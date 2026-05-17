@@ -2,6 +2,7 @@ package stable
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -605,5 +606,214 @@ func TestAnswerPermissionClearsCacheEntry(t *testing.T) {
 	}
 	if _, ok := sup.permOptions["rt_clear:req_clear"]; ok {
 		t.Fatal("cache entry was not cleared after use")
+	}
+}
+
+func TestTombstoneOnStartFailed(t *testing.T) {
+	// Create an unwritable directory so the control server can't bind the socket.
+	tmpDir, err := os.MkdirTemp("", "ast-startfail-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	socketPath := tmpDir + "/test.sock"
+	// Place tombstone outside the unwritable directory so it can be written.
+	tombstonePath := "/tmp/ast-startfail-tombstone.dead"
+	_ = os.Remove(tombstonePath)
+	defer os.Remove(tombstonePath)
+
+	if err := os.Chmod(tmpDir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(tmpDir, 0o700)
+
+	sup := NewSupervisor(Config{
+		ControlSocket: socketPath,
+		TombstoneFile: tombstonePath,
+		MaxRuntimes:   1,
+	})
+
+	code := sup.Run()
+	if code != 1 {
+		t.Fatalf("Run() = %d, want 1", code)
+	}
+
+	data, err := os.ReadFile(tombstonePath)
+	if err != nil {
+		t.Fatalf("tombstone not written: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "reason=start_failed") {
+		t.Fatalf("tombstone = %q, want reason=start_failed", content)
+	}
+	if !strings.Contains(content, "STOPPED ") {
+		t.Fatalf("tombstone = %q, missing STOPPED prefix", content)
+	}
+}
+
+func TestTombstoneOnGracefulShutdown(t *testing.T) {
+	socketPath := "/tmp/test-tombstone-shutdown.sock"
+	tombstonePath := socketPath + ".dead"
+	_ = os.Remove(socketPath)
+	_ = os.Remove(tombstonePath)
+
+	sup := NewSupervisor(Config{
+		ControlSocket:   socketPath,
+		TombstoneFile:   tombstonePath,
+		MaxRuntimes:     1,
+		ShutdownTimeout: time.Second,
+	})
+
+	done := make(chan int, 1)
+	go func() {
+		done <- sup.Run()
+	}()
+
+	// Wait for socket to exist.
+	ready := false
+	for i := 0; i < 100; i++ {
+		if _, err := os.Stat(socketPath); err == nil {
+			ready = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !ready {
+		t.Fatal("socket never appeared")
+	}
+
+	// Trigger graceful shutdown.
+	sup.Shutdown("graceful")
+
+	var code int
+	select {
+	case code = <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not return after shutdown")
+	}
+	if code != 0 {
+		t.Fatalf("Run() = %d, want 0", code)
+	}
+
+	data, err := os.ReadFile(tombstonePath)
+	if err != nil {
+		t.Fatalf("tombstone not written: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "reason=shutdown") {
+		t.Fatalf("tombstone = %q, want reason=shutdown", content)
+	}
+}
+
+func TestTombstoneOnIdleTimeout(t *testing.T) {
+	socketPath := "/tmp/test-tombstone-idle.sock"
+	tombstonePath := socketPath + ".dead"
+	_ = os.Remove(socketPath)
+	_ = os.Remove(tombstonePath)
+
+	sup := NewSupervisor(Config{
+		ControlSocket: socketPath,
+		TombstoneFile: tombstonePath,
+		MaxRuntimes:   1,
+		IdleTimeout:   200 * time.Millisecond,
+	})
+
+	done := make(chan int, 1)
+	go func() {
+		done <- sup.Run()
+	}()
+
+	// Wait for startup readiness before relying on idle timeout.
+	ready := false
+	for i := 0; i < 100; i++ {
+		if _, err := os.Stat(socketPath); err == nil {
+			ready = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !ready {
+		t.Fatal("socket never appeared")
+	}
+
+	var code int
+	select {
+	case code = <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not return after idle timeout")
+	}
+	if code != 0 {
+		t.Fatalf("Run() = %d, want 0", code)
+	}
+
+	data, err := os.ReadFile(tombstonePath)
+	if err != nil {
+		t.Fatalf("tombstone not written: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "reason=idle") {
+		t.Fatalf("tombstone = %q, want reason=idle", content)
+	}
+}
+
+func TestTombstoneOnSignal(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("signal test skipped on Windows")
+	}
+	socketPath := "/tmp/test-tombstone-signal.sock"
+	tombstonePath := socketPath + ".dead"
+	_ = os.Remove(socketPath)
+	_ = os.Remove(tombstonePath)
+
+	sup := NewSupervisor(Config{
+		ControlSocket: socketPath,
+		TombstoneFile: tombstonePath,
+		MaxRuntimes:   1,
+	})
+
+	done := make(chan int, 1)
+	go func() {
+		done <- sup.Run()
+	}()
+
+	// Wait for socket to exist. signal.NotifyContext is registered before
+	// s.control.Start(), so the socket appearing means the handler is ready.
+	ready := false
+	for i := 0; i < 100; i++ {
+		if _, err := os.Stat(socketPath); err == nil {
+			ready = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !ready {
+		t.Fatal("socket never appeared")
+	}
+	p, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatalf("FindProcess: %v", err)
+	}
+	if err := p.Signal(os.Interrupt); err != nil {
+		t.Fatalf("Signal: %v", err)
+	}
+
+	var code int
+	select {
+	case code = <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not return after signal")
+	}
+	if code != 0 {
+		t.Fatalf("Run() = %d, want 0", code)
+	}
+
+	data, err := os.ReadFile(tombstonePath)
+	if err != nil {
+		t.Fatalf("tombstone not written: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "reason=signal") {
+		t.Fatalf("tombstone = %q, want reason=signal", content)
 	}
 }

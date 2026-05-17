@@ -30,8 +30,14 @@ func runStable(args []string) int {
 		*permClaimTimeout = cli.DefaultPermissionClaimTimeout
 	}
 
+	tombstoneFile := *controlSocket + ".dead"
+	if err := os.Remove(tombstoneFile); err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "avenor stable: remove stale tombstone: %v\n", err)
+	}
+
 	sup := stable.NewSupervisor(stable.Config{
 		ControlSocket:          *controlSocket,
+		TombstoneFile:          tombstoneFile,
 		HTTPDebug:              *httpDebug,
 		MaxRuntimes:            *maxRuntimes,
 		IdleTimeout:            *idleTimeout,

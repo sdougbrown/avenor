@@ -22,6 +22,7 @@ import (
 
 type Config struct {
 	ControlSocket          string
+	TombstoneFile          string // written on any supervisor exit; empty = disabled
 	HTTPDebug              string
 	MaxRuntimes            int
 	IdleTimeout            time.Duration
@@ -110,8 +111,23 @@ func NewSupervisor(cfg Config) *Supervisor {
 }
 
 func (s *Supervisor) Run() int {
+	var reason string
+	defer func() {
+		if r := recover(); r != nil {
+			s.writeTombstone("crashed")
+			panic(r)
+		}
+		if reason != "" {
+			s.writeTombstone(reason)
+		}
+	}()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
 	if err := s.control.Start(s.config.ControlSocket); err != nil {
 		fmt.Fprintf(os.Stderr, "avenor stable: start control server: %v\n", err)
+		reason = "start_failed"
 		return 1
 	}
 	defer s.control.Stop()
@@ -121,11 +137,13 @@ func (s *Supervisor) Run() int {
 		s.httpServer, err = control.NewHTTPDebugServer(s.config.HTTPDebug, s.control)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "avenor stable: start http debug: %v\n", err)
+			reason = "start_failed"
 			return 1
 		}
 		s.httpServer.SetStableAdapter(s)
 		if err := s.httpServer.Start(); err != nil {
 			fmt.Fprintf(os.Stderr, "avenor stable: start http debug: %v\n", err)
+			reason = "start_failed"
 			return 1
 		}
 		defer func() {
@@ -134,9 +152,6 @@ func (s *Supervisor) Run() int {
 			_ = s.httpServer.Stop(shutdownCtx)
 		}()
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
 
 	var idleDeadline time.Time
 	if s.config.IdleTimeout > 0 {
@@ -147,14 +162,27 @@ func (s *Supervisor) Run() int {
 		idleCh := idleCheck(s.config.IdleTimeout, s.activeRuntimeCount(), &idleDeadline)
 		select {
 		case <-ctx.Done():
+			reason = "signal"
 			return s.shutdown("graceful")
 		case <-s.shutdownCh:
+			reason = "shutdown"
 			return s.shutdown("graceful")
 		case <-idleCh:
+			reason = "idle"
 			return s.shutdown("graceful")
 		case <-s.runtimeActivity:
 			continue
 		}
+	}
+}
+
+func (s *Supervisor) writeTombstone(reason string) {
+	if s.config.TombstoneFile == "" {
+		return
+	}
+	content := fmt.Sprintf("STOPPED reason=%s pid=%d at=%s\n", reason, os.Getpid(), time.Now().Format(time.RFC3339))
+	if err := os.WriteFile(s.config.TombstoneFile, []byte(content), 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "avenor stable: write tombstone: %v\n", err)
 	}
 }
 
