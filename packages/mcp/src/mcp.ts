@@ -67,9 +67,22 @@ server.registerTool('avenor_spawn', {
     label: z.string().optional().describe('Human-readable label for this run'),
     timeout: z.string().optional().describe('Timeout duration (e.g. 5m, 1h)'),
     model: z.string().optional().describe('Model override'),
+    backend: z.string().optional().describe('Backend override'),
+    server_url: z.string().optional().describe('Backend server URL'),
     supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
   },
-}, async ({ repo_dir, agent, prompt, prompt_file, label, timeout, model, supervisor_id }) => {
+}, async ({
+  repo_dir,
+  agent,
+  prompt,
+  prompt_file,
+  label,
+  timeout,
+  model,
+  backend,
+  server_url,
+  supervisor_id,
+}) => {
   return spawnTool({
     agent,
     dir: repo_dir,
@@ -78,6 +91,8 @@ server.registerTool('avenor_spawn', {
     label,
     timeout,
     model,
+    backend,
+    serverUrl: server_url,
     supervisorId: supervisor_id,
   })
 })

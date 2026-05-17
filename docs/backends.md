@@ -1,19 +1,22 @@
 # Backends
 
-Avenor supports two backends: `opencode-acp` (subprocess) and `opencode-http` (remote server).
+Avenor supports three backends: `opencode-http` (remote server), `opencode-acp` (subprocess), and `codex-app-server`.
 
 ## Backend selection
 
 Pass `--backend` to choose the runtime:
 
 ```sh
+avenor --server-url http://127.0.0.1:4096 --prompt "say hi"
 avenor --backend opencode-acp --prompt "say hi"
-avenor --backend opencode-http --server-url http://127.0.0.1:4096 --prompt "say hi"
+avenor --backend codex-app-server --prompt "say hi"
 ```
+
+The default backend is `opencode-http`, which requires an already-running `opencode serve` endpoint. Provide it with `--server-url` or `AVENOR_OPENCODE_URL`.
 
 ## opencode-acp
 
-The default backend. Uses OpenCode's ACP JSON-RPC protocol over stdio. Spawns `opencode acp --pure` as a subprocess.
+Uses OpenCode's ACP JSON-RPC protocol over stdio. Spawns `opencode acp --pure` as a subprocess.
 
 ### Discovery
 
@@ -39,7 +42,7 @@ If a URL is provided, the ACP backend fails cleanly — it does not support netw
 
 ## opencode-http
 
-Talks to `opencode serve` over its HTTP API. Requires `--server-url` pointing at a running `opencode serve` instance.
+The default backend. Talks to `opencode serve` over its HTTP API. Requires `--server-url` or `AVENOR_OPENCODE_URL` pointing at a running `opencode serve` instance.
 
 ### Starting the server
 

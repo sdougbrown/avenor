@@ -194,7 +194,7 @@ Returns:
 }
 ```
 
-Required: `prompt` or `prompt_file`. Optional: `dir` (defaults to `.`), `agent`, `label`, `model`, `server_url`, `backend` (defaults to `"opencode-acp"`), `on_event`, `sentinel_file`, `permission_handler`, `auto_approve`, `timeout`, `max_retries`.
+Required: `prompt` or `prompt_file`. Optional: `dir` (defaults to `.`), `agent`, `label`, `model`, `server_url`, `backend` (defaults to `"opencode-http"`), `on_event`, `sentinel_file`, `permission_handler`, `auto_approve`, `timeout`, `max_retries`.
 
 If `on_event` or `sentinel_file` is omitted, stable mode creates per-runtime files under `$TMPDIR/avenor-stable/<supervisor_run_id>/<runtime_id>/`.
 

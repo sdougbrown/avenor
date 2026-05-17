@@ -30,6 +30,8 @@ export interface SpawnParams {
   label?: string
   timeout?: number
   model?: string
+  backend?: string
+  server_url?: string
   session_id?: string
   sentinel_file?: string
   on_event?: string

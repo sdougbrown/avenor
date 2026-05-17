@@ -631,7 +631,12 @@ func TestRunExplicitPermissionHandlerWins(t *testing.T) {
 		"--on-event", eventsPath,
 		"--sentinel-file", sentPath,
 		"--permission-handler", "file:" + explicitPerm,
-	}, func(string) string { return "" }, &stderr)
+	}, func(key string) string {
+		if key == "AVENOR_OPENCODE_URL" {
+			return "http://localhost:8080"
+		}
+		return ""
+	}, &stderr)
 
 	// The explicit perm's req files should have been cleaned.
 	for _, p := range []string{explicitPerm + ".req", explicitPerm + ".req.response"} {
@@ -710,7 +715,12 @@ func TestRunPreRunCleanup(t *testing.T) {
 		"--prompt-file", promptPath,
 		"--on-event", eventsPath,
 		"--sentinel-file", sentPath,
-	}, func(string) string { return "" }, &stderr)
+	}, func(key string) string {
+		if key == "AVENOR_OPENCODE_URL" {
+			return "http://localhost:8080"
+		}
+		return ""
+	}, &stderr)
 
 	for _, p := range []string{staleReq, staleResp} {
 		if _, err := os.Stat(p); !os.IsNotExist(err) {

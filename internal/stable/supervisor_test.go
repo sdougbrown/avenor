@@ -117,6 +117,17 @@ func TestSpawnParamsValidation(t *testing.T) {
 	if !strings.Contains(err.Error(), "server-url is required for backend opencode-http") {
 		t.Errorf("error = %q, want server-url required message", err.Error())
 	}
+
+	_, err = sup.spawn(SpawnParams{
+		Prompt: "hello",
+		Dir:    "/tmp",
+	})
+	if err == nil {
+		t.Fatal("spawn with default backend and no server_url should error")
+	}
+	if !strings.Contains(err.Error(), "server-url is required for backend opencode-http") {
+		t.Errorf("error = %q, want server-url required message", err.Error())
+	}
 }
 
 func TestSpawnLoopFileFailureCleansReservedRuntime(t *testing.T) {

@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	defaultBackend        = "opencode-acp"
+	DefaultBackend        = "opencode-http"
 	backendOpenCodeACP    = "opencode-acp"
 	backendOpenCodeHTTP   = "opencode-http"
 	backendCodexAppServer = "codex-app-server"
@@ -85,7 +85,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	timeout := fs.Duration("timeout", 0, "overall session timeout")
 	progressTimeout := fs.Duration("progress-timeout", 0, "session progress timeout (fires if no event for duration)")
 	model := fs.String("model", "", "backend-specific model id")
-	backend := fs.String("backend", defaultBackend, "runtime backend")
+	backend := fs.String("backend", DefaultBackend, "runtime backend")
 	runIDFlag := fs.String("run-id", "", "correlation id for this run (generated if not set)")
 	maxRetries := fs.Int("max-retries", 0, "maximum retry attempts on transient failure (0 = no retry)")
 	autoApprove := fs.Bool("auto-approve", false, "automatically approve all permission requests")

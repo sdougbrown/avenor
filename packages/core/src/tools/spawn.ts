@@ -12,6 +12,8 @@ export async function spawnTool(args: {
   dir?: string
   timeout?: string
   model?: string
+  backend?: string
+  serverUrl?: string
   sessionId?: string
   supervisorId?: string
 }): Promise<{ run_id: string; label: string; supervisor_id: string }> {
@@ -32,6 +34,8 @@ export async function spawnTool(args: {
         timeout:
           args.timeout !== undefined ? validateTimeout(args.timeout) : undefined,
         model: args.model,
+        backend: args.backend,
+        server_url: args.serverUrl,
         session_id: args.sessionId,
         sentinel_file: sentinelPath,
         on_event: eventLogPath,
@@ -56,6 +60,8 @@ export async function spawnTool(args: {
     dir: args.dir,
     timeout: args.timeout !== undefined ? validateTimeout(args.timeout) : undefined,
     model: args.model,
+    backend: args.backend,
+    server_url: args.serverUrl,
     session_id: args.sessionId,
   })
 

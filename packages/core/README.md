@@ -44,11 +44,13 @@ const result = await spawnTool({
   prompt: 'Write a function to reverse a string',
   label: 'reverse-string',
   model: 'claude-sonnet-4',
+  backend: 'opencode-http',
+  serverUrl: 'http://127.0.0.1:4096',
 })
 // { run_id: '...', label: 'reverse-string', supervisor_id: '/path/to/socket' }
 ```
 
-Accepts `agent`, `prompt`, `promptFile`, `label`, `dir`, `timeout`, `model`, `sessionId`, and `supervisorId` (to target a specific socket).
+Accepts `agent`, `prompt`, `promptFile`, `label`, `dir`, `timeout`, `model`, `backend`, `serverUrl`, `sessionId`, and `supervisorId` (to target a specific socket).
 
 ### `statusTool`
 

@@ -17,6 +17,8 @@ describe('avenor MCP server', () => {
         label: z.string().optional(),
         timeout: z.string().optional(),
         model: z.string().optional(),
+        backend: z.string().optional(),
+        server_url: z.string().optional(),
         supervisor_id: z.string().optional(),
       },
     }, async () => ({ run_id: 'test', label: 'test', supervisor_id: 'test' }))

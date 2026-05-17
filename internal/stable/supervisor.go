@@ -349,7 +349,7 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 
 	backend := params.Backend
 	if backend == "" {
-		backend = "opencode-acp"
+		backend = cli.DefaultBackend
 	}
 	if backend == "opencode-http" && startOpts.ServerURL == "" {
 		_ = writer.Close()
