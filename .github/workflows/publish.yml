@@ -1,0 +1,159 @@
+name: Publish
+
+on:
+  workflow_run:
+    workflows: [Test]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_branch || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  detect-version-changes:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main')
+    runs-on: ubuntu-latest
+    outputs:
+      any_changed: ${{ steps.versions.outputs.any_changed }}
+      core_changed: ${{ steps.versions.outputs.core_changed }}
+      mcp_changed: ${{ steps.versions.outputs.mcp_changed }}
+      opencode_changed: ${{ steps.versions.outputs.opencode_changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Detect package version changes
+        id: versions
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          MANUAL_DISPATCH: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          node <<'NODE' >> "$GITHUB_OUTPUT"
+          const { execFileSync } = require('node:child_process');
+          const fs = require('node:fs');
+          const path = require('node:path');
+
+          const packages = ['core', 'mcp', 'opencode'];
+
+          if (process.env.MANUAL_DISPATCH === 'true') {
+            for (const pkg of packages) {
+              console.log(`${pkg}_changed=true`);
+            }
+            console.log('any_changed=true');
+            process.exit(0);
+          }
+
+          const head = process.env.HEAD_SHA;
+          const before = (() => {
+            if (!head) return null;
+            try {
+              return execFileSync('git', ['rev-parse', `${head}^1`], { encoding: 'utf8' }).trim();
+            } catch {
+              return null;
+            }
+          })();
+          const isZeroSha = !before || /^0+$/.test(before);
+
+          const readCurrentVersion = (pkg) =>
+            JSON.parse(fs.readFileSync(path.join('packages', pkg, 'package.json'), 'utf8')).version;
+
+          const readPreviousVersion = (pkg) => {
+            if (isZeroSha) return null;
+            try {
+              return JSON.parse(
+                execFileSync('git', ['show', `${before}:packages/${pkg}/package.json`], { encoding: 'utf8' })
+              ).version;
+            } catch {
+              return null;
+            }
+          };
+
+          let anyChanged = false;
+          for (const pkg of packages) {
+            const current = readCurrentVersion(pkg);
+            const previous = readPreviousVersion(pkg);
+            const changed = previous === null || current !== previous;
+            if (changed) anyChanged = true;
+            console.log(`${pkg}_changed=${changed}`);
+          }
+          console.log(`any_changed=${anyChanged}`);
+          NODE
+
+  publish:
+    needs: [detect-version-changes]
+    if: needs.detect-version-changes.outputs.any_changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    environment: npm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build
+        run: bun run build
+
+      - name: Publish @dougbots/avenor-core
+        if: needs.detect-version-changes.outputs.core_changed == 'true'
+        working-directory: packages/core
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          PKG=$(node -p "require('./package.json').name")
+          TAG="latest"
+          if echo "$VERSION" | grep -q "-"; then TAG="alpha"; fi
+          if npm show "$PKG@$VERSION" version > /dev/null 2>&1; then
+            echo "$PKG@$VERSION already published, skipping"
+          else
+            bun pm pack
+            PKG_FILE=$(node -p "require('./package.json').name.replace(/^@/, '').replace('/', '-')")-${VERSION}.tgz
+            npm publish "$PKG_FILE" --provenance --access public --tag "$TAG"
+          fi
+
+      - name: Publish @dougbots/avenor-mcp
+        if: needs.detect-version-changes.outputs.mcp_changed == 'true'
+        working-directory: packages/mcp
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          PKG=$(node -p "require('./package.json').name")
+          TAG="latest"
+          if echo "$VERSION" | grep -q "-"; then TAG="alpha"; fi
+          if npm show "$PKG@$VERSION" version > /dev/null 2>&1; then
+            echo "$PKG@$VERSION already published, skipping"
+          else
+            bun pm pack
+            PKG_FILE=$(node -p "require('./package.json').name.replace(/^@/, '').replace('/', '-')")-${VERSION}.tgz
+            npm publish "$PKG_FILE" --provenance --access public --tag "$TAG"
+          fi
+
+      - name: Publish @dougbots/avenor-opencode
+        if: needs.detect-version-changes.outputs.opencode_changed == 'true'
+        working-directory: packages/opencode
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          PKG=$(node -p "require('./package.json').name")
+          TAG="latest"
+          if echo "$VERSION" | grep -q "-"; then TAG="alpha"; fi
+          if npm show "$PKG@$VERSION" version > /dev/null 2>&1; then
+            echo "$PKG@$VERSION already published, skipping"
+          else
+            bun pm pack
+            PKG_FILE=$(node -p "require('./package.json').name.replace(/^@/, '').replace('/', '-')")-${VERSION}.tgz
+            npm publish "$PKG_FILE" --provenance --access public --tag "$TAG"
+          fi

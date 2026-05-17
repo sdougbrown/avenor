@@ -6,7 +6,7 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "bun run --filter './packages/*' build",
+    "build": "bun run --cwd packages/core build && bun run --filter './packages/*' build",
     "test": "bun run --filter './packages/*' test",
     "test:e2e": "bun run --filter '@dougbots/avenor-core' test:e2e"
   }
