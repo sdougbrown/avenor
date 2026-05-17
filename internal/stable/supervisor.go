@@ -46,6 +46,7 @@ type SpawnParams struct {
 	Timeout           int    `json:"timeout,omitempty"`
 	MaxRetries        int    `json:"max_retries,omitempty"`
 	LoopFile          string `json:"loop_file,omitempty"`
+	SessionID         string `json:"session_id,omitempty"`
 }
 
 type SpawnResult struct {
@@ -359,7 +360,7 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 		_ = writer.Close()
 		return SpawnResult{}, fmt.Errorf("create provider: %w", err)
 	}
-	session, err := cli.StartSession(context.Background(), provider, startOpts, "")
+	session, err := cli.StartSession(context.Background(), provider, startOpts, params.SessionID)
 	if err != nil {
 		if closer, ok := provider.(interface{ Close() error }); ok {
 			_ = closer.Close()
