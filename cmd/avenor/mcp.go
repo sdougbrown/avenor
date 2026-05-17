@@ -41,6 +41,7 @@ func runMCP(args []string) int {
 		fmt.Fprintf(os.Stderr, "avenor mcp: %v\n", err)
 		return 1
 	}
+	defer s.Close()
 
 	if err := s.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "avenor mcp: %v\n", err)

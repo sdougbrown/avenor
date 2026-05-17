@@ -6,11 +6,13 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/sdougbrown/avenor/client"
 )
 
 type ControlClient interface {
 	Status(runtimeID string) (map[string]any, error)
 	List() ([]map[string]any, error)
+	Close() error
 }
 
 type Options struct {
@@ -54,12 +56,29 @@ func NewServer(opts Options) (*Server, error) {
 		controlClient: opts.ControlClient,
 	}
 
+	if opts.SupervisorSocket != "" && opts.ControlClient == nil {
+		cl, err := client.Dial(opts.SupervisorSocket)
+		if err != nil {
+			return nil, fmt.Errorf("dial supervisor socket: %w", err)
+		}
+		s.controlClient = cl
+	}
+
 	mcp.AddTool(mcpServer, &mcp.Tool{
 		Name:        "avenor_status",
 		Description: "Get status of avenor runs",
 	}, s.handleAvenorStatus)
 
 	return s, nil
+}
+
+func (s *Server) Close() error {
+	if s.controlClient != nil {
+		err := s.controlClient.Close()
+		s.controlClient = nil
+		return err
+	}
+	return nil
 }
 
 func (s *Server) handleAvenorStatus(ctx context.Context, req *mcp.CallToolRequest, args statusArgs) (*mcp.CallToolResult, any, error) {

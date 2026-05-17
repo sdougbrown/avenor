@@ -1,10 +1,16 @@
 package mcpserver
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
+	"net"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sdougbrown/avenor/client"
 )
 
 type fakeClient struct {
@@ -20,6 +26,10 @@ func (f *fakeClient) Status(runtimeID string) (map[string]any, error) {
 
 func (f *fakeClient) List() ([]map[string]any, error) {
 	return f.listResult, f.listErr
+}
+
+func (f *fakeClient) Close() error {
+	return nil
 }
 
 func TestNewServerInvalidOptions(t *testing.T) {
@@ -180,5 +190,143 @@ func TestAvenorStatusNilClient(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "control client not available") {
 		t.Fatalf("expected error to contain 'control client not available', got: %v", err)
+	}
+}
+
+func startFakeSupervisor(t *testing.T) (string, func()) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "s")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				scanner := bufio.NewScanner(c)
+				for scanner.Scan() {
+					var req client.Request
+					if err := json.Unmarshal(scanner.Bytes(), &req); err != nil {
+						continue
+					}
+					var resp client.Response
+					switch req.Method {
+					case "status":
+						resp = client.Response{JSONRPC: "2.0", ID: req.ID}
+						snap := map[string]any{"session_id": "ses_test", "phase": "working"}
+						resp.Result, _ = json.Marshal(snap)
+					case "list":
+						resp = client.Response{JSONRPC: "2.0", ID: req.ID}
+						list := []map[string]any{{"runtime_id": "rt_1", "status": "running"}}
+						resp.Result, _ = json.Marshal(list)
+					default:
+						resp = client.Response{JSONRPC: "2.0", ID: req.ID, Error: &client.RespError{Code: -32601, Message: "method not found"}}
+					}
+					data, _ := json.Marshal(resp)
+					data = append(data, '\n')
+					c.Write(data)
+				}
+			}(conn)
+		}
+	}()
+
+	return path, func() { ln.Close() }
+}
+
+func TestServerWithRealSocketStatus(t *testing.T) {
+	path, cleanup := startFakeSupervisor(t)
+	defer cleanup()
+
+	s, err := NewServer(Options{
+		Transport:        "stdio",
+		SupervisorSocket: path,
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer s.Close()
+
+	_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{RunID: "run1"})
+	if err != nil {
+		t.Fatalf("handleAvenorStatus: %v", err)
+	}
+	m, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map[string]any, got %T", result)
+	}
+	if m["session_id"] != "ses_test" {
+		t.Errorf("session_id = %v, want ses_test", m["session_id"])
+	}
+	if m["phase"] != "working" {
+		t.Errorf("phase = %v, want working", m["phase"])
+	}
+}
+
+func TestServerWithRealSocketList(t *testing.T) {
+	path, cleanup := startFakeSupervisor(t)
+	defer cleanup()
+
+	s, err := NewServer(Options{
+		Transport:        "stdio",
+		SupervisorSocket: path,
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer s.Close()
+
+	_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{})
+	if err != nil {
+		t.Fatalf("handleAvenorStatus: %v", err)
+	}
+	list, ok := result.([]map[string]any)
+	if !ok {
+		t.Fatalf("expected []map[string]any, got %T", result)
+	}
+	if len(list) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(list))
+	}
+	if list[0]["runtime_id"] != "rt_1" || list[0]["status"] != "running" {
+		t.Errorf("result = %v, want [{runtime_id: rt_1, status: running}]", list)
+	}
+}
+
+func TestServerClose(t *testing.T) {
+	path, cleanup := startFakeSupervisor(t)
+	defer cleanup()
+
+	s, err := NewServer(Options{
+		Transport:        "stdio",
+		SupervisorSocket: path,
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	_, _, err = s.handleAvenorStatus(context.Background(), nil, statusArgs{RunID: "run1"})
+	if err != nil {
+		t.Fatalf("handleAvenorStatus before close: %v", err)
+	}
+
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if err := s.Close(); err != nil {
+		t.Fatalf("second Close should be idempotent: %v", err)
+	}
+
+	_, _, err = s.handleAvenorStatus(context.Background(), nil, statusArgs{RunID: "run1"})
+	if err == nil {
+		t.Error("expected error after close")
+	}
+	if !strings.Contains(err.Error(), "control client not available") {
+		t.Errorf("expected 'control client not available' error, got: %v", err)
 	}
 }
