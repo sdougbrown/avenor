@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -78,6 +79,7 @@ func TestAvenorStatusList(t *testing.T) {
 	}
 	s, err := NewServer(Options{
 		Transport:     "stdio",
+		NoAutostart:   true,
 		ControlClient: fake,
 	})
 	if err != nil {
@@ -109,6 +111,7 @@ func TestAvenorStatusSingle(t *testing.T) {
 	}
 	s, err := NewServer(Options{
 		Transport:     "stdio",
+		NoAutostart:   true,
 		ControlClient: fake,
 	})
 	if err != nil {
@@ -138,6 +141,7 @@ func TestAvenorStatusError(t *testing.T) {
 		}
 		s, err := NewServer(Options{
 			Transport:     "stdio",
+			NoAutostart:   true,
 			ControlClient: fake,
 		})
 		if err != nil {
@@ -159,6 +163,7 @@ func TestAvenorStatusError(t *testing.T) {
 		}
 		s, err := NewServer(Options{
 			Transport:     "stdio",
+			NoAutostart:   true,
 			ControlClient: fake,
 		})
 		if err != nil {
@@ -176,20 +181,18 @@ func TestAvenorStatusError(t *testing.T) {
 }
 
 func TestAvenorStatusNilClient(t *testing.T) {
-	s, err := NewServer(Options{
-		Transport:     "stdio",
-		ControlClient: nil,
+	// With autostart, creating a server with no ControlClient and no
+	// SupervisorSocket triggers startSupervisor, which fails in tests.
+	// Verify the expected error path.
+	_, err := NewServer(Options{
+		Transport:   "stdio",
+		NoAutostart: true,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	_, _, err = s.handleAvenorStatus(context.Background(), nil, statusArgs{})
 	if err == nil {
-		t.Fatal("expected error for nil control client")
+		t.Fatal("expected error for no-autostart without supervisor socket")
 	}
-	if !strings.Contains(err.Error(), "control client not available") {
-		t.Fatalf("expected error to contain 'control client not available', got: %v", err)
+	if !strings.Contains(err.Error(), "no-autostart requires") {
+		t.Fatalf("expected error to contain 'no-autostart requires', got: %v", err)
 	}
 }
 
@@ -328,5 +331,70 @@ func TestServerClose(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "control client not available") {
 		t.Errorf("expected 'control client not available' error, got: %v", err)
+	}
+}
+
+func TestServerCloseWithLifecycle(t *testing.T) {
+	tmpDir := t.TempDir()
+	socketPath := filepath.Join(tmpDir, "close-lifecycle-test.sock")
+
+	if err := os.WriteFile(socketPath, []byte("fake"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	fc := &fakeClient{}
+
+	s, err := NewServer(Options{
+		Transport:     "stdio",
+		NoAutostart:   true,
+		ControlClient: fc,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lc := &supervisorLifecycle{
+		socketPath: socketPath,
+		client:     fc,
+	}
+	s.lifecycle = lc
+
+	// Verify pre-close state
+	if s.controlClient == nil {
+		t.Fatal("controlClient should be non-nil before close")
+	}
+	if s.lifecycle == nil {
+		t.Fatal("lifecycle should be non-nil before close")
+	}
+
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Verify post-close state
+	if s.controlClient != nil {
+		t.Error("controlClient should be nil after close")
+	}
+	if s.lifecycle != nil {
+		t.Error("lifecycle should be nil after close")
+	}
+
+	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
+		t.Error("socket file was not removed during close")
+	}
+}
+
+func TestServerWithNoAutostartAndSocket(t *testing.T) {
+	// no-autostart with a non-existent socket should fail on dial
+	_, err := NewServer(Options{
+		Transport:        "stdio",
+		SupervisorSocket: "/nonexistent/socket/path",
+		NoAutostart:      true,
+	})
+	if err == nil {
+		t.Fatal("expected error dialing non-existent socket")
+	}
+	if !strings.Contains(err.Error(), "dial supervisor socket") {
+		t.Fatalf("expected error to mention dial supervisor socket, got: %v", err)
 	}
 }

@@ -28,6 +28,7 @@ type Server struct {
 	opts          Options
 	mcpServer     *mcp.Server
 	controlClient ControlClient
+	lifecycle     *supervisorLifecycle
 }
 
 type statusArgs struct {
@@ -41,7 +42,7 @@ func NewServer(opts Options) (*Server, error) {
 	if opts.Transport != "stdio" {
 		return nil, fmt.Errorf("unsupported transport: %s", opts.Transport)
 	}
-	if opts.NoAutostart && opts.SupervisorSocket == "" {
+	if opts.NoAutostart && opts.SupervisorSocket == "" && opts.ControlClient == nil {
 		return nil, fmt.Errorf("--no-autostart requires --supervisor-socket")
 	}
 
@@ -64,6 +65,15 @@ func NewServer(opts Options) (*Server, error) {
 		s.controlClient = cl
 	}
 
+	if opts.SupervisorSocket == "" && !opts.NoAutostart && opts.ControlClient == nil {
+		lc, err := startSupervisor("", opts.IdleTimeout)
+		if err != nil {
+			return nil, fmt.Errorf("autostart supervisor: %w", err)
+		}
+		s.lifecycle = lc
+		s.controlClient = lc.client
+	}
+
 	mcp.AddTool(mcpServer, &mcp.Tool{
 		Name:        "avenor_status",
 		Description: "Get status of avenor runs",
@@ -73,12 +83,23 @@ func NewServer(opts Options) (*Server, error) {
 }
 
 func (s *Server) Close() error {
+	var firstErr error
+
 	if s.controlClient != nil {
-		err := s.controlClient.Close()
+		if err := s.controlClient.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
 		s.controlClient = nil
-		return err
 	}
-	return nil
+
+	if s.lifecycle != nil {
+		if err := s.lifecycle.Shutdown(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		s.lifecycle = nil
+	}
+
+	return firstErr
 }
 
 func (s *Server) handleAvenorStatus(ctx context.Context, req *mcp.CallToolRequest, args statusArgs) (*mcp.CallToolResult, any, error) {
