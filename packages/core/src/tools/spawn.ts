@@ -1,8 +1,23 @@
 import * as crypto from 'node:crypto'
-import * as os from 'node:os'
 import * as path from 'node:path'
+import * as fs from 'node:fs'
+import * as os from 'node:os'
 import { Supervisor } from '../supervisor.js'
 import { dial } from '../client.js'
+import { validateSupervisorSocketPath, validateTimeout } from './validate.js'
+
+function runsRoot(): string {
+  return path.join(os.homedir(), '.avenor', 'runs')
+}
+
+function ensureRunDir(runId: string): { sentinelPath: string; eventLogPath: string } {
+  const runDir = path.join(runsRoot(), runId)
+  fs.mkdirSync(runDir, { recursive: true, mode: 0o700 })
+  return {
+    sentinelPath: path.join(runDir, 'sentinel.done'),
+    eventLogPath: path.join(runDir, 'events.log'),
+  }
+}
 
 export async function spawnTool(args: {
   agent: string
@@ -19,24 +34,32 @@ export async function spawnTool(args: {
   const label = args.label ?? runId
 
   if (args.supervisorId) {
-    const client = await dial(args.supervisorId)
-    const sentinelPath = path.join(os.tmpdir(), `avenor-run-${runId}.done`)
-    const eventLogPath = path.join(os.tmpdir(), `avenor-run-${runId}.log`)
+    const client = await dial(validateSupervisorSocketPath(args.supervisorId))
+    const { sentinelPath, eventLogPath } = ensureRunDir(runId)
 
-    await client.spawn({
-      agent: args.agent,
-      prompt: args.prompt,
-      prompt_file: args.promptFile,
-      label,
-      dir: args.dir,
-      timeout: args.timeout !== undefined ? Number(args.timeout) : undefined,
-      model: args.model,
-      session_id: args.sessionId,
-      sentinel_file: sentinelPath,
-      on_event: eventLogPath,
-    })
+    try {
+      const result = await client.spawn({
+        agent: args.agent,
+        prompt: args.prompt,
+        prompt_file: args.promptFile,
+        label,
+        dir: args.dir,
+        timeout:
+          args.timeout !== undefined ? validateTimeout(args.timeout) : undefined,
+        model: args.model,
+        session_id: args.sessionId,
+        sentinel_file: sentinelPath,
+        on_event: eventLogPath,
+      })
 
-    return { run_id: runId, label, supervisor_id: args.supervisorId }
+      return {
+        run_id: (result.runtime_id as string | undefined) ?? runId,
+        label,
+        supervisor_id: args.supervisorId,
+      }
+    } finally {
+      client.close()
+    }
   }
 
   const sup = await Supervisor.get()
@@ -46,7 +69,7 @@ export async function spawnTool(args: {
     prompt_file: args.promptFile,
     label,
     dir: args.dir,
-    timeout: args.timeout !== undefined ? Number(args.timeout) : undefined,
+    timeout: args.timeout !== undefined ? validateTimeout(args.timeout) : undefined,
     model: args.model,
     session_id: args.sessionId,
   })

@@ -18,6 +18,20 @@ export interface SupervisorOptions {
   callTimeoutMs?: number
 }
 
+function runsRoot(): string {
+  return path.join(os.homedir(), '.avenor', 'runs')
+}
+
+function ensureRunDir(runId: string): { runDir: string; sentinelPath: string; eventLogPath: string } {
+  const runDir = path.join(runsRoot(), runId)
+  fs.mkdirSync(runDir, { recursive: true, mode: 0o700 })
+  return {
+    runDir,
+    sentinelPath: path.join(runDir, 'sentinel.done'),
+    eventLogPath: path.join(runDir, 'events.log'),
+  }
+}
+
 export function findAvenorBinary(): string {
   const envBin = process.env.AVENOR_BIN
   if (envBin) {
@@ -220,6 +234,14 @@ export class Supervisor {
     return this.socketPath
   }
 
+  static isCurrentInstance(supervisorId: string): boolean {
+    return Supervisor.instance !== null && Supervisor.instance.supervisorId === supervisorId
+  }
+
+  static currentInstance(): Supervisor | null {
+    return Supervisor.instance
+  }
+
   getClient(): Client {
     if (this.crashed) {
       throw new Error(
@@ -235,8 +257,7 @@ export class Supervisor {
   async spawn(params: SpawnParams): Promise<RunInfo> {
     const client = this.getClient()
     const runId = crypto.randomUUID()
-    const sentinelPath = path.join(os.tmpdir(), `avenor-run-${runId}.done`)
-    const eventLogPath = path.join(os.tmpdir(), `avenor-run-${runId}.log`)
+    const { sentinelPath, eventLogPath } = ensureRunDir(runId)
 
     const spawnParams: SpawnParams = {
       ...params,
@@ -255,6 +276,7 @@ export class Supervisor {
       sessionId: result.session_id as string | undefined,
     }
 
+    this.runs.set(runInfo.label, runInfo)
     this.runs.set(runId, runInfo)
     return runInfo
   }

@@ -1,9 +1,10 @@
 import * as fs from 'node:fs'
 import { Supervisor, type RunInfo } from '../supervisor.js'
-import { dial } from '../client.js'
 
 function findRunByLabel(sup: Supervisor, runId: string): RunInfo | undefined {
   const runs = (sup as any).runs as Map<string, RunInfo>
+  const byKey = runs.get(runId)
+  if (byKey) return byKey
   for (const info of runs.values()) {
     if (info.label === runId) return info
   }
@@ -30,9 +31,20 @@ export async function eventsTool(args: {
     throw new Error(`run not found: ${args.runId}`)
   }
 
+  const limit = Math.max(1, Math.min(1000, Math.trunc(args.limit ?? 50)))
   let raw: string
   try {
-    raw = await fs.promises.readFile(runInfo.eventLogPath, 'utf-8')
+    const stat = await fs.promises.stat(runInfo.eventLogPath)
+    const tailBytes = Math.min(stat.size, 256 * 1024)
+    const handle = await fs.promises.open(runInfo.eventLogPath, 'r')
+    try {
+      const buffer = Buffer.alloc(tailBytes)
+      const start = Math.max(0, stat.size - tailBytes)
+      const { bytesRead } = await handle.read(buffer, 0, tailBytes, start)
+      raw = buffer.subarray(0, bytesRead).toString('utf-8')
+    } finally {
+      await handle.close()
+    }
   } catch {
     return []
   }
@@ -52,7 +64,6 @@ export async function eventsTool(args: {
     events = events.filter((e) => args.types!.includes(e.type ?? e.event ?? ''))
   }
 
-  const limit = args.limit ?? 50
   if (events.length > limit) {
     events = events.slice(events.length - limit)
   }

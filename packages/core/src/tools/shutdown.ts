@@ -1,7 +1,7 @@
 import * as fs from 'node:fs'
-import * as os from 'node:os'
 import { Supervisor, type RunInfo } from '../supervisor.js'
 import { dial } from '../client.js'
+import { validateSupervisorSocketPath } from './validate.js'
 
 export async function shutdownTool(args: {
   supervisorId?: string
@@ -10,12 +10,14 @@ export async function shutdownTool(args: {
   const cleanedUp: string[] = []
 
   if (args.supervisorId) {
-    const isSingleton =
-      Supervisor.instance !== null &&
-      (Supervisor.instance as Supervisor).supervisorId === args.supervisorId
+    const supervisorId = validateSupervisorSocketPath(args.supervisorId)
+    const isSingleton = Supervisor.isCurrentInstance(supervisorId)
 
     if (isSingleton) {
-      const sup = Supervisor.instance as Supervisor
+      const sup = Supervisor.currentInstance()
+      if (!sup) {
+        throw new Error('supervisor not started')
+      }
       const client = sup.getClient()
       await client.shutdown(args.force ? 'force' : 'graceful')
 
@@ -33,11 +35,12 @@ export async function shutdownTool(args: {
 
       await sup.close()
     } else {
-      const client = await dial(args.supervisorId)
+      const client = await dial(supervisorId)
       try {
         await client.shutdown(args.force ? 'force' : 'graceful')
-        client.close()
       } catch {
+        // ignore
+      } finally {
         client.close()
       }
     }

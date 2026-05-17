@@ -1,13 +1,15 @@
 import * as fs from 'node:fs'
-import * as os from 'node:os'
 import * as path from 'node:path'
+import * as crypto from 'node:crypto'
+import * as os from 'node:os'
 import { Supervisor, type RunInfo } from '../supervisor.js'
 import { dial } from '../client.js'
-import { spawnTool } from './spawn.js'
-import { validateRunId } from './validate.js'
+import { validateRunId, validateSupervisorSocketPath } from './validate.js'
 
 function findRunByLabel(sup: Supervisor, runId: string): RunInfo | undefined {
   const runs = (sup as any).runs as Map<string, RunInfo>
+  const byKey = runs.get(runId)
+  if (byKey) return byKey
   for (const info of runs.values()) {
     if (info.label === runId) return info
   }
@@ -42,18 +44,9 @@ export async function followUpTool(args: {
   supervisorId?: string
 }): Promise<{ run_id: string; label: string }> {
   if (args.supervisorId) {
-    const client = await dial(args.supervisorId)
+    const client = await dial(validateSupervisorSocketPath(args.supervisorId))
     try {
       validateRunId(args.runId)
-      const sentinelPath = path.join(
-        os.tmpdir(),
-        `avenor-run-${args.runId}.done`,
-      )
-      const sentinel = await parseSentinel(sentinelPath)
-      if (!sentinel?.SESSION) {
-        throw new Error('run has no session to resume')
-      }
-
       let liveStatus: Record<string, unknown> | null = null
       try {
         liveStatus = await client.status(args.runId)
@@ -61,15 +54,29 @@ export async function followUpTool(args: {
         // ignore
       }
 
+      const sentinelPath =
+        (liveStatus?.sentinel_file as string | undefined) ??
+        path.join(os.homedir(), '.avenor', 'runs', args.runId, 'sentinel.done')
+      const sentinel = await parseSentinel(sentinelPath)
+      if (!sentinel?.SESSION) {
+        throw new Error('run has no session to resume')
+      }
+
       const agent = (liveStatus?.agent as string) ?? 'codex'
 
-      return spawnTool({
+      const followUpRunId = crypto.randomUUID()
+      const followUpLabel = args.label ?? `${args.runId}-followup`
+      const runDir = path.join(os.homedir(), '.avenor', 'runs', followUpRunId)
+      await fs.promises.mkdir(runDir, { recursive: true, mode: 0o700 })
+      await client.spawn({
         agent,
         prompt: args.message,
-        sessionId: sentinel.SESSION,
-        label: args.label,
-        supervisorId: args.supervisorId,
+        label: followUpLabel,
+        session_id: sentinel.SESSION,
+        sentinel_file: path.join(runDir, 'sentinel.done'),
+        on_event: path.join(runDir, 'events.log'),
       })
+      return { run_id: followUpRunId, label: followUpLabel }
     } finally {
       client.close()
     }
@@ -102,11 +109,12 @@ export async function followUpTool(args: {
 
   const followUpLabel = args.label ?? `${runInfo.label}-followup`
 
-  return spawnTool({
+  const followUpRun = await sup.spawn({
     agent,
     prompt: args.message,
-    sessionId: sentinel.SESSION,
+    session_id: sentinel.SESSION,
     label: followUpLabel,
-    supervisorId: sup.supervisorId,
   })
+
+  return { run_id: followUpRun.label, label: followUpRun.label }
 }

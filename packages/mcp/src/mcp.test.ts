@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'bun:test'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
+import { getMcpAuthToken, isAllowedHost, isAllowedOrigin, parseBearerToken } from './mcp'
 
 describe('avenor MCP server', () => {
   it('registers all 6 tools without throwing', () => {
@@ -67,5 +68,44 @@ describe('avenor MCP server', () => {
     }, async () => ({ ok: true, cleaned_up: [] }))
 
     expect(server).toBeDefined()
+  })
+
+  it('parses bearer auth conservatively', () => {
+    expect(parseBearerToken(null)).toBeNull()
+    expect(parseBearerToken('Basic abc')).toBeNull()
+    expect(parseBearerToken('Bearer   token-123 ')).toBe('token-123')
+  })
+
+  it('allows only local origins or no origin', () => {
+    expect(isAllowedOrigin(null)).toBe(true)
+    expect(isAllowedOrigin('http://localhost:3748')).toBe(true)
+    expect(isAllowedOrigin('http://127.0.0.1:3748')).toBe(true)
+    expect(isAllowedOrigin('http://[::1]:3748')).toBe(true)
+    expect(isAllowedOrigin('https://localhost:3748')).toBe(false)
+    expect(isAllowedOrigin('http://example.com')).toBe(false)
+  })
+
+  it('allows only localhost host headers on the configured port', () => {
+    expect(isAllowedHost('localhost:3748', 3748)).toBe(true)
+    expect(isAllowedHost('127.0.0.1:3748', 3748)).toBe(true)
+    expect(isAllowedHost('[::1]:3748', 3748)).toBe(true)
+    expect(isAllowedHost('localhost:4000', 3748)).toBe(false)
+    expect(isAllowedHost('example.com:3748', 3748)).toBe(false)
+    expect(isAllowedHost('localhost', 3748)).toBe(false)
+  })
+
+  it('requires an auth token for sse startup', () => {
+    const original = process.env.MCP_AUTH_TOKEN
+    delete process.env.MCP_AUTH_TOKEN
+
+    try {
+      expect(() => getMcpAuthToken()).toThrow('MCP_TRANSPORT=sse requires MCP_AUTH_TOKEN to be set')
+    } finally {
+      if (original === undefined) {
+        delete process.env.MCP_AUTH_TOKEN
+      } else {
+        process.env.MCP_AUTH_TOKEN = original
+      }
+    }
   })
 })

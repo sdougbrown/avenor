@@ -3,10 +3,15 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { Supervisor, type RunInfo } from '../supervisor.js'
 import { dial, type Client } from '../client.js'
-import { validateRunId } from './validate.js'
+import {
+  validateRunId,
+  validateSupervisorSocketPath,
+} from './validate.js'
 
 function findRunByLabel(sup: Supervisor, runId: string): RunInfo | undefined {
   const runs = (sup as any).runs as Map<string, RunInfo>
+  const byKey = runs.get(runId)
+  if (byKey) return byKey
   for (const info of runs.values()) {
     if (info.label === runId) return info
   }
@@ -112,7 +117,7 @@ async function buildRunStatus(
     sentinel = await parseSentinel(runInfo.sentinelPath)
   }
 
-  const rawPhase = (liveStatus?.phase as string) ?? 'running'
+  const rawPhase = (liveStatus?.phase ?? liveStatus?.status ?? 'running') as string
   const translated = translateStatus(rawPhase, sentinel)
 
   const result: StatusResult = {
@@ -153,19 +158,10 @@ export async function statusTool(
   },
 ): Promise<StatusResult | StatusResult[]> {
   if (args.supervisorId) {
-    const client = await dial(args.supervisorId)
+    const client = await dial(validateSupervisorSocketPath(args.supervisorId))
     try {
       if (args.runId) {
         validateRunId(args.runId)
-        const sentinelPath = path.join(
-          os.tmpdir(),
-          `avenor-run-${args.runId}.done`,
-        )
-        let sentinel: Record<string, string> | null = null
-        if (await sentinelExists(sentinelPath)) {
-          sentinel = await parseSentinel(sentinelPath)
-        }
-
         let liveStatus: Record<string, unknown> | null = null
         try {
           liveStatus = await client.status(args.runId)
@@ -173,13 +169,18 @@ export async function statusTool(
           // live status unavailable
         }
 
+        const sentinelPath =
+          (liveStatus?.sentinel_file as string | undefined) ??
+          path.join(os.homedir(), '.avenor', 'runs', args.runId, 'sentinel.done')
+        let sentinel: Record<string, string> | null = null
+        if (await sentinelExists(sentinelPath)) {
+          sentinel = await parseSentinel(sentinelPath)
+        }
+
         return {
           run_id: args.runId,
           label: args.runId,
-          status: translateStatus(
-            (liveStatus?.phase as string) ?? 'running',
-            sentinel,
-          ),
+          status: translateStatus((liveStatus?.phase ?? liveStatus?.status ?? 'running') as string, sentinel),
           phase: liveStatus?.phase as string | undefined,
           phase_label: liveStatus?.phase_label as string | undefined,
           session_id:
@@ -213,10 +214,7 @@ export async function statusTool(
       return list.map((entry: any) => ({
         run_id: (entry.runtime_id ?? entry.id ?? '') as string,
         label: (entry.label ?? '') as string,
-        status: translateStatus(
-          (entry.phase as string) ?? (entry.status as string) ?? 'running',
-          null,
-        ),
+        status: translateStatus((entry.phase ?? entry.status ?? 'running') as string, null),
         phase: entry.phase as string | undefined,
         session_id: entry.session_id as string | undefined,
       }))
@@ -269,10 +267,7 @@ export async function statusTool(
       results.push({
         run_id: entryId,
         label: entryLabel,
-        status: translateStatus(
-          (entry.phase as string) ?? (entry.status as string) ?? 'running',
-          null,
-        ),
+        status: translateStatus((entry.phase ?? entry.status ?? 'running') as string, null),
         phase: entry.phase as string | undefined,
         session_id: entry.session_id as string | undefined,
       })
