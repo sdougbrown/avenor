@@ -19,6 +19,14 @@ export interface SupervisorOptions {
   callTimeoutMs?: number
 }
 
+export function installerBinaryPath(): string {
+  const installDir = process.env.AVENOR_INSTALL_DIR
+  if (installDir) {
+    return path.join(installDir, 'avenor')
+  }
+  return path.join(os.homedir(), '.cache', 'avenor', 'bin', 'avenor')
+}
+
 export function findAvenorBinary(): string {
   const envBin = process.env.AVENOR_BIN
   if (envBin) {
@@ -38,6 +46,14 @@ export function findAvenorBinary(): string {
     }
   } catch {
     // which failed or returned empty
+  }
+
+  try {
+    const installPath = installerBinaryPath()
+    fs.accessSync(installPath, fs.constants.X_OK)
+    return installPath
+  } catch {
+    // installer-managed binary not found
   }
 
   const homeBin = path.join(os.homedir(), '.botfiles', 'bin', 'avenor')

@@ -4,6 +4,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import {
   findAvenorBinary,
+  installerBinaryPath,
   Supervisor,
   type RunInfo,
 } from './supervisor.js'
@@ -108,6 +109,71 @@ describe('findAvenorBinary', () => {
         process.env.AVENOR_BIN = prev
       } else {
         delete process.env.AVENOR_BIN
+      }
+    }
+  })
+
+  it('falls back to installer-managed path when AVENOR_BIN unset and avenor not on PATH', () => {
+    const prevBin = process.env.AVENOR_BIN
+    const prevInstallDir = process.env.AVENOR_INSTALL_DIR
+    const tmpDir = path.join(os.tmpdir(), `avenor-test-install-${process.pid}`)
+    const binaryPath = path.join(tmpDir, 'avenor')
+
+    delete process.env.AVENOR_BIN
+
+    try {
+      // Create a fake executable at the installer path
+      fs.mkdirSync(tmpDir, { recursive: true })
+      fs.writeFileSync(binaryPath, '#!/bin/sh\nexit 0', { mode: 0o755 })
+      process.env.AVENOR_INSTALL_DIR = tmpDir
+
+      const result = findAvenorBinary()
+      expect(result).toBe(binaryPath)
+    } finally {
+      if (prevBin) {
+        process.env.AVENOR_BIN = prevBin
+      } else {
+        delete process.env.AVENOR_BIN
+      }
+      if (prevInstallDir) {
+        process.env.AVENOR_INSTALL_DIR = prevInstallDir
+      } else {
+        delete process.env.AVENOR_INSTALL_DIR
+      }
+      try {
+        fs.unlinkSync(binaryPath)
+        fs.rmdirSync(tmpDir)
+      } catch {
+        // ignore cleanup errors
+      }
+    }
+  })
+})
+
+describe('installerBinaryPath', () => {
+  it('returns AVENOR_INSTALL_DIR/avenor when AVENOR_INSTALL_DIR is set', () => {
+    const prev = process.env.AVENOR_INSTALL_DIR
+    try {
+      process.env.AVENOR_INSTALL_DIR = '/opt/avenor/bin'
+      expect(installerBinaryPath()).toBe(path.join('/opt/avenor/bin', 'avenor'))
+    } finally {
+      if (prev) {
+        process.env.AVENOR_INSTALL_DIR = prev
+      } else {
+        delete process.env.AVENOR_INSTALL_DIR
+      }
+    }
+  })
+
+  it('returns ~/.cache/avenor/bin/avenor when AVENOR_INSTALL_DIR is unset', () => {
+    const prev = process.env.AVENOR_INSTALL_DIR
+    try {
+      delete process.env.AVENOR_INSTALL_DIR
+      const expected = path.join(os.homedir(), '.cache', 'avenor', 'bin', 'avenor')
+      expect(installerBinaryPath()).toBe(expected)
+    } finally {
+      if (prev) {
+        process.env.AVENOR_INSTALL_DIR = prev
       }
     }
   })
