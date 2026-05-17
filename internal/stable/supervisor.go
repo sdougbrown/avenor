@@ -22,7 +22,7 @@ import (
 
 type Config struct {
 	ControlSocket          string
-	TombstoneFile          string // written on any supervisor exit; empty = disabled
+	TombstoneFile          string
 	HTTPDebug              string
 	MaxRuntimes            int
 	IdleTimeout            time.Duration
