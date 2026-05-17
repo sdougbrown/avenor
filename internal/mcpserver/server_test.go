@@ -15,10 +15,16 @@ import (
 )
 
 type fakeClient struct {
-	listResult   []map[string]any
-	statusResult map[string]any
-	listErr      error
-	statusErr    error
+	listResult          []map[string]any
+	statusResult        map[string]any
+	spawnResult         map[string]any
+	listErr             error
+	statusErr           error
+	spawnErr            error
+	shutdownErr         error
+	shutdownFunc        func(mode string) error
+	spawnFunc           func(params map[string]any) (map[string]any, error)
+	spawnCapturedParams map[string]any
 }
 
 func (f *fakeClient) Status(runtimeID string) (map[string]any, error) {
@@ -27,6 +33,21 @@ func (f *fakeClient) Status(runtimeID string) (map[string]any, error) {
 
 func (f *fakeClient) List() ([]map[string]any, error) {
 	return f.listResult, f.listErr
+}
+
+func (f *fakeClient) Spawn(params map[string]any) (map[string]any, error) {
+	f.spawnCapturedParams = params
+	if f.spawnFunc != nil {
+		return f.spawnFunc(params)
+	}
+	return f.spawnResult, f.spawnErr
+}
+
+func (f *fakeClient) Shutdown(mode string) error {
+	if f.shutdownFunc != nil {
+		return f.shutdownFunc(mode)
+	}
+	return f.shutdownErr
 }
 
 func (f *fakeClient) Close() error {
@@ -396,5 +417,546 @@ func TestServerWithNoAutostartAndSocket(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "dial supervisor socket") {
 		t.Fatalf("expected error to mention dial supervisor socket, got: %v", err)
+	}
+}
+
+func TestAvenorSpawn(t *testing.T) {
+	fake := &fakeClient{
+		spawnResult: map[string]any{
+			"runtime_id": "rt_spawn_1",
+			"session_id": "ses_spawn_1",
+		},
+	}
+	s, err := NewServer(Options{
+		Transport:     "stdio",
+		NoAutostart:   true,
+		ControlClient: fake,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, result, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
+		Agent:   "claude",
+		RepoDir: "/tmp/test-repo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map[string]any, got %T", result)
+	}
+	runID, _ := m["run_id"].(string)
+	if runID == "" {
+		t.Fatal("expected non-empty run_id")
+	}
+	if m["label"] != runID {
+		t.Errorf("expected label to default to run_id, got %v", m["label"])
+	}
+
+	ri := s.registry.Lookup(runID)
+	if ri == nil {
+		t.Fatal("expected registry entry for spawn")
+	}
+	if ri.RuntimeID != "rt_spawn_1" {
+		t.Errorf("expected runtime_id rt_spawn_1, got %s", ri.RuntimeID)
+	}
+	if ri.Agent != "claude" {
+		t.Errorf("expected agent claude, got %s", ri.Agent)
+	}
+	if ri.Dir != "/tmp/test-repo" {
+		t.Errorf("expected dir /tmp/test-repo, got %s", ri.Dir)
+	}
+}
+
+func TestAvenorSpawnWithLabel(t *testing.T) {
+	fake := &fakeClient{
+		spawnResult: map[string]any{
+			"runtime_id": "rt_label_1",
+			"session_id": "ses_label_1",
+		},
+	}
+	s, err := NewServer(Options{
+		Transport:     "stdio",
+		NoAutostart:   true,
+		ControlClient: fake,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, result, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
+		Agent:   "codex",
+		RepoDir: "/tmp/test-repo",
+		Label:   "my-label",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ := result.(map[string]any)
+	label, _ := m["label"].(string)
+	if label != "my-label" {
+		t.Errorf("expected label my-label, got %s", label)
+	}
+
+	ri := s.registry.Lookup("my-label")
+	if ri == nil {
+		t.Fatal("expected registry entry lookup by label")
+	}
+}
+
+func TestAvenorSpawnWithOptionalParams(t *testing.T) {
+	fake := &fakeClient{
+		spawnFunc: func(params map[string]any) (map[string]any, error) {
+			return map[string]any{
+				"runtime_id":    "rt_opt_1",
+				"session_id":    "ses_opt_1",
+				"supervisor_id": "/tmp/supervisor.sock",
+			}, nil
+		},
+	}
+	s, err := NewServer(Options{
+		Transport:     "stdio",
+		NoAutostart:   true,
+		ControlClient: fake,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, result, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
+		Agent:      "codex",
+		RepoDir:    "/tmp/test-repo",
+		Prompt:     "initial prompt text",
+		PromptFile: "/tmp/prompt.md",
+		Model:      "gpt-5",
+		Timeout:    "300",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p := fake.spawnCapturedParams
+	if p == nil {
+		t.Fatal("expected spawn params to be captured")
+	}
+	if p["prompt"] != "initial prompt text" {
+		t.Errorf("expected prompt 'initial prompt text', got %v", p["prompt"])
+	}
+	if p["prompt_file"] != "/tmp/prompt.md" {
+		t.Errorf("expected prompt_file '/tmp/prompt.md', got %v", p["prompt_file"])
+	}
+	if p["model"] != "gpt-5" {
+		t.Errorf("expected model 'gpt-5', got %v", p["model"])
+	}
+	if p["timeout"] != 300 {
+		t.Errorf("expected timeout 300 (int), got %v (%T)", p["timeout"], p["timeout"])
+	}
+	if p["agent"] != "codex" {
+		t.Errorf("expected agent 'codex', got %v", p["agent"])
+	}
+	if p["dir"] != "/tmp/test-repo" {
+		t.Errorf("expected dir '/tmp/test-repo', got %v", p["dir"])
+	}
+
+	m, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map[string]any, got %T", result)
+	}
+	runID, _ := m["run_id"].(string)
+	if runID == "" {
+		t.Fatal("expected non-empty run_id")
+	}
+	if m["label"] == "" {
+		t.Fatal("expected non-empty label")
+	}
+	if _, ok := m["supervisor_id"]; !ok {
+		t.Fatal("expected supervisor_id in result")
+	}
+
+	ri := s.registry.Lookup(runID)
+	if ri == nil {
+		t.Fatal("expected registry entry for spawn")
+	}
+	if ri.Agent != "codex" {
+		t.Errorf("expected agent codex, got %s", ri.Agent)
+	}
+	if ri.Dir != "/tmp/test-repo" {
+		t.Errorf("expected dir /tmp/test-repo, got %s", ri.Dir)
+	}
+	if ri.SentinelPath == "" {
+		t.Error("expected non-empty sentinel path")
+	}
+	if ri.EventLogPath == "" {
+		t.Error("expected non-empty event log path")
+	}
+	if ri.RuntimeID != "rt_opt_1" {
+		t.Errorf("expected runtime_id rt_opt_1, got %s", ri.RuntimeID)
+	}
+	if ri.SessionID != "ses_opt_1" {
+		t.Errorf("expected session_id ses_opt_1, got %s", ri.SessionID)
+	}
+}
+
+func TestAvenorSpawnTimeoutError(t *testing.T) {
+	fake := &fakeClient{}
+	s, err := NewServer(Options{
+		Transport:     "stdio",
+		NoAutostart:   true,
+		ControlClient: fake,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
+		Agent:   "claude",
+		RepoDir: "/tmp/test-repo",
+		Timeout: "5m",
+	})
+	if err == nil {
+		t.Fatal("expected error for non-numeric timeout")
+	}
+	if !strings.Contains(err.Error(), "timeout must be a number of seconds") {
+		t.Errorf("expected timeout error message, got: %v", err)
+	}
+}
+
+func TestAvenorSpawnMissingAgent(t *testing.T) {
+	fake := &fakeClient{}
+	s, err := NewServer(Options{
+		Transport:     "stdio",
+		NoAutostart:   true,
+		ControlClient: fake,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
+		RepoDir: "/tmp/test-repo",
+	})
+	if err == nil {
+		t.Fatal("expected error for missing agent")
+	}
+	if !strings.Contains(err.Error(), "agent is required") {
+		t.Errorf("expected 'agent is required', got: %v", err)
+	}
+}
+
+func TestAvenorSpawnMissingRepoDir(t *testing.T) {
+	fake := &fakeClient{}
+	s, err := NewServer(Options{
+		Transport:     "stdio",
+		NoAutostart:   true,
+		ControlClient: fake,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
+		Agent: "claude",
+	})
+	if err == nil {
+		t.Fatal("expected error for missing repo_dir")
+	}
+	if !strings.Contains(err.Error(), "repo_dir is required") {
+		t.Errorf("expected 'repo_dir is required', got: %v", err)
+	}
+}
+
+func TestAvenorShutdown(t *testing.T) {
+	var capturedMode string
+	fake := &fakeClient{
+		shutdownFunc: func(mode string) error {
+			capturedMode = mode
+			return nil
+		},
+	}
+	s, err := NewServer(Options{
+		Transport:     "stdio",
+		NoAutostart:   true,
+		ControlClient: fake,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, result, err := s.handleAvenorShutdown(context.Background(), nil, shutdownArgs{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ := result.(map[string]any)
+	if m["ok"] != true {
+		t.Errorf("expected ok=true, got %v", m["ok"])
+	}
+	if capturedMode != "graceful" {
+		t.Errorf("expected graceful mode, got %s", capturedMode)
+	}
+}
+
+func TestAvenorShutdownForce(t *testing.T) {
+	var capturedMode string
+	fake := &fakeClient{
+		shutdownFunc: func(mode string) error {
+			capturedMode = mode
+			return nil
+		},
+	}
+
+	s, err := NewServer(Options{
+		Transport:     "stdio",
+		NoAutostart:   true,
+		ControlClient: fake,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = s.handleAvenorShutdown(context.Background(), nil, shutdownArgs{Force: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if capturedMode != "kill" {
+		t.Errorf("expected kill mode, got %s", capturedMode)
+	}
+}
+
+func TestAvenorShutdownCleanup(t *testing.T) {
+	dir := t.TempDir()
+	sentinelPath := filepath.Join(dir, "cleanup-test.done")
+	eventLogPath := filepath.Join(dir, "cleanup-test.log")
+
+	if err := os.WriteFile(sentinelPath, []byte("DONE\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(eventLogPath, []byte("event data\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := &fakeClient{}
+	s, err := NewServer(Options{
+		Transport:     "stdio",
+		NoAutostart:   true,
+		ControlClient: fake,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.registry.Store(&RunInfo{
+		RunID:        "run-clean-1",
+		Label:        "clean-test",
+		RuntimeID:    "rt_clean_1",
+		SentinelPath: sentinelPath,
+		EventLogPath: eventLogPath,
+	})
+
+	_, result, err := s.handleAvenorShutdown(context.Background(), nil, shutdownArgs{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ := result.(map[string]any)
+
+	if m["ok"] != true {
+		t.Errorf("expected ok=true, got %v", m["ok"])
+	}
+
+	cleanedUp, ok := m["cleaned_up"].([]string)
+	if !ok {
+		t.Fatalf("expected cleaned_up []string, got %T", m["cleaned_up"])
+	}
+
+	foundSentinel := false
+	foundEventLog := false
+	for _, path := range cleanedUp {
+		if path == sentinelPath {
+			foundSentinel = true
+		}
+		if path == eventLogPath {
+			foundEventLog = true
+		}
+	}
+	if !foundSentinel {
+		t.Errorf("expected sentinel path %s in cleaned_up, got %v", sentinelPath, cleanedUp)
+	}
+	if !foundEventLog {
+		t.Errorf("expected event log path %s in cleaned_up, got %v", eventLogPath, cleanedUp)
+	}
+
+	if _, err := os.Stat(sentinelPath); !os.IsNotExist(err) {
+		t.Error("sentinel file was not removed from disk")
+	}
+	if _, err := os.Stat(eventLogPath); !os.IsNotExist(err) {
+		t.Error("event log file was not removed from disk")
+	}
+
+	if ri := s.registry.Lookup("run-clean-1"); ri != nil {
+		t.Error("registry entry was not removed")
+	}
+}
+
+func TestAvenorStatusWithRegistry(t *testing.T) {
+	dir := t.TempDir()
+	sentinelPath := filepath.Join(dir, "test-run.done")
+	if err := os.WriteFile(sentinelPath, []byte("DONE\nSESSION=ses_from_sentinel\nSTOP_REASON=end_turn\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := &fakeClient{
+		statusResult: map[string]any{
+			"status":     "ended",
+			"session_id": "ses_live",
+			"phase":      "done",
+		},
+	}
+	s, err := NewServer(Options{
+		Transport:     "stdio",
+		NoAutostart:   true,
+		ControlClient: fake,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.registry.Store(&RunInfo{
+		RunID:        "run-test-1",
+		Label:        "test-run",
+		RuntimeID:    "rt_test_1",
+		SentinelPath: sentinelPath,
+	})
+
+	_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{RunID: "run-test-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ := result.(map[string]any)
+	if m["status"] != "done" {
+		t.Errorf("expected done, got %v", m["status"])
+	}
+	if m["run_id"] != "run-test-1" {
+		t.Errorf("expected run_id run-test-1, got %v", m["run_id"])
+	}
+	if m["label"] != "test-run" {
+		t.Errorf("expected label test-run, got %v", m["label"])
+	}
+	if m["stop_reason"] != "end_turn" {
+		t.Errorf("expected stop_reason end_turn, got %v", m["stop_reason"])
+	}
+	if m["session_id"] != "ses_from_sentinel" {
+		t.Errorf("expected session_id ses_from_sentinel, got %v", m["session_id"])
+	}
+}
+
+func TestAvenorStatusListWithRegistry(t *testing.T) {
+	dir := t.TempDir()
+	sentinelPath := filepath.Join(dir, "list-run.done")
+	if err := os.WriteFile(sentinelPath, []byte("DONE\nSESSION=ses_sentinel\nSTOP_REASON=end_turn\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := &fakeClient{
+		listResult: []map[string]any{
+			{"runtime_id": "rt_1", "status": "running", "session_id": "ses_1"},
+			{"runtime_id": "rt_2", "status": "ended", "session_id": "ses_2"},
+		},
+	}
+	s, err := NewServer(Options{
+		Transport:     "stdio",
+		NoAutostart:   true,
+		ControlClient: fake,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.registry.Store(&RunInfo{
+		RunID:        "run-list-1",
+		Label:        "list-run-1",
+		RuntimeID:    "rt_1",
+		SentinelPath: sentinelPath,
+	})
+	s.registry.Store(&RunInfo{
+		RunID:     "run-list-2",
+		Label:     "list-run-2",
+		RuntimeID: "rt_2",
+	})
+
+	_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, ok := result.([]map[string]any)
+	if !ok {
+		t.Fatalf("expected []map[string]any, got %T", result)
+	}
+	if len(list) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(list))
+	}
+
+	if list[0]["run_id"] != "run-list-1" {
+		t.Errorf("expected run_id run-list-1, got %v", list[0]["run_id"])
+	}
+	if list[0]["status"] != "running" {
+		t.Errorf("expected running status for rt_1, got %v", list[0]["status"])
+	}
+
+	if list[1]["run_id"] != "run-list-2" {
+		t.Errorf("expected run_id run-list-2, got %v", list[1]["run_id"])
+	}
+	if list[1]["status"] != "done" {
+		t.Errorf("expected done status for rt_2, got %v", list[1]["status"])
+	}
+}
+
+func TestAvenorStatusNoRegistryHit(t *testing.T) {
+	fake := &fakeClient{
+		statusResult: map[string]any{
+			"status":     "running",
+			"session_id": "ses_direct",
+		},
+	}
+	s, err := NewServer(Options{
+		Transport:     "stdio",
+		NoAutostart:   true,
+		ControlClient: fake,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{RunID: "rt_direct"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ := result.(map[string]any)
+	if m["status"] != "running" {
+		t.Errorf("expected running, got %v", m["status"])
+	}
+	if m["session_id"] != "ses_direct" {
+		t.Errorf("expected ses_direct, got %v", m["session_id"])
+	}
+}
+
+func TestAvenorStatusControlClientNotAvailable(t *testing.T) {
+	_, err := NewServer(Options{
+		Transport:   "stdio",
+		NoAutostart: true,
+	})
+	if err == nil {
+		t.Fatal("expected error for no-autostart without supervisor socket")
+	}
+
+	s := &Server{
+		registry: NewRunRegistry(),
+	}
+	_, _, err = s.handleAvenorStatus(context.Background(), nil, statusArgs{})
+	if err == nil {
+		t.Fatal("expected error for unavailable control client")
+	}
+	if !strings.Contains(err.Error(), "control client not available") {
+		t.Errorf("expected 'control client not available', got: %v", err)
 	}
 }

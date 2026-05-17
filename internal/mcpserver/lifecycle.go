@@ -18,7 +18,7 @@ var startupTimeout = 10 * time.Second
 type supervisorLifecycle struct {
 	socketPath string
 	cmd        *exec.Cmd
-	client     *client.Client
+	client     ControlClient
 }
 
 func startSupervisor(socketPath string, idleTimeout time.Duration) (*supervisorLifecycle, error) {
