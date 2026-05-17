@@ -1,6 +1,6 @@
 import * as fs from 'node:fs'
-import * as os from 'node:os'
 import * as path from 'node:path'
+import { socketsRoot } from '../paths.js'
 
 export function validateRunId(id: string): void {
   if (!/^[a-zA-Z0-9_-]+$/.test(id)) {
@@ -26,8 +26,8 @@ export function validateTimeout(value: string): number {
 
 export function validateSupervisorSocketPath(supervisorId: string): string {
   const canonical = fs.realpathSync(supervisorId)
-  const socketsRoot = fs.realpathSync(path.join(os.homedir(), '.avenor', 'sockets'))
-  const relative = path.relative(socketsRoot, canonical)
+  const root = fs.realpathSync(socketsRoot())
+  const relative = path.relative(root, canonical)
   if (
     relative.startsWith('..') ||
     path.isAbsolute(relative) ||

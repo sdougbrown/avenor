@@ -9,9 +9,11 @@
   "scripts": {
     "build": "tsdown",
     "test": "bun test",
+    "test:e2e": "AVENOR_REAL_INTEGRATION=1 bun test",
     "dev": "tsdown --watch"
   },
   "devDependencies": {
+    "@types/bun": "^1.3.12",
     "@types/node": "^25.8.0",
     "tsdown": "^0.22.0",
     "typescript": "^6.0.3",

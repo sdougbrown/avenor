@@ -1,9 +1,9 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as crypto from 'node:crypto'
-import * as os from 'node:os'
 import { Supervisor, type RunInfo } from '../supervisor.js'
 import { dial } from '../client.js'
+import { ensureRunPaths, runsRoot } from '../paths.js'
 import { validateRunId, validateSupervisorSocketPath } from './validate.js'
 
 function findRunByLabel(sup: Supervisor, runId: string): RunInfo | undefined {
@@ -56,7 +56,7 @@ export async function followUpTool(args: {
 
       const sentinelPath =
         (liveStatus?.sentinel_file as string | undefined) ??
-        path.join(os.homedir(), '.avenor', 'runs', args.runId, 'sentinel.done')
+        path.join(runsRoot(), args.runId, 'sentinel.done')
       const sentinel = await parseSentinel(sentinelPath)
       if (!sentinel?.SESSION) {
         throw new Error('run has no session to resume')
@@ -66,15 +66,15 @@ export async function followUpTool(args: {
 
       const followUpRunId = crypto.randomUUID()
       const followUpLabel = args.label ?? `${args.runId}-followup`
-      const runDir = path.join(os.homedir(), '.avenor', 'runs', followUpRunId)
-      await fs.promises.mkdir(runDir, { recursive: true, mode: 0o700 })
+      const { sentinelPath: followUpSentinelPath, eventLogPath } =
+        ensureRunPaths(followUpRunId)
       await client.spawn({
         agent,
         prompt: args.message,
         label: followUpLabel,
         session_id: sentinel.SESSION,
-        sentinel_file: path.join(runDir, 'sentinel.done'),
-        on_event: path.join(runDir, 'events.log'),
+        sentinel_file: followUpSentinelPath,
+        on_event: eventLogPath,
       })
       return { run_id: followUpRunId, label: followUpLabel }
     } finally {

@@ -8,6 +8,18 @@ import {
   type RunInfo,
 } from './supervisor.js'
 
+function useFakeAvenorUnlessRealIntegration(): void {
+  if (process.env.AVENOR_REAL_INTEGRATION === '1') return
+  process.env.AVENOR_HOME = path.join(os.tmpdir(), `avenor-core-test-${process.pid}`)
+  process.env.AVENOR_BIN = path.resolve(import.meta.dir, '..', 'test', 'fixtures', 'fake-avenor.ts')
+}
+
+useFakeAvenorUnlessRealIntegration()
+
+function expectedAvenorHome(): string {
+  return process.env.AVENOR_HOME ?? path.join(os.homedir(), '.avenor')
+}
+
 function hasAvenorBinary(): boolean {
   try {
     findAvenorBinary()
@@ -29,7 +41,7 @@ describe.skipIf(skipIfNoBinary)('Supervisor lifecycle', () => {
   it('Supervisor.get starts the process', async () => {
     supervisor = await Supervisor.get()
     expect(supervisor).toBeTruthy()
-    expect(supervisor.supervisorId).toContain(path.join(os.homedir(), '.avenor', 'sockets', 'avenor-mcp-'))
+    expect(supervisor.supervisorId).toContain(path.join(expectedAvenorHome(), 'sockets', 'avenor-mcp-'))
   })
 
   it('supervisor.getClient().status() works', async () => {
@@ -75,7 +87,7 @@ describe.skipIf(skipIfNoBinary)('Supervisor singleton', () => {
     const sup2 = await Supervisor.get()
     expect(sup2).not.toBe(sup)
     sup = sup2
-    expect(sup2.supervisorId).toContain(path.join(os.homedir(), '.avenor', 'sockets', 'avenor-mcp-'))
+    expect(sup2.supervisorId).toContain(path.join(expectedAvenorHome(), 'sockets', 'avenor-mcp-'))
   }, 15_000)
 })
 

@@ -10,6 +10,14 @@ import { followUpTool } from './follow-up.js'
 import { eventsTool } from './events.js'
 import { shutdownTool } from './shutdown.js'
 
+function useFakeAvenorUnlessRealIntegration(): void {
+  if (process.env.AVENOR_REAL_INTEGRATION === '1') return
+  process.env.AVENOR_HOME = path.join(os.tmpdir(), `avenor-core-test-${process.pid}`)
+  process.env.AVENOR_BIN = path.resolve(import.meta.dir, '..', '..', 'test', 'fixtures', 'fake-avenor.ts')
+}
+
+useFakeAvenorUnlessRealIntegration()
+
 function hasAvenorBinary(): boolean {
   try {
     findAvenorBinary()

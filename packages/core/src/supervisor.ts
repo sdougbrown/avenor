@@ -4,6 +4,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import * as crypto from 'node:crypto'
 import { dial, Client, type SpawnParams } from './client.js'
+import { ensureRunPaths, socketsRoot } from './paths.js'
 
 export interface RunInfo {
   label: string
@@ -16,20 +17,6 @@ export interface RunInfo {
 export interface SupervisorOptions {
   binaryPath?: string
   callTimeoutMs?: number
-}
-
-function runsRoot(): string {
-  return path.join(os.homedir(), '.avenor', 'runs')
-}
-
-function ensureRunDir(runId: string): { runDir: string; sentinelPath: string; eventLogPath: string } {
-  const runDir = path.join(runsRoot(), runId)
-  fs.mkdirSync(runDir, { recursive: true, mode: 0o700 })
-  return {
-    runDir,
-    sentinelPath: path.join(runDir, 'sentinel.done'),
-    eventLogPath: path.join(runDir, 'events.log'),
-  }
 }
 
 export function findAvenorBinary(): string {
@@ -110,7 +97,7 @@ export class Supervisor {
     Supervisor.registerCleanup()
     const binaryPath = opts?.binaryPath ?? findAvenorBinary()
 
-    const socketDir = path.join(os.homedir(), '.avenor', 'sockets')
+    const socketDir = socketsRoot()
     fs.mkdirSync(socketDir, { recursive: true, mode: 0o700 })
     const socketPath = path.join(socketDir, `avenor-mcp-${process.pid}.sock`)
 
@@ -257,7 +244,7 @@ export class Supervisor {
   async spawn(params: SpawnParams): Promise<RunInfo> {
     const client = this.getClient()
     const runId = crypto.randomUUID()
-    const { sentinelPath, eventLogPath } = ensureRunDir(runId)
+    const { sentinelPath, eventLogPath } = ensureRunPaths(runId)
 
     const spawnParams: SpawnParams = {
       ...params,

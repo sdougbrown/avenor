@@ -16,5 +16,17 @@ jobs:
         with:
           go-version: '1.23'
 
-      - name: Run tests
+      - name: Run Go tests
         run: go test ./...
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install package dependencies
+        run: bun install
+
+      - name: Run package builds
+        run: bun run build
+
+      - name: Run package tests
+        run: bun run test

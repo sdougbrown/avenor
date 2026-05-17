@@ -1,8 +1,8 @@
 import * as fs from 'node:fs'
-import * as os from 'node:os'
 import * as path from 'node:path'
 import { Supervisor, type RunInfo } from '../supervisor.js'
 import { dial, type Client } from '../client.js'
+import { runsRoot } from '../paths.js'
 import {
   validateRunId,
   validateSupervisorSocketPath,
@@ -171,7 +171,7 @@ export async function statusTool(
 
         const sentinelPath =
           (liveStatus?.sentinel_file as string | undefined) ??
-          path.join(os.homedir(), '.avenor', 'runs', args.runId, 'sentinel.done')
+          path.join(runsRoot(), args.runId, 'sentinel.done')
         let sentinel: Record<string, string> | null = null
         if (await sentinelExists(sentinelPath)) {
           sentinel = await parseSentinel(sentinelPath)
