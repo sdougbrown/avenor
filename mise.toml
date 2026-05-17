@@ -1,0 +1,35 @@
+[tasks.core-build]
+description = "Build @dougbots/avenor-core"
+dir = "packages/core"
+sources = ["src/**/*.ts", "tsdown.config.ts", "package.json"]
+outputs = ["dist/index.js"]
+run = "bun run build"
+
+[tasks.mcp-build]
+description = "Build @dougbots/avenor-mcp"
+dir = "packages/mcp"
+depends = ["core-build"]
+sources = ["src/**/*.ts", "tsdown.config.ts", "package.json"]
+outputs = ["dist/index.js"]
+run = "bun run build"
+
+[tasks.opencode-build]
+description = "Build @dougbots/avenor-opencode"
+dir = "packages/opencode"
+depends = ["core-build"]
+sources = ["src/**/*.ts", "tsdown.config.ts", "package.json"]
+outputs = ["dist/index.js"]
+run = "bun run build"
+
+[tasks.build]
+description = "Build all @avenor packages"
+depends = ["mcp-build", "opencode-build"]
+
+[tasks.test]
+description = "Test all @avenor packages"
+depends = ["build"]
+run = ["cd packages/core && bun test", "cd packages/mcp && bun test", "cd packages/opencode && bun test"]
+
+[tasks.dev]
+description = "Watch all packages"
+run = ["cd packages/core && bun run dev & cd packages/mcp && bun run dev & cd packages/opencode && bun run dev & wait"]

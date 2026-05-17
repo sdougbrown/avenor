@@ -37,3 +37,7 @@ dist/
 
 # Built binaries
 /avenor
+
+# TS packages
+packages/*/dist
+packages/*/node_modules

@@ -1,0 +1,12 @@
+export { dial } from './client.js'
+export type { Client, Event, SpawnParams } from './client.js'
+export { Supervisor, findAvenorBinary } from './supervisor.js'
+export type { RunInfo, SupervisorOptions } from './supervisor.js'
+
+export { spawnTool } from './tools/spawn.js'
+export { statusTool } from './tools/status.js'
+export type { StatusResult } from './tools/status.js'
+export { answerPermissionTool } from './tools/answer-permission.js'
+export { followUpTool } from './tools/follow-up.js'
+export { eventsTool } from './tools/events.js'
+export { shutdownTool } from './tools/shutdown.js'
