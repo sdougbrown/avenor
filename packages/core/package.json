@@ -20,7 +20,8 @@
     "build": "tsdown",
     "test": "bun test",
     "test:e2e": "AVENOR_REAL_INTEGRATION=1 bun test",
-    "dev": "tsdown --watch"
+    "dev": "tsdown --watch",
+    "postinstall": "node dist/postinstall.js"
   },
   "devDependencies": {
     "@types/bun": "^1.3.12",
