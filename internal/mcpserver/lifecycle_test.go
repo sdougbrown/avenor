@@ -231,8 +231,12 @@ func TestStartSupervisorStartupTimeout(t *testing.T) {
 }
 
 func TestStartSupervisorReuseExistingSocket(t *testing.T) {
-	tmpDir := t.TempDir()
-	socketPath := filepath.Join(tmpDir, "reuse-test.sock")
+	tmpDir, err := os.MkdirTemp("/tmp", "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(tmpDir) })
+	socketPath := filepath.Join(tmpDir, "r.sock")
 
 	ln, err := net.Listen("unix", socketPath)
 	if err != nil {
@@ -240,25 +244,30 @@ func TestStartSupervisorReuseExistingSocket(t *testing.T) {
 	}
 	defer ln.Close()
 
-	// Respond to a single "status" request and terminate
+	// Accept multiple connections; each connection handles multiple
+	// requests (the Client maintains a persistent connection).
 	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-		scanner := bufio.NewScanner(conn)
-		if scanner.Scan() {
-			var req client.Request
-			if err := json.Unmarshal(scanner.Bytes(), &req); err != nil {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
 				return
 			}
-			resp := client.Response{JSONRPC: "2.0", ID: req.ID}
-			snap := map[string]any{"session_id": "ses_test", "phase": "working"}
-			resp.Result, _ = json.Marshal(snap)
-			data, _ := json.Marshal(resp)
-			data = append(data, '\n')
-			conn.Write(data)
+			go func(c net.Conn) {
+				defer c.Close()
+				scanner := bufio.NewScanner(c)
+				for scanner.Scan() {
+					var req client.Request
+					if err := json.Unmarshal(scanner.Bytes(), &req); err != nil {
+						continue
+					}
+					resp := client.Response{JSONRPC: "2.0", ID: req.ID}
+					snap := map[string]any{"session_id": "ses_test", "phase": "working"}
+					resp.Result, _ = json.Marshal(snap)
+					data, _ := json.Marshal(resp)
+					data = append(data, '\n')
+					c.Write(data)
+				}
+			}(conn)
 		}
 	}()
 

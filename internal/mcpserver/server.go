@@ -19,6 +19,7 @@ type ControlClient interface {
 	Spawn(params map[string]any) (map[string]any, error)
 	Shutdown(mode string) error
 	Close() error
+	AnswerPermission(runtimeID, requestID, optionID string) error
 }
 
 type Options struct {
@@ -58,6 +59,27 @@ type spawnArgs struct {
 type shutdownArgs struct {
 	SupervisorID string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
 	Force        bool   `json:"force,omitempty" jsonschema:"optional force kill instead of graceful shutdown"`
+}
+
+type permissionArgs struct {
+	RunID        string `json:"run_id" jsonschema:"required run ID or label"`
+	OptionID     string `json:"option_id" jsonschema:"required option ID to select"`
+	RequestID    string `json:"request_id,omitempty" jsonschema:"optional request ID (auto-detected if omitted)"`
+	SupervisorID string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
+}
+
+type eventsArgs struct {
+	RunID        string   `json:"run_id" jsonschema:"required run ID or label"`
+	Types        []string `json:"types,omitempty" jsonschema:"optional event types to filter by"`
+	Limit        int      `json:"limit,omitempty" jsonschema:"optional max events to return (default 50)"`
+	SupervisorID string   `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
+}
+
+type followUpArgs struct {
+	RunID        string `json:"run_id" jsonschema:"required prior run ID or label"`
+	Message      string `json:"message" jsonschema:"required follow-up message"`
+	Label        string `json:"label,omitempty" jsonschema:"optional label for the new run (defaults to <prior-label>-followup)"`
+	SupervisorID string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
 }
 
 func NewServer(opts Options) (*Server, error) {
@@ -116,6 +138,21 @@ func NewServer(opts Options) (*Server, error) {
 		Name:        "avenor_shutdown",
 		Description: "Shutdown the avenor supervisor and clean up run artifacts",
 	}, s.handleAvenorShutdown)
+
+	mcp.AddTool(mcpServer, &mcp.Tool{
+		Name:        "avenor_answer_permission",
+		Description: "Answer a pending permission request for a run",
+	}, s.handleAvenorAnswerPermission)
+
+	mcp.AddTool(mcpServer, &mcp.Tool{
+		Name:        "avenor_events",
+		Description: "Read recent events from a run's event log",
+	}, s.handleAvenorEvents)
+
+	mcp.AddTool(mcpServer, &mcp.Tool{
+		Name:        "avenor_follow_up",
+		Description: "Spawn a follow-up run continuing a prior session",
+	}, s.handleAvenorFollowUp)
 
 	return s, nil
 }
@@ -314,6 +351,142 @@ func (s *Server) handleAvenorShutdown(ctx context.Context, req *mcp.CallToolRequ
 	return nil, map[string]any{
 		"ok":         true,
 		"cleaned_up": cleanedUp,
+	}, nil
+}
+
+func (s *Server) handleAvenorAnswerPermission(ctx context.Context, req *mcp.CallToolRequest, args permissionArgs) (*mcp.CallToolResult, any, error) {
+	ri := s.registry.Lookup(args.RunID)
+	if ri == nil {
+		return nil, nil, fmt.Errorf("run not found in registry")
+	}
+
+	supervisorID := args.SupervisorID
+	if supervisorID == "" {
+		supervisorID = ri.SupervisorID
+	}
+
+	cl, cleanup, err := s.getClientForSupervisor(supervisorID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer cleanup()
+
+	requestID := args.RequestID
+	if requestID == "" {
+		statusResult, err := cl.Status(ri.RuntimeID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("status: %w", err)
+		}
+		pm, ok := statusResult["pending_permission"]
+		if !ok || pm == nil {
+			return nil, nil, fmt.Errorf("no pending permission request")
+		}
+		pmMap, ok := pm.(map[string]any)
+		if !ok {
+			return nil, nil, fmt.Errorf("no pending permission request")
+		}
+		requestID, _ = pmMap["request_id"].(string)
+		if requestID == "" {
+			return nil, nil, fmt.Errorf("no pending permission request")
+		}
+	}
+
+	if err := cl.AnswerPermission(ri.RuntimeID, requestID, args.OptionID); err != nil {
+		return nil, nil, fmt.Errorf("answer_permission: %w", err)
+	}
+
+	return nil, map[string]any{"ok": true}, nil
+}
+
+func (s *Server) handleAvenorEvents(ctx context.Context, req *mcp.CallToolRequest, args eventsArgs) (*mcp.CallToolResult, any, error) {
+	ri := s.registry.Lookup(args.RunID)
+	if ri == nil {
+		return nil, nil, fmt.Errorf("run not found in registry")
+	}
+
+	limit := args.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+
+	events, err := readEvents(ri.EventLogPath, args.Types, limit)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read events: %w", err)
+	}
+	if events == nil {
+		events = []map[string]any{}
+	}
+
+	return nil, events, nil
+}
+
+func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequest, args followUpArgs) (*mcp.CallToolResult, any, error) {
+	ri := s.registry.Lookup(args.RunID)
+	if ri == nil {
+		return nil, nil, fmt.Errorf("run not found in registry")
+	}
+
+	supervisorID := args.SupervisorID
+	if supervisorID == "" {
+		supervisorID = ri.SupervisorID
+	}
+
+	sessionID, err := readSentinelSession(ri.SentinelPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read sentinel session: %w", err)
+	}
+
+	runID := uuid.New().String()
+	followupLabel := args.Label
+	if followupLabel == "" {
+		followupLabel = ri.Label + "-followup"
+	}
+
+	sentinelPath := filepath.Join(os.TempDir(), fmt.Sprintf("avenor-run-%s.done", runID))
+	eventLogPath := filepath.Join(os.TempDir(), fmt.Sprintf("avenor-run-%s.log", runID))
+
+	params := map[string]any{
+		"dir":           ri.Dir,
+		"agent":         ri.Agent,
+		"prompt":        args.Message,
+		"label":         followupLabel,
+		"session_id":    sessionID,
+		"sentinel_file": sentinelPath,
+		"on_event":      eventLogPath,
+	}
+
+	cl, cleanup, err := s.getClientForSupervisor(supervisorID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer cleanup()
+
+	result, err := cl.Spawn(params)
+	if err != nil {
+		return nil, nil, fmt.Errorf("spawn: %w", err)
+	}
+
+	runtimeID, _ := result["runtime_id"].(string)
+	newSessionID, _ := result["session_id"].(string)
+
+	supervisorPath := s.getSupervisorPath(supervisorID)
+
+	s.registry.Store(&RunInfo{
+		RunID:        runID,
+		Label:        followupLabel,
+		RuntimeID:    runtimeID,
+		SessionID:    newSessionID,
+		SupervisorID: supervisorPath,
+		SentinelPath: sentinelPath,
+		EventLogPath: eventLogPath,
+		Agent:        ri.Agent,
+		Dir:          ri.Dir,
+		CreatedAt:    time.Now(),
+	})
+
+	return nil, map[string]any{
+		"run_id": runID,
+		"label":  followupLabel,
 	}, nil
 }
 

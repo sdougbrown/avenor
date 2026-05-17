@@ -83,6 +83,17 @@ func translateStatus(raw map[string]any, sentinelPath string) map[string]any {
 	return result
 }
 
+func readSentinelSession(path string) (string, error) {
+	sd, err := readSentinel(path)
+	if err != nil {
+		return "", fmt.Errorf("read sentinel: %w", err)
+	}
+	if sd.SessionID == "" {
+		return "", fmt.Errorf("no session in sentinel")
+	}
+	return sd.SessionID, nil
+}
+
 func applySentinelStatus(result map[string]any, sd *sentinelData) {
 	switch sd.Status {
 	case "DONE":
