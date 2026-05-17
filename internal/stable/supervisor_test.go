@@ -3,6 +3,8 @@ package stable
 import (
 	"context"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -610,23 +612,13 @@ func TestAnswerPermissionClearsCacheEntry(t *testing.T) {
 }
 
 func TestTombstoneOnStartFailed(t *testing.T) {
-	// Create an unwritable directory so the control server can't bind the socket.
-	tmpDir, err := os.MkdirTemp("", "ast-startfail-")
-	if err != nil {
+	tmpDir := newStableSocketTestDir(t, "startfail")
+	parentFile := filepath.Join(tmpDir, "not-a-dir")
+	if err := os.WriteFile(parentFile, []byte("not a directory"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(tmpDir)
-
-	socketPath := tmpDir + "/test.sock"
-	// Place tombstone outside the unwritable directory so it can be written.
-	tombstonePath := "/tmp/ast-startfail-tombstone.dead"
-	_ = os.Remove(tombstonePath)
-	defer os.Remove(tombstonePath)
-
-	if err := os.Chmod(tmpDir, 0o000); err != nil {
-		t.Fatal(err)
-	}
-	defer os.Chmod(tmpDir, 0o700)
+	socketPath := filepath.Join(parentFile, "test.sock")
+	tombstonePath := filepath.Join(tmpDir, "startfail.dead")
 
 	sup := NewSupervisor(Config{
 		ControlSocket: socketPath,
@@ -653,10 +645,8 @@ func TestTombstoneOnStartFailed(t *testing.T) {
 }
 
 func TestTombstoneOnGracefulShutdown(t *testing.T) {
-	socketPath := "/tmp/test-tombstone-shutdown.sock"
+	socketPath := newStableSocketPath(t, "shutdown")
 	tombstonePath := socketPath + ".dead"
-	_ = os.Remove(socketPath)
-	_ = os.Remove(tombstonePath)
 
 	sup := NewSupervisor(Config{
 		ControlSocket:   socketPath,
@@ -707,10 +697,8 @@ func TestTombstoneOnGracefulShutdown(t *testing.T) {
 }
 
 func TestTombstoneOnIdleTimeout(t *testing.T) {
-	socketPath := "/tmp/test-tombstone-idle.sock"
+	socketPath := newStableSocketPath(t, "idle")
 	tombstonePath := socketPath + ".dead"
-	_ = os.Remove(socketPath)
-	_ = os.Remove(tombstonePath)
 
 	sup := NewSupervisor(Config{
 		ControlSocket: socketPath,
@@ -758,13 +746,24 @@ func TestTombstoneOnIdleTimeout(t *testing.T) {
 }
 
 func TestTombstoneOnSignal(t *testing.T) {
+	if os.Getenv("AVENOR_TEST_SIGNAL_SUBPROCESS") == "1" {
+		testTombstoneOnSignalSubprocess(t)
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestTombstoneOnSignal$")
+	cmd.Env = append(os.Environ(), "AVENOR_TEST_SIGNAL_SUBPROCESS=1")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("signal subprocess failed: %v\n%s", err, output)
+	}
+}
+
+func testTombstoneOnSignalSubprocess(t *testing.T) {
 	if os.PathSeparator == '\\' {
 		t.Skip("signal test skipped on Windows")
 	}
-	socketPath := "/tmp/test-tombstone-signal.sock"
+	socketPath := newStableSocketPath(t, "signal")
 	tombstonePath := socketPath + ".dead"
-	_ = os.Remove(socketPath)
-	_ = os.Remove(tombstonePath)
 
 	sup := NewSupervisor(Config{
 		ControlSocket: socketPath,
@@ -816,4 +815,19 @@ func TestTombstoneOnSignal(t *testing.T) {
 	if !strings.Contains(content, "reason=signal") {
 		t.Fatalf("tombstone = %q, want reason=signal", content)
 	}
+}
+
+func newStableSocketPath(t *testing.T, name string) string {
+	t.Helper()
+	return filepath.Join(newStableSocketTestDir(t, name), name+".sock")
+}
+
+func newStableSocketTestDir(t *testing.T, name string) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "ast-"+name+"-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
 }
