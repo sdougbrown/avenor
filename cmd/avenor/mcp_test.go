@@ -32,7 +32,9 @@ func TestRunMCPNoAutostartWithoutSupervisorSocket(t *testing.T) {
 
 func TestRunMCPValidFlags(t *testing.T) {
 	s, err := mcpserver.NewServer(mcpserver.Options{
-		Transport: "stdio",
+		Transport:     "stdio",
+		NoAutostart:   true,
+		ControlClient: &stubControlClient{},
 	})
 	if err != nil {
 		t.Fatalf("NewServer() error = %v, want nil", err)
@@ -40,4 +42,16 @@ func TestRunMCPValidFlags(t *testing.T) {
 	if s == nil {
 		t.Fatal("NewServer() returned nil")
 	}
+	s.Close()
+}
+
+type stubControlClient struct{}
+
+func (s *stubControlClient) Status(runtimeID string) (map[string]any, error) { return nil, nil }
+func (s *stubControlClient) List() ([]map[string]any, error)                   { return nil, nil }
+func (s *stubControlClient) Spawn(params map[string]any) (map[string]any, error) { return nil, nil }
+func (s *stubControlClient) Shutdown(mode string) error                         { return nil }
+func (s *stubControlClient) Close() error                                       { return nil }
+func (s *stubControlClient) AnswerPermission(runtimeID, requestID, optionID string) error {
+	return nil
 }

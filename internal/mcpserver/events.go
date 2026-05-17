@@ -1,6 +1,7 @@
 package mcpserver
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -8,18 +9,19 @@ import (
 )
 
 func readEvents(path string, types []string, limit int) ([]map[string]any, error) {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("read event log: %w", err)
 	}
+	defer f.Close()
 
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	var all []map[string]any
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
+	var matched []map[string]any
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			continue
 		}
@@ -29,27 +31,35 @@ func readEvents(path string, types []string, limit int) ([]map[string]any, error
 		}
 
 		if len(types) > 0 {
-			matched := false
+			found := false
 			for _, t := range types {
 				if et, ok := event["type"].(string); ok && et == t {
-					matched = true
+					found = true
 					break
 				}
 				if ev, ok := event["event"].(string); ok && ev == t {
-					matched = true
+					found = true
 					break
 				}
 			}
-			if !matched {
+			if !found {
 				continue
 			}
 		}
-		all = append(all, event)
+		matched = append(matched, event)
 	}
 
-	if limit > 0 && len(all) > limit {
-		all = all[len(all)-limit:]
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan event log: %w", err)
 	}
 
-	return all, nil
+	if limit > 0 && len(matched) > limit {
+		matched = matched[len(matched)-limit:]
+	}
+
+	if matched == nil {
+		matched = []map[string]any{}
+	}
+
+	return matched, nil
 }

@@ -15,21 +15,13 @@ import (
 )
 
 func TestStartSupervisorStaleSocket(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skipf("cannot get home dir: %v", err)
-	}
-
-	socketsDir := filepath.Join(home, ".avenor", "sockets")
-	socketPath := filepath.Join(socketsDir, "avenor-mcp-test-stale.sock")
+	tmpDir := t.TempDir()
+	socketPath := filepath.Join(tmpDir, "avenor-mcp-test-stale.sock")
 
 	// Clean up from previous runs
 	os.Remove(socketPath)
 
 	// Create a plain file (not a real socket) to simulate stale socket
-	if err := os.MkdirAll(socketsDir, 0700); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
 	if err := os.WriteFile(socketPath, []byte("not a socket"), 0600); err != nil {
 		t.Fatalf("write stale file: %v", err)
 	}
@@ -56,7 +48,7 @@ func TestStartSupervisorStaleSocket(t *testing.T) {
 	defer func() { execCommand = origExec }()
 
 	// startSupervisor should detect the stale file, remove it, then try to spawn
-	_, err = startSupervisor(socketPath, 5*time.Second)
+	_, err := startSupervisor(socketPath, 5*time.Second)
 
 	if !execCalled {
 		t.Error("execCommand was never called — spawn was not attempted after stale removal")
@@ -74,12 +66,10 @@ func TestStartSupervisorStaleSocket(t *testing.T) {
 }
 
 func TestStartSupervisorDefaultSocketPath(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skipf("cannot get home dir: %v", err)
-	}
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
 
-	expectedDir := filepath.Join(home, ".avenor", "sockets")
+	expectedDir := filepath.Join(tmpDir, ".avenor", "sockets")
 	expectedPrefix := filepath.Join(expectedDir, "avenor-mcp-")
 	expectedSuffix := ".sock"
 
@@ -126,6 +116,57 @@ func TestStartSupervisorDefaultSocketPath(t *testing.T) {
 	}
 }
 
+func TestStartSupervisorZeroIdleTimeoutOmitsFlag(t *testing.T) {
+	tmpDir := t.TempDir()
+	socketPath := filepath.Join(tmpDir, "test-zero-idle.sock")
+
+	var capturedArgs []string
+	origExec := execCommand
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		capturedArgs = args
+		return exec.Command("/nonexistent/avenor-test-stub")
+	}
+	defer func() { execCommand = origExec }()
+
+	_, _ = startSupervisor(socketPath, 0)
+
+	for _, a := range capturedArgs {
+		if a == "--idle-timeout" {
+			t.Error("--idle-timeout flag should be omitted when idleTimeout is zero")
+		}
+	}
+}
+
+func TestStartSupervisorNonZeroIdleTimeoutIncludesFlag(t *testing.T) {
+	tmpDir := t.TempDir()
+	socketPath := filepath.Join(tmpDir, "test-idle.sock")
+	os.WriteFile(socketPath, []byte("fake"), 0600)
+	defer os.Remove(socketPath)
+
+	var capturedArgs []string
+	origExec := execCommand
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		capturedArgs = args
+		return exec.Command("/nonexistent/avenor-test-stub")
+	}
+	defer func() { execCommand = origExec }()
+
+	_, _ = startSupervisor(socketPath, 30*time.Minute)
+
+	found := false
+	for i, a := range capturedArgs {
+		if a == "--idle-timeout" && i+1 < len(capturedArgs) {
+			found = true
+			if capturedArgs[i+1] != "30m0s" {
+				t.Errorf("expected --idle-timeout 30m0s, got %s", capturedArgs[i+1])
+			}
+		}
+	}
+	if !found {
+		t.Error("--idle-timeout flag should be present when idleTimeout is non-zero")
+	}
+}
+
 func TestNewServerNoAutostartError(t *testing.T) {
 	_, err := NewServer(Options{
 		Transport:   "stdio",
@@ -163,12 +204,8 @@ func TestNewServerAutostartFails(t *testing.T) {
 func TestLifecycleShutdownNoProcess(t *testing.T) {
 	// Test Shutdown with a lifecycle that has no running process
 	// (e.g., when an existing socket was reused)
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skipf("cannot get home dir: %v", err)
-	}
-
-	socketPath := filepath.Join(home, ".avenor", "sockets", "avenor-mcp-test-noproc.sock")
+	tmpDir := t.TempDir()
+	socketPath := filepath.Join(tmpDir, "avenor-mcp-test-noproc.sock")
 
 	lc := &supervisorLifecycle{
 		socketPath: socketPath,

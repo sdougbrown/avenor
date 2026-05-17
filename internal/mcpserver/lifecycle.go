@@ -58,12 +58,12 @@ func startSupervisor(socketPath string, idleTimeout time.Duration) (*supervisorL
 		return nil, fmt.Errorf("get executable path: %w", err)
 	}
 
-	timeoutStr := ""
+	args := []string{"stable", "--control-socket", socketPath}
 	if idleTimeout > 0 {
-		timeoutStr = idleTimeout.String()
+		args = append(args, "--idle-timeout", idleTimeout.String())
 	}
 
-	cmd := execCommand(exePath, "stable", "--control-socket", socketPath, "--idle-timeout", timeoutStr)
+	cmd := execCommand(exePath, args...)
 	cmd.Stderr = os.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 

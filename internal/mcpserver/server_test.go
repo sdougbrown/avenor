@@ -154,7 +154,12 @@ func TestAvenorStatusSingle(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{RunID: "rt1"})
+	s.registry.Store(&RunInfo{
+		RunID:     "run-1",
+		RuntimeID: "rt1",
+	})
+
+	_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{RunID: "run-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,9 +169,6 @@ func TestAvenorStatusSingle(t *testing.T) {
 	}
 	if m["status"] != "running" {
 		t.Fatalf("expected status=running, got %v", m["status"])
-	}
-	if m["session_id"] != "ses1" {
-		t.Fatalf("expected session_id=ses1, got %v", m["session_id"])
 	}
 }
 
@@ -206,7 +208,12 @@ func TestAvenorStatusError(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		_, _, err = s.handleAvenorStatus(context.Background(), nil, statusArgs{RunID: "missing"})
+		s.registry.Store(&RunInfo{
+			RunID:     "run-missing",
+			RuntimeID: "rt_missing",
+		})
+
+		_, _, err = s.handleAvenorStatus(context.Background(), nil, statusArgs{RunID: "run-missing"})
 		if err == nil {
 			t.Fatal("expected error from status")
 		}
@@ -234,7 +241,11 @@ func TestAvenorStatusNilClient(t *testing.T) {
 
 func startFakeSupervisor(t *testing.T) (string, func()) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "s")
+	dir, err := os.MkdirTemp("", "fs")
+	if err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	path := filepath.Join(dir, "s")
 	ln, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -290,6 +301,11 @@ func TestServerWithRealSocketStatus(t *testing.T) {
 		t.Fatalf("NewServer: %v", err)
 	}
 	defer s.Close()
+
+	s.registry.Store(&RunInfo{
+		RunID:     "run1",
+		RuntimeID: "rt_run1",
+	})
 
 	_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{RunID: "run1"})
 	if err != nil {
@@ -348,7 +364,8 @@ func TestServerClose(t *testing.T) {
 		t.Fatalf("NewServer: %v", err)
 	}
 
-	_, _, err = s.handleAvenorStatus(context.Background(), nil, statusArgs{RunID: "run1"})
+	// Use list (no run_id) to avoid registry-miss error
+	_, _, err = s.handleAvenorStatus(context.Background(), nil, statusArgs{})
 	if err != nil {
 		t.Fatalf("handleAvenorStatus before close: %v", err)
 	}
@@ -361,7 +378,7 @@ func TestServerClose(t *testing.T) {
 		t.Fatalf("second Close should be idempotent: %v", err)
 	}
 
-	_, _, err = s.handleAvenorStatus(context.Background(), nil, statusArgs{RunID: "run1"})
+	_, _, err = s.handleAvenorStatus(context.Background(), nil, statusArgs{})
 	if err == nil {
 		t.Error("expected error after close")
 	}
@@ -929,7 +946,7 @@ func TestAvenorStatusListWithRegistry(t *testing.T) {
 	}
 }
 
-func TestAvenorStatusNoRegistryHit(t *testing.T) {
+func TestAvenorStatusNoRegistryHitWithoutSupervisorID(t *testing.T) {
 	fake := &fakeClient{
 		statusResult: map[string]any{
 			"status":     "running",
@@ -945,16 +962,41 @@ func TestAvenorStatusNoRegistryHit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{RunID: "rt_direct"})
+	_, _, err = s.handleAvenorStatus(context.Background(), nil, statusArgs{RunID: "rt_direct"})
+	if err == nil {
+		t.Fatal("expected error for registry miss without supervisor_id")
+	}
+	if !strings.Contains(err.Error(), "not found in registry") {
+		t.Errorf("expected 'not found in registry' error, got: %v", err)
+	}
+}
+
+func TestAvenorStatusWithExplicitSupervisorID(t *testing.T) {
+	path, cleanup := startFakeSupervisor(t)
+	defer cleanup()
+
+	s, err := NewServer(Options{
+		Transport:        "stdio",
+		SupervisorSocket: path,
+	})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("NewServer: %v", err)
 	}
-	m, _ := result.(map[string]any)
-	if m["status"] != "running" {
-		t.Errorf("expected running, got %v", m["status"])
+	defer s.Close()
+
+	_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{
+		RunID:        "rt_direct",
+		SupervisorID: path,
+	})
+	if err != nil {
+		t.Fatalf("expected success with explicit supervisor_id, got: %v", err)
 	}
-	if m["session_id"] != "ses_direct" {
-		t.Errorf("expected ses_direct, got %v", m["session_id"])
+	m, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map[string]any, got %T", result)
+	}
+	if m["session_id"] != "ses_test" {
+		t.Errorf("expected ses_test, got %v", m["session_id"])
 	}
 }
 

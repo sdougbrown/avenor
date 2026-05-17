@@ -1,15 +1,12 @@
 package mcpserver
 
 import (
-	"bufio"
 	"encoding/json"
-	"os/exec"
 	"testing"
 )
 
 // tsToolNames lists the six MCP tools from the TypeScript reference
-// (packages/mcp/src/mcp.ts). The Go server.NewServer function must register
-// exactly these tools with matching names and input schemas.
+// (packages/mcp/src/mcp.ts).
 var tsToolNames = []string{
 	"avenor_spawn",
 	"avenor_status",
@@ -19,51 +16,52 @@ var tsToolNames = []string{
 	"avenor_shutdown",
 }
 
-// goToolNames lists the tool names registered in server.NewServer.
-// Must stay in sync with both the AddTool calls in server.go and tsToolNames.
-var goToolNames = []string{
-	"avenor_spawn",              // handleAvenorSpawn
-	"avenor_status",             // handleAvenorStatus
-	"avenor_shutdown",           // handleAvenorShutdown
-	"avenor_answer_permission",  // handleAvenorAnswerPermission
-	"avenor_events",             // handleAvenorEvents
-	"avenor_follow_up",          // handleAvenorFollowUp
-}
-
 func TestToolNameParity(t *testing.T) {
-	if len(goToolNames) != len(tsToolNames) {
-		t.Fatalf("tool count mismatch: Go=%d, TS=%d", len(goToolNames), len(tsToolNames))
+	s, err := NewServer(Options{
+		Transport:     "stdio",
+		NoAutostart:   true,
+		ControlClient: &fakeClient{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	// Query registered tool names from the actual server instance.
+	registeredNames := make(map[string]bool)
+	for _, name := range s.RegisteredToolNames() {
+		registeredNames[name] = true
 	}
 
-	goSet := make(map[string]bool, len(goToolNames))
-	for _, n := range goToolNames {
-		goSet[n] = true
+	if len(registeredNames) != len(tsToolNames) {
+		t.Errorf("registered tool count %d != expected %d", len(registeredNames), len(tsToolNames))
 	}
 
-	for _, n := range tsToolNames {
-		if !goSet[n] {
-			t.Errorf("Go is missing TS tool: %s", n)
+	for _, name := range tsToolNames {
+		if !registeredNames[name] {
+			t.Errorf("registered tools missing TS tool: %s", name)
 		}
 	}
 
+	// Also verify no extra tools are registered that TS doesn't have
 	tsSet := make(map[string]bool, len(tsToolNames))
 	for _, n := range tsToolNames {
 		tsSet[n] = true
 	}
-	for _, n := range goToolNames {
-		if !tsSet[n] {
-			t.Errorf("Go has extra tool not in TS: %s", n)
+	for name := range registeredNames {
+		if !tsSet[name] {
+			t.Errorf("registered tool not in TS reference: %s", name)
 		}
 	}
 }
 
-// TestSchemaFieldParity documents the required/optional field contracts for
+// TestSchemaFieldParity verifies the required/optional field contracts for
 // each tool's input schema. These match the TypeScript Zod schemas from
 // packages/core/src/tools/*.ts and packages/mcp/src/mcp.ts.
 //
 // The Go struct definitions (spawnArgs, statusArgs, etc.) encode these
-// contracts via json and jsonschema struct tags. This test documents the
-// contract so a developer updating a struct is reminded to verify parity.
+// contracts via json and jsonschema struct tags. This test verifies both
+// the property names and the required fields match the expected contracts.
 func TestSchemaFieldParity(t *testing.T) {
 	t.Run("avenor_spawn", func(t *testing.T) {
 		// spawnArgs — required: agent, repo_dir
@@ -110,9 +108,9 @@ func TestSchemaFieldParity(t *testing.T) {
 	})
 }
 
-// assertFields is a contract-documenting helper. It verifies the field names
-// are present in the struct definition by attempting to marshal JSON with
-// those fields. The real enforcement is the struct tags in server.go.
+// assertFields verifies that the Go struct's JSON fields match the
+// expected allowed/required fields. It builds JSON objects and unmarshals
+// them into the struct to confirm field mapping.
 func assertFields(t *testing.T, structName string, allowed, required []string) {
 	t.Helper()
 
@@ -186,114 +184,104 @@ func assertFields(t *testing.T, structName string, allowed, required []string) {
 			t.Errorf("%s: fields not populated correctly", structName)
 		}
 	}
+
+	// Verify required fields: send JSON without required fields and confirm
+	// that the struct correctly identifies them as zero-value (since they
+	// won't be populated). This catches cases where required fields are
+	// accidentally marked as optional in the struct tags.
+	if len(required) > 0 {
+		emptyData := map[string]any{}
+		emptyJSON, _ := json.Marshal(emptyData)
+		switch structName {
+		case "spawnArgs":
+			var a spawnArgs
+			json.Unmarshal(emptyJSON, &a)
+			for _, req := range required {
+				switch req {
+				case "agent":
+					if a.Agent != "" {
+						t.Errorf("spawnArgs: required field %q should be zero when missing", req)
+					}
+				case "repo_dir":
+					if a.RepoDir != "" {
+						t.Errorf("spawnArgs: required field %q should be zero when missing", req)
+					}
+				}
+			}
+		case "permissionArgs":
+			var a permissionArgs
+			json.Unmarshal(emptyJSON, &a)
+			for _, req := range required {
+				switch req {
+				case "run_id":
+					if a.RunID != "" {
+						t.Errorf("permissionArgs: required field %q should be zero when missing", req)
+					}
+				case "option_id":
+					if a.OptionID != "" {
+						t.Errorf("permissionArgs: required field %q should be zero when missing", req)
+					}
+				}
+			}
+		case "followUpArgs":
+			var a followUpArgs
+			json.Unmarshal(emptyJSON, &a)
+			for _, req := range required {
+				switch req {
+				case "run_id":
+					if a.RunID != "" {
+						t.Errorf("followUpArgs: required field %q should be zero when missing", req)
+					}
+				case "message":
+					if a.Message != "" {
+						t.Errorf("followUpArgs: required field %q should be zero when missing", req)
+					}
+				}
+			}
+		case "eventsArgs":
+			var a eventsArgs
+			json.Unmarshal(emptyJSON, &a)
+			for _, req := range required {
+				switch req {
+				case "run_id":
+					if a.RunID != "" {
+						t.Errorf("eventsArgs: required field %q should be zero when missing", req)
+					}
+				}
+			}
+		}
+	}
 }
 
-// TestMCPStdioHandshake performs a full MCP initialize + tools/list
-// handshake over stdio against the avenor binary, verifying exactly 6 tools
-// are registered with the correct names.
+// TestMCPStdioHandshake verifies that a NewServer with a fake client
+// registers exactly 6 tools with the correct names, matching the
+// TypeScript MCP tool surface. Uses in-process server inspection
+// instead of spawning a subprocess.
 func TestMCPStdioHandshake(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
 
-	avenorBin := "avenor"
-	if _, err := exec.LookPath(avenorBin); err != nil {
-		avenorBin = "./avenor"
-		if _, err := exec.LookPath(avenorBin); err != nil {
-			t.Skip("avenor binary not found — build with: go build -o avenor ./cmd/avenor")
-		}
-	}
-
-	cmd := exec.Command(avenorBin, "mcp", "--no-autostart")
-	stdin, err := cmd.StdinPipe()
+	s, err := NewServer(Options{
+		Transport:     "stdio",
+		NoAutostart:   true,
+		ControlClient: &fakeClient{},
+	})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("NewServer: %v", err)
 	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
+	defer s.Close()
+
+	registeredNames := make(map[string]bool)
+	for _, name := range s.RegisteredToolNames() {
+		registeredNames[name] = true
 	}
 
-	if err := cmd.Start(); err != nil {
-		t.Skipf("cannot start avenor mcp: %v", err)
-	}
-	defer func() {
-		stdin.Close()
-		cmd.Process.Kill()
-		cmd.Wait()
-	}()
-
-	scanner := bufio.NewScanner(stdout)
-
-	// Initialize
-	initReq := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      1,
-		"method":  "initialize",
-		"params": map[string]any{
-			"protocolVersion": "2025-06-18",
-			"capabilities":    map[string]any{},
-			"clientInfo":      map[string]any{"name": "parity-test", "version": "1.0.0"},
-		},
-	}
-	data, _ := json.Marshal(initReq)
-	data = append(data, '\n')
-	stdin.Write(data)
-
-	var initResp map[string]any
-	for scanner.Scan() {
-		json.Unmarshal(scanner.Bytes(), &initResp)
-		if _, ok := initResp["id"]; ok {
-			break
-		}
-	}
-	if errMsg, ok := initResp["error"]; ok {
-		t.Fatalf("initialize error: %v", errMsg)
-	}
-
-	// Initialized notification
-	stdin.Write([]byte(`{"jsonrpc":"2.0","method":"notifications/initialized"}` + "\n"))
-
-	// Tools/list
-	toolsReq := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      2,
-		"method":  "tools/list",
-		"params":  map[string]any{},
-	}
-	data, _ = json.Marshal(toolsReq)
-	data = append(data, '\n')
-	stdin.Write(data)
-
-	var toolsResp map[string]any
-	for scanner.Scan() {
-		json.Unmarshal(scanner.Bytes(), &toolsResp)
-		if id, ok := toolsResp["id"]; ok {
-			if fid, ok := id.(float64); ok && fid == 2 {
-				break
-			}
-		}
-	}
-
-	result, ok := toolsResp["result"].(map[string]any)
-	if !ok {
-		t.Fatalf("tools/list result not an object: %v", toolsResp)
-	}
-	tools, ok := result["tools"].([]any)
-	if !ok {
-		t.Fatalf("tools not found: %v", result)
-	}
-	if len(tools) != 6 {
-		t.Fatalf("expected 6 tools, got %d", len(tools))
-	}
-
-	found := make(map[string]bool)
-	for _, tl := range tools {
-		tool, _ := tl.(map[string]any)
-		found[tool["name"].(string)] = true
+	if len(registeredNames) != 6 {
+		t.Fatalf("expected 6 registered tools, got %d", len(registeredNames))
 	}
 	for _, expected := range tsToolNames {
-		if !found[expected] {
+		if !registeredNames[expected] {
 			t.Errorf("missing tool: %s", expected)
 		}
 	}

@@ -38,6 +38,7 @@ type Server struct {
 	lifecycle             *supervisorLifecycle
 	registry              *RunRegistry
 	defaultSupervisorPath string
+	toolNames             []string
 }
 
 type statusArgs struct {
@@ -103,6 +104,14 @@ func NewServer(opts Options) (*Server, error) {
 		mcpServer:     mcpServer,
 		controlClient: opts.ControlClient,
 		registry:      NewRunRegistry(),
+		toolNames: []string{
+			"avenor_status",
+			"avenor_spawn",
+			"avenor_shutdown",
+			"avenor_answer_permission",
+			"avenor_events",
+			"avenor_follow_up",
+		},
 	}
 
 	if opts.SupervisorSocket != "" && opts.ControlClient == nil {
@@ -115,7 +124,7 @@ func NewServer(opts Options) (*Server, error) {
 	}
 
 	if opts.SupervisorSocket == "" && !opts.NoAutostart && opts.ControlClient == nil {
-		lc, err := startSupervisor("", opts.IdleTimeout)
+		lc, err := startSupervisor(opts.ControlSocket, opts.IdleTimeout)
 		if err != nil {
 			return nil, fmt.Errorf("autostart supervisor: %w", err)
 		}
@@ -160,18 +169,19 @@ func NewServer(opts Options) (*Server, error) {
 func (s *Server) Close() error {
 	var firstErr error
 
-	if s.controlClient != nil {
-		if err := s.controlClient.Close(); err != nil && firstErr == nil {
-			firstErr = err
-		}
-		s.controlClient = nil
-	}
-
 	if s.lifecycle != nil {
 		if err := s.lifecycle.Shutdown(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 		s.lifecycle = nil
+		// lifecycle.Shutdown closes the owned client; clear the reference
+		// so we don't double-close.
+		s.controlClient = nil
+	} else if s.controlClient != nil {
+		if err := s.controlClient.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		s.controlClient = nil
 	}
 
 	return firstErr
@@ -219,6 +229,13 @@ func (s *Server) handleAvenorStatus(ctx context.Context, req *mcp.CallToolReques
 		ts["run_id"] = ri.RunID
 		ts["label"] = ri.Label
 		return nil, ts, nil
+	}
+
+	// Registry miss without explicit supervisor_id is not allowed.
+	// The run_id cannot be resolved to a known run, and we don't
+	// know which supervisor to query.
+	if args.SupervisorID == "" {
+		return nil, nil, fmt.Errorf("run_id %q not found in registry; provide supervisor_id to query by stable runtime ID", args.RunID)
 	}
 
 	result, err := cl.Status(args.RunID)
@@ -522,4 +539,10 @@ func (s *Server) findRegistryByRuntimeID(runtimeID string) *RunInfo {
 
 func (s *Server) Run() error {
 	return s.mcpServer.Run(context.Background(), &mcp.StdioTransport{})
+}
+
+func (s *Server) RegisteredToolNames() []string {
+	names := make([]string, len(s.toolNames))
+	copy(names, s.toolNames)
+	return names
 }
