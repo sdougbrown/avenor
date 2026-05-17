@@ -22,11 +22,11 @@ export async function shutdownTool(args: {
       const runs = (sup as any).runs as Map<string, RunInfo>
       for (const info of runs.values()) {
         try {
-          fs.unlinkSync(info.sentinelPath)
+          await fs.promises.unlink(info.sentinelPath)
           cleanedUp.push(info.sentinelPath)
         } catch {}
         try {
-          fs.unlinkSync(info.eventLogPath)
+          await fs.promises.unlink(info.eventLogPath)
           cleanedUp.push(info.eventLogPath)
         } catch {}
       }

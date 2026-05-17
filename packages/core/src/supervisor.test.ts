@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, afterAll } from 'bun:test'
-import { accessSync, constants } from 'node:fs'
+import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import {
@@ -29,7 +29,7 @@ describe.skipIf(skipIfNoBinary)('Supervisor lifecycle', () => {
   it('Supervisor.get starts the process', async () => {
     supervisor = await Supervisor.get()
     expect(supervisor).toBeTruthy()
-    expect(supervisor.supervisorId).toContain(path.join(os.tmpdir(), 'avenor-mcp-'))
+    expect(supervisor.supervisorId).toContain(path.join(os.homedir(), '.avenor', 'sockets', 'avenor-mcp-'))
   })
 
   it('supervisor.getClient().status() works', async () => {
@@ -49,7 +49,7 @@ describe.skipIf(skipIfNoBinary)('Supervisor lifecycle', () => {
   it('supervisor.close() terminates cleanly', async () => {
     await supervisor.close()
     try {
-      accessSync(supervisor.supervisorId, constants.F_OK)
+      fs.accessSync(supervisor.supervisorId, fs.constants.F_OK)
       throw new Error('socket still exists after close')
     } catch (err: any) {
       expect(err.code).toBe('ENOENT')
@@ -75,7 +75,7 @@ describe.skipIf(skipIfNoBinary)('Supervisor singleton', () => {
     const sup2 = await Supervisor.get()
     expect(sup2).not.toBe(sup)
     sup = sup2
-    expect(sup2.supervisorId).toContain(path.join(os.tmpdir(), 'avenor-mcp-'))
+    expect(sup2.supervisorId).toContain(path.join(os.homedir(), '.avenor', 'sockets', 'avenor-mcp-'))
   }, 15_000)
 })
 

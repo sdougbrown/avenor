@@ -32,7 +32,7 @@ export async function eventsTool(args: {
 
   let raw: string
   try {
-    raw = fs.readFileSync(runInfo.eventLogPath, 'utf-8')
+    raw = await fs.promises.readFile(runInfo.eventLogPath, 'utf-8')
   } catch {
     return []
   }

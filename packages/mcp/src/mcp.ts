@@ -112,6 +112,6 @@ if (process.env.MCP_TRANSPORT !== 'sse') {
   })
   app.all('/mcp', (c) => transport.handleRequest(c.req.raw, c.res, c.req.raw.body))
   await server.connect(transport)
-  Bun.serve({ fetch: app.fetch, port })
+  Bun.serve({ fetch: app.fetch, port, hostname: '127.0.0.1' })
   console.error(`avenor MCP server listening on :${port}`)
 }

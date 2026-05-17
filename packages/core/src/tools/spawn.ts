@@ -26,12 +26,12 @@ export async function spawnTool(args: {
     await client.spawn({
       agent: args.agent,
       prompt: args.prompt,
-      promptFile: args.promptFile,
+      prompt_file: args.promptFile,
       label,
       dir: args.dir,
-      timeout: args.timeout,
+      timeout: args.timeout !== undefined ? Number(args.timeout) : undefined,
       model: args.model,
-      sessionId: args.sessionId,
+      session_id: args.sessionId,
       sentinel_file: sentinelPath,
       on_event: eventLogPath,
     })
@@ -43,12 +43,12 @@ export async function spawnTool(args: {
   await sup.spawn({
     agent: args.agent,
     prompt: args.prompt,
-    promptFile: args.promptFile,
+    prompt_file: args.promptFile,
     label,
     dir: args.dir,
-    timeout: args.timeout,
+    timeout: args.timeout !== undefined ? Number(args.timeout) : undefined,
     model: args.model,
-    sessionId: args.sessionId,
+    session_id: args.sessionId,
   })
 
   return { run_id: runId, label, supervisor_id: sup.supervisorId }

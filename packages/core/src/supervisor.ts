@@ -1,5 +1,5 @@
 import { spawn, execSync, type ChildProcess } from 'node:child_process'
-import { accessSync, constants, unlinkSync } from 'node:fs'
+import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import * as crypto from 'node:crypto'
@@ -22,7 +22,7 @@ export function findAvenorBinary(): string {
   const envBin = process.env.AVENOR_BIN
   if (envBin) {
     try {
-      accessSync(envBin, constants.X_OK)
+      fs.accessSync(envBin, fs.constants.X_OK)
       return envBin
     } catch {
       throw new Error(`AVENOR_BIN path not executable: ${envBin}`)
@@ -32,7 +32,7 @@ export function findAvenorBinary(): string {
   try {
     const binPath = execSync('which avenor', { encoding: 'utf-8' }).trim()
     if (binPath) {
-      accessSync(binPath, constants.X_OK)
+      fs.accessSync(binPath, fs.constants.X_OK)
       return binPath
     }
   } catch {
@@ -41,7 +41,7 @@ export function findAvenorBinary(): string {
 
   const homeBin = path.join(os.homedir(), '.botfiles', 'bin', 'avenor')
   try {
-    accessSync(homeBin, constants.X_OK)
+    fs.accessSync(homeBin, fs.constants.X_OK)
     return homeBin
   } catch {
     // not found
@@ -95,11 +95,14 @@ export class Supervisor {
 
     Supervisor.registerCleanup()
     const binaryPath = opts?.binaryPath ?? findAvenorBinary()
-    const socketPath = path.join(os.tmpdir(), `avenor-mcp-${process.pid}.sock`)
+
+    const socketDir = path.join(os.homedir(), '.avenor', 'sockets')
+    fs.mkdirSync(socketDir, { recursive: true, mode: 0o700 })
+    const socketPath = path.join(socketDir, `avenor-mcp-${process.pid}.sock`)
 
     let socketExists = false
     try {
-      accessSync(socketPath, constants.R_OK | constants.W_OK)
+      await fs.promises.access(socketPath, fs.constants.R_OK | fs.constants.W_OK)
       socketExists = true
     } catch {
       // socket does not exist
@@ -119,14 +122,14 @@ export class Supervisor {
         } catch {
           probeClient.close()
           try {
-            unlinkSync(socketPath)
+            await fs.promises.unlink(socketPath)
           } catch {
             // couldn't unlink
           }
         }
       } catch {
         try {
-          unlinkSync(socketPath)
+          await fs.promises.unlink(socketPath)
         } catch {
           // couldn't unlink
         }
@@ -280,7 +283,7 @@ export class Supervisor {
     }
 
     try {
-      unlinkSync(this.socketPath)
+      await fs.promises.unlink(this.socketPath)
     } catch {
       // ignore
     }

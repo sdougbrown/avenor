@@ -3,6 +3,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { Supervisor, type RunInfo } from '../supervisor.js'
 import { dial, type Client } from '../client.js'
+import { validateRunId } from './validate.js'
 
 function findRunByLabel(sup: Supervisor, runId: string): RunInfo | undefined {
   const runs = (sup as any).runs as Map<string, RunInfo>
@@ -12,9 +13,9 @@ function findRunByLabel(sup: Supervisor, runId: string): RunInfo | undefined {
   return undefined
 }
 
-function parseSentinel(filePath: string): Record<string, string> | null {
+async function parseSentinel(filePath: string): Promise<Record<string, string> | null> {
   try {
-    const content = fs.readFileSync(filePath, 'utf-8').trim()
+    const content = (await fs.promises.readFile(filePath, 'utf-8')).trim()
     if (!content) return null
     const lines = content.split('\n')
     const result: Record<string, string> = {}
@@ -33,9 +34,9 @@ function parseSentinel(filePath: string): Record<string, string> | null {
   }
 }
 
-function sentinelExists(filePath: string): boolean {
+async function sentinelExists(filePath: string): Promise<boolean> {
   try {
-    fs.accessSync(filePath, fs.constants.R_OK)
+    await fs.promises.access(filePath, fs.constants.R_OK)
     return true
   } catch {
     return false
@@ -107,8 +108,8 @@ async function buildRunStatus(
   liveStatus: Record<string, unknown> | null,
 ): Promise<StatusResult> {
   let sentinel: Record<string, string> | null = null
-  if (sentinelExists(runInfo.sentinelPath)) {
-    sentinel = parseSentinel(runInfo.sentinelPath)
+  if (await sentinelExists(runInfo.sentinelPath)) {
+    sentinel = await parseSentinel(runInfo.sentinelPath)
   }
 
   const rawPhase = (liveStatus?.phase as string) ?? 'running'
@@ -155,13 +156,14 @@ export async function statusTool(
     const client = await dial(args.supervisorId)
     try {
       if (args.runId) {
+        validateRunId(args.runId)
         const sentinelPath = path.join(
           os.tmpdir(),
           `avenor-run-${args.runId}.done`,
         )
         let sentinel: Record<string, string> | null = null
-        if (sentinelExists(sentinelPath)) {
-          sentinel = parseSentinel(sentinelPath)
+        if (await sentinelExists(sentinelPath)) {
+          sentinel = await parseSentinel(sentinelPath)
         }
 
         let liveStatus: Record<string, unknown> | null = null

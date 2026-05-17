@@ -24,13 +24,15 @@ export interface Event {
 
 export interface SpawnParams {
   agent: string
-  promptFile?: string
+  prompt_file?: string
   prompt?: string
   dir?: string
   label?: string
-  timeout?: string
+  timeout?: number
   model?: string
-  sessionId?: string
+  session_id?: string
+  sentinel_file?: string
+  on_event?: string
   [key: string]: unknown
 }
 

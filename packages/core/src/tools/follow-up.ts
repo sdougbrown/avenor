@@ -4,6 +4,7 @@ import * as path from 'node:path'
 import { Supervisor, type RunInfo } from '../supervisor.js'
 import { dial } from '../client.js'
 import { spawnTool } from './spawn.js'
+import { validateRunId } from './validate.js'
 
 function findRunByLabel(sup: Supervisor, runId: string): RunInfo | undefined {
   const runs = (sup as any).runs as Map<string, RunInfo>
@@ -13,9 +14,9 @@ function findRunByLabel(sup: Supervisor, runId: string): RunInfo | undefined {
   return undefined
 }
 
-function parseSentinel(filePath: string): Record<string, string> | null {
+async function parseSentinel(filePath: string): Promise<Record<string, string> | null> {
   try {
-    const content = fs.readFileSync(filePath, 'utf-8').trim()
+    const content = (await fs.promises.readFile(filePath, 'utf-8')).trim()
     if (!content) return null
     const lines = content.split('\n')
     const result: Record<string, string> = {}
@@ -43,11 +44,12 @@ export async function followUpTool(args: {
   if (args.supervisorId) {
     const client = await dial(args.supervisorId)
     try {
+      validateRunId(args.runId)
       const sentinelPath = path.join(
         os.tmpdir(),
         `avenor-run-${args.runId}.done`,
       )
-      const sentinel = parseSentinel(sentinelPath)
+      const sentinel = await parseSentinel(sentinelPath)
       if (!sentinel?.SESSION) {
         throw new Error('run has no session to resume')
       }
@@ -80,7 +82,7 @@ export async function followUpTool(args: {
     throw new Error(`run not found: ${args.runId}`)
   }
 
-  const sentinel = parseSentinel(runInfo.sentinelPath)
+  const sentinel = await parseSentinel(runInfo.sentinelPath)
 
   if (!sentinel?.SESSION) {
     throw new Error('run has no session to resume')
