@@ -1,0 +1,281 @@
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
+import { Supervisor, type RunInfo } from '../supervisor.js'
+import { dial, type Client } from '../client.js'
+
+function findRunByLabel(sup: Supervisor, runId: string): RunInfo | undefined {
+  const runs = (sup as any).runs as Map<string, RunInfo>
+  for (const info of runs.values()) {
+    if (info.label === runId) return info
+  }
+  return undefined
+}
+
+function parseSentinel(filePath: string): Record<string, string> | null {
+  try {
+    const content = fs.readFileSync(filePath, 'utf-8').trim()
+    if (!content) return null
+    const lines = content.split('\n')
+    const result: Record<string, string> = {}
+    result._status = lines[0]
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i].trim()
+      if (!line) continue
+      const eq = line.indexOf('=')
+      if (eq > 0) {
+        result[line.substring(0, eq)] = line.substring(eq + 1)
+      }
+    }
+    return result
+  } catch {
+    return null
+  }
+}
+
+function sentinelExists(filePath: string): boolean {
+  try {
+    fs.accessSync(filePath, fs.constants.R_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function translateStatus(
+  rawPhase: string,
+  sentinelData: Record<string, string> | null,
+): string {
+  const sentinelStatus = sentinelData?._status
+
+  switch (rawPhase) {
+    case 'idle':
+    case 'running':
+      return 'running'
+    case 'ended': {
+      if (sentinelStatus) {
+        switch (sentinelStatus) {
+          case 'DONE':
+            return 'done'
+          case 'FAILED':
+            return 'failed'
+          case 'TIMEOUT':
+            return 'timeout'
+          case 'KILLED':
+            return 'killed'
+          case 'BLOCKED':
+            return 'failed'
+          default:
+            return 'running'
+        }
+      }
+      return 'running'
+    }
+    case 'DONE':
+      return 'done'
+    case 'FAILED':
+      return 'failed'
+    case 'TIMEOUT':
+      return 'timeout'
+    case 'KILLED':
+      return 'killed'
+    case 'BLOCKED':
+      return 'failed'
+    default:
+      return 'running'
+  }
+}
+
+export interface StatusResult {
+  run_id: string
+  label: string
+  status: string
+  phase?: string
+  phase_label?: string
+  pending_permission?: {
+    request_id: string
+    description: string
+    options: Array<{ option_id: string; label: string; kind: string }>
+  }
+  session_id?: string
+  stop_reason?: string
+}
+
+async function buildRunStatus(
+  client: Client,
+  runInfo: RunInfo,
+  liveStatus: Record<string, unknown> | null,
+): Promise<StatusResult> {
+  let sentinel: Record<string, string> | null = null
+  if (sentinelExists(runInfo.sentinelPath)) {
+    sentinel = parseSentinel(runInfo.sentinelPath)
+  }
+
+  const rawPhase = (liveStatus?.phase as string) ?? 'running'
+  const translated = translateStatus(rawPhase, sentinel)
+
+  const result: StatusResult = {
+    run_id: runInfo.label,
+    label: runInfo.label,
+    status: translated,
+    phase: liveStatus?.phase as string | undefined,
+    phase_label: liveStatus?.phase_label as string | undefined,
+    session_id:
+      (sentinel?.SESSION as string) ??
+      (liveStatus?.session_id as string) ??
+      undefined,
+    stop_reason: sentinel?._status ?? undefined,
+  }
+
+  if (liveStatus?.pending_permission) {
+    const pp = liveStatus.pending_permission as any
+    result.pending_permission = {
+      request_id: pp.request_id ?? '',
+      description: pp.description ?? '',
+      options: Array.isArray(pp.options)
+        ? pp.options.map((o: any) => ({
+            option_id: o.option_id ?? '',
+            label: o.label ?? '',
+            kind: o.kind ?? '',
+          }))
+        : [],
+    }
+  }
+
+  return result
+}
+
+export async function statusTool(
+  args: {
+    runId?: string
+    supervisorId?: string
+  },
+): Promise<StatusResult | StatusResult[]> {
+  if (args.supervisorId) {
+    const client = await dial(args.supervisorId)
+    try {
+      if (args.runId) {
+        const sentinelPath = path.join(
+          os.tmpdir(),
+          `avenor-run-${args.runId}.done`,
+        )
+        let sentinel: Record<string, string> | null = null
+        if (sentinelExists(sentinelPath)) {
+          sentinel = parseSentinel(sentinelPath)
+        }
+
+        let liveStatus: Record<string, unknown> | null = null
+        try {
+          liveStatus = await client.status(args.runId)
+        } catch {
+          // live status unavailable
+        }
+
+        return {
+          run_id: args.runId,
+          label: args.runId,
+          status: translateStatus(
+            (liveStatus?.phase as string) ?? 'running',
+            sentinel,
+          ),
+          phase: liveStatus?.phase as string | undefined,
+          phase_label: liveStatus?.phase_label as string | undefined,
+          session_id:
+            (sentinel?.SESSION as string) ??
+            (liveStatus?.session_id as string) ??
+            undefined,
+          stop_reason: sentinel?._status ?? undefined,
+          pending_permission: liveStatus?.pending_permission
+            ? {
+                request_id:
+                  (liveStatus.pending_permission as any).request_id ?? '',
+                description:
+                  (liveStatus.pending_permission as any).description ?? '',
+                options: Array.isArray(
+                  (liveStatus.pending_permission as any).options,
+                )
+                  ? (
+                      liveStatus.pending_permission as any
+                    ).options.map((o: any) => ({
+                      option_id: o.option_id ?? '',
+                      label: o.label ?? '',
+                      kind: o.kind ?? '',
+                    }))
+                  : [],
+              }
+            : undefined,
+        }
+      }
+
+      const list = await client.list()
+      return list.map((entry: any) => ({
+        run_id: (entry.runtime_id ?? entry.id ?? '') as string,
+        label: (entry.label ?? '') as string,
+        status: translateStatus(
+          (entry.phase as string) ?? (entry.status as string) ?? 'running',
+          null,
+        ),
+        phase: entry.phase as string | undefined,
+        session_id: entry.session_id as string | undefined,
+      }))
+    } finally {
+      client.close()
+    }
+  }
+
+  const sup = await Supervisor.get()
+  const client = sup.getClient()
+
+  if (args.runId) {
+    const runInfo = findRunByLabel(sup, args.runId)
+    if (!runInfo) {
+      throw new Error(`run not found: ${args.runId}`)
+    }
+
+    let liveStatus: Record<string, unknown> | null = null
+    if (runInfo.runtimeId) {
+      try {
+        liveStatus = await client.status(runInfo.runtimeId)
+      } catch {
+        // live status unavailable
+      }
+    }
+
+    return buildRunStatus(client, runInfo, liveStatus)
+  }
+
+  const list = await client.list()
+  const results: StatusResult[] = []
+
+  for (const entry of list) {
+    const entryId = (entry.runtime_id ?? entry.id ?? '') as string
+    const entryLabel = (entry.label ?? entryId) as string
+    const runInfo = findRunByLabel(sup, entryId) ?? findRunByLabel(sup, entryLabel)
+
+    let liveStatus: Record<string, unknown> | null = null
+    if (runInfo?.runtimeId) {
+      try {
+        liveStatus = await client.status(runInfo.runtimeId)
+      } catch {
+        // ignore
+      }
+    }
+
+    if (runInfo && liveStatus) {
+      results.push(await buildRunStatus(client, runInfo, liveStatus))
+    } else {
+      results.push({
+        run_id: entryId,
+        label: entryLabel,
+        status: translateStatus(
+          (entry.phase as string) ?? (entry.status as string) ?? 'running',
+          null,
+        ),
+        phase: entry.phase as string | undefined,
+        session_id: entry.session_id as string | undefined,
+      })
+    }
+  }
+
+  return results
+}
