@@ -383,11 +383,11 @@ func (s *Server) handleAvenorAnswerPermission(ctx context.Context, req *mcp.Call
 		}
 		pmMap, ok := pm.(map[string]any)
 		if !ok {
-			return nil, nil, fmt.Errorf("no pending permission request")
+			return nil, nil, fmt.Errorf("pending_permission has unexpected type")
 		}
 		requestID, _ = pmMap["request_id"].(string)
 		if requestID == "" {
-			return nil, nil, fmt.Errorf("no pending permission request")
+			return nil, nil, fmt.Errorf("pending_permission missing request_id")
 		}
 	}
 

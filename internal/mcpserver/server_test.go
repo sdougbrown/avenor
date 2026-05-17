@@ -27,6 +27,7 @@ type fakeClient struct {
 	spawnFunc              func(params map[string]any) (map[string]any, error)
 	spawnCapturedParams    map[string]any
 	answerPermissionCalls  []permissionCall
+	statusCapturedRuntimeIDs []string
 }
 
 type permissionCall struct {
@@ -36,6 +37,7 @@ type permissionCall struct {
 }
 
 func (f *fakeClient) Status(runtimeID string) (map[string]any, error) {
+	f.statusCapturedRuntimeIDs = append(f.statusCapturedRuntimeIDs, runtimeID)
 	return f.statusResult, f.statusErr
 }
 
@@ -861,6 +863,9 @@ func TestAvenorStatusWithRegistry(t *testing.T) {
 	if m["session_id"] != "ses_from_sentinel" {
 		t.Errorf("expected session_id ses_from_sentinel, got %v", m["session_id"])
 	}
+	if len(fake.statusCapturedRuntimeIDs) != 1 || fake.statusCapturedRuntimeIDs[0] != "rt_test_1" {
+		t.Errorf("expected Status call with rt_test_1, got %v", fake.statusCapturedRuntimeIDs)
+	}
 }
 
 func TestAvenorStatusListWithRegistry(t *testing.T) {
@@ -1062,6 +1067,9 @@ func TestAvenorAnswerPermissionAutoDetectRequestID(t *testing.T) {
 	if call.optionID != "opt_deny" {
 		t.Errorf("expected optionID opt_deny, got %s", call.optionID)
 	}
+	if len(fake.statusCapturedRuntimeIDs) != 1 || fake.statusCapturedRuntimeIDs[0] != "rt_perm_2" {
+		t.Errorf("expected Status call with rt_perm_2, got %v", fake.statusCapturedRuntimeIDs)
+	}
 }
 
 func TestAvenorAnswerPermissionNoPending(t *testing.T) {
@@ -1120,6 +1128,38 @@ func TestAvenorAnswerPermissionNotFound(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "run not found in registry") {
 		t.Errorf("expected 'run not found in registry', got: %v", err)
+	}
+}
+
+func TestAvenorAnswerPermissionError(t *testing.T) {
+	fake := &fakeClient{
+		answerPermissionErr: fmt.Errorf("permission denied"),
+	}
+	s, err := NewServer(Options{
+		Transport:     "stdio",
+		NoAutostart:   true,
+		ControlClient: fake,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.registry.Store(&RunInfo{
+		RunID:     "run-perm-6",
+		Label:     "perm-error-test",
+		RuntimeID: "rt_perm_6",
+	})
+
+	_, _, err = s.handleAvenorAnswerPermission(context.Background(), nil, permissionArgs{
+		RunID:     "run-perm-6",
+		OptionID:  "opt_allow",
+		RequestID: "req_789",
+	})
+	if err == nil {
+		t.Fatal("expected error from AnswerPermission")
+	}
+	if !strings.Contains(err.Error(), "answer_permission:") || !strings.Contains(err.Error(), "permission denied") {
+		t.Errorf("expected 'answer_permission: permission denied', got: %v", err)
 	}
 }
 
@@ -1377,6 +1417,12 @@ func TestAvenorFollowUp(t *testing.T) {
 	if ri.Dir != "/tmp/prior-repo" {
 		t.Errorf("expected dir /tmp/prior-repo, got %s", ri.Dir)
 	}
+	if ri.RuntimeID != "rt_followup_1" {
+		t.Errorf("expected new runtime_id rt_followup_1, got %s", ri.RuntimeID)
+	}
+	if ri.SessionID != "ses_followup_1" {
+		t.Errorf("expected new session_id ses_followup_1, got %s", ri.SessionID)
+	}
 }
 
 func TestAvenorFollowUpCustomLabel(t *testing.T) {
@@ -1462,6 +1508,44 @@ func TestAvenorFollowUpNoSession(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no session in sentinel") {
 		t.Errorf("expected 'no session in sentinel', got: %v", err)
+	}
+}
+
+func TestAvenorFollowUpNotResumable(t *testing.T) {
+	dir := t.TempDir()
+	sentinelPath := filepath.Join(dir, "followup-failed.done")
+	if err := os.WriteFile(sentinelPath, []byte("FAILED\nSESSION=ses_failed\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := &fakeClient{}
+	s, err := NewServer(Options{
+		Transport:     "stdio",
+		NoAutostart:   true,
+		ControlClient: fake,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.registry.Store(&RunInfo{
+		RunID:        "run-prior-5",
+		Label:        "prior-failed",
+		RuntimeID:    "rt_prior_5",
+		SentinelPath: sentinelPath,
+		Agent:        "claude",
+		Dir:          "/tmp/prior-repo",
+	})
+
+	_, _, err = s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
+		RunID:   "run-prior-5",
+		Message: "continue",
+	})
+	if err == nil {
+		t.Fatal("expected error for non-resumable run")
+	}
+	if !strings.Contains(err.Error(), "not resumable") {
+		t.Errorf("expected 'not resumable', got: %v", err)
 	}
 }
 
@@ -1552,8 +1636,8 @@ func TestAvenorAnswerPermissionRequestIDEmpty(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for empty request_id")
 	}
-	if !strings.Contains(err.Error(), "no pending permission request") {
-		t.Errorf("expected 'no pending permission request', got: %v", err)
+	if !strings.Contains(err.Error(), "pending_permission missing request_id") {
+		t.Errorf("expected 'pending_permission missing request_id', got: %v", err)
 	}
 }
 

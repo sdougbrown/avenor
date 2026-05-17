@@ -86,7 +86,10 @@ func translateStatus(raw map[string]any, sentinelPath string) map[string]any {
 func readSentinelSession(path string) (string, error) {
 	sd, err := readSentinel(path)
 	if err != nil {
-		return "", fmt.Errorf("read sentinel: %w", err)
+		return "", err // readSentinel already wraps with descriptive context
+	}
+	if sd.Status != "DONE" {
+		return "", fmt.Errorf("run is not resumable (status: %s)", strings.ToLower(sd.Status))
 	}
 	if sd.SessionID == "" {
 		return "", fmt.Errorf("no session in sentinel")
