@@ -15,13 +15,14 @@ func runMCP(args []string) int {
 	supervisorSocket := fs.String("supervisor-socket", "", "unix socket path for the supervisor")
 	noAutostart := fs.Bool("no-autostart", false, "disable automatic supervisor start")
 	idleTimeout := fs.Duration("idle-timeout", 30*time.Minute, "idle timeout before server exits")
+	addr := fs.String("addr", "127.0.0.1:3748", "address to listen on for HTTP transport")
 
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
 
-	if *transport != "stdio" {
-		fmt.Fprintln(os.Stderr, "avenor mcp: --transport only supports \"stdio\"")
+	if *transport != "stdio" && *transport != "http" {
+		fmt.Fprintln(os.Stderr, "avenor mcp: --transport only supports \"stdio\" or \"http\"")
 		return 1
 	}
 	if *noAutostart && *supervisorSocket == "" {
@@ -35,6 +36,7 @@ func runMCP(args []string) int {
 		SupervisorSocket: *supervisorSocket,
 		NoAutostart:      *noAutostart,
 		IdleTimeout:      *idleTimeout,
+		Addr:             *addr,
 		ControlClient:    nil,
 	})
 	if err != nil {
@@ -43,9 +45,16 @@ func runMCP(args []string) int {
 	}
 	defer s.Close()
 
-	if err := s.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "avenor mcp: %v\n", err)
-		return 1
+	if *transport == "http" {
+		if err := s.RunHTTP(*addr); err != nil {
+			fmt.Fprintf(os.Stderr, "avenor mcp: %v\n", err)
+			return 1
+		}
+	} else {
+		if err := s.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "avenor mcp: %v\n", err)
+			return 1
+		}
 	}
 	return 0
 }

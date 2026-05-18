@@ -1614,6 +1614,20 @@ func TestAvenorFollowUpNotFound(t *testing.T) {
 	}
 }
 
+func TestNewServerHTTPTransport(t *testing.T) {
+	s, err := NewServer(Options{
+		Transport:     "http",
+		Addr:          "127.0.0.1:0",
+		NoAutostart:   true,
+		ControlClient: &fakeClient{},
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	} else {
+		defer s.Close()
+	}
+}
+
 func TestAvenorAnswerPermissionPendingPermissionNull(t *testing.T) {
 	fake := &fakeClient{
 		statusResult: map[string]any{

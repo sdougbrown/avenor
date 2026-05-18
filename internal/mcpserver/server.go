@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -28,6 +29,7 @@ type Options struct {
 	SupervisorSocket string
 	NoAutostart      bool
 	IdleTimeout      time.Duration
+	Addr             string
 	ControlClient    ControlClient
 }
 
@@ -87,7 +89,7 @@ func NewServer(opts Options) (*Server, error) {
 	if opts.Transport == "" {
 		return nil, fmt.Errorf("transport is required")
 	}
-	if opts.Transport != "stdio" {
+	if opts.Transport != "stdio" && opts.Transport != "http" {
 		return nil, fmt.Errorf("unsupported transport: %s", opts.Transport)
 	}
 	if opts.NoAutostart && opts.SupervisorSocket == "" && opts.ControlClient == nil {
@@ -550,6 +552,13 @@ func (s *Server) findRegistryByRuntimeID(runtimeID string) *RunInfo {
 
 func (s *Server) Run() error {
 	return s.mcpServer.Run(context.Background(), &mcp.StdioTransport{})
+}
+
+func (s *Server) RunHTTP(addr string) error {
+	handler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
+		return s.mcpServer
+	}, &mcp.StreamableHTTPOptions{Stateless: true})
+	return http.ListenAndServe(addr, handler)
 }
 
 func (s *Server) RegisteredToolNames() []string {
