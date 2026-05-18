@@ -118,12 +118,16 @@ func startSupervisor(socketPath string, idleTimeout time.Duration) (*supervisorL
 }
 
 func (l *supervisorLifecycle) Shutdown() error {
+	return l.ShutdownWithMode("graceful")
+}
+
+func (l *supervisorLifecycle) ShutdownWithMode(mode string) error {
 	var firstErr error
 
 	if l.client != nil {
 		// Best-effort graceful shutdown; if the process already exited
 		// the socket write will fail, which is fine.
-		_ = l.client.Shutdown("graceful")
+		_ = l.client.Shutdown(mode)
 		l.client.Close()
 		l.client = nil
 	}

@@ -304,7 +304,7 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 
 	supervisorPath := s.getSupervisorPath(args.SupervisorID)
 
-	s.registry.Store(&RunInfo{
+	if err := s.registry.Store(&RunInfo{
 		RunID:        runID,
 		Label:        label,
 		RuntimeID:    runtimeID,
@@ -315,7 +315,9 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 		Agent:        args.Agent,
 		Dir:          args.RepoDir,
 		CreatedAt:    time.Now(),
-	})
+	}); err != nil {
+		return nil, nil, fmt.Errorf("registry store: %w", err)
+	}
 
 	return nil, map[string]any{
 		"run_id":        runID,
@@ -330,16 +332,29 @@ func (s *Server) handleAvenorShutdown(ctx context.Context, req *mcp.CallToolRequ
 		mode = "kill"
 	}
 
-	cl, cleanup, err := s.getClientForSupervisor(args.SupervisorID)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer cleanup()
-
 	supervisorPath := s.getSupervisorPath(args.SupervisorID)
 
-	if err := cl.Shutdown(mode); err != nil {
-		return nil, nil, fmt.Errorf("shutdown: %w", err)
+	// When shutting down the default (autostarted) supervisor, let
+	// lifecycle.Shutdown handle the client connection so it can send
+	// the shutdown command and then close the socket in one flow.
+	// For explicit supervisor_id, use the per-call client.
+	if args.SupervisorID == "" && s.lifecycle != nil {
+		// Pass the requested mode (graceful or kill) to lifecycle shutdown
+		if err := s.lifecycle.ShutdownWithMode(mode); err != nil {
+			return nil, nil, fmt.Errorf("shutdown: %w", err)
+		}
+		s.lifecycle = nil
+		s.controlClient = nil
+	} else {
+		cl, cleanup, err := s.getClientForSupervisor(args.SupervisorID)
+		if err != nil {
+			return nil, nil, err
+		}
+		defer cleanup()
+
+		if err := cl.Shutdown(mode); err != nil {
+			return nil, nil, fmt.Errorf("shutdown: %w", err)
+		}
 	}
 
 	var cleanedUp []string
@@ -357,12 +372,6 @@ func (s *Server) handleAvenorShutdown(ctx context.Context, req *mcp.CallToolRequ
 				}
 			}
 		}
-	}
-
-	if args.SupervisorID == "" && s.lifecycle != nil {
-		_ = s.lifecycle.Shutdown()
-		s.lifecycle = nil
-		s.controlClient = nil
 	}
 
 	return nil, map[string]any{
@@ -488,7 +497,7 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 
 	supervisorPath := s.getSupervisorPath(supervisorID)
 
-	s.registry.Store(&RunInfo{
+	if err := s.registry.Store(&RunInfo{
 		RunID:        runID,
 		Label:        followupLabel,
 		RuntimeID:    runtimeID,
@@ -499,7 +508,9 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 		Agent:        ri.Agent,
 		Dir:          ri.Dir,
 		CreatedAt:    time.Now(),
-	})
+	}); err != nil {
+		return nil, nil, fmt.Errorf("registry store: %w", err)
+	}
 
 	return nil, map[string]any{
 		"run_id": runID,

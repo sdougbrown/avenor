@@ -83,13 +83,26 @@ describe('getVersion', () => {
       '..',
       'package.json',
     )
-    expect(getVersion(pkgPath)).toBeString()
+    const ver = getVersion(pkgPath)
+    expect(ver).toBeString()
+    expect(ver).toMatch(/^\d+\.\d+\.\d+/)
   })
 
   it('AVENOR_VERSION takes priority over npm_package_version', () => {
     process.env.AVENOR_VERSION = '9.9.9-priority'
     process.env.npm_package_version = '8.8.8-lower'
     expect(getVersion()).toBe('9.9.9-priority')
+  })
+
+  it('rejects invalid AVENOR_VERSION format', () => {
+    process.env.AVENOR_VERSION = '../../../etc/passwd'
+    expect(() => getVersion()).toThrow('Invalid AVENOR_VERSION')
+  })
+
+  it('rejects invalid npm_package_version format', () => {
+    delete process.env.AVENOR_VERSION
+    process.env.npm_package_version = 'not-a-version'
+    expect(() => getVersion()).toThrow('Invalid npm_package_version')
   })
 })
 
@@ -234,6 +247,29 @@ describe('postinstall', () => {
       expect(mockFetch).not.toHaveBeenCalled()
     } finally {
       cleanup()
+    }
+  })
+
+  it('downloads and installs binary on success path', async () => {
+    delete process.env.AVENOR_BIN
+    delete process.env.AVENOR_SKIP_DOWNLOAD
+    process.env.AVENOR_VERSION = '0.0.0-test-success'
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-test-success-'))
+    process.env.AVENOR_INSTALL_DIR = tmpDir
+    try {
+      const mockFetch = mock(async () => {
+        return new Response('fake-binary-content', { status: 200 })
+      })
+      await postinstall(mockFetch, 'darwin', 'arm64')
+      const binaryPath = path.join(tmpDir, 'avenor')
+      expect(fs.existsSync(binaryPath)).toBe(true)
+      const content = fs.readFileSync(binaryPath, 'utf-8')
+      expect(content).toBe('fake-binary-content')
+      const stat = fs.statSync(binaryPath)
+      expect(stat.mode & 0o111).toBeTruthy() // executable bit set
+    } finally {
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch {}
+      delete process.env.AVENOR_INSTALL_DIR
     }
   })
 })

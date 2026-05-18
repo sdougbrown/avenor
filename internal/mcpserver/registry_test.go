@@ -20,18 +20,18 @@ func TestRunRegistryStore(t *testing.T) {
 		RunID: "run-1",
 		Label: "my-run",
 	}
-	r.Store(info)
+	if err := r.Store(info); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if len(r.All()) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(r.All()))
 	}
 
-	defer func() {
-		if recover() == nil {
-			t.Fatal("expected panic for duplicate run_id")
-		}
-	}()
-	r.Store(&RunInfo{RunID: "run-1", Label: "other"})
+	err := r.Store(&RunInfo{RunID: "run-1", Label: "other"})
+	if err == nil {
+		t.Fatal("expected error for duplicate run_id")
+	}
 }
 
 func TestRunRegistryLookup(t *testing.T) {

@@ -1,6 +1,7 @@
 package mcpserver
 
 import (
+	"fmt"
 	"sync"
 	"time"
 )
@@ -31,14 +32,15 @@ func NewRunRegistry() *RunRegistry {
 	}
 }
 
-func (r *RunRegistry) Store(info *RunInfo) {
+func (r *RunRegistry) Store(info *RunInfo) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, ok := r.byID[info.RunID]; ok {
-		panic("run_id already exists: " + info.RunID)
+		return fmt.Errorf("run_id already exists: %s", info.RunID)
 	}
 	r.byID[info.RunID] = info
 	r.byLabel[info.Label] = info
+	return nil
 }
 
 func (r *RunRegistry) Lookup(key string) *RunInfo {
