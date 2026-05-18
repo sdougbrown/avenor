@@ -22,6 +22,22 @@ chmod +x avenor
 
 If you want a deeper tour, the docs cover the permission handler, event flow, plan, loop, and backend support in more detail.
 
+## Development
+
+This repo is Go-first, with a small JS workspace for package integrations. `mise` is the convenience layer for common local tasks; it wraps the underlying `go` and `bun` CLI commands rather than replacing them.
+
+```bash
+mise run build      # Go binary + JS packages
+mise run test       # Go tests + JS package tests
+
+mise run go-build   # Go binary only
+mise run go-test    # Go tests only
+mise run js-build   # JS packages only
+mise run js-test    # JS tests only
+```
+
+The direct equivalents are still ordinary commands such as `go build -o avenor ./cmd/avenor`, `go test ./...`, `bun run build`, and `bun run test`.
+
 ## Permission handling
 
 Permission handling matters because a backend can ask for approval mid-run, and Avenor's job is to broker that request without turning the harness into a blocking human-in-the-loop primitive. When your backend forwards tool approval through ACP `session/request_permission`, point `--permission-handler` at a file path:

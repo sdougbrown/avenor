@@ -30,8 +30,17 @@ jobs:
       - name: Install package dependencies
         run: bun install --frozen-lockfile
 
-      - name: Run tests
-        run: mise run test
+      - name: Build Go binary
+        run: mise run go-build
+
+      - name: Test Go packages
+        run: mise run go-test
+
+      - name: Build JS packages
+        run: mise run js-build
+
+      - name: Test JS packages
+        run: mise run js-test
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6

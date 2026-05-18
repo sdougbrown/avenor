@@ -30,18 +30,24 @@ description = "Test all JS packages"
 depends = ["js-build"]
 run = ["cd packages/core && bun test", "cd packages/mcp && bun test", "cd packages/opencode && bun test"]
 
-[tasks.build]
-description = "Build the avenor Go binary and all JS packages"
+[tasks.go-build]
+description = "Build the avenor Go binary"
 sources = ["**/*.go", "go.mod", "go.sum"]
 outputs = ["avenor"]
 run = "mkdir -p .cache/go-build .cache/go-mod && GOCACHE=$PWD/.cache/go-build GOMODCACHE=$PWD/.cache/go-mod go build -o avenor ./cmd/avenor"
-depends = ["js-build"]
+
+[tasks.go-test]
+description = "Test Go packages"
+sources = ["**/*.go", "go.mod", "go.sum"]
+run = "mkdir -p .cache/go-build .cache/go-mod && GOCACHE=$PWD/.cache/go-build GOMODCACHE=$PWD/.cache/go-mod go test ./..."
+
+[tasks.build]
+description = "Build the avenor Go binary and all JS packages"
+depends = ["go-build", "js-build"]
 
 [tasks.test]
 description = "Test Go packages and all JS packages"
-depends = ["build", "js-test"]
-sources = ["**/*.go", "go.mod", "go.sum"]
-run = "mkdir -p .cache/go-build .cache/go-mod && GOCACHE=$PWD/.cache/go-build GOMODCACHE=$PWD/.cache/go-mod go test ./..."
+depends = ["go-test", "js-test"]
 
 [tasks.js-dev]
 description = "Watch all JS packages"
