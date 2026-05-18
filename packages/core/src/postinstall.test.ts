@@ -1,8 +1,16 @@
 import { describe, it, expect, mock, beforeEach, afterEach } from 'bun:test'
+import * as crypto from 'node:crypto'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { platformMapping, getVersion, getInstallDir, postinstall } from './postinstall.js'
+import {
+  platformMapping,
+  getVersion,
+  getInstallDir,
+  postinstall,
+  verifyChecksum,
+  parseChecksums,
+} from './postinstall.js'
 
 describe('platformMapping', () => {
   it('maps darwin/arm64 to avenor_darwin_arm64', () => {
@@ -126,6 +134,44 @@ describe('getInstallDir', () => {
     delete process.env.AVENOR_INSTALL_DIR
     const expected = path.join(os.homedir(), '.cache', 'avenor', 'bin', 'avenor', '2.0.0')
     expect(getInstallDir('2.0.0')).toBe(expected)
+  })
+})
+
+describe('verifyChecksum', () => {
+  it('passes when hash matches', () => {
+    const content = 'hello world'
+    const hash = crypto.createHash('sha256').update(Buffer.from(content)).digest('hex')
+    expect(verifyChecksum(Buffer.from(content), hash)).toBe(true)
+  })
+
+  it('fails when hash does not match', () => {
+    const content = 'hello world'
+    const wrongHash = '0000000000000000000000000000000000000000000000000000000000000000'
+    expect(verifyChecksum(Buffer.from(content), wrongHash)).toBe(false)
+  })
+})
+
+describe('parseChecksums', () => {
+  const checksums = [
+    'abc123def456  avenor_darwin_arm64',
+    '7890ghi123  avenor_darwin_amd64',
+    '',
+  ].join('\n')
+
+  it('finds asset hash', () => {
+    expect(parseChecksums(checksums, 'avenor_darwin_arm64')).toBe('abc123def456')
+  })
+
+  it('finds second asset hash', () => {
+    expect(parseChecksums(checksums, 'avenor_darwin_amd64')).toBe('7890ghi123')
+  })
+
+  it('returns null for missing asset', () => {
+    expect(parseChecksums(checksums, 'avenor_linux_amd64')).toBeNull()
+  })
+
+  it('returns null for empty content', () => {
+    expect(parseChecksums('', 'avenor_darwin_arm64')).toBeNull()
   })
 })
 
@@ -267,6 +313,81 @@ describe('postinstall', () => {
       expect(content).toBe('fake-binary-content')
       const stat = fs.statSync(binaryPath)
       expect(stat.mode & 0o111).toBeTruthy() // executable bit set
+    } finally {
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch {}
+      delete process.env.AVENOR_INSTALL_DIR
+    }
+  })
+
+  it('passes checksum verification and installs binary', async () => {
+    delete process.env.AVENOR_BIN
+    delete process.env.AVENOR_SKIP_DOWNLOAD
+    process.env.AVENOR_VERSION = '0.0.0-test-checksum-ok'
+    const binaryContent = 'fake-binary-for-checksum-test'
+    const binaryHash = crypto.createHash('sha256').update(Buffer.from(binaryContent)).digest('hex')
+    const checksumsContent = `${binaryHash}  avenor_darwin_arm64\n${'0'.repeat(64)}  avenor_darwin_amd64\n`
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-test-checksum-ok-'))
+    process.env.AVENOR_INSTALL_DIR = tmpDir
+    try {
+      const mockFetch = mock(async (url: string) => {
+        if (url.includes('checksums.txt')) {
+          return new Response(checksumsContent, { status: 200 })
+        }
+        return new Response(binaryContent, { status: 200 })
+      })
+      await postinstall(mockFetch, 'darwin', 'arm64')
+      const binaryPath = path.join(tmpDir, 'avenor')
+      expect(fs.existsSync(binaryPath)).toBe(true)
+      const content = fs.readFileSync(binaryPath, 'utf-8')
+      expect(content).toBe(binaryContent)
+    } finally {
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch {}
+      delete process.env.AVENOR_INSTALL_DIR
+    }
+  })
+
+  it('soft-fails on checksum mismatch', async () => {
+    delete process.env.AVENOR_BIN
+    delete process.env.AVENOR_SKIP_DOWNLOAD
+    process.env.AVENOR_VERSION = '0.0.0-test-checksum-mismatch'
+    const checksumsContent = `${'0'.repeat(64)}  avenor_darwin_arm64\n`
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-test-checksum-mismatch-'))
+    process.env.AVENOR_INSTALL_DIR = tmpDir
+    try {
+      const mockFetch = mock(async (url: string) => {
+        if (url.includes('checksums.txt')) {
+          return new Response(checksumsContent, { status: 200 })
+        }
+        return new Response('real-binary-content', { status: 200 })
+      })
+      await postinstall(mockFetch, 'darwin', 'arm64')
+      const binaryPath = path.join(tmpDir, 'avenor')
+      expect(fs.existsSync(binaryPath)).toBe(false)
+    } finally {
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch {}
+      delete process.env.AVENOR_INSTALL_DIR
+    }
+  })
+
+  it('continues install when checksums.txt returns 404', async () => {
+    delete process.env.AVENOR_BIN
+    delete process.env.AVENOR_SKIP_DOWNLOAD
+    process.env.AVENOR_VERSION = '0.0.0-test-checksum-missing'
+    const binaryContent = 'binary-content-missing-checksums'
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-test-checksum-missing-'))
+    process.env.AVENOR_INSTALL_DIR = tmpDir
+    try {
+      const mockFetch = mock(async (url: string) => {
+        if (url.includes('checksums.txt')) {
+          return new Response('Not Found', { status: 404 })
+        }
+        return new Response(binaryContent, { status: 200 })
+      })
+      await postinstall(mockFetch, 'darwin', 'arm64')
+      const binaryPath = path.join(tmpDir, 'avenor')
+      expect(fs.existsSync(binaryPath)).toBe(true)
+      const content = fs.readFileSync(binaryPath, 'utf-8')
+      expect(content).toBe(binaryContent)
     } finally {
       try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch {}
       delete process.env.AVENOR_INSTALL_DIR

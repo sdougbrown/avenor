@@ -1,3 +1,4 @@
+import * as crypto from 'node:crypto'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -12,6 +13,23 @@ export function platformMapping(platform: string, arch: string): string | null {
     'linux/arm64': 'avenor_linux_arm64',
   }
   return map[key] ?? null
+}
+
+export function verifyChecksum(buffer: Buffer, expectedHash: string): boolean {
+  const actual = crypto.createHash('sha256').update(buffer).digest('hex')
+  return actual === expectedHash
+}
+
+export function parseChecksums(content: string, assetName: string): string | null {
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    const parts = trimmed.split(/\s+/)
+    if (parts.length >= 2 && parts[1] === assetName) {
+      return parts[0]
+    }
+  }
+  return null
 }
 
 const SEMVER_RE = /^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$/
@@ -108,6 +126,36 @@ export async function postinstall(
       return
     }
     const buffer = Buffer.from(await response.arrayBuffer())
+
+    const checksumsUrl = `https://github.com/sdougbrown/avenor/releases/download/v${version}/checksums.txt`
+    try {
+      const checksumsResponse = await fetchFn(checksumsUrl)
+      if (checksumsResponse.ok) {
+        const checksumsContent = await checksumsResponse.text()
+        const expectedHash = parseChecksums(checksumsContent, asset)
+        if (expectedHash) {
+          if (!verifyChecksum(buffer, expectedHash)) {
+            console.warn(
+              `[avenor-postinstall] Checksum mismatch for ${asset}, skipping installation`,
+            )
+            return
+          }
+        } else {
+          console.warn(
+            `[avenor-postinstall] Checksums not available for ${asset}, skipping verification`,
+          )
+        }
+      } else {
+        console.warn(
+          `[avenor-postinstall] Checksums not available (HTTP ${checksumsResponse.status}), skipping verification`,
+        )
+      }
+    } catch {
+      console.warn(
+        `[avenor-postinstall] Checksums not available, skipping verification`,
+      )
+    }
+
     fs.writeFileSync(binaryPath, buffer)
     fs.chmodSync(binaryPath, 0o755)
   } catch (err) {
