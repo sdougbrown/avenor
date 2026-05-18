@@ -1,6 +1,7 @@
 export { dial } from './client.js'
 export type { Client, Event, SpawnParams } from './client.js'
-export { Supervisor, findAvenorBinary, installerBinaryPath } from './supervisor.js'
+export { Supervisor, findAvenorBinary } from './supervisor.js'
+export { getInstallDir, getVersion, installerBinaryPath } from './install-path.js'
 export type { RunInfo, SupervisorOptions } from './supervisor.js'
 
 export { spawnTool } from './tools/spawn.js'

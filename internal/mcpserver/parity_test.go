@@ -2,6 +2,8 @@ package mcpserver
 
 import (
 	"encoding/json"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -186,9 +188,67 @@ func assertFields(t *testing.T, structName string, allowed, required []string) {
 	}
 
 	// Verify required fields: send JSON without required fields and confirm
-	// that the struct correctly identifies them as zero-value (since they
-	// won't be populated). This catches cases where required fields are
-	// accidentally marked as optional in the struct tags.
+	// that the jsonschema tags mark them as required and optional fields as
+	// optional. This protects the generated MCP input schema contract.
+	assertSchemaTags(t, structName, allowed, required)
+}
+
+func assertSchemaTags(t *testing.T, structName string, allowed, required []string) {
+	t.Helper()
+	requiredSet := make(map[string]bool, len(required))
+	for _, f := range required {
+		requiredSet[f] = true
+	}
+
+	var typ reflect.Type
+	switch structName {
+	case "spawnArgs":
+		typ = reflect.TypeOf(spawnArgs{})
+	case "statusArgs":
+		typ = reflect.TypeOf(statusArgs{})
+	case "permissionArgs":
+		typ = reflect.TypeOf(permissionArgs{})
+	case "followUpArgs":
+		typ = reflect.TypeOf(followUpArgs{})
+	case "eventsArgs":
+		typ = reflect.TypeOf(eventsArgs{})
+	case "shutdownArgs":
+		typ = reflect.TypeOf(shutdownArgs{})
+	default:
+		t.Fatalf("unknown struct: %s", structName)
+	}
+
+	seen := make(map[string]bool, typ.NumField())
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		jsonName := strings.Split(field.Tag.Get("json"), ",")[0]
+		if jsonName == "" || jsonName == "-" {
+			continue
+		}
+		seen[jsonName] = true
+		schemaTag := field.Tag.Get("jsonschema")
+		if requiredSet[jsonName] {
+			if !strings.Contains(schemaTag, "required") {
+				t.Errorf("%s.%s missing required jsonschema tag", structName, jsonName)
+			}
+			continue
+		}
+		if !strings.Contains(schemaTag, "optional") {
+			t.Errorf("%s.%s missing optional jsonschema tag", structName, jsonName)
+		}
+	}
+	for _, f := range allowed {
+		if !seen[f] {
+			t.Errorf("%s: expected field %q not present", structName, f)
+		}
+	}
+	if len(seen) != len(allowed) {
+		t.Errorf("%s: field count %d != expected %d", structName, len(seen), len(allowed))
+	}
+}
+
+func assertMissingRequiredFieldsRemainZero(t *testing.T, structName string, required []string) {
+	t.Helper()
 	if len(required) > 0 {
 		emptyData := map[string]any{}
 		emptyJSON, _ := json.Marshal(emptyData)

@@ -19,6 +19,7 @@ type supervisorLifecycle struct {
 	socketPath string
 	cmd        *exec.Cmd
 	client     ControlClient
+	exited     <-chan error
 }
 
 func startSupervisor(socketPath string, idleTimeout time.Duration) (*supervisorLifecycle, error) {
@@ -71,10 +72,9 @@ func startSupervisor(socketPath string, idleTimeout time.Duration) (*supervisorL
 		return nil, fmt.Errorf("start supervisor: %w", err)
 	}
 
-	exited := make(chan struct{})
+	exited := make(chan error, 1)
 	go func() {
-		cmd.Wait()
-		close(exited)
+		exited <- cmd.Wait()
 	}()
 
 	var cl *client.Client
@@ -88,7 +88,7 @@ func startSupervisor(socketPath string, idleTimeout time.Duration) (*supervisorL
 			return nil, fmt.Errorf("supervisor exited during startup")
 		case <-deadline:
 			cmd.Process.Kill()
-			cmd.Wait()
+			<-exited
 			os.Remove(socketPath)
 			return nil, fmt.Errorf("supervisor startup timed out after %s", startupTimeout)
 		default:
@@ -103,6 +103,7 @@ func startSupervisor(socketPath string, idleTimeout time.Duration) (*supervisorL
 					socketPath: socketPath,
 					cmd:        cmd,
 					client:     cl,
+					exited:     exited,
 				}, nil
 			}
 			cl.Close()
@@ -133,16 +134,15 @@ func (l *supervisorLifecycle) ShutdownWithMode(mode string) error {
 	}
 
 	if l.cmd != nil && l.cmd.Process != nil {
-		done := make(chan error, 1)
-		go func() {
-			done <- l.cmd.Wait()
-		}()
-
 		select {
-		case <-done:
+		case <-l.exited:
 		case <-time.After(3 * time.Second):
-			l.cmd.Process.Kill()
-			<-done
+			if pgid, err := syscall.Getpgid(l.cmd.Process.Pid); err == nil {
+				_ = syscall.Kill(-pgid, syscall.SIGKILL)
+			} else {
+				_ = l.cmd.Process.Kill()
+			}
+			<-l.exited
 		}
 	}
 

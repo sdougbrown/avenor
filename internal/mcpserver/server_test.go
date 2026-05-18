@@ -6,27 +6,30 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sdougbrown/avenor/client"
 )
 
 type fakeClient struct {
-	listResult             []map[string]any
-	statusResult           map[string]any
-	spawnResult            map[string]any
-	listErr                error
-	statusErr              error
-	spawnErr               error
-	shutdownErr            error
-	answerPermissionErr    error
-	shutdownFunc           func(mode string) error
-	spawnFunc              func(params map[string]any) (map[string]any, error)
-	spawnCapturedParams    map[string]any
-	answerPermissionCalls  []permissionCall
+	listResult               []map[string]any
+	statusResult             map[string]any
+	spawnResult              map[string]any
+	listErr                  error
+	statusErr                error
+	spawnErr                 error
+	shutdownErr              error
+	answerPermissionErr      error
+	shutdownFunc             func(mode string) error
+	spawnFunc                func(params map[string]any) (map[string]any, error)
+	spawnCapturedParams      map[string]any
+	answerPermissionCalls    []permissionCall
 	statusCapturedRuntimeIDs []string
 }
 
@@ -631,7 +634,7 @@ func TestAvenorSpawnWithOptionalParams(t *testing.T) {
 	}
 }
 
-func TestAvenorSpawnTimeoutError(t *testing.T) {
+func TestAvenorSpawnTimeoutDurationString(t *testing.T) {
 	fake := &fakeClient{}
 	s, err := NewServer(Options{
 		Transport:     "stdio",
@@ -647,11 +650,35 @@ func TestAvenorSpawnTimeoutError(t *testing.T) {
 		RepoDir: "/tmp/test-repo",
 		Timeout: "5m",
 	})
-	if err == nil {
-		t.Fatal("expected error for non-numeric timeout")
+	if err != nil {
+		t.Fatalf("expected duration timeout to be accepted, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "timeout must be a number of seconds") {
-		t.Errorf("expected timeout error message, got: %v", err)
+	if got := fake.spawnCapturedParams["timeout"]; got != 300 {
+		t.Errorf("expected timeout 300, got %v (%T)", got, got)
+	}
+}
+
+func TestAvenorSpawnTimeoutInvalid(t *testing.T) {
+	fake := &fakeClient{}
+	s, err := NewServer(Options{
+		Transport:     "stdio",
+		NoAutostart:   true,
+		ControlClient: fake,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
+		Agent:   "claude",
+		RepoDir: "/tmp/test-repo",
+		Timeout: "forever",
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid timeout")
+	}
+	if !strings.Contains(err.Error(), "invalid timeout") {
+		t.Errorf("expected invalid timeout error, got: %v", err)
 	}
 }
 
@@ -1618,6 +1645,7 @@ func TestNewServerHTTPTransport(t *testing.T) {
 	s, err := NewServer(Options{
 		Transport:     "http",
 		Addr:          "127.0.0.1:0",
+		AuthToken:     "test-token",
 		NoAutostart:   true,
 		ControlClient: &fakeClient{},
 	})
@@ -1626,6 +1654,122 @@ func TestNewServerHTTPTransport(t *testing.T) {
 	} else {
 		defer s.Close()
 	}
+}
+
+func TestNewServerHTTPTransportRequiresAuth(t *testing.T) {
+	_, err := NewServer(Options{
+		Transport:     "http",
+		Addr:          "127.0.0.1:0",
+		NoAutostart:   true,
+		ControlClient: &fakeClient{},
+	})
+	if err == nil {
+		t.Fatal("expected auth error")
+	}
+	if !strings.Contains(err.Error(), "requires") {
+		t.Fatalf("expected auth requirement error, got: %v", err)
+	}
+}
+
+func TestHTTPHandlerRequiresBearerToken(t *testing.T) {
+	s, err := NewServer(Options{
+		Transport:     "http",
+		Addr:          "127.0.0.1:0",
+		AuthToken:     "test-token",
+		NoAutostart:   true,
+		ControlClient: &fakeClient{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	ts := httptest.NewServer(s.HTTPHandler())
+	defer ts.Close()
+
+	req, err := http.NewRequest(http.MethodPost, ts.URL, strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+
+	req, err = http.NewRequest(http.MethodPost, ts.URL, strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer test-token")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		t.Fatal("authenticated request was rejected")
+	}
+}
+
+func TestHTTPHandlerServesToolList(t *testing.T) {
+	s, err := NewServer(Options{
+		Transport:     "http",
+		Addr:          "127.0.0.1:0",
+		AuthToken:     "test-token",
+		NoAutostart:   true,
+		ControlClient: &fakeClient{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	ts := httptest.NewServer(s.HTTPHandler())
+	defer ts.Close()
+
+	httpClient := &http.Client{Transport: bearerRoundTripper{
+		token: "test-token",
+		next:  http.DefaultTransport,
+	}}
+	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "test-client", Version: "dev"}, nil)
+	session, err := client.Connect(context.Background(), &mcpsdk.StreamableClientTransport{
+		Endpoint:             ts.URL,
+		HTTPClient:           httpClient,
+		DisableStandaloneSSE: true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer session.Close()
+
+	result, err := session.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("list tools: %v", err)
+	}
+	got := make(map[string]bool, len(result.Tools))
+	for _, tool := range result.Tools {
+		got[tool.Name] = true
+	}
+	for _, name := range tsToolNames {
+		if !got[name] {
+			t.Errorf("HTTP tools/list missing %s", name)
+		}
+	}
+}
+
+type bearerRoundTripper struct {
+	token string
+	next  http.RoundTripper
+}
+
+func (b bearerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	clone := req.Clone(req.Context())
+	clone.Header.Set("Authorization", "Bearer "+b.token)
+	return b.next.RoundTrip(clone)
 }
 
 func TestAvenorAnswerPermissionPendingPermissionNull(t *testing.T) {

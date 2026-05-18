@@ -2,11 +2,16 @@ package mcpserver
 
 import (
 	"context"
+	"crypto/subtle"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -30,6 +35,7 @@ type Options struct {
 	NoAutostart      bool
 	IdleTimeout      time.Duration
 	Addr             string
+	AuthToken        string
 	ControlClient    ControlClient
 }
 
@@ -91,6 +97,9 @@ func NewServer(opts Options) (*Server, error) {
 	}
 	if opts.Transport != "stdio" && opts.Transport != "http" {
 		return nil, fmt.Errorf("unsupported transport: %s", opts.Transport)
+	}
+	if opts.Transport == "http" && strings.TrimSpace(opts.AuthToken) == "" {
+		return nil, fmt.Errorf("--transport http requires MCP_AUTH_TOKEN or --auth-token")
 	}
 	if opts.NoAutostart && opts.SupervisorSocket == "" && opts.ControlClient == nil {
 		return nil, fmt.Errorf("--no-autostart requires --supervisor-socket")
@@ -283,9 +292,9 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 		params["model"] = args.Model
 	}
 	if args.Timeout != "" {
-		secs, err := strconv.Atoi(args.Timeout)
+		secs, err := parseTimeoutSeconds(args.Timeout)
 		if err != nil {
-			return nil, nil, fmt.Errorf("timeout must be a number of seconds, got: %s", args.Timeout)
+			return nil, nil, err
 		}
 		params["timeout"] = secs
 	}
@@ -555,10 +564,91 @@ func (s *Server) Run() error {
 }
 
 func (s *Server) RunHTTP(addr string) error {
+	return http.ListenAndServe(addr, s.HTTPHandler())
+}
+
+func (s *Server) HTTPHandler() http.Handler {
 	handler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
 		return s.mcpServer
 	}, &mcp.StreamableHTTPOptions{Stateless: true})
-	return http.ListenAndServe(addr, handler)
+	return s.authenticatedHTTPHandler(handler)
+}
+
+func (s *Server) authenticatedHTTPHandler(next http.Handler) http.Handler {
+	token := strings.TrimSpace(s.opts.AuthToken)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isAllowedHTTPHost(r.Host) || !isAllowedHTTPOrigin(r.Header.Get("Origin")) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		if !bearerTokenMatches(r.Header.Get("Authorization"), token) {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+var timeoutRE = regexp.MustCompile(`^(\d+)([smh]?)$`)
+
+func parseTimeoutSeconds(value string) (int, error) {
+	trimmed := strings.TrimSpace(value)
+	match := timeoutRE.FindStringSubmatch(trimmed)
+	if match == nil {
+		return 0, fmt.Errorf("invalid timeout: %s", value)
+	}
+	amount, err := strconv.Atoi(match[1])
+	if err != nil || amount <= 0 {
+		return 0, fmt.Errorf("invalid timeout: %s", value)
+	}
+	switch match[2] {
+	case "m":
+		return amount * 60, nil
+	case "h":
+		return amount * 3600, nil
+	default:
+		return amount, nil
+	}
+}
+
+func bearerTokenMatches(header, want string) bool {
+	const prefix = "Bearer "
+	if !strings.HasPrefix(strings.ToLower(header), strings.ToLower(prefix)) {
+		return false
+	}
+	got := strings.TrimSpace(header[len(prefix):])
+	if got == "" || want == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
+func isAllowedHTTPOrigin(origin string) bool {
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return u.Scheme == "http" && isLoopbackHost(u.Hostname())
+}
+
+func isAllowedHTTPHost(hostport string) bool {
+	host, _, err := net.SplitHostPort(hostport)
+	if err != nil {
+		host = hostport
+	}
+	return isLoopbackHost(strings.Trim(host, "[]"))
+}
+
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (s *Server) RegisteredToolNames() []string {

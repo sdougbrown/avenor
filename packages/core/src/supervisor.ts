@@ -5,6 +5,9 @@ import * as path from 'node:path'
 import * as crypto from 'node:crypto'
 import { dial, Client, type SpawnParams } from './client.js'
 import { ensureRunPaths, socketsRoot } from './paths.js'
+import { installerBinaryPath } from './install-path.js'
+
+export { installerBinaryPath } from './install-path.js'
 
 export interface RunInfo {
   label: string
@@ -19,14 +22,6 @@ export interface SupervisorOptions {
   callTimeoutMs?: number
 }
 
-export function installerBinaryPath(): string {
-  const installDir = process.env.AVENOR_INSTALL_DIR
-  if (installDir) {
-    return path.join(installDir, 'avenor')
-  }
-  return path.join(os.homedir(), '.cache', 'avenor', 'bin', 'avenor')
-}
-
 export function findAvenorBinary(): string {
   const envBin = process.env.AVENOR_BIN
   if (envBin) {
@@ -39,7 +34,7 @@ export function findAvenorBinary(): string {
   }
 
   try {
-    const binPath = execSync('which avenor', { encoding: 'utf-8' }).trim()
+    const binPath = execSync('which avenor', { encoding: 'utf-8', env: process.env }).trim()
     if (binPath) {
       fs.accessSync(binPath, fs.constants.X_OK)
       return binPath

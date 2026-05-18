@@ -200,7 +200,8 @@ describe('postinstall', () => {
 
   function withCleanPath(pathSuffix: string): { tmpDir: string; cleanup: () => void } {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), pathSuffix))
-    process.env.PATH = `${tmpDir}:${prevPath || '/usr/bin:/bin'}`
+    fs.writeFileSync(path.join(tmpDir, 'which'), '#!/bin/sh\nexit 1\n', { mode: 0o755 })
+    process.env.PATH = tmpDir
     return {
       tmpDir,
       cleanup: () => {
@@ -230,6 +231,7 @@ describe('postinstall', () => {
     try {
       const fakeBin = path.join(tmpDir, 'avenor')
       fs.writeFileSync(fakeBin, '#!/bin/sh\nexit 0', { mode: 0o755 })
+      fs.writeFileSync(path.join(tmpDir, 'which'), `#!/bin/sh\n[ "$1" = "avenor" ] && echo "${fakeBin}" && exit 0\nexit 1\n`, { mode: 0o755 })
       const mockFetch = mock(async () => new Response('data'))
       await postinstall(mockFetch)
       expect(mockFetch).not.toHaveBeenCalled()
@@ -302,6 +304,7 @@ describe('postinstall', () => {
     process.env.AVENOR_VERSION = '0.0.0-test-success'
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-test-success-'))
     process.env.AVENOR_INSTALL_DIR = tmpDir
+    const { cleanup } = withCleanPath('avenor-test-success-path-')
     try {
       const mockFetch = mock(async () => {
         return new Response('fake-binary-content', { status: 200 })
@@ -314,6 +317,7 @@ describe('postinstall', () => {
       const stat = fs.statSync(binaryPath)
       expect(stat.mode & 0o111).toBeTruthy() // executable bit set
     } finally {
+      cleanup()
       try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch {}
       delete process.env.AVENOR_INSTALL_DIR
     }
@@ -328,6 +332,7 @@ describe('postinstall', () => {
     const checksumsContent = `${binaryHash}  avenor_darwin_arm64\n${'0'.repeat(64)}  avenor_darwin_amd64\n`
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-test-checksum-ok-'))
     process.env.AVENOR_INSTALL_DIR = tmpDir
+    const { cleanup } = withCleanPath('avenor-test-checksum-ok-path-')
     try {
       const mockFetch = mock(async (url: string) => {
         if (url.includes('checksums.txt')) {
@@ -341,6 +346,7 @@ describe('postinstall', () => {
       const content = fs.readFileSync(binaryPath, 'utf-8')
       expect(content).toBe(binaryContent)
     } finally {
+      cleanup()
       try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch {}
       delete process.env.AVENOR_INSTALL_DIR
     }
@@ -353,6 +359,7 @@ describe('postinstall', () => {
     const checksumsContent = `${'0'.repeat(64)}  avenor_darwin_arm64\n`
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-test-checksum-mismatch-'))
     process.env.AVENOR_INSTALL_DIR = tmpDir
+    const { cleanup } = withCleanPath('avenor-test-checksum-mismatch-path-')
     try {
       const mockFetch = mock(async (url: string) => {
         if (url.includes('checksums.txt')) {
@@ -364,6 +371,7 @@ describe('postinstall', () => {
       const binaryPath = path.join(tmpDir, 'avenor')
       expect(fs.existsSync(binaryPath)).toBe(false)
     } finally {
+      cleanup()
       try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch {}
       delete process.env.AVENOR_INSTALL_DIR
     }
@@ -376,6 +384,7 @@ describe('postinstall', () => {
     const binaryContent = 'binary-content-missing-checksums'
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-test-checksum-missing-'))
     process.env.AVENOR_INSTALL_DIR = tmpDir
+    const { cleanup } = withCleanPath('avenor-test-checksum-missing-path-')
     try {
       const mockFetch = mock(async (url: string) => {
         if (url.includes('checksums.txt')) {
@@ -389,6 +398,7 @@ describe('postinstall', () => {
       const content = fs.readFileSync(binaryPath, 'utf-8')
       expect(content).toBe(binaryContent)
     } finally {
+      cleanup()
       try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch {}
       delete process.env.AVENOR_INSTALL_DIR
     }

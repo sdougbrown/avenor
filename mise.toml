@@ -1,35 +1,48 @@
-[tasks.core-build]
+[tasks.js-core-build]
 description = "Build @dougbots/avenor-core"
 dir = "packages/core"
 sources = ["src/**/*.ts", "tsdown.config.ts", "package.json"]
 outputs = ["dist/index.js"]
 run = "bun run build"
 
-[tasks.mcp-build]
+[tasks.js-mcp-build]
 description = "Build @dougbots/avenor-mcp"
 dir = "packages/mcp"
-depends = ["core-build"]
+depends = ["js-core-build"]
 sources = ["src/**/*.ts", "tsdown.config.ts", "package.json"]
 outputs = ["dist/index.js"]
 run = "bun run build"
 
-[tasks.opencode-build]
+[tasks.js-opencode-build]
 description = "Build @dougbots/avenor-opencode"
 dir = "packages/opencode"
-depends = ["core-build"]
+depends = ["js-core-build"]
 sources = ["src/**/*.ts", "tsdown.config.ts", "package.json"]
 outputs = ["dist/index.js"]
 run = "bun run build"
 
-[tasks.build]
-description = "Build all @avenor packages"
-depends = ["mcp-build", "opencode-build"]
+[tasks.js-build]
+description = "Build all JS packages"
+depends = ["js-mcp-build", "js-opencode-build"]
 
-[tasks.test]
-description = "Test all @avenor packages"
-depends = ["build"]
+[tasks.js-test]
+description = "Test all JS packages"
+depends = ["js-build"]
 run = ["cd packages/core && bun test", "cd packages/mcp && bun test", "cd packages/opencode && bun test"]
 
-[tasks.dev]
-description = "Watch all packages"
+[tasks.build]
+description = "Build the avenor Go binary and all JS packages"
+sources = ["**/*.go", "go.mod", "go.sum"]
+outputs = ["avenor"]
+run = "mkdir -p .cache/go-build .cache/go-mod && GOCACHE=$PWD/.cache/go-build GOMODCACHE=$PWD/.cache/go-mod go build -o avenor ./cmd/avenor"
+depends = ["js-build"]
+
+[tasks.test]
+description = "Test Go packages and all JS packages"
+depends = ["build", "js-test"]
+sources = ["**/*.go", "go.mod", "go.sum"]
+run = "mkdir -p .cache/go-build .cache/go-mod && GOCACHE=$PWD/.cache/go-build GOMODCACHE=$PWD/.cache/go-mod go test ./..."
+
+[tasks.js-dev]
+description = "Watch all JS packages"
 run = ["cd packages/core && bun run dev & cd packages/mcp && bun run dev & cd packages/opencode && bun run dev & wait"]
