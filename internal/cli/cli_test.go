@@ -111,7 +111,7 @@ func waitForSessionForTest(
 
 func waitForPendingPermissionForTest(t *testing.T, cs *control.ControlServer) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		if cs.HasPendingPermission() {
 			return

@@ -20,6 +20,9 @@ func readEvents(path string, types []string, limit int) ([]map[string]any, error
 
 	var matched []map[string]any
 	scanner := bufio.NewScanner(f)
+	const maxCapacity = 1024 * 1024 // 1 MiB
+	buf := make([]byte, 4096)
+	scanner.Buffer(buf, maxCapacity)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {

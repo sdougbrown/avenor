@@ -989,12 +989,19 @@ func TestAvenorStatusNoRegistryHitWithoutSupervisorID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, _, err = s.handleAvenorStatus(context.Background(), nil, statusArgs{RunID: "rt_direct"})
-	if err == nil {
-		t.Fatal("expected error for registry miss without supervisor_id")
+	_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{RunID: "rt_direct"})
+	if err != nil {
+		t.Fatalf("expected success querying runtime ID directly, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "not found in registry") {
-		t.Errorf("expected 'not found in registry' error, got: %v", err)
+	m, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map[string]any, got %T", result)
+	}
+	if m["run_id"] != "rt_direct" {
+		t.Errorf("expected run_id rt_direct, got %v", m["run_id"])
+	}
+	if m["status"] != "running" {
+		t.Errorf("expected status running, got %v", m["status"])
 	}
 }
 
@@ -1266,9 +1273,13 @@ func TestAvenorEvents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	events, ok := result.([]map[string]any)
+	rm, ok := result.(map[string]any)
 	if !ok {
-		t.Fatalf("expected []map[string]any, got %T", result)
+		t.Fatalf("expected map[string]any, got %T", result)
+	}
+	events, ok := rm["events"].([]map[string]any)
+	if !ok {
+		t.Fatalf("expected events []map[string]any, got %T", rm["events"])
 	}
 	if len(events) != 3 {
 		t.Fatalf("expected 3 events, got %d", len(events))
@@ -1313,9 +1324,13 @@ func TestAvenorEventsFilterByType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	events, ok := result.([]map[string]any)
+	rm, ok := result.(map[string]any)
 	if !ok {
-		t.Fatalf("expected []map[string]any, got %T", result)
+		t.Fatalf("expected map[string]any, got %T", result)
+	}
+	events, ok := rm["events"].([]map[string]any)
+	if !ok {
+		t.Fatalf("expected events []map[string]any, got %T", rm["events"])
 	}
 	if len(events) != 1 {
 		t.Fatalf("expected 1 event after filtering by turn, got %d", len(events))
@@ -1360,9 +1375,13 @@ func TestAvenorEventsWithLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	events, ok := result.([]map[string]any)
+	rm, ok := result.(map[string]any)
 	if !ok {
-		t.Fatalf("expected []map[string]any, got %T", result)
+		t.Fatalf("expected map[string]any, got %T", result)
+	}
+	events, ok := rm["events"].([]map[string]any)
+	if !ok {
+		t.Fatalf("expected events []map[string]any, got %T", rm["events"])
 	}
 	if len(events) != 10 {
 		t.Fatalf("expected 10 events, got %d", len(events))
@@ -1397,9 +1416,13 @@ func TestAvenorEventsNoFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	events, ok := result.([]map[string]any)
+	rm, ok := result.(map[string]any)
 	if !ok {
-		t.Fatalf("expected []map[string]any, got %T", result)
+		t.Fatalf("expected map[string]any, got %T", result)
+	}
+	events, ok := rm["events"].([]map[string]any)
+	if !ok {
+		t.Fatalf("expected events []map[string]any, got %T", rm["events"])
 	}
 	if len(events) != 0 {
 		t.Fatalf("expected 0 events when file doesn't exist, got %d", len(events))
