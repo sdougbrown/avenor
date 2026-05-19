@@ -1,6 +1,6 @@
 # @dougbots/avenor-mcp
 
-> **Note:** Since v0.x, `avenor mcp` is a Go-native MCP server built into the `avenor` binary itself — no Node/Bun required. Use `avenor mcp --help` for usage. This Node.js package is an alternative for OpenCode-based setups or when you prefer npm-based tooling.
+> **Note:** Since v0.x, `avenor mcp` is the canonical Go-native MCP server built into the `avenor` binary itself — no Node/Bun required. See [`docs/mcp.md`](../../docs/mcp.md) for the primary MCP setup and tool reference. This Node.js package is an alternative for OpenCode-based setups or when you prefer npm-based tooling.
 
 MCP server that makes [avenor](https://github.com/dougbots/avenor) agent runs available as tools inside any MCP-compatible client (Claude Code, Claude Desktop, Cursor, etc.).
 
