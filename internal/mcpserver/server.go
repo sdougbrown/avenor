@@ -242,18 +242,14 @@ func (s *Server) handleAvenorStatus(ctx context.Context, req *mcp.CallToolReques
 		return nil, ts, nil
 	}
 
-	// Registry miss without explicit supervisor_id is not allowed.
-	// The run_id cannot be resolved to a known run, and we don't
-	// know which supervisor to query.
-	if args.SupervisorID == "" {
-		return nil, nil, fmt.Errorf("run_id %q not found in registry; provide supervisor_id to query by stable runtime ID", args.RunID)
-	}
-
+	// Registry miss: query the stable runtime ID directly via the
+	// resolved supervisor client (default or explicit supervisor_id).
 	result, err := cl.Status(args.RunID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("status: %w", err)
 	}
 	ts := translateStatus(result, "")
+	ts["run_id"] = args.RunID
 	return nil, ts, nil
 }
 
@@ -454,7 +450,7 @@ func (s *Server) handleAvenorEvents(ctx context.Context, req *mcp.CallToolReques
 		events = []map[string]any{}
 	}
 
-	return nil, events, nil
+	return nil, map[string]any{"events": events}, nil
 }
 
 func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequest, args followUpArgs) (*mcp.CallToolResult, any, error) {
