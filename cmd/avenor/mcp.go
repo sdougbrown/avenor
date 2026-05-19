@@ -11,7 +11,7 @@ import (
 
 func runMCP(args []string) int {
 	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
-	transport := fs.String("transport", "stdio", "transport for MCP server (only \"stdio\" is supported)")
+	transport := fs.String("transport", "stdio", "transport for MCP server (\"stdio\" or \"http\")")
 	controlSocket := fs.String("control-socket", "", "unix socket path for the control plane")
 	supervisorSocket := fs.String("supervisor-socket", "", "unix socket path for the supervisor")
 	noAutostart := fs.Bool("no-autostart", false, "disable automatic supervisor start")
