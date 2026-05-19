@@ -64,8 +64,8 @@ describe.skipIf(skipIfNoBinary)('spawnTool + statusTool + shutdownTool integrati
   }, 10_000)
 
   it('eventsTool returns events array', async () => {
-    const events = await eventsTool({ runId })
-    expect(Array.isArray(events)).toBe(true)
+    const result = await eventsTool({ runId })
+    expect(Array.isArray(result.events)).toBe(true)
   }, 10_000)
 
   it('shutdownTool shuts down and cleans up', async () => {

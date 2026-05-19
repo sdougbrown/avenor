@@ -228,20 +228,58 @@ export async function statusTool(
 
   if (args.runId) {
     const runInfo = findRunByLabel(sup, args.runId)
-    if (!runInfo) {
-      throw new Error(`run not found: ${args.runId}`)
-    }
 
-    let liveStatus: Record<string, unknown> | null = null
-    if (runInfo.runtimeId) {
-      try {
-        liveStatus = await client.status(runInfo.runtimeId)
-      } catch {
-        // live status unavailable
+    // Registry hit: use tracked run info
+    if (runInfo) {
+      let liveStatus: Record<string, unknown> | null = null
+      if (runInfo.runtimeId) {
+        try {
+          liveStatus = await client.status(runInfo.runtimeId)
+        } catch {
+          // live status unavailable
+        }
       }
+      return buildRunStatus(client, runInfo, liveStatus)
     }
 
-    return buildRunStatus(client, runInfo, liveStatus)
+    // Registry miss: query stable runtime ID directly via the default client
+    validateRunId(args.runId)
+    let liveStatus: Record<string, unknown> | null = null
+    try {
+      liveStatus = await client.status(args.runId)
+    } catch {
+      // ignore
+    }
+    const sentinelPath = path.join(runsRoot(), args.runId, 'sentinel.done')
+    let sentinel: Record<string, string> | null = null
+    if (await sentinelExists(sentinelPath)) {
+      sentinel = await parseSentinel(sentinelPath)
+    }
+    return {
+      run_id: args.runId,
+      label: args.runId,
+      status: translateStatus((liveStatus?.phase ?? liveStatus?.status ?? 'running') as string, sentinel),
+      phase: liveStatus?.phase as string | undefined,
+      phase_label: liveStatus?.phase_label as string | undefined,
+      session_id:
+        (sentinel?.SESSION as string) ??
+        (liveStatus?.session_id as string) ??
+        undefined,
+      stop_reason: sentinel?._status ?? undefined,
+      pending_permission: liveStatus?.pending_permission
+        ? {
+            request_id: (liveStatus.pending_permission as any).request_id ?? '',
+            description: (liveStatus.pending_permission as any).description ?? '',
+            options: Array.isArray((liveStatus.pending_permission as any).options)
+              ? (liveStatus.pending_permission as any).options.map((o: any) => ({
+                  option_id: o.option_id ?? '',
+                  label: o.label ?? '',
+                  kind: o.kind ?? '',
+                }))
+              : [],
+          }
+        : undefined,
+    }
   }
 
   const list = await client.list()

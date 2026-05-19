@@ -16,7 +16,7 @@ export async function eventsTool(args: {
   types?: string[]
   limit?: number
   supervisorId?: string
-}): Promise<Array<{ type: string; ts: number; [key: string]: unknown }>> {
+}): Promise<{events: Array<{ type: string; ts: number; [key: string]: unknown }>}> {
   if (args.supervisorId) {
     throw new Error(
       'eventsTool with explicit supervisorId not supported — ' +
@@ -46,7 +46,7 @@ export async function eventsTool(args: {
       await handle.close()
     }
   } catch {
-    return []
+    return { events: [] }
   }
 
   const lines = raw.split('\n').filter((line) => line.trim())
@@ -68,5 +68,5 @@ export async function eventsTool(args: {
     events = events.slice(events.length - limit)
   }
 
-  return events
+  return { events } as { events: Array<{ type: string; ts: number; [key: string]: unknown }> }
 }
