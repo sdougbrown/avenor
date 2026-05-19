@@ -123,6 +123,20 @@ func waitForPendingPermissionForTest(t *testing.T, cs *control.ControlServer) {
 	}
 }
 
+func waitForControlClientForTest(t *testing.T, cs *control.ControlServer) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if cs.HasClients() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for control client")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func TestWaitForSessionAutoApproveAnswersAllowKindAndOrdersEvents(t *testing.T) {
 	dir := t.TempDir()
 	eventsPath := filepath.Join(dir, "events.ndjson")
@@ -932,6 +946,7 @@ func TestControlPermissionResolution(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	defer ctrlConn.Close()
+	waitForControlClientForTest(t, cs)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -1047,6 +1062,7 @@ func TestControlPermissionNonLiteralOptionIDMapsByKind(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 		}
 		defer ctrlConn.Close()
+		waitForControlClientForTest(t, cs)
 
 		var wg sync.WaitGroup
 		wg.Add(1)
@@ -1154,6 +1170,7 @@ func TestControlPermissionRejectsUnknownOptionID(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	defer ctrlConn.Close()
+	waitForControlClientForTest(t, cs)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -1235,6 +1252,7 @@ func TestControlPermissionRejectsUnsupportedKind(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	defer ctrlConn.Close()
+	waitForControlClientForTest(t, cs)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
