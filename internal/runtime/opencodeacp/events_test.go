@@ -53,3 +53,29 @@ func TestMapPromptResponseNormalisesUsage(t *testing.T) {
 		t.Error("event.Fields[\"cachedReadTokens\"] exists at top level")
 	}
 }
+
+func TestMapPromptResponseSnakeCaseFallback(t *testing.T) {
+	raw := json.RawMessage(`{ "stopReason": "end_turn", "usage": { "input_tokens": 7, "output_tokens": 3, "total_tokens": 10, "cached_read_tokens": 2 } }`)
+
+	event, err := mapPromptResponse("ses_snake", raw)
+	if err != nil {
+		t.Fatalf("mapPromptResponse() error = %v", err)
+	}
+	if event.Event != "session.end" {
+		t.Fatalf("event.Event = %q, want %q", event.Event, "session.end")
+	}
+
+	usage, ok := event.Fields["usage"].(map[string]any)
+	if !ok {
+		t.Fatal("event.Fields[\"usage\"] is missing or not a map")
+	}
+	if usage["input_tokens"] != float64(7) {
+		t.Errorf("usage.input_tokens = %v, want 7", usage["input_tokens"])
+	}
+	if usage["output_tokens"] != float64(3) {
+		t.Errorf("usage.output_tokens = %v, want 3", usage["output_tokens"])
+	}
+	if usage["cached_read_tokens"] != float64(2) {
+		t.Errorf("usage.cached_read_tokens = %v, want 2", usage["cached_read_tokens"])
+	}
+}
