@@ -79,3 +79,62 @@ func TestMapPromptResponseSnakeCaseFallback(t *testing.T) {
 		t.Errorf("usage.cached_read_tokens = %v, want 2", usage["cached_read_tokens"])
 	}
 }
+
+func TestMapPromptResponseOmitsNilUsageKeys(t *testing.T) {
+	// Only two of four usage keys present — the absent ones should be omitted.
+	raw := json.RawMessage(`{ "stopReason": "end_turn", "usage": { "outputTokens": 5 } }`)
+
+	event, err := mapPromptResponse("ses_partial", raw)
+	if err != nil {
+		t.Fatalf("mapPromptResponse() error = %v", err)
+	}
+	usage, ok := event.Fields["usage"].(map[string]any)
+	if !ok {
+		t.Fatal("event.Fields[\"usage\"] is missing or not a map")
+	}
+	if usage["output_tokens"] != float64(5) {
+		t.Errorf("usage.output_tokens = %v, want 5", usage["output_tokens"])
+	}
+	if _, exists := usage["input_tokens"]; exists {
+		t.Error("usage.input_tokens should be omitted when absent")
+	}
+	if _, exists := usage["total_tokens"]; exists {
+		t.Error("usage.total_tokens should be omitted when absent")
+	}
+	if _, exists := usage["cached_read_tokens"]; exists {
+		t.Error("usage.cached_read_tokens should be omitted when absent")
+	}
+}
+
+func TestMapPromptResponseNonMapUsageDropped(t *testing.T) {
+	// When usage is not a map, it should not appear in fields.
+	raw := json.RawMessage(`{ "stopReason": "end_turn", "usage": ["invalid"] }`)
+
+	event, err := mapPromptResponse("ses_nonmap", raw)
+	if err != nil {
+		t.Fatalf("mapPromptResponse() error = %v", err)
+	}
+	if _, exists := event.Fields["usage"]; exists {
+		t.Fatal("usage should not appear when value is not a map")
+	}
+}
+
+func TestMapPromptResponseMissingStopReason(t *testing.T) {
+	// Missing stopReason should return error.
+	raw := json.RawMessage(`{ "other": "value" }`)
+
+	_, err := mapPromptResponse("ses_nostop", raw)
+	if err == nil {
+		t.Fatal("expected error for missing stop_reason")
+	}
+}
+
+func TestMapPromptResponseInvalidJSON(t *testing.T) {
+	// Invalid JSON should return error.
+	raw := json.RawMessage(`{ "bad"`)
+
+	_, err := mapPromptResponse("ses_badjson", raw)
+	if err == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+}

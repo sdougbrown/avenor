@@ -116,13 +116,21 @@ func mapPromptResponse(sessionID string, result json.RawMessage) (events.Event, 
 					if cachedReadTokens == nil {
 						cachedReadTokens, _ = usageMap["cached_read_tokens"]
 					}
-					u["input_tokens"] = inputTokens
-					u["output_tokens"] = outputTokens
-					u["total_tokens"] = totalTokens
-					u["cached_read_tokens"] = cachedReadTokens
+					if inputTokens != nil {
+						u["input_tokens"] = inputTokens
+					}
+					if outputTokens != nil {
+						u["output_tokens"] = outputTokens
+					}
+					if totalTokens != nil {
+						u["total_tokens"] = totalTokens
+					}
+					if cachedReadTokens != nil {
+						u["cached_read_tokens"] = cachedReadTokens
+					}
 					fields["usage"] = u
-					continue
 				}
+				continue // drop non-map usage rather than corrupt fields
 			}
 			fields[k] = v
 		}

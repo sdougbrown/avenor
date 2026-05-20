@@ -2404,3 +2404,50 @@ func TestCancelAndEndIncludesBufferedUsage(t *testing.T) {
 		t.Errorf("event usage.total_tokens = %v, want 7", usage["total_tokens"])
 	}
 }
+
+// TestCancelAndEndNilUsage verifies that when timeout fires before any
+// usage-bearing event, cancelAndEnd emits session.end without a usage key.
+func TestCancelAndEndNilUsage(t *testing.T) {
+	dir := t.TempDir()
+	eventsPath := filepath.Join(dir, "events.ndjson")
+	writer, err := NewEventWriter(eventsPath)
+	if err != nil {
+		t.Fatalf("newEventWriter: %v", err)
+	}
+
+	eventCh := make(chan events.Event, 1)
+	timeoutCh := make(chan time.Time, 1)
+
+	provider := &cliFakeProvider{}
+	var wg sync.WaitGroup
+	wg.Add(1)
+	var result sessionResult
+	go func() {
+		defer wg.Done()
+		result = waitForSessionForTest(context.Background(), provider, writer, nil, nil, eventCh, nil, nil, "ses_nousage", "run_nousage", "", true, DefaultPermissionClaimTimeout, timeoutCh, io.Discard)
+	}()
+
+	// No usage-bearing event — fire timeout immediately.
+	timeoutCh <- time.Now()
+
+	wg.Wait()
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+
+	if result.ExitCode != 124 {
+		t.Fatalf("WaitForSession().ExitCode = %d, want 124 (timeout)", result.ExitCode)
+	}
+	if result.Usage != nil {
+		t.Fatalf("sessionResult.Usage should be nil when no usage-bearing event fired, got %+v", result.Usage)
+	}
+
+	got := readEventLogForTest(t, eventsPath)
+	last := got[len(got)-1]
+	if last.Event != "session.end" {
+		t.Fatalf("last event = %+v, want session.end", last)
+	}
+	if _, exists := last.Fields["usage"]; exists {
+		t.Fatal("session.end should not contain usage field when none was buffered")
+	}
+}
