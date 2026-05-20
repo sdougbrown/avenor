@@ -20,6 +20,7 @@ type attemptResult struct {
 	stopReason    string
 	loopDirective string
 	loopLabel     string
+	usage         map[string]any
 }
 
 type attemptConfig struct {
@@ -150,16 +151,16 @@ func runSingleAttempt(
 			if interruptText := deps.controlServer.ConsumeInterrupt(); interruptText != "" {
 				if _, err := resumeSession(ctx, provider, session.SessionID); err != nil {
 					fmt.Fprintf(deps.stderr, "avenor: resume after cancel: %v\n", err)
-					return attemptResult{exitCode: 1, sessionID: session.SessionID, stopReason: stopReason, loopDirective: accDirective, loopLabel: accLabel}
-				}
-				prompt = interruptText
-				continue
+				return attemptResult{exitCode: 1, sessionID: session.SessionID, stopReason: stopReason, loopDirective: accDirective, loopLabel: accLabel, usage: result.Usage}
 			}
-			if exitCode == 0 {
-				if nextPrompt := deps.controlServer.DequeuePrompt(); nextPrompt != "" {
-					if _, err := resumeSession(ctx, provider, session.SessionID); err != nil {
-						fmt.Fprintf(deps.stderr, "avenor: resume after end_turn: %v\n", err)
-						return attemptResult{exitCode: 1, sessionID: session.SessionID, stopReason: stopReason, loopDirective: accDirective, loopLabel: accLabel}
+			prompt = interruptText
+			continue
+		}
+		if exitCode == 0 {
+			if nextPrompt := deps.controlServer.DequeuePrompt(); nextPrompt != "" {
+				if _, err := resumeSession(ctx, provider, session.SessionID); err != nil {
+					fmt.Fprintf(deps.stderr, "avenor: resume after end_turn: %v\n", err)
+					return attemptResult{exitCode: 1, sessionID: session.SessionID, stopReason: stopReason, loopDirective: accDirective, loopLabel: accLabel, usage: result.Usage}
 					}
 					prompt = nextPrompt
 					continue
@@ -167,7 +168,7 @@ func runSingleAttempt(
 			}
 		}
 
-		return attemptResult{exitCode: exitCode, sessionID: session.SessionID, stopReason: stopReason, loopDirective: accDirective, loopLabel: accLabel}
+		return attemptResult{exitCode: exitCode, sessionID: session.SessionID, stopReason: stopReason, loopDirective: accDirective, loopLabel: accLabel, usage: result.Usage}
 	}
 }
 

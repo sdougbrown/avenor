@@ -30,20 +30,20 @@ Consumers should switch on `event` and read domain fields directly from the same
 
 `permission.response`: Synthesized by Avenor after it resolves a permission decision. Fields: `request_id` (string), `option_id` (string — the chosen optionId), `kind` (`"allow"` or `"reject"`), `source` (`"avenor"` for `--auto-approve`, `"control"` for control-socket answer, `"file"` for file-handler resolution), `run_id` (when present), `run_label` (when present), `ts` (Unix milliseconds). Classifies as ACTIVITY. Emitted for all permission resolution paths.
 
-`session.end`: Terminal record for the prompt. The final event stream line for a completed Avenor run is always `session.end` and includes `stop_reason`.
+`session.end`: Terminal record for the prompt. The final event stream line for a completed Avenor run is always `session.end` and includes `stop_reason`. When the backend provides it, `usage` is present with snake_case keys: `input_tokens`, `output_tokens`, `total_tokens`, and `cached_read_tokens`.
 
 ## Terminal Record
 
 Normal completion:
 
 ```json
-{"event":"session.end","session_id":"ses_123","stop_reason":"end_turn","usage":{"inputTokens":1,"outputTokens":1,"totalTokens":2}}
+{"event":"session.end","session_id":"ses_123","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}
 ```
 
-Client-side timeout:
+Client-side timeout (includes best-effort buffered usage):
 
 ```json
-{"event":"session.end","session_id":"ses_123","stop_reason":"timeout"}
+{"event":"session.end","session_id":"ses_123","stop_reason":"timeout","usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}
 ```
 
 Client-side interrupt or cancel:

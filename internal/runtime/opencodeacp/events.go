@@ -97,6 +97,18 @@ func mapPromptResponse(sessionID string, result json.RawMessage) (events.Event, 
 	fields := map[string]any{}
 	for k, v := range payload {
 		if k != "stopReason" && k != "stop_reason" {
+			if k == "usage" {
+				if usageMap, ok := v.(map[string]any); ok {
+					u := map[string]any{
+						"input_tokens":      usageMap["inputTokens"],
+						"output_tokens":     usageMap["outputTokens"],
+						"total_tokens":      usageMap["totalTokens"],
+						"cached_read_tokens": usageMap["cachedReadTokens"],
+					}
+					fields["usage"] = u
+					continue
+				}
+			}
 			fields[k] = v
 		}
 	}

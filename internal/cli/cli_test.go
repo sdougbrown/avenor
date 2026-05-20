@@ -2304,3 +2304,103 @@ func TestWaitForSessionChunkedStatusMarkerDedup(t *testing.T) {
 		t.Fatalf("expected 1 agent.status working event, got %d: %+v", workingCount, got)
 	}
 }
+
+// TestCancelAndEndIncludesBufferedUsage verifies that when the timeout path
+// fires, cancelAndEnd includes usage accumulated from prior events in the
+// synthetic session.end event.
+func TestCancelAndEndIncludesBufferedUsage(t *testing.T) {
+	dir := t.TempDir()
+	eventsPath := filepath.Join(dir, "events.ndjson")
+	writer, err := NewEventWriter(eventsPath)
+	if err != nil {
+		t.Fatalf("newEventWriter: %v", err)
+	}
+
+	eventCh := make(chan events.Event, 2)
+	eventCh <- events.Event{
+		Event:     "agent.message_chunk",
+		SessionID: "ses_usage",
+		Fields: map[string]any{
+			"usage": map[string]any{
+				"input_tokens":  float64(5),
+				"output_tokens": float64(2),
+				"total_tokens":  float64(7),
+			},
+		},
+	}
+
+	timeoutCh := make(chan time.Time, 1)
+
+	provider := &cliFakeProvider{}
+	var wg sync.WaitGroup
+	wg.Add(1)
+	var result sessionResult
+	go func() {
+		defer wg.Done()
+		result = waitForSessionForTest(context.Background(), provider, writer, nil, nil, eventCh, nil, nil, "ses_usage", "run_usage", "", true, DefaultPermissionClaimTimeout, timeoutCh, io.Discard)
+	}()
+
+	usageWritten := make(chan struct{})
+	go func() {
+		for i := 0; i < 100; i++ {
+			time.Sleep(25 * time.Millisecond)
+			data, _ := os.ReadFile(eventsPath)
+			if strings.Contains(string(data), `"input_tokens":5`) {
+				close(usageWritten)
+				return
+			}
+		}
+	}()
+	select {
+	case <-usageWritten:
+	case <-time.After(5 * time.Second):
+		t.Fatal("usage event not written within 5 seconds")
+	}
+
+	timeoutCh <- time.Now()
+
+	wg.Wait()
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+	if result.ExitCode != 124 {
+		t.Fatalf("WaitForSession().ExitCode = %d, want 124 (timeout)", result.ExitCode)
+	}
+	if result.StopReason != "timeout" {
+		t.Fatalf("WaitForSession().StopReason = %q, want %q", result.StopReason, "timeout")
+	}
+
+	got := readEventLogForTest(t, eventsPath)
+	last := got[len(got)-1]
+	if last.Event != "session.end" {
+		t.Fatalf("last event = %+v, want session.end", last)
+	}
+	if last.Fields["stop_reason"] != "timeout" {
+		t.Fatalf("stop_reason = %v, want timeout", last.Fields["stop_reason"])
+	}
+	if result.Usage == nil {
+		t.Fatalf("sessionResult.Usage is nil, buffered usage was not propagated")
+	}
+	if result.Usage["input_tokens"] != float64(5) {
+		t.Errorf("Usage.input_tokens = %v, want 5", result.Usage["input_tokens"])
+	}
+	if result.Usage["output_tokens"] != float64(2) {
+		t.Errorf("Usage.output_tokens = %v, want 2", result.Usage["output_tokens"])
+	}
+	if result.Usage["total_tokens"] != float64(7) {
+		t.Errorf("Usage.total_tokens = %v, want 7", result.Usage["total_tokens"])
+	}
+	usage, ok := last.Fields["usage"].(map[string]any)
+	if !ok {
+		t.Fatalf("usage missing from synthetic session.end event")
+	}
+	if usage["input_tokens"] != float64(5) {
+		t.Errorf("event usage.input_tokens = %v, want 5", usage["input_tokens"])
+	}
+	if usage["output_tokens"] != float64(2) {
+		t.Errorf("event usage.output_tokens = %v, want 2", usage["output_tokens"])
+	}
+	if usage["total_tokens"] != float64(7) {
+		t.Errorf("event usage.total_tokens = %v, want 7", usage["total_tokens"])
+	}
+}

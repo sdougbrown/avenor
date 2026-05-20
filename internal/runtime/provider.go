@@ -31,6 +31,7 @@ type Session struct {
 	SessionID string
 	Backend   string
 	Dir       string
+	PID       int // child process PID when backend spawns a subprocess; 0 otherwise
 }
 
 // PermissionResponse is the response to a permission request.

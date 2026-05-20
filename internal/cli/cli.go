@@ -436,6 +436,7 @@ type sessionResult struct {
 	StopReason    string
 	LoopDirective string
 	LoopLabel     string
+	Usage         map[string]any
 }
 
 func loopDirectiveSeverity(d string) int {
@@ -473,6 +474,7 @@ type SessionWaitDeps struct {
 
 func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionWaitConfig, deps SessionWaitDeps) sessionResult {
 	var finalStopReason string
+	var bufferedUsage map[string]any
 	promptReturned := false
 	var permissionDone <-chan permissionResult
 	var loopDirective string
@@ -538,7 +540,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				if finalStopReason == "" {
 					return sessionResult{ExitCode: 1}
 				}
-				return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), LoopDirective: loopDirective, LoopLabel: loopLabel}
+				return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), LoopDirective: loopDirective, LoopLabel: loopLabel, Usage: bufferedUsage}
 			} else if progressTimer != nil {
 				if !progressTimer.Stop() {
 					select {
@@ -547,6 +549,11 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 					}
 				}
 				progressTimer.Reset(cfg.ProgressTimeout)
+			}
+			if usage, ok := event.Fields["usage"]; ok {
+				if usageMap, ok := usage.(map[string]any); ok {
+					bufferedUsage = usageMap
+				}
 			}
 			markerHandled := false
 			if event.Event == "agent.message_chunk" || event.Event == "agent.thought_chunk" {
@@ -607,24 +614,24 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				return sessionResult{ExitCode: 1}
 			}
 			if event.Event == "session.end" && promptReturned && permissionDone == nil {
-				return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), LoopDirective: loopDirective, LoopLabel: loopLabel}
+				return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), LoopDirective: loopDirective, LoopLabel: loopLabel, Usage: bufferedUsage}
 			}
 		case err := <-cfg.PromptDone:
 			promptReturned = true
 			if err != nil {
 				if errors.Is(err, context.Canceled) {
-					return cancelAndEnd(provider, deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, "cancelled", deps.Stderr)
+					return cancelAndEnd(provider, deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, "cancelled", deps.Stderr, bufferedUsage)
 				}
 				emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "prompt", fmt.Sprintf("prompt: %v", err), deps.Stderr, cfg.RunLabel)
 				return sessionResult{ExitCode: 1}
 			}
 			if finalStopReason != "" && permissionDone == nil {
-				return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), LoopDirective: loopDirective, LoopLabel: loopLabel}
+				return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), LoopDirective: loopDirective, LoopLabel: loopLabel, Usage: bufferedUsage}
 			}
 		case res := <-permissionDone:
 			permissionDone = nil
 			if res.cancelled {
-				return cancelAndEnd(provider, deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, "cancelled", deps.Stderr)
+				return cancelAndEnd(provider, deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, "cancelled", deps.Stderr, bufferedUsage)
 			}
 			if res.err != nil {
 				emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "permission", fmt.Sprintf("permission handler: %v", res.err), deps.Stderr, cfg.RunLabel)
@@ -639,7 +646,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 			// If session.end + promptDone already arrived while we were waiting for
 			// AnswerPermission, exit now that the permission goroutine has resolved.
 			if finalStopReason != "" && promptReturned {
-				return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), LoopDirective: loopDirective, LoopLabel: loopLabel}
+				return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), LoopDirective: loopDirective, LoopLabel: loopLabel, Usage: bufferedUsage}
 			}
 			if eventChClosed && finalStopReason == "" {
 				return sessionResult{ExitCode: 1}
@@ -652,32 +659,36 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 			cfn()
 			finalStopReason = "cancelled"
 		case <-ctx.Done():
-			return cancelAndEnd(provider, deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, "cancelled", deps.Stderr)
+			return cancelAndEnd(provider, deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, "cancelled", deps.Stderr, bufferedUsage)
 		case <-progressTimerC:
-			return cancelAndEnd(provider, deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, "progress_timeout", deps.Stderr)
+			return cancelAndEnd(provider, deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, "progress_timeout", deps.Stderr, bufferedUsage)
 		case <-cfg.Timeout:
-			return cancelAndEnd(provider, deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, "timeout", deps.Stderr)
+			return cancelAndEnd(provider, deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, "timeout", deps.Stderr, bufferedUsage)
 		}
 	}
 }
 
-func cancelAndEnd(provider runtime.Provider, writer EventSink, sessionID, runID, runLabel, stopReason string, stderr io.Writer) sessionResult {
+func cancelAndEnd(provider runtime.Provider, writer EventSink, sessionID, runID, runLabel, stopReason string, stderr io.Writer, usage map[string]any) sessionResult {
 	cancelCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := provider.Cancel(cancelCtx, sessionID); err != nil {
 		emitErrorEvent(writer, sessionID, runID, "cancel", fmt.Sprintf("cancel session: %v", err), stderr, runLabel)
 	}
+	fields := map[string]any{
+		"stop_reason": stopReason,
+	}
+	if usage != nil {
+		fields["usage"] = usage
+	}
 	if err := writer.Write(events.Event{
 		Event:     "session.end",
 		SessionID: sessionID,
-		Fields: map[string]any{
-			"stop_reason": stopReason,
-		},
+		Fields:    fields,
 	}); err != nil {
 		fmt.Fprintf(stderr, "avenor: write terminal event: %v\n", err)
 		return sessionResult{ExitCode: 1}
 	}
-	return sessionResult{ExitCode: runtime.ExitCodeForStopReason(stopReason), StopReason: stopReason}
+	return sessionResult{ExitCode: runtime.ExitCodeForStopReason(stopReason), StopReason: stopReason, Usage: usage}
 }
 
 type eventWriter struct {

@@ -60,6 +60,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		SessionID: session.SessionID,
 		Backend:   backendID,
 		Dir:       merged.Dir,
+		PID:       p.client.PID(),
 	}, nil
 }
 
@@ -87,6 +88,7 @@ func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Sessio
 		SessionID: session.SessionID,
 		Backend:   backendID,
 		Dir:       p.opts.Dir,
+		PID:       p.client.PID(),
 	}, nil
 }
 

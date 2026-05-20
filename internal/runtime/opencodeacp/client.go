@@ -36,6 +36,7 @@ type Client struct {
 	pending              map[string]chan rpcEnvelope
 	permissionMu         sync.Mutex
 	permissions          map[string]rpcEnvelope
+	pid                  int
 }
 
 type ClientOptions struct {
@@ -86,9 +87,14 @@ func NewClientWithOptions(ctx context.Context, opts ClientOptions) (*Client, err
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
+	client.pid = cmd.Process.Pid
 	go client.readLoop()
 
 	return client, nil
+}
+
+func (c *Client) PID() int {
+	return c.pid
 }
 
 func (c *Client) Events() <-chan events.Event {
