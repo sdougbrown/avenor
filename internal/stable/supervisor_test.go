@@ -109,6 +109,9 @@ func TestManagedHTTPServerStartupFailure(t *testing.T) {
 	if strings.Contains(err.Error(), "server-url is required") {
 		t.Fatalf("error = %q, expected opencode serve startup error", err.Error())
 	}
+	if _, ok := sup.httpServers["/tmp"]; ok {
+		t.Fatal("server entry leaked into map after startup failure")
+	}
 }
 
 func TestManagedHTTPServerCleanupOnMap(t *testing.T) {

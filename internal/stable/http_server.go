@@ -200,7 +200,8 @@ func (s *Supervisor) startHTTPServer(absDir string) (*managedHTTPServer, error) 
 	port := listener.Addr().(*net.TCPAddr).Port
 	listener.Close()
 
-	cmd := httpExecCommand("opencode", "serve", "--port", fmt.Sprintf("%d", port), "--cwd", absDir)
+	cmd := httpExecCommand("opencode", "serve", "--port", fmt.Sprintf("%d", port))
+	cmd.Dir = absDir
 	cmd.Stderr = os.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
