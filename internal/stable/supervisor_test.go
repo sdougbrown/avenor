@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -104,6 +106,9 @@ func TestManagedHTTPServerStartupFailure(t *testing.T) {
 	}
 	// The error should mention opencode serve (the wrapper) rather than
 	// "server-url is required".
+	if !strings.Contains(err.Error(), "opencode serve") {
+		t.Fatalf("error = %q, expected opencode serve startup error", err.Error())
+	}
 	if strings.Contains(err.Error(), "server-url is required") {
 		t.Fatalf("error = %q, expected opencode serve startup error", err.Error())
 	}
@@ -117,7 +122,6 @@ func TestManagedHTTPServerCleanupOnMap(t *testing.T) {
 
 	// Directly set a managed server entry so shutdown clears it.
 	exited := make(chan error, 1)
-	exited <- nil // pre-signal exit so shutdown's select picks it immediately
 	cmd := exec.Command("true")
 	_ = cmd.Start()
 	go func() { exited <- cmd.Wait() }()
@@ -160,7 +164,12 @@ func TestSpawnParamsValidation(t *testing.T) {
 	// auto-start via the fake exec that always fails.
 	t.Setenv("AVENOR_OPENCODE_URL", "")
 	_, err = sup.spawn(SpawnParams{Prompt: "hello"})
-	_ = err // expected to fail (fake exec can't start server)
+	if err == nil {
+		t.Fatal("spawn with default backend and no server_url should error when subprocess fails")
+	}
+	if strings.Contains(err.Error(), "server-url is required for backend opencode-http") {
+		t.Errorf("error = %q, expected subprocess start error, not server-url required", err.Error())
+	}
 
 	// opencode-http without server_url now tries to auto-start a subprocess
 	// via the fake execCommand("false") which always fails — assert the error
@@ -873,6 +882,72 @@ func testTombstoneOnSignalSubprocess(t *testing.T) {
 	content := string(data)
 	if !strings.Contains(content, "reason=signal") {
 		t.Fatalf("tombstone = %q, want reason=signal", content)
+	}
+}
+
+func TestGetOrCreateHTTPServerConcurrentSameDir(t *testing.T) {
+	sup := NewSupervisor(Config{
+		ControlSocket: "/tmp/test-http-server-concurrent.sock",
+		MaxRuntimes:   2,
+	})
+
+	// Write a tiny script that blocks for a while, proving the sentinel
+	// dedup works: only the first goroutine reaches the script while others
+	// wait on the condition variable.
+	scriptDir := t.TempDir()
+	scriptPath := filepath.Join(scriptDir, "block.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nsleep 2\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// maxInflight tracks the peak number of goroutines simultaneously in
+	// the exec call. If the sentinel dedup works correctly, this should be
+	// 1 even though 5 goroutines call getOrCreateHTTPServer concurrently.
+	var maxInflight atomic.Int32
+	var curInflight int
+	var mu sync.Mutex
+	gate := make(chan struct{})
+
+	fakeExec := func(name string, arg ...string) *exec.Cmd {
+		mu.Lock()
+		curInflight++
+		if curInflight > int(maxInflight.Load()) {
+			maxInflight.Store(int32(curInflight))
+		}
+		mu.Unlock()
+
+		// Block until the gate opens (signaled after all goroutines have
+		// arrived or after a timeout), then run the real script.
+		<-gate
+
+		mu.Lock()
+		curInflight--
+		mu.Unlock()
+		return exec.Command(scriptPath)
+	}
+	oldExecCommand := httpExecCommand
+	httpExecCommand = fakeExec
+	defer func() { httpExecCommand = oldExecCommand }()
+
+	var wg sync.WaitGroup
+	// Open the gate after all goroutines have arrived, proving that during
+	// the time they were all waiting, only one had reached exec.
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		close(gate)
+	}()
+
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = sup.getOrCreateHTTPServer("/tmp/concurrent-test-dir")
+		}()
+	}
+	wg.Wait()
+
+	if got := maxInflight.Load(); got != 1 {
+		t.Fatalf("max concurrent exec calls = %d, want 1 (concurrent callers should be deduped by the sentinel)", got)
 	}
 }
 

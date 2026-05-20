@@ -136,31 +136,26 @@ func (s *Supervisor) getOrCreateHTTPServer(dir string) (*managedHTTPServer, erro
 		}
 
 		// Process still alive — verify health.
-		m.mu.Lock()
-		healthy := m.healthy
-		m.mu.Unlock()
-
-		if healthy {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			herr := m.healthCheck(ctx)
-			cancel()
-			if herr == nil {
-				return m, nil
-			}
-			// Server became unhealthy — shut it down and loop to restart.
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		herr := m.healthCheck(ctx)
+		cancel()
+		if herr == nil {
 			m.mu.Lock()
-			m.healthy = false
+			m.healthy = true
 			m.mu.Unlock()
-			_ = m.shutdown()
-			s.httpServerMu.Lock()
-			if s.httpServers[absDir] == m {
-				delete(s.httpServers, absDir)
-			}
-			s.httpServerMu.Unlock()
-			continue
+			return m, nil
 		}
-
-		// Not healthy and no proof it's alive — loop to restart.
+		// Server is not healthy — shut it down and loop to restart.
+		m.mu.Lock()
+		m.healthy = false
+		m.mu.Unlock()
+		_ = m.shutdown()
+		s.httpServerMu.Lock()
+		if s.httpServers[absDir] == m {
+			delete(s.httpServers, absDir)
+		}
+		s.httpServerCond.Broadcast()
+		s.httpServerMu.Unlock()
 		continue
 	}
 }
@@ -203,6 +198,10 @@ func (s *Supervisor) startHTTPServer(absDir string) (*managedHTTPServer, error) 
 		select {
 		case err := <-exited:
 			return nil, fmt.Errorf("opencode serve exited during startup: %w", err)
+		default:
+		}
+
+		select {
 		case <-deadline:
 			cmd.Process.Kill()
 			<-exited
