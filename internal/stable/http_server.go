@@ -29,9 +29,12 @@ type managedHTTPServer struct {
 }
 
 func (s *managedHTTPServer) shutdown() error {
+	s.mu.Lock()
 	if s.cmd == nil || s.cmd.Process == nil {
+		s.mu.Unlock()
 		return nil
 	}
+	s.mu.Unlock()
 
 	var firstErr error
 
@@ -57,9 +60,11 @@ func (s *managedHTTPServer) shutdown() error {
 		<-s.exited
 	}
 
+	s.mu.Lock()
 	s.cmd = nil
 	s.exited = nil
 	s.url = ""
+	s.mu.Unlock()
 
 	return firstErr
 }
