@@ -128,13 +128,21 @@ func TestStartHTTPServerSetsCmdDir(t *testing.T) {
 	})
 
 	dir := t.TempDir()
-	_, _ = sup.getOrCreateHTTPServer(dir)
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		t.Fatalf("filepath.Abs: %v", err)
+	}
+
+	_, startErr := sup.getOrCreateHTTPServer(dir)
+	if startErr == nil {
+		t.Fatal("expected startup error from fake exec, got nil")
+	}
 
 	if capturedCmd == nil {
 		t.Fatal("httpExecCommand was not called")
 	}
-	if capturedCmd.Dir != dir {
-		t.Fatalf("cmd.Dir = %q, want %q", capturedCmd.Dir, dir)
+	if capturedCmd.Dir != absDir {
+		t.Fatalf("cmd.Dir = %q, want %q", capturedCmd.Dir, absDir)
 	}
 }
 
