@@ -17,6 +17,7 @@ type ProviderConfig struct {
 	Args                 []string
 	SubprocessDiscovery  bool
 	AppendCWDArg         bool
+	Authenticate         string // optional: if non-empty, call Client.Authenticate with this methodId after Initialize
 	ConfigureSession     func(ctx context.Context, session *Session, opts runtime.StartOptions) error
 }
 
@@ -34,8 +35,9 @@ type Provider struct {
 	pendingOptions map[string]map[string][]any
 
 	subprocessDiscovery bool
-	appendCWDArg        bool
-	configureSession    func(ctx context.Context, session *Session, opts runtime.StartOptions) error
+	appendCWDArg       bool
+	authenticateID     string
+	configureSession   func(ctx context.Context, session *Session, opts runtime.StartOptions) error
 }
 
 func NewProvider(cfg ProviderConfig) runtime.Provider {
@@ -47,6 +49,7 @@ func NewProvider(cfg ProviderConfig) runtime.Provider {
 		sessions:            map[string]*Session{},
 		subprocessDiscovery: cfg.SubprocessDiscovery,
 		appendCWDArg:        cfg.AppendCWDArg,
+		authenticateID:      cfg.Authenticate,
 		configureSession:    cfg.ConfigureSession,
 	}
 }
@@ -242,6 +245,12 @@ func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions) 
 	if _, err := client.Initialize(ctx); err != nil {
 		_ = client.Close()
 		return err
+	}
+	if p.authenticateID != "" {
+		if err := client.Authenticate(ctx, p.authenticateID); err != nil {
+			_ = client.Close()
+			return err
+		}
 	}
 
 	p.mu.Lock()

@@ -137,6 +137,13 @@ func (c *Client) Initialize(ctx context.Context) (json.RawMessage, error) {
 	})
 }
 
+func (c *Client) Authenticate(ctx context.Context, methodID string) error {
+	_, err := c.request(ctx, "authenticate", map[string]any{
+		"methodId": methodID,
+	})
+	return err
+}
+
 func (c *Client) request(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	id := strconv.FormatUint(c.nextID.Add(1), 10)
 	response := make(chan rpcEnvelope, 1)
