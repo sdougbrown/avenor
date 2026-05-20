@@ -149,7 +149,9 @@ func (s *Supervisor) getOrCreateHTTPServer(dir string) (*managedHTTPServer, erro
 		m.mu.Lock()
 		m.healthy = false
 		m.mu.Unlock()
-		_ = m.shutdown()
+		if err := m.shutdown(); err != nil {
+			fmt.Fprintf(os.Stderr, "avenor stable: shutdown managed http server for %s: %v\n", absDir, err)
+		}
 		s.httpServerMu.Lock()
 		if s.httpServers[absDir] == m {
 			delete(s.httpServers, absDir)
@@ -237,7 +239,9 @@ func (s *Supervisor) shutdownManagedHTTPServers() {
 			continue
 		}
 		if m, ok := entry.(*managedHTTPServer); ok {
-			_ = m.shutdown()
+			if err := m.shutdown(); err != nil {
+				fmt.Fprintf(os.Stderr, "avenor stable: shutdown managed http server for %s: %v\n", dir, err)
+			}
 		}
 		delete(s.httpServers, dir)
 	}

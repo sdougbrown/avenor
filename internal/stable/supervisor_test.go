@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -94,11 +95,7 @@ func TestManagedHTTPServerStartupFailure(t *testing.T) {
 		MaxRuntimes:   2,
 	})
 
-	// Inject execCommand = "false" so opencode serve fails immediately.
-	fakeExec := func(name string, arg ...string) *exec.Cmd { return exec.Command("false") }
-	oldExecCommand := httpExecCommand
-	httpExecCommand = fakeExec
-	defer func() { httpExecCommand = oldExecCommand }()
+	withFakeExec(t, func(name string, arg ...string) *exec.Cmd { return exec.Command("false") })
 
 	_, err := sup.getOrCreateHTTPServer("/tmp")
 	if err == nil {
@@ -120,10 +117,16 @@ func TestManagedHTTPServerCleanupOnMap(t *testing.T) {
 		MaxRuntimes:   2,
 	})
 
-	// Directly set a managed server entry so shutdown clears it.
+	withFakeExec(t, func(name string, arg ...string) *exec.Cmd { return exec.Command("true") })
+
+	// Insert a managed server with a real subprocess (sleep 30) so
+	// shutdownManagedHTTPServers can exercise SIGTERM + reap.
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleep: %v", err)
+	}
+	pid := cmd.Process.Pid
 	exited := make(chan error, 1)
-	cmd := exec.Command("true")
-	_ = cmd.Start()
 	go func() { exited <- cmd.Wait() }()
 
 	sup.httpServers["/tmp"] = &managedHTTPServer{
@@ -139,6 +142,14 @@ func TestManagedHTTPServerCleanupOnMap(t *testing.T) {
 	if len(sup.httpServers) != 0 {
 		t.Fatalf("httpServers = %d, want 0 after shutdown", len(sup.httpServers))
 	}
+
+	// shutdown() already consumed the exited channel, so cmd.Wait() has
+	// completed and the process is fully reaped. Verify it's gone.
+	if proc, err := os.FindProcess(pid); err == nil {
+		if err := proc.Signal(syscall.Signal(0)); err == nil {
+			t.Fatalf("process %d still running after shutdown", pid)
+		}
+	}
 }
 
 func TestSpawnParamsValidation(t *testing.T) {
@@ -149,10 +160,7 @@ func TestSpawnParamsValidation(t *testing.T) {
 
 	// Replace the real exec command immediately to avoid starting real
 	// opencode serve processes when the default backend is opencode-http.
-	fakeExec := func(name string, arg ...string) *exec.Cmd { return exec.Command("false") }
-	oldExecCommand := httpExecCommand
-	httpExecCommand = fakeExec
-	defer func() { httpExecCommand = oldExecCommand }()
+	withFakeExec(t, func(name string, arg ...string) *exec.Cmd { return exec.Command("false") })
 
 	// Missing prompt and prompt_file
 	_, err := sup.spawn(SpawnParams{Dir: "/tmp"})
@@ -900,13 +908,16 @@ func TestGetOrCreateHTTPServerConcurrentSameDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	const numGoroutines = 5
+
 	// maxInflight tracks the peak number of goroutines simultaneously in
 	// the exec call. If the sentinel dedup works correctly, this should be
-	// 1 even though 5 goroutines call getOrCreateHTTPServer concurrently.
+	// 1 even though numGoroutines goroutines call getOrCreateHTTPServer concurrently.
 	var maxInflight atomic.Int32
 	var curInflight int
 	var mu sync.Mutex
 	gate := make(chan struct{})
+	arrived := make(chan struct{}, numGoroutines) // buffered so goroutines don't block
 
 	fakeExec := func(name string, arg ...string) *exec.Cmd {
 		mu.Lock()
@@ -917,7 +928,7 @@ func TestGetOrCreateHTTPServerConcurrentSameDir(t *testing.T) {
 		mu.Unlock()
 
 		// Block until the gate opens (signaled after all goroutines have
-		// arrived or after a timeout), then run the real script.
+		// arrived), then run the real script.
 		<-gate
 
 		mu.Lock()
@@ -930,20 +941,20 @@ func TestGetOrCreateHTTPServerConcurrentSameDir(t *testing.T) {
 	defer func() { httpExecCommand = oldExecCommand }()
 
 	var wg sync.WaitGroup
-	// Open the gate after all goroutines have arrived, proving that during
-	// the time they were all waiting, only one had reached exec.
-	go func() {
-		time.Sleep(300 * time.Millisecond)
-		close(gate)
-	}()
-
-	for i := 0; i < 5; i++ {
+	for i := 0; i < numGoroutines; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			arrived <- struct{}{}
 			_, _ = sup.getOrCreateHTTPServer("/tmp/concurrent-test-dir")
 		}()
 	}
+
+	// Wait for all goroutines to arrive before opening the gate.
+	for i := 0; i < numGoroutines; i++ {
+		<-arrived
+	}
+	close(gate)
 	wg.Wait()
 
 	if got := maxInflight.Load(); got != 1 {
@@ -964,4 +975,14 @@ func newStableSocketTestDir(t *testing.T, name string) string {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return dir
+}
+
+// withFakeExec replaces httpExecCommand for the duration of the test,
+// restoring it on cleanup. Returns the replaced function for manual
+// restore if needed.
+func withFakeExec(t *testing.T, fake func(name string, arg ...string) *exec.Cmd) {
+	t.Helper()
+	old := httpExecCommand
+	httpExecCommand = fake
+	t.Cleanup(func() { httpExecCommand = old })
 }
