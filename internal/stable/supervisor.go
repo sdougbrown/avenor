@@ -92,6 +92,9 @@ type Supervisor struct {
 	runtimeActivity chan struct{}
 	httpServer      *control.HTTPDebugServer
 	permOptions     map[string][]any // keyed by "runtimeID:requestID"
+	httpServers     map[string]any // dir → *managedHTTPServer or errHTTPServerStarting sentinel
+	httpServerMu    sync.Mutex
+	httpServerCond  *sync.Cond
 }
 
 func NewSupervisor(cfg Config) *Supervisor {
@@ -106,7 +109,9 @@ func NewSupervisor(cfg Config) *Supervisor {
 		shutdownCh:      make(chan struct{}),
 		runtimeActivity: make(chan struct{}),
 		permOptions:     map[string][]any{},
+		httpServers:     map[string]any{},
 	}
+	sup.httpServerCond = sync.NewCond(&sup.httpServerMu)
 	sup.control.SetStableHandler(sup)
 	return sup
 }
@@ -352,8 +357,20 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 		backend = cli.DefaultBackend
 	}
 	if backend == "opencode-http" && startOpts.ServerURL == "" {
-		_ = writer.Close()
-		return SpawnResult{}, fmt.Errorf("--server-url is required for backend opencode-http")
+		if discovery.Mode == "subprocess" {
+			server, err := s.getOrCreateHTTPServer(params.Dir)
+			if err != nil {
+				_ = writer.Close()
+				return SpawnResult{}, fmt.Errorf("start opencode serve: %w", err)
+			}
+			startOpts.ServerURL = server.url
+			// Clear Dir so supportedDir("") passes — the server is already
+			// running in the target directory.
+			startOpts.Dir = ""
+		} else {
+			_ = writer.Close()
+			return SpawnResult{}, fmt.Errorf("--server-url is required for backend opencode-http")
+		}
 	}
 	provider, err := factory.NewProvider(startOpts, backend)
 	if err != nil {
@@ -807,6 +824,8 @@ func (s *Supervisor) emitChildError(child *childRuntime, message, source string)
 }
 
 func (s *Supervisor) shutdown(mode string) int {
+	s.shutdownManagedHTTPServers()
+
 	s.controlMu.Lock()
 	runtimes := make([]*childRuntime, 0, len(s.runtimes))
 	for _, rt := range s.runtimes {

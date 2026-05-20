@@ -86,11 +86,69 @@ func TestShutdownModeValidation(t *testing.T) {
 	}
 }
 
+func TestManagedHTTPServerStartupFailure(t *testing.T) {
+	sup := NewSupervisor(Config{
+		ControlSocket: "/tmp/test-http-server-fail.sock",
+		MaxRuntimes:   2,
+	})
+
+	// Inject execCommand = "false" so opencode serve fails immediately.
+	fakeExec := func(name string, arg ...string) *exec.Cmd { return exec.Command("false") }
+	oldExecCommand := httpExecCommand
+	httpExecCommand = fakeExec
+	defer func() { httpExecCommand = oldExecCommand }()
+
+	_, err := sup.getOrCreateHTTPServer("/tmp")
+	if err == nil {
+		t.Fatal("getOrCreateHTTPServer should fail when the subprocess command fails")
+	}
+	// The error should mention opencode serve (the wrapper) rather than
+	// "server-url is required".
+	if strings.Contains(err.Error(), "server-url is required") {
+		t.Fatalf("error = %q, expected opencode serve startup error", err.Error())
+	}
+}
+
+func TestManagedHTTPServerCleanupOnMap(t *testing.T) {
+	sup := NewSupervisor(Config{
+		ControlSocket: "/tmp/test-http-server-cleanup.sock",
+		MaxRuntimes:   2,
+	})
+
+	// Directly set a managed server entry so shutdown clears it.
+	exited := make(chan error, 1)
+	exited <- nil // pre-signal exit so shutdown's select picks it immediately
+	cmd := exec.Command("true")
+	_ = cmd.Start()
+	go func() { exited <- cmd.Wait() }()
+
+	sup.httpServers["/tmp"] = &managedHTTPServer{
+		dir:     "/tmp",
+		url:     "http://127.0.0.1:12345",
+		cmd:     cmd,
+		exited:  exited,
+		healthy: true,
+	}
+
+	sup.shutdownManagedHTTPServers()
+
+	if len(sup.httpServers) != 0 {
+		t.Fatalf("httpServers = %d, want 0 after shutdown", len(sup.httpServers))
+	}
+}
+
 func TestSpawnParamsValidation(t *testing.T) {
 	sup := NewSupervisor(Config{
 		ControlSocket: "/tmp/test-spawn-validate.sock",
 		MaxRuntimes:   2,
 	})
+
+	// Replace the real exec command immediately to avoid starting real
+	// opencode serve processes when the default backend is opencode-http.
+	fakeExec := func(name string, arg ...string) *exec.Cmd { return exec.Command("false") }
+	oldExecCommand := httpExecCommand
+	httpExecCommand = fakeExec
+	defer func() { httpExecCommand = oldExecCommand }()
 
 	// Missing prompt and prompt_file
 	_, err := sup.spawn(SpawnParams{Dir: "/tmp"})
@@ -98,35 +156,25 @@ func TestSpawnParamsValidation(t *testing.T) {
 		t.Fatal("spawn with no prompt should error")
 	}
 
-	// Missing dir
-	_, err = sup.spawn(SpawnParams{Prompt: "hello"})
-	// Dir defaults to ".", so this shouldn't error on validation alone
-	// It might fail on starting the acp session though
-
-	// opencode-http without server_url — unset env to avoid accidental
-	// resolution via AVENOR_OPENCODE_URL.
+	// Missing dir — falls through to default backend which triggers
+	// auto-start via the fake exec that always fails.
 	t.Setenv("AVENOR_OPENCODE_URL", "")
+	_, err = sup.spawn(SpawnParams{Prompt: "hello"})
+	_ = err // expected to fail (fake exec can't start server)
+
+	// opencode-http without server_url now tries to auto-start a subprocess
+	// via the fake execCommand("false") which always fails — assert the error
+	// indicates subprocess startup failure rather than "server-url is required".
 	_, err = sup.spawn(SpawnParams{
 		Prompt:  "hello",
 		Dir:     "/tmp",
 		Backend: "opencode-http",
 	})
 	if err == nil {
-		t.Fatal("spawn with backend opencode-http and no server_url should error")
+		t.Fatal("spawn with backend opencode-http and no server_url should error when subprocess fails")
 	}
-	if !strings.Contains(err.Error(), "server-url is required for backend opencode-http") {
-		t.Errorf("error = %q, want server-url required message", err.Error())
-	}
-
-	_, err = sup.spawn(SpawnParams{
-		Prompt: "hello",
-		Dir:    "/tmp",
-	})
-	if err == nil {
-		t.Fatal("spawn with default backend and no server_url should error")
-	}
-	if !strings.Contains(err.Error(), "server-url is required for backend opencode-http") {
-		t.Errorf("error = %q, want server-url required message", err.Error())
+	if strings.Contains(err.Error(), "server-url is required for backend opencode-http") {
+		t.Errorf("error = %q, expected subprocess start error, not server-url required", err.Error())
 	}
 }
 
