@@ -125,6 +125,19 @@ func TestMapPromptResponseMissingStopReason(t *testing.T) {
 	}
 }
 
+func TestMapSessionUpdateUnknownKind(t *testing.T) {
+	raw := json.RawMessage(`{"sessionId":"s1","update":{"sessionUpdate":"bogus_kind","content":{"type":"text","text":"hi"}}}`)
+
+	_, err := mapSessionUpdate(raw)
+	if err == nil {
+		t.Fatal("expected error for unknown session update kind")
+	}
+	want := `unknown session update kind "bogus_kind"`
+	if err.Error() != want {
+		t.Fatalf("error = %q, want %q", err.Error(), want)
+	}
+}
+
 func TestMapPromptResponseInvalidJSON(t *testing.T) {
 	raw := json.RawMessage(`{ "bad"`)
 

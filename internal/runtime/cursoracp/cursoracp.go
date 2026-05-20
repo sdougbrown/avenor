@@ -9,8 +9,6 @@ import (
 
 const backendID = "cursor-acp"
 
-var _ runtime.Provider = New()
-
 func New() runtime.Provider {
 	return NewWithOptions(runtime.StartOptions{})
 }

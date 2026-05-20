@@ -30,8 +30,7 @@ type Provider struct {
 	args        []string
 	client      *Client
 	events      chan events.Event
-	sessions    map[string]*Session
-	initialized bool
+	sessions       map[string]*Session
 	pendingOptions map[string]map[string][]any
 
 	subprocessDiscovery bool
@@ -261,7 +260,6 @@ func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions) 
 	}
 	p.client = client
 	p.events = make(chan events.Event, 256)
-	p.initialized = true
 	go p.pumpClientEvents(client, p.events)
 	return nil
 }
