@@ -480,6 +480,8 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 	eventChClosed := false
 	tracker := newStatusTracker(cfg.SessionID, cfg.RunID, cfg.RunLabel)
 
+	chunkBuf := digest.NewChunkBuffer()
+
 	var progressTimerC <-chan time.Time
 	var progressTimer *time.Timer
 	if cfg.ProgressTimeout > 0 {
@@ -549,13 +551,14 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 			markerHandled := false
 			if event.Event == "agent.message_chunk" || event.Event == "agent.thought_chunk" {
 				if text := chunkText(event); text != "" {
-					if phase, label, ok := digest.ExtractStatusMarker(text); ok {
+					chunkBuf.Append(text)
+					if phase, label, ok := chunkBuf.ScanStatusMarker(); ok {
 						if !writeStatus(tracker.ObserveMarker(phase, label)) {
 							return sessionResult{ExitCode: 1}
 						}
 						markerHandled = true
 					}
-					if dir, lbl, ok := digest.ExtractLoopMarker(text); ok {
+					if dir, lbl, ok := chunkBuf.ScanLoopMarker(); ok {
 						if loopDirectiveSeverity(dir) > loopDirectiveSeverity(loopDirective) {
 							loopDirective = dir
 							loopLabel = lbl

@@ -1833,6 +1833,81 @@ func TestControlPermissionClaimContextCancelReleasesClaim(t *testing.T) {
 	}
 }
 
+func TestWaitForSessionChunkedLoopMarker(t *testing.T) {
+	tests := []struct {
+		name      string
+		chunks    []string
+		wantDir   string
+		wantLabel string
+	}{
+		{
+			name:      "loop marker split across chunks",
+			chunks:    []string{"[lo", "op: exit | tests green]"},
+			wantDir:   "exit",
+			wantLabel: "tests green",
+		},
+		{
+			name:      "loop marker in single chunk",
+			chunks:    []string{"[loop: continue | single]"},
+			wantDir:   "continue",
+			wantLabel: "single",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			eventCh := make(chan events.Event, len(tt.chunks)+2)
+			for _, c := range tt.chunks {
+				eventCh <- events.Event{
+					Event:     "agent.message_chunk",
+					SessionID: "ses_chunk",
+					Fields: map[string]any{
+						"content": map[string]any{"text": c},
+					},
+				}
+			}
+			eventCh <- events.Event{
+				Event:     "session.end",
+				SessionID: "ses_chunk",
+				Fields:    map[string]any{"stop_reason": "end_turn"},
+			}
+			close(eventCh)
+
+			promptDone := make(chan error, 1)
+			promptDone <- nil
+
+			dir := t.TempDir()
+			eventsPath := filepath.Join(dir, "events.ndjson")
+			writer, err := NewEventWriter(eventsPath)
+			if err != nil {
+				t.Fatalf("newEventWriter: %v", err)
+			}
+
+			provider := &cliFakeProvider{}
+			var stderr strings.Builder
+			result := waitForSessionForTest(
+				context.Background(),
+				provider,
+				writer, nil, nil,
+				eventCh, promptDone, nil,
+				"ses_chunk", "run_chunk", "",
+				true, DefaultPermissionClaimTimeout,
+				nil, &stderr,
+			)
+			if closeErr := writer.Close(); closeErr != nil {
+				t.Fatalf("close writer: %v", closeErr)
+			}
+
+			if result.LoopDirective != tt.wantDir {
+				t.Errorf("LoopDirective = %q, want %q", result.LoopDirective, tt.wantDir)
+			}
+			if result.LoopLabel != tt.wantLabel {
+				t.Errorf("LoopLabel = %q, want %q", result.LoopLabel, tt.wantLabel)
+			}
+		})
+	}
+}
+
 func TestRunBackendOpenCodeACP(t *testing.T) {
 	oldRunAttempt := runAttempt
 	oldRetryAfter := retryAfter
