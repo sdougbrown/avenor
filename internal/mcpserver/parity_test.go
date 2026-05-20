@@ -67,8 +67,8 @@ func TestToolNameParity(t *testing.T) {
 func TestSchemaFieldParity(t *testing.T) {
 	t.Run("avenor_spawn", func(t *testing.T) {
 		// spawnArgs — required: agent, repo_dir
-		// optional: prompt, prompt_file, label, timeout, model, supervisor_id
-		allowed := []string{"agent", "repo_dir", "prompt", "prompt_file", "label", "timeout", "model", "supervisor_id"}
+		// optional: prompt, prompt_file, label, timeout, model, backend, server_url, supervisor_id
+		allowed := []string{"agent", "repo_dir", "prompt", "prompt_file", "label", "timeout", "model", "backend", "server_url", "supervisor_id"}
 		required := []string{"agent", "repo_dir"}
 		assertFields(t, "spawnArgs", allowed, required)
 	})

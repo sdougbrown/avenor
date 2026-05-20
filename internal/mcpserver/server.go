@@ -62,6 +62,8 @@ type spawnArgs struct {
 	Label        string `json:"label,omitempty" jsonschema:"optional label for the run"`
 	Timeout      string `json:"timeout,omitempty" jsonschema:"optional timeout in seconds (numeric string)"`
 	Model        string `json:"model,omitempty" jsonschema:"optional model to use"`
+	Backend      string `json:"backend,omitempty" jsonschema:"optional runtime backend (opencode-http, opencode-acp, codex-app-server)"`
+	ServerURL    string `json:"server_url,omitempty" jsonschema:"optional opencode serve URL for opencode-http backend"`
 	SupervisorID string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
 }
 
@@ -286,6 +288,12 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 	}
 	if args.Model != "" {
 		params["model"] = args.Model
+	}
+	if args.Backend != "" {
+		params["backend"] = args.Backend
+	}
+	if args.ServerURL != "" {
+		params["server_url"] = args.ServerURL
 	}
 	if args.Timeout != "" {
 		secs, err := parseTimeoutSeconds(args.Timeout)
