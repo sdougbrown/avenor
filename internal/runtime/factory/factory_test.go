@@ -36,6 +36,16 @@ func TestNewProviderCodex(t *testing.T) {
 	}
 }
 
+func TestNewProviderGeminiACP(t *testing.T) {
+	p, err := NewProvider(runtime.StartOptions{}, "gemini-acp")
+	if err != nil {
+		t.Fatalf("NewProvider(gemini-acp) error = %v", err)
+	}
+	if p == nil {
+		t.Fatal("NewProvider(gemini-acp) provider is nil")
+	}
+}
+
 func TestNewProviderUnknown(t *testing.T) {
 	p, err := NewProvider(runtime.StartOptions{}, "unknown")
 	if p != nil {

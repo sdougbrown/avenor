@@ -1,10 +1,9 @@
-package opencodeacp
+package acp
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
-	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
 )
@@ -33,22 +32,6 @@ func (c *Client) NewSession(ctx context.Context) (*Session, error) {
 	}
 
 	return &Session{Client: c, SessionID: payload.SessionID}, nil
-}
-
-func (c *Client) SetSessionMode(ctx context.Context, sessionID string, modeID string) error {
-	if modeID == "" {
-		return nil
-	}
-	_, err := c.request(ctx, "session/set_mode", setSessionModeParams(sessionID, modeID))
-	return err
-}
-
-func (c *Client) SetSessionModel(ctx context.Context, sessionID string, modelID string) error {
-	if modelID == "" {
-		return nil
-	}
-	_, err := c.request(ctx, "session/set_config_option", setSessionModelParams(sessionID, modelID))
-	return err
 }
 
 func (c *Client) LoadSession(ctx context.Context, sessionID string) (*Session, error) {
@@ -121,62 +104,7 @@ func setSessionModeParams(sessionID string, modeID string) map[string]any {
 func setSessionModelParams(sessionID string, modelID string) map[string]any {
 	return map[string]any{
 		"sessionId": sessionID,
-		"configId":  "model",
-		"value":     modelID,
-	}
-}
-
-func RunProbe(ctx context.Context, dir string) ([]events.Event, error) {
-	return RunProbeWithPrompt(ctx, dir, ProbePrompt)
-}
-
-func RunProbeWithPrompt(ctx context.Context, dir, prompt string) ([]events.Event, error) {
-	client, err := NewClient(ctx, dir)
-	if err != nil {
-		return nil, err
-	}
-	defer client.Close()
-
-	initCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	if _, err := client.Initialize(initCtx); err != nil {
-		return nil, err
-	}
-
-	session, err := client.NewSession(initCtx)
-	if err != nil {
-		return nil, err
-	}
-
-	eventsCh := client.Events()
-	promptDone := make(chan struct {
-		event events.Event
-		err   error
-	}, 1)
-	go func() {
-		event, err := session.Prompt(ctx, prompt)
-		promptDone <- struct {
-			event events.Event
-			err   error
-		}{event: event, err: err}
-	}()
-
-	var transcript []events.Event
-	for {
-		select {
-		case event, ok := <-eventsCh:
-			if ok {
-				transcript = append(transcript, event)
-			}
-		case result := <-promptDone:
-			if result.err != nil {
-				return transcript, result.err
-			}
-			transcript = append(transcript, result.event)
-			return transcript, nil
-		case <-ctx.Done():
-			_ = session.Cancel()
-			return transcript, ctx.Err()
-		}
+		"configId":   "model",
+		"value":      modelID,
 	}
 }

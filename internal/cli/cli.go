@@ -26,6 +26,7 @@ const (
 	backendOpenCodeACP    = "opencode-acp"
 	backendOpenCodeHTTP   = "opencode-http"
 	backendCodexAppServer = "codex-app-server"
+	backendGeminiACP      = "gemini-acp"
 )
 
 // DefaultPermissionClaimTimeout is the default value for --permission-claim-timeout:
@@ -126,6 +127,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	discovery := DiscoverServer(*serverURL, getenv)
 	switch *backend {
 	case backendOpenCodeACP:
+	case backendGeminiACP:
 	case backendOpenCodeHTTP:
 		if discovery.URL == "" {
 			fmt.Fprintf(stderr, "avenor: --server-url is required for backend opencode-http\n")

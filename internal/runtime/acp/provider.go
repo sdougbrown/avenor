@@ -1,4 +1,4 @@
-package opencodeacp
+package acp
 
 import (
 	"context"
@@ -11,28 +11,43 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime"
 )
 
-const backendID = "opencode-acp"
+type ProviderConfig struct {
+	BackendID           string
+	Bin                  string
+	Args                 []string
+	SubprocessDiscovery  bool
+	AppendCWDArg         bool
+	ConfigureSession     func(ctx context.Context, session *Session, opts runtime.StartOptions) error
+}
 
-// Provider implements runtime.Provider for opencode's ACP stdio transport.
 type Provider struct {
 	opts runtime.StartOptions
 
-	mu             sync.Mutex
-	client         *Client
-	events         chan events.Event
-	sessions       map[string]*Session
-	initialized    bool
-	pendingOptions map[string]map[string][]any // sessionID → requestID → permission options from event
+	mu          sync.Mutex
+	backendID   string
+	bin         string
+	args        []string
+	client      *Client
+	events      chan events.Event
+	sessions    map[string]*Session
+	initialized bool
+	pendingOptions map[string]map[string][]any
+
+	subprocessDiscovery bool
+	appendCWDArg        bool
+	configureSession    func(ctx context.Context, session *Session, opts runtime.StartOptions) error
 }
 
-func New() runtime.Provider {
-	return NewWithOptions(runtime.StartOptions{})
-}
-
-func NewWithOptions(opts runtime.StartOptions) runtime.Provider {
+func NewProvider(cfg ProviderConfig) runtime.Provider {
 	return &Provider{
-		opts:     opts,
-		sessions: map[string]*Session{},
+		opts:                runtime.StartOptions{},
+		backendID:           cfg.BackendID,
+		bin:                 cfg.Bin,
+		args:                cfg.Args,
+		sessions:            map[string]*Session{},
+		subprocessDiscovery: cfg.SubprocessDiscovery,
+		appendCWDArg:        cfg.AppendCWDArg,
+		configureSession:    cfg.ConfigureSession,
 	}
 }
 
@@ -48,8 +63,10 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	if err != nil {
 		return runtime.Session{}, err
 	}
-	if err := p.configureSession(ctx, session, merged); err != nil {
-		return runtime.Session{}, err
+	if p.configureSession != nil {
+		if err := p.configureSession(ctx, session, merged); err != nil {
+			return runtime.Session{}, err
+		}
 	}
 
 	p.mu.Lock()
@@ -58,7 +75,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 
 	return runtime.Session{
 		SessionID: session.SessionID,
-		Backend:   backendID,
+		Backend:   p.backendID,
 		Dir:       merged.Dir,
 		PID:       p.client.PID(),
 	}, nil
@@ -76,8 +93,10 @@ func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Sessio
 	if err != nil {
 		return runtime.Session{}, err
 	}
-	if err := p.configureSession(ctx, session, p.opts); err != nil {
-		return runtime.Session{}, err
+	if p.configureSession != nil {
+		if err := p.configureSession(ctx, session, p.opts); err != nil {
+			return runtime.Session{}, err
+		}
 	}
 
 	p.mu.Lock()
@@ -86,7 +105,7 @@ func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Sessio
 
 	return runtime.Session{
 		SessionID: session.SessionID,
-		Backend:   backendID,
+		Backend:   p.backendID,
 		Dir:       p.opts.Dir,
 		PID:       p.client.PID(),
 	}, nil
@@ -177,11 +196,11 @@ func (p *Provider) AnswerPermission(ctx context.Context, sessionID string, reque
 
 func (p *Provider) Capabilities(ctx context.Context) (runtime.Capabilities, error) {
 	return runtime.Capabilities{
-		Backend:             backendID,
+		Backend:             p.backendID,
 		Permissions:         true,
 		Resume:              true,
 		ExternalServerURL:   false,
-		SubprocessDiscovery: true,
+		SubprocessDiscovery: p.subprocessDiscovery,
 		ModelSelection:      true,
 	}, nil
 }
@@ -207,12 +226,15 @@ func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions) 
 	p.mu.Unlock()
 
 	if opts.ServerURL != "" {
-		return fmt.Errorf("%s external server URL transport is not implemented by the stdio client", backendID)
+		return fmt.Errorf("%s external server URL transport is not implemented by the stdio client", p.backendID)
 	}
 
-	client, err := NewClientWithOptions(ctx, ClientOptions{
+	client, err := NewClient(ctx, ClientConfig{
+		Bin:                  p.bin,
+		Args:                 p.args,
 		Dir:                  opts.Dir,
 		AutoAnswerPermission: false,
+		AppendCWDArg:         p.appendCWDArg,
 	})
 	if err != nil {
 		return err
@@ -253,20 +275,6 @@ func (p *Provider) publish(event events.Event) {
 	out <- event
 }
 
-func (p *Provider) configureSession(ctx context.Context, session *Session, opts runtime.StartOptions) error {
-	if opts.Model != "" {
-		if err := session.Client.SetSessionModel(ctx, session.SessionID, opts.Model); err != nil {
-			return fmt.Errorf("set session model %q: %w", opts.Model, err)
-		}
-	}
-	if opts.Agent != "" {
-		if err := session.Client.SetSessionMode(ctx, session.SessionID, opts.Agent); err != nil {
-			return fmt.Errorf("set session agent %q: %w", opts.Agent, err)
-		}
-	}
-	return nil
-}
-
 func (p *Provider) cachePermissionOptions(event events.Event) {
 	if event.Event == "session.end" {
 		p.mu.Lock()
@@ -302,6 +310,16 @@ func (p *Provider) cachePermissionOptions(event events.Event) {
 	p.mu.Unlock()
 }
 
+func (p *Provider) session(sessionID string) (*Session, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	session := p.sessions[sessionID]
+	if session == nil {
+		return nil, fmt.Errorf("session %q not found", sessionID)
+	}
+	return session, nil
+}
+
 func pendingPermissionOptions(pending map[string]map[string][]any, sessionID, requestID string) (string, []any) {
 	if pending == nil {
 		return "", nil
@@ -319,16 +337,6 @@ func pendingPermissionOptions(pending map[string]map[string][]any, sessionID, re
 		}
 	}
 	return "", nil
-}
-
-func (p *Provider) session(sessionID string) (*Session, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	session := p.sessions[sessionID]
-	if session == nil {
-		return nil, fmt.Errorf("session %q not found", sessionID)
-	}
-	return session, nil
 }
 
 func permissionResponseResult(response runtime.PermissionResponse, optionID string) map[string]any {

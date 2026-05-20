@@ -1,4 +1,4 @@
-package opencodeacp
+package acp
 
 import (
 	"bytes"
@@ -86,10 +86,11 @@ func TestSelectPermissionOption(t *testing.T) {
 }
 
 func TestAnswerPermissionMissingOptions(t *testing.T) {
-	p := &Provider{
-		client:         &Client{},
-		pendingOptions: map[string]map[string][]any{},
-	}
+	p := &Provider{}
+	p.mu.Lock()
+	p.client = &Client{}
+	p.pendingOptions = map[string]map[string][]any{}
+	p.mu.Unlock()
 
 	err := p.AnswerPermission(context.Background(), "ses", "req_missing", runtime.PermissionResponse{Allow: true})
 	if err == nil {
@@ -130,15 +131,16 @@ func TestCachePermissionOptions(t *testing.T) {
 }
 
 func TestCachePermissionOptionsNonRequestEvent(t *testing.T) {
-	p := &Provider{
-		pendingOptions: map[string]map[string][]any{
-			"ses_existing": {
-				"req_existing": {
-					map[string]any{"optionId": "allow", "kind": "allow"},
-				},
+	p := &Provider{}
+	p.mu.Lock()
+	p.pendingOptions = map[string]map[string][]any{
+		"ses_existing": {
+			"req_existing": {
+				map[string]any{"optionId": "allow", "kind": "allow"},
 			},
 		},
 	}
+	p.mu.Unlock()
 	ev := events.Event{
 		Event:  "message",
 		Fields: map[string]any{"request_id": "req_nope", "options": []any{map[string]any{"optionId": "deny", "kind": "reject"}}},
@@ -159,15 +161,16 @@ func TestCachePermissionOptionsNonRequestEvent(t *testing.T) {
 }
 
 func TestCachePermissionOptionsSessionEndClearsCache(t *testing.T) {
-	p := &Provider{
-		pendingOptions: map[string]map[string][]any{
-			"ses_pending": {
-				"req_pending": {
-					map[string]any{"optionId": "allow", "kind": "allow"},
-				},
+	p := &Provider{}
+	p.mu.Lock()
+	p.pendingOptions = map[string]map[string][]any{
+		"ses_pending": {
+			"req_pending": {
+				map[string]any{"optionId": "allow", "kind": "allow"},
 			},
 		},
 	}
+	p.mu.Unlock()
 	p.cachePermissionOptions(events.Event{
 		Event:     "session.end",
 		SessionID: "ses_pending",
@@ -183,20 +186,21 @@ func TestCachePermissionOptionsSessionEndClearsCache(t *testing.T) {
 }
 
 func TestCachePermissionOptionsSessionEndWithoutSessionClearsAll(t *testing.T) {
-	p := &Provider{
-		pendingOptions: map[string]map[string][]any{
-			"ses_a": {
-				"req_a": {
-					map[string]any{"optionId": "allow", "kind": "allow"},
-				},
+	p := &Provider{}
+	p.mu.Lock()
+	p.pendingOptions = map[string]map[string][]any{
+		"ses_a": {
+			"req_a": {
+				map[string]any{"optionId": "allow", "kind": "allow"},
 			},
-			"ses_b": {
-				"req_b": {
-					map[string]any{"optionId": "deny", "kind": "reject"},
-				},
+		},
+		"ses_b": {
+			"req_b": {
+				map[string]any{"optionId": "deny", "kind": "reject"},
 			},
 		},
 	}
+	p.mu.Unlock()
 	p.cachePermissionOptions(events.Event{Event: "session.end"})
 
 	p.mu.Lock()
@@ -227,15 +231,16 @@ func TestCachePermissionOptionsNoOptions(t *testing.T) {
 }
 
 func TestCloseClearsPermissionOptions(t *testing.T) {
-	p := &Provider{
-		pendingOptions: map[string]map[string][]any{
-			"ses_pending": {
-				"req_pending": {
-					map[string]any{"optionId": "allow", "kind": "allow"},
-				},
+	p := &Provider{}
+	p.mu.Lock()
+	p.pendingOptions = map[string]map[string][]any{
+		"ses_pending": {
+			"req_pending": {
+				map[string]any{"optionId": "allow", "kind": "allow"},
 			},
 		},
 	}
+	p.mu.Unlock()
 
 	if err := p.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -249,16 +254,17 @@ func TestCloseClearsPermissionOptions(t *testing.T) {
 }
 
 func TestAnswerPermissionKeepsCacheOnAnswerFailure(t *testing.T) {
-	p := &Provider{
-		client: &Client{},
-		pendingOptions: map[string]map[string][]any{
-			"ses": {
-				"req": {
-					map[string]any{"optionId": "allow", "kind": "allow"},
-				},
+	p := &Provider{}
+	p.mu.Lock()
+	p.client = &Client{}
+	p.pendingOptions = map[string]map[string][]any{
+		"ses": {
+			"req": {
+				map[string]any{"optionId": "allow", "kind": "allow"},
 			},
 		},
 	}
+	p.mu.Unlock()
 
 	err := p.AnswerPermission(context.Background(), "ses", "req", runtime.PermissionResponse{Allow: true})
 	if err == nil || !strings.Contains(err.Error(), `permission request "req" not found`) {
@@ -281,19 +287,20 @@ func (recordingWriteCloser) Close() error { return nil }
 
 func TestAnswerPermissionRemovesCacheAfterSuccess(t *testing.T) {
 	stdin := &recordingWriteCloser{}
-	p := &Provider{
-		client: &Client{
-			stdin:       stdin,
-			permissions: map[string]rpcEnvelope{"req": {ID: []byte("1")}},
-		},
-		pendingOptions: map[string]map[string][]any{
-			"ses": {
-				"req": {
-					map[string]any{"optionId": "allow", "kind": "allow"},
-				},
+	p := &Provider{}
+	p.mu.Lock()
+	p.client = &Client{
+		stdin:       stdin,
+		permissions: map[string]rpcEnvelope{"req": {ID: []byte("1")}},
+	}
+	p.pendingOptions = map[string]map[string][]any{
+		"ses": {
+			"req": {
+				map[string]any{"optionId": "allow", "kind": "allow"},
 			},
 		},
 	}
+	p.mu.Unlock()
 
 	if err := p.AnswerPermission(context.Background(), "ses", "req", runtime.PermissionResponse{Allow: true}); err != nil {
 		t.Fatalf("AnswerPermission: %v", err)
@@ -309,20 +316,21 @@ func TestAnswerPermissionRemovesCacheAfterSuccess(t *testing.T) {
 
 func TestAnswerPermissionUsesExplicitOptionID(t *testing.T) {
 	stdin := &recordingWriteCloser{}
-	p := &Provider{
-		client: &Client{
-			stdin:       stdin,
-			permissions: map[string]rpcEnvelope{"req": {ID: []byte("1")}},
-		},
-		pendingOptions: map[string]map[string][]any{
-			"ses": {
-				"req": {
-					map[string]any{"optionId": "allow_first", "kind": "allow"},
-					map[string]any{"optionId": "allow_second", "kind": "allow"},
-				},
+	p := &Provider{}
+	p.mu.Lock()
+	p.client = &Client{
+		stdin:       stdin,
+		permissions: map[string]rpcEnvelope{"req": {ID: []byte("1")}},
+	}
+	p.pendingOptions = map[string]map[string][]any{
+		"ses": {
+			"req": {
+				map[string]any{"optionId": "allow_first", "kind": "allow"},
+				map[string]any{"optionId": "allow_second", "kind": "allow"},
 			},
 		},
 	}
+	p.mu.Unlock()
 
 	err := p.AnswerPermission(context.Background(), "ses", "req", runtime.PermissionResponse{
 		Allow:    true,
@@ -337,16 +345,17 @@ func TestAnswerPermissionUsesExplicitOptionID(t *testing.T) {
 }
 
 func TestAnswerPermissionRejectsExplicitOptionKindMismatch(t *testing.T) {
-	p := &Provider{
-		client: &Client{},
-		pendingOptions: map[string]map[string][]any{
-			"ses": {
-				"req": {
-					map[string]any{"optionId": "deny", "kind": "reject"},
-				},
+	p := &Provider{}
+	p.mu.Lock()
+	p.client = &Client{}
+	p.pendingOptions = map[string]map[string][]any{
+		"ses": {
+			"req": {
+				map[string]any{"optionId": "deny", "kind": "reject"},
 			},
 		},
 	}
+	p.mu.Unlock()
 
 	err := p.AnswerPermission(context.Background(), "ses", "req", runtime.PermissionResponse{
 		Allow:    true,
@@ -366,19 +375,20 @@ func TestAnswerPermissionRejectsExplicitOptionKindMismatch(t *testing.T) {
 
 func TestAnswerPermissionRemovesFallbackCacheAfterSuccess(t *testing.T) {
 	stdin := &recordingWriteCloser{}
-	p := &Provider{
-		client: &Client{
-			stdin:       stdin,
-			permissions: map[string]rpcEnvelope{"req": {ID: []byte("1")}},
-		},
-		pendingOptions: map[string]map[string][]any{
-			"": {
-				"req": {
-					map[string]any{"optionId": "allow", "kind": "allow"},
-				},
+	p := &Provider{}
+	p.mu.Lock()
+	p.client = &Client{
+		stdin:       stdin,
+		permissions: map[string]rpcEnvelope{"req": {ID: []byte("1")}},
+	}
+	p.pendingOptions = map[string]map[string][]any{
+		"": {
+			"req": {
+				map[string]any{"optionId": "allow", "kind": "allow"},
 			},
 		},
 	}
+	p.mu.Unlock()
 
 	if err := p.AnswerPermission(context.Background(), "ses", "req", runtime.PermissionResponse{Allow: true}); err != nil {
 		t.Fatalf("AnswerPermission: %v", err)

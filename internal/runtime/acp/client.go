@@ -1,4 +1,4 @@
-package opencodeacp
+package acp
 
 import (
 	"bufio"
@@ -20,6 +20,14 @@ import (
 	"github.com/sdougbrown/avenor/internal/events"
 )
 
+type ClientConfig struct {
+	Bin                  string
+	Args                 []string
+	Dir                  string
+	AutoAnswerPermission bool
+	AppendCWDArg         bool
+}
+
 type Client struct {
 	cmd                  *exec.Cmd
 	stdin                io.WriteCloser
@@ -39,20 +47,8 @@ type Client struct {
 	pid                  int
 }
 
-type ClientOptions struct {
-	Dir                  string
-	AutoAnswerPermission bool
-}
-
-func NewClient(ctx context.Context, dir string) (*Client, error) {
-	return NewClientWithOptions(ctx, ClientOptions{
-		Dir:                  dir,
-		AutoAnswerPermission: true,
-	})
-}
-
-func NewClientWithOptions(ctx context.Context, opts ClientOptions) (*Client, error) {
-	dir := opts.Dir
+func NewClient(ctx context.Context, cfg ClientConfig) (*Client, error) {
+	dir := cfg.Dir
 	if dir == "" {
 		dir = "."
 	}
@@ -61,7 +57,12 @@ func NewClientWithOptions(ctx context.Context, opts ClientOptions) (*Client, err
 		return nil, err
 	}
 
-	cmd := exec.CommandContext(ctx, "opencode", "acp", "--pure", "--log-level", "WARN", "--cwd", absDir)
+	args := make([]string, len(cfg.Args))
+	copy(args, cfg.Args)
+	if cfg.AppendCWDArg {
+		args = append(args, "--cwd", absDir)
+	}
+	cmd := exec.CommandContext(ctx, cfg.Bin, args...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -80,7 +81,7 @@ func NewClientWithOptions(ctx context.Context, opts ClientOptions) (*Client, err
 		done:                 make(chan struct{}),
 		pending:              map[string]chan rpcEnvelope{},
 		permissions:          map[string]rpcEnvelope{},
-		autoAnswerPermission: opts.AutoAnswerPermission,
+		autoAnswerPermission: cfg.AutoAnswerPermission,
 	}
 	cmd.Stderr = &client.stderr
 
@@ -170,7 +171,7 @@ func (c *Client) request(ctx context.Context, method string, params any) (json.R
 		if c.readErr != nil {
 			return nil, c.readErr
 		}
-		return nil, errors.New("opencode acp exited")
+		return nil, errors.New("acp client exited")
 	}
 }
 
@@ -205,16 +206,16 @@ func (c *Client) readLoop() {
 		if err != nil {
 			waitErr := c.cmd.Wait()
 			if !errors.Is(err, io.EOF) {
-				c.readErr = fmt.Errorf("read opencode acp: %w%s", err, c.stderrSuffix())
+				c.readErr = fmt.Errorf("read acp client: %w%s", err, c.stderrSuffix())
 			} else if waitErr != nil {
-				c.readErr = fmt.Errorf("opencode acp exited: %w%s", waitErr, c.stderrSuffix())
+				c.readErr = fmt.Errorf("acp client exited: %w%s", waitErr, c.stderrSuffix())
 			}
 			return
 		}
 
 		var msg rpcEnvelope
 		if err := json.Unmarshal(data, &msg); err != nil {
-			c.readErr = fmt.Errorf("decode opencode acp frame: %w", err)
+			c.readErr = fmt.Errorf("decode acp frame: %w", err)
 			_ = c.cmd.Process.Kill()
 			_ = c.cmd.Wait()
 			return
@@ -273,24 +274,9 @@ func (c *Client) handleRequest(msg rpcEnvelope) {
 			ID:      msg.ID,
 			Error: &rpcError{
 				Code:    -32601,
-				Message: "method not implemented by avenor probe",
+				Message: "method not implemented by avenor",
 			},
 		})
-	}
-}
-
-func rpcIDString(id json.RawMessage) string {
-	var value any
-	if err := json.Unmarshal(id, &value); err != nil {
-		return string(id)
-	}
-	switch v := value.(type) {
-	case string:
-		return v
-	case float64:
-		return strconv.FormatFloat(v, 'f', -1, 64)
-	default:
-		return fmt.Sprint(v)
 	}
 }
 
@@ -312,32 +298,11 @@ func (c *Client) answerPermission(requestID string, result any) error {
 	})
 }
 
-func defaultPermissionResponse(params json.RawMessage) map[string]any {
-	var payload struct {
-		Options []struct {
-			OptionID string `json:"optionId"`
-			Kind     string `json:"kind"`
-		} `json:"options"`
+func (c *Client) stderrSuffix() string {
+	if c.stderr.Len() == 0 {
+		return ""
 	}
-	_ = json.Unmarshal(params, &payload)
-
-	selected := ""
-	for _, opt := range payload.Options {
-		if strings.HasPrefix(opt.Kind, "reject") {
-			selected = opt.OptionID
-			break
-		}
-	}
-	if selected == "" && len(payload.Options) > 0 {
-		selected = payload.Options[0].OptionID
-	}
-
-	return map[string]any{
-		"outcome": map[string]any{
-			"outcome":  "selected",
-			"optionId": selected,
-		},
-	}
+	return ": " + c.stderr.String()
 }
 
 func readFrame(reader *bufio.Reader) ([]byte, error) {
@@ -395,14 +360,45 @@ func mustRaw(v any) json.RawMessage {
 	return data
 }
 
-func (c *Client) stderrSuffix() string {
-	if c.stderr.Len() == 0 {
-		return ""
+func rpcIDString(id json.RawMessage) string {
+	var value any
+	if err := json.Unmarshal(id, &value); err != nil {
+		return string(id)
 	}
-	return ": " + c.stderr.String()
+	switch v := value.(type) {
+	case string:
+		return v
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	default:
+		return fmt.Sprint(v)
+	}
 }
 
-func opencodeAvailable() bool {
-	_, err := exec.LookPath("opencode")
-	return err == nil
+func defaultPermissionResponse(params json.RawMessage) map[string]any {
+	var payload struct {
+		Options []struct {
+			OptionID string `json:"optionId"`
+			Kind     string `json:"kind"`
+		} `json:"options"`
+	}
+	_ = json.Unmarshal(params, &payload)
+
+	selected := ""
+	for _, opt := range payload.Options {
+		if strings.HasPrefix(opt.Kind, "reject") {
+			selected = opt.OptionID
+			break
+		}
+	}
+	if selected == "" && len(payload.Options) > 0 {
+		selected = payload.Options[0].OptionID
+	}
+
+	return map[string]any{
+		"outcome": map[string]any{
+			"outcome":  "selected",
+			"optionId": selected,
+		},
+	}
 }

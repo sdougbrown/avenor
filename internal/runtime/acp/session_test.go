@@ -1,4 +1,4 @@
-package opencodeacp
+package acp
 
 import "testing"
 

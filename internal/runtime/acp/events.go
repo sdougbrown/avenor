@@ -1,4 +1,4 @@
-package opencodeacp
+package acp
 
 import (
 	"encoding/json"
@@ -25,22 +25,7 @@ var knownProbeEvents = map[string]bool{
 	"user.message_chunk":  true,
 	"session.plan":        true,
 	"permission.request":  true,
-	"session.end":         true,
-}
-
-type rpcEnvelope struct {
-	JSONRPC string          `json:"jsonrpc,omitempty"`
-	ID      json.RawMessage `json:"id,omitempty"`
-	Method  string          `json:"method,omitempty"`
-	Params  json.RawMessage `json:"params,omitempty"`
-	Result  json.RawMessage `json:"result,omitempty"`
-	Error   *rpcError       `json:"error,omitempty"`
-}
-
-type rpcError struct {
-	Code    int             `json:"code"`
-	Message string          `json:"message"`
-	Data    json.RawMessage `json:"data,omitempty"`
+	"session.end":          true,
 }
 
 func mapSessionUpdate(params json.RawMessage) (events.Event, error) {
@@ -130,7 +115,7 @@ func mapPromptResponse(sessionID string, result json.RawMessage) (events.Event, 
 					}
 					fields["usage"] = u
 				}
-				continue // drop non-map usage rather than corrupt fields
+				continue
 			}
 			fields[k] = v
 		}
@@ -170,8 +155,6 @@ func mapPermissionRequestWithID(params json.RawMessage, requestID string) events
 	}
 }
 
-// ParseTranscriptEvent maps either a raw ACP JSON-RPC line or an already
-// normalized Avenor event line into an Event.
 func ParseTranscriptEvent(line []byte) (events.Event, error) {
 	var normalized events.Event
 	if err := json.Unmarshal(line, &normalized); err == nil && normalized.Event != "" {

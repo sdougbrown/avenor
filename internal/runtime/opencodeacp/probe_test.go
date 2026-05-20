@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/sdougbrown/avenor/internal/runtime/acp"
 )
 
 func TestProbeTranscriptVocabulary(t *testing.T) {
@@ -32,7 +34,7 @@ func TestProbeTranscriptVocabulary(t *testing.T) {
 	lineNumber := 0
 	for scanner.Scan() {
 		lineNumber++
-		event, err := ParseTranscriptEvent(scanner.Bytes())
+		event, err := acp.ParseTranscriptEvent(scanner.Bytes())
 		if err != nil {
 			t.Fatalf("line %d: %v", lineNumber, err)
 		}
@@ -57,7 +59,7 @@ func TestProbeTranscriptVocabulary(t *testing.T) {
 
 func TestMapRawSessionUpdate(t *testing.T) {
 	line := []byte(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello"},"messageId":"m1"}}}`)
-	event, err := ParseTranscriptEvent(line)
+	event, err := acp.ParseTranscriptEvent(line)
 	if err != nil {
 		t.Fatalf("parse raw update: %v", err)
 	}

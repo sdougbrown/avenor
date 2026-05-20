@@ -1,4 +1,4 @@
-package opencodeacp
+package acp
 
 import (
 	"encoding/json"
@@ -39,7 +39,6 @@ func TestMapPromptResponseNormalisesUsage(t *testing.T) {
 		t.Errorf("usage.cached_read_tokens = %v, want 3", usage["cached_read_tokens"])
 	}
 
-	// Top-level camelCase keys must NOT exist (they are nested under usage)
 	if _, exists := event.Fields["inputTokens"]; exists {
 		t.Error("event.Fields[\"inputTokens\"] exists at top level, should be nested under usage")
 	}
@@ -81,7 +80,6 @@ func TestMapPromptResponseSnakeCaseFallback(t *testing.T) {
 }
 
 func TestMapPromptResponseOmitsNilUsageKeys(t *testing.T) {
-	// Only two of four usage keys present — the absent ones should be omitted.
 	raw := json.RawMessage(`{ "stopReason": "end_turn", "usage": { "outputTokens": 5 } }`)
 
 	event, err := mapPromptResponse("ses_partial", raw)
@@ -107,7 +105,6 @@ func TestMapPromptResponseOmitsNilUsageKeys(t *testing.T) {
 }
 
 func TestMapPromptResponseNonMapUsageDropped(t *testing.T) {
-	// When usage is not a map, it should not appear in fields.
 	raw := json.RawMessage(`{ "stopReason": "end_turn", "usage": ["invalid"] }`)
 
 	event, err := mapPromptResponse("ses_nonmap", raw)
@@ -120,7 +117,6 @@ func TestMapPromptResponseNonMapUsageDropped(t *testing.T) {
 }
 
 func TestMapPromptResponseMissingStopReason(t *testing.T) {
-	// Missing stopReason should return error.
 	raw := json.RawMessage(`{ "other": "value" }`)
 
 	_, err := mapPromptResponse("ses_nostop", raw)
@@ -130,7 +126,6 @@ func TestMapPromptResponseMissingStopReason(t *testing.T) {
 }
 
 func TestMapPromptResponseInvalidJSON(t *testing.T) {
-	// Invalid JSON should return error.
 	raw := json.RawMessage(`{ "bad"`)
 
 	_, err := mapPromptResponse("ses_badjson", raw)
