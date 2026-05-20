@@ -2141,3 +2141,166 @@ func TestRunCodexAppServerBackend(t *testing.T) {
 		t.Fatalf("runAttempt backend = %q, want %q", gotBackend, "codex-app-server")
 	}
 }
+
+func TestWaitForSessionChunkedStatusMarker(t *testing.T) {
+	tests := []struct {
+		name      string
+		chunks    []string
+		wantPhase string
+		wantLabel string
+		wantOK    bool
+	}{
+		{
+			name:      "status marker split across chunks",
+			chunks:    []string{"[sta", "tus: working | running tests]"},
+			wantPhase: "working",
+			wantLabel: "running tests",
+			wantOK:    true,
+		},
+		{
+			name:      "status marker in single chunk",
+			chunks:    []string{"[status: thinking | analysing]"},
+			wantPhase: "thinking",
+			wantLabel: "analysing",
+			wantOK:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			eventsPath := filepath.Join(dir, "events.ndjson")
+			writer, err := NewEventWriter(eventsPath)
+			if err != nil {
+				t.Fatalf("newEventWriter: %v", err)
+			}
+
+			eventCh := make(chan events.Event, len(tt.chunks)+2)
+			for _, c := range tt.chunks {
+				eventCh <- events.Event{
+					Event:     "agent.message_chunk",
+					SessionID: "ses_chunk",
+					Fields: map[string]any{
+						"content": map[string]any{"text": c},
+					},
+				}
+			}
+			eventCh <- events.Event{
+				Event:     "session.end",
+				SessionID: "ses_chunk",
+				Fields:    map[string]any{"stop_reason": "end_turn"},
+			}
+			close(eventCh)
+
+			promptDone := make(chan error, 1)
+			promptDone <- nil
+
+			provider := &cliFakeProvider{}
+			var stderr strings.Builder
+			result := waitForSessionForTest(
+				context.Background(), provider,
+				writer, nil, nil,
+				eventCh, promptDone, nil,
+				"ses_chunk", "run_chunk", "",
+				true, DefaultPermissionClaimTimeout,
+				nil, &stderr,
+			)
+			if closeErr := writer.Close(); closeErr != nil {
+				t.Fatalf("close writer: %v", closeErr)
+			}
+			if result.ExitCode != 0 {
+				t.Fatalf("result.ExitCode = %d, want 0", result.ExitCode)
+			}
+
+			got := readEventLogForTest(t, eventsPath)
+			var foundStatus bool
+			for _, ev := range got {
+				if ev.Event == "agent.status" {
+					ph, _ := ev.Fields["phase"].(string)
+					lbl, _ := ev.Fields["label"].(string)
+					if ph == tt.wantPhase && lbl == tt.wantLabel {
+						foundStatus = true
+					}
+				}
+			}
+			if !foundStatus {
+				t.Errorf("status phase=%q label=%q not found in events: %+v", tt.wantPhase, tt.wantLabel, got)
+			}
+		})
+	}
+}
+
+func TestWaitForSessionChunkedStatusMarkerDedup(t *testing.T) {
+	// Verifies that sending the same status marker across multiple chunk
+	// events results in only ONE agent.status emission.
+	dir := t.TempDir()
+	eventsPath := filepath.Join(dir, "events.ndjson")
+	writer, err := NewEventWriter(eventsPath)
+	if err != nil {
+		t.Fatalf("newEventWriter: %v", err)
+	}
+
+	eventCh := make(chan events.Event, 5)
+	eventCh <- events.Event{
+		Event:     "agent.message_chunk",
+		SessionID: "ses_dedup",
+		Fields: map[string]any{
+			"content": map[string]any{"text": "[sta"},
+		},
+	}
+	eventCh <- events.Event{
+		Event:     "agent.message_chunk",
+		SessionID: "ses_dedup",
+		Fields: map[string]any{
+			"content": map[string]any{"text": "tus: working | first]"},
+		},
+	}
+	// Append more text so status markers keep getting scanned, then
+	// repeat the same marker text — chunkBuf dedup should suppress it.
+	eventCh <- events.Event{
+		Event:     "agent.message_chunk",
+		SessionID: "ses_dedup",
+		Fields: map[string]any{
+			"content": map[string]any{"text": " more text [status: working | first] trailing"},
+		},
+	}
+	eventCh <- events.Event{
+		Event:     "session.end",
+		SessionID: "ses_dedup",
+		Fields:    map[string]any{"stop_reason": "end_turn"},
+	}
+	close(eventCh)
+
+	promptDone := make(chan error, 1)
+	promptDone <- nil
+
+	provider := &cliFakeProvider{}
+	var stderr strings.Builder
+	result := waitForSessionForTest(
+		context.Background(), provider,
+		writer, nil, nil,
+		eventCh, promptDone, nil,
+		"ses_dedup", "run_dedup", "",
+		true, DefaultPermissionClaimTimeout,
+		nil, &stderr,
+	)
+	if closeErr := writer.Close(); closeErr != nil {
+		t.Fatalf("close writer: %v", closeErr)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("result.ExitCode = %d, want 0", result.ExitCode)
+	}
+
+	got := readEventLogForTest(t, eventsPath)
+	workingCount := 0
+	for _, ev := range got {
+		if ev.Event == "agent.status" {
+			if ph, _ := ev.Fields["phase"].(string); ph == "working" {
+				workingCount++
+			}
+		}
+	}
+	if workingCount != 1 {
+		t.Fatalf("expected 1 agent.status working event, got %d: %+v", workingCount, got)
+	}
+}

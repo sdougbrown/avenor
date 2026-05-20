@@ -48,6 +48,18 @@ func TestChunkBuffer(t *testing.T) {
 			wantDir: "exit",
 			wantOK:  true,
 		},
+		{
+			name:    "labelled marker in single chunk",
+			appends: []string{"[loop: exit | some label]\n"},
+			wantDir: "exit",
+			wantLbl: "some label",
+			wantOK:  true,
+		},
+		{
+			name:    "marker pushed out then not found",
+			appends: []string{"[loop: exit]\n", strings.Repeat("x", 600)},
+			wantOK:  false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -102,6 +114,26 @@ func TestChunkBufferStatusDeduplication(t *testing.T) {
 			t.Fatalf("second call: ok=%v phase=%q label=%q", ok, phase, label)
 		}
 	})
+
+	t.Run("same status re-emitted after buffer overflow", func(t *testing.T) {
+		cb := NewChunkBufferLen(40)
+		cb.Append("[status: working | foo]")
+		phase, label, ok := cb.ScanStatusMarker()
+		if !ok || phase != "working" || label != "foo" {
+			t.Fatalf("first call: ok=%v phase=%q label=%q", ok, phase, label)
+		}
+
+		// Push the first marker out of the window with filler
+		cb.Append(strings.Repeat("x", 50))
+
+		// Now append the same marker again — it should be re-emitted
+		// because the buffer overflow cleared lastStatusKey
+		cb.Append("[status: working | foo]")
+		phase, label, ok = cb.ScanStatusMarker()
+		if !ok || phase != "working" || label != "foo" {
+			t.Fatalf("after overflow: ok=%v phase=%q label=%q", ok, phase, label)
+		}
+	})
 }
 
 func TestChunkBufferEmptyAppend(t *testing.T) {
@@ -113,7 +145,7 @@ func TestChunkBufferEmptyAppend(t *testing.T) {
 	}
 }
 
-func TestChunkBufferLoopSeverityAccumulation(t *testing.T) {
+func TestChunkBufferLoopMarkerHighestSeverityWins(t *testing.T) {
 	cb := NewChunkBuffer()
 	cb.Append("[loop: abort | critical]\n")
 	dir, label, ok := cb.ScanLoopMarker()

@@ -25,6 +25,9 @@ func NewChunkBuffer() *ChunkBuffer {
 
 // NewChunkBufferLen creates a buffer with a custom maximum size.
 func NewChunkBufferLen(maxLen int) *ChunkBuffer {
+	if maxLen < 64 {
+		maxLen = 64
+	}
 	return &ChunkBuffer{maxLen: maxLen}
 }
 
@@ -36,15 +39,20 @@ func (cb *ChunkBuffer) Append(text string) {
 		tail := cb.buf.String()[cb.buf.Len()-cb.maxLen:]
 		cb.buf.Reset()
 		cb.buf.WriteString(tail)
+		cb.lastStatusKey = ""
 	}
 }
 
-// Text returns the accumulated buffer contents.
+// Text returns the accumulated buffer contents. Used in unit tests for assertions.
 func (cb *ChunkBuffer) Text() string {
 	return cb.buf.String()
 }
 
 // ScanLoopMarker runs ExtractLoopMarker over the accumulated buffer.
+// Note: unlike ScanStatusMarker, this does NOT deduplicate. In the
+// WaitForSession loop the severity guard (abort > exit > continue)
+// prevents incorrect behaviour even if a loop marker is re-found while
+// still in the buffer.
 func (cb *ChunkBuffer) ScanLoopMarker() (directive, label string, ok bool) {
 	return ExtractLoopMarker(cb.buf.String())
 }

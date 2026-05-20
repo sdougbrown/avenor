@@ -558,6 +558,9 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 						}
 						markerHandled = true
 					}
+					// Loop markers are intentionally left out of markerHandled.
+					// The raw event still reaches tracker.Observe so the caller
+					// sees the full message text including the marker.
 					if dir, lbl, ok := chunkBuf.ScanLoopMarker(); ok {
 						if loopDirectiveSeverity(dir) > loopDirectiveSeverity(loopDirective) {
 							loopDirective = dir
