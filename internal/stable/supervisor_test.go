@@ -114,6 +114,30 @@ func TestManagedHTTPServerStartupFailure(t *testing.T) {
 	}
 }
 
+func TestStartHTTPServerSetsCmdDir(t *testing.T) {
+	sup := NewSupervisor(Config{
+		ControlSocket: "/tmp/test-http-server-dir.sock",
+		MaxRuntimes:   2,
+	})
+
+	var capturedCmd *exec.Cmd
+	withFakeExec(t, func(name string, arg ...string) *exec.Cmd {
+		cmd := exec.Command("false")
+		capturedCmd = cmd
+		return cmd
+	})
+
+	dir := t.TempDir()
+	_, _ = sup.getOrCreateHTTPServer(dir)
+
+	if capturedCmd == nil {
+		t.Fatal("httpExecCommand was not called")
+	}
+	if capturedCmd.Dir != dir {
+		t.Fatalf("cmd.Dir = %q, want %q", capturedCmd.Dir, dir)
+	}
+}
+
 func TestManagedHTTPServerCleanupOnMap(t *testing.T) {
 	sup := NewSupervisor(Config{
 		ControlSocket: "/tmp/test-http-server-cleanup.sock",
