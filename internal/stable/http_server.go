@@ -46,9 +46,13 @@ func (s *managedHTTPServer) shutdown() error {
 	case <-s.exited:
 	case <-time.After(3 * time.Second):
 		if pgid, err := syscall.Getpgid(s.cmd.Process.Pid); err == nil {
-			_ = syscall.Kill(-pgid, syscall.SIGKILL)
+			if killErr := syscall.Kill(-pgid, syscall.SIGKILL); killErr != nil {
+				fmt.Fprintf(os.Stderr, "avenor stable: SIGKILL process group %d: %v\n", pgid, killErr)
+			}
 		} else {
-			_ = s.cmd.Process.Kill()
+			if killErr := s.cmd.Process.Kill(); killErr != nil {
+				fmt.Fprintf(os.Stderr, "avenor stable: SIGKILL process %d: %v\n", s.cmd.Process.Pid, killErr)
+			}
 		}
 		<-s.exited
 	}
@@ -61,7 +65,11 @@ func (s *managedHTTPServer) shutdown() error {
 }
 
 func (s *managedHTTPServer) healthCheck(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.url+"/global/health", nil)
+	return s.healthCheckWithURL(ctx, s.url)
+}
+
+func (s *managedHTTPServer) healthCheckWithURL(ctx context.Context, url string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url+"/global/health", nil)
 	if err != nil {
 		return err
 	}
@@ -123,6 +131,22 @@ func (s *Supervisor) getOrCreateHTTPServer(dir string) (*managedHTTPServer, erro
 		}
 		s.httpServerMu.Unlock()
 
+		// Re-validate m.url: another goroutine could call shutdown()
+		// between the unlock above and the healthCheck below, clearing m.url.
+		m.mu.Lock()
+		url := m.url
+		m.mu.Unlock()
+		if url == "" {
+			// Server was shut down — loop to restart.
+			s.httpServerMu.Lock()
+			if s.httpServers[absDir] == m {
+				delete(s.httpServers, absDir)
+			}
+			s.httpServerCond.Broadcast()
+			s.httpServerMu.Unlock()
+			continue
+		}
+
 		select {
 		case <-m.exited:
 			// Process has exited — clean up and loop to restart.
@@ -137,7 +161,7 @@ func (s *Supervisor) getOrCreateHTTPServer(dir string) (*managedHTTPServer, erro
 
 		// Process still alive — verify health.
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		herr := m.healthCheck(ctx)
+		herr := m.healthCheckWithURL(ctx, url)
 		cancel()
 		if herr == nil {
 			m.mu.Lock()

@@ -978,8 +978,7 @@ func newStableSocketTestDir(t *testing.T, name string) string {
 }
 
 // withFakeExec replaces httpExecCommand for the duration of the test,
-// restoring it on cleanup. Returns the replaced function for manual
-// restore if needed.
+// restoring it on cleanup.
 func withFakeExec(t *testing.T, fake func(name string, arg ...string) *exec.Cmd) {
 	t.Helper()
 	old := httpExecCommand
