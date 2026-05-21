@@ -14,6 +14,10 @@ func TestNormalizeOptionKind(t *testing.T) {
 		"deny_once":     "reject",
 		"deny_always":   "reject",
 		" other ":       "other",
+		"":              "",
+		"ALLOW":         "allow",
+		"Deny":          "reject",
+		"REJECT_ONCE":   "reject",
 	}
 
 	for input, want := range tests {
