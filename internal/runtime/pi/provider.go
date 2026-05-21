@@ -14,19 +14,16 @@ import (
 const backendID = "pi"
 
 type Provider struct {
-	opts runtime.StartOptions
-
+	opts     runtime.StartOptions
 	mu       sync.Mutex
 	client   *client
 	sessions map[string]string
-	turns    map[string]string
 }
 
 func NewWithOptions(opts runtime.StartOptions) *Provider {
 	return &Provider{
 		opts:     opts,
 		sessions: map[string]string{},
-		turns:    map[string]string{},
 	}
 }
 
@@ -117,9 +114,6 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 	}
 
 turnCh := make(chan events.Event, 1)
-	p.mu.Lock()
-	p.turns[sessionID] = sessionID
-	p.mu.Unlock()
 
 	subCh := make(chan events.Event, 128)
 	c.subscribe(sessionID, subCh)
@@ -156,9 +150,6 @@ turnCh := make(chan events.Event, 1)
 		c.unsubscribe(sessionID, subCh)
 		close(subCh)
 		<-done
-		p.mu.Lock()
-		delete(p.turns, sessionID)
-		p.mu.Unlock()
 
 		reason, _ := ev.Fields["stop_reason"]
 		switch reason {
@@ -179,9 +170,6 @@ turnCh := make(chan events.Event, 1)
 		c.unsubscribe(sessionID, subCh)
 		close(subCh)
 		<-done
-		p.mu.Lock()
-		delete(p.turns, sessionID)
-		p.mu.Unlock()
 		return ctx.Err()
 	}
 }
@@ -232,10 +220,16 @@ func (p *Provider) AnswerPermission(ctx context.Context, sessionID string, reque
 
 	c.mu.Lock()
 	approval, ok := c.approvals[requestID]
-	c.mu.Unlock()
 	if !ok {
+		c.mu.Unlock()
 		return fmt.Errorf("extension UI request %q not found", requestID)
 	}
+	if approval.sessionID != "" && approval.sessionID != sessionID {
+		c.mu.Unlock()
+		return fmt.Errorf("approval request %q belongs to session %q, not %q", requestID, approval.sessionID, sessionID)
+	}
+	delete(c.approvals, requestID)
+	c.mu.Unlock()
 
 	resp := map[string]any{
 		"cancelled": false,

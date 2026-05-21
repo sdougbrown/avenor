@@ -19,9 +19,10 @@ import (
 const stderrCap = 400
 
 type pendingApproval struct {
-	id     string
-	method string
-	rawID  string
+	id        string
+	method    string
+	rawID     any
+	sessionID string
 }
 
 type client struct {
@@ -38,6 +39,7 @@ type client struct {
 	stderr     *rollingBuffer
 	eventsCh   chan events.Event
 	done       chan struct{}
+	closeOnce  sync.Once
 	sessionID  string
 	sessionCh  chan struct{}
 }
@@ -116,14 +118,16 @@ func (c *client) Close() error {
 
 	<-c.done
 
-	c.mu.Lock()
-	for _, ch := range c.pending {
-		close(ch)
-	}
-	c.pending = nil
-	c.mu.Unlock()
+	c.closeOnce.Do(func() {
+		c.mu.Lock()
+		for _, ch := range c.pending {
+			close(ch)
+		}
+		c.pending = nil
+		c.mu.Unlock()
 
-	close(c.eventsCh)
+		close(c.eventsCh)
+	})
 	return nil
 }
 
@@ -213,7 +217,10 @@ func (c *client) answerExtensionUI(id string, method string, response map[string
 		}
 	}
 
-	data, _ := json.Marshal(msg)
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("marshal extension UI response: %w", err)
+	}
 	data = append(data, '\n')
 	return c.writeStdin(data)
 }
@@ -276,7 +283,7 @@ func (c *client) readLoop() {
 		c.dispatchLine(line)
 	}
 	if err := scanner.Err(); err != nil {
-		_ = err
+		c.stderr.Append(fmt.Sprintf("read loop error: %v", err))
 	}
 }
 
@@ -318,7 +325,11 @@ func (c *client) routeResponse(payload map[string]any) {
 		return
 	}
 
-	data, _ := json.Marshal(payload)
+	data, err := json.Marshal(payload)
+	if err != nil {
+		c.stderr.Append(fmt.Sprintf("marshal response for id %s: %v", id, err))
+		return
+	}
 	select {
 	case ch <- json.RawMessage(data):
 	default:
@@ -342,11 +353,11 @@ func (c *client) routeExtensionUI(payload map[string]any) {
 		ev.Fields["ui_request_id"] = id
 
 		c.mu.Lock()
-		rawIDBytes, _ := json.Marshal(payload["id"])
 		c.approvals[id] = pendingApproval{
-			id:     id,
-			method: method,
-			rawID:  string(rawIDBytes),
+			id:        id,
+			method:    method,
+			rawID:     payload["id"],
+			sessionID: sessionID,
 		}
 		c.mu.Unlock()
 
@@ -405,7 +416,10 @@ func (c *client) fanout(ev *events.Event) {
 	}
 
 	c.mu.Lock()
-	chans := c.subs[ev.SessionID]
+	chans := make([]chan events.Event, len(c.subs[ev.SessionID]))
+	copy(chans, c.subs[ev.SessionID])
+	c.mu.Unlock()
+
 	for _, ch := range chans {
 		if isCriticalEvent(ev.Event) {
 			ch <- *ev
@@ -417,7 +431,6 @@ func (c *client) fanout(ev *events.Event) {
 			}
 		}
 	}
-	c.mu.Unlock()
 }
 
 func isCriticalEvent(event string) bool {
