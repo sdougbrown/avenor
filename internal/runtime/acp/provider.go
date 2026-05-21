@@ -4,39 +4,39 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/permission"
 	"github.com/sdougbrown/avenor/internal/runtime"
 )
 
 type ProviderConfig struct {
 	BackendID           string
-	Bin                  string
-	Args                 []string
-	SubprocessDiscovery  bool
-	AppendCWDArg         bool
-	Authenticate         string // optional: if non-empty, call Client.Authenticate with this methodId after Initialize
-	ConfigureSession     func(ctx context.Context, session *Session, opts runtime.StartOptions) error
+	Bin                 string
+	Args                []string
+	SubprocessDiscovery bool
+	AppendCWDArg        bool
+	Authenticate        string // optional: if non-empty, call Client.Authenticate with this methodId after Initialize
+	ConfigureSession    func(ctx context.Context, session *Session, opts runtime.StartOptions) error
 }
 
 type Provider struct {
 	opts runtime.StartOptions
 
-	mu          sync.Mutex
-	backendID   string
-	bin         string
-	args        []string
-	client      *Client
-	events      chan events.Event
+	mu             sync.Mutex
+	backendID      string
+	bin            string
+	args           []string
+	client         *Client
+	events         chan events.Event
 	sessions       map[string]*Session
 	pendingOptions map[string]map[string][]any
 
 	subprocessDiscovery bool
-	appendCWDArg       bool
-	authenticateID     string
-	configureSession   func(ctx context.Context, session *Session, opts runtime.StartOptions) error
+	appendCWDArg        bool
+	authenticateID      string
+	configureSession    func(ctx context.Context, session *Session, opts runtime.StartOptions) error
 }
 
 func NewProvider(cfg ProviderConfig) runtime.Provider {
@@ -368,7 +368,7 @@ func selectPermissionOption(options []any, approve bool) (string, error) {
 			continue
 		}
 		optID, _ := m["optionId"].(string)
-		kind := strings.ToLower(fmt.Sprint(m["kind"]))
+		kind := permission.NormalizeOptionKind(fmt.Sprint(m["kind"]))
 		if kind == want {
 			if optID == "" {
 				return "", fmt.Errorf("permission option with kind %q missing optionId", want)
@@ -396,7 +396,7 @@ func selectPermissionResponseOption(options []any, response runtime.PermissionRe
 		if optID != response.OptionID {
 			continue
 		}
-		kind := strings.ToLower(fmt.Sprint(m["kind"]))
+		kind := permission.NormalizeOptionKind(fmt.Sprint(m["kind"]))
 		if kind != want {
 			return "", fmt.Errorf("permission option %q has kind %q, want %q", response.OptionID, kind, want)
 		}

@@ -737,7 +737,7 @@ func permissionKindFromOptionID(optionID string, options []any) string {
 		oid, _ := m["optionId"].(string)
 		if oid == optionID {
 			kind, _ := m["kind"].(string)
-			return strings.ToLower(kind)
+			return permission.NormalizeOptionKind(kind)
 		}
 	}
 	return "unknown"
@@ -752,7 +752,7 @@ func firstOptionKind(options []any, wantKind string) (string, string) {
 			continue
 		}
 		kind, _ := m["kind"].(string)
-		if strings.ToLower(kind) == wantKind {
+		if permission.NormalizeOptionKind(kind) == wantKind {
 			optID, _ := m["optionId"].(string)
 			return optID, wantKind
 		}

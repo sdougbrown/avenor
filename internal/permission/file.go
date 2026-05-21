@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
@@ -204,7 +203,7 @@ func permissionAllowFromOptions(options any, optionID string) (bool, error) {
 			continue
 		}
 		kind, _ := m["kind"].(string)
-		switch strings.ToLower(kind) {
+		switch NormalizeOptionKind(kind) {
 		case "allow":
 			return true, nil
 		case "reject":

@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -92,7 +91,7 @@ type Supervisor struct {
 	runtimeActivity chan struct{}
 	httpServer      *control.HTTPDebugServer
 	permOptions     map[string][]any // keyed by "runtimeID:requestID"
-	httpServers     map[string]any // dir → *managedHTTPServer or errHTTPServerStarting sentinel
+	httpServers     map[string]any   // dir → *managedHTTPServer or errHTTPServerStarting sentinel
 	httpServerMu    sync.Mutex
 	httpServerCond  *sync.Cond
 }
@@ -959,7 +958,7 @@ func (s *Supervisor) answerPermission(rtID, requestID, optionID string) error {
 		oid, _ := m["optionId"].(string)
 		if oid == optionID {
 			k, _ := m["kind"].(string)
-			kind = strings.ToLower(k)
+			kind = permission.NormalizeOptionKind(k)
 			found = true
 			break
 		}
