@@ -349,11 +349,14 @@ func (s *Server) handleAvenorShutdown(ctx context.Context, req *mcp.CallToolRequ
 
 	supervisorPath := s.getSupervisorPath(args.SupervisorID)
 
-	// When shutting down the default (autostarted) supervisor, let
-	// lifecycle.Shutdown handle the client connection so it can send
-	// the shutdown command and then close the socket in one flow.
-	// For explicit supervisor_id, use the per-call client.
-	if args.SupervisorID == "" && s.lifecycle != nil {
+	// When shutting down the autostarted supervisor, let lifecycle.Shutdown
+	// handle the client connection so it can send the shutdown command and
+	// then close the socket in one flow (it holds the owner connection).
+	// Match by resolved path so callers that echo back the supervisor_id
+	// from spawn get the same treatment as omitting it entirely.
+	useLifecycle := s.lifecycle != nil &&
+		(args.SupervisorID == "" || supervisorPath == s.defaultSupervisorPath)
+	if useLifecycle {
 		// Pass the requested mode (graceful or kill) to lifecycle shutdown
 		if err := s.lifecycle.ShutdownWithMode(mode); err != nil {
 			return nil, nil, fmt.Errorf("shutdown: %w", err)
