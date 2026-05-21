@@ -61,6 +61,10 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	}
 
 	p.mu.Lock()
+	if len(p.sessions) > 0 {
+		p.mu.Unlock()
+		return runtime.Session{}, errors.New("pi rpc supports only one active session per provider")
+	}
 	p.sessions[sessionID] = sessionID
 	p.mu.Unlock()
 
@@ -91,6 +95,10 @@ func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Sessio
 	}
 
 	p.mu.Lock()
+	if len(p.sessions) > 0 {
+		p.mu.Unlock()
+		return runtime.Session{}, errors.New("pi rpc supports only one active session per provider")
+	}
 	p.sessions[sessionID] = sessionID
 	p.mu.Unlock()
 
@@ -113,7 +121,7 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 		return err
 	}
 
-turnCh := make(chan events.Event, 1)
+	turnCh := make(chan events.Event, 1)
 
 	subCh := make(chan events.Event, 128)
 	c.subscribe(sessionID, subCh)
@@ -228,7 +236,6 @@ func (p *Provider) AnswerPermission(ctx context.Context, sessionID string, reque
 		c.mu.Unlock()
 		return fmt.Errorf("approval request %q belongs to session %q, not %q", requestID, approval.sessionID, sessionID)
 	}
-	delete(c.approvals, requestID)
 	c.mu.Unlock()
 
 	resp := map[string]any{

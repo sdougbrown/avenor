@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sdougbrown/avenor/internal/runtime"
 )
@@ -53,6 +54,22 @@ func TestResumeExisting(t *testing.T) {
 	}
 }
 
+func TestResumeRejectsSecondDistinctSession(t *testing.T) {
+	p := NewWithOptions(runtime.StartOptions{Dir: "/work"})
+	p.sessions["pi_existing"] = "pi_existing"
+	c, _, _ := fakeClient()
+	defer c.Close()
+	p.client = c
+
+	_, err := p.Resume(context.Background(), "pi_other")
+	if err == nil {
+		t.Fatal("expected error for second pi session")
+	}
+	if !strings.Contains(err.Error(), "only one active session") {
+		t.Fatalf("error = %v, want single-session validation", err)
+	}
+}
+
 func TestResumeEmptyID(t *testing.T) {
 	p := NewWithOptions(runtime.StartOptions{})
 	_, err := p.Resume(context.Background(), "")
@@ -80,6 +97,53 @@ func TestAnswerPermissionEmptyRequestID(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "permission request id is required") {
 		t.Fatalf("error = %v, want permission request id validation", err)
+	}
+}
+
+func TestAnswerPermissionWritesExtensionUIResponse(t *testing.T) {
+	p := NewWithOptions(runtime.StartOptions{})
+	c, _, rIn := fakeClient()
+	defer c.Close()
+	p.client = c
+	c.mu.Lock()
+	c.approvals["req-1"] = pendingApproval{
+		id:        "req-1",
+		method:    "select",
+		rawID:     "ui-1",
+		sessionID: "ses",
+	}
+	c.mu.Unlock()
+
+	done := make(chan map[string]any, 1)
+	go func() {
+		cmd, err := readCommand(rIn)
+		if err != nil {
+			return
+		}
+		done <- cmd
+	}()
+
+	err := p.AnswerPermission(context.Background(), "ses", "req-1", runtime.PermissionResponse{
+		Allow:    true,
+		OptionID: "Allow",
+	})
+	if err != nil {
+		t.Fatalf("AnswerPermission: %v", err)
+	}
+
+	select {
+	case cmd := <-done:
+		if cmd["type"] != "extension_ui_response" {
+			t.Errorf("type = %v, want extension_ui_response", cmd["type"])
+		}
+		if cmd["id"] != "ui-1" {
+			t.Errorf("id = %v, want ui-1", cmd["id"])
+		}
+		if cmd["value"] != "Allow" {
+			t.Errorf("value = %v, want Allow", cmd["value"])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for extension UI response")
 	}
 }
 

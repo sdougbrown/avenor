@@ -36,12 +36,12 @@ type client struct {
 	subs      map[string][]chan events.Event
 	approvals map[string]pendingApproval
 
-	stderr     *rollingBuffer
-	eventsCh   chan events.Event
-	done       chan struct{}
-	closeOnce  sync.Once
-	sessionID  string
-	sessionCh  chan struct{}
+	stderr    *rollingBuffer
+	eventsCh  chan events.Event
+	done      chan struct{}
+	closeOnce sync.Once
+	sessionID string
+	sessionCh chan struct{}
 }
 
 func newClient(proc *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, stderr io.ReadCloser) *client {
@@ -343,7 +343,7 @@ func (c *client) routeExtensionUI(payload map[string]any) {
 	isDialog := dialogMethods[method]
 
 	if isDialog {
-		sessionID := c.sessionID
+		sessionID := c.SessionID()
 		ev, _ := translateExtensionUI(payload, sessionID)
 		if ev == nil {
 			return
@@ -365,13 +365,13 @@ func (c *client) routeExtensionUI(payload map[string]any) {
 		return
 	}
 
-	if ev, _ := translateExtensionUI(payload, c.sessionID); ev != nil {
+	if ev, _ := translateExtensionUI(payload, c.SessionID()); ev != nil {
 		c.fanout(ev)
 	}
 }
 
 func (c *client) routeEvent(payload map[string]any) {
-	sessionID := c.sessionID
+	sessionID := c.SessionID()
 	evtType, _ := payload["type"].(string)
 
 	if evtType == "response" {
