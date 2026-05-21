@@ -21,7 +21,15 @@ export async function spawnTool(args: {
   const label = args.label ?? runId
 
   if (args.supervisorId) {
-    const client = await dial(validateSupervisorSocketPath(args.supervisorId))
+    const supervisorId = validateSupervisorSocketPath(args.supervisorId)
+    const isSingleton = Supervisor.isCurrentInstance(supervisorId)
+    const client = isSingleton
+      ? (() => {
+          const current = Supervisor.currentInstance()
+          if (!current) throw new Error('Supervisor.isCurrentInstance() returned true but currentInstance() is null')
+          return current.getClient()
+        })()
+      : await dial(supervisorId)
     const { sentinelPath, eventLogPath } = ensureRunPaths(runId)
 
     try {
@@ -44,10 +52,12 @@ export async function spawnTool(args: {
       return {
         run_id: (result.runtime_id as string | undefined) ?? runId,
         label,
-        supervisor_id: args.supervisorId,
+        supervisor_id: supervisorId,
       }
     } finally {
-      client.close()
+      if (!isSingleton) {
+        client.close()
+      }
     }
   }
 

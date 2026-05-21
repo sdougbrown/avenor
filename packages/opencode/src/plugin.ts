@@ -17,6 +17,8 @@ export const AvenorPlugin: Plugin = async (_ctx) => ({
         label: z.string().optional().describe('Human-readable label for the run'),
         timeout: z.string().optional().describe('Timeout duration (e.g. 3600s)'),
         model: z.string().optional().describe('Model override'),
+        backend: z.string().optional().describe('Backend override'),
+        server_url: z.string().optional().describe('Backend server URL'),
         supervisor_id: z.string().optional().describe('Reuse an existing supervisor by socket path'),
       },
       async execute(args, context: ToolContext) {
@@ -28,6 +30,8 @@ export const AvenorPlugin: Plugin = async (_ctx) => ({
           dir: context.directory,
           timeout: args.timeout,
           model: args.model,
+          backend: args.backend,
+          serverUrl: args.server_url,
           supervisorId: args.supervisor_id,
         }) as any
       },

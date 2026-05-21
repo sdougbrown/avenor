@@ -21,9 +21,20 @@ export async function answerPermissionTool(args: {
   let client
   let sup: Supervisor | null = null
   let requestId = args.requestId
+  let supervisorId: string | undefined
+  let isSingleton = false
 
   if (args.supervisorId) {
-    client = await dial(validateSupervisorSocketPath(args.supervisorId))
+    supervisorId = validateSupervisorSocketPath(args.supervisorId)
+    isSingleton = Supervisor.isCurrentInstance(supervisorId)
+    if (isSingleton) {
+      const current = Supervisor.currentInstance()
+      if (!current) throw new Error('Supervisor.isCurrentInstance() returned true but currentInstance() is null')
+      sup = current
+      client = sup.getClient()
+    } else {
+      client = await dial(supervisorId)
+    }
   } else {
     sup = await Supervisor.get()
     client = sup.getClient()
@@ -47,7 +58,7 @@ export async function answerPermissionTool(args: {
 
     return { ok: true }
   } finally {
-    if (args.supervisorId) {
+    if (supervisorId && !isSingleton) {
       client.close()
     }
   }

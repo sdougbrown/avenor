@@ -44,7 +44,15 @@ export async function followUpTool(args: {
   supervisorId?: string
 }): Promise<{ run_id: string; label: string }> {
   if (args.supervisorId) {
-    const client = await dial(validateSupervisorSocketPath(args.supervisorId))
+    const supervisorId = validateSupervisorSocketPath(args.supervisorId)
+    const isSingleton = Supervisor.isCurrentInstance(supervisorId)
+    const client = isSingleton
+      ? (() => {
+          const current = Supervisor.currentInstance()
+          if (!current) throw new Error('Supervisor.isCurrentInstance() returned true but currentInstance() is null')
+          return current.getClient()
+        })()
+      : await dial(supervisorId)
     try {
       validateRunId(args.runId)
       let liveStatus: Record<string, unknown> | null = null
@@ -78,7 +86,9 @@ export async function followUpTool(args: {
       })
       return { run_id: followUpRunId, label: followUpLabel }
     } finally {
-      client.close()
+      if (!isSingleton) {
+        client.close()
+      }
     }
   }
 

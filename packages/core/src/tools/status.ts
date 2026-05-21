@@ -158,7 +158,15 @@ export async function statusTool(
   },
 ): Promise<StatusResult | StatusResult[]> {
   if (args.supervisorId) {
-    const client = await dial(validateSupervisorSocketPath(args.supervisorId))
+    const supervisorId = validateSupervisorSocketPath(args.supervisorId)
+    const isSingleton = Supervisor.isCurrentInstance(supervisorId)
+    const client = isSingleton
+      ? (() => {
+          const current = Supervisor.currentInstance()
+          if (!current) throw new Error('Supervisor.isCurrentInstance() returned true but currentInstance() is null')
+          return current.getClient()
+        })()
+      : await dial(supervisorId)
     try {
       if (args.runId) {
         validateRunId(args.runId)
@@ -219,7 +227,9 @@ export async function statusTool(
         session_id: entry.session_id as string | undefined,
       }))
     } finally {
-      client.close()
+      if (!isSingleton) {
+        client.close()
+      }
     }
   }
 
