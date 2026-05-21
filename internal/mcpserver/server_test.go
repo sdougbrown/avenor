@@ -1895,3 +1895,53 @@ func TestAvenorFollowUpSentinelFileNotFound(t *testing.T) {
 		t.Errorf("expected 'read sentinel session', got: %v", err)
 	}
 }
+
+func TestAvenorShutdownWithExplicitLifecyclePath(t *testing.T) {
+	const sockPath = "/tmp/test-lifecycle-shutdown.sock"
+
+	var lifecycleShutdownCalled bool
+	var otherClientCalled bool
+
+	lifecycleClient := &fakeClient{
+		shutdownFunc: func(mode string) error {
+			lifecycleShutdownCalled = true
+			return nil
+		},
+	}
+	otherClient := &fakeClient{
+		shutdownFunc: func(mode string) error {
+			otherClientCalled = true
+			return nil
+		},
+	}
+
+	s, err := NewServer(Options{
+		Transport:     "stdio",
+		NoAutostart:   true,
+		ControlClient: otherClient,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Inject lifecycle as if the MCP server had autostarted a supervisor at sockPath.
+	s.lifecycle = &supervisorLifecycle{socketPath: sockPath, client: lifecycleClient}
+	s.defaultSupervisorPath = sockPath
+
+	_, _, err = s.handleAvenorShutdown(context.Background(), nil, shutdownArgs{
+		SupervisorID: sockPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !lifecycleShutdownCalled {
+		t.Error("lifecycle client Shutdown was not called — explicit supervisor_id matching defaultSupervisorPath should use lifecycle path")
+	}
+	if otherClientCalled {
+		t.Error("non-lifecycle client Shutdown was called — should not have been reached")
+	}
+	if s.lifecycle != nil {
+		t.Error("lifecycle was not cleared after shutdown")
+	}
+}
