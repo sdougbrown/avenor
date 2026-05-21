@@ -9,7 +9,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime/geminiacp"
 	"github.com/sdougbrown/avenor/internal/runtime/opencodeacp"
 	"github.com/sdougbrown/avenor/internal/runtime/opencodehttp"
-	piruntime "github.com/sdougbrown/avenor/internal/runtime/pi"
+	"github.com/sdougbrown/avenor/internal/runtime/pi"
 )
 
 func NewProvider(startOpts runtime.StartOptions, backend string) (runtime.Provider, error) {
@@ -25,7 +25,7 @@ func NewProvider(startOpts runtime.StartOptions, backend string) (runtime.Provid
 	case "cursor-acp":
 		return cursoracp.NewWithOptions(startOpts), nil
 	case "pi":
-		return piruntime.NewWithOptions(startOpts), nil
+		return pi.NewWithOptions(startOpts), nil
 	default:
 		return nil, fmt.Errorf("unknown backend %q", backend)
 	}
