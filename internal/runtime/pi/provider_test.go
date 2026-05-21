@@ -173,3 +173,71 @@ func TestCloseNotStarted(t *testing.T) {
 func TestProviderImplementsInterface(t *testing.T) {
 	var _ runtime.Provider = (*Provider)(nil)
 }
+
+func TestProviderStartParsesDataSessionID(t *testing.T) {
+	p := NewWithOptions(runtime.StartOptions{Dir: "/work"})
+	c, wOut, rIn := fakeClient()
+	defer c.Close()
+	p.client = c
+
+	go func() {
+		cmd, err := readCommand(rIn)
+		if err != nil {
+			return
+		}
+		id, _ := cmd["id"].(string)
+		writeLine(wOut, map[string]any{
+			"type": "response",
+			"id":   id,
+			"data": map[string]any{
+				"sessionId": "pi-from-data",
+			},
+		})
+	}()
+
+	sess, err := p.Start(context.Background(), runtime.StartOptions{Dir: "/work"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if sess.SessionID != "pi-from-data" {
+		t.Errorf("SessionID = %q, want pi-from-data", sess.SessionID)
+	}
+}
+
+func TestAnswerPermissionWrongSession(t *testing.T) {
+	p := NewWithOptions(runtime.StartOptions{})
+	c, _, _ := fakeClient()
+	defer c.Close()
+	p.client = c
+	c.mu.Lock()
+	c.approvals["req-1"] = pendingApproval{
+		id:        "req-1",
+		method:    "select",
+		rawID:     "ui-1",
+		sessionID: "other-ses",
+	}
+	c.mu.Unlock()
+
+	err := p.AnswerPermission(context.Background(), "ses", "req-1", runtime.PermissionResponse{Allow: true})
+	if err == nil {
+		t.Fatal("expected error for wrong session")
+	}
+	if !strings.Contains(err.Error(), "belongs to session") {
+		t.Fatalf("error = %v, want session mismatch", err)
+	}
+}
+
+func TestAnswerPermissionNotApproved(t *testing.T) {
+	p := NewWithOptions(runtime.StartOptions{})
+	c, _, _ := fakeClient()
+	defer c.Close()
+	p.client = c
+
+	err := p.AnswerPermission(context.Background(), "ses", "req-missing", runtime.PermissionResponse{Allow: true})
+	if err == nil {
+		t.Fatal("expected error for unknown approval")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("error = %v, want not found", err)
+	}
+}

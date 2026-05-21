@@ -324,6 +324,109 @@ func TestRollingBuffer(t *testing.T) {
 	}
 }
 
+func TestClientAgentEndSessionIdFromLastMessage(t *testing.T) {
+	c, wOut, _ := fakeClient()
+	defer c.Close()
+
+	go func() {
+		writeLine(wOut, map[string]any{
+			"type": "agent_end",
+			"messages": []any{
+				map[string]any{
+					"sessionId":   "pi-msg-session",
+					"stop_reason": "end_of_turn",
+				},
+			},
+		})
+	}()
+
+	select {
+	case ev := <-c.eventsCh:
+		if ev.Event != "session.end" {
+			t.Errorf("event = %q, want session.end", ev.Event)
+		}
+		if ev.SessionID != "pi-msg-session" {
+			t.Errorf("sessionID = %q, want pi-msg-session", ev.SessionID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for agent_end event")
+	}
+}
+
+func TestClientExtensionUIDialogStoresFields(t *testing.T) {
+	c, wOut, _ := fakeClient()
+	defer c.Close()
+
+	c.setSessionID("pi-dialog-ses")
+
+	go func() {
+		writeLine(wOut, map[string]any{
+			"type":    "extension_ui_request",
+			"id":      "ui-dialog-1",
+			"method":  "confirm",
+			"title":   "Confirm action?",
+			"message": "Proceed?",
+		})
+	}()
+
+	select {
+	case ev := <-c.eventsCh:
+		if ev.Event != "permission.request" {
+			t.Fatalf("event = %q, want permission.request", ev.Event)
+		}
+		reqID, ok := ev.Fields["request_id"].(string)
+		if !ok || reqID != "ui-dialog-1" {
+			t.Errorf("request_id = %v, want ui-dialog-1", reqID)
+		}
+		uiReqID, ok := ev.Fields["ui_request_id"].(string)
+		if !ok || uiReqID != "ui-dialog-1" {
+			t.Errorf("ui_request_id = %v, want ui-dialog-1", uiReqID)
+		}
+
+		c.mu.Lock()
+		approval, ok := c.approvals["ui-dialog-1"]
+		c.mu.Unlock()
+		if !ok {
+			t.Fatal("approval not stored for dialog request")
+		}
+		if approval.sessionID != "pi-dialog-ses" {
+			t.Errorf("pendingApproval.sessionID = %q, want pi-dialog-ses", approval.sessionID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for extension UI event")
+	}
+}
+
+func TestClientCloseUnblocksPending(t *testing.T) {
+	c, _, _ := fakeClient()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.sendCommand(map[string]any{"type": "get_state"})
+		done <- err
+	}()
+
+	select {
+	case <-done:
+		// sendCommand may return before Close if response arrives, but we sent nothing.
+		// Give it a moment, then close.
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	go func() {
+		_ = c.Close()
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected error from sendCommand after close")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for sendCommand to unblock after close")
+	}
+}
+
 func TestCRLFStripping(t *testing.T) {
 	c, wOut, _ := fakeClient()
 	defer c.Close()

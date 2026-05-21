@@ -54,6 +54,11 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 
 	sessionID, _ := stateMap["sessionId"].(string)
 	if sessionID == "" {
+		if data, ok := stateMap["data"].(map[string]any); ok {
+			sessionID, _ = data["sessionId"].(string)
+		}
+	}
+	if sessionID == "" {
 		sessionID, _ = stateMap["state"].(string)
 	}
 	if sessionID == "" {
