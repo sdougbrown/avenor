@@ -175,13 +175,27 @@ func (p *Provider) AnswerPermission(ctx context.Context, sessionID string, reque
 	if requestID == "" {
 		return errors.New("permission request id is required")
 	}
-	return errors.New("permissions are not supported by opencode-http backend")
+	c, err := p.clientLocked()
+	if err != nil {
+		return err
+	}
+	reply := "once"
+	if !response.Allow {
+		reply = "reject"
+	} else if response.OptionID == "allow_always" || response.OptionID == "always" {
+		reply = "always"
+	}
+	return c.AnswerPermission(ctx, sessionID, requestID, map[string]any{
+		"reply":    reply,
+		"response": reply,
+		"remember": reply == "always",
+	})
 }
 
 func (p *Provider) Capabilities(ctx context.Context) (runtime.Capabilities, error) {
 	return runtime.Capabilities{
 		Backend:             backendID,
-		Permissions:         false,
+		Permissions:         true,
 		Resume:              true,
 		ExternalServerURL:   true,
 		SubprocessDiscovery: false,

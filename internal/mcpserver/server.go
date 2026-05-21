@@ -400,12 +400,8 @@ func (s *Server) handleAvenorShutdown(ctx context.Context, req *mcp.CallToolRequ
 
 func (s *Server) handleAvenorAnswerPermission(ctx context.Context, req *mcp.CallToolRequest, args permissionArgs) (*mcp.CallToolResult, any, error) {
 	ri := s.registry.Lookup(args.RunID)
-	if ri == nil {
-		return nil, nil, fmt.Errorf("run not found in registry")
-	}
-
 	supervisorID := args.SupervisorID
-	if supervisorID == "" {
+	if supervisorID == "" && ri != nil {
 		supervisorID = ri.SupervisorID
 	}
 
@@ -415,9 +411,19 @@ func (s *Server) handleAvenorAnswerPermission(ctx context.Context, req *mcp.Call
 	}
 	defer cleanup()
 
+	runtimeID := ""
+	if ri != nil {
+		runtimeID = ri.RuntimeID
+	} else {
+		runtimeID, err = resolveRuntimeIDFromList(cl, args.RunID)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
 	requestID := args.RequestID
 	if requestID == "" {
-		statusResult, err := cl.Status(ri.RuntimeID)
+		statusResult, err := cl.Status(runtimeID)
 		if err != nil {
 			return nil, nil, fmt.Errorf("status: %w", err)
 		}
@@ -435,11 +441,30 @@ func (s *Server) handleAvenorAnswerPermission(ctx context.Context, req *mcp.Call
 		}
 	}
 
-	if err := cl.AnswerPermission(ri.RuntimeID, requestID, args.OptionID); err != nil {
+	if err := cl.AnswerPermission(runtimeID, requestID, args.OptionID); err != nil {
 		return nil, nil, fmt.Errorf("answer_permission: %w", err)
 	}
 
 	return nil, map[string]any{"ok": true}, nil
+}
+
+func resolveRuntimeIDFromList(cl ControlClient, runID string) (string, error) {
+	results, err := cl.List()
+	if err != nil {
+		return "", fmt.Errorf("list runs: %w", err)
+	}
+	for _, entry := range results {
+		runtimeID, _ := entry["runtime_id"].(string)
+		label, _ := entry["label"].(string)
+		sessionID, _ := entry["session_id"].(string)
+		if runID == runtimeID || runID == label || runID == sessionID {
+			if runtimeID == "" {
+				return "", fmt.Errorf("run %q matched but has no runtime_id", runID)
+			}
+			return runtimeID, nil
+		}
+	}
+	return "", fmt.Errorf("run %q not found", runID)
 }
 
 func (s *Server) handleAvenorEvents(ctx context.Context, req *mcp.CallToolRequest, args eventsArgs) (*mcp.CallToolResult, any, error) {

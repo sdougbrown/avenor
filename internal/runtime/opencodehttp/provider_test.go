@@ -52,8 +52,8 @@ func TestCapabilities(t *testing.T) {
 	if caps.Backend != "opencode-http" {
 		t.Errorf("Backend = %q, want %q", caps.Backend, "opencode-http")
 	}
-	if caps.Permissions {
-		t.Error("Permissions should be false until HTTP permission behavior is verified")
+	if !caps.Permissions {
+		t.Error("Permissions should be true")
 	}
 	if !caps.Resume {
 		t.Error("Resume should be true")
@@ -536,23 +536,37 @@ func TestStreamSessionEndDoesNotEndLaterTurn(t *testing.T) {
 	}
 }
 
-func TestAnswerPermissionUnsupported(t *testing.T) {
+func TestAnswerPermission(t *testing.T) {
+	var gotPath string
+	var gotPayload map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		if err := json.NewDecoder(r.Body).Decode(&gotPayload); err != nil {
+			t.Fatalf("decode payload: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
 	p, err := NewWithOptions(runtime.StartOptions{})
 	if err != nil {
 		t.Fatalf("NewWithOptions error = %v", err)
 	}
 	prov := p.(*Provider)
 	prov.mu.Lock()
-	prov.client = NewClient(ClientOptions{BaseURL: "http://localhost:4096"})
+	prov.client = NewClient(ClientOptions{BaseURL: srv.URL})
 	prov.started = true
 	prov.mu.Unlock()
 
-	err = prov.AnswerPermission(context.Background(), "ses_test", "req_1", runtime.PermissionResponse{Allow: true})
-	if err == nil {
-		t.Fatal("AnswerPermission should fail while opencode-http permissions are unsupported")
+	err = prov.AnswerPermission(context.Background(), "ses_test", "req_1", runtime.PermissionResponse{Allow: true, OptionID: "allow_always"})
+	if err != nil {
+		t.Fatalf("AnswerPermission error = %v", err)
 	}
-	if !strings.Contains(err.Error(), "permissions are not supported") {
-		t.Fatalf("error = %q, want unsupported permissions message", err.Error())
+	if gotPath != "/permission/req_1/reply" {
+		t.Fatalf("path = %q, want /permission/req_1/reply", gotPath)
+	}
+	if gotPayload["reply"] != "always" {
+		t.Fatalf("reply = %v, want always", gotPayload["reply"])
 	}
 }
 

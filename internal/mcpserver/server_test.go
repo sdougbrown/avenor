@@ -1200,10 +1200,10 @@ func TestAvenorAnswerPermissionNotFound(t *testing.T) {
 		OptionID: "opt_allow",
 	})
 	if err == nil {
-		t.Fatal("expected error for run not found in registry")
+		t.Fatal("expected error for run not found")
 	}
-	if !strings.Contains(err.Error(), "run not found in registry") {
-		t.Errorf("expected 'run not found in registry', got: %v", err)
+	if !strings.Contains(err.Error(), "run \"nonexistent\" not found") {
+		t.Errorf("expected run not found, got: %v", err)
 	}
 }
 

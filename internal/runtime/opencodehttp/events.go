@@ -138,6 +138,33 @@ func readSSEEvents(ctx context.Context, r io.Reader, out chan<- events.Event) {
 				Fields:    fields,
 			})
 
+		case "permission.asked":
+			if sid == "" {
+				continue
+			}
+			fields := map[string]any{}
+			for k, v := range raw.Properties {
+				if k == "sessionID" {
+					continue
+				}
+				fields[k] = v
+			}
+			requestID := raw.ID
+			if id, _ := raw.Properties["id"].(string); id != "" {
+				requestID = id
+			}
+			if requestID == "" {
+				continue
+			}
+			fields["request_id"] = requestID
+			fields["tool"] = "permission." + firstString(raw.Properties["permission"], "asked")
+			fields["options"] = permissionAskedOptions(requestID, raw.Properties["always"])
+			emit(events.Event{
+				Event:     "permission.request",
+				SessionID: sid,
+				Fields:    fields,
+			})
+
 		case "server.connected", "server.heartbeat",
 			"session.diff", "session.updated", "session.idle":
 			// Known idle events — silently skip.
@@ -151,6 +178,27 @@ func readSSEEvents(ctx context.Context, r io.Reader, out chan<- events.Event) {
 			})
 		}
 	}
+}
+
+func permissionAskedOptions(requestID string, always any) []any {
+	options := []any{
+		map[string]any{"optionId": "reject", "kind": "reject"},
+		map[string]any{"optionId": "allow_once", "kind": "allow_once"},
+		// Backwards-friendly alias for users who copied the permission id from
+		// the raw OpenCode event before Avenor normalized it.
+		map[string]any{"optionId": requestID, "kind": "allow_once"},
+	}
+	if patterns, ok := always.([]any); ok && len(patterns) > 0 {
+		options = append(options, map[string]any{"optionId": "allow_always", "kind": "allow_always"})
+	}
+	return options
+}
+
+func firstString(v any, fallback string) string {
+	if s, _ := v.(string); s != "" {
+		return s
+	}
+	return fallback
 }
 
 // mapErrorToStopReason converts an opencode error name to an avenor stop_reason.

@@ -201,6 +201,29 @@ func TestPermissionRequestMappingCamelCaseID(t *testing.T) {
 	}
 }
 
+func TestPermissionAskedMapping(t *testing.T) {
+	feed := sseFeed(
+		`{"id":"per_123","type":"permission.asked","properties":{"sessionID":"ses_1","id":"per_123","permission":"external_directory","patterns":["/tmp/*"],"always":["/tmp/*"],"metadata":{"filepath":"/tmp/a"},"tool":{"callID":"call_1","messageID":"msg_1"}}}`,
+	)
+	evts := collectEvents(t, feed)
+	if len(evts) != 1 {
+		t.Fatalf("got %d events, want 1: %+v", len(evts), evts)
+	}
+	if evts[0].Event != "permission.request" {
+		t.Errorf("event = %q, want permission.request", evts[0].Event)
+	}
+	if evts[0].Fields["request_id"] != "per_123" {
+		t.Errorf("request_id = %v, want per_123", evts[0].Fields["request_id"])
+	}
+	options, _ := evts[0].Fields["options"].([]any)
+	if len(options) != 4 {
+		t.Fatalf("options len = %d, want 4: %+v", len(options), options)
+	}
+	if options[2].(map[string]any)["optionId"] != "per_123" {
+		t.Errorf("permission-id alias option = %+v, want per_123", options[2])
+	}
+}
+
 func TestPermissionRequestWithoutSessionIDIsSkipped(t *testing.T) {
 	feed := sseFeed(
 		`{"type":"permission.request","properties":{"request_id":"req_abc","tool":"bash","options":[{"optionId":"allow","kind":"allow"}]}}`,

@@ -144,6 +144,21 @@ func (c *Client) Abort(ctx context.Context, sessionID string) error {
 
 // AnswerPermission responds to a permission request.
 func (c *Client) AnswerPermission(ctx context.Context, sessionID, permissionID string, payload map[string]any) error {
+	if reply, _ := payload["reply"].(string); reply != "" {
+		err := c.postJSON(ctx, c.baseURL+"/permission/"+url.PathEscape(permissionID)+"/reply", map[string]any{"reply": reply})
+		if err == nil {
+			return nil
+		}
+	}
+	if _, ok := payload["response"]; !ok {
+		if reply, _ := payload["reply"].(string); reply != "" {
+			payload["response"] = reply
+		}
+	}
+	return c.answerSessionPermission(ctx, sessionID, permissionID, payload)
+}
+
+func (c *Client) answerSessionPermission(ctx context.Context, sessionID, permissionID string, payload map[string]any) error {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -161,6 +176,28 @@ func (c *Client) AnswerPermission(ctx context.Context, sessionID, permissionID s
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("answer permission: %s", resp.Status)
+	}
+	return nil
+}
+
+func (c *Client) postJSON(ctx context.Context, url string, payload map[string]any) error {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.setAuth(req)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("post json: %s", resp.Status)
 	}
 	return nil
 }
