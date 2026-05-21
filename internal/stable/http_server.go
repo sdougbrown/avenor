@@ -197,7 +197,11 @@ func (s *Supervisor) startHTTPServer(absDir string) (*managedHTTPServer, error) 
 	if err != nil {
 		return nil, fmt.Errorf("bind port: %w", err)
 	}
-	port := listener.Addr().(*net.TCPAddr).Port
+	tcpAddr, ok := listener.Addr().(*net.TCPAddr)
+	if !ok {
+			return nil, fmt.Errorf("unexpected listener address type %T", listener.Addr())
+	}
+	port := tcpAddr.Port
 	listener.Close()
 
 	cmd := httpExecCommand("opencode", "serve", "--port", fmt.Sprintf("%d", port))
