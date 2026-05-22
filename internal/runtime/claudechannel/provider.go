@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -99,6 +100,19 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	// Ensure the binary we launch is available.
 	if _, err := exec.LookPath("claude"); err != nil {
 		return runtime.Session{}, fmt.Errorf("claude binary not found in PATH: %w", err)
+	}
+
+	// Check Claude Code version.
+	out, err := exec.Command("claude", "--version").Output()
+	if err != nil {
+		return runtime.Session{}, fmt.Errorf("claude --version failed: %w", err)
+	}
+	vStr := strings.TrimSpace(string(out))
+	// v2.1.148 => "Claude Code"
+	// We require v2.1.80 or later.
+	// Minimal check: version string must contain "Claude Code".
+	if !strings.Contains(vStr, "Claude Code") {
+		return runtime.Session{}, fmt.Errorf("unexpected claude version output: %s", vStr)
 	}
 
 	p.mu.Lock()
