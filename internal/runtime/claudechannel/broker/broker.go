@@ -4,12 +4,14 @@
 package broker
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -28,12 +30,14 @@ type ControlMessage struct {
 
 // Report is the payload from an avenor_report tool call.
 type Report struct {
+	RunID   string          `json:"run_id"`
 	State   string          `json:"state"`
 	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
 // Finish is the payload from an avenor_finish tool call.
 type Finish struct {
+	RunID        string          `json:"run_id"`
 	Status       string          `json:"status"`
 	Summary      string          `json:"summary"`
 	FilesChanged []string        `json:"files_changed,omitempty"`
@@ -42,6 +46,7 @@ type Finish struct {
 
 // Reply is the payload from an avenor_reply tool call.
 type Reply struct {
+	RunID   string          `json:"run_id"`
 	To      string          `json:"to"`
 	Payload json.RawMessage `json:"payload,omitempty"`
 }
@@ -194,27 +199,37 @@ func (b *Broker) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			next(w, r)
 			return
 		}
-		// Sidecar auth: token + run_id in JSON body
-		var body struct {
-			RunID string `json:"run_id"`
-			Token string `json:"token"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		// Sidecar auth: token + run_id in JSON body.
+		// Read body into memory so it can be consumed again by the handler.
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		// Rewind not possible; the handler reads from a fresh decode if needed
-		// Instead, read into memory upfront in production. For initial test, just gate:
-		if body.RunID == "" || body.Token == "" {
+		var cred struct {
+			RunID string `json:"run_id"`
+			Token string `json:"token"`
+		}
+		if err := json.Unmarshal(bodyBytes, &cred); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if cred.RunID == "" || cred.Token == "" {
 			http.Error(w, "unauthorized: missing run_id or token", http.StatusUnauthorized)
 			return
 		}
 		b.mu.RLock()
-		st, ok := b.runs[body.RunID]
+		st, ok := b.runs[cred.RunID]
 		b.mu.RUnlock()
-		if !ok || subtle.ConstantTimeCompare([]byte(body.Token), []byte(st.Token)) != 1 {
+		if !ok || subtle.ConstantTimeCompare([]byte(cred.Token), []byte(st.Token)) != 1 {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
+		}
+		// Replace request body with a fresh reader containing the same bytes.
+		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		// Update ContentLength to reflect the actual body length for downstream decoders.
+		if r.ContentLength > 0 {
+			r.ContentLength = int64(len(bodyBytes))
 		}
 		next(w, r)
 	}
@@ -357,7 +372,7 @@ func (b *Broker) handleReport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	b.ingest(w, r, func(st *RunState) { st.Reports = append(st.Reports, rep) })
+	b.ingest(w, rep.RunID, func(st *RunState) { st.Reports = append(st.Reports, rep) })
 }
 
 func (b *Broker) handleFinish(w http.ResponseWriter, r *http.Request) {
@@ -366,7 +381,7 @@ func (b *Broker) handleFinish(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	b.ingest(w, r, func(st *RunState) { st.Finishes = append(st.Finishes, fin) })
+	b.ingest(w, fin.RunID, func(st *RunState) { st.Finishes = append(st.Finishes, fin) })
 }
 
 func (b *Broker) handleReply(w http.ResponseWriter, r *http.Request) {
@@ -375,11 +390,12 @@ func (b *Broker) handleReply(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	b.ingest(w, r, func(st *RunState) { st.Replies = append(st.Replies, rep) })
+	b.ingest(w, rep.RunID, func(st *RunState) { st.Replies = append(st.Replies, rep) })
 }
 
 func (b *Broker) handlePermission(w http.ResponseWriter, r *http.Request) {
 	var body struct {
+		RunID     string `json:"run_id"`
 		RequestID string `json:"request_id"`
 		Behavior  string `json:"behavior"`
 	}
@@ -387,21 +403,14 @@ func (b *Broker) handlePermission(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	b.ingest(w, r, func(st *RunState) {
+	b.ingest(w, body.RunID, func(st *RunState) {
 		st.PermissionDecisions[body.RequestID] = body.Behavior
 	})
 }
 
-func (b *Broker) ingest(w http.ResponseWriter, r *http.Request, fn func(*RunState)) {
-	var body struct {
-		RunID string `json:"run_id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
+func (b *Broker) ingest(w http.ResponseWriter, runID string, fn func(*RunState)) {
 	b.mu.Lock()
-	st, ok := b.runs[body.RunID]
+	st, ok := b.runs[runID]
 	b.mu.Unlock()
 	if !ok {
 		http.Error(w, "run not found", http.StatusNotFound)
