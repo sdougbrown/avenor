@@ -180,7 +180,7 @@ func readSSEEvents(ctx context.Context, r io.Reader, out chan<- events.Event) {
 	}
 }
 
-func permissionAskedOptions(requestID string, always any) []any {
+func permissionAskedOptions(requestID string, alwaysPatterns any) []any {
 	options := []any{
 		map[string]any{"optionId": "reject", "kind": "reject"},
 		map[string]any{"optionId": "allow_once", "kind": "allow_once"},
@@ -188,7 +188,7 @@ func permissionAskedOptions(requestID string, always any) []any {
 		// the raw OpenCode event before Avenor normalized it.
 		map[string]any{"optionId": requestID, "kind": "allow_once"},
 	}
-	if patterns, ok := always.([]any); ok && len(patterns) > 0 {
+	if patterns, ok := alwaysPatterns.([]any); ok && len(patterns) > 0 {
 		options = append(options, map[string]any{"optionId": "allow_always", "kind": "allow_always"})
 	}
 	return options

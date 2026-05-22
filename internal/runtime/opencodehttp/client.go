@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -149,7 +150,11 @@ func (c *Client) AnswerPermission(ctx context.Context, sessionID, permissionID s
 		if err == nil {
 			return nil
 		}
+		log.Printf("permission reply endpoint failed: %v; falling back to session endpoint", err)
 	}
+	// Defensive fallback for direct Client callers who don't set "response".
+	// Provider.AnswerPermission always passes both "reply" and "response",
+	// so this branch is only reachable for non-Provider callers.
 	if _, ok := payload["response"]; !ok {
 		if reply, _ := payload["reply"].(string); reply != "" {
 			payload["response"] = reply

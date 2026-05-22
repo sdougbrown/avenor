@@ -219,8 +219,17 @@ func TestPermissionAskedMapping(t *testing.T) {
 	if len(options) != 4 {
 		t.Fatalf("options len = %d, want 4: %+v", len(options), options)
 	}
+	if options[0].(map[string]any)["optionId"] != "reject" {
+		t.Errorf("options[0] = %+v, want reject", options[0])
+	}
+	if options[1].(map[string]any)["optionId"] != "allow_once" {
+		t.Errorf("options[1] = %+v, want allow_once", options[1])
+	}
 	if options[2].(map[string]any)["optionId"] != "per_123" {
 		t.Errorf("permission-id alias option = %+v, want per_123", options[2])
+	}
+	if options[3].(map[string]any)["optionId"] != "allow_always" {
+		t.Errorf("options[3] = %+v, want allow_always", options[3])
 	}
 }
 

@@ -177,7 +177,7 @@ func (p *Provider) AnswerPermission(ctx context.Context, sessionID string, reque
 	}
 	c, err := p.clientLocked()
 	if err != nil {
-		return err
+		return fmt.Errorf("answer permission: %w", err)
 	}
 	reply := "once"
 	if !response.Allow {
