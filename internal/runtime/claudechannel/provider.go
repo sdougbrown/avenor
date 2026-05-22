@@ -202,6 +202,14 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 
 	go p.runSession(sessCtx, s)
 
+	// Give the goroutine a moment to actually start the process
+	time.Sleep(100 * time.Millisecond)
+
+	pid := 0
+	if s.cmd.Process != nil {
+		pid = s.cmd.Process.Pid
+	}
+
 	// Emit startup event.
 	go func() {
 		s.events <- events.Event{
@@ -222,7 +230,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		SessionID: sessionID,
 		Backend:   backendID,
 		Dir:       merged.Dir,
-		PID:       cmd.Process.Pid,
+		PID:       pid,
 	}, nil
 }
 
@@ -286,42 +294,6 @@ func (p *Provider) runSession(ctx context.Context, s *session) {
 }
 
 func (p *Provider) pollBrokerEvents(s *session) {
-	// TODO: call broker endpoints and emit events.
-}
-
-func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Session, error) {
-	return runtime.Session{}, fmt.Errorf("resume not supported for %s", backendID)
-}
-
-func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) error {
-	p.mu.Lock()
-	s, ok := p.sessions[sessionID]
-	p.mu.Unlock()
-	if !ok {
-		return fmt.Errorf("session not found: %s", sessionID)
-	}
-	if s.finished {
-		return fmt.Errorf("session already finished: %s", sessionID)
-	}
-
-	// Push control message to broker.
-	msg := broker.ControlMessage{
-		ID:    uuid.New().String(),
-		Type:  "continue",
-		RunID: s.runID,
-		Payload: mustJSON(map[string]any{
-			"message": prompt,
-		}),
-	}
-	return p.broker.PushControl(s.runID, msg)
-}
-
-func mustJSON(v any) json.RawMessage {
-	b, _ := json.Marshal(v)
-	return json.RawMessage(b)
-}
-
-func (p *Provider) handleBrokerEvents(s *session) {
 	// Drain reports, finishes, replies from broker and emit events.
 	st := p.broker.GetRun(s.runID)
 	if st == nil {
@@ -366,6 +338,38 @@ func (p *Provider) handleBrokerEvents(s *session) {
 			Fields:    map[string]any{"to": rep.To, "payload": json.RawMessage(rep.Payload)},
 		}
 	}
+}
+
+func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Session, error) {
+	return runtime.Session{}, fmt.Errorf("resume not supported for %s", backendID)
+}
+
+func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) error {
+	p.mu.Lock()
+	s, ok := p.sessions[sessionID]
+	p.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("session not found: %s", sessionID)
+	}
+	if s.finished {
+		return fmt.Errorf("session already finished: %s", sessionID)
+	}
+
+	// Push control message to broker.
+	msg := broker.ControlMessage{
+		ID:    uuid.New().String(),
+		Type:  "continue",
+		RunID: s.runID,
+		Payload: mustJSON(map[string]any{
+			"message": prompt,
+		}),
+	}
+	return p.broker.PushControl(s.runID, msg)
+}
+
+func mustJSON(v any) json.RawMessage {
+	b, _ := json.Marshal(v)
+	return json.RawMessage(b)
 }
 
 func brokerEvent(sessionID, state string, payload json.RawMessage) events.Event {

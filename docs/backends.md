@@ -1,6 +1,6 @@
 # Backends
 
-Avenor talks to agents through backends. Each backend speaks a different protocol to a different runtime — OpenCode, Codex, Gemini, Cursor, or PI. Pick the one that matches what's running locally and what you need from the orchestration layer.
+Avenor talks to agents through backends. Each backend speaks a different protocol to a different runtime — OpenCode, Claude, Codex, Gemini, Cursor, or PI. Pick the one that matches what's running locally and what you need from the orchestration layer.
 
 ## Backend selection
 
@@ -13,6 +13,7 @@ avenor --backend codex-app-server --prompt "say hi"
 avenor --backend gemini-acp --prompt "say hi"
 avenor --backend cursor-acp --prompt "say hi"
 avenor --backend pi --model anthropic/claude-sonnet-4-5 --prompt "say hi"
+avenor --backend claude-channel --prompt "say hi"
 ```
 
 ## Capability matrix
@@ -32,6 +33,46 @@ avenor --backend pi --model anthropic/claude-sonnet-4-5 --prompt "say hi"
 `—` means not verified; `✗` means not supported.
 
 ---
+
+## claude-channel (experimental)
+
+Starts a full interactive Claude Code session in the background, controlled via
+`claude/channel` MCP push events with PTY lifecycle fallback.
+
+### How it works
+
+1. Avenor spawns Claude Code with `--dangerously-load-development-channels server:avenor`.
+2. A per-run MCP sidecar (`avenor claude-channel`) declares `claude/channel` and pushes control messages into the session.
+3. The Claude session sees `<channel source="avenor">` events and reacts immediately.
+4. Claude calls `avenor_report`, `avenor_finish`, and `avenor_reply` tools to communicate back.
+5. If the channel is ignored, Avenor falls back to PTY prompt injection.
+
+### Requirements
+
+- Claude Code v2.1.80 or later installed and on `PATH`.
+- `bun` installed (to run the TypeScript sidecar).
+- Research-preview channels may be blocked by org policy.
+- This backend does **not** use `claude -p`; it launches a real interactive session.
+
+### Security
+
+- Only load trusted local channel servers.
+- The broker binds to `127.0.0.1` and requires a per-run random bearer token.
+- Do not use `--dangerously-skip-permissions` in environments you do not fully trust.
+
+### Capabilities
+
+| Capability | Supported |
+|---|---|
+| New sessions | ✓ |
+| Session resume | ✗ |
+| Prompt execution | ✓ (via channel push) |
+| Cancel | ✓ (channel cancel → signal → kill) |
+| Event streaming | ✓ |
+| Permission relay | ⚠ (experimental, not yet verified) |
+| Model selection | ✓ (via `--model`) |
+| External server URL | ✗ |
+| Subprocess discovery | ✓ |
 
 ## opencode-acp
 
