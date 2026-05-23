@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/creack/pty"
 	"github.com/google/uuid"
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
@@ -40,6 +41,7 @@ type session struct {
 	sidecarTok string
 	mcpConfig  string // path to temporary mcp config
 	ptyOut     *os.File
+	ptyMaster  *os.File // PTY master — kept open so Claude sees an interactive terminal
 
 	// event stream
 	events   chan events.Event
@@ -196,6 +198,16 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	cmd.Stdout = ptyFile
 	cmd.Stderr = ptyFile
 
+	// Allocate a PTY so Claude sees an interactive terminal on stdin and
+	// does not fall back to --print mode (which requires an upfront prompt).
+	ptm, pts, err := pty.Open()
+	if err != nil {
+		_ = ptyFile.Close()
+		_ = os.RemoveAll(mcpDir)
+		return runtime.Session{}, fmt.Errorf("open pty: %w", err)
+	}
+	cmd.Stdin = pts
+
 	sessCtx, cancel := context.WithCancel(context.Background())
 	s := &session{
 		sessionID:  sessionID,
@@ -206,6 +218,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		sidecarTok: sidecarTok,
 		mcpConfig:  mcpConfigPath,
 		ptyOut:     ptyFile,
+		ptyMaster:  ptm,
 		events:     make(chan events.Event, 64),
 		done:       make(chan struct{}),
 		cancelFn:   cancel,
@@ -251,6 +264,7 @@ func (p *Provider) runSession(ctx context.Context, s *session) {
 	defer close(s.done)
 	defer close(s.events)
 	defer s.ptyOut.Close()
+	defer s.ptyMaster.Close()
 
 	// Start the process.
 	if err := s.cmd.Start(); err != nil {
@@ -261,6 +275,8 @@ func (p *Provider) runSession(ctx context.Context, s *session) {
 		}
 		return
 	}
+	// Close the PTY slave in the parent — the child has its own fd now.
+	_ = s.cmd.Stdin.(*os.File).Close()
 
 	processDone := make(chan error, 1)
 	go func() {
