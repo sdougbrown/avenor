@@ -362,11 +362,113 @@ func TestResumeFromPreviousRoundTrip(t *testing.T) {
 	}
 }
 
+func TestPromptFile(t *testing.T) {
+	t.Parallel()
+
+	t.Run("relative prompt_file resolved from config dir", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "build.txt"), []byte("build the project"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := loadFromDir(t, dir, `{"pre":[{"name":"build","prompt_file":"build.txt"}]}`)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.Pre[0].Prompt != "build the project" {
+			t.Fatalf("unexpected prompt: %q", cfg.Pre[0].Prompt)
+		}
+		if cfg.Pre[0].PromptFile != "" {
+			t.Fatalf("expected PromptFile to be cleared, got %q", cfg.Pre[0].PromptFile)
+		}
+	})
+
+	t.Run("absolute prompt_file path works", func(t *testing.T) {
+		dir := t.TempDir()
+		absPath := filepath.Join(dir, "prompt.txt")
+		if err := os.WriteFile(absPath, []byte("absolute prompt"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := loadFromDir(t, dir, `{"pre":[{"name":"p","prompt_file":"`+absPath+`"}]}`)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.Pre[0].Prompt != "absolute prompt" {
+			t.Fatalf("unexpected prompt: %q", cfg.Pre[0].Prompt)
+		}
+	})
+
+	t.Run("prompt and prompt_file both set returns error", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "p.txt"), []byte("content"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := loadFromDir(t, dir, `{"pre":[{"name":"build","prompt":"inline","prompt_file":"p.txt"}]}`)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if err.Error() != `loop config: phase[name build]: prompt and prompt_file are mutually exclusive` {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg != nil {
+			t.Fatal("expected nil config on error")
+		}
+	})
+
+	t.Run("prompt_file not found returns error", func(t *testing.T) {
+		dir := t.TempDir()
+		cfg, err := loadFromDir(t, dir, `{"pre":[{"name":"build","prompt_file":"missing.txt"}]}`)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if cfg != nil {
+			t.Fatal("expected nil config on error")
+		}
+	})
+
+	t.Run("prompt_file in loop phase works", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "test.txt"), []byte("run tests"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := loadFromDir(t, dir, `{"loop":[{"name":"test","prompt_file":"test.txt"}]}`)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.Loop[0].Prompt != "run tests" {
+			t.Fatalf("unexpected prompt: %q", cfg.Loop[0].Prompt)
+		}
+	})
+
+	t.Run("prompt_file content preserves whitespace", func(t *testing.T) {
+		dir := t.TempDir()
+		content := "line one\n\nline two\n"
+		if err := os.WriteFile(filepath.Join(dir, "p.txt"), []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := loadFromDir(t, dir, `{"pre":[{"name":"p","prompt_file":"p.txt"}]}`)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.Pre[0].Prompt != content {
+			t.Fatalf("unexpected prompt: %q", cfg.Pre[0].Prompt)
+		}
+	})
+}
+
 // helpers
 
 func loadFromJSON(t *testing.T, data string) (*LoopConfig, error) {
 	t.Helper()
 	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		return nil, err
+	}
+	return LoadLoopConfig(path)
+}
+
+func loadFromDir(t *testing.T, dir, data string) (*LoopConfig, error) {
+	t.Helper()
 	path := filepath.Join(dir, "config.json")
 	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
 		return nil, err

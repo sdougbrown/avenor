@@ -69,7 +69,8 @@ Each phase object requires:
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `name` | `string` | Yes | Unique within the config. Reserved: `(initial)` |
-| `prompt` | `string` | Yes | The prompt sent to the agent. Supports template variables |
+| `prompt` | `string` | One of `prompt` or `prompt_file` | Inline prompt text sent to the agent. Supports template variables |
+| `prompt_file` | `string` | One of `prompt` or `prompt_file` | Path to a file containing the prompt. Relative paths are resolved from the config file's directory. Supports template variables |
 | `resume_from_previous` | `boolean` | No — defaults to `false` | Resume the immediately preceding phase's session instead of starting fresh |
 
 Phase names must be unique across `pre` and `loop`. The name `(initial)` is
@@ -453,7 +454,7 @@ On load, before any phase runs, Avenor validates:
 - At least one of `pre` or `loop` must be non-empty. An entirely empty
   config is rejected.
 - `max_iterations` must be ≥ 1 when `loop` is non-empty.
-- Every phase must have a non-empty `name` and a non-empty `prompt`.
+- Every phase must have a non-empty `name` and exactly one of `prompt` or `prompt_file`. Setting both is an error.
 - Phase names must be unique across `pre` and `loop`.
 - The name `(initial)` is reserved and cannot be used explicitly.
 - `--prompt` / `--prompt-file` with `--loop-file` inserts an unnamed
