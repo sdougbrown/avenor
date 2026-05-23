@@ -1,12 +1,12 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
-	"path/filepath"
-	"runtime"
+
+	"github.com/sdougbrown/avenor/internal/claudechannelsidecar"
 )
 
 func runClaudeChannel(args []string) int {
@@ -23,29 +23,11 @@ func runClaudeChannel(args []string) int {
 		return 1
 	}
 
-	// Locate the sidecar script relative to the compiled binary.
-	_, callerFile, _, ok := runtime.Caller(0)
-	if !ok {
-		fmt.Fprintln(os.Stderr, "avenor claude-channel: cannot determine script path")
-		return 1
-	}
-	// Walk from cmd/avenor/claudechannel.go to repo root, then into internal/claudechannelsidecar/sidecar.ts
-	repoRoot := filepath.Dir(filepath.Dir(filepath.Dir(callerFile)))
-	sidecarPath := filepath.Join(repoRoot, "internal", "claudechannelsidecar", "sidecar.ts")
-	if _, err := os.Stat(sidecarPath); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "avenor claude-channel: sidecar not found at %s\n", sidecarPath)
-		return 1
-	}
-
-	cmd := exec.Command("bun", "run", sidecarPath,
-		"--run-id", *runID,
-		"--token", *token,
-		"--broker-url", *brokerURL,
-	)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := claudechannelsidecar.Run(context.Background(), claudechannelsidecar.Options{
+		RunID:     *runID,
+		Token:     *token,
+		BrokerURL: *brokerURL,
+	}); err != nil {
 		fmt.Fprintf(os.Stderr, "avenor claude-channel: %v\n", err)
 		return 1
 	}

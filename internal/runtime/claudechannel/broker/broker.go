@@ -72,7 +72,7 @@ type RunState struct {
 	PermissionRequests  map[string]*PermissionState
 	PermissionDecisions map[string]string // requestID -> "allow" or "deny"
 	Mu                  sync.Mutex
-	Cond                *sync.Cond
+	Notify              chan struct{}
 }
 
 func (st *RunState) Lock()   { st.Mu.Lock() }
@@ -89,9 +89,16 @@ func (b *Broker) PushControl(runID string, msg ControlMessage) error {
 	st.Mu.Lock()
 	msg.CreatedAt = time.Now()
 	st.ControlQueue = append(st.ControlQueue, &msg)
-	st.Cond.Broadcast()
+	st.signalLocked()
 	st.Mu.Unlock()
 	return nil
+}
+
+func (st *RunState) signalLocked() {
+	select {
+	case st.Notify <- struct{}{}:
+	default:
+	}
 }
 
 // Broker is the in-process HTTP server for channel sidecar coordination.
@@ -138,6 +145,7 @@ func (b *Broker) Start() error {
 	router.HandleFunc("/report", b.withMethod("POST", b.withAuth(b.handleReport)))
 	router.HandleFunc("/finish", b.withMethod("POST", b.withAuth(b.handleFinish)))
 	router.HandleFunc("/reply", b.withMethod("POST", b.withAuth(b.handleReply)))
+	router.HandleFunc("/permission_request", b.withMethod("POST", b.withAuth(b.handlePermissionRequest)))
 	router.HandleFunc("/permission", b.withMethod("POST", b.withAuth(b.handlePermission)))
 
 	b.server = &http.Server{
@@ -245,6 +253,7 @@ func (b *Broker) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		RunID string `json:"run_id"`
+		Token string `json:"token"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -256,25 +265,40 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	b.mu.Lock()
-	if _, exists := b.runs[body.RunID]; exists {
+	if st, exists := b.runs[body.RunID]; exists {
 		b.mu.Unlock()
-		http.Error(w, "run already registered", http.StatusConflict)
+		if body.Token == "" || subtle.ConstantTimeCompare([]byte(body.Token), []byte(st.Token)) != 1 {
+			http.Error(w, "run already registered", http.StatusConflict)
+			return
+		}
+		st.Mu.Lock()
+		st.LastSeen = time.Now()
+		st.Mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"token":  st.Token,
+			"run_id": st.RunID,
+		})
 		return
+	}
+	token := body.Token
+	if token == "" {
+		token = MakeToken()
 	}
 	st := &RunState{
 		RunID:               body.RunID,
-		Token:               MakeToken(),
+		Token:               token,
 		LastSeen:            time.Now(),
+		Notify:              make(chan struct{}, 1),
 		PermissionRequests:  make(map[string]*PermissionState),
 		PermissionDecisions: make(map[string]string),
 	}
-	st.Cond = sync.NewCond(&st.Mu)
 	b.runs[body.RunID] = st
 	b.mu.Unlock()
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{
-		"token": st.Token,
+		"token":  st.Token,
 		"run_id": st.RunID,
 	})
 }
@@ -323,7 +347,7 @@ func (b *Broker) handlePushControl(w http.ResponseWriter, r *http.Request) {
 	st.Mu.Lock()
 	msg.CreatedAt = time.Now()
 	st.ControlQueue = append(st.ControlQueue, &msg)
-	st.Cond.Broadcast()
+	st.signalLocked()
 	st.Mu.Unlock()
 
 	w.Header().Set("Content-Type", "application/json")
@@ -349,17 +373,24 @@ func (b *Broker) handlePollControl(w http.ResponseWriter, r *http.Request) {
 
 	st.Mu.Lock()
 	if len(st.ControlQueue) == 0 {
-		// Wait up to 2 seconds for new control messages
-		waitCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		go func() {
-			<-waitCtx.Done()
-			st.Cond.Broadcast()
-		}()
-		st.Cond.Wait()
-		cancel()
+		notify := st.Notify
+		st.Mu.Unlock()
+		select {
+		case <-notify:
+		case <-time.After(2 * time.Second):
+		case <-r.Context().Done():
+			return
+		}
+		st.Mu.Lock()
 	}
 	msgs := st.ControlQueue
 	st.ControlQueue = nil
+	if len(msgs) > 0 {
+		select {
+		case <-st.Notify:
+		default:
+		}
+	}
 	st.Mu.Unlock()
 
 	w.Header().Set("Content-Type", "application/json")
@@ -391,6 +422,29 @@ func (b *Broker) handleReply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b.ingest(w, rep.RunID, func(st *RunState) { st.Replies = append(st.Replies, rep) })
+}
+
+func (b *Broker) handlePermissionRequest(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		RunID     string `json:"run_id"`
+		RequestID string `json:"request_id"`
+		ToolName  string `json:"tool_name"`
+		Desc      string `json:"description"`
+		Preview   string `json:"input_preview"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	b.ingest(w, body.RunID, func(st *RunState) {
+		st.PermissionRequests[body.RequestID] = &PermissionState{
+			RequestID: body.RequestID,
+			ToolName:  body.ToolName,
+			Desc:      body.Desc,
+			Preview:   body.Preview,
+			CreatedAt: time.Now(),
+		}
+	})
 }
 
 func (b *Broker) handlePermission(w http.ResponseWriter, r *http.Request) {
@@ -444,10 +498,10 @@ func (b *Broker) CreateRun(runID string) (string, error) {
 		RunID:               runID,
 		Token:               MakeToken(),
 		LastSeen:            time.Now(),
+		Notify:              make(chan struct{}, 1),
 		PermissionRequests:  make(map[string]*PermissionState),
 		PermissionDecisions: make(map[string]string),
 	}
-	st.Cond = sync.NewCond(&st.Mu)
 	b.runs[runID] = st
 	return st.Token, nil
 }

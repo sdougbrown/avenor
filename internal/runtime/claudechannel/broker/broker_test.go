@@ -2,10 +2,12 @@ package broker
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"testing"
+	"time"
 )
 
 func TestBrokerHealth(t *testing.T) {
@@ -64,6 +66,36 @@ func TestBrokerRegister(t *testing.T) {
 	}
 }
 
+func TestBrokerRegisterExistingRunWithMatchingToken(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	token, err := b.CreateRun("run_existing")
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+
+	body := bytes.NewReader([]byte(fmt.Sprintf(`{"run_id":"run_existing","token":"%s"}`, token)))
+	resp, err := http.Post(fmt.Sprintf("http://%s/register", b.Addr()), "application/json", body)
+	if err != nil {
+		t.Fatalf("register existing: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("register existing: expected 200, got %d", resp.StatusCode)
+	}
+	var result map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result["token"] != token {
+		t.Fatalf("token = %q, want %q", result["token"], token)
+	}
+}
+
 func TestBrokerPushControlAndPoll(t *testing.T) {
 	b := New("")
 	if err := b.Start(); err != nil {
@@ -104,6 +136,57 @@ func TestBrokerPushControlAndPoll(t *testing.T) {
 	}
 	if msgs[0].ID != "ctrl_1" {
 		t.Fatalf("unexpected id: %s", msgs[0].ID)
+	}
+}
+
+func TestBrokerPollDrainsStaleNotifyAfterQueuedMessage(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	token, err := b.CreateRun("run_poll")
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	if err := b.PushControl("run_poll", ControlMessage{ID: "ctrl_1", Type: "continue", RunID: "run_poll"}); err != nil {
+		t.Fatalf("push control: %v", err)
+	}
+
+	poll := func(ctx context.Context) (*http.Response, error) {
+		body := bytes.NewReader([]byte(fmt.Sprintf(`{"run_id":"run_poll","token":"%s"}`, token)))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("http://%s/poll-control", b.Addr()), body)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		return http.DefaultClient.Do(req)
+	}
+
+	resp, err := poll(context.Background())
+	if err != nil {
+		t.Fatalf("first poll: %v", err)
+	}
+	var msgs []ControlMessage
+	if err := json.NewDecoder(resp.Body).Decode(&msgs); err != nil {
+		t.Fatalf("decode first poll: %v", err)
+	}
+	resp.Body.Close()
+	if len(msgs) != 1 {
+		t.Fatalf("first poll got %d messages, want 1", len(msgs))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	resp, err = poll(ctx)
+	if err == nil {
+		resp.Body.Close()
+		t.Fatal("second empty poll returned before request context timed out")
+	}
+	if elapsed := time.Since(start); elapsed < 75*time.Millisecond {
+		t.Fatalf("second empty poll returned too quickly after %s", elapsed)
 	}
 }
 

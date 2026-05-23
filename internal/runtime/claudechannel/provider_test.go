@@ -2,6 +2,7 @@ package claudechannel
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/sdougbrown/avenor/internal/runtime"
@@ -51,20 +52,24 @@ func TestAnswerPermissionNotStarted(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for nonexistent session")
 	}
+	if !strings.Contains(err.Error(), "session not found") {
+		t.Fatalf("error = %q, want session not found", err)
+	}
 }
 
 func TestBrokerEventMapping(t *testing.T) {
 	cases := []struct {
-		state    string
-		wantEv   string
+		state     string
+		wantEv    string
 		wantPhase string
 	}{
 		{"thinking", "agent.status", "thinking"},
 		{"working", "agent.status", "working"},
 		{"checkpoint", "agent.message_chunk", ""},
 		{"blocked", "agent.status", "waiting"},
+		{"permission_requested", "permission.request", ""},
 		{"started", "agent.status", "started"},
-		{		"unknown", "agent.status", "unknown"},
+		{"unknown", "agent.status", "unknown"},
 	}
 
 	for range cases {

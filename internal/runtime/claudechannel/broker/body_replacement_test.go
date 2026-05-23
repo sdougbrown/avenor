@@ -49,7 +49,12 @@ func TestBodyReplacementPattern(t *testing.T) {
 		t.Fatal("run not found")
 	}
 	if len(st.Reports) != 1 {
-		t.Fatalf("expected 1 report, got %d (state=%q)", len(st.Reports), func() string { if st != nil && len(st.Reports) > 0 { return st.Reports[0].State }; return "" }())
+		t.Fatalf("expected 1 report, got %d (state=%q)", len(st.Reports), func() string {
+			if st != nil && len(st.Reports) > 0 {
+				return st.Reports[0].State
+			}
+			return ""
+		}())
 	}
 	if st.Reports[0].State != "working" {
 		t.Fatalf("unexpected state: %s", st.Reports[0].State)

@@ -50,7 +50,7 @@ Starts a full interactive Claude Code session in the background, controlled via
 ### Requirements
 
 - Claude Code v2.1.80 or later installed and on `PATH`.
-- `bun` installed (to run the TypeScript sidecar).
+- No separate sidecar runtime is required; `avenor claude-channel` is implemented in the Go binary.
 - Research-preview channels may be blocked by org policy.
 - This backend does **not** use `claude -p`; it launches a real interactive session.
 

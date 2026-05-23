@@ -232,9 +232,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 			Fields: map[string]any{
 				"backend":          backendID,
 				"dir":              merged.Dir,
-				"claude_args":      claudeArgs,
 				"broker_url":       brokerURL,
-				"mcp_config_path":  mcpConfigPath,
 				"dangerously_load": true,
 			},
 		}
@@ -294,10 +292,10 @@ func (p *Provider) runSession(ctx context.Context, s *session) {
 				Event:     "session.end",
 				SessionID: s.sessionID,
 				Fields: map[string]any{
-					"status":       status,
-					"error":        fmt.Sprintf("%v", err),
-					"exit_code":    s.cmd.ProcessState.ExitCode(),
-					"stop_reason":  "end_turn",
+					"status":      status,
+					"error":       fmt.Sprintf("%v", err),
+					"exit_code":   s.cmd.ProcessState.ExitCode(),
+					"stop_reason": "end_turn",
 				},
 			}
 			return
@@ -325,6 +323,7 @@ func (p *Provider) pollBrokerEvents(s *session) {
 	replies := make([]broker.Reply, len(st.Replies))
 	copy(replies, st.Replies)
 	st.Replies = st.Replies[:0]
+
 	st.Unlock()
 
 	for _, rep := range reports {
@@ -335,10 +334,10 @@ func (p *Provider) pollBrokerEvents(s *session) {
 			Event:     "session.end",
 			SessionID: s.sessionID,
 			Fields: map[string]any{
-				"status":       fin.Status,
-				"summary":      fin.Summary,
+				"status":        fin.Status,
+				"summary":       fin.Summary,
 				"files_changed": fin.FilesChanged,
-				"stop_reason":  mapFinishStatus(fin.Status),
+				"stop_reason":   mapFinishStatus(fin.Status),
 			},
 		}
 		p.mu.Lock()
