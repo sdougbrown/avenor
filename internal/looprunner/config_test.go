@@ -3,6 +3,7 @@ package looprunner
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -420,6 +421,9 @@ func TestPromptFile(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
+		if !strings.Contains(err.Error(), "reading prompt_file") || !strings.Contains(err.Error(), "missing.txt") {
+			t.Fatalf("expected error to mention \"reading prompt_file\" and filename, got: %v", err)
+		}
 		if cfg != nil {
 			t.Fatal("expected nil config on error")
 		}
@@ -436,6 +440,9 @@ func TestPromptFile(t *testing.T) {
 		}
 		if cfg.Loop[0].Prompt != "run tests" {
 			t.Fatalf("unexpected prompt: %q", cfg.Loop[0].Prompt)
+		}
+		if cfg.Loop[0].PromptFile != "" {
+			t.Fatalf("expected PromptFile to be cleared, got %q", cfg.Loop[0].PromptFile)
 		}
 	})
 
