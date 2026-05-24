@@ -178,17 +178,10 @@ func (c *client) sendCommand(cmd map[string]any) (json.RawMessage, error) {
 	}
 }
 
-func (c *client) answerExtensionUI(id string, method string, response map[string]any) error {
-	c.mu.Lock()
-	approval, ok := c.approvals[id]
-	c.mu.Unlock()
-	if !ok {
-		return fmt.Errorf("extension UI request %q not found", id)
-	}
-
+func (c *client) answerExtensionUI(rawID any, method string, response map[string]any) error {
 	msg := map[string]any{
 		"type": "extension_ui_response",
-		"id":   approval.rawID,
+		"id":   rawID,
 	}
 	msg["method"] = method
 

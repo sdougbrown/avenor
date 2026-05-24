@@ -241,6 +241,7 @@ func (p *Provider) AnswerPermission(ctx context.Context, sessionID string, reque
 		c.mu.Unlock()
 		return fmt.Errorf("approval request %q belongs to session %q, not %q", requestID, approval.sessionID, sessionID)
 	}
+	delete(c.approvals, requestID)
 	c.mu.Unlock()
 
 	resp := map[string]any{
@@ -266,7 +267,7 @@ func (p *Provider) AnswerPermission(ctx context.Context, sessionID string, reque
 		}
 	}
 
-	return c.answerExtensionUI(requestID, approval.method, resp)
+	return c.answerExtensionUI(approval.rawID, approval.method, resp)
 }
 
 func (p *Provider) Capabilities(ctx context.Context) (runtime.Capabilities, error) {
