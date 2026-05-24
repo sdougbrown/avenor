@@ -63,6 +63,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	}
 	if sessionID == "" {
 		sessionID = "pi-" + newRequestID()
+		c.stderr.Append("session ID not found in get_state response, generating new session ID")
 	}
 
 	p.mu.Lock()

@@ -435,6 +435,9 @@ func (c *client) drainStderr(r io.ReadCloser) {
 	for scanner.Scan() {
 		c.stderr.Append(scanner.Text())
 	}
+	if err := scanner.Err(); err != nil {
+		c.stderr.Append(fmt.Sprintf("stderr drain error: %v", err))
+	}
 	_ = r.Close()
 }
 

@@ -39,10 +39,16 @@ func TestTranslateBasicEvents(t *testing.T) {
 			if ev.Event != tt.want {
 				t.Errorf("event = %q, want %q", ev.Event, tt.want)
 			}
-			if ev.SessionID != "pi-s1" {
-				t.Errorf("sessionID = %q, want pi-s1", ev.SessionID)
+		if ev.SessionID != "pi-s1" {
+			t.Errorf("sessionID = %q, want pi-s1", ev.SessionID)
+		}
+		if tt.typeStr == "tool_execution_start" || tt.typeStr == "tool_execution_end" || tt.typeStr == "tool_execution_update" {
+			toolName, _ := ev.Fields["toolName"].(string)
+			if toolName != "cat" {
+				t.Errorf("toolName = %q, want cat", toolName)
 			}
-		})
+		}
+	})
 	}
 }
 
@@ -65,6 +71,20 @@ func TestTranslateAgentEndWithStopReason(t *testing.T) {
 	stopReason, _ := ev.Fields["stop_reason"].(string)
 	if stopReason != "end_of_turn" {
 		t.Errorf("stop_reason = %q, want end_of_turn", stopReason)
+	}
+}
+
+func TestTranslateAgentEndEmptyMessages(t *testing.T) {
+	payload := map[string]any{"type": "agent_end", "messages": []any{}}
+	ev := translateNotification(payload, "pi-s1")
+	if ev == nil {
+		t.Fatal("expected event")
+	}
+	if ev.Event != "session.end" {
+		t.Errorf("event = %q, want session.end", ev.Event)
+	}
+	if len(ev.Fields) != 0 {
+		t.Errorf("fields should be empty for empty messages slice, got %d", len(ev.Fields))
 	}
 }
 
