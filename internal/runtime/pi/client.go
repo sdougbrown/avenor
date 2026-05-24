@@ -124,6 +124,7 @@ func (c *client) Close() error {
 			close(ch)
 		}
 		c.pending = nil
+		c.approvals = nil
 		c.mu.Unlock()
 
 		close(c.eventsCh)
