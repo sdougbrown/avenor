@@ -37,7 +37,7 @@ func TestCapabilities(t *testing.T) {
 
 func TestResumeExisting(t *testing.T) {
 	p := NewWithOptions(runtime.StartOptions{Dir: "/work"})
-	p.sessions["pi_existing"] = "pi_existing"
+	p.sessions["pi_existing"] = struct{}{}
 
 	sess, err := p.Resume(context.Background(), "pi_existing")
 	if err != nil {
@@ -56,7 +56,7 @@ func TestResumeExisting(t *testing.T) {
 
 func TestResumeRejectsSecondDistinctSession(t *testing.T) {
 	p := NewWithOptions(runtime.StartOptions{Dir: "/work"})
-	p.sessions["pi_existing"] = "pi_existing"
+	p.sessions["pi_existing"] = struct{}{}
 	c, _, _ := fakeClient()
 	defer c.Close()
 	p.client = c

@@ -17,13 +17,13 @@ type Provider struct {
 	opts     runtime.StartOptions
 	mu       sync.Mutex
 	client   *client
-	sessions map[string]string
+	sessions map[string]struct{}
 }
 
 func NewWithOptions(opts runtime.StartOptions) *Provider {
 	return &Provider{
 		opts:     opts,
-		sessions: map[string]string{},
+		sessions: map[string]struct{}{},
 	}
 }
 
@@ -71,7 +71,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		p.mu.Unlock()
 		return runtime.Session{}, errors.New("pi rpc supports only one active session per provider")
 	}
-	p.sessions[sessionID] = sessionID
+	p.sessions[sessionID] = struct{}{}
 	p.mu.Unlock()
 
 	c.setSessionID(sessionID)
@@ -105,7 +105,7 @@ func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Sessio
 		p.mu.Unlock()
 		return runtime.Session{}, errors.New("pi rpc supports only one active session per provider")
 	}
-	p.sessions[sessionID] = sessionID
+	p.sessions[sessionID] = struct{}{}
 	p.mu.Unlock()
 
 	c.setSessionID(sessionID)

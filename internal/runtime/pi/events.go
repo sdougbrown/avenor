@@ -97,9 +97,11 @@ func translateExtensionUI(payload map[string]any, sessionID string) (*events.Eve
 	case "select":
 		var rawOptions []any
 		if opts := payload["options"]; opts != nil {
-			if optsArr, ok := opts.([]any); ok {
-				rawOptions = optsArr
+			optsArr, ok := opts.([]any)
+			if !ok {
+				return nil, method
 			}
+			rawOptions = optsArr
 		}
 		optList := make([]any, len(rawOptions))
 		for i, opt := range rawOptions {

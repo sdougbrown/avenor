@@ -21,7 +21,7 @@ const stderrCap = 400
 type pendingApproval struct {
 	id        string
 	method    string
-	rawID     any
+	rawID     string
 	sessionID string
 }
 
@@ -173,7 +173,9 @@ func (c *client) sendCommand(cmd map[string]any) (json.RawMessage, error) {
 		return result, nil
 	case <-c.done:
 		c.mu.Lock()
-		delete(c.pending, id)
+		if c.pending != nil {
+			delete(c.pending, id)
+		}
 		c.mu.Unlock()
 		return nil, errors.New("client closed while waiting for response")
 	}
@@ -252,15 +254,6 @@ func (c *client) SessionID() string {
 	return c.sessionID
 }
 
-func (c *client) waitSession() chan struct{} {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.sessionID != "" {
-		return nil
-	}
-	return c.sessionCh
-}
-
 func (c *client) readLoop() {
 	defer close(c.done)
 	scanner := bufio.NewScanner(c.stdout)
@@ -336,11 +329,13 @@ func (c *client) routeExtensionUI(payload map[string]any) {
 		ev.Fields["request_id"] = id
 		ev.Fields["ui_request_id"] = id
 
+		rawID, _ := payload["id"].(string)
+
 		c.mu.Lock()
 		c.approvals[id] = pendingApproval{
 			id:        id,
 			method:    method,
-			rawID:     payload["id"],
+			rawID:     rawID,
 			sessionID: sessionID,
 		}
 		c.mu.Unlock()

@@ -144,7 +144,7 @@ func TestTranslateExtensionUISelect(t *testing.T) {
 		"id":      "ui-1",
 		"method":  "select",
 		"title":   "Allow command execution?",
-		"options": []string{"Allow", "Deny"},
+		"options": []any{"Allow", "Deny"},
 	}
 	ev, method := translateExtensionUI(payload, "pi-s1")
 	if ev == nil {
