@@ -25,18 +25,26 @@ func NewWithOptions(opts runtime.StartOptions) runtime.Provider {
 		Args:                []string{"acp", "--pure", "--log-level", "WARN"},
 		SubprocessDiscovery: true,
 		AppendCWDArg:        true,
-		ConfigureSession:    configureSession,
+		ConfigureSession: func(ctx context.Context, session *acp.Session, opts runtime.StartOptions) error {
+			return configureSession(ctx, session.Client, session.SessionID, opts)
+		},
 	})
 }
 
-func configureSession(ctx context.Context, session *acp.Session, opts runtime.StartOptions) error {
+// sessionConfigurer is the subset of *acp.Client needed for session configuration.
+type sessionConfigurer interface {
+	SetSessionMode(ctx context.Context, sessionID, modeID string) error
+	SetSessionModel(ctx context.Context, sessionID, modelID string) error
+}
+
+func configureSession(ctx context.Context, cfg sessionConfigurer, sessionID string, opts runtime.StartOptions) error {
 	if opts.Model != "" {
-		if err := session.Client.SetSessionModel(ctx, session.SessionID, opts.Model); err != nil {
+		if err := cfg.SetSessionModel(ctx, sessionID, opts.Model); err != nil {
 			return err
 		}
 	}
 	if opts.Agent != "" {
-		if err := session.Client.SetSessionMode(ctx, session.SessionID, opts.Agent); err != nil {
+		if err := cfg.SetSessionMode(ctx, sessionID, opts.Agent); err != nil {
 			return err
 		}
 	}
