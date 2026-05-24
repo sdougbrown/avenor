@@ -170,6 +170,49 @@ func TestCloseNotStarted(t *testing.T) {
 	}
 }
 
+func TestAnswerPermissionDenied(t *testing.T) {
+	p := NewWithOptions(runtime.StartOptions{})
+	c, _, rIn := fakeClient()
+	defer c.Close()
+	p.client = c
+	c.mu.Lock()
+	c.approvals["req-deny"] = pendingApproval{
+		id:        "req-deny",
+		method:    "select",
+		rawID:     "ui-deny",
+		sessionID: "ses",
+	}
+	c.mu.Unlock()
+
+	done := make(chan map[string]any, 1)
+	go func() {
+		cmd, err := readCommand(rIn)
+		if err != nil {
+			return
+		}
+		done <- cmd
+	}()
+
+	err := p.AnswerPermission(context.Background(), "ses", "req-deny", runtime.PermissionResponse{
+		Allow: false,
+	})
+	if err != nil {
+		t.Fatalf("AnswerPermission: %v", err)
+	}
+
+	select {
+	case cmd := <-done:
+		if cmd["type"] != "extension_ui_response" {
+			t.Errorf("type = %v, want extension_ui_response", cmd["type"])
+		}
+		if cmd["cancelled"] != true {
+			t.Errorf("cancelled = %v, want true", cmd["cancelled"])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for denied extension UI response")
+	}
+}
+
 func TestProviderImplementsInterface(t *testing.T) {
 	var _ runtime.Provider = (*Provider)(nil)
 }

@@ -181,9 +181,6 @@ func (c *client) sendCommand(cmd map[string]any) (json.RawMessage, error) {
 func (c *client) answerExtensionUI(id string, method string, response map[string]any) error {
 	c.mu.Lock()
 	approval, ok := c.approvals[id]
-	if ok {
-		delete(c.approvals, id)
-	}
 	c.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("extension UI request %q not found", id)
@@ -295,8 +292,6 @@ func (c *client) dispatchLine(line []byte) {
 	}
 
 	evtType, _ := payload["type"].(string)
-	hasID := payload["id"] != nil && payload["id"] != ""
-	method, _ := payload["method"].(string)
 
 	switch {
 	case evtType == "response":
@@ -306,8 +301,6 @@ func (c *client) dispatchLine(line []byte) {
 	default:
 		c.routeEvent(payload)
 	}
-	_ = hasID
-	_ = method
 }
 
 func (c *client) routeResponse(payload map[string]any) {
@@ -330,10 +323,7 @@ func (c *client) routeResponse(payload map[string]any) {
 		c.stderr.Append(fmt.Sprintf("marshal response for id %s: %v", id, err))
 		return
 	}
-	select {
-	case ch <- json.RawMessage(data):
-	default:
-	}
+	ch <- json.RawMessage(data)
 }
 
 func (c *client) routeExtensionUI(payload map[string]any) {
@@ -422,7 +412,11 @@ func (c *client) fanout(ev *events.Event) {
 
 	for _, ch := range chans {
 		if isCriticalEvent(ev.Event) {
-			ch <- *ev
+			select {
+			case ch <- *ev:
+			default:
+				c.stderr.Append(fmt.Sprintf("dropped critical event %q for session %q: subscriber buffer full", ev.Event, ev.SessionID))
+			}
 		} else {
 			select {
 			case ch <- *ev:

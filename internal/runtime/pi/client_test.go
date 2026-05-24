@@ -131,7 +131,7 @@ func TestClientMalformedJSON(t *testing.T) {
 	}
 }
 
-func TestClientTruncatedJSON(t *testing.T) {
+func TestClientInvalidJSON(t *testing.T) {
 	c, wOut, _ := fakeClient()
 	defer c.Close()
 
@@ -249,6 +249,47 @@ func TestClientAnswerExtensionUI(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for answer write")
+	}
+}
+
+func TestClientAnswerExtensionUICancelled(t *testing.T) {
+	c, _, rIn := fakeClient()
+	defer c.Close()
+
+	c.setSessionID("pi_perm")
+	c.mu.Lock()
+	c.approvals["req-cancel"] = pendingApproval{
+		id:     "req-cancel",
+		method: "select",
+		rawID:  "ui-cancel",
+	}
+	c.mu.Unlock()
+
+	done := make(chan map[string]any, 1)
+	go func() {
+		cmd, err := readCommand(rIn)
+		if err != nil {
+			return
+		}
+		done <- cmd
+	}()
+
+	if err := c.answerExtensionUI("req-cancel", "select", map[string]any{
+		"cancelled": true,
+	}); err != nil {
+		t.Fatalf("answerExtensionUI: %v", err)
+	}
+
+	select {
+	case cmd := <-done:
+		if cmd["type"] != "extension_ui_response" {
+			t.Errorf("type = %v, want extension_ui_response", cmd["type"])
+		}
+		if cmd["cancelled"] != true {
+			t.Errorf("cancelled = %v, want true", cmd["cancelled"])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for cancelled answer write")
 	}
 }
 
