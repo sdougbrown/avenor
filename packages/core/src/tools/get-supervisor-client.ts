@@ -12,7 +12,7 @@ export async function getSupervisorClient(supervisorId: string): Promise<{
   const isSingleton = Supervisor.isCurrentInstance(id)
   if (isSingleton) {
     const sup = Supervisor.currentInstance()
-    if (!sup) throw new Error('Supervisor.isCurrentInstance() returned true but currentInstance() is null')
+    if (!sup) throw new Error(`Supervisor.isCurrentInstance() returned true but currentInstance() is null (id: ${id})`)
     return { client: sup.getClient(), isSingleton: true, sup, supervisorId: id }
   }
   return { client: await dial(id), isSingleton: false, sup: null, supervisorId: id }
