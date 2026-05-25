@@ -155,7 +155,9 @@ func (c *client) sendCommand(ctx context.Context, cmd map[string]any) (json.RawM
 	data, err := json.Marshal(cmd)
 	if err != nil {
 		c.mu.Lock()
-		delete(c.pending, id)
+		if c.pending != nil {
+			delete(c.pending, id)
+		}
 		c.mu.Unlock()
 		return nil, fmt.Errorf("marshal command: %w", err)
 	}
@@ -163,7 +165,9 @@ func (c *client) sendCommand(ctx context.Context, cmd map[string]any) (json.RawM
 
 	if err := c.writeStdin(data); err != nil {
 		c.mu.Lock()
-		delete(c.pending, id)
+		if c.pending != nil {
+			delete(c.pending, id)
+		}
 		c.mu.Unlock()
 		return nil, fmt.Errorf("write command: %w", err)
 	}
@@ -318,6 +322,7 @@ func (c *client) routeResponse(payload map[string]any) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		c.stderr.Append(fmt.Sprintf("marshal response for id %s: %v", id, err))
+		close(ch)
 		return
 	}
 	ch <- json.RawMessage(data)
@@ -339,7 +344,7 @@ func (c *client) routeExtensionUI(payload map[string]any) {
 		ev.Fields["request_id"] = id
 		ev.Fields["ui_request_id"] = id
 
-		rawID, _ := payload["id"].(string)
+		rawID := fmt.Sprint(payload["id"])
 
 		c.mu.Lock()
 		c.approvals[id] = pendingApproval{
