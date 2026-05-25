@@ -130,6 +130,9 @@ func TestConfigureSessionModelError(t *testing.T) {
 	if err == nil || err.Error() != "model failed" {
 		t.Fatalf("expected 'model failed' error, got %v", err)
 	}
+	if fake.modeCalls != 0 {
+		t.Fatalf("SetSessionMode was called %d times after SetSessionModel error — should have returned early", fake.modeCalls)
+	}
 }
 
 func TestConfigureSessionModeError(t *testing.T) {
@@ -144,8 +147,9 @@ func TestConfigureSessionModeError(t *testing.T) {
 }
 
 type errorConfigurer struct {
-	modelErr error
-	modeErr  error
+	modelErr  error
+	modeErr   error
+	modeCalls int
 }
 
 func (e *errorConfigurer) SetSessionModel(_ context.Context, _, _ string) error {
@@ -153,5 +157,6 @@ func (e *errorConfigurer) SetSessionModel(_ context.Context, _, _ string) error 
 }
 
 func (e *errorConfigurer) SetSessionMode(_ context.Context, _, _ string) error {
+	e.modeCalls++
 	return e.modeErr
 }

@@ -228,7 +228,11 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	}
 
 	if *agent != "" && *model == "" {
-		if resolved := resolveAgentModel(*agent); resolved != "" {
+		resolved, err := resolveAgentModel(*agent)
+		if err != nil {
+			fmt.Fprintf(stderr, "avenor: %v\n", err)
+		}
+		if resolved != "" {
 			*model = resolved
 		}
 	}
@@ -918,18 +922,23 @@ func ParsePermissionHandler(value string) (*permission.FileHandler, error) {
 }
 
 // resolveAgentModel reads opencode's config and returns the configured model
-// for the given agent name. Returns "" if not found or on error.
-func resolveAgentModel(agentName string) string {
+// for the given agent name. Returns ("", nil) if not found. Returns a non-nil
+// error only when a config file exists but cannot be parsed (malformed JSON).
+func resolveAgentModel(agentName string) (string, error) {
 	dir := opencodeConfigDir()
 	if dir == "" {
-		return ""
+		return "", nil
 	}
 	for _, name := range []string{"opencode.json", "opencode.jsonc"} {
-		if model := readAgentModel(filepath.Join(dir, name), agentName); model != "" {
-			return model
+		model, err := readAgentModel(filepath.Join(dir, name), agentName)
+		if err != nil {
+			return "", err
+		}
+		if model != "" {
+			return model, nil
 		}
 	}
-	return ""
+	return "", nil
 }
 
 func opencodeConfigDir() string {
@@ -943,10 +952,10 @@ func opencodeConfigDir() string {
 	return filepath.Join(home, ".config", "opencode")
 }
 
-func readAgentModel(path, agentName string) string {
+func readAgentModel(path, agentName string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return ""
+		return "", nil // file missing or unreadable — not an error worth surfacing
 	}
 	var config struct {
 		Agent map[string]struct {
@@ -954,10 +963,10 @@ func readAgentModel(path, agentName string) string {
 		} `json:"agent"`
 	}
 	if err := json.Unmarshal(data, &config); err != nil {
-		return ""
+		return "", fmt.Errorf("parse opencode config %s: %w", path, err)
 	}
 	if agent, ok := config.Agent[agentName]; ok && agent.Model != "" {
-		return agent.Model
+		return agent.Model, nil
 	}
-	return ""
+	return "", nil
 }

@@ -166,7 +166,7 @@ func newE2EClient(t *testing.T, ctx context.Context) *acp.Client {
 		Args:                 []string{"acp", "--pure", "--log-level", "WARN"},
 		Dir:                  ".",
 		AppendCWDArg:         true,
-		AutoAnswerPermission: true, // auto-reject all permissions so session doesn't hang
+		AutoAnswerPermission: true, // auto-answer all permissions (preferring reject) so session doesn't hang
 	})
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
