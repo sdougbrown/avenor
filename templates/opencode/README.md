@@ -7,6 +7,7 @@ The pieces are meant to be used together:
 - `prompts/jockey.md` — lead agent: plans, delegates, integrates, verifies
 - `prompts/horse.md` — bounded implementation executor for work requiring local judgment
 - `prompts/mule.md` — literal executor for small mechanical tasks
+- `skills/dispatch-jockey/SKILL.md` — starts a jockey run, monitors events, waits for completion
 - `skills/answer-jockey/SKILL.md` — answers Avenor file permission requests via `avenor answer`
 
 ## Permission model
