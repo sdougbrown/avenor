@@ -955,7 +955,10 @@ func opencodeConfigDir() string {
 func readAgentModel(path, agentName string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", nil // file missing or unreadable — not an error worth surfacing
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil // file doesn't exist — not an error
+		}
+		return "", fmt.Errorf("read opencode config %s: %w", path, err)
 	}
 	var config struct {
 		Agent map[string]struct {

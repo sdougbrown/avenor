@@ -40,14 +40,29 @@ func TestReadAgentModel(t *testing.T) {
 	t.Run("missing file returns empty", func(t *testing.T) {
 		model, err := readAgentModel(filepath.Join(dir, "nonexistent.json"), "jockey")
 		if err != nil {
-			t.Fatalf("missing file should not error: %v", err)
+			t.Fatalf("missing file should not error (ENOENT is expected): %v", err)
 		}
 		if model != "" {
 			t.Errorf("model = %q, want empty", model)
 		}
 	})
 
-	t.Run("malformed JSON returns error", func(t *testing.T) {
+	t.Run("unreadable file returns error", func(t *testing.T) {
+		// Create a directory where a file would be — ReadFile on a dir fails with EISDIR
+		subdir := filepath.Join(dir, "not-a-file")
+		if err := os.Mkdir(subdir, 0o700); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		_, err := readAgentModel(subdir, "jockey")
+		if err == nil {
+			t.Fatal("expected read error for unreadable path, got nil")
+		}
+		if !strings.Contains(err.Error(), "read opencode config") {
+			t.Errorf("error = %v, want 'read opencode config' prefix", err)
+		}
+	})
+
+	t.Run("malformed JSON returns parse error", func(t *testing.T) {
 		path := filepath.Join(dir, "broken.json")
 		if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
 			t.Fatalf("write: %v", err)
