@@ -2,9 +2,9 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as crypto from 'node:crypto'
 import { Supervisor, type RunInfo } from '../supervisor.js'
-import { dial } from '../client.js'
 import { ensureRunPaths, runsRoot } from '../paths.js'
-import { validateRunId, validateSupervisorSocketPath } from './validate.js'
+import { validateRunId } from './validate.js'
+import { getSupervisorClient } from './get-supervisor-client.js'
 
 function findRunByLabel(sup: Supervisor, runId: string): RunInfo | undefined {
   const runs = (sup as any).runs as Map<string, RunInfo>
@@ -44,15 +44,7 @@ export async function followUpTool(args: {
   supervisorId?: string
 }): Promise<{ run_id: string; label: string }> {
   if (args.supervisorId) {
-    const supervisorId = validateSupervisorSocketPath(args.supervisorId)
-    const isSingleton = Supervisor.isCurrentInstance(supervisorId)
-    const client = isSingleton
-      ? (() => {
-          const current = Supervisor.currentInstance()
-          if (!current) throw new Error('Supervisor.isCurrentInstance() returned true but currentInstance() is null')
-          return current.getClient()
-        })()
-      : await dial(supervisorId)
+    const { client, isSingleton } = await getSupervisorClient(args.supervisorId)
     try {
       validateRunId(args.runId)
       let liveStatus: Record<string, unknown> | null = null
