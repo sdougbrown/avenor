@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -223,6 +224,12 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		if err != nil {
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
 			return exitWithSentinel(1)
+		}
+	}
+
+	if *agent != "" && *model == "" {
+		if resolved := resolveAgentModel(*agent); resolved != "" {
+			*model = resolved
 		}
 	}
 
@@ -908,4 +915,49 @@ func ParsePermissionHandler(value string) (*permission.FileHandler, error) {
 		return nil, fmt.Errorf("--permission-handler file path is required")
 	}
 	return permission.NewFileHandler(path), nil
+}
+
+// resolveAgentModel reads opencode's config and returns the configured model
+// for the given agent name. Returns "" if not found or on error.
+func resolveAgentModel(agentName string) string {
+	dir := opencodeConfigDir()
+	if dir == "" {
+		return ""
+	}
+	for _, name := range []string{"opencode.json", "opencode.jsonc"} {
+		if model := readAgentModel(filepath.Join(dir, name), agentName); model != "" {
+			return model
+		}
+	}
+	return ""
+}
+
+func opencodeConfigDir() string {
+	if dir := os.Getenv("OPENCODE_CONFIG_DIR"); dir != "" {
+		return dir
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".config", "opencode")
+}
+
+func readAgentModel(path, agentName string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var config struct {
+		Agent map[string]struct {
+			Model string `json:"model"`
+		} `json:"agent"`
+	}
+	if err := json.Unmarshal(data, &config); err != nil {
+		return ""
+	}
+	if agent, ok := config.Agent[agentName]; ok && agent.Model != "" {
+		return agent.Model
+	}
+	return ""
 }

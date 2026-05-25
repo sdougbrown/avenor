@@ -6,16 +6,23 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/sdougbrown/avenor/internal/runtime/acp"
 )
 
-func newIntegrationClient(t *testing.T) (*Client, context.Context, context.CancelFunc) {
+func newIntegrationClient(t *testing.T) (*acp.Client, context.Context, context.CancelFunc) {
 	t.Helper()
 	if !opencodeAvailable() {
 		t.Skip("opencode not on PATH")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	client, err := NewClient(ctx, ".")
+	client, err := acp.NewClient(ctx, acp.ClientConfig{
+		Bin:          "opencode",
+		Args:         []string{"acp", "--pure", "--log-level", "WARN"},
+		Dir:          ".",
+		AppendCWDArg: true,
+	})
 	if err != nil {
 		cancel()
 		t.Skipf("opencode ACP unavailable in this environment: %v", err)
@@ -49,7 +56,12 @@ func TestDiscoveryCancelLatency(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	client, err := NewClient(ctx, ".")
+	client, err := acp.NewClient(ctx, acp.ClientConfig{
+		Bin:          "opencode",
+		Args:         []string{"acp", "--pure", "--log-level", "WARN"},
+		Dir:          ".",
+		AppendCWDArg: true,
+	})
 	if err != nil {
 		t.Skipf("opencode acp unavailable: %v", err)
 	}
@@ -111,7 +123,12 @@ func TestDiscoverySessionResumeAfterRestart(t *testing.T) {
 	defer cancel()
 
 	// Server #1: capture session ID.
-	first, err := NewClient(ctx, ".")
+	first, err := acp.NewClient(ctx, acp.ClientConfig{
+		Bin:          "opencode",
+		Args:         []string{"acp", "--pure", "--log-level", "WARN"},
+		Dir:          ".",
+		AppendCWDArg: true,
+	})
 	if err != nil {
 		t.Skipf("opencode acp unavailable: %v", err)
 	}
@@ -137,7 +154,12 @@ func TestDiscoverySessionResumeAfterRestart(t *testing.T) {
 	first.Close()
 
 	// Server #2: fresh process, attempt resume.
-	second, err := NewClient(ctx, ".")
+	second, err := acp.NewClient(ctx, acp.ClientConfig{
+		Bin:          "opencode",
+		Args:         []string{"acp", "--pure", "--log-level", "WARN"},
+		Dir:          ".",
+		AppendCWDArg: true,
+	})
 	if err != nil {
 		t.Fatalf("restart opencode acp: %v", err)
 	}
