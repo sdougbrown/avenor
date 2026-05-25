@@ -1,14 +1,27 @@
 # Avenor OpenCode Template Pack
 
-This pack is a starting point for consumers that run OpenCode agents through Avenor.
+A starting point for consumers that run OpenCode agents through Avenor.
 
 The pieces are meant to be used together:
 
-- `prompts/jockey.md` defines the lead agent contract.
-- `prompts/mule.md` defines a literal executor for small mechanical work.
-- `prompts/horse.md` defines a bounded implementation executor.
-- `skills/answer-jockey/SKILL.md` answers Avenor file permission requests.
+- `prompts/jockey.md` — lead agent: plans, delegates, integrates, verifies
+- `prompts/horse.md` — bounded implementation executor for work requiring local judgment
+- `prompts/mule.md` — literal executor for small mechanical tasks
+- `skills/answer-jockey/SKILL.md` — answers Avenor file permission requests via `avenor answer`
 
-In the Avenor world, jockey asks operator questions through ACP permission requests, not prose markers like `QUESTION:`. When ACP emits `session/request_permission`, Avenor writes the file format documented in `docs/permission-handler.md` and emits a `permission.request` event. The answer-jockey skill reads `<path>.req`, presents the question to the operator, and writes `<path>.req.response`.
+## Permission model
 
-These files are templates. They are not runtime policy, and consumers should adapt them to their own permission model, agent names, and verification standards.
+In the Avenor world, jockey asks operator questions through ACP permission requests, not prose markers like `QUESTION:`. When the backend emits a permission request, Avenor writes a `.req` file and emits a `permission.request` event. The answer-jockey skill reads that file, presents the question to the operator, and calls `avenor answer` to write the response atomically.
+
+See [docs/permission-handler.md](../../docs/permission-handler.md) for the full request/response format and timeout behavior.
+
+## Adapting these templates
+
+These are starting points, not runtime policy. Adapt them to your own:
+
+- Agent names and model assignments
+- Permission model (auto-approve, file handler, control socket)
+- Verification standards and test commands
+- Delegation boundaries between jockey, horse, and mule
+
+For the full CLI reference and common orchestration patterns, see [docs/cli.md](../../docs/cli.md).
