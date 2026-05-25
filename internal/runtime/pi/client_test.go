@@ -2,6 +2,7 @@ package pi
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"io"
 	"os/exec"
@@ -60,7 +61,7 @@ func TestClientCommandResponse(t *testing.T) {
 		done <- nil
 	}()
 
-	result, err := c.sendCommand(map[string]any{"type": "get_state"})
+	result, err := c.sendCommand(context.Background(), map[string]any{"type": "get_state"})
 	if err != nil {
 		t.Fatalf("sendCommand error: %v", err)
 	}
@@ -443,7 +444,7 @@ func TestClientCloseUnblocksPending(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := c.sendCommand(map[string]any{"type": "get_state"})
+		_, err := c.sendCommand(context.Background(), map[string]any{"type": "get_state"})
 		done <- err
 	}()
 

@@ -143,7 +143,7 @@ func (c *client) writeStdin(data []byte) error {
 	return err
 }
 
-func (c *client) sendCommand(cmd map[string]any) (json.RawMessage, error) {
+func (c *client) sendCommand(ctx context.Context, cmd map[string]any) (json.RawMessage, error) {
 	id := newRequestID()
 	cmd["id"] = id
 	ch := make(chan json.RawMessage, 1)
@@ -171,6 +171,13 @@ func (c *client) sendCommand(cmd map[string]any) (json.RawMessage, error) {
 	select {
 	case result := <-ch:
 		return result, nil
+	case <-ctx.Done():
+		c.mu.Lock()
+		if c.pending != nil {
+			delete(c.pending, id)
+		}
+		c.mu.Unlock()
+		return nil, ctx.Err()
 	case <-c.done:
 		c.mu.Lock()
 		if c.pending != nil {
@@ -229,7 +236,10 @@ func (c *client) unsubscribe(sessionID string, ch chan events.Event) {
 	chans := c.subs[sessionID]
 	for i, sub := range chans {
 		if sub == ch {
-			c.subs[sessionID] = append(chans[:i], chans[i+1:]...)
+			n := len(chans)
+			copy(chans[i:], chans[i+1:])
+			chans[n-1] = nil
+			c.subs[sessionID] = chans[:n-1]
 			break
 		}
 	}
@@ -401,18 +411,24 @@ func (c *client) fanout(ev *events.Event) {
 
 	for _, ch := range chans {
 		if isCriticalEvent(ev.Event) {
-			select {
-			case ch <- *ev:
-			default:
+			if !trySend(ch, *ev) {
 				c.stderr.Append(fmt.Sprintf("dropped critical event %q for session %q: subscriber buffer full", ev.Event, ev.SessionID))
 			}
 		} else {
-			select {
-			case ch <- *ev:
-			default:
+			if !trySend(ch, *ev) {
 				c.stderr.Append(fmt.Sprintf("dropped event %q for session %q: subscriber buffer full", ev.Event, ev.SessionID))
 			}
 		}
+	}
+}
+
+func trySend(ch chan events.Event, ev events.Event) (sent bool) {
+	defer func() { recover() }()
+	select {
+	case ch <- ev:
+		return true
+	default:
+		return false
 	}
 }
 

@@ -40,7 +40,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		cwd = p.opts.Dir
 	}
 
-	stateResult, err := c.sendCommand(map[string]any{
+	stateResult, err := c.sendCommand(ctx, map[string]any{
 		"type": "get_state",
 	})
 	if err != nil {
@@ -151,7 +151,7 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 		"message": prompt,
 		"id":      newRequestID(),
 	}
-	_, err = c.sendCommand(cmd)
+	_, err = c.sendCommand(ctx, cmd)
 	if err != nil {
 		c.unsubscribe(sessionID, subCh)
 		close(subCh)
@@ -198,7 +198,7 @@ func (p *Provider) Cancel(ctx context.Context, sessionID string) error {
 		return err
 	}
 
-	_, err = c.sendCommand(map[string]any{
+	_, err = c.sendCommand(ctx, map[string]any{
 		"type": "abort",
 	})
 	if err != nil {
