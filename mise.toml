@@ -52,3 +52,13 @@ depends = ["go-test", "js-test"]
 [tasks.js-dev]
 description = "Watch all JS packages"
 run = ["cd packages/core && bun run dev & cd packages/mcp && bun run dev & cd packages/opencode && bun run dev & wait"]
+
+[tasks.docs-dev]
+description = "Serve docs site locally"
+dir = "docs"
+run = "bun run dev"
+
+[tasks.docs-build]
+description = "Build docs site"
+dir = "docs"
+run = "bun run build"
