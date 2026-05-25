@@ -108,7 +108,13 @@
       },
       "permission": {
         "bash": {
-          "*": "allow"
+          "*": "allow",
+          "git push*": "deny",
+          "git reset --hard*": "deny",
+          "curl*": "deny",
+          "wget*": "deny",
+          "ssh*": "deny",
+          "rm -rf*": "deny"
         },
         "external_directory": {
           "{HOME}/your-project*": "allow",

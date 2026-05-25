@@ -43,7 +43,7 @@ avenor [flags]  # equivalent; explicit "run" is optional
 | `--http-debug` | (none) | HTTP debug adapter bind address (e.g., `127.0.0.1:8080`); enables `/debug/status` and `/debug/events` endpoints |
 | `--timeout` | `0` (disabled) | Overall session timeout (Go duration: `30s`, `5m`, etc.); fires after duration regardless of progress |
 | `--progress-timeout` | `0` (disabled) | Session progress timeout; fires if no event received for this duration |
-| `--max-retries` | `0` | Maximum retry attempts on transient failure (exit code 1) |
+| `--max-retries` | `0` | Maximum retry attempts on transient failure (exit code 1); emits `avenor.retry` and `avenor.error` events (see [events.md](events.md)) |
 | `--run-id` | (generated) | Correlation ID for this run; auto-generated if not set |
 | `--permission-claim-timeout` | `30s` | How long to wait for a connected socket client to answer a permission request before falling through to file handler or no-op resolver |
 

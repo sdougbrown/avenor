@@ -99,7 +99,7 @@ Every run writes a structured NDJSON event log. Tail and classify it while a run
 avenor watch --follow --classify /tmp/events.ndjson
 ```
 
-Events are typed (`agent.message`, `tool.use`, `permission.request`, `run.complete`, etc.) and carry enough context to drive automated handling — permission responses, downstream triggers, or log aggregation. See [docs/events.md](docs/events.md) and [docs/watch.md](docs/watch.md).
+Events are typed (`agent.message_chunk`, `tool.call`, `permission.request`, `session.end`, etc.) and carry enough context to drive automated handling — permission responses, downstream triggers, or log aggregation. See [docs/events.md](docs/events.md) and [docs/watch.md](docs/watch.md).
 
 ## Name
 

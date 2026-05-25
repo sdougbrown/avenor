@@ -27,4 +27,6 @@ These are starting points, not runtime policy. Adapt them to your own:
 - Verification standards and test commands
 - Delegation boundaries between jockey, horse, and mule
 
+`opencode.json` uses `{HOME}/your-project*` as a placeholder in every agent's `external_directory` allowlist. Replace it with your actual project root before use — the trailing `*` is needed for subdirectory access, but the path itself must be specific to your setup.
+
 For the full CLI reference and common orchestration patterns, see [docs/cli.md](../../docs/cli.md).

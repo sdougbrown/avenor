@@ -227,12 +227,12 @@ Params:
 - `label` (string) — human-readable label for this runtime.
 - `model` (string) — model name override.
 - `server_url` (string) — backend server URL (e.g., OpenCode HTTP endpoint).
-- `backend` (string) — backend class. Defaults to `"opencode-http"`.
+- `backend` (string) — backend class. Defaults to `"opencode-acp"`.
 - `on_event` (string) — path to write event NDJSON. If omitted, created under `$TMPDIR/avenor-stable/<supervisor_run_id>/<runtime_id>/`.
 - `sentinel_file` (string) — path to write exit status. If omitted, created under `$TMPDIR/avenor-stable/<supervisor_run_id>/<runtime_id>/`.
 - `permission_handler` (string) — how to handle permission requests (e.g., `"file:/path"` to poll files, or omit to use `auto_approve`).
 - `auto_approve` (bool) — auto-resolve all permission requests. Overrides file handler if both are set.
-- `timeout` (int) — total run timeout in seconds.
+- `timeout` (string) — total run timeout as a Go duration (`30s`, `5m`, etc.).
 - `max_retries` (int) — max retries after transient backend errors.
 - `loop_file` (string) — path to a loop config JSON file (advanced multi-phase mode).
 - `session_id` (string) — resume session ID (for resuming a previous session).
