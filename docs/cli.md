@@ -157,7 +157,7 @@ Spawn flags (all optional):
 | `--sentinel-file` | Path to write completion sentinel |
 | `--permission-handler` | Permission resolver (e.g., `file:<path>`) |
 | `--auto-approve` | Automatically approve all permission requests |
-| `--timeout` | Overall session timeout in seconds |
+| `--timeout` | Overall session timeout (Go duration: `30s`, `5m`, etc.) |
 | `--max-retries` | Maximum retry attempts on transient failure |
 
 ```sh
@@ -250,7 +250,7 @@ See [watch.md](watch.md) and [events.md](events.md) for full details.
 
 ## avenor answer
 
-Write a permission response file to answer a pending permission request. Used when you have a UI or approval process outside of avenor.
+Write a permission response file to answer a pending permission request. Specific to the file-based permission handler (`--permission-handler file:<path>`); not applicable when using `--auto-approve` or a control socket.
 
 ```
 avenor answer [flags] <perm-base>

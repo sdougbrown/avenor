@@ -81,7 +81,7 @@ The response is also JSON:
 
 | Field | Default | What it means |
 |-------|---------|---------------|
-| `outcome` | "selected" | Either "selected" (the permission was granted/denied based on the option) or "cancelled" (the request was cancelled, blocking execution). Omit to default to "selected". |
+| `outcome` | "selected" | Either "selected" (the operator chose one of the provided options) or "cancelled" (the request was cancelled, blocking execution). Omit to default to "selected". |
 | `option_id` | Required | The `optionId` from the request's option list. Avenor uses this to determine whether to allow or deny. |
 | `message` | Empty string | Optional note or explanation. Relayed back to the backend. |
 

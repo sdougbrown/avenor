@@ -46,7 +46,7 @@ Example:
 {"event":"permission.request","session_id":"ses_xyz","request_id":"17","tool":"bash","question":"Run this command?","options":[{"optionId":"allow","kind":"allow"},{"optionId":"reject","kind":"reject"}]}
 ```
 
-**`permission.response`** — Synthesized by Avenor after resolving a permission decision. Emitted for all resolution paths: `--auto-approve`, control socket, or file handler. Fields: `request_id` (string), `option_id` (chosen option), `kind` (`"allow"` or `"reject"`), `source` (`"avenor"` for auto-approve, `"control"` for control socket, `"file"` for file handler), `ts` (Unix milliseconds).
+**`permission.response`** — Synthesized by Avenor after resolving a permission decision. Emitted for all resolution paths: `--auto-approve`, control socket, or file handler. Fields: `request_id` (string), `option_id` (the chosen `optionId` from the request's option list), `kind` (`"allow"` or `"reject"`), `source` (`"avenor"` for auto-approve, `"control"` for control socket, `"file"` for file handler), `ts` (Unix milliseconds).
 
 Also includes `run_id` and `run_label` when present.
 
