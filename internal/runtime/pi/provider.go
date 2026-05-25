@@ -170,13 +170,13 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 		case "end_turn", "end_of_turn":
 			return nil
 		case "cancelled":
-			return fmt.Errorf("turn cancelled")
+			return fmt.Errorf("turn cancelled for session %s", sessionID)
 		case "error":
 			msg, _ := ev.Fields["error_message"].(string)
 			if msg == "" {
 				msg = "unknown error"
 			}
-			return fmt.Errorf("turn failed: %s", msg)
+			return fmt.Errorf("turn failed for session %s: %s", sessionID, msg)
 		default:
 			return nil
 		}
