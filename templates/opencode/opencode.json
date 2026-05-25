@@ -1,0 +1,120 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+
+  "agent": {
+    "jockey": {
+      "description": "Delegate-only orchestrator — decomposes tasks, briefs sub-agents, and verifies results. Cannot write or edit files. Dispatches horse/mule for implementation. Use when you have a defined task that needs multi-phase execution.",
+      "mode": "primary",
+      "prompt": "{file:./prompts/jockey.md}",
+      "tools": {
+        "write": false,
+        "edit": false,
+        "github*": false,
+        "mcp*": false,
+        "webSearch": false,
+        "webFetch": false
+      },
+      "permission": {
+        "bash": {
+          "*": "allow",
+          "git push*": "deny",
+          "git reset --hard*": "deny",
+          "curl*": "deny",
+          "wget*": "deny"
+        },
+        "external_directory": {
+          "{HOME}/your-project*": "allow",
+          "/tmp*": "allow"
+        }
+      }
+    },
+
+    "horse": {
+      "description": "Mid-tier subagent for exploratory and investigative work. Use for prototyping, debugging, and multi-file refactors that need judgement. No network or destructive git.",
+      "mode": "subagent",
+      "tools": {
+        "github*": false,
+        "mcp*": false,
+        "webSearch": false,
+        "webFetch": false
+      },
+      "permission": {
+        "bash": {
+          "*": "allow",
+          "git push*": "deny",
+          "git reset --hard*": "deny",
+          "git rebase*": "deny",
+          "git clean -n*": "allow",
+          "git clean -fd*": "allow",
+          "git clean*": "deny",
+          "git remote*": "deny",
+          "curl*": "deny",
+          "wget*": "deny",
+          "ssh*": "deny",
+          "npx --yes *": "deny",
+          "rm -rf*": "deny"
+        },
+        "external_directory": {
+          "{HOME}/your-project*": "allow",
+          "/tmp*": "allow"
+        }
+      }
+    },
+
+    "mule": {
+      "description": "Cheap subagent for mechanical, well-scoped tasks — refactors with a clear before/after, applying finished plans, repetitive codegen. No network, no destructive git. Do not use for tasks requiring judgement.",
+      "mode": "subagent",
+      "tools": {
+        "github*": false,
+        "mcp*": false,
+        "webSearch": false,
+        "webFetch": false
+      },
+      "permission": {
+        "bash": {
+          "*": "allow",
+          "git push*": "deny",
+          "git reset --hard*": "deny",
+          "git rebase*": "deny",
+          "git clean -n*": "allow",
+          "git clean -fd*": "allow",
+          "git clean*": "deny",
+          "git remote*": "deny",
+          "curl*": "deny",
+          "wget*": "deny",
+          "ssh*": "deny",
+          "npx --yes *": "deny",
+          "rm -rf*": "deny"
+        },
+        "external_directory": {
+          "{HOME}/your-project*": "allow",
+          "/tmp*": "allow"
+        }
+      }
+    },
+
+    "groom": {
+      "description": "Hidden script-runner — executes bash exactly as instructed, reports output faithfully. Used by jockey to run avenor without blocking the calling agent.",
+      "mode": "subagent",
+      "hidden": true,
+      "prompt": "{file:./prompts/groom.md}",
+      "tools": {
+        "write": false,
+        "edit": false,
+        "github*": false,
+        "mcp*": false,
+        "webSearch": false,
+        "webFetch": false
+      },
+      "permission": {
+        "bash": {
+          "*": "allow"
+        },
+        "external_directory": {
+          "{HOME}/your-project*": "allow",
+          "/tmp*": "allow"
+        }
+      }
+    }
+  }
+}

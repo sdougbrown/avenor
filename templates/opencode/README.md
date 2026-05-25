@@ -4,9 +4,11 @@ A starting point for consumers that run OpenCode agents through Avenor.
 
 The pieces are meant to be used together:
 
+- `opencode.json` — agent definitions: jockey, horse, mule, groom with permission boundaries
 - `prompts/jockey.md` — lead agent: plans, delegates, integrates, verifies
 - `prompts/horse.md` — bounded implementation executor for work requiring local judgment
 - `prompts/mule.md` — literal executor for small mechanical tasks
+- `prompts/groom.md` — hidden script runner used by jockey to invoke avenor
 - `skills/dispatch-jockey/SKILL.md` — starts a jockey run, monitors events, waits for completion
 - `skills/answer-jockey/SKILL.md` — answers Avenor file permission requests via `avenor answer`
 
