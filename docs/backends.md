@@ -1,48 +1,70 @@
 # Backends
 
-Avenor supports three backends: `opencode-http` (remote server), `opencode-acp` (subprocess), and `codex-app-server`.
+Avenor talks to agents through backends. Each backend speaks a different protocol to a different runtime — OpenCode, Codex, Gemini, Cursor, or PI. Pick the one that matches what's running locally and what you need from the orchestration layer.
 
 ## Backend selection
 
-Pass `--backend` to choose the runtime:
+Pass `--backend` to choose which runtime protocol to use. The default is `opencode-acp`:
 
 ```sh
-avenor --server-url http://127.0.0.1:4096 --prompt "say hi"
+avenor --backend opencode-http --server-url http://127.0.0.1:4096 --prompt "say hi"
 avenor --backend opencode-acp --prompt "say hi"
 avenor --backend codex-app-server --prompt "say hi"
+avenor --backend gemini-acp --prompt "say hi"
+avenor --backend cursor-acp --prompt "say hi"
+avenor --backend pi --model anthropic/claude-sonnet-4-5 --prompt "say hi"
 ```
 
-The default backend is `opencode-http`, which requires an already-running `opencode serve` endpoint. Provide it with `--server-url` or `AVENOR_OPENCODE_URL`.
+## Capability matrix
+
+| Capability | opencode-acp | opencode-http | codex-app-server | gemini-acp | cursor-acp | pi |
+|---|---|---|---|---|---|---|
+| New sessions | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Session resume | ✓ | ✓ | ✓ | — | — | ✓ |
+| Prompt execution | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Cancel | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Event streaming | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Permission relay | ✓ | ✗ | ✓ | ✓ | ✓ | ✓ |
+| Model selection | ✓ | ✓ | ✓ | ✗ | ✗ | ✓ |
+| External server URL | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Subprocess discovery | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
+
+`—` means not verified; `✗` means not supported.
+
+---
 
 ## opencode-acp
 
-Uses OpenCode's ACP JSON-RPC protocol over stdio. Spawns `opencode acp --pure` as a subprocess.
+Avenor spawns `opencode acp --pure --log-level WARN` and owns its lifecycle for the duration of the run.
 
-### Discovery
+**When to use this:** You want to avoid running a long-lived OpenCode server. Avenor starts one, uses it for one orchestration job, then tears it down. Simple and isolated.
 
-1. `--server-url <url>`
-2. `AVENOR_OPENCODE_URL`
-3. Spawn `opencode acp --pure` for this Avenor invocation
+**When not to:** You're running the same orchestration multiple times and want to reuse an OpenCode session across invocations. For that, use `opencode-http` and a separate server.
 
-If a URL is provided, the ACP backend fails cleanly — it does not support network transport.
+```sh
+avenor \
+  --backend opencode-acp \
+  --agent jockey \
+  --model deepseek/deepseek-v4-pro \
+  --prompt "Review the changes in the current branch" \
+  --dir /repo \
+  --control-socket /tmp/avenor.sock \
+  --sentinel-file /tmp/done.env
+```
 
-### Capabilities
+### URL behavior
 
-| Capability | Supported |
-|---|---|
-| New sessions | ✓ |
-| Session resume | ✓ |
-| Prompt execution | ✓ |
-| Cancel | ✓ |
-| Event streaming | ✓ |
-| Permission relay | ✓ |
-| Model selection | ✓ (via `SetSessionMode`/`SetSessionModel`) |
-| External server URL | ✗ |
-| Subprocess discovery | ✓ (subprocess fallback) |
+The ACP backend does not support network transport. If you pass `--server-url` or set `AVENOR_OPENCODE_URL`, the backend will fail cleanly. Either remove the URL or switch to `opencode-http`.
+
+---
 
 ## opencode-http
 
-The default backend. Talks to `opencode serve` over its HTTP API. Requires `--server-url` or `AVENOR_OPENCODE_URL` pointing at a running `opencode serve` instance.
+The default. Avenor talks to a running `opencode serve` instance over HTTP, with SSE for the event stream.
+
+**When to use this:** You want to point multiple Avenor invocations at a single server. Useful for `avenor stable` setups where many sequential runs share the same OpenCode instance.
+
+**When not to:** You're running a single orchestration job and don't want to manage a separate server process. For that, use `opencode-acp`.
 
 ### Starting the server
 
@@ -50,7 +72,7 @@ The default backend. Talks to `opencode serve` over its HTTP API. Requires `--se
 opencode serve --port 4096 --pure
 ```
 
-### Basic usage
+### Running against it
 
 ```sh
 avenor \
@@ -58,49 +80,127 @@ avenor \
   --server-url http://127.0.0.1:4096 \
   --agent jockey \
   --model deepseek/deepseek-v4-pro \
-  --prompt "say ok" \
+  --prompt "Review the changes in the current branch" \
   --on-event /tmp/avenor-http.ndjson \
   --sentinel-file /tmp/avenor-http.env
 ```
 
 ### Auth
 
-The server supports HTTP basic auth. Pass credentials via the URL:
+If the OpenCode server requires basic auth:
 
 ```sh
 --server-url http://user:pass@127.0.0.1:4096
 ```
 
-Or set `OPENCODE_SERVER_USERNAME` and `OPENCODE_SERVER_PASSWORD` environment variables (future support).
+### Model format
 
-### Agent and model
-
-Agent and model are forwarded on every prompt. The `--model` string uses `providerID/modelID` format:
+The `--model` flag uses `providerID/modelID`:
 
 ```sh
 --model deepseek/deepseek-v4-pro
 ```
 
-This is split and sent as `{"providerID":"deepseek","modelID":"deepseek-v4-pro"}` to the server.
-
-### Capabilities
-
-| Capability | Supported |
-|---|---|
-| New sessions | ✓ |
-| Session resume | ✓ (via `GET /session/:id`) |
-| Prompt execution | ✓ |
-| Cancel | ✓ (via `POST /session/:id/abort`) |
-| Event streaming | ✓ (SSE over `GET /event`) |
-| Permission relay | ✗ (not yet verified) |
-| Model selection | ✓ (set per prompt) |
-| External server URL | ✓ (required) |
-| Subprocess discovery | ✗ |
-
 ### Known differences from ACP
 
-- **Event stream is global.** The SSE `/event` endpoint delivers events for all sessions on the server. The provider filters by session ID locally.
-- **Session end detection.** Uses the message response finish status; SSE idle transitions are ignored as terminal signals because they can arrive late for prior turns.
-- **Working directory.** HTTP mode does not support per-session `--dir`; start `opencode serve` in the target directory instead.
-- **Resume.** Checks `GET /session/:id` for existence. No dedicated resume endpoint.
-- **Permissions.** Permission request/response behavior has not been verified for HTTP mode yet. The server may auto-approve tools depending on configuration.
+- **Event stream is global.** The SSE `/event` endpoint streams events for all sessions on the server. Avenor filters by session ID locally.
+- **Session end detection uses HTTP semantics.** Avenor watches the message response finish status. SSE idle transitions arrive late and are not treated as terminal.
+- **Working directory is per-server, not per-session.** Start `opencode serve` in the target directory. The `--dir` flag on Avenor does not work with HTTP mode — the server's working directory is the only one in play.
+- **Permissions may auto-approve.** Permission request/response behavior depends on the server's configuration. If the server is running with `--pure`, permissions are relayed correctly. Otherwise the server may auto-approve based on its own allow list.
+
+---
+
+## codex-app-server
+
+Avenor spawns the Codex app-server subprocess and talks to it via JSON-RPC over stdio. Manages the lifecycle directly.
+
+**When to use this:** You're running Codex and want Avenor to orchestrate a single run. Similar to `opencode-acp` — you get subprocess management for free.
+
+```sh
+avenor \
+  --backend codex-app-server \
+  --prompt "Implement the changes described in the plan" \
+  --dir /repo \
+  --sentinel-file /tmp/done.env
+```
+
+---
+
+## gemini-acp
+
+Avenor spawns `gemini --acp --approval-mode default` and talks via ACP over stdio.
+
+**Model selection caveat:** Gemini reads its model from its own CLI config at spawn time. Passing `--model` to Avenor has no effect on `gemini-acp`. Set the model in your Gemini CLI config before invoking Avenor.
+
+```sh
+avenor \
+  --backend gemini-acp \
+  --prompt "Review the changes in the current branch" \
+  --dir /repo \
+  --sentinel-file /tmp/done.env
+```
+
+---
+
+## cursor-acp
+
+Avenor spawns `agent acp` and authenticates via `cursor_login`. Talks via ACP over stdio.
+
+**Model selection caveat:** Like Gemini, model and configuration are managed through the `agent` binary's own config — not via session methods. Update your Cursor agent config before running Avenor if you need a different model.
+
+```sh
+avenor \
+  --backend cursor-acp \
+  --prompt "Review the changes in the current branch" \
+  --dir /repo \
+  --sentinel-file /tmp/done.env
+```
+
+---
+
+## pi
+
+Avenor spawns `pi --mode rpc --no-session` and talks via its own JSON-RPC protocol over stdio.
+
+**One session per instance.** This is a PI protocol constraint, not something Avenor can route around. If you try to start a second session before the first ends, the backend will error. If you need multiple concurrent sessions, run multiple Avenor invocations.
+
+Model selection works at spawn time via `--model`:
+
+```sh
+avenor \
+  --backend pi \
+  --model anthropic/claude-sonnet-4-5 \
+  --prompt "Implement the changes described in the plan" \
+  --dir /repo \
+  --control-socket /tmp/avenor.sock \
+  --sentinel-file /tmp/done.env
+```
+
+---
+
+## Diagnosing backend connectivity
+
+If you're not sure whether `opencode-acp` is wired up correctly — wrong binary on `PATH`, ACP not supported in your OpenCode version, subprocess dies immediately — `avenor probe` runs a minimal diagnostic session and writes the full event transcript to a file.
+
+```sh
+avenor probe --out /tmp/probe-transcript.ndjson --dir /repo --timeout 2m
+```
+
+The transcript is NDJSON in the same format as `--on-event`. Read it with `avenor watch` or inspect it directly to see what events the backend emitted before failing.
+
+`avenor probe` only works with `opencode-acp` — it spawns `opencode acp --pure` directly and is not intended for production use.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--out` | required | Path to write the probe transcript |
+| `--dir` | `.` | Working directory for the probe session |
+| `--timeout` | `5m` | Probe timeout |
+| `--prompt` | built-in | Override the default probe prompt |
+
+---
+
+## See also
+
+- [events.md](events.md) — event stream format and lifecycle
+- [permission-handler.md](permission-handler.md) — permission request/response JSON shapes
+- [control-protocol.md](control-protocol.md) — control socket methods and ownership rules
