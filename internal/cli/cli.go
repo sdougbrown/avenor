@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	DefaultBackend        = "opencode-http"
+	DefaultBackend        = "opencode-acp"
 	backendOpenCodeACP    = "opencode-acp"
 	backendOpenCodeHTTP   = "opencode-http"
 	backendCodexAppServer = "codex-app-server"

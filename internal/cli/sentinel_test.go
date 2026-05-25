@@ -596,6 +596,7 @@ func TestRunSentinelFileNotSet(t *testing.T) {
 	run([]string{
 		"--prompt-file", promptPath,
 		"--on-event", eventsPath,
+		"--backend", "opencode-http",
 	}, func(string) string { return "" }, &stderr)
 
 	if _, err := os.Stat(sentPath); !os.IsNotExist(err) {
@@ -671,6 +672,7 @@ func TestRunSentinelWrittenAfterFailedStart(t *testing.T) {
 		"--prompt-file", promptPath,
 		"--on-event", eventsPath,
 		"--sentinel-file", sentPath,
+		"--backend", "opencode-http",
 	}, func(string) string { return "" }, &stderr)
 
 	if exitCode == 0 {

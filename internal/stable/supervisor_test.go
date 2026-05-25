@@ -194,7 +194,7 @@ func TestSpawnParamsValidation(t *testing.T) {
 	})
 
 	// Replace the real exec command immediately to avoid starting real
-	// opencode serve processes when the default backend is opencode-http.
+	// opencode processes when the default backend is opencode-acp.
 	withFakeExec(t, func(name string, arg ...string) *exec.Cmd { return exec.Command("false") })
 
 	// Missing prompt and prompt_file
@@ -203,12 +203,11 @@ func TestSpawnParamsValidation(t *testing.T) {
 		t.Fatal("spawn with no prompt should error")
 	}
 
-	// Missing dir — falls through to default backend which triggers
-	// auto-start via the fake exec that always fails.
+	// Missing dir with opencode-http backend — auto-start fails via fake exec.
 	t.Setenv("AVENOR_OPENCODE_URL", "")
-	_, err = sup.spawn(SpawnParams{Prompt: "hello"})
+	_, err = sup.spawn(SpawnParams{Prompt: "hello", Backend: "opencode-http"})
 	if err == nil {
-		t.Fatal("spawn with default backend and no server_url should error when subprocess fails")
+		t.Fatal("spawn with backend opencode-http and no server_url should error when subprocess fails")
 	}
 	if strings.Contains(err.Error(), "server-url is required for backend opencode-http") {
 		t.Errorf("error = %q, expected subprocess start error, not server-url required", err.Error())

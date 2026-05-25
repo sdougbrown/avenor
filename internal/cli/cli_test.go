@@ -1946,7 +1946,7 @@ func TestRunBackendOpenCodeACP(t *testing.T) {
 	}
 }
 
-func TestRunDefaultBackendOpenCodeHTTPWithEnvServerURL(t *testing.T) {
+func TestRunDefaultBackendACP(t *testing.T) {
 	oldRunAttempt := runAttempt
 	oldRetryAfter := retryAfter
 	t.Cleanup(func() {
@@ -1979,11 +1979,13 @@ func TestRunDefaultBackendOpenCodeHTTPWithEnvServerURL(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run() = %d, want 0; stderr=%s", code, stderr.String())
 	}
-	if gotBackend != "opencode-http" {
-		t.Fatalf("runAttempt backend = %q, want %q", gotBackend, "opencode-http")
+	if gotBackend != "opencode-acp" {
+		t.Fatalf("runAttempt backend = %q, want %q", gotBackend, "opencode-acp")
 	}
-	if gotServerURL != "http://env.example" {
-		t.Fatalf("startOptions.ServerURL = %q, want env URL", gotServerURL)
+	// DiscoverServer always resolves AVENOR_OPENCODE_URL into ServerURL,
+	// even for backends that don't use it (ACP rejects it in ensureClient).
+	if gotServerURL == "" {
+		t.Fatal("startOptions.ServerURL should be resolved from env")
 	}
 }
 
@@ -2103,13 +2105,31 @@ func TestRunOpenCodeHTTPWithoutServerURL(t *testing.T) {
 }
 
 func TestRunDefaultBackendWithoutServerURL(t *testing.T) {
+	oldRunAttempt := runAttempt
+	oldRetryAfter := retryAfter
+	t.Cleanup(func() {
+		runAttempt = oldRunAttempt
+		retryAfter = oldRetryAfter
+	})
+
+	var gotBackend string
+	runAttempt = func(
+		ctx context.Context,
+		cfg attemptConfig,
+		deps attemptDeps,
+	) attemptResult {
+		gotBackend = cfg.backend
+		return attemptResult{exitCode: 0}
+	}
+	retryAfter = func(time.Duration) <-chan time.Time { return make(chan time.Time) }
+
 	var stderr strings.Builder
 	code := run([]string{"--prompt", "hello"}, func(string) string { return "" }, &stderr)
-	if code != 1 {
-		t.Fatalf("run() = %d, want 1", code)
+	if code != 0 {
+		t.Fatalf("run() = %d, want 0 (ACP provider does not require --server-url); stderr=%s", code, stderr.String())
 	}
-	if stderr.String() != "avenor: --server-url is required for backend opencode-http\n" {
-		t.Fatalf("stderr = %q, want exact --server-url message", stderr.String())
+	if gotBackend != "opencode-acp" {
+		t.Fatalf("runAttempt backend = %q, want %q", gotBackend, "opencode-acp")
 	}
 }
 

@@ -40,8 +40,8 @@ func TestRunSubcommandAlias(t *testing.T) {
 	if strings.Contains(outputStr, "--prompt, --prompt-file, or --loop-file is required") {
 		t.Fatalf("'run' was not stripped before cli.Run; got flag parsing error: %s", outputStr)
 	}
-	// Should have reached backend validation, confirming --loop-file was parsed.
-	if !strings.Contains(outputStr, "--server-url is required") {
-		t.Fatalf("expected backend validation error after strip, got: %s", outputStr)
+	// Should have reached loop config or backend validation, confirming --loop-file was parsed.
+	if !strings.Contains(outputStr, "load loop config") && !strings.Contains(outputStr, "--server-url is required") {
+		t.Fatalf("expected loop-config or backend validation error after strip, got: %s", outputStr)
 	}
 }
