@@ -4,7 +4,7 @@ You need a loop when you've got a workflow with distinct phases: build once, the
 
 ## The problem phase loops solve
 
-A single `avenor run` handles one task well, but real workflows are cyclical. Build once, then repeat test → review → fix until the test phase says go. Today you script this externally — a shell loop calling `avenor run` in sequence, gluing results together with bespoke logic. Avenor already holds the run ID, event log, sentinel, and retry machinery. It's the right place to own the loop.
+A single `avenor run` handles one task well, but real workflows are cyclical. Build once, then repeat test → review → fix until the test phase says go. Today you might try to script this externally, gluing results together with bespoke logic. Or you would just tell your agent "loop until..." and hope for the best. Avenor can do this for you *deterministically*, not according to your agents whims. (Well... some whims. You might want to let your agent leave the loop early if it encounters certain conditions.) Avenor already holds the run ID, event log, sentinel, and retry machinery. It's the right place to own the loop.
 
 ## Quick start
 
@@ -26,6 +26,7 @@ Create a loop config file:
     },
     {
       "name": "fix",
+      "resume_from_previous": true,
       "prompt": "Fix the test failures reported in the previous phase."
     }
   ]

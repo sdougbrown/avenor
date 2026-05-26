@@ -1,0 +1,255 @@
+/* ─── Royal Stables — The Avenor Theme ─── */
+
+/**
+ * Design notes:
+ * An avenor is the chief stablemaster of a king. This theme evokes
+ * the royal stables — deep violet banners and warm brass fittings,
+ * parchment warmth in the backgrounds, and enough retro character
+ * to feel like a medieval court that runs on TypeScript.
+ *
+ * Horse emojis throughout are intentional 🐴
+ */
+
+/* ─── Colors: Brand Palette ─── */
+
+:root {
+  /* Royal violet — the king's banner */
+  --vp-c-brand-1: #7C3AED;
+  --vp-c-brand-2: #8B5CF6;
+  --vp-c-brand-3: #A78BFA;
+  --vp-c-brand-soft: rgba(124, 58, 237, 0.14);
+
+  /* Royal gold — brass fittings & harness buckles */
+  --avenor-gold: #B8860B;
+  --avenor-gold-light: #D4A017;
+  --avenor-gold-soft: rgba(184, 134, 11, 0.14);
+}
+
+.dark {
+  /* Deep violet that holds richness on dark backgrounds */
+  --vp-c-brand-1: #C4B5FD;
+  --vp-c-brand-2: #A78BFA;
+  --vp-c-brand-3: #8B5CF6;
+  --vp-c-brand-soft: rgba(167, 139, 250, 0.16);
+
+  --avenor-gold: #F0D060;
+  --avenor-gold-light: #F7DC6F;
+  --avenor-gold-soft: rgba(240, 208, 96, 0.16);
+}
+
+/* ─── Colors: Background ─── */
+/* Warm parchment whites instead of cold gray */
+
+:root {
+  --vp-c-bg: #FDFBF7;
+  --vp-c-bg-alt: #F5F0E8;
+  --vp-c-bg-elv: #FAF7F0;
+  --vp-c-bg-soft: #F5F0E8;
+}
+
+.dark {
+  --vp-c-bg: #141019;
+  --vp-c-bg-alt: #1A1520;
+  --vp-c-bg-elv: #1E182A;
+  --vp-c-bg-soft: #1E182A;
+}
+
+/* ─── Colors: Text ─── */
+/* Warm ink tones — like quill on parchment */
+
+:root {
+  --vp-c-text-1: #2D2640;
+  --vp-c-text-2: #5E5672;
+  --vp-c-text-3: #8E86A0;
+}
+
+.dark {
+  --vp-c-text-1: #E8E2F0;
+  --vp-c-text-2: #A89CB8;
+  --vp-c-text-3: #6E6480;
+}
+
+/* ─── Colors: Borders ─── */
+
+:root {
+  --vp-c-border: #C9BFA0;
+  --vp-c-divider: #DDD4BC;
+  --vp-c-gutter: #DDD4BC;
+}
+
+.dark {
+  --vp-c-border: #3A3050;
+  --vp-c-divider: #2A2038;
+  --vp-c-gutter: #0D0A12;
+}
+
+/* ─── Colors: Function ─── */
+
+:root {
+  --vp-c-default-1: #C9BFA0;
+  --vp-c-default-2: #DDD4BC;
+  --vp-c-default-3: #EDE7D5;
+  --vp-c-default-soft: rgba(139, 126, 100, 0.12);
+}
+
+.dark {
+  --vp-c-default-1: #5E5672;
+  --vp-c-default-2: #3A3048;
+  --vp-c-default-3: #2A2038;
+  --vp-c-default-soft: rgba(139, 126, 164, 0.16);
+}
+
+/* ─── Components: Button ─── */
+
+:root {
+  --vp-button-brand-border: transparent;
+  --vp-button-brand-text: #FFF8E7;
+  --vp-button-brand-bg: #6D28D9;
+  --vp-button-brand-hover-border: transparent;
+  --vp-button-brand-hover-text: #FFF8E7;
+  --vp-button-brand-hover-bg: #7C3AED;
+  --vp-button-brand-active-border: transparent;
+  --vp-button-brand-active-text: #FFF8E7;
+  --vp-button-brand-active-bg: #5B21B6;
+}
+
+.dark {
+  --vp-button-brand-text: #1A0A2E;
+  --vp-button-brand-bg: #A78BFA;
+  --vp-button-brand-hover-text: #1A0A2E;
+  --vp-button-brand-hover-bg: #C4B5FD;
+  --vp-button-brand-active-text: #1A0A2E;
+  --vp-button-brand-active-bg: #8B5CF6;
+}
+
+/* ─── Components: Home Hero ─── */
+
+:root {
+  --vp-home-hero-name-color: transparent;
+  --vp-home-hero-name-background: linear-gradient(
+    120deg,
+    #7C3AED 30%,
+    var(--avenor-gold) 100%
+  );
+
+  --vp-home-hero-image-background-image: linear-gradient(
+    -45deg,
+    #7C3AED 50%,
+    var(--avenor-gold) 50%
+  );
+  --vp-home-hero-image-filter: blur(44px);
+}
+
+@media (min-width: 640px) {
+  :root {
+    --vp-home-hero-image-filter: blur(56px);
+  }
+}
+
+@media (min-width: 960px) {
+  :root {
+    --vp-home-hero-image-filter: blur(68px);
+  }
+}
+
+/* ─── Components: Custom Block (Tip) ─── */
+
+:root {
+  --vp-custom-block-tip-border: transparent;
+  --vp-custom-block-tip-text: var(--vp-c-text-1);
+  --vp-custom-block-tip-bg: var(--vp-c-brand-soft);
+  --vp-custom-block-tip-code-bg: var(--vp-c-brand-soft);
+}
+
+/* ─── Components: Code ─── */
+
+:root {
+  --vp-code-color: var(--vp-c-brand-1);
+  --vp-code-bg: rgba(124, 58, 237, 0.06);
+}
+
+.dark {
+  --vp-code-bg: rgba(167, 139, 250, 0.1);
+}
+
+/* ─── Components: Badge ─── */
+
+:root {
+  --vp-badge-tip-border: var(--avenor-gold);
+  --vp-badge-tip-text: #5E3A0A;
+  --vp-badge-tip-bg: var(--avenor-gold-soft);
+}
+
+.dark {
+  --vp-badge-tip-text: var(--avenor-gold);
+  --vp-badge-tip-bg: var(--avenor-gold-soft);
+}
+
+/* ─── Typography ─── */
+/* Serif headings for that royal decree feel, clean sans-serif body for legibility */
+
+:root {
+  --vp-font-family-base: 'Inter', ui-sans-serif, system-ui, sans-serif,
+    'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji';
+  --vp-font-family-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, 'Menlo',
+    'Monaco', 'Consolas', 'Liberation Mono', 'Courier New', monospace;
+}
+
+/* ─── Custom: Decorative Touches ─── */
+
+/* Subtle gold underline on active sidebar items — like a royal sash */
+.VPSidebarItem.is-active > .VPSidebarLink .link-text {
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--avenor-gold) 50%,
+    transparent 100%
+  );
+  background-size: 100% 1px;
+  background-repeat: no-repeat;
+  background-position: bottom;
+  padding-bottom: 1px;
+}
+
+/* Slightly warmer code blocks */
+.vp-code span,
+.VPDoc .vp-doc div[class*='language-'] {
+  border-radius: 6px;
+}
+
+/* Home hero subtitle gets a subtle warm tone */
+.VPHero .text {
+  color: var(--vp-c-text-2) !important;
+}
+
+/* Gold accent on the "action" buttons on the home page */
+.VPButton.brand {
+  box-shadow: 0 2px 8px rgba(124, 58, 237, 0.3);
+  transition: box-shadow 0.2s ease, transform 0.15s ease;
+}
+
+.VPButton.brand:hover {
+  box-shadow: 0 4px 16px rgba(124, 58, 237, 0.4);
+  transform: translateY(-1px);
+}
+
+/* ─── Custom: Scrollbar (Chrome/Edge/Safari) ─── */
+/* Warm parchment scrollbar track, purple thumb */
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--vp-c-bg-alt);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--vp-c-brand-3);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--vp-c-brand-2);
+}
