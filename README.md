@@ -12,13 +12,11 @@ A template pack in [`templates/`](templates/) covers the full dispatch matrix: C
 
 ## Installation
 
-Grab the release asset for your platform from [GitHub Releases](https://github.com/sdougbrown/avenor/releases), make it executable, and check that it runs. On macOS arm64:
-
 ```bash
-curl -fsSL https://github.com/sdougbrown/avenor/releases/latest/download/avenor_darwin_arm64 -o avenor
-chmod +x avenor
-./avenor --version
+go install github.com/sdougbrown/avenor/cmd/avenor@latest
 ```
+
+Or grab a binary for your platform from [GitHub Releases](https://github.com/sdougbrown/avenor/releases/latest).
 
 ## Development
 

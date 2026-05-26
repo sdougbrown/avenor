@@ -26,3 +26,11 @@ features:
     title: Long-lived supervision
     details: avenor stable manages multiple child runtimes under one socket. Spawn, cancel, tail, and prompt individual runs without restarting the supervisor.
 ---
+
+## Install
+
+```bash
+go install github.com/sdougbrown/avenor/cmd/avenor@latest
+```
+
+Or grab a binary for your platform from [GitHub Releases](https://github.com/sdougbrown/avenor/releases/latest).
