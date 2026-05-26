@@ -10,6 +10,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime/opencodeacp"
 	"github.com/sdougbrown/avenor/internal/runtime/opencodehttp"
 	"github.com/sdougbrown/avenor/internal/runtime/pi"
+	"github.com/sdougbrown/avenor/internal/runtime/pony"
 )
 
 func NewProvider(startOpts runtime.StartOptions, backend string) (runtime.Provider, error) {
@@ -26,6 +27,8 @@ func NewProvider(startOpts runtime.StartOptions, backend string) (runtime.Provid
 		return cursoracp.NewWithOptions(startOpts), nil
 	case "pi":
 		return pi.NewWithOptions(startOpts), nil
+	case "pony":
+		return pony.NewWithOptions(startOpts), nil
 	default:
 		return nil, fmt.Errorf("unknown backend %q", backend)
 	}

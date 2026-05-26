@@ -20,6 +20,8 @@ import (
 	"github.com/sdougbrown/avenor/internal/looprunner"
 	"github.com/sdougbrown/avenor/internal/permission"
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/runtime/pony"
+	"github.com/sdougbrown/avenor/internal/runtime/pony/model/openai"
 )
 
 const (
@@ -29,6 +31,7 @@ const (
 	backendCodexAppServer = "codex-app-server"
 	backendGeminiACP      = "gemini-acp"
 	backendCursorACP      = "cursor-acp"
+	backendPony           = "pony"
 )
 
 // DefaultPermissionClaimTimeout is the default value for --permission-claim-timeout:
@@ -96,6 +99,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	httpDebug := fs.String("http-debug", "", "http debug adapter bind address")
 	permClaimTimeout := fs.Duration("permission-claim-timeout", 0, fmt.Sprintf("how long to wait for a connected socket client to answer a permission request before falling through to the file handler or 'none' resolver (0 uses the default: %v)", DefaultPermissionClaimTimeout))
 	loopFile := fs.String("loop-file", "", "path to loop config JSON (optional; enables multi-phase mode)")
+	ponyConfig := fs.String("pony-config", "", "path to pony backend JSON config (required for --backend pony)")
 
 	if err := fs.Parse(args); err != nil {
 		return 1
@@ -128,6 +132,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 
 	discovery := DiscoverServer(*serverURL, getenv)
 	switch *backend {
+	case backendPony:
 	case backendOpenCodeACP:
 	case backendGeminiACP:
 	case backendCursorACP:
@@ -141,6 +146,54 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "avenor: unknown backend %q\n", *backend)
 		return exitWithSentinel(1)
 	}
+
+	// Pony backend setup
+	if *backend == backendPony {
+		if *ponyConfig == "" {
+			fmt.Fprintln(stderr, "avenor: --pony-config is required for backend pony")
+			return exitWithSentinel(1)
+		}
+		ponyCfg, err := pony.LoadPonyConfig(*ponyConfig)
+		if err != nil {
+			fmt.Fprintf(stderr, "avenor: %v\n", err)
+			return exitWithSentinel(1)
+		}
+		profile, err := ponyCfg.ResolveProfile(*agent)
+		if err != nil {
+			fmt.Fprintf(stderr, "avenor: %v\n", err)
+			return exitWithSentinel(1)
+		}
+
+		adapter := openai.New(openai.Config{
+			BaseURL: ponyCfg.BaseURL,
+			APIKey:  os.Getenv(ponyCfg.APIKeyEnv),
+		})
+
+		var executor pony.OrchestratorExecutor
+		if profile.Tools.Orchestration && *controlSocket != "" {
+			var err error
+			executor, err = pony.NewControlSocketExecutor(*controlSocket)
+			if err != nil {
+				fmt.Fprintf(stderr, "avenor: %v\n", err)
+				return exitWithSentinel(1)
+			}
+		}
+
+		pCfg := pony.Config{
+			Adapter:        adapter,
+			Model:          profile.Model,
+			MaxTokens:      profile.MaxTokens,
+			SystemPrompt:   profile.SystemPrompt,
+			InitialPrompt:  profile.InitialPrompt,
+			Executor:       executor,
+			LocalTools:     profile.Tools.Local,
+			OrchTools:      profile.Tools.Orchestration,
+			WorkingDir:     *dir,
+			InjectAgentsMD: profile.InjectAgentsMD,
+		}
+		pony.SetGlobalConfig(&pCfg)
+	}
+
 	if *prompt != "" && *promptFile != "" {
 		fmt.Fprintln(stderr, "avenor: --prompt and --prompt-file are mutually exclusive")
 		return exitWithSentinel(1)
