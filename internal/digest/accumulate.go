@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"unicode"
 )
 
 // Accumulator buffers consecutive chunk events (agent.message_chunk,
@@ -158,6 +157,6 @@ func digestEventLine(event map[string]any, name string) string {
 // The accumulated text is not truncated (unlike per-chunk excerpts).
 func formatAccumulatedLine(buf *chunkBuf) string {
 	text := lineBreakWhitespace.ReplaceAllString(buf.text.String(), " ")
-	text = strings.TrimRightFunc(text, unicode.IsSpace)
+	text = strings.TrimSpace(text)
 	return fmt.Sprintf("EVENT %s %s %s", buf.eventType, buf.sessionID, text)
 }

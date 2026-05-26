@@ -143,6 +143,9 @@ func Stream(in io.Reader, out io.Writer, opts Options) error {
 
 	var acc *Accumulator
 	useAccumulator := opts.Accumulate && format == "plain"
+	if opts.Accumulate && format != "plain" {
+		fmt.Fprintf(os.Stderr, "avenor watch: --accumulate is only supported with --format plain; ignoring\n")
+	}
 	if useAccumulator {
 		acc = NewAccumulator()
 	}
