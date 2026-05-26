@@ -548,3 +548,247 @@ func TestCursorWriteRenameFailure(t *testing.T) {
 		t.Fatalf("target path is no longer a directory after failure")
 	}
 }
+
+// ---- accumulate tests ----
+
+func TestStreamAccumulateChunksMerged(t *testing.T) {
+	input := strings.Join([]string{
+		`{"event":"agent.thought_chunk","session_id":"ses_1","content":{"text":"He","type":"text"}}`,
+		`{"event":"agent.thought_chunk","session_id":"ses_1","content":{"text":"llo","type":"text"}}`,
+		`{"event":"agent.thought_chunk","session_id":"ses_1","content":{"text":" world","type":"text"}}`,
+	}, "\n") + "\n"
+
+	var out bytes.Buffer
+	if err := Stream(strings.NewReader(input), &out, Options{Accumulate: true}); err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+
+	want := "EVENT agent.thought_chunk ses_1 Hello world\n"
+	if got := out.String(); got != want {
+		t.Fatalf("Stream() = %q, want %q", got, want)
+	}
+}
+
+func TestStreamAccumulateTypeChangeFlushes(t *testing.T) {
+	input := strings.Join([]string{
+		`{"event":"agent.thought_chunk","session_id":"ses_1","content":{"text":"thinking","type":"text"}}`,
+		`{"event":"agent.message_chunk","session_id":"ses_1","content":{"text":"hello","type":"text"}}`,
+	}, "\n") + "\n"
+
+	var out bytes.Buffer
+	if err := Stream(strings.NewReader(input), &out, Options{Accumulate: true}); err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+
+	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("Stream() emitted %d lines, want 2: %q", len(lines), out.String())
+	}
+	if lines[0] != "EVENT agent.thought_chunk ses_1 thinking" {
+		t.Fatalf("lines[0] = %q", lines[0])
+	}
+	if lines[1] != "EVENT agent.message_chunk ses_1 hello" {
+		t.Fatalf("lines[1] = %q", lines[1])
+	}
+}
+
+func TestStreamAccumulateNonChunkFlushes(t *testing.T) {
+	input := strings.Join([]string{
+		`{"event":"agent.thought_chunk","session_id":"ses_1","content":{"text":"thinking","type":"text"}}`,
+		`{"event":"tool.call","session_id":"ses_1","kind":"read","title":"file.go"}`,
+		`{"event":"agent.message_chunk","session_id":"ses_1","content":{"text":"done","type":"text"}}`,
+	}, "\n") + "\n"
+
+	var out bytes.Buffer
+	if err := Stream(strings.NewReader(input), &out, Options{Accumulate: true}); err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+
+	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("Stream() emitted %d lines, want 3: %q", len(lines), out.String())
+	}
+	if lines[0] != "EVENT agent.thought_chunk ses_1 thinking" {
+		t.Fatalf("lines[0] = %q", lines[0])
+	}
+	if lines[1] != "EVENT tool.call ses_1 read:file.go" {
+		t.Fatalf("lines[1] = %q", lines[1])
+	}
+	if lines[2] != "EVENT agent.message_chunk ses_1 done" {
+		t.Fatalf("lines[2] = %q", lines[2])
+	}
+}
+
+func TestStreamAccumulateSessionChangeFlushes(t *testing.T) {
+	input := strings.Join([]string{
+		`{"event":"agent.thought_chunk","session_id":"ses_a","content":{"text":"A","type":"text"}}`,
+		`{"event":"agent.thought_chunk","session_id":"ses_b","content":{"text":"B","type":"text"}}`,
+	}, "\n") + "\n"
+
+	var out bytes.Buffer
+	if err := Stream(strings.NewReader(input), &out, Options{Accumulate: true}); err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+
+	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("Stream() emitted %d lines, want 2: %q", len(lines), out.String())
+	}
+	if lines[0] != "EVENT agent.thought_chunk ses_a A" {
+		t.Fatalf("lines[0] = %q", lines[0])
+	}
+	if lines[1] != "EVENT agent.thought_chunk ses_b B" {
+		t.Fatalf("lines[1] = %q", lines[1])
+	}
+}
+
+func TestStreamAccumulateWithClassify(t *testing.T) {
+	input := strings.Join([]string{
+		`{"event":"agent.thought_chunk","session_id":"ses_1","content":{"text":"[finding] something wrong","type":"text"}}`,
+		`{"event":"session.end","session_id":"ses_1","stop_reason":"end_turn"}`,
+	}, "\n") + "\n"
+
+	var out bytes.Buffer
+	if err := Stream(strings.NewReader(input), &out, Options{Accumulate: true, Classify: true}); err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+
+	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("Stream() emitted %d lines, want 2: %q", len(lines), out.String())
+	}
+	if !strings.HasPrefix(lines[0], "FINDING EVENT agent.thought_chunk") {
+		t.Fatalf("lines[0] = %q, want FINDING prefix", lines[0])
+	}
+	if !strings.HasPrefix(lines[1], "MILESTONE EVENT session.end") {
+		t.Fatalf("lines[1] = %q, want MILESTONE prefix", lines[1])
+	}
+}
+
+func TestStreamAccumulateGolden(t *testing.T) {
+	inputPath := filepath.Join("..", "..", "testdata", "digest", "accumulate.ndjson")
+	goldenPath := filepath.Join("..", "..", "testdata", "digest", "accumulate.golden")
+
+	input, err := os.Open(inputPath)
+	if err != nil {
+		t.Fatalf("open input: %v", err)
+	}
+	defer input.Close()
+
+	var out bytes.Buffer
+	if err := Stream(input, &out, Options{Accumulate: true}); err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+
+	if *update {
+		if err := os.WriteFile(goldenPath, out.Bytes(), 0o644); err != nil {
+			t.Fatalf("update golden: %v", err)
+		}
+	}
+
+	want, err := os.ReadFile(goldenPath)
+	if err != nil {
+		t.Fatalf("read golden: %v", err)
+	}
+	if got := out.String(); got != string(want) {
+		t.Fatalf("Stream() mismatch\n--- got ---\n%s--- want ---\n%s", got, want)
+	}
+}
+
+func TestStreamAccumulateWithNonEventLines(t *testing.T) {
+	input := strings.Join([]string{
+		`{"event":"agent.thought_chunk","session_id":"ses_1","content":{"text":"A","type":"text"}}`,
+		`{"type":"text","part":{"text":"legacy noise"}}`,
+		`{"event":"agent.thought_chunk","session_id":"ses_1","content":{"text":"B","type":"text"}}`,
+		`{"event":"session.end","session_id":"ses_1","stop_reason":"end_turn"}`,
+		`{"sessionID":"ses_legacy"}`,
+	}, "\n") + "\n"
+
+	var out bytes.Buffer
+	if err := Stream(strings.NewReader(input), &out, Options{Accumulate: true}); err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+
+	// Non-event lines are skipped, chunks before and after are accumulated.
+	// Legacy non-event lines at the end are ignored.
+	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("Stream() emitted %d lines, want 2: %q", len(lines), out.String())
+	}
+	if lines[0] != "EVENT agent.thought_chunk ses_1 AB" {
+		t.Fatalf("lines[0] = %q", lines[0])
+	}
+	if lines[1] != "EVENT session.end ses_1 stop_reason=end_turn" {
+		t.Fatalf("lines[1] = %q", lines[1])
+	}
+}
+
+func TestStreamAccumulateJSONFormatIgnored(t *testing.T) {
+	// Accumulate is ignored when format is json.
+	input := strings.Join([]string{
+		`{"event":"agent.thought_chunk","session_id":"ses_1","content":{"text":"A","type":"text"}}`,
+		`{"event":"agent.thought_chunk","session_id":"ses_1","content":{"text":"B","type":"text"}}`,
+		`{"event":"session.end","session_id":"ses_1","stop_reason":"end_turn"}`,
+	}, "\n") + "\n"
+
+	var out bytes.Buffer
+	if err := Stream(strings.NewReader(input), &out, Options{Accumulate: true, Format: "json"}); err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+
+	// JSON format just passes through.
+	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("Stream() emitted %d lines, want 3 (json passthrough): %q", len(lines), out.String())
+	}
+}
+
+func TestStreamAccumulateFollowModeDrainsBeforePoll(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "test.ndjson")
+
+	content := strings.Join([]string{
+		`{"event":"agent.thought_chunk","session_id":"ses_1","content":{"text":"thinking","type":"text"}}`,
+		`{"event":"session.end","session_id":"ses_1","stop_reason":"end_turn"}`,
+	}, "\n") + "\n"
+
+	if err := os.WriteFile(logPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write log: %v", err)
+	}
+
+	f, err := os.Open(logPath)
+	if err != nil {
+		t.Fatalf("open log: %v", err)
+	}
+
+	var out bytes.Buffer
+	// Run Stream in a goroutine, close the file after it drains the content.
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Stream(f, &out, Options{Accumulate: true, Follow: true, PollInterval: 5 * time.Millisecond})
+	}()
+
+	// Wait briefly for Stream to consume the file, then close it.
+	time.Sleep(50 * time.Millisecond)
+	f.Close()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Stream() error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stream() did not return after file close")
+	}
+
+	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("Stream() emitted %d lines, want 2: %q", len(lines), out.String())
+	}
+	if lines[0] != "EVENT agent.thought_chunk ses_1 thinking" {
+		t.Fatalf("lines[0] = %q", lines[0])
+	}
+	if lines[1] != "EVENT session.end ses_1 stop_reason=end_turn" {
+		t.Fatalf("lines[1] = %q", lines[1])
+	}
+}

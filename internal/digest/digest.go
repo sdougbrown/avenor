@@ -35,6 +35,11 @@ type Options struct {
 	// MILESTONE, FINDING, or ACTIVITY. For JSON format, a top-level
 	// "classify" field is injected into each emitted object.
 	Classify bool
+	// Accumulate, when true in plain format, buffers consecutive chunk
+	// events (thought/message chunks) with the same session ID and event
+	// type, flushing them as a single human-readable line when the event
+	// type or session changes. Ignored in json format.
+	Accumulate bool
 
 	// CursorPath, when non-empty, causes Stream to atomically rewrite the
 	// cursor file after processing. The caller is responsible for seeking the
@@ -136,14 +141,33 @@ func Stream(in io.Reader, out io.Writer, opts Options) error {
 		return writeCursor(opts.CursorPath, currentOffset())
 	}
 
+	var acc *Accumulator
+	useAccumulator := opts.Accumulate && format == "plain"
+	if useAccumulator {
+		acc = NewAccumulator()
+	}
+
 	lineNumber := 0
 	eventsSinceCursorWrite := 0
 	for {
 		raw, err := reader.ReadBytes('\n')
 		if len(raw) > 0 {
 			lineNumber++
-			if streamErr := streamLine(raw, lineNumber, out, format, opts.Classify); streamErr != nil {
-				return streamErr
+			if useAccumulator {
+				lines, processErr := acc.Process(raw, opts.Classify)
+				if processErr != nil {
+					logMalformed(lineNumber, processErr)
+				} else {
+					for _, line := range lines {
+						if _, writeErr := fmt.Fprintln(out, line); writeErr != nil {
+							return writeErr
+						}
+					}
+				}
+			} else {
+				if streamErr := streamLine(raw, lineNumber, out, format, opts.Classify); streamErr != nil {
+					return streamErr
+				}
 			}
 			eventsSinceCursorWrite++
 			// In follow mode, rewrite the cursor periodically so a crash only
@@ -163,11 +187,26 @@ func Stream(in io.Reader, out io.Writer, opts Options) error {
 				time.Sleep(pollInterval)
 				continue
 			}
-			// Oneshot mode: write cursor on clean EOF.
+			// Oneshot mode: flush accumulated chunks, then write cursor on clean EOF.
+			if acc != nil {
+				for _, line := range acc.FlushRemaining(opts.Classify) {
+					if _, writeErr := fmt.Fprintln(out, line); writeErr != nil {
+						return writeErr
+					}
+				}
+			}
 			return writeCurrentCursor()
 		}
 		if errors.Is(err, os.ErrClosed) {
-			// Graceful shutdown (file closed by signal handler): write cursor.
+			// Graceful shutdown (file closed by signal handler): flush accumulated
+			// chunks, then write cursor.
+			if acc != nil {
+				for _, line := range acc.FlushRemaining(opts.Classify) {
+					if _, writeErr := fmt.Fprintln(out, line); writeErr != nil {
+						return writeErr
+					}
+				}
+			}
 			return writeCurrentCursor()
 		}
 		return err
@@ -238,10 +277,19 @@ func logMalformed(lineNumber int, err error) {
 	fmt.Fprintf(os.Stderr, "avenor watch: malformed event at line %d: %v\n", lineNumber, err)
 }
 
+// chunkText extracts the human-readable text from a chunk event (message or
+// thought), handling both ACP format (content.text) and SSE format (delta).
+func chunkText(event map[string]any) string {
+	if text := contentText(event["content"]); text != "" {
+		return text
+	}
+	return stringField(event, "delta")
+}
+
 func excerpt(event map[string]any, name string) string {
 	switch name {
 	case "agent.message_chunk", "agent.thought_chunk", "user.message_chunk":
-		return contentText(event["content"])
+		return chunkText(event)
 	case "agent.status":
 		phase := stringField(event, "phase")
 		if label := stringField(event, "label"); label != "" {

@@ -54,6 +54,7 @@ func runWatch(args []string) int {
 	follow := fs.Bool("follow", false, "poll and tail the log")
 	format := fs.String("format", "plain", "output format: plain (EVENT lines) or json (pass-through NDJSON)")
 	classify := fs.Bool("classify", false, "prefix each plain-format digest line with MILESTONE | FINDING | ACTIVITY; in json format, adds a top-level \"classify\" field")
+	accumulate := fs.Bool("accumulate", false, "buffer consecutive thought/message chunks with the same session ID and event type, flushing them as a single human-readable line (plain format only)")
 	pollInterval := fs.Duration("poll-interval", 250*time.Millisecond, "follow-mode sleep interval")
 	sinceCursor := fs.String("since-cursor", "", "cursor file path: seek to saved offset before reading; rewrite offset on exit")
 
@@ -119,6 +120,7 @@ func runWatch(args []string) int {
 		PollInterval:      *pollInterval,
 		Format:            *format,
 		Classify:          *classify,
+		Accumulate:        *accumulate,
 		CursorPath:        *sinceCursor,
 		CursorStartOffset: cursorStartOffset,
 	}

@@ -1,0 +1,19 @@
+{"event":"session.plan","session_id":"ses_acc","title":"Review changes"}
+{"event":"agent.thought_chunk","session_id":"ses_acc","content":{"text":"Let","type":"text"}}
+{"event":"agent.thought_chunk","session_id":"ses_acc","content":{"text":" me","type":"text"}}
+{"event":"agent.thought_chunk","session_id":"ses_acc","content":{"text":" read","type":"text"}}
+{"event":"agent.thought_chunk","session_id":"ses_acc","content":{"text":" the","type":"text"}}
+{"event":"agent.thought_chunk","session_id":"ses_acc","content":{"text":" classifier","type":"text"}}
+{"event":"agent.message_chunk","session_id":"ses_acc","content":{"text":"I'll","type":"text"}}
+{"event":"agent.message_chunk","session_id":"ses_acc","content":{"text":" read","type":"text"}}
+{"event":"agent.message_chunk","session_id":"ses_acc","content":{"text":" the","type":"text"}}
+{"event":"agent.message_chunk","session_id":"ses_acc","content":{"text":" classifier.go","type":"text"}}
+{"event":"tool.call","session_id":"ses_acc","kind":"read","title":"classifier.go","status":"pending"}
+{"event":"agent.thought_chunk","session_id":"ses_acc","content":{"text":"Now","type":"text"}}
+{"event":"agent.thought_chunk","session_id":"ses_acc","content":{"text":" analyzing","type":"text"}}
+{"event":"agent.thought_chunk","session_id":"ses_acc","content":{"text":" diff","type":"text"}}
+{"event":"agent.message_chunk","session_id":"ses_acc","content":{"text":"The","type":"text"}}
+{"event":"agent.message_chunk","session_id":"ses_acc","content":{"text":" code","type":"text"}}
+{"event":"agent.message_chunk","session_id":"ses_acc","content":{"text":" looks","type":"text"}}
+{"event":"agent.message_chunk","session_id":"ses_acc","content":{"text":" good","type":"text"}}
+{"event":"session.end","session_id":"ses_acc","stop_reason":"end_turn"}
