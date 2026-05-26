@@ -30,7 +30,9 @@ features:
 ## Install
 
 ```bash
-go install github.com/sdougbrown/avenor/cmd/avenor@latest
+curl -fsSL https://avenor.douggo.com/install.sh | sh
 ```
 
-Or grab a binary for your platform from [GitHub Releases](https://github.com/sdougbrown/avenor/releases/latest).
+Or with Go: `go install github.com/sdougbrown/avenor/cmd/avenor@latest`
+
+Binaries for all platforms on [GitHub Releases](https://github.com/sdougbrown/avenor/releases/latest).
