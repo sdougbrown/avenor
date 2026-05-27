@@ -6,6 +6,9 @@ import (
 	"fmt"
 )
 
+// ReportFindingToolName is the canonical name for the report_finding tool.
+const ReportFindingToolName = "report_finding"
+
 func NewReportFindingTool() Tool {
 	return &ReportFindingTool{}
 }

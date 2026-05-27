@@ -69,7 +69,13 @@ func LoadSkills(configDir string, skillNames []string) ([]Skill, error) {
 }
 
 // loadSkillFile tries to load a skill from a directory, trying .json then .md.
+// The resolved path is validated to stay within dir to prevent path traversal.
 func loadSkillFile(dir, name string) (Skill, error) {
+	// Validate name doesn't contain path separators (prevents path traversal)
+	if strings.Contains(name, "/") || strings.Contains(name, "\\") || strings.Contains(name, "..") {
+		return Skill{}, fmt.Errorf("invalid skill name %q", name)
+	}
+
 	// Try JSON first
 	path := filepath.Join(dir, name+".json")
 	data, err := os.ReadFile(path)

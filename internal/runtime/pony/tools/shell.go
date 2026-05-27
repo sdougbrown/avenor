@@ -59,12 +59,31 @@ func NewShellTool() Tool {
 }
 
 // NewShellToolWithConfig creates a ShellTool with the given config overrides.
-// Nil fields fall back to DefaultShellConfig values.
+// Nil fields fall back to DefaultShellConfig values. Partial configs are merged
+// with defaults so that unset fields keep sensible values.
 func NewShellToolWithConfig(cfg *ShellConfig) Tool {
-	t := &ShellTool{cfg: cfg}
-	if t.cfg == nil {
-		defaults := DefaultShellConfig()
-		t.cfg = &defaults
+	t := &ShellTool{cfg: &ShellConfig{}}
+	if cfg == nil {
+		d := DefaultShellConfig()
+		t.cfg = &d
+		return t
+	}
+	// Merge user config with defaults
+	d := DefaultShellConfig()
+	if cfg.AllowedCommands != nil {
+		t.cfg.AllowedCommands = cfg.AllowedCommands
+	} else {
+		t.cfg.AllowedCommands = d.AllowedCommands
+	}
+	if cfg.TimeoutSeconds > 0 {
+		t.cfg.TimeoutSeconds = cfg.TimeoutSeconds
+	} else {
+		t.cfg.TimeoutSeconds = d.TimeoutSeconds
+	}
+	if cfg.MaxOutputBytes > 0 {
+		t.cfg.MaxOutputBytes = cfg.MaxOutputBytes
+	} else {
+		t.cfg.MaxOutputBytes = d.MaxOutputBytes
 	}
 	return t
 }

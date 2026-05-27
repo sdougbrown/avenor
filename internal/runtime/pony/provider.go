@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
@@ -54,6 +53,7 @@ type Provider struct {
 	mu             sync.Mutex
 	sessions       map[string]*sessionState
 	sessionCounter atomic.Int64
+	permCounter    atomic.Int64
 }
 
 var _ runtime.Provider = (*Provider)(nil)
@@ -303,7 +303,8 @@ func (p *Provider) makeApprovalChecker(ss *sessionState) ApprovalChecker {
 		}
 
 		respond := make(chan runtime.PermissionResponse, 1)
-		requestID := fmt.Sprintf("perm_%s_%d", toolName, time.Now().UnixNano())
+		permID := p.permCounter.Add(1)
+		requestID := fmt.Sprintf("perm_%s_%d", toolName, permID)
 
 		ss.mu.Lock()
 		ss.pendingPerm.requestID = requestID
@@ -345,10 +346,14 @@ func (p *Provider) AnswerPermission(ctx context.Context, sessionID string, reque
 
 	ss.mu.Lock()
 	respond := ss.pendingPerm.respond
+	pendingID := ss.pendingPerm.requestID
 	ss.mu.Unlock()
 
 	if respond == nil {
 		return fmt.Errorf("no pending permission request for session %s", sessionID)
+	}
+	if requestID != "" && pendingID != "" && requestID != pendingID {
+		return fmt.Errorf("requestID mismatch: got %q, pending %q", requestID, pendingID)
 	}
 
 	select {
