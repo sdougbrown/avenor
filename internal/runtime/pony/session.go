@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/pony/model"
 )
 
@@ -18,6 +19,12 @@ type sessionState struct {
 	subsMu     sync.Mutex
 	initialised  bool // true after Start has set up history
 	droppedEvents int // count of events dropped due to full subscriber channels
+
+	// pendingPerm is set when a tool call is waiting for permission approval.
+	pendingPerm struct {
+		requestID string
+		respond   chan<- runtime.PermissionResponse
+	}
 }
 
 func newSessionState() *sessionState {

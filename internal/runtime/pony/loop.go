@@ -30,14 +30,18 @@ type LoopRunState struct {
 	CalledTools []string // tool names called so far
 }
 
+// ApprovalChecker is called before a tool executes. It blocks until the
+// permission is granted or denied. Returns true if approved, false if denied.
+type ApprovalChecker func(ctx context.Context, toolName string, eventCh chan<- events.Event) (bool, error)
+
 // RunLoop drives the multi-turn loop until a stop condition or terminal condition.
 //
 // It sends the history + tool defs to the adapter each turn, processes streamed
 // chunks, accumulates tool calls, dispatches them through the registry, and
 // appends results to history.
 //
-// Events are emitted on eventCh as the loop runs for subscribers (control server,
-// watch, etc.).
+// If approval is non-nil, it is called before each tool to check for permission.
+// Events are emitted on eventCh as the loop runs for subscribers.
 //
 // Returns the final conversation history (including all assistant and tool turns)
 // and the final stop reason.
@@ -51,6 +55,7 @@ func RunLoop(
 	workingDir string,
 	eventCh chan<- events.Event,
 	stopConditions []StopCondition,
+	approval ApprovalChecker,
 ) ([]model.Message, string, error) {
 
 	toolDefs := buildToolDefs(reg)
@@ -132,7 +137,7 @@ turnLoop:
 
 					for _, idx := range indices {
 						acc := accumulators[idx]
-						result, err := executeToolCall(ctx, reg, workingDir, acc, eventCh)
+						result, err := executeToolCall(ctx, reg, workingDir, acc, eventCh, approval)
 						toolResult := model.Message{
 							Role:       model.RoleTool,
 							ToolCallID: acc.id,
@@ -219,13 +224,34 @@ func buildAssistantMsg(text string, accs map[int]*accumulatedToolCall) model.Mes
 	return msg
 }
 
-func executeToolCall(ctx context.Context, reg *tools.Registry, workingDir string, acc *accumulatedToolCall, eventCh chan<- events.Event) (string, error) {
+func executeToolCall(ctx context.Context, reg *tools.Registry, workingDir string, acc *accumulatedToolCall, eventCh chan<- events.Event, approval ApprovalChecker) (string, error) {
 	emit(eventCh, "tool.call", map[string]any{
 		"kind":   acc.name,
 		"id":     acc.id,
 		"title":  acc.name,
 		"status": "called",
 	})
+
+	// Check approval before dispatching
+	if approval != nil {
+		approved, err := approval(ctx, acc.name, eventCh)
+		if err != nil {
+			emit(eventCh, "tool.result", map[string]any{
+				"kind":     acc.name,
+				"content":  fmt.Sprintf("Error: %v", err),
+				"is_error": true,
+			})
+			return "", err
+		}
+		if !approved {
+			emit(eventCh, "tool.result", map[string]any{
+				"kind":     acc.name,
+				"content":  fmt.Sprintf("Error: tool %q was denied", acc.name),
+				"is_error": true,
+			})
+			return "", fmt.Errorf("tool %q was denied", acc.name)
+		}
+	}
 
 	args := json.RawMessage(acc.arguments.String())
 
@@ -308,6 +334,7 @@ func LoopWithRetry(
 	workingDir string,
 	eventCh chan<- events.Event,
 	stopConditions []StopCondition,
+	approval ApprovalChecker,
 ) ([]model.Message, string, error) {
 
 	const maxAttempts = 4
@@ -327,7 +354,7 @@ func LoopWithRetry(
 			})
 		}
 
-		history, stopReason, err := RunLoop(ctx, adapter, modelName, maxTokens, history, reg, workingDir, eventCh, stopConditions)
+		history, stopReason, err := RunLoop(ctx, adapter, modelName, maxTokens, history, reg, workingDir, eventCh, stopConditions, approval)
 		if err == nil {
 			return history, stopReason, nil
 		}

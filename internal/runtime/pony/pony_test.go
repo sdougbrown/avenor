@@ -160,8 +160,7 @@ func TestRunLoop_textOnly_stop(t *testing.T) {
 	history, stopReason, err := RunLoop(
 		ctx, adapter, "test-model", 1024,
 		[]model.Message{{Role: model.RoleUser, Content: "hi"}},
-		nil, "", ch, nil,
-	)
+		nil, "", ch, nil, nil)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -193,8 +192,7 @@ func TestRunLoop_textOnly_length(t *testing.T) {
 	history, stopReason, err := RunLoop(
 		ctx, adapter, "test-model", 1024,
 		[]model.Message{{Role: model.RoleUser, Content: "hi"}},
-		nil, "", ch, nil,
-	)
+		nil, "", ch, nil, nil)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -241,8 +239,7 @@ func TestRunLoop_textToolCalls_stop(t *testing.T) {
 
 	finalHistory, stopReason, err := RunLoop(
 		ctx, adapter, "test-model", 1024,
-		history, reg, tmpDir, ch, nil,
-	)
+		history, reg, tmpDir, ch, nil, nil)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -299,8 +296,7 @@ func TestRunLoop_toolExecuteError(t *testing.T) {
 
 	finalHistory, stopReason, err := RunLoop(
 		ctx, adapter, "test-model", 1024,
-		history, reg, tmpDir, ch, nil,
-	)
+		history, reg, tmpDir, ch, nil, nil)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -329,8 +325,7 @@ func TestRunLoop_streamEndedUnexpectedly(t *testing.T) {
 	_, _, err := RunLoop(
 		ctx, adapter, "test-model", 1024,
 		[]model.Message{{Role: model.RoleUser, Content: "hi"}},
-		nil, "", ch, nil,
-	)
+		nil, "", ch, nil, nil)
 
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -353,8 +348,7 @@ func TestRunLoop_errorChunk(t *testing.T) {
 	_, _, err := RunLoop(
 		ctx, adapter, "test-model", 1024,
 		[]model.Message{{Role: model.RoleUser, Content: "hi"}},
-		nil, "", ch, nil,
-	)
+		nil, "", ch, nil, nil)
 
 	if !errors.Is(err, wantErr) {
 		t.Errorf("error = %v, want %v", err, wantErr)
@@ -374,8 +368,7 @@ func TestRunLoop_cancellation(t *testing.T) {
 		_, _, err := RunLoop(
 			ctx, adapter, "test-model", 1024,
 			[]model.Message{{Role: model.RoleUser, Content: "hi"}},
-			nil, "", nil, nil,
-		)
+			nil, "", nil, nil, nil)
 		errCh <- err
 	}()
 
@@ -410,8 +403,7 @@ func TestRunLoop_reasoningChunk(t *testing.T) {
 		_, _, _ = RunLoop(
 			ctx, adapter, "test-model", 1024,
 			[]model.Message{{Role: model.RoleUser, Content: "hi"}},
-			nil, "", ch, nil,
-		)
+			nil, "", ch, nil, nil)
 	}()
 
 	var foundUsage bool
@@ -470,8 +462,7 @@ func TestRunLoop_reasoningContent(t *testing.T) {
 		_, stopReason, err := RunLoop(
 			ctx, adapter, "test-model", 1024,
 			[]model.Message{{Role: model.RoleUser, Content: "hi"}},
-			nil, "", ch, nil,
-		)
+			nil, "", ch, nil, nil)
 		if err != nil {
 			t.Errorf("RunLoop error: %v", err)
 		}
@@ -524,8 +515,7 @@ func TestRunLoop_customFinishReason(t *testing.T) {
 	history, stopReason, err := RunLoop(
 		ctx, adapter, "test-model", 1024,
 		[]model.Message{{Role: model.RoleUser, Content: "hi"}},
-		nil, "", ch, nil,
-	)
+		nil, "", ch, nil, nil)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -568,8 +558,7 @@ func TestRunLoop_multipleToolCalls(t *testing.T) {
 
 	finalHistory, stopReason, err := RunLoop(
 		ctx, adapter, "test-model", 1024,
-		history, reg, tmpDir, ch, nil,
-	)
+		history, reg, tmpDir, ch, nil, nil)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -601,8 +590,7 @@ func TestRunLoop_stopConditionOnToolCalls(t *testing.T) {
 
 	finalHistory, stopReason, err := RunLoop(
 		ctx, adapter, "test-model", 1024,
-		history, reg, tmpDir, ch, []StopCondition{StepCountIs(1)},
-	)
+		history, reg, tmpDir, ch, []StopCondition{StepCountIs(1)}, nil)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -633,8 +621,7 @@ func TestLoopWithRetry_succeedsFirstAttempt(t *testing.T) {
 	history, stopReason, err := LoopWithRetry(
 		ctx, adapter, "test-model", 1024,
 		[]model.Message{{Role: model.RoleUser, Content: "hi"}},
-		nil, "", ch, nil,
-	)
+		nil, "", ch, nil, nil)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -660,8 +647,7 @@ func TestLoopWithRetry_retriesOnError(t *testing.T) {
 	_, _, err := LoopWithRetry(
 		ctx, adapter, "test-model", 1024,
 		[]model.Message{{Role: model.RoleUser, Content: "hi"}},
-		nil, "", ch, nil,
-	)
+		nil, "", ch, nil, nil)
 
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -684,8 +670,7 @@ func TestLoopWithRetry_noRetryAfterToolCalls(t *testing.T) {
 
 	finalHistory, stopReason, err := LoopWithRetry(
 		ctx, adapter, "test-model", 1024,
-		history, reg, tmpDir, ch, nil,
-	)
+		history, reg, tmpDir, ch, nil, nil)
 
 	// With empty chunks (no finish), RunLoop returns "stream ended unexpectedly"
 	// Since no tool calls were made, LoopWithRetry should retry up to 4 times
@@ -716,8 +701,7 @@ func TestLoopWithRetry_exhaustsRetries(t *testing.T) {
 	_, _, err := LoopWithRetry(
 		ctx, adapter, "test-model", 1024,
 		[]model.Message{{Role: model.RoleUser, Content: "hi"}},
-		nil, "", ch, nil,
-	)
+		nil, "", ch, nil, nil)
 
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -744,8 +728,7 @@ func TestLoopWithRetry_contextCancelledDuringBackoff(t *testing.T) {
 	_, _, err := LoopWithRetry(
 		ctx, adapter, "test-model", 1024,
 		[]model.Message{{Role: model.RoleUser, Content: "hi"}},
-		nil, "", ch, nil,
-	)
+		nil, "", ch, nil, nil)
 
 	if err != context.Canceled {
 		t.Fatalf("error = %v, want context.Canceled", err)
@@ -1136,8 +1119,7 @@ func TestRunLoop_e2e_fileRead(t *testing.T) {
 
 	finalHistory, stopReason, err := RunLoop(
 		ctx, adapter, "test-model", 1024,
-		history, reg, tmpDir, ch, nil,
-	)
+		history, reg, tmpDir, ch, nil, nil)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

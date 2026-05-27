@@ -31,6 +31,22 @@ func (c *cappedWriter) Write(p []byte) (int, error) {
 	return len(p), err // report full length to avoid short-write errors upstream
 }
 
+// ShellConfig allows overriding shell tool defaults per-profile.
+type ShellConfig struct {
+	AllowedCommands []string `json:"allowed_commands,omitempty"`
+	TimeoutSeconds  int      `json:"timeout_seconds,omitempty"`
+	MaxOutputBytes  int      `json:"max_output_bytes,omitempty"`
+}
+
+// DefaultShellConfig returns a ShellConfig with built-in defaults.
+func DefaultShellConfig() ShellConfig {
+	return ShellConfig{
+		AllowedCommands: allowedShellCommands,
+		TimeoutSeconds:  30,
+		MaxOutputBytes:  256 << 10,
+	}
+}
+
 var allowedShellCommands = []string{
 	"go", "git", "make", "mise", "npm", "bun", "node",
 	"ls", "cat", "echo", "grep", "find", "head", "tail", "wc",
@@ -38,23 +54,24 @@ var allowedShellCommands = []string{
 	"chmod", "date", "pwd", "which", "test", "python", "python3",
 }
 
-// maxShellOutput is the maximum bytes read from command stdout/stderr.
-const maxShellOutput = 256 << 10 // 256 KB
-
-func isCommandAllowed(cmd string) bool {
-	for _, allowed := range allowedShellCommands {
-		if cmd == allowed {
-			return true
-		}
-	}
-	return false
-}
-
 func NewShellTool() Tool {
-	return &ShellTool{}
+	return NewShellToolWithConfig(nil)
 }
 
-type ShellTool struct{}
+// NewShellToolWithConfig creates a ShellTool with the given config overrides.
+// Nil fields fall back to DefaultShellConfig values.
+func NewShellToolWithConfig(cfg *ShellConfig) Tool {
+	t := &ShellTool{cfg: cfg}
+	if t.cfg == nil {
+		defaults := DefaultShellConfig()
+		t.cfg = &defaults
+	}
+	return t
+}
+
+type ShellTool struct {
+	cfg *ShellConfig
+}
 
 type shellInput struct {
 	Command string `json:"command"`
@@ -63,7 +80,8 @@ type shellInput struct {
 func (t *ShellTool) Name() string { return "shell" }
 
 func (t *ShellTool) Description() string {
-	return "Run a command and return its output. Commands are executed directly (no shell interpreter), so pipes and redirects do not work. Use git, go, and other tools individually. 30-second timeout, output capped at 256KB."
+	return fmt.Sprintf("Run a command and return its output. Commands are executed directly (no shell interpreter), so pipes and redirects do not work. Timeout: %ds, output cap: %dKB.",
+		t.cfg.TimeoutSeconds, t.cfg.MaxOutputBytes/1024)
 }
 
 func (t *ShellTool) Schema() json.RawMessage {
@@ -72,7 +90,7 @@ func (t *ShellTool) Schema() json.RawMessage {
 		"properties": {
 			"command": {
 				"type": "string",
-				"description": "Shell command to run (e.g. go build ./... or git status)"
+				"description": "Command to run (e.g. go build ./... or git status)"
 			}
 		},
 		"required": ["command"]
@@ -94,11 +112,12 @@ func (t *ShellTool) Execute(ctx context.Context, workingDir string, args json.Ra
 	if len(parts) == 0 {
 		return "", fmt.Errorf("shell: command is required")
 	}
-	if !isCommandAllowed(parts[0]) {
+	if !t.isCommandAllowed(parts[0]) {
 		return "", fmt.Errorf("shell: command %q is not in the allowed list", parts[0])
 	}
 
-	cmdCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	timeout := time.Duration(t.cfg.TimeoutSeconds) * time.Second
+	cmdCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(cmdCtx, parts[0], parts[1:]...)
@@ -106,8 +125,8 @@ func (t *ShellTool) Execute(ctx context.Context, workingDir string, args json.Ra
 
 	// Cap output to prevent runaway output
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &cappedWriter{w: &stdout, limit: maxShellOutput}
-	cmd.Stderr = &cappedWriter{w: &stderr, limit: maxShellOutput}
+	cmd.Stdout = &cappedWriter{w: &stdout, limit: t.cfg.MaxOutputBytes}
+	cmd.Stderr = &cappedWriter{w: &stderr, limit: t.cfg.MaxOutputBytes}
 
 	if err := cmd.Run(); err != nil {
 		output := strings.TrimSpace(stdout.String())
@@ -128,4 +147,13 @@ func (t *ShellTool) Execute(ctx context.Context, workingDir string, args json.Ra
 	}
 
 	return strings.TrimSpace(stdout.String()), nil
+}
+
+func (t *ShellTool) isCommandAllowed(cmd string) bool {
+	for _, allowed := range t.cfg.AllowedCommands {
+		if cmd == allowed {
+			return true
+		}
+	}
+	return false
 }

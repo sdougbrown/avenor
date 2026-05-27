@@ -8,6 +8,7 @@ import (
 	"sort"
 
 	"github.com/sdougbrown/avenor/client"
+	"github.com/sdougbrown/avenor/internal/runtime/pony/tools"
 )
 
 // PonyConfig is the top-level pony configuration loaded from the JSON config file.
@@ -20,12 +21,14 @@ type PonyConfig struct {
 
 // Profile defines a named agent profile with its own model, prompts, and tool gating.
 type Profile struct {
-	Model          string   `json:"model"`
-	SystemPrompt   string   `json:"system_prompt,omitempty"`
-	InitialPrompt  string   `json:"initial_prompt,omitempty"`
-	InjectAgentsMD bool     `json:"inject_agents_md,omitempty"`
-	Tools          ToolGate `json:"tools"`
-	MaxTokens      int      `json:"max_tokens,omitempty"`
+	Model          string      `json:"model"`
+	SystemPrompt   string      `json:"system_prompt,omitempty"`
+	InitialPrompt  string      `json:"initial_prompt,omitempty"`
+	InjectAgentsMD bool        `json:"inject_agents_md,omitempty"`
+	Tools          ToolGate    `json:"tools"`
+	MaxTokens      int         `json:"max_tokens,omitempty"`
+	ToolApproval   ToolApproval `json:"tool_approval,omitempty"`
+	ShellConfig    *ShellConfig `json:"shell_config,omitempty"`
 }
 
 // ToolGate controls which tool groups are enabled for a profile.
@@ -33,6 +36,13 @@ type ToolGate struct {
 	Local         bool `json:"local"`
 	Orchestration bool `json:"orchestration"`
 }
+
+// ToolApproval maps tool names to whether they require approval before execution.
+type ToolApproval map[string]bool
+
+// ShellConfig overrides shell tool defaults per-profile.
+// This is a reference to the tools.ShellConfig type, aliased for convenience.
+type ShellConfig = tools.ShellConfig
 
 // LoadPonyConfig reads and parses a JSON pony config file.
 func LoadPonyConfig(path string) (*PonyConfig, error) {

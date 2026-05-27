@@ -194,6 +194,8 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			OrchTools:      profile.Tools.Orchestration,
 			WorkingDir:     *dir,
 			InjectAgentsMD: profile.InjectAgentsMD,
+			ToolApproval:   profile.ToolApproval,
+			ShellConfig:    profile.ShellConfig,
 		}
 		pony.SetGlobalConfig(&pCfg)
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
@@ -28,6 +29,8 @@ type Config struct {
 	OrchTools      bool
 	WorkingDir     string // for AGENTS.md discovery
 	InjectAgentsMD bool
+	ToolApproval   map[string]bool // tool name → requires approval
+	ShellConfig    *ShellConfig    // overrides for shell tool
 	// Registry is internal; built from tool config.
 	toolRegistry *tools.Registry
 
@@ -66,7 +69,7 @@ func New(cfg Config) *Provider {
 			tools.NewGlobTool(),
 			tools.NewGrepTool(),
 			tools.NewListDirTool(),
-			tools.NewShellTool(),
+			tools.NewShellToolWithConfig(cfg.ShellConfig),
 		)
 	}
 	if cfg.OrchTools && cfg.Executor != nil {
@@ -209,6 +212,10 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 	}()
 
 	// Run the loop
+	var approval ApprovalChecker
+	if len(p.cfg.ToolApproval) > 0 {
+		approval = p.makeApprovalChecker(ss)
+	}
 	finalHistory, stopReason, err := LoopWithRetry(
 		promptCtx,
 		p.cfg.Adapter,
@@ -219,6 +226,7 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 		p.cfg.WorkingDir,
 		eventCh,
 		p.cfg.StopConditions,
+		approval,
 	)
 
 	close(eventCh)
@@ -279,14 +287,76 @@ func (p *Provider) Events(ctx context.Context, sessionID string) (<-chan events.
 	return out, nil
 }
 
+// makeApprovalChecker returns an ApprovalChecker that blocks until the
+// permission request is answered via AnswerPermission.
+func (p *Provider) makeApprovalChecker(ss *sessionState) ApprovalChecker {
+	return func(ctx context.Context, toolName string, eventCh chan<- events.Event) (bool, error) {
+		requires, ok := p.cfg.ToolApproval[toolName]
+		if !ok || !requires {
+			return true, nil
+		}
+
+		respond := make(chan runtime.PermissionResponse, 1)
+		requestID := fmt.Sprintf("perm_%s_%d", toolName, time.Now().UnixNano())
+
+		ss.mu.Lock()
+		ss.pendingPerm.requestID = requestID
+		ss.pendingPerm.respond = respond
+		ss.mu.Unlock()
+
+		defer func() {
+			ss.mu.Lock()
+			ss.pendingPerm.respond = nil
+			ss.mu.Unlock()
+		}()
+
+		emit(eventCh, "permission.request", map[string]any{
+			"request_id": requestID,
+			"tool":       toolName,
+			"question":   fmt.Sprintf("Allow %s to execute?", toolName),
+			"options": []map[string]any{
+				{"optionId": "allow", "kind": "allow"},
+				{"optionId": "deny", "kind": "deny"},
+			},
+		})
+
+		select {
+		case resp := <-respond:
+			return resp.Allow, nil
+		case <-ctx.Done():
+			return false, ctx.Err()
+		}
+	}
+}
+
 func (p *Provider) AnswerPermission(ctx context.Context, sessionID string, requestID string, response runtime.PermissionResponse) error {
-	return errors.New("permissions not supported by pony backend")
+	p.mu.Lock()
+	ss, ok := p.sessions[sessionID]
+	p.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("unknown session: %s", sessionID)
+	}
+
+	ss.mu.Lock()
+	respond := ss.pendingPerm.respond
+	ss.mu.Unlock()
+
+	if respond == nil {
+		return fmt.Errorf("no pending permission request for session %s", sessionID)
+	}
+
+	select {
+	case respond <- response:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (p *Provider) Capabilities(ctx context.Context) (runtime.Capabilities, error) {
 	return runtime.Capabilities{
 		Backend:             backendID,
-		Permissions:         false,
+		Permissions:         len(p.cfg.ToolApproval) > 0,
 		Resume:              false,
 		ExternalServerURL:   true,
 		SubprocessDiscovery: false,
