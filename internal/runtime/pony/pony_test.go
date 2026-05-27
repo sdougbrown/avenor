@@ -47,6 +47,7 @@ type fakeAdapter struct {
 	callCount       int
 	mutualExclusion bool // when true, use atomic counter for thread-safe call counting
 	streamFunc      func(ctx context.Context, req model.Request) (<-chan model.Chunk, error)
+	onStream        func() // called when Stream is invoked (for synchronization)
 }
 
 var adapterCallCount int64
@@ -62,9 +63,12 @@ func (f *fakeAdapter) Stream(ctx context.Context, req model.Request) (<-chan mod
 	} else {
 		f.callCount++
 	}
-	ch := make(chan model.Chunk, len(f.chunks))
+	ch := make(chan model.Chunk, 1)
 	go func() {
 		defer close(ch)
+		if f.onStream != nil {
+			f.onStream()
+		}
 		for _, c := range f.chunks {
 			select {
 			case <-ctx.Done():
@@ -385,9 +389,10 @@ func TestRunLoop_errorChunk(t *testing.T) {
 func TestRunLoop_cancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
+	started := make(chan struct{})
 	adapter := &fakeAdapter{chunks: []model.Chunk{
 		textChunk("slow "),
-	}}
+	}, onStream: func() { close(started) }}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -399,7 +404,7 @@ func TestRunLoop_cancellation(t *testing.T) {
 		errCh <- err
 	}()
 
-	time.Sleep(50 * time.Millisecond)
+	<-started
 	cancel()
 
 	select {
@@ -810,10 +815,10 @@ func TestProvider_Cancel_unknownSession(t *testing.T) {
 func TestProvider_Prompt_cancel(t *testing.T) {
 	ctx := context.Background()
 
-	// Use a slow adapter so Prompt blocks long enough for cancellation
+	started := make(chan struct{})
 	slowAdapter := &fakeAdapter{chunks: []model.Chunk{
 		textChunk("slow response..."),
-	}}
+	}, onStream: func() { close(started) }}
 
 	p := New(Config{Model: "test-model", Adapter: slowAdapter})
 
@@ -824,7 +829,7 @@ func TestProvider_Prompt_cancel(t *testing.T) {
 		errCh <- p.Prompt(ctx, session.SessionID, "hello")
 	}()
 
-	time.Sleep(50 * time.Millisecond)
+	<-started
 	p.Cancel(ctx, session.SessionID)
 
 	select {
@@ -1110,8 +1115,8 @@ func TestRunLoop_e2e_fileRead(t *testing.T) {
 		t.Fatalf("history length = %d, want 4", len(finalHistory))
 	}
 	toolMsg := finalHistory[2]
-	if !strings.HasSuffix(toolMsg.Content, testContent) && !strings.HasPrefix(testContent, toolMsg.Content[:len(toolMsg.Content)-1]) {
-		t.Logf("tool result content = %q, want contains %q", toolMsg.Content, testContent)
+	if !strings.Contains(toolMsg.Content, testContent) {
+		t.Errorf("tool result content = %q, want to contain %q", toolMsg.Content, testContent)
 	}
 }
 

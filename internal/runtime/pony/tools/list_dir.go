@@ -49,29 +49,16 @@ func (t *ListDirTool) Execute(ctx context.Context, workingDir string, args json.
 		dirPath = "."
 	}
 
-	absPath := dirPath
-	if !filepath.IsAbs(dirPath) {
-		absPath = filepath.Join(workingDir, dirPath)
-	}
-	absPath, err := filepath.Abs(absPath)
+	safePath, err := safeResolvePath(workingDir, dirPath)
 	if err != nil {
-		return "", fmt.Errorf("list_dir: resolve path: %w", err)
-	}
-
-	wdAbs, err := filepath.Abs(workingDir)
-	if err != nil {
-		return "", fmt.Errorf("list_dir: resolve working dir: %w", err)
-	}
-
-	if !filepath.HasPrefix(absPath, wdAbs) {
-		return "", fmt.Errorf("list_dir: path %q is outside the working directory %q", absPath, workingDir)
+		return "", fmt.Errorf("list_dir: %w", err)
 	}
 
 	if err := ctx.Err(); err != nil {
 		return "", fmt.Errorf("list_dir: %w", err)
 	}
 
-	entries, err := os.ReadDir(absPath)
+	entries, err := os.ReadDir(safePath)
 	if err != nil {
 		return "", fmt.Errorf("list_dir: %w", err)
 	}
@@ -83,12 +70,15 @@ func (t *ListDirTool) Execute(ctx context.Context, workingDir string, args json.
 			continue
 		}
 
-		relPath, _ := filepath.Rel(wdAbs, filepath.Join(absPath, entry.Name()))
+		rel, err := filepath.Rel(workingDir, filepath.Join(safePath, entry.Name()))
+		if err != nil {
+			rel = entry.Name()
+		}
 
 		if entry.IsDir() {
-			lines = append(lines, fmt.Sprintf("dir  %s", relPath))
+			lines = append(lines, fmt.Sprintf("dir  %s", rel))
 		} else {
-			lines = append(lines, fmt.Sprintf("file %s (%d bytes)", relPath, info.Size()))
+			lines = append(lines, fmt.Sprintf("file %s (%d bytes)", rel, info.Size()))
 		}
 	}
 

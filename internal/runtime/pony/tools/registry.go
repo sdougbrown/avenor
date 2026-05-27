@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
+	"strings"
 )
 
 // Tool is the interface every pony tool implements.
@@ -46,6 +48,33 @@ func (r *Registry) Dispatch(ctx context.Context, workingDir string, name string,
 		return "", fmt.Errorf("unknown tool: %s", name)
 	}
 	return t.Execute(ctx, workingDir, args)
+}
+
+// safeResolvePath resolves a path relative to workingDir, follows symlinks,
+// and verifies the result is within workingDir. Returns the resolved absolute path.
+func safeResolvePath(workingDir, target string) (string, error) {
+	absPath := target
+	if !filepath.IsAbs(target) {
+		absPath = filepath.Join(workingDir, target)
+	}
+	absPath, err := filepath.Abs(absPath)
+	if err != nil {
+		return "", err
+	}
+	// Resolve symlinks to prevent symlink-based escapes
+	safePath, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		return "", err
+	}
+	wdAbs, err := filepath.Abs(workingDir)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(wdAbs, safePath)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return "", fmt.Errorf("path %q is outside the working directory", target)
+	}
+	return safePath, nil
 }
 
 // AllTools returns all registered tools.

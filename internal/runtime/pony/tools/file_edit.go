@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -57,29 +56,16 @@ func (t *FileEditTool) Execute(ctx context.Context, workingDir string, args json
 		return "", fmt.Errorf("file_edit: path is required")
 	}
 
-	absPath := input.Path
-	if !filepath.IsAbs(input.Path) {
-		absPath = filepath.Join(workingDir, input.Path)
-	}
-	absPath, err := filepath.Abs(absPath)
+	safePath, err := safeResolvePath(workingDir, input.Path)
 	if err != nil {
-		return "", fmt.Errorf("file_edit: resolve path: %w", err)
-	}
-
-	wdAbs, err := filepath.Abs(workingDir)
-	if err != nil {
-		return "", fmt.Errorf("file_edit: resolve working dir: %w", err)
-	}
-
-	if !filepath.HasPrefix(absPath, wdAbs) {
-		return "", fmt.Errorf("file_edit: path %q is outside the working directory %q", absPath, workingDir)
+		return "", fmt.Errorf("file_edit: %w", err)
 	}
 
 	if err := ctx.Err(); err != nil {
 		return "", fmt.Errorf("file_edit: %w", err)
 	}
 
-	data, err := os.ReadFile(absPath)
+	data, err := os.ReadFile(safePath)
 	if err != nil {
 		return "", fmt.Errorf("file_edit: read file: %w", err)
 	}
@@ -91,7 +77,7 @@ func (t *FileEditTool) Execute(ctx context.Context, workingDir string, args json
 		return "", fmt.Errorf("file_edit: old_string not found in file")
 	}
 
-	if err := os.WriteFile(absPath, []byte(newContent), 0644); err != nil {
+	if err := os.WriteFile(safePath, []byte(newContent), 0644); err != nil {
 		return "", fmt.Errorf("file_edit: write file: %w", err)
 	}
 

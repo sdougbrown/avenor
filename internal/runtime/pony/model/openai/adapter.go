@@ -22,6 +22,11 @@ type Adapter struct {
 func New(cfg Config) *Adapter {
 	baseURL := cfg.BaseURL
 	baseURL = strings.TrimRight(baseURL, "/")
+
+	if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
+		panic(fmt.Sprintf("openai adapter: invalid base_url scheme: %s (must be http:// or https://)", baseURL))
+	}
+
 	if !strings.Contains(baseURL, "/v1") {
 		baseURL = baseURL + "/v1"
 	}

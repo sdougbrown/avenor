@@ -55,6 +55,17 @@ func (t *GlobTool) Execute(ctx context.Context, workingDir string, args json.Raw
 		return "", fmt.Errorf("glob: resolve pattern: %w", err)
 	}
 
+	wdAbs, err := filepath.Abs(workingDir)
+	if err != nil {
+		return "", fmt.Errorf("glob: resolve working dir: %w", err)
+	}
+
+	// Validate pattern resolves within working directory
+	patternRel, err := filepath.Rel(wdAbs, pattern)
+	if err != nil || strings.HasPrefix(patternRel, "..") {
+		return "", fmt.Errorf("glob: pattern %q is outside the working directory", input.Pattern)
+	}
+
 	matches, err := filepath.Glob(pattern)
 	if err != nil {
 		return "", fmt.Errorf("glob: %w", err)
@@ -62,11 +73,6 @@ func (t *GlobTool) Execute(ctx context.Context, workingDir string, args json.Raw
 
 	if err := ctx.Err(); err != nil {
 		return "", fmt.Errorf("glob: %w", err)
-	}
-
-	wdAbs, err := filepath.Abs(workingDir)
-	if err != nil {
-		return "", fmt.Errorf("glob: resolve working dir: %w", err)
 	}
 
 	var relPaths []string

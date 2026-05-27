@@ -82,27 +82,35 @@ func New(cfg Config) *Provider {
 // The factory requires a zero-arg or StartOptions-only constructor pattern.
 // This is a thin wrapper — the actual config is loaded by the CLI and stored
 // in a package-level variable before factory call.
-var globalConfig *Config
+var (
+	globalConfigMu sync.Mutex
+	globalConfig   *Config
+)
 
 // SetGlobalConfig stores the pony config for the factory path.
 func SetGlobalConfig(cfg *Config) {
+	globalConfigMu.Lock()
 	globalConfig = cfg
+	globalConfigMu.Unlock()
 }
 
 func NewWithOptions(opts runtime.StartOptions) *Provider {
-	if globalConfig == nil {
+	globalConfigMu.Lock()
+	cfg := globalConfig
+	globalConfigMu.Unlock()
+	if cfg == nil {
 		return New(Config{
 			Model:      opts.Model,
 			WorkingDir: opts.Dir,
 		})
 	}
 	// Clone config and apply StartOptions overrides
-	cfg := *globalConfig
-	cfg.WorkingDir = opts.Dir
+	pcfg := *cfg
+	pcfg.WorkingDir = opts.Dir
 	if opts.Model != "" {
-		cfg.Model = opts.Model
+		pcfg.Model = opts.Model
 	}
-	return New(cfg)
+	return New(pcfg)
 }
 
 func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtime.Session, error) {

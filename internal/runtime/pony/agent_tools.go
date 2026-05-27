@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
+	"strings"
 
 	"github.com/sdougbrown/avenor/internal/runtime/pony/tools"
 )
@@ -58,6 +60,13 @@ func (t *spawnAgentTool) Execute(ctx context.Context, workingDir string, args js
 	}
 	if input.Prompt == "" {
 		return "", fmt.Errorf("spawn_agent: prompt is required")
+	}
+
+	if input.Dir != "" {
+		rel, err := filepath.Rel(workingDir, input.Dir)
+		if err != nil || strings.HasPrefix(rel, "..") {
+			return "", fmt.Errorf("spawn_agent: dir %q is outside the working directory %q", input.Dir, workingDir)
+		}
 	}
 
 	params := map[string]any{

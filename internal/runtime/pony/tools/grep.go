@@ -71,6 +71,16 @@ func (t *GrepTool) Execute(ctx context.Context, workingDir string, args json.Raw
 		return "", fmt.Errorf("grep: resolve glob: %w", err)
 	}
 
+	wdAbs, err := filepath.Abs(workingDir)
+	if err != nil {
+		return "", fmt.Errorf("grep: resolve working dir: %w", err)
+	}
+
+	globPatternRel, err := filepath.Rel(wdAbs, globPattern)
+	if err != nil || strings.HasPrefix(globPatternRel, "..") {
+		return "", fmt.Errorf("grep: glob pattern %q is outside the working directory", input.Glob)
+	}
+
 	matches, err := filepath.Glob(globPattern)
 	if err != nil {
 		return "", fmt.Errorf("grep: glob: %w", err)
@@ -78,11 +88,6 @@ func (t *GrepTool) Execute(ctx context.Context, workingDir string, args json.Raw
 
 	if err := ctx.Err(); err != nil {
 		return "", fmt.Errorf("grep: %w", err)
-	}
-
-	wdAbs, err := filepath.Abs(workingDir)
-	if err != nil {
-		return "", fmt.Errorf("grep: resolve working dir: %w", err)
 	}
 
 	var results []string

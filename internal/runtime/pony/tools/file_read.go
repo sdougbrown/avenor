@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
-	"strings"
 )
 
 func NewFileReadTool() Tool {
@@ -47,24 +45,9 @@ func (t *FileReadTool) Execute(ctx context.Context, workingDir string, args json
 		return "", fmt.Errorf("file_read: path is required")
 	}
 
-	// Resolve path and validate it's within working directory
-	absPath := input.Path
-	if !filepath.IsAbs(input.Path) {
-		absPath = filepath.Join(workingDir, input.Path)
-	}
-	absPath, err := filepath.Abs(absPath)
+	safePath, err := safeResolvePath(workingDir, input.Path)
 	if err != nil {
-		return "", fmt.Errorf("file_read: resolve path: %w", err)
-	}
-
-	wdAbs, err := filepath.Abs(workingDir)
-	if err != nil {
-		return "", fmt.Errorf("file_read: resolve working dir: %w", err)
-	}
-
-	// Prevent path traversal outside working directory
-	if !strings.HasPrefix(absPath, wdAbs) {
-		return "", fmt.Errorf("file_read: path %q is outside the working directory %q", absPath, workingDir)
+		return "", fmt.Errorf("file_read: %w", err)
 	}
 
 	// Check context before IO
@@ -72,7 +55,7 @@ func (t *FileReadTool) Execute(ctx context.Context, workingDir string, args json
 		return "", fmt.Errorf("file_read: %w", err)
 	}
 
-	data, err := os.ReadFile(absPath)
+	data, err := os.ReadFile(safePath)
 	if err != nil {
 		return "", fmt.Errorf("file_read: %w", err)
 	}

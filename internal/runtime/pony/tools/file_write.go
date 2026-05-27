@@ -51,33 +51,20 @@ func (t *FileWriteTool) Execute(ctx context.Context, workingDir string, args jso
 		return "", fmt.Errorf("file_write: path is required")
 	}
 
-	absPath := input.Path
-	if !filepath.IsAbs(input.Path) {
-		absPath = filepath.Join(workingDir, input.Path)
-	}
-	absPath, err := filepath.Abs(absPath)
+	safePath, err := safeResolvePath(workingDir, input.Path)
 	if err != nil {
-		return "", fmt.Errorf("file_write: resolve path: %w", err)
-	}
-
-	wdAbs, err := filepath.Abs(workingDir)
-	if err != nil {
-		return "", fmt.Errorf("file_write: resolve working dir: %w", err)
-	}
-
-	if !filepath.HasPrefix(absPath, wdAbs) {
-		return "", fmt.Errorf("file_write: path %q is outside the working directory %q", absPath, workingDir)
+		return "", fmt.Errorf("file_write: %w", err)
 	}
 
 	if err := ctx.Err(); err != nil {
 		return "", fmt.Errorf("file_write: %w", err)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(absPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(safePath), 0755); err != nil {
 		return "", fmt.Errorf("file_write: create directories: %w", err)
 	}
 
-	if err := os.WriteFile(absPath, []byte(input.Content), 0644); err != nil {
+	if err := os.WriteFile(safePath, []byte(input.Content), 0644); err != nil {
 		return "", fmt.Errorf("file_write: write file: %w", err)
 	}
 
