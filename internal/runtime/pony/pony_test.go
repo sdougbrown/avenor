@@ -40,6 +40,10 @@ func toolCallChunk(id string, name string, args json.RawMessage, index int) mode
 	return model.Chunk{Type: model.ChunkTypeToolCallDelta, ToolCall: &model.ToolCallDelta{ID: id, Name: name, Arguments: args, Index: index}}
 }
 
+func reasonChunk(text string) model.Chunk {
+	return model.Chunk{Type: model.ChunkTypeReasoning, ReasoningContent: text}
+}
+
 // fakeAdapter implements model.Adapter with a configurable chunk sequence.
 type fakeAdapter struct {
 	chunks          []model.Chunk
@@ -381,15 +385,16 @@ func TestRunLoop_cancellation(t *testing.T) {
 	select {
 	case err := <-errCh:
 		if err != context.Canceled {
-			t.Logf("RunLoop returned error: %v", err)
+			// Stream may complete before cancel() takes effect —
+			// not a bug, just a test timing artifact.
+			t.Logf("RunLoop returned non-cancel error: %v", err)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("RunLoop did not respond to cancellation")
 	}
 }
 
-
-func TestRunLoop_usageEvent(t *testing.T) {
+func TestRunLoop_reasoningChunk(t *testing.T) {
 	ctx := context.Background()
 	ch := make(chan events.Event, 64)
 
@@ -443,6 +448,65 @@ func TestRunLoop_usageEvent(t *testing.T) {
 			}
 		case <-timeout:
 			t.Fatal("timeout waiting for events")
+		}
+	}
+}
+
+func TestRunLoop_reasoningContent(t *testing.T) {
+	ctx := context.Background()
+	ch := make(chan events.Event, 64)
+	defer close(ch)
+
+	adapter := &fakeAdapter{chunks: []model.Chunk{
+		reasonChunk("I need to think about this step by step."),
+		reasonChunk("First, I'll analyze the problem."),
+		textChunk("The answer is 42."),
+		finishChunk("stop"),
+	}}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, stopReason, err := RunLoop(
+			ctx, adapter, "test-model", 1024,
+			[]model.Message{{Role: model.RoleUser, Content: "hi"}},
+			nil, "", ch, nil,
+		)
+		if err != nil {
+			t.Errorf("RunLoop error: %v", err)
+		}
+		if stopReason != "end_turn" {
+			t.Errorf("stopReason = %q, want %q", stopReason, "end_turn")
+		}
+	}()
+
+	thoughtCount := 0
+	for {
+		select {
+		case evt, ok := <-ch:
+			if !ok {
+				if thoughtCount != 2 {
+					t.Errorf("expected 2 thought_chunk events, got %d", thoughtCount)
+				}
+				return
+			}
+			if evt.Event == "agent.thought_chunk" {
+				thoughtCount++
+			}
+		case <-done:
+			for {
+				select {
+				case evt := <-ch:
+					if evt.Event == "agent.thought_chunk" {
+						thoughtCount++
+					}
+				default:
+					if thoughtCount != 2 {
+						t.Errorf("expected 2 thought_chunk events, got %d", thoughtCount)
+					}
+					return
+				}
+			}
 		}
 	}
 }

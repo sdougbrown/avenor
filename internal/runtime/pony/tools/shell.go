@@ -32,7 +32,7 @@ func (c *cappedWriter) Write(p []byte) (int, error) {
 }
 
 var allowedShellCommands = []string{
-	"go", "git", "make", "mise", "npm", "bun", "node", "curl",
+	"go", "git", "make", "mise", "npm", "bun", "node",
 	"ls", "cat", "echo", "grep", "find", "head", "tail", "wc",
 	"sort", "uniq", "diff", "mkdir", "rmdir", "cp", "mv", "rm",
 	"chmod", "date", "pwd", "which", "test", "python", "python3",
