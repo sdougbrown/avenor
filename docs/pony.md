@@ -4,6 +4,35 @@ When you need a self-contained agent that doesn't depend on Node, Bun, or a sepa
 
 Previously, Avenor required an external agent process (like OpenCode or Codex) to handle the model loop. This created a dependency on the runtime environment of those external processes. Pony removes that boundary by running the model loop directly inside the Avenor binary.
 
+## Endpoint Configuration
+
+The config file needs two top-level fields to connect to a model provider:
+
+- **`base_url`** — The full URL of an OpenAI-compatible endpoint. This works with Ollama, LM Studio, OpenRouter, vLLM, and anything that exposes a `/v1/chat/completions` route. The adapter appends `/chat/completions` automatically, so `http://localhost:4000/v1` and `http://localhost:4000` both work.
+- **`api_key_env`** — The name of an environment variable that holds the API key. Pony reads it with `os.Getenv` at startup. It does not read from files or support path-based references like `os.environ/KEY_NAME`.
+
+  ```json
+  {
+    "base_url": "http://localhost:11434/v1",
+    "api_key_env": "OLLAMA_API_KEY"
+  }
+  ```
+
+  Then set the variable before running:
+
+  ```bash
+  export OLLAMA_API_KEY="sk-..."
+  avenor --backend pony --pony-config pony.json --agent mule --prompt "hello"
+  ```
+
+  For local endpoints that don't require authentication, set the var to any value:
+
+  ```bash
+  export OLLAMA_API_KEY="sk-no-auth"
+  ```
+
+  Or use the `AVENOR_PONY_API_KEY` convention from earlier smoke tests. The key point: an empty or unset variable sends `Authorization: Bearer ` with a trailing space, which some servers reject. Always set it to something, even a dummy value.
+
 ## Agent Profiles
 
 Pony is configured via a JSON file. Instead of a single global setting, you define named **profiles**. Each profile specifies its own model, system prompt, initial prompt, and which tools are allowed to run.
