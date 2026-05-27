@@ -5,17 +5,41 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 	"time"
 )
 
+// cappedWriter is an io.Writer that stops writing after limit bytes.
+type cappedWriter struct {
+	w     io.Writer
+	limit int
+	written int
+}
+
+func (c *cappedWriter) Write(p []byte) (int, error) {
+	remaining := c.limit - c.written
+	if remaining <= 0 {
+		return len(p), nil // silently discard
+	}
+	if len(p) > remaining {
+		p = p[:remaining]
+	}
+	n, err := c.w.Write(p)
+	c.written += n
+	return len(p), err // report full length to avoid short-write errors upstream
+}
+
 var allowedShellCommands = []string{
 	"go", "git", "make", "mise", "npm", "bun", "node", "curl",
 	"ls", "cat", "echo", "grep", "find", "head", "tail", "wc",
 	"sort", "uniq", "diff", "mkdir", "rmdir", "cp", "mv", "rm",
-	"chmod", "date", "pwd", "which", "test",
+	"chmod", "date", "pwd", "which", "test", "python", "python3",
 }
+
+// maxShellOutput is the maximum bytes read from command stdout/stderr.
+const maxShellOutput = 256 << 10 // 256 KB
 
 func isCommandAllowed(cmd string) bool {
 	for _, allowed := range allowedShellCommands {
@@ -39,7 +63,7 @@ type shellInput struct {
 func (t *ShellTool) Name() string { return "shell" }
 
 func (t *ShellTool) Description() string {
-	return "Run a shell command and return its output. Commands are executed in the working directory with a 30-second timeout. Use this for git operations, build commands, and other CLI tools."
+	return "Run a command and return its output. Commands are executed directly (no shell interpreter), so pipes and redirects do not work. Use git, go, and other tools individually. 30-second timeout, output capped at 256KB."
 }
 
 func (t *ShellTool) Schema() json.RawMessage {
@@ -64,21 +88,26 @@ func (t *ShellTool) Execute(ctx context.Context, workingDir string, args json.Ra
 		return "", fmt.Errorf("shell: command is required")
 	}
 
-	// Allowlist check: only known-safe base commands
-	baseCmd, _, _ := strings.Cut(input.Command, " ")
-	if !isCommandAllowed(baseCmd) {
-		return "", fmt.Errorf("shell: command %q is not in the allowed list", baseCmd)
+	// Split into command + args. No shell interpreter is involved — the binary
+	// is executed directly. This prevents shell injection entirely.
+	parts := strings.Fields(input.Command)
+	if len(parts) == 0 {
+		return "", fmt.Errorf("shell: command is required")
+	}
+	if !isCommandAllowed(parts[0]) {
+		return "", fmt.Errorf("shell: command %q is not in the allowed list", parts[0])
 	}
 
 	cmdCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(cmdCtx, "sh", "-c", input.Command)
+	cmd := exec.CommandContext(cmdCtx, parts[0], parts[1:]...)
 	cmd.Dir = workingDir
 
+	// Cap output to prevent runaway output
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	cmd.Stdout = &cappedWriter{w: &stdout, limit: maxShellOutput}
+	cmd.Stderr = &cappedWriter{w: &stderr, limit: maxShellOutput}
 
 	if err := cmd.Run(); err != nil {
 		output := strings.TrimSpace(stdout.String())
