@@ -197,3 +197,59 @@ func TestRegistry(t *testing.T) {
 		}
 	})
 }
+
+func TestSafeResolvePath(t *testing.T) {
+	t.Run("allows relative path inside working directory", func(t *testing.T) {
+		workDir := t.TempDir()
+		target := filepath.Join(workDir, "nested", "file.txt")
+		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, []byte("ok"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		resolved, err := safeResolvePath(workDir, nil, filepath.Join("nested", "file.txt"))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if resolved != target {
+			t.Fatalf("expected %q, got %q", target, resolved)
+		}
+	})
+
+	t.Run("rejects symlink escape for new file writes", func(t *testing.T) {
+		workDir := t.TempDir()
+		escapeRoot := t.TempDir()
+		linkPath := filepath.Join(workDir, "link")
+		if err := os.Symlink(escapeRoot, linkPath); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := safeResolvePath(workDir, nil, filepath.Join("link", "newfile.txt"))
+		if err == nil {
+			t.Fatal("expected symlink escape to be rejected")
+		}
+	})
+
+	t.Run("allows symlink target inside additional dir for reads", func(t *testing.T) {
+		workDir := t.TempDir()
+		allowedDir := t.TempDir()
+		linkPath := filepath.Join(workDir, "skill-link")
+		if err := os.Symlink(allowedDir, linkPath); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(allowedDir, "skill.md")
+		if err := os.WriteFile(target, []byte("skill"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		resolved, err := safeResolvePath(workDir, []string{allowedDir}, filepath.Join("skill-link", "skill.md"))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if resolved != target {
+			t.Fatalf("expected %q, got %q", target, resolved)
+		}
+	})
+}
