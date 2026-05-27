@@ -260,6 +260,12 @@ func executeToolCall(ctx context.Context, reg *tools.Registry, workingDir string
 		if findingFields, err := tools.FindingResult(args); err == nil {
 			findingFields["tool_call_id"] = acc.id
 			emit(eventCh, "finding.report", findingFields)
+		} else {
+			emit(eventCh, "finding.report", map[string]any{
+				"tool_call_id": acc.id,
+				"is_error":     true,
+				"message":      fmt.Sprintf("parse finding result: %v", err),
+			})
 		}
 	}
 

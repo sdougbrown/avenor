@@ -356,11 +356,15 @@ func (p *Provider) AnswerPermission(ctx context.Context, sessionID string, reque
 		return fmt.Errorf("requestID mismatch: got %q, pending %q", requestID, pendingID)
 	}
 
+	// Non-blocking send: if the approval checker has already consumed the
+	// response (or its context was cancelled and it stopped listening), the
+	// send fails without blocking. This prevents goroutine leaks from
+	// duplicate or stale AnswerPermission calls.
 	select {
 	case respond <- response:
 		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+	default:
+		return fmt.Errorf("permission request %q is no longer pending", requestID)
 	}
 }
 

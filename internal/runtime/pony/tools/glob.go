@@ -80,10 +80,15 @@ func (t *GlobTool) Execute(ctx context.Context, workingDir string, args json.Raw
 
 	var relPaths []string
 	for _, m := range matches {
-		relPath, err := filepath.Rel(wdAbs, m)
+		// Resolve symlinks so the containment check uses the physical path.
+		resolved, err := filepath.EvalSymlinks(m)
+		if err != nil {
+			continue
+		}
+		relPath, err := filepath.Rel(wdAbs, resolved)
 		if err != nil || strings.HasPrefix(relPath, "..") {
 			// Check against additional allowed dirs
-			if rel := IsPathInAllowedDirs(m, AllowedDirsFromContext(ctx)); rel != "" {
+			if rel := IsPathInAllowedDirs(resolved, AllowedDirsFromContext(ctx)); rel != "" {
 				relPath = rel
 			} else {
 				continue

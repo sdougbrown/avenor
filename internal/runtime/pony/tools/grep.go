@@ -95,21 +95,28 @@ func (t *GrepTool) Execute(ctx context.Context, workingDir string, args json.Raw
 
 	var results []string
 	for _, matchFile := range matches {
-		info, err := os.Stat(matchFile)
+		// Resolve symlinks to prevent symlink-based sandbox escape.
+		// The resolved (physical) path is used for containment checks and file IO.
+		resolved, err := filepath.EvalSymlinks(matchFile)
+		if err != nil {
+			continue
+		}
+		info, err := os.Stat(resolved)
 		if err != nil || info.IsDir() {
 			continue
 		}
-		f, err := os.Open(matchFile)
+		f, err := os.Open(resolved)
 		if err != nil {
 			continue
 		}
 
-		relPath, err := filepath.Rel(wdAbs, matchFile)
+		relPath, err := filepath.Rel(wdAbs, resolved)
 		if err != nil || strings.HasPrefix(relPath, "..") {
 			// Check against additional allowed dirs
-			if rel := IsPathInAllowedDirs(matchFile, AllowedDirsFromContext(ctx)); rel != "" {
+			if rel := IsPathInAllowedDirs(resolved, AllowedDirsFromContext(ctx)); rel != "" {
 				relPath = rel
 			} else {
+				f.Close()
 				continue
 			}
 		}
