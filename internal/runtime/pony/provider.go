@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
@@ -46,8 +47,9 @@ type OrchestratorExecutor interface {
 type Provider struct {
 	cfg Config
 
-	mu       sync.Mutex
-	sessions map[string]*sessionState
+	mu             sync.Mutex
+	sessions       map[string]*sessionState
+	sessionCounter atomic.Int64
 }
 
 var _ runtime.Provider = (*Provider)(nil)
@@ -106,6 +108,11 @@ func NewWithOptions(opts runtime.StartOptions) *Provider {
 	}
 	// Clone config and apply StartOptions overrides
 	pcfg := *cfg
+	// Deep copy mutable fields
+	if len(cfg.StopConditions) > 0 {
+		pcfg.StopConditions = make([]StopCondition, len(cfg.StopConditions))
+		copy(pcfg.StopConditions, cfg.StopConditions)
+	}
 	pcfg.WorkingDir = opts.Dir
 	if opts.Model != "" {
 		pcfg.Model = opts.Model
@@ -114,8 +121,9 @@ func NewWithOptions(opts runtime.StartOptions) *Provider {
 }
 
 func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtime.Session, error) {
-	// Generate a session ID
-	sessionID := fmt.Sprintf("pony_%d", len(p.sessions)+1)
+	// Generate a unique session ID
+	id := p.sessionCounter.Add(1)
+	sessionID := fmt.Sprintf("pony_%d", id)
 
 	ss := newSessionState()
 	ss.mu.Lock()

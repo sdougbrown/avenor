@@ -7,7 +7,24 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 )
+
+var allowedShellCommands = []string{
+	"go", "git", "make", "mise", "npm", "bun", "node", "curl",
+	"ls", "cat", "echo", "grep", "find", "head", "tail", "wc",
+	"sort", "uniq", "diff", "mkdir", "rmdir", "cp", "mv", "rm",
+	"chmod", "date", "pwd", "which", "test",
+}
+
+func isCommandAllowed(cmd string) bool {
+	for _, allowed := range allowedShellCommands {
+		if cmd == allowed {
+			return true
+		}
+	}
+	return false
+}
 
 func NewShellTool() Tool {
 	return &ShellTool{}
@@ -47,7 +64,13 @@ func (t *ShellTool) Execute(ctx context.Context, workingDir string, args json.Ra
 		return "", fmt.Errorf("shell: command is required")
 	}
 
-	cmdCtx, cancel := context.WithTimeout(ctx, 30*1000*1000*1000)
+	// Allowlist check: only known-safe base commands
+	baseCmd, _, _ := strings.Cut(input.Command, " ")
+	if !isCommandAllowed(baseCmd) {
+		return "", fmt.Errorf("shell: command %q is not in the allowed list", baseCmd)
+	}
+
+	cmdCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(cmdCtx, "sh", "-c", input.Command)

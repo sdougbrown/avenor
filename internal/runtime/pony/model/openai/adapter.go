@@ -19,12 +19,12 @@ type Adapter struct {
 	baseEndpoint string
 }
 
-func New(cfg Config) *Adapter {
+func New(cfg Config) (*Adapter, error) {
 	baseURL := cfg.BaseURL
 	baseURL = strings.TrimRight(baseURL, "/")
 
 	if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
-		panic(fmt.Sprintf("openai adapter: invalid base_url scheme: %s (must be http:// or https://)", baseURL))
+		return nil, fmt.Errorf("openai adapter: invalid base_url scheme: %s (must be http:// or https://)", baseURL)
 	}
 
 	if !strings.Contains(baseURL, "/v1") {
@@ -41,7 +41,7 @@ func New(cfg Config) *Adapter {
 		cfg:          cfg,
 		httpClient:   client,
 		baseEndpoint: baseURL,
-	}
+	}, nil
 }
 
 func (a *Adapter) Name() string {
@@ -79,7 +79,7 @@ func (a *Adapter) Stream(ctx context.Context, req model.Request) (<-chan model.C
 
 		if httpResp.StatusCode != http.StatusOK {
 			errMsg := fmt.Sprintf("HTTP %d", httpResp.StatusCode)
-			bodyBytes, _ := io.ReadAll(httpResp.Body)
+			bodyBytes, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1<<20))
 			if len(bodyBytes) > 0 {
 				errMsg = string(bodyBytes)
 			}

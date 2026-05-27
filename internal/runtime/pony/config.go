@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 
 	"github.com/sdougbrown/avenor/client"
 )
@@ -61,13 +62,18 @@ func (c *PonyConfig) ResolveProfile(name string) (*Profile, error) {
 		name = c.DefaultAgent
 	}
 	if name == "" {
-		// Use the first profile
-		for _, p := range c.Profiles {
-			prof := p
-			if prof.MaxTokens <= 0 {
-				prof.MaxTokens = 4096
+		// Sort keys for deterministic fallback
+		keys := make([]string, 0, len(c.Profiles))
+		for k := range c.Profiles {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			p := c.Profiles[k]
+			if p.MaxTokens <= 0 {
+				p.MaxTokens = 4096
 			}
-			return &prof, nil
+			return &p, nil
 		}
 	}
 	p, ok := c.Profiles[name]

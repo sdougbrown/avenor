@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -61,10 +63,20 @@ func safeResolvePath(workingDir, target string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// Resolve symlinks to prevent symlink-based escapes
+	// Resolve symlinks to prevent symlink-based escapes.
+	// For paths that don't exist yet (new file writes), resolve the parent instead.
 	safePath, err := filepath.EvalSymlinks(absPath)
 	if err != nil {
-		return "", err
+		if os.IsNotExist(err) {
+			parent := filepath.Dir(absPath)
+			parentSafe, err := filepath.EvalSymlinks(parent)
+			if err != nil {
+				return "", err
+			}
+			safePath = filepath.Join(parentSafe, filepath.Base(absPath))
+		} else {
+			return "", err
+		}
 	}
 	wdAbs, err := filepath.Abs(workingDir)
 	if err != nil {
@@ -79,9 +91,14 @@ func safeResolvePath(workingDir, target string) (string, error) {
 
 // AllTools returns all registered tools.
 func (r *Registry) AllTools() []Tool {
-	result := make([]Tool, 0, len(r.tools))
-	for _, t := range r.tools {
-		result = append(result, t)
+	names := make([]string, 0, len(r.tools))
+	for n := range r.tools {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	result := make([]Tool, 0, len(names))
+	for _, n := range names {
+		result = append(result, r.tools[n])
 	}
 	return result
 }

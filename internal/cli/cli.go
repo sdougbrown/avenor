@@ -164,10 +164,14 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			return exitWithSentinel(1)
 		}
 
-		adapter := openai.New(openai.Config{
+		adapter, err := openai.New(openai.Config{
 			BaseURL: ponyCfg.BaseURL,
 			APIKey:  os.Getenv(ponyCfg.APIKeyEnv),
 		})
+		if err != nil {
+			fmt.Fprintf(stderr, "avenor: %v\n", err)
+			return exitWithSentinel(1)
+		}
 
 		var executor pony.OrchestratorExecutor
 		if profile.Tools.Orchestration && *controlSocket != "" {

@@ -83,35 +83,6 @@ func (f *fakeAdapter) Stream(ctx context.Context, req model.Request) (<-chan mod
 	return ch, nil
 }
 
-// fakeDisposableAdapter is like fakeAdapter but creates a fresh context per Stream call
-// so previous goroutines don't leak when LoopWithRetry retries.
-type fakeDisposableAdapter struct {
-	sequences   [][]model.Chunk
-	callCount   int
-}
-
-func (f *fakeDisposableAdapter) Name() string { return "fake" }
-
-func (f *fakeDisposableAdapter) Stream(ctx context.Context, req model.Request) (<-chan model.Chunk, error) {
-	idx := f.callCount
-	f.callCount++
-	ch := make(chan model.Chunk)
-	go func() {
-		defer close(ch)
-		if idx >= len(f.sequences) {
-			return
-		}
-		seq := f.sequences[idx]
-		for _, c := range seq {
-			select {
-			case <-ctx.Done():
-				return
-			case ch <- c:
-			}
-		}
-	}()
-	return ch, nil
-}
 
 
 // fakeExecutor implements OrchestratorExecutor for orchestration tool tests.

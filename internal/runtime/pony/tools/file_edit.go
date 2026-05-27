@@ -77,7 +77,12 @@ func (t *FileEditTool) Execute(ctx context.Context, workingDir string, args json
 		return "", fmt.Errorf("file_edit: old_string not found in file")
 	}
 
-	if err := os.WriteFile(safePath, []byte(newContent), 0644); err != nil {
+	// Preserve original file permissions
+	perm := os.FileMode(0644)
+	if fi, err := os.Stat(safePath); err == nil {
+		perm = fi.Mode().Perm()
+	}
+	if err := os.WriteFile(safePath, []byte(newContent), perm); err != nil {
 		return "", fmt.Errorf("file_edit: write file: %w", err)
 	}
 

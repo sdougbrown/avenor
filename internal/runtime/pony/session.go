@@ -16,7 +16,8 @@ type sessionState struct {
 	cancel     context.CancelFunc // cancels the in-flight Prompt call
 	subs       []chan events.Event
 	subsMu     sync.Mutex
-	initialised bool // true after Start has set up history
+	initialised  bool // true after Start has set up history
+	droppedEvents int // count of events dropped due to full subscriber channels
 }
 
 func newSessionState() *sessionState {

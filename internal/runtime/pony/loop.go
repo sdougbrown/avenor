@@ -123,7 +123,15 @@ turnLoop:
 					msg := buildAssistantMsg(assistantContent.String(), accumulators)
 					history = append(history, msg)
 
-					for _, acc := range accumulators {
+					// Sort by index for deterministic execution order
+					indices := make([]int, 0, len(accumulators))
+					for idx := range accumulators {
+						indices = append(indices, idx)
+					}
+					sort.Ints(indices)
+
+					for _, idx := range indices {
+						acc := accumulators[idx]
 						result, err := executeToolCall(ctx, reg, workingDir, acc, eventCh)
 						toolResult := model.Message{
 							Role:       model.RoleTool,
@@ -173,6 +181,11 @@ turnLoop:
 			}
 		}
 
+		// Stream ended without a finish reason — preserve partial content
+		if assistantContent.Len() > 0 || len(accumulators) > 0 {
+			msg := buildAssistantMsg(assistantContent.String(), accumulators)
+			history = append(history, msg)
+		}
 		return history, "error", fmt.Errorf("stream ended unexpectedly")
 	}
 }
