@@ -103,8 +103,15 @@ func (a *Adapter) buildRequestBody(req model.Request) (io.Reader, error) {
 	for i, m := range req.Messages {
 		msg := openAIMessage{
 			Role:       string(m.Role),
-			Content:    m.Content,
 			ToolCallID: m.ToolCallID,
+		}
+		// Assistant messages with tool calls and no text content should omit content
+		// (OpenAI API convention). All other messages include content.
+		if m.Role == model.RoleAssistant && m.Content == "" && len(m.ToolCalls) > 0 {
+			msg.Content = nil
+		} else {
+			content := m.Content
+			msg.Content = &content
 		}
 		if len(m.ToolCalls) > 0 {
 			msg.ToolCalls = make([]openAIToolCallMessage, len(m.ToolCalls))
@@ -247,10 +254,10 @@ type openAIRequest struct {
 }
 
 type openAIMessage struct {
-	Role       string                  `json:"role"`
-	Content    string                  `json:"content,omitempty"`
-	ToolCallID string                  `json:"tool_call_id,omitempty"`
-	ToolCalls  []openAIToolCallMessage `json:"tool_calls,omitempty"`
+	Role       string                   `json:"role"`
+	Content    *string                  `json:"content,omitempty"`
+	ToolCallID string                   `json:"tool_call_id,omitempty"`
+	ToolCalls  []openAIToolCallMessage  `json:"tool_calls,omitempty"`
 }
 
 // openAIToolCallMessage is the full tool call structure for request messages.
