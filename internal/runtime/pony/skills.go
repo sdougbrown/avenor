@@ -29,8 +29,8 @@ func LoadSkills(configDir string, skillNames []string) ([]Skill, error) {
 	if configDir != "" {
 		dirs = append(dirs, filepath.Join(configDir, ".pony", "skills"))
 	}
-	home, _ := os.UserHomeDir()
-	if home != "" {
+	home, err := os.UserHomeDir()
+	if err == nil && home != "" {
 		dirs = append(dirs, filepath.Join(home, ".config", "avenor", "skills"))
 	}
 
