@@ -44,26 +44,20 @@ func (a *Adapter) Name() string {
 }
 
 func (a *Adapter) Stream(ctx context.Context, req model.Request) (<-chan model.Chunk, error) {
-	ch := make(chan model.Chunk)
+	ch := make(chan model.Chunk, 256)
 
 	go func() {
 		defer close(ch)
 
 		body, err := a.buildRequestBody(req)
 		if err != nil {
-			select {
-			case ch <- model.Chunk{Type: model.ChunkTypeError, Err: err}:
-			default:
-			}
+			ch <- model.Chunk{Type: model.ChunkTypeError, Err: err}
 			return
 		}
 
 		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, a.baseEndpoint, body)
 		if err != nil {
-			select {
-			case ch <- model.Chunk{Type: model.ChunkTypeError, Err: err}:
-			default:
-			}
+			ch <- model.Chunk{Type: model.ChunkTypeError, Err: err}
 			return
 		}
 
@@ -73,10 +67,7 @@ func (a *Adapter) Stream(ctx context.Context, req model.Request) (<-chan model.C
 
 		httpResp, err := a.httpClient.Do(httpReq)
 		if err != nil {
-			select {
-			case ch <- model.Chunk{Type: model.ChunkTypeError, Err: err}:
-			default:
-			}
+			ch <- model.Chunk{Type: model.ChunkTypeError, Err: err}
 			return
 		}
 		defer httpResp.Body.Close()
@@ -87,10 +78,7 @@ func (a *Adapter) Stream(ctx context.Context, req model.Request) (<-chan model.C
 			if len(bodyBytes) > 0 {
 				errMsg = string(bodyBytes)
 			}
-			select {
-			case ch <- model.Chunk{Type: model.ChunkTypeError, Err: fmt.Errorf("%s", errMsg)}:
-			default:
-			}
+			ch <- model.Chunk{Type: model.ChunkTypeError, Err: fmt.Errorf("%s", errMsg)}
 			return
 		}
 
@@ -113,12 +101,26 @@ func (a *Adapter) buildRequestBody(req model.Request) (io.Reader, error) {
 	}
 
 	for i, m := range req.Messages {
-		openaiReq.Messages[i] = openAIMessage{
+		msg := openAIMessage{
 			Role:       string(m.Role),
 			Content:    m.Content,
 			ToolCallID: m.ToolCallID,
-			ToolCalls:  m.ToolCalls,
 		}
+		if len(m.ToolCalls) > 0 {
+			msg.ToolCalls = make([]openAIToolCallMessage, len(m.ToolCalls))
+			for j, tc := range m.ToolCalls {
+				argsStr := string(tc.Arguments)
+				msg.ToolCalls[j] = openAIToolCallMessage{
+					ID:   tc.ID,
+					Type: "function",
+					Function: openAIToolCallFunc{
+						Name:      tc.Name,
+						Arguments: argsStr,
+					},
+				}
+			}
+		}
+		openaiReq.Messages[i] = msg
 	}
 
 	for i, t := range req.Tools {
@@ -141,6 +143,7 @@ func (a *Adapter) buildRequestBody(req model.Request) (io.Reader, error) {
 
 func (a *Adapter) parseSSE(ctx context.Context, reader io.Reader, ch chan<- model.Chunk) {
 	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		if ctx.Err() != nil {
 			return
@@ -160,10 +163,7 @@ func (a *Adapter) parseSSE(ctx context.Context, reader io.Reader, ch chan<- mode
 
 		var chunk openAIStreamChunk
 		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
-			select {
-			case ch <- model.Chunk{Type: model.ChunkTypeError, Err: fmt.Errorf("failed to parse SSE chunk: %w", err)}:
-			default:
-			}
+			ch <- model.Chunk{Type: model.ChunkTypeError, Err: fmt.Errorf("failed to parse SSE chunk: %w", err)}
 			return
 		}
 
@@ -186,12 +186,9 @@ func (a *Adapter) parseSSE(ctx context.Context, reader io.Reader, ch chan<- mode
 			}
 
 			if choice.FinishReason != nil && *choice.FinishReason != "" {
-				select {
-				case ch <- model.Chunk{
+				ch <- model.Chunk{
 					Type:   model.ChunkTypeFinish,
 					Finish: &model.FinishReason{Reason: *choice.FinishReason},
-				}:
-				default:
 				}
 			}
 
@@ -200,10 +197,7 @@ func (a *Adapter) parseSSE(ctx context.Context, reader io.Reader, ch chan<- mode
 	}
 
 	if err := scanner.Err(); err != nil {
-		select {
-		case ch <- model.Chunk{Type: model.ChunkTypeError, Err: fmt.Errorf("SSE scan error: %w", err)}:
-		default:
-		}
+		ch <- model.Chunk{Type: model.ChunkTypeError, Err: fmt.Errorf("SSE scan error: %w", err)}
 		return
 	}
 }
@@ -253,10 +247,24 @@ type openAIRequest struct {
 }
 
 type openAIMessage struct {
-	Role       string                 `json:"role"`
-	Content    string                 `json:"content"`
-	ToolCallID string                 `json:"tool_call_id,omitempty"`
-	ToolCalls  []model.ToolCall       `json:"tool_calls,omitempty"`
+	Role       string                  `json:"role"`
+	Content    string                  `json:"content,omitempty"`
+	ToolCallID string                  `json:"tool_call_id,omitempty"`
+	ToolCalls  []openAIToolCallMessage `json:"tool_calls,omitempty"`
+}
+
+// openAIToolCallMessage is the full tool call structure for request messages.
+// OpenAI API requires type:"function" and a nested function object with
+// name and arguments (JSON-encoded string).
+type openAIToolCallMessage struct {
+	ID       string               `json:"id"`
+	Type     string               `json:"type"`
+	Function openAIToolCallFunc   `json:"function"`
+}
+
+type openAIToolCallFunc struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"` // JSON-encoded string, e.g. "{\"path\":\"file.txt\"}"
 }
 
 type openAITool struct {

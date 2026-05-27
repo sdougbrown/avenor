@@ -46,6 +46,7 @@ type fakeAdapter struct {
 	chunkDelay      time.Duration
 	callCount       int
 	mutualExclusion bool // when true, use atomic counter for thread-safe call counting
+	streamFunc      func(ctx context.Context, req model.Request) (<-chan model.Chunk, error)
 }
 
 var adapterCallCount int64
@@ -53,6 +54,9 @@ var adapterCallCount int64
 func (f *fakeAdapter) Name() string { return "fake" }
 
 func (f *fakeAdapter) Stream(ctx context.Context, req model.Request) (<-chan model.Chunk, error) {
+	if f.streamFunc != nil {
+		return f.streamFunc(ctx, req)
+	}
 	if f.mutualExclusion {
 		atomic.AddInt64(&adapterCallCount, 1)
 	} else {
@@ -69,6 +73,36 @@ func (f *fakeAdapter) Stream(ctx context.Context, req model.Request) (<-chan mod
 				if f.chunkDelay > 0 {
 					time.Sleep(f.chunkDelay)
 				}
+			}
+		}
+	}()
+	return ch, nil
+}
+
+// fakeDisposableAdapter is like fakeAdapter but creates a fresh context per Stream call
+// so previous goroutines don't leak when LoopWithRetry retries.
+type fakeDisposableAdapter struct {
+	sequences   [][]model.Chunk
+	callCount   int
+}
+
+func (f *fakeDisposableAdapter) Name() string { return "fake" }
+
+func (f *fakeDisposableAdapter) Stream(ctx context.Context, req model.Request) (<-chan model.Chunk, error) {
+	idx := f.callCount
+	f.callCount++
+	ch := make(chan model.Chunk)
+	go func() {
+		defer close(ch)
+		if idx >= len(f.sequences) {
+			return
+		}
+		seq := f.sequences[idx]
+		for _, c := range seq {
+			select {
+			case <-ctx.Done():
+				return
+			case ch <- c:
 			}
 		}
 	}()
@@ -201,13 +235,28 @@ func TestRunLoop_textToolCalls_stop(t *testing.T) {
 	defer close(ch)
 	tmpDir := t.TempDir()
 
-	adapter := &fakeAdapter{chunks: []model.Chunk{
-		toolCallChunk("tc1", "file_read", json.RawMessage(`{"path":"go.mod"}`), 0),
-		textChunk(""),
-		finishChunk("tool_calls"),
-		textChunk("done"),
-		finishChunk("stop"),
-	}}
+	// Step-based fake adapter: different chunks per Stream call
+	type stepAdapter struct{ callCount int }
+	sa := &stepAdapter{}
+	adapter := &fakeAdapter{
+		mutualExclusion: true, // prevent concurrent modification
+	}
+	adapter.streamFunc = func(ctx context.Context, req model.Request) (<-chan model.Chunk, error) {
+		sa.callCount++
+		chunks := make(chan model.Chunk, 4)
+		go func() {
+			defer close(chunks)
+			if sa.callCount == 1 {
+				chunks <- toolCallChunk("tc1", "file_read", json.RawMessage(`{"path":"go.mod"}`), 0)
+				chunks <- textChunk("")
+				chunks <- finishChunk("tool_calls")
+			} else {
+				chunks <- textChunk("done")
+				chunks <- finishChunk("stop")
+			}
+		}()
+		return chunks, nil
+	}
 
 	history := []model.Message{{Role: model.RoleUser, Content: "read go.mod"}}
 
@@ -249,12 +298,23 @@ func TestRunLoop_toolExecuteError(t *testing.T) {
 	defer close(ch)
 	tmpDir := t.TempDir()
 
-	adapter := &fakeAdapter{chunks: []model.Chunk{
-		toolCallChunk("tc1", "file_read", json.RawMessage(`{"path":"nonexistent.txt"}`), 0),
-		finishChunk("tool_calls"),
-		textChunk("error handled"),
-		finishChunk("stop"),
-	}}
+	callNum := 0
+	adapter := &fakeAdapter{}
+	adapter.streamFunc = func(ctx context.Context, req model.Request) (<-chan model.Chunk, error) {
+		callNum++
+		ch := make(chan model.Chunk, 4)
+		go func() {
+			defer close(ch)
+			if callNum == 1 {
+				ch <- toolCallChunk("tc1", "file_read", json.RawMessage(`{"path":"nonexistent.txt"}`), 0)
+				ch <- finishChunk("tool_calls")
+			} else {
+				ch <- textChunk("error handled")
+				ch <- finishChunk("stop")
+			}
+		}()
+		return ch, nil
+	}
 
 	history := []model.Message{{Role: model.RoleUser, Content: "read nonexistent"}}
 
@@ -445,13 +505,24 @@ func TestRunLoop_multipleToolCalls(t *testing.T) {
 	defer close(ch)
 	tmpDir := t.TempDir()
 
-	adapter := &fakeAdapter{chunks: []model.Chunk{
-		toolCallChunk("tc1", "file_read", json.RawMessage(`{"path":"go.mod"}`), 0),
-		toolCallChunk("tc2", "file_read", json.RawMessage(`{"path":"go.sum"}`), 1),
-		finishChunk("tool_calls"),
-		textChunk("done"),
-		finishChunk("stop"),
-	}}
+	callNum := 0
+	adapter := &fakeAdapter{}
+	adapter.streamFunc = func(ctx context.Context, req model.Request) (<-chan model.Chunk, error) {
+		callNum++
+		ch := make(chan model.Chunk, 4)
+		go func() {
+			defer close(ch)
+			if callNum == 1 {
+				ch <- toolCallChunk("tc1", "file_read", json.RawMessage(`{"path":"go.mod"}`), 0)
+				ch <- toolCallChunk("tc2", "file_read", json.RawMessage(`{"path":"go.sum"}`), 1)
+				ch <- finishChunk("tool_calls")
+			} else {
+				ch <- textChunk("done")
+				ch <- finishChunk("stop")
+			}
+		}()
+		return ch, nil
+	}
 
 	history := []model.Message{{Role: model.RoleUser, Content: "read files"}}
 
@@ -1003,12 +1074,23 @@ func TestRunLoop_e2e_fileRead(t *testing.T) {
 		t.Fatalf("write test file: %v", err)
 	}
 
-	adapter := &fakeAdapter{chunks: []model.Chunk{
-		toolCallChunk("tc1", "file_read", json.RawMessage(`{"path":"main.go"}`), 0),
-		finishChunk("tool_calls"),
-		textChunk("read it"),
-		finishChunk("stop"),
-	}}
+	callNum := 0
+	adapter := &fakeAdapter{}
+	adapter.streamFunc = func(ctx context.Context, req model.Request) (<-chan model.Chunk, error) {
+		callNum++
+		ch := make(chan model.Chunk, 4)
+		go func() {
+			defer close(ch)
+			if callNum == 1 {
+				ch <- toolCallChunk("tc1", "file_read", json.RawMessage(`{"path":"main.go"}`), 0)
+				ch <- finishChunk("tool_calls")
+			} else {
+				ch <- textChunk("read it")
+				ch <- finishChunk("stop")
+			}
+		}()
+		return ch, nil
+	}
 
 	history := []model.Message{{Role: model.RoleUser, Content: "read main.go"}}
 

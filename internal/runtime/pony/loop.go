@@ -55,6 +55,7 @@ func RunLoop(
 
 	toolDefs := buildToolDefs(reg)
 
+turnLoop:
 	for turn := 0; ; turn++ {
 		req := model.Request{
 			Model:     modelName,
@@ -141,7 +142,7 @@ func RunLoop(
 						return history, "end_turn", nil
 					}
 
-					break
+					continue turnLoop
 
 				case "length":
 					msg := buildAssistantMsg(assistantContent.String(), nil)
