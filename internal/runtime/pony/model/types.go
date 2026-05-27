@@ -39,6 +39,7 @@ type ChunkType string
 
 const (
 	ChunkTypeText          ChunkType = "text"
+	ChunkTypeReasoning     ChunkType = "reasoning"
 	ChunkTypeToolCallDelta ChunkType = "tool_call_delta"
 	ChunkTypeFinish        ChunkType = "finish"
 	ChunkTypeError         ChunkType = "error"
@@ -75,10 +76,11 @@ type Request struct {
 
 // Chunk is a single item from the adapter's stream channel.
 type Chunk struct {
-	Type     ChunkType       `json:"type"`
-	Text     string          `json:"text,omitempty"`
-	ToolCall *ToolCallDelta  `json:"tool_call,omitempty"`
-	Finish   *FinishReason   `json:"finish,omitempty"`
-	Usage    *Usage          `json:"usage,omitempty"`
-	Err      error           `json:"-"`
+	Type             ChunkType       `json:"type"`
+	Text             string          `json:"text,omitempty"`
+	ReasoningContent string          `json:"reasoning_content,omitempty"`
+	ToolCall         *ToolCallDelta  `json:"tool_call,omitempty"`
+	Finish           *FinishReason   `json:"finish,omitempty"`
+	Usage            *Usage          `json:"usage,omitempty"`
+	Err              error           `json:"-"`
 }

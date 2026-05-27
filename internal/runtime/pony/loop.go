@@ -87,6 +87,9 @@ turnLoop:
 				assistantContent.WriteString(chunk.Text)
 				emit(eventCh, "agent.message_chunk", map[string]any{"delta": chunk.Text})
 
+			case model.ChunkTypeReasoning:
+				emit(eventCh, "agent.thought_chunk", map[string]any{"delta": chunk.ReasoningContent})
+
 			case model.ChunkTypeToolCallDelta:
 				tc := chunk.ToolCall
 				if tc == nil {

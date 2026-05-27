@@ -221,6 +221,13 @@ func (p *payloadParser) processDelta(delta openAIDelta) {
 		}
 	}
 
+	if delta.ReasoningContent != "" {
+		select {
+		case p.ch <- model.Chunk{Type: model.ChunkTypeReasoning, ReasoningContent: delta.ReasoningContent}:
+		default:
+		}
+	}
+
 	for _, tc := range delta.ToolCalls {
 		tcd := &model.ToolCallDelta{
 			Index: tc.Index,
@@ -300,9 +307,10 @@ type openAIChoice struct {
 }
 
 type openAIDelta struct {
-	Role      string         `json:"role,omitempty"`
-	Content   string         `json:"content,omitempty"`
-	ToolCalls []openAIToolCall `json:"tool_calls,omitempty"`
+	Role              string           `json:"role,omitempty"`
+	Content           string           `json:"content,omitempty"`
+	ReasoningContent  string           `json:"reasoning_content,omitempty"`
+	ToolCalls         []openAIToolCall `json:"tool_calls,omitempty"`
 }
 
 type openAIToolCall struct {
