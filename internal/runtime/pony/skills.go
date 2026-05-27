@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Skill is a reusable prompt component loaded from a skill file.
@@ -19,6 +20,11 @@ type Skill struct {
 //  1. $PONY_SKILLS_DIR env var
 //  2. .pony/skills/ next to the config file
 //  3. ~/.config/avenor/skills/
+//
+// Skill files can be JSON (.json) or Markdown (.md).
+// JSON format: {"system_prompt": "...", "initial_prompt": "..."}
+// MD format: first section after frontmatter is system_prompt,
+// second section (after ---) is initial_prompt.
 func LoadSkills(configDir string, skillNames []string) ([]Skill, error) {
 	if len(skillNames) == 0 {
 		return nil, nil
@@ -46,13 +52,8 @@ func LoadSkills(configDir string, skillNames []string) ([]Skill, error) {
 	for _, name := range skillNames {
 		found := false
 		for _, dir := range searchDirs {
-			path := filepath.Join(dir, name+".json")
-			data, err := os.ReadFile(path)
+			skill, err := loadSkillFile(dir, name)
 			if err != nil {
-				continue
-			}
-			var skill Skill
-			if err := json.Unmarshal(data, &skill); err != nil {
 				continue
 			}
 			skill.Name = name
@@ -65,6 +66,64 @@ func LoadSkills(configDir string, skillNames []string) ([]Skill, error) {
 		}
 	}
 	return skills, nil
+}
+
+// loadSkillFile tries to load a skill from a directory, trying .json then .md.
+func loadSkillFile(dir, name string) (Skill, error) {
+	// Try JSON first
+	path := filepath.Join(dir, name+".json")
+	data, err := os.ReadFile(path)
+	if err == nil {
+		var skill Skill
+		if err := json.Unmarshal(data, &skill); err == nil {
+			return skill, nil
+		}
+	}
+
+	// Try Markdown
+	path = filepath.Join(dir, name+".md")
+	data, err = os.ReadFile(path)
+	if err != nil {
+		return Skill{}, err
+	}
+
+	return parseSkillMarkdown(name, data)
+}
+
+// parseSkillMarkdown parses a markdown skill file.
+// Format:
+//
+//	First section after optional frontmatter → system_prompt
+//	Section after --- separator → initial_prompt
+func parseSkillMarkdown(name string, data []byte) (Skill, error) {
+	content := string(data)
+	skill := Skill{Name: name}
+
+	// Split on --- separators
+	sections := strings.Split(content, "---")
+	
+	// Filter out empty sections and strip whitespace
+	var parts []string
+	for _, s := range sections {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			parts = append(parts, s)
+		}
+	}
+
+	if len(parts) == 0 {
+		return skill, nil
+	}
+
+	// First non-empty section is system_prompt
+	skill.SystemPrompt = parts[0]
+
+	// Second non-empty section is initial_prompt
+	if len(parts) >= 2 {
+		skill.InitialPrompt = parts[1]
+	}
+
+	return skill, nil
 }
 
 // MergeSkills merges skill prompts into a profile's system_prompt and initial_prompt.
