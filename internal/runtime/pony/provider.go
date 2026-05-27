@@ -352,7 +352,7 @@ func (p *Provider) AnswerPermission(ctx context.Context, sessionID string, reque
 	if respond == nil {
 		return fmt.Errorf("no pending permission request for session %s", sessionID)
 	}
-	if requestID != "" && pendingID != "" && requestID != pendingID {
+	if requestID != pendingID {
 		return fmt.Errorf("requestID mismatch: got %q, pending %q", requestID, pendingID)
 	}
 
