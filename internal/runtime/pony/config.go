@@ -29,6 +29,9 @@ type Profile struct {
 	MaxTokens      int         `json:"max_tokens,omitempty"`
 	ToolApproval   ToolApproval `json:"tool_approval,omitempty"`
 	ShellConfig    *ShellConfig `json:"shell_config,omitempty"`
+	BaseURL        string      `json:"base_url,omitempty"`
+	APIKeyEnv      string      `json:"api_key_env,omitempty"`
+	Skills         []string    `json:"skills,omitempty"`       // skill names to load
 }
 
 // ToolGate controls which tool groups are enabled for a profile.

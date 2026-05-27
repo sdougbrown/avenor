@@ -72,6 +72,8 @@ func New(cfg Config) *Provider {
 			tools.NewShellToolWithConfig(cfg.ShellConfig),
 		)
 	}
+	// report_finding is always available — it emits structured events
+	toolList = append(toolList, tools.NewReportFindingTool())
 	if cfg.OrchTools && cfg.Executor != nil {
 		toolList = append(toolList, newOrchestrationTools(cfg.Executor)...)
 	}

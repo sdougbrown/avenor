@@ -255,6 +255,14 @@ func executeToolCall(ctx context.Context, reg *tools.Registry, workingDir string
 
 	args := json.RawMessage(acc.arguments.String())
 
+	// Emit structured finding events for report_finding tool
+	if acc.name == "report_finding" {
+		if findingFields, err := tools.FindingResult(args); err == nil {
+			findingFields["tool_call_id"] = acc.id
+			emit(eventCh, "finding.report", findingFields)
+		}
+	}
+
 	result, err := reg.Dispatch(ctx, workingDir, acc.name, args)
 	if err != nil {
 		emit(eventCh, "tool.result", map[string]any{

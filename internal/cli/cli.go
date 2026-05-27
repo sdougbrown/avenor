@@ -164,9 +164,19 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			return exitWithSentinel(1)
 		}
 
+		// Resolve base_url and api_key_env — profile overrides top-level
+		resolvedBaseURL := ponyCfg.BaseURL
+		resolvedAPIKeyEnv := ponyCfg.APIKeyEnv
+		if profile.BaseURL != "" {
+			resolvedBaseURL = profile.BaseURL
+		}
+		if profile.APIKeyEnv != "" {
+			resolvedAPIKeyEnv = profile.APIKeyEnv
+		}
+
 		adapter, err := openai.New(openai.Config{
-			BaseURL: ponyCfg.BaseURL,
-			APIKey:  os.Getenv(ponyCfg.APIKeyEnv),
+			BaseURL: resolvedBaseURL,
+			APIKey:  os.Getenv(resolvedAPIKeyEnv),
 		})
 		if err != nil {
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
@@ -183,12 +193,25 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			}
 		}
 
+		// Load skills and merge prompts
+		systemPrompt := profile.SystemPrompt
+		initialPrompt := profile.InitialPrompt
+		if len(profile.Skills) > 0 {
+			configDir := filepath.Dir(*ponyConfig)
+			skills, err := pony.LoadSkills(configDir, profile.Skills)
+			if err != nil {
+				fmt.Fprintf(stderr, "avenor: %v\n", err)
+				return exitWithSentinel(1)
+			}
+			systemPrompt, initialPrompt = pony.MergeSkills(systemPrompt, initialPrompt, skills)
+		}
+
 		pCfg := pony.Config{
 			Adapter:        adapter,
 			Model:          profile.Model,
 			MaxTokens:      profile.MaxTokens,
-			SystemPrompt:   profile.SystemPrompt,
-			InitialPrompt:  profile.InitialPrompt,
+			SystemPrompt:   systemPrompt,
+			InitialPrompt:  initialPrompt,
 			Executor:       executor,
 			LocalTools:     profile.Tools.Local,
 			OrchTools:      profile.Tools.Orchestration,
