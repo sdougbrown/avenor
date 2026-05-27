@@ -196,6 +196,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		// Load skills and merge prompts
 		systemPrompt := profile.SystemPrompt
 		initialPrompt := profile.InitialPrompt
+		var allowedDirs []string
 		if len(profile.Skills) > 0 {
 			configDir := filepath.Dir(*ponyConfig)
 			skills, err := pony.LoadSkills(configDir, profile.Skills)
@@ -204,6 +205,14 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 				return exitWithSentinel(1)
 			}
 			systemPrompt, initialPrompt = pony.MergeSkills(systemPrompt, initialPrompt, skills)
+
+			// Add skill discovery dirs to allowed dirs for file_read/shell access
+			if skillsDir := os.Getenv("PONY_SKILLS_DIR"); skillsDir != "" {
+				allowedDirs = append(allowedDirs, skillsDir)
+			}
+			if configDir != "" {
+				allowedDirs = append(allowedDirs, filepath.Join(configDir, ".pony"))
+			}
 		}
 
 		pCfg := pony.Config{
@@ -219,6 +228,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			InjectAgentsMD: profile.InjectAgentsMD,
 			ToolApproval:   profile.ToolApproval,
 			ShellConfig:    profile.ShellConfig,
+			AllowedDirs:    allowedDirs,
 		}
 		pony.SetGlobalConfig(&pCfg)
 	}

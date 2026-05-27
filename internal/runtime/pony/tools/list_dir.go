@@ -49,7 +49,7 @@ func (t *ListDirTool) Execute(ctx context.Context, workingDir string, args json.
 		dirPath = "."
 	}
 
-	safePath, err := safeResolvePath(workingDir, dirPath)
+	safePath, err := safeResolvePath(workingDir, AllowedDirsFromContext(ctx), dirPath)
 	if err != nil {
 		return "", fmt.Errorf("list_dir: %w", err)
 	}

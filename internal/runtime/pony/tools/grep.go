@@ -78,7 +78,10 @@ func (t *GrepTool) Execute(ctx context.Context, workingDir string, args json.Raw
 
 	globPatternRel, err := filepath.Rel(wdAbs, globPattern)
 	if err != nil || strings.HasPrefix(globPatternRel, "..") {
-		return "", fmt.Errorf("grep: glob pattern %q is outside the working directory", input.Glob)
+		// Check against additional allowed dirs
+		if rel := IsPathInAllowedDirs(globPattern, AllowedDirsFromContext(ctx)); rel == "" {
+			return "", fmt.Errorf("grep: glob pattern %q is outside the working directory", input.Glob)
+		}
 	}
 
 	matches, err := filepath.Glob(globPattern)
@@ -101,7 +104,15 @@ func (t *GrepTool) Execute(ctx context.Context, workingDir string, args json.Raw
 			continue
 		}
 
-		relPath, _ := filepath.Rel(wdAbs, matchFile)
+		relPath, err := filepath.Rel(wdAbs, matchFile)
+		if err != nil || strings.HasPrefix(relPath, "..") {
+			// Check against additional allowed dirs
+			if rel := IsPathInAllowedDirs(matchFile, AllowedDirsFromContext(ctx)); rel != "" {
+				relPath = rel
+			} else {
+				continue
+			}
+		}
 
 		scanner := bufio.NewScanner(f)
 		lineNum := 0

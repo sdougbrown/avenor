@@ -29,6 +29,7 @@ type Config struct {
 	OrchTools      bool
 	WorkingDir     string // for AGENTS.md discovery
 	InjectAgentsMD bool
+	AllowedDirs    []string    // additional directories tools may access (e.g. skills)
 	ToolApproval   map[string]bool // tool name → requires approval
 	ShellConfig    *ShellConfig    // overrides for shell tool
 	// Registry is internal; built from tool config.
@@ -78,6 +79,9 @@ func New(cfg Config) *Provider {
 		toolList = append(toolList, newOrchestrationTools(cfg.Executor)...)
 	}
 	cfg.toolRegistry = tools.NewRegistry(toolList)
+	if len(cfg.AllowedDirs) > 0 {
+		cfg.toolRegistry.SetAllowedDirs(cfg.AllowedDirs)
+	}
 
 	return &Provider{
 		cfg:      cfg,
