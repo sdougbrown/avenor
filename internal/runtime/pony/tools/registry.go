@@ -14,13 +14,21 @@ import (
 type contextKey string
 
 const (
-	// AllowedDirsKey carries additional directories the tool may access beyond workingDir.
-	AllowedDirsKey contextKey = "allowed_dirs"
+	// AllowedReadDirsKey carries additional directories read-only tools may access beyond workingDir.
+	AllowedReadDirsKey contextKey = "allowed_read_dirs"
+	// AllowedWriteDirsKey carries additional directories write tools may access beyond workingDir.
+	AllowedWriteDirsKey contextKey = "allowed_write_dirs"
 )
 
-// AllowedDirsFromContext extracts additional allowed directories from context.
-func AllowedDirsFromContext(ctx context.Context) []string {
-	dirs, _ := ctx.Value(AllowedDirsKey).([]string)
+// AllowedReadDirsFromContext extracts additional read-allowed directories from context.
+func AllowedReadDirsFromContext(ctx context.Context) []string {
+	dirs, _ := ctx.Value(AllowedReadDirsKey).([]string)
+	return dirs
+}
+
+// AllowedWriteDirsFromContext extracts additional write-allowed directories from context.
+func AllowedWriteDirsFromContext(ctx context.Context) []string {
+	dirs, _ := ctx.Value(AllowedWriteDirsKey).([]string)
 	return dirs
 }
 
@@ -43,8 +51,9 @@ type Tool interface {
 
 // Registry holds all available tools and dispatches calls by name.
 type Registry struct {
-	tools       map[string]Tool
-	allowedDirs []string // additional directories tools may access
+	tools            map[string]Tool
+	allowedReadDirs  []string // additional directories read tools may access
+	allowedWriteDirs []string // additional directories write tools may access
 }
 
 // NewRegistry creates a registry from the given tools.
@@ -59,10 +68,20 @@ func NewRegistry(tools []Tool) *Registry {
 }
 
 // SetAllowedDirs sets additional directories that tools may access
-// beyond the working directory (e.g. skills directories for file reads,
-// script directories for shell execution).
+// beyond the working directory for both read and write operations.
 func (r *Registry) SetAllowedDirs(dirs []string) {
-	r.allowedDirs = dirs
+	r.allowedReadDirs = dirs
+	r.allowedWriteDirs = dirs
+}
+
+// SetAllowedReadDirs sets additional directories read-only tools may access.
+func (r *Registry) SetAllowedReadDirs(dirs []string) {
+	r.allowedReadDirs = dirs
+}
+
+// SetAllowedWriteDirs sets additional directories write tools may access.
+func (r *Registry) SetAllowedWriteDirs(dirs []string) {
+	r.allowedWriteDirs = dirs
 }
 
 // Dispatch looks up a tool by name and executes it with the given JSON args.
@@ -73,10 +92,8 @@ func (r *Registry) Dispatch(ctx context.Context, workingDir string, name string,
 	if !ok {
 		return "", fmt.Errorf("unknown tool: %s", name)
 	}
-	// Inject allowed dirs into context for tools that support them
-	if len(r.allowedDirs) > 0 {
-		ctx = context.WithValue(ctx, AllowedDirsKey, r.allowedDirs)
-	}
+	ctx = context.WithValue(ctx, AllowedReadDirsKey, r.allowedReadDirs)
+	ctx = context.WithValue(ctx, AllowedWriteDirsKey, r.allowedWriteDirs)
 	return t.Execute(ctx, workingDir, args)
 }
 

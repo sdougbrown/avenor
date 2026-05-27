@@ -51,7 +51,7 @@ func (t *FileWriteTool) Execute(ctx context.Context, workingDir string, args jso
 		return "", fmt.Errorf("file_write: path is required")
 	}
 
-	safePath, err := safeResolvePath(workingDir, AllowedDirsFromContext(ctx), input.Path)
+	safePath, err := safeResolvePath(workingDir, AllowedWriteDirsFromContext(ctx), input.Path)
 	if err != nil {
 		return "", fmt.Errorf("file_write: %w", err)
 	}

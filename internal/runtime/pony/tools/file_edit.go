@@ -56,7 +56,12 @@ func (t *FileEditTool) Execute(ctx context.Context, workingDir string, args json
 		return "", fmt.Errorf("file_edit: path is required")
 	}
 
-	safePath, err := safeResolvePath(workingDir, AllowedDirsFromContext(ctx), input.Path)
+	_, err := safeResolvePath(workingDir, AllowedReadDirsFromContext(ctx), input.Path)
+	if err != nil {
+		return "", fmt.Errorf("file_edit: %w", err)
+	}
+
+	safePath, err := safeResolvePath(workingDir, AllowedWriteDirsFromContext(ctx), input.Path)
 	if err != nil {
 		return "", fmt.Errorf("file_edit: %w", err)
 	}

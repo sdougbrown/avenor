@@ -228,7 +228,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			InjectAgentsMD: profile.InjectAgentsMD,
 			ToolApproval:   profile.ToolApproval,
 			ShellConfig:    profile.ShellConfig,
-			AllowedDirs:    allowedDirs,
+			AllowedReadDirs: allowedDirs,
 		}
 		pony.SetGlobalConfig(&pCfg)
 	}

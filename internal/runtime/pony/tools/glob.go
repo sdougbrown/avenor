@@ -64,7 +64,7 @@ func (t *GlobTool) Execute(ctx context.Context, workingDir string, args json.Raw
 	patternRel, err := filepath.Rel(wdAbs, pattern)
 	if err != nil || strings.HasPrefix(patternRel, "..") {
 		// Check against additional allowed dirs
-		if rel := IsPathInAllowedDirs(pattern, AllowedDirsFromContext(ctx)); rel == "" {
+		if rel := IsPathInAllowedDirs(pattern, AllowedReadDirsFromContext(ctx)); rel == "" {
 			return "", fmt.Errorf("glob: pattern %q is outside the working directory", input.Pattern)
 		}
 	}
@@ -88,7 +88,7 @@ func (t *GlobTool) Execute(ctx context.Context, workingDir string, args json.Raw
 		relPath, err := filepath.Rel(wdAbs, resolved)
 		if err != nil || strings.HasPrefix(relPath, "..") {
 			// Check against additional allowed dirs
-			if rel := IsPathInAllowedDirs(resolved, AllowedDirsFromContext(ctx)); rel != "" {
+			if rel := IsPathInAllowedDirs(resolved, AllowedReadDirsFromContext(ctx)); rel != "" {
 				relPath = rel
 			} else {
 				continue
