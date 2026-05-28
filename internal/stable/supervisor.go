@@ -1354,17 +1354,20 @@ func (s *Supervisor) RuntimeSendToParent(rtID, message string) error {
 	s.pendingQuestions[rtID] = pendingChildQuestion{requestID: requestID, timer: timer}
 	s.controlMu.Unlock()
 	s.control.PublishEvent(events.Event{
-		Event:     "child.question",
+		Event:     runtime.EventChildQuestion,
 		SessionID: parentSessionID,
-		Fields: map[string]any{
-			"runtime_id": parentID,
-			"message":    message,
-			"parent_id":  parentID,
-			"child_id":   rtID,
-			"request_id": requestID,
-			"ts":         time.Now().UnixMilli(),
-			"session_id": childSessionID,
-		},
+		Fields: func() map[string]any {
+			fields := runtime.ChildQuestionPayload{
+				RuntimeID: parentID,
+				SessionID: childSessionID,
+				ChildID:   rtID,
+				Message:   message,
+				RequestID: requestID,
+			}.Fields()
+			fields["parent_id"] = parentID
+			fields["ts"] = time.Now().UnixMilli()
+			return fields
+		}(),
 	})
 	return nil
 }

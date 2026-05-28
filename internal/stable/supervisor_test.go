@@ -1152,7 +1152,7 @@ func TestSpawnAndSendToParent(t *testing.T) {
 			if !ok {
 				t.Fatal("event channel closed unexpectedly")
 			}
-			if evt.Event == "child.question" {
+			if evt.Event == runtime.EventChildQuestion {
 				// Verify event fields.
 				if evt.RuntimeID != parentID {
 					t.Errorf("child.question runtime_id = %q, want %q", evt.RuntimeID, parentID)

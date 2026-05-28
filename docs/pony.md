@@ -101,6 +101,23 @@ Enabled via `"orchestration": true`. These allow a **jockey** agent to manage ch
 - `wait_for_done`: Block until a child agent completes its task.
 - `send_to_parent`: From a child, ask the parent for clarification (emits `child.question`).
 
+When a child calls `send_to_parent`, the supervisor emits a `child.question` event to the parent subscription with this payload shape:
+
+```json
+{
+  "event": "child.question",
+  "runtime_id": "<parent_runtime_id>",
+  "session_id": "<parent_session_id>",
+  "child_id": "<child_runtime_id>",
+  "message": "Which package should I use?",
+  "request_id": "cq_123"
+}
+```
+
+The parent should reply with `send_prompt` to `child_id`, and should include `request_id` to make duplicate reply handling idempotent.
+
+This payload is defined as a shared runtime contract in `internal/runtime/contracts.go` (`ChildQuestionPayload` and `EventChildQuestion`) so other runtimes (including Mustang) can consume the same schema.
+
 ## The Wire Format
 
 Pony uses the OpenAI Chat Completions wire format. This means it is compatible with any provider that implements an OpenAI-compatible API, such as Ollama, LM Studio, OpenRouter, or vLLM.
