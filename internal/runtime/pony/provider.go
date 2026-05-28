@@ -16,9 +16,11 @@ import (
 // backendID is the backend identifier.
 const backendID = "pony"
 
-// Context key for the current session's runtime ID.
-type runtimeIDKeyType struct{}
-var runtimeIDKey runtimeIDKeyType
+// RuntimeIDKey is the context key for the current session's runtime ID.
+// The pony provider injects this during Prompt; tools read it for
+// parent-child routing (e.g., send_to_parent).
+type RuntimeIDKeyType struct{}
+var RuntimeIDKey RuntimeIDKeyType
 
 // Config configures the pony provider.
 type Config struct {
@@ -221,7 +223,7 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 	defer cancel()
 
 	// Inject runtime ID into context for tool access (e.g., send_to_parent).
-	promptCtx = context.WithValue(promptCtx, runtimeIDKey, ss.runtimeID)
+	promptCtx = context.WithValue(promptCtx, RuntimeIDKey, ss.runtimeID)
 
 	// Build event channel — emit through session state
 	eventCh := make(chan events.Event, 256)

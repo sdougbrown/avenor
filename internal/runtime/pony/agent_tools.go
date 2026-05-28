@@ -88,6 +88,10 @@ func (t *spawnAgentTool) Execute(ctx context.Context, workingDir string, args js
 	if input.Label != "" {
 		params["label"] = input.Label
 	}
+	// Include parent's runtime ID for parent-child tracking.
+	if runtimeID, ok := ctx.Value(RuntimeIDKey).(string); ok && runtimeID != "" {
+		params["runtime_id"] = runtimeID
+	}
 
 	sessionID, err := t.executor.SpawnAgent(ctx, params)
 	if err != nil {
@@ -177,6 +181,10 @@ func (t *spawnAgentsTool) Execute(ctx context.Context, workingDir string, args j
 		}
 		if agent.Label != "" {
 			params["label"] = agent.Label
+		}
+		// Include parent's runtime ID for parent-child tracking.
+		if runtimeID, ok := ctx.Value(RuntimeIDKey).(string); ok && runtimeID != "" {
+			params["runtime_id"] = runtimeID
 		}
 
 		sessionID, err := t.executor.SpawnAgent(ctx, params)
@@ -345,7 +353,7 @@ func (t *sendToParentTool) Execute(ctx context.Context, workingDir string, args 
 	// Read the runtime ID from context; it was injected by the provider
 	// during Prompt. When empty (e.g., sessions without runtime context),
 	// the control server handler will validate and return a clear error.
-	runtimeID, _ := ctx.Value(runtimeIDKey).(string)
+	runtimeID, _ := ctx.Value(RuntimeIDKey).(string)
 	if err := t.executor.SendToParent(ctx, runtimeID, input.Message); err != nil {
 		return "", fmt.Errorf("send_to_parent: %w", err)
 	}

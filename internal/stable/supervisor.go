@@ -1286,6 +1286,7 @@ func (s *Supervisor) RuntimeSendToParent(rtID, message string) error {
 		Event:     "child.question",
 		SessionID: parentSessionID,
 		Fields: map[string]any{
+			"runtime_id": parentID,
 			"message":    message,
 			"parent_id":  parentID,
 			"child_id":   rtID,

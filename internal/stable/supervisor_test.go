@@ -2,6 +2,7 @@ package stable
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sdougbrown/avenor/client"
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/looprunner"
 	"github.com/sdougbrown/avenor/internal/runtime"
@@ -1018,4 +1020,190 @@ func withFakeExec(t *testing.T, fake func(name string, arg ...string) *exec.Cmd)
 	old := httpExecCommand
 	httpExecCommand = fake
 	t.Cleanup(func() { httpExecCommand = old })
+}
+
+// TestSpawnAndSendToParent exercises the full parent-child round-trip through
+// the control socket: spawn a parent, verify tracking, spawn children with
+// parent context, send a message from a child to the parent, and verify the
+// child.question event is emitted.
+func TestSpawnAndSendToParent(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "ctrl.sock")
+
+	sup := NewSupervisor(Config{
+		ControlSocket:   socketPath,
+		MaxRuntimes:     10,
+		ShutdownTimeout: 0,
+	})
+	// Start the control server so the client can connect.
+	if err := sup.control.Start(socketPath); err != nil {
+		t.Fatalf("start control server: %v", err)
+	}
+	defer sup.control.Stop()
+
+	// Connect a client to the control socket.
+	c, err := client.Dial(socketPath)
+	if err != nil {
+		t.Fatalf("dial control socket: %v", err)
+	}
+	defer c.Close()
+
+	// Subscribe to events so the server pushes them to this client.
+	if err := c.Call("subscribe", nil, nil); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	eventCh := c.Events()
+
+	// 1. Spawn a parent runtime (the jockey) using pony backend so no
+	// external server is needed.
+	parentParams := map[string]any{
+		"prompt":  "You are a jockey.",
+		"dir":     ".",
+		"backend": "pony",
+	}
+	parentResult, err := c.Spawn(parentParams)
+	if err != nil {
+		t.Fatalf("spawn parent: %v", err)
+	}
+	parentID, ok := parentResult["runtime_id"].(string)
+	if !ok || parentID == "" {
+		t.Fatalf("parent spawn result missing runtime_id: %v", parentResult)
+	}
+	parentSesID, _ := parentResult["session_id"].(string)
+
+	t.Logf("parent runtime_id=%s session_id=%s", parentID, parentSesID)
+
+	// Verify parent has no parent and no children yet.
+	list := sup.List()
+	rts := list.([]map[string]any)
+	parentEntry := findRuntimeByID(rts, parentID)
+	if parentEntry == nil {
+		t.Fatal("parent not found in list")
+	}
+	if pid, _ := parentEntry["parent_id"].(string); pid != "" {
+		t.Errorf("parent.parent_id = %q, want empty", pid)
+	}
+	if kids := childrenList(parentEntry); len(kids) != 0 {
+		t.Errorf("parent.children = %v, want empty", kids)
+	}
+
+	// 2. Spawn children using the parent's runtime_id for auto-population.
+	childCount := 2
+	var childIDs []string
+	for i := 0; i < childCount; i++ {
+		childParams := map[string]any{
+			"prompt":     "Do work.",
+			"dir":        ".",
+			"backend":    "pony",
+			"runtime_id": parentID, // tells supervisor "I am the parent"
+			"label":      fmt.Sprintf("child_%d", i+1),
+		}
+		childResult, err := c.Spawn(childParams)
+		if err != nil {
+			t.Fatalf("spawn child %d: %v", i, err)
+		}
+		cid, ok := childResult["runtime_id"].(string)
+		if !ok || cid == "" {
+			t.Fatalf("child %d spawn result missing runtime_id: %v", i, childResult)
+		}
+		childIDs = append(childIDs, cid)
+	}
+
+	// 3. Verify parent-child tracking.
+	list = sup.List()
+	rts = list.([]map[string]any)
+	parentEntry = findRuntimeByID(rts, parentID)
+	kidIDs := childrenList(parentEntry)
+	if len(kidIDs) != childCount {
+		t.Fatalf("parent.children count = %d, want %d", len(kidIDs), childCount)
+	}
+	for i, cid := range childIDs {
+		if kidIDs[i] != cid {
+			t.Errorf("parent.children[%d] = %q, want %q", i, kidIDs[i], cid)
+		}
+	}
+
+	// Verify each child has the correct parent_id.
+	for _, cid := range childIDs {
+		entry := findRuntimeByID(rts, cid)
+		if entry == nil {
+			t.Fatalf("child %s not found in list", cid)
+		}
+		pid, _ := entry["parent_id"].(string)
+		if pid != parentID {
+			t.Errorf("child %s parent_id = %q, want %q", cid, pid, parentID)
+		}
+	}
+
+	// 4. Send a message from child_1 to its parent via send_to_parent RPC.
+	message := "Which package should I use?"
+	err = c.SendToParent(childIDs[0], message)
+	if err != nil {
+		t.Fatalf("send_to_parent: %v", err)
+	}
+
+	// 5. Verify the child.question event was emitted.
+	// Drain events until we find it or time out.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	found := false
+	for {
+		select {
+		case evt, ok := <-eventCh:
+			if !ok {
+				t.Fatal("event channel closed unexpectedly")
+			}
+			if evt.Event == "child.question" {
+				// Verify event fields.
+				if evt.RuntimeID != parentID {
+					t.Errorf("child.question runtime_id = %q, want %q", evt.RuntimeID, parentID)
+				}
+				if evt.SessionID != parentSesID {
+					t.Errorf("child.question session_id = %q, want %q", evt.SessionID, parentSesID)
+				}
+				gotMsg, _ := evt.Raw["message"].(string)
+				if gotMsg != message {
+					t.Errorf("child.question message = %q, want %q", gotMsg, message)
+				}
+				gotChildID, _ := evt.Raw["child_id"].(string)
+				if gotChildID != childIDs[0] {
+					t.Errorf("child.question child_id = %q, want %q", gotChildID, childIDs[0])
+				}
+				found = true
+			}
+		case <-ctx.Done():
+			t.Fatal("timed out waiting for child.question event")
+		}
+		if found {
+			break
+		}
+	}
+}
+
+// findRuntimeByID is a test helper to find a runtime entry by ID in a list.
+func findRuntimeByID(rts []map[string]any, id string) map[string]any {
+	for _, rt := range rts {
+		if rt["runtime_id"] == id {
+			return rt
+		}
+	}
+	return nil
+}
+
+// childrenList extracts the children field from a runtime entry as a []string,
+// handling both []string and []any representations that can arise from direct
+// struct access vs JSON round-trips.
+func childrenList(entry map[string]any) []string {
+	v := entry["children"]
+	switch xs := v.(type) {
+	case []string:
+		return xs
+	case []any:
+		out := make([]string, len(xs))
+		for i, x := range xs {
+			out[i], _ = x.(string)
+		}
+		return out
+	default:
+		return nil
+	}
 }
