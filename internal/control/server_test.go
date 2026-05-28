@@ -475,9 +475,11 @@ func testSocketPath(t *testing.T) string {
 }
 
 type mockStableHandler struct {
-	spawnResult any
-	spawnErr    error
-	listResult  any
+	spawnResult          any
+	spawnErr             error
+	listResult           any
+	sendToParentCalled   int
+	sendToParentMessages []string
 }
 
 func (m *mockStableHandler) Spawn(params json.RawMessage) (any, error) {
@@ -507,6 +509,8 @@ func (m *mockStableHandler) RuntimeInterruptAndPrompt(runtimeID, text string, ke
 }
 
 func (m *mockStableHandler) RuntimeSendToParent(runtimeID, message string) error {
+	m.sendToParentCalled++
+	m.sendToParentMessages = append(m.sendToParentMessages, message)
 	return nil
 }
 
@@ -632,5 +636,80 @@ func TestStableSpawnRejectedWithoutHandler(t *testing.T) {
 	r := readResp(t, c)
 	if r.Error == nil || r.Error.Code != -32601 {
 		t.Fatalf("expected -32601 method not found, got %+v", r.Error)
+	}
+}
+
+func TestStableSendToParent(t *testing.T) {
+	state := NewState("run_1", "", 0)
+	s := NewServer(state)
+	mock := &mockStableHandler{}
+	s.SetStableHandler(mock)
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	c := mustDial(t, path)
+	defer c.Close()
+	params, _ := json.Marshal(map[string]any{"runtime_id": "rt_1", "message": "help"})
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "send_to_parent", Params: params})
+	resp := readResp(t, c)
+	if resp.Error != nil {
+		t.Fatalf("send_to_parent error: %+v", resp.Error)
+	}
+	if mock.sendToParentCalled != 1 {
+		t.Errorf("sendToParentCalled = %d, want 1", mock.sendToParentCalled)
+	}
+	if len(mock.sendToParentMessages) != 1 || mock.sendToParentMessages[0] != "help" {
+		t.Errorf("sendToParentMessages = %v, want [help]", mock.sendToParentMessages)
+	}
+}
+
+func TestStableSendToParentMissingRuntimeID(t *testing.T) {
+	state := NewState("run_1", "", 0)
+	s := NewServer(state)
+	mock := &mockStableHandler{}
+	s.SetStableHandler(mock)
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	c := mustDial(t, path)
+	defer c.Close()
+	params, _ := json.Marshal(map[string]any{"message": "help"})
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "send_to_parent", Params: params})
+	resp := readResp(t, c)
+	if resp.Error == nil {
+		t.Fatal("expected error for missing runtime_id, got nil")
+	}
+	if mock.sendToParentCalled != 0 {
+		t.Errorf("sendToParentCalled = %d, want 0 (should not be called)", mock.sendToParentCalled)
+	}
+}
+
+func TestStableSendToParentMissingMessage(t *testing.T) {
+	state := NewState("run_1", "", 0)
+	s := NewServer(state)
+	mock := &mockStableHandler{}
+	s.SetStableHandler(mock)
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	c := mustDial(t, path)
+	defer c.Close()
+	params, _ := json.Marshal(map[string]any{"runtime_id": "rt_1"})
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "send_to_parent", Params: params})
+	resp := readResp(t, c)
+	if resp.Error == nil {
+		t.Fatal("expected error for missing message, got nil")
+	}
+	if mock.sendToParentCalled != 0 {
+		t.Errorf("sendToParentCalled = %d, want 0 (should not be called)", mock.sendToParentCalled)
 	}
 }

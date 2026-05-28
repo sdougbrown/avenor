@@ -1091,6 +1091,81 @@ func TestOrchestrationTools_spawnMissingPrompt(t *testing.T) {
 	}
 }
 
+func TestOrchestrationTools_spawnAgents(t *testing.T) {
+	ctx := context.Background()
+	fe := &fakeExecutor{spawnID: "child_1"}
+	reg := tools.NewRegistry(newOrchestrationTools(fe))
+
+	result, err := reg.Dispatch(ctx, ".", "spawn_agents", json.RawMessage(`{"agents":[{"prompt":"task one"},{"prompt":"task two"}]}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if fe.spawnCalled != 2 {
+		t.Errorf("spawnCalled = %d, want 2", fe.spawnCalled)
+	}
+	expected := "Spawned agents: [child_1, child_1]"
+	if result != expected {
+		t.Errorf("result = %q, want %q", result, expected)
+	}
+}
+
+func TestOrchestrationTools_spawnAgreesEmpty(t *testing.T) {
+	ctx := context.Background()
+	reg := tools.NewRegistry(newOrchestrationTools(&fakeExecutor{}))
+
+	_, err := reg.Dispatch(ctx, ".", "spawn_agents", json.RawMessage(`{"agents":[]}`))
+	if err == nil {
+		t.Fatal("expected error for empty agents, got nil")
+	}
+}
+
+func TestOrchestrationTools_spawnAgentsMissingPrompt(t *testing.T) {
+	ctx := context.Background()
+	reg := tools.NewRegistry(newOrchestrationTools(&fakeExecutor{}))
+
+	_, err := reg.Dispatch(ctx, ".", "spawn_agents", json.RawMessage(`{"agents":[{"prompt":"ok"},{}]}`))
+	if err == nil {
+		t.Fatal("expected error for missing prompt, got nil")
+	}
+}
+
+func TestOrchestrationTools_spawnAgentsDirsOutsideWorkDir(t *testing.T) {
+	ctx := context.Background()
+	reg := tools.NewRegistry(newOrchestrationTools(&fakeExecutor{}))
+
+	_, err := reg.Dispatch(ctx, ".", "spawn_agents", json.RawMessage(`{"agents":[{"prompt":"hi","dir":"/etc"}]}`))
+	if err == nil {
+		t.Fatal("expected error for dir outside workdir, got nil")
+	}
+}
+
+func TestOrchestrationTools_sendToParent(t *testing.T) {
+	ctx := context.Background()
+	fe := &fakeExecutor{}
+	reg := tools.NewRegistry(newOrchestrationTools(fe))
+
+	result, err := reg.Dispatch(ctx, ".", "send_to_parent", json.RawMessage(`{"message":"need help"}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if fe.sendToParentCalled != 1 {
+		t.Errorf("sendToParentCalled = %d, want 1", fe.sendToParentCalled)
+	}
+	if result != "Message sent to parent agent." {
+		t.Errorf("result = %q, want %q", result, "Message sent to parent agent.")
+	}
+}
+
+func TestOrchestrationTools_sendToParentMissingMessage(t *testing.T) {
+	ctx := context.Background()
+	reg := tools.NewRegistry(newOrchestrationTools(&fakeExecutor{}))
+
+	_, err := reg.Dispatch(ctx, ".", "send_to_parent", json.RawMessage(`{}`))
+	if err == nil {
+		t.Fatal("expected error for missing message, got nil")
+	}
+}
+
 
 // ── e2e tool with real file read ─────────────────────────────────────────────
 

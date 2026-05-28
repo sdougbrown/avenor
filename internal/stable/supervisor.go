@@ -241,10 +241,14 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 
 	// Track parent-child relationship.
 	if params.ParentID != "" {
+		child.mu.Lock()
 		child.parentID = params.ParentID
+		child.mu.Unlock()
 		s.controlMu.Lock()
 		if parent, ok := s.runtimes[params.ParentID]; ok {
+			parent.mu.Lock()
 			parent.children = append(parent.children, rtID)
+			parent.mu.Unlock()
 		}
 		s.controlMu.Unlock()
 	}
