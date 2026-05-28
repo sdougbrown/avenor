@@ -10,10 +10,11 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime/pony/tools"
 )
 
-// newOrchestrationTools creates the four orchestration tools bound to the given executor.
+// newOrchestrationTools creates the orchestration tools bound to the given executor.
 func newOrchestrationTools(executor OrchestratorExecutor) []tools.Tool {
 	return []tools.Tool{
 		&spawnAgentTool{executor: executor},
+		&spawnAgentsTool{executor: executor},
 		&sendPromptTool{executor: executor},
 		&getStatusTool{executor: executor},
 		&waitForDoneTool{executor: executor},
@@ -92,6 +93,103 @@ func (t *spawnAgentTool) Execute(ctx context.Context, workingDir string, args js
 		return "", fmt.Errorf("spawn_agent: %w", err)
 	}
 	return fmt.Sprintf("Agent spawned with session ID: %s", sessionID), nil
+}
+
+// spawnAgentsTool creates multiple child agent sessions in one call.
+type spawnAgentsTool struct {
+	executor OrchestratorExecutor
+}
+
+func (t *spawnAgentsTool) Name() string { return "spawn_agents" }
+func (t *spawnAgentsTool) Description() string {
+	return "Create multiple child agent sessions in a single call. All agents run concurrently. Returns session IDs with labels for each spawned agent."
+}
+
+type spawnAgentsInput struct {
+	Agents []struct {
+		Backend string `json:"backend,omitempty"`
+		Model   string `json:"model,omitempty"`
+		Prompt  string `json:"prompt"`
+		Dir     string `json:"dir,omitempty"`
+		Label   string `json:"label,omitempty"`
+	} `json:"agents"`
+}
+
+func (t *spawnAgentsTool) Schema() json.RawMessage {
+	return json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"agents": {
+				"type": "array",
+				"items": {
+					"type": "object",
+					"properties": {
+						"backend": {"type": "string", "description": "Agent backend to use"},
+						"model": {"type": "string", "description": "Model to use for the child agent"},
+						"prompt": {"type": "string", "description": "Initial prompt for the child agent"},
+						"dir": {"type": "string", "description": "Working directory for the child agent"},
+						"label": {"type": "string", "description": "Human-readable label"}
+					},
+					"required": ["prompt"]
+				},
+				"description": "List of agents to spawn"
+			}
+		},
+		"required": ["agents"]
+	}`)
+}
+
+func (t *spawnAgentsTool) Execute(ctx context.Context, workingDir string, args json.RawMessage) (string, error) {
+	var input spawnAgentsInput
+	if err := json.Unmarshal(args, &input); err != nil {
+		return "", fmt.Errorf("spawn_agents: invalid args: %w", err)
+	}
+	if len(input.Agents) == 0 {
+		return "", fmt.Errorf("spawn_agents: at least one agent is required")
+	}
+
+	var parts []string
+	for _, agent := range input.Agents {
+		if agent.Prompt == "" {
+			return "", fmt.Errorf("spawn_agents: prompt is required for each agent")
+		}
+		if agent.Dir != "" {
+			rel, err := filepath.Rel(workingDir, agent.Dir)
+			if err != nil || strings.HasPrefix(rel, "..") {
+				return "", fmt.Errorf("spawn_agents: dir %q is outside the working directory %q", agent.Dir, workingDir)
+			}
+		}
+
+		params := map[string]any{
+			"prompt": agent.Prompt,
+		}
+		if agent.Backend != "" {
+			params["backend"] = agent.Backend
+		}
+		if agent.Model != "" {
+			params["model"] = agent.Model
+		}
+		if agent.Dir != "" {
+			params["dir"] = agent.Dir
+		} else {
+			params["dir"] = workingDir
+		}
+		if agent.Label != "" {
+			params["label"] = agent.Label
+		}
+
+		sessionID, err := t.executor.SpawnAgent(ctx, params)
+		if err != nil {
+			return "", fmt.Errorf("spawn_agents: %w", err)
+		}
+		desc := sessionID
+		if agent.Label != "" {
+			desc = sessionID + "=" + agent.Label
+		}
+		parts = append(parts, desc)
+	}
+
+	return "Spawned agents: [" + strings.Join(parts, ", ") + "]", nil
 }
 
 // sendPromptTool sends a follow-up prompt to an existing child agent.

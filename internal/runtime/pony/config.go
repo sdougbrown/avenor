@@ -145,10 +145,19 @@ func (e *controlSocketExecutor) WaitForDone(ctx context.Context, sessionID strin
 			if ec, ok := evt.Raw["exit_code"].(float64); ok {
 				exitCode = int(ec)
 			}
+			var outputFiles []string
+			if of, ok := evt.Raw["output_files"].([]any); ok {
+				for _, f := range of {
+					if s, ok := f.(string); ok {
+						outputFiles = append(outputFiles, s)
+					}
+				}
+			}
 			return &runtime.AgentResult{
-				SessionID:  sessionID,
-				StopReason: stopReason,
-				ExitCode:   exitCode,
+				SessionID:   sessionID,
+				StopReason:  stopReason,
+				ExitCode:    exitCode,
+				OutputFiles: outputFiles,
 			}, nil
 		}
 	}

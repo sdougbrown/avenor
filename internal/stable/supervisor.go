@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -97,6 +98,8 @@ type Supervisor struct {
 	httpServers     map[string]any   // dir → *managedHTTPServer or errHTTPServerStarting sentinel
 	httpServerMu    sync.Mutex
 	httpServerCond  *sync.Cond
+	fileSnapshots   map[string][]string // runtimeID → pre-run file list for output detection
+	fileSnapMu      sync.Mutex
 }
 
 func NewSupervisor(cfg Config) *Supervisor {
@@ -112,6 +115,7 @@ func NewSupervisor(cfg Config) *Supervisor {
 		runtimeActivity: make(chan struct{}),
 		permOptions:     map[string][]any{},
 		httpServers:     map[string]any{},
+		fileSnapshots:   map[string][]string{},
 	}
 	sup.httpServerCond = sync.NewCond(&sup.httpServerMu)
 	sup.control.SetStableHandler(sup)
@@ -417,6 +421,11 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 	// Initialise cancelFn in spawn so it's never nil when cancelRuntime reads it.
 	childCtx, childCancel := context.WithCancel(context.Background())
 	child.cancelFn = childCancel
+
+	// Take a file snapshot for output file detection.
+	s.fileSnapMu.Lock()
+	s.fileSnapshots[rtID] = s.takeFileSnapshot(params.Dir)
+	s.fileSnapMu.Unlock()
 
 	// Start the child event loop in a goroutine.
 	releaseReservation = nil
@@ -802,16 +811,86 @@ func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, re
 	}, resumeID)
 }
 
+// takeFileSnapshot records the set of files (relative paths) in dir for
+// later output-file diffing. Returns the snapshot as a sorted string slice.
+func (s *Supervisor) takeFileSnapshot(dir string) []string {
+	if dir == "" {
+		return nil
+	}
+	var files []string
+	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // skip unreadable entries
+		}
+		if info.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return nil
+		}
+		files = append(files, rel)
+		return nil
+	})
+	sort.Strings(files)
+	return files
+}
+
+// computeOutputFiles computes the diff between the pre-run snapshot and the
+// current file state in the runtime's working directory. Clears the snapshot
+// after computing so results are returned only once.
+func (s *Supervisor) computeOutputFiles(runtimeID string) []string {
+	s.fileSnapMu.Lock()
+	snapshot, ok := s.fileSnapshots[runtimeID]
+	delete(s.fileSnapshots, runtimeID)
+	s.fileSnapMu.Unlock()
+	if !ok {
+		return nil
+	}
+
+	// Find the runtime's working directory.
+	s.controlMu.Lock()
+	rt := s.runtimes[runtimeID]
+	s.controlMu.Unlock()
+	if rt == nil || rt.dir == "" {
+		return nil
+	}
+
+	current := s.takeFileSnapshot(rt.dir)
+	if len(current) == 0 {
+		return nil
+	}
+
+	// Return anything in current that wasn't in the pre-snapshot.
+	snapSet := make(map[string]struct{}, len(snapshot))
+	for _, f := range snapshot {
+		snapSet[f] = struct{}{}
+	}
+	var output []string
+	for _, f := range current {
+		if _, seen := snapSet[f]; !seen {
+			output = append(output, f)
+		}
+	}
+	return output
+}
+
 func (s *Supervisor) emitSessionEnd(child *childRuntime, exitCode int, stopReason string) {
+	fields := map[string]any{
+		"stop_reason": stopReason,
+		"runtime_id":  child.id,
+		"exit_code":   exitCode,
+		"ts":          time.Now().UnixMilli(),
+	}
+	// Compute output file diff if pre-snapshot exists.
+	outputFiles := s.computeOutputFiles(child.id)
+	if len(outputFiles) > 0 {
+		fields["output_files"] = outputFiles
+	}
 	s.control.PublishEvent(events.Event{
 		Event:     "session.end",
 		SessionID: child.sessionID(),
-		Fields: map[string]any{
-			"stop_reason": stopReason,
-			"runtime_id":  child.id,
-			"exit_code":   exitCode,
-			"ts":          time.Now().UnixMilli(),
-		},
+		Fields:    fields,
 	})
 }
 
