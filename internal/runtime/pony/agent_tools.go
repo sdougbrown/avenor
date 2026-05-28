@@ -356,6 +356,9 @@ func (t *sendToParentTool) Execute(ctx context.Context, workingDir string, args 
 	// during Prompt. When empty (e.g., sessions without runtime context),
 	// the control server handler will validate and return a clear error.
 	runtimeID, _ := ctx.Value(RuntimeIDKey).(string)
+	if runtimeID == "" {
+		return "", fmt.Errorf("send_to_parent: runtime context is required")
+	}
 	if err := t.executor.SendToParent(ctx, runtimeID, input.Message); err != nil {
 		return "", fmt.Errorf("send_to_parent: %w", err)
 	}

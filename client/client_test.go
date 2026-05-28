@@ -466,3 +466,63 @@ func TestSubscribeRuntimeMatchesSessionID(t *testing.T) {
 		t.Fatal("timeout waiting for session-id matched event")
 	}
 }
+
+func TestSubscribeRuntimeIgnoresOtherRuntimeIDs(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	c := &Client{
+		conn:        clientConn,
+		scan:        bufio.NewScanner(clientConn),
+		pending:     map[int]chan Response{},
+		eventCh:     make(chan Event, 8),
+		runtimeSubs: map[string]map[chan Event]struct{}{},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch := c.SubscribeRuntime(ctx, "rt_1")
+
+	n := Notification{JSONRPC: "2.0", Method: "event"}
+	n.Params, _ = json.Marshal(map[string]any{"event": "session.end", "runtime_id": "rt_3"})
+	data, _ := json.Marshal(n)
+	data = append(data, '\n')
+	_, _ = serverConn.Write(data)
+
+	select {
+	case ev := <-ch:
+		t.Fatalf("unexpected event for wrong runtime id: %+v", ev)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestSubscribeRuntimeIgnoresOtherSessionIDs(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	c := &Client{
+		conn:        clientConn,
+		scan:        bufio.NewScanner(clientConn),
+		pending:     map[int]chan Response{},
+		eventCh:     make(chan Event, 8),
+		runtimeSubs: map[string]map[chan Event]struct{}{},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch := c.SubscribeRuntime(ctx, "ses_123")
+
+	n := Notification{JSONRPC: "2.0", Method: "event"}
+	n.Params, _ = json.Marshal(map[string]any{"event": "session.end", "session_id": "ses_other", "runtime_id": "rt_77"})
+	data, _ := json.Marshal(n)
+	data = append(data, '\n')
+	_, _ = serverConn.Write(data)
+
+	select {
+	case ev := <-ch:
+		t.Fatalf("unexpected event for wrong session id: %+v", ev)
+	case <-time.After(100 * time.Millisecond):
+	}
+}

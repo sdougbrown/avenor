@@ -1104,7 +1104,7 @@ func TestOrchestrationTools_spawnMissingPrompt(t *testing.T) {
 
 func TestOrchestrationTools_spawnAgents(t *testing.T) {
 	ctx := context.Background()
-	fe := &fakeExecutor{spawnID: "child_1"}
+	fe := &fakeExecutor{}
 	reg := tools.NewRegistry(newOrchestrationTools(fe))
 
 	result, err := reg.Dispatch(ctx, ".", "spawn_agents", json.RawMessage(`{"agents":[{"prompt":"task one"},{"prompt":"task two"}]}`))
@@ -1114,7 +1114,7 @@ func TestOrchestrationTools_spawnAgents(t *testing.T) {
 	if fe.spawnCalled != 2 {
 		t.Errorf("spawnCalled = %d, want 2", fe.spawnCalled)
 	}
-	expected := "Spawned agents: [child_1, child_1]"
+	expected := "Spawned agents: [spawned_1, spawned_2]"
 	if result != expected {
 		t.Errorf("result = %q, want %q", result, expected)
 	}
@@ -1151,7 +1151,7 @@ func TestOrchestrationTools_spawnAgentsDirsOutsideWorkDir(t *testing.T) {
 }
 
 func TestOrchestrationTools_sendToParent(t *testing.T) {
-	ctx := context.Background()
+	ctx := context.WithValue(context.Background(), RuntimeIDKey, "rt_child")
 	fe := &fakeExecutor{}
 	reg := tools.NewRegistry(newOrchestrationTools(fe))
 
@@ -1164,6 +1164,16 @@ func TestOrchestrationTools_sendToParent(t *testing.T) {
 	}
 	if result != "Message sent to parent agent." {
 		t.Errorf("result = %q, want %q", result, "Message sent to parent agent.")
+	}
+}
+
+func TestOrchestrationTools_sendToParentMissingRuntimeContext(t *testing.T) {
+	ctx := context.Background()
+	reg := tools.NewRegistry(newOrchestrationTools(&fakeExecutor{}))
+
+	_, err := reg.Dispatch(ctx, ".", "send_to_parent", json.RawMessage(`{"message":"need help"}`))
+	if err == nil {
+		t.Fatal("expected error for missing runtime context, got nil")
 	}
 }
 

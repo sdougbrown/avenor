@@ -19,8 +19,9 @@ const backendID = "pony"
 // RuntimeIDKey is the context key for the current session's runtime ID.
 // The pony provider injects this during Prompt; tools read it for
 // parent-child routing (e.g., send_to_parent).
-type RuntimeIDKeyType struct{}
-var RuntimeIDKey RuntimeIDKeyType
+type runtimeIDKey struct{}
+
+var RuntimeIDKey = &runtimeIDKey{}
 
 // Config configures the pony provider.
 type Config struct {
