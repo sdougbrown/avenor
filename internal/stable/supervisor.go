@@ -1261,7 +1261,7 @@ func (s *Supervisor) RuntimeSendToParent(rtID, message string) error {
 	if child == nil {
 		return fmt.Errorf("runtime %q not found", rtID)
 	}
-child.mu.Lock()
+	child.mu.Lock()
 	parentID := child.parentID
 	childSessionID := child.session.SessionID
 	child.mu.Unlock()

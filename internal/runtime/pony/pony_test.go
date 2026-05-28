@@ -91,15 +91,16 @@ func (f *fakeAdapter) Stream(ctx context.Context, req model.Request) (<-chan mod
 
 // fakeExecutor implements OrchestratorExecutor for orchestration tool tests.
 type fakeExecutor struct {
-	spawnCalled   int
-	sendCalled    int
-	statusCalled  int
-	waitCalled    int
-	spawnDelay    time.Duration
-	waitDone      bool
-	waitErr       error
-	spawnID       string
-	getStatusResp map[string]any
+	spawnCalled    int
+	sendCalled     int
+	statusCalled   int
+	waitCalled     int
+	sendToParentCalled int
+	spawnDelay     time.Duration
+	waitDone       bool
+	waitErr        error
+	spawnID        string
+	getStatusResp  map[string]any
 }
 
 func (f *fakeExecutor) SpawnAgent(ctx context.Context, params map[string]any) (string, error) {
@@ -148,6 +149,7 @@ func (f *fakeExecutor) WaitForDone(ctx context.Context, sessionID string) (*runt
 }
 
 func (f *fakeExecutor) SendToParent(ctx context.Context, runtimeID, message string) error {
+	f.sendToParentCalled++
 	return nil
 }
 

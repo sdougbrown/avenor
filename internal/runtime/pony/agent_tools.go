@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -343,8 +342,9 @@ func (t *sendToParentTool) Execute(ctx context.Context, workingDir string, args 
 	if input.Message == "" {
 		return "", fmt.Errorf("send_to_parent: message is required")
 	}
-	runtimeID := os.Getenv("RUNTIME_ID")
-	if err := t.executor.SendToParent(ctx, runtimeID, input.Message); err != nil {
+	// Runtime ID is empty for now; the control server handler will validate
+	// and return a clear error until runtime identification is wired up.
+	if err := t.executor.SendToParent(ctx, "", input.Message); err != nil {
 		return "", fmt.Errorf("send_to_parent: %w", err)
 	}
 	return "Message sent to parent agent.", nil
