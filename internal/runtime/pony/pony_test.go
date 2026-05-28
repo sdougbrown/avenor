@@ -93,6 +93,7 @@ func (f *fakeAdapter) Stream(ctx context.Context, req model.Request) (<-chan mod
 type fakeExecutor struct {
 	spawnCalled    int
 	sendCalled     int
+	lastRequestID  string
 	statusCalled   int
 	waitCalled     int
 	sendToParentCalled int
@@ -119,8 +120,9 @@ func (f *fakeExecutor) SpawnAgent(ctx context.Context, params map[string]any) (s
 	return id, nil
 }
 
-func (f *fakeExecutor) SendPrompt(ctx context.Context, sessionID, prompt string) error {
+func (f *fakeExecutor) SendPrompt(ctx context.Context, sessionID, prompt, requestID string) error {
 	f.sendCalled++
+	f.lastRequestID = requestID
 	return nil
 }
 
@@ -1020,7 +1022,8 @@ func TestOrchestrationTools_spawn(t *testing.T) {
 
 func TestOrchestrationTools_sendPrompt(t *testing.T) {
 	ctx := context.Background()
-	reg := tools.NewRegistry(newOrchestrationTools(&fakeExecutor{}))
+	fake := &fakeExecutor{}
+	reg := tools.NewRegistry(newOrchestrationTools(fake))
 
 	result, err := reg.Dispatch(ctx, ".", "send_prompt", json.RawMessage(`{"session_id":"child_1","prompt":"more"}`))
 	if err != nil {
@@ -1028,6 +1031,14 @@ func TestOrchestrationTools_sendPrompt(t *testing.T) {
 	}
 	if result != "Prompt sent." {
 		t.Errorf("result = %q, want %q", result, "Prompt sent.")
+	}
+
+	_, err = reg.Dispatch(ctx, ".", "send_prompt", json.RawMessage(`{"session_id":"child_1","prompt":"more","request_id":"cq_9"}`))
+	if err != nil {
+		t.Fatalf("unexpected error for request_id: %v", err)
+	}
+	if fake.lastRequestID != "cq_9" {
+		t.Fatalf("lastRequestID = %q, want cq_9", fake.lastRequestID)
 	}
 }
 
@@ -1279,4 +1290,3 @@ func TestSessionState_removeSubscriber_nonExistent(t *testing.T) {
 		t.Error("ch1 should still be open and receive the event")
 	}
 }
-

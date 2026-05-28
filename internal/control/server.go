@@ -58,7 +58,7 @@ type StableHandler interface {
 	Shutdown(mode string) error
 	RuntimeStatus(runtimeID string) (any, error)
 	RuntimeCancel(runtimeID string) error
-	RuntimePrompt(runtimeID, text string) error
+	RuntimePrompt(runtimeID, text, requestID string) error
 	RuntimeAnswerPermission(runtimeID, requestID, optionID string) error
 	RuntimeInterruptAndPrompt(runtimeID, text string, keepQueue bool) error
 	RuntimeSendToParent(runtimeID, message string) error
@@ -513,7 +513,8 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 				return failure(req.ID, -32010, "permission_denied", nil)
 			}
 			var pr struct {
-				Text string `json:"text"`
+				Text      string `json:"text"`
+				RequestID string `json:"request_id"`
 			}
 			if len(req.Params) > 0 {
 				if err := json.Unmarshal(req.Params, &pr); err != nil {
@@ -523,7 +524,7 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 			if pr.Text == "" {
 				return failure(req.ID, -32602, "invalid params", map[string]any{"required": []string{"text"}})
 			}
-			if err := s.stableHandler.RuntimePrompt(rtID, pr.Text); err != nil {
+			if err := s.stableHandler.RuntimePrompt(rtID, pr.Text, pr.RequestID); err != nil {
 				return failure(req.ID, -32000, err.Error(), nil)
 			}
 			return success(req.ID, map[string]any{"accepted": true})

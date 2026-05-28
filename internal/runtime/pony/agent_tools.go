@@ -215,7 +215,8 @@ func (t *sendPromptTool) Schema() json.RawMessage {
 		"type": "object",
 		"properties": {
 			"session_id": {"type": "string", "description": "Session ID of the child agent"},
-			"prompt": {"type": "string", "description": "Follow-up prompt text"}
+			"prompt": {"type": "string", "description": "Follow-up prompt text"},
+			"request_id": {"type": "string", "description": "Optional child.question request ID for duplicate-suppression"}
 		},
 		"required": ["session_id", "prompt"]
 	}`)
@@ -224,6 +225,7 @@ func (t *sendPromptTool) Schema() json.RawMessage {
 type sendPromptInput struct {
 	SessionID string `json:"session_id"`
 	Prompt    string `json:"prompt"`
+	RequestID string `json:"request_id,omitempty"`
 }
 
 func (t *sendPromptTool) Execute(ctx context.Context, workingDir string, args json.RawMessage) (string, error) {
@@ -234,7 +236,7 @@ func (t *sendPromptTool) Execute(ctx context.Context, workingDir string, args js
 	if input.SessionID == "" || input.Prompt == "" {
 		return "", fmt.Errorf("send_prompt: session_id and prompt are required")
 	}
-	if err := t.executor.SendPrompt(ctx, input.SessionID, input.Prompt); err != nil {
+	if err := t.executor.SendPrompt(ctx, input.SessionID, input.Prompt, input.RequestID); err != nil {
 		return "", fmt.Errorf("send_prompt: %w", err)
 	}
 	return "Prompt sent.", nil

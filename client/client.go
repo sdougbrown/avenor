@@ -279,9 +279,17 @@ func (c *Client) Cancel(runtimeID string) error {
 
 // Prompt sends a follow-up prompt to the one-shot session or a runtime.
 func (c *Client) Prompt(runtimeID, text string) error {
+	return c.PromptWithRequestID(runtimeID, text, "")
+}
+
+// PromptWithRequestID sends a follow-up prompt with an optional child-question request ID.
+func (c *Client) PromptWithRequestID(runtimeID, text, requestID string) error {
 	params := map[string]string{"text": text}
 	if runtimeID != "" {
 		params["runtime_id"] = runtimeID
+	}
+	if requestID != "" {
+		params["request_id"] = requestID
 	}
 	return c.Call("prompt", params, nil)
 }

@@ -48,7 +48,7 @@ type Config struct {
 // OrchestratorExecutor wraps the control-socket client for orchestration tools.
 type OrchestratorExecutor interface {
 	SpawnAgent(ctx context.Context, params map[string]any) (sessionID string, err error)
-	SendPrompt(ctx context.Context, sessionID, prompt string) error
+	SendPrompt(ctx context.Context, sessionID, prompt, requestID string) error
 	GetStatus(ctx context.Context, sessionID string) (map[string]any, error)
 	WaitForDone(ctx context.Context, sessionID string) (*runtime.AgentResult, error)
 	SendToParent(ctx context.Context, runtimeID, message string) error

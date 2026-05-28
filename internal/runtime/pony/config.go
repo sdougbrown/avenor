@@ -128,8 +128,8 @@ func (e *controlSocketExecutor) SpawnAgent(ctx context.Context, params map[strin
 	return "", fmt.Errorf("no session_id or runtime_id in spawn result")
 }
 
-func (e *controlSocketExecutor) SendPrompt(ctx context.Context, sessionID, prompt string) error {
-	return e.client.Prompt(sessionID, prompt)
+func (e *controlSocketExecutor) SendPrompt(ctx context.Context, sessionID, prompt, requestID string) error {
+	return e.client.PromptWithRequestID(sessionID, prompt, requestID)
 }
 
 func (e *controlSocketExecutor) GetStatus(ctx context.Context, sessionID string) (map[string]any, error) {

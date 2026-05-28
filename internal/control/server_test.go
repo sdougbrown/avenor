@@ -498,7 +498,7 @@ func (m *mockStableHandler) RuntimeStatus(runtimeID string) (any, error) {
 
 func (m *mockStableHandler) RuntimeCancel(runtimeID string) error { return nil }
 
-func (m *mockStableHandler) RuntimePrompt(runtimeID, text string) error { return nil }
+func (m *mockStableHandler) RuntimePrompt(runtimeID, text, requestID string) error { return nil }
 
 func (m *mockStableHandler) RuntimeAnswerPermission(runtimeID, requestID, optionID string) error {
 	return nil

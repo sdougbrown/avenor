@@ -62,7 +62,7 @@ func TestStableHandlerNoRuntimes(t *testing.T) {
 	}
 
 	// Prompt for nonexistent runtime
-	err = sup.RuntimePrompt("rt_nonexistent", "hello")
+	err = sup.RuntimePrompt("rt_nonexistent", "hello", "")
 	if err == nil {
 		t.Fatal("RuntimePrompt for nonexistent runtime should error")
 	}
@@ -278,7 +278,7 @@ func TestRuntimePromptRejectsCompletedRuntime(t *testing.T) {
 		completed: true,
 	}
 
-	if err := sup.RuntimePrompt("rt_done", "hello"); err == nil {
+	if err := sup.RuntimePrompt("rt_done", "hello", ""); err == nil {
 		t.Fatal("RuntimePrompt on completed runtime should error")
 	}
 }
@@ -1228,7 +1228,7 @@ func TestSendToParentTimeoutCancelledByPrompt(t *testing.T) {
 	if err := sup.RuntimeSendToParent(child.id, "need clarification"); err != nil {
 		t.Fatalf("RuntimeSendToParent: %v", err)
 	}
-	if err := sup.RuntimePrompt(child.id, "Use encoding/json"); err != nil {
+	if err := sup.RuntimePrompt(child.id, "Use encoding/json", ""); err != nil {
 		t.Fatalf("RuntimePrompt: %v", err)
 	}
 
@@ -1241,6 +1241,32 @@ func TestSendToParentTimeoutCancelledByPrompt(t *testing.T) {
 	}
 	if child.promptQueue[0] != "Use encoding/json" {
 		t.Fatalf("promptQueue[0] = %q, want parent prompt", child.promptQueue[0])
+	}
+}
+
+func TestSendToParentDuplicateRequestIDIgnored(t *testing.T) {
+	sup := NewSupervisor(Config{ChildQuestionTimeout: time.Second})
+
+	child := &childRuntime{id: "rt_child", promptCh: make(chan struct{}, 1)}
+	sup.controlMu.Lock()
+	sup.runtimes[child.id] = child
+	sup.pendingQuestions[child.id] = pendingChildQuestion{requestID: "cq_42"}
+	sup.controlMu.Unlock()
+
+	if err := sup.RuntimePrompt(child.id, "First answer", "cq_42"); err != nil {
+		t.Fatalf("RuntimePrompt first call: %v", err)
+	}
+	if err := sup.RuntimePrompt(child.id, "Duplicate answer", "cq_42"); err != nil {
+		t.Fatalf("RuntimePrompt duplicate call: %v", err)
+	}
+
+	child.mu.Lock()
+	defer child.mu.Unlock()
+	if len(child.promptQueue) != 1 {
+		t.Fatalf("promptQueue len = %d, want 1", len(child.promptQueue))
+	}
+	if child.promptQueue[0] != "First answer" {
+		t.Fatalf("promptQueue[0] = %q, want First answer", child.promptQueue[0])
 	}
 }
 

@@ -89,6 +89,11 @@ type pendingChildQuestion struct {
 	timer     *time.Timer
 }
 
+type handledChildQuestion struct {
+	requestID string
+	at        time.Time
+}
+
 type Supervisor struct {
 	config          Config
 	runID           string
@@ -101,6 +106,7 @@ type Supervisor struct {
 	runtimeActivity chan struct{}
 	childQuestionSeq int
 	pendingQuestions map[string]pendingChildQuestion // child runtime ID -> pending question
+	handledQuestions map[string]handledChildQuestion // child runtime ID -> latest handled request
 	childQuestionTimeout time.Duration
 	httpServer      *control.HTTPDebugServer
 	permOptions     map[string][]any // keyed by "runtimeID:requestID"
@@ -123,6 +129,7 @@ func NewSupervisor(cfg Config) *Supervisor {
 		shutdownCh:      make(chan struct{}),
 		runtimeActivity: make(chan struct{}),
 		pendingQuestions: map[string]pendingChildQuestion{},
+		handledQuestions: map[string]handledChildQuestion{},
 		childQuestionTimeout: cfg.ChildQuestionTimeout,
 		permOptions:     map[string][]any{},
 		httpServers:     map[string]any{},
@@ -1225,8 +1232,18 @@ func (s *Supervisor) RuntimeCancel(rtID string) error {
 	return s.cancelRuntime(rtID)
 }
 
-func (s *Supervisor) RuntimePrompt(rtID, text string) error {
-	s.clearPendingChildQuestion(rtID)
+func (s *Supervisor) RuntimePrompt(rtID, text, requestID string) error {
+	if requestID != "" {
+		s.controlMu.Lock()
+		if handled, ok := s.handledQuestions[rtID]; ok && handled.requestID == requestID {
+			s.controlMu.Unlock()
+			return nil
+		}
+		s.handledQuestions[rtID] = handledChildQuestion{requestID: requestID, at: time.Now()}
+		s.controlMu.Unlock()
+	}
+
+	s.clearPendingChildQuestion(rtID, requestID)
 
 	s.controlMu.Lock()
 	rt := s.runtimes[rtID]
@@ -1245,9 +1262,13 @@ func (s *Supervisor) RuntimePrompt(rtID, text string) error {
 	return nil
 }
 
-func (s *Supervisor) clearPendingChildQuestion(childID string) {
+func (s *Supervisor) clearPendingChildQuestion(childID, requestID string) {
 	s.controlMu.Lock()
 	pq, ok := s.pendingQuestions[childID]
+	if ok && requestID != "" && pq.requestID != requestID {
+		s.controlMu.Unlock()
+		return
+	}
 	if ok {
 		delete(s.pendingQuestions, childID)
 	}
@@ -1328,7 +1349,7 @@ func (s *Supervisor) RuntimeSendToParent(rtID, message string) error {
 		}
 		delete(s.pendingQuestions, rtID)
 		s.controlMu.Unlock()
-		_ = s.RuntimePrompt(rtID, fmt.Sprintf("No parent response received within %s. Continue with your best judgment and state assumptions.", s.childQuestionTimeout))
+		_ = s.RuntimePrompt(rtID, fmt.Sprintf("No parent response received within %s. Continue with your best judgment and state assumptions.", s.childQuestionTimeout), requestID)
 	})
 	s.pendingQuestions[rtID] = pendingChildQuestion{requestID: requestID, timer: timer}
 	s.controlMu.Unlock()
