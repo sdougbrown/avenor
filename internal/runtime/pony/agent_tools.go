@@ -342,9 +342,11 @@ func (t *sendToParentTool) Execute(ctx context.Context, workingDir string, args 
 	if input.Message == "" {
 		return "", fmt.Errorf("send_to_parent: message is required")
 	}
-	// Runtime ID is empty for now; the control server handler will validate
-	// and return a clear error until runtime identification is wired up.
-	if err := t.executor.SendToParent(ctx, "", input.Message); err != nil {
+	// Read the runtime ID from context; it was injected by the provider
+	// during Prompt. When empty (e.g., sessions without runtime context),
+	// the control server handler will validate and return a clear error.
+	runtimeID, _ := ctx.Value(runtimeIDKey).(string)
+	if err := t.executor.SendToParent(ctx, runtimeID, input.Message); err != nil {
 		return "", fmt.Errorf("send_to_parent: %w", err)
 	}
 	return "Message sent to parent agent.", nil

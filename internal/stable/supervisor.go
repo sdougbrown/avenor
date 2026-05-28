@@ -360,10 +360,11 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 
 	// Start provider and session.
 	startOpts := runtime.StartOptions{
-		Agent: params.Agent,
-		Label: params.Label,
-		Dir:   params.Dir,
-		Model: params.Model,
+		Agent:     params.Agent,
+		Label:     params.Label,
+		Dir:       params.Dir,
+		Model:     params.Model,
+		RuntimeID: rtID,
 	}
 	discovery := cli.DiscoverServer(params.ServerURL, os.Getenv)
 	startOpts.ServerURL = discovery.URL

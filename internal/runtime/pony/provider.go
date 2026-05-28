@@ -16,6 +16,10 @@ import (
 // backendID is the backend identifier.
 const backendID = "pony"
 
+// Context key for the current session's runtime ID.
+type runtimeIDKeyType struct{}
+var runtimeIDKey runtimeIDKeyType
+
 // Config configures the pony provider.
 type Config struct {
 	Adapter        model.Adapter
@@ -143,6 +147,8 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
 
+	ss.runtimeID = opts.RuntimeID
+
 	// 1. System prompt
 	if p.cfg.SystemPrompt != "" {
 		ss.history = append(ss.history, model.Message{
@@ -213,6 +219,9 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 
 	// Ensure cancel is cleaned up when Prompt returns
 	defer cancel()
+
+	// Inject runtime ID into context for tool access (e.g., send_to_parent).
+	promptCtx = context.WithValue(promptCtx, runtimeIDKey, ss.runtimeID)
 
 	// Build event channel — emit through session state
 	eventCh := make(chan events.Event, 256)

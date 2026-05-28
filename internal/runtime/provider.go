@@ -24,6 +24,7 @@ type StartOptions struct {
 	Dir       string
 	ServerURL string
 	Model     string
+	RuntimeID string // supervisor-assigned runtime ID (rt_N), for parent-child routing
 }
 
 // Session represents an active ACP session.

@@ -19,6 +19,7 @@ type sessionState struct {
 	subsMu     sync.Mutex
 	initialised  bool // true after Start has set up history
 	droppedEvents int // count of events dropped due to full subscriber channels
+	runtimeID     string // supervisor-assigned runtime ID (rt_N)
 
 	// pendingPerm is set when a tool call is waiting for permission approval.
 	pendingPerm struct {
