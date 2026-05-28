@@ -83,7 +83,7 @@ On follow-up prompts (multi-turn within a single session), only the system promp
 Tools are gated by profile configuration. A profile can have `local` tools, `orchestration` tools, both, or neither.
 
 ### Local Tools
-Enabled via `"local": true`. These allow the agent to interact with the local filesystem and shell:
+Enabled via `"local": true`. These allow the agent to interact with the local filesystem and shell. By default, additional skill directories are read-access only; write and edit operations remain restricted unless the directory is explicitly write-allowed.
 - `file_read`: Read file contents.
 - `file_write`: Write new files.
 - `file_edit`: Perform partial edits to existing files.

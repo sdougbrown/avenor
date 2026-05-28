@@ -137,7 +137,7 @@ func safeResolvePath(workingDir string, additionalDirs []string, target string) 
 		}
 	}
 
-	return "", fmt.Errorf("path %q is outside the working directory", target)
+	return "", fmt.Errorf("path %q is outside the working directory and configured allowed directories", target)
 }
 
 // IsPathInAllowedDirs checks if a resolved path is within any of the allowed directories.
