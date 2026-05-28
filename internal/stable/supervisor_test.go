@@ -1183,6 +1183,67 @@ func TestSpawnAndSendToParent(t *testing.T) {
 	}
 }
 
+func TestSendToParentTimeoutInjectsSyntheticPrompt(t *testing.T) {
+	sup := NewSupervisor(Config{ChildQuestionTimeout: 25 * time.Millisecond})
+
+	parent := &childRuntime{id: "rt_parent", promptCh: make(chan struct{}, 1)}
+	parent.session.SessionID = "ses_parent"
+	child := &childRuntime{id: "rt_child", parentID: "rt_parent", promptCh: make(chan struct{}, 1)}
+	child.session.SessionID = "ses_child"
+
+	sup.controlMu.Lock()
+	sup.runtimes[parent.id] = parent
+	sup.runtimes[child.id] = child
+	sup.controlMu.Unlock()
+
+	if err := sup.RuntimeSendToParent(child.id, "which package?"); err != nil {
+		t.Fatalf("RuntimeSendToParent: %v", err)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	child.mu.Lock()
+	defer child.mu.Unlock()
+	if len(child.promptQueue) != 1 {
+		t.Fatalf("promptQueue len = %d, want 1", len(child.promptQueue))
+	}
+	if !strings.Contains(child.promptQueue[0], "No parent response received within") {
+		t.Fatalf("timeout prompt = %q, want timeout guidance", child.promptQueue[0])
+	}
+}
+
+func TestSendToParentTimeoutCancelledByPrompt(t *testing.T) {
+	sup := NewSupervisor(Config{ChildQuestionTimeout: 50 * time.Millisecond})
+
+	parent := &childRuntime{id: "rt_parent", promptCh: make(chan struct{}, 1)}
+	parent.session.SessionID = "ses_parent"
+	child := &childRuntime{id: "rt_child", parentID: "rt_parent", promptCh: make(chan struct{}, 1)}
+	child.session.SessionID = "ses_child"
+
+	sup.controlMu.Lock()
+	sup.runtimes[parent.id] = parent
+	sup.runtimes[child.id] = child
+	sup.controlMu.Unlock()
+
+	if err := sup.RuntimeSendToParent(child.id, "need clarification"); err != nil {
+		t.Fatalf("RuntimeSendToParent: %v", err)
+	}
+	if err := sup.RuntimePrompt(child.id, "Use encoding/json"); err != nil {
+		t.Fatalf("RuntimePrompt: %v", err)
+	}
+
+	time.Sleep(120 * time.Millisecond)
+
+	child.mu.Lock()
+	defer child.mu.Unlock()
+	if len(child.promptQueue) != 1 {
+		t.Fatalf("promptQueue len = %d, want 1", len(child.promptQueue))
+	}
+	if child.promptQueue[0] != "Use encoding/json" {
+		t.Fatalf("promptQueue[0] = %q, want parent prompt", child.promptQueue[0])
+	}
+}
+
 // findRuntimeByID is a test helper to find a runtime entry by ID in a list.
 func findRuntimeByID(rts []map[string]any, id string) map[string]any {
 	for _, rt := range rts {

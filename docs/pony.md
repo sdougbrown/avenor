@@ -46,7 +46,7 @@ Pony is configured via a JSON file. Instead of a single global setting, you defi
     "jockey": {
       "model": "gpt-4o",
       "system_prompt": "You are a jockey. Your job is to orchestrate other agents to complete complex tasks.",
-      "initial_prompt": "Break the incoming task into independent units. Spawn a mule for each unit using spawn_agent, send each mule its prompt, then wait for all to complete.",
+      "initial_prompt": "Break the incoming task into independent units. Spawn all mules up front with spawn_agents, then wait_for_done on each child to collect results.",
       "tools": {
         "local": false,
         "orchestration": true
@@ -95,9 +95,11 @@ Enabled via `"local": true`. These allow the agent to interact with the local fi
 ### Orchestration Tools
 Enabled via `"orchestration": true`. These allow a **jockey** agent to manage child agents:
 - `spawn_agent`: Create a new child agent session.
+- `spawn_agents`: Create multiple child agent sessions in a single call for parallel execution.
 - `send_prompt`: Send a follow-up message to a child.
 - `get_status`: Check if a child is running or finished.
 - `wait_for_done`: Block until a child agent completes its task.
+- `send_to_parent`: From a child, ask the parent for clarification (emits `child.question`).
 
 ## The Wire Format
 
