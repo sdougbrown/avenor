@@ -119,11 +119,11 @@ func (e *controlSocketExecutor) SpawnAgent(ctx context.Context, params map[strin
 	if err != nil {
 		return "", err
 	}
-	if sid, ok := result["session_id"].(string); ok && sid != "" {
-		return sid, nil
-	}
 	if rid, ok := result["runtime_id"].(string); ok && rid != "" {
 		return rid, nil
+	}
+	if sid, ok := result["session_id"].(string); ok && sid != "" {
+		return sid, nil
 	}
 	return "", fmt.Errorf("no session_id or runtime_id in spawn result")
 }

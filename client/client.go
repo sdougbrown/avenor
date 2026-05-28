@@ -72,6 +72,9 @@ type Client struct {
 	eventCh   chan Event
 	eventOnce sync.Once
 	dropped   int // events discarded due to full eventCh; surfaced as client.lagged
+
+	subsMu      sync.Mutex
+	runtimeSubs map[string]map[chan Event]struct{}
 }
 
 func Dial(socketPath string) (*Client, error) {
@@ -84,6 +87,7 @@ func Dial(socketPath string) (*Client, error) {
 		scan:    bufio.NewScanner(conn),
 		pending: map[int]chan Response{},
 		eventCh: make(chan Event, 256),
+		runtimeSubs: map[string]map[chan Event]struct{}{},
 	}, nil
 }
 
@@ -238,6 +242,7 @@ func (c *Client) readLoop() {
 		default:
 			c.dropped++
 		}
+		c.publishRuntimeEvent(ev)
 	}
 }
 
@@ -298,24 +303,50 @@ func (c *Client) AnswerPermission(runtimeID, requestID, optionID string) error {
 // the underlying event channel is closed. Calling SubscribeRuntime ensures the
 // readLoop is started.
 func (c *Client) SubscribeRuntime(ctx context.Context, runtimeID string) <-chan Event {
-	// Ensure readLoop is running (same as Events()).
-	c.eventOnce.Do(func() {
-		go c.readLoop()
-	})
+	_ = c.Events() // ensure readLoop is running
 	out := make(chan Event, 256)
+	c.subsMu.Lock()
+	if c.runtimeSubs[runtimeID] == nil {
+		c.runtimeSubs[runtimeID] = map[chan Event]struct{}{}
+	}
+	c.runtimeSubs[runtimeID][out] = struct{}{}
+	c.subsMu.Unlock()
 	go func() {
-		defer close(out)
-		for evt := range c.eventCh {
-			if evt.RuntimeID == runtimeID {
-				select {
-				case out <- evt:
-				case <-ctx.Done():
-					return
-				}
+		<-ctx.Done()
+		c.subsMu.Lock()
+		if subs := c.runtimeSubs[runtimeID]; subs != nil {
+			delete(subs, out)
+			if len(subs) == 0 {
+				delete(c.runtimeSubs, runtimeID)
 			}
 		}
+		c.subsMu.Unlock()
+		close(out)
 	}()
 	return out
+}
+
+func (c *Client) publishRuntimeEvent(ev Event) {
+	keys := []string{ev.RuntimeID}
+	if ev.SessionID != "" && ev.SessionID != ev.RuntimeID {
+		keys = append(keys, ev.SessionID)
+	}
+
+	c.subsMu.Lock()
+	targets := make([]chan Event, 0)
+	for _, key := range keys {
+		for ch := range c.runtimeSubs[key] {
+			targets = append(targets, ch)
+		}
+	}
+	c.subsMu.Unlock()
+
+	for _, ch := range targets {
+		select {
+		case ch <- ev:
+		default:
+		}
+	}
 }
 
 // List returns all active runtimes from the stable supervisor.

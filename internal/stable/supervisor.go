@@ -93,6 +93,7 @@ type Supervisor struct {
 	nextID          int
 	shutdownCh      chan struct{}
 	runtimeActivity chan struct{}
+	childQuestionSeq int
 	httpServer      *control.HTTPDebugServer
 	permOptions     map[string][]any // keyed by "runtimeID:requestID"
 	httpServers     map[string]any   // dir → *managedHTTPServer or errHTTPServerStarting sentinel
@@ -1282,6 +1283,10 @@ func (s *Supervisor) RuntimeSendToParent(rtID, message string) error {
 	parent.mu.Lock()
 	parentSessionID := parent.session.SessionID
 	parent.mu.Unlock()
+	s.controlMu.Lock()
+	s.childQuestionSeq++
+	requestID := fmt.Sprintf("cq_%d", s.childQuestionSeq)
+	s.controlMu.Unlock()
 	s.control.PublishEvent(events.Event{
 		Event:     "child.question",
 		SessionID: parentSessionID,
@@ -1290,6 +1295,7 @@ func (s *Supervisor) RuntimeSendToParent(rtID, message string) error {
 			"message":    message,
 			"parent_id":  parentID,
 			"child_id":   rtID,
+			"request_id": requestID,
 			"ts":         time.Now().UnixMilli(),
 			"session_id": childSessionID,
 		},

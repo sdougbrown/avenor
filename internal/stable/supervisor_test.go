@@ -1168,6 +1168,10 @@ func TestSpawnAndSendToParent(t *testing.T) {
 				if gotChildID != childIDs[0] {
 					t.Errorf("child.question child_id = %q, want %q", gotChildID, childIDs[0])
 				}
+				gotRequestID, _ := evt.Raw["request_id"].(string)
+				if gotRequestID == "" || !strings.HasPrefix(gotRequestID, "cq_") {
+					t.Errorf("child.question request_id = %q, want prefix cq_", gotRequestID)
+				}
 				found = true
 			}
 		case <-ctx.Done():
