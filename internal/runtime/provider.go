@@ -41,6 +41,14 @@ type PermissionResponse struct {
 	Message  string
 }
 
+// AgentResult holds the result of a completed agent session.
+type AgentResult struct {
+	SessionID   string   `json:"session_id"`
+	StopReason  string   `json:"stop_reason"`
+	ExitCode    int      `json:"exit_code"`
+	OutputFiles []string `json:"output_files,omitempty"`
+}
+
 // Capabilities describes what a runtime backend supports.
 type Capabilities struct {
 	Backend             string

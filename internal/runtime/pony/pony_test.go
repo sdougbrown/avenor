@@ -131,16 +131,20 @@ func (f *fakeExecutor) GetStatus(ctx context.Context, sessionID string) (map[str
 	return map[string]any{"phase": "running", "state": "active"}, nil
 }
 
-func (f *fakeExecutor) WaitForDone(ctx context.Context, sessionID string) error {
+func (f *fakeExecutor) WaitForDone(ctx context.Context, sessionID string) (*runtime.AgentResult, error) {
 	f.waitCalled++
 	if f.waitErr != nil {
-		return f.waitErr
+		return nil, f.waitErr
 	}
 	if !f.waitDone {
 		<-ctx.Done()
-		return ctx.Err()
+		return nil, ctx.Err()
 	}
-	return nil
+	return &runtime.AgentResult{
+		SessionID:  sessionID,
+		StopReason: "stop",
+		ExitCode:   0,
+	}, nil
 }
 
 
@@ -1042,8 +1046,9 @@ func TestOrchestrationTools_waitForDone_immediate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result != "Child agent completed." {
-		t.Errorf("result = %q, want %q", result, "Child agent completed.")
+	expected := "Agent child_1 completed (exit 0, stop). Output files: []"
+	if result != expected {
+		t.Errorf("result = %q, want %q", result, expected)
 	}
 }
 

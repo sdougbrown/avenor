@@ -8,6 +8,7 @@ import (
 	"sort"
 
 	"github.com/sdougbrown/avenor/client"
+	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/pony/tools"
 )
 
@@ -135,19 +136,21 @@ func (e *controlSocketExecutor) GetStatus(ctx context.Context, sessionID string)
 	return e.client.Status(sessionID)
 }
 
-func (e *controlSocketExecutor) WaitForDone(ctx context.Context, sessionID string) error {
-	eventsCh := e.client.Events()
-	for {
-		select {
-		case evt, ok := <-eventsCh:
-			if !ok {
-				return fmt.Errorf("event channel closed while waiting for session %s", sessionID)
+func (e *controlSocketExecutor) WaitForDone(ctx context.Context, sessionID string) (*runtime.AgentResult, error) {
+	sub := e.client.SubscribeRuntime(ctx, sessionID)
+	for evt := range sub {
+		if evt.Event == "session.end" {
+			stopReason, _ := evt.Raw["stop_reason"].(string)
+			exitCode := 0
+			if ec, ok := evt.Raw["exit_code"].(float64); ok {
+				exitCode = int(ec)
 			}
-			if evt.Event == "session.end" && (evt.RuntimeID == sessionID || evt.SessionID == sessionID) {
-				return nil
-			}
-		case <-ctx.Done():
-			return ctx.Err()
+			return &runtime.AgentResult{
+				SessionID:  sessionID,
+				StopReason: stopReason,
+				ExitCode:   exitCode,
+			}, nil
 		}
 	}
+	return nil, ctx.Err()
 }

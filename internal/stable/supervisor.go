@@ -46,6 +46,7 @@ type SpawnParams struct {
 	MaxRetries        int    `json:"max_retries,omitempty"`
 	LoopFile          string `json:"loop_file,omitempty"`
 	SessionID         string `json:"session_id,omitempty"`
+	ParentID          string `json:"parent_id,omitempty"` // runtime ID of the parent agent
 }
 
 type SpawnResult struct {
@@ -58,6 +59,8 @@ type SpawnResult struct {
 type childRuntime struct {
 	id               string
 	label            string
+	parentID         string               // runtime ID of the parent agent, empty for top-level
+	children         []string             // runtime IDs spawned by this runtime
 	provider         runtime.Provider
 	session          runtime.Session
 	eventWriter      cli.EventSink
@@ -231,6 +234,16 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 	}
 	s.runtimes[rtID] = child
 	s.controlMu.Unlock()
+
+	// Track parent-child relationship.
+	if params.ParentID != "" {
+		child.parentID = params.ParentID
+		s.controlMu.Lock()
+		if parent, ok := s.runtimes[params.ParentID]; ok {
+			parent.children = append(parent.children, rtID)
+		}
+		s.controlMu.Unlock()
+	}
 
 	releaseReservation := func() {
 		s.controlMu.Lock()
@@ -912,6 +925,8 @@ func (s *Supervisor) listRuntimes() []map[string]any {
 			"exit_code":     rt.exitCode,
 			"on_event":      rt.onEvent,
 			"sentinel_file": rt.sentinelFile,
+			"parent_id":     rt.parentID,
+			"children":      rt.children,
 		}
 		rt.mu.Unlock()
 		out = append(out, entry)
@@ -1042,6 +1057,21 @@ func (s *Supervisor) Spawn(raw json.RawMessage) (any, error) {
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return nil, fmt.Errorf("invalid spawn params: %w", err)
 	}
+	// Auto-populate ParentID when the spawn is called by a known runtime.
+	// The caller embeds its own runtime_id in the spawn params; if it maps to
+	// a registered runtime, treat it as the parent.
+	if p.ParentID == "" {
+		var caller struct {
+			RuntimeID string `json:"runtime_id"`
+		}
+		if err := json.Unmarshal(raw, &caller); err == nil && caller.RuntimeID != "" {
+			s.controlMu.Lock()
+			if _, ok := s.runtimes[caller.RuntimeID]; ok {
+				p.ParentID = caller.RuntimeID
+			}
+			s.controlMu.Unlock()
+		}
+	}
 	return s.spawn(p)
 }
 
@@ -1086,6 +1116,8 @@ func (s *Supervisor) RuntimeStatus(rtID string) (any, error) {
 		"exit_code":     rt.exitCode,
 		"on_event":      rt.onEvent,
 		"sentinel_file": rt.sentinelFile,
+		"parent_id":     rt.parentID,
+		"children":      rt.children,
 	}
 	rt.mu.Unlock()
 	return entry, nil

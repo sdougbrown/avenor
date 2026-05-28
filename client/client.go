@@ -2,6 +2,7 @@ package client
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -290,6 +291,31 @@ func (c *Client) AnswerPermission(runtimeID, requestID, optionID string) error {
 		params["runtime_id"] = runtimeID
 	}
 	return c.Call("answer_permission", params, nil)
+}
+
+// SubscribeRuntime returns a channel of events filtered to a specific runtime.
+// The caller must drain the channel. The channel closes when ctx is done or
+// the underlying event channel is closed. Calling SubscribeRuntime ensures the
+// readLoop is started.
+func (c *Client) SubscribeRuntime(ctx context.Context, runtimeID string) <-chan Event {
+	// Ensure readLoop is running (same as Events()).
+	c.eventOnce.Do(func() {
+		go c.readLoop()
+	})
+	out := make(chan Event, 256)
+	go func() {
+		defer close(out)
+		for evt := range c.eventCh {
+			if evt.RuntimeID == runtimeID {
+				select {
+				case out <- evt:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+	return out
 }
 
 // List returns all active runtimes from the stable supervisor.

@@ -206,8 +206,10 @@ func (t *waitForDoneTool) Execute(ctx context.Context, workingDir string, args j
 	if input.SessionID == "" {
 		return "", fmt.Errorf("wait_for_done: session_id is required")
 	}
-	if err := t.executor.WaitForDone(ctx, input.SessionID); err != nil {
+	result, err := t.executor.WaitForDone(ctx, input.SessionID)
+	if err != nil {
 		return "", fmt.Errorf("wait_for_done: %w", err)
 	}
-	return "Child agent completed.", nil
+	return fmt.Sprintf("Agent %s completed (exit %d, %s). Output files: %v",
+		input.SessionID, result.ExitCode, result.StopReason, result.OutputFiles), nil
 }
