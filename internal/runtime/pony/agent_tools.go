@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -18,6 +19,7 @@ func newOrchestrationTools(executor OrchestratorExecutor) []tools.Tool {
 		&sendPromptTool{executor: executor},
 		&getStatusTool{executor: executor},
 		&waitForDoneTool{executor: executor},
+		&sendToParentTool{executor: executor},
 	}
 }
 
@@ -310,4 +312,40 @@ func (t *waitForDoneTool) Execute(ctx context.Context, workingDir string, args j
 	}
 	return fmt.Sprintf("Agent %s completed (exit %d, %s). Output files: %v",
 		input.SessionID, result.ExitCode, result.StopReason, result.OutputFiles), nil
+}
+
+// sendToParentTool allows a child agent to send a message back to its parent.
+type sendToParentTool struct {
+	executor OrchestratorExecutor
+}
+
+func (t *sendToParentTool) Name() string { return "send_to_parent" }
+func (t *sendToParentTool) Description() string {
+	return "Send a message from a child agent back to its parent agent. The parent will see this as a child.question event."
+}
+func (t *sendToParentTool) Schema() json.RawMessage {
+	return json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"message": {"type": "string", "description": "The message to send to the parent agent"}
+		},
+		"required": ["message"]
+	}`)
+}
+
+func (t *sendToParentTool) Execute(ctx context.Context, workingDir string, args json.RawMessage) (string, error) {
+	var input struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(args, &input); err != nil {
+		return "", fmt.Errorf("send_to_parent: invalid args: %w", err)
+	}
+	if input.Message == "" {
+		return "", fmt.Errorf("send_to_parent: message is required")
+	}
+	runtimeID := os.Getenv("RUNTIME_ID")
+	if err := t.executor.SendToParent(ctx, runtimeID, input.Message); err != nil {
+		return "", fmt.Errorf("send_to_parent: %w", err)
+	}
+	return "Message sent to parent agent.", nil
 }

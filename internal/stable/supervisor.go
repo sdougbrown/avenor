@@ -1254,6 +1254,43 @@ func (s *Supervisor) RuntimeInterruptAndPrompt(rtID, text string, keepQueue bool
 	return nil
 }
 
+func (s *Supervisor) RuntimeSendToParent(rtID, message string) error {
+	s.controlMu.Lock()
+	child := s.runtimes[rtID]
+	s.controlMu.Unlock()
+	if child == nil {
+		return fmt.Errorf("runtime %q not found", rtID)
+	}
+child.mu.Lock()
+	parentID := child.parentID
+	childSessionID := child.session.SessionID
+	child.mu.Unlock()
+	if parentID == "" {
+		return fmt.Errorf("runtime %q has no parent", rtID)
+	}
+	s.controlMu.Lock()
+	parent := s.runtimes[parentID]
+	s.controlMu.Unlock()
+	if parent == nil {
+		return fmt.Errorf("parent runtime %q not found", parentID)
+	}
+	parent.mu.Lock()
+	parentSessionID := parent.session.SessionID
+	parent.mu.Unlock()
+	s.control.PublishEvent(events.Event{
+		Event:     "child.question",
+		SessionID: parentSessionID,
+		Fields: map[string]any{
+			"message":    message,
+			"parent_id":  parentID,
+			"child_id":   rtID,
+			"ts":         time.Now().UnixMilli(),
+			"session_id": childSessionID,
+		},
+	})
+	return nil
+}
+
 func backoffDelay(attempt int) time.Duration {
 	seconds := 2 << uint(attempt-1)
 	if seconds > 30 {

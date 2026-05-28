@@ -163,3 +163,7 @@ func (e *controlSocketExecutor) WaitForDone(ctx context.Context, sessionID strin
 	}
 	return nil, ctx.Err()
 }
+
+func (e *controlSocketExecutor) SendToParent(ctx context.Context, runtimeID, message string) error {
+	return e.client.SendToParent(runtimeID, message)
+}

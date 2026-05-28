@@ -45,6 +45,7 @@ type OrchestratorExecutor interface {
 	SendPrompt(ctx context.Context, sessionID, prompt string) error
 	GetStatus(ctx context.Context, sessionID string) (map[string]any, error)
 	WaitForDone(ctx context.Context, sessionID string) (*runtime.AgentResult, error)
+	SendToParent(ctx context.Context, runtimeID, message string) error
 }
 
 // Provider implements runtime.Provider for the pony backend.

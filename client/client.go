@@ -348,3 +348,12 @@ func (c *Client) InterruptAndPrompt(runtimeID, text string, keepQueue bool) erro
 	}
 	return c.Call("interrupt_and_prompt", params, nil)
 }
+
+// SendToParent sends a message from a child runtime to its parent.
+func (c *Client) SendToParent(runtimeID, message string) error {
+	params := map[string]any{
+		"runtime_id": runtimeID,
+		"message":    message,
+	}
+	return c.Call("send_to_parent", params, nil)
+}

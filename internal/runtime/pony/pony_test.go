@@ -147,6 +147,10 @@ func (f *fakeExecutor) WaitForDone(ctx context.Context, sessionID string) (*runt
 	}, nil
 }
 
+func (f *fakeExecutor) SendToParent(ctx context.Context, runtimeID, message string) error {
+	return nil
+}
+
 
 // ── RunLoop tests ────────────────────────────────────────────────────────────
 

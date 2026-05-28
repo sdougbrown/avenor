@@ -506,6 +506,10 @@ func (m *mockStableHandler) RuntimeInterruptAndPrompt(runtimeID, text string, ke
 	return nil
 }
 
+func (m *mockStableHandler) RuntimeSendToParent(runtimeID, message string) error {
+	return nil
+}
+
 func TestStableSpawnMethod(t *testing.T) {
 	state := NewState("run_1", "", 0)
 	s := NewServer(state)
