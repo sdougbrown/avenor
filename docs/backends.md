@@ -18,19 +18,19 @@ avenor --backend claude-channel --prompt "say hi"
 
 ## Capability matrix
 
-| Capability | opencode-acp | opencode-http | codex-app-server | gemini-acp | cursor-acp | pi |
-|---|---|---|---|---|---|---|
-| New sessions | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Session resume | ✓ | ✓ | ✓ | — | — | ✓ |
-| Prompt execution | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Cancel | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Event streaming | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Permission relay | ✓ | ✗ | ✓ | ✓ | ✓ | ✓ |
-| Model selection | ✓ | ✓ | ✓ | ✗ | ✗ | ✓ |
-| External server URL | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ |
-| Subprocess discovery | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| Capability | opencode-acp | opencode-http | codex-app-server | gemini-acp | cursor-acp | pi | claude-channel |
+|---|---|---|---|---|---|---|---|
+| New sessions | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Session resume | ✓ | ✓ | ✓ | — | — | ✓ | ✗ |
+| Prompt execution | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓  |
+| Cancel | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓  |
+| Event streaming | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Permission relay | ✓ | ✗ | ✓ | ✓ | ✓ | ✓ | ⚠  |
+| Model selection | ✓ | ✓ | ✓ | ✗ | ✗ | ✓ | ✓  |
+| External server URL | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| Subprocess discovery | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ |
 
-`—` means not verified; `✗` means not supported.
+`—` means not verified; `✗` means not supported, `⚠ ` means experimental.
 
 ---
 
