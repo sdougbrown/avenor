@@ -713,3 +713,28 @@ func TestStableSendToParentMissingMessage(t *testing.T) {
 		t.Errorf("sendToParentCalled = %d, want 0 (should not be called)", mock.sendToParentCalled)
 	}
 }
+
+func TestStableSendToParentMessageTooLarge(t *testing.T) {
+	state := NewState("run_1", "", 0)
+	s := NewServer(state)
+	mock := &mockStableHandler{}
+	s.SetStableHandler(mock)
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	c := mustDial(t, path)
+	defer c.Close()
+	big := strings.Repeat("a", maxSendToParentMessageBytes+1)
+	params, _ := json.Marshal(map[string]any{"runtime_id": "rt_1", "message": big})
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "send_to_parent", Params: params})
+	resp := readResp(t, c)
+	if resp.Error == nil {
+		t.Fatal("expected error for oversized message, got nil")
+	}
+	if mock.sendToParentCalled != 0 {
+		t.Errorf("sendToParentCalled = %d, want 0 (should not be called)", mock.sendToParentCalled)
+	}
+}

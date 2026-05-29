@@ -10,6 +10,8 @@ import (
 	"time"
 )
 
+const maxSendToParentMessageBytes = 64 * 1024
+
 type Request struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      any             `json:"id,omitempty"`
@@ -390,6 +392,15 @@ func (c *Client) InterruptAndPrompt(runtimeID, text string, keepQueue bool) erro
 
 // SendToParent sends a message from a child runtime to its parent.
 func (c *Client) SendToParent(runtimeID, message string) error {
+	if runtimeID == "" {
+		return fmt.Errorf("runtime_id is required")
+	}
+	if message == "" {
+		return fmt.Errorf("message is required")
+	}
+	if len(message) > maxSendToParentMessageBytes {
+		return fmt.Errorf("message exceeds %d bytes", maxSendToParentMessageBytes)
+	}
 	params := map[string]any{
 		"runtime_id": runtimeID,
 		"message":    message,

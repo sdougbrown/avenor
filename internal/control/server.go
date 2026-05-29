@@ -17,6 +17,7 @@ import (
 )
 
 const subscriberBuffer = 256
+const maxSendToParentMessageBytes = 64 * 1024
 
 type PermissionAnswer struct {
 	RequestID string `json:"request_id"`
@@ -641,6 +642,9 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 			}
 			if sp.Message == "" {
 				return failure(req.ID, -32602, "invalid params", map[string]any{"required": []string{"message"}})
+			}
+			if len(sp.Message) > maxSendToParentMessageBytes {
+				return failure(req.ID, -32602, "invalid params", map[string]any{"message": fmt.Sprintf("message exceeds %d bytes", maxSendToParentMessageBytes)})
 			}
 			if err := s.stableHandler.RuntimeSendToParent(rtID, sp.Message); err != nil {
 				return failure(req.ID, -32000, err.Error(), nil)

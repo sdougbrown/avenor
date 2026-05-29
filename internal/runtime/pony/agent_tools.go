@@ -65,7 +65,15 @@ func (t *spawnAgentTool) Execute(ctx context.Context, workingDir string, args js
 	}
 
 	if input.Dir != "" {
-		rel, err := filepath.Rel(workingDir, input.Dir)
+		baseAbs, err := filepath.Abs(workingDir)
+		if err != nil {
+			return "", fmt.Errorf("spawn_agent: resolve working directory: %w", err)
+		}
+		dirAbs, err := filepath.Abs(input.Dir)
+		if err != nil {
+			return "", fmt.Errorf("spawn_agent: resolve dir: %w", err)
+		}
+		rel, err := filepath.Rel(baseAbs, dirAbs)
 		if err != nil || strings.HasPrefix(rel, "..") {
 			return "", fmt.Errorf("spawn_agent: dir %q is outside the working directory %q", input.Dir, workingDir)
 		}
@@ -159,7 +167,15 @@ func (t *spawnAgentsTool) Execute(ctx context.Context, workingDir string, args j
 			return "", fmt.Errorf("spawn_agents: prompt is required for each agent")
 		}
 		if agent.Dir != "" {
-			rel, err := filepath.Rel(workingDir, agent.Dir)
+			baseAbs, err := filepath.Abs(workingDir)
+			if err != nil {
+				return "", fmt.Errorf("spawn_agents: resolve working directory: %w", err)
+			}
+			dirAbs, err := filepath.Abs(agent.Dir)
+			if err != nil {
+				return "", fmt.Errorf("spawn_agents: resolve dir: %w", err)
+			}
+			rel, err := filepath.Rel(baseAbs, dirAbs)
 			if err != nil || strings.HasPrefix(rel, "..") {
 				return "", fmt.Errorf("spawn_agents: dir %q is outside the working directory %q", agent.Dir, workingDir)
 			}

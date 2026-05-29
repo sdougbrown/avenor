@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -178,6 +179,20 @@ func TestClientShutdown(t *testing.T) {
 
 	if err := c.Shutdown("graceful"); err != nil {
 		t.Fatalf("shutdown: %v", err)
+	}
+}
+
+func TestClientSendToParentValidation(t *testing.T) {
+	c := &Client{}
+	if err := c.SendToParent("", "msg"); err == nil {
+		t.Fatal("expected error for missing runtime_id")
+	}
+	if err := c.SendToParent("rt_1", ""); err == nil {
+		t.Fatal("expected error for missing message")
+	}
+	big := strings.Repeat("a", maxSendToParentMessageBytes+1)
+	if err := c.SendToParent("rt_1", big); err == nil {
+		t.Fatal("expected error for oversized message")
 	}
 }
 
