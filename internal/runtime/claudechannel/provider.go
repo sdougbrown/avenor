@@ -1,4 +1,4 @@
-// Package claudechannel implements a runtime.Provider for Claude Code via channels + PTY.
+// Package claudechannel implements a runtime.Provider for Claude Code via channels + tmux.
 package claudechannel
 
 import (
@@ -8,11 +8,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/creack/pty"
 	"github.com/google/uuid"
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
@@ -22,7 +22,7 @@ import (
 const backendID = "claude-channel"
 
 // Provider implements runtime.Provider for an interactive Claude Code session
-// controlled via claude/channel push events with PTY lifecycle fallback.
+// controlled via claude/channel push events with tmux lifecycle management.
 type Provider struct {
 	opts runtime.StartOptions
 
@@ -36,19 +36,16 @@ type session struct {
 	sessionID  string
 	runID      string
 	dir        string
-	cmd        *exec.Cmd
+	tmuxName   string // tmux session name; used for lifecycle ops
+	mcpDir     string // tmpdir holding MCP config; removed on session exit
 	brokerURL  string
 	sidecarTok string
-	mcpConfig  string // path to temporary mcp config
-	ptyOut     *os.File
-	ptyMaster  *os.File // PTY master — kept open so Claude sees an interactive terminal
+	mcpConfig  string
 
-	// event stream
 	events   chan events.Event
 	done     chan struct{}
 	cancelFn context.CancelFunc
 
-	// coarse state
 	startedAt time.Time
 	finished  bool
 	mu        sync.Mutex
@@ -99,9 +96,12 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		}
 	}
 
-	// Ensure the binary we launch is available.
 	if _, err := exec.LookPath("claude"); err != nil {
 		return runtime.Session{}, fmt.Errorf("claude binary not found in PATH: %w", err)
+	}
+
+	if _, err := exec.LookPath("tmux"); err != nil {
+		return runtime.Session{}, fmt.Errorf("tmux not found in PATH: %w", err)
 	}
 
 	// Check Claude Code version.
@@ -110,9 +110,6 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		return runtime.Session{}, fmt.Errorf("claude --version failed: %w", err)
 	}
 	vStr := strings.TrimSpace(string(out))
-	// v2.1.148 => "Claude Code"
-	// We require v2.1.80 or later.
-	// Minimal check: version string must contain "Claude Code".
 	if !strings.Contains(vStr, "Claude Code") {
 		return runtime.Session{}, fmt.Errorf("unexpected claude version output: %s", vStr)
 	}
@@ -144,6 +141,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	mcpConfigPath := filepath.Join(mcpDir, "mcp.json")
 	avenorBin, err := os.Executable()
 	if err != nil {
+		_ = os.RemoveAll(mcpDir)
 		return runtime.Session{}, fmt.Errorf("exe path: %w", err)
 	}
 	mcpConfig := map[string]any{
@@ -161,9 +159,11 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	}
 	configJSON, err := json.MarshalIndent(mcpConfig, "", "  ")
 	if err != nil {
+		_ = os.RemoveAll(mcpDir)
 		return runtime.Session{}, fmt.Errorf("marshal mcp config: %w", err)
 	}
 	if err := os.WriteFile(mcpConfigPath, configJSON, 0600); err != nil {
+		_ = os.RemoveAll(mcpDir)
 		return runtime.Session{}, fmt.Errorf("write mcp config: %w", err)
 	}
 
@@ -183,42 +183,52 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	if merged.Model != "" {
 		claudeArgs = append(claudeArgs, "--model", merged.Model)
 	}
-	// Default permission mode: avoid dangerously-skip-permissions by default.
 	claudeArgs = append(claudeArgs, "--permission-mode", "default")
 
-	// PTY transcript capture.
-	ptyPath := filepath.Join(mcpDir, "pty.log")
-	ptyFile, err := os.Create(ptyPath)
-	if err != nil {
-		return runtime.Session{}, fmt.Errorf("create pty log: %w", err)
+	// Build the shell command for the tmux session. Using `exec` replaces the
+	// shell with claude so that #{pane_pid} reports claude's actual PID and the
+	// tmux session exits when claude exits.
+	parts := make([]string, 0, len(claudeArgs)+2)
+	parts = append(parts, "exec", "claude")
+	for _, arg := range claudeArgs {
+		parts = append(parts, shellQuote(arg))
 	}
+	shellCmd := strings.Join(parts, " ")
 
-	cmd := exec.CommandContext(ctx, "claude", claudeArgs...)
-	cmd.Dir = merged.Dir
-	cmd.Stdout = ptyFile
-	cmd.Stderr = ptyFile
-
-	// Allocate a PTY so Claude sees an interactive terminal on stdin and
-	// does not fall back to --print mode (which requires an upfront prompt).
-	ptm, pts, err := pty.Open()
-	if err != nil {
-		_ = ptyFile.Close()
+	// Launch claude in a detached tmux session. tmux provides a real virtual
+	// terminal, which is what prevents claude from falling back to --print mode.
+	tmuxName := "avenor-" + runID[:8]
+	if tmuxOut, err := exec.Command(
+		"tmux", "new-session",
+		"-d",
+		"-s", tmuxName,
+		"-c", merged.Dir,
+		"-x", "220",
+		"-y", "50",
+		shellCmd,
+	).CombinedOutput(); err != nil {
 		_ = os.RemoveAll(mcpDir)
-		return runtime.Session{}, fmt.Errorf("open pty: %w", err)
+		return runtime.Session{}, fmt.Errorf("tmux new-session: %w: %s", err, strings.TrimSpace(string(tmuxOut)))
 	}
-	cmd.Stdin = pts
+
+	// Give tmux a moment to exec the process before reading its PID.
+	time.Sleep(200 * time.Millisecond)
+
+	pid := 0
+	if pidOut, err := exec.Command("tmux", "list-panes", "-t", tmuxName, "-F", "#{pane_pid}").Output(); err == nil {
+		pid, _ = strconv.Atoi(strings.TrimSpace(string(pidOut)))
+	}
 
 	sessCtx, cancel := context.WithCancel(context.Background())
 	s := &session{
 		sessionID:  sessionID,
 		runID:      runID,
 		dir:        merged.Dir,
-		cmd:        cmd,
+		tmuxName:   tmuxName,
+		mcpDir:     mcpDir,
 		brokerURL:  brokerURL,
 		sidecarTok: sidecarTok,
 		mcpConfig:  mcpConfigPath,
-		ptyOut:     ptyFile,
-		ptyMaster:  ptm,
 		events:     make(chan events.Event, 64),
 		done:       make(chan struct{}),
 		cancelFn:   cancel,
@@ -229,15 +239,6 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 
 	go p.runSession(sessCtx, s)
 
-	// Give the goroutine a moment to actually start the process
-	time.Sleep(100 * time.Millisecond)
-
-	pid := 0
-	if s.cmd.Process != nil {
-		pid = s.cmd.Process.Pid
-	}
-
-	// Emit startup event.
 	go func() {
 		s.events <- events.Event{
 			Event:     "session.start",
@@ -259,28 +260,26 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	}, nil
 }
 
-// runSession supervises the Claude process and forwards broker events into the event stream.
+// runSession supervises the Claude tmux session and forwards broker events into
+// the event stream. It cleans up the tmux session and tmpdir on exit.
 func (p *Provider) runSession(ctx context.Context, s *session) {
 	defer close(s.done)
 	defer close(s.events)
-	defer s.ptyOut.Close()
-	defer s.ptyMaster.Close()
+	defer func() {
+		_ = exec.Command("tmux", "kill-session", "-t", s.tmuxName).Run()
+		_ = os.RemoveAll(s.mcpDir)
+	}()
 
-	// Start the process.
-	if err := s.cmd.Start(); err != nil {
-		s.events <- events.Event{
-			Event:     "session.error",
-			SessionID: s.sessionID,
-			Fields:    map[string]any{"error": fmt.Sprintf("claude start: %v", err)},
-		}
-		return
-	}
-	// Close the PTY slave in the parent — the child has its own fd now.
-	_ = s.cmd.Stdin.(*os.File).Close()
-
-	processDone := make(chan error, 1)
+	// Watch for the tmux session to disappear (claude exited).
+	sessionGone := make(chan struct{})
 	go func() {
-		processDone <- s.cmd.Wait()
+		defer close(sessionGone)
+		for {
+			time.Sleep(500 * time.Millisecond)
+			if err := exec.Command("tmux", "has-session", "-t", s.tmuxName).Run(); err != nil {
+				return
+			}
+		}
 	}()
 
 	// Poll broker for sidecar events.
@@ -290,29 +289,22 @@ func (p *Provider) runSession(ctx context.Context, s *session) {
 	for {
 		select {
 		case <-ctx.Done():
-			if s.cmd.Process != nil {
-				_ = s.cmd.Process.Signal(os.Interrupt)
-				time.Sleep(2 * time.Second)
-				_ = s.cmd.Process.Kill()
-			}
+			_ = exec.Command("tmux", "kill-session", "-t", s.tmuxName).Run()
 			return
-		case err := <-processDone:
-			status := "done"
-			if err != nil {
-				status = "failed"
-			}
+		case <-sessionGone:
 			s.mu.Lock()
-			s.finished = true
+			alreadyFinished := s.finished
 			s.mu.Unlock()
-			s.events <- events.Event{
-				Event:     "session.end",
-				SessionID: s.sessionID,
-				Fields: map[string]any{
-					"status":      status,
-					"error":       fmt.Sprintf("%v", err),
-					"exit_code":   s.cmd.ProcessState.ExitCode(),
-					"stop_reason": "end_turn",
-				},
+			if !alreadyFinished {
+				// Claude exited without calling avenor_finish.
+				s.events <- events.Event{
+					Event:     "session.end",
+					SessionID: s.sessionID,
+					Fields: map[string]any{
+						"status":      "done",
+						"stop_reason": "end_turn",
+					},
+				}
 			}
 			return
 		case <-pollTick.C:
@@ -322,7 +314,6 @@ func (p *Provider) runSession(ctx context.Context, s *session) {
 }
 
 func (p *Provider) pollBrokerEvents(s *session) {
-	// Drain reports, finishes, replies from broker and emit events.
 	st := p.broker.GetRun(s.runID)
 	if st == nil {
 		return
@@ -384,7 +375,6 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 		return fmt.Errorf("session already finished: %s", sessionID)
 	}
 
-	// Push control message to broker.
 	msg := broker.ControlMessage{
 		ID:    uuid.New().String(),
 		Type:  "continue",
@@ -456,7 +446,7 @@ func (p *Provider) Cancel(ctx context.Context, sessionID string) error {
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
 
-	// Push cancel control message.
+	// Push graceful cancel via channel.
 	msg := broker.ControlMessage{
 		ID:      uuid.New().String(),
 		Type:    "cancel",
@@ -465,14 +455,10 @@ func (p *Provider) Cancel(ctx context.Context, sessionID string) error {
 	}
 	_ = p.broker.PushControl(s.runID, msg)
 
-	// Escalate to process signal after 2 seconds.
+	// Escalate to hard kill after 2 seconds.
 	go func() {
 		time.Sleep(2 * time.Second)
-		if s.cmd.Process != nil {
-			_ = s.cmd.Process.Signal(os.Interrupt)
-			time.Sleep(2 * time.Second)
-			_ = s.cmd.Process.Kill()
-		}
+		_ = exec.Command("tmux", "kill-session", "-t", s.tmuxName).Run()
 	}()
 	return nil
 }
@@ -485,7 +471,6 @@ func (p *Provider) Events(ctx context.Context, sessionID string) (<-chan events.
 		return nil, fmt.Errorf("session not found: %s", sessionID)
 	}
 
-	// Return a cloned channel so caller can't close our internal one.
 	out := make(chan events.Event, cap(s.events))
 	go func() {
 		defer close(out)
@@ -542,4 +527,9 @@ func (p *Provider) Capabilities(ctx context.Context) (runtime.Capabilities, erro
 		SubprocessDiscovery: true,
 		ModelSelection:      true,
 	}, nil
+}
+
+// shellQuote single-quotes a string for safe interpolation into a shell command.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
