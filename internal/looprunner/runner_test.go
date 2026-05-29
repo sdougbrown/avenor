@@ -51,6 +51,37 @@ func TestRunResumeFromPreviousUsesImmediatePriorPhase(t *testing.T) {
 	}
 }
 
+func TestRunPreResumeFromPreviousThreadsSessionID(t *testing.T) {
+	cfg := &LoopConfig{
+		MaxIterations: 1,
+		Pre: []Phase{
+			{Name: "review", Prompt: "review"},
+			{Name: "orient", Prompt: "orient", ResumeFromPrevious: true},
+		},
+	}
+
+	prevSessions := map[string]string{}
+	_, err := Run(context.Background(), RunOptions{
+		WorkDir:   t.TempDir(),
+		RunID:     "run_1",
+		EventSink: discardEventWriter{},
+		Config:    cfg,
+		PhaseAttempt: func(ctx context.Context, phase Phase, attemptNum int, iteration int, prevSessionID string) (PhaseAttemptResult, error) {
+			prevSessions[phase.Name] = prevSessionID
+			return PhaseAttemptResult{ExitCode: 0, SessionID: phase.Name + "-session"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if prevSessions["review"] != "" {
+		t.Fatalf("review prevSessionID = %q, want empty", prevSessions["review"])
+	}
+	if prevSessions["orient"] != "review-session" {
+		t.Fatalf("orient prevSessionID = %q, want %q", prevSessions["orient"], "review-session")
+	}
+}
+
 func TestRunPhaseWithRetryOnlyRetriesTransientFailure(t *testing.T) {
 	attempts := 0
 	result, err := runPhaseWithRetry(context.Background(), func(ctx context.Context) (PhaseAttemptResult, error) {

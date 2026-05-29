@@ -64,17 +64,24 @@ func Run(ctx context.Context, opts RunOptions) (RunResult, error) {
 
 	prevPhaseCommit := captureHeadCommit(opts.WorkDir)
 
+	var prevPreSessionID string
 	for _, phase := range opts.Config.Pre {
 		if err := ctx.Err(); err != nil {
 			return cancelledRunResult(ctx, opts, 0)
 		}
 
-		result, err := executePhase(ctx, opts, phase, 0, "", prevPhaseCommit)
+		sessionID := ""
+		if phase.ResumeFromPrevious {
+			sessionID = prevPreSessionID
+		}
+
+		result, err := executePhase(ctx, opts, phase, 0, sessionID, prevPhaseCommit)
 		if err != nil {
 			_ = emitLoopEnd(opts.EventSink, opts.RunID, "phase_failure", "", 0)
 			return RunResult{}, err
 		}
 
+		prevPreSessionID = result.SessionID
 		prevPhaseCommit = captureHeadCommit(opts.WorkDir)
 
 		if err := ctx.Err(); err != nil {
