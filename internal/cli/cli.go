@@ -19,6 +19,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/looprunner"
 	"github.com/sdougbrown/avenor/internal/permission"
+	"github.com/sdougbrown/avenor/internal/teamrunner"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/pony"
 	"github.com/sdougbrown/avenor/internal/runtime/pony/model/openai"
@@ -99,6 +100,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	httpDebug := fs.String("http-debug", "", "http debug adapter bind address")
 	permClaimTimeout := fs.Duration("permission-claim-timeout", 0, fmt.Sprintf("how long to wait for a connected socket client to answer a permission request before falling through to the file handler or 'none' resolver (0 uses the default: %v)", DefaultPermissionClaimTimeout))
 	loopFile := fs.String("loop-file", "", "path to loop config JSON (optional; enables multi-phase mode)")
+	teamFile := fs.String("team-file", "", "path to team config JSON (optional; enables parallel-team mode)")
 	ponyConfig := fs.String("pony-config", "", "path to pony backend JSON config (required for --backend pony)")
 
 	if err := fs.Parse(args); err != nil {
@@ -237,12 +239,16 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "avenor: --prompt and --prompt-file are mutually exclusive")
 		return exitWithSentinel(1)
 	}
-	if *prompt == "" && *promptFile == "" && *loopFile == "" {
-		fmt.Fprintln(stderr, "avenor: --prompt, --prompt-file, or --loop-file is required")
+	if *loopFile != "" && *teamFile != "" {
+		fmt.Fprintln(stderr, "avenor: --loop-file and --team-file are mutually exclusive")
 		return exitWithSentinel(1)
 	}
-	if *loopFile != "" && *resume != "" {
-		fmt.Fprintln(stderr, "avenor: --loop-file and --resume are mutually exclusive")
+	if *teamFile != "" && *resume != "" {
+		fmt.Fprintln(stderr, "avenor: --team-file and --resume are mutually exclusive")
+		return exitWithSentinel(1)
+	}
+	if *prompt == "" && *promptFile == "" && *loopFile == "" && *teamFile == "" {
+		fmt.Fprintln(stderr, "avenor: --prompt, --prompt-file, --loop-file, or --team-file is required")
 		return exitWithSentinel(1)
 	}
 
@@ -424,6 +430,100 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		}
 
 		writeSentinelForResult(result, *sentinelFile, runID, stderr)
+
+		return result.ExitCode
+	}
+
+	if *teamFile != "" {
+		cfg, err := teamrunner.LoadTeamConfig(*teamFile)
+		if err != nil {
+			fmt.Fprintf(stderr, "avenor: load team config: %v\n", err)
+			if *sentinelFile != "" {
+				WriteSentinel(*sentinelFile, 1, finalSessionID, "error", runID, stderr)
+			}
+			return 1
+		}
+
+		if len(promptText) > 0 {
+			cfg.InsertInitialPrompt(string(promptText))
+		}
+
+		agentOverride := *agent
+		modelOverride := *model
+		opts := teamrunner.RunOptions{
+			WorkDir:    *dir,
+			RunID:      runID,
+			EventSink:  writer,
+			Config:     cfg,
+			MaxRetries: *maxRetries,
+			PhaseAttempt: func(ctx context.Context, phase teamrunner.Phase, attemptNum int, prevSessionID string) (teamrunner.PhaseAttemptResult, error) {
+				a := agentOverride
+				m := modelOverride
+				if phase.Agent != "" {
+					a = phase.Agent
+				}
+				if phase.Model != "" {
+					m = phase.Model
+				}
+				startOpts := runtime.StartOptions{
+					Agent:     a,
+					Model:     m,
+					Dir:       *dir,
+					ServerURL: discovery.URL,
+				}
+
+				var resumeID string
+				if prevSessionID != "" {
+					resumeID = prevSessionID
+				}
+
+				result := runSingleAttempt(ctx, attemptConfig{
+					startOptions:           startOpts,
+					backend:                *backend,
+					resumeID:               resumeID,
+					initialPrompt:          phase.Prompt,
+					runID:                  runID,
+					runLabel:               *label,
+					autoApprove:            *autoApprove,
+					permissionClaimTimeout: *permClaimTimeout,
+					progressTimeout:        *progressTimeout,
+					timer:                  timer,
+				}, attemptDeps{
+					writer:        writer,
+					fileHandler:   fileHandler,
+					controlServer: controlServer,
+					stderr:        os.Stderr,
+				})
+
+				return teamrunner.PhaseAttemptResult{
+					ExitCode:      result.exitCode,
+					SessionID:     result.sessionID,
+					StopReason:    result.stopReason,
+					LoopDirective: result.loopDirective,
+					LoopLabel:     result.loopLabel,
+				}, nil
+			},
+		}
+
+		trCtx, trCancel := context.WithCancel(ctx)
+		defer trCancel()
+
+		result, err := teamrunner.Run(trCtx, opts)
+		if err != nil {
+			fmt.Fprintf(stderr, "avenor: team run: %v\n", err)
+			if *sentinelFile != "" {
+				WriteSentinel(*sentinelFile, 1, result.SessionID, "error", runID, stderr)
+			}
+			return 1
+		}
+
+		if *sentinelFile != "" {
+			if result.Reason != "" {
+				WriteSentinelWithReason(*sentinelFile, result.ExitCode, result.SessionID, result.StopReason, runID, result.Reason, stderr)
+			} else {
+				WriteSentinel(*sentinelFile, result.ExitCode, result.SessionID, result.StopReason, runID, stderr)
+			}
+		}
 
 		return result.ExitCode
 	}
