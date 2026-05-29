@@ -672,7 +672,7 @@ func TestRunAbortCancelsOtherMembers(t *testing.T) {
 			case <-ctx.Done():
 				slowFinished.Store(true)
 				return PhaseAttemptResult{ExitCode: 130, SessionID: "slow-s"}, nil
-			case <-time.After(5 * time.Second):
+			case <-time.After(100 * time.Millisecond):
 				slowFinished.Store(true)
 				return PhaseAttemptResult{ExitCode: 0, SessionID: "slow-s"}, nil
 			}

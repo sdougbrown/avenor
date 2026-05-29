@@ -212,7 +212,12 @@ func runTeamMembers(ctx context.Context, opts RunOptions, members []phaseconfig.
 		wg.Add(1)
 		go func(idx int, phase phaseconfig.Phase) {
 			defer wg.Done()
-			r, _ := executePhase(teamCtx, opts, phase, "team", "", *prevCommit)
+			r, err := executePhase(teamCtx, opts, phase, "team", "", *prevCommit)
+			if err != nil {
+				// Internal error (template rendering, event emission failure).
+				// Treat as a non-clean stop so the team result reflects the failure.
+				r = PhaseAttemptResult{ExitCode: 1, StopReason: "phase_error"}
+			}
 			results[idx] = memberResult{index: idx, result: r}
 
 			if r.LoopDirective == "abort" {
