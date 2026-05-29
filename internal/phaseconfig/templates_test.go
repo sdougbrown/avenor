@@ -1,4 +1,4 @@
-package looprunner
+package phaseconfig
 
 import (
 	"os"

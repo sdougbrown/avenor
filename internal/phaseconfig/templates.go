@@ -1,8 +1,9 @@
-package looprunner
+package phaseconfig
 
 import (
 	"bytes"
 	"os/exec"
+	"strings"
 	"text/template"
 )
 
@@ -55,4 +56,13 @@ func runGit(workDir string, args ...string) (string, error) {
 		return "", err
 	}
 	return string(bytes.TrimRight(out, "\n")), nil
+}
+
+func CaptureHeadCommit(workDir string) string {
+	cmd := exec.Command("git", "-C", workDir, "rev-parse", "HEAD")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }

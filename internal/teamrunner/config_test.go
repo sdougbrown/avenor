@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sdougbrown/avenor/internal/phaseconfig"
 )
 
 func TestLoadTeamConfig(t *testing.T) {
@@ -201,7 +203,7 @@ func TestLoadTeamConfig(t *testing.T) {
 }
 
 func TestValidatePhaseMissingNameTeam(t *testing.T) {
-	cfg := &TeamConfig{Team: []Phase{{Prompt: "hello"}}}
+	cfg := &TeamConfig{Team: []phaseconfig.Phase{{Prompt: "hello"}}}
 	err := cfg.Validate()
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -212,7 +214,7 @@ func TestValidatePhaseMissingNameTeam(t *testing.T) {
 }
 
 func TestValidatePhaseMissingPromptTeam(t *testing.T) {
-	cfg := &TeamConfig{Team: []Phase{{Name: "test"}}}
+	cfg := &TeamConfig{Team: []phaseconfig.Phase{{Name: "test"}}}
 	err := cfg.Validate()
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -223,7 +225,7 @@ func TestValidatePhaseMissingPromptTeam(t *testing.T) {
 }
 
 func TestValidateDuplicateNameInPre(t *testing.T) {
-	cfg := &TeamConfig{Pre: []Phase{
+	cfg := &TeamConfig{Pre: []phaseconfig.Phase{
 		{Name: "foo", Prompt: "first"},
 		{Name: "foo", Prompt: "second"},
 	}}
@@ -238,8 +240,8 @@ func TestValidateDuplicateNameInPre(t *testing.T) {
 
 func TestValidateDuplicateNameInTeam(t *testing.T) {
 	cfg := &TeamConfig{
-		Pre:  []Phase{{Name: "foo", Prompt: "first"}},
-		Team: []Phase{{Name: "foo", Prompt: "second"}},
+		Pre:  []phaseconfig.Phase{{Name: "foo", Prompt: "first"}},
+		Team: []phaseconfig.Phase{{Name: "foo", Prompt: "second"}},
 	}
 	err := cfg.Validate()
 	if err == nil {
@@ -252,7 +254,7 @@ func TestValidateDuplicateNameInTeam(t *testing.T) {
 
 func TestValidateDuplicateAcrossMultipleTeam(t *testing.T) {
 	cfg := &TeamConfig{
-		Team: []Phase{
+		Team: []phaseconfig.Phase{
 			{Name: "a", Prompt: "a"},
 			{Name: "b", Prompt: "b"},
 			{Name: "a", Prompt: "a again"},
@@ -269,8 +271,8 @@ func TestValidateDuplicateAcrossMultipleTeam(t *testing.T) {
 
 func TestValidateOK(t *testing.T) {
 	cfg := &TeamConfig{
-		Pre:  []Phase{{Name: "setup", Prompt: "setup env"}},
-		Team: []Phase{{Name: "work", Prompt: "do work"}},
+		Pre:  []phaseconfig.Phase{{Name: "setup", Prompt: "setup env"}},
+		Team: []phaseconfig.Phase{{Name: "work", Prompt: "do work"}},
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -290,8 +292,8 @@ func TestInsertInitialPromptOnEmptyPre(t *testing.T) {
 
 func TestInsertInitialPromptOnExistingPre(t *testing.T) {
 	cfg := &TeamConfig{
-		Pre:  []Phase{{Name: "build", Prompt: "build it"}},
-		Team: []Phase{{Name: "work", Prompt: "do work"}},
+		Pre:  []phaseconfig.Phase{{Name: "build", Prompt: "build it"}},
+		Team: []phaseconfig.Phase{{Name: "work", Prompt: "do work"}},
 	}
 	cfg.InsertInitialPrompt("start here")
 	if len(cfg.Pre) != 2 {
@@ -306,7 +308,7 @@ func TestInsertInitialPromptOnExistingPre(t *testing.T) {
 }
 
 func TestInsertInitialPromptResumeFromPrevious(t *testing.T) {
-	cfg := &TeamConfig{Pre: []Phase{{Name: "build", Prompt: "build it", ResumeFromPrevious: true}}}
+	cfg := &TeamConfig{Pre: []phaseconfig.Phase{{Name: "build", Prompt: "build it", ResumeFromPrevious: true}}}
 	cfg.InsertInitialPrompt("go")
 	if len(cfg.Pre) != 2 {
 		t.Fatalf("expected 2 pre phases, got %d", len(cfg.Pre))
@@ -321,7 +323,7 @@ func TestInsertInitialPromptResumeFromPrevious(t *testing.T) {
 
 func TestValidateNamesCaseSensitiveDistinct(t *testing.T) {
 	cfg := &TeamConfig{
-		Pre: []Phase{
+		Pre: []phaseconfig.Phase{
 			{Name: "Foo", Prompt: "first"},
 			{Name: "foo", Prompt: "second"},
 		},
@@ -334,7 +336,7 @@ func TestValidateNamesCaseSensitiveDistinct(t *testing.T) {
 
 func TestValidateNamesCaseSensitiveDuplicate(t *testing.T) {
 	cfg := &TeamConfig{
-		Pre: []Phase{
+		Pre: []phaseconfig.Phase{
 			{Name: "Foo", Prompt: "first"},
 			{Name: "Foo", Prompt: "second"},
 		},
@@ -376,8 +378,8 @@ func TestLoadTeamConfigWithPost(t *testing.T) {
 
 func TestValidateDuplicateNameAcrossPost(t *testing.T) {
 	cfg := &TeamConfig{
-		Team: []Phase{{Name: "work", Prompt: "work"}},
-		Post: []Phase{{Name: "work", Prompt: "also work"}},
+		Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}},
+		Post: []phaseconfig.Phase{{Name: "work", Prompt: "also work"}},
 	}
 	err := cfg.Validate()
 	if err == nil {
@@ -541,8 +543,8 @@ func TestPromptFile(t *testing.T) {
 
 func TestDuplicateNameInPost(t *testing.T) {
 	cfg := &TeamConfig{
-		Pre: []Phase{{Name: "setup", Prompt: "setup"}},
-		Post: []Phase{
+		Pre: []phaseconfig.Phase{{Name: "setup", Prompt: "setup"}},
+		Post: []phaseconfig.Phase{
 			{Name: "a", Prompt: "a"},
 			{Name: "a", Prompt: "a again"},
 		},

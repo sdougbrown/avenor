@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/phaseconfig"
 )
 
 // ---- Test helpers ----
@@ -26,25 +27,25 @@ func (w *recordingEventWriter) Write(ev events.Event) error {
 	return nil
 }
 
-func makeConfig(pre, team, post []Phase) *TeamConfig {
+func makeConfig(pre, team, post []phaseconfig.Phase) *TeamConfig {
 	return &TeamConfig{Pre: pre, Team: team, Post: post}
 }
 
-func simplePhase(name, prompt string) Phase {
-	return Phase{Name: name, Prompt: prompt}
+func simplePhase(name, prompt string) phaseconfig.Phase {
+	return phaseconfig.Phase{Name: name, Prompt: prompt}
 }
 
-func conditionalPhase(name, prompt string) Phase {
-	return Phase{Name: name, Prompt: prompt, Conditional: true}
+func conditionalPhase(name, prompt string) phaseconfig.Phase {
+	return phaseconfig.Phase{Name: name, Prompt: prompt, Conditional: true}
 }
 
 // ---- Test cases ----
 
 func TestRunHappyPath(t *testing.T) {
 	cfg := makeConfig(
-		[]Phase{simplePhase("setup", "do setup")},
-		[]Phase{simplePhase("security", "review security"), simplePhase("style", "review style")},
-		[]Phase{simplePhase("report", "write report")},
+		[]phaseconfig.Phase{simplePhase("setup", "do setup")},
+		[]phaseconfig.Phase{simplePhase("security", "review security"), simplePhase("style", "review style")},
+		[]phaseconfig.Phase{simplePhase("report", "write report")},
 	)
 
 	var order []string
@@ -54,7 +55,7 @@ func TestRunHappyPath(t *testing.T) {
 		RunID:     "test-run",
 		EventSink: sink,
 		Config:    cfg,
-		PhaseAttempt: func(ctx context.Context, phase Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
 			order = append(order, phase.Name)
 			return PhaseAttemptResult{ExitCode: 0, SessionID: phase.Name + "-session"}, nil
 		},
@@ -87,14 +88,14 @@ func TestRunHappyPath(t *testing.T) {
 }
 
 func TestRunTeamOnly(t *testing.T) {
-	cfg := makeConfig(nil, []Phase{simplePhase("review", "review code")}, nil)
+	cfg := makeConfig(nil, []phaseconfig.Phase{simplePhase("review", "review code")}, nil)
 
 	result, err := Run(context.Background(), RunOptions{
 		WorkDir:   t.TempDir(),
 		RunID:     "test-run",
 		EventSink: discardEventWriter{},
 		Config:    cfg,
-		PhaseAttempt: func(ctx context.Context, phase Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
 			return PhaseAttemptResult{ExitCode: 0, SessionID: "s1"}, nil
 		},
 	})
@@ -107,14 +108,14 @@ func TestRunTeamOnly(t *testing.T) {
 }
 
 func TestRunPreOnly(t *testing.T) {
-	cfg := makeConfig([]Phase{simplePhase("setup", "setup env")}, nil, nil)
+	cfg := makeConfig([]phaseconfig.Phase{simplePhase("setup", "setup env")}, nil, nil)
 
 	result, err := Run(context.Background(), RunOptions{
 		WorkDir:   t.TempDir(),
 		RunID:     "test-run",
 		EventSink: discardEventWriter{},
 		Config:    cfg,
-		PhaseAttempt: func(ctx context.Context, phase Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
 			return PhaseAttemptResult{ExitCode: 0, SessionID: "s1"}, nil
 		},
 	})
@@ -127,7 +128,7 @@ func TestRunPreOnly(t *testing.T) {
 }
 
 func TestRunAbortInTeamMember(t *testing.T) {
-	cfg := makeConfig(nil, []Phase{simplePhase("security", "review"), simplePhase("style", "review")}, nil)
+	cfg := makeConfig(nil, []phaseconfig.Phase{simplePhase("security", "review"), simplePhase("style", "review")}, nil)
 
 	var executed []string
 	sink := &recordingEventWriter{}
@@ -136,7 +137,7 @@ func TestRunAbortInTeamMember(t *testing.T) {
 		RunID:     "test-run",
 		EventSink: sink,
 		Config:    cfg,
-		PhaseAttempt: func(ctx context.Context, phase Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
 			executed = append(executed, phase.Name)
 			if phase.Name == "security" {
 				return PhaseAttemptResult{
@@ -179,7 +180,7 @@ func TestRunAbortInTeamMember(t *testing.T) {
 }
 
 func TestRunMemberFailureDoesNotCancelPeers(t *testing.T) {
-	cfg := makeConfig(nil, []Phase{simplePhase("security", "review"), simplePhase("style", "review")}, nil)
+	cfg := makeConfig(nil, []phaseconfig.Phase{simplePhase("security", "review"), simplePhase("style", "review")}, nil)
 
 	var executed []string
 	result, err := Run(context.Background(), RunOptions{
@@ -187,7 +188,7 @@ func TestRunMemberFailureDoesNotCancelPeers(t *testing.T) {
 		RunID:     "test-run",
 		EventSink: discardEventWriter{},
 		Config:    cfg,
-		PhaseAttempt: func(ctx context.Context, phase Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
 			executed = append(executed, phase.Name)
 			if phase.Name == "security" {
 				return PhaseAttemptResult{ExitCode: 2, StopReason: "refusal", SessionID: "sec-s"}, nil
@@ -209,8 +210,8 @@ func TestRunMemberFailureDoesNotCancelPeers(t *testing.T) {
 
 func TestRunPrePhaseFailure(t *testing.T) {
 	cfg := makeConfig(
-		[]Phase{simplePhase("setup", "setup")},
-		[]Phase{simplePhase("review", "review")},
+		[]phaseconfig.Phase{simplePhase("setup", "setup")},
+		[]phaseconfig.Phase{simplePhase("review", "review")},
 		nil,
 	)
 
@@ -219,7 +220,7 @@ func TestRunPrePhaseFailure(t *testing.T) {
 		RunID:     "test-run",
 		EventSink: discardEventWriter{},
 		Config:    cfg,
-		PhaseAttempt: func(ctx context.Context, phase Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
 			return PhaseAttemptResult{ExitCode: 1, StopReason: "error", SessionID: "s1"}, nil
 		},
 	})
@@ -234,8 +235,8 @@ func TestRunPrePhaseFailure(t *testing.T) {
 func TestRunPostPhaseFailure(t *testing.T) {
 	cfg := makeConfig(
 		nil,
-		[]Phase{simplePhase("review", "review")},
-		[]Phase{simplePhase("report", "write report")},
+		[]phaseconfig.Phase{simplePhase("review", "review")},
+		[]phaseconfig.Phase{simplePhase("report", "write report")},
 	)
 
 	result, err := Run(context.Background(), RunOptions{
@@ -243,7 +244,7 @@ func TestRunPostPhaseFailure(t *testing.T) {
 		RunID:     "test-run",
 		EventSink: discardEventWriter{},
 		Config:    cfg,
-		PhaseAttempt: func(ctx context.Context, phase Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
 			if phase.Name == "report" {
 				return PhaseAttemptResult{ExitCode: 1, StopReason: "error", SessionID: "r-s"}, nil
 			}
@@ -260,8 +261,8 @@ func TestRunPostPhaseFailure(t *testing.T) {
 
 func TestRunConditionalMemberSkipping(t *testing.T) {
 	cfg := makeConfig(
-		[]Phase{simplePhase("decide", "decide which reviewers")},
-		[]Phase{
+		[]phaseconfig.Phase{simplePhase("decide", "decide which reviewers")},
+		[]phaseconfig.Phase{
 			conditionalPhase("security", "review security"),
 			simplePhase("style", "review style"),
 		},
@@ -274,7 +275,7 @@ func TestRunConditionalMemberSkipping(t *testing.T) {
 		RunID:     "test-run",
 		EventSink: discardEventWriter{},
 		Config:    cfg,
-		PhaseAttempt: func(ctx context.Context, phase Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
 			executed = append(executed, phase.Name)
 			if phase.Name == "decide" {
 				return PhaseAttemptResult{
@@ -313,8 +314,8 @@ func TestRunConditionalMemberSkipping(t *testing.T) {
 
 func TestRunConditionalInjectionInPrePrompt(t *testing.T) {
 	cfg := makeConfig(
-		[]Phase{simplePhase("decide", "decide which reviewers")},
-		[]Phase{
+		[]phaseconfig.Phase{simplePhase("decide", "decide which reviewers")},
+		[]phaseconfig.Phase{
 			conditionalPhase("security", "review security"),
 			conditionalPhase("api-compat", "review API compat"),
 		},
@@ -326,7 +327,7 @@ func TestRunConditionalInjectionInPrePrompt(t *testing.T) {
 		RunID:     "test-run",
 		EventSink: discardEventWriter{},
 		Config:    cfg,
-		PhaseAttempt: func(ctx context.Context, phase Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
 			// Verify the decide phase's prompt includes the conditional skip syntax
 			if phase.Name == "decide" {
 				if !strings.Contains(phase.Prompt, "[team: skip | <name>]") {
@@ -348,7 +349,7 @@ func TestRunConditionalInjectionInPrePrompt(t *testing.T) {
 }
 
 func TestRunContextCancellation(t *testing.T) {
-	cfg := makeConfig(nil, []Phase{simplePhase("slow", "work slowly")}, nil)
+	cfg := makeConfig(nil, []phaseconfig.Phase{simplePhase("slow", "work slowly")}, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	// Cancel immediately so the phase attempt sees cancellation
@@ -359,7 +360,7 @@ func TestRunContextCancellation(t *testing.T) {
 		RunID:     "test-run",
 		EventSink: discardEventWriter{},
 		Config:    cfg,
-		PhaseAttempt: func(ctx context.Context, phase Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
 			return PhaseAttemptResult{ExitCode: 130, SessionID: "s1"}, nil
 		},
 	})
@@ -377,9 +378,9 @@ func TestRunContextCancellation(t *testing.T) {
 
 func TestRunEventPayloads(t *testing.T) {
 	cfg := makeConfig(
-		[]Phase{simplePhase("setup", "setup")},
-		[]Phase{simplePhase("review", "review")},
-		[]Phase{simplePhase("report", "report")},
+		[]phaseconfig.Phase{simplePhase("setup", "setup")},
+		[]phaseconfig.Phase{simplePhase("review", "review")},
+		[]phaseconfig.Phase{simplePhase("report", "report")},
 	)
 
 	sink := &recordingEventWriter{}
@@ -388,7 +389,7 @@ func TestRunEventPayloads(t *testing.T) {
 		RunID:     "test-run",
 		EventSink: sink,
 		Config:    cfg,
-		PhaseAttempt: func(ctx context.Context, phase Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
 			return PhaseAttemptResult{ExitCode: 0, SessionID: phase.Name + "-s"}, nil
 		},
 	})
@@ -457,7 +458,7 @@ func TestRunRetryOnTransientFailure(t *testing.T) {
 	}
 	t.Cleanup(func() { phaseRetryAfter = oldRetryAfter })
 
-	cfg := makeConfig(nil, []Phase{simplePhase("review", "review")}, nil)
+	cfg := makeConfig(nil, []phaseconfig.Phase{simplePhase("review", "review")}, nil)
 
 	attempts := 0
 	result, err := Run(context.Background(), RunOptions{
@@ -466,7 +467,7 @@ func TestRunRetryOnTransientFailure(t *testing.T) {
 		EventSink:   discardEventWriter{},
 		Config:      cfg,
 		MaxRetries:  2,
-		PhaseAttempt: func(ctx context.Context, phase Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
 			attempts++
 			if attempts <= 2 {
 				return PhaseAttemptResult{ExitCode: 1, SessionID: fmt.Sprintf("attempt-%d", attempts)}, nil
@@ -534,7 +535,7 @@ func TestExtractTeamSkipMarkers(t *testing.T) {
 }
 
 func TestBuildMemberListFiltersSkipped(t *testing.T) {
-	team := []Phase{
+	team := []phaseconfig.Phase{
 		{Name: "security", Prompt: "review security", Conditional: true},
 		{Name: "style", Prompt: "review style"},
 		{Name: "api-compat", Prompt: "review API", Conditional: true},
@@ -550,7 +551,7 @@ func TestBuildMemberListFiltersSkipped(t *testing.T) {
 }
 
 func TestBuildMemberListNoSkips(t *testing.T) {
-	team := []Phase{
+	team := []phaseconfig.Phase{
 		{Name: "security", Prompt: "review security"},
 		{Name: "style", Prompt: "review style"},
 	}
@@ -563,9 +564,9 @@ func TestBuildMemberListNoSkips(t *testing.T) {
 
 func TestRunAbortInPreSkipsTeam(t *testing.T) {
 	cfg := makeConfig(
-		[]Phase{simplePhase("setup", "setup")},
-		[]Phase{simplePhase("review", "review")},
-		[]Phase{simplePhase("report", "report")},
+		[]phaseconfig.Phase{simplePhase("setup", "setup")},
+		[]phaseconfig.Phase{simplePhase("review", "review")},
+		[]phaseconfig.Phase{simplePhase("report", "report")},
 	)
 
 	var executed []string
@@ -574,7 +575,7 @@ func TestRunAbortInPreSkipsTeam(t *testing.T) {
 		RunID:     "test-run",
 		EventSink: discardEventWriter{},
 		Config:    cfg,
-		PhaseAttempt: func(ctx context.Context, phase Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
 			executed = append(executed, phase.Name)
 			return PhaseAttemptResult{
 				ExitCode:      5,
@@ -605,8 +606,8 @@ func TestRunAbortInPreSkipsTeam(t *testing.T) {
 func TestRunPostSkippedOnTeamAbort(t *testing.T) {
 	cfg := makeConfig(
 		nil,
-		[]Phase{simplePhase("review", "review")},
-		[]Phase{simplePhase("report", "report")},
+		[]phaseconfig.Phase{simplePhase("review", "review")},
+		[]phaseconfig.Phase{simplePhase("report", "report")},
 	)
 
 	var executed []string
@@ -615,7 +616,7 @@ func TestRunPostSkippedOnTeamAbort(t *testing.T) {
 		RunID:     "test-run",
 		EventSink: discardEventWriter{},
 		Config:    cfg,
-		PhaseAttempt: func(ctx context.Context, phase Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
 			executed = append(executed, phase.Name)
 			if phase.Name == "review" {
 				return PhaseAttemptResult{
@@ -643,7 +644,7 @@ func TestRunPostSkippedOnTeamAbort(t *testing.T) {
 }
 
 func TestRunAbortCancelsOtherMembers(t *testing.T) {
-	cfg := makeConfig(nil, []Phase{
+	cfg := makeConfig(nil, []phaseconfig.Phase{
 		simplePhase("fast-abort", "abort quickly"),
 		simplePhase("slow", "takes time"),
 	}, nil)
@@ -656,7 +657,7 @@ func TestRunAbortCancelsOtherMembers(t *testing.T) {
 		RunID:     "test-run",
 		EventSink: discardEventWriter{},
 		Config:    cfg,
-		PhaseAttempt: func(ctx context.Context, phase Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
 			if phase.Name == "fast-abort" {
 				return PhaseAttemptResult{
 					ExitCode:      5,
@@ -689,7 +690,7 @@ func TestRunAbortCancelsOtherMembers(t *testing.T) {
 }
 
 func TestRunAgentModelOverride(t *testing.T) {
-	cfg := makeConfig(nil, []Phase{
+	cfg := makeConfig(nil, []phaseconfig.Phase{
 		{Name: "review", Prompt: "review", Agent: "special-agent", Model: "gpt-5"},
 	}, nil)
 
@@ -699,7 +700,7 @@ func TestRunAgentModelOverride(t *testing.T) {
 		RunID:     "test-run",
 		EventSink: discardEventWriter{},
 		Config:    cfg,
-		PhaseAttempt: func(ctx context.Context, phase Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
 			capturedAgent = phase.Agent
 			capturedModel = phase.Model
 			return PhaseAttemptResult{ExitCode: 0, SessionID: "s1"}, nil
@@ -722,8 +723,8 @@ func TestRunPhaseEndPreservesExplicitStopReason(t *testing.T) {
 		WorkDir:   t.TempDir(),
 		RunID:     "test-run",
 		EventSink: sink,
-		Config:    makeConfig(nil, []Phase{simplePhase("review", "review")}, nil),
-		PhaseAttempt: func(ctx context.Context, phase Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
+		Config:    makeConfig(nil, []phaseconfig.Phase{simplePhase("review", "review")}, nil),
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
 			return PhaseAttemptResult{
 				ExitCode:   124,
 				SessionID:  "s1",

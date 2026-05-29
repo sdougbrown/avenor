@@ -7,12 +7,13 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/phaseconfig"
 )
 
 func TestRunResumeFromPreviousUsesImmediatePriorPhase(t *testing.T) {
 	cfg := &LoopConfig{
 		MaxIterations: 2,
-		Loop: []Phase{
+		Loop: []phaseconfig.Phase{
 			{Name: "review", Prompt: "review"},
 			{Name: "verify", Prompt: "verify", ResumeFromPrevious: true},
 		},
@@ -24,7 +25,7 @@ func TestRunResumeFromPreviousUsesImmediatePriorPhase(t *testing.T) {
 		RunID:     "run_1",
 		EventSink: discardEventWriter{},
 		Config:    cfg,
-		PhaseAttempt: func(ctx context.Context, phase Phase, attemptNum int, iteration int, prevSessionID string) (PhaseAttemptResult, error) {
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, iteration int, prevSessionID string) (PhaseAttemptResult, error) {
 			if phase.Name == "verify" {
 				verifyPrevSessions = append(verifyPrevSessions, prevSessionID)
 			}
@@ -54,7 +55,7 @@ func TestRunResumeFromPreviousUsesImmediatePriorPhase(t *testing.T) {
 func TestRunPreResumeFromPreviousThreadsSessionID(t *testing.T) {
 	cfg := &LoopConfig{
 		MaxIterations: 1,
-		Pre: []Phase{
+		Pre: []phaseconfig.Phase{
 			{Name: "review", Prompt: "review"},
 			{Name: "orient", Prompt: "orient", ResumeFromPrevious: true},
 		},
@@ -66,7 +67,7 @@ func TestRunPreResumeFromPreviousThreadsSessionID(t *testing.T) {
 		RunID:     "run_1",
 		EventSink: discardEventWriter{},
 		Config:    cfg,
-		PhaseAttempt: func(ctx context.Context, phase Phase, attemptNum int, iteration int, prevSessionID string) (PhaseAttemptResult, error) {
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, iteration int, prevSessionID string) (PhaseAttemptResult, error) {
 			prevSessions[phase.Name] = prevSessionID
 			return PhaseAttemptResult{ExitCode: 0, SessionID: phase.Name + "-session"}, nil
 		},
@@ -85,8 +86,8 @@ func TestRunPreResumeFromPreviousThreadsSessionID(t *testing.T) {
 func TestRunPostPhasesRunAfterLoop(t *testing.T) {
 	cfg := &LoopConfig{
 		MaxIterations: 2,
-		Loop:          []Phase{{Name: "work", Prompt: "work"}},
-		Post:          []Phase{{Name: "report", Prompt: "report"}},
+		Loop:          []phaseconfig.Phase{{Name: "work", Prompt: "work"}},
+		Post:          []phaseconfig.Phase{{Name: "report", Prompt: "report"}},
 	}
 
 	var order []string
@@ -95,7 +96,7 @@ func TestRunPostPhasesRunAfterLoop(t *testing.T) {
 		RunID:     "run_1",
 		EventSink: discardEventWriter{},
 		Config:    cfg,
-		PhaseAttempt: func(ctx context.Context, phase Phase, attemptNum int, iteration int, prevSessionID string) (PhaseAttemptResult, error) {
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, iteration int, prevSessionID string) (PhaseAttemptResult, error) {
 			order = append(order, fmt.Sprintf("%s-%d", phase.Name, iteration))
 			return PhaseAttemptResult{ExitCode: 0, SessionID: phase.Name + "-session"}, nil
 		},
@@ -117,8 +118,8 @@ func TestRunPostPhasesRunAfterLoop(t *testing.T) {
 func TestRunPostPhasesRunAfterExitMarker(t *testing.T) {
 	cfg := &LoopConfig{
 		MaxIterations: 10,
-		Loop:          []Phase{{Name: "work", Prompt: "work"}},
-		Post:          []Phase{{Name: "report", Prompt: "report"}},
+		Loop:          []phaseconfig.Phase{{Name: "work", Prompt: "work"}},
+		Post:          []phaseconfig.Phase{{Name: "report", Prompt: "report"}},
 	}
 
 	var order []string
@@ -127,7 +128,7 @@ func TestRunPostPhasesRunAfterExitMarker(t *testing.T) {
 		RunID:     "run_1",
 		EventSink: discardEventWriter{},
 		Config:    cfg,
-		PhaseAttempt: func(ctx context.Context, phase Phase, attemptNum int, iteration int, prevSessionID string) (PhaseAttemptResult, error) {
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, iteration int, prevSessionID string) (PhaseAttemptResult, error) {
 			order = append(order, fmt.Sprintf("%s-%d", phase.Name, iteration))
 			r := PhaseAttemptResult{ExitCode: 0, SessionID: phase.Name + "-session"}
 			if phase.Name == "work" {
@@ -153,8 +154,8 @@ func TestRunPostPhasesRunAfterExitMarker(t *testing.T) {
 func TestRunPostPhasesSkippedOnAbort(t *testing.T) {
 	cfg := &LoopConfig{
 		MaxIterations: 10,
-		Loop:          []Phase{{Name: "work", Prompt: "work"}},
-		Post:          []Phase{{Name: "report", Prompt: "report"}},
+		Loop:          []phaseconfig.Phase{{Name: "work", Prompt: "work"}},
+		Post:          []phaseconfig.Phase{{Name: "report", Prompt: "report"}},
 	}
 
 	var phases []string
@@ -163,7 +164,7 @@ func TestRunPostPhasesSkippedOnAbort(t *testing.T) {
 		RunID:     "run_1",
 		EventSink: discardEventWriter{},
 		Config:    cfg,
-		PhaseAttempt: func(ctx context.Context, phase Phase, attemptNum int, iteration int, prevSessionID string) (PhaseAttemptResult, error) {
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, iteration int, prevSessionID string) (PhaseAttemptResult, error) {
 			phases = append(phases, phase.Name)
 			return PhaseAttemptResult{ExitCode: 5, LoopDirective: "abort", SessionID: phase.Name + "-session"}, nil
 		},
@@ -181,8 +182,8 @@ func TestRunPostPhasesSkippedOnAbort(t *testing.T) {
 func TestRunPostPhaseResumeFromPreviousThreadsSessionID(t *testing.T) {
 	cfg := &LoopConfig{
 		MaxIterations: 1,
-		Loop:          []Phase{{Name: "work", Prompt: "work"}},
-		Post: []Phase{
+		Loop:          []phaseconfig.Phase{{Name: "work", Prompt: "work"}},
+		Post: []phaseconfig.Phase{
 			{Name: "summarize", Prompt: "summarize"},
 			{Name: "notify", Prompt: "notify", ResumeFromPrevious: true},
 		},
@@ -194,7 +195,7 @@ func TestRunPostPhaseResumeFromPreviousThreadsSessionID(t *testing.T) {
 		RunID:     "run_1",
 		EventSink: discardEventWriter{},
 		Config:    cfg,
-		PhaseAttempt: func(ctx context.Context, phase Phase, attemptNum int, iteration int, prevSessionID string) (PhaseAttemptResult, error) {
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, iteration int, prevSessionID string) (PhaseAttemptResult, error) {
 			prevSessions[phase.Name] = prevSessionID
 			return PhaseAttemptResult{ExitCode: 0, SessionID: phase.Name + "-session"}, nil
 		},
@@ -213,8 +214,8 @@ func TestRunPostPhaseResumeFromPreviousThreadsSessionID(t *testing.T) {
 func TestRunPostPhasesEmitCorrectKind(t *testing.T) {
 	cfg := &LoopConfig{
 		MaxIterations: 1,
-		Loop:          []Phase{{Name: "work", Prompt: "work"}},
-		Post:          []Phase{{Name: "report", Prompt: "report"}},
+		Loop:          []phaseconfig.Phase{{Name: "work", Prompt: "work"}},
+		Post:          []phaseconfig.Phase{{Name: "report", Prompt: "report"}},
 	}
 
 	sink := &recordingEventWriter{}
@@ -223,7 +224,7 @@ func TestRunPostPhasesEmitCorrectKind(t *testing.T) {
 		RunID:     "run_1",
 		EventSink: sink,
 		Config:    cfg,
-		PhaseAttempt: func(ctx context.Context, phase Phase, attemptNum int, iteration int, prevSessionID string) (PhaseAttemptResult, error) {
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, iteration int, prevSessionID string) (PhaseAttemptResult, error) {
 			return PhaseAttemptResult{ExitCode: 0, SessionID: phase.Name + "-session"}, nil
 		},
 	})
@@ -276,9 +277,9 @@ func TestRunEmitsRetryEventBeforeRetry(t *testing.T) {
 		WorkDir:    t.TempDir(),
 		RunID:      "run_1",
 		EventSink:  sink,
-		Config:     &LoopConfig{Pre: []Phase{{Name: "build", Prompt: "build"}}, MaxIterations: 1},
+		Config:     &LoopConfig{Pre: []phaseconfig.Phase{{Name: "build", Prompt: "build"}}, MaxIterations: 1},
 		MaxRetries: 1,
-		PhaseAttempt: func(ctx context.Context, phase Phase, attemptNum int, iteration int, prevSessionID string) (PhaseAttemptResult, error) {
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, iteration int, prevSessionID string) (PhaseAttemptResult, error) {
 			attempts++
 			if attempts == 1 {
 				return PhaseAttemptResult{ExitCode: 1, SessionID: "ses_1"}, nil
@@ -312,8 +313,8 @@ func TestRunPhaseEndPreservesExplicitStopReason(t *testing.T) {
 		WorkDir:   t.TempDir(),
 		RunID:     "run_1",
 		EventSink: sink,
-		Config:    &LoopConfig{Pre: []Phase{{Name: "build", Prompt: "build"}}, MaxIterations: 1},
-		PhaseAttempt: func(ctx context.Context, phase Phase, attemptNum int, iteration int, prevSessionID string) (PhaseAttemptResult, error) {
+		Config:    &LoopConfig{Pre: []phaseconfig.Phase{{Name: "build", Prompt: "build"}}, MaxIterations: 1},
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, iteration int, prevSessionID string) (PhaseAttemptResult, error) {
 			return PhaseAttemptResult{
 				ExitCode:   124,
 				SessionID:  "ses_1",

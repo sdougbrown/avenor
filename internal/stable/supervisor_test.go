@@ -16,6 +16,7 @@ import (
 	"github.com/sdougbrown/avenor/client"
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/looprunner"
+	"github.com/sdougbrown/avenor/internal/phaseconfig"
 	"github.com/sdougbrown/avenor/internal/runtime"
 )
 
@@ -393,7 +394,7 @@ func TestRunLoopChildCleansUpOnLooprunnerError(t *testing.T) {
 
 	cfg := &looprunner.LoopConfig{
 		MaxIterations: 1,
-		Pre:           []looprunner.Phase{{Name: "broken", Prompt: "{{"}},
+		Pre:           []phaseconfig.Phase{{Name: "broken", Prompt: "{{"}},
 	}
 	sup.runLoopChild(context.Background(), child, cfg, 0, "", "", "", "")
 

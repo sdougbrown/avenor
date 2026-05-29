@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sdougbrown/avenor/internal/phaseconfig"
 )
 
 func TestLoadLoopConfig(t *testing.T) {
@@ -119,7 +121,7 @@ func TestLoadLoopConfig(t *testing.T) {
 
 	t.Run("InsertInitialPrompt adds phase at index 0 of Pre", func(t *testing.T) {
 		cfg := &LoopConfig{
-			Pre: []Phase{{Name: "build", Prompt: "build it"}},
+			Pre: []phaseconfig.Phase{{Name: "build", Prompt: "build it"}},
 		}
 		cfg.InsertInitialPrompt("my initial prompt")
 		if len(cfg.Pre) != 2 {
@@ -138,7 +140,7 @@ func TestLoadLoopConfig(t *testing.T) {
 
 	t.Run("InsertInitialPrompt does not trigger duplicate error", func(t *testing.T) {
 		cfg := &LoopConfig{
-			Pre: []Phase{{Name: "foo", Prompt: "do foo"}},
+			Pre: []phaseconfig.Phase{{Name: "foo", Prompt: "do foo"}},
 		}
 		cfg.InsertInitialPrompt("start here")
 		if len(cfg.Pre) != 2 {
@@ -210,7 +212,7 @@ func TestLoadLoopConfig(t *testing.T) {
 }
 
 func TestValidatePhaseMissingNamePre(t *testing.T) {
-	cfg := &LoopConfig{Pre: []Phase{{Prompt: "hello"}}}
+	cfg := &LoopConfig{Pre: []phaseconfig.Phase{{Prompt: "hello"}}}
 	err := cfg.Validate()
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -221,7 +223,7 @@ func TestValidatePhaseMissingNamePre(t *testing.T) {
 }
 
 func TestValidatePhaseMissingPromptLoop(t *testing.T) {
-	cfg := &LoopConfig{Loop: []Phase{{Name: "test"}}, MaxIterations: 5}
+	cfg := &LoopConfig{Loop: []phaseconfig.Phase{{Name: "test"}}, MaxIterations: 5}
 	err := cfg.Validate()
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -232,7 +234,7 @@ func TestValidatePhaseMissingPromptLoop(t *testing.T) {
 }
 
 func TestValidateDuplicateNameInPre(t *testing.T) {
-	cfg := &LoopConfig{Pre: []Phase{
+	cfg := &LoopConfig{Pre: []phaseconfig.Phase{
 		{Name: "foo", Prompt: "first"},
 		{Name: "foo", Prompt: "second"},
 	}}
@@ -247,8 +249,8 @@ func TestValidateDuplicateNameInPre(t *testing.T) {
 
 func TestValidateDuplicateNameInLoop(t *testing.T) {
 	cfg := &LoopConfig{
-		Pre:           []Phase{{Name: "foo", Prompt: "first"}},
-		Loop:          []Phase{{Name: "foo", Prompt: "second"}},
+		Pre:           []phaseconfig.Phase{{Name: "foo", Prompt: "first"}},
+		Loop:          []phaseconfig.Phase{{Name: "foo", Prompt: "second"}},
 		MaxIterations: 5,
 	}
 	err := cfg.Validate()
@@ -262,7 +264,7 @@ func TestValidateDuplicateNameInLoop(t *testing.T) {
 
 func TestValidateDuplicateAcrossMultipleLoop(t *testing.T) {
 	cfg := &LoopConfig{
-		Loop: []Phase{
+		Loop: []phaseconfig.Phase{
 			{Name: "a", Prompt: "a"},
 			{Name: "b", Prompt: "b"},
 			{Name: "a", Prompt: "a again"},
@@ -281,8 +283,8 @@ func TestValidateDuplicateAcrossMultipleLoop(t *testing.T) {
 func TestValidateOK(t *testing.T) {
 	cfg := &LoopConfig{
 		MaxIterations: 10,
-		Pre:           []Phase{{Name: "setup", Prompt: "setup env"}},
-		Loop:          []Phase{{Name: "test", Prompt: "run tests"}},
+		Pre:           []phaseconfig.Phase{{Name: "setup", Prompt: "setup env"}},
+		Loop:          []phaseconfig.Phase{{Name: "test", Prompt: "run tests"}},
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -301,7 +303,7 @@ func TestInsertInitialPromptOnEmptyPre(t *testing.T) {
 }
 
 func TestInsertInitialPromptResumeFromPrevious(t *testing.T) {
-	cfg := &LoopConfig{Pre: []Phase{{Name: "build", Prompt: "build it", ResumeFromPrevious: true}}}
+	cfg := &LoopConfig{Pre: []phaseconfig.Phase{{Name: "build", Prompt: "build it", ResumeFromPrevious: true}}}
 	cfg.InsertInitialPrompt("go")
 	if len(cfg.Pre) != 2 {
 		t.Fatalf("expected 2 pre phases, got %d", len(cfg.Pre))
@@ -316,7 +318,7 @@ func TestInsertInitialPromptResumeFromPrevious(t *testing.T) {
 
 func TestValidateNamesCaseSensitiveDistinct(t *testing.T) {
 	cfg := &LoopConfig{
-		Pre: []Phase{
+		Pre: []phaseconfig.Phase{
 			{Name: "Foo", Prompt: "first"},
 			{Name: "foo", Prompt: "second"},
 		},
@@ -329,7 +331,7 @@ func TestValidateNamesCaseSensitiveDistinct(t *testing.T) {
 
 func TestValidateNamesCaseSensitiveDuplicate(t *testing.T) {
 	cfg := &LoopConfig{
-		Pre: []Phase{
+		Pre: []phaseconfig.Phase{
 			{Name: "Foo", Prompt: "first"},
 			{Name: "Foo", Prompt: "second"},
 		},
@@ -372,8 +374,8 @@ func TestLoadLoopConfigWithPost(t *testing.T) {
 
 func TestValidateDuplicateNameAcrossPost(t *testing.T) {
 	cfg := &LoopConfig{
-		Loop:          []Phase{{Name: "work", Prompt: "work"}},
-		Post:          []Phase{{Name: "work", Prompt: "also work"}},
+		Loop:          []phaseconfig.Phase{{Name: "work", Prompt: "work"}},
+		Post:          []phaseconfig.Phase{{Name: "work", Prompt: "also work"}},
 		MaxIterations: 1,
 	}
 	err := cfg.Validate()

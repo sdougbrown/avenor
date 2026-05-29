@@ -19,6 +19,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/looprunner"
 	"github.com/sdougbrown/avenor/internal/permission"
+	"github.com/sdougbrown/avenor/internal/phaseconfig"
 	"github.com/sdougbrown/avenor/internal/teamrunner"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/pony"
@@ -373,7 +374,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		agentOverride := *agent
 		modelOverride := *model
 
-		phaseAttempt := func(ctx context.Context, phase looprunner.Phase, attemptNum int, iteration int, prevSessionID string) (looprunner.PhaseAttemptResult, error) {
+		phaseAttempt := func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, iteration int, prevSessionID string) (looprunner.PhaseAttemptResult, error) {
 			startOpts := runtime.StartOptions{
 				Agent:     agentOverride,
 				Model:     modelOverride,
@@ -462,7 +463,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 					Config:     subCfg,
 					MaxRetries: *maxRetries,
 					ConfigDir:  filepath.Dir(configPath),
-					PhaseAttempt: func(ctx context.Context, phase teamrunner.Phase, attemptNum int, prevSessionID string) (teamrunner.PhaseAttemptResult, error) {
+					PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (teamrunner.PhaseAttemptResult, error) {
 						a := agentOverride
 						m := modelOverride
 						if phase.Agent != "" {
@@ -570,7 +571,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		agentOverride := *agent
 		modelOverride := *model
 
-		phaseAttempt := func(ctx context.Context, phase teamrunner.Phase, attemptNum int, prevSessionID string) (teamrunner.PhaseAttemptResult, error) {
+		phaseAttempt := func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (teamrunner.PhaseAttemptResult, error) {
 			a := agentOverride
 			m := modelOverride
 			if phase.Agent != "" {
@@ -641,7 +642,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 					Config:     subCfg,
 					MaxRetries: *maxRetries,
 					ConfigDir:  filepath.Dir(configPath),
-					PhaseAttempt: func(ctx context.Context, phase looprunner.Phase, attemptNum int, iteration int, prevSessionID string) (looprunner.PhaseAttemptResult, error) {
+					PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, iteration int, prevSessionID string) (looprunner.PhaseAttemptResult, error) {
 						startOpts := runtime.StartOptions{
 							Agent:     agentOverride,
 							Model:     modelOverride,

@@ -3,18 +3,13 @@ package looprunner
 import (
 	"context"
 	"fmt"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/phaseconfig"
 	"github.com/sdougbrown/avenor/internal/runtime"
 )
-
-type EventWriter interface {
-	Write(event events.Event) error
-}
 
 type NestedResult struct {
 	ExitCode   int
@@ -26,10 +21,10 @@ type NestedResult struct {
 type RunOptions struct {
 	WorkDir    string
 	RunID      string
-	EventSink  EventWriter
+	EventSink  phaseconfig.EventWriter
 	Config     *LoopConfig
 	MaxRetries int
-	PhaseAttempt func(ctx context.Context, phase Phase, attemptNum int, iteration int, prevSessionID string) (PhaseAttemptResult, error)
+	PhaseAttempt func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, iteration int, prevSessionID string) (PhaseAttemptResult, error)
 	NestedRun  func(ctx context.Context, configPath string, runType string) (NestedResult, error)
 	ConfigDir  string
 }
@@ -49,30 +44,12 @@ type RunResult struct {
 	Reason     string
 }
 
-type loopMarker struct {
-	directive string
-	label     string
-}
-
-func loopDirectiveSeverity(d string) int {
-	switch d {
-	case "abort":
-		return 3
-	case "exit":
-		return 2
-	case "continue":
-		return 1
-	default:
-		return 0
-	}
-}
-
 func Run(ctx context.Context, opts RunOptions) (RunResult, error) {
 	if err := emitLoopStart(opts.EventSink, opts.RunID, opts.Config.MaxIterations, len(opts.Config.Pre), len(opts.Config.Loop), len(opts.Config.Post)); err != nil {
 		return RunResult{}, err
 	}
 
-	prevPhaseCommit := captureHeadCommit(opts.WorkDir)
+	prevPhaseCommit := phaseconfig.CaptureHeadCommit(opts.WorkDir)
 
 	if early, err := runSequentialPhases(ctx, opts, opts.Config.Pre, "pre", 0, &prevPhaseCommit); err != nil {
 		return RunResult{}, err
@@ -111,7 +88,7 @@ func Run(ctx context.Context, opts RunOptions) (RunResult, error) {
 			}
 
 			prevSessionIDs[phaseIdx] = result.SessionID
-			prevPhaseCommit = captureHeadCommit(opts.WorkDir)
+			prevPhaseCommit = phaseconfig.CaptureHeadCommit(opts.WorkDir)
 
 			if err := ctx.Err(); err != nil {
 				return cancelledRunResult(ctx, opts, iterationsCompleted)
@@ -168,10 +145,7 @@ func Run(ctx context.Context, opts RunOptions) (RunResult, error) {
 	return RunResult{ExitCode: 0, StopReason: "end_turn"}, nil
 }
 
-// runSequentialPhases runs phases in order, threading session IDs for resume.
-// Returns (*RunResult, nil) on abort/failure (loop.end already emitted), or
-// (nil, err) on internal error, or (nil, nil) to continue.
-func runSequentialPhases(ctx context.Context, opts RunOptions, phases []Phase, kind string, iterationsCompleted int, prevCommit *string) (*RunResult, error) {
+func runSequentialPhases(ctx context.Context, opts RunOptions, phases []phaseconfig.Phase, kind string, iterationsCompleted int, prevCommit *string) (*RunResult, error) {
 	var prevSessionID string
 	for _, phase := range phases {
 		if err := ctx.Err(); err != nil {
@@ -191,7 +165,7 @@ func runSequentialPhases(ctx context.Context, opts RunOptions, phases []Phase, k
 		}
 
 		prevSessionID = result.SessionID
-		*prevCommit = captureHeadCommit(opts.WorkDir)
+		*prevCommit = phaseconfig.CaptureHeadCommit(opts.WorkDir)
 
 		if err := ctx.Err(); err != nil {
 			r, err := cancelledRunResult(ctx, opts, iterationsCompleted)
@@ -218,7 +192,7 @@ func runSequentialPhases(ctx context.Context, opts RunOptions, phases []Phase, k
 	return nil, nil
 }
 
-func executePhase(ctx context.Context, opts RunOptions, phase Phase, kind string, iteration int, prevSessionID string, prevPhaseCommit string) (result PhaseAttemptResult, rerr error) {
+func executePhase(ctx context.Context, opts RunOptions, phase phaseconfig.Phase, kind string, iteration int, prevSessionID string, prevPhaseCommit string) (result PhaseAttemptResult, rerr error) {
 	if phase.LoopFile != "" || phase.TeamFile != "" {
 		if opts.NestedRun == nil {
 			return PhaseAttemptResult{}, fmt.Errorf("loop config: phase %q has loop_file or team_file but NestedRun is not configured", phase.Name)
@@ -249,9 +223,9 @@ func executePhase(ctx context.Context, opts RunOptions, phase Phase, kind string
 		}, nil
 	}
 
-	diffStat, changedFiles, _ := CaptureGitDelta(opts.WorkDir, prevPhaseCommit)
+	diffStat, changedFiles, _ := phaseconfig.CaptureGitDelta(opts.WorkDir, prevPhaseCommit)
 
-	tmplCtx := TemplateContext{
+	tmplCtx := phaseconfig.TemplateContext{
 		RunID:           opts.RunID,
 		Phase:           phase.Name,
 		Iteration:       iteration,
@@ -262,7 +236,7 @@ func executePhase(ctx context.Context, opts RunOptions, phase Phase, kind string
 		ChangedFiles:    changedFiles,
 	}
 
-	rendered, err := RenderPrompt(phase.Prompt, tmplCtx)
+	rendered, err := phaseconfig.RenderPrompt(phase.Prompt, tmplCtx)
 	if err != nil {
 		return PhaseAttemptResult{}, fmt.Errorf("render prompt for phase %q: %w", phase.Name, err)
 	}
@@ -270,12 +244,12 @@ func executePhase(ctx context.Context, opts RunOptions, phase Phase, kind string
 	renderedPhase := phase
 	renderedPhase.Prompt = rendered
 
-	if err := emitPhaseStart(opts.EventSink, opts.RunID, phase.Name, iteration, kind); err != nil {
+	if err := phaseconfig.EmitPhaseStart(opts.EventSink, opts.RunID, phase.Name, iteration, kind); err != nil {
 		return PhaseAttemptResult{}, err
 	}
 
 	defer func() {
-		_ = emitPhaseEnd(opts.EventSink, opts.RunID, phase.Name, iteration, phaseStopReason(result), markerFromResult(result))
+		_ = phaseconfig.EmitPhaseEnd(opts.EventSink, opts.RunID, phase.Name, iteration, phaseStopReason(result), markerFromResult(result))
 	}()
 
 	var retryCount int
@@ -284,14 +258,14 @@ func executePhase(ctx context.Context, opts RunOptions, phase Phase, kind string
 
 	wrappedAttempt := func(ctx context.Context) (PhaseAttemptResult, error) {
 		if retryCount > 0 && retryCount <= opts.MaxRetries {
-			emitRetry(opts.EventSink, opts.RunID, retryCount, opts.MaxRetries)
+			phaseconfig.EmitRetry(opts.EventSink, opts.RunID, retryCount, opts.MaxRetries)
 		}
 		r, err := opts.PhaseAttempt(ctx, renderedPhase, retryCount, iteration, prevSessionID)
 		retryCount++
 		if err != nil {
 			return r, err
 		}
-		if loopDirectiveSeverity(r.LoopDirective) > loopDirectiveSeverity(accDirective) {
+		if phaseconfig.LoopDirectiveSeverity(r.LoopDirective) > phaseconfig.LoopDirectiveSeverity(accDirective) {
 			accDirective = r.LoopDirective
 			accLabel = r.LoopLabel
 		}
@@ -318,7 +292,7 @@ func runPhaseWithRetry(ctx context.Context, attemptFn func(ctx context.Context) 
 		select {
 		case <-ctx.Done():
 			return result, nil
-		case <-phaseRetryAfter(backoffDuration(retry - 1)):
+		case <-phaseRetryAfter(phaseconfig.BackoffDuration(retry - 1)):
 		}
 
 		result, err = attemptFn(ctx)
@@ -350,29 +324,14 @@ func phaseStopReason(result PhaseAttemptResult) string {
 	return runtime.StopReasonForExitCode(result.ExitCode)
 }
 
-func markerFromResult(result PhaseAttemptResult) *loopMarker {
+func markerFromResult(result PhaseAttemptResult) *phaseconfig.LoopMarker {
 	if result.LoopDirective == "" {
 		return nil
 	}
-	return &loopMarker{directive: result.LoopDirective, label: result.LoopLabel}
+	return &phaseconfig.LoopMarker{Directive: result.LoopDirective, Label: result.LoopLabel}
 }
 
-func emitRetry(w EventWriter, runID string, attempt, maxRetries int) {
-	fields := map[string]any{
-		"attempt":     attempt,
-		"max_retries": maxRetries,
-		"ts":          time.Now().UnixMilli(),
-	}
-	if runID != "" {
-		fields["run_id"] = runID
-	}
-	_ = w.Write(events.Event{
-		Event:  "avenor.retry",
-		Fields: fields,
-	})
-}
-
-func emitLoopStart(w EventWriter, runID string, maxIterations, preCount, loopCount, postCount int) error {
+func emitLoopStart(w phaseconfig.EventWriter, runID string, maxIterations, preCount, loopCount, postCount int) error {
 	fields := map[string]any{
 		"ts":                time.Now().UnixMilli(),
 		"max_iterations":    maxIterations,
@@ -389,52 +348,7 @@ func emitLoopStart(w EventWriter, runID string, maxIterations, preCount, loopCou
 	})
 }
 
-func emitPhaseStart(w EventWriter, runID, phase string, iteration int, kind string) error {
-	fields := map[string]any{
-		"ts":        time.Now().UnixMilli(),
-		"phase":     phase,
-		"iteration": iteration,
-		"kind":      kind,
-	}
-	if runID != "" {
-		fields["run_id"] = runID
-	}
-	return w.Write(events.Event{
-		Event:  "avenor.phase.start",
-		Fields: fields,
-	})
-}
-
-func emitPhaseEnd(w EventWriter, runID, phase string, iteration int, stopReason string, marker *loopMarker) error {
-	fields := map[string]any{
-		"ts":          time.Now().UnixMilli(),
-		"phase":       phase,
-		"iteration":   iteration,
-		"stop_reason": stopReason,
-	}
-	if runID != "" {
-		fields["run_id"] = runID
-	}
-	if marker != nil {
-		if marker.directive == "abort" {
-			fields["abort_marker"] = true
-			if marker.label != "" {
-				fields["abort_marker_label"] = marker.label
-			}
-		} else if marker.directive == "exit" {
-			fields["exit_marker"] = true
-			if marker.label != "" {
-				fields["exit_marker_label"] = marker.label
-			}
-		}
-	}
-	return w.Write(events.Event{
-		Event:  "avenor.phase.end",
-		Fields: fields,
-	})
-}
-
-func emitLoopEnd(w EventWriter, runID string, exitReason, exitLabel string, iterationsCompleted int) error {
+func emitLoopEnd(w phaseconfig.EventWriter, runID string, exitReason, exitLabel string, iterationsCompleted int) error {
 	fields := map[string]any{
 		"ts":                   time.Now().UnixMilli(),
 		"exit_reason":          exitReason,
@@ -450,21 +364,4 @@ func emitLoopEnd(w EventWriter, runID string, exitReason, exitLabel string, iter
 		Event:  "avenor.loop.end",
 		Fields: fields,
 	})
-}
-
-func captureHeadCommit(workDir string) string {
-	cmd := exec.Command("git", "-C", workDir, "rev-parse", "HEAD")
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
-}
-
-func backoffDuration(retry int) time.Duration {
-	d := time.Duration(1<<uint(retry+1)) * time.Second
-	if d > 30*time.Second {
-		d = 30 * time.Second
-	}
-	return d
 }
