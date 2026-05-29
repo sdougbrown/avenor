@@ -124,12 +124,16 @@ func safeResolvePath(workingDir string, additionalDirs []string, target string) 
 		}
 	}
 
-	// Check against workingDir first, then any additional allowed dirs
+	// Check against workingDir first, then any additional allowed dirs.
+	// EvalSymlinks both sides so macOS /var → /private/var doesn't cause false mismatches.
 	baseDirs := append([]string{workingDir}, additionalDirs...)
 	for _, base := range baseDirs {
 		wdAbs, err := filepath.Abs(base)
 		if err != nil {
 			continue
+		}
+		if resolved, err := filepath.EvalSymlinks(wdAbs); err == nil {
+			wdAbs = resolved
 		}
 		rel, err := filepath.Rel(wdAbs, safePath)
 		if err == nil && !strings.HasPrefix(rel, "..") {

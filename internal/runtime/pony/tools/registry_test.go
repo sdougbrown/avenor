@@ -213,8 +213,12 @@ func TestSafeResolvePath(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if resolved != target {
-			t.Fatalf("expected %q, got %q", target, resolved)
+		wantResolved, err := filepath.EvalSymlinks(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resolved != wantResolved {
+			t.Fatalf("expected %q, got %q", wantResolved, resolved)
 		}
 	})
 
@@ -248,8 +252,12 @@ func TestSafeResolvePath(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if resolved != target {
-			t.Fatalf("expected %q, got %q", target, resolved)
+		wantResolved, err := filepath.EvalSymlinks(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resolved != wantResolved {
+			t.Fatalf("expected %q, got %q", wantResolved, resolved)
 		}
 	})
 }
