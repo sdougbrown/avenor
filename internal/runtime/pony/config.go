@@ -137,7 +137,9 @@ func (e *controlSocketExecutor) GetStatus(ctx context.Context, sessionID string)
 }
 
 func (e *controlSocketExecutor) WaitForDone(ctx context.Context, sessionID string) (*runtime.AgentResult, error) {
-	sub := e.client.SubscribeRuntime(ctx, sessionID)
+	subCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	sub := e.client.SubscribeRuntime(subCtx, sessionID)
 	for evt := range sub {
 		if evt.Event == "session.end" {
 			stopReason, _ := evt.Raw["stop_reason"].(string)

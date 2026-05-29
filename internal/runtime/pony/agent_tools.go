@@ -160,6 +160,10 @@ func (t *spawnAgentsTool) Execute(ctx context.Context, workingDir string, args j
 	if len(input.Agents) == 0 {
 		return "", fmt.Errorf("spawn_agents: at least one agent is required")
 	}
+	baseAbs, err := filepath.Abs(workingDir)
+	if err != nil {
+		return "", fmt.Errorf("spawn_agents: resolve working directory: %w", err)
+	}
 
 	var parts []string
 	for _, agent := range input.Agents {
@@ -167,10 +171,6 @@ func (t *spawnAgentsTool) Execute(ctx context.Context, workingDir string, args j
 			return "", fmt.Errorf("spawn_agents: prompt is required for each agent")
 		}
 		if agent.Dir != "" {
-			baseAbs, err := filepath.Abs(workingDir)
-			if err != nil {
-				return "", fmt.Errorf("spawn_agents: resolve working directory: %w", err)
-			}
 			dirAbs, err := filepath.Abs(agent.Dir)
 			if err != nil {
 				return "", fmt.Errorf("spawn_agents: resolve dir: %w", err)
