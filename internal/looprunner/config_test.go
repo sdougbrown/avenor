@@ -353,6 +353,38 @@ func TestLoadLoopConfigFileNotFound(t *testing.T) {
 	}
 }
 
+func TestLoadLoopConfigWithPost(t *testing.T) {
+	cfg, err := loadFromJSON(t, `{
+		"max_iterations": 2,
+		"loop": [{"name":"work","prompt":"work"}],
+		"post": [{"name":"report","prompt":"report"}]
+	}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.Post) != 1 {
+		t.Fatalf("expected 1 post phase, got %d", len(cfg.Post))
+	}
+	if cfg.Post[0].Name != "report" || cfg.Post[0].Prompt != "report" {
+		t.Fatalf("unexpected post phase: %+v", cfg.Post[0])
+	}
+}
+
+func TestValidateDuplicateNameAcrossPost(t *testing.T) {
+	cfg := &LoopConfig{
+		Loop:          []Phase{{Name: "work", Prompt: "work"}},
+		Post:          []Phase{{Name: "work", Prompt: "also work"}},
+		MaxIterations: 1,
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for duplicate name across loop and post, got nil")
+	}
+	if err.Error() != `loop config: duplicate phase name: "work"` {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestResumeFromPreviousRoundTrip(t *testing.T) {
 	cfg, err := loadFromJSON(t, `{"pre":[{"name":"build","prompt":"build it","resume_from_previous":true}]}`)
 	if err != nil {

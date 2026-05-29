@@ -18,6 +18,7 @@ type LoopConfig struct {
 	MaxIterations int     `json:"max_iterations"`
 	Pre           []Phase `json:"pre"`
 	Loop          []Phase `json:"loop"`
+	Post          []Phase `json:"post"`
 }
 
 func LoadLoopConfig(path string) (*LoopConfig, error) {
@@ -40,6 +41,9 @@ func LoadLoopConfig(path string) (*LoopConfig, error) {
 		return nil, err
 	}
 	if err := resolvePromptFiles(cfg.Loop, configDir); err != nil {
+		return nil, err
+	}
+	if err := resolvePromptFiles(cfg.Post, configDir); err != nil {
 		return nil, err
 	}
 
@@ -100,6 +104,15 @@ func (c *LoopConfig) Validate() error {
 		}
 	}
 
+	for i := range c.Post {
+		if c.Post[i].Name == "" {
+			return fmt.Errorf("loop config: phase[index %d]: name must not be empty", i)
+		}
+		if c.Post[i].Prompt == "" && c.Post[i].PromptFile == "" {
+			return fmt.Errorf("loop config: phase[name %s]: prompt must not be empty (set prompt or prompt_file)", c.Post[i].Name)
+		}
+	}
+
 	names := make(map[string]struct{})
 	for i := range c.Pre {
 		n := c.Pre[i].Name
@@ -114,6 +127,17 @@ func (c *LoopConfig) Validate() error {
 
 	for i := range c.Loop {
 		n := c.Loop[i].Name
+		if n == "(initial)" {
+			return fmt.Errorf("loop config: duplicate phase name: \"(initial)\"")
+		}
+		if _, ok := names[n]; ok {
+			return fmt.Errorf("loop config: duplicate phase name: \"%s\"", n)
+		}
+		names[n] = struct{}{}
+	}
+
+	for i := range c.Post {
+		n := c.Post[i].Name
 		if n == "(initial)" {
 			return fmt.Errorf("loop config: duplicate phase name: \"(initial)\"")
 		}

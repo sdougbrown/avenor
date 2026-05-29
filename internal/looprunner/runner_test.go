@@ -82,6 +82,168 @@ func TestRunPreResumeFromPreviousThreadsSessionID(t *testing.T) {
 	}
 }
 
+func TestRunPostPhasesRunAfterLoop(t *testing.T) {
+	cfg := &LoopConfig{
+		MaxIterations: 2,
+		Loop:          []Phase{{Name: "work", Prompt: "work"}},
+		Post:          []Phase{{Name: "report", Prompt: "report"}},
+	}
+
+	var order []string
+	_, err := Run(context.Background(), RunOptions{
+		WorkDir:   t.TempDir(),
+		RunID:     "run_1",
+		EventSink: discardEventWriter{},
+		Config:    cfg,
+		PhaseAttempt: func(ctx context.Context, phase Phase, attemptNum int, iteration int, prevSessionID string) (PhaseAttemptResult, error) {
+			order = append(order, fmt.Sprintf("%s-%d", phase.Name, iteration))
+			return PhaseAttemptResult{ExitCode: 0, SessionID: phase.Name + "-session"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	want := []string{"work-1", "work-2", "report-0"}
+	if len(order) != len(want) {
+		t.Fatalf("phase order = %v, want %v", order, want)
+	}
+	for i := range want {
+		if order[i] != want[i] {
+			t.Fatalf("phase order = %v, want %v", order, want)
+		}
+	}
+}
+
+func TestRunPostPhasesRunAfterExitMarker(t *testing.T) {
+	cfg := &LoopConfig{
+		MaxIterations: 10,
+		Loop:          []Phase{{Name: "work", Prompt: "work"}},
+		Post:          []Phase{{Name: "report", Prompt: "report"}},
+	}
+
+	var order []string
+	_, err := Run(context.Background(), RunOptions{
+		WorkDir:   t.TempDir(),
+		RunID:     "run_1",
+		EventSink: discardEventWriter{},
+		Config:    cfg,
+		PhaseAttempt: func(ctx context.Context, phase Phase, attemptNum int, iteration int, prevSessionID string) (PhaseAttemptResult, error) {
+			order = append(order, fmt.Sprintf("%s-%d", phase.Name, iteration))
+			r := PhaseAttemptResult{ExitCode: 0, SessionID: phase.Name + "-session"}
+			if phase.Name == "work" {
+				r.LoopDirective = "exit"
+			}
+			return r, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	want := []string{"work-1", "report-0"}
+	if len(order) != len(want) {
+		t.Fatalf("phase order = %v, want %v", order, want)
+	}
+	for i := range want {
+		if order[i] != want[i] {
+			t.Fatalf("phase order = %v, want %v", order, want)
+		}
+	}
+}
+
+func TestRunPostPhasesSkippedOnAbort(t *testing.T) {
+	cfg := &LoopConfig{
+		MaxIterations: 10,
+		Loop:          []Phase{{Name: "work", Prompt: "work"}},
+		Post:          []Phase{{Name: "report", Prompt: "report"}},
+	}
+
+	var phases []string
+	_, err := Run(context.Background(), RunOptions{
+		WorkDir:   t.TempDir(),
+		RunID:     "run_1",
+		EventSink: discardEventWriter{},
+		Config:    cfg,
+		PhaseAttempt: func(ctx context.Context, phase Phase, attemptNum int, iteration int, prevSessionID string) (PhaseAttemptResult, error) {
+			phases = append(phases, phase.Name)
+			return PhaseAttemptResult{ExitCode: 5, LoopDirective: "abort", SessionID: phase.Name + "-session"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	for _, p := range phases {
+		if p == "report" {
+			t.Fatal("post phase ran after abort, expected it to be skipped")
+		}
+	}
+}
+
+func TestRunPostPhaseResumeFromPreviousThreadsSessionID(t *testing.T) {
+	cfg := &LoopConfig{
+		MaxIterations: 1,
+		Loop:          []Phase{{Name: "work", Prompt: "work"}},
+		Post: []Phase{
+			{Name: "summarize", Prompt: "summarize"},
+			{Name: "notify", Prompt: "notify", ResumeFromPrevious: true},
+		},
+	}
+
+	prevSessions := map[string]string{}
+	_, err := Run(context.Background(), RunOptions{
+		WorkDir:   t.TempDir(),
+		RunID:     "run_1",
+		EventSink: discardEventWriter{},
+		Config:    cfg,
+		PhaseAttempt: func(ctx context.Context, phase Phase, attemptNum int, iteration int, prevSessionID string) (PhaseAttemptResult, error) {
+			prevSessions[phase.Name] = prevSessionID
+			return PhaseAttemptResult{ExitCode: 0, SessionID: phase.Name + "-session"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if prevSessions["summarize"] != "" {
+		t.Fatalf("summarize prevSessionID = %q, want empty", prevSessions["summarize"])
+	}
+	if prevSessions["notify"] != "summarize-session" {
+		t.Fatalf("notify prevSessionID = %q, want %q", prevSessions["notify"], "summarize-session")
+	}
+}
+
+func TestRunPostPhasesEmitCorrectKind(t *testing.T) {
+	cfg := &LoopConfig{
+		MaxIterations: 1,
+		Loop:          []Phase{{Name: "work", Prompt: "work"}},
+		Post:          []Phase{{Name: "report", Prompt: "report"}},
+	}
+
+	sink := &recordingEventWriter{}
+	_, err := Run(context.Background(), RunOptions{
+		WorkDir:   t.TempDir(),
+		RunID:     "run_1",
+		EventSink: sink,
+		Config:    cfg,
+		PhaseAttempt: func(ctx context.Context, phase Phase, attemptNum int, iteration int, prevSessionID string) (PhaseAttemptResult, error) {
+			return PhaseAttemptResult{ExitCode: 0, SessionID: phase.Name + "-session"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	kinds := map[string]string{}
+	for _, ev := range sink.events {
+		if ev.Event == "avenor.phase.start" {
+			kinds[ev.Fields["phase"].(string)] = ev.Fields["kind"].(string)
+		}
+	}
+	if kinds["work"] != "loop" {
+		t.Fatalf("work kind = %q, want loop", kinds["work"])
+	}
+	if kinds["report"] != "post" {
+		t.Fatalf("report kind = %q, want post", kinds["report"])
+	}
+}
+
 func TestRunPhaseWithRetryOnlyRetriesTransientFailure(t *testing.T) {
 	attempts := 0
 	result, err := runPhaseWithRetry(context.Background(), func(ctx context.Context) (PhaseAttemptResult, error) {

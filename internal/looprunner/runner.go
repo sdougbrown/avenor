@@ -58,62 +58,24 @@ func loopDirectiveSeverity(d string) int {
 }
 
 func Run(ctx context.Context, opts RunOptions) (RunResult, error) {
-	if err := emitLoopStart(opts.EventSink, opts.RunID, opts.Config.MaxIterations, len(opts.Config.Pre), len(opts.Config.Loop)); err != nil {
+	if err := emitLoopStart(opts.EventSink, opts.RunID, opts.Config.MaxIterations, len(opts.Config.Pre), len(opts.Config.Loop), len(opts.Config.Post)); err != nil {
 		return RunResult{}, err
 	}
 
 	prevPhaseCommit := captureHeadCommit(opts.WorkDir)
 
-	var prevPreSessionID string
-	for _, phase := range opts.Config.Pre {
-		if err := ctx.Err(); err != nil {
-			return cancelledRunResult(ctx, opts, 0)
-		}
-
-		sessionID := ""
-		if phase.ResumeFromPrevious {
-			sessionID = prevPreSessionID
-		}
-
-		result, err := executePhase(ctx, opts, phase, 0, sessionID, prevPhaseCommit)
-		if err != nil {
-			_ = emitLoopEnd(opts.EventSink, opts.RunID, "phase_failure", "", 0)
-			return RunResult{}, err
-		}
-
-		prevPreSessionID = result.SessionID
-		prevPhaseCommit = captureHeadCommit(opts.WorkDir)
-
-		if err := ctx.Err(); err != nil {
-			return cancelledRunResult(ctx, opts, 0)
-		}
-
-		if result.LoopDirective == "abort" {
-			_ = emitLoopEnd(opts.EventSink, opts.RunID, "abort", result.LoopLabel, 0)
-			return RunResult{
-				ExitCode:   5,
-				StopReason: "blocked",
-				SessionID:  result.SessionID,
-				Reason:     result.LoopLabel,
-			}, nil
-		}
-
-		sr := runtime.StopReasonForExitCode(result.ExitCode)
-		if sr != "end_turn" {
-			_ = emitLoopEnd(opts.EventSink, opts.RunID, "phase_failure", "", 0)
-			stopReason := result.StopReason
-			if stopReason == "" {
-				stopReason = sr
-			}
-			return RunResult{
-				ExitCode:   result.ExitCode,
-				StopReason: stopReason,
-				SessionID:  result.SessionID,
-			}, nil
-		}
+	if early, err := runSequentialPhases(ctx, opts, opts.Config.Pre, "pre", 0, &prevPhaseCommit); err != nil {
+		return RunResult{}, err
+	} else if early != nil {
+		return *early, nil
 	}
 
 	if len(opts.Config.Loop) == 0 {
+		if early, err := runSequentialPhases(ctx, opts, opts.Config.Post, "post", 0, &prevPhaseCommit); err != nil {
+			return RunResult{}, err
+		} else if early != nil {
+			return *early, nil
+		}
 		_ = emitLoopEnd(opts.EventSink, opts.RunID, "end_turn", "", 0)
 		return RunResult{ExitCode: 0, StopReason: "end_turn"}, nil
 	}
@@ -132,7 +94,7 @@ func Run(ctx context.Context, opts RunOptions) (RunResult, error) {
 				prevSessionID = prevSessionIDs[phaseIdx-1]
 			}
 
-			result, err := executePhase(ctx, opts, phase, iteration, prevSessionID, prevPhaseCommit)
+			result, err := executePhase(ctx, opts, phase, "loop", iteration, prevSessionID, prevPhaseCommit)
 			if err != nil {
 				_ = emitLoopEnd(opts.EventSink, opts.RunID, "phase_failure", "", iterationsCompleted)
 				return RunResult{}, err
@@ -157,6 +119,11 @@ func Run(ctx context.Context, opts RunOptions) (RunResult, error) {
 					Reason:     result.LoopLabel,
 				}, nil
 			case "exit":
+				if early, err := runSequentialPhases(ctx, opts, opts.Config.Post, "post", iterationsCompleted, &prevPhaseCommit); err != nil {
+					return RunResult{}, err
+				} else if early != nil {
+					return *early, nil
+				}
 				_ = emitLoopEnd(opts.EventSink, opts.RunID, "marker", result.LoopLabel, iterationsCompleted)
 				return RunResult{
 					ExitCode:   0,
@@ -182,11 +149,66 @@ func Run(ctx context.Context, opts RunOptions) (RunResult, error) {
 		iterationsCompleted = iteration
 	}
 
+	if early, err := runSequentialPhases(ctx, opts, opts.Config.Post, "post", iterationsCompleted, &prevPhaseCommit); err != nil {
+		return RunResult{}, err
+	} else if early != nil {
+		return *early, nil
+	}
 	_ = emitLoopEnd(opts.EventSink, opts.RunID, "max_iterations", "", iterationsCompleted)
 	return RunResult{ExitCode: 0, StopReason: "end_turn"}, nil
 }
 
-func executePhase(ctx context.Context, opts RunOptions, phase Phase, iteration int, prevSessionID string, prevPhaseCommit string) (result PhaseAttemptResult, rerr error) {
+// runSequentialPhases runs phases in order, threading session IDs for resume.
+// Returns (*RunResult, nil) on abort/failure (loop.end already emitted), or
+// (nil, err) on internal error, or (nil, nil) to continue.
+func runSequentialPhases(ctx context.Context, opts RunOptions, phases []Phase, kind string, iterationsCompleted int, prevCommit *string) (*RunResult, error) {
+	var prevSessionID string
+	for _, phase := range phases {
+		if err := ctx.Err(); err != nil {
+			r, err := cancelledRunResult(ctx, opts, iterationsCompleted)
+			return &r, err
+		}
+
+		sessionID := ""
+		if phase.ResumeFromPrevious {
+			sessionID = prevSessionID
+		}
+
+		result, err := executePhase(ctx, opts, phase, kind, 0, sessionID, *prevCommit)
+		if err != nil {
+			_ = emitLoopEnd(opts.EventSink, opts.RunID, "phase_failure", "", iterationsCompleted)
+			return nil, err
+		}
+
+		prevSessionID = result.SessionID
+		*prevCommit = captureHeadCommit(opts.WorkDir)
+
+		if err := ctx.Err(); err != nil {
+			r, err := cancelledRunResult(ctx, opts, iterationsCompleted)
+			return &r, err
+		}
+
+		if result.LoopDirective == "abort" {
+			_ = emitLoopEnd(opts.EventSink, opts.RunID, "abort", result.LoopLabel, iterationsCompleted)
+			r := RunResult{ExitCode: 5, StopReason: "blocked", SessionID: result.SessionID, Reason: result.LoopLabel}
+			return &r, nil
+		}
+
+		sr := runtime.StopReasonForExitCode(result.ExitCode)
+		if sr != "end_turn" {
+			_ = emitLoopEnd(opts.EventSink, opts.RunID, "phase_failure", "", iterationsCompleted)
+			stopReason := result.StopReason
+			if stopReason == "" {
+				stopReason = sr
+			}
+			r := RunResult{ExitCode: result.ExitCode, StopReason: stopReason, SessionID: result.SessionID}
+			return &r, nil
+		}
+	}
+	return nil, nil
+}
+
+func executePhase(ctx context.Context, opts RunOptions, phase Phase, kind string, iteration int, prevSessionID string, prevPhaseCommit string) (result PhaseAttemptResult, rerr error) {
 	diffStat, changedFiles, _ := CaptureGitDelta(opts.WorkDir, prevPhaseCommit)
 
 	tmplCtx := TemplateContext{
@@ -207,11 +229,6 @@ func executePhase(ctx context.Context, opts RunOptions, phase Phase, iteration i
 
 	renderedPhase := phase
 	renderedPhase.Prompt = rendered
-
-	kind := "pre"
-	if iteration > 0 {
-		kind = "loop"
-	}
 
 	if err := emitPhaseStart(opts.EventSink, opts.RunID, phase.Name, iteration, kind); err != nil {
 		return PhaseAttemptResult{}, err
@@ -315,12 +332,13 @@ func emitRetry(w EventWriter, runID string, attempt, maxRetries int) {
 	})
 }
 
-func emitLoopStart(w EventWriter, runID string, maxIterations, preCount, loopCount int) error {
+func emitLoopStart(w EventWriter, runID string, maxIterations, preCount, loopCount, postCount int) error {
 	fields := map[string]any{
-		"ts":               time.Now().UnixMilli(),
-		"max_iterations":   maxIterations,
-		"pre_phase_count":  preCount,
-		"loop_phase_count": loopCount,
+		"ts":                time.Now().UnixMilli(),
+		"max_iterations":    maxIterations,
+		"pre_phase_count":   preCount,
+		"loop_phase_count":  loopCount,
+		"post_phase_count":  postCount,
 	}
 	if runID != "" {
 		fields["run_id"] = runID
