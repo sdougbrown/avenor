@@ -72,10 +72,6 @@ func TestBrokerEventMapping(t *testing.T) {
 		{"unknown", "agent.status", "unknown"},
 	}
 
-	for range cases {
-		// dummy to satisfy "notused"
-	}
-
 	for _, c := range cases {
 		payload := []byte(`{"summary":"ok"}`)
 		ev := brokerEvent("ses_1", c.state, payload)

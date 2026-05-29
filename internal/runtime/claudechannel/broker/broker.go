@@ -122,7 +122,11 @@ func New(globalToken string) *Broker {
 
 func MakeToken() string {
 	b := make([]byte, 16)
-	rand.Read(b)
+	for i := 0; i < 3; i++ {
+		if _, err := rand.Read(b); err == nil {
+			return hex.EncodeToString(b)
+		}
+	}
 	return hex.EncodeToString(b)
 }
 
@@ -195,7 +199,7 @@ func (b *Broker) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		if b.httpToken != "" && r.URL.Path == "/push-control" {
 			auth := r.Header.Get("Authorization")
 			const prefix = "Bearer "
-			if !strings.HasPrefix(strings.ToLower(auth), strings.ToLower(prefix)) {
+			if !strings.HasPrefix(auth, prefix) {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
@@ -209,7 +213,7 @@ func (b *Broker) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		// Sidecar auth: token + run_id in JSON body.
 		// Read body into memory so it can be consumed again by the handler.
-		bodyBytes, err := io.ReadAll(r.Body)
+		bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, 1<<16))
 		if err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
@@ -274,11 +278,12 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 		st.Mu.Lock()
 		st.LastSeen = time.Now()
 		st.Mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{
+		resp := map[string]string{
 			"token":  st.Token,
 			"run_id": st.RunID,
-		})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
 		return
 	}
 	token := body.Token

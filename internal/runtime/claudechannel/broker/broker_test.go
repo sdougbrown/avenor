@@ -217,6 +217,15 @@ func TestBrokerHeartbeat(t *testing.T) {
 		t.Fatalf("heartbeat: %d", resp.StatusCode)
 	}
 	resp.Body.Close()
+
+	// verify LastSeen was updated
+	st := b.GetRun("run_3")
+	if st == nil {
+		t.Fatal("run not found")
+	}
+	if st.LastSeen.IsZero() {
+		t.Fatal("LastSeen should be updated after heartbeat")
+	}
 }
 
 func TestBrokerReports(t *testing.T) {
@@ -256,6 +265,9 @@ func TestBrokerReports(t *testing.T) {
 	}
 	if st.Reports[0].State != "working" {
 		t.Fatalf("unexpected state: %s", st.Reports[0].State)
+	}
+	if st.LastSeen.IsZero() {
+		t.Fatal("LastSeen should be updated after report")
 	}
 
 	// finish
@@ -299,6 +311,17 @@ func TestBrokerAuthRejection(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// wrong token
+	wrongBody := bytes.NewReader([]byte(`{"run_id":"run_5","token":"wrong"}`))
+	resp, err = http.Post(fmt.Sprintf("http://%s/report", b.Addr()), "application/json", wrongBody)
+	if err != nil {
+		t.Fatalf("wrong token: %v", err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("wrong token: expected 401, got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
 }

@@ -211,12 +211,22 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		return runtime.Session{}, fmt.Errorf("tmux new-session: %w: %s", err, strings.TrimSpace(string(tmuxOut)))
 	}
 
-	// Give tmux a moment to exec the process before reading its PID.
-	time.Sleep(200 * time.Millisecond)
-
+	// Wait for tmux pane to become ready by polling list-panes.
 	pid := 0
-	if pidOut, err := exec.Command("tmux", "list-panes", "-t", tmuxName, "-F", "#{pane_pid}").Output(); err == nil {
-		pid, _ = strconv.Atoi(strings.TrimSpace(string(pidOut)))
+	deadline := time.After(1 * time.Second)
+	pollLoop:
+	for {
+		if pidOut, err := exec.Command("tmux", "list-panes", "-t", tmuxName, "-F", "#{pane_pid}").Output(); err == nil {
+			if p := strings.TrimSpace(string(pidOut)); p != "" {
+				pid, _ = strconv.Atoi(p)
+			}
+			break
+		}
+		select {
+		case <-deadline:
+			break pollLoop
+		case <-time.After(50 * time.Millisecond):
+		}
 	}
 
 	sessCtx, cancel := context.WithCancel(context.Background())
