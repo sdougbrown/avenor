@@ -556,6 +556,86 @@ func TestDuplicateNameInPost(t *testing.T) {
 	}
 }
 
+func TestLoopFileAndTeamFileMutualExclusion(t *testing.T) {
+	t.Parallel()
+
+	t.Run("prompt and loop_file both set returns error", func(t *testing.T) {
+		cfg, err := loadFromJSON(t, `{"team":[{"name":"work","prompt":"do work","loop_file":"sub.json"}]}`)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if err.Error() != `team config: phase[name work]: prompt is mutually exclusive with loop_file and team_file` {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg != nil {
+			t.Fatal("expected nil config on error")
+		}
+	})
+
+	t.Run("prompt and team_file both set returns error", func(t *testing.T) {
+		cfg, err := loadFromJSON(t, `{"team":[{"name":"work","prompt":"do work","team_file":"team.json"}]}`)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if err.Error() != `team config: phase[name work]: prompt is mutually exclusive with loop_file and team_file` {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg != nil {
+			t.Fatal("expected nil config on error")
+		}
+	})
+
+	t.Run("loop_file and team_file both set returns error", func(t *testing.T) {
+		cfg, err := loadFromJSON(t, `{"team":[{"name":"work","loop_file":"loop.json","team_file":"team.json"}]}`)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if err.Error() != `team config: phase[name work]: loop_file and team_file are mutually exclusive` {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg != nil {
+			t.Fatal("expected nil config on error")
+		}
+	})
+
+	t.Run("only loop_file set is valid", func(t *testing.T) {
+		cfg, err := loadFromJSON(t, `{"team":[{"name":"work","loop_file":"sub.json"}]}`)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.Team[0].LoopFile != "sub.json" {
+			t.Fatalf("expected LoopFile to be sub.json, got %q", cfg.Team[0].LoopFile)
+		}
+	})
+
+	t.Run("only team_file set is valid", func(t *testing.T) {
+		cfg, err := loadFromJSON(t, `{"team":[{"name":"work","team_file":"team.json"}]}`)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.Team[0].TeamFile != "team.json" {
+			t.Fatalf("expected TeamFile to be team.json, got %q", cfg.Team[0].TeamFile)
+		}
+	})
+
+	t.Run("prompt_file and loop_file both set returns error", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "p.txt"), []byte("content"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := loadFromDir(t, dir, `{"team":[{"name":"work","prompt_file":"p.txt","loop_file":"sub.json"}]}`)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if err.Error() != `team config: phase[name work]: prompt_file is mutually exclusive with loop_file and team_file` {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg != nil {
+			t.Fatal("expected nil config on error")
+		}
+	})
+}
+
 // helpers
 
 func loadFromJSON(t *testing.T, data string) (*TeamConfig, error) {

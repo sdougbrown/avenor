@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -15,13 +16,22 @@ type EventWriter interface {
 	Write(event events.Event) error
 }
 
+type NestedResult struct {
+	ExitCode   int
+	StopReason string
+	SessionID  string
+	Reason     string
+}
+
 type RunOptions struct {
-	WorkDir      string
-	RunID        string
-	EventSink    EventWriter
-	Config       *LoopConfig
-	MaxRetries   int
+	WorkDir    string
+	RunID      string
+	EventSink  EventWriter
+	Config     *LoopConfig
+	MaxRetries int
 	PhaseAttempt func(ctx context.Context, phase Phase, attemptNum int, iteration int, prevSessionID string) (PhaseAttemptResult, error)
+	NestedRun  func(ctx context.Context, configPath string, runType string) (NestedResult, error)
+	ConfigDir  string
 }
 
 type PhaseAttemptResult struct {
@@ -209,6 +219,36 @@ func runSequentialPhases(ctx context.Context, opts RunOptions, phases []Phase, k
 }
 
 func executePhase(ctx context.Context, opts RunOptions, phase Phase, kind string, iteration int, prevSessionID string, prevPhaseCommit string) (result PhaseAttemptResult, rerr error) {
+	if phase.LoopFile != "" || phase.TeamFile != "" {
+		if opts.NestedRun == nil {
+			return PhaseAttemptResult{}, fmt.Errorf("loop config: phase %q has loop_file or team_file but NestedRun is not configured", phase.Name)
+		}
+		var configPath string
+		if phase.LoopFile != "" {
+			configPath = phase.LoopFile
+		} else {
+			configPath = phase.TeamFile
+		}
+		if !filepath.IsAbs(configPath) && opts.ConfigDir != "" {
+			configPath = filepath.Join(opts.ConfigDir, configPath)
+		}
+		runType := "loop"
+		if phase.TeamFile != "" {
+			runType = "team"
+		}
+		nestedResult, err := opts.NestedRun(ctx, configPath, runType)
+		if err != nil {
+			return PhaseAttemptResult{}, fmt.Errorf("loop config: phase %q nested run: %w", phase.Name, err)
+		}
+		return PhaseAttemptResult{
+			ExitCode:      nestedResult.ExitCode,
+			SessionID:     nestedResult.SessionID,
+			StopReason:    nestedResult.StopReason,
+			LoopDirective: "",
+			LoopLabel:     "",
+		}, nil
+	}
+
 	diffStat, changedFiles, _ := CaptureGitDelta(opts.WorkDir, prevPhaseCommit)
 
 	tmplCtx := TemplateContext{
