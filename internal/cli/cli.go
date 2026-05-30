@@ -244,6 +244,10 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "avenor: --loop-file and --team-file are mutually exclusive")
 		return exitWithSentinel(1)
 	}
+	if *loopFile != "" && *resume != "" {
+		fmt.Fprintln(stderr, "avenor: --loop-file and --resume are mutually exclusive")
+		return exitWithSentinel(1)
+	}
 	if *teamFile != "" && *resume != "" {
 		fmt.Fprintln(stderr, "avenor: --team-file and --resume are mutually exclusive")
 		return exitWithSentinel(1)
@@ -508,6 +512,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 							StopReason:    result.stopReason,
 							LoopDirective: result.loopDirective,
 							LoopLabel:     result.loopLabel,
+							Output:        result.output,
 						}, nil
 					},
 					NestedRun: teamNestedRun,
@@ -616,6 +621,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 				StopReason:    result.stopReason,
 				LoopDirective: result.loopDirective,
 				LoopLabel:     result.loopLabel,
+				Output:        result.output,
 			}, nil
 		}
 
@@ -872,6 +878,7 @@ type sessionResult struct {
 	StopReason    string
 	LoopDirective string
 	LoopLabel     string
+	Output        string
 	Usage         map[string]any
 }
 
@@ -915,6 +922,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 	var permissionDone <-chan permissionResult
 	var loopDirective string
 	var loopLabel string
+	var output strings.Builder
 	eventChClosed := false
 	tracker := newStatusTracker(cfg.SessionID, cfg.RunID, cfg.RunLabel)
 
@@ -976,7 +984,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				if finalStopReason == "" {
 					return sessionResult{ExitCode: 1}
 				}
-				return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), LoopDirective: loopDirective, LoopLabel: loopLabel, Usage: bufferedUsage}
+				return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), LoopDirective: loopDirective, LoopLabel: loopLabel, Output: output.String(), Usage: bufferedUsage}
 			} else if progressTimer != nil {
 				if !progressTimer.Stop() {
 					select {
@@ -995,6 +1003,9 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 			if event.Event == "agent.message_chunk" || event.Event == "agent.thought_chunk" {
 				if text := chunkText(event); text != "" {
 					chunkBuf.Append(text)
+					if event.Event == "agent.message_chunk" {
+						output.WriteString(text)
+					}
 					if phase, label, ok := chunkBuf.ScanStatusMarker(); ok {
 						if !writeStatus(tracker.ObserveMarker(phase, label)) {
 							return sessionResult{ExitCode: 1}
@@ -1050,7 +1061,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				return sessionResult{ExitCode: 1}
 			}
 			if event.Event == "session.end" && promptReturned && permissionDone == nil {
-				return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), LoopDirective: loopDirective, LoopLabel: loopLabel, Usage: bufferedUsage}
+				return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), LoopDirective: loopDirective, LoopLabel: loopLabel, Output: output.String(), Usage: bufferedUsage}
 			}
 		case err := <-cfg.PromptDone:
 			promptReturned = true
@@ -1062,7 +1073,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				return sessionResult{ExitCode: 1}
 			}
 			if finalStopReason != "" && permissionDone == nil {
-				return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), LoopDirective: loopDirective, LoopLabel: loopLabel, Usage: bufferedUsage}
+				return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), LoopDirective: loopDirective, LoopLabel: loopLabel, Output: output.String(), Usage: bufferedUsage}
 			}
 		case res := <-permissionDone:
 			permissionDone = nil
@@ -1082,7 +1093,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 			// If session.end + promptDone already arrived while we were waiting for
 			// AnswerPermission, exit now that the permission goroutine has resolved.
 			if finalStopReason != "" && promptReturned {
-				return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), LoopDirective: loopDirective, LoopLabel: loopLabel, Usage: bufferedUsage}
+				return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), LoopDirective: loopDirective, LoopLabel: loopLabel, Output: output.String(), Usage: bufferedUsage}
 			}
 			if eventChClosed && finalStopReason == "" {
 				return sessionResult{ExitCode: 1}

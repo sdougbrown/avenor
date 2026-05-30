@@ -200,7 +200,7 @@ func TestSpawnParamsValidation(t *testing.T) {
 	// opencode processes when the default backend is opencode-acp.
 	withFakeExec(t, func(name string, arg ...string) *exec.Cmd { return exec.Command("false") })
 
-	// Missing prompt and prompt_file
+	// Missing prompt, prompt_file, loop_file, and team_file
 	_, err := sup.spawn(SpawnParams{Dir: "/tmp"})
 	if err == nil {
 		t.Fatal("spawn with no prompt should error")
@@ -230,6 +230,11 @@ func TestSpawnParamsValidation(t *testing.T) {
 	if strings.Contains(err.Error(), "server-url is required for backend opencode-http") {
 		t.Errorf("error = %q, expected subprocess start error, not server-url required", err.Error())
 	}
+
+	_, err = sup.spawn(SpawnParams{Dir: "/tmp", LoopFile: "/tmp/loop.json", TeamFile: "/tmp/team.json"})
+	if err == nil || !strings.Contains(err.Error(), "loop_file and team_file are mutually exclusive") {
+		t.Fatalf("err = %v, want loop/team mutual exclusion", err)
+	}
 }
 
 func TestSpawnLoopFileFailureCleansReservedRuntime(t *testing.T) {
@@ -247,6 +252,24 @@ func TestSpawnLoopFileFailureCleansReservedRuntime(t *testing.T) {
 	}
 	if len(sup.runtimes) != 0 {
 		t.Fatalf("runtimes = %d, want 0 after failed loop spawn", len(sup.runtimes))
+	}
+}
+
+func TestSpawnTeamFileFailureCleansReservedRuntime(t *testing.T) {
+	sup := NewSupervisor(Config{
+		ControlSocket: "/tmp/test-team-spawn-cleanup.sock",
+		MaxRuntimes:   1,
+	})
+
+	_, err := sup.spawn(SpawnParams{TeamFile: "/path/does/not/exist.json"})
+	if err == nil {
+		t.Fatal("spawn with missing team file should error")
+	}
+	if got := sup.activeRuntimeCount(); got != 0 {
+		t.Fatalf("activeRuntimeCount() = %d, want 0", got)
+	}
+	if len(sup.runtimes) != 0 {
+		t.Fatalf("runtimes = %d, want 0 after failed team spawn", len(sup.runtimes))
 	}
 }
 

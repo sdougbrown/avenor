@@ -127,11 +127,15 @@ func buildMemberList(teamPhases []phaseconfig.Phase, preOutput string) []phaseco
 	}
 	skipSet := make(map[string]struct{}, len(skippedNames))
 	for _, n := range skippedNames {
-		skipSet[n] = struct{}{}
+		skipSet[strings.ToLower(n)] = struct{}{}
 	}
 	var filtered []phaseconfig.Phase
 	for _, p := range teamPhases {
-		if _, ok := skipSet[p.Name]; ok {
+		if !p.Conditional {
+			filtered = append(filtered, p)
+			continue
+		}
+		if _, ok := skipSet[strings.ToLower(p.Name)]; ok {
 			continue
 		}
 		filtered = append(filtered, p)
@@ -200,6 +204,7 @@ func runTeamMembers(ctx context.Context, opts RunOptions, members []phaseconfig.
 	results := make([]memberResult, len(members))
 	var wg sync.WaitGroup
 	firstAbortLabel := ""
+	firstAbortSessionID := ""
 	abortSeen := false
 	var abortMu sync.Mutex
 
@@ -219,6 +224,7 @@ func runTeamMembers(ctx context.Context, opts RunOptions, members []phaseconfig.
 				abortMu.Lock()
 				if !abortSeen {
 					firstAbortLabel = r.LoopLabel
+					firstAbortSessionID = r.SessionID
 					abortSeen = true
 					cancel()
 				}
@@ -261,6 +267,7 @@ func runTeamMembers(ctx context.Context, opts RunOptions, members []phaseconfig.
 		return membersCompleted, membersAborted, &RunResult{
 			ExitCode:   5,
 			StopReason: "blocked",
+			SessionID:  firstAbortSessionID,
 			Reason:     firstAbortLabel,
 		}
 	}
@@ -346,8 +353,8 @@ func executePhase(ctx context.Context, opts RunOptions, phase phaseconfig.Phase,
 			ExitCode:      nestedResult.ExitCode,
 			SessionID:     nestedResult.SessionID,
 			StopReason:    nestedResult.StopReason,
-			LoopDirective: "",
-			LoopLabel:     "",
+			LoopDirective: nestedLoopDirective(nestedResult),
+			LoopLabel:     nestedResult.Reason,
 		}, nil
 	}
 
@@ -369,6 +376,10 @@ func executePhase(ctx context.Context, opts RunOptions, phase phaseconfig.Phase,
 
 	renderedPhase := phase
 	renderedPhase.Prompt = rendered
+	if kind != "team" {
+		renderedPhase.Agent = ""
+		renderedPhase.Model = ""
+	}
 
 	if err := phaseconfig.EmitPhaseStart(opts.EventSink, opts.RunID, phase.Name, 0, kind); err != nil {
 		return PhaseAttemptResult{}, err
@@ -515,4 +526,11 @@ func emitTeamEnd(w phaseconfig.EventWriter, runID string, exitReason, exitLabel 
 		Event:  "avenor.team.end",
 		Fields: fields,
 	})
+}
+
+func nestedLoopDirective(result NestedResult) string {
+	if result.StopReason == "blocked" {
+		return "abort"
+	}
+	return ""
 }

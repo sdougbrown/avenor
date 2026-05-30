@@ -19,6 +19,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/phaseconfig"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/factory"
+	"github.com/sdougbrown/avenor/internal/teamrunner"
 )
 
 type Config struct {
@@ -48,6 +49,7 @@ type SpawnParams struct {
 	Timeout           int    `json:"timeout,omitempty"`
 	MaxRetries        int    `json:"max_retries,omitempty"`
 	LoopFile          string `json:"loop_file,omitempty"`
+	TeamFile          string `json:"team_file,omitempty"`
 	SessionID         string `json:"session_id,omitempty"`
 	ParentID          string `json:"parent_id,omitempty"` // runtime ID of the parent agent
 }
@@ -298,8 +300,11 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 		}
 		promptText = string(data)
 	}
-	if promptText == "" && params.LoopFile == "" {
-		return SpawnResult{}, fmt.Errorf("prompt, prompt_file, or loop_file is required")
+	if params.LoopFile != "" && params.TeamFile != "" {
+		return SpawnResult{}, fmt.Errorf("loop_file and team_file are mutually exclusive")
+	}
+	if promptText == "" && params.LoopFile == "" && params.TeamFile == "" {
+		return SpawnResult{}, fmt.Errorf("prompt, prompt_file, loop_file, or team_file is required")
 	}
 
 	// Per-runtime artifact directory.
@@ -380,6 +385,49 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 
 		releaseReservation = nil
 		go s.runLoopChild(childCtx, child, cfg, params.MaxRetries, params.Agent, params.Model, params.ServerURL, params.Backend)
+
+		return result, nil
+	}
+
+	if params.TeamFile != "" {
+		cfg, err := teamrunner.LoadTeamConfig(params.TeamFile)
+		if err != nil {
+			_ = writer.Close()
+			return SpawnResult{}, fmt.Errorf("spawn: load team config: %w", err)
+		}
+		if promptText != "" {
+			cfg.InsertInitialPrompt(promptText)
+		}
+
+		result := SpawnResult{
+			RuntimeID:    rtID,
+			OnEvent:      onEvent,
+			SentinelFile: sentinelFile,
+		}
+
+		childCtx, childCancel := context.WithCancel(context.Background())
+
+		child.label = params.Label
+		child.cancelFn = childCancel
+		child.autoApprove = params.AutoApprove
+		child.permClaimTimeout = s.config.PermissionClaimTimeout
+		if child.permClaimTimeout == 0 {
+			child.permClaimTimeout = cli.DefaultPermissionClaimTimeout
+		}
+		child.eventWriter = writer
+		child.fileHandler = fileHandler
+		child.runID = s.runID
+		child.dir = params.Dir
+		child.onEvent = onEvent
+		child.sentinelFile = sentinelFile
+
+		select {
+		case s.runtimeActivity <- struct{}{}:
+		default:
+		}
+
+		releaseReservation = nil
+		go s.runTeamChild(childCtx, child, cfg, params.MaxRetries, params.Agent, params.Model, params.ServerURL, params.Backend)
 
 		return result, nil
 	}
@@ -687,6 +735,158 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 	}
 
 	result, err := looprunner.Run(ctx, opts)
+	if err != nil {
+		child.mu.Lock()
+		child.exitCode = 1
+		child.mu.Unlock()
+		if child.sentinelFile != "" {
+			cli.WriteSentinel(child.sentinelFile, 1, "", "error", s.runID, os.Stderr)
+		}
+		return
+	}
+
+	child.mu.Lock()
+	child.exitCode = result.ExitCode
+	child.mu.Unlock()
+
+	if child.sentinelFile != "" {
+		if result.Reason != "" {
+			cli.WriteSentinelWithReason(child.sentinelFile, result.ExitCode, result.SessionID, result.StopReason, s.runID, result.Reason, os.Stderr)
+		} else {
+			cli.WriteSentinel(child.sentinelFile, result.ExitCode, result.SessionID, result.StopReason, s.runID, os.Stderr)
+		}
+	}
+}
+
+func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg *teamrunner.TeamConfig, maxRetries int, agent, model, serverURL, backend string) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "avenor stable: child %s panic: %v\n", child.id, r)
+			s.emitChildError(child, fmt.Sprintf("panic: %v", r), "error")
+			if child.sentinelFile != "" {
+				cli.WriteSentinel(child.sentinelFile, 1, "", "error", s.runID, os.Stderr)
+			}
+		}
+		if child.cancelFn != nil {
+			child.cancelFn()
+		}
+	}()
+	defer func() {
+		if child.eventWriter != nil {
+			_ = child.eventWriter.Close()
+		}
+		child.mu.Lock()
+		child.completed = true
+		child.mu.Unlock()
+		close(child.done)
+		s.clearRuntimePermissionOptions(child.id)
+		s.controlMu.Lock()
+		delete(s.runtimes, child.id)
+		s.controlMu.Unlock()
+	}()
+
+	taggedWriter := &runtimeFanoutWriter{
+		base:            child.eventWriter,
+		runtimeID:       child.id,
+		control:         s.control,
+		onPermissionReq: s.cachePermissionOptions,
+	}
+
+	opts := teamrunner.RunOptions{
+		WorkDir:    child.dir,
+		RunID:      s.runID,
+		EventSink:  taggedWriter,
+		Config:     cfg,
+		MaxRetries: maxRetries,
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (teamrunner.PhaseAttemptResult, error) {
+			a := agent
+			m := model
+			if phase.Agent != "" {
+				a = phase.Agent
+			}
+			if phase.Model != "" {
+				m = phase.Model
+			}
+			startOpts := runtime.StartOptions{
+				Agent:     a,
+				Model:     m,
+				Dir:       child.dir,
+				ServerURL: serverURL,
+			}
+
+			var resumeID string
+			if prevSessionID != "" {
+				resumeID = prevSessionID
+			}
+
+			provider, err := factory.NewProvider(startOpts, backend)
+			if err != nil {
+				return teamrunner.PhaseAttemptResult{ExitCode: 1}, fmt.Errorf("create provider: %w", err)
+			}
+			defer func() {
+				if closer, ok := provider.(interface{ Close() error }); ok {
+					_ = closer.Close()
+				}
+			}()
+
+			session, err := cli.StartSession(ctx, provider, startOpts, resumeID)
+			if err != nil {
+				return teamrunner.PhaseAttemptResult{ExitCode: 1}, fmt.Errorf("start session: %w", err)
+			}
+			child.mu.Lock()
+			child.provider = provider
+			child.session = session
+			child.active = true
+			child.mu.Unlock()
+			defer func() {
+				child.mu.Lock()
+				if child.provider == provider {
+					child.provider = nil
+					child.session = runtime.Session{}
+				}
+				child.active = false
+				child.mu.Unlock()
+			}()
+
+			eventCtx, cancelEvents := context.WithCancel(ctx)
+			defer cancelEvents()
+
+			eventCh, err := provider.Events(eventCtx, session.SessionID)
+			if err != nil {
+				return teamrunner.PhaseAttemptResult{ExitCode: 1}, fmt.Errorf("subscribe events: %w", err)
+			}
+
+			promptDone := make(chan error, 1)
+			go func() {
+				promptDone <- provider.Prompt(context.Background(), session.SessionID, phase.Prompt)
+			}()
+
+			result := cli.WaitForSession(ctx, provider, cli.SessionWaitConfig{
+				EventCh:                eventCh,
+				PromptDone:             promptDone,
+				SessionID:              session.SessionID,
+				RunID:                  s.runID,
+				RunLabel:               child.label,
+				AutoApprove:            child.autoApprove,
+				PermissionClaimTimeout: child.permClaimTimeout,
+			}, cli.SessionWaitDeps{
+				Writer:      taggedWriter,
+				FileHandler: child.fileHandler,
+				Stderr:      os.Stderr,
+			})
+
+			return teamrunner.PhaseAttemptResult{
+				ExitCode:      result.ExitCode,
+				SessionID:     session.SessionID,
+				StopReason:    result.StopReason,
+				LoopDirective: result.LoopDirective,
+				LoopLabel:     result.LoopLabel,
+				Output:        result.Output,
+			}, nil
+		},
+	}
+
+	result, err := teamrunner.Run(ctx, opts)
 	if err != nil {
 		child.mu.Lock()
 		child.exitCode = 1

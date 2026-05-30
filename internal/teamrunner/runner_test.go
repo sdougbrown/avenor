@@ -650,7 +650,8 @@ func TestRunAbortCancelsOtherMembers(t *testing.T) {
 	}, nil)
 
 	var slowStarted atomic.Bool
-	var slowFinished atomic.Bool
+	var slowCancelled atomic.Bool
+	slowStartedCh := make(chan struct{}, 1)
 
 	result, err := Run(context.Background(), RunOptions{
 		WorkDir:   t.TempDir(),
@@ -667,13 +668,13 @@ func TestRunAbortCancelsOtherMembers(t *testing.T) {
 				}, nil
 			}
 			slowStarted.Store(true)
+			slowStartedCh <- struct{}{}
 			// Simulate a slow member — but context may get cancelled
 			select {
 			case <-ctx.Done():
-				slowFinished.Store(true)
+				slowCancelled.Store(true)
 				return PhaseAttemptResult{ExitCode: 130, SessionID: "slow-s"}, nil
 			case <-time.After(100 * time.Millisecond):
-				slowFinished.Store(true)
 				return PhaseAttemptResult{ExitCode: 0, SessionID: "slow-s"}, nil
 			}
 		},
@@ -686,6 +687,20 @@ func TestRunAbortCancelsOtherMembers(t *testing.T) {
 	}
 	if result.StopReason != "blocked" {
 		t.Fatalf("StopReason = %q, want blocked", result.StopReason)
+	}
+	if result.SessionID != "abort-s" {
+		t.Fatalf("SessionID = %q, want abort-s", result.SessionID)
+	}
+	if !slowStarted.Load() {
+		t.Fatal("slow member never started")
+	}
+	select {
+	case <-slowStartedCh:
+	default:
+		t.Fatal("slow member start signal was not observed")
+	}
+	if !slowCancelled.Load() {
+		t.Fatal("slow member did not observe ctx.Done()")
 	}
 }
 
@@ -714,6 +729,110 @@ func TestRunAgentModelOverride(t *testing.T) {
 	}
 	if capturedModel != "gpt-5" {
 		t.Fatalf("Model = %q, want gpt-5", capturedModel)
+	}
+}
+
+func TestRunPreAndPostIgnoreAgentModelOverride(t *testing.T) {
+	cfg := makeConfig(
+		[]phaseconfig.Phase{{Name: "setup", Prompt: "setup", Agent: "pre-agent", Model: "pre-model"}},
+		[]phaseconfig.Phase{{Name: "review", Prompt: "review", Agent: "team-agent", Model: "team-model"}},
+		[]phaseconfig.Phase{{Name: "report", Prompt: "report", Agent: "post-agent", Model: "post-model"}},
+	)
+
+	got := map[string][2]string{}
+	_, err := Run(context.Background(), RunOptions{
+		WorkDir:   t.TempDir(),
+		RunID:     "test-run",
+		EventSink: discardEventWriter{},
+		Config:    cfg,
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
+			got[phase.Name] = [2]string{phase.Agent, phase.Model}
+			return PhaseAttemptResult{ExitCode: 0, SessionID: phase.Name + "-s"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got["setup"] != [2]string{"", ""} {
+		t.Fatalf("pre phase override leaked through: %+v", got["setup"])
+	}
+	if got["review"] != [2]string{"team-agent", "team-model"} {
+		t.Fatalf("team phase overrides = %+v, want team-agent/team-model", got["review"])
+	}
+	if got["report"] != [2]string{"", ""} {
+		t.Fatalf("post phase override leaked through: %+v", got["report"])
+	}
+}
+
+func TestBuildMemberListSkipsConditionalCaseInsensitive(t *testing.T) {
+	team := []phaseconfig.Phase{
+		{Name: "security", Prompt: "review security", Conditional: true},
+		{Name: "style", Prompt: "review style"},
+	}
+
+	filtered := buildMemberList(team, "[TEAM: SKIP | Security]")
+	if len(filtered) != 1 || filtered[0].Name != "style" {
+		t.Fatalf("filtered = %+v, want only style", filtered)
+	}
+}
+
+func TestBuildMemberListDoesNotSkipNonConditionalMembers(t *testing.T) {
+	team := []phaseconfig.Phase{
+		{Name: "security", Prompt: "review security"},
+		{Name: "style", Prompt: "review style", Conditional: true},
+	}
+
+	filtered := buildMemberList(team, "[team: skip | security]\n[team: skip | style]")
+	if len(filtered) != 1 || filtered[0].Name != "security" {
+		t.Fatalf("filtered = %+v, want only non-conditional security", filtered)
+	}
+}
+
+func TestRunNestedAbortPropagatesDirectiveAndReason(t *testing.T) {
+	cfg := makeConfig(nil, []phaseconfig.Phase{{Name: "nested", LoopFile: "child.json"}}, nil)
+
+	result, err := Run(context.Background(), RunOptions{
+		WorkDir:   t.TempDir(),
+		RunID:     "test-run",
+		EventSink: discardEventWriter{},
+		Config:    cfg,
+		ConfigDir: "/tmp/configs",
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
+			t.Fatal("PhaseAttempt should not run for nested phase")
+			return PhaseAttemptResult{}, nil
+		},
+		NestedRun: func(ctx context.Context, configPath string, runType string) (NestedResult, error) {
+			if configPath != "/tmp/configs/child.json" {
+				t.Fatalf("configPath = %q, want /tmp/configs/child.json", configPath)
+			}
+			if runType != "loop" {
+				t.Fatalf("runType = %q, want loop", runType)
+			}
+			return NestedResult{ExitCode: 5, StopReason: "blocked", SessionID: "child-s", Reason: "needs review"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.ExitCode != 5 || result.StopReason != "blocked" || result.Reason != "needs review" || result.SessionID != "child-s" {
+		t.Fatalf("result = %+v, want blocked child result", result)
+	}
+}
+
+func TestRunNestedPhaseRequiresNestedRun(t *testing.T) {
+	cfg := makeConfig(nil, []phaseconfig.Phase{{Name: "nested", TeamFile: "child.json"}}, nil)
+
+	result, err := Run(context.Background(), RunOptions{
+		WorkDir:   t.TempDir(),
+		RunID:     "test-run",
+		EventSink: discardEventWriter{},
+		Config:    cfg,
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.ExitCode != 1 || result.StopReason != "phase_error" {
+		t.Fatalf("result = %+v, want phase_error result", result)
 	}
 }
 

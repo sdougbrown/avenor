@@ -73,6 +73,13 @@ func (c *TeamConfig) Validate() error {
 	if len(c.Pre) == 0 && len(c.Team) == 0 {
 		return fmt.Errorf("team config: at least one of pre or team must be non-empty")
 	}
+	if len(c.Pre) == 0 {
+		for _, phase := range c.Team {
+			if phase.Conditional {
+				return fmt.Errorf("team config: conditional team members require at least one pre phase")
+			}
+		}
+	}
 
 	names := make(map[string]struct{})
 

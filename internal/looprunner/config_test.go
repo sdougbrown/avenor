@@ -316,6 +316,19 @@ func TestInsertInitialPromptResumeFromPrevious(t *testing.T) {
 	}
 }
 
+func TestLoopConfigRejectsTeamOnlyFields(t *testing.T) {
+	cfg, err := loadFromJSON(t, `{"loop":[{"name":"work","prompt":"do work","agent":"special"}]}`)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if err.Error() != "loop config: phase[name work]: conditional, agent, and model are only supported on team members" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg != nil {
+		t.Fatal("expected nil config on error")
+	}
+}
+
 func TestValidateNamesCaseSensitiveDistinct(t *testing.T) {
 	cfg := &LoopConfig{
 		Pre: []phaseconfig.Phase{

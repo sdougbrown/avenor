@@ -401,7 +401,7 @@ func TestResumeFromPreviousRoundTrip(t *testing.T) {
 }
 
 func TestConditionalAgentModelFields(t *testing.T) {
-	cfg, err := loadFromJSON(t, `{"team":[{"name":"analyze","prompt":"analyze it","conditional":true,"agent":"coder","model":"claude"}]}`)
+	cfg, err := loadFromJSON(t, `{"pre":[{"name":"decide","prompt":"decide"}],"team":[{"name":"analyze","prompt":"analyze it","conditional":true,"agent":"coder","model":"claude"}]}`)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -413,6 +413,19 @@ func TestConditionalAgentModelFields(t *testing.T) {
 	}
 	if cfg.Team[0].Model != "claude" {
 		t.Fatalf("expected Model=claude, got %q", cfg.Team[0].Model)
+	}
+}
+
+func TestConditionalMembersRequirePrePhase(t *testing.T) {
+	cfg, err := loadFromJSON(t, `{"team":[{"name":"analyze","prompt":"analyze it","conditional":true}]}`)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if err.Error() != "team config: conditional team members require at least one pre phase" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg != nil {
+		t.Fatal("expected nil config on error")
 	}
 }
 

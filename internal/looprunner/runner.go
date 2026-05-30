@@ -218,8 +218,8 @@ func executePhase(ctx context.Context, opts RunOptions, phase phaseconfig.Phase,
 			ExitCode:      nestedResult.ExitCode,
 			SessionID:     nestedResult.SessionID,
 			StopReason:    nestedResult.StopReason,
-			LoopDirective: "",
-			LoopLabel:     "",
+			LoopDirective: nestedLoopDirective(nestedResult),
+			LoopLabel:     nestedResult.Reason,
 		}, nil
 	}
 
@@ -318,6 +318,13 @@ func cancelledRunResult(ctx context.Context, opts RunOptions, iterationsComplete
 	}
 	_ = emitLoopEnd(opts.EventSink, opts.RunID, exitReason, "", iterationsCompleted)
 	return RunResult{ExitCode: code, StopReason: exitReason}, nil
+}
+
+func nestedLoopDirective(result NestedResult) string {
+	if result.StopReason == "blocked" {
+		return "abort"
+	}
+	return ""
 }
 
 func phaseStopReason(result PhaseAttemptResult) string {

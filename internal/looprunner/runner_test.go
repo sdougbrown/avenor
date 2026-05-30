@@ -341,6 +341,57 @@ func TestRunPhaseEndPreservesExplicitStopReason(t *testing.T) {
 	}
 }
 
+func TestRunNestedAbortPropagatesDirectiveAndReason(t *testing.T) {
+	cfg := &LoopConfig{
+		MaxIterations: 1,
+		Loop:          []phaseconfig.Phase{{Name: "nested", TeamFile: "team.json"}},
+	}
+
+	result, err := Run(context.Background(), RunOptions{
+		WorkDir:   t.TempDir(),
+		RunID:     "run_1",
+		EventSink: discardEventWriter{},
+		Config:    cfg,
+		ConfigDir: "/tmp/configs",
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, iteration int, prevSessionID string) (PhaseAttemptResult, error) {
+			t.Fatal("PhaseAttempt should not run for nested phase")
+			return PhaseAttemptResult{}, nil
+		},
+		NestedRun: func(ctx context.Context, configPath string, runType string) (NestedResult, error) {
+			if configPath != "/tmp/configs/team.json" {
+				t.Fatalf("configPath = %q, want /tmp/configs/team.json", configPath)
+			}
+			if runType != "team" {
+				t.Fatalf("runType = %q, want team", runType)
+			}
+			return NestedResult{ExitCode: 5, StopReason: "blocked", SessionID: "child-s", Reason: "blocked downstream"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.ExitCode != 5 || result.StopReason != "blocked" || result.Reason != "blocked downstream" || result.SessionID != "child-s" {
+		t.Fatalf("result = %+v, want blocked child result", result)
+	}
+}
+
+func TestRunNestedPhaseRequiresNestedRun(t *testing.T) {
+	cfg := &LoopConfig{
+		MaxIterations: 1,
+		Loop:          []phaseconfig.Phase{{Name: "nested", LoopFile: "child.json"}},
+	}
+
+	_, err := Run(context.Background(), RunOptions{
+		WorkDir:   t.TempDir(),
+		RunID:     "run_1",
+		EventSink: discardEventWriter{},
+		Config:    cfg,
+	})
+	if err == nil || err.Error() != `loop config: phase "nested" has loop_file or team_file but NestedRun is not configured` {
+		t.Fatalf("err = %v, want NestedRun configuration error", err)
+	}
+}
+
 type discardEventWriter struct{}
 
 func (discardEventWriter) Write(events.Event) error { return nil }

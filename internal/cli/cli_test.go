@@ -373,6 +373,80 @@ func TestRunLoopFileConfigErrorWritesErrorSentinel(t *testing.T) {
 	}
 }
 
+func TestRunRejectsLoopFileAndResume(t *testing.T) {
+	var stderr strings.Builder
+	exitCode := run([]string{
+		"--loop-file", "/tmp/loop.json",
+		"--resume", "ses_1",
+	}, func(string) string { return "" }, &stderr)
+	if exitCode != 1 {
+		t.Fatalf("run() = %d, want 1", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "--loop-file and --resume are mutually exclusive") {
+		t.Fatalf("stderr = %q, want mutual exclusion error", stderr.String())
+	}
+}
+
+func TestRunRejectsLoopFileAndTeamFile(t *testing.T) {
+	var stderr strings.Builder
+	exitCode := run([]string{
+		"--loop-file", "/tmp/loop.json",
+		"--team-file", "/tmp/team.json",
+	}, func(string) string { return "" }, &stderr)
+	if exitCode != 1 {
+		t.Fatalf("run() = %d, want 1", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "--loop-file and --team-file are mutually exclusive") {
+		t.Fatalf("stderr = %q, want mutual exclusion error", stderr.String())
+	}
+}
+
+func TestRunRejectsTeamFileAndResume(t *testing.T) {
+	var stderr strings.Builder
+	exitCode := run([]string{
+		"--team-file", "/tmp/team.json",
+		"--resume", "ses_1",
+	}, func(string) string { return "" }, &stderr)
+	if exitCode != 1 {
+		t.Fatalf("run() = %d, want 1", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "--team-file and --resume are mutually exclusive") {
+		t.Fatalf("stderr = %q, want mutual exclusion error", stderr.String())
+	}
+}
+
+func TestRunTeamFileConfigErrorWritesErrorSentinel(t *testing.T) {
+	dir := t.TempDir()
+	teamPath := filepath.Join(dir, "team.json")
+	sentinelPath := filepath.Join(dir, "run.done")
+	if err := os.WriteFile(teamPath, []byte(`{"team":[{"prompt":"missing name"}]}`), 0o600); err != nil {
+		t.Fatalf("write team config: %v", err)
+	}
+
+	var stderr strings.Builder
+	exitCode := run([]string{
+		"--team-file", teamPath,
+		"--sentinel-file", sentinelPath,
+		"--run-id", "run_1",
+	}, func(key string) string {
+		if key == "AVENOR_OPENCODE_URL" {
+			return "http://localhost:8080"
+		}
+		return ""
+	}, &stderr)
+	if exitCode != 1 {
+		t.Fatalf("run() = %d, want 1; stderr=%s", exitCode, stderr.String())
+	}
+	sentinel, err := os.ReadFile(sentinelPath)
+	if err != nil {
+		t.Fatalf("read sentinel: %v", err)
+	}
+	want := "FAILED\nSESSION=\nSTOP_REASON=error\nEXIT_CODE=1\nRUN=run_1\n"
+	if string(sentinel) != want {
+		t.Fatalf("sentinel = %q, want %q", string(sentinel), want)
+	}
+}
+
 func TestWriteRetryEventReturnsWriterError(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "events.ndjson")
 	writer, err := NewEventWriter(path)
@@ -2469,5 +2543,43 @@ func TestCancelAndEndNilUsage(t *testing.T) {
 	}
 	if _, exists := last.Fields["usage"]; exists {
 		t.Fatal("session.end should not contain usage field when none was buffered")
+	}
+}
+
+func TestWaitForSessionAccumulatesAgentMessageOutput(t *testing.T) {
+	eventCh := make(chan events.Event, 3)
+	eventCh <- events.Event{
+		Event:     "agent.message_chunk",
+		SessionID: "ses_output",
+		Fields: map[string]any{
+			"content": map[string]any{"text": "[team: skip | security]"},
+		},
+	}
+	eventCh <- events.Event{
+		Event:     "agent.thought_chunk",
+		SessionID: "ses_output",
+		Fields: map[string]any{
+			"content": map[string]any{"text": "internal reasoning"},
+		},
+	}
+	eventCh <- events.Event{
+		Event:     "session.end",
+		SessionID: "ses_output",
+		Fields:    map[string]any{"stop_reason": "end_turn"},
+	}
+	close(eventCh)
+
+	promptDone := make(chan error, 1)
+	promptDone <- nil
+
+	writer, err := NewEventWriter("")
+	if err != nil {
+		t.Fatalf("NewEventWriter(\"\") error = %v", err)
+	}
+	defer writer.Close()
+
+	result := waitForSessionForTest(context.Background(), &cliFakeProvider{}, writer, nil, nil, eventCh, promptDone, nil, "ses_output", "run_output", "", true, DefaultPermissionClaimTimeout, nil, io.Discard)
+	if result.Output != "[team: skip | security]" {
+		t.Fatalf("Output = %q, want assistant output only", result.Output)
 	}
 }

@@ -86,6 +86,9 @@ func (c *LoopConfig) Validate() error {
 		if c.Pre[i].Name == "" {
 			return fmt.Errorf("loop config: phase[index %d]: name must not be empty", i)
 		}
+		if c.Pre[i].Conditional || c.Pre[i].Agent != "" || c.Pre[i].Model != "" {
+			return fmt.Errorf("loop config: phase[name %s]: conditional, agent, and model are only supported on team members", c.Pre[i].Name)
+		}
 		if err := phaseconfig.ValidatePhaseHasPrompt(c.Pre[i]); err != nil {
 			return fmt.Errorf("loop config: phase[name %s]: %w", c.Pre[i].Name, err)
 		}
@@ -101,6 +104,9 @@ func (c *LoopConfig) Validate() error {
 		if c.Loop[i].Name == "" {
 			return fmt.Errorf("loop config: phase[index %d]: name must not be empty", i)
 		}
+		if c.Loop[i].Conditional || c.Loop[i].Agent != "" || c.Loop[i].Model != "" {
+			return fmt.Errorf("loop config: phase[name %s]: conditional, agent, and model are only supported on team members", c.Loop[i].Name)
+		}
 		if err := phaseconfig.ValidatePhaseHasPrompt(c.Loop[i]); err != nil {
 			return fmt.Errorf("loop config: phase[name %s]: %w", c.Loop[i].Name, err)
 		}
@@ -115,6 +121,9 @@ func (c *LoopConfig) Validate() error {
 	for i := range c.Post {
 		if c.Post[i].Name == "" {
 			return fmt.Errorf("loop config: phase[index %d]: name must not be empty", i)
+		}
+		if c.Post[i].Conditional || c.Post[i].Agent != "" || c.Post[i].Model != "" {
+			return fmt.Errorf("loop config: phase[name %s]: conditional, agent, and model are only supported on team members", c.Post[i].Name)
 		}
 		if err := phaseconfig.ValidatePhaseHasPrompt(c.Post[i]); err != nil {
 			return fmt.Errorf("loop config: phase[name %s]: %w", c.Post[i].Name, err)
