@@ -223,7 +223,7 @@ func executePhase(ctx context.Context, opts RunOptions, phase phaseconfig.Phase,
 		}, nil
 	}
 
-	diffStat, changedFiles, _ := phaseconfig.CaptureGitDelta(opts.WorkDir, prevPhaseCommit)
+	diffStat, changedFiles, _ := phaseconfig.CaptureGitDelta(opts.WorkDir, prevPhaseCommit) // best-effort; empty in non-git contexts
 
 	tmplCtx := phaseconfig.TemplateContext{
 		RunID:           opts.RunID,
@@ -265,7 +265,10 @@ func executePhase(ctx context.Context, opts RunOptions, phase phaseconfig.Phase,
 		if err != nil {
 			return r, err
 		}
-		if phaseconfig.LoopDirectiveSeverity(r.LoopDirective) > phaseconfig.LoopDirectiveSeverity(accDirective) {
+		if r.ExitCode != 1 {
+			accDirective = r.LoopDirective
+			accLabel = r.LoopLabel
+		} else if phaseconfig.LoopDirectiveSeverity(r.LoopDirective) > phaseconfig.LoopDirectiveSeverity(accDirective) {
 			accDirective = r.LoopDirective
 			accLabel = r.LoopLabel
 		}

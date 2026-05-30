@@ -77,16 +77,6 @@ func Run(ctx context.Context, opts RunOptions) (RunResult, error) {
 		return RunResult{ExitCode: 0, StopReason: "end_turn"}, nil
 	}
 
-	if len(opts.Config.Team) == 0 {
-		if early, err := runSequentialPhases(ctx, opts, opts.Config.Post, "post", &prevPhaseCommit); err != nil {
-			return RunResult{}, err
-		} else if early != nil {
-			return *early, nil
-		}
-		_ = emitTeamEnd(opts.EventSink, opts.RunID, "end_turn", "", 0, 0)
-		return RunResult{ExitCode: 0, StopReason: "end_turn"}, nil
-	}
-
 	membersCompleted, membersAborted, result := runTeamMembers(ctx, opts, members, &prevPhaseCommit)
 	if result != nil {
 		return *result, nil
@@ -118,6 +108,11 @@ func injectSkipBlockIntoLastPre(cfg *TeamConfig) {
 			conditional = append(conditional, m.Name)
 		}
 	}
+	// Clone the Pre slice to avoid mutating the caller's config.
+	pre := make([]phaseconfig.Phase, len(cfg.Pre))
+	copy(pre, cfg.Pre)
+	cfg.Pre = pre
+
 	lastPre := &cfg.Pre[len(cfg.Pre)-1]
 	lastPre.Prompt += fmt.Sprintf(
 		"\n\nThe following team members may be skipped. For each that should not run, emit exactly one line:\n[team: skip | <name>]\nConditional members: %s",
@@ -132,7 +127,7 @@ func buildMemberList(teamPhases []phaseconfig.Phase, preOutput string) []phaseco
 	}
 	skipSet := make(map[string]struct{}, len(skippedNames))
 	for _, n := range skippedNames {
-		skipSet[strings.TrimSpace(n)] = struct{}{}
+		skipSet[n] = struct{}{}
 	}
 	var filtered []phaseconfig.Phase
 	for _, p := range teamPhases {
@@ -356,7 +351,7 @@ func executePhase(ctx context.Context, opts RunOptions, phase phaseconfig.Phase,
 		}, nil
 	}
 
-	diffStat, changedFiles, _ := phaseconfig.CaptureGitDelta(opts.WorkDir, prevPhaseCommit)
+	diffStat, changedFiles, _ := phaseconfig.CaptureGitDelta(opts.WorkDir, prevPhaseCommit) // best-effort; empty in non-git contexts
 
 	tmplCtx := phaseconfig.TemplateContext{
 		RunID:           opts.RunID,
@@ -396,7 +391,18 @@ func executePhase(ctx context.Context, opts RunOptions, phase phaseconfig.Phase,
 		if err != nil {
 			return r, err
 		}
-		if phaseconfig.LoopDirectiveSeverity(r.LoopDirective) > phaseconfig.LoopDirectiveSeverity(accDirective) {
+		// If this attempt succeeded, clear any accumulated directive from
+		// prior failed attempts — a successful retry means the phase completed.
+		// If this attempt would not be retried (success or terminal failure),
+		// clear any accumulated directive from prior failed attempts — the
+		// current attempt's result stands on its own.
+		// Non-retryable result: use this attempt's directive directly,
+		// replacing any accumulated from prior failed attempts.
+		// Retryable failure (code 1): accumulate by severity.
+		if r.ExitCode != 1 {
+			accDirective = r.LoopDirective
+			accLabel = r.LoopLabel
+		} else if phaseconfig.LoopDirectiveSeverity(r.LoopDirective) > phaseconfig.LoopDirectiveSeverity(accDirective) {
 			accDirective = r.LoopDirective
 			accLabel = r.LoopLabel
 		}
