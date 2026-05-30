@@ -74,6 +74,113 @@ func (f *cliFakeProvider) Capabilities(ctx context.Context) (runtime.Capabilitie
 	return runtime.Capabilities{}, nil
 }
 
+type scriptedSession struct {
+	opts   runtime.StartOptions
+	prompt string
+	events chan events.Event
+}
+
+type scriptedProvider struct {
+	mu       sync.Mutex
+	nextID   int
+	sessions map[string]*scriptedSession
+}
+
+func newScriptedProvider() *scriptedProvider {
+	return &scriptedProvider{sessions: map[string]*scriptedSession{}}
+}
+
+func (p *scriptedProvider) Start(ctx context.Context, opts runtime.StartOptions) (runtime.Session, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.nextID++
+	sessionID := fmt.Sprintf("ses_%d", p.nextID)
+	p.sessions[sessionID] = &scriptedSession{
+		opts:   opts,
+		events: make(chan events.Event, 8),
+	}
+	return runtime.Session{SessionID: sessionID}, nil
+}
+
+func (p *scriptedProvider) Resume(ctx context.Context, sessionID string) (runtime.Session, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, ok := p.sessions[sessionID]; !ok {
+		return runtime.Session{}, fmt.Errorf("unknown session %q", sessionID)
+	}
+	return runtime.Session{SessionID: sessionID}, nil
+}
+
+func (p *scriptedProvider) Prompt(ctx context.Context, sessionID string, prompt string) error {
+	p.mu.Lock()
+	session, ok := p.sessions[sessionID]
+	p.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("unknown session %q", sessionID)
+	}
+	session.prompt = prompt
+
+	var reply string
+	switch {
+	case strings.Contains(prompt, "decide reviewers"):
+		reply = "[team: skip | security]"
+	case strings.Contains(prompt, "review style"):
+		reply = "style findings"
+	case strings.Contains(prompt, "summarize findings"):
+		reply = "final report"
+	default:
+		reply = "ok"
+	}
+
+	session.events <- events.Event{
+		Event:     "agent.message_chunk",
+		SessionID: sessionID,
+		Fields: map[string]any{
+			"content": map[string]any{"text": reply},
+		},
+	}
+	session.events <- events.Event{
+		Event:     "session.end",
+		SessionID: sessionID,
+		Fields:    map[string]any{"stop_reason": "end_turn"},
+	}
+	close(session.events)
+	return nil
+}
+
+func (p *scriptedProvider) Cancel(ctx context.Context, sessionID string) error { return nil }
+
+func (p *scriptedProvider) Events(ctx context.Context, sessionID string) (<-chan events.Event, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	session, ok := p.sessions[sessionID]
+	if !ok {
+		return nil, fmt.Errorf("unknown session %q", sessionID)
+	}
+	return session.events, nil
+}
+
+func (p *scriptedProvider) AnswerPermission(ctx context.Context, sessionID string, requestID string, response runtime.PermissionResponse) error {
+	return nil
+}
+
+func (p *scriptedProvider) Capabilities(ctx context.Context) (runtime.Capabilities, error) {
+	return runtime.Capabilities{}, nil
+}
+
+func (p *scriptedProvider) snapshotSessions() []scriptedSession {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]scriptedSession, 0, len(p.sessions))
+	for _, session := range p.sessions {
+		out = append(out, scriptedSession{
+			opts:   session.opts,
+			prompt: session.prompt,
+		})
+	}
+	return out
+}
+
 func waitForSessionForTest(
 	ctx context.Context,
 	provider runtime.Provider,
@@ -444,6 +551,116 @@ func TestRunTeamFileConfigErrorWritesErrorSentinel(t *testing.T) {
 	want := "FAILED\nSESSION=\nSTOP_REASON=error\nEXIT_CODE=1\nRUN=run_1\n"
 	if string(sentinel) != want {
 		t.Fatalf("sentinel = %q, want %q", string(sentinel), want)
+	}
+}
+
+func TestRunTeamFileFakeE2E(t *testing.T) {
+	oldNewProvider := newProvider
+	provider := newScriptedProvider()
+	newProvider = func(startOpts runtime.StartOptions, backend string) (runtime.Provider, error) {
+		return provider, nil
+	}
+	t.Cleanup(func() { newProvider = oldNewProvider })
+
+	dir := t.TempDir()
+	teamPath := filepath.Join(dir, "team.json")
+	eventsPath := filepath.Join(dir, "events.ndjson")
+	sentinelPath := filepath.Join(dir, "run.done")
+	config := `{
+		"pre":[{"name":"decide","prompt":"decide reviewers"}],
+		"team":[
+			{"name":"security","prompt":"review security","conditional":true,"agent":"security-agent","model":"security-model"},
+			{"name":"style","prompt":"review style","agent":"style-agent","model":"style-model"}
+		],
+		"post":[{"name":"report","prompt":"summarize findings"}]
+	}`
+	if err := os.WriteFile(teamPath, []byte(config), 0o600); err != nil {
+		t.Fatalf("write team config: %v", err)
+	}
+
+	var stderr strings.Builder
+	exitCode := run([]string{
+		"--team-file", teamPath,
+		"--on-event", eventsPath,
+		"--sentinel-file", sentinelPath,
+		"--run-id", "run_team_e2e",
+		"--agent", "default-agent",
+		"--model", "default-model",
+	}, func(string) string { return "" }, &stderr)
+	if exitCode != 0 {
+		t.Fatalf("run() = %d, want 0; stderr=%s", exitCode, stderr.String())
+	}
+
+	sentinel, err := os.ReadFile(sentinelPath)
+	if err != nil {
+		t.Fatalf("read sentinel: %v", err)
+	}
+	wantSentinel := "DONE\nSESSION=\nSTOP_REASON=end_turn\nRUN=run_team_e2e\n"
+	if string(sentinel) != wantSentinel {
+		t.Fatalf("sentinel = %q, want %q", string(sentinel), wantSentinel)
+	}
+
+	gotEvents := readEventLogForTest(t, eventsPath)
+	var phasesStarted []string
+	var teamStart, teamEnd bool
+	for _, ev := range gotEvents {
+		switch ev.Event {
+		case "avenor.team.start":
+			teamStart = true
+		case "avenor.team.end":
+			teamEnd = true
+			if ev.Fields["exit_reason"] != "end_turn" {
+				t.Fatalf("team.end exit_reason = %v, want end_turn", ev.Fields["exit_reason"])
+			}
+		case "avenor.phase.start":
+			phasesStarted = append(phasesStarted, ev.Fields["phase"].(string))
+		}
+	}
+	if !teamStart || !teamEnd {
+		t.Fatalf("team lifecycle events missing: start=%v end=%v", teamStart, teamEnd)
+	}
+	if strings.Contains(strings.Join(phasesStarted, ","), "security") {
+		t.Fatalf("security phase should have been skipped; phases=%v", phasesStarted)
+	}
+	wantPhases := []string{"decide", "style", "report"}
+	if len(phasesStarted) != len(wantPhases) {
+		t.Fatalf("phase starts = %v, want %v", phasesStarted, wantPhases)
+	}
+	for i, want := range wantPhases {
+		if phasesStarted[i] != want {
+			t.Fatalf("phase starts = %v, want %v", phasesStarted, wantPhases)
+		}
+	}
+
+	sessions := provider.snapshotSessions()
+	if len(sessions) != 3 {
+		t.Fatalf("provider sessions = %d, want 3", len(sessions))
+	}
+	var sawPre, sawStyle, sawPost bool
+	for _, session := range sessions {
+		switch {
+		case strings.Contains(session.prompt, "decide reviewers"):
+			sawPre = true
+			if session.opts.Agent != "default-agent" || session.opts.Model != "default-model" {
+				t.Fatalf("pre opts = %+v, want default agent/model", session.opts)
+			}
+			if !strings.Contains(session.prompt, "[team: skip | <name>]") {
+				t.Fatalf("pre prompt missing conditional injection: %q", session.prompt)
+			}
+		case strings.Contains(session.prompt, "review style"):
+			sawStyle = true
+			if session.opts.Agent != "style-agent" || session.opts.Model != "style-model" {
+				t.Fatalf("style opts = %+v, want style overrides", session.opts)
+			}
+		case strings.Contains(session.prompt, "summarize findings"):
+			sawPost = true
+			if session.opts.Agent != "default-agent" || session.opts.Model != "default-model" {
+				t.Fatalf("post opts = %+v, want default agent/model", session.opts)
+			}
+		}
+	}
+	if !sawPre || !sawStyle || !sawPost {
+		t.Fatalf("did not observe all expected phases in provider snapshot: %+v", sessions)
 	}
 }
 

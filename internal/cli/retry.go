@@ -13,6 +13,8 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime/factory"
 )
 
+var newProvider = factory.NewProvider
+
 // attemptResult holds the outcome of a single session attempt.
 type attemptResult struct {
 	exitCode      int
@@ -63,7 +65,7 @@ func runSingleAttempt(
 	cfg attemptConfig,
 	deps attemptDeps,
 ) attemptResult {
-	provider, err := factory.NewProvider(cfg.startOptions, cfg.backend)
+	provider, err := newProvider(cfg.startOptions, cfg.backend)
 	if err != nil {
 		fmt.Fprintf(deps.stderr, "avenor: create provider: %v\n", err)
 		return attemptResult{exitCode: 1}
