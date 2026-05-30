@@ -2,6 +2,7 @@
 package claudechannel
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -183,7 +184,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	if merged.Model != "" {
 		claudeArgs = append(claudeArgs, "--model", merged.Model)
 	}
-	claudeArgs = append(claudeArgs, "--permission-mode", "bypassPermissions")
+	claudeArgs = append(claudeArgs, "--permission-mode", "default")
 
 	// Build the shell command for the tmux session. Using `exec` replaces the
 	// shell with claude so that #{pane_pid} reports claude's actual PID and the
@@ -413,6 +414,11 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 		// Type the prompt and press Enter. Use a short tool usage hint.
 		fullPrompt := prompt + " (use avenor_report and avenor_finish)"
 		_ = exec.Command("tmux", "send-keys", "-t", s.tmuxName, fullPrompt, "Enter").Run()
+
+		// After sending the prompt, watch for Claude's permission dialog and
+		// auto-answer it. This handles MCP tool call permissions that appear
+		// as terminal dialogs rather than channel-based permission requests.
+		p.pollAndAnswerPermissions(s)
 	}()
 
 	// Also push via channel for idempotence and later turns.
@@ -425,6 +431,45 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 		}),
 	}
 	return p.broker.PushControl(s.runID, msg)
+}
+
+// pollAndAnswerPermissions watches the tmux pane for Claude's permission dialog
+// ("Do you want to proceed?") and auto-answers "Yes" (option 1). It polls every
+// 2 seconds for up to 60 seconds or until the session finishes. Multiple dialogs
+// may appear during a single turn (e.g. one per tool call), so the loop keeps
+// watching until the session ends.
+func (p *Provider) pollAndAnswerPermissions(s *session) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	deadline := time.After(60 * time.Second)
+
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-deadline:
+			return
+		case <-ticker.C:
+		}
+
+		s.mu.Lock()
+		if s.finished {
+			s.mu.Unlock()
+			return
+		}
+		s.mu.Unlock()
+
+		out, err := exec.Command("tmux", "capture-pane", "-t", s.tmuxName, "-p").Output()
+		if err != nil {
+			// tmux session gone — Claude exited
+			return
+		}
+		if bytes.Contains(out, []byte("Do you want to proceed?")) {
+			_ = exec.Command("tmux", "send-keys", "-t", s.tmuxName, "1", "Enter").Run()
+			// Don't return — there may be more dialogs.
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
 }
 
 func mustJSON(v any) json.RawMessage {
