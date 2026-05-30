@@ -110,11 +110,7 @@ func TestRenderControlMessageIncludesStructuredPayload(t *testing.T) {
 	}
 	got := renderControlMessage(msg)
 	for _, want := range []string{
-		"Control message ctrl_1 from Avenor:",
-		"type=request_status",
-		"run_id=run_1",
-		`payload_json={"message":"status?"}`,
-		`Reply by calling avenor_reply with to="ctrl_1".`,
+		`Status requested. Reply by calling avenor_reply with to="ctrl_1".`,
 	} {
 		if !bytes.Contains([]byte(got), []byte(want)) {
 			t.Fatalf("rendered message missing %q:\n%s", want, got)

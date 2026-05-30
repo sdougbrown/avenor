@@ -102,8 +102,9 @@ func (s *Server) handleLine(ctx context.Context, line []byte) error {
 func (s *Server) handleRequest(ctx context.Context, method string, params json.RawMessage) (any, error) {
 	switch method {
 	case "initialize":
+		s.initOnce.Do(func() { close(s.initialized) })
 		return map[string]any{
-			"protocolVersion": "2025-06-18",
+			"protocolVersion": "2024-11-05",
 			"serverInfo": map[string]any{
 				"name":    "avenor",
 				"version": "dev",
@@ -283,27 +284,27 @@ func renderControlMessage(msg controlMessage) string {
 	if payload == "" {
 		payload = "{}"
 	}
-	lines := []string{
-		fmt.Sprintf("Control message %s from Avenor:", msg.ID),
-		"type=" + msg.Type,
-		"run_id=" + msg.RunID,
-		"payload_json=" + payload,
-	}
 	switch msg.Type {
 	case "continue":
-		lines = append(lines, "Continue working on the supplied task. Use avenor_report for progress.")
+		// Extract the message from the payload and present it as a natural prompt.
+		var p struct {
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal(msg.Payload, &p); err == nil && p.Message != "" {
+			return p.Message
+		}
+		return "Continue working on the supplied task."
 	case "add_context":
-		lines = append(lines, "Incorporate the new context into the current task.")
+		return "Incorporate the following context:\n" + payload
 	case "request_status":
-		lines = append(lines, fmt.Sprintf("Reply by calling avenor_reply with to=%q.", msg.ID))
+		return fmt.Sprintf("Status requested. Reply by calling avenor_reply with to=%q.", msg.ID)
 	case "cancel":
-		lines = append(lines, "Stop work. Call avenor_finish(status=blocked|failed) if possible. Avoid starting new tool calls.")
+		return "Stop work. Call avenor_finish(status=blocked|failed) if possible. Avoid starting new tool calls."
 	case "permission_decision":
-		lines = append(lines, fmt.Sprintf("Permission decision: %s", string(bytes.TrimSpace(msg.Payload))))
+		return "Permission decision: " + payload
 	default:
-		lines = append(lines, "Unhandled control type: "+msg.Type)
+		return "Unhandled control type: " + msg.Type
 	}
-	return joinLines(lines)
 }
 
 func joinLines(lines []string) string {

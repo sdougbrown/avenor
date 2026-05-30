@@ -34,6 +34,7 @@ const (
 	backendGeminiACP      = "gemini-acp"
 	backendCursorACP      = "cursor-acp"
 	backendPony           = "pony"
+	backendClaudeChannel  = "claude-channel"
 )
 
 // DefaultPermissionClaimTimeout is the default value for --permission-claim-timeout:
@@ -145,6 +146,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			return exitWithSentinel(1)
 		}
 	case backendCodexAppServer:
+	case backendClaudeChannel:
 	default:
 		fmt.Fprintf(stderr, "avenor: unknown backend %q\n", *backend)
 		return exitWithSentinel(1)

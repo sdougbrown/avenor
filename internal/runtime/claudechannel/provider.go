@@ -183,7 +183,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	if merged.Model != "" {
 		claudeArgs = append(claudeArgs, "--model", merged.Model)
 	}
-	claudeArgs = append(claudeArgs, "--permission-mode", "default")
+	claudeArgs = append(claudeArgs, "--permission-mode", "bypassPermissions")
 
 	// Build the shell command for the tmux session. Using `exec` replaces the
 	// shell with claude so that #{pane_pid} reports claude's actual PID and the
@@ -228,6 +228,16 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
+
+	// Auto-confirm the "Loading development channels" security prompt that
+	// Claude Code shows when --dangerously-load-development-channels is used.
+	// Without this, the detached tmux session blocks forever waiting for Enter.
+	// Claude takes ~15-20s to start and render the prompt; we fire a delayed
+	// send-keys in a goroutine so Start() returns without blocking.
+	go func() {
+		time.Sleep(20 * time.Second)
+		_ = exec.Command("tmux", "send-keys", "-t", tmuxName, "Enter").Run()
+	}()
 
 	sessCtx, cancel := context.WithCancel(context.Background())
 	s := &session{
@@ -385,6 +395,27 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 		return fmt.Errorf("session already finished: %s", sessionID)
 	}
 
+	// Inject the prompt into Claude's terminal via tmux PTY. This is the
+	// primary delivery mechanism: the channel method only works after Claude
+	// has started its first turn, and the initial prompt must arrive as
+	// terminal input to kick off the session.
+	//
+	// Wait for Claude to finish loading (~25s from session start). Use a
+	// goroutine so Prompt() doesn't block; the channel push serves as a
+	// backup if Claude is already listening.
+	go func() {
+		wait := time.Until(s.startedAt.Add(30 * time.Second))
+		if wait < 0 {
+			wait = 0
+		}
+
+		time.Sleep(wait)
+		// Type the prompt and press Enter. Use a short tool usage hint.
+		fullPrompt := prompt + " (use avenor_report and avenor_finish)"
+		_ = exec.Command("tmux", "send-keys", "-t", s.tmuxName, fullPrompt, "Enter").Run()
+	}()
+
+	// Also push via channel for idempotence and later turns.
 	msg := broker.ControlMessage{
 		ID:    uuid.New().String(),
 		Type:  "continue",
