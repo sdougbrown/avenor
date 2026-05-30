@@ -20,12 +20,14 @@ export default defineConfig({
         items: [
           { text: 'CLI Reference', link: '/cli' },
           { text: 'Backends', link: '/backends' },
+          { text: 'Pony', link: '/pony' },
         ],
       },
       {
         text: 'Running',
         items: [
           { text: 'Loop', link: '/loop' },
+          { text: 'Team', link: '/team' },
           { text: 'Events', link: '/events' },
           { text: 'Watch', link: '/watch' },
           { text: 'Permission Handler', link: '/permission-handler' },
