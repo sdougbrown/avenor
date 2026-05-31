@@ -103,7 +103,7 @@ type shellInput struct {
 func (t *ShellTool) Name() string { return "shell" }
 
 func (t *ShellTool) Description() string {
-	return fmt.Sprintf("Run a command and return its output. Prefer cmd plus args for exact argv execution. The legacy command string supports quote grouping but no shell interpreter, so pipes, redirects, command substitution, and command chaining do not work. Timeout: %ds, output cap: %dKB.",
+	return fmt.Sprintf("Run a command and return its output. Prefer cmd plus args for exact argv execution. cmd must be only the executable name; put subcommands and flags in args. Examples: {\"cmd\":\"git\",\"args\":[\"diff\",\"--stat\",\"base...head\"]}, {\"cmd\":\"git\",\"args\":[\"diff\",\"--name-only\",\"base...head\"]}, and {\"cmd\":\"ls\",\"args\":[\"packages\"]}. Do not use {\"cmd\":\"git diff\",...}, {\"cmd\":\"git\",\"args\":[\"--stat\",...]}, or repeat the executable in args. The legacy command string supports quote grouping but no shell interpreter, so pipes, redirects, command substitution, and command chaining do not work. Timeout: %ds, output cap: %dKB.",
 		t.cfg.TimeoutSeconds, t.cfg.MaxOutputBytes/1024)
 }
 
@@ -113,22 +113,15 @@ func (t *ShellTool) Schema() json.RawMessage {
 		"properties": {
 			"cmd": {
 				"type": "string",
-				"description": "Executable to run directly (preferred, e.g. rg)"
+				"description": "Executable to run directly, without spaces or flags (e.g. git, rg, ls)"
 			},
 			"args": {
 				"type": "array",
 				"items": {"type": "string"},
-				"description": "Arguments passed exactly as argv to cmd"
-			},
-			"command": {
-				"type": "string",
-				"description": "Legacy command string. Quotes group arguments, but shell operators like |, >, <, &&, ||, $(), and backticks are rejected."
+				"description": "Arguments passed exactly as argv to cmd, including subcommands and flags. Example: [\"diff\",\"--stat\",\"base...head\"]"
 			}
 		},
-		"oneOf": [
-			{"required": ["cmd"]},
-			{"required": ["command"]}
-		]
+		"required": ["cmd", "args"]
 	}`)
 }
 
@@ -226,11 +219,29 @@ func validateArgv(cmd string, args []string) error {
 	if strings.TrimSpace(cmd) == "" {
 		return fmt.Errorf("shell: cmd is required")
 	}
+	if fields := strings.Fields(cmd); len(fields) > 1 {
+		rewriteArgs := append(fields[1:], args...)
+		return fmt.Errorf("shell: cmd must be a bare executable name, not a full command string. Rewrite as {\"cmd\":%q,\"args\":%s}", fields[0], quotedJSONArray(rewriteArgs))
+	}
 	if isShellOperator(cmd) || looksLikeRedirection(cmd) || containsShellMetachar(cmd) ||
 		strings.Contains(cmd, "$(") || strings.Contains(cmd, "`") {
 		return unsupportedShellSyntaxError(cmd)
 	}
+	if len(args) > 0 && args[0] == cmd {
+		return fmt.Errorf("shell: args should not repeat cmd. Rewrite as {\"cmd\":%q,\"args\":%s}", cmd, quotedJSONArray(args[1:]))
+	}
+	if cmd == "git" && len(args) > 0 && strings.HasPrefix(args[0], "-") {
+		return fmt.Errorf("shell: git requires a subcommand before flags. Rewrite as {\"cmd\":\"git\",\"args\":[\"diff\",%s]}", strings.TrimPrefix(quotedJSONArray(args), "["))
+	}
 	return nil
+}
+
+func quotedJSONArray(items []string) string {
+	data, err := json.Marshal(items)
+	if err != nil {
+		return "[]"
+	}
+	return string(data)
 }
 
 func validateLegacyWord(word shellWord) error {

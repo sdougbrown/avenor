@@ -772,18 +772,30 @@ func TestSystemPromptWithToolInstructions(t *testing.T) {
 		}
 	})
 
-	t.Run("local tools add terse shell guidance", func(t *testing.T) {
-		got := systemPromptWithToolInstructions("You are helpful.", true, false)
-		if !strings.Contains(got, "You are helpful.") {
-			t.Fatalf("prompt missing base: %q", got)
+		t.Run("local tools prefer structured tools and strict shell argv", func(t *testing.T) {
+			got := systemPromptWithToolInstructions("You are helpful.", true, false)
+			if !strings.Contains(got, "You are helpful.") {
+				t.Fatalf("prompt missing base: %q", got)
+			}
+		if !strings.Contains(got, "Prefer structured tools") {
+			t.Fatalf("prompt missing structured-tool guidance: %q", got)
 		}
 		if !strings.Contains(got, "For shell, prefer cmd plus args") {
 			t.Fatalf("prompt missing shell argv guidance: %q", got)
 		}
-		if strings.Contains(got, "spawn_agents") {
-			t.Fatalf("prompt unexpectedly included orchestration guidance: %q", got)
-		}
-	})
+			if !strings.Contains(got, `Use shell only when no structured tool fits`) {
+				t.Fatalf("prompt missing shell fallback guidance: %q", got)
+			}
+			if !strings.Contains(got, `{"cmd":"git","args":["diff","--stat","base...head"]}`) {
+				t.Fatalf("prompt missing git example: %q", got)
+			}
+			if !strings.Contains(got, `{"cmd":"ls","args":["packages"]}`) {
+				t.Fatalf("prompt missing ls example: %q", got)
+			}
+			if strings.Contains(got, "spawn_agents") {
+				t.Fatalf("prompt unexpectedly included orchestration guidance: %q", got)
+			}
+		})
 
 	t.Run("orchestration tools add orchestration guidance", func(t *testing.T) {
 		got := systemPromptWithToolInstructions("", false, true)

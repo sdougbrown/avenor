@@ -50,7 +50,20 @@ func TestShellToolExplicitArgvAllowsOperatorLiterals(t *testing.T) {
 	}
 }
 
-func TestShellToolLegacyCommandHonorsQuoteGrouping(t *testing.T) {
+func TestShellToolSchemaExposesArgvOnly(t *testing.T) {
+	schema := string(testShellTool().Schema())
+	if strings.Contains(schema, `"command"`) {
+		t.Fatalf("schema unexpectedly exposes legacy command field: %s", schema)
+	}
+	if !strings.Contains(schema, `"cmd"`) || !strings.Contains(schema, `"args"`) {
+		t.Fatalf("schema missing argv fields: %s", schema)
+	}
+	if !strings.Contains(schema, `"required": ["cmd", "args"]`) {
+		t.Fatalf("schema should require cmd and args: %s", schema)
+	}
+}
+
+func TestShellToolLegacyCommandStillHonorsQuoteGrouping(t *testing.T) {
 	got, err := executeShell(t, map[string]any{
 		"command": `printf %s "hello world"`,
 	})
@@ -96,6 +109,45 @@ func TestShellToolRejectsAmbiguousInputShape(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "either cmd/args or command") {
 		t.Fatalf("error = %q, want input shape guidance", err.Error())
+	}
+}
+
+func TestShellToolRejectsCmdContainingSpacesWithRewriteHint(t *testing.T) {
+	_, err := executeShell(t, map[string]any{
+		"cmd":  "git diff",
+		"args": []string{"--stat", "base...head"},
+	})
+	if err == nil {
+		t.Fatal("expected cmd shape rejection")
+	}
+	if !strings.Contains(err.Error(), `cmd must be a bare executable`) || !strings.Contains(err.Error(), `"cmd":"git","args":["diff","--stat","base...head"]`) {
+		t.Fatalf("error = %q, want rewrite hint", err.Error())
+	}
+}
+
+func TestShellToolRejectsDuplicateExecutableInArgs(t *testing.T) {
+	_, err := executeShell(t, map[string]any{
+		"cmd":  "rg",
+		"args": []string{"rg", "needle"},
+	})
+	if err == nil {
+		t.Fatal("expected duplicate executable rejection")
+	}
+	if !strings.Contains(err.Error(), `args should not repeat cmd`) || !strings.Contains(err.Error(), `"cmd":"rg","args":["needle"]`) {
+		t.Fatalf("error = %q, want duplicate-argv guidance", err.Error())
+	}
+}
+
+func TestShellToolRejectsGitFlagsWithoutSubcommand(t *testing.T) {
+	_, err := executeShell(t, map[string]any{
+		"cmd":  "git",
+		"args": []string{"--stat", "base...head"},
+	})
+	if err == nil {
+		t.Fatal("expected git subcommand rejection")
+	}
+	if !strings.Contains(err.Error(), `git requires a subcommand before flags`) || !strings.Contains(err.Error(), `"cmd":"git","args":["diff","--stat","base...head"]`) {
+		t.Fatalf("error = %q, want git subcommand hint", err.Error())
 	}
 }
 
