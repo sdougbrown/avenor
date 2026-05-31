@@ -20,10 +20,10 @@ import (
 	"github.com/sdougbrown/avenor/internal/looprunner"
 	"github.com/sdougbrown/avenor/internal/permission"
 	"github.com/sdougbrown/avenor/internal/phaseconfig"
-	"github.com/sdougbrown/avenor/internal/teamrunner"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/pony"
 	"github.com/sdougbrown/avenor/internal/runtime/pony/model/openai"
+	"github.com/sdougbrown/avenor/internal/teamrunner"
 )
 
 const (
@@ -219,18 +219,18 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		}
 
 		pCfg := pony.Config{
-			Adapter:        adapter,
-			Model:          profile.Model,
-			MaxTokens:      profile.MaxTokens,
-			SystemPrompt:   systemPrompt,
-			InitialPrompt:  initialPrompt,
-			Executor:       executor,
-			LocalTools:     profile.Tools.Local,
-			OrchTools:      profile.Tools.Orchestration,
-			WorkingDir:     *dir,
-			InjectAgentsMD: profile.InjectAgentsMD,
-			ToolApproval:   profile.ToolApproval,
-			ShellConfig:    profile.ShellConfig,
+			Adapter:         adapter,
+			Model:           profile.Model,
+			MaxTokens:       profile.MaxTokens,
+			SystemPrompt:    systemPrompt,
+			InitialPrompt:   initialPrompt,
+			Executor:        executor,
+			LocalTools:      profile.Tools.Local,
+			OrchTools:       profile.Tools.Orchestration,
+			WorkingDir:      *dir,
+			InjectAgentsMD:  profile.InjectAgentsMD,
+			ToolApproval:    profile.ToolApproval,
+			ShellConfig:     profile.ShellConfig,
 			AllowedReadDirs: allowedDirs,
 		}
 		pony.SetGlobalConfig(&pCfg)
@@ -361,6 +361,59 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		timer = t.C
 	}
 
+	agentOverride := *agent
+	modelOverride := *model
+
+	execAttempt := func(ctx context.Context, agent, model, resumeID, prompt string) attemptResult {
+		return runSingleAttempt(ctx, attemptConfig{
+			startOptions:           runtime.StartOptions{Agent: agent, Model: model, Dir: *dir, ServerURL: discovery.URL},
+			backend:                *backend,
+			resumeID:               resumeID,
+			initialPrompt:          prompt,
+			runID:                  runID,
+			runLabel:               *label,
+			autoApprove:            *autoApprove,
+			permissionClaimTimeout: *permClaimTimeout,
+			progressTimeout:        *progressTimeout,
+			timer:                  timer,
+		}, attemptDeps{
+			writer:        writer,
+			fileHandler:   fileHandler,
+			controlServer: controlServer,
+			stderr:        os.Stderr,
+		})
+	}
+
+	phaseAttemptForLoop := func(ctx context.Context, phase phaseconfig.Phase, _ int, _ int, prevSessionID string) (looprunner.PhaseAttemptResult, error) {
+		r := execAttempt(ctx, agentOverride, modelOverride, prevSessionID, phase.Prompt)
+		return looprunner.PhaseAttemptResult{
+			ExitCode:      r.exitCode,
+			SessionID:     r.sessionID,
+			StopReason:    r.stopReason,
+			LoopDirective: r.loopDirective,
+			LoopLabel:     r.loopLabel,
+		}, nil
+	}
+
+	phaseAttemptForTeam := func(ctx context.Context, phase phaseconfig.Phase, _ int, prevSessionID string) (teamrunner.PhaseAttemptResult, error) {
+		a, m := agentOverride, modelOverride
+		if phase.Agent != "" {
+			a = phase.Agent
+		}
+		if phase.Model != "" {
+			m = phase.Model
+		}
+		r := execAttempt(ctx, a, m, prevSessionID, phase.Prompt)
+		return teamrunner.PhaseAttemptResult{
+			ExitCode:      r.exitCode,
+			SessionID:     r.sessionID,
+			StopReason:    r.stopReason,
+			LoopDirective: r.loopDirective,
+			LoopLabel:     r.loopLabel,
+			Output:        r.output,
+		}, nil
+	}
+
 	if *loopFile != "" {
 		cfg, err := looprunner.LoadLoopConfig(*loopFile)
 		if err != nil {
@@ -375,49 +428,6 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			cfg.InsertInitialPrompt(string(promptText))
 		}
 
-		agentOverride := *agent
-		modelOverride := *model
-
-		phaseAttempt := func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, iteration int, prevSessionID string) (looprunner.PhaseAttemptResult, error) {
-			startOpts := runtime.StartOptions{
-				Agent:     agentOverride,
-				Model:     modelOverride,
-				Dir:       *dir,
-				ServerURL: discovery.URL,
-			}
-
-			var resumeID string
-			if prevSessionID != "" {
-				resumeID = prevSessionID
-			}
-
-			result := runSingleAttempt(ctx, attemptConfig{
-				startOptions:           startOpts,
-				backend:                *backend,
-				resumeID:               resumeID,
-				initialPrompt:          phase.Prompt,
-				runID:                  runID,
-				runLabel:               *label,
-				autoApprove:            *autoApprove,
-				permissionClaimTimeout: *permClaimTimeout,
-				progressTimeout:        *progressTimeout,
-				timer:                  timer,
-			}, attemptDeps{
-				writer:        writer,
-				fileHandler:   fileHandler,
-				controlServer: controlServer,
-				stderr:        os.Stderr,
-			})
-
-			return looprunner.PhaseAttemptResult{
-				ExitCode:      result.exitCode,
-				SessionID:     result.sessionID,
-				StopReason:    result.stopReason,
-				LoopDirective: result.loopDirective,
-				LoopLabel:     result.loopLabel,
-			}, nil
-		}
-
 		var nestedRun func(ctx context.Context, configPath string, runType string) (looprunner.NestedResult, error)
 		nestedRun = func(ctx context.Context, configPath string, runType string) (looprunner.NestedResult, error) {
 			if runType == "loop" {
@@ -426,14 +436,14 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 					return looprunner.NestedResult{}, fmt.Errorf("load nested loop config: %w", err)
 				}
 				subOpts := looprunner.RunOptions{
-					WorkDir:    *dir,
-					RunID:      runID,
-					EventSink:  writer,
-					Config:     subCfg,
-					MaxRetries: *maxRetries,
-					ConfigDir:  filepath.Dir(configPath),
-					PhaseAttempt: phaseAttempt,
-					NestedRun:  nestedRun,
+					WorkDir:      *dir,
+					RunID:        runID,
+					EventSink:    writer,
+					Config:       subCfg,
+					MaxRetries:   *maxRetries,
+					ConfigDir:    filepath.Dir(configPath),
+					PhaseAttempt: phaseAttemptForLoop,
+					NestedRun:    nestedRun,
 				}
 				subResult, err := looprunner.Run(ctx, subOpts)
 				if err != nil {
@@ -461,61 +471,14 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 					}, err
 				}
 				subOpts := teamrunner.RunOptions{
-					WorkDir:    *dir,
-					RunID:      runID,
-					EventSink:  writer,
-					Config:     subCfg,
-					MaxRetries: *maxRetries,
-					ConfigDir:  filepath.Dir(configPath),
-					PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (teamrunner.PhaseAttemptResult, error) {
-						a := agentOverride
-						m := modelOverride
-						if phase.Agent != "" {
-							a = phase.Agent
-						}
-						if phase.Model != "" {
-							m = phase.Model
-						}
-						startOpts := runtime.StartOptions{
-							Agent:     a,
-							Model:     m,
-							Dir:       *dir,
-							ServerURL: discovery.URL,
-						}
-
-						var resumeID string
-						if prevSessionID != "" {
-							resumeID = prevSessionID
-						}
-
-						result := runSingleAttempt(ctx, attemptConfig{
-							startOptions:           startOpts,
-							backend:                *backend,
-							resumeID:               resumeID,
-							initialPrompt:          phase.Prompt,
-							runID:                  runID,
-							runLabel:               *label,
-							autoApprove:            *autoApprove,
-							permissionClaimTimeout: *permClaimTimeout,
-							progressTimeout:        *progressTimeout,
-							timer:                  timer,
-						}, attemptDeps{
-							writer:        writer,
-							fileHandler:   fileHandler,
-							controlServer: controlServer,
-							stderr:        os.Stderr,
-						})
-
-						return teamrunner.PhaseAttemptResult{
-							ExitCode:      result.exitCode,
-							SessionID:     result.sessionID,
-							StopReason:    result.stopReason,
-							LoopDirective: result.loopDirective,
-							LoopLabel:     result.loopLabel,
-							Output:        result.output,
-						}, nil
-					},
-					NestedRun: teamNestedRun,
+					WorkDir:      *dir,
+					RunID:        runID,
+					EventSink:    writer,
+					Config:       subCfg,
+					MaxRetries:   *maxRetries,
+					ConfigDir:    filepath.Dir(configPath),
+					PhaseAttempt: phaseAttemptForTeam,
+					NestedRun:    teamNestedRun,
 				}
 				subResult, err := teamrunner.Run(ctx, subOpts)
 				if err != nil {
@@ -532,14 +495,14 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		}
 
 		opts := looprunner.RunOptions{
-			WorkDir:     *dir,
-			RunID:       runID,
-			EventSink:   writer,
-			Config:      cfg,
-			MaxRetries:  *maxRetries,
-			ConfigDir:   filepath.Dir(*loopFile),
-			PhaseAttempt: phaseAttempt,
-			NestedRun:   nestedRun,
+			WorkDir:      *dir,
+			RunID:        runID,
+			EventSink:    writer,
+			Config:       cfg,
+			MaxRetries:   *maxRetries,
+			ConfigDir:    filepath.Dir(*loopFile),
+			PhaseAttempt: phaseAttemptForLoop,
+			NestedRun:    nestedRun,
 		}
 
 		lrCtx, lrCancel := context.WithCancel(ctx)
@@ -573,58 +536,6 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			cfg.InsertInitialPrompt(string(promptText))
 		}
 
-		agentOverride := *agent
-		modelOverride := *model
-
-		phaseAttempt := func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (teamrunner.PhaseAttemptResult, error) {
-			a := agentOverride
-			m := modelOverride
-			if phase.Agent != "" {
-				a = phase.Agent
-			}
-			if phase.Model != "" {
-				m = phase.Model
-			}
-			startOpts := runtime.StartOptions{
-				Agent:     a,
-				Model:     m,
-				Dir:       *dir,
-				ServerURL: discovery.URL,
-			}
-
-			var resumeID string
-			if prevSessionID != "" {
-				resumeID = prevSessionID
-			}
-
-			result := runSingleAttempt(ctx, attemptConfig{
-				startOptions:           startOpts,
-				backend:                *backend,
-				resumeID:               resumeID,
-				initialPrompt:          phase.Prompt,
-				runID:                  runID,
-				runLabel:               *label,
-				autoApprove:            *autoApprove,
-				permissionClaimTimeout: *permClaimTimeout,
-				progressTimeout:        *progressTimeout,
-				timer:                  timer,
-			}, attemptDeps{
-				writer:        writer,
-				fileHandler:   fileHandler,
-				controlServer: controlServer,
-				stderr:        os.Stderr,
-			})
-
-			return teamrunner.PhaseAttemptResult{
-				ExitCode:      result.exitCode,
-				SessionID:     result.sessionID,
-				StopReason:    result.stopReason,
-				LoopDirective: result.loopDirective,
-				LoopLabel:     result.loopLabel,
-				Output:        result.output,
-			}, nil
-		}
-
 		var nestedRun func(ctx context.Context, configPath string, runType string) (teamrunner.NestedResult, error)
 		nestedRun = func(ctx context.Context, configPath string, runType string) (teamrunner.NestedResult, error) {
 			if runType == "loop" {
@@ -642,52 +553,14 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 					}, err
 				}
 				subOpts := looprunner.RunOptions{
-					WorkDir:    *dir,
-					RunID:      runID,
-					EventSink:  writer,
-					Config:     subCfg,
-					MaxRetries: *maxRetries,
-					ConfigDir:  filepath.Dir(configPath),
-					PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, iteration int, prevSessionID string) (looprunner.PhaseAttemptResult, error) {
-						startOpts := runtime.StartOptions{
-							Agent:     agentOverride,
-							Model:     modelOverride,
-							Dir:       *dir,
-							ServerURL: discovery.URL,
-						}
-
-						var resumeID string
-						if prevSessionID != "" {
-							resumeID = prevSessionID
-						}
-
-						result := runSingleAttempt(ctx, attemptConfig{
-							startOptions:           startOpts,
-							backend:                *backend,
-							resumeID:               resumeID,
-							initialPrompt:          phase.Prompt,
-							runID:                  runID,
-							runLabel:               *label,
-							autoApprove:            *autoApprove,
-							permissionClaimTimeout: *permClaimTimeout,
-							progressTimeout:        *progressTimeout,
-							timer:                  timer,
-						}, attemptDeps{
-							writer:        writer,
-							fileHandler:   fileHandler,
-							controlServer: controlServer,
-							stderr:        os.Stderr,
-						})
-
-						return looprunner.PhaseAttemptResult{
-							ExitCode:      result.exitCode,
-							SessionID:     result.sessionID,
-							StopReason:    result.stopReason,
-							LoopDirective: result.loopDirective,
-							LoopLabel:     result.loopLabel,
-						}, nil
-					},
-					NestedRun: loopNestedRun,
+					WorkDir:      *dir,
+					RunID:        runID,
+					EventSink:    writer,
+					Config:       subCfg,
+					MaxRetries:   *maxRetries,
+					ConfigDir:    filepath.Dir(configPath),
+					PhaseAttempt: phaseAttemptForLoop,
+					NestedRun:    loopNestedRun,
 				}
 				subResult, err := looprunner.Run(ctx, subOpts)
 				if err != nil {
@@ -706,14 +579,14 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 					return teamrunner.NestedResult{}, fmt.Errorf("load nested team config: %w", err)
 				}
 				subOpts := teamrunner.RunOptions{
-					WorkDir:    *dir,
-					RunID:      runID,
-					EventSink:  writer,
-					Config:     subCfg,
-					MaxRetries: *maxRetries,
-					ConfigDir:  filepath.Dir(configPath),
-					PhaseAttempt: phaseAttempt,
-					NestedRun:  nestedRun,
+					WorkDir:      *dir,
+					RunID:        runID,
+					EventSink:    writer,
+					Config:       subCfg,
+					MaxRetries:   *maxRetries,
+					ConfigDir:    filepath.Dir(configPath),
+					PhaseAttempt: phaseAttemptForTeam,
+					NestedRun:    nestedRun,
 				}
 				subResult, err := teamrunner.Run(ctx, subOpts)
 				if err != nil {
@@ -730,14 +603,14 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		}
 
 		opts := teamrunner.RunOptions{
-			WorkDir:     *dir,
-			RunID:       runID,
-			EventSink:   writer,
-			Config:      cfg,
-			MaxRetries:  *maxRetries,
-			ConfigDir:   filepath.Dir(*teamFile),
-			PhaseAttempt: phaseAttempt,
-			NestedRun:   nestedRun,
+			WorkDir:      *dir,
+			RunID:        runID,
+			EventSink:    writer,
+			Config:       cfg,
+			MaxRetries:   *maxRetries,
+			ConfigDir:    filepath.Dir(*teamFile),
+			PhaseAttempt: phaseAttemptForTeam,
+			NestedRun:    nestedRun,
 		}
 
 		trCtx, trCancel := context.WithCancel(ctx)
@@ -882,19 +755,6 @@ type sessionResult struct {
 	Usage         map[string]any
 }
 
-func loopDirectiveSeverity(d string) int {
-	switch d {
-	case "abort":
-		return 3
-	case "exit":
-		return 2
-	case "continue":
-		return 1
-	default:
-		return 0
-	}
-}
-
 type SessionWaitConfig struct {
 	EventCh                <-chan events.Event
 	PromptDone             <-chan error
@@ -1016,7 +876,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 					// The raw event still reaches tracker.Observe so the caller
 					// sees the full message text including the marker.
 					if dir, lbl, ok := chunkBuf.ScanLoopMarker(); ok {
-						if loopDirectiveSeverity(dir) > loopDirectiveSeverity(loopDirective) {
+						if phaseconfig.LoopDirectiveSeverity(dir) > phaseconfig.LoopDirectiveSeverity(loopDirective) {
 							loopDirective = dir
 							loopLabel = lbl
 						}

@@ -463,10 +463,10 @@ func TestRunRetryOnTransientFailure(t *testing.T) {
 	attempts := 0
 	result, err := Run(context.Background(), RunOptions{
 		WorkDir:    t.TempDir(),
-		RunID:       "test-run",
-		EventSink:   discardEventWriter{},
-		Config:      cfg,
-		MaxRetries:  2,
+		RunID:      "test-run",
+		EventSink:  discardEventWriter{},
+		Config:     cfg,
+		MaxRetries: 2,
 		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
 			attempts++
 			if attempts <= 2 {
@@ -503,19 +503,19 @@ func TestExtractTeamSkipMarkers(t *testing.T) {
 			want:  []string{"security", "api-compat"},
 		},
 		{
-		 name:  "no skip markers",
-		 input:  "Just analysis, no skips",
-		 want:   nil,
+			name:  "no skip markers",
+			input: "Just analysis, no skips",
+			want:  nil,
 		},
 		{
-		 name:  "case insensitive",
-		 input:  "[TEAM: SKIP | Security]",
-		 want:   []string{"Security"},
+			name:  "case insensitive",
+			input: "[TEAM: SKIP | Security]",
+			want:  []string{"Security"},
 		},
 		{
-		 name:  "whitespace tolerant",
-		 input:  "  [team:  skip  |  api-compat  ]  ",
-		 want:   []string{"api-compat"},
+			name:  "whitespace tolerant",
+			input: "  [team:  skip  |  api-compat  ]  ",
+			want:  []string{"api-compat"},
 		},
 	}
 
@@ -833,6 +833,47 @@ func TestRunNestedPhaseRequiresNestedRun(t *testing.T) {
 	}
 	if result.ExitCode != 1 || result.StopReason != "phase_error" {
 		t.Fatalf("result = %+v, want phase_error result", result)
+	}
+}
+
+func TestRunPostPhaseReceivesTeamMemberOutput(t *testing.T) {
+	cfg := makeConfig(
+		nil,
+		[]phaseconfig.Phase{
+			simplePhase("worker-a", "do work a"),
+			simplePhase("worker-b", "do work b"),
+		},
+		[]phaseconfig.Phase{
+			{Name: "report", Prompt: "summarize: {{.TeamOutput}}"},
+		},
+	)
+
+	var capturedPostPrompt string
+	_, err := Run(context.Background(), RunOptions{
+		WorkDir:   t.TempDir(),
+		RunID:     "test-run",
+		EventSink: discardEventWriter{},
+		Config:    cfg,
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
+			switch phase.Name {
+			case "worker-a":
+				return PhaseAttemptResult{ExitCode: 0, Output: "output from worker-a"}, nil
+			case "worker-b":
+				return PhaseAttemptResult{ExitCode: 0, Output: "output from worker-b"}, nil
+			case "report":
+				capturedPostPrompt = phase.Prompt
+			}
+			return PhaseAttemptResult{ExitCode: 0}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !strings.Contains(capturedPostPrompt, "output from worker-a") {
+		t.Errorf("post phase prompt missing worker-a output; got: %q", capturedPostPrompt)
+	}
+	if !strings.Contains(capturedPostPrompt, "output from worker-b") {
+		t.Errorf("post phase prompt missing worker-b output; got: %q", capturedPostPrompt)
 	}
 }
 

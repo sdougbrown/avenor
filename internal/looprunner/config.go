@@ -10,7 +10,7 @@ import (
 )
 
 type LoopConfig struct {
-	MaxIterations int               `json:"max_iterations"`
+	MaxIterations int                 `json:"max_iterations"`
 	Pre           []phaseconfig.Phase `json:"pre"`
 	Loop          []phaseconfig.Phase `json:"loop"`
 	Post          []phaseconfig.Phase `json:"post"`
@@ -71,8 +71,6 @@ func (c *LoopConfig) preValidate() error {
 	return nil
 }
 
-
-
 func (c *LoopConfig) Validate() error {
 	if len(c.Pre) == 0 && len(c.Loop) == 0 {
 		return fmt.Errorf("loop config: at least one of pre or loop must be non-empty")
@@ -92,12 +90,6 @@ func (c *LoopConfig) Validate() error {
 		if err := phaseconfig.ValidatePhaseHasPrompt(c.Pre[i]); err != nil {
 			return fmt.Errorf("loop config: phase[name %s]: %w", c.Pre[i].Name, err)
 		}
-		if c.Pre[i].Prompt != "" && (c.Pre[i].LoopFile != "" || c.Pre[i].TeamFile != "") {
-			return fmt.Errorf("loop config: phase[name %s]: prompt is mutually exclusive with loop_file and team_file", c.Pre[i].Name)
-		}
-		if c.Pre[i].LoopFile != "" && c.Pre[i].TeamFile != "" {
-			return fmt.Errorf("loop config: phase[name %s]: loop_file and team_file are mutually exclusive", c.Pre[i].Name)
-		}
 	}
 
 	for i := range c.Loop {
@@ -110,12 +102,6 @@ func (c *LoopConfig) Validate() error {
 		if err := phaseconfig.ValidatePhaseHasPrompt(c.Loop[i]); err != nil {
 			return fmt.Errorf("loop config: phase[name %s]: %w", c.Loop[i].Name, err)
 		}
-		if c.Loop[i].Prompt != "" && (c.Loop[i].LoopFile != "" || c.Loop[i].TeamFile != "") {
-			return fmt.Errorf("loop config: phase[name %s]: prompt is mutually exclusive with loop_file and team_file", c.Loop[i].Name)
-		}
-		if c.Loop[i].LoopFile != "" && c.Loop[i].TeamFile != "" {
-			return fmt.Errorf("loop config: phase[name %s]: loop_file and team_file are mutually exclusive", c.Loop[i].Name)
-		}
 	}
 
 	for i := range c.Post {
@@ -127,12 +113,6 @@ func (c *LoopConfig) Validate() error {
 		}
 		if err := phaseconfig.ValidatePhaseHasPrompt(c.Post[i]); err != nil {
 			return fmt.Errorf("loop config: phase[name %s]: %w", c.Post[i].Name, err)
-		}
-		if c.Post[i].Prompt != "" && (c.Post[i].LoopFile != "" || c.Post[i].TeamFile != "") {
-			return fmt.Errorf("loop config: phase[name %s]: prompt is mutually exclusive with loop_file and team_file", c.Post[i].Name)
-		}
-		if c.Post[i].LoopFile != "" && c.Post[i].TeamFile != "" {
-			return fmt.Errorf("loop config: phase[name %s]: loop_file and team_file are mutually exclusive", c.Post[i].Name)
 		}
 	}
 

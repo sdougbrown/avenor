@@ -64,8 +64,8 @@ type SpawnResult struct {
 type childRuntime struct {
 	id               string
 	label            string
-	parentID         string               // runtime ID of the parent agent, empty for top-level
-	children         []string             // runtime IDs spawned by this runtime
+	parentID         string   // runtime ID of the parent agent, empty for top-level
+	children         []string // runtime IDs spawned by this runtime
 	provider         runtime.Provider
 	session          runtime.Session
 	eventWriter      cli.EventSink
@@ -98,45 +98,45 @@ type handledChildQuestion struct {
 }
 
 type Supervisor struct {
-	config          Config
-	runID           string
-	control         *control.ControlServer
-	state           *control.ControlState
-	controlMu       sync.Mutex
-	runtimes        map[string]*childRuntime
-	nextID          int
-	shutdownCh      chan struct{}
-	runtimeActivity chan struct{}
-	childQuestionSeq int
-	pendingQuestions map[string]pendingChildQuestion // child runtime ID -> pending question
-	handledQuestions map[string]handledChildQuestion // child runtime ID -> latest handled request
+	config               Config
+	runID                string
+	control              *control.ControlServer
+	state                *control.ControlState
+	controlMu            sync.Mutex
+	runtimes             map[string]*childRuntime
+	nextID               int
+	shutdownCh           chan struct{}
+	runtimeActivity      chan struct{}
+	childQuestionSeq     int
+	pendingQuestions     map[string]pendingChildQuestion // child runtime ID -> pending question
+	handledQuestions     map[string]handledChildQuestion // child runtime ID -> latest handled request
 	childQuestionTimeout time.Duration
-	httpServer      *control.HTTPDebugServer
-	permOptions     map[string][]any // keyed by "runtimeID:requestID"
-	httpServers     map[string]any   // dir → *managedHTTPServer or errHTTPServerStarting sentinel
-	httpServerMu    sync.Mutex
-	httpServerCond  *sync.Cond
-	fileSnapshots   map[string][]string // runtimeID → pre-run file list for output detection
-	fileSnapMu      sync.Mutex
+	httpServer           *control.HTTPDebugServer
+	permOptions          map[string][]any // keyed by "runtimeID:requestID"
+	httpServers          map[string]any   // dir → *managedHTTPServer or errHTTPServerStarting sentinel
+	httpServerMu         sync.Mutex
+	httpServerCond       *sync.Cond
+	fileSnapshots        map[string][]string // runtimeID → pre-run file list for output detection
+	fileSnapMu           sync.Mutex
 }
 
 func NewSupervisor(cfg Config) *Supervisor {
 	runID := cli.GenerateRunID()
 	state := control.NewState(runID, "", 0)
 	sup := &Supervisor{
-		config:          cfg,
-		runID:           runID,
-		state:           state,
-		control:         control.NewServer(state),
-		runtimes:        map[string]*childRuntime{},
-		shutdownCh:      make(chan struct{}),
-		runtimeActivity: make(chan struct{}),
-		pendingQuestions: map[string]pendingChildQuestion{},
-		handledQuestions: map[string]handledChildQuestion{},
+		config:               cfg,
+		runID:                runID,
+		state:                state,
+		control:              control.NewServer(state),
+		runtimes:             map[string]*childRuntime{},
+		shutdownCh:           make(chan struct{}),
+		runtimeActivity:      make(chan struct{}),
+		pendingQuestions:     map[string]pendingChildQuestion{},
+		handledQuestions:     map[string]handledChildQuestion{},
 		childQuestionTimeout: cfg.ChildQuestionTimeout,
-		permOptions:     map[string][]any{},
-		httpServers:     map[string]any{},
-		fileSnapshots:   map[string][]string{},
+		permOptions:          map[string][]any{},
+		httpServers:          map[string]any{},
+		fileSnapshots:        map[string][]string{},
 	}
 	sup.httpServerCond = sync.NewCond(&sup.httpServerMu)
 	if sup.childQuestionTimeout <= 0 {
@@ -628,8 +628,6 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 		if child.cancelFn != nil {
 			child.cancelFn()
 		}
-	}()
-	defer func() {
 		if child.eventWriter != nil {
 			_ = child.eventWriter.Close()
 		}
@@ -664,10 +662,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				ServerURL: serverURL,
 			}
 
-			var resumeID string
-			if prevSessionID != "" {
-				resumeID = prevSessionID
-			}
+			resumeID := prevSessionID
 
 			provider, err := factory.NewProvider(startOpts, backend)
 			if err != nil {
@@ -770,8 +765,6 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 		if child.cancelFn != nil {
 			child.cancelFn()
 		}
-	}()
-	defer func() {
 		if child.eventWriter != nil {
 			_ = child.eventWriter.Close()
 		}
@@ -814,10 +807,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				ServerURL: serverURL,
 			}
 
-			var resumeID string
-			if prevSessionID != "" {
-				resumeID = prevSessionID
-			}
+			resumeID := prevSessionID
 
 			provider, err := factory.NewProvider(startOpts, backend)
 			if err != nil {

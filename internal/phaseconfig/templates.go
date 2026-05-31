@@ -16,6 +16,7 @@ type TemplateContext struct {
 	PrevPhaseCommit string
 	DiffStat        string
 	ChangedFiles    string
+	TeamOutput      string
 }
 
 func RenderPrompt(tmpl string, ctx TemplateContext) (string, error) {

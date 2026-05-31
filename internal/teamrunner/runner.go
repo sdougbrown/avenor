@@ -29,14 +29,14 @@ type NestedResult struct {
 }
 
 type RunOptions struct {
-	WorkDir    string
-	RunID      string
-	EventSink  phaseconfig.EventWriter
-	Config     *TeamConfig
-	MaxRetries int
+	WorkDir      string
+	RunID        string
+	EventSink    phaseconfig.EventWriter
+	Config       *TeamConfig
+	MaxRetries   int
 	PhaseAttempt func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error)
-	NestedRun  func(ctx context.Context, configPath string, runType string) (NestedResult, error)
-	ConfigDir  string
+	NestedRun    func(ctx context.Context, configPath string, runType string) (NestedResult, error)
+	ConfigDir    string
 }
 
 type PhaseAttemptResult struct {
@@ -68,7 +68,7 @@ func Run(ctx context.Context, opts RunOptions) (RunResult, error) {
 	members := buildMemberList(opts.Config.Team, preOutput)
 
 	if len(members) == 0 {
-		if early, err := runSequentialPhases(ctx, opts, opts.Config.Post, "post", &prevPhaseCommit); err != nil {
+		if early, err := runSequentialPhases(ctx, opts, opts.Config.Post, "post", &prevPhaseCommit, ""); err != nil {
 			return RunResult{}, err
 		} else if early != nil {
 			return *early, nil
@@ -77,12 +77,12 @@ func Run(ctx context.Context, opts RunOptions) (RunResult, error) {
 		return RunResult{ExitCode: 0, StopReason: "end_turn"}, nil
 	}
 
-	membersCompleted, membersAborted, result := runTeamMembers(ctx, opts, members, &prevPhaseCommit)
+	membersCompleted, membersAborted, result, teamOutput := runTeamMembers(ctx, opts, members, &prevPhaseCommit)
 	if result != nil {
 		return *result, nil
 	}
 
-	if early, err := runSequentialPhases(ctx, opts, opts.Config.Post, "post", &prevPhaseCommit); err != nil {
+	if early, err := runSequentialPhases(ctx, opts, opts.Config.Post, "post", &prevPhaseCommit, teamOutput); err != nil {
 		return RunResult{}, err
 	} else if early != nil {
 		return *early, nil
@@ -157,7 +157,7 @@ func runPrePhases(ctx context.Context, opts RunOptions, prevCommit *string) (str
 			sessionID = prevSessionID
 		}
 
-		result, err := executePhase(ctx, opts, phase, "pre", sessionID, *prevCommit)
+		result, err := executePhase(ctx, opts, phase, "pre", sessionID, *prevCommit, "")
 		if err != nil {
 			_ = emitTeamEnd(opts.EventSink, opts.RunID, "phase_failure", "", 0, 0)
 			return output.String(), nil, err
@@ -192,7 +192,7 @@ func runPrePhases(ctx context.Context, opts RunOptions, prevCommit *string) (str
 	return output.String(), nil, nil
 }
 
-func runTeamMembers(ctx context.Context, opts RunOptions, members []phaseconfig.Phase, prevCommit *string) (int, int, *RunResult) {
+func runTeamMembers(ctx context.Context, opts RunOptions, members []phaseconfig.Phase, prevCommit *string) (int, int, *RunResult, string) {
 	teamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -212,7 +212,7 @@ func runTeamMembers(ctx context.Context, opts RunOptions, members []phaseconfig.
 		wg.Add(1)
 		go func(idx int, phase phaseconfig.Phase) {
 			defer wg.Done()
-			r, err := executePhase(teamCtx, opts, phase, "team", "", *prevCommit)
+			r, err := executePhase(teamCtx, opts, phase, "team", "", *prevCommit, "")
 			if err != nil {
 				// Internal error (template rendering, event emission failure).
 				// Treat as a non-clean stop so the team result reflects the failure.
@@ -234,6 +234,8 @@ func runTeamMembers(ctx context.Context, opts RunOptions, members []phaseconfig.
 	}
 
 	wg.Wait()
+
+	*prevCommit = phaseconfig.CaptureHeadCommit(opts.WorkDir)
 
 	membersCompleted := 0
 	membersAborted := 0
@@ -262,6 +264,16 @@ func runTeamMembers(ctx context.Context, opts RunOptions, members []phaseconfig.
 		}
 	}
 
+	var memberOutput strings.Builder
+	for _, mr := range results {
+		if mr.result.Output != "" {
+			if memberOutput.Len() > 0 {
+				memberOutput.WriteByte('\n')
+			}
+			memberOutput.WriteString(mr.result.Output)
+		}
+	}
+
 	if abortSeen {
 		_ = emitTeamEnd(opts.EventSink, opts.RunID, "abort", firstAbortLabel, membersCompleted, membersAborted)
 		return membersCompleted, membersAborted, &RunResult{
@@ -269,18 +281,18 @@ func runTeamMembers(ctx context.Context, opts RunOptions, members []phaseconfig.
 			StopReason: "blocked",
 			SessionID:  firstAbortSessionID,
 			Reason:     firstAbortLabel,
-		}
+		}, ""
 	}
 
 	if failureResult != nil {
 		_ = emitTeamEnd(opts.EventSink, opts.RunID, "phase_failure", "", membersCompleted, membersAborted)
-		return membersCompleted, membersAborted, failureResult
+		return membersCompleted, membersAborted, failureResult, ""
 	}
 
-	return membersCompleted, membersAborted, nil
+	return membersCompleted, membersAborted, nil, memberOutput.String()
 }
 
-func runSequentialPhases(ctx context.Context, opts RunOptions, phases []phaseconfig.Phase, kind string, prevCommit *string) (*RunResult, error) {
+func runSequentialPhases(ctx context.Context, opts RunOptions, phases []phaseconfig.Phase, kind string, prevCommit *string, teamOutput string) (*RunResult, error) {
 	var prevSessionID string
 	for _, phase := range phases {
 		if err := ctx.Err(); err != nil {
@@ -293,7 +305,7 @@ func runSequentialPhases(ctx context.Context, opts RunOptions, phases []phasecon
 			sessionID = prevSessionID
 		}
 
-		result, err := executePhase(ctx, opts, phase, kind, sessionID, *prevCommit)
+		result, err := executePhase(ctx, opts, phase, kind, sessionID, *prevCommit, teamOutput)
 		if err != nil {
 			_ = emitTeamEnd(opts.EventSink, opts.RunID, kind+"_failure", "", 0, 0)
 			return nil, err
@@ -327,7 +339,7 @@ func runSequentialPhases(ctx context.Context, opts RunOptions, phases []phasecon
 	return nil, nil
 }
 
-func executePhase(ctx context.Context, opts RunOptions, phase phaseconfig.Phase, kind string, prevSessionID string, prevPhaseCommit string) (result PhaseAttemptResult, rerr error) {
+func executePhase(ctx context.Context, opts RunOptions, phase phaseconfig.Phase, kind string, prevSessionID string, prevPhaseCommit string, teamOutput string) (result PhaseAttemptResult, rerr error) {
 	if phase.LoopFile != "" || phase.TeamFile != "" {
 		if opts.NestedRun == nil {
 			return PhaseAttemptResult{}, fmt.Errorf("team config: phase %q has loop_file or team_file but NestedRun is not configured", phase.Name)
@@ -367,6 +379,7 @@ func executePhase(ctx context.Context, opts RunOptions, phase phaseconfig.Phase,
 		PrevPhaseCommit: prevPhaseCommit,
 		DiffStat:        diffStat,
 		ChangedFiles:    changedFiles,
+		TeamOutput:      teamOutput,
 	}
 
 	rendered, err := phaseconfig.RenderPrompt(phase.Prompt, tmplCtx)
@@ -402,14 +415,7 @@ func executePhase(ctx context.Context, opts RunOptions, phase phaseconfig.Phase,
 		if err != nil {
 			return r, err
 		}
-		// If this attempt succeeded, clear any accumulated directive from
-		// prior failed attempts — a successful retry means the phase completed.
-		// If this attempt would not be retried (success or terminal failure),
-		// clear any accumulated directive from prior failed attempts — the
-		// current attempt's result stands on its own.
-		// Non-retryable result: use this attempt's directive directly,
-		// replacing any accumulated from prior failed attempts.
-		// Retryable failure (code 1): accumulate by severity.
+		// Non-retryable exit takes the current attempt's directive; retryable failure (code 1) accumulates by severity.
 		if r.ExitCode != 1 {
 			accDirective = r.LoopDirective
 			accLabel = r.LoopLabel

@@ -9,6 +9,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/control"
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/permission"
+	"github.com/sdougbrown/avenor/internal/phaseconfig"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/factory"
 )
@@ -143,7 +144,7 @@ func runSingleAttempt(
 		stopReason := result.StopReason
 		cancelEvents()
 
-		if loopDirectiveSeverity(result.LoopDirective) > loopDirectiveSeverity(accDirective) {
+		if phaseconfig.LoopDirectiveSeverity(result.LoopDirective) > phaseconfig.LoopDirectiveSeverity(accDirective) {
 			accDirective = result.LoopDirective
 			accLabel = result.LoopLabel
 		}

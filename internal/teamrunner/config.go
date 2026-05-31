@@ -67,8 +67,6 @@ func (c *TeamConfig) preValidate() error {
 	return nil
 }
 
-
-
 func (c *TeamConfig) Validate() error {
 	if len(c.Pre) == 0 && len(c.Team) == 0 {
 		return fmt.Errorf("team config: at least one of pre or team must be non-empty")
@@ -81,8 +79,6 @@ func (c *TeamConfig) Validate() error {
 		}
 	}
 
-	names := make(map[string]struct{})
-
 	for i := range c.Pre {
 		if c.Pre[i].Name == "" {
 			return fmt.Errorf("team config: phase[index %d]: name must not be empty", i)
@@ -90,23 +86,6 @@ func (c *TeamConfig) Validate() error {
 		if err := phaseconfig.ValidatePhaseHasPrompt(c.Pre[i]); err != nil {
 			return fmt.Errorf("team config: phase[name %s]: %w", c.Pre[i].Name, err)
 		}
-		if c.Pre[i].Prompt != "" && (c.Pre[i].LoopFile != "" || c.Pre[i].TeamFile != "") {
-			return fmt.Errorf("team config: phase[name %s]: prompt is mutually exclusive with loop_file and team_file", c.Pre[i].Name)
-		}
-		if c.Pre[i].PromptFile != "" && (c.Pre[i].LoopFile != "" || c.Pre[i].TeamFile != "") {
-			return fmt.Errorf("team config: phase[name %s]: prompt_file is mutually exclusive with loop_file and team_file", c.Pre[i].Name)
-		}
-		if c.Pre[i].LoopFile != "" && c.Pre[i].TeamFile != "" {
-			return fmt.Errorf("team config: phase[name %s]: loop_file and team_file are mutually exclusive", c.Pre[i].Name)
-		}
-		n := c.Pre[i].Name
-		if n == "(initial)" {
-			return fmt.Errorf("team config: duplicate phase name: \"(initial)\"")
-		}
-		if _, ok := names[n]; ok {
-			return fmt.Errorf("team config: duplicate phase name: %q", n)
-		}
-		names[n] = struct{}{}
 	}
 
 	for i := range c.Team {
@@ -116,23 +95,6 @@ func (c *TeamConfig) Validate() error {
 		if err := phaseconfig.ValidatePhaseHasPrompt(c.Team[i]); err != nil {
 			return fmt.Errorf("team config: phase[name %s]: %w", c.Team[i].Name, err)
 		}
-		if c.Team[i].Prompt != "" && (c.Team[i].LoopFile != "" || c.Team[i].TeamFile != "") {
-			return fmt.Errorf("team config: phase[name %s]: prompt is mutually exclusive with loop_file and team_file", c.Team[i].Name)
-		}
-		if c.Team[i].PromptFile != "" && (c.Team[i].LoopFile != "" || c.Team[i].TeamFile != "") {
-			return fmt.Errorf("team config: phase[name %s]: prompt_file is mutually exclusive with loop_file and team_file", c.Team[i].Name)
-		}
-		if c.Team[i].LoopFile != "" && c.Team[i].TeamFile != "" {
-			return fmt.Errorf("team config: phase[name %s]: loop_file and team_file are mutually exclusive", c.Team[i].Name)
-		}
-		n := c.Team[i].Name
-		if n == "(initial)" {
-			return fmt.Errorf("team config: duplicate phase name: \"(initial)\"")
-		}
-		if _, ok := names[n]; ok {
-			return fmt.Errorf("team config: duplicate phase name: %q", n)
-		}
-		names[n] = struct{}{}
 	}
 
 	for i := range c.Post {
@@ -142,23 +104,10 @@ func (c *TeamConfig) Validate() error {
 		if err := phaseconfig.ValidatePhaseHasPrompt(c.Post[i]); err != nil {
 			return fmt.Errorf("team config: phase[name %s]: %w", c.Post[i].Name, err)
 		}
-		if c.Post[i].Prompt != "" && (c.Post[i].LoopFile != "" || c.Post[i].TeamFile != "") {
-			return fmt.Errorf("team config: phase[name %s]: prompt is mutually exclusive with loop_file and team_file", c.Post[i].Name)
-		}
-		if c.Post[i].PromptFile != "" && (c.Post[i].LoopFile != "" || c.Post[i].TeamFile != "") {
-			return fmt.Errorf("team config: phase[name %s]: prompt_file is mutually exclusive with loop_file and team_file", c.Post[i].Name)
-		}
-		if c.Post[i].LoopFile != "" && c.Post[i].TeamFile != "" {
-			return fmt.Errorf("team config: phase[name %s]: loop_file and team_file are mutually exclusive", c.Post[i].Name)
-		}
-		n := c.Post[i].Name
-		if n == "(initial)" {
-			return fmt.Errorf("team config: duplicate phase name: \"(initial)\"")
-		}
-		if _, ok := names[n]; ok {
-			return fmt.Errorf("team config: duplicate phase name: %q", n)
-		}
-		names[n] = struct{}{}
+	}
+
+	if err := phaseconfig.ValidatePhaseNames(c.Pre, c.Team, c.Post); err != nil {
+		return fmt.Errorf("team config: %w", err)
 	}
 
 	return nil

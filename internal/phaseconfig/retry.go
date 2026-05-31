@@ -2,8 +2,6 @@ package phaseconfig
 
 import "time"
 
-var PhaseRetryAfter = time.After
-
 func BackoffDuration(retry int) time.Duration {
 	d := time.Duration(1<<uint(retry+1)) * time.Second
 	if d > 30*time.Second {
