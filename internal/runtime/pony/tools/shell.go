@@ -13,8 +13,8 @@ import (
 
 // cappedWriter is an io.Writer that stops writing after limit bytes.
 type cappedWriter struct {
-	w     io.Writer
-	limit int
+	w       io.Writer
+	limit   int
 	written int
 }
 
@@ -95,13 +95,15 @@ type ShellTool struct {
 }
 
 type shellInput struct {
-	Command string `json:"command"`
+	Command string   `json:"command,omitempty"`
+	Cmd     string   `json:"cmd,omitempty"`
+	Args    []string `json:"args,omitempty"`
 }
 
 func (t *ShellTool) Name() string { return "shell" }
 
 func (t *ShellTool) Description() string {
-	return fmt.Sprintf("Run a command and return its output. Commands are executed directly (no shell interpreter), so pipes and redirects do not work. Timeout: %ds, output cap: %dKB.",
+	return fmt.Sprintf("Run a command and return its output. Prefer cmd plus args for exact argv execution. The legacy command string supports quote grouping but no shell interpreter, so pipes, redirects, command substitution, and command chaining do not work. Timeout: %ds, output cap: %dKB.",
 		t.cfg.TimeoutSeconds, t.cfg.MaxOutputBytes/1024)
 }
 
@@ -109,12 +111,24 @@ func (t *ShellTool) Schema() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",
 		"properties": {
+			"cmd": {
+				"type": "string",
+				"description": "Executable to run directly (preferred, e.g. rg)"
+			},
+			"args": {
+				"type": "array",
+				"items": {"type": "string"},
+				"description": "Arguments passed exactly as argv to cmd"
+			},
 			"command": {
 				"type": "string",
-				"description": "Command to run (e.g. go build ./... or git status)"
+				"description": "Legacy command string. Quotes group arguments, but shell operators like |, >, <, &&, ||, $(), and backticks are rejected."
 			}
 		},
-		"required": ["command"]
+		"oneOf": [
+			{"required": ["cmd"]},
+			{"required": ["command"]}
+		]
 	}`)
 }
 
@@ -123,15 +137,9 @@ func (t *ShellTool) Execute(ctx context.Context, workingDir string, args json.Ra
 	if err := json.Unmarshal(args, &input); err != nil {
 		return "", fmt.Errorf("shell: invalid args: %w", err)
 	}
-	if input.Command == "" {
-		return "", fmt.Errorf("shell: command is required")
-	}
-
-	// Split into command + args. No shell interpreter is involved — the binary
-	// is executed directly. This prevents shell injection entirely.
-	parts := strings.Fields(input.Command)
-	if len(parts) == 0 {
-		return "", fmt.Errorf("shell: command is required")
+	parts, err := input.argv()
+	if err != nil {
+		return "", err
 	}
 	if !t.isCommandAllowed(parts[0]) {
 		return "", fmt.Errorf("shell: command %q is not in the allowed list", parts[0])
@@ -177,4 +185,145 @@ func (t *ShellTool) isCommandAllowed(cmd string) bool {
 		}
 	}
 	return false
+}
+
+func (input shellInput) argv() ([]string, error) {
+	hasCommand := strings.TrimSpace(input.Command) != ""
+	hasCmd := strings.TrimSpace(input.Cmd) != ""
+	if hasCommand && hasCmd {
+		return nil, fmt.Errorf("shell: provide either cmd/args or command, not both")
+	}
+	if hasCmd {
+		if err := validateArgv(input.Cmd, input.Args); err != nil {
+			return nil, err
+		}
+		return append([]string{input.Cmd}, input.Args...), nil
+	}
+	if !hasCommand {
+		return nil, fmt.Errorf("shell: command is required")
+	}
+
+	words, err := parseShellWords(input.Command)
+	if err != nil {
+		return nil, fmt.Errorf("shell: %w", err)
+	}
+	if len(words) == 0 {
+		return nil, fmt.Errorf("shell: command is required")
+	}
+	for _, word := range words {
+		if err := validateLegacyWord(word); err != nil {
+			return nil, err
+		}
+	}
+	parts := make([]string, len(words))
+	for i, word := range words {
+		parts[i] = word.Text
+	}
+	return parts, nil
+}
+
+func validateArgv(cmd string, args []string) error {
+	if strings.TrimSpace(cmd) == "" {
+		return fmt.Errorf("shell: cmd is required")
+	}
+	if isShellOperator(cmd) || looksLikeRedirection(cmd) || containsShellMetachar(cmd) ||
+		strings.Contains(cmd, "$(") || strings.Contains(cmd, "`") {
+		return unsupportedShellSyntaxError(cmd)
+	}
+	return nil
+}
+
+func validateLegacyWord(word shellWord) error {
+	if word.Quoted {
+		return nil
+	}
+	if isShellOperator(word.Text) || looksLikeRedirection(word.Text) || containsShellMetachar(word.Text) ||
+		strings.Contains(word.Text, "$(") || strings.Contains(word.Text, "`") {
+		return unsupportedShellSyntaxError(word.Text)
+	}
+	return nil
+}
+
+func unsupportedShellSyntaxError(token string) error {
+	return fmt.Errorf("shell: unsupported shell syntax %q. Pony shell executes commands directly and does not support shell operators like |, >, <, &&, ||, $(), or backticks. Use separate tool calls or pass argv via cmd/args", token)
+}
+
+func isShellOperator(token string) bool {
+	switch token {
+	case "|", ">", "<", ">>", "<<", "&&", "||", ";":
+		return true
+	default:
+		return false
+	}
+}
+
+func containsShellMetachar(token string) bool {
+	return strings.ContainsAny(token, "|<>;") || strings.Contains(token, "&&") || strings.Contains(token, "||")
+}
+
+func looksLikeRedirection(token string) bool {
+	if token == "" {
+		return false
+	}
+	i := 0
+	for i < len(token) && token[i] >= '0' && token[i] <= '9' {
+		i++
+	}
+	if i >= len(token) {
+		return false
+	}
+	return token[i] == '>' || token[i] == '<'
+}
+
+type shellWord struct {
+	Text   string
+	Quoted bool
+}
+
+func parseShellWords(command string) ([]shellWord, error) {
+	var words []shellWord
+	var b strings.Builder
+	var quote byte
+	inWord := false
+	quoted := false
+
+	flush := func() {
+		if !inWord {
+			return
+		}
+		words = append(words, shellWord{Text: b.String(), Quoted: quoted})
+		b.Reset()
+		inWord = false
+		quoted = false
+	}
+
+	for i := 0; i < len(command); i++ {
+		c := command[i]
+		if quote == 0 && (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+			flush()
+			continue
+		}
+		inWord = true
+		switch {
+		case quote == 0 && (c == '\'' || c == '"'):
+			quote = c
+			quoted = true
+		case quote != 0 && c == quote:
+			quote = 0
+		case c == '\\' && quote != '\'':
+			if i+1 >= len(command) {
+				b.WriteByte(c)
+				continue
+			}
+			i++
+			b.WriteByte(command[i])
+		default:
+			b.WriteByte(c)
+		}
+	}
+	if quote != 0 {
+		return nil, fmt.Errorf("unterminated quote in command")
+	}
+	flush()
+	return words, nil
 }

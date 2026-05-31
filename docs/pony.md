@@ -90,7 +90,7 @@ Enabled via `"local": true`. These allow the agent to interact with the local fi
 - `glob`: Match file patterns.
 - `grep`: Search file contents.
 - `list_dir`: List directory contents.
-- `shell`: Execute shell commands.
+- `shell`: Execute commands directly. Prefer `cmd` plus `args` for exact argv execution; legacy `command` strings support quote grouping but reject shell operators such as `|`, `>`, `<`, `&&`, `||`, `$()`, and backticks.
 
 ### Orchestration Tools
 Enabled via `"orchestration": true`. These allow a **jockey** agent to manage child agents:

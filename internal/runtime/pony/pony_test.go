@@ -87,21 +87,19 @@ func (f *fakeAdapter) Stream(ctx context.Context, req model.Request) (<-chan mod
 	return ch, nil
 }
 
-
-
 // fakeExecutor implements OrchestratorExecutor for orchestration tool tests.
 type fakeExecutor struct {
-	spawnCalled    int
-	sendCalled     int
-	lastRequestID  string
-	statusCalled   int
-	waitCalled     int
+	spawnCalled        int
+	sendCalled         int
+	lastRequestID      string
+	statusCalled       int
+	waitCalled         int
 	sendToParentCalled int
-	spawnDelay     time.Duration
-	waitDone       bool
-	waitErr        error
-	spawnID        string
-	getStatusResp  map[string]any
+	spawnDelay         time.Duration
+	waitDone           bool
+	waitErr            error
+	spawnID            string
+	getStatusResp      map[string]any
 }
 
 func (f *fakeExecutor) SpawnAgent(ctx context.Context, params map[string]any) (string, error) {
@@ -154,7 +152,6 @@ func (f *fakeExecutor) SendToParent(ctx context.Context, runtimeID, message stri
 	f.sendToParentCalled++
 	return nil
 }
-
 
 // ── RunLoop tests ────────────────────────────────────────────────────────────
 
@@ -277,7 +274,6 @@ func TestRunLoop_textToolCalls_stop(t *testing.T) {
 		t.Errorf("tool_call_id = %q, want %q", toolMsg.ToolCallID, "tc1")
 	}
 }
-
 
 func TestRunLoop_toolExecuteError(t *testing.T) {
 	ctx := context.Background()
@@ -616,7 +612,6 @@ func TestRunLoop_stopConditionOnToolCalls(t *testing.T) {
 	}
 }
 
-
 // ── LoopWithRetry tests ──────────────────────────────────────────────────────
 
 func TestLoopWithRetry_succeedsFirstAttempt(t *testing.T) {
@@ -747,7 +742,6 @@ func TestLoopWithRetry_contextCancelledDuringBackoff(t *testing.T) {
 	}
 }
 
-
 // ── Provider tests ───────────────────────────────────────────────────────────
 
 func TestProvider_Capabilities(t *testing.T) {
@@ -770,13 +764,45 @@ func TestProvider_Capabilities(t *testing.T) {
 	}
 }
 
+func TestSystemPromptWithToolInstructions(t *testing.T) {
+	t.Run("no tools keeps base prompt unchanged", func(t *testing.T) {
+		got := systemPromptWithToolInstructions("You are helpful.", false, false)
+		if got != "You are helpful." {
+			t.Fatalf("prompt = %q", got)
+		}
+	})
+
+	t.Run("local tools add terse shell guidance", func(t *testing.T) {
+		got := systemPromptWithToolInstructions("You are helpful.", true, false)
+		if !strings.Contains(got, "You are helpful.") {
+			t.Fatalf("prompt missing base: %q", got)
+		}
+		if !strings.Contains(got, "For shell, prefer cmd plus args") {
+			t.Fatalf("prompt missing shell argv guidance: %q", got)
+		}
+		if strings.Contains(got, "spawn_agents") {
+			t.Fatalf("prompt unexpectedly included orchestration guidance: %q", got)
+		}
+	})
+
+	t.Run("orchestration tools add orchestration guidance", func(t *testing.T) {
+		got := systemPromptWithToolInstructions("", false, true)
+		if !strings.Contains(got, "spawn_agents") || !strings.Contains(got, "wait_for_done") {
+			t.Fatalf("prompt missing orchestration guidance: %q", got)
+		}
+		if strings.Contains(got, "For shell") {
+			t.Fatalf("prompt unexpectedly included local tool guidance: %q", got)
+		}
+	})
+}
+
 func TestProvider_Start(t *testing.T) {
 	ctx := context.Background()
 	p := New(Config{
-		Model:           "test-model",
-		SystemPrompt:    "You are helpful.",
-		InitialPrompt:   "Hello!",
-		WorkingDir:      "/tmp",
+		Model:         "test-model",
+		SystemPrompt:  "You are helpful.",
+		InitialPrompt: "Hello!",
+		WorkingDir:    "/tmp",
 	})
 
 	session, err := p.Start(ctx, runtime.StartOptions{Dir: "/test"})
@@ -896,7 +922,6 @@ func TestProvider_Events_unknownSession(t *testing.T) {
 	}
 }
 
-
 func TestProvider_Start_withAgentsMD(t *testing.T) {
 	ctx := context.Background()
 	tmpDir := t.TempDir()
@@ -1002,7 +1027,6 @@ func TestProvider_NewWithOptions_noGlobalConfig(t *testing.T) {
 		t.Errorf("working dir = %q, want %q", gotCfg.WorkingDir, "/d")
 	}
 }
-
 
 // ── Orchestration tools tests ────────────────────────────────────────────────
 
@@ -1186,7 +1210,6 @@ func TestOrchestrationTools_sendToParentMissingMessage(t *testing.T) {
 		t.Fatal("expected error for missing message, got nil")
 	}
 }
-
 
 // ── e2e tool with real file read ─────────────────────────────────────────────
 

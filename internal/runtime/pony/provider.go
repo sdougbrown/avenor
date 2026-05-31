@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -25,20 +26,20 @@ var RuntimeIDKey = &runtimeIDKey{}
 
 // Config configures the pony provider.
 type Config struct {
-	Adapter        model.Adapter
-	Model          string
-	MaxTokens      int
-	SystemPrompt   string
-	InitialPrompt  string
-	Executor       OrchestratorExecutor // nil when OrchTools is false
-	LocalTools     bool
-	OrchTools      bool
-	WorkingDir     string // for AGENTS.md discovery
-	InjectAgentsMD bool
-	AllowedReadDirs  []string         // additional directories read tools may access (e.g. skills)
-	AllowedWriteDirs []string         // additional directories write tools may access
-	ToolApproval     map[string]bool  // tool name → requires approval
-	ShellConfig      *ShellConfig     // overrides for shell tool
+	Adapter          model.Adapter
+	Model            string
+	MaxTokens        int
+	SystemPrompt     string
+	InitialPrompt    string
+	Executor         OrchestratorExecutor // nil when OrchTools is false
+	LocalTools       bool
+	OrchTools        bool
+	WorkingDir       string // for AGENTS.md discovery
+	InjectAgentsMD   bool
+	AllowedReadDirs  []string        // additional directories read tools may access (e.g. skills)
+	AllowedWriteDirs []string        // additional directories write tools may access
+	ToolApproval     map[string]bool // tool name → requires approval
+	ShellConfig      *ShellConfig    // overrides for shell tool
 	// Registry is internal; built from tool config.
 	toolRegistry *tools.Registry
 
@@ -66,6 +67,24 @@ type Provider struct {
 }
 
 var _ runtime.Provider = (*Provider)(nil)
+
+const localToolInstructions = "Tool use: use tools when they are the direct way to inspect or change local state. For shell, prefer cmd plus args for exact argv execution; do not use pipes, redirects, command chaining, command substitution, or backticks in legacy command strings."
+
+const orchestrationToolInstructions = "Orchestration: use spawn_agents for independent parallel child work, send_prompt for follow-ups, and wait_for_done to collect child results."
+
+func systemPromptWithToolInstructions(base string, localTools, orchTools bool) string {
+	var parts []string
+	if strings.TrimSpace(base) != "" {
+		parts = append(parts, base)
+	}
+	if localTools {
+		parts = append(parts, localToolInstructions)
+	}
+	if orchTools {
+		parts = append(parts, orchestrationToolInstructions)
+	}
+	return strings.Join(parts, "\n\n")
+}
 
 // New creates a new pony provider with the given config.
 func New(cfg Config) *Provider {
@@ -153,10 +172,10 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	ss.runtimeID = opts.RuntimeID
 
 	// 1. System prompt
-	if p.cfg.SystemPrompt != "" {
+	if systemPrompt := systemPromptWithToolInstructions(p.cfg.SystemPrompt, p.cfg.LocalTools, p.cfg.OrchTools && p.cfg.Executor != nil); systemPrompt != "" {
 		ss.history = append(ss.history, model.Message{
 			Role:    model.RoleSystem,
-			Content: p.cfg.SystemPrompt,
+			Content: systemPrompt,
 		})
 	}
 
