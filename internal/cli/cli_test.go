@@ -2800,3 +2800,41 @@ func TestWaitForSessionAccumulatesAgentMessageOutput(t *testing.T) {
 		t.Fatalf("Output = %q, want assistant output only", result.Output)
 	}
 }
+
+func TestWaitForSessionAccumulatesDeltaAgentMessageOutput(t *testing.T) {
+	eventCh := make(chan events.Event, 3)
+	eventCh <- events.Event{
+		Event:     "agent.message_chunk",
+		SessionID: "ses_output",
+		Fields: map[string]any{
+			"delta": "[team: skip | security-reviewer]",
+		},
+	}
+	eventCh <- events.Event{
+		Event:     "agent.thought_chunk",
+		SessionID: "ses_output",
+		Fields: map[string]any{
+			"delta": "internal reasoning",
+		},
+	}
+	eventCh <- events.Event{
+		Event:     "session.end",
+		SessionID: "ses_output",
+		Fields:    map[string]any{"stop_reason": "end_turn"},
+	}
+	close(eventCh)
+
+	promptDone := make(chan error, 1)
+	promptDone <- nil
+
+	writer, err := NewEventWriter("")
+	if err != nil {
+		t.Fatalf("NewEventWriter(\"\") error = %v", err)
+	}
+	defer writer.Close()
+
+	result := waitForSessionForTest(context.Background(), &cliFakeProvider{}, writer, nil, nil, eventCh, promptDone, nil, "ses_output", "run_output", "", true, DefaultPermissionClaimTimeout, nil, io.Discard)
+	if result.Output != "[team: skip | security-reviewer]" {
+		t.Fatalf("Output = %q, want delta assistant output only", result.Output)
+	}
+}

@@ -112,10 +112,13 @@ func (s *statusTracker) ObserveMarker(phase, label string) (events.Event, bool) 
 // chunkText extracts the plain text from an agent or user message chunk event.
 func chunkText(ev events.Event) string {
 	content, ok := ev.Fields["content"].(map[string]any)
-	if !ok {
-		return ""
+	if ok {
+		text, _ := content["text"].(string)
+		if text != "" {
+			return text
+		}
 	}
-	text, _ := content["text"].(string)
+	text, _ := ev.Fields["delta"].(string)
 	return text
 }
 

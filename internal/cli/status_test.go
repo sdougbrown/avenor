@@ -239,6 +239,21 @@ func TestChunkText(t *testing.T) {
 			want: "hello world",
 		},
 		{
+			name: "delta fallback",
+			ev: makeEvent("agent.message_chunk", map[string]any{
+				"delta": "hello from delta",
+			}),
+			want: "hello from delta",
+		},
+		{
+			name: "content wins over delta",
+			ev: makeEvent("agent.message_chunk", map[string]any{
+				"content": map[string]any{"text": "preferred", "type": "text"},
+				"delta":   "ignored",
+			}),
+			want: "preferred",
+		},
+		{
 			name: "missing content",
 			ev:   makeEvent("agent.message_chunk", nil),
 			want: "",
