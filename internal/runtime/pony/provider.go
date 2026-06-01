@@ -81,6 +81,8 @@ const localToolInstructions = "Tool use: use tools when they are the direct way 
 
 const orchestrationToolInstructions = "Orchestration: use spawn_agents for independent parallel child work, send_prompt for follow-ups, and wait_for_done to collect child results."
 
+const compactionInstructions = "Context management: to keep your context window from overflowing, tool results from older turns are compacted into summaries (marked with [compacted: ...] or [tool result too large: ...]). The most recent ~16K tokens of history are always kept intact. If you need content from a compacted result, re-read the file at a different offset. file_read also returns a reminder instead of re-reading content you've already seen more than twice."
+
 func systemPromptWithToolInstructions(base string, localTools, orchTools bool) string {
 	var parts []string
 	if strings.TrimSpace(base) != "" {
@@ -88,6 +90,7 @@ func systemPromptWithToolInstructions(base string, localTools, orchTools bool) s
 	}
 	if localTools {
 		parts = append(parts, localToolInstructions)
+		parts = append(parts, compactionInstructions)
 	}
 	if orchTools {
 		parts = append(parts, orchestrationToolInstructions)

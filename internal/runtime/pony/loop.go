@@ -67,11 +67,12 @@ func SetCompactionThreshold(bytes int) {
 // results (file reads of patches/source) are the ones that cause overflow.
 const oldResultMinBytes = 2 << 10 // 2 KB
 
-// keepRecentTurns is the number of most recent assistant turns whose tool
-// results are kept intact. The model needs a working set to reason across
-// without re-reading files it just saw. Compacting too eagerly causes
-// recall-loss loops.
-const keepRecentTurns = 3
+// keepRecentTokens is the approximate number of tokens of recent history
+// protected from compaction. Tool results within this window are kept intact
+// so the model has working context. At ~4 bytes/token, 16K tokens ≈ 64 KB.
+// This replaces the turn-based window; OpenCode uses a similar 40K-token
+// protection window for tool output pruning.
+const keepRecentTokens = 16 * 1024
 
 // compactPreviewLen is the number of bytes kept from the start of a compacted
 // tool result as a content preview, so the model retains some context about
@@ -79,26 +80,25 @@ const keepRecentTurns = 3
 const compactPreviewLen = 200
 
 // compactOldToolResults compacts large tool result messages from turns the model
-// has finished reasoning about. Tool results from the last keepRecentTurns
-// assistant responses are left intact. Older results exceeding oldResultMinBytes
-// are replaced with a size summary and a short content preview.
+// has finished reasoning about. The most recent keepRecentTokens worth of
+// history (~16K tokens) is protected from compaction. Older results exceeding
+// oldResultMinBytes are replaced with a size summary and content preview.
 //
 // Returns the number of results compacted and total bytes removed.
 func compactOldToolResults(history []model.Message) (compacted int, bytesSaved int) {
-	// Find the Nth-from-last assistant message. Tool results before this
-	// are from turns old enough to compact safely.
-	cutoff := 0
-	count := 0
+	// Protect the most recent keepRecentTokens tokens (~4 bytes/token) of history.
+	// Walk backwards accumulating bytes until we hit the protection limit.
+	protectBytes := keepRecentTokens * 4
+	protected := 0
+	cutoff := len(history)
 	for i := len(history) - 1; i >= 0; i-- {
-		if history[i].Role == model.RoleAssistant {
-			count++
-			if count >= keepRecentTurns {
-				cutoff = i
-				break
-			}
+		protected += len(history[i].Content)
+		cutoff = i
+		if protected >= protectBytes {
+			break
 		}
 	}
-	// Fewer than keepRecentTurns assistant messages exist; nothing is old enough.
+	// Entire history fits in the protection window; nothing to compact.
 	if cutoff == 0 {
 		return 0, 0
 	}
