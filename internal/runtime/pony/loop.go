@@ -35,26 +35,24 @@ type LoopRunState struct {
 // permission is granted or denied. Returns true if approved, false if denied.
 type ApprovalChecker func(ctx context.Context, toolName string, eventCh chan<- events.Event) (bool, error)
 
-// defaultCompactionThreshold is the default soft limit for total conversation
-// history size before compaction kicks in. At 80 KB and ~4 chars/token, this is
-// ~20K tokens — well within even small (32K) context windows and leaves room
-// for output generation. Override per-model via SetCompactionThreshold.
+// defaultCompactionThreshold is the fallback soft limit for conversation history
+// size before request-level compaction kicks in. At 80 KB and ~4 chars/token,
+// this is ~20K tokens. Per-turn compaction (compactOldToolResults) handles the
+// steady state; this safety net catches unusually large single turns that slip
+// through. Override per-model via SetCompactionThreshold from the profile Context.
 const defaultCompactionThreshold = 80 << 10 // 80 KB
 
-// compactionThreshold is the active limit. Set via SetCompactionThreshold during
-// config wiring, or via the pony config profile's Context field.
-// Defaults to 80 KB if never set. Uses atomic for safe concurrent access
-// between config-setup and loop execution.
+// compactionThreshold is the active limit for compactForRequest. Uses atomic
+// for safe concurrent access between config-setup and loop execution.
 var compactionThreshold atomic.Int64
 
 func init() {
 	compactionThreshold.Store(defaultCompactionThreshold)
 }
 
-// SetCompactionThreshold overrides the history compaction byte threshold.
+// SetCompactionThreshold overrides the byte threshold for compactForRequest.
 // Values <= 0 reset to the default (80 KB). Called from New() which derives
 // the byte value from the profile's Context field (tokens × bytesPerToken).
-// Safe to call concurrently with active RunLoop calls.
 func SetCompactionThreshold(bytes int) {
 	if bytes <= 0 {
 		compactionThreshold.Store(defaultCompactionThreshold)
@@ -63,51 +61,69 @@ func SetCompactionThreshold(bytes int) {
 	compactionThreshold.Store(int64(bytes))
 }
 
-// compactHistory truncates old tool result messages when the total history byte
-// size exceeds the compaction threshold. It keeps system messages, user messages,
-// and assistant messages intact. Only tool results outside the protected trailing
-// window (half the budget) are truncated. Returns a copy of history with
-// truncations applied, or the original slice if no compaction is needed.
-func compactHistory(history []model.Message) []model.Message {
-	threshold := int(compactionThreshold.Load())
+// oldResultMinBytes is the minimum tool result size to compact per-turn.
+// Results below this (grep/glob/small shell outputs) are preserved indefinitely
+// since they're cheap context the model may reference across turns. Large
+// results (file reads of patches/source) are the ones that cause overflow.
+const oldResultMinBytes = 2 << 10 // 2 KB
+
+// compactOldToolResults compacts large tool result messages from turns the model
+// has already consumed. After the assistant produces a new response, tool results
+// from prior turns that exceed oldResultMinBytes are summarized in-place.
+// Current-turn results (after the most recent assistant message) and small
+// results are left intact.
+func compactOldToolResults(history []model.Message) {
+	lastAssistant := -1
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Role == model.RoleAssistant {
+			lastAssistant = i
+			break
+		}
+	}
+	if lastAssistant < 0 {
+		return
+	}
+	for i := 0; i < lastAssistant; i++ {
+		if history[i].Role == model.RoleTool && len(history[i].Content) > oldResultMinBytes {
+			history[i].Content = fmt.Sprintf("[old tool result: was %d bytes]", len(history[i].Content))
+		}
+	}
+}
+
+// compactForRequest creates a copy of history suitable for the model request.
+// If total byte size exceeds the threshold, it compacts the oldest tool results
+// to bring it under the limit. Returns a copy (never mutates the original).
+// This is a safety net for unusually large single turns; steady-state compaction
+// is handled by compactOldToolResults.
+func compactForRequest(history []model.Message, thresholdBytes int) []model.Message {
+	if thresholdBytes <= 0 {
+		return history
+	}
 	total := 0
 	for _, msg := range history {
 		total += len(msg.Content)
 	}
-	if total <= threshold {
+	if total <= thresholdBytes {
 		return history
 	}
 
-	// Work backwards to find the cutoff: the most recent messages up to
-	// half the budget are protected. Tool results before the cutoff get
-	// their content replaced with a size summary.
-	protectedBudget := threshold / 2
-	remaining := protectedBudget
+	// Protect the most recent messages up to half the threshold.
+	// Tool results before that window get compacted.
+	protected := thresholdBytes / 2
+	remaining := protected
 	cutoff := len(history)
 	for i := len(history) - 1; i >= 0 && remaining > 0; i-- {
 		remaining -= len(history[i].Content)
 		cutoff = i
 	}
 
-	// Guarantee at least one tool result is truncated when over threshold.
-	// Without this, the protected window can cover all messages and no
-	// compaction occurs, causing unbounded history growth.
-	if cutoff == 0 {
-		for i := 0; i < len(history); i++ {
-			if history[i].Role == model.RoleTool && len(history[i].Content) > 200 {
-				cutoff = i + 1
-				break
-			}
-		}
-	}
-
 	compacted := make([]model.Message, len(history))
 	for i, msg := range history {
-		if i < cutoff && msg.Role == model.RoleTool && len(msg.Content) > 200 {
+		if i < cutoff && msg.Role == model.RoleTool && len(msg.Content) > 0 {
 			compacted[i] = model.Message{
 				Role:       msg.Role,
 				ToolCallID: msg.ToolCallID,
-				Content:    fmt.Sprintf("[tool result truncated: was %d bytes]", len(msg.Content)),
+				Content:    fmt.Sprintf("[tool result too large: was %d bytes]", len(msg.Content)),
 			}
 		} else {
 			compacted[i] = msg
@@ -144,11 +160,12 @@ func RunLoop(
 
 turnLoop:
 	for turn := 0; ; turn++ {
-		compact := compactHistory(history)
+		// Copy with threshold safety net for unusually large single turns.
+		messages := compactForRequest(history, int(compactionThreshold.Load()))
 
 		req := model.Request{
 			Model:     modelName,
-			Messages:  compact,
+			Messages:  messages,
 			Tools:     toolDefs,
 			Stream:    true,
 			MaxTokens: maxTokens,
@@ -167,6 +184,7 @@ turnLoop:
 			case <-ctx.Done():
 				msg := buildAssistantMsg(assistantContent.String(), nil)
 				history = append(history, msg)
+				compactOldToolResults(history)
 				return history, "error", ctx.Err()
 			default:
 			}
@@ -205,12 +223,14 @@ turnLoop:
 				case "stop":
 					msg := buildAssistantMsg(assistantContent.String(), accumulators)
 					history = append(history, msg)
+					compactOldToolResults(history)
 					emit(eventCh, "session.end", map[string]any{"stop_reason": "end_turn"})
 					return history, "end_turn", nil
 
 				case "tool_calls":
 					msg := buildAssistantMsg(assistantContent.String(), accumulators)
 					history = append(history, msg)
+					compactOldToolResults(history)
 
 					// Sort by index for deterministic execution order
 					indices := make([]int, 0, len(accumulators))
@@ -247,12 +267,14 @@ turnLoop:
 				case "length":
 					msg := buildAssistantMsg(assistantContent.String(), nil)
 					history = append(history, msg)
+					compactOldToolResults(history)
 					emit(eventCh, "session.end", map[string]any{"stop_reason": "max_tokens"})
 					return history, "max_tokens", nil
 
 				default:
 					msg := buildAssistantMsg(assistantContent.String(), nil)
 					history = append(history, msg)
+					compactOldToolResults(history)
 					emit(eventCh, "session.end", map[string]any{"stop_reason": finish.Reason})
 					return history, finish.Reason, nil
 				}
@@ -274,6 +296,7 @@ turnLoop:
 		if assistantContent.Len() > 0 || len(accumulators) > 0 {
 			msg := buildAssistantMsg(assistantContent.String(), accumulators)
 			history = append(history, msg)
+			compactOldToolResults(history)
 		}
 		return history, "error", fmt.Errorf("stream ended unexpectedly")
 	}
