@@ -294,6 +294,21 @@ func compactForRequest(ctx context.Context, adapter model.Adapter, modelName str
 	return compactedHistory{messages: messages, compacted: compacted, bytesSaved: bytesSaved}
 }
 
+// maxConsecutiveErrors is the absolute limit — after this many consecutive
+// identical tool call errors, the loop aborts unconditionally. Before that,
+// recovery nudges are injected at errorNudgeThreshold and errorFinalNudgeThreshold.
+const maxConsecutiveErrors = 20
+
+// errorNudgeThreshold is the first intervention point. After this many
+// consecutive identical errors, a recovery message is injected into the
+// conversation to prompt the model to change course.
+const errorNudgeThreshold = 3
+
+// errorFinalNudgeThreshold is the last-chance warning. After this many
+// consecutive identical errors, a stronger message urges the model to
+// produce findings with what it has rather than keep retrying.
+const errorFinalNudgeThreshold = 10
+
 // RunLoop drives the multi-turn loop until a stop condition or terminal condition.
 //
 // It sends the history + tool defs to the adapter each turn, processes streamed
@@ -319,6 +334,10 @@ func RunLoop(
 ) ([]model.Message, string, error) {
 
 	toolDefs := buildToolDefs(reg)
+	var (
+		lastErrorKey         string // "toolName:errorMessage" of last failed tool call
+		consecutiveErrors    int    // how many times lastErrorKey has repeated
+	)
 
 turnLoop:
 	for turn := 0; ; turn++ {
@@ -419,8 +438,45 @@ turnLoop:
 						}
 						if err != nil {
 							toolResult.Content = fmt.Sprintf("Error: %v", err)
+							errKey := acc.name + ":" + err.Error()
+							if errKey == lastErrorKey {
+								consecutiveErrors++
+							} else {
+								lastErrorKey = errKey
+								consecutiveErrors = 1
+							}
+						} else {
+							lastErrorKey = ""
+							consecutiveErrors = 0
 						}
 						history = append(history, toolResult)
+					}
+
+					if consecutiveErrors == errorNudgeThreshold {
+						history = append(history, model.Message{
+							Role:    model.RoleUser,
+							Content: fmt.Sprintf("[System notice: you have made the same tool call error %d times in a row (%s). The arguments you are passing are not valid. Check the tool schema for required parameters, then either fix your call or move on to a different approach.]", consecutiveErrors, lastErrorKey),
+						})
+						emit(eventCh, "avenor.error_nudge", map[string]any{
+							"consecutive_errors": consecutiveErrors,
+							"error_key":          lastErrorKey,
+						})
+					}
+					if consecutiveErrors == errorFinalNudgeThreshold {
+						history = append(history, model.Message{
+							Role:    model.RoleUser,
+							Content: fmt.Sprintf("[Final warning: you have made the same error %d times. Stop retrying this call. Produce your best output with the information you already have, or request guidance if you are stuck.]", consecutiveErrors),
+						})
+						emit(eventCh, "avenor.error_nudge", map[string]any{
+							"consecutive_errors": consecutiveErrors,
+							"error_key":          lastErrorKey,
+							"final":              true,
+						})
+					}
+
+					if consecutiveErrors >= maxConsecutiveErrors {
+						emit(eventCh, "session.end", map[string]any{"stop_reason": "consecutive_errors"})
+						return history, "consecutive_errors", fmt.Errorf("aborting after %d consecutive identical tool errors: %s", consecutiveErrors, lastErrorKey)
 					}
 
 					state := LoopRunState{
