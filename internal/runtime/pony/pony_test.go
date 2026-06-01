@@ -49,12 +49,11 @@ type fakeAdapter struct {
 	chunks          []model.Chunk
 	chunkDelay      time.Duration
 	callCount       int
+	streamCount     atomic.Int64
 	mutualExclusion bool // when true, use atomic counter for thread-safe call counting
 	streamFunc      func(ctx context.Context, req model.Request) (<-chan model.Chunk, error)
 	onStream        func() // called when Stream is invoked (for synchronization)
 }
-
-var adapterCallCount int64
 
 func (f *fakeAdapter) Name() string { return "fake" }
 
@@ -63,7 +62,7 @@ func (f *fakeAdapter) Stream(ctx context.Context, req model.Request) (<-chan mod
 		return f.streamFunc(ctx, req)
 	}
 	if f.mutualExclusion {
-		atomic.AddInt64(&adapterCallCount, 1)
+		f.streamCount.Add(1)
 	} else {
 		f.callCount++
 	}
@@ -639,8 +638,8 @@ func TestLoopWithRetry_succeedsFirstAttempt(t *testing.T) {
 	if len(history) != 2 {
 		t.Errorf("history length = %d, want 2", len(history))
 	}
-	if atomic.LoadInt64(&adapterCallCount) != 1 {
-		t.Errorf("call count = %d, want 1", atomic.LoadInt64(&adapterCallCount))
+	if adapter.streamCount.Load() != 1 {
+		t.Errorf("call count = %d, want 1", adapter.streamCount.Load())
 	}
 }
 

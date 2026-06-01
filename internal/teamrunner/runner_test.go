@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -50,6 +51,7 @@ func TestRunHappyPath(t *testing.T) {
 	)
 
 	var order []string
+	var orderMu sync.Mutex
 	sink := &recordingEventWriter{}
 	result, err := Run(context.Background(), RunOptions{
 		WorkDir:   t.TempDir(),
@@ -57,7 +59,9 @@ func TestRunHappyPath(t *testing.T) {
 		EventSink: sink,
 		Config:    cfg,
 		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
+			orderMu.Lock()
 			order = append(order, phase.Name)
+			orderMu.Unlock()
 			return PhaseAttemptResult{ExitCode: 0, SessionID: phase.Name + "-session"}, nil
 		},
 	})
@@ -132,6 +136,7 @@ func TestRunAbortInTeamMember(t *testing.T) {
 	cfg := makeConfig(nil, []phaseconfig.Phase{simplePhase("security", "review"), simplePhase("style", "review")}, nil)
 
 	var executed []string
+	var executedMu sync.Mutex
 	sink := &recordingEventWriter{}
 	result, err := Run(context.Background(), RunOptions{
 		WorkDir:   t.TempDir(),
@@ -139,7 +144,9 @@ func TestRunAbortInTeamMember(t *testing.T) {
 		EventSink: sink,
 		Config:    cfg,
 		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
+			executedMu.Lock()
 			executed = append(executed, phase.Name)
+			executedMu.Unlock()
 			if phase.Name == "security" {
 				return PhaseAttemptResult{
 					ExitCode:      5,
@@ -184,13 +191,16 @@ func TestRunMemberFailureDoesNotCancelPeers(t *testing.T) {
 	cfg := makeConfig(nil, []phaseconfig.Phase{simplePhase("security", "review"), simplePhase("style", "review")}, nil)
 
 	var executed []string
+	var executedMu sync.Mutex
 	result, err := Run(context.Background(), RunOptions{
 		WorkDir:   t.TempDir(),
 		RunID:     "test-run",
 		EventSink: discardEventWriter{},
 		Config:    cfg,
 		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
+			executedMu.Lock()
 			executed = append(executed, phase.Name)
+			executedMu.Unlock()
 			if phase.Name == "security" {
 				return PhaseAttemptResult{ExitCode: 2, StopReason: "refusal", SessionID: "sec-s"}, nil
 			}
