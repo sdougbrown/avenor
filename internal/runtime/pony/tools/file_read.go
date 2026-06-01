@@ -5,9 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sync"
 )
 
 const defaultFileReadBytes = 12 << 10 // 12 KB
+
+// maxRepeatedReads is the number of times the same file+offset can be read
+// before the tool returns a reminder instead of re-reading content.
+const maxRepeatedReads = 2
 
 // FileReadConfig allows overriding file_read tool defaults per-profile.
 type FileReadConfig struct {
@@ -22,7 +27,10 @@ func NewFileReadTool() Tool {
 // Nil config uses the default 12 KB cap. Zero or negative MaxOutputBytes also
 // falls back to the default.
 func NewFileReadToolWithConfig(cfg *FileReadConfig) Tool {
-	t := &FileReadTool{maxBytes: defaultFileReadBytes}
+	t := &FileReadTool{
+		maxBytes:   defaultFileReadBytes,
+		readCounts: make(map[string]int),
+	}
 	if cfg != nil && cfg.MaxOutputBytes > 0 {
 		t.maxBytes = cfg.MaxOutputBytes
 	}
@@ -30,7 +38,9 @@ func NewFileReadToolWithConfig(cfg *FileReadConfig) Tool {
 }
 
 type FileReadTool struct {
-	maxBytes int
+	maxBytes   int
+	mu         sync.Mutex
+	readCounts map[string]int // key: "path@offset"
 }
 
 type fileReadInput struct {
@@ -79,6 +89,20 @@ func (t *FileReadTool) Execute(ctx context.Context, workingDir string, args json
 	}
 	if input.Limit < 0 {
 		return "", fmt.Errorf("file_read: limit must be >= 0")
+	}
+
+	// Duplicate-read guard: if the same path+offset has been read more than
+	// maxRepeatedReads times, return a reminder instead of re-reading content.
+	// This breaks recall-loss loops where compaction erases context and the
+	// model keeps re-reading the same slices.
+	readKey := fmt.Sprintf("%s\x00%d", input.Path, input.Offset)
+	t.mu.Lock()
+	count := t.readCounts[readKey]
+	t.readCounts[readKey] = count + 1
+	t.mu.Unlock()
+	if count >= maxRepeatedReads {
+		return fmt.Sprintf("[already read %d times: %s (offset=%d). Request a different range or use the content you already have.]",
+			count+1, input.Path, input.Offset), nil
 	}
 
 	safePath, err := safeResolvePath(workingDir, AllowedReadDirsFromContext(ctx), input.Path)

@@ -67,33 +67,64 @@ func SetCompactionThreshold(bytes int) {
 // results (file reads of patches/source) are the ones that cause overflow.
 const oldResultMinBytes = 2 << 10 // 2 KB
 
+// keepRecentTurns is the number of most recent assistant turns whose tool
+// results are kept intact. The model needs a working set to reason across
+// without re-reading files it just saw. Compacting too eagerly causes
+// recall-loss loops.
+const keepRecentTurns = 3
+
+// compactPreviewLen is the number of bytes kept from the start of a compacted
+// tool result as a content preview, so the model retains some context about
+// what was in the result without the full payload.
+const compactPreviewLen = 200
+
 // compactOldToolResults compacts large tool result messages from turns the model
-// has already consumed. After the assistant produces a new response, tool results
-// from prior turns that exceed oldResultMinBytes are summarized in-place.
-// Current-turn results (after the most recent assistant message) and small
-// results are left intact.
+// has finished reasoning about. Tool results from the last keepRecentTurns
+// assistant responses are left intact. Older results exceeding oldResultMinBytes
+// are replaced with a size summary and a short content preview.
 //
 // Returns the number of results compacted and total bytes removed.
 func compactOldToolResults(history []model.Message) (compacted int, bytesSaved int) {
-	lastAssistant := -1
+	// Find the Nth-from-last assistant message. Tool results before this
+	// are from turns old enough to compact safely.
+	cutoff := 0
+	count := 0
 	for i := len(history) - 1; i >= 0; i-- {
 		if history[i].Role == model.RoleAssistant {
-			lastAssistant = i
-			break
+			count++
+			if count >= keepRecentTurns {
+				cutoff = i
+				break
+			}
 		}
 	}
-	if lastAssistant < 0 {
+	// Fewer than keepRecentTurns assistant messages exist; nothing is old enough.
+	if cutoff == 0 {
 		return 0, 0
 	}
-	for i := 0; i < lastAssistant; i++ {
+	for i := 0; i < cutoff; i++ {
 		if history[i].Role == model.RoleTool && len(history[i].Content) > oldResultMinBytes {
 			oldLen := len(history[i].Content)
-			history[i].Content = fmt.Sprintf("[old tool result: was %d bytes]", oldLen)
+			history[i].Content = compactedSummary(history[i].Content, oldLen)
 			compacted++
 			bytesSaved += oldLen
 		}
 	}
 	return compacted, bytesSaved
+}
+
+// compactedSummary builds a replacement for a compacted tool result, keeping
+// a short content preview so the model remembers what the result contained.
+func compactedSummary(content string, oldLen int) string {
+	preview := content
+	if len(preview) > compactPreviewLen {
+		preview = preview[:compactPreviewLen]
+		// Don't split a multi-byte UTF-8 character.
+		for len(preview) > 0 && preview[len(preview)-1]&0xC0 == 0x80 {
+			preview = preview[:len(preview)-1]
+		}
+	}
+	return fmt.Sprintf("[compacted: was %d bytes]\n%s", oldLen, preview)
 }
 
 // compactOldAndEmit calls compactOldToolResults and emits an avenor.compaction
