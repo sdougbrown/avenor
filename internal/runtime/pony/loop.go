@@ -72,7 +72,9 @@ const oldResultMinBytes = 2 << 10 // 2 KB
 // from prior turns that exceed oldResultMinBytes are summarized in-place.
 // Current-turn results (after the most recent assistant message) and small
 // results are left intact.
-func compactOldToolResults(history []model.Message) {
+//
+// Returns the number of results compacted and total bytes removed.
+func compactOldToolResults(history []model.Message) (compacted int, bytesSaved int) {
 	lastAssistant := -1
 	for i := len(history) - 1; i >= 0; i-- {
 		if history[i].Role == model.RoleAssistant {
@@ -81,30 +83,54 @@ func compactOldToolResults(history []model.Message) {
 		}
 	}
 	if lastAssistant < 0 {
-		return
+		return 0, 0
 	}
 	for i := 0; i < lastAssistant; i++ {
 		if history[i].Role == model.RoleTool && len(history[i].Content) > oldResultMinBytes {
-			history[i].Content = fmt.Sprintf("[old tool result: was %d bytes]", len(history[i].Content))
+			oldLen := len(history[i].Content)
+			history[i].Content = fmt.Sprintf("[old tool result: was %d bytes]", oldLen)
+			compacted++
+			bytesSaved += oldLen
 		}
 	}
+	return compacted, bytesSaved
+}
+
+// compactOldAndEmit calls compactOldToolResults and emits an avenor.compaction
+// event if any results were compacted.
+func compactOldAndEmit(history []model.Message, eventCh chan<- events.Event) {
+	compacted, saved := compactOldToolResults(history)
+	if compacted > 0 {
+		emit(eventCh, "avenor.compaction", map[string]any{
+			"kind":        "per_turn",
+			"compacted":   compacted,
+			"bytes_saved": saved,
+		})
+	}
+}
+
+// compactedHistory holds a compacted copy of history and stats about what was removed.
+type compactedHistory struct {
+	messages   []model.Message
+	compacted  int // number of tool results compacted
+	bytesSaved int // total bytes removed from those results
 }
 
 // compactForRequest creates a copy of history suitable for the model request.
 // If total byte size exceeds the threshold, it compacts the oldest tool results
-// to bring it under the limit. Returns a copy (never mutates the original).
-// This is a safety net for unusually large single turns; steady-state compaction
-// is handled by compactOldToolResults.
-func compactForRequest(history []model.Message, thresholdBytes int) []model.Message {
+// to bring it under the limit. Returns a copy (never mutates the original) and
+// compaction stats. This is a safety net for unusually large single turns;
+// steady-state compaction is handled by compactOldToolResults.
+func compactForRequest(history []model.Message, thresholdBytes int) compactedHistory {
 	if thresholdBytes <= 0 {
-		return history
+		return compactedHistory{messages: history}
 	}
 	total := 0
 	for _, msg := range history {
 		total += len(msg.Content)
 	}
 	if total <= thresholdBytes {
-		return history
+		return compactedHistory{messages: history}
 	}
 
 	// Protect the most recent messages up to half the threshold.
@@ -117,19 +143,23 @@ func compactForRequest(history []model.Message, thresholdBytes int) []model.Mess
 		cutoff = i
 	}
 
-	compacted := make([]model.Message, len(history))
+	messages := make([]model.Message, len(history))
+	var compacted int
+	var bytesSaved int
 	for i, msg := range history {
 		if i < cutoff && msg.Role == model.RoleTool && len(msg.Content) > 0 {
-			compacted[i] = model.Message{
+			messages[i] = model.Message{
 				Role:       msg.Role,
 				ToolCallID: msg.ToolCallID,
 				Content:    fmt.Sprintf("[tool result too large: was %d bytes]", len(msg.Content)),
 			}
+			compacted++
+			bytesSaved += len(msg.Content)
 		} else {
-			compacted[i] = msg
+			messages[i] = msg
 		}
 	}
-	return compacted
+	return compactedHistory{messages: messages, compacted: compacted, bytesSaved: bytesSaved}
 }
 
 // RunLoop drives the multi-turn loop until a stop condition or terminal condition.
@@ -161,11 +191,18 @@ func RunLoop(
 turnLoop:
 	for turn := 0; ; turn++ {
 		// Copy with threshold safety net for unusually large single turns.
-		messages := compactForRequest(history, int(compactionThreshold.Load()))
+		ch := compactForRequest(history, int(compactionThreshold.Load()))
+		if ch.compacted > 0 {
+			emit(eventCh, "avenor.compaction", map[string]any{
+				"kind":        "threshold",
+				"compacted":   ch.compacted,
+				"bytes_saved": ch.bytesSaved,
+			})
+		}
 
 		req := model.Request{
 			Model:     modelName,
-			Messages:  messages,
+			Messages:  ch.messages,
 			Tools:     toolDefs,
 			Stream:    true,
 			MaxTokens: maxTokens,
@@ -184,7 +221,7 @@ turnLoop:
 			case <-ctx.Done():
 				msg := buildAssistantMsg(assistantContent.String(), nil)
 				history = append(history, msg)
-				compactOldToolResults(history)
+				compactOldAndEmit(history, eventCh)
 				return history, "error", ctx.Err()
 			default:
 			}
@@ -223,14 +260,14 @@ turnLoop:
 				case "stop":
 					msg := buildAssistantMsg(assistantContent.String(), accumulators)
 					history = append(history, msg)
-					compactOldToolResults(history)
+					compactOldAndEmit(history, eventCh)
 					emit(eventCh, "session.end", map[string]any{"stop_reason": "end_turn"})
 					return history, "end_turn", nil
 
 				case "tool_calls":
 					msg := buildAssistantMsg(assistantContent.String(), accumulators)
 					history = append(history, msg)
-					compactOldToolResults(history)
+					compactOldAndEmit(history, eventCh)
 
 					// Sort by index for deterministic execution order
 					indices := make([]int, 0, len(accumulators))
@@ -267,14 +304,14 @@ turnLoop:
 				case "length":
 					msg := buildAssistantMsg(assistantContent.String(), nil)
 					history = append(history, msg)
-					compactOldToolResults(history)
+					compactOldAndEmit(history, eventCh)
 					emit(eventCh, "session.end", map[string]any{"stop_reason": "max_tokens"})
 					return history, "max_tokens", nil
 
 				default:
 					msg := buildAssistantMsg(assistantContent.String(), nil)
 					history = append(history, msg)
-					compactOldToolResults(history)
+					compactOldAndEmit(history, eventCh)
 					emit(eventCh, "session.end", map[string]any{"stop_reason": finish.Reason})
 					return history, finish.Reason, nil
 				}
@@ -296,7 +333,7 @@ turnLoop:
 		if assistantContent.Len() > 0 || len(accumulators) > 0 {
 			msg := buildAssistantMsg(assistantContent.String(), accumulators)
 			history = append(history, msg)
-			compactOldToolResults(history)
+			compactOldAndEmit(history, eventCh)
 		}
 		return history, "error", fmt.Errorf("stream ended unexpectedly")
 	}

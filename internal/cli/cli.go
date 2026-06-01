@@ -230,7 +230,8 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			WorkingDir:             *dir,
 			InjectAgentsMD:         profile.InjectAgentsMD,
 			ToolApproval:           profile.ToolApproval,
-			ShellConfig:            profile.ShellConfig,
+			ShellConfig:    profile.ShellConfig,
+			FileReadConfig: profile.FileReadConfig,
 			AllowedReadDirs: allowedDirs,
 			Context:         profile.Context,
 		}

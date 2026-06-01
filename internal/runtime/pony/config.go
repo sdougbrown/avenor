@@ -29,8 +29,9 @@ type Profile struct {
 	Tools                  ToolGate      `json:"tools"`
 	MaxTokens              int           `json:"max_tokens,omitempty"`
 	ToolApproval           ToolApproval  `json:"tool_approval,omitempty"`
-	ShellConfig            *ShellConfig  `json:"shell_config,omitempty"`
-	BaseURL                string        `json:"base_url,omitempty"`
+	ShellConfig            *ShellConfig     `json:"shell_config,omitempty"`
+	FileReadConfig         *FileReadConfig  `json:"file_read_config,omitempty"`
+	BaseURL                string           `json:"base_url,omitempty"`
 	APIKeyEnv              string        `json:"api_key_env,omitempty"`
 	Skills  []string `json:"skills,omitempty"`  // skill names to load
 	Context int      `json:"context,omitempty"`  // model context window in tokens; 0 = use default compaction (80 KB)
@@ -48,6 +49,9 @@ type ToolApproval map[string]bool
 // ShellConfig overrides shell tool defaults per-profile.
 // This is a reference to the tools.ShellConfig type, aliased for convenience.
 type ShellConfig = tools.ShellConfig
+
+// FileReadConfig overrides file_read tool defaults per-profile.
+type FileReadConfig = tools.FileReadConfig
 
 // LoadPonyConfig reads and parses a JSON pony config file.
 func LoadPonyConfig(path string) (*PonyConfig, error) {

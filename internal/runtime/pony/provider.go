@@ -38,8 +38,9 @@ type Config struct {
 	AllowedReadDirs        []string        // additional directories read tools may access (e.g. skills)
 	AllowedWriteDirs       []string        // additional directories write tools may access
 	ToolApproval           map[string]bool // tool name → requires approval
-	ShellConfig     *ShellConfig    // overrides for shell tool
-	Context         int             // model context window in tokens; 0 = use default compaction
+	ShellConfig     *ShellConfig     // overrides for shell tool
+	FileReadConfig  *FileReadConfig  // overrides for file_read tool
+	Context         int              // model context window in tokens; 0 = use default compaction
 	// Registry is internal; built from tool config.
 	toolRegistry *tools.Registry
 
@@ -110,7 +111,7 @@ func New(cfg Config) *Provider {
 	var toolList []tools.Tool
 	if cfg.LocalTools {
 		toolList = append(toolList,
-			tools.NewFileReadTool(),
+			tools.NewFileReadToolWithConfig(cfg.FileReadConfig),
 			tools.NewFileWriteTool(),
 			tools.NewFileEditTool(),
 			tools.NewGlobTool(),
