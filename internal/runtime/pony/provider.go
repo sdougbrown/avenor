@@ -61,6 +61,7 @@ type OrchestratorExecutor interface {
 // Provider implements runtime.Provider for the pony backend.
 type Provider struct {
 	cfg Config
+	startErr error
 
 	mu             sync.Mutex
 	sessions       map[string]*sessionState
@@ -144,6 +145,14 @@ func New(cfg Config) *Provider {
 	}
 }
 
+func newWithStartErr(cfg Config, err error) *Provider {
+	return &Provider{
+		cfg:      cfg,
+		startErr: err,
+		sessions: make(map[string]*sessionState),
+	}
+}
+
 // NewWithOptions creates a provider from StartOptions (used by factory).
 // The factory requires a zero-arg or StartOptions-only constructor pattern.
 // This is a thin wrapper — the actual config is loaded by the CLI and stored
@@ -151,19 +160,67 @@ func New(cfg Config) *Provider {
 var (
 	globalConfigMu sync.Mutex
 	globalConfig   *Config
+	globalProfiles map[string]Config
+	globalDefaultAgent string
 )
 
 // SetGlobalConfig stores the pony config for the factory path.
 func SetGlobalConfig(cfg *Config) {
 	globalConfigMu.Lock()
 	globalConfig = cfg
+	globalProfiles = nil
+	globalDefaultAgent = ""
+	globalConfigMu.Unlock()
+}
+
+// SetGlobalProfiles stores pony profile configs for per-attempt agent resolution.
+func SetGlobalProfiles(defaultAgent string, profiles map[string]Config) {
+	globalConfigMu.Lock()
+	globalConfig = nil
+	globalDefaultAgent = defaultAgent
+	if profiles == nil {
+		globalProfiles = nil
+	} else {
+		globalProfiles = make(map[string]Config, len(profiles))
+		for name, cfg := range profiles {
+			globalProfiles[name] = cfg
+		}
+	}
 	globalConfigMu.Unlock()
 }
 
 func NewWithOptions(opts runtime.StartOptions) *Provider {
 	globalConfigMu.Lock()
 	cfg := globalConfig
+	profiles := globalProfiles
+	defaultAgent := globalDefaultAgent
 	globalConfigMu.Unlock()
+	if len(profiles) > 0 {
+		agent := opts.Agent
+		if agent == "" {
+			agent = defaultAgent
+		}
+		selected, ok := profiles[agent]
+		if !ok {
+			if opts.Agent == "" && defaultAgent != "" {
+				if fallback, ok := profiles[defaultAgent]; ok {
+					selected = fallback
+					ok = true
+				}
+			}
+			if !ok && opts.Agent != "" {
+				return newWithStartErr(Config{WorkingDir: opts.Dir}, fmt.Errorf("pony config: unknown profile %q", opts.Agent))
+			}
+		}
+		if ok {
+			pcfg := selected
+			pcfg.WorkingDir = opts.Dir
+			if opts.Model != "" {
+				pcfg.Model = opts.Model
+			}
+			return New(pcfg)
+		}
+	}
 	if cfg == nil {
 		return New(Config{
 			Model:      opts.Model,
@@ -185,6 +242,9 @@ func NewWithOptions(opts runtime.StartOptions) *Provider {
 }
 
 func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtime.Session, error) {
+	if p.startErr != nil {
+		return runtime.Session{}, p.startErr
+	}
 	// Generate a unique session ID
 	id := p.sessionCounter.Add(1)
 	sessionID := fmt.Sprintf("pony_%d", id)

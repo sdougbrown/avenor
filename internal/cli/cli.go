@@ -161,82 +161,82 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
 			return exitWithSentinel(1)
 		}
-		profile, err := ponyCfg.ResolveProfile(*agent)
-		if err != nil {
-			fmt.Fprintf(stderr, "avenor: %v\n", err)
-			return exitWithSentinel(1)
-		}
+		profileConfigs := make(map[string]pony.Config, len(ponyCfg.Profiles))
+		configDir := filepath.Dir(*ponyConfig)
+		for name, profile := range ponyCfg.Profiles {
+			resolvedBaseURL := ponyCfg.BaseURL
+			resolvedAPIKeyEnv := ponyCfg.APIKeyEnv
+			if profile.BaseURL != "" {
+				resolvedBaseURL = profile.BaseURL
+			}
+			if profile.APIKeyEnv != "" {
+				resolvedAPIKeyEnv = profile.APIKeyEnv
+			}
 
-		// Resolve base_url and api_key_env — profile overrides top-level
-		resolvedBaseURL := ponyCfg.BaseURL
-		resolvedAPIKeyEnv := ponyCfg.APIKeyEnv
-		if profile.BaseURL != "" {
-			resolvedBaseURL = profile.BaseURL
-		}
-		if profile.APIKeyEnv != "" {
-			resolvedAPIKeyEnv = profile.APIKeyEnv
-		}
-
-		adapter, err := openai.New(openai.Config{
-			BaseURL: resolvedBaseURL,
-			APIKey:  os.Getenv(resolvedAPIKeyEnv),
-		})
-		if err != nil {
-			fmt.Fprintf(stderr, "avenor: %v\n", err)
-			return exitWithSentinel(1)
-		}
-
-		var executor pony.OrchestratorExecutor
-		if profile.Tools.Orchestration && *controlSocket != "" {
-			var err error
-			executor, err = pony.NewControlSocketExecutor(*controlSocket)
+			adapter, err := openai.New(openai.Config{
+				BaseURL: resolvedBaseURL,
+				APIKey:  getenv(resolvedAPIKeyEnv),
+			})
 			if err != nil {
 				fmt.Fprintf(stderr, "avenor: %v\n", err)
 				return exitWithSentinel(1)
 			}
+
+			var executor pony.OrchestratorExecutor
+			if profile.Tools.Orchestration && *controlSocket != "" {
+				executor, err = pony.NewControlSocketExecutor(*controlSocket)
+				if err != nil {
+					fmt.Fprintf(stderr, "avenor: %v\n", err)
+					return exitWithSentinel(1)
+				}
+			}
+
+			systemPrompt := profile.SystemPrompt
+			initialPrompt := profile.InitialPrompt
+			var allowedDirs []string
+			if len(profile.Skills) > 0 {
+				skills, err := pony.LoadSkills(configDir, profile.Skills)
+				if err != nil {
+					fmt.Fprintf(stderr, "avenor: %v\n", err)
+					return exitWithSentinel(1)
+				}
+				systemPrompt, initialPrompt = pony.MergeSkills(systemPrompt, initialPrompt, skills)
+
+				if skillsDir := os.Getenv("PONY_SKILLS_DIR"); skillsDir != "" {
+					allowedDirs = append(allowedDirs, skillsDir)
+				}
+				if configDir != "" {
+					allowedDirs = append(allowedDirs, filepath.Join(configDir, ".pony"))
+				}
+			}
+
+			profileConfigs[name] = pony.Config{
+				Adapter:          adapter,
+				Model:            profile.Model,
+				MaxTokens:        profile.MaxTokens,
+				SystemPrompt:     systemPrompt,
+				InitialPrompt:    initialPrompt,
+				Executor:         executor,
+				LocalTools:       profile.Tools.Local,
+				OrchTools:        profile.Tools.Orchestration,
+				WorkingDir:       *dir,
+				InjectAgentsMD:   profile.InjectAgentsMD,
+				ToolApproval:     profile.ToolApproval,
+				ShellConfig:      profile.ShellConfig,
+				FileReadConfig:   profile.FileReadConfig,
+				AllowedReadDirs:  allowedDirs,
+				Context:          profile.Context,
+				CompactionPrompt: profile.CompactionPrompt,
+			}
 		}
 
-		// Load skills and merge prompts
-		systemPrompt := profile.SystemPrompt
-		initialPrompt := profile.InitialPrompt
-		var allowedDirs []string
-		if len(profile.Skills) > 0 {
-			configDir := filepath.Dir(*ponyConfig)
-			skills, err := pony.LoadSkills(configDir, profile.Skills)
-			if err != nil {
-				fmt.Fprintf(stderr, "avenor: %v\n", err)
+		pony.SetGlobalProfiles(ponyCfg.DefaultAgent, profileConfigs)
+		if *agent != "" {
+			if _, ok := profileConfigs[*agent]; !ok {
+				fmt.Fprintf(stderr, "avenor: pony config: unknown profile %q\n", *agent)
 				return exitWithSentinel(1)
 			}
-			systemPrompt, initialPrompt = pony.MergeSkills(systemPrompt, initialPrompt, skills)
-
-			// Add skill discovery dirs to allowed dirs for file_read/shell access
-			if skillsDir := os.Getenv("PONY_SKILLS_DIR"); skillsDir != "" {
-				allowedDirs = append(allowedDirs, skillsDir)
-			}
-			if configDir != "" {
-				allowedDirs = append(allowedDirs, filepath.Join(configDir, ".pony"))
-			}
 		}
-
-		pCfg := pony.Config{
-			Adapter:                adapter,
-			Model:                  profile.Model,
-			MaxTokens:              profile.MaxTokens,
-			SystemPrompt:           systemPrompt,
-			InitialPrompt:          initialPrompt,
-			Executor:               executor,
-			LocalTools:             profile.Tools.Local,
-			OrchTools:              profile.Tools.Orchestration,
-			WorkingDir:             *dir,
-			InjectAgentsMD:         profile.InjectAgentsMD,
-			ToolApproval:           profile.ToolApproval,
-			ShellConfig:    profile.ShellConfig,
-			FileReadConfig: profile.FileReadConfig,
-			AllowedReadDirs:      allowedDirs,
-			Context:          profile.Context,
-			CompactionPrompt: profile.CompactionPrompt,
-		}
-		pony.SetGlobalConfig(&pCfg)
 	}
 
 	if *prompt != "" && *promptFile != "" {

@@ -1173,6 +1173,79 @@ func TestProvider_NewWithOptions_noGlobalConfig(t *testing.T) {
 	}
 }
 
+func TestProvider_NewWithOptions_profileByAgent(t *testing.T) {
+	SetGlobalProfiles("primary", map[string]Config{
+		"primary": {Model: "primary-model", WorkingDir: "/primary"},
+		"mule":    {Model: "mule-model", WorkingDir: "/mule"},
+	})
+
+	p := NewWithOptions(runtime.StartOptions{Agent: "mule", Dir: "/override"})
+
+	p.mu.Lock()
+	gotCfg := p.cfg
+	p.mu.Unlock()
+
+	if gotCfg.Model != "mule-model" {
+		t.Errorf("model = %q, want %q", gotCfg.Model, "mule-model")
+	}
+	if gotCfg.WorkingDir != "/override" {
+		t.Errorf("working dir = %q, want %q", gotCfg.WorkingDir, "/override")
+	}
+}
+
+func TestProvider_NewWithOptions_profileModelOverride(t *testing.T) {
+	SetGlobalProfiles("primary", map[string]Config{
+		"primary": {Model: "primary-model"},
+		"mule":    {Model: "mule-model"},
+	})
+
+	p := NewWithOptions(runtime.StartOptions{Agent: "mule", Model: "forced-model", Dir: "/d"})
+
+	p.mu.Lock()
+	gotCfg := p.cfg
+	p.mu.Unlock()
+
+	if gotCfg.Model != "forced-model" {
+		t.Errorf("model = %q, want %q", gotCfg.Model, "forced-model")
+	}
+}
+
+func TestProvider_NewWithOptions_profileDefaultAgentFallback(t *testing.T) {
+	SetGlobalProfiles("primary", map[string]Config{
+		"primary": {Model: "primary-model", WorkingDir: "/primary"},
+		"mule":    {Model: "mule-model", WorkingDir: "/mule"},
+	})
+
+	p := NewWithOptions(runtime.StartOptions{Dir: "/override"})
+
+	p.mu.Lock()
+	gotCfg := p.cfg
+	p.mu.Unlock()
+
+	if gotCfg.Model != "primary-model" {
+		t.Errorf("model = %q, want %q", gotCfg.Model, "primary-model")
+	}
+	if gotCfg.WorkingDir != "/override" {
+		t.Errorf("working dir = %q, want %q", gotCfg.WorkingDir, "/override")
+	}
+}
+
+func TestProvider_NewWithOptions_profileUnknownAgentFailsClosed(t *testing.T) {
+	SetGlobalProfiles("primary", map[string]Config{
+		"primary": {Model: "primary-model"},
+		"mule":    {Model: "mule-model"},
+	})
+
+	p := NewWithOptions(runtime.StartOptions{Agent: "unknown-agent", Dir: "/override"})
+	_, err := p.Start(context.Background(), runtime.StartOptions{})
+	if err == nil {
+		t.Fatal("expected start error for unknown profile")
+	}
+	if !strings.Contains(err.Error(), "unknown profile") {
+		t.Fatalf("error = %q, want contains %q", err.Error(), "unknown profile")
+	}
+}
+
 // ── Orchestration tools tests ────────────────────────────────────────────────
 
 func TestOrchestrationTools_spawn(t *testing.T) {
