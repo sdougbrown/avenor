@@ -39,8 +39,9 @@ type Config struct {
 	AllowedWriteDirs       []string        // additional directories write tools may access
 	ToolApproval           map[string]bool // tool name → requires approval
 	ShellConfig     *ShellConfig     // overrides for shell tool
-	FileReadConfig  *FileReadConfig  // overrides for file_read tool
-	Context         int              // model context window in tokens; 0 = use default compaction
+	FileReadConfig         *FileReadConfig  // overrides for file_read tool
+	Context                int              // model context window in tokens; 0 = use default compaction
+	CompactionPrompt       string           // override LLM compaction task prompt
 	// Registry is internal; built from tool config.
 	toolRegistry *tools.Registry
 
@@ -109,6 +110,7 @@ func New(cfg Config) *Provider {
 	} else {
 		SetCompactionThreshold(0) // reset to default
 	}
+	SetCompactionTaskPrompt(cfg.CompactionPrompt)
 
 	// Build tool registry based on config
 	var toolList []tools.Tool

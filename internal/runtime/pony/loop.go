@@ -143,16 +143,91 @@ func compactOldAndEmit(history []model.Message, eventCh chan<- events.Event) {
 // compactedHistory holds a compacted copy of history and stats about what was removed.
 type compactedHistory struct {
 	messages   []model.Message
-	compacted  int // number of tool results compacted
-	bytesSaved int // total bytes removed from those results
+	compacted  int  // number of messages compacted
+	bytesSaved int  // total bytes removed
+	llmSummary bool // true if compaction used an LLM summary
+}
+
+// compactionSystemPrompt is the fixed system prompt for LLM compaction.
+// It sets identity and format rules — callers should not override this.
+const compactionSystemPrompt = `You are performing context compaction. Your output will replace the conversation history so work can continue in a new context window.
+
+Be concise and structured. Do not include tool call syntax, raw output, or verbatim code — summarize what was learned.`
+
+// compactionTaskPrompt is the default task instruction for LLM compaction.
+// It appears as a final user message after the old history. Callers can
+// override this via CompactionTaskPrompt in the pony config profile.
+const defaultCompactionTaskPrompt = `Summarize the conversation above as a handoff for a fresh context. Include:
+
+- What has been accomplished
+- Current work in progress and where it stands
+- Key decisions made and the reasoning behind them
+- Files examined or modified and what was learned from them
+- User requests, constraints, or preferences that should persist
+- What remains to be done (concrete next steps)
+- Any critical data, examples, or references needed to continue
+
+This summary is the only context available when the conversation resumes — make it complete enough to continue seamlessly.`
+
+// activeCompactionTaskPrompt is the effective task prompt for LLM compaction.
+// Set via SetCompactionTaskPrompt during config wiring. Uses atomic.Value for
+// safe concurrent access, matching the compactionThreshold pattern.
+var activeCompactionTaskPrompt atomic.Value
+
+func init() {
+	activeCompactionTaskPrompt.Store(defaultCompactionTaskPrompt)
+}
+
+// SetCompactionTaskPrompt overrides the task prompt for LLM compaction.
+// Empty string resets to the default. Safe to call concurrently with RunLoop.
+func SetCompactionTaskPrompt(prompt string) {
+	if prompt == "" {
+		activeCompactionTaskPrompt.Store(defaultCompactionTaskPrompt)
+		return
+	}
+	activeCompactionTaskPrompt.Store(prompt)
+}
+
+// summarizeHistory sends old history messages to the model for summarization.
+// The task prompt is appended as a final user message after the old history.
+// Returns the summary text, or an error if the call fails (caller should fall
+// back to mechanical compaction).
+func summarizeHistory(ctx context.Context, adapter model.Adapter, modelName string, oldMessages []model.Message) (string, error) {
+	msgs := make([]model.Message, 0, len(oldMessages)+2)
+	msgs = append(msgs, model.Message{Role: model.RoleSystem, Content: compactionSystemPrompt})
+	msgs = append(msgs, oldMessages...)
+	msgs = append(msgs, model.Message{Role: model.RoleUser, Content: activeCompactionTaskPrompt.Load().(string)})
+
+	summaryReq := model.Request{
+		Model:     modelName,
+		Messages:  msgs,
+		MaxTokens: 2048,
+	}
+
+	chunkCh, err := adapter.Stream(ctx, summaryReq)
+	if err != nil {
+		return "", err
+	}
+
+	var summary strings.Builder
+	for chunk := range chunkCh {
+		if chunk.Type == model.ChunkTypeText {
+			summary.WriteString(chunk.Text)
+		}
+		if chunk.Type == model.ChunkTypeError {
+			return "", chunk.Err
+		}
+	}
+	return strings.TrimSpace(summary.String()), nil
 }
 
 // compactForRequest creates a copy of history suitable for the model request.
-// If total byte size exceeds the threshold, it compacts the oldest tool results
-// to bring it under the limit. Returns a copy (never mutates the original) and
-// compaction stats. This is a safety net for unusually large single turns;
-// steady-state compaction is handled by compactOldToolResults.
-func compactForRequest(history []model.Message, thresholdBytes int) compactedHistory {
+// If total byte size exceeds the threshold, it first tries LLM summarization
+// of the oldest messages. On failure, falls back to mechanical truncation.
+// Returns a copy (never mutates the original) and compaction stats.
+// This is a safety net for unusually large single turns; steady-state
+// compaction is handled by compactOldToolResults.
+func compactForRequest(ctx context.Context, adapter model.Adapter, modelName string, history []model.Message, thresholdBytes int) compactedHistory {
 	if thresholdBytes <= 0 {
 		return compactedHistory{messages: history}
 	}
@@ -165,7 +240,6 @@ func compactForRequest(history []model.Message, thresholdBytes int) compactedHis
 	}
 
 	// Protect the most recent messages up to half the threshold.
-	// Tool results before that window get compacted.
 	protected := thresholdBytes / 2
 	remaining := protected
 	cutoff := len(history)
@@ -174,20 +248,47 @@ func compactForRequest(history []model.Message, thresholdBytes int) compactedHis
 		cutoff = i
 	}
 
-	messages := make([]model.Message, len(history))
+	oldMessages := history[:cutoff]
+	recentMessages := history[cutoff:]
+
+	// Try LLM summarization of the old messages.
+	if adapter != nil {
+		summary, err := summarizeHistory(ctx, adapter, modelName, oldMessages)
+		if err == nil && summary != "" {
+			messages := make([]model.Message, 0, 2+len(recentMessages))
+			messages = append(messages, model.Message{
+				Role:    model.RoleUser,
+				Content: "[Compaction summary of earlier conversation]\n\n" + summary,
+			})
+			messages = append(messages, recentMessages...)
+			oldBytes := 0
+			for _, m := range oldMessages {
+				oldBytes += len(m.Content)
+			}
+			return compactedHistory{
+				messages:   messages,
+				compacted:  len(oldMessages),
+				bytesSaved: oldBytes,
+				llmSummary: true,
+			}
+		}
+	}
+
+	// Fall back to mechanical compaction of old tool results.
+	messages := make([]model.Message, 0, len(history))
 	var compacted int
 	var bytesSaved int
 	for i, msg := range history {
 		if i < cutoff && msg.Role == model.RoleTool && len(msg.Content) > 0 {
-			messages[i] = model.Message{
+			messages = append(messages, model.Message{
 				Role:       msg.Role,
 				ToolCallID: msg.ToolCallID,
 				Content:    fmt.Sprintf("[tool result too large: was %d bytes]", len(msg.Content)),
-			}
+			})
 			compacted++
 			bytesSaved += len(msg.Content)
 		} else {
-			messages[i] = msg
+			messages = append(messages, msg)
 		}
 	}
 	return compactedHistory{messages: messages, compacted: compacted, bytesSaved: bytesSaved}
@@ -222,12 +323,13 @@ func RunLoop(
 turnLoop:
 	for turn := 0; ; turn++ {
 		// Copy with threshold safety net for unusually large single turns.
-		ch := compactForRequest(history, int(compactionThreshold.Load()))
+		ch := compactForRequest(ctx, adapter, modelName, history, int(compactionThreshold.Load()))
 		if ch.compacted > 0 {
 			emit(eventCh, "avenor.compaction", map[string]any{
 				"kind":        "threshold",
 				"compacted":   ch.compacted,
 				"bytes_saved": ch.bytesSaved,
+				"llm_summary": ch.llmSummary,
 			})
 		}
 

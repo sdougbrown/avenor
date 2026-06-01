@@ -232,8 +232,9 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			ToolApproval:           profile.ToolApproval,
 			ShellConfig:    profile.ShellConfig,
 			FileReadConfig: profile.FileReadConfig,
-			AllowedReadDirs: allowedDirs,
-			Context:         profile.Context,
+			AllowedReadDirs:      allowedDirs,
+			Context:          profile.Context,
+			CompactionPrompt: profile.CompactionPrompt,
 		}
 		pony.SetGlobalConfig(&pCfg)
 	}

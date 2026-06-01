@@ -35,6 +35,7 @@ type Profile struct {
 	APIKeyEnv              string        `json:"api_key_env,omitempty"`
 	Skills  []string `json:"skills,omitempty"`  // skill names to load
 	Context int      `json:"context,omitempty"`  // model context window in tokens; 0 = use default compaction (80 KB)
+	CompactionPrompt string `json:"compaction_prompt,omitempty"` // override LLM compaction task prompt
 }
 
 // ToolGate controls which tool groups are enabled for a profile.
