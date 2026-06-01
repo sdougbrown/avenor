@@ -851,6 +851,7 @@ func TestProvider_Start_multipleSessions(t *testing.T) {
 }
 
 func TestProvider_Resume(t *testing.T) {
+	cleanGlobalSessions(t)
 	ctx := context.Background()
 	p := New(Config{Model: "test-model", WorkingDir: t.TempDir()})
 
@@ -878,6 +879,7 @@ func TestProvider_Resume(t *testing.T) {
 }
 
 func TestProvider_Resume_thenPromptExtendsHistory(t *testing.T) {
+	cleanGlobalSessions(t)
 	ctx := context.Background()
 	p := New(Config{
 		Model:    "test-model",
@@ -926,6 +928,69 @@ func TestProvider_Resume_thenPromptExtendsHistory(t *testing.T) {
 	if lastUser.Role != model.RoleUser || lastUser.Content != "second question" {
 		t.Errorf("last user message = %+v, want user: second question", lastUser)
 	}
+}
+
+func TestProvider_Resume_crossProvider(t *testing.T) {
+	cleanGlobalSessions(t)
+	ctx := context.Background()
+	adapter := &fakeAdapter{chunks: []model.Chunk{textChunk("ack"), finishChunk("stop")}}
+
+	// Provider A: Start and Prompt
+	pA := New(Config{Model: "test-model", Adapter: adapter, MaxTokens: 100})
+	s1, err := pA.Start(ctx, runtime.StartOptions{})
+	if err != nil {
+		t.Fatalf("Start error: %v", err)
+	}
+	if err := pA.Prompt(ctx, s1.SessionID, "first question"); err != nil {
+		t.Fatalf("first Prompt error: %v", err)
+	}
+
+	// Provider B: Resume the session and Prompt again
+	pB := New(Config{Model: "test-model", Adapter: adapter, MaxTokens: 100})
+	s2, err := pB.Resume(ctx, s1.SessionID)
+	if err != nil {
+		t.Fatalf("Resume on provider B error: %v", err)
+	}
+	if s2.SessionID != s1.SessionID {
+		t.Errorf("resumed SessionID = %q, want %q", s2.SessionID, s1.SessionID)
+	}
+	if err := pB.Prompt(ctx, s2.SessionID, "second question"); err != nil {
+		t.Fatalf("second Prompt error: %v", err)
+	}
+
+	// Verify history was preserved across providers
+	globalSessionsMu.Lock()
+	ss, ok := globalSessions[s1.SessionID]
+	globalSessionsMu.Unlock()
+	if !ok {
+		t.Fatal("session not found in global store")
+	}
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	if len(ss.history) < 4 {
+		t.Fatalf("history length = %d, want >= 4 (2 user + 2 assistant rounds)", len(ss.history))
+	}
+	// Verify the conversation context carried over
+	foundFirst := false
+	foundSecond := false
+	for _, msg := range ss.history {
+		if msg.Role == model.RoleUser && msg.Content == "first question" {
+			foundFirst = true
+		}
+		if msg.Role == model.RoleUser && msg.Content == "second question" {
+			foundSecond = true
+		}
+	}
+	if !foundFirst || !foundSecond {
+		t.Errorf("history missing expected user messages (found first=%v, second=%v)", foundFirst, foundSecond)
+	}
+}
+
+func cleanGlobalSessions(t *testing.T) {
+	t.Helper()
+	globalSessionsMu.Lock()
+	globalSessions = make(map[string]*sessionState)
+	globalSessionsMu.Unlock()
 }
 
 func TestProvider_Prompt_unknownSession(t *testing.T) {

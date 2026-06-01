@@ -67,6 +67,14 @@ type Provider struct {
 
 var _ runtime.Provider = (*Provider)(nil)
 
+// globalSessions provides cross-provider session access so that
+// Resume + Prompt work across phase boundaries where a new provider
+// is created for each phase attempt.
+var (
+	globalSessions   = make(map[string]*sessionState)
+	globalSessionsMu sync.Mutex
+)
+
 const localToolInstructions = "Tool use: use tools when they are the direct way to inspect or change local state. Prefer structured tools first: use list_dir instead of ls, glob for path discovery, grep for content search, and file_read/file_edit/file_write for file access. Use shell only when no structured tool fits. For shell, prefer cmd plus args for exact argv execution; cmd must be only the executable name, with subcommands and flags in args. Examples: use {\"cmd\":\"git\",\"args\":[\"diff\",\"--stat\",\"base...head\"]} rather than putting diff or flags into cmd, and use {\"cmd\":\"ls\",\"args\":[\"packages\"]} rather than repeating ls in args. Do not use pipes, redirects, command chaining, command substitution, or backticks in legacy command strings."
 
 const orchestrationToolInstructions = "Orchestration: use spawn_agents for independent parallel child work, send_prompt for follow-ups, and wait_for_done to collect child results."
@@ -206,6 +214,10 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	p.sessions[sessionID] = ss
 	p.mu.Unlock()
 
+	globalSessionsMu.Lock()
+	globalSessions[sessionID] = ss
+	globalSessionsMu.Unlock()
+
 	return runtime.Session{
 		SessionID: sessionID,
 		Backend:   backendID,
@@ -217,6 +229,11 @@ func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Sessio
 	p.mu.Lock()
 	_, ok := p.sessions[sessionID]
 	p.mu.Unlock()
+	if !ok {
+		globalSessionsMu.Lock()
+		_, ok = globalSessions[sessionID]
+		globalSessionsMu.Unlock()
+	}
 	if !ok {
 		return runtime.Session{}, fmt.Errorf("unknown session: %s", sessionID)
 	}
@@ -231,7 +248,17 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 	ss, ok := p.sessions[sessionID]
 	p.mu.Unlock()
 	if !ok {
-		return fmt.Errorf("unknown session: %s", sessionID)
+		// Session may have been created by a previous provider (cross-phase resume).
+		// Look it up in the global store and adopt it.
+		globalSessionsMu.Lock()
+		ss, ok = globalSessions[sessionID]
+		globalSessionsMu.Unlock()
+		if !ok {
+			return fmt.Errorf("unknown session: %s", sessionID)
+		}
+		p.mu.Lock()
+		p.sessions[sessionID] = ss
+		p.mu.Unlock()
 	}
 
 	ss.mu.Lock()
