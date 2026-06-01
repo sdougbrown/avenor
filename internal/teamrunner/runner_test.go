@@ -21,10 +21,13 @@ type discardEventWriter struct{}
 func (discardEventWriter) Write(events.Event) error { return nil }
 
 type recordingEventWriter struct {
+	mu     sync.Mutex
 	events []events.Event
 }
 
 func (w *recordingEventWriter) Write(ev events.Event) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	w.events = append(w.events, ev)
 	return nil
 }
