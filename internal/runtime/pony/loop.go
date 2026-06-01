@@ -62,22 +62,24 @@ func SetCompactionThreshold(bytes int) {
 }
 
 // oldResultMinBytes is the minimum tool result size to compact per-turn.
-// Results below this (grep/glob/small shell outputs) are preserved indefinitely
-// since they're cheap context the model may reference across turns. Large
-// results (file reads of patches/source) are the ones that cause overflow.
-const oldResultMinBytes = 2 << 10 // 2 KB
+// Results below this (grep/glob/small shell outputs) are preserved indefinitely;
+// only larger results (file reads of source/patches) are compacted after they
+// leave the protection window.
+const oldResultMinBytes = 4 << 10 // 4 KB
 
 // keepRecentTokens is the approximate number of tokens of recent history
 // protected from compaction. Tool results within this window are kept intact
-// so the model has working context. At ~4 bytes/token, 16K tokens ≈ 64 KB.
-// This replaces the turn-based window; OpenCode uses a similar 40K-token
+// so the model has working context. At ~4 bytes/token, 32K tokens ≈ 128 KB —
+// covers ~3-4 turns of typical review work. OpenCode uses a similar 40K-token
 // protection window for tool output pruning.
-const keepRecentTokens = 16 * 1024
+const keepRecentTokens = 32 * 1024
 
 // compactPreviewLen is the number of bytes kept from the start of a compacted
-// tool result as a content preview, so the model retains some context about
+// tool result as a content preview. 500 bytes is enough to show the first
+// few functions, types, or imports in a source file — enough context for
+// the model to remember what the file contained.
 // what was in the result without the full payload.
-const compactPreviewLen = 200
+const compactPreviewLen = 500
 
 // compactOldToolResults compacts large tool result messages from turns the model
 // has finished reasoning about. The most recent keepRecentTokens worth of

@@ -8,7 +8,7 @@ import (
 	"sync"
 )
 
-const defaultFileReadBytes = 12 << 10 // 12 KB
+const defaultFileReadBytes = 32 << 10 // 32 KB
 
 // maxRepeatedReads is the number of times the same file+offset can be read
 // before the tool returns a reminder instead of re-reading content.
