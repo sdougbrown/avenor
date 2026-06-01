@@ -872,6 +872,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				LoopDirective: result.LoopDirective,
 				LoopLabel:     result.LoopLabel,
 				Output:        result.Output,
+				FinalReply:    result.FinalReply,
 			}, nil
 		},
 	}

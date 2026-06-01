@@ -46,6 +46,7 @@ type PhaseAttemptResult struct {
 	LoopDirective string
 	LoopLabel     string
 	Output        string
+	FinalReply    string
 }
 
 func Run(ctx context.Context, opts RunOptions) (RunResult, error) {
@@ -68,7 +69,7 @@ func Run(ctx context.Context, opts RunOptions) (RunResult, error) {
 	members := buildMemberList(opts.Config.Team, preOutput)
 
 	if len(members) == 0 {
-		if early, err := runSequentialPhases(ctx, opts, opts.Config.Post, "post", &prevPhaseCommit, ""); err != nil {
+		if early, err := runSequentialPhases(ctx, opts, opts.Config.Post, "post", &prevPhaseCommit, "", ""); err != nil {
 			return RunResult{}, err
 		} else if early != nil {
 			return *early, nil
@@ -77,12 +78,12 @@ func Run(ctx context.Context, opts RunOptions) (RunResult, error) {
 		return RunResult{ExitCode: 0, StopReason: "end_turn"}, nil
 	}
 
-	membersCompleted, membersAborted, result, teamOutput := runTeamMembers(ctx, opts, members, &prevPhaseCommit)
+	membersCompleted, membersAborted, result, teamOutput, teamFinalOutput := runTeamMembers(ctx, opts, members, &prevPhaseCommit)
 	if result != nil {
 		return *result, nil
 	}
 
-	if early, err := runSequentialPhases(ctx, opts, opts.Config.Post, "post", &prevPhaseCommit, teamOutput); err != nil {
+	if early, err := runSequentialPhases(ctx, opts, opts.Config.Post, "post", &prevPhaseCommit, teamOutput, teamFinalOutput); err != nil {
 		return RunResult{}, err
 	} else if early != nil {
 		return *early, nil
@@ -157,7 +158,7 @@ func runPrePhases(ctx context.Context, opts RunOptions, prevCommit *string) (str
 			sessionID = prevSessionID
 		}
 
-		result, err := executePhase(ctx, opts, phase, "pre", sessionID, *prevCommit, "")
+		result, err := executePhase(ctx, opts, phase, "pre", sessionID, *prevCommit, "", "")
 		if err != nil {
 			_ = emitTeamEnd(opts.EventSink, opts.RunID, "phase_failure", "", 0, 0)
 			return output.String(), nil, err
@@ -192,7 +193,7 @@ func runPrePhases(ctx context.Context, opts RunOptions, prevCommit *string) (str
 	return output.String(), nil, nil
 }
 
-func runTeamMembers(ctx context.Context, opts RunOptions, members []phaseconfig.Phase, prevCommit *string) (int, int, *RunResult, string) {
+func runTeamMembers(ctx context.Context, opts RunOptions, members []phaseconfig.Phase, prevCommit *string) (int, int, *RunResult, string, string) {
 	teamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -212,7 +213,7 @@ func runTeamMembers(ctx context.Context, opts RunOptions, members []phaseconfig.
 		wg.Add(1)
 		go func(idx int, phase phaseconfig.Phase) {
 			defer wg.Done()
-			r, err := executePhase(teamCtx, opts, phase, "team", "", *prevCommit, "")
+			r, err := executePhase(teamCtx, opts, phase, "team", "", *prevCommit, "", "")
 			if err != nil {
 				// Internal error (template rendering, event emission failure).
 				// Treat as a non-clean stop so the team result reflects the failure.
@@ -265,12 +266,19 @@ func runTeamMembers(ctx context.Context, opts RunOptions, members []phaseconfig.
 	}
 
 	var memberOutput strings.Builder
+	var memberFinalOutput strings.Builder
 	for _, mr := range results {
 		if mr.result.Output != "" {
 			if memberOutput.Len() > 0 {
 				memberOutput.WriteByte('\n')
 			}
 			memberOutput.WriteString(mr.result.Output)
+		}
+		if mr.result.FinalReply != "" {
+			if memberFinalOutput.Len() > 0 {
+				memberFinalOutput.WriteByte('\n')
+			}
+			memberFinalOutput.WriteString(mr.result.FinalReply)
 		}
 	}
 
@@ -281,18 +289,18 @@ func runTeamMembers(ctx context.Context, opts RunOptions, members []phaseconfig.
 			StopReason: "blocked",
 			SessionID:  firstAbortSessionID,
 			Reason:     firstAbortLabel,
-		}, ""
+		}, "", ""
 	}
 
 	if failureResult != nil {
 		_ = emitTeamEnd(opts.EventSink, opts.RunID, "phase_failure", "", membersCompleted, membersAborted)
-		return membersCompleted, membersAborted, failureResult, ""
+		return membersCompleted, membersAborted, failureResult, "", ""
 	}
 
-	return membersCompleted, membersAborted, nil, memberOutput.String()
+	return membersCompleted, membersAborted, nil, memberOutput.String(), memberFinalOutput.String()
 }
 
-func runSequentialPhases(ctx context.Context, opts RunOptions, phases []phaseconfig.Phase, kind string, prevCommit *string, teamOutput string) (*RunResult, error) {
+func runSequentialPhases(ctx context.Context, opts RunOptions, phases []phaseconfig.Phase, kind string, prevCommit *string, teamOutput, teamFinalOutput string) (*RunResult, error) {
 	var prevSessionID string
 	for _, phase := range phases {
 		if err := ctx.Err(); err != nil {
@@ -305,7 +313,7 @@ func runSequentialPhases(ctx context.Context, opts RunOptions, phases []phasecon
 			sessionID = prevSessionID
 		}
 
-		result, err := executePhase(ctx, opts, phase, kind, sessionID, *prevCommit, teamOutput)
+		result, err := executePhase(ctx, opts, phase, kind, sessionID, *prevCommit, teamOutput, teamFinalOutput)
 		if err != nil {
 			_ = emitTeamEnd(opts.EventSink, opts.RunID, kind+"_failure", "", 0, 0)
 			return nil, err
@@ -339,7 +347,7 @@ func runSequentialPhases(ctx context.Context, opts RunOptions, phases []phasecon
 	return nil, nil
 }
 
-func executePhase(ctx context.Context, opts RunOptions, phase phaseconfig.Phase, kind string, prevSessionID string, prevPhaseCommit string, teamOutput string) (result PhaseAttemptResult, rerr error) {
+func executePhase(ctx context.Context, opts RunOptions, phase phaseconfig.Phase, kind string, prevSessionID string, prevPhaseCommit string, teamOutput, teamFinalOutput string) (result PhaseAttemptResult, rerr error) {
 	if phase.LoopFile != "" || phase.TeamFile != "" {
 		if opts.NestedRun == nil {
 			return PhaseAttemptResult{}, fmt.Errorf("team config: phase %q has loop_file or team_file but NestedRun is not configured", phase.Name)
@@ -373,13 +381,14 @@ func executePhase(ctx context.Context, opts RunOptions, phase phaseconfig.Phase,
 	diffStat, changedFiles, _ := phaseconfig.CaptureGitDelta(opts.WorkDir, prevPhaseCommit) // best-effort; empty in non-git contexts
 
 	tmplCtx := phaseconfig.TemplateContext{
-		RunID:           opts.RunID,
-		Phase:           phase.Name,
-		WorkDir:         opts.WorkDir,
-		PrevPhaseCommit: prevPhaseCommit,
-		DiffStat:        diffStat,
-		ChangedFiles:    changedFiles,
-		TeamOutput:      teamOutput,
+		RunID:            opts.RunID,
+		Phase:            phase.Name,
+		WorkDir:          opts.WorkDir,
+		PrevPhaseCommit:  prevPhaseCommit,
+		DiffStat:         diffStat,
+		ChangedFiles:     changedFiles,
+		TeamOutput:       teamOutput,
+		TeamFinalOutput:  teamFinalOutput,
 	}
 
 	rendered, err := phaseconfig.RenderPrompt(phase.Prompt, tmplCtx)

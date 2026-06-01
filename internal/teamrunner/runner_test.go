@@ -877,6 +877,45 @@ func TestRunPostPhaseReceivesTeamMemberOutput(t *testing.T) {
 	}
 }
 
+func TestRunTeamFinalOutputTemplate(t *testing.T) {
+	cfg := makeConfig(
+		nil,
+		[]phaseconfig.Phase{
+			simplePhase("worker-a", "do work a"),
+			simplePhase("worker-b", "do work b"),
+		},
+		[]phaseconfig.Phase{
+			{Name: "report", Prompt: "final outputs:\n{{.TeamOutput}}\n---\nfinal replies:\n{{.TeamFinalOutput}}"},
+		},
+	)
+
+	var capturedPostPrompt string
+	_, err := Run(context.Background(), RunOptions{
+		WorkDir:   t.TempDir(),
+		RunID:     "test-run",
+		EventSink: discardEventWriter{},
+		Config:    cfg,
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
+			switch phase.Name {
+			case "worker-a":
+				return PhaseAttemptResult{ExitCode: 0, Output: "thinking a\nfinal a", FinalReply: "final a"}, nil
+			case "worker-b":
+				return PhaseAttemptResult{ExitCode: 0, Output: "thinking b\nfinal b", FinalReply: "final b"}, nil
+			case "report":
+				capturedPostPrompt = phase.Prompt
+			}
+			return PhaseAttemptResult{ExitCode: 0}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	want := "final outputs:\nthinking a\nfinal a\nthinking b\nfinal b\n---\nfinal replies:\nfinal a\nfinal b"
+	if capturedPostPrompt != want {
+		t.Errorf("post phase prompt mismatch.\n got: %q\nwant: %q", capturedPostPrompt, want)
+	}
+}
+
 func TestRunPhaseEndPreservesExplicitStopReason(t *testing.T) {
 	sink := &recordingEventWriter{}
 	result, err := Run(context.Background(), RunOptions{

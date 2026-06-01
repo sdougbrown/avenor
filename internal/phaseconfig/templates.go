@@ -17,6 +17,7 @@ type TemplateContext struct {
 	DiffStat        string
 	ChangedFiles    string
 	TeamOutput      string
+	TeamFinalOutput string
 }
 
 func RenderPrompt(tmpl string, ctx TemplateContext) (string, error) {

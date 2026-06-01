@@ -24,6 +24,7 @@ type attemptResult struct {
 	loopDirective string
 	loopLabel     string
 	output        string
+	finalReply    string
 	usage         map[string]any
 }
 
@@ -155,7 +156,7 @@ func runSingleAttempt(
 			if interruptText := deps.controlServer.ConsumeInterrupt(); interruptText != "" {
 				if _, err := resumeSession(ctx, provider, session.SessionID); err != nil {
 					fmt.Fprintf(deps.stderr, "avenor: resume after cancel: %v\n", err)
-					return attemptResult{exitCode: 1, sessionID: session.SessionID, stopReason: stopReason, loopDirective: accDirective, loopLabel: accLabel, output: result.Output, usage: result.Usage}
+					return attemptResult{exitCode: 1, sessionID: session.SessionID, stopReason: stopReason, loopDirective: accDirective, loopLabel: accLabel, output: result.Output, finalReply: result.FinalReply, usage: result.Usage}
 				}
 				prompt = interruptText
 				continue
@@ -164,7 +165,7 @@ func runSingleAttempt(
 				if nextPrompt := deps.controlServer.DequeuePrompt(); nextPrompt != "" {
 					if _, err := resumeSession(ctx, provider, session.SessionID); err != nil {
 						fmt.Fprintf(deps.stderr, "avenor: resume after end_turn: %v\n", err)
-						return attemptResult{exitCode: 1, sessionID: session.SessionID, stopReason: stopReason, loopDirective: accDirective, loopLabel: accLabel, output: result.Output, usage: result.Usage}
+						return attemptResult{exitCode: 1, sessionID: session.SessionID, stopReason: stopReason, loopDirective: accDirective, loopLabel: accLabel, output: result.Output, finalReply: result.FinalReply, usage: result.Usage}
 					}
 					prompt = nextPrompt
 					continue
@@ -172,7 +173,7 @@ func runSingleAttempt(
 			}
 		}
 
-		return attemptResult{exitCode: exitCode, sessionID: session.SessionID, stopReason: stopReason, loopDirective: accDirective, loopLabel: accLabel, output: result.Output, usage: result.Usage}
+		return attemptResult{exitCode: exitCode, sessionID: session.SessionID, stopReason: stopReason, loopDirective: accDirective, loopLabel: accLabel, output: result.Output, finalReply: result.FinalReply, usage: result.Usage}
 	}
 }
 

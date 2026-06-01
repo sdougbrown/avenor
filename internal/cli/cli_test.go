@@ -2838,3 +2838,73 @@ func TestWaitForSessionAccumulatesDeltaAgentMessageOutput(t *testing.T) {
 		t.Fatalf("Output = %q, want delta assistant output only", result.Output)
 	}
 }
+
+func TestWaitForSessionFinalReply(t *testing.T) {
+	runFinalReplyTest := func(t *testing.T, evts []events.Event, wantOutput, wantFinalReply string) {
+		t.Helper()
+		eventCh := make(chan events.Event, len(evts)+1)
+		for _, ev := range evts {
+			eventCh <- ev
+		}
+		eventCh <- events.Event{
+			Event:     "session.end",
+			SessionID: "ses_output",
+			Fields:    map[string]any{"stop_reason": "end_turn"},
+		}
+		close(eventCh)
+
+		promptDone := make(chan error, 1)
+		promptDone <- nil
+
+		writer, err := NewEventWriter("")
+		if err != nil {
+			t.Fatalf("NewEventWriter(\"\") error = %v", err)
+		}
+		defer writer.Close()
+
+		result := waitForSessionForTest(context.Background(), &cliFakeProvider{}, writer, nil, nil, eventCh, promptDone, nil, "ses_output", "run_output", "", true, DefaultPermissionClaimTimeout, nil, io.Discard)
+		if result.Output != wantOutput {
+			t.Fatalf("Output = %q, want %q", result.Output, wantOutput)
+		}
+		if result.FinalReply != wantFinalReply {
+			t.Fatalf("FinalReply = %q, want %q", result.FinalReply, wantFinalReply)
+		}
+	}
+
+	msg := func(delta string) events.Event {
+		return events.Event{Event: "agent.message_chunk", SessionID: "ses_output", Fields: map[string]any{"delta": delta}}
+	}
+	toolCall := events.Event{Event: "tool.call", SessionID: "ses_output", Fields: map[string]any{"kind": "shell", "title": "shell"}}
+
+	t.Run("single turn with tool call then final text", func(t *testing.T) {
+		runFinalReplyTest(t, []events.Event{
+			msg("Let me check."),
+			toolCall,
+			msg("Here are findings:"),
+			msg(" No issues."),
+		}, "Let me check.Here are findings: No issues.", "Here are findings: No issues.")
+	})
+
+	t.Run("zero tool calls — FinalReply equals full Output", func(t *testing.T) {
+		runFinalReplyTest(t, []events.Event{
+			msg("Summary only."),
+		}, "Summary only.", "Summary only.")
+	})
+
+	t.Run("multiple tool calls — only last block captured", func(t *testing.T) {
+		runFinalReplyTest(t, []events.Event{
+			msg("Checking files."),
+			toolCall,
+			msg("Checking tests."),
+			toolCall,
+			msg("Final answer."),
+		}, "Checking files.Checking tests.Final answer.", "Final answer.")
+	})
+
+	t.Run("tool call at end with no subsequent text — FinalReply empty", func(t *testing.T) {
+		runFinalReplyTest(t, []events.Event{
+			msg("Initial thought."),
+			toolCall,
+		}, "Initial thought.", "")
+	})
+}

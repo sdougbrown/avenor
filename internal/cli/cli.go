@@ -411,6 +411,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			LoopDirective: r.loopDirective,
 			LoopLabel:     r.loopLabel,
 			Output:        r.output,
+			FinalReply:    r.finalReply,
 		}, nil
 	}
 
@@ -752,6 +753,7 @@ type sessionResult struct {
 	LoopDirective string
 	LoopLabel     string
 	Output        string
+	FinalReply    string
 	Usage         map[string]any
 }
 
@@ -783,6 +785,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 	var loopDirective string
 	var loopLabel string
 	var output strings.Builder
+	var finalReply strings.Builder
 	eventChClosed := false
 	tracker := newStatusTracker(cfg.SessionID, cfg.RunID, cfg.RunLabel)
 
@@ -844,7 +847,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				if finalStopReason == "" {
 					return sessionResult{ExitCode: 1}
 				}
-				return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), LoopDirective: loopDirective, LoopLabel: loopLabel, Output: output.String(), Usage: bufferedUsage}
+				return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), LoopDirective: loopDirective, LoopLabel: loopLabel, Output: output.String(), FinalReply: finalReply.String(), Usage: bufferedUsage}
 			} else if progressTimer != nil {
 				if !progressTimer.Stop() {
 					select {
@@ -860,11 +863,15 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				}
 			}
 			markerHandled := false
+			if event.Event == "tool.call" {
+				finalReply.Reset()
+			}
 			if event.Event == "agent.message_chunk" || event.Event == "agent.thought_chunk" {
 				if text := chunkText(event); text != "" {
 					chunkBuf.Append(text)
 					if event.Event == "agent.message_chunk" {
 						output.WriteString(text)
+						finalReply.WriteString(text)
 					}
 					if phase, label, ok := chunkBuf.ScanStatusMarker(); ok {
 						if !writeStatus(tracker.ObserveMarker(phase, label)) {
@@ -921,7 +928,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				return sessionResult{ExitCode: 1}
 			}
 			if event.Event == "session.end" && promptReturned && permissionDone == nil {
-				return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), LoopDirective: loopDirective, LoopLabel: loopLabel, Output: output.String(), Usage: bufferedUsage}
+				return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), LoopDirective: loopDirective, LoopLabel: loopLabel, Output: output.String(), FinalReply: finalReply.String(), Usage: bufferedUsage}
 			}
 		case err := <-cfg.PromptDone:
 			promptReturned = true
@@ -933,7 +940,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				return sessionResult{ExitCode: 1}
 			}
 			if finalStopReason != "" && permissionDone == nil {
-				return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), LoopDirective: loopDirective, LoopLabel: loopLabel, Output: output.String(), Usage: bufferedUsage}
+				return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), LoopDirective: loopDirective, LoopLabel: loopLabel, Output: output.String(), FinalReply: finalReply.String(), Usage: bufferedUsage}
 			}
 		case res := <-permissionDone:
 			permissionDone = nil
@@ -953,7 +960,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 			// If session.end + promptDone already arrived while we were waiting for
 			// AnswerPermission, exit now that the permission goroutine has resolved.
 			if finalStopReason != "" && promptReturned {
-				return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), LoopDirective: loopDirective, LoopLabel: loopLabel, Output: output.String(), Usage: bufferedUsage}
+				return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), LoopDirective: loopDirective, LoopLabel: loopLabel, Output: output.String(), FinalReply: finalReply.String(), Usage: bufferedUsage}
 			}
 			if eventChClosed && finalStopReason == "" {
 				return sessionResult{ExitCode: 1}
