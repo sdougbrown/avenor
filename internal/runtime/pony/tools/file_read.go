@@ -7,6 +7,8 @@ import (
 	"os"
 )
 
+const maxFileReadBytes = 32 << 10 // 32 KB
+
 func NewFileReadTool() Tool {
 	return &FileReadTool{}
 }
@@ -20,7 +22,7 @@ type fileReadInput struct {
 func (t *FileReadTool) Name() string { return "file_read" }
 
 func (t *FileReadTool) Description() string {
-	return "Read the contents of a file at the given path. Use this to read files from the working directory."
+	return fmt.Sprintf("Read the contents of a file at the given path. Use this to read files from the working directory. Output is capped at %d KB; for larger files use offset/limit parameters.", maxFileReadBytes/1024)
 }
 
 func (t *FileReadTool) Schema() json.RawMessage {
@@ -58,6 +60,17 @@ func (t *FileReadTool) Execute(ctx context.Context, workingDir string, args json
 	data, err := os.ReadFile(safePath)
 	if err != nil {
 		return "", fmt.Errorf("file_read: %w", err)
+	}
+
+	if len(data) > maxFileReadBytes {
+		truncated := data[:maxFileReadBytes]
+		// Don't split a multi-byte UTF-8 character at the cut point.
+		// Continuation bytes (0x80-0xBF) have bit pattern 10xxxxxx.
+		for len(truncated) > 0 && truncated[len(truncated)-1]&0xC0 == 0x80 {
+			truncated = truncated[:len(truncated)-1]
+		}
+		return fmt.Sprintf("%s\n\n[... file_read truncated at %d KB; file is %d bytes total]",
+			string(truncated), maxFileReadBytes/1024, len(data)), nil
 	}
 
 	return string(data), nil

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
@@ -33,6 +34,87 @@ type LoopRunState struct {
 // ApprovalChecker is called before a tool executes. It blocks until the
 // permission is granted or denied. Returns true if approved, false if denied.
 type ApprovalChecker func(ctx context.Context, toolName string, eventCh chan<- events.Event) (bool, error)
+
+// defaultCompactionThreshold is the default soft limit for total conversation
+// history size before compaction kicks in. At 80 KB and ~4 chars/token, this is
+// ~20K tokens — well within even small (32K) context windows and leaves room
+// for output generation. Override per-model via SetCompactionThreshold.
+const defaultCompactionThreshold = 80 << 10 // 80 KB
+
+// compactionThreshold is the active limit. Set via SetCompactionThreshold during
+// config wiring, or via the pony config profile's Context field.
+// Defaults to 80 KB if never set. Uses atomic for safe concurrent access
+// between config-setup and loop execution.
+var compactionThreshold atomic.Int64
+
+func init() {
+	compactionThreshold.Store(defaultCompactionThreshold)
+}
+
+// SetCompactionThreshold overrides the history compaction byte threshold.
+// Values <= 0 reset to the default (80 KB). Called from New() which derives
+// the byte value from the profile's Context field (tokens × bytesPerToken).
+// Safe to call concurrently with active RunLoop calls.
+func SetCompactionThreshold(bytes int) {
+	if bytes <= 0 {
+		compactionThreshold.Store(defaultCompactionThreshold)
+		return
+	}
+	compactionThreshold.Store(int64(bytes))
+}
+
+// compactHistory truncates old tool result messages when the total history byte
+// size exceeds the compaction threshold. It keeps system messages, user messages,
+// and assistant messages intact. Only tool results outside the protected trailing
+// window (half the budget) are truncated. Returns a copy of history with
+// truncations applied, or the original slice if no compaction is needed.
+func compactHistory(history []model.Message) []model.Message {
+	threshold := int(compactionThreshold.Load())
+	total := 0
+	for _, msg := range history {
+		total += len(msg.Content)
+	}
+	if total <= threshold {
+		return history
+	}
+
+	// Work backwards to find the cutoff: the most recent messages up to
+	// half the budget are protected. Tool results before the cutoff get
+	// their content replaced with a size summary.
+	protectedBudget := threshold / 2
+	remaining := protectedBudget
+	cutoff := len(history)
+	for i := len(history) - 1; i >= 0 && remaining > 0; i-- {
+		remaining -= len(history[i].Content)
+		cutoff = i
+	}
+
+	// Guarantee at least one tool result is truncated when over threshold.
+	// Without this, the protected window can cover all messages and no
+	// compaction occurs, causing unbounded history growth.
+	if cutoff == 0 {
+		for i := 0; i < len(history); i++ {
+			if history[i].Role == model.RoleTool && len(history[i].Content) > 200 {
+				cutoff = i + 1
+				break
+			}
+		}
+	}
+
+	compacted := make([]model.Message, len(history))
+	for i, msg := range history {
+		if i < cutoff && msg.Role == model.RoleTool && len(msg.Content) > 200 {
+			compacted[i] = model.Message{
+				Role:       msg.Role,
+				ToolCallID: msg.ToolCallID,
+				Content:    fmt.Sprintf("[tool result truncated: was %d bytes]", len(msg.Content)),
+			}
+		} else {
+			compacted[i] = msg
+		}
+	}
+	return compacted
+}
 
 // RunLoop drives the multi-turn loop until a stop condition or terminal condition.
 //
@@ -62,9 +144,11 @@ func RunLoop(
 
 turnLoop:
 	for turn := 0; ; turn++ {
+		compact := compactHistory(history)
+
 		req := model.Request{
 			Model:     modelName,
-			Messages:  history,
+			Messages:  compact,
 			Tools:     toolDefs,
 			Stream:    true,
 			MaxTokens: maxTokens,

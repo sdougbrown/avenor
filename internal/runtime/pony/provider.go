@@ -25,20 +25,21 @@ var RuntimeIDKey = &runtimeIDKey{}
 
 // Config configures the pony provider.
 type Config struct {
-	Adapter          model.Adapter
-	Model            string
-	MaxTokens        int
-	SystemPrompt     string
-	InitialPrompt    string
-	Executor         OrchestratorExecutor // nil when OrchTools is false
-	LocalTools       bool
-	OrchTools        bool
-	WorkingDir       string // for AGENTS.md discovery
-	InjectAgentsMD   bool
-	AllowedReadDirs  []string        // additional directories read tools may access (e.g. skills)
-	AllowedWriteDirs []string        // additional directories write tools may access
-	ToolApproval     map[string]bool // tool name → requires approval
-	ShellConfig      *ShellConfig    // overrides for shell tool
+	Adapter                model.Adapter
+	Model                  string
+	MaxTokens              int
+	SystemPrompt           string
+	InitialPrompt          string
+	Executor               OrchestratorExecutor // nil when OrchTools is false
+	LocalTools             bool
+	OrchTools              bool
+	WorkingDir             string // for AGENTS.md discovery
+	InjectAgentsMD         bool
+	AllowedReadDirs        []string        // additional directories read tools may access (e.g. skills)
+	AllowedWriteDirs       []string        // additional directories write tools may access
+	ToolApproval           map[string]bool // tool name → requires approval
+	ShellConfig     *ShellConfig    // overrides for shell tool
+	Context         int             // model context window in tokens; 0 = use default compaction
 	// Registry is internal; built from tool config.
 	toolRegistry *tools.Registry
 
@@ -95,6 +96,16 @@ func systemPromptWithToolInstructions(base string, localTools, orchTools bool) s
 
 // New creates a new pony provider with the given config.
 func New(cfg Config) *Provider {
+	// Derive compaction threshold from context limit (tokens → bytes).
+	// bytesPerToken is conservative — code averages ~3.5, natural language ~4.
+	// Leaves room for output budget and tool definition overhead.
+	const bytesPerToken = 3
+	if cfg.Context > 0 {
+		SetCompactionThreshold(cfg.Context * bytesPerToken)
+	} else {
+		SetCompactionThreshold(0) // reset to default
+	}
+
 	// Build tool registry based on config
 	var toolList []tools.Tool
 	if cfg.LocalTools {

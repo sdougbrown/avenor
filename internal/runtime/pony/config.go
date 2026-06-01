@@ -22,17 +22,18 @@ type PonyConfig struct {
 
 // Profile defines a named agent profile with its own model, prompts, and tool gating.
 type Profile struct {
-	Model          string      `json:"model"`
-	SystemPrompt   string      `json:"system_prompt,omitempty"`
-	InitialPrompt  string      `json:"initial_prompt,omitempty"`
-	InjectAgentsMD bool        `json:"inject_agents_md,omitempty"`
-	Tools          ToolGate    `json:"tools"`
-	MaxTokens      int         `json:"max_tokens,omitempty"`
-	ToolApproval   ToolApproval `json:"tool_approval,omitempty"`
-	ShellConfig    *ShellConfig `json:"shell_config,omitempty"`
-	BaseURL        string      `json:"base_url,omitempty"`
-	APIKeyEnv      string      `json:"api_key_env,omitempty"`
-	Skills         []string    `json:"skills,omitempty"`       // skill names to load
+	Model                  string        `json:"model"`
+	SystemPrompt           string        `json:"system_prompt,omitempty"`
+	InitialPrompt          string        `json:"initial_prompt,omitempty"`
+	InjectAgentsMD         bool          `json:"inject_agents_md,omitempty"`
+	Tools                  ToolGate      `json:"tools"`
+	MaxTokens              int           `json:"max_tokens,omitempty"`
+	ToolApproval           ToolApproval  `json:"tool_approval,omitempty"`
+	ShellConfig            *ShellConfig  `json:"shell_config,omitempty"`
+	BaseURL                string        `json:"base_url,omitempty"`
+	APIKeyEnv              string        `json:"api_key_env,omitempty"`
+	Skills  []string `json:"skills,omitempty"`  // skill names to load
+	Context int      `json:"context,omitempty"`  // model context window in tokens; 0 = use default compaction (80 KB)
 }
 
 // ToolGate controls which tool groups are enabled for a profile.

@@ -219,19 +219,20 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		}
 
 		pCfg := pony.Config{
-			Adapter:         adapter,
-			Model:           profile.Model,
-			MaxTokens:       profile.MaxTokens,
-			SystemPrompt:    systemPrompt,
-			InitialPrompt:   initialPrompt,
-			Executor:        executor,
-			LocalTools:      profile.Tools.Local,
-			OrchTools:       profile.Tools.Orchestration,
-			WorkingDir:      *dir,
-			InjectAgentsMD:  profile.InjectAgentsMD,
-			ToolApproval:    profile.ToolApproval,
-			ShellConfig:     profile.ShellConfig,
+			Adapter:                adapter,
+			Model:                  profile.Model,
+			MaxTokens:              profile.MaxTokens,
+			SystemPrompt:           systemPrompt,
+			InitialPrompt:          initialPrompt,
+			Executor:               executor,
+			LocalTools:             profile.Tools.Local,
+			OrchTools:              profile.Tools.Orchestration,
+			WorkingDir:             *dir,
+			InjectAgentsMD:         profile.InjectAgentsMD,
+			ToolApproval:           profile.ToolApproval,
+			ShellConfig:            profile.ShellConfig,
 			AllowedReadDirs: allowedDirs,
+			Context:         profile.Context,
 		}
 		pony.SetGlobalConfig(&pCfg)
 	}
