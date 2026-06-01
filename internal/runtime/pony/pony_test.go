@@ -852,11 +852,79 @@ func TestProvider_Start_multipleSessions(t *testing.T) {
 
 func TestProvider_Resume(t *testing.T) {
 	ctx := context.Background()
-	p := New(Config{Model: "test-model"})
+	p := New(Config{Model: "test-model", WorkingDir: t.TempDir()})
 
-	_, err := p.Resume(ctx, "pony_1")
+	s1, err := p.Start(ctx, runtime.StartOptions{})
+	if err != nil {
+		t.Fatalf("Start error: %v", err)
+	}
+
+	s2, err := p.Resume(ctx, s1.SessionID)
+	if err != nil {
+		t.Fatalf("Resume error: %v", err)
+	}
+	if s2.SessionID != s1.SessionID {
+		t.Errorf("resumed SessionID = %q, want %q", s2.SessionID, s1.SessionID)
+	}
+	if s2.Backend != backendID {
+		t.Errorf("resumed Backend = %q, want %q", s2.Backend, backendID)
+	}
+
+	// Resuming an unknown session should still error
+	_, err = p.Resume(ctx, "nonexistent")
 	if err == nil {
-		t.Fatal("expected error from Resume, got nil")
+		t.Fatal("expected error for unknown session, got nil")
+	}
+}
+
+func TestProvider_Resume_thenPromptExtendsHistory(t *testing.T) {
+	ctx := context.Background()
+	p := New(Config{
+		Model:    "test-model",
+		Adapter:  &fakeAdapter{chunks: []model.Chunk{textChunk("ack"), finishChunk("stop")}},
+		MaxTokens: 100,
+	})
+
+	s1, err := p.Start(ctx, runtime.StartOptions{})
+	if err != nil {
+		t.Fatalf("Start error: %v", err)
+	}
+
+	// First prompt — adds to history
+	if err := p.Prompt(ctx, s1.SessionID, "first question"); err != nil {
+		t.Fatalf("first Prompt error: %v", err)
+	}
+
+	// Resume the session
+	s2, err := p.Resume(ctx, s1.SessionID)
+	if err != nil {
+		t.Fatalf("Resume error: %v", err)
+	}
+
+	// Second prompt — should extend existing history with 4+ messages
+	// (system + user("first question") + assistant + user("second question"))
+	if err := p.Prompt(ctx, s2.SessionID, "second question"); err != nil {
+		t.Fatalf("second Prompt error: %v", err)
+	}
+
+	// Verify the session has extended history
+	p.mu.Lock()
+	ss, ok := p.sessions[s1.SessionID]
+	p.mu.Unlock()
+	if !ok {
+		t.Fatal("session not found after resume + prompt")
+	}
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+
+	// History should have at least 4 messages:
+	// user("first") + assistant + user("second") + assistant
+	if len(ss.history) < 4 {
+		t.Fatalf("history length = %d, want >= 4 (2 user + 2 assistant rounds)", len(ss.history))
+	}
+	lastUser := ss.history[len(ss.history)-2]
+	if lastUser.Role != model.RoleUser || lastUser.Content != "second question" {
+		t.Errorf("last user message = %+v, want user: second question", lastUser)
 	}
 }
 

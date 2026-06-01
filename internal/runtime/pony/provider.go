@@ -2,7 +2,6 @@ package pony
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -215,7 +214,16 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 }
 
 func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Session, error) {
-	return runtime.Session{}, errors.New("resume not supported by pony backend")
+	p.mu.Lock()
+	_, ok := p.sessions[sessionID]
+	p.mu.Unlock()
+	if !ok {
+		return runtime.Session{}, fmt.Errorf("unknown session: %s", sessionID)
+	}
+	return runtime.Session{
+		SessionID: sessionID,
+		Backend:   backendID,
+	}, nil
 }
 
 func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) error {
