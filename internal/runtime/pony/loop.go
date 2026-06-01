@@ -369,6 +369,13 @@ turnLoop:
 
 		var assistantContent strings.Builder
 		accumulators := make(map[int]*accumulatedToolCall)
+		// Per-turn guard for degenerate reasoning streams. The guard
+		// watches each ChunkTypeReasoning delta and trips an early
+		// session-end when the upstream stream has become clearly
+		// non-productive (provider control-token leakage, long runs of
+		// single-character hex deltas, or a window dominated by hex with
+		// no other progress). See degenerate.go for the detection rules.
+		guard := &reasoningStreamGuard{}
 
 		for chunk := range chunkCh {
 			select {
@@ -386,6 +393,33 @@ turnLoop:
 				emit(eventCh, "agent.message_chunk", map[string]any{"delta": chunk.Text})
 
 			case model.ChunkTypeReasoning:
+				if reason := guard.Observe(chunk.ReasoningContent); reason != "" {
+					// The reasoning stream has gone degenerate. Stop
+					// reading the upstream channel (the goroutine
+					// draining it will return on context cancel) and
+					// terminate the session with a diagnostic stop
+					// reason so the team runner can surface the failed
+					// member while preserving completed siblings.
+					//
+					// We return a nil error so LoopWithRetry does not
+					// retry a degenerate stream — retrying would just
+					// produce the same bad output. The diagnostic info
+					// lives in the emitted events; consumers that want
+					// to surface it to a human can read the
+					// avenor.error event.
+					emit(eventCh, "avenor.error", map[string]any{
+						"source":      "loop",
+						"kind":        "degenerate_reasoning_stream",
+						"stop_reason": degenerateReasoningStopReason,
+						"model":       modelName,
+						"message":     reason,
+						"diagnostics": guard.Diagnostics(),
+					})
+					emit(eventCh, "session.end", map[string]any{
+						"stop_reason": degenerateReasoningStopReason,
+					})
+					return history, degenerateReasoningStopReason, nil
+				}
 				emit(eventCh, "agent.thought_chunk", map[string]any{"delta": chunk.ReasoningContent})
 
 			case model.ChunkTypeToolCallDelta:

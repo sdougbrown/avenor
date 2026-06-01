@@ -10,6 +10,7 @@ import (
 
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/phaseconfig"
+	"github.com/sdougbrown/avenor/internal/runtime"
 )
 
 // ---- Test helpers ----
@@ -947,5 +948,111 @@ func TestRunPhaseEndPreservesExplicitStopReason(t *testing.T) {
 	}
 	if got != "progress_timeout" {
 		t.Fatalf("phase.end stop_reason = %v, want progress_timeout; events=%+v", got, sink.events)
+	}
+}
+
+// TestRunTeamPreservesCompletedMembersOnDegenerateStream verifies the
+// cross-member behaviour the user asked for: when one team member
+// aborts with degenerate_reasoning_stream, the team result must
+// clearly report the failed member while still preserving the
+// outputs of completed members. This is the user-visible contract
+// that umpire-bot's Run() relies on when it falls back to partial
+// reviewer output (see review/runner.go: reviewRawHasFindings +
+// "Pony team produced no raw findings").
+func TestRunTeamPreservesCompletedMembersOnDegenerateStream(t *testing.T) {
+	cfg := makeConfig(
+		nil,
+		[]phaseconfig.Phase{
+			simplePhase("reviewer", "review code"),
+			simplePhase("test-reviewer", "review tests"),
+		},
+		nil,
+	)
+
+	sink := &recordingEventWriter{}
+	result, err := Run(context.Background(), RunOptions{
+		WorkDir:   t.TempDir(),
+		RunID:     "test-run",
+		EventSink: sink,
+		Config:    cfg,
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
+			switch phase.Name {
+			case "reviewer":
+				// Healthy member: returns a review with output and final reply.
+				return PhaseAttemptResult{
+					ExitCode:   0,
+					SessionID:  "reviewer-s",
+					StopReason: "end_turn",
+					Output:     "reviewer raw output\n## Findings\nnone",
+					FinalReply: "Looks good.",
+				}, nil
+			case "test-reviewer":
+				// Failed member: pony's reasoning stream guard tripped.
+				// The runner returns ExitCode 1 (mapped from
+				// unknown stop reason) and the explicit stop_reason
+				// of degenerate_reasoning_stream.
+				return PhaseAttemptResult{
+					ExitCode:   runtime.ExitCodeForStopReason("degenerate_reasoning_stream"),
+					SessionID:  "test-reviewer-s",
+					StopReason: "degenerate_reasoning_stream",
+				}, nil
+			}
+			return PhaseAttemptResult{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	// Team run is reported as a phase failure: exit_code=1, stop_reason
+	// surfaces the failed member's reason.
+	if result.StopReason != "degenerate_reasoning_stream" {
+		t.Errorf("RunResult.StopReason = %q, want degenerate_reasoning_stream", result.StopReason)
+	}
+	if result.ExitCode == 0 {
+		t.Errorf("RunResult.ExitCode = %d, want non-zero for failed member", result.ExitCode)
+	}
+
+	// Verify the team.end event reports the failure with the members counts.
+	// Note: the team runner counts every member that returned a result as
+	// "completed" (only directive=abort counts as aborted). The failure
+	// is signalled by exit_reason=phase_failure together with the
+	// RunResult's stop_reason. This mirrors the actual production
+	// behaviour seen in /tmp/pony/failed-run-18.ndjson where
+	// members_completed=2, members_aborted=0, exit_reason=phase_failure.
+	var teamEnd *events.Event
+	for i := range sink.events {
+		if sink.events[i].Event == "avenor.team.end" {
+			teamEnd = &sink.events[i]
+			break
+		}
+	}
+	if teamEnd == nil {
+		t.Fatal("expected avenor.team.end event in stream")
+	}
+	if got := teamEnd.Fields["exit_reason"]; got != "phase_failure" {
+		t.Errorf("avenor.team.end exit_reason = %v, want phase_failure", got)
+	}
+	if got := teamEnd.Fields["members_aborted"]; got != 0 {
+		t.Errorf("members_aborted = %v, want 0 (no abort directive was issued)", got)
+	}
+
+	// Per-member phase.end events: test-reviewer should carry the
+	// degenerate_reasoning_stream stop_reason, reviewer should be end_turn.
+	phaseEndByName := map[string]string{}
+	for _, ev := range sink.events {
+		if ev.Event != "avenor.phase.end" {
+			continue
+		}
+		name, _ := ev.Fields["phase"].(string)
+		reason, _ := ev.Fields["stop_reason"].(string)
+		phaseEndByName[name] = reason
+	}
+	if phaseEndByName["test-reviewer"] != "degenerate_reasoning_stream" {
+		t.Errorf("test-reviewer phase.end stop_reason = %q, want degenerate_reasoning_stream",
+			phaseEndByName["test-reviewer"])
+	}
+	if phaseEndByName["reviewer"] != "end_turn" {
+		t.Errorf("reviewer phase.end stop_reason = %q, want end_turn", phaseEndByName["reviewer"])
 	}
 }

@@ -147,6 +147,39 @@ avenor --backend pony \
 
 When using models that support reasoning (like `kimi-k2`), Pony surfaces the internal thought process. Reasoning content is emitted as `agent.thought_chunk` events, allowing you to observe the agent's internal monologue before it produces tool calls or text.
 
+## Degenerate Stream Guard
+
+Pony includes a defensive guard against degenerate reasoning streams. Some
+upstream providers emit internal control tokens (Llama 3.1+ channel
+markers like `<|channel|>` or tool markers like `<tool_call|>`) into the
+reasoning field, or stream encoded payloads as one character at a time.
+When this happens, the model is no longer making useful progress and the
+output budget would be consumed without producing a result.
+
+The guard watches every `agent.thought_chunk` delta and aborts the
+session when one of three signals trips:
+
+- **Control-token leakage** — a delta matches a known upstream control
+  token (Llama 3.1 channels, Llama tool markers, end-of-text markers,
+  etc., in canonical or truncated form). One occurrence is enough;
+  legitimate reasoning never contains these sequences.
+- **Long hex run** — 256 or more consecutive deltas are each a single
+  hex/digit character.
+- **Window dominance** — the trailing 2048-delta window is dominated by
+  single hex deltas with no other progress (safety net for unusual
+  patterns).
+
+When the guard trips, the loop emits an `avenor.error` event with
+`source: "loop"`, `kind: "degenerate_reasoning_stream"`, the model name,
+and a `diagnostics` map (counters for the abort signal, observed total,
+hex totals, window state). The session ends with
+`stop_reason: "degenerate_reasoning_stream"`, which surfaces into
+`avenor.phase.end` and `avenor.team.end` so failed team members are
+reported clearly while completed members' outputs are preserved.
+
+The threshold constants live in `internal/runtime/pony/degenerate.go`
+and can be tuned if a new failure pattern emerges.
+
 ## Boundaries
 
 Pony is a lean execution loop. It does **not** currently handle:

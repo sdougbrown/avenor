@@ -118,16 +118,27 @@ Example:
 {"event":"avenor.retry","run_id":"run_1","attempt":1,"max_retries":3,"ts":1234567890}
 ```
 
-**`avenor.error`** — Avenor encountered a runtime error (malformed request, permission handler timeout, backend unavailable, etc.). Fields: `source` (subsystem: `"permission"`, `"cancel"`, `"backend"`, etc.), `message` (human-readable error text), `ts`.
+**`avenor.error`** — Avenor encountered a runtime error (malformed request, permission handler timeout, backend unavailable, etc.). Fields: `source` (subsystem: `"permission"`, `"cancel"`, `"backend"`, `"loop"`, etc.), `message` (human-readable error text), `ts`.
 
-Also includes `run_id` and `run_label` when present.
+Also includes `run_id` and `run_label` when present. Loop-level degenerate
+reasoning aborts include additional fields: `kind` (`"degenerate_reasoning_stream"`),
+`stop_reason` (the session-end stop reason that follows), `model` (the
+provider profile that produced the bad stream), and `diagnostics` (an
+object with `abort_signal`, `observed_total`, `hex_total`, `hex_in_window`,
+`window_size`, `consecutive_hex`, and `progress_in_window`).
 
 Classifies as MILESTONE because errors usually require operator intervention.
 
-Example:
+Example (permission timeout):
 
 ```json
 {"event":"avenor.error","session_id":"ses_xyz","run_id":"run_1","source":"permission","message":"handler timed out after 10m","ts":1234567890}
+```
+
+Example (degenerate reasoning stream):
+
+```json
+{"event":"avenor.error","session_id":"ses_xyz","source":"loop","kind":"degenerate_reasoning_stream","stop_reason":"degenerate_reasoning_stream","model":"gpt-oss-120b","message":"degenerate reasoning stream: provider control token leakage (<|channel>)","diagnostics":{"abort_signal":"control_token","observed_total":1,"hex_total":0,"hex_in_window":0,"window_size":2048,"consecutive_hex":0,"progress_in_window":0}}
 ```
 
 ### Status and session events
@@ -164,6 +175,13 @@ The `stop_reason` indicates *why* the session ended:
 - `"tool_use"` — Session ended while waiting for tool results (unexpected in normal flows).
 - `"timeout"` — Avenor's client-side timeout fired. Usage is best-effort from the buffer at timeout.
 - `"cancelled"` — Avenor or the operator cancelled the session. Usage may be incomplete.
+- `"degenerate_reasoning_stream"` — The reasoning/thought stream became
+  clearly non-productive (provider leakage of internal control tokens, or
+  a long run of single-character hex deltas). Avenor aborted the session
+  early to prevent the run from consuming the entire output budget. The
+  matching `avenor.error` event contains the abort signal and diagnostics;
+  the `model` and `session_id` fields on the error are enough to identify
+  the provider profile that produced the bad stream.
 
 Example (normal completion):
 
