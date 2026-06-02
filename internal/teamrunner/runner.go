@@ -398,10 +398,6 @@ func executePhase(ctx context.Context, opts RunOptions, phase phaseconfig.Phase,
 
 	renderedPhase := phase
 	renderedPhase.Prompt = rendered
-	if kind != "team" {
-		renderedPhase.Agent = ""
-		renderedPhase.Model = ""
-	}
 
 	if err := phaseconfig.EmitPhaseStart(opts.EventSink, opts.RunID, phase.Name, 0, kind); err != nil {
 		return PhaseAttemptResult{}, err

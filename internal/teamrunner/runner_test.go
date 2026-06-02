@@ -746,7 +746,7 @@ func TestRunAgentModelOverride(t *testing.T) {
 	}
 }
 
-func TestRunPreAndPostIgnoreAgentModelOverride(t *testing.T) {
+func TestRunAllTeamPhasesAllowAgentModelOverride(t *testing.T) {
 	cfg := makeConfig(
 		[]phaseconfig.Phase{{Name: "setup", Prompt: "setup", Agent: "pre-agent", Model: "pre-model"}},
 		[]phaseconfig.Phase{{Name: "review", Prompt: "review", Agent: "team-agent", Model: "team-model"}},
@@ -767,14 +767,14 @@ func TestRunPreAndPostIgnoreAgentModelOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if got["setup"] != [2]string{"", ""} {
-		t.Fatalf("pre phase override leaked through: %+v", got["setup"])
+	if got["setup"] != [2]string{"pre-agent", "pre-model"} {
+		t.Fatalf("pre phase overrides = %+v, want pre-agent/pre-model", got["setup"])
 	}
 	if got["review"] != [2]string{"team-agent", "team-model"} {
 		t.Fatalf("team phase overrides = %+v, want team-agent/team-model", got["review"])
 	}
-	if got["report"] != [2]string{"", ""} {
-		t.Fatalf("post phase override leaked through: %+v", got["report"])
+	if got["report"] != [2]string{"post-agent", "post-model"} {
+		t.Fatalf("post phase overrides = %+v, want post-agent/post-model", got["report"])
 	}
 }
 
