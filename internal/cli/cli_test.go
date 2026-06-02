@@ -568,6 +568,18 @@ func TestRunTeamFileFakeE2E(t *testing.T) {
 	t.Cleanup(func() { newProvider = oldNewProvider })
 
 	dir := t.TempDir()
+	xdgDir := filepath.Join(dir, "xdg")
+	opencodeDir := filepath.Join(xdgDir, "opencode")
+	if err := os.MkdirAll(opencodeDir, 0o700); err != nil {
+		t.Fatalf("mkdir opencode config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(opencodeDir, "opencode.json"), []byte(`{
+		"agent": {
+			"style-agent": {"model": "style-model"}
+		}
+	}`), 0o600); err != nil {
+		t.Fatalf("write opencode config: %v", err)
+	}
 	teamPath := filepath.Join(dir, "team.json")
 	eventsPath := filepath.Join(dir, "events.ndjson")
 	sentinelPath := filepath.Join(dir, "run.done")
@@ -575,7 +587,7 @@ func TestRunTeamFileFakeE2E(t *testing.T) {
 		"pre":[{"name":"decide","prompt":"decide reviewers"}],
 		"team":[
 			{"name":"security","prompt":"review security","conditional":true,"agent":"security-agent","model":"security-model"},
-			{"name":"style","prompt":"review style","agent":"style-agent","model":"style-model"}
+			{"name":"style","prompt":"review style","agent":"style-agent"}
 		],
 		"post":[{"name":"report","prompt":"summarize findings"}]
 	}`
@@ -592,7 +604,12 @@ func TestRunTeamFileFakeE2E(t *testing.T) {
 		"--run-id", "run_team_e2e",
 		"--agent", "default-agent",
 		"--model", "default-model",
-	}, func(string) string { return "" }, &stderr)
+	}, func(key string) string {
+		if key == "XDG_CONFIG_HOME" {
+			return xdgDir
+		}
+		return ""
+	}, &stderr)
 	if exitCode != 0 {
 		t.Fatalf("run() = %d, want 0; stderr=%s", exitCode, stderr.String())
 	}

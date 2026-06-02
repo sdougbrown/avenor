@@ -334,7 +334,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	}
 
 	if *agent != "" && *model == "" {
-		resolved, err := resolveAgentModel(*agent)
+		resolved, err := resolveAgentModel(*agent, getenv)
 		if err != nil {
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
 		}
@@ -405,6 +405,14 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		}
 		if phase.Model != "" {
 			m = phase.Model
+		} else if phase.Agent != "" {
+			resolved, err := resolveAgentModel(phase.Agent, getenv)
+			if err != nil {
+				return teamrunner.PhaseAttemptResult{ExitCode: 1}, err
+			}
+			if resolved != "" {
+				m = resolved
+			}
 		}
 		r := execAttempt(ctx, a, m, prevSessionID, phase.Prompt)
 		return teamrunner.PhaseAttemptResult{
@@ -1226,13 +1234,9 @@ func ParsePermissionHandler(value string) (*permission.FileHandler, error) {
 // resolveAgentModel reads opencode's config and returns the configured model
 // for the given agent name. Returns ("", nil) if not found. Returns a non-nil
 // error only when a config file exists but cannot be parsed (malformed JSON).
-func resolveAgentModel(agentName string) (string, error) {
-	dir := opencodeConfigDir()
-	if dir == "" {
-		return "", nil
-	}
-	for _, name := range []string{"opencode.json", "opencode.jsonc"} {
-		model, err := readAgentModel(filepath.Join(dir, name), agentName)
+func resolveAgentModel(agentName string, getenv func(string) string) (string, error) {
+	for _, path := range opencodeConfigPaths(getenv) {
+		model, err := readAgentModel(path, agentName)
 		if err != nil {
 			return "", err
 		}
@@ -1243,15 +1247,26 @@ func resolveAgentModel(agentName string) (string, error) {
 	return "", nil
 }
 
-func opencodeConfigDir() string {
-	if dir := os.Getenv("OPENCODE_CONFIG_DIR"); dir != "" {
-		return dir
+func opencodeConfigPaths(getenv func(string) string) []string {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	if path := getenv("OPENCODE_CONFIG"); path != "" {
+		return []string{path}
+	}
+	if dir := getenv("OPENCODE_CONFIG_DIR"); dir != "" {
+		return []string{filepath.Join(dir, "opencode.json"), filepath.Join(dir, "opencode.jsonc")}
+	}
+	if xdg := getenv("XDG_CONFIG_HOME"); xdg != "" {
+		dir := filepath.Join(xdg, "opencode")
+		return []string{filepath.Join(dir, "opencode.json"), filepath.Join(dir, "opencode.jsonc")}
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return ""
+		return nil
 	}
-	return filepath.Join(home, ".config", "opencode")
+	dir := filepath.Join(home, ".config", "opencode")
+	return []string{filepath.Join(dir, "opencode.json"), filepath.Join(dir, "opencode.jsonc")}
 }
 
 func readAgentModel(path, agentName string) (string, error) {

@@ -107,22 +107,54 @@ func TestReadAgentModel(t *testing.T) {
 	})
 }
 
-func TestOpenCodeConfigDir(t *testing.T) {
+func TestOpenCodeConfigPaths(t *testing.T) {
 	t.Run("uses env var when set", func(t *testing.T) {
-		t.Setenv("OPENCODE_CONFIG_DIR", "/custom/config")
-		got := opencodeConfigDir()
-		if got != "/custom/config" {
-			t.Errorf("opencodeConfigDir() = %q, want /custom/config", got)
+		got := opencodeConfigPaths(func(key string) string {
+			if key == "OPENCODE_CONFIG_DIR" {
+				return "/custom/config"
+			}
+			return ""
+		})
+		want := []string{filepath.Join("/custom/config", "opencode.json"), filepath.Join("/custom/config", "opencode.jsonc")}
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("opencodeConfigPaths() = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("uses explicit config file first", func(t *testing.T) {
+		got := opencodeConfigPaths(func(key string) string {
+			if key == "OPENCODE_CONFIG" {
+				return "/custom/opencode.json"
+			}
+			if key == "OPENCODE_CONFIG_DIR" {
+				return "/custom/config"
+			}
+			return ""
+		})
+		if len(got) != 1 || got[0] != "/custom/opencode.json" {
+			t.Errorf("opencodeConfigPaths() = %v, want explicit file", got)
+		}
+	})
+
+	t.Run("uses XDG_CONFIG_HOME", func(t *testing.T) {
+		got := opencodeConfigPaths(func(key string) string {
+			if key == "XDG_CONFIG_HOME" {
+				return "/xdg"
+			}
+			return ""
+		})
+		want := []string{filepath.Join("/xdg", "opencode", "opencode.json"), filepath.Join("/xdg", "opencode", "opencode.jsonc")}
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("opencodeConfigPaths() = %v, want %v", got, want)
 		}
 	})
 
 	t.Run("falls back to ~/.config/opencode", func(t *testing.T) {
-		t.Setenv("OPENCODE_CONFIG_DIR", "")
-		got := opencodeConfigDir()
+		got := opencodeConfigPaths(func(string) string { return "" })
 		home, _ := os.UserHomeDir()
-		want := filepath.Join(home, ".config", "opencode")
-		if got != want {
-			t.Errorf("opencodeConfigDir() = %q, want %q", got, want)
+		want := []string{filepath.Join(home, ".config", "opencode", "opencode.json"), filepath.Join(home, ".config", "opencode", "opencode.jsonc")}
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("opencodeConfigPaths() = %v, want %v", got, want)
 		}
 	})
 }
@@ -147,9 +179,13 @@ func TestResolveAgentModel(t *testing.T) {
 				"jockey": map[string]any{"model": "deepseek-v4-flash"},
 			},
 		})
-		t.Setenv("OPENCODE_CONFIG_DIR", dir)
 
-		model, err := resolveAgentModel("jockey")
+		model, err := resolveAgentModel("jockey", func(key string) string {
+			if key == "OPENCODE_CONFIG_DIR" {
+				return dir
+			}
+			return ""
+		})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -164,9 +200,13 @@ func TestResolveAgentModel(t *testing.T) {
 				"horse": map[string]any{"model": "gpt-5"},
 			},
 		})
-		t.Setenv("OPENCODE_CONFIG_DIR", dir)
 
-		model, err := resolveAgentModel("horse")
+		model, err := resolveAgentModel("horse", func(key string) string {
+			if key == "OPENCODE_CONFIG_DIR" {
+				return dir
+			}
+			return ""
+		})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -180,18 +220,25 @@ func TestResolveAgentModel(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "opencode.json"), []byte("{broken"), 0o600); err != nil {
 			t.Fatalf("write: %v", err)
 		}
-		t.Setenv("OPENCODE_CONFIG_DIR", dir)
 
-		_, err := resolveAgentModel("jockey")
+		_, err := resolveAgentModel("jockey", func(key string) string {
+			if key == "OPENCODE_CONFIG_DIR" {
+				return dir
+			}
+			return ""
+		})
 		if err == nil {
 			t.Fatal("expected parse error, got nil")
 		}
 	})
 
 	t.Run("returns empty when no config dir", func(t *testing.T) {
-		t.Setenv("OPENCODE_CONFIG_DIR", "/nonexistent/dir")
-
-		model, err := resolveAgentModel("jockey")
+		model, err := resolveAgentModel("jockey", func(key string) string {
+			if key == "OPENCODE_CONFIG_DIR" {
+				return "/nonexistent/dir"
+			}
+			return ""
+		})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -204,9 +251,13 @@ func TestResolveAgentModel(t *testing.T) {
 		dir := writeConfig("opencode.json", map[string]any{
 			"agent": map[string]any{},
 		})
-		t.Setenv("OPENCODE_CONFIG_DIR", dir)
 
-		model, err := resolveAgentModel("nonexistent")
+		model, err := resolveAgentModel("nonexistent", func(key string) string {
+			if key == "OPENCODE_CONFIG_DIR" {
+				return dir
+			}
+			return ""
+		})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
