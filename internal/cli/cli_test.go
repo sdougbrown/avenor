@@ -557,7 +557,12 @@ func TestRunTeamFileConfigErrorWritesErrorSentinel(t *testing.T) {
 func TestRunTeamFileFakeE2E(t *testing.T) {
 	oldNewProvider := newProvider
 	provider := newScriptedProvider()
+	var backendsMu sync.Mutex
+	var backends []string
 	newProvider = func(startOpts runtime.StartOptions, backend string) (runtime.Provider, error) {
+		backendsMu.Lock()
+		backends = append(backends, backend)
+		backendsMu.Unlock()
 		return provider, nil
 	}
 	t.Cleanup(func() { newProvider = oldNewProvider })
@@ -580,6 +585,7 @@ func TestRunTeamFileFakeE2E(t *testing.T) {
 
 	var stderr strings.Builder
 	exitCode := run([]string{
+		"--backend", "gemini-acp",
 		"--team-file", teamPath,
 		"--on-event", eventsPath,
 		"--sentinel-file", sentinelPath,
@@ -661,6 +667,17 @@ func TestRunTeamFileFakeE2E(t *testing.T) {
 	}
 	if !sawPre || !sawStyle || !sawPost {
 		t.Fatalf("did not observe all expected phases in provider snapshot: %+v", sessions)
+	}
+
+	backendsMu.Lock()
+	defer backendsMu.Unlock()
+	if len(backends) != 3 {
+		t.Fatalf("provider backends = %v, want 3 gemini-acp entries", backends)
+	}
+	for _, backend := range backends {
+		if backend != "gemini-acp" {
+			t.Fatalf("provider backends = %v, want only gemini-acp", backends)
+		}
 	}
 }
 
