@@ -103,7 +103,7 @@ type shellInput struct {
 func (t *ShellTool) Name() string { return "shell" }
 
 func (t *ShellTool) Description() string {
-	return fmt.Sprintf("Run a command and return its output. Prefer cmd plus args for exact argv execution. cmd must be only the executable name; put subcommands and flags in args. Examples: {\"cmd\":\"git\",\"args\":[\"diff\",\"--stat\",\"base...head\"]}, {\"cmd\":\"git\",\"args\":[\"diff\",\"--name-only\",\"base...head\"]}, and {\"cmd\":\"ls\",\"args\":[\"packages\"]}. Do not use {\"cmd\":\"git diff\",...}, {\"cmd\":\"git\",\"args\":[\"--stat\",...]}, or repeat the executable in args. The legacy command string supports quote grouping but no shell interpreter, so pipes, redirects, command substitution, and command chaining do not work. Timeout: %ds, output cap: %dKB.",
+	return fmt.Sprintf("Run a command and return its output. Prefer cmd plus args for exact argv execution. cmd must be only the executable name; put subcommands and flags in args. Examples: {\"cmd\":\"git\",\"args\":[\"diff\",\"--stat\",\"base...head\"]}, {\"cmd\":\"git\",\"args\":[\"diff\",\"--name-only\",\"base...head\"]}, and {\"cmd\":\"ls\",\"args\":[\"packages\"]}. Do not use {\"cmd\":\"git diff\",...}, {\"cmd\":\"git\",\"args\":[\"--stat\",...]}, or repeat the executable in args. The legacy command string supports quote grouping but no shell interpreter, so pipes, redirects, shell builtins, command substitution, and command chaining do not work. Timeout: %ds, output cap: %dKB.",
 		t.cfg.TimeoutSeconds, t.cfg.MaxOutputBytes/1024)
 }
 

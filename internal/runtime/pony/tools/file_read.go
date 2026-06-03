@@ -24,7 +24,7 @@ func NewFileReadTool() Tool {
 }
 
 // NewFileReadToolWithConfig creates a FileReadTool with the given config overrides.
-// Nil config uses the default 12 KB cap. Zero or negative MaxOutputBytes also
+// Nil config uses the default 32 KB cap. Zero or negative MaxOutputBytes also
 // falls back to the default.
 func NewFileReadToolWithConfig(cfg *FileReadConfig) Tool {
 	t := &FileReadTool{
