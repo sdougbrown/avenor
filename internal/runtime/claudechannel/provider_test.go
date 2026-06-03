@@ -5,7 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/runtime/claudechannel/broker"
 )
 
 func TestNewWithOptions(t *testing.T) {
@@ -129,5 +131,46 @@ func TestCancelNotFound(t *testing.T) {
 	err := p.Cancel(context.Background(), "no-such-session")
 	if err == nil {
 		t.Fatal("expected error for nonexistent session")
+	}
+}
+
+func TestPollBrokerEventsMarksFinishedBeforeSendingEnd(t *testing.T) {
+	runID := "run-1"
+	b := broker.New("")
+	if _, err := b.CreateRun(runID); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	st := b.GetRun(runID)
+	st.Lock()
+	st.Finishes = append(st.Finishes, broker.Finish{Status: "done", Summary: "ok", FilesChanged: []string{}})
+	st.Unlock()
+
+	p := &Provider{broker: b}
+	s := &session{sessionID: "session-1", runID: runID, events: make(chan events.Event, 1)}
+
+	p.pollBrokerEvents(s)
+
+	s.mu.Lock()
+	finished := s.finished
+	s.mu.Unlock()
+	if !finished {
+		t.Fatal("session should be marked finished before session.end is consumed")
+	}
+	select {
+	case ev := <-s.events:
+		if ev.Event != "session.end" {
+			t.Fatalf("event = %q, want session.end", ev.Event)
+		}
+	default:
+		t.Fatal("expected session.end event")
+	}
+}
+
+func TestWaitForPaneReadyStopsOnContextCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if waitForPaneReady(ctx, "missing-session") {
+		t.Fatal("waitForPaneReady should stop when context is canceled")
 	}
 }

@@ -22,6 +22,13 @@ import (
 
 const backendID = "claude-channel"
 
+const (
+	startupPromptCheckInterval = 500 * time.Millisecond
+	startupPromptTimeout       = 30 * time.Second
+	promptInjectCheckInterval  = 500 * time.Millisecond
+	promptInjectTimeout        = 30 * time.Second
+)
+
 // Provider implements runtime.Provider for an interactive Claude Code session
 // controlled via claude/channel push events with tmux lifecycle management.
 type Provider struct {
@@ -45,6 +52,7 @@ type session struct {
 
 	events   chan events.Event
 	done     chan struct{}
+	ctx      context.Context
 	cancelFn context.CancelFunc
 
 	startedAt time.Time
@@ -230,16 +238,6 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		}
 	}
 
-	// Auto-confirm the "Loading development channels" security prompt that
-	// Claude Code shows when --dangerously-load-development-channels is used.
-	// Without this, the detached tmux session blocks forever waiting for Enter.
-	// Claude takes ~15-20s to start and render the prompt; we fire a delayed
-	// send-keys in a goroutine so Start() returns without blocking.
-	go func() {
-		time.Sleep(20 * time.Second)
-		_ = exec.Command("tmux", "send-keys", "-t", tmuxName, "Enter").Run()
-	}()
-
 	sessCtx, cancel := context.WithCancel(context.Background())
 	s := &session{
 		sessionID:  sessionID,
@@ -252,11 +250,14 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		mcpConfig:  mcpConfigPath,
 		events:     make(chan events.Event, 64),
 		done:       make(chan struct{}),
+		ctx:        sessCtx,
 		cancelFn:   cancel,
 		startedAt:  time.Now(),
 	}
 
 	p.sessions[sessionID] = s
+
+	go autoConfirmDevelopmentChannelPrompt(sessCtx, s)
 
 	go p.runSession(sessCtx, s)
 
@@ -284,8 +285,14 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 // runSession supervises the Claude tmux session and forwards broker events into
 // the event stream. It cleans up the tmux session and tmpdir on exit.
 func (p *Provider) runSession(ctx context.Context, s *session) {
+	defer s.cancelFn()
 	defer close(s.done)
 	defer close(s.events)
+	defer func() {
+		p.mu.Lock()
+		delete(p.sessions, s.sessionID)
+		p.mu.Unlock()
+	}()
 	defer func() {
 		_ = exec.Command("tmux", "kill-session", "-t", s.tmuxName).Run()
 		_ = os.RemoveAll(s.mcpDir)
@@ -296,7 +303,11 @@ func (p *Provider) runSession(ctx context.Context, s *session) {
 	go func() {
 		defer close(sessionGone)
 		for {
-			time.Sleep(500 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(500 * time.Millisecond):
+			}
 			if err := exec.Command("tmux", "has-session", "-t", s.tmuxName).Run(); err != nil {
 				return
 			}
@@ -358,6 +369,9 @@ func (p *Provider) pollBrokerEvents(s *session) {
 		s.events <- brokerEvent(s.sessionID, rep.State, rep.Payload)
 	}
 	for _, fin := range finishes {
+		s.mu.Lock()
+		s.finished = true
+		s.mu.Unlock()
 		s.events <- events.Event{
 			Event:     "session.end",
 			SessionID: s.sessionID,
@@ -368,9 +382,6 @@ func (p *Provider) pollBrokerEvents(s *session) {
 				"stop_reason":   mapFinishStatus(fin.Status),
 			},
 		}
-		p.mu.Lock()
-		s.finished = true
-		p.mu.Unlock()
 	}
 	for _, rep := range replies {
 		s.events <- events.Event{
@@ -392,7 +403,10 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 	if !ok {
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
-	if s.finished {
+	s.mu.Lock()
+	finished := s.finished
+	s.mu.Unlock()
+	if finished {
 		return fmt.Errorf("session already finished: %s", sessionID)
 	}
 
@@ -401,24 +415,20 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 	// has started its first turn, and the initial prompt must arrive as
 	// terminal input to kick off the session.
 	//
-	// Wait for Claude to finish loading (~25s from session start). Use a
-	// goroutine so Prompt() doesn't block; the channel push serves as a
-	// backup if Claude is already listening.
+	// Wait for Claude's development-channel prompt to clear. Use a goroutine so
+	// Prompt() doesn't block; the channel push serves as a backup if Claude is
+	// already listening.
 	go func() {
-		wait := time.Until(s.startedAt.Add(30 * time.Second))
-		if wait < 0 {
-			wait = 0
+		if !waitForPaneReady(s.ctx, s.tmuxName) {
+			return
 		}
 
-		time.Sleep(wait)
-		// Type the prompt and press Enter. Use a short tool usage hint.
-		fullPrompt := prompt + " (use avenor_report and avenor_finish)"
-		_ = exec.Command("tmux", "send-keys", "-t", s.tmuxName, fullPrompt, "Enter").Run()
+		_ = exec.Command("tmux", "send-keys", "-t", s.tmuxName, prompt, "Enter").Run()
 
 		// After sending the prompt, watch for Claude's permission dialog and
 		// auto-answer it. This handles MCP tool call permissions that appear
 		// as terminal dialogs rather than channel-based permission requests.
-		p.pollAndAnswerPermissions(s)
+		p.pollAndAnswerPermissions(s.ctx, s)
 	}()
 
 	// Also push via channel for idempotence and later turns.
@@ -438,16 +448,19 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 // 2 seconds for up to 60 seconds or until the session finishes. Multiple dialogs
 // may appear during a single turn (e.g. one per tool call), so the loop keeps
 // watching until the session ends.
-func (p *Provider) pollAndAnswerPermissions(s *session) {
+func (p *Provider) pollAndAnswerPermissions(ctx context.Context, s *session) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
-	deadline := time.After(60 * time.Second)
+	deadline := time.NewTimer(60 * time.Second)
+	defer deadline.Stop()
 
 	for {
 		select {
+		case <-ctx.Done():
+			return
 		case <-s.done:
 			return
-		case <-deadline:
+		case <-deadline.C:
 			return
 		case <-ticker.C:
 		}
@@ -468,6 +481,59 @@ func (p *Provider) pollAndAnswerPermissions(s *session) {
 			_ = exec.Command("tmux", "send-keys", "-t", s.tmuxName, "1", "Enter").Run()
 			// Don't return — there may be more dialogs.
 			time.Sleep(500 * time.Millisecond)
+		}
+	}
+}
+
+func autoConfirmDevelopmentChannelPrompt(ctx context.Context, s *session) {
+	deadline := time.NewTimer(startupPromptTimeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(startupPromptCheckInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.done:
+			return
+		case <-deadline.C:
+			return
+		case <-ticker.C:
+		}
+
+		out, err := exec.Command("tmux", "capture-pane", "-t", s.tmuxName, "-p").Output()
+		if err != nil {
+			return
+		}
+		if bytes.Contains(out, []byte("Loading development channels")) {
+			_ = exec.Command("tmux", "send-keys", "-t", s.tmuxName, "Enter").Run()
+			return
+		}
+	}
+}
+
+func waitForPaneReady(ctx context.Context, tmuxName string) bool {
+	deadline := time.NewTimer(promptInjectTimeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(promptInjectCheckInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-deadline.C:
+			return true
+		case <-ticker.C:
+		}
+
+		out, err := exec.Command("tmux", "capture-pane", "-t", tmuxName, "-p").Output()
+		if err != nil {
+			return false
+		}
+		if !bytes.Contains(out, []byte("Loading development channels")) {
+			return true
 		}
 	}
 }
