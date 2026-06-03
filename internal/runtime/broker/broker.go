@@ -149,6 +149,54 @@ func (b *Broker) PushControl(runID string, msg ControlMessage) error {
 	return nil
 }
 
+// Send enqueues a control message for the given run using raw fields.
+// It is a convenience wrapper around PushControl that builds the
+// ControlMessage internally. correlationID is optional; it is used as
+// the ControlMessage ID when non-empty.
+func (b *Broker) Send(runID string, kind string, payload json.RawMessage, correlationID string) error {
+	msg := ControlMessage{
+		ID:      correlationID,
+		Type:    kind,
+		RunID:   runID,
+		Payload: payload,
+	}
+	return b.PushControl(runID, msg)
+}
+
+// Ingest routes an incoming message from an agent into the appropriate
+// RunState bucket based on kind.
+//
+// Known kinds:
+//   - "done", "failed", "blocked" → stored in Finishes
+//   - everything else            → stored in Reports
+func (b *Broker) Ingest(runID string, kind string, payload json.RawMessage) error {
+	b.mu.Lock()
+	st, ok := b.runs[runID]
+	b.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("run not found: %s", runID)
+	}
+	st.Mu.Lock()
+	defer st.Mu.Unlock()
+
+	switch kind {
+	case "done", "failed", "blocked":
+		st.Finishes = append(st.Finishes, Finish{
+			RunID:   runID,
+			Status:  kind,
+			Payload: payload,
+		})
+	default:
+		st.Reports = append(st.Reports, Report{
+			RunID:   runID,
+			State:   kind,
+			Payload: payload,
+		})
+	}
+	st.LastSeen = time.Now()
+	return nil
+}
+
 func (st *RunState) signalLocked() {
 	select {
 	case st.Notify <- struct{}{}:
