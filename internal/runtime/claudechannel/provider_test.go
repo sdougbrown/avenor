@@ -29,8 +29,8 @@ func TestCapabilities(t *testing.T) {
 	if caps.Backend != backendID {
 		t.Errorf("Backend = %q, want %q", caps.Backend, backendID)
 	}
-	if caps.Permissions {
-		t.Error("Permissions should be false until verified")
+	if !caps.Permissions {
+		t.Error("Permissions should be true")
 	}
 	if caps.Resume {
 		t.Error("Resume should be false")
@@ -224,5 +224,130 @@ func TestClassifyPane(t *testing.T) {
 				t.Fatalf("classifyPane() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestMarkActive(t *testing.T) {
+	s := &session{}
+	markActive(s)
+
+	s.mu.Lock()
+	active := s.active
+	s.mu.Unlock()
+	if !active {
+		t.Fatal("session should be marked active")
+	}
+}
+
+func TestParseTmuxPermission(t *testing.T) {
+	cases := []struct {
+		name        string
+		text        string
+		wantPrompt  string
+		wantOpts    int
+		wantFirstID string
+	}{
+		{
+			name:        "edit permission dialog",
+			text:        "Do you want to make this edit to README.md?\n ❯ 1. Yes\n   2. Yes, allow all edits during this session\n   3. No\n\n Esc to cancel · Tab to amend",
+			wantPrompt:  "Do you want to make this edit to README.md?",
+			wantOpts:    3,
+			wantFirstID: "1",
+		},
+		{
+			name:        "proceed permission dialog",
+			text:        "Do you want to proceed?\n ❯ 1. Yes\n   2. No\n\n Esc to cancel · Tab to amend",
+			wantPrompt:  "Do you want to proceed?",
+			wantOpts:    2,
+			wantFirstID: "1",
+		},
+		{
+			name:        "no permission prompt",
+			text:        "────────────────\n❯ \n────────────────",
+			wantPrompt:  "",
+			wantOpts:    0,
+			wantFirstID: "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseTmuxPermission(tc.text)
+			if tc.wantOpts == 0 {
+				if got != nil {
+					t.Fatalf("parseTmuxPermission should return nil, got %+v", got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatal("parseTmuxPermission returned nil")
+			}
+			if got.prompt != tc.wantPrompt {
+				t.Fatalf("prompt = %q, want %q", got.prompt, tc.wantPrompt)
+			}
+			if len(got.options) != tc.wantOpts {
+				t.Fatalf("options count = %d, want %d", len(got.options), tc.wantOpts)
+			}
+			if got.options[0].ID != tc.wantFirstID {
+				t.Fatalf("first option id = %q, want %q", got.options[0].ID, tc.wantFirstID)
+			}
+		})
+	}
+}
+
+func TestAnswerPermissionTmuxRoute(t *testing.T) {
+	p := &Provider{sessions: make(map[string]*session)}
+
+	tmuxPerm := &tmuxPermission{
+		requestID: "tmux-req-1",
+		prompt:    "Do you want to proceed?",
+		options:   []permissionOption{{ID: "1", Label: "Yes"}, {ID: "2", Label: "No"}},
+		tmuxName:  "avenor-test",
+	}
+
+	s := &session{
+		sessionID:       "ses-tmux",
+		runID:           "run-tmux",
+		pendingTmuxPerm: tmuxPerm,
+		events:          make(chan events.Event, 64),
+	}
+
+	p.sessions["ses-tmux"] = s
+
+	// Answering a tmux permission with allow (sends keys via tmux, which won't
+	// exist in tests — we check that it clears the pending state and doesn't
+	// return a broker routing error).
+	err := p.AnswerPermission(context.Background(), "ses-tmux", "tmux-req-1", runtime.PermissionResponse{Allow: true, OptionID: "1"})
+	// Expect tmux error since no tmux session exists, but permission state cleared.
+	if err == nil {
+		t.Fatal("expected tmux error (no session) but got nil")
+	}
+
+	s.mu.Lock()
+	cleared := s.pendingTmuxPerm
+	s.mu.Unlock()
+	if cleared != nil {
+		t.Fatal("pendingTmuxPerm should be cleared after AnswerPermission")
+	}
+}
+
+func TestAnswerPermissionFallthroughToBroker(t *testing.T) {
+	b := broker.New("")
+	if _, err := b.CreateRun("run-broker"); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	p := &Provider{sessions: make(map[string]*session), broker: b}
+	s := &session{
+		sessionID: "ses-broker",
+		runID:     "run-broker",
+		events:    make(chan events.Event, 64),
+	}
+	p.sessions["ses-broker"] = s
+
+	// Answer with a request ID not matching any tmux permission.
+	err := p.AnswerPermission(context.Background(), "ses-broker", "sidecar-req-1", runtime.PermissionResponse{Allow: true})
+	if err != nil {
+		t.Fatalf("broker AnswerPermission: %v", err)
 	}
 }

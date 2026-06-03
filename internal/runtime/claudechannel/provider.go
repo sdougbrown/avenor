@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,7 +29,7 @@ const (
 	promptInjectCheckInterval  = 500 * time.Millisecond
 	promptInjectTimeout        = 30 * time.Second
 	paneScanInterval           = 500 * time.Millisecond
-	paneIdleFinishDelay        = 2 * time.Second
+	tmuxPermissionTimeout      = 60 * time.Second
 )
 
 type paneState string
@@ -66,10 +67,25 @@ type session struct {
 	ctx      context.Context
 	cancelFn context.CancelFunc
 
-	startedAt time.Time
-	prompted  bool
-	finished  bool
-	mu        sync.Mutex
+	startedAt       time.Time
+	prompted        bool
+	active          bool
+	finished        bool
+	pendingTmuxPerm *tmuxPermission
+	mu              sync.Mutex
+}
+
+type tmuxPermission struct {
+	requestID string
+	prompt    string
+	options   []permissionOption
+	tmuxName  string
+	createdAt time.Time
+}
+
+type permissionOption struct {
+	ID    string
+	Label string
 }
 
 // Ensure Provider implements runtime.Provider.
@@ -331,7 +347,6 @@ func (p *Provider) runSession(ctx context.Context, s *session) {
 	defer pollTick.Stop()
 	paneTick := time.NewTicker(paneScanInterval)
 	defer paneTick.Stop()
-	var idleSince time.Time
 
 	for {
 		select {
@@ -354,47 +369,83 @@ func (p *Provider) runSession(ctx context.Context, s *session) {
 		case <-pollTick.C:
 			p.pollBrokerEvents(s)
 		case <-paneTick.C:
-			state, err := scanPane(s.tmuxName)
-			if err != nil {
-				continue
-			}
-			s.mu.Lock()
-			prompted := s.prompted
-			finished := s.finished
-			s.mu.Unlock()
-			if finished || !prompted {
-				continue
-			}
-			switch state {
-			case paneStatePermission:
-				_ = exec.Command("tmux", "send-keys", "-t", s.tmuxName, "1", "Enter").Run()
-				idleSince = time.Time{}
-				s.events <- events.Event{Event: "permission.request", SessionID: s.sessionID, Fields: map[string]any{"source": "tmux-pane"}}
-			case paneStateActive:
-				idleSince = time.Time{}
-				s.events <- events.Event{Event: "agent.status", SessionID: s.sessionID, Fields: map[string]any{"phase": "working", "source": "tmux-pane"}}
-			case paneStateIdle:
-				if idleSince.IsZero() {
-					idleSince = time.Now()
-					continue
-				}
-				if time.Since(idleSince) < paneIdleFinishDelay {
-					continue
-				}
-				if !markFinished(s) {
-					continue
-				}
-				s.events <- events.Event{
-					Event:     "session.end",
-					SessionID: s.sessionID,
-					Fields: map[string]any{
-						"status":      "done",
-						"stop_reason": "end_turn",
-						"source":      "tmux-pane",
-					},
-				}
-			}
+			p.scanPaneTick(s)
 		}
+	}
+}
+
+func (p *Provider) scanPaneTick(s *session) {
+	state, err := scanPane(s.tmuxName)
+	if err != nil {
+		return
+	}
+
+	s.mu.Lock()
+	prompted := s.prompted
+	finished := s.finished
+	currentPerm := s.pendingTmuxPerm
+	s.mu.Unlock()
+
+	if finished || !prompted {
+		return
+	}
+
+	switch state {
+	case paneStatePermission:
+		markActive(s)
+
+		// If we already brokered this permission, wait for resolution.
+		if currentPerm != nil {
+			return
+		}
+
+		// Parse the permission prompt and broker it.
+		out, err := exec.Command("tmux", "capture-pane", "-t", s.tmuxName, "-p").Output()
+		if err != nil {
+			return
+		}
+		tmuxPerm := parseTmuxPermission(string(out))
+		if tmuxPerm == nil {
+			return
+		}
+		tmuxPerm.tmuxName = s.tmuxName
+		tmuxPerm.createdAt = time.Now()
+		tmuxPerm.requestID = uuid.New().String()
+
+		s.mu.Lock()
+		s.pendingTmuxPerm = tmuxPerm
+		s.mu.Unlock()
+
+		// Emit the brokered permission request.
+		opts := make([]map[string]any, len(tmuxPerm.options))
+		for i, o := range tmuxPerm.options {
+			opts[i] = map[string]any{"id": o.ID, "label": o.Label}
+		}
+		s.events <- events.Event{
+			Event:     "permission.request",
+			SessionID: s.sessionID,
+			Fields: map[string]any{
+				"request_id":  tmuxPerm.requestID,
+				"source":      "tmux-pane",
+				"description": tmuxPerm.prompt,
+				"options":     opts,
+			},
+		}
+
+	case paneStateActive:
+		markActive(s)
+		s.events <- events.Event{Event: "agent.status", SessionID: s.sessionID, Fields: map[string]any{"phase": "working", "source": "tmux-pane"}}
+
+	case paneStateIdle:
+		// Idle means Claude is at the prompt, waiting for next input.
+		// Don't end the session — the channel supports multi-turn.
+		// Clear any stale permission.
+		if currentPerm != nil {
+			s.mu.Lock()
+			s.pendingTmuxPerm = nil
+			s.mu.Unlock()
+		}
+		s.events <- events.Event{Event: "agent.status", SessionID: s.sessionID, Fields: map[string]any{"phase": "waiting", "source": "tmux-pane"}}
 	}
 }
 
@@ -455,6 +506,12 @@ func markFinished(s *session) bool {
 	return true
 }
 
+func markActive(s *session) {
+	s.mu.Lock()
+	s.active = true
+	s.mu.Unlock()
+}
+
 func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Session, error) {
 	return runtime.Session{}, fmt.Errorf("resume not supported for %s", backendID)
 }
@@ -492,11 +549,6 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 		s.mu.Lock()
 		s.prompted = true
 		s.mu.Unlock()
-
-		// After sending the prompt, watch for Claude's permission dialog and
-		// auto-answer it. This handles MCP tool call permissions that appear
-		// as terminal dialogs rather than channel-based permission requests.
-		p.pollAndAnswerPermissions(s.ctx, s)
 	}()
 
 	// Also push via channel for idempotence and later turns.
@@ -565,45 +617,60 @@ func looksLikeClaudeActivityLine(line string) bool {
 	return strings.Contains(line, "tool use") || strings.Contains(line, "tokens")
 }
 
-// pollAndAnswerPermissions watches the tmux pane for Claude's permission dialog
-// ("Do you want to proceed?") and auto-answers "Yes" (option 1). It polls every
-// 2 seconds for up to 60 seconds or until the session finishes. Multiple dialogs
-// may appear during a single turn (e.g. one per tool call), so the loop keeps
-// watching until the session ends.
-func (p *Provider) pollAndAnswerPermissions(ctx context.Context, s *session) {
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-	deadline := time.NewTimer(60 * time.Second)
-	defer deadline.Stop()
+var tmuxOptionRE = regexp.MustCompile(`^\s*(?:❯\s*)?(\d+)\.\s+(.*)`)
 
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-s.done:
-			return
-		case <-deadline.C:
-			return
-		case <-ticker.C:
-		}
+// parseTmuxPermission extracts a tmuxPermission from pane text, or nil if the
+// text doesn't represent a Claude permission dialog.
+func parseTmuxPermission(text string) *tmuxPermission {
+	lines := strings.Split(text, "\n")
+	promptLines := make([]string, 0)
+	options := make([]permissionOption, 0)
 
-		s.mu.Lock()
-		if s.finished {
-			s.mu.Unlock()
-			return
+	inOptions := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
 		}
-		s.mu.Unlock()
+		if tmuxOptionRE.MatchString(trimmed) {
+			matches := tmuxOptionRE.FindStringSubmatch(trimmed)
+			if len(matches) == 3 {
+				options = append(options, permissionOption{ID: matches[1], Label: strings.TrimSpace(matches[2])})
+				inOptions = true
+				continue
+			}
+		}
+		if inOptions {
+			// After options, skip footer lines (Esc to cancel, etc.)
+			if strings.Contains(trimmed, "Esc to cancel") || strings.HasPrefix(trimmed, "Esc ") {
+				continue
+			}
+			break
+		}
+		if !strings.HasPrefix(trimmed, "❯") && !strings.HasPrefix(trimmed, "●") && !strings.HasPrefix(trimmed, "✻") && !strings.HasPrefix(trimmed, "✢") {
+			promptLines = append(promptLines, trimmed)
+		}
+	}
 
-		out, err := exec.Command("tmux", "capture-pane", "-t", s.tmuxName, "-p").Output()
-		if err != nil {
-			// tmux session gone — Claude exited
-			return
+	if len(options) == 0 {
+		return nil
+	}
+
+	prompt := strings.Join(promptLines, " ")
+	if prompt == "" {
+		// Try to use the permission markers as prompt fallback.
+		if strings.Contains(text, "Do you want to proceed?") {
+			prompt = "Claude is requesting permission to proceed"
+		} else if strings.Contains(text, "Do you want to make this edit") {
+			prompt = "Claude is requesting permission to edit"
+		} else {
+			prompt = "Claude permission request"
 		}
-		if bytes.Contains(out, []byte("Do you want to proceed?")) {
-			_ = exec.Command("tmux", "send-keys", "-t", s.tmuxName, "1", "Enter").Run()
-			// Don't return — there may be more dialogs.
-			time.Sleep(500 * time.Millisecond)
-		}
+	}
+
+	return &tmuxPermission{
+		prompt:  prompt,
+		options: options,
 	}
 }
 
@@ -770,6 +837,28 @@ func (p *Provider) AnswerPermission(ctx context.Context, sessionID string, reque
 	if !ok {
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
+
+	// Check if this is a tmux-pane permission request.
+	s.mu.Lock()
+	tmuxPerm := s.pendingTmuxPerm
+	s.mu.Unlock()
+
+	if tmuxPerm != nil && tmuxPerm.requestID == requestID {
+		s.mu.Lock()
+		s.pendingTmuxPerm = nil
+		s.mu.Unlock()
+
+		key := "Esc"
+		if resp.Allow {
+			key = resp.OptionID
+			if key == "" {
+				key = "1"
+			}
+		}
+		return exec.Command("tmux", "send-keys", "-t", tmuxPerm.tmuxName, key, "Enter").Run()
+	}
+
+	// Not a tmux permission; route through broker (sidecar path).
 	if s.finished {
 		return fmt.Errorf("session already finished: %s", sessionID)
 	}
@@ -795,7 +884,7 @@ func (p *Provider) AnswerPermission(ctx context.Context, sessionID string, reque
 func (p *Provider) Capabilities(ctx context.Context) (runtime.Capabilities, error) {
 	return runtime.Capabilities{
 		Backend:             backendID,
-		Permissions:         false, // TODO: flip after Stage 7 spike
+		Permissions:         true,
 		Resume:              false,
 		ExternalServerURL:   false,
 		SubprocessDiscovery: true,
