@@ -361,3 +361,27 @@ func TestBrokerTimeout(t *testing.T) {
 		t.Fatalf("expected 0 messages, got %d", len(msgs))
 	}
 }
+
+func TestBrokerDeleteRun(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	if _, err := b.CreateRun("run_to_delete"); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	if st := b.GetRun("run_to_delete"); st == nil {
+		t.Fatal("GetRun should return state before delete")
+	}
+
+	b.DeleteRun("run_to_delete")
+
+	if st := b.GetRun("run_to_delete"); st != nil {
+		t.Fatal("GetRun should return nil after delete")
+	}
+
+	// DeleteRun on nonexistent run should not panic.
+	b.DeleteRun("nonexistent")
+}

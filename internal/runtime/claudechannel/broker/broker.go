@@ -213,9 +213,15 @@ func (b *Broker) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		// Sidecar auth: token + run_id in JSON body.
 		// Read body into memory so it can be consumed again by the handler.
-		bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+		const maxBody = 1 << 20 // 1 MiB
+		limited := io.LimitReader(r.Body, maxBody+1)
+		bodyBytes, err := io.ReadAll(limited)
 		if err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if len(bodyBytes) > maxBody {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 			return
 		}
 		var cred struct {
@@ -509,6 +515,14 @@ func (b *Broker) CreateRun(runID string) (string, error) {
 	}
 	b.runs[runID] = st
 	return st.Token, nil
+}
+
+// DeleteRun removes a run from the broker. Safe to call even if the run
+// does not exist.
+func (b *Broker) DeleteRun(runID string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.runs, runID)
 }
 
 // Reset clears all run state.

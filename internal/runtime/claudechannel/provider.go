@@ -322,6 +322,9 @@ func (p *Provider) runSession(ctx context.Context, s *session) {
 		p.mu.Unlock()
 	}()
 	defer func() {
+		p.broker.DeleteRun(s.runID)
+	}()
+	defer func() {
 		_ = exec.Command("tmux", "kill-session", "-t", s.tmuxName).Run()
 		_ = os.RemoveAll(s.mcpDir)
 	}()
@@ -434,8 +437,7 @@ func (p *Provider) scanPaneTick(s *session) {
 
 	case paneStateActive:
 		markActive(s)
-		s.events <- events.Event{Event: "agent.status", SessionID: s.sessionID, Fields: map[string]any{"phase": "working", "source": "tmux-pane"}}
-
+		emitNonBlocking(s, events.Event{Event: "agent.status", SessionID: s.sessionID, Fields: map[string]any{"phase": "working", "source": "tmux-pane"}})
 	case paneStateIdle:
 		// Idle means Claude is at the prompt, waiting for next input.
 		// Don't end the session — the channel supports multi-turn.
@@ -445,7 +447,7 @@ func (p *Provider) scanPaneTick(s *session) {
 			s.pendingTmuxPerm = nil
 			s.mu.Unlock()
 		}
-		s.events <- events.Event{Event: "agent.status", SessionID: s.sessionID, Fields: map[string]any{"phase": "waiting", "source": "tmux-pane"}}
+		emitNonBlocking(s, events.Event{Event: "agent.status", SessionID: s.sessionID, Fields: map[string]any{"phase": "waiting", "source": "tmux-pane"}})
 	}
 }
 
@@ -510,6 +512,13 @@ func markActive(s *session) {
 	s.mu.Lock()
 	s.active = true
 	s.mu.Unlock()
+}
+
+func emitNonBlocking(s *session, ev events.Event) {
+	select {
+	case s.events <- ev:
+	default:
+	}
 }
 
 func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Session, error) {
@@ -855,6 +864,9 @@ func (p *Provider) AnswerPermission(ctx context.Context, sessionID string, reque
 				key = "1"
 			}
 		}
+		if !validTmuxKey(key) {
+			return fmt.Errorf("invalid option_id for tmux permission: %q", key)
+		}
 		return exec.Command("tmux", "send-keys", "-t", tmuxPerm.tmuxName, key, "Enter").Run()
 	}
 
@@ -890,6 +902,26 @@ func (p *Provider) Capabilities(ctx context.Context) (runtime.Capabilities, erro
 		SubprocessDiscovery: true,
 		ModelSelection:      true,
 	}, nil
+}
+
+// validTmuxKey returns true if key is a safe single-character string for tmux send-keys.
+func validTmuxKey(key string) bool {
+	if len(key) == 0 || len(key) > 3 {
+		return false
+	}
+	for _, r := range key {
+		if r >= '0' && r <= '9' {
+			continue
+		}
+		if r >= 'a' && r <= 'z' {
+			continue
+		}
+		if r >= 'A' && r <= 'Z' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // shellQuote single-quotes a string for safe interpolation into a shell command.

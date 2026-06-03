@@ -351,3 +351,35 @@ func TestAnswerPermissionFallthroughToBroker(t *testing.T) {
 		t.Fatalf("broker AnswerPermission: %v", err)
 	}
 }
+
+func TestValidTmuxKey(t *testing.T) {
+	cases := []struct {
+		key  string
+		want bool
+	}{
+		{"1", true},
+		{"9", true},
+		{"Esc", true},
+		{"a", true},
+		{"Z", true},
+		{"C-c", false},
+		{"1\nrm -rf /", false},
+		{"\n", false},
+		{" 1", false},
+	}
+	for _, tc := range cases {
+		if got := validTmuxKey(tc.key); got != tc.want {
+			t.Errorf("validTmuxKey(%q) = %v, want %v", tc.key, got, tc.want)
+		}
+	}
+}
+
+func TestEmitNonBlockingFullChannel(t *testing.T) {
+	s := &session{events: make(chan events.Event, 1)}
+	s.events <- events.Event{Event: "test"}
+	// Channel is full; emitNonBlocking should not block.
+	emitNonBlocking(s, events.Event{Event: "dropped"})
+	if len(s.events) != 1 {
+		t.Fatalf("channel should still have 1 event, got %d", len(s.events))
+	}
+}
