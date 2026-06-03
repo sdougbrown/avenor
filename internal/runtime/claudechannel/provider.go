@@ -124,6 +124,9 @@ func mergeStartOptions(base, override runtime.StartOptions) runtime.StartOptions
 	if override.Model != "" {
 		merged.Model = override.Model
 	}
+	if override.Broker != nil {
+		merged.Broker = override.Broker
+	}
 	return merged
 }
 
@@ -158,7 +161,9 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if p.broker == nil {
+	if merged.Broker != nil {
+		p.broker = merged.Broker
+	} else if p.broker == nil {
 		p.broker = broker.New(p.globalTok)
 		if err := p.broker.Start(); err != nil {
 			return runtime.Session{}, fmt.Errorf("broker.Start: %w", err)

@@ -421,5 +421,8 @@ func mergeStartOptions(base, override runtime.StartOptions) runtime.StartOptions
 	if override.Model != "" {
 		base.Model = override.Model
 	}
+	if override.Broker != nil {
+		base.Broker = override.Broker
+	}
 	return base
 }

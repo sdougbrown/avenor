@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
 
 // Provider is the interface that all ACP runtime backends must implement.
@@ -25,6 +26,7 @@ type StartOptions struct {
 	ServerURL string
 	Model     string
 	RuntimeID string // supervisor-assigned runtime ID (rt_N), for parent-child routing
+	Broker    *broker.Broker // optional shared broker instance; backends may create their own if nil
 }
 
 // Session represents an active ACP session.
