@@ -10,7 +10,7 @@ import (
 
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
-	"github.com/sdougbrown/avenor/internal/runtime/claudechannel/broker"
+	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
 
 func TestNewWithOptions(t *testing.T) {

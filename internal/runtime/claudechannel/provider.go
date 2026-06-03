@@ -18,7 +18,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
-	"github.com/sdougbrown/avenor/internal/runtime/claudechannel/broker"
+	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
 
 const backendID = "claude-channel"
@@ -49,7 +49,7 @@ type Provider struct {
 
 	mu        sync.Mutex
 	sessions  map[string]*session
-	broker    *broker.Broker
+	broker       *broker.Broker
 	globalTok string
 }
 
@@ -161,7 +161,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	if p.broker == nil {
 		p.broker = broker.New(p.globalTok)
 		if err := p.broker.Start(); err != nil {
-			return runtime.Session{}, fmt.Errorf("broker start: %w", err)
+			return runtime.Session{}, fmt.Errorf("broker.Start: %w", err)
 		}
 	}
 

@@ -1,6 +1,9 @@
-// Package broker implements the in-process HTTP broker for the claude-channel backend.
-// It handles sidecar registration, control message queuing, report/finish/reply ingestion,
+// Package broker provides a harness-agnostic run broker for agent communication.
+// It handles run registration, control message queuing, report/finish/reply ingestion,
 // and heartbeat tracking scoped by run ID.
+//
+// Harness-specific concerns (e.g., MCP sidecar registration, tmux bootstrap, .mcp.json entries)
+// live in the individual harness adapter packages, not here.
 package broker
 
 import (
@@ -102,7 +105,9 @@ func (st *RunState) signalLocked() {
 	}
 }
 
-// Broker is the in-process HTTP server for channel sidecar coordination.
+// Broker is a harness-agnostic, in-process HTTP server that coordinates
+// communication between agent harnesses and their orchestrators.
+// It owns run-scoped state, message queuing, and lifecycle event ingestion.
 type Broker struct {
 	addr      string
 	listener  net.Listener

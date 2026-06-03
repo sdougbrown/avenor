@@ -14,7 +14,7 @@ import (
 
 func TestRunHandlesInitializeToolsAndReport(t *testing.T) {
 	var reportBody map[string]any
-	broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	brokerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/register", "/heartbeat":
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
@@ -32,7 +32,7 @@ func TestRunHandlesInitializeToolsAndReport(t *testing.T) {
 			http.NotFound(w, r)
 		}
 	}))
-	defer broker.Close()
+	defer brokerSrv.Close()
 
 	input := bytes.NewBufferString(
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}` + "\n" +
@@ -46,11 +46,11 @@ func TestRunHandlesInitializeToolsAndReport(t *testing.T) {
 	err := Run(ctx, Options{
 		RunID:      "run_1",
 		Token:      "tok_1",
-		BrokerURL:  broker.URL,
+		BrokerURL:  brokerSrv.URL,
 		Stdin:      input,
 		Stdout:     &stdout,
 		Stderr:     &stderr,
-		HTTPClient: broker.Client(),
+		HTTPClient: brokerSrv.Client(),
 	})
 	if err != nil {
 		t.Fatalf("Run: %v; stderr=%s", err, stderr.String())
@@ -121,7 +121,7 @@ func TestRenderControlMessageIncludesStructuredPayload(t *testing.T) {
 func TestPollControlLoopWaitsForInitialized(t *testing.T) {
 	pollCalled := make(chan struct{}, 1)
 	var polls atomic.Int32
-	broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	brokerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/poll-control" {
 			http.NotFound(w, r)
 			return
@@ -141,7 +141,7 @@ func TestPollControlLoopWaitsForInitialized(t *testing.T) {
 			Payload: json.RawMessage(`{"message":"status?"}`),
 		}})
 	}))
-	defer broker.Close()
+	defer brokerSrv.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -150,12 +150,12 @@ func TestPollControlLoopWaitsForInitialized(t *testing.T) {
 		opts: Options{
 			RunID:      "run_1",
 			Token:      "tok_1",
-			BrokerURL:  broker.URL,
+			BrokerURL:  brokerSrv.URL,
 			Stdout:     &stdout,
 			Stderr:     io.Discard,
-			HTTPClient: broker.Client(),
+			HTTPClient: brokerSrv.Client(),
 		},
-		client:      broker.Client(),
+		client:      brokerSrv.Client(),
 		initialized: make(chan struct{}),
 	}
 	done := make(chan struct{})
