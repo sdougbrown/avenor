@@ -3,6 +3,8 @@ package teamrunner
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -743,6 +745,148 @@ func TestRunAgentModelOverride(t *testing.T) {
 	}
 	if capturedModel != "gpt-5" {
 		t.Fatalf("Model = %q, want gpt-5", capturedModel)
+	}
+}
+
+func TestRunNudgesIncompletePhaseUntilRequiredFileExists(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeConfig(nil, []phaseconfig.Phase{{
+		Name:   "review",
+		Prompt: "review",
+		Requires: phaseconfig.PhaseRequirements{
+			Files: []string{"REVIEW_CODE.md"},
+		},
+	}}, nil)
+
+	var attempts int
+	var nudgePrompt string
+	var nudgePrevSession string
+	result, err := Run(context.Background(), RunOptions{
+		WorkDir:   dir,
+		RunID:     "test-run",
+		EventSink: discardEventWriter{},
+		Config:    cfg,
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
+			attempts++
+			if attempts == 2 {
+				nudgePrompt = phase.Prompt
+				nudgePrevSession = prevSessionID
+				if err := os.WriteFile(filepath.Join(dir, "REVIEW_CODE.md"), []byte("done"), 0o600); err != nil {
+					return PhaseAttemptResult{}, err
+				}
+			}
+			return PhaseAttemptResult{ExitCode: 0, StopReason: "end_turn", SessionID: fmt.Sprintf("s%d", attempts)}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, want 0", result.ExitCode)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want initial + nudge", attempts)
+	}
+	if nudgePrevSession != "s1" {
+		t.Fatalf("nudge prevSessionID = %q, want s1", nudgePrevSession)
+	}
+	if !strings.Contains(nudgePrompt, "REVIEW_CODE.md") || !strings.Contains(nudgePrompt, "Do not ask for permission") {
+		t.Fatalf("nudge prompt = %q, want default missing-file nudge", nudgePrompt)
+	}
+}
+
+func TestRunIncompleteRequiredFileFailsPhase(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeConfig(nil, []phaseconfig.Phase{{
+		Name:   "review",
+		Prompt: "review",
+		Requires: phaseconfig.PhaseRequirements{
+			Files: []string{"REVIEW_CODE.md"},
+		},
+		OnIncomplete: phaseconfig.PhaseOnIncomplete{MaxNudges: 1},
+	}}, nil)
+
+	result, err := Run(context.Background(), RunOptions{
+		WorkDir:   dir,
+		RunID:     "test-run",
+		EventSink: discardEventWriter{},
+		Config:    cfg,
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
+			return PhaseAttemptResult{ExitCode: 0, StopReason: "end_turn", SessionID: "s1"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.ExitCode != 1 {
+		t.Fatalf("ExitCode = %d, want 1", result.ExitCode)
+	}
+	if result.StopReason != "incomplete_output" {
+		t.Fatalf("StopReason = %q, want incomplete_output", result.StopReason)
+	}
+}
+
+func TestRunDefaultNudgeUsesCurrentMissingFiles(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeConfig(nil, []phaseconfig.Phase{{
+		Name:   "review",
+		Prompt: "review",
+		Requires: phaseconfig.PhaseRequirements{
+			Files: []string{"REVIEW_CODE.md", "REVIEW_TESTS.md"},
+		},
+		OnIncomplete: phaseconfig.PhaseOnIncomplete{MaxNudges: 2},
+	}}, nil)
+
+	var nudgePrompts []string
+	_, err := Run(context.Background(), RunOptions{
+		WorkDir:   dir,
+		RunID:     "test-run",
+		EventSink: discardEventWriter{},
+		Config:    cfg,
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
+			if attemptNum > 0 {
+				nudgePrompts = append(nudgePrompts, phase.Prompt)
+			}
+			if attemptNum == 1 {
+				if err := os.WriteFile(filepath.Join(dir, "REVIEW_CODE.md"), []byte("done"), 0o600); err != nil {
+					return PhaseAttemptResult{}, err
+				}
+			}
+			if attemptNum == 2 {
+				if err := os.WriteFile(filepath.Join(dir, "REVIEW_TESTS.md"), []byte("done"), 0o600); err != nil {
+					return PhaseAttemptResult{}, err
+				}
+			}
+			return PhaseAttemptResult{ExitCode: 0, StopReason: "end_turn", SessionID: fmt.Sprintf("s%d", attemptNum)}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if len(nudgePrompts) != 2 {
+		t.Fatalf("nudge prompts = %d, want 2", len(nudgePrompts))
+	}
+	if !strings.Contains(nudgePrompts[0], "REVIEW_CODE.md") || !strings.Contains(nudgePrompts[0], "REVIEW_TESTS.md") {
+		t.Fatalf("first nudge prompt = %q, want both missing files", nudgePrompts[0])
+	}
+	if strings.Contains(nudgePrompts[1], "REVIEW_CODE.md") || !strings.Contains(nudgePrompts[1], "REVIEW_TESTS.md") {
+		t.Fatalf("second nudge prompt = %q, want only REVIEW_TESTS.md", nudgePrompts[1])
+	}
+}
+
+func TestRequiredFilePathRejectsPathsOutsideWorkDir(t *testing.T) {
+	dir := t.TempDir()
+	for _, path := range []string{"/etc/passwd", "../outside", "nested/../../outside"} {
+		if _, ok := requiredFilePath(dir, path); ok {
+			t.Fatalf("requiredFilePath(%q) allowed path outside workdir", path)
+		}
+	}
+	fullPath, ok := requiredFilePath(dir, "nested/file.txt")
+	if !ok {
+		t.Fatal("expected relative path under workdir to be allowed")
+	}
+	if fullPath != filepath.Join(dir, "nested", "file.txt") {
+		t.Fatalf("fullPath = %q, want nested file under workdir", fullPath)
 	}
 }
 

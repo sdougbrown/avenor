@@ -3,6 +3,7 @@ package teamrunner
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -381,14 +382,14 @@ func executePhase(ctx context.Context, opts RunOptions, phase phaseconfig.Phase,
 	diffStat, changedFiles, _ := phaseconfig.CaptureGitDelta(opts.WorkDir, prevPhaseCommit) // best-effort; empty in non-git contexts
 
 	tmplCtx := phaseconfig.TemplateContext{
-		RunID:            opts.RunID,
-		Phase:            phase.Name,
-		WorkDir:          opts.WorkDir,
-		PrevPhaseCommit:  prevPhaseCommit,
-		DiffStat:         diffStat,
-		ChangedFiles:     changedFiles,
-		TeamOutput:       teamOutput,
-		TeamFinalOutput:  teamFinalOutput,
+		RunID:           opts.RunID,
+		Phase:           phase.Name,
+		WorkDir:         opts.WorkDir,
+		PrevPhaseCommit: prevPhaseCommit,
+		DiffStat:        diffStat,
+		ChangedFiles:    changedFiles,
+		TeamOutput:      teamOutput,
+		TeamFinalOutput: teamFinalOutput,
 	}
 
 	rendered, err := phaseconfig.RenderPrompt(phase.Prompt, tmplCtx)
@@ -434,7 +435,116 @@ func executePhase(ctx context.Context, opts RunOptions, phase phaseconfig.Phase,
 	}
 
 	result, rerr = runPhaseWithRetry(ctx, wrappedAttempt, opts.MaxRetries)
+	if rerr != nil {
+		return
+	}
+	result, rerr = completePhaseRequirements(ctx, opts, renderedPhase, result)
 	return
+}
+
+func completePhaseRequirements(ctx context.Context, opts RunOptions, phase phaseconfig.Phase, result PhaseAttemptResult) (PhaseAttemptResult, error) {
+	missing := missingRequiredFiles(opts.WorkDir, phase.Requires)
+	if len(missing) == 0 || result.ExitCode != 0 || phaseStopReason(result) != "end_turn" {
+		return result, nil
+	}
+
+	maxNudges := phase.OnIncomplete.MaxNudges
+	if maxNudges == 0 {
+		maxNudges = 1
+	}
+	customNudge := phase.OnIncomplete.Nudge
+
+	sessionID := result.SessionID
+	for i := 0; i < maxNudges; i++ {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		nudgePhase := phase
+		nudgePhase.Prompt = incompleteNudgePrompt(customNudge, missing)
+		result, err := opts.PhaseAttempt(ctx, nudgePhase, i+1, sessionID)
+		if err != nil {
+			return result, err
+		}
+		sessionID = result.SessionID
+		missing = missingRequiredFiles(opts.WorkDir, phase.Requires)
+		if len(missing) == 0 || result.ExitCode != 0 || phaseStopReason(result) != "end_turn" {
+			return result, nil
+		}
+	}
+
+	return PhaseAttemptResult{
+		ExitCode:   1,
+		SessionID:  sessionID,
+		StopReason: "incomplete_output",
+		Output:     result.Output,
+		FinalReply: result.FinalReply,
+	}, nil
+}
+
+func incompleteNudgePrompt(custom string, missing []string) string {
+	if strings.TrimSpace(custom) != "" {
+		return custom
+	}
+	return fmt.Sprintf("Continue. The phase is incomplete because required output files are missing: %s. Complete the assigned task now and write the required files. Do not ask for permission to continue.", strings.Join(missing, ", "))
+}
+
+func missingRequiredFiles(workDir string, req phaseconfig.PhaseRequirements) []string {
+	checkedFiles := map[string]struct{}{}
+	missingSet := map[string]struct{}{}
+	var missing []string
+	for _, path := range req.Files {
+		if path == "" {
+			continue
+		}
+		if _, ok := checkedFiles[path]; ok {
+			continue
+		}
+		checkedFiles[path] = struct{}{}
+		if !requiredFileExists(workDir, path, false) {
+			missing = append(missing, path)
+			missingSet[path] = struct{}{}
+		}
+	}
+	for _, path := range req.NonEmptyFiles {
+		if path == "" {
+			continue
+		}
+		if !requiredFileExists(workDir, path, true) {
+			if _, ok := missingSet[path]; !ok {
+				missing = append(missing, path)
+				missingSet[path] = struct{}{}
+			}
+		}
+	}
+	return missing
+}
+
+func requiredFileExists(workDir, path string, nonEmpty bool) bool {
+	fullPath, ok := requiredFilePath(workDir, path)
+	if !ok {
+		return false
+	}
+	info, err := os.Stat(fullPath)
+	if err != nil || info.IsDir() {
+		return false
+	}
+	return !nonEmpty || info.Size() > 0
+}
+
+func requiredFilePath(workDir, path string) (string, bool) {
+	if filepath.IsAbs(path) {
+		return "", false
+	}
+	cleanWorkDir, err := filepath.Abs(workDir)
+	if err != nil {
+		return "", false
+	}
+	cleanWorkDir = filepath.Clean(cleanWorkDir)
+	fullPath := filepath.Clean(filepath.Join(cleanWorkDir, path))
+	if fullPath != cleanWorkDir && !strings.HasPrefix(fullPath, cleanWorkDir+string(filepath.Separator)) {
+		return "", false
+	}
+	return fullPath, true
 }
 
 func runPhaseWithRetry(ctx context.Context, attemptFn func(ctx context.Context) (PhaseAttemptResult, error), maxRetries int) (PhaseAttemptResult, error) {
