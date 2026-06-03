@@ -174,3 +174,55 @@ func TestWaitForPaneReadyStopsOnContextCancel(t *testing.T) {
 		t.Fatal("waitForPaneReady should stop when context is canceled")
 	}
 }
+
+func TestClassifyPane(t *testing.T) {
+	cases := []struct {
+		name string
+		pane string
+		want paneState
+	}{
+		{
+			name: "edit permission",
+			pane: "Do you want to make this edit to README.md?\n ❯ 1. Yes\n   2. Yes, allow all edits during this session",
+			want: paneStatePermission,
+		},
+		{
+			name: "proceed permission",
+			pane: "Do you want to proceed?\n ❯ 1. Yes\n   2. No",
+			want: paneStatePermission,
+		},
+		{
+			name: "ruminating activity",
+			pane: "✻ Ruminating… (13s · ↓ 557 tokens · thinking)",
+			want: paneStateActive,
+		},
+		{
+			name: "generic ing activity",
+			pane: "✢ Churning… (2m 17s · ↓ 7.2k tokens)",
+			want: paneStateActive,
+		},
+		{
+			name: "token activity fallback",
+			pane: "✻ Working · ↓ 557 tokens",
+			want: paneStateActive,
+		},
+		{
+			name: "idle prompt",
+			pane: "────────────────\n❯ \n────────────────",
+			want: paneStateIdle,
+		},
+		{
+			name: "unknown noise",
+			pane: "\n────────────────\nClaude Code v2.1.161\n────────────────\n",
+			want: paneStateUnknown,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyPane(tc.pane); got != tc.want {
+				t.Fatalf("classifyPane() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

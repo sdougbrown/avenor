@@ -27,6 +27,17 @@ const (
 	startupPromptTimeout       = 30 * time.Second
 	promptInjectCheckInterval  = 500 * time.Millisecond
 	promptInjectTimeout        = 30 * time.Second
+	paneScanInterval           = 500 * time.Millisecond
+	paneIdleFinishDelay        = 2 * time.Second
+)
+
+type paneState string
+
+const (
+	paneStateUnknown    paneState = "unknown"
+	paneStateActive     paneState = "active"
+	paneStatePermission paneState = "permission"
+	paneStateIdle       paneState = "idle"
 )
 
 // Provider implements runtime.Provider for an interactive Claude Code session
@@ -56,6 +67,7 @@ type session struct {
 	cancelFn context.CancelFunc
 
 	startedAt time.Time
+	prompted  bool
 	finished  bool
 	mu        sync.Mutex
 }
@@ -223,7 +235,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	// Wait for tmux pane to become ready by polling list-panes.
 	pid := 0
 	deadline := time.After(1 * time.Second)
-	pollLoop:
+pollLoop:
 	for {
 		if pidOut, err := exec.Command("tmux", "list-panes", "-t", tmuxName, "-F", "#{pane_pid}").Output(); err == nil {
 			if p := strings.TrimSpace(string(pidOut)); p != "" {
@@ -317,6 +329,9 @@ func (p *Provider) runSession(ctx context.Context, s *session) {
 	// Poll broker for sidecar events.
 	pollTick := time.NewTicker(500 * time.Millisecond)
 	defer pollTick.Stop()
+	paneTick := time.NewTicker(paneScanInterval)
+	defer paneTick.Stop()
+	var idleSince time.Time
 
 	for {
 		select {
@@ -324,10 +339,7 @@ func (p *Provider) runSession(ctx context.Context, s *session) {
 			_ = exec.Command("tmux", "kill-session", "-t", s.tmuxName).Run()
 			return
 		case <-sessionGone:
-			s.mu.Lock()
-			alreadyFinished := s.finished
-			s.mu.Unlock()
-			if !alreadyFinished {
+			if markFinished(s) {
 				// Claude exited without calling avenor_finish.
 				s.events <- events.Event{
 					Event:     "session.end",
@@ -341,6 +353,47 @@ func (p *Provider) runSession(ctx context.Context, s *session) {
 			return
 		case <-pollTick.C:
 			p.pollBrokerEvents(s)
+		case <-paneTick.C:
+			state, err := scanPane(s.tmuxName)
+			if err != nil {
+				continue
+			}
+			s.mu.Lock()
+			prompted := s.prompted
+			finished := s.finished
+			s.mu.Unlock()
+			if finished || !prompted {
+				continue
+			}
+			switch state {
+			case paneStatePermission:
+				_ = exec.Command("tmux", "send-keys", "-t", s.tmuxName, "1", "Enter").Run()
+				idleSince = time.Time{}
+				s.events <- events.Event{Event: "permission.request", SessionID: s.sessionID, Fields: map[string]any{"source": "tmux-pane"}}
+			case paneStateActive:
+				idleSince = time.Time{}
+				s.events <- events.Event{Event: "agent.status", SessionID: s.sessionID, Fields: map[string]any{"phase": "working", "source": "tmux-pane"}}
+			case paneStateIdle:
+				if idleSince.IsZero() {
+					idleSince = time.Now()
+					continue
+				}
+				if time.Since(idleSince) < paneIdleFinishDelay {
+					continue
+				}
+				if !markFinished(s) {
+					continue
+				}
+				s.events <- events.Event{
+					Event:     "session.end",
+					SessionID: s.sessionID,
+					Fields: map[string]any{
+						"status":      "done",
+						"stop_reason": "end_turn",
+						"source":      "tmux-pane",
+					},
+				}
+			}
 		}
 	}
 }
@@ -369,9 +422,9 @@ func (p *Provider) pollBrokerEvents(s *session) {
 		s.events <- brokerEvent(s.sessionID, rep.State, rep.Payload)
 	}
 	for _, fin := range finishes {
-		s.mu.Lock()
-		s.finished = true
-		s.mu.Unlock()
+		if !markFinished(s) {
+			continue
+		}
 		s.events <- events.Event{
 			Event:     "session.end",
 			SessionID: s.sessionID,
@@ -390,6 +443,16 @@ func (p *Provider) pollBrokerEvents(s *session) {
 			Fields:    map[string]any{"to": rep.To, "payload": json.RawMessage(rep.Payload)},
 		}
 	}
+}
+
+func markFinished(s *session) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.finished {
+		return false
+	}
+	s.finished = true
+	return true
 }
 
 func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Session, error) {
@@ -423,7 +486,12 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 			return
 		}
 
-		_ = exec.Command("tmux", "send-keys", "-t", s.tmuxName, prompt, "Enter").Run()
+		if err := pastePromptAndSubmit(s.tmuxName, prompt); err != nil {
+			return
+		}
+		s.mu.Lock()
+		s.prompted = true
+		s.mu.Unlock()
 
 		// After sending the prompt, watch for Claude's permission dialog and
 		// auto-answer it. This handles MCP tool call permissions that appear
@@ -441,6 +509,60 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 		}),
 	}
 	return p.broker.PushControl(s.runID, msg)
+}
+
+func pastePromptAndSubmit(tmuxName, prompt string) error {
+	bufferName := "avenor-prompt-" + tmuxName
+	cmd := exec.Command("tmux", "load-buffer", "-b", bufferName, "-")
+	cmd.Stdin = strings.NewReader(prompt)
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+	if err := exec.Command("tmux", "paste-buffer", "-t", tmuxName, "-b", bufferName).Run(); err != nil {
+		return err
+	}
+	return exec.Command("tmux", "send-keys", "-t", tmuxName, "Enter").Run()
+}
+
+func scanPane(tmuxName string) (paneState, error) {
+	out, err := exec.Command("tmux", "capture-pane", "-t", tmuxName, "-p").Output()
+	if err != nil {
+		return paneStateUnknown, err
+	}
+	return classifyPane(string(out)), nil
+}
+
+func classifyPane(text string) paneState {
+	if strings.Contains(text, "Do you want to proceed?") || strings.Contains(text, "Do you want to make this edit") || strings.Contains(text, "Yes, allow all edits") {
+		return paneStatePermission
+	}
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "❯") {
+			return paneStateIdle
+		}
+		if looksLikeClaudeActivityLine(trimmed) {
+			return paneStateActive
+		}
+	}
+	return paneStateUnknown
+}
+
+func looksLikeClaudeActivityLine(line string) bool {
+	if !(strings.HasPrefix(line, "✻") || strings.HasPrefix(line, "✢") || strings.HasPrefix(line, "●") || strings.HasPrefix(line, "○") || strings.HasPrefix(line, "◯")) {
+		return false
+	}
+	fields := strings.Fields(line)
+	for _, field := range fields {
+		word := strings.Trim(field, "…,.·:;()[]{}")
+		if len(word) > 4 && strings.HasSuffix(word, "ing") {
+			return true
+		}
+	}
+	return strings.Contains(line, "tool use") || strings.Contains(line, "tokens")
 }
 
 // pollAndAnswerPermissions watches the tmux pane for Claude's permission dialog
