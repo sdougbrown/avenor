@@ -35,11 +35,23 @@ For a project-level config, add the same entry to `.opencode.json` in your repo 
 
 Once registered, the plugin exposes six tools that your OpenCode agent can call directly — no extra configuration required.
 
+## Behaviour
+
+When a run is dispatched with `avenor_spawn`, the plugin:
+
+1. **Blocks by default** — the tool call stays open, updating its title and metadata as the sub-agent runs, exactly like OpenCode's own sub-agent tool calls. The tool returns when the run reaches a terminal state.
+2. **Re-prompts on completion** — when a `wait=false` (fire-and-forget) run finishes, the plugin automatically injects a completion message into the orchestrating session so the LLM picks up without manual polling.
+3. **Routes permissions** — when a sub-agent running under the `opencode-http` backend requests a permission, the plugin injects a re-prompt into the orchestrating session. The LLM can call `avenor_answer_permission` to respond; the normal permission dialog is also shown as a fallback.
+
 ## Tools
 
 ### `avenor_spawn`
 
-Dispatch an agent run in the current working directory. Returns a `run_id` you can poll with `avenor_status`.
+Dispatch an agent run in the current working directory.
+
+**Blocking mode (default, `wait=true`):** the tool call shows live progress updates and returns a structured result when the run finishes.
+
+**Fire-and-forget (`wait=false`):** returns immediately with `run_id`. The orchestrating session is re-prompted automatically on completion.
 
 | Argument | Required | Description |
 |---|---|---|
@@ -49,6 +61,7 @@ Dispatch an agent run in the current working directory. Returns a `run_id` you c
 | `label` | no | Human-readable label for the run |
 | `timeout` | no | Timeout duration (e.g. `3600s`, `30m`) |
 | `model` | no | Model override |
+| `wait` | no | Block until complete (default `true`) |
 | `supervisor_id` | no | Reuse an existing supervisor by socket path |
 
 The working directory (`dir`) is injected automatically from your OpenCode session context — it is not a user-facing argument.
@@ -104,15 +117,25 @@ Shut down the avenor supervisor process and clean up temp files. Call this when 
 | `supervisor_id` | no | Supervisor to shut down (defaults to the singleton) |
 | `force` | no | Force shutdown instead of graceful |
 
-## Typical workflow
+## Typical workflows
 
+**Blocking (default):**
 ```
-1. avenor_spawn  →  receive run_id
-2. avenor_status  →  check if still running, spot pending permissions
-3. avenor_answer_permission  →  unblock if a permission is requested
-4. avenor_events  →  inspect output once complete
-5. avenor_follow_up  →  optionally send a follow-up
-6. avenor_shutdown  →  clean up when finished
+1. avenor_spawn            →  tool call shows live progress, blocks until done
+2. (avenor_answer_permission  →  if a permission is routed to this session mid-run)
+3. tool call returns       →  structured result with status + session_id
+4. avenor_events           →  inspect detailed output
+5. avenor_follow_up        →  optionally iterate
+6. avenor_shutdown         →  clean up when finished
+```
+
+**Parallel / fire-and-forget (`wait=false`):**
+```
+1. avenor_spawn × N        →  each returns run_id immediately
+2. (session goes idle)     →  plugin starts monitoring all pending runs
+3. (sub-agent finishes)    →  plugin re-prompts this session automatically
+4. avenor_answer_permission  →  if a permission was routed here mid-run
+5. avenor_events           →  inspect output
 ```
 
 ## Dependencies
