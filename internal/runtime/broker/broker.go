@@ -60,7 +60,7 @@ type Reply struct {
 type Envelope struct {
 	FromRunID     string          `json:"from_run_id"`
 	ToRunID       string          `json:"to_run_id"`
-	ToRole        string          `json:"to_role,omitempty"`
+	To            string          `json:"to,omitempty"`
 	Kind          string          `json:"kind"`
 	CorrelationID string          `json:"correlation_id,omitempty"`
 	Payload       json.RawMessage `json:"payload,omitempty"`
@@ -90,7 +90,7 @@ func (f Finish) ToEnvelope() Envelope {
 func (r Reply) ToEnvelope() Envelope {
 	return Envelope{
 		FromRunID: r.RunID,
-		ToRole:    r.To,
+		To:        r.To,
 		Payload:   r.Payload,
 	}
 }
@@ -173,6 +173,9 @@ func (b *Broker) Send(runID string, kind string, payload json.RawMessage, correl
 //   - "done", "failed", "blocked" → stored in Finishes
 //   - everything else            → stored in Reports
 func (b *Broker) Ingest(runID string, kind string, payload json.RawMessage) error {
+	if payload == nil {
+		return fmt.Errorf("payload must not be nil")
+	}
 	b.mu.Lock()
 	st, ok := b.runs[runID]
 	b.mu.Unlock()
@@ -219,20 +222,22 @@ func (st *RunState) signalLocked() {
 // communication between agent harnesses and their orchestrators.
 // It owns run-scoped state, message queuing, and lifecycle event ingestion.
 type Broker struct {
-	addr      string
-	listener  net.Listener
-	mu        sync.RWMutex
-	runs      map[string]*RunState
-	server    *http.Server
-	httpToken string // optional global HTTP auth token for push-control endpoint
+	addr        string
+	listener    net.Listener
+	mu          sync.RWMutex
+	runs        map[string]*RunState
+	server      *http.Server
+	httpToken   string        // optional global HTTP auth token for push-control endpoint
+	pollTimeout time.Duration // max wait for poll-control before returning empty
 }
 
 // New creates a broker on an ephemeral loopback port.
 // The resulting addr is available after Start.
 func New(globalToken string) *Broker {
 	return &Broker{
-		runs:      make(map[string]*RunState),
-		httpToken: globalToken,
+		runs:        make(map[string]*RunState),
+		httpToken:   globalToken,
+		pollTimeout: 2 * time.Second,
 	}
 }
 
@@ -506,7 +511,7 @@ func (b *Broker) handlePollControl(w http.ResponseWriter, r *http.Request) {
 		st.Mu.Unlock()
 		select {
 		case <-notify:
-		case <-time.After(2 * time.Second):
+		case <-time.After(b.pollTimeout):
 		case <-r.Context().Done():
 			return
 		}

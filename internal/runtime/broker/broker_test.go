@@ -422,8 +422,8 @@ func TestEnvelopeConversion(t *testing.T) {
 	t.Run("Reply", func(t *testing.T) {
 		r := Reply{RunID: "r4", To: "controller", Payload: payload}
 		e := r.ToEnvelope()
-		if e.ToRole != "controller" {
-			t.Errorf("ToRole = %q, want controller", e.ToRole)
+		if e.To != "controller" {
+			t.Errorf("To = %q, want controller", e.To)
 		}
 	})
 
