@@ -54,6 +54,57 @@ type Reply struct {
 	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
+// Envelope is the internal generic message format used by the broker.
+// It is not exposed on the wire; HTTP endpoints continue to use the
+// existing Report/Finish/Reply/ControlMessage types.
+type Envelope struct {
+	FromRunID     string          `json:"from_run_id"`
+	ToRunID       string          `json:"to_run_id"`
+	ToRole        string          `json:"to_role,omitempty"`
+	Kind          string          `json:"kind"`
+	CorrelationID string          `json:"correlation_id,omitempty"`
+	Payload       json.RawMessage `json:"payload,omitempty"`
+	CreatedAt     time.Time       `json:"created_at"`
+}
+
+func (r Report) ToEnvelope() Envelope {
+	return Envelope{
+		FromRunID: r.RunID,
+		Kind:      r.State,
+		Payload:   r.Payload,
+	}
+}
+
+func (f Finish) ToEnvelope() Envelope {
+	kind := f.Status
+	if kind == "" {
+		kind = "done"
+	}
+	return Envelope{
+		FromRunID: f.RunID,
+		Kind:      kind,
+		Payload:   f.Payload,
+	}
+}
+
+func (r Reply) ToEnvelope() Envelope {
+	return Envelope{
+		FromRunID: r.RunID,
+		ToRole:    r.To,
+		Payload:   r.Payload,
+	}
+}
+
+func (m ControlMessage) ToEnvelope() Envelope {
+	return Envelope{
+		ToRunID:       m.RunID,
+		Kind:          m.Type,
+		CorrelationID: m.ID,
+		Payload:       m.Payload,
+		CreatedAt:     m.CreatedAt,
+	}
+}
+
 // PermissionState holds a pending permission relay request.
 type PermissionState struct {
 	RequestID string

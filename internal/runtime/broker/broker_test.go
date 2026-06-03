@@ -385,3 +385,63 @@ func TestBrokerDeleteRun(t *testing.T) {
 	// DeleteRun on nonexistent run should not panic.
 	b.DeleteRun("nonexistent")
 }
+
+func TestEnvelopeConversion(t *testing.T) {
+	payload := json.RawMessage(`{"key":"val"}`)
+
+	t.Run("Report", func(t *testing.T) {
+		r := Report{RunID: "r1", State: "working", Payload: payload}
+		e := r.ToEnvelope()
+		if e.FromRunID != "r1" {
+			t.Errorf("FromRunID = %q, want r1", e.FromRunID)
+		}
+		if e.Kind != "working" {
+			t.Errorf("Kind = %q, want working", e.Kind)
+		}
+		if string(e.Payload) != `{"key":"val"}` {
+			t.Errorf("Payload = %s", e.Payload)
+		}
+	})
+
+	t.Run("Finish", func(t *testing.T) {
+		f := Finish{RunID: "r2", Status: "done", Summary: "ok", Payload: payload}
+		e := f.ToEnvelope()
+		if e.Kind != "done" {
+			t.Errorf("Kind = %q, want done", e.Kind)
+		}
+	})
+
+	t.Run("FinishNoStatus", func(t *testing.T) {
+		f := Finish{RunID: "r3"}
+		e := f.ToEnvelope()
+		if e.Kind != "done" {
+			t.Errorf("Kind = %q, want done", e.Kind)
+		}
+	})
+
+	t.Run("Reply", func(t *testing.T) {
+		r := Reply{RunID: "r4", To: "controller", Payload: payload}
+		e := r.ToEnvelope()
+		if e.ToRole != "controller" {
+			t.Errorf("ToRole = %q, want controller", e.ToRole)
+		}
+	})
+
+	t.Run("ControlMessage", func(t *testing.T) {
+		now := time.Now()
+		m := ControlMessage{ID: "ctrl_1", Type: "continue", RunID: "r5", Payload: payload, CreatedAt: now}
+		e := m.ToEnvelope()
+		if e.ToRunID != "r5" {
+			t.Errorf("ToRunID = %q, want r5", e.ToRunID)
+		}
+		if e.Kind != "continue" {
+			t.Errorf("Kind = %q, want continue", e.Kind)
+		}
+		if e.CorrelationID != "ctrl_1" {
+			t.Errorf("CorrelationID = %q, want ctrl_1", e.CorrelationID)
+		}
+		if !e.CreatedAt.Equal(now) {
+			t.Errorf("CreatedAt = %v, want %v", e.CreatedAt, now)
+		}
+	})
+}
