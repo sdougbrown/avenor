@@ -33,7 +33,7 @@ avenor [flags]  # equivalent; explicit "run" is optional
 | `--dir` | `.` | Working directory for the agent |
 | `--resume` | (none) | Resume an existing session by ID; incompatible with `--loop-file` |
 | `--server-url` | (none) | Long-lived ACP server endpoint; required for `--backend opencode-http` |
-| `--backend` | `opencode-acp` | Runtime backend: `opencode-acp`, `gemini-acp`, `cursor-acp`, `codex-app-server`, `opencode-http` |
+| `--backend` | `opencode-acp` | Runtime backend: `opencode-acp`, `gemini-acp`, `cursor-acp`, `codex-app-server`, `opencode-http`, `claude-channel` |
 | `--model` | (none) | Backend-specific model ID; if not set, resolved from opencode config via `--agent` |
 | `--on-event` | (none) | Path to write NDJSON event stream; events are discarded if unset |
 | `--sentinel-file` | (none) | Path to write a completion sentinel (exit code, session ID, stop reason); also derives permission handler unless `--permission-handler` is set |
@@ -151,7 +151,7 @@ Spawn flags (all optional):
 | `--agent` | Agent name |
 | `--label` | Free-form label for log correlation |
 | `--model` | Backend-specific model ID |
-| `--backend` | Runtime backend |
+| `--backend` | Runtime backend: `opencode-acp`, `gemini-acp`, `cursor-acp`, `codex-app-server`, `opencode-http`, `claude-channel` |
 | `--server-url` | Long-lived ACP server endpoint |
 | `--on-event` | Path to write NDJSON events |
 | `--sentinel-file` | Path to write completion sentinel |
@@ -354,6 +354,30 @@ avenor watch /tmp/probe.jsonl
 ```
 
 See [backends.md](backends.md) for more on backend discovery.
+
+## avenor claude-channel
+
+Internal MCP sidecar invoked automatically by Claude Code when using the `claude-channel` backend. You don't run this directly — Avenor writes a per-run MCP config that tells Claude Code how to invoke it, then cleans it up when the session ends.
+
+```
+avenor claude-channel --run-id <id> --token <token> --broker-url <url>
+```
+
+### Flags
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--run-id` | yes | Avenor run ID issued by the broker |
+| `--token` | yes | Per-run bearer token for broker authentication |
+| `--broker-url` | yes | HTTP base URL of the in-process broker |
+
+The sidecar speaks JSON-RPC 2.0 over stdio, declares `claude/channel` and `claude/channel/permission` capabilities, and exposes the three tools Claude uses to communicate back:
+
+- `avenor_report` — progress update
+- `avenor_finish` — session completion with status and summary
+- `avenor_reply` — directed reply to a named recipient
+
+See [backends.md](backends.md#claude-channel-experimental) for architecture and security notes.
 
 ## Common Patterns
 

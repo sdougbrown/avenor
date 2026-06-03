@@ -15,7 +15,7 @@ hero:
 features:
   - icon: 🐎
     title: Cross-runtime dispatch
-    details: Run OpenCode, Codex, Gemini, Cursor, or pi from any top-level agent. Avenor brokers the boundary so your sub-agents can spawn sub-agents.
+    details: Run OpenCode, Claude Code, Codex, Gemini, Cursor, or pi from any top-level agent. Avenor brokers the boundary so your sub-agents can spawn sub-agents.
   - icon: 🪵
     title: Structured event log
     details: Every run writes typed NDJSON events. Tail them live with avenor watch, classify by severity, drive permission responses and downstream triggers.
