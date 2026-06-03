@@ -65,6 +65,7 @@ type RunState struct {
 	RunID               string
 	Token               string
 	ControlQueue        []*ControlMessage
+	RegisteredAt        time.Time
 	LastSeen            time.Time
 	Reports             []Report
 	Finishes            []Finish
@@ -282,6 +283,7 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		st.Mu.Lock()
+		st.RegisteredAt = time.Now()
 		st.LastSeen = time.Now()
 		st.Mu.Unlock()
 		resp := map[string]string{
@@ -299,6 +301,7 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 	st := &RunState{
 		RunID:               body.RunID,
 		Token:               token,
+		RegisteredAt:        time.Now(),
 		LastSeen:            time.Now(),
 		Notify:              make(chan struct{}, 1),
 		PermissionRequests:  make(map[string]*PermissionState),

@@ -2,6 +2,9 @@ package claudechannel
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -89,6 +92,22 @@ func TestBrokerEventMapping(t *testing.T) {
 	}
 }
 
+func TestShortRunID(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"1234567890", "12345678"},
+		{"abc", "abc00000"},
+		{"", "00000000"},
+	}
+	for _, tc := range cases {
+		if got := shortRunID(tc.input); got != tc.want {
+			t.Fatalf("shortRunID(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
 func TestMapFinishStatus(t *testing.T) {
 	cases := []struct {
 		input, want string
@@ -134,6 +153,115 @@ func TestCancelNotFound(t *testing.T) {
 	}
 }
 
+func TestPromptQueuesChannelEvent(t *testing.T) {
+	runID := "run-prompt"
+	b := broker.New("")
+	if _, err := b.CreateRun(runID); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	p := &Provider{broker: b, sessions: make(map[string]*session)}
+	s := &session{sessionID: "session-prompt", runID: runID, tmuxName: "missing", ctx: context.Background(), events: make(chan events.Event, 8)}
+	p.sessions[s.sessionID] = s
+
+	if err := p.Prompt(context.Background(), s.sessionID, "hello from test"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	select {
+	case ev := <-s.events:
+		if ev.Event != "agent.prompt_queued" {
+			t.Fatalf("event = %q, want agent.prompt_queued", ev.Event)
+		}
+		if ev.Fields["delivery"] != "channel" {
+			t.Fatalf("delivery = %v, want channel", ev.Fields["delivery"])
+		}
+		if ev.Fields["message_type"] != "continue" {
+			t.Fatalf("message_type = %v, want continue", ev.Fields["message_type"])
+		}
+	default:
+		t.Fatal("expected agent.prompt_queued event")
+	}
+}
+
+func TestPollBrokerEventsSkipsChannelReadyBeforeSidecarRegister(t *testing.T) {
+	runID := "run-not-ready"
+	b := broker.New("")
+	if _, err := b.CreateRun(runID); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	p := &Provider{broker: b}
+	s := &session{sessionID: "session-not-ready", runID: runID, mcpServer: "avenor-channel-test", events: make(chan events.Event, 4)}
+
+	p.pollBrokerEvents(s)
+
+	select {
+	case ev := <-s.events:
+		t.Fatalf("expected no events before sidecar register, got %q", ev.Event)
+	default:
+	}
+
+	s.mu.Lock()
+	readyEmitted := s.channelReadyEmitted
+	s.mu.Unlock()
+	if readyEmitted {
+		t.Fatal("channelReadyEmitted should remain false before sidecar register")
+	}
+}
+
+func TestPollBrokerEventsEmitsChannelLifecycle(t *testing.T) {
+	runID := "run-lifecycle"
+	b := broker.New("")
+	if _, err := b.CreateRun(runID); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	st := b.GetRun(runID)
+	st.Lock()
+	st.RegisteredAt = st.LastSeen
+	st.Reports = append(st.Reports, broker.Report{RunID: runID, State: "checkpoint", Payload: []byte(`{"content":{"text":"progress"}}`)})
+	st.Replies = append(st.Replies, broker.Reply{RunID: runID, To: "controller", Payload: []byte(`{"summary":"done"}`)})
+	st.Finishes = append(st.Finishes, broker.Finish{RunID: runID, Status: "done", Summary: "ok", FilesChanged: []string{"docs/events.md"}, Payload: []byte(`{"result":"ok"}`)})
+	st.Unlock()
+
+	p := &Provider{broker: b}
+	s := &session{sessionID: "session-lifecycle", runID: runID, mcpServer: "avenor-channel-test", events: make(chan events.Event, 8)}
+
+	p.pollBrokerEvents(s)
+
+	got := make([]string, 0, 6)
+	for i := 0; i < 6; i++ {
+		select {
+		case ev := <-s.events:
+			got = append(got, ev.Event)
+		default:
+			t.Fatalf("expected 6 events, got %d", len(got))
+		}
+	}
+	want := []string{"agent.channel_ready", "agent.report", "agent.message_chunk", "agent.finish", "session.end", "agent.reply"}
+	for i, ev := range got {
+		if ev != want[i] {
+			t.Fatalf("event[%d] = %q, want %q", i, ev, want[i])
+		}
+	}
+
+	s.mu.Lock()
+	readyEmitted := s.channelReadyEmitted
+	finished := s.finished
+	s.mu.Unlock()
+	if !readyEmitted {
+		t.Fatal("expected channelReadyEmitted to be set")
+	}
+	if !finished {
+		t.Fatal("expected session to be marked finished")
+	}
+
+	p.pollBrokerEvents(s)
+	select {
+	case ev := <-s.events:
+		t.Fatalf("expected no duplicate events after drain, got %q", ev.Event)
+	default:
+	}
+}
+
 func TestPollBrokerEventsMarksFinishedBeforeSendingEnd(t *testing.T) {
 	runID := "run-1"
 	b := broker.New("")
@@ -146,7 +274,7 @@ func TestPollBrokerEventsMarksFinishedBeforeSendingEnd(t *testing.T) {
 	st.Unlock()
 
 	p := &Provider{broker: b}
-	s := &session{sessionID: "session-1", runID: runID, events: make(chan events.Event, 1)}
+	s := &session{sessionID: "session-1", runID: runID, events: make(chan events.Event, 2)}
 
 	p.pollBrokerEvents(s)
 
@@ -156,13 +284,15 @@ func TestPollBrokerEventsMarksFinishedBeforeSendingEnd(t *testing.T) {
 	if !finished {
 		t.Fatal("session should be marked finished before session.end is consumed")
 	}
-	select {
-	case ev := <-s.events:
-		if ev.Event != "session.end" {
-			t.Fatalf("event = %q, want session.end", ev.Event)
+	for _, want := range []string{"agent.finish", "session.end"} {
+		select {
+		case ev := <-s.events:
+			if ev.Event != want {
+				t.Fatalf("event = %q, want %q", ev.Event, want)
+			}
+		default:
+			t.Fatalf("expected %s event", want)
 		}
-	default:
-		t.Fatal("expected session.end event")
 	}
 }
 
@@ -381,5 +511,155 @@ func TestEmitNonBlockingFullChannel(t *testing.T) {
 	emitNonBlocking(s, events.Event{Event: "dropped"})
 	if len(s.events) != 1 {
 		t.Fatalf("channel should still have 1 event, got %d", len(s.events))
+	}
+}
+
+func TestProjectMCPConfigRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".mcp.json")
+
+	if err := upsertProjectMCPServer(path, "avenor-channel-a", map[string]any{"command": "avenor", "args": []string{"claude-channel"}}); err != nil {
+		t.Fatalf("upsert first server: %v", err)
+	}
+	if err := upsertProjectMCPServer(path, "avenor-channel-b", map[string]any{"command": "avenor", "args": []string{"claude-channel", "--run-id", "b"}}); err != nil {
+		t.Fatalf("upsert second server: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+	servers, ok := cfg["mcpServers"].(map[string]any)
+	if !ok {
+		t.Fatalf("mcpServers has type %T, want map[string]any", cfg["mcpServers"])
+	}
+	if len(servers) != 2 {
+		t.Fatalf("mcpServers len = %d, want 2", len(servers))
+	}
+	if _, ok := servers["avenor-channel-a"]; !ok {
+		t.Fatal("expected avenor-channel-a to be present in config")
+	}
+	if _, ok := servers["avenor-channel-b"]; !ok {
+		t.Fatal("expected avenor-channel-b to be present in config")
+	}
+
+	if err := removeProjectMCPServer(path, "avenor-channel-a"); err != nil {
+		t.Fatalf("remove first server: %v", err)
+	}
+	data, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config after first remove: %v", err)
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("decode config after first remove: %v", err)
+	}
+	servers, ok = cfg["mcpServers"].(map[string]any)
+	if !ok {
+		t.Fatalf("mcpServers after first remove has type %T, want map[string]any", cfg["mcpServers"])
+	}
+	if len(servers) != 1 {
+		t.Fatalf("mcpServers len after first remove = %d, want 1", len(servers))
+	}
+	if _, ok := servers["avenor-channel-b"]; !ok {
+		t.Fatal("expected avenor-channel-b to remain in config")
+	}
+
+	if err := removeProjectMCPServer(path, "avenor-channel-b"); err != nil {
+		t.Fatalf("remove second server: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("expected config file to be removed, stat err = %v", err)
+	}
+}
+
+func TestProjectMCPConfigPreservesUnrelatedServers(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".mcp.json")
+	seed := map[string]any{
+		"mcpServers": map[string]any{
+			"context7": map[string]any{"type": "http", "url": "https://mcp.context7.com/mcp"},
+		},
+	}
+	data, err := json.MarshalIndent(seed, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal seed config: %v", err)
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+		t.Fatalf("write seed config: %v", err)
+	}
+
+	if err := upsertProjectMCPServer(path, "avenor-channel-a", map[string]any{"command": "avenor"}); err != nil {
+		t.Fatalf("upsert avenor server: %v", err)
+	}
+	if err := removeProjectMCPServer(path, "avenor-channel-a"); err != nil {
+		t.Fatalf("remove avenor server: %v", err)
+	}
+
+	data, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read preserved config: %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("decode preserved config: %v", err)
+	}
+	servers, ok := cfg["mcpServers"].(map[string]any)
+	if !ok {
+		t.Fatalf("mcpServers has type %T, want map[string]any", cfg["mcpServers"])
+	}
+	if len(servers) != 1 {
+		t.Fatalf("mcpServers len = %d, want 1", len(servers))
+	}
+	if _, ok := servers["context7"]; !ok {
+		t.Fatal("expected context7 to remain in config")
+	}
+}
+
+func TestCleanupProjectMCPRemovesOnlyAvenorChannelEntries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".mcp.json")
+	seed := map[string]any{
+		"mcpServers": map[string]any{
+			"avenor-channel-old": map[string]any{"command": "avenor", "args": []string{"claude-channel", "--run-id", "old"}},
+			"context7":           map[string]any{"type": "http", "url": "https://mcp.context7.com/mcp"},
+		},
+	}
+	data, err := json.MarshalIndent(seed, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal seed config: %v", err)
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+		t.Fatalf("write seed config: %v", err)
+	}
+
+	removed, err := CleanupProjectMCP(path)
+	if err != nil {
+		t.Fatalf("cleanup project mcp: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+
+	data, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read cleaned config: %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("decode cleaned config: %v", err)
+	}
+	servers, ok := cfg["mcpServers"].(map[string]any)
+	if !ok {
+		t.Fatalf("mcpServers has type %T, want map[string]any", cfg["mcpServers"])
+	}
+	if _, ok := servers["avenor-channel-old"]; ok {
+		t.Fatal("expected avenor-channel-old entry to be removed")
+	}
+	if _, ok := servers["context7"]; !ok {
+		t.Fatal("expected context7 entry to remain")
 	}
 }

@@ -203,6 +203,12 @@ avenor watch --classify --since-cursor /tmp/watcher.cursor /tmp/run.ndjson
 
 On each invocation, processes only new events since the last run, and updates the cursor file.
 
+## Relationship to tracked state
+
+`avenor watch` is useful for operators and shell scripts, but orchestrating code usually wants a stable in-memory view instead of individual lines. Inside the Avenor codebase, use `internal/events.SessionTracker` to reduce the raw `--on-event` stream into a single `SessionState` snapshot.
+
+That gives controllers one canonical interpretation of channel lifecycle fields such as `channel_ready`, prompt queueing/submission, permission waits, report state, and terminal finish/session-end state.
+
 ## Relationship to raw events
 
 See [events.md](events.md) for the full specification of event types, fields, and semantics. `watch` digests the raw NDJSON by:

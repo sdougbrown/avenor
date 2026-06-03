@@ -106,6 +106,22 @@ Example:
 {"event":"avenor.loop.end","run_id":"run_1","exit_reason":"end_turn","iterations_completed":3,"ts":1234567890}
 ```
 
+### Claude channel events
+
+The `claude-channel` backend emits a few extra synthesized events so non-Claude controllers can follow the broker-side lifecycle without scraping tmux output. These events are emitted by Avenor, not Claude Code itself.
+
+**`agent.channel_ready`** — The Claude sidecar has registered with the in-process broker and the channel is available. Fields: `run_id`, `server_name`, `source` (`"channel"`).
+
+**`agent.prompt_queued`** — A prompt was queued onto the broker control channel for Claude to consume. Fields: `control_id`, `message_type` (currently `"continue"`), `delivery` (`"channel"`), `prompt_length`.
+
+**`agent.prompt_submitted`** — A prompt was injected directly into Claude's tmux pane and submitted with Enter. Fields: `delivery` (`"tmux"`), `prompt_length`.
+
+**`agent.report`** — The Claude sidecar called `avenor_report`. Fields: `state`, `payload`, `source` (`"channel"`). Avenor may also emit a second derived event such as `agent.message_chunk` or `agent.status` from the same report payload for compatibility with existing consumers.
+
+**`agent.reply`** — The Claude sidecar called `avenor_reply`. Fields: `to`, `payload`, `source` (`"channel"`).
+
+**`agent.finish`** — The Claude sidecar called `avenor_finish`. Fields: `status`, `summary`, `files_changed`, optional `payload`, `source` (`"channel"`). Avenor then emits the terminal `session.end` event derived from that finish record.
+
 ### Retry and error events
 
 **`avenor.retry`** — A phase is being retried (exit code 1, non-fatal failure). Emitted before each retry attempt after the first. Fields: `attempt` (which retry this is: 1 for the first retry, 2 for the second, etc.), `max_retries`, `ts`.
@@ -218,6 +234,25 @@ When using `avenor watch --classify`, MILESTONE and FINDING events are tagged so
 You can emit custom events for Avenor to pass downstream. Avenor treats any unknown event type as ACTIVITY. If you want a custom event classified as MILESTONE or FINDING, post-process it with `avenor digest --classify` before shipping downstream.
 
 Custom events must have an `event` field (string) and may include any other fields. Avenor does not validate or transform them.
+
+## Consumer pattern
+
+Machine consumers should treat the NDJSON event log as the source of truth and derive their own run view from it. For in-repo orchestration code, use `internal/events.SessionTracker` as the canonical reducer over `events.Event`.
+
+Minimal pattern:
+
+```go
+tracker := events.NewSessionTracker(sessionID)
+for _, ev := range stream {
+    if tracker.Observe(ev) {
+        snapshot := tracker.Snapshot()
+        // snapshot.ChannelReady, snapshot.LastReportState,
+        // snapshot.WaitingPermission, snapshot.Ended, etc.
+    }
+}
+```
+
+For `claude-channel`, prefer broker-derived events over tmux-derived status when both exist. In practice that means `agent.channel_ready`, `agent.prompt_queued`, `agent.prompt_submitted`, `agent.report`, `agent.reply`, `agent.finish`, and `session.end` are the authoritative lifecycle events for orchestrators. `agent.status` remains useful as secondary telemetry, but it should not be the only signal driving control flow.
 
 ## Design notes
 

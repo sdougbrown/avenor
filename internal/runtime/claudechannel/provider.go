@@ -28,6 +28,7 @@ const (
 	startupPromptTimeout       = 30 * time.Second
 	promptInjectCheckInterval  = 500 * time.Millisecond
 	promptInjectTimeout        = 30 * time.Second
+	promptSubmitRetryDelay     = 750 * time.Millisecond
 	paneScanInterval           = 500 * time.Millisecond
 	tmuxPermissionTimeout      = 60 * time.Second
 )
@@ -57,22 +58,25 @@ type session struct {
 	runID      string
 	dir        string
 	tmuxName   string // tmux session name; used for lifecycle ops
-	mcpDir     string // tmpdir holding MCP config; removed on session exit
+	mcpDir     string // tmpdir holding ephemeral bootstrap state; removed on session exit
 	brokerURL  string
 	sidecarTok string
 	mcpConfig  string
+	mcpServer  string
+	mcpProject string
 
 	events   chan events.Event
 	done     chan struct{}
 	ctx      context.Context
 	cancelFn context.CancelFunc
 
-	startedAt       time.Time
-	prompted        bool
-	active          bool
-	finished        bool
-	pendingTmuxPerm *tmuxPermission
-	mu              sync.Mutex
+	startedAt           time.Time
+	prompted            bool
+	active              bool
+	finished            bool
+	channelReadyEmitted bool
+	pendingTmuxPerm     *tmuxPermission
+	mu                  sync.Mutex
 }
 
 type tmuxPermission struct {
@@ -169,8 +173,10 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		return runtime.Session{}, fmt.Errorf("broker create run: %w", err)
 	}
 	brokerURL := fmt.Sprintf("http://%s", p.broker.Addr())
+	runSlug := shortRunID(runID)
+	serverName := "avenor-channel-" + runSlug
 
-	// Create temporary MCP config for this run.
+	// Create ephemeral bootstrap state for this run.
 	mcpDir, err := os.MkdirTemp("", "avenor-claude-channel-*")
 	if err != nil {
 		return runtime.Session{}, fmt.Errorf("mktemp: %w", err)
@@ -183,7 +189,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	}
 	mcpConfig := map[string]any{
 		"mcpServers": map[string]any{
-			"avenor": map[string]any{
+			serverName: map[string]any{
 				"command": avenorBin,
 				"args": []string{
 					"claude-channel",
@@ -203,12 +209,15 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		_ = os.RemoveAll(mcpDir)
 		return runtime.Session{}, fmt.Errorf("write mcp config: %w", err)
 	}
+	projectMCPPath := filepath.Join(merged.Dir, ".mcp.json")
+	if err := upsertProjectMCPServer(projectMCPPath, serverName, mcpConfig["mcpServers"].(map[string]any)[serverName]); err != nil {
+		_ = os.RemoveAll(mcpDir)
+		return runtime.Session{}, fmt.Errorf("upsert project mcp config: %w", err)
+	}
 
 	// Build claude args.
 	claudeArgs := []string{
-		"--strict-mcp-config",
-		"--mcp-config", mcpConfigPath,
-		"--dangerously-load-development-channels", "server:avenor",
+		"--dangerously-load-development-channels", "server:" + serverName,
 		"--session-id", sessionID,
 	}
 	if merged.Agent != "" {
@@ -234,7 +243,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 
 	// Launch claude in a detached tmux session. tmux provides a real virtual
 	// terminal, which is what prevents claude from falling back to --print mode.
-	tmuxName := "avenor-" + runID[:8]
+	tmuxName := "avenor-" + runSlug
 	if tmuxOut, err := exec.Command(
 		"tmux", "new-session",
 		"-d",
@@ -244,6 +253,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		"-y", "50",
 		shellCmd,
 	).CombinedOutput(); err != nil {
+		_ = removeProjectMCPServer(projectMCPPath, serverName)
 		_ = os.RemoveAll(mcpDir)
 		return runtime.Session{}, fmt.Errorf("tmux new-session: %w: %s", err, strings.TrimSpace(string(tmuxOut)))
 	}
@@ -276,6 +286,8 @@ pollLoop:
 		brokerURL:  brokerURL,
 		sidecarTok: sidecarTok,
 		mcpConfig:  mcpConfigPath,
+		mcpServer:  serverName,
+		mcpProject: projectMCPPath,
 		events:     make(chan events.Event, 64),
 		done:       make(chan struct{}),
 		ctx:        sessCtx,
@@ -326,6 +338,7 @@ func (p *Provider) runSession(ctx context.Context, s *session) {
 	}()
 	defer func() {
 		_ = exec.Command("tmux", "kill-session", "-t", s.tmuxName).Run()
+		_ = removeProjectMCPServer(s.mcpProject, s.mcpServer)
 		_ = os.RemoveAll(s.mcpDir)
 	}()
 
@@ -457,6 +470,7 @@ func (p *Provider) pollBrokerEvents(s *session) {
 		return
 	}
 	st.Lock()
+	registeredAt := st.RegisteredAt
 	reports := make([]broker.Report, len(st.Reports))
 	copy(reports, st.Reports)
 	st.Reports = st.Reports[:0]
@@ -471,10 +485,42 @@ func (p *Provider) pollBrokerEvents(s *session) {
 
 	st.Unlock()
 
+	if markChannelReadyEmitted(s, registeredAt) {
+		s.events <- events.Event{
+			Event:     "agent.channel_ready",
+			SessionID: s.sessionID,
+			Fields: map[string]any{
+				"run_id":      s.runID,
+				"server_name": s.mcpServer,
+				"source":      "channel",
+			},
+		}
+	}
+
 	for _, rep := range reports {
+		s.events <- events.Event{
+			Event:     "agent.report",
+			SessionID: s.sessionID,
+			Fields: map[string]any{
+				"state":   rep.State,
+				"payload": json.RawMessage(rep.Payload),
+				"source":  "channel",
+			},
+		}
 		s.events <- brokerEvent(s.sessionID, rep.State, rep.Payload)
 	}
 	for _, fin := range finishes {
+		s.events <- events.Event{
+			Event:     "agent.finish",
+			SessionID: s.sessionID,
+			Fields: map[string]any{
+				"status":        fin.Status,
+				"summary":       fin.Summary,
+				"files_changed": fin.FilesChanged,
+				"payload":       json.RawMessage(fin.Payload),
+				"source":        "channel",
+			},
+		}
 		if !markFinished(s) {
 			continue
 		}
@@ -493,7 +539,11 @@ func (p *Provider) pollBrokerEvents(s *session) {
 		s.events <- events.Event{
 			Event:     "agent.reply",
 			SessionID: s.sessionID,
-			Fields:    map[string]any{"to": rep.To, "payload": json.RawMessage(rep.Payload)},
+			Fields: map[string]any{
+				"to":      rep.To,
+				"payload": json.RawMessage(rep.Payload),
+				"source":  "channel",
+			},
 		}
 	}
 }
@@ -505,6 +555,22 @@ func markFinished(s *session) bool {
 		return false
 	}
 	s.finished = true
+	return true
+}
+
+func markChannelReadyEmitted(s *session, registeredAt time.Time) bool {
+	// Zero RegisteredAt means the Claude sidecar has not registered with the
+	// broker yet, so the channel is not ready from the orchestrator's point of
+	// view even though the run state already exists.
+	if registeredAt.IsZero() {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.channelReadyEmitted {
+		return false
+	}
+	s.channelReadyEmitted = true
 	return true
 }
 
@@ -558,6 +624,15 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 		s.mu.Lock()
 		s.prompted = true
 		s.mu.Unlock()
+		emitNonBlocking(s, events.Event{
+			Event:     "agent.prompt_submitted",
+			SessionID: s.sessionID,
+			Fields: map[string]any{
+				"delivery":      "tmux",
+				"prompt_length": len(prompt),
+			},
+		})
+		go retryPromptSubmitIfIdle(s.ctx, s.tmuxName, prompt)
 	}()
 
 	// Also push via channel for idempotence and later turns.
@@ -569,7 +644,20 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 			"message": prompt,
 		}),
 	}
-	return p.broker.PushControl(s.runID, msg)
+	if err := p.broker.PushControl(s.runID, msg); err != nil {
+		return err
+	}
+	emitNonBlocking(s, events.Event{
+		Event:     "agent.prompt_queued",
+		SessionID: s.sessionID,
+		Fields: map[string]any{
+			"control_id":    msg.ID,
+			"message_type":  msg.Type,
+			"delivery":      "channel",
+			"prompt_length": len(prompt),
+		},
+	})
+	return nil
 }
 
 func pastePromptAndSubmit(tmuxName, prompt string) error {
@@ -583,6 +671,31 @@ func pastePromptAndSubmit(tmuxName, prompt string) error {
 		return err
 	}
 	return exec.Command("tmux", "send-keys", "-t", tmuxName, "Enter").Run()
+}
+
+func retryPromptSubmitIfIdle(ctx context.Context, tmuxName, prompt string) {
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(promptSubmitRetryDelay):
+	}
+
+	out, err := exec.Command("tmux", "capture-pane", "-t", tmuxName, "-p").Output()
+	if err != nil {
+		return
+	}
+	text := string(out)
+	if classifyPane(text) != paneStateIdle {
+		return
+	}
+	needle := prompt
+	if len(needle) > 96 {
+		needle = needle[:96]
+	}
+	if !strings.Contains(text, needle) {
+		return
+	}
+	_ = exec.Command("tmux", "send-keys", "-t", tmuxName, "Enter").Run()
 }
 
 func scanPane(tmuxName string) (paneState, error) {
@@ -702,11 +815,15 @@ func autoConfirmDevelopmentChannelPrompt(ctx context.Context, s *session) {
 
 		out, err := exec.Command("tmux", "capture-pane", "-t", s.tmuxName, "-p").Output()
 		if err != nil {
-			return
+			continue
+		}
+		if bytes.Contains(out, []byte("New MCP server found in this project")) {
+			_ = exec.Command("tmux", "send-keys", "-t", s.tmuxName, "1", "Enter").Run()
+			continue
 		}
 		if bytes.Contains(out, []byte("Loading development channels")) {
 			_ = exec.Command("tmux", "send-keys", "-t", s.tmuxName, "Enter").Run()
-			return
+			continue
 		}
 	}
 }
@@ -739,6 +856,16 @@ func waitForPaneReady(ctx context.Context, tmuxName string) bool {
 func mustJSON(v any) json.RawMessage {
 	b, _ := json.Marshal(v)
 	return json.RawMessage(b)
+}
+
+func shortRunID(runID string) string {
+	if len(runID) >= 8 {
+		return runID[:8]
+	}
+	if runID == "" {
+		return "00000000"
+	}
+	return runID + strings.Repeat("0", 8-len(runID))
 }
 
 func brokerEvent(sessionID, state string, payload json.RawMessage) events.Event {
