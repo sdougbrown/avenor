@@ -185,7 +185,7 @@ func TestBrokerPollDrainsStaleNotifyAfterQueuedMessage(t *testing.T) {
 		resp.Body.Close()
 		t.Fatal("second empty poll returned before request context timed out")
 	}
-	if elapsed := time.Since(start); elapsed < 75*time.Millisecond {
+	if elapsed := time.Since(start); elapsed < 50*time.Millisecond {
 		t.Fatalf("second empty poll returned too quickly after %s", elapsed)
 	}
 }

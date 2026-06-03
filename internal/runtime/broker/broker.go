@@ -154,6 +154,9 @@ func (b *Broker) PushControl(runID string, msg ControlMessage) error {
 // ControlMessage internally. correlationID is optional; it is used as
 // the ControlMessage ID when non-empty.
 func (b *Broker) Send(runID string, kind string, payload json.RawMessage, correlationID string) error {
+	if correlationID == "" {
+		correlationID = MakeToken()
+	}
 	msg := ControlMessage{
 		ID:      correlationID,
 		Type:    kind,
@@ -197,7 +200,15 @@ func (b *Broker) Ingest(runID string, kind string, payload json.RawMessage) erro
 	return nil
 }
 
+// signalLocked sends a non-blocking signal on st.Notify to wake a
+// waiting poller. Because the channel is buffered to 1, stale signals
+// may sit unread — the consumer must drain Notify after each poll
+// to avoid a spurious immediate return when the queue is actually empty.
 func (st *RunState) signalLocked() {
+	// Non-blocking send means stale signals can be lost if the consumer
+	// doesn't drain Notify fast enough. This is intentional — it ensures
+	// poll-control never blocks longer than necessary, but means a signal
+	// arriving before the consumer drains the channel may be silently dropped.
 	select {
 	case st.Notify <- struct{}{}:
 	default:
@@ -227,10 +238,9 @@ func New(globalToken string) *Broker {
 
 func MakeToken() string {
 	b := make([]byte, 16)
-	for i := 0; i < 3; i++ {
-		if _, err := rand.Read(b); err == nil {
-			return hex.EncodeToString(b)
-		}
+	_, err := rand.Read(b)
+	if err != nil {
+		panic(fmt.Sprintf("crypto/rand: %v", err))
 	}
 	return hex.EncodeToString(b)
 }
@@ -381,8 +391,8 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	b.mu.Lock()
 	if st, exists := b.runs[body.RunID]; exists {
-		b.mu.Unlock()
 		if body.Token == "" || subtle.ConstantTimeCompare([]byte(body.Token), []byte(st.Token)) != 1 {
+			b.mu.Unlock()
 			http.Error(w, "run already registered", http.StatusConflict)
 			return
 		}
@@ -390,6 +400,7 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 		st.RegisteredAt = time.Now()
 		st.LastSeen = time.Now()
 		st.Mu.Unlock()
+		b.mu.Unlock()
 		resp := map[string]string{
 			"token":  st.Token,
 			"run_id": st.RunID,

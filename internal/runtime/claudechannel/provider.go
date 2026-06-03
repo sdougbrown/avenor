@@ -49,7 +49,7 @@ type Provider struct {
 
 	mu        sync.Mutex
 	sessions  map[string]*session
-	broker       *broker.Broker
+	broker    *broker.Broker
 	globalTok string
 }
 
