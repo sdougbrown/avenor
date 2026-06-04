@@ -484,11 +484,12 @@ func completePhaseRequirements(ctx context.Context, opts RunOptions, phase phase
 	}
 
 	return PhaseAttemptResult{
-		ExitCode:   1,
-		SessionID:  sessionID,
-		StopReason: "incomplete_output",
-		Output:     result.Output,
-		FinalReply: result.FinalReply,
+		ExitCode:     1,
+		SessionID:    sessionID,
+		StopReason:   "incomplete_output",
+		Output:       result.Output,
+		FinalReply:   result.FinalReply,
+		BrokerRunID:  result.BrokerRunID,
 	}, nil
 }
 
@@ -671,19 +672,5 @@ func nestedLoopDirective(result NestedResult) string {
 // when available. It is a no-op when no broker is configured or the
 // attempt did not produce a brokerRunID.
 func enrichFromBroker(opts RunOptions, result *PhaseAttemptResult) {
-	if opts.Broker == nil || result.BrokerRunID == "" {
-		return
-	}
-	run := opts.Broker.GetRun(result.BrokerRunID)
-	if run == nil {
-		return
-	}
-	run.Mu.Lock()
-	defer run.Mu.Unlock()
-	if len(run.Finishes) > 0 && result.StopReason == "" {
-		lastFinish := run.Finishes[len(run.Finishes)-1]
-		if lastFinish.Status != "" {
-			result.StopReason = lastFinish.Status
-		}
-	}
+	broker.EnrichStopReason(opts.Broker, result.BrokerRunID, &result.StopReason)
 }
