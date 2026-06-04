@@ -45,7 +45,9 @@ func (TmuxLauncher) Start(_ context.Context, opts StartOptions) (Session, error)
 	for {
 		pidOut, err := exec.Command("tmux", "list-panes", "-t", opts.Name, "-F", "#{pane_pid}").Output()
 		if err == nil && len(bytes.TrimSpace(pidOut)) > 0 {
-			pid, _ = strconv.Atoi(strings.TrimSpace(string(pidOut)))
+			if p, err := strconv.Atoi(strings.TrimSpace(string(pidOut))); err == nil {
+				pid = p
+			}
 			break
 		}
 		select {

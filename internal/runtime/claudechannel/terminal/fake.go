@@ -1,0 +1,182 @@
+package terminal
+
+import (
+	"context"
+	"sync"
+)
+
+// FakeSession is a terminal.Session for tests with controllable behavior.
+type FakeSession struct {
+	mu         sync.Mutex
+	name       string
+	pid        int
+	captures   []string
+	capIdx     int
+	capErr     error
+	alive      bool
+	pasteCalls [][]string
+	pasteErr   error
+	sendCalls  [][]string
+	sendErr    error
+	killErr    error
+}
+
+// NewFakeSession creates a FakeSession with the given initial capture text.
+func NewFakeSession(name string, pid int, capture string) *FakeSession {
+	return &FakeSession{
+		name:     name,
+		pid:      pid,
+		captures: []string{capture},
+		alive:    true,
+	}
+}
+
+// NewFakeSessionQueue creates a FakeSession that drains a queue of capture snapshots.
+func NewFakeSessionQueue(name string, pid int, captures []string) *FakeSession {
+	return &FakeSession{
+		name:     name,
+		pid:      pid,
+		captures: captures,
+		alive:    true,
+	}
+}
+
+// Capture returns the next queued capture text, or the error set via SetCapErr.
+func (f *FakeSession) Capture(_ context.Context) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.capIdx >= len(f.captures) {
+		return "", f.capErr
+	}
+	c := f.captures[f.capIdx]
+	f.capIdx++
+	return c, nil
+}
+
+// SetCapErr sets the error returned from Capture.
+func (f *FakeSession) SetCapErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.capErr = err
+}
+
+// QueueCapture adds a capture snapshot to the queue.
+func (f *FakeSession) QueueCapture(s string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.captures = append(f.captures, s)
+}
+
+// Alive returns the configured alive status.
+func (f *FakeSession) Alive(_ context.Context) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.alive
+}
+
+// SetAlive controls the Alive() result.
+func (f *FakeSession) SetAlive(v bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.alive = v
+}
+
+// Name returns the session name.
+func (f *FakeSession) Name() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.name
+}
+
+// PID returns the session PID.
+func (f *FakeSession) PID() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.pid
+}
+
+// PasteAndEnter records the paste call and returns the configured error.
+func (f *FakeSession) PasteAndEnter(_ context.Context, text string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pasteCalls = append(f.pasteCalls, []string{text})
+	return f.pasteErr
+}
+
+// PasteCalls returns the recorded PasteAndEnter calls.
+func (f *FakeSession) PasteCalls() [][]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([][]string, len(f.pasteCalls))
+	for i, c := range f.pasteCalls {
+		out[i] = append([]string{}, c...)
+	}
+	return out
+}
+
+// SetPasteErr sets the error returned from PasteAndEnter.
+func (f *FakeSession) SetPasteErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pasteErr = err
+}
+
+// SendKeys records the key call and returns the configured error.
+func (f *FakeSession) SendKeys(_ context.Context, keys ...Key) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	strs := make([]string, len(keys))
+	for i, k := range keys {
+		strs[i] = string(k)
+	}
+	f.sendCalls = append(f.sendCalls, strs)
+	return f.sendErr
+}
+
+// SendCalls returns the recorded SendKeys calls.
+func (f *FakeSession) SendCalls() [][]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([][]string, len(f.sendCalls))
+	for i, c := range f.sendCalls {
+		out[i] = append([]string{}, c...)
+	}
+	return out
+}
+
+// SetSendErr sets the error returned from SendKeys.
+func (f *FakeSession) SetSendErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sendErr = err
+}
+
+// Kill returns the configured error.
+func (f *FakeSession) Kill(_ context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.killErr
+}
+
+// SetKillErr sets the error returned from Kill.
+func (f *FakeSession) SetKillErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.killErr = err
+}
+
+// SetName changes the session name.
+func (f *FakeSession) SetName(n string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.name = n
+}
+
+// SetPID changes the session PID.
+func (f *FakeSession) SetPID(pid int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pid = pid
+}
+
+var _ Session = (*FakeSession)(nil)

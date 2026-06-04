@@ -30,7 +30,7 @@ const (
 	promptInjectTimeout        = 30 * time.Second
 	promptSubmitRetryDelay     = 750 * time.Millisecond
 	paneScanInterval           = 500 * time.Millisecond
-	tmuxPermissionTimeout      = 60 * time.Second
+	terminalPermissionTimeout      = 60 * time.Second
 )
 
 type paneState string
@@ -76,15 +76,14 @@ type session struct {
 	active          bool
 	finished        bool
 	channelReadyEmitted bool
-	pendingTmuxPerm *tmuxPermission
+	pendingTerminalPerm *terminalPermission
 	mu              sync.Mutex
 }
 
-type tmuxPermission struct {
+type terminalPermission struct {
 	requestID string
 	prompt    string
 	options   []permissionOption
-	tmuxName  string
 	createdAt time.Time
 }
 
@@ -353,13 +352,13 @@ func (p *Provider) runSession(ctx context.Context, s *session) {
 		case <-pollTick.C:
 			p.pollBrokerEvents(s)
 		case <-paneTick.C:
-			p.scanPaneTick(s)
+			p.scanTerminalTick(s)
 		}
 	}
 }
 
-func (p *Provider) scanPaneTick(s *session) {
-	state, err := scanPane(s.ctx, s.term)
+func (p *Provider) scanTerminalTick(s *session) {
+	state, err := scanTerminal(s.ctx, s.term)
 	if err != nil {
 		return
 	}
@@ -367,7 +366,7 @@ func (p *Provider) scanPaneTick(s *session) {
 	s.mu.Lock()
 	prompted := s.prompted
 	finished := s.finished
-	currentPerm := s.pendingTmuxPerm
+	currentPerm := s.pendingTerminalPerm
 	s.mu.Unlock()
 
 	if finished || !prompted {
@@ -388,16 +387,15 @@ func (p *Provider) scanPaneTick(s *session) {
 		if err != nil {
 			return
 		}
-		tmuxPerm := parseTmuxPermission(string(out))
+		tmuxPerm := parseTerminalPermission(string(out))
 		if tmuxPerm == nil {
 			return
 		}
-		tmuxPerm.tmuxName = s.tmuxName
 		tmuxPerm.createdAt = time.Now()
 		tmuxPerm.requestID = uuid.New().String()
 
 		s.mu.Lock()
-		s.pendingTmuxPerm = tmuxPerm
+		s.pendingTerminalPerm = tmuxPerm
 		s.mu.Unlock()
 
 		// Emit the brokered permission request.
@@ -425,7 +423,7 @@ func (p *Provider) scanPaneTick(s *session) {
 		// Clear any stale permission.
 		if currentPerm != nil {
 			s.mu.Lock()
-			s.pendingTmuxPerm = nil
+			s.pendingTerminalPerm = nil
 			s.mu.Unlock()
 		}
 		emitNonBlocking(s, events.Event{Event: "agent.status", SessionID: s.sessionID, Fields: map[string]any{"phase": "waiting", "source": "tmux-pane"}})
@@ -657,7 +655,7 @@ func retryPromptSubmitIfIdle(ctx context.Context, term terminal.Session, prompt 
 	_ = term.SendKeys(ctx, terminal.KeyEnter)
 }
 
-func scanPane(ctx context.Context, term terminal.Session) (paneState, error) {
+func scanTerminal(ctx context.Context, term terminal.Session) (paneState, error) {
 	out, err := term.Capture(ctx)
 	if err != nil {
 		return paneStateUnknown, err
@@ -700,9 +698,9 @@ func looksLikeClaudeActivityLine(line string) bool {
 
 var tmuxOptionRE = regexp.MustCompile(`^\s*(?:❯\s*)?(\d+)\.\s+(.*)`)
 
-// parseTmuxPermission extracts a tmuxPermission from pane text, or nil if the
+// parseTerminalPermission extracts a terminalPermission from pane text, or nil if the
 // text doesn't represent a Claude permission dialog.
-func parseTmuxPermission(text string) *tmuxPermission {
+func parseTerminalPermission(text string) *terminalPermission {
 	lines := strings.Split(text, "\n")
 	promptLines := make([]string, 0)
 	options := make([]permissionOption, 0)
@@ -749,7 +747,7 @@ func parseTmuxPermission(text string) *tmuxPermission {
 		}
 	}
 
-	return &tmuxPermission{
+	return &terminalPermission{
 		prompt:  prompt,
 		options: options,
 	}
@@ -894,6 +892,11 @@ func (p *Provider) Cancel(ctx context.Context, sessionID string) error {
 	// Escalate to hard kill after 2 seconds.
 	go func() {
 		time.Sleep(2 * time.Second)
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
 		_ = s.term.Kill(ctx)
 	}()
 	return nil
@@ -935,12 +938,12 @@ func (p *Provider) AnswerPermission(ctx context.Context, sessionID string, reque
 
 	// Check if this is a tmux-pane permission request.
 	s.mu.Lock()
-	tmuxPerm := s.pendingTmuxPerm
+	tmuxPerm := s.pendingTerminalPerm
 	s.mu.Unlock()
 
 	if tmuxPerm != nil && tmuxPerm.requestID == requestID {
 		s.mu.Lock()
-		s.pendingTmuxPerm = nil
+		s.pendingTerminalPerm = nil
 		s.mu.Unlock()
 
 		key := "Esc"
