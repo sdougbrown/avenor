@@ -1222,6 +1222,9 @@ func (s *Supervisor) shutdown(mode string) int {
 			fmt.Fprintf(os.Stderr, "avenor stable: %d runtimes did not finish within %v\n", remaining, timeout)
 		}
 	}
+	if s.broker != nil {
+		_ = s.broker.Stop()
+	}
 	return 0
 }
 

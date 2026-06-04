@@ -112,7 +112,7 @@ func TestOptionMerge(t *testing.T) {
 		Agent:     "jockey",
 		ServerURL: "http://localhost:4096",
 	}
-	merged := mergeStartOptions(base, override)
+	merged := runtime.MergeStartOptions(base, override)
 	if merged.Agent != "jockey" {
 		t.Errorf("Agent = %q, want %q", merged.Agent, "jockey")
 	}

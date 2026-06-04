@@ -52,7 +52,7 @@ func NewWithOptions(opts runtime.StartOptions) (runtime.Provider, error) {
 var _ runtime.Provider = (*Provider)(nil)
 
 func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtime.Session, error) {
-	merged := mergeStartOptions(p.opts, opts)
+	merged := runtime.MergeStartOptions(p.opts, opts)
 	if merged.ServerURL == "" {
 		return runtime.Session{}, errors.New("server URL is required for opencode-http backend")
 	}
@@ -464,24 +464,4 @@ func clientOptionsFromURL(rawURL string) (ClientOptions, string) {
 	return co, u.Redacted()
 }
 
-func mergeStartOptions(base, override runtime.StartOptions) runtime.StartOptions {
-	if override.Agent != "" {
-		base.Agent = override.Agent
-	}
-	if override.Label != "" {
-		base.Label = override.Label
-	}
-	if override.Dir != "" {
-		base.Dir = override.Dir
-	}
-	if override.ServerURL != "" {
-		base.ServerURL = override.ServerURL
-	}
-	if override.Model != "" {
-		base.Model = override.Model
-	}
-	if override.Broker != nil {
-		base.Broker = override.Broker
-	}
-	return base
-}
+

@@ -56,7 +56,7 @@ func NewProvider(cfg ProviderConfig) runtime.Provider {
 var _ runtime.Provider = (*Provider)(nil)
 
 func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtime.Session, error) {
-	merged := mergeStartOptions(p.opts, opts)
+	merged := runtime.MergeStartOptions(p.opts, opts)
 	if err := p.ensureClient(ctx, merged); err != nil {
 		return runtime.Session{}, err
 	}
@@ -405,24 +405,4 @@ func selectPermissionResponseOption(options []any, response runtime.PermissionRe
 	return "", fmt.Errorf("permission options missing optionId %q", response.OptionID)
 }
 
-func mergeStartOptions(base, override runtime.StartOptions) runtime.StartOptions {
-	if override.Agent != "" {
-		base.Agent = override.Agent
-	}
-	if override.Label != "" {
-		base.Label = override.Label
-	}
-	if override.Dir != "" {
-		base.Dir = override.Dir
-	}
-	if override.ServerURL != "" {
-		base.ServerURL = override.ServerURL
-	}
-	if override.Model != "" {
-		base.Model = override.Model
-	}
-	if override.Broker != nil {
-		base.Broker = override.Broker
-	}
-	return base
-}
+

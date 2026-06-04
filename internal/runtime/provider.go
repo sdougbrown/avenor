@@ -61,3 +61,32 @@ type Capabilities struct {
 	SubprocessDiscovery bool
 	ModelSelection      bool
 }
+
+// MergeStartOptions returns a new StartOptions with non-zero fields from
+// override applied over base. Use this to combine provider-scoped defaults
+// with per-start overrides.
+func MergeStartOptions(base, override StartOptions) StartOptions {
+	merged := base
+	if override.Agent != "" {
+		merged.Agent = override.Agent
+	}
+	if override.Label != "" {
+		merged.Label = override.Label
+	}
+	if override.Dir != "" {
+		merged.Dir = override.Dir
+	}
+	if override.ServerURL != "" {
+		merged.ServerURL = override.ServerURL
+	}
+	if override.Model != "" {
+		merged.Model = override.Model
+	}
+	if override.RuntimeID != "" {
+		merged.RuntimeID = override.RuntimeID
+	}
+	if override.Broker != nil {
+		merged.Broker = override.Broker
+	}
+	return merged
+}
