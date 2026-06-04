@@ -628,6 +628,7 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 }
 
 func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg *looprunner.LoopConfig, maxRetries int, agent, model, serverURL, backend string) {
+	var attemptRunIDs []string
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Fprintf(os.Stderr, "avenor stable: child %s panic: %v\n", child.id, r)
@@ -651,6 +652,9 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 		delete(s.runtimes, child.id)
 		s.controlMu.Unlock()
 		if s.broker != nil {
+			for _, rid := range attemptRunIDs {
+				s.broker.DeleteRun(rid)
+			}
 			s.broker.DeleteRun(child.id)
 		}
 	}()
@@ -665,6 +669,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 		onPermissionReq: s.cachePermissionOptions,
 		recorder:        newRecorderFor(s, child.id),
 	}
+	childRecorder := taggedWriter.recorder
 
 	opts := looprunner.RunOptions{
 		WorkDir:    child.dir,
@@ -684,9 +689,18 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 
 			resumeID := prevSessionID
 
+			var brokerRunID string
+			if s.broker != nil {
+				brokerRunID = broker.MakeToken()
+				s.broker.CreateRun(brokerRunID)
+				attemptRunIDs = append(attemptRunIDs, brokerRunID)
+				taggedWriter.SwapRecorder(broker.NewRecorder(s.broker, brokerRunID))
+				defer func() { taggedWriter.SwapRecorder(childRecorder) }()
+			}
+
 			provider, err := factory.NewProvider(startOpts, backend)
 			if err != nil {
-				return looprunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: ""}, fmt.Errorf("create provider: %w", err)
+				return looprunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: brokerRunID}, fmt.Errorf("create provider: %w", err)
 			}
 			defer func() {
 				if closer, ok := provider.(interface{ Close() error }); ok {
@@ -696,7 +710,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 
 			session, err := cli.StartSession(ctx, provider, startOpts, resumeID)
 			if err != nil {
-				return looprunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: ""}, fmt.Errorf("start session: %w", err)
+				return looprunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: brokerRunID}, fmt.Errorf("start session: %w", err)
 			}
 			child.mu.Lock()
 			child.provider = provider
@@ -718,7 +732,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 
 			eventCh, err := provider.Events(eventCtx, session.SessionID)
 			if err != nil {
-				return looprunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: ""}, fmt.Errorf("subscribe events: %w", err)
+				return looprunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: brokerRunID}, fmt.Errorf("subscribe events: %w", err)
 			}
 
 			promptDone := make(chan error, 1)
@@ -745,7 +759,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				SessionID:     session.SessionID,
 				LoopDirective: result.LoopDirective,
 				LoopLabel:     result.LoopLabel,
-				BrokerRunID:   "",
+				BrokerRunID:   brokerRunID,
 			}, nil
 		},
 	}
@@ -775,6 +789,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 }
 
 func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg *teamrunner.TeamConfig, maxRetries int, agent, model, serverURL, backend string) {
+	var attemptRunIDs []string
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Fprintf(os.Stderr, "avenor stable: child %s panic: %v\n", child.id, r)
@@ -798,6 +813,9 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 		delete(s.runtimes, child.id)
 		s.controlMu.Unlock()
 		if s.broker != nil {
+			for _, rid := range attemptRunIDs {
+				s.broker.DeleteRun(rid)
+			}
 			s.broker.DeleteRun(child.id)
 		}
 	}()
@@ -812,6 +830,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 		onPermissionReq: s.cachePermissionOptions,
 		recorder:        newRecorderFor(s, child.id),
 	}
+	childRecorder := taggedWriter.recorder
 
 	opts := teamrunner.RunOptions{
 		WorkDir:    child.dir,
@@ -839,9 +858,18 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 
 			resumeID := prevSessionID
 
+			var brokerRunID string
+			if s.broker != nil {
+				brokerRunID = broker.MakeToken()
+				s.broker.CreateRun(brokerRunID)
+				attemptRunIDs = append(attemptRunIDs, brokerRunID)
+				taggedWriter.SwapRecorder(broker.NewRecorder(s.broker, brokerRunID))
+				defer func() { taggedWriter.SwapRecorder(childRecorder) }()
+			}
+
 			provider, err := factory.NewProvider(startOpts, backend)
 			if err != nil {
-				return teamrunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: ""}, fmt.Errorf("create provider: %w", err)
+				return teamrunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: brokerRunID}, fmt.Errorf("create provider: %w", err)
 			}
 			defer func() {
 				if closer, ok := provider.(interface{ Close() error }); ok {
@@ -851,7 +879,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 
 			session, err := cli.StartSession(ctx, provider, startOpts, resumeID)
 			if err != nil {
-				return teamrunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: ""}, fmt.Errorf("start session: %w", err)
+				return teamrunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: brokerRunID}, fmt.Errorf("start session: %w", err)
 			}
 			child.mu.Lock()
 			child.provider = provider
@@ -873,7 +901,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 
 			eventCh, err := provider.Events(eventCtx, session.SessionID)
 			if err != nil {
-				return teamrunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: ""}, fmt.Errorf("subscribe events: %w", err)
+				return teamrunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: brokerRunID}, fmt.Errorf("subscribe events: %w", err)
 			}
 
 			promptDone := make(chan error, 1)
@@ -903,7 +931,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				LoopLabel:     result.LoopLabel,
 				Output:        result.Output,
 				FinalReply:    result.FinalReply,
-				BrokerRunID:   "",
+				BrokerRunID:   brokerRunID,
 			}, nil
 		},
 	}
@@ -1361,6 +1389,7 @@ type runtimeFanoutWriter struct {
 	control         *control.ControlServer
 	onPermissionReq func(runtimeID, requestID string, options []any)
 	recorder        *broker.Recorder
+	recorderMu      sync.Mutex
 }
 
 func (w *runtimeFanoutWriter) Write(ev events.Event) error {
@@ -1378,13 +1407,25 @@ func (w *runtimeFanoutWriter) Write(ev events.Event) error {
 	if w.control != nil {
 		w.control.PublishEvent(ev)
 	}
-	if w.recorder != nil {
-		w.recorder.Feed(ev)
+	w.recorderMu.Lock()
+	rec := w.recorder
+	w.recorderMu.Unlock()
+	if rec != nil {
+		rec.Feed(ev)
 	}
 	return w.base.Write(ev)
 }
 
 func (w *runtimeFanoutWriter) Close() error { return w.base.Close() }
+
+// SwapRecorder atomically replaces the recorder and returns the previous one.
+func (w *runtimeFanoutWriter) SwapRecorder(r *broker.Recorder) *broker.Recorder {
+	w.recorderMu.Lock()
+	prev := w.recorder
+	w.recorder = r
+	w.recorderMu.Unlock()
+	return prev
+}
 
 // Broker helpers.
 
