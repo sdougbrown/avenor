@@ -11,7 +11,8 @@ import (
 const ProbePrompt = "List the files in this directory and exit."
 
 type Session struct {
-	Client    *Client
+	Client  *Client
+	RunID   string
 	SessionID string
 }
 

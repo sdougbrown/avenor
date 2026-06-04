@@ -2,13 +2,18 @@ package acp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
+	"github.com/google/uuid"
+	"github.com/sdougbrown/avenor/internal/channelwrap"
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/permission"
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
 
 type ProviderConfig struct {
@@ -37,6 +42,12 @@ type Provider struct {
 	appendCWDArg        bool
 	authenticateID      string
 	configureSession    func(ctx context.Context, session *Session, opts runtime.StartOptions) error
+
+	// Broker fields for channel-wrapped prompt injection.
+	broker         *broker.Broker
+	runIDs         map[string]string // sessionID → runID
+	pendingMu      sync.Mutex
+	pendingMessages map[string][]string // sessionID → queued wrapped prompts
 }
 
 func NewProvider(cfg ProviderConfig) runtime.Provider {
@@ -46,6 +57,8 @@ func NewProvider(cfg ProviderConfig) runtime.Provider {
 		bin:                 cfg.Bin,
 		args:                cfg.Args,
 		sessions:            map[string]*Session{},
+		runIDs:              map[string]string{},
+		pendingMessages:     map[string][]string{},
 		subprocessDiscovery: cfg.SubprocessDiscovery,
 		appendCWDArg:        cfg.AppendCWDArg,
 		authenticateID:      cfg.Authenticate,
@@ -71,9 +84,27 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		}
 	}
 
+	// Create a broker run for this session so channel messages can target it.
+	runID := ""
+	if p.broker != nil {
+		runID = uuid.New().String()
+		_, err := p.broker.CreateRun(runID)
+		if err != nil {
+			runID = ""
+		}
+	}
+	session.RunID = runID
 	p.mu.Lock()
 	p.sessions[session.SessionID] = session
+	if runID != "" {
+		p.runIDs[session.SessionID] = runID
+	}
 	p.mu.Unlock()
+
+	// Start the broker message polling goroutine if we have a broker and runID.
+	if runID != "" {
+		go p.pollBrokerMessages(ctx, session.SessionID, runID)
+	}
 
 	return runtime.Session{
 		SessionID: session.SessionID,
@@ -212,7 +243,11 @@ func (p *Provider) Close() error {
 	client := p.client
 	p.client = nil
 	p.pendingOptions = nil
+	p.runIDs = nil
 	p.mu.Unlock()
+	p.pendingMu.Lock()
+	p.pendingMessages = nil
+	p.pendingMu.Unlock()
 	if client == nil {
 		return nil
 	}
@@ -284,6 +319,9 @@ func (p *Provider) publish(event events.Event) {
 
 func (p *Provider) cachePermissionOptions(event events.Event) {
 	if event.Event == "session.end" {
+		// Inject any pending channel-wrapped messages before clearing.
+		p.injectPendingMessages(event.SessionID)
+
 		p.mu.Lock()
 		if event.SessionID == "" {
 			p.pendingOptions = nil
@@ -355,6 +393,84 @@ func permissionResponseResult(response runtime.PermissionResponse, optionID stri
 		result["message"] = response.Message
 	}
 	return map[string]any{"outcome": result}
+}
+
+// pollBrokerMessages polls the broker for agent_message control messages and
+// queues them for injection at turn boundaries.
+func (p *Provider) pollBrokerMessages(ctx context.Context, sessionID, runID string) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		st := p.broker.GetRun(runID)
+		if st == nil {
+			continue
+		}
+		st.Lock()
+		msgs := make([]broker.ControlMessage, len(st.ControlQueue))
+		for i, m := range st.ControlQueue {
+			msgs[i] = *m
+		}
+		st.ControlQueue = nil
+		st.Unlock()
+
+		for _, msg := range msgs {
+			if msg.Type != "agent_message" {
+				continue
+			}
+			var payload struct {
+				Message string `json:"message"`
+			}
+			if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+				continue
+			}
+			if payload.Message == "" {
+				continue
+			}
+			meta := channelwrap.BuildMeta(msg.FromRunID, "")
+			source := channelwrap.AgentName("agent")
+			wrapped := channelwrap.ChannelWrap(payload.Message, source, meta)
+			p.pendingMu.Lock()
+			p.pendingMessages[sessionID] = append(p.pendingMessages[sessionID], wrapped)
+			p.pendingMu.Unlock()
+		}
+	}
+}
+
+// injectPendingMessages injects queued channel-wrapped messages for a session
+// at a turn boundary (after session.end).
+func (p *Provider) injectPendingMessages(sessionID string) {
+	p.pendingMu.Lock()
+	if p.pendingMessages == nil {
+		p.pendingMu.Unlock()
+		return
+	}
+	msgs := p.pendingMessages[sessionID]
+	p.pendingMessages[sessionID] = nil
+	p.pendingMu.Unlock()
+
+	if len(msgs) == 0 {
+		return
+	}
+
+	for _, msg := range msgs {
+		session, err := p.session(sessionID)
+		if err != nil {
+			continue
+		}
+		if _, err := session.Prompt(context.Background(), msg); err != nil {
+			continue
+		}
+		p.publish(events.Event{
+			Event:     "agent.message_chunk",
+			SessionID: sessionID,
+			Fields:    map[string]any{"source": "avenor-channel"},
+		})
+	}
 }
 
 func selectPermissionOption(options []any, approve bool) (string, error) {
