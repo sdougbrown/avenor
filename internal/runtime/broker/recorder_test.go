@@ -59,6 +59,9 @@ func TestRecorderSessionEndDefaultDone(t *testing.T) {
 	})
 
 	st := b.GetRun("run_rec2")
+	if st == nil || len(st.Finishes) != 1 {
+		t.Fatalf("expected 1 finish, got %d", len(st.Finishes))
+	}
 	if st.Finishes[0].Status != "done" {
 		t.Errorf("Status = %q, want done", st.Finishes[0].Status)
 	}

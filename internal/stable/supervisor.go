@@ -1016,9 +1016,6 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 	}()
 
 	// Tag events with runtime_id and fan out to both file and control subscribers.
-	if s.broker != nil {
-		s.broker.CreateRun(child.id)
-	}
 	taggedWriter := &runtimeFanoutWriter{
 		base:            child.eventWriter,
 		runtimeID:       child.id,
