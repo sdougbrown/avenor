@@ -27,6 +27,7 @@ type ControlMessage struct {
 	ID        string          `json:"id"`
 	Type      string          `json:"type"`
 	RunID     string          `json:"run_id"`
+	FromRunID string          `json:"from_run_id,omitempty"`
 	Payload   json.RawMessage `json:"payload,omitempty"`
 	CreatedAt time.Time       `json:"created_at"`
 }
@@ -166,6 +167,29 @@ func (b *Broker) Send(runID string, kind string, payload json.RawMessage, correl
 	return b.PushControl(runID, msg)
 }
 
+// SendTo sends a message from one run to another run's control queue.
+// The fromRunID must belong to a registered run whose token matches the
+// authenticated caller's token.
+func (b *Broker) SendTo(fromRunID, toRunID, kind string, payload json.RawMessage, correlationID string) error {
+	b.mu.RLock()
+	_, ok := b.runs[toRunID]
+	b.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("run not found: %s", toRunID)
+	}
+	if correlationID == "" {
+		correlationID = MakeToken()
+	}
+	msg := ControlMessage{
+		ID:        correlationID,
+		Type:      kind,
+		RunID:     toRunID,
+		FromRunID: fromRunID,
+		Payload:   payload,
+	}
+	return b.PushControl(toRunID, msg)
+}
+
 // Ingest routes an incoming message from an agent into the appropriate
 // RunState bucket based on kind.
 //
@@ -269,6 +293,7 @@ func (b *Broker) Start() error {
 	router.HandleFunc("/report", b.withMethod("POST", b.withAuth(b.handleReport)))
 	router.HandleFunc("/finish", b.withMethod("POST", b.withAuth(b.handleFinish)))
 	router.HandleFunc("/reply", b.withMethod("POST", b.withAuth(b.handleReply)))
+	router.HandleFunc("/send", b.withMethod("POST", b.withAuth(b.handleSend)))
 	router.HandleFunc("/permission_request", b.withMethod("POST", b.withAuth(b.handlePermissionRequest)))
 	router.HandleFunc("/permission", b.withMethod("POST", b.withAuth(b.handlePermission)))
 
@@ -594,6 +619,52 @@ func (b *Broker) handlePermission(w http.ResponseWriter, r *http.Request) {
 	b.ingest(w, body.RunID, func(st *RunState) {
 		st.PermissionDecisions[body.RequestID] = body.Behavior
 	})
+}
+
+func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
+	// withAuth already read and replaced the body. Parse the full body
+	// once to extract both credentials and send fields.
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	var fullBody struct {
+		RunID     string          `json:"run_id"`
+		Token     string          `json:"token"`
+		FromRunID string          `json:"from_run_id"`
+		ToRunID   string          `json:"to_run_id"`
+		Type      string          `json:"type"`
+		Payload   json.RawMessage `json:"payload"`
+	}
+	if err := json.Unmarshal(bodyBytes, &fullBody); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if fullBody.FromRunID == "" || fullBody.ToRunID == "" || fullBody.Type == "" {
+		http.Error(w, "missing fields", http.StatusBadRequest)
+		return
+	}
+	// Validate that the authenticated caller matches from_run_id's token.
+	b.mu.RLock()
+	fromSt, ok := b.runs[fullBody.FromRunID]
+	b.mu.RUnlock()
+	if !ok {
+		http.Error(w, "from run not found", http.StatusNotFound)
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(fullBody.Token), []byte(fromSt.Token)) != 1 {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	err = b.SendTo(fullBody.FromRunID, fullBody.ToRunID, fullBody.Type, fullBody.Payload, "")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]bool{"queued": true})
 }
 
 func (b *Broker) ingest(w http.ResponseWriter, runID string, fn func(*RunState)) {

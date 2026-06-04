@@ -573,3 +573,183 @@ func TestBrokerIngestNonexistentRun(t *testing.T) {
 		t.Fatal("expected error for nonexistent run")
 	}
 }
+
+
+func TestBrokerSendTo(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	// Create two runs
+	senderToken, err := b.CreateRun("sender")
+	if err != nil {
+		t.Fatalf("create sender: %v", err)
+	}
+	targetToken, err := b.CreateRun("target")
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+
+	// Send via HTTP POST /send
+	sendBody := bytes.NewReader([]byte(`{
+		"run_id": "sender",
+		"token": "` + senderToken + `",
+		"from_run_id": "sender",
+		"to_run_id": "target",
+		"type": "agent_message",
+		"payload": {"message": "hello from sender"}
+	}`))
+	resp, err := http.Post(fmt.Sprintf("http://%s/send", b.Addr()), "application/json", sendBody)
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("send: %d", resp.StatusCode)
+	}
+
+	// Poll the target to verify the message was enqueued with FromRunID
+	pollBody := bytes.NewReader([]byte(fmt.Sprintf(`{"run_id":"target","token":"%s"}`, targetToken)))
+	resp2, err := http.Post(fmt.Sprintf("http://%s/poll-control", b.Addr()), "application/json", pollBody)
+	if err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("poll: %d", resp2.StatusCode)
+	}
+	var msgs []ControlMessage
+	if err := json.NewDecoder(resp2.Body).Decode(&msgs); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(msgs))
+	}
+	if msgs[0].FromRunID != "sender" {
+		t.Errorf("FromRunID = %q, want sender", msgs[0].FromRunID)
+	}
+	if msgs[0].Type != "agent_message" {
+		t.Errorf("Type = %q, want agent_message", msgs[0].Type)
+	}
+}
+
+func TestBrokerSendToUnknownTarget(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	token, err := b.CreateRun("sender")
+	if err != nil {
+		t.Fatalf("create sender: %v", err)
+	}
+
+	sendBody := bytes.NewReader([]byte(`{
+		"run_id": "sender",
+		"token": "` + token + `",
+		"from_run_id": "sender",
+		"to_run_id": "nonexistent",
+		"type": "agent_message",
+		"payload": {"message": "hello"}
+	}`))
+	resp, err := http.Post(fmt.Sprintf("http://%s/send", b.Addr()), "application/json", sendBody)
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestBrokerSendAuthFailure(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	_, err := b.CreateRun("sender")
+	if err != nil {
+		t.Fatalf("create sender: %v", err)
+	}
+	_, err = b.CreateRun("target")
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+
+	// Wrong token for from_run_id
+	sendBody := bytes.NewReader([]byte(`{
+		"run_id": "sender",
+		"token": "wrong_token",
+		"from_run_id": "sender",
+		"to_run_id": "target",
+		"type": "agent_message",
+		"payload": {"message": "hello"}
+	}`))
+	resp, err := http.Post(fmt.Sprintf("http://%s/send", b.Addr()), "application/json", sendBody)
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", resp.StatusCode)
+	}
+}
+
+func TestBrokerSendAutoCorrelationID(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	senderToken, err := b.CreateRun("sender_auto")
+	if err != nil {
+		t.Fatalf("create sender: %v", err)
+	}
+	b.DeleteRun("target_auto")
+	targetToken, err := b.CreateRun("target_auto")
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+
+	// Send without correlation ID
+	sendBody := bytes.NewReader([]byte(`{
+		"run_id": "sender_auto",
+		"token": "` + senderToken + `",
+		"from_run_id": "sender_auto",
+		"to_run_id": "target_auto",
+		"type": "agent_message",
+		"payload": {"message": "auto corr"}
+	}`))
+	resp, err := http.Post(fmt.Sprintf("http://%s/send", b.Addr()), "application/json", sendBody)
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	resp.Body.Close()
+
+	// Poll to verify correlation ID was auto-generated
+	pollBody := bytes.NewReader([]byte(fmt.Sprintf(`{"run_id":"target_auto","token":"%s"}`, targetToken)))
+	resp2, err := http.Post(fmt.Sprintf("http://%s/poll-control", b.Addr()), "application/json", pollBody)
+	if err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("poll: %d", resp2.StatusCode)
+	}
+	var msgs []ControlMessage
+	if err := json.NewDecoder(resp2.Body).Decode(&msgs); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(msgs))
+	}
+	if msgs[0].ID == "" {
+		t.Error("expected auto-generated correlation ID")
+	}
+}
