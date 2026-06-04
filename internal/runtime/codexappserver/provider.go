@@ -6,9 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
+	"github.com/google/uuid"
+	"github.com/sdougbrown/avenor/internal/channelwrap"
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
 
 const backendID = "codex-app-server"
@@ -21,13 +25,21 @@ type Provider struct {
 	client  *client
 	threads map[string]string // sessionID (=threadID) → threadID
 	turns   map[string]string // sessionID → current turnID
+
+	// Broker fields for channel-wrapped prompt injection.
+	broker         *broker.Broker
+	runIDs         map[string]string // sessionID → runID
+	pendingMu      sync.Mutex
+	pendingMessages map[string][]string // sessionID → queued wrapped prompts
 }
 
 func NewWithOptions(opts runtime.StartOptions) *Provider {
 	return &Provider{
-		opts:    opts,
-		threads: map[string]string{},
-		turns:   map[string]string{},
+		opts:            opts,
+		threads:         map[string]string{},
+		turns:           map[string]string{},
+		runIDs:          map[string]string{},
+		pendingMessages: map[string][]string{},
 	}
 }
 
@@ -60,9 +72,26 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	}
 	threadID := tsr.Thread.ID
 
+	// Register a broker run for this session.
+	p.mu.Lock()
+	broker := p.broker
+	p.mu.Unlock()
+	var runID string
+	if broker != nil {
+		runID = uuid.New().String()
+		if _, err := broker.CreateRun(runID); err != nil {
+			runID = ""
+		}
+	}
 	p.mu.Lock()
 	p.threads[threadID] = threadID
+	p.runIDs[threadID] = runID
 	p.mu.Unlock()
+
+	// Start the broker message polling goroutine.
+	if runID != "" {
+		go p.pollBrokerMessages(ctx, threadID, runID)
+	}
 
 	return runtime.Session{
 		SessionID: threadID,
@@ -241,6 +270,12 @@ func (p *Provider) Close() error {
 	c := p.client
 	p.client = nil
 	p.mu.Unlock()
+	p.mu.Lock()
+	p.runIDs = nil
+	p.mu.Unlock()
+	p.pendingMu.Lock()
+	p.pendingMessages = nil
+	p.pendingMu.Unlock()
 	if c == nil {
 		return nil
 	}
@@ -259,6 +294,16 @@ func (p *Provider) ensureClient(ctx context.Context) (*client, error) {
 	if err != nil {
 		p.mu.Unlock()
 		return nil, err
+	}
+
+	p.mu.Lock()
+	if p.client != nil {
+		p.mu.Unlock()
+		return p.client, nil
+	}
+	// Store broker reference if provided.
+	if p.opts.Broker != nil {
+		p.broker = p.opts.Broker
 	}
 	p.client = c
 	p.mu.Unlock()
@@ -284,4 +329,68 @@ func (p *Provider) getClient() (*client, error) {
 		return nil, errors.New("provider has not been started")
 	}
 	return c, nil
+}
+
+// pollBrokerMessages polls the broker for agent_message control messages and
+// queues them for injection at turn boundaries.
+func (p *Provider) pollBrokerMessages(ctx context.Context, sessionID, runID string) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		st := p.broker.GetRun(runID)
+		if st == nil {
+			continue
+		}
+		st.Lock()
+		msgs := make([]broker.ControlMessage, len(st.ControlQueue))
+		for i, m := range st.ControlQueue {
+			msgs[i] = *m
+		}
+		st.ControlQueue = nil
+		st.Unlock()
+
+		for _, msg := range msgs {
+			if msg.Type != "agent_message" {
+				continue
+			}
+			var payload struct {
+				Message string `json:"message"`
+			}
+			if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+				continue
+			}
+			if payload.Message == "" {
+				continue
+			}
+			meta := channelwrap.BuildMeta(msg.FromRunID, "")
+			source := channelwrap.AgentName("agent")
+			wrapped := channelwrap.ChannelWrap(payload.Message, source, meta)
+			p.pendingMu.Lock()
+			p.pendingMessages[sessionID] = append(p.pendingMessages[sessionID], wrapped)
+			p.pendingMu.Unlock()
+		}
+	}
+}
+
+// injectPendingMessages injects queued channel-wrapped messages for a session
+// at a turn boundary.
+func (p *Provider) injectPendingMessages(ctx context.Context, sessionID string) {
+	p.pendingMu.Lock()
+	msgs := p.pendingMessages[sessionID]
+	p.pendingMessages[sessionID] = nil
+	p.pendingMu.Unlock()
+
+	if len(msgs) == 0 {
+		return
+	}
+	for _, msg := range msgs {
+		if err := p.Prompt(ctx, sessionID, msg); err != nil {
+			// Non-fatal: continue with remaining messages.
+		}
+	}
 }
