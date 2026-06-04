@@ -2,12 +2,14 @@ package looprunner
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/phaseconfig"
+	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
 
 func TestRunResumeFromPreviousUsesImmediatePriorPhase(t *testing.T) {
@@ -403,4 +405,56 @@ type recordingEventWriter struct {
 func (w *recordingEventWriter) Write(ev events.Event) error {
 	w.events = append(w.events, ev)
 	return nil
+}
+
+func TestEnrichFromBroker(t *testing.T) {
+	b := broker.New("test-token")
+	_, _ = b.CreateRun("test-run")
+	_ = b.Ingest("test-run", "done", json.RawMessage(`{"ok":true}`))
+	_ = b.Ingest("test-run", "failed", json.RawMessage(`{"ok":false}`))
+
+	t.Run("nil broker", func(t *testing.T) {
+		opts := RunOptions{Broker: nil}
+		result := &PhaseAttemptResult{BrokerRunID: "test-run", StopReason: ""}
+		enrichFromBroker(opts, result)
+		if result.StopReason != "" {
+			t.Errorf("expected empty StopReason with nil broker, got %q", result.StopReason)
+		}
+	})
+
+	t.Run("empty brokerRunID", func(t *testing.T) {
+		opts := RunOptions{Broker: b}
+		result := &PhaseAttemptResult{BrokerRunID: "", StopReason: ""}
+		enrichFromBroker(opts, result)
+		if result.StopReason != "" {
+			t.Errorf("expected empty StopReason with empty BrokerRunID, got %q", result.StopReason)
+		}
+	})
+
+	t.Run("unknown run", func(t *testing.T) {
+		opts := RunOptions{Broker: b}
+		result := &PhaseAttemptResult{BrokerRunID: "nonexistent", StopReason: ""}
+		enrichFromBroker(opts, result)
+		if result.StopReason != "" {
+			t.Errorf("expected empty StopReason for unknown run, got %q", result.StopReason)
+		}
+	})
+
+	t.Run("has stop reason already", func(t *testing.T) {
+		opts := RunOptions{Broker: b}
+		result := &PhaseAttemptResult{BrokerRunID: "test-run", StopReason: "cancelled"}
+		enrichFromBroker(opts, result)
+		if result.StopReason != "cancelled" {
+			t.Errorf("expected StopReason preserved, got %q", result.StopReason)
+		}
+	})
+
+	t.Run("supplements from last finish", func(t *testing.T) {
+		opts := RunOptions{Broker: b}
+		result := &PhaseAttemptResult{BrokerRunID: "test-run", StopReason: ""}
+		enrichFromBroker(opts, result)
+		if result.StopReason != "failed" {
+			t.Errorf("expected StopReason 'failed' from last finish, got %q", result.StopReason)
+		}
+	})
 }
