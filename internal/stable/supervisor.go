@@ -672,6 +672,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 		EventSink:  taggedWriter,
 		Config:     cfg,
 		MaxRetries: maxRetries,
+		Broker:     s.broker,
 		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, iteration int, prevSessionID string) (looprunner.PhaseAttemptResult, error) {
 			startOpts := runtime.StartOptions{
 				Agent:     agent,
@@ -685,7 +686,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 
 			provider, err := factory.NewProvider(startOpts, backend)
 			if err != nil {
-				return looprunner.PhaseAttemptResult{ExitCode: 1}, fmt.Errorf("create provider: %w", err)
+				return looprunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: ""}, fmt.Errorf("create provider: %w", err)
 			}
 			defer func() {
 				if closer, ok := provider.(interface{ Close() error }); ok {
@@ -695,7 +696,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 
 			session, err := cli.StartSession(ctx, provider, startOpts, resumeID)
 			if err != nil {
-				return looprunner.PhaseAttemptResult{ExitCode: 1}, fmt.Errorf("start session: %w", err)
+				return looprunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: ""}, fmt.Errorf("start session: %w", err)
 			}
 			child.mu.Lock()
 			child.provider = provider
@@ -717,7 +718,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 
 			eventCh, err := provider.Events(eventCtx, session.SessionID)
 			if err != nil {
-				return looprunner.PhaseAttemptResult{ExitCode: 1}, fmt.Errorf("subscribe events: %w", err)
+				return looprunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: ""}, fmt.Errorf("subscribe events: %w", err)
 			}
 
 			promptDone := make(chan error, 1)
@@ -744,6 +745,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				SessionID:     session.SessionID,
 				LoopDirective: result.LoopDirective,
 				LoopLabel:     result.LoopLabel,
+				BrokerRunID:   "",
 			}, nil
 		},
 	}
@@ -817,6 +819,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 		EventSink:  taggedWriter,
 		Config:     cfg,
 		MaxRetries: maxRetries,
+		Broker:     s.broker,
 		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (teamrunner.PhaseAttemptResult, error) {
 			a := agent
 			m := model
@@ -838,7 +841,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 
 			provider, err := factory.NewProvider(startOpts, backend)
 			if err != nil {
-				return teamrunner.PhaseAttemptResult{ExitCode: 1}, fmt.Errorf("create provider: %w", err)
+				return teamrunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: ""}, fmt.Errorf("create provider: %w", err)
 			}
 			defer func() {
 				if closer, ok := provider.(interface{ Close() error }); ok {
@@ -848,7 +851,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 
 			session, err := cli.StartSession(ctx, provider, startOpts, resumeID)
 			if err != nil {
-				return teamrunner.PhaseAttemptResult{ExitCode: 1}, fmt.Errorf("start session: %w", err)
+				return teamrunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: ""}, fmt.Errorf("start session: %w", err)
 			}
 			child.mu.Lock()
 			child.provider = provider
@@ -870,7 +873,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 
 			eventCh, err := provider.Events(eventCtx, session.SessionID)
 			if err != nil {
-				return teamrunner.PhaseAttemptResult{ExitCode: 1}, fmt.Errorf("subscribe events: %w", err)
+				return teamrunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: ""}, fmt.Errorf("subscribe events: %w", err)
 			}
 
 			promptDone := make(chan error, 1)
@@ -900,6 +903,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				LoopLabel:     result.LoopLabel,
 				Output:        result.Output,
 				FinalReply:    result.FinalReply,
+				BrokerRunID:   "",
 			}, nil
 		},
 	}

@@ -13,6 +13,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/phaseconfig"
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
 
 type RunResult struct {
@@ -35,6 +36,7 @@ type RunOptions struct {
 	EventSink    phaseconfig.EventWriter
 	Config       *TeamConfig
 	MaxRetries   int
+	Broker       *broker.Broker
 	PhaseAttempt func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error)
 	NestedRun    func(ctx context.Context, configPath string, runType string) (NestedResult, error)
 	ConfigDir    string
@@ -48,6 +50,7 @@ type PhaseAttemptResult struct {
 	LoopLabel     string
 	Output        string
 	FinalReply    string
+	BrokerRunID   string
 }
 
 func Run(ctx context.Context, opts RunOptions) (RunResult, error) {

@@ -397,6 +397,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			StopReason:    r.stopReason,
 			LoopDirective: r.loopDirective,
 			LoopLabel:     r.loopLabel,
+			BrokerRunID:   "",
 		}, nil
 	}
 
@@ -410,7 +411,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		} else if phase.Agent != "" {
 			resolved, err := resolveAgentModel(phase.Agent, getenv)
 			if err != nil {
-				return teamrunner.PhaseAttemptResult{ExitCode: 1}, err
+				return teamrunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: ""}, err
 			}
 			if resolved != "" {
 				m = resolved
@@ -425,6 +426,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			LoopLabel:     r.loopLabel,
 			Output:        r.output,
 			FinalReply:    r.finalReply,
+			BrokerRunID:   "",
 		}, nil
 	}
 
@@ -455,6 +457,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 					EventSink:    writer,
 					Config:       subCfg,
 					MaxRetries:   *maxRetries,
+					Broker:       nil,
 					ConfigDir:    filepath.Dir(configPath),
 					PhaseAttempt: phaseAttemptForLoop,
 					NestedRun:    nestedRun,
@@ -490,6 +493,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 					EventSink:    writer,
 					Config:       subCfg,
 					MaxRetries:   *maxRetries,
+					Broker:       nil,
 					ConfigDir:    filepath.Dir(configPath),
 					PhaseAttempt: phaseAttemptForTeam,
 					NestedRun:    teamNestedRun,
@@ -514,6 +518,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			EventSink:    writer,
 			Config:       cfg,
 			MaxRetries:   *maxRetries,
+			Broker:       nil,
 			ConfigDir:    filepath.Dir(*loopFile),
 			PhaseAttempt: phaseAttemptForLoop,
 			NestedRun:    nestedRun,
@@ -572,6 +577,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 					EventSink:    writer,
 					Config:       subCfg,
 					MaxRetries:   *maxRetries,
+					Broker:       nil,
 					ConfigDir:    filepath.Dir(configPath),
 					PhaseAttempt: phaseAttemptForLoop,
 					NestedRun:    loopNestedRun,
@@ -598,6 +604,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 					EventSink:    writer,
 					Config:       subCfg,
 					MaxRetries:   *maxRetries,
+					Broker:       nil,
 					ConfigDir:    filepath.Dir(configPath),
 					PhaseAttempt: phaseAttemptForTeam,
 					NestedRun:    nestedRun,
@@ -622,6 +629,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			EventSink:    writer,
 			Config:       cfg,
 			MaxRetries:   *maxRetries,
+			Broker:       nil,
 			ConfigDir:    filepath.Dir(*teamFile),
 			PhaseAttempt: phaseAttemptForTeam,
 			NestedRun:    nestedRun,
