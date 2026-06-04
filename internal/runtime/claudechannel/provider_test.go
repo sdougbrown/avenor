@@ -26,6 +26,31 @@ func TestNewWithOptions(t *testing.T) {
 	}
 }
 
+func TestDefaultLauncherIsTmux(t *testing.T) {
+	// Unset env var.
+	t.Setenv("AVENOR_CLAUDE_CHANNEL_TERMINAL", "")
+	l := defaultLauncher()
+	if _, ok := l.(terminal.TmuxLauncher); !ok {
+		t.Fatalf("expected TmuxLauncher, got %T", l)
+	}
+}
+
+func TestPTYEnvSelectsPTY(t *testing.T) {
+	t.Setenv("AVENOR_CLAUDE_CHANNEL_TERMINAL", "pty")
+	l := defaultLauncher()
+	if _, ok := l.(terminal.PTYLauncher); !ok {
+		t.Fatalf("expected PTYLauncher, got %T", l)
+	}
+}
+
+func TestInvalidValueDefaultsToTmux(t *testing.T) {
+	t.Setenv("AVENOR_CLAUDE_CHANNEL_TERMINAL", "bogus")
+	l := defaultLauncher()
+	if _, ok := l.(terminal.TmuxLauncher); !ok {
+		t.Fatalf("expected TmuxLauncher for invalid value, got %T", l)
+	}
+}
+
 func TestCapabilities(t *testing.T) {
 	p := New()
 	caps, err := p.Capabilities(context.Background())

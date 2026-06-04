@@ -100,7 +100,21 @@ func NewWithOptions(opts runtime.StartOptions) runtime.Provider {
 		opts:      opts,
 		sessions:  make(map[string]*session),
 		globalTok: broker.MakeToken(),
-		launcher:  terminal.TmuxLauncher{},
+		launcher:  defaultLauncher(),
+	}
+}
+
+// defaultLauncher returns the default terminal launcher based on the
+// AVENOR_CLAUDE_CHANNEL_TERMINAL environment variable. Defaults to tmux.
+func defaultLauncher() terminal.Launcher {
+	switch os.Getenv("AVENOR_CLAUDE_CHANNEL_TERMINAL") {
+	case "pty":
+		return terminal.PTYLauncher{}
+	case "", "tmux":
+		return terminal.TmuxLauncher{}
+	default:
+		// Unknown value — still default to tmux but could log a warning.
+		return terminal.TmuxLauncher{}
 	}
 }
 
