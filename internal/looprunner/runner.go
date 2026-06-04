@@ -90,6 +90,8 @@ func Run(ctx context.Context, opts RunOptions) (RunResult, error) {
 				return RunResult{}, err
 			}
 
+			enrichFromBroker(opts, &result)
+
 			prevSessionIDs[phaseIdx] = result.SessionID
 			prevPhaseCommit = phaseconfig.CaptureHeadCommit(opts.WorkDir)
 
@@ -166,6 +168,8 @@ func runSequentialPhases(ctx context.Context, opts RunOptions, phases []phasecon
 			_ = emitLoopEnd(opts.EventSink, opts.RunID, "phase_failure", "", iterationsCompleted)
 			return nil, err
 		}
+
+		enrichFromBroker(opts, &result)
 
 		prevSessionID = result.SessionID
 		*prevCommit = phaseconfig.CaptureHeadCommit(opts.WorkDir)
@@ -377,4 +381,25 @@ func emitLoopEnd(w phaseconfig.EventWriter, runID string, exitReason, exitLabel 
 		Event:  "avenor.loop.end",
 		Fields: fields,
 	})
+}
+
+// enrichFromBroker supplements a PhaseAttemptResult with broker state
+// when available. It is a no-op when no broker is configured or the
+// attempt did not produce a brokerRunID.
+func enrichFromBroker(opts RunOptions, result *PhaseAttemptResult) {
+	if opts.Broker == nil || result.BrokerRunID == "" {
+		return
+	}
+	run := opts.Broker.GetRun(result.BrokerRunID)
+	if run == nil {
+		return
+	}
+	run.Mu.Lock()
+	defer run.Mu.Unlock()
+	if len(run.Finishes) > 0 && result.StopReason == "" {
+		lastFinish := run.Finishes[len(run.Finishes)-1]
+		if lastFinish.Status != "" {
+			result.StopReason = lastFinish.Status
+		}
+	}
 }
