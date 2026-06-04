@@ -326,3 +326,176 @@ func TestPollControlLoopFromRunIDInMeta(t *testing.T) {
 		t.Fatalf("from_run_id not in notification meta: %s", output)
 	}
 }
+
+func TestToolListIncludesAvenorSend(t *testing.T) {
+	brokerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/register", "/heartbeat":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		case "/poll-control":
+			_ = json.NewEncoder(w).Encode([]any{})
+		default:
+			t.Errorf("unexpected broker path %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer brokerSrv.Close()
+
+	input := bytes.NewBufferString(
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}` + "\n" +
+			`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}` + "\n",
+	)
+	var stdout bytes.Buffer
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err := Run(ctx, Options{
+		RunID:      "run_1",
+		Token:      "tok_1",
+		BrokerURL:  brokerSrv.URL,
+		Stdin:      input,
+		Stdout:     &stdout,
+		Stderr:     io.Discard,
+		HTTPClient: brokerSrv.Client(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	responses := decodeRPCResponses(t, stdout.Bytes())
+	if len(responses) != 2 {
+		t.Fatalf("responses = %d, want 2", len(responses))
+	}
+	toolsResult := responses[1]["result"].(map[string]any)
+	tools := toolsResult["tools"].([]any)
+	found := false
+	for _, tool := range tools {
+		m := tool.(map[string]any)
+		if m["name"] == "avenor_send" {
+			found = true
+			schema := m["inputSchema"].(map[string]any)
+			req := schema["required"].([]any)
+			if len(req) != 2 || req[0] != "to_run_id" || req[1] != "message" {
+				t.Fatalf("avenor_send required fields = %v, want [to_run_id message]", req)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("tools/list missing avenor_send")
+	}
+}
+
+func TestAvenorSendToolCall(t *testing.T) {
+	var sentBody map[string]any
+	brokerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/register", "/heartbeat":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		case "/poll-control":
+			_ = json.NewEncoder(w).Encode([]any{})
+		case "/send":
+			if err := json.NewDecoder(r.Body).Decode(&sentBody); err != nil {
+				t.Errorf("decode send: %v", err)
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"queued": true})
+		default:
+			t.Errorf("unexpected broker path %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer brokerSrv.Close()
+
+	input := bytes.NewBufferString(
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}` + "\n" +
+			`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"avenor_send","arguments":{"to_run_id":"target_run","message":"Hello target"}}}` + "\n",
+	)
+	var stdout bytes.Buffer
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err := Run(ctx, Options{
+		RunID:      "sender_run",
+		Token:      "tok_1",
+		BrokerURL:  brokerSrv.URL,
+		Stdin:      input,
+		Stdout:     &stdout,
+		Stderr:     io.Discard,
+		HTTPClient: brokerSrv.Client(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	responses := decodeRPCResponses(t, stdout.Bytes())
+	if len(responses) != 2 {
+		t.Fatalf("responses = %d, want 2", len(responses))
+	}
+	// Check tool call result
+	result := responses[1]["result"].(map[string]any)
+	content := result["content"].([]any)
+	text := content[0].(map[string]any)["text"].(string)
+	if text != "ok" {
+		t.Fatalf("avenor_send result text = %q, want ok", text)
+	}
+	// Check sent body shape
+	if sentBody["type"] != "agent_message" {
+		t.Fatalf("broker /send type = %v, want agent_message", sentBody["type"])
+	}
+	payload := sentBody["payload"].(map[string]any)
+	if payload["message"] != "Hello target" {
+		t.Fatalf("message = %v, want Hello target", payload["message"])
+	}
+	if payload["from_run_id"] != "sender_run" {
+		t.Fatalf("from_run_id = %v, want sender_run", payload["from_run_id"])
+	}
+}
+
+func TestAvenorSendMissingArgs(t *testing.T) {
+	brokerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/register", "/heartbeat":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		case "/poll-control":
+			_ = json.NewEncoder(w).Encode([]any{})
+		default:
+			t.Errorf("unexpected broker path %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer brokerSrv.Close()
+
+	input := bytes.NewBufferString(
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}` + "\n" +
+			`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"avenor_send","arguments":{}}}` + "\n",
+	)
+	var stdout bytes.Buffer
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err := Run(ctx, Options{
+		RunID:      "run_1",
+		Token:      "tok_1",
+		BrokerURL:  brokerSrv.URL,
+		Stdin:      input,
+		Stdout:     &stdout,
+		Stderr:     io.Discard,
+		HTTPClient: brokerSrv.Client(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	responses := decodeRPCResponses(t, stdout.Bytes())
+	if len(responses) != 2 {
+		t.Fatalf("responses = %d, want 2", len(responses))
+	}
+	// Missing required args should produce an error response
+	result := responses[1]["result"]
+	if result != nil {
+		// Check if there's an error in the response
+		t.Fatalf("expected error for missing args, got result: %#v", result)
+	}
+}
+

@@ -204,6 +204,25 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 		if err := s.brokerPost(ctx, "/reply", map[string]any{"to": p.To, "payload": rawOrObject(p.Payload)}); err != nil {
 			return nil, err
 		}
+	case "avenor_send":
+		var p struct {
+			ToRunID string `json:"to_run_id"`
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil {
+			return nil, err
+		}
+		if p.ToRunID == "" || p.Message == "" {
+			return nil, fmt.Errorf("to_run_id and message are required")
+		}
+		if err := s.brokerPost(ctx, "/send", map[string]any{
+			"from_run_id": s.opts.RunID,
+			"to_run_id":   p.ToRunID,
+			"type":        "agent_message",
+			"payload":     map[string]any{"from": s.opts.RunID, "from_run_id": s.opts.RunID, "message": p.Message, "role": "agent"},
+		}); err != nil {
+			return nil, err
+		}
 	default:
 		return nil, fmt.Errorf("unknown tool %q", name)
 	}
@@ -436,6 +455,18 @@ func toolSchemas() []map[string]any {
 					"payload": map[string]any{"type": "object"},
 				},
 				"required": []string{"to"},
+			},
+		},
+		{
+			"name":        "avenor_send",
+			"description": "Send a message to another agent run",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"to_run_id": map[string]any{"type": "string"},
+					"message":   map[string]any{"type": "string"},
+				},
+				"required": []string{"to_run_id", "message"},
 			},
 		},
 	}
