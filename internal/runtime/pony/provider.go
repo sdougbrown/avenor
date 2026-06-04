@@ -9,6 +9,7 @@ import (
 
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/runtime/broker"
 	"github.com/sdougbrown/avenor/internal/runtime/pony/model"
 	"github.com/sdougbrown/avenor/internal/runtime/pony/tools"
 )
@@ -67,6 +68,14 @@ type Provider struct {
 	sessions       map[string]*sessionState
 	sessionCounter atomic.Int64
 	permCounter    atomic.Int64
+
+	// Broker reference — stored for future channel-wrapped prompt injection.
+	// Implementation skipped: Prompt() is synchronous/in-process and there is
+	// no clean surface for turn-boundary message injection without blocking
+	// the event loop or creating a separate goroutine that races with Prompt.
+	// A full implementation would need a non-blocking history append + turn
+	// boundary signal, or a redesign of the Prompt contract.
+	broker *broker.Broker
 }
 
 var _ runtime.Provider = (*Provider)(nil)
