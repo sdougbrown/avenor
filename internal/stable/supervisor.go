@@ -628,7 +628,7 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 }
 
 func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg *looprunner.LoopConfig, maxRetries int, agent, model, serverURL, backend string) {
-	var attemptRunIDs []string
+	var brokerAttemptIDs []string
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Fprintf(os.Stderr, "avenor stable: child %s panic: %v\n", child.id, r)
@@ -652,7 +652,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 		delete(s.runtimes, child.id)
 		s.controlMu.Unlock()
 		if s.broker != nil {
-			for _, rid := range attemptRunIDs {
+			for _, rid := range brokerAttemptIDs {
 				s.broker.DeleteRun(rid)
 			}
 			s.broker.DeleteRun(child.id)
@@ -693,7 +693,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 			if s.broker != nil {
 				brokerRunID = broker.MakeToken()
 				s.broker.CreateRun(brokerRunID)
-				attemptRunIDs = append(attemptRunIDs, brokerRunID)
+				brokerAttemptIDs = append(brokerAttemptIDs, brokerRunID)
 				taggedWriter.SwapRecorder(broker.NewRecorder(s.broker, brokerRunID))
 				defer func() { taggedWriter.SwapRecorder(childRecorder) }()
 			}
@@ -789,7 +789,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 }
 
 func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg *teamrunner.TeamConfig, maxRetries int, agent, model, serverURL, backend string) {
-	var attemptRunIDs []string
+	var brokerAttemptIDs []string
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Fprintf(os.Stderr, "avenor stable: child %s panic: %v\n", child.id, r)
@@ -813,7 +813,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 		delete(s.runtimes, child.id)
 		s.controlMu.Unlock()
 		if s.broker != nil {
-			for _, rid := range attemptRunIDs {
+			for _, rid := range brokerAttemptIDs {
 				s.broker.DeleteRun(rid)
 			}
 			s.broker.DeleteRun(child.id)
@@ -862,7 +862,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 			if s.broker != nil {
 				brokerRunID = broker.MakeToken()
 				s.broker.CreateRun(brokerRunID)
-				attemptRunIDs = append(attemptRunIDs, brokerRunID)
+				brokerAttemptIDs = append(brokerAttemptIDs, brokerRunID)
 				taggedWriter.SwapRecorder(broker.NewRecorder(s.broker, brokerRunID))
 				defer func() { taggedWriter.SwapRecorder(childRecorder) }()
 			}
