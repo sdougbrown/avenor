@@ -199,7 +199,6 @@ func TestSleepContextReturnsOnCancel(t *testing.T) {
 		t.Fatal("sleepContext did not return promptly after cancellation")
 	}
 }
-
 func decodeRPCResponses(t *testing.T, data []byte) []map[string]any {
 	t.Helper()
 	lines := bytes.Split(bytes.TrimSpace(data), []byte("\n"))
@@ -217,4 +216,113 @@ func decodeRPCResponses(t *testing.T, data []byte) []map[string]any {
 		}
 	}
 	return out
+}
+
+
+func TestRenderAgentMessage(t *testing.T) {
+	msg := controlMessage{
+		ID:        "ctrl_1",
+		Type:      "agent_message",
+		RunID:     "run_agent",
+		FromRunID: "sender_123",
+		Payload:   json.RawMessage(`{"from":"Alice","from_run_id":"sender_123","message":"Hello there","role":"agent"}`),
+	}
+	got := renderControlMessage(msg)
+	expected := "Message from agent Alice (sender_123) agent:\nHello there\n\nReply by calling avenor_send with to_run_id=" + `"sender_123"` + "."
+	if got != expected {
+		t.Fatalf("expected:\n%s\n\ngot:\n%s", expected, got)
+	}
+}
+
+func TestRenderAgentMessageFallback(t *testing.T) {
+	msg := controlMessage{
+		ID:        "ctrl_2",
+		Type:      "agent_message",
+		RunID:     "run_agent",
+		FromRunID: "fallback_run",
+		Payload:   json.RawMessage(`not valid json`),
+	}
+	got := renderControlMessage(msg)
+	if !bytes.Contains([]byte(got), []byte("Message from fallback_run")) {
+		t.Fatalf("expected fallback render, got: %s", got)
+	}
+}
+
+func TestRenderAgentMessageFromRunIDInOutput(t *testing.T) {
+	msg := controlMessage{
+		ID:        "ctrl_3",
+		Type:      "agent_message",
+		RunID:     "run_agent",
+		FromRunID: "unique_sender_id",
+		Payload:   json.RawMessage(`{"from":"Bob","from_run_id":"unique_sender_id","message":"test","role":"assistant"}`),
+	}
+	got := renderControlMessage(msg)
+	if !bytes.Contains([]byte(got), []byte("unique_sender_id")) {
+		t.Fatalf("from_run_id not in render output: %s", got)
+	}
+}
+
+func TestPollControlLoopFromRunIDInMeta(t *testing.T) {
+	pollCalled := make(chan struct{}, 1)
+	brokerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/poll-control" {
+			http.NotFound(w, r)
+			return
+		}
+		select {
+		case pollCalled <- struct{}{}:
+		default:
+		}
+		_ = json.NewEncoder(w).Encode([]controlMessage{{
+			ID:        "ctrl_1",
+			Type:      "agent_message",
+			RunID:     "run_1",
+			FromRunID: "sender_x",
+			Payload:   json.RawMessage(`{"from":"Eve","from_run_id":"sender_x","message":"hi","role":"agent"}`),
+		}})
+	}))
+	defer brokerSrv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var stdout bytes.Buffer
+	s := &Server{
+		opts: Options{
+			RunID:      "run_1",
+			Token:      "tok_1",
+			BrokerURL:  brokerSrv.URL,
+			Stdout:     &stdout,
+			Stderr:     io.Discard,
+			HTTPClient: brokerSrv.Client(),
+		},
+		client:      brokerSrv.Client(),
+		initialized: make(chan struct{}),
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.pollControlLoop(ctx)
+	}()
+
+	if err := s.handleLine(ctx, []byte(`{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`)); err != nil {
+		t.Fatalf("initialized notification: %v", err)
+	}
+	select {
+	case <-pollCalled:
+	case <-time.After(time.Second):
+		t.Fatal("poll-control did not run after initialization")
+	}
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("pollControlLoop did not stop after cancellation")
+	}
+
+	// Check that the channel notification includes from_run_id in meta
+	output := stdout.String()
+	if !bytes.Contains([]byte(output), []byte(`"from_run_id":"sender_x"`)) {
+		t.Fatalf("from_run_id not in notification meta: %s", output)
+	}
 }

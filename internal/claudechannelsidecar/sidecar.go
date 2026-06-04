@@ -254,9 +254,10 @@ func (s *Server) pollControlLoop(ctx context.Context) {
 			_ = s.writeNotification("notifications/claude/channel", map[string]any{
 				"content": renderControlMessage(msg),
 				"meta": map[string]string{
-					"run_id":  msg.RunID,
-					"ctrl_id": msg.ID,
-					"type":    msg.Type,
+					"run_id":     msg.RunID,
+					"ctrl_id":    msg.ID,
+					"type":       msg.Type,
+					"from_run_id": msg.FromRunID,
 				},
 			})
 		}
@@ -275,8 +276,9 @@ func sleepContext(ctx context.Context, d time.Duration) {
 type controlMessage struct {
 	ID      string          `json:"id"`
 	Type    string          `json:"type"`
-	RunID   string          `json:"run_id"`
-	Payload json.RawMessage `json:"payload"`
+	RunID     string          `json:"run_id"`
+	FromRunID string          `json:"from_run_id,omitempty"`
+	Payload   json.RawMessage `json:"payload"`
 }
 
 func renderControlMessage(msg controlMessage) string {
@@ -302,6 +304,24 @@ func renderControlMessage(msg controlMessage) string {
 		return "Stop work. Call avenor_finish(status=blocked|failed) if possible. Avoid starting new tool calls."
 	case "permission_decision":
 		return "Permission decision: " + payload
+	case "agent_message":
+		// Extract a stable payload with from, from_run_id, message, role
+		var agent struct {
+			From      string `json:"from"`
+			FromRunID string `json:"from_run_id"`
+			Message   string `json:"message"`
+			Role      string `json:"role"`
+		}
+		if err := json.Unmarshal(msg.Payload, &agent); err == nil && agent.Message != "" {
+			role := agent.Role
+			if role == "" {
+				role = "agent"
+			}
+			return fmt.Sprintf("Message from agent %s (%s) %s:\n%s\n\nReply by calling avenor_send with to_run_id=%q.",
+				agent.From, agent.FromRunID, role, agent.Message, msg.FromRunID)
+		}
+		// Fallback render if payload doesn't parse
+		return fmt.Sprintf("Message from %s:\n%s", msg.FromRunID, payload)
 	default:
 		return "Unhandled control type: " + msg.Type
 	}
