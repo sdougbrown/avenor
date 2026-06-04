@@ -27,7 +27,9 @@ func NewRecorder(b *Broker, runID string) *Recorder {
 	return &Recorder{broker: b, runID: runID}
 }
 
-// Feed translates an event into a broker.Ingest call. Recognised events:
+// Feed translates an event into a broker.Ingest call. Events not listed
+// below are silently dropped — the Recorder is a filtered mirror, not a
+// complete event log.
 //
 //	session.end             → kind = stop_reason (e.g. "done", "failed") — stored in Finishes
 //	agent.status            → kind = "status" — stored in Reports
@@ -35,13 +37,19 @@ func NewRecorder(b *Broker, runID string) *Recorder {
 //	permission.request      → kind = "permission_requested" — stored in Reports
 //	child.question          → kind = "child_question" — stored in Reports
 //
-// Unknown or low-signal events are silently dropped.
-func (r *Recorder) Feed(evt events.Event) {
+// Ingest errors (run not found, broker not started) are intentionally
+// suppressed — the Recorder is best-effort and must not block or panic
+// the event pump.
+func (rec *Recorder) Feed(evt events.Event) {
+	if rec == nil || rec.broker == nil {
+		return
+	}
+
 	var kind string
 	switch evt.Event {
 	case "session.end":
-		if r, ok := evt.Fields["stop_reason"].(string); ok && r != "" {
-			kind = r
+		if stopReason, ok := evt.Fields["stop_reason"].(string); ok && stopReason != "" {
+			kind = stopReason
 		} else {
 			kind = "done"
 		}
@@ -57,6 +65,6 @@ func (r *Recorder) Feed(evt events.Event) {
 		return
 	}
 
-	payload, _ := json.Marshal(evt.Fields)
-	_ = r.broker.Ingest(r.runID, kind, payload)
+	payload, _ := json.Marshal(evt.Fields) // map[string]any always marshals; ok to ignore error
+	_ = rec.broker.Ingest(rec.runID, kind, payload)
 }
