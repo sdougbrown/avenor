@@ -3,6 +3,7 @@ package claudechannel
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
+	"github.com/sdougbrown/avenor/internal/runtime/claudechannel/terminal"
 )
 
 func TestNewWithOptions(t *testing.T) {
@@ -160,7 +162,14 @@ func TestPromptQueuesChannelEvent(t *testing.T) {
 		t.Fatalf("CreateRun: %v", err)
 	}
 	p := &Provider{broker: b, sessions: make(map[string]*session)}
-	s := &session{sessionID: "session-prompt", runID: runID, tmuxName: "missing", ctx: context.Background(), events: make(chan events.Event, 8)}
+	s := &session{
+		sessionID: "session-prompt",
+		runID:     runID,
+		tmuxName:  "missing",
+		ctx:       context.Background(),
+		events:    make(chan events.Event, 8),
+		term:      &fakeTerm{alive: false},
+	}
 	p.sessions[s.sessionID] = s
 
 	if err := p.Prompt(context.Background(), s.sessionID, "hello from test"); err != nil {
@@ -300,7 +309,8 @@ func TestWaitForPaneReadyStopsOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if waitForPaneReady(ctx, "missing-session") {
+	fake := &fakeTerm{captureErr: fmt.Errorf("no session")}
+	if waitForPaneReady(ctx, fake) {
 		t.Fatal("waitForPaneReady should stop when context is canceled")
 	}
 }
@@ -440,17 +450,17 @@ func TestAnswerPermissionTmuxRoute(t *testing.T) {
 		runID:           "run-tmux",
 		pendingTmuxPerm: tmuxPerm,
 		events:          make(chan events.Event, 64),
+		term:            &fakeTerm{},
 	}
 
 	p.sessions["ses-tmux"] = s
 
-	// Answering a tmux permission with allow (sends keys via tmux, which won't
-	// exist in tests — we check that it clears the pending state and doesn't
-	// return a broker routing error).
+	// Answering a tmux permission with allow sends keys via terminal.
+	// The fake terminal succeeds, but the important thing is the pending state
+	// is cleared.
 	err := p.AnswerPermission(context.Background(), "ses-tmux", "tmux-req-1", runtime.PermissionResponse{Allow: true, OptionID: "1"})
-	// Expect tmux error since no tmux session exists, but permission state cleared.
-	if err == nil {
-		t.Fatal("expected tmux error (no session) but got nil")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 
 	s.mu.Lock()
@@ -663,3 +673,35 @@ func TestCleanupProjectMCPRemovesOnlyAvenorChannelEntries(t *testing.T) {
 		t.Fatal("expected context7 entry to remain")
 	}
 }
+
+// fakeTerm satisfies terminal.Session for tests.
+type fakeTerm struct {
+	name       string
+	pid        int
+	capture    string
+	captureErr error
+	alive      bool
+	pasteCalls []string
+	sendCalls  [][]string
+	killErr    error
+}
+
+func (f *fakeTerm) Name() string                        { return f.name }
+func (f *fakeTerm) PID() int                            { return f.pid }
+func (f *fakeTerm) Capture(_ context.Context) (string, error) { return f.capture, f.captureErr }
+func (f *fakeTerm) PasteAndEnter(_ context.Context, text string) error {
+	f.pasteCalls = append(f.pasteCalls, text)
+	return nil
+}
+func (f *fakeTerm) SendKeys(_ context.Context, keys ...terminal.Key) error {
+	strs := make([]string, len(keys))
+	for i, k := range keys {
+		strs[i] = string(k)
+	}
+	f.sendCalls = append(f.sendCalls, strs)
+	return nil
+}
+func (f *fakeTerm) Alive(_ context.Context) bool           { return f.alive }
+func (f *fakeTerm) Kill(_ context.Context) error           { return f.killErr }
+
+var _ terminal.Session = (*fakeTerm)(nil)

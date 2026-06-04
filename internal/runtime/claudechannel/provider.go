@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +18,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
+	"github.com/sdougbrown/avenor/internal/runtime/claudechannel/terminal"
 )
 
 const backendID = "claude-channel"
@@ -51,32 +51,33 @@ type Provider struct {
 	sessions  map[string]*session
 	broker    *broker.Broker
 	globalTok string
+	launcher  terminal.Launcher
 }
 
 type session struct {
 	sessionID  string
 	runID      string
 	dir        string
-	tmuxName   string // tmux session name; used for lifecycle ops
-	mcpDir     string // tmpdir holding ephemeral bootstrap state; removed on session exit
+	tmuxName   string     // tmux session name; used for lifecycle ops
+	term       terminal.Session
+	mcpDir     string     // tmpdir holding ephemeral bootstrap state; removed on session exit
 	brokerURL  string
 	sidecarTok string
 	mcpConfig  string
 	mcpServer  string
 	mcpProject string
 
-	events   chan events.Event
-	done     chan struct{}
-	ctx      context.Context
-	cancelFn context.CancelFunc
-
-	startedAt           time.Time
-	prompted            bool
-	active              bool
-	finished            bool
+	events          chan events.Event
+	done            chan struct{}
+	ctx             context.Context
+	cancelFn        context.CancelFunc
+	startedAt       time.Time
+	prompted        bool
+	active          bool
+	finished        bool
 	channelReadyEmitted bool
-	pendingTmuxPerm     *tmuxPermission
-	mu                  sync.Mutex
+	pendingTmuxPerm *tmuxPermission
+	mu              sync.Mutex
 }
 
 type tmuxPermission struct {
@@ -100,6 +101,7 @@ func NewWithOptions(opts runtime.StartOptions) runtime.Provider {
 		opts:      opts,
 		sessions:  make(map[string]*session),
 		globalTok: broker.MakeToken(),
+		launcher:  terminal.TmuxLauncher{},
 	}
 }
 
@@ -228,38 +230,6 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	// Launch claude in a detached tmux session. tmux provides a real virtual
 	// terminal, which is what prevents claude from falling back to --print mode.
 	tmuxName := "avenor-" + runSlug
-	if tmuxOut, err := exec.Command(
-		"tmux", "new-session",
-		"-d",
-		"-s", tmuxName,
-		"-c", merged.Dir,
-		"-x", "220",
-		"-y", "50",
-		shellCmd,
-	).CombinedOutput(); err != nil {
-		_ = removeProjectMCPServer(projectMCPPath, serverName)
-		_ = os.RemoveAll(mcpDir)
-		return runtime.Session{}, fmt.Errorf("tmux new-session: %w: %s", err, strings.TrimSpace(string(tmuxOut)))
-	}
-
-	// Wait for tmux pane to become ready by polling list-panes.
-	pid := 0
-	deadline := time.After(1 * time.Second)
-pollLoop:
-	for {
-		if pidOut, err := exec.Command("tmux", "list-panes", "-t", tmuxName, "-F", "#{pane_pid}").Output(); err == nil {
-			if p := strings.TrimSpace(string(pidOut)); p != "" {
-				pid, _ = strconv.Atoi(p)
-			}
-			break
-		}
-		select {
-		case <-deadline:
-			break pollLoop
-		case <-time.After(50 * time.Millisecond):
-		}
-	}
-
 	sessCtx, cancel := context.WithCancel(context.Background())
 	s := &session{
 		sessionID:  sessionID,
@@ -278,6 +248,20 @@ pollLoop:
 		cancelFn:   cancel,
 		startedAt:  time.Now(),
 	}
+
+	term, err := p.launcher.Start(sessCtx, terminal.StartOptions{
+		Name:    tmuxName,
+		Dir:     merged.Dir,
+		Cols:    220,
+		Rows:    50,
+		Command: shellCmd,
+	})
+	if err != nil {
+		_ = removeProjectMCPServer(projectMCPPath, serverName)
+		_ = os.RemoveAll(mcpDir)
+		return runtime.Session{}, fmt.Errorf("terminal launch: %w", err)
+	}
+	s.term = term
 
 	p.sessions[sessionID] = s
 
@@ -302,7 +286,7 @@ pollLoop:
 		SessionID: sessionID,
 		Backend:   backendID,
 		Dir:       merged.Dir,
-		PID:       pid,
+		PID:       term.PID(),
 	}, nil
 }
 
@@ -321,7 +305,7 @@ func (p *Provider) runSession(ctx context.Context, s *session) {
 		p.broker.DeleteRun(s.runID)
 	}()
 	defer func() {
-		_ = exec.Command("tmux", "kill-session", "-t", s.tmuxName).Run()
+		_ = s.term.Kill(ctx)
 		_ = removeProjectMCPServer(s.mcpProject, s.mcpServer)
 		_ = os.RemoveAll(s.mcpDir)
 	}()
@@ -336,7 +320,7 @@ func (p *Provider) runSession(ctx context.Context, s *session) {
 				return
 			case <-time.After(500 * time.Millisecond):
 			}
-			if err := exec.Command("tmux", "has-session", "-t", s.tmuxName).Run(); err != nil {
+			if !s.term.Alive(ctx) {
 				return
 			}
 		}
@@ -351,7 +335,7 @@ func (p *Provider) runSession(ctx context.Context, s *session) {
 	for {
 		select {
 		case <-ctx.Done():
-			_ = exec.Command("tmux", "kill-session", "-t", s.tmuxName).Run()
+			_ = s.term.Kill(ctx)
 			return
 		case <-sessionGone:
 			if markFinished(s) {
@@ -375,7 +359,7 @@ func (p *Provider) runSession(ctx context.Context, s *session) {
 }
 
 func (p *Provider) scanPaneTick(s *session) {
-	state, err := scanPane(s.tmuxName)
+	state, err := scanPane(s.ctx, s.term)
 	if err != nil {
 		return
 	}
@@ -400,7 +384,7 @@ func (p *Provider) scanPaneTick(s *session) {
 		}
 
 		// Parse the permission prompt and broker it.
-		out, err := exec.Command("tmux", "capture-pane", "-t", s.tmuxName, "-p").Output()
+		out, err := s.term.Capture(s.ctx)
 		if err != nil {
 			return
 		}
@@ -598,11 +582,11 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 	// Prompt() doesn't block; the channel push serves as a backup if Claude is
 	// already listening.
 	go func() {
-		if !waitForPaneReady(s.ctx, s.tmuxName) {
+		if !waitForPaneReady(s.ctx, s.term) {
 			return
 		}
 
-		if err := pastePromptAndSubmit(s.tmuxName, prompt); err != nil {
+		if err := pastePromptAndSubmit(s.ctx, s.term, prompt); err != nil {
 			return
 		}
 		s.mu.Lock()
@@ -616,7 +600,7 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 				"prompt_length": len(prompt),
 			},
 		})
-		go retryPromptSubmitIfIdle(s.ctx, s.tmuxName, prompt)
+		go retryPromptSubmitIfIdle(s.ctx, s.term, prompt)
 	}()
 
 	// Also push via channel for idempotence and later turns.
@@ -644,27 +628,18 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 	return nil
 }
 
-func pastePromptAndSubmit(tmuxName, prompt string) error {
-	bufferName := "avenor-prompt-" + tmuxName
-	cmd := exec.Command("tmux", "load-buffer", "-b", bufferName, "-")
-	cmd.Stdin = strings.NewReader(prompt)
-	if err := cmd.Run(); err != nil {
-		return err
-	}
-	if err := exec.Command("tmux", "paste-buffer", "-t", tmuxName, "-b", bufferName).Run(); err != nil {
-		return err
-	}
-	return exec.Command("tmux", "send-keys", "-t", tmuxName, "Enter").Run()
+func pastePromptAndSubmit(ctx context.Context, term terminal.Session, prompt string) error {
+	return term.PasteAndEnter(ctx, prompt)
 }
 
-func retryPromptSubmitIfIdle(ctx context.Context, tmuxName, prompt string) {
+func retryPromptSubmitIfIdle(ctx context.Context, term terminal.Session, prompt string) {
 	select {
 	case <-ctx.Done():
 		return
 	case <-time.After(promptSubmitRetryDelay):
 	}
 
-	out, err := exec.Command("tmux", "capture-pane", "-t", tmuxName, "-p").Output()
+	out, err := term.Capture(ctx)
 	if err != nil {
 		return
 	}
@@ -679,11 +654,11 @@ func retryPromptSubmitIfIdle(ctx context.Context, tmuxName, prompt string) {
 	if !strings.Contains(text, needle) {
 		return
 	}
-	_ = exec.Command("tmux", "send-keys", "-t", tmuxName, "Enter").Run()
+	_ = term.SendKeys(ctx, terminal.KeyEnter)
 }
 
-func scanPane(tmuxName string) (paneState, error) {
-	out, err := exec.Command("tmux", "capture-pane", "-t", tmuxName, "-p").Output()
+func scanPane(ctx context.Context, term terminal.Session) (paneState, error) {
+	out, err := term.Capture(ctx)
 	if err != nil {
 		return paneStateUnknown, err
 	}
@@ -797,22 +772,22 @@ func autoConfirmDevelopmentChannelPrompt(ctx context.Context, s *session) {
 		case <-ticker.C:
 		}
 
-		out, err := exec.Command("tmux", "capture-pane", "-t", s.tmuxName, "-p").Output()
+		out, err := s.term.Capture(ctx)
 		if err != nil {
 			continue
 		}
-		if bytes.Contains(out, []byte("New MCP server found in this project")) {
-			_ = exec.Command("tmux", "send-keys", "-t", s.tmuxName, "1", "Enter").Run()
+		if bytes.Contains([]byte(out), []byte("New MCP server found in this project")) {
+			_ = s.term.SendKeys(ctx, terminal.Key("1"), terminal.KeyEnter)
 			continue
 		}
-		if bytes.Contains(out, []byte("Loading development channels")) {
-			_ = exec.Command("tmux", "send-keys", "-t", s.tmuxName, "Enter").Run()
+		if bytes.Contains([]byte(out), []byte("Loading development channels")) {
+			_ = s.term.SendKeys(ctx, terminal.KeyEnter)
 			continue
 		}
 	}
 }
 
-func waitForPaneReady(ctx context.Context, tmuxName string) bool {
+func waitForPaneReady(ctx context.Context, term terminal.Session) bool {
 	deadline := time.NewTimer(promptInjectTimeout)
 	defer deadline.Stop()
 	ticker := time.NewTicker(promptInjectCheckInterval)
@@ -827,11 +802,11 @@ func waitForPaneReady(ctx context.Context, tmuxName string) bool {
 		case <-ticker.C:
 		}
 
-		out, err := exec.Command("tmux", "capture-pane", "-t", tmuxName, "-p").Output()
+		out, err := term.Capture(ctx)
 		if err != nil {
 			return false
 		}
-		if !bytes.Contains(out, []byte("Loading development channels")) {
+		if !bytes.Contains([]byte(out), []byte("Loading development channels")) {
 			return true
 		}
 	}
@@ -919,7 +894,7 @@ func (p *Provider) Cancel(ctx context.Context, sessionID string) error {
 	// Escalate to hard kill after 2 seconds.
 	go func() {
 		time.Sleep(2 * time.Second)
-		_ = exec.Command("tmux", "kill-session", "-t", s.tmuxName).Run()
+		_ = s.term.Kill(ctx)
 	}()
 	return nil
 }
@@ -978,7 +953,12 @@ func (p *Provider) AnswerPermission(ctx context.Context, sessionID string, reque
 		if !validTmuxKey(key) {
 			return fmt.Errorf("invalid option_id for tmux permission: %q", key)
 		}
-		return exec.Command("tmux", "send-keys", "-t", tmuxPerm.tmuxName, key, "Enter").Run()
+		keys := []terminal.Key{terminal.Key(key)}
+		if key == "Esc" {
+			keys = []terminal.Key{terminal.KeyEsc}
+		}
+		keys = append(keys, terminal.KeyEnter)
+		return s.term.SendKeys(ctx, keys...)
 	}
 
 	// Not a tmux permission; route through broker (sidecar path).

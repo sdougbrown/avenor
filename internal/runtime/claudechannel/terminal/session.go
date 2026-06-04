@@ -1,0 +1,37 @@
+// Package terminal provides an abstraction for interactive terminal sessions.
+package terminal
+
+import "context"
+
+// Key represents a terminal key for send-keys operations.
+type Key string
+
+const (
+	KeyEnter Key = "Enter"
+	KeyEsc   Key = "Esc"
+)
+
+// Session represents an interactive terminal session.
+type Session interface {
+	Name() string
+	PID() int
+	Capture(ctx context.Context) (string, error)
+	PasteAndEnter(ctx context.Context, text string) error
+	SendKeys(ctx context.Context, keys ...Key) error
+	Alive(ctx context.Context) bool
+	Kill(ctx context.Context) error
+}
+
+// StartOptions holds parameters for launching a new terminal session.
+type StartOptions struct {
+	Name    string
+	Dir     string
+	Cols    int
+	Rows    int
+	Command string
+}
+
+// Launcher creates and manages terminal sessions.
+type Launcher interface {
+	Start(ctx context.Context, opts StartOptions) (Session, error)
+}
