@@ -15,8 +15,10 @@ for (const field of depFields) {
     let resolved = false;
     for (const dir of fs.readdirSync('..')) {
       const p = path.join('..', dir, 'package.json');
-      if (fs.existsSync(p) && JSON.parse(fs.readFileSync(p, 'utf8')).name === name) {
-        deps[name] = '^' + JSON.parse(fs.readFileSync(p, 'utf8')).version;
+      if (!fs.existsSync(p)) continue;
+      const siblingPkg = JSON.parse(fs.readFileSync(p, 'utf8'));
+      if (siblingPkg.name === name) {
+        deps[name] = '^' + siblingPkg.version;
         resolved = true;
         break;
       }
