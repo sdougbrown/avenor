@@ -108,7 +108,6 @@ describe("resolve-workspace-deps", () => {
   it("resolves from package name even when dir name differs", async () => {
     const root = setupWorkspace("2.1.0");
     const pkgDir = createPackageDir(root, "opencode");
-    // dir name is 'opencode' but the only sibling package is in 'core' — script matches by package.json name
     writePackage(pkgDir, {
       name: "test-pkg",
       version: "1.0.0",
@@ -122,5 +121,75 @@ describe("resolve-workspace-deps", () => {
 
     const pkg = JSON.parse(readFileSync(join(pkgDir, "package.json"), "utf8"));
     expect(pkg.dependencies["@dougbots/avenor-core"]).toBe("^2.1.0");
+  });
+
+  it("throws when workspace dep is not found in sibling packages", async () => {
+    const root = setupWorkspace();
+    const pkgDir = createPackageDir(root, "mcp");
+    writePackage(pkgDir, {
+      name: "test-pkg",
+      version: "1.0.0",
+      dependencies: {
+        "@dougbots/nonexistent": "workspace:*",
+      },
+    });
+
+    const result = await $`bun ${join(import.meta.dirname, "resolve-workspace-deps.js")}`.cwd(pkgDir).nothrow().quiet();
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.toString()).toContain("@dougbots/nonexistent");
+  });
+
+  it("resolves workspace:* in devDependencies", async () => {
+    const root = setupWorkspace("0.4.0");
+    const pkgDir = createPackageDir(root, "mcp");
+    writePackage(pkgDir, {
+      name: "test-pkg",
+      version: "1.0.0",
+      devDependencies: {
+        "@dougbots/avenor-core": "workspace:*",
+      },
+    });
+
+    const result = await $`bun ${join(import.meta.dirname, "resolve-workspace-deps.js")}`.cwd(pkgDir).quiet();
+    expect(result.exitCode).toBe(0);
+
+    const pkg = JSON.parse(readFileSync(join(pkgDir, "package.json"), "utf8"));
+    expect(pkg.devDependencies["@dougbots/avenor-core"]).toBe("^0.4.0");
+  });
+
+  it("resolves workspace:* in peerDependencies", async () => {
+    const root = setupWorkspace("0.5.0");
+    const pkgDir = createPackageDir(root, "mcp");
+    writePackage(pkgDir, {
+      name: "test-pkg",
+      version: "1.0.0",
+      peerDependencies: {
+        "@dougbots/avenor-core": "workspace:*",
+      },
+    });
+
+    const result = await $`bun ${join(import.meta.dirname, "resolve-workspace-deps.js")}`.cwd(pkgDir).quiet();
+    expect(result.exitCode).toBe(0);
+
+    const pkg = JSON.parse(readFileSync(join(pkgDir, "package.json"), "utf8"));
+    expect(pkg.peerDependencies["@dougbots/avenor-core"]).toBe("^0.5.0");
+  });
+
+  it("resolves workspace:* in optionalDependencies", async () => {
+    const root = setupWorkspace("0.6.0");
+    const pkgDir = createPackageDir(root, "mcp");
+    writePackage(pkgDir, {
+      name: "test-pkg",
+      version: "1.0.0",
+      optionalDependencies: {
+        "@dougbots/avenor-core": "workspace:*",
+      },
+    });
+
+    const result = await $`bun ${join(import.meta.dirname, "resolve-workspace-deps.js")}`.cwd(pkgDir).quiet();
+    expect(result.exitCode).toBe(0);
+
+    const pkg = JSON.parse(readFileSync(join(pkgDir, "package.json"), "utf8"));
+    expect(pkg.optionalDependencies["@dougbots/avenor-core"]).toBe("^0.6.0");
   });
 });
