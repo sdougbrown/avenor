@@ -1,3 +1,7 @@
+github.com/chubin/vt10x v0.0.0-20231112153020-ef4f56837bf1 h1:CHg5BTAJZmCjBaAAQrD92s248JHH3JTsLlaC6QBJo/Y=
+github.com/chubin/vt10x v0.0.0-20231112153020-ef4f56837bf1/go.mod h1:mQssL2gI1LTqWgbffl6DESqe6QkAF67ujBdzSe4bWkU=
+github.com/creack/pty v1.1.24 h1:bJrF4RRfyJnbTJqzRLHzcGaZK1NeM5kTC9jGgovnR1s=
+github.com/creack/pty v1.1.24/go.mod h1:08sCNb52WyoAwi2QDyzUCTgcvVFhUzewun7wtTfvcwE=
 github.com/golang-jwt/jwt/v5 v5.3.1 h1:kYf81DTWFe7t+1VvL7eS+jKFVWaUnK9cB1qbwn63YCY=
 github.com/golang-jwt/jwt/v5 v5.3.1/go.mod h1:fxCRLWMO43lRc8nhHWY6LGqRcf+1gQWArsqaEUEa5bE=
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
