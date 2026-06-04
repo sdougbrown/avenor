@@ -67,6 +67,7 @@ func RunProbeMatrix(t *testing.T, command string) map[string]ProbeResult {
 			continue
 		}
 		res.ProcessStarted = true
+		cleanup := func() { _ = sess.Kill(ctx) }
 
 		// Give it a moment to initialize.
 		time.Sleep(500 * time.Millisecond)
@@ -75,9 +76,11 @@ func RunProbeMatrix(t *testing.T, command string) map[string]ProbeResult {
 		capture, err := sess.Capture(ctx)
 		if err != nil {
 			res.Err = fmt.Errorf("capture: %w", err)
-		} else {
-			res.FirstCapture = capture
+			cleanup()
+			results[v.name] = res
+			continue
 		}
+		res.FirstCapture = capture
 
 		// Check if alive after 10s.
 		alive10s := false
@@ -103,9 +106,7 @@ func RunProbeMatrix(t *testing.T, command string) map[string]ProbeResult {
 			res.PromptSubmitted = true
 		}
 
-		// Kill session.
-		_ = sess.Kill(ctx)
-
+		cleanup()
 		results[v.name] = res
 	}
 

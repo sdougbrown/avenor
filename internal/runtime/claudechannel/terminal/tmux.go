@@ -47,8 +47,8 @@ func (TmuxLauncher) Start(_ context.Context, opts StartOptions) (Session, error)
 		if err == nil && len(bytes.TrimSpace(pidOut)) > 0 {
 			if p, err := strconv.Atoi(strings.TrimSpace(string(pidOut))); err == nil {
 				pid = p
+				break
 			}
-			break
 		}
 		select {
 		case <-deadline:

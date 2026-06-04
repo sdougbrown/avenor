@@ -950,12 +950,12 @@ func (p *Provider) AnswerPermission(ctx context.Context, sessionID string, reque
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
 
-	// Check if this is a tmux-pane permission request.
+	// Check if this is a terminal permission request.
 	s.mu.Lock()
-	tmuxPerm := s.pendingTerminalPerm
+	pendingPerm := s.pendingTerminalPerm
 	s.mu.Unlock()
 
-	if tmuxPerm != nil && tmuxPerm.requestID == requestID {
+	if pendingPerm != nil && pendingPerm.requestID == requestID {
 		s.mu.Lock()
 		s.pendingTerminalPerm = nil
 		s.mu.Unlock()
@@ -968,7 +968,7 @@ func (p *Provider) AnswerPermission(ctx context.Context, sessionID string, reque
 			}
 		}
 		if !validTmuxKey(key) {
-			return fmt.Errorf("invalid option_id for tmux permission: %q", key)
+			return fmt.Errorf("invalid option_id for terminal permission: %q", key)
 		}
 		keys := []terminal.Key{terminal.Key(key)}
 		if key == "Esc" {
@@ -978,7 +978,7 @@ func (p *Provider) AnswerPermission(ctx context.Context, sessionID string, reque
 		return s.term.SendKeys(ctx, keys...)
 	}
 
-	// Not a tmux permission; route through broker (sidecar path).
+	// Not a terminal permission; route through broker (sidecar path).
 	if s.finished {
 		return fmt.Errorf("session already finished: %s", sessionID)
 	}

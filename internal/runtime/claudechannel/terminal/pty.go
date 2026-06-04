@@ -244,10 +244,13 @@ func (p *PTYSession) readLoop() {
 			if err == io.EOF {
 				return
 			}
+			// EIO or other PTY read error means the process died or the PTY
+			// was closed. Exit rather than spinning.
 			select {
 			case <-p.cancel:
 				return
 			default:
+				return
 			}
 		}
 	}
