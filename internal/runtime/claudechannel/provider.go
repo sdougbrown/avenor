@@ -30,6 +30,7 @@ const (
 	promptInjectTimeout        = 30 * time.Second
 	promptSubmitRetryDelay     = 750 * time.Millisecond
 	paneScanInterval           = 500 * time.Millisecond
+	transcriptScanInterval     = 500 * time.Millisecond
 )
 
 type paneState string
@@ -65,6 +66,7 @@ type session struct {
 	mcpConfig  string
 	mcpServer  string
 	mcpProject string
+	transcript *transcriptReader
 
 	events              chan events.Event
 	done                chan struct{}
@@ -258,6 +260,9 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		cancelFn:   cancel,
 		startedAt:  time.Now(),
 	}
+	if home, err := os.UserHomeDir(); err == nil {
+		s.transcript = newTranscriptReader(transcriptPath(home, merged.Dir, sessionID))
+	}
 
 	term, err := p.launcher.Start(sessCtx, terminal.StartOptions{
 		Name:    tmuxName,
@@ -341,6 +346,8 @@ func (p *Provider) runSession(ctx context.Context, s *session) {
 	defer pollTick.Stop()
 	paneTick := time.NewTicker(paneScanInterval)
 	defer paneTick.Stop()
+	transcriptTick := time.NewTicker(transcriptScanInterval)
+	defer transcriptTick.Stop()
 
 	for {
 		select {
@@ -364,8 +371,42 @@ func (p *Provider) runSession(ctx context.Context, s *session) {
 			p.pollBrokerEvents(s)
 		case <-paneTick.C:
 			p.scanTerminalTick(s)
+		case <-transcriptTick.C:
+			p.scanTranscriptTick(s)
 		}
 	}
+}
+
+// scanTranscriptTick reads any new JSONL records Claude has written since
+// the last tick and emits status events. New records are an unambiguous
+// "agent is working" signal that doesn't depend on screen-scrape parsing.
+func (p *Provider) scanTranscriptTick(s *session) {
+	if s.transcript == nil {
+		return
+	}
+	recs, _, err := s.transcript.Tick()
+	if err != nil || len(recs) == 0 {
+		return
+	}
+
+	s.mu.Lock()
+	prompted := s.prompted
+	finished := s.finished
+	s.mu.Unlock()
+	if finished || !prompted {
+		return
+	}
+
+	markActive(s)
+	emitNonBlocking(s, events.Event{
+		Event:     "agent.status",
+		SessionID: s.sessionID,
+		Fields: map[string]any{
+			"phase":   "working",
+			"source":  "transcript",
+			"records": len(recs),
+		},
+	})
 }
 
 func (p *Provider) scanTerminalTick(s *session) {
@@ -999,10 +1040,12 @@ func (p *Provider) AnswerPermission(ctx context.Context, sessionID string, reque
 }
 
 func (p *Provider) Capabilities(ctx context.Context) (runtime.Capabilities, error) {
+	// Resume reflects launcher reattachment capability (tmux yes, pty no).
+	// Provider.Resume itself is not yet wired; the capability runs ahead.
 	return runtime.Capabilities{
 		Backend:             backendID,
 		Permissions:         true,
-		Resume:              false,
+		Resume:              p.launcher.SupportsResume(),
 		ExternalServerURL:   false,
 		SubprocessDiscovery: true,
 		ModelSelection:      true,

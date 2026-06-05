@@ -51,6 +51,7 @@ func TestInvalidValueDefaultsToTmux(t *testing.T) {
 }
 
 func TestCapabilities(t *testing.T) {
+	t.Setenv("AVENOR_CLAUDE_CHANNEL_TERMINAL", "tmux")
 	p := New()
 	caps, err := p.Capabilities(context.Background())
 	if err != nil {
@@ -62,11 +63,23 @@ func TestCapabilities(t *testing.T) {
 	if !caps.Permissions {
 		t.Error("Permissions should be true")
 	}
-	if caps.Resume {
-		t.Error("Resume should be false")
+	if !caps.Resume {
+		t.Error("Resume should be true for tmux launcher")
 	}
 	if !caps.SubprocessDiscovery {
 		t.Error("SubprocessDiscovery should be true")
+	}
+}
+
+func TestCapabilitiesPTYResumeFalse(t *testing.T) {
+	t.Setenv("AVENOR_CLAUDE_CHANNEL_TERMINAL", "pty")
+	p := New()
+	caps, err := p.Capabilities(context.Background())
+	if err != nil {
+		t.Fatalf("Capabilities: %v", err)
+	}
+	if caps.Resume {
+		t.Error("Resume should be false for pty launcher")
 	}
 }
 
