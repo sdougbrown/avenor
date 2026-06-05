@@ -25,9 +25,10 @@ type Provider struct {
 	turns   map[string]string // sessionID → current turnID
 
 	// Broker fields for channel-wrapped prompt injection.
-	broker         *broker.Broker
-	runIDs         map[string]string // sessionID → runID
-	pendingMu      sync.Mutex
+	broker          *broker.Broker
+	runIDs          map[string]string // sessionID → runID
+	pollCancels     map[string]context.CancelFunc
+	pendingMu       sync.Mutex
 	pendingMessages map[string][]string // sessionID → queued wrapped prompts
 }
 
@@ -37,6 +38,7 @@ func NewWithOptions(opts runtime.StartOptions) *Provider {
 		threads:         map[string]string{},
 		turns:           map[string]string{},
 		runIDs:          map[string]string{},
+		pollCancels:     map[string]context.CancelFunc{},
 		pendingMessages: map[string][]string{},
 	}
 }
@@ -88,7 +90,11 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 
 	// Start the broker message polling goroutine.
 	if runID != "" {
-		go p.broker.PollAgentMessages(ctx, runID, func(wrapped string) {
+		pollCtx, cancel := context.WithCancel(ctx)
+		p.mu.Lock()
+		p.pollCancels[threadID] = cancel
+		p.mu.Unlock()
+		go p.broker.PollAgentMessages(pollCtx, runID, func(wrapped string) {
 			p.pendingMu.Lock()
 			p.pendingMessages[threadID] = append(p.pendingMessages[threadID], wrapped)
 			p.pendingMu.Unlock()
@@ -270,13 +276,21 @@ func (p *Provider) Capabilities(ctx context.Context) (runtime.Capabilities, erro
 func (p *Provider) Close() error {
 	p.mu.Lock()
 	c := p.client
+	cancels := make([]context.CancelFunc, 0, len(p.pollCancels))
+	for _, cancel := range p.pollCancels {
+		cancels = append(cancels, cancel)
+	}
 	p.client = nil
+	p.pollCancels = map[string]context.CancelFunc{}
 	p.mu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
 	p.mu.Lock()
 	p.runIDs = nil
 	p.mu.Unlock()
 	p.pendingMu.Lock()
-	p.pendingMessages = nil
+	p.pendingMessages = map[string][]string{}
 	p.pendingMu.Unlock()
 	if c == nil {
 		return nil

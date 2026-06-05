@@ -30,9 +30,10 @@ type Provider struct {
 	endedSessions map[string]bool // guards double-emit of session.end
 
 	// Broker fields for channel-wrapped prompt injection.
-	broker         *broker.Broker
-	runIDs         map[string]string // sessionID → runID
-	pendingMu      sync.Mutex
+	broker          *broker.Broker
+	runIDs          map[string]string // sessionID → runID
+	pollCancels     map[string]context.CancelFunc
+	pendingMu       sync.Mutex
 	pendingMessages map[string][]string // sessionID → queued wrapped prompts
 }
 
@@ -55,6 +56,7 @@ func NewWithOptions(opts runtime.StartOptions) (runtime.Provider, error) {
 		subscribers:     make(map[chan events.Event]string),
 		endedSessions:   make(map[string]bool),
 		runIDs:          make(map[string]string),
+		pollCancels:     make(map[string]context.CancelFunc),
 		pendingMessages: make(map[string][]string),
 	}, nil
 }
@@ -103,7 +105,11 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 
 	// Start the broker message polling goroutine.
 	if runID != "" {
-		go p.broker.PollAgentMessages(ctx, runID, func(wrapped string) {
+		pollCtx, cancel := context.WithCancel(ctx)
+		p.mu.Lock()
+		p.pollCancels[sessionID] = cancel
+		p.mu.Unlock()
+		go p.broker.PollAgentMessages(pollCtx, runID, func(wrapped string) {
 			p.pendingMu.Lock()
 			p.pendingMessages[sessionID] = append(p.pendingMessages[sessionID], wrapped)
 			p.pendingMu.Unlock()
@@ -238,16 +244,24 @@ func (p *Provider) Capabilities(ctx context.Context) (runtime.Capabilities, erro
 // Close shuts down the event stream and releases resources.
 func (p *Provider) Close() error {
 	p.mu.Lock()
+	cancels := make([]context.CancelFunc, 0, len(p.pollCancels))
+	for _, cancel := range p.pollCancels {
+		cancels = append(cancels, cancel)
+	}
 	if p.streamCancel != nil {
 		p.streamCancel()
 		p.streamCancel = nil
 	}
+	p.pollCancels = make(map[string]context.CancelFunc)
 	p.mu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
 	p.mu.Lock()
 	p.runIDs = nil
 	p.mu.Unlock()
 	p.pendingMu.Lock()
-	p.pendingMessages = nil
+	p.pendingMessages = map[string][]string{}
 	p.pendingMu.Unlock()
 	return nil
 }

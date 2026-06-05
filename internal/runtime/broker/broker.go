@@ -713,15 +713,12 @@ func (b *Broker) PollAgentMessages(ctx context.Context, runID string, onMessage 
 				continue
 			}
 			var payload struct {
-				From      string `json:"from"`
-				FromRunID string `json:"from_run_id"`
-				Message   string `json:"message"`
-				Role      string `json:"role"`
+				Message string `json:"message"`
 			}
 			if err := json.Unmarshal(msg.Payload, &payload); err != nil || payload.Message == "" {
 				continue
 			}
-			wrapped := channelwrap.ChannelWrap(payload.Message, "agent-"+payload.Role, map[string]string{"from_run_id": payload.FromRunID})
+			wrapped := channelwrap.ChannelWrap(payload.Message, channelwrap.AgentName("agent"), map[string]string{"from_run_id": msg.FromRunID})
 			onMessage(wrapped)
 		}
 	}

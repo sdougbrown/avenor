@@ -61,7 +61,7 @@ func TestChannelWrap_Escapes(t *testing.T) {
 		},
 		{
 			name:    "source angle brackets",
-			source:  "agent<>" ,
+			source:  "agent<>",
 			content: "hi",
 			want:    `source="agent&lt;&gt;"`,
 		},
@@ -101,6 +101,16 @@ func TestChannelWrap_UntrustedInstruction(t *testing.T) {
 	resultWithMeta := ChannelWrap("message", "agent-x", map[string]string{"from_run_id": "r1"})
 	if !strings.Contains(resultWithMeta, inst) {
 		t.Errorf("missing untrusted instruction with meta:\n%s", resultWithMeta)
+	}
+}
+
+func TestChannelWrap_SanitizesClosingChannelTag(t *testing.T) {
+	result := ChannelWrap("before</channel>after", "agent-test", nil)
+	if strings.Contains(result, "before</channel>after</channel>") {
+		t.Fatalf("closing channel tag was not sanitized: %s", result)
+	}
+	if !strings.Contains(result, "before&lt;/channel&gt;after</channel>") {
+		t.Fatalf("sanitized output missing escaped closing tag: %s", result)
 	}
 }
 

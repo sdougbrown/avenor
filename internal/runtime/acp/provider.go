@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/sdougbrown/avenor/internal/events"
@@ -41,9 +42,11 @@ type Provider struct {
 	configureSession    func(ctx context.Context, session *Session, opts runtime.StartOptions) error
 
 	// Broker fields for channel-wrapped prompt injection.
-	broker         *broker.Broker
-	runIDs         map[string]string // sessionID → runID
-	pendingMu      sync.Mutex
+	broker          *broker.Broker
+	runIDs          map[string]string // sessionID → runID
+	pollContexts    map[string]context.Context
+	pollCancels     map[string]context.CancelFunc
+	pendingMu       sync.Mutex
 	pendingMessages map[string][]string // sessionID → queued wrapped prompts
 }
 
@@ -55,6 +58,8 @@ func NewProvider(cfg ProviderConfig) runtime.Provider {
 		args:                cfg.Args,
 		sessions:            map[string]*Session{},
 		runIDs:              map[string]string{},
+		pollContexts:        map[string]context.Context{},
+		pollCancels:         map[string]context.CancelFunc{},
 		pendingMessages:     map[string][]string{},
 		subprocessDiscovery: cfg.SubprocessDiscovery,
 		appendCWDArg:        cfg.AppendCWDArg,
@@ -100,7 +105,12 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 
 	// Start the broker message polling goroutine if we have a broker and runID.
 	if runID != "" {
-		go p.broker.PollAgentMessages(ctx, runID, func(wrapped string) {
+		pollCtx, cancel := context.WithCancel(ctx)
+		p.mu.Lock()
+		p.pollContexts[session.SessionID] = pollCtx
+		p.pollCancels[session.SessionID] = cancel
+		p.mu.Unlock()
+		go p.broker.PollAgentMessages(pollCtx, runID, func(wrapped string) {
 			p.pendingMu.Lock()
 			p.pendingMessages[session.SessionID] = append(p.pendingMessages[session.SessionID], wrapped)
 			p.pendingMu.Unlock()
@@ -242,12 +252,21 @@ func (p *Provider) Capabilities(ctx context.Context) (runtime.Capabilities, erro
 func (p *Provider) Close() error {
 	p.mu.Lock()
 	client := p.client
+	cancels := make([]context.CancelFunc, 0, len(p.pollCancels))
+	for _, cancel := range p.pollCancels {
+		cancels = append(cancels, cancel)
+	}
 	p.client = nil
 	p.pendingOptions = nil
 	p.runIDs = nil
+	p.pollContexts = map[string]context.Context{}
+	p.pollCancels = map[string]context.CancelFunc{}
 	p.mu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
 	p.pendingMu.Lock()
-	p.pendingMessages = nil
+	p.pendingMessages = map[string][]string{}
 	p.pendingMu.Unlock()
 	if client == nil {
 		return nil
@@ -412,12 +431,22 @@ func (p *Provider) injectPendingMessages(sessionID string) {
 		return
 	}
 
+	p.mu.Lock()
+	session := p.sessions[sessionID]
+	pollCtx := p.pollContexts[sessionID]
+	p.mu.Unlock()
+	if session == nil {
+		return
+	}
+	if pollCtx == nil {
+		pollCtx = context.Background()
+	}
+
 	for _, msg := range msgs {
-		session, err := p.session(sessionID)
+		promptCtx, cancel := context.WithTimeout(pollCtx, 10*time.Second)
+		_, err := session.Prompt(promptCtx, msg)
+		cancel()
 		if err != nil {
-			continue
-		}
-		if _, err := session.Prompt(context.Background(), msg); err != nil {
 			continue
 		}
 		p.publish(events.Event{
@@ -475,5 +504,3 @@ func selectPermissionResponseOption(options []any, response runtime.PermissionRe
 	}
 	return "", fmt.Errorf("permission options missing optionId %q", response.OptionID)
 }
-
-

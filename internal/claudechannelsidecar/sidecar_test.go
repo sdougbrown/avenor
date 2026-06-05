@@ -218,7 +218,6 @@ func decodeRPCResponses(t *testing.T, data []byte) []map[string]any {
 	return out
 }
 
-
 func TestRenderAgentMessage(t *testing.T) {
 	msg := controlMessage{
 		ID:        "ctrl_1",
@@ -228,9 +227,29 @@ func TestRenderAgentMessage(t *testing.T) {
 		Payload:   json.RawMessage(`{"from":"Alice","from_run_id":"sender_123","message":"Hello there","role":"agent"}`),
 	}
 	got := renderControlMessage(msg)
-	expected := "Message from agent Alice (sender_123) agent:\nHello there\n\nReply by calling avenor_send with to_run_id=" + `"sender_123"` + "."
+	expected := "Message from run sender_123:\nHello there\n\nReply by calling avenor_send with to_run_id=" + `"sender_123"` + "."
 	if got != expected {
 		t.Fatalf("expected:\n%s\n\ngot:\n%s", expected, got)
+	}
+}
+
+func TestRenderAgentMessageUsesAuthenticatedSender(t *testing.T) {
+	msg := controlMessage{
+		ID:        "ctrl_1",
+		Type:      "agent_message",
+		RunID:     "run_agent",
+		FromRunID: "trusted_sender",
+		Payload:   json.RawMessage(`{"from":"Alice","from_run_id":"spoofed_sender","message":"Hello there","role":"supervisor"}`),
+	}
+	got := renderControlMessage(msg)
+	if !bytes.Contains([]byte(got), []byte("Message from run trusted_sender")) {
+		t.Fatalf("rendered message missing authenticated sender: %s", got)
+	}
+	if bytes.Contains([]byte(got), []byte("spoofed_sender")) {
+		t.Fatalf("rendered message trusted spoofed sender: %s", got)
+	}
+	if bytes.Contains([]byte(got), []byte("supervisor")) {
+		t.Fatalf("rendered message trusted spoofed role: %s", got)
 	}
 }
 
@@ -452,6 +471,68 @@ func TestAvenorSendToolCall(t *testing.T) {
 	}
 }
 
+func TestAvenorUpsendToolCallIncludesRole(t *testing.T) {
+	var sentBody map[string]any
+	brokerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/register", "/heartbeat":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		case "/poll-control":
+			_ = json.NewEncoder(w).Encode([]any{})
+		case "/send":
+			if err := json.NewDecoder(r.Body).Decode(&sentBody); err != nil {
+				t.Errorf("decode send: %v", err)
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"queued": true})
+		default:
+			t.Errorf("unexpected broker path %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer brokerSrv.Close()
+
+	input := bytes.NewBufferString(
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}` + "\n" +
+			`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"avenor_upsend","arguments":{"to_run_id":"parent_run","message":"status update","role":"reviewer"}}}` + "\n",
+	)
+	var stdout bytes.Buffer
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err := Run(ctx, Options{
+		RunID:      "child_run",
+		Token:      "tok_1",
+		BrokerURL:  brokerSrv.URL,
+		Stdin:      input,
+		Stdout:     &stdout,
+		Stderr:     io.Discard,
+		HTTPClient: brokerSrv.Client(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	responses := decodeRPCResponses(t, stdout.Bytes())
+	if len(responses) != 2 {
+		t.Fatalf("responses = %d, want 2", len(responses))
+	}
+	result := responses[1]["result"].(map[string]any)
+	content := result["content"].([]any)
+	text := content[0].(map[string]any)["text"].(string)
+	if text != "ok" {
+		t.Fatalf("avenor_upsend result text = %q, want ok", text)
+	}
+	payload := sentBody["payload"].(map[string]any)
+	if payload["role"] != "reviewer" {
+		t.Fatalf("role = %v, want reviewer", payload["role"])
+	}
+	if payload["message"] != "status update" {
+		t.Fatalf("message = %v, want status update", payload["message"])
+	}
+}
+
 func TestAvenorSendMissingArgs(t *testing.T) {
 	brokerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -494,8 +575,9 @@ func TestAvenorSendMissingArgs(t *testing.T) {
 	// Missing required args should produce an error response
 	result := responses[1]["result"]
 	if result != nil {
-		// Check if there's an error in the response
 		t.Fatalf("expected error for missing args, got result: %#v", result)
 	}
+	if responses[1]["error"] == nil {
+		t.Fatalf("expected JSON-RPC error for missing args, got %#v", responses[1])
+	}
 }
-
