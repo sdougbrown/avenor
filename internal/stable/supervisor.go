@@ -790,6 +790,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 
 func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg *teamrunner.TeamConfig, maxRetries int, agent, model, serverURL, backend string) {
 	var brokerAttemptIDs []string
+	var brokerAttemptIDsMu sync.Mutex
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Fprintf(os.Stderr, "avenor stable: child %s panic: %v\n", child.id, r)
@@ -862,7 +863,9 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 			if s.broker != nil {
 				brokerRunID = broker.MakeToken()
 				s.broker.CreateRun(brokerRunID)
+				brokerAttemptIDsMu.Lock()
 				brokerAttemptIDs = append(brokerAttemptIDs, brokerRunID)
+				brokerAttemptIDsMu.Unlock()
 				taggedWriter.SwapRecorder(broker.NewRecorder(s.broker, brokerRunID))
 				defer func() { taggedWriter.SwapRecorder(childRecorder) }()
 			}

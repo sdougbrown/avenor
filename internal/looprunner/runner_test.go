@@ -449,6 +449,33 @@ func TestEnrichFromBroker(t *testing.T) {
 		}
 	})
 
+	t.Run("empty finishes", func(t *testing.T) {
+		b2 := broker.New("test")
+		_, _ = b2.CreateRun("empty-run")
+		opts := RunOptions{Broker: b2}
+		result := &PhaseAttemptResult{BrokerRunID: "empty-run", StopReason: ""}
+		enrichFromBroker(opts, result)
+		if result.StopReason != "" {
+			t.Errorf("expected empty StopReason with no finishes, got %q", result.StopReason)
+		}
+	})
+
+	t.Run("finish with empty status", func(t *testing.T) {
+		b3 := broker.New("test")
+		_, _ = b3.CreateRun("empty-status-run")
+		// Add a Finish with empty Status directly (defensive-zero-branch).
+		run := b3.GetRun("empty-status-run")
+		run.Mu.Lock()
+		run.Finishes = append(run.Finishes, broker.Finish{RunID: "empty-status-run", Status: ""})
+		run.Mu.Unlock()
+		opts := RunOptions{Broker: b3}
+		result := &PhaseAttemptResult{BrokerRunID: "empty-status-run", StopReason: ""}
+		enrichFromBroker(opts, result)
+		if result.StopReason != "" {
+			t.Errorf("expected empty StopReason when finish status is empty, got %q", result.StopReason)
+		}
+	})
+
 	t.Run("supplements from last finish", func(t *testing.T) {
 		opts := RunOptions{Broker: b}
 		result := &PhaseAttemptResult{BrokerRunID: "test-run", StopReason: ""}
