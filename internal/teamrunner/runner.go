@@ -37,6 +37,7 @@ type RunOptions struct {
 	Config       *TeamConfig
 	MaxRetries   int
 	Broker       *broker.Broker
+	SeedMessage  *broker.AgentMessage // pushed to the attempt's brokerRunID after creation
 	PhaseAttempt func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error)
 	NestedRun    func(ctx context.Context, configPath string, runType string) (NestedResult, error)
 	ConfigDir    string
@@ -71,6 +72,13 @@ func Run(ctx context.Context, opts RunOptions) (RunResult, error) {
 	}
 
 	members := buildMemberList(opts.Config.Team, preOutput)
+
+	if len(preOutput) > 0 && opts.Broker != nil {
+		opts.SeedMessage = &broker.AgentMessage{
+			Message: preOutput,
+			Role:    "pre-phase",
+		}
+	}
 
 	if len(members) == 0 {
 		if early, err := runSequentialPhases(ctx, opts, opts.Config.Post, "post", &prevPhaseCommit, "", ""); err != nil {

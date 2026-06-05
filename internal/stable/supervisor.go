@@ -670,7 +670,8 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 		recorder:        newRecorderFor(s, child.id),
 	}
 
-	opts := looprunner.RunOptions{
+	var opts looprunner.RunOptions
+	opts = looprunner.RunOptions{
 		WorkDir:    child.dir,
 		RunID:      s.runID,
 		EventSink:  taggedWriter,
@@ -695,6 +696,11 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				s.broker.CreateRun(brokerRunID)
 				brokerAttemptIDs = append(brokerAttemptIDs, brokerRunID)
 				attemptWriter = taggedWriter.withRecorder(broker.NewRecorder(s.broker, brokerRunID))
+			}
+
+			if opts.SeedMessage != nil && s.broker != nil && brokerRunID != "" {
+				payload, _ := json.Marshal(opts.SeedMessage)
+				_ = s.broker.SendTo(opts.SeedMessage.FromRunID, brokerRunID, "agent_message", payload, "")
 			}
 
 			provider, err := factory.NewProvider(startOpts, backend)
@@ -831,7 +837,8 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 		recorder:        newRecorderFor(s, child.id),
 	}
 
-	opts := teamrunner.RunOptions{
+	var opts teamrunner.RunOptions
+	opts = teamrunner.RunOptions{
 		WorkDir:    child.dir,
 		RunID:      s.runID,
 		EventSink:  taggedWriter,
@@ -866,6 +873,11 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				brokerAttemptIDs = append(brokerAttemptIDs, brokerRunID)
 				brokerAttemptIDsMu.Unlock()
 				attemptWriter = taggedWriter.withRecorder(broker.NewRecorder(s.broker, brokerRunID))
+			}
+
+			if opts.SeedMessage != nil && s.broker != nil && brokerRunID != "" {
+				payload, _ := json.Marshal(opts.SeedMessage)
+				_ = s.broker.SendTo(opts.SeedMessage.FromRunID, brokerRunID, "agent_message", payload, "")
 			}
 
 			provider, err := factory.NewProvider(startOpts, backend)

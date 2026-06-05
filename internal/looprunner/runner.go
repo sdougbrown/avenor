@@ -26,6 +26,7 @@ type RunOptions struct {
 	Config     *LoopConfig
 	MaxRetries int
 	Broker     *broker.Broker
+	SeedMessage *broker.AgentMessage // pushed to the attempt's brokerRunID after creation
 	PhaseAttempt func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, iteration int, prevSessionID string) (PhaseAttemptResult, error)
 	NestedRun  func(ctx context.Context, configPath string, runType string) (NestedResult, error)
 	ConfigDir  string
