@@ -49,6 +49,30 @@ function summarizeEvent(evt: { type?: unknown; event?: unknown; tool?: unknown; 
   return type
 }
 
+// Channel block pattern: <channel source="agent-reviewer" from_run_id="abc123" from_role="reviewer">content</channel>
+const CHANNEL_RE = /<channel\s+source="([^"]*)"(?:\s+from_run_id="([^"]*)")?(?:\s+from_role="([^"]*)")?[^>]*>([\s\S]*?)<\/channel>/g
+
+function renderChannelMessage(match: string, source: string, fromRunId: string, fromRole: string, content: string): string {
+  const attribution = fromRole
+    ? `**📨 ${source}** (${fromRole})`
+    : `**📨 ${source}**`
+  const id = fromRunId ? ` \`${fromRunId}\`` : ''
+  return `${attribution}${id}:\n> ${content.trim()}\n`
+}
+
+function formatChannelBlocks(text: string): string {
+  CHANNEL_RE.lastIndex = 0
+  return text.replace(CHANNEL_RE, (...args: Parameters<typeof renderChannelMessage>) => {
+    return renderChannelMessage(
+      args[0] as string,
+      args[1] as string,
+      args[2] as string,
+      args[3] as string,
+      args[4] as string,
+    )
+  })
+}
+
 export const AvenorPlugin: Plugin = async (ctx) => {
   // Primary state: runId → run info
   const trackedRuns = new Map<string, TrackedRun>()
@@ -139,6 +163,21 @@ export const AvenorPlugin: Plugin = async (ctx) => {
         path: { id: run.orchestratorSessionId },
         body: { parts: [{ type: 'text', text: lines.join('\n') }] },
       }).catch(() => {})
+    },
+
+    // ── Channel rendering ────────────────────────────────────────────────────
+    // When a channel message arrives at the top-level orchestrator (injected as
+    // a raw <channel> XML prompt), format it for human readability. The model
+    // still receives the full XML with the untrusted-content instruction; this
+    // only prettifies the display.
+
+    "chat.message": async (message: any, _output: any) => {
+      if (!message?.parts) return
+      for (const part of message.parts) {
+        if (part?.type === 'text' && typeof part?.text === 'string' && part.text.includes('<channel ')) {
+          part.text = formatChannelBlocks(part.text)
+        }
+      }
     },
 
     // ── Tools ─────────────────────────────────────────────────────────────────
