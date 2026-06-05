@@ -20,6 +20,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sdougbrown/avenor/internal/channelwrap"
 )
 
 // ControlMessage is a message pushed from Avenor to the sidecar for delivery to Claude.
@@ -681,6 +683,48 @@ func (b *Broker) ingest(w http.ResponseWriter, runID string, fn func(*RunState))
 	st.Mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+}
+
+// PollAgentMessages polls the broker for agent_message control messages destined
+// to the given runID every 2 seconds. Each received message is wrapped with
+// channelwrap and passed to onMessage. The goroutine exits when ctx is done.
+func (b *Broker) PollAgentMessages(ctx context.Context, runID string, onMessage func(wrappedContent string)) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		st := b.GetRun(runID)
+		if st == nil {
+			continue
+		}
+		st.Mu.Lock()
+		msgs := make([]ControlMessage, len(st.ControlQueue))
+		for i, m := range st.ControlQueue {
+			msgs[i] = *m
+		}
+		st.ControlQueue = nil
+		st.Mu.Unlock()
+		for _, msg := range msgs {
+			if msg.Type != "agent_message" {
+				continue
+			}
+			var payload struct {
+				From      string `json:"from"`
+				FromRunID string `json:"from_run_id"`
+				Message   string `json:"message"`
+				Role      string `json:"role"`
+			}
+			if err := json.Unmarshal(msg.Payload, &payload); err != nil || payload.Message == "" {
+				continue
+			}
+			wrapped := channelwrap.ChannelWrap(payload.Message, "agent-"+payload.Role, map[string]string{"from_run_id": payload.FromRunID})
+			onMessage(wrapped)
+		}
+	}
 }
 
 // --- accessors ---

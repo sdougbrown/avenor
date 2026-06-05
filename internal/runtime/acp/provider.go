@@ -2,14 +2,11 @@ package acp
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/google/uuid"
-	"github.com/sdougbrown/avenor/internal/channelwrap"
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/permission"
 	"github.com/sdougbrown/avenor/internal/runtime"
@@ -103,7 +100,11 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 
 	// Start the broker message polling goroutine if we have a broker and runID.
 	if runID != "" {
-		go p.pollBrokerMessages(ctx, session.SessionID, runID)
+		go p.broker.PollAgentMessages(ctx, runID, func(wrapped string) {
+			p.pendingMu.Lock()
+			p.pendingMessages[session.SessionID] = append(p.pendingMessages[session.SessionID], wrapped)
+			p.pendingMu.Unlock()
+		})
 	}
 
 	return runtime.Session{
@@ -393,52 +394,6 @@ func permissionResponseResult(response runtime.PermissionResponse, optionID stri
 		result["message"] = response.Message
 	}
 	return map[string]any{"outcome": result}
-}
-
-// pollBrokerMessages polls the broker for agent_message control messages and
-// queues them for injection at turn boundaries.
-func (p *Provider) pollBrokerMessages(ctx context.Context, sessionID, runID string) {
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-		st := p.broker.GetRun(runID)
-		if st == nil {
-			continue
-		}
-		st.Lock()
-		msgs := make([]broker.ControlMessage, len(st.ControlQueue))
-		for i, m := range st.ControlQueue {
-			msgs[i] = *m
-		}
-		st.ControlQueue = nil
-		st.Unlock()
-
-		for _, msg := range msgs {
-			if msg.Type != "agent_message" {
-				continue
-			}
-			var payload struct {
-				Message string `json:"message"`
-			}
-			if err := json.Unmarshal(msg.Payload, &payload); err != nil {
-				continue
-			}
-			if payload.Message == "" {
-				continue
-			}
-			meta := channelwrap.BuildMeta(msg.FromRunID, "")
-			source := channelwrap.AgentName("agent")
-			wrapped := channelwrap.ChannelWrap(payload.Message, source, meta)
-			p.pendingMu.Lock()
-			p.pendingMessages[sessionID] = append(p.pendingMessages[sessionID], wrapped)
-			p.pendingMu.Unlock()
-		}
-	}
 }
 
 // injectPendingMessages injects queued channel-wrapped messages for a session
