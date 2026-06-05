@@ -83,11 +83,78 @@ func TestCapabilitiesPTYResumeFalse(t *testing.T) {
 	}
 }
 
-func TestResumeFails(t *testing.T) {
-	p := New()
-	_, err := p.Resume(context.Background(), "ses_1")
+func TestResumeRequiresSupportingLauncher(t *testing.T) {
+	p := &Provider{
+		sessions: make(map[string]*session),
+		launcher: terminal.PTYLauncher{},
+	}
+	_, err := p.Resume(context.Background(), "ses-1")
 	if err == nil {
-		t.Fatal("expected error for resume")
+		t.Fatal("expected error from Resume on PTY launcher")
+	}
+	if !strings.Contains(err.Error(), "resume not supported") {
+		t.Fatalf("error = %q, want 'resume not supported'", err)
+	}
+}
+
+func TestResumeMissingSession(t *testing.T) {
+	p := &Provider{
+		sessions: make(map[string]*session),
+		launcher: terminal.TmuxLauncher{},
+	}
+	_, err := p.Resume(context.Background(), "ses-unknown")
+	if err == nil {
+		t.Fatal("expected error for unknown session")
+	}
+	if !strings.Contains(err.Error(), "session not found") {
+		t.Fatalf("error = %q, want 'session not found'", err)
+	}
+}
+
+func TestResumeReturnsLiveSession(t *testing.T) {
+	p := &Provider{
+		sessions: make(map[string]*session),
+		launcher: terminal.TmuxLauncher{},
+	}
+	term := terminal.NewFakeSession("avenor-claude-ses-live", 4242, "ready")
+	p.sessions["ses-live"] = &session{
+		sessionID: "ses-live",
+		dir:       "/tmp/work",
+		term:      term,
+	}
+	got, err := p.Resume(context.Background(), "ses-live")
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	want := runtime.Session{
+		SessionID: "ses-live",
+		Backend:   backendID,
+		Dir:       "/tmp/work",
+		PID:       4242,
+	}
+	if got != want {
+		t.Fatalf("Resume = %+v, want %+v", got, want)
+	}
+}
+
+func TestResumeAfterTerminalDeath(t *testing.T) {
+	p := &Provider{
+		sessions: make(map[string]*session),
+		launcher: terminal.TmuxLauncher{},
+	}
+	term := terminal.NewFakeSession("avenor-claude-ses-dead", 1, "")
+	term.SetAlive(false)
+	p.sessions["ses-dead"] = &session{
+		sessionID: "ses-dead",
+		dir:       "/tmp/work",
+		term:      term,
+	}
+	_, err := p.Resume(context.Background(), "ses-dead")
+	if err == nil {
+		t.Fatal("expected error when terminal has exited")
+	}
+	if !strings.Contains(err.Error(), "terminal exited") {
+		t.Fatalf("error = %q, want 'terminal exited'", err)
 	}
 }
 
@@ -406,6 +473,80 @@ func TestClassifyPane(t *testing.T) {
 				t.Fatalf("classifyPane() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestScanTerminalTickActiveEmitsNothing pins the Stage-2 behavior: an
+// "active" pane state must NOT emit agent.status working — that's the
+// transcript tick's job. The pane scan only contributes idle/permission.
+func TestScanTerminalTickActiveEmitsNothing(t *testing.T) {
+	p := &Provider{
+		sessions: make(map[string]*session),
+		launcher: terminal.TmuxLauncher{},
+	}
+	// "Churning" classifies as paneStateActive.
+	term := terminal.NewFakeSession("test-term", 1, "✢ Churning… (2m 17s · ↓ 7.2k tokens)")
+	s := &session{
+		sessionID: "ses-active",
+		term:      term,
+		events:    make(chan events.Event, 4),
+		prompted:  true,
+		ctx:       context.Background(),
+	}
+	p.sessions[s.sessionID] = s
+
+	p.scanTerminalTick(s)
+
+	select {
+	case ev := <-s.events:
+		t.Fatalf("scanTerminalTick on active pane should not emit; got %+v", ev)
+	default:
+	}
+	s.mu.Lock()
+	active := s.active
+	s.mu.Unlock()
+	if !active {
+		t.Fatal("scanTerminalTick on active pane should still markActive")
+	}
+}
+
+// TestScanTranscriptTickIsAuthoritativeWorkingSignal verifies that, post-
+// Stage-2, agent.status working events come exclusively from the transcript
+// scanner when records arrive.
+func TestScanTranscriptTickIsAuthoritativeWorkingSignal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(path, []byte(`{"type":"assistant","timestamp":"t1"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := &Provider{
+		sessions: make(map[string]*session),
+		launcher: terminal.TmuxLauncher{},
+	}
+	s := &session{
+		sessionID:  "ses-trans",
+		term:       terminal.NewFakeSession("test-term", 1, "ready"),
+		transcript: newTranscriptReader(path),
+		events:     make(chan events.Event, 4),
+		prompted:   true,
+		ctx:        context.Background(),
+	}
+	p.sessions[s.sessionID] = s
+
+	p.scanTranscriptTick(s)
+
+	select {
+	case ev := <-s.events:
+		if ev.Event != "agent.status" {
+			t.Fatalf("event = %q, want agent.status", ev.Event)
+		}
+		if ev.Fields["phase"] != "working" {
+			t.Fatalf("phase = %v, want working", ev.Fields["phase"])
+		}
+		if ev.Fields["source"] != "transcript" {
+			t.Fatalf("source = %v, want transcript", ev.Fields["source"])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected agent.status working from scanTranscriptTick")
 	}
 }
 

@@ -468,8 +468,11 @@ func (p *Provider) scanTerminalTick(s *session) {
 		}
 
 	case paneStateActive:
+		// Mark the session as active but don't emit a working event from the
+		// pane: scanTranscriptTick is the authoritative working signal (it
+		// fires only when Claude actually writes new JSONL records, where
+		// pane-scrape "active" is a 500ms heartbeat that floods consumers).
 		markActive(s)
-		emitNonBlocking(s, events.Event{Event: "agent.status", SessionID: s.sessionID, Fields: map[string]any{"phase": "working", "source": s.term.Kind()}})
 	case paneStateIdle:
 		// Idle means Claude is at the prompt, waiting for next input.
 		// Don't end the session — the channel supports multi-turn.
@@ -606,8 +609,30 @@ func emitNonBlocking(s *session, ev events.Event) {
 	}
 }
 
+// Resume reattaches to an in-process session whose terminal is still alive.
+// Only the in-process case is supported in v1: if avenor restarts, broker run
+// state and the sidecar's MCP token are gone even if the tmux session is not,
+// and cross-restart recovery is out of scope. Resume is rejected for launchers
+// that don't survive the parent process (e.g. PTY).
 func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Session, error) {
-	return runtime.Session{}, fmt.Errorf("resume not supported for %s", backendID)
+	if !p.launcher.SupportsResume() {
+		return runtime.Session{}, fmt.Errorf("resume not supported by %T", p.launcher)
+	}
+	p.mu.Lock()
+	s, ok := p.sessions[sessionID]
+	p.mu.Unlock()
+	if !ok {
+		return runtime.Session{}, fmt.Errorf("session not found: %s (cross-restart resume not yet supported)", sessionID)
+	}
+	if !s.term.Alive(ctx) {
+		return runtime.Session{}, fmt.Errorf("session %s terminal exited", sessionID)
+	}
+	return runtime.Session{
+		SessionID: sessionID,
+		Backend:   backendID,
+		Dir:       s.dir,
+		PID:       s.term.PID(),
+	}, nil
 }
 
 func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) error {
@@ -1041,8 +1066,6 @@ func (p *Provider) AnswerPermission(ctx context.Context, sessionID string, reque
 }
 
 func (p *Provider) Capabilities(ctx context.Context) (runtime.Capabilities, error) {
-	// Resume reflects launcher reattachment capability (tmux yes, pty no).
-	// Provider.Resume itself is not yet wired; the capability runs ahead.
 	return runtime.Capabilities{
 		Backend:             backendID,
 		Permissions:         true,

@@ -161,7 +161,7 @@ Example (degenerate reasoning stream):
 
 **`agent.status`** — Synthesized by Avenor to signal agent phase transitions. Emitted before the protocol event that triggered it.
 
-Fields: `phase` (one of `thinking`, `working`, `waiting`, `done`), `source` (`"avenor"` for synthesized transitions, `"agent"` for explicit markers in output text), optional `label` (human-readable activity description), `ts` (Unix milliseconds).
+Fields: `phase` (one of `thinking`, `working`, `waiting`, `done`), `source` (`"avenor"` for synthesized transitions, `"agent"` for explicit markers in output text; for `claude-channel`, also `"transcript"` when derived from JSONL records, or the terminal kind `"tmux"`/`"pty"` for pane-scrape-derived `waiting`/permission states), optional `label` (human-readable activity description), `ts` (Unix milliseconds).
 
 Also includes `run_id` and `run_label` when present.
 
