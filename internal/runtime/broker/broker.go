@@ -648,6 +648,35 @@ func (b *Broker) DeleteRun(runID string) {
 	delete(b.runs, runID)
 }
 
+func (b *Broker) RunCount() int {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return len(b.runs)
+}
+
+func (b *Broker) FinishCount(runID string) int {
+	st := b.GetRun(runID)
+	if st == nil {
+		return 0
+	}
+	st.Mu.Lock()
+	defer st.Mu.Unlock()
+	return len(st.Finishes)
+}
+
+func (b *Broker) LastFinishStatus(runID string) string {
+	st := b.GetRun(runID)
+	if st == nil {
+		return ""
+	}
+	st.Mu.Lock()
+	defer st.Mu.Unlock()
+	if len(st.Finishes) == 0 {
+		return ""
+	}
+	return st.Finishes[len(st.Finishes)-1].Status
+}
+
 // Reset clears all run state.
 func (b *Broker) Reset() {
 	b.mu.Lock()

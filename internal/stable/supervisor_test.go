@@ -402,10 +402,17 @@ func TestShutdownTimeoutDoesNotHangWithMultipleStuckRuntimes(t *testing.T) {
 }
 
 func TestRunLoopChildCleansUpOnLooprunnerError(t *testing.T) {
+	b := broker.New("loop-test-token")
+	if err := b.Start(); err != nil {
+		t.Fatalf("broker.Start: %v", err)
+	}
+	defer b.Stop()
+
 	sup := NewSupervisor(Config{
 		ControlSocket: "/tmp/test-loop-cleanup.sock",
 		MaxRuntimes:   1,
 	})
+	sup.broker = b
 	sink := &closeRecordingSink{}
 	cancelled := false
 	child := &childRuntime{
@@ -455,6 +462,9 @@ func TestRunLoopChildCleansUpOnLooprunnerError(t *testing.T) {
 	if _, ok := sup.runtimes[child.id]; ok {
 		t.Fatal("loop child was not removed from supervisor runtimes")
 	}
+	if got := b.RunCount(); got != 0 {
+		t.Fatalf("broker run count = %d, want 0 after loop cleanup", got)
+	}
 }
 
 func TestRunTeamChildCleansUpBrokerRuns(t *testing.T) {
@@ -480,16 +490,10 @@ func TestRunTeamChildCleansUpBrokerRuns(t *testing.T) {
 	}
 	sup.runtimes[child.id] = child
 
-	// Register child in broker (as supervisor does when broker != nil).
-	if _, err := b.CreateRun(child.id); err != nil {
-		t.Fatalf("broker.CreateRun: %v", err)
-	}
-
-	// Run with broken config so it fails fast and triggers the cleanup defer.
 	cfg := &teamrunner.TeamConfig{
-		Pre: []phaseconfig.Phase{{Name: "broken", Prompt: "{{"}},
+		Team: []phaseconfig.Phase{{Name: "review", Prompt: "review"}},
 	}
-	sup.runTeamChild(context.Background(), child, cfg, 0, "", "", "", "")
+	sup.runTeamChild(context.Background(), child, cfg, 0, "", "", "", "unknown-backend")
 
 	select {
 	case <-child.done:
@@ -509,10 +513,54 @@ func TestRunTeamChildCleansUpBrokerRuns(t *testing.T) {
 		t.Fatal("team child was not removed from supervisor runtimes")
 	}
 
-	// Verify child broker run is cleaned up.
-	if b.GetRun(child.id) != nil {
-		t.Fatal("child broker run was not cleaned up")
+	if got := b.RunCount(); got != 0 {
+		t.Fatalf("broker run count = %d, want 0 after team cleanup", got)
 	}
+}
+
+func TestRuntimeFanoutWriterFeedsRecorder(t *testing.T) {
+	b := broker.New("writer-test-token")
+	if err := b.Start(); err != nil {
+		t.Fatalf("broker.Start: %v", err)
+	}
+	defer b.Stop()
+	if _, err := b.CreateRun("writer-run"); err != nil {
+		t.Fatalf("broker.CreateRun: %v", err)
+	}
+
+	writer := &runtimeFanoutWriter{
+		base:      stableTestSink{},
+		runtimeID: "rt_writer",
+		recorder:  broker.NewRecorder(b, "writer-run"),
+	}
+
+	if err := writer.Write(events.Event{
+		Event:     "session.end",
+		SessionID: "ses_writer",
+		Fields: map[string]any{
+			"stop_reason": "done",
+			"exit_code":   0,
+		},
+	}); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	if got := b.FinishCount("writer-run"); got != 1 {
+		t.Fatalf("finish count = %d, want 1", got)
+	}
+	if got := b.LastFinishStatus("writer-run"); got != "done" {
+		t.Fatalf("finish status = %q, want done", got)
+	}
+
+	t.Run("nil recorder", func(t *testing.T) {
+		writer := &runtimeFanoutWriter{
+			base:      stableTestSink{},
+			runtimeID: "rt_writer_nil",
+		}
+		if err := writer.Write(events.Event{Event: "agent.status", Fields: map[string]any{"phase": "idle"}}); err != nil {
+			t.Fatalf("Write with nil recorder: %v", err)
+		}
+	})
 }
 
 func TestRuntimeAnswerPermissionRejectsRuntimeWithoutActiveSession(t *testing.T) {

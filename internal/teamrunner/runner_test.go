@@ -14,6 +14,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/phaseconfig"
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
 
 // ---- Test helpers ----
@@ -273,6 +274,74 @@ func TestRunPostPhaseFailure(t *testing.T) {
 	if result.ExitCode != 1 {
 		t.Fatalf("ExitCode = %d, want 1", result.ExitCode)
 	}
+}
+
+func TestEnrichFromBroker(t *testing.T) {
+	b := broker.New("team-test-token")
+	if _, err := b.CreateRun("team-run"); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	run := b.GetRun("team-run")
+	run.Mu.Lock()
+	run.Finishes = append(run.Finishes, broker.Finish{RunID: "team-run", Status: "failed"})
+	run.Mu.Unlock()
+
+	t.Run("nil broker", func(t *testing.T) {
+		result := &PhaseAttemptResult{BrokerRunID: "team-run"}
+		enrichFromBroker(RunOptions{}, result)
+		if result.StopReason != "" {
+			t.Fatalf("StopReason = %q, want empty", result.StopReason)
+		}
+	})
+
+	t.Run("preserves existing stop reason", func(t *testing.T) {
+		result := &PhaseAttemptResult{BrokerRunID: "team-run", StopReason: "blocked"}
+		enrichFromBroker(RunOptions{Broker: b}, result)
+		if result.StopReason != "blocked" {
+			t.Fatalf("StopReason = %q, want blocked", result.StopReason)
+		}
+	})
+
+	t.Run("supplements stop reason from broker", func(t *testing.T) {
+		result := &PhaseAttemptResult{BrokerRunID: "team-run"}
+		enrichFromBroker(RunOptions{Broker: b}, result)
+		if result.StopReason != "failed" {
+			t.Fatalf("StopReason = %q, want failed", result.StopReason)
+		}
+	})
+
+	t.Run("no-op without broker run", func(t *testing.T) {
+		result := &PhaseAttemptResult{BrokerRunID: ""}
+		enrichFromBroker(RunOptions{Broker: b}, result)
+		if result.StopReason != "" {
+			t.Fatalf("StopReason = %q, want empty", result.StopReason)
+		}
+	})
+
+	t.Run("unknown run", func(t *testing.T) {
+		result := &PhaseAttemptResult{BrokerRunID: "missing-run"}
+		enrichFromBroker(RunOptions{Broker: b}, result)
+		if result.StopReason != "" {
+			t.Fatalf("StopReason = %q, want empty", result.StopReason)
+		}
+	})
+
+	t.Run("ignores empty finish status", func(t *testing.T) {
+		b2 := broker.New("team-empty-status-token")
+		if _, err := b2.CreateRun("team-empty-status"); err != nil {
+			t.Fatalf("CreateRun: %v", err)
+		}
+		run := b2.GetRun("team-empty-status")
+		run.Mu.Lock()
+		run.Finishes = append(run.Finishes, broker.Finish{RunID: "team-empty-status", Status: ""})
+		run.Mu.Unlock()
+
+		result := &PhaseAttemptResult{BrokerRunID: "team-empty-status"}
+		enrichFromBroker(RunOptions{Broker: b2}, result)
+		if result.StopReason != "" {
+			t.Fatalf("StopReason = %q, want empty", result.StopReason)
+		}
+	})
 }
 
 func TestRunConditionalMemberSkipping(t *testing.T) {

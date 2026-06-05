@@ -18,9 +18,9 @@ import (
 	"github.com/sdougbrown/avenor/internal/permission"
 	"github.com/sdougbrown/avenor/internal/phaseconfig"
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/runtime/broker"
 	"github.com/sdougbrown/avenor/internal/runtime/factory"
 	"github.com/sdougbrown/avenor/internal/teamrunner"
-	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
 
 type Config struct {
@@ -669,7 +669,6 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 		onPermissionReq: s.cachePermissionOptions,
 		recorder:        newRecorderFor(s, child.id),
 	}
-	childRecorder := taggedWriter.recorder
 
 	opts := looprunner.RunOptions{
 		WorkDir:    child.dir,
@@ -690,12 +689,12 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 			resumeID := prevSessionID
 
 			var brokerRunID string
+			attemptWriter := taggedWriter
 			if s.broker != nil {
 				brokerRunID = broker.MakeToken()
 				s.broker.CreateRun(brokerRunID)
 				brokerAttemptIDs = append(brokerAttemptIDs, brokerRunID)
-				taggedWriter.SwapRecorder(broker.NewRecorder(s.broker, brokerRunID))
-				defer func() { taggedWriter.SwapRecorder(childRecorder) }()
+				attemptWriter = taggedWriter.withRecorder(broker.NewRecorder(s.broker, brokerRunID))
 			}
 
 			provider, err := factory.NewProvider(startOpts, backend)
@@ -749,7 +748,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				AutoApprove:            child.autoApprove,
 				PermissionClaimTimeout: child.permClaimTimeout,
 			}, cli.SessionWaitDeps{
-				Writer:      taggedWriter,
+				Writer:      attemptWriter,
 				FileHandler: child.fileHandler,
 				Stderr:      os.Stderr,
 			})
@@ -831,7 +830,6 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 		onPermissionReq: s.cachePermissionOptions,
 		recorder:        newRecorderFor(s, child.id),
 	}
-	childRecorder := taggedWriter.recorder
 
 	opts := teamrunner.RunOptions{
 		WorkDir:    child.dir,
@@ -860,14 +858,14 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 			resumeID := prevSessionID
 
 			var brokerRunID string
+			attemptWriter := taggedWriter
 			if s.broker != nil {
 				brokerRunID = broker.MakeToken()
 				s.broker.CreateRun(brokerRunID)
 				brokerAttemptIDsMu.Lock()
 				brokerAttemptIDs = append(brokerAttemptIDs, brokerRunID)
 				brokerAttemptIDsMu.Unlock()
-				taggedWriter.SwapRecorder(broker.NewRecorder(s.broker, brokerRunID))
-				defer func() { taggedWriter.SwapRecorder(childRecorder) }()
+				attemptWriter = taggedWriter.withRecorder(broker.NewRecorder(s.broker, brokerRunID))
 			}
 
 			provider, err := factory.NewProvider(startOpts, backend)
@@ -921,7 +919,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				AutoApprove:            child.autoApprove,
 				PermissionClaimTimeout: child.permClaimTimeout,
 			}, cli.SessionWaitDeps{
-				Writer:      taggedWriter,
+				Writer:      attemptWriter,
 				FileHandler: child.fileHandler,
 				Stderr:      os.Stderr,
 			})
@@ -1392,7 +1390,6 @@ type runtimeFanoutWriter struct {
 	control         *control.ControlServer
 	onPermissionReq func(runtimeID, requestID string, options []any)
 	recorder        *broker.Recorder
-	recorderMu      sync.Mutex
 }
 
 func (w *runtimeFanoutWriter) Write(ev events.Event) error {
@@ -1410,9 +1407,7 @@ func (w *runtimeFanoutWriter) Write(ev events.Event) error {
 	if w.control != nil {
 		w.control.PublishEvent(ev)
 	}
-	w.recorderMu.Lock()
 	rec := w.recorder
-	w.recorderMu.Unlock()
 	if rec != nil {
 		rec.Feed(ev)
 	}
@@ -1421,13 +1416,10 @@ func (w *runtimeFanoutWriter) Write(ev events.Event) error {
 
 func (w *runtimeFanoutWriter) Close() error { return w.base.Close() }
 
-// SwapRecorder atomically replaces the recorder and returns the previous one.
-func (w *runtimeFanoutWriter) SwapRecorder(r *broker.Recorder) *broker.Recorder {
-	w.recorderMu.Lock()
-	prev := w.recorder
-	w.recorder = r
-	w.recorderMu.Unlock()
-	return prev
+func (w *runtimeFanoutWriter) withRecorder(r *broker.Recorder) *runtimeFanoutWriter {
+	clone := *w
+	clone.recorder = r
+	return &clone
 }
 
 // Broker helpers.
