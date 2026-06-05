@@ -169,9 +169,17 @@ func (p *PTYSession) readLoop() {
 			_ = p.cmd.Wait()
 		}
 	}()
+	// Snapshot ptmx under the lock — Kill() nils the field concurrently,
+	// and Read on the closed fd is the loop's exit signal.
+	p.mu.Lock()
+	ptmx := p.ptmx
+	p.mu.Unlock()
+	if ptmx == nil {
+		return
+	}
 	buf := make([]byte, 4096)
 	for {
-		n, err := p.ptmx.Read(buf)
+		n, err := ptmx.Read(buf)
 		if n > 0 {
 			p.mu.Lock()
 			p.terminal.Write(buf[:n])

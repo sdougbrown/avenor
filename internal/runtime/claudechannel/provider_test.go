@@ -545,9 +545,130 @@ func TestScanTranscriptTickIsAuthoritativeWorkingSignal(t *testing.T) {
 		if ev.Fields["source"] != "transcript" {
 			t.Fatalf("source = %v, want transcript", ev.Fields["source"])
 		}
-	case <-time.After(time.Second):
+		if ev.Fields["records"] != 1 {
+			t.Fatalf("records = %v, want 1", ev.Fields["records"])
+		}
+	default:
 		t.Fatal("expected agent.status working from scanTranscriptTick")
 	}
+}
+
+// Idle pane must emit waiting with source = backend Kind() (tmux or pty),
+// not a hardcoded string. Covers both backends so a regression that
+// reverts to a constant is caught.
+func TestScanTerminalTickIdleEmitsWaitingWithKind(t *testing.T) {
+	cases := []struct {
+		name string
+		kind string
+	}{
+		{"tmux", "tmux"},
+		{"pty", "pty"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &Provider{
+				sessions: make(map[string]*session),
+				launcher: terminal.TmuxLauncher{},
+			}
+			term := terminal.NewFakeSession("test-term", 1, "❯ ready for input")
+			term.SetKind(tc.kind)
+			s := &session{
+				sessionID: "ses-idle-" + tc.kind,
+				term:      term,
+				events:    make(chan events.Event, 4),
+				prompted:  true,
+				ctx:       context.Background(),
+			}
+			p.sessions[s.sessionID] = s
+
+			p.scanTerminalTick(s)
+
+			select {
+			case ev := <-s.events:
+				if ev.Event != "agent.status" {
+					t.Fatalf("event = %q, want agent.status", ev.Event)
+				}
+				if ev.Fields["phase"] != "waiting" {
+					t.Fatalf("phase = %v, want waiting", ev.Fields["phase"])
+				}
+				if ev.Fields["source"] != tc.kind {
+					t.Fatalf("source = %v, want %q", ev.Fields["source"], tc.kind)
+				}
+			default:
+				t.Fatalf("expected agent.status waiting; got nothing")
+			}
+		})
+	}
+}
+
+// scanTranscriptTick and scanTerminalTick both short-circuit when the
+// session is finished or has never been prompted. These guards prevent
+// stale or premature status emissions; regressions would silently re-emit.
+func TestScanTicksRespectFinishedAndPromptedGuards(t *testing.T) {
+	writeTranscript := func(t *testing.T) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "session.jsonl")
+		if err := os.WriteFile(path, []byte(`{"type":"assistant","timestamp":"t1"}`+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	newSession := func(t *testing.T) *session {
+		t.Helper()
+		return &session{
+			sessionID:  "ses-guard",
+			term:       terminal.NewFakeSession("test-term", 1, "❯ ready for input"),
+			transcript: newTranscriptReader(writeTranscript(t)),
+			events:     make(chan events.Event, 4),
+			ctx:        context.Background(),
+		}
+	}
+	assertNoEmit := func(t *testing.T, s *session) {
+		t.Helper()
+		select {
+		case ev := <-s.events:
+			t.Fatalf("expected no emit; got %+v", ev)
+		default:
+		}
+	}
+
+	t.Run("transcript skip when finished", func(t *testing.T) {
+		p := &Provider{sessions: make(map[string]*session), launcher: terminal.TmuxLauncher{}}
+		s := newSession(t)
+		s.prompted = true
+		s.finished = true
+		p.sessions[s.sessionID] = s
+		p.scanTranscriptTick(s)
+		assertNoEmit(t, s)
+	})
+
+	t.Run("transcript skip when not prompted", func(t *testing.T) {
+		p := &Provider{sessions: make(map[string]*session), launcher: terminal.TmuxLauncher{}}
+		s := newSession(t)
+		s.prompted = false
+		p.sessions[s.sessionID] = s
+		p.scanTranscriptTick(s)
+		assertNoEmit(t, s)
+	})
+
+	t.Run("terminal skip when finished", func(t *testing.T) {
+		p := &Provider{sessions: make(map[string]*session), launcher: terminal.TmuxLauncher{}}
+		s := newSession(t)
+		s.prompted = true
+		s.finished = true
+		p.sessions[s.sessionID] = s
+		p.scanTerminalTick(s)
+		assertNoEmit(t, s)
+	})
+
+	t.Run("terminal skip when not prompted", func(t *testing.T) {
+		p := &Provider{sessions: make(map[string]*session), launcher: terminal.TmuxLauncher{}}
+		s := newSession(t)
+		s.prompted = false
+		p.sessions[s.sessionID] = s
+		p.scanTerminalTick(s)
+		assertNoEmit(t, s)
+	})
 }
 
 func TestMarkActive(t *testing.T) {
