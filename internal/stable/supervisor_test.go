@@ -18,6 +18,8 @@ import (
 	"github.com/sdougbrown/avenor/internal/looprunner"
 	"github.com/sdougbrown/avenor/internal/phaseconfig"
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/runtime/broker"
+	"github.com/sdougbrown/avenor/internal/teamrunner"
 )
 
 func TestNewSupervisor(t *testing.T) {
@@ -452,6 +454,64 @@ func TestRunLoopChildCleansUpOnLooprunnerError(t *testing.T) {
 	}
 	if _, ok := sup.runtimes[child.id]; ok {
 		t.Fatal("loop child was not removed from supervisor runtimes")
+	}
+}
+
+func TestRunTeamChildCleansUpBrokerRuns(t *testing.T) {
+	b := broker.New("team-test-token")
+	if err := b.Start(); err != nil {
+		t.Fatalf("broker.Start: %v", err)
+	}
+	defer b.Stop()
+
+	sup := NewSupervisor(Config{
+		ControlSocket: "/tmp/test-team-cleanup.sock",
+		MaxRuntimes:   1,
+	})
+	sup.broker = b
+	sink := &closeRecordingSink{}
+	cancelled := false
+	child := &childRuntime{
+		id:          "rt_team",
+		done:        make(chan struct{}),
+		promptCh:    make(chan struct{}, 1),
+		eventWriter: sink,
+		cancelFn:    func() { cancelled = true },
+	}
+	sup.runtimes[child.id] = child
+
+	// Register child in broker (as supervisor does when broker != nil).
+	if _, err := b.CreateRun(child.id); err != nil {
+		t.Fatalf("broker.CreateRun: %v", err)
+	}
+
+	// Run with broken config so it fails fast and triggers the cleanup defer.
+	cfg := &teamrunner.TeamConfig{
+		Pre: []phaseconfig.Phase{{Name: "broken", Prompt: "{{"}},
+	}
+	sup.runTeamChild(context.Background(), child, cfg, 0, "", "", "", "")
+
+	select {
+	case <-child.done:
+	default:
+		t.Fatal("team child done channel was not closed")
+	}
+	if !cancelled {
+		t.Fatal("team child cancel function was not called")
+	}
+	child.mu.Lock()
+	completed := child.completed
+	child.mu.Unlock()
+	if !completed {
+		t.Fatal("team child was not marked completed")
+	}
+	if _, ok := sup.runtimes[child.id]; ok {
+		t.Fatal("team child was not removed from supervisor runtimes")
+	}
+
+	// Verify child broker run is cleaned up.
+	if b.GetRun(child.id) != nil {
+		t.Fatal("child broker run was not cleaned up")
 	}
 }
 
