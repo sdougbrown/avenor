@@ -204,10 +204,11 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 		if err := s.brokerPost(ctx, "/reply", map[string]any{"to": p.To, "payload": rawOrObject(p.Payload)}); err != nil {
 			return nil, err
 		}
-	case "avenor_send":
+	case "avenor_send", "avenor_upsend":
 		var p struct {
 			ToRunID string `json:"to_run_id"`
 			Message string `json:"message"`
+			Role    string `json:"role"`
 		}
 		if err := json.Unmarshal(args, &p); err != nil {
 			return nil, err
@@ -215,11 +216,15 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 		if p.ToRunID == "" || p.Message == "" {
 			return nil, fmt.Errorf("to_run_id and message are required")
 		}
+		role := p.Role
+		if role == "" {
+			role = "agent"
+		}
 		if err := s.brokerPost(ctx, "/send", map[string]any{
 			"from_run_id": s.opts.RunID,
 			"to_run_id":   p.ToRunID,
 			"type":        "agent_message",
-			"payload":     map[string]any{"from": s.opts.RunID, "from_run_id": s.opts.RunID, "message": p.Message, "role": "agent"},
+			"payload":     map[string]any{"from": s.opts.RunID, "from_run_id": s.opts.RunID, "message": p.Message, "role": role},
 		}); err != nil {
 			return nil, err
 		}
@@ -465,6 +470,19 @@ func toolSchemas() []map[string]any {
 				"properties": map[string]any{
 					"to_run_id": map[string]any{"type": "string"},
 					"message":   map[string]any{"type": "string"},
+				},
+				"required": []string{"to_run_id", "message"},
+			},
+		},
+		{
+			"name":        "avenor_upsend",
+			"description": "Send a message upward to your parent or supervisor agent. Use this for status updates, findings, or questions that the parent should see as a channel notification.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"to_run_id": map[string]any{"type": "string", "description": "Target parent/supervisor run ID"},
+					"message":   map[string]any{"type": "string", "description": "Message content"},
+					"role":      map[string]any{"type": "string", "description": "Role to display (e.g., reviewer, implementer)"},
 				},
 				"required": []string{"to_run_id", "message"},
 			},
