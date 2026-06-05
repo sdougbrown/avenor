@@ -17,6 +17,7 @@ type FakeSession struct {
 	pasteCalls [][]string
 	pasteErr   error
 	sendCalls  [][]string
+	sendNotify chan []string
 	sendErr    error
 	killErr    error
 }
@@ -124,13 +125,23 @@ func (f *FakeSession) SetPasteErr(err error) {
 // SendKeys records the key call and returns the configured error.
 func (f *FakeSession) SendKeys(_ context.Context, keys ...Key) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	strs := make([]string, len(keys))
 	for i, k := range keys {
 		strs[i] = string(k)
 	}
 	f.sendCalls = append(f.sendCalls, strs)
-	return f.sendErr
+	notify := f.sendNotify
+	err := f.sendErr
+	f.mu.Unlock()
+
+	if notify != nil {
+		select {
+		case notify <- append([]string{}, strs...):
+		default:
+		}
+	}
+
+	return err
 }
 
 // SendCalls returns the recorded SendKeys calls.
@@ -149,6 +160,13 @@ func (f *FakeSession) SetSendErr(err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sendErr = err
+}
+
+// SetSendNotify sets an optional channel notified on each SendKeys call.
+func (f *FakeSession) SetSendNotify(ch chan []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sendNotify = ch
 }
 
 // Kill returns the configured error.

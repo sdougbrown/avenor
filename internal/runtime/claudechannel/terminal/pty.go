@@ -53,16 +53,16 @@ func (l PTYLauncher) Start(ctx context.Context, opts StartOptions) (Session, err
 	terminal := vt10x.New(vt10x.WithSize(opts.Cols, opts.Rows))
 
 	ps := &PTYSession{
-		name:       opts.Name,
-		cmd:        cmd,
-		ptmx:       ptmx,
-		terminal:   terminal,
-		cancel:     ctx.Done(),
-		capErr:     nil,
-		pasteErr:   nil,
-		sendErr:    nil,
-		killErr:    nil,
-		alive:      true,
+		name:     opts.Name,
+		cmd:      cmd,
+		ptmx:     ptmx,
+		terminal: terminal,
+		cancel:   ctx.Done(),
+		capErr:   nil,
+		pasteErr: nil,
+		sendErr:  nil,
+		killErr:  nil,
+		alive:    true,
 	}
 
 	go ps.readLoop()
@@ -113,48 +113,64 @@ func (p *PTYSession) Capture(_ context.Context) (string, error) {
 
 func (p *PTYSession) PasteAndEnter(_ context.Context, text string) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	p.pasteCalls = append(p.pasteCalls, []string{text})
-	if p.pasteErr != nil {
-		return p.pasteErr
+	ptmx := p.ptmx
+	err := p.pasteErr
+	p.mu.Unlock()
+
+	if err != nil {
+		return err
 	}
-	_, err := p.ptmx.Write([]byte(text + "\r"))
+	if ptmx == nil {
+		return fmt.Errorf("pty closed")
+	}
+	_, err = ptmx.Write([]byte(text + "\r"))
 	return err
 }
 
+func encodeKeys(keys []Key) ([]byte, error) {
+	buf := make([]byte, 0, len(keys))
+	for _, k := range keys {
+		switch k {
+		case KeyEnter:
+			buf = append(buf, '\r')
+		case KeyEsc:
+			buf = append(buf, '\x1b')
+		default:
+			if len(k) == 1 && k[0] >= 0x20 && k[0] <= 0x7e {
+				buf = append(buf, k[0])
+			} else {
+				return nil, fmt.Errorf("unsupported key: %q", k)
+			}
+		}
+	}
+	return buf, nil
+}
+
 func (p *PTYSession) SendKeys(_ context.Context, keys ...Key) error {
+	encoded, err := encodeKeys(keys)
+	if err != nil {
+		return err
+	}
+
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	strs := make([]string, len(keys))
 	for i, k := range keys {
 		strs[i] = string(k)
 	}
 	p.sendCalls = append(p.sendCalls, strs)
-	if p.sendErr != nil {
-		return p.sendErr
+	err = p.sendErr
+	ptmx := p.ptmx
+	p.mu.Unlock()
+
+	if err != nil {
+		return err
 	}
-	for _, k := range keys {
-		switch k {
-		case KeyEnter:
-			if _, err := p.ptmx.Write([]byte{'\r'}); err != nil {
-				return err
-			}
-		case KeyEsc:
-			if _, err := p.ptmx.Write([]byte{'\x1b'}); err != nil {
-				return err
-			}
-		default:
-			// Single ASCII chars written as literal bytes.
-			if len(k) == 1 && k[0] >= 0x20 && k[0] <= 0x7e {
-				if _, err := p.ptmx.Write([]byte{k[0]}); err != nil {
-					return err
-				}
-			} else {
-				return fmt.Errorf("unsupported key: %q", k)
-			}
-		}
+	if ptmx == nil {
+		return fmt.Errorf("pty closed")
 	}
-	return nil
+	_, err = ptmx.Write(encoded)
+	return err
 }
 
 func (p *PTYSession) Alive(_ context.Context) bool {

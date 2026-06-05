@@ -30,7 +30,6 @@ const (
 	promptInjectTimeout        = 30 * time.Second
 	promptSubmitRetryDelay     = 750 * time.Millisecond
 	paneScanInterval           = 500 * time.Millisecond
-	terminalPermissionTimeout      = 60 * time.Second
 )
 
 type paneState string
@@ -58,26 +57,26 @@ type session struct {
 	sessionID  string
 	runID      string
 	dir        string
-	tmuxName   string     // tmux session name; used for lifecycle ops
+	tmuxName   string // tmux session name; used for lifecycle ops
 	term       terminal.Session
-	mcpDir     string     // tmpdir holding ephemeral bootstrap state; removed on session exit
+	mcpDir     string // tmpdir holding ephemeral bootstrap state; removed on session exit
 	brokerURL  string
 	sidecarTok string
 	mcpConfig  string
 	mcpServer  string
 	mcpProject string
 
-	events          chan events.Event
-	done            chan struct{}
-	ctx             context.Context
-	cancelFn        context.CancelFunc
-	startedAt       time.Time
-	prompted        bool
-	active          bool
-	finished        bool
+	events              chan events.Event
+	done                chan struct{}
+	ctx                 context.Context
+	cancelFn            context.CancelFunc
+	startedAt           time.Time
+	prompted            bool
+	active              bool
+	finished            bool
 	channelReadyEmitted bool
 	pendingTerminalPerm *terminalPermission
-	mu              sync.Mutex
+	mu                  sync.Mutex
 }
 
 type terminalPermission struct {
@@ -121,8 +120,6 @@ func defaultLauncher() terminal.Launcher {
 func New() runtime.Provider {
 	return NewWithOptions(runtime.StartOptions{})
 }
-
-
 
 func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtime.Session, error) {
 	merged := runtime.MergeStartOptions(p.opts, opts)
@@ -907,11 +904,11 @@ func (p *Provider) Cancel(ctx context.Context, sessionID string) error {
 	go func() {
 		time.Sleep(2 * time.Second)
 		select {
-		case <-ctx.Done():
+		case <-s.ctx.Done():
 			return
 		default:
 		}
-		_ = s.term.Kill(ctx)
+		_ = s.term.Kill(s.ctx)
 	}()
 	return nil
 }

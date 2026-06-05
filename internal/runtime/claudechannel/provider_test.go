@@ -3,7 +3,6 @@ package claudechannel
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -194,7 +193,11 @@ func TestPromptQueuesChannelEvent(t *testing.T) {
 		tmuxName:  "missing",
 		ctx:       context.Background(),
 		events:    make(chan events.Event, 8),
-		term:      &fakeTerm{alive: false},
+		term: func() terminal.Session {
+			term := terminal.NewFakeSession("missing", 0, "")
+			term.SetAlive(false)
+			return term
+		}(),
 	}
 	p.sessions[s.sessionID] = s
 
@@ -335,8 +338,8 @@ func TestWaitForPaneReadyStopsOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	fake := &fakeTerm{captureErr: fmt.Errorf("no session")}
-	if waitForPaneReady(ctx, fake) {
+	term := terminal.NewFakeSession("missing", 0, "")
+	if waitForPaneReady(ctx, term) {
 		t.Fatal("waitForPaneReady should stop when context is canceled")
 	}
 }
@@ -471,11 +474,11 @@ func TestAnswerPermissionTmuxRoute(t *testing.T) {
 	}
 
 	s := &session{
-		sessionID:       "ses-tmux",
-		runID:           "run-tmux",
+		sessionID:           "ses-tmux",
+		runID:               "run-tmux",
 		pendingTerminalPerm: terminalPerm,
-		events:          make(chan events.Event, 64),
-		term:            &fakeTerm{},
+		events:              make(chan events.Event, 64),
+		term:                terminal.NewFakeSession("test-term", 1, "ready"),
 	}
 
 	p.sessions["ses-tmux"] = s
@@ -493,6 +496,11 @@ func TestAnswerPermissionTmuxRoute(t *testing.T) {
 	s.mu.Unlock()
 	if cleared != nil {
 		t.Fatal("pendingTerminalPerm should be cleared after AnswerPermission")
+	}
+
+	sends := s.term.(*terminal.FakeSession).SendCalls()
+	if len(sends) != 1 || len(sends[0]) != 2 || sends[0][0] != "1" || sends[0][1] != string(terminal.KeyEnter) {
+		t.Fatalf("keys sent = %v, want [[1 Enter]]", sends)
 	}
 }
 
@@ -699,38 +707,6 @@ func TestCleanupProjectMCPRemovesOnlyAvenorChannelEntries(t *testing.T) {
 	}
 }
 
-// fakeTerm satisfies terminal.Session for tests.
-type fakeTerm struct {
-	name       string
-	pid        int
-	capture    string
-	captureErr error
-	alive      bool
-	pasteCalls []string
-	sendCalls  [][]string
-	killErr    error
-}
-
-func (f *fakeTerm) Name() string                        { return f.name }
-func (f *fakeTerm) PID() int                            { return f.pid }
-func (f *fakeTerm) Capture(_ context.Context) (string, error) { return f.capture, f.captureErr }
-func (f *fakeTerm) PasteAndEnter(_ context.Context, text string) error {
-	f.pasteCalls = append(f.pasteCalls, text)
-	return nil
-}
-func (f *fakeTerm) SendKeys(_ context.Context, keys ...terminal.Key) error {
-	strs := make([]string, len(keys))
-	for i, k := range keys {
-		strs[i] = string(k)
-	}
-	f.sendCalls = append(f.sendCalls, strs)
-	return nil
-}
-func (f *fakeTerm) Alive(_ context.Context) bool           { return f.alive }
-func (f *fakeTerm) Kill(_ context.Context) error           { return f.killErr }
-
-var _ terminal.Session = (*fakeTerm)(nil)
-
 // ---- Stage 3: Adapter-backed provider tests ----
 
 func TestPromptWaitsForStartupClearBeforePaste(t *testing.T) {
@@ -815,28 +791,30 @@ func TestDevelopmentChannelPromptsSendRightKeys(t *testing.T) {
 				tc.search + "\n",
 				"ready\n",
 			})
+			sendNotify := make(chan []string, 1)
+			term.SetSendNotify(sendNotify)
 			s := &session{
 				sessionID: "ses-dev",
 				runID:     runID,
 				ctx:       context.Background(),
 				term:      term,
 				events:    make(chan events.Event, 8),
+				done:      make(chan struct{}),
 			}
 			p.sessions[s.sessionID] = s
 
 			// Start autoConfirmDevelopmentChannelPrompt directly since we're not
 			// calling Start() which would normally start it.
 			go autoConfirmDevelopmentChannelPrompt(s.ctx, s)
+			defer close(s.done)
 
-			// Wait for auto-confirm to send keys.
-			time.Sleep(1500 * time.Millisecond)
-
-			sends := term.SendCalls()
-			if len(sends) == 0 {
+			select {
+			case send := <-sendNotify:
+				if send[0] != tc.want[0] {
+					t.Fatalf("first key = %q, want %q", send[0], tc.want[0])
+				}
+			case <-time.After(2 * time.Second):
 				t.Fatal("expected SendKeys to be called by autoConfirmDevelopmentChannelPrompt")
-			}
-			if sends[0][0] != tc.want[0] {
-				t.Fatalf("first key = %q, want %q", sends[0][0], tc.want[0])
 			}
 		})
 	}
@@ -856,11 +834,11 @@ func TestPermissionAllowedSendsDigitAndEnter(t *testing.T) {
 	term := terminal.NewFakeSession("test-term", 1, "ready")
 	sessCtx, sessCancel := context.WithCancel(context.Background())
 	s := &session{
-		sessionID:       "ses-allow",
-		runID:           runID,
-		ctx:             sessCtx,
-		cancelFn:        sessCancel,
-		term:            term,
+		sessionID: "ses-allow",
+		runID:     runID,
+		ctx:       sessCtx,
+		cancelFn:  sessCancel,
+		term:      term,
 		pendingTerminalPerm: &terminalPermission{
 			requestID: "perm-1",
 		},
@@ -878,8 +856,11 @@ func TestPermissionAllowedSendsDigitAndEnter(t *testing.T) {
 	if len(sends) == 0 {
 		t.Fatal("expected SendKeys to be called")
 	}
-	if sends[0][0] != "1" {
-		t.Fatalf("first key = %q, want %q", sends[0][0], "1")
+	if len(sends[0]) != 2 {
+		t.Fatalf("keys sent = %v, want [1 Enter]", sends[0])
+	}
+	if sends[0][0] != "1" || sends[0][1] != string(terminal.KeyEnter) {
+		t.Fatalf("keys sent = %v, want [1 Enter]", sends[0])
 	}
 }
 
@@ -897,11 +878,11 @@ func TestPermissionDeniedSendsEscAndEnter(t *testing.T) {
 	term := terminal.NewFakeSession("test-term", 1, "ready")
 	sessCtx, sessCancel := context.WithCancel(context.Background())
 	s := &session{
-		sessionID:       "ses-deny",
-		runID:           runID,
-		ctx:             sessCtx,
-		cancelFn:        sessCancel,
-		term:            term,
+		sessionID: "ses-deny",
+		runID:     runID,
+		ctx:       sessCtx,
+		cancelFn:  sessCancel,
+		term:      term,
 		pendingTerminalPerm: &terminalPermission{
 			requestID: "perm-2",
 		},
@@ -919,8 +900,11 @@ func TestPermissionDeniedSendsEscAndEnter(t *testing.T) {
 	if len(sends) == 0 {
 		t.Fatal("expected SendKeys to be called")
 	}
-	if sends[0][0] != "Esc" {
-		t.Fatalf("first key = %q, want %q", sends[0][0], "Esc")
+	if len(sends[0]) != 2 {
+		t.Fatalf("keys sent = %v, want [Esc Enter]", sends[0])
+	}
+	if sends[0][0] != string(terminal.KeyEsc) || sends[0][1] != string(terminal.KeyEnter) {
+		t.Fatalf("keys sent = %v, want [Esc Enter]", sends[0])
 	}
 }
 
@@ -948,11 +932,8 @@ func TestSessionGoneEmitsFallbackEnd(t *testing.T) {
 	}
 	p.sessions[s.sessionID] = s
 
-	go p.runSession(s.ctx, s)
-
-	// Let the session monitor detect the session is gone.
-	time.Sleep(1 * time.Second)
 	term.SetAlive(false)
+	go p.runSession(s.ctx, s)
 
 	// Wait for session.end event.
 	select {
@@ -963,5 +944,10 @@ func TestSessionGoneEmitsFallbackEnd(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("timeout waiting for session.end event after session went away")
 	}
-}
 
+	select {
+	case <-s.done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for runSession to exit")
+	}
+}
