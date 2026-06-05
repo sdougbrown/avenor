@@ -2,7 +2,6 @@
 package claudechannel
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -137,8 +136,10 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		return runtime.Session{}, fmt.Errorf("claude binary not found in PATH: %w", err)
 	}
 
-	if _, err := exec.LookPath("tmux"); err != nil {
-		return runtime.Session{}, fmt.Errorf("tmux not found in PATH: %w", err)
+	if _, ok := p.launcher.(terminal.TmuxLauncher); ok {
+		if _, err := exec.LookPath("tmux"); err != nil {
+			return runtime.Session{}, fmt.Errorf("tmux not found in PATH: %w", err)
+		}
 	}
 
 	// Check Claude Code version.
@@ -460,7 +461,7 @@ func (p *Provider) scanTerminalTick(s *session) {
 			SessionID: s.sessionID,
 			Fields: map[string]any{
 				"request_id":  tmuxPerm.requestID,
-				"source":      "tmux-pane",
+				"source":      s.term.Kind(),
 				"description": tmuxPerm.prompt,
 				"options":     opts,
 			},
@@ -468,7 +469,7 @@ func (p *Provider) scanTerminalTick(s *session) {
 
 	case paneStateActive:
 		markActive(s)
-		emitNonBlocking(s, events.Event{Event: "agent.status", SessionID: s.sessionID, Fields: map[string]any{"phase": "working", "source": "tmux-pane"}})
+		emitNonBlocking(s, events.Event{Event: "agent.status", SessionID: s.sessionID, Fields: map[string]any{"phase": "working", "source": s.term.Kind()}})
 	case paneStateIdle:
 		// Idle means Claude is at the prompt, waiting for next input.
 		// Don't end the session — the channel supports multi-turn.
@@ -478,7 +479,7 @@ func (p *Provider) scanTerminalTick(s *session) {
 			s.pendingTerminalPerm = nil
 			s.mu.Unlock()
 		}
-		emitNonBlocking(s, events.Event{Event: "agent.status", SessionID: s.sessionID, Fields: map[string]any{"phase": "waiting", "source": "tmux-pane"}})
+		emitNonBlocking(s, events.Event{Event: "agent.status", SessionID: s.sessionID, Fields: map[string]any{"phase": "waiting", "source": s.term.Kind()}})
 	}
 }
 
@@ -646,7 +647,7 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 			Event:     "agent.prompt_submitted",
 			SessionID: s.sessionID,
 			Fields: map[string]any{
-				"delivery":      "tmux",
+				"delivery":      s.term.Kind(),
 				"prompt_length": len(prompt),
 			},
 		})
@@ -826,11 +827,11 @@ func autoConfirmDevelopmentChannelPrompt(ctx context.Context, s *session) {
 		if err != nil {
 			continue
 		}
-		if bytes.Contains([]byte(out), []byte("New MCP server found in this project")) {
+		if strings.Contains(out, "New MCP server found in this project") {
 			_ = s.term.SendKeys(ctx, terminal.Key("1"), terminal.KeyEnter)
 			continue
 		}
-		if bytes.Contains([]byte(out), []byte("Loading development channels")) {
+		if strings.Contains(out, "Loading development channels") {
 			_ = s.term.SendKeys(ctx, terminal.KeyEnter)
 			continue
 		}
@@ -856,7 +857,7 @@ func waitForPaneReady(ctx context.Context, term terminal.Session) bool {
 		if err != nil {
 			return false
 		}
-		if !bytes.Contains([]byte(out), []byte("Loading development channels")) {
+		if !strings.Contains(out, "Loading development channels") {
 			return true
 		}
 	}

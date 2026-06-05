@@ -104,4 +104,82 @@ this is not json
 	if len(recs) != 2 {
 		t.Fatalf("expected 2 records (malformed skipped), got %d", len(recs))
 	}
+	if recs[0].Type != "user" || recs[1].Type != "assistant" {
+		t.Fatalf("returned records = %+v, want [user, assistant]", recs)
+	}
+	// Offset must be past the malformed line.
+	recs, _, err = r.Tick()
+	if err != nil {
+		t.Fatalf("idempotent Tick: %v", err)
+	}
+	if len(recs) != 0 {
+		t.Fatalf("expected 0 records on idempotent tick, got %d", len(recs))
+	}
+}
+
+func TestTranscriptReaderTruncationResetsOffset(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	r := newTranscriptReader(path)
+
+	// Write a long initial transcript so the offset advances well past any
+	// later truncation.
+	first := `{"type":"user","timestamp":"long-enough-to-push-offset-past-replacement"}` + "\n"
+	if err := os.WriteFile(path, []byte(first), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if recs, _, err := r.Tick(); err != nil || len(recs) != 1 {
+		t.Fatalf("first Tick: recs=%d err=%v", len(recs), err)
+	}
+
+	// Truncate and rewrite with a much shorter record. Without truncation
+	// handling the reader's offset would stay above EOF and silently return
+	// nothing forever.
+	if err := os.WriteFile(path, []byte(`{"type":"assistant"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	recs, _, err := r.Tick()
+	if err != nil {
+		t.Fatalf("Tick after truncate: %v", err)
+	}
+	if len(recs) != 1 || recs[0].Type != "assistant" {
+		t.Fatalf("recs after truncate = %+v, want [assistant]", recs)
+	}
+}
+
+func TestTranscriptReaderLeavesPartialLineForNextTick(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	r := newTranscriptReader(path)
+
+	// Write a complete record followed by a partial (un-terminated) record.
+	first := `{"type":"user"}` + "\n"
+	partial := `{"type":"ass`
+	if err := os.WriteFile(path, []byte(first+partial), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	recs, _, err := r.Tick()
+	if err != nil {
+		t.Fatalf("first Tick: %v", err)
+	}
+	if len(recs) != 1 || recs[0].Type != "user" {
+		t.Fatalf("first Tick recs = %+v, want [user]", recs)
+	}
+
+	// Now complete the partial record with the rest of the JSON + newline.
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`istant"}` + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	recs, _, err = r.Tick()
+	if err != nil {
+		t.Fatalf("second Tick: %v", err)
+	}
+	if len(recs) != 1 || recs[0].Type != "assistant" {
+		t.Fatalf("second Tick recs = %+v, want [assistant]", recs)
+	}
 }

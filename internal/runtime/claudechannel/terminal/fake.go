@@ -8,6 +8,7 @@ import (
 // FakeSession is a terminal.Session for tests with controllable behavior.
 type FakeSession struct {
 	mu         sync.Mutex
+	kind       string
 	name       string
 	pid        int
 	captures   []string
@@ -23,8 +24,10 @@ type FakeSession struct {
 }
 
 // NewFakeSession creates a FakeSession with the given initial capture text.
+// Defaults Kind() to "tmux"; override via SetKind for PTY-mode tests.
 func NewFakeSession(name string, pid int, capture string) *FakeSession {
 	return &FakeSession{
+		kind:     "tmux",
 		name:     name,
 		pid:      pid,
 		captures: []string{capture},
@@ -35,6 +38,7 @@ func NewFakeSession(name string, pid int, capture string) *FakeSession {
 // NewFakeSessionQueue creates a FakeSession that drains a queue of capture snapshots.
 func NewFakeSessionQueue(name string, pid int, captures []string) *FakeSession {
 	return &FakeSession{
+		kind:     "tmux",
 		name:     name,
 		pid:      pid,
 		captures: captures,
@@ -42,12 +46,35 @@ func NewFakeSessionQueue(name string, pid int, captures []string) *FakeSession {
 	}
 }
 
+// Kind reports the configured backend identifier.
+func (f *FakeSession) Kind() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.kind
+}
+
+// SetKind overrides the backend identifier returned by Kind().
+func (f *FakeSession) SetKind(k string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.kind = k
+}
+
 // Capture returns the next queued capture text, or the error set via SetCapErr.
+// Once the queue is drained the last value sticks — this mirrors a real
+// terminal where Capture returns whatever is currently on screen, and avoids
+// SUTs silently observing "" if they poll faster than test setup expected.
 func (f *FakeSession) Capture(_ context.Context) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.capIdx >= len(f.captures) {
+	if f.capErr != nil {
 		return "", f.capErr
+	}
+	if len(f.captures) == 0 {
+		return "", nil
+	}
+	if f.capIdx >= len(f.captures) {
+		return f.captures[len(f.captures)-1], nil
 	}
 	c := f.captures[f.capIdx]
 	f.capIdx++

@@ -421,7 +421,7 @@ func TestMarkActive(t *testing.T) {
 	}
 }
 
-func TestParseTmuxPermission(t *testing.T) {
+func TestParseTerminalPermission(t *testing.T) {
 	cases := []struct {
 		name        string
 		text        string
@@ -477,11 +477,11 @@ func TestParseTmuxPermission(t *testing.T) {
 	}
 }
 
-func TestAnswerPermissionTmuxRoute(t *testing.T) {
+func TestAnswerPermissionTerminalRoute(t *testing.T) {
 	p := &Provider{sessions: make(map[string]*session)}
 
 	terminalPerm := &terminalPermission{
-		requestID: "tmux-req-1",
+		requestID: "term-req-1",
 		prompt:    "Do you want to proceed?",
 		options:   []permissionOption{{ID: "1", Label: "Yes"}, {ID: "2", Label: "No"}},
 	}
@@ -496,10 +496,7 @@ func TestAnswerPermissionTmuxRoute(t *testing.T) {
 
 	p.sessions["ses-tmux"] = s
 
-	// Answering a tmux permission with allow sends keys via terminal.
-	// The fake terminal succeeds, but the important thing is the pending state
-	// is cleared.
-	err := p.AnswerPermission(context.Background(), "ses-tmux", "tmux-req-1", runtime.PermissionResponse{Allow: true, OptionID: "1"})
+	err := p.AnswerPermission(context.Background(), "ses-tmux", "term-req-1", runtime.PermissionResponse{Allow: true, OptionID: "1"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -751,10 +748,12 @@ func TestPromptQueuesBrokerControlEvenWhenTerminalInjectionAsync(t *testing.T) {
 		launcher: terminal.TmuxLauncher{},
 	}
 	term := terminal.NewFakeSession("test-term", 1, "ready")
+	sessCtx, sessCancel := context.WithCancel(context.Background())
+	t.Cleanup(sessCancel)
 	s := &session{
 		sessionID: "ses-queue",
 		runID:     runID,
-		ctx:       context.Background(),
+		ctx:       sessCtx,
 		term:      term,
 		events:    make(chan events.Event, 8),
 	}
@@ -780,12 +779,12 @@ func TestPromptQueuesBrokerControlEvenWhenTerminalInjectionAsync(t *testing.T) {
 
 func TestDevelopmentChannelPromptsSendRightKeys(t *testing.T) {
 	cases := []struct {
-		name   string
-		search string
-		want   []string // first key expected
+		name    string
+		search  string
+		wantSeq []string
 	}{
-		{"mcp found", "New MCP server found in this project", []string{"1"}},
-		{"loading channels", "Loading development channels", []string{"Enter"}},
+		{"mcp found", "New MCP server found in this project", []string{"1", string(terminal.KeyEnter)}},
+		{"loading channels", "Loading development channels", []string{string(terminal.KeyEnter)}},
 	}
 
 	for _, tc := range cases {
@@ -823,8 +822,13 @@ func TestDevelopmentChannelPromptsSendRightKeys(t *testing.T) {
 
 			select {
 			case send := <-sendNotify:
-				if send[0] != tc.want[0] {
-					t.Fatalf("first key = %q, want %q", send[0], tc.want[0])
+				if len(send) != len(tc.wantSeq) {
+					t.Fatalf("key count = %d, want %d (got %v)", len(send), len(tc.wantSeq), send)
+				}
+				for i, want := range tc.wantSeq {
+					if send[i] != want {
+						t.Fatalf("key[%d] = %q, want %q (full sequence: %v)", i, send[i], want, send)
+					}
 				}
 			case <-time.After(2 * time.Second):
 				t.Fatal("expected SendKeys to be called by autoConfirmDevelopmentChannelPrompt")
@@ -866,8 +870,8 @@ func TestPermissionAllowedSendsDigitAndEnter(t *testing.T) {
 	}
 
 	sends := term.SendCalls()
-	if len(sends) == 0 {
-		t.Fatal("expected SendKeys to be called")
+	if len(sends) != 1 {
+		t.Fatalf("SendKeys call count = %d, want 1 (calls: %v)", len(sends), sends)
 	}
 	if len(sends[0]) != 2 {
 		t.Fatalf("keys sent = %v, want [1 Enter]", sends[0])
@@ -910,8 +914,8 @@ func TestPermissionDeniedSendsEscAndEnter(t *testing.T) {
 	}
 
 	sends := term.SendCalls()
-	if len(sends) == 0 {
-		t.Fatal("expected SendKeys to be called")
+	if len(sends) != 1 {
+		t.Fatalf("SendKeys call count = %d, want 1 (calls: %v)", len(sends), sends)
 	}
 	if len(sends[0]) != 2 {
 		t.Fatalf("keys sent = %v, want [Esc Enter]", sends[0])
@@ -934,14 +938,19 @@ func TestSessionGoneEmitsFallbackEnd(t *testing.T) {
 	}
 	term := terminal.NewFakeSession("test-term", 1, "ready")
 	sessCtx, sessCancel := context.WithCancel(context.Background())
+	mcpDir := t.TempDir()
+	mcpProject := filepath.Join(t.TempDir(), ".mcp.json")
 	s := &session{
-		sessionID: "ses-gone",
-		runID:     runID,
-		ctx:       sessCtx,
-		cancelFn:  sessCancel,
-		term:      term,
-		events:    make(chan events.Event, 8),
-		done:      make(chan struct{}),
+		sessionID:  "ses-gone",
+		runID:      runID,
+		ctx:        sessCtx,
+		cancelFn:   sessCancel,
+		term:       term,
+		mcpDir:     mcpDir,
+		mcpProject: mcpProject,
+		mcpServer:  "test-server",
+		events:     make(chan events.Event, 8),
+		done:       make(chan struct{}),
 	}
 	p.sessions[s.sessionID] = s
 

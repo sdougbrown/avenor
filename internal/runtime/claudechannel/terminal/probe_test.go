@@ -14,15 +14,15 @@ import (
 
 // ProbeResult records the outcome of a single PTY probe variant.
 type ProbeResult struct {
-	Name          string
-	Err           error
-	ProcessStarted bool
-	FirstCapture  string
-	Alive10s      bool
+	Name             string
+	Err              error
+	ProcessStarted   bool
+	FirstCapture     string
+	Alive10s         bool
 	DevChannelPrompt bool
-	MCPFound      bool
-	PromptSubmitted bool
-	ChannelReg    bool
+	MCPFound         bool
+	PromptSubmitted  bool
+	ChannelReg       bool
 }
 
 // RunProbeMatrix runs the probe matrix against the PTY launcher.

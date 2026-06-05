@@ -5,6 +5,7 @@ package terminal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -33,7 +34,6 @@ func (l PTYLauncher) Start(ctx context.Context, opts StartOptions) (Session, err
 	cmd := exec.CommandContext(ctx, "sh", "-c", opts.Command)
 	cmd.Dir = opts.Dir
 
-	// Set explicit terminal environment.
 	env := l.Env
 	if len(env) == 0 {
 		env = []string{
@@ -52,18 +52,11 @@ func (l PTYLauncher) Start(ctx context.Context, opts StartOptions) (Session, err
 		return nil, fmt.Errorf("pty start: %w", err)
 	}
 
-	terminal := vt10x.New(vt10x.WithSize(opts.Cols, opts.Rows))
-
 	ps := &PTYSession{
 		name:     opts.Name,
 		cmd:      cmd,
 		ptmx:     ptmx,
-		terminal: terminal,
-		cancel:   ctx.Done(),
-		capErr:   nil,
-		pasteErr: nil,
-		sendErr:  nil,
-		killErr:  nil,
+		terminal: vt10x.New(vt10x.WithSize(opts.Cols, opts.Rows)),
 		alive:    true,
 	}
 
@@ -74,30 +67,19 @@ func (l PTYLauncher) Start(ctx context.Context, opts StartOptions) (Session, err
 
 // PTYSession is a terminal.Session backed by a PTY.
 type PTYSession struct {
-	name       string
-	cmd        *exec.Cmd
-	ptmx       *os.File
-	terminal   vt10x.Terminal
-	cancel     <-chan struct{}
-	capErr     error
-	pasteErr   error
-	sendErr    error
-	killErr    error
-	alive      bool
-	pasteCalls [][]string
-	sendCalls  [][]string
-	mu         sync.Mutex
+	mu       sync.Mutex
+	name     string
+	cmd      *exec.Cmd
+	ptmx     *os.File
+	terminal vt10x.Terminal
+	alive    bool
 }
 
-func (p *PTYSession) Name() string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.name
-}
+func (p *PTYSession) Kind() string { return "pty" }
+
+func (p *PTYSession) Name() string { return p.name }
 
 func (p *PTYSession) PID() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	if p.cmd != nil && p.cmd.Process != nil {
 		return p.cmd.Process.Pid
 	}
@@ -107,26 +89,17 @@ func (p *PTYSession) PID() int {
 func (p *PTYSession) Capture(_ context.Context) (string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.capErr != nil {
-		return "", p.capErr
-	}
 	return p.terminal.String(), nil
 }
 
 func (p *PTYSession) PasteAndEnter(_ context.Context, text string) error {
 	p.mu.Lock()
-	p.pasteCalls = append(p.pasteCalls, []string{text})
 	ptmx := p.ptmx
-	err := p.pasteErr
 	p.mu.Unlock()
-
-	if err != nil {
-		return err
-	}
 	if ptmx == nil {
 		return fmt.Errorf("pty closed")
 	}
-	_, err = ptmx.Write([]byte(text + "\r"))
+	_, err := ptmx.Write([]byte(text + "\r"))
 	return err
 }
 
@@ -154,20 +127,9 @@ func (p *PTYSession) SendKeys(_ context.Context, keys ...Key) error {
 	if err != nil {
 		return err
 	}
-
 	p.mu.Lock()
-	strs := make([]string, len(keys))
-	for i, k := range keys {
-		strs[i] = string(k)
-	}
-	p.sendCalls = append(p.sendCalls, strs)
-	err = p.sendErr
 	ptmx := p.ptmx
 	p.mu.Unlock()
-
-	if err != nil {
-		return err
-	}
 	if ptmx == nil {
 		return fmt.Errorf("pty closed")
 	}
@@ -183,72 +145,29 @@ func (p *PTYSession) Alive(_ context.Context) bool {
 
 func (p *PTYSession) Kill(_ context.Context) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	ptmx := p.ptmx
+	p.ptmx = nil
 	p.alive = false
-	if p.ptmx != nil {
-		_ = p.ptmx.Close()
+	p.mu.Unlock()
+
+	if ptmx != nil {
+		_ = ptmx.Close()
 	}
 	if p.cmd != nil && p.cmd.Process != nil {
 		_ = p.cmd.Process.Kill()
 	}
-	return p.killErr
-}
-
-func (p *PTYSession) SetCapErr(err error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.capErr = err
-}
-
-func (p *PTYSession) SetPasteErr(err error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.pasteErr = err
-}
-
-func (p *PTYSession) SetSendErr(err error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.sendErr = err
-}
-
-func (p *PTYSession) SetKillErr(err error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.killErr = err
-}
-
-func (p *PTYSession) SetAlive(v bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.alive = v
-}
-
-func (p *PTYSession) PasteCalls() [][]string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	out := make([][]string, len(p.pasteCalls))
-	for i, c := range p.pasteCalls {
-		out[i] = append([]string{}, c...)
-	}
-	return out
-}
-
-func (p *PTYSession) SendCalls() [][]string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	out := make([][]string, len(p.sendCalls))
-	for i, c := range p.sendCalls {
-		out[i] = append([]string{}, c...)
-	}
-	return out
+	return nil
 }
 
 func (p *PTYSession) readLoop() {
 	defer func() {
 		p.mu.Lock()
-		defer p.mu.Unlock()
 		p.alive = false
+		p.mu.Unlock()
+		// Reap the child so killed processes don't become zombies.
+		if p.cmd != nil {
+			_ = p.cmd.Wait()
+		}
 	}()
 	buf := make([]byte, 4096)
 	for {
@@ -259,17 +178,11 @@ func (p *PTYSession) readLoop() {
 			p.mu.Unlock()
 		}
 		if err != nil {
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				return
 			}
-			// EIO or other PTY read error means the process died or the PTY
-			// was closed. Exit rather than spinning.
-			select {
-			case <-p.cancel:
-				return
-			default:
-				return
-			}
+			// EIO/EBADF/closed-fd: the process died or the PTY was closed.
+			return
 		}
 	}
 }

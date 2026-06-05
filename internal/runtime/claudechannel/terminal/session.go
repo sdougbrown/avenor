@@ -13,6 +13,9 @@ const (
 
 // Session represents an interactive terminal session.
 type Session interface {
+	// Kind identifies the terminal backend (e.g. "tmux", "pty"). Used by
+	// callers to tag events with the actual backend rather than hardcoding.
+	Kind() string
 	Name() string
 	PID() int
 	Capture(ctx context.Context) (string, error)

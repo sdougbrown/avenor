@@ -3,6 +3,8 @@ package claudechannel
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -47,6 +49,9 @@ func newTranscriptReader(path string) *transcriptReader {
 // records, the file's mtime (zero if missing), and any read error. A
 // missing file is not an error — callers tick early and often, and the
 // transcript only appears once Claude writes its first record.
+//
+// Offset only advances past newline-terminated lines so a half-written
+// final record is left for the next tick to consume in full.
 func (r *transcriptReader) Tick() ([]transcriptRecord, time.Time, error) {
 	info, err := os.Stat(r.path)
 	if err != nil {
@@ -55,7 +60,11 @@ func (r *transcriptReader) Tick() ([]transcriptRecord, time.Time, error) {
 		}
 		return nil, time.Time{}, err
 	}
-	if info.Size() <= r.offset {
+	if info.Size() < r.offset {
+		// File was truncated/rotated — re-read from the start.
+		r.offset = 0
+	}
+	if info.Size() == r.offset {
 		return nil, info.ModTime(), nil
 	}
 	f, err := os.Open(r.path)
@@ -63,23 +72,32 @@ func (r *transcriptReader) Tick() ([]transcriptRecord, time.Time, error) {
 		return nil, info.ModTime(), err
 	}
 	defer f.Close()
-	if _, err := f.Seek(r.offset, 0); err != nil {
+	if _, err := f.Seek(r.offset, io.SeekStart); err != nil {
 		return nil, info.ModTime(), err
 	}
-	scanner := bufio.NewScanner(f)
-	// Claude's records can carry large tool outputs inline.
-	scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
+	// Claude's records can carry large tool outputs inline; use a generous buffer.
+	reader := bufio.NewReaderSize(f, 1024*1024)
 	var records []transcriptRecord
-	for scanner.Scan() {
-		var rec transcriptRecord
-		if err := json.Unmarshal(scanner.Bytes(), &rec); err != nil {
-			// Skip a single malformed line rather than aborting the tick;
-			// the next tick will retry from the new offset.
+	pos := r.offset
+	for {
+		line, readErr := reader.ReadString('\n')
+		if readErr == nil {
+			// Complete \n-terminated record.
+			var rec transcriptRecord
+			if jsonErr := json.Unmarshal([]byte(line[:len(line)-1]), &rec); jsonErr == nil {
+				records = append(records, rec)
+			}
+			// Malformed lines are skipped but still consumed.
+			pos += int64(len(line))
 			continue
 		}
-		records = append(records, rec)
+		if errors.Is(readErr, io.EOF) {
+			// Any leftover bytes are a partial line we leave for next tick.
+			break
+		}
+		r.offset = pos
+		return records, info.ModTime(), readErr
 	}
-	end, _ := f.Seek(0, 2)
-	r.offset = end
-	return records, info.ModTime(), scanner.Err()
+	r.offset = pos
+	return records, info.ModTime(), nil
 }

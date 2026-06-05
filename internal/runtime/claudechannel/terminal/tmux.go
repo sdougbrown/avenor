@@ -15,7 +15,7 @@ type TmuxLauncher struct{}
 
 func (TmuxLauncher) SupportsResume() bool { return true }
 
-func (TmuxLauncher) Start(_ context.Context, opts StartOptions) (Session, error) {
+func (TmuxLauncher) Start(ctx context.Context, opts StartOptions) (Session, error) {
 	if opts.Cols == 0 {
 		opts.Cols = 220
 	}
@@ -37,7 +37,7 @@ func (TmuxLauncher) Start(_ context.Context, opts StartOptions) (Session, error)
 		shellCmd,
 	}
 
-	if _, err := exec.Command("tmux", args...).CombinedOutput(); err != nil {
+	if _, err := exec.CommandContext(ctx, "tmux", args...).CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("tmux new-session: %w", err)
 	}
 
@@ -45,7 +45,7 @@ func (TmuxLauncher) Start(_ context.Context, opts StartOptions) (Session, error)
 	var pid int
 	deadline := time.After(2 * time.Second)
 	for {
-		pidOut, err := exec.Command("tmux", "list-panes", "-t", opts.Name, "-F", "#{pane_pid}").Output()
+		pidOut, err := exec.CommandContext(ctx, "tmux", "list-panes", "-t", opts.Name, "-F", "#{pane_pid}").Output()
 		if err == nil && len(bytes.TrimSpace(pidOut)) > 0 {
 			if p, err := strconv.Atoi(strings.TrimSpace(string(pidOut))); err == nil {
 				pid = p
@@ -68,45 +68,47 @@ type TmuxSession struct {
 	pid  int
 }
 
+func (s *TmuxSession) Kind() string { return "tmux" }
+
 func (s *TmuxSession) Name() string { return s.name }
 
 func (s *TmuxSession) PID() int { return s.pid }
 
-func (s *TmuxSession) Capture(_ context.Context) (string, error) {
-	out, err := exec.Command("tmux", "capture-pane", "-t", s.name, "-p").Output()
+func (s *TmuxSession) Capture(ctx context.Context) (string, error) {
+	out, err := exec.CommandContext(ctx, "tmux", "capture-pane", "-t", s.name, "-p").Output()
 	if err != nil {
 		return "", err
 	}
 	return string(out), nil
 }
 
-func (s *TmuxSession) PasteAndEnter(_ context.Context, text string) error {
+func (s *TmuxSession) PasteAndEnter(ctx context.Context, text string) error {
 	bufferName := "avenor-prompt-" + s.name
-	cmd := exec.Command("tmux", "load-buffer", "-b", bufferName, "-")
+	cmd := exec.CommandContext(ctx, "tmux", "load-buffer", "-b", bufferName, "-")
 	cmd.Stdin = strings.NewReader(text)
 	if err := cmd.Run(); err != nil {
 		return err
 	}
-	if err := exec.Command("tmux", "paste-buffer", "-t", s.name, "-b", bufferName).Run(); err != nil {
+	if err := exec.CommandContext(ctx, "tmux", "paste-buffer", "-t", s.name, "-b", bufferName).Run(); err != nil {
 		return err
 	}
-	return exec.Command("tmux", "send-keys", "-t", s.name, string(KeyEnter)).Run()
+	return exec.CommandContext(ctx, "tmux", "send-keys", "-t", s.name, string(KeyEnter)).Run()
 }
 
-func (s *TmuxSession) SendKeys(_ context.Context, keys ...Key) error {
+func (s *TmuxSession) SendKeys(ctx context.Context, keys ...Key) error {
 	args := []string{"send-keys", "-t", s.name}
 	for _, k := range keys {
 		args = append(args, string(k))
 	}
-	return exec.Command("tmux", args...).Run()
+	return exec.CommandContext(ctx, "tmux", args...).Run()
 }
 
-func (s *TmuxSession) Alive(_ context.Context) bool {
-	return exec.Command("tmux", "has-session", "-t", s.name).Run() == nil
+func (s *TmuxSession) Alive(ctx context.Context) bool {
+	return exec.CommandContext(ctx, "tmux", "has-session", "-t", s.name).Run() == nil
 }
 
-func (s *TmuxSession) Kill(_ context.Context) error {
-	return exec.Command("tmux", "kill-session", "-t", s.name).Run()
+func (s *TmuxSession) Kill(ctx context.Context) error {
+	return exec.CommandContext(ctx, "tmux", "kill-session", "-t", s.name).Run()
 }
 
 var _ Session = (*TmuxSession)(nil)
