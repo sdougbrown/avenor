@@ -28,31 +28,31 @@ func TestNewWithOptions(t *testing.T) {
 
 func TestDefaultLauncherIsTmux(t *testing.T) {
 	// Unset env var.
-	t.Setenv("AVENOR_CLAUDE_CHANNEL_TERMINAL", "")
-	l := defaultLauncher()
+	t.Setenv("AVENOR_CLAUDE_TERMINAL", "")
+	l := claudecore.DefaultLauncher()
 	if _, ok := l.(terminal.TmuxLauncher); !ok {
 		t.Fatalf("expected TmuxLauncher, got %T", l)
 	}
 }
 
 func TestPTYEnvSelectsPTY(t *testing.T) {
-	t.Setenv("AVENOR_CLAUDE_CHANNEL_TERMINAL", "pty")
-	l := defaultLauncher()
+	t.Setenv("AVENOR_CLAUDE_TERMINAL", "pty")
+	l := claudecore.DefaultLauncher()
 	if _, ok := l.(terminal.PTYLauncher); !ok {
 		t.Fatalf("expected PTYLauncher, got %T", l)
 	}
 }
 
 func TestInvalidValueDefaultsToTmux(t *testing.T) {
-	t.Setenv("AVENOR_CLAUDE_CHANNEL_TERMINAL", "bogus")
-	l := defaultLauncher()
+	t.Setenv("AVENOR_CLAUDE_TERMINAL", "bogus")
+	l := claudecore.DefaultLauncher()
 	if _, ok := l.(terminal.TmuxLauncher); !ok {
 		t.Fatalf("expected TmuxLauncher for invalid value, got %T", l)
 	}
 }
 
 func TestCapabilities(t *testing.T) {
-	t.Setenv("AVENOR_CLAUDE_CHANNEL_TERMINAL", "tmux")
+	t.Setenv("AVENOR_CLAUDE_TERMINAL", "tmux")
 	p := New()
 	caps, err := p.Capabilities(context.Background())
 	if err != nil {
@@ -73,7 +73,7 @@ func TestCapabilities(t *testing.T) {
 }
 
 func TestCapabilitiesPTYResumeFalse(t *testing.T) {
-	t.Setenv("AVENOR_CLAUDE_CHANNEL_TERMINAL", "pty")
+	t.Setenv("AVENOR_CLAUDE_TERMINAL", "pty")
 	p := New()
 	caps, err := p.Capabilities(context.Background())
 	if err != nil {
@@ -420,7 +420,7 @@ func TestWaitForPaneReadyStopsOnContextCancel(t *testing.T) {
 	cancel()
 
 	term := terminal.NewFakeSession("missing", 0, "")
-	if waitForPaneReady(ctx, term) {
+	if claudecore.WaitForPaneReady(ctx, term) {
 		t.Fatal("waitForPaneReady should stop when context is canceled")
 	}
 }
@@ -429,48 +429,48 @@ func TestClassifyPane(t *testing.T) {
 	cases := []struct {
 		name string
 		pane string
-		want paneState
+		want claudecore.PaneState
 	}{
 		{
 			name: "edit permission",
 			pane: "Do you want to make this edit to README.md?\n ❯ 1. Yes\n   2. Yes, allow all edits during this session",
-			want: paneStatePermission,
+			want: claudecore.PaneStatePermission,
 		},
 		{
 			name: "proceed permission",
 			pane: "Do you want to proceed?\n ❯ 1. Yes\n   2. No",
-			want: paneStatePermission,
+			want: claudecore.PaneStatePermission,
 		},
 		{
 			name: "ruminating activity",
 			pane: "✻ Ruminating… (13s · ↓ 557 tokens · thinking)",
-			want: paneStateActive,
+			want: claudecore.PaneStateActive,
 		},
 		{
 			name: "generic ing activity",
 			pane: "✢ Churning… (2m 17s · ↓ 7.2k tokens)",
-			want: paneStateActive,
+			want: claudecore.PaneStateActive,
 		},
 		{
 			name: "token activity fallback",
 			pane: "✻ Working · ↓ 557 tokens",
-			want: paneStateActive,
+			want: claudecore.PaneStateActive,
 		},
 		{
 			name: "idle prompt",
 			pane: "────────────────\n❯ \n────────────────",
-			want: paneStateIdle,
+			want: claudecore.PaneStateIdle,
 		},
 		{
 			name: "unknown noise",
 			pane: "\n────────────────\nClaude Code v2.1.161\n────────────────\n",
-			want: paneStateUnknown,
+			want: claudecore.PaneStateUnknown,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := classifyPane(tc.pane); got != tc.want {
+			if got := claudecore.ClassifyPane(tc.pane); got != tc.want {
 				t.Fatalf("classifyPane() = %q, want %q", got, tc.want)
 			}
 		})
@@ -717,7 +717,7 @@ func TestParseTerminalPermission(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := parseTerminalPermission(tc.text)
+			got := claudecore.ParseTerminalPermission(tc.text)
 			if tc.wantOpts == 0 {
 				if got != nil {
 					t.Fatalf("parseTerminalPermission should return nil, got %+v", got)
@@ -727,14 +727,14 @@ func TestParseTerminalPermission(t *testing.T) {
 			if got == nil {
 				t.Fatal("parseTerminalPermission returned nil")
 			}
-			if got.prompt != tc.wantPrompt {
-				t.Fatalf("prompt = %q, want %q", got.prompt, tc.wantPrompt)
+			if got.Prompt != tc.wantPrompt {
+				t.Fatalf("prompt = %q, want %q", got.Prompt, tc.wantPrompt)
 			}
-			if len(got.options) != tc.wantOpts {
-				t.Fatalf("options count = %d, want %d", len(got.options), tc.wantOpts)
+			if len(got.Options) != tc.wantOpts {
+				t.Fatalf("options count = %d, want %d", len(got.Options), tc.wantOpts)
 			}
-			if got.options[0].ID != tc.wantFirstID {
-				t.Fatalf("first option id = %q, want %q", got.options[0].ID, tc.wantFirstID)
+			if got.Options[0].ID != tc.wantFirstID {
+				t.Fatalf("first option id = %q, want %q", got.Options[0].ID, tc.wantFirstID)
 			}
 		})
 	}
@@ -743,10 +743,10 @@ func TestParseTerminalPermission(t *testing.T) {
 func TestAnswerPermissionTerminalRoute(t *testing.T) {
 	p := &Provider{sessions: make(map[string]*session)}
 
-	terminalPerm := &terminalPermission{
-		requestID: "term-req-1",
-		prompt:    "Do you want to proceed?",
-		options:   []permissionOption{{ID: "1", Label: "Yes"}, {ID: "2", Label: "No"}},
+	terminalPerm := &claudecore.TerminalPermission{
+		RequestID: "term-req-1",
+		Prompt:    "Do you want to proceed?",
+		Options:   []claudecore.PermissionOption{{ID: "1", Label: "Yes"}, {ID: "2", Label: "No"}},
 	}
 
 	s := &session{
@@ -814,7 +814,7 @@ func TestValidTmuxKey(t *testing.T) {
 		{" 1", false},
 	}
 	for _, tc := range cases {
-		if got := validTmuxKey(tc.key); got != tc.want {
+		if got := claudecore.ValidTmuxKey(tc.key); got != tc.want {
 			t.Errorf("validTmuxKey(%q) = %v, want %v", tc.key, got, tc.want)
 		}
 	}
@@ -983,18 +983,18 @@ func TestCleanupProjectMCPRemovesOnlyAvenorChannelEntries(t *testing.T) {
 // ---- Stage 3: Adapter-backed provider tests ----
 
 func TestPromptWaitsForStartupClearBeforePaste(t *testing.T) {
-	// Test that waitForPaneReady returns true when capture doesn't contain needle.
+	// Test that WaitForPaneReady returns true when capture doesn't contain needle.
 	term := terminal.NewFakeSession("test-term", 1, "ready")
-	if !waitForPaneReady(context.Background(), term) {
+	if !claudecore.WaitForPaneReady(context.Background(), term) {
 		t.Fatal("waitForPaneReady should return true when capture doesn't contain needle")
 	}
 
-	// Test that waitForPaneReady waits when capture contains needle, then returns true.
+	// Test that WaitForPaneReady waits when capture contains needle, then returns true.
 	term2 := terminal.NewFakeSessionQueue("test-term2", 2, []string{
 		"Loading development channels\n",
 		"ready\n",
 	})
-	if !waitForPaneReady(context.Background(), term2) {
+	if !claudecore.WaitForPaneReady(context.Background(), term2) {
 		t.Fatal("waitForPaneReady should return true after needle disappears")
 	}
 }
@@ -1119,8 +1119,8 @@ func TestPermissionAllowedSendsDigitAndEnter(t *testing.T) {
 		ctx:       sessCtx,
 		cancelFn:  sessCancel,
 		term:      term,
-		pendingTerminalPerm: &terminalPermission{
-			requestID: "perm-1",
+		pendingTerminalPerm: &claudecore.TerminalPermission{
+			RequestID: "perm-1",
 		},
 		events: make(chan events.Event, 8),
 		done:   make(chan struct{}),
@@ -1163,8 +1163,8 @@ func TestPermissionDeniedSendsEscAndEnter(t *testing.T) {
 		ctx:       sessCtx,
 		cancelFn:  sessCancel,
 		term:      term,
-		pendingTerminalPerm: &terminalPermission{
-			requestID: "perm-2",
+		pendingTerminalPerm: &claudecore.TerminalPermission{
+			RequestID: "perm-2",
 		},
 		events: make(chan events.Event, 8),
 		done:   make(chan struct{}),

@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -26,20 +25,9 @@ const backendID = "claude-channel"
 const (
 	startupPromptCheckInterval = 500 * time.Millisecond
 	startupPromptTimeout       = 30 * time.Second
-	promptInjectCheckInterval  = 500 * time.Millisecond
-	promptInjectTimeout        = 30 * time.Second
 	promptSubmitRetryDelay     = 750 * time.Millisecond
 	paneScanInterval           = 500 * time.Millisecond
 	transcriptScanInterval     = 500 * time.Millisecond
-)
-
-type paneState string
-
-const (
-	paneStateUnknown    paneState = "unknown"
-	paneStateActive     paneState = "active"
-	paneStatePermission paneState = "permission"
-	paneStateIdle       paneState = "idle"
 )
 
 // Provider implements runtime.Provider for an interactive Claude Code session
@@ -77,20 +65,8 @@ type session struct {
 	active              bool
 	finished            bool
 	channelReadyEmitted bool
-	pendingTerminalPerm *terminalPermission
+	pendingTerminalPerm *claudecore.TerminalPermission
 	mu                  sync.Mutex
-}
-
-type terminalPermission struct {
-	requestID string
-	prompt    string
-	options   []permissionOption
-	createdAt time.Time
-}
-
-type permissionOption struct {
-	ID    string
-	Label string
 }
 
 // Ensure Provider implements runtime.Provider.
@@ -101,21 +77,7 @@ func NewWithOptions(opts runtime.StartOptions) runtime.Provider {
 		opts:      opts,
 		sessions:  make(map[string]*session),
 		globalTok: broker.MakeToken(),
-		launcher:  defaultLauncher(),
-	}
-}
-
-// defaultLauncher returns the default terminal launcher based on the
-// AVENOR_CLAUDE_CHANNEL_TERMINAL environment variable. Defaults to tmux.
-func defaultLauncher() terminal.Launcher {
-	switch os.Getenv("AVENOR_CLAUDE_CHANNEL_TERMINAL") {
-	case "pty":
-		return terminal.PTYLauncher{}
-	case "", "tmux":
-		return terminal.TmuxLauncher{}
-	default:
-		// Unknown value — still default to tmux but could log a warning.
-		return terminal.TmuxLauncher{}
+		launcher:  claudecore.DefaultLauncher(),
 	}
 }
 
@@ -237,7 +199,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	parts := make([]string, 0, len(claudeArgs)+2)
 	parts = append(parts, "exec", "claude")
 	for _, arg := range claudeArgs {
-		parts = append(parts, shellQuote(arg))
+		parts = append(parts, claudecore.ShellQuote(arg))
 	}
 	shellCmd := strings.Join(parts, " ")
 
@@ -412,7 +374,7 @@ func (p *Provider) scanTranscriptTick(s *session) {
 }
 
 func (p *Provider) scanTerminalTick(s *session) {
-	state, err := scanTerminal(s.ctx, s.term)
+	state, err := claudecore.ScanTerminal(s.ctx, s.term)
 	if err != nil {
 		return
 	}
@@ -428,7 +390,7 @@ func (p *Provider) scanTerminalTick(s *session) {
 	}
 
 	switch state {
-	case paneStatePermission:
+	case claudecore.PaneStatePermission:
 		markActive(s)
 
 		// If we already brokered this permission, wait for resolution.
@@ -441,40 +403,40 @@ func (p *Provider) scanTerminalTick(s *session) {
 		if err != nil {
 			return
 		}
-		tmuxPerm := parseTerminalPermission(string(out))
+		tmuxPerm := claudecore.ParseTerminalPermission(string(out))
 		if tmuxPerm == nil {
 			return
 		}
-		tmuxPerm.createdAt = time.Now()
-		tmuxPerm.requestID = uuid.New().String()
+		tmuxPerm.CreatedAt = time.Now()
+		tmuxPerm.RequestID = uuid.New().String()
 
 		s.mu.Lock()
 		s.pendingTerminalPerm = tmuxPerm
 		s.mu.Unlock()
 
 		// Emit the brokered permission request.
-		opts := make([]map[string]any, len(tmuxPerm.options))
-		for i, o := range tmuxPerm.options {
+		opts := make([]map[string]any, len(tmuxPerm.Options))
+		for i, o := range tmuxPerm.Options {
 			opts[i] = map[string]any{"id": o.ID, "label": o.Label}
 		}
 		s.events <- events.Event{
 			Event:     "permission.request",
 			SessionID: s.sessionID,
 			Fields: map[string]any{
-				"request_id":  tmuxPerm.requestID,
+				"request_id":  tmuxPerm.RequestID,
 				"source":      s.term.Kind(),
-				"description": tmuxPerm.prompt,
+				"description": tmuxPerm.Prompt,
 				"options":     opts,
 			},
 		}
 
-	case paneStateActive:
+	case claudecore.PaneStateActive:
 		// Mark the session as active but don't emit a working event from the
 		// pane: scanTranscriptTick is the authoritative working signal (it
 		// fires only when Claude actually writes new JSONL records, where
 		// pane-scrape "active" is a 500ms heartbeat that floods consumers).
 		markActive(s)
-	case paneStateIdle:
+	case claudecore.PaneStateIdle:
 		// Idle means Claude is at the prompt, waiting for next input.
 		// Don't end the session — the channel supports multi-turn.
 		// Clear any stale permission.
@@ -659,7 +621,7 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 	// Prompt() doesn't block; the channel push serves as a backup if Claude is
 	// already listening.
 	go func() {
-		if !waitForPaneReady(s.ctx, s.term) {
+		if !claudecore.WaitForPaneReady(s.ctx, s.term) {
 			return
 		}
 
@@ -685,7 +647,7 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 		ID:    uuid.New().String(),
 		Type:  "continue",
 		RunID: s.runID,
-		Payload: mustJSON(map[string]any{
+		Payload: claudecore.MustJSON(map[string]any{
 			"message": prompt,
 		}),
 	}
@@ -721,7 +683,7 @@ func retryPromptSubmitIfIdle(ctx context.Context, term terminal.Session, prompt 
 		return
 	}
 	text := string(out)
-	if classifyPane(text) != paneStateIdle {
+	if claudecore.ClassifyPane(text) != claudecore.PaneStateIdle {
 		return
 	}
 	needle := prompt
@@ -732,104 +694,6 @@ func retryPromptSubmitIfIdle(ctx context.Context, term terminal.Session, prompt 
 		return
 	}
 	_ = term.SendKeys(ctx, terminal.KeyEnter)
-}
-
-func scanTerminal(ctx context.Context, term terminal.Session) (paneState, error) {
-	out, err := term.Capture(ctx)
-	if err != nil {
-		return paneStateUnknown, err
-	}
-	return classifyPane(string(out)), nil
-}
-
-func classifyPane(text string) paneState {
-	if strings.Contains(text, "Do you want to proceed?") || strings.Contains(text, "Do you want to make this edit") || strings.Contains(text, "Yes, allow all edits") {
-		return paneStatePermission
-	}
-	for _, line := range strings.Split(text, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
-		if strings.HasPrefix(trimmed, "❯") {
-			return paneStateIdle
-		}
-		if looksLikeClaudeActivityLine(trimmed) {
-			return paneStateActive
-		}
-	}
-	return paneStateUnknown
-}
-
-func looksLikeClaudeActivityLine(line string) bool {
-	if !(strings.HasPrefix(line, "✻") || strings.HasPrefix(line, "✢") || strings.HasPrefix(line, "●") || strings.HasPrefix(line, "○") || strings.HasPrefix(line, "◯")) {
-		return false
-	}
-	fields := strings.Fields(line)
-	for _, field := range fields {
-		word := strings.Trim(field, "…,.·:;()[]{}")
-		if len(word) > 4 && strings.HasSuffix(word, "ing") {
-			return true
-		}
-	}
-	return strings.Contains(line, "tool use") || strings.Contains(line, "tokens")
-}
-
-var tmuxOptionRE = regexp.MustCompile(`^\s*(?:❯\s*)?(\d+)\.\s+(.*)`)
-
-// parseTerminalPermission extracts a terminalPermission from pane text, or nil if the
-// text doesn't represent a Claude permission dialog.
-func parseTerminalPermission(text string) *terminalPermission {
-	lines := strings.Split(text, "\n")
-	promptLines := make([]string, 0)
-	options := make([]permissionOption, 0)
-
-	inOptions := false
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
-		if tmuxOptionRE.MatchString(trimmed) {
-			matches := tmuxOptionRE.FindStringSubmatch(trimmed)
-			if len(matches) == 3 {
-				options = append(options, permissionOption{ID: matches[1], Label: strings.TrimSpace(matches[2])})
-				inOptions = true
-				continue
-			}
-		}
-		if inOptions {
-			// After options, skip footer lines (Esc to cancel, etc.)
-			if strings.Contains(trimmed, "Esc to cancel") || strings.HasPrefix(trimmed, "Esc ") {
-				continue
-			}
-			break
-		}
-		if !strings.HasPrefix(trimmed, "❯") && !strings.HasPrefix(trimmed, "●") && !strings.HasPrefix(trimmed, "✻") && !strings.HasPrefix(trimmed, "✢") {
-			promptLines = append(promptLines, trimmed)
-		}
-	}
-
-	if len(options) == 0 {
-		return nil
-	}
-
-	prompt := strings.Join(promptLines, " ")
-	if prompt == "" {
-		// Try to use the permission markers as prompt fallback.
-		if strings.Contains(text, "Do you want to proceed?") {
-			prompt = "Claude is requesting permission to proceed"
-		} else if strings.Contains(text, "Do you want to make this edit") {
-			prompt = "Claude is requesting permission to edit"
-		} else {
-			prompt = "Claude permission request"
-		}
-	}
-
-	return &terminalPermission{
-		prompt:  prompt,
-		options: options,
-	}
 }
 
 func autoConfirmDevelopmentChannelPrompt(ctx context.Context, s *session) {
@@ -862,36 +726,6 @@ func autoConfirmDevelopmentChannelPrompt(ctx context.Context, s *session) {
 			continue
 		}
 	}
-}
-
-func waitForPaneReady(ctx context.Context, term terminal.Session) bool {
-	deadline := time.NewTimer(promptInjectTimeout)
-	defer deadline.Stop()
-	ticker := time.NewTicker(promptInjectCheckInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return false
-		case <-deadline.C:
-			return true
-		case <-ticker.C:
-		}
-
-		out, err := term.Capture(ctx)
-		if err != nil {
-			return false
-		}
-		if !strings.Contains(out, "Loading development channels") {
-			return true
-		}
-	}
-}
-
-func mustJSON(v any) json.RawMessage {
-	b, _ := json.Marshal(v)
-	return json.RawMessage(b)
 }
 
 func shortRunID(runID string) string {
@@ -964,7 +798,7 @@ func (p *Provider) Cancel(ctx context.Context, sessionID string) error {
 		ID:      uuid.New().String(),
 		Type:    "cancel",
 		RunID:   s.runID,
-		Payload: mustJSON(map[string]any{"reason": "user cancel"}),
+		Payload: claudecore.MustJSON(map[string]any{"reason": "user cancel"}),
 	}
 	_ = p.broker.PushControl(s.runID, msg)
 
@@ -1020,7 +854,7 @@ func (p *Provider) AnswerPermission(ctx context.Context, sessionID string, reque
 	pendingPerm := s.pendingTerminalPerm
 	s.mu.Unlock()
 
-	if pendingPerm != nil && pendingPerm.requestID == requestID {
+	if pendingPerm != nil && pendingPerm.RequestID == requestID {
 		s.mu.Lock()
 		s.pendingTerminalPerm = nil
 		s.mu.Unlock()
@@ -1032,7 +866,7 @@ func (p *Provider) AnswerPermission(ctx context.Context, sessionID string, reque
 				key = "1"
 			}
 		}
-		if !validTmuxKey(key) {
+		if !claudecore.ValidTmuxKey(key) {
 			return fmt.Errorf("invalid option_id for terminal permission: %q", key)
 		}
 		keys := []terminal.Key{terminal.Key(key)}
@@ -1056,7 +890,7 @@ func (p *Provider) AnswerPermission(ctx context.Context, sessionID string, reque
 		ID:    uuid.New().String(),
 		Type:  "permission_decision",
 		RunID: s.runID,
-		Payload: mustJSON(map[string]any{
+		Payload: claudecore.MustJSON(map[string]any{
 			"request_id": requestID,
 			"behavior":   state,
 			"option_id":  resp.OptionID,
@@ -1075,29 +909,4 @@ func (p *Provider) Capabilities(ctx context.Context) (runtime.Capabilities, erro
 		SubprocessDiscovery: true,
 		ModelSelection:      true,
 	}, nil
-}
-
-// validTmuxKey returns true if key is a safe single-character string for tmux send-keys.
-func validTmuxKey(key string) bool {
-	if len(key) == 0 || len(key) > 3 {
-		return false
-	}
-	for _, r := range key {
-		if r >= '0' && r <= '9' {
-			continue
-		}
-		if r >= 'a' && r <= 'z' {
-			continue
-		}
-		if r >= 'A' && r <= 'Z' {
-			continue
-		}
-		return false
-	}
-	return true
-}
-
-// shellQuote single-quotes a string for safe interpolation into a shell command.
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
