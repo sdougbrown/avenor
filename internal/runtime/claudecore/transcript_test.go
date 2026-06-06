@@ -1,4 +1,4 @@
-package claudechannel
+package claudecore
 
 import (
 	"os"
@@ -24,7 +24,7 @@ func TestEncodeProjectPath(t *testing.T) {
 }
 
 func TestTranscriptReaderMissingFile(t *testing.T) {
-	r := newTranscriptReader(filepath.Join(t.TempDir(), "missing.jsonl"))
+	r := NewTranscriptReader(filepath.Join(t.TempDir(), "missing.jsonl"))
 	recs, _, err := r.Tick()
 	if err != nil {
 		t.Fatalf("Tick on missing file: %v", err)
@@ -36,7 +36,7 @@ func TestTranscriptReaderMissingFile(t *testing.T) {
 
 func TestTranscriptReaderIncremental(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session.jsonl")
-	r := newTranscriptReader(path)
+	r := NewTranscriptReader(path)
 
 	initial := `{"type":"user","timestamp":"t1"}
 {"type":"ai-title","aiTitle":"hello world"}
@@ -96,7 +96,7 @@ this is not json
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	r := newTranscriptReader(path)
+	r := NewTranscriptReader(path)
 	recs, _, err := r.Tick()
 	if err != nil {
 		t.Fatalf("Tick: %v", err)
@@ -119,7 +119,7 @@ this is not json
 
 func TestTranscriptReaderTruncationResetsOffset(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session.jsonl")
-	r := newTranscriptReader(path)
+	r := NewTranscriptReader(path)
 
 	// Write a long initial transcript so the offset advances well past any
 	// later truncation.
@@ -148,7 +148,7 @@ func TestTranscriptReaderTruncationResetsOffset(t *testing.T) {
 
 func TestTranscriptReaderLeavesPartialLineForNextTick(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session.jsonl")
-	r := newTranscriptReader(path)
+	r := NewTranscriptReader(path)
 
 	// Write a complete record followed by a partial (un-terminated) record.
 	first := `{"type":"user"}` + "\n"

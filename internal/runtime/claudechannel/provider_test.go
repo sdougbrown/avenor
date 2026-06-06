@@ -12,7 +12,8 @@ import (
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
-	"github.com/sdougbrown/avenor/internal/runtime/claudechannel/terminal"
+	"github.com/sdougbrown/avenor/internal/runtime/claudecore"
+	"github.com/sdougbrown/avenor/internal/runtime/claudecore/terminal"
 )
 
 func TestNewWithOptions(t *testing.T) {
@@ -525,7 +526,7 @@ func TestScanTranscriptTickIsAuthoritativeWorkingSignal(t *testing.T) {
 	s := &session{
 		sessionID:  "ses-trans",
 		term:       terminal.NewFakeSession("test-term", 1, "ready"),
-		transcript: newTranscriptReader(path),
+		transcript: claudecore.NewTranscriptReader(path),
 		events:     make(chan events.Event, 4),
 		prompted:   true,
 		ctx:        context.Background(),
@@ -618,7 +619,7 @@ func TestScanTicksRespectFinishedAndPromptedGuards(t *testing.T) {
 		return &session{
 			sessionID:  "ses-guard",
 			term:       terminal.NewFakeSession("test-term", 1, "❯ ready for input"),
-			transcript: newTranscriptReader(writeTranscript(t)),
+			transcript: claudecore.NewTranscriptReader(writeTranscript(t)),
 			events:     make(chan events.Event, 4),
 			ctx:        context.Background(),
 		}

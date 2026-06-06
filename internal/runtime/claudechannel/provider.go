@@ -17,7 +17,8 @@ import (
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
-	"github.com/sdougbrown/avenor/internal/runtime/claudechannel/terminal"
+	"github.com/sdougbrown/avenor/internal/runtime/claudecore"
+	"github.com/sdougbrown/avenor/internal/runtime/claudecore/terminal"
 )
 
 const backendID = "claude-channel"
@@ -65,7 +66,7 @@ type session struct {
 	mcpConfig  string
 	mcpServer  string
 	mcpProject string
-	transcript *transcriptReader
+	transcript *claudecore.TranscriptReader
 
 	events              chan events.Event
 	done                chan struct{}
@@ -262,7 +263,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		startedAt:  time.Now(),
 	}
 	if home, err := os.UserHomeDir(); err == nil {
-		s.transcript = newTranscriptReader(transcriptPath(home, merged.Dir, sessionID))
+		s.transcript = claudecore.NewTranscriptReader(claudecore.TranscriptPath(home, merged.Dir, sessionID))
 	}
 
 	term, err := p.launcher.Start(sessCtx, terminal.StartOptions{
