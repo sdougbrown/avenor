@@ -119,9 +119,11 @@ func TestResumeReturnsLiveSession(t *testing.T) {
 	}
 	term := terminal.NewFakeSession("avenor-claude-ses-live", 4242, "ready")
 	p.sessions["ses-live"] = &session{
-		sessionID: "ses-live",
-		dir:       "/tmp/work",
-		term:      term,
+		Session: &claudecore.Session{
+			SessionID: "ses-live",
+			Dir:       "/tmp/work",
+			Term:      term,
+		},
 	}
 	got, err := p.Resume(context.Background(), "ses-live")
 	if err != nil {
@@ -146,9 +148,11 @@ func TestResumeAfterTerminalDeath(t *testing.T) {
 	term := terminal.NewFakeSession("avenor-claude-ses-dead", 1, "")
 	term.SetAlive(false)
 	p.sessions["ses-dead"] = &session{
-		sessionID: "ses-dead",
-		dir:       "/tmp/work",
-		term:      term,
+		Session: &claudecore.Session{
+			SessionID: "ses-dead",
+			Dir:       "/tmp/work",
+			Term:      term,
+		},
 	}
 	_, err := p.Resume(context.Background(), "ses-dead")
 	if err == nil {
@@ -269,25 +273,27 @@ func TestPromptQueuesChannelEvent(t *testing.T) {
 	}
 	p := &Provider{broker: b, sessions: make(map[string]*session)}
 	s := &session{
-		sessionID: "session-prompt",
-		runID:     runID,
-		tmuxName:  "missing",
-		ctx:       context.Background(),
-		events:    make(chan events.Event, 8),
-		term: func() terminal.Session {
-			term := terminal.NewFakeSession("missing", 0, "")
-			term.SetAlive(false)
-			return term
-		}(),
+		Session: &claudecore.Session{
+			SessionID: "session-prompt",
+			RunID:     runID,
+			TmuxName:  "missing",
+			Ctx:       context.Background(),
+			Events:    make(chan events.Event, 8),
+			Term: func() terminal.Session {
+				term := terminal.NewFakeSession("missing", 0, "")
+				term.SetAlive(false)
+				return term
+			}(),
+		},
 	}
-	p.sessions[s.sessionID] = s
+	p.sessions[s.SessionID] = s
 
-	if err := p.Prompt(context.Background(), s.sessionID, "hello from test"); err != nil {
+	if err := p.Prompt(context.Background(), s.SessionID, "hello from test"); err != nil {
 		t.Fatalf("Prompt: %v", err)
 	}
 
 	select {
-	case ev := <-s.events:
+	case ev := <-s.Events:
 		if ev.Event != "agent.prompt_queued" {
 			t.Fatalf("event = %q, want agent.prompt_queued", ev.Event)
 		}
@@ -309,19 +315,22 @@ func TestPollBrokerEventsSkipsChannelReadyBeforeSidecarRegister(t *testing.T) {
 		t.Fatalf("CreateRun: %v", err)
 	}
 	p := &Provider{broker: b}
-	s := &session{sessionID: "session-not-ready", runID: runID, mcpServer: "avenor-channel-test", events: make(chan events.Event, 4)}
+	s := &session{
+		Session:   &claudecore.Session{SessionID: "session-not-ready", RunID: runID, Events: make(chan events.Event, 4)},
+		mcpServer: "avenor-channel-test",
+	}
 
 	p.pollBrokerEvents(s)
 
 	select {
-	case ev := <-s.events:
+	case ev := <-s.Events:
 		t.Fatalf("expected no events before sidecar register, got %q", ev.Event)
 	default:
 	}
 
-	s.mu.Lock()
+	s.Mu.Lock()
 	readyEmitted := s.channelReadyEmitted
-	s.mu.Unlock()
+	s.Mu.Unlock()
 	if readyEmitted {
 		t.Fatal("channelReadyEmitted should remain false before sidecar register")
 	}
@@ -342,14 +351,17 @@ func TestPollBrokerEventsEmitsChannelLifecycle(t *testing.T) {
 	st.Unlock()
 
 	p := &Provider{broker: b}
-	s := &session{sessionID: "session-lifecycle", runID: runID, mcpServer: "avenor-channel-test", events: make(chan events.Event, 8)}
+	s := &session{
+		Session:   &claudecore.Session{SessionID: "session-lifecycle", RunID: runID, Events: make(chan events.Event, 8)},
+		mcpServer: "avenor-channel-test",
+	}
 
 	p.pollBrokerEvents(s)
 
 	got := make([]string, 0, 6)
 	for i := 0; i < 6; i++ {
 		select {
-		case ev := <-s.events:
+		case ev := <-s.Events:
 			got = append(got, ev.Event)
 		default:
 			t.Fatalf("expected 6 events, got %d", len(got))
@@ -362,10 +374,10 @@ func TestPollBrokerEventsEmitsChannelLifecycle(t *testing.T) {
 		}
 	}
 
-	s.mu.Lock()
+	s.Mu.Lock()
 	readyEmitted := s.channelReadyEmitted
-	finished := s.finished
-	s.mu.Unlock()
+	finished := s.Finished
+	s.Mu.Unlock()
 	if !readyEmitted {
 		t.Fatal("expected channelReadyEmitted to be set")
 	}
@@ -375,7 +387,7 @@ func TestPollBrokerEventsEmitsChannelLifecycle(t *testing.T) {
 
 	p.pollBrokerEvents(s)
 	select {
-	case ev := <-s.events:
+	case ev := <-s.Events:
 		t.Fatalf("expected no duplicate events after drain, got %q", ev.Event)
 	default:
 	}
@@ -393,19 +405,19 @@ func TestPollBrokerEventsMarksFinishedBeforeSendingEnd(t *testing.T) {
 	st.Unlock()
 
 	p := &Provider{broker: b}
-	s := &session{sessionID: "session-1", runID: runID, events: make(chan events.Event, 2)}
+	s := &session{Session: &claudecore.Session{SessionID: "session-1", RunID: runID, Events: make(chan events.Event, 2)}}
 
 	p.pollBrokerEvents(s)
 
-	s.mu.Lock()
-	finished := s.finished
-	s.mu.Unlock()
+	s.Mu.Lock()
+	finished := s.Finished
+	s.Mu.Unlock()
 	if !finished {
 		t.Fatal("session should be marked finished before session.end is consumed")
 	}
 	for _, want := range []string{"agent.finish", "session.end"} {
 		select {
-		case ev := <-s.events:
+		case ev := <-s.Events:
 			if ev.Event != want {
 				t.Fatalf("event = %q, want %q", ev.Event, want)
 			}
@@ -488,24 +500,26 @@ func TestScanTerminalTickActiveEmitsNothing(t *testing.T) {
 	// "Churning" classifies as paneStateActive.
 	term := terminal.NewFakeSession("test-term", 1, "✢ Churning… (2m 17s · ↓ 7.2k tokens)")
 	s := &session{
-		sessionID: "ses-active",
-		term:      term,
-		events:    make(chan events.Event, 4),
-		prompted:  true,
-		ctx:       context.Background(),
+		Session: &claudecore.Session{
+			SessionID: "ses-active",
+			Term:      term,
+			Events:    make(chan events.Event, 4),
+			Prompted:  true,
+			Ctx:       context.Background(),
+		},
 	}
-	p.sessions[s.sessionID] = s
+	p.sessions[s.SessionID] = s
 
 	p.scanTerminalTick(s)
 
 	select {
-	case ev := <-s.events:
+	case ev := <-s.Events:
 		t.Fatalf("scanTerminalTick on active pane should not emit; got %+v", ev)
 	default:
 	}
-	s.mu.Lock()
-	active := s.active
-	s.mu.Unlock()
+	s.Mu.Lock()
+	active := s.Active
+	s.Mu.Unlock()
 	if !active {
 		t.Fatal("scanTerminalTick on active pane should still markActive")
 	}
@@ -524,19 +538,21 @@ func TestScanTranscriptTickIsAuthoritativeWorkingSignal(t *testing.T) {
 		launcher: terminal.TmuxLauncher{},
 	}
 	s := &session{
-		sessionID:  "ses-trans",
-		term:       terminal.NewFakeSession("test-term", 1, "ready"),
-		transcript: claudecore.NewTranscriptReader(path),
-		events:     make(chan events.Event, 4),
-		prompted:   true,
-		ctx:        context.Background(),
+		Session: &claudecore.Session{
+			SessionID:  "ses-trans",
+			Term:       terminal.NewFakeSession("test-term", 1, "ready"),
+			Transcript: claudecore.NewTranscriptReader(path),
+			Events:     make(chan events.Event, 4),
+			Prompted:   true,
+			Ctx:        context.Background(),
+		},
 	}
-	p.sessions[s.sessionID] = s
+	p.sessions[s.SessionID] = s
 
-	p.scanTranscriptTick(s)
+	s.ScanTranscriptTick()
 
 	select {
-	case ev := <-s.events:
+	case ev := <-s.Events:
 		if ev.Event != "agent.status" {
 			t.Fatalf("event = %q, want agent.status", ev.Event)
 		}
@@ -574,18 +590,20 @@ func TestScanTerminalTickIdleEmitsWaitingWithKind(t *testing.T) {
 			term := terminal.NewFakeSession("test-term", 1, "❯ ready for input")
 			term.SetKind(tc.kind)
 			s := &session{
-				sessionID: "ses-idle-" + tc.kind,
-				term:      term,
-				events:    make(chan events.Event, 4),
-				prompted:  true,
-				ctx:       context.Background(),
+				Session: &claudecore.Session{
+					SessionID: "ses-idle-" + tc.kind,
+					Term:      term,
+					Events:    make(chan events.Event, 4),
+					Prompted:  true,
+					Ctx:       context.Background(),
+				},
 			}
-			p.sessions[s.sessionID] = s
+			p.sessions[s.SessionID] = s
 
 			p.scanTerminalTick(s)
 
 			select {
-			case ev := <-s.events:
+			case ev := <-s.Events:
 				if ev.Event != "agent.status" {
 					t.Fatalf("event = %q, want agent.status", ev.Event)
 				}
@@ -617,17 +635,19 @@ func TestScanTicksRespectFinishedAndPromptedGuards(t *testing.T) {
 	newSession := func(t *testing.T) *session {
 		t.Helper()
 		return &session{
-			sessionID:  "ses-guard",
-			term:       terminal.NewFakeSession("test-term", 1, "❯ ready for input"),
-			transcript: claudecore.NewTranscriptReader(writeTranscript(t)),
-			events:     make(chan events.Event, 4),
-			ctx:        context.Background(),
+			Session: &claudecore.Session{
+				SessionID:  "ses-guard",
+				Term:       terminal.NewFakeSession("test-term", 1, "❯ ready for input"),
+				Transcript: claudecore.NewTranscriptReader(writeTranscript(t)),
+				Events:     make(chan events.Event, 4),
+				Ctx:        context.Background(),
+			},
 		}
 	}
 	assertNoEmit := func(t *testing.T, s *session) {
 		t.Helper()
 		select {
-		case ev := <-s.events:
+		case ev := <-s.Events:
 			t.Fatalf("expected no emit; got %+v", ev)
 		default:
 		}
@@ -636,28 +656,28 @@ func TestScanTicksRespectFinishedAndPromptedGuards(t *testing.T) {
 	t.Run("transcript skip when finished", func(t *testing.T) {
 		p := &Provider{sessions: make(map[string]*session), launcher: terminal.TmuxLauncher{}}
 		s := newSession(t)
-		s.prompted = true
-		s.finished = true
-		p.sessions[s.sessionID] = s
-		p.scanTranscriptTick(s)
+		s.Prompted = true
+		s.Finished = true
+		p.sessions[s.SessionID] = s
+		s.ScanTranscriptTick()
 		assertNoEmit(t, s)
 	})
 
 	t.Run("transcript skip when not prompted", func(t *testing.T) {
 		p := &Provider{sessions: make(map[string]*session), launcher: terminal.TmuxLauncher{}}
 		s := newSession(t)
-		s.prompted = false
-		p.sessions[s.sessionID] = s
-		p.scanTranscriptTick(s)
+		s.Prompted = false
+		p.sessions[s.SessionID] = s
+		s.ScanTranscriptTick()
 		assertNoEmit(t, s)
 	})
 
 	t.Run("terminal skip when finished", func(t *testing.T) {
 		p := &Provider{sessions: make(map[string]*session), launcher: terminal.TmuxLauncher{}}
 		s := newSession(t)
-		s.prompted = true
-		s.finished = true
-		p.sessions[s.sessionID] = s
+		s.Prompted = true
+		s.Finished = true
+		p.sessions[s.SessionID] = s
 		p.scanTerminalTick(s)
 		assertNoEmit(t, s)
 	})
@@ -665,20 +685,20 @@ func TestScanTicksRespectFinishedAndPromptedGuards(t *testing.T) {
 	t.Run("terminal skip when not prompted", func(t *testing.T) {
 		p := &Provider{sessions: make(map[string]*session), launcher: terminal.TmuxLauncher{}}
 		s := newSession(t)
-		s.prompted = false
-		p.sessions[s.sessionID] = s
+		s.Prompted = false
+		p.sessions[s.SessionID] = s
 		p.scanTerminalTick(s)
 		assertNoEmit(t, s)
 	})
 }
 
 func TestMarkActive(t *testing.T) {
-	s := &session{}
-	markActive(s)
+	s := &session{Session: &claudecore.Session{}}
+	s.MarkActive()
 
-	s.mu.Lock()
-	active := s.active
-	s.mu.Unlock()
+	s.Mu.Lock()
+	active := s.Active
+	s.Mu.Unlock()
 	if !active {
 		t.Fatal("session should be marked active")
 	}
@@ -750,11 +770,13 @@ func TestAnswerPermissionTerminalRoute(t *testing.T) {
 	}
 
 	s := &session{
-		sessionID:           "ses-tmux",
-		runID:               "run-tmux",
-		pendingTerminalPerm: terminalPerm,
-		events:              make(chan events.Event, 64),
-		term:                terminal.NewFakeSession("test-term", 1, "ready"),
+		Session: &claudecore.Session{
+			SessionID:           "ses-tmux",
+			RunID:               "run-tmux",
+			PendingTerminalPerm: terminalPerm,
+			Events:              make(chan events.Event, 64),
+			Term:                terminal.NewFakeSession("test-term", 1, "ready"),
+		},
 	}
 
 	p.sessions["ses-tmux"] = s
@@ -764,14 +786,14 @@ func TestAnswerPermissionTerminalRoute(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	s.mu.Lock()
-	cleared := s.pendingTerminalPerm
-	s.mu.Unlock()
+	s.Mu.Lock()
+	cleared := s.PendingTerminalPerm
+	s.Mu.Unlock()
 	if cleared != nil {
 		t.Fatal("pendingTerminalPerm should be cleared after AnswerPermission")
 	}
 
-	sends := s.term.(*terminal.FakeSession).SendCalls()
+	sends := s.Term.(*terminal.FakeSession).SendCalls()
 	if len(sends) != 1 || len(sends[0]) != 2 || sends[0][0] != "1" || sends[0][1] != string(terminal.KeyEnter) {
 		t.Fatalf("keys sent = %v, want [[1 Enter]]", sends)
 	}
@@ -785,9 +807,11 @@ func TestAnswerPermissionFallthroughToBroker(t *testing.T) {
 
 	p := &Provider{sessions: make(map[string]*session), broker: b}
 	s := &session{
-		sessionID: "ses-broker",
-		runID:     "run-broker",
-		events:    make(chan events.Event, 64),
+		Session: &claudecore.Session{
+			SessionID: "ses-broker",
+			RunID:     "run-broker",
+			Events:    make(chan events.Event, 64),
+		},
 	}
 	p.sessions["ses-broker"] = s
 
@@ -821,12 +845,12 @@ func TestValidTmuxKey(t *testing.T) {
 }
 
 func TestEmitNonBlockingFullChannel(t *testing.T) {
-	s := &session{events: make(chan events.Event, 1)}
-	s.events <- events.Event{Event: "test"}
-	// Channel is full; emitNonBlocking should not block.
-	emitNonBlocking(s, events.Event{Event: "dropped"})
-	if len(s.events) != 1 {
-		t.Fatalf("channel should still have 1 event, got %d", len(s.events))
+	s := &session{Session: &claudecore.Session{Events: make(chan events.Event, 1)}}
+	s.Events <- events.Event{Event: "test"}
+	// Channel is full; Emit should not block.
+	s.Emit(events.Event{Event: "dropped"})
+	if len(s.Events) != 1 {
+		t.Fatalf("channel should still have 1 event, got %d", len(s.Events))
 	}
 }
 
@@ -1014,21 +1038,23 @@ func TestPromptQueuesBrokerControlEvenWhenTerminalInjectionAsync(t *testing.T) {
 	sessCtx, sessCancel := context.WithCancel(context.Background())
 	t.Cleanup(sessCancel)
 	s := &session{
-		sessionID: "ses-queue",
-		runID:     runID,
-		ctx:       sessCtx,
-		term:      term,
-		events:    make(chan events.Event, 8),
+		Session: &claudecore.Session{
+			SessionID: "ses-queue",
+			RunID:     runID,
+			Ctx:       sessCtx,
+			Term:      term,
+			Events:    make(chan events.Event, 8),
+		},
 	}
-	p.sessions[s.sessionID] = s
+	p.sessions[s.SessionID] = s
 
-	if err := p.Prompt(context.Background(), s.sessionID, "hello"); err != nil {
+	if err := p.Prompt(context.Background(), s.SessionID, "hello"); err != nil {
 		t.Fatalf("Prompt: %v", err)
 	}
 
 	// The broker control message should be pushed synchronously.
 	select {
-	case ev := <-s.events:
+	case ev := <-s.Events:
 		if ev.Event != "agent.prompt_queued" {
 			t.Fatalf("event = %q, want agent.prompt_queued", ev.Event)
 		}
@@ -1069,19 +1095,21 @@ func TestDevelopmentChannelPromptsSendRightKeys(t *testing.T) {
 			sendNotify := make(chan []string, 1)
 			term.SetSendNotify(sendNotify)
 			s := &session{
-				sessionID: "ses-dev",
-				runID:     runID,
-				ctx:       context.Background(),
-				term:      term,
-				events:    make(chan events.Event, 8),
-				done:      make(chan struct{}),
+				Session: &claudecore.Session{
+					SessionID: "ses-dev",
+					RunID:     runID,
+					Ctx:       context.Background(),
+					Term:      term,
+					Events:    make(chan events.Event, 8),
+					Done:      make(chan struct{}),
+				},
 			}
-			p.sessions[s.sessionID] = s
+			p.sessions[s.SessionID] = s
 
 			// Start autoConfirmDevelopmentChannelPrompt directly since we're not
 			// calling Start() which would normally start it.
-			go autoConfirmDevelopmentChannelPrompt(s.ctx, s)
-			defer close(s.done)
+			go autoConfirmDevelopmentChannelPrompt(s.Ctx, s)
+			defer close(s.Done)
 
 			select {
 			case send := <-sendNotify:
@@ -1114,20 +1142,22 @@ func TestPermissionAllowedSendsDigitAndEnter(t *testing.T) {
 	term := terminal.NewFakeSession("test-term", 1, "ready")
 	sessCtx, sessCancel := context.WithCancel(context.Background())
 	s := &session{
-		sessionID: "ses-allow",
-		runID:     runID,
-		ctx:       sessCtx,
-		cancelFn:  sessCancel,
-		term:      term,
-		pendingTerminalPerm: &claudecore.TerminalPermission{
-			RequestID: "perm-1",
+		Session: &claudecore.Session{
+			SessionID: "ses-allow",
+			RunID:     runID,
+			Ctx:       sessCtx,
+			CancelFn:  sessCancel,
+			Term:      term,
+			PendingTerminalPerm: &claudecore.TerminalPermission{
+				RequestID: "perm-1",
+			},
+			Events: make(chan events.Event, 8),
+			Done:   make(chan struct{}),
 		},
-		events: make(chan events.Event, 8),
-		done:   make(chan struct{}),
 	}
-	p.sessions[s.sessionID] = s
+	p.sessions[s.SessionID] = s
 
-	err := p.AnswerPermission(context.Background(), s.sessionID, "perm-1", runtime.PermissionResponse{Allow: true, OptionID: "1"})
+	err := p.AnswerPermission(context.Background(), s.SessionID, "perm-1", runtime.PermissionResponse{Allow: true, OptionID: "1"})
 	if err != nil {
 		t.Fatalf("AnswerPermission: %v", err)
 	}
@@ -1158,20 +1188,22 @@ func TestPermissionDeniedSendsEscAndEnter(t *testing.T) {
 	term := terminal.NewFakeSession("test-term", 1, "ready")
 	sessCtx, sessCancel := context.WithCancel(context.Background())
 	s := &session{
-		sessionID: "ses-deny",
-		runID:     runID,
-		ctx:       sessCtx,
-		cancelFn:  sessCancel,
-		term:      term,
-		pendingTerminalPerm: &claudecore.TerminalPermission{
-			RequestID: "perm-2",
+		Session: &claudecore.Session{
+			SessionID: "ses-deny",
+			RunID:     runID,
+			Ctx:       sessCtx,
+			CancelFn:  sessCancel,
+			Term:      term,
+			PendingTerminalPerm: &claudecore.TerminalPermission{
+				RequestID: "perm-2",
+			},
+			Events: make(chan events.Event, 8),
+			Done:   make(chan struct{}),
 		},
-		events: make(chan events.Event, 8),
-		done:   make(chan struct{}),
 	}
-	p.sessions[s.sessionID] = s
+	p.sessions[s.SessionID] = s
 
-	err := p.AnswerPermission(context.Background(), s.sessionID, "perm-2", runtime.PermissionResponse{Allow: false})
+	err := p.AnswerPermission(context.Background(), s.SessionID, "perm-2", runtime.PermissionResponse{Allow: false})
 	if err != nil {
 		t.Fatalf("AnswerPermission: %v", err)
 	}
@@ -1204,25 +1236,27 @@ func TestSessionGoneEmitsFallbackEnd(t *testing.T) {
 	mcpDir := t.TempDir()
 	mcpProject := filepath.Join(t.TempDir(), ".mcp.json")
 	s := &session{
-		sessionID:  "ses-gone",
-		runID:      runID,
-		ctx:        sessCtx,
-		cancelFn:   sessCancel,
-		term:       term,
+		Session: &claudecore.Session{
+			SessionID: "ses-gone",
+			RunID:     runID,
+			Ctx:       sessCtx,
+			CancelFn:  sessCancel,
+			Term:      term,
+			Events:    make(chan events.Event, 8),
+			Done:      make(chan struct{}),
+		},
 		mcpDir:     mcpDir,
 		mcpProject: mcpProject,
 		mcpServer:  "test-server",
-		events:     make(chan events.Event, 8),
-		done:       make(chan struct{}),
 	}
-	p.sessions[s.sessionID] = s
+	p.sessions[s.SessionID] = s
 
 	term.SetAlive(false)
-	go p.runSession(s.ctx, s)
+	go p.runSession(s.Ctx, s)
 
 	// Wait for session.end event.
 	select {
-	case ev := <-s.events:
+	case ev := <-s.Events:
 		if ev.Event != "session.end" {
 			t.Fatalf("event = %q, want session.end", ev.Event)
 		}
@@ -1231,7 +1265,7 @@ func TestSessionGoneEmitsFallbackEnd(t *testing.T) {
 	}
 
 	select {
-	case <-s.done:
+	case <-s.Done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("timeout waiting for runSession to exit")
 	}

@@ -43,30 +43,16 @@ type Provider struct {
 }
 
 type session struct {
-	sessionID  string
-	runID      string
-	dir        string
-	tmuxName   string // tmux session name; used for lifecycle ops
-	term       terminal.Session
-	mcpDir     string // tmpdir holding ephemeral bootstrap state; removed on session exit
-	brokerURL  string
-	sidecarTok string
-	mcpConfig  string
-	mcpServer  string
-	mcpProject string
-	transcript *claudecore.TranscriptReader
+	*claudecore.Session
 
-	events              chan events.Event
-	done                chan struct{}
-	ctx                 context.Context
-	cancelFn            context.CancelFunc
-	startedAt           time.Time
-	prompted            bool
-	active              bool
-	finished            bool
+	// claudechannel-only fields:
+	mcpDir              string
+	brokerURL           string
+	sidecarTok          string
+	mcpConfig           string
+	mcpServer           string
+	mcpProject          string
 	channelReadyEmitted bool
-	pendingTerminalPerm *claudecore.TerminalPermission
-	mu                  sync.Mutex
 }
 
 // Ensure Provider implements runtime.Provider.
@@ -206,29 +192,32 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	// Launch claude in a detached tmux session. tmux provides a real virtual
 	// terminal, which is what prevents claude from falling back to --print mode.
 	tmuxName := "avenor-" + runSlug
-	sessCtx, cancel := context.WithCancel(context.Background())
+
+	var transcript *claudecore.TranscriptReader
+	if home, err := os.UserHomeDir(); err == nil {
+		transcript = claudecore.NewTranscriptReader(claudecore.TranscriptPath(home, merged.Dir, sessionID))
+	}
+
+	core := claudecore.NewSession(context.Background(), claudecore.SessionOptions{
+		SessionID:  sessionID,
+		RunID:      runID,
+		Dir:        merged.Dir,
+		TmuxName:   tmuxName,
+		Transcript: transcript,
+		EventsBuf:  64,
+	})
+
 	s := &session{
-		sessionID:  sessionID,
-		runID:      runID,
-		dir:        merged.Dir,
-		tmuxName:   tmuxName,
+		Session:    core,
 		mcpDir:     mcpDir,
 		brokerURL:  brokerURL,
 		sidecarTok: sidecarTok,
 		mcpConfig:  mcpConfigPath,
 		mcpServer:  serverName,
 		mcpProject: projectMCPPath,
-		events:     make(chan events.Event, 64),
-		done:       make(chan struct{}),
-		ctx:        sessCtx,
-		cancelFn:   cancel,
-		startedAt:  time.Now(),
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		s.transcript = claudecore.NewTranscriptReader(claudecore.TranscriptPath(home, merged.Dir, sessionID))
 	}
 
-	term, err := p.launcher.Start(sessCtx, terminal.StartOptions{
+	term, err := p.launcher.Start(s.Ctx, terminal.StartOptions{
 		Name:    tmuxName,
 		Dir:     merged.Dir,
 		Cols:    220,
@@ -240,16 +229,16 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		_ = os.RemoveAll(mcpDir)
 		return runtime.Session{}, fmt.Errorf("terminal launch: %w", err)
 	}
-	s.term = term
+	s.Term = term
 
 	p.sessions[sessionID] = s
 
-	go autoConfirmDevelopmentChannelPrompt(sessCtx, s)
+	go autoConfirmDevelopmentChannelPrompt(s.Ctx, s)
 
-	go p.runSession(sessCtx, s)
+	go p.runSession(s.Ctx, s)
 
 	go func() {
-		s.events <- events.Event{
+		s.Events <- events.Event{
 			Event:     "session.start",
 			SessionID: sessionID,
 			Fields: map[string]any{
@@ -272,19 +261,19 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 // runSession supervises the Claude tmux session and forwards broker events into
 // the event stream. It cleans up the tmux session and tmpdir on exit.
 func (p *Provider) runSession(ctx context.Context, s *session) {
-	defer s.cancelFn()
-	defer close(s.done)
-	defer close(s.events)
+	defer s.CancelFn()
+	defer close(s.Done)
+	defer close(s.Events)
 	defer func() {
 		p.mu.Lock()
-		delete(p.sessions, s.sessionID)
+		delete(p.sessions, s.SessionID)
 		p.mu.Unlock()
 	}()
 	defer func() {
-		p.broker.DeleteRun(s.runID)
+		p.broker.DeleteRun(s.RunID)
 	}()
 	defer func() {
-		_ = s.term.Kill(ctx)
+		_ = s.Term.Kill(ctx)
 		_ = removeProjectMCPServer(s.mcpProject, s.mcpServer)
 		_ = os.RemoveAll(s.mcpDir)
 	}()
@@ -299,7 +288,7 @@ func (p *Provider) runSession(ctx context.Context, s *session) {
 				return
 			case <-time.After(500 * time.Millisecond):
 			}
-			if !s.term.Alive(ctx) {
+			if !s.Term.Alive(ctx) {
 				return
 			}
 		}
@@ -316,14 +305,14 @@ func (p *Provider) runSession(ctx context.Context, s *session) {
 	for {
 		select {
 		case <-ctx.Done():
-			_ = s.term.Kill(ctx)
+			_ = s.Term.Kill(ctx)
 			return
 		case <-sessionGone:
-			if markFinished(s) {
+			if s.MarkFinished() {
 				// Claude exited without calling avenor_finish.
-				s.events <- events.Event{
+				s.Events <- events.Event{
 					Event:     "session.end",
-					SessionID: s.sessionID,
+					SessionID: s.SessionID,
 					Fields: map[string]any{
 						"status":      "done",
 						"stop_reason": "end_turn",
@@ -336,54 +325,22 @@ func (p *Provider) runSession(ctx context.Context, s *session) {
 		case <-paneTick.C:
 			p.scanTerminalTick(s)
 		case <-transcriptTick.C:
-			p.scanTranscriptTick(s)
+			s.ScanTranscriptTick()
 		}
 	}
 }
 
-// scanTranscriptTick reads any new JSONL records Claude has written since
-// the last tick and emits status events. New records are an unambiguous
-// "agent is working" signal that doesn't depend on screen-scrape parsing.
-func (p *Provider) scanTranscriptTick(s *session) {
-	if s.transcript == nil {
-		return
-	}
-	recs, _, err := s.transcript.Tick()
-	if err != nil || len(recs) == 0 {
-		return
-	}
-
-	s.mu.Lock()
-	prompted := s.prompted
-	finished := s.finished
-	s.mu.Unlock()
-	if finished || !prompted {
-		return
-	}
-
-	markActive(s)
-	emitNonBlocking(s, events.Event{
-		Event:     "agent.status",
-		SessionID: s.sessionID,
-		Fields: map[string]any{
-			"phase":   "working",
-			"source":  "transcript",
-			"records": len(recs),
-		},
-	})
-}
-
 func (p *Provider) scanTerminalTick(s *session) {
-	state, err := claudecore.ScanTerminal(s.ctx, s.term)
+	state, err := claudecore.ScanTerminal(s.Ctx, s.Term)
 	if err != nil {
 		return
 	}
 
-	s.mu.Lock()
-	prompted := s.prompted
-	finished := s.finished
-	currentPerm := s.pendingTerminalPerm
-	s.mu.Unlock()
+	s.Mu.Lock()
+	prompted := s.Prompted
+	finished := s.Finished
+	currentPerm := s.PendingTerminalPerm
+	s.Mu.Unlock()
 
 	if finished || !prompted {
 		return
@@ -391,7 +348,7 @@ func (p *Provider) scanTerminalTick(s *session) {
 
 	switch state {
 	case claudecore.PaneStatePermission:
-		markActive(s)
+		s.MarkActive()
 
 		// If we already brokered this permission, wait for resolution.
 		if currentPerm != nil {
@@ -399,7 +356,7 @@ func (p *Provider) scanTerminalTick(s *session) {
 		}
 
 		// Parse the permission prompt and broker it.
-		out, err := s.term.Capture(s.ctx)
+		out, err := s.Term.Capture(s.Ctx)
 		if err != nil {
 			return
 		}
@@ -410,21 +367,21 @@ func (p *Provider) scanTerminalTick(s *session) {
 		tmuxPerm.CreatedAt = time.Now()
 		tmuxPerm.RequestID = uuid.New().String()
 
-		s.mu.Lock()
-		s.pendingTerminalPerm = tmuxPerm
-		s.mu.Unlock()
+		s.Mu.Lock()
+		s.PendingTerminalPerm = tmuxPerm
+		s.Mu.Unlock()
 
 		// Emit the brokered permission request.
 		opts := make([]map[string]any, len(tmuxPerm.Options))
 		for i, o := range tmuxPerm.Options {
 			opts[i] = map[string]any{"id": o.ID, "label": o.Label}
 		}
-		s.events <- events.Event{
+		s.Events <- events.Event{
 			Event:     "permission.request",
-			SessionID: s.sessionID,
+			SessionID: s.SessionID,
 			Fields: map[string]any{
 				"request_id":  tmuxPerm.RequestID,
-				"source":      s.term.Kind(),
+				"source":      s.Term.Kind(),
 				"description": tmuxPerm.Prompt,
 				"options":     opts,
 			},
@@ -435,22 +392,22 @@ func (p *Provider) scanTerminalTick(s *session) {
 		// pane: scanTranscriptTick is the authoritative working signal (it
 		// fires only when Claude actually writes new JSONL records, where
 		// pane-scrape "active" is a 500ms heartbeat that floods consumers).
-		markActive(s)
+		s.MarkActive()
 	case claudecore.PaneStateIdle:
 		// Idle means Claude is at the prompt, waiting for next input.
 		// Don't end the session — the channel supports multi-turn.
 		// Clear any stale permission.
 		if currentPerm != nil {
-			s.mu.Lock()
-			s.pendingTerminalPerm = nil
-			s.mu.Unlock()
+			s.Mu.Lock()
+			s.PendingTerminalPerm = nil
+			s.Mu.Unlock()
 		}
-		emitNonBlocking(s, events.Event{Event: "agent.status", SessionID: s.sessionID, Fields: map[string]any{"phase": "waiting", "source": s.term.Kind()}})
+		s.Emit(events.Event{Event: "agent.status", SessionID: s.SessionID, Fields: map[string]any{"phase": "waiting", "source": s.Term.Kind()}})
 	}
 }
 
 func (p *Provider) pollBrokerEvents(s *session) {
-	st := p.broker.GetRun(s.runID)
+	st := p.broker.GetRun(s.RunID)
 	if st == nil {
 		return
 	}
@@ -471,11 +428,11 @@ func (p *Provider) pollBrokerEvents(s *session) {
 	st.Unlock()
 
 	if markChannelReadyEmitted(s, registeredAt) {
-		s.events <- events.Event{
+		s.Events <- events.Event{
 			Event:     "agent.channel_ready",
-			SessionID: s.sessionID,
+			SessionID: s.SessionID,
 			Fields: map[string]any{
-				"run_id":      s.runID,
+				"run_id":      s.RunID,
 				"server_name": s.mcpServer,
 				"source":      "channel",
 			},
@@ -483,21 +440,21 @@ func (p *Provider) pollBrokerEvents(s *session) {
 	}
 
 	for _, rep := range reports {
-		s.events <- events.Event{
+		s.Events <- events.Event{
 			Event:     "agent.report",
-			SessionID: s.sessionID,
+			SessionID: s.SessionID,
 			Fields: map[string]any{
 				"state":   rep.State,
 				"payload": json.RawMessage(rep.Payload),
 				"source":  "channel",
 			},
 		}
-		s.events <- brokerEvent(s.sessionID, rep.State, rep.Payload)
+		s.Events <- brokerEvent(s.SessionID, rep.State, rep.Payload)
 	}
 	for _, fin := range finishes {
-		s.events <- events.Event{
+		s.Events <- events.Event{
 			Event:     "agent.finish",
-			SessionID: s.sessionID,
+			SessionID: s.SessionID,
 			Fields: map[string]any{
 				"status":        fin.Status,
 				"summary":       fin.Summary,
@@ -506,12 +463,12 @@ func (p *Provider) pollBrokerEvents(s *session) {
 				"source":        "channel",
 			},
 		}
-		if !markFinished(s) {
+		if !s.MarkFinished() {
 			continue
 		}
-		s.events <- events.Event{
+		s.Events <- events.Event{
 			Event:     "session.end",
-			SessionID: s.sessionID,
+			SessionID: s.SessionID,
 			Fields: map[string]any{
 				"status":        fin.Status,
 				"summary":       fin.Summary,
@@ -521,9 +478,9 @@ func (p *Provider) pollBrokerEvents(s *session) {
 		}
 	}
 	for _, rep := range replies {
-		s.events <- events.Event{
+		s.Events <- events.Event{
 			Event:     "agent.reply",
-			SessionID: s.sessionID,
+			SessionID: s.SessionID,
 			Fields: map[string]any{
 				"to":      rep.To,
 				"payload": json.RawMessage(rep.Payload),
@@ -533,16 +490,6 @@ func (p *Provider) pollBrokerEvents(s *session) {
 	}
 }
 
-func markFinished(s *session) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.finished {
-		return false
-	}
-	s.finished = true
-	return true
-}
-
 func markChannelReadyEmitted(s *session, registeredAt time.Time) bool {
 	// Zero RegisteredAt means the Claude sidecar has not registered with the
 	// broker yet, so the channel is not ready from the orchestrator's point of
@@ -550,26 +497,13 @@ func markChannelReadyEmitted(s *session, registeredAt time.Time) bool {
 	if registeredAt.IsZero() {
 		return false
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
 	if s.channelReadyEmitted {
 		return false
 	}
 	s.channelReadyEmitted = true
 	return true
-}
-
-func markActive(s *session) {
-	s.mu.Lock()
-	s.active = true
-	s.mu.Unlock()
-}
-
-func emitNonBlocking(s *session, ev events.Event) {
-	select {
-	case s.events <- ev:
-	default:
-	}
 }
 
 // Resume reattaches to an in-process session whose terminal is still alive.
@@ -587,14 +521,14 @@ func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Sessio
 	if !ok {
 		return runtime.Session{}, fmt.Errorf("session not found: %s (cross-restart resume not yet supported)", sessionID)
 	}
-	if !s.term.Alive(ctx) {
+	if !s.Term.Alive(ctx) {
 		return runtime.Session{}, fmt.Errorf("session %s terminal exited", sessionID)
 	}
 	return runtime.Session{
 		SessionID: sessionID,
 		Backend:   backendID,
-		Dir:       s.dir,
-		PID:       s.term.PID(),
+		Dir:       s.Dir,
+		PID:       s.Term.PID(),
 	}, nil
 }
 
@@ -605,9 +539,9 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 	if !ok {
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
-	s.mu.Lock()
-	finished := s.finished
-	s.mu.Unlock()
+	s.Mu.Lock()
+	finished := s.Finished
+	s.Mu.Unlock()
 	if finished {
 		return fmt.Errorf("session already finished: %s", sessionID)
 	}
@@ -621,42 +555,42 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 	// Prompt() doesn't block; the channel push serves as a backup if Claude is
 	// already listening.
 	go func() {
-		if !claudecore.WaitForPaneReady(s.ctx, s.term) {
+		if !claudecore.WaitForPaneReady(s.Ctx, s.Term) {
 			return
 		}
 
-		if err := pastePromptAndSubmit(s.ctx, s.term, prompt); err != nil {
+		if err := pastePromptAndSubmit(s.Ctx, s.Term, prompt); err != nil {
 			return
 		}
-		s.mu.Lock()
-		s.prompted = true
-		s.mu.Unlock()
-		emitNonBlocking(s, events.Event{
+		s.Mu.Lock()
+		s.Prompted = true
+		s.Mu.Unlock()
+		s.Emit(events.Event{
 			Event:     "agent.prompt_submitted",
-			SessionID: s.sessionID,
+			SessionID: s.SessionID,
 			Fields: map[string]any{
-				"delivery":      s.term.Kind(),
+				"delivery":      s.Term.Kind(),
 				"prompt_length": len(prompt),
 			},
 		})
-		go retryPromptSubmitIfIdle(s.ctx, s.term, prompt)
+		go retryPromptSubmitIfIdle(s.Ctx, s.Term, prompt)
 	}()
 
 	// Also push via channel for idempotence and later turns.
 	msg := broker.ControlMessage{
 		ID:    uuid.New().String(),
 		Type:  "continue",
-		RunID: s.runID,
+		RunID: s.RunID,
 		Payload: claudecore.MustJSON(map[string]any{
 			"message": prompt,
 		}),
 	}
-	if err := p.broker.PushControl(s.runID, msg); err != nil {
+	if err := p.broker.PushControl(s.RunID, msg); err != nil {
 		return err
 	}
-	emitNonBlocking(s, events.Event{
+	s.Emit(events.Event{
 		Event:     "agent.prompt_queued",
-		SessionID: s.sessionID,
+		SessionID: s.SessionID,
 		Fields: map[string]any{
 			"control_id":    msg.ID,
 			"message_type":  msg.Type,
@@ -706,23 +640,23 @@ func autoConfirmDevelopmentChannelPrompt(ctx context.Context, s *session) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-s.done:
+		case <-s.Done:
 			return
 		case <-deadline.C:
 			return
 		case <-ticker.C:
 		}
 
-		out, err := s.term.Capture(ctx)
+		out, err := s.Term.Capture(ctx)
 		if err != nil {
 			continue
 		}
 		if strings.Contains(out, "New MCP server found in this project") {
-			_ = s.term.SendKeys(ctx, terminal.Key("1"), terminal.KeyEnter)
+			_ = s.Term.SendKeys(ctx, terminal.Key("1"), terminal.KeyEnter)
 			continue
 		}
 		if strings.Contains(out, "Loading development channels") {
-			_ = s.term.SendKeys(ctx, terminal.KeyEnter)
+			_ = s.Term.SendKeys(ctx, terminal.KeyEnter)
 			continue
 		}
 	}
@@ -797,20 +731,20 @@ func (p *Provider) Cancel(ctx context.Context, sessionID string) error {
 	msg := broker.ControlMessage{
 		ID:      uuid.New().String(),
 		Type:    "cancel",
-		RunID:   s.runID,
+		RunID:   s.RunID,
 		Payload: claudecore.MustJSON(map[string]any{"reason": "user cancel"}),
 	}
-	_ = p.broker.PushControl(s.runID, msg)
+	_ = p.broker.PushControl(s.RunID, msg)
 
 	// Escalate to hard kill after 2 seconds.
 	go func() {
 		time.Sleep(2 * time.Second)
 		select {
-		case <-s.ctx.Done():
+		case <-s.Ctx.Done():
 			return
 		default:
 		}
-		_ = s.term.Kill(s.ctx)
+		_ = s.Term.Kill(s.Ctx)
 	}()
 	return nil
 }
@@ -823,12 +757,12 @@ func (p *Provider) Events(ctx context.Context, sessionID string) (<-chan events.
 		return nil, fmt.Errorf("session not found: %s", sessionID)
 	}
 
-	out := make(chan events.Event, cap(s.events))
+	out := make(chan events.Event, cap(s.Events))
 	go func() {
 		defer close(out)
 		for {
 			select {
-			case e, ok := <-s.events:
+			case e, ok := <-s.Events:
 				if !ok {
 					return
 				}
@@ -850,14 +784,14 @@ func (p *Provider) AnswerPermission(ctx context.Context, sessionID string, reque
 	}
 
 	// Check if this is a terminal permission request.
-	s.mu.Lock()
-	pendingPerm := s.pendingTerminalPerm
-	s.mu.Unlock()
+	s.Mu.Lock()
+	pendingPerm := s.PendingTerminalPerm
+	s.Mu.Unlock()
 
 	if pendingPerm != nil && pendingPerm.RequestID == requestID {
-		s.mu.Lock()
-		s.pendingTerminalPerm = nil
-		s.mu.Unlock()
+		s.Mu.Lock()
+		s.PendingTerminalPerm = nil
+		s.Mu.Unlock()
 
 		key := "Esc"
 		if resp.Allow {
@@ -874,11 +808,11 @@ func (p *Provider) AnswerPermission(ctx context.Context, sessionID string, reque
 			keys = []terminal.Key{terminal.KeyEsc}
 		}
 		keys = append(keys, terminal.KeyEnter)
-		return s.term.SendKeys(ctx, keys...)
+		return s.Term.SendKeys(ctx, keys...)
 	}
 
 	// Not a terminal permission; route through broker (sidecar path).
-	if s.finished {
+	if s.Finished {
 		return fmt.Errorf("session already finished: %s", sessionID)
 	}
 
@@ -889,7 +823,7 @@ func (p *Provider) AnswerPermission(ctx context.Context, sessionID string, reque
 	msg := broker.ControlMessage{
 		ID:    uuid.New().String(),
 		Type:  "permission_decision",
-		RunID: s.runID,
+		RunID: s.RunID,
 		Payload: claudecore.MustJSON(map[string]any{
 			"request_id": requestID,
 			"behavior":   state,
@@ -897,7 +831,7 @@ func (p *Provider) AnswerPermission(ctx context.Context, sessionID string, reque
 			"message":    resp.Message,
 		}),
 	}
-	return p.broker.PushControl(s.runID, msg)
+	return p.broker.PushControl(s.RunID, msg)
 }
 
 func (p *Provider) Capabilities(ctx context.Context) (runtime.Capabilities, error) {
