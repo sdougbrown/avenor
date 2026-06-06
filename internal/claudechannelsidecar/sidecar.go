@@ -228,6 +228,11 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 		}); err != nil {
 			return nil, err
 		}
+		resultText := fmt.Sprintf("sent message to run %q", p.ToRunID)
+		if name == "avenor_upsend" {
+			resultText = fmt.Sprintf("sent upward message to run %q", p.ToRunID)
+		}
+		return map[string]any{"content": []map[string]any{{"type": "text", "text": resultText}}}, nil
 	default:
 		return nil, fmt.Errorf("unknown tool %q", name)
 	}
@@ -338,7 +343,7 @@ func renderControlMessage(msg controlMessage) string {
 				msg.FromRunID, agent.Message, msg.FromRunID)
 		}
 		// Fallback render if payload doesn't parse
-		return fmt.Sprintf("Message from %s:\n%s", msg.FromRunID, payload)
+		return "Message from another agent:\n" + payload
 	default:
 		return "Unhandled control type: " + msg.Type
 	}
@@ -463,6 +468,7 @@ func toolSchemas() []map[string]any {
 				"properties": map[string]any{
 					"to_run_id": map[string]any{"type": "string"},
 					"message":   map[string]any{"type": "string"},
+					"role":      map[string]any{"type": "string", "description": "Role to display on the receiving side (defaults to agent)"},
 				},
 				"required": []string{"to_run_id", "message"},
 			},

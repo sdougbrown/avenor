@@ -262,8 +262,11 @@ func TestRenderAgentMessageFallback(t *testing.T) {
 		Payload:   json.RawMessage(`not valid json`),
 	}
 	got := renderControlMessage(msg)
-	if !bytes.Contains([]byte(got), []byte("Message from fallback_run")) {
+	if !bytes.Contains([]byte(got), []byte("Message from another agent")) {
 		t.Fatalf("expected fallback render, got: %s", got)
+	}
+	if bytes.Contains([]byte(got), []byte("fallback_run")) {
+		t.Fatalf("fallback render leaked run id: %s", got)
 	}
 }
 
@@ -393,6 +396,10 @@ func TestToolListIncludesAvenorSend(t *testing.T) {
 		if m["name"] == "avenor_send" {
 			found = true
 			schema := m["inputSchema"].(map[string]any)
+			props := schema["properties"].(map[string]any)
+			if _, ok := props["role"]; !ok {
+				t.Fatal("avenor_send schema missing optional role property")
+			}
 			req := schema["required"].([]any)
 			if len(req) != 2 || req[0] != "to_run_id" || req[1] != "message" {
 				t.Fatalf("avenor_send required fields = %v, want [to_run_id message]", req)
@@ -455,8 +462,8 @@ func TestAvenorSendToolCall(t *testing.T) {
 	result := responses[1]["result"].(map[string]any)
 	content := result["content"].([]any)
 	text := content[0].(map[string]any)["text"].(string)
-	if text != "ok" {
-		t.Fatalf("avenor_send result text = %q, want ok", text)
+	if text != `sent message to run "target_run"` {
+		t.Fatalf("avenor_send result text = %q", text)
 	}
 	// Check sent body shape
 	if sentBody["type"] != "agent_message" {
@@ -521,8 +528,8 @@ func TestAvenorUpsendToolCallIncludesRole(t *testing.T) {
 	result := responses[1]["result"].(map[string]any)
 	content := result["content"].([]any)
 	text := content[0].(map[string]any)["text"].(string)
-	if text != "ok" {
-		t.Fatalf("avenor_upsend result text = %q, want ok", text)
+	if text != `sent upward message to run "parent_run"` {
+		t.Fatalf("avenor_upsend result text = %q", text)
 	}
 	payload := sentBody["payload"].(map[string]any)
 	if payload["role"] != "reviewer" {
