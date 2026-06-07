@@ -65,12 +65,7 @@ func NewClient(ctx context.Context, cfg ClientConfig) (*Client, error) {
 		args = append(args, "--cwd", absDir)
 	}
 	cmd := exec.CommandContext(ctx, cfg.Bin, args...)
-	cmd.Env = os.Environ()
-	if len(cfg.Env) > 0 {
-		for key, value := range cfg.Env {
-			cmd.Env = append(cmd.Env, key+"="+value)
-		}
-	}
+	cmd.Env = mergeEnviron(os.Environ(), cfg.Env)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -350,6 +345,33 @@ func readFrame(reader *bufio.Reader) ([]byte, error) {
 		return readFrame(reader)
 	}
 	return trimmed, nil
+}
+
+// mergeEnviron returns a copy of base with overrides applied. Keys present in
+// overrides replace existing entries in base; new keys are appended. This
+// prevents duplicate env vars where the caller-provided value must win (e.g.
+// OPENCODE_CONFIG).
+func mergeEnviron(base []string, overrides map[string]string) []string {
+	if len(overrides) == 0 {
+		return base
+	}
+	out := make([]string, len(base))
+	copy(out, base)
+	replaced := make(map[string]bool, len(overrides))
+	for i, entry := range out {
+		if idx := strings.IndexByte(entry, '='); idx > 0 {
+			if _, ok := overrides[entry[:idx]]; ok {
+				out[i] = entry[:idx] + "=" + overrides[entry[:idx]]
+				replaced[entry[:idx]] = true
+			}
+		}
+	}
+	for key, value := range overrides {
+		if !replaced[key] {
+			out = append(out, key+"="+value)
+		}
+	}
+	return out
 }
 
 func parseContentLength(header []byte) (int, error) {

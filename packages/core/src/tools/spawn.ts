@@ -58,7 +58,7 @@ export async function spawnTool(args: {
   }
 
   const sup = await Supervisor.get()
-  await sup.spawn({
+  const runInfo = await sup.spawn({
     agent: args.agent,
     prompt: args.prompt,
     prompt_file: args.promptFile,
@@ -72,5 +72,11 @@ export async function spawnTool(args: {
     parent_run_id: args.parent_run_id,
   })
 
-  return { run_id: runId, label, supervisor_id: sup.supervisorId }
+  return {
+    run_id: runId,
+    label,
+    supervisor_id: sup.supervisorId,
+    broker_url: runInfo.brokerUrl,
+    parent_token: runInfo.parentToken,
+  }
 }

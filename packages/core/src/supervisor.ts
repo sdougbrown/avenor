@@ -15,6 +15,8 @@ export interface RunInfo {
   eventLogPath: string
   runtimeId?: string
   sessionId?: string
+  brokerUrl?: string
+  parentToken?: string
 }
 
 export interface SupervisorOptions {
@@ -272,6 +274,8 @@ export class Supervisor {
       eventLogPath: (result.on_event as string) ?? eventLogPath,
       runtimeId: result.runtime_id as string | undefined,
       sessionId: result.session_id as string | undefined,
+      brokerUrl: result.broker_url as string | undefined,
+      parentToken: result.parent_token as string | undefined,
     }
 
     this.runs.set(runInfo.label, runInfo)

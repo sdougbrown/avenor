@@ -83,7 +83,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
   let parentRunId = ''
   let parentToken = ''
   let brokerUrl = ''
-  let channelPolling = false
+  let channelPolling: Promise<void> | null = null
 
   function ensureParentRunId(): string {
     if (!parentRunId) {
@@ -131,41 +131,55 @@ export const AvenorPlugin: Plugin = async (ctx) => {
 
   // ── Channel message polling ─────────────────────────────────────────────
 
-  async function pollChannelMessages(sessionId: string): Promise<void> {
-    if (channelPolling || !brokerUrl || !parentRunId || !parentToken) return
-    channelPolling = true
-    while (true) {
-      await sleep(POLL_INTERVAL_MS)
-      let msgs: any[]
-      try {
-        const resp = await fetch(`${brokerUrl}/poll-control`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ run_id: parentRunId, token: parentToken }),
-        })
-        if (!resp.ok) continue
-        msgs = await resp.json()
-      } catch {
-        continue
-      }
-      for (const msg of (msgs ?? [])) {
-        if (msg.type !== 'agent_message') continue
-        let payload: any
-        try { payload = typeof msg.payload === 'string' ? JSON.parse(msg.payload) : msg.payload } catch { continue }
-        const text = typeof payload?.message === 'string' ? payload.message : ''
-        if (!text) continue
-        const from = payload.from_run_id ?? msg.from_run_id ?? 'unknown'
-        const role = payload.role ?? ''
-        const attribution = role ? `**📨 agent-${role}**` : '**📨 agent**'
-        const channelText = `${attribution} \`${from}\`:\n> ${text.trim()}\n`
-        await ctx.client.session.promptAsync({
-          path: { id: sessionId },
-          body: { parts: [{ type: 'text', text: channelText }] },
-        }).catch(() => {})
-      }
-    }
-  }
+   async function pollChannelMessages(sessionId: string): Promise<void> {
+     if (channelPolling || !brokerUrl || !parentRunId || !parentToken) return
 
+     let consecutiveErrors = 0
+     const MAX_CONSECUTIVE_ERRORS = 10
+
+     channelPolling = (async () => {
+       while (consecutiveErrors < MAX_CONSECUTIVE_ERRORS) {
+         await sleep(POLL_INTERVAL_MS)
+         let msgs: any[]
+         try {
+           const resp = await fetch(`${brokerUrl}/poll-control`, {
+             method: 'POST',
+             headers: { 'Content-Type': 'application/json' },
+             body: JSON.stringify({ run_id: parentRunId, token: parentToken }),
+           })
+           if (!resp.ok) {
+             consecutiveErrors++
+             continue
+           }
+           msgs = await resp.json()
+           consecutiveErrors = 0
+         } catch {
+           consecutiveErrors++
+           continue
+         }
+         for (const msg of (msgs ?? [])) {
+           if (msg.type !== 'agent_message') continue
+           let payload: any
+           try { payload = typeof msg.payload === 'string' ? JSON.parse(msg.payload) : msg.payload } catch { continue }
+           const text = typeof payload?.message === 'string' ? payload.message : ''
+           if (!text) continue
+           const from = payload.from_run_id ?? msg.from_run_id ?? 'unknown'
+           const role = payload.role ?? ''
+           const attribution = role ? `**📨 agent-${role}**` : '**📨 agent**'
+           const channelText = `${attribution} \`${from}\`:\n> ${text.trim()}\n`
+           try {
+             await ctx.client.session.promptAsync({
+               path: { id: sessionId },
+               body: { parts: [{ type: 'text', text: channelText }] },
+             })
+           } catch {
+             // Session likely gone — stop polling.
+             return
+           }
+         }
+        }
+      })()
+   }
   return {
     // ── Lifecycle ────────────────────────────────────────────────────────────
 
@@ -268,13 +282,14 @@ export const AvenorPlugin: Plugin = async (ctx) => {
             parent_run_id: parentRunId,
           })
 
-          // Capture broker info from first spawn for channel messaging.
-          if ((result as any).broker_url && !brokerUrl) {
-            brokerUrl = (result as any).broker_url
-          }
-          if ((result as any).parent_token && !parentToken) {
-            parentToken = (result as any).parent_token
-          }
+           // Capture broker info for channel messaging. Update on every spawn
+           // so a different supervisor can take over if needed.
+           if (result.broker_url) {
+             brokerUrl = result.broker_url
+           }
+           if (result.parent_token) {
+             parentToken = result.parent_token
+           }
 
           const supervisorId = result.supervisor_id || args.supervisor_id
 
@@ -288,7 +303,10 @@ export const AvenorPlugin: Plugin = async (ctx) => {
           })
 
           if (!args.wait) {
-            return result as any
+            return {
+              title: `${result.label} — dispatched`,
+              output: `Dispatched "${result.label}" (run_id: ${result.run_id}). Call avenor_status with run_id to check progress, or wait for the completion notification.`,
+            }
           }
 
           // ── Blocking mode: live updates via context.metadata ──────────────
@@ -375,10 +393,11 @@ export const AvenorPlugin: Plugin = async (ctx) => {
           supervisor_id: z.string().optional().describe('Reuse an existing supervisor by socket path'),
         },
         async execute(args, _context) {
-          return statusTool({
+          const result = await statusTool({
             runId: args.run_id,
             supervisorId: args.supervisor_id,
-          }) as any
+          })
+          return JSON.stringify(result, null, 2)
         },
       }),
 
@@ -392,12 +411,13 @@ export const AvenorPlugin: Plugin = async (ctx) => {
           supervisor_id: z.string().optional().describe('Reuse an existing supervisor by socket path'),
         },
         async execute(args, _context) {
-          return answerPermissionTool({
+          const result = await answerPermissionTool({
             runId: args.run_id,
             optionId: args.option_id,
             requestId: args.request_id,
             supervisorId: args.supervisor_id,
-          }) as any
+          })
+          return JSON.stringify(result, null, 2)
         },
       }),
 
@@ -410,12 +430,13 @@ export const AvenorPlugin: Plugin = async (ctx) => {
           supervisor_id: z.string().optional().describe('Reuse an existing supervisor by socket path'),
         },
         async execute(args, _context) {
-          return followUpTool({
+          const result = await followUpTool({
             runId: args.run_id,
             message: args.message,
             label: args.label,
             supervisorId: args.supervisor_id,
-          }) as any
+          })
+          return JSON.stringify(result, null, 2)
         },
       }),
 
@@ -428,12 +449,13 @@ export const AvenorPlugin: Plugin = async (ctx) => {
           supervisor_id: z.string().optional().describe('Reuse an existing supervisor by socket path'),
         },
         async execute(args, _context) {
-          return eventsTool({
+          const result = await eventsTool({
             runId: args.run_id,
             types: args.types,
             limit: args.limit,
             supervisorId: args.supervisor_id,
-          }) as any
+          })
+          return JSON.stringify(result, null, 2)
         },
       }),
 
@@ -444,10 +466,11 @@ export const AvenorPlugin: Plugin = async (ctx) => {
           force: z.boolean().optional().describe('Force shutdown instead of graceful'),
         },
         async execute(args, _context) {
-          return shutdownTool({
+          const result = await shutdownTool({
             supervisorId: args.supervisor_id,
             force: args.force,
-          }) as any
+          })
+          return JSON.stringify(result, null, 2)
         },
       }),
     },
