@@ -510,7 +510,7 @@ func TestScanTerminalTickActiveEmitsNothing(t *testing.T) {
 	}
 	p.sessions[s.SessionID] = s
 
-	p.scanTerminalTick(s)
+	s.ScanTerminalTick()
 
 	select {
 	case ev := <-s.Events:
@@ -600,7 +600,7 @@ func TestScanTerminalTickIdleEmitsWaitingWithKind(t *testing.T) {
 			}
 			p.sessions[s.SessionID] = s
 
-			p.scanTerminalTick(s)
+			s.ScanTerminalTick()
 
 			select {
 			case ev := <-s.Events:
@@ -678,7 +678,7 @@ func TestScanTicksRespectFinishedAndPromptedGuards(t *testing.T) {
 		s.Prompted = true
 		s.Finished = true
 		p.sessions[s.SessionID] = s
-		p.scanTerminalTick(s)
+		s.ScanTerminalTick()
 		assertNoEmit(t, s)
 	})
 
@@ -687,7 +687,7 @@ func TestScanTicksRespectFinishedAndPromptedGuards(t *testing.T) {
 		s := newSession(t)
 		s.Prompted = false
 		p.sessions[s.SessionID] = s
-		p.scanTerminalTick(s)
+		s.ScanTerminalTick()
 		assertNoEmit(t, s)
 	})
 }

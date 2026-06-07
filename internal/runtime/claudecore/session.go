@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime/claudecore/terminal"
 )
@@ -78,6 +79,82 @@ func (s *Session) Emit(ev events.Event) {
 	select {
 	case s.Events <- ev:
 	default:
+	}
+}
+
+func (s *Session) ScanTerminalTick() {
+	state, err := ScanTerminal(s.Ctx, s.Term)
+	if err != nil {
+		return
+	}
+
+	s.Mu.Lock()
+	prompted := s.Prompted
+	finished := s.Finished
+	currentPerm := s.PendingTerminalPerm
+	s.Mu.Unlock()
+
+	if finished || !prompted {
+		return
+	}
+
+	switch state {
+	case PaneStatePermission:
+		s.MarkActive()
+
+		// If we already brokered this permission, wait for resolution.
+		if currentPerm != nil {
+			return
+		}
+
+		// Parse the permission prompt and broker it.
+		out, err := s.Term.Capture(s.Ctx)
+		if err != nil {
+			return
+		}
+		tmuxPerm := ParseTerminalPermission(string(out))
+		if tmuxPerm == nil {
+			return
+		}
+		tmuxPerm.CreatedAt = time.Now()
+		tmuxPerm.RequestID = uuid.New().String()
+
+		s.Mu.Lock()
+		s.PendingTerminalPerm = tmuxPerm
+		s.Mu.Unlock()
+
+		// Emit the brokered permission request.
+		opts := make([]map[string]any, len(tmuxPerm.Options))
+		for i, o := range tmuxPerm.Options {
+			opts[i] = map[string]any{"id": o.ID, "label": o.Label}
+		}
+		s.Events <- events.Event{
+			Event:     "permission.request",
+			SessionID: s.SessionID,
+			Fields: map[string]any{
+				"request_id":  tmuxPerm.RequestID,
+				"source":      s.Term.Kind(),
+				"description": tmuxPerm.Prompt,
+				"options":     opts,
+			},
+		}
+
+	case PaneStateActive:
+		// Mark the session as active but don't emit a working event from the
+		// pane: scanTranscriptTick is the authoritative working signal (it
+		// fires only when Claude actually writes new JSONL records, where
+		// pane-scrape "active" is a 500ms heartbeat that floods consumers).
+		s.MarkActive()
+	case PaneStateIdle:
+		// Idle means Claude is at the prompt, waiting for next input.
+		// Don't end the session — the channel supports multi-turn.
+		// Clear any stale permission.
+		if currentPerm != nil {
+			s.Mu.Lock()
+			s.PendingTerminalPerm = nil
+			s.Mu.Unlock()
+		}
+		s.Emit(events.Event{Event: "agent.status", SessionID: s.SessionID, Fields: map[string]any{"phase": "waiting", "source": s.Term.Kind()}})
 	}
 }
 
