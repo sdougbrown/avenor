@@ -55,7 +55,23 @@ function translateStatus(
   const sentinelStatus = sentinelData?._status
 
   switch (rawPhase) {
-    case 'idle':
+    case 'idle': {
+      if (sentinelStatus) {
+        switch (sentinelStatus) {
+          case 'DONE':
+            return 'done'
+          case 'FAILED':
+            return 'failed'
+          case 'TIMEOUT':
+            return 'timeout'
+          case 'KILLED':
+            return 'killed'
+          case 'BLOCKED':
+            return 'failed'
+        }
+      }
+      return 'running'
+    }
     case 'running':
       return 'running'
     case 'ended': {
