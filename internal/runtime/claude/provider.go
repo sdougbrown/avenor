@@ -23,13 +23,15 @@ const (
 	paneScanInterval       = 500 * time.Millisecond
 	transcriptScanInterval = 500 * time.Millisecond
 	promptSubmitRetryDelay = 750 * time.Millisecond
+	defaultCancelGrace     = 3 * time.Second
 )
 
 type Provider struct {
-	opts     runtime.StartOptions
-	mu       sync.Mutex
-	sessions map[string]*claudecore.Session
-	launcher terminal.Launcher
+	opts        runtime.StartOptions
+	mu          sync.Mutex
+	sessions    map[string]*claudecore.Session
+	launcher    terminal.Launcher
+	cancelGrace time.Duration
 }
 
 var _ runtime.Provider = (*Provider)(nil)
@@ -47,9 +49,10 @@ func defaultLauncher() terminal.Launcher {
 
 func NewWithOptions(opts runtime.StartOptions) runtime.Provider {
 	return &Provider{
-		opts:     opts,
-		sessions: make(map[string]*claudecore.Session),
-		launcher: defaultLauncher(),
+		opts:        opts,
+		sessions:    make(map[string]*claudecore.Session),
+		launcher:    defaultLauncher(),
+		cancelGrace: defaultCancelGrace,
 	}
 }
 
@@ -169,7 +172,7 @@ func (p *Provider) runSession(ctx context.Context, s *claudecore.Session) {
 		p.mu.Unlock()
 	}()
 	defer func() {
-		_ = s.Term.Kill(ctx)
+		_ = s.Term.Kill(context.Background())
 	}()
 
 	sessionGone := make(chan struct{})
@@ -195,18 +198,17 @@ func (p *Provider) runSession(ctx context.Context, s *claudecore.Session) {
 	for {
 		select {
 		case <-ctx.Done():
-			_ = s.Term.Kill(ctx)
 			return
 		case <-sessionGone:
 			if s.MarkFinished() {
-				s.Events <- events.Event{
+				s.Emit(events.Event{
 					Event:     "session.end",
 					SessionID: s.SessionID,
 					Fields: map[string]any{
 						"status":      "done",
 						"stop_reason": "end_turn",
 					},
-				}
+				})
 			}
 			return
 		case <-paneTick.C:
@@ -308,7 +310,61 @@ func (p *Provider) Cancel(ctx context.Context, sessionID string) error {
 	if !ok {
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
-	_ = s.Term.Kill(s.Ctx)
+
+	_ = s.SendCancelKeys(ctx)
+
+	cancelDeadline := time.NewTimer(p.cancelGrace)
+	defer cancelDeadline.Stop()
+	pollTick := time.NewTicker(150 * time.Millisecond)
+	defer pollTick.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return p.forceCancel(s)
+		case <-s.Ctx.Done():
+			// runSession already exited (terminal died, sessionGone, etc.).
+			// MarkFinished will lose the race; forceCancel returns nil.
+			return p.forceCancel(s)
+		case <-cancelDeadline.C:
+			return p.forceCancel(s)
+		case <-pollTick.C:
+			state, err := claudecore.ScanTerminal(ctx, s.Term)
+			if err != nil {
+				continue
+			}
+			if state == claudecore.PaneStateIdle {
+				if !s.MarkFinished() {
+					return nil
+				}
+				s.Emit(events.Event{
+					Event:     "session.end",
+					SessionID: s.SessionID,
+					Fields: map[string]any{
+						"status":      "done",
+						"stop_reason": "cancelled",
+					},
+				})
+				_ = s.Term.Kill(context.Background())
+				return nil
+			}
+		}
+	}
+}
+
+func (p *Provider) forceCancel(s *claudecore.Session) error {
+	if !s.MarkFinished() {
+		return nil
+	}
+	s.Emit(events.Event{
+		Event:     "session.end",
+		SessionID: s.SessionID,
+		Fields: map[string]any{
+			"status":      "done",
+			"stop_reason": "cancelled_forced",
+		},
+	})
+	_ = s.Term.Kill(context.Background())
 	return nil
 }
 

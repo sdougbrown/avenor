@@ -82,6 +82,10 @@ func (s *Session) Emit(ev events.Event) {
 	}
 }
 
+func (s *Session) SendCancelKeys(ctx context.Context) error {
+	return s.Term.SendKeys(ctx, terminal.KeyEsc, terminal.KeyEsc)
+}
+
 func (s *Session) ScanTerminalTick() {
 	state, err := ScanTerminal(s.Ctx, s.Term)
 	if err != nil {

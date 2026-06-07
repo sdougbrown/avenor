@@ -2,6 +2,7 @@ package claude
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -241,18 +242,230 @@ func TestCancelNotFound(t *testing.T) {
 	}
 }
 
-func TestCancelReturnsNilForLiveSession(t *testing.T) {
-	p := &Provider{sessions: make(map[string]*claudecore.Session)}
+func TestCancelSendsEscThenWaitsForIdle(t *testing.T) {
+	p := &Provider{
+		sessions:    make(map[string]*claudecore.Session),
+		cancelGrace: 500 * time.Millisecond,
+	}
+	// First poll sees active; subsequent polls see idle (queue sticks on last).
+	term := terminal.NewFakeSessionQueue("test-term", 1, []string{
+		"✻ Churning… (2m 17s · ↓ 7.2k tokens)",
+		"❯ ready",
+	})
+
 	s := claudecore.NewSession(context.Background(), claudecore.SessionOptions{
-		SessionID: "ses-live-cancel",
+		SessionID: "ses-cancel-idle",
 		EventsBuf: 8,
 	})
-	s.Term = terminal.NewFakeSession("test-term", 1, "ready")
+	s.Term = term
 	p.sessions[s.SessionID] = s
 	defer s.CancelFn()
 
 	if err := p.Cancel(context.Background(), s.SessionID); err != nil {
 		t.Fatalf("Cancel: %v", err)
+	}
+
+	// Verify Esc Esc was sent.
+	sends := term.SendCalls()
+	if len(sends) != 1 {
+		t.Fatalf("SendCalls() len = %d, want 1", len(sends))
+	}
+	if len(sends[0]) != 2 || sends[0][0] != string(terminal.KeyEsc) || sends[0][1] != string(terminal.KeyEsc) {
+		t.Fatalf("keys sent = %v, want [Esc Esc]", sends[0])
+	}
+
+	// Verify session.end with stop_reason=cancelled was emitted.
+	var found bool
+	for len(s.Events) > 0 {
+		ev := <-s.Events
+		if ev.Event == "session.end" {
+			if ev.Fields["stop_reason"] != "cancelled" {
+				t.Fatalf("stop_reason = %v, want cancelled", ev.Fields["stop_reason"])
+			}
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("no session.end event with stop_reason=cancelled emitted")
+	}
+
+	s.Mu.Lock()
+	finished := s.Finished
+	s.Mu.Unlock()
+	if !finished {
+		t.Fatal("session.Finished should be true after Cancel")
+	}
+}
+
+func TestCancelForcesKillOnTimeout(t *testing.T) {
+	t.Parallel()
+	p := &Provider{
+		sessions:    make(map[string]*claudecore.Session),
+		cancelGrace: 200 * time.Millisecond,
+	}
+	// Stays active forever — never returns idle.
+	term := terminal.NewFakeSession("test-term", 1, "✻ Churning… (2m 17s · ↓ 7.2k tokens)")
+	s := claudecore.NewSession(context.Background(), claudecore.SessionOptions{
+		SessionID: "ses-cancel-forced",
+		EventsBuf: 8,
+	})
+	s.Term = term
+	p.sessions[s.SessionID] = s
+	defer s.CancelFn()
+
+	start := time.Now()
+	if err := p.Cancel(context.Background(), s.SessionID); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	// Should complete close to cancelGrace (200ms), well under 1s.
+	if elapsed > time.Second {
+		t.Fatalf("Cancel took %v, want ≤1s", elapsed)
+	}
+
+	// Drain events to find session.end.
+	var foundForced bool
+drain:
+	for {
+		select {
+		case ev, ok := <-s.Events:
+			if !ok {
+				break drain
+			}
+			if ev.Event == "session.end" && ev.Fields["stop_reason"] == "cancelled_forced" {
+				foundForced = true
+			}
+		default:
+			break drain
+		}
+	}
+	if !foundForced {
+		t.Fatal("no session.end with stop_reason=cancelled_forced emitted")
+	}
+
+	s.Mu.Lock()
+	finished := s.Finished
+	s.Mu.Unlock()
+	if !finished {
+		t.Fatal("session.Finished should be true after forced cancel")
+	}
+}
+
+func TestCancelOnCanceledCtx(t *testing.T) {
+	t.Parallel()
+	p := &Provider{
+		sessions:    make(map[string]*claudecore.Session),
+		cancelGrace: 5 * time.Second,
+	}
+	term := terminal.NewFakeSession("test-term", 1, "✻ Churning…")
+	s := claudecore.NewSession(context.Background(), claudecore.SessionOptions{
+		SessionID: "ses-ctx-cancelled",
+		EventsBuf: 8,
+	})
+	s.Term = term
+	p.sessions[s.SessionID] = s
+	defer s.CancelFn()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	if err := p.Cancel(ctx, s.SessionID); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("Cancel with cancelled ctx took %v, want <500ms", elapsed)
+	}
+
+	var foundForced bool
+drain:
+	for {
+		select {
+		case ev, ok := <-s.Events:
+			if !ok {
+				break drain
+			}
+			if ev.Event == "session.end" && ev.Fields["stop_reason"] == "cancelled_forced" {
+				foundForced = true
+			}
+		default:
+			break drain
+		}
+	}
+	if !foundForced {
+		t.Fatal("no session.end with stop_reason=cancelled_forced emitted")
+	}
+}
+
+func TestCancelSendKeysErrorStillForcedKills(t *testing.T) {
+	t.Parallel()
+	p := &Provider{
+		sessions:    make(map[string]*claudecore.Session),
+		cancelGrace: 200 * time.Millisecond,
+	}
+	term := terminal.NewFakeSession("test-term", 1, "✻ Churning…")
+	term.SetSendErr(fmt.Errorf("terminal dead"))
+	s := claudecore.NewSession(context.Background(), claudecore.SessionOptions{
+		SessionID: "ses-sendkeys-err",
+		EventsBuf: 8,
+	})
+	s.Term = term
+	p.sessions[s.SessionID] = s
+	defer s.CancelFn()
+
+	if err := p.Cancel(context.Background(), s.SessionID); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+
+	var foundForced bool
+drain:
+	for {
+		select {
+		case ev, ok := <-s.Events:
+			if !ok {
+				break drain
+			}
+			if ev.Event == "session.end" && ev.Fields["stop_reason"] == "cancelled_forced" {
+				foundForced = true
+			}
+		default:
+			break drain
+		}
+	}
+	if !foundForced {
+		t.Fatal("no session.end with stop_reason=cancelled_forced emitted")
+	}
+}
+
+func TestCancelSkipsEmitIfAlreadyFinished(t *testing.T) {
+	p := &Provider{
+		sessions:    make(map[string]*claudecore.Session),
+		cancelGrace: 200 * time.Millisecond,
+	}
+	// Idle immediately — would trigger the success path, but Finished is pre-set.
+	term := terminal.NewFakeSession("test-term", 1, "❯ ready")
+	s := claudecore.NewSession(context.Background(), claudecore.SessionOptions{
+		SessionID: "ses-already-done",
+		EventsBuf: 8,
+	})
+	s.Term = term
+	s.Mu.Lock()
+	s.Finished = true
+	s.Mu.Unlock()
+	p.sessions[s.SessionID] = s
+	defer s.CancelFn()
+
+	if err := p.Cancel(context.Background(), s.SessionID); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+
+	// Events channel should be empty — no session.end emitted.
+	select {
+	case ev := <-s.Events:
+		t.Fatalf("unexpected event emitted: %+v", ev)
+	default:
 	}
 }
 
