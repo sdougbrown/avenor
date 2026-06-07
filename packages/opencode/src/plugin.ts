@@ -1,6 +1,7 @@
 import type { Plugin, ToolContext } from '@opencode-ai/plugin'
 import { tool } from '@opencode-ai/plugin'
 import { z } from 'zod'
+import * as crypto from 'node:crypto'
 import {
   spawnTool, statusTool, eventsTool, answerPermissionTool,
   followUpTool, shutdownTool,
@@ -78,6 +79,18 @@ export const AvenorPlugin: Plugin = async (ctx) => {
   const trackedRuns = new Map<string, TrackedRun>()
   // Reverse index: opencode sessionId → avenor runId (for permission routing)
   const sessionIdToRunId = new Map<string, string>()
+  // Channel-messaging state for receiving messages from spawned children.
+  let parentRunId = ''
+  let parentToken = ''
+  let brokerUrl = ''
+  let channelPolling = false
+
+  function ensureParentRunId(): string {
+    if (!parentRunId) {
+      parentRunId = crypto.randomUUID()
+    }
+    return parentRunId
+  }
 
   function registerSessionId(sessionId: string | undefined, runId: string): void {
     if (sessionId && !sessionIdToRunId.has(sessionId)) {
@@ -116,6 +129,43 @@ export const AvenorPlugin: Plugin = async (ctx) => {
     }
   }
 
+  // ── Channel message polling ─────────────────────────────────────────────
+
+  async function pollChannelMessages(sessionId: string): Promise<void> {
+    if (channelPolling || !brokerUrl || !parentRunId || !parentToken) return
+    channelPolling = true
+    while (true) {
+      await sleep(POLL_INTERVAL_MS)
+      let msgs: any[]
+      try {
+        const resp = await fetch(`${brokerUrl}/poll-control`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ run_id: parentRunId, token: parentToken }),
+        })
+        if (!resp.ok) continue
+        msgs = await resp.json()
+      } catch {
+        continue
+      }
+      for (const msg of (msgs ?? [])) {
+        if (msg.type !== 'agent_message') continue
+        let payload: any
+        try { payload = typeof msg.payload === 'string' ? JSON.parse(msg.payload) : msg.payload } catch { continue }
+        const text = typeof payload?.message === 'string' ? payload.message : ''
+        if (!text) continue
+        const from = payload.from_run_id ?? msg.from_run_id ?? 'unknown'
+        const role = payload.role ?? ''
+        const attribution = role ? `**📨 agent-${role}**` : '**📨 agent**'
+        const channelText = `${attribution} \`${from}\`:\n> ${text.trim()}\n`
+        await ctx.client.session.promptAsync({
+          path: { id: sessionId },
+          body: { parts: [{ type: 'text', text: channelText }] },
+        }).catch(() => {})
+      }
+    }
+  }
+
   return {
     // ── Lifecycle ────────────────────────────────────────────────────────────
 
@@ -124,6 +174,8 @@ export const AvenorPlugin: Plugin = async (ctx) => {
       const { sessionID } = (
         event as { type: 'session.idle'; properties: { sessionID: string } }
       ).properties
+
+      pollChannelMessages(sessionID).catch(console.error)
 
       for (const run of trackedRuns.values()) {
         if (run.orchestratorSessionId === sessionID && !run.monitoring) {
@@ -201,6 +253,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
           ),
         },
         async execute(args, context: ToolContext) {
+          const parentRunId = ensureParentRunId()
           const result = await spawnTool({
             agent: args.agent,
             prompt: args.prompt,
@@ -212,7 +265,16 @@ export const AvenorPlugin: Plugin = async (ctx) => {
             backend: args.backend,
             serverUrl: args.server_url,
             supervisorId: args.supervisor_id,
+            parent_run_id: parentRunId,
           })
+
+          // Capture broker info from first spawn for channel messaging.
+          if ((result as any).broker_url && !brokerUrl) {
+            brokerUrl = (result as any).broker_url
+          }
+          if ((result as any).parent_token && !parentToken) {
+            parentToken = (result as any).parent_token
+          }
 
           const supervisorId = result.supervisor_id || args.supervisor_id
 

@@ -752,6 +752,27 @@ func (b *Broker) CreateRun(runID string) (string, error) {
 	return st.Token, nil
 }
 
+// EnsureRun registers a new run if one does not already exist for the
+// given runID. Returns the run's token (existing or newly created) and
+// whether the run was newly created.
+func (b *Broker) EnsureRun(runID string) (string, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if st, exists := b.runs[runID]; exists {
+		return st.Token, false
+	}
+	st := &RunState{
+		RunID:               runID,
+		Token:               MakeToken(),
+		LastSeen:            time.Now(),
+		Notify:              make(chan struct{}, 1),
+		PermissionRequests:  make(map[string]*PermissionState),
+		PermissionDecisions: make(map[string]string),
+	}
+	b.runs[runID] = st
+	return st.Token, true
+}
+
 // DeleteRun removes a run from the broker. Safe to call even if the run
 // does not exist.
 func (b *Broker) DeleteRun(runID string) {

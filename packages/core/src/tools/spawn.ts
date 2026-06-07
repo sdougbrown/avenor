@@ -16,7 +16,8 @@ export async function spawnTool(args: {
   serverUrl?: string
   sessionId?: string
   supervisorId?: string
-}): Promise<{ run_id: string; label: string; supervisor_id: string }> {
+  parent_run_id?: string
+}): Promise<{ run_id: string; label: string; supervisor_id: string; broker_url?: string; parent_token?: string }> {
   const runId = crypto.randomUUID()
   const label = args.label ?? runId
 
@@ -39,12 +40,15 @@ export async function spawnTool(args: {
         session_id: args.sessionId,
         sentinel_file: sentinelPath,
         on_event: eventLogPath,
+        parent_run_id: args.parent_run_id,
       })
 
       return {
         run_id: (result.runtime_id as string | undefined) ?? runId,
         label,
         supervisor_id: supervisorId,
+        broker_url: result.broker_url as string | undefined,
+        parent_token: result.parent_token as string | undefined,
       }
     } finally {
       if (!isSingleton) {
@@ -65,6 +69,7 @@ export async function spawnTool(args: {
     backend: args.backend,
     server_url: args.serverUrl,
     session_id: args.sessionId,
+    parent_run_id: args.parent_run_id,
   })
 
   return { run_id: runId, label, supervisor_id: sup.supervisorId }
