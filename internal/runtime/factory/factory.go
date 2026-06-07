@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/runtime/claude"
 	"github.com/sdougbrown/avenor/internal/runtime/claudechannel"
 	"github.com/sdougbrown/avenor/internal/runtime/codexappserver"
 	"github.com/sdougbrown/avenor/internal/runtime/cursoracp"
@@ -30,6 +31,8 @@ func NewProvider(startOpts runtime.StartOptions, backend string) (runtime.Provid
 		return pi.NewWithOptions(startOpts), nil
 	case "pony":
 		return pony.NewWithOptions(startOpts), nil
+	case "claude":
+		return claude.NewWithOptions(startOpts), nil
 	case "claude-channel":
 		return claudechannel.NewWithOptions(startOpts), nil
 	default:
