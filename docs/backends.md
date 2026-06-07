@@ -13,26 +13,87 @@ avenor --backend codex-app-server --prompt "say hi"
 avenor --backend gemini-acp --prompt "say hi"
 avenor --backend cursor-acp --prompt "say hi"
 avenor --backend pi --model anthropic/claude-sonnet-4-5 --prompt "say hi"
+avenor --backend claude --prompt "say hi"
 avenor --backend claude-channel --prompt "say hi"
 ```
 
-`claude-channel` has an extra local dependency: it requires `tmux` on `PATH` because Avenor launches Claude Code inside a real interactive tmux session.
+Both `claude` and `claude-channel` require `claude` to be on `PATH`. `claude-channel` additionally requires `tmux` on `PATH` and uses `--dangerously-load-development-channels` to open a broker channel; `claude` requires neither.
 
 ## Capability matrix
 
-| Capability | opencode-acp | opencode-http | codex-app-server | gemini-acp | cursor-acp | pi | claude-channel |
-|---|---|---|---|---|---|---|---|
-| New sessions | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Session resume | ✓ | ✓ | ✓ | — | — | ✓ | ✗ |
-| Prompt execution | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓  |
-| Cancel | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓  |
-| Event streaming | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Permission relay | ✓ | ✗ | ✓ | ✓ | ✓ | ✓ | ⚠  |
-| Model selection | ✓ | ✓ | ✓ | ✗ | ✗ | ✓ | ✓  |
-| External server URL | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
-| Subprocess discovery | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ |
+| Capability | opencode-acp | opencode-http | codex-app-server | gemini-acp | cursor-acp | pi | claude | claude-channel |
+|---|---|---|---|---|---|---|---|---|
+| New sessions | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Session resume | ✓ | ✓ | ✓ | — | — | ✓ | ⚠ | ✗ |
+| Prompt execution | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓  |
+| Cancel | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓  |
+| Event streaming | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Permission relay | ✓ | ✗ | ✓ | ✓ | ✓ | ✓ | ⚠ | ⚠  |
+| Model selection | ✓ | ✓ | ✓ | ✗ | ✗ | ✓ | ✓ | ✓  |
+| External server URL | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| Subprocess discovery | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✓ |
 
 `—` means not verified; `✗` means not supported, `⚠ ` means experimental.
+
+Session resume for `claude` works only when the tmux launcher is in use (`AVENOR_CLAUDE_TERMINAL=tmux`); the default PTY launcher does not support resume.
+
+---
+
+## claude
+
+Channel-less provider for Claude Code. Starts Claude in a terminal session (PTY by default), injects prompts via PTY paste, and reads progress from the JSONL transcript file that Claude writes to `~/.claude/projects/`. No broker, no sidecar, no `.mcp.json` injection, no `--dangerously-load-development-channels`.
+
+### Launcher
+
+Default launcher is PTY. Set `AVENOR_CLAUDE_TERMINAL=tmux` to use tmux instead.
+
+```sh
+# PTY (default)
+avenor --backend claude --prompt "say hi"
+
+# tmux
+AVENOR_CLAUDE_TERMINAL=tmux avenor --backend claude --prompt "say hi"
+```
+
+`AVENOR_CLAUDE_TERMINAL` is shared with `claude-channel`, but the defaults differ: `claude` defaults to PTY, `claude-channel` defaults to tmux.
+
+### Requirements
+
+- Claude Code installed and on `PATH`.
+- `tmux` on `PATH` only when `AVENOR_CLAUDE_TERMINAL=tmux` is set.
+
+### Capabilities
+
+| Capability | Supported |
+|---|---|
+| New sessions | ✓ |
+| Session resume | ⚠ (tmux launcher only) |
+| Prompt execution | ✓ (PTY paste) |
+| Cancel | ✓ (Esc-Esc → pane-scrape idle → forced kill) |
+| Event streaming | ✓ |
+| Permission relay | ⚠ (pane-scrape only, experimental) |
+| Model selection | ✓ (via `--model`) |
+| External server URL | ✗ |
+| Subprocess discovery | ✓ |
+
+### Cancel semantics
+
+`Cancel()` sends Esc-Esc and polls the pane for an idle prompt (up to ~3s). If the pane goes idle, `session.end stop_reason=cancelled` is emitted and the terminal is killed. If the poll times out, the terminal is killed immediately and `session.end stop_reason=cancelled_forced` is emitted.
+
+---
+
+## Choosing between `claude` and `claude-channel`
+
+Use `claude` if:
+- Your org policy blocks research-preview channel flags (`--dangerously-load-development-channels`).
+- You don't need broker-mediated permission/control flow.
+- You want PTY as the default launcher (no tmux required).
+
+Use `claude-channel` if:
+- You need structured, broker-mediated permission and control flow via `claude/channel` MCP push events.
+- You want the richer event surface (`agent.channel_ready`, `agent.prompt_queued`, `agent.report`, `agent.finish`) for orchestration.
+
+Both backends share the same terminal session model, pane-scrape idle detection, and JSONL transcript reader. The difference is whether a broker channel is opened between Avenor and the running Claude process.
 
 ---
 

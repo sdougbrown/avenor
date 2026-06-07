@@ -106,6 +106,25 @@ Example:
 {"event":"avenor.loop.end","run_id":"run_1","exit_reason":"end_turn","iterations_completed":3,"ts":1234567890}
 ```
 
+### claude backend events
+
+The `claude` backend emits a subset of the `claude-channel` event surface. It has no broker or sidecar, so it produces no channel-side events.
+
+Events emitted:
+- `session.start` — carries `backend="claude"`, `dir`, and `dangerously_load=false` (the flag is never set).
+- `session.end` — `stop_reason` is one of `end_turn`, `cancelled`, or `cancelled_forced`. No token usage field (transcript does not expose it).
+- `agent.prompt_submitted` — `delivery` is `"pty"` or `"tmux"` depending on the active launcher.
+- `agent.status` — `phase=working` sourced from `"transcript"` when new JSONL records appear; `phase=waiting` sourced from `"pty"` or `"tmux"` when a pane-scrape detects a permission prompt.
+- `permission.request` — emitted from pane-scrape when a permission dialog is detected.
+
+Events **not** emitted by `claude` (channel-only): `agent.channel_ready`, `agent.prompt_queued`, `agent.report`, `agent.reply`, `agent.finish`.
+
+The `source` field on `agent.status` is limited to `"transcript"`, `"pty"`, and `"tmux"` — never `"channel"` or `"sidecar"`.
+
+For the `claude` backend, `session.end` is the authoritative lifecycle signal. There is no `agent.finish` event; use `session.end` to detect completion.
+
+---
+
 ### Claude channel events
 
 The `claude-channel` backend emits a few extra synthesized events so non-Claude controllers can follow the broker-side lifecycle without scraping tmux output. These events are emitted by Avenor, not Claude Code itself.
@@ -253,6 +272,8 @@ for _, ev := range stream {
 ```
 
 For `claude-channel`, prefer broker-derived events over tmux-derived status when both exist. In practice that means `agent.channel_ready`, `agent.prompt_queued`, `agent.prompt_submitted`, `agent.report`, `agent.reply`, `agent.finish`, and `session.end` are the authoritative lifecycle events for orchestrators. `agent.status` remains useful as secondary telemetry, but it should not be the only signal driving control flow.
+
+For `claude`, `session.end` is the only terminal lifecycle event. There is no `agent.finish`. Use `session.end` to detect completion and `agent.status phase=working source=transcript` to track progress.
 
 ## Design notes
 

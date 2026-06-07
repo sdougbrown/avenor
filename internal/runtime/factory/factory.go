@@ -1,3 +1,15 @@
+// Package factory constructs runtime.Provider instances by backend name.
+//
+// Supported backends:
+//   - opencode-acp: spawns opencode acp subprocess, owns lifecycle.
+//   - opencode-http: talks to a running opencode serve instance over HTTP/SSE.
+//   - codex-app-server: spawns Codex app-server subprocess via JSON-RPC over stdio.
+//   - gemini-acp: spawns gemini --acp subprocess, owns lifecycle.
+//   - cursor-acp: spawns agent acp subprocess, owns lifecycle.
+//   - pi: spawns pi --mode rpc subprocess, owns lifecycle.
+//   - pony: test/stub backend.
+//   - claude: channel-less Claude Code backend; PTY by default, AVENOR_CLAUDE_TERMINAL=tmux for tmux.
+//   - claude-channel: broker-channel Claude Code backend; requires tmux; uses --dangerously-load-development-channels.
 package factory
 
 import (
