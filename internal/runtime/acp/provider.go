@@ -22,6 +22,7 @@ type ProviderConfig struct {
 	AppendCWDArg        bool
 	Authenticate        string // optional: if non-empty, call Client.Authenticate with this methodId after Initialize
 	ConfigureSession    func(ctx context.Context, session *Session, opts runtime.StartOptions) error
+	BuildClientEnv      func(opts runtime.StartOptions, runID, brokerToken, brokerAddr string) (map[string]string, func() error)
 }
 
 type Provider struct {
@@ -40,6 +41,8 @@ type Provider struct {
 	appendCWDArg        bool
 	authenticateID      string
 	configureSession    func(ctx context.Context, session *Session, opts runtime.StartOptions) error
+	buildClientEnv      func(opts runtime.StartOptions, runID, brokerToken, brokerAddr string) (map[string]string, func() error)
+	clientEnvCleanup    func() error
 
 	// Broker fields for channel-wrapped prompt injection.
 	broker          *broker.Broker
@@ -65,6 +68,7 @@ func NewProvider(cfg ProviderConfig) runtime.Provider {
 		appendCWDArg:        cfg.AppendCWDArg,
 		authenticateID:      cfg.Authenticate,
 		configureSession:    cfg.ConfigureSession,
+		buildClientEnv:      cfg.BuildClientEnv,
 	}
 }
 
@@ -72,11 +76,51 @@ var _ runtime.Provider = (*Provider)(nil)
 
 func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtime.Session, error) {
 	merged := runtime.MergeStartOptions(p.opts, opts)
-	if err := p.ensureClient(ctx, merged); err != nil {
+
+	// Store broker reference from the merged opts so sub-providers can
+	// create authenticated per-run MCP tool servers.
+	p.mu.Lock()
+	if merged.Broker != nil && p.broker == nil {
+		p.broker = merged.Broker
+	}
+	brokerRef := p.broker
+	buildClientEnv := p.buildClientEnv
+	p.mu.Unlock()
+
+	// Create a broker run for this session before the client starts so provider-specific
+	// process config can authenticate outbound sends from the first turn.
+	runID := ""
+	brokerToken := ""
+	var err error
+	if brokerRef != nil {
+		runID = uuid.New().String()
+		brokerToken, err = brokerRef.CreateRun(runID)
+		if err != nil {
+			runID = ""
+			brokerToken = ""
+		}
+	}
+	var clientEnv map[string]string
+	var cleanup func() error
+	if runID != "" && brokerToken != "" && brokerRef != nil && buildClientEnv != nil {
+		clientEnv, cleanup = buildClientEnv(merged, runID, brokerToken, brokerRef.Addr())
+	}
+	created, err := p.ensureClient(ctx, merged, clientEnv)
+	if err != nil {
+		if cleanup != nil {
+			_ = cleanup()
+		}
 		return runtime.Session{}, err
 	}
+	if created {
+		p.mu.Lock()
+		p.clientEnvCleanup = cleanup
+		p.mu.Unlock()
+	} else if cleanup != nil {
+		_ = cleanup()
+	}
 
-	session, err := p.client.NewSession(ctx)
+	session, err := p.client.NewSessionWithOptions(ctx, SessionOpenOptions{})
 	if err != nil {
 		return runtime.Session{}, err
 	}
@@ -86,16 +130,8 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		}
 	}
 
-	// Create a broker run for this session so channel messages can target it.
-	runID := ""
-	if p.broker != nil {
-		runID = uuid.New().String()
-		_, err := p.broker.CreateRun(runID)
-		if err != nil {
-			runID = ""
-		}
-	}
 	session.RunID = runID
+	session.BrokerToken = brokerToken
 	p.mu.Lock()
 	p.sessions[session.SessionID] = session
 	if runID != "" {
@@ -110,7 +146,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		p.pollContexts[session.SessionID] = pollCtx
 		p.pollCancels[session.SessionID] = cancel
 		p.mu.Unlock()
-		go p.broker.PollAgentMessages(pollCtx, runID, func(wrapped string) {
+		go brokerRef.PollAgentMessages(pollCtx, runID, func(wrapped string) {
 			p.pendingMu.Lock()
 			p.pendingMessages[session.SessionID] = append(p.pendingMessages[session.SessionID], wrapped)
 			p.pendingMu.Unlock()
@@ -129,7 +165,7 @@ func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Sessio
 	if sessionID == "" {
 		return runtime.Session{}, errors.New("session id is required")
 	}
-	if err := p.ensureClient(ctx, p.opts); err != nil {
+	if _, err := p.ensureClient(ctx, p.opts, nil); err != nil {
 		return runtime.Session{}, err
 	}
 
@@ -257,6 +293,8 @@ func (p *Provider) Close() error {
 		cancels = append(cancels, cancel)
 	}
 	p.client = nil
+	cleanup := p.clientEnvCleanup
+	p.clientEnvCleanup = nil
 	p.pendingOptions = nil
 	p.runIDs = nil
 	p.pollContexts = map[string]context.Context{}
@@ -268,42 +306,46 @@ func (p *Provider) Close() error {
 	p.pendingMu.Lock()
 	p.pendingMessages = map[string][]string{}
 	p.pendingMu.Unlock()
+	if cleanup != nil {
+		_ = cleanup()
+	}
 	if client == nil {
 		return nil
 	}
 	return client.Close()
 }
 
-func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions) error {
+func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions, env map[string]string) (bool, error) {
 	p.mu.Lock()
 	if p.client != nil {
 		p.mu.Unlock()
-		return nil
+		return false, nil
 	}
 	p.mu.Unlock()
 
 	if opts.ServerURL != "" {
-		return fmt.Errorf("%s external server URL transport is not implemented by the stdio client", p.backendID)
+		return false, fmt.Errorf("%s external server URL transport is not implemented by the stdio client", p.backendID)
 	}
 
 	client, err := NewClient(ctx, ClientConfig{
 		Bin:                  p.bin,
 		Args:                 p.args,
 		Dir:                  opts.Dir,
+		Env:                  env,
 		AutoAnswerPermission: false,
 		AppendCWDArg:         p.appendCWDArg,
 	})
 	if err != nil {
-		return err
+		return false, err
 	}
 	if _, err := client.Initialize(ctx); err != nil {
 		_ = client.Close()
-		return err
+		return false, err
 	}
 	if p.authenticateID != "" {
 		if err := client.Authenticate(ctx, p.authenticateID); err != nil {
 			_ = client.Close()
-			return err
+			return false, err
 		}
 	}
 
@@ -311,12 +353,12 @@ func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions) 
 	defer p.mu.Unlock()
 	if p.client != nil {
 		_ = client.Close()
-		return nil
+		return false, nil
 	}
 	p.client = client
 	p.events = make(chan events.Event, 256)
 	go p.pumpClientEvents(client, p.events)
-	return nil
+	return true, nil
 }
 
 func (p *Provider) pumpClientEvents(client *Client, out chan<- events.Event) {

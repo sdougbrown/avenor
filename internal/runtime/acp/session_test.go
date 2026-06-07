@@ -3,7 +3,7 @@ package acp
 import "testing"
 
 func TestSessionOpenParams(t *testing.T) {
-	got := sessionOpenParams("/repo", "sessionId", "ses_123")
+	got := sessionOpenParams("/repo", nil, "sessionId", "ses_123")
 
 	if got["cwd"] != "/repo" {
 		t.Fatalf("cwd = %v, want /repo", got["cwd"])
@@ -17,6 +17,25 @@ func TestSessionOpenParams(t *testing.T) {
 	}
 	if len(servers) != 0 {
 		t.Fatalf("mcpServers len = %d, want 0", len(servers))
+	}
+}
+
+func TestSessionOpenParamsWithMCP(t *testing.T) {
+	got := sessionOpenParams("/repo", map[string]any{"tool-a": map[string]any{"type": "local"}})
+
+	mcp, ok := got["mcp"].(map[string]any)
+	if !ok {
+		t.Fatalf("mcp has type %T, want map[string]any", got["mcp"])
+	}
+	if len(mcp) != 1 {
+		t.Fatalf("mcp len = %d, want 1", len(mcp))
+	}
+	server, ok := mcp["tool-a"].(map[string]any)
+	if !ok {
+		t.Fatalf("mcp[tool-a] has type %T, want map[string]any", mcp["tool-a"])
+	}
+	if server["type"] != "local" {
+		t.Fatalf("server type = %v, want local", server["type"])
 	}
 }
 

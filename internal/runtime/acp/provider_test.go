@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
 
 func TestSelectPermissionOption(t *testing.T) {
@@ -510,5 +512,53 @@ func TestAnswerPermissionRemovesFallbackCacheAfterSuccess(t *testing.T) {
 	p.mu.Unlock()
 	if ok {
 		t.Fatal("fallback pending options should be cleared after successful answer")
+	}
+}
+
+func TestStartRunsClientEnvCleanupOnEnsureClientFailure(t *testing.T) {
+	cleaned := false
+	p := &Provider{
+		backendID:       "test-acp",
+		bin:             "definitely-not-a-real-binary",
+		sessions:        map[string]*Session{},
+		runIDs:          map[string]string{},
+		pollContexts:    map[string]context.Context{},
+		pollCancels:     map[string]context.CancelFunc{},
+		pendingMessages: map[string][]string{},
+		broker:          broker.New(""),
+		buildClientEnv: func(opts runtime.StartOptions, runID, brokerToken, brokerAddr string) (map[string]string, func() error) {
+			return map[string]string{"OPENCODE_CONFIG": "/tmp/unused.json"}, func() error {
+				cleaned = true
+				return nil
+			}
+		},
+	}
+
+	_, err := p.Start(context.Background(), runtime.StartOptions{Broker: p.broker})
+	if err == nil {
+		t.Fatal("expected Start to fail with invalid binary")
+	}
+	if !cleaned {
+		t.Fatal("expected client env cleanup to run after ensureClient failure")
+	}
+}
+
+func TestCloseRunsClientEnvCleanup(t *testing.T) {
+	path := t.TempDir() + "/opencode.json"
+	if err := os.WriteFile(path, []byte(`{}`), 0o600); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+	p := &Provider{
+		pollCancels:      map[string]context.CancelFunc{},
+		pollContexts:     map[string]context.Context{},
+		pendingMessages:  map[string][]string{},
+		clientEnvCleanup: func() error { return os.Remove(path) },
+	}
+
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("config file still exists after Close cleanup: %v", err)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -24,6 +25,7 @@ type ClientConfig struct {
 	Bin                  string
 	Args                 []string
 	Dir                  string
+	Env                  map[string]string
 	AutoAnswerPermission bool
 	AppendCWDArg         bool
 }
@@ -63,6 +65,12 @@ func NewClient(ctx context.Context, cfg ClientConfig) (*Client, error) {
 		args = append(args, "--cwd", absDir)
 	}
 	cmd := exec.CommandContext(ctx, cfg.Bin, args...)
+	cmd.Env = os.Environ()
+	if len(cfg.Env) > 0 {
+		for key, value := range cfg.Env {
+			cmd.Env = append(cmd.Env, key+"="+value)
+		}
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err

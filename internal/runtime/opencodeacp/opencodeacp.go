@@ -2,7 +2,11 @@ package opencodeacp
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
@@ -25,10 +29,82 @@ func NewWithOptions(opts runtime.StartOptions) runtime.Provider {
 		Args:                []string{"acp", "--pure", "--log-level", "WARN"},
 		SubprocessDiscovery: true,
 		AppendCWDArg:        true,
+		BuildClientEnv:      buildClientEnv,
 		ConfigureSession: func(ctx context.Context, session *acp.Session, opts runtime.StartOptions) error {
 			return configureSession(ctx, session.Client, session.SessionID, opts)
 		},
 	})
+}
+
+func buildClientEnv(_ runtime.StartOptions, runID, brokerToken, brokerAddr string) (map[string]string, func() error) {
+	if runID == "" || brokerToken == "" || brokerAddr == "" {
+		return nil, nil
+	}
+	avenorBin, err := os.Executable()
+	if err != nil {
+		return nil, nil
+	}
+	config := map[string]any{}
+	mergeConfigFile(config, os.Getenv("OPENCODE_CONFIG"))
+	mergeConfigContent(config, os.Getenv("OPENCODE_CONFIG_CONTENT"))
+	mergeConfig(config, map[string]any{
+		"mcp": map[string]any{
+			"avenor-channel-tools": map[string]any{
+				"type":    "local",
+				"enabled": true,
+				"command": []string{avenorBin, "channel-tools", "--run-id", runID, "--token", brokerToken, "--broker-url", fmt.Sprintf("http://%s", brokerAddr)},
+			},
+		},
+		"tools": map[string]any{
+			"avenor-channel-tools*": true,
+		},
+	})
+	encoded, err := json.Marshal(config)
+	if err != nil {
+		return nil, nil
+	}
+
+	// Write per-run config to a temp file. OPENCODE_CONFIG_CONTENT does not
+	// reliably register MCP servers in opencode acp; file-based config does.
+	cfgPath := filepath.Join(os.TempDir(), "avenor-opencode-acp-"+runID+".json")
+	if err := os.WriteFile(cfgPath, encoded, 0o600); err != nil {
+		return nil, nil
+	}
+	return map[string]string{"OPENCODE_CONFIG": cfgPath}, func() error { return os.Remove(cfgPath) }
+}
+
+func mergeConfigFile(dst map[string]any, path string) {
+	if path == "" {
+		return
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	mergeConfigContent(dst, string(raw))
+}
+
+func mergeConfigContent(dst map[string]any, raw string) {
+	if raw == "" {
+		return
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		return
+	}
+	mergeConfig(dst, parsed)
+}
+
+func mergeConfig(dst, src map[string]any) {
+	for key, value := range src {
+		srcMap, srcOK := value.(map[string]any)
+		dstMap, dstOK := dst[key].(map[string]any)
+		if srcOK && dstOK {
+			mergeConfig(dstMap, srcMap)
+			continue
+		}
+		dst[key] = value
+	}
 }
 
 // sessionConfigurer is the subset of *acp.Client needed for session configuration.

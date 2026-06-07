@@ -2,7 +2,9 @@ package opencodeacp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
 	"testing"
 
 	"github.com/sdougbrown/avenor/internal/runtime"
@@ -159,4 +161,126 @@ func (e *errorConfigurer) SetSessionModel(_ context.Context, _, _ string) error 
 func (e *errorConfigurer) SetSessionMode(_ context.Context, _, _ string) error {
 	e.modeCalls++
 	return e.modeErr
+}
+
+func TestBuildClientEnv(t *testing.T) {
+	env, cleanup := buildClientEnv(runtime.StartOptions{}, "run_123", "tok_456", "127.0.0.1:9999")
+	if cleanup != nil {
+		defer func() { _ = cleanup() }()
+	}
+	if len(env) != 1 {
+		t.Fatalf("env len = %d, want 1", len(env))
+	}
+	cfgPath, ok := env["OPENCODE_CONFIG"]
+	if !ok {
+		t.Fatalf("missing OPENCODE_CONFIG: %#v", env)
+	}
+	if cfgPath == "" {
+		t.Fatal("OPENCODE_CONFIG is empty")
+	}
+
+	// Read the written config file
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config file: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+	mcp, ok := payload["mcp"].(map[string]any)
+	if !ok {
+		t.Fatalf("payload mcp has type %T, want map[string]any", payload["mcp"])
+	}
+	server, ok := mcp["avenor-channel-tools"].(map[string]any)
+	if !ok {
+		t.Fatalf("server has type %T, want map[string]any", mcp["avenor-channel-tools"])
+	}
+	if server["type"] != "local" {
+		t.Fatalf("server type = %v, want local", server["type"])
+	}
+	if server["enabled"] != true {
+		t.Fatalf("server enabled = %v, want true", server["enabled"])
+	}
+	commandRaw, ok := server["command"].([]any)
+	if !ok {
+		t.Fatalf("server command has type %T, want []any", server["command"])
+	}
+	command := make([]string, 0, len(commandRaw))
+	for _, item := range commandRaw {
+		value, ok := item.(string)
+		if !ok {
+			t.Fatalf("server command item has type %T, want string", item)
+		}
+		command = append(command, value)
+	}
+	if len(command) != 8 {
+		t.Fatalf("command len = %d, want 8", len(command))
+	}
+	if command[0] != mustExecutable(t) || command[1] != "channel-tools" || command[2] != "--run-id" || command[3] != "run_123" || command[4] != "--token" || command[5] != "tok_456" || command[6] != "--broker-url" {
+		t.Fatalf("unexpected command: %#v", command)
+	}
+	if command[7] != "http://127.0.0.1:9999" {
+		t.Fatalf("broker url arg = %q, want http://127.0.0.1:9999", command[7])
+	}
+	tools, ok := payload["tools"].(map[string]any)
+	if !ok {
+		t.Fatalf("payload tools has type %T, want map[string]any", payload["tools"])
+	}
+	if tools["avenor-channel-tools*"] != true {
+		t.Fatalf("tools[avenor-channel-tools*] = %v, want true", tools["avenor-channel-tools*"])
+	}
+}
+
+func TestMergeConfigPreservesExistingCustomConfig(t *testing.T) {
+	t.Setenv("OPENCODE_CONFIG_CONTENT", `{"tools":{"existing*":true},"mcp":{"existing":{"type":"local","command":["echo","ok"]}}}`)
+	env, cleanup := buildClientEnv(runtime.StartOptions{}, "run_123", "tok_456", "127.0.0.1:9999")
+	if cleanup != nil {
+		defer func() { _ = cleanup() }()
+	}
+	raw, err := os.ReadFile(env["OPENCODE_CONFIG"])
+	if err != nil {
+		t.Fatalf("read merged config file: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("decode merged config: %v", err)
+	}
+	tools := payload["tools"].(map[string]any)
+	if tools["existing*"] != true {
+		t.Fatalf("existing tool override lost: %#v", tools)
+	}
+	mcp := payload["mcp"].(map[string]any)
+	if _, ok := mcp["existing"]; !ok {
+		t.Fatalf("existing mcp entry lost: %#v", mcp)
+	}
+	if _, ok := mcp["avenor-channel-tools"]; !ok {
+		t.Fatalf("avenor-channel-tools entry missing: %#v", mcp)
+	}
+}
+
+func TestBuildClientEnvCleanupRemovesConfigFile(t *testing.T) {
+	env, cleanup := buildClientEnv(runtime.StartOptions{}, "run_cleanup", "tok_456", "127.0.0.1:9999")
+	if cleanup == nil {
+		t.Fatal("cleanup func is nil")
+	}
+	path := env["OPENCODE_CONFIG"]
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("config file missing before cleanup: %v", err)
+	}
+	if err := cleanup(); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("config file still exists after cleanup: %v", err)
+	}
+}
+
+func mustExecutable(t *testing.T) string {
+	t.Helper()
+	path, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	return path
 }
