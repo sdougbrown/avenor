@@ -34,6 +34,7 @@ const (
 	backendGeminiACP      = "gemini-acp"
 	backendCursorACP      = "cursor-acp"
 	backendPony           = "pony"
+	backendClaude         = "claude"
 	backendClaudeChannel  = "claude-channel"
 )
 
@@ -146,6 +147,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			return exitWithSentinel(1)
 		}
 	case backendCodexAppServer:
+	case backendClaude:
 	case backendClaudeChannel:
 	default:
 		fmt.Fprintf(stderr, "avenor: unknown backend %q\n", *backend)

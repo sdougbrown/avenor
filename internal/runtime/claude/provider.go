@@ -62,7 +62,7 @@ func New() runtime.Provider {
 
 func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtime.Session, error) {
 	merged := runtime.MergeStartOptions(p.opts, opts)
-	if merged.Dir == "" {
+	if merged.Dir == "" || merged.Dir == "." {
 		var err error
 		merged.Dir, err = os.Getwd()
 		if err != nil {
