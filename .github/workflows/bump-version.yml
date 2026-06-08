@@ -30,7 +30,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
         with:
-          bun-version: latest
+          bun-version: "1.3.11"
 
       - name: Determine bump type
         id: bump
@@ -44,7 +44,7 @@ jobs:
       - name: Calculate new version from core package
         id: versioning
         run: |
-          CURRENT_VERSION=$(grep '"version"' packages/core/package.json | head -1 | sed 's/.*: *"\([^"]*\)".*/\1/')
+          CURRENT_VERSION=$(jq -r '.version' packages/core/package.json)
           if [ -z "$CURRENT_VERSION" ]; then
             echo "Error: Could not read version from packages/core/package.json"
             exit 1
@@ -69,7 +69,7 @@ jobs:
           NEW_VERSION="${{ steps.versioning.outputs.new_version }}"
           for pkg in packages/*/; do
             [ -f "$pkg/package.json" ] || continue
-            perl -i -pe "s/(  \"version\": \")[^\"]+(\".*)/\1$NEW_VERSION\2/" "$pkg/package.json"
+            jq --arg v "$NEW_VERSION" '.version = $v' "$pkg/package.json" > "$pkg/.tmp.json" && mv "$pkg/.tmp.json" "$pkg/package.json"
           done
 
       - name: Regenerate lockfile
