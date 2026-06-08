@@ -83,7 +83,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
   let parentRunId = ''
   let parentToken = ''
   let brokerUrl = ''
-  let channelPolling: Promise<void> | null = null
+  let channelPolling = false
 
   function ensureParentRunId(): string {
     if (!parentRunId) {
@@ -134,10 +134,11 @@ export const AvenorPlugin: Plugin = async (ctx) => {
    async function pollChannelMessages(sessionId: string): Promise<void> {
      if (channelPolling || !brokerUrl || !parentRunId || !parentToken) return
 
+     channelPolling = true
      let consecutiveErrors = 0
      const MAX_CONSECUTIVE_ERRORS = 10
 
-     channelPolling = (async () => {
+     try {
        while (consecutiveErrors < MAX_CONSECUTIVE_ERRORS) {
          await sleep(POLL_INTERVAL_MS)
          let msgs: any[]
@@ -177,8 +178,10 @@ export const AvenorPlugin: Plugin = async (ctx) => {
              return
            }
          }
-        }
-      })()
+       }
+     } finally {
+       channelPolling = false
+     }
    }
   return {
     // ── Lifecycle ────────────────────────────────────────────────────────────

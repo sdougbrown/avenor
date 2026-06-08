@@ -48,6 +48,23 @@ async function sentinelExists(filePath: string): Promise<boolean> {
   }
 }
 
+function sentinelStatusToResult(sentinelStatus: string): string {
+  switch (sentinelStatus) {
+    case 'DONE':
+      return 'done'
+    case 'FAILED':
+      return 'failed'
+    case 'TIMEOUT':
+      return 'timeout'
+    case 'KILLED':
+      return 'killed'
+    case 'BLOCKED':
+      return 'failed'
+    default:
+      return 'running'
+  }
+}
+
 function translateStatus(
   rawPhase: string,
   sentinelData: Record<string, string> | null,
@@ -55,44 +72,12 @@ function translateStatus(
   const sentinelStatus = sentinelData?._status
 
   switch (rawPhase) {
-    case 'idle': {
-      if (sentinelStatus) {
-        switch (sentinelStatus) {
-          case 'DONE':
-            return 'done'
-          case 'FAILED':
-            return 'failed'
-          case 'TIMEOUT':
-            return 'timeout'
-          case 'KILLED':
-            return 'killed'
-          case 'BLOCKED':
-            return 'failed'
-        }
-      }
-      return 'running'
-    }
+    case 'idle':
+      return sentinelStatus ? sentinelStatusToResult(sentinelStatus) : 'running'
     case 'running':
       return 'running'
-    case 'ended': {
-      if (sentinelStatus) {
-        switch (sentinelStatus) {
-          case 'DONE':
-            return 'done'
-          case 'FAILED':
-            return 'failed'
-          case 'TIMEOUT':
-            return 'timeout'
-          case 'KILLED':
-            return 'killed'
-          case 'BLOCKED':
-            return 'failed'
-          default:
-            return 'running'
-        }
-      }
-      return 'running'
-    }
+    case 'ended':
+      return sentinelStatus ? sentinelStatusToResult(sentinelStatus) : 'running'
     case 'DONE':
       return 'done'
     case 'FAILED':

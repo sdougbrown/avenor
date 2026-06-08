@@ -348,9 +348,9 @@ func readFrame(reader *bufio.Reader) ([]byte, error) {
 }
 
 // mergeEnviron returns a copy of base with overrides applied. Keys present in
-// overrides replace existing entries in base; new keys are appended. This
-// prevents duplicate env vars where the caller-provided value must win (e.g.
-// OPENCODE_CONFIG).
+// overrides replace existing entries in base in-place (preserving their
+// original order); new keys are appended. This prevents duplicate env vars
+// where the caller-provided value must win (e.g. OPENCODE_CONFIG).
 func mergeEnviron(base []string, overrides map[string]string) []string {
 	if len(overrides) == 0 {
 		return base
