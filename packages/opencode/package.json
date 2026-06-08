@@ -27,8 +27,7 @@
     "dev": "tsdown --watch"
   },
   "dependencies": {
-    "@dougbots/avenor-core": "workspace:*",
-    "zod": "^4.4.3"
+    "@dougbots/avenor-core": "workspace:*"
   },
   "peerDependencies": {
     "@opencode-ai/plugin": "1.15.3"

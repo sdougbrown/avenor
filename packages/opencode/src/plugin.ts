@@ -1,6 +1,6 @@
 import type { Plugin, ToolContext } from '@opencode-ai/plugin'
 import { tool } from '@opencode-ai/plugin'
-import { z } from 'zod'
+
 import * as crypto from 'node:crypto'
 import {
   spawnTool, statusTool, eventsTool, answerPermissionTool,
@@ -290,17 +290,17 @@ export const AvenorPlugin: Plugin = async (ctx) => {
         description:
           'Dispatch an agent run via avenor. Blocks by default, showing live progress as an updating tool call. Set wait=false for fire-and-forget — you will be re-prompted automatically on completion.',
         args: {
-          agent: z.string().describe('Agent name (required, no default)'),
-          prompt: z.string().optional().describe('Prompt text'),
-          prompt_file: z.string().optional().describe('Path to prompt file'),
-          dir: z.string().optional().describe('Working directory for the run (defaults to the session project directory)'),
-          label: z.string().optional().describe('Human-readable label for the run'),
-          timeout: z.string().optional().describe('Timeout duration (e.g. 3600s)'),
-          model: z.string().optional().describe('Model override'),
-          backend: z.string().optional().describe('Backend override'),
-          server_url: z.string().optional().describe('Backend server URL'),
-          supervisor_id: z.string().optional().describe('Reuse an existing supervisor by socket path'),
-          wait: z.boolean().default(true).describe(
+          agent: tool.schema.string().describe('Agent name (required, no default)'),
+          prompt: tool.schema.string().optional().describe('Prompt text'),
+          prompt_file: tool.schema.string().optional().describe('Path to prompt file'),
+          dir: tool.schema.string().optional().describe('Working directory for the run (defaults to the session project directory)'),
+          label: tool.schema.string().optional().describe('Human-readable label for the run'),
+          timeout: tool.schema.string().optional().describe('Timeout duration (e.g. 3600s)'),
+          model: tool.schema.string().optional().describe('Model override'),
+          backend: tool.schema.string().optional().describe('Backend override'),
+          server_url: tool.schema.string().optional().describe('Backend server URL'),
+          supervisor_id: tool.schema.string().optional().describe('Reuse an existing supervisor by socket path'),
+          wait: tool.schema.boolean().default(true).describe(
             'Block until complete with live status updates. False = fire-and-forget.',
           ),
         },
@@ -434,8 +434,8 @@ export const AvenorPlugin: Plugin = async (ctx) => {
       avenor_status: tool({
         description: 'Get status of a run or all runs. Surfaces pending permission requests.',
         args: {
-          run_id: z.string().optional().describe('Specific run ID to query'),
-          supervisor_id: z.string().optional().describe('Reuse an existing supervisor by socket path'),
+          run_id: tool.schema.string().optional().describe('Specific run ID to query'),
+          supervisor_id: tool.schema.string().optional().describe('Reuse an existing supervisor by socket path'),
         },
         async execute(args, _context) {
           const result = await statusTool({
@@ -450,10 +450,10 @@ export const AvenorPlugin: Plugin = async (ctx) => {
         description:
           'Answer a pending permission request for a sub-agent. Pass option_id from avenor_status pending_permission.options, or use "allow_once", "allow_always", "deny".',
         args: {
-          run_id: z.string().describe('Run ID with the pending permission'),
-          option_id: z.string().describe('allow_once | allow_always | deny, or option_id from pending_permission.options'),
-          request_id: z.string().optional().describe('Permission request ID (auto-discovered if omitted)'),
-          supervisor_id: z.string().optional().describe('Reuse an existing supervisor by socket path'),
+          run_id: tool.schema.string().describe('Run ID with the pending permission'),
+          option_id: tool.schema.string().describe('allow_once | allow_always | deny, or option_id from pending_permission.options'),
+          request_id: tool.schema.string().optional().describe('Permission request ID (auto-discovered if omitted)'),
+          supervisor_id: tool.schema.string().optional().describe('Reuse an existing supervisor by socket path'),
         },
         async execute(args, _context) {
           const result = await answerPermissionTool({
@@ -469,10 +469,10 @@ export const AvenorPlugin: Plugin = async (ctx) => {
       avenor_follow_up: tool({
         description: 'Resume a completed run with a follow-up message.',
         args: {
-          run_id: z.string().describe('Completed run ID to resume'),
-          message: z.string().describe('Follow-up message text'),
-          label: z.string().optional().describe('Override label (defaults to <original>-followup)'),
-          supervisor_id: z.string().optional().describe('Reuse an existing supervisor by socket path'),
+          run_id: tool.schema.string().describe('Completed run ID to resume'),
+          message: tool.schema.string().describe('Follow-up message text'),
+          label: tool.schema.string().optional().describe('Override label (defaults to <original>-followup)'),
+          supervisor_id: tool.schema.string().optional().describe('Reuse an existing supervisor by socket path'),
         },
         async execute(args, _context) {
           const result = await followUpTool({
@@ -488,10 +488,10 @@ export const AvenorPlugin: Plugin = async (ctx) => {
       avenor_events: tool({
         description: 'Read events from a run. Filter by type. Returns last N events.',
         args: {
-          run_id: z.string().describe('Run ID to read events from'),
-          types: z.array(z.string()).optional().describe('Filter by event types'),
-          limit: z.number().optional().describe('Max events to return (default 50)'),
-          supervisor_id: z.string().optional().describe('Reuse an existing supervisor by socket path'),
+          run_id: tool.schema.string().describe('Run ID to read events from'),
+          types: tool.schema.array(tool.schema.string()).optional().describe('Filter by event types'),
+          limit: tool.schema.number().optional().describe('Max events to return (default 50)'),
+          supervisor_id: tool.schema.string().optional().describe('Reuse an existing supervisor by socket path'),
         },
         async execute(args, _context) {
           const result = await eventsTool({
@@ -507,8 +507,8 @@ export const AvenorPlugin: Plugin = async (ctx) => {
       avenor_shutdown: tool({
         description: 'Shut down the avenor supervisor and clean up temp files.',
         args: {
-          supervisor_id: z.string().optional().describe('Supervisor to shut down (defaults to singleton)'),
-          force: z.boolean().optional().describe('Force shutdown instead of graceful'),
+          supervisor_id: tool.schema.string().optional().describe('Supervisor to shut down (defaults to singleton)'),
+          force: tool.schema.boolean().optional().describe('Force shutdown instead of graceful'),
         },
         async execute(args, _context) {
           const result = await shutdownTool({
