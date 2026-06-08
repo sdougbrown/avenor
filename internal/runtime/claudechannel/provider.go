@@ -27,7 +27,7 @@ const (
 	startupPromptTimeout       = 30 * time.Second
 	promptSubmitRetryDelay     = 750 * time.Millisecond
 	paneScanInterval           = 500 * time.Millisecond
-	transcriptScanInterval     = 500 * time.Millisecond
+	transcriptScanInterval     = 2 * time.Second
 )
 
 // Provider implements runtime.Provider for an interactive Claude Code session

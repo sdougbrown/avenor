@@ -179,6 +179,23 @@ func (s *Session) ScanTranscriptTick() {
 		return
 	}
 
+	for _, rec := range recs {
+		if rec.StopReason == "end_turn" {
+			if !s.MarkFinished() {
+				return
+			}
+			s.Emit(events.Event{
+				Event:     "session.end",
+				SessionID: s.SessionID,
+				Fields: map[string]any{
+					"status":      "done",
+					"stop_reason": "end_turn",
+				},
+			})
+			return
+		}
+	}
+
 	s.MarkActive()
 	s.Emit(events.Event{
 		Event:     "agent.status",

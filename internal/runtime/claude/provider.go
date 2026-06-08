@@ -21,7 +21,7 @@ const backendID = "claude"
 
 const (
 	paneScanInterval       = 500 * time.Millisecond
-	transcriptScanInterval = 500 * time.Millisecond
+	transcriptScanInterval = 2 * time.Second
 	promptSubmitRetryDelay = 750 * time.Millisecond
 	defaultCancelGrace     = 3 * time.Second
 )

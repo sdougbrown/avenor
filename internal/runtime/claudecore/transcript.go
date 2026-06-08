@@ -29,9 +29,43 @@ func TranscriptPath(home, dir, sessionID string) string {
 // TranscriptRecord is the minimal subset of JSONL fields used for status
 // detection. Records are heterogeneous; unknown fields are ignored.
 type TranscriptRecord struct {
-	Type      string `json:"type"`
-	AITitle   string `json:"aiTitle,omitempty"`
-	Timestamp string `json:"timestamp,omitempty"`
+	Type       string `json:"type"`
+	AITitle    string `json:"aiTitle,omitempty"`
+	Timestamp  string `json:"timestamp,omitempty"`
+	StopReason string `json:"stop_reason,omitempty"`
+}
+
+// unmarshalRecord decodes a JSONL line into a TranscriptRecord, lifting
+// stop_reason from the nested message object on assistant records.
+func unmarshalRecord(raw []byte) (TranscriptRecord, error) {
+	// Parse the full object into a raw map first so we can extract both
+	// top-level and nested fields in a single pass.
+	var rawMap map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &rawMap); err != nil {
+		return TranscriptRecord{}, err
+	}
+	rec := TranscriptRecord{}
+	if t, ok := rawMap["type"]; ok {
+		json.Unmarshal(t, &rec.Type)
+	}
+	if t, ok := rawMap["aiTitle"]; ok {
+		json.Unmarshal(t, &rec.AITitle)
+	}
+	if t, ok := rawMap["timestamp"]; ok {
+		json.Unmarshal(t, &rec.Timestamp)
+	}
+	// stop_reason lives inside message.stop_reason on assistant records.
+	if rec.Type == "assistant" {
+		if msg, ok := rawMap["message"]; ok {
+			var m struct {
+				StopReason string `json:"stop_reason,omitempty"`
+			}
+			if err := json.Unmarshal(msg, &m); err == nil && m.StopReason != "" {
+				rec.StopReason = m.StopReason
+			}
+		}
+	}
+	return rec, nil
 }
 
 // TranscriptReader incrementally reads new records from a JSONL transcript.
@@ -53,25 +87,23 @@ func NewTranscriptReader(path string) *TranscriptReader {
 // Offset only advances past newline-terminated lines so a half-written
 // final record is left for the next tick to consume in full.
 func (r *TranscriptReader) Tick() ([]TranscriptRecord, time.Time, error) {
-	info, err := os.Stat(r.path)
+	f, err := os.Open(r.path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, time.Time{}, nil
 		}
 		return nil, time.Time{}, err
 	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return nil, time.Time{}, err
+	}
 	if info.Size() < r.offset {
 		// File was truncated/rotated — re-read from the start.
 		r.offset = 0
 	}
-	if info.Size() == r.offset {
-		return nil, info.ModTime(), nil
-	}
-	f, err := os.Open(r.path)
-	if err != nil {
-		return nil, info.ModTime(), err
-	}
-	defer f.Close()
 	if _, err := f.Seek(r.offset, io.SeekStart); err != nil {
 		return nil, info.ModTime(), err
 	}
@@ -83,8 +115,8 @@ func (r *TranscriptReader) Tick() ([]TranscriptRecord, time.Time, error) {
 		line, readErr := reader.ReadString('\n')
 		if readErr == nil {
 			// Complete \n-terminated record.
-			var rec TranscriptRecord
-			if jsonErr := json.Unmarshal([]byte(line[:len(line)-1]), &rec); jsonErr == nil {
+			rec, jsonErr := unmarshalRecord([]byte(line[:len(line)-1]))
+			if jsonErr == nil {
 				records = append(records, rec)
 			}
 			// Malformed lines are skipped but still consumed.

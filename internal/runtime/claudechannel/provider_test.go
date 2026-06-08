@@ -570,6 +570,52 @@ func TestScanTranscriptTickIsAuthoritativeWorkingSignal(t *testing.T) {
 	}
 }
 
+// TestScanTranscriptTickSessionEndOnStopReason verifies that when the
+// transcript emits an assistant record with stop_reason=end_turn,
+// ScanTranscriptTick emits session.end and marks the session finished.
+func TestScanTranscriptTickSessionEndOnStopReason(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(path, []byte(`{"type":"assistant","message":{"stop_reason":"end_turn"},"timestamp":"t1"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := &Provider{
+		sessions: make(map[string]*session),
+		launcher: terminal.TmuxLauncher{},
+	}
+	s := &session{
+		Session: &claudecore.Session{
+			SessionID:  "ses-end",
+			Term:       terminal.NewFakeSession("test-term", 1, "ready"),
+			Transcript: claudecore.NewTranscriptReader(path),
+			Events:     make(chan events.Event, 4),
+			Prompted:   true,
+			Ctx:        context.Background(),
+		},
+	}
+	p.sessions[s.SessionID] = s
+
+	s.ScanTranscriptTick()
+
+	select {
+	case ev := <-s.Events:
+		if ev.Event != "session.end" {
+			t.Fatalf("event = %q, want session.end", ev.Event)
+		}
+		if ev.Fields["stop_reason"] != "end_turn" {
+			t.Fatalf("stop_reason = %v, want end_turn", ev.Fields["stop_reason"])
+		}
+	default:
+		t.Fatal("expected session.end from scanTranscriptTick on end_turn")
+	}
+
+	s.Mu.Lock()
+	finished := s.Finished
+	s.Mu.Unlock()
+	if !finished {
+		t.Fatal("session should be marked finished after stop_reason end_turn")
+	}
+}
+
 // Idle pane must emit waiting with source = backend Kind() (tmux or pty),
 // not a hardcoded string. Covers both backends so a regression that
 // reverts to a constant is caught.
