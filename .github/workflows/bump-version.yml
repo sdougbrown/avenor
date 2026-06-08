@@ -1,0 +1,93 @@
+name: Bump app version
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump_option:
+        description: 'Select version bump type'
+        required: true
+        type: choice
+        options:
+          - Bump minor version
+          - Bump patch version
+        default: Bump minor version
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump-version:
+    name: Bump app version and open PR
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      - name: Determine bump type
+        id: bump
+        run: |
+          if [ "${{ github.event.inputs.bump_option }}" = "Bump minor version" ]; then
+            echo "bump_type=minor" >> "$GITHUB_OUTPUT"
+          else
+            echo "bump_type=patch" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Calculate new version from core package
+        id: versioning
+        run: |
+          CURRENT_VERSION=$(grep '"version"' packages/core/package.json | head -1 | sed 's/.*: *"\([^"]*\)".*/\1/')
+          if [ -z "$CURRENT_VERSION" ]; then
+            echo "Error: Could not read version from packages/core/package.json"
+            exit 1
+          fi
+          echo "Current version: $CURRENT_VERSION"
+
+          IFS='.' read -r major minor patch <<< "$CURRENT_VERSION"
+          if [ "${{ steps.bump.outputs.bump_type }}" = "minor" ]; then
+            minor=$((minor + 1))
+            patch=0
+          else
+            patch=$((patch + 1))
+          fi
+
+          NEW_VERSION="$major.$minor.$patch"
+          echo "New version: $NEW_VERSION"
+          echo "branch_name=version/v$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Bump all package versions
+        run: |
+          NEW_VERSION="${{ steps.versioning.outputs.new_version }}"
+          for pkg in packages/*/; do
+            [ -f "$pkg/package.json" ] || continue
+            perl -i -pe "s/(  \"version\": \")[^\"]+(\".*)/\1$NEW_VERSION\2/" "$pkg/package.json"
+          done
+
+      - name: Regenerate lockfile
+        run: bun install
+
+      - name: Create pull request
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "🐪 bump: v${{ steps.versioning.outputs.new_version }}"
+          committer: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+          author: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+          title: "🐪 packages bump: v${{ steps.versioning.outputs.new_version }}"
+          body: |
+            This PR was created automatically by the **Bump app version** workflow.
+
+            - Bump type: ${{ steps.bump.outputs.bump_type }}
+            - New version: v${{ steps.versioning.outputs.new_version }}
+          branch: ${{ steps.versioning.outputs.branch_name }}
+          base: main
+          draft: true
