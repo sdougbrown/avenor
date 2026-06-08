@@ -445,6 +445,49 @@ func TestWaitForPaneReadyStopsOnContextCancel(t *testing.T) {
 	}
 }
 
+// TestWaitForPaneReadyDismissesTrustDialog verifies that the safety dialog
+// shown on first launch in an unfamiliar directory is auto-confirmed (single
+// Enter) before WaitForPaneReady returns. Without this, the user's paste would
+// land in the dialog and the trailing Enter would dismiss "Yes" instead of
+// submitting the prompt.
+func TestWaitForPaneReadyDismissesTrustDialog(t *testing.T) {
+	trustPane := "Quick safety check: Is this a project you created or one you trust?\n" +
+		" ❯ 1. Yes, I trust this folder\n" +
+		"   2. No, exit\n"
+	term := terminal.NewFakeSessionQueue("trust", 1, []string{
+		trustPane,
+		"Tips for getting started\n",
+	})
+	if !claudecore.WaitForPaneReady(context.Background(), term) {
+		t.Fatal("waitForPaneReady should return true after trust dialog dismissed")
+	}
+	sends := term.SendCalls()
+	if len(sends) == 0 {
+		t.Fatal("expected SendKeys(Enter) to dismiss trust dialog, got no sends")
+	}
+	if len(sends[0]) != 1 || sends[0][0] != string(terminal.KeyEnter) {
+		t.Fatalf("expected SendKeys(Enter), got %v", sends[0])
+	}
+}
+
+// TestWaitForPaneReadyDeadlineReturnsFalse pins the contract that a stalled
+// pane (no welcome marker before PromptInjectTimeout) must return false so the
+// caller drops the prompt instead of pasting into an unknown state. Without
+// this guard, the old behavior of "give up and assume ready" re-introduces
+// the trust-dialog paste-corruption bug.
+func TestWaitForPaneReadyDeadlineReturnsFalse(t *testing.T) {
+	// Capture only ever returns text without any ready marker; the function
+	// must time out and return false rather than treating absence as readiness.
+	// A tight context bounds the test runtime — the function's own deadline
+	// (PromptInjectTimeout=30s) is too long to wait synchronously.
+	term := terminal.NewFakeSession("stalled", 1, "still booting…\n")
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if claudecore.WaitForPaneReady(ctx, term) {
+		t.Fatal("waitForPaneReady should return false when no ready marker appears before deadline")
+	}
+}
+
 func TestClassifyPane(t *testing.T) {
 	cases := []struct {
 		name string
@@ -479,6 +522,36 @@ func TestClassifyPane(t *testing.T) {
 		{
 			name: "idle prompt",
 			pane: "────────────────\n❯ \n────────────────",
+			want: claudecore.PaneStateIdle,
+		},
+		{
+			name: "evaporating glyph",
+			pane: "❯ Say only the word pong\n✽ Evaporating…\n────────────────\n❯ ",
+			want: claudecore.PaneStateActive,
+		},
+		{
+			name: "jitterbugging glyph",
+			pane: "❯ Say only the word pong\n✳ Jitterbugging…\n────────────────\n❯ ",
+			want: claudecore.PaneStateActive,
+		},
+		{
+			name: "active beats input echo",
+			pane: "❯ Say only the word pong\n✻ Churning…\n────────────────\n❯ ",
+			want: claudecore.PaneStateActive,
+		},
+		{
+			name: "middle dot spinner",
+			pane: "❯ Say only the word pong\n· Wibbling…\n────────────────\n❯ ",
+			want: claudecore.PaneStateActive,
+		},
+		{
+			name: "completed turn is idle",
+			pane: "❯ Say only the word pong\n⏺ pong\n────────────────\n❯ ",
+			want: claudecore.PaneStateIdle,
+		},
+		{
+			name: "banner ✻ activity",
+			pane: "│   ▐▛███▜▌    │ Recent activity   │\n────────────────\n❯ Try \"fix lint\"",
 			want: claudecore.PaneStateIdle,
 		},
 		{
@@ -1061,19 +1134,19 @@ func TestCleanupProjectMCPRemovesOnlyAvenorChannelEntries(t *testing.T) {
 // ---- Stage 3: Adapter-backed provider tests ----
 
 func TestPromptWaitsForStartupClearBeforePaste(t *testing.T) {
-	// Test that WaitForPaneReady returns true when capture doesn't contain needle.
-	term := terminal.NewFakeSession("test-term", 1, "ready")
+	// Welcome screen marker present: WaitForPaneReady returns true.
+	term := terminal.NewFakeSession("test-term", 1, "Tips for getting started\n")
 	if !claudecore.WaitForPaneReady(context.Background(), term) {
-		t.Fatal("waitForPaneReady should return true when capture doesn't contain needle")
+		t.Fatal("waitForPaneReady should return true when welcome marker is visible")
 	}
 
-	// Test that WaitForPaneReady waits when capture contains needle, then returns true.
+	// Loading banner appears first, then welcome marker — should wait, then return true.
 	term2 := terminal.NewFakeSessionQueue("test-term2", 2, []string{
 		"Loading development channels\n",
-		"ready\n",
+		"Tips for getting started\n",
 	})
 	if !claudecore.WaitForPaneReady(context.Background(), term2) {
-		t.Fatal("waitForPaneReady should return true after needle disappears")
+		t.Fatal("waitForPaneReady should return true after welcome marker appears")
 	}
 }
 
