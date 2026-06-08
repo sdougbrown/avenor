@@ -65,36 +65,44 @@ func TestCapabilities(t *testing.T) {
 		t.Error("Permissions should be true")
 	}
 	if !caps.Resume {
-		t.Error("Resume should be true for tmux launcher")
+		t.Error("Resume should be true")
 	}
 	if !caps.SubprocessDiscovery {
 		t.Error("SubprocessDiscovery should be true")
 	}
 }
 
-func TestCapabilitiesPTYResumeFalse(t *testing.T) {
+func TestCapabilitiesPTYReportsResume(t *testing.T) {
 	t.Setenv("AVENOR_CLAUDE_TERMINAL", "pty")
 	p := New()
 	caps, err := p.Capabilities(context.Background())
 	if err != nil {
 		t.Fatalf("Capabilities: %v", err)
 	}
-	if caps.Resume {
-		t.Error("Resume should be false for pty launcher")
+	if !caps.Resume {
+		t.Error("Resume should be true for PTY launcher (in-memory resume in stable mode)")
 	}
 }
 
-func TestResumeRequiresSupportingLauncher(t *testing.T) {
+func TestResumePTYInMemory(t *testing.T) {
 	p := &Provider{
 		sessions: make(map[string]*session),
 		launcher: terminal.PTYLauncher{},
 	}
-	_, err := p.Resume(context.Background(), "ses-1")
-	if err == nil {
-		t.Fatal("expected error from Resume on PTY launcher")
+	term := terminal.NewFakeSession("avenor-pty-live", 4243, "ready")
+	p.sessions["ses-pty-live"] = &session{
+		Session: &claudecore.Session{
+			SessionID: "ses-pty-live",
+			Dir:       "/tmp/work",
+			Term:      term,
+		},
 	}
-	if !strings.Contains(err.Error(), "resume not supported") {
-		t.Fatalf("error = %q, want 'resume not supported'", err)
+	got, err := p.Resume(context.Background(), "ses-pty-live")
+	if err != nil {
+		t.Fatalf("Resume on PTY launcher: %v", err)
+	}
+	if got.SessionID != "ses-pty-live" || got.PID != 4243 {
+		t.Fatalf("Resume = %+v, want SessionID=ses-pty-live PID=4243", got)
 	}
 }
 

@@ -21,8 +21,6 @@ type PTYLauncher struct {
 	Env []string // environment to set; defaults to TERM/COLORTERM/FORCE_COLOR
 }
 
-func (PTYLauncher) SupportsResume() bool { return false }
-
 func (l PTYLauncher) Start(ctx context.Context, opts StartOptions) (Session, error) {
 	if opts.Cols == 0 {
 		opts.Cols = 220

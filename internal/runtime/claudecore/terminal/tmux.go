@@ -13,8 +13,6 @@ import (
 // TmuxLauncher implements Launcher by spawning tmux sessions.
 type TmuxLauncher struct{}
 
-func (TmuxLauncher) SupportsResume() bool { return true }
-
 func (TmuxLauncher) Start(ctx context.Context, opts StartOptions) (Session, error) {
 	if opts.Cols == 0 {
 		opts.Cols = 220

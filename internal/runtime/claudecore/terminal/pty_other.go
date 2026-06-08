@@ -15,8 +15,6 @@ type PTYLauncher struct {
 	Env []string
 }
 
-func (PTYLauncher) SupportsResume() bool { return false }
-
 func (PTYLauncher) Start(_ context.Context, _ StartOptions) (Session, error) {
 	return nil, fmt.Errorf("PTY launcher is not supported on this platform")
 }

@@ -220,9 +220,6 @@ func (p *Provider) runSession(ctx context.Context, s *claudecore.Session) {
 }
 
 func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Session, error) {
-	if !p.launcher.SupportsResume() {
-		return runtime.Session{}, fmt.Errorf("resume not supported by %T", p.launcher)
-	}
 	p.mu.Lock()
 	s, ok := p.sessions[sessionID]
 	p.mu.Unlock()
@@ -436,7 +433,7 @@ func (p *Provider) Capabilities(ctx context.Context) (runtime.Capabilities, erro
 	return runtime.Capabilities{
 		Backend:             backendID,
 		Permissions:         true,
-		Resume:              p.launcher.SupportsResume(),
+		Resume:              true,
 		ExternalServerURL:   false,
 		SubprocessDiscovery: true,
 		ModelSelection:      true,

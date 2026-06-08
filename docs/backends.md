@@ -24,7 +24,7 @@ Both `claude` and `claude-channel` require `claude` to be on `PATH`. `claude-cha
 | Capability | opencode-acp | opencode-http | codex-app-server | gemini-acp | cursor-acp | pi | claude | claude-channel |
 |---|---|---|---|---|---|---|---|---|
 | New sessions | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Session resume | ✓ | ✓ | ✓ | — | — | ✓ | ⚠ | ✗ |
+| Session resume | ✓ | ✓ | ✓ | — | — | ✓ | ⚠ | ⚠ |
 | Prompt execution | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓  |
 | Cancel | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓  |
 | Event streaming | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
@@ -35,7 +35,7 @@ Both `claude` and `claude-channel` require `claude` to be on `PATH`. `claude-cha
 
 `—` means not verified; `✗` means not supported, `⚠ ` means experimental.
 
-Session resume for `claude` works only when the tmux launcher is in use (`AVENOR_CLAUDE_TERMINAL=tmux`); the default PTY launcher does not support resume.
+Session resume for `claude` and `claude-channel` is in-memory only: a long-lived avenor process (stable mode) keeps sessions in its map and lets clients reattach by `session_id` while the session is alive. Cross-restart resume (avenor process exits, then a new one tries to pick up the same session) is not yet supported by either backend.
 
 ---
 
@@ -67,7 +67,7 @@ AVENOR_CLAUDE_TERMINAL=tmux avenor --backend claude --prompt "say hi"
 | Capability | Supported |
 |---|---|
 | New sessions | ✓ |
-| Session resume | ⚠ (tmux launcher only) |
+| Session resume | ⚠ (in-memory, while avenor is alive) |
 | Prompt execution | ✓ (PTY paste) |
 | Cancel | ✓ (Esc-Esc → pane-scrape idle → forced kill) |
 | Event streaming | ✓ |
@@ -134,7 +134,7 @@ The `.mcp.json` is written to the project directory so Claude Code can discover 
 | Capability | Supported |
 |---|---|
 | New sessions | ✓ |
-| Session resume | ✗ |
+| Session resume | ⚠ (in-memory, while avenor is alive) |
 | Prompt execution | ✓ (via channel push) |
 | Cancel | ✓ (channel cancel → signal → kill) |
 | Event streaming | ✓ |

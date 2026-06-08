@@ -436,9 +436,6 @@ func markChannelReadyEmitted(s *session, registeredAt time.Time) bool {
 // and cross-restart recovery is out of scope. Resume is rejected for launchers
 // that don't survive the parent process (e.g. PTY).
 func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Session, error) {
-	if !p.launcher.SupportsResume() {
-		return runtime.Session{}, fmt.Errorf("resume not supported by %T", p.launcher)
-	}
 	p.mu.Lock()
 	s, ok := p.sessions[sessionID]
 	p.mu.Unlock()
@@ -762,7 +759,7 @@ func (p *Provider) Capabilities(ctx context.Context) (runtime.Capabilities, erro
 	return runtime.Capabilities{
 		Backend:             backendID,
 		Permissions:         true,
-		Resume:              p.launcher.SupportsResume(),
+		Resume:              true,
 		ExternalServerURL:   false,
 		SubprocessDiscovery: true,
 		ModelSelection:      true,

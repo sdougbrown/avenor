@@ -37,9 +37,4 @@ type StartOptions struct {
 // Launcher creates and manages terminal sessions.
 type Launcher interface {
 	Start(ctx context.Context, opts StartOptions) (Session, error)
-	// SupportsResume reports whether sessions from this launcher survive
-	// the parent process and can be reattached later. Tmux sessions live
-	// in the tmux server and outlive the launching process; PTY sessions
-	// die with their parent.
-	SupportsResume() bool
 }
