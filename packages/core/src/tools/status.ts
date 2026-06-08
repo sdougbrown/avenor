@@ -97,6 +97,7 @@ export interface StatusResult {
   run_id: string
   label: string
   status: string
+  runtime_id?: string
   phase?: string
   phase_label?: string
   pending_permission?: {
@@ -125,6 +126,7 @@ async function buildRunStatus(
     run_id: runInfo.label,
     label: runInfo.label,
     status: translated,
+    runtime_id: (liveStatus?.runtime_id as string) ?? runInfo.runtimeId,
     phase: liveStatus?.phase as string | undefined,
     phase_label: liveStatus?.phase_label as string | undefined,
     session_id:
@@ -182,6 +184,7 @@ export async function statusTool(
           run_id: args.runId,
           label: args.runId,
           status: translateStatus((liveStatus?.phase ?? liveStatus?.status ?? 'running') as string, sentinel),
+          runtime_id: liveStatus?.runtime_id as string | undefined,
           phase: liveStatus?.phase as string | undefined,
           phase_label: liveStatus?.phase_label as string | undefined,
           session_id:

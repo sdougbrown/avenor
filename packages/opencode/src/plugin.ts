@@ -10,6 +10,7 @@ import {
 
 type TrackedRun = {
   runId: string
+  agent: string
   orchestratorSessionId: string
   label: string
   supervisorId?: string
@@ -53,12 +54,21 @@ function summarizeEvent(evt: { type?: unknown; event?: unknown; tool?: unknown; 
 // Channel block pattern: <channel source="agent-reviewer" from_run_id="abc123" from_role="reviewer">content</channel>
 const CHANNEL_RE = /<channel\s+source="([^"]*)"(?:\s+from_run_id="([^"]*)")?(?:\s+from_role="([^"]*)")?[^>]*>([\s\S]*?)<\/channel>/g
 
+function formatAgentMessage(source: string, fromRunId: string, fromRole: string, content: string): string {
+  // Strip redundant "agent-" prefix that both the Go sidecar (ChannelWrap) and
+  // the plugin's pollChannelMessages may prepend, so "agent-agent" becomes "agent".
+  const label = source.replace(/^agent-/, '') || source
+  const shortId = fromRunId ? fromRunId.slice(0, 8) : ''
+  const lines = [
+    `📨 ${label} (${shortId})`,
+    '',
+    ...content.trim().split('\n').map(l => `  ${l}`),
+  ]
+  return lines.join('\n') + '\n'
+}
+
 function renderChannelMessage(match: string, source: string, fromRunId: string, fromRole: string, content: string): string {
-  const attribution = fromRole
-    ? `**📨 ${source}** (${fromRole})`
-    : `**📨 ${source}**`
-  const id = fromRunId ? ` \`${fromRunId}\`` : ''
-  return `${attribution}${id}:\n> ${content.trim()}\n`
+  return formatAgentMessage(source, fromRunId, fromRole, content)
 }
 
 function formatChannelBlocks(text: string): string {
@@ -79,6 +89,8 @@ export const AvenorPlugin: Plugin = async (ctx) => {
   const trackedRuns = new Map<string, TrackedRun>()
   // Reverse index: opencode sessionId → avenor runId (for permission routing)
   const sessionIdToRunId = new Map<string, string>()
+  // Reverse index: avenor runtimeId → avenor runId (for channel message attribution)
+  const runtimeIdToRunId = new Map<string, string>()
   // Channel-messaging state for receiving messages from spawned children.
   let parentRunId = ''
   let parentToken = ''
@@ -92,17 +104,22 @@ export const AvenorPlugin: Plugin = async (ctx) => {
     return parentRunId
   }
 
-  function registerSessionId(sessionId: string | undefined, runId: string): void {
+  function registerSessionId(sessionId: string | undefined, runtimeId: string | undefined, runId: string): void {
     if (sessionId && !sessionIdToRunId.has(sessionId)) {
       sessionIdToRunId.set(sessionId, runId)
+    }
+    if (runtimeId && !runtimeIdToRunId.has(runtimeId)) {
+      runtimeIdToRunId.set(runtimeId, runId)
     }
   }
 
   // Used by both fire-and-forget (session.idle trigger) and permision routing
   // to re-prompt the orchestrator when a run completes.
   async function monitorRun(run: TrackedRun): Promise<void> {
+    let firstPoll = true
     while (true) {
-      await sleep(POLL_INTERVAL_MS)
+      if (!firstPoll) await sleep(POLL_INTERVAL_MS)
+      firstPoll = false
 
       let raw: StatusResult | StatusResult[]
       try {
@@ -114,7 +131,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
       const result = Array.isArray(raw) ? raw[0] : raw
       if (!result) continue
 
-      registerSessionId(result.session_id, run.runId)
+      registerSessionId(result.session_id, result.runtime_id, run.runId)
 
       if (TERMINAL_STATUSES.has(result.status)) {
         trackedRuns.delete(run.runId)
@@ -158,16 +175,21 @@ export const AvenorPlugin: Plugin = async (ctx) => {
            consecutiveErrors++
            continue
          }
-         for (const msg of (msgs ?? [])) {
-           if (msg.type !== 'agent_message') continue
-           let payload: any
-           try { payload = typeof msg.payload === 'string' ? JSON.parse(msg.payload) : msg.payload } catch { continue }
-           const text = typeof payload?.message === 'string' ? payload.message : ''
-           if (!text) continue
-           const from = payload.from_run_id ?? msg.from_run_id ?? 'unknown'
-           const role = payload.role ?? ''
-           const attribution = role ? `**📨 agent-${role}**` : '**📨 agent**'
-           const channelText = `${attribution} \`${from}\`:\n> ${text.trim()}\n`
+          for (const msg of (msgs ?? [])) {
+            if (msg.type !== 'agent_message') continue
+            let payload: any
+            try { payload = typeof msg.payload === 'string' ? JSON.parse(msg.payload) : msg.payload } catch { continue }
+            const text = typeof payload?.message === 'string' ? payload.message : ''
+            if (!text) continue
+            const from = payload.from_run_id ?? msg.from_run_id ?? 'unknown'
+            const role = payload.role ?? ''
+            // Resolve the agent name from any known ID: run_id, session_id, or runtime_id.
+            const resolvedRunId = trackedRuns.has(from) ? from
+              : sessionIdToRunId.get(from)
+              ?? runtimeIdToRunId.get(from)
+            const runInfo = resolvedRunId ? trackedRuns.get(resolvedRunId) : undefined
+            const source = runInfo?.agent ?? (role ? `agent-${role}` : 'agent')
+            const channelText = formatAgentMessage(source, from, role, text)
            try {
              await ctx.client.session.promptAsync({
                path: { id: sessionId },
@@ -249,6 +271,18 @@ export const AvenorPlugin: Plugin = async (ctx) => {
       }
     },
 
+    "experimental.text.complete": async (
+      _input: { sessionID: string; messageID: string; partID: string },
+      output: { text: string },
+    ) => {
+      if (typeof output.text !== 'string' || !output.text.includes('<channel ')) return
+      try {
+        output.text = formatChannelBlocks(output.text)
+      } catch {
+        // Leave text as-is if formatting fails
+      }
+    },
+
     // ── Tools ─────────────────────────────────────────────────────────────────
 
     tool: {
@@ -298,12 +332,19 @@ export const AvenorPlugin: Plugin = async (ctx) => {
 
           trackedRuns.set(result.run_id, {
             runId: result.run_id,
+            agent: args.agent,
             orchestratorSessionId: context.sessionID,
             label: result.label,
             supervisorId,
             // Blocking mode is the monitor — prevent session.idle from starting a duplicate.
             monitoring: args.wait,
           })
+
+          // Register runtime_id immediately so channel messages arriving
+          // before the first status poll can still resolve the agent name.
+          if (result.runtime_id) {
+            runtimeIdToRunId.set(result.runtime_id, result.run_id)
+          }
 
           if (!args.wait) {
             return {
@@ -335,7 +376,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
             const status = Array.isArray(raw) ? raw[0] : raw
             if (!status) continue
 
-            registerSessionId(status.session_id, result.run_id)
+            registerSessionId(status.session_id, status.runtime_id, result.run_id)
 
             if (status.pending_permission) {
               context.metadata({

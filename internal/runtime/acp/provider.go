@@ -89,16 +89,16 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 
 	// Create a broker run for this session before the client starts so provider-specific
 	// process config can authenticate outbound sends from the first turn.
+	// Use the supervisor-assigned RuntimeID when available (parent-child routing),
+	// falling back to a generated UUID for standalone sessions.
 	runID := ""
 	brokerToken := ""
-	var err error
 	if brokerRef != nil {
-		runID = uuid.New().String()
-		brokerToken, err = brokerRef.CreateRun(runID)
-		if err != nil {
-			runID = ""
-			brokerToken = ""
+		runID = merged.RuntimeID
+		if runID == "" {
+			runID = uuid.New().String()
 		}
+		brokerToken, _ = brokerRef.EnsureRun(runID)
 	}
 	var clientEnv map[string]string
 	var cleanup func() error
