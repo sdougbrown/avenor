@@ -44,6 +44,9 @@ node_modules/
 packages/*/dist
 packages/*/node_modules
 
+# Board frontend (copied from packages/board/dist for go:embed)
+internal/board/dist
+
 # Docs site
 docs/.vitepress/dist
 docs/.vitepress/cache
