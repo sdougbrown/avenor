@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/sdougbrown/avenor/internal/board"
@@ -28,20 +30,20 @@ func runBoard(args []string) int {
 	if *socket == "" {
 		if *scan != "" {
 			for _, d := range splitPathList(*scan) {
-				scanDirs = append(scanDirs, resolveHome(d))
+				scanDirs = append(scanDirs, board.ResolveHome(d))
 			}
 		}
 		// If no --scan and no --socket, default to ~/.avenor/sockets
 		if len(scanDirs) == 0 {
 			home, _ := os.UserHomeDir()
-			scanDirs = []string{home + "/.avenor/sockets"}
+			scanDirs = []string{filepath.Join(home, ".avenor", "sockets")}
 		}
 	}
 
 	cfg := board.Config{
 		Addr:           *addr,
 		ScanDirs:       scanDirs,
-		Socket:         resolveHome(*socket),
+		Socket:         board.ResolveHome(*socket),
 		AllowMutations: *allowMutations,
 		Token:          *token,
 		NoAuth:         *noAuth,
@@ -72,54 +74,6 @@ func runBoard(args []string) int {
 	<-sig
 	fmt.Fprintln(os.Stderr, "\navenor board: shutting down...")
 	return 0
-}
-
-func resolveHome(path string) string {
-	if path == "" {
-		return ""
-	}
-	if path[0] == '~' {
-		home, _ := os.UserHomeDir()
-		if len(path) > 1 && path[1] == '/' {
-			return home + path[1:]
-		}
-		return home
-	}
-	return path
-}
-
-func splitPathList(s string) []string {
-	var result []string
-	for _, item := range splitOnComma(s) {
-		item = trimSpace(item)
-		if item != "" {
-			result = append(result, item)
-		}
-	}
-	return result
-}
-
-func splitOnComma(s string) []string {
-	var result []string
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == ',' {
-			result = append(result, s[start:i])
-			start = i + 1
-		}
-	}
-	result = append(result, s[start:])
-	return result
-}
-
-func trimSpace(s string) string {
-	for len(s) > 0 && s[0] == ' ' {
-		s = s[1:]
-	}
-	for len(s) > 0 && s[len(s)-1] == ' ' {
-		s = s[:len(s)-1]
-	}
-	return s
 }
 
 // hasDisplay returns true when a graphical display is available (X11 or
@@ -162,6 +116,13 @@ func lookPath(name string) string {
 	return path
 }
 
-func commandExists(name string) bool {
-	return lookPath(name) != ""
+func splitPathList(s string) []string {
+	var result []string
+	for _, item := range strings.Split(s, ",") {
+		item = strings.TrimSpace(item)
+		if item != "" {
+			result = append(result, item)
+		}
+	}
+	return result
 }

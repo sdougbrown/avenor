@@ -336,7 +336,7 @@ func (s *Server) handleSockets(w http.ResponseWriter, r *http.Request) {
 			dirs = []string{filepath.Join(home, ".avenor", "sockets")}
 		}
 		for _, dir := range dirs {
-			dir = resolveHome(dir)
+			dir = ResolveHome(dir)
 			entries, err := os.ReadDir(dir)
 			if err != nil {
 				continue
@@ -385,7 +385,7 @@ func dialOne(path string) *socketEntry {
 	// Query status
 	status, statusErr := c.Status("")
 
-	_ = c.Close() // best effort
+	_ = c.Close() // Connection close is best-effort; errors are not actionable.
 
 	if statusErr != nil {
 		// Socket is reachable but status failed — still report it
@@ -537,7 +537,8 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				continue
 			}
-			fmt.Fprintf(w, "event: event\ndata: %s\n\n", data)
+			// SSE spec: data fields must not contain literal newlines.
+			fmt.Fprintf(w, "event: event\ndata: %s\n\n", strings.ReplaceAll(string(data), "\n", "\\n"))
 			flusher.Flush()
 		case <-r.Context().Done():
 			return
@@ -657,7 +658,8 @@ func writeError(w http.ResponseWriter, code int, err error) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 }
 
-func resolveHome(path string) string {
+// ResolveHome expands a leading "~/" to the user's home directory.
+func ResolveHome(path string) string {
 	if strings.HasPrefix(path, "~/") {
 		home, _ := os.UserHomeDir()
 		return filepath.Join(home, path[2:])
