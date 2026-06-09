@@ -54,7 +54,8 @@ func unmarshalRecord(raw []byte) (TranscriptRecord, error) {
 	if t, ok := rawMap["timestamp"]; ok {
 		json.Unmarshal(t, &rec.Timestamp)
 	}
-	// stop_reason lives inside message.stop_reason on assistant records.
+	// stop_reason lives inside message.stop_reason on assistant records;
+	// also check top-level as a fallback for records that flatten the field.
 	if rec.Type == "assistant" {
 		if msg, ok := rawMap["message"]; ok {
 			var m struct {
@@ -63,6 +64,11 @@ func unmarshalRecord(raw []byte) (TranscriptRecord, error) {
 			if err := json.Unmarshal(msg, &m); err == nil && m.StopReason != "" {
 				rec.StopReason = m.StopReason
 			}
+		}
+	}
+	if rec.StopReason == "" {
+		if sr, ok := rawMap["stop_reason"]; ok {
+			json.Unmarshal(sr, &rec.StopReason)
 		}
 	}
 	return rec, nil

@@ -192,6 +192,46 @@ func TestEventsNotFound(t *testing.T) {
 	}
 }
 
+func TestEventsProxySemantics(t *testing.T) {
+	p := &Provider{sessions: make(map[string]*claudecore.Session)}
+	sess := claudecore.NewSession(context.Background(), claudecore.SessionOptions{
+		SessionID: "ses-events-proxy",
+		EventsBuf: 4,
+	})
+	p.sessions[sess.SessionID] = sess
+
+	// Proxy: event sent to session channel should arrive on the proxy channel.
+	ch, err := p.Events(context.Background(), sess.SessionID)
+	if err != nil {
+		t.Fatalf("Events: %v", err)
+	}
+	sess.Emit(events.Event{Event: "test.proxy", SessionID: sess.SessionID})
+	select {
+	case ev := <-ch:
+		if ev.Event != "test.proxy" {
+			t.Fatalf("event = %q, want test.proxy", ev.Event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for proxied event")
+	}
+
+	// Context cancellation: proxy channel should close when the supplied ctx is done.
+	childCtx, cancel := context.WithCancel(context.Background())
+	ch2, err := p.Events(childCtx, sess.SessionID)
+	if err != nil {
+		t.Fatalf("Events (2): %v", err)
+	}
+	cancel()
+	select {
+	case _, ok := <-ch2:
+		if ok {
+			t.Fatal("expected proxy channel to be closed after context cancellation")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for proxy channel to close")
+	}
+}
+
 func TestPromptNotFound(t *testing.T) {
 	p := New()
 	err := p.Prompt(context.Background(), "no-such-session", "hello")
