@@ -253,9 +253,23 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 
 	go func() {
 		if !claudecore.WaitForPaneReady(s.Ctx, s.Term) {
+			s.Emit(events.Event{
+				Event:     "agent.prompt_failed",
+				SessionID: s.SessionID,
+				Fields: map[string]any{
+					"error": "terminal not ready",
+				},
+			})
 			return
 		}
 		if err := s.Term.PasteAndEnter(s.Ctx, prompt); err != nil {
+			s.Emit(events.Event{
+				Event:     "agent.prompt_failed",
+				SessionID: s.SessionID,
+				Fields: map[string]any{
+					"error": err.Error(),
+				},
+			})
 			return
 		}
 		s.Mu.Lock()
@@ -342,7 +356,7 @@ func (p *Provider) Cancel(ctx context.Context, sessionID string) error {
 						"stop_reason": "cancelled",
 					},
 				})
-				_ = s.Term.Kill(context.Background())
+				// runSession's defer will call Term.Kill
 				return nil
 			}
 		}
@@ -361,7 +375,7 @@ func (p *Provider) forceCancel(s *claudecore.Session) error {
 			"stop_reason": "cancelled_forced",
 		},
 	})
-	_ = s.Term.Kill(context.Background())
+	// runSession's defer will call Term.Kill
 	return nil
 }
 

@@ -2,7 +2,7 @@ package claudecore
 
 import (
 	"encoding/json"
-	"strings"
+	"strconv"
 )
 
 func MustJSON(v any) json.RawMessage {
@@ -32,5 +32,5 @@ func ValidTmuxKey(key string) bool {
 
 // ShellQuote single-quotes a string for safe interpolation into a shell command.
 func ShellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+	return strconv.Quote(s)
 }

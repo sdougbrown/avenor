@@ -78,7 +78,7 @@ func (s *Session) MarkActive() {
 func (s *Session) Emit(ev events.Event) {
 	select {
 	case s.Events <- ev:
-	default:
+	case <-s.Ctx.Done():
 	}
 }
 

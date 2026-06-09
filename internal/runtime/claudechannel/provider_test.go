@@ -971,13 +971,33 @@ func TestValidTmuxKey(t *testing.T) {
 	}
 }
 
-func TestEmitNonBlockingFullChannel(t *testing.T) {
-	s := &session{Session: &claudecore.Session{Events: make(chan events.Event, 1)}}
+func TestEmitBlocksOnFullChannelAndRespondsToCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &session{Session: &claudecore.Session{Events: make(chan events.Event, 1), Ctx: ctx}}
 	s.Events <- events.Event{Event: "test"}
-	// Channel is full; Emit should not block.
-	s.Emit(events.Event{Event: "dropped"})
-	if len(s.Events) != 1 {
-		t.Fatalf("channel should still have 1 event, got %d", len(s.Events))
+
+	// Emit should block until ctx is cancelled.
+	done := make(chan struct{})
+	go func() {
+		s.Emit(events.Event{Event: "dropped"})
+		close(done)
+	}()
+
+	// Give the goroutine time to block on the channel send.
+	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-done:
+		t.Fatal("Emit should have blocked on full channel")
+	default:
+	}
+
+	// Cancel context; Emit should return.
+	cancel()
+	select {
+	case <-done:
+		// success
+	case <-time.After(time.Second):
+		t.Fatal("Emit did not return after context cancellation")
 	}
 }
 
