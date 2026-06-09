@@ -39,27 +39,27 @@ depends = ["js-build"]
 run = ["cd packages/core && bun test", "cd packages/mcp && bun test", "cd packages/opencode && bun test"]
 
 [tasks.go-build]
-description = "Build the avenor Go binary (also builds board frontend)"
-depends = ["js-board-build"]
+description = "Build the avenor Go binary (without board frontend)"
 sources = ["**/*.go", "go.mod", "go.sum"]
+outputs = ["avenor"]
+run = "mkdir -p .cache/go-build .cache/go-mod && GOCACHE=$PWD/.cache/go-build GOMODCACHE=$PWD/.cache/go-mod go build -o avenor ./cmd/avenor"
+
+[tasks.go-build-full]
+description = "Build the avenor Go binary with board frontend embedded"
+depends = ["js-board-build"]
+sources = ["**/*.go", "go.mod", "go.sum", "packages/board/dist/index.html"]
 outputs = ["avenor"]
 run = """
 rm -rf internal/board/dist
 cp -r packages/board/dist internal/board/dist
 mkdir -p .cache/go-build .cache/go-mod
-GOCACHE=$PWD/.cache/go-build GOMODCACHE=$PWD/.cache/go-mod go build -o avenor ./cmd/avenor
+GOCACHE=$PWD/.cache/go-build GOMODCACHE=$PWD/.cache/go-mod go build -tags board -o avenor ./cmd/avenor
 """
 
 [tasks.go-test]
-description = "Test Go packages"
-depends = ["js-board-build"]
+description = "Test Go packages (without board frontend)"
 sources = ["**/*.go", "go.mod", "go.sum"]
-run = """
-rm -rf internal/board/dist
-cp -r packages/board/dist internal/board/dist
-mkdir -p .cache/go-build .cache/go-mod
-GOCACHE=$PWD/.cache/go-build GOMODCACHE=$PWD/.cache/go-mod go test ./...
-"""
+run = "mkdir -p .cache/go-build .cache/go-mod && GOCACHE=$PWD/.cache/go-build GOMODCACHE=$PWD/.cache/go-mod go test ./..."
 
 [tasks.build]
 description = "Build the avenor Go binary and all JS packages"

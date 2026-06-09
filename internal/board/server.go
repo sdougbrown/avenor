@@ -63,11 +63,27 @@ func NewServer(cfg Config) (*Server, error) {
 	mux.HandleFunc("/api/cancel", s.handleCancel)
 	mux.HandleFunc("/api/prompt", s.handlePrompt)
 
-	// Static files under /board/ with SPA fallback
+	// Static files under /board/
 	boardFS, err := fs.Sub(EmbeddedFS, "dist")
-	if err != nil {
-		return nil, fmt.Errorf("avenor board: failed to create sub filesystem: %w", err)
+	hasFrontend := err == nil
+	if hasFrontend {
+		// Verify the frontend actually exists by checking for index.html
+		if f, ferr := boardFS.Open("index.html"); ferr != nil {
+			hasFrontend = false
+		} else {
+			f.Close()
+		}
 	}
+	if !hasFrontend {
+		// No frontend built — serve a placeholder page.
+		mux.HandleFunc("/board/", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			fmt.Fprint(w, `<!DOCTYPE html><html><body><h1>Avenor Board</h1><p>Frontend not built. Build with <code>mise run go-build-full</code> or <code>go build -tags board ./cmd/avenor</code>.</p></body></html>`)
+		})
+		mux.HandleFunc("/board", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/board/", http.StatusMovedPermanently)
+		})
+	} else {
 	mux.HandleFunc("/board/", func(w http.ResponseWriter, r *http.Request) {
 		// Trim the /board/ prefix to get the file path within the embedded FS
 		name := strings.TrimPrefix(r.URL.Path, "/board/")
@@ -119,6 +135,7 @@ func NewServer(cfg Config) (*Server, error) {
 	mux.HandleFunc("/board", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/board/", http.StatusMovedPermanently)
 	})
+	} // end else (boardFS available)
 
 	// Redirect root to /board/
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
