@@ -21,9 +21,17 @@ sources = ["src/**/*.ts", "tsdown.config.ts", "package.json"]
 outputs = ["dist/index.js"]
 run = "bun run build"
 
+[tasks.js-board-build]
+description = "Build @dougbots/avenor-board frontend"
+dir = "packages/board"
+depends = []
+sources = ["src/**/*.ts", "src/**/*.tsx", "src/**/*.css", "index.html", "vite.config.ts", "tsconfig.json", "package.json"]
+outputs = ["dist/index.html"]
+run = "bun run build"
+
 [tasks.js-build]
 description = "Build all JS packages"
-depends = ["js-mcp-build", "js-opencode-build"]
+depends = ["js-mcp-build", "js-opencode-build", "js-board-build"]
 
 [tasks.js-test]
 description = "Test all JS packages"
@@ -31,15 +39,27 @@ depends = ["js-build"]
 run = ["cd packages/core && bun test", "cd packages/mcp && bun test", "cd packages/opencode && bun test"]
 
 [tasks.go-build]
-description = "Build the avenor Go binary"
+description = "Build the avenor Go binary (also builds board frontend)"
+depends = ["js-board-build"]
 sources = ["**/*.go", "go.mod", "go.sum"]
 outputs = ["avenor"]
-run = "mkdir -p .cache/go-build .cache/go-mod && GOCACHE=$PWD/.cache/go-build GOMODCACHE=$PWD/.cache/go-mod go build -o avenor ./cmd/avenor"
+run = """
+rm -rf internal/board/dist
+cp -r packages/board/dist internal/board/dist
+mkdir -p .cache/go-build .cache/go-mod
+GOCACHE=$PWD/.cache/go-build GOMODCACHE=$PWD/.cache/go-mod go build -o avenor ./cmd/avenor
+"""
 
 [tasks.go-test]
 description = "Test Go packages"
+depends = ["js-board-build"]
 sources = ["**/*.go", "go.mod", "go.sum"]
-run = "mkdir -p .cache/go-build .cache/go-mod && GOCACHE=$PWD/.cache/go-build GOMODCACHE=$PWD/.cache/go-mod go test ./..."
+run = """
+rm -rf internal/board/dist
+cp -r packages/board/dist internal/board/dist
+mkdir -p .cache/go-build .cache/go-mod
+GOCACHE=$PWD/.cache/go-build GOMODCACHE=$PWD/.cache/go-mod go test ./...
+"""
 
 [tasks.build]
 description = "Build the avenor Go binary and all JS packages"

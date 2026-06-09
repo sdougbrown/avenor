@@ -39,6 +39,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "channel-tools" {
 		os.Exit(runChannelTools(os.Args[2:]))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "board" {
+		os.Exit(runBoard(os.Args[2:]))
+	}
 
 	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
 		fmt.Printf("avenor v%s\n", Version)
