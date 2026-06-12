@@ -93,7 +93,25 @@ const EVENT_TYPES = [
     event: 'agent.thought_chunk',
     data: {
       event: 'agent.thought_chunk',
-      text: 'I need to refactor the auth module to use the new token rotation interface. Let me check the current implementation.',
+      content: 'I need',
+      model: 'glm-5.1',
+      run_id: 'rt-alpha',
+    },
+  },
+  {
+    event: 'agent.thought_chunk',
+    data: {
+      event: 'agent.thought_chunk',
+      content: ' to refactor',
+      model: 'glm-5.1',
+      run_id: 'rt-alpha',
+    },
+  },
+  {
+    event: 'agent.thought_chunk',
+    data: {
+      event: 'agent.thought_chunk',
+      content: ' the auth module to use the new token rotation interface.',
       model: 'glm-5.1',
       run_id: 'rt-alpha',
     },
@@ -161,7 +179,16 @@ const EVENT_TYPES = [
     event: 'agent.thought_chunk',
     data: {
       event: 'agent.thought_chunk',
-      text: 'The tests pass with 94% coverage. I can now safely refactor the rotation logic.',
+      content: 'The tests pass',
+      model: 'glm-5.1',
+      run_id: 'rt-beta',
+    },
+  },
+  {
+    event: 'agent.thought_chunk',
+    data: {
+      event: 'agent.thought_chunk',
+      content: ' with 94% coverage.',
       model: 'glm-5.1',
       run_id: 'rt-beta',
     },

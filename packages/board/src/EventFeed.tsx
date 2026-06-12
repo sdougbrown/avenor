@@ -6,6 +6,7 @@ import {
 } from 'solid-js'
 import { createEventSource, fetchConfig } from './api'
 import { ControlBar } from './ControlBar'
+import { Accumulator, isChunkEvent } from './accumulation'
 
 interface Props {
   socketPath: string | null
@@ -24,12 +25,31 @@ export function EventFeed(props: Props) {
   const [mutationsAllowed, setMutationsAllowed] = createSignal(false)
   const [expandedTools, setExpandedTools] = createSignal<Set<number>>(new Set())
 
+  const accumulator = new Accumulator()
+
   // Config
   onMount(() => {
     fetchConfig()
       .then((cfg) => setMutationsAllowed(!!cfg.mutations_allowed))
       .catch(() => {})
   })
+
+  function pushEvent(type: string, content: string, timestamp: number) {
+    setEvents((prev) => {
+      const next = [...prev, { type, data: { content }, timestamp }]
+      if (next.length > 10000) {
+        return next.slice(next.length - 10000)
+      }
+      return next
+    })
+  }
+
+  function flushAccumulation() {
+    const entry = accumulator.flush()
+    if (entry) {
+      pushEvent(entry.type, entry.content, entry.timestamp)
+    }
+  }
 
   // EventSource lifecycle
   createEffect(() => {
@@ -42,15 +62,16 @@ export function EventFeed(props: Props) {
       try {
         const parsed = JSON.parse(e.data)
         const eventType = parsed.event || parsed.type || 'unknown'
-        setEvents((prev) => {
-          const next = [...prev, { type: eventType, data: parsed, timestamp: Date.now() }]
-          // Cap at 10000 events to prevent unbounded memory growth
-          if (next.length > 10000) {
-            return next.slice(next.length - 10000)
-          }
-          return next
-        })
+
+        const flushed = accumulator.ingest(eventType, parsed, Date.now())
+        if (flushed) {
+          pushEvent(flushed.type, flushed.content, flushed.timestamp)
+        }
+        if (!isChunkEvent(eventType)) {
+          flushAccumulation()
+        }
       } catch {
+        flushAccumulation()
         setEvents((prev) => [
           ...prev,
           { type: 'unknown', data: e.data, timestamp: Date.now() },
@@ -62,7 +83,10 @@ export function EventFeed(props: Props) {
       source.close()
     }
 
-    return () => source.close()
+    return () => {
+      flushAccumulation()
+      source.close()
+    }
   })
 
   // Auto-scroll tracking
@@ -109,13 +133,18 @@ export function EventFeed(props: Props) {
     const ts = new Date(ev.timestamp).toLocaleTimeString()
 
     switch (ev.type) {
-      case 'agent.thought_chunk': {
-        const raw = JSON.stringify(ev.data, null, 2)
+      case 'agent.thought_chunk':
+      case 'agent.message_chunk':
+      case 'user.message_chunk': {
+        const content = (ev.data as Record<string, unknown>)?.content as string | undefined
+        const label = ev.type === 'agent.thought_chunk' ? 'thought'
+          : ev.type === 'agent.message_chunk' ? 'message'
+          : 'user-message'
         return (
           <div class="event event-thought">
             <span class="event-time">{ts}</span>
-            <span class="event-type">thought</span>
-            <pre>{raw}</pre>
+            <span class="event-type">{label}</span>
+            <pre>{content || ''}</pre>
           </div>
         )
       }
