@@ -86,8 +86,10 @@ export function createEventSource(
   let url = `/api/events?socket=${encodeURIComponent(socketPath)}${
     runtimeId ? `&runtime_id=${encodeURIComponent(runtimeId)}` : ''
   }`
-  // EventSource cannot set custom headers, so pass token as query param
-  // (the server accepts ?token= for SSE endpoints)
+  // EventSource cannot set custom headers, so pass token as query param.
+  // This leaks the token into browser history and server logs — acceptable
+  // because the board only binds loopback by default and the token is
+  // randomly generated (or user-provided on a trusted network).
   const token = localStorage.getItem('avenor_auth_token')
   if (token) {
     url += `&token=${encodeURIComponent(token)}`

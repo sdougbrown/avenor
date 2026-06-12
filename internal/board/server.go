@@ -649,7 +649,10 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		// Encode errors on a response writer are rare (e.g. client disconnected).
+		// Not worth surfacing — the caller already sent status code/headers above.
+	}
 }
 
 func writeError(w http.ResponseWriter, code int, err error) {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/sdougbrown/avenor/internal/board"
 )
@@ -73,6 +75,11 @@ func runBoard(args []string) int {
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
 	fmt.Fprintln(os.Stderr, "\navenor board: shutting down...")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Stop(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "avenor board: server shutdown: %v\n", err)
+	}
 	return 0
 }
 

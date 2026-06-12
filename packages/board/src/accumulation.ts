@@ -60,6 +60,6 @@ export class Accumulator {
   }
 
   get isBuffered(): boolean {
-    return this.accType !== '' && this.accText !== ''
+    return this.accType !== ''
   }
 }
