@@ -10,7 +10,7 @@ var loopMarkerRe = regexp.MustCompile(`(?i)^\s*\[loop:\s*(\w+)(?:\s*\|\s*([^\]]*
 // workflowAngleRe matches <|workflow: directive|> or <|workflow: directive | label|>
 // on its own line, case-insensitively. Group 1 is the directive word; group 2 is
 // the optional label.
-var workflowAngleRe = regexp.MustCompile(`(?i)^\s*<\|workflow:\s*(\w+)\s*(?:\|\s*([^|>]*))?\|>\s*$`)
+var workflowAngleRe = regexp.MustCompile(`(?i)^\s*<\|workflow:\s*(\w+)\s*(?:\|\s*(.*))?\|>\s*$`)
 
 func loopDirectiveSeverity(directive string) int {
 	switch directive {
@@ -39,7 +39,8 @@ func ExtractLoopMarker(text string) (directive, label string, ok bool) {
 		if inFence {
 			continue
 		}
-		// Try legacy [loop: ...] first.
+		// Try legacy [loop: ...] first. Both syntaxes are full-line markers, so
+		// a matching legacy line cannot also contain a valid angle-token marker.
 		m := loopMarkerRe.FindStringSubmatch(line)
 		if m != nil {
 			dir := strings.ToLower(m[1])

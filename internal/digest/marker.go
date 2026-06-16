@@ -13,7 +13,7 @@ var statusMarkerRe = regexp.MustCompile(`(?i)\[status:\s*(\w+)(?:\s*\|\s*([^\]]*
 // statusAngleRe matches <|status: phase|> or <|status: phase | label|> on its
 // own line, case-insensitively. Group 1 is the phase word; group 2 is the
 // optional label.
-var statusAngleRe = regexp.MustCompile(`(?i)^\s*<\|status:\s*(\w+)\s*(?:\|\s*([^|>]*))?\|>\s*$`)
+var statusAngleRe = regexp.MustCompile(`(?i)^\s*<\|status:\s*(\w+)\s*(?:\|\s*(.*))?\|>\s*$`)
 
 // ExtractStatusMarker scans text for the first [status: <phase>] or
 // [status: <phase> | <label>] marker (inline, legacy). Returns the normalised

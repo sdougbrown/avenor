@@ -630,6 +630,11 @@ func TestExtractTeamSkipMarkers(t *testing.T) {
 			want:  []string{"api-compat"},
 		},
 		{
+			name:  "angle-token name may contain pipe and greater-than",
+			input: "<|team: skip | name |> variant | x|>",
+			want:  []string{"name |> variant | x"},
+		},
+		{
 			name:  "angle-token inline in prose ignored",
 			input: "output says <|team: skip | security|>",
 			want:  nil,

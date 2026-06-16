@@ -179,6 +179,13 @@ func TestExtractStatusAngle(t *testing.T) {
 			wantOK:    true,
 		},
 		{
+			name:      "angle-token label may contain pipe and greater-than",
+			text:      "<|status: waiting | compare a |> b | c|>",
+			wantPhase: "waiting",
+			wantLabel: "compare a |> b | c",
+			wantOK:    true,
+		},
+		{
 			name:      "case insensitive STATUS angle",
 			text:      "<|STATUS: THINKING|>",
 			wantPhase: "thinking",

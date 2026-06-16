@@ -150,6 +150,13 @@ func TestExtractLoopMarker(t *testing.T) {
 			wantOK:    true,
 		},
 		{
+			name:      "angle-token label may contain pipe and greater-than",
+			text:      "<|workflow: abort | blocked on a |> b | c|>",
+			wantDir:   "abort",
+			wantLabel: "blocked on a |> b | c",
+			wantOK:    true,
+		},
+		{
 			name:      "angle-token abort wins over exit",
 			text:      "<|workflow: exit | minor|>\n<|workflow: abort | critical|>",
 			wantDir:   "abort",

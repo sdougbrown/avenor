@@ -623,12 +623,12 @@ func markerFromResult(result PhaseAttemptResult) *phaseconfig.LoopMarker {
 var teamSkipRe = regexp.MustCompile(`(?i)^\s*\[team:\s*skip\s*\|\s*([^\]]+)\]\s*$`)
 
 // teamSkipAngleRe matches <|team: skip | member-name|> full-line, case-insensitively.
-var teamSkipAngleRe = regexp.MustCompile(`(?i)^\s*<\|team:\s*skip\s*\|\s*([^|>]+)\|>\s*$`)
+var teamSkipAngleRe = regexp.MustCompile(`(?i)^\s*<\|team:\s*skip\s*\|\s*(.+)\|>\s*$`)
 
 func extractTeamSkipMarkers(text string) []string {
 	var names []string
 	for _, line := range strings.Split(text, "\n") {
-		m := teamSkipRe.FindStringSubmatch(strings.TrimSpace(line))
+		m := teamSkipRe.FindStringSubmatch(line)
 		if m != nil {
 			names = append(names, strings.TrimSpace(m[1]))
 			continue
