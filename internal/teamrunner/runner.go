@@ -128,7 +128,7 @@ func injectSkipBlockIntoLastPre(cfg *TeamConfig) {
 
 	lastPre := &cfg.Pre[len(cfg.Pre)-1]
 	lastPre.Prompt += fmt.Sprintf(
-		"\n\nThe following team members may be skipped. For each that should not run, emit exactly one line:\n[team: skip | <name>]\nConditional members: %s",
+		"\n\nThe following team members may be skipped. For each that should not run, emit exactly one line:\n<|team: skip | <name>|>\nConditional members: %s",
 		strings.Join(conditional, ", "),
 	)
 }
@@ -492,12 +492,12 @@ func completePhaseRequirements(ctx context.Context, opts RunOptions, phase phase
 	}
 
 	return PhaseAttemptResult{
-		ExitCode:     1,
-		SessionID:    sessionID,
-		StopReason:   "incomplete_output",
-		Output:       result.Output,
-		FinalReply:   result.FinalReply,
-		BrokerRunID:  result.BrokerRunID,
+		ExitCode:    1,
+		SessionID:   sessionID,
+		StopReason:  "incomplete_output",
+		Output:      result.Output,
+		FinalReply:  result.FinalReply,
+		BrokerRunID: result.BrokerRunID,
 	}, nil
 }
 
@@ -622,14 +622,21 @@ func markerFromResult(result PhaseAttemptResult) *phaseconfig.LoopMarker {
 
 var teamSkipRe = regexp.MustCompile(`(?i)^\s*\[team:\s*skip\s*\|\s*([^\]]+)\]\s*$`)
 
+// teamSkipAngleRe matches <|team: skip | member-name|> full-line, case-insensitively.
+var teamSkipAngleRe = regexp.MustCompile(`(?i)^\s*<\|team:\s*skip\s*\|\s*([^|>]+)\|>\s*$`)
+
 func extractTeamSkipMarkers(text string) []string {
 	var names []string
 	for _, line := range strings.Split(text, "\n") {
 		m := teamSkipRe.FindStringSubmatch(strings.TrimSpace(line))
-		if m == nil {
+		if m != nil {
+			names = append(names, strings.TrimSpace(m[1]))
 			continue
 		}
-		names = append(names, strings.TrimSpace(m[1]))
+		m = teamSkipAngleRe.FindStringSubmatch(line)
+		if m != nil {
+			names = append(names, strings.TrimSpace(m[1]))
+		}
 	}
 	return names
 }

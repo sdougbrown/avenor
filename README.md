@@ -89,7 +89,7 @@ When a single prompt isn't enough — build once, then test → review → fix u
 avenor run --loop-file loop.json --auto-approve --sentinel-file run.done
 ```
 
-Phases emit `[loop: exit]` to finish clean or `[loop: abort | reason]` to escalate. Pre phases run once. Loop phases repeat until exit, abort, or `max_iterations`. See [docs/loop.md](docs/loop.md) for the full config reference, prompt templates, lifecycle events, and abort mechanics.
+Phases emit `<|workflow: exit | label|>` to finish clean or `<|workflow: abort | reason|>` to escalate. Pre phases run once. Loop phases repeat until exit, abort, or `max_iterations`. See [docs/loop.md](docs/loop.md) for the full config reference, prompt templates, lifecycle events, and abort mechanics.
 
 ## Event monitoring
 

@@ -415,7 +415,7 @@ func TestRunConditionalInjectionInPrePrompt(t *testing.T) {
 		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
 			// Verify the decide phase's prompt includes the conditional skip syntax
 			if phase.Name == "decide" {
-				if !strings.Contains(phase.Prompt, "[team: skip | <name>]") {
+				if !strings.Contains(phase.Prompt, "<|team: skip | <name>|>") {
 					t.Fatalf("decide prompt should contain conditional skip syntax, got: %q", phase.Prompt)
 				}
 				if !strings.Contains(phase.Prompt, "Conditional members: security, api-compat") {
@@ -601,6 +601,38 @@ func TestExtractTeamSkipMarkers(t *testing.T) {
 			name:  "whitespace tolerant",
 			input: "  [team:  skip  |  api-compat  ]  ",
 			want:  []string{"api-compat"},
+		},
+
+		// --- angle-token team skip ---
+		{
+			name:  "angle-token single skip",
+			input: "<|team: skip | security|>",
+			want:  []string{"security"},
+		},
+		{
+			name:  "angle-token multiple skips",
+			input: "<|team: skip | security|>\n<|team: skip | api-compat|>",
+			want:  []string{"security", "api-compat"},
+		},
+		{
+			name:  "mixed legacy and angle-token",
+			input: "[team: skip | security]\n<|team: skip | api-compat|>",
+			want:  []string{"security", "api-compat"},
+		},
+		{
+			name:  "angle-token case insensitive",
+			input: "<|TEAM: SKIP | Security|>",
+			want:  []string{"Security"},
+		},
+		{
+			name:  "angle-token whitespace tolerant",
+			input: "  <|team:  skip  |  api-compat  |>",
+			want:  []string{"api-compat"},
+		},
+		{
+			name:  "angle-token inline in prose ignored",
+			input: "output says <|team: skip | security|>",
+			want:  nil,
 		},
 	}
 

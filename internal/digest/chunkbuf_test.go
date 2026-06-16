@@ -7,11 +7,11 @@ import (
 
 func TestChunkBuffer(t *testing.T) {
 	tests := []struct {
-		name     string
-		appends  []string
-		wantDir  string
-		wantLbl  string
-		wantOK   bool
+		name    string
+		appends []string
+		wantDir string
+		wantLbl string
+		wantOK  bool
 	}{
 		{
 			name:    "marker in single chunk",
@@ -157,5 +157,58 @@ func TestChunkBufferLoopMarkerHighestSeverityWins(t *testing.T) {
 	dir, label, ok = cb.ScanLoopMarker()
 	if !ok || dir != "abort" || label != "critical" {
 		t.Fatalf("second scan: dir=%q label=%q (abort should still win)", dir, label)
+	}
+}
+
+func TestChunkBufferAngleTokenLoopMarker(t *testing.T) {
+	cb := NewChunkBuffer()
+	cb.Append("<|workflow: abort | critical|>\n")
+	dir, label, ok := cb.ScanLoopMarker()
+	if !ok || dir != "abort" || label != "critical" {
+		t.Fatalf("first scan: ok=%v dir=%q label=%q", ok, dir, label)
+	}
+
+	cb.Append("<|workflow: exit | minor|>\n")
+	dir, label, ok = cb.ScanLoopMarker()
+	if !ok || dir != "abort" || label != "critical" {
+		t.Fatalf("second scan: dir=%q label=%q (abort should still win)", dir, label)
+	}
+}
+
+func TestChunkBufferMixedLegacyAndAngleLoopMarker(t *testing.T) {
+	cb := NewChunkBuffer()
+	cb.Append("[loop: exit]\n")
+	cb.Append("<|workflow: abort | blocker|>\n")
+	dir, label, ok := cb.ScanLoopMarker()
+	if !ok || dir != "abort" || label != "blocker" {
+		t.Fatalf("mixed: ok=%v dir=%q label=%q", ok, dir, label)
+	}
+}
+
+func TestChunkBufferAngleTokenStatusMarker(t *testing.T) {
+	cb := NewChunkBuffer()
+	cb.Append("<|status: working | test|>")
+	phase, label, ok := cb.ScanStatusAngle()
+	if !ok || phase != "working" || label != "test" {
+		t.Fatalf("first scan: ok=%v phase=%q label=%q", ok, phase, label)
+	}
+	phase, label, ok = cb.ScanStatusAngle()
+	if ok {
+		t.Fatalf("second call: ok=%v, want false (duplicate)", ok)
+	}
+}
+
+func TestChunkBufferChunkedAngleTokenStatusMarker(t *testing.T) {
+	cb := NewChunkBuffer()
+	cb.Append("<|sta")
+	_, _, ok := cb.ScanStatusAngle()
+	if ok {
+		t.Fatalf("partial token scan: ok=%v, want false", ok)
+	}
+
+	cb.Append("tus: working | test|>")
+	phase, label, ok := cb.ScanStatusAngle()
+	if !ok || phase != "working" || label != "test" {
+		t.Fatalf("complete token scan: ok=%v phase=%q label=%q", ok, phase, label)
 	}
 }

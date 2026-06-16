@@ -63,7 +63,17 @@ Avenor runs `plan` once, then launches `auth-tests`, `api-tests`, and `db-tests`
 
 If the team member list resolves to zero members after conditional filtering, Avenor skips directly to post phases and exits cleanly.
 
-Phases run to the natural end of their session before Avenor acts on a marker. A member can emit `[team: skip | name]` during the pre phase to remove another member from the team; it cannot interrupt a member that has already started.
+## How a team run works
+
+**Pre phases** run once, in sequence, before the team starts. If any pre phase exits with a stop reason other than `end_turn`, the entire run fails immediately — the team never starts.
+
+**Team phases** run in parallel. All team members start at the same time; each runs in its own session. The team phase ends when all members have finished — or when any member aborts (see Abort and escalation below).
+
+**Post phases** run once, in sequence, after all team members complete successfully. Post phases are skipped if the team phase ends in an abort or failure.
+
+If the team member list resolves to zero members after conditional filtering, Avenor skips directly to post phases and exits cleanly.
+
+Phases run to the natural end of their session before Avenor acts on a marker. A member can emit `<|team: skip | name|>` during the pre phase to remove another member from the team; it cannot interrupt a member that has already started.
 
 ## Team config file
 
@@ -129,14 +139,14 @@ Sometimes you don't know until runtime whether a team member should run. Mark a 
 To skip a conditional member, the pre phase emits a skip marker:
 
 ```
-[team: skip | auth-review]
+<|team: skip | auth-review|>
 ```
 
 ### Skip marker format
 
 ```
-[team: skip | <name>]          skip a conditional team member by name
-[team: skip | auth-review]     case-insensitive match against the member's name
+<|team: skip | name|>         skip a conditional team member by name
+<|team: skip | auth-review|>  case-insensitive match against the member's name
 ```
 
 - Case-insensitive matching against the member's `name` field
@@ -152,7 +162,7 @@ Avenor automatically appends instructions to the last pre phase's prompt, listin
 
 ## Abort and escalation
 
-A team member emits `[loop: abort | reason]` when it hits a wall — a missing dependency, a decision requiring human judgement, or a constraint it cannot satisfy alone. The marker uses the `loop:` prefix even in a team run; there is no `[team: abort]`.
+A team member emits `<|workflow: abort | reason|>` when it hits a wall — a missing dependency, a decision requiring human judgement, or a constraint it cannot satisfy alone. The marker uses the `workflow:` prefix even in a team run; there is no `<|team: abort|>`.
 
 When any member aborts:
 
@@ -300,7 +310,7 @@ Abort marker fields appear when a member emitted an abort:
 
 | Field | Present when |
 |---|---|
-| `abort_marker: true` | `[loop: abort]` was seen during this phase |
+| `abort_marker: true` | `<|workflow: abort | reason|>` was seen during this phase |
 | `abort_marker_label` | abort marker had a label |
 
 ### avenor.team.end
@@ -323,7 +333,7 @@ Emitted once after the team run finishes, regardless of how it ended.
 | Value | Meaning |
 |---|---|
 | `end_turn` | All members completed successfully and post phases (if any) finished cleanly |
-| `abort` | At least one member emitted `[loop: abort]` |
+| `abort` | At least one member emitted `<|workflow: abort | reason|>` |
 | `phase_failure` | A phase exited with a non-clean stop reason |
 | `pre_failure` | A pre phase exited with a non-clean stop reason |
 | `post_failure` | A post phase exited with a non-clean stop reason |

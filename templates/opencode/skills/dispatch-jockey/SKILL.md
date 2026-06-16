@@ -73,7 +73,7 @@ STOP_REASON=error
 RUN=a3f9...
 ```
 
-Read `STATUS=` to branch on the outcome. `DONE` is clean completion. `FAILED`, `TIMEOUT`, and `KILLED` indicate problems. `BLOCKED` means jockey emitted `[loop: abort]` and needs escalation.
+Read `STATUS=` to branch on the outcome. `DONE` is clean completion. `FAILED`, `TIMEOUT`, and `KILLED` indicate problems. `BLOCKED` means jockey emitted `<|workflow: abort | reason|>` and needs escalation.
 
 ## Using a stable supervisor
 

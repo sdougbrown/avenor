@@ -73,3 +73,19 @@ func (cb *ChunkBuffer) ScanStatusMarker() (phase, label string, ok bool) {
 	cb.lastStatusKey = key
 	return phase, label, ok
 }
+
+// ScanStatusAngle runs ExtractStatusAngle over the accumulated buffer.
+// It returns ok=false for a status angle token that was already returned by
+// a previous call, preventing duplicate emissions.
+func (cb *ChunkBuffer) ScanStatusAngle() (phase, label string, ok bool) {
+	phase, label, ok = ExtractStatusAngle(cb.buf.String())
+	if !ok {
+		return "", "", false
+	}
+	key := phase + "|" + label
+	if key == cb.lastStatusKey {
+		return "", "", false
+	}
+	cb.lastStatusKey = key
+	return phase, label, ok
+}

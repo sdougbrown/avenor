@@ -121,6 +121,89 @@ func TestExtractLoopMarker(t *testing.T) {
 			text:   "[loop exit]",
 			wantOK: false,
 		},
+
+		// --- canonical angle-token workflow: ... ---
+		{
+			name:    "angle-token workflow: abort",
+			text:    "<|workflow: abort|>",
+			wantDir: "abort",
+			wantOK:  true,
+		},
+		{
+			name:      "angle-token workflow: exit with label",
+			text:      "<|workflow: exit | tests green|>",
+			wantDir:   "exit",
+			wantLabel: "tests green",
+			wantOK:    true,
+		},
+		{
+			name:    "angle-token workflow: continue",
+			text:    "<|workflow: continue|>",
+			wantDir: "continue",
+			wantOK:  true,
+		},
+		{
+			name:      "angle-token workflow: abort with label",
+			text:      "<|workflow: abort | critical CVE found|>",
+			wantDir:   "abort",
+			wantLabel: "critical CVE found",
+			wantOK:    true,
+		},
+		{
+			name:      "angle-token abort wins over exit",
+			text:      "<|workflow: exit | minor|>\n<|workflow: abort | critical|>",
+			wantDir:   "abort",
+			wantLabel: "critical",
+			wantOK:    true,
+		},
+		{
+			name:      "angle-token same severity first wins",
+			text:      "<|workflow: exit | first|>\n<|workflow: exit | second|>",
+			wantDir:   "exit",
+			wantLabel: "first",
+			wantOK:    true,
+		},
+		{
+			name:   "angle-token inline ignored",
+			text:   "output says <|workflow: abort|>",
+			wantOK: false,
+		},
+		{
+			name:   "angle-token in code fence ignored",
+			text:   "```\n<|workflow: abort|>\n```",
+			wantOK: false,
+		},
+		{
+			name:      "mixed legacy and angle-token: angle wins higher severity",
+			text:      "[loop: exit]\n<|workflow: abort | blocker|>",
+			wantDir:   "abort",
+			wantLabel: "blocker",
+			wantOK:    true,
+		},
+		{
+			name:      "mixed legacy and angle-token: legacy higher severity",
+			text:      "<|workflow: continue|>\n[loop: abort | legacy blocker]",
+			wantDir:   "abort",
+			wantLabel: "legacy blocker",
+			wantOK:    true,
+		},
+
+		// --- [workflow: ...] must be rejected ---
+		{
+			name:   "bracket workflow: abort rejected",
+			text:   "[workflow: abort]",
+			wantOK: false,
+		},
+		{
+			name:   "bracket workflow: exit rejected",
+			text:   "[workflow: exit]",
+			wantOK: false,
+		},
+		{
+			name:   "bracket workflow with label rejected",
+			text:   "[workflow: abort | something]",
+			wantOK: false,
+		},
 	}
 
 	for _, tt := range tests {

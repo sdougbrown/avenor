@@ -667,7 +667,7 @@ func TestRunTeamFileFakeE2E(t *testing.T) {
 			if session.opts.Agent != "default-agent" || session.opts.Model != "default-model" {
 				t.Fatalf("pre opts = %+v, want default agent/model", session.opts)
 			}
-			if !strings.Contains(session.prompt, "[team: skip | <name>]") {
+			if !strings.Contains(session.prompt, "<|team: skip | <name>|>") {
 				t.Fatalf("pre prompt missing conditional injection: %q", session.prompt)
 			}
 		case strings.Contains(session.prompt, "review style"):
@@ -2505,6 +2505,20 @@ func TestWaitForSessionChunkedStatusMarker(t *testing.T) {
 		{
 			name:      "status marker in single chunk",
 			chunks:    []string{"[status: thinking | analysing]"},
+			wantPhase: "thinking",
+			wantLabel: "analysing",
+			wantOK:    true,
+		},
+		{
+			name:      "angle status marker split across chunks",
+			chunks:    []string{"<|sta", "tus: working | running tests|>"},
+			wantPhase: "working",
+			wantLabel: "running tests",
+			wantOK:    true,
+		},
+		{
+			name:      "angle status marker in single chunk",
+			chunks:    []string{"<|status: thinking | analysing|>"},
 			wantPhase: "thinking",
 			wantLabel: "analysing",
 			wantOK:    true,

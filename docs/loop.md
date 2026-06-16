@@ -22,7 +22,7 @@ Create a loop config file:
   "loop": [
     {
       "name": "test",
-      "prompt": "Run the test suite. If all tests pass, emit [loop: exit | tests green]. Otherwise report the failures."
+      "prompt": "Run the test suite. If all tests pass, emit <|workflow: exit | tests green|>. Otherwise report the failures."
     },
     {
       "name": "fix",
@@ -39,7 +39,7 @@ Run it:
 avenor run --loop-file loop.json --auto-approve --sentinel-file run.done
 ```
 
-Avenor runs `build` once, then repeats `test` → `fix` until the test phase emits `[loop: exit]` or five iterations pass. You get a single sentinel file afterward.
+Avenor runs `build` once, then repeats `test` → `fix` until the test phase emits `<|workflow: exit|>` or five iterations pass. You get a single sentinel file afterward.
 
 `--prompt` and `--prompt-file` are optional when `--loop-file` is set. If you provide one, it runs as an implicit pre-phase (named `(initial)`) before any config phases.
 
@@ -49,8 +49,8 @@ Avenor runs `build` once, then repeats `test` → `fix` until the test phase emi
 
 **Loop phases** run in sequence from top to bottom, then repeat from the top. The loop stops when:
 
-- A phase agent emits `[loop: exit]` — clean completion
-- A phase agent emits `[loop: abort]` — stuck, needs escalation
+- A phase agent emits `<|workflow: exit|>` — clean completion
+- A phase agent emits `<|workflow: abort | reason|>` — stuck, needs escalation
 - The iteration count reaches `max_iterations`
 - Any phase exits with a non-clean stop reason
 - The run is cancelled or times out
@@ -85,16 +85,14 @@ Phase names must be unique across `pre` and `loop`. The name `(initial)` is rese
 Agents signal loop control by emitting specially formatted lines:
 
 ```
-[loop: exit]                    clean completion, stop iterating
-[loop: exit | tests green]      with optional label
-[loop: continue]                explicit no-op (for readability in prompts)
-[loop: abort]                   stuck, needs escalation
-[loop: abort | architectural issue: layering violation in pkg/db]
+<|workflow: continue|>                explicit no-op (for readability in prompts)
+<|workflow: exit | tests green|>      with optional label
+<|workflow: abort | architectural issue: layering violation in pkg/db|>
 ```
 
 ### Format rules
 
-- Case-insensitive directive word (`exit`, `abort`, `continue`)
+- Directive word (`continue`, `exit`, `abort`) enclosed in `<|workflow: ...|>`
 - Optional pipe-separated label after the directive
 - The line must match the whole-line pattern — markers embedded in prose are ignored
 - Markers inside fenced code blocks (` ``` ` or `~~~`) are ignored
@@ -102,13 +100,13 @@ Agents signal loop control by emitting specially formatted lines:
 
 ### Severity and priority
 
-When multiple markers appear in the same phase, the most severe wins: **abort > exit > continue**. If a phase emits `[loop: exit]` and later `[loop: abort]`, the phase is treated as aborted.
+When multiple markers appear in the same phase, the most severe wins: **abort > exit > continue**. If a phase emits `<|workflow: exit|>` and later `<|workflow: abort|>`, the phase is treated as aborted.
 
-Avenor extracts loop markers from the same chunk events already scanned for `[status: ...]` markers. The marker text is not stripped from the forwarded event — raw text consumers still see it.
+Avenor extracts loop markers from the same chunk events already scanned for `<|status: ...|>` markers. The marker text is not stripped from the forwarded event — raw text consumers still see it.
 
 ## Abort and escalation
 
-An agent emits `[loop: abort | reason]` when it hits a wall — an architectural constraint, a decision requiring human judgement, or a dependency on another agent's unavailable output.
+An agent emits `<|workflow: abort | reason|>` when it hits a wall — an architectural constraint, a decision requiring human judgement, or a dependency on another agent's unavailable output.
 
 When a phase aborts:
 
@@ -274,9 +272,9 @@ Marker fields appear only when a marker fired during the phase:
 
 | Field | Present when |
 |---|---|
-| `exit_marker: true` | `[loop: exit]` was seen |
+| `exit_marker: true` | `<|workflow: exit|>` was seen |
 | `exit_marker_label` | exit marker had a label |
-| `abort_marker: true` | `[loop: abort]` was seen |
+| `abort_marker: true` | `<|workflow: abort | reason|>` was seen |
 | `abort_marker_label` | abort marker had a label |
 
 If both markers appear in the same phase, only the abort fields are set (abort takes priority).
@@ -300,8 +298,8 @@ Emitted once after the loop finishes, regardless of how it ended.
 
 | Value | Meaning |
 |---|---|
-| `marker` | A phase emitted `[loop: exit]` |
-| `abort` | A phase emitted `[loop: abort]` |
+| `marker` | A phase emitted `<|workflow: exit|>` |
+| `abort` | A phase emitted `<|workflow: abort | reason|>` |
 | `max_iterations` | Loop reached `max_iterations` with no exit marker |
 | `phase_failure` | A phase exited with a non-clean stop reason |
 | `cancelled` | Run was cancelled (SIGINT) |

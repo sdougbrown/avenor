@@ -7,6 +7,11 @@ import (
 
 var loopMarkerRe = regexp.MustCompile(`(?i)^\s*\[loop:\s*(\w+)(?:\s*\|\s*([^\]]*))?\]\s*$`)
 
+// workflowAngleRe matches <|workflow: directive|> or <|workflow: directive | label|>
+// on its own line, case-insensitively. Group 1 is the directive word; group 2 is
+// the optional label.
+var workflowAngleRe = regexp.MustCompile(`(?i)^\s*<\|workflow:\s*(\w+)\s*(?:\|\s*([^|>]*))?\|>\s*$`)
+
 func loopDirectiveSeverity(directive string) int {
 	switch directive {
 	case "abort":
@@ -34,7 +39,22 @@ func ExtractLoopMarker(text string) (directive, label string, ok bool) {
 		if inFence {
 			continue
 		}
+		// Try legacy [loop: ...] first.
 		m := loopMarkerRe.FindStringSubmatch(line)
+		if m != nil {
+			dir := strings.ToLower(m[1])
+			sev := loopDirectiveSeverity(dir)
+			if sev > 0 {
+				if sev > bestSev {
+					bestDir = dir
+					bestLabel = strings.TrimSpace(m[2])
+					bestSev = sev
+				}
+			}
+			continue
+		}
+		// Try canonical angle-token <|workflow: ...|>.
+		m = workflowAngleRe.FindStringSubmatch(line)
 		if m == nil {
 			continue
 		}

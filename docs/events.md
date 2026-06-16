@@ -84,7 +84,7 @@ Example:
 
 **`avenor.phase.end`** — Phase completed (or failed). Emitted after the Claude invocation returns. Fields: `phase`, `iteration`, `stop_reason` (why the phase ended: `"end_turn"` for normal completion, `"max_tokens"`, `"tool_use"`, etc.), `ts`.
 
-If the phase exit text contained a loop directive marker (e.g., `[abort]` or `[exit]`), additional fields capture it: `abort_marker` (boolean) with optional `abort_marker_label`, or `exit_marker` (boolean) with optional `exit_marker_label`.
+If the phase exit text contained a workflow directive marker (for example, `<|workflow: abort | reason|>` or `<|workflow: exit | tests green|>`), additional fields capture it: `abort_marker` (boolean) with optional `abort_marker_label`, or `exit_marker` (boolean) with optional `exit_marker_label`.
 
 Classifies as ACTIVITY.
 

@@ -896,7 +896,12 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 						output.WriteString(text)
 						finalReply.WriteString(text)
 					}
-					if phase, label, ok := chunkBuf.ScanStatusMarker(); ok {
+					if phase, label, ok := chunkBuf.ScanStatusAngle(); ok {
+						if !writeStatus(tracker.ObserveMarker(phase, label)) {
+							return sessionResult{ExitCode: 1}
+						}
+						markerHandled = true
+					} else if phase, label, ok := chunkBuf.ScanStatusMarker(); ok {
 						if !writeStatus(tracker.ObserveMarker(phase, label)) {
 							return sessionResult{ExitCode: 1}
 						}
