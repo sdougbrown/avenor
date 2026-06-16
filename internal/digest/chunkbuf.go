@@ -71,21 +71,40 @@ func (cb *ChunkBuffer) ScanStatusMarker() (phase, label string, ok bool) {
 		return "", "", false
 	}
 	cb.lastStatusKey = key
-	return phase, label, ok
+	return phase, label, true
 }
 
 // ScanStatusAngle runs ExtractStatusAngle over the accumulated buffer.
 // It returns ok=false for a status angle token that was already returned by
 // a previous call, preventing duplicate emissions.
 func (cb *ChunkBuffer) ScanStatusAngle() (phase, label string, ok bool) {
-	phase, label, ok = ExtractStatusAngle(cb.buf.String())
-	if !ok {
+	var foundPhase string
+	var foundLabel string
+	for _, line := range strings.Split(cb.buf.String(), "\n") {
+		m := statusAngleRe.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		p := strings.ToLower(m[1])
+		switch p {
+		case "thinking", "working", "waiting", "done":
+		default:
+			continue
+		}
+		key := p + "|" + strings.TrimSpace(m[2])
+		if key == cb.lastStatusKey {
+			continue
+		}
+		foundPhase = p
+		foundLabel = strings.TrimSpace(m[2])
+		break
+	}
+	if foundPhase == "" {
 		return "", "", false
 	}
+	phase = foundPhase
+	label = foundLabel
 	key := phase + "|" + label
-	if key == cb.lastStatusKey {
-		return "", "", false
-	}
 	cb.lastStatusKey = key
-	return phase, label, ok
+	return phase, label, true
 }

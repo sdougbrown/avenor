@@ -211,4 +211,10 @@ func TestChunkBufferChunkedAngleTokenStatusMarker(t *testing.T) {
 	if !ok || phase != "working" || label != "test" {
 		t.Fatalf("complete token scan: ok=%v phase=%q label=%q", ok, phase, label)
 	}
+
+	cb.Append("\n<|status: waiting | approval|>")
+	phase, label, ok = cb.ScanStatusAngle()
+	if !ok || phase != "waiting" || label != "approval" {
+		t.Fatalf("second token scan: ok=%v phase=%q label=%q", ok, phase, label)
+	}
 }

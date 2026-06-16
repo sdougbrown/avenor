@@ -13,6 +13,8 @@ var loopMarkerRe = regexp.MustCompile(`(?i)^\s*\[loop:\s*(\w+)(?:\s*\|\s*([^\]]*
 var workflowAngleRe = regexp.MustCompile(`(?i)^\s*<\|workflow:\s*(\w+)\s*(?:\|\s*(.*))?\|>\s*$`)
 
 func loopDirectiveSeverity(directive string) int {
+	// Keep in sync with phaseconfig.LoopDirectiveSeverity. digest intentionally
+	// avoids importing phaseconfig so marker parsing stays dependency-light.
 	switch directive {
 	case "abort":
 		return 3

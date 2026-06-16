@@ -63,16 +63,6 @@ Avenor runs `plan` once, then launches `auth-tests`, `api-tests`, and `db-tests`
 
 If the team member list resolves to zero members after conditional filtering, Avenor skips directly to post phases and exits cleanly.
 
-## How a team run works
-
-**Pre phases** run once, in sequence, before the team starts. If any pre phase exits with a stop reason other than `end_turn`, the entire run fails immediately — the team never starts.
-
-**Team phases** run in parallel. All team members start at the same time; each runs in its own session. The team phase ends when all members have finished — or when any member aborts (see Abort and escalation below).
-
-**Post phases** run once, in sequence, after all team members complete successfully. Post phases are skipped if the team phase ends in an abort or failure.
-
-If the team member list resolves to zero members after conditional filtering, Avenor skips directly to post phases and exits cleanly.
-
 Phases run to the natural end of their session before Avenor acts on a marker. A member can emit `<|team: skip | name|>` during the pre phase to remove another member from the team; it cannot interrupt a member that has already started.
 
 ## Team config file
