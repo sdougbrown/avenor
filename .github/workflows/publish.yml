@@ -22,6 +22,7 @@ jobs:
       core_changed: ${{ steps.versions.outputs.core_changed }}
       mcp_changed: ${{ steps.versions.outputs.mcp_changed }}
       opencode_changed: ${{ steps.versions.outputs.opencode_changed }}
+      pi_changed: ${{ steps.versions.outputs.pi_changed }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -39,7 +40,7 @@ jobs:
           const fs = require('node:fs');
           const path = require('node:path');
 
-          const packages = ['core', 'mcp', 'opencode'];
+          const packages = ['core', 'mcp', 'opencode', 'pi'];
 
           if (process.env.MANUAL_DISPATCH === 'true') {
             for (const pkg of packages) {
@@ -149,6 +150,24 @@ jobs:
       - name: Publish @dougbots/avenor-opencode
         if: needs.detect-version-changes.outputs.opencode_changed == 'true'
         working-directory: packages/opencode
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          PKG=$(node -p "require('./package.json').name")
+          TAG="latest"
+          if echo "$VERSION" | grep -q "-"; then TAG="alpha"; fi
+          if npm show "$PKG@$VERSION" version > /dev/null 2>&1; then
+            echo "$PKG@$VERSION already published, skipping"
+          else
+            bun ../../scripts/resolve-workspace-deps.js
+            bun pm pack
+            git checkout -- package.json
+            PKG_FILE=$(node -p "require('./package.json').name.replace(/^@/, '').replace('/', '-')")-${VERSION}.tgz
+            npm publish "$PKG_FILE" --provenance --access public --tag "$TAG"
+          fi
+
+      - name: Publish @dougbots/avenor-pi
+        if: needs.detect-version-changes.outputs.pi_changed == 'true'
+        working-directory: packages/pi
         run: |
           VERSION=$(node -p "require('./package.json').version")
           PKG=$(node -p "require('./package.json').name")

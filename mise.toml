@@ -21,6 +21,14 @@ sources = ["src/**/*.ts", "tsdown.config.ts", "package.json"]
 outputs = ["dist/index.js"]
 run = "bun run build"
 
+[tasks.js-pi-build]
+description = "Build @dougbots/avenor-pi"
+dir = "packages/pi"
+depends = ["js-core-build"]
+sources = ["src/**/*.ts", "tsdown.config.ts", "package.json"]
+outputs = ["dist/index.js"]
+run = "bun run build"
+
 [tasks.js-board-build]
 description = "Build @dougbots/avenor-board frontend"
 dir = "packages/board"
@@ -31,12 +39,12 @@ run = "bun run build"
 
 [tasks.js-build]
 description = "Build all JS packages"
-depends = ["js-mcp-build", "js-opencode-build", "js-board-build"]
+depends = ["js-mcp-build", "js-opencode-build", "js-pi-build", "js-board-build"]
 
 [tasks.js-test]
 description = "Test all JS packages"
 depends = ["js-build"]
-run = ["cd packages/core && bun test", "cd packages/mcp && bun test", "cd packages/opencode && bun test"]
+run = ["cd packages/core && bun test", "cd packages/mcp && bun test", "cd packages/opencode && bun test", "cd packages/pi && bun test"]
 
 [tasks.go-build]
 description = "Build the avenor Go binary (without board frontend)"
@@ -71,7 +79,7 @@ depends = ["go-test", "js-test"]
 
 [tasks.js-dev]
 description = "Watch all JS packages"
-run = ["cd packages/core && bun run dev & cd packages/mcp && bun run dev & cd packages/opencode && bun run dev & wait"]
+run = ["cd packages/core && bun run dev & cd packages/mcp && bun run dev & cd packages/opencode && bun run dev & cd packages/pi && bun run dev & wait"]
 
 [tasks.docs-dev]
 description = "Serve docs site locally"
