@@ -12,9 +12,13 @@ export class EventFeedOverlay implements Component {
   private _onClose: () => void
   private _maxLines = 50
 
-  constructor(runId: string, onClose: () => void) {
+  constructor(runId: string, onClose?: () => void) {
     this._runId = runId
-    this._onClose = onClose
+    this._onClose = onClose ?? (() => {})
+  }
+
+  setOnClose(fn: () => void): void {
+    this._onClose = fn
   }
 
   setEvents(events: WatchEvent[]): void {

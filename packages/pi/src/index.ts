@@ -536,9 +536,7 @@ export default async function (pi: ExtensionAPI) {
       }
 
       let watchActive = true
-      const overlay = new EventFeedOverlay(runId, () => {
-        watchActive = false
-      })
+      const overlay = new EventFeedOverlay(runId)
 
       // Load initial events
       try {
@@ -551,10 +549,10 @@ export default async function (pi: ExtensionAPI) {
 
       const handle = ctx.ui.custom(
         (_tui, _theme, _kb, done) => {
-          overlay._onClose = () => {
+          overlay.setOnClose(() => {
             watchActive = false
             done()
-          }
+          })
           return overlay
         },
         {
