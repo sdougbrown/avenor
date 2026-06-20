@@ -1,4 +1,4 @@
-import type { Component, Theme, KeybindingsManager } from '@earendil-works/pi-tui'
+import type { Component } from '@earendil-works/pi-tui'
 
 export interface WatchEvent {
   type: string
@@ -49,7 +49,7 @@ export class EventFeedOverlay implements Component {
   }
 
   handleInput(data: string): void {
-    if (data === '\u001b' || data === '\x1b') {
+    if (data === '\x1b') {
       this._onClose()
     }
   }

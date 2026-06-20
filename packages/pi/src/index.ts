@@ -37,7 +37,7 @@ function buildCompletionText(run: { runId: string; label: string }, result: Stat
   return lines.join('\n')
 }
 
-function summarizeEvent(evt: { type?: unknown; event?: unknown; tool?: unknown; name?: unknown }): string {
+function summarizeEvent(evt: { type?: string; event?: string; tool?: string; name?: string; [key: string]: unknown }): string {
   const type = String(evt.type ?? evt.event ?? '')
   if (type === 'tool.call' || type === 'tool.use') {
     return `called ${String(evt.tool ?? evt.name ?? type)}`
@@ -55,16 +55,14 @@ export default async function (pi: ExtensionAPI) {
   // Captured context for polling callbacks (valid during session lifecycle)
   let sessionCtx: ExtensionContext | null = null
 
-  // Track session IDs to avenor run IDs for permission routing
-  const sessionIdToRunId = new Map<string, string>()
-
   // ── Helpers ──────────────────────────────────────────────────────────────
 
   async function pollRuns(): Promise<RunStatusEntry[]> {
     let raw: StatusResult | StatusResult[]
     try {
       raw = await statusTool({})
-    } catch {
+    } catch (err) {
+      console.error('avenor pollRuns: statusTool failed', err)
       return []
     }
 
@@ -123,6 +121,12 @@ export default async function (pi: ExtensionAPI) {
     pollingActive = true
 
     const tick = async () => {
+      // Snapshot previous statuses before pollRuns mutates run.lastStatus
+      const prevStatuses = new Map<string, string | undefined>()
+      for (const [id, run] of trackedRuns) {
+        prevStatuses.set(id, run.lastStatus?.status)
+      }
+
       const entries = await pollRuns()
       updateWidget(entries)
 
@@ -132,7 +136,7 @@ export default async function (pi: ExtensionAPI) {
           const run = trackedRuns.get(entry.runId)
           if (run) {
             // Status just transitioned to terminal
-            const prevStatus = run.lastStatus?.status
+            const prevStatus = prevStatuses.get(entry.runId)
             if (prevStatus && !TERMINAL_STATUSES.has(prevStatus)) {
               sessionCtx?.ui.notify(
                 `Sub-agent "${entry.label}" finished: ${entry.status}`,
@@ -297,7 +301,8 @@ export default async function (pi: ExtensionAPI) {
             runId: result.run_id,
             supervisorId: result.supervisor_id,
           })
-        } catch {
+        } catch (err) {
+          console.error('avenor spawn poll: statusTool failed', err)
           continue
         }
 
@@ -316,7 +321,9 @@ export default async function (pi: ExtensionAPI) {
               const eventsResult = await eventsTool({ runId: result.run_id, limit: 3 })
               const last = eventsResult.events[eventsResult.events.length - 1]
               if (last) lastAction = summarizeEvent(last)
-            } catch {}
+            } catch (err) {
+              console.error('avenor spawn poll: eventsTool failed', err)
+            }
           }
 
           onUpdate?.({
@@ -537,7 +544,8 @@ export default async function (pi: ExtensionAPI) {
       try {
         const { events } = await eventsTool({ runId, limit: 50 })
         overlay.setEvents(events)
-      } catch {
+      } catch (err) {
+        console.error('avenor watch: failed to load initial events', err)
         overlay.setEvents([])
       }
 
@@ -572,7 +580,8 @@ export default async function (pi: ExtensionAPI) {
             const { events } = await eventsTool({ runId, limit: 50 })
             overlay.setEvents(events)
             handle.requestRender?.()
-          } catch {
+          } catch (err) {
+            console.error('avenor watch poll: eventsTool failed', err)
             watchActive = false
           }
         }
@@ -611,16 +620,5 @@ export default async function (pi: ExtensionAPI) {
         ctx.ui.notify(`Failed to cancel: ${err instanceof Error ? err.message : String(err)}`, 'error')
       }
     },
-  })
-
-  // ── Tool result tracking ─────────────────────────────────────────────────
-
-  pi.on('tool_result', async (event, _ctx) => {
-    if (event.toolName === 'avenor_spawn' && event.details?.session_id) {
-      sessionIdToRunId.set(
-        event.details.session_id as string,
-        event.details.run_id as string,
-      )
-    }
   })
 }

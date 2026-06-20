@@ -20,7 +20,9 @@ export interface RunStatusEntry {
   permissionDescription?: string
 }
 
-export const TERMINAL_STATUSES = new Set(['done', 'failed', 'timeout', 'killed'])
+export type TerminalStatus = 'done' | 'failed' | 'timeout' | 'killed'
+
+export const TERMINAL_STATUSES = new Set<TerminalStatus>(['done', 'failed', 'timeout', 'killed'])
 
 export const STATUS_EMOJI: Record<string, string> = {
   running: '🟢',
