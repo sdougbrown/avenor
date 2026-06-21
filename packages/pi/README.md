@@ -111,7 +111,7 @@ Six tools for the LLM to dispatch and manage sub-agents:
 
 | Tool | Description |
 |---|---|
-| `avenor_spawn` | Dispatch an agent run (blocking or fire-and-forget) |
+| `avenor_spawn` | Dispatch an agent run (blocking or fire-and-forget). Accepts `agent` (optional, maps to a named profile in `agents.json`), `model`, `prompt`, and `dir`. |
 | `avenor_status` | Get status of a run or all runs |
 | `avenor_answer_permission` | Answer a pending permission request |
 | `avenor_follow_up` | Resume a completed run with a follow-up message |
@@ -131,6 +131,23 @@ Beyond the tools, the extension integrates with Pi's TUI and event system:
   - `/avenor-status` — show status of all runs
   - `/avenor-watch <run_id>` — open a live event feed overlay
   - `/avenor-cancel <run_id>` — cancel a running sub-agent
+
+### Agent profiles
+
+The `avenor_spawn` tool accepts an optional `agent` parameter that maps to a named profile in pi's `agents.json`:
+
+```json
+{
+  "jockey": {
+    "model": "anthropic/claude-sonnet-4",
+    "systemPrompt": "You are a PR reviewer..."
+  }
+}
+```
+
+When `agent` is set, avenor passes `PI_AGENT=<name>` to the pi subprocess. The extension reads this to load the corresponding profile (model, system prompt, tools) from `agents.json` (located at `PI_CODING_AGENT_DIR` or `~/.pi/agent/`).
+
+If you don't need a named profile, `model` alone is sufficient — no agent config or extension setup required.
 
 ## Typical workflows
 
