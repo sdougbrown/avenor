@@ -80,7 +80,14 @@ func StartClientWithAgent(ctx context.Context, provider string, model string, se
 
 	proc := exec.CommandContext(ctx, "pi", args...)
 	if agent != "" {
-		proc.Env = append(proc.Environ(), "PI_AGENT="+agent)
+		env := proc.Environ()
+		filtered := env[:0]
+		for _, e := range env {
+			if !strings.HasPrefix(e, "PI_AGENT=") {
+				filtered = append(filtered, e)
+			}
+		}
+		proc.Env = append(filtered, "PI_AGENT="+agent)
 	}
 	stdin, err := proc.StdinPipe()
 	if err != nil {
