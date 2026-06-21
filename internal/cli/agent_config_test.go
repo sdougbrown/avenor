@@ -266,7 +266,7 @@ func TestResolveAgentModel(t *testing.T) {
 		}
 	})
 
-	t.Run("falls back to pi agents.json", func(t *testing.T) {
+	t.Run("resolves from pi agents.json", func(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "agents.json")
 		data, _ := json.Marshal(map[string]any{
