@@ -568,18 +568,6 @@ func TestRunTeamFileFakeE2E(t *testing.T) {
 	t.Cleanup(func() { newProvider = oldNewProvider })
 
 	dir := t.TempDir()
-	xdgDir := filepath.Join(dir, "xdg")
-	opencodeDir := filepath.Join(xdgDir, "opencode")
-	if err := os.MkdirAll(opencodeDir, 0o700); err != nil {
-		t.Fatalf("mkdir opencode config dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(opencodeDir, "opencode.json"), []byte(`{
-		"agent": {
-			"style-agent": {"model": "style-model"}
-		}
-	}`), 0o600); err != nil {
-		t.Fatalf("write opencode config: %v", err)
-	}
 	teamPath := filepath.Join(dir, "team.json")
 	eventsPath := filepath.Join(dir, "events.ndjson")
 	sentinelPath := filepath.Join(dir, "run.done")
@@ -587,7 +575,7 @@ func TestRunTeamFileFakeE2E(t *testing.T) {
 		"pre":[{"name":"decide","prompt":"decide reviewers"}],
 		"team":[
 			{"name":"security","prompt":"review security","conditional":true,"agent":"security-agent","model":"security-model"},
-			{"name":"style","prompt":"review style","agent":"style-agent"}
+			{"name":"style","prompt":"review style","agent":"style-agent","model":"style-model"}
 		],
 		"post":[{"name":"report","prompt":"summarize findings"}]
 	}`
@@ -605,9 +593,6 @@ func TestRunTeamFileFakeE2E(t *testing.T) {
 		"--agent", "default-agent",
 		"--model", "default-model",
 	}, func(key string) string {
-		if key == "XDG_CONFIG_HOME" {
-			return xdgDir
-		}
 		return ""
 	}, &stderr)
 	if exitCode != 0 {
@@ -694,6 +679,88 @@ func TestRunTeamFileFakeE2E(t *testing.T) {
 	for _, backend := range backends {
 		if backend != "gemini-acp" {
 			t.Fatalf("provider backends = %v, want only gemini-acp", backends)
+		}
+	}
+}
+
+func TestRunTeamFileOpenCodeBackend(t *testing.T) {
+	oldNewProvider := newProvider
+	provider := newScriptedProvider()
+	var backendsMu sync.Mutex
+	var backends []string
+	newProvider = func(startOpts runtime.StartOptions, backend string) (runtime.Provider, error) {
+		backendsMu.Lock()
+		backends = append(backends, backend)
+		backendsMu.Unlock()
+		return provider, nil
+	}
+	t.Cleanup(func() { newProvider = oldNewProvider })
+
+	dir := t.TempDir()
+	xdgDir := filepath.Join(dir, "xdg")
+	opencodeDir := filepath.Join(xdgDir, "opencode")
+	if err := os.MkdirAll(opencodeDir, 0o700); err != nil {
+		t.Fatalf("mkdir opencode config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(opencodeDir, "opencode.json"), []byte(`{
+		"agent": {
+			"style-agent": {"model": "style-model"}
+		}
+	}`), 0o600); err != nil {
+		t.Fatalf("write opencode config: %v", err)
+	}
+	teamPath := filepath.Join(dir, "team.json")
+	eventsPath := filepath.Join(dir, "events.ndjson")
+	sentinelPath := filepath.Join(dir, "run.done")
+	config := `{
+		"pre":[{"name":"decide","prompt":"decide reviewers"}],
+		"team":[
+			{"name":"style","prompt":"review style","agent":"style-agent"}
+		],
+		"post":[{"name":"report","prompt":"summarize findings"}]
+	}`
+	if err := os.WriteFile(teamPath, []byte(config), 0o600); err != nil {
+		t.Fatalf("write team config: %v", err)
+	}
+
+	var stderr strings.Builder
+	exitCode := run([]string{
+		"--backend", "opencode-acp",
+		"--team-file", teamPath,
+		"--on-event", eventsPath,
+		"--sentinel-file", sentinelPath,
+		"--run-id", "run_team_opencode",
+		"--agent", "default-agent",
+		"--model", "default-model",
+	}, func(key string) string {
+		if key == "XDG_CONFIG_HOME" {
+			return xdgDir
+		}
+		return ""
+	}, &stderr)
+	if exitCode != 0 {
+		t.Fatalf("run() = %d, want 0; stderr=%s", exitCode, stderr.String())
+	}
+
+	sessions := provider.snapshotSessions()
+	var sawStyle bool
+	for _, session := range sessions {
+		if strings.Contains(session.prompt, "review style") {
+			sawStyle = true
+			if session.opts.Agent != "style-agent" || session.opts.Model != "style-model" {
+				t.Fatalf("style opts = %+v, want agent=style-agent model=style-model (resolved from opencode config)", session.opts)
+			}
+		}
+	}
+	if !sawStyle {
+		t.Fatal("did not observe style phase in provider snapshot")
+	}
+
+	backendsMu.Lock()
+	defer backendsMu.Unlock()
+	for _, backend := range backends {
+		if backend != "opencode-acp" {
+			t.Fatalf("provider backends = %v, want only opencode-acp", backends)
 		}
 	}
 }

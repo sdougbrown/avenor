@@ -36,6 +36,7 @@ const (
 	backendPony           = "pony"
 	backendClaude         = "claude"
 	backendClaudeChannel  = "claude-channel"
+	backendPi             = "pi"
 )
 
 // DefaultPermissionClaimTimeout is the default value for --permission-claim-timeout:
@@ -149,6 +150,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	case backendCodexAppServer:
 	case backendClaude:
 	case backendClaudeChannel:
+	case backendPi:
 	default:
 		fmt.Fprintf(stderr, "avenor: unknown backend %q\n", *backend)
 		return exitWithSentinel(1)
@@ -338,7 +340,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	}
 
 	if *agent != "" && *model == "" {
-		resolved, err := resolveAgentModel(*agent, getenv)
+		resolved, err := resolveAgentModel(*agent, *backend, getenv)
 		if err != nil {
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
 		}
@@ -411,7 +413,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		if phase.Model != "" {
 			m = phase.Model
 		} else if phase.Agent != "" {
-			resolved, err := resolveAgentModel(phase.Agent, getenv)
+			resolved, err := resolveAgentModel(phase.Agent, *backend, getenv)
 			if err != nil {
 				return teamrunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: ""}, err
 			}
@@ -1248,18 +1250,34 @@ func ParsePermissionHandler(value string) (*permission.FileHandler, error) {
 	return permission.NewFileHandler(path), nil
 }
 
-// resolveAgentModel reads opencode's config and returns the configured model
-// for the given agent name. Returns ("", nil) if not found. Returns a non-nil
-// error only when a config file exists but cannot be parsed (malformed JSON).
-func resolveAgentModel(agentName string, getenv func(string) string) (string, error) {
-	for _, path := range opencodeConfigPaths(getenv) {
-		model, err := readAgentModel(path, agentName)
-		if err != nil {
-			return "", err
+// resolveAgentModel resolves the configured model for the given agent name
+// based on the active backend.
+//
+//   - opencode* backends: reads opencode.json / opencode.jsonc
+//   - pi backend:          reads pi's agents.json
+//   - all other backends:  returns ("", nil) (caller provides --model explicitly)
+//
+// Returns ("", nil) if not found. Returns a non-nil error only when an
+// opencode config file exists but cannot be parsed (malformed JSON); pi
+// config errors are silently treated as not-found.
+func resolveAgentModel(agentName string, backend string, getenv func(string) string) (string, error) {
+	if strings.HasPrefix(backend, "opencode") {
+		for _, path := range opencodeConfigPaths(getenv) {
+			model, err := readAgentModel(path, agentName)
+			if err != nil {
+				return "", err
+			}
+			if model != "" {
+				return model, nil
+			}
 		}
-		if model != "" {
-			return model, nil
+	}
+	if backend == "pi" {
+		model, err := readPiAgentModel(agentName, getenv)
+		if err != nil || model == "" {
+			return "", nil
 		}
+		return model, nil
 	}
 	return "", nil
 }
@@ -1303,6 +1321,40 @@ func readAgentModel(path, agentName string) (string, error) {
 		return "", fmt.Errorf("parse opencode config %s: %w", path, err)
 	}
 	if agent, ok := config.Agent[agentName]; ok && agent.Model != "" {
+		return agent.Model, nil
+	}
+	return "", nil
+}
+
+// readPiAgentModel reads pi's agents.json and returns the configured model
+// for the given agent name. Returns ("", nil) if not found.
+func readPiAgentModel(agentName string, getenv func(string) string) (string, error) {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	agentDir := getenv("PI_CODING_AGENT_DIR")
+	if agentDir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", nil
+		}
+		agentDir = filepath.Join(home, ".pi", "agent")
+	}
+	path := filepath.Join(agentDir, "agents.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read pi agents.json %s: %w", path, err)
+	}
+	var config map[string]struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(data, &config); err != nil {
+		return "", fmt.Errorf("parse pi agents.json %s: %w", path, err)
+	}
+	if agent, ok := config[agentName]; ok && agent.Model != "" {
 		return agent.Model, nil
 	}
 	return "", nil

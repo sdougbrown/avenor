@@ -180,7 +180,7 @@ func TestResolveAgentModel(t *testing.T) {
 			},
 		})
 
-		model, err := resolveAgentModel("jockey", func(key string) string {
+		model, err := resolveAgentModel("jockey", "opencode-acp", func(key string) string {
 			if key == "OPENCODE_CONFIG_DIR" {
 				return dir
 			}
@@ -201,7 +201,7 @@ func TestResolveAgentModel(t *testing.T) {
 			},
 		})
 
-		model, err := resolveAgentModel("horse", func(key string) string {
+		model, err := resolveAgentModel("horse", "opencode-acp", func(key string) string {
 			if key == "OPENCODE_CONFIG_DIR" {
 				return dir
 			}
@@ -221,7 +221,7 @@ func TestResolveAgentModel(t *testing.T) {
 			t.Fatalf("write: %v", err)
 		}
 
-		_, err := resolveAgentModel("jockey", func(key string) string {
+		_, err := resolveAgentModel("jockey", "opencode-acp", func(key string) string {
 			if key == "OPENCODE_CONFIG_DIR" {
 				return dir
 			}
@@ -233,7 +233,7 @@ func TestResolveAgentModel(t *testing.T) {
 	})
 
 	t.Run("returns empty when no config dir", func(t *testing.T) {
-		model, err := resolveAgentModel("jockey", func(key string) string {
+		model, err := resolveAgentModel("jockey", "opencode-acp", func(key string) string {
 			if key == "OPENCODE_CONFIG_DIR" {
 				return "/nonexistent/dir"
 			}
@@ -252,8 +252,95 @@ func TestResolveAgentModel(t *testing.T) {
 			"agent": map[string]any{},
 		})
 
-		model, err := resolveAgentModel("nonexistent", func(key string) string {
+		model, err := resolveAgentModel("nonexistent", "opencode-acp", func(key string) string {
 			if key == "OPENCODE_CONFIG_DIR" {
+				return dir
+			}
+			return ""
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if model != "" {
+			t.Errorf("model = %q, want empty", model)
+		}
+	})
+
+	t.Run("falls back to pi agents.json", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "agents.json")
+		data, _ := json.Marshal(map[string]any{
+			"reviewer": map[string]any{"model": "anthropic/claude-sonnet-4"},
+		})
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatalf("write agents.json: %v", err)
+		}
+
+		model, err := resolveAgentModel("reviewer", "pi", func(key string) string {
+			if key == "PI_CODING_AGENT_DIR" {
+				return dir
+			}
+			return ""
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if model != "anthropic/claude-sonnet-4" {
+			t.Errorf("model = %q, want anthropic/claude-sonnet-4", model)
+		}
+	})
+
+	t.Run("pi agents.json missing", func(t *testing.T) {
+		dir := t.TempDir()
+		// Don't create agents.json — dir exists but file doesn't.
+
+		model, err := resolveAgentModel("reviewer", "pi", func(key string) string {
+			if key == "PI_CODING_AGENT_DIR" {
+				return dir
+			}
+			return ""
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if model != "" {
+			t.Errorf("model = %q, want empty", model)
+		}
+	})
+
+	t.Run("pi agents.json malformed", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "agents.json")
+		if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+			t.Fatalf("write agents.json: %v", err)
+		}
+
+		model, err := resolveAgentModel("reviewer", "pi", func(key string) string {
+			if key == "PI_CODING_AGENT_DIR" {
+				return dir
+			}
+			return ""
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if model != "" {
+			t.Errorf("model = %q, want empty (malformed config should not break resolution)", model)
+		}
+	})
+
+	t.Run("pi agent not in config", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "agents.json")
+		data, _ := json.Marshal(map[string]any{
+			"other-agent": map[string]any{"model": "some-model"},
+		})
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatalf("write agents.json: %v", err)
+		}
+
+		model, err := resolveAgentModel("reviewer", "pi", func(key string) string {
+			if key == "PI_CODING_AGENT_DIR" {
 				return dir
 			}
 			return ""

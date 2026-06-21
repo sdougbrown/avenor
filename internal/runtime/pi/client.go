@@ -63,6 +63,10 @@ func newClient(proc *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, stder
 }
 
 func StartClient(ctx context.Context, provider string, model string, sessionDir string) (*client, error) {
+	return StartClientWithAgent(ctx, provider, model, sessionDir, "")
+}
+
+func StartClientWithAgent(ctx context.Context, provider string, model string, sessionDir string, agent string) (*client, error) {
 	args := []string{"--mode", "rpc", "--no-session"}
 	if provider != "" {
 		args = append(args, "--provider", provider)
@@ -75,6 +79,9 @@ func StartClient(ctx context.Context, provider string, model string, sessionDir 
 	}
 
 	proc := exec.CommandContext(ctx, "pi", args...)
+	if agent != "" {
+		proc.Env = append(proc.Environ(), "PI_AGENT="+agent)
+	}
 	stdin, err := proc.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("pi stdin pipe: %w", err)
