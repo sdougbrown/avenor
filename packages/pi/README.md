@@ -107,7 +107,7 @@ The `pi` key in `package.json` declares the extension entry point:
 
 ### Tools
 
-Six tools for the LLM to dispatch and manage sub-agents:
+Available tools for LLM sub-agent management:
 
 | Tool | Description |
 |---|---|
