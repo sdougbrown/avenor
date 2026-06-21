@@ -145,7 +145,7 @@ The `avenor_spawn` tool accepts an optional `agent` parameter that maps to a nam
 }
 ```
 
-When `agent` is set, avenor passes `PI_AGENT=<name>` to the pi subprocess. The extension reads this to load the corresponding profile (model, system prompt, tools) from `agents.json` (located at `PI_CODING_AGENT_DIR` or `~/.pi/agent/`).
+When `agent` is set, avenor passes `PI_AGENT=<name>` to the pi subprocess. The `@dougbots/pi-agents` extension reads this to load the corresponding profile (model, system prompt, tools, permissions) from `agents.json` (located at `PI_CODING_AGENT_DIR` or `~/.pi/agent/`).
 
 If you don't need a named profile, `model` alone is sufficient — no agent config or extension setup required.
 

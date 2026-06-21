@@ -288,15 +288,15 @@ avenor \
 
 ### Agent profiles
 
-When using pi with the `@dougbots/avenor-pi` extension, you can select a configured agent profile with `--agent` instead of (or in addition to) `--model`:
+When using pi with the `@dougbots/pi-agents` extension, you can select a configured agent profile with `--agent` instead of (or in addition to) `--model`:
 
 ```sh
 avenor --backend pi --agent jockey --prompt "review this PR"
 ```
 
-The `--agent` flag resolves the model from pi's `agents.json` (looked up via `PI_CODING_AGENT_DIR` or `~/.pi/agent/`). It also sets the `PI_AGENT` environment variable in the pi subprocess, which the `@dougbots/avenor-pi` extension reads to load the corresponding agent profile.
+The `--agent` flag resolves the model from pi's `agents.json` (looked up via `PI_CODING_AGENT_DIR` or `~/.pi/agent/`). It also sets the `PI_AGENT` environment variable in the pi subprocess, which the `@dougbots/pi-agents` extension reads to apply the full agent profile (model, system prompt, tool restrictions, permission gates).
 
-`--model` works fine on its own — no agent config or extension required. Use `--agent` when you want pi to load a named profile with its own system prompt, tools, and model configuration.
+`--model` works fine on its own — no agent config or extension required. Use `--agent` when you want pi to load a named profile with its own configuration.
 
 ---
 
