@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/acp"
@@ -36,29 +37,66 @@ func NewWithOptions(opts runtime.StartOptions) runtime.Provider {
 	})
 }
 
-func buildClientEnv(_ runtime.StartOptions, runID, brokerToken, brokerAddr string) (map[string]string, func() error) {
-	if runID == "" || brokerToken == "" || brokerAddr == "" {
+func buildClientEnv(opts runtime.StartOptions, runID, brokerToken, brokerAddr string) (map[string]string, func() error) {
+	hasOverrides := false
+
+	// Inject the avenor-channel-tools MCP server when broker info is available.
+	// Without a broker (e.g. CLI-only runs), skip the MCP injection — the mode
+	// override below is the only thing needed.
+	mcpOverride := map[string]any{}
+	if runID != "" && brokerToken != "" && brokerAddr != "" {
+		avenorBin, err := os.Executable()
+		if err != nil {
+			return nil, nil
+		}
+		mergeConfig(mcpOverride, map[string]any{
+			"mcp": map[string]any{
+				"avenor-channel-tools": map[string]any{
+					"type":    "local",
+					"enabled": true,
+					"command": []string{avenorBin, "channel-tools", "--run-id", runID, "--token", brokerToken, "--broker-url", fmt.Sprintf("http://%s", brokerAddr)},
+				},
+			},
+			"tools": map[string]any{
+				"avenor-channel-tools*": true,
+			},
+		})
+		hasOverrides = true
+	}
+
+	// opencode's ACP filters subagent-mode agents out of the selectable
+	// modes list, causing set_mode to reject them. Override the agent's
+	// mode to "all" in the per-run config so it passes the filter. The deep
+	// merge preserves the agent's prompt, model, permissions, and tool
+	// config from the global config — only the mode field is flipped.
+	modeOverride := map[string]any{}
+	if opts.Agent != "" {
+		if mode := readAgentMode(opts.Agent, os.Getenv); mode == "subagent" {
+			mergeConfig(modeOverride, map[string]any{
+				"agent": map[string]any{
+					opts.Agent: map[string]any{
+						"mode": "all",
+					},
+				},
+			})
+			hasOverrides = true
+		}
+	}
+
+	// If there's nothing to override, don't write a config file — let the
+	// child process use the global config as-is.
+	if !hasOverrides {
 		return nil, nil
 	}
-	avenorBin, err := os.Executable()
-	if err != nil {
-		return nil, nil
-	}
+
+	// Merge existing OPENCODE_CONFIG / OPENCODE_CONFIG_CONTENT so we layer
+	// on top of any caller-provided config rather than replacing it.
 	config := map[string]any{}
 	mergeConfigFile(config, os.Getenv("OPENCODE_CONFIG"))
 	mergeConfigContent(config, os.Getenv("OPENCODE_CONFIG_CONTENT"))
-	mergeConfig(config, map[string]any{
-		"mcp": map[string]any{
-			"avenor-channel-tools": map[string]any{
-				"type":    "local",
-				"enabled": true,
-				"command": []string{avenorBin, "channel-tools", "--run-id", runID, "--token", brokerToken, "--broker-url", fmt.Sprintf("http://%s", brokerAddr)},
-			},
-		},
-		"tools": map[string]any{
-			"avenor-channel-tools*": true,
-		},
-	})
+	mergeConfig(config, mcpOverride)
+	mergeConfig(config, modeOverride)
+
 	encoded, err := json.Marshal(config)
 	if err != nil {
 		return nil, nil
@@ -66,11 +104,18 @@ func buildClientEnv(_ runtime.StartOptions, runID, brokerToken, brokerAddr strin
 
 	// Write per-run config to a temp file. OPENCODE_CONFIG_CONTENT does not
 	// reliably register MCP servers in opencode acp; file-based config does.
-	cfgPath := filepath.Join(os.TempDir(), "avenor-opencode-acp-"+runID+".json")
+	cfgPath := filepath.Join(os.TempDir(), "avenor-opencode-acp-"+runIDWithFallback(runID)+".json")
 	if err := os.WriteFile(cfgPath, encoded, 0o600); err != nil {
 		return nil, nil
 	}
 	return map[string]string{"OPENCODE_CONFIG": cfgPath}, func() error { return os.Remove(cfgPath) }
+}
+
+func runIDWithFallback(runID string) string {
+	if runID != "" {
+		return runID
+	}
+	return uuid.New().String()
 }
 
 func mergeConfigFile(dst map[string]any, path string) {
@@ -105,6 +150,66 @@ func mergeConfig(dst, src map[string]any) {
 		}
 		dst[key] = value
 	}
+}
+
+// readAgentMode resolves the declared mode for the given agent name from the
+// opencode config. Returns "" if the agent is not found or has no mode set.
+// Errors are silently treated as not-found — a missing or malformed config
+// should not block the spawn (configureSession will surface the set_mode
+// failure if the agent genuinely can't be selected).
+func readAgentMode(agentName string, getenv func(string) string) string {
+	for _, path := range opencodeConfigPaths(getenv) {
+		mode := readAgentModeFromFile(path, agentName)
+		if mode != "" {
+			return mode
+		}
+	}
+	return ""
+}
+
+func opencodeConfigPaths(getenv func(string) string) []string {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	var paths []string
+	// OPENCODE_CONFIG overlays the default config in opencode, so check both.
+	// The explicit file may not exist (e.g. set to a local override path that
+	// hasn't been created), so always include the default paths as a fallback.
+	if path := getenv("OPENCODE_CONFIG"); path != "" {
+		paths = append(paths, path)
+	}
+	if dir := getenv("OPENCODE_CONFIG_DIR"); dir != "" {
+		paths = append(paths, filepath.Join(dir, "opencode.json"), filepath.Join(dir, "opencode.jsonc"))
+	} else if xdg := getenv("XDG_CONFIG_HOME"); xdg != "" {
+		dir := filepath.Join(xdg, "opencode")
+		paths = append(paths, filepath.Join(dir, "opencode.json"), filepath.Join(dir, "opencode.jsonc"))
+	} else {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			dir := filepath.Join(home, ".config", "opencode")
+			paths = append(paths, filepath.Join(dir, "opencode.json"), filepath.Join(dir, "opencode.jsonc"))
+		}
+	}
+	return paths
+}
+
+func readAgentModeFromFile(path, agentName string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var config struct {
+		Agent map[string]struct {
+			Mode string `json:"mode"`
+		} `json:"agent"`
+	}
+	if err := json.Unmarshal(data, &config); err != nil {
+		return ""
+	}
+	if agent, ok := config.Agent[agentName]; ok {
+		return agent.Mode
+	}
+	return ""
 }
 
 // sessionConfigurer is the subset of *acp.Client needed for session configuration.

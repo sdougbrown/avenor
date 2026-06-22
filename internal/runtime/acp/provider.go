@@ -102,8 +102,16 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	}
 	var clientEnv map[string]string
 	var cleanup func() error
-	if runID != "" && brokerToken != "" && brokerRef != nil && buildClientEnv != nil {
-		clientEnv, cleanup = buildClientEnv(merged, runID, brokerToken, brokerRef.Addr())
+	if buildClientEnv != nil {
+		// Always call buildClientEnv so backends can inject config overrides
+		// (e.g. mode overrides for subagent-mode agents) even without a broker.
+		// The backend is responsible for returning nil when there's nothing to
+		// override, so no temp file is created unnecessarily.
+		brokerAddr := ""
+		if brokerRef != nil {
+			brokerAddr = brokerRef.Addr()
+		}
+		clientEnv, cleanup = buildClientEnv(merged, runID, brokerToken, brokerAddr)
 	}
 	created, err := p.ensureClient(ctx, merged, clientEnv)
 	if err != nil {

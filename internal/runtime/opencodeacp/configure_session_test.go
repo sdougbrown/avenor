@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/sdougbrown/avenor/internal/runtime"
@@ -283,4 +284,343 @@ func mustExecutable(t *testing.T) string {
 		t.Fatalf("os.Executable: %v", err)
 	}
 	return path
+}
+
+// --- subagent mode override tests ---
+
+func TestReadAgentMode(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "opencode.json")
+	cfg := `{
+		"agent": {
+			"horse": {"mode": "subagent", "model": "sparky/qwen-moe"},
+			"jockey": {"mode": "primary", "model": "deepseek/deepseek-v4-flash"},
+			"docs-writer": {"mode": "all"},
+			"nomode": {"model": "sparky/qwen-moe"}
+		}
+	}`
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	getenv := func(key string) string {
+		if key == "OPENCODE_CONFIG" {
+			return cfgPath
+		}
+		return ""
+	}
+
+	tests := []struct {
+		agent string
+		want  string
+	}{
+		{"horse", "subagent"},
+		{"jockey", "primary"},
+		{"docs-writer", "all"},
+		{"nomode", ""},
+		{"unknown", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.agent, func(t *testing.T) {
+			got := readAgentMode(tt.agent, getenv)
+			if got != tt.want {
+				t.Errorf("readAgentMode(%q) = %q, want %q", tt.agent, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReadAgentModeMissingFile(t *testing.T) {
+	emptyDir := t.TempDir()
+	getenv := func(key string) string {
+		switch key {
+		case "OPENCODE_CONFIG":
+			return "/nonexistent/path/opencode.json"
+		case "XDG_CONFIG_HOME":
+			return emptyDir
+		}
+		return ""
+	}
+	if got := readAgentMode("horse", getenv); got != "" {
+		t.Errorf("readAgentMode with missing file = %q, want empty", got)
+	}
+}
+
+func TestReadAgentModeMalformedJSON(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "opencode.json")
+	if err := os.WriteFile(cfgPath, []byte("{not valid json"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	emptyDir := t.TempDir()
+	getenv := func(key string) string {
+		switch key {
+		case "OPENCODE_CONFIG":
+			return cfgPath
+		case "XDG_CONFIG_HOME":
+			return emptyDir
+		}
+		return ""
+	}
+	if got := readAgentMode("horse", getenv); got != "" {
+		t.Errorf("readAgentMode with malformed JSON = %q, want empty", got)
+	}
+}
+
+func TestBuildClientEnvSubagentModeOverride(t *testing.T) {
+	// Write a global opencode config with a subagent-mode agent.
+	dir := t.TempDir()
+	globalCfgPath := filepath.Join(dir, "opencode.json")
+	globalCfg := `{
+		"agent": {
+			"horse": {
+				"mode": "subagent",
+				"model": "sparky/qwen-moe",
+				"tools": {"webFetch": false, "github": false},
+				"permission": {"bash": {"curl*": "deny"}}
+			},
+			"jockey": {"mode": "primary"}
+		}
+	}`
+	if err := os.WriteFile(globalCfgPath, []byte(globalCfg), 0o600); err != nil {
+		t.Fatalf("write global config: %v", err)
+	}
+	t.Setenv("OPENCODE_CONFIG", globalCfgPath)
+
+	// Clear OPENCODE_CONFIG_CONTENT so it doesn't interfere.
+	t.Setenv("OPENCODE_CONFIG_CONTENT", "")
+
+	env, cleanup := buildClientEnv(runtime.StartOptions{Agent: "horse"}, "run_sub", "tok", "127.0.0.1:1")
+	if cleanup != nil {
+		defer func() { _ = cleanup() }()
+	}
+	if env == nil {
+		t.Fatal("buildClientEnv returned nil env")
+	}
+
+	raw, err := os.ReadFile(env["OPENCODE_CONFIG"])
+	if err != nil {
+		t.Fatalf("read config file: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+
+	agent, ok := payload["agent"].(map[string]any)
+	if !ok {
+		t.Fatalf("payload has no agent map: %#v", payload)
+	}
+	horse, ok := agent["horse"].(map[string]any)
+	if !ok {
+		t.Fatalf("agent has no horse entry: %#v", agent)
+	}
+	if horse["mode"] != "all" {
+		t.Errorf("horse mode = %v, want \"all\" (overridden from subagent)", horse["mode"])
+	}
+}
+
+func TestBuildClientEnvNoOverrideForPrimaryAgent(t *testing.T) {
+	dir := t.TempDir()
+	globalCfgPath := filepath.Join(dir, "opencode.json")
+	globalCfg := `{
+		"agent": {
+			"jockey": {"mode": "primary"},
+			"horse": {"mode": "subagent"}
+		}
+	}`
+	if err := os.WriteFile(globalCfgPath, []byte(globalCfg), 0o600); err != nil {
+		t.Fatalf("write global config: %v", err)
+	}
+	t.Setenv("OPENCODE_CONFIG", globalCfgPath)
+	t.Setenv("OPENCODE_CONFIG_CONTENT", "")
+
+	// Broker info is present so MCP is injected, but no mode override for jockey.
+	env, cleanup := buildClientEnv(runtime.StartOptions{Agent: "jockey"}, "run_pri", "tok", "127.0.0.1:1")
+	if cleanup != nil {
+		defer func() { _ = cleanup() }()
+	}
+	if env == nil {
+		t.Fatal("buildClientEnv returned nil env (expected MCP injection)")
+	}
+
+	raw, err := os.ReadFile(env["OPENCODE_CONFIG"])
+	if err != nil {
+		t.Fatalf("read config file: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+
+	// The global config's agent map is merged in. Jockey must still be "primary".
+	if agent, ok := payload["agent"].(map[string]any); ok {
+		if jockey, ok := agent["jockey"].(map[string]any); ok {
+			if jockey["mode"] != "primary" {
+				t.Errorf("jockey mode = %v, want \"primary\" (not overridden)", jockey["mode"])
+			}
+		}
+	}
+}
+
+func TestBuildClientEnvNoOverrideForAllModeAgent(t *testing.T) {
+	dir := t.TempDir()
+	globalCfgPath := filepath.Join(dir, "opencode.json")
+	globalCfg := `{
+		"agent": {
+			"docs-writer": {"mode": "all"}
+		}
+	}`
+	if err := os.WriteFile(globalCfgPath, []byte(globalCfg), 0o600); err != nil {
+		t.Fatalf("write global config: %v", err)
+	}
+	t.Setenv("OPENCODE_CONFIG", globalCfgPath)
+	t.Setenv("OPENCODE_CONFIG_CONTENT", "")
+
+	env, cleanup := buildClientEnv(runtime.StartOptions{Agent: "docs-writer"}, "run_all", "tok", "127.0.0.1:1")
+	if cleanup != nil {
+		defer func() { _ = cleanup() }()
+	}
+	if env == nil {
+		t.Fatal("buildClientEnv returned nil env")
+	}
+
+	raw, err := os.ReadFile(env["OPENCODE_CONFIG"])
+	if err != nil {
+		t.Fatalf("read config file: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+
+	agent, ok := payload["agent"].(map[string]any)
+	if !ok {
+		return
+	}
+	if dw, ok := agent["docs-writer"].(map[string]any); ok {
+		if dw["mode"] != nil && dw["mode"] != "all" {
+			t.Errorf("docs-writer mode = %v, want \"all\" (not overridden)", dw["mode"])
+		}
+	}
+}
+
+func TestBuildClientEnvNoOverrideForUnknownAgent(t *testing.T) {
+	dir := t.TempDir()
+	globalCfgPath := filepath.Join(dir, "opencode.json")
+	globalCfg := `{"agent": {"horse": {"mode": "subagent"}}}`
+	if err := os.WriteFile(globalCfgPath, []byte(globalCfg), 0o600); err != nil {
+		t.Fatalf("write global config: %v", err)
+	}
+	t.Setenv("OPENCODE_CONFIG", globalCfgPath)
+	t.Setenv("OPENCODE_CONFIG_CONTENT", "")
+
+	env, cleanup := buildClientEnv(runtime.StartOptions{Agent: "nonexistent"}, "run_unk", "tok", "127.0.0.1:1")
+	if cleanup != nil {
+		defer func() { _ = cleanup() }()
+	}
+	if env == nil {
+		t.Fatal("buildClientEnv returned nil env")
+	}
+
+	raw, err := os.ReadFile(env["OPENCODE_CONFIG"])
+	if err != nil {
+		t.Fatalf("read config file: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+
+	// An unknown agent should not produce any agent overrides.
+	if agent, ok := payload["agent"].(map[string]any); ok {
+		if _, exists := agent["nonexistent"]; exists {
+			t.Errorf("unknown agent should not have an override: %#v", agent["nonexistent"])
+		}
+	}
+}
+
+// TestBuildClientEnvSubagentOverrideWithoutBroker verifies that the mode
+// override is applied even when broker parameters are empty (the CLI path).
+// This is the key scenario: avenor -agent horse with no broker should still
+// get the config override so set_mode succeeds.
+func TestBuildClientEnvSubagentOverrideWithoutBroker(t *testing.T) {
+	dir := t.TempDir()
+	globalCfgPath := filepath.Join(dir, "opencode.json")
+	globalCfg := `{
+		"agent": {
+			"horse": {"mode": "subagent", "model": "sparky/qwen-moe"}
+		}
+	}`
+	if err := os.WriteFile(globalCfgPath, []byte(globalCfg), 0o600); err != nil {
+		t.Fatalf("write global config: %v", err)
+	}
+	t.Setenv("OPENCODE_CONFIG", globalCfgPath)
+	t.Setenv("OPENCODE_CONFIG_CONTENT", "")
+
+	// No broker info — empty runID, token, addr.
+	env, cleanup := buildClientEnv(runtime.StartOptions{Agent: "horse"}, "", "", "")
+	if cleanup != nil {
+		defer func() { _ = cleanup() }()
+	}
+	if env == nil {
+		t.Fatal("buildClientEnv returned nil env — mode override should still be written without a broker")
+	}
+
+	raw, err := os.ReadFile(env["OPENCODE_CONFIG"])
+	if err != nil {
+		t.Fatalf("read config file: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+
+	agent, ok := payload["agent"].(map[string]any)
+	if !ok {
+		t.Fatalf("payload has no agent map: %#v", payload)
+	}
+	horse, ok := agent["horse"].(map[string]any)
+	if !ok {
+		t.Fatalf("agent has no horse entry: %#v", agent)
+	}
+	if horse["mode"] != "all" {
+		t.Errorf("horse mode = %v, want \"all\" (overridden from subagent)", horse["mode"])
+	}
+
+	// No MCP server should be injected without a broker.
+	if mcp, ok := payload["mcp"].(map[string]any); ok {
+		if _, has := mcp["avenor-channel-tools"]; has {
+			t.Error("avenor-channel-tools MCP server injected without broker info")
+		}
+	}
+}
+
+// TestBuildClientEnvNoOverrideWithoutBroker verifies that buildClientEnv
+// returns nil (no temp file) when there's no broker and no subagent override
+// needed. This prevents writing a redundant config file that just echoes the
+// global config back to opencode.
+func TestBuildClientEnvNoOverrideWithoutBroker(t *testing.T) {
+	dir := t.TempDir()
+	globalCfgPath := filepath.Join(dir, "opencode.json")
+	globalCfg := `{
+		"agent": {
+			"jockey": {"mode": "primary"}
+		}
+	}`
+	if err := os.WriteFile(globalCfgPath, []byte(globalCfg), 0o600); err != nil {
+		t.Fatalf("write global config: %v", err)
+	}
+	t.Setenv("OPENCODE_CONFIG", globalCfgPath)
+	t.Setenv("OPENCODE_CONFIG_CONTENT", "")
+
+	// Primary agent, no broker — nothing to override.
+	env, cleanup := buildClientEnv(runtime.StartOptions{Agent: "jockey"}, "", "", "")
+	if cleanup != nil {
+		defer func() { _ = cleanup() }()
+		t.Error("cleanup should be nil when no overrides are needed")
+	}
+	if env != nil {
+		t.Errorf("buildClientEnv should return nil env when no overrides needed, got: %#v", env)
+	}
 }
