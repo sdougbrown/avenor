@@ -117,7 +117,6 @@ export const AvenorPlugin: Plugin = async (ctx) => {
   // to re-prompt the orchestrator when a run completes.
   async function monitorRun(run: TrackedRun): Promise<void> {
     let firstPoll = true
-    let notifiedWaiting = false
     while (true) {
       if (!firstPoll) await sleep(POLL_INTERVAL_MS)
       firstPoll = false
@@ -151,8 +150,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
       // reason to poll again. Re-prompting on every poll would spam the
       // orchestrator session; a single notification mirrors the
       // permission.ask handler's one-shot behavior.
-      if (result.status === 'waiting' && !notifiedWaiting) {
-        notifiedWaiting = true
+      if (result.status === 'waiting') {
         const perm = result.pending_permission
         const lines = [
           `Sub-agent "${run.label}" is waiting for input.`,
