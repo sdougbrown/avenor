@@ -473,7 +473,8 @@ export const AvenorPlugin: Plugin = async (ctx) => {
               )
               // Leave the run tracked so session.idle / monitorRun can resume
               // observing it once the orchestrator answers.
-              run.monitoring = false
+              const tracked = trackedRuns.get(result.run_id)
+              if (tracked) tracked.monitoring = false
               return {
                 title: `${result.label} — waiting`,
                 output: lines.join('\n'),
