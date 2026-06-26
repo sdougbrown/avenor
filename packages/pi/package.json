@@ -1,8 +1,10 @@
 {
   "name": "@dougbots/avenor-pi",
-  "version": "0.1.0",
+  "version": "0.3.3",
   "type": "module",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/sdougbrown/avenor",
@@ -23,7 +25,9 @@
     "access": "public"
   },
   "pi": {
-    "extensions": ["./dist/index.js"]
+    "extensions": [
+      "./dist/index.js"
+    ]
   },
   "scripts": {
     "build": "tsdown",
