@@ -579,6 +579,202 @@ func TestRuntimeAnswerPermissionRejectsRuntimeWithoutActiveSession(t *testing.T)
 	}
 }
 
+// TestRuntimeStatusSurfacesPhaseAndPermission verifies that RuntimeStatus
+// reflects phase, phase_label, and pending_permission updated via the event
+// fanout writer. Without this, a stable-mode sub-agent asking a question or
+// requesting a permission is invisible to status polling — the orchestrator
+// spins forever because it never observes the blocked state.
+func TestRuntimeStatusSurfacesPhaseAndPermission(t *testing.T) {
+	sup := NewSupervisor(Config{
+		ControlSocket: "/tmp/test-runtime-status-surface.sock",
+		MaxRuntimes:  2,
+	})
+	child := &childRuntime{
+		id:       "rt_status",
+		done:     make(chan struct{}),
+		promptCh: make(chan struct{}, 1),
+		active:   true,
+	}
+	sup.runtimes[child.id] = child
+
+	writer := &runtimeFanoutWriter{
+		base:      stableTestSink{},
+		runtimeID: child.id,
+		child:     child,
+	}
+
+	// 1) agent.status with phase=waiting and a label must surface as phase
+	//    "waiting" and phase_label.
+	if err := writer.Write(events.Event{
+		Event: "agent.status",
+		Fields: map[string]any{
+			"phase": "waiting",
+			"label": "Allow exec?",
+		},
+	}); err != nil {
+		t.Fatalf("write agent.status: %v", err)
+	}
+
+	statusAny, err := sup.RuntimeStatus(child.id)
+	if err != nil {
+		t.Fatalf("RuntimeStatus: %v", err)
+	}
+	status, ok := statusAny.(map[string]any)
+	if !ok {
+		t.Fatalf("RuntimeStatus returned %T, want map[string]any", statusAny)
+	}
+	if got, _ := status["phase"].(string); got != "waiting" {
+		t.Errorf("phase = %q, want waiting", got)
+	}
+	if got, _ := status["phase_label"].(string); got != "Allow exec?" {
+		t.Errorf("phase_label = %q, want \"Allow exec?\"", got)
+	}
+	if got, _ := status["pending_permission"].(bool); got {
+		t.Errorf("pending_permission = %v, want false before permission.request", got)
+	}
+
+	// 2) permission.request must set pending_permission=true and copy the
+	//    request fields into the permission map.
+	if err := writer.Write(events.Event{
+		Event: "permission.request",
+		Fields: map[string]any{
+			"request_id": "req_42",
+			"question":   "Run bash?",
+			"options":    []any{map[string]any{"optionId": "allow", "kind": "allow"}},
+		},
+	}); err != nil {
+		t.Fatalf("write permission.request: %v", err)
+	}
+
+	statusAny, err = sup.RuntimeStatus(child.id)
+	if err != nil {
+		t.Fatalf("RuntimeStatus after permission.request: %v", err)
+	}
+	status, ok = statusAny.(map[string]any)
+	if !ok {
+		t.Fatalf("RuntimeStatus returned %T, want map[string]any", statusAny)
+	}
+	if got, _ := status["pending_permission"].(bool); !got {
+		t.Errorf("pending_permission = false, want true after permission.request")
+	}
+	perm, ok := status["permission"].(map[string]any)
+	if !ok {
+		t.Fatalf("permission field missing or wrong type: %T", status["permission"])
+	}
+	if got, _ := perm["request_id"].(string); got != "req_42" {
+		t.Errorf("permission.request_id = %q, want req_42", got)
+	}
+
+	// 3) permission.response must clear pending_permission. The phase stays
+	//    "waiting" until a subsequent agent.status (e.g. PermissionAnswered
+	//    emitting phase=working) updates it — the response itself does not
+	//    flip the phase, so assert it's unchanged.
+	if err := writer.Write(events.Event{
+		Event: "permission.response",
+		Fields: map[string]any{
+			"request_id": "req_42",
+			"outcome":    "selected",
+		},
+	}); err != nil {
+		t.Fatalf("write permission.response: %v", err)
+	}
+
+	statusAny, _ = sup.RuntimeStatus(child.id)
+	status, _ = statusAny.(map[string]any)
+	if got, _ := status["pending_permission"].(bool); got {
+		t.Errorf("pending_permission = true, want false after permission.response")
+	}
+	if status["permission"] != nil {
+		t.Errorf("permission = %v, want nil after permission.response", status["permission"])
+	}
+	if got, _ := status["phase"].(string); got != "waiting" {
+		t.Errorf("phase = %q, want waiting (response clears permission but not phase)", got)
+	}
+
+	// 4) session.end sets phase to "done".
+	if err := writer.Write(events.Event{
+		Event: "session.end",
+		Fields: map[string]any{
+			"stop_reason": "end_turn",
+			"exit_code":   0,
+		},
+	}); err != nil {
+		t.Fatalf("write session.end: %v", err)
+	}
+
+	statusAny, _ = sup.RuntimeStatus(child.id)
+	status, _ = statusAny.(map[string]any)
+	if got, _ := status["phase"].(string); got != "done" {
+		t.Errorf("phase = %q, want done after session.end", got)
+	}
+
+	// 5) A stale agent.status arriving after session.end must not overwrite
+	//    the terminal "done" phase. Event streams normally stop after
+	//    session.end, but a defensive guard prevents a late event from
+	//    resurrecting a completed runtime's phase.
+	if err := writer.Write(events.Event{
+		Event: "agent.status",
+		Fields: map[string]any{
+			"phase": "working",
+			"label": "should be ignored",
+		},
+	}); err != nil {
+		t.Fatalf("write stale agent.status: %v", err)
+	}
+
+	statusAny, _ = sup.RuntimeStatus(child.id)
+	status, _ = statusAny.(map[string]any)
+	if got, _ := status["phase"].(string); got != "done" {
+		t.Errorf("phase = %q, want done (stale agent.status must not overwrite terminal phase)", got)
+	}
+}
+
+// TestListRuntimesSurfacesPhaseAndPermission verifies the list path also
+// surfaces phase and pending_permission for each runtime.
+func TestListRuntimesSurfacesPhaseAndPermission(t *testing.T) {
+	sup := NewSupervisor(Config{
+		ControlSocket: "/tmp/test-list-surface.sock",
+		MaxRuntimes:  2,
+	})
+	child := &childRuntime{
+		id:       "rt_list",
+		done:     make(chan struct{}),
+		promptCh: make(chan struct{}, 1),
+		active:   true,
+		phase:    "waiting",
+		phaseLabel: "Need approval",
+		pendingPermission: true,
+		permission: map[string]any{"request_id": "req_99"},
+	}
+	sup.runtimes[child.id] = child
+
+	listAny := sup.List()
+	list, ok := listAny.([]map[string]any)
+	if !ok {
+		t.Fatalf("List() returned %T, want []map[string]any", listAny)
+	}
+	if len(list) != 1 {
+		t.Fatalf("List() = %d entries, want 1", len(list))
+	}
+	entry := list[0]
+	if got, _ := entry["phase"].(string); got != "waiting" {
+		t.Errorf("list phase = %q, want waiting", got)
+	}
+	if got, _ := entry["phase_label"].(string); got != "Need approval" {
+		t.Errorf("list phase_label = %q, want \"Need approval\"", got)
+	}
+	if got, _ := entry["pending_permission"].(bool); !got {
+		t.Errorf("list pending_permission = false, want true")
+	}
+	perm, ok := entry["permission"].(map[string]any)
+	if !ok {
+		t.Fatalf("list permission missing or wrong type: %T", entry["permission"])
+	}
+	if got, _ := perm["request_id"].(string); got != "req_99" {
+		t.Errorf("list permission.request_id = %q, want req_99", got)
+	}
+}
+
 type stableTestSink struct{}
 
 func (stableTestSink) Write(events.Event) error { return nil }

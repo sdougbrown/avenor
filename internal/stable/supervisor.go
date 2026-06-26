@@ -88,7 +88,15 @@ type childRuntime struct {
 	active           bool
 	promptCh         chan struct{}
 	promptQueue      []string
-	mu               sync.Mutex
+	// Per-runtime status mirror of control.Snapshot fields. Updated from the
+	// event fanout so RuntimeStatus can surface phase, phase_label, and
+	// pending_permission without consulting the shared ControlState (which
+	// reflects only the most recent event across ALL runtimes).
+	phase             string
+	phaseLabel        string
+	pendingPermission bool
+	permission        map[string]any
+	mu                sync.Mutex
 }
 
 type pendingChildQuestion struct {
@@ -690,6 +698,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 	taggedWriter := &runtimeFanoutWriter{
 		base:            child.eventWriter,
 		runtimeID:       child.id,
+		child:           child,
 		control:         s.control,
 		onPermissionReq: s.cachePermissionOptions,
 		recorder:        newRecorderFor(s, child.id),
@@ -857,6 +866,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 	taggedWriter := &runtimeFanoutWriter{
 		base:            child.eventWriter,
 		runtimeID:       child.id,
+		child:           child,
 		control:         s.control,
 		onPermissionReq: s.cachePermissionOptions,
 		recorder:        newRecorderFor(s, child.id),
@@ -1089,6 +1099,7 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 	taggedWriter := &runtimeFanoutWriter{
 		base:            child.eventWriter,
 		runtimeID:       child.id,
+		child:           child,
 		control:         s.control,
 		onPermissionReq: s.cachePermissionOptions,
 		recorder:        newRecorderFor(s, child.id),
@@ -1315,16 +1326,26 @@ func (s *Supervisor) listRuntimes() []map[string]any {
 			status = "ended"
 		}
 		entry := map[string]any{
-			"runtime_id":    rt.id,
-			"session_id":    rt.session.SessionID,
-			"label":         rt.label,
-			"dir":           rt.dir,
-			"status":        status,
-			"exit_code":     rt.exitCode,
-			"on_event":      rt.onEvent,
-			"sentinel_file": rt.sentinelFile,
-			"parent_id":     rt.parentID,
-			"children":      rt.children,
+			"runtime_id":         rt.id,
+			"session_id":         rt.session.SessionID,
+			"label":              rt.label,
+			"dir":                 rt.dir,
+			"status":             status,
+			"exit_code":          rt.exitCode,
+			"on_event":           rt.onEvent,
+			"sentinel_file":      rt.sentinelFile,
+			"parent_id":          rt.parentID,
+			"children":           rt.children,
+			"phase":              rt.phase,
+			"phase_label":        rt.phaseLabel,
+			"pending_permission": rt.pendingPermission,
+		}
+		if rt.permission != nil {
+			perm := make(map[string]any, len(rt.permission))
+			for k, v := range rt.permission {
+				perm[k] = v
+			}
+			entry["permission"] = perm
 		}
 		rt.mu.Unlock()
 		out = append(out, entry)
@@ -1424,6 +1445,7 @@ func (s *Supervisor) clearRuntimePermissionOptions(runtimeID string) {
 type runtimeFanoutWriter struct {
 	base            cli.EventSink
 	runtimeID       string
+	child           *childRuntime
 	control         *control.ControlServer
 	onPermissionReq func(runtimeID, requestID string, options []any)
 	recorder        *broker.Recorder
@@ -1439,6 +1461,50 @@ func (w *runtimeFanoutWriter) Write(ev events.Event) error {
 			if options, _ := ev.Fields["options"].([]any); options != nil {
 				w.onPermissionReq(w.runtimeID, requestID, options)
 			}
+		}
+	}
+	// Mirror phase, phase_label, and pending_permission onto the child so
+	// RuntimeStatus can report them per-runtime. The shared ControlState is
+	// not suitable for this because it reflects whichever runtime emitted
+	// most recently.
+	if w.child != nil {
+		switch ev.Event {
+		case "agent.status":
+			if phase, _ := ev.Fields["phase"].(string); phase != "" {
+				w.child.mu.Lock()
+				// Don't let a stale agent.status overwrite the terminal "done"
+				// phase set by session.end. Once the runtime is done, no further
+				// phase transitions are meaningful.
+				if w.child.phase != "done" {
+					w.child.phase = phase
+					if label, _ := ev.Fields["label"].(string); label != "" {
+						w.child.phaseLabel = label
+					}
+				}
+				w.child.mu.Unlock()
+			}
+		case "permission.request":
+			w.child.mu.Lock()
+			w.child.pendingPermission = true
+			w.child.permission = map[string]any{}
+			for k, v := range ev.Fields {
+				// Skip metadata injected by this writer; permission should
+				// contain only the request payload, not runtime_id tagging.
+				if k == "runtime_id" {
+					continue
+				}
+				w.child.permission[k] = v
+			}
+			w.child.mu.Unlock()
+		case "permission.response":
+			w.child.mu.Lock()
+			w.child.pendingPermission = false
+			w.child.permission = nil
+			w.child.mu.Unlock()
+		case "session.end":
+			w.child.mu.Lock()
+			w.child.phase = "done"
+			w.child.mu.Unlock()
 		}
 	}
 	if w.control != nil {
@@ -1526,16 +1592,26 @@ func (s *Supervisor) RuntimeStatus(rtID string) (any, error) {
 		status = "ended"
 	}
 	entry := map[string]any{
-		"runtime_id":    rt.id,
-		"session_id":    rt.session.SessionID,
-		"label":         rt.label,
-		"dir":           rt.dir,
-		"status":        status,
-		"exit_code":     rt.exitCode,
-		"on_event":      rt.onEvent,
-		"sentinel_file": rt.sentinelFile,
-		"parent_id":     rt.parentID,
-		"children":      rt.children,
+		"runtime_id":         rt.id,
+		"session_id":         rt.session.SessionID,
+		"label":              rt.label,
+		"dir":                 rt.dir,
+		"status":             status,
+		"exit_code":          rt.exitCode,
+		"on_event":           rt.onEvent,
+		"sentinel_file":      rt.sentinelFile,
+		"parent_id":          rt.parentID,
+		"children":           rt.children,
+		"phase":              rt.phase,
+		"phase_label":        rt.phaseLabel,
+		"pending_permission": rt.pendingPermission,
+	}
+	if rt.permission != nil {
+		perm := make(map[string]any, len(rt.permission))
+		for k, v := range rt.permission {
+			perm[k] = v
+		}
+		entry["permission"] = perm
 	}
 	rt.mu.Unlock()
 	return entry, nil

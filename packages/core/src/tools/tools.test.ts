@@ -4,7 +4,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { findAvenorBinary, Supervisor } from '../supervisor.js'
 import { spawnTool } from './spawn.js'
-import { statusTool } from './status.js'
+import { statusTool, translateStatus } from './status.js'
 import { answerPermissionTool } from './answer-permission.js'
 import { followUpTool } from './follow-up.js'
 import { eventsTool } from './events.js'
@@ -248,5 +248,39 @@ describe('followUpTool parsing sentinel for SESSION=', () => {
     }
 
     expect(kv.SESSION).toBeUndefined()
+  })
+})
+
+describe('translateStatus', () => {
+  // Regression: the "waiting" phase (set by the Go statusTracker when a
+  // sub-agent asks a question or requests a permission) used to fall through
+  // to the default branch and return "running", causing blocking spawn loops
+  // to spin forever instead of returning control to the orchestrator.
+  it('returns "waiting" for the waiting phase', () => {
+    expect(translateStatus('waiting', null)).toBe('waiting')
+  })
+
+  it('returns "waiting" even when a sentinel is present (waiting is not terminal)', () => {
+    expect(translateStatus('waiting', { _status: 'DONE' })).toBe('waiting')
+  })
+
+  // Regression: in stable mode the supervisor parks a runtime after a clean
+  // end_turn, leaving status "running" while the sentinel already reads DONE.
+  // translateStatus must consult the sentinel so the orchestrator observes
+  // completion instead of polling forever.
+  it('lets a DONE sentinel override a live "running" phase', () => {
+    expect(translateStatus('running', { _status: 'DONE' })).toBe('done')
+  })
+
+  it('lets a FAILED sentinel override a live "running" phase', () => {
+    expect(translateStatus('running', { _status: 'FAILED' })).toBe('failed')
+  })
+
+  it('returns "running" when phase is running and no terminal sentinel exists', () => {
+    expect(translateStatus('running', null)).toBe('running')
+  })
+
+  it('preserves the waiting phase even with a non-terminal sentinel', () => {
+    expect(translateStatus('waiting', { _status: 'RUNNING' })).toBe('waiting')
   })
 })

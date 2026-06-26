@@ -117,6 +117,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
   // to re-prompt the orchestrator when a run completes.
   async function monitorRun(run: TrackedRun): Promise<void> {
     let firstPoll = true
+    let notifiedWaiting = false
     while (true) {
       if (!firstPoll) await sleep(POLL_INTERVAL_MS)
       firstPoll = false
@@ -138,6 +139,38 @@ export const AvenorPlugin: Plugin = async (ctx) => {
         await ctx.client.session.promptAsync({
           path: { id: run.orchestratorSessionId },
           body: { parts: [{ type: 'text', text: buildCompletionText(run, result) }] },
+        }).catch(() => {
+          // Session may have been deleted; nothing to do.
+        })
+        return
+      }
+
+      // When the sub-agent is waiting on a question or permission, notify the
+      // orchestrator once and stop polling. The orchestrator must act (via
+      // avenor_answer_permission or avenor_follow_up) before there's any
+      // reason to poll again. Re-prompting on every poll would spam the
+      // orchestrator session; a single notification mirrors the
+      // permission.ask handler's one-shot behavior.
+      if (result.status === 'waiting' && !notifiedWaiting) {
+        notifiedWaiting = true
+        const perm = result.pending_permission
+        const lines = [
+          `Sub-agent "${run.label}" is waiting for input.`,
+        ]
+        if (perm) {
+          lines.push(
+            `Permission request: ${perm.description}`,
+            `To answer: call \`avenor_answer_permission\` with run_id "${run.runId}", option_id "allow_once" | "allow_always" | "deny"`,
+          )
+        } else if (result.phase_label) {
+          lines.push(`Question: ${result.phase_label}`)
+        }
+        lines.push(
+          `Use \`avenor_follow_up\` with run_id "${run.runId}" to respond, or \`avenor_status\` to re-check.`,
+        )
+        await ctx.client.session.promptAsync({
+          path: { id: run.orchestratorSessionId },
+          body: { parts: [{ type: 'text', text: lines.join('\n') }] },
         }).catch(() => {
           // Session may have been deleted; nothing to do.
         })
@@ -416,6 +449,41 @@ export const AvenorPlugin: Plugin = async (ctx) => {
                   status: status.status,
                   run_id: result.run_id,
                   session_id: status.session_id,
+                },
+              }
+            }
+
+            // A sub-agent in the "waiting" phase is blocked on a question or
+            // permission request that the orchestrator must answer. Break out
+            // of the blocking loop so the orchestrator gets its turn back,
+            // rather than spinning forever on a runtime that cannot progress.
+            if (status.status === 'waiting') {
+              const perm = status.pending_permission
+              const lines = [
+                `Sub-agent "${result.label}" is waiting for input.`,
+              ]
+              if (perm) {
+                lines.push(
+                  `Permission request: ${perm.description}`,
+                  `To answer: call \`avenor_answer_permission\` with run_id "${result.run_id}", option_id "allow_once" | "allow_always" | "deny"`,
+                )
+              } else if (status.phase_label) {
+                lines.push(`Question: ${status.phase_label}`)
+              }
+              lines.push(
+                `Use \`avenor_follow_up\` with run_id "${result.run_id}" to respond, or \`avenor_status\` to re-check.`,
+              )
+              // Leave the run tracked so session.idle / monitorRun can resume
+              // observing it once the orchestrator answers.
+              run.monitoring = false
+              return {
+                title: `${result.label} — waiting`,
+                output: lines.join('\n'),
+                metadata: {
+                  status: 'waiting',
+                  run_id: result.run_id,
+                  session_id: status.session_id,
+                  ...(perm && { pending_permission: perm }),
                 },
               }
             }
