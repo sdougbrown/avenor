@@ -284,8 +284,9 @@ const (
 )
 
 type permissionClaim struct {
-	state    PermissionResolverState
-	answerCh chan PermissionAnswer
+	state        PermissionResolverState
+	answerCh     chan PermissionAnswer
+	answerQueued bool
 }
 
 // PreparePermissionClaim records resolver ownership before permission.request
@@ -412,8 +413,9 @@ const (
 	PermissionAnswerNoResolver
 )
 
-// DeliverPendingPermission distinguishes a missing claim from a claim whose
-// answer channel already contains an answer.
+// DeliverPendingPermission distinguishes a missing claim from a claim that
+// has already accepted an answer. answerQueued remains set after the resolver
+// drains answerCh, making delivery single-use until the claim is ended.
 func (s *ControlServer) DeliverPendingPermission(scope, requestID, optionID string) PermissionAnswerDelivery {
 	s.pendingMu.Lock()
 	defer s.pendingMu.Unlock()
@@ -428,8 +430,12 @@ func (s *ControlServer) DeliverPendingPermission(scope, requestID, optionID stri
 	default:
 		return PermissionAnswerResolverOwned
 	}
+	if claim.answerQueued {
+		return PermissionAnswerChannelFull
+	}
 	select {
 	case claim.answerCh <- PermissionAnswer{RequestID: requestID, OptionID: optionID}:
+		claim.answerQueued = true
 		return PermissionAnswerDelivered
 	default:
 		return PermissionAnswerChannelFull

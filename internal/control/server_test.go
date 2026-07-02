@@ -133,6 +133,55 @@ func TestPermissionClaimsAreScopedAndReportFullChannel(t *testing.T) {
 	}
 }
 
+func TestPermissionClaimRejectsDuplicateAfterFirstAnswerIsDrained(t *testing.T) {
+	s := NewServer(NewState("run_1", "", 0))
+	answerCh, ok := s.BeginPermissionClaim("rt_1", "0")
+	if !ok {
+		t.Fatal("BeginPermissionClaim returned false")
+	}
+	defer s.EndPermissionClaim("rt_1", "0")
+
+	if got := s.DeliverPendingPermission("rt_1", "0", "allow"); got != PermissionAnswerDelivered {
+		t.Fatalf("first delivery = %v, want delivered", got)
+	}
+	if answer := <-answerCh; answer.OptionID != "allow" {
+		t.Fatalf("first answer = %+v", answer)
+	}
+
+	// The resolver has drained the channel but has not yet applied the answer
+	// or called EndPermissionClaim. A duplicate must remain non-deliverable.
+	if got := s.DeliverPendingPermission("rt_1", "0", "duplicate"); got != PermissionAnswerChannelFull {
+		t.Fatalf("duplicate delivery = %v, want channel-full", got)
+	}
+	select {
+	case answer := <-answerCh:
+		t.Fatalf("duplicate answer was delivered: %+v", answer)
+	default:
+	}
+}
+
+func TestBeginPermissionClaimPreservesAnswerQueuedWhileReserved(t *testing.T) {
+	s := NewServer(NewState("run_1", "", 0))
+	if !s.PreparePermissionClaim("rt_1", "0", PermissionResolverReserved) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+	if got := s.DeliverPendingPermission("rt_1", "0", "allow"); got != PermissionAnswerDelivered {
+		t.Fatalf("delivery = %v, want delivered", got)
+	}
+
+	answerCh, ok := s.BeginPermissionClaim("rt_1", "0")
+	if !ok {
+		t.Fatal("BeginPermissionClaim returned false")
+	}
+	defer s.EndPermissionClaim("rt_1", "0")
+	if answer := <-answerCh; answer.OptionID != "allow" {
+		t.Fatalf("queued answer = %+v", answer)
+	}
+	if got := s.DeliverPendingPermission("rt_1", "0", "duplicate"); got != PermissionAnswerChannelFull {
+		t.Fatalf("duplicate delivery = %v, want channel-full", got)
+	}
+}
+
 func TestHandoffPermissionClaimAtomicallyConsumesQueuedAnswerOrTransfersToFile(t *testing.T) {
 	s := NewServer(NewState("run_1", "", 0))
 	if !s.PreparePermissionClaim("rt_1", "0", PermissionResolverReserved) {
