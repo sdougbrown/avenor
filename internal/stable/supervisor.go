@@ -1421,11 +1421,16 @@ func (s *Supervisor) answerPermission(rtID, requestID, optionID string) error {
 		return nil
 	case control.PermissionAnswerChannelFull:
 		return fmt.Errorf("permission request %q for runtime %q already has an answer pending delivery", requestID, rtID)
+	case control.PermissionAnswerResolverOwned:
+		return fmt.Errorf("permission request %q for runtime %q is owned by another resolver", requestID, rtID)
+	case control.PermissionAnswerNotFound:
+		return fmt.Errorf("permission request %q for runtime %q has no registered resolver state", requestID, rtID)
+	case control.PermissionAnswerNoResolver:
+		// No control, automatic, or file resolver owns this request. The direct
+		// provider path below is the only remaining way to answer it.
 	}
 
-	// A request may have been emitted while no control client was connected,
-	// in which case no resolver claim exists. Retain the direct fallback so a
-	// later stable control call can still answer that backend request.
+	// A request emitted without any configured resolver remains backend-owned.
 	rt.mu.Lock()
 	provider := rt.provider
 	sessionID := rt.session.SessionID
@@ -1439,6 +1444,7 @@ func (s *Supervisor) answerPermission(rtID, requestID, optionID string) error {
 	}); err != nil {
 		return err
 	}
+	s.control.SetPermissionResolverState(rtID, requestID, control.PermissionResolverResolved)
 	s.controlMu.Lock()
 	delete(s.permOptions, key)
 	s.controlMu.Unlock()

@@ -40,7 +40,7 @@ type ControlServer struct {
 	cancelFn func()
 
 	pendingMu     sync.Mutex
-	pendingClaims map[permissionClaimKey]chan PermissionAnswer
+	pendingClaims map[permissionClaimKey]*permissionClaim
 
 	promptMu        sync.Mutex
 	promptQueue     []string
@@ -87,7 +87,7 @@ func NewServer(state *ControlState) *ControlServer {
 		conns:         map[*connState]struct{}{},
 		subs:          map[*subscriber]struct{}{},
 		watch:         map[chan events.Event]struct{}{},
-		pendingClaims: map[permissionClaimKey]chan PermissionAnswer{},
+		pendingClaims: map[permissionClaimKey]*permissionClaim{},
 	}
 }
 
@@ -271,6 +271,57 @@ type permissionClaimKey struct {
 	requestID string
 }
 
+type PermissionResolverState uint8
+
+const (
+	PermissionResolverUnknown PermissionResolverState = iota
+	PermissionResolverReserved
+	PermissionResolverControl
+	PermissionResolverAutomatic
+	PermissionResolverFile
+	PermissionResolverNoResolver
+	PermissionResolverResolved
+)
+
+type permissionClaim struct {
+	state    PermissionResolverState
+	answerCh chan PermissionAnswer
+}
+
+// PreparePermissionClaim records resolver ownership before permission.request
+// is published. Terminal entries may be replaced when an ACP session reuses a
+// request ID for a later request.
+func (s *ControlServer) PreparePermissionClaim(scope, requestID string, state PermissionResolverState) bool {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	key := permissionClaimKey{scope: scope, requestID: requestID}
+	if existing := s.pendingClaims[key]; existing != nil &&
+		existing.state != PermissionResolverResolved &&
+		existing.state != PermissionResolverNoResolver {
+		return false
+	}
+	s.pendingClaims[key] = &permissionClaim{state: state, answerCh: make(chan PermissionAnswer, 1)}
+	return true
+}
+
+func (s *ControlServer) SetPermissionResolverState(scope, requestID string, state PermissionResolverState) {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	key := permissionClaimKey{scope: scope, requestID: requestID}
+	if claim := s.pendingClaims[key]; claim != nil {
+		claim.state = state
+	}
+}
+
+func (s *ControlServer) PermissionResolverState(scope, requestID string) PermissionResolverState {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	if claim := s.pendingClaims[permissionClaimKey{scope: scope, requestID: requestID}]; claim != nil {
+		return claim.state
+	}
+	return PermissionResolverUnknown
+}
+
 // BeginPermissionClaim registers a permission claim within scope and returns
 // its answer channel. Request IDs are only unique within an ACP session, so
 // stable runtimes must use distinct scopes.
@@ -278,12 +329,15 @@ func (s *ControlServer) BeginPermissionClaim(scope, requestID string) (<-chan Pe
 	s.pendingMu.Lock()
 	defer s.pendingMu.Unlock()
 	key := permissionClaimKey{scope: scope, requestID: requestID}
-	if _, exists := s.pendingClaims[key]; exists {
+	claim := s.pendingClaims[key]
+	if claim == nil {
+		claim = &permissionClaim{answerCh: make(chan PermissionAnswer, 1)}
+		s.pendingClaims[key] = claim
+	} else if claim.state != PermissionResolverReserved {
 		return nil, false
 	}
-	answerCh := make(chan PermissionAnswer, 1)
-	s.pendingClaims[key] = answerCh
-	return answerCh, true
+	claim.state = PermissionResolverControl
+	return claim.answerCh, true
 }
 
 func (s *ControlServer) EndPermissionClaim(scope, requestID string) {
@@ -297,7 +351,12 @@ func (s *ControlServer) EndPermissionClaim(scope, requestID string) {
 func (s *ControlServer) HasPendingPermission() bool {
 	s.pendingMu.Lock()
 	defer s.pendingMu.Unlock()
-	return len(s.pendingClaims) != 0
+	for _, claim := range s.pendingClaims {
+		if claim.state == PermissionResolverReserved || claim.state == PermissionResolverControl {
+			return true
+		}
+	}
+	return false
 }
 
 // AnswerPendingPermission delivers an answer to the active permission claim.
@@ -312,6 +371,8 @@ const (
 	PermissionAnswerNotFound PermissionAnswerDelivery = iota
 	PermissionAnswerDelivered
 	PermissionAnswerChannelFull
+	PermissionAnswerResolverOwned
+	PermissionAnswerNoResolver
 )
 
 // DeliverPendingPermission distinguishes a missing claim from a claim whose
@@ -319,12 +380,19 @@ const (
 func (s *ControlServer) DeliverPendingPermission(scope, requestID, optionID string) PermissionAnswerDelivery {
 	s.pendingMu.Lock()
 	defer s.pendingMu.Unlock()
-	answerCh := s.pendingClaims[permissionClaimKey{scope: scope, requestID: requestID}]
-	if answerCh == nil {
+	claim := s.pendingClaims[permissionClaimKey{scope: scope, requestID: requestID}]
+	if claim == nil {
 		return PermissionAnswerNotFound
 	}
+	switch claim.state {
+	case PermissionResolverReserved, PermissionResolverControl:
+	case PermissionResolverNoResolver:
+		return PermissionAnswerNoResolver
+	default:
+		return PermissionAnswerResolverOwned
+	}
 	select {
-	case answerCh <- PermissionAnswer{RequestID: requestID, OptionID: optionID}:
+	case claim.answerCh <- PermissionAnswer{RequestID: requestID, OptionID: optionID}:
 		return PermissionAnswerDelivered
 	default:
 		return PermissionAnswerChannelFull

@@ -67,9 +67,13 @@ func (p *permissionLifecycleProvider) Capabilities(context.Context) (runtime.Cap
 
 type permissionLifecycleSink struct {
 	responses chan string
+	onRequest func()
 }
 
 func (s *permissionLifecycleSink) Write(event events.Event) error {
+	if event.Event == "permission.request" && s.onRequest != nil {
+		s.onRequest()
+	}
 	if event.Event == "permission.response" {
 		requestID, _ := event.Fields["request_id"].(string)
 		s.responses <- requestID
@@ -1977,6 +1981,133 @@ func TestScopedControlPermissionClaimCompletesAndReleasesForNextRequest(t *testi
 		}
 	case <-time.After(time.Second):
 		t.Fatal("WaitForSession did not complete")
+	}
+}
+
+func TestPermissionClaimIsReservedBeforeSynchronousRequestSink(t *testing.T) {
+	cs := control.NewServer(control.NewState("run_1", "", 0))
+	socketPath := filepath.Join(t.TempDir(), "control.sock")
+	if err := cs.Start(socketPath); err != nil {
+		t.Fatalf("start control server: %v", err)
+	}
+	defer cs.Stop()
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("dial control server: %v", err)
+	}
+	defer conn.Close()
+	for !cs.HasClients() {
+		time.Sleep(time.Millisecond)
+	}
+
+	provider := &permissionLifecycleProvider{answers: make(chan string, 1)}
+	sink := &permissionLifecycleSink{responses: make(chan string, 1)}
+	sink.onRequest = func() {
+		if !cs.AnswerPendingPermission("rt_sync", "0", "always") {
+			t.Error("synchronous answer was not queued on the reserved claim")
+		}
+	}
+	eventCh := make(chan events.Event, 2)
+	eventCh <- events.Event{
+		Event:     "permission.request",
+		SessionID: "ses_sync",
+		Fields: map[string]any{
+			"request_id": "0",
+			"options": []any{
+				map[string]any{"optionId": "always", "kind": "allow_always"},
+			},
+		},
+	}
+	eventCh <- events.Event{
+		Event:     "session.end",
+		SessionID: "ses_sync",
+		Fields:    map[string]any{"stop_reason": "end_turn"},
+	}
+	close(eventCh)
+	promptDone := make(chan error, 1)
+	promptDone <- nil
+
+	result := WaitForSession(context.Background(), provider, SessionWaitConfig{
+		EventCh:                eventCh,
+		PromptDone:             promptDone,
+		SessionID:              "ses_sync",
+		RunID:                  "run_1",
+		PermissionClaimScope:   "rt_sync",
+		PermissionClaimTimeout: time.Second,
+	}, SessionWaitDeps{Writer: sink, ControlServer: cs, Stderr: io.Discard})
+	if result.ExitCode != 0 {
+		t.Fatalf("WaitForSession exit code = %d", result.ExitCode)
+	}
+	select {
+	case got := <-provider.answers:
+		if got != "0" {
+			t.Fatalf("provider request = %q", got)
+		}
+	default:
+		t.Fatal("provider did not receive the synchronously queued answer")
+	}
+	select {
+	case <-sink.responses:
+	default:
+		t.Fatal("permission.response was not emitted")
+	}
+}
+
+func TestLateControlAnswerIsBlockedWhileFileResolverOwnsRequest(t *testing.T) {
+	cs := control.NewServer(control.NewState("run_1", "", 0))
+	socketPath := filepath.Join(t.TempDir(), "control.sock")
+	if err := cs.Start(socketPath); err != nil {
+		t.Fatalf("start control server: %v", err)
+	}
+	defer cs.Stop()
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("dial control server: %v", err)
+	}
+	defer conn.Close()
+	for !cs.HasClients() {
+		time.Sleep(time.Millisecond)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	provider := &cliFakeProvider{}
+	handler := permission.NewFileHandler(filepath.Join(t.TempDir(), "permission"))
+	handler.PollInterval = time.Millisecond
+	resultCh := make(chan permissionResult, 1)
+	event := events.Event{
+		Event:     "permission.request",
+		SessionID: "ses_file",
+		Fields: map[string]any{
+			"request_id": "0",
+			"options": []any{
+				map[string]any{"optionId": "always", "kind": "allow_always"},
+			},
+		},
+	}
+	cs.PreparePermissionClaim("rt_file", "0", control.PermissionResolverReserved)
+	go func() {
+		resultCh <- resolvePermission(ctx, provider, handler, cs, event, "ses_file", "rt_file", "0", false, time.Millisecond, nil)
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for cs.PermissionResolverState("rt_file", "0") != control.PermissionResolverFile {
+		if time.Now().After(deadline) {
+			t.Fatal("resolver did not transition to file ownership")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if got := cs.DeliverPendingPermission("rt_file", "0", "always"); got != control.PermissionAnswerResolverOwned {
+		t.Fatalf("late answer delivery = %v, want resolver-owned", got)
+	}
+	if provider.answerRequestID != "" {
+		t.Fatalf("provider was called directly for %q while file resolver was active", provider.answerRequestID)
+	}
+	cancel()
+	select {
+	case <-resultCh:
+	case <-time.After(time.Second):
+		t.Fatal("file resolver did not stop after cancellation")
 	}
 }
 
