@@ -929,6 +929,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 			if event.Event == "permission.request" {
 				// Auto-answer / control-owner / file fallback resolver.
 				requestID, _ := event.Fields["request_id"].(string)
+				claimConflict := false
 				if requestID != "" && permissionDone == nil && deps.ControlServer != nil {
 					state := control.PermissionResolverNoResolver
 					switch {
@@ -939,7 +940,11 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 					case deps.FileHandler != nil:
 						state = control.PermissionResolverFile
 					}
-					deps.ControlServer.PreparePermissionClaim(cfg.PermissionClaimScope, requestID, state)
+					claimConflict = !deps.ControlServer.PreparePermissionClaim(cfg.PermissionClaimScope, requestID, state)
+				}
+				if claimConflict {
+					emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "permission", "another permission request is already pending", deps.Stderr, cfg.RunLabel)
+					return sessionResult{ExitCode: 1}
 				}
 				if err := deps.Writer.Write(event); err != nil {
 					if requestID != "" && deps.ControlServer != nil {

@@ -1808,6 +1808,87 @@ func TestAutoAnswerSecondRequestWhilePendingEmitsErrorAndExits(t *testing.T) {
 	}
 }
 
+func TestPermissionRequestRejectsExistingDirectDeliveryBeforePublishing(t *testing.T) {
+	eventsPath := filepath.Join(t.TempDir(), "events.ndjson")
+	writer, err := NewEventWriter(eventsPath)
+	if err != nil {
+		t.Fatalf("newEventWriter: %v", err)
+	}
+
+	cs := control.NewServer(control.NewState("run_1", "", 0))
+	if !cs.PreparePermissionClaim("rt_1", "req_reused", control.PermissionResolverNoResolver) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+	if got := cs.DeliverPendingPermission("rt_1", "req_reused", "allow"); got != control.PermissionAnswerNoResolver {
+		t.Fatalf("initial delivery = %v, want no-resolver", got)
+	}
+
+	provider := newBlockingFakeProvider()
+	go provider.AnswerPermission(context.Background(), "ses_1", "req_reused", runtime.PermissionResponse{
+		Allow: true, OptionID: "allow",
+	})
+	select {
+	case <-provider.answered:
+	case <-time.After(time.Second):
+		t.Fatal("existing provider delivery did not start")
+	}
+	var releaseOnce sync.Once
+	releaseProvider := func() { releaseOnce.Do(func() { close(provider.unblockAnswer) }) }
+	t.Cleanup(releaseProvider)
+
+	eventCh := make(chan events.Event, 1)
+	eventCh <- events.Event{
+		Event:     "permission.request",
+		SessionID: "ses_1",
+		Fields: map[string]any{
+			"request_id": "req_reused",
+			"options": []any{
+				map[string]any{"optionId": "different", "kind": "reject"},
+			},
+		},
+	}
+	close(eventCh)
+
+	result := WaitForSession(context.Background(), provider, SessionWaitConfig{
+		EventCh:              eventCh,
+		PromptDone:           make(chan error),
+		SessionID:            "ses_1",
+		RunID:                "run_1",
+		PermissionClaimScope: "rt_1",
+		AutoApprove:          true,
+	}, SessionWaitDeps{Writer: writer, ControlServer: cs, Stderr: io.Discard})
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+	releaseProvider()
+
+	if result.ExitCode != 1 {
+		t.Fatalf("WaitForSession() = %d, want 1", result.ExitCode)
+	}
+	if state := cs.PermissionResolverState("rt_1", "req_reused"); state != control.PermissionResolverDirectDelivery {
+		t.Fatalf("resolver state = %v, want direct-delivery", state)
+	}
+	logged := readEventLogForTest(t, eventsPath)
+	var requestCount, overlapErrors int
+	for _, event := range logged {
+		if event.Event == "permission.request" {
+			requestCount++
+		}
+		if event.Event == "avenor.error" {
+			message, _ := event.Fields["message"].(string)
+			if strings.Contains(message, "already pending") {
+				overlapErrors++
+			}
+		}
+	}
+	if requestCount != 0 {
+		t.Fatalf("published %d rejected permission.request events", requestCount)
+	}
+	if overlapErrors != 1 {
+		t.Fatalf("overlap errors = %d, want 1; events: %+v", overlapErrors, logged)
+	}
+}
+
 // TestControlPermissionClaimTimeoutFallsThrough verifies the TOCTOU fix: when a
 // client is connected at the HasClients() gate but never sends answer_permission,
 // resolvePermission times out and falls through to the file-handler rather than
