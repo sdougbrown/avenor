@@ -1532,6 +1532,47 @@ func TestAnswerPermissionNoResolverRetriesAfterProviderError(t *testing.T) {
 	}
 }
 
+func TestDirectPermissionCleanupBlocksReuseUntilOldOptionsAreDeleted(t *testing.T) {
+	sup := NewSupervisor(Config{
+		ControlSocket: "/tmp/test-answer-cleanup-order.sock",
+		MaxRuntimes:   1,
+	})
+	const key = "rt_reuse:req_reuse"
+	sup.permOptions[key] = []any{
+		map[string]any{"optionId": "old", "kind": "allow"},
+	}
+	if !sup.control.PreparePermissionClaim("rt_reuse", "req_reuse", control.PermissionResolverNoResolver) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+	if got := sup.control.DeliverPendingPermission("rt_reuse", "req_reuse", "old"); got != control.PermissionAnswerNoResolver {
+		t.Fatalf("direct delivery = %v, want no-resolver", got)
+	}
+
+	// Successful cleanup deletes stale options while DirectDelivery still owns
+	// the claim. A reused ID cannot prepare until that deletion is complete.
+	sup.controlMu.Lock()
+	delete(sup.permOptions, key)
+	if sup.control.PreparePermissionClaim("rt_reuse", "req_reuse", control.PermissionResolverNoResolver) {
+		sup.controlMu.Unlock()
+		t.Fatal("replacement prepared before old cleanup released the claim")
+	}
+	sup.controlMu.Unlock()
+	sup.control.EndPermissionClaim("rt_reuse", "req_reuse")
+
+	if !sup.control.PreparePermissionClaim("rt_reuse", "req_reuse", control.PermissionResolverNoResolver) {
+		t.Fatal("replacement could not prepare after old cleanup")
+	}
+	replacement := []any{
+		map[string]any{"optionId": "new", "kind": "reject"},
+	}
+	sup.cachePermissionOptions("rt_reuse", "req_reuse", replacement)
+	if got := sup.permOptions[key]; len(got) != 1 {
+		t.Fatalf("replacement options = %+v, want one intact entry", got)
+	} else if option, _ := got[0].(map[string]any); option["optionId"] != "new" {
+		t.Fatalf("replacement options were overwritten: %+v", got)
+	}
+}
+
 func TestTombstoneOnStartFailed(t *testing.T) {
 	tmpDir := newStableSocketTestDir(t, "startfail")
 	parentFile := filepath.Join(tmpDir, "not-a-dir")

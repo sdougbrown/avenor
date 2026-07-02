@@ -1756,13 +1756,13 @@ func TestAutoAnswerSecondRequestWhilePendingEmitsErrorAndExits(t *testing.T) {
 	}
 
 	promptDone := make(chan error, 1)
-	var wg sync.WaitGroup
-	wg.Add(1)
-	var result sessionResult
+	resultCh := make(chan sessionResult, 1)
 	go func() {
-		defer wg.Done()
-		result = waitForSessionForTest(context.Background(), provider, writer, nil, nil, eventCh, promptDone, nil, "ses_1", "run_1", "", true, DefaultPermissionClaimTimeout, nil, io.Discard)
+		resultCh <- waitForSessionForTest(context.Background(), provider, writer, nil, nil, eventCh, promptDone, nil, "ses_1", "run_1", "", true, DefaultPermissionClaimTimeout, nil, io.Discard)
 	}()
+	var unblockOnce sync.Once
+	unblockProvider := func() { unblockOnce.Do(func() { close(provider.unblockAnswer) }) }
+	t.Cleanup(unblockProvider)
 
 	// Wait until the first AnswerPermission call is in-flight (blocking).
 	select {
@@ -1783,9 +1783,14 @@ func TestAutoAnswerSecondRequestWhilePendingEmitsErrorAndExits(t *testing.T) {
 		},
 	}
 	// Unblock so the loop can proceed to process the second request.
-	close(provider.unblockAnswer)
+	unblockProvider()
 
-	wg.Wait()
+	var result sessionResult
+	select {
+	case result = <-resultCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("WaitForSession did not reject overlapping request")
+	}
 	if closeErr := writer.Close(); closeErr != nil {
 		t.Fatalf("close writer: %v", closeErr)
 	}

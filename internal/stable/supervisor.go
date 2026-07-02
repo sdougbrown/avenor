@@ -1446,10 +1446,10 @@ func (s *Supervisor) answerPermission(rtID, requestID, optionID string) error {
 		s.control.RetryDirectPermissionDelivery(rtID, requestID)
 		return err
 	}
-	s.control.EndPermissionClaim(rtID, requestID)
 	s.controlMu.Lock()
 	delete(s.permOptions, key)
 	s.controlMu.Unlock()
+	s.control.EndPermissionClaim(rtID, requestID)
 	return nil
 }
 
