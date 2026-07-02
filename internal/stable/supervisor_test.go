@@ -864,6 +864,32 @@ type permRecordingProvider struct {
 	called       bool
 }
 
+type blockingPermissionProvider struct {
+	permRecordingProvider
+	started chan struct{}
+	release chan struct{}
+	mu      sync.Mutex
+	calls   int
+}
+
+func (p *blockingPermissionProvider) AnswerPermission(_ context.Context, _ string, _ string, _ runtime.PermissionResponse) error {
+	p.mu.Lock()
+	p.calls++
+	p.mu.Unlock()
+	select {
+	case p.started <- struct{}{}:
+	default:
+	}
+	<-p.release
+	return nil
+}
+
+func (p *blockingPermissionProvider) callCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
 type stablePermissionProvider struct {
 	answers chan string
 }
@@ -1359,6 +1385,74 @@ func TestAnswerPermissionClearsCacheEntry(t *testing.T) {
 	}
 	if _, ok := sup.permOptions["rt_clear:req_clear"]; ok {
 		t.Fatal("cache entry was not cleared after use")
+	}
+}
+
+func TestAnswerPermissionNoResolverAllowsOnlyOneConcurrentProviderCall(t *testing.T) {
+	sup := NewSupervisor(Config{
+		ControlSocket:          "/tmp/test-answer-direct-concurrent.sock",
+		MaxRuntimes:            1,
+		PermissionClaimTimeout: 5 * time.Second,
+	})
+	provider := &blockingPermissionProvider{
+		started: make(chan struct{}, 1),
+		release: make(chan struct{}),
+	}
+	sup.runtimes["rt_direct"] = &childRuntime{
+		id:       "rt_direct",
+		provider: provider,
+		session:  runtime.Session{SessionID: "ses_direct"},
+		done:     make(chan struct{}),
+		promptCh: make(chan struct{}, 1),
+	}
+	cachePermissionOptionsThroughFanout(t, sup, "rt_direct", events.Event{
+		Event: "permission.request",
+		Fields: map[string]any{
+			"request_id": "req_direct",
+			"options": []any{
+				map[string]any{"optionId": "allow_it", "kind": "allow"},
+			},
+		},
+	})
+	if !sup.control.PreparePermissionClaim("rt_direct", "req_direct", control.PermissionResolverNoResolver) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+
+	firstErr := make(chan error, 1)
+	go func() {
+		firstErr <- sup.answerPermission("rt_direct", "req_direct", "allow_it")
+	}()
+	select {
+	case <-provider.started:
+	case <-time.After(time.Second):
+		t.Fatal("provider call did not start")
+	}
+
+	secondErr := sup.answerPermission("rt_direct", "req_direct", "allow_it")
+	if secondErr == nil {
+		t.Fatal("concurrent duplicate answer unexpectedly succeeded")
+	}
+	if got := provider.callCount(); got != 1 {
+		t.Fatalf("provider calls before release = %d, want 1", got)
+	}
+
+	close(provider.release)
+	select {
+	case err := <-firstErr:
+		if err != nil {
+			t.Fatalf("first answerPermission: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first answerPermission did not complete")
+	}
+	if got := provider.callCount(); got != 1 {
+		t.Fatalf("provider calls = %d, want 1", got)
+	}
+	if state := sup.control.PermissionResolverState("rt_direct", "req_direct"); state != control.PermissionResolverUnknown {
+		t.Fatalf("resolver state after success = %v, want unknown", state)
+	}
+	if _, ok := sup.permOptions["rt_direct:req_direct"]; ok {
+		t.Fatal("cache entry was not cleared after direct delivery")
 	}
 }
 

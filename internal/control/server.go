@@ -280,6 +280,7 @@ const (
 	PermissionResolverAutomatic
 	PermissionResolverFile
 	PermissionResolverNoResolver
+	PermissionResolverDirectDelivery
 	PermissionResolverResolved
 )
 
@@ -426,6 +427,7 @@ func (s *ControlServer) DeliverPendingPermission(scope, requestID, optionID stri
 	switch claim.state {
 	case PermissionResolverReserved, PermissionResolverControl:
 	case PermissionResolverNoResolver:
+		claim.state = PermissionResolverDirectDelivery
 		return PermissionAnswerNoResolver
 	default:
 		return PermissionAnswerResolverOwned
