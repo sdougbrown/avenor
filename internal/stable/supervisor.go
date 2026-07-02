@@ -1446,11 +1446,21 @@ func (s *Supervisor) answerPermission(rtID, requestID, optionID string) error {
 		s.control.RetryDirectPermissionDelivery(rtID, requestID)
 		return err
 	}
-	s.controlMu.Lock()
-	delete(s.permOptions, key)
-	s.controlMu.Unlock()
-	s.control.EndPermissionClaim(rtID, requestID)
+	s.cleanupDirectPermission(rtID, requestID, nil)
 	return nil
+}
+
+// cleanupDirectPermission removes stale option metadata before releasing the
+// claim for reuse. controlMu remains held across EndPermissionClaim so a
+// replacement cannot publish new options between those operations.
+func (s *Supervisor) cleanupDirectPermission(runtimeID, requestID string, beforeRelease func()) {
+	s.controlMu.Lock()
+	defer s.controlMu.Unlock()
+	delete(s.permOptions, runtimeID+":"+requestID)
+	if beforeRelease != nil {
+		beforeRelease()
+	}
+	s.control.EndPermissionClaim(runtimeID, requestID)
 }
 
 func (s *Supervisor) cachePermissionOptions(runtimeID, requestID string, options []any) {

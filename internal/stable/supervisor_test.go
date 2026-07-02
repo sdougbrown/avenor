@@ -1548,16 +1548,49 @@ func TestDirectPermissionCleanupBlocksReuseUntilOldOptionsAreDeleted(t *testing.
 		t.Fatalf("direct delivery = %v, want no-resolver", got)
 	}
 
-	// Successful cleanup deletes stale options while DirectDelivery still owns
-	// the claim. A reused ID cannot prepare until that deletion is complete.
-	sup.controlMu.Lock()
-	delete(sup.permOptions, key)
-	if sup.control.PreparePermissionClaim("rt_reuse", "req_reuse", control.PermissionResolverNoResolver) {
-		sup.controlMu.Unlock()
-		t.Fatal("replacement prepared before old cleanup released the claim")
+	cleanupReached := make(chan struct{})
+	releaseCleanup := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseCleanup) }) }
+	t.Cleanup(release)
+	cleanupDone := make(chan struct{})
+	go func() {
+		sup.cleanupDirectPermission("rt_reuse", "req_reuse", func() {
+			close(cleanupReached)
+			<-releaseCleanup
+		})
+		close(cleanupDone)
+	}()
+	select {
+	case <-cleanupReached:
+	case <-time.After(time.Second):
+		t.Fatal("production cleanup did not reach claim release")
 	}
-	sup.controlMu.Unlock()
-	sup.control.EndPermissionClaim("rt_reuse", "req_reuse")
+
+	replacementAttempt := make(chan bool, 1)
+	go func() {
+		prepared := sup.control.PreparePermissionClaim("rt_reuse", "req_reuse", control.PermissionResolverNoResolver)
+		if prepared {
+			sup.cachePermissionOptions("rt_reuse", "req_reuse", []any{
+				map[string]any{"optionId": "new", "kind": "reject"},
+			})
+		}
+		replacementAttempt <- prepared
+	}()
+	select {
+	case prepared := <-replacementAttempt:
+		if prepared {
+			t.Fatal("replacement prepared while production cleanup retained the old claim")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("replacement attempt blocked during cleanup")
+	}
+	release()
+	select {
+	case <-cleanupDone:
+	case <-time.After(time.Second):
+		t.Fatal("production cleanup did not complete")
+	}
 
 	if !sup.control.PreparePermissionClaim("rt_reuse", "req_reuse", control.PermissionResolverNoResolver) {
 		t.Fatal("replacement could not prepare after old cleanup")
