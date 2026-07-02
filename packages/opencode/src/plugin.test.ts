@@ -109,7 +109,19 @@ describe('AvenorPlugin', () => {
   it('monitors fire-and-forget runs immediately so permissions cannot time out before idle', async () => {
     spawnToolMock.mockClear()
     statusToolMock.mockClear()
-    const ctx = makeCtx()
+    let promptCalled!: () => void
+    const promptCall = new Promise<void>((resolve) => {
+      promptCalled = resolve
+    })
+    const ctx = makeCtx({
+      client: {
+        session: {
+          promptAsync: mock(async () => {
+            promptCalled()
+          }),
+        },
+      },
+    })
     const hooks = await AvenorPlugin(ctx as any)
     const spawn = hooks.tool?.avenor_spawn as any
 
@@ -123,12 +135,9 @@ describe('AvenorPlugin', () => {
       },
     )
 
-    // monitorRun's first status poll is intentionally synchronous up to the
-    // mocked promise, so a few microtask turns are sufficient. No
-    // session.idle event is sent in this regression case.
-    await Promise.resolve()
-    await Promise.resolve()
-    await Promise.resolve()
+    // No session.idle event is sent in this regression case. Wait on the
+    // observable notification instead of relying on a fixed microtask count.
+    await promptCall
 
     expect(statusToolMock).toHaveBeenCalledTimes(1)
     expect(ctx.client.session.promptAsync).toHaveBeenCalledTimes(1)

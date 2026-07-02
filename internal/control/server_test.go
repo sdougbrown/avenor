@@ -63,6 +63,45 @@ func TestOwnerRejectionForMutatingMethods(t *testing.T) {
 	}
 }
 
+func TestAnswerPendingPermissionDeliversMatchingAnswer(t *testing.T) {
+	s := NewServer(NewState("run_1", "", 0))
+	answerCh, ok := s.BeginPermissionClaim("req_1")
+	if !ok {
+		t.Fatal("BeginPermissionClaim returned false")
+	}
+	defer s.EndPermissionClaim("req_1")
+
+	if !s.AnswerPendingPermission("req_1", "allow") {
+		t.Fatal("AnswerPendingPermission returned false for matching request")
+	}
+	select {
+	case answer := <-answerCh:
+		if answer.RequestID != "req_1" || answer.OptionID != "allow" {
+			t.Fatalf("answer = %+v", answer)
+		}
+	default:
+		t.Fatal("matching answer was not delivered")
+	}
+}
+
+func TestAnswerPendingPermissionRejectsMismatchedRequest(t *testing.T) {
+	s := NewServer(NewState("run_1", "", 0))
+	answerCh, ok := s.BeginPermissionClaim("req_1")
+	if !ok {
+		t.Fatal("BeginPermissionClaim returned false")
+	}
+	defer s.EndPermissionClaim("req_1")
+
+	if s.AnswerPendingPermission("req_other", "allow") {
+		t.Fatal("AnswerPendingPermission returned true for mismatched request")
+	}
+	select {
+	case answer := <-answerCh:
+		t.Fatalf("mismatched answer was delivered: %+v", answer)
+	default:
+	}
+}
+
 func TestOwnershipTransferOnDisconnect(t *testing.T) {
 	state := NewState("run_1", "", 0)
 	s := NewServer(state)

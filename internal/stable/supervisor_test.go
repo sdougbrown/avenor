@@ -952,6 +952,9 @@ func TestAnswerPermissionUsesActiveControlClaim(t *testing.T) {
 	if provider.called {
 		t.Fatal("provider was called directly instead of through the active resolver claim")
 	}
+	if _, ok := sup.permOptions["rt_claim:req_claim"]; ok {
+		t.Fatal("cache entry was not consumed after delivering the claim answer")
+	}
 	select {
 	case answer := <-answerCh:
 		if answer.RequestID != "req_claim" || answer.OptionID != "allow_it" {
