@@ -1429,12 +1429,6 @@ func (s *Supervisor) answerPermission(rtID, requestID, optionID string) error {
 		// No control, automatic, or file resolver owns this request. The direct
 		// provider path below is the only remaining way to answer it.
 	}
-	defer func() {
-		s.control.EndPermissionClaim(rtID, requestID)
-		s.controlMu.Lock()
-		delete(s.permOptions, key)
-		s.controlMu.Unlock()
-	}()
 
 	// A request emitted without any configured resolver remains backend-owned.
 	rt.mu.Lock()
@@ -1442,14 +1436,20 @@ func (s *Supervisor) answerPermission(rtID, requestID, optionID string) error {
 	sessionID := rt.session.SessionID
 	rt.mu.Unlock()
 	if provider == nil || sessionID == "" {
+		s.control.RetryDirectPermissionDelivery(rtID, requestID)
 		return fmt.Errorf("runtime %q has no active session for permission response", rtID)
 	}
 	if err := provider.AnswerPermission(context.Background(), sessionID, requestID, runtime.PermissionResponse{
 		Allow:    kind == "allow",
 		OptionID: optionID,
 	}); err != nil {
+		s.control.RetryDirectPermissionDelivery(rtID, requestID)
 		return err
 	}
+	s.control.EndPermissionClaim(rtID, requestID)
+	s.controlMu.Lock()
+	delete(s.permOptions, key)
+	s.controlMu.Unlock()
 	return nil
 }
 

@@ -315,6 +315,21 @@ func (s *ControlServer) SetPermissionResolverState(scope, requestID string, stat
 	}
 }
 
+// RetryDirectPermissionDelivery returns a failed direct delivery to the
+// unowned state. It only changes the exact in-flight claim, so cleanup or a
+// replacement claim cannot be overwritten by a late failure.
+func (s *ControlServer) RetryDirectPermissionDelivery(scope, requestID string) bool {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	key := permissionClaimKey{scope: scope, requestID: requestID}
+	claim := s.pendingClaims[key]
+	if claim == nil || claim.state != PermissionResolverDirectDelivery {
+		return false
+	}
+	claim.state = PermissionResolverNoResolver
+	return true
+}
+
 // HandoffPermissionClaim atomically consumes an answer already queued for the
 // control resolver or closes control ownership by transitioning to next. Once
 // it returns without an answer, later control deliveries are rejected.

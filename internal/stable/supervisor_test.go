@@ -890,6 +890,22 @@ func (p *blockingPermissionProvider) callCount() int {
 	return p.calls
 }
 
+type retryPermissionProvider struct {
+	permRecordingProvider
+	mu    sync.Mutex
+	calls int
+}
+
+func (p *retryPermissionProvider) AnswerPermission(_ context.Context, _ string, _ string, _ runtime.PermissionResponse) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls++
+	if p.calls == 1 {
+		return fmt.Errorf("temporary provider failure")
+	}
+	return nil
+}
+
 type stablePermissionProvider struct {
 	answers chan string
 }
@@ -1398,6 +1414,9 @@ func TestAnswerPermissionNoResolverAllowsOnlyOneConcurrentProviderCall(t *testin
 		started: make(chan struct{}, 1),
 		release: make(chan struct{}),
 	}
+	var releaseOnce sync.Once
+	releaseProvider := func() { releaseOnce.Do(func() { close(provider.release) }) }
+	t.Cleanup(releaseProvider)
 	sup.runtimes["rt_direct"] = &childRuntime{
 		id:       "rt_direct",
 		provider: provider,
@@ -1428,7 +1447,16 @@ func TestAnswerPermissionNoResolverAllowsOnlyOneConcurrentProviderCall(t *testin
 		t.Fatal("provider call did not start")
 	}
 
-	secondErr := sup.answerPermission("rt_direct", "req_direct", "allow_it")
+	secondErrCh := make(chan error, 1)
+	go func() {
+		secondErrCh <- sup.answerPermission("rt_direct", "req_direct", "allow_it")
+	}()
+	var secondErr error
+	select {
+	case secondErr = <-secondErrCh:
+	case <-time.After(time.Second):
+		t.Fatal("duplicate answerPermission did not complete")
+	}
 	if secondErr == nil {
 		t.Fatal("concurrent duplicate answer unexpectedly succeeded")
 	}
@@ -1436,7 +1464,7 @@ func TestAnswerPermissionNoResolverAllowsOnlyOneConcurrentProviderCall(t *testin
 		t.Fatalf("provider calls before release = %d, want 1", got)
 	}
 
-	close(provider.release)
+	releaseProvider()
 	select {
 	case err := <-firstErr:
 		if err != nil {
@@ -1453,6 +1481,54 @@ func TestAnswerPermissionNoResolverAllowsOnlyOneConcurrentProviderCall(t *testin
 	}
 	if _, ok := sup.permOptions["rt_direct:req_direct"]; ok {
 		t.Fatal("cache entry was not cleared after direct delivery")
+	}
+}
+
+func TestAnswerPermissionNoResolverRetriesAfterProviderError(t *testing.T) {
+	sup := NewSupervisor(Config{
+		ControlSocket:          "/tmp/test-answer-direct-retry.sock",
+		MaxRuntimes:            1,
+		PermissionClaimTimeout: 5 * time.Second,
+	})
+	provider := &retryPermissionProvider{}
+	sup.runtimes["rt_retry"] = &childRuntime{
+		id:       "rt_retry",
+		provider: provider,
+		session:  runtime.Session{SessionID: "ses_retry"},
+		done:     make(chan struct{}),
+		promptCh: make(chan struct{}, 1),
+	}
+	cachePermissionOptionsThroughFanout(t, sup, "rt_retry", events.Event{
+		Event: "permission.request",
+		Fields: map[string]any{
+			"request_id": "req_retry",
+			"options": []any{
+				map[string]any{"optionId": "allow_it", "kind": "allow"},
+			},
+		},
+	})
+	if !sup.control.PreparePermissionClaim("rt_retry", "req_retry", control.PermissionResolverNoResolver) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+
+	if err := sup.answerPermission("rt_retry", "req_retry", "allow_it"); err == nil {
+		t.Fatal("first answerPermission unexpectedly succeeded")
+	}
+	if state := sup.control.PermissionResolverState("rt_retry", "req_retry"); state != control.PermissionResolverNoResolver {
+		t.Fatalf("resolver state after failure = %v, want no-resolver", state)
+	}
+	if _, ok := sup.permOptions["rt_retry:req_retry"]; !ok {
+		t.Fatal("cache entry was removed after failed provider delivery")
+	}
+
+	if err := sup.answerPermission("rt_retry", "req_retry", "allow_it"); err != nil {
+		t.Fatalf("retry answerPermission: %v", err)
+	}
+	if state := sup.control.PermissionResolverState("rt_retry", "req_retry"); state != control.PermissionResolverUnknown {
+		t.Fatalf("resolver state after retry = %v, want unknown", state)
+	}
+	if _, ok := sup.permOptions["rt_retry:req_retry"]; ok {
+		t.Fatal("cache entry was not removed after successful retry")
 	}
 }
 
