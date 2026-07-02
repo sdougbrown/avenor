@@ -1996,7 +1996,11 @@ func TestPermissionClaimIsReservedBeforeSynchronousRequestSink(t *testing.T) {
 		t.Fatalf("dial control server: %v", err)
 	}
 	defer conn.Close()
+	clientDeadline := time.Now().Add(time.Second)
 	for !cs.HasClients() {
+		if time.Now().After(clientDeadline) {
+			t.Fatal("control client was not registered")
+		}
 		time.Sleep(time.Millisecond)
 	}
 
@@ -2051,6 +2055,9 @@ func TestPermissionClaimIsReservedBeforeSynchronousRequestSink(t *testing.T) {
 	default:
 		t.Fatal("permission.response was not emitted")
 	}
+	if got := cs.PermissionResolverState("rt_sync", "0"); got != control.PermissionResolverUnknown {
+		t.Fatalf("completed claim state = %v, want removed", got)
+	}
 }
 
 func TestLateControlAnswerIsBlockedWhileFileResolverOwnsRequest(t *testing.T) {
@@ -2065,7 +2072,11 @@ func TestLateControlAnswerIsBlockedWhileFileResolverOwnsRequest(t *testing.T) {
 		t.Fatalf("dial control server: %v", err)
 	}
 	defer conn.Close()
+	clientDeadline := time.Now().Add(time.Second)
 	for !cs.HasClients() {
+		if time.Now().After(clientDeadline) {
+			t.Fatal("control client was not registered")
+		}
 		time.Sleep(time.Millisecond)
 	}
 
@@ -2108,6 +2119,32 @@ func TestLateControlAnswerIsBlockedWhileFileResolverOwnsRequest(t *testing.T) {
 	case <-resultCh:
 	case <-time.After(time.Second):
 		t.Fatal("file resolver did not stop after cancellation")
+	}
+	if got := cs.PermissionResolverState("rt_file", "0"); got != control.PermissionResolverUnknown {
+		t.Fatalf("cancelled file claim state = %v, want removed", got)
+	}
+}
+
+func TestFailedAutomaticPermissionRemovesClaim(t *testing.T) {
+	cs := control.NewServer(control.NewState("run_1", "", 0))
+	cs.PreparePermissionClaim("rt_auto", "0", control.PermissionResolverAutomatic)
+	provider := &errorFakeProvider{answerErr: errors.New("answer failed")}
+	event := events.Event{
+		Event:     "permission.request",
+		SessionID: "ses_auto",
+		Fields: map[string]any{
+			"request_id": "0",
+			"options": []any{
+				map[string]any{"optionId": "always", "kind": "allow_always"},
+			},
+		},
+	}
+	result := resolvePermission(context.Background(), provider, nil, cs, event, "ses_auto", "rt_auto", "0", true, time.Second, nil)
+	if result.err == nil {
+		t.Fatal("automatic permission unexpectedly succeeded")
+	}
+	if got := cs.PermissionResolverState("rt_auto", "0"); got != control.PermissionResolverUnknown {
+		t.Fatalf("failed automatic claim state = %v, want removed", got)
 	}
 }
 

@@ -133,6 +133,63 @@ func TestPermissionClaimsAreScopedAndReportFullChannel(t *testing.T) {
 	}
 }
 
+func TestHandoffPermissionClaimAtomicallyConsumesQueuedAnswerOrTransfersToFile(t *testing.T) {
+	s := NewServer(NewState("run_1", "", 0))
+	if !s.PreparePermissionClaim("rt_1", "0", PermissionResolverReserved) {
+		t.Fatal("prepare queued-answer claim failed")
+	}
+	if !s.AnswerPendingPermission("rt_1", "0", "allow") {
+		t.Fatal("queue answer failed")
+	}
+	answer, answered := s.HandoffPermissionClaim("rt_1", "0", PermissionResolverFile)
+	if !answered || answer.OptionID != "allow" {
+		t.Fatalf("handoff answer = %+v, %v", answer, answered)
+	}
+	s.EndPermissionClaim("rt_1", "0")
+
+	if !s.PreparePermissionClaim("rt_1", "1", PermissionResolverReserved) {
+		t.Fatal("prepare file-handoff claim failed")
+	}
+	if answer, answered := s.HandoffPermissionClaim("rt_1", "1", PermissionResolverFile); answered {
+		t.Fatalf("unexpected handoff answer: %+v", answer)
+	}
+	if got := s.PermissionResolverState("rt_1", "1"); got != PermissionResolverFile {
+		t.Fatalf("resolver state = %v, want file", got)
+	}
+	if got := s.DeliverPendingPermission("rt_1", "1", "late"); got != PermissionAnswerResolverOwned {
+		t.Fatalf("late delivery = %v, want resolver-owned", got)
+	}
+}
+
+func TestHandoffPermissionClaimAtomicallyClosesCancelledClaim(t *testing.T) {
+	s := NewServer(NewState("run_1", "", 0))
+	if !s.PreparePermissionClaim("rt_1", "0", PermissionResolverReserved) {
+		t.Fatal("prepare claim failed")
+	}
+	if answer, answered := s.HandoffPermissionClaim("rt_1", "0", PermissionResolverResolved); answered {
+		t.Fatalf("unexpected cancellation answer: %+v", answer)
+	}
+	if got := s.PermissionResolverState("rt_1", "0"); got != PermissionResolverUnknown {
+		t.Fatalf("resolver state = %v, want removed", got)
+	}
+	if got := s.DeliverPendingPermission("rt_1", "0", "late"); got != PermissionAnswerNotFound {
+		t.Fatalf("late cancellation delivery = %v, want not-found", got)
+	}
+}
+
+func TestClearPermissionClaimsRemovesOnlyRequestedScope(t *testing.T) {
+	s := NewServer(NewState("run_1", "", 0))
+	s.PreparePermissionClaim("rt_1", "0", PermissionResolverFile)
+	s.PreparePermissionClaim("rt_2", "0", PermissionResolverFile)
+	s.ClearPermissionClaims("rt_1")
+	if got := s.PermissionResolverState("rt_1", "0"); got != PermissionResolverUnknown {
+		t.Fatalf("rt_1 state = %v, want removed", got)
+	}
+	if got := s.PermissionResolverState("rt_2", "0"); got != PermissionResolverFile {
+		t.Fatalf("rt_2 state = %v, want file", got)
+	}
+}
+
 func TestOwnershipTransferOnDisconnect(t *testing.T) {
 	state := NewState("run_1", "", 0)
 	s := NewServer(state)

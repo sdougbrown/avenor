@@ -1176,8 +1176,13 @@ func TestStableWaitersRouteSameRequestIDThroughScopedResolvers(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatalf("%s permission.response was not emitted", w.runtimeID)
 		}
-		if exitCode := <-w.result; exitCode != 0 {
-			t.Fatalf("%s WaitForSession exit code = %d", w.runtimeID, exitCode)
+		select {
+		case exitCode := <-w.result:
+			if exitCode != 0 {
+				t.Fatalf("%s WaitForSession exit code = %d", w.runtimeID, exitCode)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("%s WaitForSession did not complete", w.runtimeID)
 		}
 		w.child.mu.Lock()
 		pending := w.child.pendingPermission

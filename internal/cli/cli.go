@@ -942,6 +942,9 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 					deps.ControlServer.PreparePermissionClaim(cfg.PermissionClaimScope, requestID, state)
 				}
 				if err := deps.Writer.Write(event); err != nil {
+					if requestID != "" && deps.ControlServer != nil {
+						deps.ControlServer.EndPermissionClaim(cfg.PermissionClaimScope, requestID)
+					}
 					fmt.Fprintf(deps.Stderr, "avenor: write event: %v\n", err)
 					return sessionResult{ExitCode: 1}
 				}
@@ -1127,17 +1130,39 @@ func resolvePermission(
 	emit func(events.Event) error,
 ) permissionResult {
 	options, _ := event.Fields["options"].([]any)
+	answerControl := func(ans control.PermissionAnswer) permissionResult {
+		kind := permissionKindFromOptionID(ans.OptionID, options)
+		switch kind {
+		case "allow", "reject":
+		default:
+			if controlServer != nil {
+				controlServer.EndPermissionClaim(claimScope, requestID)
+			}
+			return permissionResult{err: fmt.Errorf("unknown option_id %q for request %q", ans.OptionID, requestID)}
+		}
+		resp := runtime.PermissionResponse{Allow: kind == "allow", OptionID: ans.OptionID}
+		if err := provider.AnswerPermission(ctx, sessionID, requestID, resp); err != nil {
+			if controlServer != nil {
+				controlServer.EndPermissionClaim(claimScope, requestID)
+			}
+			return permissionResult{err: err}
+		}
+		if controlServer != nil {
+			controlServer.EndPermissionClaim(claimScope, requestID)
+		}
+		return permissionResult{requestID: requestID, optionID: ans.OptionID, kind: kind, source: "control"}
+	}
 	if autoApprove {
 		optionID, kind := firstOptionKind(options, "allow")
 		resp := runtime.PermissionResponse{Allow: true, OptionID: optionID}
 		if err := provider.AnswerPermission(ctx, sessionID, requestID, resp); err != nil {
 			if controlServer != nil {
-				controlServer.SetPermissionResolverState(claimScope, requestID, control.PermissionResolverResolved)
+				controlServer.EndPermissionClaim(claimScope, requestID)
 			}
 			return permissionResult{err: err}
 		}
 		if controlServer != nil {
-			controlServer.SetPermissionResolverState(claimScope, requestID, control.PermissionResolverResolved)
+			controlServer.EndPermissionClaim(claimScope, requestID)
 		}
 		return permissionResult{requestID: requestID, optionID: optionID, kind: kind, source: "avenor"}
 	}
@@ -1167,61 +1192,20 @@ func resolvePermission(
 			select {
 			case ans := <-answerCh:
 				claimTimer.Stop()
-				kind := permissionKindFromOptionID(ans.OptionID, options)
-				switch kind {
-				case "allow", "reject":
-				default:
-					controlServer.SetPermissionResolverState(claimScope, requestID, control.PermissionResolverResolved)
-					return permissionResult{err: fmt.Errorf("unknown option_id %q for request %q", ans.OptionID, requestID)}
-				}
-				resp := runtime.PermissionResponse{Allow: kind == "allow", OptionID: ans.OptionID}
-				if err := provider.AnswerPermission(ctx, sessionID, requestID, resp); err != nil {
-					controlServer.SetPermissionResolverState(claimScope, requestID, control.PermissionResolverResolved)
-					return permissionResult{err: err}
-				}
-				controlServer.SetPermissionResolverState(claimScope, requestID, control.PermissionResolverResolved)
-				return permissionResult{requestID: requestID, optionID: ans.OptionID, kind: kind, source: "control"}
+				return answerControl(ans)
 			case <-ctx.Done():
 				claimTimer.Stop()
-				select {
-				case ans := <-answerCh:
-					kind := permissionKindFromOptionID(ans.OptionID, options)
-					switch kind {
-					case "allow", "reject":
-					default:
-						controlServer.SetPermissionResolverState(claimScope, requestID, control.PermissionResolverResolved)
-						return permissionResult{err: fmt.Errorf("unknown option_id %q for request %q", ans.OptionID, requestID)}
-					}
-					resp := runtime.PermissionResponse{Allow: kind == "allow", OptionID: ans.OptionID}
-					if err := provider.AnswerPermission(ctx, sessionID, requestID, resp); err != nil {
-						controlServer.SetPermissionResolverState(claimScope, requestID, control.PermissionResolverResolved)
-						return permissionResult{err: err}
-					}
-					controlServer.SetPermissionResolverState(claimScope, requestID, control.PermissionResolverResolved)
-					return permissionResult{requestID: requestID, optionID: ans.OptionID, kind: kind, source: "control"}
-				default:
+				if ans, answered := controlServer.HandoffPermissionClaim(claimScope, requestID, control.PermissionResolverResolved); answered {
+					return answerControl(ans)
 				}
-				controlServer.SetPermissionResolverState(claimScope, requestID, control.PermissionResolverResolved)
 				return permissionResult{err: ctx.Err()}
 			case <-claimTimer.C:
-				select {
-				case ans := <-answerCh:
-					kind := permissionKindFromOptionID(ans.OptionID, options)
-					switch kind {
-					case "allow", "reject":
-					default:
-						controlServer.SetPermissionResolverState(claimScope, requestID, control.PermissionResolverResolved)
-						return permissionResult{err: fmt.Errorf("unknown option_id %q for request %q", ans.OptionID, requestID)}
-					}
-					resp := runtime.PermissionResponse{Allow: kind == "allow", OptionID: ans.OptionID}
-					if err := provider.AnswerPermission(ctx, sessionID, requestID, resp); err != nil {
-						controlServer.SetPermissionResolverState(claimScope, requestID, control.PermissionResolverResolved)
-						return permissionResult{err: err}
-					}
-					controlServer.SetPermissionResolverState(claimScope, requestID, control.PermissionResolverResolved)
-					return permissionResult{requestID: requestID, optionID: ans.OptionID, kind: kind, source: "control"}
-				default:
-					// Nothing in the channel; fall through to the file-handler.
+				next := control.PermissionResolverNoResolver
+				if fileHandler != nil {
+					next = control.PermissionResolverFile
+				}
+				if ans, answered := controlServer.HandoffPermissionClaim(claimScope, requestID, next); answered {
+					return answerControl(ans)
 				}
 			}
 		}
@@ -1233,7 +1217,7 @@ func resolvePermission(
 		}
 		res, err := fileHandler.Handle(ctx, provider, event, emit)
 		if controlServer != nil {
-			controlServer.SetPermissionResolverState(claimScope, requestID, control.PermissionResolverResolved)
+			controlServer.EndPermissionClaim(claimScope, requestID)
 		}
 		if err != nil {
 			return permissionResult{err: err}
@@ -1246,7 +1230,11 @@ func resolvePermission(
 
 	// no resolver: leave backend waiting
 	if controlServer != nil {
-		controlServer.SetPermissionResolverState(claimScope, requestID, control.PermissionResolverNoResolver)
+		if claimScope == "" {
+			controlServer.EndPermissionClaim(claimScope, requestID)
+		} else {
+			controlServer.SetPermissionResolverState(claimScope, requestID, control.PermissionResolverNoResolver)
+		}
 	}
 	return permissionResult{kind: "", source: "none"}
 }

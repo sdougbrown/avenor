@@ -313,6 +313,43 @@ func (s *ControlServer) SetPermissionResolverState(scope, requestID string, stat
 	}
 }
 
+// HandoffPermissionClaim atomically consumes an answer already queued for the
+// control resolver or closes control ownership by transitioning to next. Once
+// it returns without an answer, later control deliveries are rejected.
+func (s *ControlServer) HandoffPermissionClaim(scope, requestID string, next PermissionResolverState) (PermissionAnswer, bool) {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	key := permissionClaimKey{scope: scope, requestID: requestID}
+	claim := s.pendingClaims[key]
+	if claim == nil {
+		return PermissionAnswer{}, false
+	}
+	if claim.state != PermissionResolverReserved && claim.state != PermissionResolverControl {
+		return PermissionAnswer{}, false
+	}
+	select {
+	case answer := <-claim.answerCh:
+		return answer, true
+	default:
+	}
+	if next == PermissionResolverResolved {
+		delete(s.pendingClaims, key)
+	} else {
+		claim.state = next
+	}
+	return PermissionAnswer{}, false
+}
+
+func (s *ControlServer) ClearPermissionClaims(scope string) {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	for key := range s.pendingClaims {
+		if key.scope == scope {
+			delete(s.pendingClaims, key)
+		}
+	}
+}
+
 func (s *ControlServer) PermissionResolverState(scope, requestID string) PermissionResolverState {
 	s.pendingMu.Lock()
 	defer s.pendingMu.Unlock()

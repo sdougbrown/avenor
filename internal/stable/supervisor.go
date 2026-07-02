@@ -1444,7 +1444,7 @@ func (s *Supervisor) answerPermission(rtID, requestID, optionID string) error {
 	}); err != nil {
 		return err
 	}
-	s.control.SetPermissionResolverState(rtID, requestID, control.PermissionResolverResolved)
+	s.control.EndPermissionClaim(rtID, requestID)
 	s.controlMu.Lock()
 	delete(s.permOptions, key)
 	s.controlMu.Unlock()
@@ -1466,6 +1466,7 @@ func (s *Supervisor) clearRuntimePermissionOptions(runtimeID string) {
 		}
 	}
 	s.controlMu.Unlock()
+	s.control.ClearPermissionClaims(runtimeID)
 }
 
 type runtimeFanoutWriter struct {
