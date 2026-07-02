@@ -68,7 +68,7 @@ export async function followUpTool(args: {
       const followUpLabel = args.label ?? `${args.runId}-followup`
       const { sentinelPath: followUpSentinelPath, eventLogPath } =
         ensureRunPaths(followUpRunId)
-      await client.spawn({
+      const result = await client.spawn({
         agent,
         prompt: args.message,
         label: followUpLabel,
@@ -76,7 +76,14 @@ export async function followUpTool(args: {
         sentinel_file: followUpSentinelPath,
         on_event: eventLogPath,
       })
-      return { run_id: followUpRunId, label: followUpLabel }
+      // With an external supervisor there is no local Supervisor.run map to
+      // translate our filesystem UUID back to the control-plane runtime. As
+      // spawnTool does, expose the runtime ID so status/permission calls can
+      // address the follow-up directly.
+      return {
+        run_id: (result.runtime_id as string | undefined) ?? followUpRunId,
+        label: followUpLabel,
+      }
     } finally {
       if (!isSingleton) {
         client.close()

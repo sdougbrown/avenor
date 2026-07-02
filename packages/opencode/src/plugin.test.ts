@@ -1,5 +1,32 @@
 import { describe, it, expect, mock } from 'bun:test'
-import { AvenorPlugin } from './plugin.js'
+
+const spawnToolMock = mock(async () => ({
+  run_id: 'run-1',
+  runtime_id: 'rt-1',
+  label: 'test run',
+}))
+const statusToolMock = mock(async () => ({
+  run_id: 'run-1',
+  runtime_id: 'rt-1',
+  session_id: 'child-session',
+  status: 'waiting',
+  pending_permission: {
+    request_id: 'perm-1',
+    description: 'read /outside/project',
+    options: [],
+  },
+}))
+
+mock.module('@dougbots/avenor-core', () => ({
+  spawnTool: spawnToolMock,
+  statusTool: statusToolMock,
+  eventsTool: mock(async () => ({ events: [] })),
+  answerPermissionTool: mock(async () => ({})),
+  followUpTool: mock(async () => ({})),
+  shutdownTool: mock(async () => ({})),
+}))
+
+const { AvenorPlugin } = await import('./plugin.js')
 
 function makeClient() {
   return {
@@ -77,5 +104,42 @@ describe('AvenorPlugin', () => {
     expect(ctx.client.session.promptAsync).not.toHaveBeenCalled()
     // Should not change output status
     expect(output.status).toBe('ask')
+  })
+
+  it('monitors fire-and-forget runs immediately so permissions cannot time out before idle', async () => {
+    spawnToolMock.mockClear()
+    statusToolMock.mockClear()
+    const ctx = makeCtx()
+    const hooks = await AvenorPlugin(ctx as any)
+    const spawn = hooks.tool?.avenor_spawn as any
+
+    await spawn.execute(
+      { agent: 'jockey', wait: false },
+      {
+        sessionID: 'orchestrator-session',
+        directory: '/tmp/test',
+        abort: new AbortController().signal,
+        metadata: () => {},
+      },
+    )
+
+    // monitorRun's first status poll is intentionally synchronous up to the
+    // mocked promise, so a few microtask turns are sufficient. No
+    // session.idle event is sent in this regression case.
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(statusToolMock).toHaveBeenCalledTimes(1)
+    expect(ctx.client.session.promptAsync).toHaveBeenCalledTimes(1)
+    expect(ctx.client.session.promptAsync.mock.calls[0]?.[0]).toEqual({
+      path: { id: 'orchestrator-session' },
+      body: {
+        parts: [{
+          type: 'text',
+          text: expect.stringContaining('Permission request: read /outside/project'),
+        }],
+      },
+    })
   })
 })

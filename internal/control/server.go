@@ -293,6 +293,21 @@ func (s *ControlServer) HasPendingPermission() bool {
 	return s.pendingRequest != ""
 }
 
+// AnswerPendingPermission delivers an answer to the active permission claim.
+// The bool reports whether requestID names the current claim.
+func (s *ControlServer) AnswerPendingPermission(requestID, optionID string) bool {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	if s.pendingAnswer == nil || s.pendingRequest != requestID {
+		return false
+	}
+	select {
+	case s.pendingAnswer <- PermissionAnswer{RequestID: requestID, OptionID: optionID}:
+	default:
+	}
+	return true
+}
+
 func (s *ControlServer) QueuePrompt(text string) {
 	s.promptMu.Lock()
 	s.promptQueue = append(s.promptQueue, text)
@@ -493,16 +508,8 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		if p.RequestID == "" || p.OptionID == "" {
 			return failure(req.ID, -32602, "invalid params", map[string]any{"required": []string{"request_id", "option_id"}})
 		}
-		s.pendingMu.Lock()
-		pendingReq := s.pendingRequest
-		pending := s.pendingAnswer
-		s.pendingMu.Unlock()
-		if pending == nil || pendingReq != p.RequestID {
+		if !s.AnswerPendingPermission(p.RequestID, p.OptionID) {
 			return failure(req.ID, -32001, "no_pending_permission", nil)
-		}
-		select {
-		case pending <- p:
-		default:
 		}
 		return success(req.ID, map[string]any{"accepted": true})
 	case "prompt":

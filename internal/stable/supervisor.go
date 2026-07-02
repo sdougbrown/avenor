@@ -1329,7 +1329,7 @@ func (s *Supervisor) listRuntimes() []map[string]any {
 			"runtime_id":         rt.id,
 			"session_id":         rt.session.SessionID,
 			"label":              rt.label,
-			"dir":                 rt.dir,
+			"dir":                rt.dir,
 			"status":             status,
 			"exit_code":          rt.exitCode,
 			"on_event":           rt.onEvent,
@@ -1406,6 +1406,22 @@ func (s *Supervisor) answerPermission(rtID, requestID, optionID string) error {
 		return fmt.Errorf("unsupported option kind %q for option_id %q on request %q", kind, optionID, requestID)
 	}
 
+	// Stable runtimes use the same CLI permission resolver as top-level runs.
+	// If it has an active control claim, feed the answer through that claim so
+	// the resolver can call the provider, emit permission.response, clear the
+	// waiting status, and release its in-flight guard. Calling the provider
+	// directly here leaves the resolver stuck until its timeout and causes the
+	// next backend permission to fail as an overlapping request.
+	if s.control.AnswerPendingPermission(requestID, optionID) {
+		s.controlMu.Lock()
+		delete(s.permOptions, key)
+		s.controlMu.Unlock()
+		return nil
+	}
+
+	// A request may have been emitted while no control client was connected,
+	// in which case no resolver claim exists. Retain the direct fallback so a
+	// later stable control call can still answer that backend request.
 	rt.mu.Lock()
 	provider := rt.provider
 	sessionID := rt.session.SessionID
@@ -1595,7 +1611,7 @@ func (s *Supervisor) RuntimeStatus(rtID string) (any, error) {
 		"runtime_id":         rt.id,
 		"session_id":         rt.session.SessionID,
 		"label":              rt.label,
-		"dir":                 rt.dir,
+		"dir":                rt.dir,
 		"status":             status,
 		"exit_code":          rt.exitCode,
 		"on_event":           rt.onEvent,

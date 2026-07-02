@@ -917,6 +917,51 @@ func TestAnswerPermissionRejectsUnknownOptionIDWithoutConsumingCache(t *testing.
 	}
 }
 
+func TestAnswerPermissionUsesActiveControlClaim(t *testing.T) {
+	sup := NewSupervisor(Config{
+		ControlSocket:          "/tmp/test-answer-claim.sock",
+		MaxRuntimes:            1,
+		PermissionClaimTimeout: 5 * time.Second,
+	})
+	provider := &permRecordingProvider{}
+	sup.runtimes["rt_claim"] = &childRuntime{
+		id:       "rt_claim",
+		provider: provider,
+		session:  runtime.Session{SessionID: "ses_claim"},
+		done:     make(chan struct{}),
+		promptCh: make(chan struct{}, 1),
+	}
+	cachePermissionOptionsThroughFanout(t, sup, "rt_claim", events.Event{
+		Event: "permission.request",
+		Fields: map[string]any{
+			"request_id": "req_claim",
+			"options": []any{
+				map[string]any{"optionId": "allow_it", "kind": "allow"},
+			},
+		},
+	})
+	answerCh, ok := sup.control.BeginPermissionClaim("req_claim")
+	if !ok {
+		t.Fatal("BeginPermissionClaim returned false")
+	}
+	defer sup.control.EndPermissionClaim("req_claim")
+
+	if err := sup.answerPermission("rt_claim", "req_claim", "allow_it"); err != nil {
+		t.Fatalf("answerPermission: %v", err)
+	}
+	if provider.called {
+		t.Fatal("provider was called directly instead of through the active resolver claim")
+	}
+	select {
+	case answer := <-answerCh:
+		if answer.RequestID != "req_claim" || answer.OptionID != "allow_it" {
+			t.Fatalf("claim answer = %+v", answer)
+		}
+	default:
+		t.Fatal("active resolver claim did not receive the answer")
+	}
+}
+
 func TestAnswerPermissionRejectsUnsupportedKindWithoutConsumingCache(t *testing.T) {
 	sup := NewSupervisor(Config{
 		ControlSocket:          "/tmp/test-answer-kind-bad.sock",

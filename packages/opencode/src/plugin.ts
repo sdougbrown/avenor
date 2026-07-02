@@ -113,7 +113,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
     }
   }
 
-  // Used by both fire-and-forget (session.idle trigger) and permision routing
+  // Used by both fire-and-forget and permission routing
   // to re-prompt the orchestrator when a run completes.
   async function monitorRun(run: TrackedRun): Promise<void> {
     let firstPoll = true
@@ -172,6 +172,10 @@ export const AvenorPlugin: Plugin = async (ctx) => {
         }).catch(() => {
           // Session may have been deleted; nothing to do.
         })
+        // The injected turn will answer or otherwise handle the request. Let a
+        // later idle event resume monitoring for completion (and also provide
+        // a retry opportunity if the injection raced with a busy session).
+        run.monitoring = false
         return
       }
     }
@@ -379,6 +383,15 @@ export const AvenorPlugin: Plugin = async (ctx) => {
           }
 
           if (!args.wait) {
+            // Start watching now, not when the orchestrator eventually becomes
+            // idle. A child can request permission while the orchestrator is
+            // still finishing its current response, and the control-plane
+            // claim may time out before a session.idle event is emitted.
+            const run = trackedRuns.get(result.run_id)
+            if (run) {
+              run.monitoring = true
+              monitorRun(run).catch(console.error)
+            }
             return {
               title: `${result.label} — dispatched`,
               output: `Dispatched "${result.label}" (run_id: ${result.run_id}). Call avenor_status with run_id to check progress, or wait for the completion notification.`,

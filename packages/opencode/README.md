@@ -132,7 +132,7 @@ Shut down the avenor supervisor process and clean up temp files. Call this when 
 **Parallel / fire-and-forget (`wait=false`):**
 ```
 1. avenor_spawn × N        →  each returns run_id immediately
-2. (session goes idle)     →  plugin starts monitoring all pending runs
+2. plugin starts monitoring each run immediately
 3. (sub-agent finishes)    →  plugin re-prompts this session automatically
 4. avenor_answer_permission  →  if a permission was routed here mid-run
 5. avenor_events           →  inspect output
