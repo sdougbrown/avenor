@@ -109,20 +109,54 @@ describe('AvenorPlugin', () => {
   it('monitors fire-and-forget runs immediately so permissions cannot time out before idle', async () => {
     spawnToolMock.mockClear()
     statusToolMock.mockClear()
-    let promptCalled!: () => void
-    const promptCall = new Promise<void>((resolve) => {
-      promptCalled = resolve
+    statusToolMock
+      .mockImplementationOnce(async () => ({
+        run_id: 'run-1',
+        runtime_id: 'rt-1',
+        session_id: 'child-session',
+        status: 'waiting',
+        pending_permission: {
+          request_id: 'perm-1',
+          description: 'read /outside/project',
+          options: [],
+        },
+      }))
+      .mockImplementationOnce(async () => ({
+        run_id: 'run-1',
+        runtime_id: 'rt-1',
+        session_id: 'child-session',
+        status: 'done',
+      }))
+    let hooks!: Awaited<ReturnType<typeof AvenorPlugin>>
+    let completionPrompted!: () => void
+    const completionPrompt = new Promise<void>((resolve) => {
+      completionPrompted = resolve
     })
+    let promptCount = 0
     const ctx = makeCtx({
       client: {
         session: {
           promptAsync: mock(async () => {
-            promptCalled()
+            promptCount++
+            if (promptCount === 1) {
+              // Fire idle on the next task, after the waiting monitor has
+              // returned and released its monitoring flag.
+              setTimeout(() => {
+                void hooks.event?.({
+                  event: {
+                    type: 'session.idle',
+                    properties: { sessionID: 'orchestrator-session' },
+                  } as any,
+                })
+              }, 0)
+            } else {
+              completionPrompted()
+            }
           }),
         },
       },
     })
-    const hooks = await AvenorPlugin(ctx as any)
+    hooks = await AvenorPlugin(ctx as any)
     const spawn = hooks.tool?.avenor_spawn as any
 
     await spawn.execute(
@@ -135,18 +169,25 @@ describe('AvenorPlugin', () => {
       },
     )
 
-    // No session.idle event is sent in this regression case. Wait on the
-    // observable notification instead of relying on a fixed microtask count.
-    await promptCall
+    await completionPrompt
 
-    expect(statusToolMock).toHaveBeenCalledTimes(1)
-    expect(ctx.client.session.promptAsync).toHaveBeenCalledTimes(1)
+    expect(statusToolMock).toHaveBeenCalledTimes(2)
+    expect(ctx.client.session.promptAsync).toHaveBeenCalledTimes(2)
     expect(ctx.client.session.promptAsync.mock.calls[0]?.[0]).toEqual({
       path: { id: 'orchestrator-session' },
       body: {
         parts: [{
           type: 'text',
           text: expect.stringContaining('Permission request: read /outside/project'),
+        }],
+      },
+    })
+    expect(ctx.client.session.promptAsync.mock.calls[1]?.[0]).toEqual({
+      path: { id: 'orchestrator-session' },
+      body: {
+        parts: [{
+          type: 'text',
+          text: expect.stringContaining('finished with status **done**'),
         }],
       },
     })

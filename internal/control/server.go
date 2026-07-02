@@ -39,9 +39,8 @@ type ControlServer struct {
 
 	cancelFn func()
 
-	pendingMu      sync.Mutex
-	pendingRequest string
-	pendingAnswer  chan PermissionAnswer
+	pendingMu     sync.Mutex
+	pendingClaims map[permissionClaimKey]chan PermissionAnswer
 
 	promptMu        sync.Mutex
 	promptQueue     []string
@@ -83,7 +82,13 @@ type subscriber struct {
 }
 
 func NewServer(state *ControlState) *ControlServer {
-	return &ControlServer{state: state, conns: map[*connState]struct{}{}, subs: map[*subscriber]struct{}{}, watch: map[chan events.Event]struct{}{}}
+	return &ControlServer{
+		state:         state,
+		conns:         map[*connState]struct{}{},
+		subs:          map[*subscriber]struct{}{},
+		watch:         map[chan events.Event]struct{}{},
+		pendingClaims: map[permissionClaimKey]chan PermissionAnswer{},
+	}
 }
 
 func (s *ControlServer) SetStableHandler(h StableHandler) { s.stableHandler = h }
@@ -261,28 +266,30 @@ func (s *ControlServer) PublishEvent(event events.Event) {
 	}
 }
 
-// BeginPermissionClaim registers a new permission claim for requestID and
-// returns the answer channel plus true. If a claim is already in flight it
-// returns nil, false — the caller must not overwrite an active claim.
-func (s *ControlServer) BeginPermissionClaim(requestID string) (<-chan PermissionAnswer, bool) {
-	s.pendingMu.Lock()
-	defer s.pendingMu.Unlock()
-	if s.pendingRequest != "" {
-		// Another claim is still registered; refuse to clobber it.
-		return nil, false
-	}
-	s.pendingRequest = requestID
-	s.pendingAnswer = make(chan PermissionAnswer, 1)
-	return s.pendingAnswer, true
+type permissionClaimKey struct {
+	scope     string
+	requestID string
 }
 
-func (s *ControlServer) EndPermissionClaim(requestID string) {
+// BeginPermissionClaim registers a permission claim within scope and returns
+// its answer channel. Request IDs are only unique within an ACP session, so
+// stable runtimes must use distinct scopes.
+func (s *ControlServer) BeginPermissionClaim(scope, requestID string) (<-chan PermissionAnswer, bool) {
 	s.pendingMu.Lock()
 	defer s.pendingMu.Unlock()
-	if s.pendingRequest == requestID {
-		s.pendingRequest = ""
-		s.pendingAnswer = nil
+	key := permissionClaimKey{scope: scope, requestID: requestID}
+	if _, exists := s.pendingClaims[key]; exists {
+		return nil, false
 	}
+	answerCh := make(chan PermissionAnswer, 1)
+	s.pendingClaims[key] = answerCh
+	return answerCh, true
+}
+
+func (s *ControlServer) EndPermissionClaim(scope, requestID string) {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	delete(s.pendingClaims, permissionClaimKey{scope: scope, requestID: requestID})
 }
 
 // HasPendingPermission reports whether a permission claim is currently
@@ -290,22 +297,38 @@ func (s *ControlServer) EndPermissionClaim(requestID string) {
 func (s *ControlServer) HasPendingPermission() bool {
 	s.pendingMu.Lock()
 	defer s.pendingMu.Unlock()
-	return s.pendingRequest != ""
+	return len(s.pendingClaims) != 0
 }
 
 // AnswerPendingPermission delivers an answer to the active permission claim.
-// The bool reports whether requestID names the current claim.
-func (s *ControlServer) AnswerPendingPermission(requestID, optionID string) bool {
+// The bool reports whether the answer was actually delivered.
+func (s *ControlServer) AnswerPendingPermission(scope, requestID, optionID string) bool {
+	return s.DeliverPendingPermission(scope, requestID, optionID) == PermissionAnswerDelivered
+}
+
+type PermissionAnswerDelivery uint8
+
+const (
+	PermissionAnswerNotFound PermissionAnswerDelivery = iota
+	PermissionAnswerDelivered
+	PermissionAnswerChannelFull
+)
+
+// DeliverPendingPermission distinguishes a missing claim from a claim whose
+// answer channel already contains an answer.
+func (s *ControlServer) DeliverPendingPermission(scope, requestID, optionID string) PermissionAnswerDelivery {
 	s.pendingMu.Lock()
 	defer s.pendingMu.Unlock()
-	if s.pendingAnswer == nil || s.pendingRequest != requestID {
-		return false
+	answerCh := s.pendingClaims[permissionClaimKey{scope: scope, requestID: requestID}]
+	if answerCh == nil {
+		return PermissionAnswerNotFound
 	}
 	select {
-	case s.pendingAnswer <- PermissionAnswer{RequestID: requestID, OptionID: optionID}:
+	case answerCh <- PermissionAnswer{RequestID: requestID, OptionID: optionID}:
+		return PermissionAnswerDelivered
 	default:
+		return PermissionAnswerChannelFull
 	}
-	return true
 }
 
 func (s *ControlServer) QueuePrompt(text string) {
@@ -508,7 +531,7 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		if p.RequestID == "" || p.OptionID == "" {
 			return failure(req.ID, -32602, "invalid params", map[string]any{"required": []string{"request_id", "option_id"}})
 		}
-		if !s.AnswerPendingPermission(p.RequestID, p.OptionID) {
+		if !s.AnswerPendingPermission("", p.RequestID, p.OptionID) {
 			return failure(req.ID, -32001, "no_pending_permission", nil)
 		}
 		return success(req.ID, map[string]any{"accepted": true})

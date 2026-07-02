@@ -65,13 +65,13 @@ func TestOwnerRejectionForMutatingMethods(t *testing.T) {
 
 func TestAnswerPendingPermissionDeliversMatchingAnswer(t *testing.T) {
 	s := NewServer(NewState("run_1", "", 0))
-	answerCh, ok := s.BeginPermissionClaim("req_1")
+	answerCh, ok := s.BeginPermissionClaim("", "req_1")
 	if !ok {
 		t.Fatal("BeginPermissionClaim returned false")
 	}
-	defer s.EndPermissionClaim("req_1")
+	defer s.EndPermissionClaim("", "req_1")
 
-	if !s.AnswerPendingPermission("req_1", "allow") {
+	if !s.AnswerPendingPermission("", "req_1", "allow") {
 		t.Fatal("AnswerPendingPermission returned false for matching request")
 	}
 	select {
@@ -86,19 +86,50 @@ func TestAnswerPendingPermissionDeliversMatchingAnswer(t *testing.T) {
 
 func TestAnswerPendingPermissionRejectsMismatchedRequest(t *testing.T) {
 	s := NewServer(NewState("run_1", "", 0))
-	answerCh, ok := s.BeginPermissionClaim("req_1")
+	answerCh, ok := s.BeginPermissionClaim("", "req_1")
 	if !ok {
 		t.Fatal("BeginPermissionClaim returned false")
 	}
-	defer s.EndPermissionClaim("req_1")
+	defer s.EndPermissionClaim("", "req_1")
 
-	if s.AnswerPendingPermission("req_other", "allow") {
+	if s.AnswerPendingPermission("", "req_other", "allow") {
 		t.Fatal("AnswerPendingPermission returned true for mismatched request")
 	}
 	select {
 	case answer := <-answerCh:
 		t.Fatalf("mismatched answer was delivered: %+v", answer)
 	default:
+	}
+}
+
+func TestPermissionClaimsAreScopedAndReportFullChannel(t *testing.T) {
+	s := NewServer(NewState("run_1", "", 0))
+	first, ok := s.BeginPermissionClaim("rt_1", "0")
+	if !ok {
+		t.Fatal("first BeginPermissionClaim returned false")
+	}
+	second, ok := s.BeginPermissionClaim("rt_2", "0")
+	if !ok {
+		t.Fatal("second BeginPermissionClaim returned false for a distinct scope")
+	}
+	defer s.EndPermissionClaim("rt_1", "0")
+	defer s.EndPermissionClaim("rt_2", "0")
+
+	if !s.AnswerPendingPermission("rt_1", "0", "allow_1") {
+		t.Fatal("answer for rt_1 was not delivered")
+	}
+	if s.AnswerPendingPermission("rt_1", "0", "duplicate") {
+		t.Fatal("answer reported delivery to a full channel")
+	}
+	if !s.AnswerPendingPermission("rt_2", "0", "allow_2") {
+		t.Fatal("answer for rt_2 was not delivered")
+	}
+
+	if got := <-first; got.OptionID != "allow_1" {
+		t.Fatalf("rt_1 answer = %+v", got)
+	}
+	if got := <-second; got.OptionID != "allow_2" {
+		t.Fatalf("rt_2 answer = %+v", got)
 	}
 }
 

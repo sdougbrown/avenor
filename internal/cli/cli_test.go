@@ -42,6 +42,43 @@ type cliFakeProvider struct {
 	cancelSessionID string
 }
 
+type permissionLifecycleProvider struct {
+	answers chan string
+}
+
+func (p *permissionLifecycleProvider) Start(context.Context, runtime.StartOptions) (runtime.Session, error) {
+	return runtime.Session{}, nil
+}
+func (p *permissionLifecycleProvider) Resume(context.Context, string) (runtime.Session, error) {
+	return runtime.Session{}, nil
+}
+func (p *permissionLifecycleProvider) Prompt(context.Context, string, string) error { return nil }
+func (p *permissionLifecycleProvider) Cancel(context.Context, string) error         { return nil }
+func (p *permissionLifecycleProvider) Events(context.Context, string) (<-chan events.Event, error) {
+	return nil, nil
+}
+func (p *permissionLifecycleProvider) AnswerPermission(_ context.Context, _ string, requestID string, _ runtime.PermissionResponse) error {
+	p.answers <- requestID
+	return nil
+}
+func (p *permissionLifecycleProvider) Capabilities(context.Context) (runtime.Capabilities, error) {
+	return runtime.Capabilities{}, nil
+}
+
+type permissionLifecycleSink struct {
+	responses chan string
+}
+
+func (s *permissionLifecycleSink) Write(event events.Event) error {
+	if event.Event == "permission.response" {
+		requestID, _ := event.Fields["request_id"].(string)
+		s.responses <- requestID
+	}
+	return nil
+}
+
+func (s *permissionLifecycleSink) Close() error { return nil }
+
 func (f *cliFakeProvider) Start(ctx context.Context, opts runtime.StartOptions) (runtime.Session, error) {
 	return runtime.Session{}, nil
 }
@@ -1824,7 +1861,7 @@ func TestControlPermissionClaimTimeoutFallsThrough(t *testing.T) {
 	// resolvePermission should time out waiting for the silent client,
 	// then fall through to the no-resolver path (fileHandler == nil).
 	start := time.Now()
-	res := resolvePermission(context.Background(), provider, nil, cs, event, "ses_timeout", "req_timeout", false, claimTimeout, emit)
+	res := resolvePermission(context.Background(), provider, nil, cs, event, "ses_timeout", "", "req_timeout", false, claimTimeout, emit)
 	elapsed := time.Since(start)
 
 	// Lower bound: must have waited at least the claim timeout (80ms gives 20ms slack).
@@ -1849,6 +1886,97 @@ func TestControlPermissionClaimTimeoutFallsThrough(t *testing.T) {
 	// Control path timed out without answering — AnswerPermission must NOT have been called.
 	if provider.answerRequestID != "" {
 		t.Fatalf("provider.AnswerPermission was called with requestID=%q, want no call (control path should not answer on timeout)", provider.answerRequestID)
+	}
+}
+
+func TestScopedControlPermissionClaimCompletesAndReleasesForNextRequest(t *testing.T) {
+	cs := control.NewServer(control.NewState("run_1", "", 0))
+	socketPath := filepath.Join(t.TempDir(), "control.sock")
+	if err := cs.Start(socketPath); err != nil {
+		t.Fatalf("start control server: %v", err)
+	}
+	defer cs.Stop()
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("dial control server: %v", err)
+	}
+	defer conn.Close()
+	deadline := time.Now().Add(time.Second)
+	for !cs.HasClients() {
+		if time.Now().After(deadline) {
+			t.Fatal("control client was not registered")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	provider := &permissionLifecycleProvider{answers: make(chan string, 2)}
+	sink := &permissionLifecycleSink{responses: make(chan string, 2)}
+	eventCh := make(chan events.Event)
+	promptDone := make(chan error, 1)
+	promptDone <- nil
+	resultCh := make(chan sessionResult, 1)
+
+	go func() {
+		resultCh <- WaitForSession(context.Background(), provider, SessionWaitConfig{
+			EventCh:                eventCh,
+			PromptDone:             promptDone,
+			SessionID:              "ses_1",
+			RunID:                  "run_1",
+			PermissionClaimScope:   "rt_1",
+			PermissionClaimTimeout: time.Second,
+		}, SessionWaitDeps{
+			Writer:        sink,
+			ControlServer: cs,
+			Stderr:        io.Discard,
+		})
+	}()
+
+	request := events.Event{
+		Event:     "permission.request",
+		SessionID: "ses_1",
+		Fields: map[string]any{
+			"request_id": "0",
+			"options": []any{
+				map[string]any{"optionId": "always", "kind": "allow_always"},
+			},
+		},
+	}
+	for i := 0; i < 2; i++ {
+		eventCh <- request
+		waitForPendingPermissionForTest(t, cs)
+		if !cs.AnswerPendingPermission("rt_1", "0", "always") {
+			t.Fatalf("answer %d was not delivered", i+1)
+		}
+		select {
+		case got := <-provider.answers:
+			if got != "0" {
+				t.Fatalf("provider request %d = %q", i+1, got)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("provider was not called for request %d", i+1)
+		}
+		select {
+		case got := <-sink.responses:
+			if got != "0" {
+				t.Fatalf("permission.response %d request = %q", i+1, got)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("permission.response was not emitted for request %d", i+1)
+		}
+	}
+
+	eventCh <- events.Event{
+		Event:     "session.end",
+		SessionID: "ses_1",
+		Fields:    map[string]any{"stop_reason": "end_turn"},
+	}
+	close(eventCh)
+	select {
+	case result := <-resultCh:
+		if result.ExitCode != 0 {
+			t.Fatalf("WaitForSession exit code = %d", result.ExitCode)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("WaitForSession did not complete")
 	}
 }
 
@@ -1931,7 +2059,7 @@ func TestControlPermissionClaimTimeoutFallsToFileHandler(t *testing.T) {
 	provider := &cliFakeProvider{}
 	emit := func(events.Event) error { return nil }
 
-	res := resolvePermission(context.Background(), provider, fh, cs, event, "ses_fh", "req_fh", false, claimTimeout, emit)
+	res := resolvePermission(context.Background(), provider, fh, cs, event, "ses_fh", "", "req_fh", false, claimTimeout, emit)
 
 	if res.err != nil {
 		t.Fatalf("unexpected error: %v", res.err)
@@ -1989,7 +2117,7 @@ func TestFilePermissionCancelledOutcomeDoesNotError(t *testing.T) {
 	}
 
 	provider := &cliFakeProvider{}
-	res := resolvePermission(context.Background(), provider, fh, nil, event, "ses_fh", "req_fh", false, DefaultPermissionClaimTimeout, nil)
+	res := resolvePermission(context.Background(), provider, fh, nil, event, "ses_fh", "", "req_fh", false, DefaultPermissionClaimTimeout, nil)
 
 	if res.err != nil {
 		t.Fatalf("unexpected error: %v", res.err)
@@ -2189,7 +2317,7 @@ func TestControlPermissionClaimContextCancelReleasesClaim(t *testing.T) {
 
 	resultCh := make(chan permissionResult, 1)
 	go func() {
-		resultCh <- resolvePermission(ctx, provider, nil, cs, event, "ses_cancel", "req_cancel", false, claimTimeout, emit)
+		resultCh <- resolvePermission(ctx, provider, nil, cs, event, "ses_cancel", "", "req_cancel", false, claimTimeout, emit)
 	}()
 
 	// Wait for the claim to be registered before cancelling.

@@ -377,17 +377,9 @@ func (h *HTTPDebugServer) handleAnswerPermission(w http.ResponseWriter, r *http.
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
-	h.control.pendingMu.Lock()
-	pendingReq := h.control.pendingRequest
-	pending := h.control.pendingAnswer
-	h.control.pendingMu.Unlock()
-	if pending == nil || pendingReq != p.RequestID {
+	if !h.control.AnswerPendingPermission("", p.RequestID, p.OptionID) {
 		http.Error(w, "no pending permission", http.StatusConflict)
 		return
-	}
-	select {
-	case pending <- p:
-	default:
 	}
 	writeJSON(w, map[string]any{"accepted": true})
 }

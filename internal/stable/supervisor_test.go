@@ -940,11 +940,11 @@ func TestAnswerPermissionUsesActiveControlClaim(t *testing.T) {
 			},
 		},
 	})
-	answerCh, ok := sup.control.BeginPermissionClaim("req_claim")
+	answerCh, ok := sup.control.BeginPermissionClaim("rt_claim", "req_claim")
 	if !ok {
 		t.Fatal("BeginPermissionClaim returned false")
 	}
-	defer sup.control.EndPermissionClaim("req_claim")
+	defer sup.control.EndPermissionClaim("rt_claim", "req_claim")
 
 	if err := sup.answerPermission("rt_claim", "req_claim", "allow_it"); err != nil {
 		t.Fatalf("answerPermission: %v", err)
@@ -962,6 +962,63 @@ func TestAnswerPermissionUsesActiveControlClaim(t *testing.T) {
 		}
 	default:
 		t.Fatal("active resolver claim did not receive the answer")
+	}
+}
+
+func TestAnswerPermissionScopesSameRequestIDByRuntime(t *testing.T) {
+	sup := NewSupervisor(Config{
+		ControlSocket:          "/tmp/test-answer-scoped-claims.sock",
+		MaxRuntimes:            2,
+		PermissionClaimTimeout: 5 * time.Second,
+	})
+	for _, runtimeID := range []string{"rt_1", "rt_2"} {
+		sup.runtimes[runtimeID] = &childRuntime{
+			id:       runtimeID,
+			provider: &permRecordingProvider{},
+			session:  runtime.Session{SessionID: "ses_" + runtimeID},
+			done:     make(chan struct{}),
+			promptCh: make(chan struct{}, 1),
+		}
+		cachePermissionOptionsThroughFanout(t, sup, runtimeID, events.Event{
+			Event: "permission.request",
+			Fields: map[string]any{
+				"request_id": "0",
+				"options": []any{
+					map[string]any{"optionId": "always_" + runtimeID, "kind": "allow_always"},
+				},
+			},
+		})
+	}
+
+	first, ok := sup.control.BeginPermissionClaim("rt_1", "0")
+	if !ok {
+		t.Fatal("claim for rt_1 was rejected")
+	}
+	second, ok := sup.control.BeginPermissionClaim("rt_2", "0")
+	if !ok {
+		t.Fatal("claim for rt_2 was rejected")
+	}
+	defer sup.control.EndPermissionClaim("rt_1", "0")
+	defer sup.control.EndPermissionClaim("rt_2", "0")
+
+	if err := sup.answerPermission("rt_2", "0", "always_rt_2"); err != nil {
+		t.Fatalf("answer rt_2: %v", err)
+	}
+	select {
+	case answer := <-first:
+		t.Fatalf("rt_2 answer was delivered to rt_1: %+v", answer)
+	default:
+	}
+	select {
+	case answer := <-second:
+		if answer.OptionID != "always_rt_2" {
+			t.Fatalf("rt_2 answer = %+v", answer)
+		}
+	default:
+		t.Fatal("rt_2 claim did not receive its answer")
+	}
+	if _, ok := sup.permOptions["rt_1:0"]; !ok {
+		t.Fatal("answering rt_2 consumed rt_1 options")
 	}
 }
 

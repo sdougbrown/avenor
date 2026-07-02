@@ -1110,6 +1110,7 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 		SessionID:              session.SessionID,
 		RunID:                  s.runID,
 		RunLabel:               child.label,
+		PermissionClaimScope:   child.id,
 		AutoApprove:            child.autoApprove,
 		PermissionClaimTimeout: child.permClaimTimeout,
 		Timeout:                timer,
@@ -1412,11 +1413,14 @@ func (s *Supervisor) answerPermission(rtID, requestID, optionID string) error {
 	// waiting status, and release its in-flight guard. Calling the provider
 	// directly here leaves the resolver stuck until its timeout and causes the
 	// next backend permission to fail as an overlapping request.
-	if s.control.AnswerPendingPermission(requestID, optionID) {
+	switch s.control.DeliverPendingPermission(rtID, requestID, optionID) {
+	case control.PermissionAnswerDelivered:
 		s.controlMu.Lock()
 		delete(s.permOptions, key)
 		s.controlMu.Unlock()
 		return nil
+	case control.PermissionAnswerChannelFull:
+		return fmt.Errorf("permission request %q for runtime %q already has an answer pending delivery", requestID, rtID)
 	}
 
 	// A request may have been emitted while no control client was connected,

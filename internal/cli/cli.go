@@ -789,6 +789,7 @@ type SessionWaitConfig struct {
 	SessionID              string
 	RunID                  string
 	RunLabel               string
+	PermissionClaimScope   string
 	AutoApprove            bool
 	PermissionClaimTimeout time.Duration
 	ProgressTimeout        time.Duration
@@ -945,7 +946,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				done := make(chan permissionResult, 1)
 				permissionDone = done
 				go func() {
-					res := resolvePermission(ctx, provider, deps.FileHandler, deps.ControlServer, event, cfg.SessionID, requestID, cfg.AutoApprove, cfg.PermissionClaimTimeout, deps.Writer.Write)
+					res := resolvePermission(ctx, provider, deps.FileHandler, deps.ControlServer, event, cfg.SessionID, cfg.PermissionClaimScope, requestID, cfg.AutoApprove, cfg.PermissionClaimTimeout, deps.Writer.Write)
 					done <- res
 				}()
 				continue
@@ -1107,6 +1108,7 @@ func resolvePermission(
 	controlServer *control.ControlServer,
 	event events.Event,
 	sessionID string,
+	claimScope string,
 	requestID string,
 	autoApprove bool,
 	claimTimeout time.Duration,
@@ -1133,15 +1135,15 @@ func resolvePermission(
 	// so that on disconnect or a silent client we fall through to the
 	// file-handler rather than blocking until SIGINT.
 	if controlServer != nil && controlServer.HasClients() {
-		answerCh, ok := controlServer.BeginPermissionClaim(requestID)
-		// If !ok, another claim is already in flight; fall through to the
-		// file-handler block below.
+		answerCh, ok := controlServer.BeginPermissionClaim(claimScope, requestID)
+		// If !ok, this scope already has a claim for the same request; fall
+		// through to the file-handler block below.
 		if ok {
 			claimTimer := time.NewTimer(claimTimeout)
 			select {
 			case ans := <-answerCh:
 				claimTimer.Stop()
-				controlServer.EndPermissionClaim(requestID)
+				controlServer.EndPermissionClaim(claimScope, requestID)
 				kind := permissionKindFromOptionID(ans.OptionID, options)
 				switch kind {
 				case "allow", "reject":
@@ -1155,7 +1157,7 @@ func resolvePermission(
 				return permissionResult{requestID: requestID, optionID: ans.OptionID, kind: kind, source: "control"}
 			case <-ctx.Done():
 				claimTimer.Stop()
-				controlServer.EndPermissionClaim(requestID)
+				controlServer.EndPermissionClaim(claimScope, requestID)
 				select {
 				case ans := <-answerCh:
 					kind := permissionKindFromOptionID(ans.OptionID, options)
@@ -1173,7 +1175,7 @@ func resolvePermission(
 				}
 				return permissionResult{err: ctx.Err()}
 			case <-claimTimer.C:
-				controlServer.EndPermissionClaim(requestID)
+				controlServer.EndPermissionClaim(claimScope, requestID)
 				select {
 				case ans := <-answerCh:
 					kind := permissionKindFromOptionID(ans.OptionID, options)
