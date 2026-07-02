@@ -226,6 +226,19 @@ func TestHandoffPermissionClaimAtomicallyClosesCancelledClaim(t *testing.T) {
 	}
 }
 
+func TestPreparePermissionClaimRejectsExistingNoResolver(t *testing.T) {
+	s := NewServer(NewState("run_1", "", 0))
+	if !s.PreparePermissionClaim("rt_1", "0", PermissionResolverNoResolver) {
+		t.Fatal("initial PreparePermissionClaim returned false")
+	}
+	if s.PreparePermissionClaim("rt_1", "0", PermissionResolverAutomatic) {
+		t.Fatal("second PreparePermissionClaim replaced live no-resolver claim")
+	}
+	if state := s.PermissionResolverState("rt_1", "0"); state != PermissionResolverNoResolver {
+		t.Fatalf("resolver state = %v, want no-resolver", state)
+	}
+}
+
 func TestClearPermissionClaimsRemovesOnlyRequestedScope(t *testing.T) {
 	s := NewServer(NewState("run_1", "", 0))
 	s.PreparePermissionClaim("rt_1", "0", PermissionResolverFile)

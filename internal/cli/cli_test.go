@@ -1776,9 +1776,9 @@ func TestAutoAnswerSecondRequestWhilePendingEmitsErrorAndExits(t *testing.T) {
 		Event:     "permission.request",
 		SessionID: "ses_1",
 		Fields: map[string]any{
-			"request_id": "req_second",
+			"request_id": "req_first",
 			"options": []any{
-				map[string]any{"optionId": "allow", "kind": "allow"},
+				map[string]any{"optionId": "allow", "kind": "reject"},
 			},
 		},
 	}
@@ -1795,7 +1795,18 @@ func TestAutoAnswerSecondRequestWhilePendingEmitsErrorAndExits(t *testing.T) {
 
 	got := readEventLogForTest(t, eventsPath)
 	var hasError bool
+	requestCount := 0
 	for _, ev := range got {
+		if ev.Event == "permission.request" {
+			requestCount++
+			options, _ := ev.Fields["options"].([]any)
+			if len(options) > 0 {
+				option, _ := options[0].(map[string]any)
+				if kind, _ := option["kind"].(string); kind != "allow" {
+					t.Fatalf("published overlapping request semantics: %+v", ev)
+				}
+			}
+		}
 		if ev.Event == "avenor.error" {
 			msg, _ := ev.Fields["message"].(string)
 			if strings.Contains(msg, "already pending") {
@@ -1805,6 +1816,9 @@ func TestAutoAnswerSecondRequestWhilePendingEmitsErrorAndExits(t *testing.T) {
 	}
 	if !hasError {
 		t.Fatalf("expected avenor.error about 'already pending'; events: %+v", got)
+	}
+	if requestCount != 1 {
+		t.Fatalf("permission.request count = %d, want only the first; events: %+v", requestCount, got)
 	}
 }
 
@@ -1849,14 +1863,23 @@ func TestPermissionRequestRejectsExistingDirectDeliveryBeforePublishing(t *testi
 	}
 	close(eventCh)
 
-	result := WaitForSession(context.Background(), provider, SessionWaitConfig{
-		EventCh:              eventCh,
-		PromptDone:           make(chan error),
-		SessionID:            "ses_1",
-		RunID:                "run_1",
-		PermissionClaimScope: "rt_1",
-		AutoApprove:          true,
-	}, SessionWaitDeps{Writer: writer, ControlServer: cs, Stderr: io.Discard})
+	resultCh := make(chan sessionResult, 1)
+	go func() {
+		resultCh <- WaitForSession(context.Background(), provider, SessionWaitConfig{
+			EventCh:              eventCh,
+			PromptDone:           make(chan error),
+			SessionID:            "ses_1",
+			RunID:                "run_1",
+			PermissionClaimScope: "rt_1",
+			AutoApprove:          true,
+		}, SessionWaitDeps{Writer: writer, ControlServer: cs, Stderr: io.Discard})
+	}()
+	var result sessionResult
+	select {
+	case result = <-resultCh:
+	case <-time.After(time.Second):
+		t.Fatal("WaitForSession did not reject reused request")
+	}
 	if err := writer.Close(); err != nil {
 		t.Fatalf("close writer: %v", err)
 	}
@@ -1886,6 +1909,57 @@ func TestPermissionRequestRejectsExistingDirectDeliveryBeforePublishing(t *testi
 	}
 	if overlapErrors != 1 {
 		t.Fatalf("overlap errors = %d, want 1; events: %+v", overlapErrors, logged)
+	}
+}
+
+func TestPermissionRequestRejectsExistingNoResolverBeforePublishing(t *testing.T) {
+	eventsPath := filepath.Join(t.TempDir(), "events.ndjson")
+	writer, err := NewEventWriter(eventsPath)
+	if err != nil {
+		t.Fatalf("newEventWriter: %v", err)
+	}
+	cs := control.NewServer(control.NewState("run_1", "", 0))
+	if !cs.PreparePermissionClaim("rt_1", "req_reused", control.PermissionResolverNoResolver) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+
+	eventCh := make(chan events.Event, 1)
+	eventCh <- events.Event{
+		Event:     "permission.request",
+		SessionID: "ses_1",
+		Fields: map[string]any{
+			"request_id": "req_reused",
+			"options": []any{
+				map[string]any{"optionId": "replacement", "kind": "allow"},
+			},
+		},
+	}
+	close(eventCh)
+	result := WaitForSession(context.Background(), &cliFakeProvider{}, SessionWaitConfig{
+		EventCh:              eventCh,
+		PromptDone:           make(chan error),
+		SessionID:            "ses_1",
+		RunID:                "run_1",
+		PermissionClaimScope: "rt_1",
+		AutoApprove:          true,
+	}, SessionWaitDeps{Writer: writer, ControlServer: cs, Stderr: io.Discard})
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+
+	if result.ExitCode != 1 {
+		t.Fatalf("WaitForSession() = %d, want 1", result.ExitCode)
+	}
+	if state := cs.PermissionResolverState("rt_1", "req_reused"); state != control.PermissionResolverNoResolver {
+		t.Fatalf("resolver state = %v, want no-resolver", state)
+	}
+	for _, event := range readEventLogForTest(t, eventsPath) {
+		if event.Event == "permission.request" {
+			t.Fatalf("rejected request was published: %+v", event)
+		}
+	}
+	if got := cs.DeliverPendingPermission("rt_1", "req_reused", "original"); got != control.PermissionAnswerNoResolver {
+		t.Fatalf("original claim delivery = %v, want no-resolver", got)
 	}
 }
 

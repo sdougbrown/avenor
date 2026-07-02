@@ -298,8 +298,7 @@ func (s *ControlServer) PreparePermissionClaim(scope, requestID string, state Pe
 	defer s.pendingMu.Unlock()
 	key := permissionClaimKey{scope: scope, requestID: requestID}
 	if existing := s.pendingClaims[key]; existing != nil &&
-		existing.state != PermissionResolverResolved &&
-		existing.state != PermissionResolverNoResolver {
+		existing.state != PermissionResolverResolved {
 		return false
 	}
 	s.pendingClaims[key] = &permissionClaim{state: state, answerCh: make(chan PermissionAnswer, 1)}

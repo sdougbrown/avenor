@@ -929,8 +929,12 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 			if event.Event == "permission.request" {
 				// Auto-answer / control-owner / file fallback resolver.
 				requestID, _ := event.Fields["request_id"].(string)
+				if permissionDone != nil {
+					emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "permission", "another permission request is already pending", deps.Stderr, cfg.RunLabel)
+					return sessionResult{ExitCode: 1}
+				}
 				claimConflict := false
-				if requestID != "" && permissionDone == nil && deps.ControlServer != nil {
+				if requestID != "" && deps.ControlServer != nil {
 					state := control.PermissionResolverNoResolver
 					switch {
 					case cfg.AutoApprove:
@@ -958,10 +962,6 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 					// call AnswerPermission. Emit an error and stay in waiting state.
 					emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "permission", "permission.request missing request_id", deps.Stderr, cfg.RunLabel)
 					continue
-				}
-				if permissionDone != nil {
-					emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "permission", "another permission request is already pending", deps.Stderr, cfg.RunLabel)
-					return sessionResult{ExitCode: 1}
 				}
 				done := make(chan permissionResult, 1)
 				permissionDone = done
