@@ -7,6 +7,10 @@ export interface TrackedRun {
   supervisorId?: string
   startTime: number
   lastStatus?: StatusResult
+  /** true if spawned with wait=true (blocking mode handles permissions via onUpdate) */
+  blocking?: boolean
+  /** true if we've injected a permission notification via sendUserMessage */
+  permissionNotified?: boolean
 }
 
 export interface RunStatusEntry {

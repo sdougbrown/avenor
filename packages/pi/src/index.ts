@@ -37,6 +37,27 @@ function buildCompletionText(run: { runId: string; label: string }, result: Stat
   return lines.join('\n')
 }
 
+function buildWaitingText(run: { runId: string; label: string; agent: string }, status: StatusResult): string {
+  const perm = status.pending_permission
+  const lines = [
+    `Sub-agent "${run.label}" (${run.agent}) is waiting for input.`,
+  ]
+  if (perm) {
+    lines.push(
+      `Permission request: ${perm.description}`,
+      `To answer: call \`avenor_answer_permission\` with run_id "${run.runId}", option_id "allow_once" | "allow_always" | "deny"`,
+    )
+  } else if (status.phase_label) {
+    lines.push(`Question: ${status.phase_label}`)
+  }
+  if (!perm) {
+    lines.push(
+      `Use \`avenor_follow_up\` with run_id "${run.runId}" to respond, or \`avenor_status\` to re-check.`,
+    )
+  }
+  return lines.join('\n')
+}
+
 function summarizeEvent(evt: { type?: string; event?: string; tool?: string; name?: string; [key: string]: unknown }): string {
   const type = String(evt.type ?? evt.event ?? '')
   if (type === 'tool.call' || type === 'tool.use') {
@@ -132,19 +153,51 @@ export default async function (pi: ExtensionAPI) {
 
       // Check for completed runs and notify
       for (const entry of entries) {
+        const run = trackedRuns.get(entry.runId)
+        if (!run) continue
+
         if (TERMINAL_STATUSES.has(entry.status)) {
-          const run = trackedRuns.get(entry.runId)
-          if (run) {
-            // Status just transitioned to terminal
-            const prevStatus = prevStatuses.get(entry.runId)
-            if (prevStatus && !TERMINAL_STATUSES.has(prevStatus)) {
-              sessionCtx?.ui.notify(
-                `Sub-agent "${entry.label}" finished: ${entry.status}`,
-                entry.status === 'done' ? 'info' : 'warning',
-              )
+          // Status just transitioned to terminal
+          const prevStatus = prevStatuses.get(entry.runId)
+          if (prevStatus && !TERMINAL_STATUSES.has(prevStatus)) {
+            sessionCtx?.ui.notify(
+              `Sub-agent "${entry.label}" finished: ${entry.status}`,
+              entry.status === 'done' ? 'info' : 'warning',
+            )
+            // Inject completion notification for fire-and-forget runs so the
+            // model can decide to follow up.
+            if (!run.blocking) {
+              try {
+                pi.sendUserMessage(
+                  buildCompletionText({ runId: run.runId, label: run.label }, run.lastStatus!),
+                  { deliverAs: 'followUp' },
+                )
+              } catch (err) {
+                console.error('avenor tick: sendUserMessage failed', err)
+              }
             }
-            trackedRuns.delete(entry.runId)
           }
+          trackedRuns.delete(entry.runId)
+        } else if (
+          entry.pendingPermission &&
+          !run.blocking &&
+          !run.permissionNotified
+        ) {
+          // Inject permission notification for fire-and-forget runs. The
+          // control-plane claim may time out before the user notices the 🔒.
+          run.permissionNotified = true
+          try {
+            pi.sendUserMessage(
+              buildWaitingText({ runId: run.runId, label: run.label, agent: run.agent }, run.lastStatus!),
+              { deliverAs: 'followUp' },
+            )
+          } catch (err) {
+            console.error('avenor tick: sendUserMessage for permission failed', err)
+          }
+        } else if (!entry.pendingPermission && run.permissionNotified) {
+          // Permission was resolved — allow a new notification if another
+          // permission request arrives.
+          run.permissionNotified = false
         }
       }
 
@@ -269,6 +322,7 @@ export default async function (pi: ExtensionAPI) {
         label,
         supervisorId: result.supervisor_id,
         startTime: Date.now(),
+        blocking: wait,
       })
 
       // Start polling for widget updates
@@ -330,6 +384,24 @@ export default async function (pi: ExtensionAPI) {
             content: [{ type: 'text', text: `${label}${status.phase_label ? ` (${status.phase_label})` : ''}${lastAction ? ` — ${lastAction}` : ''}` }],
             details: { status: status.status, run_id: result.run_id, lastAction },
           })
+        }
+
+        // If the sub-agent is waiting on a question or permission, break out
+        // of the blocking loop so the orchestrator gets its turn back.
+        if (status.status === 'waiting') {
+          const tracked = trackedRuns.get(result.run_id)
+          if (tracked) {
+            tracked.permissionNotified = true
+          }
+          return {
+            content: [{ type: 'text', text: buildWaitingText({ runId: result.run_id, label, agent: params.agent }, status) }],
+            details: {
+              status: 'waiting',
+              run_id: result.run_id,
+              session_id: status.session_id,
+              ...(status.pending_permission && { pending_permission: status.pending_permission }),
+            },
+          }
         }
 
         if (TERMINAL_STATUSES.has(status.status)) {
