@@ -71,11 +71,11 @@ export async function spawnTool(args: {
     server_url: args.serverUrl,
     session_id: args.sessionId,
     parent_run_id: args.parent_run_id,
-  })
+  }, runId)
 
   return {
-    run_id: runId,
-    label,
+    run_id: runInfo.runId,
+    label: runInfo.label,
     supervisor_id: sup.supervisorId,
     runtime_id: runInfo.runtimeId,
     broker_url: runInfo.brokerUrl,

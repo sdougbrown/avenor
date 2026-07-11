@@ -79,7 +79,7 @@ export function translateStatus(
     return sentinelStatusToResult(sentinelStatus)
   }
 
-  switch (rawPhase) {
+  switch (rawPhase.toLowerCase()) {
     case 'idle':
       return sentinelStatus ? sentinelStatusToResult(sentinelStatus) : 'running'
     case 'running':
@@ -88,15 +88,15 @@ export function translateStatus(
       return 'waiting'
     case 'ended':
       return sentinelStatus ? sentinelStatusToResult(sentinelStatus) : 'running'
-    case 'DONE':
+    case 'done':
       return 'done'
-    case 'FAILED':
+    case 'failed':
       return 'failed'
-    case 'TIMEOUT':
+    case 'timeout':
       return 'timeout'
-    case 'KILLED':
+    case 'killed':
       return 'killed'
-    case 'BLOCKED':
+    case 'blocked':
       return 'failed'
     default:
       return 'running'
@@ -133,7 +133,7 @@ async function buildRunStatus(
   const translated = translateStatus(rawPhase, sentinel)
 
   const result: StatusResult = {
-    run_id: runInfo.label,
+    run_id: runInfo.runId,
     label: runInfo.label,
     status: translated,
     runtime_id: (liveStatus?.runtime_id as string) ?? runInfo.runtimeId,

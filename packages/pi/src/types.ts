@@ -5,6 +5,7 @@ export interface TrackedRun {
   agent: string
   label: string
   supervisorId?: string
+  runtimeId?: string
   startTime: number
   lastStatus?: StatusResult
   /** true if spawned with wait=true (blocking mode handles permissions via onUpdate) */

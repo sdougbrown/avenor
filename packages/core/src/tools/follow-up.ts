@@ -125,5 +125,5 @@ export async function followUpTool(args: {
     label: followUpLabel,
   })
 
-  return { run_id: followUpRun.label, label: followUpRun.label }
+  return { run_id: followUpRun.runId, label: followUpRun.label }
 }

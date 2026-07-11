@@ -33,7 +33,7 @@ export async function shutdownTool(args: {
         } catch {}
       }
 
-      await sup.close()
+      await sup.close({ skipShutdown: true })
     } else {
       const client = await dial(supervisorId)
       try {
@@ -69,7 +69,7 @@ export async function shutdownTool(args: {
     } catch {}
   }
 
-  await sup.close()
+  await sup.close({ skipShutdown: true })
 
   return { ok: true, cleaned_up: cleanedUp }
 }

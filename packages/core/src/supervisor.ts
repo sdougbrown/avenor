@@ -10,6 +10,7 @@ import { installerBinaryPath } from './install-path.js'
 export { installerBinaryPath } from './install-path.js'
 
 export interface RunInfo {
+  runId: string
   label: string
   sentinelPath: string
   eventLogPath: string
@@ -254,9 +255,8 @@ export class Supervisor {
     return this.client
   }
 
-  async spawn(params: SpawnParams): Promise<RunInfo> {
+  async spawn(params: SpawnParams, runId = crypto.randomUUID()): Promise<RunInfo> {
     const client = this.getClient()
-    const runId = crypto.randomUUID()
     const { sentinelPath, eventLogPath } = ensureRunPaths(runId)
 
     const spawnParams: SpawnParams = {
@@ -269,6 +269,7 @@ export class Supervisor {
     const result = await client.spawn(spawnParams)
 
     const runInfo: RunInfo = {
+      runId,
       label: (spawnParams.label as string) ?? runId,
       sentinelPath: (result.sentinel_file as string) ?? sentinelPath,
       eventLogPath: (result.on_event as string) ?? eventLogPath,
@@ -283,8 +284,8 @@ export class Supervisor {
     return runInfo
   }
 
-  async close(): Promise<void> {
-    if (this.client) {
+  async close(options: { skipShutdown?: boolean } = {}): Promise<void> {
+    if (this.client && !options.skipShutdown) {
       try {
         await this.client.shutdown('graceful')
       } catch {

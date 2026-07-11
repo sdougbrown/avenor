@@ -43,10 +43,11 @@ describe.skipIf(skipIfNoBinary)('spawnTool + statusTool + shutdownTool integrati
       agent: '',
       prompt: 'exit 0',
       dir: process.cwd(),
+      label: 'custom-label',
     })
     runId = result.run_id
     expect(result.run_id).toBeString()
-    expect(result.label).toBeString()
+    expect(result.label).toBe('custom-label')
     expect(result.supervisor_id).toBeString()
     expect(result.supervisor_id).toBe(sup.supervisorId)
   }, 15_000)
@@ -58,9 +59,12 @@ describe.skipIf(skipIfNoBinary)('spawnTool + statusTool + shutdownTool integrati
     expect(typeof result.status).toBe('string')
   }, 10_000)
 
-  it('statusTool list returns array', async () => {
+  it('statusTool list preserves the stable run ID separately from its label', async () => {
     const list = await statusTool({})
     expect(Array.isArray(list)).toBe(true)
+    const results = Array.isArray(list) ? list : [list]
+    const result = results.find(entry => entry.run_id === runId)
+    expect(result?.label).toBe('custom-label')
   }, 10_000)
 
   it('eventsTool returns events array', async () => {
@@ -274,6 +278,13 @@ describe('translateStatus', () => {
 
   it('lets a FAILED sentinel override a live "running" phase', () => {
     expect(translateStatus('running', { _status: 'FAILED' })).toBe('failed')
+  })
+
+  it('recognizes lowercase terminal phases from the control protocol', () => {
+    expect(translateStatus('done', null)).toBe('done')
+    expect(translateStatus('failed', null)).toBe('failed')
+    expect(translateStatus('timeout', null)).toBe('timeout')
+    expect(translateStatus('killed', null)).toBe('killed')
   })
 
   it('returns "running" when phase is running and no terminal sentinel exists', () => {
