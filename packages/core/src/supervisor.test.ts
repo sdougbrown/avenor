@@ -92,6 +92,39 @@ describe.skipIf(skipIfNoBinary)('Supervisor singleton', () => {
   }, 15_000)
 })
 
+describe.skipIf(skipIfNoBinary)('Supervisor.close with skipShutdown', () => {
+  let sup: Supervisor
+  let shutdownCalled = false
+
+  afterAll(async () => {
+    await sup?.close().catch(() => {})
+  })
+
+  it('skips client.shutdown but still cleans up process/socket/client', async () => {
+    sup = await Supervisor.get()
+    const client = sup.getClient()
+    const originalShutdown = client.shutdown.bind(client)
+    client.shutdown = async (reason: string) => {
+      shutdownCalled = true
+      return originalShutdown(reason)
+    }
+
+    await sup.close({ skipShutdown: true })
+
+    expect(shutdownCalled).toBe(false)
+    try {
+      fs.accessSync(sup.supervisorId, fs.constants.F_OK)
+      throw new Error('socket still exists after close')
+    } catch (err: any) {
+      expect(err.code).toBe('ENOENT')
+    }
+    // Runs map should be cleared
+    expect((sup as any).runs.size).toBe(0)
+    // Client reference should be nullified
+    expect((sup as any).client).toBeNull()
+  })
+})
+
 describe('findAvenorBinary', () => {
   it.skipIf(!hasAvenorBinary())('returns a valid path', () => {
     const bin = findAvenorBinary()

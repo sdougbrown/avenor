@@ -81,7 +81,41 @@ export default async function (pi: ExtensionAPI) {
   // ── Helpers ──────────────────────────────────────────────────────────────
 
   async function pollRuns(): Promise<RunStatusEntry[]> {
-    return Promise.all(Array.from(trackedRuns.values()).map(async run => {
+    // First, gather all live runs from the singleton supervisor so externally
+    // spawned runs (not tracked here) appear with agent "unknown". A list
+    // failure must not stop direct monitoring of tracked runs.
+    const liveMap = new Map<string, StatusResult>()
+    try {
+      const allLive = await statusTool({})
+      const liveList = Array.isArray(allLive) ? allLive : [allLive]
+      for (const result of liveList) {
+        liveMap.set(result.run_id, result)
+      }
+    } catch (err) {
+      console.error('avenor pollRuns: failed to list singleton runs', err)
+    }
+
+    // Build entries for tracked runs, preserving metadata and lastStatus.
+    const entries: RunStatusEntry[] = []
+    for (const run of trackedRuns.values()) {
+      const live = liveMap.get(run.runId)
+      if (live) {
+        liveMap.delete(live.run_id)
+        run.lastStatus = live
+        entries.push({
+          runId: run.runId,
+          label: run.label,
+          status: live.status,
+          phase: live.phase,
+          phaseLabel: live.phase_label,
+          agent: run.agent,
+          pendingPermission: !!live.pending_permission,
+          permissionDescription: live.pending_permission?.description,
+        })
+        continue
+      }
+      // Tracked but not in live list — directly query it (explicit-supervisor
+      // or transient-failure scenario). Preserve previous status on failure.
       try {
         const raw = await statusTool({
           runId: run.runId,
@@ -89,9 +123,8 @@ export default async function (pi: ExtensionAPI) {
         })
         const result = Array.isArray(raw) ? raw[0] : raw
         if (!result) throw new Error('status response was empty')
-
         run.lastStatus = result
-        return {
+        entries.push({
           runId: run.runId,
           label: run.label,
           status: result.status,
@@ -100,11 +133,11 @@ export default async function (pi: ExtensionAPI) {
           agent: run.agent,
           pendingPermission: !!result.pending_permission,
           permissionDescription: result.pending_permission?.description,
-        }
+        })
       } catch (err) {
         console.error(`avenor pollRuns: statusTool failed for ${run.runId}`, err)
         const previous = run.lastStatus
-        return {
+        entries.push({
           runId: run.runId,
           label: run.label,
           status: previous?.status ?? 'unavailable',
@@ -113,9 +146,25 @@ export default async function (pi: ExtensionAPI) {
           agent: run.agent,
           pendingPermission: !!previous?.pending_permission,
           permissionDescription: previous?.pending_permission?.description,
-        }
+        })
       }
-    }))
+    }
+
+    // Append externally spawned singleton runs absent from tracked set.
+    for (const live of liveMap.values()) {
+      entries.push({
+        runId: live.run_id,
+        label: live.label,
+        status: live.status,
+        phase: live.phase,
+        phaseLabel: live.phase_label,
+        agent: 'unknown',
+        pendingPermission: !!live.pending_permission,
+        permissionDescription: live.pending_permission?.description,
+      })
+    }
+
+    return entries
   }
 
   function renderStatusLines(entries: RunStatusEntry[]): string[] {

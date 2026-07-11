@@ -294,4 +294,35 @@ describe('translateStatus', () => {
   it('preserves the waiting phase even with a non-terminal sentinel', () => {
     expect(translateStatus('waiting', { _status: 'RUNNING' })).toBe('waiting')
   })
+
+  // Uppercase sentinel overrides uppercase RUNNING/IDLE phases.
+  it('lets a DONE sentinel override an uppercase "RUNNING" phase', () => {
+    expect(translateStatus('RUNNING', { _status: 'DONE' })).toBe('done')
+  })
+
+  it('lets a FAILED sentinel override an uppercase "IDLE" phase', () => {
+    expect(translateStatus('IDLE', { _status: 'FAILED' })).toBe('failed')
+  })
+
+  it('lets a TIMEOUT sentinel override a mixed-case "Running" phase', () => {
+    expect(translateStatus('Running', { _status: 'TIMEOUT' })).toBe('timeout')
+  })
+
+  // Lowercase terminal phases are recognized directly.
+  it('recognizes lowercase terminal phases without sentinel', () => {
+    expect(translateStatus('done', null)).toBe('done')
+    expect(translateStatus('failed', null)).toBe('failed')
+    expect(translateStatus('timeout', null)).toBe('timeout')
+    expect(translateStatus('killed', null)).toBe('killed')
+    expect(translateStatus('blocked', null)).toBe('failed')
+  })
+
+  // Uppercase terminal phases are also normalized via switch.
+  it('recognizes uppercase terminal phases via normalization', () => {
+    expect(translateStatus('DONE', null)).toBe('done')
+    expect(translateStatus('FAILED', null)).toBe('failed')
+    expect(translateStatus('TIMEOUT', null)).toBe('timeout')
+    expect(translateStatus('KILLED', null)).toBe('killed')
+    expect(translateStatus('BLOCKED', null)).toBe('failed')
+  })
 })

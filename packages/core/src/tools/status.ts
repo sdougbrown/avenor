@@ -70,16 +70,17 @@ export function translateStatus(
   sentinelData: Record<string, string> | null,
 ): string {
   const sentinelStatus = sentinelData?._status
+  const phase = rawPhase.toLowerCase()
 
   // A terminal sentinel takes precedence over a live "running" phase. In
   // stable mode the supervisor parks a runtime after a clean end_turn, leaving
   // status "running" while the sentinel already reads DONE. Without this
   // override the orchestrator's blocking loop would never observe completion.
-  if (sentinelStatus && (rawPhase === 'running' || rawPhase === 'idle')) {
+  if (sentinelStatus && (phase === 'running' || phase === 'idle')) {
     return sentinelStatusToResult(sentinelStatus)
   }
 
-  switch (rawPhase.toLowerCase()) {
+  switch (phase) {
     case 'idle':
       return sentinelStatus ? sentinelStatusToResult(sentinelStatus) : 'running'
     case 'running':
