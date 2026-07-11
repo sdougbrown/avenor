@@ -1,0 +1,20 @@
+{
+  "name": "avenor",
+  "interface": {
+    "displayName": "Avenor"
+  },
+  "plugins": [
+    {
+      "name": "avenor",
+      "source": {
+        "source": "local",
+        "path": "./plugins/avenor"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

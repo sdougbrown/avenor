@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "avenor": {
+      "command": "avenor",
+      "args": ["mcp"]
+    }
+  }
+}

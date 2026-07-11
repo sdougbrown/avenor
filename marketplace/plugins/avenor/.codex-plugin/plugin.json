@@ -1,0 +1,39 @@
+{
+  "name": "avenor",
+  "version": "0.1.0",
+  "description": "Delegate work to independent agents and supervise their runs from Codex through Avenor.",
+  "author": {
+    "name": "Doug Brown",
+    "url": "https://github.com/sdougbrown"
+  },
+  "homepage": "https://avenor.douggo.com/",
+  "repository": "https://github.com/sdougbrown/avenor",
+  "license": "MIT",
+  "keywords": [
+    "agents",
+    "delegation",
+    "mcp",
+    "orchestration"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Avenor",
+    "shortDescription": "Delegate and supervise independent agent runs",
+    "longDescription": "Use Avenor from Codex to start independent agent processes, monitor their progress, handle permission requests, inspect event logs, and continue completed runs without leaving the conversation.",
+    "developerName": "Doug Brown",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://avenor.douggo.com/",
+    "defaultPrompt": [
+      "Use Avenor to delegate this task to jockey and supervise it through completion.",
+      "Show me the status and recent events for my Avenor runs.",
+      "Continue the completed Avenor run with this follow-up request."
+    ],
+    "brandColor": "#7C3AED"
+  }
+}

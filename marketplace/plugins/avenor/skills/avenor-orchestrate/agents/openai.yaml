@@ -1,0 +1,10 @@
+interface:
+  display_name: "Orchestrate with Avenor"
+  short_description: "Delegate and supervise nested agent work"
+  default_prompt: "Use $avenor-orchestrate to delegate this task and supervise it through completion."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "avenor"
+      description: "Avenor agent orchestration MCP server"
