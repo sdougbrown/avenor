@@ -7,7 +7,6 @@ This is not another Avenor implementation. The plugin starts `avenor mcp`, so th
 ## Prerequisites
 
 - Install Avenor and make sure `avenor` is on your `PATH`.
-- Check out the Avenor repository locally.
 - Install a Codex CLI version that supports plugins.
 
 You can confirm that Codex will be able to find the binary before installing the plugin:
@@ -18,10 +17,10 @@ avenor --help
 
 ## Setup
 
-1. Register the marketplace from your checkout. Replace `/absolute/path/to/avenor` with the absolute path to the repository:
+1. Register Avenor's marketplace from GitHub:
 
 ```bash
-codex plugin marketplace add /absolute/path/to/avenor/marketplace
+codex plugin marketplace add sdougbrown/avenor
 ```
 
 2. Install Avenor from the registered marketplace:
@@ -32,7 +31,7 @@ codex plugin add avenor@avenor
 
 3. Start a new Codex task. Plugin MCP servers and skills are loaded when the task starts, so an already-open task will not pick up the integration.
 
-The local checkout flow above is the currently verified installation path. Direct installation from a GitHub location is not documented yet; clone or update the repository, then register its `marketplace` directory.
+The repository's root marketplace manifest is shared with the Claude Code plugin. The Codex bundle itself remains under `marketplace/plugins/avenor`; Codex resolves that path from the registered GitHub source, so you do not need a local checkout.
 
 ## Verification
 
@@ -52,7 +51,13 @@ The plugin runs `avenor mcp` by command name. Make sure the directory containing
 
 ### Codex cannot find the marketplace
 
-Pass the absolute path to the repository's `marketplace` directory. That directory contains `.agents/plugins/marketplace.json`; passing the repository root will not register it.
+Register the GitHub repository with the exact owner and repository name:
+
+```bash
+codex plugin marketplace add sdougbrown/avenor
+```
+
+This step needs network access to GitHub. You do not need to clone Avenor or pass a local filesystem path.
 
 ### The plugin is installed but its tools are missing
 
