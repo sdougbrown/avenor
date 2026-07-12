@@ -29,6 +29,8 @@
       "Write"
     ],
     "websiteURL": "https://avenor.douggo.com/",
+    "composerIcon": "./assets/logo.png",
+    "logo": "./assets/logo.png",
     "defaultPrompt": [
       "Use Avenor to delegate this task to jockey and supervise it through completion.",
       "Show me the status and recent events for my Avenor runs.",
