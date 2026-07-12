@@ -61,4 +61,5 @@ Start a new Codex task after installation. MCP tools and the orchestration skill
 ## See also
 
 - [MCP server](mcp.md) covers the underlying server, transports, tools, and registry scope.
+- [Claude Code plugin](claude-plugin.md) covers the equivalent integration for Claude Code.
 - [CLI reference](cli.md) covers Avenor commands outside the Codex integration.

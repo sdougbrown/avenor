@@ -1,0 +1,15 @@
+{
+  "name": "avenor",
+  "displayName": "Avenor",
+  "version": "0.1.0",
+  "description": "Inspect available local backends, delegate work to independent agents, and supervise their runs through Avenor.",
+  "author": {
+    "name": "Doug Brown",
+    "url": "https://github.com/sdougbrown"
+  },
+  "homepage": "https://avenor.douggo.com/",
+  "repository": "https://github.com/sdougbrown/avenor",
+  "license": "MIT",
+  "keywords": ["agents", "delegation", "mcp", "orchestration"],
+  "mcpServers": "./.mcp.json"
+}

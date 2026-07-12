@@ -44,6 +44,7 @@ export default defineConfig({
         text: 'Integration',
         items: [
           { text: 'MCP', link: '/mcp' },
+          { text: 'Claude Code Plugin', link: '/claude-plugin' },
           { text: 'Codex Plugin', link: '/codex-plugin' },
         ],
       },
