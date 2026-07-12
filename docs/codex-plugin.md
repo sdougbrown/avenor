@@ -31,7 +31,23 @@ codex plugin add avenor@avenor
 
 3. Start a new Codex task. Plugin MCP servers and skills are loaded when the task starts, so an already-open task will not pick up the integration.
 
-The repository's root marketplace manifest is shared with the Claude Code plugin. The Codex bundle itself remains under `marketplace/plugins/avenor`; Codex resolves that path from the registered GitHub source, so you do not need a local checkout.
+For GitHub and repository-root installs, Codex and Claude Code both consume `.claude-plugin/marketplace.json`. That manifest points to `marketplace/plugins/avenor`, where Codex loads `.codex-plugin/plugin.json`. The separate `marketplace/.agents/plugins/marketplace.json` supports registering only the `marketplace/` subdirectory.
+
+### Installing from a local checkout or branch
+
+The GitHub source above is the normal installation path. To test local plugin changes, register the repository root instead. Replace `/absolute/path/to/avenor` with the checkout's absolute path:
+
+```bash
+codex plugin marketplace add /absolute/path/to/avenor
+```
+
+To test a Git branch without cloning it, pin that ref when registering the GitHub source:
+
+```bash
+codex plugin marketplace add sdougbrown/avenor --ref feature/my-plugin-change
+```
+
+These are alternative marketplace sources; use one registration method, then run `codex plugin add avenor@avenor` as usual.
 
 ## Verification
 
@@ -51,13 +67,23 @@ The plugin runs `avenor mcp` by command name. Make sure the directory containing
 
 ### Codex cannot find the marketplace
 
-Register the GitHub repository with the exact owner and repository name:
+Check whether the marketplace was registered:
+
+```bash
+codex plugin marketplace list
+```
+
+If `avenor` is missing, retry with the exact owner and repository name:
 
 ```bash
 codex plugin marketplace add sdougbrown/avenor
 ```
 
-This step needs network access to GitHub. You do not need to clone Avenor or pass a local filesystem path.
+This step needs network access to GitHub. If GitHub registration still fails and you have a local checkout, register its absolute repository-root path instead:
+
+```bash
+codex plugin marketplace add /absolute/path/to/avenor
+```
 
 ### The plugin is installed but its tools are missing
 
