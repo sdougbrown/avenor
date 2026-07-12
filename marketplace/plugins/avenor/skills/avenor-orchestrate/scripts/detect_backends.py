@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 
-PREFERENCE = [
+DISPLAY_ORDER = [
     "pi",
     "opencode-acp",
     "codex-app-server",
@@ -22,6 +22,17 @@ PREFERENCE = [
     "claude-channel",
     "opencode-http",
 ]
+
+MODEL_SELECTION = {
+    "pi": True,
+    "opencode-acp": True,
+    "opencode-http": True,
+    "codex-app-server": True,
+    "gemini-acp": False,
+    "cursor-acp": False,
+    "claude": True,
+    "claude-channel": True,
+}
 
 
 def existing(paths: list[Path]) -> list[str]:
@@ -134,7 +145,7 @@ def http_backend(server_url: str | None) -> dict:
     return result
 
 
-def detect(server_url: str | None) -> dict:
+def detect(server_url: str | None, preferred: str | None) -> dict:
     home = Path.home()
     pi_profiles, pi_signals, pi_agents = pi_details(home)
     opencode_profiles, opencode_signals = opencode_details(home)
@@ -154,6 +165,8 @@ def detect(server_url: str | None) -> dict:
     }
 
     backends["pi"]["pi_agents_extension"] = pi_agents
+    backends["pi"]["named_agents_ready"] = pi_agents and bool(pi_profiles)
+    backends["opencode-acp"]["named_agents_ready"] = bool(opencode_profiles)
     tmux = shutil.which("tmux")
     backends["claude-channel"]["tmux"] = tmux
     if backends["claude-channel"]["available"] and not tmux:
@@ -161,29 +174,54 @@ def detect(server_url: str | None) -> dict:
         backends["claude-channel"]["configuration"] = "unavailable"
         backends["claude-channel"]["note"] = "claude-channel also requires tmux."
 
-    recommended = next(
-        (
-            name
-            for name in PREFERENCE
-            if backends[name]["available"]
-            and backends[name]["configuration"] in {"configured", "unknown"}
-        ),
-        None,
-    )
+    for name, item in backends.items():
+        item.setdefault("named_agents_ready", False)
+        item["model_selection_supported"] = MODEL_SELECTION[name]
+        item["configured_models"] = None
+
+    candidates = [
+        name
+        for name in DISPLAY_ORDER
+        if backends[name]["available"]
+        and backends[name]["configuration"] in {"configured", "unknown"}
+    ]
+    if preferred and preferred in candidates:
+        recommended = preferred
+        selection_reason = "explicit_preference"
+    elif preferred:
+        recommended = None
+        selection_reason = "preferred_backend_unavailable"
+    elif len(candidates) == 1:
+        recommended = candidates[0]
+        selection_reason = "single_candidate"
+    elif candidates:
+        recommended = None
+        selection_reason = "multiple_candidates"
+    else:
+        recommended = None
+        selection_reason = "no_candidates"
+
     return {
         "recommended": recommended,
-        "preference": PREFERENCE,
+        "selection_reason": selection_reason,
+        "preferred": preferred,
+        "candidates": candidates,
+        "display_order": DISPLAY_ORDER,
         "backends": backends,
-        "caveat": "Configuration signals are heuristic; authentication is verified only when a run starts.",
+        "caveat": "Executable, configuration, and profile checks are heuristic. Authentication and model availability are verified only when a run starts.",
     }
 
 
 def print_human(payload: dict) -> None:
-    for name in payload["preference"]:
+    for name in payload["display_order"]:
         item = payload["backends"][name]
         marker = "yes" if item["available"] else "no"
         suffix = " (recommended)" if name == payload["recommended"] else ""
         print(f"{name:18} available={marker:3} config={item['configuration']}{suffix}")
+    if payload["selection_reason"] == "multiple_candidates":
+        print("Multiple candidates detected; select one explicitly.")
+    elif payload["selection_reason"] == "preferred_backend_unavailable":
+        print(f"Preferred backend {payload['preferred']!r} is not available.")
     print(payload["caveat"])
 
 
@@ -195,8 +233,13 @@ def main() -> None:
         default=os.environ.get("AVENOR_OPENCODE_URL"),
         help="optional opencode-http endpoint; defaults to AVENOR_OPENCODE_URL",
     )
+    parser.add_argument(
+        "--prefer",
+        choices=DISPLAY_ORDER,
+        help="validate an explicit user backend preference; no preference is assumed by default",
+    )
     args = parser.parse_args()
-    payload = detect(args.server_url)
+    payload = detect(args.server_url, args.prefer)
     if args.json:
         print(json.dumps(payload, indent=2))
     else:

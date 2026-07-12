@@ -1,7 +1,7 @@
 {
   "name": "avenor",
   "version": "0.1.0",
-  "description": "Select an available local backend, delegate work to independent agents, and supervise their runs through Avenor.",
+  "description": "Inspect available local backends, delegate work to independent agents, and supervise their runs through Avenor.",
   "author": {
     "name": "Doug Brown",
     "url": "https://github.com/sdougbrown"
@@ -20,7 +20,7 @@
   "interface": {
     "displayName": "Avenor",
     "shortDescription": "Delegate and supervise independent agent runs",
-    "longDescription": "Use Avenor from Codex to select an available local runtime, start independent agent processes, monitor their progress, handle permission requests, inspect event logs, and continue completed runs without leaving the conversation.",
+    "longDescription": "Use Avenor from Codex to inspect available local runtimes, choose one explicitly, start independent agent processes, monitor their progress, handle permission requests, inspect event logs, and continue completed runs without leaving the conversation.",
     "developerName": "Doug Brown",
     "category": "Productivity",
     "capabilities": [
@@ -32,7 +32,7 @@
     "composerIcon": "./assets/logo.png",
     "logo": "./assets/logo.png",
     "defaultPrompt": [
-      "Use Avenor to select an available backend, delegate this task, and supervise it through completion.",
+      "Use Avenor to inspect available backends, help me choose one, delegate this task, and supervise it through completion.",
       "Show me the status and recent events for my Avenor runs.",
       "Continue the completed Avenor run with this follow-up request."
     ],
