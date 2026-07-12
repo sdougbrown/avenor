@@ -9,11 +9,11 @@ export async function getSupervisorClient(supervisorId: string): Promise<{
   supervisorId: string
 }> {
   const id = validateSupervisorSocketPath(supervisorId)
-  const isSingleton = Supervisor.isCurrentInstance(id)
+  const current = Supervisor.currentInstance()
+  const isSingleton = current !== null &&
+    validateSupervisorSocketPath(current.supervisorId) === id
   if (isSingleton) {
-    const sup = Supervisor.currentInstance()
-    if (!sup) throw new Error(`Supervisor.isCurrentInstance() returned true but currentInstance() is null (id: ${id})`)
-    return { client: sup.getClient(), isSingleton: true, sup, supervisorId: id }
+    return { client: current.getClient(), isSingleton: true, sup: current, supervisorId: id }
   }
   return { client: await dial(id), isSingleton: false, sup: null, supervisorId: id }
 }

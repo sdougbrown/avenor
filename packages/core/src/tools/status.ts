@@ -172,10 +172,32 @@ export async function statusTool(
   },
 ): Promise<StatusResult | StatusResult[]> {
   if (args.supervisorId) {
-    const { client, isSingleton } = await getSupervisorClient(args.supervisorId)
+    const { client, isSingleton, sup } = await getSupervisorClient(args.supervisorId)
     try {
       if (args.runId) {
         validateRunId(args.runId)
+
+        // A locally spawned run has a public run ID that differs from the
+        // stable supervisor's runtime ID. spawnTool still returns the local
+        // supervisor socket, so callers naturally pass both values back to
+        // statusTool. Resolve through the singleton registry before querying
+        // the control plane; otherwise the lookup misses and blocking clients
+        // can poll forever when no terminal sentinel is written.
+        const runInfo = isSingleton && sup
+          ? findRunByLabel(sup, args.runId)
+          : undefined
+        if (runInfo) {
+          let liveStatus: Record<string, unknown> | null = null
+          if (runInfo.runtimeId) {
+            try {
+              liveStatus = await client.status(runInfo.runtimeId)
+            } catch {
+              // live status unavailable; buildRunStatus still checks sentinel
+            }
+          }
+          return buildRunStatus(client, runInfo, liveStatus)
+        }
+
         let liveStatus: Record<string, unknown> | null = null
         try {
           liveStatus = await client.status(args.runId)

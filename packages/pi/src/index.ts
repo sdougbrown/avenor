@@ -17,6 +17,16 @@ import { TERMINAL_STATUSES, formatRunLine, statusEmoji } from './types.js'
 
 const POLL_INTERVAL_MS = 3_000
 
+export function statusSupervisorId(
+  requestedSupervisorId: string | undefined,
+  spawnedSupervisorId: string,
+): string | undefined {
+  // Local spawns have a public run ID that differs from the stable runtime ID.
+  // Let statusTool use its singleton registry to resolve that mapping. A
+  // supervisor ID is only needed when the caller explicitly supplied one.
+  return requestedSupervisorId ? spawnedSupervisorId : undefined
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
@@ -397,11 +407,15 @@ export default async function (pi: ExtensionAPI) {
         supervisorId: params.supervisor_id,
       })
 
+      const supervisorId = statusSupervisorId(
+        params.supervisor_id,
+        result.supervisor_id,
+      )
       trackedRuns.set(result.run_id, {
         runId: result.run_id,
         agent: params.agent,
         label,
-        supervisorId: result.supervisor_id,
+        supervisorId,
         runtimeId: result.runtime_id,
         startTime: Date.now(),
         blocking: wait,
@@ -435,7 +449,7 @@ export default async function (pi: ExtensionAPI) {
         try {
           raw = await statusTool({
             runId: result.run_id,
-            supervisorId: result.supervisor_id,
+            supervisorId,
           })
         } catch (err) {
           console.error('avenor spawn poll: statusTool failed', err)

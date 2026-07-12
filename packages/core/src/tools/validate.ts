@@ -25,15 +25,19 @@ export function validateTimeout(value: string): number {
 }
 
 export function validateSupervisorSocketPath(supervisorId: string): string {
-  const canonical = fs.realpathSync(supervisorId)
   const root = fs.realpathSync(socketsRoot())
-  const relative = path.relative(root, canonical)
+  const parent = fs.realpathSync(path.dirname(supervisorId))
+  const basename = path.basename(supervisorId)
+
+  // Do not realpath the socket itself. On macOS, Bun's realpathSync can fail
+  // with EOPNOTSUPP while lstat-ing a live Unix-domain socket. Canonicalizing
+  // the containing directory still prevents traversal and symlink escapes;
+  // supervisor sockets are created directly in the private sockets root.
   if (
-    relative.startsWith('..') ||
-    path.isAbsolute(relative) ||
-    !/^avenor-mcp-[^/\\]+\.sock$/.test(path.basename(canonical))
+    parent !== root ||
+    !/^avenor-mcp-[^/\\]+\.sock$/.test(basename)
   ) {
     throw new Error(`invalid supervisorId: ${supervisorId}`)
   }
-  return canonical
+  return path.join(parent, basename)
 }

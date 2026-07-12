@@ -1,9 +1,14 @@
 import { describe, it, expect } from 'bun:test'
-import extensionFactory from './index.js'
+import extensionFactory, { statusSupervisorId } from './index.js'
 
 describe('Avenor Pi Extension', () => {
   it('exports a function', () => {
     expect(typeof extensionFactory).toBe('function')
+  })
+
+  it('only reuses a supervisor socket when the caller supplied one', () => {
+    expect(statusSupervisorId(undefined, '/tmp/spawned.sock')).toBeUndefined()
+    expect(statusSupervisorId('/tmp/requested.sock', '/tmp/spawned.sock')).toBe('/tmp/spawned.sock')
   })
 
   describe('Registration', () => {
