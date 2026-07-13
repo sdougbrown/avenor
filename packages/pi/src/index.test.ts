@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'bun:test'
+import { Text } from '@earendil-works/pi-tui'
 import extensionFactory, { statusSupervisorId } from './index.js'
 
 describe('Avenor Pi Extension', () => {
@@ -62,15 +63,25 @@ describe('Avenor Pi Extension', () => {
 
   describe('session lifecycle', () => {
     it('session_start stores context for later use', async () => {
-      const callLog: string[] = []
-      const mockCtx = { ui: { setWidget: () => {}, setStatus: () => {}, notify: () => {} } }
-      let sessionCtxInHandler: any = null
+      const widgetCalls: any[] = []
+      const statusCalls: any[] = []
+      const sessionHandlers: Record<string, any> = {}
+      const mockCtx = {
+        ui: {
+          setWidget: (...args: any[]) => {
+            widgetCalls.push(args)
+          },
+          setStatus: (...args: any[]) => {
+            statusCalls.push(args)
+          },
+          notify: () => {},
+        },
+      }
 
       const mockPi = {
         on: (event: string, handler: any) => {
-          if (event === 'session_start') {
-            // Call the handler with mock context
-            handler({}, mockCtx)
+          if (event === 'session_start' || event === 'session_shutdown') {
+            sessionHandlers[event] = handler
           }
         },
         registerTool: () => {},
@@ -82,13 +93,11 @@ describe('Avenor Pi Extension', () => {
 
       await extensionFactory(mockPi as any)
 
-      // The session_start handler should have been called.
-      // We can't directly test the internal sessionCtx variable,
-      // but we can verify the handler was invoked via side effects.
-      // The handler sets sessionCtx = ctx, which is used by updateWidget.
-      // We verify this indirectly by checking that setWidget/setStatus
-      // can be called without throwing after session_start fires.
-      expect(true).toBe(true) // Handler was invoked (no crash)
+      await sessionHandlers.session_start({}, mockCtx)
+      await sessionHandlers.session_shutdown({}, mockCtx)
+
+      expect(widgetCalls).toEqual([[ 'avenor-status', undefined ]])
+      expect(statusCalls).toEqual([[ 'avenor', '' ]])
     })
 
     it('session_shutdown clears state', async () => {
@@ -133,10 +142,7 @@ describe('Avenor Pi Extension', () => {
 
       await extensionFactory(mockPi as any)
 
-      // Without any tracked runs, the handler returns undefined (no message)
-      // The handler checks `trackedRuns.size === 0` and returns early
-      // We can't verify the internal state, but the handler shouldn't throw
-      expect(true).toBe(true)
+      expect(await handlerResult).toBeUndefined()
     })
   })
 
@@ -166,15 +172,13 @@ describe('Avenor Pi Extension', () => {
         bold: (text: string) => text,
       }
 
-      // Should not throw
       const result = capturedRenderer(
         { content: 'Active sub-agents:\n  • task1 (mule): running' },
         {},
         mockTheme,
       )
 
-      expect(result).not.toBeNull()
-      expect(result).not.toBeUndefined()
+      expect(result).toBeInstanceOf(Text)
     })
   })
 })
