@@ -3,60 +3,194 @@ import { tool } from '@opencode-ai/plugin'
 
 import * as crypto from 'node:crypto'
 import {
-  spawnTool, statusTool, eventsTool, answerPermissionTool,
-  followUpTool, shutdownTool,
+  answerPermissionTool,
+  dial,
+  eventsTool,
+  followUpTool,
+  inspectTool,
+  observeRun,
+  type RunObserver,
+  type RunSnapshot,
+  shutdownTool,
+  spawnTool,
+  statusTool,
+  Supervisor,
   type StatusResult,
 } from '@dougbots/avenor-core'
 
 type TrackedRun = {
   runId: string
+  runtimeId?: string
+  sessionId?: string
   agent: string
   orchestratorSessionId: string
   label: string
   supervisorId?: string
-  // true = a monitor is already running (either the blocking loop or monitorRun)
   monitoring: boolean
+  latestSeq?: number
+  lastSnapshot?: RunSnapshot
+}
+
+type MonitorStopReason = 'permission-routed' | 'shutdown' | 'abort'
+
+type MonitorOutcome = {
+  kind: 'terminal' | 'waiting' | 'aborted' | 'shutdown' | 'stopped'
+  snapshot: RunSnapshot
+  notified?: boolean
+}
+
+type ActiveMonitor = {
+  observer?: RunObserver
+  stopReason?: MonitorStopReason
+  promise: Promise<MonitorOutcome>
 }
 
 const TERMINAL_STATUSES = new Set(['done', 'failed', 'timeout', 'killed'])
 const POLL_INTERVAL_MS = 3_000
+const FINAL_OUTPUT_CHARS = 1_500
+const METADATA_TEXT_CHARS = 400
+const TRANSCRIPT_PREVIEW_ENTRIES = 3
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-function buildCompletionText(run: { runId: string; label: string }, result: StatusResult): string {
-  const lines = [
-    `Sub-agent "${run.label}" finished with status **${result.status}**.`,
-  ]
-  if (result.stop_reason && result.stop_reason.toUpperCase() !== result.status.toUpperCase()) {
-    lines.push(`Stop reason: ${result.stop_reason}`)
+function clipTail(text: string | undefined, limit: number): string | undefined {
+  if (!text) return undefined
+  if (text.length <= limit) return text
+  return text.slice(text.length - limit)
+}
+
+function terminalStatus(snapshot: RunSnapshot, fallback?: StatusResult): string {
+  if (fallback?.status) return fallback.status
+  if (snapshot.phase && TERMINAL_STATUSES.has(snapshot.phase)) return snapshot.phase
+  if (snapshot.phase === 'done') return 'done'
+  return snapshot.stop_reason ?? 'done'
+}
+
+function formatLiveTool(snapshot: RunSnapshot): string | undefined {
+  const tool = snapshot.live_tools[snapshot.live_tools.length - 1]
+  if (!tool) return undefined
+  const base = tool.title ?? tool.kind ?? tool.id ?? tool.key
+  const status = tool.status ? ` (${tool.status})` : ''
+  const preview = clipTail(tool.preview, 120)
+  return preview ? `${base}${status}: ${preview}` : `${base}${status}`
+}
+
+function formatTranscriptEntry(entry: RunSnapshot['transcript'][number]): string | undefined {
+  const text = clipTail(entry.text?.trim(), 120)
+  switch (entry.kind) {
+    case 'assistant':
+      return text ? `assistant: ${text}` : undefined
+    case 'thought':
+      return text ? `thought: ${text}` : undefined
+    case 'user':
+      return text ? `user: ${text}` : undefined
+    case 'tool': {
+      const title = entry.title ?? 'tool'
+      const status = entry.status ? ` (${entry.status})` : ''
+      return text ? `${title}${status}: ${text}` : `${title}${status}`
+    }
+    case 'permission':
+      return text ? `permission: ${text}` : undefined
+    case 'status':
+      return text ? `status: ${text}` : undefined
+    case 'session':
+      return text ? `session: ${text}` : undefined
   }
-  if (result.session_id) {
-    lines.push(`Session: \`${result.session_id}\``)
-  }
-  lines.push(
-    `\nCall \`avenor_events\` with \`run_id: "${run.runId}"\` to review the output, or \`avenor_follow_up\` to iterate.`,
+}
+
+function formatTranscriptPreview(snapshot: RunSnapshot): string | undefined {
+  const lines = snapshot.transcript
+    .slice(-TRANSCRIPT_PREVIEW_ENTRIES)
+    .map(formatTranscriptEntry)
+    .filter((line): line is string => Boolean(line))
+  if (lines.length === 0) return undefined
+  return clipTail(lines.join('\n'), METADATA_TEXT_CHARS)
+}
+
+function buildSnapshotMetadata(snapshot: RunSnapshot): Record<string, unknown> {
+  const metadata: Record<string, unknown> = {}
+  if (snapshot.phase) metadata.phase = snapshot.phase
+  if (snapshot.latest_seq !== undefined) metadata.latest_seq = snapshot.latest_seq
+  const liveTool = formatLiveTool(snapshot)
+  if (liveTool) metadata.live_tool = liveTool
+  const transcriptPreview = formatTranscriptPreview(snapshot)
+  if (transcriptPreview) metadata.transcript_preview = transcriptPreview
+  const pendingPermission = clipTail(
+    snapshot.pending_permission?.description
+      ?? snapshot.pending_permission?.question
+      ?? snapshot.phase_label,
+    METADATA_TEXT_CHARS,
   )
+  if (pendingPermission) metadata.pending_permission = pendingPermission
+  return metadata
+}
+
+function buildWaitingText(run: TrackedRun, snapshot: RunSnapshot): string {
+  const permission = snapshot.pending_permission
+  const lines = [
+    `Sub-agent "${run.label}" is waiting for input.`,
+  ]
+
+  if (permission) {
+    lines.push(
+      `Permission request: ${permission.description ?? permission.question ?? permission.tool ?? 'permission requested'}`,
+      `To answer: call \`avenor_answer_permission\` with run_id "${run.runId}", option_id "allow_once" | "allow_always" | "deny"`,
+    )
+  } else if (snapshot.phase_label) {
+    lines.push(`Question: ${snapshot.phase_label}`)
+  }
+
+  const transcriptPreview = formatTranscriptPreview(snapshot)
+  if (transcriptPreview) {
+    lines.push('', `Recent context:\n${transcriptPreview}`)
+  }
+
+  lines.push(
+    `Use \`avenor_follow_up\` with run_id "${run.runId}" to respond, or \`avenor_status\` to re-check.`,
+  )
+
   return lines.join('\n')
 }
 
-function summarizeEvent(evt: { type?: unknown; event?: unknown; tool?: unknown; name?: unknown }): string {
-  const type = String(evt.type ?? evt.event ?? '')
-  if (type === 'tool.call' || type === 'tool.use') {
-    return `called ${String(evt.tool ?? evt.name ?? type)}`
+function buildCompletionText(
+  run: TrackedRun,
+  snapshot: RunSnapshot,
+  status?: StatusResult,
+  finalOutput?: string,
+): string {
+  const lines = [
+    `Sub-agent "${run.label}" finished with status **${terminalStatus(snapshot, status)}**.`,
+  ]
+
+  const stopReason = status?.stop_reason ?? snapshot.stop_reason
+  if (stopReason && stopReason.toUpperCase() !== terminalStatus(snapshot, status).toUpperCase()) {
+    lines.push(`Stop reason: ${stopReason}`)
   }
-  if (type === 'agent.message_chunk') return 'thinking…'
-  if (type.startsWith('permission.')) return `permission requested`
-  return type
+
+  const sessionId = status?.session_id ?? snapshot.identity.session_id
+  if (sessionId) {
+    lines.push(`Session: \`${sessionId}\``)
+  }
+
+  const boundedOutput = clipTail(finalOutput ?? snapshot.final_output, FINAL_OUTPUT_CHARS)
+  if (boundedOutput) {
+    lines.push('', 'Final output:', '```text', boundedOutput, '```')
+  }
+
+  lines.push(
+    '',
+    `Call \`avenor_events\` with \`run_id: "${run.runId}"\` for raw events, or \`avenor_follow_up\` to iterate.`,
+  )
+
+  return lines.join('\n')
 }
 
 // Channel block pattern: <channel source="agent-reviewer" from_run_id="abc123" from_role="reviewer">content</channel>
 const CHANNEL_RE = /<channel\s+source="([^"]*)"(?:\s+from_run_id="([^"]*)")?(?:\s+from_role="([^"]*)")?[^>]*>([\s\S]*?)<\/channel>/g
 
 function formatAgentMessage(source: string, fromRunId: string, fromRole: string, content: string): string {
-  // Strip redundant "agent-" prefix that both the Go sidecar (ChannelWrap) and
-  // the plugin's pollChannelMessages may prepend, so "agent-agent" becomes "agent".
   const label = source.replace(/^agent-/, '') || source
   const shortId = fromRunId ? fromRunId.slice(0, 8) : ''
   const lines = [
@@ -85,13 +219,10 @@ function formatChannelBlocks(text: string): string {
 }
 
 export const AvenorPlugin: Plugin = async (ctx) => {
-  // Primary state: runId → run info
   const trackedRuns = new Map<string, TrackedRun>()
-  // Reverse index: opencode sessionId → avenor runId (for permission routing)
+  const activeMonitors = new Map<string, ActiveMonitor>()
   const sessionIdToRunId = new Map<string, string>()
-  // Reverse index: avenor runtimeId → avenor runId (for channel message attribution)
   const runtimeIdToRunId = new Map<string, string>()
-  // Channel-messaging state for receiving messages from spawned children.
   let parentRunId = ''
   let parentToken = ''
   let brokerUrl = ''
@@ -104,7 +235,22 @@ export const AvenorPlugin: Plugin = async (ctx) => {
     return parentRunId
   }
 
+  function unregisterRun(runId: string): void {
+    trackedRuns.delete(runId)
+    for (const [sessionId, mappedRunId] of sessionIdToRunId.entries()) {
+      if (mappedRunId === runId) sessionIdToRunId.delete(sessionId)
+    }
+    for (const [runtimeId, mappedRunId] of runtimeIdToRunId.entries()) {
+      if (mappedRunId === runId) runtimeIdToRunId.delete(runtimeId)
+    }
+  }
+
   function registerSessionId(sessionId: string | undefined, runtimeId: string | undefined, runId: string): void {
+    const run = trackedRuns.get(runId)
+    if (run) {
+      if (sessionId) run.sessionId = sessionId
+      if (runtimeId) run.runtimeId = runtimeId
+    }
     if (sessionId && !sessionIdToRunId.has(sessionId)) {
       sessionIdToRunId.set(sessionId, runId)
     }
@@ -113,136 +259,250 @@ export const AvenorPlugin: Plugin = async (ctx) => {
     }
   }
 
-  // Used by both fire-and-forget and permission routing
-  // to re-prompt the orchestrator when a run completes.
-  async function monitorRun(run: TrackedRun): Promise<void> {
-    let firstPoll = true
-    while (true) {
-      if (!firstPoll) await sleep(POLL_INTERVAL_MS)
-      firstPoll = false
+  function syncRunSnapshot(run: TrackedRun, snapshot: RunSnapshot): void {
+    run.lastSnapshot = snapshot
+    if (snapshot.latest_seq !== undefined) run.latestSeq = snapshot.latest_seq
+    registerSessionId(snapshot.identity.session_id, snapshot.identity.runtime_id, run.runId)
+  }
 
-      let raw: StatusResult | StatusResult[]
-      try {
-        raw = await statusTool({ runId: run.runId, supervisorId: run.supervisorId })
-      } catch {
-        continue
+  async function primeTrackedRun(run: TrackedRun, options: { captureLatestSeq?: boolean } = {}): Promise<StatusResult | undefined> {
+    try {
+      const raw = await statusTool({ runId: run.runId, supervisorId: run.supervisorId })
+      const status = Array.isArray(raw) ? raw[0] : raw
+      if (!status) return undefined
+      registerSessionId(status.session_id, status.runtime_id, run.runId)
+      if (status.latest_seq !== undefined && options.captureLatestSeq) {
+        run.latestSeq = status.latest_seq
       }
-
-      const result = Array.isArray(raw) ? raw[0] : raw
-      if (!result) continue
-
-      registerSessionId(result.session_id, result.runtime_id, run.runId)
-
-      if (TERMINAL_STATUSES.has(result.status)) {
-        trackedRuns.delete(run.runId)
-        await ctx.client.session.promptAsync({
-          path: { id: run.orchestratorSessionId },
-          body: { parts: [{ type: 'text', text: buildCompletionText(run, result) }] },
-        }).catch(() => {
-          // Session may have been deleted; nothing to do.
-        })
-        return
-      }
-
-      // When the sub-agent is waiting on a question or permission, notify the
-      // orchestrator once and stop polling. The orchestrator must act (via
-      // avenor_answer_permission or avenor_follow_up) before there's any
-      // reason to poll again. Re-prompting on every poll would spam the
-      // orchestrator session; a single notification mirrors the
-      // permission.ask handler's one-shot behavior.
-      if (result.status === 'waiting') {
-        const perm = result.pending_permission
-        const lines = [
-          `Sub-agent "${run.label}" is waiting for input.`,
-        ]
-        if (perm) {
-          lines.push(
-            `Permission request: ${perm.description}`,
-            `To answer: call \`avenor_answer_permission\` with run_id "${run.runId}", option_id "allow_once" | "allow_always" | "deny"`,
-          )
-        } else if (result.phase_label) {
-          lines.push(`Question: ${result.phase_label}`)
-        }
-        lines.push(
-          `Use \`avenor_follow_up\` with run_id "${run.runId}" to respond, or \`avenor_status\` to re-check.`,
-        )
-        await ctx.client.session.promptAsync({
-          path: { id: run.orchestratorSessionId },
-          body: { parts: [{ type: 'text', text: lines.join('\n') }] },
-        }).catch(() => {
-          // Session may have been deleted; nothing to do.
-        })
-        // The injected turn will answer or otherwise handle the request. Let a
-        // later idle event resume monitoring for completion (and also provide
-        // a retry opportunity if the injection raced with a busy session).
-        run.monitoring = false
-        return
-      }
+      return status
+    } catch {
+      return undefined
     }
   }
 
-  // ── Channel message polling ─────────────────────────────────────────────
+  async function createObserver(run: TrackedRun): Promise<RunObserver> {
+    if (!run.supervisorId) {
+      run.supervisorId = Supervisor.currentInstance()?.supervisorId
+    }
+    if (!run.runtimeId) {
+      await primeTrackedRun(run)
+    }
+    if (!run.supervisorId || !run.runtimeId) {
+      throw new Error(`unable to observe run ${run.runId}`)
+    }
+    const client = await dial(run.supervisorId)
+    return observeRun(client, {
+      runtime_id: run.runtimeId,
+      replay: true,
+      ...(run.latestSeq !== undefined ? { after_seq: run.latestSeq } : {}),
+      close_client: true,
+    })
+  }
 
-   async function pollChannelMessages(sessionId: string): Promise<void> {
-     if (channelPolling || !brokerUrl || !parentRunId || !parentToken) return
+  async function stopMonitor(runId: string, reason: MonitorStopReason): Promise<void> {
+    const active = activeMonitors.get(runId)
+    if (!active) return
+    active.stopReason = active.stopReason ?? reason
+    await active.observer?.close().catch(() => {})
+  }
 
-     channelPolling = true
-     let consecutiveErrors = 0
-     const MAX_CONSECUTIVE_ERRORS = 10
+  async function loadInspection(run: TrackedRun): Promise<Awaited<ReturnType<typeof inspectTool>> | undefined> {
+    try {
+      return await inspectTool({
+        runId: run.runId,
+        supervisorId: run.supervisorId,
+      })
+    } catch {
+      return undefined
+    }
+  }
 
-     try {
-       while (consecutiveErrors < MAX_CONSECUTIVE_ERRORS) {
-         await sleep(POLL_INTERVAL_MS)
-         let msgs: any[]
-         try {
-           const resp = await fetch(`${brokerUrl}/poll-control`, {
-             method: 'POST',
-             headers: { 'Content-Type': 'application/json' },
-             body: JSON.stringify({ run_id: parentRunId, token: parentToken }),
-           })
-           if (!resp.ok) {
-             consecutiveErrors++
-             continue
-           }
-           msgs = await resp.json()
-           consecutiveErrors = 0
-         } catch {
-           consecutiveErrors++
-           continue
-         }
-          for (const msg of (msgs ?? [])) {
-            if (msg.type !== 'agent_message') continue
-            let payload: any
-            try { payload = typeof msg.payload === 'string' ? JSON.parse(msg.payload) : msg.payload } catch { continue }
-            const text = typeof payload?.message === 'string' ? payload.message : ''
-            if (!text) continue
-            const from = payload.from_run_id ?? msg.from_run_id ?? 'unknown'
-            const role = payload.role ?? ''
-            // Resolve the agent name from any known ID: run_id, session_id, or runtime_id.
-            const resolvedRunId = trackedRuns.has(from) ? from
-              : sessionIdToRunId.get(from)
-              ?? runtimeIdToRunId.get(from)
-            const runInfo = resolvedRunId ? trackedRuns.get(resolvedRunId) : undefined
-            const source = runInfo?.agent ?? (role ? `agent-${role}` : 'agent')
-            const channelText = formatAgentMessage(source, from, role, text)
-           try {
-             await ctx.client.session.promptAsync({
-               path: { id: sessionId },
-               body: { parts: [{ type: 'text', text: channelText }] },
-             })
-           } catch {
-             // Session likely gone — stop polling.
-             return
-           }
-         }
-       }
-     } finally {
-       channelPolling = false
-     }
-   }
+  async function observeTrackedRun(
+    run: TrackedRun,
+    options: {
+      abort?: AbortSignal
+      onSnapshot?: (snapshot: RunSnapshot) => void
+    } = {},
+  ): Promise<MonitorOutcome> {
+    const existing = activeMonitors.get(run.runId)
+    if (existing) return existing.promise
+
+    run.monitoring = true
+    const handle: ActiveMonitor = { promise: Promise.resolve({ kind: 'stopped', snapshot: run.lastSnapshot as RunSnapshot }) }
+
+    handle.promise = (async () => {
+      let observer: RunObserver | undefined
+      let unsubscribe: (() => void) | undefined
+      let abortListener: (() => void) | undefined
+
+      try {
+        observer = await createObserver(run)
+        handle.observer = observer
+
+        if (handle.stopReason) {
+          await observer.close()
+        }
+
+        if (options.abort) {
+          const onAbort = () => {
+            void stopMonitor(run.runId, 'abort')
+          }
+          options.abort.addEventListener('abort', onAbort, { once: true })
+          abortListener = () => options.abort?.removeEventListener('abort', onAbort)
+          if (options.abort.aborted) {
+            await stopMonitor(run.runId, 'abort')
+          }
+        }
+
+        unsubscribe = observer.subscribe((snapshot) => {
+          syncRunSnapshot(run, snapshot)
+          options.onSnapshot?.(snapshot)
+        })
+
+        while (true) {
+          const snapshot = await observer.next()
+          if (!snapshot) {
+            const current = observer.snapshot()
+            syncRunSnapshot(run, current)
+            if (handle.stopReason === 'permission-routed') {
+              return { kind: 'waiting', snapshot: current, notified: true }
+            }
+            if (handle.stopReason === 'abort') {
+              return { kind: 'aborted', snapshot: current }
+            }
+            if (handle.stopReason === 'shutdown') {
+              return { kind: 'shutdown', snapshot: current }
+            }
+            if (current.pending_permission || current.phase === 'waiting') {
+              return { kind: 'waiting', snapshot: current }
+            }
+            if (current.ended) {
+              return { kind: 'terminal', snapshot: current }
+            }
+            return { kind: 'stopped', snapshot: current }
+          }
+
+          syncRunSnapshot(run, snapshot)
+          if (snapshot.pending_permission || snapshot.phase === 'waiting') {
+            return { kind: 'waiting', snapshot }
+          }
+          if (snapshot.ended) {
+            return { kind: 'terminal', snapshot }
+          }
+        }
+      } finally {
+        abortListener?.()
+        unsubscribe?.()
+        await observer?.close().catch(() => {})
+        if (activeMonitors.get(run.runId) === handle) {
+          activeMonitors.delete(run.runId)
+        }
+        run.monitoring = false
+      }
+    })()
+
+    activeMonitors.set(run.runId, handle)
+    return handle.promise
+  }
+
+  async function promptSession(sessionId: string, text: string): Promise<void> {
+    await ctx.client.session.promptAsync({
+      path: { id: sessionId },
+      body: { parts: [{ type: 'text', text }] },
+    }).catch(() => {})
+  }
+
+  async function monitorRun(run: TrackedRun): Promise<void> {
+    const outcome = await observeTrackedRun(run)
+
+    if (outcome.kind === 'waiting') {
+      if (!outcome.notified) {
+        await promptSession(run.orchestratorSessionId, buildWaitingText(run, outcome.snapshot))
+      }
+      return
+    }
+
+    if (outcome.kind === 'terminal') {
+      const inspection = await loadInspection(run)
+      const snapshot = inspection?.snapshot ?? outcome.snapshot
+      await promptSession(
+        run.orchestratorSessionId,
+        buildCompletionText(run, snapshot, inspection?.status, inspection?.final_output),
+      )
+      unregisterRun(run.runId)
+      return
+    }
+
+    if (outcome.kind === 'aborted' || outcome.kind === 'shutdown') {
+      unregisterRun(run.runId)
+    }
+  }
+
+  async function stopTrackedRuns(predicate: (run: TrackedRun) => boolean): Promise<void> {
+    const runs = [...trackedRuns.values()].filter(predicate)
+    await Promise.all(runs.map(async (run) => {
+      await stopMonitor(run.runId, 'shutdown')
+      unregisterRun(run.runId)
+    }))
+  }
+
+  async function pollChannelMessages(sessionId: string): Promise<void> {
+    if (channelPolling || !brokerUrl || !parentRunId || !parentToken) return
+
+    channelPolling = true
+    let consecutiveErrors = 0
+    const MAX_CONSECUTIVE_ERRORS = 10
+
+    try {
+      while (consecutiveErrors < MAX_CONSECUTIVE_ERRORS) {
+        await sleep(POLL_INTERVAL_MS)
+        let msgs: any[]
+        try {
+          const resp = await fetch(`${brokerUrl}/poll-control`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ run_id: parentRunId, token: parentToken }),
+          })
+          if (!resp.ok) {
+            consecutiveErrors++
+            continue
+          }
+          msgs = await resp.json()
+          consecutiveErrors = 0
+        } catch {
+          consecutiveErrors++
+          continue
+        }
+        for (const msg of (msgs ?? [])) {
+          if (msg.type !== 'agent_message') continue
+          let payload: any
+          try { payload = typeof msg.payload === 'string' ? JSON.parse(msg.payload) : msg.payload } catch { continue }
+          const text = typeof payload?.message === 'string' ? payload.message : ''
+          if (!text) continue
+          const from = payload.from_run_id ?? msg.from_run_id ?? 'unknown'
+          const role = payload.role ?? ''
+          const resolvedRunId = trackedRuns.has(from) ? from
+            : sessionIdToRunId.get(from)
+            ?? runtimeIdToRunId.get(from)
+          const runInfo = resolvedRunId ? trackedRuns.get(resolvedRunId) : undefined
+          const source = runInfo?.agent ?? (role ? `agent-${role}` : 'agent')
+          const channelText = formatAgentMessage(source, from, role, text)
+          try {
+            await ctx.client.session.promptAsync({
+              path: { id: sessionId },
+              body: { parts: [{ type: 'text', text: channelText }] },
+            })
+          } catch {
+            return
+          }
+        }
+      }
+    } finally {
+      channelPolling = false
+    }
+  }
+
   return {
-    // ── Lifecycle ────────────────────────────────────────────────────────────
-
     event: async ({ event }) => {
       if (event.type !== 'session.idle') return
       const { sessionID } = (
@@ -253,18 +513,12 @@ export const AvenorPlugin: Plugin = async (ctx) => {
 
       for (const run of trackedRuns.values()) {
         if (run.orchestratorSessionId === sessionID && !run.monitoring) {
-          run.monitoring = true
           monitorRun(run).catch(console.error)
         }
       }
     },
 
-    // ── Permission routing ────────────────────────────────────────────────────
-    // When a tracked sub-agent needs a permission, inject a re-prompt into the
-    // orchestrating session so the LLM can answer via avenor_answer_permission.
-    // output.status is left as "ask" so the normal dialog shows as a fallback.
-
-    "permission.ask": async (permission, _output) => {
+    'permission.ask': async (permission, _output) => {
       const runId = sessionIdToRunId.get(permission.sessionID)
       if (!runId) return
 
@@ -278,26 +532,19 @@ export const AvenorPlugin: Plugin = async (ctx) => {
       const lines = [
         `Sub-agent "${run.label}" is requesting permission for \`${permission.type}\`.`,
         ...(patternStr ? [`Pattern: \`${patternStr}\``] : []),
-        ``,
-        `To answer: call \`avenor_answer_permission\` with:`,
+        '',
+        'To answer: call `avenor_answer_permission` with:',
         `  run_id: "${runId}"`,
         `  request_id: "${permission.id}"`,
-        `  option_id: "allow_once" | "allow_always" | "deny"`,
+        '  option_id: "allow_once" | "allow_always" | "deny"',
       ]
 
-      await ctx.client.session.promptAsync({
-        path: { id: run.orchestratorSessionId },
-        body: { parts: [{ type: 'text', text: lines.join('\n') }] },
-      }).catch(() => {})
+      await primeTrackedRun(run, { captureLatestSeq: true })
+      await stopMonitor(run.runId, 'permission-routed')
+      await promptSession(run.orchestratorSessionId, lines.join('\n'))
     },
 
-    // ── Channel rendering ────────────────────────────────────────────────────
-    // When a channel message arrives at the top-level orchestrator (injected as
-    // a raw <channel> XML prompt), format it for human readability. The model
-    // still receives the full XML with the untrusted-content instruction; this
-    // only prettifies the display.
-
-    "chat.message": async (message: any, _output: any) => {
+    'chat.message': async (message: any, _output: any) => {
       if (!message?.parts) return
       for (const part of message.parts) {
         if (part?.type === 'text' && typeof part?.text === 'string' && part.text.includes('<channel ')) {
@@ -306,7 +553,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
       }
     },
 
-    "experimental.text.complete": async (
+    'experimental.text.complete': async (
       _input: { sessionID: string; messageID: string; partID: string },
       output: { text: string },
     ) => {
@@ -317,8 +564,6 @@ export const AvenorPlugin: Plugin = async (ctx) => {
         // Leave text as-is if formatting fails
       }
     },
-
-    // ── Tools ─────────────────────────────────────────────────────────────────
 
     tool: {
       avenor_spawn: tool({
@@ -340,7 +585,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
           ),
         },
         async execute(args, context: ToolContext) {
-          const parentRunId = ensureParentRunId()
+          const ownerRunId = ensureParentRunId()
           const result = await spawnTool({
             agent: args.agent,
             prompt: args.prompt,
@@ -352,157 +597,80 @@ export const AvenorPlugin: Plugin = async (ctx) => {
             backend: args.backend,
             serverUrl: args.server_url,
             supervisorId: args.supervisor_id,
-            parent_run_id: parentRunId,
+            parent_run_id: ownerRunId,
           })
 
-           // Capture broker info for channel messaging. Update on every spawn
-           // so a different supervisor can take over if needed.
-           if (result.broker_url) {
-             brokerUrl = result.broker_url
-           }
-           if (result.parent_token) {
-             parentToken = result.parent_token
-           }
+          if (result.broker_url) {
+            brokerUrl = result.broker_url
+          }
+          if (result.parent_token) {
+            parentToken = result.parent_token
+          }
 
-          const supervisorId = result.supervisor_id || args.supervisor_id
-
-          trackedRuns.set(result.run_id, {
+          const run: TrackedRun = {
             runId: result.run_id,
+            runtimeId: result.runtime_id,
             agent: args.agent,
             orchestratorSessionId: context.sessionID,
             label: result.label,
-            supervisorId,
-            // Blocking mode is the monitor — prevent session.idle from starting a duplicate.
-            monitoring: args.wait,
-          })
-
-          // Register runtime_id immediately so channel messages arriving
-          // before the first status poll can still resolve the agent name.
-          if (result.runtime_id) {
-            runtimeIdToRunId.set(result.runtime_id, result.run_id)
+            supervisorId: result.supervisor_id || args.supervisor_id,
+            monitoring: false,
           }
+          trackedRuns.set(result.run_id, run)
+          registerSessionId(undefined, result.runtime_id, result.run_id)
+          await primeTrackedRun(run)
 
           if (!args.wait) {
-            // Start watching now, not when the orchestrator eventually becomes
-            // idle. A child can request permission while the orchestrator is
-            // still finishing its current response, and the control-plane
-            // claim may time out before a session.idle event is emitted.
-            const run = trackedRuns.get(result.run_id)
-            if (run) {
-              run.monitoring = true
-              monitorRun(run).catch(console.error)
-            }
+            void monitorRun(run).catch(console.error)
             return {
               title: `${result.label} — dispatched`,
               output: `Dispatched "${result.label}" (run_id: ${result.run_id}). Call avenor_status with run_id to check progress, or wait for the completion notification.`,
             }
           }
 
-          // ── Blocking mode: live updates via context.metadata ──────────────
-
           context.metadata({ title: `Starting ${result.label}…` })
 
-          let firstPoll = true
-          while (!context.abort.aborted) {
-            // Poll immediately on first iteration so we register the session_id
-            // before the first permission request can arrive.
-            if (!firstPoll) await sleep(POLL_INTERVAL_MS)
-            firstPoll = false
-
-            if (context.abort.aborted) break
-
-            let raw: StatusResult | StatusResult[]
-            try {
-              raw = await statusTool({ runId: result.run_id, supervisorId })
-            } catch {
-              continue
-            }
-
-            const status = Array.isArray(raw) ? raw[0] : raw
-            if (!status) continue
-
-            registerSessionId(status.session_id, status.runtime_id, result.run_id)
-
-            if (status.pending_permission) {
+          const outcome = await observeTrackedRun(run, {
+            abort: context.abort,
+            onSnapshot: (snapshot) => {
               context.metadata({
-                title: `[blocked] ${result.label}`,
-                metadata: {
-                  status: 'permission',
-                  permission: status.pending_permission.description,
-                },
+                title: snapshot.pending_permission ? `[blocked] ${result.label}` : result.label,
+                metadata: buildSnapshotMetadata(snapshot),
               })
-            } else {
-              let lastAction = ''
-              // eventsTool requires the singleton supervisor — skip when using an explicit one.
-              if (!supervisorId) {
-                try {
-                  const { events } = await eventsTool({ runId: result.run_id, limit: 3 })
-                  const last = events[events.length - 1]
-                  if (last) lastAction = summarizeEvent(last)
-                } catch {}
-              }
-              context.metadata({
-                title: result.label,
-                metadata: {
-                  status: status.status,
-                  ...(status.phase_label && { phase: status.phase_label }),
-                  ...(lastAction && { last: lastAction }),
-                },
-              })
-            }
+            },
+          })
 
-            if (TERMINAL_STATUSES.has(status.status)) {
-              trackedRuns.delete(result.run_id)
-              return {
-                title: `${result.label} — ${status.status}`,
-                output: buildCompletionText({ runId: result.run_id, label: result.label }, status),
-                metadata: {
-                  status: status.status,
-                  run_id: result.run_id,
-                  session_id: status.session_id,
-                },
-              }
-            }
-
-            // A sub-agent in the "waiting" phase is blocked on a question or
-            // permission request that the orchestrator must answer. Break out
-            // of the blocking loop so the orchestrator gets its turn back,
-            // rather than spinning forever on a runtime that cannot progress.
-            if (status.status === 'waiting') {
-              const perm = status.pending_permission
-              const lines = [
-                `Sub-agent "${result.label}" is waiting for input.`,
-              ]
-              if (perm) {
-                lines.push(
-                  `Permission request: ${perm.description}`,
-                  `To answer: call \`avenor_answer_permission\` with run_id "${result.run_id}", option_id "allow_once" | "allow_always" | "deny"`,
-                )
-              } else if (status.phase_label) {
-                lines.push(`Question: ${status.phase_label}`)
-              }
-              lines.push(
-                `Use \`avenor_follow_up\` with run_id "${result.run_id}" to respond, or \`avenor_status\` to re-check.`,
-              )
-              // Leave the run tracked so session.idle / monitorRun can resume
-              // observing it once the orchestrator answers.
-              const tracked = trackedRuns.get(result.run_id)
-              if (tracked) tracked.monitoring = false
-              return {
-                title: `${result.label} — waiting`,
-                output: lines.join('\n'),
-                metadata: {
-                  status: 'waiting',
-                  run_id: result.run_id,
-                  session_id: status.session_id,
-                  ...(perm && { pending_permission: perm }),
-                },
-              }
+          if (outcome.kind === 'terminal') {
+            const inspection = await loadInspection(run)
+            const snapshot = inspection?.snapshot ?? outcome.snapshot
+            unregisterRun(result.run_id)
+            return {
+              title: `${result.label} — ${terminalStatus(snapshot, inspection?.status)}`,
+              output: buildCompletionText(run, snapshot, inspection?.status, inspection?.final_output),
+              metadata: {
+                run_id: result.run_id,
+                session_id: inspection?.status.session_id ?? snapshot.identity.session_id,
+                final_output: clipTail(inspection?.final_output ?? snapshot.final_output, FINAL_OUTPUT_CHARS),
+                ...buildSnapshotMetadata(snapshot),
+              },
             }
           }
 
-          // Aborted — clean up but don't cancel the underlying run.
-          trackedRuns.delete(result.run_id)
+          if (outcome.kind === 'waiting') {
+            const inspection = await loadInspection(run)
+            const snapshot = inspection?.snapshot ?? outcome.snapshot
+            return {
+              title: `${result.label} — waiting`,
+              output: buildWaitingText(run, snapshot),
+              metadata: {
+                run_id: result.run_id,
+                session_id: inspection?.status.session_id ?? snapshot.identity.session_id,
+                ...buildSnapshotMetadata(snapshot),
+              },
+            }
+          }
+
+          unregisterRun(result.run_id)
           return {
             title: `${result.label} — aborted`,
             output: `Monitoring of "${result.label}" (run_id: ${result.run_id}) was interrupted. The run may still be active — use avenor_status to check.`,
@@ -554,13 +722,27 @@ export const AvenorPlugin: Plugin = async (ctx) => {
           label: tool.schema.string().optional().describe('Override label (defaults to <original>-followup)'),
           supervisor_id: tool.schema.string().optional().describe('Reuse an existing supervisor by socket path'),
         },
-        async execute(args, _context) {
+        async execute(args, context) {
           const result = await followUpTool({
             runId: args.run_id,
             message: args.message,
             label: args.label,
             supervisorId: args.supervisor_id,
           })
+
+          const priorRun = trackedRuns.get(args.run_id)
+          const run: TrackedRun = {
+            runId: result.run_id,
+            agent: priorRun?.agent ?? 'agent',
+            orchestratorSessionId: context.sessionID,
+            label: result.label,
+            supervisorId: args.supervisor_id ?? Supervisor.currentInstance()?.supervisorId,
+            monitoring: false,
+          }
+          trackedRuns.set(result.run_id, run)
+          await primeTrackedRun(run)
+          void monitorRun(run).catch(console.error)
+
           return JSON.stringify(result, null, 2)
         },
       }),
@@ -584,6 +766,25 @@ export const AvenorPlugin: Plugin = async (ctx) => {
         },
       }),
 
+      avenor_inspect: tool({
+        description: 'Inspect a run with reduced snapshot, transcript, tools, permissions, and final output.',
+        args: {
+          run_id: tool.schema.string().describe('Run ID to inspect'),
+          limit: tool.schema.number().optional().describe('Max events to reduce into the snapshot (default 50)'),
+          after_seq: tool.schema.number().optional().describe('Only include events after this sequence number'),
+          supervisor_id: tool.schema.string().optional().describe('Reuse an existing supervisor by socket path'),
+        },
+        async execute(args, _context) {
+          const result = await inspectTool({
+            runId: args.run_id,
+            limit: args.limit,
+            after_seq: args.after_seq,
+            supervisorId: args.supervisor_id,
+          })
+          return JSON.stringify(result, null, 2)
+        },
+      }),
+
       avenor_shutdown: tool({
         description: 'Shut down the avenor supervisor and clean up temp files.',
         args: {
@@ -591,6 +792,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
           force: tool.schema.boolean().optional().describe('Force shutdown instead of graceful'),
         },
         async execute(args, _context) {
+          await stopTrackedRuns((run) => !args.supervisor_id || run.supervisorId === args.supervisor_id)
           const result = await shutdownTool({
             supervisorId: args.supervisor_id,
             force: args.force,
