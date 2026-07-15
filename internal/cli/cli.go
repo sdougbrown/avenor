@@ -1094,7 +1094,7 @@ func (m *EventMetadata) Stamp(event events.Event) events.Event {
 	if m == nil {
 		return events.BoundFinalOutput(events.Clone(event))
 	}
-	out := events.Clone(event)
+	out := events.BoundFinalOutput(events.Clone(event))
 	if out.Fields == nil {
 		out.Fields = map[string]any{}
 	}
@@ -1129,7 +1129,7 @@ func (m *EventMetadata) Stamp(event events.Event) events.Event {
 		m.latestSeq++
 		out.Fields["seq"] = m.latestSeq
 	}
-	return events.BoundFinalOutput(out)
+	return out
 }
 
 type EventSink interface {

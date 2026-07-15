@@ -40,14 +40,14 @@ func Int64(value any) (int64, bool) {
 }
 
 func BoundedFinalOutput(text string) string {
-	if text == "" {
-		return ""
+	count := 0
+	for index := range text {
+		if count == MaxFinalOutputRunes {
+			return text[:index]
+		}
+		count++
 	}
-	runes := []rune(text)
-	if len(runes) <= MaxFinalOutputRunes {
-		return text
-	}
-	return string(runes[:MaxFinalOutputRunes])
+	return text
 }
 
 func BoundFinalOutput(event Event) Event {

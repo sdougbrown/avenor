@@ -62,7 +62,7 @@ func eventScopeKey(ev events.Event) string {
 }
 
 func (s *ControlServer) CanonicalizeEvent(event events.Event) events.Event {
-	out := events.Clone(event)
+	out := events.BoundFinalOutput(events.Clone(event))
 	if out.Fields == nil {
 		out.Fields = map[string]any{}
 	}
@@ -97,7 +97,7 @@ func (s *ControlServer) CanonicalizeEvent(event events.Event) events.Event {
 		st.latestSeq++
 		out.Fields["seq"] = st.latestSeq
 	}
-	return events.BoundFinalOutput(out)
+	return out
 }
 
 func (s *ControlServer) PublishEvent(event events.Event) events.Event {
