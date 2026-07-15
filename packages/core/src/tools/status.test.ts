@@ -74,4 +74,54 @@ describe('statusTool singleton registry', () => {
       runtime_id: runInfo.runtimeId,
     })
   })
+
+  it('maps richer metadata additively from live status', async () => {
+    statusMock.mockResolvedValueOnce({
+      runtime_id: runInfo.runtimeId,
+      session_id: 'ses-live',
+      phase: 'waiting',
+      phase_label: 'Need approval',
+      backend: 'pi',
+      agent: 'horse',
+      model: 'qwen',
+      dir: '/tmp/work',
+      parent_id: 'rt-parent',
+      children: ['rt-child'],
+      event_path: '/tmp/work/events.ndjson',
+      latest_seq: 42,
+      final_output: 'final answer',
+      usage: { total_tokens: 12 },
+      pending_permission: true,
+      permission: {
+        request_id: 'req-7',
+        description: 'Allow edit?',
+        options: [{ optionId: 'allow_once', label: 'Allow', kind: 'allow_once' }],
+      },
+    })
+
+    const result = await statusTool({
+      runId: runInfo.runId,
+      supervisorId: '/tmp/avenor-mcp-test.sock',
+    })
+
+    expect(result).toMatchObject({
+      run_id: runInfo.runId,
+      status: 'waiting',
+      backend: 'pi',
+      agent: 'horse',
+      model: 'qwen',
+      dir: '/tmp/work',
+      parent_id: 'rt-parent',
+      children: ['rt-child'],
+      event_path: '/tmp/work/events.ndjson',
+      latest_seq: 42,
+      final_output: 'final answer',
+      pending_permission: {
+        request_id: 'req-7',
+        description: 'Allow edit?',
+        options: [{ option_id: 'allow_once', label: 'Allow', kind: 'allow_once' }],
+      },
+      usage: { total_tokens: 12 },
+    })
+  })
 })

@@ -37,6 +37,7 @@ export default defineConfig({
         text: 'Control',
         items: [
           { text: 'Control Protocol', link: '/control-protocol' },
+          { text: 'Run Introspection', link: '/introspection' },
           { text: 'Stable', link: '/stable' },
         ],
       },

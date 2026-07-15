@@ -1,5 +1,14 @@
 import * as fs from 'node:fs'
+import * as readline from 'node:readline'
 import { Supervisor, type RunInfo } from '../supervisor.js'
+import { type Client } from '../client.js'
+import { getSupervisorClient } from './get-supervisor-client.js'
+import { validateRunId } from './validate.js'
+
+const MAX_EVENT_LIMIT = 1_000
+const MAX_STRING_CHARS = 4_000
+const MAX_ARRAY_ITEMS = 32
+const MAX_OBJECT_KEYS = 64
 
 function findRunByLabel(sup: Supervisor, runId: string): RunInfo | undefined {
   const runs = (sup as any).runs as Map<string, RunInfo>
@@ -11,62 +20,238 @@ function findRunByLabel(sup: Supervisor, runId: string): RunInfo | undefined {
   return undefined
 }
 
+function normalizeLimit(limit?: number): number {
+  return Math.max(1, Math.min(MAX_EVENT_LIMIT, Math.trunc(limit ?? 50)))
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return null
+  }
+  return value as Record<string, unknown>
+}
+
+function eventName(record: Record<string, unknown>): string {
+  const event = record.event
+  if (typeof event === 'string' && event.length > 0) return event
+  const type = record.type
+  return typeof type === 'string' ? type : ''
+}
+
+function eventSeq(record: Record<string, unknown>): number | undefined {
+  const value = record.seq
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim().length > 0) {
+    const parsed = Number(value)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return undefined
+}
+
+function clipValue(value: unknown): unknown {
+  if (typeof value === 'string') {
+    if (value.length <= MAX_STRING_CHARS) return value
+    return value.slice(value.length - MAX_STRING_CHARS)
+  }
+  if (Array.isArray(value)) {
+    const slice = value.length <= MAX_ARRAY_ITEMS
+      ? value
+      : value.slice(value.length - MAX_ARRAY_ITEMS)
+    return slice.map((item) => clipValue(item))
+  }
+  const record = asRecord(value)
+  if (!record) return value
+  const result: Record<string, unknown> = {}
+  const entries = Object.entries(record).slice(0, MAX_OBJECT_KEYS)
+  for (const [key, item] of entries) {
+    result[key] = clipValue(item)
+  }
+  return result
+}
+
+function clipEvent(record: Record<string, unknown>): Record<string, unknown> {
+  return clipValue(record) as Record<string, unknown>
+}
+
+function matchesFilters(
+  record: Record<string, unknown>,
+  args: { types?: string[]; after_seq?: number },
+): boolean {
+  const name = eventName(record)
+  if (args.types && args.types.length > 0 && !args.types.includes(name)) {
+    return false
+  }
+  const seq = eventSeq(record)
+  if (args.after_seq !== undefined && seq !== undefined && seq <= args.after_seq) {
+    return false
+  }
+  return true
+}
+
+async function readNdjsonEvents(
+  filePath: string,
+  args: { types?: string[]; limit: number; after_seq?: number },
+): Promise<Array<Record<string, unknown>>> {
+  const stream = fs.createReadStream(filePath, { encoding: 'utf-8' })
+  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity })
+  const events: Array<Record<string, unknown>> = []
+
+  try {
+    for await (const line of rl) {
+      if (!line.trim()) continue
+      try {
+        const parsed = JSON.parse(line)
+        const record = asRecord(parsed)
+        if (!record || !matchesFilters(record, args)) continue
+        events.push(clipEvent(record))
+        if (events.length > args.limit) {
+          events.splice(0, events.length - args.limit)
+        }
+      } catch {
+        // skip malformed lines
+      }
+    }
+  } finally {
+    rl.close()
+    stream.close()
+  }
+
+  return events
+}
+
+async function resolveRun(
+  args: { runId: string; supervisorId?: string },
+): Promise<{
+  client: Client
+  isSingleton: boolean
+  runInfo?: RunInfo
+  runtimeId?: string
+  eventLogPath?: string
+}> {
+  if (args.supervisorId) {
+    const { client, isSingleton, sup } = await getSupervisorClient(args.supervisorId)
+    const runInfo = isSingleton && sup ? findRunByLabel(sup, args.runId) : undefined
+    if (runInfo) {
+      return {
+        client,
+        isSingleton,
+        runInfo,
+        runtimeId: runInfo.runtimeId,
+        eventLogPath: runInfo.eventLogPath,
+      }
+    }
+
+    let runtimeId: string | undefined
+    let eventLogPath: string | undefined
+    try {
+      const direct = await client.status(args.runId)
+      runtimeId = (direct.runtime_id as string | undefined) ?? args.runId
+      eventLogPath =
+        (direct.event_path as string | undefined) ??
+        (direct.on_event as string | undefined)
+    } catch {
+      try {
+        const list = await client.list()
+        const match = list.find((entry) => {
+          const runtime = String(entry.runtime_id ?? entry.id ?? '')
+          const label = String(entry.label ?? '')
+          const runId = String(entry.run_id ?? '')
+          return runtime === args.runId || label === args.runId || runId === args.runId
+        })
+        if (match) {
+          runtimeId = String(match.runtime_id ?? match.id ?? '') || undefined
+          eventLogPath =
+            (match.event_path as string | undefined) ??
+            (match.on_event as string | undefined)
+        }
+      } catch {
+        // ignore lookup errors
+      }
+    }
+
+    return { client, isSingleton, runtimeId, eventLogPath }
+  }
+
+  const sup = await Supervisor.get()
+  const runInfo = findRunByLabel(sup, args.runId)
+  if (runInfo) {
+    return {
+      client: sup.getClient(),
+      isSingleton: true,
+      runInfo,
+      runtimeId: runInfo.runtimeId,
+      eventLogPath: runInfo.eventLogPath,
+    }
+  }
+
+  validateRunId(args.runId)
+  let runtimeId: string | undefined
+  let eventLogPath: string | undefined
+  try {
+    const direct = await sup.getClient().status(args.runId)
+    runtimeId = (direct.runtime_id as string | undefined) ?? args.runId
+    eventLogPath =
+      (direct.event_path as string | undefined) ??
+      (direct.on_event as string | undefined)
+  } catch {
+    // ignore registry misses
+  }
+
+  return { client: sup.getClient(), isSingleton: true, runtimeId, eventLogPath }
+}
+
 export async function eventsTool(args: {
   runId: string
   types?: string[]
   limit?: number
   supervisorId?: string
-}): Promise<{events: Array<{ type: string; ts: number; [key: string]: unknown }>}> {
-  if (args.supervisorId) {
-    throw new Error(
-      'eventsTool with explicit supervisorId not supported — ' +
-        'event log path must be tracked by the singleton supervisor',
-    )
-  }
+  after_seq?: number
+}): Promise<{ events: Array<{ event?: string; type?: string; ts?: number; [key: string]: unknown }> }> {
+  const limit = normalizeLimit(args.limit)
+  const resolved = await resolveRun(args)
 
-  const sup = await Supervisor.get()
-  const runInfo = findRunByLabel(sup, args.runId)
-
-  if (!runInfo) {
-    throw new Error(`run not found: ${args.runId}`)
-  }
-
-  const limit = Math.max(1, Math.min(1000, Math.trunc(args.limit ?? 50)))
-  let raw: string
   try {
-    const stat = await fs.promises.stat(runInfo.eventLogPath)
-    const tailBytes = Math.min(stat.size, 256 * 1024)
-    const handle = await fs.promises.open(runInfo.eventLogPath, 'r')
-    try {
-      const buffer = Buffer.alloc(tailBytes)
-      const start = Math.max(0, stat.size - tailBytes)
-      const { bytesRead } = await handle.read(buffer, 0, tailBytes, start)
-      raw = buffer.subarray(0, bytesRead).toString('utf-8')
-    } finally {
-      await handle.close()
+    // Preserve eventsTool's durable-history semantics when the supervisor
+    // exposes the NDJSON path. The control-plane ring is intentionally small
+    // and can no longer answer filters that match only rotated-out events.
+    if (resolved.eventLogPath) {
+      try {
+        return {
+          events: await readNdjsonEvents(resolved.eventLogPath, {
+            types: args.types,
+            limit,
+            after_seq: args.after_seq,
+          }),
+        }
+      } catch {
+        // The path may belong to another process namespace; try live history.
+      }
     }
-  } catch {
+
+    if (resolved.runtimeId) {
+      try {
+        const history = await resolved.client.history({
+          runtime_id: resolved.runtimeId,
+          limit,
+          after_seq: args.after_seq,
+        })
+        const events = Array.isArray(history.events)
+          ? history.events
+              .map((event) => asRecord(event))
+              .filter((event): event is Record<string, unknown> => event !== null)
+              .filter((event) => matchesFilters(event, args))
+              .map((event) => clipEvent(event))
+          : []
+        return { events }
+      } catch {
+        // No durable path and history unavailable.
+      }
+    }
+
     return { events: [] }
-  }
-
-  const lines = raw.split('\n').filter((line) => line.trim())
-  let events: Array<{ type: string; ts: number; [key: string]: unknown }> = []
-
-  for (const line of lines) {
-    try {
-      events.push(JSON.parse(line))
-    } catch {
-      // skip malformed lines
+  } finally {
+    if (!resolved.isSingleton) {
+      resolved.client.close()
     }
   }
-
-  if (args.types && args.types.length > 0) {
-    events = events.filter((e) => args.types!.includes(e.type ?? e.event ?? ''))
-  }
-
-  if (events.length > limit) {
-    events = events.slice(events.length - limit)
-  }
-
-  return { events } as { events: Array<{ type: string; ts: number; [key: string]: unknown }> }
 }

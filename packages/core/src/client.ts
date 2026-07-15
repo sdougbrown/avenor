@@ -22,6 +22,25 @@ export interface Event {
   [key: string]: unknown
 }
 
+export interface SubscribeOptions {
+  runtime_id?: string
+  replay?: boolean
+  limit?: number
+  after_seq?: number
+}
+
+export interface HistoryOptions {
+  runtime_id: string
+  limit?: number
+  after_seq?: number
+}
+
+export interface HistoryResult<TEvent = Event> {
+  runtime_id?: string
+  events: TEvent[]
+  latest_seq?: number
+}
+
 export interface SpawnParams {
   agent: string
   prompt_file?: string
@@ -44,6 +63,36 @@ type PendingCall = {
   timer: ReturnType<typeof setTimeout>
 }
 
+type EventResolver = {
+  resolve: (value: IteratorResult<Event>) => void
+  active: boolean
+}
+
+function normalizeSubscribeOptions(options?: SubscribeOptions): SubscribeOptions | undefined {
+  if (!options) return undefined
+  const normalized: SubscribeOptions = {}
+  if (options.runtime_id) normalized.runtime_id = options.runtime_id
+  if (options.replay) normalized.replay = true
+  if (options.limit !== undefined) {
+    normalized.limit = Math.max(1, Math.min(256, Math.trunc(options.limit)))
+  }
+  if (options.after_seq !== undefined) {
+    normalized.after_seq = Math.max(0, Math.trunc(options.after_seq))
+  }
+  return Object.keys(normalized).length > 0 ? normalized : undefined
+}
+
+function subscribeOptionsKey(options?: SubscribeOptions): string {
+  return JSON.stringify(normalizeSubscribeOptions(options) ?? {})
+}
+
+function removeResolver(resolvers: EventResolver[], target: EventResolver): void {
+  const index = resolvers.indexOf(target)
+  if (index >= 0) {
+    resolvers.splice(index, 1)
+  }
+}
+
 export class Client {
   private socket: net.Socket
   private rl: readline.Interface
@@ -53,10 +102,11 @@ export class Client {
   private callTimeout: number
 
   private eventQueue: Event[] = []
-  private eventResolvers: Array<(value: IteratorResult<Event>) => void> = []
+  private eventResolvers: EventResolver[] = []
   private eventDone = false
   private dropped = 0
   private subscribed = false
+  private subscriptionKey = subscribeOptionsKey()
 
   constructor(
     socket: net.Socket,
@@ -104,8 +154,7 @@ export class Client {
         if (this.dropped > 0) {
           const lag = this.dropped
           this.dropped = 0
-          const lagEvent: Event = { event: 'client.lagged', dropped_count: lag }
-          this.pushEvent(lagEvent)
+          this.pushEvent({ event: 'client.lagged', dropped_count: lag })
         }
         this.pushEvent(ev)
       }
@@ -118,18 +167,24 @@ export class Client {
       }
       this.pending.clear()
       this.eventDone = true
-      for (const resolve of this.eventResolvers) {
-        resolve({ value: undefined, done: true })
+      for (const resolver of this.eventResolvers) {
+        resolver.active = false
+        resolver.resolve({ value: undefined, done: true })
       }
       this.eventResolvers = []
     })
   }
 
   private pushEvent(ev: Event): void {
-    if (this.eventResolvers.length > 0) {
-      const resolve = this.eventResolvers.shift()!
-      resolve({ value: ev, done: false })
-    } else if (this.eventQueue.length < 256) {
+    while (this.eventResolvers.length > 0) {
+      const resolver = this.eventResolvers.shift()!
+      if (!resolver.active) continue
+      resolver.active = false
+      resolver.resolve({ value: ev, done: false })
+      return
+    }
+
+    if (this.eventQueue.length < 256) {
       this.eventQueue.push(ev)
     } else {
       this.dropped++
@@ -165,29 +220,86 @@ export class Client {
     })
   }
 
-  private async subscribe(): Promise<void> {
-    if (this.subscribed) return
+  async subscribe(options?: SubscribeOptions): Promise<void> {
+    const key = subscribeOptionsKey(options)
+    if (this.subscribed) {
+      if (key !== subscribeOptionsKey() && key !== this.subscriptionKey) {
+        throw new Error('client already subscribed with different options')
+      }
+      return
+    }
     this.subscribed = true
-    await this.call('subscribe')
+    this.subscriptionKey = key
+    await this.call('subscribe', normalizeSubscribeOptions(options))
   }
 
-  async *events(): AsyncIterable<Event> {
-    await this.subscribe()
-    while (true) {
-      if (this.eventDone) break
+  events(options?: SubscribeOptions): AsyncIterableIterator<Event> {
+    let active = true
+    let pendingResolver: EventResolver | null = null
+    let subscribedPromise: Promise<void> | null = null
 
-      if (this.eventQueue.length > 0) {
-        yield this.eventQueue.shift()!
-        continue
+    const ensureSubscribed = async (): Promise<void> => {
+      if (!subscribedPromise) {
+        subscribedPromise = this.subscribe(options)
+      }
+      await subscribedPromise
+    }
+
+    const next = async (): Promise<IteratorResult<Event>> => {
+      if (!active || this.eventDone) {
+        return { value: undefined, done: true }
       }
 
-      const result = await new Promise<IteratorResult<Event>>((resolve) => {
-        this.eventResolvers.push(resolve)
-      })
+      await ensureSubscribed()
 
-      if (result.done) break
-      yield result.value
+      if (!active || this.eventDone) {
+        return { value: undefined, done: true }
+      }
+
+      if (this.eventQueue.length > 0) {
+        return { value: this.eventQueue.shift()!, done: false }
+      }
+
+      return new Promise<IteratorResult<Event>>((resolve) => {
+        pendingResolver = { resolve, active: true }
+        this.eventResolvers.push(pendingResolver)
+      })
     }
+
+    const stop = async (): Promise<IteratorResult<Event>> => {
+      if (!active) {
+        return { value: undefined, done: true }
+      }
+      active = false
+      if (pendingResolver) {
+        pendingResolver.active = false
+        removeResolver(this.eventResolvers, pendingResolver)
+        pendingResolver.resolve({ value: undefined, done: true })
+        pendingResolver = null
+      }
+      return { value: undefined, done: true }
+    }
+
+    return {
+      next,
+      return: stop,
+      async throw(error?: unknown): Promise<IteratorResult<Event>> {
+        await stop()
+        throw error
+      },
+      [Symbol.asyncIterator]() {
+        return this
+      },
+    }
+  }
+
+  async history(options: HistoryOptions): Promise<HistoryResult> {
+    const params: HistoryOptions = {
+      runtime_id: options.runtime_id,
+      limit: options.limit !== undefined ? Math.max(1, Math.min(256, Math.trunc(options.limit))) : undefined,
+      after_seq: options.after_seq !== undefined ? Math.max(0, Math.trunc(options.after_seq)) : undefined,
+    }
+    return this.call('history', params) as Promise<HistoryResult>
   }
 
   async status(runtimeId?: string): Promise<Record<string, unknown>> {
