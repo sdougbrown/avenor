@@ -172,6 +172,67 @@ describe('Client.events', () => {
     }
   })
 
+  it('preserves an explicit replay false option', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      expect(req.method).toBe('subscribe')
+      expect(req.params).toEqual({ runtime_id: 'rt-2', replay: false })
+      sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: { subscribed: true } }) + '\n')
+      sock.write(JSON.stringify({ jsonrpc: '2.0', method: 'event', params: { event: 'tick' } }) + '\n')
+    })
+
+    const client = await dial(socketPath)
+    try {
+      const event = await client.events({ runtime_id: 'rt-2', replay: false }).next()
+      expect(event.done).toBe(false)
+      expect(event.value.event).toBe('tick')
+    } finally {
+      client.close()
+    }
+  })
+
+  it('ends the iterator after surfacing a subscribe failure', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      expect(req.method).toBe('subscribe')
+      sock.write(JSON.stringify({
+        jsonrpc: '2.0',
+        id: req.id,
+        error: { code: -32000, message: 'subscribe failed' },
+      }) + '\n')
+    })
+
+    const client = await dial(socketPath)
+    try {
+      const iter = client.events()
+      await expect(iter.next()).rejects.toThrow('subscribe failed')
+      expect(await iter.next()).toEqual({ value: undefined, done: true })
+    } finally {
+      client.close()
+    }
+  })
+
+  it('rejects conflicting options after subscribing', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      expect(req.method).toBe('subscribe')
+      sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: { subscribed: true } }) + '\n')
+    })
+
+    const client = await dial(socketPath)
+    try {
+      await client.subscribe({ runtime_id: 'rt-1' })
+      await expect(client.subscribe({ runtime_id: 'rt-2' })).rejects.toThrow(
+        'client already subscribed with different options',
+      )
+    } finally {
+      client.close()
+    }
+  })
+
   it('supports explicit subscribe before events()', async () => {
     const socketPath = tempSocketPath()
     const calls: string[] = []
@@ -232,6 +293,33 @@ describe('Client.history', () => {
       expect(result.latest_seq).toBe(12)
       expect(result.events).toHaveLength(1)
       expect(result.events[0].seq).toBe(10)
+    } finally {
+      client.close()
+    }
+  })
+
+  it('clamps history bounds before sending them', async () => {
+    const socketPath = tempSocketPath()
+    const expected = [
+      { runtime_id: 'rt-hist', limit: 1, after_seq: 0 },
+      { runtime_id: 'rt-hist', limit: 256, after_seq: 0 },
+    ]
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      expect(req.method).toBe('history')
+      expect(req.params).toEqual(expected.shift())
+      sock.write(JSON.stringify({
+        jsonrpc: '2.0',
+        id: req.id,
+        result: { runtime_id: 'rt-hist', events: [] },
+      }) + '\n')
+    })
+
+    const client = await dial(socketPath)
+    try {
+      await client.history({ runtime_id: 'rt-hist', limit: -10, after_seq: -5 })
+      await client.history({ runtime_id: 'rt-hist', limit: 999, after_seq: -1 })
+      expect(expected).toHaveLength(0)
     } finally {
       client.close()
     }

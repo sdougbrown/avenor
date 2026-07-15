@@ -72,7 +72,7 @@ function normalizeSubscribeOptions(options?: SubscribeOptions): SubscribeOptions
   if (!options) return undefined
   const normalized: SubscribeOptions = {}
   if (options.runtime_id) normalized.runtime_id = options.runtime_id
-  if (options.replay) normalized.replay = true
+  if (options.replay !== undefined) normalized.replay = options.replay
   if (options.limit !== undefined) {
     normalized.limit = Math.max(1, Math.min(256, Math.trunc(options.limit)))
   }
@@ -250,7 +250,12 @@ export class Client {
         return { value: undefined, done: true }
       }
 
-      await ensureSubscribed()
+      try {
+        await ensureSubscribed()
+      } catch (error) {
+        active = false
+        throw error
+      }
 
       if (!active || this.eventDone) {
         return { value: undefined, done: true }
