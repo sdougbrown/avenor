@@ -63,10 +63,9 @@ function clipTail(text: string | undefined, limit: number): string | undefined {
   return text.slice(text.length - limit)
 }
 
-function terminalStatus(snapshot: RunSnapshot, fallback?: StatusResult): string {
+export function terminalStatus(snapshot: RunSnapshot, fallback?: StatusResult): string {
   if (fallback?.status) return fallback.status
   if (snapshot.phase && TERMINAL_STATUSES.has(snapshot.phase)) return snapshot.phase
-  if (snapshot.phase === 'done') return 'done'
   return snapshot.stop_reason ?? 'done'
 }
 
@@ -129,7 +128,7 @@ function buildSnapshotMetadata(snapshot: RunSnapshot): Record<string, unknown> {
   return metadata
 }
 
-function buildWaitingText(run: TrackedRun, snapshot: RunSnapshot): string {
+export function buildWaitingText(run: TrackedRun, snapshot: RunSnapshot): string {
   const permission = snapshot.pending_permission
   const lines = [
     `Sub-agent "${run.label}" is waiting for input.`,
@@ -149,9 +148,11 @@ function buildWaitingText(run: TrackedRun, snapshot: RunSnapshot): string {
     lines.push('', `Recent context:\n${transcriptPreview}`)
   }
 
-  lines.push(
-    `Use \`avenor_follow_up\` with run_id "${run.runId}" to respond, or \`avenor_status\` to re-check.`,
-  )
+  if (!permission) {
+    lines.push(
+      `Use \`avenor_follow_up\` with run_id "${run.runId}" to respond, or \`avenor_status\` to re-check.`,
+    )
+  }
 
   return lines.join('\n')
 }
@@ -239,10 +240,10 @@ export const AvenorPlugin: Plugin = async (ctx) => {
 
   function unregisterRun(runId: string): void {
     trackedRuns.delete(runId)
-    for (const [sessionId, mappedRunId] of sessionIdToRunId.entries()) {
+    for (const [sessionId, mappedRunId] of [...sessionIdToRunId.entries()]) {
       if (mappedRunId === runId) sessionIdToRunId.delete(sessionId)
     }
-    for (const [runtimeId, mappedRunId] of runtimeIdToRunId.entries()) {
+    for (const [runtimeId, mappedRunId] of [...runtimeIdToRunId.entries()]) {
       if (mappedRunId === runId) runtimeIdToRunId.delete(runtimeId)
     }
   }
@@ -343,6 +344,15 @@ export const AvenorPlugin: Plugin = async (ctx) => {
 
         if (handle.stopReason) {
           await observer.close()
+          const current = observer.snapshot()
+          syncRunSnapshot(run, current)
+          if (handle.stopReason === 'permission-routed') {
+            return { kind: 'waiting', snapshot: current, notified: true }
+          }
+          if (handle.stopReason === 'abort') {
+            return { kind: 'aborted', snapshot: current }
+          }
+          return { kind: 'shutdown', snapshot: current }
         }
 
         if (options.abort) {

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it, jest, mock } from 'bun:test'
 
 import { observeRun } from '../../core/src/run-observer.js'
 import { createRunSnapshot } from '../../core/src/run-reducer.js'
@@ -49,7 +49,7 @@ const inspectToolMock = mock(async () => {
   }
 })
 
-function makeEventClient(events: unknown[], options: { hangAfterExhausted?: boolean } = {}) {
+function makeEventClient(events: unknown[], options: { hangAfterExhausted?: boolean; errorAfterExhausted?: Error } = {}) {
   let index = 0
   let closed = false
   let pendingResolve: ((result: IteratorResult<any>) => void) | null = null
@@ -69,6 +69,9 @@ function makeEventClient(events: unknown[], options: { hangAfterExhausted?: bool
       }
       if (index < events.length) {
         return { value: events[index++], done: false as const }
+      }
+      if (options.errorAfterExhausted) {
+        throw options.errorAfterExhausted
       }
       if (!options.hangAfterExhausted) {
         closed = true
@@ -104,7 +107,9 @@ function makeEventClient(events: unknown[], options: { hangAfterExhausted?: bool
 }
 
 const dialQueue: Array<ReturnType<typeof makeEventClient>> = []
+let dialOverride: (() => Promise<any>) | undefined
 const dialMock = mock(async () => {
+  if (dialOverride) return dialOverride()
   const next = dialQueue.shift()
   if (!next) {
     throw new Error('unexpected dial')
@@ -130,7 +135,8 @@ mock.module('@dougbots/avenor-core', () => ({
   },
 }))
 
-const { AvenorPlugin } = await import('./plugin.js')
+const { AvenorPlugin, buildWaitingText, terminalStatus } = await import('./plugin.js')
+const originalFetch = globalThis.fetch
 
 function makeClient(promptAsync = mock(async () => {})) {
   return {
@@ -169,6 +175,12 @@ async function flush(): Promise<void> {
   await new Promise(resolve => setTimeout(resolve, 0))
 }
 
+async function flushMicrotasks(): Promise<void> {
+  for (let index = 0; index < 8; index++) {
+    await Promise.resolve()
+  }
+}
+
 describe('AvenorPlugin', () => {
   beforeEach(() => {
     spawnToolMock.mockClear()
@@ -181,6 +193,7 @@ describe('AvenorPlugin', () => {
     dialMock.mockClear()
     currentSupervisorMock.mockClear()
     dialQueue.length = 0
+    dialOverride = undefined
 
     spawnToolMock.mockImplementation(async () => ({
       run_id: 'run-1',
@@ -225,6 +238,36 @@ describe('AvenorPlugin', () => {
 
   afterEach(() => {
     dialQueue.length = 0
+    jest.useRealTimers()
+    globalThis.fetch = originalFetch
+  })
+
+  it('derives terminal status from fallback, phase, stop reason, and defaults', () => {
+    expect(terminalStatus(makeSnapshot({ phase: 'done' }))).toBe('done')
+    expect(terminalStatus(makeSnapshot({ phase: 'running', stop_reason: 'timeout' }))).toBe('timeout')
+    expect(terminalStatus(makeSnapshot(), { run_id: 'run-1', label: 'run', status: 'failed' })).toBe('failed')
+    expect(terminalStatus(makeSnapshot())).toBe('done')
+  })
+
+  it('formats permission and question waiting paths without redundant guidance', () => {
+    const run = {
+      runId: 'run-1',
+      runtimeId: 'rt-1',
+      agent: 'horse',
+      orchestratorSessionId: 'parent',
+      label: 'worker',
+      monitoring: false,
+    }
+    const permissionText = buildWaitingText(run, makeSnapshot({
+      pending_permission: { request_id: 'req-1', question: 'Allow access?', options: [] },
+    }))
+    expect(permissionText).toContain('Permission request: Allow access?')
+    expect(permissionText).toContain('avenor_answer_permission')
+    expect(permissionText).not.toContain('avenor_follow_up')
+
+    const questionText = buildWaitingText(run, makeSnapshot({ phase_label: 'Which file?' }))
+    expect(questionText).toContain('Question: Which file?')
+    expect(questionText).toContain('avenor_follow_up')
   })
 
   it('registers existing hooks plus avenor_inspect and formats channel messages', async () => {
@@ -271,6 +314,79 @@ describe('AvenorPlugin', () => {
     expect(result.output).toContain('unexpected dial')
     expect(result.output).toContain('may still be active')
     expect(result.metadata).toEqual({ run_id: 'run-1' })
+  })
+
+  it('reports observer stream failures after setup and closes the client', async () => {
+    const stream = makeEventClient([], { errorAfterExhausted: new Error('stream failed') })
+    dialQueue.push(stream)
+    const hooks = await AvenorPlugin(makeCtx() as any)
+
+    const result = await (hooks.tool?.avenor_spawn as any).execute(
+      { agent: 'jockey', wait: true },
+      {
+        sessionID: 'orchestrator-session',
+        directory: '/tmp/test',
+        abort: new AbortController().signal,
+        metadata: () => {},
+      },
+    )
+
+    expect(result.title).toBe('test run — monitoring error')
+    expect(result.output).toContain('stream failed')
+    expect(stream.closeMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('returns an aborted outcome when blocking observation is cancelled', async () => {
+    const stream = makeEventClient([], { hangAfterExhausted: true })
+    dialQueue.push(stream)
+    const controller = new AbortController()
+    const hooks = await AvenorPlugin(makeCtx() as any)
+
+    const resultPromise = (hooks.tool?.avenor_spawn as any).execute(
+      { agent: 'jockey', wait: true },
+      {
+        sessionID: 'orchestrator-session',
+        directory: '/tmp/test',
+        abort: controller.signal,
+        metadata: () => {},
+      },
+    )
+    await flush()
+    controller.abort()
+    const result = await resultPromise
+
+    expect(result.title).toBe('test run — aborted')
+    expect(result.output).toContain('may still be active')
+    expect(stream.returnMock).toHaveBeenCalledTimes(1)
+    expect(stream.closeMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('honors an abort that arrives while the observer is being created', async () => {
+    const stream = makeEventClient([], { hangAfterExhausted: true })
+    let releaseDial: ((client: any) => void) | undefined
+    dialOverride = () => new Promise((resolve) => {
+      releaseDial = resolve
+    })
+    const controller = new AbortController()
+    const hooks = await AvenorPlugin(makeCtx() as any)
+
+    const resultPromise = (hooks.tool?.avenor_spawn as any).execute(
+      { agent: 'jockey', wait: true },
+      {
+        sessionID: 'orchestrator-session',
+        directory: '/tmp/test',
+        abort: controller.signal,
+        metadata: () => {},
+      },
+    )
+    await flushMicrotasks()
+    controller.abort()
+    releaseDial?.(stream.client)
+    const result = await resultPromise
+
+    expect(result.title).toBe('test run — aborted')
+    expect(stream.returnMock).toHaveBeenCalledTimes(1)
+    expect(stream.closeMock).toHaveBeenCalledTimes(1)
   })
 
   it('uses the shared observer for blocking metadata and final output without raw event polling', async () => {
@@ -523,6 +639,128 @@ describe('AvenorPlugin', () => {
         }],
       },
     })
+  })
+
+  it('clears reverse session mappings when a completed run is unregistered', async () => {
+    const firstStream = makeEventClient([
+      { event: 'session.end', runtime_id: 'rt-1', session_id: 'child-session', seq: 1, stop_reason: 'end_turn' },
+    ])
+    dialQueue.push(firstStream)
+    const promptAsync = mock(async () => {})
+    const hooks = await AvenorPlugin(makeCtx({ client: makeClient(promptAsync) }) as any)
+    const spawn = hooks.tool?.avenor_spawn as any
+
+    await spawn.execute(
+      { agent: 'jockey', wait: true },
+      {
+        sessionID: 'orchestrator-session',
+        directory: '/tmp/test',
+        abort: new AbortController().signal,
+        metadata: () => {},
+      },
+    )
+
+    spawnToolMock.mockResolvedValueOnce({
+      run_id: 'run-2',
+      runtime_id: 'rt-2',
+      label: 'second run',
+      supervisor_id: '/tmp/avenor.sock',
+    })
+    statusToolMock.mockResolvedValue({
+      run_id: 'run-2',
+      runtime_id: 'rt-2',
+      session_id: 'child-session',
+      status: 'running',
+      latest_seq: 0,
+    })
+    const secondStream = makeEventClient([], { hangAfterExhausted: true })
+    dialQueue.push(secondStream)
+    await spawn.execute(
+      { agent: 'jockey', wait: false },
+      {
+        sessionID: 'orchestrator-session',
+        directory: '/tmp/test',
+        abort: new AbortController().signal,
+        metadata: () => {},
+      },
+    )
+
+    promptAsync.mockClear()
+    await hooks['permission.ask']?.(
+      {
+        id: 'perm-2',
+        sessionID: 'child-session',
+        type: 'fs.read',
+        title: 'Read file',
+        pattern: '/tmp/file',
+        messageID: 'msg-2',
+        metadata: {},
+        time: { created: Date.now() },
+      },
+      { status: 'ask' as const },
+    )
+
+    expect(promptAsync).toHaveBeenCalledTimes(1)
+    expect(promptAsync.mock.calls[0]?.[0].body.parts[0].text).toContain('run_id: "run-2"')
+    expect(secondStream.returnMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('polls broker messages and retries after a transient fetch error', async () => {
+    jest.useFakeTimers()
+    const fetchMock = mock()
+      .mockRejectedValueOnce(new Error('temporary broker failure'))
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [{
+          type: 'agent_message',
+          from_run_id: 'child-run',
+          payload: JSON.stringify({ from_run_id: 'child-run', role: 'reviewer', message: 'review complete' }),
+        }],
+      })
+    globalThis.fetch = fetchMock as any
+    spawnToolMock.mockResolvedValueOnce({
+      run_id: 'run-1',
+      runtime_id: 'rt-1',
+      label: 'test run',
+      supervisor_id: '/tmp/avenor.sock',
+      broker_url: 'http://broker.test',
+      parent_token: 'parent-token',
+    } as any)
+    const stream = makeEventClient([], { hangAfterExhausted: true })
+    dialQueue.push(stream)
+    const promptAsync = mock(async () => { throw new Error('stop polling after delivery') })
+    const hooks = await AvenorPlugin(makeCtx({ client: makeClient(promptAsync) }) as any)
+
+    await (hooks.tool?.avenor_spawn as any).execute(
+      { agent: 'jockey', wait: false },
+      {
+        sessionID: 'orchestrator-session',
+        directory: '/tmp/test',
+        abort: new AbortController().signal,
+        metadata: () => {},
+      },
+    )
+    await hooks.event?.({
+      event: { type: 'session.idle', properties: { sessionID: 'orchestrator-session' } } as any,
+    })
+
+    jest.advanceTimersByTime(3_000)
+    await flushMicrotasks()
+    jest.advanceTimersByTime(3_000)
+    await flushMicrotasks()
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(fetchMock.mock.calls[1]?.[0]).toBe('http://broker.test/poll-control')
+    expect(JSON.parse(fetchMock.mock.calls[1]?.[1].body)).toEqual({
+      run_id: expect.any(String),
+      token: 'parent-token',
+    })
+    expect(promptAsync).toHaveBeenCalledWith(expect.objectContaining({
+      path: { id: 'orchestrator-session' },
+      body: { parts: [{ type: 'text', text: expect.stringContaining('review complete') }] },
+    }))
+
+    await (hooks.tool?.avenor_shutdown as any).execute({}, {})
   })
 
   it('closes observers on shutdown and exposes avenor_inspect output', async () => {
