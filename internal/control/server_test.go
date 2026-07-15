@@ -347,6 +347,28 @@ func TestSubscriberBackpressureLaggedEvent(t *testing.T) {
 	}
 }
 
+func TestNormalizeHistoryLimit(t *testing.T) {
+	tests := []struct {
+		name  string
+		limit int
+		want  int
+	}{
+		{name: "negative uses default", limit: -1, want: historyDefaultLimit},
+		{name: "zero uses default", limit: 0, want: historyDefaultLimit},
+		{name: "one is preserved", limit: 1, want: 1},
+		{name: "maximum is preserved", limit: historyMaxLimit, want: historyMaxLimit},
+		{name: "above maximum is capped", limit: historyMaxLimit + 1, want: historyMaxLimit},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := normalizeHistoryLimit(tt.limit); got != tt.want {
+				t.Fatalf("normalizeHistoryLimit(%d) = %d, want %d", tt.limit, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestPublishEventCanonicalizesIdentityAndPreservesProvidedMetadata(t *testing.T) {
 	state := NewState("run_1", "label", 0)
 	s := NewServer(state)

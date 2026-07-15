@@ -53,14 +53,6 @@ func cloneEvent(ev events.Event) events.Event {
 	return out
 }
 
-func cloneEvents(src []events.Event) []events.Event {
-	out := make([]events.Event, len(src))
-	for i, ev := range src {
-		out[i] = cloneEvent(ev)
-	}
-	return out
-}
-
 func stringField(fields map[string]any, key string) string {
 	if fields == nil {
 		return ""
