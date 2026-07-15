@@ -3,6 +3,7 @@ import { RunReducer, type InspectResult, type RunObserver, type RunSnapshot, typ
 import { visibleWidth } from '@earendil-works/pi-tui'
 import {
   RunInspectorOverlay,
+  clipText,
   sanitizeText,
   openRunInspector,
   type WatchDeps,
@@ -124,6 +125,13 @@ describe('watch helpers', () => {
     expect(sanitizeText('\u001b[31mred\u001b[0m\tline\u0007')).toBe('red  line')
   })
 
+  it('clips sanitized text at the requested boundary', () => {
+    expect(clipText(undefined, 5)).toBeUndefined()
+    expect(clipText('\t\u001b[31mred\u001b[0m ', 10)).toBe('red')
+    expect(clipText('abcde', 5)).toBe('abcde')
+    expect(clipText('abcdef', 5)).toBe('abcd…')
+  })
+
   it('uses shared reducer normalization for both event and legacy type fields', async () => {
     const snapshot = buildSnapshot([
       { type: 'agent.message_chunk', runtime_id: 'rt-1', seq: 1, delta: 'hello ' },
@@ -162,17 +170,18 @@ describe('RunInspectorOverlay', () => {
     overlay.dispose()
   })
 
-  it('renders rejected run actions and clears the pending state', async () => {
+  it('renders rejected run actions and accepts another action afterward', async () => {
     const snapshot = buildSnapshot([
       { event: 'session.start', runtime_id: 'rt-error', run_id: 'run-error', backend: 'pi' },
     ])
+    const promptRun = mock(async () => { throw new Error('prompt rejected') })
     const overlay = new RunInspectorOverlay(
       tui as any,
       theme as any,
       keybindings as any,
       makeDeps({
         inspectRun: mock(async () => makeInspectResult(snapshot, { status: 'running' })),
-        promptRun: mock(async () => { throw new Error('prompt rejected') }),
+        promptRun,
       }),
       { runId: 'run-error', runtimeId: 'rt-error' },
       () => {},
@@ -182,7 +191,10 @@ describe('RunInspectorOverlay', () => {
     ;(overlay as any).submit('continue')
     await flush()
     expect(overlay.render(40).join('\n')).toContain('prompt rejected')
-    expect((overlay as any).actionPending).toBe(false)
+
+    ;(overlay as any).submit('retry')
+    await flush()
+    expect(promptRun).toHaveBeenCalledTimes(2)
     overlay.dispose()
   })
 
@@ -246,6 +258,12 @@ describe('RunInspectorOverlay', () => {
       { event: 'tool.call', runtime_id: 'rt-2', seq: 2, id: 'tool-1', title: 'bash', status: 'running', input: 'echo\tvery very very long command that should clip' },
       { event: 'agent.message_chunk', runtime_id: 'rt-2', seq: 3, delta: 'assistant line one' },
       { event: 'agent.message_chunk', runtime_id: 'rt-2', seq: 4, delta: ' and line two' },
+      ...Array.from({ length: 10 }, (_, index) => ({
+        event: index % 2 === 0 ? 'user.message_chunk' : 'agent.thought_chunk',
+        runtime_id: 'rt-2',
+        seq: index + 5,
+        delta: `scroll line ${index}`,
+      })),
     ])
 
     const overlay = new RunInspectorOverlay(
@@ -261,10 +279,10 @@ describe('RunInspectorOverlay', () => {
     const lines = overlay.render(40)
     expect(lines.some(line => line.includes('permission:'))).toBe(true)
     expect(lines.some(line => line.includes('live tools:'))).toBe(true)
-    expect(lines.some(line => line.includes('assistant line one'))).toBe(true)
+    expect(lines.some(line => line.includes('scroll line 9'))).toBe(true)
     expect(lines.every(line => visibleWidth(line) <= 40)).toBe(true)
 
-    ;(overlay as any).scrollOffset = 10
+    overlay.handleInput('\u001b[A')
     const scrolled = overlay.render(40)
     expect(scrolled.some(line => line.includes('below'))).toBe(true)
     overlay.dispose()
@@ -386,16 +404,17 @@ describe('openRunInspector', () => {
       { event: 'session.start', runtime_id: 'rt-select', run_id: run.runId, run_label: run.runId, backend: 'pi', agent: 'horse' },
     ]), { status: 'running' }))
 
-    let created = 0
+    let component: RunInspectorOverlay | undefined
+    const done = mock(() => {})
     await openRunInspector({
       hasUI: true,
       ui: {
         notify: mock(() => {}),
         select: mock(async () => 'run-selected'),
         custom: mock(async (factory: any) => {
-          const component = factory(tui, theme, keybindings, () => {})
-          created++
-          component.dispose?.()
+          component = factory(tui, theme, keybindings, done)
+          expect(component).toBeInstanceOf(RunInspectorOverlay)
+          component.dispose()
         }),
       },
     } as any, {
@@ -403,7 +422,8 @@ describe('openRunInspector', () => {
       deps: makeDeps({ inspectRun }),
     })
 
-    expect(created).toBe(1)
-    expect(inspectRun).toHaveBeenCalledWith(expect.objectContaining({ runId: 'run-selected' }))
+    expect(component).toBeDefined()
+    expect(inspectRun).toHaveBeenCalledWith({ runId: 'run-selected', label: 'picked', runtimeId: 'rt-select' })
+    expect(done).not.toHaveBeenCalled()
   })
 })

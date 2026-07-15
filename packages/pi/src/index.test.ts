@@ -4,7 +4,10 @@ import { RunReducer } from '@dougbots/avenor-core'
 import extensionFactory, {
   buildCompletionText,
   buildInspectPayload,
+  compactWhitespace,
   createExtension,
+  isTerminalStatus,
+  renderStatusLines,
   statusSupervisorId,
 } from './index.js'
 
@@ -62,22 +65,59 @@ describe('Avenor Pi extension', () => {
     expect(statusSupervisorId('/tmp/requested.sock', '/tmp/spawned.sock')).toBe('/tmp/spawned.sock')
   })
 
-  it('includes final output in completion text', () => {
+  it('formats structured completion text with final output and inspection guidance', () => {
     const text = buildCompletionText(
       { runId: 'run-1', label: 'demo' },
       { run_id: 'run-1', label: 'demo', status: 'done', final_output: 'finished', session_id: 'ses-1' },
       'final answer',
     )
 
-    expect(text).toContain('Final output:')
-    expect(text).toContain('final answer')
-    expect(text).toContain('avenor_inspect')
+    expect(text).toBe([
+      'Sub-agent "demo" finished with status **done**.',
+      '',
+      'Final output:',
+      '> final answer',
+      'Session: `ses-1`',
+      '',
+      'Call `avenor_inspect` with `run_id: "run-1"` for the bounded transcript/snapshot, or `avenor_follow_up` to iterate.',
+    ].join('\n'))
   })
 
   it('builds bounded inspect payloads with final_output exposed', () => {
-    const payload = buildInspectPayload(makeInspectResult({ final_output: 'useful answer' }))
-    expect(payload.final_output).toBe('useful answer')
-    expect((payload.transcript as any[]).length).toBeGreaterThan(0)
+    const result = makeInspectResult({ final_output: 'x'.repeat(800) })
+    result.transcript = Array.from({ length: 40 }, (_, index) => ({
+      kind: 'assistant' as const,
+      event: 'agent.message_chunk',
+      source_event: 'agent.message_chunk',
+      text: `entry-${index}`,
+    }))
+
+    const payload = buildInspectPayload(result)
+    expect(String(payload.final_output)).toHaveLength(600)
+    expect(String(payload.final_output)).toEndWith('…')
+    expect(payload.transcript).toHaveLength(24)
+    expect((payload.transcript as Array<{ text: string }>)[0].text).toBe('entry-16')
+  })
+
+  it('recognizes terminal statuses only', () => {
+    expect(['done', 'failed', 'timeout', 'killed'].map(isTerminalStatus)).toEqual([true, true, true, true])
+    expect(isTerminalStatus('running')).toBe(false)
+    expect(isTerminalStatus(undefined)).toBe(false)
+  })
+
+  it('renders only active statuses with phase and permission markers', () => {
+    expect(renderStatusLines([])).toEqual([])
+    expect(renderStatusLines([
+      { runId: 'done', label: 'finished', status: 'done', agent: 'horse' },
+      { runId: 'active', label: 'worker', status: 'running', phaseLabel: 'reading', agent: 'horse', pendingPermission: true },
+    ])).toEqual(['🟢 worker — running [reading] 🔒'])
+  })
+
+  it('compacts whitespace and clips bounded progress text', () => {
+    expect(compactWhitespace(undefined)).toBeUndefined()
+    expect(compactWhitespace('   ')).toBeUndefined()
+    expect(compactWhitespace(' one\n\t two   three ')).toBe('one two three')
+    expect(compactWhitespace('abcdefgh', 5)).toBe('abcd…')
   })
 
   it('registers all expected tools, commands, renderers, and event handlers', async () => {

@@ -136,11 +136,11 @@ function buildWaitingText(run: { runId: string; label: string; agent: string }, 
   return lines.join('\n')
 }
 
-function isTerminalStatus(status: string | undefined): boolean {
+export function isTerminalStatus(status: string | undefined): boolean {
   return !!status && TERMINAL_STATUSES.has(status as any)
 }
 
-function renderStatusLines(entries: RunStatusEntry[]): string[] {
+export function renderStatusLines(entries: RunStatusEntry[]): string[] {
   const active = entries.filter(e => !isTerminalStatus(e.status))
   if (active.length === 0) return []
 
@@ -152,7 +152,7 @@ function renderStatusLines(entries: RunStatusEntry[]): string[] {
   })
 }
 
-function compactWhitespace(text: string | undefined, limit = 100): string | undefined {
+export function compactWhitespace(text: string | undefined, limit = 100): string | undefined {
   const clipped = clipText(text, limit)
   return clipped ? clipped.replace(/\s+/g, ' ').trim() : undefined
 }
