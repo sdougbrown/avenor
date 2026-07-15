@@ -122,6 +122,7 @@ mock.module('@dougbots/avenor-core', () => ({
   followUpTool: followUpToolMock,
   shutdownTool: shutdownToolMock,
   inspectTool: inspectToolMock,
+  createRunSnapshot,
   observeRun,
   dial: dialMock,
   Supervisor: {
@@ -252,6 +253,24 @@ describe('AvenorPlugin', () => {
     const output = { text: '<channel source="agent-reviewer" from_run_id="abc12345" from_role="reviewer">Looks good</channel>' }
     await hooks['experimental.text.complete']?.({ sessionID: 'session-1', messageID: 'm', partID: 'p' }, output)
     expect(output.text).toContain('📨 reviewer (abc12345)')
+  })
+
+  it('reports observer setup failures without rejecting or losing the tracked run', async () => {
+    const hooks = await AvenorPlugin(makeCtx() as any)
+    const result = await (hooks.tool?.avenor_spawn as any).execute(
+      { agent: 'jockey', wait: true },
+      {
+        sessionID: 'orchestrator-session',
+        directory: '/tmp/test',
+        abort: new AbortController().signal,
+        metadata: () => {},
+      },
+    )
+
+    expect(result.title).toBe('test run — monitoring error')
+    expect(result.output).toContain('unexpected dial')
+    expect(result.output).toContain('may still be active')
+    expect(result.metadata).toEqual({ run_id: 'run-1' })
   })
 
   it('uses the shared observer for blocking metadata and final output without raw event polling', async () => {

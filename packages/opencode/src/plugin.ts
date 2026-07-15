@@ -4,6 +4,7 @@ import { tool } from '@opencode-ai/plugin'
 import * as crypto from 'node:crypto'
 import {
   answerPermissionTool,
+  createRunSnapshot,
   dial,
   eventsTool,
   followUpTool,
@@ -34,9 +35,10 @@ type TrackedRun = {
 type MonitorStopReason = 'permission-routed' | 'shutdown' | 'abort'
 
 type MonitorOutcome = {
-  kind: 'terminal' | 'waiting' | 'aborted' | 'shutdown' | 'stopped'
+  kind: 'terminal' | 'waiting' | 'aborted' | 'shutdown' | 'stopped' | 'error'
   snapshot: RunSnapshot
   notified?: boolean
+  error?: string
 }
 
 type ActiveMonitor = {
@@ -390,6 +392,19 @@ export const AvenorPlugin: Plugin = async (ctx) => {
             return { kind: 'terminal', snapshot }
           }
         }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        const snapshot = observer?.snapshot() ?? run.lastSnapshot ?? {
+          ...createRunSnapshot(),
+          identity: {
+            run_id: run.runId,
+            run_label: run.label,
+            runtime_id: run.runtimeId,
+            agent: run.agent,
+          },
+        }
+        syncRunSnapshot(run, snapshot)
+        return { kind: 'error', snapshot, error: message }
       } finally {
         abortListener?.()
         unsubscribe?.()
@@ -414,6 +429,14 @@ export const AvenorPlugin: Plugin = async (ctx) => {
 
   async function monitorRun(run: TrackedRun): Promise<void> {
     const outcome = await observeTrackedRun(run)
+
+    if (outcome.kind === 'error') {
+      await promptSession(
+        run.orchestratorSessionId,
+        `Monitoring of "${run.label}" (run_id: ${run.runId}) failed: ${outcome.error ?? 'unknown error'}. The run may still be active — use avenor_status to check.`,
+      )
+      return
+    }
 
     if (outcome.kind === 'waiting') {
       if (!outcome.notified) {
@@ -667,6 +690,14 @@ export const AvenorPlugin: Plugin = async (ctx) => {
                 session_id: inspection?.status.session_id ?? snapshot.identity.session_id,
                 ...buildSnapshotMetadata(snapshot),
               },
+            }
+          }
+
+          if (outcome.kind === 'error') {
+            return {
+              title: `${result.label} — monitoring error`,
+              output: `Monitoring failed: ${outcome.error ?? 'unknown error'}. The run may still be active — use avenor_status to check.`,
+              metadata: { run_id: result.run_id },
             }
           }
 
