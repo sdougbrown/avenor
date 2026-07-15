@@ -59,6 +59,24 @@ func TestTranslateNotificationDropsMalformedInformationalEvent(t *testing.T) {
 	}
 }
 
+func TestTranslateNonToolItemLifecycleEmitsAliases(t *testing.T) {
+	start := translateNotification("item/started", json.RawMessage(`{"threadId":"th9","turnId":"t9","itemId":"msg-1","item":{"type":"assistant_message"}}`))
+	if len(start) != 1 || start[0].Event != "avenor.item.start" {
+		t.Fatalf("start events = %+v, want only avenor.item.start", start)
+	}
+	if got, _ := start[0].Fields["item_kind"].(string); got != "assistant" {
+		t.Fatalf("start item_kind = %q, want assistant", got)
+	}
+
+	completed := translateNotification("item/completed", json.RawMessage(`{"threadId":"th9","turnId":"t9","itemId":"reason-1","item":{"type":"reasoning"}}`))
+	if len(completed) != 1 || completed[0].Event != "avenor.item.end" {
+		t.Fatalf("completed events = %+v, want only avenor.item.end", completed)
+	}
+	if got, _ := completed[0].Fields["item_kind"].(string); got != "reasoning" {
+		t.Fatalf("completed item_kind = %q, want reasoning", got)
+	}
+}
+
 func TestTranslateApprovalCommand(t *testing.T) {
 	params := json.RawMessage(`{"threadId":"th1","command":"rm -rf /","summary":"run command"}`)
 	ev, ar := translateApprovalRequest("item/commandExecution/requestApproval", params)

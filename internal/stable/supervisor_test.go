@@ -846,6 +846,33 @@ func TestRuntimeStatusMetadataIncludesUsageFinalOutputAndStamp(t *testing.T) {
 	}
 }
 
+func TestRuntimeFanoutWriterBoundsBackendFinalOutput(t *testing.T) {
+	child := &childRuntime{id: "rt_bound"}
+	sink := &metadataCaptureSink{}
+	writer := &runtimeFanoutWriter{base: sink, runtimeID: child.id, child: child}
+	finalOutput := strings.Repeat("é", events.MaxFinalOutputRunes+10)
+
+	if err := writer.Write(events.Event{
+		Event:  "session.end",
+		Fields: map[string]any{"final_output": finalOutput},
+	}); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if len(sink.events) != 1 {
+		t.Fatalf("captured %d events, want 1", len(sink.events))
+	}
+	got, _ := sink.events[0].Fields["final_output"].(string)
+	if count := len([]rune(got)); count != events.MaxFinalOutputRunes {
+		t.Fatalf("event final_output rune count = %d, want %d", count, events.MaxFinalOutputRunes)
+	}
+	child.mu.Lock()
+	childOutput := child.finalOutput
+	child.mu.Unlock()
+	if childOutput != got {
+		t.Fatal("child final_output differs from the bounded event")
+	}
+}
+
 func TestRuntimeFanoutWriterWritesSameStampedEventToFileAndControl(t *testing.T) {
 	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-runtime-live.sock", MaxRuntimes: 1})
 	path := filepath.Join(t.TempDir(), "events.ndjson")

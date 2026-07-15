@@ -977,7 +977,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 						if event.Fields == nil {
 							event.Fields = map[string]any{}
 						}
-						event.Fields["final_output"] = boundedFinalOutput(finalReply.String())
+						event.Fields["final_output"] = events.BoundedFinalOutput(finalReply.String())
 					}
 				}
 			}
@@ -1053,7 +1053,7 @@ func cancelAndEnd(provider runtime.Provider, writer EventSink, sessionID, runID,
 		fields["usage"] = usage
 	}
 	if finalOutput != "" {
-		fields["final_output"] = boundedFinalOutput(finalOutput)
+		fields["final_output"] = events.BoundedFinalOutput(finalOutput)
 	}
 	if err := writer.Write(events.Event{
 		Event:     "session.end",
@@ -1064,19 +1064,6 @@ func cancelAndEnd(provider runtime.Provider, writer EventSink, sessionID, runID,
 		return sessionResult{ExitCode: 1}
 	}
 	return sessionResult{ExitCode: runtime.ExitCodeForStopReason(stopReason), StopReason: stopReason, FinalReply: finalOutput, Usage: usage}
-}
-
-const maxFinalOutputRunes = 4096
-
-func boundedFinalOutput(text string) string {
-	if text == "" {
-		return ""
-	}
-	runes := []rune(text)
-	if len(runes) <= maxFinalOutputRunes {
-		return text
-	}
-	return string(runes[:maxFinalOutputRunes])
 }
 
 type eventWriter struct {
@@ -1103,40 +1090,11 @@ func NewEventMetadata(runID, runLabel, runtimeID string) *EventMetadata {
 	}
 }
 
-func cloneEvent(event events.Event) events.Event {
-	out := events.Event{Event: event.Event, SessionID: event.SessionID}
-	if event.Fields != nil {
-		out.Fields = make(map[string]any, len(event.Fields))
-		for k, v := range event.Fields {
-			out.Fields[k] = v
-		}
-	}
-	return out
-}
-
-func int64EventField(v any) (int64, bool) {
-	switch n := v.(type) {
-	case int:
-		return int64(n), true
-	case int32:
-		return int64(n), true
-	case int64:
-		return n, true
-	case float64:
-		return int64(n), true
-	case json.Number:
-		if i, err := n.Int64(); err == nil {
-			return i, true
-		}
-	}
-	return 0, false
-}
-
 func (m *EventMetadata) Stamp(event events.Event) events.Event {
 	if m == nil {
-		return cloneEvent(event)
+		return events.BoundFinalOutput(events.Clone(event))
 	}
-	out := cloneEvent(event)
+	out := events.Clone(event)
 	if out.Fields == nil {
 		out.Fields = map[string]any{}
 	}
@@ -1156,14 +1114,14 @@ func (m *EventMetadata) Stamp(event events.Event) events.Event {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, ok := int64EventField(out.Fields["ts"]); !ok {
+	if _, ok := events.Int64(out.Fields["ts"]); !ok {
 		now := time.Now
 		if m.now != nil {
 			now = m.now
 		}
 		out.Fields["ts"] = now().UnixMilli()
 	}
-	if seq, ok := int64EventField(out.Fields["seq"]); ok {
+	if seq, ok := events.Int64(out.Fields["seq"]); ok {
 		if seq > m.latestSeq {
 			m.latestSeq = seq
 		}
@@ -1171,7 +1129,7 @@ func (m *EventMetadata) Stamp(event events.Event) events.Event {
 		m.latestSeq++
 		out.Fields["seq"] = m.latestSeq
 	}
-	return out
+	return events.BoundFinalOutput(out)
 }
 
 type EventSink interface {
@@ -1187,9 +1145,6 @@ type fanoutWriter struct {
 }
 
 func newFanoutWriter(base EventSink, cs *control.ControlServer, metadata *EventMetadata) EventSink {
-	if cs == nil && metadata == nil {
-		return base
-	}
 	return &fanoutWriter{base: base, control: cs, metadata: metadata}
 }
 
@@ -1202,6 +1157,7 @@ func (f *fanoutWriter) Write(event events.Event) error {
 	} else if f.control != nil {
 		stamped = f.control.CanonicalizeEvent(event)
 	}
+	stamped = events.BoundFinalOutput(stamped)
 	if err := f.base.Write(stamped); err != nil {
 		return err
 	}

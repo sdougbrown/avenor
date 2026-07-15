@@ -1545,6 +1545,7 @@ func (w *runtimeFanoutWriter) Write(ev events.Event) error {
 			stamped = w.control.CanonicalizeEvent(stamped)
 		}
 	}
+	stamped = events.BoundFinalOutput(stamped)
 	if stamped.Event == "permission.request" && w.onPermissionReq != nil {
 		if requestID, _ := stamped.Fields["request_id"].(string); requestID != "" {
 			if options, _ := stamped.Fields["options"].([]any); options != nil {
@@ -1556,7 +1557,7 @@ func (w *runtimeFanoutWriter) Write(ev events.Event) error {
 	// latest_seq onto the child so RuntimeStatus can report them per-runtime.
 	if w.child != nil {
 		w.child.mu.Lock()
-		if seq, ok := int64Value(stamped.Fields["seq"]); ok {
+		if seq, ok := events.Int64(stamped.Fields["seq"]); ok {
 			w.child.latestSeq = seq
 		}
 		if usage, ok := stamped.Fields["usage"].(map[string]any); ok {
@@ -1604,21 +1605,6 @@ func (w *runtimeFanoutWriter) Write(ev events.Event) error {
 		w.control.PublishCanonicalEvent(stamped)
 	}
 	return nil
-}
-
-func int64Value(v any) (int64, bool) {
-	switch n := v.(type) {
-	case int:
-		return int64(n), true
-	case int32:
-		return int64(n), true
-	case int64:
-		return n, true
-	case float64:
-		return int64(n), true
-	default:
-		return 0, false
-	}
 }
 
 func (w *runtimeFanoutWriter) Close() error { return w.base.Close() }

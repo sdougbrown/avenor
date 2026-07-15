@@ -40,18 +40,39 @@ func TestTranslateBasicEvents(t *testing.T) {
 }
 
 func TestTranslateToolExecutionEmitsCanonicalAndAlias(t *testing.T) {
-	evs := translateNotification(map[string]any{"type": "tool_execution_start", "toolName": "cat"}, "pi-s1")
-	if len(evs) != 2 {
-		t.Fatalf("len(events) = %d, want 2", len(evs))
+	tests := []struct {
+		name          string
+		typeName      string
+		status        string
+		wantCanonical string
+		wantAlias     string
+		wantStatus    string
+	}{
+		{name: "start", typeName: "tool_execution_start", wantCanonical: "tool.call", wantAlias: "avenor.tool.start", wantStatus: "running"},
+		{name: "update", typeName: "tool_execution_update", status: "running", wantCanonical: "tool.call_update", wantAlias: "avenor.tool.update", wantStatus: "running"},
+		{name: "end", typeName: "tool_execution_end", wantCanonical: "tool.call_update", wantAlias: "avenor.tool.end", wantStatus: "completed"},
 	}
-	if evs[0].Event != "tool.call" || evs[1].Event != "avenor.tool.start" {
-		t.Fatalf("events = %+v", evs)
-	}
-	if got, _ := evs[0].Fields["title"].(string); got != "cat" {
-		t.Fatalf("title = %q, want cat", got)
-	}
-	if got, _ := evs[0].Fields["status"].(string); got != "running" {
-		t.Fatalf("status = %q, want running", got)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload := map[string]any{"type": tt.typeName, "toolName": "cat"}
+			if tt.status != "" {
+				payload["status"] = tt.status
+			}
+			evs := translateNotification(payload, "pi-s1")
+			if len(evs) != 2 {
+				t.Fatalf("len(events) = %d, want 2", len(evs))
+			}
+			if evs[0].Event != tt.wantCanonical || evs[1].Event != tt.wantAlias {
+				t.Fatalf("events = %+v, want %s and %s", evs, tt.wantCanonical, tt.wantAlias)
+			}
+			if got, _ := evs[0].Fields["title"].(string); got != "cat" {
+				t.Fatalf("title = %q, want cat", got)
+			}
+			if got, _ := evs[0].Fields["status"].(string); got != tt.wantStatus {
+				t.Fatalf("status = %q, want %q", got, tt.wantStatus)
+			}
+		})
 	}
 }
 
@@ -75,6 +96,24 @@ func TestTranslateAgentEndWithStopReasonAndFinalOutput(t *testing.T) {
 	}
 	if got, _ := ev.Fields["final_output"].(string); got != "done" {
 		t.Fatalf("final_output = %q, want done", got)
+	}
+}
+
+func TestTranslateAgentEndWithStopReasonAndNoFinalOutput(t *testing.T) {
+	evs := translateNotification(map[string]any{
+		"type": "agent_end",
+		"messages": []any{map[string]any{
+			"stop_reason": "cancelled",
+		}},
+	}, "pi-s1")
+	if len(evs) != 1 {
+		t.Fatalf("len(events) = %d, want 1", len(evs))
+	}
+	if got, _ := evs[0].Fields["stop_reason"].(string); got != "cancelled" {
+		t.Fatalf("stop_reason = %q, want cancelled", got)
+	}
+	if _, ok := evs[0].Fields["final_output"]; ok {
+		t.Fatalf("unexpected final_output: %v", evs[0].Fields["final_output"])
 	}
 }
 

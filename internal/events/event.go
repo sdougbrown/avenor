@@ -8,6 +8,62 @@ type Event struct {
 	Fields    map[string]any `json:"-"`
 }
 
+const MaxFinalOutputRunes = 4096
+
+func Clone(event Event) Event {
+	out := Event{Event: event.Event, SessionID: event.SessionID}
+	if event.Fields != nil {
+		out.Fields = make(map[string]any, len(event.Fields))
+		for key, value := range event.Fields {
+			out.Fields[key] = value
+		}
+	}
+	return out
+}
+
+func Int64(value any) (int64, bool) {
+	switch number := value.(type) {
+	case int:
+		return int64(number), true
+	case int32:
+		return int64(number), true
+	case int64:
+		return number, true
+	case float64:
+		return int64(number), true
+	case json.Number:
+		parsed, err := number.Int64()
+		return parsed, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func BoundedFinalOutput(text string) string {
+	if text == "" {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) <= MaxFinalOutputRunes {
+		return text
+	}
+	return string(runes[:MaxFinalOutputRunes])
+}
+
+func BoundFinalOutput(event Event) Event {
+	if event.Event != "session.end" || event.Fields == nil {
+		return event
+	}
+	text, _ := event.Fields["final_output"].(string)
+	bounded := BoundedFinalOutput(text)
+	if bounded == text {
+		return event
+	}
+	out := Clone(event)
+	out.Fields["final_output"] = bounded
+	return out
+}
+
 func (e Event) MarshalJSON() ([]byte, error) {
 	fields := map[string]any{}
 	for k, v := range e.Fields {

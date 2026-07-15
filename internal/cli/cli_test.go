@@ -893,6 +893,47 @@ func TestFanoutWriterWithoutControlStampsEventLogOnce(t *testing.T) {
 	}
 }
 
+func TestFanoutWriterWithControlAndNoMetadataCanonicalizesAndBoundsOutput(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.ndjson")
+	baseWriter, err := NewEventWriter(path)
+	if err != nil {
+		t.Fatalf("NewEventWriter: %v", err)
+	}
+	state := control.NewState("run_control", "review", 0)
+	server := control.NewServer(state)
+	writer := newFanoutWriter(baseWriter, server, nil)
+	finalOutput := strings.Repeat("é", events.MaxFinalOutputRunes+10)
+
+	if err := writer.Write(events.Event{
+		Event:     "session.end",
+		SessionID: "ses_control",
+		Fields:    map[string]any{"stop_reason": "end_turn", "final_output": finalOutput},
+	}); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	logged := readEventLogForTest(t, path)
+	if len(logged) != 1 {
+		t.Fatalf("event count = %d, want 1", len(logged))
+	}
+	if got := logged[0].Fields["run_id"]; got != "run_control" {
+		t.Fatalf("run_id = %v, want run_control", got)
+	}
+	if _, ok := logged[0].Fields["seq"]; !ok {
+		t.Fatal("expected seq to be stamped")
+	}
+	got, _ := logged[0].Fields["final_output"].(string)
+	if count := len([]rune(got)); count != events.MaxFinalOutputRunes {
+		t.Fatalf("final_output rune count = %d, want %d", count, events.MaxFinalOutputRunes)
+	}
+	if state.Snapshot().FinalOutput != got {
+		t.Fatal("control snapshot final_output differs from the bounded event log")
+	}
+}
+
 func TestDiscoverServerSelection(t *testing.T) {
 	env := func(key string) string {
 		if key == "AVENOR_OPENCODE_URL" {

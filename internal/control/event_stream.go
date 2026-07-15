@@ -2,7 +2,6 @@ package control
 
 import (
 	"context"
-	"encoding/json"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
@@ -42,17 +41,6 @@ func normalizeHistoryLimit(limit int) int {
 	return limit
 }
 
-func cloneEvent(ev events.Event) events.Event {
-	out := events.Event{Event: ev.Event, SessionID: ev.SessionID}
-	if ev.Fields != nil {
-		out.Fields = make(map[string]any, len(ev.Fields))
-		for k, v := range ev.Fields {
-			out.Fields[k] = v
-		}
-	}
-	return out
-}
-
 func stringField(fields map[string]any, key string) string {
 	if fields == nil {
 		return ""
@@ -61,22 +49,8 @@ func stringField(fields map[string]any, key string) string {
 	return v
 }
 
-func int64Field(v any) (int64, bool) {
-	switch n := v.(type) {
-	case int:
-		return int64(n), true
-	case int32:
-		return int64(n), true
-	case int64:
-		return n, true
-	case float64:
-		return int64(n), true
-	case json.Number:
-		if i, err := n.Int64(); err == nil {
-			return i, true
-		}
-	}
-	return 0, false
+func int64Field(value any) (int64, bool) {
+	return events.Int64(value)
 }
 
 func eventRuntimeID(ev events.Event) string {
@@ -88,7 +62,7 @@ func eventScopeKey(ev events.Event) string {
 }
 
 func (s *ControlServer) CanonicalizeEvent(event events.Event) events.Event {
-	out := cloneEvent(event)
+	out := events.Clone(event)
 	if out.Fields == nil {
 		out.Fields = map[string]any{}
 	}
@@ -109,7 +83,7 @@ func (s *ControlServer) CanonicalizeEvent(event events.Event) events.Event {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	key := eventScopeKey(out)
+	key := eventRuntimeID(out)
 	st := s.eventState[key]
 	if st == nil {
 		st = &runtimeEventState{}
@@ -123,7 +97,7 @@ func (s *ControlServer) CanonicalizeEvent(event events.Event) events.Event {
 		st.latestSeq++
 		out.Fields["seq"] = st.latestSeq
 	}
-	return out
+	return events.BoundFinalOutput(out)
 }
 
 func (s *ControlServer) PublishEvent(event events.Event) events.Event {
@@ -133,6 +107,7 @@ func (s *ControlServer) PublishEvent(event events.Event) events.Event {
 }
 
 func (s *ControlServer) PublishCanonicalEvent(event events.Event) {
+	event = events.BoundFinalOutput(event)
 	s.state.Update(func(ss *Snapshot) {
 		ss.LastEvent = event.Event
 		if event.SessionID != "" {
@@ -189,7 +164,7 @@ func (s *ControlServer) PublishCanonicalEvent(event events.Event) {
 		if seq, ok := int64Field(event.Fields["seq"]); ok && seq > st.latestSeq {
 			st.latestSeq = seq
 		}
-		st.history = append(st.history, cloneEvent(event))
+		st.history = append(st.history, events.Clone(event))
 		if len(st.history) > eventHistoryLimit {
 			st.history = append([]events.Event(nil), st.history[len(st.history)-eventHistoryLimit:]...)
 		}
@@ -245,7 +220,7 @@ func (s *ControlServer) runtimeHistoryLocked(runtimeID string, afterSeq int64, l
 		if seq <= afterSeq {
 			continue
 		}
-		filtered = append(filtered, cloneEvent(ev))
+		filtered = append(filtered, events.Clone(ev))
 	}
 	if len(filtered) > limit {
 		filtered = filtered[len(filtered)-limit:]
