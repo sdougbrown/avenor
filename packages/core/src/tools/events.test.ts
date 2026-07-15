@@ -112,6 +112,32 @@ describe('eventsTool', () => {
     expect(historyMock).not.toHaveBeenCalled()
   })
 
+  it('reports lookup failures when status and list fallbacks both fail', async () => {
+    statusMock.mockRejectedValueOnce(new Error('status offline'))
+    listMock.mockRejectedValueOnce(new Error('list offline'))
+
+    await expect(eventsTool({
+      runId: 'missing-run',
+      supervisorId: '/tmp/avenor-events-test.sock',
+    })).rejects.toThrow('unable to resolve run missing-run')
+    expect(closeMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('reports event-source failures after exhausting durable and live history', async () => {
+    statusMock.mockResolvedValueOnce({
+      runtime_id: 'rt-events-test',
+      event_path: '/path/that/does/not/exist/events.ndjson',
+    })
+    historyMock.mockRejectedValueOnce(new Error('history offline'))
+
+    await expect(eventsTool({
+      runId: 'rt-events-test',
+      supervisorId: '/tmp/avenor-events-test.sock',
+    })).rejects.toThrow('unable to read events for run rt-events-test')
+    expect(historyMock).toHaveBeenCalledTimes(1)
+    expect(closeMock).toHaveBeenCalledTimes(1)
+  })
+
   it('reads complete ndjson lines on file fallback and honors filters', async () => {
     logPath = path.join(os.tmpdir(), `avenor-events-${process.pid}-${Date.now()}.ndjson`)
     statusMock.mockRejectedValueOnce(new Error('status unavailable'))

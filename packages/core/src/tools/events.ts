@@ -2,6 +2,7 @@ import * as fs from 'node:fs'
 import * as readline from 'node:readline'
 import { Supervisor, type RunInfo } from '../supervisor.js'
 import { type Client } from '../client.js'
+import { asRecord } from '../value-fields.js'
 import { getSupervisorClient } from './get-supervisor-client.js'
 import { validateRunId } from './validate.js'
 
@@ -24,11 +25,9 @@ function normalizeLimit(limit?: number): number {
   return Math.max(1, Math.min(MAX_EVENT_LIMIT, Math.trunc(limit ?? 50)))
 }
 
-function asRecord(value: unknown): Record<string, unknown> | null {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return null
-  }
-  return value as Record<string, unknown>
+function contextualError(context: string, error: unknown): Error {
+  const message = error instanceof Error ? error.message : String(error)
+  return new Error(`${context}: ${message}`)
 }
 
 function eventName(record: Record<string, unknown>): string {
@@ -149,24 +148,34 @@ async function resolveRun(
       eventLogPath =
         (direct.event_path as string | undefined) ??
         (direct.on_event as string | undefined)
-    } catch {
+    } catch (statusError) {
+      let list: Array<Record<string, unknown>>
       try {
-        const list = await client.list()
-        const match = list.find((entry) => {
-          const runtime = String(entry.runtime_id ?? entry.id ?? '')
-          const label = String(entry.label ?? '')
-          const runId = String(entry.run_id ?? '')
-          return runtime === args.runId || label === args.runId || runId === args.runId
-        })
-        if (match) {
-          runtimeId = String(match.runtime_id ?? match.id ?? '') || undefined
-          eventLogPath =
-            (match.event_path as string | undefined) ??
-            (match.on_event as string | undefined)
-        }
-      } catch {
-        // ignore lookup errors
+        list = await client.list()
+      } catch (listError) {
+        if (!isSingleton) client.close()
+        throw new AggregateError(
+          [
+            contextualError(`status lookup for ${args.runId}`, statusError),
+            contextualError('runtime list fallback', listError),
+          ],
+          `unable to resolve run ${args.runId}`,
+        )
       }
+      const match = list.find((entry) => {
+        const runtime = String(entry.runtime_id ?? entry.id ?? '')
+        const label = String(entry.label ?? '')
+        const runId = String(entry.run_id ?? '')
+        return runtime === args.runId || label === args.runId || runId === args.runId
+      })
+      if (!match) {
+        if (!isSingleton) client.close()
+        throw contextualError(`unable to resolve run ${args.runId}`, statusError)
+      }
+      runtimeId = String(match.runtime_id ?? match.id ?? '') || undefined
+      eventLogPath =
+        (match.event_path as string | undefined) ??
+        (match.on_event as string | undefined)
     }
 
     return { client, isSingleton, runtimeId, eventLogPath }
@@ -193,8 +202,8 @@ async function resolveRun(
     eventLogPath =
       (direct.event_path as string | undefined) ??
       (direct.on_event as string | undefined)
-  } catch {
-    // ignore registry misses
+  } catch (error) {
+    throw contextualError(`unable to resolve run ${args.runId}`, error)
   }
 
   return { client: sup.getClient(), isSingleton: true, runtimeId, eventLogPath }
@@ -211,6 +220,8 @@ export async function eventsTool(args: {
   const resolved = await resolveRun(args)
 
   try {
+    const failures: Error[] = []
+
     // Preserve eventsTool's durable-history semantics when the supervisor
     // exposes the NDJSON path. The control-plane ring is intentionally small
     // and can no longer answer filters that match only rotated-out events.
@@ -223,8 +234,9 @@ export async function eventsTool(args: {
             after_seq: args.after_seq,
           }),
         }
-      } catch {
+      } catch (error) {
         // The path may belong to another process namespace; try live history.
+        failures.push(contextualError(`read event log ${resolved.eventLogPath}`, error))
       }
     }
 
@@ -243,11 +255,14 @@ export async function eventsTool(args: {
               .map((event) => clipEvent(event))
           : []
         return { events }
-      } catch {
-        // No durable path and history unavailable.
+      } catch (error) {
+        failures.push(contextualError(`read history for ${resolved.runtimeId}`, error))
       }
     }
 
+    if (failures.length > 0) {
+      throw new AggregateError(failures, `unable to read events for run ${args.runId}`)
+    }
     return { events: [] }
   } finally {
     if (!resolved.isSingleton) {

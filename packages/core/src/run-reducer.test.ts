@@ -18,6 +18,20 @@ describe('RunReducer', () => {
     expect(snapshot.latest_seq).toBe(3)
   })
 
+  it('tracks reasoning and user chunks separately in the transcript', () => {
+    const reducer = new RunReducer()
+    reducer.apply({ event: 'agent.thought_chunk', runtime_id: 'rt-chunks', seq: 1, delta: 'considering' })
+    reducer.apply({ event: 'user.message_chunk', runtime_id: 'rt-chunks', seq: 2, delta: 'please continue' })
+
+    const snapshot = reducer.snapshot()
+    expect(snapshot.thought_text).toBe('considering')
+    expect(snapshot.user_text).toBe('please continue')
+    expect(snapshot.transcript.map((entry) => [entry.kind, entry.text])).toEqual([
+      ['thought', 'considering'],
+      ['user', 'please continue'],
+    ])
+  })
+
   it('tracks tool lifecycle and live tool state', () => {
     const reducer = new RunReducer()
     reducer.apply({ event: 'tool.call', runtime_id: 'rt-2', seq: 1, id: 'tool-1', title: 'bash', status: 'running', input: 'echo hi' })
@@ -64,6 +78,27 @@ describe('RunReducer', () => {
     expect(snapshot.assistant_text).toBe('AB')
     expect(snapshot.transcript).toHaveLength(1)
     expect(snapshot.latest_seq).toBe(11)
+  })
+
+  it('reconstructs sequence deduplication from an initial snapshot', () => {
+    const initial = new RunReducer()
+    initial.apply({ event: 'agent.message_chunk', runtime_id: 'rt-seed', seq: 5, delta: 'history' })
+
+    const resumed = new RunReducer(undefined, initial.snapshot())
+    resumed.apply({ event: 'agent.message_chunk', runtime_id: 'rt-seed', seq: 5, delta: 'duplicate' })
+    resumed.apply({ event: 'agent.message_chunk', runtime_id: 'rt-seed', seq: 6, delta: ' live' })
+
+    expect(resumed.snapshot().assistant_text).toBe('history live')
+  })
+
+  it('does not mutate snapshots returned by earlier apply calls', () => {
+    const reducer = new RunReducer()
+    const first = reducer.apply({ event: 'agent.message_chunk', runtime_id: 'rt-copy', seq: 1, delta: 'first' })
+    reducer.apply({ event: 'agent.message_chunk', runtime_id: 'rt-copy', seq: 2, delta: ' second' })
+
+    expect(first.assistant_text).toBe('first')
+    expect(first.transcript).toHaveLength(1)
+    expect(first.latest_seq).toBe(1)
   })
 
   it('uses bounded fallback keys for unsequenced legacy events', () => {
