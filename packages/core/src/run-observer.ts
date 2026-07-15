@@ -58,7 +58,14 @@ export function observeRun(
 
   const iterator = client.events(streamOptions)[Symbol.asyncIterator]()
   let closed = false
+  let clientClosed = false
   let failure: Error | null = null
+
+  const closeClient = (): void => {
+    if (!options.close_client || clientClosed) return
+    clientClosed = true
+    client.close?.()
+  }
 
   const flushPending = (snapshot: RunSnapshot | null): void => {
     const unresolved = pendingNext.splice(0, pendingNext.length)
@@ -121,17 +128,16 @@ export function observeRun(
       })
     },
     async close() {
-      if (closed) {
+      try {
+        if (!closed) {
+          closed = true
+          if (typeof iterator.return === 'function') {
+            await iterator.return()
+          }
+        }
         await loop.catch(() => {})
-        return
-      }
-      closed = true
-      if (typeof iterator.return === 'function') {
-        await iterator.return()
-      }
-      await loop.catch(() => {})
-      if (options.close_client) {
-        client.close?.()
+      } finally {
+        closeClient()
       }
     },
   }

@@ -114,6 +114,26 @@ describe('observeRun', () => {
     expect(snapshots).toEqual(['tool.call', 'tool.call_update'])
   })
 
+  it('closes its client after the event stream fails', async () => {
+    const close = mock(() => {})
+    const observer = observeRun({
+      events: mock(() => ({
+        async next() {
+          throw new Error('stream failed')
+        },
+        [Symbol.asyncIterator]() {
+          return this
+        },
+      })),
+      close,
+    }, { close_client: true })
+
+    await expect(observer.next()).rejects.toThrow('stream failed')
+    await observer.close()
+    await observer.close()
+    expect(close).toHaveBeenCalledTimes(1)
+  })
+
   it('cleans up the underlying iterator on close', async () => {
     const { iterator, returnMock } = delayedIterable([])
     const observer = observeRun({ events: mock(() => iterator) })
