@@ -1,140 +1,146 @@
 package pi
 
-import (
-	"testing"
-)
+import "testing"
 
 func TestTranslateBasicEvents(t *testing.T) {
 	tests := []struct {
 		typeStr string
-		want    string
+		want    []string
 	}{
-		{"agent_start", "session.start"},
-		{"agent_end", "session.end"},
-		{"turn_start", "avenor.turn.start"},
-		{"turn_end", "avenor.turn.end"},
-		{"message_start", "avenor.message.start"},
-		{"message_end", "avenor.message.end"},
-		{"tool_execution_start", "avenor.tool.start"},
-		{"tool_execution_end", "avenor.tool.end"},
-		{"tool_execution_update", "avenor.tool.update"},
-		{"compaction_start", "avenor.compaction.start"},
-		{"compaction_end", "avenor.compaction.end"},
-		{"queue_update", "avenor.queue.update"},
-		{"auto_retry_start", "avenor.auto_retry.start"},
-		{"auto_retry_end", "avenor.auto_retry.end"},
-		{"extension_error", "avenor.extension.error"},
-		{"some_unknown_event", "avenor.some_unknown_event"},
+		{"agent_start", []string{"session.start"}},
+		{"agent_end", []string{"session.end"}},
+		{"turn_start", []string{"avenor.turn.start"}},
+		{"turn_end", []string{"avenor.turn.end"}},
+		{"message_start", []string{"avenor.message.start"}},
+		{"message_end", []string{"avenor.message.end"}},
+		{"compaction_start", []string{"avenor.compaction.start"}},
+		{"compaction_end", []string{"avenor.compaction.end"}},
+		{"queue_update", []string{"avenor.queue.update"}},
+		{"auto_retry_start", []string{"avenor.auto_retry.start"}},
+		{"auto_retry_end", []string{"avenor.auto_retry.end"}},
+		{"extension_error", []string{"avenor.extension.error"}},
+		{"some_unknown_event", []string{"avenor.some_unknown_event"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.typeStr, func(t *testing.T) {
-			payload := map[string]any{"type": tt.typeStr}
-			if tt.typeStr == "tool_execution_start" || tt.typeStr == "tool_execution_end" || tt.typeStr == "tool_execution_update" {
-				payload["toolName"] = "cat"
+			evs := translateNotification(map[string]any{"type": tt.typeStr}, "pi-s1")
+			if len(evs) != len(tt.want) {
+				t.Fatalf("len(events) = %d, want %d", len(evs), len(tt.want))
 			}
-			ev := translateNotification(payload, "pi-s1")
-			if ev == nil {
-				t.Fatal("expected event")
+			for i, want := range tt.want {
+				if evs[i].Event != want {
+					t.Fatalf("events[%d] = %q, want %q", i, evs[i].Event, want)
+				}
+				if evs[i].SessionID != "pi-s1" {
+					t.Fatalf("sessionID = %q, want pi-s1", evs[i].SessionID)
+				}
 			}
-			if ev.Event != tt.want {
-				t.Errorf("event = %q, want %q", ev.Event, tt.want)
-			}
-		if ev.SessionID != "pi-s1" {
-			t.Errorf("sessionID = %q, want pi-s1", ev.SessionID)
-		}
-		if tt.typeStr == "tool_execution_start" || tt.typeStr == "tool_execution_end" || tt.typeStr == "tool_execution_update" {
-			toolName, _ := ev.Fields["toolName"].(string)
-			if toolName != "cat" {
-				t.Errorf("toolName = %q, want cat", toolName)
-			}
-		}
-	})
+		})
 	}
 }
 
-func TestTranslateAgentEndWithStopReason(t *testing.T) {
-	payload := map[string]any{
+func TestTranslateToolExecutionEmitsCanonicalAndAlias(t *testing.T) {
+	evs := translateNotification(map[string]any{"type": "tool_execution_start", "toolName": "cat"}, "pi-s1")
+	if len(evs) != 2 {
+		t.Fatalf("len(events) = %d, want 2", len(evs))
+	}
+	if evs[0].Event != "tool.call" || evs[1].Event != "avenor.tool.start" {
+		t.Fatalf("events = %+v", evs)
+	}
+	if got, _ := evs[0].Fields["title"].(string); got != "cat" {
+		t.Fatalf("title = %q, want cat", got)
+	}
+	if got, _ := evs[0].Fields["status"].(string); got != "running" {
+		t.Fatalf("status = %q, want running", got)
+	}
+}
+
+func TestTranslateAgentEndWithStopReasonAndFinalOutput(t *testing.T) {
+	evs := translateNotification(map[string]any{
 		"type": "agent_end",
-		"messages": []any{
-			map[string]any{
-				"stop_reason": "end_of_turn",
-			},
-		},
+		"messages": []any{map[string]any{
+			"stop_reason": "end_of_turn",
+			"content":     []any{map[string]any{"type": "text", "text": "done"}},
+		}},
+	}, "pi-s1")
+	if len(evs) != 1 {
+		t.Fatalf("len(events) = %d, want 1", len(evs))
 	}
-	ev := translateNotification(payload, "pi-s1")
-	if ev == nil {
-		t.Fatal("expected event")
-	}
+	ev := evs[0]
 	if ev.Event != "session.end" {
-		t.Errorf("event = %q, want session.end", ev.Event)
+		t.Fatalf("event = %q, want session.end", ev.Event)
 	}
-	stopReason, _ := ev.Fields["stop_reason"].(string)
-	if stopReason != "end_of_turn" {
-		t.Errorf("stop_reason = %q, want end_of_turn", stopReason)
+	if got, _ := ev.Fields["stop_reason"].(string); got != "end_of_turn" {
+		t.Fatalf("stop_reason = %q, want end_of_turn", got)
 	}
-}
-
-func TestTranslateAgentEndEmptyMessages(t *testing.T) {
-	payload := map[string]any{"type": "agent_end", "messages": []any{}}
-	ev := translateNotification(payload, "pi-s1")
-	if ev == nil {
-		t.Fatal("expected event")
-	}
-	if ev.Event != "session.end" {
-		t.Errorf("event = %q, want session.end", ev.Event)
-	}
-	if len(ev.Fields) != 0 {
-		t.Errorf("fields should be empty for empty messages slice, got %d", len(ev.Fields))
-	}
-}
-
-func TestTranslateAgentEndNoMessages(t *testing.T) {
-	payload := map[string]any{"type": "agent_end"}
-	ev := translateNotification(payload, "pi-s1")
-	if ev == nil {
-		t.Fatal("expected event")
-	}
-	if ev.Event != "session.end" {
-		t.Errorf("event = %q, want session.end", ev.Event)
+	if got, _ := ev.Fields["final_output"].(string); got != "done" {
+		t.Fatalf("final_output = %q, want done", got)
 	}
 }
 
 func TestTranslateMessageUpdateTextDelta(t *testing.T) {
-	payload := map[string]any{
+	evs := translateNotification(map[string]any{
 		"type": "message_update",
 		"assistantMessageEvent": map[string]any{
 			"type": "text_delta",
-			"data": map[string]any{
-				"text": "hello",
-			},
+			"data": map[string]any{"text": "hello"},
 		},
+	}, "pi-s1")
+	if len(evs) != 2 {
+		t.Fatalf("len(events) = %d, want 2", len(evs))
 	}
-	ev := translateNotification(payload, "pi-s1")
-	if ev == nil {
-		t.Fatal("expected event")
+	if evs[0].Event != "agent.message_chunk" || evs[1].Event != "avenor.message.delta" {
+		t.Fatalf("events = %+v", evs)
 	}
-	if ev.Event != "avenor.message.delta" {
-		t.Errorf("event = %q, want avenor.message.delta", ev.Event)
-	}
-	text, _ := ev.Fields["text"].(string)
-	if text != "hello" {
-		t.Errorf("text = %q, want hello", text)
+	if got, _ := evs[0].Fields["delta"].(string); got != "hello" {
+		t.Fatalf("delta = %q, want hello", got)
 	}
 }
 
-func TestTranslateMessageUpdateOtherType(t *testing.T) {
-	payload := map[string]any{
+func TestTranslateMessageUpdateThinkingDelta(t *testing.T) {
+	evs := translateNotification(map[string]any{
 		"type": "message_update",
 		"assistantMessageEvent": map[string]any{
 			"type": "thinking_delta",
+			"data": map[string]any{"text": "hmm"},
 		},
+	}, "pi-s1")
+	if len(evs) != 2 {
+		t.Fatalf("len(events) = %d, want 2", len(evs))
 	}
-	ev := translateNotification(payload, "pi-s1")
-	if ev == nil {
-		t.Fatal("expected event")
+	if evs[0].Event != "agent.thought_chunk" || evs[1].Event != "avenor.message.update" {
+		t.Fatalf("events = %+v", evs)
 	}
-	if ev.Event != "avenor.message.update" {
-		t.Errorf("event = %q, want avenor.message.update", ev.Event)
+}
+
+func TestTranslateMessageUpdateSkipsEmptyCanonicalDelta(t *testing.T) {
+	evs := translateNotification(map[string]any{
+		"type":                  "message_update",
+		"assistantMessageEvent": map[string]any{"type": "text_delta"},
+	}, "pi-s1")
+	if len(evs) != 1 || evs[0].Event != "avenor.message.update" {
+		t.Fatalf("events = %+v, want only avenor.message.update", evs)
+	}
+}
+
+func TestTranslateMessageUpdateFallsBackToFullMessageText(t *testing.T) {
+	evs := translateNotification(map[string]any{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type": "message_end",
+			"partial": map[string]any{
+				"content": []any{map[string]any{"type": "text", "text": "full text"}},
+			},
+		},
+	}, "pi-s1")
+	if len(evs) != 2 {
+		t.Fatalf("len(events) = %d, want 2", len(evs))
+	}
+	if evs[0].Event != "agent.message_chunk" {
+		t.Fatalf("first event = %q, want agent.message_chunk", evs[0].Event)
+	}
+	if got, _ := evs[0].Fields["delta"].(string); got != "full text" {
+		t.Fatalf("delta = %q, want full text", got)
 	}
 }
 
@@ -226,5 +232,3 @@ func TestTranslateExtensionUINotify(t *testing.T) {
 		t.Errorf("method = %q, want notify", method)
 	}
 }
-
-

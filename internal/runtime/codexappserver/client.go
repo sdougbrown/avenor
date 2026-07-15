@@ -415,8 +415,8 @@ func (c *client) routeResponse(id json.RawMessage, result json.RawMessage, rpcEr
 }
 
 func (c *client) routeNotification(method string, params json.RawMessage) {
-	ev := translateNotification(method, params)
-	if ev == nil {
+	evs := translateNotification(method, params)
+	if len(evs) == 0 {
 		return
 	}
 
@@ -424,23 +424,32 @@ func (c *client) routeNotification(method string, params json.RawMessage) {
 	if method == "turn/completed" {
 		var n turnCompletedNotification
 		if err := json.Unmarshal(params, &n); err == nil {
+			terminal := evs[0]
+			for _, ev := range evs {
+				if ev.Event == "session.end" {
+					terminal = ev
+					break
+				}
+			}
 			c.mu.Lock()
 			ch, ok := c.turns[n.Turn.ID]
 			if !ok {
-				c.turnDone[n.Turn.ID] = *ev
+				c.turnDone[n.Turn.ID] = terminal
 			}
 			c.clearApprovalsForTurnLocked(n.ThreadID, n.Turn.ID)
 			c.mu.Unlock()
 			if ok {
 				select {
-				case ch <- *ev:
+				case ch <- terminal:
 				default:
 				}
 			}
 		}
 	}
 
-	c.fanout(ev)
+	for i := range evs {
+		c.fanout(&evs[i])
+	}
 }
 
 func (c *client) routeApprovalRequest(id json.RawMessage, method string, params json.RawMessage) {

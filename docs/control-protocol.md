@@ -102,9 +102,15 @@ Error codes:
 {"jsonrpc":"2.0","method":"event","params":{"event":"agent.status","phase":"working",...}}
 ```
 
-Events match `--on-event` NDJSON format exactly. The `subscribe` method enables event delivery on your connection. Subscribers receive live events only (from `subscribe` onward). To replay history, read the `--on-event` log.
+Events match `--on-event` NDJSON format exactly. Calling `subscribe` with no parameters preserves the original behavior: notifications begin with the next live event.
 
-When a subscriber's buffer fills (256 events pending), the oldest is dropped and a `subscriber.lagged` notification is sent with `dropped_count`. Additional lag notifications are coalesced while lagging continues.
+### Event delivery and ordering
+
+A runtime-scoped subscription can replay recent history before switching to live delivery. Replay and concurrently arriving live events are deduplicated and ordered by the runtime-local `seq` field.
+
+Both the per-runtime history window and each subscriber queue are bounded at 256 events. If a subscriber queue fills, Avenor drops its oldest pending event and emits a `subscriber.lagged` notification with `dropped_count`. Further drops are coalesced until the subscriber catches up. Closing the connection removes its subscriptions.
+
+Replay is an attachment aid, not durable storage. The NDJSON file configured by `on_event` remains the authoritative full record after the in-memory window rotates or a subscriber lags.
 
 ## Methods
 
@@ -150,10 +156,57 @@ Returns the current state snapshot:
 #### `subscribe`
 
 ```json
-{"jsonrpc":"2.0","id":1,"method":"subscribe"}
+{"jsonrpc":"2.0","id":1,"method":"subscribe", "params": {}}
 ```
 
-Returns `{"subscribed":true}`. After this, event notifications arrive on this connection as JSON-RPC notifications.
+Returns `{"subscribed":true}`. Event notifications then arrive on the same connection. Omitting parameters selects the backward-compatible, unfiltered, live-only subscription.
+
+To replay recent events from one runtime before following it live:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "subscribe",
+  "params": {
+    "runtime_id": "rt_1",
+    "replay": true,
+    "limit": 50,
+    "after_seq": 123
+  }
+}
+```
+
+- `runtime_id` (string) — filter live events to this runtime; required when `replay` is true or `after_seq` is non-zero.
+- `replay` (bool) — replay buffered history before live delivery. Defaults to false.
+- `limit` (int) — replay at most this many events. Defaults to 64 and is capped at 256.
+- `after_seq` (int64) — replay and deliver only events whose runtime-local sequence is greater than this value.
+
+#### `history`
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"history","params":{"runtime_id":"rt_1","limit":64}}
+```
+
+Retrieves a bounded in-memory window of recent events for a specific runtime. It does not read the durable NDJSON file.
+
+Params:
+- `runtime_id` (string) — required.
+- `limit` (int) — max events to return. Defaults to 64. Max limit is 256.
+- `after_seq` (int64) — optional. Only return events with a sequence number greater than this.
+
+Response:
+
+```json
+{
+  "runtime_id": "rt_1",
+  "events": [...],
+  "latest_seq": 456
+}
+```
+
+- `events` — array of event objects.
+- `latest_seq` — the latest sequence assigned to the runtime, including when older events have rotated out of the history window.
 
 #### `cancel`
 
@@ -226,11 +279,11 @@ Params:
 - `agent` (string) — agent name override.
 - `label` (string) — human-readable label for this runtime.
 - `model` (string) — model name override.
-- `server_url` (string) — backend server URL (e.g., OpenCode HTTP endpoint).
+- `server_url` (string) — backend server URL (e.g. OpenCode HTTP endpoint).
 - `backend` (string) — backend class. Defaults to `"opencode-acp"`.
 - `on_event` (string) — path to write event NDJSON. If omitted, created under `$TMPDIR/avenor-stable/<supervisor_run_id>/<runtime_id>/`.
 - `sentinel_file` (string) — path to write exit status. If omitted, created under `$TMPDIR/avenor-stable/<supervisor_run_id>/<runtime_id>/`.
-- `permission_handler` (string) — how to handle permission requests (e.g., `"file:/path"` to poll files, or omit to use `auto_approve`).
+- `permission_handler` (string) — how to handle permission requests (e.g. `"file:/path"` to poll files, or omit to use `auto_approve`).
 - `auto_approve` (bool) — auto-resolve all permission requests. Overrides file handler if both are set.
 - `timeout` (string) — total run timeout as a Go duration (`30s`, `5m`, etc.).
 - `max_retries` (int) — max retries after transient backend errors.
@@ -252,17 +305,28 @@ Returns all active and recently-completed child runtimes with status summaries. 
   {
     "runtime_id": "rt_1",
     "session_id": "ses_123",
+    "run_id": "run_abc123",
     "label": "review-42",
+    "agent": "reviewer",
+    "model": "provider/model",
+    "backend": "opencode-acp",
     "dir": "/repo/A",
     "status": "running",
+    "phase": "working",
+    "phase_label": "go test ./...",
+    "parent_id": "",
+    "children": [],
+    "latest_seq": 42,
+    "usage": {"total_tokens": 1200},
     "exit_code": 0,
     "on_event": "/tmp/avenor-stable/abc123/rt_1/events.ndjson",
+    "event_path": "/tmp/avenor-stable/abc123/rt_1/events.ndjson",
     "sentinel_file": "/tmp/avenor-stable/abc123/rt_1/sentinel.env"
   }
 ]
 ```
 
-`status` is one of: `"idle"`, `"running"`, `"ended"`.
+`status` is one of `"idle"`, `"running"`, or `"ended"`. Metadata fields are additive and may be absent when the backend does not expose them. Completed runtimes can also include bounded `final_output`; blocked runtimes include their pending permission details.
 
 #### `shutdown`
 
@@ -294,9 +358,9 @@ These are the same methods as above but applied to a specific child runtime inst
 
 The first client connection to issue a mutating method (`cancel`, `prompt`, `interrupt_and_prompt`, `answer_permission`, `spawn`, `shutdown`) becomes the owner. Non-owner calls fail with error code `-32010` (`permission_denied`).
 
-Ownership is per socket, not per user. The socket file is created with mode `0600`, so filesystem permissions enforce process-level isolation. Ownership is released when the owner connection closes, and the next client to call a mutating method becomes the new owner.
+Ownership is per socket, not per user. The socket file is created with mode `0600`, so filesystem permissions enforce process-level isolation. There is no additional token authentication on the Unix socket: any process running as the same account that can open it can observe runs and compete to become the mutating owner. Ownership is released when the owner connection closes, and the next client to call a mutating method becomes the new owner.
 
-Multiple read-only connections may observe state simultaneously (`subscribe`, `status`, `list`). Event subscriptions from non-owners continue to receive notifications.
+Multiple read-only connections may observe state simultaneously (`subscribe`, `history`, `status`, `list`). Event subscriptions and history can contain transcript text, tool inputs or outputs, and permission details, so treat read access as sensitive. Non-owner subscribers continue to receive notifications.
 
 The footgun: if you lose the owner connection, no one else can mutate state. Either be the only client, or have a heartbeat mechanism to hand off ownership gracefully before closing.
 
@@ -320,8 +384,9 @@ When `--http-debug :8080` is passed, the process starts an HTTP debug adapter bo
 ```
 GET  /status                    — current snapshot JSON
 GET  /status/<runtime_id>       — per-runtime snapshot (stable mode only)
-GET  /events                    — Server-Sent Events stream (SSE)
-GET  /events?runtime_id=<id>    — SSE stream filtered to one runtime
+GET  /events                    — SSE stream of all events.
+GET  /events?runtime_id=<id>    — SSE stream filtered to one runtime.
+GET  /events?token=<token>     — SSE stream with token.
 POST /cancel                    — cancel the run (CLI mode); 400 in stable mode
 POST /cancel/<runtime_id>       — cancel a single runtime (stable mode only)
 POST /answer-permission         — answer a permission request
@@ -345,7 +410,7 @@ All endpoints except `/events` require an `X-Avenor-Token` header. The token is 
 
 ### Localhost binding
 
-The HTTP adapter binds only to loopback. Bare `:port` is rewritten to `127.0.0.1:port`. When the `--http-debug` host is a hostname (e.g., `localhost`), the bind address is resolved at startup and rejected unless every resolved IP is a loopback address. `localhost` is hard-coded to `127.0.0.1` to avoid `/etc/hosts` ordering flakiness rather than being passed to DNS. The Unix socket remains the source of truth for ownership, lifecycles, and permission state.
+The HTTP adapter binds only to loopback. Bare `:port` is rewritten to `127.0.0.1:port`. When the `--http-debug` host is a hostname (e.g. `localhost`), the bind address is resolved at startup and rejected unless every resolved IP is a loopback address. `localhost` is hard-coded to `127.0.0.1` to avoid `/etc/hosts` ordering flakiness rather than being passed to DNS. The Unix socket remains the source of truth for ownership, lifecycles, and permission state.
 
 ## Socket Lifecycle
 

@@ -347,6 +347,242 @@ func TestSubscriberBackpressureLaggedEvent(t *testing.T) {
 	}
 }
 
+func TestPublishEventCanonicalizesIdentityAndPreservesProvidedMetadata(t *testing.T) {
+	state := NewState("run_1", "label", 0)
+	s := NewServer(state)
+
+	first := s.PublishEvent(events.Event{Event: "agent.message_chunk", SessionID: "ses_1", Fields: map[string]any{"runtime_id": "rt_1"}})
+	if got, _ := first.Fields["run_id"].(string); got != "run_1" {
+		t.Fatalf("run_id = %q, want run_1", got)
+	}
+	if got, _ := first.Fields["run_label"].(string); got != "label" {
+		t.Fatalf("run_label = %q, want label", got)
+	}
+	if got, _ := int64Field(first.Fields["seq"]); got != 1 {
+		t.Fatalf("seq = %d, want 1", got)
+	}
+	if _, ok := int64Field(first.Fields["ts"]); !ok {
+		t.Fatal("expected ts to be stamped")
+	}
+
+	second := s.PublishEvent(events.Event{Event: "tool.call", SessionID: "ses_1", Fields: map[string]any{"runtime_id": "rt_1"}})
+	if got, _ := int64Field(second.Fields["seq"]); got != 2 {
+		t.Fatalf("seq = %d, want 2", got)
+	}
+
+	preserved := s.PublishEvent(events.Event{Event: "session.end", SessionID: "ses_1", Fields: map[string]any{"runtime_id": "rt_1", "seq": int64(99), "ts": int64(123), "final_output": "done"}})
+	if got, _ := int64Field(preserved.Fields["seq"]); got != 99 {
+		t.Fatalf("seq = %d, want preserved 99", got)
+	}
+	if got, _ := int64Field(preserved.Fields["ts"]); got != 123 {
+		t.Fatalf("ts = %d, want preserved 123", got)
+	}
+
+	third := s.PublishEvent(events.Event{Event: "agent.message_chunk", SessionID: "ses_1", Fields: map[string]any{"runtime_id": "rt_1"}})
+	if got, _ := int64Field(third.Fields["seq"]); got != 100 {
+		t.Fatalf("seq = %d, want 100", got)
+	}
+
+	snap := state.Snapshot()
+	if snap.LatestSeq != 100 {
+		t.Fatalf("latest_seq = %d, want 100", snap.LatestSeq)
+	}
+	if snap.FinalOutput != "done" {
+		t.Fatalf("final_output = %q, want done", snap.FinalOutput)
+	}
+}
+
+func TestPublishCanonicalEventKeepsHistoryAndNextSeqAligned(t *testing.T) {
+	state := NewState("run_1", "label", 0)
+	s := NewServer(state)
+
+	s.PublishCanonicalEvent(events.Event{
+		Event:     "agent.message_chunk",
+		SessionID: "ses_1",
+		Fields: map[string]any{
+			"runtime_id": "rt_1",
+			"run_id":     "run_1",
+			"run_label":  "label",
+			"seq":        int64(7),
+			"ts":         int64(11),
+		},
+	})
+
+	history, latestSeq := s.runtimeHistory("rt_1", 0, 8)
+	if latestSeq != 7 {
+		t.Fatalf("latestSeq = %d, want 7", latestSeq)
+	}
+	if len(history) != 1 {
+		t.Fatalf("history len = %d, want 1", len(history))
+	}
+	if seq, _ := int64Field(history[0].Fields["seq"]); seq != 7 {
+		t.Fatalf("history seq = %d, want 7", seq)
+	}
+
+	next := s.PublishEvent(events.Event{Event: "tool.call", SessionID: "ses_1", Fields: map[string]any{"runtime_id": "rt_1"}})
+	if seq, _ := int64Field(next.Fields["seq"]); seq != 8 {
+		t.Fatalf("next seq = %d, want 8", seq)
+	}
+}
+
+func TestSubscribeHistoryReplayFiltersByRuntimeAndAfterSeq(t *testing.T) {
+	state := NewState("run_1", "", 0)
+	s := NewServer(state)
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	s.PublishEvent(events.Event{Event: "agent.message_chunk", SessionID: "ses_1", Fields: map[string]any{"runtime_id": "rt_1"}})
+	s.PublishEvent(events.Event{Event: "tool.call", SessionID: "ses_1", Fields: map[string]any{"runtime_id": "rt_1", "title": "build"}})
+	s.PublishEvent(events.Event{Event: "agent.message_chunk", SessionID: "ses_2", Fields: map[string]any{"runtime_id": "rt_2"}})
+
+	c := mustDial(t, path)
+	defer c.Close()
+	params, _ := json.Marshal(map[string]any{"runtime_id": "rt_1", "replay": true, "after_seq": 1, "limit": 8})
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "subscribe", Params: params})
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		s.mu.Lock()
+		subs := len(s.subs)
+		s.mu.Unlock()
+		if subs == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("subscriber was not registered")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	s.PublishEvent(events.Event{Event: "session.end", SessionID: "ses_1", Fields: map[string]any{"runtime_id": "rt_1", "stop_reason": "end_turn"}})
+
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	scanner := bufio.NewScanner(c)
+	var seqs []int64
+	seenResponse := false
+	for len(seqs) < 2 || !seenResponse {
+		if !scanner.Scan() {
+			t.Fatal("expected response and notifications")
+		}
+		var envelope map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &envelope); err != nil {
+			t.Fatalf("decode envelope: %v", err)
+		}
+		if _, ok := envelope["id"]; ok {
+			if errVal, ok := envelope["error"].(map[string]any); ok && errVal != nil {
+				t.Fatalf("subscribe error: %+v", errVal)
+			}
+			seenResponse = true
+			continue
+		}
+		params, _ := envelope["params"].(map[string]any)
+		if params["runtime_id"] != "rt_1" {
+			t.Fatalf("runtime_id = %v, want rt_1", params["runtime_id"])
+		}
+		seq, _ := int64Field(params["seq"])
+		seqs = append(seqs, seq)
+	}
+	if seqs[0] != 2 || seqs[1] != 3 {
+		t.Fatalf("replay/live seqs = %v, want [2 3]", seqs)
+	}
+
+	historyParams, _ := json.Marshal(map[string]any{"runtime_id": "rt_1", "after_seq": 1, "limit": 1})
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 2, Method: "history", Params: historyParams})
+	historyResp := readResp(t, c)
+	if historyResp.Error != nil {
+		t.Fatalf("history error: %+v", historyResp.Error)
+	}
+	result, ok := historyResp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("history result type: %T", historyResp.Result)
+	}
+	evs, ok := result["events"].([]any)
+	if !ok || len(evs) != 1 {
+		t.Fatalf("history events = %#v, want 1 event", result["events"])
+	}
+	last, _ := evs[0].(map[string]any)
+	if seq, _ := int64Field(last["seq"]); seq != 3 {
+		t.Fatalf("history seq = %d, want 3", seq)
+	}
+}
+
+func TestSubscriberBuffersLiveSequenceUntilReplayIsQueued(t *testing.T) {
+	sub := newSubscriber(&connState{}, "rt_1", 0)
+	replay := events.Event{Event: "agent.message_chunk", Fields: map[string]any{"runtime_id": "rt_1", "seq": int64(1)}}
+	live := events.Event{Event: "tool.call", Fields: map[string]any{"runtime_id": "rt_1", "seq": int64(2)}}
+
+	// A live event can arrive after registration but before the replay goroutine
+	// starts. It must not advance seenSeq until the older replay is queued.
+	sub.enqueue(live)
+	if len(sub.pending) != 1 {
+		t.Fatalf("pending len = %d, want 1", len(sub.pending))
+	}
+	if got := sub.seenSeq["rt_1"]; got != 0 {
+		t.Fatalf("seen seq before replay = %d, want 0", got)
+	}
+
+	sub.mu.Lock()
+	if !sub.recordSeqLocked(replay) {
+		sub.mu.Unlock()
+		t.Fatal("replay event was incorrectly treated as a duplicate")
+	}
+	sub.enqueueLocked(replay)
+	sub.mu.Unlock()
+	sub.flushPending()
+
+	first := <-sub.ch
+	second := <-sub.ch
+	if seq, _ := int64Field(first.Fields["seq"]); seq != 1 {
+		t.Fatalf("first seq = %d, want replay seq 1", seq)
+	}
+	if seq, _ := int64Field(second.Fields["seq"]); seq != 2 {
+		t.Fatalf("second seq = %d, want live seq 2", seq)
+	}
+}
+
+func TestSubscriberDisconnectCleansUp(t *testing.T) {
+	state := NewState("run_1", "", 0)
+	s := NewServer(state)
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	c := mustDial(t, path)
+	params, _ := json.Marshal(map[string]any{"runtime_id": "rt_1"})
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "subscribe", Params: params})
+	_ = readResp(t, c)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		s.mu.Lock()
+		subs := len(s.subs)
+		s.mu.Unlock()
+		if subs == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("subscriber was not registered")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	_ = c.Close()
+	for {
+		s.mu.Lock()
+		subs := len(s.subs)
+		s.mu.Unlock()
+		if subs == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("subscriber did not clean up after disconnect")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func TestSubscribeAndStatus(t *testing.T) {
 	state := NewState("run_1", "label", 2)
 	s := NewServer(state)
@@ -426,6 +662,20 @@ func readResp(t *testing.T, c net.Conn) Response {
 		t.Fatalf("decode response: %v", err)
 	}
 	return r
+}
+
+func readNotification(t *testing.T, c net.Conn) Notification {
+	t.Helper()
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	scanner := bufio.NewScanner(c)
+	if !scanner.Scan() {
+		t.Fatal("no notification")
+	}
+	var n Notification
+	if err := json.Unmarshal(scanner.Bytes(), &n); err != nil {
+		t.Fatalf("decode notification: %v", err)
+	}
+	return n
 }
 
 func TestHTTPDebugStatusAndCancel(t *testing.T) {

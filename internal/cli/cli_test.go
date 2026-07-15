@@ -257,6 +257,16 @@ func waitForSessionForTest(
 	})
 }
 
+func shortControlSocketPath(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "avenor-control-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return filepath.Join(dir, "control.sock")
+}
+
 func waitForPendingPermissionForTest(t *testing.T, cs *control.ControlServer) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -829,6 +839,57 @@ func TestNewEventWriterNullPath(t *testing.T) {
 	// Write should succeed and silently discard.
 	if err := w.Write(makeEvent("agent.status", nil)); err != nil {
 		t.Fatalf("Write() to null writer error = %v", err)
+	}
+}
+
+func TestFanoutWriterWithoutControlStampsEventLogOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.ndjson")
+	baseWriter, err := NewEventWriter(path)
+	if err != nil {
+		t.Fatalf("NewEventWriter: %v", err)
+	}
+	writer := newFanoutWriter(baseWriter, nil, NewEventMetadata("run_1", "review", ""))
+
+	for _, ev := range []events.Event{
+		{Event: "agent.status", SessionID: "ses_1", Fields: map[string]any{"phase": "working", "custom": "keep"}},
+		{Event: "tool.call", SessionID: "ses_1", Fields: map[string]any{"seq": int64(99), "ts": int64(123), "title": "build"}},
+		{Event: "session.end", SessionID: "ses_1", Fields: map[string]any{"stop_reason": "end_turn"}},
+	} {
+		if err := writer.Write(ev); err != nil {
+			t.Fatalf("Write(%s): %v", ev.Event, err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	got := readEventLogForTest(t, path)
+	if len(got) != 3 {
+		t.Fatalf("event count = %d, want 3", len(got))
+	}
+	if got[0].Fields["run_id"] != "run_1" {
+		t.Fatalf("run_id = %v, want run_1", got[0].Fields["run_id"])
+	}
+	if got[0].Fields["run_label"] != "review" {
+		t.Fatalf("run_label = %v, want review", got[0].Fields["run_label"])
+	}
+	if got[0].Fields["custom"] != "keep" {
+		t.Fatalf("custom = %v, want keep", got[0].Fields["custom"])
+	}
+	if seq := got[0].Fields["seq"]; seq != float64(1) {
+		t.Fatalf("first seq = %v, want 1", seq)
+	}
+	if ts, ok := got[0].Fields["ts"].(float64); !ok || ts <= 0 {
+		t.Fatalf("first ts = %v, want positive", got[0].Fields["ts"])
+	}
+	if seq := got[1].Fields["seq"]; seq != float64(99) {
+		t.Fatalf("second seq = %v, want preserved 99", seq)
+	}
+	if ts := got[1].Fields["ts"]; ts != float64(123) {
+		t.Fatalf("second ts = %v, want preserved 123", ts)
+	}
+	if seq := got[2].Fields["seq"]; seq != float64(100) {
+		t.Fatalf("third seq = %v, want 100", seq)
 	}
 }
 
@@ -2055,7 +2116,7 @@ func TestControlPermissionClaimTimeoutFallsThrough(t *testing.T) {
 
 func TestScopedControlPermissionClaimCompletesAndReleasesForNextRequest(t *testing.T) {
 	cs := control.NewServer(control.NewState("run_1", "", 0))
-	socketPath := filepath.Join(t.TempDir(), "control.sock")
+	socketPath := shortControlSocketPath(t)
 	if err := cs.Start(socketPath); err != nil {
 		t.Fatalf("start control server: %v", err)
 	}
@@ -2146,7 +2207,7 @@ func TestScopedControlPermissionClaimCompletesAndReleasesForNextRequest(t *testi
 
 func TestPermissionClaimIsReservedBeforeSynchronousRequestSink(t *testing.T) {
 	cs := control.NewServer(control.NewState("run_1", "", 0))
-	socketPath := filepath.Join(t.TempDir(), "control.sock")
+	socketPath := shortControlSocketPath(t)
 	if err := cs.Start(socketPath); err != nil {
 		t.Fatalf("start control server: %v", err)
 	}
@@ -2222,7 +2283,7 @@ func TestPermissionClaimIsReservedBeforeSynchronousRequestSink(t *testing.T) {
 
 func TestLateControlAnswerIsBlockedWhileFileResolverOwnsRequest(t *testing.T) {
 	cs := control.NewServer(control.NewState("run_1", "", 0))
-	socketPath := filepath.Join(t.TempDir(), "control.sock")
+	socketPath := shortControlSocketPath(t)
 	if err := cs.Start(socketPath); err != nil {
 		t.Fatalf("start control server: %v", err)
 	}
@@ -3478,4 +3539,30 @@ func TestWaitForSessionFinalReply(t *testing.T) {
 			toolCall,
 		}, "Initial thought.", "")
 	})
+}
+
+func TestWaitForSessionSessionEndIncludesFinalOutput(t *testing.T) {
+	eventsPath := filepath.Join(t.TempDir(), "events.ndjson")
+	writer, err := NewEventWriter(eventsPath)
+	if err != nil {
+		t.Fatalf("NewEventWriter: %v", err)
+	}
+	defer writer.Close()
+
+	eventCh := make(chan events.Event, 2)
+	eventCh <- events.Event{Event: "agent.message_chunk", SessionID: "ses_output", Fields: map[string]any{"delta": "final answer"}}
+	eventCh <- events.Event{Event: "session.end", SessionID: "ses_output", Fields: map[string]any{"stop_reason": "end_turn"}}
+	close(eventCh)
+	promptDone := make(chan error, 1)
+	promptDone <- nil
+
+	result := waitForSessionForTest(context.Background(), &cliFakeProvider{}, writer, nil, nil, eventCh, promptDone, nil, "ses_output", "run_output", "", true, DefaultPermissionClaimTimeout, nil, io.Discard)
+	if result.FinalReply != "final answer" {
+		t.Fatalf("FinalReply = %q, want final answer", result.FinalReply)
+	}
+	logged := readEventLogForTest(t, eventsPath)
+	last := logged[len(logged)-1]
+	if got, _ := last.Fields["final_output"].(string); got != "final answer" {
+		t.Fatalf("final_output = %q, want final answer", got)
+	}
 }

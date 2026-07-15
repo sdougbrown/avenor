@@ -68,6 +68,9 @@ type SpawnResult struct {
 type childRuntime struct {
 	id               string
 	label            string
+	agent            string
+	model            string
+	backend          string
 	parentID         string   // runtime ID of the parent agent, empty for top-level
 	children         []string // runtime IDs spawned by this runtime
 	provider         runtime.Provider
@@ -88,6 +91,9 @@ type childRuntime struct {
 	active           bool
 	promptCh         chan struct{}
 	promptQueue      []string
+	latestSeq        int64
+	usage            map[string]any
+	finalOutput      string
 	// Per-runtime status mirror of control.Snapshot fields. Updated from the
 	// event fanout so RuntimeStatus can surface phase, phase_label, and
 	// pending_permission without consulting the shared ControlState (which
@@ -97,6 +103,7 @@ type childRuntime struct {
 	pendingPermission bool
 	permission        map[string]any
 	mu                sync.Mutex
+	writeMu           sync.Mutex
 }
 
 type pendingChildQuestion struct {
@@ -308,6 +315,10 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 	if params.Dir == "" {
 		params.Dir = "."
 	}
+	backend := params.Backend
+	if backend == "" {
+		backend = cli.DefaultBackend
+	}
 
 	promptText := params.Prompt
 	if promptText == "" && params.PromptFile != "" {
@@ -392,6 +403,9 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 		childCtx, childCancel := context.WithCancel(context.Background())
 
 		child.label = params.Label
+		child.agent = params.Agent
+		child.model = params.Model
+		child.backend = backend
 		child.cancelFn = childCancel
 		child.autoApprove = params.AutoApprove
 		child.permClaimTimeout = s.config.PermissionClaimTimeout
@@ -437,6 +451,9 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 		childCtx, childCancel := context.WithCancel(context.Background())
 
 		child.label = params.Label
+		child.agent = params.Agent
+		child.model = params.Model
+		child.backend = backend
 		child.cancelFn = childCancel
 		child.autoApprove = params.AutoApprove
 		child.permClaimTimeout = s.config.PermissionClaimTimeout
@@ -473,10 +490,6 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 	discovery := cli.DiscoverServer(params.ServerURL, os.Getenv)
 	startOpts.ServerURL = discovery.URL
 
-	backend := params.Backend
-	if backend == "" {
-		backend = cli.DefaultBackend
-	}
 	if backend == "opencode-http" && startOpts.ServerURL == "" {
 		if discovery.Mode == "subprocess" {
 			server, err := s.getOrCreateHTTPServer(params.Dir)
@@ -509,6 +522,9 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 
 	// Populate child with fully-initialised state.
 	child.label = params.Label
+	child.agent = params.Agent
+	child.model = params.Model
+	child.backend = backend
 	child.provider = provider
 	child.session = session
 	child.eventWriter = writer
@@ -700,6 +716,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 		runtimeID:       child.id,
 		child:           child,
 		control:         s.control,
+		metadata:        cli.NewEventMetadata(s.runID, child.label, child.id),
 		onPermissionReq: s.cachePermissionOptions,
 		recorder:        newRecorderFor(s, child.id),
 	}
@@ -868,6 +885,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 		runtimeID:       child.id,
 		child:           child,
 		control:         s.control,
+		metadata:        cli.NewEventMetadata(s.runID, child.label, child.id),
 		onPermissionReq: s.cachePermissionOptions,
 		recorder:        newRecorderFor(s, child.id),
 	}
@@ -1101,6 +1119,7 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 		runtimeID:       child.id,
 		child:           child,
 		control:         s.control,
+		metadata:        cli.NewEventMetadata(s.runID, child.label, child.id),
 		onPermissionReq: s.cachePermissionOptions,
 		recorder:        newRecorderFor(s, child.id),
 	}
@@ -1329,17 +1348,23 @@ func (s *Supervisor) listRuntimes() []map[string]any {
 		entry := map[string]any{
 			"runtime_id":         rt.id,
 			"session_id":         rt.session.SessionID,
+			"run_id":             rt.runID,
 			"label":              rt.label,
+			"agent":              rt.agent,
+			"model":              rt.model,
+			"backend":            rt.backend,
 			"dir":                rt.dir,
 			"status":             status,
 			"exit_code":          rt.exitCode,
 			"on_event":           rt.onEvent,
+			"event_path":         rt.onEvent,
 			"sentinel_file":      rt.sentinelFile,
 			"parent_id":          rt.parentID,
 			"children":           rt.children,
 			"phase":              rt.phase,
 			"phase_label":        rt.phaseLabel,
 			"pending_permission": rt.pendingPermission,
+			"latest_seq":         rt.latestSeq,
 		}
 		if rt.permission != nil {
 			perm := make(map[string]any, len(rt.permission))
@@ -1347,6 +1372,16 @@ func (s *Supervisor) listRuntimes() []map[string]any {
 				perm[k] = v
 			}
 			entry["permission"] = perm
+		}
+		if rt.usage != nil {
+			usage := make(map[string]any, len(rt.usage))
+			for k, v := range rt.usage {
+				usage[k] = v
+			}
+			entry["usage"] = usage
+		}
+		if rt.finalOutput != "" {
+			entry["final_output"] = rt.finalOutput
 		}
 		rt.mu.Unlock()
 		out = append(out, entry)
@@ -1486,74 +1521,104 @@ type runtimeFanoutWriter struct {
 	runtimeID       string
 	child           *childRuntime
 	control         *control.ControlServer
+	metadata        *cli.EventMetadata
 	onPermissionReq func(runtimeID, requestID string, options []any)
 	recorder        *broker.Recorder
 }
 
 func (w *runtimeFanoutWriter) Write(ev events.Event) error {
-	if ev.Fields == nil {
-		ev.Fields = map[string]any{}
+	if w.child != nil {
+		w.child.writeMu.Lock()
+		defer w.child.writeMu.Unlock()
 	}
-	ev.Fields["runtime_id"] = w.runtimeID
-	if ev.Event == "permission.request" && w.onPermissionReq != nil {
-		if requestID, _ := ev.Fields["request_id"].(string); requestID != "" {
-			if options, _ := ev.Fields["options"].([]any); options != nil {
+	stamped := ev
+	if w.metadata != nil {
+		stamped = w.metadata.Stamp(ev)
+	} else {
+		if stamped.Fields == nil {
+			stamped.Fields = map[string]any{}
+		}
+		if _, ok := stamped.Fields["runtime_id"]; !ok && w.runtimeID != "" {
+			stamped.Fields["runtime_id"] = w.runtimeID
+		}
+		if w.control != nil {
+			stamped = w.control.CanonicalizeEvent(stamped)
+		}
+	}
+	if stamped.Event == "permission.request" && w.onPermissionReq != nil {
+		if requestID, _ := stamped.Fields["request_id"].(string); requestID != "" {
+			if options, _ := stamped.Fields["options"].([]any); options != nil {
 				w.onPermissionReq(w.runtimeID, requestID, options)
 			}
 		}
 	}
-	// Mirror phase, phase_label, and pending_permission onto the child so
-	// RuntimeStatus can report them per-runtime. The shared ControlState is
-	// not suitable for this because it reflects whichever runtime emitted
-	// most recently.
+	// Mirror phase, phase_label, pending_permission, usage, final_output, and
+	// latest_seq onto the child so RuntimeStatus can report them per-runtime.
 	if w.child != nil {
-		switch ev.Event {
+		w.child.mu.Lock()
+		if seq, ok := int64Value(stamped.Fields["seq"]); ok {
+			w.child.latestSeq = seq
+		}
+		if usage, ok := stamped.Fields["usage"].(map[string]any); ok {
+			w.child.usage = make(map[string]any, len(usage))
+			for k, v := range usage {
+				w.child.usage[k] = v
+			}
+		}
+		switch stamped.Event {
 		case "agent.status":
-			if phase, _ := ev.Fields["phase"].(string); phase != "" {
-				w.child.mu.Lock()
-				// Don't let a stale agent.status overwrite the terminal "done"
-				// phase set by session.end. Once the runtime is done, no further
-				// phase transitions are meaningful.
-				if w.child.phase != "done" {
-					w.child.phase = phase
-					if label, _ := ev.Fields["label"].(string); label != "" {
-						w.child.phaseLabel = label
-					}
+			if phase, _ := stamped.Fields["phase"].(string); phase != "" && w.child.phase != "done" {
+				w.child.phase = phase
+				if label, _ := stamped.Fields["label"].(string); label != "" {
+					w.child.phaseLabel = label
 				}
-				w.child.mu.Unlock()
 			}
 		case "permission.request":
-			w.child.mu.Lock()
 			w.child.pendingPermission = true
 			w.child.permission = map[string]any{}
-			for k, v := range ev.Fields {
-				// Skip metadata injected by this writer; permission should
-				// contain only the request payload, not runtime_id tagging.
-				if k == "runtime_id" {
+			for k, v := range stamped.Fields {
+				if k == "runtime_id" || k == "run_id" || k == "run_label" || k == "ts" || k == "seq" {
 					continue
 				}
 				w.child.permission[k] = v
 			}
-			w.child.mu.Unlock()
 		case "permission.response":
-			w.child.mu.Lock()
 			w.child.pendingPermission = false
 			w.child.permission = nil
-			w.child.mu.Unlock()
 		case "session.end":
-			w.child.mu.Lock()
 			w.child.phase = "done"
-			w.child.mu.Unlock()
+			if finalOutput, _ := stamped.Fields["final_output"].(string); finalOutput != "" {
+				w.child.finalOutput = finalOutput
+			}
 		}
-	}
-	if w.control != nil {
-		w.control.PublishEvent(ev)
+		w.child.mu.Unlock()
 	}
 	rec := w.recorder
 	if rec != nil {
-		rec.Feed(ev)
+		rec.Feed(stamped)
 	}
-	return w.base.Write(ev)
+	if err := w.base.Write(stamped); err != nil {
+		return err
+	}
+	if w.control != nil {
+		w.control.PublishCanonicalEvent(stamped)
+	}
+	return nil
+}
+
+func int64Value(v any) (int64, bool) {
+	switch n := v.(type) {
+	case int:
+		return int64(n), true
+	case int32:
+		return int64(n), true
+	case int64:
+		return n, true
+	case float64:
+		return int64(n), true
+	default:
+		return 0, false
+	}
 }
 
 func (w *runtimeFanoutWriter) Close() error { return w.base.Close() }
@@ -1633,17 +1698,23 @@ func (s *Supervisor) RuntimeStatus(rtID string) (any, error) {
 	entry := map[string]any{
 		"runtime_id":         rt.id,
 		"session_id":         rt.session.SessionID,
+		"run_id":             rt.runID,
 		"label":              rt.label,
+		"agent":              rt.agent,
+		"model":              rt.model,
+		"backend":            rt.backend,
 		"dir":                rt.dir,
 		"status":             status,
 		"exit_code":          rt.exitCode,
 		"on_event":           rt.onEvent,
+		"event_path":         rt.onEvent,
 		"sentinel_file":      rt.sentinelFile,
 		"parent_id":          rt.parentID,
 		"children":           rt.children,
 		"phase":              rt.phase,
 		"phase_label":        rt.phaseLabel,
 		"pending_permission": rt.pendingPermission,
+		"latest_seq":         rt.latestSeq,
 	}
 	if rt.permission != nil {
 		perm := make(map[string]any, len(rt.permission))
@@ -1651,6 +1722,16 @@ func (s *Supervisor) RuntimeStatus(rtID string) (any, error) {
 			perm[k] = v
 		}
 		entry["permission"] = perm
+	}
+	if rt.usage != nil {
+		usage := make(map[string]any, len(rt.usage))
+		for k, v := range rt.usage {
+			usage[k] = v
+		}
+		entry["usage"] = usage
+	}
+	if rt.finalOutput != "" {
+		entry["final_output"] = rt.finalOutput
 	}
 	rt.mu.Unlock()
 	return entry, nil

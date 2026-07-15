@@ -180,6 +180,10 @@ func (s *Session) ScanTranscriptTick() {
 	}
 
 	for _, rec := range recs {
+		for _, ev := range rec.ContentEvents {
+			ev.SessionID = s.SessionID
+			s.Emit(ev)
+		}
 		if rec.StopReason == "end_turn" {
 			if !s.MarkFinished() {
 				return

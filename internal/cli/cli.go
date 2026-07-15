@@ -294,8 +294,8 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "avenor: open event stream: %v\n", err)
 		return exitWithSentinel(1)
 	}
-	var writer EventSink = baseWriter
-	defer writer.Close()
+	defer baseWriter.Close()
+	metadata := NewEventMetadata(runID, *label, "")
 
 	state := control.NewState(runID, *label, *maxRetries)
 	var controlServer *control.ControlServer
@@ -307,12 +307,10 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			return exitWithSentinel(1)
 		}
 		defer controlServer.Stop()
-		writer = newFanoutWriter(writer, controlServer)
 	}
 	if *httpDebug != "" {
 		if controlServer == nil {
 			controlServer = control.NewServer(state)
-			writer = newFanoutWriter(writer, controlServer)
 		}
 		httpServer, err = control.NewHTTPDebugServer(*httpDebug, controlServer)
 		if err != nil {
@@ -329,6 +327,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			_ = httpServer.Stop(shutdownCtx)
 		}()
 	}
+	var writer EventSink = newFanoutWriter(baseWriter, controlServer, metadata)
 
 	var fileHandler *permission.FileHandler
 	if effectivePermHandler != "" {
@@ -973,6 +972,14 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 			}
 			if event.Event == "session.end" {
 				finalStopReason, _ = event.Fields["stop_reason"].(string)
+				if finalReply.Len() > 0 {
+					if _, ok := event.Fields["final_output"]; !ok {
+						if event.Fields == nil {
+							event.Fields = map[string]any{}
+						}
+						event.Fields["final_output"] = boundedFinalOutput(finalReply.String())
+					}
+				}
 			}
 			if err := deps.Writer.Write(event); err != nil {
 				fmt.Fprintf(deps.Stderr, "avenor: write event: %v\n", err)
@@ -985,7 +992,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 			promptReturned = true
 			if err != nil {
 				if errors.Is(err, context.Canceled) {
-					return cancelAndEnd(provider, deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, "cancelled", deps.Stderr, bufferedUsage)
+					return cancelAndEnd(provider, deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, "cancelled", deps.Stderr, bufferedUsage, finalReply.String())
 				}
 				emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "prompt", fmt.Sprintf("prompt: %v", err), deps.Stderr, cfg.RunLabel)
 				return sessionResult{ExitCode: 1}
@@ -996,7 +1003,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 		case res := <-permissionDone:
 			permissionDone = nil
 			if res.cancelled {
-				return cancelAndEnd(provider, deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, "cancelled", deps.Stderr, bufferedUsage)
+				return cancelAndEnd(provider, deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, "cancelled", deps.Stderr, bufferedUsage, finalReply.String())
 			}
 			if res.err != nil {
 				emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "permission", fmt.Sprintf("permission handler: %v", res.err), deps.Stderr, cfg.RunLabel)
@@ -1024,16 +1031,16 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 			cfn()
 			finalStopReason = "cancelled"
 		case <-ctx.Done():
-			return cancelAndEnd(provider, deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, "cancelled", deps.Stderr, bufferedUsage)
+			return cancelAndEnd(provider, deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, "cancelled", deps.Stderr, bufferedUsage, finalReply.String())
 		case <-progressTimerC:
-			return cancelAndEnd(provider, deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, "progress_timeout", deps.Stderr, bufferedUsage)
+			return cancelAndEnd(provider, deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, "progress_timeout", deps.Stderr, bufferedUsage, finalReply.String())
 		case <-cfg.Timeout:
-			return cancelAndEnd(provider, deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, "timeout", deps.Stderr, bufferedUsage)
+			return cancelAndEnd(provider, deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, "timeout", deps.Stderr, bufferedUsage, finalReply.String())
 		}
 	}
 }
 
-func cancelAndEnd(provider runtime.Provider, writer EventSink, sessionID, runID, runLabel, stopReason string, stderr io.Writer, usage map[string]any) sessionResult {
+func cancelAndEnd(provider runtime.Provider, writer EventSink, sessionID, runID, runLabel, stopReason string, stderr io.Writer, usage map[string]any, finalOutput string) sessionResult {
 	cancelCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := provider.Cancel(cancelCtx, sessionID); err != nil {
@@ -1045,6 +1052,9 @@ func cancelAndEnd(provider runtime.Provider, writer EventSink, sessionID, runID,
 	if usage != nil {
 		fields["usage"] = usage
 	}
+	if finalOutput != "" {
+		fields["final_output"] = boundedFinalOutput(finalOutput)
+	}
 	if err := writer.Write(events.Event{
 		Event:     "session.end",
 		SessionID: sessionID,
@@ -1053,7 +1063,20 @@ func cancelAndEnd(provider runtime.Provider, writer EventSink, sessionID, runID,
 		fmt.Fprintf(stderr, "avenor: write terminal event: %v\n", err)
 		return sessionResult{ExitCode: 1}
 	}
-	return sessionResult{ExitCode: runtime.ExitCodeForStopReason(stopReason), StopReason: stopReason, Usage: usage}
+	return sessionResult{ExitCode: runtime.ExitCodeForStopReason(stopReason), StopReason: stopReason, FinalReply: finalOutput, Usage: usage}
+}
+
+const maxFinalOutputRunes = 4096
+
+func boundedFinalOutput(text string) string {
+	if text == "" {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) <= maxFinalOutputRunes {
+		return text
+	}
+	return string(runes[:maxFinalOutputRunes])
 }
 
 type eventWriter struct {
@@ -1062,28 +1085,129 @@ type eventWriter struct {
 	encoder *json.Encoder
 }
 
+type EventMetadata struct {
+	mu        sync.Mutex
+	runID     string
+	runLabel  string
+	runtimeID string
+	latestSeq int64
+	now       func() time.Time
+}
+
+func NewEventMetadata(runID, runLabel, runtimeID string) *EventMetadata {
+	return &EventMetadata{
+		runID:     runID,
+		runLabel:  runLabel,
+		runtimeID: runtimeID,
+		now:       time.Now,
+	}
+}
+
+func cloneEvent(event events.Event) events.Event {
+	out := events.Event{Event: event.Event, SessionID: event.SessionID}
+	if event.Fields != nil {
+		out.Fields = make(map[string]any, len(event.Fields))
+		for k, v := range event.Fields {
+			out.Fields[k] = v
+		}
+	}
+	return out
+}
+
+func int64EventField(v any) (int64, bool) {
+	switch n := v.(type) {
+	case int:
+		return int64(n), true
+	case int32:
+		return int64(n), true
+	case int64:
+		return n, true
+	case float64:
+		return int64(n), true
+	case json.Number:
+		if i, err := n.Int64(); err == nil {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+func (m *EventMetadata) Stamp(event events.Event) events.Event {
+	if m == nil {
+		return cloneEvent(event)
+	}
+	out := cloneEvent(event)
+	if out.Fields == nil {
+		out.Fields = map[string]any{}
+	}
+	if out.SessionID == "" {
+		if sessionID, _ := out.Fields["session_id"].(string); sessionID != "" {
+			out.SessionID = sessionID
+		}
+	}
+	if _, ok := out.Fields["runtime_id"]; !ok && m.runtimeID != "" {
+		out.Fields["runtime_id"] = m.runtimeID
+	}
+	if _, ok := out.Fields["run_id"]; !ok && m.runID != "" {
+		out.Fields["run_id"] = m.runID
+	}
+	if _, ok := out.Fields["run_label"]; !ok && m.runLabel != "" {
+		out.Fields["run_label"] = m.runLabel
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := int64EventField(out.Fields["ts"]); !ok {
+		now := time.Now
+		if m.now != nil {
+			now = m.now
+		}
+		out.Fields["ts"] = now().UnixMilli()
+	}
+	if seq, ok := int64EventField(out.Fields["seq"]); ok {
+		if seq > m.latestSeq {
+			m.latestSeq = seq
+		}
+	} else {
+		m.latestSeq++
+		out.Fields["seq"] = m.latestSeq
+	}
+	return out
+}
+
 type EventSink interface {
 	Write(events.Event) error
 	Close() error
 }
 
 type fanoutWriter struct {
-	base    EventSink
-	control *control.ControlServer
+	mu       sync.Mutex
+	base     EventSink
+	control  *control.ControlServer
+	metadata *EventMetadata
 }
 
-func newFanoutWriter(base EventSink, cs *control.ControlServer) EventSink {
-	if cs == nil {
+func newFanoutWriter(base EventSink, cs *control.ControlServer, metadata *EventMetadata) EventSink {
+	if cs == nil && metadata == nil {
 		return base
 	}
-	return &fanoutWriter{base: base, control: cs}
+	return &fanoutWriter{base: base, control: cs, metadata: metadata}
 }
 
 func (f *fanoutWriter) Write(event events.Event) error {
-	if err := f.base.Write(event); err != nil {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	stamped := event
+	if f.metadata != nil {
+		stamped = f.metadata.Stamp(event)
+	} else if f.control != nil {
+		stamped = f.control.CanonicalizeEvent(event)
+	}
+	if err := f.base.Write(stamped); err != nil {
 		return err
 	}
-	f.control.PublishEvent(event)
+	if f.control != nil {
+		f.control.PublishCanonicalEvent(stamped)
+	}
 	return nil
 }
 

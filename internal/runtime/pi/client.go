@@ -405,12 +405,10 @@ func (c *client) routeEvent(payload map[string]any) {
 		}
 	}
 
-	ev := translateNotification(payload, sessionID)
-	if ev == nil {
-		return
+	events := translateNotification(payload, sessionID)
+	for i := range events {
+		c.fanout(&events[i])
 	}
-
-	c.fanout(ev)
 }
 
 func (c *client) fanout(ev *events.Event) {

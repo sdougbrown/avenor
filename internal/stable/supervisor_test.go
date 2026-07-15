@@ -2,6 +2,7 @@ package stable
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -591,7 +592,7 @@ func TestRuntimeAnswerPermissionRejectsRuntimeWithoutActiveSession(t *testing.T)
 func TestRuntimeStatusSurfacesPhaseAndPermission(t *testing.T) {
 	sup := NewSupervisor(Config{
 		ControlSocket: "/tmp/test-runtime-status-surface.sock",
-		MaxRuntimes:  2,
+		MaxRuntimes:   2,
 	})
 	child := &childRuntime{
 		id:       "rt_status",
@@ -738,17 +739,17 @@ func TestRuntimeStatusSurfacesPhaseAndPermission(t *testing.T) {
 func TestListRuntimesSurfacesPhaseAndPermission(t *testing.T) {
 	sup := NewSupervisor(Config{
 		ControlSocket: "/tmp/test-list-surface.sock",
-		MaxRuntimes:  2,
+		MaxRuntimes:   2,
 	})
 	child := &childRuntime{
-		id:       "rt_list",
-		done:     make(chan struct{}),
-		promptCh: make(chan struct{}, 1),
-		active:   true,
-		phase:    "waiting",
-		phaseLabel: "Need approval",
+		id:                "rt_list",
+		done:              make(chan struct{}),
+		promptCh:          make(chan struct{}, 1),
+		active:            true,
+		phase:             "waiting",
+		phaseLabel:        "Need approval",
 		pendingPermission: true,
-		permission: map[string]any{"request_id": "req_99"},
+		permission:        map[string]any{"request_id": "req_99"},
 	}
 	sup.runtimes[child.id] = child
 
@@ -778,6 +779,162 @@ func TestListRuntimesSurfacesPhaseAndPermission(t *testing.T) {
 		t.Errorf("list permission.request_id = %q, want req_99", got)
 	}
 }
+
+func TestRuntimeStatusMetadataIncludesUsageFinalOutputAndStamp(t *testing.T) {
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-runtime-meta.sock", MaxRuntimes: 1})
+	child := &childRuntime{
+		id:           "rt_meta",
+		label:        "worker",
+		agent:        "horse",
+		model:        "model-x",
+		backend:      "pi",
+		runID:        sup.runID,
+		dir:          "/tmp/work",
+		onEvent:      "/tmp/work/events.ndjson",
+		sentinelFile: "/tmp/work/sentinel.env",
+		done:         make(chan struct{}),
+		promptCh:     make(chan struct{}, 1),
+	}
+	sup.runtimes[child.id] = child
+
+	sink := &metadataCaptureSink{}
+	writer := &runtimeFanoutWriter{base: sink, runtimeID: child.id, child: child, control: sup.control}
+	if err := writer.Write(events.Event{Event: "session.end", SessionID: "ses_meta", Fields: map[string]any{"stop_reason": "end_turn", "usage": map[string]any{"total_tokens": 7}, "final_output": "final text"}}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if len(sink.events) != 1 {
+		t.Fatalf("captured %d events, want 1", len(sink.events))
+	}
+	if got, _ := sink.events[0].Fields["run_id"].(string); got != sup.runID {
+		t.Fatalf("run_id = %q, want %q", got, sup.runID)
+	}
+	if _, ok := sink.events[0].Fields["seq"]; !ok {
+		t.Fatal("expected seq to be stamped")
+	}
+	if _, ok := sink.events[0].Fields["ts"]; !ok {
+		t.Fatal("expected ts to be stamped")
+	}
+
+	statusAny, err := sup.RuntimeStatus(child.id)
+	if err != nil {
+		t.Fatalf("RuntimeStatus: %v", err)
+	}
+	status := statusAny.(map[string]any)
+	for key, want := range map[string]any{"agent": "horse", "model": "model-x", "backend": "pi", "event_path": "/tmp/work/events.ndjson", "final_output": "final text"} {
+		if got := status[key]; got != want {
+			t.Fatalf("status[%q] = %v, want %v", key, got, want)
+		}
+	}
+	usage, _ := status["usage"].(map[string]any)
+	if got, _ := usage["total_tokens"].(int); got != 7 {
+		if gotf, _ := usage["total_tokens"].(float64); int(gotf) != 7 {
+			t.Fatalf("usage.total_tokens = %v, want 7", usage["total_tokens"])
+		}
+	}
+	if got, _ := status["latest_seq"].(int64); got == 0 {
+		if gotf, _ := status["latest_seq"].(float64); gotf == 0 {
+			t.Fatal("expected latest_seq to be populated")
+		}
+	}
+
+	list := sup.List().([]map[string]any)
+	if len(list) != 1 {
+		t.Fatalf("List() = %d entries, want 1", len(list))
+	}
+	if list[0]["final_output"] != "final text" {
+		t.Fatalf("list final_output = %v, want final text", list[0]["final_output"])
+	}
+}
+
+func TestRuntimeFanoutWriterWritesSameStampedEventToFileAndControl(t *testing.T) {
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-runtime-live.sock", MaxRuntimes: 1})
+	path := filepath.Join(t.TempDir(), "events.ndjson")
+	fileWriter, err := cli.NewEventWriter(path)
+	if err != nil {
+		t.Fatalf("NewEventWriter: %v", err)
+	}
+
+	child := &childRuntime{
+		id:          "rt_live",
+		runID:       sup.runID,
+		label:       "review",
+		eventWriter: fileWriter,
+		done:        make(chan struct{}),
+		promptCh:    make(chan struct{}, 1),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	liveCh := sup.control.SubscribeEvents(ctx)
+	writer := &runtimeFanoutWriter{
+		base:      fileWriter,
+		runtimeID: child.id,
+		child:     child,
+		control:   sup.control,
+		metadata:  cli.NewEventMetadata(sup.runID, child.label, child.id),
+	}
+	if err := writer.Write(events.Event{Event: "agent.status", SessionID: "ses_live", Fields: map[string]any{"phase": "working", "label": "dispatch"}}); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	var live events.Event
+	select {
+	case live = <-liveCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for live event")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	line := strings.TrimSpace(string(data))
+	if line == "" {
+		t.Fatal("expected stamped event in file")
+	}
+	var logged events.Event
+	if err := json.Unmarshal([]byte(line), &logged); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if logged.Fields["run_id"] != sup.runID {
+		t.Fatalf("run_id = %v, want %v", logged.Fields["run_id"], sup.runID)
+	}
+	if logged.Fields["run_label"] != "review" {
+		t.Fatalf("run_label = %v, want review", logged.Fields["run_label"])
+	}
+	if logged.Fields["runtime_id"] != "rt_live" {
+		t.Fatalf("runtime_id = %v, want rt_live", logged.Fields["runtime_id"])
+	}
+	if seq := logged.Fields["seq"]; seq != float64(1) {
+		t.Fatalf("seq = %v, want 1", seq)
+	}
+	if ts, ok := logged.Fields["ts"].(float64); !ok || ts <= 0 {
+		t.Fatalf("ts = %v, want positive", logged.Fields["ts"])
+	}
+	loggedJSON, err := json.Marshal(logged)
+	if err != nil {
+		t.Fatalf("Marshal logged: %v", err)
+	}
+	liveJSON, err := json.Marshal(live)
+	if err != nil {
+		t.Fatalf("Marshal live: %v", err)
+	}
+	if string(loggedJSON) != string(liveJSON) {
+		t.Fatalf("file/live mismatch\nfile=%s\nlive=%s", loggedJSON, liveJSON)
+	}
+}
+
+type metadataCaptureSink struct{ events []events.Event }
+
+func (s *metadataCaptureSink) Write(ev events.Event) error {
+	s.events = append(s.events, ev)
+	return nil
+}
+
+func (s *metadataCaptureSink) Close() error { return nil }
 
 type stableTestSink struct{}
 
@@ -1109,7 +1266,7 @@ func TestAnswerPermissionScopesSameRequestIDByRuntime(t *testing.T) {
 
 func TestStableWaitersRouteSameRequestIDThroughScopedResolvers(t *testing.T) {
 	sup := NewSupervisor(Config{
-		ControlSocket:          filepath.Join(t.TempDir(), "control.sock"),
+		ControlSocket:          filepath.Join(newStableSocketTestDir(t, "stable-claims"), "control.sock"),
 		MaxRuntimes:            2,
 		PermissionClaimTimeout: time.Second,
 	})

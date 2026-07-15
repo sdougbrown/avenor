@@ -19,6 +19,8 @@ type Snapshot struct {
 	StartedAt         int64          `json:"started_at"`
 	UpdatedAt         int64          `json:"updated_at"`
 	TurnState         string         `json:"turn_state,omitempty"`
+	LatestSeq         int64          `json:"latest_seq,omitempty"`
+	FinalOutput       string         `json:"final_output,omitempty"`
 }
 
 type ControlState struct {

@@ -1,9 +1,12 @@
 package claudecore
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/sdougbrown/avenor/internal/events"
 )
 
 func TestEncodeProjectPath(t *testing.T) {
@@ -181,5 +184,73 @@ func TestTranscriptReaderLeavesPartialLineForNextTick(t *testing.T) {
 	}
 	if len(recs) != 1 || recs[0].Type != "assistant" {
 		t.Fatalf("second Tick recs = %+v, want [assistant]", recs)
+	}
+}
+
+func TestUnmarshalRecordExtractsContentEvents(t *testing.T) {
+	rec, err := unmarshalRecord([]byte(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hello"},{"type":"thinking","thinking":"hmm"},{"type":"tool_use","id":"tool-1","name":"bash","input":{"cmd":"ls"}},{"type":"tool_result","tool_use_id":"tool-1","content":"ok"}],"stop_reason":"end_turn"}}`))
+	if err != nil {
+		t.Fatalf("unmarshalRecord: %v", err)
+	}
+	if rec.StopReason != "end_turn" {
+		t.Fatalf("StopReason = %q, want end_turn", rec.StopReason)
+	}
+	if rec.Text != "hello" {
+		t.Fatalf("Text = %q, want hello", rec.Text)
+	}
+	if len(rec.ContentEvents) != 4 {
+		t.Fatalf("len(ContentEvents) = %d, want 4", len(rec.ContentEvents))
+	}
+	if rec.ContentEvents[0].Event != "agent.message_chunk" || rec.ContentEvents[1].Event != "agent.thought_chunk" || rec.ContentEvents[2].Event != "tool.call" || rec.ContentEvents[3].Event != "tool.call_update" {
+		t.Fatalf("content events = %+v", rec.ContentEvents)
+	}
+}
+
+func TestSessionScanTranscriptTickEmitsIncrementalContent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	r := NewTranscriptReader(path)
+	sess := NewSession(context.Background(), SessionOptions{SessionID: "ses_1", Transcript: r, EventsBuf: 16})
+	sess.Prompted = true
+
+	first := `{"type":"user","message":{"role":"user","content":"hello"}}` + "\n" + `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi there"}]}}` + "\n"
+	if err := os.WriteFile(path, []byte(first), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sess.ScanTranscriptTick()
+	got := drainSessionEvents(sess.Events)
+	if len(got) != 3 {
+		t.Fatalf("first tick events = %+v, want 3 events", got)
+	}
+	if got[0].Event != "user.message_chunk" || got[1].Event != "agent.message_chunk" || got[2].Event != "agent.status" {
+		t.Fatalf("first tick order = %+v", got)
+	}
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}],"stop_reason":"end_turn"}}` + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	sess.ScanTranscriptTick()
+	got = drainSessionEvents(sess.Events)
+	if len(got) != 2 {
+		t.Fatalf("second tick events = %+v, want 2 events", got)
+	}
+	if got[0].Event != "agent.message_chunk" || got[1].Event != "session.end" {
+		t.Fatalf("second tick order = %+v", got)
+	}
+}
+
+func drainSessionEvents(ch <-chan events.Event) []events.Event {
+	var out []events.Event
+	for {
+		select {
+		case ev := <-ch:
+			out = append(out, ev)
+		default:
+			return out
+		}
 	}
 }

@@ -13,35 +13,11 @@ func TestTranslateTurnCompleted(t *testing.T) {
 		wantStop  string
 		wantError string
 	}{
-		{
-			name:      "completed → end_turn",
-			params:    `{"threadId":"th1","turn":{"id":"t1","status":"completed"}}`,
-			wantEvent: "session.end",
-			wantStop:  "end_turn",
-		},
-		{
-			name:      "interrupted → cancelled",
-			params:    `{"threadId":"th1","turn":{"id":"t1","status":"interrupted"}}`,
-			wantEvent: "session.end",
-			wantStop:  "cancelled",
-		},
-		{
-			name:      "failed → error",
-			params:    `{"threadId":"th1","turn":{"id":"t1","status":"failed","error":{"message":"boom"}}}`,
-			wantEvent: "session.end",
-			wantStop:  "error",
-			wantError: "boom",
-		},
-		{
-			name:      "unknown status dropped",
-			params:    `{"threadId":"th1","turn":{"id":"t1","status":"running"}}`,
-			wantEvent: "",
-		},
-		{
-			name:      "malformed json dropped",
-			params:    `{bad`,
-			wantEvent: "",
-		},
+		{name: "completed → end_turn", params: `{"threadId":"th1","turn":{"id":"t1","status":"completed"}}`, wantEvent: "session.end", wantStop: "end_turn"},
+		{name: "interrupted → cancelled", params: `{"threadId":"th1","turn":{"id":"t1","status":"interrupted"}}`, wantEvent: "session.end", wantStop: "cancelled"},
+		{name: "failed → error", params: `{"threadId":"th1","turn":{"id":"t1","status":"failed","error":{"message":"boom"}}}`, wantEvent: "session.end", wantStop: "error", wantError: "boom"},
+		{name: "unknown status dropped", params: `{"threadId":"th1","turn":{"id":"t1","status":"running"}}`, wantEvent: ""},
+		{name: "malformed json dropped", params: `{bad`, wantEvent: ""},
 	}
 
 	for _, tt := range tests {
@@ -72,14 +48,14 @@ func TestTranslateTurnCompleted(t *testing.T) {
 }
 
 func TestTranslateNotificationDrop(t *testing.T) {
-	if ev := translateNotification("unknown/method", nil); ev != nil {
-		t.Fatalf("unknown method should be dropped, got %+v", ev)
+	if evs := translateNotification("unknown/method", nil); len(evs) != 0 {
+		t.Fatalf("unknown method should be dropped, got %+v", evs)
 	}
 }
 
 func TestTranslateNotificationDropsMalformedInformationalEvent(t *testing.T) {
-	if ev := translateNotification("turn/started", json.RawMessage(`{bad`)); ev != nil {
-		t.Fatalf("malformed informational event should be dropped, got %+v", ev)
+	if evs := translateNotification("turn/started", json.RawMessage(`{bad`)); len(evs) != 0 {
+		t.Fatalf("malformed informational event should be dropped, got %+v", evs)
 	}
 }
 
@@ -179,27 +155,54 @@ func TestTranslateApprovalNilParams(t *testing.T) {
 
 func TestInformationalEvents(t *testing.T) {
 	params := json.RawMessage(`{"threadId":"th5","turnId":"t5"}`)
-
-	tests := []struct {
-		method string
-		want   string
-	}{
-		{"turn/started", "avenor.turn.start"},
-		{"item/started", "avenor.item.start"},
-		{"item/completed", "avenor.item.end"},
+	evts := translateNotification("turn/started", params)
+	if len(evts) != 1 || evts[0].Event != "avenor.turn.start" {
+		t.Fatalf("events = %+v", evts)
 	}
-	for _, tt := range tests {
-		t.Run(tt.want, func(t *testing.T) {
-			ev := translateNotification(tt.method, params)
-			if ev == nil {
-				t.Fatal("expected event")
-			}
-			if ev.Event != tt.want {
-				t.Errorf("event = %q, want %q", ev.Event, tt.want)
-			}
-			if ev.SessionID != "th5" {
-				t.Errorf("session = %q, want th5", ev.SessionID)
-			}
-		})
+}
+
+func TestTranslateItemAssistantDelta(t *testing.T) {
+	evts := translateNotification("item/delta", json.RawMessage(`{"threadId":"th6","turnId":"t6","itemId":"i1","item":{"type":"assistant_message","delta":{"text":"hello"}}}`))
+	if len(evts) != 1 {
+		t.Fatalf("len(events) = %d, want 1", len(evts))
+	}
+	if evts[0].Event != "agent.message_chunk" {
+		t.Fatalf("event = %q, want agent.message_chunk", evts[0].Event)
+	}
+	if got, _ := evts[0].Fields["delta"].(string); got != "hello" {
+		t.Fatalf("delta = %q, want hello", got)
+	}
+}
+
+func TestTranslateItemReasoningDelta(t *testing.T) {
+	evts := translateNotification("item/delta", json.RawMessage(`{"threadId":"th7","turnId":"t7","itemId":"i2","item":{"type":"reasoning","delta":{"text":"hmm"}}}`))
+	if len(evts) != 1 || evts[0].Event != "agent.thought_chunk" {
+		t.Fatalf("events = %+v", evts)
+	}
+}
+
+func TestTranslateItemToolLifecycle(t *testing.T) {
+	start := translateNotification("item/started", json.RawMessage(`{"threadId":"th8","turnId":"t8","itemId":"tool-1","item":{"type":"tool_call","name":"bash"}}`))
+	if len(start) != 2 || start[0].Event != "tool.call" || start[1].Event != "avenor.item.start" {
+		t.Fatalf("start events = %+v", start)
+	}
+	if got, _ := start[0].Fields["status"].(string); got != "running" {
+		t.Fatalf("status = %q, want running", got)
+	}
+
+	update := translateNotification("item/delta", json.RawMessage(`{"threadId":"th8","turnId":"t8","itemId":"tool-1","item":{"type":"tool_call","delta":{"arguments":"ls"}}}`))
+	if len(update) != 1 || update[0].Event != "tool.call_update" {
+		t.Fatalf("update events = %+v", update)
+	}
+	if got, _ := update[0].Fields["delta"].(string); got != "ls" {
+		t.Fatalf("delta = %q, want ls", got)
+	}
+
+	end := translateNotification("item/completed", json.RawMessage(`{"threadId":"th8","turnId":"t8","itemId":"tool-1","item":{"type":"tool_call","name":"bash"}}`))
+	if len(end) != 2 || end[0].Event != "tool.call_update" || end[1].Event != "avenor.item.end" {
+		t.Fatalf("end events = %+v", end)
+	}
+	if got, _ := end[0].Fields["status"].(string); got != "completed" {
+		t.Fatalf("status = %q, want completed", got)
 	}
 }

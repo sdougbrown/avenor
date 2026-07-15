@@ -14,6 +14,19 @@ Without events, you're polling HTTP endpoints or reading a finished log file. Wi
 
 Avenor classifies each event as MILESTONE, FINDING, or ACTIVITY. LLMs that consume this stream use those tags to decide whether to wake up, log, or escalate.
 
+## Event structure
+
+Events use a flat envelope. In addition to the event-specific fields below, Avenor adds these fields when the corresponding identity is available:
+
+- `event` — event type name.
+- `ts` — Unix time in milliseconds.
+- `seq` — monotonically increasing, runtime-local sequence number.
+- `session_id` — backend session identifier.
+- `run_id` and `run_label` — Avenor run identity.
+- `runtime_id` — stable-supervisor runtime identifier.
+
+Use `seq`, not arrival time, to reconcile replayed and live events from the same runtime. Sequence numbers are not globally comparable across runtimes.
+
 ## Event types
 
 ### Protocol events (passed from backend)
@@ -31,6 +44,16 @@ These come from the Claude API backend. Avenor parses them, validates required f
 **`user.message_chunk`** — User text reflected by the backend. Rarely emitted; documented for protocol completeness.
 
 **`session.plan`** — Backend plan update (experimental). Rarely emitted; documented for protocol completeness.
+
+### Backend normalization and compatibility events
+
+ACP backends already speak the canonical chunk and tool vocabulary. Other backends are translated on a best-effort basis:
+
+- Pi message and tool notifications produce canonical `agent.message_chunk`, `agent.thought_chunk`, `tool.call`, and `tool.call_update` events. Existing `avenor.message.*` and `avenor.tool.*` compatibility events remain available; consumers should deduplicate canonical/compatibility pairs by `seq` and semantic content. Empty Pi text deltas are suppressed.
+- Codex app-server item notifications are mapped to canonical chunks and tool lifecycle events when their payload contains usable text or tool metadata. The original `avenor.item.*` lifecycle events remain available.
+- Claude transcript records produce canonical assistant, user, thought, and tool events when those records expose the content. Avenor does not fabricate reasoning or tool output that the transcript does not contain.
+
+TypeScript consumers can use `normalizeRunEvent`, `RunReducer`, and `observeRun` from `@dougbots/avenor-core` rather than maintaining backend-specific parsing.
 
 ### Permission events
 
@@ -198,7 +221,7 @@ Example:
 {"event":"agent.status","session_id":"ses_xyz","phase":"working","label":"reading files","source":"avenor","ts":1234567890}
 ```
 
-**`session.end`** — Terminal record for the session. Always the last event in any run. Fields: `stop_reason`, optional `usage` (object with `input_tokens`, `output_tokens`, `total_tokens`, `cached_read_tokens` in snake_case).
+**`session.end`** — Terminal record for the session. Always the last event in any run. Fields: `stop_reason`, optional `usage` (object with `input_tokens`, `output_tokens`, `total_tokens`, `cached_read_tokens` in snake_case), and optional bounded `final_output` when the backend exposes the final assistant text.
 
 Classifies as MILESTONE.
 
@@ -256,7 +279,7 @@ Custom events must have an `event` field (string) and may include any other fiel
 
 ## Consumer pattern
 
-Machine consumers should treat the NDJSON event log as the source of truth and derive their own run view from it. For in-repo orchestration code, use `internal/events.SessionTracker` as the canonical reducer over `events.Event`.
+Machine consumers should treat the NDJSON event log as the durable source of truth and derive their own run view from it. Control-socket history and subscriber queues retain only a recent bounded window and surface lag explicitly. For Go orchestration code, use `internal/events.SessionTracker` for the coarse lifecycle view. TypeScript integrations should use the shared `@dougbots/avenor-core` normalizer, reducer, and observer for transcript-oriented snapshots.
 
 Minimal pattern:
 

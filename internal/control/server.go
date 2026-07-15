@@ -2,7 +2,6 @@ package control
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,10 +31,11 @@ type ControlServer struct {
 	path     string
 	stopped  bool
 
-	conns map[*connState]struct{}
-	subs  map[*subscriber]struct{}
-	owner *connState
-	watch map[chan events.Event]struct{}
+	conns      map[*connState]struct{}
+	subs       map[*subscriber]struct{}
+	owner      *connState
+	watch      map[chan events.Event]struct{}
+	eventState map[string]*runtimeEventState
 
 	cancelFn func()
 
@@ -74,11 +74,15 @@ type connState struct {
 }
 
 type subscriber struct {
-	conn    *connState
-	ch      chan events.Event
-	dropped int
-	mu      sync.Mutex // guards ch from concurrent close+send
-	closed  bool
+	conn      *connState
+	ch        chan events.Event
+	runtimeID string
+	pending   []events.Event
+	dropped   int
+	seenSeq   map[string]int64
+	ready     bool
+	mu        sync.Mutex // guards subscriber buffers and channel lifecycle
+	closed    bool
 }
 
 func NewServer(state *ControlState) *ControlServer {
@@ -87,6 +91,7 @@ func NewServer(state *ControlState) *ControlServer {
 		conns:         map[*connState]struct{}{},
 		subs:          map[*subscriber]struct{}{},
 		watch:         map[chan events.Event]struct{}{},
+		eventState:    map[string]*runtimeEventState{},
 		pendingClaims: map[permissionClaimKey]*permissionClaim{},
 	}
 }
@@ -177,93 +182,6 @@ func (s *ControlServer) HasClients() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.path != "" && len(s.conns) > 0
-}
-
-func (s *ControlServer) SubscribeEvents(ctx context.Context) <-chan events.Event {
-	ch := make(chan events.Event, subscriberBuffer)
-	s.mu.Lock()
-	s.watch[ch] = struct{}{}
-	s.mu.Unlock()
-	go func() {
-		<-ctx.Done()
-		s.mu.Lock()
-		delete(s.watch, ch)
-		s.mu.Unlock()
-		close(ch)
-	}()
-	return ch
-}
-
-func (s *ControlServer) PublishEvent(event events.Event) {
-	s.state.Update(func(ss *Snapshot) {
-		ss.LastEvent = event.Event
-		if event.SessionID != "" {
-			ss.SessionID = event.SessionID
-		}
-		if event.Event == "agent.status" {
-			if phase, _ := event.Fields["phase"].(string); phase != "" {
-				ss.Phase = phase
-			}
-			if label, _ := event.Fields["label"].(string); label != "" {
-				ss.PhaseLabel = label
-			}
-		}
-		if event.Event == "permission.request" {
-			ss.PendingPermission = true
-			ss.Permission = map[string]any{}
-			for k, v := range event.Fields {
-				ss.Permission[k] = v
-			}
-		}
-		if event.Event == "permission.response" {
-			ss.PendingPermission = false
-			ss.Permission = nil
-		}
-		switch event.Event {
-		case "session.start":
-			ss.TurnState = "starting"
-		case "tool.call", "agent.thought_chunk", "agent.message_chunk":
-			if ss.TurnState == "starting" || ss.TurnState == "" {
-				ss.TurnState = "running"
-			}
-		case "session.end":
-			if ss.TurnState != "idle" && ss.TurnState != "cancelling" {
-				ss.TurnState = "ended"
-			}
-		}
-	})
-
-	s.mu.Lock()
-	subs := make([]*subscriber, 0, len(s.subs))
-	for sub := range s.subs {
-		subs = append(subs, sub)
-	}
-	watch := make([]chan events.Event, 0, len(s.watch))
-	for ch := range s.watch {
-		watch = append(watch, ch)
-	}
-	s.mu.Unlock()
-
-	for _, sub := range subs {
-		sub.enqueue(event)
-	}
-	for _, ch := range watch {
-		// Best-effort deliver to in-process watchers: drain one stale
-		// event if full, then retry. Under concurrent load, events may
-		// be silently dropped.
-		select {
-		case ch <- event:
-		default:
-			select {
-			case <-ch:
-			default:
-			}
-			select {
-			case ch <- event:
-			default:
-			}
-		}
-	}
 }
 
 type permissionClaimKey struct {
@@ -595,12 +513,45 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		}
 		return success(req.ID, s.state.Snapshot())
 	case "subscribe":
-		sub := &subscriber{conn: c, ch: make(chan events.Event, subscriberBuffer)}
-		s.mu.Lock()
-		s.subs[sub] = struct{}{}
-		s.mu.Unlock()
-		go sub.loop()
+		var p subscribeParams
+		if len(req.Params) > 0 {
+			if err := json.Unmarshal(req.Params, &p); err != nil {
+				return failure(req.ID, -32602, "invalid params", map[string]any{"detail": err.Error()})
+			}
+		}
+		if p.RuntimeID == "" && (p.Replay || p.AfterSeq > 0) {
+			return failure(req.ID, -32602, "invalid params", map[string]any{"required": []string{"runtime_id"}})
+		}
+		sub := newSubscriber(c, p.RuntimeID, p.AfterSeq)
+		var replay []events.Event
+		if p.Replay {
+			s.mu.Lock()
+			s.subs[sub] = struct{}{}
+			replay, _ = s.runtimeHistoryLocked(p.RuntimeID, p.AfterSeq, p.Limit)
+			s.mu.Unlock()
+		} else {
+			s.mu.Lock()
+			s.subs[sub] = struct{}{}
+			s.mu.Unlock()
+		}
+		go sub.start(replay)
 		return success(req.ID, map[string]any{"subscribed": true})
+	case "history":
+		var p historyParams
+		if len(req.Params) > 0 {
+			if err := json.Unmarshal(req.Params, &p); err != nil {
+				return failure(req.ID, -32602, "invalid params", map[string]any{"detail": err.Error()})
+			}
+		}
+		if p.RuntimeID == "" {
+			return failure(req.ID, -32602, "invalid params", map[string]any{"required": []string{"runtime_id"}})
+		}
+		history, latestSeq := s.runtimeHistory(p.RuntimeID, p.AfterSeq, p.Limit)
+		result := make([]map[string]any, 0, len(history))
+		for _, ev := range history {
+			result = append(result, eventToMap(ev))
+		}
+		return success(req.ID, map[string]any{"runtime_id": p.RuntimeID, "events": result, "latest_seq": latestSeq})
 	case "cancel":
 		if rtID := runtimeIDFromParams(req.Params); rtID != "" {
 			if s.stableHandler == nil {
@@ -837,8 +788,7 @@ func (s *ControlServer) disconnect(c *connState) {
 		if sub.conn == c {
 			delete(s.subs, sub)
 			sub.mu.Lock()
-			sub.closed = true
-			close(sub.ch)
+			sub.closeLocked()
 			sub.mu.Unlock()
 		}
 	}
@@ -867,12 +817,48 @@ func (c *connState) writeJSON(v any) error {
 	return err
 }
 
-func (s *subscriber) enqueue(ev events.Event) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func newSubscriber(conn *connState, runtimeID string, afterSeq int64) *subscriber {
+	sub := &subscriber{
+		conn:      conn,
+		ch:        make(chan events.Event, subscriberBuffer),
+		runtimeID: runtimeID,
+		seenSeq:   map[string]int64{},
+	}
+	if runtimeID != "" && afterSeq > 0 {
+		sub.seenSeq[runtimeID] = afterSeq
+	}
+	return sub
+}
+
+func (s *subscriber) closeLocked() {
 	if s.closed {
 		return
 	}
+	s.closed = true
+	close(s.ch)
+}
+
+func (s *subscriber) matches(ev events.Event) bool {
+	if s.runtimeID == "" {
+		return true
+	}
+	return eventRuntimeID(ev) == s.runtimeID
+}
+
+func (s *subscriber) recordSeqLocked(ev events.Event) bool {
+	seq, ok := int64Field(ev.Fields["seq"])
+	if !ok {
+		return true
+	}
+	key := eventScopeKey(ev)
+	if last, ok := s.seenSeq[key]; ok && seq <= last {
+		return false
+	}
+	s.seenSeq[key] = seq
+	return true
+}
+
+func (s *subscriber) enqueueLocked(ev events.Event) {
 	select {
 	case s.ch <- ev:
 	default:
@@ -880,6 +866,76 @@ func (s *subscriber) enqueue(ev events.Event) {
 		s.dropped++
 		s.ch <- ev
 	}
+}
+
+func (s *subscriber) enqueue(ev events.Event) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.seenSeq == nil {
+		s.seenSeq = map[string]int64{}
+		s.ready = true
+	}
+	if s.closed || !s.matches(ev) {
+		return
+	}
+	if !s.ready {
+		// Do not advance seenSeq until replay has been queued. Otherwise a live
+		// event arriving during replay setup can make every older replay event
+		// look like a duplicate and silently erase the requested history.
+		if len(s.pending) >= subscriberBuffer {
+			s.pending = append(s.pending[:0], s.pending[1:]...)
+			s.dropped++
+		}
+		s.pending = append(s.pending, ev)
+		return
+	}
+	if !s.recordSeqLocked(ev) {
+		return
+	}
+	s.enqueueLocked(ev)
+}
+
+func (s *subscriber) flushPending() {
+	for {
+		s.mu.Lock()
+		if s.closed {
+			s.mu.Unlock()
+			return
+		}
+		if len(s.pending) == 0 {
+			s.ready = true
+			s.mu.Unlock()
+			return
+		}
+		batch := append([]events.Event(nil), s.pending...)
+		s.pending = nil
+		s.mu.Unlock()
+		for _, ev := range batch {
+			s.mu.Lock()
+			if s.closed {
+				s.mu.Unlock()
+				return
+			}
+			if s.recordSeqLocked(ev) {
+				s.enqueueLocked(ev)
+			}
+			s.mu.Unlock()
+		}
+	}
+}
+
+func (s *subscriber) start(replay []events.Event) {
+	go s.loop()
+	for _, ev := range replay {
+		s.mu.Lock()
+		if s.closed || !s.matches(ev) || !s.recordSeqLocked(ev) {
+			s.mu.Unlock()
+			continue
+		}
+		s.enqueueLocked(ev)
+		s.mu.Unlock()
+	}
+	s.flushPending()
 }
 
 func (s *subscriber) loop() {
