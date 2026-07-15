@@ -147,6 +147,45 @@ describe('watch helpers', () => {
 })
 
 describe('RunInspectorOverlay', () => {
+  it('renders inspection failures from reload', async () => {
+    const overlay = new RunInspectorOverlay(
+      tui as any,
+      theme as any,
+      keybindings as any,
+      makeDeps({ inspectRun: mock(async () => { throw new Error('inspection failed') }) }),
+      { runId: 'run-error' },
+      () => {},
+    )
+
+    await flush()
+    expect(overlay.render(40).join('\n')).toContain('inspection failed')
+    overlay.dispose()
+  })
+
+  it('renders rejected run actions and clears the pending state', async () => {
+    const snapshot = buildSnapshot([
+      { event: 'session.start', runtime_id: 'rt-error', run_id: 'run-error', backend: 'pi' },
+    ])
+    const overlay = new RunInspectorOverlay(
+      tui as any,
+      theme as any,
+      keybindings as any,
+      makeDeps({
+        inspectRun: mock(async () => makeInspectResult(snapshot, { status: 'running' })),
+        promptRun: mock(async () => { throw new Error('prompt rejected') }),
+      }),
+      { runId: 'run-error', runtimeId: 'rt-error' },
+      () => {},
+    )
+
+    await flush()
+    ;(overlay as any).submit('continue')
+    await flush()
+    expect(overlay.render(40).join('\n')).toContain('prompt rejected')
+    expect((overlay as any).actionPending).toBe(false)
+    overlay.dispose()
+  })
+
   it('requests re-render on observer updates and cleans up observer on dispose', async () => {
     tui.requestRender.mockClear()
     const initial = buildSnapshot([
@@ -298,6 +337,50 @@ describe('RunInspectorOverlay', () => {
 })
 
 describe('openRunInspector', () => {
+  it('warns and returns when TUI mode is unavailable', async () => {
+    const notify = mock(() => {})
+    const custom = mock(async () => {})
+
+    await openRunInspector({ hasUI: false, ui: { notify, custom } } as any, {
+      trackedRuns: [],
+      deps: makeDeps(),
+    })
+
+    expect(notify).toHaveBeenCalledWith('avenor-watch requires TUI mode', 'warning')
+    expect(custom).not.toHaveBeenCalled()
+  })
+
+  it('warns and returns when no tracked runs are available', async () => {
+    const notify = mock(() => {})
+    const select = mock(async () => 'unused')
+    const custom = mock(async () => {})
+
+    await openRunInspector({ hasUI: true, ui: { notify, select, custom } } as any, {
+      trackedRuns: [],
+      deps: makeDeps(),
+    })
+
+    expect(notify).toHaveBeenCalledWith('No tracked runs', 'warning')
+    expect(select).not.toHaveBeenCalled()
+    expect(custom).not.toHaveBeenCalled()
+  })
+
+  it('returns when run selection is cancelled', async () => {
+    const select = mock(async () => undefined)
+    const custom = mock(async () => {})
+
+    await openRunInspector({
+      hasUI: true,
+      ui: { notify: mock(() => {}), select, custom },
+    } as any, {
+      trackedRuns: [{ runId: 'run-1' }],
+      deps: makeDeps(),
+    })
+
+    expect(select).toHaveBeenCalled()
+    expect(custom).not.toHaveBeenCalled()
+  })
+
   it('treats ctx.ui.select() as returning the selected value string', async () => {
     const inspectRun = mock(async (run: WatchRunRef) => makeInspectResult(buildSnapshot([
       { event: 'session.start', runtime_id: 'rt-select', run_id: run.runId, run_label: run.runId, backend: 'pi', agent: 'horse' },
