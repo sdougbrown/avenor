@@ -6,6 +6,7 @@ import extensionFactory, {
   buildInspectPayload,
   compactWhitespace,
   createExtension,
+  findLiveStatusForTrackedRun,
   isTerminalStatus,
   renderStatusLines,
   statusSupervisorId,
@@ -103,6 +104,30 @@ describe('Avenor Pi extension', () => {
     expect(['done', 'failed', 'timeout', 'killed'].map(isTerminalStatus)).toEqual([true, true, true, true])
     expect(isTerminalStatus('running')).toBe(false)
     expect(isTerminalStatus(undefined)).toBe(false)
+  })
+
+  it('reconciles spawned UUIDs with singleton live runtime identities', () => {
+    const live: StatusResult = {
+      run_id: 'canonical-run',
+      label: 'test-explore',
+      status: 'running',
+      runtime_id: 'rt-1',
+    }
+
+    expect(findLiveStatusForTrackedRun({
+      runId: 'spawn-uuid',
+      runtimeId: 'rt-1',
+    }, [live])).toBe(live)
+    expect(findLiveStatusForTrackedRun({
+      runId: 'spawn-uuid',
+      runtimeId: 'rt-1',
+      supervisorId: '/tmp/other.sock',
+    }, [live])).toBeUndefined()
+    expect(findLiveStatusForTrackedRun({
+      runId: 'spawn-uuid',
+      supervisorId: '/tmp/other.sock',
+      lastStatus: live,
+    }, [live])).toBe(live)
   })
 
   it('renders only active statuses with phase and permission markers', () => {

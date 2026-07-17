@@ -648,6 +648,35 @@ export class RunInspectorOverlay implements Component, Focusable {
   }
 }
 
+export function matchingWatchRuns(
+  runs: ReadonlyArray<WatchRunRef>,
+  selector: string,
+): WatchRunRef[] {
+  const query = selector.trim().toLowerCase()
+  if (!query) return []
+  const byId = runs.find(run => run.runId.toLowerCase() === query)
+  if (byId) return [byId]
+  return runs.filter(run =>
+    run.label?.toLowerCase() === query || run.agent?.toLowerCase() === query,
+  )
+}
+
+function watchRunChoice(run: WatchRunRef): string {
+  const label = run.label ?? run.runId
+  const agent = run.agent ? ` · ${run.agent}` : ''
+  return `${label}${agent} · ${run.runId.slice(0, 8)}`
+}
+
+async function selectWatchRun(
+  ctx: ExtensionCommandContext,
+  runs: ReadonlyArray<WatchRunRef>,
+): Promise<WatchRunRef | undefined> {
+  const choices = runs.map(watchRunChoice)
+  const selected = await ctx.ui.select('Watch run:', choices)
+  if (!selected) return undefined
+  return runs.find((run, index) => choices[index] === selected || run.runId === selected)
+}
+
 export async function openRunInspector(
   ctx: ExtensionCommandContext,
   options: WatchOpenOptions,
@@ -657,18 +686,28 @@ export async function openRunInspector(
     return
   }
 
-  let runId = options.initialRunId?.trim()
-  if (!runId) {
+  const selector = options.initialRunId?.trim()
+  let tracked: WatchRunRef | undefined
+  let runId: string
+  if (selector) {
+    const matches = matchingWatchRuns(options.trackedRuns, selector)
+    tracked = matches.length === 1
+      ? matches[0]
+      : matches.length > 1
+        ? await selectWatchRun(ctx, matches)
+        : undefined
+    if (matches.length > 1 && !tracked) return
+    runId = tracked?.runId ?? selector
+  } else {
     if (options.trackedRuns.length === 0) {
       ctx.ui.notify('No tracked runs', 'warning')
       return
     }
-    const selected = await ctx.ui.select('Watch run:', options.trackedRuns.map(run => run.runId))
-    if (!selected) return
-    runId = selected
+    tracked = await selectWatchRun(ctx, options.trackedRuns)
+    if (!tracked) return
+    runId = tracked.runId
   }
 
-  const tracked = options.trackedRuns.find(run => run.runId === runId)
   await ctx.ui.custom<void>(
     (tui, theme, keybindings, done) => new RunInspectorOverlay(
       tui,

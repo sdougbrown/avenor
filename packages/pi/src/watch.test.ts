@@ -6,6 +6,7 @@ import {
   clipText,
   sanitizeText,
   openRunInspector,
+  matchingWatchRuns,
   type WatchDeps,
   type WatchRunRef,
 } from './watch.js'
@@ -130,6 +131,18 @@ describe('watch helpers', () => {
     expect(clipText('\t\u001b[31mred\u001b[0m ', 10)).toBe('red')
     expect(clipText('abcde', 5)).toBe('abcde')
     expect(clipText('abcdef', 5)).toBe('abcd…')
+  })
+
+  it('matches tracked runs by ID, label, or agent name', () => {
+    const runs: WatchRunRef[] = [
+      { runId: 'run-1', label: 'test-explore', agent: 'explore' },
+      { runId: 'run-2', label: 'second', agent: 'explore' },
+    ]
+
+    expect(matchingWatchRuns(runs, 'RUN-1')).toEqual([runs[0]])
+    expect(matchingWatchRuns(runs, 'test-explore')).toEqual([runs[0]])
+    expect(matchingWatchRuns(runs, 'Explore')).toEqual(runs)
+    expect(matchingWatchRuns(runs, 'missing')).toEqual([])
   })
 
   it('uses shared reducer normalization for both event and legacy type fields', async () => {
@@ -397,6 +410,30 @@ describe('openRunInspector', () => {
 
     expect(select).toHaveBeenCalled()
     expect(custom).not.toHaveBeenCalled()
+  })
+
+  it('opens a uniquely matched agent name without showing the selector', async () => {
+    const inspectRun = mock(async () => makeInspectResult(buildSnapshot([]), { status: 'running' }))
+    const select = mock(async () => undefined)
+
+    await openRunInspector({
+      hasUI: true,
+      ui: {
+        notify: mock(() => {}),
+        select,
+        custom: mock(async (factory: any) => {
+          const component = factory(tui, theme, keybindings, mock(() => {})) as RunInspectorOverlay
+          component.dispose()
+        }),
+      },
+    } as any, {
+      trackedRuns: [{ runId: 'run-explore', label: 'test-explore', agent: 'explore' }],
+      initialRunId: 'explore',
+      deps: makeDeps({ inspectRun }),
+    })
+
+    expect(select).not.toHaveBeenCalled()
+    expect(inspectRun).toHaveBeenCalledWith(expect.objectContaining({ runId: 'run-explore', agent: 'explore' }))
   })
 
   it('treats ctx.ui.select() as returning the selected value string', async () => {
