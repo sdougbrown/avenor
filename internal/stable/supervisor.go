@@ -138,6 +138,7 @@ type Supervisor struct {
 	fileSnapshots        map[string][]string // runtimeID → pre-run file list for output detection
 	fileSnapMu           sync.Mutex
 	broker               *broker.Broker
+	newProviderFunc      func(startOpts runtime.StartOptions, backend string) (runtime.Provider, error)
 }
 
 func NewSupervisor(cfg Config) *Supervisor {
@@ -167,6 +168,7 @@ func NewSupervisor(cfg Config) *Supervisor {
 		sup.childQuestionTimeout = 120 * time.Second
 	}
 	sup.control.SetStableHandler(sup)
+	sup.newProviderFunc = factory.NewProvider
 	return sup
 }
 
@@ -506,7 +508,7 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 			return SpawnResult{}, fmt.Errorf("--server-url is required for backend opencode-http")
 		}
 	}
-	provider, err := factory.NewProvider(startOpts, backend)
+	provider, err := s.newProviderFunc(startOpts, backend)
 	if err != nil {
 		_ = writer.Close()
 		return SpawnResult{}, fmt.Errorf("create provider: %w", err)
@@ -754,7 +756,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				_ = s.broker.SendTo(opts.SeedMessage.FromRunID, brokerRunID, "agent_message", payload, "")
 			}
 
-			provider, err := factory.NewProvider(startOpts, backend)
+			provider, err := s.newProviderFunc(startOpts, backend)
 			if err != nil {
 				return looprunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: brokerRunID}, fmt.Errorf("create provider: %w", err)
 			}
@@ -802,6 +804,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				SessionID:              session.SessionID,
 				RunID:                  s.runID,
 				RunLabel:               child.label,
+				PermissionClaimScope:   child.id,
 				AutoApprove:            child.autoApprove,
 				PermissionClaimTimeout: child.permClaimTimeout,
 			}, cli.SessionWaitDeps{
@@ -934,7 +937,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				_ = s.broker.SendTo(opts.SeedMessage.FromRunID, brokerRunID, "agent_message", payload, "")
 			}
 
-			provider, err := factory.NewProvider(startOpts, backend)
+			provider, err := s.newProviderFunc(startOpts, backend)
 			if err != nil {
 				return teamrunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: brokerRunID}, fmt.Errorf("create provider: %w", err)
 			}
@@ -982,6 +985,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				SessionID:              session.SessionID,
 				RunID:                  s.runID,
 				RunLabel:               child.label,
+				PermissionClaimScope:   child.id,
 				AutoApprove:            child.autoApprove,
 				PermissionClaimTimeout: child.permClaimTimeout,
 			}, cli.SessionWaitDeps{

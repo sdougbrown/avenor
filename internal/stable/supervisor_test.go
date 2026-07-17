@@ -1264,6 +1264,197 @@ func TestRunChildAttemptWiresControlServerForClaims(t *testing.T) {
 	}
 }
 
+// TestRunLoopChildWiresControlServerForClaims exercises the full loop-run path
+// through runLoopChild with a control permission claim. It overrides the
+// provider-construction seam so that each phase attempt emits a
+// permission.request, then answers via sup.answerPermission and verifies the
+// provider received the answer.
+func TestRunLoopChildWiresControlServerForClaims(t *testing.T) {
+	socketPath := filepath.Join(newStableSocketTestDir(t, "loop-claim"), "control.sock")
+
+	sup := NewSupervisor(Config{
+		ControlSocket:          socketPath,
+		MaxRuntimes:            1,
+		PermissionClaimTimeout: 2 * time.Second,
+	})
+	if err := sup.control.Start(socketPath); err != nil {
+		t.Fatalf("start control server: %v", err)
+	}
+	defer sup.control.Stop()
+
+	// Connect a client so the control claim can deliver.
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("dial control server: %v", err)
+	}
+	defer conn.Close()
+	deadline := time.Now().Add(time.Second)
+	for !sup.control.HasClients() {
+		if time.Now().After(deadline) {
+			t.Fatal("control client was not registered")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	provider := &controlClaimProvider{
+		events:   make(chan events.Event, 4),
+		answered: make(chan string, 1),
+	}
+	answerErr := make(chan error, 1)
+	child := &childRuntime{
+		id:       "rt_loop_claim",
+		done:     make(chan struct{}),
+		promptCh: make(chan struct{}, 1),
+		eventWriter: &synchronousStablePermissionSink{
+			responses: make(chan events.Event, 1),
+			answer: func() error {
+				err := sup.answerPermission("rt_loop_claim", "0", "allow")
+				answerErr <- err
+				return err
+			},
+		},
+		permClaimTimeout: 2 * time.Second,
+		cancelFn:         func() {},
+	}
+	sup.runtimes[child.id] = child
+
+	// Inject the controlClaimProvider into the provider construction seam.
+	sup.newProviderFunc = func(startOpts runtime.StartOptions, backend string) (runtime.Provider, error) {
+		return provider, nil
+	}
+
+	cfg := &looprunner.LoopConfig{
+		MaxIterations: 1,
+		Pre:           []phaseconfig.Phase{{Name: "test", Prompt: "do work"}},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go sup.runLoopChild(ctx, child, cfg, 0, "", "", "", "")
+
+	// Wait for the child to complete (with timeout).
+	select {
+	case <-child.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runLoopChild did not complete within timeout")
+	}
+
+	// Verify the permission.request was answered via sup.answerPermission.
+	select {
+	case err := <-answerErr:
+		if err != nil {
+			t.Fatalf("answerPermission through control claim failed: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("permission.request never reached the answer path")
+	}
+
+	// Verify the provider received the answer (end-to-end claim delivery).
+	select {
+	case reqID := <-provider.answered:
+		if reqID != "0" {
+			t.Fatalf("provider answered request %q, want 0", reqID)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("control claim did not deliver the answer to the provider")
+	}
+}
+
+// TestRunTeamChildWiresControlServerForClaims exercises the full team-run path
+// through runTeamChild with a control permission claim. It overrides the
+// provider-construction seam so that the phase attempt emits a
+// permission.request, then answers via sup.answerPermission and verifies the
+// provider received the answer.
+func TestRunTeamChildWiresControlServerForClaims(t *testing.T) {
+	soc := filepath.Join(newStableSocketTestDir(t, "team-claim"), "control.sock")
+
+	sup := NewSupervisor(Config{
+		ControlSocket:          soc,
+		MaxRuntimes:            1,
+		PermissionClaimTimeout: 2 * time.Second,
+	})
+	if err := sup.control.Start(soc); err != nil {
+		t.Fatalf("start control server: %v", err)
+	}
+	defer sup.control.Stop()
+
+	// Connect a client so the control claim can deliver.
+	conn, err := net.Dial("unix", soc)
+	if err != nil {
+		t.Fatalf("dial control server: %v", err)
+	}
+	defer conn.Close()
+	deadline := time.Now().Add(time.Second)
+	for !sup.control.HasClients() {
+		if time.Now().After(deadline) {
+			t.Fatal("control client was not registered")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	provider := &controlClaimProvider{
+		events:   make(chan events.Event, 4),
+		answered: make(chan string, 1),
+	}
+	answerErr := make(chan error, 1)
+	child := &childRuntime{
+		id:       "rt_team_claim",
+		done:     make(chan struct{}),
+		promptCh: make(chan struct{}, 1),
+		eventWriter: &synchronousStablePermissionSink{
+			responses: make(chan events.Event, 1),
+			answer: func() error {
+				err := sup.answerPermission("rt_team_claim", "0", "allow")
+				answerErr <- err
+				return err
+			},
+		},
+		permClaimTimeout: 2 * time.Second,
+		cancelFn:         func() {},
+	}
+	sup.runtimes[child.id] = child
+
+	// Inject the controlClaimProvider into the provider construction seam.
+	sup.newProviderFunc = func(startOpts runtime.StartOptions, backend string) (runtime.Provider, error) {
+		return provider, nil
+	}
+
+	cfg := &teamrunner.TeamConfig{
+		Team: []phaseconfig.Phase{{Name: "review", Prompt: "do work"}},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go sup.runTeamChild(ctx, child, cfg, 0, "", "", "", "unknown-backend")
+
+	// Wait for the child to complete (with timeout).
+	select {
+	case <-child.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runTeamChild did not complete within timeout")
+	}
+
+	// Verify the permission.request was answered via sup.answerPermission.
+	select {
+	case err := <-answerErr:
+		if err != nil {
+			t.Fatalf("answerPermission through control claim failed: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("permission.request never reached the answer path")
+	}
+
+	// Verify the provider received the answer (end-to-end claim delivery).
+	select {
+	case reqID := <-provider.answered:
+		if reqID != "0" {
+			t.Fatalf("provider answered request %q, want 0", reqID)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("control claim did not deliver the answer to the provider")
+	}
+}
+
 func TestAnswerPermissionRejectsUnknownOptionIDWithoutConsumingCache(t *testing.T) {
 	sup := NewSupervisor(Config{
 		ControlSocket:          "/tmp/test-answer-unknown.sock",
