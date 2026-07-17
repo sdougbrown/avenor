@@ -562,7 +562,14 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 }
 
 func (s *Server) getClientForSupervisor(supervisorID string) (ControlClient, func(), error) {
-	if supervisorID == "" {
+	// An explicit supervisor_id that resolves to the autostarted/default
+	// supervisor must reuse the persistent owner connection. Ownership is
+	// per-connection (first mutator wins), and spawn claimed it on
+	// s.controlClient — dialing a fresh connection here would fail ensureOwner
+	// on mutating calls (answer_permission, prompt, cancel, follow_up), since
+	// those resolve supervisor_id from the registry and would otherwise arrive
+	// on a non-owner connection. Mirrors handleAvenorShutdown's path check.
+	if supervisorID == "" || supervisorID == s.defaultSupervisorPath {
 		if s.controlClient == nil {
 			return nil, nil, fmt.Errorf("control client not available")
 		}

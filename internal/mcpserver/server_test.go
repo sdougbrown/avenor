@@ -109,6 +109,51 @@ func TestNewServerInvalidOptions(t *testing.T) {
 	})
 }
 
+// TestGetClientForSupervisorReusesOwnerConn guards the ownership bug: mutating
+// calls (answer_permission, prompt, cancel, follow_up) resolve supervisor_id
+// from the registry, so an explicit id equal to the default supervisor must
+// reuse the persistent owner connection rather than dialing a fresh (non-owner)
+// one — otherwise ensureOwner rejects the call with permission_denied.
+func TestGetClientForSupervisorReusesOwnerConn(t *testing.T) {
+	fake := &fakeClient{}
+	s, err := NewServer(Options{
+		Transport:     "stdio",
+		NoAutostart:   true,
+		ControlClient: fake,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.defaultSupervisorPath = "/tmp/avenor-default-test.sock"
+
+	// Omitted id → persistent client.
+	cl, cleanup, err := s.getClientForSupervisor("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cl != s.controlClient {
+		t.Fatal("empty supervisor_id should reuse the persistent client")
+	}
+	cleanup()
+
+	// Explicit id equal to the default supervisor → same persistent connection,
+	// not a fresh dial.
+	cl, cleanup, err = s.getClientForSupervisor(s.defaultSupervisorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cl != s.controlClient {
+		t.Fatal("default-path supervisor_id should reuse the persistent owner connection, got a fresh dial")
+	}
+	cleanup()
+
+	// A different id must still dial (and here fail on the missing socket),
+	// proving the two paths actually diverge.
+	if _, _, err := s.getClientForSupervisor("/tmp/avenor-other-nonexistent.sock"); err == nil {
+		t.Fatal("non-default supervisor_id should dial a fresh connection and fail on the missing socket")
+	}
+}
+
 func TestAvenorStatusList(t *testing.T) {
 	fake := &fakeClient{
 		listResult: []map[string]any{
