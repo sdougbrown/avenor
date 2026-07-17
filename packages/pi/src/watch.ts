@@ -648,7 +648,7 @@ export class RunInspectorOverlay implements Component, Focusable {
   }
 }
 
-export function matchingWatchRuns(
+function matchingWatchRuns(
   runs: ReadonlyArray<WatchRunRef>,
   selector: string,
 ): WatchRunRef[] {
@@ -674,7 +674,7 @@ async function selectWatchRun(
   const choices = runs.map(watchRunChoice)
   const selected = await ctx.ui.select('Watch run:', choices)
   if (!selected) return undefined
-  return runs.find((run, index) => choices[index] === selected || run.runId === selected)
+  return runs.find((_run, index) => choices[index] === selected)
 }
 
 export async function openRunInspector(

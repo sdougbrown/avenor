@@ -6,7 +6,6 @@ import {
   clipText,
   sanitizeText,
   openRunInspector,
-  matchingWatchRuns,
   type WatchDeps,
   type WatchRunRef,
 } from './watch.js'
@@ -131,18 +130,6 @@ describe('watch helpers', () => {
     expect(clipText('\t\u001b[31mred\u001b[0m ', 10)).toBe('red')
     expect(clipText('abcde', 5)).toBe('abcde')
     expect(clipText('abcdef', 5)).toBe('abcd…')
-  })
-
-  it('matches tracked runs by ID, label, or agent name', () => {
-    const runs: WatchRunRef[] = [
-      { runId: 'run-1', label: 'test-explore', agent: 'explore' },
-      { runId: 'run-2', label: 'second', agent: 'explore' },
-    ]
-
-    expect(matchingWatchRuns(runs, 'RUN-1')).toEqual([runs[0]])
-    expect(matchingWatchRuns(runs, 'test-explore')).toEqual([runs[0]])
-    expect(matchingWatchRuns(runs, 'Explore')).toEqual(runs)
-    expect(matchingWatchRuns(runs, 'missing')).toEqual([])
   })
 
   it('uses shared reducer normalization for both event and legacy type fields', async () => {
@@ -381,13 +368,14 @@ describe('openRunInspector', () => {
     expect(custom).not.toHaveBeenCalled()
   })
 
-  it('warns and returns when no tracked runs are available', async () => {
+  it('treats a whitespace selector as empty and warns when no tracked runs are available', async () => {
     const notify = mock(() => {})
     const select = mock(async () => 'unused')
     const custom = mock(async () => {})
 
     await openRunInspector({ hasUI: true, ui: { notify, select, custom } } as any, {
       trackedRuns: [],
+      initialRunId: '   ',
       deps: makeDeps(),
     })
 
@@ -436,7 +424,40 @@ describe('openRunInspector', () => {
     expect(inspectRun).toHaveBeenCalledWith(expect.objectContaining({ runId: 'run-explore', agent: 'explore' }))
   })
 
-  it('treats ctx.ui.select() as returning the selected value string', async () => {
+  it('uses the picker to disambiguate multiple runs for one agent', async () => {
+    const inspectRun = mock(async () => makeInspectResult(buildSnapshot([]), { status: 'running' }))
+    const select = mock(async (_title: string, choices: string[]) => {
+      expect(choices).toEqual([
+        'first · explore · run-one',
+        'second · explore · run-two',
+      ])
+      return choices[1]
+    })
+
+    await openRunInspector({
+      hasUI: true,
+      ui: {
+        notify: mock(() => {}),
+        select,
+        custom: mock(async (factory: any) => {
+          const component = factory(tui, theme, keybindings, mock(() => {})) as RunInspectorOverlay
+          component.dispose()
+        }),
+      },
+    } as any, {
+      trackedRuns: [
+        { runId: 'run-one', label: 'first', agent: 'explore' },
+        { runId: 'run-two', label: 'second', agent: 'explore' },
+      ],
+      initialRunId: 'explore',
+      deps: makeDeps({ inspectRun }),
+    })
+
+    expect(select).toHaveBeenCalledTimes(1)
+    expect(inspectRun).toHaveBeenCalledWith(expect.objectContaining({ runId: 'run-two', label: 'second' }))
+  })
+
+  it('uses the display string returned by ctx.ui.select()', async () => {
     const inspectRun = mock(async (run: WatchRunRef) => makeInspectResult(buildSnapshot([
       { event: 'session.start', runtime_id: 'rt-select', run_id: run.runId, run_label: run.runId, backend: 'pi', agent: 'horse' },
     ]), { status: 'running' }))
@@ -447,7 +468,7 @@ describe('openRunInspector', () => {
       hasUI: true,
       ui: {
         notify: mock(() => {}),
-        select: mock(async () => 'run-selected'),
+        select: mock(async () => 'picked · run-sele'),
         custom: mock(async (factory: any) => {
           component = factory(tui, theme, keybindings, done)
           expect(component).toBeInstanceOf(RunInspectorOverlay)

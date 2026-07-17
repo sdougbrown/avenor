@@ -6,11 +6,11 @@ import extensionFactory, {
   buildInspectPayload,
   compactWhitespace,
   createExtension,
-  findLiveStatusForTrackedRun,
   isTerminalStatus,
   renderStatusLines,
   statusSupervisorId,
 } from './index.js'
+import { findLiveStatusForTrackedRun } from './types.js'
 
 function buildSnapshot(): RunSnapshot {
   const reducer = new RunReducer()
@@ -114,6 +114,8 @@ describe('Avenor Pi extension', () => {
       runtime_id: 'rt-1',
     }
 
+    expect(findLiveStatusForTrackedRun({ runId: 'canonical-run' }, [live])).toBe(live)
+    expect(findLiveStatusForTrackedRun({ runId: 'missing' }, [])).toBeUndefined()
     expect(findLiveStatusForTrackedRun({
       runId: 'spawn-uuid',
       runtimeId: 'rt-1',
@@ -147,7 +149,7 @@ describe('Avenor Pi extension', () => {
 
   it('registers all expected tools, commands, renderers, and event handlers', async () => {
     const registeredTools: Record<string, any> = {}
-    const registeredCommands: string[] = []
+    const registeredCommands: Record<string, any> = {}
     const registeredRenderers: string[] = []
     const eventHandlers: Map<string, any[]> = new Map()
 
@@ -158,8 +160,8 @@ describe('Avenor Pi extension', () => {
       registerTool: (def: { name: string }) => {
         registeredTools[def.name] = def
       },
-      registerCommand: (name: string) => {
-        registeredCommands.push(name)
+      registerCommand: (name: string, definition: any) => {
+        registeredCommands[name] = definition
       },
       registerMessageRenderer: (type: string) => {
         registeredRenderers.push(type)
@@ -169,7 +171,7 @@ describe('Avenor Pi extension', () => {
 
     await createExtension({
       spawnTool: mock(async () => ({ run_id: 'run-1', label: 'demo', supervisor_id: '/tmp/sock', runtime_id: 'rt-1' })),
-      statusTool: mock(async () => ({ run_id: 'run-1', label: 'demo', status: 'done', runtime_id: 'rt-1', final_output: 'answer' })),
+      statusTool: mock(async () => ({ run_id: 'run-1', label: 'demo', status: 'running', runtime_id: 'rt-1' })),
       eventsTool: mock(async () => ({ events: [] })),
       answerPermissionTool: mock(async () => ({ ok: true })),
       followUpTool: mock(async () => ({ run_id: 'run-2', label: 'follow-up' })),
@@ -198,9 +200,24 @@ describe('Avenor Pi extension', () => {
     expect(Object.keys(registeredTools)).toContain('avenor_events')
     expect(Object.keys(registeredTools)).toContain('avenor_shutdown')
 
-    expect(registeredCommands).toContain('avenor-status')
-    expect(registeredCommands).toContain('avenor-watch')
-    expect(registeredCommands).toContain('avenor-cancel')
+    expect(Object.keys(registeredCommands)).toContain('avenor-status')
+    expect(Object.keys(registeredCommands)).toContain('avenor-watch')
+    expect(Object.keys(registeredCommands)).toContain('avenor-cancel')
+
+    await registeredTools.avenor_spawn.execute(
+      'tool-1',
+      { agent: 'explore', label: 'test-pi-explore', wait: false },
+      undefined,
+      undefined,
+      { cwd: '/tmp' },
+    )
+    const expectedCompletion = [{
+      value: 'run-1',
+      label: 'test-pi-explore (explore, run-1)',
+    }]
+    expect(registeredCommands['avenor-watch'].getArgumentCompletions('expl')).toEqual(expectedCompletion)
+    expect(registeredCommands['avenor-cancel'].getArgumentCompletions('expl')).toEqual(expectedCompletion)
+    for (const handler of eventHandlers.get('session_shutdown') ?? []) await handler()
 
     expect(registeredRenderers).toContain('avenor-active-runs')
     expect(eventHandlers.has('session_start')).toBe(true)

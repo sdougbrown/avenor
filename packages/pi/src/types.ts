@@ -14,6 +14,23 @@ export interface TrackedRun {
   permissionNotified?: boolean
 }
 
+export function findLiveStatusForTrackedRun(
+  run: Pick<TrackedRun, 'runId' | 'runtimeId' | 'supervisorId' | 'lastStatus'>,
+  liveStatuses: Iterable<StatusResult>,
+): StatusResult | undefined {
+  const knownRunIds = new Set([run.runId, run.lastStatus?.run_id].filter((id): id is string => !!id))
+  let runtimeMatch: StatusResult | undefined
+  for (const status of liveStatuses) {
+    if (knownRunIds.has(status.run_id)) return status
+    // Runtime IDs are scoped to a supervisor. The unqualified live-status list and
+    // tracked runs without an explicit supervisor both refer to the singleton.
+    if (!run.supervisorId && run.runtimeId === status.runtime_id) {
+      runtimeMatch = status
+    }
+  }
+  return runtimeMatch
+}
+
 export interface RunStatusEntry {
   runId: string
   label: string

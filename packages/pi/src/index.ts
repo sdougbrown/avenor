@@ -29,7 +29,7 @@ import {
   type WatchRunRef,
 } from './watch.js'
 import type { TrackedRun, RunStatusEntry } from './types.js'
-import { TERMINAL_STATUSES, formatRunLine, statusEmoji } from './types.js'
+import { TERMINAL_STATUSES, findLiveStatusForTrackedRun, formatRunLine, statusEmoji } from './types.js'
 
 const POLL_INTERVAL_MS = 3_000
 const INSPECT_LIMIT = 128
@@ -138,23 +138,6 @@ function buildWaitingText(run: { runId: string; label: string; agent: string }, 
 
 export function isTerminalStatus(status: string | undefined): boolean {
   return !!status && TERMINAL_STATUSES.has(status as any)
-}
-
-export function findLiveStatusForTrackedRun(
-  run: Pick<TrackedRun, 'runId' | 'runtimeId' | 'supervisorId' | 'lastStatus'>,
-  liveStatuses: Iterable<StatusResult>,
-): StatusResult | undefined {
-  const statuses = Array.from(liveStatuses)
-  const knownRunIds = new Set([run.runId, run.lastStatus?.run_id].filter((id): id is string => !!id))
-  const byRunId = statuses.find(status => knownRunIds.has(status.run_id))
-  if (byRunId) return byRunId
-
-  // Runtime IDs are scoped to a supervisor. The unqualified live-status list and
-  // tracked runs without an explicit supervisor both refer to the singleton.
-  if (!run.supervisorId && run.runtimeId) {
-    return statuses.find(status => status.runtime_id === run.runtimeId)
-  }
-  return undefined
 }
 
 export function renderStatusLines(entries: RunStatusEntry[]): string[] {
@@ -1098,7 +1081,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
       getArgumentCompletions: (prefix: string) => {
         const items = Array.from(trackedRuns.values())
           .filter(run => run.label.startsWith(prefix) || run.agent.startsWith(prefix) || run.runId.startsWith(prefix))
-          .map(run => ({ value: run.runId, label: `${run.label} (${run.runId.slice(0, 8)})` }))
+          .map(run => ({ value: run.runId, label: `${run.label} (${run.agent}, ${run.runId.slice(0, 8)})` }))
         return items.length > 0 ? items : null
       },
       handler: async (args, ctx) => {
