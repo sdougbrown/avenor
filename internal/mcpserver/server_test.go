@@ -606,12 +606,13 @@ func TestAvenorSpawnWithOptionalParams(t *testing.T) {
 	}
 
 	_, result, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
-		Agent:      "codex",
-		RepoDir:    "/tmp/test-repo",
-		Prompt:     "initial prompt text",
-		PromptFile: "/tmp/prompt.md",
-		Model:      "gpt-5",
-		Timeout:    "300",
+		Agent:       "codex",
+		RepoDir:     "/tmp/test-repo",
+		Prompt:      "initial prompt text",
+		PromptFile:  "/tmp/prompt.md",
+		Model:       "gpt-5",
+		Timeout:     "300",
+		AutoApprove: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -620,6 +621,9 @@ func TestAvenorSpawnWithOptionalParams(t *testing.T) {
 	p := fake.spawnCapturedParams
 	if p == nil {
 		t.Fatal("expected spawn params to be captured")
+	}
+	if p["auto_approve"] != true {
+		t.Errorf("expected auto_approve true, got %v", p["auto_approve"])
 	}
 	if p["prompt"] != "initial prompt text" {
 		t.Errorf("expected prompt 'initial prompt text', got %v", p["prompt"])

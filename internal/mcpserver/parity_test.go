@@ -67,8 +67,8 @@ func TestToolNameParity(t *testing.T) {
 func TestSchemaFieldParity(t *testing.T) {
 	t.Run("avenor_spawn", func(t *testing.T) {
 		// spawnArgs — required: agent, repo_dir
-		// optional: prompt, prompt_file, label, timeout, model, backend, server_url, supervisor_id
-		allowed := []string{"agent", "repo_dir", "prompt", "prompt_file", "label", "timeout", "model", "backend", "server_url", "supervisor_id"}
+		// optional: prompt, prompt_file, label, timeout, model, backend, server_url, supervisor_id, auto_approve
+		allowed := []string{"agent", "repo_dir", "prompt", "prompt_file", "label", "timeout", "model", "backend", "server_url", "supervisor_id", "auto_approve"}
 		required := []string{"agent", "repo_dir"}
 		assertFields(t, "spawnArgs", allowed, required)
 	})
@@ -129,8 +129,14 @@ func assertFields(t *testing.T, structName string, allowed, required []string) {
 
 	switch structName {
 	case "spawnArgs":
+		data := map[string]any{
+			"agent": "test", "repo_dir": "test", "prompt": "test", "prompt_file": "test",
+			"label": "test", "timeout": "test", "model": "test", "backend": "test",
+			"server_url": "test", "supervisor_id": "test", "auto_approve": true,
+		}
+		b, _ := json.Marshal(data)
 		var a spawnArgs
-		if err := json.Unmarshal(data, &a); err != nil {
+		if err := json.Unmarshal(b, &a); err != nil {
 			t.Fatalf("%s: unmarshal: %v", structName, err)
 		}
 		// Verify required fields are populated
@@ -139,6 +145,9 @@ func assertFields(t *testing.T, structName string, allowed, required []string) {
 		}
 		if a.RepoDir != "test" {
 			t.Errorf("%s: repo_dir not populated", structName)
+		}
+		if !a.AutoApprove {
+			t.Errorf("%s: auto_approve not populated", structName)
 		}
 	case "statusArgs":
 		var a statusArgs
