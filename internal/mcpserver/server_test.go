@@ -1146,8 +1146,11 @@ func TestAvenorAnswerPermission(t *testing.T) {
 
 func TestAvenorAnswerPermissionAutoDetectRequestID(t *testing.T) {
 	fake := &fakeClient{
+		// Mirror the real supervisor RuntimeStatus shape: pending_permission is a
+		// bool, and the request details live in a separate "permission" map.
 		statusResult: map[string]any{
-			"pending_permission": map[string]any{
+			"pending_permission": true,
+			"permission": map[string]any{
 				"request_id": "req_auto_456",
 			},
 		},
@@ -1877,7 +1880,8 @@ func TestAvenorAnswerPermissionPendingPermissionNull(t *testing.T) {
 func TestAvenorAnswerPermissionRequestIDEmpty(t *testing.T) {
 	fake := &fakeClient{
 		statusResult: map[string]any{
-			"pending_permission": map[string]any{
+			"pending_permission": true,
+			"permission": map[string]any{
 				"request_id": "",
 			},
 		},
@@ -1904,7 +1908,7 @@ func TestAvenorAnswerPermissionRequestIDEmpty(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for empty request_id")
 	}
-	if !strings.Contains(err.Error(), "pending_permission missing request_id") {
+	if !strings.Contains(err.Error(), "missing request_id") {
 		t.Errorf("expected 'pending_permission missing request_id', got: %v", err)
 	}
 }

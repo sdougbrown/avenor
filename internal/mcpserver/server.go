@@ -427,17 +427,18 @@ func (s *Server) handleAvenorAnswerPermission(ctx context.Context, req *mcp.Call
 		if err != nil {
 			return nil, nil, fmt.Errorf("status: %w", err)
 		}
-		pm, ok := statusResult["pending_permission"]
-		if !ok || pm == nil {
+		// The supervisor reports pending_permission as a bool and carries the
+		// request details (including request_id) in a separate "permission" map.
+		if pending, _ := statusResult["pending_permission"].(bool); !pending {
 			return nil, nil, fmt.Errorf("no pending permission request")
 		}
-		pmMap, ok := pm.(map[string]any)
+		perm, ok := statusResult["permission"].(map[string]any)
 		if !ok {
-			return nil, nil, fmt.Errorf("pending_permission has unexpected type")
+			return nil, nil, fmt.Errorf("pending permission has no request details in status")
 		}
-		requestID, _ = pmMap["request_id"].(string)
+		requestID, _ = perm["request_id"].(string)
 		if requestID == "" {
-			return nil, nil, fmt.Errorf("pending_permission missing request_id")
+			return nil, nil, fmt.Errorf("pending permission missing request_id")
 		}
 	}
 
