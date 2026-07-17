@@ -2,7 +2,9 @@ package codexappserver
 
 import (
 	"context"
+	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -153,6 +155,183 @@ func TestProviderPipeRoundtrip(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for Prompt")
 	}
+}
+
+// TestEnsureClientReturnsWithoutDeadlock is the regression guard for the
+// self-deadlock: ensureClient must not hold p.mu across the client-start call,
+// or the double-checked re-lock deadlocks the calling goroutine against itself.
+// The pre-fix code hung here forever on the first call.
+func TestEnsureClientReturnsWithoutDeadlock(t *testing.T) {
+	c, _, _ := fakeClient()
+	p := NewWithOptions(runtime.StartOptions{})
+	p.startClient = func(context.Context) (*client, error) { return c, nil }
+
+	done := make(chan struct{})
+	go func() {
+		got, err := p.ensureClient(context.Background())
+		if err != nil {
+			t.Errorf("ensureClient: %v", err)
+		}
+		if got != c {
+			t.Errorf("ensureClient returned %p, want %p", got, c)
+		}
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ensureClient deadlocked")
+	}
+	_ = c.Close()
+}
+
+// TestEnsureClientRaceLossClosesLoser verifies that when another goroutine wins
+// the start race (sets p.client while this call is starting its own), the losing
+// call closes its now-orphaned client instead of leaking the app-server process.
+func TestEnsureClientRaceLossClosesLoser(t *testing.T) {
+	winner, _, _ := fakeClient()
+	defer winner.Close()
+	loser, _, _ := fakeClient()
+
+	p := NewWithOptions(runtime.StartOptions{})
+	p.startClient = func(context.Context) (*client, error) {
+		// Simulate a concurrent winner publishing its client during our start.
+		p.mu.Lock()
+		p.client = winner
+		p.mu.Unlock()
+		return loser, nil
+	}
+
+	got, err := p.ensureClient(context.Background())
+	if err != nil {
+		t.Fatalf("ensureClient: %v", err)
+	}
+	if got != winner {
+		t.Fatalf("ensureClient returned %p, want winner %p", got, winner)
+	}
+	p.mu.Lock()
+	stored := p.client
+	p.mu.Unlock()
+	if stored != winner {
+		t.Fatalf("p.client = %p, want winner %p (loser clobbered stored state)", stored, winner)
+	}
+
+	// The loser must have been closed: Close() closes its events channel.
+	select {
+	case _, ok := <-loser.Events():
+		if ok {
+			t.Fatal("loser events channel delivered an event; want closed")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("loser client was not closed (events channel still open)")
+	}
+}
+
+// TestEnsureClientStartError verifies the start-error path: the error
+// propagates, no client is stored, and — critically — p.mu was released so a
+// subsequent call is not deadlocked by a leaked lock. This guards the branch
+// whose old error-path unlock was removed by the deadlock fix.
+func TestEnsureClientStartError(t *testing.T) {
+	p := NewWithOptions(runtime.StartOptions{})
+	wantErr := errors.New("boom")
+	p.startClient = func(context.Context) (*client, error) { return nil, wantErr }
+
+	if _, err := p.ensureClient(context.Background()); !errors.Is(err, wantErr) {
+		t.Fatalf("err = %v, want %v", err, wantErr)
+	}
+	p.mu.Lock()
+	stored := p.client
+	p.mu.Unlock()
+	if stored != nil {
+		t.Fatalf("p.client = %p, want nil after start error", stored)
+	}
+
+	// A second call must retry the start and must not deadlock on a leaked lock.
+	c, _, _ := fakeClient()
+	p.startClient = func(context.Context) (*client, error) { return c, nil }
+	done := make(chan *client, 1)
+	go func() {
+		got, err := p.ensureClient(context.Background())
+		if err != nil {
+			t.Errorf("second ensureClient: %v", err)
+		}
+		done <- got
+	}()
+	select {
+	case got := <-done:
+		if got != c {
+			t.Fatalf("second ensureClient returned %p, want %p", got, c)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second ensureClient deadlocked — error path leaked p.mu")
+	}
+	_ = c.Close()
+}
+
+// TestEnsureClientConcurrentSingleWinner exercises real contention: many
+// goroutines racing first-use must converge on exactly one retained client,
+// every caller sees that same client, and every other started client is closed
+// (no orphaned app-server). Run under -race, this covers the production path the
+// deterministic race-loss test only simulates.
+func TestEnsureClientConcurrentSingleWinner(t *testing.T) {
+	const n = 8
+	p := NewWithOptions(runtime.StartOptions{})
+
+	var mu sync.Mutex
+	var created []*client
+	p.startClient = func(context.Context) (*client, error) {
+		c, _, _ := fakeClient()
+		mu.Lock()
+		created = append(created, c)
+		mu.Unlock()
+		return c, nil
+	}
+
+	results := make([]*client, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			c, err := p.ensureClient(context.Background())
+			if err != nil {
+				t.Errorf("ensureClient: %v", err)
+			}
+			results[i] = c
+		}(i)
+	}
+	wg.Wait()
+
+	p.mu.Lock()
+	kept := p.client
+	p.mu.Unlock()
+	if kept == nil {
+		t.Fatal("no client retained")
+	}
+	for i, c := range results {
+		if c != kept {
+			t.Errorf("caller %d got %p, want retained %p", i, c, kept)
+		}
+	}
+
+	// Every started client except the kept one must have been closed.
+	mu.Lock()
+	defer mu.Unlock()
+	for _, c := range created {
+		if c == kept {
+			continue
+		}
+		select {
+		case _, ok := <-c.Events():
+			if ok {
+				t.Error("loser delivered an event; want closed")
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("a losing client was not closed (events channel still open)")
+		}
+	}
+	_ = kept.Close()
 }
 
 func TestProviderImplementsInterface(t *testing.T) {
