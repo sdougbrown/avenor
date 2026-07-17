@@ -65,7 +65,7 @@ type spawnArgs struct {
 	Backend      string `json:"backend,omitempty" jsonschema:"optional runtime backend (opencode-http, opencode-acp, codex-app-server)"`
 	ServerURL    string `json:"server_url,omitempty" jsonschema:"optional opencode serve URL for opencode-http backend"`
 	SupervisorID string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
-	AutoApprove  bool   `json:"auto_approve,omitempty" jsonschema:"optional: auto-approve all permission requests so the run executes unattended (no answer_permission needed)"`
+	AutoApprove  bool   `json:"auto_approve,omitempty" jsonschema:"optional auto-approve all permission requests so the run executes unattended (no answer_permission needed)"`
 }
 
 type shutdownArgs struct {

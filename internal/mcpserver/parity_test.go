@@ -120,6 +120,10 @@ func assertFields(t *testing.T, structName string, allowed, required []string) {
 	// without error into the struct.
 	obj := make(map[string]any)
 	for _, f := range allowed {
+		if f == "auto_approve" {
+			obj[f] = true
+			continue
+		}
 		obj[f] = "test"
 	}
 	data, err := json.Marshal(obj)
@@ -129,14 +133,8 @@ func assertFields(t *testing.T, structName string, allowed, required []string) {
 
 	switch structName {
 	case "spawnArgs":
-		data := map[string]any{
-			"agent": "test", "repo_dir": "test", "prompt": "test", "prompt_file": "test",
-			"label": "test", "timeout": "test", "model": "test", "backend": "test",
-			"server_url": "test", "supervisor_id": "test", "auto_approve": true,
-		}
-		b, _ := json.Marshal(data)
 		var a spawnArgs
-		if err := json.Unmarshal(b, &a); err != nil {
+		if err := json.Unmarshal(data, &a); err != nil {
 			t.Fatalf("%s: unmarshal: %v", structName, err)
 		}
 		// Verify required fields are populated
