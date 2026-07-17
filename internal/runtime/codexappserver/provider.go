@@ -305,17 +305,24 @@ func (p *Provider) ensureClient(ctx context.Context) (*client, error) {
 		p.mu.Unlock()
 		return c, nil
 	}
+	// Release the lock before the expensive StartClient handshake — sync.Mutex
+	// is not reentrant, and holding it across StartClient then re-locking below
+	// self-deadlocks. Re-check p.client after re-acquiring (double-checked locking).
+	p.mu.Unlock()
 
 	c, err := StartClient(ctx)
 	if err != nil {
-		p.mu.Unlock()
 		return nil, err
 	}
 
 	p.mu.Lock()
 	if p.client != nil {
+		// Lost the race: another goroutine started a client first. Close ours
+		// to avoid orphaning the codex app-server process it spawned.
+		existing := p.client
 		p.mu.Unlock()
-		return p.client, nil
+		_ = c.Close()
+		return existing, nil
 	}
 	// Store broker reference if provided.
 	if p.opts.Broker != nil {
