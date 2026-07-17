@@ -1150,6 +1150,120 @@ func (p *permRecordingProvider) Capabilities(context.Context) (runtime.Capabilit
 	return runtime.Capabilities{}, nil
 }
 
+// controlClaimProvider drives one permission.request through a real session so
+// the control-claim wiring in runChildAttempt is exercised end to end.
+type controlClaimProvider struct {
+	events   chan events.Event
+	answered chan string
+}
+
+func (p *controlClaimProvider) Start(context.Context, runtime.StartOptions) (runtime.Session, error) {
+	return runtime.Session{SessionID: "ses_claim"}, nil
+}
+func (p *controlClaimProvider) Resume(context.Context, string) (runtime.Session, error) {
+	return runtime.Session{}, nil
+}
+func (p *controlClaimProvider) Prompt(context.Context, string, string) error {
+	p.events <- events.Event{
+		Event:     "permission.request",
+		SessionID: "ses_claim",
+		Fields: map[string]any{
+			"request_id": "0",
+			"options":    []any{map[string]any{"optionId": "allow", "kind": "allow"}},
+		},
+	}
+	return nil
+}
+func (p *controlClaimProvider) Cancel(context.Context, string) error { return nil }
+func (p *controlClaimProvider) Events(context.Context, string) (<-chan events.Event, error) {
+	return p.events, nil
+}
+func (p *controlClaimProvider) AnswerPermission(_ context.Context, _ string, requestID string, _ runtime.PermissionResponse) error {
+	p.answered <- requestID
+	p.events <- events.Event{
+		Event:     "session.end",
+		SessionID: "ses_claim",
+		Fields:    map[string]any{"stop_reason": "end_turn"},
+	}
+	return nil
+}
+func (p *controlClaimProvider) Capabilities(context.Context) (runtime.Capabilities, error) {
+	return runtime.Capabilities{}, nil
+}
+
+// TestRunChildAttemptWiresControlServerForClaims guards the ownership-claim
+// wiring: runChildAttempt must pass s.control into WaitForSession, otherwise no
+// control permission claim is ever registered and avenor_answer_permission
+// fails with "no registered resolver state" for every stable run.
+func TestRunChildAttemptWiresControlServerForClaims(t *testing.T) {
+	sup := NewSupervisor(Config{
+		ControlSocket:          filepath.Join(newStableSocketTestDir(t, "stable-attempt-claim"), "control.sock"),
+		MaxRuntimes:            1,
+		PermissionClaimTimeout: 2 * time.Second,
+	})
+	if err := sup.control.Start(sup.config.ControlSocket); err != nil {
+		t.Fatalf("start control server: %v", err)
+	}
+	defer sup.control.Stop()
+
+	conn, err := net.Dial("unix", sup.config.ControlSocket)
+	if err != nil {
+		t.Fatalf("dial control server: %v", err)
+	}
+	defer conn.Close()
+	deadline := time.Now().Add(time.Second)
+	for !sup.control.HasClients() {
+		if time.Now().After(deadline) {
+			t.Fatal("control client was not registered")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	provider := &controlClaimProvider{
+		events:   make(chan events.Event, 4),
+		answered: make(chan string, 1),
+	}
+	answerErr := make(chan error, 1)
+	child := &childRuntime{
+		id:               "rt_claim",
+		provider:         provider,
+		permClaimTimeout: 2 * time.Second,
+		done:             make(chan struct{}),
+		promptCh:         make(chan struct{}, 1),
+		eventWriter: &synchronousStablePermissionSink{
+			responses: make(chan events.Event, 1),
+			answer: func() error {
+				err := sup.answerPermission("rt_claim", "0", "allow")
+				answerErr <- err
+				return err
+			},
+		},
+	}
+	sup.runtimes["rt_claim"] = child
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go sup.runChildAttempt(ctx, child, "", "do it", nil)
+
+	select {
+	case err := <-answerErr:
+		if err != nil {
+			t.Fatalf("answerPermission through control claim failed: %v (ControlServer not wired into runChildAttempt?)", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("permission.request never reached the answer path")
+	}
+
+	select {
+	case reqID := <-provider.answered:
+		if reqID != "0" {
+			t.Fatalf("provider answered request %q, want 0", reqID)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("control claim did not deliver the answer to the provider")
+	}
+}
+
 func TestAnswerPermissionRejectsUnknownOptionIDWithoutConsumingCache(t *testing.T) {
 	sup := NewSupervisor(Config{
 		ControlSocket:          "/tmp/test-answer-unknown.sock",

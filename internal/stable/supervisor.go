@@ -805,9 +805,10 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				AutoApprove:            child.autoApprove,
 				PermissionClaimTimeout: child.permClaimTimeout,
 			}, cli.SessionWaitDeps{
-				Writer:      attemptWriter,
-				FileHandler: child.fileHandler,
-				Stderr:      os.Stderr,
+				Writer:        attemptWriter,
+				FileHandler:   child.fileHandler,
+				ControlServer: s.control,
+				Stderr:        os.Stderr,
 			})
 
 			return looprunner.PhaseAttemptResult{
@@ -984,9 +985,10 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				AutoApprove:            child.autoApprove,
 				PermissionClaimTimeout: child.permClaimTimeout,
 			}, cli.SessionWaitDeps{
-				Writer:      attemptWriter,
-				FileHandler: child.fileHandler,
-				Stderr:      os.Stderr,
+				Writer:        attemptWriter,
+				FileHandler:   child.fileHandler,
+				ControlServer: s.control,
+				Stderr:        os.Stderr,
 			})
 
 			return teamrunner.PhaseAttemptResult{
@@ -1134,9 +1136,10 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 		PermissionClaimTimeout: child.permClaimTimeout,
 		Timeout:                timer,
 	}, cli.SessionWaitDeps{
-		Writer:      taggedWriter,
-		FileHandler: child.fileHandler,
-		Stderr:      os.Stderr,
+		Writer:        taggedWriter,
+		FileHandler:   child.fileHandler,
+		ControlServer: s.control,
+		Stderr:        os.Stderr,
 	})
 	exitCode := result.ExitCode
 	return childAttemptResult{exitCode: exitCode, sessionID: session.SessionID}
