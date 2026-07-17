@@ -206,7 +206,7 @@ describe('Avenor Pi extension', () => {
 
     await registeredTools.avenor_spawn.execute(
       'tool-1',
-      { agent: 'explore', label: 'test-pi-explore', wait: false },
+      { agent: 'explore', label: '\u001b[31mtest-pi-explore\u001b[0m', wait: false },
       undefined,
       undefined,
       { cwd: '/tmp' },

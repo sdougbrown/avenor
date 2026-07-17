@@ -446,7 +446,7 @@ describe('openRunInspector', () => {
       },
     } as any, {
       trackedRuns: [
-        { runId: 'run-one', label: 'first', agent: 'explore' },
+        { runId: 'run-one', label: '\u001b[31mfirst\u001b[0m', agent: 'explore' },
         { runId: 'run-two', label: 'second', agent: 'explore' },
       ],
       initialRunId: 'explore',

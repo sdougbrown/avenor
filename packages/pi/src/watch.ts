@@ -662,9 +662,9 @@ function matchingWatchRuns(
 }
 
 function watchRunChoice(run: WatchRunRef): string {
-  const label = run.label ?? run.runId
-  const agent = run.agent ? ` · ${run.agent}` : ''
-  return `${label}${agent} · ${run.runId.slice(0, 8)}`
+  const label = sanitizeText(run.label ?? run.runId)
+  const agent = run.agent ? ` · ${sanitizeText(run.agent)}` : ''
+  return `${label}${agent} · ${sanitizeText(run.runId).slice(0, 8)}`
 }
 
 async function selectWatchRun(

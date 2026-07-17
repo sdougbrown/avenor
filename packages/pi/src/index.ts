@@ -1055,7 +1055,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
       getArgumentCompletions: (prefix: string) => {
         const items = Array.from(trackedRuns.values())
           .filter(run => run.label.startsWith(prefix) || run.agent.startsWith(prefix) || run.runId.startsWith(prefix))
-          .map(run => ({ value: run.runId, label: `${run.label} (${run.agent}, ${run.runId.slice(0, 8)})` }))
+          .map(run => ({
+            value: run.runId,
+            label: `${sanitizeText(run.label)} (${sanitizeText(run.agent)}, ${sanitizeText(run.runId).slice(0, 8)})`,
+          }))
         return items.length > 0 ? items : null
       },
       handler: async (args, ctx) => {
@@ -1081,7 +1084,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
       getArgumentCompletions: (prefix: string) => {
         const items = Array.from(trackedRuns.values())
           .filter(run => run.label.startsWith(prefix) || run.agent.startsWith(prefix) || run.runId.startsWith(prefix))
-          .map(run => ({ value: run.runId, label: `${run.label} (${run.agent}, ${run.runId.slice(0, 8)})` }))
+          .map(run => ({
+            value: run.runId,
+            label: `${sanitizeText(run.label)} (${sanitizeText(run.agent)}, ${sanitizeText(run.runId).slice(0, 8)})`,
+          }))
         return items.length > 0 ? items : null
       },
       handler: async (args, ctx) => {
