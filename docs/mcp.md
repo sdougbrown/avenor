@@ -83,11 +83,11 @@ When you (an LLM) are using this MCP server to automate work:
 avenor_spawn(agent="jockey", repo_dir="/path/to/repo", prompt="fix the tests")
 → { "run_id": "...", "label": "...", "supervisor_id": "..." }
 
-avenor_status(run_id="...")
+avenor_status(run_id="...", view="lifecycle")
 → { "status": "running", ... }
 
-avenor_status(run_id="...")
-→ { "status": "done", ... }
+avenor_result(run_id="...")
+→ { "status": "done", "ready": true, "output": "..." }
 
 avenor_events(run_id="...")
 → { "events": [ { "type": "...", ... }, ... ] }
@@ -97,11 +97,12 @@ avenor_shutdown()
 ```
 
 1. Call `avenor_spawn` with an agent name and repository path.
-2. Poll `avenor_status` until the run is terminal (`done`, `failed`, `timeout`, `killed`) or asks for permission.
+2. Use `avenor_status` with `view="lifecycle"` when you need progress or pending permission details.
 3. If `pending_permission` is present, call `avenor_answer_permission` to respond.
-4. Call `avenor_events` to read what happened during the run.
-5. Optionally call `avenor_follow_up` to continue from a completed run.
-6. Call `avenor_shutdown` when the MCP session is done.
+4. Call `avenor_result` to wait for and retrieve the bounded final output.
+5. Call `avenor_events` only when you need raw recent history.
+6. Optionally call `avenor_follow_up` to continue from a completed run.
+7. Call `avenor_shutdown` when the MCP session is done.
 
 ## Supervisor lifecycle
 
@@ -173,10 +174,11 @@ The returned `run_id` is generated and unique. Pass it to other tools to query o
 
 ### `avenor_status`
 
-Queries the status of runs.
+Queries the status of runs. Use this for lifecycle and permission checks, not final output retrieval.
 
 **Optional:**
 - `run_id` — specific run ID or label to query; omit to list all runs
+- `view` — `lifecycle` for a compact response or `full` for compatibility (default: `full`)
 - `supervisor_id` — supervisor socket to query (default: the autostarted supervisor)
 
 **Returns:** One status object if `run_id` is given, or an array of status objects if omitted.
@@ -189,6 +191,20 @@ Status values:
 - `killed` — forcefully terminated
 
 When blocked on a permission request, the result includes `pending_permission` with `request_id` and options.
+
+### `avenor_result`
+
+Waits for one run and returns its bounded final output without transcript or raw event details.
+
+**Required:**
+- `run_id` — run ID or label to await
+
+**Optional:**
+- `wait` — wait for a terminal result (default: `true`)
+- `timeout` — maximum time to wait, such as `30s` or `5m`
+- `supervisor_id` — supervisor socket to query
+
+A terminal response has `ready: true` and includes `output` when the backend exposed final assistant text. A blocked run returns its `pending_permission` immediately. If the result tool's own timeout expires, it returns the latest state with `ready: false` and `timed_out: true`; the underlying run keeps going.
 
 ### `avenor_answer_permission`
 

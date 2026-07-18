@@ -40,7 +40,7 @@ func readSentinel(path string) (*sentinelData, error) {
 func translateStatus(raw map[string]any, sentinelPath string) map[string]any {
 	result := make(map[string]any)
 
-	for _, k := range []string{"runtime_id", "label", "dir", "phase", "phase_label", "pending_permission"} {
+	for _, k := range []string{"runtime_id", "label", "dir", "phase", "phase_label", "pending_permission", "backend", "agent", "model", "parent_id", "children", "event_path", "usage", "latest_seq", "final_output"} {
 		if v, ok := raw[k]; ok {
 			result[k] = v
 		}
@@ -66,14 +66,25 @@ func translateStatus(raw map[string]any, sentinelPath string) map[string]any {
 		if rawSession != "" {
 			result["session_id"] = rawSession
 		}
+	case "done", "failed", "timeout", "killed", "waiting":
+		result["status"] = rawStatus
+		if rawSession != "" {
+			result["session_id"] = rawSession
+		}
+		if stopReason, ok := raw["stop_reason"]; ok {
+			result["stop_reason"] = stopReason
+		}
+	case "blocked":
+		result["status"] = "failed"
+		if rawSession != "" {
+			result["session_id"] = rawSession
+		}
 	default:
+		result["status"] = "running"
 		if sentinelPath != "" {
-			sd, err := readSentinel(sentinelPath)
-			if err != nil {
-				return result
+			if sd, err := readSentinel(sentinelPath); err == nil {
+				applySentinelStatus(result, sd)
 			}
-			applySentinelStatus(result, sd)
-			return result
 		}
 		if rawSession != "" {
 			result["session_id"] = rawSession

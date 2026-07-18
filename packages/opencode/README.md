@@ -33,7 +33,7 @@ Add `@dougbots/avenor-opencode` to your OpenCode configuration. If you use a glo
 
 For a project-level config, add the same entry to `.opencode.json` in your repo root.
 
-Once registered, the plugin exposes six tools that your OpenCode agent can call directly — no extra configuration required.
+Once registered, the plugin exposes eight tools that your OpenCode agent can call directly — no extra configuration required.
 
 ## Behaviour
 
@@ -68,12 +68,26 @@ The working directory (`dir`) is injected automatically from your OpenCode sessi
 
 ### `avenor_status`
 
-Get status of a specific run or all active runs. Surfaces any pending permission requests the sub-agent is blocked on.
+Get status of a specific run or all active runs. Use the compact `lifecycle` view for progress and pending permission checks; `full` remains the compatibility default.
 
 | Argument | Required | Description |
 |---|---|---|
 | `run_id` | no | Specific run ID to query (omit for all runs) |
+| `view` | no | Response detail: `lifecycle` or `full` (default) |
 | `supervisor_id` | no | Reuse an existing supervisor by socket path |
+
+### `avenor_result`
+
+Wait for a run to finish and return its bounded final output without transcript or event details. This is the output retrieval tool; `avenor_status` remains a lifecycle check.
+
+| Argument | Required | Description |
+|---|---|---|
+| `run_id` | yes | Run ID to await |
+| `wait` | no | Wait for a terminal result (default `true`) |
+| `timeout` | no | Maximum time to wait (for example `30s` or `5m`) |
+| `supervisor_id` | no | Reuse an existing supervisor by socket path |
+
+A blocked run returns its pending permission instead of waiting forever. If this tool's own timeout expires, it returns the latest status with `ready: false` and `timed_out: true`.
 
 ### `avenor_answer_permission`
 
@@ -123,8 +137,8 @@ Shut down the avenor supervisor process and clean up temp files. Call this when 
 ```
 1. avenor_spawn            →  tool call shows live progress, blocks until done
 2. (avenor_answer_permission  →  if a permission is routed to this session mid-run)
-3. tool call returns       →  structured result with status + session_id
-4. avenor_events           →  inspect detailed output
+3. tool call returns       →  completion preview with status + session_id
+4. avenor_result           →  retrieve the bounded final output when needed
 5. avenor_follow_up        →  optionally iterate
 6. avenor_shutdown         →  clean up when finished
 ```
@@ -135,7 +149,8 @@ Shut down the avenor supervisor process and clean up temp files. Call this when 
 2. plugin starts monitoring each run immediately
 3. (sub-agent finishes)    →  plugin re-prompts this session automatically
 4. avenor_answer_permission  →  if a permission was routed here mid-run
-5. avenor_events           →  inspect output
+5. avenor_result           →  wait for and retrieve the final output
+6. avenor_events           →  inspect raw event history when needed
 ```
 
 ## Dependencies

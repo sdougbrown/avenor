@@ -86,7 +86,7 @@ SSE mode restricts incoming requests to `localhost` / `127.0.0.1` / `[::1]` orig
 
 ## Tools
 
-All six tools register under the `avenor_` prefix to avoid collisions with other MCP servers.
+All seven tools register under the `avenor_` prefix to avoid collisions with other MCP servers.
 
 ### `avenor_spawn`
 
@@ -109,14 +109,28 @@ Returns `{ run_id, label, supervisor_id }`. The `run_id` is what you pass to the
 
 ### `avenor_status`
 
-Get the status of one run, or list all runs.
+Get the status of one run, or list all runs. Use the compact `lifecycle` view for progress and pending permission checks; `full` remains the compatibility default.
 
 | Parameter | Required | Description |
 |---|---|---|
 | `run_id` | no | Run ID or label to query. Omit to list all runs. |
+| `view` | no | Response detail: `lifecycle` or `full` (default) |
 | `supervisor_id` | no | Supervisor ID for multi-supervisor setups |
 
 Returns a status object (or array) with `status` being one of `running`, `done`, `failed`, `timeout`, or `killed`. When a run is blocked on a permission request, the response includes a `pending_permission` field with the available options.
+
+### `avenor_result`
+
+Wait for a run to finish and return its bounded final output without transcript or event details.
+
+| Parameter | Required | Description |
+|---|---|---|
+| `run_id` | yes | Run ID or label to await |
+| `wait` | no | Wait for a terminal result (default `true`) |
+| `timeout` | no | Maximum time to wait (for example `30s` or `5m`) |
+| `supervisor_id` | no | Supervisor ID for multi-supervisor setups |
+
+Terminal responses include `ready: true` and `output` when the backend exposed one. A pending permission returns immediately. If the result wait itself expires, the response has `ready: false` and `timed_out: true` without changing the run.
 
 ### `avenor_answer_permission`
 
@@ -171,11 +185,12 @@ Returns `{ ok: true, cleaned_up: [...] }`. Use this when you're done with avenor
 ## Typical workflow
 
 1. **Spawn a run:** `avenor_spawn(agent: "codex", repo_dir: "/path/to/project", prompt: "audit the API routes for auth gaps")`
-2. **Check status:** `avenor_status(run_id: "<id>")` — repeat until status is `done` or an action is needed.
-3. **If permission requested:** run `avenor_answer_permission` with the option you want.
-4. **After completion:** `avenor_events(run_id: "<id>")` to see what happened.
-5. **Optional follow-up:** `avenor_follow_up(run_id: "<id>", message: "now write tests for that")`
-6. **Clean up:** `avenor_shutdown()` when you're finished.
+2. **Check lifecycle when needed:** `avenor_status(run_id: "<id>", view: "lifecycle")` for progress or pending permissions.
+3. **If permission requested:** run `avenor_answer_permission` with the offered option.
+4. **Retrieve the result:** `avenor_result(run_id: "<id>")` waits and returns the bounded final output.
+5. **Inspect history when needed:** `avenor_events(run_id: "<id>")` returns raw recent events.
+6. **Optional follow-up:** `avenor_follow_up(run_id: "<id>", message: "now write tests for that")`
+7. **Clean up:** `avenor_shutdown()` when you're finished.
 
 ## Package structure
 

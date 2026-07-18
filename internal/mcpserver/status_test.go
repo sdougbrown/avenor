@@ -99,8 +99,18 @@ func TestTranslateStatusNoLiveStatusWithSentinel(t *testing.T) {
 func TestTranslateStatusNoLiveStatusNoSentinel(t *testing.T) {
 	raw := map[string]any{}
 	result := translateStatus(raw, "")
-	if len(result) != 0 {
-		t.Errorf("expected empty result, got %v", result)
+	if result["status"] != "running" {
+		t.Errorf("expected running fallback, got %v", result["status"])
+	}
+}
+
+func TestTranslateStatusBlockedLiveStatus(t *testing.T) {
+	result := translateStatus(map[string]any{"status": "blocked", "session_id": "ses_block"}, "")
+	if result["status"] != "failed" {
+		t.Errorf("expected failed, got %v", result["status"])
+	}
+	if result["session_id"] != "ses_block" {
+		t.Errorf("expected ses_block, got %v", result["session_id"])
 	}
 }
 

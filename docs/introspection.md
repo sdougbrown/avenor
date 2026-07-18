@@ -23,7 +23,7 @@ Use `/avenor-watch` to select a tracked run or pass a run ID directly:
 
 The inspector shows assistant and reasoning text exposed by the backend, live and completed tools, permissions, status, and final output. It supports scrolling, cancellation, and follow-up input. Raw ANSI and terminal control characters are removed before rendering.
 
-The model-facing `avenor_inspect` tool returns the same kind of bounded snapshot as JSON. Use it when the parent agent needs progress or final output without consuming raw `avenor_events` records.
+The model-facing `avenor_inspect` tool returns the same kind of bounded snapshot as JSON. Use it for transcript and tool diagnostics without consuming raw `avenor_events` records. When the parent only needs the sub-agent's conclusion, `avenor_result` waits for the run and returns its bounded final output without the snapshot.
 
 ## OpenCode
 

@@ -35,7 +35,43 @@ mock.module('./get-supervisor-client.js', () => ({
   getSupervisorClient: getSupervisorClientMock,
 }))
 
-const { statusTool } = await import('./status.js')
+const { shapeStatusResult, statusTool } = await import('./status.js')
+
+describe('status result views', () => {
+  it('keeps lifecycle and permission fields while omitting result and diagnostic data', () => {
+    expect(shapeStatusResult({
+      run_id: 'run-1',
+      label: 'demo',
+      status: 'waiting',
+      runtime_id: 'rt-1',
+      phase: 'waiting',
+      phase_label: 'Need approval',
+      latest_seq: 42,
+      pending_permission: {
+        request_id: 'req-1',
+        description: 'Allow edit?',
+        options: [{ option_id: 'allow_once', label: 'Allow', kind: 'allow_once' }],
+      },
+      session_id: 'ses-1',
+      usage: { total_tokens: 12 },
+      event_path: '/tmp/events.log',
+      final_output: 'do not include me',
+    }, 'lifecycle')).toEqual({
+      run_id: 'run-1',
+      label: 'demo',
+      status: 'waiting',
+      runtime_id: 'rt-1',
+      phase: 'waiting',
+      phase_label: 'Need approval',
+      latest_seq: 42,
+      pending_permission: {
+        request_id: 'req-1',
+        description: 'Allow edit?',
+        options: [{ option_id: 'allow_once', label: 'Allow', kind: 'allow_once' }],
+      },
+    })
+  })
+})
 
 describe('statusTool singleton registry', () => {
   let sentinelPath: string
@@ -77,6 +113,7 @@ describe('statusTool singleton registry', () => {
 
   it('maps richer metadata additively from live status', async () => {
     statusMock.mockResolvedValueOnce({
+      run_id: 'parent-run-id-that-must-not-replace-the-tracked-run',
       runtime_id: runInfo.runtimeId,
       session_id: 'ses-live',
       phase: 'waiting',

@@ -10,6 +10,7 @@ import {
   followUpTool,
   inspectTool,
   observeRun,
+  resultTool,
   type RunObserver,
   type RunSnapshot,
   shutdownTool,
@@ -32,7 +33,7 @@ type TrackedRun = {
   lastSnapshot?: RunSnapshot
 }
 
-type MonitorStopReason = 'permission-routed' | 'shutdown' | 'abort'
+type MonitorStopReason = 'permission-routed' | 'shutdown' | 'abort' | 'result'
 
 type MonitorOutcome = {
   kind: 'terminal' | 'waiting' | 'aborted' | 'shutdown' | 'stopped' | 'error'
@@ -352,6 +353,9 @@ export const AvenorPlugin: Plugin = async (ctx) => {
           if (handle.stopReason === 'abort') {
             return { kind: 'aborted', snapshot: current }
           }
+          if (handle.stopReason === 'result') {
+            return { kind: 'stopped', snapshot: current }
+          }
           return { kind: 'shutdown', snapshot: current }
         }
 
@@ -384,6 +388,9 @@ export const AvenorPlugin: Plugin = async (ctx) => {
             }
             if (handle.stopReason === 'shutdown') {
               return { kind: 'shutdown', snapshot: current }
+            }
+            if (handle.stopReason === 'result') {
+              return { kind: 'stopped', snapshot: current }
             }
             if (current.pending_permission || current.phase === 'waiting') {
               return { kind: 'waiting', snapshot: current }
@@ -657,7 +664,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
             void monitorRun(run).catch(console.error)
             return {
               title: `${result.label} — dispatched`,
-              output: `Dispatched "${result.label}" (run_id: ${result.run_id}). Call avenor_status with run_id to check progress, or wait for the completion notification.`,
+              output: `Dispatched "${result.label}" (run_id: ${result.run_id}). Completion will be delivered automatically; use avenor_status with view "lifecycle" for progress or avenor_result to wait for the final result.`,
             }
           }
 
@@ -721,17 +728,52 @@ export const AvenorPlugin: Plugin = async (ctx) => {
       }),
 
       avenor_status: tool({
-        description: 'Get status of a run or all runs. Surfaces pending permission requests.',
+        description: 'Get lifecycle status of a run or all runs. Use view="lifecycle" for compact polling; full is the compatibility default.',
         args: {
           run_id: tool.schema.string().optional().describe('Specific run ID to query'),
+          view: tool.schema.enum(['lifecycle', 'full']).optional().describe('Response detail (default full for compatibility)'),
           supervisor_id: tool.schema.string().optional().describe('Reuse an existing supervisor by socket path'),
         },
         async execute(args, _context) {
           const result = await statusTool({
             runId: args.run_id,
             supervisorId: args.supervisor_id,
+            view: args.view,
           })
           return JSON.stringify(result, null, 2)
+        },
+      }),
+
+      avenor_result: tool({
+        description: 'Wait for a run to finish and return its bounded final output without transcript or event details.',
+        args: {
+          run_id: tool.schema.string().describe('Run ID to await'),
+          wait: tool.schema.boolean().optional().describe('Wait for a terminal result (default true)'),
+          timeout: tool.schema.string().optional().describe('Maximum time to wait (e.g. 30s, 5m)'),
+          supervisor_id: tool.schema.string().optional().describe('Reuse an existing supervisor by socket path'),
+        },
+        async execute(args, context) {
+          const run = trackedRuns.get(args.run_id)
+          if (run) await stopMonitor(run.runId, 'result')
+
+          try {
+            const result = await resultTool({
+              runId: args.run_id,
+              supervisorId: args.supervisor_id,
+              wait: args.wait,
+              timeout: args.timeout,
+              signal: context.abort,
+            })
+            if (result.ready) {
+              unregisterRun(args.run_id)
+            } else if (run) {
+              void monitorRun(run).catch(console.error)
+            }
+            return JSON.stringify(result, null, 2)
+          } catch (error) {
+            if (run) void monitorRun(run).catch(console.error)
+            throw error
+          }
         },
       }),
 

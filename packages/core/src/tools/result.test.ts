@@ -1,0 +1,121 @@
+import { describe, expect, it, mock } from 'bun:test'
+import { createResultTool, type ResultResult } from './result.js'
+import type { StatusResult } from './status.js'
+
+function status(overrides: Partial<StatusResult> = {}): StatusResult {
+  return {
+    run_id: 'run-1',
+    label: 'demo',
+    status: 'running',
+    runtime_id: 'rt-1',
+    ...overrides,
+  }
+}
+
+function deps(statuses: StatusResult[], times: number[] = [0], pollIntervalMs = 1_000) {
+  const queue = [...statuses]
+  const statusMock = mock(async () => queue.shift() ?? statuses[statuses.length - 1]!)
+  const inspectMock = mock(async () => ({
+    final_output: 'inspected fallback',
+    snapshot: { final_output: 'inspected fallback', assistant_text: 'inspected fallback' },
+  }))
+  const sleepMock = mock(async () => {})
+  const nowQueue = [...times]
+  const nowMock = mock(() => nowQueue.shift() ?? times[times.length - 1] ?? 0)
+  return {
+    value: { status: statusMock, inspect: inspectMock, sleep: sleepMock, now: nowMock, pollIntervalMs },
+    statusMock,
+    inspectMock,
+    sleepMock,
+  }
+}
+
+describe('resultTool', () => {
+  it('returns only terminal result fields and the final output', async () => {
+    const testDeps = deps([status({
+      status: 'done',
+      session_id: 'ses-1',
+      stop_reason: 'end_turn',
+      final_output: 'final answer',
+      usage: { total_tokens: 50 },
+      event_path: '/tmp/events.log',
+    })])
+
+    const result = await createResultTool(testDeps.value)({ runId: 'run-1' })
+
+    expect(result).toEqual({
+      run_id: 'run-1',
+      label: 'demo',
+      status: 'done',
+      ready: true,
+      runtime_id: 'rt-1',
+      session_id: 'ses-1',
+      stop_reason: 'end_turn',
+      output: 'final answer',
+    })
+    expect(testDeps.statusMock).toHaveBeenCalledWith({
+      runId: 'run-1',
+      supervisorId: undefined,
+      view: 'full',
+    })
+    expect(testDeps.inspectMock).not.toHaveBeenCalled()
+  })
+
+  it('falls back to inspection when terminal status has no final output', async () => {
+    const testDeps = deps([status({ status: 'done' })])
+
+    const result = await createResultTool(testDeps.value)({ runId: 'run-1' })
+
+    expect(result).toMatchObject({ ready: true, output: 'inspected fallback' })
+    expect(testDeps.inspectMock).toHaveBeenCalledWith({ runId: 'run-1', supervisorId: undefined })
+  })
+
+  it('waits through running states until a result is ready', async () => {
+    const testDeps = deps([
+      status(),
+      status({ status: 'done', final_output: 'finished' }),
+    ], [0], 5)
+
+    const result = await createResultTool(testDeps.value)({ runId: 'run-1' })
+
+    expect(result.output).toBe('finished')
+    expect(testDeps.statusMock).toHaveBeenCalledTimes(2)
+    expect(testDeps.sleepMock).toHaveBeenCalledWith(5, undefined)
+  })
+
+  it('returns immediately when non-blocking or waiting for permission', async () => {
+    const runningDeps = deps([status()])
+    const running = await createResultTool(runningDeps.value)({ runId: 'run-1', wait: false })
+    expect(running).toMatchObject({ status: 'running', ready: false })
+    expect(runningDeps.sleepMock).not.toHaveBeenCalled()
+
+    const waitingDeps = deps([status({
+      status: 'waiting',
+      pending_permission: { request_id: 'req-1', description: 'Allow?', options: [] },
+    })])
+    const waiting = await createResultTool(waitingDeps.value)({ runId: 'run-1' })
+    expect(waiting).toMatchObject({
+      status: 'waiting',
+      ready: false,
+      pending_permission: { request_id: 'req-1' },
+    } satisfies Partial<ResultResult>)
+    expect(waitingDeps.sleepMock).not.toHaveBeenCalled()
+  })
+
+  it('returns the latest lifecycle state when its wait timeout expires', async () => {
+    const testDeps = deps([status(), status()], [0, 0, 1_000, 1_000])
+
+    const result = await createResultTool(testDeps.value)({ runId: 'run-1', timeout: '1s' })
+
+    expect(result).toMatchObject({ status: 'running', ready: false, timed_out: true })
+  })
+
+  it('honors cancellation before polling', async () => {
+    const controller = new AbortController()
+    controller.abort()
+    const testDeps = deps([status()])
+
+    await expect(createResultTool(testDeps.value)({ runId: 'run-1', signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
+    expect(testDeps.statusMock).not.toHaveBeenCalled()
+  })
+})

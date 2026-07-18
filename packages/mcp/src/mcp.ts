@@ -7,6 +7,7 @@ import { z } from 'zod'
 import {
   spawnTool,
   statusTool,
+  resultTool,
   answerPermissionTool,
   followUpTool,
   eventsTool,
@@ -98,13 +99,26 @@ server.registerTool('avenor_spawn', {
 })
 
 server.registerTool('avenor_status', {
-  description: 'Get status of one or all runs',
+  description: 'Get lifecycle status of one or all runs. Use lifecycle view for compact polling.',
   inputSchema: {
     run_id: z.string().optional().describe('Run ID or label to query'),
+    view: z.enum(['lifecycle', 'full']).optional().describe('Response detail (default full for compatibility)'),
     supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
   },
-}, async ({ run_id, supervisor_id }) => {
-  return statusTool({ runId: run_id, supervisorId: supervisor_id })
+}, async ({ run_id, view, supervisor_id }) => {
+  return statusTool({ runId: run_id, supervisorId: supervisor_id, view })
+})
+
+server.registerTool('avenor_result', {
+  description: 'Wait for a run to finish and return its bounded final output without event details',
+  inputSchema: {
+    run_id: z.string().describe('Run ID or label to await'),
+    wait: z.boolean().optional().describe('Wait for a terminal result (default true)'),
+    timeout: z.string().optional().describe('Maximum time to wait (e.g. 30s, 5m)'),
+    supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
+  },
+}, async ({ run_id, wait, timeout, supervisor_id }) => {
+  return resultTool({ runId: run_id, supervisorId: supervisor_id, wait, timeout })
 })
 
 server.registerTool('avenor_answer_permission', {

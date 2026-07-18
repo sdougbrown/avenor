@@ -7,11 +7,12 @@ import (
 	"testing"
 )
 
-// tsToolNames lists the six MCP tools from the TypeScript reference
+// tsToolNames lists the seven MCP tools from the TypeScript reference
 // (packages/mcp/src/mcp.ts).
 var tsToolNames = []string{
 	"avenor_spawn",
 	"avenor_status",
+	"avenor_result",
 	"avenor_answer_permission",
 	"avenor_follow_up",
 	"avenor_events",
@@ -74,9 +75,16 @@ func TestSchemaFieldParity(t *testing.T) {
 	})
 
 	t.Run("avenor_status", func(t *testing.T) {
-		// statusArgs — all optional: run_id, supervisor_id
-		allowed := []string{"run_id", "supervisor_id"}
+		// statusArgs — all optional: run_id, view, supervisor_id
+		allowed := []string{"run_id", "view", "supervisor_id"}
 		assertFields(t, "statusArgs", allowed, nil)
+	})
+
+	t.Run("avenor_result", func(t *testing.T) {
+		// resultArgs — required: run_id; optional: wait, timeout, supervisor_id
+		allowed := []string{"run_id", "wait", "timeout", "supervisor_id"}
+		required := []string{"run_id"}
+		assertFields(t, "resultArgs", allowed, required)
 	})
 
 	t.Run("avenor_answer_permission", func(t *testing.T) {
@@ -120,7 +128,7 @@ func assertFields(t *testing.T, structName string, allowed, required []string) {
 	// without error into the struct.
 	obj := make(map[string]any)
 	for _, f := range allowed {
-		if f == "auto_approve" {
+		if f == "auto_approve" || f == "wait" {
 			obj[f] = true
 			continue
 		}
@@ -151,6 +159,14 @@ func assertFields(t *testing.T, structName string, allowed, required []string) {
 		var a statusArgs
 		if err := json.Unmarshal(data, &a); err != nil {
 			t.Fatalf("%s: unmarshal: %v", structName, err)
+		}
+	case "resultArgs":
+		var a resultArgs
+		if err := json.Unmarshal(data, &a); err != nil {
+			t.Fatalf("%s: unmarshal: %v", structName, err)
+		}
+		if a.RunID != "test" || a.Wait == nil || !*a.Wait {
+			t.Errorf("%s: fields not populated correctly", structName)
 		}
 	case "permissionArgs":
 		data := map[string]any{"run_id": "r", "option_id": "o", "request_id": "req", "supervisor_id": "s"}
@@ -213,6 +229,8 @@ func assertSchemaTags(t *testing.T, structName string, allowed, required []strin
 		typ = reflect.TypeOf(spawnArgs{})
 	case "statusArgs":
 		typ = reflect.TypeOf(statusArgs{})
+	case "resultArgs":
+		typ = reflect.TypeOf(resultArgs{})
 	case "permissionArgs":
 		typ = reflect.TypeOf(permissionArgs{})
 	case "followUpArgs":
@@ -275,6 +293,12 @@ func assertMissingRequiredFieldsRemainZero(t *testing.T, structName string, requ
 					}
 				}
 			}
+		case "resultArgs":
+			var a resultArgs
+			json.Unmarshal(emptyJSON, &a)
+			if a.RunID != "" {
+				t.Errorf("resultArgs: required field %q should be zero when missing", "run_id")
+			}
 		case "permissionArgs":
 			var a permissionArgs
 			json.Unmarshal(emptyJSON, &a)
@@ -321,7 +345,7 @@ func assertMissingRequiredFieldsRemainZero(t *testing.T, structName string, requ
 }
 
 // TestMCPStdioHandshake verifies that a NewServer with a fake client
-// registers exactly 6 tools with the correct names, matching the
+// registers exactly 7 tools with the correct names, matching the
 // TypeScript MCP tool surface. Uses in-process server inspection
 // instead of spawning a subprocess.
 func TestMCPStdioHandshake(t *testing.T) {
@@ -344,8 +368,8 @@ func TestMCPStdioHandshake(t *testing.T) {
 		registeredNames[name] = true
 	}
 
-	if len(registeredNames) != 6 {
-		t.Fatalf("expected 6 registered tools, got %d", len(registeredNames))
+	if len(registeredNames) != 7 {
+		t.Fatalf("expected 7 registered tools, got %d", len(registeredNames))
 	}
 	for _, expected := range tsToolNames {
 		if !registeredNames[expected] {

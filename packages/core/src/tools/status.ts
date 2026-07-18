@@ -150,11 +150,14 @@ function buildBaseStatus(
     runtime_id?: string
     session_id?: string
     stop_reason?: string
+    prefer_fallback_run_id?: boolean
   },
   translatedStatus: string,
 ): StatusResult {
   return {
-    run_id: stringField(source, 'run_id') ?? fallback.run_id,
+    run_id: fallback.prefer_fallback_run_id
+      ? fallback.run_id
+      : stringField(source, 'run_id') ?? fallback.run_id,
     label: stringField(source, 'label') ?? fallback.label,
     status: translatedStatus,
     runtime_id: stringField(source, 'runtime_id', 'id') ?? fallback.runtime_id,
@@ -175,6 +178,8 @@ function buildBaseStatus(
     final_output: stringField(source, 'final_output', 'finalOutput'),
   }
 }
+
+export type StatusView = 'lifecycle' | 'full'
 
 export interface StatusResult {
   run_id: string
@@ -202,6 +207,22 @@ export interface StatusResult {
   final_output?: string
 }
 
+export function shapeStatusResult(result: StatusResult, view: StatusView = 'full'): StatusResult {
+  if (view === 'full') return result
+  if (view !== 'lifecycle') throw new Error(`invalid status view: ${String(view)}`)
+
+  return {
+    run_id: result.run_id,
+    label: result.label,
+    status: result.status,
+    ...(result.runtime_id !== undefined && { runtime_id: result.runtime_id }),
+    ...(result.phase !== undefined && { phase: result.phase }),
+    ...(result.phase_label !== undefined && { phase_label: result.phase_label }),
+    ...(result.pending_permission !== undefined && { pending_permission: result.pending_permission }),
+    ...(result.latest_seq !== undefined && { latest_seq: result.latest_seq }),
+  }
+}
+
 async function buildRunStatus(
   runInfo: RunInfo,
   liveStatus: Record<string, unknown> | null,
@@ -218,6 +239,7 @@ async function buildRunStatus(
     {
       run_id: runInfo.runId,
       label: runInfo.label,
+      prefer_fallback_run_id: true,
       runtime_id: runInfo.runtimeId,
       session_id:
         (sentinel?.SESSION as string) ??
@@ -245,6 +267,7 @@ export async function statusTool(
   args: {
     runId?: string
     supervisorId?: string
+    view?: StatusView
   },
 ): Promise<StatusResult | StatusResult[]> {
   if (args.supervisorId) {
@@ -258,7 +281,7 @@ export async function statusTool(
           : undefined
         if (runInfo) {
           const liveStatus = await queryLiveStatus(client, runInfo.runtimeId)
-          return buildRunStatus(runInfo, liveStatus)
+          return shapeStatusResult(await buildRunStatus(runInfo, liveStatus), args.view)
         }
 
         let liveStatus = await queryLiveStatus(client, args.runId)
@@ -287,7 +310,7 @@ export async function statusTool(
           sentinel = await parseSentinel(sentinelPath)
         }
 
-        return buildBaseStatus(
+        return shapeStatusResult(buildBaseStatus(
           liveStatus ?? {},
           {
             run_id: args.runId,
@@ -299,11 +322,11 @@ export async function statusTool(
             stop_reason: sentinel?._status,
           },
           translateStatus((liveStatus?.phase ?? liveStatus?.status ?? 'running') as string, sentinel),
-        )
+        ), args.view)
       }
 
       const list = await client.list()
-      return list.map((entry: any) => buildBaseStatus(
+      return list.map((entry: any) => shapeStatusResult(buildBaseStatus(
         entry,
         {
           run_id: String(entry.run_id ?? entry.runtime_id ?? entry.id ?? ''),
@@ -312,7 +335,7 @@ export async function statusTool(
           session_id: entry.session_id as string | undefined,
         },
         translateStatus((entry.phase ?? entry.status ?? 'running') as string, null),
-      ))
+      ), args.view))
     } finally {
       if (!isSingleton) {
         client.close()
@@ -328,7 +351,7 @@ export async function statusTool(
 
     if (runInfo) {
       const liveStatus = await queryLiveStatus(client, runInfo.runtimeId)
-      return buildRunStatus(runInfo, liveStatus)
+      return shapeStatusResult(await buildRunStatus(runInfo, liveStatus), args.view)
     }
 
     validateRunId(args.runId)
@@ -338,7 +361,7 @@ export async function statusTool(
     if (await sentinelExists(sentinelPath)) {
       sentinel = await parseSentinel(sentinelPath)
     }
-    return buildBaseStatus(
+    return shapeStatusResult(buildBaseStatus(
       liveStatus ?? {},
       {
         run_id: args.runId,
@@ -350,7 +373,7 @@ export async function statusTool(
         stop_reason: sentinel?._status,
       },
       translateStatus((liveStatus?.phase ?? liveStatus?.status ?? 'running') as string, sentinel),
-    )
+    ), args.view)
   }
 
   const list = await client.list()
@@ -366,9 +389,9 @@ export async function statusTool(
       : null
 
     if (runInfo && liveStatus) {
-      results.push(await buildRunStatus(runInfo, liveStatus))
+      results.push(shapeStatusResult(await buildRunStatus(runInfo, liveStatus), args.view))
     } else {
-      results.push(buildBaseStatus(
+      results.push(shapeStatusResult(buildBaseStatus(
         entry,
         {
           run_id: String(entry.run_id ?? entryId),
@@ -377,7 +400,7 @@ export async function statusTool(
           session_id: entry.session_id as string | undefined,
         },
         translateStatus((entry.phase ?? entry.status ?? 'running') as string, null),
-      ))
+      ), args.view))
     }
   }
 

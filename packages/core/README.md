@@ -59,11 +59,24 @@ Reports status for one or all runs. When `runId` is omitted it lists every run a
 ```ts
 import { statusTool } from '@dougbots/avenor-core'
 
-const status = await statusTool({ runId: 'reverse-string' })
+const status = await statusTool({ runId: 'reverse-string', view: 'lifecycle' })
 // { run_id: 'reverse-string', label: 'reverse-string', status: 'running', ... }
 ```
 
-Status values: `running`, `done`, `failed`, `timeout`, `killed`. If a permission request is pending, the result includes `pending_permission` with available options.
+Status values: `running`, `done`, `failed`, `timeout`, `killed`. If a permission request is pending, the result includes `pending_permission` with available options. The `lifecycle` view omits final output and diagnostic metadata; `full` remains the default for compatibility.
+
+### `resultTool`
+
+Waits for one run to finish and returns its bounded final output without transcript or event details.
+
+```ts
+import { resultTool } from '@dougbots/avenor-core'
+
+const result = await resultTool({ runId: 'reverse-string', timeout: '5m' })
+// { run_id: 'reverse-string', status: 'done', ready: true, output: '...' }
+```
+
+Set `wait: false` for a non-blocking availability check. A pending permission returns immediately; an expired result wait returns `ready: false` and `timed_out: true` without stopping the run.
 
 ### `answerPermissionTool`
 
@@ -113,7 +126,7 @@ const result = await shutdownTool({ force: false })
 ## Quick start
 
 ```ts
-import { Supervisor, spawnTool, statusTool, shutdownTool } from '@dougbots/avenor-core'
+import { Supervisor, resultTool, spawnTool, shutdownTool } from '@dougbots/avenor-core'
 
 // 1. The supervisor auto-starts avenor. Call get() early — it's a singleton.
 const sup = await Supervisor.get()
@@ -125,13 +138,9 @@ const { run_id } = await spawnTool({
   label: 'security-review',
 })
 
-// 3. Poll until complete
-let state = await statusTool({ runId: run_id })
-while (state.status === 'running' || state.status === undefined) {
-  await new Promise(r => setTimeout(r, 2000))
-  state = await statusTool({ runId: run_id })
-}
-console.log(state) // { run_id, label, status: 'done', ... }
+// 3. Wait for the bounded final output
+const result = await resultTool({ runId: run_id })
+console.log(result) // { run_id, label, status: 'done', ready: true, output: '...' }
 
 // 4. Clean up
 await shutdownTool()
@@ -146,7 +155,8 @@ await shutdownTool()
 | `Supervisor` | class | Singleton avenor process lifecycle manager |
 | `findAvenorBinary` | function | Discover the avenor binary path |
 | `spawnTool` | function | Start a new agent run |
-| `statusTool` | function | Query run status (single or all) |
+| `statusTool` | function | Query run lifecycle status (single or all) |
+| `resultTool` | function | Wait for and retrieve one run's bounded final output |
 | `answerPermissionTool` | function | Answer a pending permission request |
 | `followUpTool` | function | Resume a session with a follow-up prompt |
 | `eventsTool` | function | Read recent events from a run's event log |

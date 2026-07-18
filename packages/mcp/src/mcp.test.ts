@@ -4,7 +4,7 @@ import { z } from 'zod'
 import { getMcpAuthToken, isAllowedHost, isAllowedOrigin, parseBearerToken } from './mcp'
 
 describe('avenor MCP server', () => {
-  it('registers all 6 tools without throwing', () => {
+  it('registers all 7 tools without throwing', () => {
     const server = new McpServer({ name: 'avenor', version: '0.1.0' })
 
     server.registerTool('avenor_spawn', {
@@ -27,9 +27,20 @@ describe('avenor MCP server', () => {
       description: 'Get status',
       inputSchema: {
         run_id: z.string().optional(),
+        view: z.enum(['lifecycle', 'full']).optional(),
         supervisor_id: z.string().optional(),
       },
     }, async () => ({ run_id: 'test', label: 'test', status: 'running' }))
+
+    server.registerTool('avenor_result', {
+      description: 'Get result',
+      inputSchema: {
+        run_id: z.string(),
+        wait: z.boolean().optional(),
+        timeout: z.string().optional(),
+        supervisor_id: z.string().optional(),
+      },
+    }, async () => ({ run_id: 'test', label: 'test', status: 'done', ready: true, output: 'done' }))
 
     server.registerTool('avenor_answer_permission', {
       description: 'Answer permission',

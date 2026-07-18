@@ -19,6 +19,7 @@ const statusToolMock = mock(async () => ({
 const eventsToolMock = mock(async () => ({ events: [] }))
 const answerPermissionToolMock = mock(async () => ({ ok: true }))
 const followUpToolMock = mock(async () => ({ run_id: 'run-2', label: 'test follow-up' }))
+const resultToolMock = mock(async () => ({ run_id: 'run-1', label: 'test run', status: 'done', ready: true, output: 'final answer' }))
 const shutdownToolMock = mock(async () => ({ ok: true }))
 const inspectToolMock = mock(async () => {
   const snapshot = createRunSnapshot()
@@ -125,6 +126,7 @@ mock.module('@dougbots/avenor-core', () => ({
   eventsTool: eventsToolMock,
   answerPermissionTool: answerPermissionToolMock,
   followUpTool: followUpToolMock,
+  resultTool: resultToolMock,
   shutdownTool: shutdownToolMock,
   inspectTool: inspectToolMock,
   createRunSnapshot,
@@ -188,6 +190,7 @@ describe('AvenorPlugin', () => {
     eventsToolMock.mockClear()
     answerPermissionToolMock.mockClear()
     followUpToolMock.mockClear()
+    resultToolMock.mockClear()
     shutdownToolMock.mockClear()
     inspectToolMock.mockClear()
     dialMock.mockClear()
@@ -207,6 +210,13 @@ describe('AvenorPlugin', () => {
       session_id: 'child-session',
       status: 'running',
       latest_seq: 0,
+    }))
+    resultToolMock.mockImplementation(async () => ({
+      run_id: 'run-1',
+      label: 'test run',
+      status: 'done',
+      ready: true,
+      output: 'final answer',
     }))
     inspectToolMock.mockImplementation(async () => ({
       run_id: 'run-1',
@@ -280,6 +290,7 @@ describe('AvenorPlugin', () => {
     expect(Object.keys(hooks.tool ?? {})).toEqual(expect.arrayContaining([
       'avenor_spawn',
       'avenor_status',
+      'avenor_result',
       'avenor_answer_permission',
       'avenor_follow_up',
       'avenor_events',
@@ -296,6 +307,34 @@ describe('AvenorPlugin', () => {
     const output = { text: '<channel source="agent-reviewer" from_run_id="abc12345" from_role="reviewer">Looks good</channel>' }
     await hooks['experimental.text.complete']?.({ sessionID: 'session-1', messageID: 'm', partID: 'p' }, output)
     expect(output.text).toContain('📨 reviewer (abc12345)')
+  })
+
+  it('passes lifecycle and result retrieval arguments through to core tools', async () => {
+    const hooks = await AvenorPlugin(makeCtx() as any)
+    const context = { sessionID: 'orchestrator-session', directory: '/tmp/test', abort: new AbortController().signal }
+
+    await (hooks.tool?.avenor_status as any).execute(
+      { run_id: 'run-1', view: 'lifecycle', supervisor_id: '/tmp/avenor.sock' },
+      context,
+    )
+    expect(statusToolMock).toHaveBeenCalledWith({
+      runId: 'run-1',
+      supervisorId: '/tmp/avenor.sock',
+      view: 'lifecycle',
+    })
+
+    const output = await (hooks.tool?.avenor_result as any).execute(
+      { run_id: 'run-1', timeout: '5m', supervisor_id: '/tmp/avenor.sock' },
+      context,
+    )
+    expect(output).toContain('"output": "final answer"')
+    expect(resultToolMock).toHaveBeenCalledWith({
+      runId: 'run-1',
+      supervisorId: '/tmp/avenor.sock',
+      wait: undefined,
+      timeout: '5m',
+      signal: context.abort,
+    })
   })
 
   it('reports observer setup failures without rejecting or losing the tracked run', async () => {

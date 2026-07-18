@@ -8,6 +8,7 @@ import {
   followUpTool,
   inspectTool,
   observeRun,
+  resultTool,
   answerPermissionTool,
   shutdownTool,
   spawnTool,
@@ -46,6 +47,7 @@ export interface ExtensionDeps {
   answerPermissionTool: typeof answerPermissionTool
   followUpTool: typeof followUpTool
   inspectTool: typeof inspectTool
+  resultTool: typeof resultTool
   shutdownTool: typeof shutdownTool
   observeRun: typeof observeRun
   dial: typeof dial
@@ -59,6 +61,7 @@ const defaultDeps: ExtensionDeps = {
   answerPermissionTool,
   followUpTool,
   inspectTool,
+  resultTool,
   shutdownTool,
   observeRun,
   dial,
@@ -731,11 +734,12 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
       label: 'Avenor Spawn',
       description:
         'Dispatch an agent run via avenor. Blocks by default, showing live progress. Set wait=false for fire-and-forget.',
-      promptSnippet: 'Dispatch sub-agent runs via avenor (spawn, status, inspect, events, follow-up, shutdown)',
+      promptSnippet: 'Dispatch sub-agent runs via avenor (spawn, status, result, inspect, events, follow-up, shutdown)',
       promptGuidelines: [
         'Use avenor_spawn to delegate well-defined tasks to sub-agents.',
-        'Use avenor_status to check progress of fire-and-forget runs.',
-        'Use avenor_inspect to review a bounded transcript, tools, and final output from a run.',
+        'Use avenor_status with view "lifecycle" only to check progress or pending permissions.',
+        'Use avenor_result to wait for and retrieve a sub-agent final result.',
+        'Use avenor_inspect to review a bounded transcript and tool activity from a run.',
         'Use avenor_events only when raw event payloads are specifically needed.',
         'Use avenor_follow_up to iterate on a completed run.',
         'Use avenor_shutdown when done delegating work.',
@@ -790,7 +794,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
           return {
             content: [{
               type: 'text',
-              text: `Dispatched "${label}" (run_id: ${result.run_id}). Call avenor_status to check progress or avenor_inspect for a bounded transcript snapshot.`,
+              text: `Dispatched "${label}" (run_id: ${result.run_id}). Completion will be delivered automatically; use avenor_status with view "lifecycle" for progress or avenor_result to wait for the final result.`,
             }],
             details: { run_id: result.run_id, label },
           }
@@ -883,19 +887,67 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
     pi.registerTool({
       name: 'avenor_status',
       label: 'Avenor Status',
-      description: 'Get status of a run or all runs. Surfaces pending permission requests.',
+      description: 'Get lifecycle status of a run or all runs. Use view="lifecycle" for compact polling; full is the compatibility default.',
       parameters: Type.Object({
         run_id: Type.Optional(Type.String({ description: 'Specific run ID to query' })),
+        view: Type.Optional(Type.Unsafe<'lifecycle' | 'full'>({
+          type: 'string',
+          enum: ['lifecycle', 'full'],
+          description: 'Response detail (default full for compatibility)',
+        })),
         supervisor_id: Type.Optional(Type.String({ description: 'Reuse an existing supervisor by socket path' })),
       }),
       async execute(_toolCallId, params) {
         const result = await deps.statusTool({
           runId: params.run_id,
           supervisorId: params.supervisor_id,
+          view: params.view,
         })
         return {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
           details: result,
+        }
+      },
+    })
+
+    pi.registerTool({
+      name: 'avenor_result',
+      label: 'Avenor Result',
+      description: 'Wait for a run to finish and return its bounded final output without transcript or event details.',
+      parameters: Type.Object({
+        run_id: Type.String({ description: 'Run ID to await' }),
+        wait: Type.Optional(Type.Boolean({ description: 'Wait for a terminal result (default true)' })),
+        timeout: Type.Optional(Type.String({ description: 'Maximum time to wait (e.g. 30s, 5m)' })),
+        supervisor_id: Type.Optional(Type.String({ description: 'Reuse an existing supervisor by socket path' })),
+      }),
+      async execute(_toolCallId, params, signal) {
+        const tracked = trackedRuns.get(params.run_id)
+        const previousBlocking = tracked?.blocking
+        if (tracked) tracked.blocking = true
+        let completed = false
+
+        try {
+          const result = await deps.resultTool({
+            runId: params.run_id,
+            supervisorId: params.supervisor_id,
+            wait: params.wait,
+            timeout: params.timeout,
+            signal,
+          })
+          completed = result.ready
+          if (completed) {
+            trackedRuns.delete(params.run_id)
+          } else if (tracked && result.status === 'waiting') {
+            tracked.permissionNotified = true
+          }
+          return {
+            content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+            details: result,
+          }
+        } finally {
+          if (!completed && tracked && trackedRuns.get(params.run_id) === tracked) {
+            tracked.blocking = previousBlocking ?? false
+          }
         }
       },
     })

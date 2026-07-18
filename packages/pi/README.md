@@ -112,7 +112,9 @@ Available tools for LLM sub-agent management:
 | Tool | Description |
 |---|---|
 | `avenor_spawn` | Dispatch an agent run (blocking or fire-and-forget). Accepts `agent` (optional, maps to a named profile in `agents.json`), `model`, `prompt`, and `dir`. |
-| `avenor_status` | Get status of a run or all runs |
+| `avenor_status` | Get status of a run or all runs; use `view="lifecycle"` for compact progress and permission checks |
+| `avenor_result` | Wait for a run and return its bounded final output without transcript details |
+| `avenor_inspect` | Review a bounded transcript, tool activity, permissions, and final output |
 | `avenor_answer_permission` | Answer a pending permission request |
 | `avenor_follow_up` | Resume a completed run with a follow-up message |
 | `avenor_events` | Read events from a run |
@@ -154,18 +156,20 @@ If you don't need a named profile, `model` alone is sufficient — no agent conf
 **Blocking (default):**
 ```
 1. avenor_spawn            →  tool call shows live progress, blocks until done
-2. tool call returns       →  structured result with status + session_id
-3. avenor_events           →  inspect detailed output
-4. avenor_follow_up        →  optionally iterate
-5. avenor_shutdown         →  clean up when finished
+2. tool call returns       →  completion preview with status + session_id
+3. avenor_result           →  retrieve the bounded final output when needed
+4. avenor_inspect          →  inspect transcript and tool details when needed
+5. avenor_follow_up        →  optionally iterate
+6. avenor_shutdown         →  clean up when finished
 ```
 
 **Parallel / fire-and-forget (`wait=false`):**
 ```
 1. avenor_spawn × N        →  each returns run_id immediately
 2. (status widget updates) →  persistent widget shows all active runs
-3. /avenor-watch <id>      →  open live event feed for a specific run
-4. avenor_events           →  inspect output when done
+3. avenor_status           →  optional compact lifecycle/permission check
+4. avenor_result           →  wait for and retrieve each final output
+5. /avenor-watch <id>      →  open live diagnostics for a specific run
 ```
 
 ## Dependencies

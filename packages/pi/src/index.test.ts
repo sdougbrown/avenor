@@ -169,13 +169,17 @@ describe('Avenor Pi extension', () => {
       sendUserMessage: mock(() => {}),
     }
 
+    const statusToolMock = mock(async () => ({ run_id: 'run-1', label: 'demo', status: 'running', runtime_id: 'rt-1' }))
+    const resultToolMock = mock(async () => ({ run_id: 'run-1', label: 'demo', status: 'done', ready: true, output: 'hello world' }))
+
     await createExtension({
       spawnTool: mock(async () => ({ run_id: 'run-1', label: 'demo', supervisor_id: '/tmp/sock', runtime_id: 'rt-1' })),
-      statusTool: mock(async () => ({ run_id: 'run-1', label: 'demo', status: 'running', runtime_id: 'rt-1' })),
+      statusTool: statusToolMock,
       eventsTool: mock(async () => ({ events: [] })),
       answerPermissionTool: mock(async () => ({ ok: true })),
       followUpTool: mock(async () => ({ run_id: 'run-2', label: 'follow-up' })),
       inspectTool: mock(async () => makeInspectResult()),
+      resultTool: resultToolMock,
       shutdownTool: mock(async () => ({ ok: true })),
       observeRun: mock(() => ({
         closed: false,
@@ -194,6 +198,7 @@ describe('Avenor Pi extension', () => {
 
     expect(Object.keys(registeredTools)).toContain('avenor_spawn')
     expect(Object.keys(registeredTools)).toContain('avenor_status')
+    expect(Object.keys(registeredTools)).toContain('avenor_result')
     expect(Object.keys(registeredTools)).toContain('avenor_inspect')
     expect(Object.keys(registeredTools)).toContain('avenor_answer_permission')
     expect(Object.keys(registeredTools)).toContain('avenor_follow_up')
@@ -217,6 +222,20 @@ describe('Avenor Pi extension', () => {
     }]
     expect(registeredCommands['avenor-watch'].getArgumentCompletions('expl')).toEqual(expectedCompletion)
     expect(registeredCommands['avenor-cancel'].getArgumentCompletions('expl')).toEqual(expectedCompletion)
+
+    await registeredTools.avenor_status.execute('tool-status', { run_id: 'run-1', view: 'lifecycle' })
+    expect(statusToolMock).toHaveBeenCalledWith({ runId: 'run-1', supervisorId: undefined, view: 'lifecycle' })
+
+    const result = await registeredTools.avenor_result.execute('tool-result', { run_id: 'run-1', timeout: '5m' })
+    expect(result.content[0].text).toContain('"output": "hello world"')
+    expect(resultToolMock).toHaveBeenCalledWith({
+      runId: 'run-1',
+      supervisorId: undefined,
+      wait: undefined,
+      timeout: '5m',
+      signal: undefined,
+    })
+
     for (const handler of eventHandlers.get('session_shutdown') ?? []) await handler()
 
     expect(registeredRenderers).toContain('avenor-active-runs')
@@ -245,6 +264,7 @@ describe('Avenor Pi extension', () => {
         answerPermissionTool: mock(async () => ({ ok: true })),
         followUpTool: mock(async () => ({ run_id: 'run-2', label: 'follow-up' })),
         inspectTool: mock(async () => makeInspectResult()),
+        resultTool: mock(async () => ({ run_id: 'run-1', label: 'demo', status: 'done', ready: true, output: 'hello world' })),
         shutdownTool: mock(async () => ({ ok: true })),
         observeRun: mock(() => null),
         dial: mock(async () => ({ close() {}, cancel: async () => {}, prompt: async () => {}, events() { throw new Error('unused') } })),
