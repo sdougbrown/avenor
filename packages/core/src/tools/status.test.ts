@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, mock } from 'bun:test'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import type { StatusResult } from './status.js'
 
 const statusMock = mock(async () => {
   throw new Error('status call failed')
@@ -37,7 +38,39 @@ mock.module('./get-supervisor-client.js', () => ({
 
 const { shapeStatusResult, statusTool } = await import('./status.js')
 
+function fullStatus(): StatusResult {
+  return {
+    run_id: 'run-1',
+    label: 'demo',
+    status: 'done',
+    runtime_id: 'rt-1',
+    phase: 'done',
+    phase_label: 'Complete',
+    latest_seq: 42,
+    session_id: 'ses-1',
+    usage: { total_tokens: 12 },
+    event_path: '/tmp/events.log',
+    final_output: 'final answer',
+  }
+}
+
 describe('status result views', () => {
+  it('returns the complete input unchanged when view is omitted', () => {
+    const input = fullStatus()
+    const result = shapeStatusResult(input)
+
+    expect(result).toBe(input)
+    expect(result).toEqual(fullStatus())
+  })
+
+  it('returns the complete input unchanged for the full view', () => {
+    const input = fullStatus()
+    const result = shapeStatusResult(input, 'full')
+
+    expect(result).toBe(input)
+    expect(result).toEqual(fullStatus())
+  })
+
   it('keeps lifecycle and permission fields while omitting result and diagnostic data', () => {
     expect(shapeStatusResult({
       run_id: 'run-1',

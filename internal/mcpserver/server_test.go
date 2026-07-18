@@ -346,6 +346,25 @@ func TestAvenorResultDeadlineTimeout(t *testing.T) {
 	}
 }
 
+func TestAvenorResultStatusError(t *testing.T) {
+	// A ControlClient.Status error should propagate with the existing "status:" context.
+	fake := &fakeClient{
+		statusErr: fmt.Errorf("runtime not found"),
+	}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = s.handleAvenorResult(context.Background(), nil, resultArgs{RunID: "rt-broken"})
+	if err == nil {
+		t.Fatal("expected error from status")
+	}
+	if !strings.Contains(err.Error(), "status:") || !strings.Contains(err.Error(), "runtime not found") {
+		t.Fatalf("expected error to contain 'status: runtime not found', got: %v", err)
+	}
+}
+
 func TestAvenorResultInvalidTimeout(t *testing.T) {
 	fake := &fakeClient{}
 	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
@@ -484,6 +503,10 @@ func TestAvenorStatusForwardsSpecialCharsToControlClient(t *testing.T) {
 	}
 	if m["run_id"] != "../../socket" {
 		t.Errorf("expected run_id ../../socket, got %v", m["run_id"])
+	}
+	// Verify the exact run reference was forwarded to the control client.
+	if len(fake.statusCapturedRuntimeIDs) != 1 || fake.statusCapturedRuntimeIDs[0] != "../../socket" {
+		t.Errorf("expected statusCapturedRuntimeIDs [../../socket], got %v", fake.statusCapturedRuntimeIDs)
 	}
 }
 

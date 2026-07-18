@@ -83,12 +83,14 @@ describe('resultTool', () => {
     expect(testDeps.sleepMock).toHaveBeenCalledWith(5, undefined)
   })
 
-  it('returns immediately when non-blocking or waiting for permission', async () => {
+  it('returns immediately when non-blocking (wait=false)', async () => {
     const runningDeps = deps([status()])
     const running = await createResultTool(runningDeps.value)({ runId: 'run-1', wait: false })
     expect(running).toMatchObject({ status: 'running', ready: false })
     expect(runningDeps.sleepMock).not.toHaveBeenCalled()
+  })
 
+  it('returns immediately when waiting for permission', async () => {
     const waitingDeps = deps([status({
       status: 'waiting',
       pending_permission: { request_id: 'req-1', description: 'Allow?', options: [] },
@@ -100,6 +102,20 @@ describe('resultTool', () => {
       pending_permission: { request_id: 'req-1' },
     } satisfies Partial<ResultResult>)
     expect(waitingDeps.sleepMock).not.toHaveBeenCalled()
+  })
+
+  it('returns terminal output before timeout deadline', async () => {
+    const testDeps = deps([
+      status(),
+      status({ status: 'done', final_output: 'before-deadline' }),
+    ], [0, 500], 5)
+
+    const result = await createResultTool(testDeps.value)({ runId: 'run-1', timeout: '2s' })
+
+    expect(result.output).toBe('before-deadline')
+    expect(result.timed_out).toBeUndefined()
+    expect(testDeps.statusMock).toHaveBeenCalledTimes(2)
+    expect(testDeps.sleepMock).toHaveBeenCalledWith(5, undefined)
   })
 
   it('returns the latest lifecycle state when its wait timeout expires', async () => {

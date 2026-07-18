@@ -361,6 +361,16 @@ func (s *Server) handleAvenorResult(ctx context.Context, req *mcp.CallToolReques
 	}
 	defer cleanup()
 
+	var pollTimer *time.Timer
+	defer func() {
+		if pollTimer != nil && !pollTimer.Stop() {
+			select {
+			case <-pollTimer.C:
+			default:
+			}
+		}
+	}()
+
 	for {
 		status, err := s.queryRunStatus(cl, args.RunID)
 		if err != nil {
@@ -387,10 +397,16 @@ func (s *Server) handleAvenorResult(ctx context.Context, req *mcp.CallToolReques
 		if delay <= 0 {
 			return nil, resultFromStatus(status, true), nil
 		}
+
+		if pollTimer == nil {
+			pollTimer = time.NewTimer(delay)
+		} else {
+			pollTimer.Reset(delay)
+		}
 		select {
 		case <-ctx.Done():
 			return nil, nil, ctx.Err()
-		case <-time.After(delay):
+		case <-pollTimer.C:
 		}
 	}
 }
