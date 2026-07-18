@@ -21,6 +21,7 @@ import (
 type fakeClient struct {
 	listResult               []map[string]any
 	statusResult             map[string]any
+	statusFunc               func(runtimeID string) (map[string]any, error)
 	spawnResult              map[string]any
 	listErr                  error
 	statusErr                error
@@ -42,6 +43,9 @@ type permissionCall struct {
 
 func (f *fakeClient) Status(runtimeID string) (map[string]any, error) {
 	f.statusCapturedRuntimeIDs = append(f.statusCapturedRuntimeIDs, runtimeID)
+	if f.statusFunc != nil {
+		return f.statusFunc(runtimeID)
+	}
 	return f.statusResult, f.statusErr
 }
 
@@ -317,18 +321,21 @@ func TestAvenorResultHonorsCancellation(t *testing.T) {
 
 func TestAvenorResultDeadlineTimeout(t *testing.T) {
 	// A running run with a short timeout should return ready:false and timed_out:true.
-	fake := &fakeClient{statusResult: map[string]any{"runtime_id": "rt1", "status": "running"}}
+	fake := &fakeClient{}
 	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Use a very short timeout so the deadline expires after one poll.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	currentTime := time.Date(2026, 7, 18, 0, 0, 0, 0, time.UTC)
+	fake.statusFunc = func(runtimeID string) (map[string]any, error) {
+		currentTime = currentTime.Add(2 * time.Second)
+		return map[string]any{"runtime_id": runtimeID, "status": "running"}, nil
+	}
+	s.clock = func() time.Time { return currentTime }
 
-	_, value, err := s.handleAvenorResult(ctx, nil, resultArgs{
-		RunID:   "rt1",
+	_, value, err := s.handleAvenorResult(context.Background(), nil, resultArgs{
+		RunID:   "run-1",
 		Timeout: "1s",
 	})
 	if err != nil {
@@ -343,6 +350,41 @@ func TestAvenorResultDeadlineTimeout(t *testing.T) {
 	}
 	if result["status"] != "running" {
 		t.Errorf("expected status=running, got %v", result["status"])
+	}
+}
+
+func TestAvenorResultWaitingBranch(t *testing.T) {
+	// A waiting run with wait=true should return immediately with ready:false,
+	// preserve pending permission data, and perform exactly one status call.
+	fake := &fakeClient{
+		statusResult: map[string]any{
+			"runtime_id":         "rt1",
+			"status":             "waiting",
+			"pending_permission": map[string]any{"request_id": "req-42", "description": "Allow?"},
+		},
+	}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, value, err := s.handleAvenorResult(context.Background(), nil, resultArgs{RunID: "run-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := value.(map[string]any)
+	if result["ready"] != false {
+		t.Errorf("expected ready=false, got %v", result["ready"])
+	}
+	if result["status"] != "waiting" {
+		t.Errorf("expected status=waiting, got %v", result["status"])
+	}
+	pending, ok := result["pending_permission"].(map[string]any)
+	if !ok || pending["request_id"] != "req-42" {
+		t.Errorf("expected pending_permission request req-42, got %v", result["pending_permission"])
+	}
+	if len(fake.statusCapturedRuntimeIDs) != 1 {
+		t.Fatalf("expected 1 status call, got %d", len(fake.statusCapturedRuntimeIDs))
 	}
 }
 

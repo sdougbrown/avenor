@@ -12,16 +12,18 @@ function status(overrides: Partial<StatusResult> = {}): StatusResult {
   }
 }
 
-function deps(statuses: StatusResult[], times: number[] = [0], pollIntervalMs = 1_000) {
+function deps(statuses: StatusResult[], pollIntervalMs = 1_000) {
   const queue = [...statuses]
   const statusMock = mock(async () => queue.shift() ?? statuses[statuses.length - 1]!)
   const inspectMock = mock(async () => ({
     final_output: 'inspected fallback',
     snapshot: { final_output: 'inspected fallback', assistant_text: 'inspected fallback' },
   }))
-  const sleepMock = mock(async () => {})
-  const nowQueue = [...times]
-  const nowMock = mock(() => nowQueue.shift() ?? times[times.length - 1] ?? 0)
+  let fakeTime = 0
+  const sleepMock = mock(async (ms: number) => {
+    fakeTime += ms
+  })
+  const nowMock = mock(() => fakeTime)
   return {
     value: { status: statusMock, inspect: inspectMock, sleep: sleepMock, now: nowMock, pollIntervalMs },
     statusMock,
@@ -74,13 +76,13 @@ describe('resultTool', () => {
     const testDeps = deps([
       status(),
       status({ status: 'done', final_output: 'finished' }),
-    ], [0], 5)
+    ], 5)
 
     const result = await createResultTool(testDeps.value)({ runId: 'run-1' })
 
     expect(result.output).toBe('finished')
     expect(testDeps.statusMock).toHaveBeenCalledTimes(2)
-    expect(testDeps.sleepMock).toHaveBeenCalledWith(5, undefined)
+    expect(testDeps.sleepMock).toHaveBeenCalledOnce()
   })
 
   it('returns immediately when non-blocking (wait=false)', async () => {
@@ -108,22 +110,24 @@ describe('resultTool', () => {
     const testDeps = deps([
       status(),
       status({ status: 'done', final_output: 'before-deadline' }),
-    ], [0, 500], 5)
+    ], 5)
 
     const result = await createResultTool(testDeps.value)({ runId: 'run-1', timeout: '2s' })
 
     expect(result.output).toBe('before-deadline')
     expect(result.timed_out).toBeUndefined()
     expect(testDeps.statusMock).toHaveBeenCalledTimes(2)
-    expect(testDeps.sleepMock).toHaveBeenCalledWith(5, undefined)
+    expect(testDeps.sleepMock).toHaveBeenCalledOnce()
   })
 
   it('returns the latest lifecycle state when its wait timeout expires', async () => {
-    const testDeps = deps([status(), status()], [0, 0, 1_000, 1_000])
+    const testDeps = deps([status(), status()])
 
     const result = await createResultTool(testDeps.value)({ runId: 'run-1', timeout: '1s' })
 
     expect(result).toMatchObject({ status: 'running', ready: false, timed_out: true })
+    expect(testDeps.statusMock).toHaveBeenCalledTimes(2)
+    expect(testDeps.sleepMock).toHaveBeenCalledOnce()
   })
 
   it('honors cancellation before polling', async () => {

@@ -47,6 +47,7 @@ type Server struct {
 	registry              *RunRegistry
 	defaultSupervisorPath string
 	toolNames             []string
+	clock                 func() time.Time
 }
 
 type statusArgs struct {
@@ -126,6 +127,7 @@ func NewServer(opts Options) (*Server, error) {
 		mcpServer:     mcpServer,
 		controlClient: opts.ControlClient,
 		registry:      NewRunRegistry(),
+		clock:         time.Now,
 		toolNames: []string{
 			"avenor_status",
 			"avenor_result",
@@ -352,7 +354,7 @@ func (s *Server) handleAvenorResult(ctx context.Context, req *mcp.CallToolReques
 		if err != nil {
 			return nil, nil, err
 		}
-		deadline = time.Now().Add(time.Duration(seconds) * time.Second)
+		deadline = s.clock().Add(time.Duration(seconds) * time.Second)
 	}
 
 	cl, cleanup, err := s.getClientForSupervisor(args.SupervisorID)
@@ -386,13 +388,16 @@ func (s *Server) handleAvenorResult(ctx context.Context, req *mcp.CallToolReques
 			}
 			return nil, resultFromStatus(status, false), nil
 		}
-		if !deadline.IsZero() && !time.Now().Before(deadline) {
+		if !deadline.IsZero() && !s.clock().Before(deadline) {
 			return nil, resultFromStatus(status, true), nil
 		}
 
 		delay := time.Second
-		if !deadline.IsZero() && time.Until(deadline) < delay {
-			delay = time.Until(deadline)
+		if !deadline.IsZero() {
+			remaining := deadline.Sub(s.clock())
+			if remaining < delay {
+				delay = remaining
+			}
 		}
 		if delay <= 0 {
 			return nil, resultFromStatus(status, true), nil
