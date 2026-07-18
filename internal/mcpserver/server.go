@@ -271,9 +271,6 @@ func (s *Server) queryRunStatus(cl ControlClient, runID string) (map[string]any,
 		return ts, nil
 	}
 
-	if !runIDRE.MatchString(runID) {
-		return nil, fmt.Errorf("invalid run_id: %s", runID)
-	}
 	result, err := cl.Status(runID)
 	if err != nil {
 		return nil, fmt.Errorf("status: %w", err)
@@ -325,6 +322,24 @@ func resultFromStatus(status map[string]any, timedOut bool) map[string]any {
 	return result
 }
 
+// recoverFinalOutput mirrors the TypeScript inspect fallback using durable event history.
+func (s *Server) recoverFinalOutput(runID string) string {
+	ri := s.registry.Lookup(runID)
+	if ri == nil || ri.EventLogPath == "" {
+		return ""
+	}
+	events, err := readEvents(ri.EventLogPath, []string{"session.end"}, 1)
+	if err != nil || len(events) == 0 {
+		return ""
+	}
+	for i := len(events) - 1; i >= 0; i-- {
+		if output, ok := events[i]["final_output"].(string); ok {
+			return output
+		}
+	}
+	return ""
+}
+
 func (s *Server) handleAvenorResult(ctx context.Context, req *mcp.CallToolRequest, args resultArgs) (*mcp.CallToolResult, any, error) {
 	if args.RunID == "" {
 		return nil, nil, fmt.Errorf("run_id is required")
@@ -354,6 +369,11 @@ func (s *Server) handleAvenorResult(ctx context.Context, req *mcp.CallToolReques
 		state, _ := status["status"].(string)
 		terminal := state == "done" || state == "failed" || state == "timeout" || state == "killed"
 		if terminal || state == "waiting" || !wait {
+			if finalOutput, _ := status["final_output"].(string); terminal && finalOutput == "" {
+				if output := s.recoverFinalOutput(args.RunID); output != "" {
+					status["final_output"] = output
+				}
+			}
 			return nil, resultFromStatus(status, false), nil
 		}
 		if !deadline.IsZero() && !time.Now().Before(deadline) {
@@ -753,7 +773,6 @@ func (s *Server) authenticatedHTTPHandler(next http.Handler) http.Handler {
 	})
 }
 
-var runIDRE = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 var timeoutRE = regexp.MustCompile(`^(\d+)([smh]?)$`)
 
 func parseTimeoutSeconds(value string) (int, error) {

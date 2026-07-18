@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sdougbrown/avenor/client"
@@ -314,15 +315,175 @@ func TestAvenorResultHonorsCancellation(t *testing.T) {
 	}
 }
 
-func TestAvenorStatusRejectsInvalidDirectRunID(t *testing.T) {
-	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: &fakeClient{}})
+func TestAvenorResultDeadlineTimeout(t *testing.T) {
+	// A running run with a short timeout should return ready:false and timed_out:true.
+	fake := &fakeClient{statusResult: map[string]any{"runtime_id": "rt1", "status": "running"}}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	_, _, err = s.handleAvenorStatus(context.Background(), nil, statusArgs{RunID: "../../socket"})
-	if err == nil || !strings.Contains(err.Error(), "invalid run_id") {
-		t.Fatalf("expected invalid run_id error, got %v", err)
+	// Use a very short timeout so the deadline expires after one poll.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, value, err := s.handleAvenorResult(ctx, nil, resultArgs{
+		RunID:   "rt1",
+		Timeout: "1s",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	result := value.(map[string]any)
+	if result["ready"] != false {
+		t.Errorf("expected ready=false, got %v", result["ready"])
+	}
+	if result["timed_out"] != true {
+		t.Errorf("expected timed_out=true, got %v", result["timed_out"])
+	}
+	if result["status"] != "running" {
+		t.Errorf("expected status=running, got %v", result["status"])
+	}
+}
+
+func TestAvenorResultInvalidTimeout(t *testing.T) {
+	fake := &fakeClient{}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = s.handleAvenorResult(context.Background(), nil, resultArgs{
+		RunID:   "rt1",
+		Timeout: "not-a-number",
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid timeout") {
+		t.Fatalf("expected invalid timeout error, got %v", err)
+	}
+}
+
+func TestAvenorStatusInvalidView(t *testing.T) {
+	fake := &fakeClient{}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = s.handleAvenorStatus(context.Background(), nil, statusArgs{RunID: "rt1", View: "invalid"})
+	if err == nil || !strings.Contains(err.Error(), "view must be lifecycle or full") {
+		t.Fatalf("expected view validation error, got %v", err)
+	}
+}
+
+func TestAvenorResultTerminalOutputFallbackFromEvents(t *testing.T) {
+	// When a terminal run lacks final_output in live status, recover from
+	// event history (registered run's EventLogPath). Only return the output,
+	// not event details.
+	dir := t.TempDir()
+	eventLogPath := filepath.Join(dir, "fallback-test.log")
+	eventsContent := `{"event":"start","type":"lifecycle"}
+{"event":"session.end","type":"lifecycle","final_output":"recovered answer"}
+`
+	if err := os.WriteFile(eventLogPath, []byte(eventsContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := &fakeClient{
+		statusResult: map[string]any{
+			"runtime_id": "rt_fallback",
+			"status":     "done",
+		},
+	}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.registry.Store(&RunInfo{
+		RunID:        "run-fallback-1",
+		RuntimeID:    "rt_fallback",
+		EventLogPath: eventLogPath,
+	})
+
+	_, value, err := s.handleAvenorResult(context.Background(), nil, resultArgs{RunID: "run-fallback-1"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	result := value.(map[string]any)
+	if result["ready"] != true {
+		t.Errorf("expected ready=true, got %v", result["ready"])
+	}
+	if result["output"] != "recovered answer" {
+		t.Errorf("expected output 'recovered answer', got %v", result["output"])
+	}
+	// Should not include event details
+	if _, ok := result["events"]; ok {
+		t.Error("result should not contain events")
+	}
+}
+
+func TestAvenorResultTerminalOutputFallbackMissingEvents(t *testing.T) {
+	// When event log doesn't exist or has no session.end, missing final_output
+	// is non-fatal — return the terminal status without output.
+	dir := t.TempDir()
+	eventLogPath := filepath.Join(dir, "no-session-end.log")
+	eventsContent := `{"event":"start","type":"lifecycle"}
+`
+	if err := os.WriteFile(eventLogPath, []byte(eventsContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := &fakeClient{
+		statusResult: map[string]any{
+			"runtime_id": "rt_no_end",
+			"status":     "done",
+		},
+	}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.registry.Store(&RunInfo{
+		RunID:        "run-no-end",
+		RuntimeID:    "rt_no_end",
+		EventLogPath: eventLogPath,
+	})
+
+	_, value, err := s.handleAvenorResult(context.Background(), nil, resultArgs{RunID: "run-no-end"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	result := value.(map[string]any)
+	if result["ready"] != true {
+		t.Errorf("expected ready=true, got %v", result["ready"])
+	}
+	if _, ok := result["output"]; ok {
+		t.Error("expected no output key when no session.end found")
+	}
+}
+
+func TestAvenorStatusForwardsSpecialCharsToControlClient(t *testing.T) {
+	// Direct run IDs with special characters are forwarded to the control client
+	// rather than rejected by regex validation.
+	fake := &fakeClient{
+		statusResult: map[string]any{"status": "running"},
+	}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{RunID: "../../socket"})
+	if err != nil {
+		t.Fatalf("expected success forwarding special chars to control client, got: %v", err)
+	}
+	m, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map[string]any, got %T", result)
+	}
+	if m["run_id"] != "../../socket" {
+		t.Errorf("expected run_id ../../socket, got %v", m["run_id"])
 	}
 }
 
