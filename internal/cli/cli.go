@@ -32,6 +32,7 @@ const (
 	backendOpenCodeHTTP   = "opencode-http"
 	backendCodexAppServer = "codex-app-server"
 	backendGeminiACP      = "gemini-acp"
+	backendAgy            = "agy"
 	backendCursorACP      = "cursor-acp"
 	backendPony           = "pony"
 	backendClaude         = "claude"
@@ -137,6 +138,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	case backendPony:
 	case backendOpenCodeACP:
 	case backendGeminiACP:
+	case backendAgy:
 	case backendCursorACP:
 	case backendOpenCodeHTTP:
 		if discovery.URL == "" {

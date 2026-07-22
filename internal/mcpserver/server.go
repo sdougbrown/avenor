@@ -79,7 +79,7 @@ type spawnArgs struct {
 	Label        string `json:"label,omitempty" jsonschema:"optional label for the run"`
 	Timeout      string `json:"timeout,omitempty" jsonschema:"optional timeout in seconds (numeric string)"`
 	Model        string `json:"model,omitempty" jsonschema:"optional model to use"`
-	Backend      string `json:"backend,omitempty" jsonschema:"optional runtime backend (for example pi, opencode-acp, or codex-app-server)"`
+	Backend      string `json:"backend,omitempty" jsonschema:"optional runtime backend (for example agy, pi, opencode-acp, or codex-app-server)"`
 	ServerURL    string `json:"server_url,omitempty" jsonschema:"optional opencode serve URL for opencode-http backend"`
 	SupervisorID string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
 	AutoApprove  bool   `json:"auto_approve,omitempty" jsonschema:"optional auto-approve all permission requests so the run executes unattended (no answer_permission needed)"`

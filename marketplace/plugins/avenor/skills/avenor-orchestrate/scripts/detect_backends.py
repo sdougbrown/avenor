@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 
 
 DISPLAY_ORDER = [
+    "agy",
     "pi",
     "opencode-acp",
     "codex-app-server",
@@ -28,6 +29,7 @@ MODEL_SELECTION = {
     "opencode-acp": True,
     "opencode-http": True,
     "codex-app-server": True,
+    "agy": True,
     "gemini-acp": False,
     "cursor-acp": False,
     "claude": True,
@@ -154,6 +156,10 @@ def detect(server_url: str | None, preferred: str | None) -> dict:
         "pi": backend("pi", pi_signals, profiles=pi_profiles),
         "opencode-acp": backend("opencode", opencode_signals, profiles=opencode_profiles),
         "codex-app-server": backend("codex", existing([home / ".codex" / "auth.json"])),
+        "agy": backend(
+            "agy",
+            existing([home / ".gemini" / "config" / "config.json", home / ".gemini" / "antigravity-cli" / "jetski_state.pbtxt"]),
+        ),
         "gemini-acp": backend(
             "gemini",
             existing([home / ".gemini" / "oauth_creds.json", home / ".gemini" / "settings.json"]),
