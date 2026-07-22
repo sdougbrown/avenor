@@ -1,10 +1,14 @@
 package mcpserver
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/sdougbrown/avenor/internal/events"
 )
 
 func TestReadEventsBasic(t *testing.T) {
@@ -24,6 +28,52 @@ func TestReadEventsBasic(t *testing.T) {
 	}
 	if len(events) != 3 {
 		t.Fatalf("expected 3 events, got %d", len(events))
+	}
+}
+
+func TestReadEventsBoundsTerminalPreviewAndMarksIt(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events-bounded.log")
+	complete := strings.Repeat("é", events.MaxFinalOutputRunes+10)
+	line, err := json.Marshal(map[string]any{"event": "session.end", "final_output": complete})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(line, '\n'), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	read, err := readEvents(path, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview, _ := read[0]["final_output"].(string)
+	if len([]rune(preview)) != events.MaxFinalOutputRunes {
+		t.Fatalf("preview rune count = %d, want %d", len([]rune(preview)), events.MaxFinalOutputRunes)
+	}
+	if read[0]["final_output_truncated"] != true {
+		t.Fatalf("final_output_truncated = %v, want true", read[0]["final_output_truncated"])
+	}
+}
+
+func TestReadFinalOutputReadsBeyondScannerLimit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events-large.log")
+	complete := strings.Repeat("é", 40_000) // 80 KiB UTF-8, beyond Scanner's 64 KiB default.
+	line, err := json.Marshal(map[string]any{"event": "session.end", "final_output": complete})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(line, '\n'), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	output, found, err := readFinalOutput(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || output != complete {
+		t.Fatalf("readFinalOutput found=%v length=%d, want complete length=%d", found, len(output), len(complete))
 	}
 }
 

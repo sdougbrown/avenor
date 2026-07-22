@@ -93,7 +93,11 @@ type childRuntime struct {
 	promptQueue      []string
 	latestSeq        int64
 	usage            map[string]any
-	finalOutput      string
+	// finalOutput is a bounded status preview; fullFinalOutput is returned
+	// only through the explicit result control method.
+	finalOutput          string
+	finalOutputTruncated bool
+	fullFinalOutput      string
 	// Per-runtime status mirror of control.Snapshot fields. Updated from the
 	// event fanout so RuntimeStatus can surface phase, phase_label, and
 	// pending_permission without consulting the shared ControlState (which
@@ -1390,6 +1394,9 @@ func (s *Supervisor) listRuntimes() []map[string]any {
 		if rt.finalOutput != "" {
 			entry["final_output"] = rt.finalOutput
 		}
+		if rt.finalOutputTruncated {
+			entry["final_output_truncated"] = true
+		}
 		rt.mu.Unlock()
 		out = append(out, entry)
 	}
@@ -1552,39 +1559,39 @@ func (w *runtimeFanoutWriter) Write(ev events.Event) error {
 			stamped = w.control.CanonicalizeEvent(stamped)
 		}
 	}
-	stamped = events.BoundFinalOutput(stamped)
-	if stamped.Event == "permission.request" && w.onPermissionReq != nil {
-		if requestID, _ := stamped.Fields["request_id"].(string); requestID != "" {
-			if options, _ := stamped.Fields["options"].([]any); options != nil {
+	presentation := events.BoundFinalOutput(stamped)
+	if presentation.Event == "permission.request" && w.onPermissionReq != nil {
+		if requestID, _ := presentation.Fields["request_id"].(string); requestID != "" {
+			if options, _ := presentation.Fields["options"].([]any); options != nil {
 				w.onPermissionReq(w.runtimeID, requestID, options)
 			}
 		}
 	}
-	// Mirror phase, phase_label, pending_permission, usage, final_output, and
-	// latest_seq onto the child so RuntimeStatus can report them per-runtime.
+	// Mirror bounded presentation state onto RuntimeStatus, retaining the
+	// complete reply separately for RuntimeResult.
 	if w.child != nil {
 		w.child.mu.Lock()
-		if seq, ok := events.Int64(stamped.Fields["seq"]); ok {
+		if seq, ok := events.Int64(presentation.Fields["seq"]); ok {
 			w.child.latestSeq = seq
 		}
-		if usage, ok := stamped.Fields["usage"].(map[string]any); ok {
+		if usage, ok := presentation.Fields["usage"].(map[string]any); ok {
 			w.child.usage = make(map[string]any, len(usage))
 			for k, v := range usage {
 				w.child.usage[k] = v
 			}
 		}
-		switch stamped.Event {
+		switch presentation.Event {
 		case "agent.status":
-			if phase, _ := stamped.Fields["phase"].(string); phase != "" && w.child.phase != "done" {
+			if phase, _ := presentation.Fields["phase"].(string); phase != "" && w.child.phase != "done" {
 				w.child.phase = phase
-				if label, _ := stamped.Fields["label"].(string); label != "" {
+				if label, _ := presentation.Fields["label"].(string); label != "" {
 					w.child.phaseLabel = label
 				}
 			}
 		case "permission.request":
 			w.child.pendingPermission = true
 			w.child.permission = map[string]any{}
-			for k, v := range stamped.Fields {
+			for k, v := range presentation.Fields {
 				if k == "runtime_id" || k == "run_id" || k == "run_label" || k == "ts" || k == "seq" {
 					continue
 				}
@@ -1595,15 +1602,19 @@ func (w *runtimeFanoutWriter) Write(ev events.Event) error {
 			w.child.permission = nil
 		case "session.end":
 			w.child.phase = "done"
-			if finalOutput, _ := stamped.Fields["final_output"].(string); finalOutput != "" {
+			if finalOutput, _ := presentation.Fields["final_output"].(string); finalOutput != "" {
 				w.child.finalOutput = finalOutput
+			}
+			if fullFinalOutput, _ := stamped.Fields["final_output"].(string); fullFinalOutput != "" {
+				w.child.fullFinalOutput = fullFinalOutput
+				w.child.finalOutputTruncated = events.FinalOutputTruncated(fullFinalOutput)
 			}
 		}
 		w.child.mu.Unlock()
 	}
 	rec := w.recorder
 	if rec != nil {
-		rec.Feed(stamped)
+		rec.Feed(presentation)
 	}
 	if err := w.base.Write(stamped); err != nil {
 		return err
@@ -1726,8 +1737,25 @@ func (s *Supervisor) RuntimeStatus(rtID string) (any, error) {
 	if rt.finalOutput != "" {
 		entry["final_output"] = rt.finalOutput
 	}
+	if rt.finalOutputTruncated {
+		entry["final_output_truncated"] = true
+	}
 	rt.mu.Unlock()
 	return entry, nil
+}
+
+// RuntimeResult exposes the complete terminal reply without widening the
+// bounded RuntimeStatus presentation surface.
+func (s *Supervisor) RuntimeResult(rtID string) (any, error) {
+	s.controlMu.Lock()
+	rt := s.runtimes[rtID]
+	s.controlMu.Unlock()
+	if rt == nil {
+		return nil, fmt.Errorf("runtime %q not found", rtID)
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return map[string]any{"final_output": rt.fullFinalOutput}, nil
 }
 
 func (s *Supervisor) RuntimeCancel(rtID string) error {

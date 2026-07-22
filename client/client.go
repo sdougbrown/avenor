@@ -65,7 +65,7 @@ func (e *Event) UnmarshalJSON(data []byte) error {
 type Client struct {
 	conn    net.Conn
 	mu      sync.Mutex
-	scan    *bufio.Scanner
+	reader  *bufio.Reader
 	nextID  int
 	started bool
 
@@ -85,10 +85,10 @@ func Dial(socketPath string) (*Client, error) {
 		return nil, fmt.Errorf("dial control socket: %w", err)
 	}
 	return &Client{
-		conn:    conn,
-		scan:    bufio.NewScanner(conn),
-		pending: map[int]chan Response{},
-		eventCh: make(chan Event, 256),
+		conn:        conn,
+		reader:      bufio.NewReader(conn),
+		pending:     map[int]chan Response{},
+		eventCh:     make(chan Event, 256),
 		runtimeSubs: map[string]map[chan Event]struct{}{},
 	}, nil
 }
@@ -175,10 +175,13 @@ func (c *Client) Events() <-chan Event {
 	return c.eventCh
 }
 
-// readLoop is the single goroutine that reads from the bufio.Scanner,
+// readLoop is the single goroutine that reads newline-delimited frames,
 // dispatching responses to pending Call() waiters and events to the
 // Events() channel. Only one readLoop runs per Client.
 func (c *Client) readLoop() {
+	if c.reader == nil {
+		c.reader = bufio.NewReader(c.conn)
+	}
 	defer close(c.eventCh)
 	defer func() {
 		// Drain pending channels so Call() goroutines don't hang
@@ -190,9 +193,13 @@ func (c *Client) readLoop() {
 		}
 		c.mu.Unlock()
 	}()
-	for c.scan.Scan() {
-		line := c.scan.Bytes()
-		// Try parsing as a Response (has "id" field).
+	for {
+		line, err := c.reader.ReadBytes('\n')
+		if err != nil {
+			return
+		}
+		// Try parsing as a Response (has "id" field). ReadBytes has no
+		// token-size ceiling, which lets explicit result replies remain exact.
 		var resp Response
 		if err := json.Unmarshal(line, &resp); err != nil {
 			continue
@@ -267,6 +274,18 @@ func (c *Client) Status(runtimeID string) (map[string]any, error) {
 	}
 	var result map[string]any
 	err := c.Call("status", params, &result)
+	return result, err
+}
+
+// Result returns the complete terminal reply. Unlike Status, this explicit
+// retrieval path is not bounded for lifecycle presentation.
+func (c *Client) Result(runtimeID string) (map[string]any, error) {
+	var params any
+	if runtimeID != "" {
+		params = map[string]string{"runtime_id": runtimeID}
+	}
+	var result map[string]any
+	err := c.Call("result", params, &result)
 	return result, err
 }
 

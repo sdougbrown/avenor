@@ -62,7 +62,10 @@ func eventScopeKey(ev events.Event) string {
 }
 
 func (s *ControlServer) CanonicalizeEvent(event events.Event) events.Event {
-	out := events.BoundFinalOutput(events.Clone(event))
+	// Canonical events are written to durable NDJSON by the caller, so retain
+	// the complete final_output here. Presentation boundaries are applied only
+	// when publishing to status/history/subscribers below.
+	out := events.Clone(event)
 	if out.Fields == nil {
 		out.Fields = map[string]any{}
 	}
@@ -107,6 +110,9 @@ func (s *ControlServer) PublishEvent(event events.Event) events.Event {
 }
 
 func (s *ControlServer) PublishCanonicalEvent(event events.Event) {
+	// Keep the terminal answer privately for the explicit result RPC, while
+	// all status, replay, and subscription surfaces receive a bounded preview.
+	fullFinalOutput, _ := event.Fields["final_output"].(string)
 	event = events.BoundFinalOutput(event)
 	s.state.Update(func(ss *Snapshot) {
 		ss.LastEvent = event.Event
@@ -138,6 +144,10 @@ func (s *ControlServer) PublishCanonicalEvent(event events.Event) {
 		if event.Event == "session.end" {
 			if finalOutput, _ := event.Fields["final_output"].(string); finalOutput != "" {
 				ss.FinalOutput = finalOutput
+			}
+			if fullFinalOutput != "" {
+				ss.FullFinalOutput = fullFinalOutput
+				ss.FinalOutputTruncated = events.FinalOutputTruncated(fullFinalOutput)
 			}
 		}
 		switch event.Event {

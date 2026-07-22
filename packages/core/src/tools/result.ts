@@ -1,4 +1,6 @@
+import { Supervisor } from '../supervisor.js'
 import { inspectTool } from './inspect.js'
+import { getSupervisorClient } from './get-supervisor-client.js'
 import { statusTool, type StatusResult } from './status.js'
 import { validateTimeout } from './validate.js'
 
@@ -15,12 +17,17 @@ export interface ResultResult {
   stop_reason?: string
   pending_permission?: StatusResult['pending_permission']
   output?: string
+  // Present only when an older/unavailable control server prevented lossless
+  // retrieval; callers can resume via avenor_result or the durable event path.
+  output_truncated?: boolean
+  output_event_path?: string
   timed_out?: boolean
 }
 
 interface ResultToolDeps {
   status: typeof statusTool
   inspect: typeof inspectTool
+  fullOutput?(runtimeId: string | undefined, supervisorId?: string): Promise<string | undefined>
   sleep(ms: number, signal?: AbortSignal): Promise<void>
   now(): number
   pollIntervalMs: number
@@ -48,9 +55,26 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   })
 }
 
+async function fullOutput(runtimeId: string | undefined, supervisorId?: string): Promise<string | undefined> {
+  if (supervisorId) {
+    const { client, isSingleton } = await getSupervisorClient(supervisorId)
+    try {
+      const result = await client.result(runtimeId)
+      return typeof result.final_output === 'string' ? result.final_output : undefined
+    } finally {
+      if (!isSingleton) client.close()
+    }
+  }
+
+  const client = (await Supervisor.get()).getClient()
+  const result = await client.result(runtimeId)
+  return typeof result.final_output === 'string' ? result.final_output : undefined
+}
+
 const defaultDeps: ResultToolDeps = {
   status: statusTool,
   inspect: inspectTool,
+  fullOutput,
   sleep,
   now: Date.now,
   pollIntervalMs: DEFAULT_POLL_INTERVAL_MS,
@@ -68,6 +92,8 @@ function toResult(status: StatusResult, timedOut = false): ResultResult {
     stop_reason: status.stop_reason,
     pending_permission: status.pending_permission,
     output: ready ? status.final_output : undefined,
+    output_truncated: ready && status.final_output_truncated ? true : undefined,
+    output_event_path: ready && status.final_output_truncated ? status.event_path : undefined,
     timed_out: timedOut || undefined,
   }
 }
@@ -98,7 +124,22 @@ async function executeResultTool(args: ResultToolArgs, deps: ResultToolDeps): Pr
     if (!status) throw new Error(`run not found: ${args.runId}`)
 
     if (TERMINAL_STATUSES.has(status.status)) {
-      if (!status.final_output) {
+      // Status only carries a bounded preview. The explicit result path asks
+      // control for the durable, complete terminal answer instead of replaying
+      // message chunks or widening inspector payloads.
+      let exactOutputRetrieved = false
+      try {
+        const output = await deps.fullOutput?.(status.runtime_id, args.supervisorId)
+        if (output !== undefined) {
+          status.final_output = output
+          status.final_output_truncated = false
+          exactOutputRetrieved = true
+        }
+      } catch {
+        // Older supervisors may not implement result yet. Any presentation
+        // fallback below is explicitly marked as possibly truncated.
+      }
+      if (status.final_output === undefined) {
         try {
           const inspected = await deps.inspect({
             runId: args.runId,
@@ -108,6 +149,12 @@ async function executeResultTool(args: ResultToolArgs, deps: ResultToolDeps): Pr
         } catch {
           // The terminal status is still useful when detailed run history is unavailable.
         }
+      }
+      // Older supervisors did not expose final_output_truncated. Since status
+      // and inspection are bounded presentation surfaces, a fallback output
+      // must remain explicitly uncertain rather than being claimed complete.
+      if (!exactOutputRetrieved && status.final_output !== undefined) {
+        status.final_output_truncated = true
       }
       return toResult(status)
     }

@@ -165,7 +165,7 @@ func NewServer(opts Options) (*Server, error) {
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
 		Name:        "avenor_result",
-		Description: "Wait for a run to finish and return its bounded final output",
+		Description: "Wait for a run to finish and return its complete final output",
 	}, s.handleAvenorResult)
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
@@ -317,6 +317,12 @@ func resultFromStatus(status map[string]any, timedOut bool) map[string]any {
 		if output, ok := status["final_output"]; ok {
 			result["output"] = output
 		}
+		if truncated, _ := status["final_output_truncated"].(bool); truncated {
+			result["output_truncated"] = true
+			if eventPath, _ := status["event_path"].(string); eventPath != "" {
+				result["output_event_path"] = eventPath
+			}
+		}
 	}
 	if timedOut {
 		result["timed_out"] = true
@@ -324,22 +330,18 @@ func resultFromStatus(status map[string]any, timedOut bool) map[string]any {
 	return result
 }
 
-// recoverFinalOutput mirrors the TypeScript inspect fallback using durable event history.
-func (s *Server) recoverFinalOutput(runID string) string {
+// recoverFinalOutput reads the durable terminal event when an older control
+// server does not implement the explicit result method.
+func (s *Server) recoverFinalOutput(runID string) (string, bool) {
 	ri := s.registry.Lookup(runID)
 	if ri == nil || ri.EventLogPath == "" {
-		return ""
+		return "", false
 	}
-	events, err := readEvents(ri.EventLogPath, []string{"session.end"}, 1)
-	if err != nil || len(events) == 0 {
-		return ""
+	output, found, err := readFinalOutput(ri.EventLogPath)
+	if err != nil {
+		return "", false
 	}
-	for i := len(events) - 1; i >= 0; i-- {
-		if output, ok := events[i]["final_output"].(string); ok {
-			return output
-		}
-	}
-	return ""
+	return output, found
 }
 
 func (s *Server) handleAvenorResult(ctx context.Context, req *mcp.CallToolRequest, args resultArgs) (*mcp.CallToolResult, any, error) {
@@ -381,9 +383,36 @@ func (s *Server) handleAvenorResult(ctx context.Context, req *mcp.CallToolReques
 		state, _ := status["status"].(string)
 		terminal := state == "done" || state == "failed" || state == "timeout" || state == "killed"
 		if terminal || state == "waiting" || !wait {
-			if finalOutput, _ := status["final_output"].(string); terminal && finalOutput == "" {
-				if output := s.recoverFinalOutput(args.RunID); output != "" {
-					status["final_output"] = output
+			if terminal {
+				// Status intentionally carries only a bounded preview. Ask the
+				// control plane's explicit result method for the lossless reply.
+				fullResultRetrieved := false
+				if results, ok := cl.(interface {
+					Result(string) (map[string]any, error)
+				}); ok {
+					runtimeID, _ := status["runtime_id"].(string)
+					if result, err := results.Result(runtimeID); err == nil {
+						if output, ok := result["final_output"].(string); ok {
+							status["final_output"] = output
+							status["final_output_truncated"] = false
+							fullResultRetrieved = true
+						}
+					}
+				}
+				if !fullResultRetrieved {
+					if output, found := s.recoverFinalOutput(args.RunID); found {
+						status["final_output"] = output
+						status["final_output_truncated"] = false
+						fullResultRetrieved = true
+					}
+				}
+				// Older supervisors have no result RPC and did not report whether
+				// their status preview was bounded. Never present that fallback as
+				// complete when neither lossless source was available.
+				if !fullResultRetrieved {
+					if _, ok := status["final_output"].(string); ok {
+						status["final_output_truncated"] = true
+					}
 				}
 			}
 			return nil, resultFromStatus(status, false), nil

@@ -500,6 +500,25 @@ func (s *ControlServer) handleConn(c *connState) {
 
 func (s *ControlServer) dispatch(c *connState, req Request) Response {
 	switch req.Method {
+	case "result":
+		runtimeID := runtimeIDFromParams(req.Params)
+		if runtimeID == "" {
+			return success(req.ID, map[string]any{"final_output": s.state.FinalOutput()})
+		}
+		// Result is intentionally narrower than status: implementations may
+		// retain a full terminal reply without putting it on status or event
+		// presentation paths.
+		handler, ok := s.stableHandler.(interface {
+			RuntimeResult(string) (any, error)
+		})
+		if !ok {
+			return failure(req.ID, -32601, "method not found", nil)
+		}
+		result, err := handler.RuntimeResult(runtimeID)
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), nil)
+		}
+		return success(req.ID, result)
 	case "status":
 		if rtID := runtimeIDFromParams(req.Params); rtID != "" {
 			if s.stableHandler == nil {

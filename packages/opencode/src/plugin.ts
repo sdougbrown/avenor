@@ -745,7 +745,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
       }),
 
       avenor_result: tool({
-        description: 'Wait for a run to finish and return its bounded final output without transcript or event details.',
+        description: 'Wait for a run to finish and return its complete final output without transcript or event details.',
         args: {
           run_id: tool.schema.string().describe('Run ID to await'),
           wait: tool.schema.boolean().optional().describe('Wait for a terminal result (default true)'),

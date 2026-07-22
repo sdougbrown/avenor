@@ -39,6 +39,19 @@ func Int64(value any) (int64, bool) {
 	}
 }
 
+// FinalOutputTruncated reports whether a status/inspection preview will omit
+// any runes from this terminal reply.
+func FinalOutputTruncated(text string) bool {
+	count := 0
+	for range text {
+		count++
+		if count > MaxFinalOutputRunes {
+			return true
+		}
+	}
+	return false
+}
+
 func BoundedFinalOutput(text string) string {
 	count := 0
 	for index := range text {
@@ -61,6 +74,9 @@ func BoundFinalOutput(event Event) Event {
 	}
 	out := Clone(event)
 	out.Fields["final_output"] = bounded
+	// This copy is sent to bounded presentation surfaces (status, history, and
+	// subscriptions); preserve the fact that it is only a preview.
+	out.Fields["final_output_truncated"] = true
 	return out
 }
 

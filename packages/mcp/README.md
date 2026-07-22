@@ -121,7 +121,7 @@ Returns a status object (or array) with `status` being one of `running`, `done`,
 
 ### `avenor_result`
 
-Wait for a run to finish and return its bounded final output without transcript or event details.
+Wait for a run to finish and return its complete final output without transcript or event details.
 
 | Parameter | Required | Description |
 |---|---|---|
@@ -187,7 +187,7 @@ Returns `{ ok: true, cleaned_up: [...] }`. Use this when you're done with avenor
 1. **Spawn a run:** `avenor_spawn(agent: "codex", repo_dir: "/path/to/project", prompt: "audit the API routes for auth gaps")`
 2. **Check lifecycle when needed:** `avenor_status(run_id: "<id>", view: "lifecycle")` for progress or pending permissions.
 3. **If permission requested:** run `avenor_answer_permission` with the offered option.
-4. **Retrieve the result:** `avenor_result(run_id: "<id>")` waits and returns the bounded final output.
+4. **Retrieve the result:** `avenor_result(run_id: "<id>")` waits and returns the complete final output.
 5. **Inspect history when needed:** `avenor_events(run_id: "<id>")` returns raw recent events.
 6. **Optional follow-up:** `avenor_follow_up(run_id: "<id>", message: "now write tests for that")`
 7. **Clean up:** `avenor_shutdown()` when you're finished.

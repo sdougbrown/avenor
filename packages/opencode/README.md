@@ -78,7 +78,7 @@ Get status of a specific run or all active runs. Use the compact `lifecycle` vie
 
 ### `avenor_result`
 
-Wait for a run to finish and return its bounded final output without transcript or event details. This is the output retrieval tool; `avenor_status` remains a lifecycle check.
+Wait for a run to finish and return its complete final output without transcript or event details. This is the output retrieval tool; `avenor_status` remains a lifecycle check.
 
 | Argument | Required | Description |
 |---|---|---|
@@ -138,7 +138,7 @@ Shut down the avenor supervisor process and clean up temp files. Call this when 
 1. avenor_spawn            →  tool call shows live progress, blocks until done
 2. (avenor_answer_permission  →  if a permission is routed to this session mid-run)
 3. tool call returns       →  completion preview with status + session_id
-4. avenor_result           →  retrieve the bounded final output when needed
+4. avenor_result           →  retrieve the complete final output when needed
 5. avenor_follow_up        →  optionally iterate
 6. avenor_shutdown         →  clean up when finished
 ```

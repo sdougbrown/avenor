@@ -246,7 +246,6 @@ func TestLaggedOrdering(t *testing.T) {
 	// Small channel so we can provoke back-pressure without sending 256 events.
 	c := &Client{
 		conn:    clientConn,
-		scan:    bufio.NewScanner(clientConn),
 		pending: map[int]chan Response{},
 		eventCh: make(chan Event, 2),
 	}
@@ -323,6 +322,40 @@ func TestLaggedOrdering(t *testing.T) {
 	serverConn.Close()
 }
 
+func TestClientResultReadsReplyBeyondScannerLimit(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	c := &Client{
+		conn:    clientConn,
+		pending: map[int]chan Response{},
+		eventCh: make(chan Event, 1),
+	}
+	complete := strings.Repeat("é", 40_000) // 80 KiB UTF-8, beyond Scanner's 64 KiB default.
+	go func() {
+		line, err := bufio.NewReader(serverConn).ReadBytes('\n')
+		if err != nil {
+			return
+		}
+		var req Request
+		if json.Unmarshal(line, &req) != nil {
+			return
+		}
+		result, _ := json.Marshal(map[string]string{"final_output": complete})
+		data, _ := json.Marshal(Response{JSONRPC: "2.0", ID: req.ID, Result: result})
+		_, _ = serverConn.Write(append(data, '\n'))
+	}()
+
+	result, err := c.Result("rt_large")
+	if err != nil {
+		t.Fatalf("Result: %v", err)
+	}
+	if got, _ := result["final_output"].(string); got != complete {
+		t.Fatalf("final_output length = %d, want %d", len(got), len(complete))
+	}
+}
+
 func TestClientStatusWithRuntimeID(t *testing.T) {
 	path, cleanup := startTestServer(t)
 	defer cleanup()
@@ -346,7 +379,6 @@ func TestClientCallAfterEventsHandlesImmediateResponse(t *testing.T) {
 
 	c := &Client{
 		conn:    clientConn,
-		scan:    bufio.NewScanner(clientConn),
 		pending: map[int]chan Response{},
 		eventCh: make(chan Event, 2),
 	}
@@ -382,7 +414,6 @@ func TestClientCallReturnsErrorWhenConnectionCloses(t *testing.T) {
 
 	c := &Client{
 		conn:    clientConn,
-		scan:    bufio.NewScanner(clientConn),
 		pending: map[int]chan Response{},
 		eventCh: make(chan Event, 2),
 	}
@@ -405,7 +436,6 @@ func TestSubscribeRuntimeFanoutIndependent(t *testing.T) {
 
 	c := &Client{
 		conn:        clientConn,
-		scan:        bufio.NewScanner(clientConn),
 		pending:     map[int]chan Response{},
 		eventCh:     make(chan Event, 8),
 		runtimeSubs: map[string]map[chan Event]struct{}{},
@@ -456,7 +486,6 @@ func TestSubscribeRuntimeMatchesSessionID(t *testing.T) {
 
 	c := &Client{
 		conn:        clientConn,
-		scan:        bufio.NewScanner(clientConn),
 		pending:     map[int]chan Response{},
 		eventCh:     make(chan Event, 8),
 		runtimeSubs: map[string]map[chan Event]struct{}{},
@@ -489,7 +518,6 @@ func TestSubscribeRuntimeIgnoresOtherRuntimeIDs(t *testing.T) {
 
 	c := &Client{
 		conn:        clientConn,
-		scan:        bufio.NewScanner(clientConn),
 		pending:     map[int]chan Response{},
 		eventCh:     make(chan Event, 8),
 		runtimeSubs: map[string]map[chan Event]struct{}{},
@@ -519,7 +547,6 @@ func TestSubscribeRuntimeIgnoresOtherSessionIDs(t *testing.T) {
 
 	c := &Client{
 		conn:        clientConn,
-		scan:        bufio.NewScanner(clientConn),
 		pending:     map[int]chan Response{},
 		eventCh:     make(chan Event, 8),
 		runtimeSubs: map[string]map[chan Event]struct{}{},

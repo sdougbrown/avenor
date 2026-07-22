@@ -86,6 +86,31 @@ describe('Client.status', () => {
   })
 })
 
+describe('Client.result', () => {
+  let server: net.Server
+
+  afterEach(() => {
+    server?.close()
+  })
+
+  it('requests the lossless result endpoint with runtime_id', async () => {
+    const socketPath = tempSocketPath()
+    const complete = 'x'.repeat(8_000)
+    server = await startMockServer(socketPath, (req, sock) => {
+      expect(req.method).toBe('result')
+      expect(req.params).toEqual({ runtime_id: 'rt-123' })
+      sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: { final_output: complete } }) + '\n')
+    })
+
+    const client = await dial(socketPath)
+    try {
+      expect(await client.result('rt-123')).toEqual({ final_output: complete })
+    } finally {
+      client.close()
+    }
+  })
+})
+
 describe('Client.events', () => {
   let server: net.Server
 

@@ -221,7 +221,7 @@ Example:
 {"event":"agent.status","session_id":"ses_xyz","phase":"working","label":"reading files","source":"avenor","ts":1234567890}
 ```
 
-**`session.end`** — Terminal record for the session. Always the last event in any run. Fields: `stop_reason`, optional `usage` (object with `input_tokens`, `output_tokens`, `total_tokens`, `cached_read_tokens` in snake_case), and optional bounded `final_output` when the backend exposes the final assistant text.
+**`session.end`** — Terminal record for the session. Always the last event in any run. Fields: `stop_reason`, optional `usage` (object with `input_tokens`, `output_tokens`, `total_tokens`, `cached_read_tokens` in snake_case), and optional complete `final_output` when the backend exposes the final assistant text. Durable NDJSON retains that complete value. Status, inspection, control history, and subscriptions show bounded previews and set `final_output_truncated: true` when they omit text; `avenor_result` retrieves the complete reply.
 
 Classifies as MILESTONE.
 

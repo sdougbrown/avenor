@@ -43,6 +43,7 @@ describe('resultTool', () => {
       event_path: '/tmp/events.log',
     })])
 
+    testDeps.value.fullOutput = mock(async () => 'final answer')
     const result = await createResultTool(testDeps.value)({ runId: 'run-1' })
 
     expect(result).toEqual({
@@ -63,12 +64,47 @@ describe('resultTool', () => {
     expect(testDeps.inspectMock).not.toHaveBeenCalled()
   })
 
-  it('falls back to inspection when terminal status has no final output', async () => {
-    const testDeps = deps([status({ status: 'done' })])
+  it('retrieves the complete terminal output instead of the status preview', async () => {
+    const testDeps = deps([status({ status: 'done', final_output: 'x'.repeat(4_000) })])
+    const fullOutput = 'x'.repeat(4_000) + ' complete explore report'
+    testDeps.value.fullOutput = mock(async () => fullOutput)
 
     const result = await createResultTool(testDeps.value)({ runId: 'run-1' })
 
-    expect(result).toMatchObject({ ready: true, output: 'inspected fallback' })
+    expect(result.output).toBe(fullOutput)
+    expect(testDeps.value.fullOutput).toHaveBeenCalledWith('rt-1', undefined)
+    expect(testDeps.inspectMock).not.toHaveBeenCalled()
+  })
+
+  it('marks an older supervisor preview as possibly truncated when result retrieval fails', async () => {
+    const testDeps = deps([status({
+      status: 'done',
+      final_output: 'bounded preview',
+      event_path: '/tmp/events.ndjson',
+    })])
+    testDeps.value.fullOutput = mock(async () => { throw new Error('method not found') })
+
+    const result = await createResultTool(testDeps.value)({ runId: 'run-1' })
+
+    expect(result).toMatchObject({
+      output: 'bounded preview',
+      output_truncated: true,
+      output_event_path: '/tmp/events.ndjson',
+    })
+  })
+
+  it('marks an inspection fallback as possibly truncated', async () => {
+    const testDeps = deps([status({ status: 'done', event_path: '/tmp/events.ndjson' })])
+    testDeps.value.fullOutput = mock(async () => undefined)
+
+    const result = await createResultTool(testDeps.value)({ runId: 'run-1' })
+
+    expect(result).toMatchObject({
+      ready: true,
+      output: 'inspected fallback',
+      output_truncated: true,
+      output_event_path: '/tmp/events.ndjson',
+    })
     expect(testDeps.inspectMock).toHaveBeenCalledWith({ runId: 'run-1', supervisorId: undefined })
   })
 

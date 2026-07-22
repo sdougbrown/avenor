@@ -99,7 +99,7 @@ avenor_shutdown()
 1. Call `avenor_spawn` with an agent name and repository path.
 2. Use `avenor_status` with `view="lifecycle"` when you need progress or pending permission details.
 3. If `pending_permission` is present, call `avenor_answer_permission` to respond.
-4. Call `avenor_result` to wait for and retrieve the bounded final output.
+4. Call `avenor_result` to wait for and retrieve the complete final output.
 5. Call `avenor_events` only when you need raw recent history.
 6. Optionally call `avenor_follow_up` to continue from a completed run.
 7. Call `avenor_shutdown` when the MCP session is done.
@@ -194,7 +194,7 @@ When blocked on a permission request, the result includes `pending_permission` w
 
 ### `avenor_result`
 
-Waits for one run and returns its bounded final output without transcript or raw event details.
+Waits for one run and returns its complete final output without transcript or raw event details.
 
 **Required:**
 - `run_id` — run ID or label to await
@@ -204,7 +204,7 @@ Waits for one run and returns its bounded final output without transcript or raw
 - `timeout` — maximum time to wait, such as `30s` or `5m`
 - `supervisor_id` — supervisor socket to query
 
-A terminal response has `ready: true` and includes `output` when the backend exposed final assistant text. A blocked run returns its `pending_permission` immediately. If the result tool's own timeout expires, it returns the latest state with `ready: false` and `timed_out: true`; the underlying run keeps going.
+A terminal response has `ready: true` and includes the complete `output` when the backend exposed final assistant text. A blocked run returns its `pending_permission` immediately. If an older or unavailable control endpoint prevents lossless retrieval and a presentation fallback is returned, `output_truncated: true` and `output_event_path` make its possible truncation explicit; retry `avenor_result` or read the durable event path. If the result tool's own timeout expires, it returns the latest state with `ready: false` and `timed_out: true`; the underlying run keeps going.
 
 ### `avenor_answer_permission`
 

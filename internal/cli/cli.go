@@ -977,7 +977,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 						if event.Fields == nil {
 							event.Fields = map[string]any{}
 						}
-						event.Fields["final_output"] = events.BoundedFinalOutput(finalReply.String())
+						event.Fields["final_output"] = finalReply.String()
 					}
 				}
 			}
@@ -1053,7 +1053,7 @@ func cancelAndEnd(provider runtime.Provider, writer EventSink, sessionID, runID,
 		fields["usage"] = usage
 	}
 	if finalOutput != "" {
-		fields["final_output"] = events.BoundedFinalOutput(finalOutput)
+		fields["final_output"] = finalOutput
 	}
 	if err := writer.Write(events.Event{
 		Event:     "session.end",
@@ -1092,9 +1092,11 @@ func NewEventMetadata(runID, runLabel, runtimeID string) *EventMetadata {
 
 func (m *EventMetadata) Stamp(event events.Event) events.Event {
 	if m == nil {
-		return events.BoundFinalOutput(events.Clone(event))
+		return events.Clone(event)
 	}
-	out := events.BoundFinalOutput(events.Clone(event))
+	// Stamping happens before durable NDJSON persistence, so it must not alter
+	// the terminal reply. Control/status paths apply their own preview bound.
+	out := events.Clone(event)
 	if out.Fields == nil {
 		out.Fields = map[string]any{}
 	}
@@ -1157,7 +1159,6 @@ func (f *fanoutWriter) Write(event events.Event) error {
 	} else if f.control != nil {
 		stamped = f.control.CanonicalizeEvent(event)
 	}
-	stamped = events.BoundFinalOutput(stamped)
 	if err := f.base.Write(stamped); err != nil {
 		return err
 	}

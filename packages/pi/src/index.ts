@@ -920,7 +920,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
     pi.registerTool({
       name: 'avenor_result',
       label: 'Avenor Result',
-      description: 'Wait for a run to finish and return its bounded final output without transcript or event details.',
+      description: 'Wait for a run to finish and return its complete final output without transcript or event details.',
       parameters: Type.Object({
         run_id: Type.String({ description: 'Run ID to await' }),
         wait: Type.Optional(Type.Boolean({ description: 'Wait for a terminal result (default true)' })),

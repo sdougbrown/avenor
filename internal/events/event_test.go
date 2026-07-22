@@ -36,7 +36,13 @@ func TestBoundFinalOutputUsesRuneLimitWithoutMutatingInput(t *testing.T) {
 	if count := utf8.RuneCountInString(got); count != MaxFinalOutputRunes {
 		t.Fatalf("bounded rune count = %d, want %d", count, MaxFinalOutputRunes)
 	}
+	if bounded.Fields["final_output_truncated"] != true {
+		t.Fatalf("final_output_truncated = %v, want true", bounded.Fields["final_output_truncated"])
+	}
 	if original.Fields["final_output"] != text {
 		t.Fatal("BoundFinalOutput mutated the input event")
+	}
+	if _, ok := original.Fields["final_output_truncated"]; ok {
+		t.Fatal("BoundFinalOutput mutated the input metadata")
 	}
 }

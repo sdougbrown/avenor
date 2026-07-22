@@ -113,7 +113,7 @@ Available tools for LLM sub-agent management:
 |---|---|
 | `avenor_spawn` | Dispatch an agent run (blocking or fire-and-forget). Accepts `agent` (optional, maps to a named profile in `agents.json`), `model`, `prompt`, and `dir`. |
 | `avenor_status` | Get status of a run or all runs; use `view="lifecycle"` for compact progress and permission checks |
-| `avenor_result` | Wait for a run and return its bounded final output without transcript details |
+| `avenor_result` | Wait for a run and return its complete final output without transcript details |
 | `avenor_inspect` | Review a bounded transcript, tool activity, permissions, and final output |
 | `avenor_answer_permission` | Answer a pending permission request |
 | `avenor_follow_up` | Resume a completed run with a follow-up message |
@@ -157,7 +157,7 @@ If you don't need a named profile, `model` alone is sufficient — no agent conf
 ```
 1. avenor_spawn            →  tool call shows live progress, blocks until done
 2. tool call returns       →  completion preview with status + session_id
-3. avenor_result           →  retrieve the bounded final output when needed
+3. avenor_result           →  retrieve the complete final output when needed
 4. avenor_inspect          →  inspect transcript and tool details when needed
 5. avenor_follow_up        →  optionally iterate
 6. avenor_shutdown         →  clean up when finished

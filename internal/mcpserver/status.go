@@ -40,7 +40,7 @@ func readSentinel(path string) (*sentinelData, error) {
 func translateStatus(raw map[string]any, sentinelPath string) map[string]any {
 	result := make(map[string]any)
 
-	for _, k := range []string{"runtime_id", "label", "dir", "phase", "phase_label", "pending_permission", "backend", "agent", "model", "parent_id", "children", "event_path", "usage", "latest_seq", "final_output"} {
+	for _, k := range []string{"runtime_id", "label", "dir", "phase", "phase_label", "pending_permission", "backend", "agent", "model", "parent_id", "children", "event_path", "usage", "latest_seq", "final_output", "final_output_truncated"} {
 		if v, ok := raw[k]; ok {
 			result[k] = v
 		}

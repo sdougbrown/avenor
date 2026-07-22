@@ -312,6 +312,13 @@ export class Client {
     return this.call('status', params) as Promise<Record<string, unknown>>
   }
 
+  // Result is the lossless terminal-output path. Status and history stay
+  // bounded so polling and observers cannot accidentally attach large replies.
+  async result(runtimeId?: string): Promise<Record<string, unknown>> {
+    const params = runtimeId ? { runtime_id: runtimeId } : undefined
+    return this.call('result', params) as Promise<Record<string, unknown>>
+  }
+
   async list(): Promise<Array<Record<string, unknown>>> {
     return this.call('list') as Promise<Array<Record<string, unknown>>>
   }

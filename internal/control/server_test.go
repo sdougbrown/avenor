@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sdougbrown/avenor/client"
 	"github.com/sdougbrown/avenor/internal/events"
 )
 
@@ -366,6 +367,56 @@ func TestNormalizeHistoryLimit(t *testing.T) {
 				t.Fatalf("normalizeHistoryLimit(%d) = %d, want %d", tt.limit, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestResultReturnsFullTerminalOutputWhileStatusIsBounded(t *testing.T) {
+	state := NewState("run_1", "demo", 0)
+	s := NewServer(state)
+	full := strings.Repeat("é", events.MaxFinalOutputRunes+10)
+	s.PublishEvent(events.Event{Event: "session.end", Fields: map[string]any{"runtime_id": "rt_1", "final_output": full}})
+
+	snapshot := state.Snapshot()
+	if count := len([]rune(snapshot.FinalOutput)); count != events.MaxFinalOutputRunes {
+		t.Fatalf("status final_output rune count = %d, want %d", count, events.MaxFinalOutputRunes)
+	}
+	if !snapshot.FinalOutputTruncated {
+		t.Fatal("bounded status preview did not expose truncation metadata")
+	}
+	history, _ := s.runtimeHistory("rt_1", 0, 1)
+	if len(history) != 1 || history[0].Fields["final_output_truncated"] != true {
+		t.Fatalf("bounded history did not expose truncation metadata: %#v", history)
+	}
+	response := s.dispatch(nil, Request{JSONRPC: "2.0", ID: 1, Method: "result"})
+	result := response.Result.(map[string]any)
+	if result["final_output"] != full {
+		t.Fatal("result did not preserve the complete terminal output")
+	}
+}
+
+func TestResultOverControlSocketReadsReplyBeyondScannerLimit(t *testing.T) {
+	state := NewState("run_1", "demo", 0)
+	s := NewServer(state)
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	complete := strings.Repeat("é", 40_000) // 80 KiB UTF-8, beyond Scanner's 64 KiB default.
+	s.PublishEvent(events.Event{Event: "session.end", Fields: map[string]any{"final_output": complete}})
+
+	c, err := client.Dial(path)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer c.Close()
+	result, err := c.Result("")
+	if err != nil {
+		t.Fatalf("Result: %v", err)
+	}
+	if got, _ := result["final_output"].(string); got != complete {
+		t.Fatalf("final_output byte length = %d, want %d", len(got), len(complete))
 	}
 }
 

@@ -67,7 +67,7 @@ Status values: `running`, `done`, `failed`, `timeout`, `killed`. If a permission
 
 ### `resultTool`
 
-Waits for one run to finish and returns its bounded final output without transcript or event details.
+Waits for one run to finish and returns its complete final output without transcript or event details.
 
 ```ts
 import { resultTool } from '@dougbots/avenor-core'
@@ -138,7 +138,7 @@ const { run_id } = await spawnTool({
   label: 'security-review',
 })
 
-// 3. Wait for the bounded final output
+// 3. Wait for the complete final output
 const result = await resultTool({ runId: run_id })
 console.log(result) // { run_id, label, status: 'done', ready: true, output: '...' }
 
@@ -156,7 +156,7 @@ await shutdownTool()
 | `findAvenorBinary` | function | Discover the avenor binary path |
 | `spawnTool` | function | Start a new agent run |
 | `statusTool` | function | Query run lifecycle status (single or all) |
-| `resultTool` | function | Wait for and retrieve one run's bounded final output |
+| `resultTool` | function | Wait for and retrieve one run's complete final output |
 | `answerPermissionTool` | function | Answer a pending permission request |
 | `followUpTool` | function | Resume a session with a follow-up prompt |
 | `eventsTool` | function | Read recent events from a run's event log |

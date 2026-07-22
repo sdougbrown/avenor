@@ -110,7 +110,7 @@ server.registerTool('avenor_status', {
 })
 
 server.registerTool('avenor_result', {
-  description: 'Wait for a run to finish and return its bounded final output without event details',
+  description: 'Wait for a run to finish and return its complete final output without event details',
   inputSchema: {
     run_id: z.string().describe('Run ID or label to await'),
     wait: z.boolean().optional().describe('Wait for a terminal result (default true)'),

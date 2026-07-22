@@ -176,6 +176,7 @@ function buildBaseStatus(
     usage: asRecord(source.usage) ?? undefined,
     latest_seq: numberField(source, 'latest_seq'),
     final_output: stringField(source, 'final_output', 'finalOutput'),
+    ...(source.final_output_truncated === true && { final_output_truncated: true }),
   }
 }
 
@@ -205,6 +206,7 @@ export interface StatusResult {
   usage?: Record<string, unknown>
   latest_seq?: number
   final_output?: string
+  final_output_truncated?: boolean
 }
 
 export function shapeStatusResult(result: StatusResult, view: StatusView = 'full'): StatusResult {

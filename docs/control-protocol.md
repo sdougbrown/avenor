@@ -153,6 +153,18 @@ Returns the current state snapshot:
 - `turn_state` — internal turn lifecycle: `"idle"`, `"starting"`, `"running"`, `"ending"`, `"cancelling"`, `"ended"`.
 - Times are Unix milliseconds.
 
+#### `result`
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"result"}
+```
+
+Returns `{"final_output":"..."}` with the complete terminal assistant reply. This is the lossless retrieval path; `status`, history, and subscriptions keep bounded previews for safe polling and display. In stable mode, scope the same method to a child runtime:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"result","params":{"runtime_id":"rt_1"}}
+```
+
 #### `subscribe`
 
 ```json
@@ -326,7 +338,7 @@ Returns all active and recently-completed child runtimes with status summaries. 
 ]
 ```
 
-`status` is one of `"idle"`, `"running"`, or `"ended"`. Metadata fields are additive and may be absent when the backend does not expose them. Completed runtimes can also include bounded `final_output`; blocked runtimes include their pending permission details.
+`status` is one of `"idle"`, `"running"`, or `"ended"`. Metadata fields are additive and may be absent when the backend does not expose them. Completed runtimes can include a bounded `final_output` preview; when it was bounded, `final_output_truncated: true` is included. Use `result` with that runtime's `runtime_id` for the complete reply. Blocked runtimes include their pending permission details.
 
 #### `shutdown`
 
@@ -349,6 +361,7 @@ These are the same methods as above but applied to a specific child runtime inst
 ```
 
 - `status {"runtime_id":"rt_1"}` — runtime-specific status (same shape as stable `list` entry).
+- `result {"runtime_id":"rt_1"}` — complete terminal reply for one runtime; do not use the unscoped result method in stable mode.
 - `cancel {"runtime_id":"rt_1"}` — cancel one runtime. Requires ownership.
 - `prompt {"runtime_id":"rt_1","text":"Continue"}` — send a prompt to one runtime. Requires ownership.
 - `interrupt_and_prompt {"runtime_id":"rt_1","text":"Stop and do this","keep_queue":false}` — interrupt and re-prompt. Requires ownership.

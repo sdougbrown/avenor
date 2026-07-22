@@ -34,7 +34,7 @@ Use the Avenor MCP tools for the full run lifecycle. Do not replace them with sh
 
 ## Supervise the run
 
-1. Call `avenor_result` with the run identifier to wait for the bounded final output. A blocked run returns its `pending_permission` instead of waiting indefinitely.
+1. Call `avenor_result` with the run identifier to wait for the complete final output. A blocked run returns its `pending_permission` instead of waiting indefinitely.
 2. Use `avenor_status` with `view: "lifecycle"` only when you need a non-blocking progress check. Do not poll status to retrieve output.
 3. Keep the user informed during long runs. Do not treat an unchanged `running` result as a failure.
 4. For `pending_permission`, inspect the offered options. Apply the same authorization and safety boundaries as the parent task. Call `avenor_answer_permission` only with an offered `option_id`; ask the user when the choice needs new authority or materially changes scope. Then call `avenor_result` again.

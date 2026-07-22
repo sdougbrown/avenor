@@ -20,7 +20,11 @@ type Snapshot struct {
 	UpdatedAt         int64          `json:"updated_at"`
 	TurnState         string         `json:"turn_state,omitempty"`
 	LatestSeq         int64          `json:"latest_seq,omitempty"`
-	FinalOutput       string         `json:"final_output,omitempty"`
+	// FinalOutput is a bounded status preview. The complete terminal reply is
+	// retained separately for the explicit result control method.
+	FinalOutput          string `json:"final_output,omitempty"`
+	FinalOutputTruncated bool   `json:"final_output_truncated,omitempty"`
+	FullFinalOutput      string `json:"-"`
 }
 
 type ControlState struct {
@@ -44,6 +48,14 @@ func (s *ControlState) Snapshot() Snapshot {
 		}
 	}
 	return out
+}
+
+// FinalOutput returns the complete terminal reply retained for avenor_result.
+// It is deliberately not part of Snapshot's JSON status representation.
+func (s *ControlState) FinalOutput() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.s.FullFinalOutput
 }
 
 func (s *ControlState) Update(fn func(*Snapshot)) {

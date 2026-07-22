@@ -846,7 +846,7 @@ func TestRuntimeStatusMetadataIncludesUsageFinalOutputAndStamp(t *testing.T) {
 	}
 }
 
-func TestRuntimeFanoutWriterBoundsBackendFinalOutput(t *testing.T) {
+func TestRuntimeFanoutWriterPreservesBackendFinalOutputAndBoundsStatus(t *testing.T) {
 	child := &childRuntime{id: "rt_bound"}
 	sink := &metadataCaptureSink{}
 	writer := &runtimeFanoutWriter{base: sink, runtimeID: child.id, child: child}
@@ -862,14 +862,53 @@ func TestRuntimeFanoutWriterBoundsBackendFinalOutput(t *testing.T) {
 		t.Fatalf("captured %d events, want 1", len(sink.events))
 	}
 	got, _ := sink.events[0].Fields["final_output"].(string)
-	if count := len([]rune(got)); count != events.MaxFinalOutputRunes {
-		t.Fatalf("event final_output rune count = %d, want %d", count, events.MaxFinalOutputRunes)
+	if got != finalOutput {
+		t.Fatal("durable event did not preserve the complete final_output")
 	}
 	child.mu.Lock()
 	childOutput := child.finalOutput
+	fullChildOutput := child.fullFinalOutput
 	child.mu.Unlock()
-	if childOutput != got {
-		t.Fatal("child final_output differs from the bounded event")
+	if count := len([]rune(childOutput)); count != events.MaxFinalOutputRunes {
+		t.Fatalf("status final_output rune count = %d, want %d", count, events.MaxFinalOutputRunes)
+	}
+	if fullChildOutput != finalOutput {
+		t.Fatal("child result storage did not preserve the complete final_output")
+	}
+	if !child.finalOutputTruncated {
+		t.Fatal("bounded stable status preview did not expose truncation metadata")
+	}
+	sup := &Supervisor{runtimes: map[string]*childRuntime{child.id: child}}
+	result, err := sup.RuntimeResult(child.id)
+	if err != nil {
+		t.Fatalf("RuntimeResult: %v", err)
+	}
+	if got := result.(map[string]any)["final_output"]; got != finalOutput {
+		t.Fatal("RuntimeResult did not return the complete terminal output")
+	}
+}
+
+func TestStableResultOverControlSocketUsesRuntimeIDAndPreservesLargeOutput(t *testing.T) {
+	socket := filepath.Join(newStableSocketTestDir(t, "stable-result"), "control.sock")
+	sup := NewSupervisor(Config{ControlSocket: socket, MaxRuntimes: 1})
+	complete := strings.Repeat("é", 40_000) // 80 KiB UTF-8, beyond Scanner's 64 KiB default.
+	sup.runtimes["rt_large"] = &childRuntime{id: "rt_large", fullFinalOutput: complete}
+	if err := sup.control.Start(socket); err != nil {
+		t.Fatalf("start control: %v", err)
+	}
+	defer sup.control.Stop()
+
+	c, err := client.Dial(socket)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer c.Close()
+	result, err := c.Result("rt_large")
+	if err != nil {
+		t.Fatalf("Result: %v", err)
+	}
+	if got, _ := result["final_output"].(string); got != complete {
+		t.Fatalf("final_output byte length = %d, want %d", len(got), len(complete))
 	}
 }
 

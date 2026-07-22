@@ -25,6 +25,8 @@ type fakeClient struct {
 	spawnResult              map[string]any
 	listErr                  error
 	statusErr                error
+	resultResult             map[string]any
+	resultErr                error
 	spawnErr                 error
 	shutdownErr              error
 	answerPermissionErr      error
@@ -33,6 +35,7 @@ type fakeClient struct {
 	spawnCapturedParams      map[string]any
 	answerPermissionCalls    []permissionCall
 	statusCapturedRuntimeIDs []string
+	resultCapturedRuntimeIDs []string
 }
 
 type permissionCall struct {
@@ -47,6 +50,11 @@ func (f *fakeClient) Status(runtimeID string) (map[string]any, error) {
 		return f.statusFunc(runtimeID)
 	}
 	return f.statusResult, f.statusErr
+}
+
+func (f *fakeClient) Result(runtimeID string) (map[string]any, error) {
+	f.resultCapturedRuntimeIDs = append(f.resultCapturedRuntimeIDs, runtimeID)
+	return f.resultResult, f.resultErr
 }
 
 func (f *fakeClient) List() ([]map[string]any, error) {
@@ -433,6 +441,82 @@ func TestAvenorStatusInvalidView(t *testing.T) {
 	_, _, err = s.handleAvenorStatus(context.Background(), nil, statusArgs{RunID: "rt1", View: "invalid"})
 	if err == nil || !strings.Contains(err.Error(), "view must be lifecycle or full") {
 		t.Fatalf("expected view validation error, got %v", err)
+	}
+}
+
+func TestAvenorResultReturnsCompleteControlOutput(t *testing.T) {
+	preview := strings.Repeat("é", 4096)
+	complete := preview + " complete explore report"
+	fake := &fakeClient{
+		statusResult: map[string]any{
+			"runtime_id":   "rt_complete",
+			"status":       "done",
+			"final_output": preview,
+		},
+		resultResult: map[string]any{"final_output": complete},
+	}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, value, err := s.handleAvenorResult(context.Background(), nil, resultArgs{RunID: "rt_complete"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := value.(map[string]any)["output"]; got != complete {
+		t.Fatalf("output = %q, want complete result", got)
+	}
+	if got := fake.resultCapturedRuntimeIDs; len(got) != 1 || got[0] != "rt_complete" {
+		t.Fatalf("Result runtime IDs = %v, want [rt_complete]", got)
+	}
+}
+
+func TestAvenorResultMarksOlderStatusPreviewAsPossiblyTruncated(t *testing.T) {
+	fake := &fakeClient{
+		statusResult: map[string]any{
+			"runtime_id":   "rt_legacy",
+			"status":       "done",
+			"final_output": "legacy preview",
+			"event_path":   "/tmp/events.ndjson",
+		},
+		resultErr: fmt.Errorf("rpc error [-32601]: method not found"),
+	}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, value, err := s.handleAvenorResult(context.Background(), nil, resultArgs{RunID: "rt_legacy"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	result := value.(map[string]any)
+	if result["output"] != "legacy preview" || result["output_truncated"] != true {
+		t.Fatalf("result = %#v, want explicitly uncertain preview", result)
+	}
+	if result["output_event_path"] != "/tmp/events.ndjson" {
+		t.Fatalf("output_event_path = %v", result["output_event_path"])
+	}
+}
+
+func TestAvenorResultReturnsLargeCompleteControlOutput(t *testing.T) {
+	complete := strings.Repeat("é", 40_000)
+	fake := &fakeClient{
+		statusResult: map[string]any{"runtime_id": "rt_large", "status": "done", "final_output": "preview"},
+		resultResult: map[string]any{"final_output": complete},
+	}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, value, err := s.handleAvenorResult(context.Background(), nil, resultArgs{RunID: "rt_large"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := value.(map[string]any)["output"]; got != complete {
+		t.Fatalf("output byte length = %d, want %d", len(got.(string)), len(complete))
 	}
 }
 

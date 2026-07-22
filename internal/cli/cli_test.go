@@ -893,7 +893,7 @@ func TestFanoutWriterWithoutControlStampsEventLogOnce(t *testing.T) {
 	}
 }
 
-func TestFanoutWriterWithControlAndNoMetadataCanonicalizesAndBoundsOutput(t *testing.T) {
+func TestFanoutWriterWithControlAndNoMetadataPreservesOutputAndBoundsStatus(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "events.ndjson")
 	baseWriter, err := NewEventWriter(path)
 	if err != nil {
@@ -926,11 +926,15 @@ func TestFanoutWriterWithControlAndNoMetadataCanonicalizesAndBoundsOutput(t *tes
 		t.Fatal("expected seq to be stamped")
 	}
 	got, _ := logged[0].Fields["final_output"].(string)
-	if count := len([]rune(got)); count != events.MaxFinalOutputRunes {
-		t.Fatalf("final_output rune count = %d, want %d", count, events.MaxFinalOutputRunes)
+	if got != finalOutput {
+		t.Fatal("durable event log did not preserve the complete final_output")
 	}
-	if state.Snapshot().FinalOutput != got {
-		t.Fatal("control snapshot final_output differs from the bounded event log")
+	preview := state.Snapshot().FinalOutput
+	if count := len([]rune(preview)); count != events.MaxFinalOutputRunes {
+		t.Fatalf("status final_output rune count = %d, want %d", count, events.MaxFinalOutputRunes)
+	}
+	if state.FinalOutput() != finalOutput {
+		t.Fatal("control result storage did not preserve the complete final_output")
 	}
 }
 
