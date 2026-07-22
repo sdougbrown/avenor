@@ -11,11 +11,11 @@ func TestTranslateEvent_BasicSuccessfulTurn(t *testing.T) {
 	sid := "sess-basic-1"
 	cache := map[string]any{}
 
-	evts, cache := translateEvent(newInit("conv-abc123", "gemini-2.0-flash", "1.1.5"), sid, true, cache)
+	evts, cache := translateEvent(newInit("conv-abc123", "", ""), sid, true, cache)
 	assertEvent(t, evts[0], "session.start", sid, map[string]any{
 		"backend":         BackendID,
-		"model":           "gemini-2.0-flash",
-		"agy_version":     "1.1.5",
+		"model":           "",
+		"agy_version":     "",
 		"conversation_id": "conv-abc123",
 	})
 
@@ -39,8 +39,8 @@ func TestTranslateEvent_BasicSuccessfulTurn(t *testing.T) {
 	if cache["conversation_id"] != "conv-abc123" {
 		t.Errorf("cache conversation_id = %v, want conv-abc123", cache["conversation_id"])
 	}
-	if cache["model"] != "gemini-2.0-flash" {
-		t.Errorf("cache model = %v, want gemini-2.0-flash", cache["model"])
+	if cache["model"] != "" {
+		t.Errorf("cache model = %v, want empty string", cache["model"])
 	}
 }
 
@@ -48,7 +48,7 @@ func TestTranslateEvent_ToolSuccess(t *testing.T) {
 	sid := "sess-tool-1"
 	cache := map[string]any{}
 
-	translateEvent(newInit("conv-tool-1", "gemini-2.0-flash", "1.1.5"), sid, true, cache)
+	translateEvent(newInit("conv-tool-1", "", ""), sid, true, cache)
 
 	evts, _ := translateEvent(newAgentActive(1, "Let me check that."), sid, false, cache)
 	assertEvent(t, evts[0], "agent.message_chunk", sid, map[string]any{"delta": "Let me check that."})
@@ -64,7 +64,7 @@ func TestTranslateEvent_ToolSuccess(t *testing.T) {
 		"status":      "completed",
 		"name":        "read",
 		"output":      "file contents",
-		"duration_ms": int64(150),
+		"duration_ms": int64(150000), // 150 seconds * 1000
 	})
 
 	evts, _ = translateEvent(newAgentActive(3, "The file contains: file contents"), sid, false, cache)
@@ -86,7 +86,7 @@ func TestTranslateEvent_ToolDenied(t *testing.T) {
 	sid := "sess-deny-1"
 	cache := map[string]any{}
 
-	translateEvent(newInit("conv-deny-1", "gemini-2.0-flash", "1.1.5"), sid, true, cache)
+	translateEvent(newInit("conv-deny-1", "", ""), sid, true, cache)
 
 	evts, _ := translateEvent(newToolActive(1, "bash", map[string]any{"command": "rm -rf /"}), sid, false, cache)
 	assertEvent(t, evts[0], "tool.call", sid, map[string]any{"title": "bash", "status": "running"})
@@ -111,7 +111,7 @@ func TestTranslateEvent_ResultError(t *testing.T) {
 	sid := "sess-err-1"
 	cache := map[string]any{}
 
-	translateEvent(newInit("conv-err-1", "gemini-2.0-flash", "1.1.5"), sid, true, cache)
+	translateEvent(newInit("conv-err-1", "", ""), sid, true, cache)
 
 	evts, _ := translateEvent(newAgentActive(1, "Processing..."), sid, false, cache)
 	assertEvent(t, evts[0], "agent.message_chunk", sid, map[string]any{"delta": "Processing..."})
@@ -135,29 +135,35 @@ func TestTranslateEvent_FragmentedOutput(t *testing.T) {
 	sid := "sess-frag-1"
 	cache := map[string]any{}
 
-	translateEvent(newInit("conv-frag", "gemini-2.0-flash", "1.1.5"), sid, true, cache)
+	translateEvent(newInit("conv-frag", "", ""), sid, true, cache)
 
 	var chunks []string
 	chunks = append(chunks, collectDeltas(map[string]any{
-		"type":       "step_update",
-		"step_index": 1,
-		"step_type":  "agent_response",
-		"state":      "ACTIVE",
-		"text_delta": "Hello",
+		"event": "step_update",
+		"step_update": map[string]any{
+			"step_index": 1,
+			"step_type":  "agent_response",
+			"state":      "ACTIVE",
+			"text_delta": "Hello",
+		},
 	}, sid, cache)...)
 	chunks = append(chunks, collectDeltas(map[string]any{
-		"type":       "step_update",
-		"step_index": 1,
-		"step_type":  "agent_response",
-		"state":      "ACTIVE",
-		"text_delta": " ",
+		"event": "step_update",
+		"step_update": map[string]any{
+			"step_index": 1,
+			"step_type":  "agent_response",
+			"state":      "ACTIVE",
+			"text_delta": " ",
+		},
 	}, sid, cache)...)
 	chunks = append(chunks, collectDeltas(map[string]any{
-		"type":       "step_update",
-		"step_index": 1,
-		"step_type":  "agent_response",
-		"state":      "ACTIVE",
-		"text_delta": "World!",
+		"event": "step_update",
+		"step_update": map[string]any{
+			"step_index": 1,
+			"step_type":  "agent_response",
+			"state":      "ACTIVE",
+			"text_delta": "World!",
+		},
 	}, sid, cache)...)
 
 	concatenated := strings.Join(chunks, "")
@@ -178,14 +184,16 @@ func TestTranslateEvent_EmptyAgentSteps(t *testing.T) {
 	sid := "sess-empty-1"
 	cache := map[string]any{}
 
-	translateEvent(newInit("conv-empty", "gemini-2.0-flash", "1.1.5"), sid, true, cache)
+	translateEvent(newInit("conv-empty", "", ""), sid, true, cache)
 
 	evts, _ := translateEvent(map[string]any{
-		"type":       "step_update",
-		"step_index": 1,
-		"step_type":  "agent_response",
-		"state":      "ACTIVE",
-		"text_delta": "",
+		"event": "step_update",
+		"step_update": map[string]any{
+			"step_index": 1,
+			"step_type":  "agent_response",
+			"state":      "ACTIVE",
+			"text_delta": "",
+		},
 	}, sid, false, cache)
 	for _, e := range evts {
 		if e.Event == "agent.message_chunk" {
@@ -194,10 +202,12 @@ func TestTranslateEvent_EmptyAgentSteps(t *testing.T) {
 	}
 
 	evts, _ = translateEvent(map[string]any{
-		"type":       "step_update",
-		"step_index": 1,
-		"step_type":  "agent_response",
-		"state":      "DONE",
+		"event": "step_update",
+		"step_update": map[string]any{
+			"step_index": 1,
+			"step_type":  "agent_response",
+			"state":      "DONE",
+		},
 	}, sid, false, cache)
 	if len(evts) != 1 || evts[0].Event != "avenor.message.update" {
 		t.Errorf("expected avenor.message.update, got %v", evts)
@@ -208,17 +218,17 @@ func TestTranslateEvent_SecondInitNoDuplicateSessionStart(t *testing.T) {
 	sid := "sess-dup-1"
 	cache := map[string]any{}
 
-	evts, cache := translateEvent(newInit("conv-dup", "gemini-2.0-flash", "1.1.5"), sid, true, cache)
+	evts, cache := translateEvent(newInit("conv-dup", "", ""), sid, true, cache)
 	if len(evts) != 1 || evts[0].Event != "session.start" {
 		t.Fatalf("first init: expected session.start, got %v", evts)
 	}
 
-	evts, _ = translateEvent(newInit("conv-dup", "gemini-2.0-flash", "1.1.5"), sid, false, cache)
+	evts, _ = translateEvent(newInit("conv-dup", "", ""), sid, false, cache)
 	if len(evts) != 0 {
 		t.Errorf("second init with same conversation_id: expected no events, got %v", evts)
 	}
 
-	evts, _ = translateEvent(newInit("conv-dup-2", "claude-3.5", "1.1.5"), sid, false, cache)
+	evts, _ = translateEvent(newInit("conv-dup-2", "", ""), sid, false, cache)
 	if len(evts) != 0 {
 		t.Errorf("second init with different conversation_id: expected no events, got %v", evts)
 	}
@@ -231,7 +241,7 @@ func TestTranslateEvent_ResultNotDoubleRendered(t *testing.T) {
 	sid := "sess-dbl-1"
 	cache := map[string]any{}
 
-	translateEvent(newInit("conv-dbl", "gemini-2.0-flash", "1.1.5"), sid, true, cache)
+	translateEvent(newInit("conv-dbl", "", ""), sid, true, cache)
 
 	resp := "This is the full response."
 	for i := 0; i < len(resp); i += 4 {
@@ -240,11 +250,13 @@ func TestTranslateEvent_ResultNotDoubleRendered(t *testing.T) {
 			end = len(resp)
 		}
 		translateEvent(map[string]any{
-			"type":       "step_update",
-			"step_index": 1,
-			"step_type":  "agent_response",
-			"state":      "ACTIVE",
-			"text_delta": resp[i:end],
+			"event": "step_update",
+			"step_update": map[string]any{
+				"step_index": 1,
+				"step_type":  "agent_response",
+				"state":      "ACTIVE",
+				"text_delta": resp[i:end],
+			},
 		}, sid, false, cache)
 	}
 	translateEvent(newAgentDone(1), sid, false, cache)
@@ -269,11 +281,11 @@ func TestTranslateEvent_UnknownEventType(t *testing.T) {
 	sid := "sess-unk-1"
 	cache := map[string]any{}
 
-	translateEvent(newInit("conv-unk", "gemini-2.0-flash", "1.1.5"), sid, true, cache)
+	translateEvent(newInit("conv-unk", "", ""), sid, true, cache)
 
 	evts, _ := translateEvent(map[string]any{
-		"type": "heartbeat",
-		"seq":  42,
+		"event": "heartbeat",
+		"seq":   42,
 	}, sid, false, cache)
 
 	if len(evts) != 1 {
@@ -298,10 +310,10 @@ func TestTranslateEvent_MalformedPayload(t *testing.T) {
 
 	evts, _ = translateEvent(map[string]any{"foo": "bar"}, sid, false, cache)
 	if len(evts) != 1 || evts[0].Event != "avenor.agy." {
-		t.Errorf("no type: unexpected events = %v", evts)
+		t.Errorf("no event key: unexpected events = %v", evts)
 	}
 
-	evts, _ = translateEvent(map[string]any{"type": "init"}, sid, true, cache)
+	evts, _ = translateEvent(map[string]any{"event": "init"}, sid, true, cache)
 	if len(evts) != 1 || evts[0].Event != "session.start" {
 		t.Fatalf("init with no conversation_id: unexpected events = %v", evts)
 	}
@@ -309,12 +321,12 @@ func TestTranslateEvent_MalformedPayload(t *testing.T) {
 		t.Errorf("session.start conversation_id = %v, want empty string", evts[0].Fields["conversation_id"])
 	}
 
-	evts, _ = translateEvent(map[string]any{"type": "step_update"}, sid, false, cache)
+	evts, _ = translateEvent(map[string]any{"event": "step_update"}, sid, false, cache)
 	if len(evts) != 1 {
-		t.Fatalf("step_update with no step_type: expected 1 event, got %d", len(evts))
+		t.Fatalf("step_update with no step_update nested data: expected 1 event, got %d", len(evts))
 	}
 
-	evts, _ = translateEvent(map[string]any{"type": "result"}, sid, false, cache)
+	evts, _ = translateEvent(map[string]any{"event": "result"}, sid, false, cache)
 	if len(evts) != 1 || evts[0].Event != "session.end" {
 		t.Fatalf("result with no fields: unexpected events = %v", evts)
 	}
@@ -326,7 +338,7 @@ func TestTranslateEvent_MalformedPayload(t *testing.T) {
 func TestTranslateEvent_InitCacheNil(t *testing.T) {
 	sid := "sess-nil-1"
 
-	evts, cache := translateEvent(newInit("conv-nil", "gemini-2.0-flash", "1.1.5"), sid, true, nil)
+	evts, cache := translateEvent(newInit("conv-nil", "", ""), sid, true, nil)
 
 	if len(evts) != 1 || evts[0].Event != "session.start" {
 		t.Fatalf("expected session.start, got %v", evts)
@@ -343,7 +355,7 @@ func TestTranslateEvent_ResultUsagePreserved(t *testing.T) {
 	sid := "sess-usage-1"
 	cache := map[string]any{}
 
-	translateEvent(newInit("conv-usage", "gemini-2.0-flash", "1.1.5"), sid, true, cache)
+	translateEvent(newInit("conv-usage", "", ""), sid, true, cache)
 
 	evts, _ := translateEvent(newResult("conv-usage", "done", map[string]any{"input_tokens": float64(42), "output_tokens": float64(13)}), sid, false, cache)
 
@@ -366,19 +378,21 @@ func TestTranslateEvent_ToolCallParameters(t *testing.T) {
 	sid := "sess-params-1"
 	cache := map[string]any{}
 
-	translateEvent(newInit("conv-params", "gemini-2.0-flash", "1.1.5"), sid, true, cache)
+	translateEvent(newInit("conv-params", "", ""), sid, true, cache)
 
 	evts, _ := translateEvent(map[string]any{
-		"type":       "step_update",
-		"step_index": 5,
-		"step_type":  "tool",
-		"state":      "ACTIVE",
-		"tool_name":  "write",
-		"tool_info": map[string]any{
-			"parameters": map[string]any{
-				"path":      "/tmp/out.txt",
-				"content":   "hello",
-				"overwrite": true,
+		"event": "step_update",
+		"step_update": map[string]any{
+			"step_index": 5,
+			"step_type":  "tool",
+			"state":      "ACTIVE",
+			"tool_name":  "write",
+			"tool_info": map[string]any{
+				"parameters": map[string]any{
+					"path":      "/tmp/out.txt",
+					"content":   "hello",
+					"overwrite": true,
+				},
 			},
 		},
 	}, sid, false, cache)
@@ -414,15 +428,16 @@ func TestTranslateEvent_TelemetryNoPanic(t *testing.T) {
 	testCases := []map[string]any{
 		nil,
 		{},
-		{"type": nil},
-		{"type": 123},
-		{"type": "init", "conversation_id": nil},
-		{"type": "step_update", "step_type": nil},
-		{"type": "step_update", "step_type": "agent_response"},
-		{"type": "step_update", "step_type": "tool"},
-		{"type": "result", "response": nil, "error": nil},
-		{"type": "result", "usage": "not-a-map"},
-		{"type": "init", "conversation_id": "conv-safe", "model": nil, "agy_version": nil},
+		{"event": nil},
+		{"event": 123},
+		{"event": "init", "conversation_id": nil},
+		{"event": "step_update"},
+		{"event": "step_update", "step_update": map[string]any{"step_type": nil}},
+		{"event": "step_update", "step_update": map[string]any{"step_type": "agent_response"}},
+		{"event": "step_update", "step_update": map[string]any{"step_type": "tool"}},
+		{"event": "result"},
+		{"event": "result", "result": map[string]any{"response": nil, "error": nil, "usage": "not-a-map"}},
+		{"event": "init", "conversation_id": "conv-safe", "init": map[string]any{}},
 	}
 
 	for _, tc := range testCases {
@@ -440,83 +455,103 @@ func TestBackendID(t *testing.T) {
 
 func newInit(conversationID, model, agyVersion string) map[string]any {
 	return map[string]any{
-		"type":            "init",
+		"event":           "init",
 		"conversation_id": conversationID,
-		"model":           model,
-		"agy_version":     agyVersion,
+		"init":            map[string]any{},
 	}
 }
 
 func newAgentActive(stepIndex int, text string) map[string]any {
 	return map[string]any{
-		"type":       "step_update",
-		"step_index": stepIndex,
-		"step_type":  "agent_response",
-		"state":      "ACTIVE",
-		"text_delta": text,
+		"event": "step_update",
+		"step_update": map[string]any{
+			"step_index": stepIndex,
+			"step_type":  "agent_response",
+			"state":      "ACTIVE",
+			"text_delta": text,
+		},
 	}
 }
 
 func newAgentDone(stepIndex int) map[string]any {
 	return map[string]any{
-		"type":       "step_update",
-		"step_index": stepIndex,
-		"step_type":  "agent_response",
-		"state":      "DONE",
+		"event": "step_update",
+		"step_update": map[string]any{
+			"step_index": stepIndex,
+			"step_type":  "agent_response",
+			"state":      "DONE",
+		},
 	}
 }
 
 func newToolActive(stepIndex int, toolName string, params map[string]any) map[string]any {
 	return map[string]any{
-		"type":       "step_update",
-		"step_index": stepIndex,
-		"step_type":  "tool",
-		"state":      "ACTIVE",
-		"tool_name":  toolName,
-		"tool_info": map[string]any{
-			"parameters": params,
+		"event": "step_update",
+		"step_update": map[string]any{
+			"step_index": stepIndex,
+			"step_type":  "tool",
+			"state":      "ACTIVE",
+			"tool_name":  toolName,
+			"tool_info": map[string]any{
+				"parameters": params,
+			},
 		},
 	}
 }
 
 func newToolDone(stepIndex int, toolName, output string, duration float64) map[string]any {
 	return map[string]any{
-		"type":        "step_update",
-		"step_index":  stepIndex,
-		"step_type":   "tool",
-		"state":       "DONE",
-		"tool_name":   toolName,
-		"output":      output,
-		"duration_ms": duration,
+		"event": "step_update",
+		"step_update": map[string]any{
+			"step_index":       stepIndex,
+			"step_type":        "tool",
+			"state":            "DONE",
+			"tool_name":        toolName,
+			"output":           output,
+			"duration_seconds": duration,
+		},
 	}
 }
 
 func newToolError(stepIndex int, toolName, errMsg string) map[string]any {
 	return map[string]any{
-		"type":       "step_update",
-		"step_index": stepIndex,
-		"step_type":  "tool",
-		"state":      "ERROR",
-		"tool_name":  toolName,
-		"error":      errMsg,
+		"event": "step_update",
+		"step_update": map[string]any{
+			"step_index": stepIndex,
+			"step_type":  "tool",
+			"state":      "ERROR",
+			"tool_name":  toolName,
+			"tool_info": map[string]any{
+				"error": map[string]any{
+					"type":    "TOOL_ERROR",
+					"message": errMsg,
+				},
+			},
+		},
 	}
 }
 
 func newResult(conversationID, response string, usage map[string]any) map[string]any {
 	return map[string]any{
-		"type":            "result",
+		"event":           "result",
 		"conversation_id": conversationID,
-		"response":        response,
-		"usage":           usage,
+		"result": map[string]any{
+			"response": response,
+			"status":   "SUCCESS",
+			"usage":    usage,
+		},
 	}
 }
 
 func newResultWithError(conversationID, errMsg string, usage map[string]any) map[string]any {
 	return map[string]any{
-		"type":            "result",
+		"event":           "result",
 		"conversation_id": conversationID,
-		"error":           errMsg,
-		"usage":           usage,
+		"result": map[string]any{
+			"status": "ERROR",
+			"error":  errMsg,
+			"usage":  usage,
+		},
 	}
 }
 

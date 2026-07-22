@@ -56,10 +56,9 @@ func TestClient_StartInitCapture(t *testing.T) {
 
 	go func() {
 		writeJSONL(wOut, map[string]any{
-			"type":            "init",
+			"event":           "init",
 			"conversation_id": "conv-abc123",
-			"model":           "gemini-2.0-flash",
-			"agy_version":     "1.2.0",
+			"init":            map[string]any{},
 		})
 	}()
 
@@ -69,12 +68,6 @@ func TestClient_StartInitCapture(t *testing.T) {
 	}
 	if info.ConversationID != "conv-abc123" {
 		t.Errorf("ConversationID = %q, want %q", info.ConversationID, "conv-abc123")
-	}
-	if info.Model != "gemini-2.0-flash" {
-		t.Errorf("Model = %q, want %q", info.Model, "gemini-2.0-flash")
-	}
-	if info.AgyVersion != "1.2.0" {
-		t.Errorf("AgyVersion = %q, want %q", info.AgyVersion, "1.2.0")
 	}
 	if c.SessionID() != "conv-abc123" {
 		t.Errorf("SessionID = %q, want %q", c.SessionID(), "conv-abc123")
@@ -226,10 +219,9 @@ func TestClient_ValidateInitMismatch(t *testing.T) {
 
 	go func() {
 		writeJSONL(wOut, map[string]any{
-			"type":            "init",
+			"event":           "init",
 			"conversation_id": "conv-wrong",
-			"model":           "gemini-2.0-flash",
-			"agy_version":     "1.2.0",
+			"init":            map[string]any{},
 		})
 	}()
 
@@ -257,10 +249,9 @@ func TestClient_ValidateInitMatch(t *testing.T) {
 
 	go func() {
 		writeJSONL(wOut, map[string]any{
-			"type":            "init",
+			"event":           "init",
 			"conversation_id": "conv-match",
-			"model":           "gemini-2.0-flash",
-			"agy_version":     "1.2.0",
+			"init":            map[string]any{},
 		})
 	}()
 
@@ -327,8 +318,8 @@ func TestClient_MalformedJSONL(t *testing.T) {
 	go func() {
 		_, _ = wOut.Write([]byte("not json at all\n"))
 		writeJSONL(wOut, map[string]any{
-			"type": "init", "conversation_id": "conv-ok",
-			"model": "gemini-2.0-flash", "agy_version": "1.2.0",
+			"event": "init", "conversation_id": "conv-ok",
+			"init": map[string]any{},
 		})
 	}()
 
@@ -379,10 +370,9 @@ func TestClient_EOFBeforeResult(t *testing.T) {
 
 	// Send init but never send session.end, then close stdout.
 	writeJSONL(wOut, map[string]any{
-		"type":            "init",
+		"event":           "init",
 		"conversation_id": "conv-eof",
-		"model":           "gemini-2.0-flash",
-		"agy_version":     "1.2.0",
+		"init":            map[string]any{},
 	})
 	// Give time for init to arrive
 	time.Sleep(50 * time.Millisecond)
@@ -731,22 +721,23 @@ func TestClient_EventsChannel(t *testing.T) {
 
 	go func() {
 		writeJSONL(wOut, map[string]any{
-			"type":            "init",
+			"event":           "init",
 			"conversation_id": "conv-events",
-			"model":           "gemini-2.0-flash",
-			"agy_version":     "1.2.0",
+			"init":            map[string]any{},
 		})
 		writeJSONL(wOut, map[string]any{
-			"type":       "step_update",
-			"step_index": 1,
-			"step_type":  "agent_response",
-			"state":      "ACTIVE",
-			"text_delta": "hello",
+			"event": "step_update",
+			"step_update": map[string]any{
+				"step_index": 1,
+				"step_type":  "agent_response",
+				"state":      "ACTIVE",
+				"text_delta": "hello",
+			},
 		})
 		writeJSONL(wOut, map[string]any{
-			"type":            "result",
+			"event":           "result",
 			"conversation_id": "conv-events",
-			"response":        "hello",
+			"result":          map[string]any{"response": "hello", "status": "SUCCESS"},
 		})
 	}()
 

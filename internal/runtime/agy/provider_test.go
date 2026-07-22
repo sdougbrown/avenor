@@ -39,10 +39,9 @@ func TestStartReturnsSession(t *testing.T) {
 
 	go func() {
 		writeJSONL(wOut, map[string]any{
-			"type":            "init",
+			"event":           "init",
 			"conversation_id": "conv-abc123",
-			"model":           "gemini-2.0-flash",
-			"agy_version":     "1.2.0",
+			"init":            map[string]any{},
 		})
 	}()
 
@@ -108,10 +107,9 @@ func TestFirstPromptPublishesSessionStart(t *testing.T) {
 	// Send init event so Start succeeds
 	go func() {
 		writeJSONL(wOut, map[string]any{
-			"type":            "init",
+			"event":           "init",
 			"conversation_id": "conv-abc",
-			"model":           "gemini-2.0-flash",
-			"agy_version":     "1.2.0",
+			"init":            map[string]any{},
 		})
 	}()
 
@@ -135,17 +133,19 @@ func TestFirstPromptPublishesSessionStart(t *testing.T) {
 	// Send init event for FirstPrompt and then result
 	go func() {
 		if err := writeJSONL(wOut, map[string]any{
-			"type":            "init",
+			"event":           "init",
 			"conversation_id": "conv-abc",
-			"model":           "gemini-2.0-flash",
-			"agy_version":     "1.2.0",
+			"init":            map[string]any{},
 		}); err != nil {
 			t.Logf("first prompt init write failed: %v", err)
 		}
 		if err := writeJSONL(wOut, map[string]any{
-			"type":            "result",
+			"event":           "result",
 			"conversation_id": "conv-abc",
-			"response":        "hello world",
+			"result": map[string]any{
+				"response": "hello world",
+				"status":   "SUCCESS",
+			},
 		}); err != nil {
 			t.Logf("result write failed: %v", err)
 		}
@@ -202,10 +202,9 @@ func TestSecondPromptResumedProcess(t *testing.T) {
 	// Initial Start
 	go func() {
 		writeJSONL(wOut, map[string]any{
-			"type":            "init",
+			"event":           "init",
 			"conversation_id": "conv-abc",
-			"model":           "gemini-2.0-flash",
-			"agy_version":     "1.2.0",
+			"init":            map[string]any{},
 		})
 	}()
 
@@ -224,14 +223,16 @@ func TestSecondPromptResumedProcess(t *testing.T) {
 	// First Prompt
 	go func() {
 		sendEvents(wOut, map[string]any{
-			"type":            "init",
+			"event":           "init",
 			"conversation_id": "conv-abc",
-			"model":           "gemini-2.0-flash",
-			"agy_version":     "1.2.0",
+			"init":            map[string]any{},
 		}, map[string]any{
-			"type":            "result",
+			"event":           "result",
 			"conversation_id": "conv-abc",
-			"response":        "first response",
+			"result": map[string]any{
+				"response": "first response",
+				"status":   "SUCCESS",
+			},
 		})
 	}()
 
@@ -269,14 +270,16 @@ func TestSecondPromptResumedProcess(t *testing.T) {
 	// Send init + result for the resumed client
 	go func() {
 		sendEvents(wOut2, map[string]any{
-			"type":            "init",
+			"event":           "init",
 			"conversation_id": "conv-abc",
-			"model":           "gemini-2.0-flash",
-			"agy_version":     "1.2.0",
+			"init":            map[string]any{},
 		}, map[string]any{
-			"type":            "result",
+			"event":           "result",
 			"conversation_id": "conv-abc",
-			"response":        "second response",
+			"result": map[string]any{
+				"response": "second response",
+				"status":   "SUCCESS",
+			},
 		})
 	}()
 
@@ -316,10 +319,9 @@ func TestConcurrentPromptRejection(t *testing.T) {
 	// Send init for Start
 	go func() {
 		writeJSONL(wOut, map[string]any{
-			"type":            "init",
+			"event":           "init",
 			"conversation_id": "conv-abc",
-			"model":           "gemini-2.0-flash",
-			"agy_version":     "1.2.0",
+			"init":            map[string]any{},
 		})
 	}()
 
@@ -337,10 +339,9 @@ func TestConcurrentPromptRejection(t *testing.T) {
 	go func() {
 		// Send init for first prompt
 		writeJSONL(wOut, map[string]any{
-			"type":            "init",
+			"event":           "init",
 			"conversation_id": "conv-abc",
-			"model":           "gemini-2.0-flash",
-			"agy_version":     "1.2.0",
+			"init":            map[string]any{},
 		})
 		// Don't send result — keep it blocked
 		_ = p.Prompt(ctx1, sess.SessionID, "blocked prompt")
@@ -380,7 +381,7 @@ func TestConcurrentIndependentSessions(t *testing.T) {
 	// Start first session
 	go func() {
 		writeJSONL(wOut1, map[string]any{
-			"type":            "init",
+			"event":           "init",
 			"conversation_id": "conv-1",
 			"model":           "gemini-2.0-flash",
 			"agy_version":     "1.2.0",
@@ -403,7 +404,7 @@ func TestConcurrentIndependentSessions(t *testing.T) {
 
 	go func() {
 		writeJSONL(wOut2, map[string]any{
-			"type":            "init",
+			"event":           "init",
 			"conversation_id": "conv-2",
 			"model":           "gemini-2.0-flash",
 			"agy_version":     "1.2.0",
@@ -428,14 +429,17 @@ func TestConcurrentIndependentSessions(t *testing.T) {
 	// Session 1 prompt
 	go func() {
 		sendEvents(wOut1, map[string]any{
-			"type":            "init",
+			"event":           "init",
 			"conversation_id": "conv-1",
 			"model":           "gemini-2.0-flash",
 			"agy_version":     "1.2.0",
 		}, map[string]any{
-			"type":            "result",
+			"event":           "result",
 			"conversation_id": "conv-1",
-			"response":        "response 1",
+			"result": map[string]any{
+				"response": "response 1",
+				"status":   "SUCCESS",
+			},
 		})
 		_ = p.Prompt(context.Background(), s1.SessionID, "prompt 1")
 		done <- struct{}{}
@@ -444,14 +448,17 @@ func TestConcurrentIndependentSessions(t *testing.T) {
 	// Session 2 prompt
 	go func() {
 		sendEvents(wOut2, map[string]any{
-			"type":            "init",
+			"event":           "init",
 			"conversation_id": "conv-2",
 			"model":           "gemini-2.0-flash",
 			"agy_version":     "1.2.0",
 		}, map[string]any{
-			"type":            "result",
+			"event":           "result",
 			"conversation_id": "conv-2",
-			"response":        "response 2",
+			"result": map[string]any{
+				"response": "response 2",
+				"status":   "SUCCESS",
+			},
 		})
 		_ = p.Prompt(context.Background(), s2.SessionID, "prompt 2")
 		done <- struct{}{}
@@ -483,7 +490,7 @@ func TestCancelEmitsCancelledEnd(t *testing.T) {
 
 	go func() {
 		writeJSONL(wOut, map[string]any{
-			"type":            "init",
+			"event":           "init",
 			"conversation_id": "conv-cancel",
 			"model":           "gemini-2.0-flash",
 			"agy_version":     "1.2.0",
@@ -507,7 +514,7 @@ func TestCancelEmitsCancelledEnd(t *testing.T) {
 	go func() {
 		// Only send init — keep result unsent so the prompt blocks
 		writeJSONL(wOut, map[string]any{
-			"type":            "init",
+			"event":           "init",
 			"conversation_id": "conv-cancel",
 			"model":           "gemini-2.0-flash",
 			"agy_version":     "1.2.0",
@@ -561,7 +568,7 @@ func TestSessionEndSuccess(t *testing.T) {
 
 	go func() {
 		writeJSONL(wOut, map[string]any{
-			"type":            "init",
+			"event":           "init",
 			"conversation_id": "conv-success",
 			"model":           "gemini-2.0-flash",
 			"agy_version":     "1.2.0",
@@ -582,14 +589,17 @@ func TestSessionEndSuccess(t *testing.T) {
 	// Send init + result for the prompt
 	go func() {
 		sendEvents(wOut, map[string]any{
-			"type":            "init",
+			"event":           "init",
 			"conversation_id": "conv-success",
 			"model":           "gemini-2.0-flash",
 			"agy_version":     "1.2.0",
 		}, map[string]any{
-			"type":            "result",
+			"event":           "result",
 			"conversation_id": "conv-success",
-			"response":        "success response",
+			"result": map[string]any{
+				"response": "success response",
+				"status":   "SUCCESS",
+			},
 		})
 	}()
 
@@ -639,7 +649,7 @@ func TestSessionEndError(t *testing.T) {
 
 	go func() {
 		writeJSONL(wOut, map[string]any{
-			"type":            "init",
+			"event":           "init",
 			"conversation_id": "conv-error",
 			"model":           "gemini-2.0-flash",
 			"agy_version":     "1.2.0",
@@ -660,15 +670,18 @@ func TestSessionEndError(t *testing.T) {
 	// Send init + error result
 	go func() {
 		writeJSONL(wOut, map[string]any{
-			"type":            "init",
+			"event":           "init",
 			"conversation_id": "conv-error",
 			"model":           "gemini-2.0-flash",
 			"agy_version":     "1.2.0",
 		})
 		writeJSONL(wOut, map[string]any{
-			"type":            "result",
+			"event":           "result",
 			"conversation_id": "conv-error",
-			"error":           "model error",
+			"result": map[string]any{
+				"status": "ERROR",
+				"error":  "model error",
+			},
 		})
 		wOut.Close()
 	}()
@@ -717,7 +730,7 @@ func TestSessionStartNotLostBeforeSubscription(t *testing.T) {
 	// Start the session first
 	go func() {
 		writeJSONL(wOut, map[string]any{
-			"type":            "init",
+			"event":           "init",
 			"conversation_id": "conv-noloss",
 			"model":           "gemini-2.0-flash",
 			"agy_version":     "1.2.0",
@@ -741,14 +754,17 @@ func TestSessionStartNotLostBeforeSubscription(t *testing.T) {
 	// Then prompt — session.start should be emitted
 	go func() {
 		sendEvents(wOut, map[string]any{
-			"type":            "init",
+			"event":           "init",
 			"conversation_id": "conv-noloss",
 			"model":           "gemini-2.0-flash",
 			"agy_version":     "1.2.0",
 		}, map[string]any{
-			"type":            "result",
+			"event":           "result",
 			"conversation_id": "conv-noloss",
-			"response":        "noloss response",
+			"result": map[string]any{
+				"response": "noloss response",
+				"status":   "SUCCESS",
+			},
 		})
 	}()
 
@@ -785,7 +801,7 @@ func TestSessionStartEmittedOnce(t *testing.T) {
 
 	go func() {
 		writeJSONL(wOut, map[string]any{
-			"type":            "init",
+			"event":           "init",
 			"conversation_id": "conv-once",
 			"model":           "gemini-2.0-flash",
 			"agy_version":     "1.2.0",
@@ -808,14 +824,17 @@ func TestSessionStartEmittedOnce(t *testing.T) {
 	// Prompt
 	go func() {
 		sendEvents(wOut, map[string]any{
-			"type":            "init",
+			"event":           "init",
 			"conversation_id": "conv-once",
 			"model":           "gemini-2.0-flash",
 			"agy_version":     "1.2.0",
 		}, map[string]any{
-			"type":            "result",
+			"event":           "result",
 			"conversation_id": "conv-once",
-			"response":        "once response",
+			"result": map[string]any{
+				"response": "once response",
+				"status":   "SUCCESS",
+			},
 		})
 	}()
 
@@ -912,7 +931,7 @@ func TestCloseDuringActivePrompt(t *testing.T) {
 
 	go func() {
 		writeJSONL(wOut, map[string]any{
-			"type":            "init",
+			"event":           "init",
 			"conversation_id": "conv-close",
 			"model":           "gemini-2.0-flash",
 			"agy_version":     "1.2.0",
@@ -931,7 +950,7 @@ func TestCloseDuringActivePrompt(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		writeJSONL(wOut, map[string]any{
-			"type":            "init",
+			"event":           "init",
 			"conversation_id": "conv-close",
 			"model":           "gemini-2.0-flash",
 			"agy_version":     "1.2.0",
@@ -994,7 +1013,7 @@ func TestEventsSubscriberCancellation(t *testing.T) {
 
 	go func() {
 		writeJSONL(wOut, map[string]any{
-			"type":            "init",
+			"event":           "init",
 			"conversation_id": "conv-subcancel",
 			"model":           "gemini-2.0-flash",
 			"agy_version":     "1.2.0",
@@ -1018,7 +1037,7 @@ func TestEventsSubscriberCancellation(t *testing.T) {
 	// Send init event for the prompt
 	go func() {
 		writeJSONL(wOut, map[string]any{
-			"type":            "init",
+			"event":           "init",
 			"conversation_id": "conv-subcancel",
 			"model":           "gemini-2.0-flash",
 			"agy_version":     "1.2.0",
@@ -1055,7 +1074,7 @@ func TestEventsChannelBuffered(t *testing.T) {
 
 	go func() {
 		writeJSONL(wOut, map[string]any{
-			"type":            "init",
+			"event":           "init",
 			"conversation_id": "conv-buf",
 			"model":           "gemini-2.0-flash",
 			"agy_version":     "1.2.0",
@@ -1128,7 +1147,7 @@ func TestIdleTimerTransition(t *testing.T) {
 	// Start the session
 	go func() {
 		writeJSONL(wOut, map[string]any{
-			"type":            "init",
+			"event":           "init",
 			"conversation_id": "conv-idle",
 			"model":           "gemini-2.0-flash",
 			"agy_version":     "1.2.0",
@@ -1146,14 +1165,17 @@ func TestIdleTimerTransition(t *testing.T) {
 	// First prompt — completes normally
 	go func() {
 		sendEvents(wOut, map[string]any{
-			"type":            "init",
+			"event":           "init",
 			"conversation_id": "conv-idle",
 			"model":           "gemini-2.0-flash",
 			"agy_version":     "1.2.0",
 		}, map[string]any{
-			"type":            "result",
+			"event":           "result",
 			"conversation_id": "conv-idle",
-			"response":        "first response",
+			"result": map[string]any{
+				"response": "first response",
+				"status":   "SUCCESS",
+			},
 		})
 	}()
 
@@ -1190,14 +1212,17 @@ func TestIdleTimerTransition(t *testing.T) {
 
 	go func() {
 		sendEvents(wOut2, map[string]any{
-			"type":            "init",
+			"event":           "init",
 			"conversation_id": "conv-idle",
 			"model":           "gemini-2.0-flash",
 			"agy_version":     "1.2.0",
 		}, map[string]any{
-			"type":            "result",
+			"event":           "result",
 			"conversation_id": "conv-idle",
-			"response":        "second response",
+			"result": map[string]any{
+				"response": "second response",
+				"status":   "SUCCESS",
+			},
 		})
 	}()
 
