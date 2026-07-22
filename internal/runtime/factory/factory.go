@@ -21,6 +21,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime/codexappserver"
 	"github.com/sdougbrown/avenor/internal/runtime/cursoracp"
 	"github.com/sdougbrown/avenor/internal/runtime/geminiacp"
+	"github.com/sdougbrown/avenor/internal/runtime/agy"
 	"github.com/sdougbrown/avenor/internal/runtime/opencodeacp"
 	"github.com/sdougbrown/avenor/internal/runtime/opencodehttp"
 	"github.com/sdougbrown/avenor/internal/runtime/pi"
@@ -37,6 +38,8 @@ func NewProvider(startOpts runtime.StartOptions, backend string) (runtime.Provid
 		return codexappserver.NewWithOptions(startOpts), nil
 	case "gemini-acp":
 		return geminiacp.NewWithOptions(startOpts), nil
+	case "agy":
+		return agy.NewWithOptions(startOpts), nil
 	case "cursor-acp":
 		return cursoracp.NewWithOptions(startOpts), nil
 	case "pi":

@@ -46,6 +46,16 @@ func TestNewProviderGeminiACP(t *testing.T) {
 	}
 }
 
+func TestNewProviderAgy(t *testing.T) {
+	p, err := NewProvider(runtime.StartOptions{}, "agy")
+	if err != nil {
+		t.Fatalf("NewProvider(agy) error = %v", err)
+	}
+	if p == nil {
+		t.Fatal("NewProvider(agy) provider is nil")
+	}
+}
+
 func TestNewProviderCursorACP(t *testing.T) {
 	p, err := NewProvider(runtime.StartOptions{}, "cursor-acp")
 	if err != nil {
