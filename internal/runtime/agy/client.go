@@ -59,6 +59,10 @@ type client struct {
 	idleTimer  *time.Timer
 	idleOnce   sync.Once
 
+	testMode       bool     // if true, skip subprocess spawning
+	lastResult     string   // last result/response from agent
+	lastStopReason string   // last stop_reason from session.end
+
 	version     string
 	versionOnce sync.Once
 	versionErr  error
@@ -74,8 +78,12 @@ func newClient(proc *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, stder
 		done:      make(chan struct{}),
 		initCache: make(map[string]any),
 	}
-	go c.drainStderr(stderr)
-	go c.readLoop()
+	if stderr != nil {
+		go c.drainStderr(stderr)
+	}
+	if stdout != nil {
+		go c.readLoop()
+	}
 	return c
 }
 
@@ -112,6 +120,9 @@ func (b *rollingBuffer) String() string {
 // ensureVersion detects the agy binary version via sync.Once.
 func (c *client) ensureVersion(ctx context.Context) {
 	c.versionOnce.Do(func() {
+		if c.testMode {
+			return
+		}
 		cmd := exec.CommandContext(ctx, "agy", "--version")
 		out, err := cmd.Output()
 		if err != nil {
@@ -120,6 +131,57 @@ func (c *client) ensureVersion(ctx context.Context) {
 		}
 		c.version = strings.TrimSpace(string(out))
 	})
+}
+
+// StartWithPipes sets up the client from pre-existing pipes (for testing)
+// and waits for the init event. Does NOT launch a subprocess.
+// If goroutines are already running (e.g., from fakeClient), it reuses them.
+func (c *client) StartWithPipes(ctx context.Context, stdin io.WriteCloser, stdout io.ReadCloser, stderr io.ReadCloser) (sessionInfo, error) {
+	c.mu.Lock()
+	needsStart := c.events == nil || c.done == nil
+	c.stdin = stdin
+	c.stdout = stdout
+	c.stderr = newRollingBuffer(stderrCap)
+	if needsStart {
+		c.events = make(chan events.Event, eventsChBuf)
+		c.done = make(chan struct{})
+		c.initCache = make(map[string]any)
+		c.mode = "pending"
+	} else {
+		c.mode = "pending"
+		if c.initCache == nil {
+			c.initCache = make(map[string]any)
+		}
+	}
+	c.mu.Unlock()
+
+	if needsStart {
+		go c.drainStderr(stderr)
+		go c.readLoop()
+	}
+
+	info, err := c.waitForInit(ctx)
+	if err != nil {
+		c.doClose()
+		return sessionInfo{}, err
+	}
+
+	c.idleOnce.Do(func() {
+		c.idleTimer = time.AfterFunc(firstPromptIdle, func() {
+			c.mu.Lock()
+			if c.mode == "pending" {
+				c.mu.Unlock()
+				if c.proc != nil && c.proc.Process != nil {
+					_ = c.proc.Process.Signal(os.Interrupt)
+				}
+				go c.doClose()
+			} else {
+				c.mu.Unlock()
+			}
+		})
+	})
+
+	return info, nil
 }
 
 // Start launches an agy subprocess for a new session (no prompt).
@@ -254,13 +316,15 @@ func (c *client) FirstPrompt(ctx context.Context, prompt string) error {
 	stdin := c.stdin
 	c.mu.Unlock()
 
-	_, err := stdin.Write([]byte(prompt + "\n"))
-	if err != nil {
-		return fmt.Errorf("write prompt to stdin: %w", err)
+	if !c.testMode {
+		_, writeErr := stdin.Write([]byte(prompt + "\n"))
+		if writeErr != nil {
+			return fmt.Errorf("write prompt to stdin: %w", writeErr)
+		}
+		_ = stdin.Close()
 	}
-	_ = stdin.Close()
 
-	err = c.readUntilResult(ctx)
+	err := c.readUntilResult(ctx)
 
 	// Cleanup after result arrives or context is cancelled.
 	c.doClose()
@@ -354,6 +418,81 @@ func (c *client) ResumePrompt(ctx context.Context, conversationID, prompt, model
 	return err
 }
 
+// ResumePromptWithPipes is the test-friendly version of ResumePrompt.
+// It takes pre-existing pipes instead of spawning a subprocess.
+func (c *client) ResumePromptWithPipes(ctx context.Context, conversationID, prompt string, stdin io.WriteCloser, stdout io.ReadCloser, stderr io.ReadCloser) error {
+	cl := newClient(nil, stdin, stdout, stderr)
+	cl.mode = "resumed"
+	cl.testMode = true
+
+	initErr := cl.validateInit(ctx, conversationID)
+	if initErr != nil {
+		cl.doClose()
+		return initErr
+	}
+
+	readErr := cl.readUntilResult(ctx)
+
+	c.mu.Lock()
+	if readErr == nil {
+		c.proc = cl.proc
+		c.stdin = cl.stdin
+		c.stdout = cl.stdout
+		c.stderr = cl.stderr
+		c.events = cl.events
+		c.done = cl.done
+		c.mode = cl.mode
+		c.initCache = cl.initCache
+		c.sessionID = cl.sessionID
+		cl.events = nil
+		cl.done = nil
+	} else {
+		c.mode = "resumed"
+	}
+	c.mu.Unlock()
+
+	return readErr
+}
+
+// ValidateAndReadResult validates init conversation_id then reads until result,
+// reusing the existing client's goroutines and channels.
+// Used when the client already has active reader goroutines (e.g. test mode).
+func (c *client) ValidateAndReadResult(ctx context.Context, conversationID string) error {
+	c.mu.Lock()
+	c.mode = "resumed"
+	c.mu.Unlock()
+
+	err := c.validateInit(ctx, conversationID)
+	if err != nil {
+		return err
+	}
+
+	return c.readUntilResult(ctx)
+}
+
+// validateAndReadResult is the provider-facing method that also writes the prompt to stdin.
+func (c *client) validateAndReadResult(ctx context.Context, conversationID, prompt string) error {
+	c.mu.Lock()
+	c.mode = "resumed"
+	stdin := c.stdin
+	c.mu.Unlock()
+
+	err := c.validateInit(ctx, conversationID)
+	if err != nil {
+		return err
+	}
+
+	if !c.testMode {
+		_, writeErr := stdin.Write([]byte(prompt + "\n"))
+		if writeErr != nil {
+			return fmt.Errorf("write prompt to stdin: %w", writeErr)
+		}
+		_ = stdin.Close()
+	}
+
+	return c.readUntilResult(ctx)
+}
+
 // validateInit waits for the init event and verifies conversation_id matches.
 func (c *client) validateInit(ctx context.Context, expectedID string) error {
 	timeout := time.NewTimer(startupTimeout)
@@ -396,9 +535,22 @@ func (c *client) readUntilResult(ctx context.Context) error {
 		select {
 		case evt := <-c.events:
 			if evt.Event == "session.end" {
+				if evt.Fields != nil {
+					if sr, ok := evt.Fields["stop_reason"].(string); ok {
+						c.mu.Lock()
+						c.lastStopReason = sr
+						c.mu.Unlock()
+					}
+				}
 				return nil
 			}
 		case <-c.done:
+			c.mu.Lock()
+			reason := c.lastStopReason
+			c.mu.Unlock()
+			if reason != "" && reason != "error" {
+				return nil
+			}
 			return ErrProcessDied
 		case <-ctx.Done():
 			return ctx.Err()
@@ -441,8 +593,6 @@ func (c *client) Close() error {
 func (c *client) doClose() error {
 	c.closeOnce.Do(func() {
 		c.mu.Lock()
-		defer c.mu.Unlock()
-
 		c.mode = "closed"
 
 		if c.idleTimer != nil {
@@ -450,22 +600,47 @@ func (c *client) doClose() error {
 			c.idleTimer = nil
 		}
 
-		if c.stdin != nil {
-			_ = c.stdin.Close()
+		stdin := c.stdin
+		stdout := c.stdout
+		proc := c.proc
+		done := c.done
+		events := c.events
+		c.stdin = nil
+		c.stdout = nil
+		c.proc = nil
+		c.mu.Unlock()
+
+		if stdin != nil {
+			_ = stdin.Close()
 		}
-		if c.stdout != nil {
-			_ = c.stdout.Close()
+		if stdout != nil {
+			_ = stdout.Close()
 		}
 
-		if c.proc != nil && c.proc.Process != nil {
-			_ = c.proc.Process.Signal(os.Interrupt)
+		if proc != nil && proc.Process != nil {
+			_ = proc.Process.Signal(os.Interrupt)
+			waitCh := make(chan struct{})
+			go func() {
+				_, _ = proc.Process.Wait()
+				close(waitCh)
+			}()
+			select {
+			case <-waitCh:
+			case <-time.After(shutdownGrace):
+				_ = proc.Process.Kill()
+				<-waitCh
+			}
 		}
 
-		if c.done != nil {
-			<-c.done
+		if done != nil {
+			select {
+			case <-done:
+			case <-time.After(3 * time.Second):
+			}
 		}
-
-		close(c.events)
+		if events != nil {
+			close(events)
+		}
 	})
 	return nil
 }
@@ -522,6 +697,18 @@ func (c *client) readLoop() {
 
 		evts := c.translateEvent(payload)
 		for _, evt := range evts {
+			if evt.Event == "session.end" && evt.Fields != nil {
+				if sr, ok := evt.Fields["stop_reason"].(string); ok {
+					c.mu.Lock()
+					c.lastStopReason = sr
+					c.mu.Unlock()
+				}
+				if resp, ok := evt.Fields["final_output"].(string); ok {
+					c.mu.Lock()
+					c.lastResult = resp
+					c.mu.Unlock()
+				}
+			}
 			select {
 			case c.events <- evt:
 			default:
