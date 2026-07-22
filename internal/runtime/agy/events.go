@@ -138,8 +138,8 @@ func translateToolStep(payload map[string]any, sessionID string) []events.Event 
 	switch state {
 	case "ACTIVE":
 		fields := map[string]any{
-			"title":    toolName,
-			"status":   "running",
+			"title":      toolName,
+			"status":     "running",
 			"step_index": stepIndex,
 		}
 		if stepInfo, ok := payload["tool_info"].(map[string]any); ok {

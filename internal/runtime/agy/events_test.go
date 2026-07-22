@@ -493,12 +493,12 @@ func newToolDone(stepIndex int, toolName, output string, duration float64) map[s
 
 func newToolError(stepIndex int, toolName, errMsg string) map[string]any {
 	return map[string]any{
-		"type":      "step_update",
+		"type":       "step_update",
 		"step_index": stepIndex,
-		"step_type": "tool",
-		"state":     "ERROR",
-		"tool_name": toolName,
-		"error":     errMsg,
+		"step_type":  "tool",
+		"state":      "ERROR",
+		"tool_name":  toolName,
+		"error":      errMsg,
 	}
 }
 

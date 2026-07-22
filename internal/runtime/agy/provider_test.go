@@ -21,8 +21,6 @@ func sendEvents(w io.Writer, events ...map[string]any) {
 	}
 }
 
-
-
 // --- 1. Compile-time interface check ---
 
 func TestProviderImplementsInterface(t *testing.T) {
@@ -145,9 +143,9 @@ func TestFirstPromptPublishesSessionStart(t *testing.T) {
 			t.Logf("first prompt init write failed: %v", err)
 		}
 		if err := writeJSONL(wOut, map[string]any{
-			"type":       "result",
+			"type":            "result",
 			"conversation_id": "conv-abc",
-			"response":   "hello world",
+			"response":        "hello world",
 		}); err != nil {
 			t.Logf("result write failed: %v", err)
 		}
@@ -231,9 +229,9 @@ func TestSecondPromptResumedProcess(t *testing.T) {
 			"model":           "gemini-2.0-flash",
 			"agy_version":     "1.2.0",
 		}, map[string]any{
-			"type":       "result",
+			"type":            "result",
 			"conversation_id": "conv-abc",
-			"response":   "first response",
+			"response":        "first response",
 		})
 	}()
 
@@ -276,9 +274,9 @@ func TestSecondPromptResumedProcess(t *testing.T) {
 			"model":           "gemini-2.0-flash",
 			"agy_version":     "1.2.0",
 		}, map[string]any{
-			"type":       "result",
+			"type":            "result",
 			"conversation_id": "conv-abc",
-			"response":   "second response",
+			"response":        "second response",
 		})
 	}()
 
@@ -435,9 +433,9 @@ func TestConcurrentIndependentSessions(t *testing.T) {
 			"model":           "gemini-2.0-flash",
 			"agy_version":     "1.2.0",
 		}, map[string]any{
-			"type":       "result",
+			"type":            "result",
 			"conversation_id": "conv-1",
-			"response":   "response 1",
+			"response":        "response 1",
 		})
 		_ = p.Prompt(context.Background(), s1.SessionID, "prompt 1")
 		done <- struct{}{}
@@ -451,9 +449,9 @@ func TestConcurrentIndependentSessions(t *testing.T) {
 			"model":           "gemini-2.0-flash",
 			"agy_version":     "1.2.0",
 		}, map[string]any{
-			"type":       "result",
+			"type":            "result",
 			"conversation_id": "conv-2",
-			"response":   "response 2",
+			"response":        "response 2",
 		})
 		_ = p.Prompt(context.Background(), s2.SessionID, "prompt 2")
 		done <- struct{}{}
@@ -589,9 +587,9 @@ func TestSessionEndSuccess(t *testing.T) {
 			"model":           "gemini-2.0-flash",
 			"agy_version":     "1.2.0",
 		}, map[string]any{
-			"type":       "result",
+			"type":            "result",
 			"conversation_id": "conv-success",
-			"response":   "success response",
+			"response":        "success response",
 		})
 	}()
 
@@ -668,9 +666,9 @@ func TestSessionEndError(t *testing.T) {
 			"agy_version":     "1.2.0",
 		})
 		writeJSONL(wOut, map[string]any{
-			"type":       "result",
+			"type":            "result",
 			"conversation_id": "conv-error",
-			"error":      "model error",
+			"error":           "model error",
 		})
 		wOut.Close()
 	}()
@@ -748,9 +746,9 @@ func TestSessionStartNotLostBeforeSubscription(t *testing.T) {
 			"model":           "gemini-2.0-flash",
 			"agy_version":     "1.2.0",
 		}, map[string]any{
-			"type":       "result",
+			"type":            "result",
 			"conversation_id": "conv-noloss",
-			"response":   "noloss response",
+			"response":        "noloss response",
 		})
 	}()
 
@@ -815,9 +813,9 @@ func TestSessionStartEmittedOnce(t *testing.T) {
 			"model":           "gemini-2.0-flash",
 			"agy_version":     "1.2.0",
 		}, map[string]any{
-			"type":       "result",
+			"type":            "result",
 			"conversation_id": "conv-once",
-			"response":   "once response",
+			"response":        "once response",
 		})
 	}()
 
@@ -1153,9 +1151,9 @@ func TestIdleTimerTransition(t *testing.T) {
 			"model":           "gemini-2.0-flash",
 			"agy_version":     "1.2.0",
 		}, map[string]any{
-			"type":       "result",
+			"type":            "result",
 			"conversation_id": "conv-idle",
-			"response":   "first response",
+			"response":        "first response",
 		})
 	}()
 
@@ -1197,9 +1195,9 @@ func TestIdleTimerTransition(t *testing.T) {
 			"model":           "gemini-2.0-flash",
 			"agy_version":     "1.2.0",
 		}, map[string]any{
-			"type":       "result",
+			"type":            "result",
 			"conversation_id": "conv-idle",
-			"response":   "second response",
+			"response":        "second response",
 		})
 	}()
 
