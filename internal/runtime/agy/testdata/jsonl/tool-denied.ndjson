@@ -1,0 +1,4 @@
+{"type":"init","conversation_id":"conv-deny-1","model":"gemini-2.0-flash","agy_version":"1.1.5"}
+{"type":"step_update","step_index":1,"step_type":"tool","state":"ACTIVE","tool_name":"bash","tool_info":{"parameters":{"command":"rm -rf /"}}}
+{"type":"step_update","step_index":1,"step_type":"tool","state":"ERROR","tool_name":"bash","error":"Permission denied: command 'rm -rf /' requires interactive confirmation in headless mode"}
+{"type":"result","conversation_id":"conv-deny-1","error":"Tool execution failed: Permission denied","usage":{"input_tokens":10,"output_tokens":5}}
