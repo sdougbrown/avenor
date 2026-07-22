@@ -1545,6 +1545,8 @@ func (w *runtimeFanoutWriter) Write(ev events.Event) error {
 		w.child.writeMu.Lock()
 		defer w.child.writeMu.Unlock()
 	}
+	// stamped is the lossless durable event (written to file/broker);
+	// presentation is the bounded copy for control/status surfaces.
 	stamped := ev
 	if w.metadata != nil {
 		stamped = w.metadata.Stamp(ev)
