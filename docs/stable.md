@@ -77,7 +77,7 @@ Spawn parameters (all optional except one prompt source):
 | `--agent` | string | Agent name (e.g. `jockey`, `butler`). Backend-specific |
 | `--label` | string | Free-form label for log correlation and list output |
 | `--model` | string | Backend-specific model ID (e.g. `claude-sonnet-4-5`) |
-| `--backend` | string | Runtime backend (opencode-acp, opencode-http, codex-app-server, gemini-acp, cursor-acp, pi). Defaults to opencode-acp |
+| `--backend` | string | Runtime backend (opencode-acp, opencode-http, codex-app-server, agy, gemini-acp, cursor-acp, pi). Defaults to opencode-acp |
 | `--server-url` | string | External ACP server endpoint for opencode-http backend |
 | `--on-event` | string | Path to write NDJSON events. Auto-created under `$TMPDIR/avenor-stable/<supervisor_run_id>/<runtime_id>/events.ndjson` if not set |
 | `--sentinel-file` | string | Path to write completion sentinel (exit code, session ID, stop reason). Auto-created under `$TMPDIR/avenor-stable/<supervisor_run_id>/<runtime_id>/sentinel.env` if not set |
