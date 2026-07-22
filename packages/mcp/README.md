@@ -101,7 +101,7 @@ Start a new agent run.
 | `label` | no | Human-readable label for this run |
 | `timeout` | no | Duration string (`5m`, `1h`, `90s`) |
 | `model` | no | Model override for the agent |
-| `backend` | no | Backend override (`opencode-http`, `opencode-acp`, `codex-app-server`) |
+| `backend` | no | Backend override (`opencode-http`, `opencode-acp`, `codex-app-server`, `agy`) |
 | `server_url` | no | Backend server URL, required by `opencode-http` unless configured by environment |
 | `supervisor_id` | no | Supervisor ID for multi-supervisor setups |
 

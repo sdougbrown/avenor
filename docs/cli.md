@@ -33,7 +33,7 @@ avenor [flags]  # equivalent; explicit "run" is optional
 | `--dir` | `.` | Working directory for the agent |
 | `--resume` | (none) | Resume an existing session by ID; incompatible with `--loop-file` |
 | `--server-url` | (none) | Long-lived ACP server endpoint; required for `--backend opencode-http` |
-| `--backend` | `opencode-acp` | Runtime backend: `opencode-acp`, `gemini-acp`, `cursor-acp`, `codex-app-server`, `opencode-http`, `claude-channel` |
+| `--backend` | `opencode-acp` | Runtime backend: `opencode-acp`, `agy`, `gemini-acp`, `cursor-acp`, `codex-app-server`, `opencode-http`, `claude-channel` |
 | `--model` | (none) | Backend-specific model ID; if not set, resolved from opencode config via `--agent` |
 | `--on-event` | (none) | Path to write NDJSON event stream; events are discarded if unset |
 | `--sentinel-file` | (none) | Path to write a completion sentinel (exit code, session ID, stop reason); also derives permission handler unless `--permission-handler` is set |
@@ -151,7 +151,7 @@ Spawn flags (all optional):
 | `--agent` | Agent name |
 | `--label` | Free-form label for log correlation |
 | `--model` | Backend-specific model ID |
-| `--backend` | Runtime backend: `opencode-acp`, `gemini-acp`, `cursor-acp`, `codex-app-server`, `opencode-http`, `claude-channel` |
+| `--backend` | Runtime backend: `opencode-acp`, `agy`, `gemini-acp`, `cursor-acp`, `codex-app-server`, `opencode-http`, `claude-channel` |
 | `--server-url` | Long-lived ACP server endpoint |
 | `--on-event` | Path to write NDJSON events |
 | `--sentinel-file` | Path to write completion sentinel |

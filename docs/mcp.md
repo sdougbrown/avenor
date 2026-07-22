@@ -157,7 +157,7 @@ Starts a new run.
 - `label` — human-friendly label (defaults to `run_id`)
 - `timeout` — timeout as seconds or duration (e.g., `"90s"`, `"5m"`, `"1h"`)
 - `model` — model to use
-- `backend` — runtime backend (e.g., `"opencode-http"`, `"opencode-acp"`, `"codex-app-server"`)
+- `backend` — runtime backend (e.g., `"opencode-http"`, `"opencode-acp"`, `"codex-app-server"`, `"agy"`)
 - `server_url` — server URL for opencode-http backend
 - `supervisor_id` — supervisor socket to use instead of the default
 

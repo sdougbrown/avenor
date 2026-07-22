@@ -1,6 +1,6 @@
 # Backends
 
-Avenor talks to agents through backends. Each backend speaks a different protocol to a different runtime — OpenCode, Claude, Codex, Gemini, Cursor, or PI. Pick the one that matches what's running locally and what you need from the orchestration layer.
+Avenor talks to agents through backends. Each backend speaks a different protocol to a different runtime — OpenCode, Claude, Codex, Gemini, Cursor, PI, or agy. Pick the one that matches what's running locally and what you need from the orchestration layer.
 
 ## Backend selection
 
@@ -10,6 +10,7 @@ Pass `--backend` to choose which runtime protocol to use. The default is `openco
 avenor --backend opencode-http --server-url http://127.0.0.1:4096 --prompt "say hi"
 avenor --backend opencode-acp --prompt "say hi"
 avenor --backend codex-app-server --prompt "say hi"
+avenor --backend agy --model gemini-2.0-flash --prompt "say hi"
 avenor --backend gemini-acp --prompt "say hi"
 avenor --backend cursor-acp --prompt "say hi"
 avenor --backend pi --model anthropic/claude-sonnet-4-5 --prompt "say hi"
@@ -21,17 +22,17 @@ Both `claude` and `claude-channel` require `claude` to be on `PATH`. `claude-cha
 
 ## Capability matrix
 
-| Capability | opencode-acp | opencode-http | codex-app-server | gemini-acp | cursor-acp | pi | claude | claude-channel |
+| Capability | opencode-acp | opencode-http | codex-app-server | agy | gemini-acp | cursor-acp | pi | claude | claude-channel |
 |---|---|---|---|---|---|---|---|---|
-| New sessions | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Session resume | ✓ | ✓ | ✓ | — | — | ✓ | ⚠ | ⚠ |
-| Prompt execution | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓  |
-| Cancel | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓  |
-| Event streaming | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Permission relay | ✓ | ✗ | ✓ | ✓ | ✓ | ✓ | ⚠ | ⚠  |
-| Model selection | ✓ | ✓ | ✓ | ✗ | ✗ | ✓ | ✓ | ✓  |
-| External server URL | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
-| Subprocess discovery | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✓ |
+| New sessions | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Session resume | ✓ | ✓ | ✓ | ✓ | — | — | ✓ | ⚠ | ⚠ |
+| Prompt execution | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓  | ✓  |
+| Cancel | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓  | ✓  |
+| Event streaming | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Permission relay | ✓ | ✗ | ✓ | ✗ | ✓ | ✓ | ✓ | ⚠ | ⚠  |
+| Model selection | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ | ✓ | ✓ | ✓  |
+| External server URL | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| Subprocess discovery | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✓ |
 
 `—` means not verified; `✗` means not supported, `⚠ ` means experimental.
 
@@ -245,6 +246,31 @@ Avenor spawns `gemini --acp --approval-mode default` and talks via ACP over stdi
 ```sh
 avenor \
   --backend gemini-acp \
+  --prompt "Review the changes in the current branch" \
+  --dir /repo \
+  --sentinel-file /tmp/done.env
+```
+
+---
+
+## agy
+
+Avenor spawns `agy --output-format stream-json --print --print-timeout 24h` and talks to it over JSONL on stdio. No ACP wrapper, no PTY. The backend reads newline-delimited JSON from the subprocess and translates events into Avenor's canonical event format.
+
+This is a Phase 1 headless backend. It does not support interactive permission decisions or tool approval prompts — `agy`'s headless mode auto-denies tools that require interactive confirmation. Pre-existing `agy` persisted allow rules still apply.
+
+**Structured output only.** This backend does not launch a terminal or scrape a TUI. All communication happens through `agy`'s `--output-format stream-json` JSONL protocol over pipes.
+
+**24-hour print ceiling.** Every prompt carries `--print-timeout 24h` to prevent `agy`'s default 5-minute timeout from pre-empting Avenor's own timeout/control path. If Avenor does not have its own timeout set, the turn runs for up to 24 hours.
+
+**Model selection** works at spawn time via `--model`. Unsupported models produce a non-zero error rather than silent fallback.
+
+**Permissions are false.** The `Permissions` capability is advertised as `false`. Permission requests are not relayed through Avenor — they appear as tool errors with explanation on `agy`'s stderr. Avenor does not pass `--dangerously-skip-permissions` by default.
+
+```sh
+avenor \
+  --backend agy \
+  --model gemini-2.0-flash \
   --prompt "Review the changes in the current branch" \
   --dir /repo \
   --sentinel-file /tmp/done.env
