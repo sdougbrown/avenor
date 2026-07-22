@@ -20,7 +20,7 @@ func translateEvent(payload map[string]any, sessionID string, isFirstInit bool, 
 		initCache = make(map[string]any)
 	}
 
-	typ, _ := payload["type"].(string)
+	typ, _ := payload["event"].(string)
 
 	switch typ {
 	case "init":
@@ -38,8 +38,9 @@ func translateEvent(payload map[string]any, sessionID string, isFirstInit bool, 
 // metadata and emits a session.start; subsequent inits are silently cached.
 func translateInit(payload map[string]any, sessionID string, isFirstInit bool, initCache map[string]any) ([]events.Event, map[string]any) {
 	conversationID, _ := payload["conversation_id"].(string)
-	model, _ := payload["model"].(string)
-	agyVersion, _ := payload["agy_version"].(string)
+	// agy 1.1.5 does not emit model or agy_version in the init event.
+	model := ""
+	agyVersion := ""
 
 	// Already cached this conversation → no-op.
 	if prev, ok := initCache["conversation_id"].(string); ok && prev == conversationID {
@@ -73,13 +74,18 @@ func translateInit(payload map[string]any, sessionID string, isFirstInit bool, i
 // translateStepUpdate handles agy "step_update" events for both agent
 // responses and tool calls.
 func translateStepUpdate(payload map[string]any, sessionID string, initCache map[string]any) ([]events.Event, map[string]any) {
-	stepType, _ := payload["step_type"].(string)
+	data, ok := payload["step_update"].(map[string]any)
+	if !ok {
+		return translateUnknown(payload, sessionID, initCache)
+	}
+
+	stepType, _ := data["step_type"].(string)
 
 	switch stepType {
 	case "agent_response":
-		return translateAgentResponse(payload, sessionID), initCache
+		return translateAgentResponse(data, sessionID), initCache
 	case "tool":
-		return translateToolStep(payload, sessionID), initCache
+		return translateToolStep(data, sessionID), initCache
 	default:
 		return translateUnknown(payload, sessionID, initCache)
 	}
@@ -87,10 +93,10 @@ func translateStepUpdate(payload map[string]any, sessionID string, initCache map
 
 // translateAgentResponse emits message_chunk and delta events for agent
 // response step_updates.
-func translateAgentResponse(payload map[string]any, sessionID string) []events.Event {
-	textDelta, _ := payload["text_delta"].(string)
-	stepIndex := toInt64(payload["step_index"])
-	state, _ := payload["state"].(string)
+func translateAgentResponse(data map[string]any, sessionID string) []events.Event {
+	textDelta, _ := data["text_delta"].(string)
+	stepIndex := toInt64(data["step_index"])
+	state, _ := data["state"].(string)
 
 	var out []events.Event
 
@@ -130,10 +136,10 @@ func translateAgentResponse(payload map[string]any, sessionID string) []events.E
 }
 
 // translateToolStep emits tool.call and tool.call_update events.
-func translateToolStep(payload map[string]any, sessionID string) []events.Event {
-	toolName, _ := payload["tool_name"].(string)
-	stepIndex := toInt64(payload["step_index"])
-	state, _ := payload["state"].(string)
+func translateToolStep(data map[string]any, sessionID string) []events.Event {
+	toolName, _ := data["tool_name"].(string)
+	stepIndex := toInt64(data["step_index"])
+	state, _ := data["state"].(string)
 
 	switch state {
 	case "ACTIVE":
@@ -142,7 +148,7 @@ func translateToolStep(payload map[string]any, sessionID string) []events.Event 
 			"status":     "running",
 			"step_index": stepIndex,
 		}
-		if stepInfo, ok := payload["tool_info"].(map[string]any); ok {
+		if stepInfo, ok := data["tool_info"].(map[string]any); ok {
 			if params, ok := stepInfo["parameters"].(map[string]any); ok {
 				fields["parameters"] = params
 			}
@@ -159,11 +165,11 @@ func translateToolStep(payload map[string]any, sessionID string) []events.Event 
 			"step_index": stepIndex,
 			"name":       toolName,
 		}
-		if output, ok := payload["output"].(string); ok {
+		if output, ok := data["output"].(string); ok {
 			fields["output"] = output
 		}
-		if dur, ok := payload["duration_ms"].(float64); ok {
-			fields["duration_ms"] = int64(dur)
+		if dur, ok := data["duration_seconds"].(float64); ok {
+			fields["duration_ms"] = int64(dur * 1000)
 		}
 		return []events.Event{{
 			Event:     "tool.call_update",
@@ -177,8 +183,13 @@ func translateToolStep(payload map[string]any, sessionID string) []events.Event 
 			"step_index": stepIndex,
 			"name":       toolName,
 		}
-		if errText, ok := payload["error"].(string); ok {
-			fields["error"] = errText
+		// Error is nested under tool_info["error"] as a map {"type":"TOOL_ERROR","message":"..."}
+		if stepInfo, ok := data["tool_info"].(map[string]any); ok {
+			if errObj, ok := stepInfo["error"].(map[string]any); ok {
+				if errText, ok := errObj["message"].(string); ok {
+					fields["error"] = errText
+				}
+			}
 		}
 		return []events.Event{{
 			Event:     "tool.call_update",
@@ -201,18 +212,33 @@ func translateToolStep(payload map[string]any, sessionID string) []events.Event 
 
 // translateResult handles agy "result" events, emitting session.end.
 func translateResult(payload map[string]any, sessionID string, initCache map[string]any) ([]events.Event, map[string]any) {
-	response, hasResponse := payload["response"].(string)
-	errorText, hasError := payload["error"].(string)
+	data, ok := payload["result"].(map[string]any)
+	if !ok {
+		// Handle result event with no nested data (e.g. {"event": "result"})
+		return []events.Event{{
+			Event:     "session.end",
+			SessionID: sessionID,
+			Fields: map[string]any{
+				"stop_reason": "end_turn",
+			},
+		}}, initCache
+	}
+
+	response, _ := data["response"].(string)
+	status, _ := data["status"].(string)
+	errorText, _ := data["error"].(string)
 
 	fields := map[string]any{}
 
-	if usage, ok := payload["usage"].(map[string]any); ok {
+	if usage, ok := data["usage"].(map[string]any); ok {
 		fields["usage"] = usage
 	}
 
-	if hasResponse {
+	if response != "" {
 		fields["final_output"] = response
 	}
+
+	hasError := status == "ERROR" || errorText != ""
 
 	if hasError {
 		fields["error"] = errorText
@@ -240,7 +266,7 @@ func translateResult(payload map[string]any, sessionID string, initCache map[str
 // translateUnknown emits an avenor.agy.* telemetry event for unknown event
 // types, preventing silent drops while avoiding false lifecycle events.
 func translateUnknown(payload map[string]any, sessionID string, initCache map[string]any) ([]events.Event, map[string]any) {
-	typ, _ := payload["type"].(string)
+	typ, _ := payload["event"].(string)
 	return []events.Event{{
 		Event:     "avenor.agy." + typ,
 		SessionID: sessionID,

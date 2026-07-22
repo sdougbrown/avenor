@@ -690,7 +690,7 @@ func (c *client) readLoop() {
 			continue
 		}
 
-		evtType, _ := payload["type"].(string)
+		evtType, _ := payload["event"].(string)
 		if evtType == "" {
 			continue
 		}
