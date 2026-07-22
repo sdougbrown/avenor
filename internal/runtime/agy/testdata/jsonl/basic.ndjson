@@ -1,0 +1,5 @@
+{"type":"init","conversation_id":"conv-abc123","model":"gemini-2.0-flash","agy_version":"1.1.5"}
+{"type":"step_update","step_index":1,"step_type":"agent_response","state":"ACTIVE","text_delta":"Hello"}
+{"type":"step_update","step_index":1,"step_type":"agent_response","state":"ACTIVE","text_delta":"! I am Gemini."}
+{"type":"step_update","step_index":1,"step_type":"agent_response","state":"DONE","text_delta":"!"}
+{"type":"result","conversation_id":"conv-abc123","response":"Hello! I am Gemini.","usage":{"input_tokens":15,"output_tokens":12}}

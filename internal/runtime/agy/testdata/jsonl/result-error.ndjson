@@ -1,0 +1,4 @@
+{"type":"init","conversation_id":"conv-err-1","model":"gemini-2.0-flash","agy_version":"1.1.5"}
+{"type":"step_update","step_index":1,"step_type":"agent_response","state":"ACTIVE","text_delta":"Processing..."}
+{"type":"step_update","step_index":1,"step_type":"agent_response","state":"DONE"}
+{"type":"result","conversation_id":"conv-err-1","error":"Internal server error","usage":{"input_tokens":5,"output_tokens":3}}
