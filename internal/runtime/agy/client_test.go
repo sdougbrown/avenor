@@ -581,13 +581,11 @@ func TestClient_IdempotentClose(t *testing.T) {
 
 func TestClient_IdempotentCloseWithProcess(t *testing.T) {
 	proc := exec.Command("sleep", "30")
-	_ = proc.Start()
-	defer func() { _ = proc.Process.Kill() }()
-
 	stdin, _ := proc.StdinPipe()
 	stdout, _ := proc.StdoutPipe()
 	stderr, _ := proc.StderrPipe()
-
+	_ = proc.Start()
+	defer func() { _ = proc.Process.Kill() }()
 	c := newClient(proc, stdin, stdout, stderr)
 
 	// Close multiple times — should not panic.
