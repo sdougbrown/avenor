@@ -476,8 +476,15 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
       }
 
       async function withClient<T>(run: WatchRunRef, work: (client: Client) => Promise<T>): Promise<T> {
-        const socket = await resolveSupervisorSocket(run)
-        const client = await deps.dial(socket)
+        // The singleton supervisor grants mutations to the client that spawned
+        // the run. Re-dialing it creates a non-owner connection, which the
+        // control server correctly rejects with permission_denied.
+        if (!run.supervisorId || deps.Supervisor.isCurrentInstance(run.supervisorId)) {
+          const supervisor = await deps.Supervisor.get()
+          return work(supervisor.getClient())
+        }
+
+        const client = await deps.dial(run.supervisorId)
         try {
           return await work(client)
         } finally {
