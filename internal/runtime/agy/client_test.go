@@ -744,9 +744,9 @@ func TestClient_EventsChannel(t *testing.T) {
 			"text_delta": "hello",
 		})
 		writeJSONL(wOut, map[string]any{
-			"type": "result",
+			"type":            "result",
 			"conversation_id": "conv-events",
-			"response": "hello",
+			"response":        "hello",
 		})
 	}()
 

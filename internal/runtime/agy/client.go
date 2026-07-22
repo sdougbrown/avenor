@@ -27,11 +27,11 @@ const (
 )
 
 var (
-	ErrStartupTimeout     = errors.New("agy: startup timeout — no init event within 10s")
+	ErrStartupTimeout       = errors.New("agy: startup timeout — no init event within 10s")
 	ErrConversationMismatch = errors.New("agy: conversation_id mismatch")
-	ErrLineTooLong        = errors.New("agy: JSONL line exceeds 50 MiB")
-	ErrProcessDied        = errors.New("agy: process exited before result")
-	ErrClientClosed       = errors.New("agy: client is closed")
+	ErrLineTooLong          = errors.New("agy: JSONL line exceeds 50 MiB")
+	ErrProcessDied          = errors.New("agy: process exited before result")
+	ErrClientClosed         = errors.New("agy: client is closed")
 )
 
 // sessionInfo holds the metadata extracted from the init event.
@@ -53,15 +53,15 @@ type client struct {
 	done      chan struct{}
 	closeOnce sync.Once
 
-	mode       string // "pending", "prompting", "resumed", "closed"
-	sessionID  string
-	initCache  map[string]any
-	idleTimer  *time.Timer
-	idleOnce   sync.Once
+	mode      string // "pending", "prompting", "resumed", "closed"
+	sessionID string
+	initCache map[string]any
+	idleTimer *time.Timer
+	idleOnce  sync.Once
 
-	testMode       bool     // if true, skip subprocess spawning
-	lastResult     string   // last result/response from agent
-	lastStopReason string   // last stop_reason from session.end
+	testMode       bool   // if true, skip subprocess spawning
+	lastResult     string // last result/response from agent
+	lastStopReason string // last stop_reason from session.end
 
 	version     string
 	versionOnce sync.Once
