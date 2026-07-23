@@ -1,0 +1,242 @@
+// Avenor's minimal wire-compatible view of agy 1.1.5.
+//
+// This file intentionally retains only fields supported by the Stage 9 evidence.
+// Fields outside this view decode as protobuf unknown fields and are preserved on
+// re-marshal. See parity-manifest.json and README.md before changing it.
+syntax = "proto3";
+
+package avenor.agy.v115;
+
+import "internal/runtime/agy/interop/v115/snapshot.proto";
+
+option go_package = "github.com/sdougbrown/avenor/internal/runtime/agy/interop/v115;agyv115";
+
+message HeartbeatRequest {}
+message HeartbeatResponse {}
+
+message GetConversationMetadataRequest { string conversation_id = 1; }
+message GetConversationMetadataResponse { TrajectoryMetadata metadata = 1; }
+message TrajectoryMetadata { string root_conversation_id = 6; }
+
+message GetAvailableModelsRequest { bool force_refresh = 1; }
+message GetAvailableModelsResponse { FetchAvailableModelsResponse response = 1; }
+message FetchAvailableModelsResponse { map<string, ModelDetails> models = 1; }
+message ModelDetails {}
+
+message GetAllCascadeTrajectoriesRequest { bool exclude_subtrajectories = 1; }
+message GetAllCascadeTrajectoriesResponse { map<string, CascadeTrajectorySummary> trajectory_summaries = 1; }
+message CascadeTrajectorySummary {}
+
+message GetCascadeTrajectoryStepsRequest {
+  string cascade_id = 1;
+  uint32 step_offset = 2;
+  avenor.agy.v115.snapshot.SnapshotTrajectoryVerbosity verbosity = 3;
+  StreamTrajectoryVerbosity trajectory_verbosity = 4;
+}
+message GetCascadeTrajectoryStepsResponse { repeated Step steps = 1; }
+
+message StartCascadeRequest { CortexTrajectorySource source = 4; }
+message StartCascadeResponse { string cascade_id = 1; }
+
+message SendUserCascadeMessageRequest {
+  string cascade_id = 1;
+  repeated TextOrScopeItem items = 2;
+  CascadeConfig cascade_config = 5;
+}
+message SendUserCascadeMessageResponse {}
+
+message HandleCascadeUserInteractionRequest {
+  string cascade_id = 1;
+  CascadeUserInteraction interaction = 2;
+}
+message HandleCascadeUserInteractionResponse {}
+
+message CancelCascadeStepsRequest {
+  string cascade_id = 1;
+  repeated uint32 step_indices = 2;
+}
+message CancelCascadeStepsResponse {}
+
+message ForceStopCascadeTreeRequest { string conversation_id = 1; }
+message ForceStopCascadeTreeResponse {}
+
+message StreamAgentStateUpdatesRequest {
+  string conversation_id = 1;
+  string subscriber_id = 2;
+  Slice initial_steps_page_bounds = 3;
+  StreamTrajectoryVerbosity trajectory_verbosity = 4;
+  bool disable_rehydration = 7;
+}
+message StreamAgentStateUpdatesResponse { AgentStateUpdate update = 1; }
+
+message Slice {
+  int32 start_index = 1;
+  optional int32 end_index_exclusive = 2;
+}
+
+message AgentStateUpdate {
+  string conversation_id = 1;
+  string trajectory_id = 2;
+  CascadeRunStatus status = 3;
+  CascadeRunStatus executable_status = 4;
+  CascadeRunStatus executor_loop_status = 5;
+  TrajectoryUpdate main_trajectory_update = 7;
+  bool fully_idle = 18;
+}
+
+message TrajectoryUpdate {
+  StepsUpdate steps_update = 1;
+  CascadeRunStatus status = 6;
+  CortexErrorDetails last_step_error = 7;
+  CortexStepType last_step_type = 8;
+  bool fully_idle = 10;
+}
+
+message StepsUpdate {
+  repeated uint32 indices = 1;
+  repeated Step steps = 2;
+  uint32 total_length = 3;
+  Slice page_bounds = 4;
+}
+
+message Step {
+  CortexStepType type = 1;
+  CortexStepStatus status = 4;
+  CortexStepMetadata metadata = 5;
+  CortexErrorDetails error = 31;
+  RequestedInteraction requested_interaction = 56;
+  repeated CompletedInteraction completed_interactions = 147;
+  oneof step {
+    CortexStepPlannerResponse planner_response = 20;
+    CortexStepListDirectory list_directory = 15;
+  }
+}
+
+message CortexStepMetadata {
+  ModelUsageStats model_usage = 9;
+  Model generator_model = 11;
+  uint32 step_generation_version = 21;
+}
+
+message ModelUsageStats {
+  Model model = 1;
+  uint64 input_tokens = 2;
+  uint64 output_tokens = 3;
+  uint64 cache_write_tokens = 4;
+  uint64 cache_read_tokens = 5;
+  uint64 thinking_output_tokens = 9;
+  uint64 response_output_tokens = 10;
+}
+
+message CortexStepPlannerResponse {
+  string response = 1;
+  string thinking = 3;
+  bool thinking_redacted = 5;
+  repeated ChatToolCall tool_calls = 7;
+  string modified_response = 8;
+  string raw_thinking = 16;
+}
+
+message ChatToolCall {
+  string id = 1;
+  string name = 2;
+  string arguments_json = 3;
+}
+
+message CortexStepListDirectory {
+  string directory_path_uri = 1;
+  repeated ListDirectoryResult results = 3;
+}
+message ListDirectoryResult {}
+
+message CortexErrorDetails {}
+
+message RequestedInteraction {
+  oneof interaction {
+    CascadeDeployInteractionSpec deploy = 2;
+  }
+}
+message CascadeDeployInteractionSpec {}
+
+message CompletedInteraction {
+  RequestedInteraction request = 1;
+  CascadeUserInteraction response = 2;
+}
+
+message CascadeUserInteraction {
+  string trajectory_id = 1;
+  uint32 step_index = 2;
+  oneof interaction {
+    CascadeDeployInteraction deploy = 4;
+  }
+}
+message CascadeDeployInteraction { bool cancel = 1; }
+
+message TextOrScopeItem {
+  oneof chunk {
+    string text = 1;
+  }
+}
+
+message CascadeConfig { CascadePlannerConfig planner_config = 1; }
+message CascadePlannerConfig { Model plan_model = 1; }
+
+enum CascadeRunStatus {
+  CASCADE_RUN_STATUS_UNSPECIFIED = 0;
+  CASCADE_RUN_STATUS_IDLE = 1;
+  CASCADE_RUN_STATUS_RUNNING = 2;
+  CASCADE_RUN_STATUS_CANCELING = 3;
+  CASCADE_RUN_STATUS_BUSY = 4;
+}
+
+enum CortexStepStatus {
+  CORTEX_STEP_STATUS_UNSPECIFIED = 0;
+  CORTEX_STEP_STATUS_GENERATING = 8;
+  CORTEX_STEP_STATUS_QUEUED = 11;
+  CORTEX_STEP_STATUS_PENDING = 1;
+  CORTEX_STEP_STATUS_RUNNING = 2;
+  CORTEX_STEP_STATUS_WAITING = 9;
+  CORTEX_STEP_STATUS_DONE = 3;
+  CORTEX_STEP_STATUS_INVALID = 4;
+  CORTEX_STEP_STATUS_CLEARED = 5;
+  CORTEX_STEP_STATUS_CANCELED = 6;
+  CORTEX_STEP_STATUS_ERROR = 7;
+  CORTEX_STEP_STATUS_INTERRUPTED = 12;
+}
+
+enum CortexStepType {
+  CORTEX_STEP_TYPE_UNSPECIFIED = 0;
+  CORTEX_STEP_TYPE_LIST_DIRECTORY = 9;
+  CORTEX_STEP_TYPE_PLANNER_RESPONSE = 15;
+}
+
+enum CortexTrajectorySource {
+  CORTEX_TRAJECTORY_SOURCE_UNSPECIFIED = 0;
+  CORTEX_TRAJECTORY_SOURCE_CLI = 17;
+}
+
+enum StreamTrajectoryVerbosity {
+  CLIENT_TRAJECTORY_VERBOSITY_UNSPECIFIED = 0;
+  CLIENT_TRAJECTORY_VERBOSITY_DEBUG = 1;
+  CLIENT_TRAJECTORY_VERBOSITY_PROD_UI = 2;
+  CLIENT_TRAJECTORY_VERBOSITY_FULL = 3;
+}
+
+enum Model {
+  MODEL_UNSPECIFIED = 0;
+  MODEL_GOOGLE_GEMINI_2_5_FLASH = 312;
+}
+
+service LanguageServerService {
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc GetConversationMetadata(GetConversationMetadataRequest) returns (GetConversationMetadataResponse);
+  rpc GetAvailableModels(GetAvailableModelsRequest) returns (GetAvailableModelsResponse);
+  rpc GetAllCascadeTrajectories(GetAllCascadeTrajectoriesRequest) returns (GetAllCascadeTrajectoriesResponse);
+  rpc GetCascadeTrajectorySteps(GetCascadeTrajectoryStepsRequest) returns (GetCascadeTrajectoryStepsResponse);
+  rpc StartCascade(StartCascadeRequest) returns (StartCascadeResponse);
+  rpc SendUserCascadeMessage(SendUserCascadeMessageRequest) returns (SendUserCascadeMessageResponse);
+  rpc HandleCascadeUserInteraction(HandleCascadeUserInteractionRequest) returns (HandleCascadeUserInteractionResponse);
+  rpc CancelCascadeSteps(CancelCascadeStepsRequest) returns (CancelCascadeStepsResponse);
+  rpc ForceStopCascadeTree(ForceStopCascadeTreeRequest) returns (ForceStopCascadeTreeResponse);
+  rpc StreamAgentStateUpdates(StreamAgentStateUpdatesRequest) returns (stream StreamAgentStateUpdatesResponse);
+}

@@ -103,16 +103,23 @@ func TestRPC115FixtureCorpus(t *testing.T) {
 	}
 }
 
-func TestRPC115SchemaProvenanceIsPinnedAndIncomplete(t *testing.T) {
+func TestRPC115SchemaProvenancePinsUnretainedCompleteClosure(t *testing.T) {
 	var provenance struct {
-		AgyVersion            string            `json:"agy_version"`
-		EvidenceSHA256        map[string]string `json:"evidence_sha256"`
-		DescriptorSHA256      map[string]string `json:"descriptor_sha256"`
-		CompleteImportClosure bool              `json:"complete_import_closure"`
+		AgyVersion       string            `json:"agy_version"`
+		EvidenceSHA256   map[string]string `json:"evidence_sha256"`
+		DescriptorSHA256 map[string]string `json:"descriptor_sha256"`
+		CompleteClosure  struct {
+			RecoveredLocally                  bool   `json:"recovered_locally"`
+			DescriptorCount                   int    `json:"descriptor_count"`
+			SHA256                            string `json:"sha256"`
+			ValidatedMissingImports           int    `json:"validated_missing_imports"`
+			ValidatedUnresolvedTypeReferences int    `json:"validated_unresolved_type_references"`
+			Retained                          bool   `json:"retained"`
+		} `json:"complete_closure"`
 	}
 	readRPCFixture(t, "schema-provenance.json", &provenance)
-	if provenance.AgyVersion != "1.1.5" || provenance.CompleteImportClosure {
-		t.Fatalf("schema fixture must pin agy 1.1.5 and explicitly reject an incomplete closure: %+v", provenance)
+	if provenance.AgyVersion != "1.1.5" || !provenance.CompleteClosure.RecoveredLocally || provenance.CompleteClosure.DescriptorCount != 102 || provenance.CompleteClosure.SHA256 != "7e3073643388963f21bf269c51fa30a13f37ba3a25b3ddd7b49edbbf91557a21" || provenance.CompleteClosure.ValidatedMissingImports != 0 || provenance.CompleteClosure.ValidatedUnresolvedTypeReferences != 0 || provenance.CompleteClosure.Retained {
+		t.Fatalf("schema fixture must pin the locally recovered but unretained complete closure: %+v", provenance)
 	}
 	for name, sum := range provenance.EvidenceSHA256 {
 		if _, err := hex.DecodeString(sum); err != nil || len(sum) != sha256.Size*2 {
