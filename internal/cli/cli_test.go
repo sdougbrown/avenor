@@ -3611,3 +3611,43 @@ func TestWaitForSessionSessionEndIncludesFinalOutput(t *testing.T) {
 		t.Fatalf("final_output = %q, want final answer", got)
 	}
 }
+
+func TestWaitForSessionAdoptsExternalConversationID(t *testing.T) {
+	eventCh := make(chan events.Event, 2)
+	eventCh <- events.Event{
+		Event:     "session.start",
+		SessionID: "external-conversation",
+		Fields: map[string]any{
+			"conversation_id": "external-conversation",
+		},
+	}
+	eventCh <- events.Event{
+		Event:     "session.end",
+		SessionID: "external-conversation",
+		Fields: map[string]any{
+			"stop_reason": "end_turn",
+		},
+	}
+	promptDone := make(chan error, 1)
+	promptDone <- nil
+
+	adopted := ""
+	result := WaitForSession(context.Background(), &cliFakeProvider{}, SessionWaitConfig{
+		EventCh:    eventCh,
+		PromptDone: promptDone,
+		SessionID:  "agy-pending-local",
+		AdoptSessionID: func(sessionID string) {
+			adopted = sessionID
+		},
+	}, SessionWaitDeps{
+		Writer: &permissionLifecycleSink{responses: make(chan string, 1)},
+		Stderr: io.Discard,
+	})
+
+	if result.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, want 0", result.ExitCode)
+	}
+	if adopted != "external-conversation" {
+		t.Fatalf("adopted session ID = %q", adopted)
+	}
+}

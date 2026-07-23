@@ -135,6 +135,9 @@ func runSingleAttempt(
 			PermissionClaimTimeout: cfg.permissionClaimTimeout,
 			ProgressTimeout:        cfg.progressTimeout,
 			Timeout:                cfg.timer,
+			AdoptSessionID: func(externalID string) {
+				session.SessionID = externalID
+			},
 		}, SessionWaitDeps{
 			Writer:        deps.writer,
 			FileHandler:   deps.fileHandler,

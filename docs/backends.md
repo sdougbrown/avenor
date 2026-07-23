@@ -255,11 +255,13 @@ avenor \
 
 ## agy
 
-Avenor spawns `agy --output-format stream-json --print --print-timeout 24h` and talks to it over JSONL on stdio. No ACP wrapper, no PTY. The backend reads newline-delimited JSON from the subprocess and translates events into Avenor's canonical event format.
+Avenor spawns `agy --add-dir <dir> --output-format stream-json --print-timeout 24h --print <prompt>` and reads JSONL from stdout. No ACP wrapper, no PTY. The backend translates newline-delimited events into Avenor's canonical event format.
 
 This is a Phase 1 headless backend. It does not support interactive permission decisions or tool approval prompts — `agy`'s headless mode auto-denies tools that require interactive confirmation. Pre-existing `agy` persisted allow rules still apply.
 
 **Structured output only.** This backend does not launch a terminal or scrape a TUI. All communication happens through `agy`'s `--output-format stream-json` JSONL protocol over pipes.
+
+**Session identity.** `agy` allocates its conversation ID only after receiving the required first `--print` prompt. Avenor therefore uses an internal provisional ID between `Start` and the first `session.start`, then adopts agy's external ID. Event logs, sentinels, later turns, and `--resume` all use the external ID.
 
 **24-hour print ceiling.** Every prompt carries `--print-timeout 24h` to prevent `agy`'s default 5-minute timeout from pre-empting Avenor's own timeout/control path. If Avenor does not have its own timeout set, the turn runs for up to 24 hours.
 
@@ -270,7 +272,7 @@ This is a Phase 1 headless backend. It does not support interactive permission d
 ```sh
 avenor \
   --backend agy \
-  --model gemini-2.0-flash \
+  --model gemini-3.6-flash-low \
   --prompt "Review the changes in the current branch" \
   --dir /repo \
   --sentinel-file /tmp/done.env
