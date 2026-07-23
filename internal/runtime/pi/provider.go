@@ -30,14 +30,14 @@ func NewWithOptions(opts runtime.StartOptions) *Provider {
 var _ runtime.Provider = (*Provider)(nil)
 
 func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtime.Session, error) {
-	c, err := p.ensureClient(ctx)
-	if err != nil {
-		return runtime.Session{}, err
-	}
-
 	cwd := opts.Dir
 	if cwd == "" {
 		cwd = p.opts.Dir
+	}
+
+	c, err := p.ensureClient(ctx, cwd)
+	if err != nil {
+		return runtime.Session{}, err
 	}
 
 	stateResult, err := c.sendCommand(ctx, map[string]any{
@@ -95,7 +95,7 @@ func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Sessio
 	}
 	p.mu.Unlock()
 
-	c, err := p.ensureClient(ctx)
+	c, err := p.ensureClient(ctx, p.opts.Dir)
 	if err != nil {
 		return runtime.Session{}, err
 	}
@@ -293,7 +293,7 @@ func (p *Provider) Close() error {
 	return c.Close()
 }
 
-func (p *Provider) ensureClient(ctx context.Context) (*client, error) {
+func (p *Provider) ensureClient(ctx context.Context, cwd string) (*client, error) {
 	p.mu.Lock()
 	if p.client != nil {
 		c := p.client
@@ -301,7 +301,7 @@ func (p *Provider) ensureClient(ctx context.Context) (*client, error) {
 		return c, nil
 	}
 
-	c, err := StartClientWithAgent(ctx, "", p.opts.Model, "", p.opts.Agent)
+	c, err := StartClientWithAgentAndDir(ctx, "", p.opts.Model, "", p.opts.Agent, cwd)
 	if err != nil {
 		p.mu.Unlock()
 		return nil, err

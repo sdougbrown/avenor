@@ -1,7 +1,11 @@
 package pi
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -215,6 +219,108 @@ func TestAnswerPermissionDenied(t *testing.T) {
 
 func TestProviderImplementsInterface(t *testing.T) {
 	var _ runtime.Provider = (*Provider)(nil)
+}
+
+func TestPiProviderHelperProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_PI_PROVIDER_HELPER") != "1" {
+		return
+	}
+
+	scanner := bufio.NewScanner(os.Stdin)
+	encoder := json.NewEncoder(os.Stdout)
+	for scanner.Scan() {
+		var command map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &command); err != nil {
+			os.Exit(2)
+		}
+		if err := encoder.Encode(map[string]any{
+			"type":      "response",
+			"id":        command["id"],
+			"sessionId": "pi-test-session",
+		}); err != nil {
+			os.Exit(3)
+		}
+	}
+	os.Exit(0)
+}
+
+func withFakePiCommand(t *testing.T) func() *exec.Cmd {
+	t.Helper()
+	original := piExecCommandContext
+	t.Cleanup(func() { piExecCommandContext = original })
+
+	var command *exec.Cmd
+	piExecCommandContext = func(_ context.Context, _ string, _ ...string) *exec.Cmd {
+		command = exec.Command(os.Args[0], "-test.run=^TestPiProviderHelperProcess$")
+		command.Env = append(os.Environ(), "GO_WANT_PI_PROVIDER_HELPER=1")
+		return command
+	}
+	return func() *exec.Cmd { return command }
+}
+
+func TestProviderStartUsesRequestedWorkingDirectory(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		provider runtime.StartOptions
+		start    runtime.StartOptions
+	}{
+		{
+			name:     "start option",
+			provider: runtime.StartOptions{Dir: t.TempDir()},
+			start:    runtime.StartOptions{Dir: t.TempDir()},
+		},
+		{
+			name:     "provider fallback",
+			provider: runtime.StartOptions{Dir: t.TempDir()},
+			start:    runtime.StartOptions{},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			captured := withFakePiCommand(t)
+			p := NewWithOptions(tc.provider)
+			defer p.Close()
+
+			sess, err := p.Start(context.Background(), tc.start)
+			if err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+
+			wantDir := tc.start.Dir
+			if wantDir == "" {
+				wantDir = tc.provider.Dir
+			}
+			if sess.Dir != wantDir {
+				t.Errorf("session dir = %q, want %q", sess.Dir, wantDir)
+			}
+			if captured() == nil {
+				t.Fatal("Pi command was not created")
+			}
+			if captured().Dir != wantDir {
+				t.Errorf("Pi command cwd = %q, want %q", captured().Dir, wantDir)
+			}
+		})
+	}
+}
+
+func TestProviderResumeUsesProviderWorkingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	captured := withFakePiCommand(t)
+	p := NewWithOptions(runtime.StartOptions{Dir: dir})
+	defer p.Close()
+
+	sess, err := p.Resume(context.Background(), "pi-resumed")
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if sess.Dir != dir {
+		t.Errorf("session dir = %q, want %q", sess.Dir, dir)
+	}
+	if captured() == nil {
+		t.Fatal("Pi command was not created")
+	}
+	if captured().Dir != dir {
+		t.Errorf("Pi command cwd = %q, want %q", captured().Dir, dir)
+	}
 }
 
 func TestProviderStartParsesDataSessionID(t *testing.T) {

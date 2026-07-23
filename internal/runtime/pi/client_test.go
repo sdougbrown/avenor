@@ -315,6 +315,31 @@ func TestClientFanoutRecordsDroppedEvents(t *testing.T) {
 	}
 }
 
+func TestStartClientUsesRequestedWorkingDirectory(t *testing.T) {
+	original := piExecCommandContext
+	t.Cleanup(func() { piExecCommandContext = original })
+
+	var captured *exec.Cmd
+	piExecCommandContext = func(_ context.Context, _ string, _ ...string) *exec.Cmd {
+		captured = exec.Command("cat")
+		return captured
+	}
+
+	cwd := t.TempDir()
+	client, err := StartClientWithAgentAndDir(context.Background(), "", "", "", "", cwd)
+	if err != nil {
+		t.Fatalf("StartClientWithAgentAndDir: %v", err)
+	}
+	defer client.Close()
+
+	if captured == nil {
+		t.Fatal("pi command was not created")
+	}
+	if captured.Dir != cwd {
+		t.Errorf("pi command cwd = %q, want %q", captured.Dir, cwd)
+	}
+}
+
 func TestClientClose(t *testing.T) {
 	proc := exec.Command("cat")
 	stdin, _ := proc.StdinPipe()

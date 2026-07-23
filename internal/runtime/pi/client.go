@@ -62,11 +62,17 @@ func newClient(proc *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, stder
 	return c
 }
 
+var piExecCommandContext = exec.CommandContext
+
 func StartClient(ctx context.Context, provider string, model string, sessionDir string) (*client, error) {
-	return StartClientWithAgent(ctx, provider, model, sessionDir, "")
+	return StartClientWithAgentAndDir(ctx, provider, model, sessionDir, "", "")
 }
 
 func StartClientWithAgent(ctx context.Context, provider string, model string, sessionDir string, agent string) (*client, error) {
+	return StartClientWithAgentAndDir(ctx, provider, model, sessionDir, agent, "")
+}
+
+func StartClientWithAgentAndDir(ctx context.Context, provider string, model string, sessionDir string, agent string, cwd string) (*client, error) {
 	args := []string{"--mode", "rpc", "--no-session"}
 	if provider != "" {
 		args = append(args, "--provider", provider)
@@ -78,7 +84,8 @@ func StartClientWithAgent(ctx context.Context, provider string, model string, se
 		args = append(args, "--session-dir", sessionDir)
 	}
 
-	proc := exec.CommandContext(ctx, "pi", args...)
+	proc := piExecCommandContext(ctx, "pi", args...)
+	proc.Dir = cwd
 	if agent != "" {
 		env := proc.Environ()
 		filtered := env[:0]
