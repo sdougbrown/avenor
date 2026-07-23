@@ -89,6 +89,14 @@ func TestGRPCWebUnaryFramingHostileInputs(t *testing.T) {
 	}
 }
 
+func TestGRPCStatusBounds(t *testing.T) {
+	for _, status := range []string{"17", "999"} {
+		if _, err := parseGRPCStatus(status); err == nil {
+			t.Fatalf("out-of-range grpc-status %q accepted", status)
+		}
+	}
+}
+
 func TestGRPCWebUnaryCancellationAndStatus(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -246,6 +254,24 @@ func TestHTTPHeaderGRPCStatusIsSurfacedWithoutMessage(t *testing.T) {
 	_, err = client.heartbeat(context.Background())
 	if err == nil || strings.Contains(err.Error(), "sensitive") {
 		t.Fatalf("header grpc error leaked message: %v", err)
+	}
+}
+
+func TestOutOfRangeHeaderGRPCStatusIsRejected(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", grpcWebContentType)
+		w.Header().Set("Grpc-Status", "17")
+	}))
+	defer server.Close()
+	client, err := newRPCEndpointClient(rpcEndpoint{address: strings.TrimPrefix(server.URL, "http://")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.close()
+	_, err = client.heartbeat(context.Background())
+	var statusErr *grpcStatusError
+	if err == nil || errors.As(err, &statusErr) {
+		t.Fatalf("out-of-range header grpc-status = %v", err)
 	}
 }
 

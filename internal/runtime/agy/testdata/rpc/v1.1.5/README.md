@@ -16,7 +16,7 @@ This is a minimal, redacted, fixture-ready record of the 2026-07-23 local `agy 1
 
 `schema-provenance.json` pins SHA-256s for the descriptors extracted from the installed 1.1.5 binary and for source captures. A complete 102-descriptor closure was subsequently recovered locally and validated by its recorded SHA-256 with zero missing imports or unresolved type references. It is intentionally **not retained** because it includes unrelated private schemas. The checked-in `internal/runtime/agy/interop/v115` schema is instead a small Avenor-owned wire-compatible view, with every retained symbol mapped back to the complete closure by a parity manifest and caller-supplied parity check.
 
-`FIELD_MAP.md` and `RECONNECT_BRIEF.md` are evidence-only records for future Stage 11/12 work; this schema substage does not introduce RPC framing, stream decoding, mapping, PTY hosting, transport selection, or provider integration.
+`stream-agent-state-updates-structural.json` is a clearly labeled redacted structural fixture generated from the parity-checked minimal schema; it is not a raw live capture. Stage 11 consumes the stream framing and typed boundary facts for decoding only. `FIELD_MAP.md` and `RECONNECT_BRIEF.md` remain evidence-only inputs for deferred Stage 12 mapping, reconciliation, and reconnect work; this corpus does not add PTY hosting, transport selection, or provider integration.
 
 ## Redaction
 

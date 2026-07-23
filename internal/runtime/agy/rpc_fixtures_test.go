@@ -79,6 +79,25 @@ func TestRPC115FixtureCorpus(t *testing.T) {
 		t.Fatalf("missing method fixtures: %v", wantMethods)
 	}
 
+	var stream struct {
+		FixtureKind string `json:"fixture_kind"`
+		Service     string `json:"service"`
+		Method      string `json:"method"`
+		ContentType string `json:"content_type"`
+		Request     struct {
+			Fields []string `json:"fields"`
+		} `json:"request"`
+		Response struct {
+			DataFrame    string   `json:"data_frame"`
+			TrailerFrame string   `json:"trailer_frame"`
+			Fields       []string `json:"fields"`
+		} `json:"response"`
+	}
+	readRPCFixture(t, "stream-agent-state-updates-structural.json", &stream)
+	if stream.FixtureKind != "redacted structural fixture, not a raw live capture" || stream.Service != languageServerService || stream.Method != "StreamAgentStateUpdates" || stream.ContentType != grpcWebContentType || len(stream.Request.Fields) != 1 || stream.Request.Fields[0] != "conversation_id=1:string" || stream.Response.DataFrame != "0x00 protobuf StreamAgentStateUpdatesResponse" || stream.Response.TrailerFrame != "0x80 ASCII grpc-status trailer" || len(stream.Response.Fields) != 4 {
+		t.Fatalf("stream structural fixture does not retain the validated typed boundary: %+v", stream)
+	}
+
 	var rpcErrors struct {
 		MalformedMetadata struct {
 			HTTPStatus int    `json:"http_status"`

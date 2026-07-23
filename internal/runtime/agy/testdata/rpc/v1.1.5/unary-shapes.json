@@ -15,6 +15,5 @@
     {"name": "HandleCascadeUserInteraction", "request": "HandleCascadeUserInteractionRequest.cascade_id=1:string; interaction=2:CascadeUserInteraction with trajectory_id=1:string, step_index=2:uint32, deploy=4:CascadeDeployInteraction; only empty/default-false deploy denial validated", "response": "HandleCascadeUserInteractionResponse; empty protobuf observed"},
     {"name": "CancelCascadeSteps", "request": "CancelCascadeStepsRequest.cascade_id=1:string; step_indices=2:repeated uint32, packed or unpacked accepted", "response": "CancelCascadeStepsResponse; empty protobuf observed"},
     {"name": "ForceStopCascadeTree", "request": "ForceStopCascadeTreeRequest.conversation_id=1:string", "response": "ForceStopCascadeTreeResponse; empty protobuf observed"}
-  ],
-  "not_implemented": ["StreamAgentStateUpdates is evidence-only and deferred to Stage 11"]
+  ]
 }
