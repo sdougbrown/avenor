@@ -16,6 +16,13 @@ function findRunByLabel(sup: Supervisor, runId: string): RunInfo | undefined {
   return undefined
 }
 
+function requireResumableAgent(agent: string | undefined): string {
+  if (agent === undefined) {
+    throw new Error('run has no agent to resume')
+  }
+  return agent
+}
+
 async function parseSentinel(filePath: string): Promise<Record<string, string> | null> {
   try {
     const content = (await fs.promises.readFile(filePath, 'utf-8')).trim()
@@ -76,7 +83,9 @@ export async function followUpTool(args: {
 
       // Prefer live supervisor metadata, then the local run map, so an
       // explicit supervisor retains the original runtime context as well.
-      const agent = (liveStatus?.agent as string) ?? runInfo?.agent ?? 'codex'
+      const agent = requireResumableAgent(
+        (liveStatus?.agent as string | undefined) ?? runInfo?.agent,
+      )
       const backend =
         (liveStatus?.backend as string | undefined) ?? runInfo?.backend
       const dir = (liveStatus?.dir as string | undefined) ?? runInfo?.dir
@@ -139,7 +148,9 @@ export async function followUpTool(args: {
       // Stored metadata still permits a follow-up when status is unavailable.
     }
   }
-  const agent = (liveStatus?.agent as string | undefined) ?? runInfo.agent ?? 'codex'
+  const agent = requireResumableAgent(
+    (liveStatus?.agent as string | undefined) ?? runInfo.agent,
+  )
   const backend = (liveStatus?.backend as string | undefined) ?? runInfo.backend
   const dir = (liveStatus?.dir as string | undefined) ?? runInfo.dir
 

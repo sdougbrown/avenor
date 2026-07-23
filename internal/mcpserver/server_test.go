@@ -147,6 +147,9 @@ func TestResultSupervisorIDUsesRegisteredRun(t *testing.T) {
 	if got := s.resultSupervisorID("run-on-secondary", "/tmp/explicit.sock"); got != "/tmp/explicit.sock" {
 		t.Fatalf("result supervisor = %q, want explicit supervisor", got)
 	}
+	if got := s.resultSupervisorID("unregistered-run", ""); got != "" {
+		t.Fatalf("result supervisor = %q, want default supervisor fallback", got)
+	}
 }
 
 func TestGetClientForSupervisorReusesOwnerConn(t *testing.T) {
