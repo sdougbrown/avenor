@@ -113,6 +113,7 @@ message Step {
 }
 
 message CortexStepMetadata {
+  ChatToolCall tool_call = 4;
   ModelUsageStats model_usage = 9;
   Model generator_model = 11;
   uint32 step_generation_version = 21;

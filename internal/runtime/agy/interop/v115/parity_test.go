@@ -104,6 +104,11 @@ func TestFieldShapesAndServicePaths(t *testing.T) {
 	if step.Fields().ByName("planner_response").ContainingOneof() != step.Fields().ByName("list_directory").ContainingOneof() {
 		t.Fatal("step alternatives must share a oneof")
 	}
+	metadata := (&CortexStepMetadata{}).ProtoReflect().Descriptor()
+	toolCall := metadata.Fields().ByName("tool_call")
+	if toolCall == nil || toolCall.Number() != 4 || toolCall.Message().FullName() != "avenor.agy.v115.ChatToolCall" {
+		t.Fatal("metadata.tool_call must retain the parity-checked ChatToolCall field 4")
+	}
 	if CascadeRunStatus_CASCADE_RUN_STATUS_IDLE.Number() != 1 || CortexStepStatus_CORTEX_STEP_STATUS_DONE.Number() != 3 || CortexTrajectorySource_CORTEX_TRAJECTORY_SOURCE_CLI.Number() != 17 {
 		t.Fatal("validated enum values changed")
 	}
