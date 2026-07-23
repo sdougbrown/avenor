@@ -1,0 +1,29 @@
+{
+  "agy_version": "1.1.5",
+  "source_root": "/tmp/agy-stage9-terra",
+  "evidence_sha256": {
+    "REPORT.md": "44541313c692c976e7c022e67d46c10ebd5fce33c06b1d540324f772a4a3d6aa",
+    "MANIFEST.md": "42281d77eeefcdd39083836097dbb676447543baedecd54d15f04eaadbcb71f7",
+    "fixtures/heartbeat-grpcweb-0.json": "09d6cede028bfab6f279877e4defc98c69cc2b84c63e0f5609fa550573174e55",
+    "fixtures/live-metadata.safe.json": "ab744cc4056b1dd1fba705d5196a5f3e7facd08f18145b78d15e34e85ae15703",
+    "fixtures/live-models.safe.json": "c83af579314891f0b7c7014a6e17b9c3ab75426474059d0eee762878881ee785",
+    "fixtures/live2-send.safe.json": "e161ce11ee63e703d14ca254c57c8c39b6dc44da1514a89ad1c70bcd821f7994",
+    "fixtures/live2-cancel.safe.json": "c0f23f4574b0794884fa7412a7387d1dea2292b8257e6a1e2d84ed1ee0de25e7",
+    "fixtures/permission-deny.safe.json": "fd6ca6f0604255765d9d196b7050dad771d8b27db6d84ad97cad106ccc9c6636",
+    "fixtures/force-valid.safe.json": "84aceee5e884fa04652f72b33885420c3fd71dee01c86dc2dcbc2aa050467ada",
+    "fixtures/error-malformed-metadata.safe.json": "e67e04642ed6f2ee173660cc067d94fedf90e5e98c40c8e5ff1df1ca5829ea24",
+    "fixtures/start-cascade-cli-structural.txt": "4585e9088fb7ac40359876cf3a8e7ff845910bfc44de0e371fea962319350763",
+    "followup/raw/listener-role-summary.json": "87920b4d403e147309dda675a356c4541fc39e181a0c78ee37993ba8b443659f",
+    "followup/raw/reconnect-comparison.json": "e72822c34a03f335ca42d0ea7cdb685fb12990e888c98d0bdf1bd8e86825bf96"
+  },
+  "descriptor_sha256": {
+    "third_party/jetski/language_server_pb/language_server.proto": "7812bd75064e5ea72365dc55431fce4700bbce723ace48b8971c5a8917898c61",
+    "third_party/jetski/jetski_cortex_pb/jetski_cortex.proto": "74eb8ba8ae2f2815e0c1ea7337bb19f42a0ef67f6fbd949f46f9b9e93d3f211f",
+    "third_party/jetski/cortex_pb/cortex.proto": "1deca21fd90c8e28319351e865f40c0973be880adec2c3ab38557355546f897f",
+    "third_party/jetski/codeium_common_pb/codeium_common.proto": "af07e7a06666d74f33f10194771d811745f825922e21614064502dfd37ec933a",
+    "google/internal/cloud/code/v1internal/model_configs.proto": "34ab28e7c0293e9ad322118f89f3cfc79d7c6dcd1a7229e9707731f9ef5592f5",
+    "third_party/gemini_coder/proto/trajectory.proto": "9f433c64f9423205be404131089f5f03a9fd6afd6101cc8479bbf65ac241880b"
+  },
+  "complete_import_closure": false,
+  "closure_boundary": "The extracted descriptors have unresolved private imports. No generated bindings or manual replacement schema are authorized from this subset."
+}

@@ -1,0 +1,15 @@
+{
+  "malformed_metadata": {
+    "method": "GetConversationMetadata",
+    "request": "grpc-web protobuf data envelope with field 1 string",
+    "http_status": 200,
+    "grpc_status": "2",
+    "grpc_message": "redacted upstream not-found detail",
+    "data_frames": 0
+  },
+  "incompatible_content_types": [
+    {"content_type": "text/plain", "http_status": 415},
+    {"content_type": "application/json", "http_status": 400, "meaning": "raw grpc-web bytes are not JSON"}
+  ],
+  "handling": "HTTP success does not imply RPC success; surface HTTP status, grpc-status, grpc-message, malformed/truncated body, and unknown frame flags."
+}

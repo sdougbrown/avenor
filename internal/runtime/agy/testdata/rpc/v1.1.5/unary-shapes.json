@@ -1,0 +1,20 @@
+{
+  "agy_version": "1.1.5",
+  "service": "exa.language_server_pb.LanguageServerService",
+  "content_type": "application/grpc-web+proto",
+  "request_frame": "0x00 + uint32be length + protobuf",
+  "response_frames": ["0x00 protobuf data", "0x80 ASCII grpc trailer"],
+  "methods": [
+    {"name": "Heartbeat", "request": "empty protobuf", "response": "validated protobuf data followed by grpc-status trailer"},
+    {"name": "GetConversationMetadata", "request": "GetConversationMetadataRequest.conversation_id=1:string", "response": "GetConversationMetadataResponse.metadata=1:CortexTrajectoryMetadata"},
+    {"name": "GetAvailableModels", "request": "GetAvailableModelsRequest; optional force_refresh=1:bool", "response": "GetAvailableModelsResponse.response=1:FetchAvailableModelsResponse; models=1:map<string,ModelDetails>"},
+    {"name": "GetAllCascadeTrajectories", "request": "GetAllCascadeTrajectoriesRequest; optional exclude_subtrajectories=1:bool", "response": "GetAllCascadeTrajectoriesResponse.trajectory_summaries=1:repeated map entry"},
+    {"name": "GetCascadeTrajectorySteps", "request": "GetCascadeTrajectoryStepsRequest.cascade_id=1:string; step_offset=2:uint32; verbosity=3:enum; trajectory_verbosity=4:enum", "response": "GetCascadeTrajectoryStepsResponse.steps=1:repeated gemini_coder.Step"},
+    {"name": "StartCascade", "request": "StartCascadeRequest.source=4:CortexTrajectorySource; CORTEX_TRAJECTORY_SOURCE_CLI=17 validated", "response": "StartCascadeResponse.cascade_id=1:string"},
+    {"name": "SendUserCascadeMessage", "request": "SendUserCascadeMessageRequest.cascade_id=1:string; items=2:repeated TextOrScopeItem (text=1:string); cascade_config=5 with planner_config.plan_model=5.1.1:enum", "response": "SendUserCascadeMessageResponse; empty protobuf observed"},
+    {"name": "HandleCascadeUserInteraction", "request": "HandleCascadeUserInteractionRequest.cascade_id=1:string; interaction=2:CascadeUserInteraction with trajectory_id=1:string, step_index=2:uint32, deploy=4:CascadeDeployInteraction; only empty/default-false deploy denial validated", "response": "HandleCascadeUserInteractionResponse; empty protobuf observed"},
+    {"name": "CancelCascadeSteps", "request": "CancelCascadeStepsRequest.cascade_id=1:string; step_indices=2:repeated uint32, packed or unpacked accepted", "response": "CancelCascadeStepsResponse; empty protobuf observed"},
+    {"name": "ForceStopCascadeTree", "request": "ForceStopCascadeTreeRequest.conversation_id=1:string", "response": "ForceStopCascadeTreeResponse; empty protobuf observed"}
+  ],
+  "not_implemented": ["StreamAgentStateUpdates is evidence-only and deferred to Stage 11"]
+}

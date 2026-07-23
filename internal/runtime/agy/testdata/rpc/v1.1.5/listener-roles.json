@@ -1,0 +1,9 @@
+{
+  "source_capture_sha256": "87920b4d403e147309dda675a356c4541fc39e181a0c78ee37993ba8b443659f",
+  "ownership": "both candidates were listeners owned by the launched exact PID",
+  "candidates": [
+    {"ordinal": 1, "transport": "tls", "certificate": "self-signed localhost", "heartbeat": "HTTP 200, grpc-status 0", "metadata": "HTTP 200, grpc-status 0", "wrong_plain_transport": "HTTP 400"},
+    {"ordinal": 2, "transport": "plain_http", "heartbeat": "HTTP 200, grpc-status 0", "metadata": "HTTP 200, grpc-status 0", "wrong_tls_transport": "TLS error"}
+  ],
+  "selection": "enumerate exact-PID loopback candidates, identify transport independently, probe framed Heartbeat, validate metadata identity; prefer TLS and require an explicit plain fallback"
+}
