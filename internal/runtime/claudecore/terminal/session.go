@@ -23,6 +23,10 @@ type Session interface {
 	SendKeys(ctx context.Context, keys ...Key) error
 	Alive(ctx context.Context) bool
 	Kill(ctx context.Context) error
+	// Wait blocks until the hosted process/session has exited. It is the
+	// synchronous lifecycle seam callers use after Kill to ensure resources are
+	// reaped before they release ownership.
+	Wait(ctx context.Context) error
 }
 
 // StartOptions holds parameters for launching a new terminal session.

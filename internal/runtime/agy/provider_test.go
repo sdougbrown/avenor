@@ -35,6 +35,10 @@ func eventWithin(t *testing.T, ch <-chan events.Event) events.Event {
 
 func TestProviderStartReturnsResourceFreeProvisionalSession(t *testing.T) {
 	p := testProvider(runtime.StartOptions{Dir: "/default", Model: "default-model"})
+	p.ptyRPCHostFactory = func(context.Context, runtime.StartOptions, string, string) (*ptyRPCHost, error) {
+		t.Fatal("Phase 1 Start must not select or launch the RPC PTY host")
+		return nil, nil
+	}
 
 	sess, err := p.Start(context.Background(), runtime.StartOptions{Dir: "/work", Model: "chosen-model"})
 	if err != nil {
@@ -116,6 +120,10 @@ func TestProviderFirstPromptAdoptsExternalIDAndForwardsEvents(t *testing.T) {
 
 func TestProviderResumeFirstPromptEmitsLogicalStart(t *testing.T) {
 	p := testProvider(runtime.StartOptions{Dir: "/work", Model: "model-r"})
+	p.ptyRPCHostFactory = func(context.Context, runtime.StartOptions, string, string) (*ptyRPCHost, error) {
+		t.Fatal("Phase 1 Resume must not select or launch the RPC PTY host")
+		return nil, nil
+	}
 	c, out := fakeClient()
 	p.clientFactory = func() *client { return c }
 
