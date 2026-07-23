@@ -1,0 +1,19 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/exa.language_server_pb.LanguageServerService/Heartbeat",
+    "content_type": "application/grpc-web+proto",
+    "body_hex": "0000000000"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/grpc-web+proto"
+    },
+    "body_hex": "000000000e0a0c08cdb788d30610c8deeee1028000000010677270632d7374617475733a20300d0a",
+    "frames": [
+      {"flag_hex": "0x00", "length": 14},
+      {"flag_hex": "0x80", "length": 16, "trailer": "grpc-status: 0\r\n"}
+    ]
+  }
+}
