@@ -111,7 +111,7 @@ Available tools for LLM sub-agent management:
 
 | Tool | Description |
 |---|---|
-| `avenor_spawn` | Dispatch an agent run (blocking or fire-and-forget). Accepts `agent` (optional, maps to a named profile in `agents.json`), `model`, `prompt`, and `dir`. |
+| `avenor_spawn` | Dispatch an agent run (blocking or fire-and-forget). Uses the `pi` backend by default; accepts `agent`, `model`, `prompt`, and `dir`. |
 | `avenor_status` | Get status of a run or all runs; use `view="lifecycle"` for compact progress and permission checks |
 | `avenor_result` | Wait for a run and return its complete final output without transcript details |
 | `avenor_inspect` | Review a bounded transcript, tool activity, permissions, and final output |

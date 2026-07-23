@@ -178,13 +178,15 @@ describe('Avenor Pi extension', () => {
     const singletonClient = { close() {}, cancel: singletonCancel, prompt: singletonPrompt, events() { throw new Error('unused') } }
     const externalClient = { close: externalClose, cancel: async () => {}, prompt: externalPrompt, events() { throw new Error('unused') } }
 
+    const spawnToolMock = mock(async (args: { supervisorId?: string }) => ({
+      run_id: args.supervisorId === '/tmp/external.sock' ? 'run-external' : 'run-1',
+      label: 'demo',
+      supervisor_id: args.supervisorId ?? '/tmp/sock',
+      runtime_id: 'rt-1',
+    }))
+
     await createExtension({
-      spawnTool: mock(async (args: { supervisorId?: string }) => ({
-        run_id: args.supervisorId === '/tmp/external.sock' ? 'run-external' : 'run-1',
-        label: 'demo',
-        supervisor_id: args.supervisorId ?? '/tmp/sock',
-        runtime_id: 'rt-1',
-      })),
+      spawnTool: spawnToolMock,
       statusTool: statusToolMock,
       eventsTool: mock(async () => ({ events: [] })),
       answerPermissionTool: mock(async () => ({ ok: true })),
@@ -230,6 +232,8 @@ describe('Avenor Pi extension', () => {
       undefined,
       { cwd: '/tmp' },
     )
+    expect(spawnToolMock.mock.calls[0]?.[0]).toMatchObject({ backend: 'pi' })
+
     const expectedCompletion = [{
       value: 'run-1',
       label: 'test-pi-explore (explore, run-1)',
@@ -280,11 +284,13 @@ describe('Avenor Pi extension', () => {
 
     await registeredTools.avenor_spawn.execute(
       'tool-external',
-      { agent: 'explore', label: 'external', supervisor_id: '/tmp/external.sock', wait: false },
+      { agent: 'explore', label: 'external', backend: 'opencode-acp', supervisor_id: '/tmp/external.sock', wait: false },
       undefined,
       undefined,
       { cwd: '/tmp' },
     )
+    expect(spawnToolMock.mock.calls[1]?.[0]).toMatchObject({ backend: 'opencode-acp' })
+
     let resolveExternalClose!: () => void
     const externalClosed = new Promise<void>(resolve => { resolveExternalClose = resolve })
     externalClose.mockImplementation(() => { resolveExternalClose() })

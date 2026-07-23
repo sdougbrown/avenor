@@ -759,7 +759,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
         label: Type.Optional(Type.String({ description: 'Human-readable label for the run' })),
         timeout: Type.Optional(Type.String({ description: 'Timeout duration (e.g. 3600s)' })),
         model: Type.Optional(Type.String({ description: 'Model override' })),
-        backend: Type.Optional(Type.String({ description: 'Backend override' })),
+        backend: Type.Optional(Type.String({ description: 'Backend override (defaults to pi)' })),
         server_url: Type.Optional(Type.String({ description: 'Backend server URL' })),
         supervisor_id: Type.Optional(Type.String({ description: 'Reuse an existing supervisor by socket path' })),
         wait: Type.Optional(Type.Boolean({ description: 'Block until complete (default true)' })),
@@ -772,6 +772,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
         const wait = params.wait ?? true
         const dir = params.dir ?? ctx.cwd
         const label = params.label ?? `${params.agent}-${Date.now()}`
+        const backend = params.backend ?? 'pi'
 
         const result = await deps.spawnTool({
           agent: params.agent,
@@ -781,7 +782,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
           dir,
           timeout: params.timeout,
           model: params.model,
-          backend: params.backend,
+          backend,
           serverUrl: params.server_url,
           supervisorId: params.supervisor_id,
         })
