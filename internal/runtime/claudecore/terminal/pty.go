@@ -56,9 +56,13 @@ func (l PTYLauncher) Start(ctx context.Context, opts StartOptions) (Session, err
 		ptmx:     ptmx,
 		terminal: vt10x.New(vt10x.WithSize(opts.Cols, opts.Rows)),
 		alive:    true,
+		waitDone: make(chan struct{}),
 	}
 
 	go ps.readLoop()
+	// Reap natural exits even if a caller only observes Alive. Wait still joins
+	// this single reaper synchronously.
+	ps.startWait()
 
 	return ps, nil
 }
@@ -71,6 +75,10 @@ type PTYSession struct {
 	ptmx     *os.File
 	terminal vt10x.Terminal
 	alive    bool
+
+	waitOnce sync.Once
+	waitDone chan struct{}
+	waitErr  error
 }
 
 func (p *PTYSession) Kind() string { return "pty" }
@@ -151,10 +159,53 @@ func (p *PTYSession) Kill(_ context.Context) error {
 	if ptmx != nil {
 		_ = ptmx.Close()
 	}
+	var err error
 	if p.cmd != nil && p.cmd.Process != nil {
-		_ = p.cmd.Process.Kill()
+		err = p.cmd.Process.Kill()
+		if errors.Is(err, os.ErrProcessDone) {
+			err = nil
+		}
 	}
-	return nil
+	// Preserve the old Kill-only lifecycle while keeping cmd.Wait ownership in
+	// one place. Wait callers still synchronously observe the same completion.
+	p.startWait()
+	return err
+}
+
+// Wait waits for the command's single reaper. cmd.Wait is invoked exactly once
+// by startWait, even when Kill and several Wait callers race.
+func (p *PTYSession) Wait(ctx context.Context) error {
+	p.startWait()
+	select {
+	case <-p.waitDone:
+		p.mu.Lock()
+		err := p.waitErr
+		p.mu.Unlock()
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (p *PTYSession) startWait() {
+	p.waitOnce.Do(func() {
+		go func() {
+			var err error
+			if p.cmd != nil {
+				err = p.cmd.Wait()
+			}
+			p.mu.Lock()
+			p.waitErr = err
+			p.alive = false
+			ptmx := p.ptmx
+			p.ptmx = nil
+			p.mu.Unlock()
+			if ptmx != nil {
+				_ = ptmx.Close()
+			}
+			close(p.waitDone)
+		}()
+	})
 }
 
 func (p *PTYSession) readLoop() {
@@ -162,10 +213,6 @@ func (p *PTYSession) readLoop() {
 		p.mu.Lock()
 		p.alive = false
 		p.mu.Unlock()
-		// Reap the child so killed processes don't become zombies.
-		if p.cmd != nil {
-			_ = p.cmd.Wait()
-		}
 	}()
 	// Snapshot ptmx under the lock — Kill() nils the field concurrently,
 	// and Read on the closed fd is the loop's exit signal.

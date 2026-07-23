@@ -21,6 +21,11 @@ type FakeSession struct {
 	sendNotify chan []string
 	sendErr    error
 	killErr    error
+	killCalls  int
+	waitErr    error
+	waitCalls  int
+	waitDone   chan struct{}
+	waitOnce   sync.Once
 }
 
 // NewFakeSession creates a FakeSession with the given initial capture text.
@@ -32,6 +37,7 @@ func NewFakeSession(name string, pid int, capture string) *FakeSession {
 		pid:      pid,
 		captures: []string{capture},
 		alive:    true,
+		waitDone: make(chan struct{}),
 	}
 }
 
@@ -43,6 +49,7 @@ func NewFakeSessionQueue(name string, pid int, captures []string) *FakeSession {
 		pid:      pid,
 		captures: captures,
 		alive:    true,
+		waitDone: make(chan struct{}),
 	}
 }
 
@@ -105,8 +112,11 @@ func (f *FakeSession) Alive(_ context.Context) bool {
 // SetAlive controls the Alive() result.
 func (f *FakeSession) SetAlive(v bool) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.alive = v
+	f.mu.Unlock()
+	if !v {
+		f.completeWait()
+	}
 }
 
 // Name returns the session name.
@@ -196,11 +206,57 @@ func (f *FakeSession) SetSendNotify(ch chan []string) {
 	f.sendNotify = ch
 }
 
-// Kill returns the configured error.
+// Kill returns the configured error and completes the fake process lifecycle.
 func (f *FakeSession) Kill(_ context.Context) error {
 	f.mu.Lock()
+	f.killCalls++
+	f.alive = false
+	err := f.killErr
+	f.mu.Unlock()
+	f.completeWait()
+	return err
+}
+
+// Wait waits for the fake process to exit.
+func (f *FakeSession) Wait(ctx context.Context) error {
+	f.mu.Lock()
+	f.waitCalls++
+	done := f.waitDone
+	f.mu.Unlock()
+	select {
+	case <-done:
+		f.mu.Lock()
+		err := f.waitErr
+		f.mu.Unlock()
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (f *FakeSession) completeWait() {
+	f.waitOnce.Do(func() { close(f.waitDone) })
+}
+
+// SetWaitErr sets the result returned after the fake process exits.
+func (f *FakeSession) SetWaitErr(err error) {
+	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.killErr
+	f.waitErr = err
+}
+
+// KillCalls reports calls to Kill.
+func (f *FakeSession) KillCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.killCalls
+}
+
+// WaitCalls reports calls to Wait.
+func (f *FakeSession) WaitCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.waitCalls
 }
 
 // SetKillErr sets the error returned from Kill.

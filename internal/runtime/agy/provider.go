@@ -24,21 +24,23 @@ func defaultClientFactory() *client {
 
 // Provider implements the runtime.Provider interface for agy-based sessions.
 type Provider struct {
-	opts          runtime.StartOptions
-	mu            sync.Mutex
-	sessions      map[string]*sessionState
-	version       string
-	versionErr    error
-	versionOnce   sync.Once
-	clientFactory clientFactory
+	opts              runtime.StartOptions
+	mu                sync.Mutex
+	sessions          map[string]*sessionState
+	version           string
+	versionErr        error
+	versionOnce       sync.Once
+	clientFactory     clientFactory
+	ptyRPCHostFactory ptyRPCHostFactory // Stage 18 selects this seam; Phase 1 never invokes it.
 }
 
 // NewWithOptions creates a new Provider with the given start options.
 func NewWithOptions(opts runtime.StartOptions) *Provider {
 	return &Provider{
-		opts:          opts,
-		sessions:      make(map[string]*sessionState),
-		clientFactory: defaultClientFactory,
+		opts:              opts,
+		sessions:          make(map[string]*sessionState),
+		clientFactory:     defaultClientFactory,
+		ptyRPCHostFactory: defaultPTYRPCHostFactory,
 	}
 }
 
@@ -47,6 +49,7 @@ type sessionState struct {
 	mu sync.Mutex
 
 	client    *client
+	rpcHost   *ptyRPCHost // Reserved for an already-probed Stage 18 RPC selection.
 	sessionID string
 	startOpts runtime.StartOptions
 	initCache map[string]any
@@ -680,11 +683,18 @@ func (p *Provider) Close() error {
 		s.closed = true
 		cl := s.client
 		s.client = nil
+		rpc := s.rpcHost
+		s.rpcHost = nil
 		s.mu.Unlock()
 
 		if cl != nil {
 			if err := cl.Close(); err != nil && firstErr == nil {
 				firstErr = fmt.Errorf("close session %q: %w", s.sessionID, err)
+			}
+		}
+		if rpc != nil {
+			if err := rpc.Close(context.Background()); err != nil && firstErr == nil {
+				firstErr = fmt.Errorf("close RPC session: %w", err)
 			}
 		}
 

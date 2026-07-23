@@ -109,4 +109,24 @@ func (s *TmuxSession) Kill(ctx context.Context) error {
 	return exec.CommandContext(ctx, "tmux", "kill-session", "-t", s.name).Run()
 }
 
+// Wait polls tmux session ownership rather than terminal contents. tmux owns
+// its pane child, so there is no child process for this package to reap.
+func (s *TmuxSession) Wait(ctx context.Context) error {
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !s.Alive(ctx) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
 var _ Session = (*TmuxSession)(nil)

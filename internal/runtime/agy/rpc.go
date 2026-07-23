@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	agyv115 "github.com/sdougbrown/avenor/internal/runtime/agy/interop/v115"
@@ -52,6 +53,9 @@ type rpcHost struct {
 	endpoint  rpcEndpoint
 	version   string
 	sessionID string
+
+	closeOnce sync.Once
+	closeHook func() // test seam; production hosts leave this nil.
 }
 
 type rpcDiscoveryOptions struct {
@@ -497,6 +501,14 @@ func discoverRPCHost(ctx context.Context, pid int, version string, options rpcDi
 	return nil, errors.New("agy RPC discovery could not validate an owned listener")
 }
 
+// startCascade starts a new interactive cascade through the typed RPC client.
+func (h *rpcHost) startCascade(ctx context.Context) (*agyv115.StartCascadeResponse, error) {
+	if h == nil || h.client == nil {
+		return nil, errors.New("agy RPC cascade start requires a discovered host")
+	}
+	return h.client.startCascade(ctx)
+}
+
 func (h *rpcHost) validateSession(ctx context.Context, expectedSessionID string) error {
 	if h == nil || h.client == nil {
 		return errors.New("agy RPC session validation requires a discovered host")
@@ -520,7 +532,12 @@ func (h *rpcHost) validateSession(ctx context.Context, expectedSessionID string)
 
 func (h *rpcHost) close() {
 	if h != nil {
-		h.client.close()
+		h.closeOnce.Do(func() {
+			h.client.close()
+			if h.closeHook != nil {
+				h.closeHook()
+			}
+		})
 	}
 }
 
