@@ -517,6 +517,35 @@ describe('Client.prompt', () => {
   })
 })
 
+describe('Client.interruptAndPrompt', () => {
+  let server: net.Server
+
+  afterEach(() => {
+    server?.close()
+  })
+
+  it('interrupts a runtime and replaces queued prompts by default', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      expect(req.method).toBe('interrupt_and_prompt')
+      expect(req.params).toEqual({
+        runtime_id: 'rt-1',
+        text: 'change direction',
+        keep_queue: false,
+      })
+      sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: null }) + '\n')
+    })
+
+    const client = await dial(socketPath)
+    try {
+      await client.interruptAndPrompt('rt-1', 'change direction')
+    } finally {
+      client.close()
+    }
+  })
+})
+
 describe('Client.cancel', () => {
   let server: net.Server
 

@@ -171,12 +171,12 @@ describe('Avenor Pi extension', () => {
 
     const statusToolMock = mock(async () => ({ run_id: 'run-1', label: 'demo', status: 'running', runtime_id: 'rt-1' }))
     const resultToolMock = mock(async () => ({ run_id: 'run-1', label: 'demo', status: 'done', ready: true, output: 'hello world' }))
-    const singletonPrompt = mock(async () => {})
+    const singletonInterruptAndPrompt = mock(async () => {})
     const singletonCancel = mock(async () => {})
-    const externalPrompt = mock(async () => {})
+    const externalInterruptAndPrompt = mock(async () => {})
     const externalClose = mock(() => {})
-    const singletonClient = { close() {}, cancel: singletonCancel, prompt: singletonPrompt, events() { throw new Error('unused') } }
-    const externalClient = { close: externalClose, cancel: async () => {}, prompt: externalPrompt, events() { throw new Error('unused') } }
+    const singletonClient = { close() {}, cancel: singletonCancel, interruptAndPrompt: singletonInterruptAndPrompt, events() { throw new Error('unused') } }
+    const externalClient = { close: externalClose, cancel: async () => {}, interruptAndPrompt: externalInterruptAndPrompt, events() { throw new Error('unused') } }
 
     const spawnToolMock = mock(async (args: { supervisorId?: string }) => ({
       run_id: args.supervisorId === '/tmp/external.sock' ? 'run-external' : 'run-1',
@@ -277,8 +277,8 @@ describe('Avenor Pi extension', () => {
       overlay.dispose()
     }
 
-    await runWatchAction('run-1', singletonPrompt, overlay => overlay.submit('continue'))
-    expect(singletonPrompt).toHaveBeenCalledWith('rt-1', 'continue')
+    await runWatchAction('run-1', singletonInterruptAndPrompt, overlay => overlay.submit('continue'))
+    expect(singletonInterruptAndPrompt).toHaveBeenCalledWith('rt-1', 'continue')
     await runWatchAction('run-1', singletonCancel, overlay => overlay.handleInput('\u0003'))
     expect(singletonCancel).toHaveBeenCalledWith('rt-1')
 
@@ -294,9 +294,9 @@ describe('Avenor Pi extension', () => {
     let resolveExternalClose!: () => void
     const externalClosed = new Promise<void>(resolve => { resolveExternalClose = resolve })
     externalClose.mockImplementation(() => { resolveExternalClose() })
-    await runWatchAction('run-external', externalPrompt, overlay => overlay.submit('continue'))
+    await runWatchAction('run-external', externalInterruptAndPrompt, overlay => overlay.submit('continue'))
     await externalClosed
-    expect(externalPrompt).toHaveBeenCalledWith('rt-1', 'continue')
+    expect(externalInterruptAndPrompt).toHaveBeenCalledWith('rt-1', 'continue')
     expect(externalClose).toHaveBeenCalledTimes(1)
 
     const result = await registeredTools.avenor_result.execute('tool-result', { run_id: 'run-1', timeout: '5m' })

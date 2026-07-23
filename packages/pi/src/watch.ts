@@ -55,7 +55,7 @@ export interface WatchDeps {
     initialSnapshot?: InspectResult['snapshot'],
   ): Promise<RunObserver | null>
   cancelRun(run: WatchRunRef, runtimeId: string): Promise<void>
-  promptRun(run: WatchRunRef, runtimeId: string, text: string): Promise<void>
+  interruptAndPromptRun(run: WatchRunRef, runtimeId: string, text: string): Promise<void>
   followUpRun(run: WatchRunRef, text: string): Promise<{ run_id: string; label: string }>
 }
 
@@ -255,7 +255,7 @@ function renderToolState(tool: RunToolState, width: number, theme: Theme): strin
 function helpText(state: WatchViewState): string {
   const actions: string[] = ['↑/↓ scroll', 'pgup/pgdn page', 'home/end jump', 'esc close']
   if (state.status && isPromptable(state.status, state.snapshot)) {
-    actions.unshift('enter send prompt', 'ctrl-c cancel run')
+    actions.unshift('enter interrupt and send', 'ctrl-c cancel run')
   } else if (isFollowUpable(state.status, state.snapshot)) {
     actions.unshift('enter follow up')
   }
@@ -452,9 +452,9 @@ export class RunInspectorOverlay implements Component, Focusable {
     const runtimeId = this.state.run.runtimeId ?? this.state.status?.runtime_id ?? this.state.snapshot.identity.runtime_id
     if (this.state.status && isPromptable(this.state.status, this.state.snapshot) && runtimeId) {
       this.runAction(async () => {
-        await this.deps.promptRun(this.state.run, runtimeId, text)
-        this.state = { ...this.state, actionMessage: clipText(`Queued prompt: ${text}`, ACTION_STATUS_CHARS) }
-      }, 'sending prompt…')
+        await this.deps.interruptAndPromptRun(this.state.run, runtimeId, text)
+        this.state = { ...this.state, actionMessage: clipText(`Interrupted and sent: ${text}`, ACTION_STATUS_CHARS) }
+      }, 'interrupting and sending…')
       return
     }
 
@@ -637,7 +637,7 @@ export class RunInspectorOverlay implements Component, Focusable {
     lines.push(...this.input.render(innerWidth).map(line => truncateToWidth(line, innerWidth)))
 
     const promptHint = this.state.status && isPromptable(this.state.status, this.state.snapshot)
-      ? 'send prompt to running/waiting run'
+      ? 'interrupt and send to running/waiting run'
       : isFollowUpable(this.state.status, this.state.snapshot)
         ? 'start a follow-up run from this transcript'
         : 'read-only view'

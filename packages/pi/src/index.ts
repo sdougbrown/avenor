@@ -518,9 +518,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
             await client.cancel(runtimeId)
           })
         },
-        promptRun(run, runtimeId, text) {
+        interruptAndPromptRun(run, runtimeId, text) {
           return withClient(run, async client => {
-            await client.prompt(runtimeId, text)
+            await client.interruptAndPrompt(runtimeId, text)
           })
         },
         followUpRun(run, text) {

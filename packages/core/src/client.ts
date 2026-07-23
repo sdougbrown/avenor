@@ -347,6 +347,14 @@ export class Client {
     await this.call('prompt', { runtime_id: runtimeId, text })
   }
 
+  async interruptAndPrompt(runtimeId: string, text: string, keepQueue = false): Promise<void> {
+    await this.call('interrupt_and_prompt', {
+      runtime_id: runtimeId,
+      text,
+      keep_queue: keepQueue,
+    })
+  }
+
   async cancel(runtimeId?: string): Promise<void> {
     const params = runtimeId ? { runtime_id: runtimeId } : undefined
     await this.call('cancel', params)

@@ -115,7 +115,7 @@ function makeDeps(overrides: Partial<WatchDeps> = {}): WatchDeps {
     ]), { status: 'running' })),
     observeRun: overrides.observeRun ?? mock(async () => null),
     cancelRun: overrides.cancelRun ?? mock(async () => {}),
-    promptRun: overrides.promptRun ?? mock(async () => {}),
+    interruptAndPromptRun: overrides.interruptAndPromptRun ?? mock(async () => {}),
     followUpRun: overrides.followUpRun ?? mock(async () => ({ run_id: 'run-2', label: 'follow-up' })),
   }
 }
@@ -174,14 +174,14 @@ describe('RunInspectorOverlay', () => {
     const snapshot = buildSnapshot([
       { event: 'session.start', runtime_id: 'rt-error', run_id: 'run-error', backend: 'pi' },
     ])
-    const promptRun = mock(async () => { throw new Error('prompt rejected') })
+    const interruptAndPromptRun = mock(async () => { throw new Error('prompt rejected') })
     const overlay = new RunInspectorOverlay(
       tui as any,
       theme as any,
       keybindings as any,
       makeDeps({
         inspectRun: mock(async () => makeInspectResult(snapshot, { status: 'running' })),
-        promptRun,
+        interruptAndPromptRun,
       }),
       { runId: 'run-error', runtimeId: 'rt-error' },
       () => {},
@@ -194,7 +194,7 @@ describe('RunInspectorOverlay', () => {
 
     ;(overlay as any).submit('retry')
     await flush()
-    expect(promptRun).toHaveBeenCalledTimes(2)
+    expect(interruptAndPromptRun).toHaveBeenCalledTimes(2)
     overlay.dispose()
   })
 
@@ -288,8 +288,8 @@ describe('RunInspectorOverlay', () => {
     overlay.dispose()
   })
 
-  it('dispatches prompt and cancel actions for active runs', async () => {
-    const promptRun = mock(async () => {})
+  it('interrupts and replaces queued prompts for active runs', async () => {
+    const interruptAndPromptRun = mock(async () => {})
     const cancelRun = mock(async () => {})
     const snapshot = buildSnapshot([
       { event: 'session.start', runtime_id: 'rt-3', run_id: 'run-3', run_label: 'active', backend: 'pi', agent: 'horse' },
@@ -301,7 +301,7 @@ describe('RunInspectorOverlay', () => {
       keybindings as any,
       makeDeps({
         inspectRun: mock(async () => makeInspectResult(snapshot, { status: 'running' })),
-        promptRun,
+        interruptAndPromptRun,
         cancelRun,
       }),
       { runId: 'run-3', runtimeId: 'rt-3' },
@@ -311,7 +311,7 @@ describe('RunInspectorOverlay', () => {
     await flush()
     ;(overlay as any).submit('keep going')
     await flush()
-    expect(promptRun).toHaveBeenCalledWith(expect.objectContaining({ runId: 'run-3' }), 'rt-3', 'keep going')
+    expect(interruptAndPromptRun).toHaveBeenCalledWith(expect.objectContaining({ runId: 'run-3' }), 'rt-3', 'keep going')
 
     overlay.handleInput('\u0003')
     await flush()
