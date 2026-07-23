@@ -16,6 +16,9 @@ export interface RunInfo {
   eventLogPath: string
   runtimeId?: string
   sessionId?: string
+  agent?: string
+  backend?: string
+  dir?: string
   brokerUrl?: string
   parentToken?: string
 }
@@ -275,6 +278,9 @@ export class Supervisor {
       eventLogPath: (result.on_event as string) ?? eventLogPath,
       runtimeId: result.runtime_id as string | undefined,
       sessionId: result.session_id as string | undefined,
+      agent: (spawnParams.agent as string | undefined) ?? params.agent as string | undefined,
+      backend: spawnParams.backend as string | undefined,
+      dir: spawnParams.dir as string | undefined,
       brokerUrl: result.broker_url as string | undefined,
       parentToken: result.parent_token as string | undefined,
     }

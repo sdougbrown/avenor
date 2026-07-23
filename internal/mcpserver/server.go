@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	"crypto/subtle"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -71,7 +72,7 @@ type spawnArgs struct {
 	Label        string `json:"label,omitempty" jsonschema:"optional label for the run"`
 	Timeout      string `json:"timeout,omitempty" jsonschema:"optional timeout in seconds (numeric string)"`
 	Model        string `json:"model,omitempty" jsonschema:"optional model to use"`
-	Backend      string `json:"backend,omitempty" jsonschema:"optional runtime backend (opencode-http, opencode-acp, codex-app-server)"`
+	Backend      string `json:"backend,omitempty" jsonschema:"optional runtime backend (for example pi, opencode-acp, or codex-app-server)"`
 	ServerURL    string `json:"server_url,omitempty" jsonschema:"optional opencode serve URL for opencode-http backend"`
 	SupervisorID string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
 	AutoApprove  bool   `json:"auto_approve,omitempty" jsonschema:"optional auto-approve all permission requests so the run executes unattended (no answer_permission needed)"`
@@ -344,6 +345,16 @@ func (s *Server) recoverFinalOutput(runID string) (string, bool) {
 	return output, found
 }
 
+func (s *Server) resultSupervisorID(runID, requestedSupervisorID string) string {
+	if requestedSupervisorID != "" {
+		return requestedSupervisorID
+	}
+	if ri := s.registry.Lookup(runID); ri != nil {
+		return ri.SupervisorID
+	}
+	return ""
+}
+
 func (s *Server) handleAvenorResult(ctx context.Context, req *mcp.CallToolRequest, args resultArgs) (*mcp.CallToolResult, any, error) {
 	if args.RunID == "" {
 		return nil, nil, fmt.Errorf("run_id is required")
@@ -359,7 +370,8 @@ func (s *Server) handleAvenorResult(ctx context.Context, req *mcp.CallToolReques
 		deadline = s.clock().Add(time.Duration(seconds) * time.Second)
 	}
 
-	cl, cleanup, err := s.getClientForSupervisor(args.SupervisorID)
+	supervisorID := s.resultSupervisorID(args.RunID, args.SupervisorID)
+	cl, cleanup, err := s.getClientForSupervisor(supervisorID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -521,6 +533,7 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 		SentinelPath: sentinelPath,
 		EventLogPath: eventLogPath,
 		Agent:        args.Agent,
+		Backend:      args.Backend,
 		Dir:          args.RepoDir,
 		CreatedAt:    time.Now(),
 	}); err != nil {
@@ -696,7 +709,13 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 
 	sessionID, err := readSentinelSession(ri.SentinelPath)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read sentinel session: %w", err)
+		// A supervisor returns session_id when it creates the runtime, before a
+		// terminal sentinel exists. Preserve failed/non-resumable sentinels as
+		// errors, but allow that durable registry value to cover a missing file.
+		if !errors.Is(err, os.ErrNotExist) || ri.SessionID == "" {
+			return nil, nil, fmt.Errorf("read sentinel session: %w", err)
+		}
+		sessionID = ri.SessionID
 	}
 
 	runID := uuid.New().String()
@@ -716,6 +735,9 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 		"session_id":    sessionID,
 		"sentinel_file": sentinelPath,
 		"on_event":      eventLogPath,
+	}
+	if ri.Backend != "" {
+		params["backend"] = ri.Backend
 	}
 
 	cl, cleanup, err := s.getClientForSupervisor(supervisorID)
@@ -743,6 +765,7 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 		SentinelPath: sentinelPath,
 		EventLogPath: eventLogPath,
 		Agent:        ri.Agent,
+		Backend:      ri.Backend,
 		Dir:          ri.Dir,
 		CreatedAt:    time.Now(),
 	}); err != nil {

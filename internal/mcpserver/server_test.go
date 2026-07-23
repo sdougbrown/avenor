@@ -127,6 +127,28 @@ func TestNewServerInvalidOptions(t *testing.T) {
 // from the registry, so an explicit id equal to the default supervisor must
 // reuse the persistent owner connection rather than dialing a fresh (non-owner)
 // one — otherwise ensureOwner rejects the call with permission_denied.
+func TestResultSupervisorIDUsesRegisteredRun(t *testing.T) {
+	s, err := NewServer(Options{
+		Transport:     "stdio",
+		NoAutostart:   true,
+		ControlClient: &fakeClient{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.registry.Store(&RunInfo{
+		RunID:        "run-on-secondary",
+		SupervisorID: "/tmp/avenor-secondary.sock",
+	})
+
+	if got := s.resultSupervisorID("run-on-secondary", ""); got != "/tmp/avenor-secondary.sock" {
+		t.Fatalf("result supervisor = %q, want registered secondary supervisor", got)
+	}
+	if got := s.resultSupervisorID("run-on-secondary", "/tmp/explicit.sock"); got != "/tmp/explicit.sock" {
+		t.Fatalf("result supervisor = %q, want explicit supervisor", got)
+	}
+}
+
 func TestGetClientForSupervisorReusesOwnerConn(t *testing.T) {
 	fake := &fakeClient{}
 	s, err := NewServer(Options{
@@ -1035,6 +1057,7 @@ func TestAvenorSpawnWithOptionalParams(t *testing.T) {
 		Prompt:     "initial prompt text",
 		PromptFile: "/tmp/prompt.md",
 		Model:      "gpt-5",
+		Backend:    "pi",
 		Timeout:    "300",
 	})
 	if err != nil {
@@ -1053,6 +1076,9 @@ func TestAvenorSpawnWithOptionalParams(t *testing.T) {
 	}
 	if p["model"] != "gpt-5" {
 		t.Errorf("expected model 'gpt-5', got %v", p["model"])
+	}
+	if p["backend"] != "pi" {
+		t.Errorf("expected backend 'pi', got %v", p["backend"])
 	}
 	if p["timeout"] != 300 {
 		t.Errorf("expected timeout 300 (int), got %v (%T)", p["timeout"], p["timeout"])
@@ -1085,6 +1111,9 @@ func TestAvenorSpawnWithOptionalParams(t *testing.T) {
 	}
 	if ri.Agent != "codex" {
 		t.Errorf("expected agent codex, got %s", ri.Agent)
+	}
+	if ri.Backend != "pi" {
+		t.Errorf("expected backend pi, got %s", ri.Backend)
 	}
 	if ri.Dir != "/tmp/test-repo" {
 		t.Errorf("expected dir /tmp/test-repo, got %s", ri.Dir)
@@ -1965,6 +1994,7 @@ func TestAvenorFollowUp(t *testing.T) {
 		RuntimeID:    "rt_prior_1",
 		SentinelPath: sentinelPath,
 		Agent:        "claude",
+		Backend:      "pi",
 		Dir:          "/tmp/prior-repo",
 	})
 
@@ -2000,6 +2030,9 @@ func TestAvenorFollowUp(t *testing.T) {
 	if p["agent"] != "claude" {
 		t.Errorf("expected agent claude, got %v", p["agent"])
 	}
+	if p["backend"] != "pi" {
+		t.Errorf("expected backend pi, got %v", p["backend"])
+	}
 	if p["dir"] != "/tmp/prior-repo" {
 		t.Errorf("expected dir /tmp/prior-repo, got %v", p["dir"])
 	}
@@ -2014,6 +2047,9 @@ func TestAvenorFollowUp(t *testing.T) {
 	if ri.Agent != "claude" {
 		t.Errorf("expected agent claude, got %s", ri.Agent)
 	}
+	if ri.Backend != "pi" {
+		t.Errorf("expected backend pi, got %s", ri.Backend)
+	}
 	if ri.Dir != "/tmp/prior-repo" {
 		t.Errorf("expected dir /tmp/prior-repo, got %s", ri.Dir)
 	}
@@ -2022,6 +2058,53 @@ func TestAvenorFollowUp(t *testing.T) {
 	}
 	if ri.SessionID != "ses_followup_1" {
 		t.Errorf("expected new session_id ses_followup_1, got %s", ri.SessionID)
+	}
+}
+
+func TestAvenorFollowUpUsesRegistrySessionWhenSentinelMissing(t *testing.T) {
+	fake := &fakeClient{
+		spawnResult: map[string]any{
+			"runtime_id": "rt_followup_pi",
+			"session_id": "ses_followup_pi",
+		},
+	}
+	s, err := NewServer(Options{
+		Transport:     "stdio",
+		NoAutostart:   true,
+		ControlClient: fake,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.registry.Store(&RunInfo{
+		RunID:        "run-pi-prior",
+		Label:        "pi-prior",
+		RuntimeID:    "rt_pi_prior",
+		SessionID:    "ses_pi_prior",
+		SentinelPath: filepath.Join(t.TempDir(), "missing.done"),
+		Agent:        "explore",
+		Backend:      "pi",
+		Dir:          "/tmp/pi-repo",
+	})
+
+	_, _, err = s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
+		RunID:   "run-pi-prior",
+		Message: "continue",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p := fake.spawnCapturedParams
+	if p["session_id"] != "ses_pi_prior" {
+		t.Errorf("expected stored session ses_pi_prior, got %v", p["session_id"])
+	}
+	if p["backend"] != "pi" {
+		t.Errorf("expected backend pi, got %v", p["backend"])
+	}
+	if p["dir"] != "/tmp/pi-repo" {
+		t.Errorf("expected dir /tmp/pi-repo, got %v", p["dir"])
 	}
 }
 
@@ -2132,6 +2215,7 @@ func TestAvenorFollowUpNotResumable(t *testing.T) {
 		RunID:        "run-prior-5",
 		Label:        "prior-failed",
 		RuntimeID:    "rt_prior_5",
+		SessionID:    "ses_failed",
 		SentinelPath: sentinelPath,
 		Agent:        "claude",
 		Dir:          "/tmp/prior-repo",

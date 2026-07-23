@@ -35,7 +35,7 @@ describe('followUpTool with an external supervisor', () => {
     if (home) fs.rmSync(home, { recursive: true, force: true })
   })
 
-  it('returns the runtime_id from the spawned follow-up', async () => {
+  it('returns the runtime_id from the spawned follow-up (sentinel path)', async () => {
     home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-follow-up-test-'))
     process.env.AVENOR_HOME = home
     const runDir = path.join(home, 'runs', 'original-run')
@@ -53,6 +53,39 @@ describe('followUpTool with an external supervisor', () => {
       agent: 'jockey',
       prompt: 'continue',
       session_id: 'ses-original',
+    })
+    expect(result.run_id).toBe('rt-followup')
+    expect(closeMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('falls back to liveStatus.session_id when no sentinel SESSION', async () => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-follow-up-test-'))
+    process.env.AVENOR_HOME = home
+    const runDir = path.join(home, 'runs', 'no-sentinel-run')
+    fs.mkdirSync(runDir, { recursive: true })
+    // No sentinel file at all
+
+    statusMock.mockClear()
+    statusMock.mockResolvedValueOnce({
+      agent: 'jockey',
+      session_id: 'ses-from-live',
+      backend: 'pi',
+      dir: '/repo/from-original-run',
+    })
+
+    const result = await followUpTool({
+      runId: 'no-sentinel-run',
+      message: 'continue',
+      supervisorId: '/tmp/avenor-mcp-test.sock',
+    })
+
+    expect(spawnMock).toHaveBeenCalledTimes(1)
+    expect(spawnMock.mock.calls[0]?.[0]).toMatchObject({
+      agent: 'jockey',
+      prompt: 'continue',
+      session_id: 'ses-from-live',
+      backend: 'pi',
+      dir: '/repo/from-original-run',
     })
     expect(result.run_id).toBe('rt-followup')
     expect(closeMock).toHaveBeenCalledTimes(1)

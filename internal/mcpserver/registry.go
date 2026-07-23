@@ -15,6 +15,7 @@ type RunInfo struct {
 	SentinelPath string
 	EventLogPath string
 	Agent        string
+	Backend      string
 	Dir          string
 	CreatedAt    time.Time
 }

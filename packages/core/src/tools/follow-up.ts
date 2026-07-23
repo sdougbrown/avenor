@@ -44,9 +44,17 @@ export async function followUpTool(args: {
   supervisorId?: string
 }): Promise<{ run_id: string; label: string }> {
   if (args.supervisorId) {
-    const { client, isSingleton } = await getSupervisorClient(args.supervisorId)
+    const { client, isSingleton, sup } = await getSupervisorClient(args.supervisorId)
     try {
       validateRunId(args.runId)
+
+      // Try to resolve the run via the local supervisor's run map first
+      let runInfo: RunInfo | undefined
+      if (isSingleton && sup) {
+        runInfo = findRunByLabel(sup, args.runId)
+      }
+      const fallbackSessionId = runInfo?.sessionId
+
       let liveStatus: Record<string, unknown> | null = null
       try {
         liveStatus = await client.status(args.runId)
@@ -58,24 +66,38 @@ export async function followUpTool(args: {
         (liveStatus?.sentinel_file as string | undefined) ??
         path.join(runsRoot(), args.runId, 'sentinel.done')
       const sentinel = await parseSentinel(sentinelPath)
-      if (!sentinel?.SESSION) {
+      const sessionId =
+        sentinel?.SESSION ??
+        (liveStatus?.session_id as string | undefined) ??
+        fallbackSessionId
+      if (!sessionId) {
         throw new Error('run has no session to resume')
       }
 
-      const agent = (liveStatus?.agent as string) ?? 'codex'
+      // Prefer live supervisor metadata, then the local run map, so an
+      // explicit supervisor retains the original runtime context as well.
+      const agent = (liveStatus?.agent as string) ?? runInfo?.agent ?? 'codex'
+      const backend =
+        (liveStatus?.backend as string | undefined) ?? runInfo?.backend
+      const dir = (liveStatus?.dir as string | undefined) ?? runInfo?.dir
 
       const followUpRunId = crypto.randomUUID()
       const followUpLabel = args.label ?? `${args.runId}-followup`
       const { sentinelPath: followUpSentinelPath, eventLogPath } =
         ensureRunPaths(followUpRunId)
-      const result = await client.spawn({
+
+      const spawnParams: Record<string, unknown> = {
         agent,
         prompt: args.message,
         label: followUpLabel,
-        session_id: sentinel.SESSION,
+        session_id: sessionId,
         sentinel_file: followUpSentinelPath,
         on_event: eventLogPath,
-      })
+      }
+      if (backend) spawnParams.backend = backend
+      if (dir) spawnParams.dir = dir
+
+      const result = await client.spawn(spawnParams)
       // With an external supervisor there is no local Supervisor.run map to
       // translate our filesystem UUID back to the control-plane runtime. As
       // spawnTool does, expose the runtime ID so status/permission calls can
@@ -99,29 +121,36 @@ export async function followUpTool(args: {
   }
 
   const sentinel = await parseSentinel(runInfo.sentinelPath)
+  const sessionId = sentinel?.SESSION ?? runInfo.sessionId
 
-  if (!sentinel?.SESSION) {
+  if (!sessionId) {
     throw new Error('run has no session to resume')
   }
 
   const client = sup.getClient()
 
-  let agent = 'codex'
+  // The run map preserves explicitly supplied context. Live status supplies
+  // the resolved values when the original spawn relied on supervisor defaults.
+  let liveStatus: Record<string, unknown> | null = null
   if (runInfo.runtimeId) {
     try {
-      const liveStatus = await client.status(runInfo.runtimeId)
-      agent = (liveStatus?.agent as string) ?? 'codex'
+      liveStatus = await client.status(runInfo.runtimeId)
     } catch {
-      // fallback to default
+      // Stored metadata still permits a follow-up when status is unavailable.
     }
   }
+  const agent = (liveStatus?.agent as string | undefined) ?? runInfo.agent ?? 'codex'
+  const backend = (liveStatus?.backend as string | undefined) ?? runInfo.backend
+  const dir = (liveStatus?.dir as string | undefined) ?? runInfo.dir
 
   const followUpLabel = args.label ?? `${runInfo.label}-followup`
 
   const followUpRun = await sup.spawn({
     agent,
+    backend,
+    dir,
     prompt: args.message,
-    session_id: sentinel.SESSION,
+    session_id: sessionId,
     label: followUpLabel,
   })
 

@@ -8,6 +8,7 @@ import {
   Supervisor,
   type RunInfo,
 } from './supervisor.js'
+import { followUpTool } from './tools/follow-up.js'
 
 function useFakeAvenorUnlessRealIntegration(): void {
   if (process.env.AVENOR_REAL_INTEGRATION === '1') return
@@ -34,6 +35,7 @@ const skipIfNoBinary = !hasAvenorBinary()
 
 describe.skipIf(skipIfNoBinary)('Supervisor lifecycle', () => {
   let supervisor: Supervisor
+  let originalRun: RunInfo
 
   afterAll(async () => {
     await supervisor?.close().catch(() => {})
@@ -52,11 +54,34 @@ describe.skipIf(skipIfNoBinary)('Supervisor lifecycle', () => {
   })
 
   it('supervisor.spawn() returns a run entry', async () => {
-    const run = await supervisor.spawn({ prompt: 'exit 0' } as any)
-    expect(run).toBeObject()
-    expect(run.runtimeId).toBeString()
-    expect(run.sentinelPath).toBeString()
-    expect(run.eventLogPath).toBeString()
+    originalRun = await supervisor.spawn({
+      agent: 'explore',
+      backend: 'pi',
+      dir: '/tmp/original-repo',
+      prompt: 'exit 0',
+    })
+    expect(originalRun).toBeObject()
+    expect(originalRun.runtimeId).toBeString()
+    expect(originalRun.sentinelPath).toBeString()
+    expect(originalRun.eventLogPath).toBeString()
+    expect(originalRun.agent).toBe('explore')
+    expect(originalRun.backend).toBe('pi')
+    expect(originalRun.dir).toBe('/tmp/original-repo')
+  }, 15_000)
+
+  it('follows up from stored Pi context when no sentinel exists', async () => {
+    fs.rmSync(originalRun.sentinelPath, { force: true })
+
+    const result = await followUpTool({
+      runId: originalRun.runId,
+      message: 'continue',
+    })
+    const followUpRun = (supervisor as any).runs.get(result.run_id) as RunInfo
+
+    expect(followUpRun.sessionId).toBe(originalRun.sessionId)
+    expect(followUpRun.agent).toBe('explore')
+    expect(followUpRun.backend).toBe('pi')
+    expect(followUpRun.dir).toBe('/tmp/original-repo')
   }, 15_000)
 
   it('supervisor.close() terminates cleanly', async () => {
