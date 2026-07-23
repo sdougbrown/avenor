@@ -791,6 +791,7 @@ type SessionWaitConfig struct {
 	PermissionClaimTimeout time.Duration
 	ProgressTimeout        time.Duration
 	Timeout                <-chan time.Time
+	AdoptSessionID         func(string)
 }
 
 type SessionWaitDeps struct {
@@ -871,7 +872,19 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 					return sessionResult{ExitCode: 1}
 				}
 				return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), LoopDirective: loopDirective, LoopLabel: loopLabel, Output: output.String(), FinalReply: finalReply.String(), Usage: bufferedUsage}
-			} else if progressTimer != nil {
+			} else {
+				if event.Event == "session.start" {
+					externalID, _ := event.Fields["conversation_id"].(string)
+					if externalID != "" && externalID != cfg.SessionID {
+						cfg.SessionID = externalID
+						tracker.sessionID = externalID
+						if cfg.AdoptSessionID != nil {
+							cfg.AdoptSessionID(externalID)
+						}
+					}
+				}
+			}
+			if ok && progressTimer != nil {
 				if !progressTimer.Stop() {
 					select {
 					case <-progressTimer.C:
