@@ -237,7 +237,7 @@ func parseGRPCStatus(statusText string) (int, error) {
 		}
 	}
 	status, err := strconv.Atoi(statusText)
-	if err != nil || status < 0 {
+	if err != nil || status < 0 || status > 16 {
 		return 0, errors.New("invalid grpc status")
 	}
 	return status, nil
@@ -317,6 +317,23 @@ func (c *rpcClient) call(ctx context.Context, method string, request, response p
 		return errors.New("agy RPC request failed")
 	}
 	defer resp.Body.Close()
+	if err := validateGRPCWebResponse(resp); err != nil {
+		return err
+	}
+	responsePayload, err := readGRPCWebUnary(ctx, resp.Body)
+	if err != nil {
+		return err
+	}
+	if err := proto.Unmarshal(responsePayload, response); err != nil {
+		return errors.New("agy RPC response unmarshal failed")
+	}
+	return nil
+}
+
+// validateGRPCWebResponse applies the HTTP-level gRPC-Web contract shared by
+// unary and server-streaming requests. Frame-level grpc-status is validated by
+// their respective readers.
+func validateGRPCWebResponse(resp *http.Response) error {
 	if resp.StatusCode != http.StatusOK {
 		return errors.New("agy RPC returned non-success HTTP status")
 	}
@@ -337,13 +354,6 @@ func (c *rpcClient) call(ctx context.Context, method string, request, response p
 		if status != 0 {
 			return &grpcStatusError{status: status}
 		}
-	}
-	responsePayload, err := readGRPCWebUnary(ctx, resp.Body)
-	if err != nil {
-		return err
-	}
-	if err := proto.Unmarshal(responsePayload, response); err != nil {
-		return errors.New("agy RPC response unmarshal failed")
 	}
 	return nil
 }

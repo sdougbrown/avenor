@@ -1,0 +1,23 @@
+{
+  "fixture_kind": "redacted structural fixture, not a raw live capture",
+  "source": "generated from the parity-checked Avenor-owned agy 1.1.5 minimal schema using Stage 9 stream framing facts",
+  "service": "exa.language_server_pb.LanguageServerService",
+  "method": "StreamAgentStateUpdates",
+  "content_type": "application/grpc-web+proto",
+  "request": {
+    "frame": "0x00 + uint32be length + protobuf",
+    "message": "StreamAgentStateUpdatesRequest",
+    "fields": ["conversation_id=1:string"]
+  },
+  "response": {
+    "data_frame": "0x00 protobuf StreamAgentStateUpdatesResponse",
+    "trailer_frame": "0x80 ASCII grpc-status trailer",
+    "fields": [
+      "update=1:AgentStateUpdate",
+      "update.status=3:CascadeRunStatus",
+      "update.fully_idle=18:bool",
+      "update.main_trajectory_update=7:TrajectoryUpdate"
+    ]
+  },
+  "redaction": "No raw payload, conversation ID, trajectory ID, prompt, response text, endpoint, certificate, or port is retained."
+}
