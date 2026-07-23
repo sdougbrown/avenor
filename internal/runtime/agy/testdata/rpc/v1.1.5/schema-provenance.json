@@ -1,6 +1,5 @@
 {
   "agy_version": "1.1.5",
-  "source_root": "/tmp/agy-stage9-terra",
   "evidence_sha256": {
     "REPORT.md": "44541313c692c976e7c022e67d46c10ebd5fce33c06b1d540324f772a4a3d6aa",
     "MANIFEST.md": "42281d77eeefcdd39083836097dbb676447543baedecd54d15f04eaadbcb71f7",
@@ -24,6 +23,13 @@
     "google/internal/cloud/code/v1internal/model_configs.proto": "34ab28e7c0293e9ad322118f89f3cfc79d7c6dcd1a7229e9707731f9ef5592f5",
     "third_party/gemini_coder/proto/trajectory.proto": "9f433c64f9423205be404131089f5f03a9fd6afd6101cc8479bbf65ac241880b"
   },
-  "complete_import_closure": false,
-  "closure_boundary": "The extracted descriptors have unresolved private imports. No generated bindings or manual replacement schema are authorized from this subset."
+  "complete_closure": {
+    "recovered_locally": true,
+    "descriptor_count": 102,
+    "sha256": "7e3073643388963f21bf269c51fa30a13f37ba3a25b3ddd7b49edbbf91557a21",
+    "validated_missing_imports": 0,
+    "validated_unresolved_type_references": 0,
+    "retained": false,
+    "retention_reason": "The complete closure contains unrelated private schemas. Only the minimal Avenor-owned interop view and its symbol parity manifest are retained."
+  }
 }

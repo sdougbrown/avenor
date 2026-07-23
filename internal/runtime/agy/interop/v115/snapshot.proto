@@ -1,0 +1,14 @@
+// This separate package avoids giving two upstream enums with identical value
+// names one invented local enum alias. It shares the agyv115 Go package.
+syntax = "proto3";
+
+package avenor.agy.v115.snapshot;
+
+option go_package = "github.com/sdougbrown/avenor/internal/runtime/agy/interop/v115;agyv115";
+
+enum SnapshotTrajectoryVerbosity {
+  CLIENT_TRAJECTORY_VERBOSITY_UNSPECIFIED = 0;
+  CLIENT_TRAJECTORY_VERBOSITY_DEBUG = 1;
+  CLIENT_TRAJECTORY_VERBOSITY_PROD_UI = 2;
+  CLIENT_TRAJECTORY_VERBOSITY_FULL = 3;
+}

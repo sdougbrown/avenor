@@ -14,9 +14,9 @@ This is a minimal, redacted, fixture-ready record of the 2026-07-23 local `agy 1
 
 ## Schema provenance and boundary
 
-`schema-provenance.json` pins SHA-256s for the descriptors extracted from the installed 1.1.5 binary and for source captures. The available descriptor artifacts are **not a complete import closure**: `language_server.proto` alone imports many unavailable private files, and the retained subset also depends on unavailable private descriptors. Therefore this corpus explicitly does not authorize generated bindings, handwritten protobuf structs, guessed protowire mappings, or RPC implementation. Stage 10 must stop at this boundary until a complete, versioned source/descriptor import closure is obtained and reviewed.
+`schema-provenance.json` pins SHA-256s for the descriptors extracted from the installed 1.1.5 binary and for source captures. A complete 102-descriptor closure was subsequently recovered locally and validated by its recorded SHA-256 with zero missing imports or unresolved type references. It is intentionally **not retained** because it includes unrelated private schemas. The checked-in `internal/runtime/agy/interop/v115` schema is instead a small Avenor-owned wire-compatible view, with every retained symbol mapped back to the complete closure by a parity manifest and caller-supplied parity check.
 
-`FIELD_MAP.md` and `RECONNECT_BRIEF.md` are evidence-only records for future Stage 11/12 work; they do not introduce stream decoding, mapping, PTY hosting, or transport selection.
+`FIELD_MAP.md` and `RECONNECT_BRIEF.md` are evidence-only records for future Stage 11/12 work; this schema substage does not introduce RPC framing, stream decoding, mapping, PTY hosting, transport selection, or provider integration.
 
 ## Redaction
 
