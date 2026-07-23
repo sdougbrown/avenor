@@ -1,6 +1,6 @@
 {
   "name": "@dougbots/avenor-pi",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "type": "module",
   "keywords": [
     "pi-package"
