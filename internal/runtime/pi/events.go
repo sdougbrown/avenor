@@ -69,42 +69,169 @@ func translateAgentEnd(payload map[string]any, sessionID string) events.Event {
 }
 
 func translateMessageUpdate(payload map[string]any, sessionID string) []events.Event {
-	alias := events.Event{Event: "avenor.message.update", SessionID: sessionID, Fields: payload}
 	amMap, _ := payload["assistantMessageEvent"].(map[string]any)
 	if amMap == nil {
-		return []events.Event{alias}
+		return []events.Event{{
+			Event:     "avenor.message.update",
+			SessionID: sessionID,
+			Fields:    map[string]any{"type": "message_update"},
+		}}
 	}
 
+	// Pi's message_update payload contains both the entire cumulative message
+	// and a partial snapshot on every streamed fragment. Some providers also
+	// attach large opaque reasoning signatures to every snapshot. Persisting the
+	// raw payload makes tool arguments grow quadratically and can duplicate the
+	// same signature three times across the canonical and compatibility events.
+	// Keep only the incremental data and tool identity needed by consumers.
+	alias := compactMessageUpdateAlias(amMap, sessionID)
 	evtType, _ := amMap["type"].(string)
-	text := extractPiText(amMap)
+
 	switch evtType {
 	case "text_delta":
+		text := extractPiDeltaText(amMap)
 		if text == "" {
 			return []events.Event{alias}
 		}
 		return []events.Event{
 			canonicalChunk("agent.message_chunk", sessionID, text),
-			events.Event{Event: "avenor.message.delta", SessionID: sessionID, Fields: map[string]any{"text": text}},
+			{Event: "avenor.message.delta", SessionID: sessionID, Fields: map[string]any{"text": text}},
 		}
 	case "thinking_delta":
+		text := extractPiDeltaText(amMap)
 		if text == "" {
 			return []events.Event{alias}
 		}
 		return []events.Event{canonicalChunk("agent.thought_chunk", sessionID, text), alias}
 	case "toolcall_start":
-		return []events.Event{canonicalToolCall("tool.call", sessionID, amMap, "running"), alias}
+		return []events.Event{canonicalMessageToolCall("tool.call", sessionID, amMap, "running"), alias}
 	case "toolcall_delta", "toolcall_update", "toolcall_end":
 		status := "running"
 		if evtType == "toolcall_end" {
 			status = "completed"
 		}
-		return []events.Event{canonicalToolCall("tool.call_update", sessionID, amMap, status), alias}
+		return []events.Event{canonicalMessageToolCall("tool.call_update", sessionID, amMap, status), alias}
 	default:
-		if text != "" {
-			return []events.Event{canonicalChunk("agent.message_chunk", sessionID, text), alias}
-		}
+		// Start/end notifications carry cumulative content, not deltas. The
+		// corresponding streamed deltas already produced canonical chunks.
 		return []events.Event{alias}
 	}
+}
+
+func compactMessageUpdateAlias(amMap map[string]any, sessionID string) events.Event {
+	return events.Event{
+		Event:     "avenor.message.update",
+		SessionID: sessionID,
+		Fields: map[string]any{
+			"type":                  "message_update",
+			"assistantMessageEvent": compactAssistantMessageEvent(amMap),
+		},
+	}
+}
+
+func compactAssistantMessageEvent(amMap map[string]any) map[string]any {
+	fields := map[string]any{}
+	if evtType, _ := amMap["type"].(string); evtType != "" {
+		fields["type"] = evtType
+	}
+	if contentIndex, ok := events.Int64(amMap["contentIndex"]); ok {
+		fields["contentIndex"] = contentIndex
+	}
+	if delta := extractPiDeltaText(amMap); delta != "" {
+		fields["delta"] = delta
+	}
+	for _, key := range []string{"reason", "stopReason"} {
+		if value, _ := amMap[key].(string); value != "" {
+			fields[key] = value
+		}
+	}
+
+	toolCall := assistantToolCall(amMap)
+	toolCallID := firstNonEmptyString(amMap, "toolCallId", "tool_call_id")
+	toolName := firstNonEmptyString(amMap, "toolName", "name", "title")
+	if toolCall != nil {
+		if toolCallID == "" {
+			toolCallID = firstNonEmptyString(toolCall, "id", "toolCallId", "tool_call_id")
+		}
+		if toolName == "" {
+			toolName = firstNonEmptyString(toolCall, "name", "toolName", "title")
+		}
+	}
+	if toolCallID != "" {
+		fields["toolCallId"] = toolCallID
+	}
+	if toolName != "" {
+		fields["toolName"] = toolName
+		fields["title"] = toolName
+	}
+	if toolCallID != "" || toolName != "" {
+		fields["kind"] = "tool"
+		compactToolCall := map[string]any{}
+		if toolCallID != "" {
+			compactToolCall["id"] = toolCallID
+		}
+		if toolName != "" {
+			compactToolCall["name"] = toolName
+		}
+		fields["toolCall"] = compactToolCall
+	}
+	return fields
+}
+
+func canonicalMessageToolCall(eventName, sessionID string, amMap map[string]any, status string) events.Event {
+	compact := compactAssistantMessageEvent(amMap)
+	fields := map[string]any{
+		"kind":   "tool",
+		"status": status,
+	}
+	for _, key := range []string{"toolCallId", "toolName", "title", "delta"} {
+		if value, ok := compact[key]; ok {
+			fields[key] = value
+		}
+	}
+	if evtType, _ := amMap["type"].(string); evtType == "toolcall_end" {
+		if toolCall := assistantToolCall(amMap); toolCall != nil {
+			if args, ok := toolCall["arguments"]; ok {
+				fields["rawInput"] = args
+			}
+		}
+	}
+	return events.Event{Event: eventName, SessionID: sessionID, Fields: fields}
+}
+
+func assistantToolCall(amMap map[string]any) map[string]any {
+	if toolCall, _ := amMap["toolCall"].(map[string]any); toolCall != nil {
+		return toolCall
+	}
+	partial, _ := amMap["partial"].(map[string]any)
+	if partial == nil {
+		return nil
+	}
+	content, _ := partial["content"].([]any)
+	contentIndex, ok := events.Int64(amMap["contentIndex"])
+	if !ok || contentIndex < 0 || contentIndex >= int64(len(content)) {
+		return nil
+	}
+	toolCall, _ := content[contentIndex].(map[string]any)
+	return toolCall
+}
+
+func extractPiDeltaText(amMap map[string]any) string {
+	if delta, _ := amMap["delta"].(string); delta != "" {
+		return delta
+	}
+	if text, _ := amMap["text"].(string); text != "" {
+		return text
+	}
+	if data, _ := amMap["data"].(map[string]any); data != nil {
+		if delta, _ := data["delta"].(string); delta != "" {
+			return delta
+		}
+		if text, _ := data["text"].(string); text != "" {
+			return text
+		}
+	}
+	return ""
 }
 
 func canonicalChunk(eventName, sessionID, text string) events.Event {

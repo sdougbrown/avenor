@@ -49,7 +49,7 @@ These come from the Claude API backend. Avenor parses them, validates required f
 
 ACP backends already speak the canonical chunk and tool vocabulary. Other backends are translated on a best-effort basis:
 
-- Pi message and tool notifications produce canonical `agent.message_chunk`, `agent.thought_chunk`, `tool.call`, and `tool.call_update` events. Existing `avenor.message.*` and `avenor.tool.*` compatibility events remain available; consumers should deduplicate canonical/compatibility pairs by `seq` and semantic content. Empty Pi text deltas are suppressed.
+- Pi message and tool notifications produce canonical `agent.message_chunk`, `agent.thought_chunk`, `tool.call`, and `tool.call_update` events. Existing `avenor.message.*` and `avenor.tool.*` compatibility events remain available; consumers should deduplicate canonical/compatibility pairs by `seq` and semantic content. Streamed `avenor.message.update` events retain only the incremental delta and tool identity: cumulative message snapshots, cumulative partial tool arguments, and opaque provider reasoning signatures are intentionally omitted from Avenor's event log. Empty Pi text deltas are suppressed.
 - Codex app-server item notifications are mapped to canonical chunks and tool lifecycle events when their payload contains usable text or tool metadata. The original `avenor.item.*` lifecycle events remain available.
 - Claude transcript records produce canonical assistant, user, thought, and tool events when those records expose the content. Avenor does not fabricate reasoning or tool output that the transcript does not contain.
 
