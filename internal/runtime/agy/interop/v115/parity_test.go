@@ -100,6 +100,14 @@ func TestFieldShapesAndServicePaths(t *testing.T) {
 	if !models.IsMap() || models.MapKey().Kind() != protoreflect.StringKind || models.MapValue().Message().FullName() != "avenor.agy.v115.ModelDetails" {
 		t.Fatal("models map shape changed")
 	}
+	details := (&ModelDetails{}).ProtoReflect().Descriptor()
+	modelField := details.Fields().ByName("model")
+	if modelField == nil {
+		t.Fatal("ModelDetails.model field is missing")
+	}
+	if modelField.Number() != 15 || modelField.Kind() != protoreflect.EnumKind || modelField.Enum().FullName() != "avenor.agy.v115.Model" {
+		t.Fatalf("ModelDetails.model field shape changed: num=%d kind=%v enum=%v", modelField.Number(), modelField.Kind(), modelField.Enum().FullName())
+	}
 	step := (&Step{}).ProtoReflect().Descriptor()
 	if step.Fields().ByName("planner_response").ContainingOneof() != step.Fields().ByName("list_directory").ContainingOneof() {
 		t.Fatal("step alternatives must share a oneof")

@@ -689,6 +689,7 @@ func (x *FetchAvailableModelsResponse) GetModels() map[string]*ModelDetails {
 
 type ModelDetails struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
+	Model         Model                  `protobuf:"varint,15,opt,name=model,proto3,enum=avenor.agy.v115.Model" json:"model,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -721,6 +722,13 @@ func (x *ModelDetails) ProtoReflect() protoreflect.Message {
 // Deprecated: Use ModelDetails.ProtoReflect.Descriptor instead.
 func (*ModelDetails) Descriptor() ([]byte, []int) {
 	return file_internal_runtime_agy_interop_v115_agy_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *ModelDetails) GetModel() Model {
+	if x != nil {
+		return x.Model
+	}
+	return Model_MODEL_UNSPECIFIED
 }
 
 type GetAllCascadeTrajectoriesRequest struct {
@@ -2820,8 +2828,9 @@ const file_internal_runtime_agy_interop_v115_agy_proto_rawDesc = "" +
 	"\x06models\x18\x01 \x03(\v29.avenor.agy.v115.FetchAvailableModelsResponse.ModelsEntryR\x06models\x1aX\n" +
 	"\vModelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x123\n" +
-	"\x05value\x18\x02 \x01(\v2\x1d.avenor.agy.v115.ModelDetailsR\x05value:\x028\x01\"\x0e\n" +
-	"\fModelDetails\"[\n" +
+	"\x05value\x18\x02 \x01(\v2\x1d.avenor.agy.v115.ModelDetailsR\x05value:\x028\x01\"<\n" +
+	"\fModelDetails\x12,\n" +
+	"\x05model\x18\x0f \x01(\x0e2\x16.avenor.agy.v115.ModelR\x05model\"[\n" +
 	" GetAllCascadeTrajectoriesRequest\x127\n" +
 	"\x17exclude_subtrajectories\x18\x01 \x01(\bR\x16excludeSubtrajectories\"\x96\x02\n" +
 	"!GetAllCascadeTrajectoriesResponse\x12~\n" +
@@ -3087,76 +3096,77 @@ var file_internal_runtime_agy_interop_v115_agy_proto_depIdxs = []int32{
 	10, // 0: avenor.agy.v115.GetConversationMetadataResponse.metadata:type_name -> avenor.agy.v115.TrajectoryMetadata
 	13, // 1: avenor.agy.v115.GetAvailableModelsResponse.response:type_name -> avenor.agy.v115.FetchAvailableModelsResponse
 	52, // 2: avenor.agy.v115.FetchAvailableModelsResponse.models:type_name -> avenor.agy.v115.FetchAvailableModelsResponse.ModelsEntry
-	53, // 3: avenor.agy.v115.GetAllCascadeTrajectoriesResponse.trajectory_summaries:type_name -> avenor.agy.v115.GetAllCascadeTrajectoriesResponse.TrajectorySummariesEntry
-	54, // 4: avenor.agy.v115.GetCascadeTrajectoryStepsRequest.verbosity:type_name -> avenor.agy.v115.snapshot.SnapshotTrajectoryVerbosity
-	4,  // 5: avenor.agy.v115.GetCascadeTrajectoryStepsRequest.trajectory_verbosity:type_name -> avenor.agy.v115.StreamTrajectoryVerbosity
-	36, // 6: avenor.agy.v115.GetCascadeTrajectoryStepsResponse.steps:type_name -> avenor.agy.v115.Step
-	3,  // 7: avenor.agy.v115.StartCascadeRequest.source:type_name -> avenor.agy.v115.CortexTrajectorySource
-	49, // 8: avenor.agy.v115.SendUserCascadeMessageRequest.items:type_name -> avenor.agy.v115.TextOrScopeItem
-	50, // 9: avenor.agy.v115.SendUserCascadeMessageRequest.cascade_config:type_name -> avenor.agy.v115.CascadeConfig
-	47, // 10: avenor.agy.v115.HandleCascadeUserInteractionRequest.interaction:type_name -> avenor.agy.v115.CascadeUserInteraction
-	32, // 11: avenor.agy.v115.StreamAgentStateUpdatesRequest.initial_steps_page_bounds:type_name -> avenor.agy.v115.Slice
-	4,  // 12: avenor.agy.v115.StreamAgentStateUpdatesRequest.trajectory_verbosity:type_name -> avenor.agy.v115.StreamTrajectoryVerbosity
-	33, // 13: avenor.agy.v115.StreamAgentStateUpdatesResponse.update:type_name -> avenor.agy.v115.AgentStateUpdate
-	0,  // 14: avenor.agy.v115.AgentStateUpdate.status:type_name -> avenor.agy.v115.CascadeRunStatus
-	0,  // 15: avenor.agy.v115.AgentStateUpdate.executable_status:type_name -> avenor.agy.v115.CascadeRunStatus
-	0,  // 16: avenor.agy.v115.AgentStateUpdate.executor_loop_status:type_name -> avenor.agy.v115.CascadeRunStatus
-	34, // 17: avenor.agy.v115.AgentStateUpdate.main_trajectory_update:type_name -> avenor.agy.v115.TrajectoryUpdate
-	35, // 18: avenor.agy.v115.TrajectoryUpdate.steps_update:type_name -> avenor.agy.v115.StepsUpdate
-	0,  // 19: avenor.agy.v115.TrajectoryUpdate.status:type_name -> avenor.agy.v115.CascadeRunStatus
-	43, // 20: avenor.agy.v115.TrajectoryUpdate.last_step_error:type_name -> avenor.agy.v115.CortexErrorDetails
-	2,  // 21: avenor.agy.v115.TrajectoryUpdate.last_step_type:type_name -> avenor.agy.v115.CortexStepType
-	36, // 22: avenor.agy.v115.StepsUpdate.steps:type_name -> avenor.agy.v115.Step
-	32, // 23: avenor.agy.v115.StepsUpdate.page_bounds:type_name -> avenor.agy.v115.Slice
-	2,  // 24: avenor.agy.v115.Step.type:type_name -> avenor.agy.v115.CortexStepType
-	1,  // 25: avenor.agy.v115.Step.status:type_name -> avenor.agy.v115.CortexStepStatus
-	37, // 26: avenor.agy.v115.Step.metadata:type_name -> avenor.agy.v115.CortexStepMetadata
-	43, // 27: avenor.agy.v115.Step.error:type_name -> avenor.agy.v115.CortexErrorDetails
-	44, // 28: avenor.agy.v115.Step.requested_interaction:type_name -> avenor.agy.v115.RequestedInteraction
-	46, // 29: avenor.agy.v115.Step.completed_interactions:type_name -> avenor.agy.v115.CompletedInteraction
-	39, // 30: avenor.agy.v115.Step.planner_response:type_name -> avenor.agy.v115.CortexStepPlannerResponse
-	41, // 31: avenor.agy.v115.Step.list_directory:type_name -> avenor.agy.v115.CortexStepListDirectory
-	40, // 32: avenor.agy.v115.CortexStepMetadata.tool_call:type_name -> avenor.agy.v115.ChatToolCall
-	38, // 33: avenor.agy.v115.CortexStepMetadata.model_usage:type_name -> avenor.agy.v115.ModelUsageStats
-	5,  // 34: avenor.agy.v115.CortexStepMetadata.generator_model:type_name -> avenor.agy.v115.Model
-	5,  // 35: avenor.agy.v115.ModelUsageStats.model:type_name -> avenor.agy.v115.Model
-	40, // 36: avenor.agy.v115.CortexStepPlannerResponse.tool_calls:type_name -> avenor.agy.v115.ChatToolCall
-	42, // 37: avenor.agy.v115.CortexStepListDirectory.results:type_name -> avenor.agy.v115.ListDirectoryResult
-	45, // 38: avenor.agy.v115.RequestedInteraction.deploy:type_name -> avenor.agy.v115.CascadeDeployInteractionSpec
-	44, // 39: avenor.agy.v115.CompletedInteraction.request:type_name -> avenor.agy.v115.RequestedInteraction
-	47, // 40: avenor.agy.v115.CompletedInteraction.response:type_name -> avenor.agy.v115.CascadeUserInteraction
-	48, // 41: avenor.agy.v115.CascadeUserInteraction.deploy:type_name -> avenor.agy.v115.CascadeDeployInteraction
-	51, // 42: avenor.agy.v115.CascadeConfig.planner_config:type_name -> avenor.agy.v115.CascadePlannerConfig
-	5,  // 43: avenor.agy.v115.CascadePlannerConfig.plan_model:type_name -> avenor.agy.v115.Model
-	14, // 44: avenor.agy.v115.FetchAvailableModelsResponse.ModelsEntry.value:type_name -> avenor.agy.v115.ModelDetails
-	17, // 45: avenor.agy.v115.GetAllCascadeTrajectoriesResponse.TrajectorySummariesEntry.value:type_name -> avenor.agy.v115.CascadeTrajectorySummary
-	6,  // 46: avenor.agy.v115.LanguageServerService.Heartbeat:input_type -> avenor.agy.v115.HeartbeatRequest
-	8,  // 47: avenor.agy.v115.LanguageServerService.GetConversationMetadata:input_type -> avenor.agy.v115.GetConversationMetadataRequest
-	11, // 48: avenor.agy.v115.LanguageServerService.GetAvailableModels:input_type -> avenor.agy.v115.GetAvailableModelsRequest
-	15, // 49: avenor.agy.v115.LanguageServerService.GetAllCascadeTrajectories:input_type -> avenor.agy.v115.GetAllCascadeTrajectoriesRequest
-	18, // 50: avenor.agy.v115.LanguageServerService.GetCascadeTrajectorySteps:input_type -> avenor.agy.v115.GetCascadeTrajectoryStepsRequest
-	20, // 51: avenor.agy.v115.LanguageServerService.StartCascade:input_type -> avenor.agy.v115.StartCascadeRequest
-	22, // 52: avenor.agy.v115.LanguageServerService.SendUserCascadeMessage:input_type -> avenor.agy.v115.SendUserCascadeMessageRequest
-	24, // 53: avenor.agy.v115.LanguageServerService.HandleCascadeUserInteraction:input_type -> avenor.agy.v115.HandleCascadeUserInteractionRequest
-	26, // 54: avenor.agy.v115.LanguageServerService.CancelCascadeSteps:input_type -> avenor.agy.v115.CancelCascadeStepsRequest
-	28, // 55: avenor.agy.v115.LanguageServerService.ForceStopCascadeTree:input_type -> avenor.agy.v115.ForceStopCascadeTreeRequest
-	30, // 56: avenor.agy.v115.LanguageServerService.StreamAgentStateUpdates:input_type -> avenor.agy.v115.StreamAgentStateUpdatesRequest
-	7,  // 57: avenor.agy.v115.LanguageServerService.Heartbeat:output_type -> avenor.agy.v115.HeartbeatResponse
-	9,  // 58: avenor.agy.v115.LanguageServerService.GetConversationMetadata:output_type -> avenor.agy.v115.GetConversationMetadataResponse
-	12, // 59: avenor.agy.v115.LanguageServerService.GetAvailableModels:output_type -> avenor.agy.v115.GetAvailableModelsResponse
-	16, // 60: avenor.agy.v115.LanguageServerService.GetAllCascadeTrajectories:output_type -> avenor.agy.v115.GetAllCascadeTrajectoriesResponse
-	19, // 61: avenor.agy.v115.LanguageServerService.GetCascadeTrajectorySteps:output_type -> avenor.agy.v115.GetCascadeTrajectoryStepsResponse
-	21, // 62: avenor.agy.v115.LanguageServerService.StartCascade:output_type -> avenor.agy.v115.StartCascadeResponse
-	23, // 63: avenor.agy.v115.LanguageServerService.SendUserCascadeMessage:output_type -> avenor.agy.v115.SendUserCascadeMessageResponse
-	25, // 64: avenor.agy.v115.LanguageServerService.HandleCascadeUserInteraction:output_type -> avenor.agy.v115.HandleCascadeUserInteractionResponse
-	27, // 65: avenor.agy.v115.LanguageServerService.CancelCascadeSteps:output_type -> avenor.agy.v115.CancelCascadeStepsResponse
-	29, // 66: avenor.agy.v115.LanguageServerService.ForceStopCascadeTree:output_type -> avenor.agy.v115.ForceStopCascadeTreeResponse
-	31, // 67: avenor.agy.v115.LanguageServerService.StreamAgentStateUpdates:output_type -> avenor.agy.v115.StreamAgentStateUpdatesResponse
-	57, // [57:68] is the sub-list for method output_type
-	46, // [46:57] is the sub-list for method input_type
-	46, // [46:46] is the sub-list for extension type_name
-	46, // [46:46] is the sub-list for extension extendee
-	0,  // [0:46] is the sub-list for field type_name
+	5,  // 3: avenor.agy.v115.ModelDetails.model:type_name -> avenor.agy.v115.Model
+	53, // 4: avenor.agy.v115.GetAllCascadeTrajectoriesResponse.trajectory_summaries:type_name -> avenor.agy.v115.GetAllCascadeTrajectoriesResponse.TrajectorySummariesEntry
+	54, // 5: avenor.agy.v115.GetCascadeTrajectoryStepsRequest.verbosity:type_name -> avenor.agy.v115.snapshot.SnapshotTrajectoryVerbosity
+	4,  // 6: avenor.agy.v115.GetCascadeTrajectoryStepsRequest.trajectory_verbosity:type_name -> avenor.agy.v115.StreamTrajectoryVerbosity
+	36, // 7: avenor.agy.v115.GetCascadeTrajectoryStepsResponse.steps:type_name -> avenor.agy.v115.Step
+	3,  // 8: avenor.agy.v115.StartCascadeRequest.source:type_name -> avenor.agy.v115.CortexTrajectorySource
+	49, // 9: avenor.agy.v115.SendUserCascadeMessageRequest.items:type_name -> avenor.agy.v115.TextOrScopeItem
+	50, // 10: avenor.agy.v115.SendUserCascadeMessageRequest.cascade_config:type_name -> avenor.agy.v115.CascadeConfig
+	47, // 11: avenor.agy.v115.HandleCascadeUserInteractionRequest.interaction:type_name -> avenor.agy.v115.CascadeUserInteraction
+	32, // 12: avenor.agy.v115.StreamAgentStateUpdatesRequest.initial_steps_page_bounds:type_name -> avenor.agy.v115.Slice
+	4,  // 13: avenor.agy.v115.StreamAgentStateUpdatesRequest.trajectory_verbosity:type_name -> avenor.agy.v115.StreamTrajectoryVerbosity
+	33, // 14: avenor.agy.v115.StreamAgentStateUpdatesResponse.update:type_name -> avenor.agy.v115.AgentStateUpdate
+	0,  // 15: avenor.agy.v115.AgentStateUpdate.status:type_name -> avenor.agy.v115.CascadeRunStatus
+	0,  // 16: avenor.agy.v115.AgentStateUpdate.executable_status:type_name -> avenor.agy.v115.CascadeRunStatus
+	0,  // 17: avenor.agy.v115.AgentStateUpdate.executor_loop_status:type_name -> avenor.agy.v115.CascadeRunStatus
+	34, // 18: avenor.agy.v115.AgentStateUpdate.main_trajectory_update:type_name -> avenor.agy.v115.TrajectoryUpdate
+	35, // 19: avenor.agy.v115.TrajectoryUpdate.steps_update:type_name -> avenor.agy.v115.StepsUpdate
+	0,  // 20: avenor.agy.v115.TrajectoryUpdate.status:type_name -> avenor.agy.v115.CascadeRunStatus
+	43, // 21: avenor.agy.v115.TrajectoryUpdate.last_step_error:type_name -> avenor.agy.v115.CortexErrorDetails
+	2,  // 22: avenor.agy.v115.TrajectoryUpdate.last_step_type:type_name -> avenor.agy.v115.CortexStepType
+	36, // 23: avenor.agy.v115.StepsUpdate.steps:type_name -> avenor.agy.v115.Step
+	32, // 24: avenor.agy.v115.StepsUpdate.page_bounds:type_name -> avenor.agy.v115.Slice
+	2,  // 25: avenor.agy.v115.Step.type:type_name -> avenor.agy.v115.CortexStepType
+	1,  // 26: avenor.agy.v115.Step.status:type_name -> avenor.agy.v115.CortexStepStatus
+	37, // 27: avenor.agy.v115.Step.metadata:type_name -> avenor.agy.v115.CortexStepMetadata
+	43, // 28: avenor.agy.v115.Step.error:type_name -> avenor.agy.v115.CortexErrorDetails
+	44, // 29: avenor.agy.v115.Step.requested_interaction:type_name -> avenor.agy.v115.RequestedInteraction
+	46, // 30: avenor.agy.v115.Step.completed_interactions:type_name -> avenor.agy.v115.CompletedInteraction
+	39, // 31: avenor.agy.v115.Step.planner_response:type_name -> avenor.agy.v115.CortexStepPlannerResponse
+	41, // 32: avenor.agy.v115.Step.list_directory:type_name -> avenor.agy.v115.CortexStepListDirectory
+	40, // 33: avenor.agy.v115.CortexStepMetadata.tool_call:type_name -> avenor.agy.v115.ChatToolCall
+	38, // 34: avenor.agy.v115.CortexStepMetadata.model_usage:type_name -> avenor.agy.v115.ModelUsageStats
+	5,  // 35: avenor.agy.v115.CortexStepMetadata.generator_model:type_name -> avenor.agy.v115.Model
+	5,  // 36: avenor.agy.v115.ModelUsageStats.model:type_name -> avenor.agy.v115.Model
+	40, // 37: avenor.agy.v115.CortexStepPlannerResponse.tool_calls:type_name -> avenor.agy.v115.ChatToolCall
+	42, // 38: avenor.agy.v115.CortexStepListDirectory.results:type_name -> avenor.agy.v115.ListDirectoryResult
+	45, // 39: avenor.agy.v115.RequestedInteraction.deploy:type_name -> avenor.agy.v115.CascadeDeployInteractionSpec
+	44, // 40: avenor.agy.v115.CompletedInteraction.request:type_name -> avenor.agy.v115.RequestedInteraction
+	47, // 41: avenor.agy.v115.CompletedInteraction.response:type_name -> avenor.agy.v115.CascadeUserInteraction
+	48, // 42: avenor.agy.v115.CascadeUserInteraction.deploy:type_name -> avenor.agy.v115.CascadeDeployInteraction
+	51, // 43: avenor.agy.v115.CascadeConfig.planner_config:type_name -> avenor.agy.v115.CascadePlannerConfig
+	5,  // 44: avenor.agy.v115.CascadePlannerConfig.plan_model:type_name -> avenor.agy.v115.Model
+	14, // 45: avenor.agy.v115.FetchAvailableModelsResponse.ModelsEntry.value:type_name -> avenor.agy.v115.ModelDetails
+	17, // 46: avenor.agy.v115.GetAllCascadeTrajectoriesResponse.TrajectorySummariesEntry.value:type_name -> avenor.agy.v115.CascadeTrajectorySummary
+	6,  // 47: avenor.agy.v115.LanguageServerService.Heartbeat:input_type -> avenor.agy.v115.HeartbeatRequest
+	8,  // 48: avenor.agy.v115.LanguageServerService.GetConversationMetadata:input_type -> avenor.agy.v115.GetConversationMetadataRequest
+	11, // 49: avenor.agy.v115.LanguageServerService.GetAvailableModels:input_type -> avenor.agy.v115.GetAvailableModelsRequest
+	15, // 50: avenor.agy.v115.LanguageServerService.GetAllCascadeTrajectories:input_type -> avenor.agy.v115.GetAllCascadeTrajectoriesRequest
+	18, // 51: avenor.agy.v115.LanguageServerService.GetCascadeTrajectorySteps:input_type -> avenor.agy.v115.GetCascadeTrajectoryStepsRequest
+	20, // 52: avenor.agy.v115.LanguageServerService.StartCascade:input_type -> avenor.agy.v115.StartCascadeRequest
+	22, // 53: avenor.agy.v115.LanguageServerService.SendUserCascadeMessage:input_type -> avenor.agy.v115.SendUserCascadeMessageRequest
+	24, // 54: avenor.agy.v115.LanguageServerService.HandleCascadeUserInteraction:input_type -> avenor.agy.v115.HandleCascadeUserInteractionRequest
+	26, // 55: avenor.agy.v115.LanguageServerService.CancelCascadeSteps:input_type -> avenor.agy.v115.CancelCascadeStepsRequest
+	28, // 56: avenor.agy.v115.LanguageServerService.ForceStopCascadeTree:input_type -> avenor.agy.v115.ForceStopCascadeTreeRequest
+	30, // 57: avenor.agy.v115.LanguageServerService.StreamAgentStateUpdates:input_type -> avenor.agy.v115.StreamAgentStateUpdatesRequest
+	7,  // 58: avenor.agy.v115.LanguageServerService.Heartbeat:output_type -> avenor.agy.v115.HeartbeatResponse
+	9,  // 59: avenor.agy.v115.LanguageServerService.GetConversationMetadata:output_type -> avenor.agy.v115.GetConversationMetadataResponse
+	12, // 60: avenor.agy.v115.LanguageServerService.GetAvailableModels:output_type -> avenor.agy.v115.GetAvailableModelsResponse
+	16, // 61: avenor.agy.v115.LanguageServerService.GetAllCascadeTrajectories:output_type -> avenor.agy.v115.GetAllCascadeTrajectoriesResponse
+	19, // 62: avenor.agy.v115.LanguageServerService.GetCascadeTrajectorySteps:output_type -> avenor.agy.v115.GetCascadeTrajectoryStepsResponse
+	21, // 63: avenor.agy.v115.LanguageServerService.StartCascade:output_type -> avenor.agy.v115.StartCascadeResponse
+	23, // 64: avenor.agy.v115.LanguageServerService.SendUserCascadeMessage:output_type -> avenor.agy.v115.SendUserCascadeMessageResponse
+	25, // 65: avenor.agy.v115.LanguageServerService.HandleCascadeUserInteraction:output_type -> avenor.agy.v115.HandleCascadeUserInteractionResponse
+	27, // 66: avenor.agy.v115.LanguageServerService.CancelCascadeSteps:output_type -> avenor.agy.v115.CancelCascadeStepsResponse
+	29, // 67: avenor.agy.v115.LanguageServerService.ForceStopCascadeTree:output_type -> avenor.agy.v115.ForceStopCascadeTreeResponse
+	31, // 68: avenor.agy.v115.LanguageServerService.StreamAgentStateUpdates:output_type -> avenor.agy.v115.StreamAgentStateUpdatesResponse
+	58, // [58:69] is the sub-list for method output_type
+	47, // [47:58] is the sub-list for method input_type
+	47, // [47:47] is the sub-list for extension type_name
+	47, // [47:47] is the sub-list for extension extendee
+	0,  // [0:47] is the sub-list for field type_name
 }
 
 func init() { file_internal_runtime_agy_interop_v115_agy_proto_init() }

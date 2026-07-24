@@ -386,6 +386,52 @@ func (c *rpcClient) getAvailableModels(ctx context.Context, forceRefresh bool) (
 	return response, nil
 }
 
+// modelAvailabilityDeadline is the bounded wall-clock window the startup path
+// waits for model availability to resolve. The evidence-backed production
+// gate showed models populated ~1 second after PTY RPC startup.
+var modelAvailabilityDeadline = 3 * time.Second
+
+// modelAvailabilityPollInterval is the spacing between normal (force=false)
+// GetAvailableModels probes during the bounded wait.
+var modelAvailabilityPollInterval = 100 * time.Millisecond
+
+// waitForAvailableModels blocks until the RPC client's model map is populated
+// or the context/deadline expires. It only issues normal (non-forcing) queries
+// and never retries mutations such as SendUserCascadeMessage or StartCascade.
+// Returns the populated response on success.
+func (c *rpcClient) waitForAvailableModels(ctx context.Context) (*agyv115.FetchAvailableModelsResponse, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, modelAvailabilityDeadline)
+	defer cancel()
+	poll := time.NewTicker(modelAvailabilityPollInterval)
+	defer poll.Stop()
+	for {
+		resp, err := c.getAvailableModels(waitCtx, false)
+		if err == nil && hasResolvedModel(resp.GetResponse()) {
+			return resp.GetResponse(), nil
+		}
+		select {
+		case <-waitCtx.Done():
+			if callerErr := ctx.Err(); callerErr != nil {
+				return nil, callerErr
+			}
+			return nil, errors.New("agy RPC model availability timed out")
+		case <-poll.C:
+		}
+	}
+}
+
+func hasResolvedModel(response *agyv115.FetchAvailableModelsResponse) bool {
+	if response == nil {
+		return false
+	}
+	for _, details := range response.GetModels() {
+		if details != nil && details.GetModel() != agyv115.Model_MODEL_UNSPECIFIED {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *rpcClient) getAllCascadeTrajectories(ctx context.Context, excludeSubtrajectories bool) (*agyv115.GetAllCascadeTrajectoriesResponse, error) {
 	response := new(agyv115.GetAllCascadeTrajectoriesResponse)
 	if err := c.call(ctx, "GetAllCascadeTrajectories", &agyv115.GetAllCascadeTrajectoriesRequest{ExcludeSubtrajectories: excludeSubtrajectories}, response); err != nil {

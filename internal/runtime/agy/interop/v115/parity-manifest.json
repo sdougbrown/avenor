@@ -10,7 +10,7 @@
     {"local":"avenor.agy.v115.GetAvailableModelsRequest","original":"exa.language_server_pb.GetAvailableModelsRequest","fields":[["force_refresh","force_refresh"]]},
     {"local":"avenor.agy.v115.GetAvailableModelsResponse","original":"exa.language_server_pb.GetAvailableModelsResponse","fields":[["response","response"]]},
     {"local":"avenor.agy.v115.FetchAvailableModelsResponse","original":"google.internal.cloud.code.v1internal.FetchAvailableModelsResponse","fields":[["models","models"]]},
-    {"local":"avenor.agy.v115.ModelDetails","original":"google.internal.cloud.code.v1internal.ModelDetails","fields":[]},
+    {"local":"avenor.agy.v115.ModelDetails","original":"google.internal.cloud.code.v1internal.ModelDetails","fields":[["model","model"]]},
     {"local":"avenor.agy.v115.GetAllCascadeTrajectoriesRequest","original":"exa.language_server_pb.GetAllCascadeTrajectoriesRequest","fields":[["exclude_subtrajectories","exclude_subtrajectories"]]},
     {"local":"avenor.agy.v115.GetAllCascadeTrajectoriesResponse","original":"exa.language_server_pb.GetAllCascadeTrajectoriesResponse","fields":[["trajectory_summaries","trajectory_summaries"]]},
     {"local":"avenor.agy.v115.CascadeTrajectorySummary","original":"exa.jetski_cortex_pb.CascadeTrajectorySummary","fields":[]},
