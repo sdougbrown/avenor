@@ -10,6 +10,7 @@ import (
 	"io"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
@@ -70,6 +71,7 @@ type trajectoryMapper struct {
 	sessionID            string
 	expectedConversation string
 	expectedTrajectory   string
+	streamConversation   string
 	trajectoryID         string
 	steps                map[trajectoryStepKey]*trajectoryStepState
 	turnUsage            map[trajectoryStepKey]trajectoryUsage
@@ -120,14 +122,17 @@ func (m *trajectoryMapper) TrajectoryID() string { return m.trajectoryID }
 // never used as a trajectory substitute. Diagnostics intentionally omit opaque
 // identities.
 func (m *trajectoryMapper) bindIdentity(conversationID, trajectoryID string) trajectoryMapResult {
+	if conversationID == "" || trajectoryID == "" {
+		return m.protocol("missing_stream_identity", true)
+	}
 	if len(conversationID) > maxTrajectoryOpaqueID || len(trajectoryID) > maxTrajectoryOpaqueID {
 		return m.protocol("identity_too_large", true)
 	}
 	if m.expectedConversation != "" && conversationID != m.expectedConversation {
 		return m.protocol("identity_mismatch", true)
 	}
-	if trajectoryID == "" {
-		return m.protocol("missing_trajectory_identity", true)
+	if m.streamConversation != "" && conversationID != m.streamConversation {
+		return m.protocol("identity_mismatch", true)
 	}
 	if m.expectedTrajectory != "" && trajectoryID != m.expectedTrajectory {
 		return m.protocol("identity_mismatch", true)
@@ -135,6 +140,7 @@ func (m *trajectoryMapper) bindIdentity(conversationID, trajectoryID string) tra
 	if m.trajectoryID != "" && trajectoryID != m.trajectoryID {
 		return m.protocol("identity_mismatch", true)
 	}
+	m.streamConversation = conversationID
 	m.trajectoryID = trajectoryID
 	return trajectoryMapResult{}
 }
@@ -526,6 +532,7 @@ type trajectoryRecoveryOptions struct {
 	maxRecoveryAttempts int
 	backoff             func(int) time.Duration
 	onEvent             func(events.Event)
+	holdAfterReady      bool
 }
 
 type heldTrajectorySnapshot struct {
@@ -539,16 +546,26 @@ var errTrajectoryRecoveryClosed = errors.New("agy trajectory recovery is closed"
 // does not start goroutines; Close closes the active Stage 11 stream to unblock
 // Recv, and Run always closes every opened stream before returning.
 type trajectoryRecoveryCoordinator struct {
-	transport trajectoryRecoveryTransport
-	mapper    *trajectoryMapper
-	options   trajectoryRecoveryOptions
-	closed    chan struct{}
-	closeOnce sync.Once
-	mu        sync.Mutex
-	stream    trajectoryRecoveryStream
-	runCancel context.CancelFunc
-	ran       bool
-	sleep     func(context.Context, time.Duration) error
+	transport    trajectoryRecoveryTransport
+	mapper       *trajectoryMapper
+	options      trajectoryRecoveryOptions
+	closed       chan struct{}
+	closeOnce    sync.Once
+	ready        chan struct{}
+	readyOnce    sync.Once
+	finished     chan struct{}
+	finishOnce   sync.Once
+	terminal     chan struct{}
+	terminalOnce sync.Once
+	release      chan struct{}
+	releaseOnce  sync.Once
+	released     atomic.Bool
+	mu           sync.Mutex
+	stream       trajectoryRecoveryStream
+	runCancel    context.CancelFunc
+	ran          bool
+	resultErr    error
+	sleep        func(context.Context, time.Duration) error
 }
 
 func newTrajectoryRecoveryCoordinator(client *rpcClient, mapper *trajectoryMapper, options trajectoryRecoveryOptions) *trajectoryRecoveryCoordinator {
@@ -561,7 +578,17 @@ func newTrajectoryRecoveryCoordinatorWithTransport(transport trajectoryRecoveryT
 	if options.backoff == nil {
 		options.backoff = func(attempt int) time.Duration { return time.Duration(attempt) * 50 * time.Millisecond }
 	}
-	return &trajectoryRecoveryCoordinator{transport: transport, mapper: mapper, options: options, closed: make(chan struct{}), sleep: sleepTrajectoryRecovery}
+	return &trajectoryRecoveryCoordinator{
+		transport: transport,
+		mapper:    mapper,
+		options:   options,
+		closed:    make(chan struct{}),
+		ready:     make(chan struct{}),
+		finished:  make(chan struct{}),
+		terminal:  make(chan struct{}),
+		release:   make(chan struct{}),
+		sleep:     sleepTrajectoryRecovery,
+	}
 }
 
 func (c *trajectoryRecoveryCoordinator) Close() error {
@@ -574,12 +601,68 @@ func (c *trajectoryRecoveryCoordinator) Close() error {
 		if c.stream != nil {
 			_ = c.stream.Close()
 		}
+		if !c.ran {
+			c.resultErr = errTrajectoryRecoveryClosed
+			c.finishOnce.Do(func() { close(c.finished) })
+		}
 		c.mu.Unlock()
 	})
 	return nil
 }
 
-func (c *trajectoryRecoveryCoordinator) Run(ctx context.Context) error {
+func (c *trajectoryRecoveryCoordinator) WaitReady(ctx context.Context) error {
+	select {
+	case <-c.ready:
+		select {
+		case <-c.closed:
+			return errTrajectoryRecoveryClosed
+		default:
+			return nil
+		}
+	case <-c.finished:
+		return c.result()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// ReleaseAfterReady lets a turn owner begin its mutation only after the
+// stream has reported a quiescent IDLE baseline. It is a no-op for recovery
+// coordinators that were not configured to hold after readiness.
+func (c *trajectoryRecoveryCoordinator) ReleaseAfterReady() {
+	c.releaseOnce.Do(func() {
+		c.released.Store(true)
+		close(c.release)
+	})
+}
+
+func (c *trajectoryRecoveryCoordinator) Wait(ctx context.Context) error {
+	select {
+	case <-c.terminal:
+		<-c.finished
+		return c.result()
+	case <-c.finished:
+		return c.result()
+	case <-ctx.Done():
+		select {
+		case <-c.terminal:
+			<-c.finished
+			return c.result()
+		case <-c.finished:
+			return c.result()
+		default:
+			return ctx.Err()
+		}
+	}
+}
+
+func (c *trajectoryRecoveryCoordinator) result() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.resultErr
+}
+
+func (c *trajectoryRecoveryCoordinator) Run(ctx context.Context) (resultErr error) {
 	if c.transport == nil || c.mapper == nil || c.options.cascadeID == "" || c.options.conversationID == "" {
 		return errors.New("agy trajectory recovery requires transport, mapper, cascade, and conversation")
 	}
@@ -609,7 +692,9 @@ func (c *trajectoryRecoveryCoordinator) Run(ctx context.Context) error {
 		cancel()
 		c.mu.Lock()
 		c.runCancel = nil
+		c.resultErr = resultErr
 		c.mu.Unlock()
+		c.finishOnce.Do(func() { close(c.finished) })
 	}()
 	ctx = runCtx
 	attempts := 0
@@ -663,7 +748,26 @@ func (c *trajectoryRecoveryCoordinator) Run(ctx context.Context) error {
 				}
 			}
 			result := c.mapper.ApplyStream(update)
+			if result.terminal {
+				c.terminalOnce.Do(func() { close(c.terminal) })
+			}
 			c.emit(result.events)
+			if !result.recover && update.GetStatus() == agyv115.CascadeRunStatus_CASCADE_RUN_STATUS_IDLE && update.GetFullyIdle() {
+				becameReady := false
+				c.readyOnce.Do(func() {
+					becameReady = true
+					close(c.ready)
+				})
+				if becameReady && c.options.holdAfterReady {
+					select {
+					case <-c.release:
+					case <-ctx.Done():
+						return ctx.Err()
+					case <-c.closed:
+						return errTrajectoryRecoveryClosed
+					}
+				}
+			}
 			if result.terminal {
 				c.clearStream(stream)
 				_ = stream.Close()
@@ -753,6 +857,9 @@ func (c *trajectoryRecoveryCoordinator) stopped(ctx context.Context) error {
 	}
 }
 func (c *trajectoryRecoveryCoordinator) emit(events []events.Event) {
+	if c.options.holdAfterReady && !c.released.Load() {
+		return
+	}
 	for _, event := range events {
 		if c.options.onEvent != nil {
 			c.options.onEvent(event)

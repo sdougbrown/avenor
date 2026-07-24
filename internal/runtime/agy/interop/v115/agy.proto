@@ -21,7 +21,7 @@ message TrajectoryMetadata { string root_conversation_id = 6; }
 message GetAvailableModelsRequest { bool force_refresh = 1; }
 message GetAvailableModelsResponse { FetchAvailableModelsResponse response = 1; }
 message FetchAvailableModelsResponse { map<string, ModelDetails> models = 1; }
-message ModelDetails {}
+message ModelDetails { Model model = 15; }
 
 message GetAllCascadeTrajectoriesRequest { bool exclude_subtrajectories = 1; }
 message GetAllCascadeTrajectoriesResponse { map<string, CascadeTrajectorySummary> trajectory_summaries = 1; }

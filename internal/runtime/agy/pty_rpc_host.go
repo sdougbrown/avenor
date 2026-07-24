@@ -25,15 +25,19 @@ type ptyRPCHost struct {
 	conversationID string
 	processDone    <-chan struct{}
 
-	mu       sync.Mutex
-	closing  bool
-	closed   chan struct{}
-	closeErr error
+	mu         sync.Mutex
+	closing    bool
+	turnCancel context.CancelFunc
+	turnDone   chan struct{}
+	closed     chan struct{}
+	closeErr   error
 
-	// coordinator is reserved for the Stage 12 recovery owner when Stage 18
-	// selects this host. Keeping the close seam here ensures the host remains
-	// the sole lifetime owner rather than leaking a future stream.
-	coordinator interface{ Close() error }
+	models   *agyv115.FetchAvailableModelsResponse
+	mapper   *trajectoryMapper
+	turnGate chan struct{}
+
+	// coordinator is the active Stage 12 recovery owner for the current turn.
+	coordinator *trajectoryRecoveryCoordinator
 }
 
 type ptyRPCHostFactory func(context.Context, runtime.StartOptions, string, string) (*ptyRPCHost, error)
@@ -43,7 +47,10 @@ var (
 	startPTYCascade    = func(ctx context.Context, host *rpcHost) (*agyv115.StartCascadeResponse, error) {
 		return host.startCascade(ctx)
 	}
-	validatePTYSession = func(ctx context.Context, host *rpcHost, id string) error { return host.validateSession(ctx, id) }
+	validatePTYSession     = func(ctx context.Context, host *rpcHost, id string) error { return host.validateSession(ctx, id) }
+	awaitModelAvailability = func(ctx context.Context, host *rpcHost) (*agyv115.FetchAvailableModelsResponse, error) {
+		return host.client.waitForAvailableModels(ctx)
+	}
 )
 
 func defaultPTYRPCHostFactory(ctx context.Context, opts runtime.StartOptions, resumeID, version string) (*ptyRPCHost, error) {
@@ -74,7 +81,9 @@ func startPTYRPCHost(ctx context.Context, launcher terminal.Launcher, opts runti
 		return nil, errors.New("agy RPC host startup failed")
 	}
 
-	host := &ptyRPCHost{terminal: session, cancel: cancel, closed: make(chan struct{})}
+	turnGate := make(chan struct{}, 1)
+	turnGate <- struct{}{}
+	host := &ptyRPCHost{terminal: session, cancel: cancel, closed: make(chan struct{}), turnGate: turnGate}
 	pid := session.PID()
 	if pid <= 0 {
 		_ = host.Close(context.Background())
@@ -123,6 +132,20 @@ func startPTYRPCHost(ctx context.Context, launcher terminal.Launcher, opts runti
 		return nil, err
 	}
 	host.conversationID = conversationID
+
+	var modelsResp *agyv115.FetchAvailableModelsResponse
+	if err := awaitPTYRPCStartup(ctx, processDone, func(startCtx context.Context) error {
+		var waitErr error
+		modelsResp, waitErr = awaitModelAvailability(startCtx, rpc)
+		return waitErr
+	}); err != nil {
+		_ = host.Close(context.Background())
+		return nil, err
+	}
+	host.models = modelsResp
+	// AgentStateUpdate.conversation_id is a distinct wire identity. Pin it from
+	// the first stream update rather than equating it with the cascade ID.
+	host.mapper = newTrajectoryMapper(conversationID, "", "")
 	return host, nil
 }
 
@@ -225,12 +248,29 @@ func (h *ptyRPCHost) Close(ctx context.Context) error {
 		}
 	}
 	h.closing = true
+	if h.turnCancel != nil {
+		h.turnCancel()
+	}
+	turnDone := h.turnDone
+	coordinator := h.coordinator
 	h.mu.Unlock()
 
 	var firstErr error
-	if h.coordinator != nil {
-		if err := h.coordinator.Close(); err != nil {
+	if coordinator != nil {
+		if err := coordinator.Close(); err != nil {
 			firstErr = err
+		}
+		if err := coordinator.Wait(cleanupCtx); err != nil && !errors.Is(err, errTrajectoryRecoveryClosed) && !errors.Is(err, context.Canceled) && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if turnDone != nil {
+		select {
+		case <-turnDone:
+		case <-cleanupCtx.Done():
+			if firstErr == nil {
+				firstErr = cleanupCtx.Err()
+			}
 		}
 	}
 	if h.rpc != nil {

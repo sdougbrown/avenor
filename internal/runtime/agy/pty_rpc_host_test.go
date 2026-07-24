@@ -92,10 +92,21 @@ func (s *blockingReapSession) Kill(ctx context.Context) error {
 
 func withPTYRPCSeams(t *testing.T, discover func(context.Context, int, string, rpcDiscoveryOptions) (*rpcHost, error), start func(context.Context, *rpcHost) (*agyv115.StartCascadeResponse, error), validate func(context.Context, *rpcHost, string) error) {
 	t.Helper()
-	oldDiscover, oldStart, oldValidate := discoverPTYRPCHost, startPTYCascade, validatePTYSession
-	discoverPTYRPCHost, startPTYCascade, validatePTYSession = discover, start, validate
+	withPTYRPCSeamsAndWait(t, discover, start, validate, func(context.Context, *rpcHost) (*agyv115.FetchAvailableModelsResponse, error) {
+		return &agyv115.FetchAvailableModelsResponse{
+			Models: map[string]*agyv115.ModelDetails{
+				"gemini-2.5-flash": {Model: agyv115.Model_MODEL_GOOGLE_GEMINI_2_5_FLASH},
+			},
+		}, nil
+	})
+}
+
+func withPTYRPCSeamsAndWait(t *testing.T, discover func(context.Context, int, string, rpcDiscoveryOptions) (*rpcHost, error), start func(context.Context, *rpcHost) (*agyv115.StartCascadeResponse, error), validate func(context.Context, *rpcHost, string) error, wait func(context.Context, *rpcHost) (*agyv115.FetchAvailableModelsResponse, error)) {
+	t.Helper()
+	oldDiscover, oldStart, oldValidate, oldWait := discoverPTYRPCHost, startPTYCascade, validatePTYSession, awaitModelAvailability
+	discoverPTYRPCHost, startPTYCascade, validatePTYSession, awaitModelAvailability = discover, start, validate, wait
 	t.Cleanup(func() {
-		discoverPTYRPCHost, startPTYCascade, validatePTYSession = oldDiscover, oldStart, oldValidate
+		discoverPTYRPCHost, startPTYCascade, validatePTYSession, awaitModelAvailability = oldDiscover, oldStart, oldValidate, oldWait
 	})
 }
 
@@ -395,6 +406,69 @@ func TestPTYRPCHostCancellationAndConcurrentClose(t *testing.T) {
 	}
 }
 
+func TestPTYRPCHostModelAvailabilityWait(t *testing.T) {
+	session := &noTerminalProtocolSession{FakeSession: terminal.NewFakeSession("agy", 42, "")}
+	launcher := &recordingLauncher{session: session}
+	var discoverCalls, waitCalls int
+	withPTYRPCSeamsAndWait(t,
+		func(_ context.Context, pid int, _ string, _ rpcDiscoveryOptions) (*rpcHost, error) {
+			discoverCalls++
+			return &rpcHost{client: &rpcClient{}, sessionID: "model-wait-id"}, nil
+		},
+		func(context.Context, *rpcHost) (*agyv115.StartCascadeResponse, error) {
+			return &agyv115.StartCascadeResponse{CascadeId: "model-wait-id"}, nil
+		},
+		func(context.Context, *rpcHost, string) error { return nil },
+		func(_ context.Context, host *rpcHost) (*agyv115.FetchAvailableModelsResponse, error) {
+			waitCalls++
+			if host == nil || host.client == nil {
+				return nil, errors.New("no client in availability wait")
+			}
+			return &agyv115.FetchAvailableModelsResponse{
+				Models: map[string]*agyv115.ModelDetails{
+					"gemini-2.5-flash": {Model: agyv115.Model_MODEL_GOOGLE_GEMINI_2_5_FLASH},
+				},
+			}, nil
+		},
+	)
+	host, err := startPTYRPCHost(context.Background(), launcher, runtime.StartOptions{}, "", "1.1.5", rpcDiscoveryOptions{})
+	if err != nil {
+		t.Fatalf("start host: %v", err)
+	}
+	defer host.Close(context.Background())
+	if waitCalls != 1 || discoverCalls != 1 || host.ConversationID() != "model-wait-id" {
+		t.Fatalf("wait=%d discover=%d id=%q", waitCalls, discoverCalls, host.ConversationID())
+	}
+	if host.models == nil || len(host.models.GetModels()) == 0 {
+		t.Fatal("available models were not retained")
+	}
+}
+
+func TestPTYRPCHostModelAvailabilityWaitFailureReaps(t *testing.T) {
+	session := &noTerminalProtocolSession{FakeSession: terminal.NewFakeSession("agy", 43, "")}
+	launcher := &recordingLauncher{session: session}
+	withPTYRPCSeamsAndWait(t,
+		func(context.Context, int, string, rpcDiscoveryOptions) (*rpcHost, error) {
+			return &rpcHost{sessionID: "fail-id"}, nil
+		},
+		func(context.Context, *rpcHost) (*agyv115.StartCascadeResponse, error) {
+			return &agyv115.StartCascadeResponse{CascadeId: "fail-id"}, nil
+		},
+		func(context.Context, *rpcHost, string) error { return nil },
+		func(context.Context, *rpcHost) (*agyv115.FetchAvailableModelsResponse, error) {
+			return nil, errors.New("model wait failed")
+		},
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := startPTYRPCHost(ctx, launcher, runtime.StartOptions{}, "", "1.1.5", rpcDiscoveryOptions{}); err == nil {
+		t.Fatal("start host should have failed")
+	}
+	if session.KillCalls() != 1 || session.WaitCalls() != 1 {
+		t.Fatalf("cleanup kill=%d wait=%d", session.KillCalls(), session.WaitCalls())
+	}
+}
+
 func TestPTYRPCHostConcurrentCloseHonorsWaiterDeadline(t *testing.T) {
 	base := &noTerminalProtocolSession{FakeSession: terminal.NewFakeSession("agy", 14, "")}
 	session := &blockingReapSession{
@@ -405,11 +479,16 @@ func TestPTYRPCHostConcurrentCloseHonorsWaiterDeadline(t *testing.T) {
 	}
 	launcher := &recordingLauncher{session: session}
 	withPTYRPCSeams(t,
-		func(context.Context, int, string, rpcDiscoveryOptions) (*rpcHost, error) { return &rpcHost{}, nil },
+		func(_ context.Context, _ int, _ string, _ rpcDiscoveryOptions) (*rpcHost, error) {
+			return &rpcHost{sessionID: "id"}, nil
+		},
 		func(context.Context, *rpcHost) (*agyv115.StartCascadeResponse, error) {
 			return &agyv115.StartCascadeResponse{CascadeId: "id"}, nil
 		},
-		func(context.Context, *rpcHost, string) error { return nil },
+		func(_ context.Context, h *rpcHost, id string) error {
+			h.sessionID = id // Simulate real validateSession behavior.
+			return nil
+		},
 	)
 	host, err := startPTYRPCHost(context.Background(), launcher, runtime.StartOptions{}, "", "1.1.5", rpcDiscoveryOptions{})
 	if err != nil {

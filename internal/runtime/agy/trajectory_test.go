@@ -186,6 +186,21 @@ func TestTrajectoryMapperSnapshots(t *testing.T) {
 	}
 }
 
+func TestTrajectoryMapperPinsIndependentStreamConversation(t *testing.T) {
+	m := newTrajectoryMapper("logical-session", "", "")
+	first := update(agyv115.CascadeRunStatus_CASCADE_RUN_STATUS_IDLE, true, nil)
+	if result := m.ApplyStream(first); result.recover {
+		t.Fatal("first stream identity did not bind")
+	}
+	changed := update(agyv115.CascadeRunStatus_CASCADE_RUN_STATUS_RUNNING, false, nil)
+	changed.ConversationId = "different-stream-conversation"
+	result := m.ApplyStream(changed)
+	requireNames(t, result.events, "avenor.agy.protocol")
+	if !result.recover {
+		t.Fatal("changed stream conversation did not request recovery")
+	}
+}
+
 func TestTrajectoryMapperBoundsAndPrivateIDs(t *testing.T) {
 	t.Run("usage overflow is omitted", func(t *testing.T) {
 		m := newTrajectoryMapper("session", testConversation, "")
@@ -299,6 +314,7 @@ type fakeRecoveryTransport struct {
 	streams      []trajectoryRecoveryStream
 	calls        []string
 	openStarted  chan struct{}
+	openRelease  chan struct{}
 	blockOpen    bool
 }
 
@@ -331,6 +347,17 @@ func (t *fakeRecoveryTransport) openStream(ctx context.Context, _ *agyv115.Strea
 			case <-started:
 			default:
 				close(started)
+			}
+		}
+		if t.openRelease != nil {
+			select {
+			case <-t.openRelease:
+				return &fakeRecoveryStream{
+					responses: []*agyv115.StreamAgentStateUpdatesResponse{streamResponse(update(agyv115.CascadeRunStatus_CASCADE_RUN_STATUS_IDLE, true, nil))},
+					wait:      ctx,
+				}, nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
 			}
 		}
 		<-ctx.Done()
@@ -421,6 +448,73 @@ func TestTrajectoryRecoveryCleanTrailerAndIdentityMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	requireNames(t, got, "avenor.agy.protocol", "agent.message_chunk", "session.end")
+}
+
+func TestTrajectoryRecoveryReadiness(t *testing.T) {
+	t.Run("signals only after stream install", func(t *testing.T) {
+		started := make(chan struct{})
+		release := make(chan struct{})
+		ctx, cancel := context.WithCancel(context.Background())
+		transport := &fakeRecoveryTransport{snapshots: []*agyv115.GetCascadeTrajectoryStepsResponse{{}}, blockOpen: true, openStarted: started, openRelease: release}
+		mapper := newTrajectoryMapper("session", testConversation, "")
+		mapper.BeginTurn()
+		c := newTrajectoryRecoveryCoordinatorWithTransport(transport, mapper, trajectoryRecoveryOptions{cascadeID: "cascade", conversationID: testConversation})
+		go func() { _ = c.Run(ctx) }()
+		<-started
+		short, shortCancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		defer shortCancel()
+		if err := c.WaitReady(short); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("premature readiness = %v", err)
+		}
+		close(release)
+		readyCtx, readyCancel := context.WithTimeout(context.Background(), time.Second)
+		defer readyCancel()
+		if err := c.WaitReady(readyCtx); err != nil {
+			t.Fatalf("readiness = %v", err)
+		}
+		cancel()
+		if err := c.Wait(readyCtx); !errors.Is(err, context.Canceled) {
+			t.Fatalf("run result = %v", err)
+		}
+	})
+
+	t.Run("quiescent baseline holds updates until release", func(t *testing.T) {
+		stream := &fakeRecoveryStream{responses: []*agyv115.StreamAgentStateUpdatesResponse{
+			streamResponse(update(agyv115.CascadeRunStatus_CASCADE_RUN_STATUS_IDLE, true, nil)),
+			streamResponse(update(agyv115.CascadeRunStatus_CASCADE_RUN_STATUS_RUNNING, false, []uint32{1}, plannerStep(agyv115.CortexStepStatus_CORTEX_STEP_STATUS_GENERATING, "answer", nil))),
+			streamResponse(update(agyv115.CascadeRunStatus_CASCADE_RUN_STATUS_IDLE, true, []uint32{1}, plannerStep(agyv115.CortexStepStatus_CORTEX_STEP_STATUS_DONE, "answer", nil))),
+		}}
+		transport := &fakeRecoveryTransport{snapshots: []*agyv115.GetCascadeTrajectoryStepsResponse{{}}, streams: []trajectoryRecoveryStream{stream}}
+		mapper := newTrajectoryMapper("session", testConversation, "")
+		var got []events.Event
+		c := newTrajectoryRecoveryCoordinatorWithTransport(transport, mapper, trajectoryRecoveryOptions{cascadeID: "cascade", conversationID: testConversation, holdAfterReady: true, onEvent: func(event events.Event) { got = append(got, event) }})
+		go func() { _ = c.Run(context.Background()) }()
+		readyCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := c.WaitReady(readyCtx); err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("baseline emitted before release: %v", eventNames(got))
+		}
+		mapper.BeginTurn()
+		c.ReleaseAfterReady()
+		if err := c.Wait(readyCtx); err != nil {
+			t.Fatal(err)
+		}
+		requireNames(t, got, "agent.message_chunk", "session.end")
+	})
+
+	t.Run("close wakes readiness before run", func(t *testing.T) {
+		c := newTrajectoryRecoveryCoordinatorWithTransport(&fakeRecoveryTransport{}, newTrajectoryMapper("session", testConversation, ""), trajectoryRecoveryOptions{cascadeID: "cascade", conversationID: testConversation})
+		_ = c.Close()
+		if err := c.WaitReady(context.Background()); !errors.Is(err, errTrajectoryRecoveryClosed) {
+			t.Fatalf("closed readiness = %v", err)
+		}
+		if err := c.Wait(context.Background()); !errors.Is(err, errTrajectoryRecoveryClosed) {
+			t.Fatalf("closed result = %v", err)
+		}
+	})
 }
 
 func TestTrajectoryRecoveryBoundsAndCancellation(t *testing.T) {

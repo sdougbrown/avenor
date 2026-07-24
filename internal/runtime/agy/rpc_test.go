@@ -459,6 +459,120 @@ func TestEndpointRestrictionProxyBypassAndNoMutationRetry(t *testing.T) {
 	}
 }
 
+func TestWaitForAvailableModelsEmptyThenPopulated(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		w.Header().Set("Content-Type", grpcWebContentType)
+		body, err := io.ReadAll(request.Body)
+		if err != nil || len(body) < 5 {
+			t.Errorf("read model request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		modelRequest := new(agyv115.GetAvailableModelsRequest)
+		if err := proto.Unmarshal(body[5:], modelRequest); err != nil || modelRequest.GetForceRefresh() {
+			t.Errorf("model poll request = %#v, %v", modelRequest, err)
+		}
+		calls.Add(1)
+		if calls.Load() >= 2 {
+			resp := &agyv115.GetAvailableModelsResponse{
+				Response: &agyv115.FetchAvailableModelsResponse{
+					Models: map[string]*agyv115.ModelDetails{
+						"gemini-2.5-flash": {Model: agyv115.Model_MODEL_GOOGLE_GEMINI_2_5_FLASH},
+						"future":           {Model: agyv115.Model(987654)},
+					},
+				},
+			}
+			_, _ = w.Write(grpcReply(t, resp))
+			return
+		}
+		_, _ = w.Write(grpcReply(t, &agyv115.GetAvailableModelsResponse{
+			Response: &agyv115.FetchAvailableModelsResponse{
+				Models: map[string]*agyv115.ModelDetails{"zero": {}},
+			},
+		}))
+	}))
+	defer server.Close()
+	client, err := newRPCEndpointClient(rpcEndpoint{address: strings.TrimPrefix(server.URL, "http://")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.close()
+
+	// Override poll interval to speed up the test.
+	oldPoll := modelAvailabilityPollInterval
+	modelAvailabilityPollInterval = 10 * time.Millisecond
+	defer func() { modelAvailabilityPollInterval = oldPoll }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	resp, err := client.waitForAvailableModels(ctx)
+	if err != nil {
+		t.Fatalf("waitForAvailableModels: %v", err)
+	}
+	if len(resp.GetModels()) == 0 {
+		t.Fatal("models map is empty after wait")
+	}
+	md, ok := resp.GetModels()["gemini-2.5-flash"]
+	if !ok {
+		t.Fatal("expected model key gemini-2.5-flash not found")
+	}
+	if md.GetModel() != agyv115.Model_MODEL_GOOGLE_GEMINI_2_5_FLASH {
+		t.Fatalf("model = %d, want %d", md.GetModel(), agyv115.Model_MODEL_GOOGLE_GEMINI_2_5_FLASH)
+	}
+	if got := resp.GetModels()["future"].GetModel(); got != agyv115.Model(987654) {
+		t.Fatalf("unknown model enum = %d", got)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("expected 2 calls, got %d", calls.Load())
+	}
+}
+
+func TestWaitForAvailableModelsEmptyUntilDeadline(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", grpcWebContentType)
+		_, _ = w.Write(grpcReply(t, &agyv115.GetAvailableModelsResponse{Response: &agyv115.FetchAvailableModelsResponse{}}))
+	}))
+	defer server.Close()
+	client, err := newRPCEndpointClient(rpcEndpoint{address: strings.TrimPrefix(server.URL, "http://")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.close()
+
+	// A tiny deadline so the test completes quickly. The model availability
+	// deadline is bounded by the minimum of this context and the internal timer.
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err = client.waitForAvailableModels(ctx)
+	if err == nil {
+		t.Fatal("waitForAvailableModels succeeded with empty models")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("wait took %v, far beyond deadline", elapsed)
+	}
+}
+
+func TestWaitForAvailableModelsCancellation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", grpcWebContentType)
+		_, _ = w.Write(grpcReply(t, &agyv115.GetAvailableModelsResponse{Response: &agyv115.FetchAvailableModelsResponse{}}))
+	}))
+	defer server.Close()
+	client, err := newRPCEndpointClient(rpcEndpoint{address: strings.TrimPrefix(server.URL, "http://")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := client.waitForAvailableModels(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation error = %v", err)
+	}
+}
+
 func TestDarwinAndLinuxListenerParsers(t *testing.T) {
 	darwin, err := os.ReadFile(rpcFixtureDir + "/darwin-lsof.txt")
 	if err != nil {
