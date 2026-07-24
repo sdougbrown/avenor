@@ -108,6 +108,85 @@ func TestClientNotificationRouting(t *testing.T) {
 	}
 }
 
+func TestClientMessageUpdateRoutingCompactsProviderSnapshots(t *testing.T) {
+	c, wOut, _ := fakeClient()
+	defer c.Close()
+
+	c.setSessionID("pi_test")
+	signature := strings.Repeat("opaque-signature", 1_000)
+	updates := []struct {
+		delta       string
+		partialJSON string
+		arguments   string
+	}{
+		{delta: `{"content":"first`, partialJSON: `{"content":"first`, arguments: "first"},
+		{delta: ` second"}`, partialJSON: `{"content":"first second"}`, arguments: "first second"},
+	}
+	go func() {
+		for _, update := range updates {
+			toolCall := map[string]any{
+				"type":        "toolCall",
+				"id":          "call-1",
+				"name":        "write",
+				"arguments":   map[string]any{"content": update.arguments},
+				"partialJson": update.partialJSON,
+			}
+			partial := map[string]any{"content": []any{
+				map[string]any{"type": "thinking", "thinkingSignature": signature},
+				toolCall,
+			}}
+			writeLine(wOut, map[string]any{
+				"type":                  "message_update",
+				"message":               partial,
+				"assistantMessageEvent": map[string]any{"type": "toolcall_delta", "contentIndex": 1, "delta": update.delta, "partial": partial},
+			})
+		}
+	}()
+
+	got := make([]events.Event, 0, len(updates)*2)
+	for len(got) < cap(got) {
+		select {
+		case ev := <-c.eventsCh:
+			got = append(got, ev)
+		case <-time.After(time.Second):
+			t.Fatalf("timed out after %d routed events", len(got))
+		}
+	}
+	for i := range updates {
+		canonical, alias := got[i*2], got[i*2+1]
+		if canonical.Event != "tool.call_update" || alias.Event != "avenor.message.update" {
+			t.Fatalf("update %d events = %+v, want canonical and compact compatibility updates", i, got[i*2:i*2+2])
+		}
+		if canonical.SessionID != "pi_test" || alias.SessionID != "pi_test" {
+			t.Fatalf("update %d session IDs = %q/%q, want pi_test", i, canonical.SessionID, alias.SessionID)
+		}
+		for _, key := range []string{"message", "partial", "partialJson", "arguments"} {
+			if _, ok := canonical.Fields[key]; ok {
+				t.Fatalf("update %d canonical event retained %s: %+v", i, key, canonical.Fields)
+			}
+		}
+		if _, ok := alias.Fields["message"]; ok {
+			t.Fatalf("update %d alias retained message: %+v", i, alias.Fields)
+		}
+		assistantEvent, ok := alias.Fields["assistantMessageEvent"].(map[string]any)
+		if !ok {
+			t.Fatalf("update %d alias missing assistantMessageEvent: %+v", i, alias.Fields)
+		}
+		for _, key := range []string{"partial", "partialJson", "arguments"} {
+			if _, ok := assistantEvent[key]; ok {
+				t.Fatalf("update %d compact assistant event retained %s: %+v", i, key, assistantEvent)
+			}
+		}
+	}
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshal routed events: %v", err)
+	}
+	if strings.Contains(string(encoded), signature) || strings.Contains(string(encoded), `"partialJson"`) {
+		t.Fatalf("routed events retained cumulative provider snapshot (%d bytes)", len(encoded))
+	}
+}
+
 func TestClientMalformedJSON(t *testing.T) {
 	c, wOut, _ := fakeClient()
 	defer c.Close()

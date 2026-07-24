@@ -152,6 +152,124 @@ func TestTranslateMessageUpdateTextDelta(t *testing.T) {
 	}
 }
 
+func TestTranslateMessageUpdateLegacyNestedDataTextDelta(t *testing.T) {
+	payload := map[string]any{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type":         "text_delta",
+			"contentIndex": 0,
+			"data":         map[string]any{"text": "nested hello"},
+		},
+	}
+	evs := translateNotification(payload, "pi-s1")
+	if len(evs) != 2 {
+		t.Fatalf("len(events) = %d, want 2", len(evs))
+	}
+	if evs[0].Event != "agent.message_chunk" || evs[1].Event != "avenor.message.delta" {
+		t.Fatalf("events = %+v", evs)
+	}
+	if got := evs[0].Fields["delta"]; got != "nested hello" {
+		t.Fatalf("canonical delta = %v, want nested hello", got)
+	}
+	if got := evs[1].Fields["text"]; got != "nested hello" {
+		t.Fatalf("alias text = %v, want nested hello", got)
+	}
+}
+
+func TestTranslateToolCallDeltaOutOfRangeContentIndex(t *testing.T) {
+	payload := map[string]any{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type":         "toolcall_delta",
+			"contentIndex": 1,
+			"delta":        `{"path":"out.txt"}`,
+			"partial": map[string]any{"content": []any{
+				map[string]any{"type": "text", "text": "short"},
+			}},
+		},
+	}
+	evs := translateNotification(payload, "pi-s1")
+	if len(evs) != 2 {
+		t.Fatalf("len(events) = %d, want 2", len(evs))
+	}
+	if evs[0].Event != "tool.call_update" || evs[1].Event != "avenor.message.update" {
+		t.Fatalf("events = %+v, want canonical and compact alias", evs)
+	}
+	if got := evs[0].Fields["kind"]; got != "tool" {
+		t.Fatalf("canonical kind = %v, want tool", got)
+	}
+	if got := evs[0].Fields["status"]; got != "running" {
+		t.Fatalf("canonical status = %v, want running", got)
+	}
+	for _, key := range []string{"toolCallId", "toolName", "title"} {
+		if _, ok := evs[0].Fields[key]; ok {
+			t.Fatalf("canonical event unexpectedly has %s: %+v", key, evs[0].Fields)
+		}
+	}
+	if got := evs[0].Fields["delta"]; got != `{"path":"out.txt"}` {
+		t.Fatalf("canonical delta = %v, want supplied fragment", got)
+	}
+	assistantEvent, ok := evs[1].Fields["assistantMessageEvent"].(map[string]any)
+	if !ok {
+		t.Fatalf("compact alias missing assistantMessageEvent: %+v", evs[1].Fields)
+	}
+	if got := assistantEvent["delta"]; got != `{"path":"out.txt"}` {
+		t.Fatalf("compact alias delta = %v, want supplied fragment", got)
+	}
+	for _, key := range []string{"toolCallId", "toolName", "title", "toolCall"} {
+		if _, ok := assistantEvent[key]; ok {
+			t.Fatalf("compact alias unexpectedly has %s: %+v", key, assistantEvent)
+		}
+	}
+}
+
+func TestCompactMessageUpdateAliasPreservesNonEmptyReasons(t *testing.T) {
+	evs := translateNotification(map[string]any{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type":       "done",
+			"reason":     "stop",
+			"stopReason": "end_turn",
+		},
+	}, "pi-s1")
+	if len(evs) != 1 {
+		t.Fatalf("len(events) = %d, want 1", len(evs))
+	}
+	assistantEvent, ok := evs[0].Fields["assistantMessageEvent"].(map[string]any)
+	if !ok {
+		t.Fatalf("compact alias missing assistantMessageEvent: %+v", evs[0].Fields)
+	}
+	if got := assistantEvent["reason"]; got != "stop" {
+		t.Fatalf("reason = %v, want stop", got)
+	}
+	if got := assistantEvent["stopReason"]; got != "end_turn" {
+		t.Fatalf("stopReason = %v, want end_turn", got)
+	}
+}
+
+func TestCompactMessageUpdateAliasOmitsEmptyReasons(t *testing.T) {
+	evs := translateNotification(map[string]any{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type":       "done",
+			"reason":     "",
+			"stopReason": "",
+		},
+	}, "pi-s1")
+	if len(evs) != 1 {
+		t.Fatalf("len(events) = %d, want 1", len(evs))
+	}
+	assistantEvent, ok := evs[0].Fields["assistantMessageEvent"].(map[string]any)
+	if !ok {
+		t.Fatalf("compact alias missing assistantMessageEvent: %+v", evs[0].Fields)
+	}
+	for _, key := range []string{"reason", "stopReason"} {
+		if _, ok := assistantEvent[key]; ok {
+			t.Fatalf("empty %s was retained: %+v", key, assistantEvent)
+		}
+	}
+}
+
 func TestTranslateMessageUpdateThinkingDelta(t *testing.T) {
 	payload := mustPiPayload(t, `{
 		"type":"message_update",
@@ -168,6 +286,16 @@ func TestTranslateMessageUpdateThinkingDelta(t *testing.T) {
 	if evs[0].Event != "agent.thought_chunk" || evs[1].Event != "avenor.message.update" {
 		t.Fatalf("events = %+v", evs)
 	}
+	if got := evs[0].Fields["delta"]; got != "hmm" {
+		t.Fatalf("canonical thought delta = %v, want hmm", got)
+	}
+	assistantEvent, ok := evs[1].Fields["assistantMessageEvent"].(map[string]any)
+	if !ok {
+		t.Fatalf("compact alias missing assistantMessageEvent: %+v", evs[1].Fields)
+	}
+	if got := assistantEvent["delta"]; got != "hmm" {
+		t.Fatalf("compact thought delta = %v, want hmm", got)
+	}
 }
 
 func TestTranslateMessageUpdateSkipsEmptyCanonicalDelta(t *testing.T) {
@@ -177,6 +305,24 @@ func TestTranslateMessageUpdateSkipsEmptyCanonicalDelta(t *testing.T) {
 	}, "pi-s1")
 	if len(evs) != 1 || evs[0].Event != "avenor.message.update" {
 		t.Fatalf("events = %+v, want only avenor.message.update", evs)
+	}
+}
+
+func TestTranslateMessageUpdateWithoutAssistantEventDropsCumulativeMessage(t *testing.T) {
+	evs := translateNotification(map[string]any{
+		"type": "message_update",
+		"message": map[string]any{
+			"content": []any{map[string]any{"type": "text", "text": strings.Repeat("cumulative", 1_000)}},
+		},
+	}, "pi-s1")
+	if len(evs) != 1 || evs[0].Event != "avenor.message.update" {
+		t.Fatalf("events = %+v, want one compact compatibility event", evs)
+	}
+	if got := evs[0].Fields["type"]; got != "message_update" {
+		t.Fatalf("type = %v, want message_update", got)
+	}
+	if _, ok := evs[0].Fields["message"]; ok {
+		t.Fatalf("fallback event retained cumulative message: %+v", evs[0].Fields)
 	}
 }
 
@@ -227,26 +373,90 @@ func TestTranslateMessageLifecycleDoesNotReplayCumulativeText(t *testing.T) {
 	}
 }
 
-func TestTranslateToolCallDeltaCompactsCumulativeProviderPayload(t *testing.T) {
-	var translated []any
-	for i, delta := range []string{`{"path":"out.txt"`, `,"content":"first"`, ` plus second"}`} {
-		signature := strings.Repeat("encrypted-signature", (i+1)*1_000)
-		arguments := strings.Repeat("tool argument content", (i+1)*1_000)
-		payload := map[string]any{
-			"type": "message_update",
-			"message": map[string]any{"content": []any{
-				map[string]any{"type": "thinking", "thinkingSignature": signature},
-				map[string]any{"type": "toolCall", "id": "call-1", "name": "write", "arguments": map[string]any{"content": arguments}, "partialJson": arguments},
-			}},
-			"assistantMessageEvent": map[string]any{
-				"type":         "toolcall_delta",
-				"contentIndex": 1,
-				"delta":        delta,
-				"partial": map[string]any{"content": []any{
-					map[string]any{"type": "thinking", "thinkingSignature": signature},
-					map[string]any{"type": "toolCall", "id": "call-1", "name": "write", "arguments": map[string]any{"content": arguments}, "partialJson": arguments},
+func TestTranslateMessageLifecycleAliasesDropCumulativeSnapshots(t *testing.T) {
+	for _, evtType := range []string{"text_start", "thinking_start", "thinking_end"} {
+		t.Run(evtType, func(t *testing.T) {
+			signature := strings.Repeat("opaque-signature", 1_000)
+			cumulative := strings.Repeat("cumulative-content", 1_000)
+			payload := map[string]any{
+				"type": "message_update",
+				"message": map[string]any{"content": []any{
+					map[string]any{"type": "thinking", "thinking": cumulative, "thinkingSignature": signature},
 				}},
-			},
+				"assistantMessageEvent": map[string]any{
+					"type":         evtType,
+					"contentIndex": 0,
+					"content":      cumulative,
+					"partial": map[string]any{"content": []any{
+						map[string]any{"type": "thinking", "thinking": cumulative, "thinkingSignature": signature},
+					}},
+				},
+			}
+
+			evs := translateNotification(payload, "pi-s1")
+			if len(evs) != 1 || evs[0].Event != "avenor.message.update" {
+				t.Fatalf("events = %+v, want only compact compatibility event", evs)
+			}
+			if _, ok := evs[0].Fields["message"]; ok {
+				t.Fatalf("alias retained cumulative message: %+v", evs[0].Fields)
+			}
+			assistantEvent, ok := evs[0].Fields["assistantMessageEvent"].(map[string]any)
+			if !ok {
+				t.Fatalf("alias missing assistantMessageEvent: %+v", evs[0].Fields)
+			}
+			if got := assistantEvent["type"]; got != evtType {
+				t.Fatalf("assistant type = %v, want %s", got, evtType)
+			}
+			for _, key := range []string{"content", "partial", "thinkingSignature"} {
+				if _, ok := assistantEvent[key]; ok {
+					t.Fatalf("compact assistant event retained %s: %+v", key, assistantEvent)
+				}
+			}
+			encoded, err := json.Marshal(evs)
+			if err != nil {
+				t.Fatalf("marshal compact lifecycle event: %v", err)
+			}
+			if strings.Contains(string(encoded), cumulative) || strings.Contains(string(encoded), signature) {
+				t.Fatalf("compact lifecycle event retained cumulative provider data (%d bytes)", len(encoded))
+			}
+		})
+	}
+}
+
+func TestTranslateToolCallDeltaCompactsCumulativeProviderPayload(t *testing.T) {
+	fragments := []string{
+		`{"path":"out.txt","content":"`,
+		strings.Repeat("a", 4_000),
+		strings.Repeat("b", 4_000),
+		`"}`,
+	}
+	var partialJSON strings.Builder
+	var content strings.Builder
+	var translated []any
+	var deltaBytes int
+	for i, delta := range fragments {
+		partialJSON.WriteString(delta)
+		deltaBytes += len(delta)
+		switch i {
+		case 1, 2:
+			content.WriteString(delta)
+		}
+		signature := strings.Repeat("encrypted-signature", (i+1)*1_000)
+		toolCall := map[string]any{
+			"type":        "toolCall",
+			"id":          "call-1",
+			"name":        "write",
+			"arguments":   map[string]any{"path": "out.txt", "content": content.String()},
+			"partialJson": partialJSON.String(),
+		}
+		partial := map[string]any{"content": []any{
+			map[string]any{"type": "thinking", "thinkingSignature": signature},
+			toolCall,
+		}}
+		payload := map[string]any{
+			"type":                  "message_update",
+			"message":               partial,
+			"assistantMessageEvent": map[string]any{"type": "toolcall_delta", "contentIndex": 1, "delta": delta, "partial": partial},
 		}
 
 		evs := translateNotification(payload, "pi-s1")
@@ -255,6 +465,12 @@ func TestTranslateToolCallDeltaCompactsCumulativeProviderPayload(t *testing.T) {
 		}
 		if got := evs[0].Fields["toolCallId"]; got != "call-1" {
 			t.Fatalf("update %d toolCallId = %v, want call-1", i, got)
+		}
+		if got := evs[0].Fields["kind"]; got != "tool" {
+			t.Fatalf("update %d kind = %v, want tool", i, got)
+		}
+		if got := evs[0].Fields["status"]; got != "running" {
+			t.Fatalf("update %d status = %v, want running", i, got)
 		}
 		if got := evs[0].Fields["title"]; got != "write" {
 			t.Fatalf("update %d title = %v, want write", i, got)
@@ -280,19 +496,21 @@ func TestTranslateToolCallDeltaCompactsCumulativeProviderPayload(t *testing.T) {
 		}
 		translated = append(translated, evs[0], evs[1])
 	}
+	if !json.Valid([]byte(partialJSON.String())) {
+		t.Fatalf("tool delta fragments do not form valid JSON: %q", partialJSON.String())
+	}
 
 	encoded, err := json.Marshal(translated)
 	if err != nil {
 		t.Fatalf("marshal compact events: %v", err)
 	}
-	if strings.Contains(string(encoded), "encrypted-signature") {
-		t.Fatal("compact events retained encrypted reasoning signature")
+	for _, forbidden := range []string{"encrypted-signature", `"partialJson"`, `"arguments"`} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("compact delta events retained %s", forbidden)
+		}
 	}
-	if strings.Contains(string(encoded), "tool argument content") {
-		t.Fatal("compact delta events retained cumulative tool arguments")
-	}
-	if len(encoded) > 5_000 {
-		t.Fatalf("compact events encoded to %d bytes, want less than 5000", len(encoded))
+	if max := deltaBytes*3 + 5_000; len(encoded) > max {
+		t.Fatalf("compact events encoded to %d bytes, want at most %d for %d delta bytes", len(encoded), max, deltaBytes)
 	}
 }
 
@@ -332,6 +550,12 @@ func TestTranslateToolCallEndKeepsFullInputOnce(t *testing.T) {
 	}, "pi-s1")
 	if len(evs) != 2 {
 		t.Fatalf("len(events) = %d, want 2", len(evs))
+	}
+	if evs[0].Event != "tool.call_update" || evs[1].Event != "avenor.message.update" {
+		t.Fatalf("tool end events = %+v, want canonical and compact compatibility updates", evs)
+	}
+	if got := evs[0].Fields["status"]; got != "completed" {
+		t.Fatalf("tool end status = %v, want completed", got)
 	}
 	if got := evs[0].Fields["toolCallId"]; got != "call-1" {
 		t.Fatalf("tool end id = %v, want call-1", got)
