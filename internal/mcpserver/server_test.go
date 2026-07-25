@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -83,6 +85,67 @@ func (f *fakeClient) AnswerPermission(runtimeID, requestID, optionID string) err
 
 func (f *fakeClient) Close() error {
 	return nil
+}
+
+type spawnCountingClient struct {
+	spawns atomic.Int32
+}
+
+func (c *spawnCountingClient) Status(string) (map[string]any, error) { return nil, nil }
+func (c *spawnCountingClient) List() ([]map[string]any, error)       { return nil, nil }
+func (c *spawnCountingClient) Spawn(map[string]any) (map[string]any, error) {
+	c.spawns.Add(1)
+	return map[string]any{"runtime_id": "rt-shared", "session_id": "ses-shared"}, nil
+}
+func (c *spawnCountingClient) Shutdown(string) error                         { return nil }
+func (c *spawnCountingClient) Close() error                                  { return nil }
+func (c *spawnCountingClient) AnswerPermission(string, string, string) error { return nil }
+
+func TestParallelSpawnLazilyStartsOneSharedSupervisor(t *testing.T) {
+	origStart := startSupervisorFunc
+	defer func() { startSupervisorFunc = origStart }()
+
+	const socketPath = "/tmp/avenor-parallel-start.sock"
+	control := &spawnCountingClient{}
+	var starts atomic.Int32
+	startSupervisorFunc = func(string, time.Duration) (*supervisorLifecycle, error) {
+		starts.Add(1)
+		return &supervisorLifecycle{socketPath: socketPath, client: control}, nil
+	}
+
+	s, err := NewServer(Options{Transport: "stdio"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	const calls = 16
+	var wg sync.WaitGroup
+	wg.Add(calls)
+	for i := 0; i < calls; i++ {
+		go func() {
+			defer wg.Done()
+			_, _, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
+				Agent:   "test",
+				RepoDir: ".",
+				Prompt:  "hello",
+			})
+			if err != nil {
+				t.Errorf("spawn: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := starts.Load(); got != 1 {
+		t.Fatalf("supervisor starts = %d, want 1", got)
+	}
+	if got := control.spawns.Load(); got != calls {
+		t.Fatalf("spawn calls = %d, want %d", got, calls)
+	}
+	if s.controlClient != control || s.defaultSupervisorPath != socketPath {
+		t.Fatal("parallel calls did not share the lazy supervisor client")
+	}
 }
 
 func TestNewServerInvalidOptions(t *testing.T) {
@@ -895,9 +958,14 @@ func TestServerCloseWithLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	info, err := os.Stat(socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	lc := &supervisorLifecycle{
 		socketPath: socketPath,
 		client:     fc,
+		socketInfo: info,
 	}
 	s.lifecycle = lc
 
@@ -1582,6 +1650,7 @@ func TestAvenorStatusControlClientNotAvailable(t *testing.T) {
 
 	s := &Server{
 		registry: NewRunRegistry(),
+		opts:     Options{NoAutostart: true},
 	}
 	_, _, err = s.handleAvenorStatus(context.Background(), nil, statusArgs{})
 	if err == nil {

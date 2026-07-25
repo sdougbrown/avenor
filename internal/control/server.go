@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -26,10 +27,11 @@ type PermissionAnswer struct {
 type ControlServer struct {
 	state *ControlState
 
-	mu       sync.Mutex
-	listener net.Listener
-	path     string
-	stopped  bool
+	mu         sync.Mutex
+	listener   net.Listener
+	path       string
+	socketInfo os.FileInfo
+	stopped    bool
 
 	conns      map[*connState]struct{}
 	subs       map[*subscriber]struct{}
@@ -120,6 +122,23 @@ func (s *ControlServer) Start(socketPath string) error {
 	if err := os.MkdirAll(filepath.Dir(socketPath), 0o700); err != nil {
 		return fmt.Errorf("create control socket dir: %w", err)
 	}
+	// Serialize stale-socket inspection and bind across independent stable
+	// starters. The lock is held only through Listen, so an attached client
+	// is never blocked from converging on the winner.
+	lockPath := socketPath + ".control.lock"
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("open control socket lock: %w", err)
+	}
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		_ = lockFile.Close()
+		return fmt.Errorf("lock control socket: %w", err)
+	}
+	defer func() {
+		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+		_ = lockFile.Close()
+	}()
+
 	if _, err := os.Stat(socketPath); err == nil {
 		if c, dialErr := net.DialTimeout("unix", socketPath, 250*time.Millisecond); dialErr == nil {
 			_ = c.Close()
@@ -137,11 +156,30 @@ func (s *ControlServer) Start(socketPath string) error {
 		_ = l.Close()
 		return fmt.Errorf("chmod control socket: %w", err)
 	}
+	info, err := os.Stat(socketPath)
+	if err != nil {
+		_ = l.Close()
+		return fmt.Errorf("stat control socket: %w", err)
+	}
 
 	s.mu.Lock()
 	s.listener = l
 	s.path = socketPath
+	s.socketInfo = info
 	s.mu.Unlock()
+
+	// startSupervisor supplies this one-shot inherited descriptor. Signalling
+	// only after Listen succeeds lets its parent distinguish this child from a
+	// competing stable process that bound the same path first.
+	readyFDValue := os.Getenv("AVENOR_CONTROL_READY_FD")
+	_ = os.Unsetenv("AVENOR_CONTROL_READY_FD")
+	if readyFD, err := strconv.Atoi(readyFDValue); err == nil && readyFD >= 3 {
+		ready := os.NewFile(uintptr(readyFD), "avenor-control-ready")
+		if ready != nil {
+			_, _ = ready.Write([]byte{1})
+			_ = ready.Close()
+		}
+	}
 
 	go s.acceptLoop()
 	return nil
@@ -156,6 +194,7 @@ func (s *ControlServer) Stop() {
 	s.stopped = true
 	l := s.listener
 	path := s.path
+	socketInfo := s.socketInfo
 	conns := make([]*connState, 0, len(s.conns))
 	for c := range s.conns {
 		conns = append(conns, c)
@@ -169,7 +208,10 @@ func (s *ControlServer) Stop() {
 		_ = c.conn.Close()
 	}
 	if path != "" {
-		_ = os.Remove(path)
+		current, err := os.Stat(path)
+		if err == nil && (socketInfo == nil || os.SameFile(current, socketInfo)) {
+			_ = os.Remove(path)
+		}
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,64 @@ import (
 	"github.com/sdougbrown/avenor/client"
 	"github.com/sdougbrown/avenor/internal/events"
 )
+
+func TestSocketStartSignalsReadinessFD(t *testing.T) {
+	readyReader, readyWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readyReader.Close()
+	defer readyWriter.Close()
+	t.Setenv("AVENOR_CONTROL_READY_FD", strconv.Itoa(int(readyWriter.Fd())))
+
+	s := NewServer(NewState("run_1", "", 0))
+	if err := s.Start(testSocketPath(t)); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	read := make(chan error, 1)
+	go func() {
+		var signal [1]byte
+		_, err := readyReader.Read(signal[:])
+		read <- err
+	}()
+	select {
+	case err := <-read:
+		if err != nil {
+			t.Fatalf("read readiness signal: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("control server did not signal readiness")
+	}
+}
+
+func TestSocketStopDoesNotUnlinkReplacement(t *testing.T) {
+	path := testSocketPath(t)
+	first := NewServer(NewState("run_1", "", 0))
+	if err := first.Start(path); err != nil {
+		t.Fatalf("start first: %v", err)
+	}
+
+	// Model a competing starter that wins after the first listener closes but
+	// before the first server reaches its cleanup unlink.
+	if err := first.listener.Close(); err != nil {
+		t.Fatalf("close first listener: %v", err)
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("remove old socket: %v", err)
+	}
+	winner, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatalf("start replacement listener: %v", err)
+	}
+	defer winner.Close()
+
+	first.Stop()
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("old server removed replacement socket: %v", err)
+	}
+}
 
 func TestSocketLifecycleActiveListenerFails(t *testing.T) {
 	state := NewState("run_1", "", 0)

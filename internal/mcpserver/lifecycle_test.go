@@ -2,12 +2,16 @@ package mcpserver
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -180,21 +184,26 @@ func TestNewServerNoAutostartError(t *testing.T) {
 	}
 }
 
-func TestNewServerAutostartFails(t *testing.T) {
-	// Autostart should try to spawn the supervisor, which will fail
-	// because the test binary is not avenor with a "stable" subcommand.
-	// We mock execCommand to ensure it doesn't actually try.
+func TestNewServerAutostartFailsLazily(t *testing.T) {
+	// Autostart is lazy: construction succeeds, and the first control
+	// operation starts the supervisor and reports the startup failure.
 	origExec := execCommand
 	execCommand = func(name string, args ...string) *exec.Cmd {
 		return exec.Command("/nonexistent/avenor-test-stub")
 	}
 	defer func() { execCommand = origExec }()
 
-	_, err := NewServer(Options{
+	s, err := NewServer(Options{
 		Transport: "stdio",
 	})
+	if err != nil {
+		t.Fatalf("NewServer should not start lazily: %v", err)
+	}
+	defer s.Close()
+
+	_, _, err = s.handleAvenorStatus(context.Background(), nil, statusArgs{})
 	if err == nil {
-		t.Fatal("expected autostart to fail (spawn can't succeed in test)")
+		t.Fatal("expected lazy autostart to fail (spawn can't succeed in test)")
 	}
 	if !strings.Contains(err.Error(), "autostart supervisor") {
 		t.Fatalf("expected error to mention autostart supervisor, got: %v", err)
@@ -227,10 +236,15 @@ func TestSupervisorLifecycleSocketCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	info, err := os.Stat(socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	lc := &supervisorLifecycle{
 		socketPath: socketPath,
 		cmd:        nil,
 		client:     nil,
+		socketInfo: info,
 	}
 
 	if err := lc.Shutdown(); err != nil {
@@ -339,6 +353,283 @@ func TestStartSupervisorReuseExistingSocket(t *testing.T) {
 	}
 	if status["session_id"] != "ses_test" {
 		t.Errorf("session_id = %v, want ses_test", status["session_id"])
+	}
+}
+
+func signalMCPStartupReady() {
+	fd, err := strconv.Atoi(os.Getenv("AVENOR_CONTROL_READY_FD"))
+	if err != nil || fd < 3 {
+		return
+	}
+	ready := os.NewFile(uintptr(fd), "avenor-control-ready")
+	if ready != nil {
+		_, _ = ready.Write([]byte{1})
+		_ = ready.Close()
+	}
+}
+
+func TestMCPSupervisorChild(t *testing.T) {
+	if os.Getenv("AVENOR_MCP_SUPERVISOR_CHILD") != "1" {
+		return
+	}
+	path := os.Getenv("AVENOR_MCP_SUPERVISOR_SOCKET")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatalf("child listen: %v", err)
+	}
+	defer ln.Close()
+	signalMCPStartupReady()
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		go func(c net.Conn) {
+			defer c.Close()
+			scanner := bufio.NewScanner(c)
+			for scanner.Scan() {
+				var req client.Request
+				if json.Unmarshal(scanner.Bytes(), &req) != nil {
+					continue
+				}
+				resp := client.Response{JSONRPC: "2.0", ID: req.ID}
+				resp.Result, _ = json.Marshal(map[string]any{"phase": "working"})
+				data, _ := json.Marshal(resp)
+				_, _ = c.Write(append(data, '\n'))
+				if req.Method == "shutdown" {
+					os.Exit(0)
+				}
+			}
+		}(conn)
+	}
+}
+
+func TestPreReadyWinnerIsSharedAndSurvivesLoserClose(t *testing.T) {
+	// Keep the path under macOS's short Unix-socket pathname limit.
+	tmpDir, err := os.MkdirTemp("/tmp", "mcp-winner-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+	socketPath := filepath.Join(tmpDir, "winner.sock")
+
+	var winner net.Listener
+	origExec := execCommand
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		var err error
+		winner, err = net.Listen("unix", socketPath)
+		if err != nil {
+			t.Fatalf("start competing winner: %v", err)
+		}
+		go serveHealthySupervisor(winner)
+		// The child has not bound the socket and therefore cannot send the
+		// readiness acknowledgement. It exits after the winner is healthy.
+		return exec.Command("sleep", "0.1")
+	}
+	defer func() {
+		execCommand = origExec
+		if winner != nil {
+			_ = winner.Close()
+		}
+	}()
+
+	lifecycle, err := startSupervisor(socketPath, 0)
+	if err != nil {
+		t.Fatalf("startSupervisor: %v", err)
+	}
+	if !lifecycle.shared {
+		t.Fatal("starter classified a pre-ready competing winner as its child")
+	}
+	if err := lifecycle.Close(); err != nil {
+		t.Fatalf("close loser lifecycle: %v", err)
+	}
+	if cl, ok := dialHealthySupervisor(socketPath); !ok {
+		t.Fatal("loser close shut down or removed the competing winner")
+	} else {
+		_ = cl.Close()
+	}
+}
+
+func serveHealthySupervisor(ln net.Listener) {
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		go func(c net.Conn) {
+			defer c.Close()
+			scanner := bufio.NewScanner(c)
+			for scanner.Scan() {
+				var req client.Request
+				if json.Unmarshal(scanner.Bytes(), &req) != nil {
+					continue
+				}
+				resp := client.Response{JSONRPC: "2.0", ID: req.ID}
+				resp.Result, _ = json.Marshal(map[string]any{"phase": "working"})
+				data, _ := json.Marshal(resp)
+				_, _ = c.Write(append(data, '\n'))
+			}
+		}(conn)
+	}
+}
+
+func TestCompetingLifecycleStartersConvergeOnWinner(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("/tmp", "mcp-start-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+	socketPath := filepath.Join(tmpDir, "winner.sock")
+
+	origExec := execCommand
+	var execCalls atomic.Int32
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		execCalls.Add(1)
+		cmd := exec.Command(os.Args[0], "-test.run=TestMCPSupervisorChild")
+		cmd.Env = append(os.Environ(),
+			"AVENOR_MCP_SUPERVISOR_CHILD=1",
+			"AVENOR_MCP_SUPERVISOR_SOCKET="+socketPath,
+		)
+		return cmd
+	}
+	defer func() { execCommand = origExec }()
+
+	type result struct {
+		lifecycle *supervisorLifecycle
+		err       error
+	}
+	results := make(chan result, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			defer wg.Done()
+			lifecycle, err := startSupervisor(socketPath, 0)
+			results <- result{lifecycle: lifecycle, err: err}
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	var lifecycles []*supervisorLifecycle
+	for result := range results {
+		if result.err != nil {
+			t.Fatalf("startSupervisor: %v", result.err)
+		}
+		lifecycles = append(lifecycles, result.lifecycle)
+	}
+	if got := execCalls.Load(); got != 1 {
+		t.Fatalf("child starts = %d, want 1", got)
+	}
+	if lifecycles[0].shared == lifecycles[1].shared {
+		t.Fatal("expected one owner and one shared lifecycle")
+	}
+
+	var owner, shared *supervisorLifecycle
+	for _, lifecycle := range lifecycles {
+		if lifecycle.shared {
+			shared = lifecycle
+		} else {
+			owner = lifecycle
+		}
+	}
+	if err := shared.Close(); err != nil {
+		t.Fatalf("close shared lifecycle: %v", err)
+	}
+	if winnerClient, ok := dialHealthySupervisor(socketPath); !ok {
+		t.Fatal("shared cleanup removed the winner socket")
+	} else {
+		_ = winnerClient.Close()
+	}
+	if err := owner.Close(); err != nil {
+		t.Fatalf("close owner lifecycle: %v", err)
+	}
+}
+
+func TestCompetingLifecycleAttachmentsDoNotRemoveWinner(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("/tmp", "mcp-race-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+	socketPath := filepath.Join(tmpDir, "winner.sock")
+	ln, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				scanner := bufio.NewScanner(c)
+				for scanner.Scan() {
+					var req client.Request
+					if json.Unmarshal(scanner.Bytes(), &req) != nil {
+						continue
+					}
+					resp := client.Response{JSONRPC: "2.0", ID: req.ID}
+					resp.Result, _ = json.Marshal(map[string]any{"phase": "working"})
+					data, _ := json.Marshal(resp)
+					_, _ = c.Write(append(data, '\n'))
+				}
+			}(conn)
+		}
+	}()
+
+	first, err := startSupervisor(socketPath, 0)
+	if err != nil {
+		t.Fatalf("first startSupervisor: %v", err)
+	}
+	second, err := startSupervisor(socketPath, 0)
+	if err != nil {
+		t.Fatalf("second startSupervisor: %v", err)
+	}
+	if !first.shared || !second.shared {
+		t.Fatal("expected both starters to attach to the existing supervisor")
+	}
+
+	// Closing the losing MCP server must only close its connection. The
+	// winner's socket remains live for the other attached server.
+	if err := first.Close(); err != nil {
+		t.Fatalf("close first attachment: %v", err)
+	}
+	if _, err := os.Stat(socketPath); err != nil {
+		t.Fatalf("winner socket removed by competing cleanup: %v", err)
+	}
+	if winnerClient, ok := dialHealthySupervisor(socketPath); !ok {
+		t.Fatal("winner supervisor is no longer healthy")
+	} else {
+		_ = winnerClient.Close()
+	}
+	_ = second.Close()
+}
+
+func TestLifecycleShutdownIsIdempotentAfterChildExit(t *testing.T) {
+	cmd := exec.Command("true")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	lc := &supervisorLifecycle{cmd: cmd, exited: exited, client: &fakeClient{}}
+
+	for i := 0; i < 2; i++ {
+		done := make(chan error, 1)
+		go func() { done <- lc.Shutdown() }()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("shutdown %d: %v", i+1, err)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("shutdown %d blocked after child exit", i+1)
+		}
 	}
 }
 

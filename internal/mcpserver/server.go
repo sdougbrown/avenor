@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -49,6 +50,12 @@ type Server struct {
 	defaultSupervisorPath string
 	toolNames             []string
 	clock                 func() time.Time
+
+	// supervisorMu serializes lazy default-supervisor acquisition. The
+	// persistent client is also the connection that owns mutating operations
+	// in the control plane, so concurrent MCP calls must share it.
+	supervisorMu sync.Mutex
+	closed       bool
 }
 
 type statusArgs struct {
@@ -140,23 +147,18 @@ func NewServer(opts Options) (*Server, error) {
 		},
 	}
 
+	// Explicit sockets retain their eager, no-autostart dial semantics. The
+	// default autostart path is intentionally acquired by the first tool call
+	// so constructing an MCP server does not race other constructors.
+	if opts.SupervisorSocket != "" {
+		s.defaultSupervisorPath = opts.SupervisorSocket
+	}
 	if opts.SupervisorSocket != "" && opts.ControlClient == nil {
 		cl, err := client.Dial(opts.SupervisorSocket)
 		if err != nil {
 			return nil, fmt.Errorf("dial supervisor socket: %w", err)
 		}
 		s.controlClient = cl
-		s.defaultSupervisorPath = opts.SupervisorSocket
-	}
-
-	if opts.SupervisorSocket == "" && !opts.NoAutostart && opts.ControlClient == nil {
-		lc, err := startSupervisor(opts.ControlSocket, opts.IdleTimeout)
-		if err != nil {
-			return nil, fmt.Errorf("autostart supervisor: %w", err)
-		}
-		s.lifecycle = lc
-		s.controlClient = lc.client
-		s.defaultSupervisorPath = lc.socketPath
 	}
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
@@ -198,24 +200,21 @@ func NewServer(opts Options) (*Server, error) {
 }
 
 func (s *Server) Close() error {
-	var firstErr error
+	s.supervisorMu.Lock()
+	lifecycle := s.lifecycle
+	controlClient := s.controlClient
+	s.lifecycle = nil
+	s.controlClient = nil
+	s.closed = true
+	s.supervisorMu.Unlock()
 
-	if s.lifecycle != nil {
-		if err := s.lifecycle.Shutdown(); err != nil && firstErr == nil {
-			firstErr = err
-		}
-		s.lifecycle = nil
-		// lifecycle.Shutdown closes the owned client; clear the reference
-		// so we don't double-close.
-		s.controlClient = nil
-	} else if s.controlClient != nil {
-		if err := s.controlClient.Close(); err != nil && firstErr == nil {
-			firstErr = err
-		}
-		s.controlClient = nil
+	if lifecycle != nil {
+		return lifecycle.Close()
 	}
-
-	return firstErr
+	if controlClient != nil {
+		return controlClient.Close()
+	}
+	return nil
 }
 
 func (s *Server) handleAvenorStatus(ctx context.Context, req *mcp.CallToolRequest, args statusArgs) (*mcp.CallToolResult, any, error) {
@@ -553,32 +552,36 @@ func (s *Server) handleAvenorShutdown(ctx context.Context, req *mcp.CallToolRequ
 		mode = "kill"
 	}
 
+	// Acquire lazily before deciding whether this is our owned lifecycle. This
+	// makes shutdown on a cold MCP server behave like the other tools while
+	// still allowing the owner connection to perform the shutdown.
+	cl, cleanup, err := s.getClientForSupervisor(args.SupervisorID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer cleanup()
+
+	s.supervisorMu.Lock()
+	lifecycle := s.lifecycle
+	defaultSupervisorPath := s.defaultSupervisorPath
+	s.supervisorMu.Unlock()
 	supervisorPath := s.getSupervisorPath(args.SupervisorID)
-
-	// When shutting down the autostarted supervisor, let lifecycle.Shutdown
-	// handle the client connection so it can send the shutdown command and
-	// then close the socket in one flow (it holds the owner connection).
-	// Match by resolved path so callers that echo back the supervisor_id
-	// from spawn get the same treatment as omitting it entirely.
-	useLifecycle := s.lifecycle != nil &&
-		(args.SupervisorID == "" || supervisorPath == s.defaultSupervisorPath)
+	useLifecycle := lifecycle != nil &&
+		(args.SupervisorID == "" || supervisorPath == defaultSupervisorPath)
 	if useLifecycle {
-		// Pass the requested mode (graceful or kill) to lifecycle shutdown
-		if err := s.lifecycle.ShutdownWithMode(mode); err != nil {
+		// Pass the requested mode (graceful or kill) to lifecycle shutdown.
+		if err := lifecycle.ShutdownWithMode(mode); err != nil {
 			return nil, nil, fmt.Errorf("shutdown: %w", err)
 		}
-		s.lifecycle = nil
-		s.controlClient = nil
-	} else {
-		cl, cleanup, err := s.getClientForSupervisor(args.SupervisorID)
-		if err != nil {
-			return nil, nil, err
+		s.supervisorMu.Lock()
+		if s.lifecycle == lifecycle {
+			s.lifecycle = nil
+			s.controlClient = nil
+			s.closed = true
 		}
-		defer cleanup()
-
-		if err := cl.Shutdown(mode); err != nil {
-			return nil, nil, fmt.Errorf("shutdown: %w", err)
-		}
+		s.supervisorMu.Unlock()
+	} else if err := cl.Shutdown(mode); err != nil {
+		return nil, nil, fmt.Errorf("shutdown: %w", err)
 	}
 
 	var cleanedUp []string
@@ -778,6 +781,8 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 	}, nil
 }
 
+var startSupervisorFunc = startSupervisor
+
 func (s *Server) getClientForSupervisor(supervisorID string) (ControlClient, func(), error) {
 	// An explicit supervisor_id that resolves to the autostarted/default
 	// supervisor must reuse the persistent owner connection. Ownership is
@@ -786,23 +791,43 @@ func (s *Server) getClientForSupervisor(supervisorID string) (ControlClient, fun
 	// on mutating calls (answer_permission, prompt, cancel, follow_up), since
 	// those resolve supervisor_id from the registry and would otherwise arrive
 	// on a non-owner connection. Mirrors handleAvenorShutdown's path check.
-	if supervisorID == "" || supervisorID == s.defaultSupervisorPath {
-		if s.controlClient == nil {
+	s.supervisorMu.Lock()
+	if s.closed {
+		s.supervisorMu.Unlock()
+		return nil, nil, fmt.Errorf("control client not available")
+	}
+	isDefault := supervisorID == "" || supervisorID == s.defaultSupervisorPath
+	if !isDefault {
+		s.supervisorMu.Unlock()
+		cl, err := client.Dial(supervisorID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("dial supervisor socket %s: %w", supervisorID, err)
+		}
+		return cl, func() { cl.Close() }, nil
+	}
+	defer s.supervisorMu.Unlock()
+
+	if s.controlClient == nil {
+		if s.opts.NoAutostart {
 			return nil, nil, fmt.Errorf("control client not available")
 		}
-		return s.controlClient, func() {}, nil
+		lc, err := startSupervisorFunc(s.opts.ControlSocket, s.opts.IdleTimeout)
+		if err != nil {
+			return nil, nil, fmt.Errorf("autostart supervisor: %w", err)
+		}
+		s.lifecycle = lc
+		s.controlClient = lc.client
+		s.defaultSupervisorPath = lc.socketPath
 	}
-	cl, err := client.Dial(supervisorID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("dial supervisor socket %s: %w", supervisorID, err)
-	}
-	return cl, func() { cl.Close() }, nil
+	return s.controlClient, func() {}, nil
 }
 
 func (s *Server) getSupervisorPath(supervisorID string) string {
 	if supervisorID != "" {
 		return supervisorID
 	}
+	s.supervisorMu.Lock()
+	defer s.supervisorMu.Unlock()
 	return s.defaultSupervisorPath
 }
 
