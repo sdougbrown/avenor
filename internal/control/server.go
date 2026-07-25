@@ -209,17 +209,25 @@ func (s *ControlServer) Stop() {
 	}
 	s.mu.Unlock()
 
+	// Remove the owned path before closing the listener. Closing first creates
+	// a window where another process can bind a replacement whose inode may be
+	// immediately reused on Linux. If the listener was already closed, it no
+	// longer proves ownership, so leave whatever currently occupies the path.
+	removeOwnedPath := l != nil && path != ""
+	if unixListener, ok := l.(*net.UnixListener); ok {
+		removeOwnedPath = unixListener.SetDeadline(time.Now()) == nil
+	}
+	if removeOwnedPath {
+		current, err := os.Stat(path)
+		if err == nil && (socketInfo == nil || os.SameFile(current, socketInfo)) {
+			_ = os.Remove(path)
+		}
+	}
 	if l != nil {
 		_ = l.Close()
 	}
 	for _, c := range conns {
 		_ = c.conn.Close()
-	}
-	if path != "" {
-		current, err := os.Stat(path)
-		if err == nil && (socketInfo == nil || os.SameFile(current, socketInfo)) {
-			_ = os.Remove(path)
-		}
 	}
 }
 
