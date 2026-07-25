@@ -152,13 +152,21 @@ func (s *ControlServer) Start(socketPath string) error {
 	if err != nil {
 		return err
 	}
+	// UnixListener.Close normally unlinks its path. Disable that implicit
+	// cleanup so Stop can verify that the path still identifies this listener
+	// before removing it; otherwise a repeated Close can unlink a replacement.
+	if unixListener, ok := l.(*net.UnixListener); ok {
+		unixListener.SetUnlinkOnClose(false)
+	}
 	if err := os.Chmod(socketPath, 0o600); err != nil {
 		_ = l.Close()
+		_ = os.Remove(socketPath)
 		return fmt.Errorf("chmod control socket: %w", err)
 	}
 	info, err := os.Stat(socketPath)
 	if err != nil {
 		_ = l.Close()
+		_ = os.Remove(socketPath)
 		return fmt.Errorf("stat control socket: %w", err)
 	}
 
