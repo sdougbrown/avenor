@@ -89,6 +89,8 @@ export async function followUpTool(args: {
       const backend =
         (liveStatus?.backend as string | undefined) ?? runInfo?.backend
       const dir = (liveStatus?.dir as string | undefined) ?? runInfo?.dir
+      const agentProfile =
+        (liveStatus?.agent_profile as string | undefined) ?? runInfo?.agentProfile
 
       const followUpRunId = crypto.randomUUID()
       const followUpLabel = args.label ?? `${args.runId}-followup`
@@ -105,6 +107,7 @@ export async function followUpTool(args: {
       }
       if (backend) spawnParams.backend = backend
       if (dir) spawnParams.dir = dir
+      if (agentProfile) spawnParams.agent_profile = agentProfile
 
       const result = await client.spawn(spawnParams)
       // With an external supervisor there is no local Supervisor.run map to
@@ -153,6 +156,8 @@ export async function followUpTool(args: {
   )
   const backend = (liveStatus?.backend as string | undefined) ?? runInfo.backend
   const dir = (liveStatus?.dir as string | undefined) ?? runInfo.dir
+  const agentProfile =
+    (liveStatus?.agent_profile as string | undefined) ?? runInfo.agentProfile
 
   const followUpLabel = args.label ?? `${runInfo.label}-followup`
 
@@ -160,6 +165,7 @@ export async function followUpTool(args: {
     agent,
     backend,
     dir,
+    agent_profile: agentProfile,
     prompt: args.message,
     session_id: sessionId,
     label: followUpLabel,

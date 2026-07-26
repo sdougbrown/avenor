@@ -433,7 +433,7 @@ func TestRunLoopChildCleansUpOnLooprunnerError(t *testing.T) {
 		MaxIterations: 1,
 		Pre:           []phaseconfig.Phase{{Name: "broken", Prompt: "{{"}},
 	}
-	sup.runLoopChild(context.Background(), child, cfg, 0, "", "", "", "")
+	sup.runLoopChild(context.Background(), child, cfg, 0, "", "", "", "", "")
 
 	select {
 	case <-child.done:
@@ -498,7 +498,7 @@ func TestRunTeamChildCleansUpBrokerRuns(t *testing.T) {
 	cfg := &teamrunner.TeamConfig{
 		Team: []phaseconfig.Phase{{Name: "review", Prompt: "review"}},
 	}
-	sup.runTeamChild(context.Background(), child, cfg, 0, "", "", "", "unknown-backend")
+	sup.runTeamChild(context.Background(), child, cfg, 0, "", "", "", "", "unknown-backend")
 
 	select {
 	case <-child.done:
@@ -1369,7 +1369,7 @@ func TestRunLoopChildWiresControlServerForClaims(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go sup.runLoopChild(ctx, child, cfg, 0, "", "", "", "")
+	go sup.runLoopChild(ctx, child, cfg, 0, "", "", "", "", "")
 
 	// Wait for the child to complete (with timeout).
 	select {
@@ -1464,7 +1464,7 @@ func TestRunTeamChildWiresControlServerForClaims(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go sup.runTeamChild(ctx, child, cfg, 0, "", "", "", "unknown-backend")
+	go sup.runTeamChild(ctx, child, cfg, 0, "", "", "", "", "unknown-backend")
 
 	// Wait for the child to complete (with timeout).
 	select {

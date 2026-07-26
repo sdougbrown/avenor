@@ -230,9 +230,19 @@ describe('Avenor Pi extension', () => {
       { agent: 'explore', label: '\u001b[31mtest-pi-explore\u001b[0m', supervisor_id: '/tmp/sock', wait: false },
       undefined,
       undefined,
-      { cwd: '/tmp' },
+      {
+        cwd: '/tmp',
+        sessionManager: {
+          getEntries: () => [
+            { type: 'custom', customType: 'pi-agents:profile', data: { name: 'cloud' } },
+          ],
+        },
+      },
     )
-    expect(spawnToolMock.mock.calls[0]?.[0]).toMatchObject({ backend: 'pi' })
+    expect(spawnToolMock.mock.calls[0]?.[0]).toMatchObject({
+      backend: 'pi',
+      agentProfile: 'cloud',
+    })
 
     const expectedCompletion = [{
       value: 'run-1',

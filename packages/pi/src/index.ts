@@ -31,6 +31,7 @@ import {
 } from './watch.js'
 import type { TrackedRun, RunStatusEntry } from './types.js'
 import { TERMINAL_STATUSES, findLiveStatusForTrackedRun, formatRunLine, statusEmoji } from './types.js'
+import { resolveAgentProfile } from './agent-profile.js'
 
 const POLL_INTERVAL_MS = 3_000
 const INSPECT_LIMIT = 128
@@ -773,6 +774,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
         const dir = params.dir ?? ctx.cwd
         const label = params.label ?? `${params.agent}-${Date.now()}`
         const backend = params.backend ?? 'pi'
+        const entries = (ctx as { sessionManager?: { getEntries?: () => readonly unknown[] } })
+          .sessionManager?.getEntries?.()
+        const agentProfile = backend === 'pi' ? resolveAgentProfile(entries) : undefined
 
         const result = await deps.spawnTool({
           agent: params.agent,
@@ -783,6 +787,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
           timeout: params.timeout,
           model: params.model,
           backend,
+          agentProfile,
           serverUrl: params.server_url,
           supervisorId: params.supervisor_id,
         })

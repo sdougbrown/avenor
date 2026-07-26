@@ -12,6 +12,7 @@ export async function spawnTool(args: {
   dir?: string
   timeout?: string
   model?: string
+  agentProfile?: string
   backend?: string
   serverUrl?: string
   sessionId?: string
@@ -35,6 +36,7 @@ export async function spawnTool(args: {
         timeout:
           args.timeout !== undefined ? validateTimeout(args.timeout) : undefined,
         model: args.model,
+        agent_profile: args.agentProfile,
         backend: args.backend,
         server_url: args.serverUrl,
         session_id: args.sessionId,
@@ -67,6 +69,7 @@ export async function spawnTool(args: {
     dir: args.dir,
     timeout: args.timeout !== undefined ? validateTimeout(args.timeout) : undefined,
     model: args.model,
+    agent_profile: args.agentProfile,
     backend: args.backend,
     server_url: args.serverUrl,
     session_id: args.sessionId,

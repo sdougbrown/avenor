@@ -17,6 +17,7 @@ export interface RunInfo {
   runtimeId?: string
   sessionId?: string
   agent?: string
+  agentProfile?: string
   backend?: string
   dir?: string
   brokerUrl?: string
@@ -279,6 +280,7 @@ export class Supervisor {
       runtimeId: result.runtime_id as string | undefined,
       sessionId: result.session_id as string | undefined,
       agent: (spawnParams.agent as string | undefined) ?? params.agent as string | undefined,
+      agentProfile: spawnParams.agent_profile as string | undefined,
       backend: spawnParams.backend as string | undefined,
       dir: spawnParams.dir as string | undefined,
       brokerUrl: result.broker_url as string | undefined,

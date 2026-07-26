@@ -73,6 +73,7 @@ describe('followUpTool with an external supervisor', () => {
       agent: 'jockey',
       session_id: 'ses-from-live',
       backend: 'pi',
+      agent_profile: 'cloud',
       dir: '/repo/from-original-run',
     })
 
@@ -88,6 +89,7 @@ describe('followUpTool with an external supervisor', () => {
       prompt: 'continue',
       session_id: 'ses-from-live',
       backend: 'pi',
+      agent_profile: 'cloud',
       dir: '/repo/from-original-run',
     })
     expect(result.run_id).toBe('rt-followup')

@@ -301,7 +301,9 @@ func (p *Provider) ensureClient(ctx context.Context, cwd string) (*client, error
 		return c, nil
 	}
 
-	c, err := StartClientWithAgentAndDir(ctx, "", p.opts.Model, "", p.opts.Agent, cwd)
+	c, err := StartClientWithAgentProfileAndDir(
+		ctx, "", p.opts.Model, "", p.opts.Agent, p.opts.AgentProfile, cwd,
+	)
 	if err != nil {
 		p.mu.Unlock()
 		return nil, err

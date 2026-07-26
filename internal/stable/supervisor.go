@@ -39,6 +39,7 @@ type SpawnParams struct {
 	PromptFile        string `json:"prompt_file,omitempty"`
 	Dir               string `json:"dir"`
 	Agent             string `json:"agent,omitempty"`
+	AgentProfile      string `json:"agent_profile,omitempty"`
 	Label             string `json:"label,omitempty"`
 	Model             string `json:"model,omitempty"`
 	ServerURL         string `json:"server_url,omitempty"`
@@ -69,6 +70,7 @@ type childRuntime struct {
 	id               string
 	label            string
 	agent            string
+	agentProfile     string
 	model            string
 	backend          string
 	parentID         string   // runtime ID of the parent agent, empty for top-level
@@ -410,6 +412,7 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 
 		child.label = params.Label
 		child.agent = params.Agent
+		child.agentProfile = params.AgentProfile
 		child.model = params.Model
 		child.backend = backend
 		child.cancelFn = childCancel
@@ -432,7 +435,7 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 		}
 
 		releaseReservation = nil
-		go s.runLoopChild(childCtx, child, cfg, params.MaxRetries, params.Agent, params.Model, params.ServerURL, params.Backend)
+		go s.runLoopChild(childCtx, child, cfg, params.MaxRetries, params.Agent, params.AgentProfile, params.Model, params.ServerURL, params.Backend)
 
 		return result, nil
 	}
@@ -458,6 +461,7 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 
 		child.label = params.Label
 		child.agent = params.Agent
+		child.agentProfile = params.AgentProfile
 		child.model = params.Model
 		child.backend = backend
 		child.cancelFn = childCancel
@@ -479,19 +483,20 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 		}
 
 		releaseReservation = nil
-		go s.runTeamChild(childCtx, child, cfg, params.MaxRetries, params.Agent, params.Model, params.ServerURL, params.Backend)
+		go s.runTeamChild(childCtx, child, cfg, params.MaxRetries, params.Agent, params.AgentProfile, params.Model, params.ServerURL, params.Backend)
 
 		return result, nil
 	}
 
 	// Start provider and session.
 	startOpts := runtime.StartOptions{
-		Agent:     params.Agent,
-		Label:     params.Label,
-		Dir:       params.Dir,
-		Model:     params.Model,
-		RuntimeID: rtID,
-		Broker:    s.broker,
+		Agent:        params.Agent,
+		AgentProfile: params.AgentProfile,
+		Label:        params.Label,
+		Dir:          params.Dir,
+		Model:        params.Model,
+		RuntimeID:    rtID,
+		Broker:       s.broker,
 	}
 	discovery := cli.DiscoverServer(params.ServerURL, os.Getenv)
 	startOpts.ServerURL = discovery.URL
@@ -529,6 +534,7 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 	// Populate child with fully-initialised state.
 	child.label = params.Label
 	child.agent = params.Agent
+	child.agentProfile = params.AgentProfile
 	child.model = params.Model
 	child.backend = backend
 	child.provider = provider
@@ -682,7 +688,7 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 	}
 }
 
-func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg *looprunner.LoopConfig, maxRetries int, agent, model, serverURL, backend string) {
+func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg *looprunner.LoopConfig, maxRetries int, agent, agentProfile, model, serverURL, backend string) {
 	var brokerAttemptIDs []string
 	defer func() {
 		if r := recover(); r != nil {
@@ -737,11 +743,12 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 		Broker:     s.broker,
 		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, iteration int, prevSessionID string) (looprunner.PhaseAttemptResult, error) {
 			startOpts := runtime.StartOptions{
-				Agent:     agent,
-				Model:     model,
-				Dir:       child.dir,
-				ServerURL: serverURL,
-				Broker:    s.broker,
+				Agent:        agent,
+				AgentProfile: agentProfile,
+				Model:        model,
+				Dir:          child.dir,
+				ServerURL:    serverURL,
+				Broker:       s.broker,
 			}
 
 			resumeID := prevSessionID
@@ -852,7 +859,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 	}
 }
 
-func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg *teamrunner.TeamConfig, maxRetries int, agent, model, serverURL, backend string) {
+func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg *teamrunner.TeamConfig, maxRetries int, agent, agentProfile, model, serverURL, backend string) {
 	var brokerAttemptIDs []string
 	var brokerAttemptIDsMu sync.Mutex
 	defer func() {
@@ -916,11 +923,12 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				m = phase.Model
 			}
 			startOpts := runtime.StartOptions{
-				Agent:     a,
-				Model:     m,
-				Dir:       child.dir,
-				ServerURL: serverURL,
-				Broker:    s.broker,
+				Agent:        a,
+				AgentProfile: agentProfile,
+				Model:        m,
+				Dir:          child.dir,
+				ServerURL:    serverURL,
+				Broker:       s.broker,
 			}
 
 			resumeID := prevSessionID
@@ -1362,6 +1370,7 @@ func (s *Supervisor) listRuntimes() []map[string]any {
 			"run_id":             rt.runID,
 			"label":              rt.label,
 			"agent":              rt.agent,
+			"agent_profile":      rt.agentProfile,
 			"model":              rt.model,
 			"backend":            rt.backend,
 			"dir":                rt.dir,
@@ -1707,6 +1716,7 @@ func (s *Supervisor) RuntimeStatus(rtID string) (any, error) {
 		"run_id":             rt.runID,
 		"label":              rt.label,
 		"agent":              rt.agent,
+		"agent_profile":      rt.agentProfile,
 		"model":              rt.model,
 		"backend":            rt.backend,
 		"dir":                rt.dir,

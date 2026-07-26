@@ -419,6 +419,43 @@ func TestStartClientUsesRequestedWorkingDirectory(t *testing.T) {
 	}
 }
 
+func TestStartClientReplacesAgentProfileEnvironment(t *testing.T) {
+	original := piExecCommandContext
+	t.Cleanup(func() { piExecCommandContext = original })
+	t.Setenv("PI_AGENT", "stale-agent")
+	t.Setenv("PI_AGENT_PROFILE", "stale-profile")
+
+	var captured *exec.Cmd
+	piExecCommandContext = func(_ context.Context, _ string, _ ...string) *exec.Cmd {
+		captured = exec.Command("cat")
+		return captured
+	}
+
+	client, err := StartClientWithAgentProfileAndDir(
+		context.Background(), "", "", "", "explore", "cloud", "",
+	)
+	if err != nil {
+		t.Fatalf("StartClientWithAgentProfileAndDir: %v", err)
+	}
+	defer client.Close()
+
+	if captured == nil {
+		t.Fatal("pi command was not created")
+	}
+	gotAgent, gotProfile := "", ""
+	for _, entry := range captured.Env {
+		if strings.HasPrefix(entry, "PI_AGENT=") {
+			gotAgent = strings.TrimPrefix(entry, "PI_AGENT=")
+		}
+		if strings.HasPrefix(entry, "PI_AGENT_PROFILE=") {
+			gotProfile = strings.TrimPrefix(entry, "PI_AGENT_PROFILE=")
+		}
+	}
+	if gotAgent != "explore" || gotProfile != "cloud" {
+		t.Fatalf("pi environment = PI_AGENT=%q PI_AGENT_PROFILE=%q, want explore/cloud", gotAgent, gotProfile)
+	}
+}
+
 func TestClientClose(t *testing.T) {
 	proc := exec.Command("cat")
 	stdin, _ := proc.StdinPipe()

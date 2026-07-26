@@ -49,6 +49,7 @@ export interface SpawnParams {
   label?: string
   timeout?: number
   model?: string
+  agent_profile?: string
   backend?: string
   server_url?: string
   session_id?: string

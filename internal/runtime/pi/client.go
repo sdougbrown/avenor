@@ -65,14 +65,18 @@ func newClient(proc *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, stder
 var piExecCommandContext = exec.CommandContext
 
 func StartClient(ctx context.Context, provider string, model string, sessionDir string) (*client, error) {
-	return StartClientWithAgentAndDir(ctx, provider, model, sessionDir, "", "")
+	return StartClientWithAgentProfileAndDir(ctx, provider, model, sessionDir, "", "", "")
 }
 
 func StartClientWithAgent(ctx context.Context, provider string, model string, sessionDir string, agent string) (*client, error) {
-	return StartClientWithAgentAndDir(ctx, provider, model, sessionDir, agent, "")
+	return StartClientWithAgentProfileAndDir(ctx, provider, model, sessionDir, agent, "", "")
 }
 
 func StartClientWithAgentAndDir(ctx context.Context, provider string, model string, sessionDir string, agent string, cwd string) (*client, error) {
+	return StartClientWithAgentProfileAndDir(ctx, provider, model, sessionDir, agent, "", cwd)
+}
+
+func StartClientWithAgentProfileAndDir(ctx context.Context, provider string, model string, sessionDir string, agent string, agentProfile string, cwd string) (*client, error) {
 	args := []string{"--mode", "rpc", "--no-session"}
 	if provider != "" {
 		args = append(args, "--provider", provider)
@@ -86,15 +90,22 @@ func StartClientWithAgentAndDir(ctx context.Context, provider string, model stri
 
 	proc := piExecCommandContext(ctx, "pi", args...)
 	proc.Dir = cwd
-	if agent != "" {
+	if agent != "" || agentProfile != "" {
 		env := proc.Environ()
 		filtered := env[:0]
 		for _, e := range env {
-			if !strings.HasPrefix(e, "PI_AGENT=") {
+			if !strings.HasPrefix(e, "PI_AGENT=") &&
+				!strings.HasPrefix(e, "PI_AGENT_PROFILE=") {
 				filtered = append(filtered, e)
 			}
 		}
-		proc.Env = append(filtered, "PI_AGENT="+agent)
+		if agent != "" {
+			filtered = append(filtered, "PI_AGENT="+agent)
+		}
+		if agentProfile != "" {
+			filtered = append(filtered, "PI_AGENT_PROFILE="+agentProfile)
+		}
+		proc.Env = filtered
 	}
 	stdin, err := proc.StdinPipe()
 	if err != nil {

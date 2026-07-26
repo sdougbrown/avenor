@@ -151,6 +151,11 @@ When `agent` is set, avenor passes `PI_AGENT=<name>` to the pi subprocess. The `
 
 If you don't need a named profile, `model` alone is sufficient — no agent config or extension setup required.
 
+When `pi-agents` has selected a session-scoped `/agent-profile`, this extension
+also forwards that optional session metadata to Pi automatically. Avenor does
+not depend on `pi-agents`; absent or malformed metadata is ignored. The setting
+is not an `avenor_spawn` parameter and applies only to Pi-backed child runs.
+
 ## Typical workflows
 
 **Blocking (default):**

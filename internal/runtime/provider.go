@@ -20,13 +20,14 @@ type Provider interface {
 
 // StartOptions holds options for starting a new session.
 type StartOptions struct {
-	Agent     string
-	Label     string
-	Dir       string
-	ServerURL string
-	Model     string
-	RuntimeID string // supervisor-assigned runtime ID (rt_N), for parent-child routing
-	Broker    *broker.Broker // optional shared broker instance; backends may create their own if nil
+	Agent        string
+	Label        string
+	Dir          string
+	ServerURL    string
+	Model        string
+	AgentProfile string
+	RuntimeID    string         // supervisor-assigned runtime ID (rt_N), for parent-child routing
+	Broker       *broker.Broker // optional shared broker instance; backends may create their own if nil
 }
 
 // Session represents an active ACP session.
@@ -81,6 +82,9 @@ func MergeStartOptions(base, override StartOptions) StartOptions {
 	}
 	if override.Model != "" {
 		merged.Model = override.Model
+	}
+	if override.AgentProfile != "" {
+		merged.AgentProfile = override.AgentProfile
 	}
 	if override.RuntimeID != "" {
 		merged.RuntimeID = override.RuntimeID
