@@ -12,6 +12,10 @@ export interface TrackedRun {
   blocking?: boolean
   /** true if we've injected a permission notification via sendUserMessage */
   permissionNotified?: boolean
+  /** true if the run reached terminal status and a completion message is pending.
+   * The message is deferred by one tick cycle so avenor_result can consume
+   * the result first without a duplicate steering message. */
+  completionPending?: boolean
 }
 
 export function findLiveStatusForTrackedRun(

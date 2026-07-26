@@ -262,6 +262,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
         lastStatus: status ?? current?.lastStatus,
         blocking: current?.blocking ?? blocking,
         permissionNotified: current?.permissionNotified,
+        completionPending: current?.completionPending,
       })
     }
 
@@ -401,22 +402,36 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
 
           if (isTerminalStatus(entry.status)) {
             const prevStatus = prevStatuses.get(entry.runId)
-            if (!prevStatus || !isTerminalStatus(prevStatus)) {
+            const wasTerminal = prevStatus && isTerminalStatus(prevStatus)
+            if (!wasTerminal) {
+              // Notify immediately on first terminal transition.
               sessionCtx?.ui.notify(
                 `Sub-agent "${entry.label}" finished: ${entry.status}`,
                 entry.status === 'done' ? 'info' : 'warning',
               )
-              if (!run.blocking && run.lastStatus) {
-                const finalOutput = await resolveFinalOutput(run, run.lastStatus)
-                try {
-                  pi.sendUserMessage(
-                    buildCompletionText({ runId: run.runId, label: run.label }, run.lastStatus, finalOutput),
-                    { deliverAs: 'followUp' },
-                  )
-                } catch (err) {
-                  console.error('avenor tick: sendUserMessage failed', err)
-                }
-              }
+            }
+            if (run.blocking) {
+              // avenor_result is actively waiting — it will delete the run
+              // when it returns, so skip the completion message entirely.
+              continue
+            }
+            if (!run.completionPending) {
+              // First tick seeing terminal status: defer the completion
+              // message by one cycle so avenor_result can consume the
+              // result first without a duplicate steering message.
+              run.completionPending = true
+              continue
+            }
+            // Second tick seeing terminal status: the agent did not call
+            // avenor_result within one cycle, so deliver the completion.
+            const finalOutput = await resolveFinalOutput(run, run.lastStatus)
+            try {
+              pi.sendUserMessage(
+                buildCompletionText({ runId: run.runId, label: run.label }, run.lastStatus!, finalOutput),
+                { deliverAs: 'followUp' },
+              )
+            } catch (err) {
+              console.error('avenor tick: sendUserMessage failed', err)
             }
             trackedRuns.delete(entry.runId)
           } else if (
