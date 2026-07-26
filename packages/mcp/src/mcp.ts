@@ -128,13 +128,15 @@ server.registerTool('avenor_answer_permission', {
     option_id: z.string().describe('Option ID to select'),
     request_id: z.string().optional().describe('Permission request ID (auto-detected if omitted)'),
     supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
+    message: z.string().optional().describe('Optional write-in response text. Required only when the selected option declares requiresMessage: true.'),
   },
-}, async ({ run_id, option_id, request_id, supervisor_id }) => {
+}, async ({ run_id, option_id, request_id, supervisor_id, message }) => {
   return answerPermissionTool({
     runId: run_id,
     optionId: option_id,
     requestId: request_id,
     supervisorId: supervisor_id,
+    message,
   })
 })
 

@@ -46,6 +46,7 @@ type permissionCall struct {
 	runtimeID string
 	requestID string
 	optionID  string
+	message   string
 }
 
 func (f *fakeClient) Status(runtimeID string) (map[string]any, error) {
@@ -81,7 +82,11 @@ func (f *fakeClient) Shutdown(mode string) error {
 }
 
 func (f *fakeClient) AnswerPermission(runtimeID, requestID, optionID string) error {
-	f.answerPermissionCalls = append(f.answerPermissionCalls, permissionCall{runtimeID, requestID, optionID})
+	return f.AnswerPermissionWithMessage(runtimeID, requestID, optionID, "")
+}
+
+func (f *fakeClient) AnswerPermissionWithMessage(runtimeID, requestID, optionID, message string) error {
+	f.answerPermissionCalls = append(f.answerPermissionCalls, permissionCall{runtimeID, requestID, optionID, message})
 	return f.answerPermissionErr
 }
 

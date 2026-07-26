@@ -590,3 +590,144 @@ func TestSubscribeRuntimeIgnoresOtherSessionIDs(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 }
+
+func TestClientAnswerPermissionWithMessage(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+
+	c := &Client{
+		conn:    clientConn,
+		pending: map[int]chan Response{},
+		eventCh: make(chan Event, 1),
+	}
+
+	done := make(chan map[string]any, 1)
+	go func() {
+		dec := json.NewDecoder(serverConn)
+		var raw map[string]any
+		if err := dec.Decode(&raw); err != nil {
+			done <- map[string]any{"error": err.Error()}
+			return
+		}
+		// Write a success response so Call doesn't block.
+		id := raw["id"]
+		resp := map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{"accepted": true}}
+		respData, _ := json.Marshal(resp)
+		respData = append(respData, '\n')
+		serverConn.Write(respData)
+		done <- raw
+	}()
+
+	if err := c.AnswerPermissionWithMessage("rt_1", "req_1", "allow", "write-in note"); err != nil {
+		t.Fatalf("AnswerPermissionWithMessage: %v", err)
+	}
+
+	select {
+	case cmd := <-done:
+		if _, isErr := cmd["error"]; isErr {
+			t.Fatalf("failed to read command: %v", cmd["error"])
+		}
+		params, _ := cmd["params"].(map[string]any)
+		if params == nil {
+			t.Fatalf("params missing from request: %v", cmd)
+		}
+		if params["message"] != "write-in note" {
+			t.Errorf("message = %v, want 'write-in note'", cmd["message"])
+		}
+		if params["option_id"] != "allow" {
+			t.Errorf("option_id = %v, want allow", cmd["option_id"])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for command")
+	}
+}
+
+func TestClientAnswerPermissionOmitsEmptyMessage(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+
+	c := &Client{
+		conn:    clientConn,
+		pending: map[int]chan Response{},
+		eventCh: make(chan Event, 1),
+	}
+
+	done := make(chan map[string]any, 1)
+	go func() {
+		dec := json.NewDecoder(serverConn)
+		var raw map[string]any
+		if err := dec.Decode(&raw); err != nil {
+			done <- map[string]any{"error": err.Error()}
+			return
+		}
+		id := raw["id"]
+		resp := map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{"accepted": true}}
+		respData, _ := json.Marshal(resp)
+		respData = append(respData, '\n')
+		serverConn.Write(respData)
+		done <- raw
+	}()
+
+	// Old API (no message) should not include "message" in the JSON.
+	if err := c.AnswerPermission("rt_1", "req_1", "allow"); err != nil {
+		t.Fatalf("AnswerPermission: %v", err)
+	}
+
+	select {
+	case cmd := <-done:
+		params, _ := cmd["params"].(map[string]any)
+		if params == nil {
+			t.Fatalf("params missing from request: %v", cmd)
+		}
+		if _, hasMessage := params["message"]; hasMessage {
+			t.Error("message should not be present when using old API")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for command")
+	}
+}
+
+func TestClientAnswerPermissionWithMessageOmitsEmpty(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+
+	c := &Client{
+		conn:    clientConn,
+		pending: map[int]chan Response{},
+		eventCh: make(chan Event, 1),
+	}
+
+	done := make(chan map[string]any, 1)
+	go func() {
+		dec := json.NewDecoder(serverConn)
+		var raw map[string]any
+		if err := dec.Decode(&raw); err != nil {
+			done <- map[string]any{"error": err.Error()}
+			return
+		}
+		id := raw["id"]
+		resp := map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{"accepted": true}}
+		respData, _ := json.Marshal(resp)
+		respData = append(respData, '\n')
+		serverConn.Write(respData)
+		done <- raw
+	}()
+
+	// AnswerPermissionWithMessage with empty message should also omit it.
+	if err := c.AnswerPermissionWithMessage("rt_1", "req_1", "allow", ""); err != nil {
+		t.Fatalf("AnswerPermissionWithMessage: %v", err)
+	}
+
+	select {
+	case cmd := <-done:
+		params, _ := cmd["params"].(map[string]any)
+		if params == nil {
+			t.Fatalf("params missing from request: %v", cmd)
+		}
+		if _, hasMessage := params["message"]; hasMessage {
+			t.Error("message should not be present when empty")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for command")
+	}
+}

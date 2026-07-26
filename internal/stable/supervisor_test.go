@@ -76,7 +76,7 @@ func TestStableHandlerNoRuntimes(t *testing.T) {
 	}
 
 	// AnswerPermission for nonexistent runtime
-	err = sup.RuntimeAnswerPermission("rt_nonexistent", "req_1", "allow")
+	err = sup.RuntimeAnswerPermission("rt_nonexistent", "req_1", "allow", "")
 	if err == nil {
 		t.Fatal("RuntimeAnswerPermission for nonexistent runtime should error")
 	}
@@ -579,7 +579,7 @@ func TestRuntimeAnswerPermissionRejectsRuntimeWithoutActiveSession(t *testing.T)
 		promptCh: make(chan struct{}, 1),
 	}
 
-	if err := sup.RuntimeAnswerPermission("rt_loop", "req_1", "allow"); err == nil {
+	if err := sup.RuntimeAnswerPermission("rt_loop", "req_1", "allow", ""); err == nil {
 		t.Fatal("RuntimeAnswerPermission should reject runtime without active session")
 	}
 }
@@ -1276,7 +1276,7 @@ func TestRunChildAttemptWiresControlServerForClaims(t *testing.T) {
 		eventWriter: &synchronousStablePermissionSink{
 			responses: make(chan events.Event, 1),
 			answer: func() error {
-				err := sup.answerPermission("rt_claim", "0", "allow")
+				err := sup.answerPermission("rt_claim", "0", "allow", "")
 				answerErr <- err
 				return err
 			},
@@ -1351,7 +1351,7 @@ func TestRunLoopChildWiresControlServerForClaims(t *testing.T) {
 		eventWriter: &synchronousStablePermissionSink{
 			responses: make(chan events.Event, 1),
 			answer: func() error {
-				err := sup.answerPermission("rt_loop_claim", "0", "allow")
+				err := sup.answerPermission("rt_loop_claim", "0", "allow", "")
 				answerErr <- err
 				return err
 			},
@@ -1458,7 +1458,7 @@ func TestRunTeamChildWiresControlServerForClaims(t *testing.T) {
 		eventWriter: &synchronousStablePermissionSink{
 			responses: make(chan events.Event, 1),
 			answer: func() error {
-				err := sup.answerPermission("rt_team_claim", "0", "allow")
+				err := sup.answerPermission("rt_team_claim", "0", "allow", "")
 				answerErr <- err
 				return err
 			},
@@ -1545,7 +1545,7 @@ func TestAnswerPermissionRejectsUnknownOptionIDWithoutConsumingCache(t *testing.
 		},
 	})
 
-	if err := sup.answerPermission("rt_unknown", "req_unknown", "missing"); err == nil {
+	if err := sup.answerPermission("rt_unknown", "req_unknown", "missing", ""); err == nil {
 		t.Fatal("answerPermission with unknown option_id should error")
 	}
 	if provider.called {
@@ -1585,7 +1585,7 @@ func TestAnswerPermissionUsesActiveControlClaim(t *testing.T) {
 	}
 	defer sup.control.EndPermissionClaim("rt_claim", "req_claim")
 
-	if err := sup.answerPermission("rt_claim", "req_claim", "allow_it"); err != nil {
+	if err := sup.answerPermission("rt_claim", "req_claim", "allow_it", ""); err != nil {
 		t.Fatalf("answerPermission: %v", err)
 	}
 	if provider.called {
@@ -1640,7 +1640,7 @@ func TestAnswerPermissionScopesSameRequestIDByRuntime(t *testing.T) {
 	defer sup.control.EndPermissionClaim("rt_1", "0")
 	defer sup.control.EndPermissionClaim("rt_2", "0")
 
-	if err := sup.answerPermission("rt_2", "0", "always_rt_2"); err != nil {
+	if err := sup.answerPermission("rt_2", "0", "always_rt_2", ""); err != nil {
 		t.Fatalf("answer rt_2: %v", err)
 	}
 	select {
@@ -1709,7 +1709,7 @@ func TestStableWaitersRouteSameRequestIDThroughScopedResolvers(t *testing.T) {
 		sink := &synchronousStablePermissionSink{
 			responses: w.responses,
 			answer: func() error {
-				return sup.answerPermission(w.runtimeID, "0", "always_"+w.runtimeID)
+				return sup.answerPermission(w.runtimeID, "0", "always_"+w.runtimeID, "")
 			},
 		}
 		writer := &runtimeFanoutWriter{
@@ -1810,7 +1810,7 @@ func TestAnswerPermissionRejectsLateAnswerOwnedByFileResolver(t *testing.T) {
 	})
 	sup.control.PreparePermissionClaim("rt_file", "0", control.PermissionResolverFile)
 
-	if err := sup.answerPermission("rt_file", "0", "always"); err == nil {
+	if err := sup.answerPermission("rt_file", "0", "always", ""); err == nil {
 		t.Fatal("late stable answer succeeded while file resolver owned the request")
 	}
 	if provider.called {
@@ -1845,7 +1845,7 @@ func TestAnswerPermissionRejectsUnsupportedKindWithoutConsumingCache(t *testing.
 		},
 	})
 
-	if err := sup.answerPermission("rt_kind_bad", "req_kind_bad", "weird"); err == nil {
+	if err := sup.answerPermission("rt_kind_bad", "req_kind_bad", "weird", ""); err == nil {
 		t.Fatal("answerPermission with unsupported kind should error")
 	}
 	if provider.called {
@@ -1882,7 +1882,7 @@ func TestAnswerPermissionMapsAllowByKind(t *testing.T) {
 	})
 	sup.control.PreparePermissionClaim("rt_kind", "req_kind", control.PermissionResolverNoResolver)
 
-	if err := sup.answerPermission("rt_kind", "req_kind", "yes_please"); err != nil {
+	if err := sup.answerPermission("rt_kind", "req_kind", "yes_please", ""); err != nil {
 		t.Fatalf("answerPermission allow: %v", err)
 	}
 	if !provider.called {
@@ -1911,7 +1911,7 @@ func TestAnswerPermissionMapsAllowByKind(t *testing.T) {
 	})
 	sup.control.PreparePermissionClaim("rt_kind", "req_kind", control.PermissionResolverNoResolver)
 
-	if err := sup.answerPermission("rt_kind", "req_kind", "nope_please"); err != nil {
+	if err := sup.answerPermission("rt_kind", "req_kind", "nope_please", ""); err != nil {
 		t.Fatalf("answerPermission reject: %v", err)
 	}
 	if !provider.called {
@@ -1950,7 +1950,7 @@ func TestAnswerPermissionClearsCacheEntry(t *testing.T) {
 	})
 	sup.control.PreparePermissionClaim("rt_clear", "req_clear", control.PermissionResolverNoResolver)
 
-	if err := sup.answerPermission("rt_clear", "req_clear", "ok"); err != nil {
+	if err := sup.answerPermission("rt_clear", "req_clear", "ok", ""); err != nil {
 		t.Fatalf("answerPermission: %v", err)
 	}
 	if _, ok := sup.permOptions["rt_clear:req_clear"]; ok {
@@ -1993,7 +1993,7 @@ func TestAnswerPermissionNoResolverAllowsOnlyOneConcurrentProviderCall(t *testin
 
 	firstErr := make(chan error, 1)
 	go func() {
-		firstErr <- sup.answerPermission("rt_direct", "req_direct", "allow_it")
+		firstErr <- sup.answerPermission("rt_direct", "req_direct", "allow_it", "")
 	}()
 	select {
 	case <-provider.started:
@@ -2003,7 +2003,7 @@ func TestAnswerPermissionNoResolverAllowsOnlyOneConcurrentProviderCall(t *testin
 
 	secondErrCh := make(chan error, 1)
 	go func() {
-		secondErrCh <- sup.answerPermission("rt_direct", "req_direct", "allow_it")
+		secondErrCh <- sup.answerPermission("rt_direct", "req_direct", "allow_it", "")
 	}()
 	var secondErr error
 	select {
@@ -2065,7 +2065,7 @@ func TestAnswerPermissionNoResolverRetriesAfterProviderError(t *testing.T) {
 		t.Fatal("PreparePermissionClaim returned false")
 	}
 
-	if err := sup.answerPermission("rt_retry", "req_retry", "allow_it"); err == nil {
+	if err := sup.answerPermission("rt_retry", "req_retry", "allow_it", ""); err == nil {
 		t.Fatal("first answerPermission unexpectedly succeeded")
 	}
 	if state := sup.control.PermissionResolverState("rt_retry", "req_retry"); state != control.PermissionResolverNoResolver {
@@ -2075,7 +2075,7 @@ func TestAnswerPermissionNoResolverRetriesAfterProviderError(t *testing.T) {
 		t.Fatal("cache entry was removed after failed provider delivery")
 	}
 
-	if err := sup.answerPermission("rt_retry", "req_retry", "allow_it"); err != nil {
+	if err := sup.answerPermission("rt_retry", "req_retry", "allow_it", ""); err != nil {
 		t.Fatalf("retry answerPermission: %v", err)
 	}
 	if state := sup.control.PermissionResolverState("rt_retry", "req_retry"); state != control.PermissionResolverUnknown {
@@ -2098,7 +2098,7 @@ func TestDirectPermissionCleanupBlocksReuseUntilOldOptionsAreDeleted(t *testing.
 	if !sup.control.PreparePermissionClaim("rt_reuse", "req_reuse", control.PermissionResolverNoResolver) {
 		t.Fatal("PreparePermissionClaim returned false")
 	}
-	if got := sup.control.DeliverPendingPermission("rt_reuse", "req_reuse", "old"); got != control.PermissionAnswerNoResolver {
+	if got := sup.control.DeliverPendingPermission("rt_reuse", "req_reuse", "old", ""); got != control.PermissionAnswerNoResolver {
 		t.Fatalf("direct delivery = %v, want no-resolver", got)
 	}
 

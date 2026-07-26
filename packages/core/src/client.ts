@@ -336,12 +336,17 @@ export class Client {
     runtimeId: string,
     requestId: string,
     optionId: string,
+    message?: string,
   ): Promise<void> {
-    await this.call('answer_permission', {
+    const params: Record<string, string> = {
       runtime_id: runtimeId,
       request_id: requestId,
       option_id: optionId,
-    })
+    }
+    if (message) {
+      params.message = message
+    }
+    await this.call('answer_permission', params)
   }
 
   async prompt(runtimeId: string, text: string): Promise<void> {

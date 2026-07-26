@@ -47,11 +47,14 @@ func TestRunMCPValidFlags(t *testing.T) {
 
 type stubControlClient struct{}
 
-func (s *stubControlClient) Status(runtimeID string) (map[string]any, error) { return nil, nil }
-func (s *stubControlClient) List() ([]map[string]any, error)                   { return nil, nil }
+func (s *stubControlClient) Status(runtimeID string) (map[string]any, error)     { return nil, nil }
+func (s *stubControlClient) List() ([]map[string]any, error)                     { return nil, nil }
 func (s *stubControlClient) Spawn(params map[string]any) (map[string]any, error) { return nil, nil }
-func (s *stubControlClient) Shutdown(mode string) error                         { return nil }
-func (s *stubControlClient) Close() error                                       { return nil }
+func (s *stubControlClient) Shutdown(mode string) error                          { return nil }
+func (s *stubControlClient) Close() error                                        { return nil }
 func (s *stubControlClient) AnswerPermission(runtimeID, requestID, optionID string) error {
+	return nil
+}
+func (s *stubControlClient) AnswerPermissionWithMessage(runtimeID, requestID, optionID, message string) error {
 	return nil
 }

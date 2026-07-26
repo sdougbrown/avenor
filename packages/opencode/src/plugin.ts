@@ -785,6 +785,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
           option_id: tool.schema.string().describe('allow_once | allow_always | deny, or option_id from pending_permission.options'),
           request_id: tool.schema.string().optional().describe('Permission request ID (auto-discovered if omitted)'),
           supervisor_id: tool.schema.string().optional().describe('Reuse an existing supervisor by socket path'),
+          message: tool.schema.string().optional().describe('Optional write-in response text. Required only when the selected option declares requiresMessage: true.'),
         },
         async execute(args, _context) {
           const result = await answerPermissionTool({
@@ -792,6 +793,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
             optionId: args.option_id,
             requestId: args.request_id,
             supervisorId: args.supervisor_id,
+            message: args.message,
           })
           return JSON.stringify(result, null, 2)
         },

@@ -2,6 +2,8 @@ package runtime
 
 import (
 	"context"
+	"fmt"
+	"unicode/utf8"
 
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
@@ -36,6 +38,26 @@ type Session struct {
 	Backend   string
 	Dir       string
 	PID       int // Consumed by longe halt (SIGTERM); set by opencode-acp backend. 0 otherwise.
+}
+
+// MaxPermissionMessageBytes is the maximum allowed size for a write-in
+// permission message. Messages are validated as UTF-8 and must not exceed
+// this bound.
+const MaxPermissionMessageBytes = 64 << 10 // 64 KiB
+
+// ValidatePermissionMessage checks that a message is valid UTF-8 and within
+// the size bound. Returns nil for an empty message (ordinary options).
+func ValidatePermissionMessage(msg string) error {
+	if len(msg) == 0 {
+		return nil
+	}
+	if len(msg) > MaxPermissionMessageBytes {
+		return fmt.Errorf("permission message exceeds %d bytes", MaxPermissionMessageBytes)
+	}
+	if !utf8.ValidString(msg) {
+		return fmt.Errorf("permission message is not valid UTF-8")
+	}
+	return nil
 }
 
 // PermissionResponse is the response to a permission request.

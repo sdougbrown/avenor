@@ -28,6 +28,7 @@ type ControlClient interface {
 	Shutdown(mode string) error
 	Close() error
 	AnswerPermission(runtimeID, requestID, optionID string) error
+	AnswerPermissionWithMessage(runtimeID, requestID, optionID, message string) error
 }
 
 type Options struct {
@@ -95,6 +96,7 @@ type permissionArgs struct {
 	OptionID     string `json:"option_id" jsonschema:"required option ID to select"`
 	RequestID    string `json:"request_id,omitempty" jsonschema:"optional request ID (auto-detected if omitted)"`
 	SupervisorID string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
+	Message      string `json:"message,omitempty" jsonschema:"optional write-in response text"`
 }
 
 type eventsArgs struct {
@@ -653,7 +655,7 @@ func (s *Server) handleAvenorAnswerPermission(ctx context.Context, req *mcp.Call
 		}
 	}
 
-	if err := cl.AnswerPermission(runtimeID, requestID, args.OptionID); err != nil {
+	if err := cl.AnswerPermissionWithMessage(runtimeID, requestID, args.OptionID, args.Message); err != nil {
 		return nil, nil, fmt.Errorf("answer_permission: %w", err)
 	}
 

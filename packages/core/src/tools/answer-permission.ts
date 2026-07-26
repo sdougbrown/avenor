@@ -17,6 +17,7 @@ export async function answerPermissionTool(args: {
   optionId: string
   requestId?: string
   supervisorId?: string
+  message?: string
 }): Promise<{ ok: boolean }> {
   let client
   let sup: Supervisor | null = null
@@ -46,7 +47,7 @@ export async function answerPermissionTool(args: {
       requestId = pp.request_id
     }
 
-    await client.answerPermission(runtimeId, requestId, args.optionId)
+    await client.answerPermission(runtimeId, requestId, args.optionId, args.message)
 
     return { ok: true }
   } finally {

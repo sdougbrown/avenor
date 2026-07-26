@@ -1237,7 +1237,7 @@ func resolvePermission(
 			}
 			return permissionResult{err: fmt.Errorf("unknown option_id %q for request %q", ans.OptionID, requestID)}
 		}
-		resp := runtime.PermissionResponse{Allow: kind == "allow", OptionID: ans.OptionID}
+		resp := runtime.PermissionResponse{Allow: kind == "allow", OptionID: ans.OptionID, Message: ans.Message}
 		if err := provider.AnswerPermission(ctx, sessionID, requestID, resp); err != nil {
 			if controlServer != nil {
 				controlServer.EndPermissionClaim(claimScope, requestID)

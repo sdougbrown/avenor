@@ -330,12 +330,22 @@ func (c *Client) PromptWithRequestID(runtimeID, text, requestID string) error {
 
 // AnswerPermission answers a pending permission request.
 func (c *Client) AnswerPermission(runtimeID, requestID, optionID string) error {
+	return c.AnswerPermissionWithMessage(runtimeID, requestID, optionID, "")
+}
+
+// AnswerPermissionWithMessage answers a pending permission request with an
+// optional write-in message. Only non-empty messages are included in the
+// JSON payload, preserving backward compatibility.
+func (c *Client) AnswerPermissionWithMessage(runtimeID, requestID, optionID, message string) error {
 	params := map[string]string{
 		"request_id": requestID,
 		"option_id":  optionID,
 	}
 	if runtimeID != "" {
 		params["runtime_id"] = runtimeID
+	}
+	if message != "" {
+		params["message"] = message
 	}
 	return c.Call("answer_permission", params, nil)
 }
