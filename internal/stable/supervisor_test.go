@@ -786,6 +786,7 @@ func TestRuntimeStatusMetadataIncludesUsageFinalOutputAndStamp(t *testing.T) {
 		id:           "rt_meta",
 		label:        "worker",
 		agent:        "horse",
+		agentProfile: "cloud",
 		model:        "model-x",
 		backend:      "pi",
 		runID:        sup.runID,
@@ -820,10 +821,13 @@ func TestRuntimeStatusMetadataIncludesUsageFinalOutputAndStamp(t *testing.T) {
 		t.Fatalf("RuntimeStatus: %v", err)
 	}
 	status := statusAny.(map[string]any)
-	for key, want := range map[string]any{"agent": "horse", "model": "model-x", "backend": "pi", "event_path": "/tmp/work/events.ndjson", "final_output": "final text"} {
+	for key, want := range map[string]any{"agent": "horse", "agent_profile": "cloud", "model": "model-x", "backend": "pi", "event_path": "/tmp/work/events.ndjson", "final_output": "final text"} {
 		if got := status[key]; got != want {
 			t.Fatalf("status[%q] = %v, want %v", key, got, want)
 		}
+	}
+	if got := sup.listRuntimes()[0]["agent_profile"]; got != "cloud" {
+		t.Fatalf("list agent_profile = %v, want cloud", got)
 	}
 	usage, _ := status["usage"].(map[string]any)
 	if got, _ := usage["total_tokens"].(int); got != 7 {
@@ -1358,7 +1362,9 @@ func TestRunLoopChildWiresControlServerForClaims(t *testing.T) {
 	sup.runtimes[child.id] = child
 
 	// Inject the controlClaimProvider into the provider construction seam.
+	startOptions := make(chan runtime.StartOptions, 1)
 	sup.newProviderFunc = func(startOpts runtime.StartOptions, backend string) (runtime.Provider, error) {
+		startOptions <- startOpts
 		return provider, nil
 	}
 
@@ -1369,13 +1375,22 @@ func TestRunLoopChildWiresControlServerForClaims(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go sup.runLoopChild(ctx, child, cfg, 0, "", "", "", "", "")
+	go sup.runLoopChild(ctx, child, cfg, 0, "", "cloud", "", "", "")
 
 	// Wait for the child to complete (with timeout).
 	select {
 	case <-child.done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("runLoopChild did not complete within timeout")
+	}
+
+	select {
+	case startOpts := <-startOptions:
+		if startOpts.AgentProfile != "cloud" {
+			t.Fatalf("loop start AgentProfile = %q, want cloud", startOpts.AgentProfile)
+		}
+	default:
+		t.Fatal("loop child did not create a provider")
 	}
 
 	// Verify the permission.request was answered via sup.answerPermission.
@@ -1454,7 +1469,9 @@ func TestRunTeamChildWiresControlServerForClaims(t *testing.T) {
 	sup.runtimes[child.id] = child
 
 	// Inject the controlClaimProvider into the provider construction seam.
+	startOptions := make(chan runtime.StartOptions, 1)
 	sup.newProviderFunc = func(startOpts runtime.StartOptions, backend string) (runtime.Provider, error) {
+		startOptions <- startOpts
 		return provider, nil
 	}
 
@@ -1464,13 +1481,22 @@ func TestRunTeamChildWiresControlServerForClaims(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go sup.runTeamChild(ctx, child, cfg, 0, "", "", "", "", "unknown-backend")
+	go sup.runTeamChild(ctx, child, cfg, 0, "", "cloud", "", "", "unknown-backend")
 
 	// Wait for the child to complete (with timeout).
 	select {
 	case <-child.done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("runTeamChild did not complete within timeout")
+	}
+
+	select {
+	case startOpts := <-startOptions:
+		if startOpts.AgentProfile != "cloud" {
+			t.Fatalf("team start AgentProfile = %q, want cloud", startOpts.AgentProfile)
+		}
+	default:
+		t.Fatal("team child did not create a provider")
 	}
 
 	// Verify the permission.request was answered via sup.answerPermission.

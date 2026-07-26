@@ -105,6 +105,7 @@ describe('followUpTool with an external supervisor', () => {
         eventLogPath: '/tmp/missing-singleton-events',
         sessionId: 'ses-from-run-map',
         agent: 'explore',
+        agentProfile: 'cloud',
         backend: 'pi',
         dir: '/repo/from-run-map',
       }]]),
@@ -130,6 +131,7 @@ describe('followUpTool with an external supervisor', () => {
     expect(spawnMock.mock.calls[0]?.[0]).toMatchObject({
       agent: 'explore',
       backend: 'pi',
+      agent_profile: 'cloud',
       dir: '/repo/from-run-map',
       session_id: 'ses-from-run-map',
     })

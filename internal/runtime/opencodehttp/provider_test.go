@@ -104,9 +104,10 @@ func TestAnswerPermissionFailsBeforeStart(t *testing.T) {
 
 func TestOptionMerge(t *testing.T) {
 	base := runtime.StartOptions{
-		Agent: "default-agent",
-		Model: "default-model",
-		Dir:   "/default",
+		Agent:        "default-agent",
+		AgentProfile: "default-profile",
+		Model:        "default-model",
+		Dir:          "/default",
 	}
 	override := runtime.StartOptions{
 		Agent:     "jockey",
@@ -118,6 +119,12 @@ func TestOptionMerge(t *testing.T) {
 	}
 	if merged.Model != "default-model" {
 		t.Errorf("Model = %q, want %q (override is empty, should keep base)", merged.Model, "default-model")
+	}
+	if merged.AgentProfile != "default-profile" {
+		t.Errorf("AgentProfile = %q, want %q (override is empty, should keep base)", merged.AgentProfile, "default-profile")
+	}
+	if replaced := runtime.MergeStartOptions(base, runtime.StartOptions{AgentProfile: "cloud"}); replaced.AgentProfile != "cloud" {
+		t.Errorf("AgentProfile = %q, want cloud", replaced.AgentProfile)
 	}
 	if merged.ServerURL != "http://localhost:4096" {
 		t.Errorf("ServerURL = %q, want %q", merged.ServerURL, "http://localhost:4096")

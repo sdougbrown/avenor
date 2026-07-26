@@ -456,6 +456,39 @@ func TestStartClientReplacesAgentProfileEnvironment(t *testing.T) {
 	}
 }
 
+func TestStartClientInjectsProfileWithoutAgent(t *testing.T) {
+	original := piExecCommandContext
+	t.Cleanup(func() { piExecCommandContext = original })
+	t.Setenv("PI_AGENT_PROFILE", "stale-profile")
+
+	var captured *exec.Cmd
+	piExecCommandContext = func(_ context.Context, _ string, _ ...string) *exec.Cmd {
+		captured = exec.Command("cat")
+		return captured
+	}
+
+	client, err := StartClientWithAgentProfileAndDir(
+		context.Background(), "", "", "", "", "cloud", "",
+	)
+	if err != nil {
+		t.Fatalf("StartClientWithAgentProfileAndDir: %v", err)
+	}
+	defer client.Close()
+
+	gotAgent, gotProfile := "", ""
+	for _, entry := range captured.Env {
+		if strings.HasPrefix(entry, "PI_AGENT=") {
+			gotAgent = strings.TrimPrefix(entry, "PI_AGENT=")
+		}
+		if strings.HasPrefix(entry, "PI_AGENT_PROFILE=") {
+			gotProfile = strings.TrimPrefix(entry, "PI_AGENT_PROFILE=")
+		}
+	}
+	if gotAgent != "" || gotProfile != "cloud" {
+		t.Fatalf("pi environment = PI_AGENT=%q PI_AGENT_PROFILE=%q, want empty/cloud", gotAgent, gotProfile)
+	}
+}
+
 func TestClientClose(t *testing.T) {
 	proc := exec.Command("cat")
 	stdin, _ := proc.StdinPipe()
