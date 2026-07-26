@@ -36,6 +36,11 @@ type client struct {
 	subs      map[string][]chan events.Event
 	approvals map[string]pendingApproval
 
+	// lastToolPayload tracks the most recent tool_execution_start payload
+	// so permission requests can be enriched with tool/command context.
+	// Guarded by mu.
+	lastToolPayload map[string]any
+
 	stderr    *rollingBuffer
 	eventsCh  chan events.Event
 	done      chan struct{}
@@ -376,6 +381,13 @@ func (c *client) routeExtensionUI(payload map[string]any) {
 		ev.Fields["request_id"] = id
 		ev.Fields["ui_request_id"] = id
 
+		// Enrich with correlated tool call context. The pi backend's
+		// extension_ui_request title is often minimal (e.g. "Allow rm -rf?")
+		// without the full command or arguments. If a tool_execution_start
+		// was received, attach its tool name and input so the supervisor
+		// and permission resolvers have the full picture.
+		c.enrichWithToolContext(ev)
+
 		rawID := fmt.Sprint(payload["id"])
 
 		c.mu.Lock()
@@ -424,8 +436,66 @@ func (c *client) routeEvent(payload map[string]any) {
 	}
 
 	events := translateNotification(payload, sessionID)
+
+	// Track the most recent tool call so permission requests can be
+	// correlated with the tool that triggered them. The pi backend may
+	// send tool_execution_start before or after the extension_ui_request;
+	// we store the payload either way so the next permission request can
+	// attach the tool context.
+	if evtType == "tool_execution_start" {
+		// Store a shallow copy — translateNotification fans out the
+		// avenor.tool.start alias event with Fields: payload (same map),
+		// so subscribers could mutate the original. The copy decouples
+		// stored state from fanned-out events.
+		c.mu.Lock()
+		c.lastToolPayload = copyMap(payload)
+		c.mu.Unlock()
+	} else if evtType == "tool_execution_end" {
+		c.mu.Lock()
+		c.lastToolPayload = nil
+		c.mu.Unlock()
+	} else if evtType == "turn_start" {
+		// Clear stale tool context at the start of a new turn in case
+		// a previous tool_execution_end was never received (e.g. backend
+		// crash, dropped event).
+		c.mu.Lock()
+		c.lastToolPayload = nil
+		c.mu.Unlock()
+	}
+
 	for i := range events {
 		c.fanout(&events[i])
+	}
+}
+
+// enrichWithToolContext attaches tool name and command/input fields from the
+// most recent tool_execution_start payload to a permission.request event.
+// This is a best-effort correlation: if no tool call preceded the permission
+// request (or was already cleared), no fields are added.
+func (c *client) enrichWithToolContext(ev *events.Event) {
+	c.mu.Lock()
+	toolPayload := c.lastToolPayload
+	c.mu.Unlock()
+	if toolPayload == nil {
+		return
+	}
+
+	// Only enrich if the event doesn't already carry a tool_name from the
+	// passthrough (the backend might include it in the UI request payload).
+	if _, hasToolName := ev.Fields["tool_name"]; !hasToolName {
+		if name := firstNonEmptyString(toolPayload, "toolName", "name", "title"); name != "" {
+			ev.Fields["tool_name"] = name
+		}
+	}
+	if _, hasCommand := ev.Fields["command"]; !hasCommand {
+		if cmd := extractToolCommand(toolPayload); cmd != "" {
+			ev.Fields["command"] = cmd
+		}
+	}
+	if _, hasInput := ev.Fields["input"]; !hasInput {
+		if input := extractToolInput(toolPayload); input != "" {
+			ev.Fields["input"] = input
+		}
 	}
 }
 

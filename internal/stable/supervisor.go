@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -1608,6 +1609,22 @@ func (w *runtimeFanoutWriter) Write(ev events.Event) error {
 				}
 				w.child.permission[k] = v
 			}
+			// Stamp the working directory so permission resolvers know the
+			// context the command runs in.
+			if w.child.dir != "" {
+				w.child.permission["cwd"] = w.child.dir
+			}
+			// If a command is available (from tool-call correlation or
+			// passthrough), analyze whether target paths escape cwd.
+			// Always set path_escapes_cwd explicitly so a passthrough
+			// value from the backend payload cannot persist unchallenged.
+			if cmd, _ := w.child.permission["command"].(string); cmd != "" && w.child.dir != "" {
+				resolved, escapes := analyzeCommandPaths(cmd, w.child.dir)
+				if len(resolved) > 0 {
+					w.child.permission["resolved_paths"] = resolved
+				}
+				w.child.permission["path_escapes_cwd"] = escapes
+			}
 		case "permission.response":
 			w.child.pendingPermission = false
 			w.child.permission = nil
@@ -1951,4 +1968,56 @@ func (s *Supervisor) HTTPCancelRuntime(runtimeID string) error {
 		return control.ErrRuntimeNotFound
 	}
 	return s.cancelRuntime(runtimeID)
+}
+
+// analyzeCommandPaths performs a best-effort analysis of a command string to
+// identify path-like arguments and determine whether any resolved path
+// escapes the working directory. This is used to enrich permission.request
+// metadata so resolvers can make informed safety decisions.
+//
+// The analysis is intentionally conservative: it only flags potential escapes
+// and does not attempt to fully parse shell syntax. False positives (flagging
+// a safe path) are acceptable; false negatives (missing a dangerous path) are
+// not. Does not resolve symlinks; a symlink inside cwd pointing outside will
+// not be flagged as an escape.
+func analyzeCommandPaths(command, cwd string) (resolved []string, escapes bool) {
+	cwdAbs, err := filepath.Abs(cwd)
+	if err != nil {
+		return nil, false
+	}
+
+	tokens := strings.Fields(command)
+	for _, tok := range tokens {
+		// Skip flags and options.
+		if strings.HasPrefix(tok, "-") {
+			continue
+		}
+		// Skip obvious command names (first non-flag token is usually the
+		// executable).
+		if len(resolved) == 0 && len(tokens) > 0 && tok == tokens[0] {
+			// Only skip if it looks like a bare command name, not a path.
+			if !strings.Contains(tok, "/") {
+				continue
+			}
+		}
+		// Check if the token looks like a path (contains / or starts with .
+		// or ~).
+		if !strings.Contains(tok, "/") && !strings.HasPrefix(tok, "~") && !strings.HasPrefix(tok, ".") {
+			continue
+		}
+
+		var resolvedPath string
+		if filepath.IsAbs(tok) {
+			resolvedPath = filepath.Clean(tok)
+		} else {
+			resolvedPath = filepath.Clean(filepath.Join(cwdAbs, tok))
+		}
+		resolved = append(resolved, resolvedPath)
+
+		// Check if the resolved path escapes cwd.
+		if !strings.HasPrefix(resolvedPath+"/", cwdAbs+"/") && resolvedPath != cwdAbs {
+			escapes = true
+		}
+	}
+	return resolved, escapes
 }

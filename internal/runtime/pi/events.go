@@ -1,6 +1,7 @@
 package pi
 
 import (
+	"encoding/json"
 	"strings"
 
 	"github.com/sdougbrown/avenor/internal/events"
@@ -318,6 +319,98 @@ var dialogMethods = map[string]bool{
 	"editor":  true,
 }
 
+// copyPassthroughFields copies payload fields into a new map, excluding keys
+// that are handled explicitly by the caller. This preserves any extra
+// metadata the backend sends (e.g. command, args, cwd) so downstream
+// consumers and the supervisor can surface it.
+func copyPassthroughFields(payload map[string]any, exclude ...string) map[string]any {
+	skip := make(map[string]bool, len(exclude))
+	for _, k := range exclude {
+		skip[k] = true
+	}
+	out := make(map[string]any, len(payload))
+	for k, v := range payload {
+		if skip[k] {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// copyMap creates a shallow copy of a map. Used to decouple stored tool
+// payloads from event maps that are fanned out to subscribers.
+func copyMap(m map[string]any) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// extractToolCommand attempts to extract a command string from a
+// tool_execution_start payload. The pi backend tool payloads may carry the
+// command in various fields depending on the tool type (bash, exec, etc.).
+func extractToolCommand(payload map[string]any) string {
+	// Direct "command" field.
+	if cmd, _ := payload["command"].(string); cmd != "" {
+		return cmd
+	}
+	// "input" as a string (some tools put the raw command there).
+	if cmd, _ := payload["input"].(string); cmd != "" {
+		return cmd
+	}
+	// "input" as a map — try common sub-keys.
+	if inputMap, ok := payload["input"].(map[string]any); ok {
+		for _, key := range []string{"command", "cmd", "script", "expression", "code"} {
+			if cmd, _ := inputMap[key].(string); cmd != "" {
+				return cmd
+			}
+		}
+	}
+	// "args" as a string or string slice joined.
+	if args, ok := payload["args"].(string); ok && args != "" {
+		return args
+	}
+	if argsArr, ok := payload["args"].([]any); ok && len(argsArr) > 0 {
+		parts := make([]string, 0, len(argsArr))
+		for _, a := range argsArr {
+			if s, _ := a.(string); s != "" {
+				parts = append(parts, s)
+			}
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, " ")
+		}
+	}
+	return ""
+}
+
+// extractToolInput returns a string representation of the tool input
+// payload, useful as a fallback when a specific command field is not found.
+// The output is capped at 4KB to prevent large tool inputs from bloating
+// permission event metadata.
+func extractToolInput(payload map[string]any) string {
+	if input, ok := payload["input"].(string); ok && input != "" {
+		return truncateInput(input)
+	}
+	if inputMap, ok := payload["input"].(map[string]any); ok && len(inputMap) > 0 {
+		if b, err := json.Marshal(inputMap); err == nil {
+			return truncateInput(string(b))
+		}
+	}
+	return ""
+}
+
+const maxToolInputLen = 4096
+
+func truncateInput(s string) string {
+	if len(s) <= maxToolInputLen {
+		return s
+	}
+	return s[:maxToolInputLen] + "...[truncated]"
+}
+
 func translateExtensionUI(payload map[string]any, sessionID string) (*events.Event, string) {
 	method, _ := payload["method"].(string)
 	title, _ := payload["title"].(string)
@@ -347,38 +440,39 @@ func translateExtensionUI(payload map[string]any, sessionID string) (*events.Eve
 				}
 			}
 		}
+		// Start with passthrough of any extra fields the backend provides,
+		// then layer normalized fields on top.
+		fields := copyPassthroughFields(payload, "type", "id", "method", "title", "options")
+		fields["kind"] = "command"
+		fields["description"] = title
+		fields["options"] = optList
 		return &events.Event{
 			Event:     "permission.request",
 			SessionID: sessionID,
-			Fields: map[string]any{
-				"kind":        "command",
-				"description": title,
-				"options":     optList,
-			},
+			Fields:    fields,
 		}, method
 	case "confirm":
 		msg, _ := payload["message"].(string)
 		if msg == "" {
 			msg = title
 		}
+		fields := copyPassthroughFields(payload, "type", "id", "method", "title", "message")
+		fields["kind"] = "confirm"
+		fields["description"] = msg
+		fields["options"] = []any{
+			map[string]any{"optionId": "yes", "kind": "allow"},
+			map[string]any{"optionId": "no", "kind": "reject"},
+		}
 		return &events.Event{
 			Event:     "permission.request",
 			SessionID: sessionID,
-			Fields: map[string]any{
-				"kind":        "confirm",
-				"description": msg,
-				"options": []any{
-					map[string]any{"optionId": "yes", "kind": "allow"},
-					map[string]any{"optionId": "no", "kind": "reject"},
-				},
-			},
+			Fields:    fields,
 		}, method
 	case "input", "editor":
 		defVal, _ := payload["default"].(string)
-		fields := map[string]any{
-			"kind":        "input",
-			"description": title,
-		}
+		fields := copyPassthroughFields(payload, "type", "id", "method", "title", "default")
+		fields["kind"] = "input"
+		fields["description"] = title
 		if defVal != "" {
 			fields["default"] = defVal
 		}

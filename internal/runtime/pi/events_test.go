@@ -675,3 +675,160 @@ func TestTranslateExtensionUINotify(t *testing.T) {
 		t.Errorf("method = %q, want notify", method)
 	}
 }
+
+func TestTranslateExtensionUISelectPassthroughExtraFields(t *testing.T) {
+	payload := map[string]any{
+		"type":    "extension_ui_request",
+		"id":      "ui-1",
+		"method":  "select",
+		"title":   "Allow delete?",
+		"options": []any{"Allow", "Deny"},
+		"command": "delete -rf /tmp/agy-stage15-terra/probe-workdir",
+		"cwd":     "/tmp/agy-stage15-terra",
+		"custom":  "extra",
+	}
+	ev, _ := translateExtensionUI(payload, "pi-s1")
+	if ev == nil {
+		t.Fatal("expected event")
+	}
+	if got, _ := ev.Fields["kind"].(string); got != "command" {
+		t.Errorf("kind = %q, want command", got)
+	}
+	if got, _ := ev.Fields["description"].(string); got != "Allow delete?" {
+		t.Errorf("description = %q", got)
+	}
+	if got, _ := ev.Fields["command"].(string); got != "delete -rf /tmp/agy-stage15-terra/probe-workdir" {
+		t.Errorf("command passthrough = %q", got)
+	}
+	if got, _ := ev.Fields["cwd"].(string); got != "/tmp/agy-stage15-terra" {
+		t.Errorf("cwd passthrough = %q", got)
+	}
+	if got, _ := ev.Fields["custom"].(string); got != "extra" {
+		t.Errorf("custom passthrough = %q", got)
+	}
+	for _, excluded := range []string{"type", "id", "method", "title"} {
+		if _, ok := ev.Fields[excluded]; ok {
+			t.Errorf("excluded field %q should not be in output", excluded)
+		}
+	}
+}
+
+func TestExtractToolCommandFromStringInput(t *testing.T) {
+	payload := map[string]any{"toolName": "bash", "input": "ls /tmp/work"}
+	got := extractToolCommand(payload)
+	if got != "ls /tmp/work" {
+		t.Errorf("extractToolCommand = %q, want 'ls /tmp/work'", got)
+	}
+}
+
+func TestExtractToolCommandFromMapInput(t *testing.T) {
+	payload := map[string]any{"toolName": "bash", "input": map[string]any{"command": "ls /tmp/work"}}
+	got := extractToolCommand(payload)
+	if got != "ls /tmp/work" {
+		t.Errorf("extractToolCommand = %q, want 'ls /tmp/work'", got)
+	}
+}
+
+func TestExtractToolCommandFromArgs(t *testing.T) {
+	payload := map[string]any{"toolName": "bash", "args": []any{"ls", "-la", "/tmp/work"}}
+	got := extractToolCommand(payload)
+	if got != "ls -la /tmp/work" {
+		t.Errorf("extractToolCommand = %q, want 'ls -la /tmp/work'", got)
+	}
+}
+
+func TestExtractToolCommandFromDirectCommand(t *testing.T) {
+	payload := map[string]any{"toolName": "bash", "command": "cat /tmp/work/file"}
+	got := extractToolCommand(payload)
+	if got != "cat /tmp/work/file" {
+		t.Errorf("extractToolCommand = %q, want 'cat /tmp/work/file'", got)
+	}
+}
+
+func TestExtractToolCommandEmpty(t *testing.T) {
+	payload := map[string]any{"toolName": "unknown"}
+	got := extractToolCommand(payload)
+	if got != "" {
+		t.Errorf("extractToolCommand = %q, want empty", got)
+	}
+}
+
+func TestExtractToolInputString(t *testing.T) {
+	payload := map[string]any{"input": "some raw input"}
+	got := extractToolInput(payload)
+	if got != "some raw input" {
+		t.Errorf("extractToolInput = %q", got)
+	}
+}
+
+func TestExtractToolInputMap(t *testing.T) {
+	payload := map[string]any{"input": map[string]any{"command": "ls"}}
+	got := extractToolInput(payload)
+	if got != "{\"command\":\"ls\"}" {
+		t.Errorf("extractToolInput = %q", got)
+	}
+}
+
+func TestExtractToolInputEmpty(t *testing.T) {
+	payload := map[string]any{"toolName": "bash"}
+	got := extractToolInput(payload)
+	if got != "" {
+		t.Errorf("extractToolInput = %q, want empty", got)
+	}
+}
+
+func TestExtractToolCommandFromStringArgs(t *testing.T) {
+	payload := map[string]any{"toolName": "bash", "args": "ls -la /tmp"}
+	got := extractToolCommand(payload)
+	if got != "ls -la /tmp" {
+		t.Errorf("extractToolCommand = %q, want 'ls -la /tmp'", got)
+	}
+}
+
+func TestTranslateExtensionUIConfirmPassthroughExtraFields(t *testing.T) {
+	payload := map[string]any{
+		"type":    "extension_ui_request",
+		"id":      "ui-2",
+		"method":  "confirm",
+		"title":   "Confirm?",
+		"message": "Do you want to proceed?",
+		"detail":  "some detail",
+	}
+	ev, _ := translateExtensionUI(payload, "pi-s1")
+	if ev == nil {
+		t.Fatal("expected event")
+	}
+	if got, _ := ev.Fields["detail"].(string); got != "some detail" {
+		t.Errorf("detail passthrough = %q", got)
+	}
+}
+
+func TestTranslateExtensionUIInputPassthroughExtraFields(t *testing.T) {
+	payload := map[string]any{
+		"type":    "extension_ui_request",
+		"id":      "ui-3",
+		"method":  "input",
+		"title":   "Enter value",
+		"default": "hello",
+		"hint":    "path to file",
+	}
+	ev, _ := translateExtensionUI(payload, "pi-s1")
+	if ev == nil {
+		t.Fatal("expected event")
+	}
+	if got, _ := ev.Fields["hint"].(string); got != "path to file" {
+		t.Errorf("hint passthrough = %q", got)
+	}
+}
+
+func TestExtractToolInputTruncation(t *testing.T) {
+	long := strings.Repeat("x", maxToolInputLen+100)
+	payload := map[string]any{"input": long}
+	got := extractToolInput(payload)
+	if len(got) != maxToolInputLen+len("...[truncated]") {
+		t.Errorf("extractToolInput len = %d, want %d", len(got), maxToolInputLen+len("...[truncated]"))
+	}
+	if !strings.HasSuffix(got, "...[truncated]") {
+		t.Errorf("extractToolInput should end with truncation marker, got %q", got[len(got)-20:])
+	}
+}

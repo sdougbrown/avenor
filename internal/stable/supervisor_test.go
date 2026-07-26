@@ -2735,3 +2735,84 @@ func childrenList(entry map[string]any) []string {
 		return nil
 	}
 }
+
+func TestAnalyzeCommandPathsNoEscape(t *testing.T) {
+	resolved, escapes := analyzeCommandPaths("ls -la /tmp/agy-stage15-terra/probe-workdir", "/tmp/agy-stage15-terra")
+	if escapes {
+		t.Error("expected no escape for path inside cwd")
+	}
+	if len(resolved) == 0 {
+		t.Fatal("expected at least one resolved path")
+	}
+	found := false
+	for _, p := range resolved {
+		if p == "/tmp/agy-stage15-terra/probe-workdir" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("resolved paths = %v, expected to contain probe-workdir", resolved)
+	}
+}
+
+func TestAnalyzeCommandPathsEscapeDetected(t *testing.T) {
+	resolved, escapes := analyzeCommandPaths("cat /etc/passwd", "/tmp/agy-stage15-terra")
+	if !escapes {
+		t.Error("expected escape for /etc/passwd outside cwd")
+	}
+	if len(resolved) == 0 {
+		t.Fatal("expected at least one resolved path")
+	}
+}
+
+func TestAnalyzeCommandPathsRelativeEscape(t *testing.T) {
+	resolved, escapes := analyzeCommandPaths("cat ../../../etc/passwd", "/tmp/agy-stage15-terra/sub")
+	if !escapes {
+		t.Error("expected escape for ../../etc/passwd")
+	}
+	found := false
+	for _, p := range resolved {
+		if p == "/etc/passwd" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("resolved paths = %v, expected to contain /etc/passwd", resolved)
+	}
+}
+
+func TestAnalyzeCommandPathsRelativeInsideCwd(t *testing.T) {
+	_, escapes := analyzeCommandPaths("cat ./subdir/file", "/tmp/agy-stage15-terra")
+	if escapes {
+		t.Error("expected no escape for ./subdir inside cwd")
+	}
+}
+
+func TestAnalyzeCommandPathsFlagsSkipped(t *testing.T) {
+	resolved, _ := analyzeCommandPaths("git -C /tmp/repo status", "/tmp/agy-stage15-terra")
+	for _, p := range resolved {
+		if p == "/tmp/agy-stage15-terra/-C" {
+			t.Error("flag -C should be skipped")
+		}
+	}
+	// Verify the flag argument is still captured as a resolved path.
+	foundRepo := false
+	for _, p := range resolved {
+		if p == "/tmp/repo" {
+			foundRepo = true
+		}
+	}
+	if !foundRepo {
+		t.Errorf("resolved paths = %v, expected to contain /tmp/repo", resolved)
+	}
+}
+
+func TestAnalyzeCommandPathsNoPaths(t *testing.T) {
+	resolved, escapes := analyzeCommandPaths("echo hello", "/tmp/agy-stage15-terra")
+	if escapes {
+		t.Error("expected no escape for echo hello")
+	}
+	if len(resolved) != 0 {
+		t.Errorf("expected 0 resolved paths, got %v", resolved)
+	}
+}
