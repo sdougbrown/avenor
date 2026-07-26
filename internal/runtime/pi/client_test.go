@@ -799,3 +799,48 @@ func drainAndAssert(t *testing.T, ch <-chan events.Event, want []string) {
 		}
 	}
 }
+
+func TestClientToolCallCorrelationPreservesBackendFields(t *testing.T) {
+	c, wOut, _ := fakeClient()
+	defer c.Close()
+
+	c.setSessionID("pi-preserve")
+
+	go func() {
+		// tool_execution_start with a command.
+		writeLine(wOut, map[string]any{
+			"type":     "tool_execution_start",
+			"toolName": "bash",
+			"input":    "ls /tmp/work",
+		})
+		// extension_ui_request that already carries tool_name and command.
+		// enrichWithToolContext must NOT overwrite these.
+		writeLine(wOut, map[string]any{
+			"type":      "extension_ui_request",
+			"id":        "ui-preserve-1",
+			"method":    "select",
+			"title":     "Allow?",
+			"options":   []string{"Allow", "Deny"},
+			"tool_name": "custom_tool",
+			"command":   "cat /custom/path",
+		})
+	}()
+
+	drainAndAssert(t, c.eventsCh, []string{"tool.call", "avenor.tool.start"})
+
+	select {
+	case ev := <-c.eventsCh:
+		if ev.Event != "permission.request" {
+			t.Fatalf("event = %q, want permission.request", ev.Event)
+		}
+		// Backend-provided fields must be preserved, not overwritten.
+		if got, _ := ev.Fields["tool_name"].(string); got != "custom_tool" {
+			t.Errorf("tool_name = %q, want custom_tool (backend value preserved)", got)
+		}
+		if got, _ := ev.Fields["command"].(string); got != "cat /custom/path" {
+			t.Errorf("command = %q, want cat /custom/path (backend value preserved)", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for permission request")
+	}
+}

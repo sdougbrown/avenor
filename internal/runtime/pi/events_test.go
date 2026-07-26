@@ -801,6 +801,13 @@ func TestTranslateExtensionUIConfirmPassthroughExtraFields(t *testing.T) {
 	if got, _ := ev.Fields["detail"].(string); got != "some detail" {
 		t.Errorf("detail passthrough = %q", got)
 	}
+	// message is excluded from passthrough and surfaced as description.
+	if _, ok := ev.Fields["message"]; ok {
+		t.Error("message should be excluded from passthrough (surfaced as description)")
+	}
+	if got, _ := ev.Fields["description"].(string); got != "Do you want to proceed?" {
+		t.Errorf("description = %q, want message value", got)
+	}
 }
 
 func TestTranslateExtensionUIInputPassthroughExtraFields(t *testing.T) {
@@ -819,6 +826,10 @@ func TestTranslateExtensionUIInputPassthroughExtraFields(t *testing.T) {
 	if got, _ := ev.Fields["hint"].(string); got != "path to file" {
 		t.Errorf("hint passthrough = %q", got)
 	}
+	// default is excluded from passthrough then re-added by the caller.
+	if got, _ := ev.Fields["default"].(string); got != "hello" {
+		t.Errorf("default = %q, want hello", got)
+	}
 }
 
 func TestExtractToolInputTruncation(t *testing.T) {
@@ -830,5 +841,64 @@ func TestExtractToolInputTruncation(t *testing.T) {
 	}
 	if !strings.HasSuffix(got, "...[truncated]") {
 		t.Errorf("extractToolInput should end with truncation marker, got %q", got[len(got)-20:])
+	}
+}
+
+func TestCopyPassthroughFields(t *testing.T) {
+	payload := map[string]any{
+		"keep":   "val",
+		"also":   42,
+		"drop1":  "x",
+		"drop2":  "y",
+		"nested": map[string]any{"inner": "deep"},
+	}
+	out := copyPassthroughFields(payload, "drop1", "drop2")
+	if len(out) != 3 {
+		t.Fatalf("len = %d, want 3", len(out))
+	}
+	if got, _ := out["keep"].(string); got != "val" {
+		t.Errorf("keep = %q", got)
+	}
+	if _, ok := out["drop1"]; ok {
+		t.Error("drop1 should be excluded")
+	}
+	if _, ok := out["drop2"]; ok {
+		t.Error("drop2 should be excluded")
+	}
+	// Shallow copy: mutating the output must not affect the original.
+	out["keep"] = "changed"
+	if payload["keep"] == "changed" {
+		t.Error("output map should be a copy, not a reference")
+	}
+	// Nested values are shared (shallow copy).
+	if nested, ok := out["nested"].(map[string]any); ok {
+		nested["inner"] = "mutated"
+		if orig, _ := payload["nested"].(map[string]any); orig["inner"] != "mutated" {
+			t.Error("nested map should be shared (shallow copy)")
+		}
+	}
+}
+
+func TestCopyMap(t *testing.T) {
+	orig := map[string]any{"a": "1", "b": 2, "c": map[string]any{"deep": true}}
+	clone := copyMap(orig)
+	if len(clone) != len(orig) {
+		t.Fatalf("len = %d, want %d", len(clone), len(orig))
+	}
+	// Mutating the clone must not affect the original.
+	clone["a"] = "changed"
+	delete(clone, "b")
+	if orig["a"] != "1" {
+		t.Error("original should be unaffected by clone mutation")
+	}
+	if _, ok := orig["b"]; !ok {
+		t.Error("original should still contain b")
+	}
+	// Shallow copy: nested maps are shared.
+	if nested, ok := clone["c"].(map[string]any); ok {
+		nested["deep"] = false
+		if origNested, _ := orig["c"].(map[string]any); origNested["deep"] != false {
+			t.Error("nested map should be shared (shallow copy)")
+		}
 	}
 }

@@ -2805,6 +2805,10 @@ func TestAnalyzeCommandPathsFlagsSkipped(t *testing.T) {
 	if !foundRepo {
 		t.Errorf("resolved paths = %v, expected to contain /tmp/repo", resolved)
 	}
+	// Only /tmp/repo should be resolved — git and status are not paths.
+	if len(resolved) != 1 {
+		t.Errorf("len(resolved) = %d, want 1 (only /tmp/repo), got %v", len(resolved), resolved)
+	}
 }
 
 func TestAnalyzeCommandPathsNoPaths(t *testing.T) {
