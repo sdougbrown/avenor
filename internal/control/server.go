@@ -19,6 +19,15 @@ import (
 const subscriberBuffer = 256
 const maxSendToParentMessageBytes = 64 * 1024
 
+const controlIdentityTokenEnv = "AVENOR_CONTROL_IDENTITY_TOKEN"
+
+var dialControlSocket = net.DialTimeout
+
+// These no-op hooks let socket-lifecycle tests coordinate at the lock boundary
+// without changing production lock behavior.
+var beforeControlSocketLock = func() {}
+var beforeControlSocketCleanup = func() {}
+
 type PermissionAnswer struct {
 	RequestID string `json:"request_id"`
 	OptionID  string `json:"option_id"`
@@ -27,11 +36,12 @@ type PermissionAnswer struct {
 type ControlServer struct {
 	state *ControlState
 
-	mu         sync.Mutex
-	listener   net.Listener
-	path       string
-	socketInfo os.FileInfo
-	stopped    bool
+	mu            sync.Mutex
+	listener      net.Listener
+	path          string
+	socketInfo    os.FileInfo
+	identityToken string
+	stopped       bool
 
 	conns      map[*connState]struct{}
 	subs       map[*subscriber]struct{}
@@ -115,7 +125,47 @@ func runtimeIDFromParams(params json.RawMessage) string {
 
 func (s *ControlServer) SetCancelFunc(fn func()) { s.cancelFn = fn }
 
+// lockControlSocket serializes every mutation of a socket path. Start holds it
+// through stale-path removal and bind; Stop holds it through owned-path removal.
+func lockControlSocket(socketPath string) (*os.File, error) {
+	beforeControlSocketLock()
+	lockFile, err := os.OpenFile(socketPath+".control.lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open control socket lock: %w", err)
+	}
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		_ = lockFile.Close()
+		return nil, fmt.Errorf("lock control socket: %w", err)
+	}
+	return lockFile, nil
+}
+
+func unlockControlSocket(lockFile *os.File) {
+	_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+	_ = lockFile.Close()
+}
+
+// removeOwnedSocket removes path only while l still proves it is the active
+// listener and path still names that listener's identity. The caller must hold
+// the control socket lock.
+func removeOwnedSocket(l net.Listener, path string, socketInfo os.FileInfo) {
+	unixListener, ok := l.(*net.UnixListener)
+	if !ok || unixListener.SetDeadline(time.Now()) != nil {
+		return
+	}
+	current, err := os.Stat(path)
+	if err == nil && (socketInfo == nil || os.SameFile(current, socketInfo)) {
+		_ = os.Remove(path)
+	}
+}
+
 func (s *ControlServer) Start(socketPath string) error {
+	// startSupervisor passes this one-shot token to prove that the process
+	// which acknowledged readiness is the process later reached by its parent.
+	// Clear it immediately so spawned providers cannot inherit it.
+	identityToken := os.Getenv(controlIdentityTokenEnv)
+	_ = os.Unsetenv(controlIdentityTokenEnv)
+
 	if socketPath == "" {
 		return nil
 	}
@@ -125,26 +175,26 @@ func (s *ControlServer) Start(socketPath string) error {
 	// Serialize stale-socket inspection and bind across independent stable
 	// starters. The lock is held only through Listen, so an attached client
 	// is never blocked from converging on the winner.
-	lockPath := socketPath + ".control.lock"
-	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	lockFile, err := lockControlSocket(socketPath)
 	if err != nil {
-		return fmt.Errorf("open control socket lock: %w", err)
+		return err
 	}
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
-		_ = lockFile.Close()
-		return fmt.Errorf("lock control socket: %w", err)
-	}
-	defer func() {
-		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
-		_ = lockFile.Close()
-	}()
+	defer unlockControlSocket(lockFile)
 
 	if _, err := os.Stat(socketPath); err == nil {
-		if c, dialErr := net.DialTimeout("unix", socketPath, 250*time.Millisecond); dialErr == nil {
+		if c, dialErr := dialControlSocket("unix", socketPath, 250*time.Millisecond); dialErr == nil {
 			_ = c.Close()
 			return fmt.Errorf("control socket already in use: %s", socketPath)
+		} else if !errors.Is(dialErr, syscall.ECONNREFUSED) {
+			// A timeout or transient error does not prove the socket is stale.
+			// Leave it intact rather than risking an active peer's path.
+			return fmt.Errorf("probe existing control socket %s: %w", socketPath, dialErr)
 		}
-		_ = os.Remove(socketPath)
+		if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove stale control socket: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat control socket: %w", err)
 	}
 	oldMask := syscall.Umask(0o077)
 	l, err := net.Listen("unix", socketPath)
@@ -171,9 +221,18 @@ func (s *ControlServer) Start(socketPath string) error {
 	}
 
 	s.mu.Lock()
+	if s.stopped {
+		s.mu.Unlock()
+		// Start and Stop raced. We still own the control lock and the live
+		// listener, so clean up before returning without leaving a socket behind.
+		removeOwnedSocket(l, socketPath, info)
+		_ = l.Close()
+		return fmt.Errorf("control server stopped")
+	}
 	s.listener = l
 	s.path = socketPath
 	s.socketInfo = info
+	s.identityToken = identityToken
 	s.mu.Unlock()
 
 	// startSupervisor supplies this one-shot inherited descriptor. Signalling
@@ -209,18 +268,14 @@ func (s *ControlServer) Stop() {
 	}
 	s.mu.Unlock()
 
-	// Remove the owned path before closing the listener. Closing first creates
-	// a window where another process can bind a replacement whose inode may be
-	// immediately reused on Linux. If the listener was already closed, it no
-	// longer proves ownership, so leave whatever currently occupies the path.
-	removeOwnedPath := l != nil && path != ""
-	if unixListener, ok := l.(*net.UnixListener); ok {
-		removeOwnedPath = unixListener.SetDeadline(time.Now()) == nil
-	}
-	if removeOwnedPath {
-		current, err := os.Stat(path)
-		if err == nil && (socketInfo == nil || os.SameFile(current, socketInfo)) {
-			_ = os.Remove(path)
+	// Serialize cleanup with Start's stale-path inspection and bind. Remove
+	// while the listener is still live; once it is closed, a replacement may
+	// bind and reuse its inode before a parent can safely inspect the path.
+	if l != nil && path != "" {
+		if lockFile, err := lockControlSocket(path); err == nil {
+			beforeControlSocketCleanup()
+			removeOwnedSocket(l, path, socketInfo)
+			unlockControlSocket(lockFile)
 		}
 	}
 	if l != nil {
@@ -558,6 +613,8 @@ func (s *ControlServer) handleConn(c *connState) {
 
 func (s *ControlServer) dispatch(c *connState, req Request) Response {
 	switch req.Method {
+	case "identity":
+		return success(req.ID, map[string]any{"token": s.identityToken})
 	case "result":
 		runtimeID := runtimeIDFromParams(req.Params)
 		if runtimeID == "" {

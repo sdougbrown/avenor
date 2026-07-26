@@ -18,54 +18,29 @@ import (
 	"github.com/sdougbrown/avenor/client"
 )
 
-func TestStartSupervisorStaleSocket(t *testing.T) {
+func TestStartSupervisorLeavesStaleSocketForChild(t *testing.T) {
 	tmpDir := t.TempDir()
 	socketPath := filepath.Join(tmpDir, "avenor-mcp-test-stale.sock")
 
-	// Clean up from previous runs
-	os.Remove(socketPath)
-
-	// Create a plain file (not a real socket) to simulate stale socket
+	// Create a plain file (not a real socket) to simulate a stale socket.
 	if err := os.WriteFile(socketPath, []byte("not a socket"), 0600); err != nil {
 		t.Fatalf("write stale file: %v", err)
 	}
 	defer os.Remove(socketPath)
 
-	// Mock execCommand to verify spawn was attempted after stale removal
-	execCalled := false
+	// The child ControlServer.Start owns stale-path removal under its control
+	// lock. A failed parent spawn must leave that path untouched.
 	origExec := execCommand
 	execCommand = func(name string, args ...string) *exec.Cmd {
-		execCalled = true
-
-		found := false
-		for i, a := range args {
-			if a == "--control-socket" && i+1 < len(args) && args[i+1] == socketPath {
-				found = true
-			}
-		}
-		if !found {
-			t.Errorf("expected --control-socket %s in args, got %v", socketPath, args)
-		}
-
 		return exec.Command("/nonexistent/avenor-test-stub")
 	}
 	defer func() { execCommand = origExec }()
 
-	// startSupervisor should detect the stale file, remove it, then try to spawn
-	_, err := startSupervisor(socketPath, 5*time.Second)
-
-	if !execCalled {
-		t.Error("execCommand was never called — spawn was not attempted after stale removal")
+	if _, err := startSupervisor(socketPath, 5*time.Second); err == nil {
+		t.Fatal("expected error from failed spawn")
 	}
-
-	// The spawn should fail since we returned a false command
-	if err == nil {
-		t.Error("expected error from failed spawn")
-	}
-
-	// Verify the stale file was removed
-	if _, statErr := os.Stat(socketPath); !os.IsNotExist(statErr) {
-		t.Error("stale socket was not removed")
+	if _, err := os.Stat(socketPath); err != nil {
+		t.Fatalf("parent removed stale socket instead of leaving it for child Start: %v", err)
 	}
 }
 
@@ -188,7 +163,9 @@ func TestNewServerAutostartFailsLazily(t *testing.T) {
 	// Autostart is lazy: construction succeeds, and the first control
 	// operation starts the supervisor and reports the startup failure.
 	origExec := execCommand
+	var execAttempts atomic.Int32
 	execCommand = func(name string, args ...string) *exec.Cmd {
+		execAttempts.Add(1)
 		return exec.Command("/nonexistent/avenor-test-stub")
 	}
 	defer func() { execCommand = origExec }()
@@ -200,6 +177,9 @@ func TestNewServerAutostartFailsLazily(t *testing.T) {
 		t.Fatalf("NewServer should not start lazily: %v", err)
 	}
 	defer s.Close()
+	if got := execAttempts.Load(); got != 0 {
+		t.Fatalf("NewServer exec attempts = %d, want 0", got)
+	}
 
 	_, _, err = s.handleAvenorStatus(context.Background(), nil, statusArgs{})
 	if err == nil {
@@ -207,6 +187,9 @@ func TestNewServerAutostartFailsLazily(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "autostart supervisor") {
 		t.Fatalf("expected error to mention autostart supervisor, got: %v", err)
+	}
+	if got := execAttempts.Load(); got != 1 {
+		t.Fatalf("first control operation exec attempts = %d, want 1", got)
 	}
 }
 
@@ -227,32 +210,43 @@ func TestLifecycleShutdownNoProcess(t *testing.T) {
 	}
 }
 
-func TestSupervisorLifecycleSocketCleanup(t *testing.T) {
-	tmpDir := t.TempDir()
-	socketPath := filepath.Join(tmpDir, "test.sock")
-
-	// Create a file that exists so we can verify removal
-	if err := os.WriteFile(socketPath, []byte("fake"), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	info, err := os.Stat(socketPath)
+func TestOwnedLifecycleShutdownDoesNotUnlinkReplacement(t *testing.T) {
+	// Keep the Unix-socket path below macOS's pathname limit.
+	tmpDir, err := os.MkdirTemp("/tmp", "mcp-replace-")
 	if err != nil {
 		t.Fatal(err)
 	}
-	lc := &supervisorLifecycle{
-		socketPath: socketPath,
-		cmd:        nil,
-		client:     nil,
-		socketInfo: info,
+	defer os.RemoveAll(tmpDir)
+	socketPath := filepath.Join(tmpDir, "test.sock")
+	if err := os.WriteFile(socketPath, []byte("former child socket"), 0o600); err != nil {
+		t.Fatal(err)
 	}
+	if err := os.Remove(socketPath); err != nil {
+		t.Fatal(err)
+	}
+
+	winner, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer winner.Close()
+
+	// Model an owned child that has already exited. The lifecycle parent must
+	// not inspect or unlink the path: on Linux the winner can reuse the child's
+	// inode before that inspection.
+	cmd := exec.Command("true")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	lc := &supervisorLifecycle{socketPath: socketPath, cmd: cmd, exited: exited}
 
 	if err := lc.Shutdown(); err != nil {
 		t.Fatalf("Shutdown: %v", err)
 	}
-
-	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
-		t.Error("socket file was not removed during shutdown")
+	if _, err := os.Stat(socketPath); err != nil {
+		t.Fatalf("owned lifecycle parent removed replacement socket: %v", err)
 	}
 }
 
@@ -357,7 +351,9 @@ func TestStartSupervisorReuseExistingSocket(t *testing.T) {
 }
 
 func signalMCPStartupReady() {
-	fd, err := strconv.Atoi(os.Getenv("AVENOR_CONTROL_READY_FD"))
+	fdValue := os.Getenv("AVENOR_CONTROL_READY_FD")
+	_ = os.Unsetenv("AVENOR_CONTROL_READY_FD")
+	fd, err := strconv.Atoi(fdValue)
 	if err != nil || fd < 3 {
 		return
 	}
@@ -373,6 +369,8 @@ func TestMCPSupervisorChild(t *testing.T) {
 		return
 	}
 	path := os.Getenv("AVENOR_MCP_SUPERVISOR_SOCKET")
+	identityToken := os.Getenv(controlIdentityTokenEnv)
+	_ = os.Unsetenv(controlIdentityTokenEnv)
 	ln, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatalf("child listen: %v", err)
@@ -393,7 +391,11 @@ func TestMCPSupervisorChild(t *testing.T) {
 					continue
 				}
 				resp := client.Response{JSONRPC: "2.0", ID: req.ID}
-				resp.Result, _ = json.Marshal(map[string]any{"phase": "working"})
+				if req.Method == "identity" {
+					resp.Result, _ = json.Marshal(map[string]any{"token": identityToken})
+				} else {
+					resp.Result, _ = json.Marshal(map[string]any{"phase": "working"})
+				}
 				data, _ := json.Marshal(resp)
 				_, _ = c.Write(append(data, '\n'))
 				if req.Method == "shutdown" {
@@ -447,6 +449,162 @@ func TestPreReadyWinnerIsSharedAndSurvivesLoserClose(t *testing.T) {
 		t.Fatal("loser close shut down or removed the competing winner")
 	} else {
 		_ = cl.Close()
+	}
+}
+
+func TestMCPPostReadyReplacementChild(t *testing.T) {
+	if os.Getenv("AVENOR_MCP_POST_READY_REPLACEMENT_CHILD") != "1" {
+		return
+	}
+
+	path := os.Getenv("AVENOR_MCP_SUPERVISOR_SOCKET")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatalf("child listen: %v", err)
+	}
+	signalMCPStartupReady()
+	if err := ln.Close(); err != nil {
+		t.Fatalf("child close: %v", err)
+	}
+	// Be explicit even on platforms where closing a Unix listener does not
+	// unlink its pathname by default.
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("child unlink: %v", err)
+	}
+
+	closedFD, err := strconv.Atoi(os.Getenv("AVENOR_MCP_CHILD_CLOSED_FD"))
+	if err != nil || closedFD < 3 {
+		t.Fatal("child closed notification fd is unavailable")
+	}
+	closed := os.NewFile(uintptr(closedFD), "avenor-mcp-child-closed")
+	if _, err := closed.Write([]byte{1}); err != nil {
+		t.Fatalf("notify child socket closed: %v", err)
+	}
+	_ = closed.Close()
+
+	holdFD, err := strconv.Atoi(os.Getenv("AVENOR_MCP_CHILD_HOLD_FD"))
+	if err != nil || holdFD < 3 {
+		t.Fatal("child hold fd is unavailable")
+	}
+	hold := os.NewFile(uintptr(holdFD), "avenor-mcp-child-hold")
+	_, _ = hold.Read(make([]byte, 1))
+	_ = hold.Close()
+}
+
+func TestPostReadyReplacementIsShared(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("/tmp", "mcp-replace-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+	socketPath := filepath.Join(tmpDir, "winner.sock")
+
+	childClosedReader, childClosedWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer childClosedReader.Close()
+	defer childClosedWriter.Close()
+	childHoldReader, childHoldWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer childHoldReader.Close()
+	defer childHoldWriter.Close()
+
+	origExec := execCommand
+	origAfterReady := afterSupervisorReady
+	var spawnedChild *exec.Cmd
+	defer func() {
+		execCommand = origExec
+		afterSupervisorReady = origAfterReady
+	}()
+
+	parentReady := make(chan struct{})
+	releaseProbe := make(chan struct{})
+	var releaseProbeOnce sync.Once
+	release := func() { releaseProbeOnce.Do(func() { close(releaseProbe) }) }
+	defer release()
+	afterSupervisorReady = func() {
+		close(parentReady)
+		<-releaseProbe
+	}
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestMCPPostReadyReplacementChild$")
+		spawnedChild = cmd
+		cmd.ExtraFiles = []*os.File{childClosedWriter, childHoldReader}
+		cmd.Env = append(os.Environ(),
+			"AVENOR_MCP_POST_READY_REPLACEMENT_CHILD=1",
+			"AVENOR_MCP_SUPERVISOR_SOCKET="+socketPath,
+			"AVENOR_MCP_CHILD_CLOSED_FD=3",
+			"AVENOR_MCP_CHILD_HOLD_FD=4",
+		)
+		return cmd
+	}
+
+	type startResult struct {
+		lifecycle *supervisorLifecycle
+		err       error
+	}
+	started := make(chan startResult, 1)
+	go func() {
+		lifecycle, err := startSupervisor(socketPath, 0)
+		started <- startResult{lifecycle: lifecycle, err: err}
+	}()
+
+	select {
+	case <-parentReady:
+	case <-time.After(time.Second):
+		t.Fatal("parent did not receive child readiness")
+	}
+	var signal [1]byte
+	childClosed := make(chan error, 1)
+	go func() {
+		_, err := childClosedReader.Read(signal[:])
+		childClosed <- err
+	}()
+	select {
+	case err := <-childClosed:
+		if err != nil {
+			t.Fatalf("read child socket-closed notification: %v", err)
+		}
+		if signal[0] != 1 {
+			t.Fatalf("child socket-closed signal = %d, want 1", signal[0])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("child did not close and unlink its socket")
+	}
+
+	winner, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("start replacement supervisor: %v", err)
+	}
+	defer winner.Close()
+	go serveHealthySupervisor(winner) // Its identity response has an empty token.
+
+	// The replacement is bound before the parent can make its first probe.
+	release()
+	result := <-started
+	if result.err != nil {
+		t.Fatalf("startSupervisor: %v", result.err)
+	}
+	if !result.lifecycle.shared {
+		t.Fatal("starter classified a post-ready replacement as its child")
+	}
+	if spawnedChild == nil || spawnedChild.ProcessState == nil {
+		t.Fatal("starter did not reap its replaced child process")
+	}
+	if err := result.lifecycle.Close(); err != nil {
+		t.Fatalf("close shared lifecycle: %v", err)
+	}
+	cl, err := client.Dial(socketPath)
+	if err != nil {
+		t.Fatalf("dial replacement after shared close: %v", err)
+	}
+	defer cl.Close()
+	identity, err := cl.Identity()
+	if err != nil || identity != "" {
+		t.Fatalf("replacement identity = %q, %v; want empty token, nil", identity, err)
 	}
 }
 

@@ -507,7 +507,7 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 		params["timeout"] = secs
 	}
 
-	cl, cleanup, err := s.getClientForSupervisor(args.SupervisorID)
+	cl, cleanup, supervisorPath, err := s.getClientForSupervisorWithPath(args.SupervisorID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -520,8 +520,6 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 
 	runtimeID, _ := result["runtime_id"].(string)
 	sessionID, _ := result["session_id"].(string)
-
-	supervisorPath := s.getSupervisorPath(args.SupervisorID)
 
 	if err := s.registry.Store(&RunInfo{
 		RunID:        runID,
@@ -564,22 +562,26 @@ func (s *Server) handleAvenorShutdown(ctx context.Context, req *mcp.CallToolRequ
 	s.supervisorMu.Lock()
 	lifecycle := s.lifecycle
 	defaultSupervisorPath := s.defaultSupervisorPath
+	supervisorPath := args.SupervisorID
+	if supervisorPath == "" {
+		supervisorPath = defaultSupervisorPath
+	}
 	s.supervisorMu.Unlock()
-	supervisorPath := s.getSupervisorPath(args.SupervisorID)
 	useLifecycle := lifecycle != nil &&
 		(args.SupervisorID == "" || supervisorPath == defaultSupervisorPath)
 	if useLifecycle {
-		// Pass the requested mode (graceful or kill) to lifecycle shutdown.
-		if err := lifecycle.ShutdownWithMode(mode); err != nil {
-			return nil, nil, fmt.Errorf("shutdown: %w", err)
-		}
+		// Shutdown may report an RPC error after it has closed the client and
+		// waited for its child. Retire the owned lifecycle either way so a
+		// closed connection is never retained for another tool call.
+		shutdownErr := lifecycle.ShutdownWithMode(mode)
 		s.supervisorMu.Lock()
-		if s.lifecycle == lifecycle {
-			s.lifecycle = nil
-			s.controlClient = nil
-			s.closed = true
-		}
+		s.lifecycle = nil
+		s.controlClient = nil
+		s.closed = true
 		s.supervisorMu.Unlock()
+		if shutdownErr != nil {
+			return nil, nil, fmt.Errorf("shutdown: %w", shutdownErr)
+		}
 	} else if err := cl.Shutdown(mode); err != nil {
 		return nil, nil, fmt.Errorf("shutdown: %w", err)
 	}
@@ -783,7 +785,16 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 
 var startSupervisorFunc = startSupervisor
 
+// beforeSupervisorLock is a no-op production hook used to coordinate callers
+// at the lazy-supervisor lock boundary in concurrency tests.
+var beforeSupervisorLock = func() {}
+
 func (s *Server) getClientForSupervisor(supervisorID string) (ControlClient, func(), error) {
+	cl, cleanup, _, err := s.getClientForSupervisorWithPath(supervisorID)
+	return cl, cleanup, err
+}
+
+func (s *Server) getClientForSupervisorWithPath(supervisorID string) (ControlClient, func(), string, error) {
 	// An explicit supervisor_id that resolves to the autostarted/default
 	// supervisor must reuse the persistent owner connection. Ownership is
 	// per-connection (first mutator wins), and spawn claimed it on
@@ -791,35 +802,36 @@ func (s *Server) getClientForSupervisor(supervisorID string) (ControlClient, fun
 	// on mutating calls (answer_permission, prompt, cancel, follow_up), since
 	// those resolve supervisor_id from the registry and would otherwise arrive
 	// on a non-owner connection. Mirrors handleAvenorShutdown's path check.
+	beforeSupervisorLock()
 	s.supervisorMu.Lock()
 	if s.closed {
 		s.supervisorMu.Unlock()
-		return nil, nil, fmt.Errorf("control client not available")
+		return nil, nil, "", fmt.Errorf("control client not available")
 	}
 	isDefault := supervisorID == "" || supervisorID == s.defaultSupervisorPath
 	if !isDefault {
 		s.supervisorMu.Unlock()
 		cl, err := client.Dial(supervisorID)
 		if err != nil {
-			return nil, nil, fmt.Errorf("dial supervisor socket %s: %w", supervisorID, err)
+			return nil, nil, "", fmt.Errorf("dial supervisor socket %s: %w", supervisorID, err)
 		}
-		return cl, func() { cl.Close() }, nil
+		return cl, func() { cl.Close() }, supervisorID, nil
 	}
 	defer s.supervisorMu.Unlock()
 
 	if s.controlClient == nil {
 		if s.opts.NoAutostart {
-			return nil, nil, fmt.Errorf("control client not available")
+			return nil, nil, "", fmt.Errorf("control client not available")
 		}
 		lc, err := startSupervisorFunc(s.opts.ControlSocket, s.opts.IdleTimeout)
 		if err != nil {
-			return nil, nil, fmt.Errorf("autostart supervisor: %w", err)
+			return nil, nil, "", fmt.Errorf("autostart supervisor: %w", err)
 		}
 		s.lifecycle = lc
 		s.controlClient = lc.client
 		s.defaultSupervisorPath = lc.socketPath
 	}
-	return s.controlClient, func() {}, nil
+	return s.controlClient, func() {}, s.defaultSupervisorPath, nil
 }
 
 func (s *Server) getSupervisorPath(supervisorID string) string {

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -36,6 +37,7 @@ type fakeClient struct {
 	spawnFunc                func(params map[string]any) (map[string]any, error)
 	spawnCapturedParams      map[string]any
 	answerPermissionCalls    []permissionCall
+	closeCalls               int
 	statusCapturedRuntimeIDs []string
 	resultCapturedRuntimeIDs []string
 }
@@ -84,6 +86,7 @@ func (f *fakeClient) AnswerPermission(runtimeID, requestID, optionID string) err
 }
 
 func (f *fakeClient) Close() error {
+	f.closeCalls++
 	return nil
 }
 
@@ -103,13 +106,21 @@ func (c *spawnCountingClient) AnswerPermission(string, string, string) error { r
 
 func TestParallelSpawnLazilyStartsOneSharedSupervisor(t *testing.T) {
 	origStart := startSupervisorFunc
-	defer func() { startSupervisorFunc = origStart }()
+	origBeforeLock := beforeSupervisorLock
+	defer func() {
+		startSupervisorFunc = origStart
+		beforeSupervisorLock = origBeforeLock
+	}()
 
 	const socketPath = "/tmp/avenor-parallel-start.sock"
 	control := &spawnCountingClient{}
 	var starts atomic.Int32
+	startupEntered := make(chan struct{})
+	releaseStartup := make(chan struct{})
 	startSupervisorFunc = func(string, time.Duration) (*supervisorLifecycle, error) {
 		starts.Add(1)
+		startupEntered <- struct{}{}
+		<-releaseStartup
 		return &supervisorLifecycle{socketPath: socketPath, client: control}, nil
 	}
 
@@ -120,21 +131,42 @@ func TestParallelSpawnLazilyStartsOneSharedSupervisor(t *testing.T) {
 	defer s.Close()
 
 	const calls = 16
+	atLockBoundary := make(chan struct{}, calls)
+	releaseLockBoundary := make(chan struct{})
+	beforeSupervisorLock = func() {
+		atLockBoundary <- struct{}{}
+		<-releaseLockBoundary
+	}
+	spawn := func(wg *sync.WaitGroup) {
+		defer wg.Done()
+		_, _, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
+			Agent:   "test",
+			RepoDir: ".",
+			Prompt:  "hello",
+		})
+		if err != nil {
+			t.Errorf("spawn: %v", err)
+		}
+	}
+
 	var wg sync.WaitGroup
 	wg.Add(calls)
 	for i := 0; i < calls; i++ {
-		go func() {
-			defer wg.Done()
-			_, _, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
-				Agent:   "test",
-				RepoDir: ".",
-				Prompt:  "hello",
-			})
-			if err != nil {
-				t.Errorf("spawn: %v", err)
-			}
-		}()
+		go spawn(&wg)
 	}
+	for i := 0; i < calls; i++ {
+		<-atLockBoundary
+	}
+
+	// All calls are queued immediately before the same lock. Release them,
+	// then keep the winning initialization in flight to prove no second call
+	// can begin a startup.
+	close(releaseLockBoundary)
+	<-startupEntered
+	if got := starts.Load(); got != 1 {
+		t.Fatalf("supervisor starts while first startup is blocked = %d, want 1", got)
+	}
+	close(releaseStartup)
 	wg.Wait()
 
 	if got := starts.Load(); got != 1 {
@@ -958,14 +990,9 @@ func TestServerCloseWithLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	info, err := os.Stat(socketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
 	lc := &supervisorLifecycle{
 		socketPath: socketPath,
 		client:     fc,
-		socketInfo: info,
 	}
 	s.lifecycle = lc
 
@@ -989,8 +1016,11 @@ func TestServerCloseWithLifecycle(t *testing.T) {
 		t.Error("lifecycle should be nil after close")
 	}
 
-	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
-		t.Error("socket file was not removed during close")
+	if _, err := os.Stat(socketPath); err != nil {
+		t.Errorf("lifecycle parent unexpectedly removed socket: %v", err)
+	}
+	if fc.closeCalls != 1 {
+		t.Fatalf("fake client Close calls = %d, want 1", fc.closeCalls)
 	}
 }
 
@@ -1064,6 +1094,23 @@ func TestAvenorSpawn(t *testing.T) {
 	}
 	if _, ok := p["auto_approve"]; ok {
 		t.Error("expected auto_approve key to be absent when not set")
+	}
+}
+
+func TestAvenorSpawnError(t *testing.T) {
+	cause := errors.New("control plane unavailable")
+	fake := &fakeClient{spawnErr: cause}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = s.handleAvenorSpawn(context.Background(), nil, spawnArgs{Agent: "claude", RepoDir: "/tmp/test-repo"})
+	if !errors.Is(err, cause) {
+		t.Fatalf("spawn error does not wrap cause: %v", err)
+	}
+	if !strings.Contains(err.Error(), "spawn:") {
+		t.Fatalf("spawn error lacks operation context: %v", err)
 	}
 }
 
@@ -1358,6 +1405,49 @@ func TestAvenorShutdown(t *testing.T) {
 	}
 	if capturedMode != "graceful" {
 		t.Errorf("expected graceful mode, got %s", capturedMode)
+	}
+}
+
+func TestAvenorShutdownError(t *testing.T) {
+	cause := errors.New("control plane unavailable")
+	fake := &fakeClient{shutdownErr: cause}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = s.handleAvenorShutdown(context.Background(), nil, shutdownArgs{})
+	if !errors.Is(err, cause) {
+		t.Fatalf("shutdown error does not wrap cause: %v", err)
+	}
+	if !strings.Contains(err.Error(), "shutdown:") {
+		t.Fatalf("shutdown error lacks operation context: %v", err)
+	}
+}
+
+func TestOwnedLifecycleShutdownErrorReachesMCPCaller(t *testing.T) {
+	cause := errors.New("shutdown RPC failed")
+	fake := &fakeClient{shutdownErr: cause}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An owned lifecycle takes the lifecycle shutdown path rather than the
+	// direct client path used by TestAvenorShutdownError above.
+	s.lifecycle = &supervisorLifecycle{client: fake}
+
+	_, _, err = s.handleAvenorShutdown(context.Background(), nil, shutdownArgs{})
+	if !errors.Is(err, cause) {
+		t.Fatalf("owned lifecycle shutdown error does not wrap cause: %v", err)
+	}
+	if !strings.Contains(err.Error(), "shutdown:") {
+		t.Fatalf("shutdown error lacks MCP operation context: %v", err)
+	}
+	if s.lifecycle != nil || s.controlClient != nil || !s.closed {
+		t.Fatalf("shutdown error retained closed lifecycle/client: lifecycle=%v client=%v closed=%v", s.lifecycle, s.controlClient, s.closed)
+	}
+	if fake.closeCalls != 1 {
+		t.Fatalf("fake client Close calls = %d, want 1", fake.closeCalls)
 	}
 }
 

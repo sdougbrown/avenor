@@ -266,6 +266,19 @@ func idToInt(v any) (int, bool) {
 	}
 }
 
+// Identity returns the per-process control-server token, when configured.
+// It is used internally to distinguish a newly spawned supervisor from a
+// replacement that reused its socket path.
+func (c *Client) Identity() (string, error) {
+	var result struct {
+		Token string `json:"token"`
+	}
+	if err := c.Call("identity", nil, &result); err != nil {
+		return "", err
+	}
+	return result.Token, nil
+}
+
 // Status returns the snapshot for the one-shot run or a runtime if runtimeID is set.
 func (c *Client) Status(runtimeID string) (map[string]any, error) {
 	var params any

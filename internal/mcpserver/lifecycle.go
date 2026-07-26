@@ -1,6 +1,8 @@
 package mcpserver
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -17,6 +19,20 @@ var execCommand = exec.Command
 
 var startupTimeout = 10 * time.Second
 
+// afterSupervisorReady is a no-op production hook used to coordinate the
+// post-readiness socket-replacement test before its first identity probe.
+var afterSupervisorReady = func() {}
+
+const controlIdentityTokenEnv = "AVENOR_CONTROL_IDENTITY_TOKEN"
+
+func newControlIdentityToken() (string, error) {
+	var token [32]byte
+	if _, err := rand.Read(token[:]); err != nil {
+		return "", fmt.Errorf("generate control identity token: %w", err)
+	}
+	return hex.EncodeToString(token[:]), nil
+}
+
 type supervisorLifecycle struct {
 	mu         sync.Mutex
 	socketPath string
@@ -29,8 +45,7 @@ type supervisorLifecycle struct {
 	// Closing an attached MCP server may not shut down or unlink the
 	// supervisor owned by another process; an explicit shutdown tool still
 	// sends the shutdown RPC.
-	shared     bool
-	socketInfo os.FileInfo
+	shared bool
 }
 
 func startSupervisor(socketPath string, idleTimeout time.Duration) (*supervisorLifecycle, error) {
@@ -48,7 +63,7 @@ func startSupervisor(socketPath string, idleTimeout time.Duration) (*supervisorL
 		socketPath = filepath.Join(socketsDir, fmt.Sprintf("avenor-mcp-%d.sock", os.Getpid()))
 	}
 
-	// The lock covers the check/remove/startup sequence, not the lifetime of
+	// The lock covers the health check/startup sequence, not the lifetime of
 	// the supervisor. A waiter must be able to acquire it after startup and
 	// attach to the winner instead of blocking until the winner shuts down.
 	lockPath := socketPath + ".start.lock"
@@ -73,14 +88,9 @@ func startSupervisor(socketPath string, idleTimeout time.Duration) (*supervisorL
 		}, nil
 	}
 
-	// No healthy supervisor owns the path while the startup lock is held.
-	// Removing a stale entry here is safe; importantly, no exit path below
-	// removes the path because it may have been replaced by a winner.
-	if _, statErr := os.Stat(socketPath); statErr == nil {
-		if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
-			return nil, fmt.Errorf("remove stale socket: %w", err)
-		}
-	}
+	// Stale-path removal belongs to ControlServer.Start, which serializes it
+	// with bind and Stop under the per-socket control lock. The startup lock
+	// only elects an MCP lifecycle owner and must not mutate the socket path.
 
 	exePath, err := os.Executable()
 	if err != nil {
@@ -105,6 +115,11 @@ func startSupervisor(socketPath string, idleTimeout time.Duration) (*supervisorL
 		return nil, fmt.Errorf("create supervisor readiness pipe: %w", err)
 	}
 	defer readyReader.Close()
+	identityToken, err := newControlIdentityToken()
+	if err != nil {
+		_ = readyWriter.Close()
+		return nil, err
+	}
 	readyFD := 3 + len(cmd.ExtraFiles)
 	cmd.ExtraFiles = append(cmd.ExtraFiles, readyWriter)
 	env := cmd.Env
@@ -112,13 +127,17 @@ func startSupervisor(socketPath string, idleTimeout time.Duration) (*supervisorL
 		env = os.Environ()
 	}
 	const readyEnv = "AVENOR_CONTROL_READY_FD="
-	cmd.Env = make([]string, 0, len(env)+1)
+	const identityEnv = controlIdentityTokenEnv + "="
+	cmd.Env = make([]string, 0, len(env)+2)
 	for _, entry := range env {
-		if !strings.HasPrefix(entry, readyEnv) {
+		if !strings.HasPrefix(entry, readyEnv) && !strings.HasPrefix(entry, identityEnv) {
 			cmd.Env = append(cmd.Env, entry)
 		}
 	}
-	cmd.Env = append(cmd.Env, fmt.Sprintf("%s%d", readyEnv, readyFD))
+	cmd.Env = append(cmd.Env,
+		fmt.Sprintf("%s%d", readyEnv, readyFD),
+		identityEnv+identityToken,
+	)
 
 	if err := cmd.Start(); err != nil {
 		_ = readyWriter.Close()
@@ -147,6 +166,9 @@ func startSupervisor(socketPath string, idleTimeout time.Duration) (*supervisorL
 		case readyErr := <-readyCh:
 			readyCh = nil
 			childReady = readyErr == nil
+			if childReady {
+				afterSupervisorReady()
+			}
 		case <-exited:
 			// A competing starter may have won the bind. Re-check before
 			// declaring failure, and never unlink or shut down its socket.
@@ -170,10 +192,10 @@ func startSupervisor(socketPath string, idleTimeout time.Duration) (*supervisorL
 			if dialErr == nil {
 				_, statusErr := cl.Status("")
 				if statusErr == nil {
-					info, statErr := os.Stat(socketPath)
-					if statErr == nil {
-						// The process may have lost the socket and exited while this
-						// probe was in flight. Do not turn a winner into our child.
+					identity, identityErr := cl.Identity()
+					if identityErr == nil && identity == identityToken {
+						// Readiness proves the child bound the path once. The identity
+						// probe proves this particular connection still reaches it.
 						select {
 						case <-exited:
 							_ = cl.Close()
@@ -187,9 +209,18 @@ func startSupervisor(socketPath string, idleTimeout time.Duration) (*supervisorL
 								cmd:        cmd,
 								client:     cl,
 								exited:     exited,
-								socketInfo: info,
 							}, nil
 						}
+					}
+					if identityErr == nil {
+						// A replacement won the path after readiness. Retire the child
+						// we spawned before attaching; it may still be running with its
+						// original socket unlinked and must not become an orphan.
+						if cmd.Process != nil {
+							_ = cmd.Process.Kill()
+							<-exited
+						}
+						return &supervisorLifecycle{socketPath: socketPath, client: cl, shared: true}, nil
 					}
 				}
 				_ = cl.Close()
@@ -247,9 +278,9 @@ func (l *supervisorLifecycle) shutdownWithMode(mode string) error {
 	var firstErr error
 
 	if l.client != nil {
-		// Best-effort graceful shutdown; if the process already exited
-		// the socket write will fail, which is fine.
-		_ = l.client.Shutdown(mode)
+		if err := l.client.Shutdown(mode); err != nil && firstErr == nil {
+			firstErr = err
+		}
 		if err := l.client.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
@@ -271,17 +302,9 @@ func (l *supervisorLifecycle) shutdownWithMode(mode string) error {
 		}
 	}
 
-	// Only the lifecycle that started the supervisor may clean up its socket.
-	// Compare the socket identity as well: a replacement supervisor may have
-	// won the path after this process exited.
-	if !l.shared && l.socketPath != "" && l.socketInfo != nil {
-		current, err := os.Stat(l.socketPath)
-		if err == nil && os.SameFile(current, l.socketInfo) {
-			if err := os.Remove(l.socketPath); err != nil && !os.IsNotExist(err) && firstErr == nil {
-				firstErr = err
-			}
-		}
-	}
+	// The child ControlServer.Stop removes its socket while its listener is
+	// still live. Never unlink here: after the child exits a replacement can
+	// bind the same path and reuse its inode before a parent-side Stat.
 
 	return firstErr
 }

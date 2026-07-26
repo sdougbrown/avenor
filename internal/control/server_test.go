@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -33,8 +34,8 @@ func TestSocketStartSignalsReadinessFD(t *testing.T) {
 	defer s.Stop()
 
 	read := make(chan error, 1)
+	var signal [1]byte
 	go func() {
-		var signal [1]byte
 		_, err := readyReader.Read(signal[:])
 		read <- err
 	}()
@@ -43,8 +44,81 @@ func TestSocketStartSignalsReadinessFD(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read readiness signal: %v", err)
 		}
+		if signal[0] != 1 {
+			t.Fatalf("readiness signal = %d, want 1", signal[0])
+		}
 	case <-time.After(time.Second):
 		t.Fatal("control server did not signal readiness")
+	}
+}
+
+func TestSocketStartRemovesStalePath(t *testing.T) {
+	path := testSocketPath(t)
+	stale, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale.(*net.UnixListener).SetUnlinkOnClose(false)
+	if err := stale.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewServer(NewState("run_1", "", 0))
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start after stale socket: %v", err)
+	}
+	defer s.Stop()
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		t.Fatalf("stale path was not replaced by a socket: %v", info.Mode())
+	}
+}
+
+func TestSocketStartDoesNotUnlinkAmbiguousProbe(t *testing.T) {
+	path := testSocketPath(t)
+	if err := os.WriteFile(path, []byte("do not remove"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	origDial := dialControlSocket
+	dialControlSocket = func(string, string, time.Duration) (net.Conn, error) {
+		return nil, syscall.EAGAIN
+	}
+	defer func() { dialControlSocket = origDial }()
+
+	s := NewServer(NewState("run_1", "", 0))
+	if err := s.Start(path); err == nil {
+		t.Fatal("expected ambiguous probe to fail")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("ambiguous probe removed socket path: %v", err)
+	}
+}
+
+func TestSocketStartIdentityTokenIsOneShot(t *testing.T) {
+	path := testSocketPath(t)
+	t.Setenv(controlIdentityTokenEnv, "child-token")
+
+	s := NewServer(NewState("run_1", "", 0))
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	if got := os.Getenv(controlIdentityTokenEnv); got != "" {
+		t.Fatalf("identity token still in environment: %q", got)
+	}
+	cl, err := client.Dial(path)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer cl.Close()
+	if token, err := cl.Identity(); err != nil || token != "child-token" {
+		t.Fatalf("identity = %q, %v; want child-token, nil", token, err)
 	}
 }
 
@@ -72,6 +146,62 @@ func TestSocketStopDoesNotUnlinkReplacement(t *testing.T) {
 	first.Stop()
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("old server removed replacement socket: %v", err)
+	}
+}
+
+func TestSocketStartStopCooperateWithoutRemovingWinner(t *testing.T) {
+	path := testSocketPath(t)
+	first := NewServer(NewState("run_1", "", 0))
+	if err := first.Start(path); err != nil {
+		t.Fatalf("start first: %v", err)
+	}
+
+	origBeforeLock := beforeControlSocketLock
+	origBeforeCleanup := beforeControlSocketCleanup
+	defer func() {
+		beforeControlSocketLock = origBeforeLock
+		beforeControlSocketCleanup = origBeforeCleanup
+	}()
+
+	// Hold Stop after it owns the socket lock. Start must reach the same lock
+	// boundary before cleanup can proceed, making the two operations contend
+	// rather than relying on scheduler timing.
+	cleanupOwnsLock := make(chan struct{})
+	releaseCleanup := make(chan struct{})
+	beforeControlSocketCleanup = func() {
+		close(cleanupOwnsLock)
+		<-releaseCleanup
+	}
+	startAtLock := make(chan struct{}, 2)
+	beforeControlSocketLock = func() {
+		startAtLock <- struct{}{}
+	}
+
+	stopped := make(chan struct{})
+	go func() {
+		first.Stop()
+		close(stopped)
+	}()
+	<-cleanupOwnsLock
+	<-startAtLock // Stop reached the socket-lock boundary.
+
+	winner := NewServer(NewState("run_2", "", 0))
+	started := make(chan error, 1)
+	go func() { started <- winner.Start(path) }()
+	<-startAtLock // The competing Start is now blocked on Stop's lock.
+	close(releaseCleanup)
+	if err := <-started; err != nil {
+		t.Fatalf("start winner while stopping first: %v", err)
+	}
+	defer func() {
+		beforeControlSocketLock = origBeforeLock
+		beforeControlSocketCleanup = origBeforeCleanup
+		winner.Stop()
+	}()
+	<-stopped
+
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("cooperative Stop cleanup removed winner socket: %v", err)
 	}
 }
 

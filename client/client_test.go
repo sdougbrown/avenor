@@ -43,6 +43,9 @@ func startTestServer(t *testing.T) (string, func()) {
 					resp = Response{JSONRPC: "2.0", ID: req.ID}
 					snap := map[string]any{"session_id": "ses_test", "phase": "working"}
 					resp.Result, _ = json.Marshal(snap)
+				case "identity":
+					resp = Response{JSONRPC: "2.0", ID: req.ID}
+					resp.Result, _ = json.Marshal(map[string]any{"token": "test-identity"})
 				case "subscribe":
 					resp = Response{JSONRPC: "2.0", ID: req.ID}
 					resp.Result, _ = json.Marshal(map[string]any{"subscribed": true})
@@ -100,6 +103,25 @@ func TestClientStatus(t *testing.T) {
 	}
 	if snap["session_id"] != "ses_test" {
 		t.Errorf("session_id = %v, want ses_test", snap["session_id"])
+	}
+}
+
+func TestClientIdentity(t *testing.T) {
+	path, cleanup := startTestServer(t)
+	defer cleanup()
+
+	c, err := Dial(path)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer c.Close()
+
+	identity, err := c.Identity()
+	if err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+	if identity != "test-identity" {
+		t.Fatalf("identity = %q, want test-identity", identity)
 	}
 }
 
