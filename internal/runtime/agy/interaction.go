@@ -63,10 +63,17 @@ type interactionBridge struct {
 	// done channel lets host teardown join the claimed answer before RPC close.
 	inFlight     context.CancelFunc
 	inFlightDone chan struct{}
+
+	// dispatch serializes the final Handle boundary with host cancellation.
+	// An answer that acquired it is considered already dispatching; cancellation
+	// waits it out before marking the bridge stale, so no later answer can send.
+	dispatch chan struct{}
 }
 
 func newInteractionBridge(sessionID, cascadeID string, getSteps func(context.Context, uint32) (*agyv115.GetCascadeTrajectoryStepsResponse, error), handle func(context.Context, *agyv115.CascadeUserInteraction) error) *interactionBridge {
-	return &interactionBridge{sessionID: sessionID, cascadeID: cascadeID, getSteps: getSteps, handle: handle}
+	dispatch := make(chan struct{}, 1)
+	dispatch <- struct{}{}
+	return &interactionBridge{sessionID: sessionID, cascadeID: cascadeID, getSteps: getSteps, handle: handle, dispatch: dispatch}
 }
 
 // Observe consumes one exact stream/snapshot step. Duplicate representations of
@@ -306,7 +313,20 @@ func (b *interactionBridge) Answer(ctx context.Context, requestID string, respon
 		return errInteractionStale
 	}
 	b.mu.Unlock()
-	if err := answerCtx.Err(); err != nil {
+
+	// Serialize the irreversible Handle mutation with cancellation. A host
+	// cancellation that arrives first drains this token and clears the claim;
+	// an already-dispatching answer completes before cancellation is marked.
+	select {
+	case <-b.dispatch:
+		defer func() { b.dispatch <- struct{}{} }()
+	case <-answerCtx.Done():
+		return errInteractionStale
+	}
+	b.mu.Lock()
+	valid := b.claimed == pending && b.trajectoryID == pendingTrajectory
+	b.mu.Unlock()
+	if !valid || answerCtx.Err() != nil {
 		return errInteractionStale
 	}
 	if err := b.handle(answerCtx, interaction); err != nil {
@@ -394,6 +414,26 @@ func (b *interactionBridge) Clear() {
 	if cancel != nil {
 		cancel()
 	}
+}
+
+// CancelAndWait is the host cancellation boundary. It first clears and
+// cancels all answer work, then drains a Handle already at the mutation
+// boundary and joins its goroutine. An answer rechecks its claim after taking
+// dispatch, so one waiting to send cannot cross this boundary.
+func (b *interactionBridge) CancelAndWait(ctx context.Context) error {
+	if b == nil {
+		return nil
+	}
+	b.Clear()
+	select {
+	case <-b.dispatch:
+		// Clear happened before this fence. Release immediately so an answer
+		// that was waiting at dispatch can recheck the cleared claim and exit.
+		b.dispatch <- struct{}{}
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return b.Wait(ctx)
 }
 
 func (b *interactionBridge) Wait(ctx context.Context) error {

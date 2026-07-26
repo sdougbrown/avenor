@@ -33,6 +33,30 @@ func TestPTYSessionWaitReapsAndIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestPTYSessionInterruptThenWaitReaps(t *testing.T) {
+	session, err := (PTYLauncher{}).Start(context.Background(), StartOptions{Command: `exec sh -c 'trap "exit 0" INT; while :; do :; done'`})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	pid := session.PID()
+	time.Sleep(20 * time.Millisecond)
+	interrupter, ok := session.(InterruptSession)
+	if !ok {
+		t.Fatal("PTY session has no Interrupt capability")
+	}
+	if err := interrupter.Interrupt(context.Background()); err != nil {
+		t.Fatalf("Interrupt: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := session.Wait(ctx); err != nil {
+		t.Fatalf("Wait after Interrupt: %v", err)
+	}
+	if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("PID %d remains after Interrupt/Wait: %v", pid, err)
+	}
+}
+
 func TestPTYSessionKillThenWaitReaps(t *testing.T) {
 	session, err := (PTYLauncher{}).Start(context.Background(), StartOptions{Command: "exec sleep 30"})
 	if err != nil {

@@ -12,6 +12,13 @@ const (
 )
 
 // Session represents an interactive terminal session.
+// InterruptSession is the optional exact-process interruption seam. Callers
+// that need graceful shutdown must use this capability rather than deriving a
+// PID and signaling an ambient process.
+type InterruptSession interface {
+	Interrupt(ctx context.Context) error
+}
+
 type Session interface {
 	// Kind identifies the terminal backend (e.g. "tmux", "pty"). Used by
 	// callers to tag events with the actual backend rather than hardcoding.

@@ -520,6 +520,55 @@ func TestInteractionBridgeRejectsOversizedRequest(t *testing.T) {
 	}
 }
 
+func TestInteractionBridgeCancelAtDispatchPreventsHandle(t *testing.T) {
+	current := permissionWaiting("act", "target", "reason")
+	fetchDone := make(chan struct{})
+	var handleCalls atomic.Int32
+	bridge := newInteractionBridge("session", "cascade", func(context.Context, uint32) (*agyv115.GetCascadeTrajectoryStepsResponse, error) {
+		close(fetchDone)
+		return &agyv115.GetCascadeTrajectoryStepsResponse{Steps: []*agyv115.Step{current}}, nil
+	}, func(context.Context, *agyv115.CascadeUserInteraction) error {
+		handleCalls.Add(1)
+		return nil
+	})
+	event := bridge.Observe(trajectoryStepKey{trajectoryID: "trajectory", index: 4}, current, false)[0]
+	<-bridge.dispatch
+	answerDone := make(chan error, 1)
+	go func() {
+		answerDone <- bridge.Answer(context.Background(), event.Fields["request_id"].(string), runtime.PermissionResponse{Allow: true, OptionID: "allow_once"})
+	}()
+	select {
+	case <-fetchDone:
+	case <-time.After(time.Second):
+		t.Fatal("answer did not reach dispatch boundary")
+	}
+	// Establish cancellation before releasing the gate; CancelAndWait repeats
+	// Clear and then fences with the dispatch token.
+	bridge.Clear()
+	cancelDone := make(chan error, 1)
+	go func() { cancelDone <- bridge.CancelAndWait(context.Background()) }()
+	bridge.dispatch <- struct{}{}
+	select {
+	case err := <-answerDone:
+		if err == nil {
+			t.Fatal("answer crossed cancellation boundary")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("answer did not exit")
+	}
+	select {
+	case err := <-cancelDone:
+		if err != nil {
+			t.Fatalf("CancelAndWait: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("CancelAndWait did not exit")
+	}
+	if handleCalls.Load() != 0 {
+		t.Fatalf("Handle calls = %d", handleCalls.Load())
+	}
+}
+
 // TestInteractionBridgeCloseCancelsInFlightPreAnswerFetch proves that Close
 // cancels a blocked pre-answer snapshot RPC and yields zero Handle mutations.
 func TestInteractionBridgeCloseCancelsInFlightPreAnswerFetch(t *testing.T) {

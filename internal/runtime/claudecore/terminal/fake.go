@@ -7,25 +7,28 @@ import (
 
 // FakeSession is a terminal.Session for tests with controllable behavior.
 type FakeSession struct {
-	mu         sync.Mutex
-	kind       string
-	name       string
-	pid        int
-	captures   []string
-	capIdx     int
-	capErr     error
-	alive      bool
-	pasteCalls [][]string
-	pasteErr   error
-	sendCalls  [][]string
-	sendNotify chan []string
-	sendErr    error
-	killErr    error
-	killCalls  int
-	waitErr    error
-	waitCalls  int
-	waitDone   chan struct{}
-	waitOnce   sync.Once
+	mu                 sync.Mutex
+	kind               string
+	name               string
+	pid                int
+	captures           []string
+	capIdx             int
+	capErr             error
+	alive              bool
+	pasteCalls         [][]string
+	pasteErr           error
+	sendCalls          [][]string
+	sendNotify         chan []string
+	sendErr            error
+	interruptErr       error
+	interruptCalls     int
+	interruptCompletes bool
+	killErr            error
+	killCalls          int
+	waitErr            error
+	waitCalls          int
+	waitDone           chan struct{}
+	waitOnce           sync.Once
 }
 
 // NewFakeSession creates a FakeSession with the given initial capture text.
@@ -206,6 +209,44 @@ func (f *FakeSession) SetSendNotify(ch chan []string) {
 	f.sendNotify = ch
 }
 
+// Interrupt records an exact hosted-process interruption. Tests can opt into
+// graceful completion; otherwise Kill remains necessary after the grace window.
+func (f *FakeSession) Interrupt(_ context.Context) error {
+	f.mu.Lock()
+	f.interruptCalls++
+	complete := f.interruptCompletes
+	err := f.interruptErr
+	if complete {
+		f.alive = false
+	}
+	f.mu.Unlock()
+	if complete {
+		f.completeWait()
+	}
+	return err
+}
+
+// InterruptCalls reports calls to Interrupt.
+func (f *FakeSession) InterruptCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.interruptCalls
+}
+
+// SetInterruptCompletes controls whether Interrupt exits the fake process.
+func (f *FakeSession) SetInterruptCompletes(v bool) {
+	f.mu.Lock()
+	f.interruptCompletes = v
+	f.mu.Unlock()
+}
+
+// SetInterruptErr sets the error returned from Interrupt.
+func (f *FakeSession) SetInterruptErr(err error) {
+	f.mu.Lock()
+	f.interruptErr = err
+	f.mu.Unlock()
+}
+
 // Kill returns the configured error and completes the fake process lifecycle.
 func (f *FakeSession) Kill(_ context.Context) error {
 	f.mu.Lock()
@@ -281,3 +322,4 @@ func (f *FakeSession) SetPID(pid int) {
 }
 
 var _ Session = (*FakeSession)(nil)
+var _ InterruptSession = (*FakeSession)(nil)

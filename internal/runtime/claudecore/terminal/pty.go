@@ -149,6 +149,19 @@ func (p *PTYSession) Alive(_ context.Context) bool {
 	return p.alive
 }
 
+// Interrupt asks this exact hosted process to stop gracefully. It deliberately
+// does not derive or signal any other PID/process group.
+func (p *PTYSession) Interrupt(_ context.Context) error {
+	if p.cmd == nil || p.cmd.Process == nil {
+		return nil
+	}
+	if err := p.cmd.Process.Signal(os.Interrupt); errors.Is(err, os.ErrProcessDone) {
+		return nil
+	} else {
+		return err
+	}
+}
+
 func (p *PTYSession) Kill(_ context.Context) error {
 	p.mu.Lock()
 	ptmx := p.ptmx
@@ -207,6 +220,8 @@ func (p *PTYSession) startWait() {
 		}()
 	})
 }
+
+var _ InterruptSession = (*PTYSession)(nil)
 
 func (p *PTYSession) readLoop() {
 	defer func() {

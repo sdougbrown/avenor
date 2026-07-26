@@ -29,6 +29,7 @@ type ptyRPCHost struct {
 	closing    bool
 	turnCancel context.CancelFunc
 	turnDone   chan struct{}
+	turn       *rpcTurn
 	closed     chan struct{}
 	closeErr   error
 
@@ -304,8 +305,7 @@ func (h *ptyRPCHost) Close(ctx context.Context) error {
 	// down. This is the gate that proves Close during a blocked pre-answer
 	// fetch yields zero Handle mutations and no goroutine leak.
 	if interactions != nil {
-		interactions.Clear()
-		if err := interactions.Wait(cleanupCtx); err != nil && firstErr == nil {
+		if err := interactions.CancelAndWait(cleanupCtx); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
