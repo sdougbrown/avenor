@@ -98,6 +98,18 @@ func (h *ptyRPCHost) RunTurn(ctx context.Context, prompt, modelSlug string, onEv
 
 	go func() { _ = coordinator.Run(turnCtx) }()
 	defer func() {
+		if h.interactions != nil {
+			if h.mapper != nil && h.mapper.Terminal() {
+				h.interactions.Evict()
+			} else {
+				h.interactions.Clear()
+			}
+			waitCtx, waitCancel := context.WithTimeout(context.Background(), ptyRPCCloseTimeout)
+			if err := h.interactions.Wait(waitCtx); err != nil {
+				h.interactions.Clear()
+			}
+			waitCancel()
+		}
 		_ = coordinator.Close()
 		_ = coordinator.Wait(context.Background())
 		cancel()

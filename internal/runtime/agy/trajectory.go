@@ -53,7 +53,6 @@ type trajectoryStepState struct {
 	toolTerminal     agyv115.CortexStepStatus
 	toolID           string
 	toolEventID      string
-	waitingEmitted   bool
 	unknownEmitted   bool
 }
 
@@ -83,6 +82,8 @@ type trajectoryMapper struct {
 	retainedTextBytes    int
 	lastPlanner          trajectoryStepKey
 	hasLastPlanner       bool
+	interactionObserver  func(trajectoryStepKey, *agyv115.Step, bool) []events.Event
+	interactionClear     func()
 }
 
 type trajectoryMapResult struct {
@@ -117,6 +118,17 @@ func (m *trajectoryMapper) BeginTurn() {
 
 func (m *trajectoryMapper) Terminal() bool       { return m.terminal }
 func (m *trajectoryMapper) TrajectoryID() string { return m.trajectoryID }
+
+// SetInteractionObserver extends the accepted sequential mapper seam. It is
+// called only while the mapper applies a stream or recovered snapshot step.
+// The seed flag is true when the observation comes from a held startup
+// snapshot: the bridge still records the pending identity so subsequent
+// stream replays dedupe through it, but it does not surface a fresh
+// permission.request event from a stale wire representation.
+func (m *trajectoryMapper) SetInteractionObserver(observe func(trajectoryStepKey, *agyv115.Step, bool) []events.Event, clear func()) {
+	m.interactionObserver = observe
+	m.interactionClear = clear
+}
 
 // bindIdentity binds only a stream-supplied trajectory ID. A conversation ID is
 // never used as a trajectory substitute. Diagnostics intentionally omit opaque
@@ -168,6 +180,9 @@ func (m *trajectoryMapper) ApplyStream(update *agyv115.AgentStateUpdate) traject
 	}
 	if m.turnProgress && update.GetStatus() == agyv115.CascadeRunStatus_CASCADE_RUN_STATUS_IDLE && update.GetFullyIdle() {
 		m.terminal = true
+		if m.interactionClear != nil {
+			m.interactionClear()
+		}
 		result.terminal = true
 		result.events = append(result.events, m.terminalEvent())
 	}
@@ -245,6 +260,9 @@ func (m *trajectoryMapper) applyStep(key trajectoryStepKey, step *agyv115.Step, 
 	hash := sha256.Sum256(wire)
 	state := m.steps[key]
 	if state != nil && state.hash == hash {
+		if !seed && m.interactionObserver != nil {
+			return trajectoryMapResult{events: m.interactionObserver(key, step, false)}
+		}
 		return trajectoryMapResult{}
 	}
 	if planner := step.GetPlannerResponse(); planner != nil {
@@ -282,6 +300,14 @@ func (m *trajectoryMapper) applyStep(key trajectoryStepKey, step *agyv115.Step, 
 	}
 
 	var result trajectoryMapResult
+	if m.interactionObserver != nil {
+		result.events = append(result.events, m.interactionObserver(key, step, seed)...)
+	} else if step.GetStatus() == agyv115.CortexStepStatus_CORTEX_STEP_STATUS_WAITING && step.GetRequestedInteraction() != nil {
+		// Without an observer, a WAITING step with a valid interaction cannot
+		// be handled; emit one diagnostic and rely on the suppressed
+		// unsupported_step_type below to keep the event surface quiet.
+		result.events = append(result.events, m.event("avenor.agy.protocol", map[string]any{"code": "unsupported_requested_interaction"}))
+	}
 	switch step.GetType() {
 	case agyv115.CortexStepType_CORTEX_STEP_TYPE_PLANNER_RESPONSE:
 		result.events = append(result.events, m.mapPlanner(key, state, step.GetPlannerResponse(), seed)...)
@@ -293,18 +319,15 @@ func (m *trajectoryMapper) applyStep(key trajectoryStepKey, step *agyv115.Step, 
 			return result
 		}
 	default:
-		if !seed && !state.unknownEmitted {
+		// A WAITING step with a valid requested interaction is a bridge-owned
+		// surface, not an unsupported step type. Suppress the diagnostic in
+		// either mode (with or without an observer) so the bridge can speak
+		// the typed shape without an extra noise event.
+		waitingWithInteraction := step.GetStatus() == agyv115.CortexStepStatus_CORTEX_STEP_STATUS_WAITING && step.GetRequestedInteraction() != nil
+		if !seed && !state.unknownEmitted && !waitingWithInteraction {
 			state.unknownEmitted = true
 			result.events = append(result.events, m.event("avenor.agy.protocol", map[string]any{"code": "unsupported_step_type", "step_index": int64(key.index), "step_type": int32(step.GetType())}))
 		}
-	}
-	if !seed && step.GetStatus() == agyv115.CortexStepStatus_CORTEX_STEP_STATUS_WAITING && step.GetRequestedInteraction() != nil && step.GetRequestedInteraction().GetDeploy() != nil && !state.waitingEmitted {
-		state.waitingEmitted = true
-		result.events = append(result.events, m.event("avenor.agy.interaction.waiting", map[string]any{
-			"interaction_id": stableTrajectoryEventID("agy-interaction-", key, "deploy"),
-			"step_index":     int64(key.index),
-			"interaction":    "deploy",
-		}))
 	}
 	state.hash = hash
 	return result
@@ -499,8 +522,18 @@ func cloneFields(fields map[string]any) map[string]any {
 }
 
 // Explicit markers are reserved for a later provider lifecycle integration.
-func (m *trajectoryMapper) MarkCancelled() { m.terminal = true }
-func (m *trajectoryMapper) MarkErrored()   { m.terminal = true }
+func (m *trajectoryMapper) MarkCancelled() {
+	m.terminal = true
+	if m.interactionClear != nil {
+		m.interactionClear()
+	}
+}
+func (m *trajectoryMapper) MarkErrored() {
+	m.terminal = true
+	if m.interactionClear != nil {
+		m.interactionClear()
+	}
+}
 
 // trajectoryRecoveryTransport is deliberately small so recovery tests do not
 // need an HTTP server. rpcTrajectoryRecoveryTransport is the production bridge

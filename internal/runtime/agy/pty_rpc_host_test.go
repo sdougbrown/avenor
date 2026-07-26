@@ -3,9 +3,12 @@ package agy
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -108,6 +111,61 @@ func withPTYRPCSeamsAndWait(t *testing.T, discover func(context.Context, int, st
 	t.Cleanup(func() {
 		discoverPTYRPCHost, startPTYCascade, validatePTYSession, awaitModelAvailability = oldDiscover, oldStart, oldValidate, oldWait
 	})
+}
+
+func TestSupportedRPCVersions(t *testing.T) {
+	for version, want := range map[string]bool{"1.1.5": true, "1.1.7": true, "1.1.6": false, "": false, "1.2.0": false} {
+		if got := supportedRPCVersion(version); got != want {
+			t.Errorf("supportedRPCVersion(%q) = %v, want %v", version, got, want)
+		}
+	}
+}
+
+func TestPTYRPCHostStartupAccepts117AndRejects116(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		version string
+		want    bool
+	}{
+		{"accepts 1.1.7", "1.1.7", true},
+		{"rejects 1.1.6", "1.1.6", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			session := &noTerminalProtocolSession{FakeSession: terminal.NewFakeSession("agy", 51, "")}
+			launcher := &recordingLauncher{session: session}
+			withPTYRPCSeams(t,
+				func(_ context.Context, pid int, version string, _ rpcDiscoveryOptions) (*rpcHost, error) {
+					if !tc.want {
+						t.Fatalf("discover should not run for rejected version %q", version)
+					}
+					if version != tc.version {
+						t.Fatalf("version = %q, want %q", version, tc.version)
+					}
+					return &rpcHost{sessionID: "id"}, nil
+				},
+				func(context.Context, *rpcHost) (*agyv115.StartCascadeResponse, error) {
+					return &agyv115.StartCascadeResponse{CascadeId: "id"}, nil
+				},
+				func(_ context.Context, h *rpcHost, id string) error {
+					h.sessionID = id
+					return nil
+				},
+			)
+			_, err := startPTYRPCHost(context.Background(), launcher, runtime.StartOptions{}, "", tc.version, rpcDiscoveryOptions{})
+			if tc.want {
+				if err != nil {
+					t.Fatalf("start host: %v", err)
+				}
+			} else {
+				if err == nil {
+					t.Fatal("start host should have rejected unsupported version")
+				}
+				if !strings.Contains(err.Error(), "supported version") {
+					t.Fatalf("rejection error = %v, want supported-version diagnostic", err)
+				}
+			}
+		})
+	}
 }
 
 func TestInteractiveAgyCommandQuotesOnlySupportedValues(t *testing.T) {
@@ -513,4 +571,105 @@ func TestPTYRPCHostConcurrentCloseHonorsWaiterDeadline(t *testing.T) {
 	if session.KillCalls() != 1 {
 		t.Fatalf("kill calls = %d", session.KillCalls())
 	}
+}
+
+// TestPTYRPCHostCloseCancelsInFlightPreAnswerFetch verifies that a Close
+// during a blocked pre-answer GetSteps call yields zero Handle mutations and
+// no goroutine leak. The fake RPC client exposes hooks to count calls and
+// signal that the in-flight snapshot is blocked.
+func TestPTYRPCHostCloseCancelsInFlightPreAnswerFetch(t *testing.T) {
+	session := &noTerminalProtocolSession{FakeSession: terminal.NewFakeSession("agy", 17, "")}
+	launcher := &recordingLauncher{session: session}
+	var handleCalls atomic.Int32
+	getRelease := make(chan struct{})
+	getCancelled := make(chan struct{})
+	// Wrap a real httptest server so the handle call path is exercised end to
+	// end: any Handle reaching the wire would be visible as an incremented
+	// counter on the dedicated handler.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", grpcWebContentType)
+		if strings.HasSuffix(r.URL.Path, "/HandleCascadeUserInteraction") {
+			handleCalls.Add(1)
+		}
+		_, _ = w.Write(grpcReply(t, &agyv115.HeartbeatResponse{}))
+	}))
+	defer server.Close()
+	client, err := newRPCEndpointClient(rpcEndpoint{address: strings.TrimPrefix(server.URL, "http://")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.close()
+	withPTYRPCSeams(t,
+		func(context.Context, int, string, rpcDiscoveryOptions) (*rpcHost, error) {
+			return &rpcHost{client: client, sessionID: "id"}, nil
+		},
+		func(context.Context, *rpcHost) (*agyv115.StartCascadeResponse, error) {
+			return &agyv115.StartCascadeResponse{CascadeId: "id"}, nil
+		},
+		func(_ context.Context, h *rpcHost, id string) error { h.sessionID = id; return nil },
+	)
+	host, err := startPTYRPCHost(context.Background(), launcher, runtime.StartOptions{}, "", "1.1.5", rpcDiscoveryOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Swap in a custom bridge that blocks the pre-answer snapshot until Close
+	// cancels it. We retain the real getSteps/handle so an actual Handle call
+	// would hit the wire and be counted.
+	cancelled := make(chan struct{})
+	host.interactions = newInteractionBridge("session", "id",
+		func(ctx context.Context, offset uint32) (*agyv115.GetCascadeTrajectoryStepsResponse, error) {
+			select {
+			case <-cancelled:
+			default:
+				close(cancelled)
+			}
+			select {
+			case <-getRelease:
+			case <-ctx.Done():
+				select {
+				case <-getCancelled:
+				default:
+					close(getCancelled)
+				}
+				return nil, ctx.Err()
+			}
+			step := &agyv115.Step{Type: agyv115.CortexStepType_CORTEX_STEP_TYPE_PLANNER_RESPONSE, Status: agyv115.CortexStepStatus_CORTEX_STEP_STATUS_WAITING, Metadata: &agyv115.CortexStepMetadata{StepGenerationVersion: pendingGenerationVersion}, RequestedInteraction: &agyv115.RequestedInteraction{Interaction: &agyv115.RequestedInteraction_Permission{Permission: &agyv115.PermissionInteractionSpec{Resource: &agyv115.PermissionResource{Action: "act", Target: "target"}}}}}
+			return &agyv115.GetCascadeTrajectoryStepsResponse{Steps: []*agyv115.Step{step}}, nil
+		},
+		func(context.Context, *agyv115.CascadeUserInteraction) error { return nil },
+	)
+	host.mapper.SetInteractionObserver(host.interactions.Observe, host.interactions.Clear)
+	step := &agyv115.Step{Type: agyv115.CortexStepType_CORTEX_STEP_TYPE_PLANNER_RESPONSE, Status: agyv115.CortexStepStatus_CORTEX_STEP_STATUS_WAITING, Metadata: &agyv115.CortexStepMetadata{StepGenerationVersion: pendingGenerationVersion}, RequestedInteraction: &agyv115.RequestedInteraction{Interaction: &agyv115.RequestedInteraction_Permission{Permission: &agyv115.PermissionInteractionSpec{Resource: &agyv115.PermissionResource{Action: "act", Target: "target"}}}}}
+	host.mapper.BindStreamIdentity(&agyv115.AgentStateUpdate{ConversationId: "id", TrajectoryId: "trajectory"})
+	host.mapper.BeginTurn()
+	streamEvents := host.mapper.ApplyStream(&agyv115.AgentStateUpdate{ConversationId: "id", TrajectoryId: "trajectory", Status: agyv115.CascadeRunStatus_CASCADE_RUN_STATUS_RUNNING, MainTrajectoryUpdate: &agyv115.TrajectoryUpdate{StepsUpdate: &agyv115.StepsUpdate{Indices: []uint32{3}, Steps: []*agyv115.Step{step}}}})
+	if len(streamEvents.events) != 1 || streamEvents.events[0].Event != "permission.request" {
+		t.Fatalf("stream events = %#v", streamEvents.events)
+	}
+	requestID := streamEvents.events[0].Fields["request_id"].(string)
+	answerDone := make(chan error, 1)
+	go func() {
+		answerDone <- host.AnswerPermission(context.Background(), requestID, runtime.PermissionResponse{Allow: true, OptionID: "allow_once"})
+	}()
+	// Wait for the bridge to enter the snapshot RPC.
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("pre-answer snapshot did not start")
+	}
+	if err := host.Close(context.Background()); err != nil {
+		t.Fatalf("host close: %v", err)
+	}
+	select {
+	case err := <-answerDone:
+		if err == nil {
+			t.Fatal("AnswerPermission succeeded after Close")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("answer goroutine leaked after Close")
+	}
+	if got := handleCalls.Load(); got != 0 {
+		t.Fatalf("Handle sent %d mutations after Close", got)
+	}
+	close(getRelease)
 }

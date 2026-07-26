@@ -1,4 +1,4 @@
-# agy 1.1.5 interop schema
+# agy 1.1.5 / 1.1.7 interop schema
 
 `agy.proto` is Avenor-owned and intentionally minimal. It retains only the
 Stage 9 validated unary boundaries plus the shared state-update, step,
@@ -7,7 +7,8 @@ It is not a copy of agy's private schema closure. Fields not declared here are
 protobuf unknown fields and therefore survive decode/re-marshal.
 
 `parity-manifest.json` maps every retained descriptor symbol to its original
-1.1.5 symbol. The full private closure is caller-supplied only for validation:
+1.1.5 symbol and accepts the independently validated, declaration-identical
+1.1.7 closure. The full private closure is caller-supplied only for validation:
 
 ```sh
 AGY_DESCRIPTOR_SET=/path/to/descriptor-set.pb \

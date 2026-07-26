@@ -140,11 +140,28 @@ func TestTrajectoryMapperFixtures(t *testing.T) {
 				t.Fatalf("tool replay = %v", got)
 			}
 		}},
-		{"waiting interaction signal", func(t *testing.T, m *trajectoryMapper) {
+		{"unsupported waiting interaction is diagnostic", func(t *testing.T, m *trajectoryMapper) {
 			m.BeginTurn()
 			step := plannerStep(agyv115.CortexStepStatus_CORTEX_STEP_STATUS_WAITING, "", nil)
 			step.RequestedInteraction = &agyv115.RequestedInteraction{Interaction: &agyv115.RequestedInteraction_Deploy{Deploy: &agyv115.CascadeDeployInteractionSpec{}}}
-			requireNames(t, m.ApplyStream(update(agyv115.CascadeRunStatus_CASCADE_RUN_STATUS_RUNNING, false, []uint32{5}, step)).events, "avenor.agy.interaction.waiting")
+			requireNames(t, m.ApplyStream(update(agyv115.CascadeRunStatus_CASCADE_RUN_STATUS_RUNNING, false, []uint32{5}, step)).events, "avenor.agy.protocol")
+		}},
+		{"valid waiting interaction does not emit unsupported_step_type", func(t *testing.T, m *trajectoryMapper) {
+			current := permissionWaiting("act", "target", "reason")
+			var sent []*agyv115.CascadeUserInteraction
+			bridge := newInteractionTestBridge(t, &current, &sent)
+			m.SetInteractionObserver(bridge.Observe, bridge.Clear)
+			m.BeginTurn()
+			step := plannerStep(agyv115.CortexStepStatus_CORTEX_STEP_STATUS_WAITING, "", nil)
+			step.RequestedInteraction = &agyv115.RequestedInteraction{Interaction: &agyv115.RequestedInteraction_Permission{Permission: &agyv115.PermissionInteractionSpec{Resource: &agyv115.PermissionResource{Action: "act", Target: "target"}}}}
+			if got := m.ApplyStream(update(agyv115.CascadeRunStatus_CASCADE_RUN_STATUS_RUNNING, false, []uint32{6}, step)).events; len(got) != 1 || got[0].Event != "permission.request" {
+				t.Fatalf("permission events = %v, want exactly one permission.request", got)
+			}
+			question := plannerStep(agyv115.CortexStepStatus_CORTEX_STEP_STATUS_WAITING, "", nil)
+			question.RequestedInteraction = &agyv115.RequestedInteraction{Interaction: &agyv115.RequestedInteraction_AskQuestion{AskQuestion: &agyv115.AskQuestionInteractionSpec{Questions: []*agyv115.AskQuestionEntry{{Question: "q", Options: []*agyv115.AskQuestionOption{{Id: "raw", Text: "visible"}}}}}}}
+			if got := m.ApplyStream(update(agyv115.CascadeRunStatus_CASCADE_RUN_STATUS_RUNNING, false, []uint32{7}, question)).events; len(got) != 1 || got[0].Event != "permission.request" {
+				t.Fatalf("question events = %v, want exactly one permission.request", got)
+			}
 		}},
 	}
 	for _, tc := range cases {
@@ -198,6 +215,100 @@ func TestTrajectoryMapperPinsIndependentStreamConversation(t *testing.T) {
 	requireNames(t, result.events, "avenor.agy.protocol")
 	if !result.recover {
 		t.Fatal("changed stream conversation did not request recovery")
+	}
+}
+
+// TestTrajectorySeedThenStreamDedupesThroughBridge verifies that a held
+// startup snapshot does not surface a stale permission.request event, and
+// that the first matching stream step is the one the bridge finally speaks
+// to. Identical step hashes between seed and stream must dedupe through the
+// bridge.
+func TestTrajectorySeedThenStreamDedupesThroughBridge(t *testing.T) {
+	current := permissionWaiting("act", "target", "reason")
+	var sent []*agyv115.CascadeUserInteraction
+	bridge := newInteractionTestBridge(t, &current, &sent)
+	mapper := newTrajectoryMapper("local-session", testConversation, "")
+	mapper.SetInteractionObserver(bridge.Observe, bridge.Clear)
+	if result := mapper.BindStreamIdentity(update(agyv115.CascadeRunStatus_CASCADE_RUN_STATUS_IDLE, true, nil)); result.recover {
+		t.Fatal("bind failed")
+	}
+	m := mapper
+	_ = m
+	mapper.BeginTurn()
+	seeded := mapper.MergeSnapshot(testTrajectory, 3, []*agyv115.Step{current}, trajectorySnapshotSeed)
+	if len(seeded.events) != 0 {
+		t.Fatalf("seed emitted stale interaction: %#v", seeded.events)
+	}
+	// The seed is only a baseline. The first matching stream step remains the
+	// authoritative actionable observation and emits exactly one request even
+	// though its step hash equals the seeded state.
+	first := mapper.ApplyStream(update(agyv115.CascadeRunStatus_CASCADE_RUN_STATUS_RUNNING, false, []uint32{3}, current))
+	if len(first.events) != 1 || first.events[0].Event != "permission.request" {
+		t.Fatalf("first stream emit = %#v, want one permission request", first.events)
+	}
+	// A materially different step at the same index must replace the pending.
+	changed := permissionWaiting("act", "other", "reason")
+	second := mapper.ApplyStream(update(agyv115.CascadeRunStatus_CASCADE_RUN_STATUS_RUNNING, false, []uint32{3}, changed))
+	if len(second.events) != 1 || second.events[0].Event != "permission.request" {
+		t.Fatalf("replacement events = %#v", second.events)
+	}
+}
+
+// TestTrajectoryDisconnectSnapshotThenStreamReplaysThroughBridge covers the
+// disconnect → snapshot → stream cycle. The recovered snapshot must dedupe
+// through the bridge, and a later stream replacement of the same step must
+// re-emit because the recovery/snapshot path is the only place the bridge
+// is asked to re-derive the current identity.
+func TestTrajectoryDisconnectSnapshotThenStreamReplaysThroughBridge(t *testing.T) {
+	first := &fakeRecoveryStream{responses: []*agyv115.StreamAgentStateUpdatesResponse{
+		streamResponse(update(agyv115.CascadeRunStatus_CASCADE_RUN_STATUS_RUNNING, false, []uint32{4}, permissionWaiting("act", "target", "reason"))),
+	}, errs: []error{io.EOF}}
+	replacement := &fakeRecoveryStream{responses: []*agyv115.StreamAgentStateUpdatesResponse{
+		streamResponse(update(agyv115.CascadeRunStatus_CASCADE_RUN_STATUS_RUNNING, false, []uint32{4}, permissionWaiting("act", "other", "reason"))),
+		streamResponse(update(agyv115.CascadeRunStatus_CASCADE_RUN_STATUS_IDLE, true, []uint32{4}, permissionWaiting("act", "other", "reason"))),
+	}}
+	recovered := &agyv115.GetCascadeTrajectoryStepsResponse{Steps: []*agyv115.Step{permissionWaiting("act", "target", "reason")}}
+	transport := &fakeRecoveryTransport{snapshots: []*agyv115.GetCascadeTrajectoryStepsResponse{recovered}, streams: []trajectoryRecoveryStream{first, replacement}}
+	var got []events.Event
+	mapper := newTrajectoryMapper("session", testConversation, "")
+	coordinator := newTrajectoryRecoveryCoordinatorWithTransport(transport, mapper, trajectoryRecoveryOptions{cascadeID: "cascade", conversationID: testConversation, maxRecoveryAttempts: 2, backoff: func(int) time.Duration { return 0 }, onEvent: func(event events.Event) { got = append(got, event) }})
+	bridge := newInteractionTestBridge(t, &recovered.Steps[0], nil)
+	mapper.SetInteractionObserver(bridge.Observe, bridge.Clear)
+	mapper.BeginTurn()
+	if err := coordinator.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// We expect: first stream emits a permission.request for the original,
+	// recovery snapshot deduplicates (no event), replacement stream emits a
+	// fresh permission.request because the step is materially different, then
+	// a final IDLE without a session.end because the bridge is not wired to a
+	// terminal event in this minimal scenario.
+	if len(got) < 2 {
+		t.Fatalf("events = %v", eventNames(got))
+	}
+	if got[0].Event != "permission.request" {
+		t.Fatalf("first event = %q", got[0].Event)
+	}
+	replays := 0
+	for _, evt := range got {
+		if evt.Event == "permission.request" {
+			replays++
+		}
+	}
+	if replays != 2 {
+		t.Fatalf("replays = %d, want 2", replays)
+	}
+	transport.mu.Lock()
+	calls := append([]string(nil), transport.calls...)
+	transport.mu.Unlock()
+	want := []string{"snapshot", "stream", "snapshot", "stream"}
+	if len(calls) != len(want) {
+		t.Fatalf("call ordering = %v, want %v", calls, want)
+	}
+	for i := range want {
+		if calls[i] != want[i] {
+			t.Fatalf("call ordering = %v, want %v", calls, want)
+		}
 	}
 }
 

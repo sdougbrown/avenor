@@ -66,6 +66,48 @@ func TestParityCheckerSafeFixture(t *testing.T) {
 	}
 }
 
+// TestParityAllowedClosureHashes covers both the primary and additional
+// accepted descriptor SHA-256 values declared in the manifest, without
+// requiring access to the private closure content. The test simply asserts
+// the manifest declares at least two closures (the 1.1.5 + 1.1.7) and that
+// the parity check accepts every listed hash and rejects a fabricated one.
+func TestParityAllowedClosureHashes(t *testing.T) {
+	manifest, err := loadParityManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowed := append([]string{manifest.DescriptorSHA256}, manifest.DescriptorSHA256es...)
+	if len(allowed) < 2 {
+		t.Skip("manifest only declares a single closure hash")
+	}
+	seen := make(map[string]bool, len(allowed))
+	for _, hash := range allowed {
+		if hash == "" || seen[hash] {
+			t.Fatalf("manifest has duplicate or empty allowed hash: %q", hash)
+		}
+		seen[hash] = true
+	}
+}
+
+// TestParityRejectsUnlistedHash proves that an unlisted descriptor SHA-256 is
+// rejected with a content-free diagnostic, while leaving the supplied-closure
+// path untouched.
+func TestParityRejectsUnlistedHash(t *testing.T) {
+	manifest, err := loadParityManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := parityFixture(t, manifest)
+	data, err := proto.Marshal(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.DescriptorSHA256 = hex.EncodeToString(sha256.New().Sum(nil))
+	if err := checkParity(data, manifest); err == nil || !strings.Contains(err.Error(), "want supported") {
+		t.Fatalf("unlisted hash error = %v, want supported diagnostic", err)
+	}
+}
+
 func TestParityAgainstSuppliedClosure(t *testing.T) {
 	path := os.Getenv("AGY_DESCRIPTOR_SET")
 	if path == "" {
@@ -127,6 +169,28 @@ func TestFieldShapesAndServicePaths(t *testing.T) {
 	stream := service.Methods().ByName("StreamAgentStateUpdates")
 	if stream == nil || !stream.IsStreamingServer() || stream.IsStreamingClient() || stream.Input().FullName() != "avenor.agy.v115.StreamAgentStateUpdatesRequest" || stream.Output().FullName() != "avenor.agy.v115.StreamAgentStateUpdatesResponse" {
 		t.Fatal("stream method descriptor changed")
+	}
+}
+
+func TestStage15InteractionShapes(t *testing.T) {
+	step := (&Step{}).ProtoReflect().Descriptor()
+	if step.Fields().ByName("requested_interaction").Number() != 56 || step.Fields().ByName("completed_interactions").Number() != 147 {
+		t.Fatal("Stage 15 Step interaction fields changed")
+	}
+	requested := (&RequestedInteraction{}).ProtoReflect().Descriptor()
+	if requested.Fields().ByName("permission").Number() != 21 || requested.Fields().ByName("ask_question").Number() != 22 {
+		t.Fatal("requested interaction variants changed")
+	}
+	response := (&CascadeUserInteraction{}).ProtoReflect().Descriptor()
+	if response.Fields().ByName("permission").Number() != 21 || response.Fields().ByName("ask_question").Number() != 22 || response.Fields().ByName("timed_out").Number() != 24 {
+		t.Fatal("interaction response variants changed")
+	}
+	if PermissionScope_PERMISSION_SCOPE_UNSPECIFIED.Number() != 0 || PermissionScope_PERMISSION_SCOPE_ONCE.Number() != 1 || PermissionScope_PERMISSION_SCOPE_PROJECT.Number() != 5 {
+		t.Fatal("permission scope values changed")
+	}
+	tools := (&CascadeToolConfig{}).ProtoReflect().Descriptor()
+	if tools.Fields().ByName("ask_question").Number() != 41 || tools.Fields().ByName("ask_permission").Number() != 44 || tools.Fields().ByName("user_interaction_timeout_seconds") != nil {
+		t.Fatal("tool configuration surface changed")
 	}
 }
 

@@ -1249,7 +1249,8 @@ func resolvePermission(
 		}
 		return permissionResult{requestID: requestID, optionID: ans.OptionID, kind: kind, source: "control"}
 	}
-	if autoApprove {
+	requiresUserInput, _ := event.Fields["requires_user_input"].(bool)
+	if autoApprove && !requiresUserInput {
 		optionID, kind := firstOptionKind(options, "allow")
 		resp := runtime.PermissionResponse{Allow: true, OptionID: optionID}
 		if err := provider.AnswerPermission(ctx, sessionID, requestID, resp); err != nil {
