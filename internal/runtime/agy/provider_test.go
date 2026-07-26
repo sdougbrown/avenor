@@ -14,6 +14,7 @@ import (
 
 func testProvider(opts runtime.StartOptions) *Provider {
 	p := NewWithOptions(opts)
+	p.getenv = func(string) string { return "headless" }
 	p.version = "1.1.5"
 	p.versionOnce.Do(func() {})
 	return p

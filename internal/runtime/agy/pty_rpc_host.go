@@ -25,13 +25,16 @@ type ptyRPCHost struct {
 	conversationID string
 	processDone    <-chan struct{}
 
-	mu         sync.Mutex
-	closing    bool
-	turnCancel context.CancelFunc
-	turnDone   chan struct{}
-	turn       *rpcTurn
-	closed     chan struct{}
-	closeErr   error
+	mu            sync.Mutex
+	retryMu       sync.Mutex
+	closing       bool
+	turnCancel    context.CancelFunc
+	turnDone      chan struct{}
+	turn          *rpcTurn
+	turnStarting  bool
+	pendingCancel bool
+	closed        chan struct{}
+	closeErr      error
 
 	models   *agyv115.FetchAvailableModelsResponse
 	mapper   *trajectoryMapper
@@ -92,8 +95,7 @@ func startPTYRPCHost(ctx context.Context, launcher terminal.Launcher, opts runti
 	host := &ptyRPCHost{terminal: session, cancel: cancel, closed: make(chan struct{}), turnGate: turnGate}
 	pid := session.PID()
 	if pid <= 0 {
-		_ = host.Close(context.Background())
-		return nil, errors.New("agy RPC host did not report a process PID")
+		return failPTYRPCHostStartup(host, errors.New("agy RPC host did not report a process PID"))
 	}
 
 	processDone := make(chan struct{})
@@ -110,8 +112,7 @@ func startPTYRPCHost(ctx context.Context, launcher terminal.Launcher, opts runti
 		return discoverErr
 	})
 	if err != nil {
-		_ = host.Close(context.Background())
-		return nil, err
+		return failPTYRPCHostStartup(host, err)
 	}
 	host.rpc = rpc
 
@@ -119,13 +120,11 @@ func startPTYRPCHost(ctx context.Context, launcher terminal.Launcher, opts runti
 	if resumeID == "" {
 		response, startErr := awaitPTYCascadeStart(ctx, processDone, rpc)
 		if startErr != nil {
-			_ = host.Close(context.Background())
-			return nil, startErr
+			return failPTYRPCHostStartup(host, startErr)
 		}
 		conversationID = response.GetCascadeId()
 		if conversationID == "" {
-			_ = host.Close(context.Background())
-			return nil, errors.New("agy RPC host did not create a conversation")
+			return failPTYRPCHostStartup(host, errors.New("agy RPC host did not create a conversation"))
 		}
 	} else {
 		conversationID = resumeID
@@ -134,8 +133,7 @@ func startPTYRPCHost(ctx context.Context, launcher terminal.Launcher, opts runti
 	if err := awaitPTYRPCStartup(ctx, processDone, func(startCtx context.Context) error {
 		return validatePTYSession(startCtx, rpc, conversationID)
 	}); err != nil {
-		_ = host.Close(context.Background())
-		return nil, err
+		return failPTYRPCHostStartup(host, err)
 	}
 	host.conversationID = conversationID
 
@@ -145,8 +143,7 @@ func startPTYRPCHost(ctx context.Context, launcher terminal.Launcher, opts runti
 		modelsResp, waitErr = awaitModelAvailability(startCtx, rpc)
 		return waitErr
 	}); err != nil {
-		_ = host.Close(context.Background())
-		return nil, err
+		return failPTYRPCHostStartup(host, err)
 	}
 	host.models = modelsResp
 	// AgentStateUpdate.conversation_id is a distinct wire identity. Pin it from
@@ -154,6 +151,17 @@ func startPTYRPCHost(ctx context.Context, launcher terminal.Launcher, opts runti
 	host.mapper = newTrajectoryMapper(conversationID, "", "")
 	host.installInteractionBridge()
 	return host, nil
+}
+
+func failPTYRPCHostStartup(host *ptyRPCHost, cause error) (*ptyRPCHost, error) {
+	if host != nil {
+		if err := host.Close(context.Background()); err != nil {
+			if retryErr := host.Close(context.Background()); retryErr != nil {
+				return host, errors.New("agy RPC host startup cleanup failed")
+			}
+		}
+	}
+	return nil, cause
 }
 
 // discoverPTYRPCHostWithRetry gives interactive agy a bounded opportunity to
@@ -249,7 +257,6 @@ func (h *ptyRPCHost) installInteractionBridge() {
 }
 
 // AnswerPermission resolves only the current local request owned by this host.
-// Provider transport selection remains intentionally deferred to Stage 18.
 func (h *ptyRPCHost) AnswerPermission(ctx context.Context, requestID string, response runtime.PermissionResponse) error {
 	if h == nil {
 		return errInteractionRejected
@@ -285,7 +292,10 @@ func (h *ptyRPCHost) Close(ctx context.Context) error {
 			h.mu.Lock()
 			err := h.closeErr
 			h.mu.Unlock()
-			return err
+			if err != nil {
+				return h.retryCloseCleanup(ctx)
+			}
+			return nil
 		case <-cleanupCtx.Done():
 			return cleanupCtx.Err()
 		}
@@ -350,6 +360,67 @@ func (h *ptyRPCHost) Close(ctx context.Context) error {
 	close(h.closed)
 	h.mu.Unlock()
 	return firstErr
+}
+
+func (h *ptyRPCHost) retryCloseCleanup(ctx context.Context) error {
+	h.retryMu.Lock()
+	defer h.retryMu.Unlock()
+	h.mu.Lock()
+	if h.closeErr == nil {
+		h.mu.Unlock()
+		return nil
+	}
+	processDone := h.processDone
+	interactions := h.interactions
+	coordinator := h.coordinator
+	turnDone := h.turnDone
+	rpc := h.rpc
+	h.mu.Unlock()
+
+	cleanupCtx, cancel := boundedPTYRPCCloseContext(ctx)
+	defer cancel()
+	if interactions != nil {
+		if err := interactions.CancelAndWait(cleanupCtx); err != nil {
+			return err
+		}
+	}
+	if coordinator != nil {
+		_ = coordinator.Close()
+		if err := coordinator.Wait(cleanupCtx); err != nil && !errors.Is(err, errTrajectoryRecoveryClosed) && !errors.Is(err, context.Canceled) {
+			return err
+		}
+	}
+	if turnDone != nil {
+		select {
+		case <-turnDone:
+		case <-cleanupCtx.Done():
+			return cleanupCtx.Err()
+		}
+	}
+	if rpc != nil {
+		rpc.close()
+	}
+	if h.cancel != nil {
+		h.cancel()
+	}
+	if h.terminal != nil {
+		_ = h.terminal.Kill(cleanupCtx)
+	}
+	if processDone != nil {
+		select {
+		case <-processDone:
+		case <-cleanupCtx.Done():
+			return cleanupCtx.Err()
+		}
+	} else if h.terminal != nil {
+		if err := h.terminal.Wait(cleanupCtx); err != nil && cleanupCtx.Err() != nil {
+			return cleanupCtx.Err()
+		}
+	}
+	h.mu.Lock()
+	h.closeErr = nil
+	h.mu.Unlock()
+	return nil
 }
 
 func boundedPTYRPCCloseContext(ctx context.Context) (context.Context, context.CancelFunc) {

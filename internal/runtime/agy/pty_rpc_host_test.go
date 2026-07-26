@@ -573,6 +573,38 @@ func TestPTYRPCHostConcurrentCloseHonorsWaiterDeadline(t *testing.T) {
 	}
 }
 
+func TestPTYRPCHostFailedCloseCanRetryReap(t *testing.T) {
+	base := &noTerminalProtocolSession{FakeSession: terminal.NewFakeSession("agy", 15, "")}
+	session := &blockingReapSession{noTerminalProtocolSession: base, waitStarted: make(chan struct{}), killStarted: make(chan struct{}), release: make(chan struct{})}
+	launcher := &recordingLauncher{session: session}
+	withPTYRPCSeams(t,
+		func(_ context.Context, _ int, _ string, _ rpcDiscoveryOptions) (*rpcHost, error) {
+			return &rpcHost{sessionID: "id"}, nil
+		},
+		func(context.Context, *rpcHost) (*agyv115.StartCascadeResponse, error) {
+			return &agyv115.StartCascadeResponse{CascadeId: "id"}, nil
+		},
+		func(_ context.Context, h *rpcHost, id string) error { h.sessionID = id; return nil },
+	)
+	host, err := startPTYRPCHost(context.Background(), launcher, runtime.StartOptions{}, "", "1.1.5", rpcDiscoveryOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-session.waitStarted
+	closeCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	if err := host.Close(closeCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first Close = %v", err)
+	}
+	cancel()
+	close(session.release)
+	if err := host.Close(context.Background()); err != nil {
+		t.Fatalf("retry Close = %v", err)
+	}
+	if session.KillCalls() < 2 {
+		t.Fatalf("retry did not reattempt cleanup: kill calls = %d", session.KillCalls())
+	}
+}
+
 // TestPTYRPCHostCloseCancelsInFlightPreAnswerFetch verifies that a Close
 // during a blocked pre-answer GetSteps call yields zero Handle mutations and
 // no goroutine leak. The fake RPC client exposes hooks to count calls and

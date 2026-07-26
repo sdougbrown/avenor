@@ -29,12 +29,12 @@ Both `claude` and `claude-channel` require `claude` to be on `PATH`. `claude-cha
 | Prompt execution | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓  | ✓  |
 | Cancel | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓  | ✓  |
 | Event streaming | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Permission relay | ✓ | ✗ | ✓ | ✗ | ✓ | ✓ | ✓ | ⚠ | ⚠  |
+| Permission relay | ✓ | ✗ | ✓ | ⚠ | ✓ | ✓ | ✓ | ⚠ | ⚠  |
 | Model selection | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ | ✓ | ✓ | ✓  |
 | External server URL | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
 | Subprocess discovery | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✓ |
 
-`—` means not verified; `✗` means not supported, `⚠ ` means experimental.
+`—` means not verified; `✗` means not supported, `⚠ ` means experimental. `agy` permission relay requires the explicit RPC transport.
 
 Session resume for `claude` and `claude-channel` is in-memory only: a long-lived avenor process (stable mode) keeps sessions in its map and lets clients reattach by `session_id` while the session is alive. Cross-restart resume (avenor process exits, then a new one tries to pick up the same session) is not yet supported by either backend.
 
@@ -255,19 +255,19 @@ avenor \
 
 ## agy
 
-Avenor spawns `agy --add-dir <dir> --output-format stream-json --print-timeout 24h --print <prompt>` and reads JSONL from stdout. No ACP wrapper, no PTY. The backend translates newline-delimited events into Avenor's canonical event format.
+Avenor provides two dedicated `agy` transports. It does not treat `agy` as ACP, scrape its terminal, or send TUI keystrokes.
 
-This is a Phase 1 headless backend. It does not support interactive permission decisions or tool approval prompts — `agy`'s headless mode auto-denies tools that require interactive confirmation. Pre-existing `agy` persisted allow rules still apply.
+**Headless is the default.** With `AVENOR_AGY_TRANSPORT` unset or set to `headless`, Avenor spawns `agy --add-dir <dir> --output-format stream-json --print-timeout 24h --print <prompt>` and translates JSONL from stdout into canonical events. This mode does not support interactive permission decisions; `agy` auto-denies tools that require confirmation, while persisted allow rules still apply.
 
-**Structured output only.** This backend does not launch a terminal or scrape a TUI. All communication happens through `agy`'s `--output-format stream-json` JSONL protocol over pipes.
+**RPC is opt-in.** Set `AVENOR_AGY_TRANSPORT=rpc` to host interactive `agy` in a PTY while controlling turns, cancellation, permissions, and questions through its exact-process-owned loopback RPC service. This mode supports validated permission write-ins. Model names must exactly match an available slug; there is no silent fallback.
 
-**Session identity.** `agy` allocates its conversation ID only after receiving the required first `--print` prompt. Avenor therefore uses an internal provisional ID between `Start` and the first `session.start`, then adopts agy's external ID. Event logs, sentinels, later turns, and `--resume` all use the external ID.
+**Automatic probing.** `AVENOR_AGY_TRANSPORT=auto` tries RPC and falls back to headless only after the failed RPC host has been cleaned up. Because selection occurs per session, Avenor advertises RPC permission capabilities conservatively only when `rpc` is selected explicitly.
 
-**24-hour print ceiling.** Every prompt carries `--print-timeout 24h` to prevent `agy`'s default 5-minute timeout from pre-empting Avenor's own timeout/control path. If Avenor does not have its own timeout set, the turn runs for up to 24 hours.
+**Session identity.** Headless `agy` allocates its conversation ID after the required first `--print` prompt, so Avenor starts with a provisional ID and then adopts the external ID. RPC sessions bind the conversation before `Start` or `Resume` returns. Event logs, sentinels, later turns, and resumes use the resulting external ID.
 
-**Model selection** works at spawn time via `--model`. Unsupported models produce a non-zero error rather than silent fallback.
+**24-hour headless ceiling.** Headless prompts use `--print-timeout 24h` so `agy`'s default 5-minute timeout does not pre-empt Avenor's control path. RPC interactions do not acquire an implicit answer deadline.
 
-**Permissions are false.** The `Permissions` capability is advertised as `false`. Permission requests are not relayed through Avenor — they appear as tool errors with explanation on `agy`'s stderr. Avenor does not pass `--dangerously-skip-permissions` by default.
+Avenor never passes `--dangerously-skip-permissions` by default.
 
 ```sh
 avenor \

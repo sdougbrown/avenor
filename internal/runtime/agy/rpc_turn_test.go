@@ -455,6 +455,34 @@ func TestPTYRPCHostCancelRPCEmitsOneTerminalAndHostRemainsReusable(t *testing.T)
 	}
 }
 
+func TestPTYRPCHostPendingProviderCancelPreventsTurnStart(t *testing.T) {
+	server := newTurnTestServer(t)
+	defer server.close()
+	host := newTurnTestHost(t, server.server.URL)
+	defer host.rpc.close()
+	host.mu.Lock()
+	host.pendingCancel = true
+	host.mu.Unlock()
+	if err := host.RunTurn(context.Background(), "private", "known", nil); !errors.Is(err, errRPCTurnCancelled) {
+		t.Fatalf("pending cancel turn = %v", err)
+	}
+	if len(server.requests()) != 0 {
+		t.Fatal("pending provider cancel sent a mutation")
+	}
+}
+
+func TestPTYRPCHostDisarmClearsUnconsumedProviderCancel(t *testing.T) {
+	host := &ptyRPCHost{}
+	host.ArmCancellation()
+	host.DisarmCancellation()
+	host.mu.Lock()
+	pending := host.pendingCancel
+	host.mu.Unlock()
+	if pending {
+		t.Fatal("unconsumed cancellation remained armed past its prompt")
+	}
+}
+
 func TestPTYRPCHostCancelBeforeSendIssuesNoSend(t *testing.T) {
 	server := newTurnTestServer(t)
 	defer server.close()

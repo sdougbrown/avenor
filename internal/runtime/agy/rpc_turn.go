@@ -200,9 +200,17 @@ func (h *ptyRPCHost) RunTurn(ctx context.Context, prompt, modelSlug string, onEv
 	if h == nil || h.turnGate == nil {
 		return errRPCHostClosed
 	}
+	h.mu.Lock()
+	if h.closing {
+		h.mu.Unlock()
+		return errRPCHostClosed
+	}
 	select {
 	case <-h.turnGate:
+		h.turnStarting = true
+		h.mu.Unlock()
 	default:
+		h.mu.Unlock()
 		return errRPCTurnActive
 	}
 
@@ -216,12 +224,21 @@ func (h *ptyRPCHost) RunTurn(ctx context.Context, prompt, modelSlug string, onEv
 	turnCtx, cancel := context.WithCancel(ctx)
 	h.mu.Lock()
 	if h.closing || h.rpc == nil || h.rpc.client == nil || h.mapper == nil {
+		h.turnStarting = false
 		h.mu.Unlock()
 		cancel()
 		return errRPCHostClosed
 	}
+	if h.pendingCancel {
+		h.pendingCancel = false
+		h.turnStarting = false
+		h.mu.Unlock()
+		cancel()
+		return errRPCTurnCancelled
+	}
 	model, err := resolveRPCModel(h.models, modelSlug)
 	if err != nil {
+		h.turnStarting = false
 		h.mu.Unlock()
 		cancel()
 		return err
@@ -229,6 +246,7 @@ func (h *ptyRPCHost) RunTurn(ctx context.Context, prompt, modelSlug string, onEv
 	processDone := h.processDone
 	select {
 	case <-processDone:
+		h.turnStarting = false
 		h.mu.Unlock()
 		cancel()
 		return errors.New("agy RPC host exited before turn")
@@ -248,6 +266,7 @@ func (h *ptyRPCHost) RunTurn(ctx context.Context, prompt, modelSlug string, onEv
 	h.turnCancel = cancel
 	h.turnDone = turnDone
 	h.turn = turn
+	h.turnStarting = false
 	h.mu.Unlock()
 
 	monitorStop := make(chan struct{})
@@ -351,6 +370,31 @@ func (h *ptyRPCHost) turnError(caller context.Context, processDone <-chan struct
 	return errors.New("agy RPC turn failed")
 }
 
+// ArmCancellation fences a provider cancellation that can race RunTurn entry.
+// If no turn is installed yet, the next in-progress start consumes the marker
+// before opening a stream or sending a mutation.
+func (h *ptyRPCHost) ArmCancellation() {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	if !h.closing && h.turn == nil {
+		h.pendingCancel = true
+	}
+	h.mu.Unlock()
+}
+
+// DisarmCancellation clears an arm that was not consumed by the prompt that
+// owned it. Provider invokes this while ending that prompt's running state.
+func (h *ptyRPCHost) DisarmCancellation() {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.pendingCancel = false
+	h.mu.Unlock()
+}
+
 // Cancel stops the active typed-RPC turn. A successful RPC cancellation keeps
 // the PTY alive for another/resumed turn; only an observed, terminal-stream
 // convergence keeps the host reusable. Protocol errors, deadlines, or a stream
@@ -372,9 +416,16 @@ func (h *ptyRPCHost) Cancel(ctx context.Context) error {
 	bridge := h.interactions
 	rpc := h.rpc
 	cascadeID := h.conversationID
-	if turn == nil || rpc == nil || rpc.client == nil {
+	if turn == nil {
+		if h.turnStarting {
+			h.pendingCancel = true
+		}
 		h.mu.Unlock()
 		return nil
+	}
+	if rpc == nil || rpc.client == nil {
+		h.mu.Unlock()
+		return errRPCHostClosed
 	}
 	turn.mu.Lock()
 	if turn.cancelStarted {

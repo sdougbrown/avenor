@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 
 	"github.com/google/uuid"
@@ -26,21 +27,33 @@ func defaultClientFactory() *client {
 type Provider struct {
 	opts              runtime.StartOptions
 	mu                sync.Mutex
+	closeMu           sync.Mutex
+	operations        sync.WaitGroup
 	sessions          map[string]*sessionState
+	cleanupHosts      []rpcSessionHost
+	closed            bool
+	lifetimeCtx       context.Context
+	lifetimeCancel    context.CancelFunc
 	version           string
 	versionErr        error
 	versionOnce       sync.Once
 	clientFactory     clientFactory
-	ptyRPCHostFactory ptyRPCHostFactory // Stage 18 selects this seam; Phase 1 never invokes it.
+	ptyRPCHostFactory ptyRPCHostFactory // Production factory for selected RPC sessions.
+	getenv            func(string) string
+	rpcHostFactory    rpcSessionHostFactory // Optional narrow test seam.
 }
 
 // NewWithOptions creates a new Provider with the given start options.
 func NewWithOptions(opts runtime.StartOptions) *Provider {
+	lifetimeCtx, lifetimeCancel := context.WithCancel(context.Background())
 	return &Provider{
 		opts:              opts,
+		lifetimeCtx:       lifetimeCtx,
+		lifetimeCancel:    lifetimeCancel,
 		sessions:          make(map[string]*sessionState),
 		clientFactory:     defaultClientFactory,
 		ptyRPCHostFactory: defaultPTYRPCHostFactory,
+		getenv:            os.Getenv,
 	}
 }
 
@@ -48,11 +61,13 @@ func NewWithOptions(opts runtime.StartOptions) *Provider {
 type sessionState struct {
 	mu sync.Mutex
 
-	client    *client
-	rpcHost   *ptyRPCHost // Reserved for an already-probed Stage 18 RPC selection.
-	sessionID string
-	startOpts runtime.StartOptions
-	initCache map[string]any
+	client     *client
+	rpcHost    rpcSessionHost // Owned for RPC sessions from selection until Close.
+	transport  transportKind
+	diagnostic string
+	sessionID  string
+	startOpts  runtime.StartOptions
+	initCache  map[string]any
 
 	startEmitted bool
 	firstTurn    bool
@@ -66,6 +81,7 @@ type sessionState struct {
 	// cancelled and terminalEmitted are reset at the start of each turn.
 	cancelled       bool
 	terminalEmitted bool
+	promptCancel    context.CancelFunc
 }
 
 type subscriber struct {
@@ -181,35 +197,71 @@ func (p *Provider) ensureVersion(ctx context.Context) error {
 // Start
 // ---------------------------------------------------------------------------
 
-// Start registers a resource-free provisional session. agy allocates its
-// external conversation ID only after --print receives the first prompt, so
-// Prompt launches the process and atomically adopts that external ID.
+// Start selects a transport before registration. Headless keeps its
+// resource-free provisional identity; RPC registers the host's already
+// validated external conversation identity directly.
 func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtime.Session, error) {
 	merged := runtime.MergeStartOptions(p.opts, opts)
-	if err := p.ensureVersion(ctx); err != nil {
+	opCtx, finish, err := p.beginOperation(ctx)
+	if err != nil {
+		return runtime.Session{}, err
+	}
+	defer finish()
+	if err := p.ensureVersion(opCtx); err != nil {
+		return runtime.Session{}, err
+	}
+	version := p.validatedVersion()
+	selection, diagnostic, err := p.selectTransport(opCtx, merged, "", version)
+	if err != nil {
+		if selection.rpc != nil {
+			p.retainCleanupHost(selection.rpc)
+		}
 		return runtime.Session{}, err
 	}
 
-	provisionalID := "agy-pending-" + uuid.New().String()
+	sessionID := "agy-pending-" + uuid.New().String()
+	if selection.kind == transportRPC {
+		sessionID = selection.rpc.ConversationID()
+		if sessionID == "" {
+			if err := p.closeSelectedRPCHost(selection.rpc); err != nil {
+				return runtime.Session{}, err
+			}
+			return runtime.Session{}, errors.New("agy RPC host did not provide a conversation")
+		}
+	}
 	s := &sessionState{
-		sessionID: provisionalID,
-		startOpts: merged,
+		rpcHost:    selection.rpc,
+		transport:  selection.kind,
+		diagnostic: diagnostic,
+		sessionID:  sessionID,
+		startOpts:  merged,
 		initCache: map[string]any{
-			"model":       merged.Model,
-			"agy_version": p.version,
+			"conversation_id": sessionID,
+			"model":           merged.Model,
+			"agy_version":     version,
 		},
 		firstTurn: true,
 	}
 
 	p.mu.Lock()
-	p.sessions[provisionalID] = s
+	if p.closed {
+		p.mu.Unlock()
+		if err := p.closeSelectedRPCHost(selection.rpc); err != nil {
+			return runtime.Session{}, err
+		}
+		return runtime.Session{}, errors.New("agy provider is closed")
+	}
+	if existing := p.sessions[sessionID]; existing != nil {
+		p.mu.Unlock()
+		if err := p.closeSelectedRPCHost(selection.rpc); err != nil {
+			return runtime.Session{}, err
+		}
+		return runtime.Session{}, errors.New("agy conversation is already active")
+	}
+	p.sessions[sessionID] = s
 	p.mu.Unlock()
 
-	return runtime.Session{
-		SessionID: provisionalID,
-		Backend:   BackendID,
-		Dir:       merged.Dir,
-	}, nil
+	return runtime.Session{SessionID: sessionID, Backend: BackendID, Dir: merged.Dir}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -224,39 +276,76 @@ func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Sessio
 	if sessionID == "" {
 		return runtime.Session{}, errors.New("session id is required")
 	}
-	if err := p.ensureVersion(ctx); err != nil {
+	opCtx, finish, err := p.beginOperation(ctx)
+	if err != nil {
+		return runtime.Session{}, err
+	}
+	defer finish()
+	if err := p.ensureVersion(opCtx); err != nil {
 		return runtime.Session{}, err
 	}
 
+	// Check before probing so an already-owned session never starts a second
+	// PTY. A second check below closes a concurrently-probed losing host.
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if s, ok := p.sessions[sessionID]; ok {
-		return runtime.Session{
-			SessionID: sessionID,
-			Backend:   BackendID,
-			Dir:       s.startOpts.Dir,
-		}, nil
+	if p.closed {
+		p.mu.Unlock()
+		return runtime.Session{}, errors.New("agy provider is closed")
 	}
+	if s := p.sessions[sessionID]; s != nil {
+		p.mu.Unlock()
+		return runtime.Session{SessionID: sessionID, Backend: BackendID, Dir: s.startOpts.Dir}, nil
+	}
+	p.mu.Unlock()
 
+	version := p.validatedVersion()
+	selection, diagnostic, err := p.selectTransport(opCtx, p.opts, sessionID, version)
+	if err != nil {
+		if selection.rpc != nil {
+			p.retainCleanupHost(selection.rpc)
+		}
+		return runtime.Session{}, err
+	}
+	if selection.kind == transportRPC && selection.rpc.ConversationID() != sessionID {
+		if err := p.closeSelectedRPCHost(selection.rpc); err != nil {
+			return runtime.Session{}, err
+		}
+		return runtime.Session{}, errors.New("agy RPC host resumed the wrong conversation")
+	}
 	s := &sessionState{
+		rpcHost:    selection.rpc,
+		transport:  selection.kind,
+		diagnostic: diagnostic,
 		sessionID:  sessionID,
 		externalID: sessionID,
 		startOpts:  p.opts,
 		initCache: map[string]any{
 			"conversation_id": sessionID,
 			"model":           p.opts.Model,
-			"agy_version":     p.version,
+			"agy_version":     version,
 		},
 		firstTurn: true,
 	}
-	p.sessions[sessionID] = s
 
-	return runtime.Session{
-		SessionID: sessionID,
-		Backend:   BackendID,
-		Dir:       p.opts.Dir,
-	}, nil
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		if err := p.closeSelectedRPCHost(selection.rpc); err != nil {
+			return runtime.Session{}, err
+		}
+		return runtime.Session{}, errors.New("agy provider is closed")
+	}
+	if existing := p.sessions[sessionID]; existing != nil {
+		p.mu.Unlock()
+		if err := p.closeSelectedRPCHost(selection.rpc); err != nil {
+			return runtime.Session{}, err
+		}
+		return runtime.Session{SessionID: sessionID, Backend: BackendID, Dir: existing.startOpts.Dir}, nil
+	}
+	p.sessions[sessionID] = s
+	p.mu.Unlock()
+
+	return runtime.Session{SessionID: sessionID, Backend: BackendID, Dir: p.opts.Dir}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -284,25 +373,33 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 		return fmt.Errorf("session %q not found", sessionID)
 	}
 
+	turnCtx, turnCancel := context.WithCancel(ctx)
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
+		turnCancel()
 		return fmt.Errorf("session %q is closed", sessionID)
 	}
 	if s.running {
 		s.mu.Unlock()
+		turnCancel()
 		return fmt.Errorf("prompt already active for session %q", sessionID)
 	}
 	s.running = true
 	s.cancelled = false
 	s.terminalEmitted = false
+	s.promptCancel = turnCancel
 	s.mu.Unlock()
 
 	// On return, mark the session as no longer running, clean up the turn
 	// process, and remove the provisional alias after successful ID adoption.
 	defer func() {
 		s.mu.Lock()
+		if s.rpcHost != nil {
+			s.rpcHost.DisarmCancellation()
+		}
 		s.running = false
+		s.promptCancel = nil
 		cl := s.client
 		s.client = nil
 		currentID := s.sessionID
@@ -310,6 +407,7 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 		if cl != nil {
 			_ = cl.Close()
 		}
+		turnCancel()
 		if currentID != sessionID {
 			p.mu.Lock()
 			if p.sessions[sessionID] == s {
@@ -322,16 +420,21 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 	s.mu.Lock()
 	firstTurn := s.firstTurn
 	externalID := s.externalID
+	transport := s.transport
 	s.mu.Unlock()
 
 	var err error
-	switch {
-	case firstTurn && externalID == "":
-		err = p.runInitialPrompt(ctx, s, sessionID, prompt)
-	case firstTurn:
-		err = p.runResumedPrompt(ctx, s, externalID, prompt, true)
-	default:
-		err = p.runResumedPrompt(ctx, s, externalID, prompt, false)
+	if transport == transportRPC {
+		err = p.runRPCPrompt(turnCtx, s, prompt)
+	} else {
+		switch {
+		case firstTurn && externalID == "":
+			err = p.runInitialPrompt(turnCtx, s, sessionID, prompt)
+		case firstTurn:
+			err = p.runResumedPrompt(turnCtx, s, externalID, prompt, true)
+		default:
+			err = p.runResumedPrompt(turnCtx, s, externalID, prompt, false)
+		}
 	}
 
 	if err != nil {
@@ -416,6 +519,7 @@ func (p *Provider) runInitialPrompt(ctx context.Context, s *sessionState, provis
 	s.startEmitted = true
 	s.mu.Unlock()
 	s.emit(startEvt)
+	s.emitTransportDiagnostic()
 
 	termEvt, err := relayEvents(ctx, s, cl)
 	if err != nil {
@@ -431,8 +535,69 @@ func (p *Provider) runInitialPrompt(ctx context.Context, s *sessionState, provis
 	return nil
 }
 
-// runResumedPrompt starts a fresh agy process for an existing conversation,
-// validates its init event, and relays the new turn without replaying history.
+// runRPCPrompt uses the already-probed persistent host selected at Start or
+// Resume. It deliberately has no fallback path: a registered RPC session stays
+// RPC for its entire lifetime.
+func (p *Provider) runRPCPrompt(ctx context.Context, s *sessionState, prompt string) error {
+	s.mu.Lock()
+	host := s.rpcHost
+	first := s.firstTurn
+	model := s.startOpts.Model
+	cancelled := s.cancelled
+	if host == nil {
+		s.mu.Unlock()
+		return errors.New("agy RPC host is unavailable")
+	}
+	if cancelled {
+		s.mu.Unlock()
+		return context.Canceled
+	}
+	if first && !s.startEmitted {
+		start := s.buildSessionStart()
+		s.startEmitted = true
+		s.mu.Unlock()
+		s.emit(start)
+		s.emitTransportDiagnostic()
+	} else {
+		s.mu.Unlock()
+	}
+
+	err := host.RunTurn(ctx, prompt, model, func(evt events.Event) {
+		// The selected host's validated conversation is the only logical ID
+		// exposed by this session. Preserve canonical event fields, but enforce
+		// that identity at the provider boundary.
+		s.mu.Lock()
+		evt.SessionID = s.sessionID
+		s.mu.Unlock()
+		if evt.Event == "session.end" {
+			s.emitTerminal(evt)
+			return
+		}
+		s.emit(evt)
+	})
+	if err == nil {
+		s.mu.Lock()
+		s.firstTurn = false
+		s.mu.Unlock()
+	}
+	return err
+}
+
+func (s *sessionState) emitTransportDiagnostic() {
+	s.mu.Lock()
+	code := s.diagnostic
+	s.diagnostic = ""
+	sessionID := s.sessionID
+	s.mu.Unlock()
+	if code == "" {
+		return
+	}
+	s.emit(events.Event{Event: "avenor.agy.transport", SessionID: sessionID, Fields: map[string]any{"code": code}})
+}
+
+// runResumedPrompt starts a fresh headless process for an existing
+// conversation, validates its init event, and relays the new turn without
+// replaying history.
 func (p *Provider) runResumedPrompt(ctx context.Context, s *sessionState, sessionID, prompt string, isFirstResumed bool) error {
 	s.mu.Lock()
 	oldClient := s.client
@@ -482,6 +647,7 @@ func (p *Provider) runResumedPrompt(ctx context.Context, s *sessionState, sessio
 	s.mu.Unlock()
 	if startEvt != nil {
 		s.emit(*startEvt)
+		s.emitTransportDiagnostic()
 	}
 
 	termEvt, err := relayEvents(ctx, s, cl)
@@ -580,6 +746,11 @@ func (p *Provider) Cancel(ctx context.Context, sessionID string) error {
 
 	s.mu.Lock()
 	cl := s.client
+	rpc := s.rpcHost
+	transport := s.transport
+	promptCancel := s.promptCancel
+	running := s.running
+	terminalEmitted := s.terminalEmitted
 	if s.cancelled {
 		s.mu.Unlock()
 		return nil
@@ -588,6 +759,29 @@ func (p *Provider) Cancel(ctx context.Context, sessionID string) error {
 	s.mu.Unlock()
 
 	var cancelErr error
+	if transport == transportRPC {
+		if rpc != nil {
+			if running && !terminalEmitted {
+				rpc.ArmCancellation()
+			}
+			cancelErr = rpc.Cancel(ctx)
+		}
+		if promptCancel != nil {
+			promptCancel()
+		}
+		// ptyRPCHost normally forwards its observed cancelled terminal through
+		// RunTurn. Emit the provider fallback only when that event was absent.
+		s.mu.Lock()
+		terminal := s.terminalEmitted
+		s.mu.Unlock()
+		if !terminal {
+			s.emitTerminal(events.Event{Event: "session.end", SessionID: sessionID, Fields: map[string]any{"stop_reason": "cancelled"}})
+		}
+		return cancelErr
+	}
+	if promptCancel != nil {
+		promptCancel()
+	}
 	if cl != nil {
 		cancelErr = cl.Cancel(ctx)
 		if errors.Is(cancelErr, ErrClientClosed) {
@@ -595,14 +789,8 @@ func (p *Provider) Cancel(ctx context.Context, sessionID string) error {
 		}
 	}
 
-	endEvt := events.Event{
-		Event:     "session.end",
-		SessionID: sessionID,
-		Fields: map[string]any{
-			"stop_reason": "cancelled",
-		},
-	}
-	s.emitTerminal(endEvt)
+	// Preserve the Phase 1 cancellation event exactly.
+	s.emitTerminal(events.Event{Event: "session.end", SessionID: sessionID, Fields: map[string]any{"stop_reason": "cancelled"}})
 	return cancelErr
 }
 
@@ -637,9 +825,20 @@ func (p *Provider) Events(ctx context.Context, sessionID string) (<-chan events.
 // AnswerPermission
 // ---------------------------------------------------------------------------
 
-// AnswerPermission is not supported in agy headless mode.
+// AnswerPermission delegates only to a session selected for RPC. Headless
+// keeps its Phase 1 unsupported error.
 func (p *Provider) AnswerPermission(ctx context.Context, sessionID string, requestID string, response runtime.PermissionResponse) error {
-	return errors.New("AnswerPermission is not supported in agy headless mode")
+	s := p.getSession(sessionID)
+	if s == nil {
+		return errors.New("AnswerPermission is not supported in agy headless mode")
+	}
+	s.mu.Lock()
+	host, transport := s.rpcHost, s.transport
+	s.mu.Unlock()
+	if transport != transportRPC || host == nil {
+		return errors.New("AnswerPermission is not supported in agy headless mode")
+	}
+	return host.AnswerPermission(ctx, requestID, response)
 }
 
 // ---------------------------------------------------------------------------
@@ -648,9 +847,12 @@ func (p *Provider) AnswerPermission(ctx context.Context, sessionID string, reque
 
 // Capabilities returns the capabilities of the agy backend.
 func (p *Provider) Capabilities(ctx context.Context) (runtime.Capabilities, error) {
+	// auto is deliberately conservative in Stage 18: its probe may select
+	// headless, so only explicit rpc advertises interactive permissions.
+	permissions := p.transportPolicy() == "rpc"
 	return runtime.Capabilities{
 		Backend:             BackendID,
-		Permissions:         false,
+		Permissions:         permissions,
 		Resume:              true,
 		ExternalServerURL:   false,
 		SubprocessDiscovery: false,
@@ -664,6 +866,16 @@ func (p *Provider) Capabilities(ctx context.Context) (runtime.Capabilities, erro
 
 // Close shuts down the provider and all sessions. Idempotent.
 func (p *Provider) Close() error {
+	p.closeMu.Lock()
+	defer p.closeMu.Unlock()
+	p.mu.Lock()
+	p.closed = true
+	if p.lifetimeCancel != nil {
+		p.lifetimeCancel()
+	}
+	p.mu.Unlock()
+	p.operations.Wait()
+
 	p.mu.Lock()
 	sessions := make([]*sessionState, 0, len(p.sessions))
 	seen := make(map[*sessionState]struct{}, len(p.sessions))
@@ -674,7 +886,8 @@ func (p *Provider) Close() error {
 		seen[s] = struct{}{}
 		sessions = append(sessions, s)
 	}
-	p.sessions = make(map[string]*sessionState)
+	cleanupHosts := p.cleanupHosts
+	p.cleanupHosts = nil
 	p.mu.Unlock()
 
 	var firstErr error
@@ -682,23 +895,56 @@ func (p *Provider) Close() error {
 		s.mu.Lock()
 		s.closed = true
 		cl := s.client
-		s.client = nil
 		rpc := s.rpcHost
-		s.rpcHost = nil
 		s.mu.Unlock()
 
+		clientClosed := true
 		if cl != nil {
-			if err := cl.Close(); err != nil && firstErr == nil {
-				firstErr = fmt.Errorf("close session %q: %w", s.sessionID, err)
+			if err := cl.Close(); err != nil {
+				clientClosed = false
+				if firstErr == nil {
+					firstErr = errors.New("agy session close failed")
+				}
 			}
 		}
+		rpcClosed := true
 		if rpc != nil {
-			if err := rpc.Close(context.Background()); err != nil && firstErr == nil {
-				firstErr = fmt.Errorf("close RPC session: %w", err)
+			if err := rpc.Close(context.Background()); err != nil {
+				rpcClosed = false
+				if firstErr == nil {
+					firstErr = errors.New("agy RPC session close failed")
+				}
 			}
 		}
 
+		s.mu.Lock()
+		if clientClosed && s.client == cl {
+			s.client = nil
+		}
+		if rpcClosed && s.rpcHost == rpc {
+			s.rpcHost = nil
+		}
+		s.mu.Unlock()
+		if clientClosed && rpcClosed {
+			p.mu.Lock()
+			for id, candidate := range p.sessions {
+				if candidate == s {
+					delete(p.sessions, id)
+				}
+			}
+			p.mu.Unlock()
+		}
 		s.closeSubscribers()
+	}
+	for _, host := range cleanupHosts {
+		if err := host.Close(context.Background()); err != nil {
+			if retryErr := host.Close(context.Background()); retryErr != nil {
+				p.retainCleanupHost(host)
+				if firstErr == nil {
+					firstErr = errors.New("agy RPC host cleanup failed")
+				}
+			}
+		}
 	}
 
 	return firstErr
@@ -708,11 +954,83 @@ func (p *Provider) Close() error {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+func (p *Provider) beginOperation(ctx context.Context) (context.Context, func(), error) {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return nil, nil, errors.New("agy provider is closed")
+	}
+	lifetime := p.lifetimeCtx
+	p.operations.Add(1)
+	p.mu.Unlock()
+
+	opCtx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(lifetime, cancel)
+	finish := func() {
+		stop()
+		cancel()
+		p.operations.Done()
+	}
+	return opCtx, finish, nil
+}
+
+func (p *Provider) retainCleanupHost(host rpcSessionHost) {
+	if host == nil {
+		return
+	}
+	p.mu.Lock()
+	p.cleanupHosts = append(p.cleanupHosts, host)
+	p.mu.Unlock()
+}
+
+func (p *Provider) closeSelectedRPCHost(host rpcSessionHost) error {
+	if host == nil {
+		return nil
+	}
+	if err := host.Close(context.Background()); err != nil {
+		if retryErr := host.Close(context.Background()); retryErr != nil {
+			p.retainCleanupHost(host)
+			return errors.New("agy RPC host cleanup failed")
+		}
+	}
+	return nil
+}
+
+func (p *Provider) validatedVersion() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.version
+}
+
+func (p *Provider) transportPolicy() string {
+	p.mu.Lock()
+	getenv := p.getenv
+	p.mu.Unlock()
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	return getenv("AVENOR_AGY_TRANSPORT")
+}
+
+func (p *Provider) selectTransport(ctx context.Context, opts runtime.StartOptions, resumeID, version string) (transportSelection, string, error) {
+	p.mu.Lock()
+	getenv := p.getenv
+	factory := p.rpcHostFactory
+	ptyFactory := p.ptyRPCHostFactory
+	p.mu.Unlock()
+	if factory == nil && ptyFactory != nil {
+		factory = func(ctx context.Context, opts runtime.StartOptions, resumeID, version string) (rpcSessionHost, error) {
+			return ptyFactory(ctx, opts, resumeID, version)
+		}
+	}
+	return selectTransport(ctx, getenv, opts, resumeID, version, factory)
+}
+
 func (p *Provider) adoptSessionID(provisionalID string, info sessionInfo, s *sessionState) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if existing := p.sessions[info.ConversationID]; existing != nil && existing != s {
-		return fmt.Errorf("agy: conversation_id %q is already active", info.ConversationID)
+		return errors.New("agy conversation is already active")
 	}
 
 	s.mu.Lock()
