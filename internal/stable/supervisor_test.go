@@ -2820,3 +2820,127 @@ func TestAnalyzeCommandPathsNoPaths(t *testing.T) {
 		t.Errorf("expected 0 resolved paths, got %v", resolved)
 	}
 }
+
+func TestRuntimeFanoutWriterStampsPathAnalysisOnPermissionRequest(t *testing.T) {
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-path-analysis.sock", MaxRuntimes: 1})
+	path := filepath.Join(t.TempDir(), "events.ndjson")
+	fileWriter, err := cli.NewEventWriter(path)
+	if err != nil {
+		t.Fatalf("NewEventWriter: %v", err)
+	}
+
+	child := &childRuntime{
+		id:          "rt_path",
+		runID:       sup.runID,
+		label:       "path-test",
+		dir:         "/tmp/agy-stage15-terra",
+		eventWriter: fileWriter,
+		done:        make(chan struct{}),
+		promptCh:    make(chan struct{}, 1),
+	}
+
+	writer := &runtimeFanoutWriter{
+		base:      fileWriter,
+		runtimeID: child.id,
+		child:     child,
+		control:   sup.control,
+		metadata:  cli.NewEventMetadata(sup.runID, child.label, child.id),
+	}
+
+	// Send a permission.request with a command that references a path inside cwd.
+	if err := writer.Write(events.Event{
+		Event:     "permission.request",
+		SessionID: "ses_path",
+		Fields: map[string]any{
+			"request_id": "req_path_1",
+			"kind":       "command",
+			"command":    "ls -la /tmp/agy-stage15-terra/probe-workdir",
+			"options":    []any{map[string]any{"optionId": "allow", "kind": "allow"}},
+		},
+	}); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	child.mu.Lock()
+	perm := child.permission
+	child.mu.Unlock()
+
+	if perm == nil {
+		t.Fatal("expected child.permission to be set")
+	}
+	// cwd must be stamped from child.dir.
+	if got, _ := perm["cwd"].(string); got != "/tmp/agy-stage15-terra" {
+		t.Errorf("cwd = %q, want /tmp/agy-stage15-terra", got)
+	}
+	// resolved_paths must contain the probe-workdir path.
+	resolved, _ := perm["resolved_paths"].([]string)
+	found := false
+	for _, p := range resolved {
+		if p == "/tmp/agy-stage15-terra/probe-workdir" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("resolved_paths = %v, expected to contain /tmp/agy-stage15-terra/probe-workdir", resolved)
+	}
+	// path_escapes_cwd must be explicitly set to false (not absent).
+	escapes, ok := perm["path_escapes_cwd"]
+	if !ok {
+		t.Error("path_escapes_cwd should be explicitly set, not absent")
+	}
+	if escapes != false {
+		t.Errorf("path_escapes_cwd = %v, want false", escapes)
+	}
+}
+
+func TestRuntimeFanoutWriterDetectsPathEscape(t *testing.T) {
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-path-escape.sock", MaxRuntimes: 1})
+	path := filepath.Join(t.TempDir(), "events.ndjson")
+	fileWriter, err := cli.NewEventWriter(path)
+	if err != nil {
+		t.Fatalf("NewEventWriter: %v", err)
+	}
+
+	child := &childRuntime{
+		id:          "rt_escape",
+		runID:       sup.runID,
+		label:       "escape-test",
+		dir:         "/tmp/agy-stage15-terra",
+		eventWriter: fileWriter,
+		done:        make(chan struct{}),
+		promptCh:    make(chan struct{}, 1),
+	}
+
+	writer := &runtimeFanoutWriter{
+		base:      fileWriter,
+		runtimeID: child.id,
+		child:     child,
+		control:   sup.control,
+		metadata:  cli.NewEventMetadata(sup.runID, child.label, child.id),
+	}
+
+	// Send a permission.request with a command that escapes cwd.
+	if err := writer.Write(events.Event{
+		Event:     "permission.request",
+		SessionID: "ses_escape",
+		Fields: map[string]any{
+			"request_id": "req_escape_1",
+			"kind":       "command",
+			"command":    "cat /etc/passwd",
+			"options":    []any{map[string]any{"optionId": "allow", "kind": "allow"}},
+		},
+	}); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	child.mu.Lock()
+	perm := child.permission
+	child.mu.Unlock()
+
+	if perm == nil {
+		t.Fatal("expected child.permission to be set")
+	}
+	if got, _ := perm["path_escapes_cwd"].(bool); !got {
+		t.Error("path_escapes_cwd should be true for /etc/passwd outside cwd")
+	}
+}

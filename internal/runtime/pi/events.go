@@ -2,6 +2,7 @@ package pi
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/sdougbrown/avenor/internal/events"
@@ -389,17 +390,19 @@ func extractToolCommand(payload map[string]any) string {
 // extractToolInput returns a string representation of the tool input
 // payload, useful as a fallback when a specific command field is not found.
 // The output is capped at 4KB to prevent large tool inputs from bloating
-// permission event metadata.
-func extractToolInput(payload map[string]any) string {
+// permission event metadata. Returns an error if JSON marshaling fails.
+func extractToolInput(payload map[string]any) (string, error) {
 	if input, ok := payload["input"].(string); ok && input != "" {
-		return truncateInput(input)
+		return truncateInput(input), nil
 	}
 	if inputMap, ok := payload["input"].(map[string]any); ok && len(inputMap) > 0 {
-		if b, err := json.Marshal(inputMap); err == nil {
-			return truncateInput(string(b))
+		b, err := json.Marshal(inputMap)
+		if err != nil {
+			return "", fmt.Errorf("marshal tool input: %w", err)
 		}
+		return truncateInput(string(b)), nil
 	}
-	return ""
+	return "", nil
 }
 
 const maxToolInputLen = 4096

@@ -755,7 +755,10 @@ func TestExtractToolCommandEmpty(t *testing.T) {
 
 func TestExtractToolInputString(t *testing.T) {
 	payload := map[string]any{"input": "some raw input"}
-	got := extractToolInput(payload)
+	got, err := extractToolInput(payload)
+	if err != nil {
+		t.Fatalf("extractToolInput error: %v", err)
+	}
 	if got != "some raw input" {
 		t.Errorf("extractToolInput = %q", got)
 	}
@@ -763,7 +766,10 @@ func TestExtractToolInputString(t *testing.T) {
 
 func TestExtractToolInputMap(t *testing.T) {
 	payload := map[string]any{"input": map[string]any{"command": "ls"}}
-	got := extractToolInput(payload)
+	got, err := extractToolInput(payload)
+	if err != nil {
+		t.Fatalf("extractToolInput error: %v", err)
+	}
 	if got != "{\"command\":\"ls\"}" {
 		t.Errorf("extractToolInput = %q", got)
 	}
@@ -771,7 +777,10 @@ func TestExtractToolInputMap(t *testing.T) {
 
 func TestExtractToolInputEmpty(t *testing.T) {
 	payload := map[string]any{"toolName": "bash"}
-	got := extractToolInput(payload)
+	got, err := extractToolInput(payload)
+	if err != nil {
+		t.Fatalf("extractToolInput error: %v", err)
+	}
 	if got != "" {
 		t.Errorf("extractToolInput = %q, want empty", got)
 	}
@@ -835,7 +844,10 @@ func TestTranslateExtensionUIInputPassthroughExtraFields(t *testing.T) {
 func TestExtractToolInputTruncation(t *testing.T) {
 	long := strings.Repeat("x", maxToolInputLen+100)
 	payload := map[string]any{"input": long}
-	got := extractToolInput(payload)
+	got, err := extractToolInput(payload)
+	if err != nil {
+		t.Fatalf("extractToolInput error: %v", err)
+	}
 	if len(got) != maxToolInputLen+len("...[truncated]") {
 		t.Errorf("extractToolInput len = %d, want %d", len(got), maxToolInputLen+len("...[truncated]"))
 	}

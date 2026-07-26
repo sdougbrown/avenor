@@ -493,7 +493,9 @@ func (c *client) enrichWithToolContext(ev *events.Event) {
 		}
 	}
 	if _, hasInput := ev.Fields["input"]; !hasInput {
-		if input := extractToolInput(toolPayload); input != "" {
+		if input, err := extractToolInput(toolPayload); err != nil {
+			c.stderr.Append(fmt.Sprintf("enrichWithToolContext: %v", err))
+		} else if input != "" {
 			ev.Fields["input"] = input
 		}
 	}
