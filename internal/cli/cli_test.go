@@ -1488,7 +1488,7 @@ func TestControlPermissionResolution(t *testing.T) {
 			"question":   "Allow?",
 			"options": []any{
 				map[string]any{"optionId": "deny", "kind": "reject"},
-				map[string]any{"optionId": "allow_x", "kind": "allow"},
+				map[string]any{"optionId": "allow_x", "kind": "allow", "requiresMessage": true},
 			},
 		},
 	}
@@ -1530,8 +1530,25 @@ func TestControlPermissionResolution(t *testing.T) {
 
 	waitForPendingPermissionForTest(t, cs)
 
-	// Answer the pending permission via the control socket.
-	params, _ := json.Marshal(control.PermissionAnswer{RequestID: "req_ctrl", OptionID: "allow_x"})
+	// A missing required write-in is rejected without consuming the claim.
+	emptyParams, _ := json.Marshal(control.PermissionAnswer{RequestID: "req_ctrl", OptionID: "allow_x"})
+	emptyRequest := control.Request{JSONRPC: "2.0", ID: 0, Method: "answer_permission", Params: emptyParams}
+	emptyBytes, _ := json.Marshal(emptyRequest)
+	if _, err := ctrlConn.Write(append(emptyBytes, '\n')); err != nil {
+		t.Fatalf("write empty answer_permission: %v", err)
+	}
+	_ = ctrlConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	scanner := bufio.NewScanner(ctrlConn)
+	if !scanner.Scan() {
+		t.Fatal("no response to empty answer_permission")
+	}
+	var emptyResponse control.Response
+	if err := json.Unmarshal(scanner.Bytes(), &emptyResponse); err != nil || emptyResponse.Error == nil {
+		t.Fatalf("empty write-in response = %#v, %v", emptyResponse, err)
+	}
+
+	// A valid write-in can still answer the same pending claim.
+	params, _ := json.Marshal(control.PermissionAnswer{RequestID: "req_ctrl", OptionID: "allow_x", Message: "typed response"})
 	req := control.Request{JSONRPC: "2.0", ID: 1, Method: "answer_permission", Params: params}
 	b, _ := json.Marshal(req)
 	b = append(b, '\n')
@@ -1540,7 +1557,6 @@ func TestControlPermissionResolution(t *testing.T) {
 	}
 
 	_ = ctrlConn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	scanner := bufio.NewScanner(ctrlConn)
 	if !scanner.Scan() {
 		t.Fatal("no response to answer_permission")
 	}
@@ -1562,8 +1578,13 @@ func TestControlPermissionResolution(t *testing.T) {
 	if provider.answerRequestID != "req_ctrl" {
 		t.Fatalf("answerRequestID = %q, want req_ctrl", provider.answerRequestID)
 	}
-	if !provider.answerResponse.Allow {
-		t.Fatal("answerResponse.Allow = false, want true")
+	if !provider.answerResponse.Allow || provider.answerResponse.Message != "typed response" {
+		t.Fatalf("answerResponse = %#v", provider.answerResponse)
+	}
+	for _, event := range readEventLogForTest(t, eventsPath) {
+		if _, leaked := event.Fields["message"]; leaked {
+			t.Fatalf("permission message leaked to event log: %#v", event)
+		}
 	}
 }
 
@@ -1959,7 +1980,7 @@ func TestPermissionRequestRejectsExistingDirectDeliveryBeforePublishing(t *testi
 	}
 
 	cs := control.NewServer(control.NewState("run_1", "", 0))
-	if !cs.PreparePermissionClaim("rt_1", "req_reused", control.PermissionResolverNoResolver) {
+	if !cs.PreparePermissionClaim("rt_1", "req_reused", control.PermissionResolverNoResolver, nil) {
 		t.Fatal("PreparePermissionClaim returned false")
 	}
 	if got := cs.DeliverPendingPermission("rt_1", "req_reused", "allow", ""); got != control.PermissionAnswerNoResolver {
@@ -2048,7 +2069,7 @@ func TestPermissionRequestRejectsExistingNoResolverBeforePublishing(t *testing.T
 		t.Fatalf("newEventWriter: %v", err)
 	}
 	cs := control.NewServer(control.NewState("run_1", "", 0))
-	if !cs.PreparePermissionClaim("rt_1", "req_reused", control.PermissionResolverNoResolver) {
+	if !cs.PreparePermissionClaim("rt_1", "req_reused", control.PermissionResolverNoResolver, nil) {
 		t.Fatal("PreparePermissionClaim returned false")
 	}
 
@@ -2376,7 +2397,7 @@ func TestLateControlAnswerIsBlockedWhileFileResolverOwnsRequest(t *testing.T) {
 			},
 		},
 	}
-	cs.PreparePermissionClaim("rt_file", "0", control.PermissionResolverReserved)
+	cs.PreparePermissionClaim("rt_file", "0", control.PermissionResolverReserved, nil)
 	go func() {
 		resultCh <- resolvePermission(ctx, provider, handler, cs, event, "ses_file", "rt_file", "0", false, time.Millisecond, nil)
 	}()
@@ -2407,7 +2428,7 @@ func TestLateControlAnswerIsBlockedWhileFileResolverOwnsRequest(t *testing.T) {
 
 func TestFailedAutomaticPermissionRemovesClaim(t *testing.T) {
 	cs := control.NewServer(control.NewState("run_1", "", 0))
-	cs.PreparePermissionClaim("rt_auto", "0", control.PermissionResolverAutomatic)
+	cs.PreparePermissionClaim("rt_auto", "0", control.PermissionResolverAutomatic, nil)
 	provider := &errorFakeProvider{answerErr: errors.New("answer failed")}
 	event := events.Event{
 		Event:     "permission.request",

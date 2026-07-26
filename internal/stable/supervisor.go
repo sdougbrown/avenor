@@ -1440,6 +1440,7 @@ func (s *Supervisor) answerPermission(rtID, requestID, optionID, message string)
 	}
 
 	kind := ""
+	requiresMessage := false
 	found := false
 	for _, opt := range options {
 		m, ok := opt.(map[string]any)
@@ -1450,12 +1451,16 @@ func (s *Supervisor) answerPermission(rtID, requestID, optionID, message string)
 		if oid == optionID {
 			k, _ := m["kind"].(string)
 			kind = permission.NormalizeOptionKind(k)
+			requiresMessage, _ = m["requiresMessage"].(bool)
 			found = true
 			break
 		}
 	}
 	if !found {
 		return fmt.Errorf("unknown option_id %q for request %q on runtime %q", optionID, requestID, rtID)
+	}
+	if requiresMessage && message == "" {
+		return fmt.Errorf("option_id %q for request %q requires a message", optionID, requestID)
 	}
 	switch kind {
 	case "allow", "reject":
@@ -1484,6 +1489,8 @@ func (s *Supervisor) answerPermission(rtID, requestID, optionID, message string)
 	case control.PermissionAnswerNoResolver:
 		// No control, automatic, or file resolver owns this request. The direct
 		// provider path below is the only remaining way to answer it.
+	case control.PermissionAnswerInvalid:
+		return fmt.Errorf("permission request %q for runtime %q rejected an invalid answer", requestID, rtID)
 	}
 
 	// A request emitted without any configured resolver remains backend-owned.

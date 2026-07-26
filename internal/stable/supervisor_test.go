@@ -1088,6 +1088,7 @@ func (p *stableFakeProvider) Capabilities(context.Context) (runtime.Capabilities
 type permRecordingProvider struct {
 	lastAllow    bool
 	lastOptionID string
+	lastMessage  string
 	called       bool
 }
 
@@ -1187,6 +1188,7 @@ func (p *permRecordingProvider) AnswerPermission(_ context.Context, _ string, _ 
 	p.called = true
 	p.lastAllow = resp.Allow
 	p.lastOptionID = resp.OptionID
+	p.lastMessage = resp.Message
 	return nil
 }
 func (p *permRecordingProvider) Capabilities(context.Context) (runtime.Capabilities, error) {
@@ -1556,6 +1558,34 @@ func TestAnswerPermissionRejectsUnknownOptionIDWithoutConsumingCache(t *testing.
 	}
 }
 
+func TestAnswerPermissionRequiresWriteInBeforeConsumingClaim(t *testing.T) {
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-answer-write-in.sock", MaxRuntimes: 1, PermissionClaimTimeout: 5 * time.Second})
+	provider := &permRecordingProvider{}
+	sup.runtimes["rt_write"] = &childRuntime{id: "rt_write", provider: provider, session: runtime.Session{SessionID: "ses_write"}, done: make(chan struct{}), promptCh: make(chan struct{}, 1)}
+	cachePermissionOptionsThroughFanout(t, sup, "rt_write", events.Event{Event: "permission.request", Fields: map[string]any{
+		"request_id": "req_write",
+		"options":    []any{map[string]any{"optionId": "other", "kind": "allow", "requiresMessage": true}},
+	}})
+	if !sup.control.PreparePermissionClaim("rt_write", "req_write", control.PermissionResolverNoResolver, nil) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+	if err := sup.answerPermission("rt_write", "req_write", "other", ""); err == nil {
+		t.Fatal("empty required write-in succeeded")
+	}
+	if provider.called {
+		t.Fatal("provider called for empty write-in")
+	}
+	if _, ok := sup.permOptions["rt_write:req_write"]; !ok {
+		t.Fatal("empty write-in consumed cached request")
+	}
+	if err := sup.answerPermission("rt_write", "req_write", "other", "typed response"); err != nil {
+		t.Fatalf("write-in answer: %v", err)
+	}
+	if !provider.called || provider.lastMessage != "typed response" {
+		t.Fatalf("provider write-in called=%v message=%q", provider.called, provider.lastMessage)
+	}
+}
+
 func TestAnswerPermissionUsesActiveControlClaim(t *testing.T) {
 	sup := NewSupervisor(Config{
 		ControlSocket:          "/tmp/test-answer-claim.sock",
@@ -1808,7 +1838,7 @@ func TestAnswerPermissionRejectsLateAnswerOwnedByFileResolver(t *testing.T) {
 			},
 		},
 	})
-	sup.control.PreparePermissionClaim("rt_file", "0", control.PermissionResolverFile)
+	sup.control.PreparePermissionClaim("rt_file", "0", control.PermissionResolverFile, nil)
 
 	if err := sup.answerPermission("rt_file", "0", "always", ""); err == nil {
 		t.Fatal("late stable answer succeeded while file resolver owned the request")
@@ -1880,7 +1910,7 @@ func TestAnswerPermissionMapsAllowByKind(t *testing.T) {
 			},
 		},
 	})
-	sup.control.PreparePermissionClaim("rt_kind", "req_kind", control.PermissionResolverNoResolver)
+	sup.control.PreparePermissionClaim("rt_kind", "req_kind", control.PermissionResolverNoResolver, nil)
 
 	if err := sup.answerPermission("rt_kind", "req_kind", "yes_please", ""); err != nil {
 		t.Fatalf("answerPermission allow: %v", err)
@@ -1909,7 +1939,7 @@ func TestAnswerPermissionMapsAllowByKind(t *testing.T) {
 			},
 		},
 	})
-	sup.control.PreparePermissionClaim("rt_kind", "req_kind", control.PermissionResolverNoResolver)
+	sup.control.PreparePermissionClaim("rt_kind", "req_kind", control.PermissionResolverNoResolver, nil)
 
 	if err := sup.answerPermission("rt_kind", "req_kind", "nope_please", ""); err != nil {
 		t.Fatalf("answerPermission reject: %v", err)
@@ -1948,7 +1978,7 @@ func TestAnswerPermissionClearsCacheEntry(t *testing.T) {
 			},
 		},
 	})
-	sup.control.PreparePermissionClaim("rt_clear", "req_clear", control.PermissionResolverNoResolver)
+	sup.control.PreparePermissionClaim("rt_clear", "req_clear", control.PermissionResolverNoResolver, nil)
 
 	if err := sup.answerPermission("rt_clear", "req_clear", "ok", ""); err != nil {
 		t.Fatalf("answerPermission: %v", err)
@@ -1987,7 +2017,7 @@ func TestAnswerPermissionNoResolverAllowsOnlyOneConcurrentProviderCall(t *testin
 			},
 		},
 	})
-	if !sup.control.PreparePermissionClaim("rt_direct", "req_direct", control.PermissionResolverNoResolver) {
+	if !sup.control.PreparePermissionClaim("rt_direct", "req_direct", control.PermissionResolverNoResolver, nil) {
 		t.Fatal("PreparePermissionClaim returned false")
 	}
 
@@ -2061,7 +2091,7 @@ func TestAnswerPermissionNoResolverRetriesAfterProviderError(t *testing.T) {
 			},
 		},
 	})
-	if !sup.control.PreparePermissionClaim("rt_retry", "req_retry", control.PermissionResolverNoResolver) {
+	if !sup.control.PreparePermissionClaim("rt_retry", "req_retry", control.PermissionResolverNoResolver, nil) {
 		t.Fatal("PreparePermissionClaim returned false")
 	}
 
@@ -2095,7 +2125,7 @@ func TestDirectPermissionCleanupBlocksReuseUntilOldOptionsAreDeleted(t *testing.
 	sup.permOptions[key] = []any{
 		map[string]any{"optionId": "old", "kind": "allow"},
 	}
-	if !sup.control.PreparePermissionClaim("rt_reuse", "req_reuse", control.PermissionResolverNoResolver) {
+	if !sup.control.PreparePermissionClaim("rt_reuse", "req_reuse", control.PermissionResolverNoResolver, nil) {
 		t.Fatal("PreparePermissionClaim returned false")
 	}
 	if got := sup.control.DeliverPendingPermission("rt_reuse", "req_reuse", "old", ""); got != control.PermissionAnswerNoResolver {
@@ -2123,7 +2153,7 @@ func TestDirectPermissionCleanupBlocksReuseUntilOldOptionsAreDeleted(t *testing.
 
 	replacementAttempt := make(chan bool, 1)
 	go func() {
-		prepared := sup.control.PreparePermissionClaim("rt_reuse", "req_reuse", control.PermissionResolverNoResolver)
+		prepared := sup.control.PreparePermissionClaim("rt_reuse", "req_reuse", control.PermissionResolverNoResolver, nil)
 		if prepared {
 			sup.cachePermissionOptions("rt_reuse", "req_reuse", []any{
 				map[string]any{"optionId": "new", "kind": "reject"},
@@ -2146,7 +2176,7 @@ func TestDirectPermissionCleanupBlocksReuseUntilOldOptionsAreDeleted(t *testing.
 		t.Fatal("production cleanup did not complete")
 	}
 
-	if !sup.control.PreparePermissionClaim("rt_reuse", "req_reuse", control.PermissionResolverNoResolver) {
+	if !sup.control.PreparePermissionClaim("rt_reuse", "req_reuse", control.PermissionResolverNoResolver, nil) {
 		t.Fatal("replacement could not prepare after old cleanup")
 	}
 	replacement := []any{

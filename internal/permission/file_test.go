@@ -232,6 +232,19 @@ func TestReadResponseMapping(t *testing.T) {
 			wantOptID: "deny_fh",
 		},
 		{
+			name:       "required write-in rejects empty message",
+			json:       `{"outcome":"selected","option_id":"other"}`,
+			options:    []any{map[string]any{"optionId": "other", "kind": "allow", "requiresMessage": true}},
+			wantErrMsg: `permission option_id "other" requires a message`,
+		},
+		{
+			name:      "required write-in accepts message",
+			json:      `{"outcome":"selected","option_id":"other","message":"typed"}`,
+			options:   []any{map[string]any{"optionId": "other", "kind": "allow", "requiresMessage": true}},
+			wantAllow: true,
+			wantOptID: "other",
+		},
+		{
 			name:       "unknown option id errors",
 			json:       `{"outcome":"selected","option_id":"custom_deny"}`,
 			options:    []any{map[string]any{"optionId": "allow_fh", "kind": "allow"}},
@@ -348,13 +361,7 @@ func TestFileHandlerRejectsOversizedMessage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	raw, err := readResponse(permBase + ".req.response")
-	if err != nil {
-		t.Fatalf("readResponse: %v", err)
-	}
-
-	_, err = permissionResponseFromRequest(req["options"], raw, "allow")
-	if err == nil {
-		t.Fatal("oversized message should be rejected")
+	if _, err := readResponse(permBase + ".req.response"); err == nil {
+		t.Fatal("oversized message should be rejected during strict decode")
 	}
 }

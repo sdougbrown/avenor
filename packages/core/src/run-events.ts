@@ -6,6 +6,7 @@ export interface RunPermissionOption {
   option_id: string
   label: string
   kind: string
+  requires_message?: boolean
 }
 
 export interface RunPermissionSummary {
@@ -92,10 +93,11 @@ function normalizePermissionOptions(value: unknown): RunPermissionOption[] {
     const record = asRecord(item)
     if (!record) continue
     const option_id = stringField(record, 'option_id', 'optionId') ?? ''
-    const label = stringField(record, 'label') ?? option_id
+    const label = stringField(record, 'label', 'name') ?? option_id
     const kind = stringField(record, 'kind') ?? ''
+    const requires_message = record.requires_message === true || record.requiresMessage === true
     if (!option_id && !label && !kind) continue
-    options.push({ option_id, label, kind })
+    options.push({ option_id, label, kind, ...(requires_message && { requires_message: true }) })
   }
   return options
 }

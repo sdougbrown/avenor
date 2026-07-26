@@ -169,13 +169,13 @@ func assertFields(t *testing.T, structName string, allowed, required []string) {
 			t.Errorf("%s: fields not populated correctly", structName)
 		}
 	case "permissionArgs":
-		data := map[string]any{"run_id": "r", "option_id": "o", "request_id": "req", "supervisor_id": "s"}
+		data := map[string]any{"run_id": "r", "option_id": "o", "request_id": "req", "supervisor_id": "s", "message": "typed"}
 		b, _ := json.Marshal(data)
 		var a permissionArgs
 		if err := json.Unmarshal(b, &a); err != nil {
 			t.Fatalf("%s: unmarshal: %v", structName, err)
 		}
-		if a.RunID != "r" || a.OptionID != "o" || a.RequestID != "req" || a.SupervisorID != "s" {
+		if a.RunID != "r" || a.OptionID != "o" || a.RequestID != "req" || a.SupervisorID != "s" || a.Message != "typed" {
 			t.Errorf("%s: fields not populated correctly", structName)
 		}
 	case "followUpArgs":
@@ -348,6 +348,13 @@ func assertMissingRequiredFieldsRemainZero(t *testing.T, structName string, requ
 // registers exactly 7 tools with the correct names, matching the
 // TypeScript MCP tool surface. Uses in-process server inspection
 // instead of spawning a subprocess.
+func TestPermissionArgsRejectsUnpairedSurrogateMessage(t *testing.T) {
+	var args permissionArgs
+	if err := json.Unmarshal([]byte(`{"run_id":"r","option_id":"o","message":"\uD800"}`), &args); err == nil {
+		t.Fatal("permissionArgs accepted malformed write-in")
+	}
+}
+
 func TestMCPStdioHandshake(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")

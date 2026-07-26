@@ -100,8 +100,12 @@ func TestInteractionBridgeQuestionOptionAndWriteIn(t *testing.T) {
 			bridge := newInteractionTestBridge(t, &current, &sent)
 			event := bridge.Observe(trajectoryStepKey{trajectoryID: "raw-trajectory", index: 9}, current, false)[0]
 			options := event.Fields["options"].([]any)
-			if len(options) != 1 || event.Fields["requires_user_input"] != true {
+			if len(options) != 2 || event.Fields["requires_user_input"] != true {
 				t.Fatalf("question event shape = %#v", event.Fields)
+			}
+			writeInOption := options[1].(map[string]any)
+			if writeInOption["name"] != "Other" || writeInOption["requiresMessage"] != true || writeInOption["optionId"] != interactionWriteInID(t, bridge) {
+				t.Fatalf("write-in option = %#v", writeInOption)
 			}
 			optionID := options[0].(map[string]any)["optionId"].(string)
 			if optionID == "raw-option-id" {
@@ -331,7 +335,7 @@ func TestInteractionBridgeRejectsInvalidAnswerBeforeEviction(t *testing.T) {
 		if err := bridge.Answer(context.Background(), requestID, runtime.PermissionResponse{Allow: true, OptionID: writeInID, Message: ""}); err != errInteractionRejected {
 			t.Fatalf("empty write-in error = %v, want rejected", err)
 		}
-		if err := bridge.Answer(context.Background(), requestID, runtime.PermissionResponse{Allow: true, OptionID: writeInID, Message: strings.Repeat("x", maxInteractionText+1)}); err != errInteractionRejected {
+		if err := bridge.Answer(context.Background(), requestID, runtime.PermissionResponse{Allow: true, OptionID: writeInID, Message: strings.Repeat("x", runtime.MaxPermissionMessageBytes+1)}); err != errInteractionRejected {
 			t.Fatalf("oversized write-in error = %v, want rejected", err)
 		}
 		if len(sent) != 0 {

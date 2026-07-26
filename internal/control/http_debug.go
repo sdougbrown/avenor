@@ -13,6 +13,8 @@ import (
 	"os"
 	"strings"
 	"sync/atomic"
+
+	"github.com/sdougbrown/avenor/internal/runtime"
 )
 
 var ErrRuntimeNotFound = errors.New("runtime not found")
@@ -375,6 +377,10 @@ func (h *HTTPDebugServer) handleAnswerPermission(w http.ResponseWriter, r *http.
 	var p PermissionAnswer
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	if err := runtime.ValidatePermissionMessage(p.Message); err != nil {
+		http.Error(w, "invalid permission message", http.StatusBadRequest)
 		return
 	}
 	if !h.control.AnswerPendingPermission("", p.RequestID, p.OptionID, p.Message) {

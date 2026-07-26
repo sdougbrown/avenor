@@ -114,8 +114,9 @@ function normalizePermission(raw: Record<string, unknown> | null | undefined): S
           if (!record) return null
           return {
             option_id: stringField(record, 'option_id', 'optionId') ?? '',
-            label: stringField(record, 'label') ?? '',
+            label: stringField(record, 'label', 'name') ?? '',
             kind: stringField(record, 'kind') ?? '',
+            ...((record.requires_message === true || record.requiresMessage === true) && { requires_message: true }),
           }
         })
         .filter((item): item is NonNullable<typeof item> => item !== null)
@@ -192,7 +193,7 @@ export interface StatusResult {
   pending_permission?: {
     request_id: string
     description: string
-    options: Array<{ option_id: string; label: string; kind: string }>
+    options: Array<{ option_id: string; label: string; kind: string; requires_message?: boolean }>
   }
   session_id?: string
   stop_reason?: string

@@ -24,16 +24,6 @@ var (
 	errInteractionStale    = errors.New("agy interaction answer is stale")
 )
 
-// Stage18WriteInControlPlaneBlocker documents an architecture constraint
-// that this file cannot resolve alone: runtime.PermissionResponse already
-// supports Message, but Avenor control.PermissionAnswer and the MCP
-// answer-permission surface currently carry only OptionID. Therefore
-// write-in answers are typed/provider-direct only and not end-to-end
-// reachable through the current control plane. The bridge capability
-// and the typed Handle payload are kept here so that once the control
-// plane is extended to carry Message, the agy path is ready without
-// further schema work.
-
 type pendingInteraction struct {
 	requestID         string
 	key               trajectoryStepKey
@@ -205,7 +195,7 @@ func (b *interactionBridge) makePending(key trajectoryStepKey, generation uint32
 		// the generic permission auto-approver.
 		fields["requires_user_input"] = true
 		pending.question = make(map[string]string, len(entry.GetOptions()))
-		options := make([]any, 0, len(entry.GetOptions()))
+		options := make([]any, 0, len(entry.GetOptions())+1)
 		seenRaw := make(map[string]struct{}, len(entry.GetOptions()))
 		for _, option := range entry.GetOptions() {
 			if option == nil || !boundedInteractionText(option.GetId()) || !boundedInteractionText(option.GetText()) {
@@ -219,9 +209,13 @@ func (b *interactionBridge) makePending(key trajectoryStepKey, generation uint32
 			pending.question[localID] = option.GetId()
 			options = append(options, map[string]any{"optionId": localID, "kind": "allow", "name": option.GetText()})
 		}
-		// Keep the typed provider-direct write-in path ready, but do not expose a
-		// dead "Other" option until control.PermissionAnswer can carry Message.
 		pending.writeInID = "agy-write-in-" + uuid.NewString()
+		options = append(options, map[string]any{
+			"optionId":        pending.writeInID,
+			"kind":            "allow",
+			"name":            "Other",
+			"requiresMessage": true,
+		})
 		fields["question"] = entry.GetQuestion()
 		fields["options"] = options
 	default:
@@ -376,7 +370,7 @@ func (p *pendingInteraction) response(response runtime.PermissionResponse) (*agy
 			}
 			entry.SelectedOptionIds = []string{rawID}
 		} else if response.OptionID == p.writeInID {
-			if !boundedInteractionText(response.Message) {
+			if response.Message == "" || runtime.ValidatePermissionMessage(response.Message) != nil {
 				return nil, false
 			}
 			entry.WriteInResponse = response.Message

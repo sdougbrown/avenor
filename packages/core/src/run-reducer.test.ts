@@ -52,8 +52,11 @@ describe('RunReducer', () => {
       seq: 1,
       request_id: 'req-1',
       question: 'allow?',
-      options: [{ option_id: 'allow_once', label: 'Allow', kind: 'allow_once' }],
+      options: [{ optionId: 'write_in', name: 'Other', kind: 'allow', requiresMessage: true }],
     })
+    expect(reducer.snapshot().pending_permission?.options).toEqual([
+      { option_id: 'write_in', label: 'Other', kind: 'allow', requires_message: true },
+    ])
     reducer.apply({
       event: 'permission.response',
       runtime_id: 'rt-3',

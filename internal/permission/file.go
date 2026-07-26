@@ -152,6 +152,23 @@ type fileResponse struct {
 	Message  string `json:"message,omitempty"`
 }
 
+func (r *fileResponse) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		Outcome  string          `json:"outcome"`
+		OptionID string          `json:"option_id"`
+		Message  json.RawMessage `json:"message"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	message, err := runtime.DecodePermissionMessageJSON(wire.Message)
+	if err != nil {
+		return err
+	}
+	r.Outcome, r.OptionID, r.Message = wire.Outcome, wire.OptionID, message
+	return nil
+}
+
 func readResponse(path string) (fileResponse, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -177,12 +194,15 @@ func readResponse(path string) (fileResponse, error) {
 }
 
 func permissionResponseFromRequest(options any, response fileResponse, optionID string) (runtime.PermissionResponse, error) {
-	allow, err := permissionAllowFromOptions(options, optionID)
+	allow, requiresMessage, err := permissionOptionFromOptions(options, optionID)
 	if err != nil {
 		return runtime.PermissionResponse{}, err
 	}
 	if err := runtime.ValidatePermissionMessage(response.Message); err != nil {
 		return runtime.PermissionResponse{}, err
+	}
+	if requiresMessage && response.Message == "" {
+		return runtime.PermissionResponse{}, fmt.Errorf("permission option_id %q requires a message", optionID)
 	}
 	return runtime.PermissionResponse{
 		Allow:    allow,
@@ -191,10 +211,10 @@ func permissionResponseFromRequest(options any, response fileResponse, optionID 
 	}, nil
 }
 
-func permissionAllowFromOptions(options any, optionID string) (bool, error) {
+func permissionOptionFromOptions(options any, optionID string) (bool, bool, error) {
 	list, ok := options.([]any)
 	if !ok {
-		return false, fmt.Errorf("permission request options must be an array, got %T", options)
+		return false, false, fmt.Errorf("permission request options must be an array, got %T", options)
 	}
 	for _, opt := range list {
 		m, ok := opt.(map[string]any)
@@ -206,16 +226,17 @@ func permissionAllowFromOptions(options any, optionID string) (bool, error) {
 			continue
 		}
 		kind, _ := m["kind"].(string)
+		requiresMessage, _ := m["requiresMessage"].(bool)
 		switch NormalizeOptionKind(kind) {
 		case "allow":
-			return true, nil
+			return true, requiresMessage, nil
 		case "reject":
-			return false, nil
+			return false, requiresMessage, nil
 		default:
-			return false, fmt.Errorf("unsupported permission option kind %q for option_id %q", kind, optionID)
+			return false, false, fmt.Errorf("unsupported permission option kind %q for option_id %q", kind, optionID)
 		}
 	}
-	return false, fmt.Errorf("unknown permission option_id %q", optionID)
+	return false, false, fmt.Errorf("unknown permission option_id %q", optionID)
 }
 
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {

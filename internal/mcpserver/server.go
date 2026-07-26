@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -19,6 +20,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sdougbrown/avenor/client"
+	"github.com/sdougbrown/avenor/internal/runtime"
 )
 
 type ControlClient interface {
@@ -28,6 +30,9 @@ type ControlClient interface {
 	Shutdown(mode string) error
 	Close() error
 	AnswerPermission(runtimeID, requestID, optionID string) error
+}
+
+type messagePermissionControlClient interface {
 	AnswerPermissionWithMessage(runtimeID, requestID, optionID, message string) error
 }
 
@@ -97,6 +102,26 @@ type permissionArgs struct {
 	RequestID    string `json:"request_id,omitempty" jsonschema:"optional request ID (auto-detected if omitted)"`
 	SupervisorID string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
 	Message      string `json:"message,omitempty" jsonschema:"optional write-in response text"`
+}
+
+func (p *permissionArgs) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		RunID        string          `json:"run_id"`
+		OptionID     string          `json:"option_id"`
+		RequestID    string          `json:"request_id"`
+		SupervisorID string          `json:"supervisor_id"`
+		Message      json.RawMessage `json:"message"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	message, err := runtime.DecodePermissionMessageJSON(wire.Message)
+	if err != nil {
+		return err
+	}
+	p.RunID, p.OptionID, p.Message = wire.RunID, wire.OptionID, message
+	p.RequestID, p.SupervisorID = wire.RequestID, wire.SupervisorID
+	return nil
 }
 
 type eventsArgs struct {
@@ -612,6 +637,9 @@ func (s *Server) handleAvenorShutdown(ctx context.Context, req *mcp.CallToolRequ
 }
 
 func (s *Server) handleAvenorAnswerPermission(ctx context.Context, req *mcp.CallToolRequest, args permissionArgs) (*mcp.CallToolResult, any, error) {
+	if err := runtime.ValidatePermissionMessage(args.Message); err != nil {
+		return nil, nil, err
+	}
 	ri := s.registry.Lookup(args.RunID)
 	supervisorID := args.SupervisorID
 	if supervisorID == "" && ri != nil {
@@ -655,8 +683,16 @@ func (s *Server) handleAvenorAnswerPermission(ctx context.Context, req *mcp.Call
 		}
 	}
 
-	if err := cl.AnswerPermissionWithMessage(runtimeID, requestID, args.OptionID, args.Message); err != nil {
-		return nil, nil, fmt.Errorf("answer_permission: %w", err)
+	var answerErr error
+	if args.Message == "" {
+		answerErr = cl.AnswerPermission(runtimeID, requestID, args.OptionID)
+	} else if messageClient, ok := cl.(messagePermissionControlClient); ok {
+		answerErr = messageClient.AnswerPermissionWithMessage(runtimeID, requestID, args.OptionID, args.Message)
+	} else {
+		answerErr = errors.New("control client does not support permission write-ins")
+	}
+	if answerErr != nil {
+		return nil, nil, fmt.Errorf("answer_permission: %w", answerErr)
 	}
 
 	return nil, map[string]any{"ok": true}, nil

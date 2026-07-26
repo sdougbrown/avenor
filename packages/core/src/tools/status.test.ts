@@ -165,7 +165,10 @@ describe('statusTool singleton registry', () => {
       permission: {
         request_id: 'req-7',
         description: 'Allow edit?',
-        options: [{ optionId: 'allow_once', label: 'Allow', kind: 'allow_once' }],
+        options: [
+          { optionId: 'allow_once', label: 'Allow', kind: 'allow_once' },
+          { optionId: 'write_in', name: 'Other', kind: 'allow', requiresMessage: true },
+        ],
       },
     })
 
@@ -189,7 +192,10 @@ describe('statusTool singleton registry', () => {
       pending_permission: {
         request_id: 'req-7',
         description: 'Allow edit?',
-        options: [{ option_id: 'allow_once', label: 'Allow', kind: 'allow_once' }],
+        options: [
+          { option_id: 'allow_once', label: 'Allow', kind: 'allow_once' },
+          { option_id: 'write_in', label: 'Other', kind: 'allow', requires_message: true },
+        ],
       },
       usage: { total_tokens: 12 },
     })

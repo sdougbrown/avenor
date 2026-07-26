@@ -954,7 +954,8 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 					case deps.FileHandler != nil:
 						state = control.PermissionResolverFile
 					}
-					claimConflict = !deps.ControlServer.PreparePermissionClaim(cfg.PermissionClaimScope, requestID, state)
+					options, _ := event.Fields["options"].([]any)
+					claimConflict = !deps.ControlServer.PreparePermissionClaim(cfg.PermissionClaimScope, requestID, state, options)
 				}
 				if claimConflict {
 					emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "permission", "another permission request is already pending", deps.Stderr, cfg.RunLabel)

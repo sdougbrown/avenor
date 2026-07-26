@@ -352,7 +352,7 @@ func TestPermissionClaimRejectsDuplicateAfterFirstAnswerIsDrained(t *testing.T) 
 
 func TestBeginPermissionClaimPreservesAnswerQueuedWhileReserved(t *testing.T) {
 	s := NewServer(NewState("run_1", "", 0))
-	if !s.PreparePermissionClaim("rt_1", "0", PermissionResolverReserved) {
+	if !s.PreparePermissionClaim("rt_1", "0", PermissionResolverReserved, nil) {
 		t.Fatal("PreparePermissionClaim returned false")
 	}
 	if got := s.DeliverPendingPermission("rt_1", "0", "allow", ""); got != PermissionAnswerDelivered {
@@ -374,7 +374,7 @@ func TestBeginPermissionClaimPreservesAnswerQueuedWhileReserved(t *testing.T) {
 
 func TestHandoffPermissionClaimAtomicallyConsumesQueuedAnswerOrTransfersToFile(t *testing.T) {
 	s := NewServer(NewState("run_1", "", 0))
-	if !s.PreparePermissionClaim("rt_1", "0", PermissionResolverReserved) {
+	if !s.PreparePermissionClaim("rt_1", "0", PermissionResolverReserved, nil) {
 		t.Fatal("prepare queued-answer claim failed")
 	}
 	if !s.AnswerPendingPermission("rt_1", "0", "allow", "") {
@@ -386,7 +386,7 @@ func TestHandoffPermissionClaimAtomicallyConsumesQueuedAnswerOrTransfersToFile(t
 	}
 	s.EndPermissionClaim("rt_1", "0")
 
-	if !s.PreparePermissionClaim("rt_1", "1", PermissionResolverReserved) {
+	if !s.PreparePermissionClaim("rt_1", "1", PermissionResolverReserved, nil) {
 		t.Fatal("prepare file-handoff claim failed")
 	}
 	if answer, answered := s.HandoffPermissionClaim("rt_1", "1", PermissionResolverFile); answered {
@@ -402,7 +402,7 @@ func TestHandoffPermissionClaimAtomicallyConsumesQueuedAnswerOrTransfersToFile(t
 
 func TestHandoffPermissionClaimAtomicallyClosesCancelledClaim(t *testing.T) {
 	s := NewServer(NewState("run_1", "", 0))
-	if !s.PreparePermissionClaim("rt_1", "0", PermissionResolverReserved) {
+	if !s.PreparePermissionClaim("rt_1", "0", PermissionResolverReserved, nil) {
 		t.Fatal("prepare claim failed")
 	}
 	if answer, answered := s.HandoffPermissionClaim("rt_1", "0", PermissionResolverResolved); answered {
@@ -418,10 +418,10 @@ func TestHandoffPermissionClaimAtomicallyClosesCancelledClaim(t *testing.T) {
 
 func TestPreparePermissionClaimRejectsExistingNoResolver(t *testing.T) {
 	s := NewServer(NewState("run_1", "", 0))
-	if !s.PreparePermissionClaim("rt_1", "0", PermissionResolverNoResolver) {
+	if !s.PreparePermissionClaim("rt_1", "0", PermissionResolverNoResolver, nil) {
 		t.Fatal("initial PreparePermissionClaim returned false")
 	}
-	if s.PreparePermissionClaim("rt_1", "0", PermissionResolverAutomatic) {
+	if s.PreparePermissionClaim("rt_1", "0", PermissionResolverAutomatic, nil) {
 		t.Fatal("second PreparePermissionClaim replaced live no-resolver claim")
 	}
 	if state := s.PermissionResolverState("rt_1", "0"); state != PermissionResolverNoResolver {
@@ -431,8 +431,8 @@ func TestPreparePermissionClaimRejectsExistingNoResolver(t *testing.T) {
 
 func TestClearPermissionClaimsRemovesOnlyRequestedScope(t *testing.T) {
 	s := NewServer(NewState("run_1", "", 0))
-	s.PreparePermissionClaim("rt_1", "0", PermissionResolverFile)
-	s.PreparePermissionClaim("rt_2", "0", PermissionResolverFile)
+	s.PreparePermissionClaim("rt_1", "0", PermissionResolverFile, nil)
+	s.PreparePermissionClaim("rt_2", "0", PermissionResolverFile, nil)
 	s.ClearPermissionClaims("rt_1")
 	if got := s.PermissionResolverState("rt_1", "0"); got != PermissionResolverUnknown {
 		t.Fatalf("rt_1 state = %v, want removed", got)
@@ -1506,7 +1506,7 @@ func TestPermissionClaimDisconnectChNotClosedWithClientsRemaining(t *testing.T) 
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	if !s.PreparePermissionClaim("rt_1", "req_1", PermissionResolverReserved) {
+	if !s.PreparePermissionClaim("rt_1", "req_1", PermissionResolverReserved, nil) {
 		t.Fatal("PreparePermissionClaim returned false")
 	}
 	_, disconnectCh, ok := s.BeginPermissionClaim("rt_1", "req_1")
@@ -1555,7 +1555,7 @@ func TestPermissionClaimDisconnectChFiresOnRealDisconnect(t *testing.T) {
 	}
 
 	// Prepare a Reserved claim (as resolvePermission would) then begin it.
-	if !s.PreparePermissionClaim("rt_1", "req_1", PermissionResolverReserved) {
+	if !s.PreparePermissionClaim("rt_1", "req_1", PermissionResolverReserved, nil) {
 		t.Fatal("PreparePermissionClaim returned false")
 	}
 	_, disconnectCh, ok := s.BeginPermissionClaim("rt_1", "req_1")
@@ -1595,11 +1595,18 @@ func TestPermissionClaimDisconnectChFiresOnRealDisconnect(t *testing.T) {
 	}
 }
 
+func TestPermissionAnswerRejectsUnpairedSurrogateMessage(t *testing.T) {
+	var answer PermissionAnswer
+	if err := json.Unmarshal([]byte(`{"request_id":"req","option_id":"other","message":"\uD800"}`), &answer); err == nil {
+		t.Fatal("PermissionAnswer accepted malformed write-in")
+	}
+}
+
 func TestPermissionAnswerPreservesMessage(t *testing.T) {
 	s := NewServer(NewState("run_msg", "", 0))
 
 	scope := "rt_msg"
-	s.PreparePermissionClaim(scope, "req_msg", PermissionResolverReserved)
+	s.PreparePermissionClaim(scope, "req_msg", PermissionResolverReserved, nil)
 	ch, _, ok := s.BeginPermissionClaim(scope, "req_msg")
 	if !ok {
 		t.Fatal("BeginPermissionClaim failed")
@@ -1623,11 +1630,40 @@ func TestPermissionAnswerPreservesMessage(t *testing.T) {
 	}
 }
 
+func TestDeliverPendingPermissionRequiresMessageWithoutConsumingClaim(t *testing.T) {
+	s := NewServer(NewState("run", "label", 0))
+	options := []any{map[string]any{"optionId": "other", "kind": "allow", "requiresMessage": true}}
+	if !s.PreparePermissionClaim("scope", "req", PermissionResolverReserved, options) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+	answers, _, ok := s.BeginPermissionClaim("scope", "req")
+	if !ok {
+		t.Fatal("BeginPermissionClaim returned false")
+	}
+	if got := s.DeliverPendingPermission("scope", "req", "other", ""); got != PermissionAnswerInvalid {
+		t.Fatalf("empty write-in delivery = %v", got)
+	}
+	if got := s.DeliverPendingPermission("scope", "req", "missing", "typed"); got != PermissionAnswerInvalid {
+		t.Fatalf("unknown option delivery = %v", got)
+	}
+	if got := s.DeliverPendingPermission("scope", "req", "other", "typed"); got != PermissionAnswerDelivered {
+		t.Fatalf("valid write-in delivery = %v", got)
+	}
+	select {
+	case answer := <-answers:
+		if answer.Message != "typed" || answer.OptionID != "other" {
+			t.Fatalf("answer = %#v", answer)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("valid write-in was not queued")
+	}
+}
+
 func TestDeliverPendingPermissionPreservesMessage(t *testing.T) {
 	s := NewServer(NewState("run_deliver", "", 0))
 
 	scope := "rt_deliver"
-	s.PreparePermissionClaim(scope, "req_deliver", PermissionResolverReserved)
+	s.PreparePermissionClaim(scope, "req_deliver", PermissionResolverReserved, nil)
 	_, _, ok := s.BeginPermissionClaim(scope, "req_deliver")
 	if !ok {
 		t.Fatal("BeginPermissionClaim failed")

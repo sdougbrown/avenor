@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"unicode/utf8"
 
@@ -58,6 +59,81 @@ func ValidatePermissionMessage(msg string) error {
 		return fmt.Errorf("permission message is not valid UTF-8")
 	}
 	return nil
+}
+
+// DecodePermissionMessageJSON decodes a JSON string without accepting the
+// replacement behavior encoding/json applies to malformed UTF-8 or unpaired
+// UTF-16 surrogate escapes.
+func DecodePermissionMessageJSON(raw json.RawMessage) (string, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return "", nil
+	}
+	if !utf8.Valid(raw) || !validJSONSurrogatePairs(raw) {
+		return "", fmt.Errorf("permission message is not valid UTF-8")
+	}
+	var message string
+	if err := json.Unmarshal(raw, &message); err != nil {
+		return "", fmt.Errorf("permission message is not a JSON string")
+	}
+	if err := ValidatePermissionMessage(message); err != nil {
+		return "", err
+	}
+	return message, nil
+}
+
+func validJSONSurrogatePairs(raw []byte) bool {
+	for i := 0; i < len(raw); i++ {
+		if raw[i] != '\\' {
+			continue
+		}
+		i++
+		if i >= len(raw) {
+			return false
+		}
+		if raw[i] != 'u' {
+			continue
+		}
+		value, ok := jsonHexWord(raw, i+1)
+		if !ok {
+			return false
+		}
+		i += 4
+		switch {
+		case value >= 0xD800 && value <= 0xDBFF:
+			if i+6 >= len(raw) || raw[i+1] != '\\' || raw[i+2] != 'u' {
+				return false
+			}
+			low, ok := jsonHexWord(raw, i+3)
+			if !ok || low < 0xDC00 || low > 0xDFFF {
+				return false
+			}
+			i += 6
+		case value >= 0xDC00 && value <= 0xDFFF:
+			return false
+		}
+	}
+	return true
+}
+
+func jsonHexWord(raw []byte, offset int) (uint16, bool) {
+	if offset < 0 || offset+4 > len(raw) {
+		return 0, false
+	}
+	var value uint16
+	for _, char := range raw[offset : offset+4] {
+		value <<= 4
+		switch {
+		case char >= '0' && char <= '9':
+			value |= uint16(char - '0')
+		case char >= 'a' && char <= 'f':
+			value |= uint16(char-'a') + 10
+		case char >= 'A' && char <= 'F':
+			value |= uint16(char-'A') + 10
+		default:
+			return 0, false
+		}
+	}
+	return value, true
 }
 
 // PermissionResponse is the response to a permission request.

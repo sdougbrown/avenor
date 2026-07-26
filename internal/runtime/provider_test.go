@@ -3,7 +3,6 @@ package runtime
 import (
 	"strings"
 	"testing"
-	"unicode/utf8"
 )
 
 func TestValidatePermissionMessageEmpty(t *testing.T) {
@@ -57,6 +56,25 @@ func TestValidatePermissionMessagePreservesText(t *testing.T) {
 	if MaxPermissionMessageBytes != 64<<10 {
 		t.Errorf("MaxPermissionMessageBytes = %d, want %d", MaxPermissionMessageBytes, 64<<10)
 	}
-	// Verify UTF-8 import is used (not a real test, just prevents unused import)
-	_ = utf8.Valid
+}
+
+func TestDecodePermissionMessageJSONRejectsMalformedText(t *testing.T) {
+	for _, raw := range [][]byte{
+		[]byte{'"', 0xff, '"'},
+		[]byte(`"\uD800"`),
+		[]byte(`"\uDC00"`),
+		[]byte(`"\uD800x"`),
+	} {
+		if _, err := DecodePermissionMessageJSON(raw); err == nil {
+			t.Fatalf("malformed JSON message accepted: %q", raw)
+		}
+	}
+	message, err := DecodePermissionMessageJSON([]byte(`"\uD83D\uDE00"`))
+	if err != nil || message != "😀" {
+		t.Fatalf("surrogate pair = %q, %v", message, err)
+	}
+	message, err = DecodePermissionMessageJSON([]byte(`"\\uD800"`))
+	if err != nil || message != `\uD800` {
+		t.Fatalf("escaped literal = %q, %v", message, err)
+	}
 }
