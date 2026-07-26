@@ -995,6 +995,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
         option_id: Type.String({ description: 'allow_once | allow_always | deny' }),
         request_id: Type.Optional(Type.String({ description: 'Permission request ID (auto-discovered if omitted)' })),
         supervisor_id: Type.Optional(Type.String({ description: 'Reuse an existing supervisor by socket path' })),
+        message: Type.Optional(Type.String({ description: 'Optional write-in response text. Required only when the selected option declares requiresMessage: true.' })),
       }),
       async execute(_toolCallId, params) {
         const result = await deps.answerPermissionTool({
@@ -1002,6 +1003,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
           optionId: params.option_id,
           requestId: params.request_id,
           supervisorId: params.supervisor_id,
+          message: params.message,
         })
         return {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],

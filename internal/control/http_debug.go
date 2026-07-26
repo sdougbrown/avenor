@@ -377,7 +377,7 @@ func (h *HTTPDebugServer) handleAnswerPermission(w http.ResponseWriter, r *http.
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
-	if !h.control.AnswerPendingPermission("", p.RequestID, p.OptionID) {
+	if !h.control.AnswerPendingPermission("", p.RequestID, p.OptionID, p.Message) {
 		http.Error(w, "no pending permission", http.StatusConflict)
 		return
 	}

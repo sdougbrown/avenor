@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -286,5 +287,74 @@ func TestReadResponseMapping(t *testing.T) {
 				t.Errorf("optionID = %q, want %q", raw.OptionID, tt.wantOptID)
 			}
 		})
+	}
+}
+
+func TestFileHandlerPreservesMessage(t *testing.T) {
+	dir := t.TempDir()
+	permBase := filepath.Join(dir, "perm")
+
+	// Write a request file with options.
+	req := map[string]any{
+		"options": []any{
+			map[string]any{"optionId": "allow", "kind": "allow"},
+			map[string]any{"optionId": "deny", "kind": "reject"},
+		},
+	}
+	reqData, _ := json.Marshal(req)
+	if err := os.WriteFile(permBase+".req", reqData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a response with a message.
+	resp := fileResponse{Outcome: "selected", OptionID: "allow", Message: "approved with caveat"}
+	respData, _ := json.Marshal(resp)
+	if err := os.WriteFile(permBase+".req.response", respData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := readResponse(permBase + ".req.response")
+	if err != nil {
+		t.Fatalf("readResponse: %v", err)
+	}
+
+	pr, err := permissionResponseFromRequest(req["options"], raw, "allow")
+	if err != nil {
+		t.Fatalf("permissionResponseFromRequest: %v", err)
+	}
+	if pr.Message != "approved with caveat" {
+		t.Errorf("Message = %q, want 'approved with caveat'", pr.Message)
+	}
+}
+
+func TestFileHandlerRejectsOversizedMessage(t *testing.T) {
+	dir := t.TempDir()
+	permBase := filepath.Join(dir, "perm")
+
+	req := map[string]any{
+		"options": []any{
+			map[string]any{"optionId": "allow", "kind": "allow"},
+		},
+	}
+	reqData, _ := json.Marshal(req)
+	if err := os.WriteFile(permBase+".req", reqData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	longMsg := strings.Repeat("x", runtime.MaxPermissionMessageBytes+1)
+	resp := fileResponse{Outcome: "selected", OptionID: "allow", Message: longMsg}
+	respData, _ := json.Marshal(resp)
+	if err := os.WriteFile(permBase+".req.response", respData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := readResponse(permBase + ".req.response")
+	if err != nil {
+		t.Fatalf("readResponse: %v", err)
+	}
+
+	_, err = permissionResponseFromRequest(req["options"], raw, "allow")
+	if err == nil {
+		t.Fatal("oversized message should be rejected")
 	}
 }

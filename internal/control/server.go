@@ -21,6 +21,7 @@ const maxSendToParentMessageBytes = 64 * 1024
 type PermissionAnswer struct {
 	RequestID string `json:"request_id"`
 	OptionID  string `json:"option_id"`
+	Message   string `json:"message,omitempty"`
 }
 
 type ControlServer struct {
@@ -59,7 +60,7 @@ type StableHandler interface {
 	RuntimeStatus(runtimeID string) (any, error)
 	RuntimeCancel(runtimeID string) error
 	RuntimePrompt(runtimeID, text, requestID string) error
-	RuntimeAnswerPermission(runtimeID, requestID, optionID string) error
+	RuntimeAnswerPermission(runtimeID, requestID, optionID, message string) error
 	RuntimeInterruptAndPrompt(runtimeID, text string, keepQueue bool) error
 	RuntimeSendToParent(runtimeID, message string) error
 }
@@ -332,8 +333,8 @@ func (s *ControlServer) HasPendingPermission() bool {
 
 // AnswerPendingPermission delivers an answer to the active permission claim.
 // The bool reports whether the answer was actually delivered.
-func (s *ControlServer) AnswerPendingPermission(scope, requestID, optionID string) bool {
-	return s.DeliverPendingPermission(scope, requestID, optionID) == PermissionAnswerDelivered
+func (s *ControlServer) AnswerPendingPermission(scope, requestID, optionID, message string) bool {
+	return s.DeliverPendingPermission(scope, requestID, optionID, message) == PermissionAnswerDelivered
 }
 
 type PermissionAnswerDelivery uint8
@@ -349,7 +350,7 @@ const (
 // DeliverPendingPermission distinguishes a missing claim from a claim that
 // has already accepted an answer. answerQueued remains set after the resolver
 // drains answerCh, making delivery single-use until the claim is ended.
-func (s *ControlServer) DeliverPendingPermission(scope, requestID, optionID string) PermissionAnswerDelivery {
+func (s *ControlServer) DeliverPendingPermission(scope, requestID, optionID, message string) PermissionAnswerDelivery {
 	s.pendingMu.Lock()
 	defer s.pendingMu.Unlock()
 	claim := s.pendingClaims[permissionClaimKey{scope: scope, requestID: requestID}]
@@ -368,7 +369,7 @@ func (s *ControlServer) DeliverPendingPermission(scope, requestID, optionID stri
 		return PermissionAnswerChannelFull
 	}
 	select {
-	case claim.answerCh <- PermissionAnswer{RequestID: requestID, OptionID: optionID}:
+	case claim.answerCh <- PermissionAnswer{RequestID: requestID, OptionID: optionID, Message: message}:
 		claim.answerQueued = true
 		return PermissionAnswerDelivered
 	default:
@@ -602,6 +603,7 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 			var p struct {
 				RequestID string `json:"request_id"`
 				OptionID  string `json:"option_id"`
+				Message   string `json:"message"`
 			}
 			if len(req.Params) > 0 {
 				if err := json.Unmarshal(req.Params, &p); err != nil {
@@ -611,7 +613,7 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 			if p.RequestID == "" || p.OptionID == "" {
 				return failure(req.ID, -32602, "invalid params", map[string]any{"required": []string{"request_id", "option_id"}})
 			}
-			if err := s.stableHandler.RuntimeAnswerPermission(rtID, p.RequestID, p.OptionID); err != nil {
+			if err := s.stableHandler.RuntimeAnswerPermission(rtID, p.RequestID, p.OptionID, p.Message); err != nil {
 				return failure(req.ID, -32000, err.Error(), nil)
 			}
 			return success(req.ID, map[string]any{"accepted": true})
@@ -628,7 +630,7 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		if p.RequestID == "" || p.OptionID == "" {
 			return failure(req.ID, -32602, "invalid params", map[string]any{"required": []string{"request_id", "option_id"}})
 		}
-		if !s.AnswerPendingPermission("", p.RequestID, p.OptionID) {
+		if !s.AnswerPendingPermission("", p.RequestID, p.OptionID, p.Message) {
 			return failure(req.ID, -32001, "no_pending_permission", nil)
 		}
 		return success(req.ID, map[string]any{"accepted": true})

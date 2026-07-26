@@ -181,6 +181,9 @@ func permissionResponseFromRequest(options any, response fileResponse, optionID 
 	if err != nil {
 		return runtime.PermissionResponse{}, err
 	}
+	if err := runtime.ValidatePermissionMessage(response.Message); err != nil {
+		return runtime.PermissionResponse{}, err
+	}
 	return runtime.PermissionResponse{
 		Allow:    allow,
 		OptionID: optionID,

@@ -89,8 +89,8 @@ func TestSchemaFieldParity(t *testing.T) {
 
 	t.Run("avenor_answer_permission", func(t *testing.T) {
 		// permissionArgs — required: run_id, option_id
-		// optional: request_id, supervisor_id
-		allowed := []string{"run_id", "option_id", "request_id", "supervisor_id"}
+		// optional: request_id, supervisor_id, message
+		allowed := []string{"run_id", "option_id", "request_id", "supervisor_id", "message"}
 		required := []string{"run_id", "option_id"}
 		assertFields(t, "permissionArgs", allowed, required)
 	})

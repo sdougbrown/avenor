@@ -1962,7 +1962,7 @@ func TestPermissionRequestRejectsExistingDirectDeliveryBeforePublishing(t *testi
 	if !cs.PreparePermissionClaim("rt_1", "req_reused", control.PermissionResolverNoResolver) {
 		t.Fatal("PreparePermissionClaim returned false")
 	}
-	if got := cs.DeliverPendingPermission("rt_1", "req_reused", "allow"); got != control.PermissionAnswerNoResolver {
+	if got := cs.DeliverPendingPermission("rt_1", "req_reused", "allow", ""); got != control.PermissionAnswerNoResolver {
 		t.Fatalf("initial delivery = %v, want no-resolver", got)
 	}
 
@@ -2087,7 +2087,7 @@ func TestPermissionRequestRejectsExistingNoResolverBeforePublishing(t *testing.T
 			t.Fatalf("rejected request was published: %+v", event)
 		}
 	}
-	if got := cs.DeliverPendingPermission("rt_1", "req_reused", "original"); got != control.PermissionAnswerNoResolver {
+	if got := cs.DeliverPendingPermission("rt_1", "req_reused", "original", ""); got != control.PermissionAnswerNoResolver {
 		t.Fatalf("original claim delivery = %v, want no-resolver", got)
 	}
 }
@@ -2231,7 +2231,7 @@ func TestScopedControlPermissionClaimCompletesAndReleasesForNextRequest(t *testi
 	for i := 0; i < 2; i++ {
 		eventCh <- request
 		waitForPendingPermissionForTest(t, cs)
-		if !cs.AnswerPendingPermission("rt_1", "0", "always") {
+		if !cs.AnswerPendingPermission("rt_1", "0", "always", "") {
 			t.Fatalf("answer %d was not delivered", i+1)
 		}
 		select {
@@ -2291,7 +2291,7 @@ func TestPermissionClaimIsReservedBeforeSynchronousRequestSink(t *testing.T) {
 	provider := &permissionLifecycleProvider{answers: make(chan string, 1)}
 	sink := &permissionLifecycleSink{responses: make(chan string, 1)}
 	sink.onRequest = func() {
-		if !cs.AnswerPendingPermission("rt_sync", "0", "always") {
+		if !cs.AnswerPendingPermission("rt_sync", "0", "always", "") {
 			t.Error("synchronous answer was not queued on the reserved claim")
 		}
 	}
@@ -2392,7 +2392,7 @@ func TestLateControlAnswerIsBlockedWhileFileResolverOwnsRequest(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	if got := cs.DeliverPendingPermission("rt_file", "0", "always"); got != control.PermissionAnswerResolverOwned {
+	if got := cs.DeliverPendingPermission("rt_file", "0", "always", ""); got != control.PermissionAnswerResolverOwned {
 		t.Fatalf("late answer delivery = %v, want resolver-owned", got)
 	}
 	if provider.answerRequestID != "" {
