@@ -1,6 +1,6 @@
-// Avenor's minimal wire-compatible view of agy 1.1.5.
+// Avenor's minimal wire-compatible view of agy 1.1.5 and 1.1.7.
 //
-// This file intentionally retains only fields supported by the Stage 9 evidence.
+// This file intentionally retains only fields supported by the Stage 9/15 evidence.
 // Fields outside this view decode as protobuf unknown fields and are preserved on
 // re-marshal. See parity-manifest.json and README.md before changing it.
 syntax = "proto3";
@@ -155,9 +155,35 @@ message CortexErrorDetails {}
 message RequestedInteraction {
   oneof interaction {
     CascadeDeployInteractionSpec deploy = 2;
+    PermissionInteractionSpec permission = 21;
+    AskQuestionInteractionSpec ask_question = 22;
   }
 }
 message CascadeDeployInteractionSpec {}
+
+// The retained permission request view is intentionally limited to the
+// display fields Avenor needs to present a decision.
+message PermissionInteractionSpec {
+  PermissionResource resource = 1;
+  optional string reason = 4;
+  optional string action_description = 5;
+}
+message PermissionResource {
+  string action = 1;
+  string target = 2;
+}
+
+message AskQuestionInteractionSpec { repeated AskQuestionEntry questions = 1; }
+message AskQuestionInteraction { repeated AskQuestionEntry responses = 1; bool cancelled = 2; }
+message AskQuestionEntry {
+  string question = 1;
+  repeated AskQuestionOption options = 2;
+  bool is_multi_select = 3;
+  repeated string selected_option_ids = 4;
+  string write_in_response = 5;
+  bool skipped = 6;
+}
+message AskQuestionOption { string id = 1; string text = 2; }
 
 message CompletedInteraction {
   RequestedInteraction request = 1;
@@ -169,9 +195,18 @@ message CascadeUserInteraction {
   uint32 step_index = 2;
   oneof interaction {
     CascadeDeployInteraction deploy = 4;
+    PermissionInteraction permission = 21;
+    AskQuestionInteraction ask_question = 22;
   }
+  // Retained only to validate observed stale wire state; Avenor never sends it.
+  bool timed_out = 24;
 }
 message CascadeDeployInteraction { bool cancel = 1; }
+message PermissionInteraction {
+  bool allow = 1;
+  PermissionScope scope = 2;
+  bool sandbox_override = 3;
+}
 
 message TextOrScopeItem {
   oneof chunk {
@@ -180,7 +215,16 @@ message TextOrScopeItem {
 }
 
 message CascadeConfig { CascadePlannerConfig planner_config = 1; }
-message CascadePlannerConfig { Model plan_model = 1; }
+message CascadePlannerConfig {
+  Model plan_model = 1;
+  CascadeToolConfig tool_config = 13;
+}
+message CascadeToolConfig {
+  AskQuestionToolConfig ask_question = 41;
+  AskPermissionToolConfig ask_permission = 44;
+}
+message AskQuestionToolConfig { optional bool enabled = 1; }
+message AskPermissionToolConfig { optional bool enabled = 1; }
 
 enum CascadeRunStatus {
   CASCADE_RUN_STATUS_UNSPECIFIED = 0;
@@ -226,6 +270,15 @@ enum StreamTrajectoryVerbosity {
 enum Model {
   MODEL_UNSPECIFIED = 0;
   MODEL_GOOGLE_GEMINI_2_5_FLASH = 312;
+}
+
+enum PermissionScope {
+  PERMISSION_SCOPE_UNSPECIFIED = 0;
+  PERMISSION_SCOPE_ONCE = 1;
+  PERMISSION_SCOPE_CONVERSATION = 2;
+  PERMISSION_SCOPE_WORKSPACE = 3;
+  PERMISSION_SCOPE_GLOBAL = 4;
+  PERMISSION_SCOPE_PROJECT = 5;
 }
 
 service LanguageServerService {

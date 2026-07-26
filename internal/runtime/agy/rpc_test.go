@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sdougbrown/avenor/internal/runtime"
 	agyv115 "github.com/sdougbrown/avenor/internal/runtime/agy/interop/v115"
 	"google.golang.org/protobuf/proto"
 )
@@ -207,7 +208,7 @@ func TestTypedUnaryWrappersWireShape(t *testing.T) {
 		return err
 	})
 	assertRequest(t, "StartCascade", &agyv115.StartCascadeRequest{Source: agyv115.CortexTrajectorySource_CORTEX_TRAJECTORY_SOURCE_CLI}, func() error { _, err := client.startCascade(ctx); return err })
-	assertRequest(t, "SendUserCascadeMessage", &agyv115.SendUserCascadeMessageRequest{CascadeId: "cascade", Items: []*agyv115.TextOrScopeItem{{Chunk: &agyv115.TextOrScopeItem_Text{Text: "prompt"}}}, CascadeConfig: &agyv115.CascadeConfig{PlannerConfig: &agyv115.CascadePlannerConfig{PlanModel: agyv115.Model_MODEL_GOOGLE_GEMINI_2_5_FLASH}}}, func() error {
+	assertRequest(t, "SendUserCascadeMessage", &agyv115.SendUserCascadeMessageRequest{CascadeId: "cascade", Items: []*agyv115.TextOrScopeItem{{Chunk: &agyv115.TextOrScopeItem_Text{Text: "prompt"}}}, CascadeConfig: &agyv115.CascadeConfig{PlannerConfig: &agyv115.CascadePlannerConfig{PlanModel: agyv115.Model_MODEL_GOOGLE_GEMINI_2_5_FLASH, ToolConfig: &agyv115.CascadeToolConfig{AskQuestion: &agyv115.AskQuestionToolConfig{Enabled: proto.Bool(true)}, AskPermission: &agyv115.AskPermissionToolConfig{Enabled: proto.Bool(true)}}}}}, func() error {
 		_, err := client.sendUserCascadeMessage(ctx, "cascade", "prompt", agyv115.Model_MODEL_GOOGLE_GEMINI_2_5_FLASH)
 		return err
 	})
@@ -607,4 +608,198 @@ func TestDarwinAndLinuxListenerParsers(t *testing.T) {
 	if err != nil || len(listeners) != 0 {
 		t.Fatalf("unowned sockets accepted: %v, %v", listeners, err)
 	}
+}
+
+// TestTypedInteractionLifecycleWireShape exercises the pre-answer GetSteps
+// request and the typed Handle payload through the actual gRPC-Web transport.
+// It verifies the exact cached wire offset, both FULL verbosity fields on the
+// snapshot call, and the typed Handle payload for both option selection and
+// write-in.
+func TestTypedInteractionLifecycleWireShape(t *testing.T) {
+	type recording struct {
+		stepRequest   *agyv115.GetCascadeTrajectoryStepsRequest
+		handleRequest *agyv115.HandleCascadeUserInteractionRequest
+		stepCalls     int
+		handleCalls   int
+	}
+	rec := &recording{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", grpcWebContentType)
+		body, err := io.ReadAll(r.Body)
+		if err != nil || len(body) < 5 {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/GetCascadeTrajectorySteps"):
+			rec.stepCalls++
+			rec.stepRequest = &agyv115.GetCascadeTrajectoryStepsRequest{}
+			if err := proto.Unmarshal(body[5:], rec.stepRequest); err != nil {
+				t.Errorf("snapshot unmarshal: %v", err)
+				return
+			}
+			step := &agyv115.Step{Type: agyv115.CortexStepType_CORTEX_STEP_TYPE_PLANNER_RESPONSE, Status: agyv115.CortexStepStatus_CORTEX_STEP_STATUS_WAITING, Metadata: &agyv115.CortexStepMetadata{StepGenerationVersion: pendingGenerationVersion}, RequestedInteraction: &agyv115.RequestedInteraction{Interaction: &agyv115.RequestedInteraction_Permission{Permission: &agyv115.PermissionInteractionSpec{Resource: &agyv115.PermissionResource{Action: "act", Target: "target"}}}}}
+			_, _ = w.Write(grpcReply(t, &agyv115.GetCascadeTrajectoryStepsResponse{Steps: []*agyv115.Step{step}}))
+		case strings.HasSuffix(r.URL.Path, "/HandleCascadeUserInteraction"):
+			rec.handleCalls++
+			rec.handleRequest = &agyv115.HandleCascadeUserInteractionRequest{}
+			if err := proto.Unmarshal(body[5:], rec.handleRequest); err != nil {
+				t.Errorf("handle unmarshal: %v", err)
+				return
+			}
+			_, _ = w.Write(grpcReply(t, &agyv115.HandleCascadeUserInteractionResponse{}))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	client, err := newRPCEndpointClient(rpcEndpoint{address: strings.TrimPrefix(server.URL, "http://")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.close()
+
+	host := &ptyRPCHost{rpc: &rpcHost{client: client, endpoint: rpcEndpoint{address: strings.TrimPrefix(server.URL, "http://")}}, conversationID: "cascade"}
+	step := &agyv115.Step{Type: agyv115.CortexStepType_CORTEX_STEP_TYPE_PLANNER_RESPONSE, Status: agyv115.CortexStepStatus_CORTEX_STEP_STATUS_WAITING, Metadata: &agyv115.CortexStepMetadata{StepGenerationVersion: pendingGenerationVersion}, RequestedInteraction: &agyv115.RequestedInteraction{Interaction: &agyv115.RequestedInteraction_Permission{Permission: &agyv115.PermissionInteractionSpec{Resource: &agyv115.PermissionResource{Action: "act", Target: "target"}}}}}
+	host.mapper = newTrajectoryMapper("session", "cascade", "")
+	host.installInteractionBridge()
+	host.mapper.SetInteractionObserver(host.interactions.Observe, host.interactions.Clear)
+	host.mapper.BindStreamIdentity(&agyv115.AgentStateUpdate{ConversationId: "cascade", TrajectoryId: "trajectory"})
+	host.mapper.BeginTurn()
+	events := host.mapper.ApplyStream(&agyv115.AgentStateUpdate{ConversationId: "cascade", TrajectoryId: "trajectory", Status: agyv115.CascadeRunStatus_CASCADE_RUN_STATUS_RUNNING, MainTrajectoryUpdate: &agyv115.TrajectoryUpdate{StepsUpdate: &agyv115.StepsUpdate{Indices: []uint32{42}, Steps: []*agyv115.Step{step}}}})
+	if len(events.events) != 1 || events.events[0].Event != "permission.request" {
+		t.Fatalf("stream events = %#v", events.events)
+	}
+	requestID := events.events[0].Fields["request_id"].(string)
+	if err := host.AnswerPermission(context.Background(), requestID, runtime.PermissionResponse{Allow: true, OptionID: "allow_once"}); err != nil {
+		t.Fatalf("AnswerPermission: %v", err)
+	}
+	if rec.stepCalls != 1 || rec.handleCalls != 1 {
+		t.Fatalf("calls = snapshot=%d handle=%d", rec.stepCalls, rec.handleCalls)
+	}
+	if rec.stepRequest.GetStepOffset() != 42 {
+		t.Fatalf("snapshot offset = %d, want exact wire index 42", rec.stepRequest.GetStepOffset())
+	}
+	if rec.stepRequest.GetVerbosity() != agyv115.SnapshotTrajectoryVerbosity_CLIENT_TRAJECTORY_VERBOSITY_FULL {
+		t.Fatalf("snapshot verbosity = %v, want FULL", rec.stepRequest.GetVerbosity())
+	}
+	if rec.stepRequest.GetTrajectoryVerbosity() != agyv115.StreamTrajectoryVerbosity_CLIENT_TRAJECTORY_VERBOSITY_FULL {
+		t.Fatalf("snapshot trajectory verbosity = %v, want FULL", rec.stepRequest.GetTrajectoryVerbosity())
+	}
+	if rec.handleRequest.GetCascadeId() != "cascade" {
+		t.Fatalf("handle cascade_id = %q", rec.handleRequest.GetCascadeId())
+	}
+	interaction := rec.handleRequest.GetInteraction()
+	if interaction == nil || interaction.GetTrajectoryId() != "trajectory" || interaction.GetStepIndex() != 42 {
+		t.Fatalf("handle interaction = %#v", interaction)
+	}
+	perm := interaction.GetPermission()
+	if perm == nil || !perm.GetAllow() || perm.GetScope() != agyv115.PermissionScope_PERMISSION_SCOPE_ONCE {
+		t.Fatalf("permission payload = %#v", perm)
+	}
+}
+
+func TestTypedAnswerPermissionQuestionOptionAndWriteIn(t *testing.T) {
+	type recording struct {
+		stepRequest   *agyv115.GetCascadeTrajectoryStepsRequest
+		handleRequest *agyv115.HandleCascadeUserInteractionRequest
+		stepCalls     int
+		handleCalls   int
+	}
+	run := func(t *testing.T, response runtime.PermissionResponse, optionIDFn func(host *ptyRPCHost, options []any) string, validate func(t *testing.T, interaction *agyv115.CascadeUserInteraction)) {
+		rec := &recording{}
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", grpcWebContentType)
+			body, err := io.ReadAll(r.Body)
+			if err != nil || len(body) < 5 {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			switch {
+			case strings.HasSuffix(r.URL.Path, "/GetCascadeTrajectorySteps"):
+				rec.stepCalls++
+				rec.stepRequest = &agyv115.GetCascadeTrajectoryStepsRequest{}
+				if err := proto.Unmarshal(body[5:], rec.stepRequest); err != nil {
+					t.Errorf("snapshot unmarshal: %v", err)
+					return
+				}
+				step := &agyv115.Step{Type: agyv115.CortexStepType_CORTEX_STEP_TYPE_PLANNER_RESPONSE, Status: agyv115.CortexStepStatus_CORTEX_STEP_STATUS_WAITING, Metadata: &agyv115.CortexStepMetadata{StepGenerationVersion: pendingGenerationVersion}, RequestedInteraction: &agyv115.RequestedInteraction{Interaction: &agyv115.RequestedInteraction_AskQuestion{AskQuestion: &agyv115.AskQuestionInteractionSpec{Questions: []*agyv115.AskQuestionEntry{{Question: "choose", Options: []*agyv115.AskQuestionOption{{Id: "raw-option", Text: "Visible"}}}}}}}}
+				_, _ = w.Write(grpcReply(t, &agyv115.GetCascadeTrajectoryStepsResponse{Steps: []*agyv115.Step{step}}))
+			case strings.HasSuffix(r.URL.Path, "/HandleCascadeUserInteraction"):
+				rec.handleCalls++
+				rec.handleRequest = &agyv115.HandleCascadeUserInteractionRequest{}
+				if err := proto.Unmarshal(body[5:], rec.handleRequest); err != nil {
+					t.Errorf("handle unmarshal: %v", err)
+					return
+				}
+				_, _ = w.Write(grpcReply(t, &agyv115.HandleCascadeUserInteractionResponse{}))
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		defer server.Close()
+		client, err := newRPCEndpointClient(rpcEndpoint{address: strings.TrimPrefix(server.URL, "http://")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer client.close()
+		host := &ptyRPCHost{rpc: &rpcHost{client: client, endpoint: rpcEndpoint{address: strings.TrimPrefix(server.URL, "http://")}}, conversationID: "cascade"}
+		step := &agyv115.Step{Type: agyv115.CortexStepType_CORTEX_STEP_TYPE_PLANNER_RESPONSE, Status: agyv115.CortexStepStatus_CORTEX_STEP_STATUS_WAITING, Metadata: &agyv115.CortexStepMetadata{StepGenerationVersion: pendingGenerationVersion}, RequestedInteraction: &agyv115.RequestedInteraction{Interaction: &agyv115.RequestedInteraction_AskQuestion{AskQuestion: &agyv115.AskQuestionInteractionSpec{Questions: []*agyv115.AskQuestionEntry{{Question: "choose", Options: []*agyv115.AskQuestionOption{{Id: "raw-option", Text: "Visible"}}}}}}}}
+		host.mapper = newTrajectoryMapper("session", "cascade", "")
+		host.installInteractionBridge()
+		host.mapper.SetInteractionObserver(host.interactions.Observe, host.interactions.Clear)
+		host.mapper.BindStreamIdentity(&agyv115.AgentStateUpdate{ConversationId: "cascade", TrajectoryId: "trajectory"})
+		host.mapper.BeginTurn()
+		events := host.mapper.ApplyStream(&agyv115.AgentStateUpdate{ConversationId: "cascade", TrajectoryId: "trajectory", Status: agyv115.CascadeRunStatus_CASCADE_RUN_STATUS_RUNNING, MainTrajectoryUpdate: &agyv115.TrajectoryUpdate{StepsUpdate: &agyv115.StepsUpdate{Indices: []uint32{7}, Steps: []*agyv115.Step{step}}}})
+		if len(events.events) != 1 || events.events[0].Event != "permission.request" {
+			t.Fatalf("stream events = %#v", events.events)
+		}
+		options := events.events[0].Fields["options"].([]any)
+		response.OptionID = optionIDFn(host, options)
+		if err := host.AnswerPermission(context.Background(), events.events[0].Fields["request_id"].(string), response); err != nil {
+			t.Fatalf("AnswerPermission: %v", err)
+		}
+		if rec.stepCalls != 1 || rec.handleCalls != 1 {
+			t.Fatalf("calls = snapshot=%d handle=%d", rec.stepCalls, rec.handleCalls)
+		}
+		if rec.stepRequest.GetStepOffset() != 7 {
+			t.Fatalf("snapshot offset = %d, want 7", rec.stepRequest.GetStepOffset())
+		}
+		if rec.stepRequest.GetVerbosity() != agyv115.SnapshotTrajectoryVerbosity_CLIENT_TRAJECTORY_VERBOSITY_FULL {
+			t.Fatalf("snapshot verbosity = %v, want FULL", rec.stepRequest.GetVerbosity())
+		}
+		if rec.stepRequest.GetTrajectoryVerbosity() != agyv115.StreamTrajectoryVerbosity_CLIENT_TRAJECTORY_VERBOSITY_FULL {
+			t.Fatalf("snapshot trajectory verbosity = %v, want FULL", rec.stepRequest.GetTrajectoryVerbosity())
+		}
+		if rec.handleRequest.GetCascadeId() != "cascade" {
+			t.Fatalf("handle cascade_id = %q", rec.handleRequest.GetCascadeId())
+		}
+		validate(t, rec.handleRequest.GetInteraction())
+	}
+
+	t.Run("option", func(t *testing.T) {
+		run(t, runtime.PermissionResponse{Allow: true},
+			func(_ *ptyRPCHost, options []any) string { return options[0].(map[string]any)["optionId"].(string) },
+			func(t *testing.T, interaction *agyv115.CascadeUserInteraction) {
+				if interaction == nil || interaction.GetTrajectoryId() != "trajectory" || interaction.GetStepIndex() != 7 {
+					t.Fatalf("handle interaction = %#v", interaction)
+				}
+				ask := interaction.GetAskQuestion().GetResponses()
+				if len(ask) != 1 || len(ask[0].GetSelectedOptionIds()) != 1 || ask[0].GetSelectedOptionIds()[0] != "raw-option" || ask[0].GetWriteInResponse() != "" {
+					t.Fatalf("option payload = %#v", ask)
+				}
+			})
+	})
+	t.Run("write-in", func(t *testing.T) {
+		run(t, runtime.PermissionResponse{Allow: true, Message: "typed answer"},
+			func(host *ptyRPCHost, _ []any) string {
+				return interactionWriteInID(t, host.interactions)
+			},
+			func(t *testing.T, interaction *agyv115.CascadeUserInteraction) {
+				ask := interaction.GetAskQuestion().GetResponses()
+				if len(ask) != 1 || ask[0].GetWriteInResponse() != "typed answer" || len(ask[0].GetSelectedOptionIds()) != 0 {
+					t.Fatalf("write-in payload = %#v", ask)
+				}
+			})
+	})
 }

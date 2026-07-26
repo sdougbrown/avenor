@@ -1,6 +1,6 @@
-// Avenor's minimal wire-compatible view of agy 1.1.5.
+// Avenor's minimal wire-compatible view of agy 1.1.5 and 1.1.7.
 //
-// This file intentionally retains only fields supported by the Stage 9 evidence.
+// This file intentionally retains only fields supported by the Stage 9/15 evidence.
 // Fields outside this view decode as protobuf unknown fields and are preserved on
 // re-marshal. See parity-manifest.json and README.md before changing it.
 
@@ -349,6 +349,64 @@ func (x Model) Number() protoreflect.EnumNumber {
 // Deprecated: Use Model.Descriptor instead.
 func (Model) EnumDescriptor() ([]byte, []int) {
 	return file_internal_runtime_agy_interop_v115_agy_proto_rawDescGZIP(), []int{5}
+}
+
+type PermissionScope int32
+
+const (
+	PermissionScope_PERMISSION_SCOPE_UNSPECIFIED  PermissionScope = 0
+	PermissionScope_PERMISSION_SCOPE_ONCE         PermissionScope = 1
+	PermissionScope_PERMISSION_SCOPE_CONVERSATION PermissionScope = 2
+	PermissionScope_PERMISSION_SCOPE_WORKSPACE    PermissionScope = 3
+	PermissionScope_PERMISSION_SCOPE_GLOBAL       PermissionScope = 4
+	PermissionScope_PERMISSION_SCOPE_PROJECT      PermissionScope = 5
+)
+
+// Enum value maps for PermissionScope.
+var (
+	PermissionScope_name = map[int32]string{
+		0: "PERMISSION_SCOPE_UNSPECIFIED",
+		1: "PERMISSION_SCOPE_ONCE",
+		2: "PERMISSION_SCOPE_CONVERSATION",
+		3: "PERMISSION_SCOPE_WORKSPACE",
+		4: "PERMISSION_SCOPE_GLOBAL",
+		5: "PERMISSION_SCOPE_PROJECT",
+	}
+	PermissionScope_value = map[string]int32{
+		"PERMISSION_SCOPE_UNSPECIFIED":  0,
+		"PERMISSION_SCOPE_ONCE":         1,
+		"PERMISSION_SCOPE_CONVERSATION": 2,
+		"PERMISSION_SCOPE_WORKSPACE":    3,
+		"PERMISSION_SCOPE_GLOBAL":       4,
+		"PERMISSION_SCOPE_PROJECT":      5,
+	}
+)
+
+func (x PermissionScope) Enum() *PermissionScope {
+	p := new(PermissionScope)
+	*p = x
+	return p
+}
+
+func (x PermissionScope) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (PermissionScope) Descriptor() protoreflect.EnumDescriptor {
+	return file_internal_runtime_agy_interop_v115_agy_proto_enumTypes[6].Descriptor()
+}
+
+func (PermissionScope) Type() protoreflect.EnumType {
+	return &file_internal_runtime_agy_interop_v115_agy_proto_enumTypes[6]
+}
+
+func (x PermissionScope) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use PermissionScope.Descriptor instead.
+func (PermissionScope) EnumDescriptor() ([]byte, []int) {
+	return file_internal_runtime_agy_interop_v115_agy_proto_rawDescGZIP(), []int{6}
 }
 
 type HeartbeatRequest struct {
@@ -2378,6 +2436,8 @@ type RequestedInteraction struct {
 	// Types that are valid to be assigned to Interaction:
 	//
 	//	*RequestedInteraction_Deploy
+	//	*RequestedInteraction_Permission
+	//	*RequestedInteraction_AskQuestion
 	Interaction   isRequestedInteraction_Interaction `protobuf_oneof:"interaction"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2429,6 +2489,24 @@ func (x *RequestedInteraction) GetDeploy() *CascadeDeployInteractionSpec {
 	return nil
 }
 
+func (x *RequestedInteraction) GetPermission() *PermissionInteractionSpec {
+	if x != nil {
+		if x, ok := x.Interaction.(*RequestedInteraction_Permission); ok {
+			return x.Permission
+		}
+	}
+	return nil
+}
+
+func (x *RequestedInteraction) GetAskQuestion() *AskQuestionInteractionSpec {
+	if x != nil {
+		if x, ok := x.Interaction.(*RequestedInteraction_AskQuestion); ok {
+			return x.AskQuestion
+		}
+	}
+	return nil
+}
+
 type isRequestedInteraction_Interaction interface {
 	isRequestedInteraction_Interaction()
 }
@@ -2437,7 +2515,19 @@ type RequestedInteraction_Deploy struct {
 	Deploy *CascadeDeployInteractionSpec `protobuf:"bytes,2,opt,name=deploy,proto3,oneof"`
 }
 
+type RequestedInteraction_Permission struct {
+	Permission *PermissionInteractionSpec `protobuf:"bytes,21,opt,name=permission,proto3,oneof"`
+}
+
+type RequestedInteraction_AskQuestion struct {
+	AskQuestion *AskQuestionInteractionSpec `protobuf:"bytes,22,opt,name=ask_question,json=askQuestion,proto3,oneof"`
+}
+
 func (*RequestedInteraction_Deploy) isRequestedInteraction_Interaction() {}
+
+func (*RequestedInteraction_Permission) isRequestedInteraction_Interaction() {}
+
+func (*RequestedInteraction_AskQuestion) isRequestedInteraction_Interaction() {}
 
 type CascadeDeployInteractionSpec struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -2475,6 +2565,352 @@ func (*CascadeDeployInteractionSpec) Descriptor() ([]byte, []int) {
 	return file_internal_runtime_agy_interop_v115_agy_proto_rawDescGZIP(), []int{39}
 }
 
+// The retained permission request view is intentionally limited to the
+// display fields Avenor needs to present a decision.
+type PermissionInteractionSpec struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	Resource          *PermissionResource    `protobuf:"bytes,1,opt,name=resource,proto3" json:"resource,omitempty"`
+	Reason            *string                `protobuf:"bytes,4,opt,name=reason,proto3,oneof" json:"reason,omitempty"`
+	ActionDescription *string                `protobuf:"bytes,5,opt,name=action_description,json=actionDescription,proto3,oneof" json:"action_description,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *PermissionInteractionSpec) Reset() {
+	*x = PermissionInteractionSpec{}
+	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[40]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PermissionInteractionSpec) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PermissionInteractionSpec) ProtoMessage() {}
+
+func (x *PermissionInteractionSpec) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[40]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PermissionInteractionSpec.ProtoReflect.Descriptor instead.
+func (*PermissionInteractionSpec) Descriptor() ([]byte, []int) {
+	return file_internal_runtime_agy_interop_v115_agy_proto_rawDescGZIP(), []int{40}
+}
+
+func (x *PermissionInteractionSpec) GetResource() *PermissionResource {
+	if x != nil {
+		return x.Resource
+	}
+	return nil
+}
+
+func (x *PermissionInteractionSpec) GetReason() string {
+	if x != nil && x.Reason != nil {
+		return *x.Reason
+	}
+	return ""
+}
+
+func (x *PermissionInteractionSpec) GetActionDescription() string {
+	if x != nil && x.ActionDescription != nil {
+		return *x.ActionDescription
+	}
+	return ""
+}
+
+type PermissionResource struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Action        string                 `protobuf:"bytes,1,opt,name=action,proto3" json:"action,omitempty"`
+	Target        string                 `protobuf:"bytes,2,opt,name=target,proto3" json:"target,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PermissionResource) Reset() {
+	*x = PermissionResource{}
+	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[41]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PermissionResource) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PermissionResource) ProtoMessage() {}
+
+func (x *PermissionResource) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[41]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PermissionResource.ProtoReflect.Descriptor instead.
+func (*PermissionResource) Descriptor() ([]byte, []int) {
+	return file_internal_runtime_agy_interop_v115_agy_proto_rawDescGZIP(), []int{41}
+}
+
+func (x *PermissionResource) GetAction() string {
+	if x != nil {
+		return x.Action
+	}
+	return ""
+}
+
+func (x *PermissionResource) GetTarget() string {
+	if x != nil {
+		return x.Target
+	}
+	return ""
+}
+
+type AskQuestionInteractionSpec struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Questions     []*AskQuestionEntry    `protobuf:"bytes,1,rep,name=questions,proto3" json:"questions,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AskQuestionInteractionSpec) Reset() {
+	*x = AskQuestionInteractionSpec{}
+	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[42]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AskQuestionInteractionSpec) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AskQuestionInteractionSpec) ProtoMessage() {}
+
+func (x *AskQuestionInteractionSpec) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[42]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AskQuestionInteractionSpec.ProtoReflect.Descriptor instead.
+func (*AskQuestionInteractionSpec) Descriptor() ([]byte, []int) {
+	return file_internal_runtime_agy_interop_v115_agy_proto_rawDescGZIP(), []int{42}
+}
+
+func (x *AskQuestionInteractionSpec) GetQuestions() []*AskQuestionEntry {
+	if x != nil {
+		return x.Questions
+	}
+	return nil
+}
+
+type AskQuestionInteraction struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Responses     []*AskQuestionEntry    `protobuf:"bytes,1,rep,name=responses,proto3" json:"responses,omitempty"`
+	Cancelled     bool                   `protobuf:"varint,2,opt,name=cancelled,proto3" json:"cancelled,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AskQuestionInteraction) Reset() {
+	*x = AskQuestionInteraction{}
+	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[43]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AskQuestionInteraction) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AskQuestionInteraction) ProtoMessage() {}
+
+func (x *AskQuestionInteraction) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[43]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AskQuestionInteraction.ProtoReflect.Descriptor instead.
+func (*AskQuestionInteraction) Descriptor() ([]byte, []int) {
+	return file_internal_runtime_agy_interop_v115_agy_proto_rawDescGZIP(), []int{43}
+}
+
+func (x *AskQuestionInteraction) GetResponses() []*AskQuestionEntry {
+	if x != nil {
+		return x.Responses
+	}
+	return nil
+}
+
+func (x *AskQuestionInteraction) GetCancelled() bool {
+	if x != nil {
+		return x.Cancelled
+	}
+	return false
+}
+
+type AskQuestionEntry struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	Question          string                 `protobuf:"bytes,1,opt,name=question,proto3" json:"question,omitempty"`
+	Options           []*AskQuestionOption   `protobuf:"bytes,2,rep,name=options,proto3" json:"options,omitempty"`
+	IsMultiSelect     bool                   `protobuf:"varint,3,opt,name=is_multi_select,json=isMultiSelect,proto3" json:"is_multi_select,omitempty"`
+	SelectedOptionIds []string               `protobuf:"bytes,4,rep,name=selected_option_ids,json=selectedOptionIds,proto3" json:"selected_option_ids,omitempty"`
+	WriteInResponse   string                 `protobuf:"bytes,5,opt,name=write_in_response,json=writeInResponse,proto3" json:"write_in_response,omitempty"`
+	Skipped           bool                   `protobuf:"varint,6,opt,name=skipped,proto3" json:"skipped,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *AskQuestionEntry) Reset() {
+	*x = AskQuestionEntry{}
+	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[44]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AskQuestionEntry) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AskQuestionEntry) ProtoMessage() {}
+
+func (x *AskQuestionEntry) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[44]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AskQuestionEntry.ProtoReflect.Descriptor instead.
+func (*AskQuestionEntry) Descriptor() ([]byte, []int) {
+	return file_internal_runtime_agy_interop_v115_agy_proto_rawDescGZIP(), []int{44}
+}
+
+func (x *AskQuestionEntry) GetQuestion() string {
+	if x != nil {
+		return x.Question
+	}
+	return ""
+}
+
+func (x *AskQuestionEntry) GetOptions() []*AskQuestionOption {
+	if x != nil {
+		return x.Options
+	}
+	return nil
+}
+
+func (x *AskQuestionEntry) GetIsMultiSelect() bool {
+	if x != nil {
+		return x.IsMultiSelect
+	}
+	return false
+}
+
+func (x *AskQuestionEntry) GetSelectedOptionIds() []string {
+	if x != nil {
+		return x.SelectedOptionIds
+	}
+	return nil
+}
+
+func (x *AskQuestionEntry) GetWriteInResponse() string {
+	if x != nil {
+		return x.WriteInResponse
+	}
+	return ""
+}
+
+func (x *AskQuestionEntry) GetSkipped() bool {
+	if x != nil {
+		return x.Skipped
+	}
+	return false
+}
+
+type AskQuestionOption struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Text          string                 `protobuf:"bytes,2,opt,name=text,proto3" json:"text,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AskQuestionOption) Reset() {
+	*x = AskQuestionOption{}
+	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[45]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AskQuestionOption) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AskQuestionOption) ProtoMessage() {}
+
+func (x *AskQuestionOption) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[45]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AskQuestionOption.ProtoReflect.Descriptor instead.
+func (*AskQuestionOption) Descriptor() ([]byte, []int) {
+	return file_internal_runtime_agy_interop_v115_agy_proto_rawDescGZIP(), []int{45}
+}
+
+func (x *AskQuestionOption) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *AskQuestionOption) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
 type CompletedInteraction struct {
 	state         protoimpl.MessageState  `protogen:"open.v1"`
 	Request       *RequestedInteraction   `protobuf:"bytes,1,opt,name=request,proto3" json:"request,omitempty"`
@@ -2485,7 +2921,7 @@ type CompletedInteraction struct {
 
 func (x *CompletedInteraction) Reset() {
 	*x = CompletedInteraction{}
-	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[40]
+	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2497,7 +2933,7 @@ func (x *CompletedInteraction) String() string {
 func (*CompletedInteraction) ProtoMessage() {}
 
 func (x *CompletedInteraction) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[40]
+	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2510,7 +2946,7 @@ func (x *CompletedInteraction) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CompletedInteraction.ProtoReflect.Descriptor instead.
 func (*CompletedInteraction) Descriptor() ([]byte, []int) {
-	return file_internal_runtime_agy_interop_v115_agy_proto_rawDescGZIP(), []int{40}
+	return file_internal_runtime_agy_interop_v115_agy_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *CompletedInteraction) GetRequest() *RequestedInteraction {
@@ -2534,14 +2970,18 @@ type CascadeUserInteraction struct {
 	// Types that are valid to be assigned to Interaction:
 	//
 	//	*CascadeUserInteraction_Deploy
-	Interaction   isCascadeUserInteraction_Interaction `protobuf_oneof:"interaction"`
+	//	*CascadeUserInteraction_Permission
+	//	*CascadeUserInteraction_AskQuestion
+	Interaction isCascadeUserInteraction_Interaction `protobuf_oneof:"interaction"`
+	// Retained only to validate observed stale wire state; Avenor never sends it.
+	TimedOut      bool `protobuf:"varint,24,opt,name=timed_out,json=timedOut,proto3" json:"timed_out,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CascadeUserInteraction) Reset() {
 	*x = CascadeUserInteraction{}
-	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[41]
+	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2553,7 +2993,7 @@ func (x *CascadeUserInteraction) String() string {
 func (*CascadeUserInteraction) ProtoMessage() {}
 
 func (x *CascadeUserInteraction) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[41]
+	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2566,7 +3006,7 @@ func (x *CascadeUserInteraction) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CascadeUserInteraction.ProtoReflect.Descriptor instead.
 func (*CascadeUserInteraction) Descriptor() ([]byte, []int) {
-	return file_internal_runtime_agy_interop_v115_agy_proto_rawDescGZIP(), []int{41}
+	return file_internal_runtime_agy_interop_v115_agy_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *CascadeUserInteraction) GetTrajectoryId() string {
@@ -2599,6 +3039,31 @@ func (x *CascadeUserInteraction) GetDeploy() *CascadeDeployInteraction {
 	return nil
 }
 
+func (x *CascadeUserInteraction) GetPermission() *PermissionInteraction {
+	if x != nil {
+		if x, ok := x.Interaction.(*CascadeUserInteraction_Permission); ok {
+			return x.Permission
+		}
+	}
+	return nil
+}
+
+func (x *CascadeUserInteraction) GetAskQuestion() *AskQuestionInteraction {
+	if x != nil {
+		if x, ok := x.Interaction.(*CascadeUserInteraction_AskQuestion); ok {
+			return x.AskQuestion
+		}
+	}
+	return nil
+}
+
+func (x *CascadeUserInteraction) GetTimedOut() bool {
+	if x != nil {
+		return x.TimedOut
+	}
+	return false
+}
+
 type isCascadeUserInteraction_Interaction interface {
 	isCascadeUserInteraction_Interaction()
 }
@@ -2607,7 +3072,19 @@ type CascadeUserInteraction_Deploy struct {
 	Deploy *CascadeDeployInteraction `protobuf:"bytes,4,opt,name=deploy,proto3,oneof"`
 }
 
+type CascadeUserInteraction_Permission struct {
+	Permission *PermissionInteraction `protobuf:"bytes,21,opt,name=permission,proto3,oneof"`
+}
+
+type CascadeUserInteraction_AskQuestion struct {
+	AskQuestion *AskQuestionInteraction `protobuf:"bytes,22,opt,name=ask_question,json=askQuestion,proto3,oneof"`
+}
+
 func (*CascadeUserInteraction_Deploy) isCascadeUserInteraction_Interaction() {}
+
+func (*CascadeUserInteraction_Permission) isCascadeUserInteraction_Interaction() {}
+
+func (*CascadeUserInteraction_AskQuestion) isCascadeUserInteraction_Interaction() {}
 
 type CascadeDeployInteraction struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -2618,7 +3095,7 @@ type CascadeDeployInteraction struct {
 
 func (x *CascadeDeployInteraction) Reset() {
 	*x = CascadeDeployInteraction{}
-	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[42]
+	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2630,7 +3107,7 @@ func (x *CascadeDeployInteraction) String() string {
 func (*CascadeDeployInteraction) ProtoMessage() {}
 
 func (x *CascadeDeployInteraction) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[42]
+	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2643,12 +3120,72 @@ func (x *CascadeDeployInteraction) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CascadeDeployInteraction.ProtoReflect.Descriptor instead.
 func (*CascadeDeployInteraction) Descriptor() ([]byte, []int) {
-	return file_internal_runtime_agy_interop_v115_agy_proto_rawDescGZIP(), []int{42}
+	return file_internal_runtime_agy_interop_v115_agy_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *CascadeDeployInteraction) GetCancel() bool {
 	if x != nil {
 		return x.Cancel
+	}
+	return false
+}
+
+type PermissionInteraction struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Allow           bool                   `protobuf:"varint,1,opt,name=allow,proto3" json:"allow,omitempty"`
+	Scope           PermissionScope        `protobuf:"varint,2,opt,name=scope,proto3,enum=avenor.agy.v115.PermissionScope" json:"scope,omitempty"`
+	SandboxOverride bool                   `protobuf:"varint,3,opt,name=sandbox_override,json=sandboxOverride,proto3" json:"sandbox_override,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *PermissionInteraction) Reset() {
+	*x = PermissionInteraction{}
+	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[49]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PermissionInteraction) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PermissionInteraction) ProtoMessage() {}
+
+func (x *PermissionInteraction) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[49]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PermissionInteraction.ProtoReflect.Descriptor instead.
+func (*PermissionInteraction) Descriptor() ([]byte, []int) {
+	return file_internal_runtime_agy_interop_v115_agy_proto_rawDescGZIP(), []int{49}
+}
+
+func (x *PermissionInteraction) GetAllow() bool {
+	if x != nil {
+		return x.Allow
+	}
+	return false
+}
+
+func (x *PermissionInteraction) GetScope() PermissionScope {
+	if x != nil {
+		return x.Scope
+	}
+	return PermissionScope_PERMISSION_SCOPE_UNSPECIFIED
+}
+
+func (x *PermissionInteraction) GetSandboxOverride() bool {
+	if x != nil {
+		return x.SandboxOverride
 	}
 	return false
 }
@@ -2665,7 +3202,7 @@ type TextOrScopeItem struct {
 
 func (x *TextOrScopeItem) Reset() {
 	*x = TextOrScopeItem{}
-	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[43]
+	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[50]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2677,7 +3214,7 @@ func (x *TextOrScopeItem) String() string {
 func (*TextOrScopeItem) ProtoMessage() {}
 
 func (x *TextOrScopeItem) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[43]
+	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[50]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2690,7 +3227,7 @@ func (x *TextOrScopeItem) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TextOrScopeItem.ProtoReflect.Descriptor instead.
 func (*TextOrScopeItem) Descriptor() ([]byte, []int) {
-	return file_internal_runtime_agy_interop_v115_agy_proto_rawDescGZIP(), []int{43}
+	return file_internal_runtime_agy_interop_v115_agy_proto_rawDescGZIP(), []int{50}
 }
 
 func (x *TextOrScopeItem) GetChunk() isTextOrScopeItem_Chunk {
@@ -2728,7 +3265,7 @@ type CascadeConfig struct {
 
 func (x *CascadeConfig) Reset() {
 	*x = CascadeConfig{}
-	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[44]
+	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[51]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2740,7 +3277,7 @@ func (x *CascadeConfig) String() string {
 func (*CascadeConfig) ProtoMessage() {}
 
 func (x *CascadeConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[44]
+	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[51]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2753,7 +3290,7 @@ func (x *CascadeConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CascadeConfig.ProtoReflect.Descriptor instead.
 func (*CascadeConfig) Descriptor() ([]byte, []int) {
-	return file_internal_runtime_agy_interop_v115_agy_proto_rawDescGZIP(), []int{44}
+	return file_internal_runtime_agy_interop_v115_agy_proto_rawDescGZIP(), []int{51}
 }
 
 func (x *CascadeConfig) GetPlannerConfig() *CascadePlannerConfig {
@@ -2766,13 +3303,14 @@ func (x *CascadeConfig) GetPlannerConfig() *CascadePlannerConfig {
 type CascadePlannerConfig struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	PlanModel     Model                  `protobuf:"varint,1,opt,name=plan_model,json=planModel,proto3,enum=avenor.agy.v115.Model" json:"plan_model,omitempty"`
+	ToolConfig    *CascadeToolConfig     `protobuf:"bytes,13,opt,name=tool_config,json=toolConfig,proto3" json:"tool_config,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CascadePlannerConfig) Reset() {
 	*x = CascadePlannerConfig{}
-	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[45]
+	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2784,7 +3322,7 @@ func (x *CascadePlannerConfig) String() string {
 func (*CascadePlannerConfig) ProtoMessage() {}
 
 func (x *CascadePlannerConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[45]
+	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2797,7 +3335,7 @@ func (x *CascadePlannerConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CascadePlannerConfig.ProtoReflect.Descriptor instead.
 func (*CascadePlannerConfig) Descriptor() ([]byte, []int) {
-	return file_internal_runtime_agy_interop_v115_agy_proto_rawDescGZIP(), []int{45}
+	return file_internal_runtime_agy_interop_v115_agy_proto_rawDescGZIP(), []int{52}
 }
 
 func (x *CascadePlannerConfig) GetPlanModel() Model {
@@ -2805,6 +3343,153 @@ func (x *CascadePlannerConfig) GetPlanModel() Model {
 		return x.PlanModel
 	}
 	return Model_MODEL_UNSPECIFIED
+}
+
+func (x *CascadePlannerConfig) GetToolConfig() *CascadeToolConfig {
+	if x != nil {
+		return x.ToolConfig
+	}
+	return nil
+}
+
+type CascadeToolConfig struct {
+	state         protoimpl.MessageState   `protogen:"open.v1"`
+	AskQuestion   *AskQuestionToolConfig   `protobuf:"bytes,41,opt,name=ask_question,json=askQuestion,proto3" json:"ask_question,omitempty"`
+	AskPermission *AskPermissionToolConfig `protobuf:"bytes,44,opt,name=ask_permission,json=askPermission,proto3" json:"ask_permission,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CascadeToolConfig) Reset() {
+	*x = CascadeToolConfig{}
+	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[53]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CascadeToolConfig) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CascadeToolConfig) ProtoMessage() {}
+
+func (x *CascadeToolConfig) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[53]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CascadeToolConfig.ProtoReflect.Descriptor instead.
+func (*CascadeToolConfig) Descriptor() ([]byte, []int) {
+	return file_internal_runtime_agy_interop_v115_agy_proto_rawDescGZIP(), []int{53}
+}
+
+func (x *CascadeToolConfig) GetAskQuestion() *AskQuestionToolConfig {
+	if x != nil {
+		return x.AskQuestion
+	}
+	return nil
+}
+
+func (x *CascadeToolConfig) GetAskPermission() *AskPermissionToolConfig {
+	if x != nil {
+		return x.AskPermission
+	}
+	return nil
+}
+
+type AskQuestionToolConfig struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Enabled       *bool                  `protobuf:"varint,1,opt,name=enabled,proto3,oneof" json:"enabled,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AskQuestionToolConfig) Reset() {
+	*x = AskQuestionToolConfig{}
+	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[54]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AskQuestionToolConfig) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AskQuestionToolConfig) ProtoMessage() {}
+
+func (x *AskQuestionToolConfig) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[54]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AskQuestionToolConfig.ProtoReflect.Descriptor instead.
+func (*AskQuestionToolConfig) Descriptor() ([]byte, []int) {
+	return file_internal_runtime_agy_interop_v115_agy_proto_rawDescGZIP(), []int{54}
+}
+
+func (x *AskQuestionToolConfig) GetEnabled() bool {
+	if x != nil && x.Enabled != nil {
+		return *x.Enabled
+	}
+	return false
+}
+
+type AskPermissionToolConfig struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Enabled       *bool                  `protobuf:"varint,1,opt,name=enabled,proto3,oneof" json:"enabled,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AskPermissionToolConfig) Reset() {
+	*x = AskPermissionToolConfig{}
+	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[55]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AskPermissionToolConfig) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AskPermissionToolConfig) ProtoMessage() {}
+
+func (x *AskPermissionToolConfig) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[55]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AskPermissionToolConfig.ProtoReflect.Descriptor instead.
+func (*AskPermissionToolConfig) Descriptor() ([]byte, []int) {
+	return file_internal_runtime_agy_interop_v115_agy_proto_rawDescGZIP(), []int{55}
+}
+
+func (x *AskPermissionToolConfig) GetEnabled() bool {
+	if x != nil && x.Enabled != nil {
+		return *x.Enabled
+	}
+	return false
 }
 
 var File_internal_runtime_agy_interop_v115_agy_proto protoreflect.FileDescriptor
@@ -2949,30 +3634,80 @@ const file_internal_runtime_agy_interop_v115_agy_proto_rawDesc = "" +
 	"\x12directory_path_uri\x18\x01 \x01(\tR\x10directoryPathUri\x12>\n" +
 	"\aresults\x18\x03 \x03(\v2$.avenor.agy.v115.ListDirectoryResultR\aresults\"\x15\n" +
 	"\x13ListDirectoryResult\"\x14\n" +
-	"\x12CortexErrorDetails\"n\n" +
+	"\x12CortexErrorDetails\"\x8e\x02\n" +
 	"\x14RequestedInteraction\x12G\n" +
-	"\x06deploy\x18\x02 \x01(\v2-.avenor.agy.v115.CascadeDeployInteractionSpecH\x00R\x06deployB\r\n" +
+	"\x06deploy\x18\x02 \x01(\v2-.avenor.agy.v115.CascadeDeployInteractionSpecH\x00R\x06deploy\x12L\n" +
+	"\n" +
+	"permission\x18\x15 \x01(\v2*.avenor.agy.v115.PermissionInteractionSpecH\x00R\n" +
+	"permission\x12P\n" +
+	"\fask_question\x18\x16 \x01(\v2+.avenor.agy.v115.AskQuestionInteractionSpecH\x00R\vaskQuestionB\r\n" +
 	"\vinteraction\"\x1e\n" +
-	"\x1cCascadeDeployInteractionSpec\"\x9c\x01\n" +
+	"\x1cCascadeDeployInteractionSpec\"\xcf\x01\n" +
+	"\x19PermissionInteractionSpec\x12?\n" +
+	"\bresource\x18\x01 \x01(\v2#.avenor.agy.v115.PermissionResourceR\bresource\x12\x1b\n" +
+	"\x06reason\x18\x04 \x01(\tH\x00R\x06reason\x88\x01\x01\x122\n" +
+	"\x12action_description\x18\x05 \x01(\tH\x01R\x11actionDescription\x88\x01\x01B\t\n" +
+	"\a_reasonB\x15\n" +
+	"\x13_action_description\"D\n" +
+	"\x12PermissionResource\x12\x16\n" +
+	"\x06action\x18\x01 \x01(\tR\x06action\x12\x16\n" +
+	"\x06target\x18\x02 \x01(\tR\x06target\"]\n" +
+	"\x1aAskQuestionInteractionSpec\x12?\n" +
+	"\tquestions\x18\x01 \x03(\v2!.avenor.agy.v115.AskQuestionEntryR\tquestions\"w\n" +
+	"\x16AskQuestionInteraction\x12?\n" +
+	"\tresponses\x18\x01 \x03(\v2!.avenor.agy.v115.AskQuestionEntryR\tresponses\x12\x1c\n" +
+	"\tcancelled\x18\x02 \x01(\bR\tcancelled\"\x8a\x02\n" +
+	"\x10AskQuestionEntry\x12\x1a\n" +
+	"\bquestion\x18\x01 \x01(\tR\bquestion\x12<\n" +
+	"\aoptions\x18\x02 \x03(\v2\".avenor.agy.v115.AskQuestionOptionR\aoptions\x12&\n" +
+	"\x0fis_multi_select\x18\x03 \x01(\bR\risMultiSelect\x12.\n" +
+	"\x13selected_option_ids\x18\x04 \x03(\tR\x11selectedOptionIds\x12*\n" +
+	"\x11write_in_response\x18\x05 \x01(\tR\x0fwriteInResponse\x12\x18\n" +
+	"\askipped\x18\x06 \x01(\bR\askipped\"7\n" +
+	"\x11AskQuestionOption\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
+	"\x04text\x18\x02 \x01(\tR\x04text\"\x9c\x01\n" +
 	"\x14CompletedInteraction\x12?\n" +
 	"\arequest\x18\x01 \x01(\v2%.avenor.agy.v115.RequestedInteractionR\arequest\x12C\n" +
-	"\bresponse\x18\x02 \x01(\v2'.avenor.agy.v115.CascadeUserInteractionR\bresponse\"\xb0\x01\n" +
+	"\bresponse\x18\x02 \x01(\v2'.avenor.agy.v115.CascadeUserInteractionR\bresponse\"\xe5\x02\n" +
 	"\x16CascadeUserInteraction\x12#\n" +
 	"\rtrajectory_id\x18\x01 \x01(\tR\ftrajectoryId\x12\x1d\n" +
 	"\n" +
 	"step_index\x18\x02 \x01(\rR\tstepIndex\x12C\n" +
-	"\x06deploy\x18\x04 \x01(\v2).avenor.agy.v115.CascadeDeployInteractionH\x00R\x06deployB\r\n" +
+	"\x06deploy\x18\x04 \x01(\v2).avenor.agy.v115.CascadeDeployInteractionH\x00R\x06deploy\x12H\n" +
+	"\n" +
+	"permission\x18\x15 \x01(\v2&.avenor.agy.v115.PermissionInteractionH\x00R\n" +
+	"permission\x12L\n" +
+	"\fask_question\x18\x16 \x01(\v2'.avenor.agy.v115.AskQuestionInteractionH\x00R\vaskQuestion\x12\x1b\n" +
+	"\ttimed_out\x18\x18 \x01(\bR\btimedOutB\r\n" +
 	"\vinteraction\"2\n" +
 	"\x18CascadeDeployInteraction\x12\x16\n" +
-	"\x06cancel\x18\x01 \x01(\bR\x06cancel\"0\n" +
+	"\x06cancel\x18\x01 \x01(\bR\x06cancel\"\x90\x01\n" +
+	"\x15PermissionInteraction\x12\x14\n" +
+	"\x05allow\x18\x01 \x01(\bR\x05allow\x126\n" +
+	"\x05scope\x18\x02 \x01(\x0e2 .avenor.agy.v115.PermissionScopeR\x05scope\x12)\n" +
+	"\x10sandbox_override\x18\x03 \x01(\bR\x0fsandboxOverride\"0\n" +
 	"\x0fTextOrScopeItem\x12\x14\n" +
 	"\x04text\x18\x01 \x01(\tH\x00R\x04textB\a\n" +
 	"\x05chunk\"]\n" +
 	"\rCascadeConfig\x12L\n" +
-	"\x0eplanner_config\x18\x01 \x01(\v2%.avenor.agy.v115.CascadePlannerConfigR\rplannerConfig\"M\n" +
+	"\x0eplanner_config\x18\x01 \x01(\v2%.avenor.agy.v115.CascadePlannerConfigR\rplannerConfig\"\x92\x01\n" +
 	"\x14CascadePlannerConfig\x125\n" +
 	"\n" +
-	"plan_model\x18\x01 \x01(\x0e2\x16.avenor.agy.v115.ModelR\tplanModel*\xb2\x01\n" +
+	"plan_model\x18\x01 \x01(\x0e2\x16.avenor.agy.v115.ModelR\tplanModel\x12C\n" +
+	"\vtool_config\x18\r \x01(\v2\".avenor.agy.v115.CascadeToolConfigR\n" +
+	"toolConfig\"\xaf\x01\n" +
+	"\x11CascadeToolConfig\x12I\n" +
+	"\fask_question\x18) \x01(\v2&.avenor.agy.v115.AskQuestionToolConfigR\vaskQuestion\x12O\n" +
+	"\x0eask_permission\x18, \x01(\v2(.avenor.agy.v115.AskPermissionToolConfigR\raskPermission\"B\n" +
+	"\x15AskQuestionToolConfig\x12\x1d\n" +
+	"\aenabled\x18\x01 \x01(\bH\x00R\aenabled\x88\x01\x01B\n" +
+	"\n" +
+	"\b_enabled\"D\n" +
+	"\x17AskPermissionToolConfig\x12\x1d\n" +
+	"\aenabled\x18\x01 \x01(\bH\x00R\aenabled\x88\x01\x01B\n" +
+	"\n" +
+	"\b_enabled*\xb2\x01\n" +
 	"\x10CascadeRunStatus\x12\"\n" +
 	"\x1eCASCADE_RUN_STATUS_UNSPECIFIED\x10\x00\x12\x1b\n" +
 	"\x17CASCADE_RUN_STATUS_IDLE\x10\x01\x12\x1e\n" +
@@ -3006,7 +3741,14 @@ const file_internal_runtime_agy_interop_v115_agy_proto_rawDesc = "" +
 	" CLIENT_TRAJECTORY_VERBOSITY_FULL\x10\x03*B\n" +
 	"\x05Model\x12\x15\n" +
 	"\x11MODEL_UNSPECIFIED\x10\x00\x12\"\n" +
-	"\x1dMODEL_GOOGLE_GEMINI_2_5_FLASH\x10\xb8\x022\xac\n" +
+	"\x1dMODEL_GOOGLE_GEMINI_2_5_FLASH\x10\xb8\x02*\xcc\x01\n" +
+	"\x0fPermissionScope\x12 \n" +
+	"\x1cPERMISSION_SCOPE_UNSPECIFIED\x10\x00\x12\x19\n" +
+	"\x15PERMISSION_SCOPE_ONCE\x10\x01\x12!\n" +
+	"\x1dPERMISSION_SCOPE_CONVERSATION\x10\x02\x12\x1e\n" +
+	"\x1aPERMISSION_SCOPE_WORKSPACE\x10\x03\x12\x1b\n" +
+	"\x17PERMISSION_SCOPE_GLOBAL\x10\x04\x12\x1c\n" +
+	"\x18PERMISSION_SCOPE_PROJECT\x10\x052\xac\n" +
 	"\n" +
 	"\x15LanguageServerService\x12R\n" +
 	"\tHeartbeat\x12!.avenor.agy.v115.HeartbeatRequest\x1a\".avenor.agy.v115.HeartbeatResponse\x12|\n" +
@@ -3033,8 +3775,8 @@ func file_internal_runtime_agy_interop_v115_agy_proto_rawDescGZIP() []byte {
 	return file_internal_runtime_agy_interop_v115_agy_proto_rawDescData
 }
 
-var file_internal_runtime_agy_interop_v115_agy_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
-var file_internal_runtime_agy_interop_v115_agy_proto_msgTypes = make([]protoimpl.MessageInfo, 48)
+var file_internal_runtime_agy_interop_v115_agy_proto_enumTypes = make([]protoimpl.EnumInfo, 7)
+var file_internal_runtime_agy_interop_v115_agy_proto_msgTypes = make([]protoimpl.MessageInfo, 58)
 var file_internal_runtime_agy_interop_v115_agy_proto_goTypes = []any{
 	(CascadeRunStatus)(0),                        // 0: avenor.agy.v115.CascadeRunStatus
 	(CortexStepStatus)(0),                        // 1: avenor.agy.v115.CortexStepStatus
@@ -3042,131 +3784,154 @@ var file_internal_runtime_agy_interop_v115_agy_proto_goTypes = []any{
 	(CortexTrajectorySource)(0),                  // 3: avenor.agy.v115.CortexTrajectorySource
 	(StreamTrajectoryVerbosity)(0),               // 4: avenor.agy.v115.StreamTrajectoryVerbosity
 	(Model)(0),                                   // 5: avenor.agy.v115.Model
-	(*HeartbeatRequest)(nil),                     // 6: avenor.agy.v115.HeartbeatRequest
-	(*HeartbeatResponse)(nil),                    // 7: avenor.agy.v115.HeartbeatResponse
-	(*GetConversationMetadataRequest)(nil),       // 8: avenor.agy.v115.GetConversationMetadataRequest
-	(*GetConversationMetadataResponse)(nil),      // 9: avenor.agy.v115.GetConversationMetadataResponse
-	(*TrajectoryMetadata)(nil),                   // 10: avenor.agy.v115.TrajectoryMetadata
-	(*GetAvailableModelsRequest)(nil),            // 11: avenor.agy.v115.GetAvailableModelsRequest
-	(*GetAvailableModelsResponse)(nil),           // 12: avenor.agy.v115.GetAvailableModelsResponse
-	(*FetchAvailableModelsResponse)(nil),         // 13: avenor.agy.v115.FetchAvailableModelsResponse
-	(*ModelDetails)(nil),                         // 14: avenor.agy.v115.ModelDetails
-	(*GetAllCascadeTrajectoriesRequest)(nil),     // 15: avenor.agy.v115.GetAllCascadeTrajectoriesRequest
-	(*GetAllCascadeTrajectoriesResponse)(nil),    // 16: avenor.agy.v115.GetAllCascadeTrajectoriesResponse
-	(*CascadeTrajectorySummary)(nil),             // 17: avenor.agy.v115.CascadeTrajectorySummary
-	(*GetCascadeTrajectoryStepsRequest)(nil),     // 18: avenor.agy.v115.GetCascadeTrajectoryStepsRequest
-	(*GetCascadeTrajectoryStepsResponse)(nil),    // 19: avenor.agy.v115.GetCascadeTrajectoryStepsResponse
-	(*StartCascadeRequest)(nil),                  // 20: avenor.agy.v115.StartCascadeRequest
-	(*StartCascadeResponse)(nil),                 // 21: avenor.agy.v115.StartCascadeResponse
-	(*SendUserCascadeMessageRequest)(nil),        // 22: avenor.agy.v115.SendUserCascadeMessageRequest
-	(*SendUserCascadeMessageResponse)(nil),       // 23: avenor.agy.v115.SendUserCascadeMessageResponse
-	(*HandleCascadeUserInteractionRequest)(nil),  // 24: avenor.agy.v115.HandleCascadeUserInteractionRequest
-	(*HandleCascadeUserInteractionResponse)(nil), // 25: avenor.agy.v115.HandleCascadeUserInteractionResponse
-	(*CancelCascadeStepsRequest)(nil),            // 26: avenor.agy.v115.CancelCascadeStepsRequest
-	(*CancelCascadeStepsResponse)(nil),           // 27: avenor.agy.v115.CancelCascadeStepsResponse
-	(*ForceStopCascadeTreeRequest)(nil),          // 28: avenor.agy.v115.ForceStopCascadeTreeRequest
-	(*ForceStopCascadeTreeResponse)(nil),         // 29: avenor.agy.v115.ForceStopCascadeTreeResponse
-	(*StreamAgentStateUpdatesRequest)(nil),       // 30: avenor.agy.v115.StreamAgentStateUpdatesRequest
-	(*StreamAgentStateUpdatesResponse)(nil),      // 31: avenor.agy.v115.StreamAgentStateUpdatesResponse
-	(*Slice)(nil),                                // 32: avenor.agy.v115.Slice
-	(*AgentStateUpdate)(nil),                     // 33: avenor.agy.v115.AgentStateUpdate
-	(*TrajectoryUpdate)(nil),                     // 34: avenor.agy.v115.TrajectoryUpdate
-	(*StepsUpdate)(nil),                          // 35: avenor.agy.v115.StepsUpdate
-	(*Step)(nil),                                 // 36: avenor.agy.v115.Step
-	(*CortexStepMetadata)(nil),                   // 37: avenor.agy.v115.CortexStepMetadata
-	(*ModelUsageStats)(nil),                      // 38: avenor.agy.v115.ModelUsageStats
-	(*CortexStepPlannerResponse)(nil),            // 39: avenor.agy.v115.CortexStepPlannerResponse
-	(*ChatToolCall)(nil),                         // 40: avenor.agy.v115.ChatToolCall
-	(*CortexStepListDirectory)(nil),              // 41: avenor.agy.v115.CortexStepListDirectory
-	(*ListDirectoryResult)(nil),                  // 42: avenor.agy.v115.ListDirectoryResult
-	(*CortexErrorDetails)(nil),                   // 43: avenor.agy.v115.CortexErrorDetails
-	(*RequestedInteraction)(nil),                 // 44: avenor.agy.v115.RequestedInteraction
-	(*CascadeDeployInteractionSpec)(nil),         // 45: avenor.agy.v115.CascadeDeployInteractionSpec
-	(*CompletedInteraction)(nil),                 // 46: avenor.agy.v115.CompletedInteraction
-	(*CascadeUserInteraction)(nil),               // 47: avenor.agy.v115.CascadeUserInteraction
-	(*CascadeDeployInteraction)(nil),             // 48: avenor.agy.v115.CascadeDeployInteraction
-	(*TextOrScopeItem)(nil),                      // 49: avenor.agy.v115.TextOrScopeItem
-	(*CascadeConfig)(nil),                        // 50: avenor.agy.v115.CascadeConfig
-	(*CascadePlannerConfig)(nil),                 // 51: avenor.agy.v115.CascadePlannerConfig
-	nil,                                          // 52: avenor.agy.v115.FetchAvailableModelsResponse.ModelsEntry
-	nil,                                          // 53: avenor.agy.v115.GetAllCascadeTrajectoriesResponse.TrajectorySummariesEntry
-	(SnapshotTrajectoryVerbosity)(0),             // 54: avenor.agy.v115.snapshot.SnapshotTrajectoryVerbosity
+	(PermissionScope)(0),                         // 6: avenor.agy.v115.PermissionScope
+	(*HeartbeatRequest)(nil),                     // 7: avenor.agy.v115.HeartbeatRequest
+	(*HeartbeatResponse)(nil),                    // 8: avenor.agy.v115.HeartbeatResponse
+	(*GetConversationMetadataRequest)(nil),       // 9: avenor.agy.v115.GetConversationMetadataRequest
+	(*GetConversationMetadataResponse)(nil),      // 10: avenor.agy.v115.GetConversationMetadataResponse
+	(*TrajectoryMetadata)(nil),                   // 11: avenor.agy.v115.TrajectoryMetadata
+	(*GetAvailableModelsRequest)(nil),            // 12: avenor.agy.v115.GetAvailableModelsRequest
+	(*GetAvailableModelsResponse)(nil),           // 13: avenor.agy.v115.GetAvailableModelsResponse
+	(*FetchAvailableModelsResponse)(nil),         // 14: avenor.agy.v115.FetchAvailableModelsResponse
+	(*ModelDetails)(nil),                         // 15: avenor.agy.v115.ModelDetails
+	(*GetAllCascadeTrajectoriesRequest)(nil),     // 16: avenor.agy.v115.GetAllCascadeTrajectoriesRequest
+	(*GetAllCascadeTrajectoriesResponse)(nil),    // 17: avenor.agy.v115.GetAllCascadeTrajectoriesResponse
+	(*CascadeTrajectorySummary)(nil),             // 18: avenor.agy.v115.CascadeTrajectorySummary
+	(*GetCascadeTrajectoryStepsRequest)(nil),     // 19: avenor.agy.v115.GetCascadeTrajectoryStepsRequest
+	(*GetCascadeTrajectoryStepsResponse)(nil),    // 20: avenor.agy.v115.GetCascadeTrajectoryStepsResponse
+	(*StartCascadeRequest)(nil),                  // 21: avenor.agy.v115.StartCascadeRequest
+	(*StartCascadeResponse)(nil),                 // 22: avenor.agy.v115.StartCascadeResponse
+	(*SendUserCascadeMessageRequest)(nil),        // 23: avenor.agy.v115.SendUserCascadeMessageRequest
+	(*SendUserCascadeMessageResponse)(nil),       // 24: avenor.agy.v115.SendUserCascadeMessageResponse
+	(*HandleCascadeUserInteractionRequest)(nil),  // 25: avenor.agy.v115.HandleCascadeUserInteractionRequest
+	(*HandleCascadeUserInteractionResponse)(nil), // 26: avenor.agy.v115.HandleCascadeUserInteractionResponse
+	(*CancelCascadeStepsRequest)(nil),            // 27: avenor.agy.v115.CancelCascadeStepsRequest
+	(*CancelCascadeStepsResponse)(nil),           // 28: avenor.agy.v115.CancelCascadeStepsResponse
+	(*ForceStopCascadeTreeRequest)(nil),          // 29: avenor.agy.v115.ForceStopCascadeTreeRequest
+	(*ForceStopCascadeTreeResponse)(nil),         // 30: avenor.agy.v115.ForceStopCascadeTreeResponse
+	(*StreamAgentStateUpdatesRequest)(nil),       // 31: avenor.agy.v115.StreamAgentStateUpdatesRequest
+	(*StreamAgentStateUpdatesResponse)(nil),      // 32: avenor.agy.v115.StreamAgentStateUpdatesResponse
+	(*Slice)(nil),                                // 33: avenor.agy.v115.Slice
+	(*AgentStateUpdate)(nil),                     // 34: avenor.agy.v115.AgentStateUpdate
+	(*TrajectoryUpdate)(nil),                     // 35: avenor.agy.v115.TrajectoryUpdate
+	(*StepsUpdate)(nil),                          // 36: avenor.agy.v115.StepsUpdate
+	(*Step)(nil),                                 // 37: avenor.agy.v115.Step
+	(*CortexStepMetadata)(nil),                   // 38: avenor.agy.v115.CortexStepMetadata
+	(*ModelUsageStats)(nil),                      // 39: avenor.agy.v115.ModelUsageStats
+	(*CortexStepPlannerResponse)(nil),            // 40: avenor.agy.v115.CortexStepPlannerResponse
+	(*ChatToolCall)(nil),                         // 41: avenor.agy.v115.ChatToolCall
+	(*CortexStepListDirectory)(nil),              // 42: avenor.agy.v115.CortexStepListDirectory
+	(*ListDirectoryResult)(nil),                  // 43: avenor.agy.v115.ListDirectoryResult
+	(*CortexErrorDetails)(nil),                   // 44: avenor.agy.v115.CortexErrorDetails
+	(*RequestedInteraction)(nil),                 // 45: avenor.agy.v115.RequestedInteraction
+	(*CascadeDeployInteractionSpec)(nil),         // 46: avenor.agy.v115.CascadeDeployInteractionSpec
+	(*PermissionInteractionSpec)(nil),            // 47: avenor.agy.v115.PermissionInteractionSpec
+	(*PermissionResource)(nil),                   // 48: avenor.agy.v115.PermissionResource
+	(*AskQuestionInteractionSpec)(nil),           // 49: avenor.agy.v115.AskQuestionInteractionSpec
+	(*AskQuestionInteraction)(nil),               // 50: avenor.agy.v115.AskQuestionInteraction
+	(*AskQuestionEntry)(nil),                     // 51: avenor.agy.v115.AskQuestionEntry
+	(*AskQuestionOption)(nil),                    // 52: avenor.agy.v115.AskQuestionOption
+	(*CompletedInteraction)(nil),                 // 53: avenor.agy.v115.CompletedInteraction
+	(*CascadeUserInteraction)(nil),               // 54: avenor.agy.v115.CascadeUserInteraction
+	(*CascadeDeployInteraction)(nil),             // 55: avenor.agy.v115.CascadeDeployInteraction
+	(*PermissionInteraction)(nil),                // 56: avenor.agy.v115.PermissionInteraction
+	(*TextOrScopeItem)(nil),                      // 57: avenor.agy.v115.TextOrScopeItem
+	(*CascadeConfig)(nil),                        // 58: avenor.agy.v115.CascadeConfig
+	(*CascadePlannerConfig)(nil),                 // 59: avenor.agy.v115.CascadePlannerConfig
+	(*CascadeToolConfig)(nil),                    // 60: avenor.agy.v115.CascadeToolConfig
+	(*AskQuestionToolConfig)(nil),                // 61: avenor.agy.v115.AskQuestionToolConfig
+	(*AskPermissionToolConfig)(nil),              // 62: avenor.agy.v115.AskPermissionToolConfig
+	nil,                                          // 63: avenor.agy.v115.FetchAvailableModelsResponse.ModelsEntry
+	nil,                                          // 64: avenor.agy.v115.GetAllCascadeTrajectoriesResponse.TrajectorySummariesEntry
+	(SnapshotTrajectoryVerbosity)(0),             // 65: avenor.agy.v115.snapshot.SnapshotTrajectoryVerbosity
 }
 var file_internal_runtime_agy_interop_v115_agy_proto_depIdxs = []int32{
-	10, // 0: avenor.agy.v115.GetConversationMetadataResponse.metadata:type_name -> avenor.agy.v115.TrajectoryMetadata
-	13, // 1: avenor.agy.v115.GetAvailableModelsResponse.response:type_name -> avenor.agy.v115.FetchAvailableModelsResponse
-	52, // 2: avenor.agy.v115.FetchAvailableModelsResponse.models:type_name -> avenor.agy.v115.FetchAvailableModelsResponse.ModelsEntry
+	11, // 0: avenor.agy.v115.GetConversationMetadataResponse.metadata:type_name -> avenor.agy.v115.TrajectoryMetadata
+	14, // 1: avenor.agy.v115.GetAvailableModelsResponse.response:type_name -> avenor.agy.v115.FetchAvailableModelsResponse
+	63, // 2: avenor.agy.v115.FetchAvailableModelsResponse.models:type_name -> avenor.agy.v115.FetchAvailableModelsResponse.ModelsEntry
 	5,  // 3: avenor.agy.v115.ModelDetails.model:type_name -> avenor.agy.v115.Model
-	53, // 4: avenor.agy.v115.GetAllCascadeTrajectoriesResponse.trajectory_summaries:type_name -> avenor.agy.v115.GetAllCascadeTrajectoriesResponse.TrajectorySummariesEntry
-	54, // 5: avenor.agy.v115.GetCascadeTrajectoryStepsRequest.verbosity:type_name -> avenor.agy.v115.snapshot.SnapshotTrajectoryVerbosity
+	64, // 4: avenor.agy.v115.GetAllCascadeTrajectoriesResponse.trajectory_summaries:type_name -> avenor.agy.v115.GetAllCascadeTrajectoriesResponse.TrajectorySummariesEntry
+	65, // 5: avenor.agy.v115.GetCascadeTrajectoryStepsRequest.verbosity:type_name -> avenor.agy.v115.snapshot.SnapshotTrajectoryVerbosity
 	4,  // 6: avenor.agy.v115.GetCascadeTrajectoryStepsRequest.trajectory_verbosity:type_name -> avenor.agy.v115.StreamTrajectoryVerbosity
-	36, // 7: avenor.agy.v115.GetCascadeTrajectoryStepsResponse.steps:type_name -> avenor.agy.v115.Step
+	37, // 7: avenor.agy.v115.GetCascadeTrajectoryStepsResponse.steps:type_name -> avenor.agy.v115.Step
 	3,  // 8: avenor.agy.v115.StartCascadeRequest.source:type_name -> avenor.agy.v115.CortexTrajectorySource
-	49, // 9: avenor.agy.v115.SendUserCascadeMessageRequest.items:type_name -> avenor.agy.v115.TextOrScopeItem
-	50, // 10: avenor.agy.v115.SendUserCascadeMessageRequest.cascade_config:type_name -> avenor.agy.v115.CascadeConfig
-	47, // 11: avenor.agy.v115.HandleCascadeUserInteractionRequest.interaction:type_name -> avenor.agy.v115.CascadeUserInteraction
-	32, // 12: avenor.agy.v115.StreamAgentStateUpdatesRequest.initial_steps_page_bounds:type_name -> avenor.agy.v115.Slice
+	57, // 9: avenor.agy.v115.SendUserCascadeMessageRequest.items:type_name -> avenor.agy.v115.TextOrScopeItem
+	58, // 10: avenor.agy.v115.SendUserCascadeMessageRequest.cascade_config:type_name -> avenor.agy.v115.CascadeConfig
+	54, // 11: avenor.agy.v115.HandleCascadeUserInteractionRequest.interaction:type_name -> avenor.agy.v115.CascadeUserInteraction
+	33, // 12: avenor.agy.v115.StreamAgentStateUpdatesRequest.initial_steps_page_bounds:type_name -> avenor.agy.v115.Slice
 	4,  // 13: avenor.agy.v115.StreamAgentStateUpdatesRequest.trajectory_verbosity:type_name -> avenor.agy.v115.StreamTrajectoryVerbosity
-	33, // 14: avenor.agy.v115.StreamAgentStateUpdatesResponse.update:type_name -> avenor.agy.v115.AgentStateUpdate
+	34, // 14: avenor.agy.v115.StreamAgentStateUpdatesResponse.update:type_name -> avenor.agy.v115.AgentStateUpdate
 	0,  // 15: avenor.agy.v115.AgentStateUpdate.status:type_name -> avenor.agy.v115.CascadeRunStatus
 	0,  // 16: avenor.agy.v115.AgentStateUpdate.executable_status:type_name -> avenor.agy.v115.CascadeRunStatus
 	0,  // 17: avenor.agy.v115.AgentStateUpdate.executor_loop_status:type_name -> avenor.agy.v115.CascadeRunStatus
-	34, // 18: avenor.agy.v115.AgentStateUpdate.main_trajectory_update:type_name -> avenor.agy.v115.TrajectoryUpdate
-	35, // 19: avenor.agy.v115.TrajectoryUpdate.steps_update:type_name -> avenor.agy.v115.StepsUpdate
+	35, // 18: avenor.agy.v115.AgentStateUpdate.main_trajectory_update:type_name -> avenor.agy.v115.TrajectoryUpdate
+	36, // 19: avenor.agy.v115.TrajectoryUpdate.steps_update:type_name -> avenor.agy.v115.StepsUpdate
 	0,  // 20: avenor.agy.v115.TrajectoryUpdate.status:type_name -> avenor.agy.v115.CascadeRunStatus
-	43, // 21: avenor.agy.v115.TrajectoryUpdate.last_step_error:type_name -> avenor.agy.v115.CortexErrorDetails
+	44, // 21: avenor.agy.v115.TrajectoryUpdate.last_step_error:type_name -> avenor.agy.v115.CortexErrorDetails
 	2,  // 22: avenor.agy.v115.TrajectoryUpdate.last_step_type:type_name -> avenor.agy.v115.CortexStepType
-	36, // 23: avenor.agy.v115.StepsUpdate.steps:type_name -> avenor.agy.v115.Step
-	32, // 24: avenor.agy.v115.StepsUpdate.page_bounds:type_name -> avenor.agy.v115.Slice
+	37, // 23: avenor.agy.v115.StepsUpdate.steps:type_name -> avenor.agy.v115.Step
+	33, // 24: avenor.agy.v115.StepsUpdate.page_bounds:type_name -> avenor.agy.v115.Slice
 	2,  // 25: avenor.agy.v115.Step.type:type_name -> avenor.agy.v115.CortexStepType
 	1,  // 26: avenor.agy.v115.Step.status:type_name -> avenor.agy.v115.CortexStepStatus
-	37, // 27: avenor.agy.v115.Step.metadata:type_name -> avenor.agy.v115.CortexStepMetadata
-	43, // 28: avenor.agy.v115.Step.error:type_name -> avenor.agy.v115.CortexErrorDetails
-	44, // 29: avenor.agy.v115.Step.requested_interaction:type_name -> avenor.agy.v115.RequestedInteraction
-	46, // 30: avenor.agy.v115.Step.completed_interactions:type_name -> avenor.agy.v115.CompletedInteraction
-	39, // 31: avenor.agy.v115.Step.planner_response:type_name -> avenor.agy.v115.CortexStepPlannerResponse
-	41, // 32: avenor.agy.v115.Step.list_directory:type_name -> avenor.agy.v115.CortexStepListDirectory
-	40, // 33: avenor.agy.v115.CortexStepMetadata.tool_call:type_name -> avenor.agy.v115.ChatToolCall
-	38, // 34: avenor.agy.v115.CortexStepMetadata.model_usage:type_name -> avenor.agy.v115.ModelUsageStats
+	38, // 27: avenor.agy.v115.Step.metadata:type_name -> avenor.agy.v115.CortexStepMetadata
+	44, // 28: avenor.agy.v115.Step.error:type_name -> avenor.agy.v115.CortexErrorDetails
+	45, // 29: avenor.agy.v115.Step.requested_interaction:type_name -> avenor.agy.v115.RequestedInteraction
+	53, // 30: avenor.agy.v115.Step.completed_interactions:type_name -> avenor.agy.v115.CompletedInteraction
+	40, // 31: avenor.agy.v115.Step.planner_response:type_name -> avenor.agy.v115.CortexStepPlannerResponse
+	42, // 32: avenor.agy.v115.Step.list_directory:type_name -> avenor.agy.v115.CortexStepListDirectory
+	41, // 33: avenor.agy.v115.CortexStepMetadata.tool_call:type_name -> avenor.agy.v115.ChatToolCall
+	39, // 34: avenor.agy.v115.CortexStepMetadata.model_usage:type_name -> avenor.agy.v115.ModelUsageStats
 	5,  // 35: avenor.agy.v115.CortexStepMetadata.generator_model:type_name -> avenor.agy.v115.Model
 	5,  // 36: avenor.agy.v115.ModelUsageStats.model:type_name -> avenor.agy.v115.Model
-	40, // 37: avenor.agy.v115.CortexStepPlannerResponse.tool_calls:type_name -> avenor.agy.v115.ChatToolCall
-	42, // 38: avenor.agy.v115.CortexStepListDirectory.results:type_name -> avenor.agy.v115.ListDirectoryResult
-	45, // 39: avenor.agy.v115.RequestedInteraction.deploy:type_name -> avenor.agy.v115.CascadeDeployInteractionSpec
-	44, // 40: avenor.agy.v115.CompletedInteraction.request:type_name -> avenor.agy.v115.RequestedInteraction
-	47, // 41: avenor.agy.v115.CompletedInteraction.response:type_name -> avenor.agy.v115.CascadeUserInteraction
-	48, // 42: avenor.agy.v115.CascadeUserInteraction.deploy:type_name -> avenor.agy.v115.CascadeDeployInteraction
-	51, // 43: avenor.agy.v115.CascadeConfig.planner_config:type_name -> avenor.agy.v115.CascadePlannerConfig
-	5,  // 44: avenor.agy.v115.CascadePlannerConfig.plan_model:type_name -> avenor.agy.v115.Model
-	14, // 45: avenor.agy.v115.FetchAvailableModelsResponse.ModelsEntry.value:type_name -> avenor.agy.v115.ModelDetails
-	17, // 46: avenor.agy.v115.GetAllCascadeTrajectoriesResponse.TrajectorySummariesEntry.value:type_name -> avenor.agy.v115.CascadeTrajectorySummary
-	6,  // 47: avenor.agy.v115.LanguageServerService.Heartbeat:input_type -> avenor.agy.v115.HeartbeatRequest
-	8,  // 48: avenor.agy.v115.LanguageServerService.GetConversationMetadata:input_type -> avenor.agy.v115.GetConversationMetadataRequest
-	11, // 49: avenor.agy.v115.LanguageServerService.GetAvailableModels:input_type -> avenor.agy.v115.GetAvailableModelsRequest
-	15, // 50: avenor.agy.v115.LanguageServerService.GetAllCascadeTrajectories:input_type -> avenor.agy.v115.GetAllCascadeTrajectoriesRequest
-	18, // 51: avenor.agy.v115.LanguageServerService.GetCascadeTrajectorySteps:input_type -> avenor.agy.v115.GetCascadeTrajectoryStepsRequest
-	20, // 52: avenor.agy.v115.LanguageServerService.StartCascade:input_type -> avenor.agy.v115.StartCascadeRequest
-	22, // 53: avenor.agy.v115.LanguageServerService.SendUserCascadeMessage:input_type -> avenor.agy.v115.SendUserCascadeMessageRequest
-	24, // 54: avenor.agy.v115.LanguageServerService.HandleCascadeUserInteraction:input_type -> avenor.agy.v115.HandleCascadeUserInteractionRequest
-	26, // 55: avenor.agy.v115.LanguageServerService.CancelCascadeSteps:input_type -> avenor.agy.v115.CancelCascadeStepsRequest
-	28, // 56: avenor.agy.v115.LanguageServerService.ForceStopCascadeTree:input_type -> avenor.agy.v115.ForceStopCascadeTreeRequest
-	30, // 57: avenor.agy.v115.LanguageServerService.StreamAgentStateUpdates:input_type -> avenor.agy.v115.StreamAgentStateUpdatesRequest
-	7,  // 58: avenor.agy.v115.LanguageServerService.Heartbeat:output_type -> avenor.agy.v115.HeartbeatResponse
-	9,  // 59: avenor.agy.v115.LanguageServerService.GetConversationMetadata:output_type -> avenor.agy.v115.GetConversationMetadataResponse
-	12, // 60: avenor.agy.v115.LanguageServerService.GetAvailableModels:output_type -> avenor.agy.v115.GetAvailableModelsResponse
-	16, // 61: avenor.agy.v115.LanguageServerService.GetAllCascadeTrajectories:output_type -> avenor.agy.v115.GetAllCascadeTrajectoriesResponse
-	19, // 62: avenor.agy.v115.LanguageServerService.GetCascadeTrajectorySteps:output_type -> avenor.agy.v115.GetCascadeTrajectoryStepsResponse
-	21, // 63: avenor.agy.v115.LanguageServerService.StartCascade:output_type -> avenor.agy.v115.StartCascadeResponse
-	23, // 64: avenor.agy.v115.LanguageServerService.SendUserCascadeMessage:output_type -> avenor.agy.v115.SendUserCascadeMessageResponse
-	25, // 65: avenor.agy.v115.LanguageServerService.HandleCascadeUserInteraction:output_type -> avenor.agy.v115.HandleCascadeUserInteractionResponse
-	27, // 66: avenor.agy.v115.LanguageServerService.CancelCascadeSteps:output_type -> avenor.agy.v115.CancelCascadeStepsResponse
-	29, // 67: avenor.agy.v115.LanguageServerService.ForceStopCascadeTree:output_type -> avenor.agy.v115.ForceStopCascadeTreeResponse
-	31, // 68: avenor.agy.v115.LanguageServerService.StreamAgentStateUpdates:output_type -> avenor.agy.v115.StreamAgentStateUpdatesResponse
-	58, // [58:69] is the sub-list for method output_type
-	47, // [47:58] is the sub-list for method input_type
-	47, // [47:47] is the sub-list for extension type_name
-	47, // [47:47] is the sub-list for extension extendee
-	0,  // [0:47] is the sub-list for field type_name
+	41, // 37: avenor.agy.v115.CortexStepPlannerResponse.tool_calls:type_name -> avenor.agy.v115.ChatToolCall
+	43, // 38: avenor.agy.v115.CortexStepListDirectory.results:type_name -> avenor.agy.v115.ListDirectoryResult
+	46, // 39: avenor.agy.v115.RequestedInteraction.deploy:type_name -> avenor.agy.v115.CascadeDeployInteractionSpec
+	47, // 40: avenor.agy.v115.RequestedInteraction.permission:type_name -> avenor.agy.v115.PermissionInteractionSpec
+	49, // 41: avenor.agy.v115.RequestedInteraction.ask_question:type_name -> avenor.agy.v115.AskQuestionInteractionSpec
+	48, // 42: avenor.agy.v115.PermissionInteractionSpec.resource:type_name -> avenor.agy.v115.PermissionResource
+	51, // 43: avenor.agy.v115.AskQuestionInteractionSpec.questions:type_name -> avenor.agy.v115.AskQuestionEntry
+	51, // 44: avenor.agy.v115.AskQuestionInteraction.responses:type_name -> avenor.agy.v115.AskQuestionEntry
+	52, // 45: avenor.agy.v115.AskQuestionEntry.options:type_name -> avenor.agy.v115.AskQuestionOption
+	45, // 46: avenor.agy.v115.CompletedInteraction.request:type_name -> avenor.agy.v115.RequestedInteraction
+	54, // 47: avenor.agy.v115.CompletedInteraction.response:type_name -> avenor.agy.v115.CascadeUserInteraction
+	55, // 48: avenor.agy.v115.CascadeUserInteraction.deploy:type_name -> avenor.agy.v115.CascadeDeployInteraction
+	56, // 49: avenor.agy.v115.CascadeUserInteraction.permission:type_name -> avenor.agy.v115.PermissionInteraction
+	50, // 50: avenor.agy.v115.CascadeUserInteraction.ask_question:type_name -> avenor.agy.v115.AskQuestionInteraction
+	6,  // 51: avenor.agy.v115.PermissionInteraction.scope:type_name -> avenor.agy.v115.PermissionScope
+	59, // 52: avenor.agy.v115.CascadeConfig.planner_config:type_name -> avenor.agy.v115.CascadePlannerConfig
+	5,  // 53: avenor.agy.v115.CascadePlannerConfig.plan_model:type_name -> avenor.agy.v115.Model
+	60, // 54: avenor.agy.v115.CascadePlannerConfig.tool_config:type_name -> avenor.agy.v115.CascadeToolConfig
+	61, // 55: avenor.agy.v115.CascadeToolConfig.ask_question:type_name -> avenor.agy.v115.AskQuestionToolConfig
+	62, // 56: avenor.agy.v115.CascadeToolConfig.ask_permission:type_name -> avenor.agy.v115.AskPermissionToolConfig
+	15, // 57: avenor.agy.v115.FetchAvailableModelsResponse.ModelsEntry.value:type_name -> avenor.agy.v115.ModelDetails
+	18, // 58: avenor.agy.v115.GetAllCascadeTrajectoriesResponse.TrajectorySummariesEntry.value:type_name -> avenor.agy.v115.CascadeTrajectorySummary
+	7,  // 59: avenor.agy.v115.LanguageServerService.Heartbeat:input_type -> avenor.agy.v115.HeartbeatRequest
+	9,  // 60: avenor.agy.v115.LanguageServerService.GetConversationMetadata:input_type -> avenor.agy.v115.GetConversationMetadataRequest
+	12, // 61: avenor.agy.v115.LanguageServerService.GetAvailableModels:input_type -> avenor.agy.v115.GetAvailableModelsRequest
+	16, // 62: avenor.agy.v115.LanguageServerService.GetAllCascadeTrajectories:input_type -> avenor.agy.v115.GetAllCascadeTrajectoriesRequest
+	19, // 63: avenor.agy.v115.LanguageServerService.GetCascadeTrajectorySteps:input_type -> avenor.agy.v115.GetCascadeTrajectoryStepsRequest
+	21, // 64: avenor.agy.v115.LanguageServerService.StartCascade:input_type -> avenor.agy.v115.StartCascadeRequest
+	23, // 65: avenor.agy.v115.LanguageServerService.SendUserCascadeMessage:input_type -> avenor.agy.v115.SendUserCascadeMessageRequest
+	25, // 66: avenor.agy.v115.LanguageServerService.HandleCascadeUserInteraction:input_type -> avenor.agy.v115.HandleCascadeUserInteractionRequest
+	27, // 67: avenor.agy.v115.LanguageServerService.CancelCascadeSteps:input_type -> avenor.agy.v115.CancelCascadeStepsRequest
+	29, // 68: avenor.agy.v115.LanguageServerService.ForceStopCascadeTree:input_type -> avenor.agy.v115.ForceStopCascadeTreeRequest
+	31, // 69: avenor.agy.v115.LanguageServerService.StreamAgentStateUpdates:input_type -> avenor.agy.v115.StreamAgentStateUpdatesRequest
+	8,  // 70: avenor.agy.v115.LanguageServerService.Heartbeat:output_type -> avenor.agy.v115.HeartbeatResponse
+	10, // 71: avenor.agy.v115.LanguageServerService.GetConversationMetadata:output_type -> avenor.agy.v115.GetConversationMetadataResponse
+	13, // 72: avenor.agy.v115.LanguageServerService.GetAvailableModels:output_type -> avenor.agy.v115.GetAvailableModelsResponse
+	17, // 73: avenor.agy.v115.LanguageServerService.GetAllCascadeTrajectories:output_type -> avenor.agy.v115.GetAllCascadeTrajectoriesResponse
+	20, // 74: avenor.agy.v115.LanguageServerService.GetCascadeTrajectorySteps:output_type -> avenor.agy.v115.GetCascadeTrajectoryStepsResponse
+	22, // 75: avenor.agy.v115.LanguageServerService.StartCascade:output_type -> avenor.agy.v115.StartCascadeResponse
+	24, // 76: avenor.agy.v115.LanguageServerService.SendUserCascadeMessage:output_type -> avenor.agy.v115.SendUserCascadeMessageResponse
+	26, // 77: avenor.agy.v115.LanguageServerService.HandleCascadeUserInteraction:output_type -> avenor.agy.v115.HandleCascadeUserInteractionResponse
+	28, // 78: avenor.agy.v115.LanguageServerService.CancelCascadeSteps:output_type -> avenor.agy.v115.CancelCascadeStepsResponse
+	30, // 79: avenor.agy.v115.LanguageServerService.ForceStopCascadeTree:output_type -> avenor.agy.v115.ForceStopCascadeTreeResponse
+	32, // 80: avenor.agy.v115.LanguageServerService.StreamAgentStateUpdates:output_type -> avenor.agy.v115.StreamAgentStateUpdatesResponse
+	70, // [70:81] is the sub-list for method output_type
+	59, // [59:70] is the sub-list for method input_type
+	59, // [59:59] is the sub-list for extension type_name
+	59, // [59:59] is the sub-list for extension extendee
+	0,  // [0:59] is the sub-list for field type_name
 }
 
 func init() { file_internal_runtime_agy_interop_v115_agy_proto_init() }
@@ -3182,20 +3947,27 @@ func file_internal_runtime_agy_interop_v115_agy_proto_init() {
 	}
 	file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[38].OneofWrappers = []any{
 		(*RequestedInteraction_Deploy)(nil),
+		(*RequestedInteraction_Permission)(nil),
+		(*RequestedInteraction_AskQuestion)(nil),
 	}
-	file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[41].OneofWrappers = []any{
+	file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[40].OneofWrappers = []any{}
+	file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[47].OneofWrappers = []any{
 		(*CascadeUserInteraction_Deploy)(nil),
+		(*CascadeUserInteraction_Permission)(nil),
+		(*CascadeUserInteraction_AskQuestion)(nil),
 	}
-	file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[43].OneofWrappers = []any{
+	file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[50].OneofWrappers = []any{
 		(*TextOrScopeItem_Text)(nil),
 	}
+	file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[54].OneofWrappers = []any{}
+	file_internal_runtime_agy_interop_v115_agy_proto_msgTypes[55].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_internal_runtime_agy_interop_v115_agy_proto_rawDesc), len(file_internal_runtime_agy_interop_v115_agy_proto_rawDesc)),
-			NumEnums:      6,
-			NumMessages:   48,
+			NumEnums:      7,
+			NumMessages:   58,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

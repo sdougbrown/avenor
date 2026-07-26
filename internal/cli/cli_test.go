@@ -370,6 +370,24 @@ func TestWaitForSessionAutoApproveAnswersAllowKindAndOrdersEvents(t *testing.T) 
 	}
 }
 
+func TestResolvePermissionAutoApproveDoesNotAnswerQuestion(t *testing.T) {
+	provider := &cliFakeProvider{}
+	event := events.Event{Event: "permission.request", Fields: map[string]any{
+		"request_id":          "req_question",
+		"requires_user_input": true,
+		"options": []any{
+			map[string]any{"optionId": "choice", "kind": "allow"},
+		},
+	}}
+	result := resolvePermission(context.Background(), provider, nil, nil, event, "ses_1", "", "req_question", true, DefaultPermissionClaimTimeout, nil)
+	if provider.answerRequestID != "" {
+		t.Fatalf("question was auto-answered: %q", provider.answerRequestID)
+	}
+	if result.source != "none" {
+		t.Fatalf("result source = %q, want none", result.source)
+	}
+}
+
 func readEventLogForTest(t *testing.T, path string) []events.Event {
 	t.Helper()
 	data, err := os.ReadFile(path)

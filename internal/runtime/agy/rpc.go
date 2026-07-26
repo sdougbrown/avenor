@@ -461,9 +461,15 @@ func (c *rpcClient) startCascade(ctx context.Context) (*agyv115.StartCascadeResp
 func (c *rpcClient) sendUserCascadeMessage(ctx context.Context, cascadeID, text string, model agyv115.Model) (*agyv115.SendUserCascadeMessageResponse, error) {
 	response := new(agyv115.SendUserCascadeMessageResponse)
 	request := &agyv115.SendUserCascadeMessageRequest{
-		CascadeId:     cascadeID,
-		Items:         []*agyv115.TextOrScopeItem{{Chunk: &agyv115.TextOrScopeItem_Text{Text: text}}},
-		CascadeConfig: &agyv115.CascadeConfig{PlannerConfig: &agyv115.CascadePlannerConfig{PlanModel: model}},
+		CascadeId: cascadeID,
+		Items:     []*agyv115.TextOrScopeItem{{Chunk: &agyv115.TextOrScopeItem_Text{Text: text}}},
+		CascadeConfig: &agyv115.CascadeConfig{PlannerConfig: &agyv115.CascadePlannerConfig{
+			PlanModel: model,
+			ToolConfig: &agyv115.CascadeToolConfig{
+				AskQuestion:   &agyv115.AskQuestionToolConfig{Enabled: proto.Bool(true)},
+				AskPermission: &agyv115.AskPermissionToolConfig{Enabled: proto.Bool(true)},
+			},
+		}},
 	}
 	if err := c.call(ctx, "SendUserCascadeMessage", request, response); err != nil {
 		return nil, err
@@ -471,19 +477,27 @@ func (c *rpcClient) sendUserCascadeMessage(ctx context.Context, cascadeID, text 
 	return response, nil
 }
 
-// handleCascadeUserInteractionDenial intentionally exposes only the one Stage
-// 9 validated interaction shape: an empty/default-false deploy denial.
-func (c *rpcClient) handleCascadeUserInteractionDenial(ctx context.Context, cascadeID, trajectoryID string, stepIndex uint32) (*agyv115.HandleCascadeUserInteractionResponse, error) {
+// handleCascadeUserInteraction sends one typed interaction mutation. Callers
+// own idempotency: mutations are never retried by this RPC layer.
+func (c *rpcClient) handleCascadeUserInteraction(ctx context.Context, cascadeID string, interaction *agyv115.CascadeUserInteraction) (*agyv115.HandleCascadeUserInteractionResponse, error) {
+	if interaction == nil {
+		return nil, errors.New("agy interaction is required")
+	}
 	response := new(agyv115.HandleCascadeUserInteractionResponse)
-	request := &agyv115.HandleCascadeUserInteractionRequest{CascadeId: cascadeID, Interaction: &agyv115.CascadeUserInteraction{
-		TrajectoryId: trajectoryID,
-		StepIndex:    stepIndex,
-		Interaction:  &agyv115.CascadeUserInteraction_Deploy{Deploy: &agyv115.CascadeDeployInteraction{}},
-	}}
+	request := &agyv115.HandleCascadeUserInteractionRequest{CascadeId: cascadeID, Interaction: interaction}
 	if err := c.call(ctx, "HandleCascadeUserInteraction", request, response); err != nil {
 		return nil, err
 	}
 	return response, nil
+}
+
+// handleCascadeUserInteractionDenial remains the Stage 9 fixture seam.
+func (c *rpcClient) handleCascadeUserInteractionDenial(ctx context.Context, cascadeID, trajectoryID string, stepIndex uint32) (*agyv115.HandleCascadeUserInteractionResponse, error) {
+	return c.handleCascadeUserInteraction(ctx, cascadeID, &agyv115.CascadeUserInteraction{
+		TrajectoryId: trajectoryID,
+		StepIndex:    stepIndex,
+		Interaction:  &agyv115.CascadeUserInteraction_Deploy{Deploy: &agyv115.CascadeDeployInteraction{}},
+	})
 }
 
 func (c *rpcClient) cancelCascadeSteps(ctx context.Context, cascadeID string, stepIndices []uint32) (*agyv115.CancelCascadeStepsResponse, error) {
@@ -510,8 +524,8 @@ var ownedListenerDiscovery = discoverOwnedListeners
 // until StartCascade succeeds; validateSession performs the required metadata
 // identity check before the host is registered with a provider session.
 func discoverRPCHost(ctx context.Context, pid int, version string, options rpcDiscoveryOptions) (*rpcHost, error) {
-	if version != "1.1.5" {
-		return nil, errors.New("agy RPC requires supported version 1.1.5")
+	if !supportedRPCVersion(version) {
+		return nil, errors.New("agy RPC requires supported version 1.1.5 or 1.1.7")
 	}
 	ctx, cancel := context.WithTimeout(ctx, rpcDiscoveryTimeout)
 	defer cancel()

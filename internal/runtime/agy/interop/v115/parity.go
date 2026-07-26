@@ -18,10 +18,11 @@ import (
 var parityManifestJSON []byte
 
 type parityManifest struct {
-	DescriptorSHA256 string          `json:"descriptor_sha256"`
-	Messages         []messageParity `json:"messages"`
-	Enums            []enumParity    `json:"enums"`
-	Service          serviceParity   `json:"service"`
+	DescriptorSHA256   string          `json:"descriptor_sha256"`
+	DescriptorSHA256es []string        `json:"descriptor_sha256es"`
+	Messages           []messageParity `json:"messages"`
+	Enums              []enumParity    `json:"enums"`
+	Service            serviceParity   `json:"service"`
 }
 type messageParity struct {
 	Local, Original string
@@ -57,9 +58,16 @@ func loadParityManifest() (parityManifest, error) {
 
 func checkParity(data []byte, manifest parityManifest) error {
 	sum := sha256.Sum256(data)
-	if got := hex.EncodeToString(sum[:]); got != manifest.DescriptorSHA256 {
-		return fmt.Errorf("descriptor SHA-256 = %s, want %s", got, manifest.DescriptorSHA256)
+	got := hex.EncodeToString(sum[:])
+	allowed := append([]string{manifest.DescriptorSHA256}, manifest.DescriptorSHA256es...)
+	for _, want := range allowed {
+		if got == want {
+			goto descriptorOK
+		}
 	}
+	return fmt.Errorf("descriptor SHA-256 = %s, want supported agy 1.1.5 or 1.1.7 closure", got)
+
+descriptorOK:
 	set := new(descriptorpb.FileDescriptorSet)
 	if err := proto.Unmarshal(data, set); err != nil {
 		return fmt.Errorf("unmarshal descriptor set: %w", err)

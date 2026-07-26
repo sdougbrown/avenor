@@ -37,10 +37,15 @@ type ptyRPCHost struct {
 	turnGate chan struct{}
 
 	// coordinator is the active Stage 12 recovery owner for the current turn.
-	coordinator *trajectoryRecoveryCoordinator
+	coordinator  *trajectoryRecoveryCoordinator
+	interactions *interactionBridge
 }
 
 type ptyRPCHostFactory func(context.Context, runtime.StartOptions, string, string) (*ptyRPCHost, error)
+
+func supportedRPCVersion(version string) bool {
+	return version == "1.1.5" || version == "1.1.7"
+}
 
 var (
 	discoverPTYRPCHost = discoverRPCHost
@@ -64,8 +69,8 @@ func startPTYRPCHost(ctx context.Context, launcher terminal.Launcher, opts runti
 	if launcher == nil {
 		return nil, errors.New("agy RPC host startup failed")
 	}
-	if version != "1.1.5" {
-		return nil, errors.New("agy RPC host requires supported version 1.1.5")
+	if !supportedRPCVersion(version) {
+		return nil, errors.New("agy RPC host requires supported version 1.1.5 or 1.1.7")
 	}
 
 	lifetimeCtx, cancel := context.WithCancel(context.Background())
@@ -146,6 +151,7 @@ func startPTYRPCHost(ctx context.Context, launcher terminal.Launcher, opts runti
 	// AgentStateUpdate.conversation_id is a distinct wire identity. Pin it from
 	// the first stream update rather than equating it with the cascade ID.
 	host.mapper = newTrajectoryMapper(conversationID, "", "")
+	host.installInteractionBridge()
 	return host, nil
 }
 
@@ -224,11 +230,47 @@ func awaitPTYRPCStartup(ctx context.Context, processDone <-chan struct{}, action
 // terminal operations or untyped protobuf transport.
 func (h *ptyRPCHost) RPC() *rpcHost { return h.rpc }
 
+func (h *ptyRPCHost) installInteractionBridge() {
+	if h == nil || h.rpc == nil || h.rpc.client == nil || h.mapper == nil {
+		return
+	}
+	bridge := newInteractionBridge(h.conversationID, h.conversationID,
+		func(ctx context.Context, offset uint32) (*agyv115.GetCascadeTrajectoryStepsResponse, error) {
+			return h.rpc.client.getCascadeTrajectorySteps(ctx, h.conversationID, offset, agyv115.SnapshotTrajectoryVerbosity_CLIENT_TRAJECTORY_VERBOSITY_FULL, agyv115.StreamTrajectoryVerbosity_CLIENT_TRAJECTORY_VERBOSITY_FULL)
+		},
+		func(ctx context.Context, interaction *agyv115.CascadeUserInteraction) error {
+			_, err := h.rpc.client.handleCascadeUserInteraction(ctx, h.conversationID, interaction)
+			return err
+		},
+	)
+	h.interactions = bridge
+	h.mapper.SetInteractionObserver(bridge.Observe, bridge.Evict)
+}
+
+// AnswerPermission resolves only the current local request owned by this host.
+// Provider transport selection remains intentionally deferred to Stage 18.
+func (h *ptyRPCHost) AnswerPermission(ctx context.Context, requestID string, response runtime.PermissionResponse) error {
+	if h == nil {
+		return errInteractionRejected
+	}
+	h.mu.Lock()
+	closing, bridge := h.closing, h.interactions
+	h.mu.Unlock()
+	if closing || bridge == nil {
+		return errInteractionRejected
+	}
+	return bridge.Answer(ctx, requestID, response)
+}
+
 // ConversationID returns the validated external agy conversation identity.
 func (h *ptyRPCHost) ConversationID() string { return h.conversationID }
 
-// Close is safe to call concurrently. It closes RPC/coordinator ownership,
-// cancels and kills the PTY, then synchronously waits for reaping.
+// Close is safe to call concurrently. It first cancels any in-flight
+// interaction answer and clears the bridge, then closes the recovery
+// coordinator, the typed RPC client, the PTY, and finally waits for reaping.
+// Clearing interactions first ensures a blocked pre-answer snapshot or Handle
+// RPC exits before RPC teardown, and no Handle mutation is sent against a
+// closed transport.
 func (h *ptyRPCHost) Close(ctx context.Context) error {
 	cleanupCtx, cancel := boundedPTYRPCCloseContext(ctx)
 	defer cancel()
@@ -253,9 +295,20 @@ func (h *ptyRPCHost) Close(ctx context.Context) error {
 	}
 	turnDone := h.turnDone
 	coordinator := h.coordinator
+	interactions := h.interactions
+	rpc := h.rpc
 	h.mu.Unlock()
 
 	var firstErr error
+	// Clear and cancel any in-flight interaction answer before tearing RPC
+	// down. This is the gate that proves Close during a blocked pre-answer
+	// fetch yields zero Handle mutations and no goroutine leak.
+	if interactions != nil {
+		interactions.Clear()
+		if err := interactions.Wait(cleanupCtx); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
 	if coordinator != nil {
 		if err := coordinator.Close(); err != nil {
 			firstErr = err
@@ -273,8 +326,8 @@ func (h *ptyRPCHost) Close(ctx context.Context) error {
 			}
 		}
 	}
-	if h.rpc != nil {
-		h.rpc.close()
+	if rpc != nil {
+		rpc.close()
 	}
 	h.cancel()
 	if err := h.terminal.Kill(cleanupCtx); err != nil && firstErr == nil {
