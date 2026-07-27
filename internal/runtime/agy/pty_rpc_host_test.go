@@ -173,15 +173,17 @@ func TestInteractiveAgyCommandQuotesOnlySupportedValues(t *testing.T) {
 		name   string
 		resume string
 		agent  string
+		dir    string
 		want   string
 	}{
-		{"new", "", "", "exec agy"},
-		{"new agent", "", "agent one", "exec agy --agent 'agent one'"},
-		{"resume", "conversation-123", "", "exec agy --conversation 'conversation-123'"},
-		{"resume agent hostile", "id' ; $(touch nope)\nnext", "a'\n$(bad); *", "exec agy --conversation 'id'\"'\"' ; $(touch nope)\nnext' --agent 'a'\"'\"'\n$(bad); *'"},
+		{"new", "", "", "", "exec agy"},
+		{"new workspace", "", "", "/private/workspace", "exec agy --add-dir \"$PWD\""},
+		{"new agent", "", "agent one", "", "exec agy --agent 'agent one'"},
+		{"resume", "conversation-123", "", "", "exec agy --conversation 'conversation-123'"},
+		{"resume agent hostile", "id' ; $(touch nope)\nnext", "a'\n$(bad); *", "", "exec agy --conversation 'id'\"'\"' ; $(touch nope)\nnext' --agent 'a'\"'\"'\n$(bad); *'"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := interactiveAgyCommand(tc.resume, tc.agent); got != tc.want {
+			if got := interactiveAgyCommand(tc.resume, tc.agent, tc.dir); got != tc.want {
 				t.Fatalf("command = %q, want %q", got, tc.want)
 			}
 		})
@@ -227,7 +229,7 @@ func TestPTYRPCHostNewBindsCascadeWithoutTerminalProtocol(t *testing.T) {
 	if discoveredPID != 4242 || startCalls != 1 || validateCalls != 1 || host.ConversationID() != "external-conversation" || host.RPC() == nil {
 		t.Fatalf("host binding pid=%d starts=%d validates=%d id=%q rpc=%v", discoveredPID, startCalls, validateCalls, host.ConversationID(), host.RPC())
 	}
-	if launcher.calls != 1 || launcher.opts.Dir != opts.Dir || launcher.opts.Command != "exec agy --agent 'agent '\"'\"' one'" {
+	if launcher.calls != 1 || launcher.opts.Dir != opts.Dir || launcher.opts.Command != "exec agy --agent 'agent '\"'\"' one' --add-dir \"$PWD\"" {
 		t.Fatalf("launch = calls=%d opts=%#v", launcher.calls, launcher.opts)
 	}
 	for _, forbidden := range []string{opts.Model, opts.Dir, "prompt content"} {

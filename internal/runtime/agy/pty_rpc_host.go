@@ -83,7 +83,7 @@ func startPTYRPCHost(ctx context.Context, launcher terminal.Launcher, opts runti
 		Dir:     opts.Dir,
 		Cols:    220,
 		Rows:    50,
-		Command: interactiveAgyCommand(resumeID, opts.Agent),
+		Command: interactiveAgyCommand(resumeID, opts.Agent, opts.Dir),
 	})
 	if err != nil {
 		cancel()
@@ -433,13 +433,19 @@ func boundedPTYRPCCloseContext(ctx context.Context) (context.Context, context.Ca
 	return context.WithTimeout(context.Background(), timeout)
 }
 
-func interactiveAgyCommand(resumeID, agent string) string {
+func interactiveAgyCommand(resumeID, agent, dir string) string {
 	command := "exec agy"
 	if resumeID != "" {
 		command += " --conversation " + posixShellQuote(resumeID)
 	}
 	if agent != "" {
 		command += " --agent " + posixShellQuote(agent)
+	}
+	// agy's interactive tool workspace is not derived from the process cwd, and
+	// it resolves a literal "." after changing directories. Let the launch shell
+	// expand its trusted cwd without embedding the user path in this command.
+	if dir != "" {
+		command += " --add-dir \"$PWD\""
 	}
 	return command
 }
