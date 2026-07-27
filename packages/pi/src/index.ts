@@ -30,7 +30,7 @@ import {
   type WatchRunRef,
 } from './watch.js'
 import type { TrackedRun, RunStatusEntry } from './types.js'
-import { TERMINAL_STATUSES, findLiveStatusForTrackedRun, formatRunLine, statusEmoji } from './types.js'
+import { TERMINAL_STATUSES, findLiveStatusForTrackedRun, formatRunLine, statusEmoji, decideCompletion } from './types.js'
 import { resolveAgentProfile } from './agent-profile.js'
 
 const POLL_INTERVAL_MS = 3_000
@@ -415,13 +415,15 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
               // when it returns, so skip the completion message entirely.
               continue
             }
-            if (!run.completionPending) {
+            const action = decideCompletion(run)
+            if (action === 'defer') {
               // First tick seeing terminal status: defer the completion
               // message by one cycle so avenor_result can consume the
               // result first without a duplicate steering message.
               run.completionPending = true
               continue
             }
+            if (action === 'skip') continue
             // Second tick seeing terminal status: the agent did not call
             // avenor_result within one cycle, so deliver the completion.
             const finalOutput = await resolveFinalOutput(run, run.lastStatus)
