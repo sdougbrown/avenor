@@ -1583,11 +1583,14 @@ func TestPermissionClaimDisconnectChFiresOnRealDisconnect(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	// Now the disconnect channel should be closed.
+	// Now the disconnect channel should be closed. Use a blocking
+	// select with a timeout — HasClients() returning false means the
+	// connection was removed from s.conns, but signalClientDisconnect()
+	// (called next in disconnect()) may not have run yet.
 	select {
 	case <-disconnectCh:
 		// expected
-	default:
-		t.Fatal("disconnectCh was not closed after all clients disconnected")
+	case <-time.After(2 * time.Second):
+		t.Fatal("disconnectCh was not closed within 2 seconds after all clients disconnected")
 	}
 }

@@ -1280,8 +1280,10 @@ func resolvePermission(
 			}
 			// handoffToFallback transitions the claim to the file-handler or
 			// no-resolver state and returns a result if a queued answer was
-			// consumed. When no answer is queued, the caller falls through to
-			// the file-handler block below.
+			// consumed. When no answer is queued, returns a zero-value
+			// permissionResult as a sentinel: the caller checks source != ""
+			// || err != nil to distinguish it from real results. This works
+			// because answerControl always sets source or err on every path.
 			handoffToFallback := func() permissionResult {
 				next := control.PermissionResolverNoResolver
 				if fileHandler != nil {
