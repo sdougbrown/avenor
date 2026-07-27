@@ -19,6 +19,7 @@ export interface RunInfo {
   agent?: string
   agentProfile?: string
   backend?: string
+  model?: string
   dir?: string
   brokerUrl?: string
   parentToken?: string
@@ -282,6 +283,7 @@ export class Supervisor {
       agent: (spawnParams.agent as string | undefined) ?? params.agent as string | undefined,
       agentProfile: spawnParams.agent_profile as string | undefined,
       backend: spawnParams.backend as string | undefined,
+      model: spawnParams.model as string | undefined,
       dir: spawnParams.dir as string | undefined,
       brokerUrl: result.broker_url as string | undefined,
       parentToken: result.parent_token as string | undefined,

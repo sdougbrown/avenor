@@ -73,6 +73,7 @@ describe('followUpTool with an external supervisor', () => {
       agent: 'jockey',
       session_id: 'ses-from-live',
       backend: 'pi',
+      model: 'test-model',
       agent_profile: 'cloud',
       dir: '/repo/from-original-run',
     })
@@ -89,6 +90,7 @@ describe('followUpTool with an external supervisor', () => {
       prompt: 'continue',
       session_id: 'ses-from-live',
       backend: 'pi',
+      model: 'test-model',
       agent_profile: 'cloud',
       dir: '/repo/from-original-run',
     })
@@ -107,6 +109,7 @@ describe('followUpTool with an external supervisor', () => {
         agent: 'explore',
         agentProfile: 'cloud',
         backend: 'pi',
+        model: 'stored-model',
         dir: '/repo/from-run-map',
       }]]),
     }
@@ -131,6 +134,7 @@ describe('followUpTool with an external supervisor', () => {
     expect(spawnMock.mock.calls[0]?.[0]).toMatchObject({
       agent: 'explore',
       backend: 'pi',
+      model: 'stored-model',
       agent_profile: 'cloud',
       dir: '/repo/from-run-map',
       session_id: 'ses-from-run-map',

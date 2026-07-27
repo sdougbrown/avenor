@@ -88,6 +88,7 @@ export async function followUpTool(args: {
       )
       const backend =
         (liveStatus?.backend as string | undefined) ?? runInfo?.backend
+      const model = (liveStatus?.model as string | undefined) ?? runInfo?.model
       const dir = (liveStatus?.dir as string | undefined) ?? runInfo?.dir
       const agentProfile =
         (liveStatus?.agent_profile as string | undefined) ?? runInfo?.agentProfile
@@ -106,6 +107,7 @@ export async function followUpTool(args: {
         on_event: eventLogPath,
       }
       if (backend) spawnParams.backend = backend
+      if (model) spawnParams.model = model
       if (dir) spawnParams.dir = dir
       if (agentProfile) spawnParams.agent_profile = agentProfile
 
@@ -155,6 +157,7 @@ export async function followUpTool(args: {
     (liveStatus?.agent as string | undefined) ?? runInfo.agent,
   )
   const backend = (liveStatus?.backend as string | undefined) ?? runInfo.backend
+  const model = (liveStatus?.model as string | undefined) ?? runInfo.model
   const dir = (liveStatus?.dir as string | undefined) ?? runInfo.dir
   const agentProfile =
     (liveStatus?.agent_profile as string | undefined) ?? runInfo.agentProfile
@@ -164,6 +167,7 @@ export async function followUpTool(args: {
   const followUpRun = await sup.spawn({
     agent,
     backend,
+    model,
     dir,
     agent_profile: agentProfile,
     prompt: args.message,
