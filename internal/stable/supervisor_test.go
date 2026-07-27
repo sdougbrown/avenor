@@ -1579,7 +1579,7 @@ func TestAnswerPermissionUsesActiveControlClaim(t *testing.T) {
 			},
 		},
 	})
-	answerCh, ok := sup.control.BeginPermissionClaim("rt_claim", "req_claim")
+	answerCh, _, ok := sup.control.BeginPermissionClaim("rt_claim", "req_claim")
 	if !ok {
 		t.Fatal("BeginPermissionClaim returned false")
 	}
@@ -1629,11 +1629,11 @@ func TestAnswerPermissionScopesSameRequestIDByRuntime(t *testing.T) {
 		})
 	}
 
-	first, ok := sup.control.BeginPermissionClaim("rt_1", "0")
+	first, _, ok := sup.control.BeginPermissionClaim("rt_1", "0")
 	if !ok {
 		t.Fatal("claim for rt_1 was rejected")
 	}
-	second, ok := sup.control.BeginPermissionClaim("rt_2", "0")
+	second, _, ok := sup.control.BeginPermissionClaim("rt_2", "0")
 	if !ok {
 		t.Fatal("claim for rt_2 was rejected")
 	}

@@ -419,9 +419,6 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 		child.cancelFn = childCancel
 		child.autoApprove = params.AutoApprove
 		child.permClaimTimeout = s.config.PermissionClaimTimeout
-		if child.permClaimTimeout == 0 {
-			child.permClaimTimeout = cli.DefaultPermissionClaimTimeout
-		}
 		child.eventWriter = writer
 		child.fileHandler = fileHandler
 		child.runID = s.runID
@@ -468,9 +465,6 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 		child.cancelFn = childCancel
 		child.autoApprove = params.AutoApprove
 		child.permClaimTimeout = s.config.PermissionClaimTimeout
-		if child.permClaimTimeout == 0 {
-			child.permClaimTimeout = cli.DefaultPermissionClaimTimeout
-		}
 		child.eventWriter = writer
 		child.fileHandler = fileHandler
 		child.runID = s.runID
@@ -544,9 +538,6 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 	child.fileHandler = fileHandler
 	child.autoApprove = params.AutoApprove
 	child.permClaimTimeout = s.config.PermissionClaimTimeout
-	if child.permClaimTimeout == 0 {
-		child.permClaimTimeout = cli.DefaultPermissionClaimTimeout
-	}
 	child.runID = s.runID
 	child.dir = params.Dir
 	child.onEvent = onEvent

@@ -2074,14 +2074,11 @@ func TestPermissionRequestRejectsExistingNoResolverBeforePublishing(t *testing.T
 	}
 }
 
-// TestControlPermissionClaimTimeoutFallsThrough verifies the TOCTOU fix: when a
-// client is connected at the HasClients() gate but never sends answer_permission,
-// resolvePermission times out and falls through to the file-handler rather than
-// blocking until SIGINT.
-func TestControlPermissionClaimTimeoutFallsThrough(t *testing.T) {
-	// Shorten the claim window so the test completes quickly.
-	claimTimeout := 100 * time.Millisecond
-
+// TestControlPermissionClaimDisconnectFallsThrough verifies that when a
+// client is connected at the HasClients() gate but never sends
+// answer_permission, resolvePermission falls through to the file-handler (or
+// no-resolver) when the client disconnects, rather than blocking indefinitely.
+func TestControlPermissionClaimDisconnectFallsThrough(t *testing.T) {
 	// Use /tmp to keep socket path under the 104-byte macOS limit.
 	sockDir, err := os.MkdirTemp("", "av-pct-*")
 	if err != nil {
@@ -2102,16 +2099,9 @@ func TestControlPermissionClaimTimeoutFallsThrough(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial silent client: %v", err)
 	}
-	defer silentConn.Close()
+	t.Cleanup(func() { silentConn.Close() })
 
-	// Verify HasClients() is true before we call resolvePermission.
-	deadline := time.Now().Add(2 * time.Second)
-	for !cs.HasClients() {
-		if time.Now().After(deadline) {
-			t.Fatal("HasClients() never became true")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	waitForControlClientForTest(t, cs)
 
 	event := events.Event{
 		Event:     "permission.request",
@@ -2128,20 +2118,26 @@ func TestControlPermissionClaimTimeoutFallsThrough(t *testing.T) {
 	provider := &cliFakeProvider{}
 	emit := func(events.Event) error { return nil }
 
-	// resolvePermission should time out waiting for the silent client,
-	// then fall through to the no-resolver path (fileHandler == nil).
-	start := time.Now()
-	res := resolvePermission(context.Background(), provider, nil, cs, event, "ses_timeout", "", "req_timeout", false, claimTimeout, emit)
-	elapsed := time.Since(start)
+	// claimTimeout = 0 means no wall-clock timer; fallback happens only on
+	// client disconnect.
+	resultCh := make(chan permissionResult, 1)
+	go func() {
+		resultCh <- resolvePermission(context.Background(), provider, nil, cs, event, "ses_timeout", "", "req_timeout", false, 0, emit)
+	}()
 
-	// Lower bound: must have waited at least the claim timeout (80ms gives 20ms slack).
-	if elapsed < 80*time.Millisecond {
-		t.Fatalf("resolvePermission returned too quickly (%v); expected to wait ~%v for the claim timer", elapsed, claimTimeout)
+	// Wait for the claim to be registered before disconnecting.
+	waitForPendingPermissionForTest(t, cs)
+
+	// Disconnect the silent client — this should trigger the fallback.
+	silentConn.Close()
+
+	var res permissionResult
+	select {
+	case res = <-resultCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("resolvePermission did not return within 5 seconds after client disconnect")
 	}
-	// Upper bound: should not have blocked indefinitely.
-	if elapsed > 5*time.Second {
-		t.Fatalf("resolvePermission blocked for %v, want ~%v", elapsed, claimTimeout)
-	}
+
 	// No file-handler provided, so result should be the no-resolver sentinel.
 	if res.source != "none" {
 		t.Fatalf("result source = %q, want \"none\"", res.source)
@@ -2151,11 +2147,11 @@ func TestControlPermissionClaimTimeoutFallsThrough(t *testing.T) {
 	}
 	// The claim should have been cleaned up.
 	if cs.HasPendingPermission() {
-		t.Fatal("permission claim still registered after timeout")
+		t.Fatal("permission claim still registered after disconnect")
 	}
-	// Control path timed out without answering — AnswerPermission must NOT have been called.
+	// Control path fell through without answering — AnswerPermission must NOT have been called.
 	if provider.answerRequestID != "" {
-		t.Fatalf("provider.AnswerPermission was called with requestID=%q, want no call (control path should not answer on timeout)", provider.answerRequestID)
+		t.Fatalf("provider.AnswerPermission was called with requestID=%q, want no call (control path should not answer on disconnect)", provider.answerRequestID)
 	}
 }
 
@@ -2414,12 +2410,10 @@ func TestFailedAutomaticPermissionRemovesClaim(t *testing.T) {
 	}
 }
 
-// TestControlPermissionClaimTimeoutFallsToFileHandler verifies that when the
-// claim times out and a file-handler is configured, resolvePermission routes to
-// the file-handler rather than returning source "none".
-func TestControlPermissionClaimTimeoutFallsToFileHandler(t *testing.T) {
-	claimTimeout := 100 * time.Millisecond
-
+// TestControlPermissionClaimDisconnectFallsToFileHandler verifies that when
+// the client disconnects and a file-handler is configured, resolvePermission
+// routes to the file-handler rather than returning source "none".
+func TestControlPermissionClaimDisconnectFallsToFileHandler(t *testing.T) {
 	// Use /tmp to keep socket path under the 104-byte macOS limit.
 	sockDir, err := os.MkdirTemp("", "av-pcf-*")
 	if err != nil {
@@ -2440,15 +2434,9 @@ func TestControlPermissionClaimTimeoutFallsToFileHandler(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial silent client: %v", err)
 	}
-	defer silentConn.Close()
+	t.Cleanup(func() { silentConn.Close() })
 
-	deadline := time.Now().Add(2 * time.Second)
-	for !cs.HasClients() {
-		if time.Now().After(deadline) {
-			t.Fatal("HasClients() never became true")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	waitForControlClientForTest(t, cs)
 
 	dir := t.TempDir()
 	base := filepath.Join(dir, "perm")
@@ -2493,7 +2481,26 @@ func TestControlPermissionClaimTimeoutFallsToFileHandler(t *testing.T) {
 	provider := &cliFakeProvider{}
 	emit := func(events.Event) error { return nil }
 
-	res := resolvePermission(context.Background(), provider, fh, cs, event, "ses_fh", "", "req_fh", false, claimTimeout, emit)
+	// claimTimeout = 0 means no wall-clock timer; fallback happens only on
+	// client disconnect.
+	resultCh := make(chan permissionResult, 1)
+	go func() {
+		resultCh <- resolvePermission(context.Background(), provider, fh, cs, event, "ses_fh", "", "req_fh", false, 0, emit)
+	}()
+
+	// Wait for the claim to be registered before disconnecting.
+	waitForPendingPermissionForTest(t, cs)
+
+	// Disconnect the silent client — this should trigger the fallback to the
+	// file handler.
+	silentConn.Close()
+
+	var res permissionResult
+	select {
+	case res = <-resultCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("resolvePermission did not return within 10 seconds after client disconnect")
+	}
 
 	if res.err != nil {
 		t.Fatalf("unexpected error: %v", res.err)
@@ -2685,8 +2692,9 @@ func TestWaitForSessionClosedEventChannelWaitsForPermissionThenErrors(t *testing
 // claim channel, the claim is cleaned up (HasPendingPermission returns false)
 // and the result carries the context error.
 func TestControlPermissionClaimContextCancelReleasesClaim(t *testing.T) {
-	// Use a long claim timeout so we know the ctx.Done() branch fires, not the timer.
-	claimTimeout := 30 * time.Second
+	// claimTimeout = 0 means no wall-clock timer; only context cancellation
+	// or client disconnect can break the wait. We test ctx cancellation here.
+	claimTimeout := time.Duration(0)
 
 	// Use /tmp to keep socket path under the 104-byte macOS limit.
 	sockDir, err := os.MkdirTemp("", "av-pcx-*")
@@ -2710,14 +2718,7 @@ func TestControlPermissionClaimContextCancelReleasesClaim(t *testing.T) {
 	}
 	defer silentConn.Close()
 
-	// Wait until the server registers the client.
-	deadline := time.Now().Add(2 * time.Second)
-	for !cs.HasClients() {
-		if time.Now().After(deadline) {
-			t.Fatal("HasClients() never became true")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	waitForControlClientForTest(t, cs)
 
 	event := events.Event{
 		Event:     "permission.request",
@@ -2736,30 +2737,13 @@ func TestControlPermissionClaimContextCancelReleasesClaim(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Channel closed once resolvePermission has registered the claim.
-	claimRegistered := make(chan struct{})
-	go func() {
-		// Poll until HasPendingPermission becomes true, then signal.
-		for {
-			if cs.HasPendingPermission() {
-				close(claimRegistered)
-				return
-			}
-			time.Sleep(5 * time.Millisecond)
-		}
-	}()
-
 	resultCh := make(chan permissionResult, 1)
 	go func() {
 		resultCh <- resolvePermission(ctx, provider, nil, cs, event, "ses_cancel", "", "req_cancel", false, claimTimeout, emit)
 	}()
 
 	// Wait for the claim to be registered before cancelling.
-	select {
-	case <-claimRegistered:
-	case <-time.After(2 * time.Second):
-		t.Fatal("claim was never registered within 2 seconds")
-	}
+	waitForPendingPermissionForTest(t, cs)
 
 	cancel()
 
@@ -2784,6 +2768,76 @@ func TestControlPermissionClaimContextCancelReleasesClaim(t *testing.T) {
 	// AnswerPermission must NOT have been called (ctx was cancelled before any answer).
 	if provider.answerRequestID != "" {
 		t.Fatalf("provider.AnswerPermission called with requestID=%q, want no call", provider.answerRequestID)
+	}
+}
+
+// TestControlPermissionClaimExplicitTimeoutFallsThrough verifies that when an
+// explicit --permission-claim-timeout > 0 is set, the wall-clock timer still
+// fires and causes the resolver to fall through to the file-handler or
+// no-resolver path, even if the client remains connected.
+func TestControlPermissionClaimExplicitTimeoutFallsThrough(t *testing.T) {
+	// Shorten the claim window so the test completes quickly.
+	claimTimeout := 100 * time.Millisecond
+
+	// Use /tmp to keep socket path under the 104-byte macOS limit.
+	sockDir, err := os.MkdirTemp("", "av-pet-*")
+	if err != nil {
+		t.Fatalf("mkdirtemp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(sockDir) })
+
+	state := control.NewState("run_et", "label", 0)
+	cs := control.NewServer(state)
+	socketPath := filepath.Join(sockDir, "et.sock")
+	if err := cs.Start(socketPath); err != nil {
+		t.Fatalf("start control server: %v", err)
+	}
+	defer cs.Stop()
+
+	// Connect a client so HasClients() returns true — but never answer.
+	silentConn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("dial silent client: %v", err)
+	}
+	defer silentConn.Close()
+
+	waitForControlClientForTest(t, cs)
+
+	event := events.Event{
+		Event:     "permission.request",
+		SessionID: "ses_et",
+		Fields: map[string]any{
+			"request_id": "req_et",
+			"options": []any{
+				map[string]any{"optionId": "deny", "kind": "reject"},
+				map[string]any{"optionId": "allow_et", "kind": "allow"},
+			},
+		},
+	}
+
+	provider := &cliFakeProvider{}
+	emit := func(events.Event) error { return nil }
+
+	// With an explicit timeout > 0, the timer fires even though the client
+	// stays connected.
+	start := time.Now()
+	res := resolvePermission(context.Background(), provider, nil, cs, event, "ses_et", "", "req_et", false, claimTimeout, emit)
+	elapsed := time.Since(start)
+
+	// Lower bound: must have waited at least the claim timeout (80ms gives 20ms slack).
+	if elapsed < 80*time.Millisecond {
+		t.Fatalf("resolvePermission returned too quickly (%v); expected to wait ~%v for the claim timer", elapsed, claimTimeout)
+	}
+	// Upper bound: should not have blocked indefinitely.
+	if elapsed > 5*time.Second {
+		t.Fatalf("resolvePermission blocked for %v, want ~%v", elapsed, claimTimeout)
+	}
+	// No file-handler provided, so result should be the no-resolver sentinel.
+	if res.source != "none" {
+		t.Fatalf("result source = %q, want \"none\"", res.source)
+	}
+	if res.err != nil {
+		t.Fatalf("unexpected error: %v", res.err)
 	}
 }
 

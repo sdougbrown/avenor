@@ -255,7 +255,7 @@ func TestOwnerRejectionForMutatingMethods(t *testing.T) {
 
 func TestAnswerPendingPermissionDeliversMatchingAnswer(t *testing.T) {
 	s := NewServer(NewState("run_1", "", 0))
-	answerCh, ok := s.BeginPermissionClaim("", "req_1")
+	answerCh, _, ok := s.BeginPermissionClaim("", "req_1")
 	if !ok {
 		t.Fatal("BeginPermissionClaim returned false")
 	}
@@ -276,7 +276,7 @@ func TestAnswerPendingPermissionDeliversMatchingAnswer(t *testing.T) {
 
 func TestAnswerPendingPermissionRejectsMismatchedRequest(t *testing.T) {
 	s := NewServer(NewState("run_1", "", 0))
-	answerCh, ok := s.BeginPermissionClaim("", "req_1")
+	answerCh, _, ok := s.BeginPermissionClaim("", "req_1")
 	if !ok {
 		t.Fatal("BeginPermissionClaim returned false")
 	}
@@ -294,11 +294,11 @@ func TestAnswerPendingPermissionRejectsMismatchedRequest(t *testing.T) {
 
 func TestPermissionClaimsAreScopedAndReportFullChannel(t *testing.T) {
 	s := NewServer(NewState("run_1", "", 0))
-	first, ok := s.BeginPermissionClaim("rt_1", "0")
+	first, _, ok := s.BeginPermissionClaim("rt_1", "0")
 	if !ok {
 		t.Fatal("first BeginPermissionClaim returned false")
 	}
-	second, ok := s.BeginPermissionClaim("rt_2", "0")
+	second, _, ok := s.BeginPermissionClaim("rt_2", "0")
 	if !ok {
 		t.Fatal("second BeginPermissionClaim returned false for a distinct scope")
 	}
@@ -325,7 +325,7 @@ func TestPermissionClaimsAreScopedAndReportFullChannel(t *testing.T) {
 
 func TestPermissionClaimRejectsDuplicateAfterFirstAnswerIsDrained(t *testing.T) {
 	s := NewServer(NewState("run_1", "", 0))
-	answerCh, ok := s.BeginPermissionClaim("rt_1", "0")
+	answerCh, _, ok := s.BeginPermissionClaim("rt_1", "0")
 	if !ok {
 		t.Fatal("BeginPermissionClaim returned false")
 	}
@@ -359,7 +359,7 @@ func TestBeginPermissionClaimPreservesAnswerQueuedWhileReserved(t *testing.T) {
 		t.Fatalf("delivery = %v, want delivered", got)
 	}
 
-	answerCh, ok := s.BeginPermissionClaim("rt_1", "0")
+	answerCh, _, ok := s.BeginPermissionClaim("rt_1", "0")
 	if !ok {
 		t.Fatal("BeginPermissionClaim returned false")
 	}
@@ -1437,5 +1437,157 @@ func TestStableSendToParentMessageTooLarge(t *testing.T) {
 	}
 	if mock.sendToParentCalled != 0 {
 		t.Errorf("sendToParentCalled = %d, want 0 (should not be called)", mock.sendToParentCalled)
+	}
+}
+
+// TestPermissionClaimDisconnectChClosedOnClientDisconnect verifies that when
+// all control-socket clients disconnect, the disconnect channel for pending
+// claims in Reserved or Control state is closed, signaling the resolver to
+// fall through to a fallback handler.
+func TestPermissionClaimDisconnectChClosedOnClientDisconnect(t *testing.T) {
+	state := NewState("run_1", "", 0)
+	s := NewServer(state)
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	// No PreparePermissionClaim needed — BeginPermissionClaim creates the claim.
+	answerCh, disconnectCh, ok := s.BeginPermissionClaim("rt_1", "req_1")
+	if !ok {
+		t.Fatal("BeginPermissionClaim returned false")
+	}
+	defer s.EndPermissionClaim("rt_1", "req_1")
+
+	// Without any clients connected, signalClientDisconnect should close the channel.
+	s.signalClientDisconnect()
+
+	select {
+	case <-disconnectCh:
+		// expected: channel was closed
+	default:
+		t.Fatal("disconnectCh was not closed after signalClientDisconnect")
+	}
+
+	// The claim should still exist (signalClientDisconnect only closes the
+	// channel; the resolver is responsible for calling HandoffPermissionClaim
+	// to transition the state).
+	if got := s.PermissionResolverState("rt_1", "req_1"); got != PermissionResolverControl {
+		t.Fatalf("resolver state after disconnect = %v, want Control (resolver must handoff)", got)
+	}
+	_ = answerCh // still valid, just unused
+}
+
+// TestPermissionClaimDisconnectChNotClosedWithClientsRemaining verifies that
+// signalClientDisconnect does NOT close the disconnect channel when at least
+// one client is still connected.
+func TestPermissionClaimDisconnectChNotClosedWithClientsRemaining(t *testing.T) {
+	state := NewState("run_1", "", 0)
+	s := NewServer(state)
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	// Connect a client.
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !s.HasClients() {
+		if time.Now().After(deadline) {
+			t.Fatal("HasClients() never became true")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if !s.PreparePermissionClaim("rt_1", "req_1", PermissionResolverReserved) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+	_, disconnectCh, ok := s.BeginPermissionClaim("rt_1", "req_1")
+	if !ok {
+		t.Fatal("BeginPermissionClaim returned false")
+	}
+	defer s.EndPermissionClaim("rt_1", "req_1")
+
+	// With a client connected, signalClientDisconnect should be a no-op
+	// (the re-check inside the method returns early).
+	s.signalClientDisconnect()
+
+	select {
+	case <-disconnectCh:
+		t.Fatal("disconnectCh was closed while a client is still connected")
+	default:
+		// expected: channel still open
+	}
+}
+
+// TestPermissionClaimDisconnectChFiresOnRealDisconnect verifies the end-to-end
+// path: a real client connects, a claim is started, then the client
+// disconnects and the disconnect channel fires.
+func TestPermissionClaimDisconnectChFiresOnRealDisconnect(t *testing.T) {
+	state := NewState("run_1", "", 0)
+	s := NewServer(state)
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	// Connect a client.
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+
+	// Wait for the server to register the connection.
+	deadline := time.Now().Add(2 * time.Second)
+	for !s.HasClients() {
+		if time.Now().After(deadline) {
+			t.Fatal("HasClients() never became true")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Prepare a Reserved claim (as resolvePermission would) then begin it.
+	if !s.PreparePermissionClaim("rt_1", "req_1", PermissionResolverReserved) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+	_, disconnectCh, ok := s.BeginPermissionClaim("rt_1", "req_1")
+	if !ok {
+		t.Fatal("BeginPermissionClaim returned false")
+	}
+	defer s.EndPermissionClaim("rt_1", "req_1")
+
+	// disconnectCh should not be closed while the client is connected.
+	select {
+	case <-disconnectCh:
+		t.Fatal("disconnectCh was closed while client is still connected")
+	default:
+	}
+
+	// Disconnect the client.
+	conn.Close()
+
+	// First wait for the server to process the disconnect.
+	disconnectDeadline := time.Now().Add(2 * time.Second)
+	for s.HasClients() {
+		if time.Now().After(disconnectDeadline) {
+			t.Fatal("server still reports clients after disconnect")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Now the disconnect channel should be closed.
+	select {
+	case <-disconnectCh:
+		// expected
+	default:
+		t.Fatal("disconnectCh was not closed after all clients disconnected")
 	}
 }

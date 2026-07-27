@@ -39,12 +39,12 @@ const (
 	backendPi             = "pi"
 )
 
-// DefaultPermissionClaimTimeout is the default value for --permission-claim-timeout:
-// how long resolvePermission will wait for a connected socket client to send
-// answer_permission before falling through to the file-handler (or the
-// no-resolver path). This bounds the TOCTOU window where HasClients() was true
-// at the gate but the client disconnects or goes silent before answering.
-const DefaultPermissionClaimTimeout = 30 * time.Second
+// DefaultPermissionClaimTimeout is the zero value, meaning "no timeout":
+// the resolver waits indefinitely for a connected socket client to answer,
+// falling through to the file-handler (or no-resolver) only when the client
+// disconnects. A non-zero --permission-claim-timeout arms an explicit timer
+// for unattended automation scenarios.
+const DefaultPermissionClaimTimeout = 0
 
 type ServerDiscovery struct {
 	URL    string
@@ -102,17 +102,13 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	autoApprove := fs.Bool("auto-approve", false, "automatically approve all permission requests")
 	controlSocket := fs.String("control-socket", "", "unix socket path for control plane")
 	httpDebug := fs.String("http-debug", "", "http debug adapter bind address")
-	permClaimTimeout := fs.Duration("permission-claim-timeout", 0, fmt.Sprintf("how long to wait for a connected socket client to answer a permission request before falling through to the file handler or 'none' resolver (0 uses the default: %v)", DefaultPermissionClaimTimeout))
+	permClaimTimeout := fs.Duration("permission-claim-timeout", 0, "how long to wait for a connected socket client to answer a permission request before falling through to the file handler or 'none' resolver (0 = disabled: fall through only when all clients disconnect; use a non-zero value for unattended automation where client processes may hang)")
 	loopFile := fs.String("loop-file", "", "path to loop config JSON (optional; enables multi-phase mode)")
 	teamFile := fs.String("team-file", "", "path to team config JSON (optional; enables parallel-team mode)")
 	ponyConfig := fs.String("pony-config", "", "path to pony backend JSON config (required for --backend pony)")
 
 	if err := fs.Parse(args); err != nil {
 		return 1
-	}
-
-	if *permClaimTimeout == 0 {
-		*permClaimTimeout = DefaultPermissionClaimTimeout
 	}
 
 	runID := *runIDFlag
@@ -1260,9 +1256,10 @@ func resolvePermission(
 	//
 	// TOCTOU note: HasClients() may have been true when checked but the client
 	// can disconnect (or go silent) before we reach BeginPermissionClaim or
-	// before it sends answer_permission. We bound the wait with claimTimeout
-	// so that on disconnect or a silent client we fall through to the
-	// file-handler rather than blocking until SIGINT.
+	// before it sends answer_permission. When all clients disconnect, the
+	// control server closes disconnectCh so we fall through to the file-handler
+	// rather than blocking indefinitely. An explicit claimTimeout > 0 also
+	// arms a wall-clock timer for unattended automation.
 	resolverState := control.PermissionResolverUnknown
 	if controlServer != nil {
 		resolverState = controlServer.PermissionResolverState(claimScope, requestID)
@@ -1270,28 +1267,56 @@ func resolvePermission(
 	if controlServer != nil &&
 		(resolverState == control.PermissionResolverReserved ||
 			(resolverState == control.PermissionResolverUnknown && controlServer.HasClients())) {
-		answerCh, ok := controlServer.BeginPermissionClaim(claimScope, requestID)
+		answerCh, disconnectCh, ok := controlServer.BeginPermissionClaim(claimScope, requestID)
 		// If !ok, this scope already has a claim for the same request; fall
 		// through to the file-handler block below.
 		if ok {
-			claimTimer := time.NewTimer(claimTimeout)
-			select {
-			case ans := <-answerCh:
-				claimTimer.Stop()
-				return answerControl(ans)
-			case <-ctx.Done():
-				claimTimer.Stop()
-				if ans, answered := controlServer.HandoffPermissionClaim(claimScope, requestID, control.PermissionResolverResolved); answered {
-					return answerControl(ans)
-				}
-				return permissionResult{err: ctx.Err()}
-			case <-claimTimer.C:
+			var claimTimer <-chan time.Time
+			var timerStop func()
+			if claimTimeout > 0 {
+				t := time.NewTimer(claimTimeout)
+				claimTimer = t.C
+				timerStop = func() { t.Stop() }
+			}
+			// handoffToFallback transitions the claim to the file-handler or
+			// no-resolver state and returns a result if a queued answer was
+			// consumed. When no answer is queued, the caller falls through to
+			// the file-handler block below.
+			handoffToFallback := func() permissionResult {
 				next := control.PermissionResolverNoResolver
 				if fileHandler != nil {
 					next = control.PermissionResolverFile
 				}
 				if ans, answered := controlServer.HandoffPermissionClaim(claimScope, requestID, next); answered {
 					return answerControl(ans)
+				}
+				return permissionResult{} // sentinel: continue to file-handler block
+			}
+			select {
+			case ans := <-answerCh:
+				if timerStop != nil {
+					timerStop()
+				}
+				return answerControl(ans)
+			case <-ctx.Done():
+				if timerStop != nil {
+					timerStop()
+				}
+				if ans, answered := controlServer.HandoffPermissionClaim(claimScope, requestID, control.PermissionResolverResolved); answered {
+					return answerControl(ans)
+				}
+				return permissionResult{err: ctx.Err()}
+			case <-disconnectCh:
+				if timerStop != nil {
+					timerStop()
+				}
+				if res := handoffToFallback(); res.source != "" || res.err != nil {
+					return res
+				}
+			case <-claimTimer:
+				timerStop()
+				if res := handoffToFallback(); res.source != "" || res.err != nil {
+					return res
 				}
 			}
 		}

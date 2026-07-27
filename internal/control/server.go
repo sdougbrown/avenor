@@ -319,6 +319,7 @@ type permissionClaim struct {
 	state        PermissionResolverState
 	answerCh     chan PermissionAnswer
 	answerQueued bool
+	disconnectCh chan struct{} // closed when all clients disconnect while in Reserved/Control state
 }
 
 // PreparePermissionClaim records resolver ownership before permission.request
@@ -332,7 +333,7 @@ func (s *ControlServer) PreparePermissionClaim(scope, requestID string, state Pe
 		existing.state != PermissionResolverResolved {
 		return false
 	}
-	s.pendingClaims[key] = &permissionClaim{state: state, answerCh: make(chan PermissionAnswer, 1)}
+	s.pendingClaims[key] = &permissionClaim{state: state, answerCh: make(chan PermissionAnswer, 1), disconnectCh: make(chan struct{})}
 	return true
 }
 
@@ -407,27 +408,66 @@ func (s *ControlServer) PermissionResolverState(scope, requestID string) Permiss
 }
 
 // BeginPermissionClaim registers a permission claim within scope and returns
-// its answer channel. Request IDs are only unique within an ACP session, so
+// its answer channel and a disconnect channel. The disconnect channel is
+// closed when all control-socket clients disconnect while the claim is in the
+// Reserved or Control state, allowing the resolver to fall through to a
+// fallback handler. Request IDs are only unique within an ACP session, so
 // stable runtimes must use distinct scopes.
-func (s *ControlServer) BeginPermissionClaim(scope, requestID string) (<-chan PermissionAnswer, bool) {
+func (s *ControlServer) BeginPermissionClaim(scope, requestID string) (<-chan PermissionAnswer, <-chan struct{}, bool) {
 	s.pendingMu.Lock()
 	defer s.pendingMu.Unlock()
 	key := permissionClaimKey{scope: scope, requestID: requestID}
 	claim := s.pendingClaims[key]
 	if claim == nil {
-		claim = &permissionClaim{answerCh: make(chan PermissionAnswer, 1)}
+		claim = &permissionClaim{answerCh: make(chan PermissionAnswer, 1), disconnectCh: make(chan struct{})}
 		s.pendingClaims[key] = claim
 	} else if claim.state != PermissionResolverReserved {
-		return nil, false
+		return nil, nil, false
 	}
 	claim.state = PermissionResolverControl
-	return claim.answerCh, true
+	return claim.answerCh, claim.disconnectCh, true
 }
 
 func (s *ControlServer) EndPermissionClaim(scope, requestID string) {
 	s.pendingMu.Lock()
 	defer s.pendingMu.Unlock()
 	delete(s.pendingClaims, permissionClaimKey{scope: scope, requestID: requestID})
+}
+
+// signalClientDisconnect closes the disconnect channel for every pending
+// claim in the Reserved or Control state. This notifies the resolver that no
+// live control-socket client can answer the permission request, so it should
+// fall through to a fallback handler (file handler or no-resolver). The claims
+// themselves are not removed; they remain answerable via the direct-delivery
+// path until resolved, cancelled, superseded, or the session ends.
+//
+// The disconnect signal is intentionally one-shot: after all clients
+// disconnect, the claim permanently falls through to fallback. A reconnecting
+// client cannot reclaim the claim; it must use the direct-delivery
+// (NoResolver) path.
+func (s *ControlServer) signalClientDisconnect() {
+	// Re-check under s.mu: a new client may have connected between the
+	// allGone snapshot in disconnect() and this call. If so, a live client
+	// can answer and we must not fire a spurious disconnect notification.
+	s.mu.Lock()
+	if len(s.conns) > 0 {
+		s.mu.Unlock()
+		return
+	}
+	s.mu.Unlock()
+
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	for _, claim := range s.pendingClaims {
+		if claim.state == PermissionResolverReserved || claim.state == PermissionResolverControl {
+			select {
+			case <-claim.disconnectCh:
+				// already closed
+			default:
+				close(claim.disconnectCh)
+			}
+		}
+	}
 }
 
 // HasPendingPermission reports whether a permission claim is currently
@@ -929,8 +969,12 @@ func (s *ControlServer) disconnect(c *connState) {
 	if s.owner == c {
 		s.owner = nil
 	}
+	allGone := len(s.conns) == 0
 	s.mu.Unlock()
 	_ = c.conn.Close()
+	if allGone {
+		s.signalClientDisconnect()
+	}
 }
 
 func (c *connState) writeJSON(v any) error {
