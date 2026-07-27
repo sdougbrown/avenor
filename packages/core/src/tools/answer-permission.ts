@@ -1,5 +1,6 @@
 import { Supervisor } from '../supervisor.js'
 import { getSupervisorClient } from './get-supervisor-client.js'
+import { asRecord, stringField } from '../value-fields.js'
 import { validateRunId } from './validate.js'
 
 function findRunByLabel(sup: Supervisor, runId: string): { label: string; runtimeId?: string } | undefined {
@@ -10,6 +11,13 @@ function findRunByLabel(sup: Supervisor, runId: string): { label: string; runtim
     if (info.label === runId) return info
   }
   return undefined
+}
+
+export function pendingPermissionRequestID(liveStatus: unknown): string | undefined {
+  const status = asRecord(liveStatus)
+  if (!status) return undefined
+  const permission = asRecord(status.permission) ?? asRecord(status.pending_permission)
+  return permission ? stringField(permission, 'request_id', 'requestId') : undefined
 }
 
 export async function answerPermissionTool(args: {
@@ -38,13 +46,10 @@ export async function answerPermissionTool(args: {
     const runtimeId = runInfo?.runtimeId ?? args.runId
     if (!requestId) {
       const liveStatus = await client.status(runtimeId)
-      const pp = liveStatus?.pending_permission as
-        | { request_id?: string }
-        | undefined
-      if (!pp?.request_id) {
+      requestId = pendingPermissionRequestID(liveStatus)
+      if (!requestId) {
         throw new Error('no pending permission request for this run')
       }
-      requestId = pp.request_id
     }
 
     await client.answerPermission(runtimeId, requestId, args.optionId, args.message)
