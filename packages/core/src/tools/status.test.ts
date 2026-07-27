@@ -144,6 +144,29 @@ describe('statusTool singleton registry', () => {
     })
   })
 
+  it('uses non-empty status when phase is present but empty', async () => {
+    sentinelPath = path.join(os.tmpdir(), `avenor-run-${runInfo.runId}.done`)
+    fs.writeFileSync(sentinelPath, 'FAILED\nSESSION=ses-failed\n')
+    runInfo.sentinelPath = sentinelPath
+    statusMock.mockResolvedValueOnce({
+      runtime_id: runInfo.runtimeId,
+      session_id: 'ses-failed',
+      phase: '',
+      status: 'ended',
+    })
+
+    const result = await statusTool({
+      runId: runInfo.runId,
+      supervisorId: '/tmp/avenor-mcp-test.sock',
+    })
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      stop_reason: 'FAILED',
+      session_id: 'ses-failed',
+    })
+  })
+
   it('maps richer metadata additively from live status', async () => {
     statusMock.mockResolvedValueOnce({
       run_id: 'parent-run-id-that-must-not-replace-the-tracked-run',
