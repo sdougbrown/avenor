@@ -1472,8 +1472,8 @@ func (s *Supervisor) answerPermission(rtID, requestID, optionID, message string)
 	// If it has an active control claim, feed the answer through that claim so
 	// the resolver can call the provider, emit permission.response, clear the
 	// waiting status, and release its in-flight guard. Calling the provider
-	// directly here leaves the resolver stuck until its timeout and causes the
-	// next backend permission to fail as an overlapping request.
+	// directly here leaves the resolver owned until client disconnect or an
+	// explicit claim timeout and makes the next request appear to overlap.
 	switch s.control.DeliverPendingPermission(rtID, requestID, optionID, message) {
 	case control.PermissionAnswerDelivered:
 		s.controlMu.Lock()
