@@ -446,18 +446,17 @@ func (s *ControlServer) EndPermissionClaim(scope, requestID string) {
 // client cannot reclaim the claim; it must use the direct-delivery
 // (NoResolver) path.
 func (s *ControlServer) signalClientDisconnect() {
-	// Re-check under s.mu: a new client may have connected between the
-	// allGone snapshot in disconnect() and this call. If so, a live client
-	// can answer and we must not fire a spurious disconnect notification.
+	// Hold s.mu across the connection check and the channel-close loop so
+	// that no new client can connect (via acceptLoop) and register a claim
+	// (via BeginPermissionClaim) in the gap between the check and closing
+	// disconnect channels. Lock ordering s.mu → pendingMu is safe: no other
+	// code path acquires both locks.
 	s.mu.Lock()
 	if len(s.conns) > 0 {
 		s.mu.Unlock()
 		return
 	}
-	s.mu.Unlock()
-
 	s.pendingMu.Lock()
-	defer s.pendingMu.Unlock()
 	for _, claim := range s.pendingClaims {
 		if claim.state == PermissionResolverReserved || claim.state == PermissionResolverControl {
 			select {
@@ -468,6 +467,8 @@ func (s *ControlServer) signalClientDisconnect() {
 			}
 		}
 	}
+	s.pendingMu.Unlock()
+	s.mu.Unlock()
 }
 
 // HasPendingPermission reports whether a permission claim is currently

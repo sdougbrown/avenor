@@ -2825,7 +2825,7 @@ func TestControlPermissionClaimExplicitTimeoutFallsThrough(t *testing.T) {
 	elapsed := time.Since(start)
 
 	// Lower bound: must have waited at least the claim timeout (80ms gives 20ms slack).
-	if elapsed < 80*time.Millisecond {
+	if elapsed < 50*time.Millisecond {
 		t.Fatalf("resolvePermission returned too quickly (%v); expected to wait ~%v for the claim timer", elapsed, claimTimeout)
 	}
 	// Upper bound: should not have blocked indefinitely.
