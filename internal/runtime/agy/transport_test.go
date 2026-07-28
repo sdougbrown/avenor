@@ -147,6 +147,34 @@ func TestSelectTransportAutoClosesFailedProbeWithoutLeakingError(t *testing.T) {
 	}
 }
 
+func TestSelectTransportRejectsTypedNilHostWithoutCallingClose(t *testing.T) {
+	probeErr := errors.New("probe failed")
+	for _, tc := range []struct {
+		mode           string
+		wantErr        bool
+		wantDiagnostic string
+	}{
+		{mode: "rpc", wantErr: true},
+		{mode: "auto", wantDiagnostic: autoRPCFallbackDiagnostic},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			selection, diagnostic, err := selectTransport(context.Background(), func(string) string { return tc.mode }, runtime.StartOptions{}, "", "1.1.7", func(context.Context, runtime.StartOptions, string, string) (rpcSessionHost, error) {
+				var host *ptyRPCHost
+				return host, probeErr
+			})
+			if (err != nil) != tc.wantErr || diagnostic != tc.wantDiagnostic {
+				t.Fatalf("selection=%#v diagnostic=%q err=%v", selection, diagnostic, err)
+			}
+			if err != nil && !errors.Is(err, probeErr) {
+				t.Fatalf("error = %v, want probe error", err)
+			}
+			if selection.rpc != nil {
+				t.Fatalf("retained typed nil host: %#v", selection.rpc)
+			}
+		})
+	}
+}
+
 func TestSelectTransportDoesNotFallbackWhenProbeCleanupFails(t *testing.T) {
 	host := &fakeRPCSessionHost{id: "conversation", closeErr: errors.New("private cleanup detail")}
 	selection, diagnostic, err := selectTransport(context.Background(), func(string) string { return "auto" }, runtime.StartOptions{}, "", "1.1.7", func(context.Context, runtime.StartOptions, string, string) (rpcSessionHost, error) {

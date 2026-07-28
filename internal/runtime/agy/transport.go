@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"reflect"
 
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
@@ -65,7 +66,7 @@ func selectTransport(ctx context.Context, getenv func(string) string, opts runti
 			err = errors.New("agy RPC host factory is unavailable")
 		} else {
 			host, err = factory(ctx, opts, resumeID, version)
-			if err == nil && host == nil {
+			if err == nil && nilRPCSessionHost(host) {
 				err = errors.New("agy RPC host startup failed")
 			}
 		}
@@ -74,7 +75,7 @@ func selectTransport(ctx context.Context, getenv func(string) string, opts runti
 		}
 		// A factory may have allocated its host before reporting a late probe
 		// failure. It remains the caller's responsibility to clean it up.
-		if host != nil {
+		if !nilRPCSessionHost(host) {
 			if closeErr := host.Close(context.Background()); closeErr != nil {
 				if retryErr := host.Close(context.Background()); retryErr != nil {
 					return transportSelection{rpc: host}, "", errors.New("agy RPC probe cleanup failed")
@@ -89,5 +90,20 @@ func selectTransport(ctx context.Context, getenv func(string) string, opts runti
 		return transportSelection{}, "", err
 	default:
 		return transportSelection{}, "", errors.New("invalid AVENOR_AGY_TRANSPORT")
+	}
+}
+
+// nilRPCSessionHost handles typed nil pointers returned through the interface
+// factory boundary. Calling a method on such a host would panic the supervisor.
+func nilRPCSessionHost(host rpcSessionHost) bool {
+	if host == nil {
+		return true
+	}
+	value := reflect.ValueOf(host)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
 	}
 }
