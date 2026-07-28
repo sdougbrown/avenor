@@ -259,7 +259,7 @@ Avenor provides two dedicated `agy` transports. It does not treat `agy` as ACP, 
 
 **Headless is the default.** With `AVENOR_AGY_TRANSPORT` unset or set to `headless`, Avenor spawns `agy --add-dir <dir> --output-format stream-json --print-timeout 24h --print <prompt>` and translates JSONL from stdout into canonical events. This mode does not support interactive permission decisions; `agy` auto-denies tools that require confirmation, while persisted allow rules still apply.
 
-**RPC is opt-in.** Set `AVENOR_AGY_TRANSPORT=rpc` to host interactive `agy` in a PTY while controlling turns, cancellation, permissions, and questions through its exact-process-owned loopback RPC service. This mode supports validated permission write-ins. Model names must exactly match an available slug; there is no silent fallback.
+**RPC is opt-in.** Set `AVENOR_AGY_TRANSPORT=rpc` to host interactive `agy` in a PTY while controlling turns, cancellation, permissions, and questions through its exact-process-owned loopback RPC service. This mode supports validated permission write-ins. Model names must exactly match an available slug; there is no silent fallback. RPC accepts stable semantic versions with major version 1, including newer minor and patch releases, and rejects malformed, prerelease, or different-major versions.
 
 **Automatic probing.** `AVENOR_AGY_TRANSPORT=auto` tries RPC and falls back to headless only after the failed RPC host has been cleaned up. Because selection occurs per session, Avenor advertises RPC permission capabilities conservatively only when `rpc` is selected explicitly.
 
