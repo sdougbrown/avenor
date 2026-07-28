@@ -3,6 +3,7 @@ package agy
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -48,7 +49,19 @@ type ptyRPCHost struct {
 type ptyRPCHostFactory func(context.Context, runtime.StartOptions, string, string) (*ptyRPCHost, error)
 
 func supportedRPCVersion(version string) bool {
-	return version == "1.1.5" || version == "1.1.7"
+	parts := strings.Split(version, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" || len(part) > 1 && part[0] == '0' {
+			return false
+		}
+		if _, err := strconv.ParseUint(part, 10, 64); err != nil {
+			return false
+		}
+	}
+	return parts[0] == "1"
 }
 
 var (
@@ -74,7 +87,7 @@ func startPTYRPCHost(ctx context.Context, launcher terminal.Launcher, opts runti
 		return nil, errors.New("agy RPC host startup failed")
 	}
 	if !supportedRPCVersion(version) {
-		return nil, errors.New("agy RPC host requires supported version 1.1.5 or 1.1.7")
+		return nil, errors.New("agy RPC host requires compatible major version 1")
 	}
 
 	lifetimeCtx, cancel := context.WithCancel(context.Background())

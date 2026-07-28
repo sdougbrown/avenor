@@ -114,21 +114,38 @@ func withPTYRPCSeamsAndWait(t *testing.T, discover func(context.Context, int, st
 }
 
 func TestSupportedRPCVersions(t *testing.T) {
-	for version, want := range map[string]bool{"1.1.5": true, "1.1.7": true, "1.1.6": false, "": false, "1.2.0": false} {
+	for version, want := range map[string]bool{
+		"1.1.5":      true,
+		"1.1.6":      true,
+		"1.1.7":      true,
+		"1.1.8":      true,
+		"1.2.0":      true,
+		"1.99.999":   true,
+		"":           false,
+		"1":          false,
+		"1.1":        false,
+		"01.1.8":     false,
+		"1.01.8":     false,
+		"1.1.08":     false,
+		"1.1.x":      false,
+		"1.1.8-beta": false,
+		"2.0.0":      false,
+	} {
 		if got := supportedRPCVersion(version); got != want {
 			t.Errorf("supportedRPCVersion(%q) = %v, want %v", version, got, want)
 		}
 	}
 }
 
-func TestPTYRPCHostStartupAccepts117AndRejects116(t *testing.T) {
+func TestPTYRPCHostStartupAcceptsCompatibleMajorAndRejectsOtherMajor(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		version string
 		want    bool
 	}{
-		{"accepts 1.1.7", "1.1.7", true},
-		{"rejects 1.1.6", "1.1.6", false},
+		{"accepts 1.1.8", "1.1.8", true},
+		{"accepts 1.2.0", "1.2.0", true},
+		{"rejects 2.0.0", "2.0.0", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			session := &noTerminalProtocolSession{FakeSession: terminal.NewFakeSession("agy", 51, "")}
@@ -160,8 +177,8 @@ func TestPTYRPCHostStartupAccepts117AndRejects116(t *testing.T) {
 				if err == nil {
 					t.Fatal("start host should have rejected unsupported version")
 				}
-				if !strings.Contains(err.Error(), "supported version") {
-					t.Fatalf("rejection error = %v, want supported-version diagnostic", err)
+				if !strings.Contains(err.Error(), "compatible major version") {
+					t.Fatalf("rejection error = %v, want compatible-major diagnostic", err)
 				}
 			}
 		})

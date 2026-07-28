@@ -525,7 +525,7 @@ var ownedListenerDiscovery = discoverOwnedListeners
 // identity check before the host is registered with a provider session.
 func discoverRPCHost(ctx context.Context, pid int, version string, options rpcDiscoveryOptions) (*rpcHost, error) {
 	if !supportedRPCVersion(version) {
-		return nil, errors.New("agy RPC requires supported version 1.1.5 or 1.1.7")
+		return nil, errors.New("agy RPC requires compatible major version 1")
 	}
 	ctx, cancel := context.WithTimeout(ctx, rpcDiscoveryTimeout)
 	defer cancel()

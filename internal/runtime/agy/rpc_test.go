@@ -405,7 +405,7 @@ func TestDiscoveryClosesRejectedCandidates(t *testing.T) {
 }
 
 func TestDiscoveryVersionDeadlineAndCancellation(t *testing.T) {
-	if _, err := discoverRPCHost(context.Background(), 1, "1.1.4", rpcDiscoveryOptions{}); err == nil {
+	if _, err := discoverRPCHost(context.Background(), 1, "2.0.0", rpcDiscoveryOptions{}); err == nil {
 		t.Fatal("unsupported version accepted")
 	}
 	oldDiscovery := ownedListenerDiscovery
