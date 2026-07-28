@@ -674,6 +674,12 @@ func (p *Provider) runResumedPrompt(ctx context.Context, s *sessionState, sessio
 // Returns nil for context cancellation and process-death paths.
 func relayEvents(ctx context.Context, s *sessionState, cl *client) (*events.Event, error) {
 	handle := func(evt events.Event) *events.Event {
+		// The init event has already been adopted before relay begins. Enforce
+		// that logical identity here because the client's read loop can parse
+		// later events before adoption updates its local conversion cache.
+		s.mu.Lock()
+		evt.SessionID = s.sessionID
+		s.mu.Unlock()
 		if evt.Event == "session.end" {
 			return &evt
 		}
