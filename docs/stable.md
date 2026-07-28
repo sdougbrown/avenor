@@ -30,7 +30,7 @@ Flags:
 | `--idle-timeout` | 0 | Exit cleanly after this duration with no child runtimes running and no control connections active. 0 disables (supervisor runs until signaled) |
 | `--shutdown-timeout` | 10s | How long to wait for child runtimes to finish gracefully before killing them |
 | `--http-debug` | (empty) | If set, bind an HTTP debug adapter to this address (e.g. `:8080`). Useful for rapid inspection and testing |
-| `--permission-claim-timeout` | 30s | How long the supervisor waits for a connected socket client to answer a permission request before falling back to file-based handlers |
+| `--permission-claim-timeout` | 0 | Optional deadline for a connected control client to answer a permission request. With 0, control retains the request until it is answered or all clients disconnect |
 
 The supervisor does not exit until you signal it (SIGINT/SIGTERM), all child runtimes have finished and the idle timeout expires, or a fatal error occurs.
 
@@ -82,7 +82,7 @@ Spawn parameters (all optional except one prompt source):
 | `--on-event` | string | Path to write NDJSON events. Auto-created under `$TMPDIR/avenor-stable/<supervisor_run_id>/<runtime_id>/events.ndjson` if not set |
 | `--sentinel-file` | string | Path to write completion sentinel (exit code, session ID, stop reason). Auto-created under `$TMPDIR/avenor-stable/<supervisor_run_id>/<runtime_id>/sentinel.env` if not set |
 | `--permission-handler` | string | Permission handler (supports `file:<path>`). Auto-derived from sentinel-file if unset. Use `--auto-approve` to skip file-based handlers |
-| `--auto-approve` | bool | Automatically approve all permission requests without file-based handlers |
+| `--auto-approve` | bool | Automatically approve ordinary permission requests without file-based handlers. Questions that require user input still wait for an answer |
 | `--timeout` | int | Overall session timeout in seconds |
 | `--max-retries` | int | Maximum retry attempts on transient failure |
 
@@ -208,7 +208,9 @@ avenor control --socket /tmp/avenor-stable.sock answer-permission \
   rt_1
 ```
 
-This passes the answer back to the active session. If the runtime has no active session, the command fails.
+This passes an option-only answer back to the active session. If the runtime has no active session, the command fails.
+
+Write-ins use the JSON-RPC, Core, Pi, or MCP answer API's optional `message` field. The positional `avenor control answer-permission` command does not accept a message; use one of those APIs when the pending option has `requiresMessage: true`. See [Control Protocol](control-protocol.md#answer_permission) for both request shapes.
 
 ### Event Subscription
 

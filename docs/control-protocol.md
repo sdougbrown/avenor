@@ -240,9 +240,19 @@ The key distinction from `interrupt_and_prompt`: `prompt` never preempts an acti
 
 #### `answer_permission`
 
+Choose one of the options from the pending request:
+
 ```json
 {"jsonrpc":"2.0","id":1,"method":"answer_permission","params":{"request_id":"req_17","option_id":"allow"}}
 ```
+
+The option-only shape remains valid. For a write-in option, include `message`:
+
+```json
+{"jsonrpc":"2.0","id":2,"method":"answer_permission","params":{"request_id":"req_18","option_id":"other","message":"Use the staging project."}}
+```
+
+`message` is optional unless the selected option has `requiresMessage: true`; those options reject an empty message. Messages must be valid UTF-8 and no larger than 64 KiB. This is how an `agy` question carries an answer that is not one of its listed choices.
 
 Answers the currently pending permission request. Requires ownership. Returns error `-32001` if no permission request is pending or the `request_id` doesn't match the pending one.
 
@@ -365,7 +375,7 @@ These are the same methods as above but applied to a specific child runtime inst
 - `cancel {"runtime_id":"rt_1"}` — cancel one runtime. Requires ownership.
 - `prompt {"runtime_id":"rt_1","text":"Continue"}` — send a prompt to one runtime. Requires ownership.
 - `interrupt_and_prompt {"runtime_id":"rt_1","text":"Stop and do this","keep_queue":false}` — interrupt and re-prompt. Requires ownership.
-- `answer_permission {"runtime_id":"rt_1","request_id":"req_1","option_id":"allow"}` — answer a permission for one runtime. Requires ownership.
+- `answer_permission {"runtime_id":"rt_1","request_id":"req_1","option_id":"allow","message":"optional write-in"}` — answer a permission for one runtime. `message` is optional unless the selected option requires it. Requires ownership.
 
 ## Owner Semantics
 
@@ -381,8 +391,8 @@ The footgun: if you lose the owner connection, no one else can mutate state. Eit
 
 When a permission request arrives, Avenor tries these sources in order:
 
-1. **Auto-approve** (`--auto-approve` flag) — resolves immediately without asking.
-2. **Control socket clients** — when at least one client is connected to the control socket, it is expected to answer via `answer_permission`. A claim waits up to `--permission-claim-timeout` (default 30s); if no answer arrives, resolution falls through to the file handler or no-resolver path.
+1. **Auto-approve** (`--auto-approve` flag) — resolves ordinary permission requests immediately. Questions marked `requires_user_input` bypass generic auto-approval and still need an answer.
+2. **Control socket clients** — when at least one client is connected to the control socket, it is expected to answer via `answer_permission`. By default there is no claim deadline; the request remains with the control path until it is answered or every control client disconnects. Set a non-zero `--permission-claim-timeout` only when unattended automation needs a bounded fallback.
 3. **File handler** (`--permission-handler file:<path>`) — used when no control socket client is connected, when a socket claim times out, or when no socket claim can be registered. Writes `.req`, polls `.req.response`.
 4. **No resolver** — `permission.request` is emitted, backend waits until context cancellation or backend timeout.
 

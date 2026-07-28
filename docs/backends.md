@@ -10,7 +10,7 @@ Pass `--backend` to choose which runtime protocol to use. The default is `openco
 avenor --backend opencode-http --server-url http://127.0.0.1:4096 --prompt "say hi"
 avenor --backend opencode-acp --prompt "say hi"
 avenor --backend codex-app-server --prompt "say hi"
-avenor --backend agy --model gemini-2.0-flash --prompt "say hi"
+avenor --backend agy --model gemini-2.5-flash --prompt "say hi"
 avenor --backend gemini-acp --prompt "say hi"
 avenor --backend cursor-acp --prompt "say hi"
 avenor --backend pi --model anthropic/claude-sonnet-4-5 --prompt "say hi"
@@ -23,7 +23,7 @@ Both `claude` and `claude-channel` require `claude` to be on `PATH`. `claude-cha
 ## Capability matrix
 
 | Capability | opencode-acp | opencode-http | codex-app-server | agy | gemini-acp | cursor-acp | pi | claude | claude-channel |
-|---|---|---|---|---|---|---|---|---|
+|---|---|---|---|---|---|---|---|---|---|
 | New sessions | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Session resume | ✓ | ✓ | ✓ | ✓ | — | — | ✓ | ⚠ | ⚠ |
 | Prompt execution | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓  | ✓  |
@@ -255,28 +255,90 @@ avenor \
 
 ## agy
 
-Avenor provides two dedicated `agy` transports. It does not treat `agy` as ACP, scrape its terminal, or send TUI keystrokes.
+A headless `agy` run works until the agent needs an answer from outside the process. Tool approval, user questions, and mid-turn cancellation all need a control path that stdout JSONL cannot provide.
 
-**Headless is the default.** With `AVENOR_AGY_TRANSPORT` unset or set to `headless`, Avenor spawns `agy --add-dir <dir> --output-format stream-json --print-timeout 24h --print <prompt>` and translates JSONL from stdout into canonical events. This mode does not support interactive permission decisions; `agy` auto-denies tools that require confirmation, while persisted allow rules still apply.
+Avenor gives the dedicated `agy` backend three transport policies. None of them treats `agy` as ACP. The interactive path also does not scrape the terminal or send TUI keystrokes.
 
-**RPC is opt-in.** Set `AVENOR_AGY_TRANSPORT=rpc` to host interactive `agy` in a PTY while controlling turns, cancellation, permissions, and questions through its exact-process-owned loopback RPC service. This mode supports validated permission write-ins. Model names must exactly match an available slug; there is no silent fallback. RPC accepts stable semantic versions with major version 1, including newer minor and patch releases, and rejects malformed, prerelease, or different-major versions.
+### Headless is the default
 
-**Automatic probing.** `AVENOR_AGY_TRANSPORT=auto` tries RPC and falls back to headless only after the failed RPC host has been cleaned up. Because selection occurs per session, Avenor advertises RPC permission capabilities conservatively only when `rpc` is selected explicitly.
-
-**Session identity.** Headless `agy` allocates its conversation ID after the required first `--print` prompt, so Avenor starts with a provisional ID and then adopts the external ID. RPC sessions bind the conversation before `Start` or `Resume` returns. Event logs, sentinels, later turns, and resumes use the resulting external ID.
-
-**24-hour headless ceiling.** Headless prompts use `--print-timeout 24h` so `agy`'s default 5-minute timeout does not pre-empt Avenor's control path. RPC interactions do not acquire an implicit answer deadline.
-
-Avenor never passes `--dangerously-skip-permissions` by default.
+With `AVENOR_AGY_TRANSPORT` unset or set to `headless`, Avenor runs `agy` in stream-JSON print mode and translates its stdout into canonical events. This is the least surprising choice for unattended text work.
 
 ```sh
 avenor \
   --backend agy \
-  --model gemini-3.6-flash-low \
+  --model gemini-2.5-flash \
   --prompt "Review the changes in the current branch" \
   --dir /repo \
-  --sentinel-file /tmp/done.env
+  --sentinel-file /tmp/agy-headless.env
 ```
+
+Headless prompts use `--print-timeout 24h`, which keeps `agy`'s shorter print timeout from ending a run before Avenor does. The ceiling is still a ceiling: a single headless prompt cannot run longer than 24 hours.
+
+Headless mode cannot relay interactive permission decisions. `agy` denies tools that require confirmation, although its persisted allow rules still apply. Use explicit RPC mode when the run must stop and ask.
+
+### RPC carries the conversation
+
+Set `AVENOR_AGY_TRANSPORT=rpc` in the environment of the Avenor process. For a stable, that means the environment of `avenor stable`, not an individual spawn request.
+
+```sh
+AVENOR_AGY_TRANSPORT=rpc avenor \
+  --backend agy \
+  --model gemini-2.5-flash \
+  --prompt "Reply with a one-line status update" \
+  --dir /repo \
+  --control-socket /tmp/avenor-agy.sock \
+  --sentinel-file /tmp/agy-rpc.env
+```
+
+RPC mode hosts interactive `agy` in a PTY, but the PTY owns process lifetime only. Turns, events, permissions, questions, cancellation, and recovery use the loopback RPC connection. Model selection is exact: `--model` must contain a nonempty slug advertised by `agy`, and Avenor will not substitute another model.
+
+RPC accepts stable semantic versions in major version 1, including newer minor and patch releases. Malformed versions, prereleases, and different major versions are rejected.
+
+Permission choices and questions arrive as `permission.request` events. Questions that require user input do not go through generic auto-approval. An option marked `requiresMessage` needs a nonempty write-in message; see [Control Protocol](control-protocol.md#answer_permission) and [File Permission Handler](permission-handler.md).
+
+A stable can run multiple RPC sessions concurrently. Each session owns its workspace, conversation identity, PTY, and RPC host. A follow-up prompt sent to the same runtime reuses that host; resume starts from the requested conversation identity. After a normal turn, the stable keeps the host while that runtime waits for another prompt. Cancelling or shutting down the runtime cleans it up.
+
+Cancellation does not treat a successful cancel request as proof that the agent stopped. Avenor reuses the host only after the remote session reaches a terminal state. If it does not converge, Avenor interrupts the exact hosted process and escalates to kill and reap when necessary.
+
+For a long-lived stable, start the transport policy with the supervisor:
+
+```sh
+AVENOR_AGY_TRANSPORT=rpc avenor stable \
+  --control-socket /tmp/avenor-agy-stable.sock \
+  --idle-timeout 30m
+```
+
+Then, from another shell, spawn an `agy` runtime normally:
+
+```sh
+avenor control --socket /tmp/avenor-agy-stable.sock spawn \
+  --backend agy \
+  --model gemini-2.5-flash \
+  --prompt "Review the changes in the current branch" \
+  --dir /repo \
+  --label agy-review
+```
+
+### Auto probes before committing
+
+`AVENOR_AGY_TRANSPORT=auto` tries RPC for each new session. It falls back to headless only before the session is registered and only after the failed RPC host has been cleaned up.
+
+```sh
+AVENOR_AGY_TRANSPORT=auto avenor \
+  --backend agy \
+  --model gemini-2.5-flash \
+  --prompt "Summarize the current branch" \
+  --dir /repo \
+  --sentinel-file /tmp/agy-auto.env
+```
+
+Because the selected transport is not known in advance, `auto` does not advertise interactive permission capability conservatively. If permission relay is required, choose `rpc` explicitly rather than hoping the probe wins.
+
+### Security boundaries
+
+RPC discovery accepts only loopback listeners owned by the exact hosted `agy` process. Its HTTP client does not use ambient proxies, prefers TLS, and does not enable plain-HTTP fallback in normal backend configuration. Private endpoints, certificates, and wire identities do not become public session identifiers or diagnostics.
+
+Avenor never passes `--dangerously-skip-permissions` by default. RPC adds a control path; it does not remove `agy`'s permission boundary.
 
 ---
 

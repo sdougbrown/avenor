@@ -38,14 +38,14 @@ avenor [flags]  # equivalent; explicit "run" is optional
 | `--on-event` | (none) | Path to write NDJSON event stream; events are discarded if unset |
 | `--sentinel-file` | (none) | Path to write a completion sentinel (exit code, session ID, stop reason); also derives permission handler unless `--permission-handler` is set |
 | `--permission-handler` | (derived) | Permission resolver: `file:<path>` for file-based answers, or omitted for socket/auto-approve only. If `--sentinel-file` is set and `--permission-handler` is not, defaults to `file:<sentinel-base>` |
-| `--auto-approve` | `false` | Automatically approve all permission requests (overrides file/socket handlers) |
+| `--auto-approve` | `false` | Automatically approve ordinary permission requests. Questions that require user input still wait for an answer |
 | `--control-socket` | (none) | Unix socket path for control plane; enables remote commands while session is running |
 | `--http-debug` | (none) | HTTP debug adapter bind address (e.g., `127.0.0.1:8080`); enables `/debug/status` and `/debug/events` endpoints |
 | `--timeout` | `0` (disabled) | Overall session timeout (Go duration: `30s`, `5m`, etc.); fires after duration regardless of progress |
 | `--progress-timeout` | `0` (disabled) | Session progress timeout; fires if no event received for this duration |
 | `--max-retries` | `0` | Maximum retry attempts on transient failure (exit code 1); emits `avenor.retry` and `avenor.error` events (see [events.md](events.md)) |
 | `--run-id` | (generated) | Correlation ID for this run; auto-generated if not set |
-| `--permission-claim-timeout` | `30s` | How long to wait for a connected socket client to answer a permission request before falling through to file handler or no-op resolver |
+| `--permission-claim-timeout` | `0` (disabled) | Optional deadline for a connected control client to answer a permission request. With 0, fallback occurs only after all control clients disconnect |
 
 ### Examples
 
@@ -83,7 +83,7 @@ avenor stable --control-socket /tmp/avenor.sock
 | `--max-runtimes` | `8` | Maximum concurrent child runtimes |
 | `--idle-timeout` | `0` (disabled) | Exit after this duration with no child runtimes and no control connections |
 | `--shutdown-timeout` | `10s` | Graceful shutdown timeout before killing children |
-| `--permission-claim-timeout` | `30s` | How long to wait for a connected socket client to answer a permission request (same as in `run`) |
+| `--permission-claim-timeout` | `0` (disabled) | Optional permission claim deadline; with 0, fallback occurs only after all control clients disconnect |
 
 ### Example
 

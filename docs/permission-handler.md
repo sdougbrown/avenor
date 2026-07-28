@@ -58,7 +58,7 @@ The `.req` file is JSON:
 | `session_id` | No | Session ID if one exists. |
 | `tool` | No | The tool or skill that triggered the request (e.g., "bash"). |
 | `question` | No | Human-readable text explaining what approval is needed. |
-| `options` | No | Array of available choices, each with `optionId` (the code name) and `kind` (the semantics: "allow" or "reject"). |
+| `options` | No | Array of available choices, each with `optionId` (the code name) and `kind` (the semantics: "allow" or "reject"). An option can also set `requiresMessage: true`. |
 | `payload` | No | The full normalized event fields for consumers that need the complete picture. |
 
 ### Response file
@@ -83,7 +83,7 @@ The response is also JSON:
 |-------|---------|---------------|
 | `outcome` | "selected" | Either "selected" (the operator chose one of the provided options) or "cancelled" (the request was cancelled, blocking execution). Omit to default to "selected". |
 | `option_id` | Required | The `optionId` from the request's option list. Avenor uses this to determine whether to allow or deny. |
-| `message` | Empty string | Optional note or explanation. Relayed back to the backend. |
+| `message` | Empty string | Optional valid UTF-8 note relayed to the backend, up to 64 KiB. It must be nonempty when the selected option has `requiresMessage: true`, including an `agy` question write-in. |
 
 ## Important: Stale response cleanup
 
