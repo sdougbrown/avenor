@@ -2,6 +2,7 @@ package claudechannel
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -127,6 +128,99 @@ func TestEventsDeliversSessionEndThenClosesOnTeardown(t *testing.T) {
 			}
 		case <-deadline:
 			t.Fatal("timeout: events channel neither delivered session.end nor closed")
+		}
+	}
+}
+
+// TestPollBrokerEventsDeliversViaRunSession exercises the pollBrokerEvents path
+// that the other teardown race tests don't cover. pollBrokerEvents uses raw
+// s.Events <- sends (not s.Emit) that run in the runSession goroutine via the
+// pollTick branch. This test pushes broker reports into a run, starts
+// runSession with a live terminal so pollTick fires before sessionGone, and
+// verifies the report events are delivered through Events(). It then kills the
+// terminal to trigger sessionGone teardown and verifies session.end arrives
+// and the channel closes — exercising the full runSession lifecycle including
+// the raw-send path.
+func TestPollBrokerEventsDeliversViaRunSession(t *testing.T) {
+	p := &Provider{
+		sessions: make(map[string]*session),
+		broker:   broker.New(""),
+		launcher: terminal.PTYLauncher{},
+	}
+	core := claudecore.NewSession(context.Background(), claudecore.SessionOptions{
+		SessionID: "ses-poll",
+		RunID:     "run-poll",
+		EventsBuf: 64,
+	})
+	term := terminal.NewFakeSession("test-term", 1, "ready")
+	term.SetAlive(true) // keep alive so pollTick fires before sessionGone
+	s := &session{Session: core}
+	s.Term = term
+	p.sessions[s.SessionID] = s
+
+	// Register the run in the broker and push reports so pollBrokerEvents has
+	// data to send on the first pollTick.
+	if _, err := p.broker.CreateRun("run-poll"); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	st := p.broker.GetRun("run-poll")
+	if st == nil {
+		t.Fatal("GetRun returned nil")
+	}
+	st.Lock()
+	st.RegisteredAt = time.Now()
+	st.Reports = append(st.Reports, broker.Report{
+		RunID:   "run-poll",
+		State:   "working",
+		Payload: json.RawMessage(`{"step":1}`),
+	})
+	st.Reports = append(st.Reports, broker.Report{
+		RunID:   "run-poll",
+		State:   "thinking",
+		Payload: json.RawMessage(`{"step":2}`),
+	})
+	st.Unlock()
+
+	// Subscribe before runSession starts, the way the supervisor does.
+	ch, err := p.Events(context.Background(), s.SessionID)
+	if err != nil {
+		t.Fatalf("Events: %v", err)
+	}
+
+	go p.runSession(s.Ctx, s)
+
+	var gotChannelReady bool
+	var reportCount int
+	var gotEnd bool
+	var triggeredTeardown bool
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				if !gotEnd {
+					t.Fatal("events channel closed without delivering session.end")
+				}
+				return
+			}
+			switch ev.Event {
+			case "agent.channel_ready":
+				gotChannelReady = true
+			case "agent.report":
+				reportCount++
+			case "session.end":
+				if ev.Fields["stop_reason"] == "" {
+					t.Fatalf("session.end missing stop_reason: %+v", ev.Fields)
+				}
+				gotEnd = true
+			}
+			// Once we've seen the broker events, trigger teardown.
+			if gotChannelReady && reportCount >= 2 && !triggeredTeardown {
+				term.SetAlive(false)
+				triggeredTeardown = true
+			}
+		case <-deadline:
+			t.Fatalf("timeout: gotChannelReady=%v reportCount=%d gotEnd=%v", gotChannelReady, reportCount, gotEnd)
 		}
 	}
 }

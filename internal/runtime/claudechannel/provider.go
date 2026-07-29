@@ -267,9 +267,11 @@ func (p *Provider) runSession(ctx context.Context, s *session) {
 	// (the async Prompt goroutine, the session.start emitter, broker-poll
 	// events), and closing a channel while other goroutines may still send to it
 	// panics with "send on closed channel". Shutdown is signalled via
-	// s.CancelFn()/s.Ctx instead; every send goes through s.Emit, which selects
-	// on s.Ctx.Done(). The Events() reader drains and closes its downstream
-	// channel on s.Ctx.Done.
+	// s.CancelFn()/s.Ctx instead. Sends from other goroutines go through s.Emit,
+	// which selects on s.Ctx.Done(). Raw sends in pollBrokerEvents and the
+	// sessionGone branch below stay raw because they run in this goroutine and
+	// cannot race teardown. The Events() reader drains and closes its
+	// downstream channel on s.Ctx.Done().
 	defer func() {
 		p.mu.Lock()
 		delete(p.sessions, s.SessionID)
@@ -316,15 +318,17 @@ func (p *Provider) runSession(ctx context.Context, s *session) {
 		case <-sessionGone:
 			if s.MarkFinished() {
 				// Claude exited without calling avenor_finish. This runs in the
-				// runSession goroutine, so a raw send cannot race teardown.
-				s.Events <- events.Event{
+				// runSession goroutine, so it cannot race teardown. Using s.Emit
+				// for consistency with the claude backend and for the s.Ctx.Done()
+				// escape hatch if the buffer is full.
+				s.Emit(events.Event{
 					Event:     "session.end",
 					SessionID: s.SessionID,
 					Fields: map[string]any{
 						"status":      "done",
 						"stop_reason": "end_turn",
 					},
-				}
+				})
 			}
 			return
 		case <-pollTick.C:
