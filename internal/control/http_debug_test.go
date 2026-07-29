@@ -783,3 +783,83 @@ func TestAuthRequiredEventsRuntimeIDFilter(t *testing.T) {
 		}
 	})
 }
+
+// --- /answer-permission validation tests --------------------------------------
+
+// authedPostBody sends a POST with a JSON body and the auth token.
+func authedPostBody(t *testing.T, client *http.Client, url, token string, body string) *http.Response {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPost, url, strings.NewReader(body))
+	req.Header.Set("X-Avenor-Token", token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("POST %s: %v", url, err)
+	}
+	return resp
+}
+
+func TestHTTPAnswerPermissionInvalidJSON(t *testing.T) {
+	state := NewState("run_cli", "", 0)
+	ctrl := NewServer(state)
+	_, addr, token := startDebugServer(t, ctrl, nil)
+	client := &http.Client{Timeout: 2 * time.Second}
+
+	resp := authedPostBody(t, client, "http://"+addr+"/answer-permission", token, "{bad json")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("POST /answer-permission (invalid json): %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestHTTPAnswerPermissionOversizedMessage(t *testing.T) {
+	state := NewState("run_cli", "", 0)
+	ctrl := NewServer(state)
+	_, addr, token := startDebugServer(t, ctrl, nil)
+	client := &http.Client{Timeout: 2 * time.Second}
+
+	// Message larger than MaxPermissionMessageBytes (64 KiB).
+	big := strings.Repeat("a", 64*1024+1)
+	body := fmt.Sprintf(`{"request_id":"req_1","option_id":"allow","message":%q}`, big)
+	resp := authedPostBody(t, client, "http://"+addr+"/answer-permission", token, body)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("POST /answer-permission (oversized message): %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestHTTPAnswerPermissionInvalidUTF8Message(t *testing.T) {
+	state := NewState("run_cli", "", 0)
+	ctrl := NewServer(state)
+	_, addr, token := startDebugServer(t, ctrl, nil)
+	client := &http.Client{Timeout: 2 * time.Second}
+
+	// Invalid UTF-8 in the message field — embed raw 0xff/0xfe bytes inside
+	// the JSON string value so the body is syntactically valid JSON but the
+	// message contains invalid UTF-8. This exercises the UTF-8 validation path
+	// in DecodePermissionMessageJSON, not just a JSON parse error.
+	body := `{"request_id":"req_1","option_id":"allow","message":"` + string([]byte{0xff, 0xfe}) + `"}`
+	resp := authedPostBody(t, client, "http://"+addr+"/answer-permission", token, body)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("POST /answer-permission (invalid UTF-8 message): %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestHTTPAnswerPermissionEmptyMessageOK(t *testing.T) {
+	// An empty message is valid (ordinary option without write-in note).
+	// The endpoint should not return 400 for an empty message — it will
+	// return 409 because no pending permission exists, but that's past
+	// validation.
+	state := NewState("run_cli", "", 0)
+	ctrl := NewServer(state)
+	_, addr, token := startDebugServer(t, ctrl, nil)
+	client := &http.Client{Timeout: 2 * time.Second}
+
+	body := `{"request_id":"req_1","option_id":"allow"}`
+	resp := authedPostBody(t, client, "http://"+addr+"/answer-permission", token, body)
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusBadRequest {
+		t.Fatalf("POST /answer-permission (empty message): got 400, want non-400 (empty message is valid)")
+	}
+}

@@ -632,7 +632,7 @@ func TestClientAnswerPermissionWithMessage(t *testing.T) {
 			t.Fatalf("params missing from request: %v", cmd)
 		}
 		if params["message"] != "write-in note" {
-			t.Errorf("message = %v, want 'write-in note'", cmd["message"])
+			t.Errorf("message = %v, want 'write-in note'", params["message"])
 		}
 		if params["option_id"] != "allow" {
 			t.Errorf("option_id = %v, want allow", cmd["option_id"])
