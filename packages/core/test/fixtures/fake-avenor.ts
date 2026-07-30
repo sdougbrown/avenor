@@ -16,6 +16,7 @@ type Runtime = {
   status: string
   on_event?: string
   sentinel_file?: string
+  auto_approve: boolean
 }
 
 function argValue(name: string): string | undefined {
@@ -105,6 +106,7 @@ const server = net.createServer((socket) => {
             status: 'running',
             on_event: req.params?.on_event,
             sentinel_file: req.params?.sentinel_file,
+            auto_approve: req.params?.auto_approve === true,
           }
           runtimes.set(runtimeId, runtime)
           if (runtime.on_event) {

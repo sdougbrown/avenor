@@ -55,6 +55,7 @@ export interface SpawnParams {
   session_id?: string
   sentinel_file?: string
   on_event?: string
+  auto_approve?: boolean
   [key: string]: unknown
 }
 

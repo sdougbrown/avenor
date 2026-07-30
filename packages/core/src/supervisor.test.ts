@@ -58,6 +58,7 @@ describe.skipIf(skipIfNoBinary)('Supervisor lifecycle', () => {
       agent: 'explore',
       backend: 'pi',
       dir: '/tmp/original-repo',
+      auto_approve: true,
       prompt: 'exit 0',
     })
     expect(originalRun).toBeObject()
@@ -67,9 +68,10 @@ describe.skipIf(skipIfNoBinary)('Supervisor lifecycle', () => {
     expect(originalRun.agent).toBe('explore')
     expect(originalRun.backend).toBe('pi')
     expect(originalRun.dir).toBe('/tmp/original-repo')
+    expect(originalRun.autoApprove).toBe(true)
   }, 15_000)
 
-  it('follows up from stored Pi context when no sentinel exists', async () => {
+  it('retains auto-approval across singleton follow-ups when no sentinel exists', async () => {
     fs.rmSync(originalRun.sentinelPath, { force: true })
 
     const result = await followUpTool({
@@ -82,6 +84,21 @@ describe.skipIf(skipIfNoBinary)('Supervisor lifecycle', () => {
     expect(followUpRun.agent).toBe('explore')
     expect(followUpRun.backend).toBe('pi')
     expect(followUpRun.dir).toBe('/tmp/original-repo')
+    expect(followUpRun.autoApprove).toBe(true)
+    expect(await supervisor.getClient().status(followUpRun.runtimeId)).toMatchObject({
+      auto_approve: true,
+    })
+
+    const chainedResult = await followUpTool({
+      runId: followUpRun.runId,
+      message: 'continue again',
+    })
+    const chainedRun = (supervisor as any).runs.get(chainedResult.run_id) as RunInfo
+
+    expect(chainedRun.autoApprove).toBe(true)
+    expect(await supervisor.getClient().status(chainedRun.runtimeId)).toMatchObject({
+      auto_approve: true,
+    })
   }, 15_000)
 
   it('supervisor.close() terminates cleanly', async () => {

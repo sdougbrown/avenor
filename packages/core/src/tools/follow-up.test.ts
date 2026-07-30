@@ -61,6 +61,47 @@ describe('followUpTool with an external supervisor', () => {
     expect(closeMock).toHaveBeenCalledTimes(1)
   })
 
+  it('forwards live auto-approval for an explicit supervisor', async () => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-follow-up-test-'))
+    process.env.AVENOR_HOME = home
+    const runDir = path.join(home, 'runs', 'auto-approved-run')
+    fs.mkdirSync(runDir, { recursive: true })
+    fs.writeFileSync(path.join(runDir, 'sentinel.done'), 'DONE\nSESSION=ses-original\n')
+    statusMock.mockResolvedValueOnce({ agent: 'jockey', auto_approve: true })
+
+    await followUpTool({
+      runId: 'auto-approved-run',
+      message: 'continue',
+      supervisorId: '/tmp/avenor-mcp-test.sock',
+    })
+
+    expect(spawnMock.mock.calls[0]?.[0]).toMatchObject({ auto_approve: true })
+  })
+
+  it('omits auto-approval for false, undefined, and non-boolean live status', async () => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-follow-up-test-'))
+    process.env.AVENOR_HOME = home
+
+    for (const [runId, autoApprove] of [
+      ['auto-approve-false', false],
+      ['auto-approve-undefined', undefined],
+      ['auto-approve-truthy', 'true'],
+    ]) {
+      const runDir = path.join(home, 'runs', runId)
+      fs.mkdirSync(runDir, { recursive: true })
+      fs.writeFileSync(path.join(runDir, 'sentinel.done'), 'DONE\nSESSION=ses-original\n')
+      statusMock.mockResolvedValueOnce({ agent: 'jockey', auto_approve: autoApprove })
+
+      await followUpTool({
+        runId,
+        message: 'continue',
+        supervisorId: '/tmp/avenor-mcp-test.sock',
+      })
+
+      expect(spawnMock.mock.calls.at(-1)?.[0]).not.toHaveProperty('auto_approve')
+    }
+  })
+
   it('falls back to liveStatus.session_id when no sentinel SESSION', async () => {
     home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-follow-up-test-'))
     process.env.AVENOR_HOME = home
@@ -98,6 +139,45 @@ describe('followUpTool with an external supervisor', () => {
     expect(closeMock).toHaveBeenCalledTimes(1)
   })
 
+  it('lets live false override stale singleton auto-approval', async () => {
+    const sup = {
+      runs: new Map([['singleton-run', {
+        runId: 'singleton-run',
+        label: 'singleton-run',
+        sentinelPath: '/tmp/missing-singleton-sentinel',
+        eventLogPath: '/tmp/missing-singleton-events',
+        runtimeId: 'runtime-singleton-run',
+        sessionId: 'ses-from-run-map',
+        agent: 'explore',
+        autoApprove: true,
+      }]]),
+    }
+    getSupervisorClientMock.mockResolvedValueOnce({
+      client: {
+        status: statusMock,
+        spawn: spawnMock,
+        close: closeMock,
+      },
+      isSingleton: true,
+      sup,
+      supervisorId: '/tmp/avenor-mcp-test.sock',
+    })
+    statusMock.mockResolvedValueOnce({
+      agent: 'explore',
+      session_id: 'ses-from-live',
+      auto_approve: false,
+    })
+
+    await followUpTool({
+      runId: 'singleton-run',
+      message: 'continue',
+      supervisorId: '/tmp/avenor-mcp-test.sock',
+    })
+
+    expect(statusMock).toHaveBeenCalledWith('runtime-singleton-run')
+    expect(spawnMock.mock.calls[0]?.[0]).not.toHaveProperty('auto_approve')
+  })
+
   it('uses singleton run metadata when status and sentinel are unavailable', async () => {
     const sup = {
       runs: new Map([['singleton-run', {
@@ -111,6 +191,7 @@ describe('followUpTool with an external supervisor', () => {
         backend: 'pi',
         model: 'stored-model',
         dir: '/repo/from-run-map',
+        autoApprove: true,
       }]]),
     }
     getSupervisorClientMock.mockResolvedValueOnce({
@@ -138,6 +219,7 @@ describe('followUpTool with an external supervisor', () => {
       agent_profile: 'cloud',
       dir: '/repo/from-run-map',
       session_id: 'ses-from-run-map',
+      auto_approve: true,
     })
     expect(closeMock).not.toHaveBeenCalled()
   })

@@ -23,6 +23,7 @@ export interface RunInfo {
   dir?: string
   brokerUrl?: string
   parentToken?: string
+  autoApprove?: boolean
 }
 
 export interface SupervisorOptions {
@@ -287,6 +288,7 @@ export class Supervisor {
       dir: spawnParams.dir as string | undefined,
       brokerUrl: result.broker_url as string | undefined,
       parentToken: result.parent_token as string | undefined,
+      autoApprove: spawnParams.auto_approve,
     }
 
     this.runs.set(runInfo.label, runInfo)

@@ -16,6 +16,15 @@ function findRunByLabel(sup: Supervisor, runId: string): RunInfo | undefined {
   return undefined
 }
 
+function resolveAutoApprove(
+  liveStatus: Record<string, unknown> | null,
+  runInfo?: RunInfo,
+): boolean | undefined {
+  const liveAutoApprove = liveStatus?.auto_approve
+  if (typeof liveAutoApprove === 'boolean') return liveAutoApprove
+  return typeof runInfo?.autoApprove === 'boolean' ? runInfo.autoApprove : undefined
+}
+
 function requireResumableAgent(agent: string | undefined): string {
   if (agent === undefined) {
     throw new Error('run has no agent to resume')
@@ -64,7 +73,7 @@ export async function followUpTool(args: {
 
       let liveStatus: Record<string, unknown> | null = null
       try {
-        liveStatus = await client.status(args.runId)
+        liveStatus = await client.status(runInfo?.runtimeId ?? args.runId)
       } catch {
         // ignore
       }
@@ -92,6 +101,7 @@ export async function followUpTool(args: {
       const dir = (liveStatus?.dir as string | undefined) ?? runInfo?.dir
       const agentProfile =
         (liveStatus?.agent_profile as string | undefined) ?? runInfo?.agentProfile
+      const autoApprove = resolveAutoApprove(liveStatus, runInfo)
 
       const followUpRunId = crypto.randomUUID()
       const followUpLabel = args.label ?? `${args.runId}-followup`
@@ -110,6 +120,7 @@ export async function followUpTool(args: {
       if (model) spawnParams.model = model
       if (dir) spawnParams.dir = dir
       if (agentProfile) spawnParams.agent_profile = agentProfile
+      if (autoApprove === true) spawnParams.auto_approve = true
 
       const result = await client.spawn(spawnParams)
       // With an external supervisor there is no local Supervisor.run map to
@@ -161,6 +172,7 @@ export async function followUpTool(args: {
   const dir = (liveStatus?.dir as string | undefined) ?? runInfo.dir
   const agentProfile =
     (liveStatus?.agent_profile as string | undefined) ?? runInfo.agentProfile
+  const autoApprove = resolveAutoApprove(liveStatus, runInfo)
 
   const followUpLabel = args.label ?? `${runInfo.label}-followup`
 
@@ -173,6 +185,7 @@ export async function followUpTool(args: {
     prompt: args.message,
     session_id: sessionId,
     label: followUpLabel,
+    ...(autoApprove === true ? { auto_approve: true } : {}),
   })
 
   return { run_id: followUpRun.runId, label: followUpRun.label }
