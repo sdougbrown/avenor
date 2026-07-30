@@ -32,7 +32,7 @@ export type {
 export { observeRun } from './run-observer.js'
 export type { ObserveRunOptions, RunObserver, RunObserverClient } from './run-observer.js'
 export { Supervisor, findAvenorBinary } from './supervisor.js'
-export { socketsRoot, avenorHome, runsRoot } from './paths.js'
+export { socketsRoot } from './paths.js'
 export { getInstallDir, getVersion, installerBinaryPath } from './install-path.js'
 export type { RunInfo, SupervisorOptions } from './supervisor.js'
 
