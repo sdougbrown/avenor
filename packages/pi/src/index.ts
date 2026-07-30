@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-a
 import type { Theme } from '@earendil-works/pi-tui'
 import { Text } from '@earendil-works/pi-tui'
 import { Type } from 'typebox'
+import * as path from 'node:path'
 import {
   dial,
   eventsTool,
@@ -14,6 +15,7 @@ import {
   spawnTool,
   statusTool,
   Supervisor,
+  socketsRoot,
   type Client,
   type InspectResult,
   type RunObserver,
@@ -152,7 +154,8 @@ export function renderStatusLines(entries: RunStatusEntry[]): string[] {
     const emoji = statusEmoji(e.status)
     const perm = e.pendingPermission ? ' 🔒' : ''
     const phase = e.phaseLabel ? ` [${e.phaseLabel}]` : ''
-    return `${emoji} ${e.label} — ${e.status}${phase}${perm}`
+    const nested = e.nestedCount ? ` +${e.nestedCount}` : ''
+    return `${emoji} ${e.label} — ${e.status}${phase}${perm}${nested}`
   })
 }
 
@@ -281,6 +284,39 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
       }
     }
 
+    /**
+     * Count active (non-terminal) runs on a child supervisor discovered via
+     * the spawned pi process's PID. The child pi process creates its own
+     * avenor supervisor at `avenor-mcp-<pid>.sock`; we dial it briefly to
+     * list runs and count those still active. Returns 0 on any failure
+     * (socket not yet ready, supervisor idle-shut-down, etc.).
+     */
+    async function countNestedRuns(pid: number): Promise<number> {
+      if (!pid) return 0
+      const socketPath = path.join(socketsRoot(), `avenor-mcp-${pid}.sock`)
+      let client: Awaited<ReturnType<typeof deps.dial>> | undefined
+      try {
+        // Race the dial against a timeout. Unix domain sockets usually
+        // connect or refuse instantly, but a stale socket file with a
+        // full backlog can hang indefinitely and freeze the poll loop.
+        client = await Promise.race([
+          deps.dial(socketPath, { callTimeoutMs: 2_000 }),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('dial timeout')), 2_000),
+          ),
+        ])
+        const runs = await client.list()
+        return runs.filter(r => {
+          const status = String(r.status ?? 'running').toLowerCase()
+          return status === 'running' || status === 'idle'
+        }).length
+      } catch {
+        return 0
+      } finally {
+        client?.close()
+      }
+    }
+
     async function pollRuns(): Promise<RunStatusEntry[]> {
       const liveMap = new Map<string, StatusResult>()
       try {
@@ -308,6 +344,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
             agent: run.agent,
             pendingPermission: !!live.pending_permission,
             permissionDescription: live.pending_permission?.description,
+            pid: live.pid,
+            backend: live.backend,
           })
           continue
         }
@@ -328,6 +366,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
             agent: run.agent,
             pendingPermission: !!result.pending_permission,
             permissionDescription: result.pending_permission?.description,
+            pid: result.pid,
+            backend: result.backend,
           })
         } catch (err) {
           console.error(`avenor pollRuns: statusTool failed for ${run.runId}`, err)
@@ -341,6 +381,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
             agent: run.agent,
             pendingPermission: !!previous?.pending_permission,
             permissionDescription: previous?.pending_permission?.description,
+            pid: previous?.pid,
+            backend: previous?.backend,
           })
         }
       }
@@ -355,7 +397,24 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
           agent: live.agent ?? 'unknown',
           pendingPermission: !!live.pending_permission,
           permissionDescription: live.pending_permission?.description,
+          pid: live.pid,
+          backend: live.backend,
         })
+      }
+
+      // Query child supervisors for nested run counts. Only pi-backend
+      // runs with a known PID can have child supervisors.
+      const nestedPids = entries
+        .filter(e => e.backend === 'pi' && e.pid && !isTerminalStatus(e.status))
+        .map(e => e.pid!)
+      if (nestedPids.length > 0) {
+        const nestedCounts = await Promise.all(nestedPids.map(pid => countNestedRuns(pid)))
+        let idx = 0
+        for (const entry of entries) {
+          if (entry.backend === 'pi' && entry.pid && !isTerminalStatus(entry.status)) {
+            entry.nestedCount = nestedCounts[idx++] ?? 0
+          }
+        }
       }
 
       return entries
@@ -367,7 +426,17 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
       const lines = renderStatusLines(entries)
       if (lines.length > 0) {
         sessionCtx.ui.setWidget('avenor-status', lines)
-        sessionCtx.ui.setStatus('avenor', lines.map(line => line.slice(0, 60)).join('  '))
+        const statusStr = lines.map(line => line.slice(0, 60)).join('  ')
+        // Append total count (direct + nested) so the footer indicator can
+        // display the full agent tree size without parsing individual lines.
+        const nestedTotal = entries
+          .filter(e => !isTerminalStatus(e.status))
+          .reduce((sum, e) => sum + (e.nestedCount ?? 0), 0)
+        const total = lines.length + nestedTotal
+        const statusWithTotal = nestedTotal > 0
+          ? `${statusStr}  total:${total}`
+          : statusStr
+        sessionCtx.ui.setStatus('avenor', statusWithTotal)
       } else {
         sessionCtx.ui.setWidget('avenor-status', undefined)
         sessionCtx.ui.setStatus('avenor', '')

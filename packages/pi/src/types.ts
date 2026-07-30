@@ -44,6 +44,12 @@ export interface RunStatusEntry {
   agent: string
   pendingPermission?: boolean
   permissionDescription?: string
+  /** OS PID of the spawned pi process (pi backend only), for discovering child supervisors. */
+  pid?: number
+  /** Backend type, used to determine whether to look for child supervisors. */
+  backend?: string
+  /** Count of active (non-terminal) runs on this run's child supervisor, if discovered. */
+  nestedCount?: number
 }
 
 export type TerminalStatus = 'done' | 'failed' | 'timeout' | 'killed'

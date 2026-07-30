@@ -132,6 +132,16 @@ func StartClientWithAgentProfileAndDir(ctx context.Context, provider string, mod
 	return c, nil
 }
 
+// Pid returns the OS process ID of the spawned pi process, or 0 if not started.
+func (c *client) Pid() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.proc != nil && c.proc.Process != nil {
+		return c.proc.Process.Pid
+	}
+	return 0
+}
+
 func (c *client) Close() error {
 	if c.stdin != nil {
 		_ = c.stdin.Close()

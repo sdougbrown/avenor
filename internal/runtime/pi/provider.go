@@ -80,6 +80,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		SessionID: sessionID,
 		Backend:   backendID,
 		Dir:       cwd,
+		PID:       c.Pid(),
 	}, nil
 }
 
@@ -91,7 +92,11 @@ func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Sessio
 	p.mu.Lock()
 	if _, ok := p.sessions[sessionID]; ok {
 		p.mu.Unlock()
-		return runtime.Session{SessionID: sessionID, Backend: backendID, Dir: p.opts.Dir}, nil
+		var pid int
+		if c, err := p.getClient(); err == nil {
+			pid = c.Pid()
+		}
+		return runtime.Session{SessionID: sessionID, Backend: backendID, Dir: p.opts.Dir, PID: pid}, nil
 	}
 	p.mu.Unlock()
 
@@ -114,6 +119,7 @@ func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Sessio
 		SessionID: sessionID,
 		Backend:   backendID,
 		Dir:       p.opts.Dir,
+		PID:       c.Pid(),
 	}, nil
 }
 

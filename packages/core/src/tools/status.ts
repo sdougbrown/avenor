@@ -172,6 +172,7 @@ function buildBaseStatus(
     dir: stringField(source, 'dir'),
     parent_id: stringField(source, 'parent_id', 'parentId'),
     children: stringArrayField(source, 'children'),
+    pid: typeof source.pid === 'number' ? source.pid : undefined,
     event_path: stringField(source, 'event_path', 'on_event'),
     usage: asRecord(source.usage) ?? undefined,
     latest_seq: numberField(source, 'latest_seq'),
@@ -202,6 +203,7 @@ export interface StatusResult {
   dir?: string
   parent_id?: string
   children?: string[]
+  pid?: number
   event_path?: string
   usage?: Record<string, unknown>
   latest_seq?: number
