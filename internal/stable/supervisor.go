@@ -1378,6 +1378,7 @@ func (s *Supervisor) listRuntimes() []map[string]any {
 			"phase_label":        rt.phaseLabel,
 			"pending_permission": rt.pendingPermission,
 			"latest_seq":         rt.latestSeq,
+			"auto_approve":       rt.autoApprove,
 		}
 		if rt.permission != nil {
 			perm := make(map[string]any, len(rt.permission))
@@ -1755,6 +1756,7 @@ func (s *Supervisor) RuntimeStatus(rtID string) (any, error) {
 		"phase_label":        rt.phaseLabel,
 		"pending_permission": rt.pendingPermission,
 		"latest_seq":         rt.latestSeq,
+		"auto_approve":       rt.autoApprove,
 	}
 	if rt.permission != nil {
 		perm := make(map[string]any, len(rt.permission))

@@ -595,10 +595,11 @@ func TestRuntimeStatusSurfacesPhaseAndPermission(t *testing.T) {
 		MaxRuntimes:   2,
 	})
 	child := &childRuntime{
-		id:       "rt_status",
-		done:     make(chan struct{}),
-		promptCh: make(chan struct{}, 1),
-		active:   true,
+		id:          "rt_status",
+		done:        make(chan struct{}),
+		promptCh:    make(chan struct{}, 1),
+		active:      true,
+		autoApprove: true,
 	}
 	sup.runtimes[child.id] = child
 
@@ -732,6 +733,11 @@ func TestRuntimeStatusSurfacesPhaseAndPermission(t *testing.T) {
 	if got, _ := status["phase"].(string); got != "done" {
 		t.Errorf("phase = %q, want done (stale agent.status must not overwrite terminal phase)", got)
 	}
+
+	// 6) auto_approve must be surfaced in RuntimeStatus.
+	if got, _ := status["auto_approve"].(bool); !got {
+		t.Errorf("auto_approve = %v, want true", got)
+	}
 }
 
 // TestListRuntimesSurfacesPhaseAndPermission verifies the list path also
@@ -749,6 +755,7 @@ func TestListRuntimesSurfacesPhaseAndPermission(t *testing.T) {
 		phase:             "waiting",
 		phaseLabel:        "Need approval",
 		pendingPermission: true,
+		autoApprove:       true,
 		permission:        map[string]any{"request_id": "req_99"},
 	}
 	sup.runtimes[child.id] = child
@@ -777,6 +784,41 @@ func TestListRuntimesSurfacesPhaseAndPermission(t *testing.T) {
 	}
 	if got, _ := perm["request_id"].(string); got != "req_99" {
 		t.Errorf("list permission.request_id = %q, want req_99", got)
+	}
+
+	// auto_approve must be surfaced in List.
+	if got, _ := entry["auto_approve"].(bool); !got {
+		t.Errorf("list auto_approve = %v, want true", got)
+	}
+}
+
+func TestRuntimeStatusAndListRuntimesSurfaceAutoApproveFalse(t *testing.T) {
+	sup := NewSupervisor(Config{
+		ControlSocket: "/tmp/test-auto-approve-false.sock",
+		MaxRuntimes:   1,
+	})
+	child := &childRuntime{
+		id:       "rt_auto_approve_false",
+		done:     make(chan struct{}),
+		promptCh: make(chan struct{}, 1),
+	}
+	sup.runtimes[child.id] = child
+
+	statusAny, err := sup.RuntimeStatus(child.id)
+	if err != nil {
+		t.Fatalf("RuntimeStatus: %v", err)
+	}
+	status := statusAny.(map[string]any)
+	if got, ok := status["auto_approve"].(bool); !ok || got {
+		t.Errorf("RuntimeStatus auto_approve = %v, want bool false", status["auto_approve"])
+	}
+
+	list := sup.listRuntimes()
+	if len(list) != 1 {
+		t.Fatalf("listRuntimes() = %d entries, want 1", len(list))
+	}
+	if got, ok := list[0]["auto_approve"].(bool); !ok || got {
+		t.Errorf("listRuntimes auto_approve = %v, want bool false", list[0]["auto_approve"])
 	}
 }
 
