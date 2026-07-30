@@ -77,14 +77,29 @@ The HTTP server rejects non-loopback hosts and non-loopback browser origins. Kee
 
 ## Typical workflow
 
-When you (an LLM) are using this MCP server to automate work:
+When you (an LLM) are using this MCP server to automate work, a run moves
+through a set of lifecycle states. Your supervision code must distinguish them
+because each requires a different action.
+
+### Run lifecycle states
+
+| Status | Means | Next action |
+|---|---|---|
+| `running` | Agent is actively working (reading, thinking, running tools). | Keep waiting. |
+| `done` (has output) | Agent finished and produced a result. Final output and file changes exist. | Report the outcome. |
+| `done` (no output) | Agent finished without writing anything. It likely asked a clarifying question. | Inspect then call `avenor_follow_up` with your answer. |
+| `failed` | Agent hit an error mid-run. | Report the failure. |
+| `timeout` | Run exceeded its timeout. | Report the timeout. |
+| `killed` | Run was forcefully terminated. | Report the kill. |
+| `waiting` (`pending_permission`) | Agent hit a tool approval gate. It is blocked mid-task. | Answer via `avenor_answer_permission`, then resume waiting. |
+
+### Supervision approaches
+
+**Option A: Blocking** — let `avenor_result` handle the loop:
 
 ```
 avenor_spawn(agent="jockey", repo_dir="/path/to/repo", prompt="fix the tests")
 → { "run_id": "...", "label": "...", "supervisor_id": "..." }
-
-avenor_status(run_id="...", view="lifecycle")
-→ { "status": "running", ... }
 
 avenor_result(run_id="...")
 → { "status": "done", "ready": true, "output": "..." }
@@ -97,12 +112,49 @@ avenor_shutdown()
 ```
 
 1. Call `avenor_spawn` with an agent name and repository path.
-2. Use `avenor_status` with `view="lifecycle"` when you need progress or pending permission details.
-3. If `pending_permission` is present, call `avenor_answer_permission` to respond.
-4. Call `avenor_result` to wait for and retrieve the complete final output.
-5. Call `avenor_events` only when you need raw recent history.
-6. Optionally call `avenor_follow_up` to continue from a completed run.
-7. Call `avenor_shutdown` when the MCP session is done.
+2. Call `avenor_result` to wait. It returns on the first terminal or
+   waiting state. For `pending_permission`, answer it with
+   `avenor_answer_permission` and call `avenor_result` again.
+3. Call `avenor_events` only when you need raw recent history.
+4. Call `avenor_shutdown` when the session is done.
+
+**Option B: Polling** — call `avenor_status` yourself when you need to
+parallelize work or build a custom monitor:
+
+```
+avenor_spawn(agent="jockey", repo_dir="/path/to/repo", prompt="fix the tests")
+→ { "run_id": "...", "label": "...", "supervisor_id": "..." }
+
+# Poll loop — check both terminal and waiting states:
+loop:
+  status = avenor_status(run_id, view="lifecycle")
+  if status.status == "running":
+    wait 3s, repeat
+  if status.status == "waiting" and status.pending_permission:
+    avenor_answer_permission(run_id, option_id="allow_once")
+    repeat
+  if status.status == "done":
+    if no final_output or output looks like a question:
+      avenor_follow_up(run_id, message="...your answer...")
+    else:
+      break  # successful completion
+  if status.status in ("failed", "timeout", "killed"):
+    break  # report failure
+```
+
+### What not to watch for
+
+- **File changes alone.** An agent that ends its turn without writing anything
+  has still ended its turn. Do not treat an empty working tree as "still
+  running." Check `avenor_status` instead.
+- **`session.end` alone.** A permission-blocked run never reaches
+  `session.end`. Check `pending_permission` separately.
+
+### Follow up
+
+Call `avenor_follow_up` when a `done` run needs more direction. It spawns a
+new session continuing from the prior one. Treat the follow-up as a new run
+through the same lifecycle.
 
 ## Supervisor lifecycle
 

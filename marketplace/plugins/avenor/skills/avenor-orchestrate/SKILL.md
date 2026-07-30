@@ -34,17 +34,79 @@ Use the Avenor MCP tools for the full run lifecycle. Do not replace them with sh
 
 ## Supervise the run
 
-1. Call `avenor_result` with the run identifier to wait for the complete final output. A blocked run returns its `pending_permission` instead of waiting indefinitely.
-2. Use `avenor_status` with `view: "lifecycle"` only when you need a non-blocking progress check. Do not poll status to retrieve output.
-3. Keep the user informed during long runs. Do not treat an unchanged `running` result as a failure.
-4. For `pending_permission`, inspect the offered options. Apply the same authorization and safety boundaries as the parent task. Call `avenor_answer_permission` only with an offered `option_id`; ask the user when the choice needs new authority or materially changes scope. Then call `avenor_result` again.
-5. Call `avenor_events` only when relevant raw history is needed. Report the outcome, important findings, and changed files, and distinguish the worker's claims from changes verified in the local workspace.
+A run can settle into one of several states while you wait. Your monitoring
+must distinguish them because each requires a different action.
 
-## Continue a run
+### Run lifecycle states
 
-Call `avenor_follow_up` only for a completed run. Pass the prior run identifier and a self-contained follow-up message, then supervise the returned run through the same lifecycle.
+| Status | Means | Next action |
+|---|---|---|
+| `running` | Agent is actively working (reading, thinking, running tools). | Keep waiting. Do not treat unchanged `running` as a failure. |
+| `done` (with output) | Agent finished its turn and produced a result (`final_output` present, files changed). | Report the outcome. Verified changed files against the workspace. |
+| `done` (no output) | Agent ended its turn without writing anything. It is likely asking a clarifying question or needs direction. | Inspect via `avenor_events` or `avenor_inspect`. If it asked a question, call `avenor_follow_up` with your answer. |
+| `failed` | Agent encountered an error mid-run. | Report the failure and any partial artifacts. |
+| `timeout` | Run exceeded its configured timeout. | Report the timeout and any partial artifacts. |
+| `killed` | Run was forcefully terminated. | Report the kill. |
+| `waiting` (`pending_permission`) | Agent hit a tool approval gate. It is blocked mid-task, not finished. | Inspect the offered options. Call `avenor_answer_permission` with an offered `option_id`, then resume monitoring. |
 
-The Avenor MCP registry is scoped to the current MCP server process. Events and follow-ups may be unavailable after the plugin, MCP server, or Codex task restarts.
+### Two supervision patterns
+
+**Blocking pattern** — call `avenor_result` and let it handle the lifecycle:
+
+- `avenor_result` waits until the run reaches a terminal state (`done`, `failed`,
+  `timeout`, `killed`) or a waiting state (`pending_permission`). It handles the
+  polling internally and returns the first meaningful state change.
+- This is the simplest pattern: one call, no loop. Use this when you can afford
+  to wait rather than parallelize other work.
+- After `pending_permission`, answer it with `avenor_answer_permission` and call
+  `avenor_result` again.
+
+**Polling pattern** — call `avenor_status` periodically and dispatch on the
+returned state:
+
+```
+loop:
+  status = avenor_status(run_id, view="lifecycle")
+
+  if status.status == "running":
+    wait a few seconds, repeat the loop
+
+  if status.status == "waiting" and status.pending_permission:
+    answer permission, then repeat the loop
+
+  if status.status == "done":
+    check for final_output or changed files
+    if output is a question or empty:
+      call avenor_follow_up with your answer
+    else:
+      report results, exit loop
+
+  if status.status in ("failed", "timeout", "killed"):
+    report failure, exit loop
+```
+
+### Common monitoring pitfalls
+
+- **Watching only for file changes.** An agent that finishes its turn without
+  writing anything has still finished its turn. Do not treat an empty working
+  tree as "still running." Check `avenor_status` to see if the run is done and
+  inspect its output.
+- **Watching only for `session.end`.** A permission-blocked run never reaches
+  `session.end`. Use the polling pattern above, which checks both terminal
+  and waiting states.
+- **Confusing "done but empty" with "still running."** A file-watch cannot
+  distinguish them. One needs a follow-up; the other needs patience.
+
+### When to inspect or follow up
+
+- Call `avenor_inspect` after a `done` run to see a bounded transcript, tool
+  calls, and final output without reading raw events.
+- Call `avenor_events` only when you need the raw event log, such as
+  permission history or detailed timing.
+- Call `avenor_follow_up` when a `done` run needs more direction. It spawns a
+  new session continuing from the prior one. Supervise the follow-up run
+  through the same lifecycle: watch for permission gates, terminal states,
+  and clarifying questions.
 
 ## Clean up
 
