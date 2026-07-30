@@ -17,6 +17,7 @@ type RunInfo struct {
 	Agent        string
 	Backend      string
 	Dir          string
+	AutoApprove  bool
 	CreatedAt    time.Time
 }
 

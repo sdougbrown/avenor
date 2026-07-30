@@ -1273,13 +1273,21 @@ func TestAvenorSpawnAutoApproveTrue(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, _, err = s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
+	_, result, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
 		Agent:       "codex",
 		RepoDir:     "/tmp/test-repo",
 		AutoApprove: true,
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+
+	runID, _ := result.(map[string]any)["run_id"].(string)
+	if runID == "" {
+		t.Fatal("expected spawned run ID")
+	}
+	if ri := s.registry.Lookup(runID); ri == nil || !ri.AutoApprove {
+		t.Fatalf("initial registry auto-approve = %#v, want true", ri)
 	}
 
 	p := fake.spawnCapturedParams
@@ -2225,6 +2233,124 @@ func TestAvenorFollowUp(t *testing.T) {
 	}
 	if ri.SessionID != "ses_followup_1" {
 		t.Errorf("expected new session_id ses_followup_1, got %s", ri.SessionID)
+	}
+}
+
+func TestAvenorFollowUpInheritsAutoApproveTransitively(t *testing.T) {
+	var spawnParams []map[string]any
+	spawnCount := 0
+	fake := &fakeClient{
+		spawnFunc: func(params map[string]any) (map[string]any, error) {
+			captured := make(map[string]any, len(params))
+			for key, value := range params {
+				captured[key] = value
+			}
+			spawnParams = append(spawnParams, captured)
+			spawnCount++
+			return map[string]any{
+				"runtime_id": fmt.Sprintf("rt_followup_%d", spawnCount),
+				"session_id": fmt.Sprintf("ses_followup_%d", spawnCount),
+			}, nil
+		},
+	}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.registry.Store(&RunInfo{
+		RunID:        "run-auto-prior",
+		Label:        "auto-prior",
+		RuntimeID:    "rt_auto_prior",
+		SessionID:    "ses_auto_prior",
+		SentinelPath: filepath.Join(t.TempDir(), "missing.done"),
+		Agent:        "claude",
+		Backend:      "pi",
+		Dir:          "/tmp/auto-repo",
+		AutoApprove:  true,
+	})
+
+	_, firstResult, err := s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
+		RunID:   "run-auto-prior",
+		Message: "first follow-up",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstRunID, _ := firstResult.(map[string]any)["run_id"].(string)
+	if firstRunID == "" {
+		t.Fatal("expected first follow-up run ID")
+	}
+	if got, ok := spawnParams[0]["auto_approve"].(bool); !ok || !got {
+		t.Fatalf("first follow-up auto_approve = %T %v, want bool true", spawnParams[0]["auto_approve"], spawnParams[0]["auto_approve"])
+	}
+	if ri := s.registry.Lookup(firstRunID); ri == nil || !ri.AutoApprove {
+		t.Fatalf("first follow-up registry auto-approve = %#v, want true", ri)
+	}
+
+	_, secondResult, err := s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
+		RunID:   firstRunID,
+		Message: "second follow-up",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spawnParams) != 2 {
+		t.Fatalf("follow-up spawns = %d, want 2", len(spawnParams))
+	}
+	if got, ok := spawnParams[1]["auto_approve"].(bool); !ok || !got {
+		t.Fatalf("second follow-up auto_approve = %T %v, want bool true", spawnParams[1]["auto_approve"], spawnParams[1]["auto_approve"])
+	}
+	secondRunID, _ := secondResult.(map[string]any)["run_id"].(string)
+	if ri := s.registry.Lookup(secondRunID); ri == nil || !ri.AutoApprove {
+		t.Fatalf("second follow-up registry auto-approve = %#v, want true", ri)
+	}
+}
+
+func TestAvenorFollowUpOmitsAutoApproveWhenFalseOrUnset(t *testing.T) {
+	tests := []struct {
+		name string
+		info RunInfo
+	}{
+		{
+			name: "false",
+			info: RunInfo{AutoApprove: false},
+		},
+		{
+			name: "unset",
+			info: RunInfo{},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fake := &fakeClient{
+				spawnResult: map[string]any{"runtime_id": "rt_followup", "session_id": "ses_followup"},
+			}
+			s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+			if err != nil {
+				t.Fatal(err)
+			}
+			info := test.info
+			info.RunID = "run-supervised"
+			info.Label = "supervised"
+			info.RuntimeID = "rt_supervised"
+			info.SessionID = "ses_supervised"
+			info.SentinelPath = filepath.Join(t.TempDir(), "missing.done")
+			info.Agent = "claude"
+			info.Dir = "/tmp/supervised-repo"
+			if err := s.registry.Store(&info); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
+				RunID:   info.RunID,
+				Message: "continue supervised",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := fake.spawnCapturedParams["auto_approve"]; ok {
+				t.Errorf("auto_approve unexpectedly forwarded: %#v", fake.spawnCapturedParams)
+			}
+		})
 	}
 }
 

@@ -559,6 +559,7 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 		Agent:        args.Agent,
 		Backend:      args.Backend,
 		Dir:          args.RepoDir,
+		AutoApprove:  args.AutoApprove,
 		CreatedAt:    time.Now(),
 	}); err != nil {
 		return nil, nil, fmt.Errorf("registry store: %w", err)
@@ -782,6 +783,9 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 	if ri.Backend != "" {
 		params["backend"] = ri.Backend
 	}
+	if ri.AutoApprove {
+		params["auto_approve"] = true
+	}
 
 	cl, cleanup, err := s.getClientForSupervisor(supervisorID)
 	if err != nil {
@@ -810,6 +814,7 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 		Agent:        ri.Agent,
 		Backend:      ri.Backend,
 		Dir:          ri.Dir,
+		AutoApprove:  ri.AutoApprove,
 		CreatedAt:    time.Now(),
 	}); err != nil {
 		return nil, nil, fmt.Errorf("registry store: %w", err)
