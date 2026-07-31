@@ -67,9 +67,9 @@ func TestToolNameParity(t *testing.T) {
 // the property names and the required fields match the expected contracts.
 func TestSchemaFieldParity(t *testing.T) {
 	t.Run("avenor_spawn", func(t *testing.T) {
-		// spawnArgs — required: repo_dir
+		// spawnArgs — repo_dir is required.
 		// agent and model are independently optional; omitting both uses runtime defaults.
-		// Other optional fields: prompt, prompt_file, label, timeout, backend, server_url, supervisor_id, auto_approve
+		// All remaining fields are optional.
 		allowed := []string{"agent", "repo_dir", "prompt", "prompt_file", "label", "timeout", "model", "backend", "server_url", "supervisor_id", "auto_approve"}
 		required := []string{"repo_dir"}
 		assertFields(t, "spawnArgs", allowed, required)
