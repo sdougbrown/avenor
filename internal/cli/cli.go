@@ -1272,6 +1272,17 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 			cfn()
 			finalStopReason = "cancelled"
 		case <-ctx.Done():
+			// Synchronize with any in-flight permission resolution so that
+			// the goroutine's cleanup (e.g. removing the file-handler
+			// .req file) completes before we return.  The goroutine
+			// itself runs on the same cancelled context, so it should
+			// finish almost immediately.
+			if permissionDone != nil {
+				select {
+				case <-permissionDone:
+				case <-time.After(5 * time.Second):
+				}
+			}
 			return cancelAndEnd(provider, deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, "cancelled", deps.Stderr, bufferedUsage, fullReply.String(), finalReply.String())
 		case <-progressTimerC:
 			return cancelAndEnd(provider, deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, "progress_timeout", deps.Stderr, bufferedUsage, fullReply.String(), finalReply.String())

@@ -124,11 +124,13 @@ type permissionRequestCaptureSink struct {
 	request    events.Event
 	claimState control.PermissionResolverState
 	onRequest  func()
+	captured   bool
 }
 
 func (s *permissionRequestCaptureSink) Write(event events.Event) error {
-	if event.Event == "permission.request" {
+	if event.Event == "permission.request" && !s.captured {
 		s.request = event
+		s.captured = true
 		if s.onRequest != nil {
 			s.onRequest()
 		}
