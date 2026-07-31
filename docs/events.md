@@ -60,14 +60,21 @@ TypeScript consumers can use `normalizeRunEvent`, `RunReducer`, and `observeRun`
 
 **`permission.request`** — Backend is asking the client to choose a permission option. For example: "Allow bash command?" with options `["allow", "reject"]`.
 
-Avenor populates `request_id` (unique for this session), `tool` (best-effort), `question` (best-effort), and `options` (array of choice objects) when available. If you're using `--permission-handler file:<path>`, Avenor writes the `.req` file and emits this event immediately after, without waiting for the response.
+Avenor populates `request_id` (unique for this session), `tool` (best-effort), `question` (best-effort), and `options` (array of choice objects) when available. Every request also includes `resolver`, which is one of `automatic`, `reserved`, `file`, or `none`:
+
+- `automatic`: Avenor will resolve the request automatically. This value is informational.
+- `reserved`: A connected control client can answer the request.
+- `file`: The configured file handler can answer the request.
+- `none`: No resolver is configured, so the backend remains blocked until another path answers it.
+
+The latter three values indicate a real block requiring attention when the event is emitted. `--auto-approve` does not make requests with `requires_user_input: true` automatic. Consumers should continue using `pending_permission` as the lifecycle summary; `resolver` is an event-time hint, not a replacement for status. If you're using `--permission-handler file:<path>`, Avenor writes the `.req` file and emits this event immediately after, without waiting for the response.
 
 Classifies as MILESTONE because permission gates are decision points.
 
 Example:
 
 ```json
-{"event":"permission.request","session_id":"ses_xyz","request_id":"17","tool":"bash","question":"Run this command?","options":[{"optionId":"allow","kind":"allow"},{"optionId":"reject","kind":"reject"}]}
+{"event":"permission.request","session_id":"ses_xyz","request_id":"17","resolver":"reserved","tool":"bash","question":"Run this command?","options":[{"optionId":"allow","kind":"allow"},{"optionId":"reject","kind":"reject"}]}
 ```
 
 **`permission.response`** — Synthesized by Avenor after resolving a permission decision. Emitted for all resolution paths: `--auto-approve`, control socket, or file handler. Fields: `request_id` (string), `option_id` (the chosen `optionId` from the request's option list), `kind` (`"allow"` or `"reject"`), `source` (`"avenor"` for auto-approve, `"control"` for control socket, `"file"` for file handler), `ts` (Unix milliseconds).
