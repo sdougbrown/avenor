@@ -1,8 +1,9 @@
 import * as path from 'node:path'
-import { describe, expect, it } from 'bun:test'
+import { describe, expect, it, jest } from 'bun:test'
 import {
   countNestedRuns,
   type NestedSupervisorDial,
+  type NestedSupervisorClient,
   AsyncLimiter,
   dialWithTimeout,
   isActiveRun,
@@ -150,34 +151,46 @@ describe('dialWithTimeout', () => {
   })
 
   it('rejects when timeout wins', async () => {
-    const dial: NestedSupervisorDial = async () =>
-      new Promise(() => {
-        /* never resolve */
-      })
+    jest.useFakeTimers()
+    try {
+      const dial: NestedSupervisorDial = async () =>
+        new Promise(() => {
+          /* never resolve */
+        })
 
-    await expect(dialWithTimeout(dial, '/tmp/test.sock', 5)).rejects.toThrow('dial timeout')
+      const pending = dialWithTimeout(dial, '/tmp/test.sock', 5)
+      jest.advanceTimersByTime(5)
+      await expect(pending).rejects.toThrow('dial timeout')
+    } finally {
+      jest.useRealTimers()
+    }
   })
 
   it('closes a late-resolving client after timeout wins', async () => {
-    let closeCalled = false
-    let resolveClosed!: () => void
-    const closed = new Promise<void>(resolve => { resolveClosed = resolve })
-    const dial: NestedSupervisorDial = async () =>
-      new Promise(resolve => {
-        setTimeout(() => {
-          resolve({
-            async list() { return [] },
-            close() {
-              closeCalled = true
-              resolveClosed()
-            },
-          })
-        }, 50)
-      })
+    jest.useFakeTimers()
+    try {
+      let closeCalled = false
+      let resolveDial!: (client: NestedSupervisorClient) => void
+      const dial: NestedSupervisorDial = async () => new Promise(resolve => { resolveDial = resolve })
 
-    await expect(dialWithTimeout(dial, '/tmp/test.sock', 10)).rejects.toThrow('dial timeout')
-    await closed
-    expect(closeCalled).toBe(true)
+      const pending = dialWithTimeout(dial, '/tmp/test.sock', 10)
+      jest.advanceTimersByTime(10)
+      await expect(pending).rejects.toThrow('dial timeout')
+
+      const closed = new Promise<void>(resolve => {
+        resolveDial({
+          async list() { return [] },
+          close() {
+            closeCalled = true
+            resolve()
+          },
+        })
+      })
+      await closed
+      expect(closeCalled).toBe(true)
+    } finally {
+      jest.useRealTimers()
+    }
   })
 })
 
@@ -186,6 +199,11 @@ describe('AsyncLimiter', () => {
     const limiter = new AsyncLimiter(2)
     let active = 0
     let peak = 0
+    let startedCount = 0
+    let markFirstWave!: () => void
+    let release!: () => void
+    const firstWaveStarted = new Promise<void>(resolve => { markFirstWave = resolve })
+    const releaseFirstWave = new Promise<void>(resolve => { release = resolve })
     const tasks: Array<Promise<void>> = []
 
     for (let i = 0; i < 6; i++) {
@@ -193,14 +211,17 @@ describe('AsyncLimiter', () => {
         limiter.run(async () => {
           active++
           peak = Math.max(peak, active)
-          await new Promise(r => setTimeout(r, 10))
+          if (++startedCount === 2) markFirstWave()
+          await releaseFirstWave
           active--
         }),
       )
     }
 
+    await firstWaveStarted
+    expect(peak).toBe(2)
+    release()
     await Promise.all(tasks)
-    expect(peak).toBeLessThanOrEqual(2)
     expect(active).toBe(0)
     expect(await limiter.run(async () => 42)).toBe(42)
   })
@@ -239,22 +260,29 @@ describe('AsyncLimiter', () => {
     const limiter = new AsyncLimiter(16)
     let active = 0
     let peak = 0
-    const started = 32
+    let startedCount = 0
+    let markFirstWave!: () => void
+    let release!: () => void
+    const firstWaveStarted = new Promise<void>(resolve => { markFirstWave = resolve })
+    const releaseFirstWave = new Promise<void>(resolve => { release = resolve })
     const tasks: Array<Promise<void>> = []
 
-    for (let i = 0; i < started; i++) {
+    for (let i = 0; i < 32; i++) {
       tasks.push(
         limiter.run(async () => {
           active++
           peak = Math.max(peak, active)
-          await new Promise(r => setTimeout(r, 5))
+          if (++startedCount === 16) markFirstWave()
+          await releaseFirstWave
           active--
         }),
       )
     }
 
-    await Promise.all(tasks)
+    await firstWaveStarted
     expect(peak).toBe(16)
+    release()
+    await Promise.all(tasks)
     expect(active).toBe(0)
   })
 })

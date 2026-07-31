@@ -64,6 +64,10 @@ function nestedSocketPath(pid: number): string {
   return path.join(parent, path.basename(requestedPath))
 }
 
+/**
+ * Dial a nested supervisor with a bounded connection/RPC timeout.
+ * A client that resolves after the timeout loses the race and is closed.
+ */
 export async function dialWithTimeout(
   dial: NestedSupervisorDial,
   socketPath: string,
@@ -104,9 +108,17 @@ async function countNestedRunsAtDepth(
 
   seen.add(pid)
 
+  let socketPath: string
   try {
-    const socketPath = nestedSocketPath(pid)
-    const activeRuns = await nestedDialLimiter.run(async () => {
+    socketPath = nestedSocketPath(pid)
+  } catch (error) {
+    console.warn('avenor nested count: invalid supervisor socket path', error)
+    return 0
+  }
+
+  let activeRuns: Array<Record<string, unknown>>
+  try {
+    activeRuns = await nestedDialLimiter.run(async () => {
       const client = await dialWithTimeout(dial, socketPath)
       try {
         return (await client.list()).filter(isActiveRun)
@@ -114,20 +126,21 @@ async function countNestedRunsAtDepth(
         client.close()
       }
     })
-
-    let total = 0
-    for (const run of activeRuns) {
-      const nestedPid = childPiPid(run)
-      // Count the active run at the depth boundary, but do not walk beyond it.
-      total += 1
-      if (nestedPid && depth + 1 < MAX_NESTED_DEPTH) {
-        total += await countNestedRunsAtDepth(nestedPid, dial, seen, depth + 1)
-      }
-    }
-    return total
   } catch {
+    // A child supervisor can disappear between PID discovery and this dial.
     return 0
   }
+
+  let total = 0
+  for (const run of activeRuns) {
+    const nestedPid = childPiPid(run)
+    // Count the active run at the depth boundary, but do not walk beyond it.
+    total += 1
+    if (nestedPid && depth + 1 < MAX_NESTED_DEPTH) {
+      total += await countNestedRunsAtDepth(nestedPid, dial, seen, depth + 1)
+    }
+  }
+  return total
 }
 
 /**
