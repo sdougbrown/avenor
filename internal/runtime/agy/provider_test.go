@@ -119,6 +119,77 @@ func TestProviderFirstPromptAdoptsExternalIDAndForwardsEvents(t *testing.T) {
 	}
 }
 
+func TestProviderProvisionalAliasResolvesUntilPromptReturns(t *testing.T) {
+	p := testProvider(runtime.StartOptions{Dir: "/work"})
+	c, out := fakeClient()
+	p.clientFactory = func() *client { return c }
+
+	sess, err := p.Start(context.Background(), runtime.StartOptions{Model: "model-x"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	provisional := sess.SessionID
+	if !strings.HasPrefix(provisional, "agy-pending-") {
+		t.Fatalf("provisional SessionID = %q, want agy-pending-*", provisional)
+	}
+
+	eventCtx, cancelEvents := context.WithCancel(context.Background())
+	defer cancelEvents()
+	evCh, err := p.Events(eventCtx, provisional)
+	if err != nil {
+		t.Fatalf("Events: %v", err)
+	}
+
+	// Deliver init with the real conversation id but keep the stream open so
+	// the first Prompt stays in flight after adoption fires.
+	sendEventsNoClose(out, newInit("conv-alias-resolve", "", ""))
+
+	promptDone := make(chan error, 1)
+	go func() { promptDone <- p.Prompt(context.Background(), provisional, "block") }()
+
+	// session.start is emitted after adoptSessionID registers the real id and
+	// re-binds the provisional alias to the same session state.
+	startEvt := eventWithin(t, evCh)
+	if startEvt.Event != "session.start" || startEvt.SessionID != "conv-alias-resolve" {
+		t.Fatalf("session.start = %#v", startEvt)
+	}
+
+	// The provisional alias must still resolve while the original Prompt is
+	// in flight so cancellation and timeout paths that captured the old id
+	// keep working.
+	if p.getSession(provisional) == nil {
+		t.Fatal("provisional alias was removed before Prompt returned")
+	}
+	if p.getSession("conv-alias-resolve") == nil {
+		t.Fatal("adopted conversation id was not registered")
+	}
+
+	// Cancellation through the provisional id must resolve against the
+	// in-flight prompt, not report a missing session.
+	if err := p.Cancel(context.Background(), provisional); err != nil {
+		t.Fatalf("Cancel through provisional id: %v", err)
+	}
+
+	endEvt := eventWithin(t, evCh)
+	if endEvt.Event != "session.end" || endEvt.Fields["stop_reason"] != "cancelled" {
+		t.Fatalf("cancel terminal = %#v", endEvt)
+	}
+
+	if err := <-promptDone; err == nil {
+		t.Fatal("Prompt returned nil error after cancellation")
+	}
+
+	// Only after the original Prompt returns may the provisional alias be
+	// removed; the adopted conversation id remains registered for resume.
+	if p.getSession(provisional) != nil {
+		t.Fatal("provisional alias was not removed after Prompt returned")
+	}
+	if p.getSession("conv-alias-resolve") == nil {
+		t.Fatal("adopted conversation id was removed after Prompt returned")
+	}
+	_ = out.Close()
+}
+
 func TestProviderResumeFirstPromptEmitsLogicalStart(t *testing.T) {
 	p := testProvider(runtime.StartOptions{Dir: "/work", Model: "model-r"})
 	p.ptyRPCHostFactory = func(context.Context, runtime.StartOptions, string, string) (*ptyRPCHost, error) {
