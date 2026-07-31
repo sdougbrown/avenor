@@ -335,6 +335,45 @@ func TestMarkPermissionClaimResolvedRetainsTombstone(t *testing.T) {
 	}
 }
 
+func TestMarkPermissionClaimResolvedDoubleClose(t *testing.T) {
+	s := NewServer(NewState("run_1", "", 0))
+	if !s.PreparePermissionClaim("rt_1", "req_1", PermissionResolverAutomatic, nil) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+
+	s.pendingMu.Lock()
+	close(s.pendingClaims[permissionClaimKey{scope: "rt_1", requestID: "req_1"}].disconnectCh)
+	s.pendingMu.Unlock()
+
+	if !s.MarkPermissionClaimResolved("rt_1", "req_1", "disconnect") {
+		t.Fatal("MarkPermissionClaimResolved returned false")
+	}
+}
+
+func TestMarkPermissionClaimResolvedConcurrent(t *testing.T) {
+	s := NewServer(NewState("run_1", "", 0))
+	if !s.PreparePermissionClaim("rt_1", "req_1", PermissionResolverAutomatic, nil) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+
+	s.pendingMu.Lock()
+	close(s.pendingClaims[permissionClaimKey{scope: "rt_1", requestID: "req_1"}].disconnectCh)
+	s.pendingMu.Unlock()
+
+	const callers = 8
+	results := make(chan bool, callers)
+	for range callers {
+		go func() {
+			results <- s.MarkPermissionClaimResolved("rt_1", "req_1", "concurrent")
+		}()
+	}
+	for range callers {
+		if !<-results {
+			t.Fatal("MarkPermissionClaimResolved returned false")
+		}
+	}
+}
+
 func TestPreparePermissionClaimReplacesResolvedTombstone(t *testing.T) {
 	s := NewServer(NewState("run_1", "", 0))
 	if !s.PreparePermissionClaim("rt_1", "req_1", PermissionResolverAutomatic, nil) {

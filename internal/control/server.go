@@ -413,7 +413,8 @@ func (s *ControlServer) SetPermissionResolverState(scope, requestID string, stat
 // MarkPermissionClaimResolved changes claim.state to PermissionResolverResolved.
 // DeliverPendingPermission returns AlreadyResolved for that state.
 // Live-only channels and queued metadata are cleared so the resolved claim
-// cannot be mistaken for a pending request.
+// cannot be mistaken for a pending request. Channels are safely closed to
+// unblock any lingering waiters before being set to nil.
 func (s *ControlServer) MarkPermissionClaimResolved(scope, requestID, source string) bool {
 	s.pendingMu.Lock()
 	defer s.pendingMu.Unlock()
@@ -423,8 +424,24 @@ func (s *ControlServer) MarkPermissionClaimResolved(scope, requestID, source str
 	}
 	claim.state = PermissionResolverResolved
 	claim.resolutionSource = source
+	if claim.answerCh != nil {
+		select {
+		case <-claim.answerCh:
+			// drain any queued value; claim is being resolved
+		default:
+		}
+		close(claim.answerCh)
+	}
 	claim.answerCh = nil
 	claim.answerQueued = false
+	if claim.disconnectCh != nil {
+		select {
+		case <-claim.disconnectCh:
+			// already closed by signalClientDisconnect
+		default:
+			close(claim.disconnectCh)
+		}
+	}
 	claim.disconnectCh = nil
 	claim.requiresMessage = nil
 	return true
