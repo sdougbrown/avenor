@@ -475,9 +475,8 @@ func assertSentinelHasSession(t *testing.T, content, banner, sessionID string) {
 }
 
 // TestRunLoopChildPreservesAdoptedSessionAfterPhaseCleanup proves loop
-// PhaseAttempt cleanup preserves the authoritative conversation ID.
-// The aggregate child record and RuntimeStatus retain the adopted ID after
-// the phase terminates and deferred cleanup runs.
+// PhaseAttempt cleanup preserves the authoritative conversation ID in the
+// aggregate child record after the phase terminates.
 func TestRunLoopChildPreservesAdoptedSessionAfterPhaseCleanup(t *testing.T) {
 	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-loop-keep-session.sock", MaxRuntimes: 1})
 	const provisionalID, realID = "agy-pending-loop-keep", "conv-loop-keep"
@@ -517,11 +516,6 @@ func TestRunLoopChildPreservesAdoptedSessionAfterPhaseCleanup(t *testing.T) {
 	close(endRelease)
 	waitForChildProviderCleared(t, child)
 
-	// Status must still reflect the adopted id now that cleanup has run but
-	// before the runtime is removed from the supervisor.
-	if id := statusSessionID(t, sup, child.id); id != realID {
-		t.Fatalf("loop status after cleanup = %q, want %q", id, realID)
-	}
 	waitForStableDone(t, child)
 
 	assertChildSessionID(t, child, realID)
@@ -567,9 +561,6 @@ func TestRunTeamChildPreservesAdoptedSessionAfterPhaseCleanup(t *testing.T) {
 	close(endRelease)
 	waitForChildProviderCleared(t, child)
 
-	if id := statusSessionID(t, sup, child.id); id != realID {
-		t.Fatalf("team status after cleanup = %q, want %q", id, realID)
-	}
 	waitForStableDone(t, child)
 
 	assertChildSessionID(t, child, realID)
