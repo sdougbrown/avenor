@@ -78,7 +78,7 @@ type resultArgs struct {
 }
 
 type spawnArgs struct {
-	Agent        string `json:"agent" jsonschema:"required agent to run"`
+	Agent        string `json:"agent,omitempty" jsonschema:"optional agent name; omission uses the selected model or runtime defaults"`
 	RepoDir      string `json:"repo_dir" jsonschema:"required path to the repository"`
 	Prompt       string `json:"prompt,omitempty" jsonschema:"optional initial prompt"`
 	PromptFile   string `json:"prompt_file,omitempty" jsonschema:"optional path to file containing the initial prompt"`
@@ -484,9 +484,6 @@ func (s *Server) handleAvenorResult(ctx context.Context, req *mcp.CallToolReques
 }
 
 func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest, args spawnArgs) (*mcp.CallToolResult, any, error) {
-	if args.Agent == "" {
-		return nil, nil, fmt.Errorf("agent is required")
-	}
 	if args.RepoDir == "" {
 		return nil, nil, fmt.Errorf("repo_dir is required")
 	}
@@ -502,12 +499,14 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 
 	params := map[string]any{
 		"dir":           args.RepoDir,
-		"agent":         args.Agent,
 		"label":         label,
 		"sentinel_file": sentinelPath,
 		"on_event":      eventLogPath,
 	}
 
+	if args.Agent != "" {
+		params["agent"] = args.Agent
+	}
 	if args.Prompt != "" {
 		params["prompt"] = args.Prompt
 	}

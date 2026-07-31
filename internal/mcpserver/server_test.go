@@ -1350,25 +1350,62 @@ func TestAvenorSpawnTimeoutInvalid(t *testing.T) {
 	}
 }
 
-func TestAvenorSpawnMissingAgent(t *testing.T) {
-	fake := &fakeClient{}
-	s, err := NewServer(Options{
-		Transport:     "stdio",
-		NoAutostart:   true,
-		ControlClient: fake,
-	})
-	if err != nil {
-		t.Fatal(err)
+func TestAvenorSpawnWithoutAgent(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      spawnArgs
+		wantModel string
+	}{
+		{
+			name: "neither agent nor model",
+			args: spawnArgs{RepoDir: "/tmp/test-repo"},
+		},
+		{
+			name:      "model only",
+			args:      spawnArgs{RepoDir: "/tmp/test-repo", Model: "gpt-5"},
+			wantModel: "gpt-5",
+		},
+		{
+			name:      "empty agent is omitted",
+			args:      spawnArgs{RepoDir: "/tmp/test-repo", Agent: "", Model: "gpt-5"},
+			wantModel: "gpt-5",
+		},
 	}
 
-	_, _, err = s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
-		RepoDir: "/tmp/test-repo",
-	})
-	if err == nil {
-		t.Fatal("expected error for missing agent")
-	}
-	if !strings.Contains(err.Error(), "agent is required") {
-		t.Errorf("expected 'agent is required', got: %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := &fakeClient{
+				spawnResult: map[string]any{
+					"runtime_id": "rt_spawn_without_agent",
+					"session_id": "ses_spawn_without_agent",
+				},
+			}
+			s, err := NewServer(Options{
+				Transport:     "stdio",
+				NoAutostart:   true,
+				ControlClient: fake,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if _, _, err := s.handleAvenorSpawn(context.Background(), nil, tt.args); err != nil {
+				t.Fatalf("agent-less spawn failed: %v", err)
+			}
+			if fake.spawnCapturedParams == nil {
+				t.Fatal("expected spawn params to be captured")
+			}
+			if _, ok := fake.spawnCapturedParams["agent"]; ok {
+				t.Errorf("agent key should be absent, params=%#v", fake.spawnCapturedParams)
+			}
+			if tt.wantModel == "" {
+				if _, ok := fake.spawnCapturedParams["model"]; ok {
+					t.Errorf("model key should be absent, params=%#v", fake.spawnCapturedParams)
+				}
+			} else if fake.spawnCapturedParams["model"] != tt.wantModel {
+				t.Errorf("model = %v, want %q", fake.spawnCapturedParams["model"], tt.wantModel)
+			}
+		})
 	}
 }
 
