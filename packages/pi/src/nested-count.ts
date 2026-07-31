@@ -1,3 +1,4 @@
+import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { socketsRoot } from '@dougbots/avenor-core'
 
@@ -49,6 +50,20 @@ export function childPiPid(run: Record<string, unknown>): number | undefined {
   return run.pid
 }
 
+function nestedSocketPath(pid: number): string {
+  const requestedRoot = socketsRoot()
+  const requestedPath = path.join(requestedRoot, `avenor-mcp-${pid}.sock`)
+  // A missing sockets root already means the child supervisor is unavailable;
+  // preserve the normal dial failure path instead of making polling depend on
+  // the directory existing before the first supervisor starts.
+  if (!fs.existsSync(requestedRoot)) return requestedPath
+
+  const root = fs.realpathSync(requestedRoot)
+  const parent = fs.realpathSync(path.dirname(requestedPath))
+  if (parent !== root) throw new Error('nested supervisor socket escaped sockets root')
+  return path.join(parent, path.basename(requestedPath))
+}
+
 export async function dialWithTimeout(
   dial: NestedSupervisorDial,
   socketPath: string,
@@ -87,11 +102,10 @@ async function countNestedRunsAtDepth(
 ): Promise<number> {
   if (!Number.isInteger(pid) || pid <= 0 || seen.has(pid) || depth >= MAX_NESTED_DEPTH) return 0
 
-  const nextSeen = new Set(seen)
-  nextSeen.add(pid)
-  const socketPath = path.join(socketsRoot(), `avenor-mcp-${pid}.sock`)
+  seen.add(pid)
 
   try {
+    const socketPath = nestedSocketPath(pid)
     const activeRuns = await nestedDialLimiter.run(async () => {
       const client = await dialWithTimeout(dial, socketPath)
       try {
@@ -101,13 +115,16 @@ async function countNestedRunsAtDepth(
       }
     })
 
-    const counts = await Promise.all(activeRuns.map(async run => {
+    let total = 0
+    for (const run of activeRuns) {
       const nestedPid = childPiPid(run)
       // Count the active run at the depth boundary, but do not walk beyond it.
-      if (!nestedPid || depth + 1 >= MAX_NESTED_DEPTH) return 1
-      return 1 + await countNestedRunsAtDepth(nestedPid, dial, nextSeen, depth + 1)
-    }))
-    return counts.reduce((total, count) => total + count, 0)
+      total += 1
+      if (nestedPid && depth + 1 < MAX_NESTED_DEPTH) {
+        total += await countNestedRunsAtDepth(nestedPid, dial, seen, depth + 1)
+      }
+    }
+    return total
   } catch {
     return 0
   }
@@ -120,7 +137,8 @@ async function countNestedRunsAtDepth(
  *
  * The depth guard prevents malformed acyclic data from recursing forever, and
  * the dial limiter keeps a large fan-out from opening unbounded sockets at
- * once. A path-local PID set separately prevents cycles.
+ * once. A traversal-wide PID set separately prevents cycles and duplicate
+ * subtree walks from stale cross-branch references.
  */
 export async function countNestedRuns(
   pid: number,
