@@ -120,6 +120,24 @@ type permissionLifecycleSink struct {
 	onRequest func()
 }
 
+type permissionRequestCaptureSink struct {
+	request    events.Event
+	claimState control.PermissionResolverState
+	onRequest  func()
+}
+
+func (s *permissionRequestCaptureSink) Write(event events.Event) error {
+	if event.Event == "permission.request" {
+		s.request = event
+		if s.onRequest != nil {
+			s.onRequest()
+		}
+	}
+	return nil
+}
+
+func (s *permissionRequestCaptureSink) Close() error { return nil }
+
 func (s *permissionLifecycleSink) Write(event events.Event) error {
 	if event.Event == "permission.request" && s.onRequest != nil {
 		s.onRequest()
@@ -421,6 +439,9 @@ func TestWaitForSessionAutoApproveAnswersAllowKindAndOrdersEvents(t *testing.T) 
 	for i, ev := range got {
 		if ev.Event == "permission.request" {
 			requestIndex = i
+			if gotResolver := ev.Fields["resolver"]; gotResolver != "automatic" {
+				t.Fatalf("permission.request resolver = %v, want automatic", gotResolver)
+			}
 		}
 		// With the goroutine-based auto-answer, AnswerPermission runs concurrently
 		// with event draining, so session.end may arrive before the permissionDone
@@ -438,6 +459,110 @@ func TestWaitForSessionAutoApproveAnswersAllowKindAndOrdersEvents(t *testing.T) 
 	}
 	if got[0].Fields["run_label"] != "review" {
 		t.Fatalf("run_label = %v, want review", got[0].Fields["run_label"])
+	}
+}
+
+func TestEffectivePermissionResolverState(t *testing.T) {
+	tests := []struct {
+		name              string
+		autoApprove       bool
+		requiresUserInput bool
+		hasControlClient  bool
+		hasFileHandler    bool
+		want              control.PermissionResolverState
+	}{
+		{name: "automatic", autoApprove: true, want: control.PermissionResolverAutomatic},
+		{name: "write-in with control", autoApprove: true, requiresUserInput: true, hasControlClient: true, hasFileHandler: true, want: control.PermissionResolverReserved},
+		{name: "write-in with file", autoApprove: true, requiresUserInput: true, hasFileHandler: true, want: control.PermissionResolverFile},
+		{name: "file fallback", hasFileHandler: true, want: control.PermissionResolverFile},
+		{name: "write-in with none", autoApprove: true, requiresUserInput: true, want: control.PermissionResolverNoResolver},
+		{name: "none", want: control.PermissionResolverNoResolver},
+		{name: "automatic takes precedence", autoApprove: true, hasControlClient: true, hasFileHandler: true, want: control.PermissionResolverAutomatic},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := effectivePermissionResolverState(tt.autoApprove, tt.requiresUserInput, tt.hasControlClient, tt.hasFileHandler); got != tt.want {
+				t.Fatalf("effectivePermissionResolverState() = %v, want %v", got, tt.want)
+			}
+			if got := effectivePermissionResolverState(tt.autoApprove, tt.requiresUserInput, tt.hasControlClient, tt.hasFileHandler).String(); got != tt.want.String() {
+				t.Fatalf("serialized resolver = %q, want %q", got, tt.want.String())
+			}
+		})
+	}
+}
+
+func TestPermissionRequestEmitsEffectiveResolverAndClaimState(t *testing.T) {
+	tests := []struct {
+		name              string
+		autoApprove       bool
+		hasFileHandler    bool
+		requiresUserInput bool
+		want              control.PermissionResolverState
+		connectControl    bool
+	}{
+		{name: "automatic", autoApprove: true, want: control.PermissionResolverAutomatic},
+		{name: "reserved", want: control.PermissionResolverReserved, connectControl: true},
+		{name: "file", hasFileHandler: true, want: control.PermissionResolverFile},
+		{name: "none", want: control.PermissionResolverNoResolver},
+		{name: "write-in none", autoApprove: true, requiresUserInput: true, want: control.PermissionResolverNoResolver},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cs := control.NewServer(control.NewState("run_1", "", 0))
+			var conn net.Conn
+			if tt.connectControl {
+				socketPath := shortControlSocketPath(t)
+				if err := cs.Start(socketPath); err != nil {
+					t.Fatalf("start control server: %v", err)
+				}
+				defer cs.Stop()
+				var err error
+				conn, err = net.Dial("unix", socketPath)
+				if err != nil {
+					t.Fatalf("dial control server: %v", err)
+				}
+				defer conn.Close()
+				waitForControlClientForTest(t, cs)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			eventCh := make(chan events.Event, 1)
+			eventCh <- events.Event{
+				Event:     "permission.request",
+				SessionID: "ses_resolver",
+				Fields: map[string]any{
+					"request_id":          "req_resolver",
+					"requires_user_input": tt.requiresUserInput,
+					"options": []any{
+						map[string]any{"optionId": "allow", "kind": "allow"},
+					},
+				},
+			}
+			close(eventCh)
+			promptDone := make(chan error, 1)
+			promptDone <- nil
+			sink := &permissionRequestCaptureSink{}
+			sink.onRequest = func() {
+				sink.claimState = cs.PermissionResolverState("", "req_resolver")
+				cancel()
+			}
+			fileHandler := (*permission.FileHandler)(nil)
+			if tt.hasFileHandler {
+				fileHandler = permission.NewFileHandler(filepath.Join(t.TempDir(), "permission"))
+			}
+
+			result := waitForSessionForTest(ctx, &cliFakeProvider{}, sink, fileHandler, cs, eventCh, promptDone, nil, "ses_resolver", "run_1", "", tt.autoApprove, time.Millisecond, nil, io.Discard)
+			if result.ExitCode == 0 && tt.want == control.PermissionResolverReserved {
+				t.Fatal("reserved permission unexpectedly completed")
+			}
+			if got := sink.request.Fields["resolver"]; got != tt.want.String() {
+				t.Fatalf("permission.request resolver = %v, want %q", got, tt.want.String())
+			}
+			if got := sink.claimState; got != tt.want {
+				t.Fatalf("claim state before resolution = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -1291,12 +1416,8 @@ func TestAutoAnswerMissingRequestIDEmitsErrorNotWorking(t *testing.T) {
 	eventCh <- events.Event{
 		Event:     "permission.request",
 		SessionID: "ses_1",
-		Fields: map[string]any{
-			// intentionally no "request_id"
-			"options": []any{
-				map[string]any{"optionId": "allow", "kind": "allow"},
-			},
-		},
+		// Nil fields exercise request-event enrichment before serialization.
+		Fields: nil,
 	}
 	// session.end so the loop can terminate
 	eventCh <- events.Event{
@@ -1324,8 +1445,14 @@ func TestAutoAnswerMissingRequestIDEmitsErrorNotWorking(t *testing.T) {
 	}
 
 	got := readEventLogForTest(t, eventsPath)
-	var hasError, hasWorking bool
+	var hasError, hasWorking, hasRequest bool
 	for _, ev := range got {
+		if ev.Event == "permission.request" {
+			hasRequest = true
+			if gotResolver := ev.Fields["resolver"]; gotResolver != "automatic" {
+				t.Fatalf("permission.request resolver = %v, want automatic", gotResolver)
+			}
+		}
 		if ev.Event == "avenor.error" {
 			msg, _ := ev.Fields["message"].(string)
 			if strings.Contains(msg, "missing request_id") {
@@ -1335,6 +1462,9 @@ func TestAutoAnswerMissingRequestIDEmitsErrorNotWorking(t *testing.T) {
 		if ev.Event == "agent.status" && ev.Fields["phase"] == "working" {
 			hasWorking = true
 		}
+	}
+	if !hasRequest {
+		t.Fatalf("permission.request was not emitted; events: %+v", got)
 	}
 	if !hasError {
 		t.Fatalf("expected avenor.error with 'missing request_id'; events: %+v", got)
@@ -2477,8 +2607,8 @@ func TestPermissionClaimIsReservedBeforeSynchronousRequestSink(t *testing.T) {
 	default:
 		t.Fatal("permission.response was not emitted")
 	}
-	if got := cs.PermissionResolverState("rt_sync", "0"); got != control.PermissionResolverUnknown {
-		t.Fatalf("completed claim state = %v, want removed", got)
+	if got := cs.PermissionResolverState("rt_sync", "0"); got != control.PermissionResolverResolved {
+		t.Fatalf("completed claim state = %v, want resolved", got)
 	}
 }
 

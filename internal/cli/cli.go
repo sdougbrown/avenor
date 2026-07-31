@@ -1167,24 +1167,26 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 			}
 			if event.Event == "permission.request" {
 				// Auto-answer / control-owner / file fallback resolver.
+				if event.Fields == nil {
+					event.Fields = map[string]any{}
+				}
 				requestID, _ := event.Fields["request_id"].(string)
+				requiresUserInput, _ := event.Fields["requires_user_input"].(bool)
+				resolverState := effectivePermissionResolverState(
+					cfg.AutoApprove,
+					requiresUserInput,
+					deps.ControlServer != nil && deps.ControlServer.HasClients(),
+					deps.FileHandler != nil,
+				)
+				event.Fields["resolver"] = resolverState.String()
 				if permissionDone != nil {
 					emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "permission", "another permission request is already pending", deps.Stderr, cfg.RunLabel)
 					return sessionResult{ExitCode: 1}
 				}
 				claimConflict := false
 				if requestID != "" && deps.ControlServer != nil {
-					state := control.PermissionResolverNoResolver
-					switch {
-					case cfg.AutoApprove:
-						state = control.PermissionResolverAutomatic
-					case deps.ControlServer.HasClients():
-						state = control.PermissionResolverReserved
-					case deps.FileHandler != nil:
-						state = control.PermissionResolverFile
-					}
 					options, _ := event.Fields["options"].([]any)
-					claimConflict = !deps.ControlServer.PreparePermissionClaim(cfg.PermissionClaimScope, requestID, state, options)
+					claimConflict = !deps.ControlServer.PreparePermissionClaim(cfg.PermissionClaimScope, requestID, resolverState, options)
 				}
 				if claimConflict {
 					emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "permission", "another permission request is already pending", deps.Stderr, cfg.RunLabel)
@@ -1441,6 +1443,19 @@ func firstOptionKind(options []any, wantKind string) (string, string) {
 	return "", ""
 }
 
+func effectivePermissionResolverState(autoApprove, requiresUserInput, hasControlClient, hasFileHandler bool) control.PermissionResolverState {
+	switch {
+	case autoApprove && !requiresUserInput:
+		return control.PermissionResolverAutomatic
+	case hasControlClient:
+		return control.PermissionResolverReserved
+	case hasFileHandler:
+		return control.PermissionResolverFile
+	default:
+		return control.PermissionResolverNoResolver
+	}
+}
+
 func resolvePermission(
 	ctx context.Context,
 	provider runtime.Provider,
@@ -1473,7 +1488,7 @@ func resolvePermission(
 			return permissionResult{err: err}
 		}
 		if controlServer != nil {
-			controlServer.EndPermissionClaim(claimScope, requestID)
+			controlServer.MarkPermissionClaimResolved(claimScope, requestID, "control")
 		}
 		return permissionResult{requestID: requestID, optionID: ans.OptionID, kind: kind, source: "control"}
 	}
@@ -1488,7 +1503,7 @@ func resolvePermission(
 			return permissionResult{err: err}
 		}
 		if controlServer != nil {
-			controlServer.EndPermissionClaim(claimScope, requestID)
+			controlServer.MarkPermissionClaimResolved(claimScope, requestID, "avenor")
 		}
 		return permissionResult{requestID: requestID, optionID: optionID, kind: kind, source: "avenor"}
 	}
@@ -1573,14 +1588,20 @@ func resolvePermission(
 			controlServer.SetPermissionResolverState(claimScope, requestID, control.PermissionResolverFile)
 		}
 		res, err := fileHandler.Handle(ctx, provider, event, emit)
-		if controlServer != nil {
-			controlServer.EndPermissionClaim(claimScope, requestID)
-		}
 		if err != nil {
+			if controlServer != nil {
+				controlServer.EndPermissionClaim(claimScope, requestID)
+			}
 			return permissionResult{err: err}
 		}
 		if res.Cancelled {
+			if controlServer != nil {
+				controlServer.EndPermissionClaim(claimScope, requestID)
+			}
 			return permissionResult{requestID: res.RequestID, optionID: res.OptionID, kind: permissionKindFromOptionID(res.OptionID, options), cancelled: true, source: "file"}
+		}
+		if controlServer != nil {
+			controlServer.MarkPermissionClaimResolved(claimScope, requestID, "file")
 		}
 		return permissionResult{requestID: res.RequestID, optionID: res.OptionID, kind: permissionKindFromOptionID(res.OptionID, options), source: "file"}
 	}
