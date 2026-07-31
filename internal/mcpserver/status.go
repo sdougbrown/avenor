@@ -48,9 +48,26 @@ func translateStatus(raw map[string]any, sentinelPath string) map[string]any {
 
 	rawStatus, _ := raw["status"].(string)
 	rawSession, _ := raw["session_id"].(string)
+	rawPhase, _ := raw["phase"].(string)
 
 	switch rawStatus {
 	case "idle", "running":
+		if isTerminalPhase(rawPhase) {
+			if rawStatus == "idle" && sentinelPath != "" {
+				if sd, err := readSentinel(sentinelPath); err == nil {
+					applySentinelStatus(result, sd)
+					return result
+				}
+			}
+			result["status"] = rawPhase
+			if rawSession != "" {
+				result["session_id"] = rawSession
+			}
+			if stopReason, ok := raw["stop_reason"]; ok {
+				result["stop_reason"] = stopReason
+			}
+			return result
+		}
 		result["status"] = "running"
 		if rawSession != "" {
 			result["session_id"] = rawSession
@@ -92,6 +109,15 @@ func translateStatus(raw map[string]any, sentinelPath string) map[string]any {
 	}
 
 	return result
+}
+
+func isTerminalPhase(phase string) bool {
+	switch phase {
+	case "done", "failed", "timeout", "killed":
+		return true
+	default:
+		return false
+	}
 }
 
 func readSentinelSession(path string) (string, error) {
