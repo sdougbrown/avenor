@@ -59,8 +59,8 @@ func TestToolNameParity(t *testing.T) {
 }
 
 // TestSchemaFieldParity verifies the required/optional field contracts for
-// each tool's input schema. These match the TypeScript Zod schemas from
-// packages/core/src/tools/*.ts and packages/mcp/src/mcp.ts.
+// each Go MCP tool's input schema. The shared fields match the TypeScript
+// reference; Go-only fields are intentionally covered by the Go expectations.
 //
 // The Go struct definitions (spawnArgs, statusArgs, etc.) encode these
 // contracts via json and jsonschema struct tags. This test verifies both
@@ -75,8 +75,8 @@ func TestSchemaFieldParity(t *testing.T) {
 	})
 
 	t.Run("avenor_status", func(t *testing.T) {
-		// statusArgs — all optional: run_id, view, supervisor_id
-		allowed := []string{"run_id", "view", "supervisor_id"}
+		// statusArgs — all optional: run_id, view, wait_for, timeout, supervisor_id
+		allowed := []string{"run_id", "view", "wait_for", "timeout", "supervisor_id"}
 		assertFields(t, "statusArgs", allowed, nil)
 	})
 

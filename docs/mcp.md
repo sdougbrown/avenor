@@ -85,7 +85,7 @@ because each requires a different action.
 
 | Status | Means | Next action |
 |---|---|---|
-| `running` | Agent is actively working (reading, thinking, running tools). | Keep waiting. |
+| `running` | Agent is active; `pending_permission: true` may still interrupt it. | Answer permission if pending; otherwise keep waiting. |
 | `done` (has output) | Agent finished and produced a result. Final output and file changes exist. | Report the outcome. |
 | `done` (no output) | Agent finished without writing anything. It likely asked a clarifying question. | Inspect then call `avenor_follow_up` with your answer. |
 | `failed` | Agent hit an error mid-run. | Report the failure. |
@@ -118,29 +118,20 @@ avenor_shutdown()
 3. Call `avenor_events` only when you need raw recent history.
 4. Call `avenor_shutdown` when the session is done.
 
-**Option B: Polling** — call `avenor_status` yourself when you need to
-parallelize work or build a custom monitor:
+**Option B: Targeted waits** — use `avenor_status` when you need lifecycle
+control without implementing a caller-side poll loop:
 
 ```
 avenor_spawn(agent="jockey", repo_dir="/path/to/repo", prompt="fix the tests")
 → { "run_id": "...", "label": "...", "supervisor_id": "..." }
 
-# Poll loop — check both terminal and waiting states:
-loop:
-  status = avenor_status(run_id, view="lifecycle")
-  if status.status == "running":
-    wait 3s, repeat
-  if status.status == "waiting" and status.pending_permission:
-    avenor_answer_permission(run_id, option_id="allow_once")
-    repeat
-  if status.status == "done":
-    if no final_output or output looks like a question:
-      avenor_follow_up(run_id, message="...your answer...")
-    else:
-      break  # successful completion
-  if status.status in ("failed", "timeout", "killed"):
-    break  # report failure
+avenor_status(run_id="...", wait_for="turn_complete", timeout="5m", view="lifecycle")
+→ { "status": "done", "phase": "done" }
 ```
+
+Each wait requires one `run_id`. The server polls internally at a fixed cadence.
+A caller does not provide a poll interval. A wait returns when its condition is
+met, when a current permission request appears, or when its timeout expires.
 
 ### What not to watch for
 
@@ -154,7 +145,15 @@ loop:
 
 Call `avenor_follow_up` when a `done` run needs more direction. It spawns a
 new session continuing from the prior one. Treat the follow-up as a new run
-through the same lifecycle.
+through the same lifecycle. The existing `auto_approve` policy is inherited by
+follow-ups, so approved runs remain unattended across continuation turns.
+
+### Progress notifications
+
+This issue uses long-poll responses instead of MCP progress notifications. The
+Go SDK exposes notification capability, but Claude Code host rendering and
+useful progress semantics are not established. Wait correctness is independent
+of notifications.
 
 ## Supervisor lifecycle
 
@@ -231,18 +230,30 @@ Queries the status of runs. Use this for lifecycle and permission checks, not fi
 **Optional:**
 - `run_id` — specific run ID or label to query; omit to list all runs
 - `view` — `lifecycle` for a compact response or `full` for compatibility (default: `full`)
+- `wait_for` — wait for `terminal`, `phase_change`, `turn_complete`, or `permission`
+- `timeout` — maximum wait such as `30s`, `5m`, or `1h`; only valid with `wait_for`
 - `supervisor_id` — supervisor socket to query (default: the autostarted supervisor)
 
+A wait requires one `run_id`. Without `wait_for`, `avenor_status` performs its
+existing one-shot query or list operation. The server polls internally at a fixed
+one-second cadence; callers do not provide a poll interval.
+
+**Wait conditions:**
+- `terminal` — returns on normalized `done`, `failed`, `timeout`, or `killed` status.
+- `phase_change` — returns when normalized `phase` differs from the first snapshot.
+- `turn_complete` — returns on safely normalized completion of the current turn.
+  Parked idle runs with a terminal phase count as complete. Active runs with a
+  transient terminal phase do not.
+- `permission` — returns when a current permission request is pending.
+
+A pending permission interrupts every wait condition, including `terminal`.
+Inspect `pending_permission`, answer the request with `avenor_answer_permission`,
+and then issue another wait. The legacy `waiting` status remains supported.
+
 **Returns:** One status object if `run_id` is given, or an array of status objects if omitted.
-
-Status values:
-- `running` — still executing
-- `done` — completed successfully
-- `failed` — ended with an error
-- `timeout` — exceeded timeout
-- `killed` — forcefully terminated
-
-When blocked on a permission request, the result includes `pending_permission` with `request_id` and options.
+A timed-out wait returns the latest status with `timed_out: true`; it does not
+cancel the underlying run. Lifecycle view retains `timed_out` but omits
+`final_output` and usage. Use `avenor_result` to harvest complete output.
 
 ### `avenor_result`
 
@@ -256,7 +267,7 @@ Waits for one run and returns its complete final output without transcript or ra
 - `timeout` — maximum time to wait, such as `30s` or `5m`
 - `supervisor_id` — supervisor socket to query
 
-A terminal response has `ready: true` and includes the complete `output` when the backend exposed final assistant text. A blocked run returns its `pending_permission` immediately. If an older or unavailable control endpoint prevents lossless retrieval and a presentation fallback is returned, `output_truncated: true` and `output_event_path` make its possible truncation explicit; retry `avenor_result` or read the durable event path. If the result tool's own timeout expires, it returns the latest state with `ready: false` and `timed_out: true`; the underlying run keeps going.
+A terminal response has `ready: true` and includes the complete `output` when the backend exposed final assistant text. A blocked run returns its `pending_permission` immediately, even when its public status is still `running`. Answer the request before waiting again. If an older or unavailable control endpoint prevents lossless retrieval and a presentation fallback is returned, `output_truncated: true` and `output_event_path` make its possible truncation explicit; retry `avenor_result` or read the durable event path. If the result tool's own timeout expires, it returns the latest state with `ready: false` and `timed_out: true`; the underlying run keeps going.
 
 ### `avenor_answer_permission`
 
