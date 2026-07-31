@@ -48,6 +48,24 @@ func TestSpawnParamsFromArgs(t *testing.T) {
 	}
 }
 
+func TestSpawnParamsFromArgsAllowsModelWithoutAgent(t *testing.T) {
+	var stderr bytes.Buffer
+	params, code := spawnParamsFromArgs([]string{
+		"--prompt", "Use the runtime default agent",
+		"--dir", "/repo/A",
+		"--model", "test-model",
+	}, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr=%s", code, stderr.String())
+	}
+	if params["model"] != "test-model" {
+		t.Fatalf("params[model] = %#v, want test-model", params["model"])
+	}
+	if _, ok := params["agent"]; ok {
+		t.Fatalf("agent key should be absent, params=%#v", params)
+	}
+}
+
 func TestSpawnParamsFromArgsRequiresPrompt(t *testing.T) {
 	var stderr bytes.Buffer
 	_, code := spawnParamsFromArgs([]string{"--dir", "/repo/A"}, &stderr)

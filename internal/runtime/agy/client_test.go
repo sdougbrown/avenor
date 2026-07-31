@@ -416,6 +416,17 @@ func TestClientInitialArgs(t *testing.T) {
 	assertArgs(t, got, want)
 }
 
+func TestClientInitialArgsWithModelWithoutAgent(t *testing.T) {
+	got := initialArgs("test prompt", "sonnet", "", "")
+	want := []string{
+		"--output-format", "stream-json",
+		"--print-timeout", printTimeout,
+		"--model", "sonnet",
+		"--print", "test prompt",
+	}
+	assertArgs(t, got, want)
+}
+
 func TestClientResumedArgs(t *testing.T) {
 	got := resumedArgs("conv-resumed", "next prompt", "", "", "")
 	want := []string{

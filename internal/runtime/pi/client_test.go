@@ -419,6 +419,42 @@ func TestStartClientUsesRequestedWorkingDirectory(t *testing.T) {
 	}
 }
 
+func TestStartClientForwardsAgentAndModel(t *testing.T) {
+	original := piExecCommandContext
+	t.Cleanup(func() { piExecCommandContext = original })
+
+	var captured *exec.Cmd
+	piExecCommandContext = func(_ context.Context, _ string, args ...string) *exec.Cmd {
+		captured = exec.Command("cat", args...)
+		return captured
+	}
+
+	client, err := StartClientWithAgentAndDir(
+		context.Background(), "anthropic", "sonnet", "", "jockey", "",
+	)
+	if err != nil {
+		t.Fatalf("StartClientWithAgentAndDir: %v", err)
+	}
+	defer client.Close()
+
+	if captured == nil {
+		t.Fatal("pi command was not created")
+	}
+	want := []string{"cat", "--mode", "rpc", "--no-session", "--provider", "anthropic", "--model", "sonnet"}
+	if strings.Join(captured.Args, " ") != strings.Join(want, " ") {
+		t.Fatalf("pi args = %#v, want %#v", captured.Args, want)
+	}
+	gotAgent := ""
+	for _, entry := range captured.Env {
+		if strings.HasPrefix(entry, "PI_AGENT=") {
+			gotAgent = strings.TrimPrefix(entry, "PI_AGENT=")
+		}
+	}
+	if gotAgent != "jockey" {
+		t.Fatalf("PI_AGENT = %q, want jockey", gotAgent)
+	}
+}
+
 func TestStartClientReplacesAgentProfileEnvironment(t *testing.T) {
 	original := piExecCommandContext
 	t.Cleanup(func() { piExecCommandContext = original })
