@@ -3822,7 +3822,7 @@ func TestWaitForSessionCancelAndEndUsesFullReply(t *testing.T) {
 			name:           "progress timeout",
 			stopReason:     "progress_timeout",
 			wantFinalReply: "After the tool.",
-			progress:       20 * time.Millisecond,
+			progress:       100 * time.Millisecond,
 			cancel: func(_ context.CancelFunc, _ chan<- time.Time) {
 			},
 		},
