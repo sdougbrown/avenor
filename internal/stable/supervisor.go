@@ -788,7 +788,13 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				child.mu.Lock()
 				if child.provider == provider {
 					child.provider = nil
-					child.session = runtime.Session{}
+					// Preserve the latest adopted session id. Clearing the
+					// provider ends this phase's hold on the runtime, but
+					// the authoritative conversation id must survive between
+					// phases and after normal success so retries, resume,
+					// status, and the terminal sentinel reference it. A stale
+					// concurrent attempt whose provider was already replaced
+					// fails the guard above and never reaches this branch.
 				}
 				child.active = false
 				child.phase = ""
@@ -860,6 +866,15 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 	child.mu.Lock()
 	child.exitCode = result.ExitCode
 	child.mu.Unlock()
+
+	// The normal successful loop/team path (max_iterations reached, all
+	// phases end_turn) returns an empty SessionID because no single phase
+	// result is authoritative for the aggregate. Fall back to the latest
+	// adopted child session id so the terminal sentinel carries the
+	// authoritative conversation id rather than remaining empty.
+	if result.SessionID == "" {
+		result.SessionID = child.sessionID()
+	}
 
 	if child.sentinelFile != "" {
 		if result.Reason != "" {
@@ -988,7 +1003,13 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				child.mu.Lock()
 				if child.provider == provider {
 					child.provider = nil
-					child.session = runtime.Session{}
+					// Preserve the latest adopted session id. Clearing the
+					// provider ends this phase's hold on the runtime, but
+					// the authoritative conversation id must survive between
+					// phases and after normal success so retries, resume,
+					// status, and the terminal sentinel reference it. A stale
+					// concurrent attempt whose provider was already replaced
+					// fails the guard above and never reaches this branch.
 				}
 				child.active = false
 				child.phase = ""
@@ -1063,6 +1084,15 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 	child.mu.Lock()
 	child.exitCode = result.ExitCode
 	child.mu.Unlock()
+
+	// The normal successful loop/team path (all members and post phases
+	// end_turn) returns an empty SessionID because no single phase result
+	// is authoritative for the aggregate. Fall back to the latest adopted
+	// child session id so the terminal sentinel carries the authoritative
+	// conversation id rather than remaining empty.
+	if result.SessionID == "" {
+		result.SessionID = child.sessionID()
+	}
 
 	if child.sentinelFile != "" {
 		if result.Reason != "" {

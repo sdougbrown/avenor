@@ -2,6 +2,9 @@ package stable
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -82,6 +85,24 @@ func waitForChildSessionID(t *testing.T, child *childRuntime, want string) {
 		time.Sleep(2 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for child session %q", want)
+}
+
+// waitForChildProviderCleared blocks until the PhaseAttempt deferred cleanup
+// has run and cleared the active provider, signalling the phase has
+// terminated while the runtime is still registered with the supervisor.
+func waitForChildProviderCleared(t *testing.T, child *childRuntime) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		child.mu.Lock()
+		provider := child.provider
+		child.mu.Unlock()
+		if provider == nil {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for child provider to be cleared")
 }
 
 func statusSessionID(t *testing.T, sup *Supervisor, rtID string) string {
@@ -413,4 +434,291 @@ func TestStableAdoptionDoesNotOverwriteNewerConcurrentAttempt(t *testing.T) {
 	wg.Wait()
 
 	assertChildSessionID(t, child, "conv-new-real")
+}
+
+// readSentinel returns the sentinel file content, failing the test if the file
+// is missing or empty. Used to assert the terminal sentinel carries the
+// adopted conversation id on the normal successful loop/team path.
+func readSentinel(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read sentinel %q: %v", path, err)
+	}
+	if len(data) == 0 {
+		t.Fatalf("sentinel %q is empty", path)
+	}
+	return string(data)
+}
+
+// assertSentinelHasSession asserts the sentinel content carries the expected
+// conversation id on the SESSION= line and the expected status banner.
+func assertSentinelHasSession(t *testing.T, content, banner, sessionID string) {
+	t.Helper()
+	if !strings.HasPrefix(content, banner+"\n") {
+		t.Fatalf("sentinel = %q, want banner %q", content, banner)
+	}
+	if !strings.Contains(content, "SESSION="+sessionID+"\n") {
+		t.Fatalf("sentinel = %q, want SESSION=%s", content, sessionID)
+	}
+}
+
+// TestRunLoopChildPreservesAdoptedSessionAfterPhaseCleanup proves the loop
+// PhaseAttempt cleanup no longer erases the authoritative conversation id:
+// after the phase terminates and the deferred cleanup runs, the aggregate
+// child record and RuntimeStatus still hold the adopted id.
+func TestRunLoopChildPreservesAdoptedSessionAfterPhaseCleanup(t *testing.T) {
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-loop-keep-session.sock", MaxRuntimes: 1})
+	const provisionalID, realID = "agy-pending-loop-keep", "conv-loop-keep"
+	startRelease := make(chan struct{})
+	endRelease := make(chan struct{})
+	provider := &stableDeferredProvider{
+		provisionalID: provisionalID,
+		realID:        realID,
+		backend:       "agy",
+		pid:           7117,
+		events:        deferredGatedEvents(realID, startRelease, endRelease),
+	}
+	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
+
+	child := &childRuntime{
+		id:          "rt_loop_keep",
+		label:       "loop-keep",
+		provider:    provider,
+		session:     runtime.Session{SessionID: provisionalID, Backend: "agy", Dir: "/work", PID: 7117},
+		eventWriter: stableTestSink{},
+		done:        make(chan struct{}),
+		promptCh:    make(chan struct{}, 1),
+		cancelFn:    func() {},
+		runID:       sup.runID,
+	}
+	sup.runtimes[child.id] = child
+
+	cfg := &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
+	go sup.runLoopChild(context.Background(), child, cfg, 0, "", "", "", "", "agy")
+
+	waitForStableChild(t, child, func(active, completed bool, phase, phaseLabel string) bool { return active })
+	close(startRelease)
+	waitForChildSessionID(t, child, realID)
+
+	// Releasing session.end terminates the phase; the deferred cleanup runs
+	// before runLoopChild returns. The adopted id must survive cleanup.
+	close(endRelease)
+	waitForChildProviderCleared(t, child)
+
+	// Status must still reflect the adopted id now that cleanup has run but
+	// before the runtime is removed from the supervisor.
+	if id := statusSessionID(t, sup, child.id); id != realID {
+		t.Fatalf("loop status after cleanup = %q, want %q", id, realID)
+	}
+	waitForStableDone(t, child)
+
+	assertChildSessionID(t, child, realID)
+	child.mu.Lock()
+	pid := child.session.PID
+	child.mu.Unlock()
+	if pid != 7117 {
+		t.Fatalf("loop child pid = %d, want 7117", pid)
+	}
+}
+
+// TestRunTeamChildPreservesAdoptedSessionAfterPhaseCleanup is the team analogue
+// of the loop cleanup-preservation test.
+func TestRunTeamChildPreservesAdoptedSessionAfterPhaseCleanup(t *testing.T) {
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-team-keep-session.sock", MaxRuntimes: 1})
+	const provisionalID, realID = "agy-pending-team-keep", "conv-team-keep"
+	startRelease := make(chan struct{})
+	endRelease := make(chan struct{})
+	provider := &stableDeferredProvider{
+		provisionalID: provisionalID,
+		realID:        realID,
+		backend:       "agy",
+		pid:           8228,
+		events:        deferredGatedEvents(realID, startRelease, endRelease),
+	}
+	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
+
+	child := &childRuntime{
+		id:          "rt_team_keep",
+		label:       "team-keep",
+		provider:    provider,
+		session:     runtime.Session{SessionID: provisionalID, Backend: "agy", Dir: "/work", PID: 8228},
+		eventWriter: stableTestSink{},
+		done:        make(chan struct{}),
+		promptCh:    make(chan struct{}, 1),
+		cancelFn:    func() {},
+		runID:       sup.runID,
+	}
+	sup.runtimes[child.id] = child
+
+	cfg := &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
+	go sup.runTeamChild(context.Background(), child, cfg, 0, "", "", "", "", "agy")
+
+	waitForStableChild(t, child, func(active, completed bool, phase, phaseLabel string) bool { return active })
+	close(startRelease)
+	waitForChildSessionID(t, child, realID)
+
+	close(endRelease)
+	waitForChildProviderCleared(t, child)
+
+	if id := statusSessionID(t, sup, child.id); id != realID {
+		t.Fatalf("team status after cleanup = %q, want %q", id, realID)
+	}
+	waitForStableDone(t, child)
+
+	assertChildSessionID(t, child, realID)
+	child.mu.Lock()
+	pid := child.session.PID
+	child.mu.Unlock()
+	if pid != 8228 {
+		t.Fatalf("team child pid = %d, want 8228", pid)
+	}
+}
+
+// TestRunLoopChildSentinelCarriesAdoptedSessionOnNormalSuccess proves the
+// terminal sentinel written on a normal successful loop run carries the
+// adopted conversation id rather than remaining empty (the aggregate
+// RunResult has no SessionID on the max_iterations path).
+func TestRunLoopChildSentinelCarriesAdoptedSessionOnNormalSuccess(t *testing.T) {
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-loop-sentinel.sock", MaxRuntimes: 1})
+	const provisionalID, realID = "agy-pending-loop-sent", "conv-loop-sent"
+	provider := &stableDeferredProvider{
+		provisionalID: provisionalID,
+		realID:        realID,
+		backend:       "agy",
+		pid:           7001,
+		events:        deferredStartEndEvents(realID, nil),
+	}
+	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
+
+	sentinelPath := filepath.Join(t.TempDir(), "loop-sentinel.env")
+	child := &childRuntime{
+		id:           "rt_loop_sent",
+		label:        "loop-sent",
+		provider:     provider,
+		session:      runtime.Session{SessionID: provisionalID, Backend: "agy", Dir: "/work", PID: 7001},
+		eventWriter:  stableTestSink{},
+		sentinelFile: sentinelPath,
+		done:         make(chan struct{}),
+		promptCh:     make(chan struct{}, 1),
+		cancelFn:     func() {},
+		runID:        sup.runID,
+	}
+	sup.runtimes[child.id] = child
+
+	cfg := &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
+	sup.runLoopChild(context.Background(), child, cfg, 0, "", "", "", "", "agy")
+
+	waitForStableDone(t, child)
+	assertSentinelHasSession(t, readSentinel(t, sentinelPath), "DONE", realID)
+}
+
+// TestRunTeamChildSentinelCarriesAdoptedSessionOnNormalSuccess is the team
+// analogue of the loop sentinel test.
+func TestRunTeamChildSentinelCarriesAdoptedSessionOnNormalSuccess(t *testing.T) {
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-team-sentinel.sock", MaxRuntimes: 1})
+	const provisionalID, realID = "agy-pending-team-sent", "conv-team-sent"
+	provider := &stableDeferredProvider{
+		provisionalID: provisionalID,
+		realID:        realID,
+		backend:       "agy",
+		pid:           8002,
+		events:        deferredStartEndEvents(realID, nil),
+	}
+	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
+
+	sentinelPath := filepath.Join(t.TempDir(), "team-sentinel.env")
+	child := &childRuntime{
+		id:           "rt_team_sent",
+		label:        "team-sent",
+		provider:     provider,
+		session:      runtime.Session{SessionID: provisionalID, Backend: "agy", Dir: "/work", PID: 8002},
+		eventWriter:  stableTestSink{},
+		sentinelFile: sentinelPath,
+		done:         make(chan struct{}),
+		promptCh:     make(chan struct{}, 1),
+		cancelFn:     func() {},
+		runID:        sup.runID,
+	}
+	sup.runtimes[child.id] = child
+
+	cfg := &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
+	sup.runTeamChild(context.Background(), child, cfg, 0, "", "", "", "", "agy")
+
+	waitForStableDone(t, child)
+	assertSentinelHasSession(t, readSentinel(t, sentinelPath), "DONE", realID)
+}
+
+// TestRunTeamChildStaleAttemptCleanupDoesNotEraseNewerSession proves a stale
+// concurrent team attempt whose provider was already replaced by a newer
+// attempt cannot erase the newer child session via the deferred PhaseAttempt
+// cleanup. The cleanup guard compares the runtime.Provider interface; when it
+// no longer matches, neither the provider nor the session is touched.
+func TestRunTeamChildStaleAttemptCleanupDoesNotEraseNewerSession(t *testing.T) {
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-team-stale-cleanup.sock", MaxRuntimes: 1})
+	const provisionalID, realID = "agy-pending-team-stale", "conv-team-stale"
+	startRelease := make(chan struct{})
+	endRelease := make(chan struct{})
+	older := &stableDeferredProvider{
+		provisionalID: provisionalID,
+		realID:        realID,
+		backend:       "agy",
+		pid:           6336,
+		events:        deferredGatedEvents(realID, startRelease, endRelease),
+	}
+	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) { return older, nil }
+
+	child := &childRuntime{
+		id:          "rt_team_stale",
+		label:       "team-stale",
+		provider:    older,
+		session:     runtime.Session{SessionID: provisionalID, Backend: "agy", Dir: "/work", PID: 6336},
+		eventWriter: stableTestSink{},
+		done:        make(chan struct{}),
+		promptCh:    make(chan struct{}, 1),
+		cancelFn:    func() {},
+		runID:       sup.runID,
+	}
+	sup.runtimes[child.id] = child
+
+	cfg := &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
+	go sup.runTeamChild(context.Background(), child, cfg, 0, "", "", "", "", "agy")
+
+	// Wait until the older attempt is active and has adopted the real id.
+	waitForStableChild(t, child, func(active, completed bool, phase, phaseLabel string) bool { return active })
+	close(startRelease)
+	waitForChildSessionID(t, child, realID)
+
+	// Simulate a newer concurrent attempt taking over the aggregate child
+	// record while the older attempt's phase is still running (before its
+	// deferred cleanup runs).
+	newer := &stableDeferredProvider{
+		provisionalID: "agy-pending-team-newer",
+		realID:        "conv-team-newer",
+		backend:       "agy",
+		pid:           9449,
+		events:        deferredStartEndEvents("conv-team-newer", nil),
+	}
+	child.mu.Lock()
+	child.provider = newer
+	child.session = runtime.Session{SessionID: "conv-team-newer", Backend: "agy", Dir: "/work", PID: 9449}
+	child.mu.Unlock()
+
+	// Releasing session.end terminates the older attempt; its deferred
+	// cleanup guard (child.provider == older) is now false, so the newer
+	// provider/session must survive untouched.
+	close(endRelease)
+	waitForStableDone(t, child)
+
+	assertChildSessionID(t, child, "conv-team-newer")
+	child.mu.Lock()
+	providerIsNewer := child.provider == newer
+	pid := child.session.PID
+	child.mu.Unlock()
+	if !providerIsNewer {
+		t.Fatalf("stale older attempt erased newer provider/session; provider = %v", child.provider)
+	}
+	if pid != 9449 {
+		t.Fatalf("newer session pid = %d, want 9449", pid)
+	}
 }
