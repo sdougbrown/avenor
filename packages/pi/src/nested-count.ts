@@ -15,7 +15,7 @@ export type NestedSupervisorDial = (
   options?: { callTimeoutMs?: number },
 ) => Promise<NestedSupervisorClient>
 
-class AsyncLimiter {
+export class AsyncLimiter {
   private active = 0
   private readonly queue: Array<() => void> = []
 
@@ -38,24 +38,26 @@ class AsyncLimiter {
 
 const nestedDialLimiter = new AsyncLimiter(MAX_CONCURRENT_NESTED_DIALS)
 
-function isActiveRun(run: Record<string, unknown>): boolean {
+export function isActiveRun(run: Record<string, unknown>): boolean {
   const status = String(run.status ?? 'running').toLowerCase()
   return status === 'running' || status === 'idle'
 }
 
-function childPiPid(run: Record<string, unknown>): number | undefined {
+export function childPiPid(run: Record<string, unknown>): number | undefined {
   if (String(run.backend ?? '').toLowerCase() !== 'pi') return undefined
   if (typeof run.pid !== 'number' || !Number.isInteger(run.pid) || run.pid <= 0) return undefined
   return run.pid
 }
 
-async function dialWithTimeout(
+export async function dialWithTimeout(
   dial: NestedSupervisorDial,
   socketPath: string,
+  timeoutOverride?: number,
 ): Promise<NestedSupervisorClient> {
+  const effectiveTimeout = timeoutOverride ?? NESTED_DIAL_TIMEOUT_MS
   let timedOut = false
   let timeout: ReturnType<typeof setTimeout> | undefined
-  const connection = dial(socketPath, { callTimeoutMs: NESTED_DIAL_TIMEOUT_MS }).then(client => {
+  const connection = dial(socketPath, { callTimeoutMs: effectiveTimeout }).then(client => {
     // A connection can resolve after the outer timeout wins the race. Close it
     // instead of leaking a socket that the caller can no longer observe.
     if (timedOut) client.close()
@@ -66,7 +68,7 @@ async function dialWithTimeout(
     return await Promise.race([
       connection,
       new Promise<never>((_, reject) => {
-        timeout = setTimeout(() => reject(new Error('dial timeout')), NESTED_DIAL_TIMEOUT_MS)
+        timeout = setTimeout(() => reject(new Error('dial timeout')), effectiveTimeout)
       }),
     ])
   } catch (error) {

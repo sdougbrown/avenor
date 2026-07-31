@@ -1,6 +1,13 @@
 import * as path from 'node:path'
 import { describe, expect, it } from 'bun:test'
-import { countNestedRuns, type NestedSupervisorDial } from './nested-count.js'
+import {
+  countNestedRuns,
+  type NestedSupervisorDial,
+  AsyncLimiter,
+  dialWithTimeout,
+  isActiveRun,
+  childPiPid,
+} from './nested-count.js'
 
 type Run = Record<string, unknown>
 
@@ -99,5 +106,197 @@ describe('countNestedRuns', () => {
 
     await expect(countNestedRuns(500, harness.dial)).resolves.toBe(2)
     expect(harness.calls).toEqual([500, 600])
+  })
+
+  // --- depth-boundary closeCount assertion ---
+  it('closeCount equals total dials at the depth boundary', async () => {
+    const basePid = 2_000
+    const supervisors: Record<number, Run[]> = {}
+    for (let i = 0; i < 99; i++) {
+      supervisors[basePid + i] = [{ status: 'running', backend: 'pi', pid: basePid + i + 1 }]
+    }
+    // At depth 98 (basePid+98), the child is at basePid+99 which would be depth 99 — boundary.
+    // That child has no children, so its client gets closed once.
+    supervisors[basePid + 99] = []
+    const harness = makeDial(supervisors)
+
+    const result = await countNestedRuns(basePid, harness.dial)
+    expect(result).toBe(99)
+    // Every dialled supervisor's client is closed exactly once.
+    expect(harness.closeCount()).toBe(99)
+  })
+})
+
+describe('dialWithTimeout', () => {
+  it('returns the connection when it wins the race', async () => {
+    let resolved = false
+    const dial: NestedSupervisorDial = async () => {
+      resolved = true
+      return {
+        async list() { return [] },
+        close() {},
+      }
+    }
+
+    const client = await dialWithTimeout(dial, '/tmp/test.sock', 10)
+    expect(resolved).toBe(true)
+    expect(await client.list()).toEqual([])
+    client.close()
+  })
+
+  it('rejects when timeout wins', async () => {
+    const dial: NestedSupervisorDial = async () =>
+      new Promise(() => {
+        /* never resolve */
+      })
+
+    await expect(dialWithTimeout(dial, '/tmp/test.sock', 5)).rejects.toThrow('dial timeout')
+  })
+
+  it('closes a late-resolving client after timeout wins', async () => {
+    let closeCalled = false
+    const dial: NestedSupervisorDial = async () =>
+      new Promise(resolve => {
+        setTimeout(() => {
+          resolve({
+            async list() { return [] },
+            close() { closeCalled = true },
+          })
+        }, 50)
+      })
+
+    await expect(dialWithTimeout(dial, '/tmp/test.sock', 10)).rejects.toThrow('dial timeout')
+    // Wait for the late resolution and close to fire.
+    await new Promise(r => setTimeout(r, 80))
+    expect(closeCalled).toBe(true)
+  })
+})
+
+describe('AsyncLimiter', () => {
+  it('enforces max concurrency', async () => {
+    const limiter = new AsyncLimiter(2)
+    let active = 0
+    let peak = 0
+    const tasks: Array<Promise<void>> = []
+
+    for (let i = 0; i < 6; i++) {
+      tasks.push(
+        limiter.run(async () => {
+          active++
+          peak = Math.max(peak, active)
+          await new Promise(r => setTimeout(r, 10))
+          active--
+        }),
+      )
+    }
+
+    await Promise.all(tasks)
+    expect(peak).toBeLessThanOrEqual(2)
+    expect(active).toBe(0)
+  })
+
+  it('starts queued tasks in FIFO order when concurrency slots free up', async () => {
+    const limiter = new AsyncLimiter(1)
+    const order: string[] = []
+
+    const p1 = limiter.run(async () => {
+      order.push('1:start')
+      await new Promise(r => setTimeout(r, 20))
+      order.push('1:done')
+    })
+    const p2 = limiter.run(async () => {
+      order.push('2:start')
+      await new Promise(r => setTimeout(r, 5))
+      order.push('2:done')
+    })
+    const p3 = limiter.run(async () => {
+      order.push('3:start')
+      order.push('3:done')
+    })
+
+    await Promise.all([p1, p2, p3])
+    // 1 starts first, blocks for 20ms. 2 queues. 3 queues.
+    // When 1 finishes, 2 should start next (FIFO).
+    // After 2 finishes quickly, 3 should start.
+    expect(order).toEqual(['1:start', '1:done', '2:start', '2:done', '3:start', '3:done'])
+  })
+
+  it('handles more than 16 queued tasks with limit of 16', async () => {
+    const limiter = new AsyncLimiter(16)
+    let active = 0
+    let peak = 0
+    const started = 32
+    const tasks: Array<Promise<void>> = []
+
+    for (let i = 0; i < started; i++) {
+      tasks.push(
+        limiter.run(async () => {
+          active++
+          peak = Math.max(peak, active)
+          await new Promise(r => setTimeout(r, 5))
+          active--
+        }),
+      )
+    }
+
+    await Promise.all(tasks)
+    expect(peak).toBe(16)
+    expect(active).toBe(0)
+  })
+})
+
+describe('isActiveRun', () => {
+  it('returns true for running', () => {
+    expect(isActiveRun({ status: 'running' })).toBe(true)
+  })
+
+  it('returns true for idle', () => {
+    expect(isActiveRun({ status: 'idle' })).toBe(true)
+  })
+
+  it('returns false for done', () => {
+    expect(isActiveRun({ status: 'done' })).toBe(false)
+  })
+
+  it('defaults to running when status is null', () => {
+    expect(isActiveRun({ status: null })).toBe(true)
+  })
+
+  it('defaults to running when status is absent', () => {
+    expect(isActiveRun({})).toBe(true)
+  })
+
+  it('returns false for empty string status', () => {
+    expect(isActiveRun({ status: '' })).toBe(false)
+  })
+})
+
+describe('childPiPid', () => {
+  it('returns valid Pi PID', () => {
+    expect(childPiPid({ backend: 'pi', pid: 42 })).toBe(42)
+  })
+
+  it('returns undefined for non-Pi backend', () => {
+    expect(childPiPid({ backend: 'opencode-acp', pid: 42 })).toBeUndefined()
+  })
+
+  it('returns undefined for missing backend', () => {
+    expect(childPiPid({ pid: 42 })).toBeUndefined()
+  })
+
+  it('returns undefined for zero pid', () => {
+    expect(childPiPid({ backend: 'pi', pid: 0 })).toBeUndefined()
+  })
+
+  it('returns undefined for negative pid', () => {
+    expect(childPiPid({ backend: 'pi', pid: -1 })).toBeUndefined()
+  })
+
+  it('returns undefined for float pid', () => {
+    expect(childPiPid({ backend: 'pi', pid: 1.5 })).toBeUndefined()
+  })
+
+  it('returns undefined for non-number pid', () => {
+    expect(childPiPid({ backend: 'pi', pid: 'abc' as unknown as number })).toBeUndefined()
   })
 })
