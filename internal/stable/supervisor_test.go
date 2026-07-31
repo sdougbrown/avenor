@@ -734,7 +734,6 @@ func TestRuntimeStatusSurfacesPhaseAndPermission(t *testing.T) {
 		t.Errorf("phase = %q, want done (stale agent.status must not overwrite terminal phase)", got)
 	}
 
-	// 6) auto_approve must be surfaced in RuntimeStatus.
 	if got, _ := status["auto_approve"].(bool); !got {
 		t.Errorf("auto_approve = %v, want true", got)
 	}
@@ -786,7 +785,6 @@ func TestListRuntimesSurfacesPhaseAndPermission(t *testing.T) {
 		t.Errorf("list permission.request_id = %q, want req_99", got)
 	}
 
-	// auto_approve must be surfaced in List.
 	if got, _ := entry["auto_approve"].(bool); !got {
 		t.Errorf("list auto_approve = %v, want true", got)
 	}
