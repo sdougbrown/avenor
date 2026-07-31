@@ -56,6 +56,7 @@ type Server struct {
 	defaultSupervisorPath string
 	toolNames             []string
 	clock                 func() time.Time
+	sleep                 func(context.Context, time.Duration) error
 
 	// supervisorMu serializes lazy default-supervisor acquisition. The
 	// persistent client is also the connection that owns mutating operations
@@ -67,6 +68,8 @@ type Server struct {
 type statusArgs struct {
 	RunID        string `json:"run_id,omitempty" jsonschema:"optional run ID or label to query"`
 	View         string `json:"view,omitempty" jsonschema:"optional response detail: lifecycle or full"`
+	WaitFor      string `json:"wait_for,omitempty" jsonschema:"optional wait condition: terminal, phase_change, turn_complete, or permission"`
+	Timeout      string `json:"timeout,omitempty" jsonschema:"optional maximum wait time, such as 30s, 5m, or 1h"`
 	SupervisorID string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
 }
 
@@ -163,6 +166,7 @@ func NewServer(opts Options) (*Server, error) {
 		controlClient: opts.ControlClient,
 		registry:      NewRunRegistry(),
 		clock:         time.Now,
+		sleep:         sleepWithContext,
 		toolNames: []string{
 			"avenor_status",
 			"avenor_result",
@@ -190,7 +194,7 @@ func NewServer(opts Options) (*Server, error) {
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
 		Name:        "avenor_status",
-		Description: "Get lifecycle status of avenor runs; use lifecycle view for compact polling",
+		Description: "Get lifecycle status of avenor runs; optionally wait for terminal, phase_change, turn_complete, or permission",
 	}, s.handleAvenorStatus)
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
@@ -248,6 +252,25 @@ func (s *Server) handleAvenorStatus(ctx context.Context, req *mcp.CallToolReques
 	if args.View != "" && args.View != "lifecycle" && args.View != "full" {
 		return nil, nil, fmt.Errorf("view must be lifecycle or full")
 	}
+	condition, err := parseWaitCondition(args.WaitFor)
+	if err != nil {
+		return nil, nil, err
+	}
+	if condition == "" && args.Timeout != "" {
+		return nil, nil, fmt.Errorf("timeout requires wait_for")
+	}
+	if condition != "" && args.RunID == "" {
+		return nil, nil, fmt.Errorf("run_id is required when wait_for is set")
+	}
+
+	var deadline time.Time
+	if args.Timeout != "" {
+		seconds, err := parseTimeoutSeconds(args.Timeout)
+		if err != nil {
+			return nil, nil, err
+		}
+		deadline = s.clock().Add(time.Duration(seconds) * time.Second)
+	}
 
 	cl, cleanup, err := s.getClientForSupervisor(args.SupervisorID)
 	if err != nil {
@@ -280,9 +303,18 @@ func (s *Server) handleAvenorStatus(ctx context.Context, req *mcp.CallToolReques
 		return nil, translated, nil
 	}
 
-	ts, err := s.queryRunStatus(cl, args.RunID)
+	var timedOut bool
+	var ts map[string]any
+	if condition != "" {
+		ts, timedOut, err = s.waitForRun(ctx, cl, args.RunID, condition, deadline)
+	} else {
+		ts, err = s.queryRunStatus(cl, args.RunID)
+	}
 	if err != nil {
 		return nil, nil, err
+	}
+	if timedOut {
+		ts["timed_out"] = true
 	}
 	return nil, shapeStatusForView(ts, args.View), nil
 }
@@ -318,7 +350,7 @@ func shapeStatusForView(status map[string]any, view string) map[string]any {
 	}
 
 	result := make(map[string]any)
-	for _, key := range []string{"run_id", "label", "status", "runtime_id", "phase", "phase_label", "pending_permission", "latest_seq"} {
+	for _, key := range []string{"run_id", "label", "status", "runtime_id", "phase", "phase_label", "pending_permission", "latest_seq", "timed_out"} {
 		if value, ok := status[key]; ok {
 			result[key] = value
 		}
@@ -328,7 +360,7 @@ func shapeStatusForView(status map[string]any, view string) map[string]any {
 
 func resultFromStatus(status map[string]any, timedOut bool) map[string]any {
 	state, _ := status["status"].(string)
-	ready := state == "done" || state == "failed" || state == "timeout" || state == "killed"
+	ready := isTerminalStatus(status) && !hasPendingPermission(status)
 	result := map[string]any{
 		"run_id": status["run_id"],
 		"label":  status["label"],
@@ -381,6 +413,38 @@ func (s *Server) resultSupervisorID(runID, requestedSupervisorID string) string 
 	return ""
 }
 
+func (s *Server) retrieveFinalOutput(cl ControlClient, runID string, status map[string]any) {
+	// Status provides a bounded preview only. Call the explicit result method
+	// for a full response when the control plane supports it.
+	fullResultRetrieved := false
+	if results, ok := cl.(interface {
+		Result(string) (map[string]any, error)
+	}); ok {
+		runtimeID, _ := status["runtime_id"].(string)
+		if result, err := results.Result(runtimeID); err == nil {
+			if output, ok := result["final_output"].(string); ok {
+				status["final_output"] = output
+				status["final_output_truncated"] = false
+				fullResultRetrieved = true
+			}
+		}
+	}
+	if !fullResultRetrieved {
+		if output, found := s.recoverFinalOutput(runID); found {
+			status["final_output"] = output
+			status["final_output_truncated"] = false
+			fullResultRetrieved = true
+		}
+	}
+	// Older supervisors lack a result RPC and do not specify whether their
+	// preview is bounded. Do not present it as complete when no full source exists.
+	if !fullResultRetrieved {
+		if _, ok := status["final_output"].(string); ok {
+			status["final_output_truncated"] = true
+		}
+	}
+}
+
 func (s *Server) handleAvenorResult(ctx context.Context, req *mcp.CallToolRequest, args resultArgs) (*mcp.CallToolResult, any, error) {
 	if args.RunID == "" {
 		return nil, nil, fmt.Errorf("run_id is required")
@@ -403,84 +467,21 @@ func (s *Server) handleAvenorResult(ctx context.Context, req *mcp.CallToolReques
 	}
 	defer cleanup()
 
-	var pollTimer *time.Timer
-	defer func() {
-		if pollTimer != nil && !pollTimer.Stop() {
-			select {
-			case <-pollTimer.C:
-			default:
-			}
-		}
-	}()
-
-	for {
-		status, err := s.queryRunStatus(cl, args.RunID)
-		if err != nil {
-			return nil, nil, err
-		}
-		state, _ := status["status"].(string)
-		terminal := state == "done" || state == "failed" || state == "timeout" || state == "killed"
-		if terminal || state == "waiting" || !wait {
-			if terminal {
-				// Status intentionally carries only a bounded preview. Ask the
-				// control plane's explicit result method for the lossless reply.
-				fullResultRetrieved := false
-				if results, ok := cl.(interface {
-					Result(string) (map[string]any, error)
-				}); ok {
-					runtimeID, _ := status["runtime_id"].(string)
-					if result, err := results.Result(runtimeID); err == nil {
-						if output, ok := result["final_output"].(string); ok {
-							status["final_output"] = output
-							status["final_output_truncated"] = false
-							fullResultRetrieved = true
-						}
-					}
-				}
-				if !fullResultRetrieved {
-					if output, found := s.recoverFinalOutput(args.RunID); found {
-						status["final_output"] = output
-						status["final_output_truncated"] = false
-						fullResultRetrieved = true
-					}
-				}
-				// Older supervisors have no result RPC and did not report whether
-				// their status preview was bounded. Never present that fallback as
-				// complete when neither lossless source was available.
-				if !fullResultRetrieved {
-					if _, ok := status["final_output"].(string); ok {
-						status["final_output_truncated"] = true
-					}
-				}
-			}
-			return nil, resultFromStatus(status, false), nil
-		}
-		if !deadline.IsZero() && !s.clock().Before(deadline) {
-			return nil, resultFromStatus(status, true), nil
-		}
-
-		delay := time.Second
-		if !deadline.IsZero() {
-			remaining := deadline.Sub(s.clock())
-			if remaining < delay {
-				delay = remaining
-			}
-		}
-		if delay <= 0 {
-			return nil, resultFromStatus(status, true), nil
-		}
-
-		if pollTimer == nil {
-			pollTimer = time.NewTimer(delay)
-		} else {
-			pollTimer.Reset(delay)
-		}
-		select {
-		case <-ctx.Done():
-			return nil, nil, ctx.Err()
-		case <-pollTimer.C:
-		}
+	var status map[string]any
+	var timedOut bool
+	if wait {
+		status, timedOut, err = s.waitForRun(ctx, cl, args.RunID, waitTurnComplete, deadline)
+	} else {
+		status, err = s.queryRunStatus(cl, args.RunID)
 	}
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if isTerminalStatus(status) && !hasPendingPermission(status) {
+		s.retrieveFinalOutput(cl, args.RunID, status)
+	}
+	return nil, resultFromStatus(status, timedOut), nil
 }
 
 func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest, args spawnArgs) (*mcp.CallToolResult, any, error) {
