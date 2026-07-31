@@ -1100,6 +1100,26 @@ func (c *childRuntime) sessionID() string {
 	return c.session.SessionID
 }
 
+// adoptChildSessionID propagates an authoritative conversation id onto the
+// aggregate child record when the adoption arrives from the attempt that is
+// still the active one. The provider and pre-adoption session id are captured
+// by the caller before the adoption fires; both must still match the live
+// child state, mirroring the cleanup guard that compares the runtime.Provider
+// interface directly. A stale callback from an older attempt (or a same/empty
+// external id) is rejected so a late team/loop phase cannot overwrite a newer
+// active session. Only SessionID changes; Backend, Dir, and PID are preserved.
+func (s *Supervisor) adoptChildSessionID(child *childRuntime, provider runtime.Provider, expectedOldID, externalID string) {
+	if externalID == "" || externalID == expectedOldID {
+		return
+	}
+	child.mu.Lock()
+	defer child.mu.Unlock()
+	if child.provider == nil || child.provider != provider || child.session.SessionID != expectedOldID {
+		return
+	}
+	child.session.SessionID = externalID
+}
+
 func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, resumeID, promptText string, timer <-chan time.Time) childAttemptResult {
 	child.mu.Lock()
 	child.phase = ""
@@ -1139,6 +1159,9 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 		return childAttemptResult{exitCode: 1, sessionID: session.SessionID}
 	}
 
+	attemptProvider := child.provider
+	preAdoptionID := session.SessionID
+
 	promptDone := make(chan error, 1)
 	go func() {
 		defer func() { recover() }()
@@ -1165,6 +1188,15 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 		AutoApprove:            child.autoApprove,
 		PermissionClaimTimeout: child.permClaimTimeout,
 		Timeout:                timer,
+		// adoptSessionID fires inside WaitForSession before the session.start
+		// event is forwarded, so the stable status identity cannot lag the
+		// authoritative event. The attempt-local session is always updated; the
+		// aggregate child record is updated only when this attempt is still the
+		// active one, so a late retry cannot overwrite a newer session.
+		AdoptSessionID: func(externalID string) {
+			session.SessionID = externalID
+			s.adoptChildSessionID(child, attemptProvider, preAdoptionID, externalID)
+		},
 	}, cli.SessionWaitDeps{
 		Writer:        taggedWriter,
 		FileHandler:   child.fileHandler,
