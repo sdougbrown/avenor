@@ -43,7 +43,7 @@ must distinguish them because each requires a different action.
 |---|---|---|
 | `running` | Agent is actively working (reading, thinking, running tools). | Keep waiting. Do not treat unchanged `running` as a failure. |
 | `done` (with output) | Agent finished its turn and produced a result (`final_output` present, files changed). | Report the outcome. Verified changed files against the workspace. |
-| `done` (no output) | Agent ended its turn without writing anything. It is likely asking a clarifying question or needs direction. | Claude Code: use `avenor_status` with `view: "full"` for detailed status and `final_output` when present, and `avenor_events` for raw history; `avenor_events` is also available on Pi and OpenCode. On Pi and OpenCode only, use `avenor_inspect` for a bounded transcript, tool calls, and final output. |
+| `done` (no output) | Agent ended its turn without writing anything. It is likely asking a clarifying question or needs direction. | Inspect output with the host-specific tools below. If the agent asked a question, call `avenor_follow_up`. |
 | `failed` | Agent encountered an error mid-run. | Report the failure and any partial artifacts. |
 | `timeout` | Run exceeded its configured timeout. | Report the timeout and any partial artifacts. |
 | `killed` | Run was forcefully terminated. | Report the kill. |
@@ -75,7 +75,8 @@ loop:
     answer permission, then repeat the loop
 
   if status.status == "done":
-    check for final_output or changed files
+    full_status = avenor_status(run_id, view="full")
+    check full_status.final_output and changed files
     if output is a question or empty:
       call avenor_follow_up with your answer
     else:
@@ -99,8 +100,15 @@ loop:
 
 ### When to inspect or follow up
 
-- On Claude Code, use `avenor_status` with `view: "full"` to inspect detailed status and `final_output` when present. The compact polling view, `avenor_status` with `view: "lifecycle"`, omits `final_output`; use `avenor_events` for raw event history, such as permission history or detailed timing.
-- On Pi and OpenCode, call `avenor_inspect` after a `done` run to see a bounded transcript, tool calls, and final output. `avenor_inspect` is not available on Claude Code; `avenor_events` is available on all three hosts and is not host-exclusive.
+- On Claude Code, call `avenor_status` with `view: "full"` after a `done`
+  lifecycle result. The full view includes `final_output` when present.
+- Do not look for `final_output` in `view: "lifecycle"`; that compact polling
+  view omits it.
+- On Pi and OpenCode, call `avenor_inspect` after a `done` run for a bounded
+  transcript, tool calls, and final output. Claude Code does not expose this
+  tool.
+- On every host, use `avenor_events` only when you need raw event history, such
+  as permission history or detailed timing.
 - Call `avenor_follow_up` when a `done` run needs more direction. It spawns a
   new session continuing from the prior one. Supervise the follow-up run
   through the same lifecycle: watch for permission gates, terminal states,
