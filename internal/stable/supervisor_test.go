@@ -1648,13 +1648,12 @@ func (p *stablePermissionProvider) Capabilities(context.Context) (runtime.Capabi
 	return runtime.Capabilities{}, nil
 }
 
-// stableDeferredProvider simulates a headless backend that starts with a
-// provisional session id and discovers the real conversation id only when
-// the first session.start event fires. Start returns the provisional id; the
-// scripted events carry the real conversation_id so cli.WaitForSession's
-// AdoptSessionID callback fires. A release gate before session.start lets
-// tests assert the child still holds the provisional id before the identity
-// is known.
+// stableDeferredProvider simulates a headless backend with a provisional
+// session ID. Start returns that provisional ID.
+// The first session.start event carries the real conversation_id.
+// cli.WaitForSession's AdoptSessionID callback adopts that ID.
+// A release gate delays session.start so tests can inspect the provisional
+// identity.
 type stableDeferredProvider struct {
 	provisionalID string
 	realID        string
@@ -1662,10 +1661,10 @@ type stableDeferredProvider struct {
 	pid           int
 	startOpts     runtime.StartOptions
 	events        []stableScriptedEvent
-	mu        sync.Mutex
-	channels   map[string]chan events.Event
-	started   chan struct{}
-	promptErr error
+	mu            sync.Mutex
+	channels      map[string]chan events.Event
+	started       chan struct{}
+	promptErr     error
 }
 
 func (p *stableDeferredProvider) Start(_ context.Context, opts runtime.StartOptions) (runtime.Session, error) {
@@ -1734,9 +1733,10 @@ func (p *stableDeferredProvider) Capabilities(context.Context) (runtime.Capabili
 	return runtime.Capabilities{}, nil
 }
 
-// checkingSink records forwarded events and optionally asserts child state when
-// session.start arrives, so a test can prove the aggregate child identity was
-// updated before the authoritative event was forwarded.
+// checkingSink records forwarded events.
+// It can inspect child state when session.start arrives.
+// Tests use it to verify that the aggregate child SessionID is updated before
+// the authoritative event is forwarded.
 type checkingSink struct {
 	onSessionStart func()
 	events         []events.Event

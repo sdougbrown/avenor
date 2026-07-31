@@ -52,9 +52,10 @@ func deferredStartEndEvents(realID string, release <-chan struct{}) []stableScri
 	}
 }
 
-// deferredGatedEvents returns the headless sequence with independent release
-// gates on session.start and session.end so a test can observe the aggregate
-// child identity mid-run, after adoption but before the phase terminates.
+// deferredGatedEvents returns a headless event sequence.
+// It gates session.start and session.end independently.
+// Tests can inspect the aggregate child SessionID after adoption but before
+// phase termination.
 func deferredGatedEvents(realID string, startRelease, endRelease <-chan struct{}) []stableScriptedEvent {
 	return []stableScriptedEvent{
 		{event: events.Event{Event: "session.start", SessionID: realID, Fields: map[string]any{"conversation_id": realID}}, release: startRelease},
@@ -97,9 +98,9 @@ func waitForChildSessionID(t *testing.T, child *childRuntime, want string) {
 	t.Fatalf("timed out waiting for child session %q", want)
 }
 
-// waitForChildProviderCleared blocks until the PhaseAttempt deferred cleanup
-// has run and cleared the active provider, signalling the phase has
-// terminated while the runtime is still registered with the supervisor.
+// waitForChildProviderCleared waits for PhaseAttempt deferred cleanup to clear
+// the active provider. A nil provider signals phase termination while the
+// runtime remains registered with the supervisor.
 func waitForChildProviderCleared(t *testing.T, child *childRuntime) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -473,10 +474,10 @@ func assertSentinelHasSession(t *testing.T, content, banner, sessionID string) {
 	}
 }
 
-// TestRunLoopChildPreservesAdoptedSessionAfterPhaseCleanup proves the loop
-// PhaseAttempt cleanup no longer erases the authoritative conversation id:
-// after the phase terminates and the deferred cleanup runs, the aggregate
-// child record and RuntimeStatus still hold the adopted id.
+// TestRunLoopChildPreservesAdoptedSessionAfterPhaseCleanup proves loop
+// PhaseAttempt cleanup preserves the authoritative conversation ID.
+// The aggregate child record and RuntimeStatus retain the adopted ID after
+// the phase terminates and deferred cleanup runs.
 func TestRunLoopChildPreservesAdoptedSessionAfterPhaseCleanup(t *testing.T) {
 	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-loop-keep-session.sock", MaxRuntimes: 1})
 	const provisionalID, realID = "agy-pending-loop-keep", "conv-loop-keep"
@@ -575,10 +576,9 @@ func TestRunTeamChildPreservesAdoptedSessionAfterPhaseCleanup(t *testing.T) {
 	assertOnlySessionID(t, child, realID)
 }
 
-// TestRunLoopChildSentinelCarriesAdoptedSessionOnNormalSuccess proves the
-// terminal sentinel written on a normal successful loop run carries the
-// adopted conversation id rather than remaining empty (the aggregate
-// RunResult has no SessionID on the max_iterations path).
+// TestRunLoopChildSentinelCarriesAdoptedSessionOnNormalSuccess proves that a
+// normal successful loop writes the adopted conversation ID to its terminal
+// sentinel. The aggregate RunResult has no SessionID on the max_iterations path.
 func TestRunLoopChildSentinelCarriesAdoptedSessionOnNormalSuccess(t *testing.T) {
 	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-loop-sentinel.sock", MaxRuntimes: 1})
 	const provisionalID, realID = "agy-pending-loop-sent", "conv-loop-sent"
@@ -649,11 +649,11 @@ func TestRunTeamChildSentinelCarriesAdoptedSessionOnNormalSuccess(t *testing.T) 
 	assertSentinelHasSession(t, readSentinel(t, sentinelPath), "DONE", realID)
 }
 
-// TestRunTeamChildStaleAttemptCleanupDoesNotEraseNewerSession proves a stale
-// concurrent team attempt whose provider was already replaced by a newer
-// attempt cannot erase the newer child session via the deferred PhaseAttempt
-// cleanup. The cleanup guard compares the runtime.Provider interface; when it
-// no longer matches, neither the provider nor the session is touched.
+// TestRunTeamChildStaleAttemptCleanupDoesNotEraseNewerSession proves that
+// stale team cleanup preserves a newer child session.
+// A newer attempt replaces the provider before deferred cleanup runs.
+// The cleanup guard compares runtime.Provider values. A mismatch leaves the
+// newer provider and session untouched.
 func TestRunTeamChildStaleAttemptCleanupDoesNotEraseNewerSession(t *testing.T) {
 	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-team-stale-cleanup.sock", MaxRuntimes: 1})
 	const provisionalID, realID = "agy-pending-team-stale", "conv-team-stale"

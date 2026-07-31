@@ -864,11 +864,9 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 	child.exitCode = result.ExitCode
 	child.mu.Unlock()
 
-	// The normal successful loop/team path (max_iterations reached, all
-	// phases end_turn) returns an empty SessionID because no single phase
-	// result is authoritative for the aggregate. Fall back to the latest
-	// adopted child session id so the terminal sentinel carries the
-	// authoritative conversation id rather than remaining empty.
+	// The loop reaches max_iterations only when each iteration phase returns
+	// end_turn. Its aggregate RunResult then has no authoritative SessionID.
+	// Use the latest adopted child session ID to populate the terminal sentinel.
 	if result.SessionID == "" {
 		result.SessionID = child.sessionID()
 	}
@@ -1079,11 +1077,9 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 	child.exitCode = result.ExitCode
 	child.mu.Unlock()
 
-	// The normal successful loop/team path (all members and post phases
-	// end_turn) returns an empty SessionID because no single phase result
-	// is authoritative for the aggregate. Fall back to the latest adopted
-	// child session id so the terminal sentinel carries the authoritative
-	// conversation id rather than remaining empty.
+	// A successful team can finish all members and post phases with end_turn.
+	// The aggregate RunResult then has no authoritative SessionID. Use the latest
+	// adopted child session ID to populate the terminal sentinel.
 	if result.SessionID == "" {
 		result.SessionID = child.sessionID()
 	}

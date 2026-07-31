@@ -751,8 +751,9 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 		supervisorID = ri.SupervisorID
 	}
 
-	// Resolve the control client once. The current-status lookup and the
-	// follow-up Spawn then share a single connection.
+	// Resolve the supervisor's control client once and store it in cl.
+	// The status lookup and follow-up Spawn call both use cl.
+	// They therefore reuse one control-client connection.
 	cl, cleanup, err := s.getClientForSupervisor(supervisorID)
 	if err != nil {
 		return nil, nil, err
