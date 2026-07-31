@@ -289,9 +289,10 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 
 	// Reserve the slot to prevent TOCTOU bypass of the max-runtime limit.
 	child := &childRuntime{
-		id:       rtID,
-		done:     make(chan struct{}),
-		promptCh: make(chan struct{}, 1),
+		id:          rtID,
+		done:        make(chan struct{}),
+		promptCh:    make(chan struct{}, 1),
+		autoApprove: params.AutoApprove,
 	}
 	s.runtimes[rtID] = child
 	s.controlMu.Unlock()
@@ -417,7 +418,6 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 		child.model = params.Model
 		child.backend = backend
 		child.cancelFn = childCancel
-		child.autoApprove = params.AutoApprove
 		child.permClaimTimeout = s.config.PermissionClaimTimeout
 		child.eventWriter = writer
 		child.fileHandler = fileHandler
@@ -463,7 +463,6 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 		child.model = params.Model
 		child.backend = backend
 		child.cancelFn = childCancel
-		child.autoApprove = params.AutoApprove
 		child.permClaimTimeout = s.config.PermissionClaimTimeout
 		child.eventWriter = writer
 		child.fileHandler = fileHandler
@@ -536,7 +535,6 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 	child.session = session
 	child.eventWriter = writer
 	child.fileHandler = fileHandler
-	child.autoApprove = params.AutoApprove
 	child.permClaimTimeout = s.config.PermissionClaimTimeout
 	child.runID = s.runID
 	child.dir = params.Dir
