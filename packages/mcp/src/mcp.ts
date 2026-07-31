@@ -4,6 +4,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { Hono } from 'hono'
 import { z } from 'zod'
+import { spawnInputShape } from './spawn-schema.js'
 import {
   spawnTool,
   statusTool,
@@ -60,18 +61,7 @@ const server = new McpServer({ name: 'avenor', version: '0.1.0' })
 
 server.registerTool('avenor_spawn', {
   description: 'Spawn a new agent run',
-  inputSchema: {
-    agent: z.string().describe('Agent name (codex, claude, gemini, butler)'),
-    repo_dir: z.string().describe('Working directory for the agent'),
-    prompt: z.string().optional().describe('Prompt text'),
-    prompt_file: z.string().optional().describe('Path to a prompt file'),
-    label: z.string().optional().describe('Human-readable label for this run'),
-    timeout: z.string().optional().describe('Timeout duration (e.g. 5m, 1h)'),
-    model: z.string().optional().describe('Model override'),
-    backend: z.string().optional().describe('Backend override'),
-    server_url: z.string().optional().describe('Backend server URL'),
-    supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
-  },
+  inputSchema: spawnInputShape,
 }, async ({
   repo_dir,
   agent,

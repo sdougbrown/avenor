@@ -1,0 +1,16 @@
+import { z } from 'zod'
+
+export const spawnInputShape = {
+  agent: z.string()
+    .optional()
+    .describe('Optional agent name; omission uses the supplied model or runtime defaults'),
+  repo_dir: z.string().describe('Working directory for the agent'),
+  prompt: z.string().optional().describe('Prompt text'),
+  prompt_file: z.string().optional().describe('Path to a prompt file'),
+  label: z.string().optional().describe('Human-readable label for this run'),
+  timeout: z.string().optional().describe('Timeout duration (e.g. 5m, 1h)'),
+  model: z.string().optional().describe('Model override'),
+  backend: z.string().optional().describe('Backend override'),
+  server_url: z.string().optional().describe('Backend server URL'),
+  supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
+}

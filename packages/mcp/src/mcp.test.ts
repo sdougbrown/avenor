@@ -2,6 +2,7 @@ import { describe, it, expect } from 'bun:test'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import { getMcpAuthToken, isAllowedHost, isAllowedOrigin, parseBearerToken } from './mcp'
+import { spawnInputShape } from './spawn-schema'
 
 describe('avenor MCP server', () => {
   it('registers all 7 tools without throwing', () => {
@@ -9,18 +10,7 @@ describe('avenor MCP server', () => {
 
     server.registerTool('avenor_spawn', {
       description: 'Spawn a new agent run',
-      inputSchema: {
-        agent: z.string(),
-        repo_dir: z.string(),
-        prompt: z.string().optional(),
-        prompt_file: z.string().optional(),
-        label: z.string().optional(),
-        timeout: z.string().optional(),
-        model: z.string().optional(),
-        backend: z.string().optional(),
-        server_url: z.string().optional(),
-        supervisor_id: z.string().optional(),
-      },
+      inputSchema: spawnInputShape,
     }, async () => ({ run_id: 'test', label: 'test', supervisor_id: 'test' }))
 
     server.registerTool('avenor_status', {
@@ -81,6 +71,15 @@ describe('avenor MCP server', () => {
     }, async () => ({ ok: true, cleaned_up: [] }))
 
     expect(server).toBeDefined()
+  })
+
+  it('accepts agent-less, model-only, and both-supplied spawn inputs', () => {
+    const schema = z.object(spawnInputShape)
+
+    expect(schema.safeParse({ repo_dir: '/tmp/repo' }).success).toBe(true)
+    expect(schema.safeParse({ repo_dir: '/tmp/repo', model: 'sonnet' }).success).toBe(true)
+    expect(schema.safeParse({ repo_dir: '/tmp/repo', agent: 'codex', model: 'sonnet' }).success).toBe(true)
+    expect(schema.safeParse({ agent: 'codex' }).success).toBe(false)
   })
 
   it('parses bearer auth conservatively', () => {

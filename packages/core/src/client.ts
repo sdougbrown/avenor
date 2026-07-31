@@ -42,7 +42,7 @@ export interface HistoryResult<TEvent = Event> {
 }
 
 export interface SpawnParams {
-  agent: string
+  agent?: string
   prompt_file?: string
   prompt?: string
   dir?: string

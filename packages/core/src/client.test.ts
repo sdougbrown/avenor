@@ -396,15 +396,23 @@ describe('Client.spawn', () => {
   it('sends params, receives result', async () => {
     const socketPath = tempSocketPath()
 
+    let callCount = 0
     server = await startMockServer(socketPath, (req, sock) => {
       expect(req.method).toBe('spawn')
-      expect(req.params.agent).toBe('codex')
-      expect(req.params.model).toBe('sonnet')
+      if (callCount++ === 0) {
+        expect(req.params.agent).toBe('codex')
+        expect(req.params.model).toBe('sonnet')
+        expect(Object.hasOwn(req.params, 'agent')).toBe(true)
+      } else {
+        expect(req.params.agent).toBeUndefined()
+        expect(req.params.model).toBe('sonnet')
+        expect(Object.hasOwn(req.params, 'agent')).toBe(false)
+      }
 
       const rpcRes = {
         jsonrpc: '2.0',
         id: req.id,
-        result: { runtime_id: 'rt-42', status: 'spawning' },
+        result: { runtime_id: `rt-${callCount}`, status: 'spawning' },
       }
       sock.write(JSON.stringify(rpcRes) + '\n')
     })
@@ -412,8 +420,12 @@ describe('Client.spawn', () => {
     const client = await dial(socketPath)
     try {
       const result = await client.spawn({ agent: 'codex', model: 'sonnet' })
-      expect(result.runtime_id).toBe('rt-42')
+      expect(result.runtime_id).toBe('rt-1')
       expect(result.status).toBe('spawning')
+
+      const modelOnlyResult = await client.spawn({ model: 'sonnet' })
+      expect(modelOnlyResult.runtime_id).toBe('rt-2')
+      expect(modelOnlyResult.status).toBe('spawning')
     } finally {
       client.close()
     }

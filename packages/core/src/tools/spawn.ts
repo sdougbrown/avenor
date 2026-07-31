@@ -1,11 +1,12 @@
 import * as crypto from 'node:crypto'
 import { Supervisor } from '../supervisor.js'
+import type { SpawnParams } from '../client.js'
 import { ensureRunPaths } from '../paths.js'
 import { validateTimeout } from './validate.js'
 import { getSupervisorClient } from './get-supervisor-client.js'
 
 export async function spawnTool(args: {
-  agent: string
+  agent?: string
   prompt?: string
   promptFile?: string
   label?: string
@@ -21,6 +22,23 @@ export async function spawnTool(args: {
 }): Promise<{ run_id: string; label: string; supervisor_id: string; runtime_id?: string; broker_url?: string; parent_token?: string }> {
   const runId = crypto.randomUUID()
   const label = args.label ?? runId
+  const baseParams: SpawnParams = {
+    prompt: args.prompt,
+    prompt_file: args.promptFile,
+    label,
+    dir: args.dir,
+    timeout:
+      args.timeout !== undefined ? validateTimeout(args.timeout) : undefined,
+    model: args.model,
+    agent_profile: args.agentProfile,
+    backend: args.backend,
+    server_url: args.serverUrl,
+    session_id: args.sessionId,
+    parent_run_id: args.parent_run_id,
+  }
+  if (args.agent) {
+    baseParams.agent = args.agent
+  }
 
   if (args.supervisorId) {
     const { client, isSingleton, supervisorId } = await getSupervisorClient(args.supervisorId)
@@ -28,21 +46,9 @@ export async function spawnTool(args: {
 
     try {
       const result = await client.spawn({
-        agent: args.agent,
-        prompt: args.prompt,
-        prompt_file: args.promptFile,
-        label,
-        dir: args.dir,
-        timeout:
-          args.timeout !== undefined ? validateTimeout(args.timeout) : undefined,
-        model: args.model,
-        agent_profile: args.agentProfile,
-        backend: args.backend,
-        server_url: args.serverUrl,
-        session_id: args.sessionId,
+        ...baseParams,
         sentinel_file: sentinelPath,
         on_event: eventLogPath,
-        parent_run_id: args.parent_run_id,
       })
 
       return {
@@ -61,20 +67,7 @@ export async function spawnTool(args: {
   }
 
   const sup = await Supervisor.get()
-  const runInfo = await sup.spawn({
-    agent: args.agent,
-    prompt: args.prompt,
-    prompt_file: args.promptFile,
-    label,
-    dir: args.dir,
-    timeout: args.timeout !== undefined ? validateTimeout(args.timeout) : undefined,
-    model: args.model,
-    agent_profile: args.agentProfile,
-    backend: args.backend,
-    server_url: args.serverUrl,
-    session_id: args.sessionId,
-    parent_run_id: args.parent_run_id,
-  }, runId)
+  const runInfo = await sup.spawn(baseParams, runId)
 
   return {
     run_id: runInfo.runId,
