@@ -3679,6 +3679,20 @@ func TestWaitForSessionFinalReply(t *testing.T) {
 	})
 }
 
+func runSessionEventLogTest(t *testing.T, run func(EventSink) sessionResult) (sessionResult, []events.Event) {
+	t.Helper()
+	eventsPath := filepath.Join(t.TempDir(), "events.ndjson")
+	writer, err := NewEventWriter(eventsPath)
+	if err != nil {
+		t.Fatalf("NewEventWriter: %v", err)
+	}
+	result := run(writer)
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+	return result, readEventLogForTest(t, eventsPath)
+}
+
 func TestWaitForSessionSessionEndIncludesFinalOutput(t *testing.T) {
 	msg := func(delta string) events.Event {
 		return events.Event{Event: "agent.message_chunk", SessionID: "ses_output", Fields: map[string]any{"delta": delta}}
@@ -3721,25 +3735,18 @@ func TestWaitForSessionSessionEndIncludesFinalOutput(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			eventsPath := filepath.Join(t.TempDir(), "events.ndjson")
-			writer, err := NewEventWriter(eventsPath)
-			if err != nil {
-				t.Fatalf("NewEventWriter: %v", err)
-			}
+			result, logged := runSessionEventLogTest(t, func(writer EventSink) sessionResult {
+				eventCh := make(chan events.Event, len(tt.events)+1)
+				for _, event := range tt.events {
+					eventCh <- event
+				}
+				eventCh <- events.Event{Event: "session.end", SessionID: "ses_output", Fields: map[string]any{"stop_reason": "end_turn"}}
+				close(eventCh)
+				promptDone := make(chan error, 1)
+				promptDone <- nil
 
-			eventCh := make(chan events.Event, len(tt.events)+1)
-			for _, event := range tt.events {
-				eventCh <- event
-			}
-			eventCh <- events.Event{Event: "session.end", SessionID: "ses_output", Fields: map[string]any{"stop_reason": "end_turn"}}
-			close(eventCh)
-			promptDone := make(chan error, 1)
-			promptDone <- nil
-
-			result := waitForSessionForTest(context.Background(), &cliFakeProvider{}, writer, nil, nil, eventCh, promptDone, nil, "ses_output", "run_output", "", true, DefaultPermissionClaimTimeout, nil, io.Discard)
-			if err := writer.Close(); err != nil {
-				t.Fatalf("close writer: %v", err)
-			}
+				return waitForSessionForTest(context.Background(), &cliFakeProvider{}, writer, nil, nil, eventCh, promptDone, nil, "ses_output", "run_output", "", true, DefaultPermissionClaimTimeout, nil, io.Discard)
+			})
 			if result.Output != tt.wantOutput {
 				t.Fatalf("Output = %q, want %q", result.Output, tt.wantOutput)
 			}
@@ -3747,7 +3754,6 @@ func TestWaitForSessionSessionEndIncludesFinalOutput(t *testing.T) {
 				t.Fatalf("FinalReply = %q, want %q", result.FinalReply, tt.wantFinalReply)
 			}
 
-			logged := readEventLogForTest(t, eventsPath)
 			last := logged[len(logged)-1]
 			got, ok := last.Fields["final_output"].(string)
 			if !ok || got != tt.wantFinalOutput {
@@ -3755,39 +3761,65 @@ func TestWaitForSessionSessionEndIncludesFinalOutput(t *testing.T) {
 			}
 		})
 	}
-}
 
-func TestWaitForSessionSessionEndPreservesBackendFinalOutput(t *testing.T) {
-	for _, tt := range []struct {
-		name  string
-		value any
-	}{
-		{name: "non-empty", value: "backend final"},
-		{name: "explicit empty", value: ""},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			eventsPath := filepath.Join(t.TempDir(), "events.ndjson")
-			writer, err := NewEventWriter(eventsPath)
-			if err != nil {
-				t.Fatalf("NewEventWriter: %v", err)
-			}
-
-			eventCh := make(chan events.Event, 2)
-			eventCh <- events.Event{Event: "agent.message_chunk", SessionID: "ses_backend_final", Fields: map[string]any{"delta": "local message"}}
-			eventCh <- events.Event{Event: "session.end", SessionID: "ses_backend_final", Fields: map[string]any{
-				"stop_reason":  "end_turn",
-				"final_output": tt.value,
-			}}
+	t.Run("no message chunks", func(t *testing.T) {
+		result, logged := runSessionEventLogTest(t, func(writer EventSink) sessionResult {
+			eventCh := make(chan events.Event, 1)
+			eventCh <- events.Event{Event: "session.end", SessionID: "ses_output_empty", Fields: map[string]any{"stop_reason": "end_turn"}}
 			close(eventCh)
 			promptDone := make(chan error, 1)
 			promptDone <- nil
 
-			waitForSessionForTest(context.Background(), &cliFakeProvider{}, writer, nil, nil, eventCh, promptDone, nil, "ses_backend_final", "run_backend_final", "", true, DefaultPermissionClaimTimeout, nil, io.Discard)
-			if err := writer.Close(); err != nil {
-				t.Fatalf("close writer: %v", err)
+			return waitForSessionForTest(context.Background(), &cliFakeProvider{}, writer, nil, nil, eventCh, promptDone, nil, "ses_output_empty", "run_output_empty", "", true, DefaultPermissionClaimTimeout, nil, io.Discard)
+		})
+		if result.Output != "" {
+			t.Fatalf("Output = %q, want empty", result.Output)
+		}
+		if result.FinalReply != "" {
+			t.Fatalf("FinalReply = %q, want empty", result.FinalReply)
+		}
+
+		last := logged[len(logged)-1]
+		if last.Event != "session.end" {
+			t.Fatalf("last event = %q, want session.end", last.Event)
+		}
+		if _, ok := last.Fields["final_output"]; ok {
+			t.Fatal("final_output is present, want it absent")
+		}
+	})
+}
+
+func TestWaitForSessionSessionEndPreservesBackendFinalOutput(t *testing.T) {
+	for _, tt := range []struct {
+		name           string
+		value          any
+		wantOutput     string
+		wantFinalReply string
+	}{
+		{name: "non-empty", value: "backend final", wantOutput: "local message", wantFinalReply: "local message"},
+		{name: "explicit empty", value: "", wantOutput: "local message", wantFinalReply: "local message"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			result, logged := runSessionEventLogTest(t, func(writer EventSink) sessionResult {
+				eventCh := make(chan events.Event, 2)
+				eventCh <- events.Event{Event: "agent.message_chunk", SessionID: "ses_backend_final", Fields: map[string]any{"delta": "local message"}}
+				eventCh <- events.Event{Event: "session.end", SessionID: "ses_backend_final", Fields: map[string]any{
+					"stop_reason":  "end_turn",
+					"final_output": tt.value,
+				}}
+				close(eventCh)
+				promptDone := make(chan error, 1)
+				promptDone <- nil
+
+				return waitForSessionForTest(context.Background(), &cliFakeProvider{}, writer, nil, nil, eventCh, promptDone, nil, "ses_backend_final", "run_backend_final", "", true, DefaultPermissionClaimTimeout, nil, io.Discard)
+			})
+			if result.Output != tt.wantOutput {
+				t.Fatalf("Output = %q, want %q", result.Output, tt.wantOutput)
+			}
+			if result.FinalReply != tt.wantFinalReply {
+				t.Fatalf("FinalReply = %q, want %q", result.FinalReply, tt.wantFinalReply)
 			}
 
-			logged := readEventLogForTest(t, eventsPath)
 			last := logged[len(logged)-1]
 			got, ok := last.Fields["final_output"]
 			if !ok || got != tt.value {
@@ -3804,40 +3836,35 @@ func TestWaitForSessionCancelAndEndUsesFullReply(t *testing.T) {
 	toolCall := events.Event{Event: "tool.call", SessionID: "ses_cancel", Fields: map[string]any{"kind": "shell", "title": "shell"}}
 
 	tests := []struct {
-		name           string
-		stopReason     string
-		wantFinalReply string
-		cancel         func(context.CancelFunc, chan<- time.Time)
-		progress       time.Duration
+		name            string
+		stopReason      string
+		wantFinalReply  string
+		wantFinalOutput string
+		cancel          func(context.CancelFunc, chan<- time.Time)
 	}{
 		{
-			name:           "context cancellation",
-			stopReason:     "cancelled",
-			wantFinalReply: "After the tool.",
+			name:            "context cancellation",
+			stopReason:      "cancelled",
+			wantFinalReply:  "After the tool.",
+			wantFinalOutput: "Before the tool. After the tool.",
 			cancel: func(cancel context.CancelFunc, _ chan<- time.Time) {
 				cancel()
 			},
 		},
 		{
-			name:           "progress timeout",
-			stopReason:     "progress_timeout",
-			wantFinalReply: "After the tool.",
-			progress:       100 * time.Millisecond,
-			cancel: func(_ context.CancelFunc, _ chan<- time.Time) {
-			},
-		},
-		{
-			name:           "explicit timeout",
-			stopReason:     "timeout",
-			wantFinalReply: "After the tool.",
+			name:            "explicit timeout",
+			stopReason:      "timeout",
+			wantFinalReply:  "After the tool.",
+			wantFinalOutput: "Before the tool. After the tool.",
 			cancel: func(_ context.CancelFunc, timeout chan<- time.Time) {
 				timeout <- time.Now()
 			},
 		},
 		{
-			name:           "trailing tool call",
-			stopReason:     "cancelled",
-			wantFinalReply: "",
+			name:            "trailing tool call",
+			stopReason:      "cancelled",
+			wantFinalReply:  "",
+			wantFinalOutput: "Before the tool. ",
 			cancel: func(cancel context.CancelFunc, _ chan<- time.Time) {
 				cancel()
 			},
@@ -3846,55 +3873,48 @@ func TestWaitForSessionCancelAndEndUsesFullReply(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			eventsPath := filepath.Join(t.TempDir(), "events.ndjson")
-			writer, err := NewEventWriter(eventsPath)
-			if err != nil {
-				t.Fatalf("NewEventWriter: %v", err)
-			}
-
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			timeoutCh := make(chan time.Time, 1)
-			eventCh := make(chan events.Event)
-			eventsToSend := []events.Event{msg("Before the tool. "), toolCall}
-			if tt.wantFinalReply != "" {
-				eventsToSend = append(eventsToSend, msg("After the tool."))
-			}
-			sent := make(chan struct{})
-			go func() {
-				for _, event := range eventsToSend {
-					eventCh <- event
+			result, logged := runSessionEventLogTest(t, func(writer EventSink) sessionResult {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				timeoutCh := make(chan time.Time, 1)
+				eventCh := make(chan events.Event)
+				eventsToSend := []events.Event{msg("Before the tool. "), toolCall}
+				if tt.wantFinalReply != "" {
+					eventsToSend = append(eventsToSend, msg("After the tool."))
 				}
-				close(sent)
-			}()
+				sent := make(chan struct{})
+				go func() {
+					for _, event := range eventsToSend {
+						eventCh <- event
+					}
+					close(sent)
+				}()
 
-			resultCh := make(chan sessionResult, 1)
-			go func() {
-				resultCh <- WaitForSession(ctx, &cliFakeProvider{}, SessionWaitConfig{
-					EventCh:         eventCh,
-					SessionID:       "ses_cancel",
-					RunID:           "run_cancel",
-					ProgressTimeout: tt.progress,
-					Timeout:         timeoutCh,
-				}, SessionWaitDeps{Writer: writer, Stderr: io.Discard})
-			}()
+				resultCh := make(chan sessionResult, 1)
+				go func() {
+					resultCh <- WaitForSession(ctx, &cliFakeProvider{}, SessionWaitConfig{
+						EventCh:   eventCh,
+						SessionID: "ses_cancel",
+						RunID:     "run_cancel",
+						Timeout:   timeoutCh,
+					}, SessionWaitDeps{Writer: writer, Stderr: io.Discard})
+				}()
 
-			select {
-			case <-sent:
-			case <-time.After(2 * time.Second):
-				t.Fatal("message events were not consumed")
-			}
-			tt.cancel(cancel, timeoutCh)
+				select {
+				case <-sent:
+				case <-time.After(2 * time.Second):
+					t.Fatal("message events were not consumed")
+				}
+				tt.cancel(cancel, timeoutCh)
 
-			var result sessionResult
-			select {
-			case result = <-resultCh:
-			case <-time.After(2 * time.Second):
-				t.Fatal("WaitForSession did not return")
-			}
-			if err := writer.Close(); err != nil {
-				t.Fatalf("close writer: %v", err)
-			}
+				select {
+				case result := <-resultCh:
+					return result
+				case <-time.After(2 * time.Second):
+					t.Fatal("WaitForSession did not return")
+					return sessionResult{}
+				}
+			})
 			if result.StopReason != tt.stopReason {
 				t.Fatalf("StopReason = %q, want %q", result.StopReason, tt.stopReason)
 			}
@@ -3902,21 +3922,37 @@ func TestWaitForSessionCancelAndEndUsesFullReply(t *testing.T) {
 				t.Fatalf("FinalReply = %q, want %q", result.FinalReply, tt.wantFinalReply)
 			}
 
-			logged := readEventLogForTest(t, eventsPath)
 			last := logged[len(logged)-1]
 			if last.Event != "session.end" {
 				t.Fatalf("last event = %q, want session.end", last.Event)
 			}
-			if got, _ := last.Fields["final_output"].(string); got != "Before the tool. After the tool." && tt.wantFinalReply != "" {
-				t.Fatalf("final_output = %q, want complete message stream", got)
-			}
-			if tt.wantFinalReply == "" {
-				if got, _ := last.Fields["final_output"].(string); got != "Before the tool. " {
-					t.Fatalf("final_output = %q, want message before trailing tool call", got)
-				}
+			got, ok := last.Fields["final_output"].(string)
+			if !ok || got != tt.wantFinalOutput {
+				t.Fatalf("final_output = %q (present=%t), want %q", got, ok, tt.wantFinalOutput)
 			}
 		})
 	}
+
+	t.Run("progress timeout uses complete output and last block reply", func(t *testing.T) {
+		const fullOutput = "Before the tool. After the tool."
+		const lastBlockReply = "After the tool."
+
+		result, logged := runSessionEventLogTest(t, func(writer EventSink) sessionResult {
+			return cancelAndEnd(&cliFakeProvider{}, writer, "ses_cancel", "run_cancel", "", "progress_timeout", io.Discard, nil, fullOutput, lastBlockReply)
+		})
+		if result.StopReason != "progress_timeout" {
+			t.Fatalf("StopReason = %q, want progress_timeout", result.StopReason)
+		}
+		if result.FinalReply != lastBlockReply {
+			t.Fatalf("FinalReply = %q, want %q", result.FinalReply, lastBlockReply)
+		}
+
+		last := logged[len(logged)-1]
+		got, ok := last.Fields["final_output"].(string)
+		if !ok || got != fullOutput {
+			t.Fatalf("final_output = %q (present=%t), want %q", got, ok, fullOutput)
+		}
+	})
 }
 
 func TestWaitForSessionAdoptsExternalConversationID(t *testing.T) {
