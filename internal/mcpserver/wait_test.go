@@ -3,6 +3,8 @@ package mcpserver
 import (
 	"context"
 	"errors"
+	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -298,18 +300,93 @@ func TestAvenorStatusWaitValidationAndLifecycleTimeout(t *testing.T) {
 }
 
 func TestWaitAutoApprovedFollowUpLifecycle(t *testing.T) {
-	s, fake := newWaitTestServer(t, []map[string]any{
-		{"status": "running", "pending_permission": false, "phase": "working"},
-		{"status": "idle", "phase": "done"},
-	})
-	s.registry.Store(&RunInfo{RunID: "run-auto-followup", RuntimeID: "rt-auto-followup", AutoApprove: true})
-	_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{RunID: "run-auto-followup", WaitFor: "turn_complete"})
+	var followUpRuntimeID string
+	spawnCount := 0
+	fake := &fakeClient{
+		spawnFunc: func(params map[string]any) (map[string]any, error) {
+			spawnCount++
+			followUpRuntimeID = fmt.Sprintf("rt_followup_%d", spawnCount)
+			return map[string]any{
+				"runtime_id": followUpRuntimeID,
+				"session_id": fmt.Sprintf("ses_followup_%d", spawnCount),
+			}, nil
+		},
+	}
+	// Return running for any runtime until the second call for the follow-up.
+	callCount := 0
+	fake.statusFunc = func(runtimeID string) (map[string]any, error) {
+		fake.statusCapturedRuntimeIDs = append(fake.statusCapturedRuntimeIDs, runtimeID)
+		if runtimeID == followUpRuntimeID {
+			callCount++
+			if callCount <= 1 {
+				return map[string]any{
+					"runtime_id":         runtimeID,
+					"status":             "running",
+					"phase":              "working",
+					"pending_permission": false,
+				}, nil
+			}
+			return map[string]any{
+				"runtime_id":         runtimeID,
+				"status":             "idle",
+				"phase":              "done",
+				"pending_permission": false,
+			}, nil
+		}
+		return map[string]any{"runtime_id": runtimeID, "status": "running"}, nil
+	}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
 	if err != nil {
 		t.Fatal(err)
 	}
-	status := result.(map[string]any)
-	if status["status"] != "done" || hasPendingPermission(status) || len(fake.statusCapturedRuntimeIDs) != 2 {
+	s.sleep = func(ctx context.Context, _ time.Duration) error {
+		return ctx.Err()
+	}
+
+	// Store a prior run with AutoApprove so the follow-up inherits it.
+	s.registry.Store(&RunInfo{
+		RunID:        "run-auto-prior",
+		Label:        "auto-prior",
+		RuntimeID:    "rt_auto_prior",
+		SessionID:    "ses_auto_prior",
+		SentinelPath: filepath.Join(t.TempDir(), "missing.done"),
+		Agent:        "claude",
+		Backend:      "pi",
+		Dir:          "/tmp/auto-repo",
+		AutoApprove:  true,
+	})
+
+	// Create a follow-up that inherits auto_approve.
+	_, followUpResult, err := s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
+		RunID:   "run-auto-prior",
+		Message: "continue",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	followUpRunID := followUpResult.(map[string]any)["run_id"].(string)
+	if followUpRunID == "" {
+		t.Fatal("expected follow-up run ID")
+	}
+	if ri := s.registry.Lookup(followUpRunID); ri == nil || !ri.AutoApprove {
+		t.Fatalf("follow-up registry entry has no auto-approve: %#v", ri)
+	}
+
+	// Wait for the follow-up run to complete.
+	_, statusResult, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{
+		RunID:   followUpRunID,
+		WaitFor: "turn_complete",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := statusResult.(map[string]any)
+	if status["status"] != "done" || hasPendingPermission(status) {
 		t.Fatalf("status = %#v, calls = %d", status, len(fake.statusCapturedRuntimeIDs))
+	}
+	// Verify status was queried at least twice (running then terminal).
+	if len(fake.statusCapturedRuntimeIDs) < 2 {
+		t.Fatalf("status calls = %d, want >= 2", len(fake.statusCapturedRuntimeIDs))
 	}
 }
 

@@ -113,6 +113,12 @@ func (s *Server) waitForRun(ctx context.Context, cl ControlClient, runID string,
 		if firstSnapshot {
 			initialPhase, _ = status["phase"].(string)
 			firstSnapshot = false
+			// For phase_change, return immediately if the first snapshot is
+			// already terminal. An initially terminal state satisfies the
+			// condition without requiring a phase transition.
+			if condition == waitPhaseChange && isTerminalStatus(status) {
+				return status, false, nil
+			}
 		}
 		if waitConditionSatisfied(condition, status, initialPhase) {
 			return status, false, nil
