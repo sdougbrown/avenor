@@ -777,8 +777,8 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 			}
 		}
 		if sessionID == "" {
-			// The supervisor may write the sentinel file after the initial read but
-			// before the status call.
+			// If status yields no session ID, retry the sentinel because the
+			// supervisor may have written it since the initial read.
 			retryID, retryErr := readSentinelSession(ri.SentinelPath)
 			if retryErr == nil {
 				sessionID = retryID
