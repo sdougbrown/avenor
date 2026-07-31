@@ -864,9 +864,9 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 	child.exitCode = result.ExitCode
 	child.mu.Unlock()
 
-	// The loop reaches max_iterations only when each iteration phase returns
-	// end_turn. Its aggregate RunResult then has no authoritative SessionID.
-	// Use the latest adopted child session ID to populate the terminal sentinel.
+	// When every iteration phase returns end_turn, looprunner stops at
+	// max_iterations with result.SessionID == "". Use the latest adopted child
+	// session ID to populate the terminal sentinel.
 	if result.SessionID == "" {
 		result.SessionID = child.sessionID()
 	}
