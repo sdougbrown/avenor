@@ -73,16 +73,18 @@ describe('countNestedRuns', () => {
     expect(closeCount).toBe(1)
   })
 
-  it('rejects invalid root PIDs without dialing', async () => {
+  it.each([
+    { pid: 0, label: 'zero' },
+    { pid: -1, label: 'negative' },
+    { pid: 1.5, label: 'float' },
+  ])('rejects invalid root PID $label ($pid) without dialing', async ({ pid }) => {
     let dialCount = 0
     const dial: NestedSupervisorDial = async () => {
       dialCount++
       throw new Error('should not dial')
     }
 
-    await expect(countNestedRuns(0, dial)).resolves.toBe(0)
-    await expect(countNestedRuns(-1, dial)).resolves.toBe(0)
-    await expect(countNestedRuns(1.5, dial)).resolves.toBe(0)
+    await expect(countNestedRuns(pid as number, dial)).resolves.toBe(0)
     expect(dialCount).toBe(0)
   })
 
@@ -97,6 +99,8 @@ describe('countNestedRuns', () => {
 
     await expect(countNestedRuns(basePid, harness.dial)).resolves.toBe(99)
     expect(harness.calls).toHaveLength(99)
+    // Every dialled supervisor's client is closed exactly once.
+    expect(harness.closeCount()).toBe(99)
   })
 
   it('stops safely when supervisor data contains a pid cycle', async () => {
@@ -109,23 +113,6 @@ describe('countNestedRuns', () => {
     expect(harness.calls).toEqual([500, 600])
   })
 
-  // --- depth-boundary closeCount assertion ---
-  it('closeCount equals total dials at the depth boundary', async () => {
-    const basePid = 2_000
-    const supervisors: Record<number, Run[]> = {}
-    for (let i = 0; i < 99; i++) {
-      supervisors[basePid + i] = [{ status: 'running', backend: 'pi', pid: basePid + i + 1 }]
-    }
-    // At depth 98 (basePid+98), the child is at basePid+99 which would be depth 99 — boundary.
-    // That child has no children, so its client gets closed once.
-    supervisors[basePid + 99] = []
-    const harness = makeDial(supervisors)
-
-    const result = await countNestedRuns(basePid, harness.dial)
-    expect(result).toBe(99)
-    // Every dialled supervisor's client is closed exactly once.
-    expect(harness.closeCount()).toBe(99)
-  })
 })
 
 describe('dialWithTimeout', () => {
@@ -191,6 +178,14 @@ describe('dialWithTimeout', () => {
     } finally {
       jest.useRealTimers()
     }
+  })
+
+  it('propagates rejection when dial function rejects immediately', async () => {
+    const dial: NestedSupervisorDial = async () => {
+      throw new Error('connection refused')
+    }
+
+    await expect(dialWithTimeout(dial, '/tmp/test.sock', 10)).rejects.toThrow('connection refused')
   })
 })
 
@@ -284,6 +279,29 @@ describe('AsyncLimiter', () => {
     release()
     await Promise.all(tasks)
     expect(active).toBe(0)
+  })
+
+  it('propagates errors from queued tasks while later tasks still run', async () => {
+    const limiter = new AsyncLimiter(1)
+    const results: string[] = []
+    let releaseTask1!: () => void
+    const task1Released = new Promise<void>(resolve => { releaseTask1 = resolve })
+
+    const p1 = limiter.run(async () => {
+      await task1Released
+      throw new Error('task 1 failed')
+    })
+    const p2 = limiter.run(async () => {
+      results.push('task 2 succeeded')
+    })
+    const p3 = limiter.run(async () => {
+      results.push('task 3 succeeded')
+    })
+
+    releaseTask1()
+    await expect(p1).rejects.toThrow('task 1 failed')
+    await Promise.all([p2, p3])
+    expect(results).toEqual(['task 2 succeeded', 'task 3 succeeded'])
   })
 })
 
