@@ -376,6 +376,316 @@ func TestRunChildAttemptUsesInitialSpawnSession(t *testing.T) {
 	}
 }
 
+func TestRunChildAttemptClearsPhaseAfterSessionEnd(t *testing.T) {
+	provider := &stableScriptedProvider{
+		attempt: 0,
+		scripts: []stableScriptedAttempt{{
+			sessionID: "ses_0",
+			events: []stableScriptedEvent{{event: events.Event{
+				Event:     "session.end",
+				SessionID: "ses_0",
+				Fields:    map[string]any{"stop_reason": "end_turn"},
+			}}},
+		}},
+	}
+	child := &childRuntime{
+		id:          "rt_attempt_phase",
+		provider:    provider,
+		session:     runtime.Session{SessionID: "ses_0"},
+		eventWriter: stableTestSink{},
+		done:        make(chan struct{}),
+		promptCh:    make(chan struct{}, 1),
+		phase:       "done",
+		phaseLabel:  "finished",
+	}
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-attempt-phase.sock", MaxRuntimes: 1})
+
+	result := sup.runChildAttempt(context.Background(), child, "", "hello", nil)
+	if result.exitCode != 0 {
+		t.Fatalf("exitCode = %d, want 0", result.exitCode)
+	}
+	child.mu.Lock()
+	active, phase, phaseLabel := child.active, child.phase, child.phaseLabel
+	child.mu.Unlock()
+	if active {
+		t.Fatal("active = true after attempt cleanup")
+	}
+	if phase != "" || phaseLabel != "" {
+		t.Fatalf("phase state = %q/%q, want empty after attempt cleanup", phase, phaseLabel)
+	}
+}
+
+func TestRunChildAllowsNewPhaseAfterSameRuntimeFollowUp(t *testing.T) {
+	releaseSecondEnd := make(chan struct{})
+	provider := &stableScriptedProvider{
+		attempt: 0,
+		scripts: []stableScriptedAttempt{
+			{
+				sessionID: "ses_0",
+				events: []stableScriptedEvent{{event: events.Event{
+					Event:     "session.end",
+					SessionID: "ses_0",
+					Fields:    map[string]any{"stop_reason": "end_turn"},
+				}}},
+			},
+			{
+				sessionID: "ses_1",
+				events: []stableScriptedEvent{
+					{event: events.Event{Event: "agent.status", SessionID: "ses_1", Fields: map[string]any{"phase": "working"}}},
+					{event: events.Event{Event: "session.end", SessionID: "ses_1", Fields: map[string]any{"stop_reason": "end_turn"}}, release: releaseSecondEnd},
+				},
+			},
+		},
+	}
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-follow-up-phase.sock", MaxRuntimes: 1})
+	ctx, cancel := context.WithCancel(context.Background())
+	child := &childRuntime{
+		id:          "rt_follow_up_phase",
+		provider:    provider,
+		session:     runtime.Session{SessionID: "ses_0"},
+		eventWriter: stableTestSink{},
+		done:        make(chan struct{}),
+		promptCh:    make(chan struct{}, 1),
+		cancelFn:    cancel,
+	}
+	sup.runtimes[child.id] = child
+	go sup.runChild(ctx, child, "first", 0, 0)
+
+	waitForStableChild(t, child, func(active bool, completed bool, phase, phaseLabel string) bool {
+		return !active && !completed && phase == "done"
+	})
+	if err := sup.RuntimePrompt(child.id, "follow up", ""); err != nil {
+		t.Fatalf("RuntimePrompt: %v", err)
+	}
+	waitForStableChild(t, child, func(active bool, completed bool, phase, phaseLabel string) bool {
+		return active && !completed && phase == "working"
+	})
+	close(releaseSecondEnd)
+	waitForStableChild(t, child, func(active bool, completed bool, phase, phaseLabel string) bool {
+		return !active && !completed && phase == "done"
+	})
+	cancel()
+	waitForStableDone(t, child)
+}
+
+func TestRunChildParksSuccessfulTurnWithDonePhase(t *testing.T) {
+	provider := &stableScriptedProvider{
+		attempt: 0,
+		scripts: []stableScriptedAttempt{{
+			sessionID: "ses_parked",
+			events: []stableScriptedEvent{{event: events.Event{
+				Event:     "session.end",
+				SessionID: "ses_parked",
+				Fields:    map[string]any{"stop_reason": "end_turn"},
+			}}},
+		}},
+	}
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-parked-phase.sock", MaxRuntimes: 1})
+	ctx, cancel := context.WithCancel(context.Background())
+	child := &childRuntime{
+		id:          "rt_parked_phase",
+		provider:    provider,
+		session:     runtime.Session{SessionID: "ses_parked"},
+		eventWriter: stableTestSink{},
+		done:        make(chan struct{}),
+		promptCh:    make(chan struct{}, 1),
+		cancelFn:    cancel,
+	}
+	sup.runtimes[child.id] = child
+	go sup.runChild(ctx, child, "park", 0, 0)
+
+	waitForStableChild(t, child, func(active bool, completed bool, phase, phaseLabel string) bool {
+		return !active && !completed && phase == "done"
+	})
+	statusAny, err := sup.RuntimeStatus(child.id)
+	if err != nil {
+		t.Fatalf("RuntimeStatus: %v", err)
+	}
+	status := statusAny.(map[string]any)
+	if status["status"] != "idle" || status["phase"] != "done" {
+		t.Fatalf("parked status = %#v, want idle/done", status)
+	}
+	child.mu.Lock()
+	completed := child.completed
+	child.mu.Unlock()
+	if completed {
+		t.Fatal("parked runtime was marked completed")
+	}
+	cancel()
+	waitForStableDone(t, child)
+	child.mu.Lock()
+	completed = child.completed
+	child.mu.Unlock()
+	if !completed {
+		t.Fatal("runtime was not marked completed after cancellation")
+	}
+}
+
+func TestRunChildClearsPhaseDuringRetryBackoff(t *testing.T) {
+	provider := &stableScriptedProvider{
+		attempt: 0,
+		emitted: make(chan int, 4),
+		scripts: []stableScriptedAttempt{
+			{sessionID: "ses_retry", events: []stableScriptedEvent{{event: events.Event{Event: "session.end", SessionID: "ses_retry", Fields: map[string]any{"stop_reason": "error"}}}}},
+			{sessionID: "ses_success", events: []stableScriptedEvent{{event: events.Event{Event: "session.end", SessionID: "ses_success", Fields: map[string]any{"stop_reason": "end_turn"}}}}},
+		},
+	}
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-child-retry-phase.sock", MaxRuntimes: 1})
+	ctx, cancel := context.WithCancel(context.Background())
+	child := &childRuntime{
+		id:          "rt_child_retry_phase",
+		provider:    provider,
+		session:     runtime.Session{SessionID: "ses_retry"},
+		eventWriter: stableTestSink{},
+		done:        make(chan struct{}),
+		promptCh:    make(chan struct{}, 1),
+		phase:       "done",
+		cancelFn:    cancel,
+	}
+	sup.runtimes[child.id] = child
+	go sup.runChild(ctx, child, "retry", 0, 1)
+	select {
+	case <-provider.emitted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first retry event was not emitted")
+	}
+	waitForStableChild(t, child, func(active bool, completed bool, phase, phaseLabel string) bool {
+		return !active && !completed && phase == ""
+	})
+	waitForStableChild(t, child, func(active bool, completed bool, phase, phaseLabel string) bool {
+		return !active && !completed && phase == "done"
+	})
+	cancel()
+	waitForStableDone(t, child)
+}
+
+func TestRunLoopChildClearsPhaseDuringRetryBackoff(t *testing.T) {
+	provider := &stableScriptedProvider{
+		attempt: -1,
+		emitted: make(chan int, 4),
+		scripts: []stableScriptedAttempt{
+			{sessionID: "ses_loop_retry", events: []stableScriptedEvent{{event: events.Event{Event: "session.end", SessionID: "ses_loop_retry", Fields: map[string]any{"stop_reason": "error"}}}}},
+			{sessionID: "ses_loop_success", events: []stableScriptedEvent{{event: events.Event{Event: "session.end", SessionID: "ses_loop_success", Fields: map[string]any{"stop_reason": "end_turn"}}}}},
+		},
+	}
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-loop-retry-phase.sock", MaxRuntimes: 1})
+	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
+	child := &childRuntime{id: "rt_loop_retry_phase", done: make(chan struct{}), promptCh: make(chan struct{}, 1), eventWriter: stableTestSink{}, phase: "done", cancelFn: func() {}}
+	sup.runtimes[child.id] = child
+	cfg := &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
+	go sup.runLoopChild(context.Background(), child, cfg, 1, "", "", "", "", "")
+	select {
+	case <-provider.emitted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first loop retry event was not emitted")
+	}
+	waitForStableChild(t, child, func(active bool, completed bool, phase, phaseLabel string) bool {
+		return !active && phase == ""
+	})
+	waitForStableDone(t, child)
+	child.mu.Lock()
+	phase := child.phase
+	child.mu.Unlock()
+	if phase != "" {
+		t.Fatalf("loop phase after completion = %q, want empty", phase)
+	}
+}
+
+func TestRunTeamChildClearsPhaseDuringRetryBackoff(t *testing.T) {
+	provider := &stableScriptedProvider{
+		attempt: -1,
+		emitted: make(chan int, 4),
+		scripts: []stableScriptedAttempt{
+			{sessionID: "ses_team_retry", events: []stableScriptedEvent{{event: events.Event{Event: "session.end", SessionID: "ses_team_retry", Fields: map[string]any{"stop_reason": "error"}}}}},
+			{sessionID: "ses_team_success", events: []stableScriptedEvent{{event: events.Event{Event: "session.end", SessionID: "ses_team_success", Fields: map[string]any{"stop_reason": "end_turn"}}}}},
+		},
+	}
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-team-retry-phase.sock", MaxRuntimes: 1})
+	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
+	child := &childRuntime{id: "rt_team_retry_phase", done: make(chan struct{}), promptCh: make(chan struct{}, 1), eventWriter: stableTestSink{}, phase: "done", cancelFn: func() {}}
+	sup.runtimes[child.id] = child
+	cfg := &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
+	go sup.runTeamChild(context.Background(), child, cfg, 1, "", "", "", "", "unknown-backend")
+	select {
+	case <-provider.emitted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first team retry event was not emitted")
+	}
+	waitForStableChild(t, child, func(active bool, completed bool, phase, phaseLabel string) bool {
+		return !active && phase == ""
+	})
+	waitForStableDone(t, child)
+	child.mu.Lock()
+	phase := child.phase
+	child.mu.Unlock()
+	if phase != "" {
+		t.Fatalf("team phase after completion = %q, want empty", phase)
+	}
+}
+
+func TestRunLoopChildClearsStalePhaseOnAttemptSetupFailure(t *testing.T) {
+	provider := &stableScriptedProvider{
+		attempt: -1,
+		scripts: []stableScriptedAttempt{{sessionID: "ses_loop_failure", startErr: fmt.Errorf("start failed")}},
+	}
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-loop-setup-phase.sock", MaxRuntimes: 1})
+	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
+	child := &childRuntime{id: "rt_loop_setup_phase", done: make(chan struct{}), promptCh: make(chan struct{}, 1), eventWriter: stableTestSink{}, phase: "done", phaseLabel: "stale", cancelFn: func() {}}
+	sup.runtimes[child.id] = child
+	sup.runLoopChild(context.Background(), child, &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}, 0, "", "", "", "", "")
+	child.mu.Lock()
+	phase, phaseLabel := child.phase, child.phaseLabel
+	child.mu.Unlock()
+	if phase != "" || phaseLabel != "" {
+		t.Fatalf("loop setup failure phase state = %q/%q, want empty", phase, phaseLabel)
+	}
+}
+
+func TestRunTeamChildClearsStalePhaseOnAttemptSetupFailure(t *testing.T) {
+	provider := &stableScriptedProvider{
+		attempt: -1,
+		scripts: []stableScriptedAttempt{{sessionID: "ses_team_failure", startErr: fmt.Errorf("start failed")}},
+	}
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-team-setup-phase.sock", MaxRuntimes: 1})
+	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
+	child := &childRuntime{id: "rt_team_setup_phase", done: make(chan struct{}), promptCh: make(chan struct{}, 1), eventWriter: stableTestSink{}, phase: "done", phaseLabel: "stale", cancelFn: func() {}}
+	sup.runtimes[child.id] = child
+	sup.runTeamChild(context.Background(), child, &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}, 0, "", "", "", "", "unknown-backend")
+	child.mu.Lock()
+	phase, phaseLabel := child.phase, child.phaseLabel
+	child.mu.Unlock()
+	if phase != "" || phaseLabel != "" {
+		t.Fatalf("team setup failure phase state = %q/%q, want empty", phase, phaseLabel)
+	}
+}
+
+func waitForStableChild(t *testing.T, child *childRuntime, condition func(active, completed bool, phase, phaseLabel string) bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		child.mu.Lock()
+		active, completed, phase, phaseLabel := child.active, child.completed, child.phase, child.phaseLabel
+		child.mu.Unlock()
+		if condition(active, completed, phase, phaseLabel) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	child.mu.Lock()
+	active, completed, phase, phaseLabel := child.active, child.completed, child.phase, child.phaseLabel
+	child.mu.Unlock()
+	t.Fatalf("timed out waiting for child state: active=%v completed=%v phase=%q phase_label=%q", active, completed, phase, phaseLabel)
+}
+
+func waitForStableDone(t *testing.T, child *childRuntime) {
+	t.Helper()
+	select {
+	case <-child.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stable child did not finish")
+	}
+}
+
 func TestShutdownTimeoutDoesNotHangWithMultipleStuckRuntimes(t *testing.T) {
 	sup := NewSupervisor(Config{
 		ControlSocket:   "/tmp/test-shutdown-timeout.sock",
@@ -1121,6 +1431,128 @@ func (p *stableFakeProvider) AnswerPermission(context.Context, string, string, r
 }
 
 func (p *stableFakeProvider) Capabilities(context.Context) (runtime.Capabilities, error) {
+	return runtime.Capabilities{}, nil
+}
+
+type stableScriptedEvent struct {
+	event   events.Event
+	release <-chan struct{}
+}
+
+type stableScriptedAttempt struct {
+	sessionID string
+	startErr  error
+	events    []stableScriptedEvent
+}
+
+type stableScriptedProvider struct {
+	mu       sync.Mutex
+	attempt  int
+	scripts  []stableScriptedAttempt
+	channels map[string]chan events.Event
+	emitted  chan int
+}
+
+func (p *stableScriptedProvider) openSession() (runtime.Session, error) {
+	p.mu.Lock()
+	p.attempt++
+	index := p.attempt
+	if index >= len(p.scripts) {
+		p.mu.Unlock()
+		return runtime.Session{}, fmt.Errorf("missing scripted attempt %d", index)
+	}
+	script := p.scripts[index]
+	sessionID := script.sessionID
+	if sessionID == "" {
+		sessionID = fmt.Sprintf("ses_scripted_%d", index)
+	}
+	if script.startErr != nil {
+		p.mu.Unlock()
+		return runtime.Session{}, script.startErr
+	}
+	if p.channels == nil {
+		p.channels = make(map[string]chan events.Event)
+	}
+	p.channels[sessionID] = make(chan events.Event, len(script.events)+1)
+	if p.emitted != nil {
+		select {
+		case p.emitted <- index:
+		default:
+		}
+	}
+	p.mu.Unlock()
+	return runtime.Session{SessionID: sessionID}, nil
+}
+
+func (p *stableScriptedProvider) Start(context.Context, runtime.StartOptions) (runtime.Session, error) {
+	return p.openSession()
+}
+
+func (p *stableScriptedProvider) Resume(context.Context, string) (runtime.Session, error) {
+	return p.openSession()
+}
+
+func (p *stableScriptedProvider) Prompt(ctx context.Context, sessionID, _ string) error {
+	p.mu.Lock()
+	index := p.attempt
+	if index < 0 || index >= len(p.scripts) {
+		p.mu.Unlock()
+		return fmt.Errorf("missing scripted prompt attempt %d", index)
+	}
+	script := p.scripts[index]
+	eventCh := p.channels[sessionID]
+	p.mu.Unlock()
+	if eventCh == nil {
+		return fmt.Errorf("missing event channel for %s", sessionID)
+	}
+	defer close(eventCh)
+	for _, step := range script.events {
+		if step.release != nil {
+			select {
+			case <-step.release:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		select {
+		case eventCh <- step.event:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		if p.emitted != nil {
+			select {
+			case p.emitted <- index:
+			default:
+			}
+		}
+	}
+	return nil
+}
+
+func (p *stableScriptedProvider) Cancel(context.Context, string) error { return nil }
+
+func (p *stableScriptedProvider) Events(_ context.Context, sessionID string) (<-chan events.Event, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if ch := p.channels[sessionID]; ch != nil {
+		return ch, nil
+	}
+	if p.attempt < 0 || p.attempt >= len(p.scripts) {
+		return nil, fmt.Errorf("missing scripted attempt %d", p.attempt)
+	}
+	if p.channels == nil {
+		p.channels = make(map[string]chan events.Event)
+	}
+	ch := make(chan events.Event, len(p.scripts[p.attempt].events)+1)
+	p.channels[sessionID] = ch
+	return ch, nil
+}
+
+func (p *stableScriptedProvider) AnswerPermission(context.Context, string, string, runtime.PermissionResponse) error {
+	return nil
+}
+
+func (p *stableScriptedProvider) Capabilities(context.Context) (runtime.Capabilities, error) {
 	return runtime.Capabilities{}, nil
 }
 
