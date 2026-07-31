@@ -414,8 +414,8 @@ func (s *Server) resultSupervisorID(runID, requestedSupervisorID string) string 
 }
 
 func (s *Server) retrieveFinalOutput(cl ControlClient, runID string, status map[string]any) {
-	// Status provides a bounded preview only. Call the explicit result method
-	// for a full response when the control plane supports it.
+	// Status provides a bounded preview only. Call Result for full output when
+	// the control plane supports it.
 	fullResultRetrieved := false
 	if results, ok := cl.(interface {
 		Result(string) (map[string]any, error)
@@ -436,8 +436,8 @@ func (s *Server) retrieveFinalOutput(cl ControlClient, runID string, status map[
 			fullResultRetrieved = true
 		}
 	}
-	// Older supervisors lack a result RPC and do not specify whether their
-	// preview is bounded. Do not present it as complete when no full source exists.
+	// Older supervisors lack Result and do not specify whether previews are
+	// bounded. Do not present a preview as complete without a full source.
 	if !fullResultRetrieved {
 		if _, ok := status["final_output"].(string); ok {
 			status["final_output_truncated"] = true

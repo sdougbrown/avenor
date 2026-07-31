@@ -55,8 +55,8 @@ func hasPendingPermission(status map[string]any) bool {
 	if pending, ok := value.(bool); ok {
 		return pending
 	}
-	// Older supervisors returned the request object itself. Treat any non-nil
-	// object as pending, including an empty object from a sparse response.
+	// Treat any non-nil object from older supervisors as pending, including
+	// empty objects from sparse responses.
 	return true
 }
 
@@ -127,8 +127,8 @@ func (s *Server) waitForRun(ctx context.Context, cl ControlClient, runID string,
 				if err := s.waitSleep(ctx, remaining); err != nil {
 					return nil, false, err
 				}
-				// Re-query after sleeping to the deadline so a condition observed
-				// there wins over the timeout result.
+				// Re-query after sleeping to the deadline so conditions observed
+				// there take precedence over timeout results.
 				continue
 			}
 		}
