@@ -761,11 +761,10 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 
 	sessionID, err := readSentinelSession(ri.SentinelPath)
 	if err != nil {
-		// Preserve failed/non-resumable sentinels as errors. A missing file may
-		// mean the supervisor has not written a terminal sentinel yet. Ask the
-		// live supervisor for its current session id so a headless run resumes
-		// with the adopted conversation id. Fall back to the spawn-time registry
-		// value when the status call fails or returns no session id.
+		// Return errors for failed or non-resumable sentinel files unchanged. A
+		// missing file may mean the run is not terminal. Query supervisor status for
+		// the adopted session ID. If status has no usable ID, re-read the sentinel
+		// before using the spawn-time registry value.
 		if !errors.Is(err, os.ErrNotExist) {
 			return nil, nil, fmt.Errorf("read sentinel session: %w", err)
 		}
@@ -774,6 +773,16 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 				if currentID, _ := status["session_id"].(string); currentID != "" {
 					sessionID = currentID
 				}
+			}
+		}
+		if sessionID == "" {
+			// The supervisor may write the sentinel file after the initial read but
+			// before the status call.
+			retryID, retryErr := readSentinelSession(ri.SentinelPath)
+			if retryErr == nil {
+				sessionID = retryID
+			} else if !errors.Is(retryErr, os.ErrNotExist) {
+				return nil, nil, fmt.Errorf("read sentinel session: %w", retryErr)
 			}
 		}
 		if sessionID == "" {

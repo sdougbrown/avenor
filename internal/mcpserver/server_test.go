@@ -2537,6 +2537,114 @@ func TestAvenorFollowUpUsesCurrentSupervisorSessionWhenSentinelMissing(t *testin
 	}
 }
 
+func TestAvenorFollowUpRetriesMissingSentinelAfterStatusRace(t *testing.T) {
+	tests := []struct {
+		name             string
+		statusResult     map[string]any
+		statusErr        error
+		createSentinel   bool
+		sentinelContents string
+		wantSession      string
+		wantError        string
+	}{
+		{
+			name:             "status error then valid sentinel",
+			statusErr:        errors.New("status unavailable"),
+			createSentinel:   true,
+			sentinelContents: "DONE\nSESSION=ses_after_status\n",
+			wantSession:      "ses_after_status",
+		},
+		{
+			name:             "status without session then valid sentinel",
+			statusResult:     map[string]any{"runtime_id": "rt_race", "status": "running"},
+			createSentinel:   true,
+			sentinelContents: "DONE\nSESSION=ses_after_empty_status\n",
+			wantSession:      "ses_after_empty_status",
+		},
+		{
+			name:             "status error then non-resumable sentinel",
+			statusErr:        errors.New("status unavailable"),
+			createSentinel:   true,
+			sentinelContents: "FAILED\nSESSION=ses_failed\n",
+			wantError:        "not resumable",
+		},
+		{
+			name:             "status without session then invalid sentinel",
+			statusResult:     map[string]any{"runtime_id": "rt_race", "status": "running"},
+			createSentinel:   true,
+			sentinelContents: "DONE\n",
+			wantError:        "no session in sentinel",
+		},
+		{
+			name:        "status error then still missing",
+			statusErr:   errors.New("status unavailable"),
+			wantSession: "agy-pending-race",
+		},
+		{
+			name:         "status without session then still missing",
+			statusResult: map[string]any{"runtime_id": "rt_race", "status": "running"},
+			wantSession:  "agy-pending-race",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			sentinelPath := filepath.Join(dir, "missing.done")
+			fake := &fakeClient{
+				statusResult: test.statusResult,
+				statusErr:    test.statusErr,
+				spawnResult: map[string]any{
+					"runtime_id": "rt_followup_race",
+					"session_id": "ses_followup_race",
+				},
+			}
+			fake.statusFunc = func(string) (map[string]any, error) {
+				if test.createSentinel {
+					if err := os.WriteFile(sentinelPath, []byte(test.sentinelContents), 0644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return test.statusResult, test.statusErr
+			}
+
+			s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.registry.Store(&RunInfo{
+				RunID:        "run-race",
+				Label:        "race",
+				RuntimeID:    "rt_race",
+				SessionID:    "agy-pending-race",
+				SentinelPath: sentinelPath,
+				Agent:        "agy",
+				Backend:      "agy",
+				Dir:          "/tmp/race-repo",
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			_, _, err = s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
+				RunID:   "run-race",
+				Message: "continue",
+			})
+			if test.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantError) {
+					t.Fatalf("error = %v, want substring %q", err, test.wantError)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := fake.spawnCapturedParams["session_id"]; got != test.wantSession {
+				t.Fatalf("spawn session_id = %v, want %q", got, test.wantSession)
+			}
+		})
+	}
+}
+
 func TestAvenorFollowUpUsesRegistrySessionWhenSentinelMissing(t *testing.T) {
 	fake := &fakeClient{
 		spawnResult: map[string]any{

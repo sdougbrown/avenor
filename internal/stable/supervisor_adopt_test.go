@@ -72,6 +72,16 @@ func assertChildSessionID(t *testing.T, child *childRuntime, want string) {
 	}
 }
 
+func assertOnlySessionID(t *testing.T, child *childRuntime, want string) {
+	t.Helper()
+	child.mu.Lock()
+	session := child.session
+	child.mu.Unlock()
+	if session != (runtime.Session{SessionID: want}) {
+		t.Fatalf("cleaned session = %#v, want only SessionID %q", session, want)
+	}
+}
+
 func waitForChildSessionID(t *testing.T, child *childRuntime, want string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -514,12 +524,7 @@ func TestRunLoopChildPreservesAdoptedSessionAfterPhaseCleanup(t *testing.T) {
 	waitForStableDone(t, child)
 
 	assertChildSessionID(t, child, realID)
-	child.mu.Lock()
-	pid := child.session.PID
-	child.mu.Unlock()
-	if pid != 7117 {
-		t.Fatalf("loop child pid = %d, want 7117", pid)
-	}
+	assertOnlySessionID(t, child, realID)
 }
 
 // TestRunTeamChildPreservesAdoptedSessionAfterPhaseCleanup is the team analogue
@@ -567,12 +572,7 @@ func TestRunTeamChildPreservesAdoptedSessionAfterPhaseCleanup(t *testing.T) {
 	waitForStableDone(t, child)
 
 	assertChildSessionID(t, child, realID)
-	child.mu.Lock()
-	pid := child.session.PID
-	child.mu.Unlock()
-	if pid != 8228 {
-		t.Fatalf("team child pid = %d, want 8228", pid)
-	}
+	assertOnlySessionID(t, child, realID)
 }
 
 // TestRunLoopChildSentinelCarriesAdoptedSessionOnNormalSuccess proves the

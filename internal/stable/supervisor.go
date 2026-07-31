@@ -787,14 +787,11 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 			defer func() {
 				child.mu.Lock()
 				if child.provider == provider {
+					sessionID := child.session.SessionID
 					child.provider = nil
-					// Preserve the latest adopted session id. Clearing the
-					// provider ends this phase's hold on the runtime, but
-					// the authoritative conversation id must survive between
-					// phases and after normal success so retries, resume,
-					// status, and the terminal sentinel reference it. A stale
-					// concurrent attempt whose provider was already replaced
-					// fails the guard above and never reaches this branch.
+					// Retain only the authoritative ID. The provider's PID and
+					// other fields become invalid when it closes.
+					child.session = runtime.Session{SessionID: sessionID}
 				}
 				child.active = false
 				child.phase = ""
@@ -1002,14 +999,11 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 			defer func() {
 				child.mu.Lock()
 				if child.provider == provider {
+					sessionID := child.session.SessionID
 					child.provider = nil
-					// Preserve the latest adopted session id. Clearing the
-					// provider ends this phase's hold on the runtime, but
-					// the authoritative conversation id must survive between
-					// phases and after normal success so retries, resume,
-					// status, and the terminal sentinel reference it. A stale
-					// concurrent attempt whose provider was already replaced
-					// fails the guard above and never reaches this branch.
+					// Retain only the authoritative ID. The provider's PID and
+					// other fields become invalid when it closes.
+					child.session = runtime.Session{SessionID: sessionID}
 				}
 				child.active = false
 				child.phase = ""
