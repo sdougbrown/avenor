@@ -76,6 +76,7 @@ export async function dialWithTimeout(
   const effectiveTimeout = timeoutOverride ?? NESTED_DIAL_TIMEOUT_MS
   let timedOut = false
   let timeout: ReturnType<typeof setTimeout> | undefined
+  const timeoutMarker = Symbol('dial timeout')
   const connection = dial(socketPath, { callTimeoutMs: effectiveTimeout }).then(client => {
     // A connection can resolve after the outer timeout wins the race. Close it
     // instead of leaking a socket that the caller can no longer observe.
@@ -84,12 +85,17 @@ export async function dialWithTimeout(
   })
 
   try {
-    return await Promise.race([
+    const result = await Promise.race([
       connection,
-      new Promise<never>((_, reject) => {
-        timeout = setTimeout(() => reject(new Error('dial timeout')), effectiveTimeout)
+      new Promise<typeof timeoutMarker>(resolve => {
+        timeout = setTimeout(() => resolve(timeoutMarker), effectiveTimeout)
       }),
     ])
+    if (result === timeoutMarker) {
+      timedOut = true
+      throw new Error('dial timeout')
+    }
+    return result
   } catch (error) {
     timedOut = true
     throw error
@@ -134,7 +140,8 @@ async function countNestedRunsAtDepth(
   let total = 0
   for (const run of activeRuns) {
     const nestedPid = childPiPid(run)
-    // Count the active run at the depth boundary, but do not walk beyond it.
+    // Count the active run at the depth boundary. The strict `<` below keeps
+    // the boundary at 99 levels instead of allowing a 100th supervisor walk.
     total += 1
     if (nestedPid && depth + 1 < MAX_NESTED_DEPTH) {
       total += await countNestedRunsAtDepth(nestedPid, dial, seen, depth + 1)
