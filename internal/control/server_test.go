@@ -253,6 +253,107 @@ func TestOwnerRejectionForMutatingMethods(t *testing.T) {
 	}
 }
 
+func TestJSONAnswerPermissionAlreadyResolvedIsAccepted(t *testing.T) {
+	s := NewServer(NewState("run_1", "", 0))
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+	if !s.PreparePermissionClaim("", "req_done", PermissionResolverAutomatic, nil) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+	if !s.MarkPermissionClaimResolved("", "req_done", "avenor") {
+		t.Fatal("MarkPermissionClaimResolved returned false")
+	}
+
+	conn := mustDial(t, path)
+	defer conn.Close()
+	params, _ := json.Marshal(PermissionAnswer{RequestID: "req_done", OptionID: "stale"})
+	_ = writeReq(t, conn, Request{JSONRPC: "2.0", ID: 1, Method: "answer_permission", Params: params})
+	response := readResp(t, conn)
+	if response.Error != nil {
+		t.Fatalf("resolved answer returned error: %+v", response.Error)
+	}
+	result, ok := response.Result.(map[string]any)
+	if !ok || result["accepted"] != true {
+		t.Fatalf("resolved answer result = %#v, want accepted=true", response.Result)
+	}
+}
+
+func TestPermissionResolverStateString(t *testing.T) {
+	tests := []struct {
+		state PermissionResolverState
+		want  string
+	}{
+		{PermissionResolverUnknown, "unknown"},
+		{PermissionResolverReserved, "reserved"},
+		{PermissionResolverControl, "control"},
+		{PermissionResolverAutomatic, "automatic"},
+		{PermissionResolverFile, "file"},
+		{PermissionResolverNoResolver, "none"},
+		{PermissionResolverDirectDelivery, "direct_delivery"},
+		{PermissionResolverResolved, "resolved"},
+		{PermissionResolverState(255), "unknown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.want, func(t *testing.T) {
+			if got := tt.state.String(); got != tt.want {
+				t.Fatalf("PermissionResolverState(%d).String() = %q, want %q", tt.state, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMarkPermissionClaimResolvedRetainsTombstone(t *testing.T) {
+	s := NewServer(NewState("run_1", "", 0))
+	if !s.PreparePermissionClaim("rt_1", "req_1", PermissionResolverAutomatic, []any{
+		map[string]any{"optionId": "allow", "kind": "allow", "requiresMessage": true},
+	}) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+	if !s.MarkPermissionClaimResolved("rt_1", "req_1", "avenor") {
+		t.Fatal("MarkPermissionClaimResolved returned false")
+	}
+	if got := s.PermissionResolverState("rt_1", "req_1"); got != PermissionResolverResolved {
+		t.Fatalf("resolver state = %v, want resolved", got)
+	}
+	s.pendingMu.Lock()
+	source := s.pendingClaims[permissionClaimKey{scope: "rt_1", requestID: "req_1"}].resolutionSource
+	s.pendingMu.Unlock()
+	if source != "avenor" {
+		t.Fatalf("resolution source = %q, want avenor", source)
+	}
+	if got := s.DeliverPendingPermission("rt_1", "req_1", "missing", ""); got != PermissionAnswerAlreadyResolved {
+		t.Fatalf("late delivery = %v, want already-resolved", got)
+	}
+	if !s.AnswerPendingPermission("rt_1", "req_1", "missing", "") {
+		t.Fatal("AnswerPendingPermission rejected an already-resolved claim")
+	}
+	if got := s.DeliverPendingPermission("rt_1", "missing", "allow", ""); got != PermissionAnswerNotFound {
+		t.Fatalf("unknown delivery = %v, want not-found", got)
+	}
+}
+
+func TestPreparePermissionClaimReplacesResolvedTombstone(t *testing.T) {
+	s := NewServer(NewState("run_1", "", 0))
+	if !s.PreparePermissionClaim("rt_1", "req_1", PermissionResolverAutomatic, nil) {
+		t.Fatal("initial PreparePermissionClaim returned false")
+	}
+	if !s.MarkPermissionClaimResolved("rt_1", "req_1", "avenor") {
+		t.Fatal("MarkPermissionClaimResolved returned false")
+	}
+	if !s.PreparePermissionClaim("rt_1", "req_1", PermissionResolverFile, nil) {
+		t.Fatal("resolved tombstone was not replaced")
+	}
+	if got := s.PermissionResolverState("rt_1", "req_1"); got != PermissionResolverFile {
+		t.Fatalf("replacement state = %v, want file", got)
+	}
+	if got := s.DeliverPendingPermission("rt_1", "req_1", "allow", ""); got != PermissionAnswerResolverOwned {
+		t.Fatalf("delivery to replacement = %v, want resolver-owned", got)
+	}
+}
+
 func TestAnswerPendingPermissionDeliversMatchingAnswer(t *testing.T) {
 	s := NewServer(NewState("run_1", "", 0))
 	answerCh, _, ok := s.BeginPermissionClaim("", "req_1")
@@ -432,6 +533,7 @@ func TestPreparePermissionClaimRejectsExistingNoResolver(t *testing.T) {
 func TestClearPermissionClaimsRemovesOnlyRequestedScope(t *testing.T) {
 	s := NewServer(NewState("run_1", "", 0))
 	s.PreparePermissionClaim("rt_1", "0", PermissionResolverFile, nil)
+	s.MarkPermissionClaimResolved("rt_1", "0", "file")
 	s.PreparePermissionClaim("rt_2", "0", PermissionResolverFile, nil)
 	s.ClearPermissionClaims("rt_1")
 	if got := s.PermissionResolverState("rt_1", "0"); got != PermissionResolverUnknown {

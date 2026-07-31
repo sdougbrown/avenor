@@ -334,12 +334,36 @@ const (
 	PermissionResolverResolved
 )
 
+func (s PermissionResolverState) String() string {
+	switch s {
+	case PermissionResolverUnknown:
+		return "unknown"
+	case PermissionResolverReserved:
+		return "reserved"
+	case PermissionResolverControl:
+		return "control"
+	case PermissionResolverAutomatic:
+		return "automatic"
+	case PermissionResolverFile:
+		return "file"
+	case PermissionResolverNoResolver:
+		return "none"
+	case PermissionResolverDirectDelivery:
+		return "direct_delivery"
+	case PermissionResolverResolved:
+		return "resolved"
+	default:
+		return "unknown"
+	}
+}
+
 type permissionClaim struct {
-	state           PermissionResolverState
-	answerCh        chan PermissionAnswer
-	answerQueued    bool
-	disconnectCh    chan struct{} // closed when all clients disconnect while in Reserved/Control state
-	requiresMessage map[string]bool
+	state            PermissionResolverState
+	resolutionSource string
+	answerCh         chan PermissionAnswer
+	answerQueued     bool
+	disconnectCh     chan struct{} // closed when all clients disconnect while in Reserved/Control state
+	requiresMessage  map[string]bool
 }
 
 // PreparePermissionClaim records resolver ownership before permission.request
@@ -384,6 +408,20 @@ func (s *ControlServer) SetPermissionResolverState(scope, requestID string, stat
 	if claim := s.pendingClaims[key]; claim != nil {
 		claim.state = state
 	}
+}
+
+// MarkPermissionClaimResolved changes claim.state to PermissionResolverResolved.
+// DeliverPendingPermission returns AlreadyResolved for that state.
+func (s *ControlServer) MarkPermissionClaimResolved(scope, requestID, source string) bool {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	claim := s.pendingClaims[permissionClaimKey{scope: scope, requestID: requestID}]
+	if claim == nil {
+		return false
+	}
+	claim.state = PermissionResolverResolved
+	claim.resolutionSource = source
+	return true
 }
 
 // RetryDirectPermissionDelivery returns a failed direct delivery to the
@@ -524,10 +562,15 @@ func (s *ControlServer) HasPendingPermission() bool {
 	return false
 }
 
-// AnswerPendingPermission delivers an answer to the active permission claim.
-// The bool reports whether the answer was actually delivered.
+// AnswerPendingPermission accepts an answer for the active permission claim.
+// An already-resolved claim is also accepted as a benign no-op.
 func (s *ControlServer) AnswerPendingPermission(scope, requestID, optionID, message string) bool {
-	return s.DeliverPendingPermission(scope, requestID, optionID, message) == PermissionAnswerDelivered
+	switch s.DeliverPendingPermission(scope, requestID, optionID, message) {
+	case PermissionAnswerDelivered, PermissionAnswerAlreadyResolved:
+		return true
+	default:
+		return false
+	}
 }
 
 type PermissionAnswerDelivery uint8
@@ -535,6 +578,7 @@ type PermissionAnswerDelivery uint8
 const (
 	PermissionAnswerNotFound PermissionAnswerDelivery = iota
 	PermissionAnswerDelivered
+	PermissionAnswerAlreadyResolved
 	PermissionAnswerChannelFull
 	PermissionAnswerResolverOwned
 	PermissionAnswerNoResolver
@@ -542,14 +586,17 @@ const (
 )
 
 // DeliverPendingPermission distinguishes a missing claim from a claim that
-// has already accepted an answer. answerQueued remains set after the resolver
-// drains answerCh, making delivery single-use until the claim is ended.
+// has already resolved. It checks claim.state before validating payloads.
+// For PermissionResolverResolved, it returns AlreadyResolved without a provider.
 func (s *ControlServer) DeliverPendingPermission(scope, requestID, optionID, message string) PermissionAnswerDelivery {
 	s.pendingMu.Lock()
 	defer s.pendingMu.Unlock()
 	claim := s.pendingClaims[permissionClaimKey{scope: scope, requestID: requestID}]
 	if claim == nil {
 		return PermissionAnswerNotFound
+	}
+	if claim.state == PermissionResolverResolved {
+		return PermissionAnswerAlreadyResolved
 	}
 	if claim.requiresMessage != nil {
 		requiresMessage, offered := claim.requiresMessage[optionID]
@@ -831,13 +878,20 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		if p.RequestID == "" || p.OptionID == "" {
 			return failure(req.ID, -32602, "invalid params", map[string]any{"required": []string{"request_id", "option_id"}})
 		}
+		if s.PermissionResolverState("", p.RequestID) == PermissionResolverResolved {
+			return success(req.ID, map[string]any{"accepted": true})
+		}
 		if err := runtime.ValidatePermissionMessage(p.Message); err != nil {
 			return failure(req.ID, -32602, "invalid params", map[string]any{"detail": err.Error()})
 		}
-		if !s.AnswerPendingPermission("", p.RequestID, p.OptionID, p.Message) {
+		switch delivery := s.DeliverPendingPermission("", p.RequestID, p.OptionID, p.Message); delivery {
+		case PermissionAnswerDelivered, PermissionAnswerAlreadyResolved:
+			return success(req.ID, map[string]any{"accepted": true})
+		case PermissionAnswerNotFound:
+			return failure(req.ID, -32001, "no_pending_permission", nil)
+		default:
 			return failure(req.ID, -32001, "no_pending_permission", nil)
 		}
-		return success(req.ID, map[string]any{"accepted": true})
 	case "prompt":
 		if rtID := runtimeIDFromParams(req.Params); rtID != "" {
 			if s.stableHandler == nil {

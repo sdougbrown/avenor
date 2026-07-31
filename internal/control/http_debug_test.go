@@ -846,6 +846,32 @@ func TestHTTPAnswerPermissionInvalidUTF8Message(t *testing.T) {
 	}
 }
 
+func TestHTTPAnswerPermissionAlreadyResolvedIsAccepted(t *testing.T) {
+	ctrl := NewServer(NewState("run_cli", "", 0))
+	if !ctrl.PreparePermissionClaim("", "req_done", PermissionResolverAutomatic, nil) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+	if !ctrl.MarkPermissionClaimResolved("", "req_done", "avenor") {
+		t.Fatal("MarkPermissionClaimResolved returned false")
+	}
+	_, addr, token := startDebugServer(t, ctrl, nil)
+	client := &http.Client{Timeout: 2 * time.Second}
+
+	body := `{"request_id":"req_done","option_id":"stale","message":""}`
+	resp := authedPostBody(t, client, "http://"+addr+"/answer-permission", token, body)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /answer-permission (resolved): %d, want 200", resp.StatusCode)
+	}
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if result["accepted"] != true {
+		t.Fatalf("response = %#v, want accepted=true", result)
+	}
+}
+
 func TestHTTPAnswerPermissionEmptyMessageOK(t *testing.T) {
 	// An empty message is valid (ordinary option without write-in note).
 	// The endpoint should not return 400 for an empty message — it will

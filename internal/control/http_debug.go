@@ -379,15 +379,22 @@ func (h *HTTPDebugServer) handleAnswerPermission(w http.ResponseWriter, r *http.
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
+	if h.control.PermissionResolverState("", p.RequestID) == PermissionResolverResolved {
+		writeJSON(w, map[string]any{"accepted": true})
+		return
+	}
 	if err := runtime.ValidatePermissionMessage(p.Message); err != nil {
 		http.Error(w, "invalid permission message", http.StatusBadRequest)
 		return
 	}
-	if !h.control.AnswerPendingPermission("", p.RequestID, p.OptionID, p.Message) {
+	switch delivery := h.control.DeliverPendingPermission("", p.RequestID, p.OptionID, p.Message); delivery {
+	case PermissionAnswerDelivered, PermissionAnswerAlreadyResolved:
+		writeJSON(w, map[string]any{"accepted": true})
+	case PermissionAnswerNotFound:
 		http.Error(w, "no pending permission", http.StatusConflict)
-		return
+	default:
+		http.Error(w, "no pending permission", http.StatusConflict)
 	}
-	writeJSON(w, map[string]any{"accepted": true})
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
