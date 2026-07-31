@@ -168,6 +168,8 @@ describe('followUpTool with an external supervisor', () => {
   })
 
   it('lets live false override stale singleton auto-approval', async () => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-follow-up-test-'))
+    process.env.AVENOR_HOME = home
     const sup = {
       runs: new Map([['singleton-run', {
         runId: 'singleton-run',
@@ -207,6 +209,8 @@ describe('followUpTool with an external supervisor', () => {
   })
 
   it('uses singleton run metadata when status and sentinel are unavailable', async () => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-follow-up-test-'))
+    process.env.AVENOR_HOME = home
     const sup = {
       runs: new Map([['singleton-run', {
         runId: 'singleton-run',
