@@ -2181,6 +2181,16 @@ func (s *Supervisor) cancelRuntime(rtID string) error {
 }
 
 func (s *Supervisor) answerPermission(rtID, requestID, optionID, message string) error {
+	s.controlMu.Lock()
+	rt := s.runtimes[rtID]
+	s.controlMu.Unlock()
+	if rt == nil {
+		return fmt.Errorf("runtime %q not found", rtID)
+	}
+	if s.control.PermissionResolverState(rtID, requestID) == control.PermissionResolverResolved {
+		return nil
+	}
+
 	// Validate message before consuming the pending claim so oversized
 	// or invalid input does not deplete the resolver.
 	if err := runtime.ValidatePermissionMessage(message); err != nil {
@@ -2188,17 +2198,13 @@ func (s *Supervisor) answerPermission(rtID, requestID, optionID, message string)
 	}
 
 	s.controlMu.Lock()
-	rt := s.runtimes[rtID]
-	s.controlMu.Unlock()
-	if rt == nil {
-		return fmt.Errorf("runtime %q not found", rtID)
-	}
-
-	s.controlMu.Lock()
 	key := rtID + ":" + requestID
 	options := s.permOptions[key]
 	s.controlMu.Unlock()
 	if options == nil {
+		if s.control.PermissionResolverState(rtID, requestID) == control.PermissionResolverResolved {
+			return nil
+		}
 		return fmt.Errorf("permission request %q not found for runtime %q", requestID, rtID)
 	}
 
@@ -2243,6 +2249,8 @@ func (s *Supervisor) answerPermission(rtID, requestID, optionID, message string)
 		delete(s.permOptions, key)
 		s.controlMu.Unlock()
 		return nil
+	case control.PermissionAnswerAlreadyResolved:
+		return nil
 	case control.PermissionAnswerChannelFull:
 		return fmt.Errorf("permission request %q for runtime %q already has an answer pending delivery", requestID, rtID)
 	case control.PermissionAnswerResolverOwned:
@@ -2277,9 +2285,8 @@ func (s *Supervisor) answerPermission(rtID, requestID, optionID, message string)
 	return nil
 }
 
-// cleanupDirectPermission removes stale option metadata before releasing the
-// claim for reuse. controlMu remains held across EndPermissionClaim so a
-// replacement cannot publish new options between those operations.
+// Acquire controlMu to prevent replacements from publishing options while
+// options are removed and the claim is marked resolved.
 func (s *Supervisor) cleanupDirectPermission(runtimeID, requestID string, beforeRelease func()) {
 	s.controlMu.Lock()
 	defer s.controlMu.Unlock()
@@ -2287,7 +2294,7 @@ func (s *Supervisor) cleanupDirectPermission(runtimeID, requestID string, before
 	if beforeRelease != nil {
 		beforeRelease()
 	}
-	s.control.EndPermissionClaim(runtimeID, requestID)
+	s.control.MarkPermissionClaimResolved(runtimeID, requestID, "direct")
 }
 
 func (s *Supervisor) cachePermissionOptions(runtimeID, requestID string, options []any) {

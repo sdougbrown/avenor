@@ -2663,11 +2663,38 @@ func TestAnswerPermissionNoResolverAllowsOnlyOneConcurrentProviderCall(t *testin
 	if got := provider.callCount(); got != 1 {
 		t.Fatalf("provider calls = %d, want 1", got)
 	}
-	if state := sup.control.PermissionResolverState("rt_direct", "req_direct"); state != control.PermissionResolverUnknown {
-		t.Fatalf("resolver state after success = %v, want unknown", state)
+	if state := sup.control.PermissionResolverState("rt_direct", "req_direct"); state != control.PermissionResolverResolved {
+		t.Fatalf("resolver state after success = %v, want resolved", state)
 	}
 	if _, ok := sup.permOptions["rt_direct:req_direct"]; ok {
 		t.Fatal("cache entry was not cleared after direct delivery")
+	}
+	if err := sup.answerPermission("rt_direct", "req_direct", "stale", strings.Repeat("x", 100000)); err != nil {
+		t.Fatalf("late answer after direct resolution: %v", err)
+	}
+}
+
+func TestAnswerPermissionAlreadyResolvedWithoutOptionsIsBenignNoOp(t *testing.T) {
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-answer-resolved.sock", MaxRuntimes: 1})
+	provider := &permRecordingProvider{}
+	sup.runtimes["rt_resolved"] = &childRuntime{
+		id:       "rt_resolved",
+		provider: provider,
+		session:  runtime.Session{SessionID: "ses_resolved"},
+		done:     make(chan struct{}),
+		promptCh: make(chan struct{}, 1),
+	}
+	if !sup.control.PreparePermissionClaim("rt_resolved", "req_resolved", control.PermissionResolverAutomatic, nil) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+	if !sup.control.MarkPermissionClaimResolved("rt_resolved", "req_resolved", "avenor") {
+		t.Fatal("MarkPermissionClaimResolved returned false")
+	}
+	if err := sup.answerPermission("rt_resolved", "req_resolved", "stale", strings.Repeat("x", 100000)); err != nil {
+		t.Fatalf("late answer after resolution: %v", err)
+	}
+	if provider.called {
+		t.Fatal("late answer invoked provider")
 	}
 }
 
@@ -2711,8 +2738,8 @@ func TestAnswerPermissionNoResolverRetriesAfterProviderError(t *testing.T) {
 	if err := sup.answerPermission("rt_retry", "req_retry", "allow_it", ""); err != nil {
 		t.Fatalf("retry answerPermission: %v", err)
 	}
-	if state := sup.control.PermissionResolverState("rt_retry", "req_retry"); state != control.PermissionResolverUnknown {
-		t.Fatalf("resolver state after retry = %v, want unknown", state)
+	if state := sup.control.PermissionResolverState("rt_retry", "req_retry"); state != control.PermissionResolverResolved {
+		t.Fatalf("resolver state after retry = %v, want resolved", state)
 	}
 	if _, ok := sup.permOptions["rt_retry:req_retry"]; ok {
 		t.Fatal("cache entry was not removed after successful retry")
