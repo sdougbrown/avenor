@@ -2,11 +2,15 @@ package stable
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/looprunner"
+	"github.com/sdougbrown/avenor/internal/phaseconfig"
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/teamrunner"
 )
 
 // newDeferredChild builds a childRuntime backed by a stableDeferredProvider
@@ -43,6 +47,66 @@ func deferredStartEndEvents(realID string, release <-chan struct{}) []stableScri
 		{event: events.Event{Event: "session.start", SessionID: realID, Fields: map[string]any{"conversation_id": realID}}, release: release},
 		{event: events.Event{Event: "session.end", SessionID: realID, Fields: map[string]any{"stop_reason": "end_turn"}}},
 	}
+}
+
+// deferredGatedEvents returns the headless sequence with independent release
+// gates on session.start and session.end so a test can observe the aggregate
+// child identity mid-run, after adoption but before the phase terminates.
+func deferredGatedEvents(realID string, startRelease, endRelease <-chan struct{}) []stableScriptedEvent {
+	return []stableScriptedEvent{
+		{event: events.Event{Event: "session.start", SessionID: realID, Fields: map[string]any{"conversation_id": realID}}, release: startRelease},
+		{event: events.Event{Event: "session.end", SessionID: realID, Fields: map[string]any{"stop_reason": "end_turn"}}, release: endRelease},
+	}
+}
+
+func assertChildSessionID(t *testing.T, child *childRuntime, want string) {
+	t.Helper()
+	child.mu.Lock()
+	got := child.session.SessionID
+	child.mu.Unlock()
+	if got != want {
+		t.Fatalf("child session = %q, want %q", got, want)
+	}
+}
+
+func waitForChildSessionID(t *testing.T, child *childRuntime, want string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		child.mu.Lock()
+		got := child.session.SessionID
+		child.mu.Unlock()
+		if got == want {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for child session %q", want)
+}
+
+func statusSessionID(t *testing.T, sup *Supervisor, rtID string) string {
+	t.Helper()
+	statusAny, err := sup.RuntimeStatus(rtID)
+	if err != nil {
+		t.Fatalf("RuntimeStatus: %v", err)
+	}
+	status, _ := statusAny.(map[string]any)
+	id, _ := status["session_id"].(string)
+	return id
+}
+
+// findForwardedSessionStart returns the first session.start event recorded by
+// the sink, skipping the loop/team runner's avenor.*.start envelope events
+// that precede it.
+func findForwardedSessionStart(t *testing.T, sink *checkingSink) events.Event {
+	t.Helper()
+	for _, ev := range sink.events {
+		if ev.Event == "session.start" {
+			return ev
+		}
+	}
+	t.Fatalf("no session.start event forwarded; events=%#v", sink.events)
+	return events.Event{}
 }
 
 func TestRunChildAttemptAdoptsExternalConversationID(t *testing.T) {
@@ -90,12 +154,7 @@ func TestRuntimeStatusAndListUseAdoptedSessionID(t *testing.T) {
 		t.Fatalf("exitCode = %d, want 0", res.exitCode)
 	}
 
-	statusAny, err := sup.RuntimeStatus(child.id)
-	if err != nil {
-		t.Fatalf("RuntimeStatus: %v", err)
-	}
-	status, _ := statusAny.(map[string]any)
-	if id, _ := status["session_id"].(string); id != realID {
+	if id := statusSessionID(t, sup, child.id); id != realID {
 		t.Fatalf("status session_id = %q, want %q", id, realID)
 	}
 
@@ -140,28 +199,16 @@ func TestAdoptChildSessionIDIgnoresStaleAttempt(t *testing.T) {
 
 	// Stale provider + stale expected old id: must NOT overwrite the new session.
 	sup.adoptChildSessionID(child, provider, provisionalID, realID)
-	child.mu.Lock()
-	if child.session.SessionID != "agy-pending-new" {
-		t.Fatalf("stale adoption overwrote child session = %q", child.session.SessionID)
-	}
-	child.mu.Unlock()
+	assertChildSessionID(t, child, "agy-pending-new")
 
 	// Matching provider + matching expected old id: updates proceed.
 	sup.adoptChildSessionID(child, newProvider, "agy-pending-new", "conv-new-real")
-	child.mu.Lock()
-	if child.session.SessionID != "conv-new-real" {
-		t.Fatalf("matching adoption failed: child session = %q", child.session.SessionID)
-	}
-	child.mu.Unlock()
+	assertChildSessionID(t, child, "conv-new-real")
 
 	// Empty or same external id is a no-op even when the guard would match.
 	sup.adoptChildSessionID(child, newProvider, "conv-new-real", "")
 	sup.adoptChildSessionID(child, newProvider, "conv-new-real", "conv-new-real")
-	child.mu.Lock()
-	if child.session.SessionID != "conv-new-real" {
-		t.Fatalf("no-op adoption mutated child session = %q", child.session.SessionID)
-	}
-	child.mu.Unlock()
+	assertChildSessionID(t, child, "conv-new-real")
 }
 
 func TestSessionStartUpdatesChildBeforeEventForwarding(t *testing.T) {
@@ -180,11 +227,7 @@ func TestSessionStartUpdatesChildBeforeEventForwarding(t *testing.T) {
 	// Wait until the attempt is active (Prompt goroutine subscribed and blocked
 	// on the release gate), then assert the provisional identity is still live.
 	waitForStableChild(t, child, func(active, completed bool, phase, phaseLabel string) bool { return active })
-	child.mu.Lock()
-	if id := child.session.SessionID; id != provisionalID {
-		t.Fatalf("child session = %q before adoption, want %q", id, provisionalID)
-	}
-	child.mu.Unlock()
+	assertChildSessionID(t, child, provisionalID)
 
 	// When session.start is forwarded, the child must already carry the real id.
 	sink.onSessionStart = func() {
@@ -210,4 +253,164 @@ func TestSessionStartUpdatesChildBeforeEventForwarding(t *testing.T) {
 	if len(sink.events) == 0 || sink.events[0].Event != "session.start" {
 		t.Fatalf("first forwarded event = %#v", sink.events)
 	}
+}
+
+func TestRunLoopChildAdoptsExternalConversationID(t *testing.T) {
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-loop-adopt.sock", MaxRuntimes: 1})
+	const provisionalID, realID = "agy-pending-loop", "conv-loop-real"
+	startRelease := make(chan struct{})
+	endRelease := make(chan struct{})
+	provider := &stableDeferredProvider{
+		provisionalID: provisionalID,
+		realID:        realID,
+		backend:       "agy",
+		pid:           7788,
+		events:        deferredGatedEvents(realID, startRelease, endRelease),
+	}
+	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
+
+	sink := &checkingSink{}
+	child := &childRuntime{
+		id:          "rt_loop_adopt",
+		label:       "loop-adopt",
+		provider:    provider,
+		session:     runtime.Session{SessionID: provisionalID, Backend: "agy", Dir: "/work", PID: 7788},
+		eventWriter: sink,
+		done:        make(chan struct{}),
+		promptCh:    make(chan struct{}, 1),
+		cancelFn:    func() {},
+		runID:       sup.runID,
+	}
+	sup.runtimes[child.id] = child
+
+	cfg := &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
+	go sup.runLoopChild(context.Background(), child, cfg, 0, "", "", "", "", "agy")
+
+	// Before session.start is delivered the aggregate child must still hold the
+	// provisional id and status must mirror it.
+	waitForStableChild(t, child, func(active, completed bool, phase, phaseLabel string) bool { return active })
+	assertChildSessionID(t, child, provisionalID)
+	if id := statusSessionID(t, sup, child.id); id != provisionalID {
+		t.Fatalf("loop status before adoption = %q, want %q", id, provisionalID)
+	}
+
+	// Releasing session.start triggers adoption; the child record and status
+	// must converge on the real id while the phase is still active.
+	close(startRelease)
+	waitForChildSessionID(t, child, realID)
+	if id := statusSessionID(t, sup, child.id); id != realID {
+		t.Fatalf("loop status after adoption = %q, want %q", id, realID)
+	}
+	child.mu.Lock()
+	pid := child.session.PID
+	child.mu.Unlock()
+	if pid != 7788 {
+		t.Fatalf("loop child pid = %d, want 7788", pid)
+	}
+
+	close(endRelease)
+	waitForStableDone(t, child)
+
+	evt := findForwardedSessionStart(t, sink)
+	if evt.SessionID != realID {
+		t.Fatalf("loop session.start event = %#v", evt)
+	}
+}
+
+func TestRunTeamChildAdoptsExternalConversationID(t *testing.T) {
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-team-adopt.sock", MaxRuntimes: 1})
+	const provisionalID, realID = "agy-pending-team", "conv-team-real"
+	startRelease := make(chan struct{})
+	endRelease := make(chan struct{})
+	provider := &stableDeferredProvider{
+		provisionalID: provisionalID,
+		realID:        realID,
+		backend:       "agy",
+		pid:           9090,
+		events:        deferredGatedEvents(realID, startRelease, endRelease),
+	}
+	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
+
+	sink := &checkingSink{}
+	child := &childRuntime{
+		id:          "rt_team_adopt",
+		label:       "team-adopt",
+		provider:    provider,
+		session:     runtime.Session{SessionID: provisionalID, Backend: "agy", Dir: "/work", PID: 9090},
+		eventWriter: sink,
+		done:        make(chan struct{}),
+		promptCh:    make(chan struct{}, 1),
+		cancelFn:    func() {},
+		runID:       sup.runID,
+	}
+	sup.runtimes[child.id] = child
+
+	cfg := &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
+	go sup.runTeamChild(context.Background(), child, cfg, 0, "", "", "", "", "agy")
+
+	waitForStableChild(t, child, func(active, completed bool, phase, phaseLabel string) bool { return active })
+	assertChildSessionID(t, child, provisionalID)
+	if id := statusSessionID(t, sup, child.id); id != provisionalID {
+		t.Fatalf("team status before adoption = %q, want %q", id, provisionalID)
+	}
+
+	close(startRelease)
+	waitForChildSessionID(t, child, realID)
+	if id := statusSessionID(t, sup, child.id); id != realID {
+		t.Fatalf("team status after adoption = %q, want %q", id, realID)
+	}
+	child.mu.Lock()
+	pid := child.session.PID
+	child.mu.Unlock()
+	if pid != 9090 {
+		t.Fatalf("team child pid = %d, want 9090", pid)
+	}
+
+	close(endRelease)
+	waitForStableDone(t, child)
+
+	evt := findForwardedSessionStart(t, sink)
+	if evt.SessionID != realID {
+		t.Fatalf("team session.start event = %#v", evt)
+	}
+}
+
+func TestStableAdoptionDoesNotOverwriteNewerConcurrentAttempt(t *testing.T) {
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-adopt-concurrent.sock", MaxRuntimes: 1})
+	child := &childRuntime{
+		id:       "rt_concurrent",
+		label:    "concurrent",
+		done:     make(chan struct{}),
+		promptCh: make(chan struct{}, 1),
+		runID:    sup.runID,
+	}
+	sup.runtimes[child.id] = child
+
+	older := &stableDeferredProvider{provisionalID: "agy-pending-old", realID: "conv-old-real", backend: "agy", pid: 1111, events: deferredStartEndEvents("conv-old-real", nil)}
+	newer := &stableDeferredProvider{provisionalID: "agy-pending-new", realID: "conv-new-real", backend: "agy", pid: 2222, events: deferredStartEndEvents("conv-new-real", nil)}
+
+	// The newer attempt has already become the active child session.
+	child.mu.Lock()
+	child.provider = newer
+	child.session = runtime.Session{SessionID: "agy-pending-new", Backend: "agy", Dir: "/work", PID: 2222}
+	child.mu.Unlock()
+
+	var wg sync.WaitGroup
+	lateRelease := make(chan struct{})
+	// Older attempt's adoption callback fires late, after the newer attempt
+	// already updated the aggregate child record.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-lateRelease
+		sup.adoptChildSessionID(child, older, "agy-pending-old", "conv-old-real")
+	}()
+	// Newer attempt's adoption fires first and updates the child.
+	sup.adoptChildSessionID(child, newer, "agy-pending-new", "conv-new-real")
+	assertChildSessionID(t, child, "conv-new-real")
+
+	close(lateRelease)
+	wg.Wait()
+
+	assertChildSessionID(t, child, "conv-new-real")
 }

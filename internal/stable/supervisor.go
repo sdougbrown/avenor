@@ -804,6 +804,9 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				return looprunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: brokerRunID}, fmt.Errorf("subscribe events: %w", err)
 			}
 
+			attemptProvider := provider
+			preAdoptionID := session.SessionID
+
 			promptDone := make(chan error, 1)
 			go func() {
 				promptDone <- provider.Prompt(context.Background(), session.SessionID, phase.Prompt)
@@ -818,6 +821,14 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				PermissionClaimScope:   child.id,
 				AutoApprove:            child.autoApprove,
 				PermissionClaimTimeout: child.permClaimTimeout,
+				// adoptSessionID propagates the authoritative conversation id onto
+				// the phase-local session (authoritative for retries, resume, and
+				// the terminal sentinel) and onto the aggregate child record when
+				// this phase is still the active one.
+				AdoptSessionID: func(externalID string) {
+					session.SessionID = externalID
+					s.adoptChildSessionID(child, attemptProvider, preAdoptionID, externalID)
+				},
 			}, cli.SessionWaitDeps{
 				Writer:        attemptWriter,
 				FileHandler:   child.fileHandler,
@@ -993,6 +1004,9 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				return teamrunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: brokerRunID}, fmt.Errorf("subscribe events: %w", err)
 			}
 
+			attemptProvider := provider
+			preAdoptionID := session.SessionID
+
 			promptDone := make(chan error, 1)
 			go func() {
 				promptDone <- provider.Prompt(context.Background(), session.SessionID, phase.Prompt)
@@ -1007,6 +1021,14 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				PermissionClaimScope:   child.id,
 				AutoApprove:            child.autoApprove,
 				PermissionClaimTimeout: child.permClaimTimeout,
+				// adoptSessionID propagates the authoritative conversation id onto
+				// the phase-local session (authoritative for retries, resume, and
+				// the terminal sentinel) and onto the aggregate child record when
+				// this phase is still the active one.
+				AdoptSessionID: func(externalID string) {
+					session.SessionID = externalID
+					s.adoptChildSessionID(child, attemptProvider, preAdoptionID, externalID)
+				},
 			}, cli.SessionWaitDeps{
 				Writer:        attemptWriter,
 				FileHandler:   child.fileHandler,
