@@ -822,9 +822,9 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				AutoApprove:            child.autoApprove,
 				PermissionClaimTimeout: child.permClaimTimeout,
 				// adoptSessionID propagates the authoritative conversation id onto
-				// the phase-local session (authoritative for retries, resume, and
-				// the terminal sentinel) and onto the aggregate child record when
-				// this phase is still the active one.
+				// the phase-local session, which is authoritative for retries,
+				// resume, and the terminal sentinel. It also updates the aggregate
+				// child record when this phase is still the active one.
 				AdoptSessionID: func(externalID string) {
 					session.SessionID = externalID
 					s.adoptChildSessionID(child, attemptProvider, preAdoptionID, externalID)
@@ -1022,9 +1022,9 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				AutoApprove:            child.autoApprove,
 				PermissionClaimTimeout: child.permClaimTimeout,
 				// adoptSessionID propagates the authoritative conversation id onto
-				// the phase-local session (authoritative for retries, resume, and
-				// the terminal sentinel) and onto the aggregate child record when
-				// this phase is still the active one.
+				// the phase-local session, which is authoritative for retries,
+				// resume, and the terminal sentinel. It also updates the aggregate
+				// child record when this phase is still the active one.
 				AdoptSessionID: func(externalID string) {
 					session.SessionID = externalID
 					s.adoptChildSessionID(child, attemptProvider, preAdoptionID, externalID)
@@ -1123,12 +1123,13 @@ func (c *childRuntime) sessionID() string {
 }
 
 // adoptChildSessionID propagates an authoritative conversation id onto the
-// aggregate child record when the adoption arrives from the attempt that is
-// still the active one. The provider and pre-adoption session id are captured
-// by the caller before the adoption fires; both must still match the live
-// child state, mirroring the cleanup guard that compares the runtime.Provider
-// interface directly. A stale callback from an older attempt (or a same/empty
-// external id) is rejected so a late team/loop phase cannot overwrite a newer
+// aggregate child record when the adoption arrives from the active attempt.
+// The caller captures the provider and pre-adoption session id before the
+// adoption fires. Both the provider and the pre-adoption id must still
+// match the live child state. This mirrors the cleanup guard, which
+// compares the runtime.Provider interface directly.
+// A stale callback from an older attempt is rejected, as is a same or empty
+// external id. This prevents a late team/loop phase from overwriting a newer
 // active session. Only SessionID changes; Backend, Dir, and PID are preserved.
 func (s *Supervisor) adoptChildSessionID(child *childRuntime, provider runtime.Provider, expectedOldID, externalID string) {
 	if externalID == "" || externalID == expectedOldID {
@@ -1212,9 +1213,10 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 		Timeout:                timer,
 		// adoptSessionID fires inside WaitForSession before the session.start
 		// event is forwarded, so the stable status identity cannot lag the
-		// authoritative event. The attempt-local session is always updated; the
-		// aggregate child record is updated only when this attempt is still the
-		// active one, so a late retry cannot overwrite a newer session.
+		// authoritative event. The attempt-local session is always updated.
+		// The aggregate child record is updated only when this attempt is
+		// still the active one, so a late retry cannot overwrite a newer
+		// session.
 		AdoptSessionID: func(externalID string) {
 			session.SessionID = externalID
 			s.adoptChildSessionID(child, attemptProvider, preAdoptionID, externalID)

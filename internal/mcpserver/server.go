@@ -751,8 +751,8 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 		supervisorID = ri.SupervisorID
 	}
 
-	// Resolve the control client once so the current-status lookup and the
-	// follow-up Spawn share a single connection.
+	// Resolve the control client once. The current-status lookup and the
+	// follow-up Spawn then share a single connection.
 	cl, cleanup, err := s.getClientForSupervisor(supervisorID)
 	if err != nil {
 		return nil, nil, err
@@ -762,10 +762,10 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 	sessionID, err := readSentinelSession(ri.SentinelPath)
 	if err != nil {
 		// Preserve failed/non-resumable sentinels as errors. A missing file may
-		// mean the supervisor has not written a terminal sentinel yet; before
-		// falling back to the spawn-time registry value, ask the live supervisor
-		// for its current session id so a headless run whose id was adopted after
-		// spawn resumes with the authoritative conversation id.
+		// mean the supervisor has not written a terminal sentinel yet. Ask the
+		// live supervisor for its current session id so a headless run resumes
+		// with the adopted conversation id. Fall back to the spawn-time registry
+		// value when the status call fails or returns no session id.
 		if !errors.Is(err, os.ErrNotExist) {
 			return nil, nil, fmt.Errorf("read sentinel session: %w", err)
 		}
