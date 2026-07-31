@@ -1,35 +1,28 @@
-import { afterAll, afterEach, describe, expect, it, mock } from 'bun:test'
+import { afterEach, describe, expect, it, mock } from 'bun:test'
+import * as net from 'node:net'
+import * as os from 'node:os'
+import * as path from 'node:path'
 import type { SpawnParams } from '../client.js'
-
-const clientSpawnMock = mock(async (_params: SpawnParams) => ({
-  runtime_id: 'rt-explicit',
-}))
-const closeMock = mock(() => {})
-const getSupervisorClientMock = mock(async () => ({
-  client: {
-    spawn: clientSpawnMock,
-    close: closeMock,
-  },
-  isSingleton: false,
-  sup: null,
-  supervisorId: '/tmp/avenor-explicit.sock',
-}))
-
-mock.module('./get-supervisor-client.js', () => ({
-  getSupervisorClient: getSupervisorClientMock,
-}))
+import { socketsRoot } from '../paths.js'
 
 const { spawnTool } = await import('./spawn.js')
 const { Supervisor } = await import('../supervisor.js')
 
-const forwardingCases = [
+type SpawnForwardingParams = Parameters<typeof spawnTool>[0]
+
+type ForwardingCase = {
+  name: string
+  args: SpawnForwardingParams
+  model?: string
+  agent?: string
+}
+
+const forwardingCases: ForwardingCase[] = [
   { name: 'neither supplied', args: {}, model: undefined, agent: undefined },
   { name: 'model only', args: { model: 'sonnet' }, model: 'sonnet', agent: undefined },
   { name: 'both supplied', args: { agent: 'codex', model: 'sonnet' }, model: 'sonnet', agent: 'codex' },
   { name: 'empty agent', args: { agent: '', model: 'sonnet' }, model: 'sonnet', agent: undefined },
-] as const
-
-type SpawnForwardingParams = Parameters<typeof spawnTool>[0]
+]
 
 function assertForwardedParams(
   received: SpawnParams | undefined,
@@ -45,27 +38,66 @@ function assertForwardedParams(
   }
   if (expected.model !== undefined) {
     expect(received.model).toBe(expected.model)
+  } else {
+    expect(received.model).toBeUndefined()
+  }
+}
+
+async function startSpawnServer(): Promise<{
+  server: net.Server
+  socketPath: string
+  received: SpawnParams[]
+}> {
+  const socketPath = path.join(
+    socketsRoot(),
+    `avenor-mcp-spawn-test-${process.pid}-${Math.random().toString(36).slice(2)}.sock`,
+  )
+  const received: SpawnParams[] = []
+  const server = net.createServer((socket) => {
+    let buffer = ''
+    socket.on('data', (chunk) => {
+      buffer += chunk.toString()
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines) {
+        if (!line.trim()) continue
+        const request = JSON.parse(line) as { id: number; params: SpawnParams }
+        received.push(request.params)
+        socket.write(JSON.stringify({
+          jsonrpc: '2.0',
+          id: request.id,
+          result: { runtime_id: 'rt-explicit' },
+        }) + '\n')
+      }
+    })
+  })
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(socketPath, resolve)
+  })
+  return { server, socketPath, received }
+}
+
+async function stopSpawnServer(server: net.Server, socketPath: string): Promise<void> {
+  await new Promise<void>((resolve) => server.close(() => resolve()))
+  try {
+    await os.promises.unlink(socketPath)
+  } catch {
+    // The server may have removed the socket during close.
   }
 }
 
 describe('spawnTool with an explicit supervisor', () => {
-  afterEach(() => {
-    clientSpawnMock.mockClear()
-    closeMock.mockClear()
-    getSupervisorClientMock.mockClear()
-  })
-
   for (const testCase of forwardingCases) {
     it(`forwards ${testCase.name} without fabricating an agent`, async () => {
-      const args: SpawnForwardingParams = {
-        supervisorId: '/tmp/avenor-explicit.sock',
-        ...testCase.args,
+      const { server, socketPath, received } = await startSpawnServer()
+      try {
+        await spawnTool({ supervisorId: socketPath, ...testCase.args })
+        expect(received).toHaveLength(1)
+        assertForwardedParams(received[0], testCase)
+      } finally {
+        await stopSpawnServer(server, socketPath)
       }
-      await spawnTool(args)
-
-      expect(clientSpawnMock).toHaveBeenCalledTimes(1)
-      assertForwardedParams(clientSpawnMock.mock.calls[0]?.[0], testCase)
-      expect(closeMock).toHaveBeenCalledTimes(1)
     })
   }
 })
@@ -80,11 +112,8 @@ describe('spawnTool with the singleton supervisor', () => {
   }))
   const originalSupervisorGet = Supervisor.get
 
-  afterAll(() => {
-    Supervisor.get = originalSupervisorGet
-  })
-
   afterEach(() => {
+    Supervisor.get = originalSupervisorGet
     localSpawnMock.mockClear()
   })
 
@@ -95,8 +124,7 @@ describe('spawnTool with the singleton supervisor', () => {
         supervisorId: '/tmp/avenor-singleton.sock',
       })) as any
 
-      const args: SpawnForwardingParams = { ...testCase.args }
-      await spawnTool(args)
+      await spawnTool(testCase.args)
 
       expect(localSpawnMock).toHaveBeenCalledTimes(1)
       assertForwardedParams(localSpawnMock.mock.calls[0]?.[0], testCase)
