@@ -48,7 +48,7 @@ export interface RunStatusEntry {
   pid?: number
   /** Backend type, used to determine whether to look for child supervisors. */
   backend?: string
-  /** Count of active (non-terminal) runs on this run's child supervisor, if discovered. */
+  /** Count of active (non-terminal) descendants, if discovered. */
   nestedCount?: number
 }
 
