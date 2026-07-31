@@ -2399,6 +2399,9 @@ func TestAvenorFollowUpUsesRegistrySessionWhenSentinelMissing(t *testing.T) {
 	if p["dir"] != "/tmp/pi-repo" {
 		t.Errorf("expected dir /tmp/pi-repo, got %v", p["dir"])
 	}
+	if v, ok := p["auto_approve"]; ok {
+		t.Errorf("auto_approve unexpectedly present on supervised follow-up: %v", v)
+	}
 }
 
 func TestAvenorFollowUpCustomLabel(t *testing.T) {

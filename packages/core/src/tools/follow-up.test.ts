@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, mock } from 'bun:test'
+import { afterAll, afterEach, beforeAll, describe, expect, it, mock } from 'bun:test'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -23,6 +23,7 @@ mock.module('./get-supervisor-client.js', () => ({
 }))
 
 const { followUpTool } = await import('./follow-up.js')
+const { Supervisor } = await import('../supervisor.js')
 
 describe('followUpTool with an external supervisor', () => {
   const previousHome = process.env.AVENOR_HOME
@@ -78,28 +79,55 @@ describe('followUpTool with an external supervisor', () => {
     expect(spawnMock.mock.calls[0]?.[0]).toMatchObject({ auto_approve: true })
   })
 
-  it('omits auto-approval for false, undefined, and non-boolean live status', async () => {
+  it('omits auto-approval when live status is false', async () => {
     home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-follow-up-test-'))
     process.env.AVENOR_HOME = home
+    const runDir = path.join(home, 'runs', 'auto-approve-false')
+    fs.mkdirSync(runDir, { recursive: true })
+    fs.writeFileSync(path.join(runDir, 'sentinel.done'), 'DONE\nSESSION=ses-original\n')
+    statusMock.mockResolvedValueOnce({ agent: 'jockey', auto_approve: false })
 
-    for (const [runId, autoApprove] of [
-      ['auto-approve-false', false],
-      ['auto-approve-undefined', undefined],
-      ['auto-approve-truthy', 'true'],
-    ]) {
-      const runDir = path.join(home, 'runs', runId)
-      fs.mkdirSync(runDir, { recursive: true })
-      fs.writeFileSync(path.join(runDir, 'sentinel.done'), 'DONE\nSESSION=ses-original\n')
-      statusMock.mockResolvedValueOnce({ agent: 'jockey', auto_approve: autoApprove })
+    await followUpTool({
+      runId: 'auto-approve-false',
+      message: 'continue',
+      supervisorId: '/tmp/avenor-mcp-test.sock',
+    })
 
-      await followUpTool({
-        runId,
-        message: 'continue',
-        supervisorId: '/tmp/avenor-mcp-test.sock',
-      })
+    expect(spawnMock.mock.calls.at(-1)?.[0]).not.toHaveProperty('auto_approve')
+  })
 
-      expect(spawnMock.mock.calls.at(-1)?.[0]).not.toHaveProperty('auto_approve')
-    }
+  it('omits auto-approval when live status is undefined', async () => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-follow-up-test-'))
+    process.env.AVENOR_HOME = home
+    const runDir = path.join(home, 'runs', 'auto-approve-undefined')
+    fs.mkdirSync(runDir, { recursive: true })
+    fs.writeFileSync(path.join(runDir, 'sentinel.done'), 'DONE\nSESSION=ses-original\n')
+    statusMock.mockResolvedValueOnce({ agent: 'jockey' })
+
+    await followUpTool({
+      runId: 'auto-approve-undefined',
+      message: 'continue',
+      supervisorId: '/tmp/avenor-mcp-test.sock',
+    })
+
+    expect(spawnMock.mock.calls.at(-1)?.[0]).not.toHaveProperty('auto_approve')
+  })
+
+  it('omits auto-approval when live status is a non-boolean truthy string', async () => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-follow-up-test-'))
+    process.env.AVENOR_HOME = home
+    const runDir = path.join(home, 'runs', 'auto-approve-truthy')
+    fs.mkdirSync(runDir, { recursive: true })
+    fs.writeFileSync(path.join(runDir, 'sentinel.done'), 'DONE\nSESSION=ses-original\n')
+    statusMock.mockResolvedValueOnce({ agent: 'jockey', auto_approve: 'true' })
+
+    await followUpTool({
+      runId: 'auto-approve-truthy',
+      message: 'continue',
+      supervisorId: '/tmp/avenor-mcp-test.sock',
+    })
+
+    expect(spawnMock.mock.calls.at(-1)?.[0]).not.toHaveProperty('auto_approve')
   })
 
   it('falls back to liveStatus.session_id when no sentinel SESSION', async () => {
@@ -236,5 +264,111 @@ describe('followUpTool with an external supervisor', () => {
     })).rejects.toThrow('run has no agent to resume')
 
     expect(spawnMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('followUpTool with a local supervisor (no supervisorId)', () => {
+  const localSupRuns = new Map<string, Record<string, unknown>>()
+  const localSupSpawnMock = mock(async (params: Record<string, unknown>) => ({
+    runId: 'local-followup-run',
+    label: params.label as string,
+  }))
+  const localSupGetClientMock = mock(() => ({
+    status: statusMock,
+    spawn: spawnMock,
+    close: closeMock,
+  }))
+  const originalSupervisorGet = Supervisor.get
+
+  beforeAll(() => {
+    Supervisor.get = mock(async () => ({
+      runs: localSupRuns,
+      getClient: localSupGetClientMock,
+      spawn: localSupSpawnMock,
+      supervisorId: '/tmp/local-supervisor.sock',
+    })) as any
+  })
+
+  afterAll(() => {
+    Supervisor.get = originalSupervisorGet
+  })
+
+  afterEach(() => {
+    localSupSpawnMock.mockClear()
+    localSupGetClientMock.mockClear()
+    statusMock.mockClear()
+    localSupRuns.clear()
+  })
+
+  it('forwards autoApprove from runInfo when live status is unavailable', async () => {
+    localSupRuns.set('local-auto-run', {
+      runId: 'local-auto-run',
+      label: 'local-auto-run',
+      sentinelPath: '/tmp/missing-local-sentinel.done',
+      eventLogPath: '/tmp/missing-local-events',
+      runtimeId: 'rt-local-auto',
+      sessionId: 'ses-local-auto',
+      agent: 'explore',
+      autoApprove: true,
+    })
+    statusMock.mockRejectedValueOnce(new Error('runtime unavailable'))
+
+    const result = await followUpTool({
+      runId: 'local-auto-run',
+      message: 'continue',
+    })
+
+    expect(localSupSpawnMock).toHaveBeenCalledTimes(1)
+    expect(localSupSpawnMock.mock.calls[0]?.[0]).toMatchObject({
+      agent: 'explore',
+      prompt: 'continue',
+      session_id: 'ses-local-auto',
+      auto_approve: true,
+    })
+    expect(result.run_id).toBe('local-followup-run')
+  })
+
+  it('omits auto_approve when runInfo.autoApprove is false', async () => {
+    localSupRuns.set('local-supervised-run', {
+      runId: 'local-supervised-run',
+      label: 'local-supervised-run',
+      sentinelPath: '/tmp/missing-local-sentinel.done',
+      eventLogPath: '/tmp/missing-local-events',
+      runtimeId: 'rt-local-supervised',
+      sessionId: 'ses-local-supervised',
+      agent: 'explore',
+      autoApprove: false,
+    })
+    statusMock.mockRejectedValueOnce(new Error('runtime unavailable'))
+
+    await followUpTool({
+      runId: 'local-supervised-run',
+      message: 'continue',
+    })
+
+    expect(localSupSpawnMock.mock.calls[0]?.[0]).not.toHaveProperty('auto_approve')
+  })
+
+  it('lets live status auto_approve true override runInfo when both are present', async () => {
+    localSupRuns.set('local-override-run', {
+      runId: 'local-override-run',
+      label: 'local-override-run',
+      sentinelPath: '/tmp/missing-local-sentinel.done',
+      eventLogPath: '/tmp/missing-local-events',
+      runtimeId: 'rt-local-override',
+      sessionId: 'ses-local-override',
+      agent: 'explore',
+      autoApprove: false,
+    })
+    statusMock.mockResolvedValueOnce({ agent: 'explore', auto_approve: true })
+
+    await followUpTool({
+      runId: 'local-override-run',
+      message: 'continue',
+    })
+
+    expect(localSupSpawnMock.mock.calls[0]?.[0]).toMatchObject({
+      auto_approve: true,
+    })
   })
 })
