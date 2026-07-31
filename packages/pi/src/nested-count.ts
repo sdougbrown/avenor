@@ -23,6 +23,8 @@ export class AsyncLimiter {
   constructor(private readonly limit: number) {}
 
   async run<T>(task: () => Promise<T>): Promise<T> {
+    // The capacity check and increment contain no await, so they cannot be
+    // interleaved by another task on the single-threaded event loop.
     if (this.active >= this.limit) {
       await new Promise<void>(resolve => this.queue.push(resolve))
     }
@@ -96,9 +98,6 @@ export async function dialWithTimeout(
       throw new Error('dial timeout')
     }
     return result
-  } catch (error) {
-    timedOut = true
-    throw error
   } finally {
     if (timeout) clearTimeout(timeout)
   }
