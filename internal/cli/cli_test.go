@@ -3859,6 +3859,7 @@ func TestWaitForSessionCancelAndEndUsesFullReply(t *testing.T) {
 	tests := []struct {
 		name            string
 		stopReason      string
+		wantOutput      string
 		wantFinalReply  string
 		wantFinalOutput string
 		cancel          func(context.CancelFunc, chan<- time.Time)
@@ -3866,6 +3867,7 @@ func TestWaitForSessionCancelAndEndUsesFullReply(t *testing.T) {
 		{
 			name:            "context cancellation",
 			stopReason:      "cancelled",
+			wantOutput:      "Before the tool. After the tool.",
 			wantFinalReply:  "After the tool.",
 			wantFinalOutput: "Before the tool. After the tool.",
 			cancel: func(cancel context.CancelFunc, _ chan<- time.Time) {
@@ -3875,6 +3877,7 @@ func TestWaitForSessionCancelAndEndUsesFullReply(t *testing.T) {
 		{
 			name:            "explicit timeout",
 			stopReason:      "timeout",
+			wantOutput:      "Before the tool. After the tool.",
 			wantFinalReply:  "After the tool.",
 			wantFinalOutput: "Before the tool. After the tool.",
 			cancel: func(_ context.CancelFunc, timeout chan<- time.Time) {
@@ -3884,6 +3887,7 @@ func TestWaitForSessionCancelAndEndUsesFullReply(t *testing.T) {
 		{
 			name:            "trailing tool call",
 			stopReason:      "cancelled",
+			wantOutput:      "Before the tool. ",
 			wantFinalReply:  "",
 			wantFinalOutput: "Before the tool. ",
 			cancel: func(cancel context.CancelFunc, _ chan<- time.Time) {
@@ -3942,6 +3946,9 @@ func TestWaitForSessionCancelAndEndUsesFullReply(t *testing.T) {
 			if result.FinalReply != tt.wantFinalReply {
 				t.Fatalf("FinalReply = %q, want %q", result.FinalReply, tt.wantFinalReply)
 			}
+			if result.Output != tt.wantOutput {
+				t.Fatalf("Output = %q, want %q", result.Output, tt.wantOutput)
+			}
 
 			last := logged[len(logged)-1]
 			if last.Event != "session.end" {
@@ -3994,6 +4001,9 @@ func TestWaitForSessionCancelAndEndUsesFullReply(t *testing.T) {
 		}
 		if result.FinalReply != lastBlockReply {
 			t.Fatalf("FinalReply = %q, want %q", result.FinalReply, lastBlockReply)
+		}
+		if result.Output != fullOutput {
+			t.Fatalf("Output = %q, want %q", result.Output, fullOutput)
 		}
 
 		last := logged[len(logged)-1]

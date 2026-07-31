@@ -1080,7 +1080,7 @@ func cancelAndEnd(provider runtime.Provider, writer EventSink, sessionID, runID,
 		fmt.Fprintf(stderr, "avenor: write terminal event: %v\n", err)
 		return sessionResult{ExitCode: 1}
 	}
-	return sessionResult{ExitCode: runtime.ExitCodeForStopReason(stopReason), StopReason: stopReason, FinalReply: lastBlockFinalReply, Usage: usage}
+	return sessionResult{ExitCode: runtime.ExitCodeForStopReason(stopReason), StopReason: stopReason, Output: fullFinalOutput, FinalReply: lastBlockFinalReply, Usage: usage}
 }
 
 type eventWriter struct {
