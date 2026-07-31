@@ -280,6 +280,11 @@ describe('followUpTool with a local supervisor (no supervisorId)', () => {
   }))
   const originalSupervisorGet = Supervisor.get
 
+  // Per-test temporary directory so sentinel/event paths are isolated from
+  // the shared /tmp namespace and cannot be polluted by stale files (e.g. a
+  // leftover /tmp/missing-local-sentinel.done containing SESSION=...).
+  let localTmpDir = ''
+
   beforeAll(() => {
     Supervisor.get = mock(async () => ({
       runs: localSupRuns,
@@ -298,14 +303,21 @@ describe('followUpTool with a local supervisor (no supervisorId)', () => {
     localSupGetClientMock.mockClear()
     statusMock.mockClear()
     localSupRuns.clear()
+    if (localTmpDir) {
+      fs.rmSync(localTmpDir, { recursive: true, force: true })
+      localTmpDir = ''
+    }
   })
 
   it('forwards autoApprove from runInfo when live status is unavailable', async () => {
+    localTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-follow-up-local-'))
+    const sentinelPath = path.join(localTmpDir, 'sentinel.done')
+    const eventLogPath = path.join(localTmpDir, 'events.log')
     localSupRuns.set('local-auto-run', {
       runId: 'local-auto-run',
       label: 'local-auto-run',
-      sentinelPath: '/tmp/missing-local-sentinel.done',
-      eventLogPath: '/tmp/missing-local-events',
+      sentinelPath,
+      eventLogPath,
       runtimeId: 'rt-local-auto',
       sessionId: 'ses-local-auto',
       agent: 'explore',
@@ -329,11 +341,14 @@ describe('followUpTool with a local supervisor (no supervisorId)', () => {
   })
 
   it('omits auto_approve when runInfo.autoApprove is false', async () => {
+    localTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-follow-up-local-'))
+    const sentinelPath = path.join(localTmpDir, 'sentinel.done')
+    const eventLogPath = path.join(localTmpDir, 'events.log')
     localSupRuns.set('local-supervised-run', {
       runId: 'local-supervised-run',
       label: 'local-supervised-run',
-      sentinelPath: '/tmp/missing-local-sentinel.done',
-      eventLogPath: '/tmp/missing-local-events',
+      sentinelPath,
+      eventLogPath,
       runtimeId: 'rt-local-supervised',
       sessionId: 'ses-local-supervised',
       agent: 'explore',
@@ -350,11 +365,14 @@ describe('followUpTool with a local supervisor (no supervisorId)', () => {
   })
 
   it('lets live status auto_approve true override runInfo when both are present', async () => {
+    localTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-follow-up-local-'))
+    const sentinelPath = path.join(localTmpDir, 'sentinel.done')
+    const eventLogPath = path.join(localTmpDir, 'events.log')
     localSupRuns.set('local-override-run', {
       runId: 'local-override-run',
       label: 'local-override-run',
-      sentinelPath: '/tmp/missing-local-sentinel.done',
-      eventLogPath: '/tmp/missing-local-events',
+      sentinelPath,
+      eventLogPath,
       runtimeId: 'rt-local-override',
       sessionId: 'ses-local-override',
       agent: 'explore',
