@@ -751,15 +751,37 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 		supervisorID = ri.SupervisorID
 	}
 
+	// Resolve the control client once so the current-status lookup and the
+	// follow-up Spawn share a single connection.
+	cl, cleanup, err := s.getClientForSupervisor(supervisorID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer cleanup()
+
 	sessionID, err := readSentinelSession(ri.SentinelPath)
 	if err != nil {
-		// A supervisor returns session_id when it creates the runtime, before a
-		// terminal sentinel exists. Preserve failed/non-resumable sentinels as
-		// errors, but allow that durable registry value to cover a missing file.
-		if !errors.Is(err, os.ErrNotExist) || ri.SessionID == "" {
+		// Preserve failed/non-resumable sentinels as errors. A missing file may
+		// mean the supervisor has not written a terminal sentinel yet; before
+		// falling back to the spawn-time registry value, ask the live supervisor
+		// for its current session id so a headless run whose id was adopted after
+		// spawn resumes with the authoritative conversation id.
+		if !errors.Is(err, os.ErrNotExist) {
 			return nil, nil, fmt.Errorf("read sentinel session: %w", err)
 		}
-		sessionID = ri.SessionID
+		if ri.RuntimeID != "" {
+			if status, statusErr := cl.Status(ri.RuntimeID); statusErr == nil {
+				if currentID, _ := status["session_id"].(string); currentID != "" {
+					sessionID = currentID
+				}
+			}
+		}
+		if sessionID == "" {
+			if ri.SessionID == "" {
+				return nil, nil, fmt.Errorf("read sentinel session: %w", err)
+			}
+			sessionID = ri.SessionID
+		}
 	}
 
 	runID := uuid.New().String()
@@ -786,12 +808,6 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 	if ri.AutoApprove {
 		params["auto_approve"] = true
 	}
-
-	cl, cleanup, err := s.getClientForSupervisor(supervisorID)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer cleanup()
 
 	result, err := cl.Spawn(params)
 	if err != nil {

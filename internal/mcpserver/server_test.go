@@ -411,6 +411,9 @@ func TestAvenorResultReturnsTerminalOutput(t *testing.T) {
 	if result["ready"] != true || result["output"] != "final answer" {
 		t.Fatalf("unexpected result: %#v", result)
 	}
+	if sid, _ := result["session_id"].(string); sid != "ses1" {
+		t.Fatalf("result session_id = %q, want ses1 (adopted id from status)", sid)
+	}
 	if _, ok := result["usage"]; ok {
 		t.Fatal("result unexpectedly included diagnostic fields")
 	}
@@ -2482,6 +2485,55 @@ func TestAvenorFollowUpOmitsAutoApproveWhenFalseOrUnset(t *testing.T) {
 				t.Errorf("auto_approve unexpectedly forwarded: %#v", fake.spawnCapturedParams)
 			}
 		})
+	}
+}
+
+func TestAvenorFollowUpUsesCurrentSupervisorSessionWhenSentinelMissing(t *testing.T) {
+	fake := &fakeClient{
+		statusResult: map[string]any{
+			"runtime_id": "rt_live_adopted",
+			"session_id": "conv-current-real",
+			"status":     "running",
+		},
+		spawnResult: map[string]any{
+			"runtime_id": "rt_followup_live",
+			"session_id": "ses_followup_live",
+		},
+	}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Registry carries the spawn-time provisional id; the terminal sentinel is
+	// absent because the supervisor has not written one yet.
+	s.registry.Store(&RunInfo{
+		RunID:        "run-live-adopt",
+		Label:        "live-adopt",
+		RuntimeID:    "rt_live_adopted",
+		SessionID:    "agy-pending-live",
+		SentinelPath: filepath.Join(t.TempDir(), "missing-live.done"),
+		Agent:        "agy",
+		Backend:      "agy",
+		Dir:          "/tmp/live-repo",
+	})
+
+	if _, _, err := s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
+		RunID:   "run-live-adopt",
+		Message: "continue",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(fake.statusCapturedRuntimeIDs) == 0 || fake.statusCapturedRuntimeIDs[0] != "rt_live_adopted" {
+		t.Fatalf("status lookups = %#v", fake.statusCapturedRuntimeIDs)
+	}
+	p := fake.spawnCapturedParams
+	if p["session_id"] != "conv-current-real" {
+		t.Fatalf("expected adopted session conv-current-real, got %v", p["session_id"])
+	}
+	if p["backend"] != "agy" {
+		t.Fatalf("expected backend agy, got %v", p["backend"])
 	}
 }
 
