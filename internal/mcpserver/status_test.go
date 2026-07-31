@@ -280,15 +280,22 @@ func TestTranslateStatusLiveNonTerminalPhaseIgnoresSentinel(t *testing.T) {
 			} {
 				t.Run(rawStatus+"/phase="+phase+"/sentinel="+sentinel.name, func(t *testing.T) {
 					result := translateStatus(map[string]any{
-						"status":     rawStatus,
-						"session_id": "ses_live",
-						"phase":      phase,
+						"status":      rawStatus,
+						"session_id":  "ses_live",
+						"phase":       phase,
+						"phase_label": "live label",
 					}, sentinel.path)
 					if result["status"] != "running" {
 						t.Fatalf("raw status %s phase %q status = %v, want running", rawStatus, phase, result["status"])
 					}
 					if result["session_id"] != "ses_live" {
 						t.Fatalf("raw status %s phase %q session_id = %v, want ses_live", rawStatus, phase, result["session_id"])
+					}
+					if result["phase"] != phase {
+						t.Fatalf("raw status %s phase = %v, want %q", rawStatus, result["phase"], phase)
+					}
+					if result["phase_label"] != "live label" {
+						t.Fatalf("raw status %s phase_label = %v, want live label", rawStatus, result["phase_label"])
 					}
 				})
 			}
