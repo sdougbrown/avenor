@@ -2282,6 +2282,25 @@ func (s *Supervisor) answerPermission(rtID, requestID, optionID, message string)
 		return err
 	}
 	s.cleanupDirectPermission(rtID, requestID, nil)
+
+	// Emit permission.response through the fanout writer so pending_permission
+	// clears on the child runtime and the event is recorded for the audit trail.
+	rt.mu.Lock()
+	rt.pendingPermission = false
+	rt.permission = nil
+	rt.mu.Unlock()
+
+	s.control.PublishEvent(events.Event{
+		Event:     "permission.response",
+		SessionID: sessionID,
+		Fields: map[string]any{
+			"request_id": requestID,
+			"option_id":  optionID,
+			"kind":       kind,
+			"source":     "direct",
+			"ts":         time.Now().UnixMilli(),
+		},
+	})
 	return nil
 }
 
