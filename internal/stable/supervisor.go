@@ -623,6 +623,9 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 				if child.sentinelFile != "" {
 					cli.WriteSentinel(child.sentinelFile, result.exitCode, result.sessionID, runtime.StopReasonForExitCode(result.exitCode), s.runID, os.Stderr)
 				}
+				child.mu.Lock()
+				child.phase = "done"
+				child.mu.Unlock()
 				nextPrompt, ok := child.waitForNextPrompt(ctx)
 				if !ok {
 					if ctx.Err() != nil {
@@ -732,6 +735,11 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 		MaxRetries: maxRetries,
 		Broker:     s.broker,
 		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, iteration int, prevSessionID string) (looprunner.PhaseAttemptResult, error) {
+			child.mu.Lock()
+			child.phase = ""
+			child.phaseLabel = ""
+			child.mu.Unlock()
+
 			startOpts := runtime.StartOptions{
 				Agent:        agent,
 				AgentProfile: agentProfile,
@@ -783,6 +791,8 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 					child.session = runtime.Session{}
 				}
 				child.active = false
+				child.phase = ""
+				child.phaseLabel = ""
 				child.mu.Unlock()
 			}()
 
@@ -904,6 +914,11 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 		MaxRetries: maxRetries,
 		Broker:     s.broker,
 		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (teamrunner.PhaseAttemptResult, error) {
+			child.mu.Lock()
+			child.phase = ""
+			child.phaseLabel = ""
+			child.mu.Unlock()
+
 			a := agent
 			m := model
 			if phase.Agent != "" {
@@ -965,6 +980,8 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 					child.session = runtime.Session{}
 				}
 				child.active = false
+				child.phase = ""
+				child.phaseLabel = ""
 				child.mu.Unlock()
 			}()
 
@@ -1084,6 +1101,11 @@ func (c *childRuntime) sessionID() string {
 }
 
 func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, resumeID, promptText string, timer <-chan time.Time) childAttemptResult {
+	child.mu.Lock()
+	child.phase = ""
+	child.phaseLabel = ""
+	child.mu.Unlock()
+
 	session, err := s.attemptSession(ctx, child, resumeID)
 	if err != nil {
 		s.emitChildError(child, fmt.Sprintf("start session: %v", err), "error")
@@ -1103,6 +1125,8 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 		child.mu.Lock()
 		child.active = false
 		child.interruptFn = nil
+		child.phase = ""
+		child.phaseLabel = ""
 		child.mu.Unlock()
 	}()
 
