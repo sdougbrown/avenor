@@ -112,9 +112,9 @@ avenor_shutdown()
 ```
 
 1. Call `avenor_spawn` with an agent name and repository path.
-2. Call `avenor_result` to wait. It returns on the first terminal or
-   waiting state. For `pending_permission`, answer it with
-   `avenor_answer_permission` and call `avenor_result` again.
+2. Call `avenor_result` to wait. It returns on terminal completion or a
+   current pending permission. Answer the permission with
+   `avenor_answer_permission`, then call `avenor_result` again.
 3. Call `avenor_events` only when you need raw recent history.
 4. Call `avenor_shutdown` when the session is done.
 
