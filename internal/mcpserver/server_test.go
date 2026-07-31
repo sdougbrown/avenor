@@ -1620,6 +1620,135 @@ func TestAvenorStatusWithRegistry(t *testing.T) {
 	}
 }
 
+func TestAvenorStatusRegisteredParkedTerminalViews(t *testing.T) {
+	dir := t.TempDir()
+	sentinelPath := writeSentinel(t, dir, "parked.done", "DONE\nSESSION=ses_sentinel\nSTOP_REASON=end_turn\n")
+	fake := &fakeClient{statusResult: map[string]any{
+		"runtime_id":   "rt_parked",
+		"status":       "idle",
+		"session_id":   "ses_live",
+		"phase":        "done",
+		"final_output": "parked answer",
+		"usage":        map[string]any{"total_tokens": 7},
+	}}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.registry.Store(&RunInfo{RunID: "run-parked", Label: "parked", RuntimeID: "rt_parked", SentinelPath: sentinelPath})
+
+	for _, view := range []string{"", "lifecycle"} {
+		_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{RunID: "run-parked", View: view})
+		if err != nil {
+			t.Fatalf("view %q: %v", view, err)
+		}
+		status := result.(map[string]any)
+		if status["status"] != "done" || status["phase"] != "done" {
+			t.Fatalf("view %q status = %#v, want done/done", view, status)
+		}
+		if view == "" && (status["session_id"] != "ses_sentinel" || status["stop_reason"] != "end_turn") {
+			t.Fatalf("view %q metadata = %#v, want sentinel values", view, status)
+		}
+		if status["run_id"] != "run-parked" || status["label"] != "parked" {
+			t.Fatalf("view %q identity = %#v", view, status)
+		}
+		if view == "lifecycle" {
+			if _, ok := status["final_output"]; ok {
+				t.Fatal("lifecycle view included final_output")
+			}
+			if _, ok := status["usage"]; ok {
+				t.Fatal("lifecycle view included usage")
+			}
+		} else if status["final_output"] != "parked answer" {
+			t.Fatalf("full view final_output = %v", status["final_output"])
+		}
+	}
+}
+
+func TestAvenorResultParkedTerminalAndRetrySnapshots(t *testing.T) {
+	dir := t.TempDir()
+	parkedSentinel := writeSentinel(t, dir, "parked.done", "DONE\nSESSION=ses_parked\nSTOP_REASON=end_turn\n")
+	fake := &fakeClient{
+		statusResult: map[string]any{
+			"runtime_id":   "rt_parked",
+			"status":       "idle",
+			"session_id":   "ses_live",
+			"phase":        "done",
+			"final_output": "preview",
+		},
+		resultResult: map[string]any{"final_output": "complete parked answer"},
+	}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.registry.Store(&RunInfo{RunID: "run-parked", Label: "parked", RuntimeID: "rt_parked", SentinelPath: parkedSentinel})
+
+	_, value, err := s.handleAvenorResult(context.Background(), nil, resultArgs{RunID: "run-parked"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parked := value.(map[string]any)
+	if parked["ready"] != true || parked["status"] != "done" || parked["output"] != "complete parked answer" {
+		t.Fatalf("parked result = %#v", parked)
+	}
+
+	staleSentinel := writeSentinel(t, dir, "retry.done", "DONE\nSESSION=ses_stale\nSTOP_REASON=stale\n")
+	currentTime := time.Date(2026, 7, 18, 0, 0, 0, 0, time.UTC)
+	fake.statusFunc = func(runtimeID string) (map[string]any, error) {
+		currentTime = currentTime.Add(2 * time.Second)
+		return map[string]any{"runtime_id": runtimeID, "status": "idle", "session_id": "ses_retry", "phase": ""}, nil
+	}
+	fake.statusResult = nil
+	s.clock = func() time.Time { return currentTime }
+	s.registry.Store(&RunInfo{RunID: "run-retry", Label: "retry", RuntimeID: "rt_retry", SentinelPath: staleSentinel})
+	_, value, err = s.handleAvenorResult(context.Background(), nil, resultArgs{RunID: "run-retry", Timeout: "1s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry := value.(map[string]any)
+	if retry["ready"] != false || retry["status"] != "running" || retry["timed_out"] != true {
+		t.Fatalf("retry result = %#v, want bounded non-ready polling", retry)
+	}
+}
+
+func TestAvenorStatusListWithParkedAndRetrySnapshots(t *testing.T) {
+	dir := t.TempDir()
+	parkedSentinel := writeSentinel(t, dir, "parked.done", "DONE\nSESSION=ses_parked\nSTOP_REASON=end_turn\n")
+	staleSentinel := writeSentinel(t, dir, "retry.done", "DONE\nSESSION=ses_stale\nSTOP_REASON=stale\n")
+	fake := &fakeClient{listResult: []map[string]any{
+		{"runtime_id": "rt_parked", "status": "idle", "session_id": "ses_live", "phase": "done"},
+		{"runtime_id": "rt_retry", "status": "idle", "session_id": "ses_retry", "phase": ""},
+	}}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.registry.Store(&RunInfo{RunID: "run-parked", Label: "parked", RuntimeID: "rt_parked", SentinelPath: parkedSentinel})
+	s.registry.Store(&RunInfo{RunID: "run-retry", Label: "retry", RuntimeID: "rt_retry", SentinelPath: staleSentinel})
+
+	_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := result.([]map[string]any)
+	if len(list) != 2 {
+		t.Fatalf("list length = %d, want 2", len(list))
+	}
+	if list[0]["status"] != "done" || list[0]["phase"] != "done" || list[0]["session_id"] != "ses_parked" || list[0]["stop_reason"] != "end_turn" {
+		t.Fatalf("parked list entry = %#v", list[0])
+	}
+	if list[0]["run_id"] != "run-parked" || list[0]["label"] != "parked" {
+		t.Fatalf("parked list identity = %#v", list[0])
+	}
+	if list[1]["status"] != "running" || list[1]["phase"] != "" || list[1]["session_id"] != "ses_retry" {
+		t.Fatalf("retry list entry = %#v", list[1])
+	}
+	if list[1]["run_id"] != "run-retry" || list[1]["label"] != "retry" {
+		t.Fatalf("retry list identity = %#v", list[1])
+	}
+}
+
 func TestAvenorStatusListWithRegistry(t *testing.T) {
 	dir := t.TempDir()
 	sentinelPath := filepath.Join(dir, "list-run.done")
