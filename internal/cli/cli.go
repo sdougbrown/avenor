@@ -799,6 +799,9 @@ type SessionWaitDeps struct {
 	FileHandler   *permission.FileHandler
 	ControlServer *control.ControlServer
 	Stderr        io.Writer
+	// ProgressTimerC overrides the progress timer channel; nil preserves the
+	// normal wall-clock timer behavior.
+	ProgressTimerC <-chan time.Time
 }
 
 func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionWaitConfig, deps SessionWaitDeps) sessionResult {
@@ -818,7 +821,9 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 
 	var progressTimerC <-chan time.Time
 	var progressTimer *time.Timer
-	if cfg.ProgressTimeout > 0 {
+	if deps.ProgressTimerC != nil {
+		progressTimerC = deps.ProgressTimerC
+	} else if cfg.ProgressTimeout > 0 {
 		progressTimer = time.NewTimer(cfg.ProgressTimeout)
 		defer progressTimer.Stop()
 		progressTimerC = progressTimer.C

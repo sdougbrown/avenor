@@ -83,6 +83,27 @@ func (s *permissionLifecycleSink) Write(event events.Event) error {
 
 func (s *permissionLifecycleSink) Close() error { return nil }
 
+type signalEventSink struct {
+	EventSink
+	eventName string
+	field     string
+	value     string
+	signal    chan struct{}
+	once      sync.Once
+}
+
+func (s *signalEventSink) Write(event events.Event) error {
+	if err := s.EventSink.Write(event); err != nil {
+		return err
+	}
+	if event.Event == s.eventName {
+		if value, _ := event.Fields[s.field].(string); value == s.value {
+			s.once.Do(func() { close(s.signal) })
+		}
+	}
+	return nil
+}
+
 func (f *cliFakeProvider) Start(ctx context.Context, opts runtime.StartOptions) (runtime.Session, error) {
 	return runtime.Session{}, nil
 }
@@ -3938,7 +3959,35 @@ func TestWaitForSessionCancelAndEndUsesFullReply(t *testing.T) {
 		const lastBlockReply = "After the tool."
 
 		result, logged := runSessionEventLogTest(t, func(writer EventSink) sessionResult {
-			return cancelAndEnd(&cliFakeProvider{}, writer, "ses_cancel", "run_cancel", "", "progress_timeout", io.Discard, nil, fullOutput, lastBlockReply)
+			progressTimerC := make(chan time.Time, 1)
+			messageWritten := make(chan struct{})
+			eventCh := make(chan events.Event)
+			signalWriter := &signalEventSink{
+				EventSink: writer,
+				eventName: "agent.message_chunk",
+				field:     "delta",
+				value:     lastBlockReply,
+				signal:    messageWritten,
+			}
+			resultCh := make(chan sessionResult, 1)
+			go func() {
+				resultCh <- WaitForSession(context.Background(), &cliFakeProvider{}, SessionWaitConfig{
+					EventCh:   eventCh,
+					SessionID: "ses_cancel",
+					RunID:     "run_cancel",
+				}, SessionWaitDeps{
+					Writer:         signalWriter,
+					Stderr:         io.Discard,
+					ProgressTimerC: progressTimerC,
+				})
+			}()
+
+			eventCh <- msg("Before the tool. ")
+			eventCh <- toolCall
+			eventCh <- msg(lastBlockReply)
+			<-messageWritten
+			progressTimerC <- time.Time{}
+			return <-resultCh
 		})
 		if result.StopReason != "progress_timeout" {
 			t.Fatalf("StopReason = %q, want progress_timeout", result.StopReason)
@@ -3948,6 +3997,12 @@ func TestWaitForSessionCancelAndEndUsesFullReply(t *testing.T) {
 		}
 
 		last := logged[len(logged)-1]
+		if last.Event != "session.end" {
+			t.Fatalf("last event = %q, want session.end", last.Event)
+		}
+		if last.Fields["stop_reason"] != "progress_timeout" {
+			t.Fatalf("stop_reason = %v, want progress_timeout", last.Fields["stop_reason"])
+		}
 		got, ok := last.Fields["final_output"].(string)
 		if !ok || got != fullOutput {
 			t.Fatalf("final_output = %q (present=%t), want %q", got, ok, fullOutput)
