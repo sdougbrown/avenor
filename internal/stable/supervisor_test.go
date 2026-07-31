@@ -579,6 +579,14 @@ func TestRunLoopChildClearsPhaseDuringRetryBackoff(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("first loop retry event was not emitted")
 	}
+	// openSession emits the first signal before child.active is true.
+	// Wait for Prompt's signal to ensure session.end ran; otherwise the
+	// assertion can observe the empty pre-attempt setup state.
+	select {
+	case <-provider.emitted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first loop retry prompt event was not emitted")
+	}
 	waitForStableChild(t, child, func(active bool, completed bool, phase, phaseLabel string) bool {
 		return !active && phase == ""
 	})
@@ -610,6 +618,14 @@ func TestRunTeamChildClearsPhaseDuringRetryBackoff(t *testing.T) {
 	case <-provider.emitted:
 	case <-time.After(2 * time.Second):
 		t.Fatal("first team retry event was not emitted")
+	}
+	// openSession emits the first signal before child.active is true.
+	// Wait for Prompt's signal to ensure session.end ran; otherwise the
+	// assertion can observe the empty pre-attempt setup state.
+	select {
+	case <-provider.emitted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first team retry prompt event was not emitted")
 	}
 	waitForStableChild(t, child, func(active bool, completed bool, phase, phaseLabel string) bool {
 		return !active && phase == ""
@@ -684,6 +700,9 @@ func waitForStableDone(t *testing.T, child *childRuntime) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("stable child did not finish")
 	}
+	waitForStableChild(t, child, func(_ bool, completed bool, _ string, _ string) bool {
+		return completed
+	})
 }
 
 func TestShutdownTimeoutDoesNotHangWithMultipleStuckRuntimes(t *testing.T) {

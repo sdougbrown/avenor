@@ -146,44 +146,63 @@ func TestTranslateStatusBlockedSentinel(t *testing.T) {
 	}
 }
 
-func TestTranslateStatusLiveTerminalPhases(t *testing.T) {
-	for _, rawStatus := range []string{"idle", "running"} {
-		for _, phase := range []string{"done", "failed", "timeout", "killed"} {
-			raw := map[string]any{
-				"status":      rawStatus,
-				"session_id":  "ses_raw",
-				"phase":       phase,
-				"stop_reason": "raw_reason",
-			}
-			result := translateStatus(raw, "")
-			if result["status"] == "running" {
-				t.Errorf("raw status %s phase %s returned running: %#v", rawStatus, phase, result)
-			}
-			if result["phase"] != phase {
-				t.Errorf("raw status %s phase = %v, want %s", rawStatus, result["phase"], phase)
-			}
-			if result["session_id"] != "ses_raw" {
-				t.Errorf("raw status %s phase %s session_id = %v, want ses_raw", rawStatus, phase, result["session_id"])
-			}
-			if result["stop_reason"] != "raw_reason" {
-				t.Errorf("raw status %s phase %s stop_reason = %v, want raw_reason", rawStatus, phase, result["stop_reason"])
-			}
+func TestTranslateStatusIdleTerminalPhases(t *testing.T) {
+	// Terminal phase metadata determines an idle runtime's public state.
+	for _, phase := range []string{"done", "failed", "timeout", "killed"} {
+		raw := map[string]any{
+			"status":      "idle",
+			"session_id":  "ses_raw",
+			"phase":       phase,
+			"stop_reason": "raw_reason",
+		}
+		result := translateStatus(raw, "")
+		if result["status"] == "running" {
+			t.Errorf("idle phase %s returned running: %#v", phase, result)
+		}
+		if result["phase"] != phase {
+			t.Errorf("idle phase = %v, want %s", result["phase"], phase)
+		}
+		if result["session_id"] != "ses_raw" {
+			t.Errorf("idle phase %s session_id = %v, want ses_raw", phase, result["session_id"])
+		}
+		if result["stop_reason"] != "raw_reason" {
+			t.Errorf("idle phase %s stop_reason = %v, want raw_reason", phase, result["stop_reason"])
 		}
 	}
 }
 
-func TestTranslateStatusParkedSuccessUsesDoneSentinel(t *testing.T) {
-	dir := t.TempDir()
-	path := writeSentinel(t, dir, "parked.sentinel", "DONE\nSESSION=ses_done\nSTOP_REASON=end_turn\n")
+func TestTranslateStatusRunningTerminalPhaseStaysRunning(t *testing.T) {
+	for _, phase := range []string{"done", "failed", "timeout", "killed"} {
+		raw := map[string]any{
+			"status":      "running",
+			"session_id":  "ses_active",
+			"phase":       phase,
+			"stop_reason": "active_failure",
+		}
+		result := translateStatus(raw, "")
+		if result["status"] != "running" {
+			t.Errorf("running phase %s status = %v, want running (transient race must not promote)", phase, result["status"])
+		}
+		if result["phase"] != "" || result["phase_label"] != "" {
+			t.Errorf("running phase %s public phase = %q/%q, want empty", phase, result["phase"], result["phase_label"])
+		}
+		if result["session_id"] != "ses_active" {
+			t.Errorf("running phase %s session_id = %v, want ses_active", phase, result["session_id"])
+		}
+	}
+}
+
+func TestTranslateStatusParkedSuccessUsesCurrentMetadata(t *testing.T) {
+	path := writeSentinel(t, t.TempDir(), "parked.sentinel", "DONE\nSESSION=ses_stale\nSTOP_REASON=stale\n")
 
 	result := translateStatus(map[string]any{
 		"status":      "idle",
 		"session_id":  "ses_live",
 		"phase":       "done",
-		"stop_reason": "raw_reason",
+		"stop_reason": "end_turn",
 	}, path)
-	if result["status"] != "done" || result["session_id"] != "ses_done" || result["stop_reason"] != "end_turn" {
-		t.Fatalf("parked success = %#v, want sentinel terminal metadata", result)
+	if result["status"] != "done" || result["session_id"] != "ses_live" || result["stop_reason"] != "end_turn" {
+		t.Fatalf("parked success = %#v, want current raw metadata", result)
 	}
 }
 
@@ -212,35 +231,35 @@ func TestTranslateStatusRunningTerminalPhaseIgnoresStaleSentinel(t *testing.T) {
 		"phase":       "failed",
 		"stop_reason": "active_failure",
 	}, path)
-	if result["status"] != "failed" {
-		t.Fatalf("status = %v, want failed from active phase", result["status"])
+	// An active runtime remains public "running" when its raw phase is terminal; retries are not complete.
+	if result["status"] != "running" {
+		t.Fatalf("status = %v, want running (running runtime must not promote terminal phase)", result["status"])
 	}
-	if result["session_id"] != "ses_active" || result["stop_reason"] != "active_failure" {
-		t.Fatalf("active terminal metadata = %#v, want raw values", result)
+	if result["session_id"] != "ses_active" {
+		t.Fatalf("session_id = %v, want ses_active", result["session_id"])
 	}
 }
 
-func TestTranslateStatusIdleTerminalPhaseSentinelPrecedence(t *testing.T) {
+func TestTranslateStatusIdleTerminalPhaseIgnoresStaleSentinel(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		status string
-		want   string
 	}{
-		{name: "failed", status: "FAILED", want: "failed"},
-		{name: "timeout", status: "TIMEOUT", want: "timeout"},
-		{name: "killed", status: "KILLED", want: "killed"},
+		{name: "done", status: "DONE"},
+		{name: "failed", status: "FAILED"},
+		{name: "timeout", status: "TIMEOUT"},
+		{name: "killed", status: "KILLED"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			path := writeSentinel(t, dir, tc.name+".sentinel", tc.status+"\nSESSION=ses_sentinel\nSTOP_REASON=sentinel_reason\n")
+			path := writeSentinel(t, t.TempDir(), tc.name+".sentinel", tc.status+"\nSESSION=ses_stale\nSTOP_REASON=stale_reason\n")
 			result := translateStatus(map[string]any{
 				"status":      "idle",
-				"session_id":  "ses_raw",
-				"phase":       "done",
-				"stop_reason": "raw_reason",
+				"session_id":  "ses_current",
+				"phase":       tc.name,
+				"stop_reason": "current_reason",
 			}, path)
-			if result["status"] != tc.want || result["session_id"] != "ses_sentinel" || result["stop_reason"] != "sentinel_reason" {
-				t.Fatalf("translated status = %#v, want sentinel %s metadata", result, tc.want)
+			if result["status"] != tc.name || result["session_id"] != "ses_current" || result["stop_reason"] != "current_reason" {
+				t.Fatalf("translated status = %#v, want current phase metadata", result)
 			}
 		})
 	}

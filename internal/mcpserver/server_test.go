@@ -1622,12 +1622,13 @@ func TestAvenorStatusWithRegistry(t *testing.T) {
 
 func TestAvenorStatusRegisteredParkedTerminalViews(t *testing.T) {
 	dir := t.TempDir()
-	sentinelPath := writeSentinel(t, dir, "parked.done", "DONE\nSESSION=ses_sentinel\nSTOP_REASON=end_turn\n")
+	sentinelPath := writeSentinel(t, dir, "parked.done", "DONE\nSESSION=ses_stale\nSTOP_REASON=stale\n")
 	fake := &fakeClient{statusResult: map[string]any{
 		"runtime_id":   "rt_parked",
 		"status":       "idle",
 		"session_id":   "ses_live",
 		"phase":        "done",
+		"stop_reason":  "current_turn",
 		"final_output": "parked answer",
 		"usage":        map[string]any{"total_tokens": 7},
 	}}
@@ -1646,8 +1647,8 @@ func TestAvenorStatusRegisteredParkedTerminalViews(t *testing.T) {
 		if status["status"] != "done" || status["phase"] != "done" {
 			t.Fatalf("view %q status = %#v, want done/done", view, status)
 		}
-		if view == "" && (status["session_id"] != "ses_sentinel" || status["stop_reason"] != "end_turn") {
-			t.Fatalf("view %q metadata = %#v, want sentinel values", view, status)
+		if view == "" && (status["session_id"] != "ses_live" || status["stop_reason"] != "current_turn") {
+			t.Fatalf("view %q metadata = %#v, want current raw values", view, status)
 		}
 		if status["run_id"] != "run-parked" || status["label"] != "parked" {
 			t.Fatalf("view %q identity = %#v", view, status)
@@ -1674,6 +1675,7 @@ func TestAvenorResultParkedTerminalAndRetrySnapshots(t *testing.T) {
 			"status":       "idle",
 			"session_id":   "ses_live",
 			"phase":        "done",
+			"stop_reason":  "current_turn",
 			"final_output": "preview",
 		},
 		resultResult: map[string]any{"final_output": "complete parked answer"},
@@ -1689,7 +1691,7 @@ func TestAvenorResultParkedTerminalAndRetrySnapshots(t *testing.T) {
 		t.Fatal(err)
 	}
 	parked := value.(map[string]any)
-	if parked["ready"] != true || parked["status"] != "done" || parked["output"] != "complete parked answer" {
+	if parked["ready"] != true || parked["status"] != "done" || parked["output"] != "complete parked answer" || parked["session_id"] != "ses_live" || parked["stop_reason"] != "current_turn" {
 		t.Fatalf("parked result = %#v", parked)
 	}
 
@@ -1714,10 +1716,10 @@ func TestAvenorResultParkedTerminalAndRetrySnapshots(t *testing.T) {
 
 func TestAvenorStatusListWithParkedAndRetrySnapshots(t *testing.T) {
 	dir := t.TempDir()
-	parkedSentinel := writeSentinel(t, dir, "parked.done", "DONE\nSESSION=ses_parked\nSTOP_REASON=end_turn\n")
+	parkedSentinel := writeSentinel(t, dir, "parked.done", "DONE\nSESSION=ses_stale\nSTOP_REASON=stale\n")
 	staleSentinel := writeSentinel(t, dir, "retry.done", "DONE\nSESSION=ses_stale\nSTOP_REASON=stale\n")
 	fake := &fakeClient{listResult: []map[string]any{
-		{"runtime_id": "rt_parked", "status": "idle", "session_id": "ses_live", "phase": "done"},
+		{"runtime_id": "rt_parked", "status": "idle", "session_id": "ses_live", "phase": "done", "stop_reason": "current_turn"},
 		{"runtime_id": "rt_retry", "status": "idle", "session_id": "ses_retry", "phase": ""},
 	}}
 	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
@@ -1735,7 +1737,7 @@ func TestAvenorStatusListWithParkedAndRetrySnapshots(t *testing.T) {
 	if len(list) != 2 {
 		t.Fatalf("list length = %d, want 2", len(list))
 	}
-	if list[0]["status"] != "done" || list[0]["phase"] != "done" || list[0]["session_id"] != "ses_parked" || list[0]["stop_reason"] != "end_turn" {
+	if list[0]["status"] != "done" || list[0]["phase"] != "done" || list[0]["session_id"] != "ses_live" || list[0]["stop_reason"] != "current_turn" {
 		t.Fatalf("parked list entry = %#v", list[0])
 	}
 	if list[0]["run_id"] != "run-parked" || list[0]["label"] != "parked" {
