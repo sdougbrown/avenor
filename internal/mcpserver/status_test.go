@@ -248,22 +248,32 @@ func TestTranslateStatusIdleTerminalPhaseSentinelPrecedence(t *testing.T) {
 
 func TestTranslateStatusLiveNonTerminalPhaseIgnoresSentinel(t *testing.T) {
 	dir := t.TempDir()
-	path := writeSentinel(t, dir, "stale.sentinel", "DONE\nSESSION=ses_stale\nSTOP_REASON=stale\n")
+	stalePath := writeSentinel(t, dir, "stale.sentinel", "DONE\nSESSION=ses_stale\nSTOP_REASON=stale\n")
 
-	for _, phase := range []string{"", "working", "waiting", "unknown"} {
-		t.Run("phase="+phase, func(t *testing.T) {
-			result := translateStatus(map[string]any{
-				"status":     "idle",
-				"session_id": "ses_live",
-				"phase":      phase,
-			}, path)
-			if result["status"] != "running" {
-				t.Fatalf("phase %q status = %v, want running", phase, result["status"])
+	for _, rawStatus := range []string{"idle", "running"} {
+		for _, phase := range []string{"", "working", "waiting", "unknown"} {
+			for _, sentinel := range []struct {
+				name string
+				path string
+			}{
+				{name: "absent", path: ""},
+				{name: "stale", path: stalePath},
+			} {
+				t.Run(rawStatus+"/phase="+phase+"/sentinel="+sentinel.name, func(t *testing.T) {
+					result := translateStatus(map[string]any{
+						"status":     rawStatus,
+						"session_id": "ses_live",
+						"phase":      phase,
+					}, sentinel.path)
+					if result["status"] != "running" {
+						t.Fatalf("raw status %s phase %q status = %v, want running", rawStatus, phase, result["status"])
+					}
+					if result["session_id"] != "ses_live" {
+						t.Fatalf("raw status %s phase %q session_id = %v, want ses_live", rawStatus, phase, result["session_id"])
+					}
+				})
 			}
-			if result["session_id"] != "ses_live" {
-				t.Fatalf("phase %q session_id = %v, want ses_live", phase, result["session_id"])
-			}
-		})
+		}
 	}
 }
 
