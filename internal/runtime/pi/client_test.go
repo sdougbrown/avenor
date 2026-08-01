@@ -455,6 +455,34 @@ func TestStartClientForwardsAgentAndModel(t *testing.T) {
 	}
 }
 
+func TestStartClientEmptyAgent(t *testing.T) {
+	original := piExecCommandContext
+	t.Cleanup(func() { piExecCommandContext = original })
+
+	var captured *exec.Cmd
+	piExecCommandContext = func(_ context.Context, _ string, _ ...string) *exec.Cmd {
+		captured = exec.Command("cat")
+		return captured
+	}
+
+	client, err := StartClientWithAgentAndDir(
+		context.Background(), "anthropic", "sonnet", "", "", "",
+	)
+	if err != nil {
+		t.Fatalf("StartClientWithAgentAndDir: %v", err)
+	}
+	defer client.Close()
+
+	if captured == nil {
+		t.Fatal("pi command was not created")
+	}
+	for _, entry := range captured.Env {
+		if strings.HasPrefix(entry, "PI_AGENT=") {
+			t.Fatalf("PI_AGENT should not be set when agent is empty, got %q", entry)
+		}
+	}
+}
+
 func TestStartClientReplacesAgentProfileEnvironment(t *testing.T) {
 	original := piExecCommandContext
 	t.Cleanup(func() { piExecCommandContext = original })
