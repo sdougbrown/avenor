@@ -66,6 +66,7 @@ A JSON file with three top-level keys:
 | `pre` | `Phase[]` | At least one of `pre` or `loop` must be non-empty | Phases that run once, in order, before the loop |
 | `loop` | `Phase[]` | At least one of `pre` or `loop` must be non-empty | Phases that repeat until an exit condition fires |
 | `max_iterations` | `int` | No — defaults to `10` | Maximum loop iterations. Must be ≥ 1 when `loop` is non-empty |
+| `roster_file` | `string` | No | Path to a roster map. Workflow phases select entries with `roster_entry` |
 
 ### Phase fields
 
@@ -77,8 +78,56 @@ Each phase object requires:
 | `prompt` | `string` | One of `prompt` or `prompt_file` | Inline prompt text sent to the agent. Supports template variables |
 | `prompt_file` | `string` | One of `prompt` or `prompt_file` | Path to a file containing the prompt. Relative paths are resolved from the config file's directory. Supports template variables |
 | `resume_from_previous` | `boolean` | No — defaults to `false` | Resume the immediately preceding phase's session instead of starting fresh |
+| `roster_entry` | `string` | No | Key in the workflow roster; valid only for a direct prompt or prompt-file phase |
 
 Phase names must be unique across `pre` and `loop`. The name `(initial)` is reserved for the implicit pre-phase created when you pass `--prompt` or `--prompt-file` alongside `--loop-file`.
+
+## Roster-backed phases
+
+A roster is a top-level JSON map. `roster_file` identifies that map; `roster_entry` identifies one key within it. Every entry requires `backend` and at least one of `agent` or `model`:
+
+```json
+{
+  "planner": {"backend": "opencode-acp", "model": "provider/planner"},
+  "tester": {"backend": "agy", "model": "provider/tester"}
+}
+```
+
+The following is a complete loop config. Save it as `/tmp/avenor-loop/loop.json` beside `/tmp/avenor-loop/roster.json`, then run it with the command shown:
+
+```sh
+mkdir -p /tmp/avenor-loop
+cat >/tmp/avenor-loop/roster.json <<'JSON'
+{
+  "planner": {"backend": "opencode-acp", "model": "provider/planner"},
+  "tester": {"backend": "agy", "model": "provider/tester"}
+}
+JSON
+cat >/tmp/avenor-loop/loop.json <<'JSON'
+{
+  "roster_file": "roster.json",
+  "pre": [{
+    "name": "plan",
+    "roster_entry": "planner",
+    "prompt": "Write a short plan to plan.md."
+  }],
+  "loop": [{
+    "name": "test",
+    "roster_entry": "tester",
+    "prompt": "Run the tests and emit <|workflow: exit | tests complete|> when done."
+  }]
+}
+JSON
+avenor run --dir /tmp/avenor-loop --loop-file /tmp/avenor-loop/loop.json
+```
+
+A phase roster entry selects the complete backend/agent/model identity for that phase and overrides the run-level identity. Without an entry, existing loop behavior is unchanged; loop phases still do not accept inline `agent` or `model`. A `roster_entry` cannot be combined with `loop_file` or `team_file` (those phases dispatch another workflow instead of a direct session).
+
+Roster files use strict decoding. `system`, `thinking`, and misspelled entry fields are not supported. Run-level `thinking` remains an independent option and is validated against each phase's effective backend, so one workflow may fail early when an explicit value is unsupported by a selected roster backend.
+
+When loaded by the CLI, a config-declared `roster_file` is relative to the loop config. If the root config has no declaration, command-level `--roster-file` is a fallback relative to `--dir`; nested CLI loads receive no fallback. A child with no declaration inherits the parent's already loaded entries, recursively, while a child declaration replaces them. `--roster-entry` is not a command-level workflow selector. Stable nesting retains its existing behavior and does not receive this CLI-only inheritance.
+
+If `resume_from_previous` is set, the resuming phase must select the same effective backend as the session it resumes. A different roster backend is rejected rather than migrating the conversation across providers.
 
 ## Loop markers
 

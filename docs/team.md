@@ -74,6 +74,7 @@ A JSON file with three top-level keys:
 | `pre` | `Phase[]` | At least one of `pre` or `team` must be non-empty | Phases that run once, in order, before the parallel team |
 | `team` | `Phase[]` | At least one of `pre` or `team` must be non-empty | Phases that run in parallel as team members |
 | `post` | `Phase[]` | No | Phases that run once, in order, after all team members complete |
+| `roster_file` | `string` | No | Path to a roster map. Direct phases select entries with `roster_entry` |
 
 ### Phase fields
 
@@ -90,10 +91,53 @@ Each phase object:
 | `conditional` | `boolean` | No — defaults to `false` | Whether the pre phase can instruct Avenor to skip this team member |
 | `agent` | `string` | No | Agent override for this team member. Ignored for pre and post phases |
 | `model` | `string` | No | Model override for this team member. Ignored for pre and post phases |
+| `roster_entry` | `string` | No | Key in the workflow roster; valid only for a direct prompt or prompt-file phase |
 
 Phase names must be unique across `pre`, `team`, and `post`. The name `(initial)` is reserved for the implicit pre-phase created when you pass `--prompt` or `--prompt-file` alongside `--team-file`.
 
 `loop_file` and `team_file` are mutually exclusive. `prompt` and `prompt_file` are mutually exclusive. A phase that sets `loop_file` or `team_file` cannot also set `prompt` or `prompt_file`.
+
+## Roster-backed phases
+
+A roster file is a top-level JSON map. `roster_file` names the file and `roster_entry` names an entry. Each entry requires `backend` and at least one of `agent` or `model`; `system` and `thinking` are not roster fields and are rejected by strict decoding.
+
+This is a complete team configuration with per-phase backend selection:
+
+```sh
+mkdir -p /tmp/avenor-team
+cat >/tmp/avenor-team/roster.json <<'JSON'
+{
+  "planner": {"backend": "opencode-acp", "model": "provider/planner"},
+  "reviewer": {"backend": "agy", "model": "provider/reviewer"}
+}
+JSON
+cat >/tmp/avenor-team/team.json <<'JSON'
+{
+  "roster_file": "roster.json",
+  "pre": [{
+    "name": "plan",
+    "roster_entry": "planner",
+    "prompt": "Write the review plan to plan.md."
+  }],
+  "team": [{
+    "name": "review",
+    "roster_entry": "reviewer",
+    "prompt": "Review the repository and write findings to review.md."
+  }],
+  "post": [{
+    "name": "report",
+    "prompt": "Summarize plan.md and review.md."
+  }]
+}
+JSON
+avenor run --dir /tmp/avenor-team --team-file /tmp/avenor-team/team.json
+```
+
+A phase roster entry supplies the complete backend/agent/model identity and overrides the run-level identity for that phase. Without an entry, existing team behavior remains unchanged: team members may use their existing inline `agent` and `model` overrides, while pre and post phases do not. A roster entry cannot be combined with inline identity fields or with `loop_file`/`team_file`.
+
+Run-level `thinking` remains outside the roster and is checked against each phase's effective backend. A selected backend that does not support an explicit value fails before that phase starts. A pre or post phase using `resume_from_previous` must use the same effective backend as the session it resumes; cross-backend conversation migration is rejected. Team members always start fresh, so `resume_from_previous` has no effect on team members.
+
+When the CLI loads a team config, a declared `roster_file` is relative to that config. If the root has no declaration, command-level `--roster-file` is a fallback relative to `--dir`; nested CLI configs inherit the already loaded entries only when they omit `roster_file`, recursively. A declaration replaces the inherited roster. `--roster-entry` is not a command-level workflow selector. Stable nesting retains its existing behavior and does not receive this CLI-only inheritance rule.
 
 ## Conditional members
 

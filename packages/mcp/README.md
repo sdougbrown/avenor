@@ -94,18 +94,36 @@ Start a new agent run.
 
 | Parameter | Required | Description |
 |---|---|---|
-| `agent` | yes | Agent to invoke: `codex`, `claude`, `gemini`, `butler` |
+| `agent` | no | Agent to invoke; omission uses the supplied model or runtime defaults |
 | `repo_dir` | yes | Working directory for the agent |
 | `prompt` | no | Prompt text (mutually exclusive with `prompt_file`) |
 | `prompt_file` | no | Path to a prompt file |
 | `label` | no | Human-readable label for this run |
 | `timeout` | no | Duration string (`5m`, `1h`, `90s`) |
 | `model` | no | Model override for the agent |
+| `thinking` | no | Run-level reasoning control; unsupported effective backends reject explicit values |
 | `backend` | no | Backend override (`opencode-http`, `opencode-acp`, `codex-app-server`, `agy`) |
+| `roster_file` | no | Path to a top-level roster map |
+| `roster_entry` | no | Key within `roster_file`; selects the complete backend/agent/model identity |
 | `server_url` | no | Backend server URL, required by `opencode-http` unless configured by environment |
 | `supervisor_id` | no | Supervisor ID for multi-supervisor setups |
 
 Returns `{ run_id, label, supervisor_id }`. The `run_id` is what you pass to the other tools.
+
+#### Direct and roster modes
+
+Use both `roster_file` and `roster_entry` for roster mode. A roster entry requires `backend` plus at least one of `agent` or `model`, and cannot be mixed with direct `agent`, `model`, or `backend` fields. Direct mode permits all three identity fields to be omitted independently, including a backend-only request; omitted values use runtime defaults.
+
+```json
+{
+  "repo_dir": "/repo",
+  "prompt": "Analyze the repository",
+  "roster_file": "/repo/roster.json",
+  "roster_entry": "planner"
+}
+```
+
+The roster map is strict and currently supports only `backend`, `agent`, and `model` in each entry. `system` and `thinking` are not roster fields. The `thinking` argument remains run-level and is validated against the effective backend chosen by the direct request or roster entry. A resumed session cannot switch to a different backend.
 
 ### `avenor_status`
 

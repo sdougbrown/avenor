@@ -77,7 +77,10 @@ Spawn parameters (all optional except one prompt source):
 | `--agent` | string | Agent name (e.g. `jockey`, `butler`). Backend-specific |
 | `--label` | string | Free-form label for log correlation and list output |
 | `--model` | string | Backend-specific model ID (e.g. `claude-sonnet-4-5`) |
-| `--backend` | string | Runtime backend (opencode-acp, opencode-http, codex-app-server, agy, gemini-acp, cursor-acp, pi). Defaults to opencode-acp |
+| `--thinking` | string | Run-level backend-native reasoning level; validated against the effective backend |
+| `--backend` | string | Runtime backend (opencode-acp, opencode-http, codex-app-server, agy, gemini-acp, cursor-acp, pi). Defaults to opencode-acp in direct mode |
+| `--roster-file` | string | Roster map for direct selection, or root workflow fallback |
+| `--roster-entry` | string | Entry key for direct selection; invalid with `--loop-file` or `--team-file` |
 | `--server-url` | string | External ACP server endpoint for opencode-http backend |
 | `--on-event` | string | Path to write NDJSON events. Auto-created under `$TMPDIR/avenor-stable/<supervisor_run_id>/<runtime_id>/events.ndjson` if not set |
 | `--sentinel-file` | string | Path to write completion sentinel (exit code, session ID, stop reason). Auto-created under `$TMPDIR/avenor-stable/<supervisor_run_id>/<runtime_id>/sentinel.env` if not set |
@@ -96,6 +99,32 @@ Spawn returns immediately with the runtime ID and paths to the event log and sen
   "sentinel_file": "/tmp/pr42-done.env"
 }
 ```
+
+### Roster selection
+
+A roster file is a top-level JSON map. `roster_file` is its path and `roster_entry` is the key to select. Each entry requires `backend` plus at least one of `agent` or `model`; an entry may provide both. Roster entries contain only those identity fields, so `system` and `thinking` are not supported and strict decoding rejects them.
+
+```sh
+cat >/tmp/avenor-roster.json <<'JSON'
+{
+  "planner": {
+    "backend": "opencode-acp",
+    "model": "provider/planner"
+  }
+}
+JSON
+avenor control --socket /tmp/avenor-stable.sock spawn \\
+  --prompt "Analyze this repository" \\
+  --dir "$PWD" \\
+  --roster-file /tmp/avenor-roster.json \\
+  --roster-entry planner
+```
+
+Direct selection requires the `roster_file`/`roster_entry` pair and excludes direct `agent`, `model`, and `backend` overrides. Without roster selection, direct `agent`, `model`, and `backend` are independently optional: omitting agent and model uses the selected backend's defaults, and `--backend opencode-acp` alone is valid. In roster mode the entry's backend wins; stable does not apply its direct default backend over the entry.
+
+A roster phase in a loop or team config is a per-phase override of the run-level backend, agent, and model. Phases without `roster_entry` retain the existing run-level selection. The command-level `--roster-file` is only a root workflow fallback; `--roster-entry` is never a workflow selector. A declared workflow `roster_file` is resolved relative to that loop/team config, while a relative command fallback is resolved relative to the selected `--dir`. Nested stable workflow behavior is unchanged: the CLI-only roster inheritance rule does not apply to stable nesting. Use a roster declaration in the nested config where stable's existing workflow contract requires one.
+
+Run-level `--thinking` stays outside the roster and is validated after each phase's effective backend is known. For example, a roster entry selecting `agy` rejects an explicit `--thinking low`, because Agy does not support that setting. `resume_from_previous` and an explicit session resume also require the effective backend to match the session's backend; a roster cannot move a conversation to another provider.
 
 ### Prompt Sources
 

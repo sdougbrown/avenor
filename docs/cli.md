@@ -29,12 +29,15 @@ avenor [flags]  # equivalent; explicit "run" is optional
 | `--prompt` | (none) | Inline prompt text; mutually exclusive with `--prompt-file` |
 | `--prompt-file` | (none) | Path to prompt file; mutually exclusive with `--prompt` |
 | `--loop-file` | (none) | Path to multi-phase loop config JSON; enables looping mode (incompatible with `--resume`) |
+| `--roster-file` | (none) | Path to a roster map for direct selection, or the root workflow fallback |
+| `--roster-entry` | (none) | Entry key within `--roster-file` for a direct spawn; invalid with a workflow file |
 | `--label` | (none) | Free-form label for log correlation; appears in events and sentinel |
 | `--dir` | `.` | Working directory for the agent |
 | `--resume` | (none) | Resume an existing session by ID; incompatible with `--loop-file` |
 | `--server-url` | (none) | Long-lived ACP server endpoint; required for `--backend opencode-http` |
 | `--backend` | `opencode-acp` | Runtime backend: `opencode-acp`, `agy`, `gemini-acp`, `cursor-acp`, `codex-app-server`, `opencode-http`, `claude-channel` |
 | `--model` | (none) | Backend-specific model ID; if not set, resolved from opencode config via `--agent` |
+| `--thinking` | (none) | Backend-native reasoning level; validated against the effective backend |
 | `--on-event` | (none) | Path to write NDJSON event stream; events are discarded if unset |
 | `--sentinel-file` | (none) | Path to write a completion sentinel (exit code, session ID, stop reason); also derives permission handler unless `--permission-handler` is set |
 | `--permission-handler` | (derived) | Permission resolver: `file:<path>` for file-based answers, or omitted for socket/auto-approve only. If `--sentinel-file` is set and `--permission-handler` is not, defaults to `file:<sentinel-base>` |
@@ -65,6 +68,76 @@ avenor run --prompt "find bugs" --max-retries 3 \
 ```
 
 See [loop.md](loop.md) for multi-phase loop config.
+
+### Roster selection
+
+A roster is a JSON map from a name to a complete backend/agent/model loadout. `roster_file` names the map; `roster_entry` names one key inside it. Every entry must contain `backend` and at least one of `agent` or `model`:
+
+```json
+{
+  "planner": {
+    "backend": "opencode-acp",
+    "model": "provider/model"
+  },
+  "executor": {
+    "backend": "agy",
+    "agent": "windsurf-swe"
+  }
+}
+```
+
+Direct mode selects an entry with both flags and does not accept direct identity overrides:
+
+```sh
+avenor run --prompt "Analyze the repository" \\
+  --roster-file /repo/roster.json --roster-entry planner
+```
+
+The direct selector is intentionally permissive when no roster is selected: `--agent`, `--model`, and `--backend` are independently optional. This allow-neither form is valid; omitted identity values use the selected runtime's defaults, and the last command uses the explicit backend with no agent or model:
+
+```sh
+avenor run --prompt "Use the runtime defaults"
+avenor run --prompt "Use this agent" --agent reviewer
+avenor run --prompt "Use this model" --model provider/model
+avenor run --prompt "Use backend defaults" --backend opencode-acp
+```
+
+`--roster-file` and `--roster-entry` must be supplied together for a direct request. A roster request cannot also supply `--agent`, `--model`, or `--backend`; the roster entry supplies all three identity fields. A roster file is strict: `system`, `thinking`, and unknown entry fields are rejected. Run-level `--thinking` remains separate and is checked against the effective backend selected by the direct entry or by each workflow phase.
+
+For a workflow, `--roster-file` is only a root fallback and `--roster-entry` is invalid. The workflow config selects entries per direct phase:
+
+```sh
+mkdir -p /tmp/avenor-roster-demo
+cat >/tmp/avenor-roster-demo/roster.json <<'JSON'
+{
+  "plan": {"backend": "opencode-acp", "model": "provider/planner"},
+  "test": {"backend": "agy", "model": "provider/tester"}
+}
+JSON
+cat >/tmp/avenor-roster-demo/loop.json <<'JSON'
+{
+  "roster_file": "roster.json",
+  "pre": [{
+    "name": "plan",
+    "roster_entry": "plan",
+    "prompt": "Produce the implementation plan."
+  }],
+  "loop": [{
+    "name": "test",
+    "roster_entry": "test",
+    "prompt": "Run the tests and report the result.",
+    "on_incomplete": {"nudge": "Finish the test report.", "max_nudges": 1}
+  }]
+}
+JSON
+avenor run --dir /tmp/avenor-roster-demo --loop-file /tmp/avenor-roster-demo/loop.json
+```
+
+A phase roster entry overrides the run-level backend, agent, and model for that phase. Phases without an entry retain the existing run-level selection rules. `roster_entry` is valid only for a direct prompt or prompt-file phase, not for a phase dispatching `loop_file` or `team_file`.
+
+For CLI workflows, a declared `roster_file` is resolved relative to its loop/team config. If the root config has no declaration, the command-level `--roster-file` fallback is resolved relative to `--dir`; nested CLI loads do not reuse that fallback. A child with no declaration inherits the already loaded parent entries, recursively; a child declaration replaces them. Stable-mode nesting keeps its existing behavior and does not gain this CLI-only inheritance rule. For direct selection, pass a path that is valid from the invoking process (an absolute path avoids ambiguity).
+
+A phase with `resume_from_previous: true` may resume only a session owned by the same effective backend. Selecting a different roster backend for the resuming phase is rejected; Avenor does not migrate conversation state across providers.
 
 ## avenor stable
 

@@ -58,16 +58,35 @@ Dispatch an agent run in the current working directory.
 
 | Argument | Required | Description |
 |---|---|---|
-| `agent` | yes | Agent name (no default — must be specified) |
+| `agent` | no | Agent name; omission uses the supplied model or runtime defaults |
 | `prompt` | no | Prompt text |
 | `prompt_file` | no | Path to a prompt file |
 | `label` | no | Human-readable label for the run |
 | `timeout` | no | Timeout duration (e.g. `3600s`, `30m`) |
 | `model` | no | Model override |
+| `thinking` | no | Run-level reasoning control; unsupported effective backends reject explicit values |
+| `backend` | no | Backend override; direct mode defaults to Avenor's `opencode-acp` backend when omitted |
+| `roster_file` | no | Path to a top-level roster map |
+| `roster_entry` | no | Key within `roster_file` |
 | `wait` | no | Block until complete (default `true`) |
 | `supervisor_id` | no | Reuse an existing supervisor by socket path |
 
 The working directory (`dir`) is injected automatically from your OpenCode session context — it is not a user-facing argument.
+
+#### Direct and roster modes
+
+Use `roster_file` plus `roster_entry` to select a complete identity. Every roster entry requires `backend` and at least one of `agent` or `model`; roster mode rejects direct `agent`, `model`, and `backend` overrides. Direct mode allows all three identity fields to be omitted independently, including backend-only selection. Roster mode does not apply the direct `opencode-acp` default.
+
+```json
+{
+  "prompt": "Review the repository",
+  "roster_file": "/repo/roster.json",
+  "roster_entry": "reviewer",
+  "wait": true
+}
+```
+
+Roster entries currently support only `backend`, `agent`, and `model`. `system` and `thinking` are rejected; `thinking` remains a run-level value and is validated against the effective backend. A resumed session cannot change backend. The plugin passes `roster_file` as supplied, so an absolute path avoids ambiguity when the OpenCode process directory differs from the project directory.
 
 ### `avenor_status`
 

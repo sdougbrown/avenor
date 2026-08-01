@@ -50,7 +50,33 @@ const result = await spawnTool({
 // { run_id: '...', label: 'reverse-string', supervisor_id: '/path/to/socket' }
 ```
 
-Accepts `agent`, `prompt`, `promptFile`, `label`, `dir`, `timeout`, `model`, `backend`, `serverUrl`, `sessionId`, and `supervisorId` (to target a specific socket).
+Accepts `agent`, `prompt`, `promptFile`, `label`, `dir`, `timeout`, `model`, `thinking`, `backend`, `rosterFile`, `rosterEntry`, `serverUrl`, `sessionId`, and `supervisorId` (to target a specific socket).
+
+### Roster selection
+
+`rosterFile` is the path to a top-level JSON roster map and `rosterEntry` is the key selected from it. Each entry must contain `backend` and at least one of `agent` or `model`:
+
+```json
+{
+  "planner": {
+    "backend": "opencode-acp",
+    "model": "provider/planner"
+  }
+}
+```
+
+A direct roster spawn forwards both selectors and must not also provide `agent`, `model`, or `backend`. Direct mode without a roster allows each of those identity fields to be omitted independently, including a backend-only request; the selected runtime supplies defaults for omitted values. `thinking` is run-level, not a roster field, and is checked against the effective backend. The shared selector validation rejects missing selector pairs, mixed direct/roster fields, and unknown selector keys. Roster-file loading rejects deferred entry fields such as `system`; `thinking` remains a valid run-level option but is never read from a roster entry.
+
+```ts
+await spawnTool({
+  prompt: 'Analyze the repository',
+  dir: '/repo',
+  rosterFile: '/repo/roster.json',
+  rosterEntry: 'planner',
+})
+```
+
+Roster phase selection is resolved by Avenor's Go workflow runners. A roster entry may override backend/agent/model per phase. CLI workflow fallback and nested roster inheritance are CLI-only; stable nesting keeps its existing behavior. A resumed session must use the same effective backend as the original session.
 
 ### `statusTool`
 

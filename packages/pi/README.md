@@ -112,7 +112,7 @@ Available tools for LLM sub-agent management:
 
 | Tool | Description |
 |---|---|
-| `avenor_spawn` | Dispatch an agent run (blocking or fire-and-forget). Uses the `pi` backend by default; accepts `agent`, `model`, `prompt`, and `dir`. |
+| `avenor_spawn` | Dispatch an agent run (blocking or fire-and-forget). Uses the `pi` backend by default in direct mode; accepts optional `agent`, `model`, `prompt`, `dir`, `roster_file`, and `roster_entry`. |
 | `avenor_status` | Get status of a run or all runs; use `view="lifecycle"` for compact progress and permission checks |
 | `avenor_result` | Wait for a run and return its complete final output without transcript details |
 | `avenor_inspect` | Review a bounded transcript, tool activity, permissions, and final output |
@@ -120,6 +120,20 @@ Available tools for LLM sub-agent management:
 | `avenor_follow_up` | Resume a completed run with a follow-up message |
 | `avenor_events` | Read events from a run |
 | `avenor_shutdown` | Shut down the avenor supervisor |
+
+### Direct and roster spawns
+
+Direct mode permits `agent`, `model`, and `backend` to be omitted independently, including a backend-only request; omitted values use runtime defaults. Pi supplies `backend: "pi"` for direct tool calls when no backend is given. Roster mode uses both `roster_file` and `roster_entry`, and leaves backend selection to the roster entry instead of applying Pi's direct default:
+
+```json
+{
+  "prompt": "Review the repository",
+  "roster_file": "/repo/roster.json",
+  "roster_entry": "reviewer"
+}
+```
+
+Each roster entry must contain `backend` and at least one of `agent` or `model`. Do not combine roster mode with direct `agent`, `model`, or `backend` overrides. Roster entries currently do not support `system` or `thinking`; `thinking` remains a run-level option and is validated against the effective backend. A resumed session must stay on its original backend. Use an absolute `roster_file` path when the Pi process and target project have different working directories.
 
 ### Pi-specific features
 
