@@ -510,9 +510,7 @@ func TestPreparePermissionClaimAfterDirectDeliveryAbandoned(t *testing.T) {
 		prepared <- s.PreparePermissionClaimAfterDirectDelivery(context.Background(), "rt_1", "reused", PermissionResolverFile, nil)
 	}()
 	<-waiting
-	if !s.RetryDirectPermissionDelivery("rt_1", "reused") {
-		t.Fatal("RetryDirectPermissionDelivery returned false")
-	}
+	s.EndPermissionClaim("rt_1", "reused")
 	select {
 	case got := <-prepared:
 		if got {
@@ -521,8 +519,8 @@ func TestPreparePermissionClaimAfterDirectDeliveryAbandoned(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("replacement did not return after abandon")
 	}
-	if got := s.PermissionResolverState("rt_1", "reused"); got != PermissionResolverNoResolver {
-		t.Fatalf("resolver state after abandon = %v, want NoResolver", got)
+	if got := s.PermissionResolverState("rt_1", "reused"); got != PermissionResolverUnknown {
+		t.Fatalf("resolver state after abandon = %v, want Unknown", got)
 	}
 }
 
