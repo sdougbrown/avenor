@@ -59,6 +59,61 @@ describe('followUpTool with an external supervisor', () => {
     expect(closeMock).toHaveBeenCalledTimes(1)
   })
 
+  it('uses resolved identity for roster follow-ups without forwarding the mutable selector', async () => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-follow-up-test-'))
+    process.env.AVENOR_HOME = home
+    const runDir = path.join(home, 'runs', 'roster-run')
+    fs.mkdirSync(runDir, { recursive: true })
+    fs.writeFileSync(path.join(runDir, 'sentinel.done'), 'DONE\nSESSION=ses-roster\n')
+    statusMock.mockResolvedValueOnce({
+      session_id: 'ses-roster',
+      effective_agent: 'resolved-agent',
+      effective_model: 'resolved-model',
+      effective_backend: 'agy',
+      roster_file: '/tmp/mutable-roster.json',
+      roster_entry: 'planner',
+    })
+
+    await followUpTool({
+      runId: 'roster-run',
+      message: 'continue',
+      supervisorId: '/tmp/avenor-mcp-test.sock',
+    })
+
+    expect(spawnMock.mock.calls[0]?.[0]).toMatchObject({
+      agent: 'resolved-agent',
+      model: 'resolved-model',
+      backend: 'agy',
+    })
+    expect(spawnMock.mock.calls[0]?.[0]).not.toHaveProperty('roster_file')
+    expect(spawnMock.mock.calls[0]?.[0]).not.toHaveProperty('roster_entry')
+  })
+
+  it('supports a resolved model-only roster follow-up', async () => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-follow-up-test-'))
+    process.env.AVENOR_HOME = home
+    const runDir = path.join(home, 'runs', 'model-only-run')
+    fs.mkdirSync(runDir, { recursive: true })
+    fs.writeFileSync(path.join(runDir, 'sentinel.done'), 'DONE\nSESSION=ses-model-only\n')
+    statusMock.mockResolvedValueOnce({
+      session_id: 'ses-model-only',
+      effective_model: 'provider/model',
+      effective_backend: 'agy',
+    })
+
+    await followUpTool({
+      runId: 'model-only-run',
+      message: 'continue',
+      supervisorId: '/tmp/avenor-mcp-test.sock',
+    })
+
+    expect(spawnMock.mock.calls[0]?.[0]).toMatchObject({
+      model: 'provider/model',
+      backend: 'agy',
+    })
+    expect(spawnMock.mock.calls[0]?.[0]).not.toHaveProperty('agent')
+  })
+
   it('forwards live auto-approval for an explicit supervisor', async () => {
     home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-follow-up-test-'))
     process.env.AVENOR_HOME = home
@@ -310,6 +365,44 @@ describe('followUpTool with a local supervisor (no supervisorId)', () => {
       fs.rmSync(localTmpDir, { recursive: true, force: true })
       localTmpDir = ''
     }
+  })
+
+  it('retains roster metadata when a local follow-up uses resolved direct identity', async () => {
+    localTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-follow-up-local-'))
+    const sentinelPath = path.join(localTmpDir, 'sentinel.done')
+    const eventLogPath = path.join(localTmpDir, 'events.log')
+    localSupRuns.set('local-roster-run', {
+      runId: 'local-roster-run',
+      label: 'local-roster-run',
+      sentinelPath,
+      eventLogPath,
+      runtimeId: 'rt-local-roster',
+      sessionId: 'ses-local-roster',
+      rosterFile: '/tmp/mutable-roster.json',
+      rosterEntry: 'planner',
+      effectiveAgent: 'resolved-agent',
+      effectiveModel: 'resolved-model',
+      effectiveBackend: 'agy',
+      agent: 'resolved-agent',
+      model: 'resolved-model',
+      backend: 'agy',
+    })
+    statusMock.mockRejectedValueOnce(new Error('runtime unavailable'))
+
+    await followUpTool({ runId: 'local-roster-run', message: 'continue' })
+
+    expect(localSupSpawnMock.mock.calls[0]?.[0]).toMatchObject({
+      agent: 'resolved-agent',
+      model: 'resolved-model',
+      backend: 'agy',
+    })
+    expect(localSupSpawnMock.mock.calls[0]?.[0]).not.toHaveProperty('roster_file')
+    expect(localSupSpawnMock.mock.calls[0]?.[0]).not.toHaveProperty('roster_entry')
+    expect(localSupSpawnMock.mock.calls[0]?.[2]).toMatchObject({
+      rosterFile: '/tmp/mutable-roster.json',
+      rosterEntry: 'planner',
+      effectiveAgent: 'resolved-agent',
+    })
   })
 
   it('forwards autoApprove from runInfo when live status is unavailable', async () => {

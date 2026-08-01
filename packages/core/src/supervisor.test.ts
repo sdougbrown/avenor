@@ -1,4 +1,4 @@
-import { describe, it, expect, afterAll } from 'bun:test'
+import { describe, it, expect, afterEach, afterAll, mock } from 'bun:test'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -32,6 +32,63 @@ function hasAvenorBinary(): boolean {
 }
 
 const skipIfNoBinary = !hasAvenorBinary()
+
+describe('Supervisor roster metadata', () => {
+  it('forwards roster selectors and records effective identity without rereading the roster', async () => {
+    const spawnMock = mock(async () => ({
+      runtime_id: 'rt-roster',
+      session_id: 'ses-roster',
+      roster_file: '/repo/roster.json',
+      roster_entry: 'planner',
+      effective_agent: 'planner-agent',
+      effective_model: 'planner-model',
+      effective_backend: 'agy',
+    }))
+    const client = {
+      spawn: spawnMock,
+      status: mock(async () => ({})),
+      isClosed: mock(() => false),
+    }
+    const sup = Object.create(Supervisor.prototype) as Supervisor
+    ;(sup as any).client = client
+    ;(sup as any).crashed = false
+    ;(sup as any).runs = new Map()
+
+    const run = await sup.spawn({
+      roster_file: '/repo/roster.json',
+      roster_entry: 'planner',
+      prompt: 'plan',
+    }, 'roster-run')
+
+    expect(spawnMock).toHaveBeenCalledWith(expect.objectContaining({
+      roster_file: '/repo/roster.json',
+      roster_entry: 'planner',
+    }))
+    expect(spawnMock.mock.calls[0]?.[0]).not.toHaveProperty('agent')
+    expect(run).toMatchObject({
+      rosterFile: '/repo/roster.json',
+      rosterEntry: 'planner',
+      agent: 'planner-agent',
+      model: 'planner-model',
+      backend: 'agy',
+      effectiveAgent: 'planner-agent',
+      effectiveModel: 'planner-model',
+      effectiveBackend: 'agy',
+    })
+  })
+
+  it('rejects an invalid selector before RPC', async () => {
+    const spawnMock = mock(async () => ({ runtime_id: 'should-not-spawn' }))
+    const sup = Object.create(Supervisor.prototype) as Supervisor
+    ;(sup as any).client = { spawn: spawnMock }
+    ;(sup as any).crashed = false
+    ;(sup as any).runs = new Map()
+
+    await expect(sup.spawn({ roster_file: '/repo/roster.json', prompt: 'invalid' }, 'invalid-run'))
+      .rejects.toThrow()
+    expect(spawnMock).not.toHaveBeenCalled()
+  })
+})
 
 describe.skipIf(skipIfNoBinary)('Supervisor lifecycle', () => {
   let supervisor: Supervisor

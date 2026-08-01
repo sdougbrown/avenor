@@ -5,6 +5,7 @@ export type {
   HistoryOptions,
   HistoryResult,
   SpawnParams,
+  SpawnResult,
   SubscribeOptions,
   ThinkingLevel,
 } from './client.js'
@@ -35,17 +36,19 @@ export type { ObserveRunOptions, RunObserver, RunObserverClient } from './run-ob
 export { Supervisor, findAvenorBinary } from './supervisor.js'
 export { socketsRoot } from './paths.js'
 export { getInstallDir, getVersion, installerBinaryPath } from './install-path.js'
-export type { RunInfo, SupervisorOptions } from './supervisor.js'
+export type { RunInfo, SpawnMetadata, SupervisorOptions } from './supervisor.js'
 
 export { spawnTool } from './tools/spawn.js'
+export type { SpawnToolArgs, SpawnToolResult } from './tools/spawn.js'
 export { validateSpawnSelection } from './spawn-selection.js'
 export type { SpawnSelectionInput } from './spawn-selection.js'
 export { statusTool } from './tools/status.js'
-export type { StatusResult, StatusView } from './tools/status.js'
+export type { StatusResult, StatusToolArgs, StatusView } from './tools/status.js'
 export { resultTool } from './tools/result.js'
 export type { ResultResult, ResultToolArgs } from './tools/result.js'
 export { answerPermissionTool } from './tools/answer-permission.js'
 export { followUpTool } from './tools/follow-up.js'
+export type { FollowUpToolArgs, FollowUpToolResult } from './tools/follow-up.js'
 export { eventsTool } from './tools/events.js'
 export { inspectTool } from './tools/inspect.js'
 export type { InspectResult } from './tools/inspect.js'

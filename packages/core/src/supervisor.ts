@@ -3,7 +3,8 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import * as crypto from 'node:crypto'
-import { dial, Client, type SpawnParams, type ThinkingLevel } from './client.js'
+import { dial, Client, type SpawnParams, type SpawnResult, type ThinkingLevel } from './client.js'
+import { validateSpawnSelection } from './spawn-selection.js'
 import { ensureRunPaths, socketsRoot } from './paths.js'
 import { installerBinaryPath } from './install-path.js'
 
@@ -20,6 +21,11 @@ export interface RunInfo {
   agentProfile?: string
   backend?: string
   model?: string
+  effectiveAgent?: string
+  effectiveModel?: string
+  effectiveBackend?: string
+  rosterFile?: string
+  rosterEntry?: string
   thinking?: ThinkingLevel
   dir?: string
   brokerUrl?: string
@@ -30,6 +36,15 @@ export interface RunInfo {
 export interface SupervisorOptions {
   binaryPath?: string
   callTimeoutMs?: number
+}
+
+/** Metadata retained locally when a follow-up uses a resolved direct identity. */
+export interface SpawnMetadata {
+  rosterFile?: string
+  rosterEntry?: string
+  effectiveAgent?: string
+  effectiveModel?: string
+  effectiveBackend?: string
 }
 
 export function findAvenorBinary(): string {
@@ -293,7 +308,22 @@ export class Supervisor {
     return this.client
   }
 
-  async spawn(params: SpawnParams, runId = crypto.randomUUID()): Promise<RunInfo> {
+  async spawn(
+    params: SpawnParams,
+    runId = crypto.randomUUID(),
+    metadata?: SpawnMetadata,
+  ): Promise<RunInfo> {
+    const workflowMode = typeof params.loop_file === 'string' || typeof params.team_file === 'string'
+    if (!workflowMode) {
+      validateSpawnSelection({
+        agent: params.agent,
+        model: params.model,
+        backend: params.backend,
+        roster_file: params.roster_file,
+        roster_entry: params.roster_entry,
+      })
+    }
+
     const client = this.getClient()
     const { sentinelPath, eventLogPath } = ensureRunPaths(runId)
 
@@ -303,20 +333,72 @@ export class Supervisor {
       sentinel_file: sentinelPath,
       on_event: eventLogPath,
     }
+    if (spawnParams.roster_entry) {
+      // Empty optional direct values are equivalent to omission in the shared
+      // selector contract; do not forward them as roster overrides.
+      for (const field of ['agent', 'model', 'backend'] as const) {
+        if (spawnParams[field] === '') delete spawnParams[field]
+      }
+    }
 
     const result = await client.spawn(spawnParams)
+    let identityResult: SpawnResult = result
+
+    // Older supervisors may return only runtime/session identifiers from spawn.
+    // A status lookup fills in the resolved roster identity without rereading the
+    // roster file. Failure is deliberately non-fatal: direct compatibility still
+    // has the caller-supplied identity as a fallback.
+    if (spawnParams.roster_entry && result.runtime_id) {
+      const hasBackend = [result.effective_backend, result.backend]
+        .some(value => typeof value === 'string' && value.length > 0)
+      const hasAgentOrModel = [
+        result.effective_agent,
+        result.agent,
+        result.effective_model,
+        result.model,
+      ].some(value => typeof value === 'string' && value.length > 0)
+      const hasIdentity = hasBackend && hasAgentOrModel
+      if (!hasIdentity) {
+        try {
+          identityResult = {
+            ...result,
+            ...(await client.status(result.runtime_id)),
+          }
+        } catch {
+          // The spawn already succeeded; retain selector metadata and fallbacks.
+        }
+      }
+    }
+
+    const value = (candidate: unknown): string | undefined =>
+      typeof candidate === 'string' && candidate.length > 0 ? candidate : undefined
+    const effectiveAgent = metadata?.effectiveAgent ??
+      value(identityResult.effective_agent) ?? value(identityResult.agent) ?? value(spawnParams.agent)
+    const effectiveModel = metadata?.effectiveModel ??
+      value(identityResult.effective_model) ?? value(identityResult.model) ?? value(spawnParams.model)
+    const effectiveBackend = metadata?.effectiveBackend ??
+      value(identityResult.effective_backend) ?? value(identityResult.backend) ?? value(spawnParams.backend)
+    const rosterFile = metadata?.rosterFile ??
+      value(identityResult.roster_file) ?? value(spawnParams.roster_file)
+    const rosterEntry = metadata?.rosterEntry ??
+      value(identityResult.roster_entry) ?? value(spawnParams.roster_entry)
 
     const runInfo: RunInfo = {
       runId,
       label: (spawnParams.label as string) ?? runId,
       sentinelPath: (result.sentinel_file as string) ?? sentinelPath,
       eventLogPath: (result.on_event as string) ?? eventLogPath,
-      runtimeId: result.runtime_id as string | undefined,
-      sessionId: result.session_id as string | undefined,
-      agent: (spawnParams.agent as string | undefined) ?? params.agent as string | undefined,
+      runtimeId: value(identityResult.runtime_id),
+      sessionId: value(identityResult.session_id),
+      agent: effectiveAgent,
       agentProfile: spawnParams.agent_profile as string | undefined,
-      backend: spawnParams.backend as string | undefined,
-      model: spawnParams.model as string | undefined,
+      backend: effectiveBackend,
+      model: effectiveModel,
+      effectiveAgent,
+      effectiveModel,
+      effectiveBackend,
+      rosterFile,
+      rosterEntry,
       thinking: spawnParams.thinking,
       dir: spawnParams.dir as string | undefined,
       brokerUrl: result.broker_url as string | undefined,

@@ -156,9 +156,36 @@ function buildBaseStatus(
     session_id?: string
     stop_reason?: string
     prefer_fallback_run_id?: boolean
+    identity?: {
+      roster_file?: string
+      roster_entry?: string
+      agent?: string
+      model?: string
+      backend?: string
+      effective_agent?: string
+      effective_model?: string
+      effective_backend?: string
+    }
   },
   translatedStatus: string,
 ): StatusResult {
+  const identity = fallback.identity
+  const effectiveAgent =
+    stringField(source, 'effective_agent') ??
+    stringField(source, 'agent') ??
+    identity?.effective_agent ??
+    identity?.agent
+  const effectiveModel =
+    stringField(source, 'effective_model') ??
+    stringField(source, 'model') ??
+    identity?.effective_model ??
+    identity?.model
+  const effectiveBackend =
+    stringField(source, 'effective_backend') ??
+    stringField(source, 'backend') ??
+    identity?.effective_backend ??
+    identity?.backend
+
   return {
     run_id: fallback.prefer_fallback_run_id
       ? fallback.run_id
@@ -171,9 +198,14 @@ function buildBaseStatus(
     pending_permission: extractPendingPermission(source),
     session_id: stringField(source, 'session_id') ?? fallback.session_id,
     stop_reason: stringField(source, 'stop_reason') ?? fallback.stop_reason,
-    backend: stringField(source, 'backend'),
-    agent: stringField(source, 'agent'),
-    model: stringField(source, 'model'),
+    roster_file: stringField(source, 'roster_file') ?? identity?.roster_file,
+    roster_entry: stringField(source, 'roster_entry') ?? identity?.roster_entry,
+    backend: effectiveBackend,
+    agent: effectiveAgent,
+    model: effectiveModel,
+    effective_backend: effectiveBackend,
+    effective_agent: effectiveAgent,
+    effective_model: effectiveModel,
     dir: stringField(source, 'dir'),
     parent_id: stringField(source, 'parent_id', 'parentId'),
     children: stringArrayField(source, 'children'),
@@ -188,7 +220,7 @@ function buildBaseStatus(
 
 export type StatusView = 'lifecycle' | 'full'
 
-interface StatusToolArgs {
+export interface StatusToolArgs {
   runId?: string
   supervisorId?: string
   view?: StatusView
@@ -208,9 +240,14 @@ export interface StatusResult {
   }
   session_id?: string
   stop_reason?: string
+  roster_file?: string
+  roster_entry?: string
   backend?: string
   agent?: string
   model?: string
+  effective_backend?: string
+  effective_agent?: string
+  effective_model?: string
   dir?: string
   parent_id?: string
   children?: string[]
@@ -261,6 +298,16 @@ async function buildRunStatus(
         (liveStatus?.session_id as string | undefined) ??
         runInfo.sessionId,
       stop_reason: sentinel?._status,
+      identity: {
+        roster_file: runInfo.rosterFile,
+        roster_entry: runInfo.rosterEntry,
+        agent: runInfo.agent,
+        model: runInfo.model,
+        backend: runInfo.backend,
+        effective_agent: runInfo.effectiveAgent,
+        effective_model: runInfo.effectiveModel,
+        effective_backend: runInfo.effectiveBackend,
+      },
     },
     translated,
   )
@@ -400,7 +447,7 @@ async function executeStatusTool(
       ? await queryLiveStatus(client, runInfo.runtimeId)
       : null
 
-    if (runInfo && liveStatus) {
+    if (runInfo) {
       results.push(shapeStatusResult(await buildRunStatus(runInfo, liveStatus), args.view))
     } else {
       results.push(shapeStatusResult(buildBaseStatus(

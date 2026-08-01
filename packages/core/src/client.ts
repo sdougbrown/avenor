@@ -54,11 +54,31 @@ export interface SpawnParams {
   thinking?: ThinkingLevel
   agent_profile?: string
   backend?: string
+  roster_file?: string
+  roster_entry?: string
   server_url?: string
   session_id?: string
   sentinel_file?: string
   on_event?: string
   auto_approve?: boolean
+  [key: string]: unknown
+}
+
+export interface SpawnResult {
+  runtime_id?: string
+  session_id?: string
+  on_event?: string
+  sentinel_file?: string
+  broker_url?: string
+  parent_token?: string
+  agent?: string
+  model?: string
+  backend?: string
+  roster_file?: string
+  roster_entry?: string
+  effective_agent?: string
+  effective_model?: string
+  effective_backend?: string
   [key: string]: unknown
 }
 
@@ -338,8 +358,8 @@ export class Client {
     return this.call('list') as Promise<Array<Record<string, unknown>>>
   }
 
-  async spawn(params: SpawnParams): Promise<Record<string, unknown>> {
-    return this.call('spawn', params) as Promise<Record<string, unknown>>
+  async spawn(params: SpawnParams): Promise<SpawnResult> {
+    return this.call('spawn', params) as Promise<SpawnResult>
   }
 
   async shutdown(mode: string): Promise<void> {

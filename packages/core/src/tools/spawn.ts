@@ -3,9 +3,10 @@ import { Supervisor } from '../supervisor.js'
 import type { SpawnParams, ThinkingLevel } from '../client.js'
 import { ensureRunPaths } from '../paths.js'
 import { validateTimeout } from './validate.js'
+import { validateSpawnSelection } from '../spawn-selection.js'
 import { getSupervisorClient } from './get-supervisor-client.js'
 
-export async function spawnTool(args: {
+export interface SpawnToolArgs {
   agent?: string
   prompt?: string
   promptFile?: string
@@ -16,11 +17,32 @@ export async function spawnTool(args: {
   thinking?: ThinkingLevel
   agentProfile?: string
   backend?: string
+  rosterFile?: string
+  rosterEntry?: string
   serverUrl?: string
   sessionId?: string
   supervisorId?: string
   parent_run_id?: string
-}): Promise<{ run_id: string; label: string; supervisor_id: string; runtime_id?: string; broker_url?: string; parent_token?: string }> {
+}
+
+export interface SpawnToolResult {
+  run_id: string
+  label: string
+  supervisor_id: string
+  runtime_id?: string
+  broker_url?: string
+  parent_token?: string
+}
+
+export async function spawnTool(args: SpawnToolArgs): Promise<SpawnToolResult> {
+  validateSpawnSelection({
+    agent: args.agent,
+    model: args.model,
+    backend: args.backend,
+    roster_file: args.rosterFile,
+    roster_entry: args.rosterEntry,
+  })
+
   const runId = crypto.randomUUID()
   const label = args.label ?? runId
   const baseParams: SpawnParams = {
@@ -36,6 +58,12 @@ export async function spawnTool(args: {
     server_url: args.serverUrl,
     session_id: args.sessionId,
     parent_run_id: args.parent_run_id,
+  }
+  if (args.rosterFile) {
+    baseParams.roster_file = args.rosterFile
+  }
+  if (args.rosterEntry) {
+    baseParams.roster_entry = args.rosterEntry
   }
   if (args.agent) {
     baseParams.agent = args.agent

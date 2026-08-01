@@ -2,19 +2,19 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as crypto from 'node:crypto'
 import { Supervisor, type RunInfo } from '../supervisor.js'
-import type { ThinkingLevel } from '../client.js'
+import type { SpawnParams, ThinkingLevel } from '../client.js'
 import { ensureRunPaths, runsRoot } from '../paths.js'
 import { validateRunId } from './validate.js'
 import { getSupervisorClient as realGetSupervisorClient } from './get-supervisor-client.js'
 
-interface FollowUpToolArgs {
+export interface FollowUpToolArgs {
   runId: string
   message: string
   label?: string
   supervisorId?: string
 }
 
-interface FollowUpToolResult {
+export interface FollowUpToolResult {
   run_id: string
   label: string
 }
@@ -38,11 +38,27 @@ function resolveAutoApprove(
   return typeof runInfo?.autoApprove === 'boolean' ? runInfo.autoApprove : undefined
 }
 
-function requireResumableAgent(agent: string | undefined): string {
-  if (agent === undefined) {
+function value(candidate: unknown): string | undefined {
+  return typeof candidate === 'string' && candidate.length > 0 ? candidate : undefined
+}
+
+function resolvedIdentity(
+  liveStatus: Record<string, unknown> | null,
+  effectiveKey: string,
+  directKey: string,
+  fallbackEffective: string | undefined,
+  fallbackDirect: string | undefined,
+): string | undefined {
+  return value(liveStatus?.[effectiveKey]) ??
+    value(liveStatus?.[directKey]) ??
+    fallbackEffective ??
+    fallbackDirect
+}
+
+function requireResumableIdentity(agent: string | undefined, model: string | undefined): void {
+  if (agent === undefined && model === undefined) {
     throw new Error('run has no agent to resume')
   }
-  return agent
 }
 
 async function parseSentinel(filePath: string): Promise<Record<string, string> | null> {
@@ -101,14 +117,31 @@ async function executeFollowUpTool(
         throw new Error('run has no session to resume')
       }
 
-      // Prefer live supervisor metadata, then the local run map, so an
-      // explicit supervisor retains the original runtime context as well.
-      const agent = requireResumableAgent(
-        (liveStatus?.agent as string | undefined) ?? runInfo?.agent,
+      // Prefer the supervisor's resolved identity, then local metadata. Never
+      // send the roster selector on a follow-up: the original resolved values
+      // are immutable for this continuation.
+      const agent = resolvedIdentity(
+        liveStatus,
+        'effective_agent',
+        'agent',
+        runInfo?.effectiveAgent,
+        runInfo?.agent,
       )
-      const backend =
-        (liveStatus?.backend as string | undefined) ?? runInfo?.backend
-      const model = (liveStatus?.model as string | undefined) ?? runInfo?.model
+      const model = resolvedIdentity(
+        liveStatus,
+        'effective_model',
+        'model',
+        runInfo?.effectiveModel,
+        runInfo?.model,
+      )
+      const backend = resolvedIdentity(
+        liveStatus,
+        'effective_backend',
+        'backend',
+        runInfo?.effectiveBackend,
+        runInfo?.backend,
+      )
+      requireResumableIdentity(agent, model)
       const thinking = (liveStatus?.thinking as ThinkingLevel | undefined) ?? runInfo?.thinking
       const dir = (liveStatus?.dir as string | undefined) ?? runInfo?.dir
       const agentProfile =
@@ -121,13 +154,13 @@ async function executeFollowUpTool(
         ensureRunPaths(followUpRunId)
 
       const spawnParams: Record<string, unknown> = {
-        agent,
         prompt: args.message,
         label: followUpLabel,
         session_id: sessionId,
         sentinel_file: followUpSentinelPath,
         on_event: eventLogPath,
       }
+      if (agent) spawnParams.agent = agent
       if (backend) spawnParams.backend = backend
       if (model) spawnParams.model = model
       if (thinking) spawnParams.thinking = thinking
@@ -177,11 +210,28 @@ async function executeFollowUpTool(
       // Stored metadata still permits a follow-up when status is unavailable.
     }
   }
-  const agent = requireResumableAgent(
-    (liveStatus?.agent as string | undefined) ?? runInfo.agent,
+  const agent = resolvedIdentity(
+    liveStatus,
+    'effective_agent',
+    'agent',
+    runInfo.effectiveAgent,
+    runInfo.agent,
   )
-  const backend = (liveStatus?.backend as string | undefined) ?? runInfo.backend
-  const model = (liveStatus?.model as string | undefined) ?? runInfo.model
+  const model = resolvedIdentity(
+    liveStatus,
+    'effective_model',
+    'model',
+    runInfo.effectiveModel,
+    runInfo.model,
+  )
+  const backend = resolvedIdentity(
+    liveStatus,
+    'effective_backend',
+    'backend',
+    runInfo.effectiveBackend,
+    runInfo.backend,
+  )
+  requireResumableIdentity(agent, model)
   const thinking = (liveStatus?.thinking as ThinkingLevel | undefined) ?? runInfo.thinking
   const dir = (liveStatus?.dir as string | undefined) ?? runInfo.dir
   const agentProfile =
@@ -190,17 +240,24 @@ async function executeFollowUpTool(
 
   const followUpLabel = args.label ?? `${runInfo.label}-followup`
 
-  const followUpRun = await sup.spawn({
-    agent,
-    backend,
-    model,
-    thinking,
-    dir,
-    agent_profile: agentProfile,
+  const followUpParams: SpawnParams = {
+    ...(agent ? { agent } : {}),
+    ...(backend ? { backend } : {}),
+    ...(model ? { model } : {}),
+    ...(thinking ? { thinking } : {}),
+    ...(dir ? { dir } : {}),
+    ...(agentProfile ? { agent_profile: agentProfile } : {}),
     prompt: args.message,
     session_id: sessionId,
     label: followUpLabel,
     ...(autoApprove === true ? { auto_approve: true } : {}),
+  }
+  const followUpRun = await sup.spawn(followUpParams, undefined, {
+    rosterFile: runInfo.rosterFile,
+    rosterEntry: runInfo.rosterEntry,
+    effectiveAgent: agent,
+    effectiveModel: model,
+    effectiveBackend: backend,
   })
 
   return { run_id: followUpRun.runId, label: followUpRun.label }

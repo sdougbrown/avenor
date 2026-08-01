@@ -16,6 +16,8 @@ type ForwardingCase = {
   model?: string
   agent?: string
   thinking?: SpawnParams['thinking']
+  rosterFile?: string
+  rosterEntry?: string
 }
 
 const forwardingCases: ForwardingCase[] = [
@@ -24,11 +26,23 @@ const forwardingCases: ForwardingCase[] = [
   { name: 'both supplied', args: { agent: 'codex', model: 'sonnet' }, model: 'sonnet', agent: 'codex' },
   { name: 'empty agent', args: { agent: '', model: 'sonnet' }, model: 'sonnet', agent: undefined },
   { name: 'thinking', args: { thinking: 'xhigh' }, thinking: 'xhigh' },
+  {
+    name: 'roster selector',
+    args: { rosterFile: '/repo/roster.json', rosterEntry: 'planner' },
+    rosterFile: '/repo/roster.json',
+    rosterEntry: 'planner',
+  },
 ]
 
 function assertForwardedParams(
   received: SpawnParams | undefined,
-  expected: { model?: string; agent?: string; thinking?: SpawnParams['thinking'] },
+  expected: {
+    model?: string
+    agent?: string
+    thinking?: SpawnParams['thinking']
+    rosterFile?: string
+    rosterEntry?: string
+  },
 ): void {
   expect(received).toBeDefined()
   if (!received) return
@@ -47,6 +61,13 @@ function assertForwardedParams(
     expect(Object.hasOwn(received, 'thinking')).toBe(false)
   } else {
     expect(received.thinking).toBe(expected.thinking)
+  }
+  if (expected.rosterFile === undefined) {
+    expect(Object.hasOwn(received, 'roster_file')).toBe(false)
+    expect(Object.hasOwn(received, 'roster_entry')).toBe(false)
+  } else {
+    expect(received.roster_file).toBe(expected.rosterFile)
+    expect(received.roster_entry).toBe(expected.rosterEntry)
   }
 }
 
@@ -107,6 +128,24 @@ describe('spawnTool with an explicit supervisor', () => {
       }
     })
   }
+})
+
+describe('spawnTool selector validation', () => {
+  it('rejects invalid selectors before acquiring a supervisor or making RPC', async () => {
+    await expect(spawnTool({
+      supervisorId: '/tmp/not-a-supervisor.sock',
+      rosterFile: '/repo/roster.json',
+      rosterEntry: 'planner',
+      backend: 'pi',
+    })).rejects.toThrow()
+  })
+
+  it('rejects a missing roster entry before RPC', async () => {
+    await expect(spawnTool({
+      supervisorId: '/tmp/not-a-supervisor.sock',
+      rosterFile: '/repo/roster.json',
+    })).rejects.toThrow()
+  })
 })
 
 describe('spawnTool with the singleton supervisor', () => {
