@@ -2567,9 +2567,16 @@ func TestPermissionRequestConsumesCompletedResolverBeforeReusedID(t *testing.T) 
 	var lifecycle []string
 	for _, event := range readEventLogForTest(t, eventsPath) {
 		switch event.Event {
-		case "permission.request", "permission.response":
+		case "permission.request":
 			requestID, _ := event.Fields["request_id"].(string)
-			lifecycle = append(lifecycle, event.Event+":"+requestID)
+			options, _ := event.Fields["options"].([]any)
+			option, _ := options[0].(map[string]any)
+			optionID, _ := option["optionId"].(string)
+			lifecycle = append(lifecycle, event.Event+":"+requestID+":"+optionID)
+		case "permission.response":
+			requestID, _ := event.Fields["request_id"].(string)
+			optionID, _ := event.Fields["option_id"].(string)
+			lifecycle = append(lifecycle, event.Event+":"+requestID+":"+optionID)
 		case "avenor.error":
 			message, _ := event.Fields["message"].(string)
 			if strings.Contains(message, "already pending") {
@@ -2578,10 +2585,10 @@ func TestPermissionRequestConsumesCompletedResolverBeforeReusedID(t *testing.T) 
 		}
 	}
 	want := []string{
-		"permission.request:req_reused",
-		"permission.response:req_reused",
-		"permission.request:req_reused",
-		"permission.response:req_reused",
+		"permission.request:req_reused:allow_first",
+		"permission.response:req_reused:allow_first",
+		"permission.request:req_reused:allow_second",
+		"permission.response:req_reused:allow_second",
 	}
 	if fmt.Sprint(lifecycle) != fmt.Sprint(want) {
 		t.Fatalf("permission lifecycle = %v, want %v", lifecycle, want)
