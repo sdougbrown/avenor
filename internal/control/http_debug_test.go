@@ -893,6 +893,9 @@ func TestHTTPAnswerPermissionNoResolver(t *testing.T) {
 	if got, want := string(message), "permission handling delegated to provider\n"; got != want {
 		t.Fatalf("no-resolver response = %q, want %q", got, want)
 	}
+	if got := ctrl.PermissionResolverState("", "req_direct"); got != PermissionResolverDirectDelivery {
+		t.Fatalf("PermissionResolverState = %v, want DirectDelivery", got)
+	}
 }
 
 func TestHTTPAnswerPermissionAlreadyResolvedIsAccepted(t *testing.T) {

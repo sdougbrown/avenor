@@ -504,6 +504,7 @@ func TestEffectivePermissionResolverState(t *testing.T) {
 		{name: "file fallback", hasFileHandler: true, want: control.PermissionResolverFile},
 		{name: "write-in with none", autoApprove: true, requiresUserInput: true, want: control.PermissionResolverNoResolver},
 		{name: "none", want: control.PermissionResolverNoResolver},
+		{name: "reserved no-auto", autoApprove: false, hasControlClient: true, requiresUserInput: false, want: control.PermissionResolverReserved},
 		{name: "automatic takes precedence", autoApprove: true, hasControlClient: true, hasFileHandler: true, want: control.PermissionResolverAutomatic},
 	}
 	for _, tt := range tests {
@@ -634,34 +635,39 @@ func TestWaitForSessionFilePermissionEmitsOneEffectiveRequestAndCleansUp(t *test
 
 func TestWaitForSessionSynchronizesFileCleanupForEveryTerminationSource(t *testing.T) {
 	tests := []struct {
-		name       string
-		stopReason string
-		trigger    func(chan<- error, chan<- time.Time, chan<- time.Time, chan<- struct{})
+		name            string
+		stopReason      string
+		expectedExitCode int
+		trigger         func(chan<- error, chan<- time.Time, chan<- time.Time, chan<- struct{})
 	}{
 		{
-			name:       "prompt cancellation",
-			stopReason: "cancelled",
+			name:            "prompt cancellation",
+			stopReason:      "cancelled",
+			expectedExitCode: 130,
 			trigger: func(promptDone chan<- error, _ chan<- time.Time, _ chan<- time.Time, _ chan<- struct{}) {
 				promptDone <- context.Canceled
 			},
 		},
 		{
-			name:       "progress timeout",
-			stopReason: "progress_timeout",
+			name:            "progress timeout",
+			stopReason:      "progress_timeout",
+			expectedExitCode: 124,
 			trigger: func(_ chan<- error, progressTimer chan<- time.Time, _ chan<- time.Time, _ chan<- struct{}) {
 				progressTimer <- time.Time{}
 			},
 		},
 		{
-			name:       "configured timeout",
-			stopReason: "timeout",
+			name:            "configured timeout",
+			stopReason:      "timeout",
+			expectedExitCode: 124,
 			trigger: func(_ chan<- error, _ chan<- time.Time, timeout chan<- time.Time, _ chan<- struct{}) {
 				timeout <- time.Time{}
 			},
 		},
 		{
-			name:       "interrupt",
-			stopReason: "cancelled",
+			name:            "interrupt",
+			stopReason:      "cancelled",
+			expectedExitCode: 130,
 			trigger: func(_ chan<- error, _ chan<- time.Time, _ chan<- time.Time, interruptCh chan<- struct{}) {
 				interruptCh <- struct{}{}
 			},
@@ -730,6 +736,9 @@ func TestWaitForSessionSynchronizesFileCleanupForEveryTerminationSource(t *testi
 				if result.StopReason != tt.stopReason {
 					t.Fatalf("StopReason = %q, want %q", result.StopReason, tt.stopReason)
 				}
+				if result.ExitCode != tt.expectedExitCode {
+					t.Fatalf("ExitCode = %d, want %d", result.ExitCode, tt.expectedExitCode)
+				}
 			case <-time.After(2 * time.Second):
 				t.Fatal("WaitForSession did not synchronize and return")
 			}
@@ -749,7 +758,7 @@ func TestResolvePermissionAutoApproveDoesNotAnswerQuestion(t *testing.T) {
 			map[string]any{"optionId": "choice", "kind": "allow"},
 		},
 	}}
-	result := resolvePermission(context.Background(), provider, nil, nil, event, "ses_1", "", "req_question", true, DefaultPermissionClaimTimeout, nil)
+	result := resolvePermission(context.Background(), provider, nil, nil, event, "ses_1", "", "req_question", true, DefaultPermissionClaimTimeout)
 	if provider.answerRequestID != "" {
 		t.Fatalf("question was auto-answered: %q", provider.answerRequestID)
 	}
@@ -2784,13 +2793,12 @@ func TestControlPermissionClaimDisconnectFallsThrough(t *testing.T) {
 	}
 
 	provider := &cliFakeProvider{}
-	emit := func(events.Event) error { return nil }
 
 	// claimTimeout = 0 means no wall-clock timer; fallback happens only on
 	// client disconnect.
 	resultCh := make(chan permissionResult, 1)
 	go func() {
-		resultCh <- resolvePermission(context.Background(), provider, nil, cs, event, "ses_timeout", "", "req_timeout", false, 0, emit)
+		resultCh <- resolvePermission(context.Background(), provider, nil, cs, event, "ses_timeout", "", "req_timeout", false, 0)
 	}()
 
 	// Wait for the claim to be registered before disconnecting.
@@ -3028,7 +3036,7 @@ func TestLateControlAnswerIsBlockedWhileFileResolverOwnsRequest(t *testing.T) {
 	}
 	cs.PreparePermissionClaim("rt_file", "0", control.PermissionResolverReserved, nil)
 	go func() {
-		resultCh <- resolvePermission(ctx, provider, handler, cs, event, "ses_file", "rt_file", "0", false, time.Millisecond, nil)
+		resultCh <- resolvePermission(ctx, provider, handler, cs, event, "ses_file", "rt_file", "0", false, time.Millisecond)
 	}()
 
 	deadline := time.Now().Add(time.Second)
@@ -3069,7 +3077,7 @@ func TestFailedAutomaticPermissionRemovesClaim(t *testing.T) {
 			},
 		},
 	}
-	result := resolvePermission(context.Background(), provider, nil, cs, event, "ses_auto", "rt_auto", "0", true, time.Second, nil)
+	result := resolvePermission(context.Background(), provider, nil, cs, event, "ses_auto", "rt_auto", "0", true, time.Second)
 	if result.err == nil {
 		t.Fatal("automatic permission unexpectedly succeeded")
 	}
@@ -3147,13 +3155,12 @@ func TestControlPermissionClaimDisconnectFallsToFileHandler(t *testing.T) {
 	}
 
 	provider := &cliFakeProvider{}
-	emit := func(events.Event) error { return nil }
 
 	// claimTimeout = 0 means no wall-clock timer; fallback happens only on
 	// client disconnect.
 	resultCh := make(chan permissionResult, 1)
 	go func() {
-		resultCh <- resolvePermission(context.Background(), provider, fh, cs, event, "ses_fh", "", "req_fh", false, 0, emit)
+		resultCh <- resolvePermission(context.Background(), provider, fh, cs, event, "ses_fh", "", "req_fh", false, 0)
 	}()
 
 	// Wait for the claim to be registered before disconnecting.
@@ -3226,7 +3233,7 @@ func TestFilePermissionCancelledOutcomeDoesNotError(t *testing.T) {
 	}
 
 	provider := &cliFakeProvider{}
-	res := resolvePermission(context.Background(), provider, fh, nil, event, "ses_fh", "", "req_fh", false, DefaultPermissionClaimTimeout, nil)
+	res := resolvePermission(context.Background(), provider, fh, nil, event, "ses_fh", "", "req_fh", false, DefaultPermissionClaimTimeout)
 
 	if res.err != nil {
 		t.Fatalf("unexpected error: %v", res.err)
@@ -3401,13 +3408,12 @@ func TestControlPermissionClaimContextCancelReleasesClaim(t *testing.T) {
 	}
 
 	provider := &cliFakeProvider{}
-	emit := func(events.Event) error { return nil }
 
 	ctx, cancel := context.WithCancel(context.Background())
 
 	resultCh := make(chan permissionResult, 1)
 	go func() {
-		resultCh <- resolvePermission(ctx, provider, nil, cs, event, "ses_cancel", "", "req_cancel", false, claimTimeout, emit)
+		resultCh <- resolvePermission(ctx, provider, nil, cs, event, "ses_cancel", "", "req_cancel", false, claimTimeout)
 	}()
 
 	// Wait for the claim to be registered before cancelling.
@@ -3484,12 +3490,11 @@ func TestControlPermissionClaimExplicitTimeoutFallsThrough(t *testing.T) {
 	}
 
 	provider := &cliFakeProvider{}
-	emit := func(events.Event) error { return nil }
 
 	// With an explicit timeout > 0, the timer fires even though the client
 	// stays connected.
 	start := time.Now()
-	res := resolvePermission(context.Background(), provider, nil, cs, event, "ses_et", "", "req_et", false, claimTimeout, emit)
+	res := resolvePermission(context.Background(), provider, nil, cs, event, "ses_et", "", "req_et", false, claimTimeout)
 	elapsed := time.Since(start)
 
 	// Lower bound: must have waited at least the claim timeout (80ms gives 20ms slack).

@@ -372,6 +372,22 @@ func TestMarkPermissionClaimResolvedConcurrent(t *testing.T) {
 			t.Fatal("MarkPermissionClaimResolved returned false")
 		}
 	}
+	key := permissionClaimKey{scope: "rt_1", requestID: "req_1"}
+	s.pendingMu.Lock()
+	claim := s.pendingClaims[key]
+	s.pendingMu.Unlock()
+	if claim.state != PermissionResolverResolved {
+		t.Fatalf("claim state = %v, want Resolved", claim.state)
+	}
+	if claim.answerCh != nil {
+		t.Fatal("claim.answerCh should be nil after resolution")
+	}
+	if claim.disconnectCh != nil {
+		t.Fatal("claim.disconnectCh should be nil after resolution")
+	}
+	if claim.resolutionSource != "concurrent" {
+		t.Fatalf("claim.resolutionSource = %q, want concurrent", claim.resolutionSource)
+	}
 }
 
 func TestPreparePermissionClaimReplacesResolvedTombstone(t *testing.T) {
@@ -472,6 +488,41 @@ func TestPreparePermissionClaimAfterDirectDeliveryCancellation(t *testing.T) {
 	}
 	if !s.MarkPermissionClaimResolved("rt_1", "reused", "direct") {
 		t.Fatal("direct provider completion did not resolve claim")
+	}
+}
+
+func TestPreparePermissionClaimAfterDirectDeliveryAbandoned(t *testing.T) {
+	s := NewServer(NewState("run_1", "", 0))
+	if !s.PreparePermissionClaim("rt_1", "reused", PermissionResolverNoResolver, nil) {
+		t.Fatal("initial PreparePermissionClaim returned false")
+	}
+	if got := s.DeliverPendingPermission("rt_1", "reused", "old", ""); got != PermissionAnswerNoResolver {
+		t.Fatalf("direct delivery = %v, want no-resolver", got)
+	}
+
+	origHook := beforeDirectPermissionClaimWait
+	defer func() { beforeDirectPermissionClaimWait = origHook }()
+	waiting := make(chan struct{})
+	beforeDirectPermissionClaimWait = func() { close(waiting) }
+
+	prepared := make(chan bool, 1)
+	go func() {
+		prepared <- s.PreparePermissionClaimAfterDirectDelivery(context.Background(), "rt_1", "reused", PermissionResolverFile, nil)
+	}()
+	<-waiting
+	if !s.RetryDirectPermissionDelivery("rt_1", "reused") {
+		t.Fatal("RetryDirectPermissionDelivery returned false")
+	}
+	select {
+	case got := <-prepared:
+		if got {
+			t.Fatal("replacement succeeded after abandon")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("replacement did not return after abandon")
+	}
+	if got := s.PermissionResolverState("rt_1", "reused"); got != PermissionResolverNoResolver {
+		t.Fatalf("resolver state after abandon = %v, want NoResolver", got)
 	}
 }
 

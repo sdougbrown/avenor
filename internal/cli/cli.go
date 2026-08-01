@@ -1284,7 +1284,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				done := make(chan permissionResult, 1)
 				permissionDone = done
 				go func() {
-					res := resolvePermission(permissionCtx, provider, deps.FileHandler, deps.ControlServer, event, cfg.SessionID, cfg.PermissionClaimScope, requestID, cfg.AutoApprove, cfg.PermissionClaimTimeout, deps.Writer.Write)
+					res := resolvePermission(permissionCtx, provider, deps.FileHandler, deps.ControlServer, event, cfg.SessionID, cfg.PermissionClaimScope, requestID, cfg.AutoApprove, cfg.PermissionClaimTimeout)
 					done <- res
 					if deps.permissionResultSent != nil {
 						deps.permissionResultSent()
@@ -1523,7 +1523,6 @@ func resolvePermission(
 	requestID string,
 	autoApprove bool,
 	claimTimeout time.Duration,
-	_ func(events.Event) error, // retained for internal call-site compatibility; file handling does not emit events
 ) permissionResult {
 	options, _ := event.Fields["options"].([]any)
 	answerControl := func(ans control.PermissionAnswer) permissionResult {
