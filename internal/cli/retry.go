@@ -26,12 +26,14 @@ type attemptResult struct {
 	output        string
 	finalReply    string
 	usage         map[string]any
+	err           error
 }
 
 type attemptConfig struct {
 	startOptions           runtime.StartOptions
 	backend                string
 	resumeID               string
+	sessionBackends        *sessionBackendMap
 	initialPrompt          string
 	runID                  string
 	runLabel               string
@@ -63,6 +65,11 @@ func runSingleAttempt(
 	cfg attemptConfig,
 	deps attemptDeps,
 ) attemptResult {
+	if err := cfg.sessionBackends.validateResume(cfg.resumeID, cfg.backend); err != nil {
+		fmt.Fprintf(deps.stderr, "avenor: %v\n", err)
+		return attemptResult{exitCode: 1, err: err}
+	}
+
 	provider, err := newProvider(cfg.startOptions, cfg.backend)
 	if err != nil {
 		fmt.Fprintf(deps.stderr, "avenor: create provider: %v\n", err)
@@ -79,6 +86,14 @@ func runSingleAttempt(
 		fmt.Fprintf(deps.stderr, "avenor: start session: %v\n", err)
 		return attemptResult{exitCode: 1}
 	}
+
+	attempt := &cliSessionAttempt{}
+	if err := cfg.sessionBackends.claim(session.SessionID, cfg.backend, attempt, cfg.resumeID); err != nil {
+		fmt.Fprintf(deps.stderr, "avenor: %v\n", err)
+		return attemptResult{exitCode: 1, err: err}
+	}
+	provisionalID := session.SessionID
+	defer func() { cfg.sessionBackends.finish(provisionalID, session.SessionID, cfg.backend, attempt) }()
 
 	prompt := cfg.initialPrompt
 
@@ -131,6 +146,9 @@ func runSingleAttempt(
 			PermissionClaimTimeout: cfg.permissionClaimTimeout,
 			ProgressTimeout:        cfg.progressTimeout,
 			Timeout:                cfg.timer,
+			AcceptSessionID: func(externalID string) bool {
+				return cfg.sessionBackends.adopt(session.SessionID, externalID, cfg.backend, attempt)
+			},
 			AdoptSessionID: func(externalID string) {
 				session.SessionID = externalID
 			},

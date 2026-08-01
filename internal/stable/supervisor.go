@@ -346,6 +346,9 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 		if err := runtime.ValidateThinkingForBackend(backend, params.Thinking); err != nil {
 			return SpawnResult{}, err
 		}
+		if err := s.validateResumeBackend(params.SessionID, backend); err != nil {
+			return SpawnResult{}, err
+		}
 	}
 
 	s.controlMu.Lock()
@@ -878,6 +881,10 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				selectionMu.Unlock()
 			}
 
+			if err := s.validateResumeBackend(prevSessionID, selection.Backend); err != nil {
+				return looprunner.PhaseAttemptResult{ExitCode: 1}, err
+			}
+
 			startOpts := runtime.StartOptions{
 				Agent:        selection.Agent,
 				AgentProfile: agentProfile,
@@ -981,9 +988,11 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				// the phase-local session, which is authoritative for retries,
 				// resume, and the terminal sentinel. It also updates the aggregate
 				// child record when this phase is still the active one.
+				AcceptSessionID: func(externalID string) bool {
+					return s.adoptChildSessionID(child, attemptProvider, preAdoptionID, externalID)
+				},
 				AdoptSessionID: func(externalID string) {
 					session.SessionID = externalID
-					s.adoptChildSessionID(child, attemptProvider, preAdoptionID, externalID)
 				},
 			}, cli.SessionWaitDeps{
 				Writer:        attemptWriter,
@@ -1116,6 +1125,9 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				resolvedSelections[phase.Name] = selection
 				selectionMu.Unlock()
 			}
+			if err := s.validateResumeBackend(prevSessionID, selection.Backend); err != nil {
+				return teamrunner.PhaseAttemptResult{ExitCode: 1}, err
+			}
 			startOpts := runtime.StartOptions{
 				Agent:        selection.Agent,
 				AgentProfile: agentProfile,
@@ -1221,9 +1233,11 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				// the phase-local session, which is authoritative for retries,
 				// resume, and the terminal sentinel. It also updates the aggregate
 				// child record when this phase is still the active one.
+				AcceptSessionID: func(externalID string) bool {
+					return s.adoptChildSessionID(child, attemptProvider, preAdoptionID, externalID)
+				},
 				AdoptSessionID: func(externalID string) {
 					session.SessionID = externalID
-					s.adoptChildSessionID(child, attemptProvider, preAdoptionID, externalID)
 				},
 			}, cli.SessionWaitDeps{
 				Writer:        attemptWriter,
@@ -1334,18 +1348,27 @@ func (c *childRuntime) sessionID() string {
 // A stale callback from an older attempt is rejected, as is a same or empty
 // external id. This prevents a late team/loop phase from overwriting a newer
 // active session. Only SessionID changes; Backend, Dir, and PID are preserved.
-func (s *Supervisor) adoptChildSessionID(child *childRuntime, provider runtime.Provider, expectedOldID, externalID string) {
+func (s *Supervisor) adoptChildSessionID(child *childRuntime, provider runtime.Provider, expectedOldID, externalID string) bool {
 	if externalID == "" || externalID == expectedOldID {
-		return
+		return false
 	}
 	child.mu.Lock()
 	defer child.mu.Unlock()
 	if child.provider == nil || child.provider != provider || child.session.SessionID != expectedOldID {
-		return
+		return false
 	}
-	identityEntry, ok := s.sessionIdentityEntry(expectedOldID)
+
+	// Guard the authoritative map and the child update as one adoption. In
+	// particular, a late provisional callback must not overwrite an ID already
+	// claimed by a newer provider.
+	s.sessionIdentityMu.Lock()
+	defer s.sessionIdentityMu.Unlock()
+	identityEntry, ok := s.sessionIdentities[expectedOldID]
 	if ok && identityEntry.provider != nil && identityEntry.provider != provider {
-		return
+		return false
+	}
+	if _, exists := s.sessionIdentities[externalID]; exists {
+		return false
 	}
 	identity := identityEntry.identity
 	if !ok {
@@ -1358,12 +1381,15 @@ func (s *Supervisor) adoptChildSessionID(child *childRuntime, provider runtime.P
 			RosterEntry:  child.rosterEntry,
 		}
 	}
+	if s.sessionIdentities == nil {
+		s.sessionIdentities = make(map[string]sessionIdentityEntry)
+	}
 	// Keep the provisional alias until phase cleanup, but publish the
-	// authoritative mapping while child.mu is still guarded and before the
-	// session.start event can be forwarded.
-	s.rememberSessionIdentity(expectedOldID, identity, provider)
-	s.rememberSessionIdentity(externalID, identity, provider)
+	// authoritative mapping before session.start is forwarded.
+	s.sessionIdentities[expectedOldID] = sessionIdentityEntry{identity: identity, provider: provider}
+	s.sessionIdentities[externalID] = sessionIdentityEntry{identity: identity, provider: provider}
 	child.session.SessionID = externalID
+	return true
 }
 
 func resolveStablePhaseSelection(roster *rosterconfig.Config, backend, agent, model string, phase phaseconfig.Phase, loop bool) (rosterconfig.ResolvedSelection, error) {
@@ -1399,6 +1425,17 @@ func (s *Supervisor) rememberSessionIdentity(sessionID string, identity effectiv
 	}
 	s.sessionIdentities[sessionID] = sessionIdentityEntry{identity: identity, provider: provider}
 	s.sessionIdentityMu.Unlock()
+}
+
+func (s *Supervisor) validateResumeBackend(sessionID, currentBackend string) error {
+	if sessionID == "" {
+		return nil
+	}
+	identity, ok := s.sessionIdentity(sessionID)
+	if ok && identity.Backend != "" && identity.Backend != currentBackend {
+		return fmt.Errorf("cannot resume session %q with backend %q: session belongs to backend %q", sessionID, currentBackend, identity.Backend)
+	}
+	return nil
 }
 
 func (s *Supervisor) sessionIdentity(sessionID string) (effectiveIdentity, bool) {
@@ -1533,9 +1570,11 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 		// The aggregate child record is updated only when this attempt is
 		// still the active one, so a late retry cannot overwrite a newer
 		// session.
+		AcceptSessionID: func(externalID string) bool {
+			return s.adoptChildSessionID(child, attemptProvider, preAdoptionID, externalID)
+		},
 		AdoptSessionID: func(externalID string) {
 			session.SessionID = externalID
-			s.adoptChildSessionID(child, attemptProvider, preAdoptionID, externalID)
 		},
 	}, cli.SessionWaitDeps{
 		Writer:        taggedWriter,

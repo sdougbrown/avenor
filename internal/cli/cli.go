@@ -172,6 +172,16 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		*backend = entry.Backend
 		*agent = entry.Agent
 		*model = entry.Model
+		if *agent != "" && *model == "" {
+			resolved, resolveErr := resolveAgentModel(*agent, *backend, getenv)
+			if resolveErr != nil {
+				fmt.Fprintf(stderr, "avenor: %v\n", resolveErr)
+				return exitWithSentinel(1)
+			}
+			if resolved != "" {
+				*model = resolved
+			}
+		}
 	}
 
 	discovery := DiscoverServer(*serverURL, getenv)
@@ -415,6 +425,10 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		timer = t.C
 	}
 
+	// Stable supervisor metadata is unavailable in this execution path. Keep
+	// the authoritative session/backend relationship local to this CLI run.
+	sessionBackends := newSessionBackendMap()
+
 	execAttempt := func(ctx context.Context, selection rosterconfig.ResolvedSelection, resumeID, prompt string) attemptResult {
 		if err := validateCLISelection(selection.Backend, discovery, *thinking); err != nil {
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
@@ -424,6 +438,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			startOptions:           runtime.StartOptions{Agent: selection.Agent, Model: selection.Model, Label: *label, Dir: *dir, ServerURL: discovery.URL, Thinking: *thinking},
 			backend:                selection.Backend,
 			resumeID:               resumeID,
+			sessionBackends:        sessionBackends,
 			initialPrompt:          prompt,
 			runID:                  runID,
 			runLabel:               *label,
@@ -494,6 +509,9 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 				selectionMu.Unlock()
 			}
 			r := execAttempt(ctx, selection, prevSessionID, phase.Prompt)
+			if r.err != nil {
+				return looprunner.PhaseAttemptResult{ExitCode: 1}, r.err
+			}
 			return looprunner.PhaseAttemptResult{
 				ExitCode:      r.exitCode,
 				SessionID:     r.sessionID,
@@ -554,6 +572,9 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 				selectionMu.Unlock()
 			}
 			r := execAttempt(ctx, selection, prevSessionID, phase.Prompt)
+			if r.err != nil {
+				return teamrunner.PhaseAttemptResult{ExitCode: 1}, r.err
+			}
 			return teamrunner.PhaseAttemptResult{
 				ExitCode:      r.exitCode,
 				SessionID:     r.sessionID,
@@ -825,6 +846,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			startOptions:           startOptions,
 			backend:                *backend,
 			resumeID:               resumeID,
+			sessionBackends:        sessionBackends,
 			initialPrompt:          string(promptText),
 			runID:                  runID,
 			runLabel:               *label,
@@ -841,7 +863,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		finalSessionID = result.sessionID
 		finalStopReason = result.stopReason
 
-		if result.exitCode != 1 || attempt > *maxRetries {
+		if result.err != nil || result.exitCode != 1 || attempt > *maxRetries {
 			break
 		}
 
@@ -978,7 +1000,12 @@ type SessionWaitConfig struct {
 	PermissionClaimTimeout time.Duration
 	ProgressTimeout        time.Duration
 	Timeout                <-chan time.Time
-	AdoptSessionID         func(string)
+	// AcceptSessionID can reject an authoritative provider ID before the
+	// legacy AdoptSessionID callback is invoked. Rejection keeps the attempt
+	// on its provisional ID so a late callback cannot make another provider's
+	// session reusable.
+	AcceptSessionID func(string) bool
+	AdoptSessionID  func(string)
 }
 
 type SessionWaitDeps struct {
@@ -1069,10 +1096,16 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				if event.Event == "session.start" {
 					externalID, _ := event.Fields["conversation_id"].(string)
 					if externalID != "" && externalID != cfg.SessionID {
-						cfg.SessionID = externalID
-						tracker.sessionID = externalID
-						if cfg.AdoptSessionID != nil {
-							cfg.AdoptSessionID(externalID)
+						adopted := true
+						if cfg.AcceptSessionID != nil {
+							adopted = cfg.AcceptSessionID(externalID)
+						}
+						if adopted {
+							cfg.SessionID = externalID
+							tracker.sessionID = externalID
+							if cfg.AdoptSessionID != nil {
+								cfg.AdoptSessionID(externalID)
+							}
 						}
 					}
 				}
