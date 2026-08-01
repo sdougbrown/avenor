@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'bun:test'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { validateSpawnSelection } from '@dougbots/avenor-core'
 import { z } from 'zod'
 import { getMcpAuthToken, isAllowedHost, isAllowedOrigin, parseBearerToken } from './mcp'
 import { spawnInputShape } from './spawn-schema'
@@ -73,15 +74,35 @@ describe('avenor MCP server', () => {
     expect(server).toBeDefined()
   })
 
-  it('accepts agent-less, model-only, and both-supplied spawn inputs', () => {
+  it('keeps direct and roster selectors as optional flat fields', () => {
     const schema = z.object(spawnInputShape)
 
     expect(schema.safeParse({ repo_dir: '/tmp/repo' }).success).toBe(true)
+    expect(schema.safeParse({ repo_dir: '/tmp/repo', agent: 'codex' }).success).toBe(true)
     expect(schema.safeParse({ repo_dir: '/tmp/repo', model: 'sonnet' }).success).toBe(true)
+    expect(schema.safeParse({ repo_dir: '/tmp/repo', backend: 'agy' }).success).toBe(true)
     expect(schema.safeParse({ repo_dir: '/tmp/repo', agent: 'codex', model: 'sonnet' }).success).toBe(true)
+    expect(schema.safeParse({
+      repo_dir: '/tmp/repo',
+      roster_file: '/repo/roster.json',
+      roster_entry: 'planner',
+    }).success).toBe(true)
     expect(schema.safeParse({ repo_dir: '/tmp/repo', thinking: 'xhigh' }).success).toBe(true)
     expect(schema.safeParse({ repo_dir: '/tmp/repo', thinking: 'HIGH' }).success).toBe(false)
     expect(schema.safeParse({ agent: 'codex' }).success).toBe(false)
+  })
+
+  it('defers mixed-selector rejection to shared execution validation', () => {
+    const input = {
+      roster_file: '/repo/roster.json',
+      roster_entry: 'planner',
+      backend: 'agy',
+    }
+
+    expect(z.object(spawnInputShape).safeParse({ repo_dir: '/tmp/repo', ...input }).success).toBe(true)
+    expect(() => validateSpawnSelection(input)).toThrow(
+      'invalid spawn selector: direct identity fields are disabled in roster mode',
+    )
   })
 
   it('parses bearer auth conservatively', () => {

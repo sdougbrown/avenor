@@ -72,6 +72,8 @@ server.registerTool('avenor_spawn', {
   model,
   thinking,
   backend,
+  roster_file,
+  roster_entry,
   server_url,
   supervisor_id,
 }) => {
@@ -85,6 +87,8 @@ server.registerTool('avenor_spawn', {
     model,
     thinking,
     backend,
+    rosterFile: roster_file,
+    rosterEntry: roster_entry,
     serverUrl: server_url,
     supervisorId: supervisor_id,
   })
