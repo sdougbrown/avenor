@@ -35,6 +35,30 @@ describe('MCP spawn schema', () => {
       roster_file: '/repo/roster.json',
       roster_entry: 'planner',
     }).success).toBe(true)
+
+    // Exercise the remaining optional flat fields
+    expect(spawnSchema.safeParse({ repo_dir: '/tmp/repo', prompt: 'hello' }).success).toBe(true)
+    expect(spawnSchema.safeParse({ repo_dir: '/tmp/repo', prompt_file: '/tmp/prompt.md' }).success).toBe(true)
+    expect(spawnSchema.safeParse({ repo_dir: '/tmp/repo', label: 'test-run' }).success).toBe(true)
+    expect(spawnSchema.safeParse({ repo_dir: '/tmp/repo', timeout: '5m' }).success).toBe(true)
+    expect(spawnSchema.safeParse({ repo_dir: '/tmp/repo', server_url: 'http://localhost:3000' }).success).toBe(true)
+    expect(spawnSchema.safeParse({ repo_dir: '/tmp/repo', supervisor_id: 'svc-1' }).success).toBe(true)
+
+    // All optional flat fields together
+    expect(spawnSchema.safeParse({
+      repo_dir: '/tmp/repo',
+      prompt: 'hello',
+      prompt_file: '/tmp/prompt.md',
+      label: 'test-run',
+      timeout: '5m',
+      server_url: 'http://localhost:3000',
+      supervisor_id: 'svc-1',
+    }).success).toBe(true)
+
+    // repo_dir is required
+    expect(spawnSchema.safeParse({}).success).toBe(false)
+    expect(spawnSchema.safeParse({ agent: 'reviewer' }).success).toBe(false)
+
     expect(expectedFields).not.toContain('mode')
   })
 
