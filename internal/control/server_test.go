@@ -393,6 +393,41 @@ func TestPreparePermissionClaimReplacesResolvedTombstone(t *testing.T) {
 	}
 }
 
+func TestPreparePermissionClaimWaitsForDirectCompletionBeforeReusedID(t *testing.T) {
+	s := NewServer(NewState("run_1", "", 0))
+	if !s.PreparePermissionClaim("rt_1", "reused", PermissionResolverNoResolver, nil) {
+		t.Fatal("initial PreparePermissionClaim returned false")
+	}
+	if got := s.DeliverPendingPermission("rt_1", "reused", "old", ""); got != PermissionAnswerNoResolver {
+		t.Fatalf("direct delivery = %v, want no-resolver", got)
+	}
+
+	origHook := beforeDirectPermissionClaimWait
+	defer func() { beforeDirectPermissionClaimWait = origHook }()
+	waiting := make(chan struct{})
+	releaseWait := make(chan struct{})
+	beforeDirectPermissionClaimWait = func() {
+		close(waiting)
+		<-releaseWait
+	}
+
+	prepared := make(chan bool, 1)
+	go func() {
+		prepared <- s.PreparePermissionClaimAfterDirectDelivery(context.Background(), "rt_1", "reused", PermissionResolverFile, nil)
+	}()
+	<-waiting
+	if !s.MarkPermissionClaimResolved("rt_1", "reused", "direct") {
+		t.Fatal("direct provider completion did not resolve claim")
+	}
+	close(releaseWait)
+	if !<-prepared {
+		t.Fatal("reused request was rejected after direct completion")
+	}
+	if got := s.PermissionResolverState("rt_1", "reused"); got != PermissionResolverFile {
+		t.Fatalf("replacement state = %v, want file", got)
+	}
+}
+
 func TestAnswerPendingPermissionDeliversMatchingAnswer(t *testing.T) {
 	s := NewServer(NewState("run_1", "", 0))
 	answerCh, _, ok := s.BeginPermissionClaim("", "req_1")

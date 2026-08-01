@@ -135,6 +135,9 @@ type childRuntime struct {
 	mu                sync.Mutex
 	writeMu           sync.Mutex
 	fanoutWriter      *runtimeFanoutWriter
+	writerClosing     bool
+	directAnswers     int
+	directAnswersDone chan struct{}
 }
 
 type effectiveIdentity struct {
@@ -226,31 +229,32 @@ type handledChildQuestion struct {
 }
 
 type Supervisor struct {
-	config               Config
-	runID                string
-	control              *control.ControlServer
-	state                *control.ControlState
-	controlMu            sync.Mutex
-	runtimes             map[string]*childRuntime
-	nextID               int
-	shutdownCh           chan struct{}
-	runtimeActivity      chan struct{}
-	childQuestionSeq     int
-	pendingQuestions     map[string]pendingChildQuestion // child runtime ID -> pending question
-	handledQuestions     map[string]handledChildQuestion // child runtime ID -> latest handled request
-	childQuestionTimeout time.Duration
-	httpServer           *control.HTTPDebugServer
-	permOptions          map[string][]any // keyed by "runtimeID:requestID"
-	httpServers          map[string]any   // dir → *managedHTTPServer or errHTTPServerStarting sentinel
-	httpServerMu         sync.Mutex
-	httpServerCond       *sync.Cond
-	fileSnapshots        map[string][]string // runtimeID → pre-run file list for output detection
-	fileSnapMu           sync.Mutex
-	broker               *broker.Broker
-	newProviderFunc      func(startOpts runtime.StartOptions, backend string) (runtime.Provider, error)
-	sessionIdentityMu    sync.RWMutex
-	sessionIdentities    map[string]sessionIdentityEntry
-	sessionOwners        map[string]*sessionAttempt
+	config                     Config
+	runID                      string
+	control                    *control.ControlServer
+	state                      *control.ControlState
+	controlMu                  sync.Mutex
+	runtimes                   map[string]*childRuntime
+	nextID                     int
+	shutdownCh                 chan struct{}
+	runtimeActivity            chan struct{}
+	childQuestionSeq           int
+	pendingQuestions           map[string]pendingChildQuestion // child runtime ID -> pending question
+	handledQuestions           map[string]handledChildQuestion // child runtime ID -> latest handled request
+	childQuestionTimeout       time.Duration
+	httpServer                 *control.HTTPDebugServer
+	permOptions                map[string][]any // keyed by "runtimeID:requestID"
+	httpServers                map[string]any   // dir → *managedHTTPServer or errHTTPServerStarting sentinel
+	httpServerMu               sync.Mutex
+	httpServerCond             *sync.Cond
+	fileSnapshots              map[string][]string // runtimeID → pre-run file list for output detection
+	fileSnapMu                 sync.Mutex
+	broker                     *broker.Broker
+	newProviderFunc            func(startOpts runtime.StartOptions, backend string) (runtime.Provider, error)
+	sessionIdentityMu          sync.RWMutex
+	sessionIdentities          map[string]sessionIdentityEntry
+	sessionOwners              map[string]*sessionAttempt
+	beforeChildWriterCloseWait func()
 }
 
 func NewSupervisor(cfg Config) *Supervisor {
@@ -811,8 +815,8 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			}
 		}
 		close(child.done)
+		s.closeChildEventWriter(child)
 		s.clearRuntimePermissionOptions(child.id)
-		_ = child.eventWriter.Close()
 		if closer, ok := child.provider.(interface{ Close() error }); ok {
 			_ = closer.Close()
 		}
@@ -927,11 +931,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 		if child.cancelFn != nil {
 			child.cancelFn()
 		}
-		child.writeMu.Lock()
-		if child.eventWriter != nil {
-			_ = child.eventWriter.Close()
-		}
-		child.writeMu.Unlock()
+		s.closeChildEventWriter(child)
 		child.mu.Lock()
 		child.completed = true
 		child.mu.Unlock()
@@ -1104,10 +1104,11 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 					session.SessionID = externalID
 				},
 			}, cli.SessionWaitDeps{
-				Writer:        attemptWriter,
-				FileHandler:   child.fileHandler,
-				ControlServer: s.control,
-				Stderr:        os.Stderr,
+				Writer:                 attemptWriter,
+				FileHandler:            child.fileHandler,
+				ControlServer:          s.control,
+				PreparePermissionClaim: s.control.PreparePermissionClaimAfterDirectDelivery,
+				Stderr:                 os.Stderr,
 			})
 
 			sessions.remember(phase.Name, session.SessionID, identity)
@@ -1184,11 +1185,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 		if child.cancelFn != nil {
 			child.cancelFn()
 		}
-		child.writeMu.Lock()
-		if child.eventWriter != nil {
-			_ = child.eventWriter.Close()
-		}
-		child.writeMu.Unlock()
+		s.closeChildEventWriter(child)
 		child.mu.Lock()
 		child.completed = true
 		child.mu.Unlock()
@@ -1359,10 +1356,11 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 					session.SessionID = externalID
 				},
 			}, cli.SessionWaitDeps{
-				Writer:        attemptWriter,
-				FileHandler:   child.fileHandler,
-				ControlServer: s.control,
-				Stderr:        os.Stderr,
+				Writer:                 attemptWriter,
+				FileHandler:            child.fileHandler,
+				ControlServer:          s.control,
+				PreparePermissionClaim: s.control.PreparePermissionClaimAfterDirectDelivery,
+				Stderr:                 os.Stderr,
 			})
 
 			sessions.remember(phase.Name, session.SessionID, identity)
@@ -1876,10 +1874,11 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 			session.SessionID = externalID
 		},
 	}, cli.SessionWaitDeps{
-		Writer:        taggedWriter,
-		FileHandler:   child.fileHandler,
-		ControlServer: s.control,
-		Stderr:        os.Stderr,
+		Writer:                 taggedWriter,
+		FileHandler:            child.fileHandler,
+		ControlServer:          s.control,
+		PreparePermissionClaim: s.control.PreparePermissionClaimAfterDirectDelivery,
+		Stderr:                 os.Stderr,
 	})
 	exitCode := result.ExitCode
 	return childAttemptResult{exitCode: exitCode, sessionID: session.SessionID, stopReason: result.StopReason}
@@ -2283,20 +2282,29 @@ func (s *Supervisor) answerPermission(rtID, requestID, optionID, message string)
 		s.control.RetryDirectPermissionDelivery(rtID, requestID)
 		return fmt.Errorf("runtime %q has no active session for permission response", rtID)
 	}
-	if err := provider.AnswerPermission(context.Background(), sessionID, requestID, runtime.PermissionResponse{
+	if !s.beginDirectPermissionAnswer(rt) {
+		s.control.RetryDirectPermissionDelivery(rtID, requestID)
+		return fmt.Errorf("runtime %q is closing", rtID)
+	}
+	providerErr := provider.AnswerPermission(context.Background(), sessionID, requestID, runtime.PermissionResponse{
 		Allow:    kind == "allow",
 		OptionID: optionID,
 		Message:  message,
-	}); err != nil {
-		s.control.RetryDirectPermissionDelivery(rtID, requestID)
-		return err
-	}
-	// The provider has accepted the answer. Serialize claim resolution, child
-	// status mutation, and the durable response event under the same write lock
-	// used by runtimeFanoutWriter. A reused request ID therefore cannot publish
-	// a newer request and then have this old response clear its status.
+	})
+
+	// No supervisor lock is held across the provider call. Completion resumes
+	// the established writeMu -> controlMu -> pendingMu order. A replacement
+	// preparation waiting on DirectDelivery is released by the terminal claim
+	// transition, then blocks on writeMu until this response is durable.
 	rt.writeMu.Lock()
-	defer rt.writeMu.Unlock()
+	defer func() {
+		s.finishDirectPermissionAnswerLocked(rt)
+		rt.writeMu.Unlock()
+	}()
+	if providerErr != nil {
+		s.control.RetryDirectPermissionDelivery(rtID, requestID)
+		return providerErr
+	}
 	s.cleanupDirectPermission(rtID, requestID, nil)
 	writer := s.fanoutWriterLocked(rt)
 	return writer.writeLocked(events.Event{
@@ -2345,6 +2353,46 @@ func (s *Supervisor) clearRuntimePermissionOptions(runtimeID string) {
 	s.control.ClearPermissionClaims(runtimeID)
 }
 
+func (s *Supervisor) beginDirectPermissionAnswer(child *childRuntime) bool {
+	child.writeMu.Lock()
+	defer child.writeMu.Unlock()
+	if child.writerClosing {
+		return false
+	}
+	if child.directAnswers == 0 {
+		child.directAnswersDone = make(chan struct{})
+	}
+	child.directAnswers++
+	return true
+}
+
+func (s *Supervisor) finishDirectPermissionAnswerLocked(child *childRuntime) {
+	child.directAnswers--
+	if child.directAnswers == 0 {
+		close(child.directAnswersDone)
+	}
+}
+
+// closeChildEventWriter closes the durable sink only after every direct answer
+// admitted before teardown has written its canonical permission.response.
+func (s *Supervisor) closeChildEventWriter(child *childRuntime) {
+	child.writeMu.Lock()
+	child.writerClosing = true
+	if child.directAnswers > 0 {
+		done := child.directAnswersDone
+		if s.beforeChildWriterCloseWait != nil {
+			s.beforeChildWriterCloseWait()
+		}
+		child.writeMu.Unlock()
+		<-done
+		child.writeMu.Lock()
+	}
+	if child.eventWriter != nil {
+		_ = child.eventWriter.Close()
+	}
+	child.writeMu.Unlock()
+}
+
 func (s *Supervisor) setFanoutWriter(child *childRuntime, writer *runtimeFanoutWriter) {
 	child.writeMu.Lock()
 	child.mu.Lock()
@@ -2382,10 +2430,14 @@ type runtimeFanoutWriter struct {
 	metadata        *cli.EventMetadata
 	onPermissionReq func(runtimeID, requestID string, options []any)
 	recorder        *broker.Recorder
+	beforeWriteLock func()
 }
 
 func (w *runtimeFanoutWriter) Write(ev events.Event) error {
 	if w.child != nil {
+		if w.beforeWriteLock != nil {
+			w.beforeWriteLock()
+		}
 		w.child.writeMu.Lock()
 		defer w.child.writeMu.Unlock()
 	}

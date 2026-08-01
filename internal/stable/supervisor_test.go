@@ -1401,6 +1401,31 @@ func (s *blockingResponseSink) Write(ev events.Event) error {
 
 func (s *blockingResponseSink) Close() error { return nil }
 
+type orderedCloseSink struct {
+	mu    sync.Mutex
+	order []string
+}
+
+func (s *orderedCloseSink) Write(ev events.Event) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.order = append(s.order, ev.Event)
+	return nil
+}
+
+func (s *orderedCloseSink) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.order = append(s.order, "close")
+	return nil
+}
+
+func (s *orderedCloseSink) recordedOrder() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.order...)
+}
+
 func cachePermissionOptionsThroughFanout(t *testing.T, sup *Supervisor, runtimeID string, ev events.Event) {
 	t.Helper()
 	writer := &runtimeFanoutWriter{
@@ -2747,16 +2772,20 @@ func TestDirectPermissionResponseOrdersReusedRequestIDStatus(t *testing.T) {
 	if !sup.control.PreparePermissionClaim(child.id, "reused", control.PermissionResolverNoResolver, newOptions) {
 		t.Fatal("resolved direct claim was not replaceable")
 	}
+	writeLockAttempted := make(chan struct{})
+	var writeLockOnce sync.Once
+	writer.beforeWriteLock = func() { writeLockOnce.Do(func() { close(writeLockAttempted) }) }
 	newRequestDone := make(chan error, 1)
 	go func() {
 		newRequestDone <- writer.Write(events.Event{Event: "permission.request", SessionID: child.session.SessionID, Fields: map[string]any{
 			"request_id": "reused", "resolver": "none", "options": newOptions,
 		}})
 	}()
+	<-writeLockAttempted
 	select {
 	case err := <-newRequestDone:
 		t.Fatalf("new request bypassed response write lock, err=%v", err)
-	case <-time.After(25 * time.Millisecond):
+	default:
 	}
 
 	close(sink.releaseResponse)
@@ -2782,6 +2811,67 @@ func TestDirectPermissionResponseOrdersReusedRequestIDStatus(t *testing.T) {
 	child.mu.Unlock()
 	if !pending {
 		t.Fatal("old response cleared pending status for the reused new request")
+	}
+}
+
+func TestNormalChildTeardownWaitsForAcceptedDirectResponse(t *testing.T) {
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-answer-direct-teardown.sock", MaxRuntimes: 1})
+	provider := &blockingPermissionProvider{
+		started: make(chan struct{}, 1),
+		release: make(chan struct{}),
+	}
+	sink := &orderedCloseSink{}
+	child := &childRuntime{
+		id:          "rt_direct_teardown",
+		provider:    provider,
+		session:     runtime.Session{SessionID: "ses_direct_teardown"},
+		eventWriter: sink,
+		done:        make(chan struct{}),
+		promptCh:    make(chan struct{}, 1),
+	}
+	writer := &runtimeFanoutWriter{
+		base:            sink,
+		runtimeID:       child.id,
+		child:           child,
+		control:         sup.control,
+		metadata:        cli.NewEventMetadata(sup.runID, "teardown", child.id),
+		onPermissionReq: sup.cachePermissionOptions,
+	}
+	sup.setFanoutWriter(child, writer)
+	sup.runtimes[child.id] = child
+
+	options := []any{map[string]any{"optionId": "allow", "kind": "allow"}}
+	if !sup.control.PreparePermissionClaim(child.id, "req_teardown", control.PermissionResolverNoResolver, options) {
+		t.Fatal("permission claim was not prepared")
+	}
+	if err := writer.Write(events.Event{Event: "permission.request", SessionID: child.session.SessionID, Fields: map[string]any{
+		"request_id": "req_teardown", "resolver": "none", "options": options,
+	}}); err != nil {
+		t.Fatalf("write permission request: %v", err)
+	}
+
+	answerDone := make(chan error, 1)
+	go func() { answerDone <- sup.answerPermission(child.id, "req_teardown", "allow", "") }()
+	<-provider.started
+
+	teardownWaiting := make(chan struct{})
+	var teardownOnce sync.Once
+	sup.beforeChildWriterCloseWait = func() { teardownOnce.Do(func() { close(teardownWaiting) }) }
+	closeDone := make(chan struct{})
+	go func() {
+		sup.closeChildEventWriter(child)
+		close(closeDone)
+	}()
+	<-teardownWaiting
+	close(provider.release)
+
+	if err := <-answerDone; err != nil {
+		t.Fatalf("accepted direct answer: %v", err)
+	}
+	<-closeDone
+	want := []string{"permission.request", "permission.response", "close"}
+	if got := sink.recordedOrder(); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("durable order = %v, want %v", got, want)
 	}
 }
 

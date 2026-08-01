@@ -1019,6 +1019,9 @@ type SessionWaitDeps struct {
 	// permissionResultSent is a test synchronization hook invoked after a
 	// resolver publishes its result to permissionDone.
 	permissionResultSent func()
+	// PreparePermissionClaim lets stable runtimes serialize a reused request ID
+	// with direct provider completion. Nil uses ControlServer directly.
+	PreparePermissionClaim func(context.Context, string, string, control.PermissionResolverState, []any) bool
 }
 
 func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionWaitConfig, deps SessionWaitDeps) sessionResult {
@@ -1252,7 +1255,14 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				claimConflict := false
 				if requestID != "" && deps.ControlServer != nil {
 					options, _ := event.Fields["options"].([]any)
-					claimConflict = !deps.ControlServer.PreparePermissionClaim(cfg.PermissionClaimScope, requestID, resolverState, options)
+					if deps.PreparePermissionClaim != nil {
+						claimConflict = !deps.PreparePermissionClaim(permissionCtx, cfg.PermissionClaimScope, requestID, resolverState, options)
+					} else {
+						claimConflict = !deps.ControlServer.PreparePermissionClaim(cfg.PermissionClaimScope, requestID, resolverState, options)
+					}
+				}
+				if claimConflict && permissionCtx.Err() != nil {
+					return terminate("cancelled")
 				}
 				if claimConflict {
 					emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "permission", "another permission request is already pending", deps.Stderr, cfg.RunLabel)
