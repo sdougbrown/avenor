@@ -107,6 +107,7 @@ type childRuntime struct {
 	dir              string
 	onEvent          string
 	sentinelFile     string
+	lifecycleCtx     context.Context
 	cancelFn         func()
 	interruptFn      func()
 	done             chan struct{}
@@ -450,13 +451,18 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 	}
 	s.nextID++
 	rtID := fmt.Sprintf("rt_%d", s.nextID)
+	childCtx, childCancel := context.WithCancel(context.Background())
 
 	// Reserve the slot to prevent TOCTOU bypass of the max-runtime limit.
+	// Every child mode shares this lifecycle context so direct provider calls
+	// can be canceled before writer teardown waits for them.
 	child := &childRuntime{
-		id:          rtID,
-		done:        make(chan struct{}),
-		promptCh:    make(chan struct{}, 1),
-		autoApprove: params.AutoApprove,
+		id:           rtID,
+		lifecycleCtx: childCtx,
+		cancelFn:     childCancel,
+		done:         make(chan struct{}),
+		promptCh:     make(chan struct{}, 1),
+		autoApprove:  params.AutoApprove,
 	}
 	s.runtimes[rtID] = child
 	s.controlMu.Unlock()
@@ -476,6 +482,7 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 	}
 
 	releaseReservation := func() {
+		childCancel()
 		s.controlMu.Lock()
 		delete(s.runtimes, rtID)
 		s.controlMu.Unlock()
@@ -582,8 +589,6 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 			AgentProfile: params.AgentProfile,
 		}
 
-		childCtx, childCancel := context.WithCancel(context.Background())
-
 		child.label = params.Label
 		child.agent = params.Agent
 		child.agentProfile = params.AgentProfile
@@ -595,7 +600,6 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 		child.effectiveModel = params.Model
 		child.rosterFile = rosterMetadataPath
 		child.roster = rootRoster
-		child.cancelFn = childCancel
 		child.permClaimTimeout = s.config.PermissionClaimTimeout
 		child.eventWriter = writer
 		child.fileHandler = fileHandler
@@ -645,8 +649,6 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 			AgentProfile: params.AgentProfile,
 		}
 
-		childCtx, childCancel := context.WithCancel(context.Background())
-
 		child.label = params.Label
 		child.agent = params.Agent
 		child.agentProfile = params.AgentProfile
@@ -658,7 +660,6 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 		child.effectiveModel = params.Model
 		child.rosterFile = rosterMetadataPath
 		child.roster = rootRoster
-		child.cancelFn = childCancel
 		child.permClaimTimeout = s.config.PermissionClaimTimeout
 		child.eventWriter = writer
 		child.fileHandler = fileHandler
@@ -713,7 +714,7 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 		_ = writer.Close()
 		return SpawnResult{}, fmt.Errorf("create provider: %w", err)
 	}
-	session, err := cli.StartSession(context.Background(), provider, backend, startOpts, params.SessionID)
+	session, err := cli.StartSession(childCtx, provider, backend, startOpts, params.SessionID)
 	if err != nil {
 		if closer, ok := provider.(interface{ Close() error }); ok {
 			_ = closer.Close()
@@ -759,10 +760,6 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 		return SpawnResult{}, err
 	}
 	child.directAttempt = attempt
-
-	// Initialise cancelFn in spawn so it's never nil when cancelRuntime reads it.
-	childCtx, childCancel := context.WithCancel(context.Background())
-	child.cancelFn = childCancel
 
 	// Take a file snapshot for output file detection.
 	s.fileSnapMu.Lock()
@@ -814,6 +811,7 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 				cli.WriteSentinel(child.sentinelFile, 1, child.sessionID(), "error", s.runID, os.Stderr)
 			}
 		}
+		child.cancelFn()
 		close(child.done)
 		s.closeChildEventWriter(child)
 		s.clearRuntimePermissionOptions(child.id)
@@ -2286,7 +2284,7 @@ func (s *Supervisor) answerPermission(rtID, requestID, optionID, message string)
 		s.control.RetryDirectPermissionDelivery(rtID, requestID)
 		return fmt.Errorf("runtime %q is closing", rtID)
 	}
-	providerErr := provider.AnswerPermission(context.Background(), sessionID, requestID, runtime.PermissionResponse{
+	providerErr := provider.AnswerPermission(rt.lifecycleContext(), sessionID, requestID, runtime.PermissionResponse{
 		Allow:    kind == "allow",
 		OptionID: optionID,
 		Message:  message,
@@ -2351,6 +2349,19 @@ func (s *Supervisor) clearRuntimePermissionOptions(runtimeID string) {
 	}
 	s.controlMu.Unlock()
 	s.control.ClearPermissionClaims(runtimeID)
+}
+
+// lifecycleContext returns the immutable context created when the runtime is
+// reserved. The fallback keeps focused unit tests with hand-built children
+// backward compatible while production direct answers always share the child
+// lifecycle.
+func (child *childRuntime) lifecycleContext() context.Context {
+	child.mu.Lock()
+	defer child.mu.Unlock()
+	if child.lifecycleCtx == nil {
+		return context.Background()
+	}
+	return child.lifecycleCtx
 }
 
 func (s *Supervisor) beginDirectPermissionAnswer(child *childRuntime) bool {

@@ -1655,6 +1655,21 @@ func (p *blockingPermissionProvider) callCount() int {
 	return p.calls
 }
 
+// cancellablePermissionProvider blocks until its caller's context is canceled.
+// It makes teardown races deterministic without relying on scheduling delays.
+type cancellablePermissionProvider struct {
+	permRecordingProvider
+	started   chan struct{}
+	cancelled chan struct{}
+}
+
+func (p *cancellablePermissionProvider) AnswerPermission(ctx context.Context, _ string, _ string, _ runtime.PermissionResponse) error {
+	close(p.started)
+	<-ctx.Done()
+	close(p.cancelled)
+	return ctx.Err()
+}
+
 type retryPermissionProvider struct {
 	permRecordingProvider
 	mu    sync.Mutex
@@ -2870,6 +2885,108 @@ func TestNormalChildTeardownWaitsForAcceptedDirectResponse(t *testing.T) {
 	}
 	<-closeDone
 	want := []string{"permission.request", "permission.response", "close"}
+	if got := sink.recordedOrder(); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("durable order = %v, want %v", got, want)
+	}
+}
+
+func TestCancellingLifecycleReleasesDirectAnswerAndWriterClose(t *testing.T) {
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-answer-direct-cancel-teardown.sock", MaxRuntimes: 1})
+	lifecycleCtx, cancelLifecycle := context.WithCancel(context.Background())
+	defer cancelLifecycle()
+	provider := &cancellablePermissionProvider{
+		started:   make(chan struct{}),
+		cancelled: make(chan struct{}),
+	}
+	sink := &orderedCloseSink{}
+	child := &childRuntime{
+		id:           "rt_direct_cancel_teardown",
+		lifecycleCtx: lifecycleCtx,
+		cancelFn:     cancelLifecycle,
+		provider:     provider,
+		session:      runtime.Session{SessionID: "ses_direct_cancel_teardown"},
+		eventWriter:  sink,
+		done:         make(chan struct{}),
+		promptCh:     make(chan struct{}, 1),
+	}
+	writer := &runtimeFanoutWriter{
+		base:            sink,
+		runtimeID:       child.id,
+		child:           child,
+		control:         sup.control,
+		metadata:        cli.NewEventMetadata(sup.runID, "cancel-teardown", child.id),
+		onPermissionReq: sup.cachePermissionOptions,
+	}
+	sup.setFanoutWriter(child, writer)
+	sup.runtimes[child.id] = child
+
+	options := []any{map[string]any{"optionId": "allow", "kind": "allow"}}
+	if !sup.control.PreparePermissionClaim(child.id, "req_cancel_teardown", control.PermissionResolverNoResolver, options) {
+		t.Fatal("permission claim was not prepared")
+	}
+	if err := writer.Write(events.Event{Event: "permission.request", SessionID: child.session.SessionID, Fields: map[string]any{
+		"request_id": "req_cancel_teardown", "resolver": "none", "options": options,
+	}}); err != nil {
+		t.Fatalf("write permission request: %v", err)
+	}
+
+	answerDone := make(chan error, 1)
+	go func() { answerDone <- sup.answerPermission(child.id, "req_cancel_teardown", "allow", "") }()
+	select {
+	case <-provider.started:
+	case <-time.After(time.Second):
+		t.Fatal("direct provider call did not start")
+	}
+	child.writeMu.Lock()
+	answers := child.directAnswers
+	child.writeMu.Unlock()
+	if answers != 1 {
+		t.Fatalf("direct answers while provider blocks = %d, want 1", answers)
+	}
+
+	teardownWaiting := make(chan struct{})
+	var teardownOnce sync.Once
+	sup.beforeChildWriterCloseWait = func() { teardownOnce.Do(func() { close(teardownWaiting) }) }
+	closeDone := make(chan struct{})
+	go func() {
+		sup.closeChildEventWriter(child)
+		close(closeDone)
+	}()
+	select {
+	case <-teardownWaiting:
+	case <-time.After(time.Second):
+		t.Fatal("writer teardown did not wait for the direct answer")
+	}
+
+	if err := sup.cancelRuntime(child.id); err != nil {
+		t.Fatalf("cancelRuntime: %v", err)
+	}
+	select {
+	case <-provider.cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("provider did not receive lifecycle cancellation")
+	}
+	select {
+	case err := <-answerDone:
+		if err != context.Canceled {
+			t.Fatalf("canceled direct answer error = %v, want %v", err, context.Canceled)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled direct answer did not complete")
+	}
+	select {
+	case <-closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("writer close remained blocked after direct answer cancellation")
+	}
+
+	child.writeMu.Lock()
+	answers = child.directAnswers
+	child.writeMu.Unlock()
+	if answers != 0 {
+		t.Fatalf("direct answers after cancellation = %d, want 0", answers)
+	}
+	want := []string{"permission.request", "close"}
 	if got := sink.recordedOrder(); fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("durable order = %v, want %v", got, want)
 	}
