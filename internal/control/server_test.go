@@ -428,6 +428,53 @@ func TestPreparePermissionClaimWaitsForDirectCompletionBeforeReusedID(t *testing
 	}
 }
 
+func TestPreparePermissionClaimAfterDirectDeliveryCancellation(t *testing.T) {
+	s := NewServer(NewState("run_1", "", 0))
+	if !s.PreparePermissionClaim("rt_1", "reused", PermissionResolverNoResolver, nil) {
+		t.Fatal("initial PreparePermissionClaim returned false")
+	}
+	if got := s.DeliverPendingPermission("rt_1", "reused", "old", ""); got != PermissionAnswerNoResolver {
+		t.Fatalf("direct delivery = %v, want no-resolver", got)
+	}
+
+	origHook := beforeDirectPermissionClaimWait
+	defer func() { beforeDirectPermissionClaimWait = origHook }()
+	waiting := make(chan struct{})
+	beforeDirectPermissionClaimWait = func() { close(waiting) }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	prepared := make(chan bool, 1)
+	go func() {
+		prepared <- s.PreparePermissionClaimAfterDirectDelivery(ctx, "rt_1", "reused", PermissionResolverFile, nil)
+	}()
+	select {
+	case <-waiting:
+	case <-time.After(time.Second):
+		t.Fatal("replacement did not begin waiting for direct completion")
+	}
+	cancel()
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("context did not cancel while waiting for direct completion")
+	}
+	select {
+	case got := <-prepared:
+		if got {
+			t.Fatal("replacement succeeded after cancellation")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("replacement did not return after cancellation")
+	}
+	if got := s.PermissionResolverState("rt_1", "reused"); got != PermissionResolverDirectDelivery {
+		t.Fatalf("resolver state after cancellation = %v, want direct-delivery", got)
+	}
+	if !s.MarkPermissionClaimResolved("rt_1", "reused", "direct") {
+		t.Fatal("direct provider completion did not resolve claim")
+	}
+}
+
 func TestAnswerPendingPermissionDeliversMatchingAnswer(t *testing.T) {
 	s := NewServer(NewState("run_1", "", 0))
 	answerCh, _, ok := s.BeginPermissionClaim("", "req_1")

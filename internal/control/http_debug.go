@@ -379,6 +379,9 @@ func (h *HTTPDebugServer) handleAnswerPermission(w http.ResponseWriter, r *http.
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
+	// The early state check and delivery use separate locks. A claim may resolve
+	// after the early check. DeliverPendingPermission rechecks the state and
+	// returns AlreadyResolved, so this TOCTOU window is benign.
 	if h.control.PermissionResolverState("", p.RequestID) == PermissionResolverResolved {
 		writeJSON(w, map[string]any{"accepted": true})
 		return
@@ -392,6 +395,10 @@ func (h *HTTPDebugServer) handleAnswerPermission(w http.ResponseWriter, r *http.
 		writeJSON(w, map[string]any{"accepted": true})
 	case PermissionAnswerNotFound:
 		http.Error(w, "no pending permission", http.StatusConflict)
+	case PermissionAnswerInvalid:
+		http.Error(w, "invalid permission message", http.StatusBadRequest)
+	case PermissionAnswerNoResolver:
+		http.Error(w, "permission handling delegated to provider", http.StatusConflict)
 	default:
 		http.Error(w, "no pending permission", http.StatusConflict)
 	}

@@ -753,6 +753,9 @@ func TestResolvePermissionAutoApproveDoesNotAnswerQuestion(t *testing.T) {
 	if provider.answerRequestID != "" {
 		t.Fatalf("question was auto-answered: %q", provider.answerRequestID)
 	}
+	if result.err != nil {
+		t.Fatalf("auto-approve result error = %v, want nil", result.err)
+	}
 	if result.source != "none" {
 		t.Fatalf("result source = %q, want none", result.source)
 	}
