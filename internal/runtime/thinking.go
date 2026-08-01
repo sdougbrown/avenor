@@ -4,6 +4,8 @@ import "fmt"
 
 const thinkingValues = "off, minimal, low, medium, high, xhigh, max"
 
+var thinkingValueList = []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"}
+
 var validThinkingValues = map[string]struct{}{
 	"off":     {},
 	"minimal": {},
@@ -56,7 +58,10 @@ func ValidateThinkingForBackend(backend, value string) error {
 		return NewUnsupportedThinkingError(backend)
 	}
 	if _, ok := values[value]; !ok {
-		return NewUnsupportedThinkingError(backend)
+		if len(values) == 0 {
+			return NewUnsupportedThinkingError(backend)
+		}
+		return NewUnsupportedThinkingValueError(backend, value)
 	}
 	return nil
 }
@@ -64,4 +69,34 @@ func ValidateThinkingForBackend(backend, value string) error {
 // NewUnsupportedThinkingError returns the shared unsupported-parameter error.
 func NewUnsupportedThinkingError(backend string) error {
 	return fmt.Errorf("backend %q does not support parameter %q", backend, "thinking")
+}
+
+// NewUnsupportedThinkingValueError reports a canonical value that the backend
+// supports in general but cannot apply natively.
+func NewUnsupportedThinkingValueError(backend, value string) error {
+	values := backendThinkingValues[backend]
+	allowed := make([]string, 0, len(values))
+	for _, candidate := range thinkingValueList {
+		if _, ok := values[candidate]; ok {
+			allowed = append(allowed, candidate)
+		}
+	}
+	return fmt.Errorf("backend %q does not support thinking value %q (allowed: %s)", backend, value, joinThinkingValues(allowed))
+}
+
+// NewStartOnlyThinkingError reports that a backend supports the value only on
+// a new session, not an explicit resume.
+func NewStartOnlyThinkingError(backend, value string) error {
+	return fmt.Errorf("backend %q supports parameter %q only when starting a session; cannot apply value %q on an explicit resume", backend, "thinking", value)
+}
+
+func joinThinkingValues(values []string) string {
+	if len(values) == 0 {
+		return "none"
+	}
+	result := values[0]
+	for _, value := range values[1:] {
+		result += ", " + value
+	}
+	return result
 }

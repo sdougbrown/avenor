@@ -88,7 +88,7 @@ func TestStartSessionRejectsExplicitResumeWithoutNativePath(t *testing.T) {
 		for _, level := range []string{"low", "medium", "high", "xhigh", "max"} {
 			p := &plainThinkingProvider{}
 			_, err := StartSession(context.Background(), p, backend, runtime.StartOptions{Thinking: level}, "session")
-			if err == nil || !strings.Contains(err.Error(), backend) || !strings.Contains(err.Error(), "thinking") {
+			if err == nil || !strings.Contains(err.Error(), backend) || !strings.Contains(err.Error(), "only when starting a session") || !strings.Contains(err.Error(), `value "`+level+`"`) {
 				t.Fatalf("%s/%s error = %v", backend, level, err)
 			}
 			if p.resumeCalls != 0 {

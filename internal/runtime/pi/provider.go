@@ -32,6 +32,9 @@ var _ runtime.Provider = (*Provider)(nil)
 
 func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtime.Session, error) {
 	merged := runtime.MergeStartOptions(p.opts, opts)
+	if err := runtime.ValidateThinkingForBackend(backendID, merged.Thinking); err != nil {
+		return runtime.Session{}, err
+	}
 	c, fresh, err := p.ensureClient(ctx, merged)
 	if err != nil {
 		return runtime.Session{}, err
@@ -101,6 +104,9 @@ func (p *Provider) resume(ctx context.Context, sessionID string, opts runtime.St
 	merged := runtime.MergeStartOptions(p.opts, opts)
 	if !applyThinking {
 		merged.Thinking = ""
+	}
+	if err := runtime.ValidateThinkingForBackend(backendID, merged.Thinking); err != nil {
+		return runtime.Session{}, err
 	}
 
 	p.mu.Lock()
@@ -365,20 +371,20 @@ func (p *Provider) setThinkingLevel(ctx context.Context, c *client, level string
 		"level": level,
 	})
 	if err != nil {
-		return fmt.Errorf("%w: set_thinking_level: %v", runtime.NewUnsupportedThinkingError(backendID), err)
+		return fmt.Errorf("pi set_thinking_level %q: %w", level, err)
 	}
 	var response struct {
 		Success bool   `json:"success"`
 		Error   string `json:"error"`
 	}
 	if err := json.Unmarshal(result, &response); err != nil {
-		return fmt.Errorf("%w: set_thinking_level response: %v", runtime.NewUnsupportedThinkingError(backendID), err)
+		return fmt.Errorf("decode pi set_thinking_level %q response: %w", level, err)
 	}
 	if !response.Success {
 		if response.Error == "" {
 			response.Error = "unsuccessful response"
 		}
-		return fmt.Errorf("%w: set_thinking_level: %s", runtime.NewUnsupportedThinkingError(backendID), response.Error)
+		return fmt.Errorf("pi set_thinking_level %q rejected: %s", level, response.Error)
 	}
 	return nil
 }

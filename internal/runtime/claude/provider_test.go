@@ -11,36 +11,18 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/claudecore"
 	"github.com/sdougbrown/avenor/internal/runtime/claudecore/terminal"
+	"github.com/sdougbrown/avenor/internal/runtime/claudeutil"
 )
 
 func TestThinkingEffortArguments(t *testing.T) {
 	for _, level := range []string{"low", "medium", "high", "xhigh", "max"} {
-		args := buildClaudeArgs("session", runtime.StartOptions{Thinking: level})
+		args := claudeutil.BuildArgs("session", "", runtime.StartOptions{Thinking: level})
 		if got := strings.Join(args, " "); !strings.Contains(got, "--effort "+level) {
 			t.Fatalf("args for %s = %q", level, got)
 		}
 	}
-	if got := strings.Join(buildClaudeArgs("session", runtime.StartOptions{}), " "); strings.Contains(got, "--effort") {
+	if got := strings.Join(claudeutil.BuildArgs("session", "", runtime.StartOptions{}), " "); strings.Contains(got, "--effort") {
 		t.Fatalf("empty thinking args = %q", got)
-	}
-}
-
-func TestThinkingEffortCapabilityMismatch(t *testing.T) {
-	original := claudeHelpOutput
-	claudeHelpOutput = func(context.Context) ([]byte, error) { return []byte("usage: claude"), nil }
-	t.Cleanup(func() { claudeHelpOutput = original })
-	err := checkClaudeEffortCapability(context.Background(), "high")
-	if err == nil || !strings.Contains(err.Error(), "claude") || !strings.Contains(err.Error(), "thinking") {
-		t.Fatalf("error = %v", err)
-	}
-}
-
-func TestThinkingEffortCapabilityPresent(t *testing.T) {
-	original := claudeHelpOutput
-	claudeHelpOutput = func(context.Context) ([]byte, error) { return []byte("--effort <level>"), nil }
-	t.Cleanup(func() { claudeHelpOutput = original })
-	if err := checkClaudeEffortCapability(context.Background(), "max"); err != nil {
-		t.Fatalf("checkClaudeEffortCapability: %v", err)
 	}
 }
 

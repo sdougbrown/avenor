@@ -55,6 +55,29 @@ func TestThinkingBackendPolicy(t *testing.T) {
 	}
 }
 
+func TestThinkingErrorsDistinguishUnsupportedValueAndCapability(t *testing.T) {
+	for _, backend := range []string{"claude", "claude-channel"} {
+		valueErr := ValidateThinkingForBackend(backend, "off")
+		if valueErr == nil || !strings.Contains(valueErr.Error(), "thinking value \"off\"") || !strings.Contains(valueErr.Error(), "allowed: low, medium, high, xhigh, max") {
+			t.Fatalf("%s value error = %v", backend, valueErr)
+		}
+	}
+
+	capabilityErr := ValidateThinkingForBackend("agy", "low")
+	if capabilityErr == nil || capabilityErr.Error() != `backend "agy" does not support parameter "thinking"` {
+		t.Fatalf("Agy capability error = %v", capabilityErr)
+	}
+}
+
+func TestJoinThinkingValues(t *testing.T) {
+	if got := joinThinkingValues(nil); got != "none" {
+		t.Fatalf("empty values = %q", got)
+	}
+	if got := joinThinkingValues([]string{"low", "high"}); got != "low, high" {
+		t.Fatalf("values = %q", got)
+	}
+}
+
 func TestMergeStartOptionsThinking(t *testing.T) {
 	base := StartOptions{Thinking: "low"}
 	if got := MergeStartOptions(base, StartOptions{}).Thinking; got != "low" {

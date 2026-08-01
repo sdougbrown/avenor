@@ -252,6 +252,22 @@ func TestFreshStartUsesThinkingFlagWithoutSetter(t *testing.T) {
 	}
 }
 
+func TestProviderRejectsInvalidThinkingBeforeClient(t *testing.T) {
+	p := NewWithOptions(runtime.StartOptions{})
+	launched := false
+	p.startClient = func(context.Context, runtime.StartOptions) (*client, error) {
+		launched = true
+		return nil, errors.New("unexpected launch")
+	}
+	_, err := p.Start(context.Background(), runtime.StartOptions{Thinking: "HIGH"})
+	if err == nil || !strings.Contains(err.Error(), "invalid thinking value") {
+		t.Fatalf("error = %v", err)
+	}
+	if launched {
+		t.Fatal("client launched after invalid thinking")
+	}
+}
+
 func TestReusedStartSetsThinkingBeforeGetState(t *testing.T) {
 	p := NewWithOptions(runtime.StartOptions{})
 	c, wOut, rIn := fakeClient()
@@ -290,7 +306,7 @@ func TestReusedThinkingSetterFailureStopsBeforeState(t *testing.T) {
 		writeLine(wOut, map[string]any{"type": "response", "id": command["id"], "success": false, "error": "level rejected"})
 	}()
 	_, err := p.Start(context.Background(), runtime.StartOptions{Thinking: "max"})
-	if err == nil || !strings.Contains(err.Error(), "backend \"pi\"") || !strings.Contains(err.Error(), "thinking") {
+	if err == nil || !strings.Contains(err.Error(), `pi set_thinking_level "max" rejected: level rejected`) || strings.Contains(err.Error(), "does not support parameter") {
 		t.Fatalf("error = %v", err)
 	}
 	p.mu.Lock()
@@ -333,9 +349,37 @@ func TestReusedResumeThinkingSetterFailure(t *testing.T) {
 		writeLine(wOut, map[string]any{"type": "response", "id": command["id"], "success": false, "error": "level rejected"})
 	}()
 	_, err := p.ResumeWithOptions(context.Background(), "pi-existing", runtime.StartOptions{Thinking: "max"})
-	if err == nil || !strings.Contains(err.Error(), "backend \"pi\"") || !strings.Contains(err.Error(), "thinking") {
+	if err == nil || !strings.Contains(err.Error(), `pi set_thinking_level "max" rejected: level rejected`) || strings.Contains(err.Error(), "does not support parameter") {
 		t.Fatalf("error = %v", err)
 	}
+}
+
+type failingWriteCloser struct{}
+
+func (failingWriteCloser) Write([]byte) (int, error) { return 0, errors.New("transport unavailable") }
+func (failingWriteCloser) Close() error              { return nil }
+
+func TestThinkingSetterTransportAndDecodeErrorsAreNotCapabilityErrors(t *testing.T) {
+	t.Run("transport", func(t *testing.T) {
+		c := &client{stdin: failingWriteCloser{}, pending: map[string]chan json.RawMessage{}, done: make(chan struct{})}
+		err := NewWithOptions(runtime.StartOptions{}).setThinkingLevel(context.Background(), c, "high")
+		if err == nil || !strings.Contains(err.Error(), `pi set_thinking_level "high":`) || strings.Contains(err.Error(), "does not support parameter") {
+			t.Fatalf("error = %v", err)
+		}
+	})
+
+	t.Run("decode", func(t *testing.T) {
+		c, wOut, rIn := fakeClient()
+		defer c.Close()
+		go func() {
+			command, _ := readCommand(rIn)
+			writeLine(wOut, map[string]any{"type": "response", "id": command["id"], "success": "invalid"})
+		}()
+		err := NewWithOptions(runtime.StartOptions{}).setThinkingLevel(context.Background(), c, "high")
+		if err == nil || !strings.Contains(err.Error(), `decode pi set_thinking_level "high" response:`) || strings.Contains(err.Error(), "does not support parameter") {
+			t.Fatalf("error = %v", err)
+		}
+	})
 }
 
 func TestFreshResumeUsesStartupThinkingWithoutSetter(t *testing.T) {

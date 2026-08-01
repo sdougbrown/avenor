@@ -736,6 +736,9 @@ func StartSession(ctx context.Context, provider runtime.Provider, backend string
 	}
 	resumer, ok := provider.(resumeWithOptionser)
 	if !ok {
+		if backend == "claude" || backend == "claude-channel" {
+			return runtime.Session{}, runtime.NewStartOnlyThinkingError(backend, opts.Thinking)
+		}
 		return runtime.Session{}, runtime.NewUnsupportedThinkingError(backend)
 	}
 	return resumer.ResumeWithOptions(ctx, resumeID, opts)
