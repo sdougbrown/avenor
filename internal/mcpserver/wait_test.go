@@ -65,6 +65,21 @@ func TestWaitConditions(t *testing.T) {
 			wantCalls:  3,
 		},
 		{
+			name:       "phase change terminal no phase change",
+			condition:  waitPhaseChange,
+			snapshots:  []map[string]any{{"status": "running", "phase": ""}, {"status": "done", "phase": ""}},
+			wantStatus: "done",
+			wantPhase:  "",
+			wantCalls:  2,
+		},
+		{
+			name:       "phase change initially terminal",
+			condition:  waitPhaseChange,
+			snapshots:  []map[string]any{{"status": "done"}},
+			wantStatus: "done",
+			wantCalls:  1,
+		},
+		{
 			name:       "turn complete parked idle",
 			condition:  waitTurnComplete,
 			snapshots:  []map[string]any{{"status": "idle", "phase": "done"}},

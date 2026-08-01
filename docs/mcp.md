@@ -240,7 +240,8 @@ one-second cadence; callers do not provide a poll interval.
 
 **Wait conditions:**
 - `terminal` — returns on normalized `done`, `failed`, `timeout`, or `killed` status.
-- `phase_change` — returns when normalized `phase` differs from the first snapshot.
+- `phase_change` — returns when normalized `phase` differs from the first snapshot,
+    or when a terminal status is reached (even if the phase string did not change).
 - `turn_complete` — returns on safely normalized completion of the current turn.
   Parked idle runs with a terminal phase count as complete. Active runs with a
   transient terminal phase do not.

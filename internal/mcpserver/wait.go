@@ -71,7 +71,12 @@ func waitConditionSatisfied(condition waitCondition, status map[string]any, init
 		return isTerminalStatus(status)
 	case waitPhaseChange:
 		phase, _ := status["phase"].(string)
-		return phase != initialPhase
+		if phase != initialPhase {
+			return true
+		}
+		// A terminal status always satisfies phase_change, even when the
+		// phase string did not change (e.g. running/"" -> done/"").
+		return isTerminalStatus(status)
 	case waitPermission:
 		return false
 	default:
@@ -113,12 +118,6 @@ func (s *Server) waitForRun(ctx context.Context, cl ControlClient, runID string,
 		if firstSnapshot {
 			initialPhase, _ = status["phase"].(string)
 			firstSnapshot = false
-			// For phase_change, return immediately if the first snapshot is
-			// already terminal. An initially terminal state satisfies the
-			// condition without requiring a phase transition.
-			if condition == waitPhaseChange && isTerminalStatus(status) {
-				return status, false, nil
-			}
 		}
 		if waitConditionSatisfied(condition, status, initialPhase) {
 			return status, false, nil
