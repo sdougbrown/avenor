@@ -18,9 +18,11 @@ import (
 	"github.com/sdougbrown/avenor/internal/looprunner"
 	"github.com/sdougbrown/avenor/internal/permission"
 	"github.com/sdougbrown/avenor/internal/phaseconfig"
+	"github.com/sdougbrown/avenor/internal/rosterconfig"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
 	"github.com/sdougbrown/avenor/internal/runtime/factory"
+	"github.com/sdougbrown/avenor/internal/spawnselection"
 	"github.com/sdougbrown/avenor/internal/teamrunner"
 )
 
@@ -54,6 +56,8 @@ type SpawnParams struct {
 	MaxRetries        int    `json:"max_retries,omitempty"`
 	LoopFile          string `json:"loop_file,omitempty"`
 	TeamFile          string `json:"team_file,omitempty"`
+	RosterFile        string `json:"roster_file,omitempty"`
+	RosterEntry       string `json:"roster_entry,omitempty"`
 	SessionID         string `json:"session_id,omitempty"`
 	ParentID          string `json:"parent_id,omitempty"`     // runtime ID of the parent agent
 	ParentRunID       string `json:"parent_run_id,omitempty"` // broker run ID of the parent, for channel messaging
@@ -76,6 +80,12 @@ type childRuntime struct {
 	model            string
 	thinking         string
 	backend          string
+	rosterFile       string
+	rosterEntry      string
+	effectiveBackend string
+	effectiveAgent   string
+	effectiveModel   string
+	roster           *rosterconfig.Config
 	parentID         string   // runtime ID of the parent agent, empty for top-level
 	children         []string // runtime IDs spawned by this runtime
 	provider         runtime.Provider
@@ -115,6 +125,20 @@ type childRuntime struct {
 	writeMu           sync.Mutex
 }
 
+type effectiveIdentity struct {
+	Backend      string
+	Agent        string
+	Model        string
+	AgentProfile string
+	RosterFile   string
+	RosterEntry  string
+}
+
+type sessionIdentityEntry struct {
+	identity effectiveIdentity
+	provider runtime.Provider
+}
+
 type pendingChildQuestion struct {
 	requestID string
 	timer     *time.Timer
@@ -148,6 +172,8 @@ type Supervisor struct {
 	fileSnapMu           sync.Mutex
 	broker               *broker.Broker
 	newProviderFunc      func(startOpts runtime.StartOptions, backend string) (runtime.Provider, error)
+	sessionIdentityMu    sync.RWMutex
+	sessionIdentities    map[string]sessionIdentityEntry
 }
 
 func NewSupervisor(cfg Config) *Supervisor {
@@ -167,6 +193,7 @@ func NewSupervisor(cfg Config) *Supervisor {
 		permOptions:          map[string][]any{},
 		httpServers:          map[string]any{},
 		fileSnapshots:        map[string][]string{},
+		sessionIdentities:    map[string]sessionIdentityEntry{},
 	}
 	sup.broker = broker.New("")
 	if err := sup.broker.Start(); err != nil {
@@ -281,12 +308,44 @@ func (s *Supervisor) activeRuntimeCountLocked() int {
 }
 
 func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
+	workflowMode := params.LoopFile != "" || params.TeamFile != ""
+	if workflowMode {
+		if params.RosterEntry != "" {
+			return SpawnResult{}, fmt.Errorf("roster_entry is not valid with loop_file or team_file")
+		}
+	} else {
+		if err := spawnselection.Validate(spawnselection.Input{
+			Agent:       params.Agent,
+			Model:       params.Model,
+			Backend:     params.Backend,
+			RosterFile:  params.RosterFile,
+			RosterEntry: params.RosterEntry,
+		}, false); err != nil {
+			return SpawnResult{}, err
+		}
+	}
+
 	backend := params.Backend
 	if backend == "" {
 		backend = cli.DefaultBackend
 	}
-	if err := runtime.ValidateThinkingForBackend(backend, params.Thinking); err != nil {
-		return SpawnResult{}, err
+	roster := (*rosterconfig.Config)(nil)
+	if !workflowMode && params.RosterFile != "" {
+		loaded, err := rosterconfig.Load(params.RosterFile)
+		if err != nil {
+			return SpawnResult{}, err
+		}
+		roster = loaded
+		entry, err := roster.Lookup(params.RosterEntry)
+		if err != nil {
+			return SpawnResult{}, err
+		}
+		backend, params.Agent, params.Model = entry.Backend, entry.Agent, entry.Model
+	}
+	if !workflowMode {
+		if err := runtime.ValidateThinkingForBackend(backend, params.Thinking); err != nil {
+			return SpawnResult{}, err
+		}
 	}
 
 	s.controlMu.Lock()
@@ -398,10 +457,21 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 
 	// Loop spawn path — uses looprunner instead of a single provider/session.
 	if params.LoopFile != "" {
-		cfg, err := looprunner.LoadLoopConfig(params.LoopFile)
+		fallbackRosterPath := params.RosterFile
+		if fallbackRosterPath != "" && !filepath.IsAbs(fallbackRosterPath) {
+			fallbackRosterPath = filepath.Join(params.Dir, fallbackRosterPath)
+		}
+		cfg, rootRoster, err := looprunner.LoadLoopConfigWithRoster(params.LoopFile, nil, fallbackRosterPath)
 		if err != nil {
 			_ = writer.Close()
 			return SpawnResult{}, fmt.Errorf("spawn: load loop config: %w", err)
+		}
+		rosterMetadataPath := params.RosterFile
+		if rosterMetadataPath == "" && cfg.RosterFile != "" {
+			rosterMetadataPath = cfg.RosterFile
+			if !filepath.IsAbs(rosterMetadataPath) {
+				rosterMetadataPath = filepath.Join(filepath.Dir(params.LoopFile), rosterMetadataPath)
+			}
 		}
 		if promptText != "" {
 			cfg.InsertInitialPrompt(promptText)
@@ -424,6 +494,11 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 		child.model = params.Model
 		child.thinking = params.Thinking
 		child.backend = backend
+		child.effectiveBackend = backend
+		child.effectiveAgent = params.Agent
+		child.effectiveModel = params.Model
+		child.rosterFile = rosterMetadataPath
+		child.roster = rootRoster
 		child.cancelFn = childCancel
 		child.permClaimTimeout = s.config.PermissionClaimTimeout
 		child.eventWriter = writer
@@ -446,10 +521,21 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 	}
 
 	if params.TeamFile != "" {
-		cfg, err := teamrunner.LoadTeamConfig(params.TeamFile)
+		fallbackRosterPath := params.RosterFile
+		if fallbackRosterPath != "" && !filepath.IsAbs(fallbackRosterPath) {
+			fallbackRosterPath = filepath.Join(params.Dir, fallbackRosterPath)
+		}
+		cfg, rootRoster, err := teamrunner.LoadTeamConfigWithRoster(params.TeamFile, nil, fallbackRosterPath)
 		if err != nil {
 			_ = writer.Close()
 			return SpawnResult{}, fmt.Errorf("spawn: load team config: %w", err)
+		}
+		rosterMetadataPath := params.RosterFile
+		if rosterMetadataPath == "" && cfg.RosterFile != "" {
+			rosterMetadataPath = cfg.RosterFile
+			if !filepath.IsAbs(rosterMetadataPath) {
+				rosterMetadataPath = filepath.Join(filepath.Dir(params.TeamFile), rosterMetadataPath)
+			}
 		}
 		if promptText != "" {
 			cfg.InsertInitialPrompt(promptText)
@@ -470,6 +556,11 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 		child.model = params.Model
 		child.thinking = params.Thinking
 		child.backend = backend
+		child.effectiveBackend = backend
+		child.effectiveAgent = params.Agent
+		child.effectiveModel = params.Model
+		child.rosterFile = rosterMetadataPath
+		child.roster = rootRoster
 		child.cancelFn = childCancel
 		child.permClaimTimeout = s.config.PermissionClaimTimeout
 		child.eventWriter = writer
@@ -541,6 +632,11 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 	child.model = params.Model
 	child.thinking = params.Thinking
 	child.backend = backend
+	child.effectiveBackend = backend
+	child.effectiveAgent = params.Agent
+	child.effectiveModel = params.Model
+	child.rosterFile = params.RosterFile
+	child.rosterEntry = params.RosterEntry
 	child.provider = provider
 	child.session = session
 	child.eventWriter = writer
@@ -550,6 +646,14 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 	child.dir = params.Dir
 	child.onEvent = onEvent
 	child.sentinelFile = sentinelFile
+	s.rememberSessionIdentity(session.SessionID, effectiveIdentity{
+		Backend:      backend,
+		Agent:        params.Agent,
+		Model:        params.Model,
+		AgentProfile: params.AgentProfile,
+		RosterFile:   params.RosterFile,
+		RosterEntry:  params.RosterEntry,
+	}, provider)
 
 	// Initialise cancelFn in spawn so it's never nil when cancelRuntime reads it.
 	childCtx, childCancel := context.WithCancel(context.Background())
@@ -736,6 +840,8 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 		recorder:        newRecorderFor(s, child.id),
 	}
 
+	var selectionMu sync.Mutex
+	resolvedSelections := make(map[string]rosterconfig.ResolvedSelection)
 	var opts looprunner.RunOptions
 	opts = looprunner.RunOptions{
 		WorkDir:    child.dir,
@@ -748,15 +854,39 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 			child.mu.Lock()
 			child.phase = ""
 			child.phaseLabel = ""
+			phaseRoster := child.roster
 			child.mu.Unlock()
 
+			selectionMu.Lock()
+			selection, cached := resolvedSelections[phase.Name]
+			selectionMu.Unlock()
+			if !cached {
+				runBackend := backend
+				if runBackend == "" {
+					runBackend = cli.DefaultBackend
+				}
+				var resolveErr error
+				selection, resolveErr = resolveStablePhaseSelection(phaseRoster, runBackend, agent, model, phase, true)
+				if resolveErr != nil {
+					return looprunner.PhaseAttemptResult{ExitCode: 1}, resolveErr
+				}
+				if resolveErr = runtime.ValidateThinkingForBackend(selection.Backend, thinking); resolveErr != nil {
+					return looprunner.PhaseAttemptResult{ExitCode: 1}, resolveErr
+				}
+				selectionMu.Lock()
+				resolvedSelections[phase.Name] = selection
+				selectionMu.Unlock()
+			}
+
 			startOpts := runtime.StartOptions{
-				Agent:        agent,
+				Agent:        selection.Agent,
 				AgentProfile: agentProfile,
-				Model:        model,
+				Label:        child.label,
+				Model:        selection.Model,
 				Thinking:     thinking,
 				Dir:          child.dir,
 				ServerURL:    serverURL,
+				RuntimeID:    child.id,
 				Broker:       s.broker,
 			}
 
@@ -776,7 +906,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				_ = s.broker.SendTo(opts.SeedMessage.FromRunID, brokerRunID, "agent_message", payload, "")
 			}
 
-			provider, err := s.newProviderFunc(startOpts, backend)
+			provider, err := s.newProviderFunc(startOpts, selection.Backend)
 			if err != nil {
 				return looprunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: brokerRunID}, fmt.Errorf("create provider: %w", err)
 			}
@@ -786,15 +916,22 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				}
 			}()
 
-			session, err := cli.StartSession(ctx, provider, backend, startOpts, resumeID)
+			session, err := cli.StartSession(ctx, provider, selection.Backend, startOpts, resumeID)
 			if err != nil {
 				return looprunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: brokerRunID}, fmt.Errorf("start session: %w", err)
 			}
 			child.mu.Lock()
 			child.provider = provider
 			child.session = session
+			child.effectiveBackend = selection.Backend
+			child.effectiveAgent = selection.Agent
+			child.effectiveModel = selection.Model
 			child.active = true
 			child.mu.Unlock()
+			s.rememberSessionIdentity(session.SessionID, effectiveIdentity{
+				Backend: selection.Backend, Agent: selection.Agent, Model: selection.Model,
+				AgentProfile: agentProfile, RosterFile: child.rosterFile, RosterEntry: phase.RosterEntry,
+			}, provider)
 			defer func() {
 				child.mu.Lock()
 				if child.provider == provider {
@@ -820,6 +957,11 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 
 			attemptProvider := provider
 			preAdoptionID := session.SessionID
+			defer func() {
+				if session.SessionID != preAdoptionID {
+					s.forgetSessionIdentity(preAdoptionID, attemptProvider)
+				}
+			}()
 
 			promptDone := make(chan error, 1)
 			go func() {
@@ -937,6 +1079,8 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 		recorder:        newRecorderFor(s, child.id),
 	}
 
+	var selectionMu sync.Mutex
+	resolvedSelections := make(map[string]rosterconfig.ResolvedSelection)
 	var opts teamrunner.RunOptions
 	opts = teamrunner.RunOptions{
 		WorkDir:    child.dir,
@@ -949,23 +1093,38 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 			child.mu.Lock()
 			child.phase = ""
 			child.phaseLabel = ""
+			phaseRoster := child.roster
 			child.mu.Unlock()
 
-			a := agent
-			m := model
-			if phase.Agent != "" {
-				a = phase.Agent
-			}
-			if phase.Model != "" {
-				m = phase.Model
+			selectionMu.Lock()
+			selection, cached := resolvedSelections[phase.Name]
+			selectionMu.Unlock()
+			if !cached {
+				runBackend := backend
+				if runBackend == "" {
+					runBackend = cli.DefaultBackend
+				}
+				var resolveErr error
+				selection, resolveErr = resolveStablePhaseSelection(phaseRoster, runBackend, agent, model, phase, false)
+				if resolveErr != nil {
+					return teamrunner.PhaseAttemptResult{ExitCode: 1}, resolveErr
+				}
+				if resolveErr = runtime.ValidateThinkingForBackend(selection.Backend, thinking); resolveErr != nil {
+					return teamrunner.PhaseAttemptResult{ExitCode: 1}, resolveErr
+				}
+				selectionMu.Lock()
+				resolvedSelections[phase.Name] = selection
+				selectionMu.Unlock()
 			}
 			startOpts := runtime.StartOptions{
-				Agent:        a,
+				Agent:        selection.Agent,
 				AgentProfile: agentProfile,
-				Model:        m,
+				Label:        child.label,
+				Model:        selection.Model,
 				Thinking:     thinking,
 				Dir:          child.dir,
 				ServerURL:    serverURL,
+				RuntimeID:    child.id,
 				Broker:       s.broker,
 			}
 
@@ -987,7 +1146,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				_ = s.broker.SendTo(opts.SeedMessage.FromRunID, brokerRunID, "agent_message", payload, "")
 			}
 
-			provider, err := s.newProviderFunc(startOpts, backend)
+			provider, err := s.newProviderFunc(startOpts, selection.Backend)
 			if err != nil {
 				return teamrunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: brokerRunID}, fmt.Errorf("create provider: %w", err)
 			}
@@ -997,15 +1156,22 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				}
 			}()
 
-			session, err := cli.StartSession(ctx, provider, backend, startOpts, resumeID)
+			session, err := cli.StartSession(ctx, provider, selection.Backend, startOpts, resumeID)
 			if err != nil {
 				return teamrunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: brokerRunID}, fmt.Errorf("start session: %w", err)
 			}
 			child.mu.Lock()
 			child.provider = provider
 			child.session = session
+			child.effectiveBackend = selection.Backend
+			child.effectiveAgent = selection.Agent
+			child.effectiveModel = selection.Model
 			child.active = true
 			child.mu.Unlock()
+			s.rememberSessionIdentity(session.SessionID, effectiveIdentity{
+				Backend: selection.Backend, Agent: selection.Agent, Model: selection.Model,
+				AgentProfile: agentProfile, RosterFile: child.rosterFile, RosterEntry: phase.RosterEntry,
+			}, provider)
 			defer func() {
 				child.mu.Lock()
 				if child.provider == provider {
@@ -1031,6 +1197,11 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 
 			attemptProvider := provider
 			preAdoptionID := session.SessionID
+			defer func() {
+				if session.SessionID != preAdoptionID {
+					s.forgetSessionIdentity(preAdoptionID, attemptProvider)
+				}
+			}()
 
 			promptDone := make(chan error, 1)
 			go func() {
@@ -1172,7 +1343,115 @@ func (s *Supervisor) adoptChildSessionID(child *childRuntime, provider runtime.P
 	if child.provider == nil || child.provider != provider || child.session.SessionID != expectedOldID {
 		return
 	}
+	identityEntry, ok := s.sessionIdentityEntry(expectedOldID)
+	if ok && identityEntry.provider != nil && identityEntry.provider != provider {
+		return
+	}
+	identity := identityEntry.identity
+	if !ok {
+		identity = effectiveIdentity{
+			Backend:      child.effectiveBackend,
+			Agent:        child.effectiveAgent,
+			Model:        child.effectiveModel,
+			AgentProfile: child.agentProfile,
+			RosterFile:   child.rosterFile,
+			RosterEntry:  child.rosterEntry,
+		}
+	}
+	// Keep the provisional alias until phase cleanup, but publish the
+	// authoritative mapping while child.mu is still guarded and before the
+	// session.start event can be forwarded.
+	s.rememberSessionIdentity(expectedOldID, identity, provider)
+	s.rememberSessionIdentity(externalID, identity, provider)
 	child.session.SessionID = externalID
+}
+
+func resolveStablePhaseSelection(roster *rosterconfig.Config, backend, agent, model string, phase phaseconfig.Phase, loop bool) (rosterconfig.ResolvedSelection, error) {
+	var entry *rosterconfig.Entry
+	if phase.RosterEntry != "" {
+		if roster == nil {
+			return rosterconfig.ResolvedSelection{}, fmt.Errorf("phase %q roster entry %q requires a roster", phase.Name, phase.RosterEntry)
+		}
+		loaded, err := roster.Lookup(phase.RosterEntry)
+		if err != nil {
+			return rosterconfig.ResolvedSelection{}, err
+		}
+		entry = &loaded
+	}
+	return rosterconfig.Resolve(rosterconfig.ResolveInput{
+		Backend:     backend,
+		Agent:       agent,
+		Model:       model,
+		InlineAgent: phase.Agent,
+		InlineModel: phase.Model,
+		Roster:      entry,
+		Loop:        loop,
+	})
+}
+
+func (s *Supervisor) rememberSessionIdentity(sessionID string, identity effectiveIdentity, provider runtime.Provider) {
+	if sessionID == "" {
+		return
+	}
+	s.sessionIdentityMu.Lock()
+	if s.sessionIdentities == nil {
+		s.sessionIdentities = make(map[string]sessionIdentityEntry)
+	}
+	s.sessionIdentities[sessionID] = sessionIdentityEntry{identity: identity, provider: provider}
+	s.sessionIdentityMu.Unlock()
+}
+
+func (s *Supervisor) sessionIdentity(sessionID string) (effectiveIdentity, bool) {
+	entry, ok := s.sessionIdentityEntry(sessionID)
+	if !ok {
+		return effectiveIdentity{}, false
+	}
+	return entry.identity, true
+}
+
+func (s *Supervisor) sessionIdentityEntry(sessionID string) (sessionIdentityEntry, bool) {
+	if sessionID == "" {
+		return sessionIdentityEntry{}, false
+	}
+	s.sessionIdentityMu.RLock()
+	entry, ok := s.sessionIdentities[sessionID]
+	s.sessionIdentityMu.RUnlock()
+	return entry, ok
+}
+
+func (s *Supervisor) forgetSessionIdentity(sessionID string, provider runtime.Provider) {
+	if sessionID == "" {
+		return
+	}
+	s.sessionIdentityMu.Lock()
+	if entry, ok := s.sessionIdentities[sessionID]; ok && (provider == nil || entry.provider == provider) {
+		delete(s.sessionIdentities, sessionID)
+	}
+	s.sessionIdentityMu.Unlock()
+}
+
+func (s *Supervisor) statusIdentity(child *childRuntime, sessionID string) effectiveIdentity {
+	if identity, ok := s.sessionIdentity(sessionID); ok {
+		return identity
+	}
+	identity := effectiveIdentity{
+		Backend:      child.effectiveBackend,
+		Agent:        child.effectiveAgent,
+		Model:        child.effectiveModel,
+		AgentProfile: child.agentProfile,
+		RosterFile:   child.rosterFile,
+		RosterEntry:  child.rosterEntry,
+	}
+	if identity.Backend == "" {
+		identity.Backend = child.backend
+	}
+	if identity.Agent == "" {
+		identity.Agent = child.agent
+	}
+	if identity.Model == "" {
+		identity.Model = child.model
+	}
+	return identity
 }
 
 func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, resumeID, promptText string, timer <-chan time.Time) childAttemptResult {
@@ -1216,6 +1495,11 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 
 	attemptProvider := child.provider
 	preAdoptionID := session.SessionID
+	defer func() {
+		if session.SessionID != preAdoptionID {
+			s.forgetSessionIdentity(preAdoptionID, attemptProvider)
+		}
+	}()
 
 	promptDone := make(chan error, 1)
 	go func() {
@@ -1272,13 +1556,40 @@ func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, re
 			return session, nil
 		}
 	}
-	return cli.StartSession(ctx, child.provider, child.backend, runtime.StartOptions{
-		Agent:        child.agent,
+	child.mu.Lock()
+	identity := effectiveIdentity{
+		Backend:      child.effectiveBackend,
+		Agent:        child.effectiveAgent,
+		Model:        child.effectiveModel,
 		AgentProfile: child.agentProfile,
-		Label:        child.label,
-		Dir:          child.dir,
-		Model:        child.model,
-		Thinking:     child.thinking,
+	}
+	provider := child.provider
+	fallbackBackend := child.backend
+	fallbackAgent, fallbackModel := child.agent, child.model
+	fallbackProfile := child.agentProfile
+	label, dir, thinking := child.label, child.dir, child.thinking
+	child.mu.Unlock()
+	if mapped, ok := s.sessionIdentity(resumeID); ok {
+		identity = mapped
+	}
+	if identity.Backend == "" {
+		identity.Backend = fallbackBackend
+	}
+	if identity.AgentProfile == "" {
+		identity.AgentProfile = fallbackProfile
+	}
+	if identity.Agent == "" && identity.Model == "" {
+		// Preserve the legacy fields for runtimes created by older callers or
+		// tests that do not populate effective metadata.
+		identity.Agent, identity.Model = fallbackAgent, fallbackModel
+	}
+	return cli.StartSession(ctx, provider, identity.Backend, runtime.StartOptions{
+		Agent:        identity.Agent,
+		AgentProfile: identity.AgentProfile,
+		Label:        label,
+		Dir:          dir,
+		Model:        identity.Model,
+		Thinking:     thinking,
 	}, resumeID)
 }
 
@@ -1469,16 +1780,22 @@ func (s *Supervisor) listRuntimes() []map[string]any {
 		if rt.completed {
 			status = "ended"
 		}
+		identity := s.statusIdentity(rt, rt.session.SessionID)
 		entry := map[string]any{
 			"runtime_id":         rt.id,
 			"session_id":         rt.session.SessionID,
 			"run_id":             rt.runID,
 			"label":              rt.label,
-			"agent":              rt.agent,
-			"agent_profile":      rt.agentProfile,
-			"model":              rt.model,
+			"agent":              identity.Agent,
+			"agent_profile":      identity.AgentProfile,
+			"model":              identity.Model,
 			"thinking":           rt.thinking,
-			"backend":            rt.backend,
+			"backend":            identity.Backend,
+			"roster_file":        identity.RosterFile,
+			"roster_entry":       identity.RosterEntry,
+			"effective_agent":    identity.Agent,
+			"effective_model":    identity.Model,
+			"effective_backend":  identity.Backend,
 			"dir":                rt.dir,
 			"status":             status,
 			"exit_code":          rt.exitCode,
@@ -1848,16 +2165,22 @@ func (s *Supervisor) RuntimeStatus(rtID string) (any, error) {
 	if rt.completed {
 		status = "ended"
 	}
+	identity := s.statusIdentity(rt, rt.session.SessionID)
 	entry := map[string]any{
 		"runtime_id":         rt.id,
 		"session_id":         rt.session.SessionID,
 		"run_id":             rt.runID,
 		"label":              rt.label,
-		"agent":              rt.agent,
-		"agent_profile":      rt.agentProfile,
-		"model":              rt.model,
+		"agent":              identity.Agent,
+		"agent_profile":      identity.AgentProfile,
+		"model":              identity.Model,
 		"thinking":           rt.thinking,
-		"backend":            rt.backend,
+		"backend":            identity.Backend,
+		"roster_file":        identity.RosterFile,
+		"roster_entry":       identity.RosterEntry,
+		"effective_agent":    identity.Agent,
+		"effective_model":    identity.Model,
+		"effective_backend":  identity.Backend,
 		"dir":                rt.dir,
 		"status":             status,
 		"exit_code":          rt.exitCode,
