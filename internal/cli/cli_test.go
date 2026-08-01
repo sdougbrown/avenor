@@ -181,6 +181,24 @@ func (s *signalEventSink) Write(event events.Event) error {
 	return nil
 }
 
+type callbackEventSink struct {
+	EventSink
+	eventName string
+	field     string
+	value     string
+	callback  func()
+	once      sync.Once
+}
+
+func (s *callbackEventSink) Write(event events.Event) error {
+	if event.Event == s.eventName {
+		if value, _ := event.Fields[s.field].(string); value == s.value {
+			s.once.Do(s.callback)
+		}
+	}
+	return s.EventSink.Write(event)
+}
+
 func (f *cliFakeProvider) Start(ctx context.Context, opts runtime.StartOptions) (runtime.Session, error) {
 	return runtime.Session{}, nil
 }
@@ -1469,6 +1487,45 @@ func (f *blockingFakeProvider) AnswerPermission(ctx context.Context, sessionID, 
 	return nil
 }
 
+type sequentialPermissionProvider struct {
+	cliFakeProvider
+	mu             sync.Mutex
+	answerIDs      []string
+	firstStarted   chan struct{}
+	releaseFirst   chan struct{}
+	secondAnswered chan struct{}
+}
+
+func newSequentialPermissionProvider() *sequentialPermissionProvider {
+	return &sequentialPermissionProvider{
+		firstStarted:   make(chan struct{}),
+		releaseFirst:   make(chan struct{}),
+		secondAnswered: make(chan struct{}),
+	}
+}
+
+func (f *sequentialPermissionProvider) AnswerPermission(_ context.Context, _ string, requestID string, _ runtime.PermissionResponse) error {
+	f.mu.Lock()
+	f.answerIDs = append(f.answerIDs, requestID)
+	answerNumber := len(f.answerIDs)
+	f.mu.Unlock()
+
+	switch answerNumber {
+	case 1:
+		close(f.firstStarted)
+		<-f.releaseFirst
+	case 2:
+		close(f.secondAnswered)
+	}
+	return nil
+}
+
+func (f *sequentialPermissionProvider) answers() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.answerIDs...)
+}
+
 // TestAutoAnswerGoroutineDoesNotBlockEventLoop verifies that a slow
 // AnswerPermission call does not prevent subsequent events from draining.
 // It injects a blocking provider, sends a permission.request followed by
@@ -2309,8 +2366,16 @@ func TestAutoAnswerSecondRequestWhilePendingEmitsErrorAndExits(t *testing.T) {
 
 	promptDone := make(chan error, 1)
 	resultCh := make(chan sessionResult, 1)
+	overlapSeen := make(chan struct{})
+	sink := &signalEventSink{
+		EventSink: writer,
+		eventName: "avenor.error",
+		field:     "message",
+		value:     "another permission request is already pending",
+		signal:    overlapSeen,
+	}
 	go func() {
-		resultCh <- waitForSessionForTest(context.Background(), provider, writer, nil, nil, eventCh, promptDone, nil, "ses_1", "run_1", "", true, DefaultPermissionClaimTimeout, nil, io.Discard)
+		resultCh <- waitForSessionForTest(context.Background(), provider, sink, nil, nil, eventCh, promptDone, nil, "ses_1", "run_1", "", true, DefaultPermissionClaimTimeout, nil, io.Discard)
 	}()
 	var unblockOnce sync.Once
 	unblockProvider := func() { unblockOnce.Do(func() { close(provider.unblockAnswer) }) }
@@ -2334,14 +2399,20 @@ func TestAutoAnswerSecondRequestWhilePendingEmitsErrorAndExits(t *testing.T) {
 			},
 		},
 	}
-	// Unblock so the loop can proceed to process the second request.
+	// Keep the first resolver active until the overlap error is emitted. The
+	// deferred resolver join cannot complete until the provider is released.
+	select {
+	case <-overlapSeen:
+	case <-time.After(5 * time.Second):
+		t.Fatal("WaitForSession did not reject overlapping request")
+	}
 	unblockProvider()
 
 	var result sessionResult
 	select {
 	case result = <-resultCh:
 	case <-time.After(5 * time.Second):
-		t.Fatal("WaitForSession did not reject overlapping request")
+		t.Fatal("WaitForSession did not finish after rejecting overlapping request")
 	}
 	if closeErr := writer.Close(); closeErr != nil {
 		t.Fatalf("close writer: %v", closeErr)
@@ -2376,6 +2447,147 @@ func TestAutoAnswerSecondRequestWhilePendingEmitsErrorAndExits(t *testing.T) {
 	}
 	if requestCount != 1 {
 		t.Fatalf("permission.request count = %d, want only the first; events: %+v", requestCount, got)
+	}
+}
+
+func TestPermissionRequestConsumesCompletedResolverBeforeReusedID(t *testing.T) {
+	eventsPath := filepath.Join(t.TempDir(), "events.ndjson")
+	writer, err := NewEventWriter(eventsPath)
+	if err != nil {
+		t.Fatalf("newEventWriter: %v", err)
+	}
+
+	provider := newSequentialPermissionProvider()
+	completionSent := make(chan struct{})
+	gateTimedOut := make(chan struct{}, 1)
+	var completionOnce sync.Once
+	sink := &callbackEventSink{
+		EventSink: writer,
+		eventName: "agent.status",
+		field:     "label",
+		value:     "second request",
+		callback: func() {
+			close(provider.releaseFirst)
+			select {
+			case <-completionSent:
+			case <-time.After(5 * time.Second):
+				gateTimedOut <- struct{}{}
+			}
+		},
+	}
+	controlServer := control.NewServer(control.NewState("run_1", "", 0))
+	eventCh := make(chan events.Event, 4)
+	eventCh <- events.Event{
+		Event:     "permission.request",
+		SessionID: "ses_1",
+		Fields: map[string]any{
+			"request_id": "req_reused",
+			"question":   "first request",
+			"options": []any{
+				map[string]any{"optionId": "allow_first", "kind": "allow"},
+			},
+		},
+	}
+	promptDone := make(chan error, 1)
+	resultCh := make(chan sessionResult, 1)
+	go func() {
+		resultCh <- WaitForSession(context.Background(), provider, SessionWaitConfig{
+			EventCh:              eventCh,
+			PromptDone:           promptDone,
+			SessionID:            "ses_1",
+			RunID:                "run_1",
+			PermissionClaimScope: "rt_1",
+			AutoApprove:          true,
+		}, SessionWaitDeps{
+			Writer:        sink,
+			ControlServer: controlServer,
+			Stderr:        io.Discard,
+			permissionResultSent: func() {
+				completionOnce.Do(func() { close(completionSent) })
+			},
+		})
+	}()
+
+	select {
+	case <-provider.firstStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first permission resolution did not start")
+	}
+
+	// The second waiting status is emitted after the event loop selects request
+	// B but before it checks permissionDone. Its sink callback releases A and
+	// waits until A's buffered completion result is definitely ready, forcing
+	// the regression window without scheduler timing.
+	eventCh <- events.Event{
+		Event:     "permission.request",
+		SessionID: "ses_1",
+		Fields: map[string]any{
+			"request_id": "req_reused",
+			"question":   "second request",
+			"options": []any{
+				map[string]any{"optionId": "allow_second", "kind": "allow"},
+			},
+		},
+	}
+
+	select {
+	case <-provider.secondAnswered:
+	case result := <-resultCh:
+		_ = writer.Close()
+		t.Fatalf("WaitForSession exited before resolving the second request: %+v", result)
+	case <-time.After(5 * time.Second):
+		t.Fatal("second permission resolution did not complete")
+	}
+	select {
+	case <-gateTimedOut:
+		t.Fatal("timed out waiting for the first completion result")
+	default:
+	}
+
+	eventCh <- events.Event{Event: "session.end", SessionID: "ses_1", Fields: map[string]any{"stop_reason": "end_turn"}}
+	promptDone <- nil
+	close(eventCh)
+
+	var result sessionResult
+	select {
+	case result = <-resultCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("WaitForSession did not finish")
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("WaitForSession() = %d, want 0", result.ExitCode)
+	}
+	if got := provider.answers(); len(got) != 2 || got[0] != "req_reused" || got[1] != "req_reused" {
+		t.Fatalf("provider answers = %v, want [req_reused req_reused]", got)
+	}
+
+	var lifecycle []string
+	for _, event := range readEventLogForTest(t, eventsPath) {
+		switch event.Event {
+		case "permission.request", "permission.response":
+			requestID, _ := event.Fields["request_id"].(string)
+			lifecycle = append(lifecycle, event.Event+":"+requestID)
+		case "avenor.error":
+			message, _ := event.Fields["message"].(string)
+			if strings.Contains(message, "already pending") {
+				t.Fatalf("completed resolver was reported as overlapping: %+v", event)
+			}
+		}
+	}
+	want := []string{
+		"permission.request:req_reused",
+		"permission.response:req_reused",
+		"permission.request:req_reused",
+		"permission.response:req_reused",
+	}
+	if fmt.Sprint(lifecycle) != fmt.Sprint(want) {
+		t.Fatalf("permission lifecycle = %v, want %v", lifecycle, want)
+	}
+	if state := controlServer.PermissionResolverState("rt_1", "req_reused"); state != control.PermissionResolverResolved {
+		t.Fatalf("resolver state = %v, want resolved", state)
 	}
 }
 

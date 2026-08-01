@@ -1016,6 +1016,9 @@ type SessionWaitDeps struct {
 	// ProgressTimerC overrides the progress timer channel; nil preserves the
 	// normal wall-clock timer behavior.
 	ProgressTimerC <-chan time.Time
+	// permissionResultSent is a test synchronization hook invoked after a
+	// resolver publishes its result to permissionDone.
+	permissionResultSent func()
 }
 
 func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionWaitConfig, deps SessionWaitDeps) sessionResult {
@@ -1095,6 +1098,38 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 		}); err != nil {
 			fmt.Fprintf(deps.Stderr, "avenor: write permission.response event: %v\n", err)
 		}
+	}
+
+	handlePermissionResult := func(res permissionResult) (sessionResult, bool) {
+		if res.cancelled {
+			return terminate("cancelled"), true
+		}
+		if res.err != nil {
+			// Permission handlers share the session cancellation context. A
+			// wrapped context.Canceled therefore preserves the run's
+			// cancellation classification even if the permission result wins
+			// the select at the same time as ctx.Done.
+			if errors.Is(res.err, context.Canceled) {
+				return terminate("cancelled"), true
+			}
+			emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "permission", fmt.Sprintf("permission handler: %v", res.err), deps.Stderr, cfg.RunLabel)
+			return sessionResult{ExitCode: 1}, true
+		}
+		if res.requestID != "" {
+			emitPermissionResponse(res.requestID, res.optionID, res.kind, res.source)
+			if !writeStatus(tracker.PermissionAnswered()) {
+				return sessionResult{ExitCode: 1}, true
+			}
+		}
+		// If session.end + promptDone already arrived while we were waiting for
+		// AnswerPermission, exit now that the permission goroutine has resolved.
+		if finalStopReason != "" && promptReturned {
+			return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), LoopDirective: loopDirective, LoopLabel: loopLabel, Output: output.String(), FinalReply: finalReply.String(), Usage: bufferedUsage}, true
+		}
+		if eventChClosed && finalStopReason == "" {
+			return sessionResult{ExitCode: 1}, true
+		}
+		return sessionResult{}, false
 	}
 
 	for {
@@ -1200,8 +1235,16 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				)
 				event.Fields["resolver"] = resolverState.String()
 				if permissionDone != nil {
-					emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "permission", "another permission request is already pending", deps.Stderr, cfg.RunLabel)
-					return sessionResult{ExitCode: 1}
+					select {
+					case res := <-permissionDone:
+						permissionDone = nil
+						if result, done := handlePermissionResult(res); done {
+							return result
+						}
+					default:
+						emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "permission", "another permission request is already pending", deps.Stderr, cfg.RunLabel)
+						return sessionResult{ExitCode: 1}
+					}
 				}
 				claimConflict := false
 				if requestID != "" && deps.ControlServer != nil {
@@ -1230,6 +1273,9 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				go func() {
 					res := resolvePermission(permissionCtx, provider, deps.FileHandler, deps.ControlServer, event, cfg.SessionID, cfg.PermissionClaimScope, requestID, cfg.AutoApprove, cfg.PermissionClaimTimeout, deps.Writer.Write)
 					done <- res
+					if deps.permissionResultSent != nil {
+						deps.permissionResultSent()
+					}
 				}()
 				continue
 			}
@@ -1263,33 +1309,8 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 			}
 		case res := <-permissionDone:
 			permissionDone = nil
-			if res.cancelled {
-				return terminate("cancelled")
-			}
-			if res.err != nil {
-				// Permission handlers share the session cancellation context. A
-				// wrapped context.Canceled therefore preserves the run's
-				// cancellation classification even if the permission result wins
-				// the select at the same time as ctx.Done.
-				if errors.Is(res.err, context.Canceled) {
-					return terminate("cancelled")
-				}
-				emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "permission", fmt.Sprintf("permission handler: %v", res.err), deps.Stderr, cfg.RunLabel)
-				return sessionResult{ExitCode: 1}
-			}
-			if res.requestID != "" {
-				emitPermissionResponse(res.requestID, res.optionID, res.kind, res.source)
-				if !writeStatus(tracker.PermissionAnswered()) {
-					return sessionResult{ExitCode: 1}
-				}
-			}
-			// If session.end + promptDone already arrived while we were waiting for
-			// AnswerPermission, exit now that the permission goroutine has resolved.
-			if finalStopReason != "" && promptReturned {
-				return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), LoopDirective: loopDirective, LoopLabel: loopLabel, Output: output.String(), FinalReply: finalReply.String(), Usage: bufferedUsage}
-			}
-			if eventChClosed && finalStopReason == "" {
-				return sessionResult{ExitCode: 1}
+			if result, done := handlePermissionResult(res); done {
+				return result
 			}
 		case <-cfg.InterruptCh:
 			return terminate("cancelled")
