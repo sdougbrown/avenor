@@ -49,11 +49,13 @@ const getSupervisorClientMock = mock(async () => ({
   supervisorId: '/tmp/avenor-inspect.sock',
 }))
 
-mock.module('./get-supervisor-client.js', () => ({
-  getSupervisorClient: getSupervisorClientMock,
-}))
-
-const { inspectTool } = await import('./inspect.js')
+const { createStatusTool } = await import('./status.js')
+const { createEventsTool } = await import('./events.js')
+const { createInspectTool } = await import('./inspect.js')
+const inspectTool = createInspectTool({
+  status: createStatusTool(getSupervisorClientMock),
+  events: createEventsTool(getSupervisorClientMock),
+})
 
 describe('inspectTool', () => {
   afterEach(() => {

@@ -32,11 +32,8 @@ const getSupervisorClientMock = mock(async () => ({
   supervisorId: '/tmp/avenor-mcp-test.sock',
 }))
 
-mock.module('./get-supervisor-client.js', () => ({
-  getSupervisorClient: getSupervisorClientMock,
-}))
-
-const { shapeStatusResult, statusTool } = await import('./status.js')
+const { shapeStatusResult, createStatusTool } = await import('./status.js')
+const statusTool = createStatusTool(getSupervisorClientMock)
 
 function fullStatus(): StatusResult {
   return {

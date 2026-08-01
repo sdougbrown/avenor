@@ -3,13 +3,25 @@ import * as readline from 'node:readline'
 import { Supervisor, type RunInfo } from '../supervisor.js'
 import { type Client } from '../client.js'
 import { asRecord } from '../value-fields.js'
-import { getSupervisorClient } from './get-supervisor-client.js'
+import { getSupervisorClient as realGetSupervisorClient } from './get-supervisor-client.js'
 import { validateRunId } from './validate.js'
 
 const MAX_EVENT_LIMIT = 1_000
 const MAX_STRING_CHARS = 4_000
 const MAX_ARRAY_ITEMS = 32
 const MAX_OBJECT_KEYS = 64
+
+interface EventsToolArgs {
+  runId: string
+  types?: string[]
+  limit?: number
+  supervisorId?: string
+  after_seq?: number
+}
+
+interface EventsToolResult {
+  events: Array<{ event?: string; type?: string; ts?: number; [key: string]: unknown }>
+}
 
 function findRunByLabel(sup: Supervisor, runId: string): RunInfo | undefined {
   const runs = (sup as any).runs as Map<string, RunInfo>
@@ -120,6 +132,7 @@ async function readNdjsonEvents(
 
 async function resolveRun(
   args: { runId: string; supervisorId?: string },
+  getSupervisorClient: typeof realGetSupervisorClient,
 ): Promise<{
   client: Client
   isSingleton: boolean
@@ -209,15 +222,12 @@ async function resolveRun(
   return { client: sup.getClient(), isSingleton: true, runtimeId, eventLogPath }
 }
 
-export async function eventsTool(args: {
-  runId: string
-  types?: string[]
-  limit?: number
-  supervisorId?: string
-  after_seq?: number
-}): Promise<{ events: Array<{ event?: string; type?: string; ts?: number; [key: string]: unknown }> }> {
+async function executeEventsTool(
+  args: EventsToolArgs,
+  getSupervisorClient: typeof realGetSupervisorClient,
+): Promise<EventsToolResult> {
   const limit = normalizeLimit(args.limit)
-  const resolved = await resolveRun(args)
+  const resolved = await resolveRun(args, getSupervisorClient)
 
   try {
     const failures: Error[] = []
@@ -270,3 +280,11 @@ export async function eventsTool(args: {
     }
   }
 }
+
+export function createEventsTool(
+  getSupervisorClient: typeof realGetSupervisorClient,
+): (args: EventsToolArgs) => Promise<EventsToolResult> {
+  return args => executeEventsTool(args, getSupervisorClient)
+}
+
+export const eventsTool = createEventsTool(realGetSupervisorClient)

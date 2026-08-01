@@ -18,11 +18,8 @@ const getSupervisorClientMock = mock(async () => ({
   supervisorId: '/tmp/avenor-mcp-test.sock',
 }))
 
-mock.module('./get-supervisor-client.js', () => ({
-  getSupervisorClient: getSupervisorClientMock,
-}))
-
-const { followUpTool } = await import('./follow-up.js')
+const { createFollowUpTool } = await import('./follow-up.js')
+const followUpTool = createFollowUpTool(getSupervisorClientMock)
 const { Supervisor } = await import('../supervisor.js')
 
 describe('followUpTool with an external supervisor', () => {

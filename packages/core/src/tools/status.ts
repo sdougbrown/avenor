@@ -7,7 +7,7 @@ import { asRecord, numberField, stringArrayField, stringField } from '../value-f
 import {
   validateRunId,
 } from './validate.js'
-import { getSupervisorClient } from './get-supervisor-client.js'
+import { getSupervisorClient as realGetSupervisorClient } from './get-supervisor-client.js'
 
 function findRunByLabel(sup: Supervisor, runId: string): RunInfo | undefined {
   const runs = (sup as any).runs as Map<string, RunInfo>
@@ -188,6 +188,12 @@ function buildBaseStatus(
 
 export type StatusView = 'lifecycle' | 'full'
 
+interface StatusToolArgs {
+  runId?: string
+  supervisorId?: string
+  view?: StatusView
+}
+
 export interface StatusResult {
   run_id: string
   label: string
@@ -272,12 +278,9 @@ async function queryLiveStatus(
   }
 }
 
-export async function statusTool(
-  args: {
-    runId?: string
-    supervisorId?: string
-    view?: StatusView
-  },
+async function executeStatusTool(
+  args: StatusToolArgs,
+  getSupervisorClient: typeof realGetSupervisorClient,
 ): Promise<StatusResult | StatusResult[]> {
   if (args.supervisorId) {
     const { client, isSingleton, sup } = await getSupervisorClient(args.supervisorId)
@@ -415,3 +418,11 @@ export async function statusTool(
 
   return results
 }
+
+export function createStatusTool(
+  getSupervisorClient: typeof realGetSupervisorClient,
+): (args: StatusToolArgs) => Promise<StatusResult | StatusResult[]> {
+  return args => executeStatusTool(args, getSupervisorClient)
+}
+
+export const statusTool = createStatusTool(realGetSupervisorClient)

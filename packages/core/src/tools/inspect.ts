@@ -2,6 +2,18 @@ import { RunReducer, type RunSnapshot } from '../run-reducer.js'
 import { eventsTool } from './events.js'
 import { statusTool, type StatusResult } from './status.js'
 
+interface InspectToolDeps {
+  status: typeof statusTool
+  events: typeof eventsTool
+}
+
+interface InspectToolArgs {
+  runId: string
+  supervisorId?: string
+  limit?: number
+  after_seq?: number
+}
+
 function publicSnapshot(snapshot: RunSnapshot): Omit<RunSnapshot, '_seen_seq_by_scope' | '_recent_legacy_keys' | '_last_semantic_fingerprint' | '_last_source_event'> {
   const {
     _seen_seq_by_scope: _seen,
@@ -26,13 +38,11 @@ export interface InspectResult {
   final_output?: string
 }
 
-export async function inspectTool(args: {
-  runId: string
-  supervisorId?: string
-  limit?: number
-  after_seq?: number
-}): Promise<InspectResult> {
-  const rawStatus = await statusTool({
+async function executeInspectTool(
+  args: InspectToolArgs,
+  deps: InspectToolDeps,
+): Promise<InspectResult> {
+  const rawStatus = await deps.status({
     runId: args.runId,
     supervisorId: args.supervisorId,
   })
@@ -42,7 +52,7 @@ export async function inspectTool(args: {
   }
 
   const reducer = new RunReducer()
-  const { events } = await eventsTool({
+  const { events } = await deps.events({
     runId: args.runId,
     supervisorId: args.supervisorId,
     limit: args.limit,
@@ -90,3 +100,9 @@ export async function inspectTool(args: {
     final_output: clean.final_output,
   }
 }
+
+export function createInspectTool(deps: InspectToolDeps): (args: InspectToolArgs) => Promise<InspectResult> {
+  return args => executeInspectTool(args, deps)
+}
+
+export const inspectTool = createInspectTool({ status: statusTool, events: eventsTool })

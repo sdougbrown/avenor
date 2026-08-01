@@ -21,11 +21,8 @@ const getSupervisorClientMock = mock(async () => ({
   supervisorId: '/tmp/avenor-events-test.sock',
 }))
 
-mock.module('./get-supervisor-client.js', () => ({
-  getSupervisorClient: getSupervisorClientMock,
-}))
-
-const { eventsTool } = await import('./events.js')
+const { createEventsTool } = await import('./events.js')
+const eventsTool = createEventsTool(getSupervisorClientMock)
 
 describe('eventsTool', () => {
   let logPath = ''

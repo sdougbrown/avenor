@@ -4,7 +4,19 @@ import * as crypto from 'node:crypto'
 import { Supervisor, type RunInfo } from '../supervisor.js'
 import { ensureRunPaths, runsRoot } from '../paths.js'
 import { validateRunId } from './validate.js'
-import { getSupervisorClient } from './get-supervisor-client.js'
+import { getSupervisorClient as realGetSupervisorClient } from './get-supervisor-client.js'
+
+interface FollowUpToolArgs {
+  runId: string
+  message: string
+  label?: string
+  supervisorId?: string
+}
+
+interface FollowUpToolResult {
+  run_id: string
+  label: string
+}
 
 function findRunByLabel(sup: Supervisor, runId: string): RunInfo | undefined {
   const runs = (sup as any).runs as Map<string, RunInfo>
@@ -53,12 +65,10 @@ async function parseSentinel(filePath: string): Promise<Record<string, string> |
   }
 }
 
-export async function followUpTool(args: {
-  runId: string
-  message: string
-  label?: string
-  supervisorId?: string
-}): Promise<{ run_id: string; label: string }> {
+async function executeFollowUpTool(
+  args: FollowUpToolArgs,
+  getSupervisorClient: typeof realGetSupervisorClient,
+): Promise<FollowUpToolResult> {
   if (args.supervisorId) {
     const { client, isSingleton, sup } = await getSupervisorClient(args.supervisorId)
     try {
@@ -190,3 +200,11 @@ export async function followUpTool(args: {
 
   return { run_id: followUpRun.runId, label: followUpRun.label }
 }
+
+export function createFollowUpTool(
+  getSupervisorClient: typeof realGetSupervisorClient,
+): (args: FollowUpToolArgs) => Promise<FollowUpToolResult> {
+  return args => executeFollowUpTool(args, getSupervisorClient)
+}
+
+export const followUpTool = createFollowUpTool(realGetSupervisorClient)
