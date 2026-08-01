@@ -79,6 +79,8 @@ describe('avenor MCP server', () => {
     expect(schema.safeParse({ repo_dir: '/tmp/repo' }).success).toBe(true)
     expect(schema.safeParse({ repo_dir: '/tmp/repo', model: 'sonnet' }).success).toBe(true)
     expect(schema.safeParse({ repo_dir: '/tmp/repo', agent: 'codex', model: 'sonnet' }).success).toBe(true)
+    expect(schema.safeParse({ repo_dir: '/tmp/repo', thinking: 'xhigh' }).success).toBe(true)
+    expect(schema.safeParse({ repo_dir: '/tmp/repo', thinking: 'HIGH' }).success).toBe(false)
     expect(schema.safeParse({ agent: 'codex' }).success).toBe(false)
   })
 

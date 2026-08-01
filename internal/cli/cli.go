@@ -97,6 +97,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	timeout := fs.Duration("timeout", 0, "overall session timeout")
 	progressTimeout := fs.Duration("progress-timeout", 0, "session progress timeout (fires if no event for duration)")
 	model := fs.String("model", "", "backend-specific model id")
+	thinking := fs.String("thinking", "", "thinking level (off, minimal, low, medium, high, xhigh, max)")
 	backend := fs.String("backend", DefaultBackend, "runtime backend")
 	runIDFlag := fs.String("run-id", "", "correlation id for this run (generated if not set)")
 	maxRetries := fs.Int("max-retries", 0, "maximum retry attempts on transient failure (0 = no retry)")
@@ -151,6 +152,10 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	case backendPi:
 	default:
 		fmt.Fprintf(stderr, "avenor: unknown backend %q\n", *backend)
+		return exitWithSentinel(1)
+	}
+	if err := runtime.ValidateThinkingForBackend(*backend, *thinking); err != nil {
+		fmt.Fprintf(stderr, "avenor: %v\n", err)
 		return exitWithSentinel(1)
 	}
 
@@ -352,6 +357,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		Dir:       *dir,
 		ServerURL: discovery.URL,
 		Model:     *model,
+		Thinking:  *thinking,
 	}
 
 	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -371,8 +377,8 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	modelOverride := *model
 
 	execAttempt := func(ctx context.Context, agent, model, resumeID, prompt string) attemptResult {
-		return runSingleAttempt(ctx, attemptConfig{
-			startOptions:           runtime.StartOptions{Agent: agent, Model: model, Dir: *dir, ServerURL: discovery.URL},
+		return runAttempt(ctx, attemptConfig{
+			startOptions:           runtime.StartOptions{Agent: agent, Model: model, Dir: *dir, ServerURL: discovery.URL, Thinking: *thinking},
 			backend:                *backend,
 			resumeID:               resumeID,
 			initialPrompt:          prompt,
@@ -714,11 +720,25 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	return exitWithSentinel(result.exitCode)
 }
 
-func StartSession(ctx context.Context, provider runtime.Provider, opts runtime.StartOptions, resumeID string) (runtime.Session, error) {
-	if resumeID != "" {
+type resumeWithOptionser interface {
+	ResumeWithOptions(context.Context, string, runtime.StartOptions) (runtime.Session, error)
+}
+
+func StartSession(ctx context.Context, provider runtime.Provider, backend string, opts runtime.StartOptions, resumeID string) (runtime.Session, error) {
+	if err := runtime.ValidateThinkingForBackend(backend, opts.Thinking); err != nil {
+		return runtime.Session{}, err
+	}
+	if resumeID == "" {
+		return provider.Start(ctx, opts)
+	}
+	if opts.Thinking == "" {
 		return provider.Resume(ctx, resumeID)
 	}
-	return provider.Start(ctx, opts)
+	resumer, ok := provider.(resumeWithOptionser)
+	if !ok {
+		return runtime.Session{}, runtime.NewUnsupportedThinkingError(backend)
+	}
+	return resumer.ResumeWithOptions(ctx, resumeID, opts)
 }
 
 var runAttempt = runSingleAttempt

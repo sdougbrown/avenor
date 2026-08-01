@@ -68,6 +68,20 @@ func newClient(proc *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, stder
 }
 
 var piExecCommandContext = exec.CommandContext
+var piHelpOutput = func(ctx context.Context) ([]byte, error) {
+	return exec.CommandContext(ctx, "pi", "--help").CombinedOutput()
+}
+
+func checkThinkingCapability(ctx context.Context) error {
+	out, err := piHelpOutput(ctx)
+	if err != nil {
+		return fmt.Errorf("pi --help: %w", err)
+	}
+	if !strings.Contains(string(out), "--thinking <level>") {
+		return errors.New("pi --help does not advertise --thinking <level>")
+	}
+	return nil
+}
 
 func StartClient(ctx context.Context, provider string, model string, sessionDir string) (*client, error) {
 	return StartClientWithAgentProfileAndDir(ctx, provider, model, sessionDir, "", "", "")
@@ -82,6 +96,10 @@ func StartClientWithAgentAndDir(ctx context.Context, provider string, model stri
 }
 
 func StartClientWithAgentProfileAndDir(ctx context.Context, provider string, model string, sessionDir string, agent string, agentProfile string, cwd string) (*client, error) {
+	return StartClientWithAgentProfileThinkingAndDir(ctx, provider, model, sessionDir, agent, agentProfile, "", cwd)
+}
+
+func StartClientWithAgentProfileThinkingAndDir(ctx context.Context, provider string, model string, sessionDir string, agent string, agentProfile string, thinking string, cwd string) (*client, error) {
 	args := []string{"--mode", "rpc", "--no-session"}
 	if provider != "" {
 		args = append(args, "--provider", provider)
@@ -91,6 +109,9 @@ func StartClientWithAgentProfileAndDir(ctx context.Context, provider string, mod
 	}
 	if sessionDir != "" {
 		args = append(args, "--session-dir", sessionDir)
+	}
+	if thinking != "" {
+		args = append(args, "--thinking", thinking)
 	}
 
 	proc := piExecCommandContext(ctx, "pi", args...)

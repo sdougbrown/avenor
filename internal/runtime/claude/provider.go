@@ -60,8 +60,43 @@ func New() runtime.Provider {
 	return NewWithOptions(runtime.StartOptions{})
 }
 
+var claudeHelpOutput = func(ctx context.Context) ([]byte, error) {
+	return exec.CommandContext(ctx, "claude", "--help").CombinedOutput()
+}
+
+func checkClaudeEffortCapability(ctx context.Context, effort string) error {
+	if effort == "" {
+		return nil
+	}
+	out, err := claudeHelpOutput(ctx)
+	if err != nil || !strings.Contains(string(out), "--effort <level>") {
+		return runtime.NewUnsupportedThinkingError(backendID)
+	}
+	return nil
+}
+
+func buildClaudeArgs(sessionID string, opts runtime.StartOptions) []string {
+	args := []string{"--session-id", sessionID, "--permission-mode", "default"}
+	if opts.Agent != "" {
+		args = append(args, "--agent", opts.Agent)
+	}
+	if opts.Label != "" {
+		args = append(args, "--name", opts.Label)
+	}
+	if opts.Model != "" {
+		args = append(args, "--model", opts.Model)
+	}
+	if opts.Thinking != "" {
+		args = append(args, "--effort", opts.Thinking)
+	}
+	return args
+}
+
 func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtime.Session, error) {
 	merged := runtime.MergeStartOptions(p.opts, opts)
+	if err := runtime.ValidateThinkingForBackend(backendID, merged.Thinking); err != nil {
+		return runtime.Session{}, err
+	}
 	if merged.Dir == "" || merged.Dir == "." {
 		var err error
 		merged.Dir, err = os.Getwd()
@@ -87,22 +122,13 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	if !strings.Contains(strings.TrimSpace(string(out)), "Claude Code") {
 		return runtime.Session{}, fmt.Errorf("unexpected claude version output: %s", strings.TrimSpace(string(out)))
 	}
+	if err := checkClaudeEffortCapability(ctx, merged.Thinking); err != nil {
+		return runtime.Session{}, err
+	}
 
 	sessionID := uuid.New().String()
 
-	claudeArgs := []string{
-		"--session-id", sessionID,
-		"--permission-mode", "default",
-	}
-	if merged.Agent != "" {
-		claudeArgs = append(claudeArgs, "--agent", merged.Agent)
-	}
-	if merged.Label != "" {
-		claudeArgs = append(claudeArgs, "--name", merged.Label)
-	}
-	if merged.Model != "" {
-		claudeArgs = append(claudeArgs, "--model", merged.Model)
-	}
+	claudeArgs := buildClaudeArgs(sessionID, merged)
 
 	parts := make([]string, 0, len(claudeArgs)+2)
 	parts = append(parts, "exec", "claude")

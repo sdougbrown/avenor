@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"github.com/sdougbrown/avenor/client"
+	"github.com/sdougbrown/avenor/internal/runtime"
 )
 
 func runControl(args []string) int {
@@ -120,6 +121,7 @@ func spawnParamsFromArgs(args []string, stderr io.Writer) (map[string]any, int) 
 	agent := fs.String("agent", "", "agent name")
 	label := fs.String("label", "", "free-form label for log correlation")
 	model := fs.String("model", "", "backend-specific model id")
+	thinking := fs.String("thinking", "", "thinking level (off, minimal, low, medium, high, xhigh, max)")
 	backend := fs.String("backend", "", "runtime backend")
 	serverURL := fs.String("server-url", "", "long-lived ACP server endpoint")
 	onEvent := fs.String("on-event", "", "path to write NDJSON events")
@@ -139,6 +141,10 @@ func spawnParamsFromArgs(args []string, stderr io.Writer) (map[string]any, int) 
 		fmt.Fprintln(stderr, "avenor control: spawn: --prompt or --prompt-file is required")
 		return nil, 1
 	}
+	if err := runtime.ValidateThinking(*thinking); err != nil {
+		fmt.Fprintf(stderr, "avenor control: spawn: %v\n", err)
+		return nil, 1
+	}
 	params := map[string]any{}
 	addString := func(key, value string) {
 		if value != "" {
@@ -151,6 +157,7 @@ func spawnParamsFromArgs(args []string, stderr io.Writer) (map[string]any, int) 
 	addString("agent", *agent)
 	addString("label", *label)
 	addString("model", *model)
+	addString("thinking", *thinking)
 	addString("backend", *backend)
 	addString("server_url", *serverURL)
 	addString("on_event", *onEvent)

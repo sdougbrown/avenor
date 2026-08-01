@@ -340,7 +340,7 @@ describe('AvenorPlugin', () => {
   it('reports observer setup failures without rejecting or losing the tracked run', async () => {
     const hooks = await AvenorPlugin(makeCtx() as any)
     const result = await (hooks.tool?.avenor_spawn as any).execute(
-      { agent: 'jockey', wait: true },
+      { agent: 'jockey', thinking: 'medium', wait: true },
       {
         sessionID: 'orchestrator-session',
         directory: '/tmp/test',
@@ -349,6 +349,7 @@ describe('AvenorPlugin', () => {
       },
     )
 
+    expect(spawnToolMock.mock.calls[0]?.[0]).toMatchObject({ thinking: 'medium' })
     expect(result.title).toBe('test run — monitoring error')
     expect(result.output).toContain('unexpected dial')
     expect(result.output).toContain('may still be active')

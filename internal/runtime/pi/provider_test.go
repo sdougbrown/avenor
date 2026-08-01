@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"strings"
@@ -214,6 +215,165 @@ func TestAnswerPermissionDenied(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for denied extension UI response")
+	}
+}
+
+func TestFreshStartUsesThinkingFlagWithoutSetter(t *testing.T) {
+	originalHelp := piHelpOutput
+	piHelpOutput = func(context.Context) ([]byte, error) { return []byte("--thinking <level>"), nil }
+	t.Cleanup(func() { piHelpOutput = originalHelp })
+
+	for _, level := range []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"} {
+		t.Run(level, func(t *testing.T) {
+			p := NewWithOptions(runtime.StartOptions{})
+			var launched runtime.StartOptions
+			c, wOut, rIn := fakeClient()
+			p.startClient = func(_ context.Context, opts runtime.StartOptions) (*client, error) {
+				launched = opts
+				return c, nil
+			}
+			defer p.Close()
+			first := make(chan string, 1)
+			go func() {
+				command, _ := readCommand(rIn)
+				first <- command["type"].(string)
+				writeLine(wOut, map[string]any{"type": "response", "id": command["id"], "success": true, "sessionId": "pi-fresh"})
+			}()
+			if _, err := p.Start(context.Background(), runtime.StartOptions{Thinking: level}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			if launched.Thinking != level {
+				t.Fatalf("launch thinking = %q", launched.Thinking)
+			}
+			if command := <-first; command != "get_state" {
+				t.Fatalf("first command = %q, want get_state (no setter on fresh client)", command)
+			}
+		})
+	}
+}
+
+func TestReusedStartSetsThinkingBeforeGetState(t *testing.T) {
+	p := NewWithOptions(runtime.StartOptions{})
+	c, wOut, rIn := fakeClient()
+	defer c.Close()
+	p.client = c
+	commands := make(chan []string, 1)
+	go func() {
+		var got []string
+		for i := 0; i < 2; i++ {
+			command, _ := readCommand(rIn)
+			got = append(got, command["type"].(string))
+			response := map[string]any{"type": "response", "id": command["id"], "success": true}
+			if command["type"] == "get_state" {
+				response["sessionId"] = "pi-reused"
+			}
+			writeLine(wOut, response)
+		}
+		commands <- got
+	}()
+	if _, err := p.Start(context.Background(), runtime.StartOptions{Thinking: "high"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	got := <-commands
+	if strings.Join(got, ",") != "set_thinking_level,get_state" {
+		t.Fatalf("commands = %v", got)
+	}
+}
+
+func TestReusedThinkingSetterFailureStopsBeforeState(t *testing.T) {
+	p := NewWithOptions(runtime.StartOptions{})
+	c, wOut, rIn := fakeClient()
+	defer c.Close()
+	p.client = c
+	go func() {
+		command, _ := readCommand(rIn)
+		writeLine(wOut, map[string]any{"type": "response", "id": command["id"], "success": false, "error": "level rejected"})
+	}()
+	_, err := p.Start(context.Background(), runtime.StartOptions{Thinking: "max"})
+	if err == nil || !strings.Contains(err.Error(), "backend \"pi\"") || !strings.Contains(err.Error(), "thinking") {
+		t.Fatalf("error = %v", err)
+	}
+	p.mu.Lock()
+	registered := len(p.sessions)
+	p.mu.Unlock()
+	if registered != 0 {
+		t.Fatalf("registered sessions = %d", registered)
+	}
+}
+
+func TestPlainResumeExistingSessionSendsNoThinkingSetter(t *testing.T) {
+	p := NewWithOptions(runtime.StartOptions{Thinking: "high"})
+	c, _, _ := fakeClient()
+	defer c.Close()
+	p.client = c
+	p.sessions["pi-existing"] = struct{}{}
+	done := make(chan error, 1)
+	go func() {
+		_, err := p.Resume(context.Background(), "pi-existing")
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Resume: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("plain Resume blocked sending a thinking setter")
+	}
+}
+
+func TestReusedResumeThinkingSetterFailure(t *testing.T) {
+	p := NewWithOptions(runtime.StartOptions{})
+	c, wOut, rIn := fakeClient()
+	defer c.Close()
+	p.client = c
+	p.sessions["pi-existing"] = struct{}{}
+	go func() {
+		command, _ := readCommand(rIn)
+		writeLine(wOut, map[string]any{"type": "response", "id": command["id"], "success": false, "error": "level rejected"})
+	}()
+	_, err := p.ResumeWithOptions(context.Background(), "pi-existing", runtime.StartOptions{Thinking: "max"})
+	if err == nil || !strings.Contains(err.Error(), "backend \"pi\"") || !strings.Contains(err.Error(), "thinking") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestFreshResumeUsesStartupThinkingWithoutSetter(t *testing.T) {
+	originalHelp := piHelpOutput
+	piHelpOutput = func(context.Context) ([]byte, error) { return []byte("--thinking <level>"), nil }
+	t.Cleanup(func() { piHelpOutput = originalHelp })
+	p := NewWithOptions(runtime.StartOptions{Dir: "/work"})
+	c, _, _ := fakeClient()
+	var launched runtime.StartOptions
+	p.startClient = func(_ context.Context, opts runtime.StartOptions) (*client, error) {
+		launched = opts
+		return c, nil
+	}
+	defer p.Close()
+	if _, err := p.ResumeWithOptions(context.Background(), "pi-resume", runtime.StartOptions{Thinking: "xhigh"}); err != nil {
+		t.Fatalf("ResumeWithOptions: %v", err)
+	}
+	if launched.Thinking != "xhigh" {
+		t.Fatalf("launch thinking = %q", launched.Thinking)
+	}
+}
+
+func TestThinkingHelpMismatchRejectsBeforeLaunch(t *testing.T) {
+	originalHelp := piHelpOutput
+	piHelpOutput = func(context.Context) ([]byte, error) { return []byte("usage: pi"), nil }
+	t.Cleanup(func() { piHelpOutput = originalHelp })
+	p := NewWithOptions(runtime.StartOptions{})
+	launched := false
+	p.startClient = func(context.Context, runtime.StartOptions) (*client, error) {
+		launched = true
+		return nil, errors.New("unexpected launch")
+	}
+	_, err := p.Start(context.Background(), runtime.StartOptions{Thinking: "low"})
+	if err == nil || !strings.Contains(err.Error(), "thinking") || !strings.Contains(err.Error(), "pi") {
+		t.Fatalf("error = %v", err)
+	}
+	if launched {
+		t.Fatal("client launched after failed help capability check")
 	}
 }
 
