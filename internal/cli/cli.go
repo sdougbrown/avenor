@@ -1235,6 +1235,9 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				)
 				event.Fields["resolver"] = resolverState.String()
 				if permissionDone != nil {
+					// A non-nil channel may hold a completed result that has not won
+					// the outer select. Consume only ready results; never wait for an
+					// active resolver or allow the new request to overlap it.
 					select {
 					case res := <-permissionDone:
 						permissionDone = nil
