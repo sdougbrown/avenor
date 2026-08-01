@@ -67,7 +67,7 @@ Avenor populates `request_id` (unique for this session), `tool` (best-effort), `
 - `file`: The configured file handler can answer the request.
 - `none`: No resolver is configured, so the backend remains blocked until another path answers it.
 
-The latter three values indicate a real block requiring attention when the event is emitted. `--auto-approve` does not make requests with `requires_user_input: true` automatic. Consumers should continue using `pending_permission` as the lifecycle summary; `resolver` is an event-time hint, not a replacement for status. If you're using `--permission-handler file:<path>`, Avenor writes the `.req` file and emits this event immediately after, without waiting for the response.
+The latter three values indicate a real block requiring attention when the event is emitted. `--auto-approve` does not make requests with `requires_user_input: true` automatic. Consumers should continue using `pending_permission` as the lifecycle summary; `resolver` is an event-time hint, not a replacement for status. If you're using `--permission-handler file:<path>`, Avenor emits this event once and writes the `.req` file for the file resolver without waiting for the response.
 
 Classifies as MILESTONE because permission gates are decision points.
 

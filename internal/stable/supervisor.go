@@ -134,6 +134,7 @@ type childRuntime struct {
 	directAttempt     *sessionAttempt
 	mu                sync.Mutex
 	writeMu           sync.Mutex
+	fanoutWriter      *runtimeFanoutWriter
 }
 
 type effectiveIdentity struct {
@@ -926,9 +927,11 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 		if child.cancelFn != nil {
 			child.cancelFn()
 		}
+		child.writeMu.Lock()
 		if child.eventWriter != nil {
 			_ = child.eventWriter.Close()
 		}
+		child.writeMu.Unlock()
 		child.mu.Lock()
 		child.completed = true
 		child.mu.Unlock()
@@ -961,6 +964,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 		onPermissionReq: s.cachePermissionOptions,
 		recorder:        newRecorderFor(s, child.id),
 	}
+	s.setFanoutWriter(child, taggedWriter)
 
 	var selectionMu sync.Mutex
 	resolvedSelections := make(map[string]rosterconfig.ResolvedSelection)
@@ -1035,6 +1039,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				brokerAttemptIDsMu.Unlock()
 				attemptWriter = taggedWriter.withRecorder(broker.NewRecorder(s.broker, brokerRunID))
 			}
+			s.setFanoutWriter(child, attemptWriter)
 
 			if opts.SeedMessage != nil && s.broker != nil && brokerRunID != "" {
 				payload, _ := json.Marshal(opts.SeedMessage)
@@ -1179,9 +1184,11 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 		if child.cancelFn != nil {
 			child.cancelFn()
 		}
+		child.writeMu.Lock()
 		if child.eventWriter != nil {
 			_ = child.eventWriter.Close()
 		}
+		child.writeMu.Unlock()
 		child.mu.Lock()
 		child.completed = true
 		child.mu.Unlock()
@@ -1214,6 +1221,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 		onPermissionReq: s.cachePermissionOptions,
 		recorder:        newRecorderFor(s, child.id),
 	}
+	s.setFanoutWriter(child, taggedWriter)
 
 	var selectionMu sync.Mutex
 	resolvedSelections := make(map[string]rosterconfig.ResolvedSelection)
@@ -1286,6 +1294,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				brokerAttemptIDsMu.Unlock()
 				attemptWriter = taggedWriter.withRecorder(broker.NewRecorder(s.broker, brokerRunID))
 			}
+			s.setFanoutWriter(child, attemptWriter)
 
 			if opts.SeedMessage != nil && s.broker != nil && brokerRunID != "" {
 				payload, _ := json.Marshal(opts.SeedMessage)
@@ -1843,6 +1852,7 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 		onPermissionReq: s.cachePermissionOptions,
 		recorder:        newRecorderFor(s, child.id),
 	}
+	s.setFanoutWriter(child, taggedWriter)
 	result := cli.WaitForSession(turnCtx, attemptProvider, cli.SessionWaitConfig{
 		EventCh:                eventCh,
 		PromptDone:             promptDone,
@@ -2281,27 +2291,28 @@ func (s *Supervisor) answerPermission(rtID, requestID, optionID, message string)
 		s.control.RetryDirectPermissionDelivery(rtID, requestID)
 		return err
 	}
+	// The provider has accepted the answer. Serialize claim resolution, child
+	// status mutation, and the durable response event under the same write lock
+	// used by runtimeFanoutWriter. A reused request ID therefore cannot publish
+	// a newer request and then have this old response clear its status.
+	rt.writeMu.Lock()
+	defer rt.writeMu.Unlock()
 	s.cleanupDirectPermission(rtID, requestID, nil)
-
-	// Emit permission.response through the fanout writer so pending_permission
-	// clears on the child runtime and the event is recorded for the audit trail.
-	rt.mu.Lock()
-	rt.pendingPermission = false
-	rt.permission = nil
-	rt.mu.Unlock()
-
-	s.control.PublishEvent(events.Event{
+	writer := s.fanoutWriterLocked(rt)
+	return writer.writeLocked(events.Event{
 		Event:     "permission.response",
 		SessionID: sessionID,
 		Fields: map[string]any{
 			"request_id": requestID,
 			"option_id":  optionID,
 			"kind":       kind,
-			"source":     "direct",
-			"ts":         time.Now().UnixMilli(),
+			// A stable answer_permission call is a control-plane answer even
+			// when it had to deliver directly because no resolver owned the
+			// request. Keep the public source vocabulary documented.
+			"source": "control",
+			"ts":     time.Now().UnixMilli(),
 		},
 	})
-	return nil
 }
 
 // Acquire controlMu to prevent replacements from publishing options while
@@ -2334,6 +2345,35 @@ func (s *Supervisor) clearRuntimePermissionOptions(runtimeID string) {
 	s.control.ClearPermissionClaims(runtimeID)
 }
 
+func (s *Supervisor) setFanoutWriter(child *childRuntime, writer *runtimeFanoutWriter) {
+	child.writeMu.Lock()
+	child.mu.Lock()
+	child.fanoutWriter = writer
+	child.mu.Unlock()
+	child.writeMu.Unlock()
+}
+
+// fanoutWriterLocked returns the writer associated with the active runtime.
+// Production children install one before they can receive permission answers;
+// the fallback keeps focused unit tests with hand-built children observable
+// without reintroducing a direct ControlServer publication path.
+func (s *Supervisor) fanoutWriterLocked(child *childRuntime) *runtimeFanoutWriter {
+	child.mu.Lock()
+	writer := child.fanoutWriter
+	if writer == nil {
+		writer = &runtimeFanoutWriter{
+			base:            child.eventWriter,
+			runtimeID:       child.id,
+			child:           child,
+			control:         s.control,
+			metadata:        cli.NewEventMetadata(s.runID, child.label, child.id),
+			onPermissionReq: s.cachePermissionOptions,
+		}
+	}
+	child.mu.Unlock()
+	return writer
+}
+
 type runtimeFanoutWriter struct {
 	base            cli.EventSink
 	runtimeID       string
@@ -2349,6 +2389,14 @@ func (w *runtimeFanoutWriter) Write(ev events.Event) error {
 		w.child.writeMu.Lock()
 		defer w.child.writeMu.Unlock()
 	}
+	return w.writeLocked(ev)
+}
+
+// writeLocked is the canonical event path for callers that already hold the
+// child write lock. In particular, a direct permission answer must mark the
+// old claim, clear its status, and publish its response as one ordered write
+// relative to a reused request ID.
+func (w *runtimeFanoutWriter) writeLocked(ev events.Event) error {
 	// stamped is the lossless durable event (written to file/broker);
 	// presentation is the bounded copy for control/status surfaces.
 	stamped := ev
@@ -2438,8 +2486,10 @@ func (w *runtimeFanoutWriter) Write(ev events.Event) error {
 	if rec != nil {
 		rec.Feed(presentation)
 	}
-	if err := w.base.Write(stamped); err != nil {
-		return err
+	if w.base != nil {
+		if err := w.base.Write(stamped); err != nil {
+			return err
+		}
 	}
 	if w.control != nil {
 		w.control.PublishCanonicalEvent(stamped)

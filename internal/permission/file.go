@@ -62,7 +62,10 @@ func NewFileHandler(basePath string) *FileHandler {
 	}
 }
 
-func (h *FileHandler) Handle(ctx context.Context, provider runtime.Provider, event events.Event, emit func(events.Event) error) (res Resolution, err error) {
+// Handle manages the file protocol for an already-published permission.request.
+// The caller owns event publication so a request receives one effective resolver
+// hint rather than a duplicate normalized event.
+func (h *FileHandler) Handle(ctx context.Context, provider runtime.Provider, event events.Event) (res Resolution, err error) {
 	if h == nil {
 		return Resolution{}, errors.New("permission file handler is nil")
 	}
@@ -99,14 +102,6 @@ func (h *FileHandler) Handle(ctx context.Context, provider runtime.Provider, eve
 			os.Remove(requestPath)
 		}
 	}()
-
-	if emit != nil {
-		if e := emit(normalizedPermissionEvent(request)); e != nil {
-			err = e
-			return
-		}
-	}
-
 	rawResponse, optionID, wErr := h.waitForResponse(ctx, responsePath)
 	if wErr != nil {
 		err = wErr
@@ -281,25 +276,5 @@ func requestFromEvent(event events.Event) FileRequest {
 		Question:  question,
 		Options:   fields["options"],
 		Payload:   fields,
-	}
-}
-
-func normalizedPermissionEvent(request FileRequest) events.Event {
-	fields := map[string]any{
-		"request_id": request.RequestID,
-	}
-	if request.Tool != "" {
-		fields["tool"] = request.Tool
-	}
-	if request.Question != "" {
-		fields["question"] = request.Question
-	}
-	if request.Options != nil {
-		fields["options"] = request.Options
-	}
-	return events.Event{
-		Event:     "permission.request",
-		SessionID: request.SessionID,
-		Fields:    fields,
 	}
 }

@@ -24,7 +24,7 @@ It then polls continuously for:
 
 The default timeout is 10 minutes. The default polling cadence is 500 milliseconds. If no response arrives within the timeout window, the handler returns a timeout error and the execution halts.
 
-Avenor also emits a `permission.request` NDJSON event after writing the request file, so downstream listeners can react in parallel with the file-based protocol.
+Avenor emits the canonical `permission.request` NDJSON event once, with `resolver: "file"`, before the handler writes the request file. Downstream listeners can react in parallel with the file-based protocol without receiving a duplicate request event.
 
 ### Request file
 

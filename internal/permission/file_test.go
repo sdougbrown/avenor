@@ -71,14 +71,10 @@ func TestFileHandlerRoundTrip(t *testing.T) {
 		},
 	}
 
-	emitted := make(chan events.Event, 1)
 	done := make(chan error, 1)
 	resolved := make(chan Resolution, 1)
 	go func() {
-		res, err := handler.Handle(context.Background(), provider, event, func(event events.Event) error {
-			emitted <- event
-			return nil
-		})
+		res, err := handler.Handle(context.Background(), provider, event)
 		resolved <- res
 		done <- err
 	}()
@@ -134,15 +130,6 @@ func TestFileHandlerRoundTrip(t *testing.T) {
 	default:
 		t.Fatal("missing resolution")
 	}
-
-	select {
-	case event := <-emitted:
-		if event.Event != "permission.request" || event.Fields["request_id"] != "42" {
-			t.Fatalf("emitted = %+v", event)
-		}
-	default:
-		t.Fatal("permission.request was not emitted")
-	}
 }
 
 func TestFileHandlerCancelledOutcomeDoesNotAnswerPermission(t *testing.T) {
@@ -169,7 +156,7 @@ func TestFileHandlerCancelledOutcomeDoesNotAnswerPermission(t *testing.T) {
 		err error
 	}, 1)
 	go func() {
-		res, err := handler.Handle(context.Background(), provider, event, nil)
+		res, err := handler.Handle(context.Background(), provider, event)
 		done <- struct {
 			res Resolution
 			err error

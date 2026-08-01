@@ -1023,6 +1023,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 	var bufferedUsage map[string]any
 	promptReturned := false
 	var permissionDone <-chan permissionResult
+	permissionCtx, cancelPermission := context.WithCancel(ctx)
 	var loopDirective string
 	var loopLabel string
 	var output strings.Builder
@@ -1030,6 +1031,25 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 	var fullReply strings.Builder
 	eventChClosed := false
 	tracker := newStatusTracker(cfg.SessionID, cfg.RunID, cfg.RunLabel)
+
+	// Every return path must join an in-flight permission resolver. Cancelling
+	// its dedicated context first lets progress/configured timeouts stop file
+	// polling without depending on the caller to cancel ctx after we return.
+	synchronizePermission := func() {
+		cancelPermission()
+		if permissionDone != nil {
+			<-permissionDone
+			permissionDone = nil
+		}
+	}
+	defer synchronizePermission()
+	terminate := func(stopReason string) sessionResult {
+		// The termination branch owns the outcome. In particular, the expected
+		// context.Canceled result from the resolver must not replace "cancelled"
+		// with a generic permission-handler failure.
+		synchronizePermission()
+		return cancelAndEnd(provider, deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, stopReason, deps.Stderr, bufferedUsage, fullReply.String(), finalReply.String())
+	}
 
 	chunkBuf := digest.NewChunkBuffer()
 
@@ -1082,33 +1102,33 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 		case event, ok := <-cfg.EventCh:
 			if !ok {
 				// Nil the channel so it no longer fires on subsequent iterations.
+				// If permission resolution is still in flight, keep waiting for its
+				// result instead of repeatedly selecting the closed event channel.
 				cfg.EventCh = nil
 				eventChClosed = true
-				// Wait for any in-flight AnswerPermission goroutine before exiting.
 				if permissionDone != nil {
-					break
+					continue
 				}
 				if finalStopReason == "" {
 					return sessionResult{ExitCode: 1}
 				}
 				return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), LoopDirective: loopDirective, LoopLabel: loopLabel, Output: output.String(), FinalReply: finalReply.String(), Usage: bufferedUsage}
-			} else {
-				if event.Event == "session.start" {
-					externalID, _ := event.Fields["conversation_id"].(string)
-					if externalID != "" && externalID != cfg.SessionID {
-						adopted := true
-						if cfg.AcceptSessionID != nil {
-							adopted = cfg.AcceptSessionID(externalID)
-						}
-						if !adopted {
-							emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "session", fmt.Sprintf("authoritative session ID %q conflicts with an existing session", externalID), deps.Stderr, cfg.RunLabel)
-							return sessionResult{ExitCode: 1, StopReason: runtime.SessionIDConflictStopReason}
-						}
-						cfg.SessionID = externalID
-						tracker.sessionID = externalID
-						if cfg.AdoptSessionID != nil {
-							cfg.AdoptSessionID(externalID)
-						}
+			}
+			if event.Event == "session.start" {
+				externalID, _ := event.Fields["conversation_id"].(string)
+				if externalID != "" && externalID != cfg.SessionID {
+					adopted := true
+					if cfg.AcceptSessionID != nil {
+						adopted = cfg.AcceptSessionID(externalID)
+					}
+					if !adopted {
+						emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "session", fmt.Sprintf("authoritative session ID %q conflicts with an existing session", externalID), deps.Stderr, cfg.RunLabel)
+						return sessionResult{ExitCode: 1, StopReason: runtime.SessionIDConflictStopReason}
+					}
+					cfg.SessionID = externalID
+					tracker.sessionID = externalID
+					if cfg.AdoptSessionID != nil {
+						cfg.AdoptSessionID(externalID)
 					}
 				}
 			}
@@ -1208,7 +1228,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				done := make(chan permissionResult, 1)
 				permissionDone = done
 				go func() {
-					res := resolvePermission(ctx, provider, deps.FileHandler, deps.ControlServer, event, cfg.SessionID, cfg.PermissionClaimScope, requestID, cfg.AutoApprove, cfg.PermissionClaimTimeout, deps.Writer.Write)
+					res := resolvePermission(permissionCtx, provider, deps.FileHandler, deps.ControlServer, event, cfg.SessionID, cfg.PermissionClaimScope, requestID, cfg.AutoApprove, cfg.PermissionClaimTimeout, deps.Writer.Write)
 					done <- res
 				}()
 				continue
@@ -1233,7 +1253,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 			promptReturned = true
 			if err != nil {
 				if errors.Is(err, context.Canceled) {
-					return cancelAndEnd(provider, deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, "cancelled", deps.Stderr, bufferedUsage, fullReply.String(), finalReply.String())
+					return terminate("cancelled")
 				}
 				emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "prompt", fmt.Sprintf("prompt: %v", err), deps.Stderr, cfg.RunLabel)
 				return sessionResult{ExitCode: 1}
@@ -1244,9 +1264,16 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 		case res := <-permissionDone:
 			permissionDone = nil
 			if res.cancelled {
-				return cancelAndEnd(provider, deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, "cancelled", deps.Stderr, bufferedUsage, fullReply.String(), finalReply.String())
+				return terminate("cancelled")
 			}
 			if res.err != nil {
+				// Permission handlers share the session cancellation context. A
+				// wrapped context.Canceled therefore preserves the run's
+				// cancellation classification even if the permission result wins
+				// the select at the same time as ctx.Done.
+				if errors.Is(res.err, context.Canceled) {
+					return terminate("cancelled")
+				}
 				emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "permission", fmt.Sprintf("permission handler: %v", res.err), deps.Stderr, cfg.RunLabel)
 				return sessionResult{ExitCode: 1}
 			}
@@ -1272,22 +1299,11 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 			cfn()
 			finalStopReason = "cancelled"
 		case <-ctx.Done():
-			// Synchronize with any in-flight permission resolution so that
-			// the goroutine's cleanup (e.g. removing the file-handler
-			// .req file) completes before we return.  The goroutine
-			// itself runs on the same cancelled context, so it should
-			// finish almost immediately.
-			if permissionDone != nil {
-				select {
-				case <-permissionDone:
-				case <-time.After(5 * time.Second):
-				}
-			}
-			return cancelAndEnd(provider, deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, "cancelled", deps.Stderr, bufferedUsage, fullReply.String(), finalReply.String())
+			return terminate("cancelled")
 		case <-progressTimerC:
-			return cancelAndEnd(provider, deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, "progress_timeout", deps.Stderr, bufferedUsage, fullReply.String(), finalReply.String())
+			return terminate("progress_timeout")
 		case <-cfg.Timeout:
-			return cancelAndEnd(provider, deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, "timeout", deps.Stderr, bufferedUsage, fullReply.String(), finalReply.String())
+			return terminate("timeout")
 		}
 	}
 }
@@ -1478,7 +1494,7 @@ func resolvePermission(
 	requestID string,
 	autoApprove bool,
 	claimTimeout time.Duration,
-	emit func(events.Event) error,
+	_ func(events.Event) error, // retained for internal call-site compatibility; file handling does not emit events
 ) permissionResult {
 	options, _ := event.Fields["options"].([]any)
 	answerControl := func(ans control.PermissionAnswer) permissionResult {
@@ -1598,7 +1614,10 @@ func resolvePermission(
 		if controlServer != nil {
 			controlServer.SetPermissionResolverState(claimScope, requestID, control.PermissionResolverFile)
 		}
-		res, err := fileHandler.Handle(ctx, provider, event, emit)
+		// WaitForSession owns the canonical permission.request event and its
+		// effective resolver hint. The file handler only writes its protocol
+		// file and waits for the response; it must not emit a duplicate event.
+		res, err := fileHandler.Handle(ctx, provider, event)
 		if err != nil {
 			if controlServer != nil {
 				controlServer.EndPermissionClaim(claimScope, requestID)

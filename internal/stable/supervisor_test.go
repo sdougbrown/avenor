@@ -1380,6 +1380,27 @@ type stableTestSink struct{}
 func (stableTestSink) Write(events.Event) error { return nil }
 func (stableTestSink) Close() error             { return nil }
 
+type blockingResponseSink struct {
+	mu              sync.Mutex
+	events          []events.Event
+	responseStarted chan struct{}
+	releaseResponse chan struct{}
+	responseOnce    sync.Once
+}
+
+func (s *blockingResponseSink) Write(ev events.Event) error {
+	s.mu.Lock()
+	s.events = append(s.events, ev)
+	s.mu.Unlock()
+	if ev.Event == "permission.response" {
+		s.responseOnce.Do(func() { close(s.responseStarted) })
+		<-s.releaseResponse
+	}
+	return nil
+}
+
+func (s *blockingResponseSink) Close() error { return nil }
+
 func cachePermissionOptionsThroughFanout(t *testing.T, sup *Supervisor, runtimeID string, ev events.Event) {
 	t.Helper()
 	writer := &runtimeFanoutWriter{
@@ -2588,6 +2609,179 @@ func TestAnswerPermissionClearsCacheEntry(t *testing.T) {
 	}
 	if _, ok := sup.permOptions["rt_clear:req_clear"]; ok {
 		t.Fatal("cache entry was not cleared after use")
+	}
+}
+
+func TestAnswerPermissionDirectPublishesThroughCanonicalFanout(t *testing.T) {
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-answer-direct-fanout.sock", MaxRuntimes: 1})
+	provider := &permRecordingProvider{}
+	sink := &metadataCaptureSink{}
+	child := &childRuntime{
+		id:          "rt_direct_fanout",
+		label:       "direct",
+		provider:    provider,
+		session:     runtime.Session{SessionID: "ses_direct_fanout"},
+		eventWriter: sink,
+		done:        make(chan struct{}),
+		promptCh:    make(chan struct{}, 1),
+	}
+	writer := &runtimeFanoutWriter{
+		base:            sink,
+		runtimeID:       child.id,
+		child:           child,
+		control:         sup.control,
+		metadata:        cli.NewEventMetadata(sup.runID, child.label, child.id),
+		onPermissionReq: sup.cachePermissionOptions,
+	}
+	sup.setFanoutWriter(child, writer)
+	sup.runtimes[child.id] = child
+
+	options := []any{map[string]any{"optionId": "allow", "kind": "allow"}}
+	if !sup.control.PreparePermissionClaim(child.id, "req_direct_fanout", control.PermissionResolverNoResolver, options) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+	if err := writer.Write(events.Event{
+		Event:     "permission.request",
+		SessionID: child.session.SessionID,
+		Fields: map[string]any{
+			"request_id": "req_direct_fanout",
+			"options":    options,
+			"resolver":   "none",
+		},
+	}); err != nil {
+		t.Fatalf("write permission.request: %v", err)
+	}
+
+	if err := sup.answerPermission(child.id, "req_direct_fanout", "allow", ""); err != nil {
+		t.Fatalf("answerPermission: %v", err)
+	}
+	if len(sink.events) != 2 {
+		t.Fatalf("durable events = %d, want request and response: %+v", len(sink.events), sink.events)
+	}
+	response := sink.events[1]
+	if response.Event != "permission.response" {
+		t.Fatalf("second event = %+v, want permission.response", response)
+	}
+	if got := response.Fields["source"]; got != "control" {
+		t.Fatalf("permission.response source = %v, want control", got)
+	}
+	if got := response.Fields["runtime_id"]; got != child.id {
+		t.Fatalf("permission.response runtime_id = %v, want %s", got, child.id)
+	}
+	if got := response.Fields["run_id"]; got != sup.runID {
+		t.Fatalf("permission.response run_id = %v, want %s", got, sup.runID)
+	}
+	if seq, ok := events.Int64(response.Fields["seq"]); !ok || seq != 2 {
+		t.Fatalf("permission.response seq = %v, want 2", response.Fields["seq"])
+	}
+	child.mu.Lock()
+	pending := child.pendingPermission
+	child.mu.Unlock()
+	if pending {
+		t.Fatal("pending permission remained true after canonical response")
+	}
+}
+
+func TestDirectPermissionResponseOrdersReusedRequestIDStatus(t *testing.T) {
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-answer-direct-reuse-order.sock", MaxRuntimes: 1})
+	provider := &blockingPermissionProvider{
+		started: make(chan struct{}, 1),
+		release: make(chan struct{}),
+	}
+	sink := &blockingResponseSink{
+		responseStarted: make(chan struct{}),
+		releaseResponse: make(chan struct{}),
+	}
+	child := &childRuntime{
+		id:          "rt_direct_reuse_order",
+		provider:    provider,
+		session:     runtime.Session{SessionID: "ses_direct_reuse_order"},
+		eventWriter: sink,
+		done:        make(chan struct{}),
+		promptCh:    make(chan struct{}, 1),
+	}
+	writer := &runtimeFanoutWriter{
+		base:            sink,
+		runtimeID:       child.id,
+		child:           child,
+		control:         sup.control,
+		metadata:        cli.NewEventMetadata(sup.runID, "reuse", child.id),
+		onPermissionReq: sup.cachePermissionOptions,
+	}
+	sup.setFanoutWriter(child, writer)
+	sup.runtimes[child.id] = child
+
+	oldOptions := []any{map[string]any{"optionId": "old", "kind": "allow"}}
+	if !sup.control.PreparePermissionClaim(child.id, "reused", control.PermissionResolverNoResolver, oldOptions) {
+		t.Fatal("old claim was not prepared")
+	}
+	if err := writer.Write(events.Event{Event: "permission.request", SessionID: child.session.SessionID, Fields: map[string]any{
+		"request_id": "reused", "resolver": "none", "options": oldOptions,
+	}}); err != nil {
+		t.Fatalf("write old request: %v", err)
+	}
+
+	answerDone := make(chan error, 1)
+	go func() { answerDone <- sup.answerPermission(child.id, "reused", "old", "") }()
+	select {
+	case <-provider.started:
+	case <-time.After(time.Second):
+		t.Fatal("direct provider call did not start")
+	}
+	deadline := time.Now().Add(time.Second)
+	for sup.control.PermissionResolverState(child.id, "reused") != control.PermissionResolverDirectDelivery {
+		if time.Now().After(deadline) {
+			t.Fatal("claim did not enter direct-delivery state")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(provider.release)
+
+	select {
+	case <-sink.responseStarted:
+	case <-time.After(time.Second):
+		t.Fatal("canonical response was not started")
+	}
+
+	newOptions := []any{map[string]any{"optionId": "new", "kind": "reject"}}
+	if !sup.control.PreparePermissionClaim(child.id, "reused", control.PermissionResolverNoResolver, newOptions) {
+		t.Fatal("resolved direct claim was not replaceable")
+	}
+	newRequestDone := make(chan error, 1)
+	go func() {
+		newRequestDone <- writer.Write(events.Event{Event: "permission.request", SessionID: child.session.SessionID, Fields: map[string]any{
+			"request_id": "reused", "resolver": "none", "options": newOptions,
+		}})
+	}()
+	select {
+	case err := <-newRequestDone:
+		t.Fatalf("new request bypassed response write lock, err=%v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	close(sink.releaseResponse)
+	select {
+	case err := <-answerDone:
+		if err != nil {
+			t.Fatalf("old direct answer: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("old direct answer did not finish")
+	}
+	select {
+	case err := <-newRequestDone:
+		if err != nil {
+			t.Fatalf("new request write: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("new request remained blocked after old response")
+	}
+
+	child.mu.Lock()
+	pending := child.pendingPermission
+	child.mu.Unlock()
+	if !pending {
+		t.Fatal("old response cleared pending status for the reused new request")
 	}
 }
 

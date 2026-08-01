@@ -121,18 +121,25 @@ type permissionLifecycleSink struct {
 }
 
 type permissionRequestCaptureSink struct {
-	request    events.Event
-	claimState control.PermissionResolverState
-	onRequest  func()
-	captured   bool
+	mu           sync.Mutex
+	request      events.Event
+	claimState   control.PermissionResolverState
+	onRequest    func()
+	captured     bool
+	requestCount int
 }
 
 func (s *permissionRequestCaptureSink) Write(event events.Event) error {
-	if event.Event == "permission.request" && !s.captured {
-		s.request = event
-		s.captured = true
-		if s.onRequest != nil {
-			s.onRequest()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if event.Event == "permission.request" {
+		s.requestCount++
+		if !s.captured {
+			s.request = event
+			s.captured = true
+			if s.onRequest != nil {
+				s.onRequest()
+			}
 		}
 	}
 	return nil
@@ -563,6 +570,144 @@ func TestPermissionRequestEmitsEffectiveResolverAndClaimState(t *testing.T) {
 			}
 			if got := sink.claimState; got != tt.want {
 				t.Fatalf("claim state before resolution = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWaitForSessionFilePermissionEmitsOneEffectiveRequestAndCleansUp(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "permission")
+	handler := permission.NewFileHandler(base)
+	handler.PollInterval = time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	eventCh := make(chan events.Event, 1)
+	eventCh <- events.Event{
+		Event:     "permission.request",
+		SessionID: "ses_file_once",
+		Fields: map[string]any{
+			"request_id": "req_file_once",
+			"options": []any{
+				map[string]any{"optionId": "allow", "kind": "allow"},
+			},
+		},
+	}
+	close(eventCh)
+	promptDone := make(chan error, 1)
+	promptDone <- nil
+	sink := &permissionRequestCaptureSink{onRequest: cancel}
+
+	result := waitForSessionForTest(ctx, &cliFakeProvider{}, sink, handler, nil, eventCh, promptDone, nil, "ses_file_once", "run_1", "", false, time.Second, nil, io.Discard)
+	if result.ExitCode != 130 {
+		t.Fatalf("WaitForSession exit code = %d, want 130", result.ExitCode)
+	}
+	if sink.requestCount != 1 {
+		t.Fatalf("permission.request count = %d, want 1", sink.requestCount)
+	}
+	if got := sink.request.Fields["resolver"]; got != "file" {
+		t.Fatalf("permission.request resolver = %v, want file", got)
+	}
+	if _, err := os.Stat(base + ".req"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("permission request file still exists after synchronized cancellation: %v", err)
+	}
+}
+
+func TestWaitForSessionSynchronizesFileCleanupForEveryTerminationSource(t *testing.T) {
+	tests := []struct {
+		name       string
+		stopReason string
+		trigger    func(chan<- error, chan<- time.Time, chan<- time.Time)
+	}{
+		{
+			name:       "prompt cancellation",
+			stopReason: "cancelled",
+			trigger: func(promptDone chan<- error, _ chan<- time.Time, _ chan<- time.Time) {
+				promptDone <- context.Canceled
+			},
+		},
+		{
+			name:       "progress timeout",
+			stopReason: "progress_timeout",
+			trigger: func(_ chan<- error, progressTimer chan<- time.Time, _ chan<- time.Time) {
+				progressTimer <- time.Time{}
+			},
+		},
+		{
+			name:       "configured timeout",
+			stopReason: "timeout",
+			trigger: func(_ chan<- error, _ chan<- time.Time, timeout chan<- time.Time) {
+				timeout <- time.Time{}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			base := filepath.Join(dir, "permission")
+			handler := permission.NewFileHandler(base)
+			handler.PollInterval = time.Millisecond
+			promptDone := make(chan error)
+			progressTimer := make(chan time.Time, 1)
+			timeout := make(chan time.Time, 1)
+			eventCh := make(chan events.Event, 1)
+			eventCh <- events.Event{Event: "permission.request", SessionID: "ses_cleanup", Fields: map[string]any{
+				"request_id": "req_cleanup",
+				"options":    []any{map[string]any{"optionId": "allow", "kind": "allow"}},
+			}}
+			sink := &permissionRequestCaptureSink{}
+			requestWritten := make(chan struct{})
+			var requestOnce sync.Once
+			sink.onRequest = func() { requestOnce.Do(func() { close(requestWritten) }) }
+			resultCh := make(chan sessionResult, 1)
+			go func() {
+				resultCh <- WaitForSession(context.Background(), &cliFakeProvider{}, SessionWaitConfig{
+					EventCh:                eventCh,
+					PromptDone:             promptDone,
+					SessionID:              "ses_cleanup",
+					RunID:                  "run_cleanup",
+					PermissionClaimTimeout: time.Second,
+					ProgressTimeout:        time.Second,
+					Timeout:                timeout,
+				}, SessionWaitDeps{
+					Writer:         sink,
+					FileHandler:    handler,
+					ProgressTimerC: progressTimer,
+					Stderr:         io.Discard,
+				})
+			}()
+			select {
+			case <-requestWritten:
+			case <-time.After(time.Second):
+				t.Fatal("permission.request was not written")
+			}
+			deadline := time.Now().Add(time.Second)
+			for {
+				if _, err := os.Stat(base + ".req"); err == nil {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("file handler did not create .req before termination")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			triggerDone := make(chan struct{})
+			go func() {
+				defer close(triggerDone)
+				tt.trigger(promptDone, progressTimer, timeout)
+			}()
+			select {
+			case result := <-resultCh:
+				<-triggerDone
+				if result.StopReason != tt.stopReason {
+					t.Fatalf("StopReason = %q, want %q", result.StopReason, tt.stopReason)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("WaitForSession did not synchronize and return")
+			}
+			if _, err := os.Stat(base + ".req"); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf(".req remained after %s termination: %v", tt.name, err)
 			}
 		})
 	}
