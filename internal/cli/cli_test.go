@@ -618,27 +618,34 @@ func TestWaitForSessionSynchronizesFileCleanupForEveryTerminationSource(t *testi
 	tests := []struct {
 		name       string
 		stopReason string
-		trigger    func(chan<- error, chan<- time.Time, chan<- time.Time)
+		trigger    func(chan<- error, chan<- time.Time, chan<- time.Time, chan<- struct{})
 	}{
 		{
 			name:       "prompt cancellation",
 			stopReason: "cancelled",
-			trigger: func(promptDone chan<- error, _ chan<- time.Time, _ chan<- time.Time) {
+			trigger: func(promptDone chan<- error, _ chan<- time.Time, _ chan<- time.Time, _ chan<- struct{}) {
 				promptDone <- context.Canceled
 			},
 		},
 		{
 			name:       "progress timeout",
 			stopReason: "progress_timeout",
-			trigger: func(_ chan<- error, progressTimer chan<- time.Time, _ chan<- time.Time) {
+			trigger: func(_ chan<- error, progressTimer chan<- time.Time, _ chan<- time.Time, _ chan<- struct{}) {
 				progressTimer <- time.Time{}
 			},
 		},
 		{
 			name:       "configured timeout",
 			stopReason: "timeout",
-			trigger: func(_ chan<- error, _ chan<- time.Time, timeout chan<- time.Time) {
+			trigger: func(_ chan<- error, _ chan<- time.Time, timeout chan<- time.Time, _ chan<- struct{}) {
 				timeout <- time.Time{}
+			},
+		},
+		{
+			name:       "interrupt",
+			stopReason: "cancelled",
+			trigger: func(_ chan<- error, _ chan<- time.Time, _ chan<- time.Time, interruptCh chan<- struct{}) {
+				interruptCh <- struct{}{}
 			},
 		},
 	}
@@ -651,6 +658,7 @@ func TestWaitForSessionSynchronizesFileCleanupForEveryTerminationSource(t *testi
 			promptDone := make(chan error)
 			progressTimer := make(chan time.Time, 1)
 			timeout := make(chan time.Time, 1)
+			interruptCh := make(chan struct{}, 1)
 			eventCh := make(chan events.Event, 1)
 			eventCh <- events.Event{Event: "permission.request", SessionID: "ses_cleanup", Fields: map[string]any{
 				"request_id": "req_cleanup",
@@ -665,6 +673,7 @@ func TestWaitForSessionSynchronizesFileCleanupForEveryTerminationSource(t *testi
 				resultCh <- WaitForSession(context.Background(), &cliFakeProvider{}, SessionWaitConfig{
 					EventCh:                eventCh,
 					PromptDone:             promptDone,
+					InterruptCh:            interruptCh,
 					SessionID:              "ses_cleanup",
 					RunID:                  "run_cleanup",
 					PermissionClaimTimeout: time.Second,
@@ -695,7 +704,7 @@ func TestWaitForSessionSynchronizesFileCleanupForEveryTerminationSource(t *testi
 			triggerDone := make(chan struct{})
 			go func() {
 				defer close(triggerDone)
-				tt.trigger(promptDone, progressTimer, timeout)
+				tt.trigger(promptDone, progressTimer, timeout, interruptCh)
 			}()
 			select {
 			case result := <-resultCh:

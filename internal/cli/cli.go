@@ -1292,12 +1292,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				return sessionResult{ExitCode: 1}
 			}
 		case <-cfg.InterruptCh:
-			cancelCtx, cfn := context.WithTimeout(context.Background(), 5*time.Second)
-			if err := provider.Cancel(cancelCtx, cfg.SessionID); err != nil {
-				emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "cancel", fmt.Sprintf("cancel session: %v", err), deps.Stderr, cfg.RunLabel)
-			}
-			cfn()
-			finalStopReason = "cancelled"
+			return terminate("cancelled")
 		case <-ctx.Done():
 			return terminate("cancelled")
 		case <-progressTimerC:
