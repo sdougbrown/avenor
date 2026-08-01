@@ -27,13 +27,21 @@ import {
   statusTool,
   Supervisor,
   type StatusResult,
+  validateSpawnSelection,
 } from '@dougbots/avenor-core'
 
 type TrackedRun = {
   runId: string
   runtimeId?: string
   sessionId?: string
-  agent: string
+  agent?: string
+  model?: string
+  backend?: string
+  rosterFile?: string
+  rosterEntry?: string
+  effectiveAgent?: string
+  effectiveModel?: string
+  effectiveBackend?: string
   orchestratorSessionId: string
   label: string
   supervisorId?: string
@@ -120,7 +128,33 @@ function formatTranscriptPreview(snapshot: RunSnapshot): string | undefined {
   return clipTail(lines.join('\n'), METADATA_TEXT_CHARS)
 }
 
-function buildSnapshotMetadata(snapshot: RunSnapshot): Record<string, unknown> {
+type HostIdentityMetadataInput = Pick<TrackedRun, 'agent' | 'model' | 'backend' | 'rosterFile' | 'rosterEntry' | 'effectiveAgent' | 'effectiveModel' | 'effectiveBackend'>
+
+type HostIdentityStatus = Pick<StatusResult, 'roster_file' | 'roster_entry' | 'agent' | 'model' | 'backend' | 'effective_agent' | 'effective_model' | 'effective_backend'>
+
+/** Project shared spawn identity into OpenCode metadata without resolving rosters here. */
+export function hostIdentityMetadata(
+  run: HostIdentityMetadataInput = {},
+  status?: HostIdentityStatus,
+): Record<string, unknown> {
+  const metadata: Record<string, unknown> = {}
+  const add = (key: string, value: unknown) => {
+    if (typeof value === 'string' && value.length > 0) metadata[key] = value
+  }
+
+  add('roster_file', status?.roster_file ?? run.rosterFile)
+  add('roster_entry', status?.roster_entry ?? run.rosterEntry)
+  add('effective_agent', status?.effective_agent ?? status?.agent ?? run.effectiveAgent)
+  add('effective_model', status?.effective_model ?? status?.model ?? run.effectiveModel)
+  add('effective_backend', status?.effective_backend ?? status?.backend ?? run.effectiveBackend)
+  return metadata
+}
+
+export function buildSnapshotMetadata(
+  snapshot: RunSnapshot,
+  run?: HostIdentityMetadataInput,
+  status?: HostIdentityStatus,
+): Record<string, unknown> {
   const metadata: Record<string, unknown> = {}
   if (snapshot.phase) metadata.phase = snapshot.phase
   if (snapshot.latest_seq !== undefined) metadata.latest_seq = snapshot.latest_seq
@@ -135,6 +169,7 @@ function buildSnapshotMetadata(snapshot: RunSnapshot): Record<string, unknown> {
     METADATA_TEXT_CHARS,
   )
   if (pendingPermission) metadata.pending_permission = pendingPermission
+  Object.assign(metadata, hostIdentityMetadata(run, status))
   return metadata
 }
 
@@ -278,12 +313,24 @@ export const AvenorPlugin: Plugin = async (ctx) => {
     registerSessionId(snapshot.identity.session_id, snapshot.identity.runtime_id, run.runId)
   }
 
+  function updateRunIdentity(run: TrackedRun, status: StatusResult): void {
+    run.rosterFile = status.roster_file ?? run.rosterFile
+    run.rosterEntry = status.roster_entry ?? run.rosterEntry
+    run.effectiveAgent = status.effective_agent ?? status.agent ?? run.effectiveAgent
+    run.effectiveModel = status.effective_model ?? status.model ?? run.effectiveModel
+    run.effectiveBackend = status.effective_backend ?? status.backend ?? run.effectiveBackend
+    run.agent = run.effectiveAgent ?? run.agent
+    run.model = run.effectiveModel ?? run.model
+    run.backend = run.effectiveBackend ?? run.backend
+  }
+
   async function primeTrackedRun(run: TrackedRun, options: { captureLatestSeq?: boolean } = {}): Promise<StatusResult | undefined> {
     try {
       const raw = await statusTool({ runId: run.runId, supervisorId: run.supervisorId })
       const status = Array.isArray(raw) ? raw[0] : raw
       if (!status) return undefined
       registerSessionId(status.session_id, status.runtime_id, run.runId)
+      updateRunIdentity(run, status)
       if (status.latest_seq !== undefined && options.captureLatestSeq) {
         run.latestSeq = status.latest_seq
       }
@@ -321,10 +368,12 @@ export const AvenorPlugin: Plugin = async (ctx) => {
 
   async function loadInspection(run: TrackedRun): Promise<Awaited<ReturnType<typeof inspectTool>> | undefined> {
     try {
-      return await inspectTool({
+      const inspection = await inspectTool({
         runId: run.runId,
         supervisorId: run.supervisorId,
       })
+      updateRunIdentity(run, inspection.status)
+      return inspection
     } catch {
       return undefined
     }
@@ -619,7 +668,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
         description:
           'Dispatch an agent run via avenor. Optional thinking accepts off, minimal, low, medium, high, xhigh, or max; unsupported backends reject explicit values. Blocks by default, showing live progress as an updating tool call. Set wait=false for fire-and-forget — you will be re-prompted automatically on completion.',
         args: {
-          agent: tool.schema.string().describe('Agent name (required, no default)'),
+          agent: tool.schema.string().optional().describe('Optional agent name; omission uses the supplied model or runtime defaults'),
           prompt: tool.schema.string().optional().describe('Prompt text'),
           prompt_file: tool.schema.string().optional().describe('Path to prompt file'),
           dir: tool.schema.string().optional().describe('Working directory for the run (defaults to the session project directory)'),
@@ -628,6 +677,8 @@ export const AvenorPlugin: Plugin = async (ctx) => {
           model: tool.schema.string().optional().describe('Model override'),
           thinking: tool.schema.enum(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']).optional().describe('Thinking level; omission uses the backend default'),
           backend: tool.schema.string().optional().describe('Backend override'),
+          roster_file: tool.schema.string().optional().describe('Path to the roster map'),
+          roster_entry: tool.schema.string().optional().describe('Roster entry to select'),
           server_url: tool.schema.string().optional().describe('Backend server URL'),
           supervisor_id: tool.schema.string().optional().describe('Reuse an existing supervisor by socket path'),
           wait: tool.schema.boolean().default(true).describe(
@@ -635,19 +686,29 @@ export const AvenorPlugin: Plugin = async (ctx) => {
           ),
         },
         async execute(args, context: ToolContext) {
+          validateSpawnSelection({
+            agent: args.agent,
+            model: args.model,
+            backend: args.backend,
+            roster_file: args.roster_file,
+            roster_entry: args.roster_entry,
+          })
+
           const ownerRunId = ensureParentRunId()
           const result = await spawnTool({
-            agent: args.agent,
-            prompt: args.prompt,
-            promptFile: args.prompt_file,
-            label: args.label,
+            ...(args.agent !== undefined ? { agent: args.agent } : {}),
+            ...(args.prompt !== undefined ? { prompt: args.prompt } : {}),
+            ...(args.prompt_file !== undefined ? { promptFile: args.prompt_file } : {}),
+            ...(args.label !== undefined ? { label: args.label } : {}),
             dir: args.dir ?? context.directory,
-            timeout: args.timeout,
-            model: args.model,
-            thinking: args.thinking,
-            backend: args.backend,
-            serverUrl: args.server_url,
-            supervisorId: args.supervisor_id,
+            ...(args.timeout !== undefined ? { timeout: args.timeout } : {}),
+            ...(args.model !== undefined ? { model: args.model } : {}),
+            ...(args.thinking !== undefined ? { thinking: args.thinking } : {}),
+            ...(args.backend !== undefined ? { backend: args.backend } : {}),
+            ...(args.roster_file !== undefined ? { rosterFile: args.roster_file } : {}),
+            ...(args.roster_entry !== undefined ? { rosterEntry: args.roster_entry } : {}),
+            ...(args.server_url !== undefined ? { serverUrl: args.server_url } : {}),
+            ...(args.supervisor_id !== undefined ? { supervisorId: args.supervisor_id } : {}),
             parent_run_id: ownerRunId,
           })
 
@@ -662,6 +723,10 @@ export const AvenorPlugin: Plugin = async (ctx) => {
             runId: result.run_id,
             runtimeId: result.runtime_id,
             agent: args.agent,
+            model: args.model,
+            backend: args.backend,
+            rosterFile: args.roster_file,
+            rosterEntry: args.roster_entry,
             orchestratorSessionId: context.sessionID,
             label: result.label,
             supervisorId: result.supervisor_id || args.supervisor_id,
@@ -676,6 +741,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
             return {
               title: `${result.label} — dispatched`,
               output: `Dispatched "${result.label}" (run_id: ${result.run_id}). Completion will be delivered automatically; use avenor_status with view "lifecycle" for progress or avenor_result to wait for the final result.`,
+              metadata: hostIdentityMetadata(run),
             }
           }
 
@@ -686,7 +752,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
             onSnapshot: (snapshot) => {
               context.metadata({
                 title: snapshot.pending_permission ? `[blocked] ${result.label}` : result.label,
-                metadata: buildSnapshotMetadata(snapshot),
+                metadata: buildSnapshotMetadata(snapshot, run),
               })
             },
           })
@@ -702,7 +768,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
                 run_id: result.run_id,
                 session_id: inspection?.status.session_id ?? snapshot.identity.session_id,
                 final_output: clipTail(inspection?.final_output ?? snapshot.final_output, FINAL_OUTPUT_CHARS),
-                ...buildSnapshotMetadata(snapshot),
+                ...buildSnapshotMetadata(snapshot, run, inspection?.status),
               },
             }
           }
@@ -716,7 +782,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
               metadata: {
                 run_id: result.run_id,
                 session_id: inspection?.status.session_id ?? snapshot.identity.session_id,
-                ...buildSnapshotMetadata(snapshot),
+                ...buildSnapshotMetadata(snapshot, run, inspection?.status),
               },
             }
           }
@@ -725,7 +791,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
             return {
               title: `${result.label} — monitoring error`,
               output: `Monitoring failed: ${outcome.error ?? 'unknown error'}. The run may still be active — use avenor_status to check.`,
-              metadata: { run_id: result.run_id },
+              metadata: { run_id: result.run_id, ...hostIdentityMetadata(run) },
             }
           }
 
@@ -733,7 +799,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
           return {
             title: `${result.label} — aborted`,
             output: `Monitoring of "${result.label}" (run_id: ${result.run_id}) was interrupted. The run may still be active — use avenor_status to check.`,
-            metadata: { run_id: result.run_id },
+            metadata: { run_id: result.run_id, ...hostIdentityMetadata(run) },
           }
         },
       }),

@@ -13,6 +13,7 @@ import {
   spawnTool,
   statusTool,
   Supervisor,
+  validateSpawnSelection,
   type Client,
   type InspectResult,
   type RunObserver,
@@ -99,6 +100,32 @@ export function statusSupervisorId(
   return requestedSupervisorId ? spawnedSupervisorId : undefined
 }
 
+type SpawnHostParams = {
+  agent?: string
+  model?: string
+  backend?: string
+  roster_file?: string
+  roster_entry?: string
+}
+
+/** Project shared spawn identity into Pi tool metadata without resolving rosters here. */
+export function spawnIdentityMetadata(
+  params: SpawnHostParams,
+  status?: Pick<StatusResult, 'roster_file' | 'roster_entry' | 'agent' | 'model' | 'backend' | 'effective_agent' | 'effective_model' | 'effective_backend'>,
+): Record<string, unknown> {
+  const metadata: Record<string, unknown> = {}
+  const add = (key: string, value: unknown) => {
+    if (typeof value === 'string' && value.length > 0) metadata[key] = value
+  }
+
+  add('roster_file', status?.roster_file ?? params.roster_file)
+  add('roster_entry', status?.roster_entry ?? params.roster_entry)
+  add('effective_agent', status?.effective_agent ?? status?.agent ?? params.agent)
+  add('effective_model', status?.effective_model ?? status?.model ?? params.model)
+  add('effective_backend', status?.effective_backend ?? status?.backend ?? params.backend)
+  return metadata
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
@@ -142,10 +169,11 @@ export function buildCompletionText(
   return lines.join('\n')
 }
 
-function buildWaitingText(run: { runId: string; label: string; agent: string }, status: StatusResult): string {
+function buildWaitingText(run: { runId: string; label: string; agent?: string }, status: StatusResult): string {
   const perm = status.pending_permission
+  const agent = run.agent ?? status.effective_agent ?? status.agent ?? 'roster'
   const lines = [
-    `Sub-agent "${run.label}" (${run.agent}) is waiting for input.`,
+    `Sub-agent "${run.label}" (${agent}) is waiting for input.`,
   ]
   if (perm) {
     lines.push(
@@ -346,6 +374,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
           liveMap.delete(live.run_id)
           clearPollingFailure(`run-status:${run.supervisorId ?? 'singleton'}:${run.runId}`)
           run.lastStatus = live
+          run.agent = live.agent ?? run.agent
           entries.push({
             runId: run.runId,
             supervisorId: run.supervisorId,
@@ -354,7 +383,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
             status: live.status,
             phase: live.phase,
             phaseLabel: live.phase_label,
-            agent: run.agent,
+            agent: run.agent ?? 'unknown',
             pendingPermission: !!live.pending_permission,
             permissionDescription: live.pending_permission?.description,
             pid: live.pid,
@@ -371,6 +400,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
           if (!result) throw new Error('status response was empty')
           clearPollingFailure(`run-status:${run.supervisorId ?? 'singleton'}:${run.runId}`)
           run.lastStatus = result
+          run.agent = result.agent ?? run.agent
           entries.push({
             runId: run.runId,
             supervisorId: run.supervisorId,
@@ -379,7 +409,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
             status: result.status,
             phase: result.phase,
             phaseLabel: result.phase_label,
-            agent: run.agent,
+            agent: run.agent ?? 'unknown',
             pendingPermission: !!result.pending_permission,
             permissionDescription: result.pending_permission?.description,
             pid: result.pid,
@@ -400,7 +430,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
             status: previous?.status ?? 'unavailable',
             phase: previous?.phase,
             phaseLabel: previous?.phase_label,
-            agent: run.agent,
+            agent: run.agent ?? previous?.agent ?? 'unknown',
             pendingPermission: !!previous?.pending_permission,
             permissionDescription: previous?.pending_permission?.description,
             pid: previous?.pid,
@@ -893,7 +923,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
         'Use avenor_shutdown when done delegating work.',
       ],
       parameters: Type.Object({
-        agent: Type.String({ description: 'Agent name (required, no default)' }),
+        agent: Type.Optional(Type.String({ description: 'Optional agent name; omission uses the supplied model or runtime defaults' })),
         prompt: Type.Optional(Type.String({ description: 'Prompt text' })),
         prompt_file: Type.Optional(Type.String({ description: 'Path to prompt file' })),
         dir: Type.Optional(Type.String({ description: 'Working directory (defaults to session directory)' })),
@@ -904,7 +934,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
           Type.Literal('off'), Type.Literal('minimal'), Type.Literal('low'), Type.Literal('medium'),
           Type.Literal('high'), Type.Literal('xhigh'), Type.Literal('max'),
         ], { description: 'Thinking level; omission uses the backend default' })),
-        backend: Type.Optional(Type.String({ description: 'Backend override (defaults to pi)' })),
+        backend: Type.Optional(Type.String({ description: 'Backend override (defaults to pi for direct mode)' })),
+        roster_file: Type.Optional(Type.String({ description: 'Path to the roster map' })),
+        roster_entry: Type.Optional(Type.String({ description: 'Roster entry to select' })),
         server_url: Type.Optional(Type.String({ description: 'Backend server URL' })),
         supervisor_id: Type.Optional(Type.String({ description: 'Reuse an existing supervisor by socket path' })),
         wait: Type.Optional(Type.Boolean({ description: 'Block until complete (default true)' })),
@@ -914,27 +946,39 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
           return { content: [{ type: 'text', text: 'Cancelled' }] }
         }
 
+        validateSpawnSelection({
+          agent: params.agent,
+          model: params.model,
+          backend: params.backend,
+          roster_file: params.roster_file,
+          roster_entry: params.roster_entry,
+        })
+
         const wait = params.wait ?? true
         const dir = params.dir ?? ctx.cwd
-        const label = params.label ?? `${params.agent}-${Date.now()}`
-        const backend = params.backend ?? 'pi'
+        const label = params.label ?? `${params.agent ?? params.roster_entry ?? params.model ?? 'avenor'}-${Date.now()}`
+        const rosterMode = Boolean(params.roster_entry)
+        const backend = rosterMode ? params.backend : params.backend ?? 'pi'
         const entries = (ctx as { sessionManager?: { getEntries?: () => readonly unknown[] } })
           .sessionManager?.getEntries?.()
-        const agentProfile = backend === 'pi' ? resolveAgentProfile(entries) : undefined
+        const agentProfile = !rosterMode && backend === 'pi' ? resolveAgentProfile(entries) : undefined
+        const hostParams = { ...params, backend }
 
         const result = await deps.spawnTool({
-          agent: params.agent,
-          prompt: params.prompt,
-          promptFile: params.prompt_file,
+          ...(params.agent !== undefined ? { agent: params.agent } : {}),
+          ...(params.prompt !== undefined ? { prompt: params.prompt } : {}),
+          ...(params.prompt_file !== undefined ? { promptFile: params.prompt_file } : {}),
           label,
           dir,
-          timeout: params.timeout,
-          model: params.model,
-          thinking: params.thinking,
-          backend,
-          agentProfile,
-          serverUrl: params.server_url,
-          supervisorId: params.supervisor_id,
+          ...(params.timeout !== undefined ? { timeout: params.timeout } : {}),
+          ...(params.model !== undefined ? { model: params.model } : {}),
+          ...(params.thinking !== undefined ? { thinking: params.thinking } : {}),
+          ...(backend !== undefined ? { backend } : {}),
+          ...(params.roster_file !== undefined ? { rosterFile: params.roster_file } : {}),
+          ...(params.roster_entry !== undefined ? { rosterEntry: params.roster_entry } : {}),
+          ...(agentProfile !== undefined ? { agentProfile } : {}),
+          ...(params.server_url !== undefined ? { serverUrl: params.server_url } : {}),
+          ...(params.supervisor_id !== undefined ? { supervisorId: params.supervisor_id } : {}),
         })
 
         const supervisorId = statusSupervisorId(params.supervisor_id, result.supervisor_id)
@@ -954,7 +998,11 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
               type: 'text',
               text: `Dispatched "${label}" (run_id: ${result.run_id}). Completion will be delivered automatically; use avenor_status with view "lifecycle" for progress or avenor_result to wait for the final result.`,
             }],
-            details: { run_id: result.run_id, label },
+            details: {
+              run_id: result.run_id,
+              label,
+              ...spawnIdentityMetadata(hostParams),
+            },
           }
         }
 
@@ -969,7 +1017,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
           trackedRuns.delete(result.run_id)
           return {
             content: [{ type: 'text', text: `Monitoring of "${label}" (run_id: ${result.run_id}) was interrupted. Use avenor_status or avenor_inspect to check.` }],
-            details: { run_id: result.run_id },
+            details: {
+              run_id: result.run_id,
+              ...spawnIdentityMetadata(hostParams),
+            },
           }
         }
 
@@ -977,7 +1028,11 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
         if (!status) {
           return {
             content: [{ type: 'text', text: `Sub-agent "${label}" is still running. Use avenor_status or avenor_inspect to check progress.` }],
-            details: { status: 'running', run_id: result.run_id },
+            details: {
+              status: 'running',
+              run_id: result.run_id,
+              ...spawnIdentityMetadata(hostParams),
+            },
           }
         }
 
@@ -993,6 +1048,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
               run_id: result.run_id,
               session_id: status.session_id,
               ...(status.pending_permission && { pending_permission: status.pending_permission }),
+              ...spawnIdentityMetadata(hostParams, status),
             },
           }
         }
@@ -1021,18 +1077,23 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
               run_id: result.run_id,
               session_id: status.session_id,
               final_output: finalOutput,
+              ...spawnIdentityMetadata(hostParams, status),
             },
           }
         }
 
         return {
           content: [{ type: 'text', text: `${label} is ${status.status}. Use avenor_status or avenor_inspect to check progress.` }],
-          details: { status: status.status, run_id: result.run_id },
+          details: {
+            status: status.status,
+            run_id: result.run_id,
+            ...spawnIdentityMetadata(hostParams, status),
+          },
         }
       },
       renderCall(args, theme) {
         const agent = theme.fg('toolTitle', theme.bold('avenor_spawn '))
-        const agentName = theme.fg('accent', args.agent)
+        const agentName = theme.fg('accent', args.agent ?? args.roster_entry ?? args.model ?? 'roster')
         const label = args.label ? theme.fg('dim', ` "${args.label}"`) : ''
         const wait = args.wait === false ? theme.fg('warning', ' [async]') : ''
         return new Text(agent + agentName + label + wait, 0, 0)
@@ -1339,10 +1400,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
       description: 'Open a live run inspector by run ID, label, or agent name',
       getArgumentCompletions: (prefix: string) => {
         const items = Array.from(trackedRuns.values())
-          .filter(run => run.label.startsWith(prefix) || run.agent.startsWith(prefix) || run.runId.startsWith(prefix))
+          .filter(run => run.label.startsWith(prefix) || run.agent?.startsWith(prefix) || run.runId.startsWith(prefix))
           .map(run => ({
             value: run.runId,
-            label: `${sanitizeText(run.label)} (${sanitizeText(run.agent)}, ${sanitizeText(run.runId).slice(0, 8)})`,
+            label: `${sanitizeText(run.label)} (${sanitizeText(run.agent ?? 'roster')}, ${sanitizeText(run.runId).slice(0, 8)})`,
           }))
         return items.length > 0 ? items : null
       },
@@ -1368,10 +1429,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
       description: 'Cancel a running avenor sub-agent',
       getArgumentCompletions: (prefix: string) => {
         const items = Array.from(trackedRuns.values())
-          .filter(run => run.label.startsWith(prefix) || run.agent.startsWith(prefix) || run.runId.startsWith(prefix))
+          .filter(run => run.label.startsWith(prefix) || run.agent?.startsWith(prefix) || run.runId.startsWith(prefix))
           .map(run => ({
             value: run.runId,
-            label: `${sanitizeText(run.label)} (${sanitizeText(run.agent)}, ${sanitizeText(run.runId).slice(0, 8)})`,
+            label: `${sanitizeText(run.label)} (${sanitizeText(run.agent ?? 'roster')}, ${sanitizeText(run.runId).slice(0, 8)})`,
           }))
         return items.length > 0 ? items : null
       },

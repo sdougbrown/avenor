@@ -2,7 +2,7 @@ import type { StatusResult } from '@dougbots/avenor-core'
 
 export interface TrackedRun {
   runId: string
-  agent: string
+  agent?: string
   label: string
   supervisorId?: string
   runtimeId?: string

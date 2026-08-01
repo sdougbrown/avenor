@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, jest, mock } from 'bun:tes
 import { observeRun } from '../../core/src/run-observer.js'
 import { createRunSnapshot } from '../../core/src/run-reducer.js'
 import { extractEventText } from '../../core/src/run-events.js'
+import { validateSpawnSelection } from '../../core/src/spawn-selection.js'
 
 const spawnToolMock = mock(async () => ({
   run_id: 'run-1',
@@ -123,6 +124,7 @@ const currentSupervisorMock = mock(() => ({ supervisorId: '/tmp/avenor.sock' }))
 
 mock.module('@dougbots/avenor-core', () => ({
   spawnTool: spawnToolMock,
+  validateSpawnSelection,
   statusTool: statusToolMock,
   eventsTool: eventsToolMock,
   answerPermissionTool: answerPermissionToolMock,
@@ -139,7 +141,7 @@ mock.module('@dougbots/avenor-core', () => ({
   },
 }))
 
-const { AvenorPlugin, buildWaitingText, terminalStatus } = await import('./plugin.js')
+const { AvenorPlugin, buildWaitingText, hostIdentityMetadata, terminalStatus } = await import('./plugin.js')
 const originalFetch = globalThis.fetch
 
 function makeClient(promptAsync = mock(async () => {})) {
@@ -186,6 +188,25 @@ async function flushMicrotasks(): Promise<void> {
 }
 
 describe('AvenorPlugin', () => {
+  it('preserves roster selectors and effective identity in host metadata', () => {
+    expect(hostIdentityMetadata({
+      rosterFile: '/repo/roster.json',
+      rosterEntry: 'planner',
+    }, {
+      roster_file: '/repo/roster.json',
+      roster_entry: 'planner',
+      effective_agent: 'planner-agent',
+      effective_model: 'provider/model',
+      effective_backend: 'agy',
+    })).toEqual({
+      roster_file: '/repo/roster.json',
+      roster_entry: 'planner',
+      effective_agent: 'planner-agent',
+      effective_model: 'provider/model',
+      effective_backend: 'agy',
+    })
+  })
+
   beforeEach(() => {
     spawnToolMock.mockClear()
     statusToolMock.mockClear()
@@ -341,6 +362,43 @@ describe('AvenorPlugin', () => {
       timeout: '5m',
       signal: context.abort,
     })
+  })
+
+  it('forwards optional direct and roster selectors through the shared spawn tool', async () => {
+    const hooks = await AvenorPlugin(makeCtx() as any)
+    const spawn = hooks.tool?.avenor_spawn as any
+    const context = {
+      sessionID: 'orchestrator-session',
+      directory: '/tmp/test',
+      abort: new AbortController().signal,
+    }
+
+    await spawn.execute({ model: 'provider/model', backend: 'agy', wait: false }, context)
+    expect(spawnToolMock.mock.calls[0]?.[0]).toMatchObject({
+      model: 'provider/model',
+      backend: 'agy',
+    })
+    expect(spawnToolMock.mock.calls[0]?.[0]).not.toHaveProperty('agent')
+
+    spawnToolMock.mockClear()
+    await spawn.execute({
+      roster_file: '/repo/roster.json',
+      roster_entry: 'planner',
+      wait: false,
+    }, context)
+    expect(spawnToolMock.mock.calls[0]?.[0]).toMatchObject({
+      rosterFile: '/repo/roster.json',
+      rosterEntry: 'planner',
+    })
+    expect(spawnToolMock.mock.calls[0]?.[0]).not.toHaveProperty('backend')
+
+    await expect(spawn.execute({
+      roster_file: '/repo/roster.json',
+      roster_entry: 'planner',
+      backend: 'agy',
+      wait: false,
+    }, context)).rejects.toThrow('direct identity fields are disabled in roster mode')
+    expect(spawnToolMock).toHaveBeenCalledTimes(1)
   })
 
   it('reports observer setup failures without rejecting or losing the tracked run', async () => {
