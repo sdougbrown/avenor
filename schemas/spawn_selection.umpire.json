@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "conditions": {
+    "rosterConfigured": {
+      "type": "boolean",
+      "description": "Whether the caller has a configured roster context"
+    }
+  },
+  "fields": {
+    "agent": {
+      "isEmpty": "string"
+    },
+    "model": {
+      "isEmpty": "string"
+    },
+    "backend": {
+      "isEmpty": "string"
+    },
+    "roster_file": {
+      "isEmpty": "string"
+    },
+    "roster_entry": {
+      "isEmpty": "string"
+    }
+  },
+  "rules": [
+    {
+      "type": "requires",
+      "field": "roster_file",
+      "dependency": "roster_entry",
+      "reason": "roster_file requires roster_entry"
+    },
+    {
+      "type": "fairWhen",
+      "field": "roster_entry",
+      "when": {
+        "op": "or",
+        "exprs": [
+          {
+            "op": "present",
+            "field": "roster_file"
+          },
+          {
+            "op": "cond",
+            "condition": "rosterConfigured"
+          }
+        ]
+      },
+      "reason": "roster_entry requires roster_file unless a roster context is configured"
+    },
+    {
+      "type": "disables",
+      "source": "roster_entry",
+      "targets": [
+        "agent",
+        "model",
+        "backend"
+      ],
+      "reason": "direct identity fields are disabled in roster mode"
+    }
+  ]
+}

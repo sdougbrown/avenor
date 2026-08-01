@@ -24,6 +24,10 @@
     "packages/core": {
       "name": "@dougbots/avenor-core",
       "version": "0.9.0",
+      "dependencies": {
+        "@umpire/core": "1.0.1",
+        "@umpire/json": "1.0.0",
+      },
       "devDependencies": {
         "@types/bun": "^1.3.12",
         "@types/node": "^25.8.0",
@@ -545,6 +549,12 @@
     "@types/unist": ["@types/unist@3.0.3", "", {}, "sha512-ko/gIFJRv177XgZsZcBwnqJN5x/Gien8qNOn0D5bQU/zAzVf9Zt3BlcUiLqhV9y4ARk0GbT3tnUiPNgnTXzc/Q=="],
 
     "@types/web-bluetooth": ["@types/web-bluetooth@0.0.21", "", {}, "sha512-oIQLCGWtcFZy2JW77j9k8nHzAOpqMHLQejDA48XXMWH6tjCQHz5RCFz1bzsmROyL6PUm+LLnUiI4BCn221inxA=="],
+
+    "@umpire/core": ["@umpire/core@1.0.1", "", {}, "sha512-jH0mTKJHCYpqZEwx2x0sOzIF3UjW4BZfuxFtmx5q8pCif/7VlwilbWdqqg2fuCCtnrtbgEVYnh14K1VTWvpKfw=="],
+
+    "@umpire/dsl": ["@umpire/dsl@1.0.1", "", { "dependencies": { "@umpire/core": "^1.1.0" } }, "sha512-SXk6KjCpqvI0FVC6sro3XaDAeWbP13pHSx6BZkTP6yKClkzVV7aGjOugloKn4WYCI9u7ErWPNTGy3+aHXPYAXQ=="],
+
+    "@umpire/json": ["@umpire/json@1.0.0", "", { "dependencies": { "@umpire/core": "^1.0.0", "@umpire/dsl": "^1.0.0" } }, "sha512-tYMEDEqbd1lp5uJy5E4InRLItKULE2wuIb7Ln/QTo9u1XoMgKc7Y7JbyH9iLaj5zR1ekYKscG9LimBYegZscog=="],
 
     "@ungap/structured-clone": ["@ungap/structured-clone@1.3.1", "", {}, "sha512-mUFwbeTqrVgDQxFveS+df2yfap6iuP20NAKAsBt5jDEoOTDew+zwLAOilHCeQJOVSvmgCX4ogqIrA0mnyr08yQ=="],
 
@@ -1165,6 +1175,8 @@
     "@earendil-works/pi-coding-agent/typebox": ["typebox@1.1.38", "", {}, "sha512-pZ0aQPmMmXoUvSbeuWf/Hzsc+avNw/Zd6VeE8CFgkVGWyuHPJvqeJJDeJqLve+K70LvjYIoleGcoJHPT17cWoA=="],
 
     "@opencode-ai/plugin/zod": ["zod@4.1.8", "", {}, "sha512-5R1P+WwQqmmMIEACyzSvo4JXHY5WiAFHRMg+zBZKgKS+Q1viRa0C1hmUKtHltoIFKtIdki3pRxkmpP74jnNYHQ=="],
+
+    "@umpire/dsl/@umpire/core": ["@umpire/core@1.1.0", "", {}, "sha512-scwpNlfA/BTplIcVfczqRO449L1lMleveRERwz0ee4qYg6x8k+8g4mSPXNx/+DipWLJF6DPJhU2Q5XOunFK9pg=="],
 
     "@vue/compiler-core/entities": ["entities@7.0.1", "", {}, "sha512-TWrgLOFUQTH994YUyl1yT4uyavY5nNB5muff+RtWaqNVCAK408b5ZnnbNAUEWLTCpum9w6arT70i1XdQ4UeOPA=="],
 

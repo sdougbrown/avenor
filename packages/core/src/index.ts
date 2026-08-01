@@ -38,6 +38,8 @@ export { getInstallDir, getVersion, installerBinaryPath } from './install-path.j
 export type { RunInfo, SupervisorOptions } from './supervisor.js'
 
 export { spawnTool } from './tools/spawn.js'
+export { validateSpawnSelection } from './spawn-selection.js'
+export type { SpawnSelectionInput } from './spawn-selection.js'
 export { statusTool } from './tools/status.js'
 export type { StatusResult, StatusView } from './tools/status.js'
 export { resultTool } from './tools/result.js'
