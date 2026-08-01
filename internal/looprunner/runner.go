@@ -8,6 +8,7 @@ import (
 
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/phaseconfig"
+	"github.com/sdougbrown/avenor/internal/rosterconfig"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
@@ -20,16 +21,17 @@ type NestedResult struct {
 }
 
 type RunOptions struct {
-	WorkDir    string
-	RunID      string
-	EventSink  phaseconfig.EventWriter
-	Config     *LoopConfig
-	MaxRetries int
-	Broker     *broker.Broker
-	SeedMessage *broker.AgentMessage // pushed to the attempt's brokerRunID after creation
+	WorkDir      string
+	RunID        string
+	EventSink    phaseconfig.EventWriter
+	Config       *LoopConfig
+	MaxRetries   int
+	Broker       *broker.Broker
+	SeedMessage  *broker.AgentMessage // pushed to the attempt's brokerRunID after creation
 	PhaseAttempt func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, iteration int, prevSessionID string) (PhaseAttemptResult, error)
-	NestedRun  func(ctx context.Context, configPath string, runType string) (NestedResult, error)
-	ConfigDir  string
+	NestedRun    func(ctx context.Context, configPath string, runType string) (NestedResult, error)
+	ConfigDir    string
+	Roster       *rosterconfig.Config
 }
 
 type PhaseAttemptResult struct {
@@ -351,11 +353,11 @@ func markerFromResult(result PhaseAttemptResult) *phaseconfig.LoopMarker {
 
 func emitLoopStart(w phaseconfig.EventWriter, runID string, maxIterations, preCount, loopCount, postCount int) error {
 	fields := map[string]any{
-		"ts":                time.Now().UnixMilli(),
-		"max_iterations":    maxIterations,
-		"pre_phase_count":   preCount,
-		"loop_phase_count":  loopCount,
-		"post_phase_count":  postCount,
+		"ts":               time.Now().UnixMilli(),
+		"max_iterations":   maxIterations,
+		"pre_phase_count":  preCount,
+		"loop_phase_count": loopCount,
+		"post_phase_count": postCount,
 	}
 	if runID != "" {
 		fields["run_id"] = runID

@@ -12,6 +12,7 @@ import (
 
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/phaseconfig"
+	"github.com/sdougbrown/avenor/internal/rosterconfig"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
@@ -41,6 +42,7 @@ type RunOptions struct {
 	PhaseAttempt func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error)
 	NestedRun    func(ctx context.Context, configPath string, runType string) (NestedResult, error)
 	ConfigDir    string
+	Roster       *rosterconfig.Config
 }
 
 type PhaseAttemptResult struct {

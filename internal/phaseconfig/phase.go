@@ -10,6 +10,7 @@ type Phase struct {
 	Conditional        bool              `json:"conditional,omitempty"`
 	Agent              string            `json:"agent,omitempty"`
 	Model              string            `json:"model,omitempty"`
+	RosterEntry        string            `json:"roster_entry,omitempty"`
 	Requires           PhaseRequirements `json:"requires,omitempty"`
 	OnIncomplete       PhaseOnIncomplete `json:"on_incomplete,omitempty"`
 }

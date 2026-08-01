@@ -7,24 +7,34 @@ import (
 	"path/filepath"
 
 	"github.com/sdougbrown/avenor/internal/phaseconfig"
+	"github.com/sdougbrown/avenor/internal/rosterconfig"
 )
 
 type LoopConfig struct {
 	MaxIterations int                 `json:"max_iterations"`
+	RosterFile    string              `json:"roster_file,omitempty"`
 	Pre           []phaseconfig.Phase `json:"pre"`
 	Loop          []phaseconfig.Phase `json:"loop"`
 	Post          []phaseconfig.Phase `json:"post"`
 }
 
 func LoadLoopConfig(path string) (*LoopConfig, error) {
+	cfg, _, err := LoadLoopConfigWithRoster(path, nil, "")
+	return cfg, err
+}
+
+// LoadLoopConfigWithRoster loads a loop config and resolves its effective
+// roster. A declared roster file is relative to the loop config, then the
+// inherited loaded roster is used, and finally fallbackPath is used.
+func LoadLoopConfigWithRoster(path string, inherited *rosterconfig.Config, fallbackPath string) (*LoopConfig, *rosterconfig.Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	var cfg LoopConfig
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if cfg.MaxIterations == 0 {
@@ -33,23 +43,65 @@ func LoadLoopConfig(path string) (*LoopConfig, error) {
 
 	configDir := filepath.Dir(path)
 	if err := cfg.preValidate(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := phaseconfig.ResolvePhaseFiles(cfg.Pre, configDir); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := phaseconfig.ResolvePhaseFiles(cfg.Loop, configDir); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := phaseconfig.ResolvePhaseFiles(cfg.Post, configDir); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if err := cfg.Validate(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return &cfg, nil
+	roster, err := loadRoster(path, cfg.RosterFile, inherited, fallbackPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := validateRosterEntries(roster, cfg.Pre, cfg.Loop, cfg.Post); err != nil {
+		return nil, nil, err
+	}
+
+	return &cfg, roster, nil
+}
+
+func loadRoster(configPath, declaredPath string, inherited *rosterconfig.Config, fallbackPath string) (*rosterconfig.Config, error) {
+	rosterPath := declaredPath
+	if rosterPath != "" {
+		if !filepath.IsAbs(rosterPath) {
+			rosterPath = filepath.Join(filepath.Dir(configPath), rosterPath)
+		}
+	} else if inherited != nil {
+		return inherited, nil
+	} else {
+		rosterPath = fallbackPath
+	}
+	if rosterPath == "" {
+		return nil, nil
+	}
+	return rosterconfig.Load(rosterPath)
+}
+
+func validateRosterEntries(roster *rosterconfig.Config, phases ...[]phaseconfig.Phase) error {
+	for _, slice := range phases {
+		for _, phase := range slice {
+			if phase.RosterEntry == "" {
+				continue
+			}
+			if roster == nil {
+				return fmt.Errorf("loop config: phase[name %s]: roster entry %q requires a roster file", phase.Name, phase.RosterEntry)
+			}
+			if _, err := roster.Lookup(phase.RosterEntry); err != nil {
+				return fmt.Errorf("loop config: phase[name %s]: %w", phase.Name, err)
+			}
+		}
+	}
+	return nil
 }
 
 func (c *LoopConfig) preValidate() error {
@@ -81,6 +133,9 @@ func (c *LoopConfig) Validate() error {
 	}
 
 	for i := range c.Pre {
+		if err := phaseconfig.ValidatePhaseRoster(c.Pre[i]); err != nil {
+			return fmt.Errorf("loop config: %w", err)
+		}
 		if c.Pre[i].Name == "" {
 			return fmt.Errorf("loop config: phase[index %d]: name must not be empty", i)
 		}
@@ -93,6 +148,9 @@ func (c *LoopConfig) Validate() error {
 	}
 
 	for i := range c.Loop {
+		if err := phaseconfig.ValidatePhaseRoster(c.Loop[i]); err != nil {
+			return fmt.Errorf("loop config: %w", err)
+		}
 		if c.Loop[i].Name == "" {
 			return fmt.Errorf("loop config: phase[index %d]: name must not be empty", i)
 		}
@@ -105,6 +163,9 @@ func (c *LoopConfig) Validate() error {
 	}
 
 	for i := range c.Post {
+		if err := phaseconfig.ValidatePhaseRoster(c.Post[i]); err != nil {
+			return fmt.Errorf("loop config: %w", err)
+		}
 		if c.Post[i].Name == "" {
 			return fmt.Errorf("loop config: phase[index %d]: name must not be empty", i)
 		}

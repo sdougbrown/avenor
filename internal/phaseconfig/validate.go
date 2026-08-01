@@ -38,6 +38,9 @@ func ValidatePhaseHasPrompt(p Phase) error {
 }
 
 func ValidatePhaseMutualExclusions(p Phase) error {
+	if err := ValidatePhaseRoster(p); err != nil {
+		return err
+	}
 	if p.Prompt != "" && p.PromptFile != "" {
 		return fmt.Errorf("phase[name %s]: prompt and prompt_file are mutually exclusive", p.Name)
 	}
@@ -49,6 +52,18 @@ func ValidatePhaseMutualExclusions(p Phase) error {
 	}
 	if p.LoopFile != "" && p.TeamFile != "" {
 		return fmt.Errorf("phase[name %s]: loop_file and team_file are mutually exclusive", p.Name)
+	}
+	return nil
+}
+
+// ValidatePhaseRoster checks the phase-local roster selector against fields
+// that describe a different identity or dispatch a nested workflow.
+func ValidatePhaseRoster(p Phase) error {
+	if p.RosterEntry != "" && (p.Agent != "" || p.Model != "") {
+		return fmt.Errorf("phase[name %s]: roster_entry is mutually exclusive with agent and model", p.Name)
+	}
+	if p.RosterEntry != "" && (p.LoopFile != "" || p.TeamFile != "") {
+		return fmt.Errorf("phase[name %s]: roster_entry is mutually exclusive with loop_file and team_file", p.Name)
 	}
 	return nil
 }
