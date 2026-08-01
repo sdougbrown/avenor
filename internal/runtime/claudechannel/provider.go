@@ -71,8 +71,46 @@ func New() runtime.Provider {
 	return NewWithOptions(runtime.StartOptions{})
 }
 
+var claudeHelpOutput = func(ctx context.Context) ([]byte, error) {
+	return exec.CommandContext(ctx, "claude", "--help").CombinedOutput()
+}
+
+func checkClaudeEffortCapability(ctx context.Context, effort string) error {
+	if effort == "" {
+		return nil
+	}
+	out, err := claudeHelpOutput(ctx)
+	if err != nil || !strings.Contains(string(out), "--effort <level>") {
+		return runtime.NewUnsupportedThinkingError(backendID)
+	}
+	return nil
+}
+
+func buildClaudeArgs(sessionID, serverName string, opts runtime.StartOptions) []string {
+	args := []string{
+		"--dangerously-load-development-channels", "server:" + serverName,
+		"--session-id", sessionID,
+	}
+	if opts.Agent != "" {
+		args = append(args, "--agent", opts.Agent)
+	}
+	if opts.Label != "" {
+		args = append(args, "--name", opts.Label)
+	}
+	if opts.Model != "" {
+		args = append(args, "--model", opts.Model)
+	}
+	if opts.Thinking != "" {
+		args = append(args, "--effort", opts.Thinking)
+	}
+	return append(args, "--permission-mode", "default")
+}
+
 func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtime.Session, error) {
 	merged := runtime.MergeStartOptions(p.opts, opts)
+	if err := runtime.ValidateThinkingForBackend(backendID, merged.Thinking); err != nil {
+		return runtime.Session{}, err
+	}
 	if merged.Dir == "" {
 		var err error
 		merged.Dir, err = os.Getwd()
@@ -99,6 +137,9 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	vStr := strings.TrimSpace(string(out))
 	if !strings.Contains(vStr, "Claude Code") {
 		return runtime.Session{}, fmt.Errorf("unexpected claude version output: %s", vStr)
+	}
+	if err := checkClaudeEffortCapability(ctx, merged.Thinking); err != nil {
+		return runtime.Session{}, err
 	}
 
 	p.mu.Lock()
@@ -164,20 +205,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	}
 
 	// Build claude args.
-	claudeArgs := []string{
-		"--dangerously-load-development-channels", "server:" + serverName,
-		"--session-id", sessionID,
-	}
-	if merged.Agent != "" {
-		claudeArgs = append(claudeArgs, "--agent", merged.Agent)
-	}
-	if merged.Label != "" {
-		claudeArgs = append(claudeArgs, "--name", merged.Label)
-	}
-	if merged.Model != "" {
-		claudeArgs = append(claudeArgs, "--model", merged.Model)
-	}
-	claudeArgs = append(claudeArgs, "--permission-mode", "default")
+	claudeArgs := buildClaudeArgs(sessionID, serverName, merged)
 
 	// Build the shell command for the tmux session. Using `exec` replaces the
 	// shell with claude so that #{pane_pid} reports claude's actual PID and the

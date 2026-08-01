@@ -14,10 +14,11 @@ import (
 const backendID = "pi"
 
 type Provider struct {
-	opts     runtime.StartOptions
-	mu       sync.Mutex
-	client   *client
-	sessions map[string]struct{}
+	opts        runtime.StartOptions
+	mu          sync.Mutex
+	client      *client
+	sessions    map[string]struct{}
+	startClient func(context.Context, runtime.StartOptions) (*client, error)
 }
 
 func NewWithOptions(opts runtime.StartOptions) *Provider {
@@ -30,14 +31,15 @@ func NewWithOptions(opts runtime.StartOptions) *Provider {
 var _ runtime.Provider = (*Provider)(nil)
 
 func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtime.Session, error) {
-	cwd := opts.Dir
-	if cwd == "" {
-		cwd = p.opts.Dir
-	}
-
-	c, err := p.ensureClient(ctx, cwd)
+	merged := runtime.MergeStartOptions(p.opts, opts)
+	c, fresh, err := p.ensureClient(ctx, merged)
 	if err != nil {
 		return runtime.Session{}, err
+	}
+	if !fresh && merged.Thinking != "" {
+		if err := p.setThinkingLevel(ctx, c, merged.Thinking); err != nil {
+			return runtime.Session{}, err
+		}
 	}
 
 	stateResult, err := c.sendCommand(ctx, map[string]any{
@@ -79,30 +81,56 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	return runtime.Session{
 		SessionID: sessionID,
 		Backend:   backendID,
-		Dir:       cwd,
+		Dir:       merged.Dir,
 		PID:       c.Pid(),
 	}, nil
 }
 
 func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Session, error) {
+	return p.resume(ctx, sessionID, runtime.StartOptions{}, false)
+}
+
+func (p *Provider) ResumeWithOptions(ctx context.Context, sessionID string, opts runtime.StartOptions) (runtime.Session, error) {
+	return p.resume(ctx, sessionID, opts, true)
+}
+
+func (p *Provider) resume(ctx context.Context, sessionID string, opts runtime.StartOptions, applyThinking bool) (runtime.Session, error) {
 	if sessionID == "" {
 		return runtime.Session{}, errors.New("session id is required")
 	}
+	merged := runtime.MergeStartOptions(p.opts, opts)
+	if !applyThinking {
+		merged.Thinking = ""
+	}
 
 	p.mu.Lock()
-	if _, ok := p.sessions[sessionID]; ok {
-		p.mu.Unlock()
+	_, exists := p.sessions[sessionID]
+	c := p.client
+	p.mu.Unlock()
+	if exists {
+		if merged.Thinking != "" {
+			if c == nil {
+				return runtime.Session{}, errors.New("provider has not been started")
+			}
+			if err := p.setThinkingLevel(ctx, c, merged.Thinking); err != nil {
+				return runtime.Session{}, err
+			}
+		}
 		var pid int
-		if c, err := p.getClient(); err == nil {
+		if c != nil {
 			pid = c.Pid()
 		}
-		return runtime.Session{SessionID: sessionID, Backend: backendID, Dir: p.opts.Dir, PID: pid}, nil
+		return runtime.Session{SessionID: sessionID, Backend: backendID, Dir: merged.Dir, PID: pid}, nil
 	}
-	p.mu.Unlock()
 
-	c, err := p.ensureClient(ctx, p.opts.Dir)
+	c, fresh, err := p.ensureClient(ctx, merged)
 	if err != nil {
 		return runtime.Session{}, err
+	}
+	if !fresh && merged.Thinking != "" {
+		if err := p.setThinkingLevel(ctx, c, merged.Thinking); err != nil {
+			return runtime.Session{}, err
+		}
 	}
 
 	p.mu.Lock()
@@ -118,7 +146,7 @@ func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Sessio
 	return runtime.Session{
 		SessionID: sessionID,
 		Backend:   backendID,
-		Dir:       p.opts.Dir,
+		Dir:       merged.Dir,
 		PID:       c.Pid(),
 	}, nil
 }
@@ -299,24 +327,60 @@ func (p *Provider) Close() error {
 	return c.Close()
 }
 
-func (p *Provider) ensureClient(ctx context.Context, cwd string) (*client, error) {
+func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions) (*client, bool, error) {
 	p.mu.Lock()
 	if p.client != nil {
 		c := p.client
 		p.mu.Unlock()
-		return c, nil
+		return c, false, nil
+	}
+	if opts.Thinking != "" {
+		if err := checkThinkingCapability(ctx); err != nil {
+			p.mu.Unlock()
+			return nil, false, fmt.Errorf("%w: %v", runtime.NewUnsupportedThinkingError(backendID), err)
+		}
 	}
 
-	c, err := StartClientWithAgentProfileAndDir(
-		ctx, "", p.opts.Model, "", p.opts.Agent, p.opts.AgentProfile, cwd,
-	)
+	starter := p.startClient
+	if starter == nil {
+		starter = func(ctx context.Context, opts runtime.StartOptions) (*client, error) {
+			return StartClientWithAgentProfileThinkingAndDir(
+				ctx, "", opts.Model, "", opts.Agent, opts.AgentProfile, opts.Thinking, opts.Dir,
+			)
+		}
+	}
+	c, err := starter(ctx, opts)
 	if err != nil {
 		p.mu.Unlock()
-		return nil, err
+		return nil, false, err
 	}
 	p.client = c
 	p.mu.Unlock()
-	return c, nil
+	return c, true, nil
+}
+
+func (p *Provider) setThinkingLevel(ctx context.Context, c *client, level string) error {
+	result, err := c.sendCommand(ctx, map[string]any{
+		"type":  "set_thinking_level",
+		"level": level,
+	})
+	if err != nil {
+		return fmt.Errorf("%w: set_thinking_level: %v", runtime.NewUnsupportedThinkingError(backendID), err)
+	}
+	var response struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error"`
+	}
+	if err := json.Unmarshal(result, &response); err != nil {
+		return fmt.Errorf("%w: set_thinking_level response: %v", runtime.NewUnsupportedThinkingError(backendID), err)
+	}
+	if !response.Success {
+		if response.Error == "" {
+			response.Error = "unsuccessful response"
+		}
+		return fmt.Errorf("%w: set_thinking_level: %s", runtime.NewUnsupportedThinkingError(backendID), response.Error)
+	}
+	return nil
 }
 
 func (p *Provider) sessionExists(sessionID string) (string, error) {

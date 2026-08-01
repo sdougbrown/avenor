@@ -13,6 +13,7 @@ func TestSpawnParamsFromArgs(t *testing.T) {
 		"--label", "review-42",
 		"--agent", "coder",
 		"--model", "test-model",
+		"--thinking", "medium",
 		"--backend", "opencode-http",
 		"--server-url", "http://127.0.0.1:9999",
 		"--on-event", "/tmp/events.ndjson",
@@ -32,6 +33,7 @@ func TestSpawnParamsFromArgs(t *testing.T) {
 		"label":              "review-42",
 		"agent":              "coder",
 		"model":              "test-model",
+		"thinking":           "medium",
 		"backend":            "opencode-http",
 		"server_url":         "http://127.0.0.1:9999",
 		"on_event":           "/tmp/events.ndjson",
@@ -63,6 +65,32 @@ func TestSpawnParamsFromArgsAllowsModelWithoutAgent(t *testing.T) {
 	}
 	if _, ok := params["agent"]; ok {
 		t.Fatalf("agent key should be absent, params=%#v", params)
+	}
+	if _, ok := params["thinking"]; ok {
+		t.Fatalf("thinking key should be absent, params=%#v", params)
+	}
+}
+
+func TestSpawnParamsFromArgsRejectsInvalidThinking(t *testing.T) {
+	var stderr bytes.Buffer
+	params, code := spawnParamsFromArgs([]string{"--prompt", "work", "--thinking", "HIGH"}, &stderr)
+	if code == 0 || params != nil {
+		t.Fatalf("code=%d params=%#v", code, params)
+	}
+	if !containsStr(stderr.String(), "invalid thinking value") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestSpawnParamsFromArgsAcceptsEveryThinkingValue(t *testing.T) {
+	for _, value := range []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"} {
+		t.Run(value, func(t *testing.T) {
+			var stderr bytes.Buffer
+			params, code := spawnParamsFromArgs([]string{"--prompt", "work", "--thinking", value}, &stderr)
+			if code != 0 || params["thinking"] != value {
+				t.Fatalf("code=%d thinking=%v stderr=%s", code, params["thinking"], stderr.String())
+			}
+		})
 	}
 }
 

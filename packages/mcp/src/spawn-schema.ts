@@ -10,6 +10,9 @@ export const spawnInputShape = {
   label: z.string().optional().describe('Human-readable label for this run'),
   timeout: z.string().optional().describe('Timeout duration (e.g. 5m, 1h)'),
   model: z.string().optional().describe('Model override'),
+  thinking: z.enum(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+    .optional()
+    .describe('Thinking level; omission uses the backend default and unsupported backends reject explicit values'),
   backend: z.string().optional().describe('Backend override'),
   server_url: z.string().optional().describe('Backend server URL'),
   supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),

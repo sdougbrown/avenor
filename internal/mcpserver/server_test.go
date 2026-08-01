@@ -1183,6 +1183,7 @@ func TestAvenorSpawnWithOptionalParams(t *testing.T) {
 		Prompt:     "initial prompt text",
 		PromptFile: "/tmp/prompt.md",
 		Model:      "gpt-5",
+		Thinking:   "high",
 		Backend:    "pi",
 		Timeout:    "300",
 	})
@@ -1202,6 +1203,9 @@ func TestAvenorSpawnWithOptionalParams(t *testing.T) {
 	}
 	if p["model"] != "gpt-5" {
 		t.Errorf("expected model 'gpt-5', got %v", p["model"])
+	}
+	if p["thinking"] != "high" {
+		t.Errorf("expected thinking 'high', got %v", p["thinking"])
 	}
 	if p["backend"] != "pi" {
 		t.Errorf("expected backend 'pi', got %v", p["backend"])
@@ -1255,6 +1259,21 @@ func TestAvenorSpawnWithOptionalParams(t *testing.T) {
 	}
 	if ri.SessionID != "ses_opt_1" {
 		t.Errorf("expected session_id ses_opt_1, got %s", ri.SessionID)
+	}
+}
+
+func TestAvenorSpawnRejectsInvalidThinkingBeforeClient(t *testing.T) {
+	fake := &fakeClient{}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = s.handleAvenorSpawn(context.Background(), nil, spawnArgs{RepoDir: "/tmp/test-repo", Thinking: "HIGH"})
+	if err == nil || !strings.Contains(err.Error(), "invalid thinking value") {
+		t.Fatalf("error = %v", err)
+	}
+	if fake.spawnCapturedParams != nil {
+		t.Fatal("spawn client called for invalid thinking")
 	}
 }
 
@@ -2341,6 +2360,7 @@ func TestAvenorFollowUp(t *testing.T) {
 		SentinelPath: sentinelPath,
 		Agent:        "claude",
 		Backend:      "pi",
+		Thinking:     "high",
 		Dir:          "/tmp/prior-repo",
 	})
 
@@ -2379,6 +2399,9 @@ func TestAvenorFollowUp(t *testing.T) {
 	if p["backend"] != "pi" {
 		t.Errorf("expected backend pi, got %v", p["backend"])
 	}
+	if p["thinking"] != "high" {
+		t.Errorf("expected thinking high, got %v", p["thinking"])
+	}
 	if p["dir"] != "/tmp/prior-repo" {
 		t.Errorf("expected dir /tmp/prior-repo, got %v", p["dir"])
 	}
@@ -2395,6 +2418,9 @@ func TestAvenorFollowUp(t *testing.T) {
 	}
 	if ri.Backend != "pi" {
 		t.Errorf("expected backend pi, got %s", ri.Backend)
+	}
+	if ri.Thinking != "high" {
+		t.Errorf("expected thinking high, got %s", ri.Thinking)
 	}
 	if ri.Dir != "/tmp/prior-repo" {
 		t.Errorf("expected dir /tmp/prior-repo, got %s", ri.Dir)

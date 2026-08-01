@@ -2,6 +2,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as crypto from 'node:crypto'
 import { Supervisor, type RunInfo } from '../supervisor.js'
+import type { ThinkingLevel } from '../client.js'
 import { ensureRunPaths, runsRoot } from '../paths.js'
 import { validateRunId } from './validate.js'
 import { getSupervisorClient as realGetSupervisorClient } from './get-supervisor-client.js'
@@ -108,6 +109,7 @@ async function executeFollowUpTool(
       const backend =
         (liveStatus?.backend as string | undefined) ?? runInfo?.backend
       const model = (liveStatus?.model as string | undefined) ?? runInfo?.model
+      const thinking = (liveStatus?.thinking as ThinkingLevel | undefined) ?? runInfo?.thinking
       const dir = (liveStatus?.dir as string | undefined) ?? runInfo?.dir
       const agentProfile =
         (liveStatus?.agent_profile as string | undefined) ?? runInfo?.agentProfile
@@ -128,6 +130,7 @@ async function executeFollowUpTool(
       }
       if (backend) spawnParams.backend = backend
       if (model) spawnParams.model = model
+      if (thinking) spawnParams.thinking = thinking
       if (dir) spawnParams.dir = dir
       if (agentProfile) spawnParams.agent_profile = agentProfile
       if (autoApprove === true) spawnParams.auto_approve = true
@@ -179,6 +182,7 @@ async function executeFollowUpTool(
   )
   const backend = (liveStatus?.backend as string | undefined) ?? runInfo.backend
   const model = (liveStatus?.model as string | undefined) ?? runInfo.model
+  const thinking = (liveStatus?.thinking as ThinkingLevel | undefined) ?? runInfo.thinking
   const dir = (liveStatus?.dir as string | undefined) ?? runInfo.dir
   const agentProfile =
     (liveStatus?.agent_profile as string | undefined) ?? runInfo.agentProfile
@@ -190,6 +194,7 @@ async function executeFollowUpTool(
     agent,
     backend,
     model,
+    thinking,
     dir,
     agent_profile: agentProfile,
     prompt: args.message,

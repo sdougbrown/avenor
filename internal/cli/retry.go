@@ -50,12 +50,8 @@ type attemptDeps struct {
 
 // resumeSession resumes an existing session after cancellation so a follow-up
 // prompt can be sent without respawning the provider.
-func resumeSession(ctx context.Context, provider runtime.Provider, sessionID string) (runtime.Session, error) {
-	s, err := provider.Resume(ctx, sessionID)
-	if err != nil {
-		return runtime.Session{}, err
-	}
-	return s, nil
+func resumeSession(ctx context.Context, provider runtime.Provider, backend string, opts runtime.StartOptions, sessionID string) (runtime.Session, error) {
+	return StartSession(ctx, provider, backend, opts, sessionID)
 }
 
 // runSingleAttempt creates a fresh provider, starts or resumes a session,
@@ -78,7 +74,7 @@ func runSingleAttempt(
 		}
 	}()
 
-	session, err := StartSession(ctx, provider, cfg.startOptions, cfg.resumeID)
+	session, err := StartSession(ctx, provider, cfg.backend, cfg.startOptions, cfg.resumeID)
 	if err != nil {
 		fmt.Fprintf(deps.stderr, "avenor: start session: %v\n", err)
 		return attemptResult{exitCode: 1}
@@ -90,7 +86,7 @@ func runSingleAttempt(
 	if deps.controlServer != nil {
 		if text := deps.controlServer.ConsumeInterrupt(); text != "" {
 			prompt = text
-			if _, err := resumeSession(ctx, provider, session.SessionID); err != nil {
+			if _, err := resumeSession(ctx, provider, cfg.backend, cfg.startOptions, session.SessionID); err != nil {
 				fmt.Fprintf(deps.stderr, "avenor: resume for interrupt: %v\n", err)
 				return attemptResult{exitCode: 1, sessionID: session.SessionID}
 			}
@@ -157,7 +153,7 @@ func runSingleAttempt(
 			// Check interrupt first (priority over queued prompts) to avoid
 			// losing the interrupt when exitCode==0 overlaps with a queued prompt.
 			if interruptText := deps.controlServer.ConsumeInterrupt(); interruptText != "" {
-				if _, err := resumeSession(ctx, provider, session.SessionID); err != nil {
+				if _, err := resumeSession(ctx, provider, cfg.backend, cfg.startOptions, session.SessionID); err != nil {
 					fmt.Fprintf(deps.stderr, "avenor: resume after cancel: %v\n", err)
 					return attemptResult{exitCode: 1, sessionID: session.SessionID, stopReason: stopReason, loopDirective: accDirective, loopLabel: accLabel, output: result.Output, finalReply: result.FinalReply, usage: result.Usage}
 				}
@@ -166,7 +162,7 @@ func runSingleAttempt(
 			}
 			if exitCode == 0 {
 				if nextPrompt := deps.controlServer.DequeuePrompt(); nextPrompt != "" {
-					if _, err := resumeSession(ctx, provider, session.SessionID); err != nil {
+					if _, err := resumeSession(ctx, provider, cfg.backend, cfg.startOptions, session.SessionID); err != nil {
 						fmt.Fprintf(deps.stderr, "avenor: resume after end_turn: %v\n", err)
 						return attemptResult{exitCode: 1, sessionID: session.SessionID, stopReason: stopReason, loopDirective: accDirective, loopLabel: accLabel, output: result.Output, finalReply: result.FinalReply, usage: result.Usage}
 					}

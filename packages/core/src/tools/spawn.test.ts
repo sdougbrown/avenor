@@ -15,6 +15,7 @@ type ForwardingCase = {
   args: SpawnForwardingParams
   model?: string
   agent?: string
+  thinking?: SpawnParams['thinking']
 }
 
 const forwardingCases: ForwardingCase[] = [
@@ -22,11 +23,12 @@ const forwardingCases: ForwardingCase[] = [
   { name: 'model only', args: { model: 'sonnet' }, model: 'sonnet', agent: undefined },
   { name: 'both supplied', args: { agent: 'codex', model: 'sonnet' }, model: 'sonnet', agent: 'codex' },
   { name: 'empty agent', args: { agent: '', model: 'sonnet' }, model: 'sonnet', agent: undefined },
+  { name: 'thinking', args: { thinking: 'xhigh' }, thinking: 'xhigh' },
 ]
 
 function assertForwardedParams(
   received: SpawnParams | undefined,
-  expected: { model?: string; agent?: string },
+  expected: { model?: string; agent?: string; thinking?: SpawnParams['thinking'] },
 ): void {
   expect(received).toBeDefined()
   if (!received) return
@@ -40,6 +42,11 @@ function assertForwardedParams(
     expect(received.model).toBe(expected.model)
   } else {
     expect(received.model).toBeUndefined()
+  }
+  if (expected.thinking === undefined) {
+    expect(Object.hasOwn(received, 'thinking')).toBe(false)
+  } else {
+    expect(received.thinking).toBe(expected.thinking)
   }
 }
 

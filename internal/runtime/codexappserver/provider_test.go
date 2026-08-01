@@ -2,6 +2,7 @@ package codexappserver
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -53,6 +54,197 @@ func TestResumeNoop(t *testing.T) {
 	}
 	if sess.Dir != "/work" {
 		t.Errorf("Dir = %q, want /work", sess.Dir)
+	}
+}
+
+func TestResumeThinkingControlsTurnEffort(t *testing.T) {
+	for _, effort := range []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"} {
+		t.Run(effort, func(t *testing.T) {
+			c, wOut, rIn := fakeClient()
+			defer c.Close()
+			p := NewWithOptions(runtime.StartOptions{})
+			p.client = c
+			p.threads["th_effort"] = "th_effort"
+			if _, err := p.ResumeWithOptions(context.Background(), "th_effort", runtime.StartOptions{Thinking: effort}); err != nil {
+				t.Fatalf("ResumeWithOptions: %v", err)
+			}
+
+			errCh := make(chan error, 1)
+			go func() { errCh <- p.Prompt(context.Background(), "th_effort", "hello") }()
+			msg, err := readLine(rIn)
+			if err != nil {
+				t.Fatalf("read turn/start: %v", err)
+			}
+			var params map[string]any
+			if err := json.Unmarshal(msg.Params, &params); err != nil {
+				t.Fatalf("params: %v", err)
+			}
+			if params["effort"] != effort {
+				t.Fatalf("effort = %v, want %q", params["effort"], effort)
+			}
+			writeLine(wOut, map[string]any{"id": msg.ID, "result": map[string]any{"turn": map[string]any{"id": "turn_effort"}}})
+			writeLine(wOut, map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": "th_effort", "turn": map[string]any{"id": "turn_effort", "status": "completed"}}})
+			if err := <-errCh; err != nil {
+				t.Fatalf("Prompt: %v", err)
+			}
+		})
+	}
+}
+
+func TestResumeEmptyThinkingClearsOutboundEffort(t *testing.T) {
+	p := NewWithOptions(runtime.StartOptions{})
+	p.threads["th_clear"] = "th_clear"
+	p.efforts["th_clear"] = "high"
+	if _, err := p.Resume(context.Background(), "th_clear"); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if got := p.efforts["th_clear"]; got != "" {
+		t.Fatalf("outbound effort = %q, want empty", got)
+	}
+}
+
+func TestResumeEmptyThinkingOmitsTurnEffort(t *testing.T) {
+	c, wOut, rIn := fakeClient()
+	defer c.Close()
+	p := NewWithOptions(runtime.StartOptions{})
+	p.client = c
+	p.threads["th_clear_wire"] = "th_clear_wire"
+	p.efforts["th_clear_wire"] = "high"
+	if _, err := p.Resume(context.Background(), "th_clear_wire"); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	promptDone := make(chan error, 1)
+	go func() { promptDone <- p.Prompt(context.Background(), "th_clear_wire", "hello") }()
+	turn, err := readLine(rIn)
+	if err != nil {
+		t.Fatalf("read turn/start: %v", err)
+	}
+	var params map[string]any
+	if err := json.Unmarshal(turn.Params, &params); err != nil {
+		t.Fatalf("params: %v", err)
+	}
+	if _, ok := params["effort"]; ok {
+		t.Fatalf("turn/start retained outbound effort: %#v", params)
+	}
+	writeLine(wOut, map[string]any{"id": turn.ID, "result": map[string]any{"turn": map[string]any{"id": "turn_clear"}}})
+	writeLine(wOut, map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": "th_clear_wire", "turn": map[string]any{"id": "turn_clear", "status": "completed"}}})
+	if err := <-promptDone; err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+}
+
+func TestResumeWithOptionsNewThreadStoresEffortForFirstTurn(t *testing.T) {
+	c, wOut, rIn := fakeClient()
+	defer c.Close()
+	p := NewWithOptions(runtime.StartOptions{})
+	p.client = c
+	resumeDone := make(chan error, 1)
+	go func() {
+		_, err := p.ResumeWithOptions(context.Background(), "th_requested", runtime.StartOptions{Thinking: "xhigh"})
+		resumeDone <- err
+	}()
+	resume, err := readLine(rIn)
+	if err != nil {
+		t.Fatalf("read thread/resume: %v", err)
+	}
+	if resume.Method != "thread/resume" {
+		t.Fatalf("method = %q", resume.Method)
+	}
+	writeLine(wOut, map[string]any{"id": resume.ID, "result": map[string]any{"thread": map[string]any{"id": "th_resumed"}}})
+	if err := <-resumeDone; err != nil {
+		t.Fatalf("ResumeWithOptions: %v", err)
+	}
+
+	promptDone := make(chan error, 1)
+	go func() { promptDone <- p.Prompt(context.Background(), "th_resumed", "hello") }()
+	turn, err := readLine(rIn)
+	if err != nil {
+		t.Fatalf("read turn/start: %v", err)
+	}
+	var params map[string]any
+	if err := json.Unmarshal(turn.Params, &params); err != nil {
+		t.Fatalf("params: %v", err)
+	}
+	if params["effort"] != "xhigh" {
+		t.Fatalf("effort = %v", params["effort"])
+	}
+	writeLine(wOut, map[string]any{"id": turn.ID, "result": map[string]any{"turn": map[string]any{"id": "turn_resumed"}}})
+	writeLine(wOut, map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": "th_resumed", "turn": map[string]any{"id": "turn_resumed", "status": "completed"}}})
+	if err := <-promptDone; err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+}
+
+func TestThreadStartNeverSerializesReasoningEffort(t *testing.T) {
+	c, wOut, rIn := fakeClient()
+	defer c.Close()
+	p := NewWithOptions(runtime.StartOptions{})
+	p.client = c
+	done := make(chan error, 1)
+	go func() {
+		_, err := p.Start(context.Background(), runtime.StartOptions{Thinking: "high"})
+		done <- err
+	}()
+	msg, err := readLine(rIn)
+	if err != nil {
+		t.Fatalf("read thread/start: %v", err)
+	}
+	var params map[string]any
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		t.Fatalf("params: %v", err)
+	}
+	if _, ok := params["reasoning_effort"]; ok {
+		t.Fatal("thread/start contained guessed reasoning_effort")
+	}
+	if _, ok := params["effort"]; ok {
+		t.Fatal("thread/start contained turn-only effort")
+	}
+	writeLine(wOut, map[string]any{"id": msg.ID, "result": map[string]any{"thread": map[string]any{"id": "th_started"}}})
+	if err := <-done; err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if got := p.efforts["th_started"]; got != "high" {
+		t.Fatalf("stored effort = %q", got)
+	}
+
+	promptDone := make(chan error, 1)
+	go func() { promptDone <- p.Prompt(context.Background(), "th_started", "hello") }()
+	turn, err := readLine(rIn)
+	if err != nil {
+		t.Fatalf("read turn/start: %v", err)
+	}
+	if err := json.Unmarshal(turn.Params, &params); err != nil {
+		t.Fatalf("turn params: %v", err)
+	}
+	if params["effort"] != "high" {
+		t.Fatalf("turn/start effort = %v", params["effort"])
+	}
+	writeLine(wOut, map[string]any{"id": turn.ID, "result": map[string]any{"turn": map[string]any{"id": "turn_started"}}})
+	writeLine(wOut, map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": "th_started", "turn": map[string]any{"id": "turn_started", "status": "completed"}}})
+	if err := <-promptDone; err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+}
+
+func TestTurnStartThinkingErrorPreservesNativeMessage(t *testing.T) {
+	c, wOut, rIn := fakeClient()
+	defer c.Close()
+	p := NewWithOptions(runtime.StartOptions{})
+	p.client = c
+	p.threads["th_error"] = "th_error"
+	p.efforts["th_error"] = "max"
+	done := make(chan error, 1)
+	go func() { done <- p.Prompt(context.Background(), "th_error", "hello") }()
+	msg, err := readLine(rIn)
+	if err != nil {
+		t.Fatalf("read turn/start: %v", err)
+	}
+	writeLine(wOut, map[string]any{"id": msg.ID, "error": map[string]any{"code": -32602, "message": "effort unsupported by active model"}})
+	err = <-done
+	for _, want := range []string{"codex-app-server", "thinking", "max", "effort unsupported by active model"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %v, want %q", err, want)
+		}
 	}
 }
 

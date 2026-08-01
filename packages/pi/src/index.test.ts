@@ -227,7 +227,7 @@ describe('Avenor Pi extension', () => {
 
     await registeredTools.avenor_spawn.execute(
       'tool-1',
-      { agent: 'explore', label: '\u001b[31mtest-pi-explore\u001b[0m', supervisor_id: '/tmp/sock', wait: false },
+      { agent: 'explore', label: '\u001b[31mtest-pi-explore\u001b[0m', thinking: 'high', supervisor_id: '/tmp/sock', wait: false },
       undefined,
       undefined,
       {
@@ -241,6 +241,7 @@ describe('Avenor Pi extension', () => {
     )
     expect(spawnToolMock.mock.calls[0]?.[0]).toMatchObject({
       backend: 'pi',
+      thinking: 'high',
       agentProfile: 'cloud',
     })
 

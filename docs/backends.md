@@ -1,6 +1,6 @@
 # Backends
 
-Avenor talks to agents through backends. Each backend speaks a different protocol to a different runtime — OpenCode, Claude, Codex, Gemini, Cursor, PI, or agy. Pick the one that matches what's running locally and what you need from the orchestration layer.
+Avenor talks to agents through backends. Each backend speaks a different protocol to a different runtime — OpenCode, Claude, Codex, Gemini, Cursor, Pi, agy, or the in-process Pony test backend. Pick the one that matches what's running locally and what you need from the orchestration layer.
 
 ## Backend selection
 
@@ -22,19 +22,22 @@ Both `claude` and `claude-channel` require `claude` to be on `PATH`. `claude-cha
 
 ## Capability matrix
 
-| Capability | opencode-acp | opencode-http | codex-app-server | agy | gemini-acp | cursor-acp | pi | claude | claude-channel |
-|---|---|---|---|---|---|---|---|---|---|
-| New sessions | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Session resume | ✓ | ✓ | ✓ | ✓ | — | — | ✓ | ⚠ | ⚠ |
-| Prompt execution | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓  | ✓  |
-| Cancel | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓  | ✓  |
-| Event streaming | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Permission relay | ✓ | ✗ | ✓ | ⚠ | ✓ | ✓ | ✓ | ⚠ | ⚠  |
-| Model selection | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ | ✓ | ✓ | ✓  |
-| External server URL | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
-| Subprocess discovery | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✓ |
+| Capability | opencode-acp | opencode-http | codex-app-server | agy | gemini-acp | cursor-acp | pi | claude | claude-channel | pony |
+|---|---|---|---|---|---|---|---|---|---|---|
+| New sessions | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Session resume | ✓ | ✓ | ✓ | ✓ | — | — | ✓ | ⚠ | ⚠ | ✗ |
+| Prompt execution | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Cancel | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Event streaming | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Permission relay | ✓ | ✗ | ✓ | ⚠ | ✓ | ✓ | ✓ | ⚠ | ⚠ | ⚠ |
+| Model selection | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ | ✓ | ✓ | ✓ | ✓ |
+| Thinking control | ✗ | ✗ | ✓ | ✗ | ✗ | ✗ | ✓ | ⚠ | ⚠ | ✗ |
+| External server URL | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ |
+| Subprocess discovery | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✓ | ✗ |
 
 `—` means not verified; `✗` means not supported, `⚠ ` means experimental. `agy` permission relay requires the explicit RPC transport.
+
+Thinking control is native for Codex and Pi. Claude and Claude Channel support five startup values but no explicit resume value. Every other backend rejects explicit thinking. See [Thinking level](thinking-level.md) for values, version scope, validation order, and resume behavior.
 
 Session resume for `claude` and `claude-channel` is in-memory only: a long-lived avenor process (stable mode) keeps sessions in its map and lets clients reattach by `session_id` while the session is alive. Cross-restart resume (avenor process exits, then a new one tries to pick up the same session) is not yet supported by either backend.
 

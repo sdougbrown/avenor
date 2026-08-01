@@ -608,7 +608,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
     tool: {
       avenor_spawn: tool({
         description:
-          'Dispatch an agent run via avenor. Blocks by default, showing live progress as an updating tool call. Set wait=false for fire-and-forget — you will be re-prompted automatically on completion.',
+          'Dispatch an agent run via avenor. Optional thinking accepts off, minimal, low, medium, high, xhigh, or max; unsupported backends reject explicit values. Blocks by default, showing live progress as an updating tool call. Set wait=false for fire-and-forget — you will be re-prompted automatically on completion.',
         args: {
           agent: tool.schema.string().describe('Agent name (required, no default)'),
           prompt: tool.schema.string().optional().describe('Prompt text'),
@@ -617,6 +617,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
           label: tool.schema.string().optional().describe('Human-readable label for the run'),
           timeout: tool.schema.string().optional().describe('Timeout duration (e.g. 3600s)'),
           model: tool.schema.string().optional().describe('Model override'),
+          thinking: tool.schema.enum(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']).optional().describe('Thinking level; omission uses the backend default'),
           backend: tool.schema.string().optional().describe('Backend override'),
           server_url: tool.schema.string().optional().describe('Backend server URL'),
           supervisor_id: tool.schema.string().optional().describe('Reuse an existing supervisor by socket path'),
@@ -634,6 +635,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
             dir: args.dir ?? context.directory,
             timeout: args.timeout,
             model: args.model,
+            thinking: args.thinking,
             backend: args.backend,
             serverUrl: args.server_url,
             supervisorId: args.supervisor_id,

@@ -70,7 +70,7 @@ func TestSchemaFieldParity(t *testing.T) {
 		// spawnArgs — repo_dir is required.
 		// agent and model are independently optional; omitting both uses runtime defaults.
 		// All remaining fields are optional.
-		allowed := []string{"agent", "repo_dir", "prompt", "prompt_file", "label", "timeout", "model", "backend", "server_url", "supervisor_id", "auto_approve"}
+		allowed := []string{"agent", "repo_dir", "prompt", "prompt_file", "label", "timeout", "model", "thinking", "backend", "server_url", "supervisor_id", "auto_approve"}
 		required := []string{"repo_dir"}
 		assertFields(t, "spawnArgs", allowed, required)
 	})
