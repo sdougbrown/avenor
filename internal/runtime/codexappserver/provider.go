@@ -23,6 +23,7 @@ type Provider struct {
 	client  *client
 	threads map[string]string // sessionID (=threadID) → threadID
 	turns   map[string]string // sessionID → current turnID
+	efforts map[string]string // sessionID → explicit turn/start effort override
 
 	// startClient constructs a new app-server client. Overridable in tests;
 	// defaults to StartClient when nil.
@@ -41,6 +42,7 @@ func NewWithOptions(opts runtime.StartOptions) *Provider {
 		opts:            opts,
 		threads:         map[string]string{},
 		turns:           map[string]string{},
+		efforts:         map[string]string{},
 		runIDs:          map[string]string{},
 		pollCancels:     map[string]context.CancelFunc{},
 		pendingMessages: map[string][]string{},
@@ -50,19 +52,14 @@ func NewWithOptions(opts runtime.StartOptions) *Provider {
 var _ runtime.Provider = (*Provider)(nil)
 
 func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtime.Session, error) {
+	merged := runtime.MergeStartOptions(p.opts, opts)
 	c, err := p.ensureClient(ctx)
 	if err != nil {
 		return runtime.Session{}, err
 	}
 
-	cwd := opts.Dir
-	if cwd == "" {
-		cwd = p.opts.Dir
-	}
-	model := opts.Model
-	if model == "" {
-		model = p.opts.Model
-	}
+	cwd := merged.Dir
+	model := merged.Model
 
 	params := threadStartParams{CWD: cwd, Model: model}
 	result, err := c.request(ctx, "thread/start", params)
@@ -89,6 +86,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	}
 	p.mu.Lock()
 	p.threads[threadID] = threadID
+	p.efforts[threadID] = merged.Thinking
 	p.runIDs[threadID] = runID
 	p.mu.Unlock()
 
@@ -113,12 +111,21 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 }
 
 func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Session, error) {
+	return p.resume(ctx, sessionID, "")
+}
+
+func (p *Provider) ResumeWithOptions(ctx context.Context, sessionID string, opts runtime.StartOptions) (runtime.Session, error) {
+	return p.resume(ctx, sessionID, opts.Thinking)
+}
+
+func (p *Provider) resume(ctx context.Context, sessionID, effort string) (runtime.Session, error) {
 	if sessionID == "" {
 		return runtime.Session{}, errors.New("session id is required")
 	}
 
 	p.mu.Lock()
 	if _, ok := p.threads[sessionID]; ok {
+		p.efforts[sessionID] = effort
 		p.mu.Unlock()
 		return runtime.Session{SessionID: sessionID, Backend: backendID, Dir: p.opts.Dir}, nil
 	}
@@ -143,6 +150,7 @@ func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Sessio
 
 	p.mu.Lock()
 	p.threads[threadID] = threadID
+	p.efforts[threadID] = effort
 	p.mu.Unlock()
 
 	return runtime.Session{
@@ -162,14 +170,22 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 		return err
 	}
 
+	p.mu.Lock()
+	effort := p.efforts[sessionID]
+	p.mu.Unlock()
+
 	params := turnStartParams{
 		ThreadID: sessionID,
+		Effort:   effort,
 		Input: []inputPart{
 			{Type: "text", Text: prompt},
 		},
 	}
 	result, err := c.request(ctx, "turn/start", params)
 	if err != nil {
+		if effort != "" {
+			return fmt.Errorf("%s thinking %q: turn/start: %w", backendID, effort, err)
+		}
 		return fmt.Errorf("turn/start: %w", err)
 	}
 

@@ -29,6 +29,7 @@ type StartOptions struct {
 	ServerURL    string
 	Model        string
 	AgentProfile string
+	Thinking     string
 	RuntimeID    string         // supervisor-assigned runtime ID (rt_N), for parent-child routing
 	Broker       *broker.Broker // optional shared broker instance; backends may create their own if nil
 }
@@ -183,6 +184,9 @@ func MergeStartOptions(base, override StartOptions) StartOptions {
 	}
 	if override.AgentProfile != "" {
 		merged.AgentProfile = override.AgentProfile
+	}
+	if override.Thinking != "" {
+		merged.Thinking = override.Thinking
 	}
 	if override.RuntimeID != "" {
 		merged.RuntimeID = override.RuntimeID

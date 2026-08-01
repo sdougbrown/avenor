@@ -573,7 +573,7 @@ func TestRunLoopChildClearsPhaseDuringRetryBackoff(t *testing.T) {
 	child := &childRuntime{id: "rt_loop_retry_phase", done: make(chan struct{}), promptCh: make(chan struct{}, 1), eventWriter: stableTestSink{}, phase: "done", cancelFn: func() {}}
 	sup.runtimes[child.id] = child
 	cfg := &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
-	go sup.runLoopChild(context.Background(), child, cfg, 1, "", "", "", "", "")
+	go sup.runLoopChild(context.Background(), child, cfg, 1, "", "", "", "", "", "")
 	select {
 	case <-provider.emitted:
 	case <-time.After(2 * time.Second):
@@ -613,7 +613,7 @@ func TestRunTeamChildClearsPhaseDuringRetryBackoff(t *testing.T) {
 	child := &childRuntime{id: "rt_team_retry_phase", done: make(chan struct{}), promptCh: make(chan struct{}, 1), eventWriter: stableTestSink{}, phase: "done", cancelFn: func() {}}
 	sup.runtimes[child.id] = child
 	cfg := &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
-	go sup.runTeamChild(context.Background(), child, cfg, 1, "", "", "", "", "unknown-backend")
+	go sup.runTeamChild(context.Background(), child, cfg, 1, "", "", "", "", "", "unknown-backend")
 	select {
 	case <-provider.emitted:
 	case <-time.After(2 * time.Second):
@@ -648,7 +648,7 @@ func TestRunLoopChildClearsStalePhaseOnAttemptSetupFailure(t *testing.T) {
 	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
 	child := &childRuntime{id: "rt_loop_setup_phase", done: make(chan struct{}), promptCh: make(chan struct{}, 1), eventWriter: stableTestSink{}, phase: "done", phaseLabel: "stale", cancelFn: func() {}}
 	sup.runtimes[child.id] = child
-	sup.runLoopChild(context.Background(), child, &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}, 0, "", "", "", "", "")
+	sup.runLoopChild(context.Background(), child, &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}, 0, "", "", "", "", "", "")
 	child.mu.Lock()
 	phase, phaseLabel := child.phase, child.phaseLabel
 	child.mu.Unlock()
@@ -666,7 +666,7 @@ func TestRunTeamChildClearsStalePhaseOnAttemptSetupFailure(t *testing.T) {
 	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
 	child := &childRuntime{id: "rt_team_setup_phase", done: make(chan struct{}), promptCh: make(chan struct{}, 1), eventWriter: stableTestSink{}, phase: "done", phaseLabel: "stale", cancelFn: func() {}}
 	sup.runtimes[child.id] = child
-	sup.runTeamChild(context.Background(), child, &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}, 0, "", "", "", "", "unknown-backend")
+	sup.runTeamChild(context.Background(), child, &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}, 0, "", "", "", "", "", "unknown-backend")
 	child.mu.Lock()
 	phase, phaseLabel := child.phase, child.phaseLabel
 	child.mu.Unlock()
@@ -762,7 +762,7 @@ func TestRunLoopChildCleansUpOnLooprunnerError(t *testing.T) {
 		MaxIterations: 1,
 		Pre:           []phaseconfig.Phase{{Name: "broken", Prompt: "{{"}},
 	}
-	sup.runLoopChild(context.Background(), child, cfg, 0, "", "", "", "", "")
+	sup.runLoopChild(context.Background(), child, cfg, 0, "", "", "", "", "", "")
 
 	select {
 	case <-child.done:
@@ -827,7 +827,7 @@ func TestRunTeamChildCleansUpBrokerRuns(t *testing.T) {
 	cfg := &teamrunner.TeamConfig{
 		Team: []phaseconfig.Phase{{Name: "review", Prompt: "review"}},
 	}
-	sup.runTeamChild(context.Background(), child, cfg, 0, "", "", "", "", "unknown-backend")
+	sup.runTeamChild(context.Background(), child, cfg, 0, "", "", "", "", "", "unknown-backend")
 
 	select {
 	case <-child.done:
@@ -1972,7 +1972,7 @@ func TestRunLoopChildWiresControlServerForClaims(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go sup.runLoopChild(ctx, child, cfg, 0, "", "cloud", "", "", "")
+	go sup.runLoopChild(ctx, child, cfg, 0, "", "cloud", "", "", "", "")
 
 	// Wait for the child to complete (with timeout).
 	select {
@@ -2078,7 +2078,7 @@ func TestRunTeamChildWiresControlServerForClaims(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go sup.runTeamChild(ctx, child, cfg, 0, "", "cloud", "", "", "unknown-backend")
+	go sup.runTeamChild(ctx, child, cfg, 0, "", "cloud", "", "", "", "unknown-backend")
 
 	// Wait for the child to complete (with timeout).
 	select {

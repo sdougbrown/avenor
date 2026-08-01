@@ -140,6 +140,7 @@ describe('followUpTool with an external supervisor', () => {
       session_id: 'ses-from-live',
       backend: 'pi',
       model: 'test-model',
+      thinking: 'high',
       agent_profile: 'cloud',
       dir: '/repo/from-original-run',
     })
@@ -157,6 +158,7 @@ describe('followUpTool with an external supervisor', () => {
       session_id: 'ses-from-live',
       backend: 'pi',
       model: 'test-model',
+      thinking: 'high',
       agent_profile: 'cloud',
       dir: '/repo/from-original-run',
     })
@@ -322,6 +324,7 @@ describe('followUpTool with a local supervisor (no supervisorId)', () => {
       runtimeId: 'rt-local-auto',
       sessionId: 'ses-local-auto',
       agent: 'explore',
+      thinking: 'max',
       autoApprove: true,
     })
     statusMock.mockRejectedValueOnce(new Error('runtime unavailable'))
@@ -336,6 +339,7 @@ describe('followUpTool with a local supervisor (no supervisorId)', () => {
       agent: 'explore',
       prompt: 'continue',
       session_id: 'ses-local-auto',
+      thinking: 'max',
       auto_approve: true,
     })
     expect(result.run_id).toBe('local-followup-run')

@@ -793,7 +793,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
       name: 'avenor_spawn',
       label: 'Avenor Spawn',
       description:
-        'Dispatch an agent run via avenor. Blocks by default, showing live progress. Set wait=false for fire-and-forget.',
+        'Dispatch an agent run via avenor. Optional thinking accepts off, minimal, low, medium, high, xhigh, or max; unsupported backends reject explicit values. Blocks by default, showing live progress. Set wait=false for fire-and-forget.',
       promptSnippet: 'Dispatch sub-agent runs via avenor (spawn, status, result, inspect, events, follow-up, shutdown)',
       promptGuidelines: [
         'Use avenor_spawn to delegate well-defined tasks to sub-agents.',
@@ -812,6 +812,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
         label: Type.Optional(Type.String({ description: 'Human-readable label for the run' })),
         timeout: Type.Optional(Type.String({ description: 'Timeout duration (e.g. 3600s)' })),
         model: Type.Optional(Type.String({ description: 'Model override' })),
+        thinking: Type.Optional(Type.Union([
+          Type.Literal('off'), Type.Literal('minimal'), Type.Literal('low'), Type.Literal('medium'),
+          Type.Literal('high'), Type.Literal('xhigh'), Type.Literal('max'),
+        ], { description: 'Thinking level; omission uses the backend default' })),
         backend: Type.Optional(Type.String({ description: 'Backend override (defaults to pi)' })),
         server_url: Type.Optional(Type.String({ description: 'Backend server URL' })),
         supervisor_id: Type.Optional(Type.String({ description: 'Reuse an existing supervisor by socket path' })),
@@ -838,6 +842,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
           dir,
           timeout: params.timeout,
           model: params.model,
+          thinking: params.thinking,
           backend,
           agentProfile,
           serverUrl: params.server_url,

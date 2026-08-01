@@ -41,6 +41,8 @@ export interface HistoryResult<TEvent = Event> {
   latest_seq?: number
 }
 
+export type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+
 export interface SpawnParams {
   agent?: string
   prompt_file?: string
@@ -49,6 +51,7 @@ export interface SpawnParams {
   label?: string
   timeout?: number
   model?: string
+  thinking?: ThinkingLevel
   agent_profile?: string
   backend?: string
   server_url?: string

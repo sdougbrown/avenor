@@ -60,7 +60,7 @@ export function getMcpAuthToken(): string {
 const server = new McpServer({ name: 'avenor', version: '0.1.0' })
 
 server.registerTool('avenor_spawn', {
-  description: 'Spawn a new agent run',
+  description: 'Spawn a new agent run with an optional canonical thinking level; unsupported backends reject explicit values',
   inputSchema: spawnInputShape,
 }, async ({
   repo_dir,
@@ -70,6 +70,7 @@ server.registerTool('avenor_spawn', {
   label,
   timeout,
   model,
+  thinking,
   backend,
   server_url,
   supervisor_id,
@@ -82,6 +83,7 @@ server.registerTool('avenor_spawn', {
     label,
     timeout,
     model,
+    thinking,
     backend,
     serverUrl: server_url,
     supervisorId: supervisor_id,

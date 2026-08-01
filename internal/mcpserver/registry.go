@@ -16,6 +16,7 @@ type RunInfo struct {
 	EventLogPath string
 	Agent        string
 	Backend      string
+	Thinking     string
 	Dir          string
 	AutoApprove  bool
 	CreatedAt    time.Time

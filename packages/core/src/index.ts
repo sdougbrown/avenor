@@ -6,6 +6,7 @@ export type {
   HistoryResult,
   SpawnParams,
   SubscribeOptions,
+  ThinkingLevel,
 } from './client.js'
 export { normalizeRunEvent, extractEventText } from './run-events.js'
 export type {

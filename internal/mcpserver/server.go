@@ -88,6 +88,7 @@ type spawnArgs struct {
 	Label        string `json:"label,omitempty" jsonschema:"optional label for the run"`
 	Timeout      string `json:"timeout,omitempty" jsonschema:"optional timeout in seconds (numeric string)"`
 	Model        string `json:"model,omitempty" jsonschema:"optional model to use"`
+	Thinking     string `json:"thinking,omitempty" jsonschema:"optional thinking level (off, minimal, low, medium, high, xhigh, max); omission uses the backend default"`
 	Backend      string `json:"backend,omitempty" jsonschema:"optional runtime backend (for example agy, pi, opencode-acp, or codex-app-server)"`
 	ServerURL    string `json:"server_url,omitempty" jsonschema:"optional opencode serve URL for opencode-http backend"`
 	SupervisorID string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
@@ -488,6 +489,9 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 	if args.RepoDir == "" {
 		return nil, nil, fmt.Errorf("repo_dir is required")
 	}
+	if err := runtime.ValidateThinking(args.Thinking); err != nil {
+		return nil, nil, err
+	}
 
 	runID := uuid.New().String()
 	label := args.Label
@@ -516,6 +520,9 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 	}
 	if args.Model != "" {
 		params["model"] = args.Model
+	}
+	if args.Thinking != "" {
+		params["thinking"] = args.Thinking
 	}
 	if args.Backend != "" {
 		params["backend"] = args.Backend
@@ -558,6 +565,7 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 		EventLogPath: eventLogPath,
 		Agent:        args.Agent,
 		Backend:      args.Backend,
+		Thinking:     args.Thinking,
 		Dir:          args.RepoDir,
 		AutoApprove:  args.AutoApprove,
 		CreatedAt:    time.Now(),
@@ -815,6 +823,9 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 	if ri.Backend != "" {
 		params["backend"] = ri.Backend
 	}
+	if ri.Thinking != "" {
+		params["thinking"] = ri.Thinking
+	}
 	if ri.AutoApprove {
 		params["auto_approve"] = true
 	}
@@ -839,6 +850,7 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 		EventLogPath: eventLogPath,
 		Agent:        ri.Agent,
 		Backend:      ri.Backend,
+		Thinking:     ri.Thinking,
 		Dir:          ri.Dir,
 		AutoApprove:  ri.AutoApprove,
 		CreatedAt:    time.Now(),

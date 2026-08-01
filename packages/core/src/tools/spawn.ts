@@ -1,6 +1,6 @@
 import * as crypto from 'node:crypto'
 import { Supervisor } from '../supervisor.js'
-import type { SpawnParams } from '../client.js'
+import type { SpawnParams, ThinkingLevel } from '../client.js'
 import { ensureRunPaths } from '../paths.js'
 import { validateTimeout } from './validate.js'
 import { getSupervisorClient } from './get-supervisor-client.js'
@@ -13,6 +13,7 @@ export async function spawnTool(args: {
   dir?: string
   timeout?: string
   model?: string
+  thinking?: ThinkingLevel
   agentProfile?: string
   backend?: string
   serverUrl?: string
@@ -38,6 +39,9 @@ export async function spawnTool(args: {
   }
   if (args.agent) {
     baseParams.agent = args.agent
+  }
+  if (args.thinking !== undefined) {
+    baseParams.thinking = args.thinking
   }
 
   if (args.supervisorId) {

@@ -41,6 +41,7 @@ type threadResumeParams struct {
 type turnStartParams struct {
 	ThreadID string      `json:"threadId"`
 	Input    []inputPart `json:"input"`
+	Effort   string      `json:"effort,omitempty"`
 }
 
 type inputPart struct {

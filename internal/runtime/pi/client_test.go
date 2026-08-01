@@ -455,6 +455,46 @@ func TestStartClientForwardsAgentAndModel(t *testing.T) {
 	}
 }
 
+func TestStartClientForwardsThinkingFlag(t *testing.T) {
+	original := piExecCommandContext
+	t.Cleanup(func() { piExecCommandContext = original })
+
+	var captured []string
+	piExecCommandContext = func(_ context.Context, _ string, args ...string) *exec.Cmd {
+		captured = append([]string(nil), args...)
+		return exec.Command("cat")
+	}
+	client, err := StartClientWithAgentProfileThinkingAndDir(
+		context.Background(), "", "", "", "", "", "high", "",
+	)
+	if err != nil {
+		t.Fatalf("StartClientWithAgentProfileThinkingAndDir: %v", err)
+	}
+	defer client.Close()
+	if got := strings.Join(captured, " "); got != "--mode rpc --no-session --thinking high" {
+		t.Fatalf("args = %q", got)
+	}
+}
+
+func TestStartClientOmitsThinkingFlagByDefault(t *testing.T) {
+	original := piExecCommandContext
+	t.Cleanup(func() { piExecCommandContext = original })
+
+	var captured []string
+	piExecCommandContext = func(_ context.Context, _ string, args ...string) *exec.Cmd {
+		captured = append([]string(nil), args...)
+		return exec.Command("cat")
+	}
+	client, err := StartClientWithAgentProfileAndDir(context.Background(), "", "", "", "", "", "")
+	if err != nil {
+		t.Fatalf("StartClientWithAgentProfileAndDir: %v", err)
+	}
+	defer client.Close()
+	if got := strings.Join(captured, " "); strings.Contains(got, "--thinking") {
+		t.Fatalf("args = %q", got)
+	}
+}
+
 func TestStartClientEmptyAgent(t *testing.T) {
 	original := piExecCommandContext
 	t.Cleanup(func() { piExecCommandContext = original })

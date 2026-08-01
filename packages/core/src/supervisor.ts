@@ -3,7 +3,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import * as crypto from 'node:crypto'
-import { dial, Client, type SpawnParams } from './client.js'
+import { dial, Client, type SpawnParams, type ThinkingLevel } from './client.js'
 import { ensureRunPaths, socketsRoot } from './paths.js'
 import { installerBinaryPath } from './install-path.js'
 
@@ -20,6 +20,7 @@ export interface RunInfo {
   agentProfile?: string
   backend?: string
   model?: string
+  thinking?: ThinkingLevel
   dir?: string
   brokerUrl?: string
   parentToken?: string
@@ -297,6 +298,7 @@ export class Supervisor {
       agentProfile: spawnParams.agent_profile as string | undefined,
       backend: spawnParams.backend as string | undefined,
       model: spawnParams.model as string | undefined,
+      thinking: spawnParams.thinking,
       dir: spawnParams.dir as string | undefined,
       brokerUrl: result.broker_url as string | undefined,
       parentToken: result.parent_token as string | undefined,
