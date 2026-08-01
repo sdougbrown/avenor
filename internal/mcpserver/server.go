@@ -21,6 +21,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sdougbrown/avenor/client"
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/spawnselection"
 )
 
 type ControlClient interface {
@@ -90,6 +91,8 @@ type spawnArgs struct {
 	Model        string `json:"model,omitempty" jsonschema:"optional model to use"`
 	Thinking     string `json:"thinking,omitempty" jsonschema:"optional thinking level (off, minimal, low, medium, high, xhigh, max); omission uses the backend default"`
 	Backend      string `json:"backend,omitempty" jsonschema:"optional runtime backend (for example agy, pi, opencode-acp, or codex-app-server)"`
+	RosterFile   string `json:"roster_file,omitempty" jsonschema:"optional path to the roster map"`
+	RosterEntry  string `json:"roster_entry,omitempty" jsonschema:"optional roster entry key"`
 	ServerURL    string `json:"server_url,omitempty" jsonschema:"optional opencode serve URL for opencode-http backend"`
 	SupervisorID string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
 	AutoApprove  bool   `json:"auto_approve,omitempty" jsonschema:"optional auto-approve all permission requests so the run executes unattended (no answer_permission needed)"`
@@ -295,6 +298,7 @@ func (s *Server) handleAvenorStatus(ctx context.Context, req *mcp.CallToolReques
 			ts := translateStatus(entry, sentinelPath)
 			if len(ts) > 0 {
 				if ri != nil {
+					applyRunInfoIdentity(ts, ri)
 					ts["run_id"] = ri.RunID
 					ts["label"] = ri.Label
 				}
@@ -328,6 +332,7 @@ func (s *Server) queryRunStatus(cl ControlClient, runID string) (map[string]any,
 			return nil, fmt.Errorf("status: %w", err)
 		}
 		ts := translateStatus(result, ri.SentinelPath)
+		applyRunInfoIdentity(ts, ri)
 		ts["run_id"] = ri.RunID
 		ts["label"] = ri.Label
 		return ts, nil
@@ -485,9 +490,91 @@ func (s *Server) handleAvenorResult(ctx context.Context, req *mcp.CallToolReques
 	return nil, resultFromStatus(status, timedOut), nil
 }
 
+type resolvedSpawnIdentity struct {
+	Agent            string
+	Model            string
+	Backend          string
+	RosterFile       string
+	RosterEntry      string
+	EffectiveAgent   string
+	EffectiveModel   string
+	EffectiveBackend string
+}
+
+func applySpawnIdentity(raw map[string]any, identity *resolvedSpawnIdentity) {
+	if raw == nil {
+		return
+	}
+	if value, ok := raw["roster_file"].(string); ok && value != "" {
+		identity.RosterFile = value
+	}
+	if value, ok := raw["roster_entry"].(string); ok && value != "" {
+		identity.RosterEntry = value
+	}
+	if value, ok := raw["effective_agent"].(string); ok && value != "" {
+		identity.EffectiveAgent = value
+	}
+	if value, ok := raw["effective_model"].(string); ok && value != "" {
+		identity.EffectiveModel = value
+	}
+	if value, ok := raw["effective_backend"].(string); ok && value != "" {
+		identity.EffectiveBackend = value
+	}
+	if value, ok := raw["agent"].(string); ok && value != "" {
+		identity.Agent = value
+	}
+	if value, ok := raw["model"].(string); ok && value != "" {
+		identity.Model = value
+	}
+	if value, ok := raw["backend"].(string); ok && value != "" {
+		identity.Backend = value
+	}
+	if identity.EffectiveAgent == "" {
+		identity.EffectiveAgent = identity.Agent
+	}
+	if identity.EffectiveModel == "" {
+		identity.EffectiveModel = identity.Model
+	}
+	if identity.EffectiveBackend == "" {
+		identity.EffectiveBackend = identity.Backend
+	}
+}
+
+func resolveSpawnIdentity(cl ControlClient, runtimeID string, result map[string]any, args spawnArgs) resolvedSpawnIdentity {
+	identity := resolvedSpawnIdentity{
+		Agent:            args.Agent,
+		Model:            args.Model,
+		Backend:          args.Backend,
+		RosterFile:       args.RosterFile,
+		RosterEntry:      args.RosterEntry,
+		EffectiveAgent:   args.Agent,
+		EffectiveModel:   args.Model,
+		EffectiveBackend: args.Backend,
+	}
+	applySpawnIdentity(result, &identity)
+	// SpawnResult is intentionally small on older supervisors. Query status
+	// when available so registry metadata records the supervisor's resolved
+	// backend/identity rather than re-resolving a roster in this server.
+	if runtimeID != "" {
+		if status, err := cl.Status(runtimeID); err == nil {
+			applySpawnIdentity(status, &identity)
+		}
+	}
+	return identity
+}
+
 func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest, args spawnArgs) (*mcp.CallToolResult, any, error) {
 	if args.RepoDir == "" {
 		return nil, nil, fmt.Errorf("repo_dir is required")
+	}
+	if err := spawnselection.Validate(spawnselection.Input{
+		Agent:       args.Agent,
+		Model:       args.Model,
+		Backend:     args.Backend,
+		RosterFile:  args.RosterFile,
+		RosterEntry: args.RosterEntry,
+	}, false); err != nil {
+		return nil, nil, err
 	}
 	if err := runtime.ValidateThinking(args.Thinking); err != nil {
 		return nil, nil, err
@@ -527,6 +614,12 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 	if args.Backend != "" {
 		params["backend"] = args.Backend
 	}
+	if args.RosterFile != "" {
+		params["roster_file"] = args.RosterFile
+	}
+	if args.RosterEntry != "" {
+		params["roster_entry"] = args.RosterEntry
+	}
 	if args.AutoApprove {
 		params["auto_approve"] = true
 	}
@@ -554,21 +647,28 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 
 	runtimeID, _ := result["runtime_id"].(string)
 	sessionID, _ := result["session_id"].(string)
+	identity := resolveSpawnIdentity(cl, runtimeID, result, args)
 
 	if err := s.registry.Store(&RunInfo{
-		RunID:        runID,
-		Label:        label,
-		RuntimeID:    runtimeID,
-		SessionID:    sessionID,
-		SupervisorID: supervisorPath,
-		SentinelPath: sentinelPath,
-		EventLogPath: eventLogPath,
-		Agent:        args.Agent,
-		Backend:      args.Backend,
-		Thinking:     args.Thinking,
-		Dir:          args.RepoDir,
-		AutoApprove:  args.AutoApprove,
-		CreatedAt:    time.Now(),
+		RunID:            runID,
+		Label:            label,
+		RuntimeID:        runtimeID,
+		SessionID:        sessionID,
+		SupervisorID:     supervisorPath,
+		SentinelPath:     sentinelPath,
+		EventLogPath:     eventLogPath,
+		Agent:            identity.EffectiveAgent,
+		Model:            identity.EffectiveModel,
+		Backend:          identity.EffectiveBackend,
+		RosterFile:       identity.RosterFile,
+		RosterEntry:      identity.RosterEntry,
+		EffectiveAgent:   identity.EffectiveAgent,
+		EffectiveModel:   identity.EffectiveModel,
+		EffectiveBackend: identity.EffectiveBackend,
+		Thinking:         args.Thinking,
+		Dir:              args.RepoDir,
+		AutoApprove:      args.AutoApprove,
+		CreatedAt:        time.Now(),
 	}); err != nil {
 		return nil, nil, fmt.Errorf("registry store: %w", err)
 	}
@@ -811,17 +911,34 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 	sentinelPath := filepath.Join(os.TempDir(), fmt.Sprintf("avenor-run-%s.done", runID))
 	eventLogPath := filepath.Join(os.TempDir(), fmt.Sprintf("avenor-run-%s.log", runID))
 
+	effectiveAgent := ri.EffectiveAgent
+	if effectiveAgent == "" {
+		effectiveAgent = ri.Agent
+	}
+	effectiveModel := ri.EffectiveModel
+	if effectiveModel == "" {
+		effectiveModel = ri.Model
+	}
+	effectiveBackend := ri.EffectiveBackend
+	if effectiveBackend == "" {
+		effectiveBackend = ri.Backend
+	}
 	params := map[string]any{
 		"dir":           ri.Dir,
-		"agent":         ri.Agent,
 		"prompt":        args.Message,
 		"label":         followupLabel,
 		"session_id":    sessionID,
 		"sentinel_file": sentinelPath,
 		"on_event":      eventLogPath,
 	}
-	if ri.Backend != "" {
-		params["backend"] = ri.Backend
+	if effectiveAgent != "" {
+		params["agent"] = effectiveAgent
+	}
+	if effectiveModel != "" {
+		params["model"] = effectiveModel
+	}
+	if effectiveBackend != "" {
+		params["backend"] = effectiveBackend
 	}
 	if ri.Thinking != "" {
 		params["thinking"] = ri.Thinking
@@ -841,19 +958,25 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 	supervisorPath := s.getSupervisorPath(supervisorID)
 
 	if err := s.registry.Store(&RunInfo{
-		RunID:        runID,
-		Label:        followupLabel,
-		RuntimeID:    runtimeID,
-		SessionID:    newSessionID,
-		SupervisorID: supervisorPath,
-		SentinelPath: sentinelPath,
-		EventLogPath: eventLogPath,
-		Agent:        ri.Agent,
-		Backend:      ri.Backend,
-		Thinking:     ri.Thinking,
-		Dir:          ri.Dir,
-		AutoApprove:  ri.AutoApprove,
-		CreatedAt:    time.Now(),
+		RunID:            runID,
+		Label:            followupLabel,
+		RuntimeID:        runtimeID,
+		SessionID:        newSessionID,
+		SupervisorID:     supervisorPath,
+		SentinelPath:     sentinelPath,
+		EventLogPath:     eventLogPath,
+		Agent:            effectiveAgent,
+		Model:            effectiveModel,
+		Backend:          effectiveBackend,
+		RosterFile:       ri.RosterFile,
+		RosterEntry:      ri.RosterEntry,
+		EffectiveAgent:   effectiveAgent,
+		EffectiveModel:   effectiveModel,
+		EffectiveBackend: effectiveBackend,
+		Thinking:         ri.Thinking,
+		Dir:              ri.Dir,
+		AutoApprove:      ri.AutoApprove,
+		CreatedAt:        time.Now(),
 	}); err != nil {
 		return nil, nil, fmt.Errorf("registry store: %w", err)
 	}

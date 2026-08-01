@@ -7,19 +7,25 @@ import (
 )
 
 type RunInfo struct {
-	RunID        string
-	Label        string
-	RuntimeID    string
-	SessionID    string
-	SupervisorID string
-	SentinelPath string
-	EventLogPath string
-	Agent        string
-	Backend      string
-	Thinking     string
-	Dir          string
-	AutoApprove  bool
-	CreatedAt    time.Time
+	RunID            string
+	Label            string
+	RuntimeID        string
+	SessionID        string
+	SupervisorID     string
+	SentinelPath     string
+	EventLogPath     string
+	Agent            string
+	Model            string
+	Backend          string
+	RosterFile       string
+	RosterEntry      string
+	EffectiveAgent   string
+	EffectiveModel   string
+	EffectiveBackend string
+	Thinking         string
+	Dir              string
+	AutoApprove      bool
+	CreatedAt        time.Time
 }
 
 type RunRegistry struct {

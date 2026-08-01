@@ -64,12 +64,20 @@ type SpawnParams struct {
 }
 
 type SpawnResult struct {
-	RuntimeID    string `json:"runtime_id"`
-	SessionID    string `json:"session_id"`
-	OnEvent      string `json:"on_event"`
-	SentinelFile string `json:"sentinel_file"`
-	BrokerURL    string `json:"broker_url,omitempty"`
-	ParentToken  string `json:"parent_token,omitempty"`
+	RuntimeID        string `json:"runtime_id"`
+	SessionID        string `json:"session_id"`
+	OnEvent          string `json:"on_event"`
+	SentinelFile     string `json:"sentinel_file"`
+	BrokerURL        string `json:"broker_url,omitempty"`
+	ParentToken      string `json:"parent_token,omitempty"`
+	Agent            string `json:"agent,omitempty"`
+	Model            string `json:"model,omitempty"`
+	Backend          string `json:"backend,omitempty"`
+	RosterFile       string `json:"roster_file,omitempty"`
+	RosterEntry      string `json:"roster_entry,omitempty"`
+	EffectiveAgent   string `json:"effective_agent,omitempty"`
+	EffectiveModel   string `json:"effective_model,omitempty"`
+	EffectiveBackend string `json:"effective_backend,omitempty"`
 }
 
 type childRuntime struct {
@@ -678,12 +686,20 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 
 	brokerURL := s.brokerURL()
 	return SpawnResult{
-		RuntimeID:    rtID,
-		SessionID:    session.SessionID,
-		OnEvent:      onEvent,
-		SentinelFile: sentinelFile,
-		BrokerURL:    brokerURL,
-		ParentToken:  parentToken,
+		RuntimeID:        rtID,
+		SessionID:        session.SessionID,
+		OnEvent:          onEvent,
+		SentinelFile:     sentinelFile,
+		BrokerURL:        brokerURL,
+		ParentToken:      parentToken,
+		Agent:            params.Agent,
+		Model:            params.Model,
+		Backend:          backend,
+		RosterFile:       params.RosterFile,
+		RosterEntry:      params.RosterEntry,
+		EffectiveAgent:   params.Agent,
+		EffectiveModel:   params.Model,
+		EffectiveBackend: backend,
 	}, nil
 }
 

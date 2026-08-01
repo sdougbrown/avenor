@@ -105,6 +105,57 @@ func TestSpawnParamsFromArgsRequiresPrompt(t *testing.T) {
 	}
 }
 
+func TestSpawnParamsFromArgsAllowsBackendOnly(t *testing.T) {
+	var stderr bytes.Buffer
+	params, code := spawnParamsFromArgs([]string{
+		"--prompt", "Use the backend default agent",
+		"--backend", "agy",
+	}, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr=%s", code, stderr.String())
+	}
+	if params["backend"] != "agy" {
+		t.Fatalf("params[backend] = %#v, want agy", params["backend"])
+	}
+	if _, ok := params["agent"]; ok {
+		t.Fatalf("agent should be omitted: %#v", params)
+	}
+}
+
+func TestSpawnParamsFromArgsRosterSelector(t *testing.T) {
+	var stderr bytes.Buffer
+	params, code := spawnParamsFromArgs([]string{
+		"--prompt", "Plan the work",
+		"--roster-file", "/repo/roster.json",
+		"--roster-entry", "planner",
+	}, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr=%s", code, stderr.String())
+	}
+	if params["roster_file"] != "/repo/roster.json" || params["roster_entry"] != "planner" {
+		t.Fatalf("roster params = %#v", params)
+	}
+	if _, ok := params["agent"]; ok {
+		t.Fatalf("agent should be omitted in roster mode: %#v", params)
+	}
+}
+
+func TestSpawnParamsFromArgsRejectsMixedRosterSelector(t *testing.T) {
+	var stderr bytes.Buffer
+	params, code := spawnParamsFromArgs([]string{
+		"--prompt", "Plan the work",
+		"--roster-file", "/repo/roster.json",
+		"--roster-entry", "planner",
+		"--backend", "pi",
+	}, &stderr)
+	if code == 0 || params != nil {
+		t.Fatalf("code=%d params=%#v", code, params)
+	}
+	if !containsStr(stderr.String(), "direct identity fields are disabled in roster mode") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
 func TestSpawnParamsFromArgsRejectsPromptAndPromptFile(t *testing.T) {
 	var stderr bytes.Buffer
 	_, code := spawnParamsFromArgs([]string{"--prompt", "hello", "--prompt-file", "prompt.txt"}, &stderr)

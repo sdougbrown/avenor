@@ -40,7 +40,7 @@ func readSentinel(path string) (*sentinelData, error) {
 func translateStatus(raw map[string]any, sentinelPath string) map[string]any {
 	result := make(map[string]any)
 
-	for _, k := range []string{"runtime_id", "label", "dir", "phase", "phase_label", "pending_permission", "backend", "agent", "model", "parent_id", "children", "event_path", "usage", "latest_seq", "final_output", "final_output_truncated"} {
+	for _, k := range []string{"runtime_id", "label", "dir", "phase", "phase_label", "pending_permission", "backend", "agent", "model", "roster_file", "roster_entry", "effective_backend", "effective_agent", "effective_model", "parent_id", "children", "event_path", "usage", "latest_seq", "final_output", "final_output_truncated"} {
 		if v, ok := raw[k]; ok {
 			result[k] = v
 		}
@@ -119,6 +119,40 @@ func translateStatus(raw map[string]any, sentinelPath string) map[string]any {
 	}
 
 	return result
+}
+
+func applyRunInfoIdentity(status map[string]any, info *RunInfo) {
+	if info == nil {
+		return
+	}
+	setIfMissing := func(key, value string) {
+		if value == "" {
+			return
+		}
+		if current, ok := status[key].(string); !ok || current == "" {
+			status[key] = value
+		}
+	}
+	effectiveAgent := info.EffectiveAgent
+	if effectiveAgent == "" {
+		effectiveAgent = info.Agent
+	}
+	effectiveModel := info.EffectiveModel
+	if effectiveModel == "" {
+		effectiveModel = info.Model
+	}
+	effectiveBackend := info.EffectiveBackend
+	if effectiveBackend == "" {
+		effectiveBackend = info.Backend
+	}
+	setIfMissing("roster_file", info.RosterFile)
+	setIfMissing("roster_entry", info.RosterEntry)
+	setIfMissing("agent", effectiveAgent)
+	setIfMissing("model", effectiveModel)
+	setIfMissing("backend", effectiveBackend)
+	setIfMissing("effective_agent", effectiveAgent)
+	setIfMissing("effective_model", effectiveModel)
+	setIfMissing("effective_backend", effectiveBackend)
 }
 
 func isTerminalPhase(phase string) bool {

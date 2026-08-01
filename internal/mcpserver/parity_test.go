@@ -5,6 +5,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/sdougbrown/avenor/internal/spawnselection"
 )
 
 // tsToolNames lists the seven MCP tools from the TypeScript reference
@@ -70,7 +72,7 @@ func TestSchemaFieldParity(t *testing.T) {
 		// spawnArgs — repo_dir is required.
 		// agent and model are independently optional; omitting both uses runtime defaults.
 		// All remaining fields are optional.
-		allowed := []string{"agent", "repo_dir", "prompt", "prompt_file", "label", "timeout", "model", "thinking", "backend", "server_url", "supervisor_id", "auto_approve"}
+		allowed := []string{"agent", "repo_dir", "prompt", "prompt_file", "label", "timeout", "model", "thinking", "backend", "roster_file", "roster_entry", "server_url", "supervisor_id", "auto_approve"}
 		required := []string{"repo_dir"}
 		assertFields(t, "spawnArgs", allowed, required)
 	})
@@ -122,6 +124,35 @@ func TestSchemaFieldParity(t *testing.T) {
 // assertFields verifies that the Go struct's JSON fields match the
 // expected allowed/required fields. It builds JSON objects and unmarshals
 // them into the struct to confirm field mapping.
+func TestSpawnSelectorParity(t *testing.T) {
+	// These cases mirror packages/core/src/spawn-selection.test.ts. Keep the
+	// portable selector contract in lockstep while the host schemas are staged.
+	tests := []struct {
+		name    string
+		input   spawnselection.Input
+		wantErr bool
+	}{
+		{name: "direct neither", input: spawnselection.Input{}},
+		{name: "direct backend only", input: spawnselection.Input{Backend: "agy"}},
+		{name: "direct agent only", input: spawnselection.Input{Agent: "reviewer"}},
+		{name: "direct model only", input: spawnselection.Input{Model: "provider/model"}},
+		{name: "roster pair", input: spawnselection.Input{RosterFile: "/repo/roster.json", RosterEntry: "planner"}},
+		{name: "missing roster entry", input: spawnselection.Input{RosterFile: "/repo/roster.json"}, wantErr: true},
+		{name: "missing roster file", input: spawnselection.Input{RosterEntry: "planner"}, wantErr: true},
+		{name: "mixed agent", input: spawnselection.Input{RosterFile: "/repo/roster.json", RosterEntry: "planner", Agent: "reviewer"}, wantErr: true},
+		{name: "mixed model", input: spawnselection.Input{RosterFile: "/repo/roster.json", RosterEntry: "planner", Model: "provider/model"}, wantErr: true},
+		{name: "mixed backend", input: spawnselection.Input{RosterFile: "/repo/roster.json", RosterEntry: "planner", Backend: "agy"}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := spawnselection.Validate(tt.input, false)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func assertFields(t *testing.T, structName string, allowed, required []string) {
 	t.Helper()
 
@@ -149,6 +180,9 @@ func assertFields(t *testing.T, structName string, allowed, required []string) {
 		// Verify required fields are populated
 		if a.Agent != "test" {
 			t.Errorf("%s: agent not populated", structName)
+		}
+		if a.RosterFile != "test" || a.RosterEntry != "test" {
+			t.Errorf("%s: roster selector fields not populated", structName)
 		}
 		if a.RepoDir != "test" {
 			t.Errorf("%s: repo_dir not populated", structName)

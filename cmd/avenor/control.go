@@ -9,6 +9,7 @@ import (
 
 	"github.com/sdougbrown/avenor/client"
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/spawnselection"
 )
 
 func runControl(args []string) int {
@@ -123,6 +124,8 @@ func spawnParamsFromArgs(args []string, stderr io.Writer) (map[string]any, int) 
 	model := fs.String("model", "", "backend-specific model id")
 	thinking := fs.String("thinking", "", "thinking level (off, minimal, low, medium, high, xhigh, max)")
 	backend := fs.String("backend", "", "runtime backend")
+	rosterFile := fs.String("roster-file", "", "path to the roster map")
+	rosterEntry := fs.String("roster-entry", "", "roster entry key")
 	serverURL := fs.String("server-url", "", "long-lived ACP server endpoint")
 	onEvent := fs.String("on-event", "", "path to write NDJSON events")
 	sentinelFile := fs.String("sentinel-file", "", "path to write a completion sentinel")
@@ -145,6 +148,16 @@ func spawnParamsFromArgs(args []string, stderr io.Writer) (map[string]any, int) 
 		fmt.Fprintf(stderr, "avenor control: spawn: %v\n", err)
 		return nil, 1
 	}
+	if err := spawnselection.Validate(spawnselection.Input{
+		Agent:       *agent,
+		Model:       *model,
+		Backend:     *backend,
+		RosterFile:  *rosterFile,
+		RosterEntry: *rosterEntry,
+	}, false); err != nil {
+		fmt.Fprintf(stderr, "avenor control: spawn: %v\n", err)
+		return nil, 1
+	}
 	params := map[string]any{}
 	addString := func(key, value string) {
 		if value != "" {
@@ -159,6 +172,8 @@ func spawnParamsFromArgs(args []string, stderr io.Writer) (map[string]any, int) 
 	addString("model", *model)
 	addString("thinking", *thinking)
 	addString("backend", *backend)
+	addString("roster_file", *rosterFile)
+	addString("roster_entry", *rosterEntry)
 	addString("server_url", *serverURL)
 	addString("on_event", *onEvent)
 	addString("sentinel_file", *sentinelFile)

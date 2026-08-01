@@ -15,6 +15,42 @@ func writeSentinel(t *testing.T, dir, name, content string) string {
 	return path
 }
 
+func TestTranslateStatusPreservesRosterIdentity(t *testing.T) {
+	result := translateStatus(map[string]any{
+		"status":            "running",
+		"roster_file":       "/repo/roster.json",
+		"roster_entry":      "planner",
+		"effective_backend": "agy",
+		"effective_agent":   "planner-agent",
+		"effective_model":   "planner-model",
+	}, "")
+	for key, want := range map[string]any{
+		"roster_file":       "/repo/roster.json",
+		"roster_entry":      "planner",
+		"effective_backend": "agy",
+		"effective_agent":   "planner-agent",
+		"effective_model":   "planner-model",
+	} {
+		if result[key] != want {
+			t.Fatalf("status[%q] = %v, want %v", key, result[key], want)
+		}
+	}
+}
+
+func TestApplyRunInfoIdentityFallback(t *testing.T) {
+	status := map[string]any{}
+	applyRunInfoIdentity(status, &RunInfo{
+		RosterFile:       "/repo/roster.json",
+		RosterEntry:      "planner",
+		EffectiveBackend: "agy",
+		EffectiveAgent:   "planner-agent",
+		EffectiveModel:   "planner-model",
+	})
+	if status["roster_entry"] != "planner" || status["effective_backend"] != "agy" || status["agent"] != "planner-agent" {
+		t.Fatalf("identity fallback = %#v", status)
+	}
+}
+
 func TestTranslateStatusIdle(t *testing.T) {
 	raw := map[string]any{"status": "idle", "session_id": "ses_1", "phase": "working"}
 	result := translateStatus(raw, "")
