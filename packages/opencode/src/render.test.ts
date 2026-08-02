@@ -143,6 +143,122 @@ describe('OpenCode Avenor result renderers', () => {
     expect(inspectOutput.metadata).toEqual(inspect)
   })
 
+  it('caps hostile collection displays without changing metadata', () => {
+    const hostile = (value: string) => `\u001b[31m${value}\u001b[0m\t\u0000`
+    const marker = '… 2 items omitted'
+
+    const statuses = Array.from({ length: 14 }, (_, index) => ({
+      run_id: hostile(`run-${index}`),
+      label: hostile(`worker-${index}`),
+      status: 'running',
+    }))
+    const expectedStatuses = structuredClone(statuses)
+    const statusOutput = formatStatusOutput({}, statuses as any)
+    const statusLines = statusOutput.output.split('\n')
+    expect(statusLines.filter(line => line.includes('(run_id:'))).toHaveLength(12)
+    expect(statusLines.filter(line => line === marker)).toEqual([marker])
+    expect(statusOutput.output).toContain('worker-0 — running (run_id: run-0)')
+    expect(statusOutput.output).not.toContain('worker-12')
+    expect(statusOutput.metadata).toEqual({ results: expectedStatuses, count: 14 })
+
+    const options = Array.from({ length: 10 }, (_, index) => ({
+      option_id: hostile(`option-${index}`),
+      label: hostile(`label-${index}`),
+    }))
+    const permissionStatus = {
+      run_id: hostile('permission-run'),
+      label: hostile('permission-worker'),
+      status: 'waiting',
+      pending_permission: { description: hostile('permission request'), options },
+    }
+    const expectedPermissionStatus = structuredClone(permissionStatus)
+    const permissionOutput = formatStatusOutput({}, permissionStatus as any)
+    expect(permissionOutput.output.split('\n').find(line => line.startsWith('Options:'))).toBe(
+      `Options: ${Array.from({ length: 8 }, (_, index) => `option-${index} (label-${index})`).join(', ')} ${marker}`,
+    )
+    expect(permissionOutput.output).not.toContain('option-8')
+    expect(permissionOutput.metadata).toEqual(expectedPermissionStatus)
+
+    const types = Array.from({ length: 10 }, (_, index) => hostile(`type-${index}`))
+    const events = Array.from({ length: 14 }, (_, index) => ({
+      event: hostile(`event-${index}`),
+      seq: index,
+      delta: hostile(`delta-${index}`),
+    }))
+    const eventsPayload = { events }
+    const expectedEvents = structuredClone(eventsPayload)
+    const eventsRun = hostile('events-run')
+    const eventsOutput = formatEventsOutput({ run_id: eventsRun, types }, eventsPayload)
+    const eventLines = eventsOutput.output.split('\n')
+    expect(eventLines.find(line => line.startsWith('Filter:'))).toBe(
+      `Filter: ${Array.from({ length: 8 }, (_, index) => `type-${index}`).join(', ')} ${marker}`,
+    )
+    expect(eventLines.filter(line => line.startsWith('Event '))).toHaveLength(12)
+    expect(eventLines.filter(line => line === '… 13 items omitted')).toEqual(['… 13 items omitted'])
+    expect(eventLines.filter(line => line === marker)).toEqual([marker])
+    expect(eventsOutput.output).toContain('Event 0: event-0 — delta-0')
+    expect(eventsOutput.output).not.toContain('event-12')
+    expect(eventsOutput.metadata).toEqual({ ...expectedEvents, run_id: eventsRun, count: 14 })
+
+    const transcript = Array.from({ length: 7 }, (_, index) => ({ kind: 'assistant', text: hostile(`transcript-${index}`) }))
+    const tools = Array.from({ length: 7 }, (_, index) => ({
+      title: hostile(`tool-${index}`), status: hostile('done'), preview: hostile(`preview-${index}`),
+    }))
+    const liveTools = Array.from({ length: 7 }, (_, index) => ({
+      kind: hostile(`live-${index}`), preview: hostile(`live-preview-${index}`),
+    }))
+    const permissions = Array.from({ length: 7 }, (_, index) => ({
+      description: hostile(`permission-${index}`),
+      request_id: hostile(`request-${index}`),
+      options: [{ option_id: hostile(`allow-${index}`), label: hostile(`Allow ${index}`) }],
+    }))
+    const inspect = {
+      run_id: hostile('inspect-run'),
+      label: hostile('inspect-worker'),
+      status: { status: 'done' },
+      final_output: hostile('inspect-output'),
+      snapshot: {},
+      transcript,
+      tools,
+      live_tools: liveTools,
+      permissions,
+    }
+    const expectedInspect = structuredClone(inspect)
+    const inspectOutput = formatInspectOutput({}, inspect as any)
+    const inspectLines = inspectOutput.output.split('\n')
+    expect(inspectLines.filter(line => line.startsWith('assistant: transcript-'))).toHaveLength(5)
+    expect(inspectLines.filter(line => line.startsWith('Tool: tool-'))).toHaveLength(5)
+    expect(inspectLines.filter(line => line.startsWith('Live tool: live-'))).toHaveLength(5)
+    expect(inspectLines.filter(line => line.startsWith('Permission: permission-'))).toHaveLength(5)
+    expect(inspectLines.filter(line => line === marker)).toEqual([marker, marker, marker, marker])
+    expect(inspectOutput.output).not.toContain('transcript-5')
+    expect(inspectOutput.output).not.toContain('tool-5')
+    expect(inspectOutput.output).not.toContain('live-5')
+    expect(inspectOutput.output).not.toContain('permission-5')
+    expect(inspectOutput.metadata).toEqual(expectedInspect)
+
+    const cleanup = { ok: true, cleaned_up: Array.from({ length: 10 }, (_, index) => hostile(`/tmp/cleanup-${index}`)) }
+    const expectedCleanup = structuredClone(cleanup)
+    const supervisor = hostile('/tmp/sock')
+    const cleanupOutput = formatShutdownOutput({ supervisor_id: supervisor, force: true }, cleanup)
+    const cleanupLines = cleanupOutput.output.split('\n')
+    expect(cleanupLines.filter(line => line.startsWith('Cleanup path:'))).toHaveLength(8)
+    expect(cleanupLines.filter(line => line === marker)).toEqual([marker])
+    expect(cleanupOutput.output).toContain('Cleanup path: /tmp/cleanup-0')
+    expect(cleanupOutput.output).not.toContain('cleanup-8')
+    expect(cleanupOutput.metadata).toEqual({ ...expectedCleanup, supervisor_id: supervisor, force: true })
+
+    for (const output of [
+      statusOutput.output,
+      permissionOutput.output,
+      eventsOutput.output,
+      inspectOutput.output,
+      cleanupOutput.output,
+    ]) {
+      expect(output).not.toMatch(/[\u001b\u0000\t]/)
+    }
+  })
+
   it('sanitizes and bounds display text without changing metadata', () => {
     const rawOutput = `\u001b[31mHEAD-MARKER hello\tworld\u0000\n${Array.from({ length: 20 }, (_, index) => `line-${index}`).join('\n')}${'x'.repeat(1_600)}TAIL-MARKER`
     const value = { run_id: 'run-1', label: 'worker', status: 'done', ready: true, output: rawOutput }

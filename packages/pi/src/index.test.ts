@@ -400,6 +400,80 @@ describe('Avenor Pi extension', () => {
     expect(eventHandlers.has('before_agent_start')).toBe(true)
   })
 
+  it('keeps exact raw JSON payloads and details for every non-spawn tool callback', async () => {
+    const registeredTools: Record<string, any> = {}
+    const statusPayload = {
+      run_id: 'status-run', label: 'status worker', status: 'done', runtime_id: 'rt-status', latest_seq: 1,
+    }
+    const resultPayload = {
+      run_id: 'result-run', label: 'result worker', status: 'done', ready: true, output: 'result output',
+    }
+    const inspectResult = makeInspectResult({ run_id: 'inspect-run', label: 'inspect worker' })
+    const permissionPayload = { ok: true }
+    const followUpPayload = { run_id: 'follow-up-run', label: 'follow-up worker' }
+    const eventsPayload = { events: [{ event: 'agent.message', seq: 1, delta: 'hello' }] }
+    const shutdownPayload = { ok: true, cleaned_up: ['/tmp/one'] }
+
+    const mockPi = {
+      on: () => {},
+      registerTool: (def: { name: string }) => {
+        registeredTools[def.name] = def
+      },
+      registerCommand: () => {},
+      registerMessageRenderer: () => {},
+      sendUserMessage: () => {},
+    }
+
+    await createExtension({
+      spawnTool: mock(async () => ({ run_id: 'spawn-run', label: 'spawn worker', supervisor_id: '/tmp/sock', runtime_id: 'rt-spawn' })),
+      statusTool: mock(async () => statusPayload),
+      resultTool: mock(async () => resultPayload),
+      inspectTool: mock(async () => inspectResult),
+      answerPermissionTool: mock(async () => permissionPayload),
+      followUpTool: mock(async () => followUpPayload),
+      eventsTool: mock(async () => eventsPayload),
+      shutdownTool: mock(async () => shutdownPayload),
+      observeRun: mock(() => null),
+      dial: mock(async () => ({ close() {}, cancel: async () => {}, interruptAndPrompt: async () => {}, events() { throw new Error('unused') } })),
+      Supervisor: class {} as any,
+    })(mockPi as any)
+
+    const status = await registeredTools.avenor_status.execute('tool-status', { run_id: 'status-run' })
+    expect(status.content[0]?.text).toBe(JSON.stringify(statusPayload, null, 2))
+    expect(status.details).toEqual(statusPayload)
+
+    const runResult = await registeredTools.avenor_result.execute('tool-result', { run_id: 'result-run' })
+    expect(runResult.content[0]?.text).toBe(JSON.stringify(resultPayload, null, 2))
+    expect(runResult.details).toEqual(resultPayload)
+
+    const inspectPayload = buildInspectPayload(inspectResult)
+    const inspect = await registeredTools.avenor_inspect.execute('tool-inspect', { run_id: 'inspect-run' })
+    expect(inspect.content[0]?.text).toBe(JSON.stringify(inspectPayload, null, 2))
+    expect(inspect.details).toEqual(inspectPayload)
+
+    const permission = await registeredTools.avenor_answer_permission.execute('tool-permission', {
+      run_id: 'status-run', option_id: 'allow_once', request_id: 'request-1', message: 'approved',
+    })
+    expect(permission.content[0]?.text).toBe(JSON.stringify(permissionPayload, null, 2))
+    expect(permission.details).toEqual(permissionPayload)
+
+    const followUp = await registeredTools.avenor_follow_up.execute('tool-follow-up', {
+      run_id: 'status-run', message: 'continue', label: 'follow-up worker',
+    })
+    expect(followUp.content[0]?.text).toBe(JSON.stringify(followUpPayload, null, 2))
+    expect(followUp.details).toEqual(followUpPayload)
+
+    const events = await registeredTools.avenor_events.execute('tool-events', {
+      run_id: 'status-run', types: ['agent.message'], limit: 10,
+    })
+    expect(events.content[0]?.text).toBe(JSON.stringify(eventsPayload, null, 2))
+    expect(events.details).toEqual(eventsPayload)
+
+    const shutdown = await registeredTools.avenor_shutdown.execute('tool-shutdown', { supervisor_id: '/tmp/sock', force: true })
+    expect(shutdown.content[0]?.text).toBe(JSON.stringify(shutdownPayload, null, 2))
+    expect(shutdown.details).toEqual(shutdownPayload)
+  })
+
   it('registers avenor_inspect with bounded JSON output', async () => {
     let inspectToolDef: any
     const mockPi = {

@@ -173,6 +173,125 @@ describe('Avenor Pi renderers', () => {
     ].join('\n'))
   })
 
+  it('caps hostile collection displays without changing details', () => {
+    const hostile = (value: string) => `\u001b[31m${value}\u001b[0m\t\u0000`
+    const marker = '… 2 items omitted'
+
+    const statuses = Array.from({ length: 14 }, (_, index) => ({
+      run_id: hostile(`run-${index}`),
+      label: hostile(`worker-${index}`),
+      status: 'running',
+    }))
+    const expectedStatuses = structuredClone(statuses)
+    const statusResult = result(statuses)
+    const statusText = text(renderStatusResult(statusResult, collapsed, theme, {}))
+    const statusLines = statusText.split('\n')
+    expect(statusLines.filter(line => line.includes('(run_id:'))).toHaveLength(12)
+    expect(statusLines.filter(line => line === marker)).toEqual([marker])
+    expect(statusText).toContain('worker-0 — running (run_id: run-0)')
+    expect(statusText).not.toContain('worker-12')
+    expect(statusResult.details).toEqual(expectedStatuses)
+
+    const options = Array.from({ length: 10 }, (_, index) => ({
+      option_id: hostile(`option-${index}`),
+      label: hostile(`label-${index}`),
+    }))
+    const permissionStatus = {
+      run_id: hostile('permission-run'),
+      label: hostile('permission-worker'),
+      status: 'waiting',
+      pending_permission: { description: hostile('permission request'), options },
+    }
+    const expectedPermissionStatus = structuredClone(permissionStatus)
+    const permissionResult = result(permissionStatus)
+    const permissionText = text(renderStatusResult(permissionResult, collapsed, theme, {}))
+    expect(permissionText.split('\n').find(line => line.startsWith('Options:'))).toBe(
+      `Options: ${Array.from({ length: 8 }, (_, index) => `option-${index} (label-${index})`).join(', ')} ${marker}`,
+    )
+    expect(permissionText).not.toContain('option-8')
+    expect(permissionResult.details).toEqual(expectedPermissionStatus)
+
+    const types = Array.from({ length: 10 }, (_, index) => hostile(`type-${index}`))
+    const events = Array.from({ length: 14 }, (_, index) => ({
+      event: hostile(`event-${index}`),
+      seq: index,
+      delta: hostile(`delta-${index}`),
+    }))
+    const eventsPayload = { events }
+    const expectedEvents = structuredClone(eventsPayload)
+    const eventsResult = result(eventsPayload)
+    const eventsText = text(renderEventsResult(eventsResult, expanded, theme, {
+      run_id: hostile('events-run'), types,
+    }))
+    const eventLines = eventsText.split('\n')
+    expect(text(renderEventsCall({ run_id: hostile('events-run'), types }, theme))).toBe(
+      `avenor_events run_id "events-run" types=[${Array.from({ length: 8 }, (_, index) => `"type-${index}"`).join(', ')}] ${marker}`,
+    )
+    expect(eventLines.find(line => line.startsWith('Filter:'))).toBe(
+      `Filter: ${Array.from({ length: 8 }, (_, index) => `type-${index}`).join(', ')} ${marker}`,
+    )
+    expect(eventLines.filter(line => line.startsWith('Event '))).toHaveLength(12)
+    expect(eventLines.filter(line => line === '… 13 items omitted')).toEqual(['… 13 items omitted'])
+    expect(eventLines.filter(line => line === marker)).toEqual([marker])
+    expect(eventsText).toContain('Event 0: event-0 — delta-0')
+    expect(eventsText).not.toContain('event-12')
+    expect(eventsResult.details).toEqual(expectedEvents)
+
+    const transcript = Array.from({ length: 7 }, (_, index) => ({ kind: 'assistant', text: hostile(`transcript-${index}`) }))
+    const tools = Array.from({ length: 7 }, (_, index) => ({
+      title: hostile(`tool-${index}`), status: hostile('done'), preview: hostile(`preview-${index}`),
+    }))
+    const liveTools = Array.from({ length: 7 }, (_, index) => ({
+      kind: hostile(`live-${index}`), preview: hostile(`live-preview-${index}`),
+    }))
+    const permissions = Array.from({ length: 7 }, (_, index) => ({
+      description: hostile(`permission-${index}`),
+      request_id: hostile(`request-${index}`),
+      options: [{ option_id: hostile(`allow-${index}`), label: hostile(`Allow ${index}`) }],
+    }))
+    const inspect = {
+      run_id: hostile('inspect-run'),
+      label: hostile('inspect-worker'),
+      status: { status: 'done' },
+      final_output: hostile('inspect-output'),
+      transcript,
+      tools,
+      live_tools: liveTools,
+      permissions,
+    }
+    const expectedInspect = structuredClone(inspect)
+    const inspectResult = result(inspect)
+    const inspectText = text(renderInspectResult(inspectResult, expanded, theme, {}))
+    const inspectLines = inspectText.split('\n')
+    expect(inspectLines.filter(line => line.startsWith('assistant: transcript-'))).toHaveLength(5)
+    expect(inspectLines.filter(line => line.startsWith('Tool: tool-'))).toHaveLength(5)
+    expect(inspectLines.filter(line => line.startsWith('Live tool: live-'))).toHaveLength(5)
+    expect(inspectLines.filter(line => line.startsWith('Permission: permission-'))).toHaveLength(5)
+    expect(inspectLines.filter(line => line === marker)).toEqual([marker, marker, marker, marker])
+    expect(inspectText).not.toContain('transcript-5')
+    expect(inspectText).not.toContain('tool-5')
+    expect(inspectText).not.toContain('live-5')
+    expect(inspectText).not.toContain('permission-5')
+    expect(inspectResult.details).toEqual(expectedInspect)
+
+    const cleanup = { ok: true, cleaned_up: Array.from({ length: 10 }, (_, index) => hostile(`/tmp/cleanup-${index}`)) }
+    const expectedCleanup = structuredClone(cleanup)
+    const cleanupResult = result(cleanup)
+    const cleanupText = text(renderShutdownResult(cleanupResult, expanded, theme, {
+      supervisor_id: hostile('/tmp/sock'), force: true,
+    }))
+    const cleanupLines = cleanupText.split('\n')
+    expect(cleanupLines.filter(line => line.startsWith('Cleanup path:'))).toHaveLength(8)
+    expect(cleanupLines.filter(line => line === marker)).toEqual([marker])
+    expect(cleanupText).toContain('Cleanup path: /tmp/cleanup-0')
+    expect(cleanupText).not.toContain('cleanup-8')
+    expect(cleanupResult.details).toEqual(expectedCleanup)
+
+    for (const output of [statusText, permissionText, eventsText, inspectText, cleanupText]) {
+      expect(output).not.toMatch(/[\u001b\u0000\t]/)
+    }
+  })
+
   it('defensively renders partial and malformed results, strips controls, and marks bounded previews', () => {
     expect(text(renderStatusResult(result({ label: 'worker', status: 'running' }), { expanded: false, isPartial: true }, theme, {}))).toBe('Working: worker — running')
     expect(text(renderStatusResult(result(undefined, '{"run_id":"raw"}'), { expanded: false, isPartial: true }, theme, {}))).toBe('Working…')
