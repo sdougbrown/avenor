@@ -86,11 +86,20 @@ describe('local run resolution', () => {
         },
       }
     })
+    const list = mock(async () => (
+      [...runtimes.entries()].map(([runtimeId, runtime]) => ({
+        runtime_id: runtimeId,
+        session_id: runtime.sessionId,
+        label: runtime.label,
+        status: 'waiting',
+      }))
+    ))
     const history = mock(async () => ({ events: [] }))
     const answerPermission = mock(async () => {})
     const client = {
       spawn,
       status,
+      list,
       history,
       answerPermission,
       isClosed: () => false,
@@ -156,6 +165,27 @@ describe('local run resolution', () => {
         label: canonical.label,
       })
       expect(status).toHaveBeenLastCalledWith(canonical.runtimeId)
+
+      const originalStatusSupervisorGet = Supervisor.get
+      Supervisor.get = mock(async () => sup) as typeof Supervisor.get
+      try {
+        const statusList = await statusTool({})
+        expect(statusList).toHaveLength(2)
+        expect(statusList).toEqual(expect.arrayContaining([
+          expect.objectContaining({
+            run_id: canonical.runId,
+            runtime_id: canonical.runtimeId,
+            label: canonical.label,
+          }),
+          expect.objectContaining({
+            run_id: colliding.runId,
+            runtime_id: colliding.runtimeId,
+            label: colliding.label,
+          }),
+        ]))
+      } finally {
+        Supervisor.get = originalStatusSupervisorGet
+      }
 
       const eventsResult = await eventsTool({
         runId: canonical.runId,

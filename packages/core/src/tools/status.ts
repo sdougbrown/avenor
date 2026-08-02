@@ -9,7 +9,7 @@ import {
 } from './validate.js'
 import { getSupervisorClient as realGetSupervisorClient } from './get-supervisor-client.js'
 import { findExternalRun, listExternalRuns } from './run-registry.js'
-import { findLocalRunByReference } from './run-resolution.js'
+import { findLocalRunByReference, findLocalRunByRuntimeId } from './run-resolution.js'
 
 async function parseSentinel(filePath: string): Promise<Record<string, string> | null> {
   try {
@@ -464,7 +464,8 @@ async function executeStatusTool(
   for (const entry of list) {
     const entryId = String(entry.runtime_id ?? entry.id ?? '')
     const entryLabel = String(entry.label ?? entryId)
-    const runInfo = findLocalRunByReference(sup, entryId)
+    const runInfo = findLocalRunByRuntimeId(sup, entryId)
+      ?? findLocalRunByReference(sup, entryId)
       ?? findLocalRunByReference(sup, entryLabel)
 
     const liveStatus = runInfo
