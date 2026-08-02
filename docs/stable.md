@@ -26,7 +26,7 @@ Flags:
 | Flag | Default | Description |
 |---|---|---|
 | `--control-socket` `<path>` | (required) | Unix socket path for the control plane. Avenor writes a tombstone file at `<path>.dead` to signal abnormal shutdown |
-| `--max-runtimes` | 8 | Maximum concurrent child runtimes. Spawn requests are rejected once this limit is hit |
+| `--max-runtimes` | 16 | Maximum concurrent child runtimes. Spawn requests are rejected once this limit is hit |
 | `--idle-timeout` | 0 | Exit cleanly after this duration with no child runtimes running and no control connections active. 0 disables (supervisor runs until signaled) |
 | `--shutdown-timeout` | 10s | How long to wait for child runtimes to finish gracefully before killing them |
 | `--http-debug` | (empty) | If set, bind an HTTP debug adapter to this address (e.g. `:8080`). Useful for rapid inspection and testing |
@@ -242,10 +242,10 @@ This cancels all runtimes without waiting. Any in-flight sessions are terminated
 
 ## Max Runtimes Limit
 
-The supervisor enforces a maximum number of concurrent child runtimes set by `--max-runtimes` (default 8). When this limit is reached, spawn requests fail with an error:
+The supervisor enforces a maximum number of concurrent child runtimes set by `--max-runtimes` (default 16). When this limit is reached, spawn requests fail with an error:
 
 ```
-max runtimes (8) reached
+max runtimes (16) reached
 ```
 
 To spawn more runtimes, you must wait for existing ones to finish. The limit prevents resource exhaustion and gives you a predictable constraint for scheduling.
