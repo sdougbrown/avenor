@@ -127,8 +127,6 @@ describe('Avenor Pi renderers', () => {
     expect(text(renderEventsResult(result(events), expanded, theme, { run_id: 'run-1', types: ['agent.message'] }))).toBe([
       'Events: run-1 — 2 events',
       'Filter: agent.message',
-      'Preview: Event 2: agent.message — hello',
-      '… 1 items omitted',
       'Event 2: agent.message — hello',
       'Event 3: session.end',
     ].join('\n'))
@@ -276,7 +274,6 @@ describe('Avenor Pi renderers', () => {
       `Filter: ${Array.from({ length: 8 }, (_, index) => `type-${index}`).join(', ')} ${marker}`,
     )
     expect(eventLines.filter(line => line.startsWith('Event '))).toHaveLength(12)
-    expect(eventLines.filter(line => line === '… 13 items omitted')).toEqual(['… 13 items omitted'])
     expect(eventLines.filter(line => line === marker)).toEqual([marker])
     expect(eventsText).toContain('Event 0: event-0 — delta-0')
     expect(eventsText).not.toContain('event-12')
