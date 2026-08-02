@@ -105,7 +105,7 @@ function preview(value: unknown, limit: number): string[] | undefined {
   const clean = cleanMultiline(value)
   if (!clean) return undefined
   const clipped = tailClip(clean, limit)
-  const lines = clipped.text.split('\n').slice(0, PREVIEW_LINES)
+  const lines = clipped.text.split('\n').slice(-PREVIEW_LINES)
   const omittedLines = Math.max(0, clean.split('\n').length - lines.length)
   return [
     ...lines,

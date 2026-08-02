@@ -25,6 +25,25 @@
 
 `PI_AGENT_PROFILE` is unset for Bun verification because this harness supplies `hybrid`, while the Pi profile test intentionally exercises the no-environment session-profile path.
 
-## Delivery
+## Initial delivery
 
 The correction commit is authored and committed as `avenor horse <019fc055-8912-7df1-901e-8bf4acc38578>`. No push, PR, or merge was performed.
+
+## Tail-preview follow-up
+
+- Session: `019fc061-e369-7125-9fba-007a26e1d0f1`
+- Agent: `horse`
+- Model: `gpt-5.6-terra` (`openai-codex`)
+- Corrected the OpenCode renderer's tail preview to retain the final 12 lines after character clipping, so a final conclusion is not discarded.
+- Added a multiline result regression that asserts the character marker (`923`), line marker (`19`), ordered tail contents, and unchanged raw metadata.
+
+### Verification
+
+- `env -u PI_AGENT_PROFILE bun run --cwd packages/opencode test` — passed (20 tests).
+- `env -u PI_AGENT_PROFILE bun run --cwd packages/opencode build` — passed.
+- `env -u PI_AGENT_PROFILE bun run test` — passed (all workspace JavaScript package suites).
+- `go test ./...` — passed.
+
+### Delivery
+
+This follow-up is committed as `avenor horse <019fc061-e369-7125-9fba-007a26e1d0f1>`. No push, PR, or merge was performed.

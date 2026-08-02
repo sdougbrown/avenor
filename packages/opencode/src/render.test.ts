@@ -259,6 +259,37 @@ describe('OpenCode Avenor result renderers', () => {
     }
   })
 
+  it('keeps the final conclusion in bounded multiline result previews', () => {
+    const evidence = Array.from(
+      { length: 30 },
+      (_, index) => `analysis-${String(index).padStart(2, '0')}: ${'x'.repeat(64)}`,
+    )
+    const conclusion = 'FINAL CONCLUSION: ship the implementation.'
+    const value = {
+      run_id: 'run-1',
+      label: 'worker',
+      status: 'done',
+      ready: true,
+      output: [...evidence, conclusion].join('\n'),
+    }
+    const expectedMetadata = structuredClone(value)
+
+    const formatted = formatResultOutput({}, value)
+
+    expect(formatted.output).toBe([
+      'Result: worker — done',
+      'Run: run-1',
+      'Guidance: Call avenor_result or avenor_events with run_id "run-1".',
+      'Final output:',
+      ...evidence.slice(-11),
+      conclusion,
+      '[preview clipped: 923 characters omitted]',
+      '… 19 lines omitted',
+    ].join('\n'))
+    expect(formatted.metadata).toEqual(expectedMetadata)
+    expect(value).toEqual(expectedMetadata)
+  })
+
   it('sanitizes and bounds display text without changing metadata', () => {
     const rawOutput = `\u001b[31mHEAD-MARKER hello\tworld\u0000\n${Array.from({ length: 20 }, (_, index) => `line-${index}`).join('\n')}${'x'.repeat(1_600)}TAIL-MARKER`
     const value = { run_id: 'run-1', label: 'worker', status: 'done', ready: true, output: rawOutput }
