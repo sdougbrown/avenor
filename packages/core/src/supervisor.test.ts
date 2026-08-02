@@ -138,7 +138,31 @@ describe.skipIf(skipIfNoBinary)('Supervisor singleton', () => {
     expect(sup2).not.toBe(sup)
     sup = sup2
     expect(sup2.supervisorId).toContain(path.join(expectedAvenorHome(), 'sockets', 'avenor-mcp-'))
+  }, 20_000)
+
+  it('invalidates singleton when process is alive but client is closed', async () => {
+    sup = await Supervisor.get()
+    // Close the client while the process keeps running
+    ;(sup as any).client.close()
+
+    // Next get() should detect the stale state and start a fresh instance.
+    const replacement = await Supervisor.get()
+    expect(replacement).not.toBe(sup)
+    expect(await replacement.getClient().status()).toBeObject()
+    sup = replacement
   }, 15_000)
+
+  it('getClient throws "connection closed" when client socket closes before exit handler', async () => {
+    sup = await Supervisor.get()
+    const client = sup.getClient()
+    // Destroy the underlying socket directly so isClosed() returns true
+    // but the child process is still running (no exit event yet)
+    ;(client as any).socket.destroy()
+
+    expect(() => sup.getClient()).toThrow('avenor supervisor connection closed')
+    expect((sup as any).crashed).toBe(true)
+    expect((sup as any).client).toBeNull()
+  })
 
   it('failed cold startup does not poison future calls', async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-fail-test-'))
@@ -167,11 +191,11 @@ describe.skipIf(skipIfNoBinary)('Supervisor singleton', () => {
 
   it('reconnects after an external clean shutdown', async () => {
     const previous = sup
+    const exited = new Promise<void>(resolve => {
+      ;(previous as any).childProcess.on('exit', () => resolve())
+    })
     await previous.getClient().shutdown('graceful')
-
-    for (let attempt = 0; attempt < 100 && !(previous as any).crashed; attempt++) {
-      await new Promise(resolve => setTimeout(resolve, 10))
-    }
+    await exited
     expect((previous as any).crashed).toBe(true)
 
     const replacement = await Supervisor.get()

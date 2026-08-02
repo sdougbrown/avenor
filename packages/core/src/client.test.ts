@@ -2,7 +2,8 @@ import { describe, it, expect, afterEach } from 'bun:test'
 import * as net from 'node:net'
 import * as path from 'node:path'
 import * as os from 'node:os'
-import { dial, type Event } from './client.js'
+import { PassThrough } from 'node:stream'
+import { Client, dial, type Event } from './client.js'
 
 function tempSocketPath(): string {
   const rand = Math.random().toString(36).substring(2, 10)
@@ -737,6 +738,135 @@ describe('Client.call with multiple concurrent calls', () => {
       expect((a as any).echo).toBe('a')
       expect((b as any).method).toBe('beta')
       expect((b as any).echo).toBe('b')
+    } finally {
+      client.close()
+    }
+  })
+})
+
+describe('Client.socket error', () => {
+  it('marks the client closed and emits protocol-error on socket error', async () => {
+    const socket = new PassThrough()
+    let onSocketError: ((error: Error) => void) | undefined
+    const socketOn = socket.on.bind(socket)
+    socket.on = ((event: string | symbol, listener: (...args: any[]) => void) => {
+      if (event === 'error') onSocketError = listener as (error: Error) => void
+      return socketOn(event, listener)
+    }) as typeof socket.on
+    socket.write = ((data: string, callback?: (err?: Error | null) => void): boolean => {
+      const request = JSON.parse(data)
+      queueMicrotask(() => {
+        socket.push(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { subscribed: true } }) + '\n')
+      })
+      callback?.()
+      return true
+    }) as typeof socket.write
+
+    const client = new Client(socket as unknown as net.Socket)
+    try {
+      await client.subscribe()
+      // Bun surfaces every synthetic `error` emission as a test failure, so
+      // invoke the exact listener Client registers instead.
+      expect(onSocketError).toBeFunction()
+      onSocketError!(new Error('connection reset'))
+
+      const result = await client.events().next()
+      expect(result.done).toBe(false)
+      const ev = result.value as Event
+      expect(ev.event).toBe('protocol-error')
+      expect(ev.message).toBe('connection reset')
+      expect(client.isClosed()).toBe(true)
+    } finally {
+      client.close()
+    }
+  })
+})
+
+describe('Client.write error', () => {
+  let server: net.Server
+
+  afterEach(() => {
+    server?.close()
+  })
+
+  it('rejects the pending call and closes the client on socket write error', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, () => {})
+
+    const client = await dial(socketPath)
+    try {
+      // Override the connected client socket's write method to fail.
+      ;(client as any).socket.write = (
+        data: string,
+        cb?: (err?: Error | null) => void,
+      ): boolean => {
+        if (cb) cb(new Error('pipe broken'))
+        return false
+      }
+
+      await expect(client.status()).rejects.toThrow('write request: pipe broken')
+      expect(client.isClosed()).toBe(true)
+    } finally {
+      client.close()
+    }
+  })
+})
+
+describe('Client.isClosed independent checks', () => {
+  let server: net.Server
+
+  afterEach(() => {
+    server?.close()
+  })
+
+  it('returns true when the underlying socket is destroyed', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      const rpcRes = {
+        jsonrpc: '2.0',
+        id: req.id,
+        result: { ok: true },
+      }
+      sock.write(JSON.stringify(rpcRes) + '\n')
+    })
+
+    const client = await dial(socketPath)
+    try {
+      await client.status()
+      expect(client.isClosed()).toBe(false)
+
+      ;(client as any).socket.destroy()
+      expect((client as any).closed).toBe(false)
+      expect(client.isClosed()).toBe(true)
+      expect((client as any).socket.destroyed).toBe(true)
+    } finally {
+      client.close()
+    }
+  })
+
+  it('returns true when the underlying socket has writableEnded', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      const rpcRes = {
+        jsonrpc: '2.0',
+        id: req.id,
+        result: { ok: true },
+      }
+      sock.write(JSON.stringify(rpcRes) + '\n')
+    })
+
+    const client = await dial(socketPath)
+    try {
+      await client.status()
+      expect(client.isClosed()).toBe(false)
+
+      ;(client as any).socket.end()
+      expect((client as any).closed).toBe(false)
+      expect(client.isClosed()).toBe(true)
+      expect((client as any).socket.writableEnded).toBe(true)
     } finally {
       client.close()
     }

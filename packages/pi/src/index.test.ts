@@ -1,5 +1,6 @@
 import { describe, expect, it, mock } from 'bun:test'
 import type { InspectResult, RunSnapshot, StatusResult } from '@dougbots/avenor-core'
+import type { ExtensionDeps } from './index.js'
 import { RunReducer } from '@dougbots/avenor-core'
 import extensionFactory, {
   buildCompletionText,
@@ -12,6 +13,24 @@ import extensionFactory, {
   statusSupervisorId,
 } from './index.js'
 import { findLiveStatusForTrackedRun } from './types.js'
+
+/** Build minimal mock ExtensionDeps with all tools stubbed via bun:test.mock(). */
+function buildMockDeps(partial: Partial<ExtensionDeps> = {}): ExtensionDeps {
+  return {
+    spawnTool: mock(async () => ({ run_id: 'run-1', label: 'demo', supervisor_id: '/tmp/sock' })),
+    statusTool: mock(async () => []),
+    eventsTool: mock(async () => ({ events: [] })),
+    answerPermissionTool: mock(async () => ({ ok: true })),
+    followUpTool: mock(async () => ({ run_id: 'run-2', label: 'follow-up' })),
+    inspectTool: mock(async () => makeInspectResult()),
+    resultTool: mock(async () => ({ run_id: 'run-1', label: 'demo', status: 'done', ready: true })),
+    shutdownTool: mock(async () => ({ ok: true })),
+    observeRun: mock(() => null),
+    dial: mock(async () => ({ close() {} })),
+    Supervisor: class {} as any,
+    ...partial,
+  }
+}
 
 function buildSnapshot(): RunSnapshot {
   const reducer = new RunReducer()
@@ -170,19 +189,9 @@ describe('Avenor Pi extension', () => {
     console.error = consoleError as typeof console.error
 
     try {
-      await createExtension({
-        spawnTool: mock(async () => ({ run_id: 'run-1', label: 'demo', supervisor_id: '/tmp/sock' })),
-        statusTool: statusToolMock,
-        eventsTool: mock(async () => ({ events: [] })),
-        answerPermissionTool: mock(async () => ({ ok: true })),
-        followUpTool: mock(async () => ({ run_id: 'run-2', label: 'follow-up' })),
-        inspectTool: mock(async () => makeInspectResult()),
-        resultTool: mock(async () => ({ run_id: 'run-1', label: 'demo', status: 'done', ready: true })),
-        shutdownTool: mock(async () => ({ ok: true })),
-        observeRun: mock(() => null),
-        dial: mock(async () => ({ close() {} })),
-        Supervisor: class {} as any,
-      } as any)(mockPi as any)
+      await createExtension(
+        buildMockDeps({ statusTool: statusToolMock }),
+      )(mockPi as any)
 
       const ctx = { ui: { notify: mock(() => {}), setWidget: mock(() => {}), setStatus: mock(() => {}) } }
       await commands['avenor-status'].handler('', ctx)
