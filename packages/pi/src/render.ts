@@ -164,7 +164,7 @@ function partial(result: ToolResult): string[] {
 }
 
 function isTerminal(status: string): boolean {
-  return TERMINAL_STATUSES.has(status as never)
+  return TERMINAL_STATUSES.has(status)
 }
 
 function permission(record: RecordValue | undefined): RecordValue | undefined {
@@ -387,7 +387,8 @@ function inspectPermissionRow(value: RecordValue): string {
       ?? stringValue(value.kind),
   )
   const options = permissionOptions(value)
-  return `Permission: ${description} (request_id: ${selected(value, 'request_id')}); options:${optionRows(options) ? ` ${optionRows(options)}` : ''}${options.length > COLLECTION_ITEMS ? ` ${itemMarker(options.length - COLLECTION_ITEMS)}` : ''}`
+  const rows = optionRows(options)
+  return `Permission: ${description} (request_id: ${selected(value, 'request_id')}); options:${rows ? ` ${rows}` : ''}${options.length > COLLECTION_ITEMS ? ` ${itemMarker(options.length - COLLECTION_ITEMS)}` : ''}`
 }
 
 function inspectGroup(title: string, values: unknown, row: (value: RecordValue) => string | undefined): string[] {

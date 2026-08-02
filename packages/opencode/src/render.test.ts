@@ -143,6 +143,45 @@ describe('OpenCode Avenor result renderers', () => {
     expect(inspectOutput.metadata).toEqual(inspect)
   })
 
+  it('uses fallback prose for malformed acknowledgement, follow-up, events, inspect, and shutdown results', () => {
+    const retry = 'Retry the tool or use avenor_status/avenor_inspect.'
+    const malformedEvents = { events: [null, { event: 'agent.message', seq: 1, delta: 'hello' }] }
+
+    expect(formatAnswerPermissionOutput({ run_id: 'run-1', option_id: 'allow' }, { ok: 'yes' } as any)).toEqual({
+      title: 'run-1 — permission answered',
+      output: ['Avenor answer_permission result unavailable.', retry].join('\n'),
+      metadata: { ok: 'yes', run_id: 'run-1', option_id: 'allow', request_id: undefined },
+    })
+    expect(formatFollowUpOutput({ run_id: 'run-1' }, { run_id: null, label: 'follow-up' } as any)).toEqual({
+      title: 'follow-up — dispatched',
+      output: ['Avenor follow_up result unavailable.', retry].join('\n'),
+      metadata: { run_id: null, label: 'follow-up', source_run_id: 'run-1' },
+    })
+    expect(formatEventsOutput({ run_id: 'run-1' }, malformedEvents as any)).toEqual({
+      title: 'run-1 — 2 events',
+      output: ['Avenor events result unavailable.', retry].join('\n'),
+      metadata: { ...malformedEvents, run_id: 'run-1', count: 2 },
+    })
+    expect(formatInspectOutput({ run_id: 'run-1' }, {} as any)).toEqual({
+      title: 'run-1 — unknown',
+      output: ['Avenor inspect result unavailable.', retry].join('\n'),
+      metadata: {},
+    })
+    expect(formatShutdownOutput({}, { ok: 'yes', cleaned_up: 'not-an-array' } as any)).toEqual({
+      title: 'Avenor — shut down',
+      output: ['Avenor shutdown result unavailable.', retry].join('\n'),
+      metadata: { ok: 'yes', cleaned_up: 'not-an-array', supervisor_id: undefined, force: false },
+    })
+  })
+
+  it('formats empty OpenCode event lists', () => {
+    expect(formatEventsOutput({ run_id: 'run-1' }, { events: [] })).toEqual({
+      title: 'run-1 — 0 events',
+      output: ['Events: run-1 — 0 events', 'No events.'].join('\n'),
+      metadata: { events: [], run_id: 'run-1', count: 0 },
+    })
+  })
+
   it('caps hostile collection displays without changing metadata', () => {
     const hostile = (value: string) => `\u001b[31m${value}\u001b[0m\t\u0000`
     const marker = '… 2 items omitted'

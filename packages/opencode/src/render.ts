@@ -11,7 +11,7 @@ const INSPECT_ITEMS = 5
 const CLEANUP_ITEMS = 8
 const TERMINAL_STATUSES = new Set(['done', 'failed', 'timeout', 'killed'])
 
-export type RichToolResult = {
+type RichToolResult = {
   title: string
   output: string
   metadata: Record<string, unknown>

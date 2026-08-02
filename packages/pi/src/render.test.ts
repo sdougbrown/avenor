@@ -173,6 +173,51 @@ describe('Avenor Pi renderers', () => {
     ].join('\n'))
   })
 
+  it('keeps result, event, and shutdown details out of collapsed renderings', () => {
+    const collapsedResult = text(renderResultResult(result({
+      run_id: 'run-1', label: 'worker', status: 'done', output: 'answer', session_id: 'session-1', stop_reason: 'budget',
+    }), collapsed, theme, { run_id: 'call-run' }))
+    expect(collapsedResult).toBe([
+      'Result: worker — done',
+      'Run: run-1',
+      'Guidance: Call avenor_result or avenor_events with run_id "run-1".',
+      'Final output:',
+      'answer',
+    ].join('\n'))
+    expect(collapsedResult).not.toContain('Session:')
+    expect(collapsedResult).not.toContain('Stop reason:')
+
+    const collapsedEvents = text(renderEventsResult(result({
+      events: [
+        { event: 'agent.message', seq: 1, delta: 'first' },
+        { event: 'session.end', seq: 2, delta: 'second' },
+      ],
+    }), collapsed, theme, { run_id: 'run-1' }))
+    expect(collapsedEvents).toBe([
+      'Events: run-1 — 2 events',
+      'Preview: Event 1: agent.message — first',
+      '… 1 items omitted',
+    ].join('\n'))
+    expect(collapsedEvents).not.toContain('Event 2: session.end')
+
+    const emptyCollapsedEvents = text(renderEventsResult(result({ events: [] }), collapsed, theme, { run_id: 'run-1' }))
+    expect(emptyCollapsedEvents).toBe([
+      'Events: run-1 — 0 events',
+      'No events.',
+    ].join('\n'))
+
+    const collapsedShutdown = text(renderShutdownResult(result({ ok: true, cleaned_up: ['/tmp/one'] }), collapsed, theme, {
+      supervisor_id: '/tmp/sock', force: false,
+    }))
+    expect(collapsedShutdown).toBe([
+      'Avenor shutdown: succeeded.',
+      'Supervisor: /tmp/sock',
+      'Mode: graceful',
+      'Cleanup: 1 paths',
+    ].join('\n'))
+    expect(collapsedShutdown).not.toContain('Cleanup path:')
+  })
+
   it('caps hostile collection displays without changing details', () => {
     const hostile = (value: string) => `\u001b[31m${value}\u001b[0m\t\u0000`
     const marker = '… 2 items omitted'

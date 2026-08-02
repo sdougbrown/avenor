@@ -164,7 +164,7 @@ function buildWaitingText(run: { runId: string; label: string; agent: string }, 
 }
 
 export function isTerminalStatus(status: string | undefined): boolean {
-  return !!status && TERMINAL_STATUSES.has(status as any)
+  return !!status && TERMINAL_STATUSES.has(status)
 }
 
 export function renderStatusLines(entries: RunStatusEntry[]): string[] {
