@@ -2,8 +2,6 @@ package runtime
 
 import "fmt"
 
-const thinkingValues = "off, minimal, low, medium, high, xhigh, max"
-
 var thinkingValueList = []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"}
 
 var validThinkingValues = map[string]struct{}{
@@ -39,7 +37,7 @@ func ValidateThinking(value string) error {
 		return nil
 	}
 	if _, ok := validThinkingValues[value]; !ok {
-		return fmt.Errorf("invalid thinking value %q (allowed: %s)", value, thinkingValues)
+		return fmt.Errorf("invalid thinking value %q (allowed: %s)", value, joinThinkingValues(thinkingValueList))
 	}
 	return nil
 }

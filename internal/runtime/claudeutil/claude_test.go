@@ -21,7 +21,7 @@ func TestBuildArgsPreservesBackendSpecificOrdering(t *testing.T) {
 		{
 			name: "normal with options",
 			opts: opts,
-			want: []string{"--session-id", "session", "--permission-mode", "default", "--agent", "agent", "--name", "label", "--model", "model", "--effort", "high"},
+			want: []string{"--session-id", "session", "--agent", "agent", "--name", "label", "--model", "model", "--effort", "high", "--permission-mode", "default"},
 		},
 		{
 			name:       "channel with options",
@@ -49,33 +49,66 @@ func TestBuildArgsPreservesBackendSpecificOrdering(t *testing.T) {
 }
 
 func TestCheckEffortCapability(t *testing.T) {
-	original := helpOutput
-	t.Cleanup(func() { helpOutput = original })
+	tests := []struct {
+		name      string
+		backend   string
+		effort    string
+		output    []byte
+		helpErr   error
+		wantCalls int
+		wantErr   bool
+	}{
+		{
+			name:      "empty effort skips probe",
+			backend:   "claude",
+			output:    []byte("usage: claude"),
+			wantCalls: 0,
+		},
+		{
+			name:      "unsupported output",
+			backend:   "claude",
+			effort:    "high",
+			output:    []byte("usage: claude"),
+			wantCalls: 1,
+			wantErr:   true,
+		},
+		{
+			name:      "failed help",
+			backend:   "claude",
+			effort:    "high",
+			helpErr:   errors.New("help failed"),
+			wantCalls: 1,
+			wantErr:   true,
+		},
+		{
+			name:      "supported output",
+			backend:   "claude-channel",
+			effort:    "max",
+			output:    []byte("--effort <level>"),
+			wantCalls: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	calls := 0
-	helpOutput = func(context.Context) ([]byte, error) {
-		calls++
-		return []byte("usage: claude"), nil
-	}
-	if err := CheckEffortCapability(context.Background(), "claude", ""); err != nil {
-		t.Fatalf("empty effort error = %v", err)
-	}
-	if calls != 0 {
-		t.Fatalf("help calls for empty effort = %d", calls)
-	}
-
-	err := CheckEffortCapability(context.Background(), "claude", "high")
-	if err == nil || !strings.Contains(err.Error(), "claude") || !strings.Contains(err.Error(), "thinking") {
-		t.Fatalf("unsupported capability error = %v", err)
-	}
-
-	helpOutput = func(context.Context) ([]byte, error) { return nil, errors.New("help failed") }
-	if err := CheckEffortCapability(context.Background(), "claude", "high"); err == nil || !strings.Contains(err.Error(), "thinking") {
-		t.Fatalf("failed help error = %v", err)
-	}
-
-	helpOutput = func(context.Context) ([]byte, error) { return []byte("--effort <level>"), nil }
-	if err := CheckEffortCapability(context.Background(), "claude-channel", "max"); err != nil {
-		t.Fatalf("supported capability error = %v", err)
+			calls := 0
+			err := checkEffortCapability(context.Background(), tt.backend, tt.effort, func(context.Context) ([]byte, error) {
+				calls++
+				return tt.output, tt.helpErr
+			})
+			if calls != tt.wantCalls {
+				t.Fatalf("help calls = %d, want %d", calls, tt.wantCalls)
+			}
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), tt.backend) || !strings.Contains(err.Error(), "thinking") {
+					t.Fatalf("capability error = %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("capability error = %v", err)
+			}
+		})
 	}
 }

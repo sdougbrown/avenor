@@ -9,13 +9,17 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime"
 )
 
-var helpOutput = func(ctx context.Context) ([]byte, error) {
+func claudeHelpOutput(ctx context.Context) ([]byte, error) {
 	return exec.CommandContext(ctx, "claude", "--help").CombinedOutput()
 }
 
 // CheckEffortCapability verifies that the installed Claude CLI supports the
 // native startup effort flag. An empty effort needs no capability probe.
 func CheckEffortCapability(ctx context.Context, backend, effort string) error {
+	return checkEffortCapability(ctx, backend, effort, claudeHelpOutput)
+}
+
+func checkEffortCapability(ctx context.Context, backend, effort string, helpOutput func(context.Context) ([]byte, error)) error {
 	if effort == "" {
 		return nil
 	}
@@ -34,9 +38,6 @@ func BuildArgs(sessionID, serverName string, opts runtime.StartOptions) []string
 		args = append(args, "--dangerously-load-development-channels", "server:"+serverName)
 	}
 	args = append(args, "--session-id", sessionID)
-	if serverName == "" {
-		args = append(args, "--permission-mode", "default")
-	}
 	if opts.Agent != "" {
 		args = append(args, "--agent", opts.Agent)
 	}
@@ -49,8 +50,5 @@ func BuildArgs(sessionID, serverName string, opts runtime.StartOptions) []string
 	if opts.Thinking != "" {
 		args = append(args, "--effort", opts.Thinking)
 	}
-	if serverName != "" {
-		args = append(args, "--permission-mode", "default")
-	}
-	return args
+	return append(args, "--permission-mode", "default")
 }
