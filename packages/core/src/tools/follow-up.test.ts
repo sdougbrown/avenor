@@ -19,8 +19,31 @@ const getSupervisorClientMock = mock(async () => ({
 }))
 
 const { createFollowUpTool } = await import('./follow-up.js')
+const { createSpawnTool } = await import('./spawn.js')
+const { forgetExternalRuns } = await import('./run-registry.js')
 const followUpTool = createFollowUpTool(getSupervisorClientMock)
+const externalSpawnTool = createSpawnTool(getSupervisorClientMock)
 const { Supervisor } = await import('../supervisor.js')
+
+function singletonSupervisor(runs: Map<string, any>): any {
+  return {
+    runs,
+    spawn: async (params: Record<string, unknown>, runId: string) => {
+      const result = await spawnMock(params)
+      const runInfo = {
+        runId,
+        label: String(params.label ?? runId),
+        sentinelPath: String(params.sentinel_file ?? ''),
+        eventLogPath: String(params.on_event ?? ''),
+        runtimeId: result.runtime_id,
+        sessionId: params.session_id as string | undefined,
+      }
+      runs.set(runId, runInfo)
+      runs.set(runInfo.label, runInfo)
+      return runInfo
+    },
+  }
+}
 
 describe('followUpTool with an external supervisor', () => {
   const previousHome = process.env.AVENOR_HOME
@@ -36,7 +59,7 @@ describe('followUpTool with an external supervisor', () => {
     if (home) fs.rmSync(home, { recursive: true, force: true })
   })
 
-  it('returns the runtime_id from the spawned follow-up (sentinel path)', async () => {
+  it('returns a public follow-up ID with the provider runtime ID separately', async () => {
     home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-follow-up-test-'))
     process.env.AVENOR_HOME = home
     const runDir = path.join(home, 'runs', 'original-run')
@@ -55,29 +78,44 @@ describe('followUpTool with an external supervisor', () => {
       prompt: 'continue',
       session_id: 'ses-original',
     })
-    expect(result.run_id).toBe('rt-followup')
+    expect(result.run_id).not.toBe('rt-followup')
+    expect(result.runtime_id).toBe('rt-followup')
+    expect(spawnMock.mock.calls[0]?.[0]).toMatchObject({
+      sentinel_file: path.join(home, 'runs', result.run_id, 'sentinel.done'),
+      on_event: path.join(home, 'runs', result.run_id, 'events.log'),
+    })
     expect(closeMock).toHaveBeenCalledTimes(1)
   })
 
-  it('rejects a conflicted provisional sentinel session before external spawn', async () => {
+  it('refuses a rejected provisional session from the spawn-created artifact layout', async () => {
     home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-follow-up-test-'))
     process.env.AVENOR_HOME = home
-    const runDir = path.join(home, 'runs', 'conflicted-run')
-    fs.mkdirSync(runDir, { recursive: true })
+    const spawned = await externalSpawnTool({
+      label: 'conflicted external run',
+      prompt: 'start',
+      supervisorId: '/tmp/avenor-mcp-test.sock',
+    })
+    const initialSpawn = spawnMock.mock.calls[0]?.[0]
+    expect(initialSpawn?.sentinel_file).toBe(
+      path.join(home, 'runs', spawned.run_id, 'sentinel.done'),
+    )
     fs.writeFileSync(
-      path.join(runDir, 'sentinel.done'),
+      String(initialSpawn?.sentinel_file),
       'FAILED\nSESSION=ses-rejected\nSTOP_REASON=session_id_conflict\nEXIT_CODE=1\n',
     )
+    spawnMock.mockClear()
+    statusMock.mockRejectedValueOnce(new Error('completed runtime removed'))
+    forgetExternalRuns('/tmp/avenor-mcp-test.sock')
 
     await expect(followUpTool({
-      runId: 'conflicted-run',
+      runId: spawned.run_id,
       message: 'do not continue',
       supervisorId: '/tmp/avenor-mcp-test.sock',
     })).rejects.toThrow('run is not resumable: session_id_conflict')
 
-    expect(statusMock).toHaveBeenCalledWith('conflicted-run')
+    expect(statusMock).toHaveBeenCalledWith(spawned.runtime_id)
     expect(spawnMock).not.toHaveBeenCalled()
-    expect(closeMock).toHaveBeenCalledTimes(1)
+    expect(closeMock).toHaveBeenCalledTimes(2)
   })
 
   it('preserves normal FAILED sentinel resume behavior for non-conflict failures', async () => {
@@ -261,25 +299,24 @@ describe('followUpTool with an external supervisor', () => {
       agent_profile: 'cloud',
       dir: '/repo/from-original-run',
     })
-    expect(result.run_id).toBe('rt-followup')
+    expect(result.run_id).not.toBe('rt-followup')
+    expect(result.runtime_id).toBe('rt-followup')
     expect(closeMock).toHaveBeenCalledTimes(1)
   })
 
   it('lets live false override stale singleton auto-approval', async () => {
     home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-follow-up-test-'))
     process.env.AVENOR_HOME = home
-    const sup = {
-      runs: new Map([['singleton-run', {
-        runId: 'singleton-run',
-        label: 'singleton-run',
-        sentinelPath: '/tmp/missing-singleton-sentinel',
-        eventLogPath: '/tmp/missing-singleton-events',
-        runtimeId: 'runtime-singleton-run',
-        sessionId: 'ses-from-run-map',
-        agent: 'explore',
-        autoApprove: true,
-      }]]),
-    }
+    const sup = singletonSupervisor(new Map([['singleton-run', {
+      runId: 'singleton-run',
+      label: 'singleton-run',
+      sentinelPath: '/tmp/missing-singleton-sentinel',
+      eventLogPath: '/tmp/missing-singleton-events',
+      runtimeId: 'runtime-singleton-run',
+      sessionId: 'ses-from-run-map',
+      agent: 'explore',
+      autoApprove: true,
+    }]]))
     getSupervisorClientMock.mockResolvedValueOnce({
       client: {
         status: statusMock,
@@ -309,21 +346,19 @@ describe('followUpTool with an external supervisor', () => {
   it('uses singleton run metadata when status and sentinel are unavailable', async () => {
     home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-follow-up-test-'))
     process.env.AVENOR_HOME = home
-    const sup = {
-      runs: new Map([['singleton-run', {
-        runId: 'singleton-run',
-        label: 'singleton-run',
-        sentinelPath: '/tmp/missing-singleton-sentinel',
-        eventLogPath: '/tmp/missing-singleton-events',
-        sessionId: 'ses-from-run-map',
-        agent: 'explore',
-        agentProfile: 'cloud',
-        backend: 'pi',
-        model: 'stored-model',
-        dir: '/repo/from-run-map',
-        autoApprove: true,
-      }]]),
-    }
+    const sup = singletonSupervisor(new Map([['singleton-run', {
+      runId: 'singleton-run',
+      label: 'singleton-run',
+      sentinelPath: '/tmp/missing-singleton-sentinel',
+      eventLogPath: '/tmp/missing-singleton-events',
+      sessionId: 'ses-from-run-map',
+      agent: 'explore',
+      agentProfile: 'cloud',
+      backend: 'pi',
+      model: 'stored-model',
+      dir: '/repo/from-run-map',
+      autoApprove: true,
+    }]]))
     getSupervisorClientMock.mockResolvedValueOnce({
       client: {
         status: statusMock,
@@ -357,19 +392,17 @@ describe('followUpTool with an external supervisor', () => {
   it('clears a stale run-level model for an authoritative agent-only workflow phase', async () => {
     home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-follow-up-test-'))
     process.env.AVENOR_HOME = home
-    const sup = {
-      runs: new Map([['agent-only-workflow', {
-        runId: 'agent-only-workflow',
-        label: 'agent-only-workflow',
-        sentinelPath: '/tmp/missing-agent-only-sentinel',
-        eventLogPath: '/tmp/missing-agent-only-events',
-        runtimeId: 'rt-agent-only-workflow',
-        sessionId: 'stale-session',
-        agent: 'run-agent',
-        model: 'stale-run-model',
-        backend: 'pi',
-      }]]),
-    }
+    const sup = singletonSupervisor(new Map([['agent-only-workflow', {
+      runId: 'agent-only-workflow',
+      label: 'agent-only-workflow',
+      sentinelPath: '/tmp/missing-agent-only-sentinel',
+      eventLogPath: '/tmp/missing-agent-only-events',
+      runtimeId: 'rt-agent-only-workflow',
+      sessionId: 'stale-session',
+      agent: 'run-agent',
+      model: 'stale-run-model',
+      backend: 'pi',
+    }]]))
     getSupervisorClientMock.mockResolvedValueOnce({
       client: { status: statusMock, spawn: spawnMock, close: closeMock },
       isSingleton: true,

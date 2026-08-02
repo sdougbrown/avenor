@@ -43,6 +43,15 @@ describe('eventsTool', () => {
     }
   })
 
+  it('rejects traversal before acquiring an external supervisor client', async () => {
+    await expect(eventsTool({
+      runId: '../other-run',
+      supervisorId: '/tmp/avenor-events-test.sock',
+    })).rejects.toThrow('invalid run_id')
+
+    expect(getSupervisorClientMock).not.toHaveBeenCalled()
+  })
+
   it('uses control-plane history for explicit supervisors', async () => {
     statusMock.mockResolvedValueOnce({
       runtime_id: 'rt-events-test',

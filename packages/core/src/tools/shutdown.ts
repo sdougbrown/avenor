@@ -2,6 +2,7 @@ import * as fs from 'node:fs'
 import { Supervisor, type RunInfo } from '../supervisor.js'
 import { dial } from '../client.js'
 import { validateSupervisorSocketPath } from './validate.js'
+import { clearExternalRuns, externalRunMetadataPath } from './run-registry.js'
 
 export async function shutdownTool(args: {
   supervisorId?: string
@@ -37,11 +38,27 @@ export async function shutdownTool(args: {
     } else {
       const client = await dial(supervisorId)
       try {
+        // A failed shutdown may leave live runtimes. Keep their durable mappings
+        // instead of orphaning them by cleaning artifacts on an unconfirmed stop.
         await client.shutdown(args.force ? 'force' : 'graceful')
-      } catch {
-        // ignore
       } finally {
         client.close()
+      }
+
+      for (const info of clearExternalRuns(supervisorId)) {
+        try {
+          await fs.promises.unlink(info.sentinelPath)
+          cleanedUp.push(info.sentinelPath)
+        } catch {}
+        try {
+          await fs.promises.unlink(info.eventLogPath)
+          cleanedUp.push(info.eventLogPath)
+        } catch {}
+        const metadataPath = externalRunMetadataPath(info.runId)
+        try {
+          await fs.promises.unlink(metadataPath)
+          cleanedUp.push(metadataPath)
+        } catch {}
       }
     }
 

@@ -89,7 +89,7 @@ A roster is a JSON map from a name to a complete backend/agent/model loadout. `r
 Direct mode selects an entry with both flags and does not accept direct identity overrides:
 
 ```sh
-avenor run --prompt "Analyze the repository" \\
+avenor run --prompt "Analyze the repository" \
   --roster-file /repo/roster.json --roster-entry planner
 ```
 

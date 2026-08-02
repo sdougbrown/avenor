@@ -5,6 +5,7 @@ import { type Client } from '../client.js'
 import { asRecord } from '../value-fields.js'
 import { getSupervisorClient as realGetSupervisorClient } from './get-supervisor-client.js'
 import { validateRunId } from './validate.js'
+import { findExternalRun } from './run-registry.js'
 
 const MAX_EVENT_LIMIT = 1_000
 const MAX_STRING_CHARS = 4_000
@@ -141,8 +142,10 @@ async function resolveRun(
   eventLogPath?: string
 }> {
   if (args.supervisorId) {
-    const { client, isSingleton, sup } = await getSupervisorClient(args.supervisorId)
-    const runInfo = isSingleton && sup ? findRunByLabel(sup, args.runId) : undefined
+    const { client, isSingleton, sup, supervisorId } = await getSupervisorClient(args.supervisorId)
+    const runInfo = isSingleton && sup
+      ? findRunByLabel(sup, args.runId)
+      : findExternalRun(supervisorId, args.runId)
     if (runInfo) {
       return {
         client,
@@ -226,6 +229,7 @@ async function executeEventsTool(
   args: EventsToolArgs,
   getSupervisorClient: typeof realGetSupervisorClient,
 ): Promise<EventsToolResult> {
+  validateRunId(args.runId)
   const limit = normalizeLimit(args.limit)
   const resolved = await resolveRun(args, getSupervisorClient)
 

@@ -8,6 +8,7 @@ import {
   validateRunId,
 } from './validate.js'
 import { getSupervisorClient as realGetSupervisorClient } from './get-supervisor-client.js'
+import { findExternalRun, listExternalRuns } from './run-registry.js'
 
 function findRunByLabel(sup: Supervisor, runId: string): RunInfo | undefined {
   const runs = (sup as any).runs as Map<string, RunInfo>
@@ -345,14 +346,14 @@ async function executeStatusTool(
   getSupervisorClient: typeof realGetSupervisorClient,
 ): Promise<StatusResult | StatusResult[]> {
   if (args.supervisorId) {
-    const { client, isSingleton, sup } = await getSupervisorClient(args.supervisorId)
+    const { client, isSingleton, sup, supervisorId } = await getSupervisorClient(args.supervisorId)
     try {
       if (args.runId) {
         validateRunId(args.runId)
 
         const runInfo = isSingleton && sup
           ? findRunByLabel(sup, args.runId)
-          : undefined
+          : findExternalRun(supervisorId, args.runId)
         if (runInfo) {
           const liveStatus = await queryLiveStatus(client, runInfo.runtimeId)
           return shapeStatusResult(await buildRunStatus(runInfo, liveStatus), args.view)
@@ -389,6 +390,7 @@ async function executeStatusTool(
           {
             run_id: args.runId,
             label: args.runId,
+            prefer_fallback_run_id: true,
             runtime_id: stringField(liveStatus ?? {}, 'runtime_id', 'id'),
             session_id:
               (sentinel?.SESSION as string) ??
@@ -400,16 +402,31 @@ async function executeStatusTool(
       }
 
       const list = await client.list()
-      return list.map((entry: any) => shapeStatusResult(buildBaseStatus(
-        entry,
-        {
-          run_id: String(entry.run_id ?? entry.runtime_id ?? entry.id ?? ''),
-          label: String(entry.label ?? entry.runtime_id ?? entry.id ?? ''),
-          runtime_id: String(entry.runtime_id ?? entry.id ?? ''),
-          session_id: entry.session_id as string | undefined,
-        },
-        translateStatus(rawStatusPhase(entry), null),
-      ), args.view))
+      if (!isSingleton) listExternalRuns(supervisorId)
+      const results: StatusResult[] = []
+      for (const entry of list) {
+        const entryId = String(entry.runtime_id ?? entry.id ?? '')
+        const runInfo = !isSingleton
+          ? findExternalRun(supervisorId, entryId)
+            ?? findExternalRun(supervisorId, String(entry.run_id ?? ''))
+            ?? findExternalRun(supervisorId, String(entry.label ?? ''))
+          : undefined
+        if (runInfo) {
+          results.push(shapeStatusResult(await buildRunStatus(runInfo, entry), args.view))
+          continue
+        }
+        results.push(shapeStatusResult(buildBaseStatus(
+          entry,
+          {
+            run_id: String(entry.run_id ?? entryId),
+            label: String(entry.label ?? entryId),
+            runtime_id: entryId,
+            session_id: entry.session_id as string | undefined,
+          },
+          translateStatus(rawStatusPhase(entry), null),
+        ), args.view))
+      }
+      return results
     } finally {
       if (!isSingleton) {
         client.close()

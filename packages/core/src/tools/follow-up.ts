@@ -6,6 +6,7 @@ import type { SpawnParams, ThinkingLevel } from '../client.js'
 import { ensureRunPaths, runsRoot } from '../paths.js'
 import { validateRunId } from './validate.js'
 import { getSupervisorClient as realGetSupervisorClient } from './get-supervisor-client.js'
+import { findExternalRun, registerExternalRun } from './run-registry.js'
 
 export interface FollowUpToolArgs {
   runId: string
@@ -17,6 +18,7 @@ export interface FollowUpToolArgs {
 export interface FollowUpToolResult {
   run_id: string
   label: string
+  runtime_id?: string
 }
 
 function findRunByLabel(sup: Supervisor, runId: string): RunInfo | undefined {
@@ -97,7 +99,7 @@ async function executeFollowUpTool(
   getSupervisorClient: typeof realGetSupervisorClient,
 ): Promise<FollowUpToolResult> {
   if (args.supervisorId) {
-    const { client, isSingleton, sup } = await getSupervisorClient(args.supervisorId)
+    const { client, isSingleton, sup, supervisorId } = await getSupervisorClient(args.supervisorId)
     try {
       validateRunId(args.runId)
 
@@ -105,6 +107,8 @@ async function executeFollowUpTool(
       let runInfo: RunInfo | undefined
       if (isSingleton && sup) {
         runInfo = findRunByLabel(sup, args.runId)
+      } else {
+        runInfo = findExternalRun(supervisorId, args.runId)
       }
       const fallbackSessionId = runInfo?.sessionId
 
@@ -162,15 +166,10 @@ async function executeFollowUpTool(
 
       const followUpRunId = crypto.randomUUID()
       const followUpLabel = args.label ?? `${args.runId}-followup`
-      const { sentinelPath: followUpSentinelPath, eventLogPath } =
-        ensureRunPaths(followUpRunId)
-
-      const spawnParams: Record<string, unknown> = {
+      const spawnParams: SpawnParams = {
         prompt: args.message,
         label: followUpLabel,
         session_id: sessionId,
-        sentinel_file: followUpSentinelPath,
-        on_event: eventLogPath,
       }
       if (agent) spawnParams.agent = agent
       if (backend) spawnParams.backend = backend
@@ -180,14 +179,52 @@ async function executeFollowUpTool(
       if (agentProfile) spawnParams.agent_profile = agentProfile
       if (autoApprove === true) spawnParams.auto_approve = true
 
+      if (isSingleton && sup) {
+        const followUpRun = await sup.spawn(spawnParams, followUpRunId, {
+          rosterFile: runInfo?.rosterFile,
+          rosterEntry: runInfo?.rosterEntry,
+          effectiveAgent: agent,
+          effectiveModel: model,
+          effectiveBackend: backend,
+        })
+        return {
+          run_id: followUpRun.runId,
+          label: followUpRun.label,
+          runtime_id: followUpRun.runtimeId,
+        }
+      }
+
+      const { sentinelPath: followUpSentinelPath, eventLogPath } =
+        ensureRunPaths(followUpRunId)
+      spawnParams.sentinel_file = followUpSentinelPath
+      spawnParams.on_event = eventLogPath
       const result = await client.spawn(spawnParams)
-      // With an external supervisor there is no local Supervisor.run map to
-      // translate our filesystem UUID back to the control-plane runtime. As
-      // spawnTool does, expose the runtime ID so status/permission calls can
-      // address the follow-up directly.
-      return {
-        run_id: (result.runtime_id as string | undefined) ?? followUpRunId,
+      const runtimeId = value(result.runtime_id)
+      registerExternalRun({
+        runId: followUpRunId,
         label: followUpLabel,
+        supervisorId,
+        sentinelPath: followUpSentinelPath,
+        eventLogPath,
+        runtimeId,
+        sessionId: value(result.session_id) ?? sessionId,
+        agent,
+        model,
+        backend,
+        effectiveAgent: agent,
+        effectiveModel: model,
+        effectiveBackend: backend,
+        rosterFile: runInfo?.rosterFile,
+        rosterEntry: runInfo?.rosterEntry,
+        thinking,
+        dir,
+        agentProfile,
+        autoApprove,
+      })
+      return {
+        run_id: followUpRunId,
+        label: followUpLabel,
+        runtime_id: runtimeId,
       }
     } finally {
       if (!isSingleton) {
@@ -274,7 +311,11 @@ async function executeFollowUpTool(
     effectiveBackend: backend,
   })
 
-  return { run_id: followUpRun.runId, label: followUpRun.label }
+  return {
+    run_id: followUpRun.runId,
+    label: followUpRun.label,
+    runtime_id: followUpRun.runtimeId,
+  }
 }
 
 export function createFollowUpTool(

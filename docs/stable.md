@@ -113,10 +113,10 @@ cat >/tmp/avenor-roster.json <<'JSON'
   }
 }
 JSON
-avenor control --socket /tmp/avenor-stable.sock spawn \\
-  --prompt "Analyze this repository" \\
-  --dir "$PWD" \\
-  --roster-file /tmp/avenor-roster.json \\
+avenor control --socket /tmp/avenor-stable.sock spawn \
+  --prompt "Analyze this repository" \
+  --dir "$PWD" \
+  --roster-file /tmp/avenor-roster.json \
   --roster-entry planner
 ```
 

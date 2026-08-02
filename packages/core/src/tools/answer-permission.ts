@@ -2,6 +2,7 @@ import { Supervisor } from '../supervisor.js'
 import { getSupervisorClient } from './get-supervisor-client.js'
 import { asRecord, stringField } from '../value-fields.js'
 import { validateRunId } from './validate.js'
+import { findExternalRun } from './run-registry.js'
 
 function findRunByLabel(sup: Supervisor, runId: string): { label: string; runtimeId?: string } | undefined {
   const runs = (sup as any).runs as Map<string, { label: string; runtimeId?: string }>
@@ -42,7 +43,11 @@ export async function answerPermissionTool(args: {
 
   try {
     validateRunId(args.runId)
-    const runInfo = sup ? findRunByLabel(sup, args.runId) : undefined
+    const runInfo = sup
+      ? findRunByLabel(sup, args.runId)
+      : supervisorId
+        ? findExternalRun(supervisorId, args.runId)
+        : undefined
     const runtimeId = runInfo?.runtimeId ?? args.runId
     if (!requestId) {
       const liveStatus = await client.status(runtimeId)

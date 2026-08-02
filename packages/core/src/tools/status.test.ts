@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, mock } from 'bun:test'
+import * as crypto from 'node:crypto'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -33,6 +34,8 @@ const getSupervisorClientMock = mock(async () => ({
 }))
 
 const { shapeStatusResult, createStatusTool } = await import('./status.js')
+const { createSpawnTool } = await import('./spawn.js')
+const { forgetExternalRuns } = await import('./run-registry.js')
 const statusTool = createStatusTool(getSupervisorClientMock)
 
 function fullStatus(): StatusResult {
@@ -303,45 +306,65 @@ describe('statusTool singleton registry', () => {
 })
 
 describe('statusTool external sentinel fallback', () => {
-  it('exposes STOP_REASON when a completed external runtime is unavailable', async () => {
+  it('uses the public spawn ID to expose STOP_REASON after live status disappears', async () => {
     const previousHome = process.env.AVENOR_HOME
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-status-external-'))
     process.env.AVENOR_HOME = home
-    const runId = 'external-conflict-run'
-    const runDir = path.join(home, 'runs', runId)
-    fs.mkdirSync(runDir, { recursive: true })
-    fs.writeFileSync(
-      path.join(runDir, 'sentinel.done'),
-      'FAILED\nSESSION=ses-external-rejected\nSTOP_REASON=session_id_conflict\nEXIT_CODE=1\n',
-    )
-
+    const supervisorId = `/tmp/external-supervisor-${crypto.randomUUID()}.sock`
+    let spawnParams: Record<string, unknown> | undefined
+    const externalSpawnMock = mock(async (params: Record<string, unknown>) => {
+      spawnParams = params
+      return { runtime_id: 'rt-external-conflict' }
+    })
     const externalStatusMock = mock(async () => {
       throw new Error('completed runtime removed')
     })
-    const externalListMock = mock(async () => [])
+    const externalListMock = mock(async () => {
+      throw new Error('completed runtime not listed')
+    })
     const externalCloseMock = mock(() => {})
-    const externalStatusTool = createStatusTool(mock(async () => ({
+    const getExternalClient = mock(async () => ({
       client: {
+        spawn: externalSpawnMock,
         status: externalStatusMock,
         list: externalListMock,
         close: externalCloseMock,
       },
       isSingleton: false,
       sup: null,
-      supervisorId: '/tmp/external-supervisor.sock',
-    })) as any)
+      supervisorId,
+    })) as any
+    const externalSpawnTool = createSpawnTool(getExternalClient)
+    const externalStatusTool = createStatusTool(getExternalClient)
 
     try {
+      const spawned = await externalSpawnTool({
+        label: 'external conflict',
+        prompt: 'start',
+        supervisorId,
+      })
+      expect(spawned.run_id).not.toBe(spawned.runtime_id)
+      expect(spawnParams?.sentinel_file).toBe(
+        path.join(home, 'runs', spawned.run_id, 'sentinel.done'),
+      )
+      fs.writeFileSync(
+        String(spawnParams?.sentinel_file),
+        'FAILED\nSESSION=ses-external-rejected\nSTOP_REASON=session_id_conflict\nEXIT_CODE=1\n',
+      )
+      forgetExternalRuns(supervisorId)
+
       const result = await externalStatusTool({
-        runId,
-        supervisorId: '/tmp/external-supervisor.sock',
+        runId: spawned.run_id,
+        supervisorId,
       })
 
-      expect(externalStatusMock).toHaveBeenCalledWith(runId)
-      expect(externalListMock).toHaveBeenCalledTimes(1)
-      expect(externalCloseMock).toHaveBeenCalledTimes(1)
+      expect(externalStatusMock).toHaveBeenCalledWith(spawned.runtime_id)
+      expect(externalListMock).not.toHaveBeenCalled()
+      expect(externalCloseMock).toHaveBeenCalledTimes(2)
       expect(result).toMatchObject({
-        run_id: runId,
+        run_id: spawned.run_id,
+        label: 'external conflict',
+        runtime_id: spawned.runtime_id,
         status: 'failed',
         session_id: 'ses-external-rejected',
         stop_reason: 'session_id_conflict',
