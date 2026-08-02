@@ -1,7 +1,7 @@
 [tasks.js-core-build]
 description = "Build @dougbots/avenor-core"
 dir = "packages/core"
-sources = ["src/**/*.ts", "tsdown.config.ts", "package.json"]
+sources = ["src/**/*.ts", "../../schemas/spawn_selection.umpire.json", "tsdown.config.ts", "package.json"]
 outputs = ["dist/index.js"]
 run = "bun run build"
 
