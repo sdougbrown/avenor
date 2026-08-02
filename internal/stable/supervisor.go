@@ -820,6 +820,7 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 
 func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg *looprunner.LoopConfig, maxRetries int, agent, agentProfile, model, thinking, serverURL, backend string) {
 	var brokerAttemptIDs []string
+	var brokerAttemptIDsMu sync.Mutex
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Fprintf(os.Stderr, "avenor stable: child %s panic: %v\n", child.id, r)
@@ -843,7 +844,11 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 		delete(s.runtimes, child.id)
 		s.controlMu.Unlock()
 		if s.broker != nil {
-			for _, rid := range brokerAttemptIDs {
+			brokerAttemptIDsMu.Lock()
+			ids := make([]string, len(brokerAttemptIDs))
+			copy(ids, brokerAttemptIDs)
+			brokerAttemptIDsMu.Unlock()
+			for _, rid := range ids {
 				s.broker.DeleteRun(rid)
 			}
 			s.broker.DeleteRun(child.id)
@@ -924,7 +929,9 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 			if s.broker != nil {
 				brokerRunID = broker.MakeToken()
 				s.broker.CreateRun(brokerRunID)
+				brokerAttemptIDsMu.Lock()
 				brokerAttemptIDs = append(brokerAttemptIDs, brokerRunID)
+				brokerAttemptIDsMu.Unlock()
 				attemptWriter = taggedWriter.withRecorder(broker.NewRecorder(s.broker, brokerRunID))
 			}
 
