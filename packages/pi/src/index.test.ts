@@ -422,6 +422,7 @@ describe('Avenor Pi extension', () => {
       registerCommand: () => {},
       registerMessageRenderer: () => {},
       sendUserMessage: () => {},
+      events: { emit: mock(() => {}), on: mock(() => () => {}) },
     }
 
     await createExtension({

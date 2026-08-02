@@ -100,7 +100,7 @@ describe('Avenor Pi renderers', () => {
       'Run: run-2',
       'Warning: wait timed out; the run is still active.',
       'Guidance: Call avenor_result with run_id "run-2".',
-      'Warning: final output may be truncated; use avenor_events with run_id "run-2" and path "/tmp/events.log".',
+      'Warning: final output may be truncated; retry avenor_result or read the durable event path "/tmp/events.log".',
       'Final output:',
       'partial answer',
       'Session: session-2',
@@ -356,5 +356,21 @@ describe('Avenor Pi renderers', () => {
     expect(rendered).toContain('[preview clipped:')
     expect(rendered).toContain('lines omitted')
     expect(rendered.indexOf('[preview clipped:')).toBeLessThan(rendered.indexOf('lines omitted'))
+  })
+
+  it('falls back when a result getter throws during rendering', () => {
+    let getterRead = false
+    const throwingDetails = Object.defineProperty({}, 'events', {
+      get() {
+        getterRead = true
+        throw new Error('intentional renderer test failure')
+      },
+    })
+
+    expect(text(renderEventsResult(result(throwingDetails), collapsed, theme, { run_id: 'run-1' }))).toBe([
+      'Avenor events result unavailable.',
+      'Retry the tool or use avenor_status/avenor_inspect.',
+    ].join('\n'))
+    expect(getterRead).toBe(true)
   })
 })

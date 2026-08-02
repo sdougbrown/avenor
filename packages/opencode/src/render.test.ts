@@ -56,7 +56,7 @@ describe('OpenCode Avenor result renderers', () => {
       'Run: run-1',
       'Warning: wait timed out; the run is still active.',
       'Guidance: Call avenor_result with run_id "run-1".',
-      'Warning: final output may be truncated; use avenor_events with run_id "run-1" and path "/tmp/events".',
+      'Warning: final output may be truncated; retry avenor_result or read the durable event path "/tmp/events".',
       'Final output:',
       'partial',
       'Session: session-1',
@@ -110,8 +110,6 @@ describe('OpenCode Avenor result renderers', () => {
       output: [
         'Events: run-1 — 2 events',
         'Filter: agent.message',
-        'Preview: Event 2: agent.message — hello',
-        '… 1 items omitted',
         'Event 2: agent.message — hello',
         'Event 3: session.end',
       ].join('\n'),
@@ -233,8 +231,7 @@ describe('OpenCode Avenor result renderers', () => {
       `Filter: ${Array.from({ length: 8 }, (_, index) => `type-${index}`).join(', ')} ${marker}`,
     )
     expect(eventLines.filter(line => line.startsWith('Event '))).toHaveLength(12)
-    expect(eventLines.filter(line => line === '… 13 items omitted')).toEqual(['… 13 items omitted'])
-    expect(eventLines.filter(line => line === marker)).toEqual([marker])
+    expect(eventLines.filter(line => line.startsWith('…'))).toEqual([marker])
     expect(eventsOutput.output).toContain('Event 0: event-0 — delta-0')
     expect(eventsOutput.output).not.toContain('event-12')
     expect(eventsOutput.metadata).toEqual({ ...expectedEvents, run_id: eventsRun, count: 14 })

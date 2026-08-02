@@ -259,7 +259,7 @@ function resultLines(details: unknown, args: ResultArgs): string[] | undefined {
     guidance(state, pending, runId),
     ...(result.output_truncated === true
       ? [stringValue(result.output_event_path)
-        ? `Warning: final output may be truncated; use avenor_events with run_id "${runId}" and path "${scalar(result.output_event_path)}".`
+        ? `Warning: final output may be truncated; retry avenor_result or read the durable event path "${scalar(result.output_event_path)}".`
         : `Warning: final output may be truncated; call avenor_events with run_id "${runId}".`]
       : []),
     ...(finalPreview ? ['Final output:', ...finalPreview] : ['Final output: unavailable.']),
@@ -320,8 +320,6 @@ function eventsLines(details: unknown, args: EventsArgs): string[] | undefined {
     ...(types.length > 0 ? [`Filter: ${displayedTypes}${types.length > COLLECTION_ITEMS ? ` ${itemMarker(types.length - COLLECTION_ITEMS)}` : ''}`] : []),
   ]
   if (events.length === 0) return [...lines, 'No events.']
-  lines.push(`Preview: ${eventRow(events[0])}`)
-  if (events.length > 1) lines.push(itemMarker(events.length - 1))
   const displayed = events.slice(0, STATUS_ROWS)
   lines.push(...displayed.map(eventRow))
   if (events.length > displayed.length) lines.push(itemMarker(events.length - displayed.length))

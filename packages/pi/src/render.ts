@@ -286,7 +286,7 @@ function resultLines(details: unknown, args: ResultArgs, expanded: boolean): str
     guidance(state, pending, runId),
     ...(result.output_truncated === true
       ? [stringValue(result.output_event_path)
-        ? `Warning: final output may be truncated; use avenor_events with run_id "${runId}" and path "${scalar(result.output_event_path)}".`
+        ? `Warning: final output may be truncated; retry avenor_result or read the durable event path "${scalar(result.output_event_path)}".`
         : `Warning: final output may be truncated; call avenor_events with run_id "${runId}".`]
       : []),
     ...(finalPreview ? ['Final output:', ...finalPreview] : ['Final output: unavailable.']),
