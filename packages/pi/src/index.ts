@@ -33,6 +33,13 @@ import type { TrackedRun, RunStatusEntry } from './types.js'
 import { TERMINAL_STATUSES, findLiveStatusForTrackedRun, formatRunLine, statusEmoji, decideCompletion } from './types.js'
 import { countNestedRuns } from './nested-count.js'
 import { resolveAgentProfile } from './agent-profile.js'
+import {
+  CHANNEL_POLL_COMPLETED,
+  CHANNEL_RUN_TERMINAL,
+  createPollCompletedPayload,
+  createRunTerminalPayload,
+  emitAvenorEvent,
+} from './events.js'
 
 const POLL_INTERVAL_MS = 3_000
 const INSPECT_LIMIT = 128
@@ -246,6 +253,7 @@ function toWatchRunRef(run: TrackedRun): WatchRunRef {
 
 export function createExtension(deps: ExtensionDeps = defaultDeps) {
   return async function (pi: ExtensionAPI) {
+    let telemetryGeneration = 0
     const trackedRuns = new Map<string, TrackedRun>()
     let pollingActive = false
     let pollingGeneration = 0
@@ -303,6 +311,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
           run.lastStatus = live
           entries.push({
             runId: run.runId,
+            supervisorId: run.supervisorId,
+            runtimeId: live.runtime_id ?? run.runtimeId,
             label: run.label,
             status: live.status,
             phase: live.phase,
@@ -325,6 +335,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
           run.lastStatus = result
           entries.push({
             runId: run.runId,
+            supervisorId: run.supervisorId,
+            runtimeId: result.runtime_id ?? run.runtimeId,
             label: run.label,
             status: result.status,
             phase: result.phase,
@@ -340,6 +352,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
           const previous = run.lastStatus
           entries.push({
             runId: run.runId,
+            supervisorId: run.supervisorId,
+            runtimeId: previous?.runtime_id ?? run.runtimeId,
             label: run.label,
             status: previous?.status ?? 'unavailable',
             phase: previous?.phase,
@@ -356,6 +370,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
       for (const live of liveMap.values()) {
         entries.push({
           runId: live.run_id,
+          runtimeId: live.runtime_id,
           label: live.label,
           status: live.status,
           phase: live.phase,
@@ -431,6 +446,15 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
 
         updateWidget(entries)
 
+        // Emit telemetry event for companion extensions. The payload is
+        // copied and frozen by createPollCompletedPayload so subscribers
+        // cannot mutate the official extension's local entries.
+        emitAvenorEvent(
+          pi.events,
+          CHANNEL_POLL_COMPLETED,
+          createPollCompletedPayload(entries, Date.now(), ++telemetryGeneration),
+        )
+
         for (const entry of entries) {
           const run = trackedRuns.get(entry.runId)
           if (!run) continue
@@ -470,6 +494,20 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
             } catch (err) {
               console.error('avenor tick: sendUserMessage failed', err)
             }
+            emitAvenorEvent(
+              pi.events,
+              CHANNEL_RUN_TERMINAL,
+              createRunTerminalPayload({
+                runId: entry.runId,
+                supervisorId: entry.supervisorId,
+                runtimeId: entry.runtimeId,
+                label: entry.label,
+                agent: entry.agent,
+                status: entry.status,
+                nestedCount: entry.nestedCount,
+                backend: entry.backend,
+              }),
+            )
             trackedRuns.delete(entry.runId)
           } else if (
             entry.pendingPermission &&
@@ -905,6 +943,19 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
 
         if (isTerminalStatus(status.status)) {
           const finalOutput = await resolveFinalOutput({ runId: result.run_id, supervisorId }, status)
+          emitAvenorEvent(
+            pi.events,
+            CHANNEL_RUN_TERMINAL,
+            createRunTerminalPayload({
+              runId: result.run_id,
+              supervisorId,
+              runtimeId: status.runtime_id ?? runRef.runtimeId,
+              label,
+              agent: params.agent,
+              status: status.status,
+              backend: status.backend,
+            }),
+          )
           trackedRuns.delete(result.run_id)
           return {
             content: [{ type: 'text', text: buildCompletionText({ runId: result.run_id, label }, status, finalOutput) }],
@@ -1001,6 +1052,18 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
           })
           completed = result.ready
           if (completed) {
+            emitAvenorEvent(
+              pi.events,
+              CHANNEL_RUN_TERMINAL,
+              createRunTerminalPayload({
+                runId: params.run_id,
+                supervisorId: tracked?.supervisorId ?? params.supervisor_id,
+                runtimeId: tracked?.runtimeId ?? result.runtime_id,
+                label: tracked?.label ?? result.label ?? params.run_id,
+                agent: tracked?.agent ?? 'unknown',
+                status: result.status ?? 'done',
+              }),
+            )
             trackedRuns.delete(params.run_id)
           } else if (tracked && result.status === 'waiting') {
             tracked.permissionNotified = true
@@ -1237,5 +1300,25 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
     })
   }
 }
+
+// Re-export the typed event channels, adapters, and payload types for
+// companion extensions. The adapters wrap Pi's shared event bus; they do not
+// own a second module-level bus.
+export {
+  CHANNEL_POLL_COMPLETED,
+  CHANNEL_RUN_TERMINAL,
+  createPollCompletedPayload,
+  createRunTerminalPayload,
+  emitAvenorEvent,
+  onAvenorEvent,
+} from './events.js'
+export type {
+  AvenorEventBus,
+  AvenorEventChannel,
+  AvenorEventMap,
+  AvenorRunStatus,
+  PollCompletedPayload,
+  RunTerminalPayload,
+} from './events.js'
 
 export default createExtension()

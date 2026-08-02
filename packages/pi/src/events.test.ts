@@ -1,0 +1,204 @@
+import { describe, expect, it, mock } from 'bun:test'
+import type { EventBus } from '@earendil-works/pi-coding-agent'
+import {
+  CHANNEL_POLL_COMPLETED,
+  CHANNEL_RUN_TERMINAL,
+  createPollCompletedPayload,
+  createRunTerminalPayload,
+  emitAvenorEvent,
+  onAvenorEvent,
+} from './events.js'
+import type { PollCompletedPayload, RunTerminalPayload } from './events.js'
+
+function createMockBus(): EventBus {
+  const handlers = new Map<string, Set<(data: unknown) => void>>()
+  return {
+    emit(channel: string, data: unknown): void {
+      for (const handler of Array.from(handlers.get(channel) ?? [])) {
+        try {
+          handler(data)
+        } catch (error) {
+          console.error(`mock event handler failed: ${String(error)}`)
+        }
+      }
+    },
+    on(channel: string, handler: (data: unknown) => void): () => void {
+      let set = handlers.get(channel)
+      if (!set) {
+        set = new Set()
+        handlers.set(channel, set)
+      }
+      set.add(handler)
+      return () => {
+        set?.delete(handler)
+        if (set?.size === 0) handlers.delete(channel)
+      }
+    },
+  }
+}
+
+describe('Avenor telemetry event bridge', () => {
+  it('uses namespaced channels', () => {
+    expect(CHANNEL_POLL_COMPLETED).toBe('avenor:poll:completed')
+    expect(CHANNEL_RUN_TERMINAL).toBe('avenor:run:terminal')
+  })
+
+  it('delivers typed poll payloads through the injected Pi event bus', () => {
+    const bus = createMockBus()
+    const received: PollCompletedPayload[] = []
+    const unsubscribe = onAvenorEvent(bus, CHANNEL_POLL_COMPLETED, payload => {
+      received.push(payload)
+    })
+
+    const payload = createPollCompletedPayload([
+      {
+        runId: 'run-1',
+        supervisorId: '/tmp/parent.sock',
+        runtimeId: 'runtime-1',
+        label: 'explore',
+        status: 'running',
+        agent: 'horse',
+        phaseLabel: 'reading',
+        backend: 'pi',
+        nestedCount: 3,
+      },
+    ], 1_700_000_000_000, 7)
+    emitAvenorEvent(bus, CHANNEL_POLL_COMPLETED, payload)
+
+    expect(received).toEqual([payload])
+    expect(received[0]?.entries[0]?.runId).toBe('run-1')
+    expect(received[0]?.generation).toBe(7)
+    unsubscribe()
+  })
+
+  it('delivers terminal payloads and supports unsubscribe', () => {
+    const bus = createMockBus()
+    const received: RunTerminalPayload[] = []
+    const handler = (payload: RunTerminalPayload) => received.push(payload)
+    const unsubscribe = onAvenorEvent(bus, CHANNEL_RUN_TERMINAL, handler)
+
+    emitAvenorEvent(bus, CHANNEL_RUN_TERMINAL, createRunTerminalPayload({
+      runId: 'run-1',
+      supervisorId: '/tmp/parent.sock',
+      runtimeId: 'runtime-1',
+      label: 'explore',
+      agent: 'horse',
+      status: 'done',
+      nestedCount: 5,
+      backend: 'pi',
+    }))
+    unsubscribe()
+    emitAvenorEvent(bus, CHANNEL_RUN_TERMINAL, createRunTerminalPayload({
+      runId: 'run-2',
+      label: 'review',
+      agent: 'mule',
+      status: 'failed',
+    }))
+
+    expect(received).toEqual([{
+      runId: 'run-1',
+      supervisorId: '/tmp/parent.sock',
+      runtimeId: 'runtime-1',
+      label: 'explore',
+      agent: 'horse',
+      status: 'done',
+      nestedCount: 5,
+      backend: 'pi',
+    }])
+  })
+
+  it('copies and freezes the bounded poll payload', () => {
+    const source = {
+      runId: 'run-1',
+      supervisorId: '/tmp/parent.sock',
+      runtimeId: 'runtime-1',
+      label: 'task-a',
+      status: 'running',
+      agent: 'horse',
+      phaseLabel: 'reading',
+      pendingPermission: false,
+      pid: 100,
+      backend: 'pi',
+      nestedCount: 2,
+      // Deliberately present at runtime to verify explicit field selection.
+      transcript: 'not-public',
+      final_output: 'not-public',
+    } as any
+
+    const payload = createPollCompletedPayload([source], 1, 1)
+    expect(payload.entries).toEqual([{
+      runId: 'run-1',
+      supervisorId: '/tmp/parent.sock',
+      runtimeId: 'runtime-1',
+      label: 'task-a',
+      status: 'running',
+      agent: 'horse',
+      phaseLabel: 'reading',
+      pendingPermission: false,
+      pid: 100,
+      backend: 'pi',
+      nestedCount: 2,
+    }])
+    expect(payload.entries[0]).not.toHaveProperty('transcript')
+    expect(payload.entries[0]).not.toHaveProperty('final_output')
+    expect(Object.isFrozen(payload)).toBe(true)
+    expect(Object.isFrozen(payload.entries)).toBe(true)
+    expect(Object.isFrozen(payload.entries[0])).toBe(true)
+  })
+
+  it('copies and freezes terminal payloads', () => {
+    const payload = createRunTerminalPayload({
+      runId: 'run-1',
+      supervisorId: '/tmp/parent.sock',
+      runtimeId: 'runtime-1',
+      label: 'task-a',
+      agent: 'horse',
+      status: 'done',
+      backend: 'pi',
+    })
+
+    expect(payload).toEqual({
+      runId: 'run-1',
+      supervisorId: '/tmp/parent.sock',
+      runtimeId: 'runtime-1',
+      label: 'task-a',      agent: 'horse',
+      status: 'done',
+      backend: 'pi',
+    })
+    expect(Object.isFrozen(payload)).toBe(true)
+  })
+
+  it('forwards handlers to the shared bus without owning global state', () => {
+    const emit = mock<(channel: string, data: unknown) => void>()
+    const unsubscribe = mock(() => {})
+    const on = mock<(channel: string, handler: (data: unknown) => void) => () => void>(() => unsubscribe)
+    const bus: EventBus = { emit, on }
+    const handler = () => {}
+
+    const returned = onAvenorEvent(bus, CHANNEL_POLL_COMPLETED, handler)
+    emitAvenorEvent(bus, CHANNEL_POLL_COMPLETED, {
+      entries: [],
+      timestamp: 1,
+      generation: 1,
+    })
+    returned()
+
+    expect(on).toHaveBeenCalledWith(CHANNEL_POLL_COMPLETED, handler)
+    expect(emit).toHaveBeenCalledWith(CHANNEL_POLL_COMPLETED, {
+      entries: [],
+      timestamp: 1,
+      generation: 1,
+    })
+    expect(unsubscribe).toHaveBeenCalled()
+  })
+
+  it('keeps separate subscriptions isolated by channel', () => {
+    const bus = createMockBus()
+    const calls: string[] = []
+    onAvenorEvent(bus, CHANNEL_POLL_COMPLETED, () => calls.push('poll'))
+    onAvenorEvent(bus, CHANNEL_RUN_TERMINAL, () => calls.push('terminal'))
+
+    emitAvenorEvent(bus, CHANNEL_POLL_COMPLETED, { entries: [], timestamp: 1, generation: 1 })
+    expect(calls).toEqual(['poll'])
+  })
+})

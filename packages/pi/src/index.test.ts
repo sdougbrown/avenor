@@ -153,6 +153,10 @@ describe('Avenor Pi extension', () => {
     const registeredRenderers: string[] = []
     const eventHandlers: Map<string, any[]> = new Map()
 
+    const mockBus = {
+      emit: mock(() => {}),
+      on: mock(() => () => {}),
+    }
     const mockPi = {
       on: (event: string, handler: any) => {
         eventHandlers.set(event, [...(eventHandlers.get(event) ?? []), handler])
@@ -167,6 +171,7 @@ describe('Avenor Pi extension', () => {
         registeredRenderers.push(type)
       },
       sendUserMessage: mock(() => {}),
+      events: mockBus,
     }
 
     const statusToolMock = mock(async () => ({ run_id: 'run-1', label: 'demo', status: 'running', runtime_id: 'rt-1' }))
@@ -337,6 +342,7 @@ describe('Avenor Pi extension', () => {
       registerCommand: () => {},
       registerMessageRenderer: () => {},
       sendUserMessage: () => {},
+      events: { emit: mock(() => {}), on: mock(() => () => {}) },
     }
 
     await createExtension({
