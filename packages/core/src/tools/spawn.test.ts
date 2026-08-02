@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it, mock } from 'bun:test'
+import * as fs from 'node:fs'
 import * as net from 'node:net'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import type { SpawnParams } from '../client.js'
 import { socketsRoot } from '../paths.js'
 
-const { spawnTool } = await import('./spawn.js')
+const { createSpawnTool, spawnTool } = await import('./spawn.js')
 const { Supervisor } = await import('../supervisor.js')
 
 type SpawnForwardingParams = Parameters<typeof spawnTool>[0]
@@ -128,6 +129,30 @@ describe('spawnTool with an explicit supervisor', () => {
       }
     })
   }
+
+  it('does not close a client marked singleton on the RPC fallback', async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-mcp-spawn-singleton-test-'))
+    const previousHome = process.env.AVENOR_HOME
+    const spawn = mock(async () => ({ runtime_id: 'rt-singleton-fallback' }))
+    const close = mock(() => {})
+    const singletonFallbackTool = createSpawnTool(mock(async () => ({
+      client: { spawn, close },
+      isSingleton: true,
+      sup: null,
+      supervisorId: '/tmp/avenor-mcp-singleton.sock',
+    })) as any)
+
+    try {
+      process.env.AVENOR_HOME = home
+      const result = await singletonFallbackTool({ supervisorId: '/tmp/avenor-mcp-singleton.sock' })
+      expect(result.runtime_id).toBe('rt-singleton-fallback')
+      expect(close).not.toHaveBeenCalled()
+    } finally {
+      if (previousHome === undefined) delete process.env.AVENOR_HOME
+      else process.env.AVENOR_HOME = previousHome
+      fs.rmSync(home, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('spawnTool selector validation', () => {

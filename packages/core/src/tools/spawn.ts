@@ -135,7 +135,7 @@ async function executeSpawnTool(
         parent_token: stringValue(result.parent_token),
       }
     } finally {
-      client.close()
+      if (!isSingleton) client.close()
     }
   }
 

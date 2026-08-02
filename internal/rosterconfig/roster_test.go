@@ -43,6 +43,54 @@ func TestLoadValidRosterAndLookup(t *testing.T) {
 	}
 }
 
+func TestLoadForConfigResolvesDeclaredInheritedAndFallbackRoster(t *testing.T) {
+	dir := t.TempDir()
+	writeFile := func(name, contents string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	configPath := filepath.Join(dir, "workflow.json")
+	fallbackPath := writeFile("fallback.json", `{"entry":{"backend":"fallback","agent":"fallback"}}`)
+	writeFile("declared.json", `{"entry":{"backend":"declared","agent":"declared"}}`)
+	inherited := Config{"entry": {Backend: "inherited", Agent: "inherited"}}
+
+	declared, err := LoadForConfig(configPath, "declared.json", &inherited, fallbackPath)
+	if err != nil {
+		t.Fatalf("declared roster = %v", err)
+	}
+	if entry, _ := declared.Lookup("entry"); entry.Backend != "declared" {
+		t.Fatalf("declared roster = %+v, want declared", entry)
+	}
+
+	gotInherited, err := LoadForConfig(configPath, "", &inherited, fallbackPath)
+	if err != nil {
+		t.Fatalf("inherited roster = %v", err)
+	}
+	if gotInherited != &inherited {
+		t.Fatal("inherited roster was not preserved")
+	}
+
+	fallback, err := LoadForConfig(configPath, "", nil, fallbackPath)
+	if err != nil {
+		t.Fatalf("fallback roster = %v", err)
+	}
+	if entry, _ := fallback.Lookup("entry"); entry.Backend != "fallback" {
+		t.Fatalf("fallback roster = %+v, want fallback", entry)
+	}
+
+	empty, err := LoadForConfig(configPath, "", nil, "")
+	if err != nil {
+		t.Fatalf("empty roster = %v", err)
+	}
+	if empty != nil {
+		t.Fatalf("empty roster = %+v, want nil", empty)
+	}
+}
+
 func TestLoadRejectsInvalidEntries(t *testing.T) {
 	tests := []struct {
 		name    string

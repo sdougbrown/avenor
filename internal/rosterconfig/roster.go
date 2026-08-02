@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -54,6 +55,26 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("validate roster config %s: %w", path, err)
 	}
 	return &config, nil
+}
+
+// LoadForConfig resolves the effective roster for a workflow config. A
+// declared roster path is relative to configPath; when absent, inherited takes
+// precedence over fallbackPath.
+func LoadForConfig(configPath, declaredPath string, inherited *Config, fallbackPath string) (*Config, error) {
+	rosterPath := declaredPath
+	if rosterPath != "" {
+		if !filepath.IsAbs(rosterPath) {
+			rosterPath = filepath.Join(filepath.Dir(configPath), rosterPath)
+		}
+	} else if inherited != nil {
+		return inherited, nil
+	} else {
+		rosterPath = fallbackPath
+	}
+	if rosterPath == "" {
+		return nil, nil
+	}
+	return Load(rosterPath)
 }
 
 // Validate checks every roster name and entry in the configuration.

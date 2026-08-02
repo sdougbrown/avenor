@@ -59,7 +59,7 @@ func LoadLoopConfigWithRoster(path string, inherited *rosterconfig.Config, fallb
 		return nil, nil, err
 	}
 
-	roster, err := loadRoster(path, cfg.RosterFile, inherited, fallbackPath)
+	roster, err := rosterconfig.LoadForConfig(path, cfg.RosterFile, inherited, fallbackPath)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -68,23 +68,6 @@ func LoadLoopConfigWithRoster(path string, inherited *rosterconfig.Config, fallb
 	}
 
 	return &cfg, roster, nil
-}
-
-func loadRoster(configPath, declaredPath string, inherited *rosterconfig.Config, fallbackPath string) (*rosterconfig.Config, error) {
-	rosterPath := declaredPath
-	if rosterPath != "" {
-		if !filepath.IsAbs(rosterPath) {
-			rosterPath = filepath.Join(filepath.Dir(configPath), rosterPath)
-		}
-	} else if inherited != nil {
-		return inherited, nil
-	} else {
-		rosterPath = fallbackPath
-	}
-	if rosterPath == "" {
-		return nil, nil
-	}
-	return rosterconfig.Load(rosterPath)
 }
 
 func validateRosterEntries(roster *rosterconfig.Config, phases ...[]phaseconfig.Phase) error {
