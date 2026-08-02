@@ -89,6 +89,49 @@ function makeInspectResult(statusOverrides: Partial<StatusResult> = {}): Inspect
   }
 }
 
+async function createPollingHarness(statusTool: any, observeRun = mock(() => null)) {
+  const registeredTools: Record<string, any> = {}
+  const registeredCommands: Record<string, any> = {}
+  const eventHandlers: Record<string, any> = {}
+  const setStatus = mock((..._args: any[]) => {})
+  const setWidget = mock((..._args: any[]) => {})
+  const notify = mock((..._args: any[]) => {})
+  const emitted: Array<[string, unknown]> = []
+  let resolvePollCompleted: (() => void) | undefined
+  const waitForPoll = () => new Promise<void>(resolve => { resolvePollCompleted = resolve })
+  const mockPi = {
+    on: (event: string, handler: any) => { eventHandlers[event] = handler },
+    registerTool: (definition: { name: string }) => { registeredTools[definition.name] = definition },
+    registerCommand: (name: string, definition: any) => { registeredCommands[name] = definition },
+    registerMessageRenderer: () => {},
+    sendUserMessage: () => {},
+    events: {
+      emit: mock((channel: string, payload: unknown) => {
+        emitted.push([channel, payload])
+        if (channel === 'avenor:poll:completed') resolvePollCompleted?.()
+      }),
+      on: mock(() => () => {}),
+    },
+  }
+  await createExtension({
+    spawnTool: mock(async () => ({ run_id: 'run-1', label: 'demo', supervisor_id: '/tmp/sock', runtime_id: 'rt-1' })),
+    statusTool,
+    eventsTool: mock(async () => ({ events: [] })),
+    answerPermissionTool: mock(async () => ({ ok: true })),
+    followUpTool: mock(async () => ({ run_id: 'run-2', label: 'follow-up' })),
+    inspectTool: mock(async () => makeInspectResult({ status: 'running' })),
+    resultTool: mock(async () => ({ run_id: 'run-1', label: 'demo', status: 'done', ready: true })),
+    shutdownTool: mock(async () => ({ ok: true })),
+    observeRun,
+    dial: mock(async () => ({ close() {} })),
+    Supervisor: class {} as any,
+  } as any)(mockPi as any)
+
+  const ctx = { cwd: '/tmp', ui: { setStatus, setWidget, notify } }
+  await eventHandlers.session_start({}, ctx)
+  return { ctx, emitted, eventHandlers, notify, registeredCommands, registeredTools, setStatus, setWidget, waitForPoll }
+}
+
 describe('Avenor Pi extension', () => {
   it('exports a function', () => {
     expect(typeof extensionFactory).toBe('function')
@@ -199,90 +242,137 @@ describe('Avenor Pi extension', () => {
     expect(compactWhitespace('abcdefgh', 5)).toBe('abcd…')
   })
 
-  it('surfaces polling errors in the footer, event bus, and debug command', async () => {
-    const registeredTools: Record<string, any> = {}
-    const registeredCommands: Record<string, any> = {}
-    const eventHandlers: Record<string, any> = {}
-    const setStatus = mock((..._args: any[]) => {})
-    const setWidget = mock((..._args: any[]) => {})
-    const mockBus = {
-      emit: mock(() => {}),
-      on: mock(() => () => {}),
-    }
-    const mockPi = {
-      on: (event: string, handler: any) => {
-        eventHandlers[event] = handler
-      },
-      registerTool: (definition: { name: string }) => {
-        registeredTools[definition.name] = definition
-      },
-      registerCommand: (name: string, definition: any) => {
-        registeredCommands[name] = definition
-      },
-      registerMessageRenderer: () => {},
-      sendUserMessage: () => {},
-      events: mockBus,
-    }
-    let available = false
-    const statusToolMock = mock(async (args: { runId?: string } = {}) => {
-      if (available) {
-        return args.runId
-          ? { run_id: 'run-1', label: 'demo', status: 'running', runtime_id: 'rt-1' }
-          : []
-      }
-      throw new Error('write request: This socket has been ended by the other party')
-    })
+  it('emits polling errors through the event bus', async () => {
+    const statusTool = mock(async () => { throw new Error('socket ended') })
+    const harness = await createPollingHarness(statusTool)
+    const pollCompleted = harness.waitForPoll()
 
-    await createExtension({
-      spawnTool: mock(async () => ({ run_id: 'run-1', label: 'demo', supervisor_id: '/tmp/sock', runtime_id: 'rt-1' })),
-      statusTool: statusToolMock,
-      eventsTool: mock(async () => ({ events: [] })),
-      answerPermissionTool: mock(async () => ({ ok: true })),
-      followUpTool: mock(async () => ({ run_id: 'run-2', label: 'follow-up' })),
-      inspectTool: mock(async () => makeInspectResult({ status: 'running' })),
-      resultTool: mock(async () => ({ run_id: 'run-1', label: 'demo', status: 'done', ready: true })),
-      shutdownTool: mock(async () => ({ ok: true })),
-      observeRun: mock(() => null),
-      dial: mock(async () => ({ close() {} })),
-      Supervisor: class {} as any,
-    } as any)(mockPi as any)
-
-    const ctx = {
-      cwd: '/tmp',
-      ui: { setStatus, setWidget, notify: mock(() => {}) },
-    }
-    await eventHandlers.session_start({}, ctx)
-    await registeredTools.avenor_spawn.execute(
-      'tool-1',
-      { agent: 'explore', label: 'demo', wait: false },
-      undefined,
-      undefined,
-      ctx,
+    await harness.registeredTools.avenor_spawn.execute(
+      'tool-1', { agent: 'explore', label: 'demo', wait: false }, undefined, undefined, harness.ctx,
     )
-    await new Promise(resolve => setTimeout(resolve, 0))
+    await pollCompleted
 
-    expect(mockBus.emit).toHaveBeenCalledWith(
+    expect(harness.emitted).toContainEqual([
       CHANNEL_POLL_ERROR,
       expect.objectContaining({ source: 'singleton-list', count: 1 }),
-    )
-    expect(mockBus.emit).toHaveBeenCalledWith(
+    ])
+    expect(harness.emitted).toContainEqual([
       CHANNEL_POLL_ERROR,
       expect.objectContaining({ source: 'run-status', runId: 'run-1', count: 2 }),
+    ])
+    await harness.eventHandlers.session_shutdown()
+  })
+
+  it('shows and clears polling errors in the footer', async () => {
+    let available = false
+    const statusTool = mock(async (args: { runId?: string } = {}) => {
+      if (!available) throw new Error('socket ended')
+      return args.runId
+        ? { run_id: 'run-1', label: 'demo', status: 'running', runtime_id: 'rt-1' }
+        : []
+    })
+    const harness = await createPollingHarness(statusTool)
+    const pollCompleted = harness.waitForPoll()
+
+    await harness.registeredTools.avenor_spawn.execute(
+      'tool-1', { agent: 'explore', label: 'demo', wait: false }, undefined, undefined, harness.ctx,
     )
-    expect(setStatus.mock.calls.some(([name, value]) => name === 'avenor' && String(value).includes('errors:2'))).toBe(true)
+    await pollCompleted
+    expect(String(harness.setStatus.mock.calls.filter(([name]) => name === 'avenor').at(-1)?.[1])).toContain('errors:2')
 
     available = true
-    await registeredCommands['avenor-status'].handler('', ctx)
-    const recoveredStatus = setStatus.mock.calls.filter(([name]) => name === 'avenor').at(-1)
-    expect(String(recoveredStatus?.[1])).not.toContain('errors:')
+    await harness.registeredCommands['avenor-status'].handler('', harness.ctx)
+    expect(String(harness.setStatus.mock.calls.filter(([name]) => name === 'avenor').at(-1)?.[1])).not.toContain('errors:')
+    await harness.eventHandlers.session_shutdown()
+  })
 
-    await registeredCommands['avenor-errors'].handler('', ctx)
-    const errorWidget = setWidget.mock.calls.find(([name]) => name === 'avenor-errors')
-    expect(errorWidget?.[1]).toEqual([
+  it('shows recorded polling errors, then clears them', async () => {
+    const statusTool = mock(async () => { throw new Error('socket ended') })
+    const harness = await createPollingHarness(statusTool)
+    const pollCompleted = harness.waitForPoll()
+
+    await harness.registeredTools.avenor_spawn.execute(
+      'tool-1', { agent: 'explore', label: 'demo', wait: false }, undefined, undefined, harness.ctx,
+    )
+    await pollCompleted
+    await harness.registeredCommands['avenor-errors'].handler('', harness.ctx)
+    expect(harness.setWidget.mock.calls.find(([name]) => name === 'avenor-errors')?.[1]).toEqual([
       expect.stringContaining('failed to list singleton runs'),
       expect.stringContaining('statusTool failed while polling a run'),
     ])
-    await eventHandlers.session_shutdown()
+
+    await harness.registeredCommands['avenor-errors'].handler('', harness.ctx)
+    expect(harness.setWidget.mock.calls.filter(([name]) => name === 'avenor-errors').at(-1)?.[1]).toBeUndefined()
+    expect(harness.notify).toHaveBeenCalledWith('No recorded avenor polling errors', 'info')
+    await harness.eventHandlers.session_shutdown()
+  })
+
+  it('reports an empty polling-error history', async () => {
+    const harness = await createPollingHarness(mock(async () => []))
+
+    await harness.registeredCommands['avenor-errors'].handler('', harness.ctx)
+
+    expect(harness.setWidget).toHaveBeenCalledWith('avenor-errors', undefined)
+    expect(harness.notify).toHaveBeenCalledWith('No recorded avenor polling errors', 'info')
+    await harness.eventHandlers.session_shutdown()
+  })
+
+  it('resets polling errors when polling stops before a restart', async () => {
+    const statusTool = mock(async () => { throw new Error('socket ended') })
+    const harness = await createPollingHarness(statusTool)
+    let pollCompleted = harness.waitForPoll()
+
+    await harness.registeredTools.avenor_spawn.execute(
+      'tool-1', { agent: 'explore', label: 'demo', wait: false }, undefined, undefined, harness.ctx,
+    )
+    await pollCompleted
+    await harness.eventHandlers.session_shutdown()
+    await harness.eventHandlers.session_start({}, harness.ctx)
+
+    const emittedBeforeRestart = harness.emitted.length
+    pollCompleted = harness.waitForPoll()
+    await harness.registeredTools.avenor_spawn.execute(
+      'tool-2', { agent: 'mule', label: 'restart', wait: false }, undefined, undefined, harness.ctx,
+    )
+    await pollCompleted
+
+    const restartErrors = harness.emitted.slice(emittedBeforeRestart)
+      .filter(([channel]) => channel === CHANNEL_POLL_ERROR)
+    expect(restartErrors[0]?.[1]).toEqual(expect.objectContaining({ count: 1 }))
+    await harness.eventHandlers.session_shutdown()
+  })
+
+  it('records spawn-status errors while wait:true falls back to polling', async () => {
+    const controller = new AbortController()
+    let releaseSingleton!: () => void
+    const singletonPending = new Promise<void>(resolve => { releaseSingleton = resolve })
+    let runStatusCalls = 0
+    const statusTool = mock(async (args: { runId?: string } = {}) => {
+      if (!args.runId) {
+        await singletonPending
+        return []
+      }
+      if (runStatusCalls++ === 1) controller.abort()
+      throw new Error('socket ended')
+    })
+    const harness = await createPollingHarness(statusTool)
+    const pollCompleted = harness.waitForPoll()
+
+    await harness.registeredTools.avenor_spawn.execute(
+      'tool-1',
+      { agent: 'explore', label: 'demo', wait: true },
+      controller.signal,
+      undefined,
+      harness.ctx,
+    )
+    releaseSingleton()
+    await pollCompleted
+
+    expect(harness.emitted).toContainEqual([
+      CHANNEL_POLL_ERROR,
+      expect.objectContaining({ source: 'spawn-status', runId: 'run-1', count: 1 }),
+    ])
+    await harness.eventHandlers.session_shutdown()
   })
 
   it('registers all expected tools, commands, renderers, and event handlers', async () => {

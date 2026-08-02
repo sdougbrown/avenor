@@ -99,10 +99,10 @@ export interface AvenorEventMap {
 export type AvenorEventChannel = keyof AvenorEventMap
 export type AvenorEventBus = Pick<EventBus, 'emit' | 'on'>
 
-/** Derive a stable non-connectable scope from a local supervisor socket. */
+/** Maximum sanitized error text exposed to companion extensions. */
 const POLL_ERROR_TEXT_CHARS = 600
 
-function boundedText(value: unknown): string {
+function sanitizeAndBoundText(value: unknown): string {
   const text = sanitizeText(String(value)).trim()
   if (!text) return 'unknown error'
   return text.length <= POLL_ERROR_TEXT_CHARS
@@ -188,8 +188,8 @@ export function createPollErrorPayload(
   return Object.freeze({
     source: payload.source,
     ...(payload.runId !== undefined && { runId: payload.runId }),
-    message: boundedText(payload.message),
-    error: boundedText(payload.error),
+    message: sanitizeAndBoundText(payload.message),
+    error: sanitizeAndBoundText(payload.error),
     count: payload.count,
     timestamp: payload.timestamp,
   })

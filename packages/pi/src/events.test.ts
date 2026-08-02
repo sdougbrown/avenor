@@ -244,6 +244,52 @@ describe('Avenor telemetry event bridge', () => {
     expect(Object.isFrozen(payload)).toBe(true)
   })
 
+  it('uses unknown error for empty text after sanitizing', () => {
+    const payload = createPollErrorPayload({
+      source: 'run-status',
+      message: '\u001b[31m\n\t  \n',
+      error: '\u001b[31m\u001b[0m',
+      count: 1,
+      timestamp: 1_700_000_000_000,
+    })
+
+    expect(payload.message).toBe('unknown error')
+    expect(payload.error).toBe('unknown error')
+    expect(Object.isFrozen(payload)).toBe(true)
+  })
+
+  it('sanitizes message while bounding error independently', () => {
+    const longMessage = 'a'.repeat(700)
+    const longError = 'b'.repeat(800)
+    const payload = createPollErrorPayload({
+      source: 'singleton-list',
+      message: longMessage,
+      error: longError,
+      count: 2,
+      timestamp: 1_700_000_000_000,
+    })
+
+    expect(payload.message).toHaveLength(600)
+    expect(payload.message).toEndWith('…')
+    expect(payload.error).toHaveLength(600)
+    expect(payload.error).toEndWith('…')
+    expect(payload.source).toBe('singleton-list')
+    expect(payload.count).toBe(2)
+  })
+
+  it('preserves clean text under the bound limit', () => {
+    const payload = createPollErrorPayload({
+      source: 'spawn-status',
+      message: 'short msg',
+      error: 'short err',
+      count: 1,
+      timestamp: 1_700_000_000_000,
+    })
+
+    expect(payload.message).toBe('short msg')
+    expect(payload.error).toBe('short err')
+  })
+
   it('forwards handlers to the shared bus without owning global state', () => {
     const emit = mock<(channel: string, data: unknown) => void>()
     const unsubscribe = mock(() => {})

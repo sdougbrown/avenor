@@ -646,10 +646,11 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
     async function stopPolling(): Promise<void> {
       pollingActive = false
       pollingGeneration++
+      pollingErrorCount = 0
+      pollingErrors.length = 0
       lastStatusEntries = []
       await pollInFlight?.catch(() => {})
-      sessionCtx?.ui.setStatus('avenor', '')
-      sessionCtx?.ui.setWidget('avenor-status', undefined)
+      updateWidget([])
     }
 
     function createWatchDeps(): WatchDeps {
@@ -1384,7 +1385,6 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
       async execute(_toolCallId, params) {
         await stopPolling()
         trackedRuns.clear()
-        clearPollingErrors()
         const result = await deps.shutdownTool({
           supervisorId: params.supervisor_id,
           force: params.force,
@@ -1424,11 +1424,12 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
           return
         }
 
-        ctx.ui.setWidget('avenor-errors', pollingErrors.map(error => {
+        const errorLines = pollingErrors.map(error => {
           const run = error.runId ? ` [${error.runId}]` : ''
           const timestamp = new Date(error.timestamp).toLocaleTimeString()
           return `${timestamp} ${error.message}${run}: ${error.error}`
-        }))
+        })
+        ctx.ui.setWidget('avenor-errors', errorLines)
         clearPollingErrors()
       },
     })
