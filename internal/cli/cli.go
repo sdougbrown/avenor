@@ -48,6 +48,8 @@ const (
 // for unattended automation scenarios.
 const DefaultPermissionClaimTimeout = 0
 
+const permissionResolverJoinTimeout = 5 * time.Second
+
 type ServerDiscovery struct {
 	URL    string
 	Source string
@@ -1019,6 +1021,8 @@ type SessionWaitDeps struct {
 	// permissionResultSent is a test synchronization hook invoked after a
 	// resolver publishes its result to permissionDone.
 	permissionResultSent func()
+	// permissionJoinTimeout shortens bounded provider joins in tests.
+	permissionJoinTimeout time.Duration
 	// PreparePermissionClaim lets stable runtimes serialize a reused request ID
 	// with direct provider completion. Nil uses ControlServer directly.
 	PreparePermissionClaim func(context.Context, string, string, control.PermissionResolverState, []any) bool
@@ -1037,24 +1041,38 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 	var fullReply strings.Builder
 	eventChClosed := false
 	tracker := newStatusTracker(cfg.SessionID, cfg.RunID, cfg.RunLabel)
+	permissionJoinTimeout := permissionResolverJoinTimeout
+	if deps.permissionJoinTimeout > 0 {
+		permissionJoinTimeout = deps.permissionJoinTimeout
+	}
 
-	// Every return path must join an in-flight permission resolver. Cancelling
-	// its dedicated context first lets progress/configured timeouts stop file
-	// polling without depending on the caller to cancel ctx after we return.
+	// Every return path attempts to join an in-flight permission resolver.
+	// Context cancellation stops cooperative resolvers; the bound prevents a
+	// third-party provider that ignores context from deadlocking teardown.
 	synchronizePermission := func() {
 		cancelPermission()
-		if permissionDone != nil {
-			<-permissionDone
-			permissionDone = nil
+		if permissionDone == nil {
+			return
 		}
+		timer := time.NewTimer(permissionJoinTimeout)
+		defer timer.Stop()
+		select {
+		case <-permissionDone:
+		case <-timer.C:
+		}
+		permissionDone = nil
 	}
 	defer synchronizePermission()
 	terminate := func(stopReason string) sessionResult {
 		// The termination branch owns the outcome. In particular, the expected
 		// context.Canceled result from the resolver must not replace "cancelled"
-		// with a generic permission-handler failure.
+		// with a generic permission-handler failure. Issue provider cancellation
+		// before joining: some providers ignore the answer context and only
+		// unblock AnswerPermission when Cancel is called.
+		cancelPermission()
+		cancelProvider(provider, deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, deps.Stderr, permissionJoinTimeout)
 		synchronizePermission()
-		return cancelAndEnd(provider, deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, stopReason, deps.Stderr, bufferedUsage, fullReply.String(), finalReply.String())
+		return endSession(deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, stopReason, deps.Stderr, bufferedUsage, fullReply.String(), finalReply.String())
 	}
 
 	chunkBuf := digest.NewChunkBuffer()
@@ -1337,12 +1355,31 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 	}
 }
 
-func cancelAndEnd(provider runtime.Provider, writer EventSink, sessionID, runID, runLabel, stopReason string, stderr io.Writer, usage map[string]any, fullFinalOutput, lastBlockFinalReply string) sessionResult {
-	cancelCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+func cancelProvider(provider runtime.Provider, writer EventSink, sessionID, runID, runLabel string, stderr io.Writer, timeout time.Duration) {
+	cancelCtx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	if err := provider.Cancel(cancelCtx, sessionID); err != nil {
+	result := make(chan error, 1)
+	go func() {
+		result <- provider.Cancel(cancelCtx, sessionID)
+	}()
+
+	var err error
+	select {
+	case err = <-result:
+	case <-cancelCtx.Done():
+		err = cancelCtx.Err()
+	}
+	if err != nil {
 		emitErrorEvent(writer, sessionID, runID, "cancel", fmt.Sprintf("cancel session: %v", err), stderr, runLabel)
 	}
+}
+
+func cancelAndEnd(provider runtime.Provider, writer EventSink, sessionID, runID, runLabel, stopReason string, stderr io.Writer, usage map[string]any, fullFinalOutput, lastBlockFinalReply string) sessionResult {
+	cancelProvider(provider, writer, sessionID, runID, runLabel, stderr, permissionResolverJoinTimeout)
+	return endSession(writer, sessionID, runID, runLabel, stopReason, stderr, usage, fullFinalOutput, lastBlockFinalReply)
+}
+
+func endSession(writer EventSink, sessionID, runID, runLabel, stopReason string, stderr io.Writer, usage map[string]any, fullFinalOutput, lastBlockFinalReply string) sessionResult {
 	fields := map[string]any{
 		"stop_reason": stopReason,
 	}

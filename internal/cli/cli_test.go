@@ -1499,6 +1499,79 @@ func (f *blockingFakeProvider) AnswerPermission(ctx context.Context, sessionID, 
 	return nil
 }
 
+// cancelUnblocksPermissionProvider models providers whose AnswerPermission
+// ignores its context but is released by the session-level Cancel operation.
+type cancelUnblocksPermissionProvider struct {
+	cliFakeProvider
+	answerStarted  chan struct{}
+	cancelStarted  chan struct{}
+	answerReturned chan struct{}
+	cancelOnce     sync.Once
+}
+
+func newCancelUnblocksPermissionProvider() *cancelUnblocksPermissionProvider {
+	return &cancelUnblocksPermissionProvider{
+		answerStarted:  make(chan struct{}),
+		cancelStarted:  make(chan struct{}),
+		answerReturned: make(chan struct{}),
+	}
+}
+
+func (p *cancelUnblocksPermissionProvider) AnswerPermission(context.Context, string, string, runtime.PermissionResponse) error {
+	close(p.answerStarted)
+	<-p.cancelStarted
+	close(p.answerReturned)
+	return nil
+}
+
+func (p *cancelUnblocksPermissionProvider) Cancel(context.Context, string) error {
+	p.cancelOnce.Do(func() { close(p.cancelStarted) })
+	return nil
+}
+
+type nonCooperativePermissionProvider struct {
+	cliFakeProvider
+	answerStarted  chan struct{}
+	answerRelease  chan struct{}
+	answerReturned chan struct{}
+	cancelStarted  chan struct{}
+	cancelRelease  chan struct{}
+	cancelReturned chan struct{}
+	releaseOnce    sync.Once
+}
+
+func newNonCooperativePermissionProvider() *nonCooperativePermissionProvider {
+	return &nonCooperativePermissionProvider{
+		answerStarted:  make(chan struct{}),
+		answerRelease:  make(chan struct{}),
+		answerReturned: make(chan struct{}),
+		cancelStarted:  make(chan struct{}),
+		cancelRelease:  make(chan struct{}),
+		cancelReturned: make(chan struct{}),
+	}
+}
+
+func (p *nonCooperativePermissionProvider) AnswerPermission(context.Context, string, string, runtime.PermissionResponse) error {
+	close(p.answerStarted)
+	<-p.answerRelease
+	close(p.answerReturned)
+	return nil
+}
+
+func (p *nonCooperativePermissionProvider) Cancel(context.Context, string) error {
+	close(p.cancelStarted)
+	<-p.cancelRelease
+	close(p.cancelReturned)
+	return nil
+}
+
+func (p *nonCooperativePermissionProvider) release() {
+	p.releaseOnce.Do(func() {
+		close(p.answerRelease)
+		close(p.cancelRelease)
+	})
+}
+
 type sequentialPermissionProvider struct {
 	cliFakeProvider
 	mu             sync.Mutex
@@ -1536,6 +1609,212 @@ func (f *sequentialPermissionProvider) answers() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.answerIDs...)
+}
+
+func TestWaitForSessionTerminationCancelsBeforeJoiningPermissionAnswer(t *testing.T) {
+	tests := []struct {
+		name       string
+		trigger    string
+		stopReason string
+	}{
+		{name: "interrupt", trigger: "interrupt", stopReason: "cancelled"},
+		{name: "context", trigger: "context", stopReason: "cancelled"},
+		{name: "prompt cancellation", trigger: "prompt", stopReason: "cancelled"},
+		{name: "progress timeout", trigger: "progress", stopReason: "progress_timeout"},
+		{name: "configured timeout", trigger: "timeout", stopReason: "timeout"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			provider := newCancelUnblocksPermissionProvider()
+			writer, err := NewEventWriter("")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			interruptCh := make(chan struct{})
+			progressCh := make(chan time.Time, 1)
+			timeoutCh := make(chan time.Time, 1)
+			promptDone := make(chan error, 1)
+			eventCh := make(chan events.Event, 1)
+			eventCh <- events.Event{
+				Event:     "permission.request",
+				SessionID: "ses_cancel_answer",
+				Fields: map[string]any{
+					"request_id": "req_cancel_answer",
+					"options": []any{
+						map[string]any{"optionId": "allow", "kind": "allow"},
+					},
+				},
+			}
+
+			resultCh := make(chan sessionResult, 1)
+			waitDone := make(chan struct{})
+			t.Cleanup(func() {
+				provider.cancelOnce.Do(func() { close(provider.cancelStarted) })
+				cancel()
+				select {
+				case <-waitDone:
+				case <-time.After(time.Second):
+					t.Error("WaitForSession goroutine did not exit during cleanup")
+				}
+				if err := writer.Close(); err != nil {
+					t.Errorf("close writer: %v", err)
+				}
+			})
+			go func() {
+				defer close(waitDone)
+				resultCh <- WaitForSession(ctx, provider, SessionWaitConfig{
+					EventCh:     eventCh,
+					PromptDone:  promptDone,
+					InterruptCh: interruptCh,
+					SessionID:   "ses_cancel_answer",
+					RunID:       "run_cancel_answer",
+					AutoApprove: true,
+					Timeout:     timeoutCh,
+				}, SessionWaitDeps{
+					Writer:         writer,
+					Stderr:         io.Discard,
+					ProgressTimerC: progressCh,
+				})
+			}()
+
+			select {
+			case <-provider.answerStarted:
+			case <-time.After(time.Second):
+				t.Fatal("AnswerPermission did not reach the forced blocking point")
+			}
+			switch tt.trigger {
+			case "interrupt":
+				close(interruptCh)
+			case "context":
+				cancel()
+			case "prompt":
+				promptDone <- context.Canceled
+			case "progress":
+				progressCh <- time.Now()
+			case "timeout":
+				timeoutCh <- time.Now()
+			}
+
+			select {
+			case result := <-resultCh:
+				if result.StopReason != tt.stopReason {
+					t.Fatalf("StopReason = %q, want %q", result.StopReason, tt.stopReason)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("WaitForSession deadlocked joining AnswerPermission before provider.Cancel")
+			}
+			select {
+			case <-provider.cancelStarted:
+			default:
+				t.Fatal("provider.Cancel was not called")
+			}
+			select {
+			case <-provider.answerReturned:
+			default:
+				t.Fatal("WaitForSession returned before AnswerPermission joined")
+			}
+		})
+	}
+}
+
+func TestWaitForSessionTerminationBoundsNonCooperativeProviderCalls(t *testing.T) {
+	provider := newNonCooperativePermissionProvider()
+	resolverFinished := make(chan struct{})
+	writer, err := NewEventWriter("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	waitDone := make(chan struct{})
+	t.Cleanup(func() {
+		provider.release()
+		cancel()
+		select {
+		case <-provider.answerReturned:
+		case <-time.After(time.Second):
+			t.Error("AnswerPermission goroutine did not exit after cleanup release")
+		}
+		select {
+		case <-provider.cancelReturned:
+		case <-time.After(time.Second):
+			t.Error("Cancel goroutine did not exit after cleanup release")
+		}
+		select {
+		case <-resolverFinished:
+		case <-time.After(time.Second):
+			t.Error("permission resolver goroutine did not exit after cleanup release")
+		}
+		select {
+		case <-waitDone:
+		case <-time.After(time.Second):
+			t.Error("WaitForSession goroutine did not exit during cleanup")
+		}
+		if err := writer.Close(); err != nil {
+			t.Errorf("close writer: %v", err)
+		}
+	})
+
+	interruptCh := make(chan struct{})
+	eventCh := make(chan events.Event, 1)
+	eventCh <- events.Event{
+		Event:     "permission.request",
+		SessionID: "ses_stubborn_answer",
+		Fields: map[string]any{
+			"request_id": "req_stubborn_answer",
+			"options": []any{
+				map[string]any{"optionId": "allow", "kind": "allow"},
+			},
+		},
+	}
+	resultCh := make(chan sessionResult, 1)
+	go func() {
+		defer close(waitDone)
+		resultCh <- WaitForSession(ctx, provider, SessionWaitConfig{
+			EventCh:     eventCh,
+			PromptDone:  make(chan error),
+			InterruptCh: interruptCh,
+			SessionID:   "ses_stubborn_answer",
+			RunID:       "run_stubborn_answer",
+			AutoApprove: true,
+		}, SessionWaitDeps{
+			Writer:                writer,
+			Stderr:                io.Discard,
+			permissionJoinTimeout: 20 * time.Millisecond,
+			permissionResultSent:  func() { close(resolverFinished) },
+		})
+	}()
+
+	select {
+	case <-provider.answerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("AnswerPermission did not reach the forced blocking point")
+	}
+	close(interruptCh)
+	select {
+	case <-provider.cancelStarted:
+	case <-time.After(time.Second):
+		t.Fatal("provider.Cancel did not reach the forced blocking point")
+	}
+	select {
+	case result := <-resultCh:
+		if result.StopReason != "cancelled" {
+			t.Fatalf("StopReason = %q, want cancelled", result.StopReason)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("non-cooperative provider calls made termination unbounded")
+	}
+	select {
+	case <-provider.answerReturned:
+		t.Fatal("AnswerPermission unexpectedly returned before test cleanup")
+	default:
+	}
+	select {
+	case <-provider.cancelReturned:
+		t.Fatal("Cancel unexpectedly returned before test cleanup")
+	default:
+	}
 }
 
 // TestAutoAnswerGoroutineDoesNotBlockEventLoop verifies that a slow

@@ -444,6 +444,119 @@ func TestPreparePermissionClaimWaitsForDirectCompletionBeforeReusedID(t *testing
 	}
 }
 
+func TestReservedClaimCreatedAfterCompletedDisconnectScanIsSignalled(t *testing.T) {
+	s := NewServer(NewState("run_1", "", 0))
+	if err := s.Start(testSocketPath(t)); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+	conn, err := net.Dial("unix", s.path)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for !s.HasClients() {
+		if time.Now().After(deadline) {
+			t.Fatal("control client was not registered")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	scanned := make(chan struct{})
+	release := make(chan struct{})
+	s.mu.Lock()
+	s.afterClientDisconnectScan = func() {
+		close(scanned)
+		<-release
+	}
+	s.mu.Unlock()
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close client: %v", err)
+	}
+	select {
+	case <-scanned:
+	case <-time.After(time.Second):
+		t.Fatal("last-client disconnect did not complete its claim scan")
+	}
+	// The disconnect scan is complete and found no claims. Let it release the
+	// connection lock, then create the stale Reserved decision from an earlier
+	// HasClients observation. Claim creation itself must inherit disconnection.
+	close(release)
+	if !s.PreparePermissionClaim("rt_1", "req_gap", PermissionResolverReserved, nil) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+	_, disconnectCh, ok := s.BeginPermissionClaim("rt_1", "req_gap")
+	if !ok {
+		t.Fatal("BeginPermissionClaim returned false")
+	}
+	select {
+	case <-disconnectCh:
+	default:
+		t.Fatal("Reserved claim created after disconnect scan was not signalled")
+	}
+}
+
+func TestPermissionClaimsCreatedWithoutClientsSignalDisconnect(t *testing.T) {
+	t.Run("direct begin", func(t *testing.T) {
+		s := NewServer(NewState("run_1", "", 0))
+		_, disconnectCh, ok := s.BeginPermissionClaim("rt_1", "direct")
+		if !ok {
+			t.Fatal("BeginPermissionClaim returned false")
+		}
+		select {
+		case <-disconnectCh:
+		default:
+			t.Fatal("unprepared claim did not inherit the no-client disconnect state")
+		}
+	})
+
+	t.Run("replacement after direct delivery", func(t *testing.T) {
+		s := NewServer(NewState("run_1", "", 0))
+		if !s.PreparePermissionClaim("rt_1", "reused", PermissionResolverNoResolver, nil) {
+			t.Fatal("initial PreparePermissionClaim returned false")
+		}
+		if got := s.DeliverPendingPermission("rt_1", "reused", "old", ""); got != PermissionAnswerNoResolver {
+			t.Fatalf("direct delivery = %v, want no-resolver", got)
+		}
+
+		origHook := beforeDirectPermissionClaimWait
+		defer func() { beforeDirectPermissionClaimWait = origHook }()
+		waiting := make(chan struct{})
+		beforeDirectPermissionClaimWait = func() { close(waiting) }
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		prepared := make(chan bool, 1)
+		go func() {
+			prepared <- s.PreparePermissionClaimAfterDirectDelivery(ctx, "rt_1", "reused", PermissionResolverReserved, nil)
+		}()
+		select {
+		case <-waiting:
+		case <-time.After(time.Second):
+			t.Fatal("replacement did not begin waiting for direct completion")
+		}
+		if !s.MarkPermissionClaimResolved("rt_1", "reused", "direct") {
+			t.Fatal("direct provider completion did not resolve claim")
+		}
+		select {
+		case ok := <-prepared:
+			if !ok {
+				t.Fatal("replacement claim was not prepared")
+			}
+		case <-time.After(time.Second):
+			t.Fatal("replacement claim did not finish after direct completion")
+		}
+		_, disconnectCh, ok := s.BeginPermissionClaim("rt_1", "reused")
+		if !ok {
+			t.Fatal("BeginPermissionClaim returned false for replacement")
+		}
+		select {
+		case <-disconnectCh:
+		default:
+			t.Fatal("replacement claim did not inherit the no-client disconnect state")
+		}
+	})
+}
+
 func TestPreparePermissionClaimAfterDirectDeliveryCancellation(t *testing.T) {
 	s := NewServer(NewState("run_1", "", 0))
 	if !s.PreparePermissionClaim("rt_1", "reused", PermissionResolverNoResolver, nil) {
