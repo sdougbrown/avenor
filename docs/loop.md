@@ -127,7 +127,7 @@ Roster files use strict decoding. `system`, `thinking`, and misspelled entry fie
 
 When loaded by the CLI, a config-declared `roster_file` is relative to the loop config. If the root config has no declaration, command-level `--roster-file` is a fallback relative to `--dir`; nested CLI loads receive no fallback. A child with no declaration inherits the parent's already loaded entries, recursively, while a child declaration replaces them. `--roster-entry` is not a command-level workflow selector. Stable nesting retains its existing behavior and does not receive this CLI-only inheritance.
 
-If `resume_from_previous` is set, the resuming phase must select the same effective backend as the session it resumes. A different roster backend is rejected rather than migrating the conversation across providers.
+If `resume_from_previous` is set, the phase must match four values stored for the session: effective backend, agent, model, and agent profile. If its roster selection changes any value, Avenor fails the phase before creating a provider. Matching only the backend is insufficient.
 
 ## Loop markers
 

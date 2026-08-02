@@ -2,6 +2,18 @@ package runtime
 
 import "testing"
 
+func TestIsRetryableFailure(t *testing.T) {
+	if !IsRetryableFailure(1, "") {
+		t.Fatal("generic exit code 1 should be retryable")
+	}
+	if IsRetryableFailure(1, SessionIDConflictStopReason) {
+		t.Fatal("session ID conflict should be fatal")
+	}
+	if IsRetryableFailure(0, "end_turn") {
+		t.Fatal("successful attempt should not be retryable")
+	}
+}
+
 func TestStopReasonForExitCode(t *testing.T) {
 	tests := map[int]string{
 		0:   "end_turn",

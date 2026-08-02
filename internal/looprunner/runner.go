@@ -298,7 +298,7 @@ func runPhaseWithRetry(ctx context.Context, attemptFn func(ctx context.Context) 
 	}
 
 	for retry := 1; retry <= maxRetries; retry++ {
-		if result.ExitCode != 1 {
+		if !runtime.IsRetryableFailure(result.ExitCode, result.StopReason) {
 			return result, nil
 		}
 

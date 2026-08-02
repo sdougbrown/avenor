@@ -1,5 +1,14 @@
 package runtime
 
+const SessionIDConflictStopReason = "session_id_conflict"
+
+// IsRetryableFailure reports whether a failed attempt may be retried. Session
+// identity conflicts are fatal: retrying could resume a provisional ID or let
+// an attempt finish without adopting the provider's authoritative session ID.
+func IsRetryableFailure(exitCode int, stopReason string) bool {
+	return exitCode == 1 && stopReason != SessionIDConflictStopReason
+}
+
 // ExitCodeForStopReason returns Avenor's locked process exit code for a
 // terminal ACP stop reason.
 func ExitCodeForStopReason(stopReason string) int {

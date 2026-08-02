@@ -249,6 +249,33 @@ func TestRunPrePhaseFailure(t *testing.T) {
 	}
 }
 
+func TestRunSessionIDConflictIsFatalWithRetriesEnabled(t *testing.T) {
+	attempts := 0
+	result, err := Run(context.Background(), RunOptions{
+		WorkDir:    t.TempDir(),
+		RunID:      "run-conflict",
+		EventSink:  discardEventWriter{},
+		Config:     makeConfig([]phaseconfig.Phase{simplePhase("conflict", "conflict")}, nil, nil),
+		MaxRetries: 3,
+		PhaseAttempt: func(context.Context, phaseconfig.Phase, int, string) (PhaseAttemptResult, error) {
+			attempts++
+			if attempts > 1 {
+				return PhaseAttemptResult{ExitCode: 0, SessionID: "provisional-retry", StopReason: "end_turn"}, nil
+			}
+			return PhaseAttemptResult{ExitCode: 1, SessionID: "provisional", StopReason: runtime.SessionIDConflictStopReason}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want one fatal attempt", attempts)
+	}
+	if result.ExitCode != 1 || result.StopReason != runtime.SessionIDConflictStopReason || result.SessionID != "provisional" {
+		t.Fatalf("result = %+v, want fatal session ID conflict", result)
+	}
+}
+
 func TestRunPostPhaseFailure(t *testing.T) {
 	cfg := makeConfig(
 		nil,

@@ -837,14 +837,18 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			resumeID = child.sessionID()
 		}
 		result := s.runChildAttempt(ctx, child, resumeID, promptText, timer)
-		if result.exitCode != 1 || attempt > maxRetries {
+		if !runtime.IsRetryableFailure(result.exitCode, result.stopReason) || attempt > maxRetries {
+			stopReason := result.stopReason
+			if stopReason == "" {
+				stopReason = runtime.StopReasonForExitCode(result.exitCode)
+			}
 			child.mu.Lock()
 			child.exitCode = result.exitCode
 			child.mu.Unlock()
 
 			if result.exitCode == 0 {
 				if child.sentinelFile != "" {
-					cli.WriteSentinel(child.sentinelFile, result.exitCode, result.sessionID, runtime.StopReasonForExitCode(result.exitCode), s.runID, os.Stderr)
+					cli.WriteSentinel(child.sentinelFile, result.exitCode, result.sessionID, stopReason, s.runID, os.Stderr)
 				}
 				child.mu.Lock()
 				child.phase = "done"
@@ -865,10 +869,10 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 				continue
 			}
 
-			if ctx.Err() == nil {
+			if ctx.Err() == nil && result.stopReason != runtime.SessionIDConflictStopReason {
 				if nextPrompt, ok := child.dequeuePrompt(); ok {
 					if child.sentinelFile != "" {
-						cli.WriteSentinel(child.sentinelFile, result.exitCode, result.sessionID, runtime.StopReasonForExitCode(result.exitCode), s.runID, os.Stderr)
+						cli.WriteSentinel(child.sentinelFile, result.exitCode, result.sessionID, stopReason, s.runID, os.Stderr)
 					}
 					promptText = nextPrompt
 					resumeID = result.sessionID
@@ -881,7 +885,7 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			}
 
 			if child.sentinelFile != "" {
-				cli.WriteSentinel(child.sentinelFile, result.exitCode, result.sessionID, runtime.StopReasonForExitCode(result.exitCode), s.runID, os.Stderr)
+				cli.WriteSentinel(child.sentinelFile, result.exitCode, result.sessionID, stopReason, s.runID, os.Stderr)
 			}
 			return
 		}
@@ -1105,6 +1109,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 			return looprunner.PhaseAttemptResult{
 				ExitCode:      result.ExitCode,
 				SessionID:     session.SessionID,
+				StopReason:    result.StopReason,
 				LoopDirective: result.LoopDirective,
 				LoopLabel:     result.LoopLabel,
 				BrokerRunID:   brokerRunID,
@@ -1410,8 +1415,9 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 }
 
 type childAttemptResult struct {
-	exitCode  int
-	sessionID string
+	exitCode   int
+	sessionID  string
+	stopReason string
 }
 
 func (c *childRuntime) dequeuePrompt() (string, bool) {
@@ -1798,7 +1804,7 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 		attempt, err = s.registerSessionAttempt(session.SessionID, identity, attemptProvider, resumeID)
 		if err != nil {
 			s.emitChildError(child, err.Error(), "error")
-			return childAttemptResult{exitCode: 1, sessionID: session.SessionID}
+			return childAttemptResult{exitCode: 1, sessionID: session.SessionID, stopReason: runtime.SessionIDConflictStopReason}
 		}
 		child.mu.Lock()
 		child.directAttempt = attempt
@@ -1866,7 +1872,7 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 		Stderr:        os.Stderr,
 	})
 	exitCode := result.ExitCode
-	return childAttemptResult{exitCode: exitCode, sessionID: session.SessionID}
+	return childAttemptResult{exitCode: exitCode, sessionID: session.SessionID, stopReason: result.StopReason}
 }
 
 func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, resumeID string) (runtime.Session, error) {

@@ -137,7 +137,7 @@ A phase roster entry overrides the run-level backend, agent, and model for that 
 
 For CLI workflows, a declared `roster_file` is resolved relative to its loop/team config. If the root config has no declaration, the command-level `--roster-file` fallback is resolved relative to `--dir`; nested CLI loads do not reuse that fallback. A child with no declaration inherits the already loaded parent entries, recursively; a child declaration replaces them. Stable-mode nesting keeps its existing behavior and does not gain this CLI-only inheritance rule. For direct selection, pass a path that is valid from the invoking process (an absolute path avoids ambiguity).
 
-A phase with `resume_from_previous: true` may resume only a session owned by the same effective backend. Selecting a different roster backend for the resuming phase is rejected; Avenor does not migrate conversation state across providers.
+A phase with `resume_from_previous: true` must match four values stored for the session: effective backend, agent, model, and agent profile. If its roster selection changes any value, Avenor fails the phase before creating a provider. Matching only the backend is insufficient.
 
 ## avenor stable
 

@@ -42,6 +42,56 @@ type cliFakeProvider struct {
 	cancelSessionID string
 }
 
+type directConflictProvider struct {
+	mu      sync.Mutex
+	events  chan events.Event
+	starts  int
+	resumes int
+	prompts int
+	noStart bool
+}
+
+func (p *directConflictProvider) Start(context.Context, runtime.StartOptions) (runtime.Session, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.starts++
+	p.events = make(chan events.Event, 2)
+	return runtime.Session{SessionID: "direct-provisional"}, nil
+}
+
+func (p *directConflictProvider) Resume(context.Context, string) (runtime.Session, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.resumes++
+	p.events = make(chan events.Event, 2)
+	return runtime.Session{SessionID: "direct-retry-provisional"}, nil
+}
+
+func (p *directConflictProvider) Prompt(context.Context, string, string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.prompts++
+	if !p.noStart {
+		p.events <- events.Event{Event: "session.start", Fields: map[string]any{"conversation_id": "occupied"}}
+	}
+	p.events <- events.Event{Event: "session.end", Fields: map[string]any{"stop_reason": "end_turn"}}
+	close(p.events)
+	return nil
+}
+
+func (*directConflictProvider) Cancel(context.Context, string) error { return nil }
+func (p *directConflictProvider) Events(context.Context, string) (<-chan events.Event, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.events, nil
+}
+func (*directConflictProvider) AnswerPermission(context.Context, string, string, runtime.PermissionResponse) error {
+	return nil
+}
+func (*directConflictProvider) Capabilities(context.Context) (runtime.Capabilities, error) {
+	return runtime.Capabilities{}, nil
+}
+
 type permissionLifecycleProvider struct {
 	answers chan string
 }
@@ -498,6 +548,56 @@ func TestRunCleansSentinelFilesBetweenRetries(t *testing.T) {
 	}
 	if attempts != 2 {
 		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+}
+
+func TestRunSessionIDConflictDoesNotRetryProvisionalSession(t *testing.T) {
+	oldRunAttempt, oldNewProvider, oldRetryAfter := runAttempt, newProvider, retryAfter
+	t.Cleanup(func() {
+		runAttempt, newProvider, retryAfter = oldRunAttempt, oldNewProvider, oldRetryAfter
+	})
+
+	conflictProvider := &directConflictProvider{}
+	noStartProvider := &directConflictProvider{noStart: true}
+	factoryCalls := 0
+	newProvider = func(runtime.StartOptions, string) (runtime.Provider, error) {
+		factoryCalls++
+		if factoryCalls == 1 {
+			return conflictProvider, nil
+		}
+		return noStartProvider, nil
+	}
+	runAttempt = func(ctx context.Context, cfg attemptConfig, deps attemptDeps) attemptResult {
+		if _, exists := cfg.sessionBackends.identity("occupied"); !exists {
+			owner := &cliSessionAttempt{}
+			identity := cliSessionIdentity{backend: cfg.backend, agent: cfg.startOptions.Agent, model: cfg.startOptions.Model, agentProfile: cfg.startOptions.AgentProfile}
+			if err := cfg.sessionBackends.claim("occupied", identity, owner, ""); err != nil {
+				t.Fatal(err)
+			}
+			cfg.sessionBackends.finish("occupied", "occupied", owner)
+		}
+		return runSingleAttempt(ctx, cfg, deps)
+	}
+	retryAfter = func(time.Duration) <-chan time.Time {
+		t.Fatal("fatal session identity conflict entered retry backoff")
+		return nil
+	}
+
+	var stderr strings.Builder
+	if code := run([]string{"--prompt", "hello", "--max-retries", "3"}, func(string) string { return "" }, &stderr); code != 1 {
+		t.Fatalf("run() = %d, want 1; stderr=%s", code, stderr.String())
+	}
+	conflictProvider.mu.Lock()
+	starts, resumes, prompts := conflictProvider.starts, conflictProvider.resumes, conflictProvider.prompts
+	conflictProvider.mu.Unlock()
+	if factoryCalls != 1 || starts != 1 || resumes != 0 || prompts != 1 {
+		t.Fatalf("factory=%d starts=%d resumes=%d prompts=%d, want one fatal attempt", factoryCalls, starts, resumes, prompts)
+	}
+	noStartProvider.mu.Lock()
+	noStartPrompts := noStartProvider.prompts
+	noStartProvider.mu.Unlock()
+	if noStartPrompts != 0 {
+		t.Fatal("retry succeeded without a session.start event")
 	}
 }
 

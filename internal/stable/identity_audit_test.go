@@ -273,7 +273,7 @@ func TestStableWorkflowRejectsSameBackendIdentityChangeOnResume(t *testing.T) {
 		return scriptedStage5Provider("workflow-resume-session", "end_turn"), nil
 	}
 	sentinelPath := filepath.Join(dir, "resume-conflict.done")
-	spawned, err := sup.spawn(SpawnParams{LoopFile: loopPath, Dir: dir, SentinelFile: sentinelPath})
+	spawned, err := sup.spawn(SpawnParams{LoopFile: loopPath, Dir: dir, SentinelFile: sentinelPath, MaxRetries: 3})
 	if err != nil {
 		t.Fatal(err)
 	}

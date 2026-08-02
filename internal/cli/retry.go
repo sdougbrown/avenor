@@ -175,6 +175,12 @@ func runSingleAttempt(
 			accLabel = result.LoopLabel
 		}
 
+		// An authoritative ID conflict invalidates this attempt. Do not service
+		// queued control prompts by resuming its provisional session ID.
+		if result.StopReason == runtime.SessionIDConflictStopReason {
+			return attemptResult{exitCode: exitCode, sessionID: session.SessionID, stopReason: result.StopReason, loopDirective: accDirective, loopLabel: accLabel, output: result.Output, finalReply: result.FinalReply, usage: result.Usage}
+		}
+
 		if deps.controlServer != nil {
 			// Check interrupt first (priority over queued prompts) to avoid
 			// losing the interrupt when exitCode==0 overlaps with a queued prompt.

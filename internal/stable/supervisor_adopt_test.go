@@ -319,6 +319,113 @@ func TestSessionStartUpdatesChildBeforeEventForwarding(t *testing.T) {
 	}
 }
 
+func TestRunChildSessionIDConflictIsFatalWithRetriesEnabled(t *testing.T) {
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-direct-conflict-fatal.sock", MaxRuntimes: 1})
+	sup.rememberSessionIdentity("occupied", effectiveIdentity{Backend: "agy", Agent: "owner"}, nil)
+	provider := &stableDeferredProvider{
+		provisionalID: "pending-direct-conflict",
+		realID:        "occupied",
+		backend:       "agy",
+		events:        deferredStartEndEvents("occupied", nil),
+	}
+	sentinelPath := filepath.Join(t.TempDir(), "direct-conflict.env")
+	child := &childRuntime{
+		id: "rt_direct_conflict", label: "direct-conflict", provider: provider,
+		session:     runtime.Session{SessionID: provider.provisionalID, Backend: "agy"},
+		eventWriter: stableTestSink{}, sentinelFile: sentinelPath,
+		done: make(chan struct{}), promptCh: make(chan struct{}, 1), promptQueue: []string{"must not run"}, runID: sup.runID,
+	}
+	sup.runtimes[child.id] = child
+
+	sup.runChild(context.Background(), child, "conflict", 0, 3)
+
+	provider.mu.Lock()
+	prompts, resumes := provider.prompts, provider.resumes
+	provider.mu.Unlock()
+	if prompts != 1 || resumes != 0 {
+		t.Fatalf("prompts=%d resumes=%d, want one fatal attempt and no provisional resume", prompts, resumes)
+	}
+	child.mu.Lock()
+	exitCode := child.exitCode
+	child.mu.Unlock()
+	if exitCode != 1 {
+		t.Fatalf("exitCode = %d, want 1", exitCode)
+	}
+	if content := readSentinel(t, sentinelPath); !strings.Contains(content, "STOP_REASON="+runtime.SessionIDConflictStopReason+"\n") {
+		t.Fatalf("sentinel = %q, want explicit fatal conflict", content)
+	}
+}
+
+func TestRunLoopChildSessionIDConflictIsFatalWithRetriesEnabled(t *testing.T) {
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-loop-conflict-fatal.sock", MaxRuntimes: 1})
+	sup.rememberSessionIdentity("occupied", effectiveIdentity{Backend: "agy", Agent: "owner"}, nil)
+	provider := &stableDeferredProvider{
+		provisionalID: "pending-loop-conflict", realID: "occupied", backend: "agy",
+		events: deferredStartEndEvents("occupied", nil),
+	}
+	factoryCalls := 0
+	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) {
+		factoryCalls++
+		return provider, nil
+	}
+	child := &childRuntime{
+		id: "rt_loop_conflict", label: "loop-conflict", eventWriter: stableTestSink{},
+		done: make(chan struct{}), promptCh: make(chan struct{}, 1), cancelFn: func() {}, runID: sup.runID,
+	}
+	sup.runtimes[child.id] = child
+	cfg := &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "conflict", Prompt: "conflict"}}}
+
+	sup.runLoopChild(context.Background(), child, cfg, 3, "", "", "", "", "", "agy")
+
+	provider.mu.Lock()
+	prompts, resumes := provider.prompts, provider.resumes
+	provider.mu.Unlock()
+	if factoryCalls != 1 || prompts != 1 || resumes != 0 {
+		t.Fatalf("factory=%d prompts=%d resumes=%d, want one fatal attempt", factoryCalls, prompts, resumes)
+	}
+	child.mu.Lock()
+	exitCode := child.exitCode
+	child.mu.Unlock()
+	if exitCode != 1 {
+		t.Fatalf("exitCode = %d, want 1", exitCode)
+	}
+}
+
+func TestRunTeamChildSessionIDConflictIsFatalWithRetriesEnabled(t *testing.T) {
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-team-conflict-fatal.sock", MaxRuntimes: 1})
+	sup.rememberSessionIdentity("occupied", effectiveIdentity{Backend: "agy", Agent: "owner"}, nil)
+	provider := &stableDeferredProvider{
+		provisionalID: "pending-team-conflict", realID: "occupied", backend: "agy",
+		events: deferredStartEndEvents("occupied", nil),
+	}
+	factoryCalls := 0
+	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) {
+		factoryCalls++
+		return provider, nil
+	}
+	child := &childRuntime{
+		id: "rt_team_conflict", label: "team-conflict", eventWriter: stableTestSink{},
+		done: make(chan struct{}), promptCh: make(chan struct{}, 1), cancelFn: func() {}, runID: sup.runID,
+	}
+	sup.runtimes[child.id] = child
+	cfg := &teamrunner.TeamConfig{Pre: []phaseconfig.Phase{{Name: "conflict", Prompt: "conflict"}}}
+
+	sup.runTeamChild(context.Background(), child, cfg, 3, "", "", "", "", "", "agy")
+
+	provider.mu.Lock()
+	prompts, resumes := provider.prompts, provider.resumes
+	provider.mu.Unlock()
+	if factoryCalls != 1 || prompts != 1 || resumes != 0 {
+		t.Fatalf("factory=%d prompts=%d resumes=%d, want one fatal attempt", factoryCalls, prompts, resumes)
+	}
+	child.mu.Lock()
+	exitCode := child.exitCode
+	child.mu.Unlock()
+	if exitCode != 1 {
+		t.Fatalf("exitCode = %d, want 1", exitCode)
+	}
+}
+
 func TestRunLoopChildAdoptsExternalConversationID(t *testing.T) {
 	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-loop-adopt.sock", MaxRuntimes: 1})
 	const provisionalID, realID = "agy-pending-loop", "conv-loop-real"

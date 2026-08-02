@@ -9,6 +9,7 @@ import (
 
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/phaseconfig"
+	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
 
@@ -261,6 +262,33 @@ func TestRunPhaseWithRetryOnlyRetriesTransientFailure(t *testing.T) {
 	}
 	if result.ExitCode != 5 || result.SessionID != "ses_blocked" {
 		t.Fatalf("result = %+v, want blocked result", result)
+	}
+}
+
+func TestRunSessionIDConflictIsFatalWithRetriesEnabled(t *testing.T) {
+	attempts := 0
+	result, err := Run(context.Background(), RunOptions{
+		WorkDir:    t.TempDir(),
+		RunID:      "run_conflict",
+		EventSink:  &recordingEventWriter{},
+		Config:     &LoopConfig{Pre: []phaseconfig.Phase{{Name: "conflict", Prompt: "conflict"}}, MaxIterations: 1},
+		MaxRetries: 3,
+		PhaseAttempt: func(context.Context, phaseconfig.Phase, int, int, string) (PhaseAttemptResult, error) {
+			attempts++
+			if attempts > 1 {
+				return PhaseAttemptResult{ExitCode: 0, SessionID: "provisional-retry", StopReason: "end_turn"}, nil
+			}
+			return PhaseAttemptResult{ExitCode: 1, SessionID: "provisional", StopReason: runtime.SessionIDConflictStopReason}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want one fatal attempt", attempts)
+	}
+	if result.ExitCode != 1 || result.StopReason != runtime.SessionIDConflictStopReason || result.SessionID != "provisional" {
+		t.Fatalf("result = %+v, want fatal session ID conflict", result)
 	}
 }
 

@@ -124,7 +124,9 @@ Direct selection requires the `roster_file`/`roster_entry` pair and excludes dir
 
 A roster phase in a loop or team config is a per-phase override of the run-level backend, agent, and model. Phases without `roster_entry` retain the existing run-level selection. The command-level `--roster-file` is only a root workflow fallback; `--roster-entry` is never a workflow selector. A declared workflow `roster_file` is resolved relative to that loop/team config, while a relative command fallback is resolved relative to the selected `--dir`. Nested stable workflow behavior is unchanged: the CLI-only roster inheritance rule does not apply to stable nesting. Use a roster declaration in the nested config where stable's existing workflow contract requires one.
 
-Run-level `--thinking` stays outside the roster and is validated after each phase's effective backend is known. For example, a roster entry selecting `agy` rejects an explicit `--thinking low`, because Agy does not support that setting. `resume_from_previous` and an explicit session resume also require the effective backend to match the session's backend; a roster cannot move a conversation to another provider.
+Run-level `--thinking` is separate from roster entries and is validated after each phase's effective backend is known. A roster entry selecting `agy` rejects an explicit `--thinking low` setting because Agy does not support it.
+
+For `resume_from_previous` or a spawn that resumes `session_id`, Avenor compares four stored session values: effective backend, agent, model, and agent profile. Any mismatch fails the resume. Matching only the backend is insufficient.
 
 ### Prompt Sources
 

@@ -863,7 +863,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		finalSessionID = result.sessionID
 		finalStopReason = result.stopReason
 
-		if result.err != nil || result.exitCode != 1 || attempt > *maxRetries {
+		if result.err != nil || !runtime.IsRetryableFailure(result.exitCode, result.stopReason) || attempt > *maxRetries {
 			break
 		}
 
@@ -1102,7 +1102,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 						}
 						if !adopted {
 							emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "session", fmt.Sprintf("authoritative session ID %q conflicts with an existing session", externalID), deps.Stderr, cfg.RunLabel)
-							return sessionResult{ExitCode: 1, StopReason: "session_id_conflict"}
+							return sessionResult{ExitCode: 1, StopReason: runtime.SessionIDConflictStopReason}
 						}
 						cfg.SessionID = externalID
 						tracker.sessionID = externalID

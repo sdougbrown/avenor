@@ -135,7 +135,9 @@ avenor run --dir /tmp/avenor-team --team-file /tmp/avenor-team/team.json
 
 A phase roster entry supplies the complete backend/agent/model identity and overrides the run-level identity for that phase. Without an entry, existing team behavior remains unchanged: team members may use their existing inline `agent` and `model` overrides, while pre and post phases do not. A roster entry cannot be combined with inline identity fields or with `loop_file`/`team_file`.
 
-Run-level `thinking` remains outside the roster and is checked against each phase's effective backend. A selected backend that does not support an explicit value fails before that phase starts. A pre or post phase using `resume_from_previous` must use the same effective backend as the session it resumes; cross-backend conversation migration is rejected. Team members always start fresh, so `resume_from_previous` has no effect on team members.
+Run-level `thinking` remains outside the roster and is checked against each phase's effective backend. If a selected backend does not support an explicit value, the phase fails before it starts.
+
+A pre or post phase using `resume_from_previous` must match four values stored for the session: effective backend, agent, model, and agent profile. If any value differs, Avenor fails the phase before creating a provider. Matching only the backend is insufficient. Team members always start fresh, so `resume_from_previous` has no effect on them.
 
 When the CLI loads a team config, a declared `roster_file` is relative to that config. If the root has no declaration, command-level `--roster-file` is a fallback relative to `--dir`; nested CLI configs inherit the already loaded entries only when they omit `roster_file`, recursively. A declaration replaces the inherited roster. `--roster-entry` is not a command-level workflow selector. Stable nesting retains its existing behavior and does not receive this CLI-only inheritance rule.
 

@@ -1665,10 +1665,14 @@ type stableDeferredProvider struct {
 	channels      map[string]chan events.Event
 	started       chan struct{}
 	promptErr     error
+	starts        int
+	resumes       int
+	prompts       int
 }
 
 func (p *stableDeferredProvider) Start(_ context.Context, opts runtime.StartOptions) (runtime.Session, error) {
 	p.mu.Lock()
+	p.starts++
 	if p.channels == nil {
 		p.channels = map[string]chan events.Event{}
 	}
@@ -1681,11 +1685,15 @@ func (p *stableDeferredProvider) Start(_ context.Context, opts runtime.StartOpti
 }
 
 func (p *stableDeferredProvider) Resume(ctx context.Context, sessionID string) (runtime.Session, error) {
+	p.mu.Lock()
+	p.resumes++
+	p.mu.Unlock()
 	return p.Start(ctx, runtime.StartOptions{})
 }
 
 func (p *stableDeferredProvider) Prompt(ctx context.Context, sessionID, _ string) error {
 	p.mu.Lock()
+	p.prompts++
 	ch := p.channels[sessionID]
 	p.mu.Unlock()
 	if ch == nil {
