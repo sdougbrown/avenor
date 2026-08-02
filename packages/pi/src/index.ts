@@ -646,10 +646,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
     async function stopPolling(): Promise<void> {
       pollingActive = false
       pollingGeneration++
+      await pollInFlight?.catch(() => {})
       pollingErrorCount = 0
       pollingErrors.length = 0
       lastStatusEntries = []
-      await pollInFlight?.catch(() => {})
       updateWidget([])
     }
 
