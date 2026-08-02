@@ -111,6 +111,7 @@ type childRuntime struct {
 	cancelFn         func()
 	interruptFn      func()
 	done             chan struct{}
+	doneOnce         sync.Once
 	exitCode         int
 	completed        bool
 	active           bool
@@ -486,6 +487,7 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 		s.controlMu.Lock()
 		delete(s.runtimes, rtID)
 		s.controlMu.Unlock()
+		child.complete()
 	}
 	defer func() {
 		if releaseReservation != nil {
@@ -817,10 +819,7 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 		if closer, ok := child.provider.(interface{ Close() error }); ok {
 			_ = closer.Close()
 		}
-		child.mu.Lock()
-		child.completed = true
-		child.mu.Unlock()
-		close(child.done)
+		child.complete()
 	}()
 
 	if s.broker != nil {
@@ -930,10 +929,6 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 			child.cancelFn()
 		}
 		s.closeChildEventWriter(child)
-		child.mu.Lock()
-		child.completed = true
-		child.mu.Unlock()
-		close(child.done)
 		s.clearRuntimePermissionOptions(child.id)
 		// Keep the completed workflow runtime as a status tombstone. Its final
 		// authoritative phase identity is required by status and follow-up after
@@ -948,6 +943,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 			}
 			s.broker.DeleteRun(child.id)
 		}
+		child.complete()
 	}()
 
 	if s.broker != nil {
@@ -1184,10 +1180,6 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 			child.cancelFn()
 		}
 		s.closeChildEventWriter(child)
-		child.mu.Lock()
-		child.completed = true
-		child.mu.Unlock()
-		close(child.done)
 		s.clearRuntimePermissionOptions(child.id)
 		// Keep the completed workflow runtime as a status tombstone. Its final
 		// authoritative phase identity is required by status and follow-up after
@@ -1202,6 +1194,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 			}
 			s.broker.DeleteRun(child.id)
 		}
+		child.complete()
 	}()
 
 	if s.broker != nil {
@@ -2362,6 +2355,17 @@ func (child *childRuntime) lifecycleContext() context.Context {
 		return context.Background()
 	}
 	return child.lifecycleCtx
+}
+
+// complete publishes terminal completion after the caller has finished all
+// teardown. It is safe for reservation rollback and a child goroutine to race.
+func (child *childRuntime) complete() {
+	child.doneOnce.Do(func() {
+		child.mu.Lock()
+		child.completed = true
+		child.mu.Unlock()
+		close(child.done)
+	})
 }
 
 func (s *Supervisor) beginDirectPermissionAnswer(child *childRuntime) bool {

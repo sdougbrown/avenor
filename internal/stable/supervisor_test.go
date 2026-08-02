@@ -280,6 +280,102 @@ func TestSpawnTeamFileFailureCleansReservedRuntime(t *testing.T) {
 	}
 }
 
+// TestShutdownWaitsForFailedReservedRuntime covers a spawn that has reserved a
+// child but fails before it can launch the child goroutine. Shutdown must be
+// able to wait for that reservation to reach a terminal completion.
+func TestShutdownWaitsForFailedReservedRuntime(t *testing.T) {
+	sup := NewSupervisor(Config{
+		ControlSocket:   newStableSocketPath(t, "failed-reservation"),
+		MaxRuntimes:     1,
+		ShutdownTimeout: 0,
+	})
+	defer func() { _ = sup.broker.Stop() }()
+	providerStarted := make(chan struct{})
+	releaseProvider := make(chan struct{})
+	dir := t.TempDir()
+	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) {
+		close(providerStarted)
+		<-releaseProvider
+		return nil, fmt.Errorf("intentional provider creation failure")
+	}
+
+	spawnDone := make(chan error, 1)
+	go func() {
+		_, err := sup.spawn(SpawnParams{Prompt: "fail after reserving", Dir: dir})
+		spawnDone <- err
+	}()
+	select {
+	case <-providerStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("spawn did not reach provider creation")
+	}
+
+	sup.controlMu.Lock()
+	var child *childRuntime
+	for _, rt := range sup.runtimes {
+		child = rt
+		break
+	}
+	sup.controlMu.Unlock()
+	if child == nil {
+		t.Fatal("reserved runtime was not registered")
+	}
+	cancelled := make(chan struct{})
+	go func() {
+		<-child.lifecycleCtx.Done()
+		close(cancelled)
+	}()
+
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- sup.Shutdown("graceful") }()
+	select {
+	case <-cancelled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutdown did not cancel the reserved runtime")
+	}
+	select {
+	case err := <-shutdownDone:
+		t.Fatalf("Shutdown returned before reservation failure: %v", err)
+	default:
+	}
+
+	close(releaseProvider)
+	select {
+	case err := <-spawnDone:
+		if err == nil || !strings.Contains(err.Error(), "intentional provider creation failure") {
+			t.Fatalf("spawn error = %v, want provider creation failure", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("spawn did not return after provider failure")
+	}
+	select {
+	case <-child.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("failed reservation did not publish completion")
+	}
+	select {
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatalf("Shutdown: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Shutdown did not return after failed reservation completed")
+	}
+
+	child.mu.Lock()
+	completed := child.completed
+	child.mu.Unlock()
+	if !completed {
+		t.Fatal("failed reservation was not marked completed")
+	}
+	sup.controlMu.Lock()
+	_, stillRegistered := sup.runtimes[child.id]
+	sup.controlMu.Unlock()
+	if stillRegistered {
+		t.Fatal("failed reservation remained registered")
+	}
+}
+
 func TestActiveRuntimeCountIgnoresCompletedHistory(t *testing.T) {
 	sup := NewSupervisor(Config{
 		ControlSocket: "/tmp/test-active-count.sock",
@@ -733,6 +829,160 @@ func TestShutdownTimeoutDoesNotHangWithMultipleStuckRuntimes(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("shutdown did not return after timeout with multiple stuck runtimes")
 	}
+}
+
+// assertShutdownWaitsForNestedChildCleanup holds the cleanup lock after
+// shutdown snapshots and cancels a live nested child. It proves child.done
+// cannot release Shutdown before permission, runtime, and broker cleanup.
+func assertShutdownWaitsForNestedChildCleanup(t *testing.T, kind string, run func(*Supervisor, context.Context, *childRuntime, *stableScriptedProvider)) {
+	t.Helper()
+	sup := NewSupervisor(Config{
+		ControlSocket:   newStableSocketPath(t, kind+"-cleanup-order"),
+		MaxRuntimes:     1,
+		ShutdownTimeout: 0,
+	})
+	if sup.broker == nil {
+		t.Fatal("supervisor did not create a broker")
+	}
+	defer func() { _ = sup.broker.Stop() }()
+
+	releasePrompt := make(chan struct{})
+	provider := &stableScriptedProvider{
+		attempt: -1,
+		scripts: []stableScriptedAttempt{{
+			sessionID: "ses_" + kind + "_cleanup",
+			events:    []stableScriptedEvent{{release: releasePrompt}},
+		}},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	shutdownCancellationStarted := make(chan struct{})
+	releaseCancellation := make(chan struct{})
+	var cancelOnce sync.Once
+	var releasePromptOnce sync.Once
+	releasePromptWait := func() { releasePromptOnce.Do(func() { close(releasePrompt) }) }
+	child := &childRuntime{
+		id:          "rt_" + kind + "_cleanup",
+		done:        make(chan struct{}),
+		promptCh:    make(chan struct{}, 1),
+		eventWriter: &closeNotifyingSink{closed: make(chan struct{})},
+		cancelFn: func() {
+			cancelOnce.Do(func() {
+				close(shutdownCancellationStarted)
+				<-releaseCancellation
+				cancel()
+				releasePromptWait()
+			})
+		},
+	}
+	sink := child.eventWriter.(*closeNotifyingSink)
+	sup.controlMu.Lock()
+	sup.runtimes[child.id] = child
+	sup.permOptions[child.id+":req_cleanup"] = []any{"allow"}
+	sup.controlMu.Unlock()
+
+	locked := false
+	defer func() {
+		if locked {
+			sup.controlMu.Unlock()
+		}
+		select {
+		case <-releaseCancellation:
+		default:
+			close(releaseCancellation)
+		}
+		releasePromptWait()
+	}()
+
+	go run(sup, ctx, child, provider)
+	waitForStableChild(t, child, func(active, _ bool, _ string, _ string) bool { return active })
+
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- sup.Shutdown("graceful") }()
+	select {
+	case <-shutdownCancellationStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutdown did not snapshot and cancel nested child")
+	}
+
+	// Shutdown has already snapshotted the child. Block cleanup immediately
+	// after writer close; the old ordering closed done before this lock.
+	sup.controlMu.Lock()
+	locked = true
+	close(releaseCancellation)
+	select {
+	case <-sink.closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("nested child did not close its event writer")
+	}
+	select {
+	case <-child.done:
+		t.Fatal("nested child published completion before cleanup")
+	default:
+	}
+	select {
+	case err := <-shutdownDone:
+		t.Fatalf("Shutdown returned before nested cleanup: %v", err)
+	default:
+	}
+
+	sup.controlMu.Unlock()
+	locked = false
+	select {
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatalf("Shutdown: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Shutdown did not return after nested cleanup")
+	}
+
+	child.mu.Lock()
+	completed := child.completed
+	providerCleared := child.provider == nil
+	child.mu.Unlock()
+	if !completed {
+		t.Fatal("nested child was not marked completed")
+	}
+	if !providerCleared {
+		t.Fatal("nested child provider was not cleaned up")
+	}
+	sup.controlMu.Lock()
+	_, registered := sup.runtimes[child.id]
+	_, optionsCached := sup.permOptions[child.id+":req_cleanup"]
+	sup.controlMu.Unlock()
+	if registered {
+		t.Fatal("nested child remained registered after completion")
+	}
+	if optionsCached {
+		t.Fatal("nested child permission options remained after completion")
+	}
+	if got := sup.broker.RunCount(); got != 0 {
+		t.Fatalf("broker run count = %d, want 0 after nested cleanup", got)
+	}
+}
+
+func TestShutdownWaitsForLoopChildCleanup(t *testing.T) {
+	assertShutdownWaitsForNestedChildCleanup(t, "loop", func(sup *Supervisor, ctx context.Context, child *childRuntime, provider *stableScriptedProvider) {
+		sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) {
+			return provider, nil
+		}
+		sup.runLoopChild(ctx, child, &looprunner.LoopConfig{
+			MaxIterations: 1,
+			Pre:           []phaseconfig.Phase{{Name: "work", Prompt: "wait for shutdown"}},
+		}, 0, "", "", "", "", "test")
+	})
+}
+
+func TestShutdownWaitsForTeamChildCleanup(t *testing.T) {
+	assertShutdownWaitsForNestedChildCleanup(t, "team", func(sup *Supervisor, ctx context.Context, child *childRuntime, provider *stableScriptedProvider) {
+		sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) {
+			return provider, nil
+		}
+		sup.runTeamChild(ctx, child, &teamrunner.TeamConfig{
+			Team: []phaseconfig.Phase{{Name: "work", Prompt: "wait for shutdown"}},
+		}, 0, "", "", "", "", "test")
+	})
 }
 
 func TestRunLoopChildCleansUpOnLooprunnerError(t *testing.T) {
@@ -1445,6 +1695,18 @@ func cachePermissionOptionsThroughFanout(t *testing.T, sup *Supervisor, runtimeI
 			t.Fatalf("fanout writer did not cache permission options for %s:%s", runtimeID, requestID)
 		}
 	}
+}
+
+type closeNotifyingSink struct {
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (*closeNotifyingSink) Write(events.Event) error { return nil }
+
+func (s *closeNotifyingSink) Close() error {
+	s.once.Do(func() { close(s.closed) })
+	return nil
 }
 
 type closeRecordingSink struct {
