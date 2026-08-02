@@ -86,26 +86,25 @@ type permissionProviderLifecycle struct {
 	sessionID                  string
 	answerCtx                  context.Context
 	cancelAnswers              context.CancelFunc
-	providerCancelOnce         sync.Once
-	providerCancelDone         chan struct{}
-	answerCallAbandoned        bool
+	providerCalls              *cli.ProviderLifecycle
+	turn                       *cli.ProviderTurn
 	closing                    bool
 	directAnswers              int
 	directAnswersDone          chan struct{}
 	permissionReservations     int
 	permissionReservationsDone chan struct{}
-	closeOnce                  sync.Once
 }
 
 type permissionProviderBinding struct {
 	lifecycle *permissionProviderLifecycle
+	turn      *cli.ProviderTurn
 	sessionID string
 	writer    *runtimeFanoutWriter
 }
 
 type directPermissionReservation struct {
 	lifecycle *permissionProviderLifecycle
-	provider  runtime.Provider
+	turn      *cli.ProviderTurn
 	sessionID string
 	ctx       context.Context
 	writer    *runtimeFanoutWriter
@@ -1104,6 +1103,12 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 			defer s.releaseSessionAttempt(attempt)
 			identity = attempt.identity
 			providerLifecycle = s.beginWorkflowAttempt(child, provider, session, identity)
+			providerTurn, admitted := s.beginChildProviderTurn(child, providerLifecycle)
+			if !admitted {
+				s.closeChildProvider(child, providerLifecycle)
+				s.endWorkflowAttempt(child, provider)
+				return looprunner.PhaseAttemptResult{ExitCode: 130, SessionID: session.SessionID, StopReason: "cancelled", BrokerRunID: brokerRunID}, nil
+			}
 			defer func() {
 				s.closeChildProvider(child, providerLifecycle)
 				s.endWorkflowAttempt(child, provider)
@@ -1121,7 +1126,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 
 			promptDone := make(chan error, 1)
 			go func() {
-				promptDone <- provider.Prompt(context.Background(), session.SessionID, phase.Prompt)
+				promptDone <- providerTurn.Prompt(context.Background(), session.SessionID, phase.Prompt)
 			}()
 
 			result := cli.WaitForSession(ctx, provider, cli.SessionWaitConfig{
@@ -1150,7 +1155,8 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				PreparePermissionClaim: func(ctx context.Context, scope, requestID string, state control.PermissionResolverState, options []any) bool {
 					return s.prepareChildPermissionClaim(ctx, child, providerLifecycle, attemptWriter, session.SessionID, scope, requestID, state, options)
 				},
-				Stderr: os.Stderr,
+				Stderr:       os.Stderr,
+				ProviderTurn: providerTurn,
 			})
 
 			sessions.remember(phase.Name, session.SessionID, identity)
@@ -1359,6 +1365,12 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 			defer s.releaseSessionAttempt(attempt)
 			identity = attempt.identity
 			providerLifecycle = s.beginWorkflowAttempt(child, provider, session, identity)
+			providerTurn, admitted := s.beginChildProviderTurn(child, providerLifecycle)
+			if !admitted {
+				s.closeChildProvider(child, providerLifecycle)
+				s.endWorkflowAttempt(child, provider)
+				return teamrunner.PhaseAttemptResult{ExitCode: 130, SessionID: session.SessionID, StopReason: "cancelled", BrokerRunID: brokerRunID}, nil
+			}
 			defer func() {
 				s.closeChildProvider(child, providerLifecycle)
 				s.endWorkflowAttempt(child, provider)
@@ -1376,7 +1388,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 
 			promptDone := make(chan error, 1)
 			go func() {
-				promptDone <- provider.Prompt(context.Background(), session.SessionID, phase.Prompt)
+				promptDone <- providerTurn.Prompt(context.Background(), session.SessionID, phase.Prompt)
 			}()
 
 			result := cli.WaitForSession(ctx, provider, cli.SessionWaitConfig{
@@ -1405,7 +1417,8 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				PreparePermissionClaim: func(ctx context.Context, scope, requestID string, state control.PermissionResolverState, options []any) bool {
 					return s.prepareChildPermissionClaim(ctx, child, providerLifecycle, attemptWriter, session.SessionID, scope, requestID, state, options)
 				},
-				Stderr: os.Stderr,
+				Stderr:       os.Stderr,
+				ProviderTurn: providerTurn,
 			})
 
 			sessions.remember(phase.Name, session.SessionID, identity)
@@ -1891,10 +1904,15 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 	preAdoptionID := session.SessionID
 	promptSessionID := session.SessionID
 
+	providerLifecycle := s.ensureChildProviderLifecycle(child)
+	providerTurn, admitted := s.beginChildProviderTurn(child, providerLifecycle)
+	if !admitted {
+		return childAttemptResult{exitCode: 130, sessionID: session.SessionID}
+	}
 	promptDone := make(chan error, 1)
 	go func() {
 		defer func() { recover() }()
-		promptDone <- attemptProvider.Prompt(turnCtx, promptSessionID, promptText)
+		promptDone <- providerTurn.Prompt(turnCtx, promptSessionID, promptText)
 	}()
 
 	// Tag events with runtime_id and fan out to both file and control subscribers.
@@ -1935,9 +1953,10 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 		FileHandler:   child.fileHandler,
 		ControlServer: s.control,
 		PreparePermissionClaim: func(ctx context.Context, scope, requestID string, state control.PermissionResolverState, options []any) bool {
-			return s.prepareChildPermissionClaim(ctx, child, s.ensureChildProviderLifecycle(child), taggedWriter, session.SessionID, scope, requestID, state, options)
+			return s.prepareChildPermissionClaim(ctx, child, providerLifecycle, taggedWriter, session.SessionID, scope, requestID, state, options)
 		},
-		Stderr: os.Stderr,
+		Stderr:       os.Stderr,
+		ProviderTurn: providerTurn,
 	})
 	exitCode := result.ExitCode
 	return childAttemptResult{exitCode: exitCode, sessionID: session.SessionID, stopReason: result.StopReason}
@@ -2350,7 +2369,7 @@ func (s *Supervisor) answerPermission(rtID, requestID, optionID, message string)
 		s.control.RetryDirectPermissionDelivery(rtID, requestID)
 		return fmt.Errorf("runtime %q has no active permission provider or is closing", rtID)
 	}
-	providerErr, abandoned := s.callDirectPermissionProvider(reservation, requestID, runtime.PermissionResponse{
+	providerErr := s.callDirectPermissionProvider(reservation, requestID, runtime.PermissionResponse{
 		Allow:    kind == "allow",
 		OptionID: optionID,
 		Message:  message,
@@ -2361,9 +2380,6 @@ func (s *Supervisor) answerPermission(rtID, requestID, optionID, message string)
 	// remains non-terminal until the canonical response write returns, so a
 	// reused request ID cannot replace it before durable publication.
 	rt.writeMu.Lock()
-	if abandoned {
-		reservation.lifecycle.answerCallAbandoned = true
-	}
 	defer func() {
 		s.finishDirectPermissionAnswerLocked(rt, reservation)
 		rt.writeMu.Unlock()
@@ -2452,11 +2468,14 @@ func newPermissionProviderLifecycle(child *childRuntime, provider runtime.Provid
 		parent = context.Background()
 	}
 	answerCtx, cancelAnswers := context.WithCancel(parent)
+	providerCalls := cli.NewProviderLifecycle(provider)
 	return &permissionProviderLifecycle{
 		provider:      provider,
 		sessionID:     sessionID,
 		answerCtx:     answerCtx,
 		cancelAnswers: cancelAnswers,
+		providerCalls: providerCalls,
+		turn:          providerCalls.NewTurn(),
 	}
 }
 
@@ -2494,6 +2513,20 @@ func (s *Supervisor) ensureChildProviderLifecycle(child *childRuntime) *permissi
 	return child.providerLifecycle
 }
 
+// beginChildProviderTurn gives WaitForSession and stable direct answers the
+// same cancellation and live-call coordinator for this provider generation.
+// Turn admission is rejected once provider or child shutdown begins, so no new
+// Prompt can enter after the teardown boundary.
+func (s *Supervisor) beginChildProviderTurn(child *childRuntime, lifecycle *permissionProviderLifecycle) (*cli.ProviderTurn, bool) {
+	child.writeMu.Lock()
+	defer child.writeMu.Unlock()
+	if lifecycle == nil || lifecycle.closing || child.shuttingDown || child.writerClosing {
+		return nil, false
+	}
+	lifecycle.turn = lifecycle.providerCalls.NewTurn()
+	return lifecycle.turn, true
+}
+
 // prepareChildPermissionClaim linearizes a new claim reservation against both
 // supervisor shutdown and phase-provider close. A reservation admitted first
 // is tracked until control registration and exact-provider binding finish, so
@@ -2519,11 +2552,12 @@ func (s *Supervisor) prepareChildPermissionClaim(ctx context.Context, child *chi
 		lifecycle.permissionReservationsDone = make(chan struct{})
 	}
 	lifecycle.permissionReservations++
+	turn := lifecycle.turn
 	child.writeMu.Unlock()
 
 	prepared := s.control.PreparePermissionClaimAfterDirectDeliveryWith(ctx, scope, requestID, state, options, func() {
 		s.permissionProviderMu.Lock()
-		s.permissionProviders[scope+":"+requestID] = permissionProviderBinding{lifecycle: lifecycle, sessionID: sessionID, writer: writer}
+		s.permissionProviders[scope+":"+requestID] = permissionProviderBinding{lifecycle: lifecycle, turn: turn, sessionID: sessionID, writer: writer}
 		s.permissionProviderMu.Unlock()
 	})
 
@@ -2556,9 +2590,15 @@ func (s *Supervisor) beginChildShutdown(child *childRuntime) *permissionProvider
 	cancel := child.cancelFn
 	child.mu.Unlock()
 	cancelProvider := lifecycle != nil && lifecycle.directAnswers > 0
+	var turn *cli.ProviderTurn
+	var sessionID string
+	if lifecycle != nil {
+		turn = lifecycle.turn
+		sessionID = lifecycle.sessionID
+	}
 	child.writeMu.Unlock()
-	if cancelProvider {
-		s.requestPermissionProviderCancel(lifecycle)
+	if cancelProvider && turn != nil {
+		turn.RequestCancel(sessionID, directPermissionJoinTimeout)
 	}
 	if !alreadyShuttingDown && cancel != nil {
 		cancel()
@@ -2598,27 +2638,19 @@ func (s *Supervisor) closeChildProvider(child *childRuntime, lifecycle *permissi
 		s.beforeChildProviderCloseWait()
 	}
 	cancelProvider := lifecycle.directAnswers > 0
+	turn := lifecycle.turn
+	sessionID := lifecycle.sessionID
 	child.writeMu.Unlock()
-	if cancelProvider {
-		s.requestPermissionProviderCancel(lifecycle)
+	if cancelProvider && turn != nil {
+		turn.RequestCancel(sessionID, directPermissionJoinTimeout)
 	}
 	for _, done := range waits {
 		<-done
 	}
-	child.writeMu.Lock()
-	abandoned := lifecycle.answerCallAbandoned
-	child.writeMu.Unlock()
-	if abandoned || !s.waitPermissionProviderCancel(lifecycle) {
-		// Do not race Close against an AnswerPermission or Cancel call that the
-		// provider failed to unblock. The isolated calls may leak, but teardown
-		// remains bounded and the provider object remains valid for them.
-		return
-	}
-	lifecycle.closeOnce.Do(func() {
-		if closer, ok := lifecycle.provider.(interface{ Close() error }); ok {
-			_ = closer.Close()
-		}
-	})
+	// RequestClose is non-blocking while an AnswerPermission or Cancel call is
+	// still live. The shared lifecycle closes later, after the last such call
+	// returns, rather than racing the abandoned provider operation.
+	lifecycle.providerCalls.RequestClose()
 }
 
 func (s *Supervisor) beginDirectPermissionAnswer(child *childRuntime, binding *permissionProviderBinding) (*directPermissionReservation, bool) {
@@ -2635,8 +2667,10 @@ func (s *Supervisor) beginDirectPermissionAnswer(child *childRuntime, binding *p
 	var sessionID string
 	var writer *runtimeFanoutWriter
 	var lifecycle *permissionProviderLifecycle
+	var turn *cli.ProviderTurn
 	if binding != nil {
 		lifecycle = binding.lifecycle
+		turn = binding.turn
 		provider = lifecycle.provider
 		sessionID = binding.sessionID
 		writer = binding.writer
@@ -2649,12 +2683,15 @@ func (s *Supervisor) beginDirectPermissionAnswer(child *childRuntime, binding *p
 			lifecycle = newPermissionProviderLifecycle(child, provider, sessionID)
 			child.providerLifecycle = lifecycle
 		}
+		if lifecycle != nil {
+			turn = lifecycle.turn
+		}
 	}
 	if writer == nil {
 		writer = s.fanoutWriterForChildLocked(child)
 	}
 	child.mu.Unlock()
-	if provider == nil || sessionID == "" || lifecycle == nil || lifecycle.closing || writer == nil {
+	if provider == nil || sessionID == "" || lifecycle == nil || turn == nil || lifecycle.closing || writer == nil {
 		return nil, false
 	}
 	lifecycle.sessionID = sessionID
@@ -2670,7 +2707,7 @@ func (s *Supervisor) beginDirectPermissionAnswer(child *childRuntime, binding *p
 	}
 	child.directAnswers++
 	lifecycle.directAnswers++
-	return &directPermissionReservation{lifecycle: lifecycle, provider: provider, sessionID: sessionID, ctx: ctx, writer: writer}, true
+	return &directPermissionReservation{lifecycle: lifecycle, turn: turn, sessionID: sessionID, ctx: ctx, writer: writer}, true
 }
 
 const directPermissionJoinTimeout = 5 * time.Second
@@ -2680,65 +2717,31 @@ const directPermissionJoinTimeout = 5 * time.Second
 // issued before a bounded join. A provider that ignores both context and
 // Cancel may leak its own call, but it cannot deadlock child teardown or hold
 // the runtime write lock indefinitely.
-func (s *Supervisor) callDirectPermissionProvider(reservation *directPermissionReservation, requestID string, response runtime.PermissionResponse) (error, bool) {
+func (s *Supervisor) callDirectPermissionProvider(reservation *directPermissionReservation, requestID string, response runtime.PermissionResponse) error {
 	result := make(chan error, 1)
 	go func() {
-		result <- reservation.provider.AnswerPermission(reservation.ctx, reservation.sessionID, requestID, response)
+		result <- reservation.turn.AnswerPermission(reservation.ctx, reservation.sessionID, requestID, response)
 	}()
 
 	select {
 	case err := <-result:
-		return err, false
+		return err
 	default:
 	}
 	select {
 	case err := <-result:
-		return err, false
+		return err
 	case <-reservation.ctx.Done():
 	}
 
-	s.requestPermissionProviderCancel(reservation.lifecycle)
+	reservation.turn.RequestCancel(reservation.sessionID, directPermissionJoinTimeout)
 	timer := time.NewTimer(directPermissionJoinTimeout)
 	defer timer.Stop()
 	select {
 	case err := <-result:
-		return err, false
+		return err
 	case <-timer.C:
-		return reservation.ctx.Err(), true
-	}
-}
-
-// requestPermissionProviderCancel starts exactly one bounded provider Cancel
-// call for a generation. The call itself is isolated because context remains
-// advisory for third-party Provider implementations.
-func (s *Supervisor) requestPermissionProviderCancel(lifecycle *permissionProviderLifecycle) <-chan struct{} {
-	lifecycle.providerCancelOnce.Do(func() {
-		lifecycle.providerCancelDone = make(chan struct{})
-		go func() {
-			cancelCtx, cancel := context.WithTimeout(context.Background(), directPermissionJoinTimeout)
-			defer cancel()
-			_ = lifecycle.provider.Cancel(cancelCtx, lifecycle.sessionID)
-			close(lifecycle.providerCancelDone)
-		}()
-	})
-	return lifecycle.providerCancelDone
-}
-
-// waitPermissionProviderCancel prevents Close from racing an outstanding
-// provider Cancel. A provider that ignores cancellation is abandoned rather
-// than allowed to deadlock termination.
-func (s *Supervisor) waitPermissionProviderCancel(lifecycle *permissionProviderLifecycle) bool {
-	done := lifecycle.providerCancelDone
-	if done == nil {
-		return true
-	}
-	timer := time.NewTimer(directPermissionJoinTimeout)
-	defer timer.Stop()
-	select {
-	case <-done:
-		return true
-	case <-timer.C:
-		return false
+		return reservation.ctx.Err()
 	}
 }
 

@@ -83,11 +83,8 @@ func runSingleAttempt(
 		fmt.Fprintf(deps.stderr, "avenor: create provider: %v\n", err)
 		return attemptResult{exitCode: 1}
 	}
-	defer func() {
-		if closer, ok := provider.(interface{ Close() error }); ok {
-			_ = closer.Close()
-		}
-	}()
+	providerLifecycle := NewProviderLifecycle(provider)
+	defer providerLifecycle.RequestClose()
 
 	session, err := StartSession(ctx, provider, cfg.backend, cfg.startOptions, cfg.resumeID)
 	if err != nil {
@@ -138,9 +135,10 @@ func runSingleAttempt(
 
 		// Use a background context for Prompt so it survives process-cancellation
 		// (interrupt_and_prompt must not kill the process).
+		providerTurn := providerLifecycle.NewTurn()
 		promptDone := make(chan error, 1)
 		go func() {
-			promptDone <- provider.Prompt(context.Background(), session.SessionID, prompt)
+			promptDone <- providerTurn.Prompt(context.Background(), session.SessionID, prompt)
 		}()
 
 		result := WaitForSession(ctx, provider, SessionWaitConfig{
@@ -165,6 +163,7 @@ func runSingleAttempt(
 			FileHandler:   deps.fileHandler,
 			ControlServer: deps.controlServer,
 			Stderr:        deps.stderr,
+			ProviderTurn:  providerTurn,
 		})
 		exitCode := result.ExitCode
 		stopReason := result.StopReason

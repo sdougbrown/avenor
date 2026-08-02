@@ -635,38 +635,38 @@ func TestWaitForSessionFilePermissionEmitsOneEffectiveRequestAndCleansUp(t *test
 
 func TestWaitForSessionSynchronizesFileCleanupForEveryTerminationSource(t *testing.T) {
 	tests := []struct {
-		name            string
-		stopReason      string
+		name             string
+		stopReason       string
 		expectedExitCode int
-		trigger         func(chan<- error, chan<- time.Time, chan<- time.Time, chan<- struct{})
+		trigger          func(chan<- error, chan<- time.Time, chan<- time.Time, chan<- struct{})
 	}{
 		{
-			name:            "prompt cancellation",
-			stopReason:      "cancelled",
+			name:             "prompt cancellation",
+			stopReason:       "cancelled",
 			expectedExitCode: 130,
 			trigger: func(promptDone chan<- error, _ chan<- time.Time, _ chan<- time.Time, _ chan<- struct{}) {
 				promptDone <- context.Canceled
 			},
 		},
 		{
-			name:            "progress timeout",
-			stopReason:      "progress_timeout",
+			name:             "progress timeout",
+			stopReason:       "progress_timeout",
 			expectedExitCode: 124,
 			trigger: func(_ chan<- error, progressTimer chan<- time.Time, _ chan<- time.Time, _ chan<- struct{}) {
 				progressTimer <- time.Time{}
 			},
 		},
 		{
-			name:            "configured timeout",
-			stopReason:      "timeout",
+			name:             "configured timeout",
+			stopReason:       "timeout",
 			expectedExitCode: 124,
 			trigger: func(_ chan<- error, _ chan<- time.Time, timeout chan<- time.Time, _ chan<- struct{}) {
 				timeout <- time.Time{}
 			},
 		},
 		{
-			name:            "interrupt",
-			stopReason:      "cancelled",
+			name:             "interrupt",
+			stopReason:       "cancelled",
 			expectedExitCode: 130,
 			trigger: func(_ chan<- error, _ chan<- time.Time, _ chan<- time.Time, interruptCh chan<- struct{}) {
 				interruptCh <- struct{}{}
@@ -1572,6 +1572,191 @@ func (p *nonCooperativePermissionProvider) release() {
 	})
 }
 
+type coordinatedLifecycleProvider struct {
+	cliFakeProvider
+	answerStarted     chan struct{}
+	answerRelease     chan struct{}
+	answerReturned    chan struct{}
+	cancelStarted     chan struct{}
+	cancelRelease     chan struct{}
+	cancelReturned    chan struct{}
+	closeCalled       chan struct{}
+	answerStartOnce   sync.Once
+	answerDoneOnce    sync.Once
+	cancelStartOnce   sync.Once
+	cancelDoneOnce    sync.Once
+	closeOnce         sync.Once
+	answerReleaseOnce sync.Once
+	cancelReleaseOnce sync.Once
+	mu                sync.Mutex
+	cancelCalls       int
+	closeCalls        int
+	answerInFlight    bool
+	cancelInFlight    bool
+	closeRaced        bool
+}
+
+func newCoordinatedLifecycleProvider() *coordinatedLifecycleProvider {
+	return &coordinatedLifecycleProvider{
+		answerStarted:  make(chan struct{}),
+		answerRelease:  make(chan struct{}),
+		answerReturned: make(chan struct{}),
+		cancelStarted:  make(chan struct{}),
+		cancelRelease:  make(chan struct{}),
+		cancelReturned: make(chan struct{}),
+		closeCalled:    make(chan struct{}),
+	}
+}
+
+func (p *coordinatedLifecycleProvider) AnswerPermission(context.Context, string, string, runtime.PermissionResponse) error {
+	p.mu.Lock()
+	p.answerInFlight = true
+	p.mu.Unlock()
+	defer func() {
+		p.mu.Lock()
+		p.answerInFlight = false
+		p.mu.Unlock()
+		p.answerDoneOnce.Do(func() { close(p.answerReturned) })
+	}()
+	p.answerStartOnce.Do(func() { close(p.answerStarted) })
+	<-p.answerRelease
+	return nil
+}
+
+func (p *coordinatedLifecycleProvider) Cancel(context.Context, string) error {
+	p.mu.Lock()
+	p.cancelCalls++
+	p.cancelInFlight = true
+	p.mu.Unlock()
+	defer func() {
+		p.mu.Lock()
+		p.cancelInFlight = false
+		p.mu.Unlock()
+		p.cancelDoneOnce.Do(func() { close(p.cancelReturned) })
+	}()
+	p.cancelStartOnce.Do(func() { close(p.cancelStarted) })
+	<-p.cancelRelease
+	return nil
+}
+
+func (p *coordinatedLifecycleProvider) Close() error {
+	p.mu.Lock()
+	p.closeCalls++
+	if p.answerInFlight || p.cancelInFlight {
+		p.closeRaced = true
+	}
+	p.mu.Unlock()
+	p.closeOnce.Do(func() { close(p.closeCalled) })
+	return nil
+}
+
+func (p *coordinatedLifecycleProvider) releaseAnswer() {
+	p.answerReleaseOnce.Do(func() { close(p.answerRelease) })
+}
+
+func (p *coordinatedLifecycleProvider) releaseCancel() {
+	p.cancelReleaseOnce.Do(func() { close(p.cancelRelease) })
+}
+
+func (p *coordinatedLifecycleProvider) release() {
+	p.releaseAnswer()
+	p.releaseCancel()
+}
+
+func (p *coordinatedLifecycleProvider) lifecycleCounts() (int, int, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.cancelCalls, p.closeCalls, p.closeRaced
+}
+
+type blockingPromptLifecycleProvider struct {
+	cliFakeProvider
+	started     chan struct{}
+	release     chan struct{}
+	returned    chan struct{}
+	closed      chan struct{}
+	releaseOnce sync.Once
+	closeOnce   sync.Once
+	mu          sync.Mutex
+	inFlight    bool
+	closeCalls  int
+	closeRaced  bool
+}
+
+func newBlockingPromptLifecycleProvider() *blockingPromptLifecycleProvider {
+	return &blockingPromptLifecycleProvider{
+		started:  make(chan struct{}),
+		release:  make(chan struct{}),
+		returned: make(chan struct{}),
+		closed:   make(chan struct{}),
+	}
+}
+
+func (p *blockingPromptLifecycleProvider) Prompt(context.Context, string, string) error {
+	p.mu.Lock()
+	p.inFlight = true
+	p.mu.Unlock()
+	close(p.started)
+	defer func() {
+		p.mu.Lock()
+		p.inFlight = false
+		p.mu.Unlock()
+		close(p.returned)
+	}()
+	<-p.release
+	return nil
+}
+
+func (p *blockingPromptLifecycleProvider) Close() error {
+	p.mu.Lock()
+	p.closeCalls++
+	if p.inFlight {
+		p.closeRaced = true
+	}
+	p.mu.Unlock()
+	p.closeOnce.Do(func() { close(p.closed) })
+	return nil
+}
+
+func (p *blockingPromptLifecycleProvider) unblock() {
+	p.releaseOnce.Do(func() { close(p.release) })
+}
+
+type multiSessionCancelProvider struct {
+	cliFakeProvider
+	started     chan string
+	release     chan struct{}
+	releaseOnce sync.Once
+	mu          sync.Mutex
+	sessionIDs  []string
+}
+
+func newMultiSessionCancelProvider() *multiSessionCancelProvider {
+	return &multiSessionCancelProvider{
+		started: make(chan string, 2),
+		release: make(chan struct{}),
+	}
+}
+
+func (p *multiSessionCancelProvider) Cancel(_ context.Context, sessionID string) error {
+	p.mu.Lock()
+	p.sessionIDs = append(p.sessionIDs, sessionID)
+	p.mu.Unlock()
+	p.started <- sessionID
+	<-p.release
+	return nil
+}
+
+func (p *multiSessionCancelProvider) unblock() {
+	p.releaseOnce.Do(func() { close(p.release) })
+}
+
+func (p *multiSessionCancelProvider) sessions() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.sessionIDs...)
+}
+
 type sequentialPermissionProvider struct {
 	cliFakeProvider
 	mu             sync.Mutex
@@ -1716,6 +1901,247 @@ func TestWaitForSessionTerminationCancelsBeforeJoiningPermissionAnswer(t *testin
 				t.Fatal("WaitForSession returned before AnswerPermission joined")
 			}
 		})
+	}
+}
+
+func TestProviderLifecycleDefersCloseAndSharesBlockedCancel(t *testing.T) {
+	for _, answerFirst := range []bool{true, false} {
+		name := "cancel returns first"
+		if answerFirst {
+			name = "answer returns first"
+		}
+		t.Run(name, func(t *testing.T) {
+			provider := newCoordinatedLifecycleProvider()
+			ctx, cancel := context.WithCancel(context.Background())
+			lifecycle := NewProviderLifecycle(provider)
+			turn := lifecycle.NewTurn()
+			resolverFinished := make(chan struct{})
+			writer, err := NewEventWriter("")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			interruptCh := make(chan struct{})
+			eventCh := make(chan events.Event, 1)
+			eventCh <- events.Event{
+				Event:     "permission.request",
+				SessionID: "ses_coordinated_lifecycle",
+				Fields: map[string]any{
+					"request_id": "req_coordinated_lifecycle",
+					"options": []any{
+						map[string]any{"optionId": "allow", "kind": "allow"},
+					},
+				},
+			}
+			resultCh := make(chan sessionResult, 1)
+			waitDone := make(chan struct{})
+			t.Cleanup(func() {
+				cancel()
+				provider.release()
+				select {
+				case <-waitDone:
+				case <-time.After(time.Second):
+					t.Error("WaitForSession goroutine did not exit during cleanup")
+				}
+				closeDone := lifecycle.RequestClose()
+				select {
+				case <-closeDone:
+				case <-time.After(time.Second):
+					t.Error("provider lifecycle did not close during cleanup")
+				}
+				if err := writer.Close(); err != nil {
+					t.Errorf("close writer: %v", err)
+				}
+			})
+			go func() {
+				defer close(waitDone)
+				resultCh <- WaitForSession(ctx, provider, SessionWaitConfig{
+					EventCh:     eventCh,
+					PromptDone:  make(chan error),
+					InterruptCh: interruptCh,
+					SessionID:   "ses_coordinated_lifecycle",
+					RunID:       "run_coordinated_lifecycle",
+					AutoApprove: true,
+				}, SessionWaitDeps{
+					Writer:                writer,
+					Stderr:                io.Discard,
+					ProviderTurn:          turn,
+					permissionJoinTimeout: 20 * time.Millisecond,
+					permissionResultSent:  func() { close(resolverFinished) },
+				})
+			}()
+
+			waitFor := func(label string, done <-chan struct{}) {
+				t.Helper()
+				select {
+				case <-done:
+				case <-time.After(time.Second):
+					t.Fatalf("%s did not finish", label)
+				}
+			}
+			assertPending := func(label string, done <-chan struct{}) {
+				t.Helper()
+				select {
+				case <-done:
+					t.Fatalf("%s finished before its provider call was released", label)
+				default:
+				}
+			}
+
+			waitFor("AnswerPermission start", provider.answerStarted)
+			close(interruptCh)
+			waitFor("Cancel start", provider.cancelStarted)
+			select {
+			case result := <-resultCh:
+				if result.StopReason != "cancelled" {
+					t.Fatalf("StopReason = %q, want cancelled", result.StopReason)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("WaitForSession did not return after the provider-call bounds")
+			}
+
+			// Model runSingleAttempt/stable teardown and a second cancellation
+			// owner. Both must share the one still-live provider Cancel.
+			lifecycle.RequestClose()
+			secondTurn := lifecycle.NewTurn()
+			secondCancelDone := secondTurn.RequestCancel("ses_coordinated_lifecycle", 20*time.Millisecond)
+			assertPending("deferred Close", provider.closeCalled)
+			assertPending("second cancel wait", secondCancelDone)
+			if cancelCalls, _, _ := provider.lifecycleCounts(); cancelCalls != 1 {
+				t.Fatalf("provider Cancel calls = %d, want one shared lifecycle", cancelCalls)
+			}
+
+			if answerFirst {
+				provider.releaseAnswer()
+				waitFor("AnswerPermission", provider.answerReturned)
+				waitFor("permission resolver", resolverFinished)
+				assertPending("deferred Close after answer", provider.closeCalled)
+				assertPending("second cancel wait after answer", secondCancelDone)
+				provider.releaseCancel()
+				waitFor("Cancel", provider.cancelReturned)
+				waitFor("second cancel wait", secondCancelDone)
+			} else {
+				provider.releaseCancel()
+				waitFor("Cancel", provider.cancelReturned)
+				waitFor("second cancel wait", secondCancelDone)
+				assertPending("deferred Close after cancel", provider.closeCalled)
+				assertPending("AnswerPermission after cancel", provider.answerReturned)
+				provider.releaseAnswer()
+				waitFor("AnswerPermission", provider.answerReturned)
+				waitFor("permission resolver", resolverFinished)
+			}
+			waitFor("deferred Close", provider.closeCalled)
+			if cancelCalls, closeCalls, raced := provider.lifecycleCounts(); cancelCalls != 1 || closeCalls != 1 || raced {
+				t.Fatalf("provider lifecycle = {cancel calls:%d close calls:%d close raced:%v}, want {1 1 false}", cancelCalls, closeCalls, raced)
+			}
+		})
+	}
+}
+
+func TestProviderLifecycleDefersCloseForPromptAndRejectsLateCalls(t *testing.T) {
+	provider := newBlockingPromptLifecycleProvider()
+	t.Cleanup(provider.unblock)
+	lifecycle := NewProviderLifecycle(provider)
+	turn := lifecycle.NewTurn()
+	promptDone := make(chan error, 1)
+	go func() { promptDone <- turn.Prompt(context.Background(), "ses_prompt", "prompt") }()
+
+	select {
+	case <-provider.started:
+	case <-time.After(time.Second):
+		t.Fatal("Prompt did not reach the forced blocking point")
+	}
+	const closeRequests = 8
+	closeResults := make(chan (<-chan struct{}), closeRequests)
+	for range closeRequests {
+		go func() { closeResults <- lifecycle.RequestClose() }()
+	}
+	var closeDone <-chan struct{}
+	for range closeRequests {
+		var done <-chan struct{}
+		select {
+		case done = <-closeResults:
+		case <-time.After(time.Second):
+			t.Fatal("concurrent RequestClose call blocked")
+		}
+		if closeDone == nil {
+			closeDone = done
+		} else if done != closeDone {
+			t.Fatal("concurrent RequestClose calls returned different completion channels")
+		}
+	}
+	select {
+	case <-closeDone:
+		t.Fatal("provider closed while Prompt remained live")
+	default:
+	}
+	lateTurn := lifecycle.NewTurn()
+	if err := lateTurn.Prompt(context.Background(), "ses_prompt", "late"); !errors.Is(err, errProviderLifecycleClosing) {
+		t.Fatalf("late Prompt error = %v, want provider lifecycle closing", err)
+	}
+	if err := lateTurn.AnswerPermission(context.Background(), "ses_prompt", "req_late", runtime.PermissionResponse{}); !errors.Is(err, errProviderLifecycleClosing) {
+		t.Fatalf("late AnswerPermission error = %v, want provider lifecycle closing", err)
+	}
+	lateCancelDone := lateTurn.RequestCancel("ses_prompt", 20*time.Millisecond)
+	select {
+	case <-lateCancelDone:
+		if err := lateTurn.cancelError(); !errors.Is(err, errProviderLifecycleClosing) {
+			t.Fatalf("late Cancel error = %v, want provider lifecycle closing", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("late Cancel rejection did not complete")
+	}
+
+	provider.unblock()
+	select {
+	case err := <-promptDone:
+		if err != nil {
+			t.Fatalf("Prompt: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Prompt did not return after release")
+	}
+	select {
+	case <-closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("provider did not close after Prompt returned")
+	}
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	if provider.closeCalls != 1 || provider.closeRaced {
+		t.Fatalf("provider close lifecycle = {calls:%d raced:%v}, want {1 false}", provider.closeCalls, provider.closeRaced)
+	}
+}
+
+func TestProviderLifecycleDoesNotShareCancelAcrossSessions(t *testing.T) {
+	provider := newMultiSessionCancelProvider()
+	t.Cleanup(provider.unblock)
+	lifecycle := NewProviderLifecycle(provider)
+	firstDone := lifecycle.NewTurn().RequestCancel("ses_first", time.Second)
+	secondDone := lifecycle.NewTurn().RequestCancel("ses_second", time.Second)
+
+	seen := map[string]bool{}
+	for range 2 {
+		select {
+		case sessionID := <-provider.started:
+			seen[sessionID] = true
+		case <-time.After(time.Second):
+			t.Fatal("distinct-session Cancel did not start")
+		}
+	}
+	if !seen["ses_first"] || !seen["ses_second"] {
+		t.Fatalf("provider Cancel sessions = %v, want both sessions", provider.sessions())
+	}
+	provider.unblock()
+	for name, done := range map[string]<-chan struct{}{"first": firstDone, "second": secondDone} {
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatalf("%s Cancel did not return after release", name)
+		}
+	}
+	if got := provider.sessions(); len(got) != 2 {
+		t.Fatalf("provider Cancel calls = %v, want two distinct calls", got)
 	}
 }
 
@@ -4299,9 +4725,8 @@ func TestWaitForSessionChunkedStatusMarkerDedup(t *testing.T) {
 	}
 }
 
-// TestCancelAndEndIncludesBufferedUsage verifies that when the timeout path
-// fires, cancelAndEnd includes usage accumulated from prior events in the
-// synthetic session.end event.
+// TestCancelAndEndIncludesBufferedUsage verifies that the timeout path includes
+// usage accumulated from prior events in the synthetic session.end event.
 func TestCancelAndEndIncludesBufferedUsage(t *testing.T) {
 	dir := t.TempDir()
 	eventsPath := filepath.Join(dir, "events.ndjson")
@@ -4399,8 +4824,8 @@ func TestCancelAndEndIncludesBufferedUsage(t *testing.T) {
 	}
 }
 
-// TestCancelAndEndNilUsage verifies that when timeout fires before any
-// usage-bearing event, cancelAndEnd emits session.end without a usage key.
+// TestCancelAndEndNilUsage verifies that a timeout before any usage-bearing
+// event emits session.end without a usage key.
 func TestCancelAndEndNilUsage(t *testing.T) {
 	dir := t.TempDir()
 	eventsPath := filepath.Join(dir, "events.ndjson")

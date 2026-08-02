@@ -1026,6 +1026,10 @@ type SessionWaitDeps struct {
 	// PreparePermissionClaim lets stable runtimes serialize a reused request ID
 	// with direct provider completion. Nil uses ControlServer directly.
 	PreparePermissionClaim func(context.Context, string, string, control.PermissionResolverState, []any) bool
+	// ProviderTurn coordinates permission answers, cancellation, and eventual
+	// provider close with the caller's provider lifecycle. Nil creates a turn
+	// suitable for callers that do not own provider teardown.
+	ProviderTurn *ProviderTurn
 }
 
 func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionWaitConfig, deps SessionWaitDeps) sessionResult {
@@ -1045,6 +1049,11 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 	if deps.permissionJoinTimeout > 0 {
 		permissionJoinTimeout = deps.permissionJoinTimeout
 	}
+	providerTurn := deps.ProviderTurn
+	if providerTurn == nil {
+		providerTurn = NewProviderLifecycle(provider).NewTurn()
+	}
+	permissionProvider := permissionTurnProvider{Provider: provider, turn: providerTurn}
 
 	// Every return path attempts to join an in-flight permission resolver.
 	// Context cancellation stops cooperative resolvers; the bound prevents a
@@ -1070,7 +1079,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 		// before joining: some providers ignore the answer context and only
 		// unblock AnswerPermission when Cancel is called.
 		cancelPermission()
-		cancelProvider(provider, deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, deps.Stderr, permissionJoinTimeout)
+		cancelProvider(providerTurn, deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, deps.Stderr, permissionJoinTimeout)
 		synchronizePermission()
 		return endSession(deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, stopReason, deps.Stderr, bufferedUsage, fullReply.String(), finalReply.String())
 	}
@@ -1302,7 +1311,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				done := make(chan permissionResult, 1)
 				permissionDone = done
 				go func() {
-					res := resolvePermission(permissionCtx, provider, deps.FileHandler, deps.ControlServer, event, cfg.SessionID, cfg.PermissionClaimScope, requestID, cfg.AutoApprove, cfg.PermissionClaimTimeout)
+					res := resolvePermission(permissionCtx, permissionProvider, deps.FileHandler, deps.ControlServer, event, cfg.SessionID, cfg.PermissionClaimScope, requestID, cfg.AutoApprove, cfg.PermissionClaimTimeout)
 					done <- res
 					if deps.permissionResultSent != nil {
 						deps.permissionResultSent()
@@ -1355,28 +1364,21 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 	}
 }
 
-func cancelProvider(provider runtime.Provider, writer EventSink, sessionID, runID, runLabel string, stderr io.Writer, timeout time.Duration) {
-	cancelCtx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	result := make(chan error, 1)
-	go func() {
-		result <- provider.Cancel(cancelCtx, sessionID)
-	}()
+func cancelProvider(turn *ProviderTurn, writer EventSink, sessionID, runID, runLabel string, stderr io.Writer, timeout time.Duration) {
+	done := turn.RequestCancel(sessionID, timeout)
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 
 	var err error
 	select {
-	case err = <-result:
-	case <-cancelCtx.Done():
-		err = cancelCtx.Err()
+	case <-done:
+		err = turn.cancelError()
+	case <-timer.C:
+		err = context.DeadlineExceeded
 	}
 	if err != nil {
 		emitErrorEvent(writer, sessionID, runID, "cancel", fmt.Sprintf("cancel session: %v", err), stderr, runLabel)
 	}
-}
-
-func cancelAndEnd(provider runtime.Provider, writer EventSink, sessionID, runID, runLabel, stopReason string, stderr io.Writer, usage map[string]any, fullFinalOutput, lastBlockFinalReply string) sessionResult {
-	cancelProvider(provider, writer, sessionID, runID, runLabel, stderr, permissionResolverJoinTimeout)
-	return endSession(writer, sessionID, runID, runLabel, stopReason, stderr, usage, fullFinalOutput, lastBlockFinalReply)
 }
 
 func endSession(writer EventSink, sessionID, runID, runLabel, stopReason string, stderr io.Writer, usage map[string]any, fullFinalOutput, lastBlockFinalReply string) sessionResult {
