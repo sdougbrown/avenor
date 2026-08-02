@@ -35,8 +35,9 @@ type sessionBackendEntry struct {
 // from an older provider fail the ownership check without relying on provider
 // interface equality.
 type cliSessionAttempt struct {
-	resumeID string
-	rejected bool
+	resumeID             string
+	provisionalWasMapped bool
+	rejected             bool
 }
 
 func newSessionBackendMap() *sessionBackendMap {
@@ -99,7 +100,8 @@ func (m *sessionBackendMap) claim(sessionID string, identity cliSessionIdentity,
 	if m.entries == nil {
 		m.entries = make(map[string]sessionBackendEntry)
 	}
-	if existing, ok := m.entries[sessionID]; ok {
+	existing, wasMapped := m.entries[sessionID]
+	if wasMapped {
 		if existing.identity != identity {
 			return fmt.Errorf("session ID %q is already assigned to a different provider identity", sessionID)
 		}
@@ -110,6 +112,7 @@ func (m *sessionBackendMap) claim(sessionID string, identity cliSessionIdentity,
 	}
 	if owner != nil {
 		owner.resumeID = resumeID
+		owner.provisionalWasMapped = wasMapped
 	}
 	m.entries[sessionID] = sessionBackendEntry{identity: identity, owner: owner, authoritative: true}
 	return nil
@@ -157,9 +160,16 @@ func (m *sessionBackendMap) finish(provisionalID, finalID string, owner *cliSess
 	defer m.mu.Unlock()
 	if owner != nil && owner.rejected {
 		for sessionID, entry := range m.entries {
-			if entry.owner == owner {
-				delete(m.entries, sessionID)
+			if entry.owner != owner {
+				continue
 			}
+			if sessionID == provisionalID && owner.provisionalWasMapped {
+				entry.owner = nil
+				entry.authoritative = true
+				m.entries[sessionID] = entry
+				continue
+			}
+			delete(m.entries, sessionID)
 		}
 		return
 	}

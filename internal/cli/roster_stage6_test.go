@@ -276,6 +276,39 @@ func TestSessionBackendMapResumeCanReadoptMappedAuthoritativeID(t *testing.T) {
 	}
 }
 
+func TestSessionBackendMapRejectedResumePreservesAuthoritativeMapping(t *testing.T) {
+	mapping := newSessionBackendMap()
+	identity := cliSessionIdentity{backend: "gemini-acp", agent: "planner", model: "planner-model"}
+	initial := &cliSessionAttempt{}
+	if err := mapping.claim("resume-session", identity, initial, ""); err != nil {
+		t.Fatal(err)
+	}
+	mapping.finish("resume-session", "resume-session", initial)
+
+	collisionOwner := &cliSessionAttempt{}
+	collisionIdentity := cliSessionIdentity{backend: "agy", agent: "other", model: "other-model"}
+	if err := mapping.claim("occupied", collisionIdentity, collisionOwner, ""); err != nil {
+		t.Fatal(err)
+	}
+	mapping.finish("occupied", "occupied", collisionOwner)
+
+	resumed := &cliSessionAttempt{}
+	if err := mapping.claim("resume-session", identity, resumed, "resume-session"); err != nil {
+		t.Fatal(err)
+	}
+	if mapping.adopt("resume-session", "occupied", resumed) {
+		t.Fatal("resume adopted another session's authoritative ID")
+	}
+	mapping.finish("resume-session", "resume-session", resumed)
+
+	if got, ok := mapping.identity("resume-session"); !ok || got != identity {
+		t.Fatalf("resume mapping = %#v, ok=%v; want preserved identity %#v", got, ok, identity)
+	}
+	if got, ok := mapping.identity("occupied"); !ok || got != collisionIdentity {
+		t.Fatalf("collision mapping = %#v, ok=%v; want preserved identity %#v", got, ok, collisionIdentity)
+	}
+}
+
 func TestSessionBackendMapRestoresCompleteIdentityAndRejectsSameBackendConflict(t *testing.T) {
 	mapping := newSessionBackendMap()
 	owner := &cliSessionAttempt{}
