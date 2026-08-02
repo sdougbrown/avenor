@@ -1,6 +1,6 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import { Supervisor, type RunInfo } from '../supervisor.js'
+import { Supervisor, retainLiveIdentity, type RunInfo } from '../supervisor.js'
 import { type Client } from '../client.js'
 import { runsRoot } from '../paths.js'
 import { asRecord, numberField, stringArrayField, stringField } from '../value-fields.js'
@@ -162,6 +162,7 @@ function buildBaseStatus(
       agent?: string
       model?: string
       backend?: string
+      agent_profile?: string
       effective_agent?: string
       effective_model?: string
       effective_backend?: string
@@ -170,21 +171,25 @@ function buildBaseStatus(
   translatedStatus: string,
 ): StatusResult {
   const identity = fallback.identity
-  const effectiveAgent =
-    stringField(source, 'effective_agent') ??
-    stringField(source, 'agent') ??
-    identity?.effective_agent ??
-    identity?.agent
-  const effectiveModel =
-    stringField(source, 'effective_model') ??
-    stringField(source, 'model') ??
-    identity?.effective_model ??
-    identity?.model
-  const effectiveBackend =
-    stringField(source, 'effective_backend') ??
-    stringField(source, 'backend') ??
-    identity?.effective_backend ??
-    identity?.backend
+  const authoritativeValue = (
+    effectiveKey: string,
+    directKey: string,
+    fallbackEffective?: string,
+    fallbackDirect?: string,
+  ): string | undefined => {
+    if (typeof source[effectiveKey] === 'string') return stringField(source, effectiveKey)
+    if (typeof source[directKey] === 'string') return stringField(source, directKey)
+    return fallbackEffective ?? fallbackDirect
+  }
+  const effectiveAgent = authoritativeValue(
+    'effective_agent', 'agent', identity?.effective_agent, identity?.agent,
+  )
+  const effectiveModel = authoritativeValue(
+    'effective_model', 'model', identity?.effective_model, identity?.model,
+  )
+  const effectiveBackend = authoritativeValue(
+    'effective_backend', 'backend', identity?.effective_backend, identity?.backend,
+  )
 
   return {
     run_id: fallback.prefer_fallback_run_id
@@ -198,11 +203,18 @@ function buildBaseStatus(
     pending_permission: extractPendingPermission(source),
     session_id: stringField(source, 'session_id') ?? fallback.session_id,
     stop_reason: stringField(source, 'stop_reason') ?? fallback.stop_reason,
-    roster_file: stringField(source, 'roster_file') ?? identity?.roster_file,
-    roster_entry: stringField(source, 'roster_entry') ?? identity?.roster_entry,
+    roster_file: typeof source.roster_file === 'string'
+      ? stringField(source, 'roster_file')
+      : identity?.roster_file,
+    roster_entry: typeof source.roster_entry === 'string'
+      ? stringField(source, 'roster_entry')
+      : identity?.roster_entry,
     backend: effectiveBackend,
     agent: effectiveAgent,
     model: effectiveModel,
+    agent_profile: typeof source.agent_profile === 'string'
+      ? stringField(source, 'agent_profile')
+      : identity?.agent_profile,
     effective_backend: effectiveBackend,
     effective_agent: effectiveAgent,
     effective_model: effectiveModel,
@@ -245,6 +257,7 @@ export interface StatusResult {
   backend?: string
   agent?: string
   model?: string
+  agent_profile?: string
   effective_backend?: string
   effective_agent?: string
   effective_model?: string
@@ -279,6 +292,7 @@ async function buildRunStatus(
   runInfo: RunInfo,
   liveStatus: Record<string, unknown> | null,
 ): Promise<StatusResult> {
+  if (liveStatus) retainLiveIdentity(runInfo, liveStatus)
   let sentinel: Record<string, string> | null = null
   if (await sentinelExists(runInfo.sentinelPath)) {
     sentinel = await parseSentinel(runInfo.sentinelPath)
@@ -304,6 +318,7 @@ async function buildRunStatus(
         agent: runInfo.agent,
         model: runInfo.model,
         backend: runInfo.backend,
+        agent_profile: runInfo.agentProfile,
         effective_agent: runInfo.effectiveAgent,
         effective_model: runInfo.effectiveModel,
         effective_backend: runInfo.effectiveBackend,

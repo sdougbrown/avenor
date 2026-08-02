@@ -2677,6 +2677,47 @@ func TestAvenorRosterFollowUpUsesResolvedIdentity(t *testing.T) {
 	}
 }
 
+func TestAvenorWorkflowFollowUpClearsStaleModelFromAgentOnlyFinalPhase(t *testing.T) {
+	sentinelPath := filepath.Join(t.TempDir(), "agent-only-followup.done")
+	if err := os.WriteFile(sentinelPath, []byte("DONE\nSESSION=final-session\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var captured map[string]any
+	fake := &fakeClient{
+		statusResult: map[string]any{
+			"session_id": "final-session", "effective_agent": "final-agent",
+			"effective_model": "", "effective_backend": "agy", "agent_profile": "cloud",
+		},
+		spawnFunc: func(params map[string]any) (map[string]any, error) {
+			captured = params
+			return map[string]any{"runtime_id": "rt-agent-only-followup"}, nil
+		},
+	}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.registry.Store(&RunInfo{
+		RunID: "agent-only-workflow", Label: "agent-only-workflow", RuntimeID: "rt-agent-only",
+		SentinelPath: sentinelPath, EffectiveAgent: "stale-agent", EffectiveModel: "stale-model",
+		EffectiveBackend: "pi", AgentProfile: "cloud", Dir: "/tmp/repo",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
+		RunID: "agent-only-workflow", Message: "continue",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if captured["agent"] != "final-agent" || captured["backend"] != "agy" || captured["agent_profile"] != "cloud" {
+		t.Fatalf("final identity not forwarded: %#v", captured)
+	}
+	if _, exists := captured["model"]; exists {
+		t.Fatalf("stale run-level model was forwarded: %#v", captured)
+	}
+}
+
 func TestAvenorFollowUpInheritsAutoApproveTransitively(t *testing.T) {
 	var spawnParams []map[string]any
 	spawnCount := 0

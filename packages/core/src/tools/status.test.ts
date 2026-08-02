@@ -110,6 +110,9 @@ describe('statusTool singleton registry', () => {
     statusMock.mockClear()
     closeMock.mockClear()
     getSupervisorClientMock.mockClear()
+    delete (runInfo as any).agentProfile
+    delete (runInfo as any).model
+    delete (runInfo as any).effectiveModel
 
     if (sentinelPath) {
       try {
@@ -141,6 +144,20 @@ describe('statusTool singleton registry', () => {
     })
   })
 
+  it('preserves stored agent_profile when live status is unavailable', async () => {
+    sentinelPath = path.join(os.tmpdir(), `avenor-run-${runInfo.runId}.done`)
+    fs.writeFileSync(sentinelPath, 'DONE\nSESSION=ses-profile\n')
+    runInfo.sentinelPath = sentinelPath
+    ;(runInfo as any).agentProfile = 'stored-profile'
+
+    const result = await statusTool({
+      runId: runInfo.runId,
+      supervisorId: '/tmp/avenor-mcp-test.sock',
+    })
+
+    expect(result).toMatchObject({ agent_profile: 'stored-profile' })
+  })
+
   it('uses non-empty status when phase is present but empty', async () => {
     sentinelPath = path.join(os.tmpdir(), `avenor-run-${runInfo.runId}.done`)
     fs.writeFileSync(sentinelPath, 'FAILED\nSESSION=ses-failed\n')
@@ -164,6 +181,36 @@ describe('statusTool singleton registry', () => {
     })
   })
 
+  it('does not restore a stale fallback model when live identity is agent-only', async () => {
+    ;(runInfo as any).model = 'stale-model'
+    ;(runInfo as any).effectiveModel = 'stale-model'
+    statusMock.mockResolvedValueOnce({
+      runtime_id: runInfo.runtimeId,
+      session_id: 'ses-agent-only',
+      status: 'ended',
+      effective_agent: 'final-agent',
+      effective_model: '',
+      effective_backend: 'agy',
+    })
+
+    const result = await statusTool({
+      runId: runInfo.runId,
+      supervisorId: '/tmp/avenor-mcp-test.sock',
+    })
+
+    expect(result).toMatchObject({ agent: 'final-agent', backend: 'agy' })
+    expect(result.model).toBeUndefined()
+    expect(result.effective_model).toBeUndefined()
+
+    statusMock.mockRejectedValueOnce(new Error('completed runtime removed'))
+    const fallback = await statusTool({
+      runId: runInfo.runId,
+      supervisorId: '/tmp/avenor-mcp-test.sock',
+    })
+    expect(fallback).toMatchObject({ agent: 'final-agent', backend: 'agy' })
+    expect(fallback.model).toBeUndefined()
+  })
+
   it('maps richer metadata additively from live status', async () => {
     statusMock.mockResolvedValueOnce({
       run_id: 'parent-run-id-that-must-not-replace-the-tracked-run',
@@ -173,6 +220,7 @@ describe('statusTool singleton registry', () => {
       phase_label: 'Need approval',
       backend: 'pi',
       agent: 'horse',
+      agent_profile: 'live-profile',
       model: 'qwen',
       roster_file: '/repo/roster.json',
       roster_entry: 'planner',
@@ -207,6 +255,7 @@ describe('statusTool singleton registry', () => {
       status: 'waiting',
       backend: 'pi',
       agent: 'horse',
+      agent_profile: 'live-profile',
       model: 'qwen',
       roster_file: '/repo/roster.json',
       roster_entry: 'planner',

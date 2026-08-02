@@ -1,7 +1,7 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as crypto from 'node:crypto'
-import { Supervisor, type RunInfo } from '../supervisor.js'
+import { Supervisor, retainLiveIdentity, type RunInfo } from '../supervisor.js'
 import type { SpawnParams, ThinkingLevel } from '../client.js'
 import { ensureRunPaths, runsRoot } from '../paths.js'
 import { validateRunId } from './validate.js'
@@ -49,16 +49,15 @@ function resolvedIdentity(
   fallbackEffective: string | undefined,
   fallbackDirect: string | undefined,
 ): string | undefined {
-  return value(liveStatus?.[effectiveKey]) ??
-    value(liveStatus?.[directKey]) ??
-    fallbackEffective ??
-    fallbackDirect
-}
-
-function requireResumableIdentity(agent: string | undefined, model: string | undefined): void {
-  if (agent === undefined && model === undefined) {
-    throw new Error('run has no agent to resume')
+  // A live empty string is authoritative too: agent-only/model-only/defaulted
+  // sessions must clear stale run-level fallback fields on follow-up.
+  if (liveStatus && typeof liveStatus[effectiveKey] === 'string') {
+    return value(liveStatus[effectiveKey])
   }
+  if (liveStatus && typeof liveStatus[directKey] === 'string') {
+    return value(liveStatus[directKey])
+  }
+  return fallbackEffective ?? fallbackDirect
 }
 
 async function parseSentinel(filePath: string): Promise<Record<string, string> | null> {
@@ -141,7 +140,7 @@ async function executeFollowUpTool(
         runInfo?.effectiveBackend,
         runInfo?.backend,
       )
-      requireResumableIdentity(agent, model)
+      if (runInfo && liveStatus) retainLiveIdentity(runInfo, liveStatus)
       const thinking = (liveStatus?.thinking as ThinkingLevel | undefined) ?? runInfo?.thinking
       const dir = (liveStatus?.dir as string | undefined) ?? runInfo?.dir
       const agentProfile =
@@ -231,7 +230,7 @@ async function executeFollowUpTool(
     runInfo.effectiveBackend,
     runInfo.backend,
   )
-  requireResumableIdentity(agent, model)
+  if (liveStatus) retainLiveIdentity(runInfo, liveStatus)
   const thinking = (liveStatus?.thinking as ThinkingLevel | undefined) ?? runInfo.thinking
   const dir = (liveStatus?.dir as string | undefined) ?? runInfo.dir
   const agentProfile =

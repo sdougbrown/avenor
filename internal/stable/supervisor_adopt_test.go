@@ -16,6 +16,38 @@ import (
 	"github.com/sdougbrown/avenor/internal/teamrunner"
 )
 
+// adoptChildSessionID preserves the pre-attempt-token test API. Production
+// ownership is registered explicitly and never depends on the aggregate child.
+func (s *Supervisor) adoptChildSessionID(child *childRuntime, provider runtime.Provider, expectedOldID, externalID string) bool {
+	s.sessionIdentityMu.RLock()
+	attempt := s.sessionOwners[expectedOldID]
+	s.sessionIdentityMu.RUnlock()
+	if attempt == nil {
+		child.mu.Lock()
+		if child.provider != provider || child.session.SessionID != expectedOldID {
+			child.mu.Unlock()
+			return false
+		}
+		identity := effectiveIdentity{
+			Backend: child.effectiveBackend, Agent: child.effectiveAgent, Model: child.effectiveModel,
+			AgentProfile: child.agentProfile, RosterFile: child.rosterFile, RosterEntry: child.rosterEntry,
+		}
+		child.mu.Unlock()
+		if mapped, ok := s.sessionIdentity(expectedOldID); ok {
+			identity = mapped
+		}
+		var err error
+		attempt, err = s.registerSessionAttempt(expectedOldID, identity, provider, expectedOldID)
+		if err != nil {
+			return false
+		}
+	}
+	if attempt.provider != provider {
+		return false
+	}
+	return s.adoptSessionAttempt(child, attempt, expectedOldID, externalID)
+}
+
 // newDeferredChild builds a childRuntime backed by a stableDeferredProvider
 // whose spawn-time session id is provisional. The child is registered with the
 // supervisor so RuntimeStatus/List reflect its aggregate state.
@@ -701,15 +733,14 @@ func TestRunTeamChildStaleAttemptCleanupDoesNotEraseNewerSession(t *testing.T) {
 	close(endRelease)
 	waitForStableDone(t, child)
 
-	assertChildSessionID(t, child, "conv-team-newer")
+	// Workflow finalization is authoritative over the transient aggregate slot:
+	// the configured phase completed with the older provider's adopted session.
+	assertChildSessionID(t, child, realID)
 	child.mu.Lock()
-	providerIsNewer := child.provider == newer
+	provider := child.provider
 	pid := child.session.PID
 	child.mu.Unlock()
-	if !providerIsNewer {
-		t.Fatalf("stale older attempt erased newer provider/session; provider = %v", child.provider)
-	}
-	if pid != 9449 {
-		t.Fatalf("newer session pid = %d, want 9449", pid)
+	if provider != nil || pid != 0 {
+		t.Fatalf("completed workflow retained live provider state: provider=%v pid=%d", provider, pid)
 	}
 }

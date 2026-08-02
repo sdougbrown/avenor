@@ -310,18 +310,85 @@ describe('followUpTool with an external supervisor', () => {
     expect(closeMock).not.toHaveBeenCalled()
   })
 
-  it('does not resume with a different default agent when metadata is unavailable', async () => {
+  it('clears a stale run-level model for an authoritative agent-only workflow phase', async () => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-follow-up-test-'))
+    process.env.AVENOR_HOME = home
+    const sup = {
+      runs: new Map([['agent-only-workflow', {
+        runId: 'agent-only-workflow',
+        label: 'agent-only-workflow',
+        sentinelPath: '/tmp/missing-agent-only-sentinel',
+        eventLogPath: '/tmp/missing-agent-only-events',
+        runtimeId: 'rt-agent-only-workflow',
+        sessionId: 'stale-session',
+        agent: 'run-agent',
+        model: 'stale-run-model',
+        backend: 'pi',
+      }]]),
+    }
+    getSupervisorClientMock.mockResolvedValueOnce({
+      client: { status: statusMock, spawn: spawnMock, close: closeMock },
+      isSingleton: true,
+      sup,
+      supervisorId: '/tmp/avenor-mcp-test.sock',
+    })
+    statusMock.mockResolvedValueOnce({
+      session_id: 'final-session',
+      effective_agent: 'final-agent',
+      effective_model: '',
+      effective_backend: 'agy',
+    })
+
+    await followUpTool({
+      runId: 'agent-only-workflow',
+      message: 'continue',
+      supervisorId: '/tmp/avenor-mcp-test.sock',
+    })
+
+    expect(spawnMock.mock.calls[0]?.[0]).toMatchObject({
+      agent: 'final-agent',
+      backend: 'agy',
+      session_id: 'final-session',
+    })
+    expect(spawnMock.mock.calls[0]?.[0]).not.toHaveProperty('model')
+  })
+
+  it('resumes a valid fully defaulted run using only its stored session', async () => {
     home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-follow-up-test-'))
     process.env.AVENOR_HOME = home
     statusMock.mockResolvedValueOnce({ session_id: 'ses-without-agent' })
 
-    await expect(followUpTool({
+    await followUpTool({
       runId: 'no-agent-run',
       message: 'continue',
       supervisorId: '/tmp/avenor-mcp-test.sock',
-    })).rejects.toThrow('run has no agent to resume')
+    })
 
-    expect(spawnMock).not.toHaveBeenCalled()
+    expect(spawnMock.mock.calls[0]?.[0]).toMatchObject({
+      prompt: 'continue',
+      session_id: 'ses-without-agent',
+    })
+    expect(spawnMock.mock.calls[0]?.[0]).not.toHaveProperty('agent')
+    expect(spawnMock.mock.calls[0]?.[0]).not.toHaveProperty('model')
+  })
+
+  it('resumes a backend-only run with no agent or model', async () => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-follow-up-test-'))
+    process.env.AVENOR_HOME = home
+    statusMock.mockResolvedValueOnce({ session_id: 'ses-backend-only', effective_backend: 'agy' })
+
+    await followUpTool({
+      runId: 'backend-only-run',
+      message: 'continue',
+      supervisorId: '/tmp/avenor-mcp-test.sock',
+    })
+
+    expect(spawnMock.mock.calls[0]?.[0]).toMatchObject({
+      backend: 'agy',
+      session_id: 'ses-backend-only',
+    })
+    expect(spawnMock.mock.calls[0]?.[0]).not.toHaveProperty('agent')
+    expect(spawnMock.mock.calls[0]?.[0]).not.toHaveProperty('model')
   })
 })
 
@@ -403,6 +470,31 @@ describe('followUpTool with a local supervisor (no supervisorId)', () => {
       rosterEntry: 'planner',
       effectiveAgent: 'resolved-agent',
     })
+  })
+
+  it('resumes a stored backend-only local run when live status is unavailable', async () => {
+    localTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-follow-up-local-'))
+    const sentinelPath = path.join(localTmpDir, 'sentinel.done')
+    localSupRuns.set('local-backend-only', {
+      runId: 'local-backend-only',
+      label: 'local-backend-only',
+      sentinelPath,
+      eventLogPath: path.join(localTmpDir, 'events.log'),
+      runtimeId: 'rt-local-backend-only',
+      sessionId: 'ses-local-backend-only',
+      backend: 'agy',
+      effectiveBackend: 'agy',
+    })
+    statusMock.mockRejectedValueOnce(new Error('runtime unavailable'))
+
+    await followUpTool({ runId: 'local-backend-only', message: 'continue' })
+
+    expect(localSupSpawnMock.mock.calls[0]?.[0]).toMatchObject({
+      backend: 'agy',
+      session_id: 'ses-local-backend-only',
+    })
+    expect(localSupSpawnMock.mock.calls[0]?.[0]).not.toHaveProperty('agent')
+    expect(localSupSpawnMock.mock.calls[0]?.[0]).not.toHaveProperty('model')
   })
 
   it('forwards autoApprove from runInfo when live status is unavailable', async () => {

@@ -72,6 +72,7 @@ export interface SpawnResult {
   broker_url?: string
   parent_token?: string
   agent?: string
+  agent_profile?: string
   model?: string
   backend?: string
   roster_file?: string

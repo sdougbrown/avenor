@@ -33,6 +33,38 @@ export interface RunInfo {
   autoApprove?: boolean
 }
 
+export function retainLiveIdentity(runInfo: RunInfo, liveStatus: Record<string, unknown>): void {
+  const value = (candidate: unknown): string | undefined =>
+    typeof candidate === 'string' && candidate.length > 0 ? candidate : undefined
+  const liveIdentity = (effectiveKey: string, directKey: string): { present: boolean, value?: string } => {
+    if (typeof liveStatus[effectiveKey] === 'string') {
+      return { present: true, value: value(liveStatus[effectiveKey]) }
+    }
+    if (typeof liveStatus[directKey] === 'string') {
+      return { present: true, value: value(liveStatus[directKey]) }
+    }
+    return { present: false }
+  }
+  const effectiveAgent = liveIdentity('effective_agent', 'agent')
+  const effectiveModel = liveIdentity('effective_model', 'model')
+  const effectiveBackend = liveIdentity('effective_backend', 'backend')
+  const sessionId = value(liveStatus.session_id)
+  const rosterFilePresent = typeof liveStatus.roster_file === 'string'
+  const rosterFile = value(liveStatus.roster_file)
+  const rosterEntryPresent = typeof liveStatus.roster_entry === 'string'
+  const rosterEntry = value(liveStatus.roster_entry)
+  const agentProfilePresent = typeof liveStatus.agent_profile === 'string'
+  const agentProfile = value(liveStatus.agent_profile)
+
+  if (effectiveAgent.present) runInfo.agent = runInfo.effectiveAgent = effectiveAgent.value
+  if (effectiveModel.present) runInfo.model = runInfo.effectiveModel = effectiveModel.value
+  if (effectiveBackend.present) runInfo.backend = runInfo.effectiveBackend = effectiveBackend.value
+  if (sessionId) runInfo.sessionId = sessionId
+  if (rosterFilePresent) runInfo.rosterFile = rosterFile
+  if (rosterEntryPresent) runInfo.rosterEntry = rosterEntry
+  if (agentProfilePresent) runInfo.agentProfile = agentProfile
+}
+
 export interface SupervisorOptions {
   binaryPath?: string
   callTimeoutMs?: number
@@ -391,7 +423,7 @@ export class Supervisor {
       runtimeId: value(identityResult.runtime_id),
       sessionId: value(identityResult.session_id),
       agent: effectiveAgent,
-      agentProfile: spawnParams.agent_profile as string | undefined,
+      agentProfile: value(identityResult.agent_profile) ?? (spawnParams.agent_profile as string | undefined),
       backend: effectiveBackend,
       model: effectiveModel,
       effectiveAgent,

@@ -951,6 +951,26 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 		}
 	}
 
+	identity := resolvedSpawnIdentity{
+		Agent: ri.Agent, Model: ri.Model, Backend: ri.Backend,
+		RosterFile: ri.RosterFile, RosterEntry: ri.RosterEntry,
+		EffectiveAgent: ri.EffectiveAgent, EffectiveModel: ri.EffectiveModel,
+		EffectiveBackend: ri.EffectiveBackend, AgentProfile: ri.AgentProfile,
+	}
+	// A completed workflow's authoritative identity belongs to its final phase,
+	// not its run-level selector. Refresh from the stable tombstone before
+	// follow-up and never reread the roster file.
+	var liveIdentityStatus map[string]any
+	if ri.RuntimeID != "" {
+		if status, statusErr := cl.Status(ri.RuntimeID); statusErr == nil {
+			liveIdentityStatus = status
+			applySpawnIdentity(status, &identity)
+			if currentID, _ := status["session_id"].(string); currentID != "" {
+				sessionID = currentID
+			}
+		}
+	}
+
 	runID := uuid.New().String()
 	followupLabel := args.Label
 	if followupLabel == "" {
@@ -960,17 +980,41 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 	sentinelPath := filepath.Join(os.TempDir(), fmt.Sprintf("avenor-run-%s.done", runID))
 	eventLogPath := filepath.Join(os.TempDir(), fmt.Sprintf("avenor-run-%s.log", runID))
 
-	effectiveAgent := ri.EffectiveAgent
+	effectiveAgent := identity.EffectiveAgent
 	if effectiveAgent == "" {
-		effectiveAgent = ri.Agent
+		effectiveAgent = identity.Agent
 	}
-	effectiveModel := ri.EffectiveModel
+	effectiveModel := identity.EffectiveModel
 	if effectiveModel == "" {
-		effectiveModel = ri.Model
+		effectiveModel = identity.Model
 	}
-	effectiveBackend := ri.EffectiveBackend
+	effectiveBackend := identity.EffectiveBackend
 	if effectiveBackend == "" {
-		effectiveBackend = ri.Backend
+		effectiveBackend = identity.Backend
+	}
+	agentProfile := identity.AgentProfile
+	// Presence is authoritative even for an empty string. This clears stale
+	// run-level fields when the final workflow phase is agent-only/model-only.
+	if liveIdentityStatus != nil {
+		exact := func(effectiveKey, directKey string) (string, bool) {
+			if value, ok := liveIdentityStatus[effectiveKey].(string); ok {
+				return value, true
+			}
+			value, ok := liveIdentityStatus[directKey].(string)
+			return value, ok
+		}
+		if value, ok := exact("effective_agent", "agent"); ok {
+			effectiveAgent = value
+		}
+		if value, ok := exact("effective_model", "model"); ok {
+			effectiveModel = value
+		}
+		if value, ok := exact("effective_backend", "backend"); ok {
+			effectiveBackend = value
+		}
+		if value, ok := liveIdentityStatus["agent_profile"].(string); ok {
+			agentProfile = value
+		}
 	}
 	params := map[string]any{
 		"dir":           ri.Dir,
@@ -992,8 +1036,8 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 	if ri.Thinking != "" {
 		params["thinking"] = ri.Thinking
 	}
-	if ri.AgentProfile != "" {
-		params["agent_profile"] = ri.AgentProfile
+	if agentProfile != "" {
+		params["agent_profile"] = agentProfile
 	}
 	if ri.AutoApprove {
 		params["auto_approve"] = true
@@ -1020,12 +1064,12 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 		Agent:            effectiveAgent,
 		Model:            effectiveModel,
 		Backend:          effectiveBackend,
-		RosterFile:       ri.RosterFile,
-		RosterEntry:      ri.RosterEntry,
+		RosterFile:       identity.RosterFile,
+		RosterEntry:      identity.RosterEntry,
 		EffectiveAgent:   effectiveAgent,
 		EffectiveModel:   effectiveModel,
 		EffectiveBackend: effectiveBackend,
-		AgentProfile:     ri.AgentProfile,
+		AgentProfile:     agentProfile,
 		Thinking:         ri.Thinking,
 		Dir:              ri.Dir,
 		AutoApprove:      ri.AutoApprove,

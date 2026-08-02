@@ -793,8 +793,8 @@ func TestRunLoopChildCleansUpOnLooprunnerError(t *testing.T) {
 	if exitCode != 1 {
 		t.Fatalf("loop child exitCode = %d, want 1", exitCode)
 	}
-	if _, ok := sup.runtimes[child.id]; ok {
-		t.Fatal("loop child was not removed from supervisor runtimes")
+	if retained := sup.runtimes[child.id]; retained != child {
+		t.Fatal("completed loop child was not retained as a status tombstone")
 	}
 	if got := b.RunCount(); got != 0 {
 		t.Fatalf("broker run count = %d, want 0 after loop cleanup", got)
@@ -843,8 +843,8 @@ func TestRunTeamChildCleansUpBrokerRuns(t *testing.T) {
 	if !completed {
 		t.Fatal("team child was not marked completed")
 	}
-	if _, ok := sup.runtimes[child.id]; ok {
-		t.Fatal("team child was not removed from supervisor runtimes")
+	if retained := sup.runtimes[child.id]; retained != child {
+		t.Fatal("completed team child was not retained as a status tombstone")
 	}
 
 	if got := b.RunCount(); got != 0 {
@@ -3096,6 +3096,15 @@ func TestSpawnAndSendToParent(t *testing.T) {
 		MaxRuntimes:     10,
 		ShutdownTimeout: 0,
 	})
+	var providerSeq int
+	var providerMu sync.Mutex
+	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) {
+		providerMu.Lock()
+		providerSeq++
+		sessionID := fmt.Sprintf("parent-child-%d", providerSeq)
+		providerMu.Unlock()
+		return scriptedStage5Provider(sessionID, "end_turn"), nil
+	}
 	// Start the control server so the client can connect.
 	if err := sup.control.Start(socketPath); err != nil {
 		t.Fatalf("start control server: %v", err)
@@ -3196,6 +3205,9 @@ func TestSpawnAndSendToParent(t *testing.T) {
 		}
 	}
 
+	childEntry := findRuntimeByID(rts, childIDs[0])
+	childSessionID, _ := childEntry["session_id"].(string)
+
 	// 4. Send a message from child_1 to its parent via send_to_parent RPC.
 	message := "Which package should I use?"
 	err = c.SendToParent(childIDs[0], message)
@@ -3219,8 +3231,8 @@ func TestSpawnAndSendToParent(t *testing.T) {
 				if evt.RuntimeID != parentID {
 					t.Errorf("child.question runtime_id = %q, want %q", evt.RuntimeID, parentID)
 				}
-				if evt.SessionID != parentSesID {
-					t.Errorf("child.question session_id = %q, want %q", evt.SessionID, parentSesID)
+				if evt.SessionID != childSessionID {
+					t.Errorf("child.question session_id = %q, want child session %q", evt.SessionID, childSessionID)
 				}
 				gotMsg, _ := evt.Raw["message"].(string)
 				if gotMsg != message {

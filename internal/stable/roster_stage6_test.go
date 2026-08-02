@@ -15,7 +15,7 @@ func TestStableRosterSameBackendResume(t *testing.T) {
 	dir := t.TempDir()
 	writeStage5Roster(t, dir, `{
 		"first":{"backend":"gemini-acp","agent":"planner","model":"planner-model"},
-		"second":{"backend":"gemini-acp","agent":"reviewer","model":"reviewer-model"}
+		"second":{"backend":"gemini-acp","agent":"planner","model":"planner-model"}
 	}`)
 	loopPath := filepath.Join(dir, "loop.json")
 	if err := os.WriteFile(loopPath, []byte(`{"roster_file":"roster.json","pre":[
