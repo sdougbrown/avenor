@@ -4,6 +4,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { ensureRunPaths } from '../paths.js'
 import {
+  externalRunMetadataPath,
   findExternalRun,
   forgetExternalRuns,
   listExternalRuns,
@@ -39,6 +40,16 @@ describe('external run registry', () => {
     if (previousHome === undefined) delete process.env.AVENOR_HOME
     else process.env.AVENOR_HOME = previousHome
     fs.rmSync(home, { recursive: true, force: true })
+  })
+
+  it('rejects unsafe references at the metadata-path boundary', () => {
+    expect(externalRunMetadataPath('safe_run-1')).toBe(
+      path.join(home, 'runs', 'safe_run-1', 'run.json'),
+    )
+
+    for (const reference of ['', '.', '..', '../escape', 'nested/run', '/absolute', 'nested\\run']) {
+      expect(() => externalRunMetadataPath(reference)).toThrow('unsafe external run reference')
+    }
   })
 
   it('persists runtime identity and restores it after in-memory state is lost', () => {

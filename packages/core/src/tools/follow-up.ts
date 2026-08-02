@@ -7,6 +7,7 @@ import { ensureRunPaths, runsRoot } from '../paths.js'
 import { validateRunId } from './validate.js'
 import { getSupervisorClient as realGetSupervisorClient } from './get-supervisor-client.js'
 import { findExternalRun, registerExternalRun } from './run-registry.js'
+import { findLocalRunByReference } from './run-resolution.js'
 
 export interface FollowUpToolArgs {
   runId: string
@@ -19,16 +20,6 @@ export interface FollowUpToolResult {
   run_id: string
   label: string
   runtime_id?: string
-}
-
-function findRunByLabel(sup: Supervisor, runId: string): RunInfo | undefined {
-  const runs = (sup as any).runs as Map<string, RunInfo>
-  const byKey = runs.get(runId)
-  if (byKey) return byKey
-  for (const info of runs.values()) {
-    if (info.label === runId) return info
-  }
-  return undefined
 }
 
 function resolveAutoApprove(
@@ -106,7 +97,7 @@ async function executeFollowUpTool(
       // Try to resolve the run via the local supervisor's run map first
       let runInfo: RunInfo | undefined
       if (isSingleton && sup) {
-        runInfo = findRunByLabel(sup, args.runId)
+        runInfo = findLocalRunByReference(sup, args.runId)
       } else {
         runInfo = findExternalRun(supervisorId, args.runId)
       }
@@ -234,7 +225,7 @@ async function executeFollowUpTool(
   }
 
   const sup = await Supervisor.get()
-  const runInfo = findRunByLabel(sup, args.runId)
+  const runInfo = findLocalRunByReference(sup, args.runId)
 
   if (!runInfo) {
     throw new Error(`run not found: ${args.runId}`)

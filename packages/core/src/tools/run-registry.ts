@@ -32,12 +32,15 @@ function indexRun(runInfo: ExternalRunInfo): void {
   if (runInfo.runtimeId) runs.byAlias.set(runInfo.runtimeId, runInfo)
 }
 
-export function externalRunMetadataPath(runId: string): string {
-  return path.join(runsRoot(), runId, 'run.json')
-}
-
 function isSafeRunReference(reference: string): boolean {
   return /^[a-zA-Z0-9_-]+$/.test(reference)
+}
+
+export function externalRunMetadataPath(runId: string): string {
+  if (!isSafeRunReference(runId)) {
+    throw new Error(`unsafe external run reference: ${runId}`)
+  }
+  return path.join(runsRoot(), runId, 'run.json')
 }
 
 function optionalString(value: unknown): string | undefined {

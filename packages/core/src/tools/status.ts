@@ -9,16 +9,7 @@ import {
 } from './validate.js'
 import { getSupervisorClient as realGetSupervisorClient } from './get-supervisor-client.js'
 import { findExternalRun, listExternalRuns } from './run-registry.js'
-
-function findRunByLabel(sup: Supervisor, runId: string): RunInfo | undefined {
-  const runs = (sup as any).runs as Map<string, RunInfo>
-  const byKey = runs.get(runId)
-  if (byKey) return byKey
-  for (const info of runs.values()) {
-    if (info.label === runId) return info
-  }
-  return undefined
-}
+import { findLocalRunByReference } from './run-resolution.js'
 
 async function parseSentinel(filePath: string): Promise<Record<string, string> | null> {
   try {
@@ -352,7 +343,7 @@ async function executeStatusTool(
         validateRunId(args.runId)
 
         const runInfo = isSingleton && sup
-          ? findRunByLabel(sup, args.runId)
+          ? findLocalRunByReference(sup, args.runId)
           : findExternalRun(supervisorId, args.runId)
         if (runInfo) {
           const liveStatus = await queryLiveStatus(client, runInfo.runtimeId)
@@ -438,7 +429,7 @@ async function executeStatusTool(
   const client = sup.getClient()
 
   if (args.runId) {
-    const runInfo = findRunByLabel(sup, args.runId)
+    const runInfo = findLocalRunByReference(sup, args.runId)
 
     if (runInfo) {
       const liveStatus = await queryLiveStatus(client, runInfo.runtimeId)
@@ -473,7 +464,8 @@ async function executeStatusTool(
   for (const entry of list) {
     const entryId = String(entry.runtime_id ?? entry.id ?? '')
     const entryLabel = String(entry.label ?? entryId)
-    const runInfo = findRunByLabel(sup, entryId) ?? findRunByLabel(sup, entryLabel)
+    const runInfo = findLocalRunByReference(sup, entryId)
+      ?? findLocalRunByReference(sup, entryLabel)
 
     const liveStatus = runInfo
       ? await queryLiveStatus(client, runInfo.runtimeId)
