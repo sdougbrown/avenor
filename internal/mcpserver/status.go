@@ -129,7 +129,10 @@ func applyRunInfoIdentity(status map[string]any, info *RunInfo) {
 		if value == "" {
 			return
 		}
-		if current, ok := status[key].(string); !ok || current == "" {
+		// Field presence from live supervisor status is authoritative, including
+		// an empty string that deliberately clears a prior workflow identity.
+		// Registry metadata is fallback only when the supervisor omitted the key.
+		if _, present := status[key]; !present {
 			status[key] = value
 		}
 	}

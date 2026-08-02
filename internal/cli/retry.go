@@ -65,10 +65,18 @@ func runSingleAttempt(
 	cfg attemptConfig,
 	deps attemptDeps,
 ) attemptResult {
-	if err := cfg.sessionBackends.validateResume(cfg.resumeID, cfg.backend); err != nil {
+	identity, err := cfg.sessionBackends.resolveResume(cfg.resumeID, cliSessionIdentity{
+		backend: cfg.backend, agent: cfg.startOptions.Agent, model: cfg.startOptions.Model,
+		agentProfile: cfg.startOptions.AgentProfile,
+	})
+	if err != nil {
 		fmt.Fprintf(deps.stderr, "avenor: %v\n", err)
 		return attemptResult{exitCode: 1, err: err}
 	}
+	cfg.backend = identity.backend
+	cfg.startOptions.Agent = identity.agent
+	cfg.startOptions.Model = identity.model
+	cfg.startOptions.AgentProfile = identity.agentProfile
 
 	provider, err := newProvider(cfg.startOptions, cfg.backend)
 	if err != nil {
@@ -88,12 +96,12 @@ func runSingleAttempt(
 	}
 
 	attempt := &cliSessionAttempt{}
-	if err := cfg.sessionBackends.claim(session.SessionID, cfg.backend, attempt, cfg.resumeID); err != nil {
+	if err := cfg.sessionBackends.claim(session.SessionID, identity, attempt, cfg.resumeID); err != nil {
 		fmt.Fprintf(deps.stderr, "avenor: %v\n", err)
 		return attemptResult{exitCode: 1, err: err}
 	}
 	provisionalID := session.SessionID
-	defer func() { cfg.sessionBackends.finish(provisionalID, session.SessionID, cfg.backend, attempt) }()
+	defer func() { cfg.sessionBackends.finish(provisionalID, session.SessionID, attempt) }()
 
 	prompt := cfg.initialPrompt
 
@@ -147,7 +155,7 @@ func runSingleAttempt(
 			ProgressTimeout:        cfg.progressTimeout,
 			Timeout:                cfg.timer,
 			AcceptSessionID: func(externalID string) bool {
-				return cfg.sessionBackends.adopt(session.SessionID, externalID, cfg.backend, attempt)
+				return cfg.sessionBackends.adopt(session.SessionID, externalID, attempt)
 			},
 			AdoptSessionID: func(externalID string) {
 				session.SessionID = externalID

@@ -1000,10 +1000,10 @@ type SessionWaitConfig struct {
 	PermissionClaimTimeout time.Duration
 	ProgressTimeout        time.Duration
 	Timeout                <-chan time.Time
-	// AcceptSessionID can reject an authoritative provider ID before the
-	// legacy AdoptSessionID callback is invoked. Rejection keeps the attempt
-	// on its provisional ID so a late callback cannot make another provider's
-	// session reusable.
+	// AcceptSessionID validates an authoritative provider ID before the legacy
+	// AdoptSessionID callback is invoked. Rejection is a fatal session identity
+	// conflict; continuing on the provisional ID would report false success for
+	// a conversation owned by another attempt.
 	AcceptSessionID func(string) bool
 	AdoptSessionID  func(string)
 }
@@ -1100,12 +1100,14 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 						if cfg.AcceptSessionID != nil {
 							adopted = cfg.AcceptSessionID(externalID)
 						}
-						if adopted {
-							cfg.SessionID = externalID
-							tracker.sessionID = externalID
-							if cfg.AdoptSessionID != nil {
-								cfg.AdoptSessionID(externalID)
-							}
+						if !adopted {
+							emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "session", fmt.Sprintf("authoritative session ID %q conflicts with an existing session", externalID), deps.Stderr, cfg.RunLabel)
+							return sessionResult{ExitCode: 1, StopReason: "session_id_conflict"}
+						}
+						cfg.SessionID = externalID
+						tracker.sessionID = externalID
+						if cfg.AdoptSessionID != nil {
+							cfg.AdoptSessionID(externalID)
 						}
 					}
 				}

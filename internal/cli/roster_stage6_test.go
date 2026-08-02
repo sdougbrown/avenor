@@ -90,7 +90,7 @@ func (p *stage6ResumeProvider) counts() (starts, resumes int) {
 	return p.starts, p.resumes
 }
 
-func TestRunWorkflowRosterSameBackendResume(t *testing.T) {
+func TestRunWorkflowRosterRejectsSameBackendIdentityChangeBeforeProvider(t *testing.T) {
 	oldNewProvider := newProvider
 	provider := newStage6ResumeProvider()
 	var backendsMu sync.Mutex
@@ -120,17 +120,20 @@ func TestRunWorkflowRosterSameBackendResume(t *testing.T) {
 	}
 
 	var stderr strings.Builder
-	if got := run([]string{"--dir", dir, "--loop-file", loopPath, "--roster-file", rosterPath}, func(string) string { return "" }, &stderr); got != 0 {
-		t.Fatalf("run() = %d, want 0; stderr=%s", got, stderr.String())
+	if got := run([]string{"--dir", dir, "--loop-file", loopPath, "--roster-file", rosterPath}, func(string) string { return "" }, &stderr); got != 1 {
+		t.Fatalf("run() = %d, want 1; stderr=%s", got, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "cannot resume session") || !strings.Contains(stderr.String(), "agent") {
+		t.Fatalf("stderr=%q, want same-backend identity conflict", stderr.String())
 	}
 	starts, resumes := provider.counts()
-	if starts != 1 || resumes != 1 {
-		t.Fatalf("starts=%d resumes=%d, want one start and one same-backend resume", starts, resumes)
+	if starts != 1 || resumes != 0 {
+		t.Fatalf("starts=%d resumes=%d, want conflict rejected before second provider", starts, resumes)
 	}
 	backendsMu.Lock()
 	defer backendsMu.Unlock()
-	if len(backends) != 2 || backends[0] != "gemini-acp" || backends[1] != "gemini-acp" {
-		t.Fatalf("backends=%v, want same roster backend", backends)
+	if len(backends) != 1 || backends[0] != "gemini-acp" {
+		t.Fatalf("backends=%v, want only the first provider", backends)
 	}
 }
 
@@ -224,25 +227,80 @@ func TestRunWorkflowRosterAgentOnlyResolvesAgainstEffectiveBackend(t *testing.T)
 func TestSessionBackendMapRetryCleanupRejectsLateProvisionalAdoption(t *testing.T) {
 	mapping := newSessionBackendMap()
 	first := &cliSessionAttempt{}
-	if err := mapping.claim("provisional", "gemini-acp", first, ""); err != nil {
+	identity := cliSessionIdentity{backend: "gemini-acp", agent: "planner", model: "planner-model", agentProfile: "cloud"}
+	if err := mapping.claim("provisional", identity, first, ""); err != nil {
 		t.Fatal(err)
 	}
-	if !mapping.adopt("provisional", "authoritative", "gemini-acp", first) {
+	if !mapping.adopt("provisional", "authoritative", first) {
 		t.Fatal("initial adoption was rejected")
 	}
-	mapping.finish("provisional", "authoritative", "gemini-acp", first)
+	mapping.finish("provisional", "authoritative", first)
 	if _, ok := mapping.backend("provisional"); ok {
 		t.Fatal("provisional alias survived attempt cleanup")
 	}
 
 	second := &cliSessionAttempt{}
-	if err := mapping.claim("authoritative", "gemini-acp", second, "authoritative"); err != nil {
+	if err := mapping.claim("authoritative", identity, second, "authoritative"); err != nil {
 		t.Fatalf("same-backend retry claim: %v", err)
 	}
-	if mapping.adopt("provisional", "late-authoritative", "gemini-acp", first) {
+	if mapping.adopt("provisional", "late-authoritative", first) {
 		t.Fatal("late callback from old attempt was accepted")
 	}
 	if got, ok := mapping.backend("authoritative"); !ok || got != "gemini-acp" {
 		t.Fatalf("authoritative mapping = %q, %v; want retry backend", got, ok)
+	}
+}
+
+func TestSessionBackendMapResumeCanReadoptMappedAuthoritativeID(t *testing.T) {
+	mapping := newSessionBackendMap()
+	identity := cliSessionIdentity{backend: "gemini-acp", agent: "planner", model: "planner-model"}
+	first := &cliSessionAttempt{}
+	if err := mapping.claim("authoritative", identity, first, ""); err != nil {
+		t.Fatal(err)
+	}
+	mapping.finish("authoritative", "authoritative", first)
+
+	resumed := &cliSessionAttempt{}
+	if err := mapping.claim("resume-pending", identity, resumed, "authoritative"); err != nil {
+		t.Fatal(err)
+	}
+	if !mapping.adopt("resume-pending", "authoritative", resumed) {
+		t.Fatal("resume could not re-adopt its own mapped authoritative ID")
+	}
+	mapping.finish("resume-pending", "authoritative", resumed)
+	if _, ok := mapping.identity("resume-pending"); ok {
+		t.Fatal("resume provisional alias survived cleanup")
+	}
+	if got, ok := mapping.identity("authoritative"); !ok || got != identity {
+		t.Fatalf("authoritative identity = %#v, ok=%v", got, ok)
+	}
+}
+
+func TestSessionBackendMapRestoresCompleteIdentityAndRejectsSameBackendConflict(t *testing.T) {
+	mapping := newSessionBackendMap()
+	owner := &cliSessionAttempt{}
+	want := cliSessionIdentity{backend: "gemini-acp", agent: "planner", model: "planner-model", agentProfile: "cloud"}
+	if err := mapping.claim("session", want, owner, ""); err != nil {
+		t.Fatal(err)
+	}
+	mapping.finish("session", "session", owner)
+
+	got, err := mapping.resolveResume("session", cliSessionIdentity{backend: "gemini-acp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("restored identity = %#v, want %#v", got, want)
+	}
+	for name, supplied := range map[string]cliSessionIdentity{
+		"agent":   {backend: "gemini-acp", agent: "reviewer"},
+		"model":   {backend: "gemini-acp", model: "reviewer-model"},
+		"profile": {backend: "gemini-acp", agentProfile: "local"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := mapping.resolveResume("session", supplied); err == nil {
+				t.Fatal("expected complete identity conflict")
+			}
+		})
 	}
 }

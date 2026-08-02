@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -83,6 +84,70 @@ func TestSessionAttemptRejectsAuthoritativeIDCollision(t *testing.T) {
 	}
 	sup.releaseSessionAttempt(first)
 	sup.releaseSessionAttempt(second)
+}
+
+func TestStableTeamAuthoritativeIDCollisionFailsWorkflowDeterministically(t *testing.T) {
+	dir := t.TempDir()
+	writeStage5Roster(t, dir, `{
+		"first":{"backend":"pi","agent":"first","model":"model-first"},
+		"second":{"backend":"agy","agent":"second","model":"model-second"}
+	}`)
+	teamPath := filepath.Join(dir, "collision-team.json")
+	if err := os.WriteFile(teamPath, []byte(`{"roster_file":"roster.json","team":[
+		{"name":"first","prompt":"first","roster_entry":"first"},
+		{"name":"second","prompt":"second","roster_entry":"second"}
+	]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first := &stableDeferredProvider{
+		provisionalID: "pending-first", realID: "shared-authoritative", backend: "pi",
+		events: deferredStartEndEvents("shared-authoritative", nil),
+	}
+	second := &stableDeferredProvider{
+		provisionalID: "pending-second", realID: "shared-authoritative", backend: "agy",
+		events: deferredStartEndEvents("shared-authoritative", nil),
+	}
+	sentinelPath := filepath.Join(dir, "collision.done")
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/audit-team-collision-e2e.sock", MaxRuntimes: 1})
+	sup.newProviderFunc = func(opts runtime.StartOptions, _ string) (runtime.Provider, error) {
+		if opts.Agent == "first" {
+			return first, nil
+		}
+		return second, nil
+	}
+	spawned, err := sup.spawn(SpawnParams{TeamFile: teamPath, Dir: dir, SentinelFile: sentinelPath, AgentProfile: "cloud"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sup.controlMu.Lock()
+	child := sup.runtimes[spawned.RuntimeID]
+	sup.controlMu.Unlock()
+	waitStage5Done(t, child)
+
+	statusAny, err := sup.RuntimeStatus(child.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := statusAny.(map[string]any)
+	if status["exit_code"] != 1 || status["status"] != "ended" {
+		t.Fatalf("collision workflow status = %#v, want failed terminal attempt", status)
+	}
+	// Team configuration order, never callback timing, owns the tombstone even
+	// though either provider may win the shared authoritative ID race.
+	if status["effective_agent"] != "second" || status["effective_model"] != "model-second" || status["agent_profile"] != "cloud" {
+		t.Fatalf("collision tombstone identity = %#v, want deterministic second member", status)
+	}
+	data, err := os.ReadFile(sentinelPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "FAILED") {
+		t.Fatalf("collision sentinel = %q, want FAILED", data)
+	}
+	mapped, ok := sup.sessionIdentity("shared-authoritative")
+	if !ok || (mapped.Agent != "first" && mapped.Agent != "second") {
+		t.Fatalf("winning authoritative mapping = %#v, ok=%v", mapped, ok)
+	}
 }
 
 func TestStableParallelTeamAdoptionUsesPerAttemptOwnership(t *testing.T) {
@@ -207,7 +272,8 @@ func TestStableWorkflowRejectsSameBackendIdentityChangeOnResume(t *testing.T) {
 		mu.Unlock()
 		return scriptedStage5Provider("workflow-resume-session", "end_turn"), nil
 	}
-	spawned, err := sup.spawn(SpawnParams{LoopFile: loopPath, Dir: dir})
+	sentinelPath := filepath.Join(dir, "resume-conflict.done")
+	spawned, err := sup.spawn(SpawnParams{LoopFile: loopPath, Dir: dir, SentinelFile: sentinelPath})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,6 +289,69 @@ func TestStableWorkflowRejectsSameBackendIdentityChangeOnResume(t *testing.T) {
 	}
 	if identity, ok := sup.sessionIdentity("workflow-resume-session"); !ok || identity.Agent != "first" || identity.Model != "first-model" {
 		t.Fatalf("authoritative workflow identity = %#v, ok=%v", identity, ok)
+	}
+	statusAny, err := sup.RuntimeStatus(child.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := statusAny.(map[string]any)
+	if status["session_id"] != "workflow-resume-session" || status["effective_agent"] != "first" || status["effective_model"] != "first-model" || status["exit_code"] != 1 {
+		t.Fatalf("failed workflow tombstone = %#v, want finalized first-phase identity", status)
+	}
+	data, err := os.ReadFile(sentinelPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); !strings.Contains(got, "FAILED") || !strings.Contains(got, "SESSION=workflow-resume-session") {
+		t.Fatalf("failed sentinel = %q, want finalized session", got)
+	}
+}
+
+func TestStableFailedTeamFinalizesIdentityBeforeErrorReturn(t *testing.T) {
+	dir := t.TempDir()
+	writeStage5Roster(t, dir, `{
+		"first":{"backend":"pi","agent":"first","model":"first-model"},
+		"never-started":{"backend":"agy","agent":"second","model":"second-model"}
+	}`)
+	teamPath := filepath.Join(dir, "team-error.json")
+	if err := os.WriteFile(teamPath, []byte(`{"roster_file":"roster.json",
+		"pre":[{"name":"first","prompt":"first","roster_entry":"first"}],
+		"post":[{"name":"never-started","prompt":"second","roster_entry":"never-started"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sentinelPath := filepath.Join(dir, "team-error.done")
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/audit-team-error-finalize.sock", MaxRuntimes: 1})
+	var calls int
+	sup.newProviderFunc = func(_ runtime.StartOptions, _ string) (runtime.Provider, error) {
+		calls++
+		if calls == 1 {
+			return scriptedStage5Provider("team-first-session", "end_turn"), nil
+		}
+		return nil, fmt.Errorf("injected provider failure")
+	}
+	spawned, err := sup.spawn(SpawnParams{TeamFile: teamPath, Dir: dir, SentinelFile: sentinelPath, AgentProfile: "cloud"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sup.controlMu.Lock()
+	child := sup.runtimes[spawned.RuntimeID]
+	sup.controlMu.Unlock()
+	waitStage5Done(t, child)
+
+	statusAny, err := sup.RuntimeStatus(child.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := statusAny.(map[string]any)
+	if status["exit_code"] != 1 || status["session_id"] != "team-first-session" || status["effective_agent"] != "first" || status["effective_model"] != "first-model" {
+		t.Fatalf("failed team tombstone = %#v, want completed first-phase identity", status)
+	}
+	data, err := os.ReadFile(sentinelPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); !strings.Contains(got, "FAILED") || !strings.Contains(got, "SESSION=team-first-session") {
+		t.Fatalf("failed team sentinel = %q, want finalized first session", got)
 	}
 }
 

@@ -4059,3 +4059,27 @@ func TestWaitForSessionAdoptsExternalConversationID(t *testing.T) {
 		t.Fatalf("adopted session ID = %q", adopted)
 	}
 }
+
+func TestWaitForSessionFailsWhenAuthoritativeConversationIDIsRejected(t *testing.T) {
+	eventCh := make(chan events.Event, 2)
+	eventCh <- events.Event{Event: "session.start", SessionID: "shared", Fields: map[string]any{"conversation_id": "shared"}}
+	// A later successful terminal event must not turn the rejected collision into
+	// a successful attempt.
+	eventCh <- events.Event{Event: "session.end", SessionID: "shared", Fields: map[string]any{"stop_reason": "end_turn"}}
+	promptDone := make(chan error, 1)
+	promptDone <- nil
+
+	adopted := false
+	result := WaitForSession(context.Background(), &cliFakeProvider{}, SessionWaitConfig{
+		EventCh: eventCh, PromptDone: promptDone, SessionID: "pending",
+		AcceptSessionID: func(string) bool { return false },
+		AdoptSessionID:  func(string) { adopted = true },
+	}, SessionWaitDeps{Writer: &permissionLifecycleSink{responses: make(chan string, 1)}, Stderr: io.Discard})
+
+	if result.ExitCode != 1 || result.StopReason != "session_id_conflict" {
+		t.Fatalf("result = %+v, want fatal session identity conflict", result)
+	}
+	if adopted {
+		t.Fatal("rejected authoritative ID reached adoption callback")
+	}
+}
