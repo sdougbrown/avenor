@@ -384,11 +384,21 @@ func (s *ControlServer) PreparePermissionClaim(scope, requestID string, state Pe
 // waits, so provider completion can take the normal writeMu -> controlMu ->
 // pendingMu path before the replacement claim is prepared.
 func (s *ControlServer) PreparePermissionClaimAfterDirectDelivery(ctx context.Context, scope, requestID string, state PermissionResolverState, options []any) bool {
+	return s.PreparePermissionClaimAfterDirectDeliveryWith(ctx, scope, requestID, state, options, nil)
+}
+
+// PreparePermissionClaimAfterDirectDeliveryWith invokes onPrepared while the
+// new claim is still protected by pendingMu. Stable runtimes use this to make
+// an exact provider-generation binding visible before the claim is answerable.
+func (s *ControlServer) PreparePermissionClaimAfterDirectDeliveryWith(ctx context.Context, scope, requestID string, state PermissionResolverState, options []any, onPrepared func()) bool {
 	for {
 		s.pendingMu.Lock()
 		claim := s.pendingClaims[permissionClaimKey{scope: scope, requestID: requestID}]
 		if claim == nil || claim.state != PermissionResolverDirectDelivery || claim.directDone == nil {
 			prepared := s.preparePermissionClaimLocked(scope, requestID, state, options)
+			if prepared && onPrepared != nil {
+				onPrepared()
+			}
 			s.pendingMu.Unlock()
 			return prepared
 		}

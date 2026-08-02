@@ -801,6 +801,102 @@ func waitForStableDone(t *testing.T, child *childRuntime) {
 	})
 }
 
+func TestShutdownRejectsSpawnAfterReservationBoundary(t *testing.T) {
+	sup := NewSupervisor(Config{
+		ControlSocket:   newStableSocketPath(t, "shutdown-spawn-boundary"),
+		MaxRuntimes:     2,
+		ShutdownTimeout: 0,
+	})
+	defer func() { _ = sup.broker.Stop() }()
+
+	cancelStarted := make(chan struct{})
+	releaseCancel := make(chan struct{})
+	child := &childRuntime{
+		id:       "rt_existing",
+		done:     make(chan struct{}),
+		promptCh: make(chan struct{}, 1),
+	}
+	child.cancelFn = func() {
+		close(cancelStarted)
+		<-releaseCancel
+		child.complete()
+	}
+	sup.runtimes[child.id] = child
+
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- sup.Shutdown("graceful") }()
+	select {
+	case <-cancelStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutdown did not cross the reservation boundary")
+	}
+
+	providerCalled := false
+	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) {
+		providerCalled = true
+		return nil, fmt.Errorf("must not be called")
+	}
+	beforeID := sup.nextID
+	if _, err := sup.spawn(SpawnParams{Prompt: "too late", Dir: t.TempDir()}); err == nil || !strings.Contains(err.Error(), "shutting down") {
+		t.Fatalf("spawn after shutdown boundary error = %v, want shutting-down rejection", err)
+	}
+	if providerCalled {
+		t.Fatal("rejected spawn reached provider creation")
+	}
+	if sup.nextID != beforeID {
+		t.Fatalf("nextID = %d, want unchanged %d after rejected reservation", sup.nextID, beforeID)
+	}
+	sup.controlMu.Lock()
+	_, added := sup.runtimes["rt_1"]
+	sup.controlMu.Unlock()
+	if added {
+		t.Fatal("spawn registered a runtime after shutdown started")
+	}
+
+	close(releaseCancel)
+	select {
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatalf("Shutdown: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutdown did not finish after existing reservation completed")
+	}
+}
+
+func TestConcurrentShutdownDoesNotCloseChannelTwice(t *testing.T) {
+	sup := NewSupervisor(Config{ControlSocket: newStableSocketPath(t, "concurrent-shutdown"), MaxRuntimes: 1})
+	defer func() { _ = sup.broker.Stop() }()
+	cancelled := make(chan struct{})
+	child := &childRuntime{id: "rt_concurrent_shutdown", done: make(chan struct{})}
+	child.cancelFn = func() {
+		close(cancelled) // a second invocation would panic and fail the test
+		child.complete()
+	}
+	sup.runtimes[child.id] = child
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- sup.Shutdown("kill")
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent Shutdown: %v", err)
+		}
+	}
+	select {
+	case <-cancelled:
+	default:
+		t.Fatal("concurrent shutdown did not cancel child")
+	}
+}
+
 func TestShutdownTimeoutDoesNotHangWithMultipleStuckRuntimes(t *testing.T) {
 	sup := NewSupervisor(Config{
 		ControlSocket:   "/tmp/test-shutdown-timeout.sock",
@@ -948,11 +1044,11 @@ func assertShutdownWaitsForNestedChildCleanup(t *testing.T, kind string, run fun
 		t.Fatal("nested child provider was not cleaned up")
 	}
 	sup.controlMu.Lock()
-	_, registered := sup.runtimes[child.id]
+	retained := sup.runtimes[child.id]
 	_, optionsCached := sup.permOptions[child.id+":req_cleanup"]
 	sup.controlMu.Unlock()
-	if registered {
-		t.Fatal("nested child remained registered after completion")
+	if retained != child {
+		t.Fatal("completed nested child was not retained as a status tombstone")
 	}
 	if optionsCached {
 		t.Fatal("nested child permission options remained after completion")
@@ -970,7 +1066,7 @@ func TestShutdownWaitsForLoopChildCleanup(t *testing.T) {
 		sup.runLoopChild(ctx, child, &looprunner.LoopConfig{
 			MaxIterations: 1,
 			Pre:           []phaseconfig.Phase{{Name: "work", Prompt: "wait for shutdown"}},
-		}, 0, "", "", "", "", "test")
+		}, 0, "", "", "", "", "", "test")
 	})
 }
 
@@ -981,7 +1077,7 @@ func TestShutdownWaitsForTeamChildCleanup(t *testing.T) {
 		}
 		sup.runTeamChild(ctx, child, &teamrunner.TeamConfig{
 			Team: []phaseconfig.Phase{{Name: "work", Prompt: "wait for shutdown"}},
-		}, 0, "", "", "", "", "test")
+		}, 0, "", "", "", "", "", "test")
 	})
 }
 
@@ -1988,6 +2084,97 @@ func (*shutdownBlockedDirectPermissionProvider) Capabilities(context.Context) (r
 func (p *shutdownBlockedDirectPermissionProvider) Close() error {
 	p.closeOnce.Do(func() { close(p.closed) })
 	return nil
+}
+
+type drainingPermissionProvider struct {
+	sessionID     string
+	requestID     string
+	events        chan events.Event
+	requestSent   chan struct{}
+	finishPrompt  chan struct{}
+	answerStarted chan struct{}
+	releaseAnswer chan struct{}
+	closed        chan struct{}
+	requestOnce   sync.Once
+	answerOnce    sync.Once
+	closeOnce     sync.Once
+	mu            sync.Mutex
+	answerCalls   int
+}
+
+func newDrainingPermissionProvider(sessionID string) *drainingPermissionProvider {
+	return &drainingPermissionProvider{
+		sessionID:     sessionID,
+		requestID:     "req_provider_drain",
+		events:        make(chan events.Event, 2),
+		requestSent:   make(chan struct{}),
+		finishPrompt:  make(chan struct{}),
+		answerStarted: make(chan struct{}),
+		releaseAnswer: make(chan struct{}),
+		closed:        make(chan struct{}),
+	}
+}
+
+func (p *drainingPermissionProvider) Start(context.Context, runtime.StartOptions) (runtime.Session, error) {
+	return runtime.Session{SessionID: p.sessionID}, nil
+}
+
+func (p *drainingPermissionProvider) Resume(context.Context, string) (runtime.Session, error) {
+	return runtime.Session{SessionID: p.sessionID}, nil
+}
+
+func (p *drainingPermissionProvider) Prompt(ctx context.Context, sessionID, _ string) error {
+	p.events <- events.Event{
+		Event:     "permission.request",
+		SessionID: sessionID,
+		Fields: map[string]any{
+			"request_id":          p.requestID,
+			"requires_user_input": true,
+			"options": []any{
+				map[string]any{"optionId": "allow", "kind": "allow"},
+			},
+		},
+	}
+	p.requestOnce.Do(func() { close(p.requestSent) })
+	select {
+	case <-p.finishPrompt:
+		p.events <- events.Event{Event: "session.end", SessionID: sessionID, Fields: map[string]any{"stop_reason": "end_turn"}}
+		close(p.events)
+		return nil
+	case <-ctx.Done():
+		close(p.events)
+		return ctx.Err()
+	}
+}
+
+func (*drainingPermissionProvider) Cancel(context.Context, string) error { return nil }
+
+func (p *drainingPermissionProvider) Events(context.Context, string) (<-chan events.Event, error) {
+	return p.events, nil
+}
+
+func (p *drainingPermissionProvider) AnswerPermission(context.Context, string, string, runtime.PermissionResponse) error {
+	p.mu.Lock()
+	p.answerCalls++
+	p.mu.Unlock()
+	p.answerOnce.Do(func() { close(p.answerStarted) })
+	<-p.releaseAnswer
+	return nil
+}
+
+func (*drainingPermissionProvider) Capabilities(context.Context) (runtime.Capabilities, error) {
+	return runtime.Capabilities{}, nil
+}
+
+func (p *drainingPermissionProvider) Close() error {
+	p.closeOnce.Do(func() { close(p.closed) })
+	return nil
+}
+
+func (p *drainingPermissionProvider) answerCallCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.answerCalls
 }
 
 type retryPermissionProvider struct {
@@ -3149,6 +3336,18 @@ func TestDirectPermissionResponseOrdersReusedRequestIDStatus(t *testing.T) {
 	}
 }
 
+func TestCloseChildEventWriterIsIdempotent(t *testing.T) {
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-writer-close-idempotent.sock", MaxRuntimes: 1})
+	defer func() { _ = sup.broker.Stop() }()
+	sink := &orderedCloseSink{}
+	child := &childRuntime{eventWriter: sink}
+	sup.closeChildEventWriter(child)
+	sup.closeChildEventWriter(child)
+	if got := sink.recordedOrder(); fmt.Sprint(got) != fmt.Sprint([]string{"close"}) {
+		t.Fatalf("writer close order = %v, want one close", got)
+	}
+}
+
 func TestNormalChildTeardownWaitsForAcceptedDirectResponse(t *testing.T) {
 	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-answer-direct-teardown.sock", MaxRuntimes: 1})
 	provider := &blockingPermissionProvider{
@@ -3434,6 +3633,272 @@ func TestShutdownWaitsForDirectPermissionTeardown(t *testing.T) {
 	sup.controlMu.Unlock()
 	if cached {
 		t.Fatal("permission options were not cleared before shutdown returned")
+	}
+	sup.permissionProviderMu.Lock()
+	_, providerBound := sup.permissionProviders[spawn.RuntimeID+":req_shutdown_direct"]
+	sup.permissionProviderMu.Unlock()
+	if providerBound {
+		t.Fatal("permission provider binding was not cleared before shutdown returned")
+	}
+}
+
+func TestChildModesDrainAcceptedDirectAnswerBeforeProviderClose(t *testing.T) {
+	for _, mode := range []string{"direct", "loop", "team"} {
+		t.Run(mode, func(t *testing.T) {
+			assertChildModeDrainsAcceptedDirectAnswer(t, mode)
+		})
+	}
+}
+
+func assertChildModeDrainsAcceptedDirectAnswer(t *testing.T, mode string) {
+	t.Helper()
+	sup := NewSupervisor(Config{
+		ControlSocket: newStableSocketPath(t, mode+"-provider-drain"),
+		MaxRuntimes:   1,
+	})
+	defer func() { _ = sup.broker.Stop() }()
+	provider := newDrainingPermissionProvider("ses_" + mode + "_provider_drain")
+	sink := &orderedCloseSink{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	child := &childRuntime{
+		id:           "rt_" + mode + "_provider_drain",
+		lifecycleCtx: ctx,
+		cancelFn:     cancel,
+		done:         make(chan struct{}),
+		promptCh:     make(chan struct{}, 1),
+		eventWriter:  sink,
+		autoApprove:  true,
+	}
+	sup.runtimes[child.id] = child
+	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
+
+	teardownWaiting := make(chan struct{})
+	var teardownOnce sync.Once
+	if mode == "direct" {
+		sup.beforeChildWriterCloseWait = func() { teardownOnce.Do(func() { close(teardownWaiting) }) }
+		sup.installChildProvider(child, provider, runtime.Session{SessionID: provider.sessionID})
+		go sup.runChild(ctx, child, "ask", 0, 0)
+	} else {
+		sup.beforeChildProviderCloseWait = func() { teardownOnce.Do(func() { close(teardownWaiting) }) }
+		if mode == "loop" {
+			go sup.runLoopChild(ctx, child, &looprunner.LoopConfig{
+				MaxIterations: 1,
+				Pre:           []phaseconfig.Phase{{Name: "ask", Prompt: "ask"}},
+			}, 0, "", "", "", "", "", "test")
+		} else {
+			go sup.runTeamChild(ctx, child, &teamrunner.TeamConfig{
+				Team: []phaseconfig.Phase{{Name: "ask", Prompt: "ask"}},
+			}, 0, "", "", "", "", "", "test")
+		}
+	}
+
+	select {
+	case <-provider.requestSent:
+	case <-time.After(5 * time.Second):
+		t.Fatal("provider did not emit permission request")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		sup.controlMu.Lock()
+		_, cached := sup.permOptions[child.id+":"+provider.requestID]
+		sup.controlMu.Unlock()
+		if cached && sup.control.PermissionResolverState(child.id, provider.requestID) == control.PermissionResolverNoResolver {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("permission request did not reach direct-delivery state")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	answerDone := make(chan error, 1)
+	go func() { answerDone <- sup.answerPermission(child.id, provider.requestID, "allow", "") }()
+	select {
+	case <-provider.answerStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("direct permission answer did not start")
+	}
+	child.mu.Lock()
+	providerLifecycle := child.providerLifecycle
+	child.mu.Unlock()
+	if providerLifecycle == nil {
+		t.Fatal("accepted answer had no provider lifecycle reservation")
+	}
+
+	if mode == "direct" {
+		if err := sup.cancelRuntime(child.id); err != nil {
+			t.Fatalf("cancelRuntime: %v", err)
+		}
+	} else {
+		close(provider.finishPrompt)
+	}
+	select {
+	case <-teardownWaiting:
+	case <-time.After(5 * time.Second):
+		t.Fatal("provider teardown did not wait for accepted direct answer")
+	}
+	select {
+	case <-provider.closed:
+		t.Fatal("provider closed before accepted direct answer drained")
+	default:
+	}
+	reservationID := "req_reservation_after_close_" + mode
+	if sup.prepareChildPermissionClaim(context.Background(), child, providerLifecycle, provider.sessionID, child.id, reservationID, control.PermissionResolverNoResolver, nil) {
+		t.Fatal("permission reservation was admitted after provider shutdown started")
+	}
+	if state := sup.control.PermissionResolverState(child.id, reservationID); state != control.PermissionResolverUnknown {
+		t.Fatalf("rejected reservation state = %v, want unknown", state)
+	}
+
+	lateID := "req_late_" + mode
+	lateOptions := []any{map[string]any{"optionId": "allow", "kind": "allow"}}
+	sup.cachePermissionOptions(child.id, lateID, lateOptions)
+	if !sup.control.PreparePermissionClaim(child.id, lateID, control.PermissionResolverNoResolver, lateOptions) {
+		t.Fatal("could not seed late direct claim")
+	}
+	if err := sup.answerPermission(child.id, lateID, "allow", ""); err == nil || !strings.Contains(err.Error(), "closing") {
+		t.Fatalf("late answer error = %v, want provider-closing rejection", err)
+	}
+	if got := provider.answerCallCount(); got != 1 {
+		t.Fatalf("provider answer calls after late rejection = %d, want 1", got)
+	}
+
+	close(provider.releaseAnswer)
+	select {
+	case err := <-answerDone:
+		if err != nil {
+			t.Fatalf("accepted direct answer: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("accepted direct answer did not finish")
+	}
+	select {
+	case <-provider.closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("provider did not close after accepted direct answer drained")
+	}
+	waitForStableDone(t, child)
+
+	order := sink.recordedOrder()
+	responses := 0
+	for _, event := range order {
+		if event == "permission.response" {
+			responses++
+		}
+	}
+	if responses != 1 {
+		t.Fatalf("durable permission responses = %d, want 1; order=%v", responses, order)
+	}
+}
+
+func TestProviderCloseWaitsForAdmittedPermissionReservation(t *testing.T) {
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-provider-reservation-drain.sock", MaxRuntimes: 1})
+	defer func() { _ = sup.broker.Stop() }()
+	provider := newDrainingPermissionProvider("ses_reservation_drain")
+	child := &childRuntime{id: "rt_reservation_drain", done: make(chan struct{}), eventWriter: stableTestSink{}}
+	lifecycle := sup.installChildProvider(child, provider, runtime.Session{SessionID: provider.sessionID})
+
+	const requestID = "req_reused_reservation"
+	if !sup.control.PreparePermissionClaim(child.id, requestID, control.PermissionResolverNoResolver, nil) {
+		t.Fatal("old direct claim was not prepared")
+	}
+	if got := sup.control.DeliverPendingPermission(child.id, requestID, "old", ""); got != control.PermissionAnswerNoResolver {
+		t.Fatalf("old direct delivery = %v, want no-resolver", got)
+	}
+
+	prepared := make(chan bool, 1)
+	go func() {
+		prepared <- sup.prepareChildPermissionClaim(context.Background(), child, lifecycle, provider.sessionID, child.id, requestID, control.PermissionResolverNoResolver, nil)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		child.writeMu.Lock()
+		reservations := lifecycle.permissionReservations
+		child.writeMu.Unlock()
+		if reservations == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("replacement claim never acquired its lifecycle reservation")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	closeWaiting := make(chan struct{})
+	sup.beforeChildProviderCloseWait = func() { close(closeWaiting) }
+	closeDone := make(chan struct{})
+	go func() {
+		sup.closeChildProvider(child, lifecycle)
+		close(closeDone)
+	}()
+	select {
+	case <-closeWaiting:
+	case <-time.After(5 * time.Second):
+		t.Fatal("provider close did not wait for admitted claim reservation")
+	}
+	select {
+	case <-provider.closed:
+		t.Fatal("provider closed before admitted claim registration completed")
+	default:
+	}
+
+	if !sup.control.MarkPermissionClaimResolved(child.id, requestID, "test") {
+		t.Fatal("old direct claim was not released")
+	}
+	select {
+	case ok := <-prepared:
+		if !ok {
+			t.Fatal("claim admitted before close boundary was rejected")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("admitted claim reservation did not finish")
+	}
+	select {
+	case <-closeDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("provider close did not finish after claim registration")
+	}
+	select {
+	case <-provider.closed:
+	default:
+		t.Fatal("provider was not closed after admitted reservation drained")
+	}
+}
+
+func TestDirectAnswerUsesProviderGenerationThatReservedClaim(t *testing.T) {
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-answer-provider-generation.sock", MaxRuntimes: 1})
+	defer func() { _ = sup.broker.Stop() }()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	oldProvider := &permRecordingProvider{}
+	newProvider := &permRecordingProvider{}
+	child := &childRuntime{
+		id:           "rt_provider_generation",
+		lifecycleCtx: ctx,
+		cancelFn:     cancel,
+		done:         make(chan struct{}),
+		promptCh:     make(chan struct{}, 1),
+		eventWriter:  stableTestSink{},
+	}
+	sup.runtimes[child.id] = child
+	oldLifecycle := sup.installChildProvider(child, oldProvider, runtime.Session{SessionID: "ses_old_generation"})
+	sup.installChildProvider(child, newProvider, runtime.Session{SessionID: "ses_new_generation"})
+
+	const requestID = "req_old_generation"
+	options := []any{map[string]any{"optionId": "allow", "kind": "allow"}}
+	if !sup.prepareChildPermissionClaim(context.Background(), child, oldLifecycle, "ses_old_generation", child.id, requestID, control.PermissionResolverNoResolver, options) {
+		t.Fatal("old provider generation did not reserve claim")
+	}
+	sup.cachePermissionOptions(child.id, requestID, options)
+	if err := sup.answerPermission(child.id, requestID, "allow", ""); err != nil {
+		t.Fatalf("answerPermission: %v", err)
+	}
+	if !oldProvider.called {
+		t.Fatal("claim answer did not reach its reserving provider generation")
+	}
+	if newProvider.called {
+		t.Fatal("claim answer was misrouted to the current newer provider generation")
 	}
 }
 
