@@ -1670,6 +1670,64 @@ func (p *cancellablePermissionProvider) AnswerPermission(ctx context.Context, _ 
 	return ctx.Err()
 }
 
+// shutdownBlockedDirectPermissionProvider drives the normal stable spawn path
+// to a backend-owned permission that remains blocked until shutdown cancels the
+// child lifecycle context.
+type shutdownBlockedDirectPermissionProvider struct {
+	events          chan events.Event
+	answerStarted   chan struct{}
+	answerCancelled chan struct{}
+	releaseAnswer   chan struct{}
+	closed          chan struct{}
+	closeOnce       sync.Once
+}
+
+func (p *shutdownBlockedDirectPermissionProvider) Start(context.Context, runtime.StartOptions) (runtime.Session, error) {
+	return runtime.Session{SessionID: "ses_shutdown_direct"}, nil
+}
+
+func (p *shutdownBlockedDirectPermissionProvider) Resume(context.Context, string) (runtime.Session, error) {
+	return runtime.Session{}, nil
+}
+
+func (p *shutdownBlockedDirectPermissionProvider) Prompt(context.Context, string, string) error {
+	p.events <- events.Event{
+		Event:     "permission.request",
+		SessionID: "ses_shutdown_direct",
+		Fields: map[string]any{
+			"request_id":          "req_shutdown_direct",
+			"requires_user_input": true,
+			"options": []any{
+				map[string]any{"optionId": "allow", "kind": "allow"},
+			},
+		},
+	}
+	return nil
+}
+
+func (*shutdownBlockedDirectPermissionProvider) Cancel(context.Context, string) error { return nil }
+
+func (p *shutdownBlockedDirectPermissionProvider) Events(context.Context, string) (<-chan events.Event, error) {
+	return p.events, nil
+}
+
+func (p *shutdownBlockedDirectPermissionProvider) AnswerPermission(ctx context.Context, _ string, _ string, _ runtime.PermissionResponse) error {
+	close(p.answerStarted)
+	<-ctx.Done()
+	close(p.answerCancelled)
+	<-p.releaseAnswer
+	return ctx.Err()
+}
+
+func (*shutdownBlockedDirectPermissionProvider) Capabilities(context.Context) (runtime.Capabilities, error) {
+	return runtime.Capabilities{}, nil
+}
+
+func (p *shutdownBlockedDirectPermissionProvider) Close() error {
+	p.closeOnce.Do(func() { close(p.closed) })
+	return nil
+}
+
 type retryPermissionProvider struct {
 	permRecordingProvider
 	mu    sync.Mutex
@@ -2989,6 +3047,131 @@ func TestCancellingLifecycleReleasesDirectAnswerAndWriterClose(t *testing.T) {
 	want := []string{"permission.request", "close"}
 	if got := sink.recordedOrder(); fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("durable order = %v, want %v", got, want)
+	}
+}
+
+func TestShutdownWaitsForDirectPermissionTeardown(t *testing.T) {
+	provider := &shutdownBlockedDirectPermissionProvider{
+		events:          make(chan events.Event, 1),
+		answerStarted:   make(chan struct{}),
+		answerCancelled: make(chan struct{}),
+		releaseAnswer:   make(chan struct{}),
+		closed:          make(chan struct{}),
+	}
+	sup := NewSupervisor(Config{
+		ControlSocket:   newStableSocketPath(t, "shutdown-direct-teardown"),
+		MaxRuntimes:     1,
+		ShutdownTimeout: 0,
+	})
+	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) {
+		return provider, nil
+	}
+
+	spawn, err := sup.spawn(SpawnParams{
+		Prompt:      "wait for permission",
+		Dir:         t.TempDir(),
+		AutoApprove: true, // requires_user_input below deliberately keeps this backend-owned.
+	})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+
+	sup.controlMu.Lock()
+	child := sup.runtimes[spawn.RuntimeID]
+	sup.controlMu.Unlock()
+	if child == nil {
+		t.Fatal("spawned runtime was not registered")
+	}
+
+	deadline := time.After(5 * time.Second)
+	for {
+		sup.controlMu.Lock()
+		_, cached := sup.permOptions[spawn.RuntimeID+":req_shutdown_direct"]
+		sup.controlMu.Unlock()
+		if cached && sup.control.PermissionResolverState(spawn.RuntimeID, "req_shutdown_direct") == control.PermissionResolverNoResolver {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("spawned runtime never published its backend-owned permission")
+		case <-time.After(time.Millisecond):
+		}
+	}
+
+	answerDone := make(chan error, 1)
+	go func() {
+		answerDone <- sup.RuntimeAnswerPermission(spawn.RuntimeID, "req_shutdown_direct", "allow", "")
+	}()
+	select {
+	case <-provider.answerStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("direct AnswerPermission did not block")
+	}
+
+	writerCloseWaiting := make(chan struct{})
+	releaseWriterClose := make(chan struct{})
+	sup.beforeChildWriterCloseWait = func() {
+		close(writerCloseWaiting)
+		<-releaseWriterClose
+	}
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- sup.Shutdown("graceful") }()
+
+	select {
+	case <-writerCloseWaiting:
+	case <-time.After(5 * time.Second):
+		t.Fatal("direct teardown never reached event-writer wait")
+	}
+	select {
+	case <-provider.answerCancelled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutdown did not cancel the direct AnswerPermission lifecycle")
+	}
+	select {
+	case <-child.done:
+		t.Fatal("child completion was published before direct teardown finished")
+	default:
+	}
+	select {
+	case err := <-shutdownDone:
+		t.Fatalf("Shutdown returned before child teardown completed: %v", err)
+	default:
+	}
+
+	close(releaseWriterClose)
+	close(provider.releaseAnswer)
+	select {
+	case err := <-answerDone:
+		if err != context.Canceled {
+			t.Fatalf("direct AnswerPermission error = %v, want %v", err, context.Canceled)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("direct AnswerPermission did not finish after lifecycle cancellation")
+	}
+	select {
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatalf("Shutdown: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Shutdown did not return after direct teardown completed")
+	}
+	select {
+	case <-provider.closed:
+	default:
+		t.Fatal("provider was not closed before shutdown returned")
+	}
+	child.mu.Lock()
+	completed := child.completed
+	child.mu.Unlock()
+	if !completed {
+		t.Fatal("child was not marked completed before shutdown returned")
+	}
+	sup.controlMu.Lock()
+	_, cached := sup.permOptions[spawn.RuntimeID+":req_shutdown_direct"]
+	sup.controlMu.Unlock()
+	if cached {
+		t.Fatal("permission options were not cleared before shutdown returned")
 	}
 }
 

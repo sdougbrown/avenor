@@ -812,7 +812,6 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			}
 		}
 		child.cancelFn()
-		close(child.done)
 		s.closeChildEventWriter(child)
 		s.clearRuntimePermissionOptions(child.id)
 		if closer, ok := child.provider.(interface{ Close() error }); ok {
@@ -821,6 +820,7 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 		child.mu.Lock()
 		child.completed = true
 		child.mu.Unlock()
+		close(child.done)
 	}()
 
 	if s.broker != nil {
