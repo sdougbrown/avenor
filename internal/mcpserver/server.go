@@ -281,6 +281,7 @@ func (s *Server) handleAvenorStatus(ctx context.Context, req *mcp.CallToolReques
 		return nil, nil, err
 	}
 	defer cleanup()
+	supervisorPath := s.getSupervisorPath(args.SupervisorID)
 
 	if args.RunID == "" {
 		results, err := cl.List()
@@ -288,6 +289,7 @@ func (s *Server) handleAvenorStatus(ctx context.Context, req *mcp.CallToolReques
 			return nil, nil, fmt.Errorf("list runs: %w", err)
 		}
 		translated := make([]map[string]any, 0, len(results))
+		seenRegistryRuns := make(map[string]bool)
 		for _, entry := range results {
 			runtimeID, _ := entry["runtime_id"].(string)
 			ri := s.findRegistryByRuntimeID(runtimeID)
@@ -298,10 +300,19 @@ func (s *Server) handleAvenorStatus(ctx context.Context, req *mcp.CallToolReques
 			ts := translateStatus(entry, sentinelPath)
 			if len(ts) > 0 {
 				if ri != nil {
+					seenRegistryRuns[ri.RunID] = true
 					applyRunInfoIdentity(ts, ri)
 					ts["run_id"] = ri.RunID
 					ts["label"] = ri.Label
 				}
+				translated = append(translated, shapeStatusForView(ts, args.View))
+			}
+		}
+		for _, ri := range s.registry.All() {
+			if seenRegistryRuns[ri.RunID] || ri.SupervisorID != supervisorPath {
+				continue
+			}
+			if ts, ok := terminalStatusFromRunInfo(ri); ok {
 				translated = append(translated, shapeStatusForView(ts, args.View))
 			}
 		}
@@ -324,11 +335,44 @@ func (s *Server) handleAvenorStatus(ctx context.Context, req *mcp.CallToolReques
 	return nil, shapeStatusForView(ts, args.View), nil
 }
 
+func terminalStatusFromRunInfo(info *RunInfo) (map[string]any, bool) {
+	if info == nil || info.SentinelPath == "" {
+		return nil, false
+	}
+	sd, err := readSentinel(info.SentinelPath)
+	if err != nil {
+		return nil, false
+	}
+	switch strings.ToUpper(sd.Status) {
+	case "DONE", "FAILED", "BLOCKED", "TIMEOUT", "KILLED":
+	default:
+		return nil, false
+	}
+	status := make(map[string]any)
+	applySentinelStatus(status, sd)
+	applyRunInfoIdentity(status, info)
+	if info.RuntimeID != "" {
+		status["runtime_id"] = info.RuntimeID
+	}
+	if info.Dir != "" {
+		status["dir"] = info.Dir
+	}
+	if info.Thinking != "" {
+		status["thinking"] = info.Thinking
+	}
+	status["run_id"] = info.RunID
+	status["label"] = info.Label
+	return status, true
+}
+
 func (s *Server) queryRunStatus(cl ControlClient, runID string) (map[string]any, error) {
 	ri := s.registry.Lookup(runID)
 	if ri != nil {
 		result, err := cl.Status(ri.RuntimeID)
 		if err != nil {
+			if ts, ok := terminalStatusFromRunInfo(ri); ok {
+				return ts, nil
+			}
 			return nil, fmt.Errorf("status: %w", err)
 		}
 		ts := translateStatus(result, ri.SentinelPath)
@@ -499,6 +543,7 @@ type resolvedSpawnIdentity struct {
 	EffectiveAgent   string
 	EffectiveModel   string
 	EffectiveBackend string
+	AgentProfile     string
 }
 
 func applySpawnIdentity(raw map[string]any, identity *resolvedSpawnIdentity) {
@@ -519,6 +564,9 @@ func applySpawnIdentity(raw map[string]any, identity *resolvedSpawnIdentity) {
 	}
 	if value, ok := raw["effective_backend"].(string); ok && value != "" {
 		identity.EffectiveBackend = value
+	}
+	if value, ok := raw["agent_profile"].(string); ok && value != "" {
+		identity.AgentProfile = value
 	}
 	if value, ok := raw["agent"].(string); ok && value != "" {
 		identity.Agent = value
@@ -665,6 +713,7 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 		EffectiveAgent:   identity.EffectiveAgent,
 		EffectiveModel:   identity.EffectiveModel,
 		EffectiveBackend: identity.EffectiveBackend,
+		AgentProfile:     identity.AgentProfile,
 		Thinking:         args.Thinking,
 		Dir:              args.RepoDir,
 		AutoApprove:      args.AutoApprove,
@@ -943,6 +992,9 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 	if ri.Thinking != "" {
 		params["thinking"] = ri.Thinking
 	}
+	if ri.AgentProfile != "" {
+		params["agent_profile"] = ri.AgentProfile
+	}
 	if ri.AutoApprove {
 		params["auto_approve"] = true
 	}
@@ -973,6 +1025,7 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 		EffectiveAgent:   effectiveAgent,
 		EffectiveModel:   effectiveModel,
 		EffectiveBackend: effectiveBackend,
+		AgentProfile:     ri.AgentProfile,
 		Thinking:         ri.Thinking,
 		Dir:              ri.Dir,
 		AutoApprove:      ri.AutoApprove,

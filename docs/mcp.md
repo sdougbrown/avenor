@@ -199,16 +199,17 @@ All tools use the `avenor_` prefix and are scoped to this MCP process's supervis
 Starts a new run.
 
 **Required:**
-- `agent` — agent to run (e.g., `"jockey"`, `"butler"`)
 - `repo_dir` — working directory for the run
 
 **Optional:**
+- `agent` — agent to run (e.g., `"jockey"`, `"butler"`)
 - `prompt` — initial prompt text
 - `prompt_file` — path to file containing the initial prompt
 - `label` — human-friendly label (defaults to `run_id`)
 - `timeout` — timeout as seconds or duration (e.g., `"90s"`, `"5m"`, `"1h"`)
 - `model` — model to use
 - `backend` — runtime backend (e.g., `"opencode-http"`, `"opencode-acp"`, `"codex-app-server"`, `"agy"`)
+- `roster_file` / `roster_entry` — optional roster selector pair
 - `server_url` — server URL for opencode-http backend
 - `supervisor_id` — supervisor socket to use instead of the default
 

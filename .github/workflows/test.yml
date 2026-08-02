@@ -16,6 +16,21 @@ jobs:
         with:
           go-version: '1.25'
 
+      - name: Verify generated spawn selection
+        run: |
+          set -euo pipefail
+          generated=internal/spawnselection/spawn_selection.gen.go
+          git ls-files --error-unmatch -- "$generated"
+          first_generated="$(mktemp)"
+          trap 'rm -f "$first_generated"' EXIT
+          go generate ./internal/spawnselection
+          cp -- "$generated" "$first_generated"
+          first_checksum="$(sha256sum "$first_generated" | awk '{print $1}')"
+          go generate ./internal/spawnselection
+          test "$first_checksum" = "$(sha256sum "$generated" | awk '{print $1}')"
+          cmp -- "$first_generated" "$generated"
+          git diff --exit-code -- "$generated"
+
       - name: Setup mise
         uses: jdx/mise-action@v2
 

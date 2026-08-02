@@ -15,6 +15,7 @@ type RunInfo struct {
 	SentinelPath     string
 	EventLogPath     string
 	Agent            string
+	AgentProfile     string
 	Model            string
 	Backend          string
 	RosterFile       string

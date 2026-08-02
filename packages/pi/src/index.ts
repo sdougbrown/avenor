@@ -961,7 +961,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
         const backend = rosterMode ? params.backend : params.backend ?? 'pi'
         const entries = (ctx as { sessionManager?: { getEntries?: () => readonly unknown[] } })
           .sessionManager?.getEntries?.()
-        const agentProfile = !rosterMode && backend === 'pi' ? resolveAgentProfile(entries) : undefined
+        const agentProfile = rosterMode || backend === 'pi' ? resolveAgentProfile(entries) : undefined
         const hostParams = { ...params, backend }
 
         const result = await deps.spawnTool({

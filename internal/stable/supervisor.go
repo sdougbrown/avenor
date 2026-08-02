@@ -71,6 +71,7 @@ type SpawnResult struct {
 	BrokerURL        string `json:"broker_url,omitempty"`
 	ParentToken      string `json:"parent_token,omitempty"`
 	Agent            string `json:"agent,omitempty"`
+	AgentProfile     string `json:"agent_profile,omitempty"`
 	Model            string `json:"model,omitempty"`
 	Backend          string `json:"backend,omitempty"`
 	RosterFile       string `json:"roster_file,omitempty"`
@@ -495,6 +496,7 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 			OnEvent:      onEvent,
 			SentinelFile: sentinelFile,
 			BrokerURL:    s.brokerURL(),
+			AgentProfile: params.AgentProfile,
 		}
 
 		childCtx, childCancel := context.WithCancel(context.Background())
@@ -557,6 +559,7 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 			OnEvent:      onEvent,
 			SentinelFile: sentinelFile,
 			BrokerURL:    s.brokerURL(),
+			AgentProfile: params.AgentProfile,
 		}
 
 		childCtx, childCancel := context.WithCancel(context.Background())
@@ -693,6 +696,7 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 		BrokerURL:        brokerURL,
 		ParentToken:      parentToken,
 		Agent:            params.Agent,
+		AgentProfile:     params.AgentProfile,
 		Model:            params.Model,
 		Backend:          backend,
 		RosterFile:       params.RosterFile,

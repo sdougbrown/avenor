@@ -40,7 +40,7 @@ func readSentinel(path string) (*sentinelData, error) {
 func translateStatus(raw map[string]any, sentinelPath string) map[string]any {
 	result := make(map[string]any)
 
-	for _, k := range []string{"runtime_id", "label", "dir", "phase", "phase_label", "pending_permission", "backend", "agent", "model", "roster_file", "roster_entry", "effective_backend", "effective_agent", "effective_model", "parent_id", "children", "event_path", "usage", "latest_seq", "final_output", "final_output_truncated"} {
+	for _, k := range []string{"runtime_id", "label", "dir", "phase", "phase_label", "pending_permission", "backend", "agent", "agent_profile", "model", "roster_file", "roster_entry", "effective_backend", "effective_agent", "effective_model", "parent_id", "children", "event_path", "usage", "latest_seq", "final_output", "final_output_truncated"} {
 		if v, ok := raw[k]; ok {
 			result[k] = v
 		}
@@ -147,6 +147,7 @@ func applyRunInfoIdentity(status map[string]any, info *RunInfo) {
 	}
 	setIfMissing("roster_file", info.RosterFile)
 	setIfMissing("roster_entry", info.RosterEntry)
+	setIfMissing("agent_profile", info.AgentProfile)
 	setIfMissing("agent", effectiveAgent)
 	setIfMissing("model", effectiveModel)
 	setIfMissing("backend", effectiveBackend)

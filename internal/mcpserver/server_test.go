@@ -358,6 +358,67 @@ func TestAvenorStatusSingle(t *testing.T) {
 	}
 }
 
+func TestAvenorStatusUsesTerminalSentinelAfterWorkflowRuntimeRemoval(t *testing.T) {
+	sentinelPath := filepath.Join(t.TempDir(), "workflow.done")
+	if err := os.WriteFile(sentinelPath, []byte("DONE\nSESSION=ses_workflow\nSTOP_REASON=end_turn\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeClient{statusErr: errors.New("runtime not found")}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.registry.Store(&RunInfo{
+		RunID:            "run-workflow",
+		Label:            "workflow",
+		RuntimeID:        "rt-workflow",
+		SentinelPath:     sentinelPath,
+		AgentProfile:     "cloud",
+		EffectiveBackend: "agy",
+	})
+
+	_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{RunID: "run-workflow"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := result.(map[string]any)
+	if status["status"] != "done" || status["session_id"] != "ses_workflow" {
+		t.Fatalf("terminal status = %#v", status)
+	}
+	if status["agent_profile"] != "cloud" || status["effective_backend"] != "agy" {
+		t.Fatalf("terminal identity = %#v", status)
+	}
+}
+
+func TestAvenorStatusListIncludesTerminalRegistryRunAfterWorkflowRemoval(t *testing.T) {
+	sentinelPath := filepath.Join(t.TempDir(), "workflow.done")
+	if err := os.WriteFile(sentinelPath, []byte("FAILED\nSESSION=ses_workflow\nSTOP_REASON=error\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: &fakeClient{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.registry.Store(&RunInfo{
+		RunID:        "run-workflow-list",
+		Label:        "workflow-list",
+		SentinelPath: sentinelPath,
+		AgentProfile: "cloud",
+	})
+
+	_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := result.([]map[string]any)
+	if len(list) != 1 || list[0]["run_id"] != "run-workflow-list" || list[0]["status"] != "failed" {
+		t.Fatalf("terminal list = %#v", list)
+	}
+	if list[0]["agent_profile"] != "cloud" {
+		t.Fatalf("terminal list profile = %#v", list[0])
+	}
+}
+
 func TestAvenorStatusLifecycleViewOmitsFinalOutput(t *testing.T) {
 	fake := &fakeClient{
 		statusResult: map[string]any{
@@ -1112,6 +1173,7 @@ func TestAvenorSpawnRosterSelectorAndResolvedIdentity(t *testing.T) {
 			"runtime_id":        "rt_roster_1",
 			"session_id":        "ses_roster_1",
 			"backend":           "agy",
+			"agent_profile":     "cloud",
 			"agent":             "planner-agent",
 			"model":             "planner-model",
 			"roster_file":       rosterPath,
@@ -1152,7 +1214,7 @@ func TestAvenorSpawnRosterSelectorAndResolvedIdentity(t *testing.T) {
 	if ri.RosterFile != rosterPath || ri.RosterEntry != "planner" {
 		t.Fatalf("roster metadata = %#v", ri)
 	}
-	if ri.EffectiveBackend != "agy" || ri.EffectiveAgent != "planner-agent" || ri.EffectiveModel != "planner-model" {
+	if ri.EffectiveBackend != "agy" || ri.EffectiveAgent != "planner-agent" || ri.EffectiveModel != "planner-model" || ri.AgentProfile != "cloud" {
 		t.Fatalf("effective identity = %#v", ri)
 	}
 }
@@ -2479,6 +2541,7 @@ func TestAvenorFollowUp(t *testing.T) {
 		RuntimeID:    "rt_prior_1",
 		SentinelPath: sentinelPath,
 		Agent:        "claude",
+		AgentProfile: "cloud",
 		Backend:      "pi",
 		Thinking:     "high",
 		Dir:          "/tmp/prior-repo",
@@ -2522,6 +2585,9 @@ func TestAvenorFollowUp(t *testing.T) {
 	if p["thinking"] != "high" {
 		t.Errorf("expected thinking high, got %v", p["thinking"])
 	}
+	if p["agent_profile"] != "cloud" {
+		t.Errorf("expected agent_profile cloud, got %v", p["agent_profile"])
+	}
 	if p["dir"] != "/tmp/prior-repo" {
 		t.Errorf("expected dir /tmp/prior-repo, got %v", p["dir"])
 	}
@@ -2541,6 +2607,9 @@ func TestAvenorFollowUp(t *testing.T) {
 	}
 	if ri.Thinking != "high" {
 		t.Errorf("expected thinking high, got %s", ri.Thinking)
+	}
+	if ri.AgentProfile != "cloud" {
+		t.Errorf("expected agent_profile cloud, got %s", ri.AgentProfile)
 	}
 	if ri.Dir != "/tmp/prior-repo" {
 		t.Errorf("expected dir /tmp/prior-repo, got %s", ri.Dir)

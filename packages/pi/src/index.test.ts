@@ -42,6 +42,17 @@ function buildSnapshot(): RunSnapshot {
   return reducer.snapshot()
 }
 
+async function withoutAmbientAgentProfile<T>(run: () => Promise<T>): Promise<T> {
+  const previous = process.env.PI_AGENT_PROFILE
+  delete process.env.PI_AGENT_PROFILE
+  try {
+    return await run()
+  } finally {
+    if (previous === undefined) delete process.env.PI_AGENT_PROFILE
+    else process.env.PI_AGENT_PROFILE = previous
+  }
+}
+
 function makeInspectResult(statusOverrides: Partial<StatusResult> = {}): InspectResult {
   const snapshot = buildSnapshot()
   const status: StatusResult = {
@@ -333,57 +344,69 @@ describe('Avenor Pi extension', () => {
     expect(Object.keys(registeredCommands)).toContain('avenor-watch')
     expect(Object.keys(registeredCommands)).toContain('avenor-cancel')
 
-    await registeredTools.avenor_spawn.execute(
-      'tool-1',
-      { agent: 'explore', label: '\u001b[31mtest-pi-explore\u001b[0m', thinking: 'high', supervisor_id: '/tmp/sock', wait: false },
-      undefined,
-      undefined,
-      {
-        cwd: '/tmp',
-        sessionManager: {
-          getEntries: () => [
-            { type: 'custom', customType: 'pi-agents:profile', data: { name: 'cloud' } },
-          ],
+    await withoutAmbientAgentProfile(async () => {
+      await registeredTools.avenor_spawn.execute(
+        'tool-1',
+        { agent: 'explore', label: '\u001b[31mtest-pi-explore\u001b[0m', thinking: 'high', supervisor_id: '/tmp/sock', wait: false },
+        undefined,
+        undefined,
+        {
+          cwd: '/tmp',
+          sessionManager: {
+            getEntries: () => [
+              { type: 'custom', customType: 'pi-agents:profile', data: { name: 'cloud' } },
+            ],
+          },
         },
-      },
-    )
-    expect(spawnToolMock.mock.calls[0]?.[0]).toMatchObject({
-      backend: 'pi',
-      thinking: 'high',
-      agentProfile: 'cloud',
+      )
+      expect(spawnToolMock.mock.calls[0]?.[0]).toMatchObject({
+        backend: 'pi',
+        thinking: 'high',
+        agentProfile: 'cloud',
+      })
     })
 
-    await registeredTools.avenor_spawn.execute(
-      'tool-roster',
-      {
-        roster_file: '/repo/roster.json',
-        roster_entry: 'planner',
-        label: 'roster-run',
-        supervisor_id: '/tmp/sock',
-        wait: false,
-      },
-      undefined,
-      undefined,
-      { cwd: '/tmp' },
-    )
-    expect(spawnToolMock.mock.calls[1]?.[0]).toMatchObject({
-      rosterFile: '/repo/roster.json',
-      rosterEntry: 'planner',
+    await withoutAmbientAgentProfile(async () => {
+      await registeredTools.avenor_spawn.execute(
+        'tool-roster',
+        {
+          roster_file: '/repo/roster.json',
+          roster_entry: 'planner',
+          label: 'roster-run',
+          supervisor_id: '/tmp/sock',
+          wait: false,
+        },
+        undefined,
+        undefined,
+        {
+          cwd: '/tmp',
+          sessionManager: {
+            getEntries: () => [
+              { type: 'custom', customType: 'pi-agents:profile', data: { name: 'cloud' } },
+            ],
+          },
+        },
+      )
+      expect(spawnToolMock.mock.calls[1]?.[0]).toMatchObject({
+        rosterFile: '/repo/roster.json',
+        rosterEntry: 'planner',
+        agentProfile: 'cloud',
+      })
+      expect(spawnToolMock.mock.calls[1]?.[0]).not.toHaveProperty('backend', 'pi')
+      await expect(registeredTools.avenor_spawn.execute(
+        'tool-invalid-roster',
+        {
+          roster_file: '/repo/roster.json',
+          roster_entry: 'planner',
+          backend: 'pi',
+          wait: false,
+        },
+        undefined,
+        undefined,
+        { cwd: '/tmp' },
+      )).rejects.toThrow('direct identity fields are disabled in roster mode')
+      expect(spawnToolMock).toHaveBeenCalledTimes(2)
     })
-    expect(spawnToolMock.mock.calls[1]?.[0]).not.toHaveProperty('backend', 'pi')
-    await expect(registeredTools.avenor_spawn.execute(
-      'tool-invalid-roster',
-      {
-        roster_file: '/repo/roster.json',
-        roster_entry: 'planner',
-        backend: 'pi',
-        wait: false,
-      },
-      undefined,
-      undefined,
-      { cwd: '/tmp' },
-    )).rejects.toThrow('direct identity fields are disabled in roster mode')
-    expect(spawnToolMock).toHaveBeenCalledTimes(2)
     spawnToolMock.mockClear()
 
     const expectedCompletion = [{

@@ -21,6 +21,7 @@ func TestTranslateStatusPreservesRosterIdentity(t *testing.T) {
 		"roster_file":       "/repo/roster.json",
 		"roster_entry":      "planner",
 		"effective_backend": "agy",
+		"agent_profile":     "cloud",
 		"effective_agent":   "planner-agent",
 		"effective_model":   "planner-model",
 	}, "")
@@ -28,6 +29,7 @@ func TestTranslateStatusPreservesRosterIdentity(t *testing.T) {
 		"roster_file":       "/repo/roster.json",
 		"roster_entry":      "planner",
 		"effective_backend": "agy",
+		"agent_profile":     "cloud",
 		"effective_agent":   "planner-agent",
 		"effective_model":   "planner-model",
 	} {
@@ -43,10 +45,11 @@ func TestApplyRunInfoIdentityFallback(t *testing.T) {
 		RosterFile:       "/repo/roster.json",
 		RosterEntry:      "planner",
 		EffectiveBackend: "agy",
+		AgentProfile:     "cloud",
 		EffectiveAgent:   "planner-agent",
 		EffectiveModel:   "planner-model",
 	})
-	if status["roster_entry"] != "planner" || status["effective_backend"] != "agy" || status["agent"] != "planner-agent" {
+	if status["roster_entry"] != "planner" || status["effective_backend"] != "agy" || status["agent_profile"] != "cloud" || status["agent"] != "planner-agent" {
 		t.Fatalf("identity fallback = %#v", status)
 	}
 }
