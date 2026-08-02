@@ -26,8 +26,10 @@ const externalSpawnTool = createSpawnTool(getSupervisorClientMock)
 const { Supervisor } = await import('../supervisor.js')
 
 function singletonSupervisor(runs: Map<string, any>): any {
+  const aliases = new Map([...runs.values()].map(run => [run.label, run]))
   return {
     runs,
+    aliases,
     spawn: async (params: Record<string, unknown>, runId: string) => {
       const result = await spawnMock(params)
       const runInfo = {
@@ -39,7 +41,7 @@ function singletonSupervisor(runs: Map<string, any>): any {
         sessionId: params.session_id as string | undefined,
       }
       runs.set(runId, runInfo)
-      runs.set(runInfo.label, runInfo)
+      aliases.set(runInfo.label, runInfo)
       return runInfo
     },
   }
@@ -471,6 +473,7 @@ describe('followUpTool with an external supervisor', () => {
 
 describe('followUpTool with a local supervisor (no supervisorId)', () => {
   const localSupRuns = new Map<string, Record<string, unknown>>()
+  const localSupAliases = new Map<string, Record<string, unknown>>()
   const localSupSpawnMock = mock(async (params: Record<string, unknown>) => ({
     runId: 'local-followup-run',
     label: params.label as string,
@@ -490,6 +493,7 @@ describe('followUpTool with a local supervisor (no supervisorId)', () => {
   beforeAll(() => {
     Supervisor.get = mock(async () => ({
       runs: localSupRuns,
+      aliases: localSupAliases,
       getClient: localSupGetClientMock,
       spawn: localSupSpawnMock,
       supervisorId: '/tmp/local-supervisor.sock',
@@ -505,6 +509,7 @@ describe('followUpTool with a local supervisor (no supervisorId)', () => {
     localSupGetClientMock.mockClear()
     statusMock.mockClear()
     localSupRuns.clear()
+    localSupAliases.clear()
     if (localTmpDir) {
       fs.rmSync(localTmpDir, { recursive: true, force: true })
       localTmpDir = ''

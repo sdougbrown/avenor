@@ -2,21 +2,14 @@ import { Supervisor, type RunInfo } from '../supervisor.js'
 
 type SupervisorRuns = {
   runs: Map<string, RunInfo>
+  aliases: Map<string, RunInfo>
 }
 
-/**
- * Resolve a local supervisor reference. An exact map key deliberately wins
- * over a label alias so aliases cannot shadow public run IDs.
- */
+/** Resolve a local public run ID before considering a label alias. */
 export function findLocalRunByReference(
   sup: Supervisor,
   reference: string,
 ): RunInfo | undefined {
-  const runs = (sup as unknown as SupervisorRuns).runs
-  const byKey = runs.get(reference)
-  if (byKey) return byKey
-  for (const info of runs.values()) {
-    if (info.label === reference) return info
-  }
-  return undefined
+  const { runs, aliases } = sup as unknown as SupervisorRuns
+  return runs.get(reference) ?? aliases.get(reference)
 }

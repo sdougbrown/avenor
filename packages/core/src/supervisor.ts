@@ -144,7 +144,9 @@ export class Supervisor {
   private socketPath: string
   private crashed = false
   private crashCode: number | null = null
+  // Public run IDs are canonical; labels are lookup-only aliases.
   private runs = new Map<string, RunInfo>()
+  private aliases = new Map<string, RunInfo>()
   private binaryPath: string
   private callTimeoutMs: number
 
@@ -438,8 +440,8 @@ export class Supervisor {
       autoApprove: spawnParams.auto_approve,
     }
 
-    this.runs.set(runInfo.label, runInfo)
     this.runs.set(runId, runInfo)
+    this.aliases.set(runInfo.label, runInfo)
     return runInfo
   }
 
@@ -475,6 +477,7 @@ export class Supervisor {
     this.crashed = false
     this.crashCode = null
     this.runs.clear()
+    this.aliases.clear()
     Supervisor.instance = null
   }
 }

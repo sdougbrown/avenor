@@ -53,6 +53,7 @@ describe('Supervisor roster metadata', () => {
     ;(sup as any).client = client
     ;(sup as any).crashed = false
     ;(sup as any).runs = new Map()
+    ;(sup as any).aliases = new Map()
 
     const run = await sup.spawn({
       roster_file: '/repo/roster.json',
@@ -83,6 +84,7 @@ describe('Supervisor roster metadata', () => {
     ;(sup as any).client = { spawn: spawnMock }
     ;(sup as any).crashed = false
     ;(sup as any).runs = new Map()
+    ;(sup as any).aliases = new Map()
 
     await expect(sup.spawn({ roster_file: '/repo/roster.json', prompt: 'invalid' }, 'invalid-run'))
       .rejects.toThrow()
@@ -288,8 +290,9 @@ describe.skipIf(skipIfNoBinary)('Supervisor.close with skipShutdown', () => {
     } catch (err: any) {
       expect(err.code).toBe('ENOENT')
     }
-    // Runs map should be cleared
+    // Run indexes should be cleared
     expect((sup as any).runs.size).toBe(0)
+    expect((sup as any).aliases.size).toBe(0)
     // Client reference should be nullified
     expect((sup as any).client).toBeNull()
   })

@@ -29,6 +29,9 @@ const getSupervisorClientMock = mock(async () => ({
     runs: new Map([
       [runInfo.runId, runInfo],
     ]),
+    aliases: new Map([
+      [runInfo.label, runInfo],
+    ]),
   },
   supervisorId: '/tmp/avenor-mcp-test.sock',
 }))
