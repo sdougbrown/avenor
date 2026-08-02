@@ -5,6 +5,7 @@ import { RunReducer } from '@dougbots/avenor-core'
 import extensionFactory, {
   buildCompletionText,
   buildInspectPayload,
+  CHANNEL_POLL_ERROR,
   CHANNEL_RUN_TERMINAL,
   compactWhitespace,
   createExtension,
@@ -198,45 +199,90 @@ describe('Avenor Pi extension', () => {
     expect(compactWhitespace('abcdefgh', 5)).toBe('abcd…')
   })
 
-  it('reports a persistent polling failure once until the source recovers', async () => {
-    const commands: Record<string, any> = {}
+  it('surfaces polling errors in the footer, event bus, and debug command', async () => {
+    const registeredTools: Record<string, any> = {}
+    const registeredCommands: Record<string, any> = {}
+    const eventHandlers: Record<string, any> = {}
+    const setStatus = mock((..._args: any[]) => {})
+    const setWidget = mock((..._args: any[]) => {})
+    const mockBus = {
+      emit: mock(() => {}),
+      on: mock(() => () => {}),
+    }
     const mockPi = {
-      on: () => {},
-      registerTool: () => {},
+      on: (event: string, handler: any) => {
+        eventHandlers[event] = handler
+      },
+      registerTool: (definition: { name: string }) => {
+        registeredTools[definition.name] = definition
+      },
       registerCommand: (name: string, definition: any) => {
-        commands[name] = definition
+        registeredCommands[name] = definition
       },
       registerMessageRenderer: () => {},
       sendUserMessage: () => {},
-      events: { emit: mock(() => {}), on: mock(() => () => {}) },
+      events: mockBus,
     }
     let available = false
-    const statusToolMock = mock(async () => {
-      if (!available) throw new Error('write request: socket ended')
-      return []
+    const statusToolMock = mock(async (args: { runId?: string } = {}) => {
+      if (available) {
+        return args.runId
+          ? { run_id: 'run-1', label: 'demo', status: 'running', runtime_id: 'rt-1' }
+          : []
+      }
+      throw new Error('write request: This socket has been ended by the other party')
     })
-    const consoleError = mock(() => {})
-    const originalConsoleError = console.error
-    console.error = consoleError as typeof console.error
 
-    try {
-      await createExtension(
-        buildMockDeps({ statusTool: statusToolMock }),
-      )(mockPi as any)
+    await createExtension({
+      spawnTool: mock(async () => ({ run_id: 'run-1', label: 'demo', supervisor_id: '/tmp/sock', runtime_id: 'rt-1' })),
+      statusTool: statusToolMock,
+      eventsTool: mock(async () => ({ events: [] })),
+      answerPermissionTool: mock(async () => ({ ok: true })),
+      followUpTool: mock(async () => ({ run_id: 'run-2', label: 'follow-up' })),
+      inspectTool: mock(async () => makeInspectResult({ status: 'running' })),
+      resultTool: mock(async () => ({ run_id: 'run-1', label: 'demo', status: 'done', ready: true })),
+      shutdownTool: mock(async () => ({ ok: true })),
+      observeRun: mock(() => null),
+      dial: mock(async () => ({ close() {} })),
+      Supervisor: class {} as any,
+    } as any)(mockPi as any)
 
-      const ctx = { ui: { notify: mock(() => {}), setWidget: mock(() => {}), setStatus: mock(() => {}) } }
-      await commands['avenor-status'].handler('', ctx)
-      await commands['avenor-status'].handler('', ctx)
-      expect(consoleError).toHaveBeenCalledTimes(1)
-
-      available = true
-      await commands['avenor-status'].handler('', ctx)
-      available = false
-      await commands['avenor-status'].handler('', ctx)
-      expect(consoleError).toHaveBeenCalledTimes(2)
-    } finally {
-      console.error = originalConsoleError
+    const ctx = {
+      cwd: '/tmp',
+      ui: { setStatus, setWidget, notify: mock(() => {}) },
     }
+    await eventHandlers.session_start({}, ctx)
+    await registeredTools.avenor_spawn.execute(
+      'tool-1',
+      { agent: 'explore', label: 'demo', wait: false },
+      undefined,
+      undefined,
+      ctx,
+    )
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    expect(mockBus.emit).toHaveBeenCalledWith(
+      CHANNEL_POLL_ERROR,
+      expect.objectContaining({ source: 'singleton-list', count: 1 }),
+    )
+    expect(mockBus.emit).toHaveBeenCalledWith(
+      CHANNEL_POLL_ERROR,
+      expect.objectContaining({ source: 'run-status', runId: 'run-1', count: 2 }),
+    )
+    expect(setStatus.mock.calls.some(([name, value]) => name === 'avenor' && String(value).includes('errors:2'))).toBe(true)
+
+    available = true
+    await registeredCommands['avenor-status'].handler('', ctx)
+    const recoveredStatus = setStatus.mock.calls.filter(([name]) => name === 'avenor').at(-1)
+    expect(String(recoveredStatus?.[1])).not.toContain('errors:')
+
+    await registeredCommands['avenor-errors'].handler('', ctx)
+    const errorWidget = setWidget.mock.calls.find(([name]) => name === 'avenor-errors')
+    expect(errorWidget?.[1]).toEqual([
+      expect.stringContaining('failed to list singleton runs'),
+      expect.stringContaining('statusTool failed while polling a run'),
+    ])
+    await eventHandlers.session_shutdown()
   })
 
   it('registers all expected tools, commands, renderers, and event handlers', async () => {
@@ -341,6 +387,7 @@ describe('Avenor Pi extension', () => {
     expect(typeof registeredTools.avenor_spawn.renderResult).toBe('function')
 
     expect(Object.keys(registeredCommands)).toContain('avenor-status')
+    expect(Object.keys(registeredCommands)).toContain('avenor-errors')
     expect(Object.keys(registeredCommands)).toContain('avenor-watch')
     expect(Object.keys(registeredCommands)).toContain('avenor-cancel')
 

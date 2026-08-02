@@ -35,11 +35,14 @@ import { countNestedRuns } from './nested-count.js'
 import { resolveAgentProfile } from './agent-profile.js'
 import {
   CHANNEL_POLL_COMPLETED,
+  CHANNEL_POLL_ERROR,
   CHANNEL_RUN_TERMINAL,
   createPollCompletedPayload,
+  createPollErrorPayload,
   createRunTerminalPayload,
   emitAvenorEvent,
 } from './events.js'
+import type { PollErrorPayload } from './events.js'
 import {
   renderAnswerPermissionCall,
   renderAnswerPermissionResult,
@@ -64,6 +67,7 @@ const INSPECT_JSON_STRING_CHARS = 600
 const INSPECT_JSON_ARRAY_ITEMS = 24
 const INSPECT_JSON_OBJECT_KEYS = 24
 const INSPECT_JSON_DEPTH = 8
+const MAX_POLL_ERRORS = 100
 
 export interface ExtensionDeps {
   spawnTool: typeof spawnTool
@@ -302,25 +306,34 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
     let pollingGeneration = 0
     let pollInFlight: Promise<RunStatusEntry[]> | null = null
     let sessionCtx: ExtensionContext | null = null
-    // Supervisor connections can disappear while the Pi session keeps running
-    // (for example, when an orchestrator switches supervisors). Polling is
-    // best-effort, so report each failure once until that source recovers
-    // instead of writing the same stack trace every poll interval.
-    const reportedPollingFailures = new Set<string>()
+    let pollingErrorCount = 0
+    const pollingErrors: PollErrorPayload[] = []
+    let lastStatusEntries: RunStatusEntry[] = []
 
-    function reportPollingFailure(key: string, message: string, error: unknown): void {
-      if (reportedPollingFailures.has(key)) return
-      reportedPollingFailures.add(key)
-      console.error(message, error)
+    function recordPollingError(
+      source: PollErrorPayload['source'],
+      message: string,
+      error: unknown,
+      runId?: string,
+    ): void {
+      pollingErrorCount++
+      const payload = createPollErrorPayload({
+        source,
+        runId,
+        message,
+        error,
+        count: pollingErrorCount,
+        timestamp: Date.now(),
+      })
+      pollingErrors.push(payload)
+      if (pollingErrors.length > MAX_POLL_ERRORS) pollingErrors.shift()
+      emitAvenorEvent(pi.events, CHANNEL_POLL_ERROR, payload)
     }
 
-    function clearPollingFailure(key: string): void {
-      reportedPollingFailures.delete(key)
-    }
-
-    function clearRunPollingFailures(run: Pick<WatchRunRef, 'runId' | 'supervisorId'>): void {
-      clearPollingFailure(`run-status:${run.supervisorId ?? 'singleton'}:${run.runId}`)
-      clearPollingFailure(`spawn-status:${run.supervisorId ?? 'singleton'}:${run.runId}`)
+    function clearPollingErrors(): void {
+      pollingErrorCount = 0
+      pollingErrors.length = 0
+      updateWidget(lastStatusEntries)
     }
 
     function upsertTrackedRun(run: WatchRunRef, status?: StatusResult, blocking = false): void {
@@ -355,6 +368,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
     }
 
     async function pollRuns(): Promise<RunStatusEntry[]> {
+      const errorCountAtPollStart = pollingErrorCount
       const liveMap = new Map<string, StatusResult>()
       try {
         const allLive = await deps.statusTool({})
@@ -364,7 +378,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
         }
         clearPollingFailure('singleton-list')
       } catch (err) {
-        reportPollingFailure('singleton-list', 'avenor pollRuns: failed to list singleton runs', err)
+        recordPollingError('singleton-list', 'failed to list singleton runs', err)
       }
 
       const entries: RunStatusEntry[] = []
@@ -416,11 +430,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
             backend: result.backend,
           })
         } catch (err) {
-          reportPollingFailure(
-            `run-status:${run.supervisorId ?? 'singleton'}:${run.runId}`,
-            `avenor pollRuns: statusTool failed for ${run.runId}`,
-            err,
-          )
+          recordPollingError('run-status', 'statusTool failed while polling a run', err, run.runId)
           const previous = run.lastStatus
           entries.push({
             runId: run.runId,
@@ -472,13 +482,22 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
         }
       }
 
+      // Keep the footer focused on current/repeating failures. Preserve the
+      // bounded history for /avenor-errors, but clear the visible count after
+      // a complete poll cycle succeeds without adding another error.
+      if (pollingErrorCount === errorCountAtPollStart) {
+        pollingErrorCount = 0
+      }
+
       return entries
     }
 
     function updateWidget(entries: RunStatusEntry[]): void {
+      lastStatusEntries = entries
       if (!sessionCtx) return
 
       const lines = renderStatusLines(entries)
+      const errorSuffix = pollingErrorCount > 0 ? `errors:${pollingErrorCount}` : ''
       if (lines.length > 0) {
         sessionCtx.ui.setWidget('avenor-status', lines)
         const statusStr = lines.map(line => line.slice(0, 60)).join('  ')
@@ -488,13 +507,14 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
           .filter(e => !isTerminalStatus(e.status))
           .reduce((sum, e) => sum + (e.nestedCount ?? 0), 0)
         const total = lines.length + nestedTotal
-        const statusWithTotal = nestedTotal > 0
-          ? `${statusStr}  total:${total}`
-          : statusStr
+        const statusWithTotal = [
+          nestedTotal > 0 ? `${statusStr}  total:${total}` : statusStr,
+          errorSuffix,
+        ].filter(Boolean).join('  ')
         sessionCtx.ui.setStatus('avenor', statusWithTotal)
       } else {
         sessionCtx.ui.setWidget('avenor-status', undefined)
-        sessionCtx.ui.setStatus('avenor', '')
+        sessionCtx.ui.setStatus('avenor', errorSuffix)
       }
     }
 
@@ -613,9 +633,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
           }, POLL_INTERVAL_MS)
         } else {
           pollingActive = false
-          reportedPollingFailures.clear()
-          sessionCtx?.ui.setStatus('avenor', '')
-          sessionCtx?.ui.setWidget('avenor-status', undefined)
+          updateWidget([])
         }
       }
 
@@ -628,7 +646,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
     async function stopPolling(): Promise<void> {
       pollingActive = false
       pollingGeneration++
-      reportedPollingFailures.clear()
+      lastStatusEntries = []
       await pollInFlight?.catch(() => {})
       sessionCtx?.ui.setStatus('avenor', '')
       sessionCtx?.ui.setWidget('avenor-status', undefined)
@@ -843,11 +861,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
             return { status, aborted: false }
           }
         } catch (err) {
-          reportPollingFailure(
-            `spawn-status:${run.supervisorId ?? 'singleton'}:${run.runId}`,
-            'avenor spawn poll: statusTool failed',
-            err,
-          )
+          recordPollingError('spawn-status', 'statusTool failed while waiting for a run', err, run.runId)
         }
       }
 
@@ -866,6 +880,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
 
     pi.on('session_start', async (_event, ctx) => {
       sessionCtx = ctx
+      lastStatusEntries = []
+      pollingErrorCount = 0
+      pollingErrors.length = 0
     })
 
     pi.on('session_shutdown', async () => {
@@ -1367,6 +1384,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
       async execute(_toolCallId, params) {
         await stopPolling()
         trackedRuns.clear()
+        clearPollingErrors()
         const result = await deps.shutdownTool({
           supervisorId: params.supervisor_id,
           force: params.force,
@@ -1388,11 +1406,30 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
       description: 'Show status of all avenor runs',
       handler: async (_args, ctx) => {
         const entries = await pollRuns()
+        updateWidget(entries)
         if (entries.length === 0) {
           ctx.ui.notify('No active avenor runs', 'info')
           return
         }
         ctx.ui.setWidget('avenor-status-detail', entries.map(entry => formatRunLine(entry)))
+      },
+    })
+
+    pi.registerCommand('avenor-errors', {
+      description: 'Show and clear recent Avenor polling errors',
+      handler: async (_args, ctx) => {
+        if (pollingErrors.length === 0) {
+          ctx.ui.setWidget('avenor-errors', undefined)
+          ctx.ui.notify('No recorded avenor polling errors', 'info')
+          return
+        }
+
+        ctx.ui.setWidget('avenor-errors', pollingErrors.map(error => {
+          const run = error.runId ? ` [${error.runId}]` : ''
+          const timestamp = new Date(error.timestamp).toLocaleTimeString()
+          return `${timestamp} ${error.message}${run}: ${error.error}`
+        }))
+        clearPollingErrors()
       },
     })
 
@@ -1469,8 +1506,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
 // These adapters use Pi's shared bus and do not create a second bus.
 export {
   CHANNEL_POLL_COMPLETED,
+  CHANNEL_POLL_ERROR,
   CHANNEL_RUN_TERMINAL,
   createPollCompletedPayload,
+  createPollErrorPayload,
   createRunTerminalPayload,
   emitAvenorEvent,
   onAvenorEvent,
@@ -1481,6 +1520,9 @@ export type {
   AvenorEventMap,
   AvenorRunStatus,
   PollCompletedPayload,
+  PollErrorPayload,
+  PollErrorPayloadInput,
+  PollErrorSource,
   RunTerminalPayload,
   RunTerminalPayloadInput,
 } from './events.js'

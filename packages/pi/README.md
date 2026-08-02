@@ -140,12 +140,14 @@ Each roster entry must contain `backend` and at least one of `agent` or `model`.
 Beyond the tools, the extension integrates with Pi's TUI and event system:
 
 - **Status widget** — persistent widget showing all active runs with status, phase, and permission state
-- **Footer status** — active runs shown in the Pi footer bar
+- **Footer status** — active runs and polling error counts shown in the Pi footer bar
+- **Polling diagnostics** — bounded polling errors are emitted on `avenor:poll:error` for companion extensions
 - **Live progress** — blocking `avenor_spawn` calls stream progress updates via `onUpdate`
 - **Context enrichment** — active sub-agents are automatically surfaced in the system prompt via `before_agent_start`
 - **Custom rendering** — The Pi extension renders all Avenor tool calls and results as themed, bounded summaries. Results have collapsed and expanded views.
 - **Commands** — interactive commands for run management:
   - `/avenor-status` — show status of all runs
+  - `/avenor-errors` — show and clear recent polling errors
   - `/avenor-watch <run_id>` — open a live event feed overlay
   - `/avenor-cancel <run_id>` — cancel a running sub-agent
 

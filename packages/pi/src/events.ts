@@ -12,12 +12,42 @@
 import { createHash } from 'node:crypto'
 import type { EventBus } from '@earendil-works/pi-coding-agent'
 import type { RunStatusEntry } from './types.js'
+import { sanitizeText } from './watch.js'
 
 /** Emitted when the official extension completes a polling cycle. */
 export const CHANNEL_POLL_COMPLETED = 'avenor:poll:completed' as const
 
 /** Emitted when the extension observes a terminal run result. */
 export const CHANNEL_RUN_TERMINAL = 'avenor:run:terminal' as const
+
+/** Emitted when a best-effort polling operation fails. */
+export const CHANNEL_POLL_ERROR = 'avenor:poll:error' as const
+
+export type PollErrorSource = 'singleton-list' | 'run-status' | 'spawn-status'
+
+export interface PollErrorPayload {
+  /** Polling operation that failed. */
+  readonly source: PollErrorSource
+  /** Run associated with the failure, when the operation was run-specific. */
+  readonly runId?: string
+  /** Human-readable operation description. */
+  readonly message: string
+  /** Bounded, sanitized error text suitable for debug consumers. */
+  readonly error: string
+  /** Number of polling errors observed by this extension instance. */
+  readonly count: number
+  /** Wall-clock timestamp in epoch milliseconds. */
+  readonly timestamp: number
+}
+
+export interface PollErrorPayloadInput {
+  readonly source: PollErrorSource
+  readonly runId?: string
+  readonly message: string
+  readonly error: unknown
+  readonly count: number
+  readonly timestamp: number
+}
 
 export type AvenorRunStatus = Readonly<Omit<
   RunStatusEntry,
@@ -63,12 +93,23 @@ export interface RunTerminalPayloadInput {
 export interface AvenorEventMap {
   [CHANNEL_POLL_COMPLETED]: PollCompletedPayload
   [CHANNEL_RUN_TERMINAL]: RunTerminalPayload
+  [CHANNEL_POLL_ERROR]: PollErrorPayload
 }
 
 export type AvenorEventChannel = keyof AvenorEventMap
 export type AvenorEventBus = Pick<EventBus, 'emit' | 'on'>
 
 /** Derive a stable non-connectable scope from a local supervisor socket. */
+const POLL_ERROR_TEXT_CHARS = 600
+
+function boundedText(value: unknown): string {
+  const text = sanitizeText(String(value)).trim()
+  if (!text) return 'unknown error'
+  return text.length <= POLL_ERROR_TEXT_CHARS
+    ? text
+    : `${text.slice(0, POLL_ERROR_TEXT_CHARS - 1)}…`
+}
+
 function createSupervisorKey(supervisorId?: string): string {
   if (!supervisorId) return 'singleton'
   return `supervisor:${createHash('sha256').update(supervisorId).digest('hex').slice(0, 16)}`
@@ -137,5 +178,19 @@ export function createRunTerminalPayload(
     status: payload.status,
     ...(payload.nestedCount !== undefined && { nestedCount: payload.nestedCount }),
     ...(payload.backend !== undefined && { backend: payload.backend }),
+  })
+}
+
+/** Copy, bound, sanitize, and freeze a polling error before publishing it. */
+export function createPollErrorPayload(
+  payload: PollErrorPayloadInput,
+): PollErrorPayload {
+  return Object.freeze({
+    source: payload.source,
+    ...(payload.runId !== undefined && { runId: payload.runId }),
+    message: boundedText(payload.message),
+    error: boundedText(payload.error),
+    count: payload.count,
+    timestamp: payload.timestamp,
   })
 }
