@@ -864,6 +864,67 @@ func TestShutdownRejectsSpawnAfterReservationBoundary(t *testing.T) {
 	}
 }
 
+func TestShutdownClosesPermissionAdmissionBeforeManagedHTTPTeardown(t *testing.T) {
+	sup := NewSupervisor(Config{
+		ControlSocket:   newStableSocketPath(t, "shutdown-permission-boundary"),
+		MaxRuntimes:     1,
+		ShutdownTimeout: 0,
+	})
+	defer func() { _ = sup.broker.Stop() }()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	child := &childRuntime{
+		id:           "rt_shutdown_permission_boundary",
+		lifecycleCtx: ctx,
+		cancelFn:     func() { cancel() },
+		done:         make(chan struct{}),
+		eventWriter:  stableTestSink{},
+	}
+	writer := &runtimeFanoutWriter{base: child.eventWriter, runtimeID: child.id, child: child, control: sup.control}
+	lifecycle := sup.installChildProvider(child, &permRecordingProvider{}, runtime.Session{SessionID: "ses_shutdown_permission_boundary"})
+	child.cancelFn = func() {
+		cancel()
+		child.complete()
+	}
+	sup.runtimes[child.id] = child
+
+	shutdownStarted := make(chan struct{})
+	releaseHTTPTeardown := make(chan struct{})
+	sup.afterShutdownAdmissionClosed = func() {
+		close(shutdownStarted)
+		<-releaseHTTPTeardown
+	}
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- sup.Shutdown("graceful") }()
+	select {
+	case <-shutdownStarted:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not close supervisor admission")
+	}
+	child.writeMu.Lock()
+	locallyClosing := child.shuttingDown
+	child.writeMu.Unlock()
+	if locallyClosing {
+		t.Fatal("test did not stop in the managed HTTP teardown gap")
+	}
+	if sup.prepareChildPermissionClaim(context.Background(), child, lifecycle, writer, lifecycle.sessionID, child.id, "req_too_late", control.PermissionResolverNoResolver, nil) {
+		t.Fatal("permission claim was admitted after supervisor shutdown started")
+	}
+	if state := sup.control.PermissionResolverState(child.id, "req_too_late"); state != control.PermissionResolverUnknown {
+		t.Fatalf("rejected claim state = %v, want unknown", state)
+	}
+
+	close(releaseHTTPTeardown)
+	select {
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatalf("Shutdown: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not finish")
+	}
+}
+
 func TestConcurrentShutdownDoesNotCloseChannelTwice(t *testing.T) {
 	sup := NewSupervisor(Config{ControlSocket: newStableSocketPath(t, "concurrent-shutdown"), MaxRuntimes: 1})
 	defer func() { _ = sup.broker.Stop() }()
@@ -1752,6 +1813,24 @@ type orderedCloseSink struct {
 	order []string
 }
 
+type failingResponseSink struct {
+	mu     sync.Mutex
+	events []events.Event
+	fail   bool
+}
+
+func (s *failingResponseSink) Write(ev events.Event) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.fail && ev.Event == "permission.response" {
+		return fmt.Errorf("intentional durable response failure")
+	}
+	s.events = append(s.events, ev)
+	return nil
+}
+
+func (*failingResponseSink) Close() error { return nil }
+
 func (s *orderedCloseSink) Write(ev events.Event) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2019,6 +2098,25 @@ type cancellablePermissionProvider struct {
 	permRecordingProvider
 	started   chan struct{}
 	cancelled chan struct{}
+}
+
+type cancelUnblocksPermissionProvider struct {
+	permRecordingProvider
+	started      chan struct{}
+	cancelCalled chan struct{}
+	startOnce    sync.Once
+	cancelOnce   sync.Once
+}
+
+func (p *cancelUnblocksPermissionProvider) AnswerPermission(context.Context, string, string, runtime.PermissionResponse) error {
+	p.startOnce.Do(func() { close(p.started) })
+	<-p.cancelCalled
+	return nil
+}
+
+func (p *cancelUnblocksPermissionProvider) Cancel(context.Context, string) error {
+	p.cancelOnce.Do(func() { close(p.cancelCalled) })
+	return nil
 }
 
 func (p *cancellablePermissionProvider) AnswerPermission(ctx context.Context, _ string, _ string, _ runtime.PermissionResponse) error {
@@ -3229,6 +3327,46 @@ func TestAnswerPermissionDirectPublishesThroughCanonicalFanout(t *testing.T) {
 	}
 }
 
+func TestFailedDirectResponseWriteKeepsReusedIDTombstone(t *testing.T) {
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-answer-direct-write-failure.sock", MaxRuntimes: 1})
+	defer func() { _ = sup.broker.Stop() }()
+	provider := &permRecordingProvider{}
+	sink := &failingResponseSink{fail: true}
+	child := &childRuntime{
+		id:          "rt_direct_write_failure",
+		provider:    provider,
+		session:     runtime.Session{SessionID: "ses_direct_write_failure"},
+		eventWriter: sink,
+		done:        make(chan struct{}),
+		promptCh:    make(chan struct{}, 1),
+	}
+	writer := &runtimeFanoutWriter{base: sink, runtimeID: child.id, child: child, control: sup.control, metadata: cli.NewEventMetadata(sup.runID, "write-failure", child.id), onPermissionReq: sup.cachePermissionOptions}
+	sup.setFanoutWriter(child, writer)
+	sup.runtimes[child.id] = child
+	options := []any{map[string]any{"optionId": "allow", "kind": "allow"}}
+	if !sup.control.PreparePermissionClaim(child.id, "reused", control.PermissionResolverNoResolver, options) {
+		t.Fatal("old claim was not prepared")
+	}
+	if err := writer.Write(events.Event{Event: "permission.request", SessionID: child.session.SessionID, Fields: map[string]any{
+		"request_id": "reused", "resolver": "none", "options": options,
+	}}); err != nil {
+		t.Fatalf("write permission.request: %v", err)
+	}
+
+	if err := sup.answerPermission(child.id, "reused", "allow", ""); err == nil || !strings.Contains(err.Error(), "intentional durable response failure") {
+		t.Fatalf("answer error = %v, want durable response failure", err)
+	}
+	if state := sup.control.PermissionResolverState(child.id, "reused"); state != control.PermissionResolverNoResolver {
+		t.Fatalf("claim state after failed publication = %v, want non-terminal no-resolver", state)
+	}
+	if _, ok := sup.permOptions[child.id+":reused"]; !ok {
+		t.Fatal("failed publication removed the old permission options")
+	}
+	if sup.control.PreparePermissionClaim(child.id, "reused", control.PermissionResolverNoResolver, options) {
+		t.Fatal("reused ID replaced a claim whose canonical response was not durable")
+	}
+}
+
 func TestDirectPermissionResponseOrdersReusedRequestIDStatus(t *testing.T) {
 	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-answer-direct-reuse-order.sock", MaxRuntimes: 1})
 	provider := &blockingPermissionProvider{
@@ -3291,23 +3429,8 @@ func TestDirectPermissionResponseOrdersReusedRequestIDStatus(t *testing.T) {
 	}
 
 	newOptions := []any{map[string]any{"optionId": "new", "kind": "reject"}}
-	if !sup.control.PreparePermissionClaim(child.id, "reused", control.PermissionResolverNoResolver, newOptions) {
-		t.Fatal("resolved direct claim was not replaceable")
-	}
-	writeLockAttempted := make(chan struct{})
-	var writeLockOnce sync.Once
-	writer.beforeWriteLock = func() { writeLockOnce.Do(func() { close(writeLockAttempted) }) }
-	newRequestDone := make(chan error, 1)
-	go func() {
-		newRequestDone <- writer.Write(events.Event{Event: "permission.request", SessionID: child.session.SessionID, Fields: map[string]any{
-			"request_id": "reused", "resolver": "none", "options": newOptions,
-		}})
-	}()
-	<-writeLockAttempted
-	select {
-	case err := <-newRequestDone:
-		t.Fatalf("new request bypassed response write lock, err=%v", err)
-	default:
+	if sup.control.PreparePermissionClaim(child.id, "reused", control.PermissionResolverNoResolver, newOptions) {
+		t.Fatal("reused ID replaced the old claim before its response was durable")
 	}
 
 	close(sink.releaseResponse)
@@ -3319,13 +3442,13 @@ func TestDirectPermissionResponseOrdersReusedRequestIDStatus(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("old direct answer did not finish")
 	}
-	select {
-	case err := <-newRequestDone:
-		if err != nil {
-			t.Fatalf("new request write: %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("new request remained blocked after old response")
+	if !sup.control.PreparePermissionClaim(child.id, "reused", control.PermissionResolverNoResolver, newOptions) {
+		t.Fatal("reused ID was not replaceable after the old response became durable")
+	}
+	if err := writer.Write(events.Event{Event: "permission.request", SessionID: child.session.SessionID, Fields: map[string]any{
+		"request_id": "reused", "resolver": "none", "options": newOptions,
+	}}); err != nil {
+		t.Fatalf("new request write: %v", err)
 	}
 
 	child.mu.Lock()
@@ -3345,6 +3468,75 @@ func TestCloseChildEventWriterIsIdempotent(t *testing.T) {
 	sup.closeChildEventWriter(child)
 	if got := sink.recordedOrder(); fmt.Sprint(got) != fmt.Sprint([]string{"close"}) {
 		t.Fatalf("writer close order = %v, want one close", got)
+	}
+}
+
+func TestTerminationCancelsProviderBeforeJoiningContextIgnoringAnswer(t *testing.T) {
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-answer-cancel-before-join.sock", MaxRuntimes: 1})
+	defer func() { _ = sup.broker.Stop() }()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	provider := &cancelUnblocksPermissionProvider{
+		started:      make(chan struct{}),
+		cancelCalled: make(chan struct{}),
+	}
+	sink := &orderedCloseSink{}
+	child := &childRuntime{
+		id:           "rt_cancel_before_join",
+		lifecycleCtx: ctx,
+		cancelFn:     cancel,
+		done:         make(chan struct{}),
+		promptCh:     make(chan struct{}, 1),
+		eventWriter:  sink,
+	}
+	writer := &runtimeFanoutWriter{base: sink, runtimeID: child.id, child: child, control: sup.control, metadata: cli.NewEventMetadata(sup.runID, "cancel-before-join", child.id), onPermissionReq: sup.cachePermissionOptions}
+	sup.setFanoutWriter(child, writer)
+	lifecycle := sup.installChildProvider(child, provider, runtime.Session{SessionID: "ses_cancel_before_join"})
+	sup.runtimes[child.id] = child
+	options := []any{map[string]any{"optionId": "allow", "kind": "allow"}}
+	if !sup.prepareChildPermissionClaim(context.Background(), child, lifecycle, writer, lifecycle.sessionID, child.id, "req_cancel_before_join", control.PermissionResolverNoResolver, options) {
+		t.Fatal("permission claim was not prepared")
+	}
+	if err := writer.Write(events.Event{Event: "permission.request", SessionID: lifecycle.sessionID, Fields: map[string]any{
+		"request_id": "req_cancel_before_join", "resolver": "none", "options": options,
+	}}); err != nil {
+		t.Fatalf("write permission.request: %v", err)
+	}
+
+	answerDone := make(chan error, 1)
+	go func() { answerDone <- sup.answerPermission(child.id, "req_cancel_before_join", "allow", "") }()
+	select {
+	case <-provider.started:
+	case <-time.After(time.Second):
+		t.Fatal("context-ignoring AnswerPermission did not start")
+	}
+	teardownDone := make(chan struct{})
+	go func() {
+		sup.beginChildShutdown(child)
+		sup.closeChildEventWriter(child)
+		close(teardownDone)
+	}()
+	select {
+	case <-provider.cancelCalled:
+	case <-time.After(time.Second):
+		t.Fatal("provider Cancel was not called before the answer join")
+	}
+	select {
+	case err := <-answerDone:
+		if err != nil {
+			t.Fatalf("answer after provider Cancel: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("AnswerPermission remained blocked after provider Cancel")
+	}
+	select {
+	case <-teardownDone:
+	case <-time.After(time.Second):
+		t.Fatal("writer teardown deadlocked joining AnswerPermission")
+	}
+	want := []string{"permission.request", "permission.response", "close"}
+	if got := sink.recordedOrder(); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("durable order = %v, want %v", got, want)
 	}
 }
 
@@ -3744,7 +3936,7 @@ func assertChildModeDrainsAcceptedDirectAnswer(t *testing.T, mode string) {
 	default:
 	}
 	reservationID := "req_reservation_after_close_" + mode
-	if sup.prepareChildPermissionClaim(context.Background(), child, providerLifecycle, provider.sessionID, child.id, reservationID, control.PermissionResolverNoResolver, nil) {
+	if sup.prepareChildPermissionClaim(context.Background(), child, providerLifecycle, sup.fanoutWriterLocked(child), provider.sessionID, child.id, reservationID, control.PermissionResolverNoResolver, nil) {
 		t.Fatal("permission reservation was admitted after provider shutdown started")
 	}
 	if state := sup.control.PermissionResolverState(child.id, reservationID); state != control.PermissionResolverUnknown {
@@ -3797,6 +3989,8 @@ func TestProviderCloseWaitsForAdmittedPermissionReservation(t *testing.T) {
 	defer func() { _ = sup.broker.Stop() }()
 	provider := newDrainingPermissionProvider("ses_reservation_drain")
 	child := &childRuntime{id: "rt_reservation_drain", done: make(chan struct{}), eventWriter: stableTestSink{}}
+	writer := &runtimeFanoutWriter{base: child.eventWriter, runtimeID: child.id, child: child, control: sup.control}
+	sup.setFanoutWriter(child, writer)
 	lifecycle := sup.installChildProvider(child, provider, runtime.Session{SessionID: provider.sessionID})
 
 	const requestID = "req_reused_reservation"
@@ -3809,7 +4003,7 @@ func TestProviderCloseWaitsForAdmittedPermissionReservation(t *testing.T) {
 
 	prepared := make(chan bool, 1)
 	go func() {
-		prepared <- sup.prepareChildPermissionClaim(context.Background(), child, lifecycle, provider.sessionID, child.id, requestID, control.PermissionResolverNoResolver, nil)
+		prepared <- sup.prepareChildPermissionClaim(context.Background(), child, lifecycle, writer, provider.sessionID, child.id, requestID, control.PermissionResolverNoResolver, nil)
 	}()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -3866,30 +4060,37 @@ func TestProviderCloseWaitsForAdmittedPermissionReservation(t *testing.T) {
 	}
 }
 
-func TestDirectAnswerUsesProviderGenerationThatReservedClaim(t *testing.T) {
+func TestConcurrentTeamStreamsUseProviderAndWriterGenerationThatReservedClaim(t *testing.T) {
 	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-answer-provider-generation.sock", MaxRuntimes: 1})
 	defer func() { _ = sup.broker.Stop() }()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	oldProvider := &permRecordingProvider{}
 	newProvider := &permRecordingProvider{}
+	oldSink := &metadataCaptureSink{}
+	newSink := &metadataCaptureSink{}
 	child := &childRuntime{
 		id:           "rt_provider_generation",
 		lifecycleCtx: ctx,
 		cancelFn:     cancel,
 		done:         make(chan struct{}),
 		promptCh:     make(chan struct{}, 1),
-		eventWriter:  stableTestSink{},
+		eventWriter:  oldSink,
 	}
 	sup.runtimes[child.id] = child
+	oldWriter := &runtimeFanoutWriter{base: oldSink, runtimeID: child.id, child: child, control: sup.control, metadata: cli.NewEventMetadata(sup.runID, "old-team-member", child.id)}
+	newWriter := &runtimeFanoutWriter{base: newSink, runtimeID: child.id, child: child, control: sup.control, metadata: cli.NewEventMetadata(sup.runID, "new-team-member", child.id)}
 	oldLifecycle := sup.installChildProvider(child, oldProvider, runtime.Session{SessionID: "ses_old_generation"})
-	sup.installChildProvider(child, newProvider, runtime.Session{SessionID: "ses_new_generation"})
 
 	const requestID = "req_old_generation"
 	options := []any{map[string]any{"optionId": "allow", "kind": "allow"}}
-	if !sup.prepareChildPermissionClaim(context.Background(), child, oldLifecycle, "ses_old_generation", child.id, requestID, control.PermissionResolverNoResolver, options) {
-		t.Fatal("old provider generation did not reserve claim")
+	if !sup.prepareChildPermissionClaim(context.Background(), child, oldLifecycle, oldWriter, "ses_old_generation", child.id, requestID, control.PermissionResolverNoResolver, options) {
+		t.Fatal("old team stream did not reserve claim")
 	}
+	// A concurrent team member becomes the mutable current generation before
+	// the older stream's answer completes.
+	sup.installChildProvider(child, newProvider, runtime.Session{SessionID: "ses_new_generation"})
+	sup.setFanoutWriter(child, newWriter)
 	sup.cachePermissionOptions(child.id, requestID, options)
 	if err := sup.answerPermission(child.id, requestID, "allow", ""); err != nil {
 		t.Fatalf("answerPermission: %v", err)
@@ -3899,6 +4100,12 @@ func TestDirectAnswerUsesProviderGenerationThatReservedClaim(t *testing.T) {
 	}
 	if newProvider.called {
 		t.Fatal("claim answer was misrouted to the current newer provider generation")
+	}
+	if len(oldSink.events) != 1 || oldSink.events[0].Event != "permission.response" {
+		t.Fatalf("old stream events = %+v, want its permission.response", oldSink.events)
+	}
+	if len(newSink.events) != 0 {
+		t.Fatalf("new stream received old generation response: %+v", newSink.events)
 	}
 }
 
