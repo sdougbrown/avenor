@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, jest, mock } from 'bun:tes
 
 import { observeRun } from '../../core/src/run-observer.js'
 import { createRunSnapshot } from '../../core/src/run-reducer.js'
+import { extractEventText } from '../../core/src/run-events.js'
 
 const spawnToolMock = mock(async () => ({
   run_id: 'run-1',
@@ -130,6 +131,7 @@ mock.module('@dougbots/avenor-core', () => ({
   shutdownTool: shutdownToolMock,
   inspectTool: inspectToolMock,
   createRunSnapshot,
+  extractEventText,
   observeRun,
   dial: dialMock,
   Supervisor: {
@@ -327,7 +329,11 @@ describe('AvenorPlugin', () => {
       { run_id: 'run-1', timeout: '5m', supervisor_id: '/tmp/avenor.sock' },
       context,
     )
-    expect(output).toContain('"output": "final answer"')
+    expect(output).toEqual(expect.objectContaining({
+      title: 'test run — done',
+      output: expect.stringContaining('Final output:\nfinal answer'),
+      metadata: expect.objectContaining({ output: 'final answer' }),
+    }))
     expect(resultToolMock).toHaveBeenCalledWith({
       runId: 'run-1',
       supervisorId: '/tmp/avenor.sock',
@@ -841,9 +847,13 @@ describe('AvenorPlugin', () => {
       after_seq: 3,
       supervisorId: '/tmp/avenor.sock',
     })
-    expect(JSON.parse(output)).toEqual(expect.objectContaining({
-      run_id: 'run-1',
-      final_output: expect.any(String),
+    expect(output).toEqual(expect.objectContaining({
+      title: 'test run — done',
+      output: expect.stringContaining('Inspect: test run — done'),
+      metadata: expect.objectContaining({
+        run_id: 'run-1',
+        final_output: expect.any(String),
+      }),
     }))
   })
 })

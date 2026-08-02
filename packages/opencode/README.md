@@ -42,6 +42,9 @@ When a run is dispatched with `avenor_spawn`, the plugin:
 1. **Blocks by default** — the tool call stays open, updating its title and metadata as the sub-agent runs, exactly like OpenCode's own sub-agent tool calls. The tool returns when the run reaches a terminal state.
 2. **Re-prompts on completion** — when a `wait=false` (fire-and-forget) run finishes, the plugin automatically injects a completion message into the orchestrating session so the LLM picks up without manual polling.
 3. **Routes permissions** — when a sub-agent running under the `opencode-http` backend requests a permission, the plugin injects a re-prompt into the orchestrating session. The LLM can call `avenor_answer_permission` to respond; the normal permission dialog is also shown as a fallback.
+4. **Formats results** — `avenor_status`, `avenor_result`, `avenor_answer_permission`, `avenor_follow_up`, `avenor_events`, `avenor_inspect`, and `avenor_shutdown` return concise, bounded prose with structured metadata. D008 accepts OpenCode's change from raw JSON to prose in `output`. The model sees only that prose. OpenCode stores metadata in host/session tool state. It does not include metadata in `output` or a second model channel. `avenor_spawn` keeps its existing presentation.
+
+OpenCode controls tool-call input presentation. The plugin does not change MCP result text because MCP clients control their own human rendering.
 
 ## Tools
 
@@ -88,6 +91,17 @@ Wait for a run to finish and return its complete final output without transcript
 | `supervisor_id` | no | Reuse an existing supervisor by socket path |
 
 A blocked run returns its pending permission instead of waiting forever. If this tool's own timeout expires, it returns the latest status with `ready: false` and `timed_out: true`.
+
+### `avenor_inspect`
+
+Review a bounded snapshot with transcript, completed and live tools, permissions, and final output. Use `avenor_events` when raw event records are required.
+
+| Argument | Required | Description |
+|---|---|---|
+| `run_id` | yes | Run ID to inspect |
+| `limit` | no | Max events to reduce into the snapshot |
+| `after_seq` | no | Only include events after this sequence number |
+| `supervisor_id` | no | Reuse an existing supervisor by socket path |
 
 ### `avenor_answer_permission`
 

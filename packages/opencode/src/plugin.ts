@@ -3,6 +3,15 @@ import { tool } from '@opencode-ai/plugin'
 
 import * as crypto from 'node:crypto'
 import {
+  formatAnswerPermissionOutput,
+  formatEventsOutput,
+  formatFollowUpOutput,
+  formatInspectOutput,
+  formatResultOutput,
+  formatShutdownOutput,
+  formatStatusOutput,
+} from './render.js'
+import {
   answerPermissionTool,
   createRunSnapshot,
   dial,
@@ -742,7 +751,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
             supervisorId: args.supervisor_id,
             view: args.view,
           })
-          return JSON.stringify(result, null, 2)
+          return formatStatusOutput(args, result)
         },
       }),
 
@@ -771,7 +780,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
             } else if (run) {
               void monitorRun(run).catch(console.error)
             }
-            return JSON.stringify(result, null, 2)
+            return formatResultOutput(args, result)
           } catch (error) {
             if (run) void monitorRun(run).catch(console.error)
             throw error
@@ -797,7 +806,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
             supervisorId: args.supervisor_id,
             message: args.message,
           })
-          return JSON.stringify(result, null, 2)
+          return formatAnswerPermissionOutput(args, result)
         },
       }),
 
@@ -830,7 +839,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
           await primeTrackedRun(run)
           void monitorRun(run).catch(console.error)
 
-          return JSON.stringify(result, null, 2)
+          return formatFollowUpOutput(args, result)
         },
       }),
 
@@ -849,7 +858,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
             limit: args.limit,
             supervisorId: args.supervisor_id,
           })
-          return JSON.stringify(result, null, 2)
+          return formatEventsOutput(args, result)
         },
       }),
 
@@ -868,7 +877,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
             after_seq: args.after_seq,
             supervisorId: args.supervisor_id,
           })
-          return JSON.stringify(result, null, 2)
+          return formatInspectOutput(args, result)
         },
       }),
 
@@ -884,7 +893,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
             supervisorId: args.supervisor_id,
             force: args.force,
           })
-          return JSON.stringify(result, null, 2)
+          return formatShutdownOutput(args, result)
         },
       }),
     },

@@ -1,5 +1,4 @@
-import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
-import type { Theme } from '@earendil-works/pi-tui'
+import type { ExtensionAPI, ExtensionContext, Theme } from '@earendil-works/pi-coding-agent'
 import { Text } from '@earendil-works/pi-tui'
 import { Type } from 'typebox'
 import {
@@ -40,6 +39,22 @@ import {
   createRunTerminalPayload,
   emitAvenorEvent,
 } from './events.js'
+import {
+  renderAnswerPermissionCall,
+  renderAnswerPermissionResult,
+  renderEventsCall,
+  renderEventsResult,
+  renderFollowUpCall,
+  renderFollowUpResult,
+  renderInspectCall,
+  renderInspectResult,
+  renderResultCall,
+  renderResultResult,
+  renderShutdownCall,
+  renderShutdownResult,
+  renderStatusCall,
+  renderStatusResult,
+} from './render.js'
 
 const POLL_INTERVAL_MS = 3_000
 const INSPECT_LIMIT = 128
@@ -1029,6 +1044,12 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
           details: result,
         }
       },
+      renderCall(args, theme, context) {
+        return renderStatusCall(context.args, theme)
+      },
+      renderResult(result, { expanded, isPartial }, theme, context) {
+        return renderStatusResult(result, { expanded, isPartial }, theme, context.args)
+      },
     })
 
     pi.registerTool({
@@ -1083,6 +1104,12 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
           }
         }
       },
+      renderCall(args, theme, context) {
+        return renderResultCall(context.args, theme)
+      },
+      renderResult(result, { expanded, isPartial }, theme, context) {
+        return renderResultResult(result, { expanded, isPartial }, theme, context.args)
+      },
     })
 
     pi.registerTool({
@@ -1107,6 +1134,12 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
           content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
           details: payload,
         }
+      },
+      renderCall(args, theme, context) {
+        return renderInspectCall(context.args, theme)
+      },
+      renderResult(result, { expanded, isPartial }, theme, context) {
+        return renderInspectResult(result, { expanded, isPartial }, theme, context.args)
       },
     })
 
@@ -1134,6 +1167,12 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
           details: result,
         }
+      },
+      renderCall(args, theme, context) {
+        return renderAnswerPermissionCall(context.args, theme)
+      },
+      renderResult(result, { expanded, isPartial }, theme, context) {
+        return renderAnswerPermissionResult(result, { expanded, isPartial }, theme, context.args)
       },
     })
 
@@ -1177,6 +1216,12 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
           details: result,
         }
       },
+      renderCall(args, theme, context) {
+        return renderFollowUpCall(context.args, theme)
+      },
+      renderResult(result, { expanded, isPartial }, theme, context) {
+        return renderFollowUpResult(result, { expanded, isPartial }, theme, context.args)
+      },
     })
 
     pi.registerTool({
@@ -1201,6 +1246,12 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
           details: result,
         }
       },
+      renderCall(args, theme, context) {
+        return renderEventsCall(context.args, theme)
+      },
+      renderResult(result, { expanded, isPartial }, theme, context) {
+        return renderEventsResult(result, { expanded, isPartial }, theme, context.args)
+      },
     })
 
     pi.registerTool({
@@ -1222,6 +1273,12 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
           details: result,
         }
+      },
+      renderCall(args, theme, context) {
+        return renderShutdownCall(context.args, theme)
+      },
+      renderResult(result, { expanded, isPartial }, theme, context) {
+        return renderShutdownResult(result, { expanded, isPartial }, theme, context.args)
       },
     })
 

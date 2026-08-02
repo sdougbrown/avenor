@@ -86,8 +86,9 @@ packages/pi/
 ├── package.json
 ├── tsdown.config.ts
 ├── src/
-│   ├── index.ts          # main extension (tools, commands, hooks, rendering)
-│   ├── types.ts          # shared types, status emoji mapping
+│   ├── index.ts          # main extension, tool registration, commands, and hooks
+│   ├── render.ts         # host-only tool-call and result presentation
+│   ├── types.ts          # shared types and status emoji mapping
 │   └── watch.ts          # EventFeedOverlay TUI component
 └── dist/
     └── index.js          # built output (loaded by pi)
@@ -128,11 +129,24 @@ Beyond the tools, the extension integrates with Pi's TUI and event system:
 - **Footer status** — active runs shown in the Pi footer bar
 - **Live progress** — blocking `avenor_spawn` calls stream progress updates via `onUpdate`
 - **Context enrichment** — active sub-agents are automatically surfaced in the system prompt via `before_agent_start`
-- **Custom rendering** — tool calls and results are rendered with status emojis and color-coded output
+- **Custom rendering** — all Avenor tool calls and results use themed, bounded host-only summaries. Results have collapsed and expanded views. When Pi passes `isPartial`, the renderer reads available status or plain-text content. This renderer never calls `onUpdate`.
 - **Commands** — interactive commands for run management:
   - `/avenor-status` — show status of all runs
   - `/avenor-watch <run_id>` — open a live event feed overlay
   - `/avenor-cancel <run_id>` — cancel a running sub-agent
+
+### Tool-result channels
+
+Pi keeps the agent and terminal channels separate. Every Avenor tool call and
+result has a host-only themed summary. Tools other than `avenor_spawn` continue
+to return JSON in `content[0].text` for the agent and preserve structured
+`details`. The renderer reads those details without changing either channel.
+Long output, events, and snapshot rows are sanitized and bounded; use
+`avenor_result`, `avenor_inspect`, or `avenor_events` for the corresponding
+hand-off.
+
+MCP clients choose their own human presentation. This extension does not change
+Go or TypeScript MCP result text or add an OpenCode input renderer.
 
 ### Agent profiles
 

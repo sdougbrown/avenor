@@ -233,6 +233,19 @@ describe('Avenor Pi extension', () => {
     expect(Object.keys(registeredTools)).toContain('avenor_follow_up')
     expect(Object.keys(registeredTools)).toContain('avenor_events')
     expect(Object.keys(registeredTools)).toContain('avenor_shutdown')
+    for (const name of [
+      'avenor_status',
+      'avenor_result',
+      'avenor_inspect',
+      'avenor_answer_permission',
+      'avenor_follow_up',
+      'avenor_events',
+      'avenor_shutdown',
+    ]) {
+      expect(typeof registeredTools[name]?.renderCall).toBe('function')
+      expect(typeof registeredTools[name]?.renderResult).toBe('function')
+    }
+    expect(typeof registeredTools.avenor_spawn.renderResult).toBe('function')
 
     expect(Object.keys(registeredCommands)).toContain('avenor-status')
     expect(Object.keys(registeredCommands)).toContain('avenor-watch')
@@ -348,6 +361,15 @@ describe('Avenor Pi extension', () => {
 
     const result = await registeredTools.avenor_result.execute('tool-result', { run_id: 'run-1', timeout: '5m' })
     expect(result.content[0].text).toContain('"output": "hello world"')
+    expect(result.details).toEqual({ run_id: 'run-1', label: 'demo', status: 'done', ready: true, output: 'hello world' })
+    const renderedResult = registeredTools.avenor_result.renderResult(
+      result,
+      { expanded: false, isPartial: false },
+      { fg: (_color: string, value: string) => value, bold: (value: string) => value },
+      { args: { run_id: 'run-1' } },
+    ).render(2_000).join('\n').trimEnd()
+    expect(renderedResult).toContain('Result: demo — done')
+    expect(renderedResult).not.toContain('"output"')
     expect(resultToolMock).toHaveBeenCalledWith({
       runId: 'run-1',
       supervisorId: undefined,
@@ -413,6 +435,15 @@ describe('Avenor Pi extension', () => {
 
     const result = await inspectToolDef.execute('tool-1', { run_id: 'run-1' })
     expect(result.content[0].text).toContain('"final_output": "hello world"')
+    expect(result.details).toEqual(buildInspectPayload(makeInspectResult()))
     expect(result.details.snapshot.identity.run_id).toBe('run-1')
+    const rendered = inspectToolDef.renderResult(
+      result,
+      { expanded: false, isPartial: false },
+      { fg: (_color: string, value: string) => value, bold: (value: string) => value },
+      { args: { run_id: 'run-1' } },
+    ).render(2_000).join('\n').trimEnd()
+    expect(rendered).toContain('Inspect: demo — done')
+    expect(rendered).not.toContain('"snapshot"')
   })
 })
