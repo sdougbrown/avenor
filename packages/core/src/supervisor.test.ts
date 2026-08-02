@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach, afterAll } from 'bun:test'
+import { describe, it, expect, afterAll } from 'bun:test'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -133,11 +133,37 @@ describe.skipIf(skipIfNoBinary)('Supervisor singleton', () => {
 
   it('starts fresh after close', async () => {
     await sup.close()
-    const sup2 = await Supervisor.get()
+    const [sup2, sup3] = await Promise.all([Supervisor.get(), Supervisor.get()])
+    expect(sup2).toBe(sup3)
     expect(sup2).not.toBe(sup)
     sup = sup2
     expect(sup2.supervisorId).toContain(path.join(expectedAvenorHome(), 'sockets', 'avenor-mcp-'))
   }, 15_000)
+
+  it('failed cold startup does not poison future calls', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-fail-test-'))
+    const failingScript = path.join(tmpDir, 'failing-avenor.sh')
+    fs.writeFileSync(failingScript, '#!/bin/sh\nexit 1\n', { mode: 0o755 })
+
+    try {
+      await sup.close()
+      await expect(Supervisor.get({ binaryPath: failingScript })).rejects.toThrow(
+        'avenor exited with code 1 during startup',
+      )
+
+      const sup2 = await Supervisor.get()
+      expect(sup2).not.toBe(sup)
+      expect(await sup2.getClient().status()).toBeObject()
+      sup = sup2
+    } finally {
+      try {
+        fs.unlinkSync(failingScript)
+        fs.rmdirSync(tmpDir)
+      } catch {
+        // ignore cleanup errors
+      }
+    }
+  })
 })
 
 describe.skipIf(skipIfNoBinary)('Supervisor.close with skipShutdown', () => {
