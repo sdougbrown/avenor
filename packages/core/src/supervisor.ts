@@ -75,6 +75,7 @@ export function findAvenorBinary(): string {
 
 export class Supervisor {
   private static instance: Supervisor | null = null
+  private static starting: Promise<Supervisor> | null = null
   private static cleanupRegistered = false
 
   private static registerCleanup(): void {
@@ -109,11 +110,22 @@ export class Supervisor {
     this.callTimeoutMs = opts?.callTimeoutMs ?? 30_000
   }
 
-  static async get(opts?: SupervisorOptions): Promise<Supervisor> {
+  static get(opts?: SupervisorOptions): Promise<Supervisor> {
     if (Supervisor.instance && !Supervisor.instance.crashed) {
-      return Supervisor.instance
+      return Promise.resolve(Supervisor.instance)
     }
+    if (Supervisor.starting) return Supervisor.starting
 
+    const starting = Supervisor.start(opts)
+    Supervisor.starting = starting
+    const clearStarting = () => {
+      if (Supervisor.starting === starting) Supervisor.starting = null
+    }
+    void starting.then(clearStarting, clearStarting)
+    return starting
+  }
+
+  private static async start(opts?: SupervisorOptions): Promise<Supervisor> {
     Supervisor.registerCleanup()
     const binaryPath = opts?.binaryPath ?? findAvenorBinary()
 

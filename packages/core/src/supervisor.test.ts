@@ -119,6 +119,12 @@ describe.skipIf(skipIfNoBinary)('Supervisor singleton', () => {
     await sup?.close().catch(() => {})
   })
 
+  it('coalesces concurrent cold starts', async () => {
+    const [first, second] = await Promise.all([Supervisor.get(), Supervisor.get()])
+    sup = first
+    expect(second).toBe(first)
+  })
+
   it('reuses existing instance', async () => {
     sup = await Supervisor.get()
     const sup2 = await Supervisor.get()
