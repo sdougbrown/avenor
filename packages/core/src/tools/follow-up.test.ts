@@ -59,6 +59,50 @@ describe('followUpTool with an external supervisor', () => {
     expect(closeMock).toHaveBeenCalledTimes(1)
   })
 
+  it('rejects a conflicted provisional sentinel session before external spawn', async () => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-follow-up-test-'))
+    process.env.AVENOR_HOME = home
+    const runDir = path.join(home, 'runs', 'conflicted-run')
+    fs.mkdirSync(runDir, { recursive: true })
+    fs.writeFileSync(
+      path.join(runDir, 'sentinel.done'),
+      'FAILED\nSESSION=ses-rejected\nSTOP_REASON=session_id_conflict\nEXIT_CODE=1\n',
+    )
+
+    await expect(followUpTool({
+      runId: 'conflicted-run',
+      message: 'do not continue',
+      supervisorId: '/tmp/avenor-mcp-test.sock',
+    })).rejects.toThrow('run is not resumable: session_id_conflict')
+
+    expect(statusMock).toHaveBeenCalledWith('conflicted-run')
+    expect(spawnMock).not.toHaveBeenCalled()
+    expect(closeMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('preserves normal FAILED sentinel resume behavior for non-conflict failures', async () => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-follow-up-test-'))
+    process.env.AVENOR_HOME = home
+    const runDir = path.join(home, 'runs', 'ordinary-failed-run')
+    fs.mkdirSync(runDir, { recursive: true })
+    fs.writeFileSync(
+      path.join(runDir, 'sentinel.done'),
+      'FAILED\nSESSION=ses-failed\nSTOP_REASON=refusal\nEXIT_CODE=2\n',
+    )
+
+    await followUpTool({
+      runId: 'ordinary-failed-run',
+      message: 'continue after refusal',
+      supervisorId: '/tmp/avenor-mcp-test.sock',
+    })
+
+    expect(spawnMock).toHaveBeenCalledTimes(1)
+    expect(spawnMock.mock.calls[0]?.[0]).toMatchObject({
+      session_id: 'ses-failed',
+      prompt: 'continue after refusal',
+    })
+  })
+
   it('uses resolved identity for roster follow-ups without forwarding the mutable selector', async () => {
     home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-follow-up-test-'))
     process.env.AVENOR_HOME = home
@@ -470,6 +514,33 @@ describe('followUpTool with a local supervisor (no supervisorId)', () => {
       rosterEntry: 'planner',
       effectiveAgent: 'resolved-agent',
     })
+  })
+
+  it('rejects a conflicted provisional sentinel session before local spawn', async () => {
+    localTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-follow-up-local-'))
+    const sentinelPath = path.join(localTmpDir, 'sentinel.done')
+    fs.writeFileSync(
+      sentinelPath,
+      'FAILED\nSESSION=ses-local-rejected\nSTOP_REASON=session_id_conflict\nEXIT_CODE=1\n',
+    )
+    localSupRuns.set('local-conflicted-run', {
+      runId: 'local-conflicted-run',
+      label: 'local-conflicted-run',
+      sentinelPath,
+      eventLogPath: path.join(localTmpDir, 'events.log'),
+      runtimeId: 'rt-local-conflicted',
+      sessionId: 'ses-local-rejected',
+      backend: 'pi',
+    })
+
+    await expect(followUpTool({
+      runId: 'local-conflicted-run',
+      message: 'do not continue',
+    })).rejects.toThrow('run is not resumable: session_id_conflict')
+
+    expect(localSupGetClientMock).not.toHaveBeenCalled()
+    expect(statusMock).not.toHaveBeenCalled()
+    expect(localSupSpawnMock).not.toHaveBeenCalled()
   })
 
   it('resumes a stored backend-only local run when live status is unavailable', async () => {

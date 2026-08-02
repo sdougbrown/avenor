@@ -123,7 +123,7 @@ describe('statusTool singleton registry', () => {
 
   it('reads terminal sentinel when singleton registry status lookup throws', async () => {
     sentinelPath = path.join(os.tmpdir(), `avenor-run-${runInfo.runId}.done`)
-    fs.writeFileSync(sentinelPath, 'DONE\nSESSION=ses-1234\n')
+    fs.writeFileSync(sentinelPath, 'DONE\nSESSION=ses-1234\nSTOP_REASON=end_turn\n')
     runInfo.sentinelPath = sentinelPath
 
     const result = await statusTool({
@@ -139,8 +139,29 @@ describe('statusTool singleton registry', () => {
       label: runInfo.label,
       status: 'done',
       session_id: 'ses-1234',
-      stop_reason: 'DONE',
+      stop_reason: 'end_turn',
       runtime_id: runInfo.runtimeId,
+    })
+  })
+
+  it('exposes a completed local session conflict from STOP_REASON', async () => {
+    sentinelPath = path.join(os.tmpdir(), `avenor-run-${runInfo.runId}.done`)
+    fs.writeFileSync(
+      sentinelPath,
+      'FAILED\nSESSION=ses-rejected\nSTOP_REASON=session_id_conflict\nEXIT_CODE=1\n',
+    )
+    runInfo.sentinelPath = sentinelPath
+
+    const result = await statusTool({
+      runId: runInfo.runId,
+      supervisorId: '/tmp/avenor-mcp-test.sock',
+    })
+
+    expect(statusMock).toHaveBeenCalledWith(runInfo.runtimeId)
+    expect(result).toMatchObject({
+      status: 'failed',
+      session_id: 'ses-rejected',
+      stop_reason: 'session_id_conflict',
     })
   })
 
@@ -160,7 +181,7 @@ describe('statusTool singleton registry', () => {
 
   it('uses non-empty status when phase is present but empty', async () => {
     sentinelPath = path.join(os.tmpdir(), `avenor-run-${runInfo.runId}.done`)
-    fs.writeFileSync(sentinelPath, 'FAILED\nSESSION=ses-failed\n')
+    fs.writeFileSync(sentinelPath, 'FAILED\nSESSION=ses-failed\nSTOP_REASON=refusal\n')
     runInfo.sentinelPath = sentinelPath
     statusMock.mockResolvedValueOnce({
       runtime_id: runInfo.runtimeId,
@@ -176,7 +197,7 @@ describe('statusTool singleton registry', () => {
 
     expect(result).toMatchObject({
       status: 'failed',
-      stop_reason: 'FAILED',
+      stop_reason: 'refusal',
       session_id: 'ses-failed',
     })
   })
@@ -278,5 +299,57 @@ describe('statusTool singleton registry', () => {
       },
       usage: { total_tokens: 12 },
     })
+  })
+})
+
+describe('statusTool external sentinel fallback', () => {
+  it('exposes STOP_REASON when a completed external runtime is unavailable', async () => {
+    const previousHome = process.env.AVENOR_HOME
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-status-external-'))
+    process.env.AVENOR_HOME = home
+    const runId = 'external-conflict-run'
+    const runDir = path.join(home, 'runs', runId)
+    fs.mkdirSync(runDir, { recursive: true })
+    fs.writeFileSync(
+      path.join(runDir, 'sentinel.done'),
+      'FAILED\nSESSION=ses-external-rejected\nSTOP_REASON=session_id_conflict\nEXIT_CODE=1\n',
+    )
+
+    const externalStatusMock = mock(async () => {
+      throw new Error('completed runtime removed')
+    })
+    const externalListMock = mock(async () => [])
+    const externalCloseMock = mock(() => {})
+    const externalStatusTool = createStatusTool(mock(async () => ({
+      client: {
+        status: externalStatusMock,
+        list: externalListMock,
+        close: externalCloseMock,
+      },
+      isSingleton: false,
+      sup: null,
+      supervisorId: '/tmp/external-supervisor.sock',
+    })) as any)
+
+    try {
+      const result = await externalStatusTool({
+        runId,
+        supervisorId: '/tmp/external-supervisor.sock',
+      })
+
+      expect(externalStatusMock).toHaveBeenCalledWith(runId)
+      expect(externalListMock).toHaveBeenCalledTimes(1)
+      expect(externalCloseMock).toHaveBeenCalledTimes(1)
+      expect(result).toMatchObject({
+        run_id: runId,
+        status: 'failed',
+        session_id: 'ses-external-rejected',
+        stop_reason: 'session_id_conflict',
+      })
+    } finally {
+      if (previousHome === undefined) delete process.env.AVENOR_HOME
+      else process.env.AVENOR_HOME = previousHome
+      fs.rmSync(home, { recursive: true, force: true })
+    }
   })
 })

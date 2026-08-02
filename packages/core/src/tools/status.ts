@@ -311,7 +311,7 @@ async function buildRunStatus(
         (sentinel?.SESSION as string) ??
         (liveStatus?.session_id as string | undefined) ??
         runInfo.sessionId,
-      stop_reason: sentinel?._status,
+      stop_reason: sentinel?.STOP_REASON,
       identity: {
         roster_file: runInfo.rosterFile,
         roster_entry: runInfo.rosterEntry,
@@ -393,7 +393,7 @@ async function executeStatusTool(
             session_id:
               (sentinel?.SESSION as string) ??
               (liveStatus?.session_id as string | undefined),
-            stop_reason: sentinel?._status,
+            stop_reason: sentinel?.STOP_REASON,
           },
           translateStatus(rawStatusPhase(liveStatus), sentinel),
         ), args.view)
@@ -444,7 +444,7 @@ async function executeStatusTool(
         session_id:
           (sentinel?.SESSION as string) ??
           (liveStatus?.session_id as string | undefined),
-        stop_reason: sentinel?._status,
+        stop_reason: sentinel?.STOP_REASON,
       },
       translateStatus(rawStatusPhase(liveStatus), sentinel),
     ), args.view)

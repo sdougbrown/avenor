@@ -81,6 +81,17 @@ async function parseSentinel(filePath: string): Promise<Record<string, string> |
   }
 }
 
+function rejectSessionConflict(
+  sentinel: Record<string, string> | null,
+  liveStatus: Record<string, unknown> | null,
+): void {
+  const sentinelStopReason = value(sentinel?.STOP_REASON)
+  const liveStopReason = value(liveStatus?.stop_reason)
+  if (sentinelStopReason === 'session_id_conflict' || liveStopReason === 'session_id_conflict') {
+    throw new Error('run is not resumable: session_id_conflict')
+  }
+}
+
 async function executeFollowUpTool(
   args: FollowUpToolArgs,
   getSupervisorClient: typeof realGetSupervisorClient,
@@ -106,8 +117,10 @@ async function executeFollowUpTool(
 
       const sentinelPath =
         (liveStatus?.sentinel_file as string | undefined) ??
+        runInfo?.sentinelPath ??
         path.join(runsRoot(), args.runId, 'sentinel.done')
       const sentinel = await parseSentinel(sentinelPath)
+      rejectSessionConflict(sentinel, liveStatus)
       const sessionId =
         sentinel?.SESSION ??
         (liveStatus?.session_id as string | undefined) ??
@@ -191,6 +204,7 @@ async function executeFollowUpTool(
   }
 
   const sentinel = await parseSentinel(runInfo.sentinelPath)
+  rejectSessionConflict(sentinel, null)
   const sessionId = sentinel?.SESSION ?? runInfo.sessionId
 
   if (!sessionId) {
@@ -209,6 +223,7 @@ async function executeFollowUpTool(
       // Stored metadata still permits a follow-up when status is unavailable.
     }
   }
+  rejectSessionConflict(sentinel, liveStatus)
   const agent = resolvedIdentity(
     liveStatus,
     'effective_agent',
