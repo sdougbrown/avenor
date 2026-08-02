@@ -164,6 +164,21 @@ describe.skipIf(skipIfNoBinary)('Supervisor singleton', () => {
       }
     }
   })
+
+  it('reconnects after an external clean shutdown', async () => {
+    const previous = sup
+    await previous.getClient().shutdown('graceful')
+
+    for (let attempt = 0; attempt < 100 && !(previous as any).crashed; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    expect((previous as any).crashed).toBe(true)
+
+    const replacement = await Supervisor.get()
+    expect(replacement).not.toBe(previous)
+    expect(await replacement.getClient().status()).toBeObject()
+    sup = replacement
+  }, 15_000)
 })
 
 describe.skipIf(skipIfNoBinary)('Supervisor.close with skipShutdown', () => {

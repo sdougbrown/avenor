@@ -148,6 +148,57 @@ describe('Avenor Pi extension', () => {
     expect(compactWhitespace('abcdefgh', 5)).toBe('abcd…')
   })
 
+  it('reports a persistent polling failure once until the source recovers', async () => {
+    const commands: Record<string, any> = {}
+    const mockPi = {
+      on: () => {},
+      registerTool: () => {},
+      registerCommand: (name: string, definition: any) => {
+        commands[name] = definition
+      },
+      registerMessageRenderer: () => {},
+      sendUserMessage: () => {},
+      events: { emit: mock(() => {}), on: mock(() => () => {}) },
+    }
+    let available = false
+    const statusToolMock = mock(async () => {
+      if (!available) throw new Error('write request: socket ended')
+      return []
+    })
+    const consoleError = mock(() => {})
+    const originalConsoleError = console.error
+    console.error = consoleError as typeof console.error
+
+    try {
+      await createExtension({
+        spawnTool: mock(async () => ({ run_id: 'run-1', label: 'demo', supervisor_id: '/tmp/sock' })),
+        statusTool: statusToolMock,
+        eventsTool: mock(async () => ({ events: [] })),
+        answerPermissionTool: mock(async () => ({ ok: true })),
+        followUpTool: mock(async () => ({ run_id: 'run-2', label: 'follow-up' })),
+        inspectTool: mock(async () => makeInspectResult()),
+        resultTool: mock(async () => ({ run_id: 'run-1', label: 'demo', status: 'done', ready: true })),
+        shutdownTool: mock(async () => ({ ok: true })),
+        observeRun: mock(() => null),
+        dial: mock(async () => ({ close() {} })),
+        Supervisor: class {} as any,
+      } as any)(mockPi as any)
+
+      const ctx = { ui: { notify: mock(() => {}), setWidget: mock(() => {}), setStatus: mock(() => {}) } }
+      await commands['avenor-status'].handler('', ctx)
+      await commands['avenor-status'].handler('', ctx)
+      expect(consoleError).toHaveBeenCalledTimes(1)
+
+      available = true
+      await commands['avenor-status'].handler('', ctx)
+      available = false
+      await commands['avenor-status'].handler('', ctx)
+      expect(consoleError).toHaveBeenCalledTimes(2)
+    } finally {
+      console.error = originalConsoleError
+    }
+  })
+
   it('registers all expected tools, commands, renderers, and event handlers', async () => {
     const registeredTools: Record<string, any> = {}
     const registeredCommands: Record<string, any> = {}

@@ -101,6 +101,7 @@ function removeResolver(resolvers: EventResolver[], target: EventResolver): void
 export class Client {
   private socket: net.Socket
   private rl: readline.Interface
+  private closed = false
   private nextID = 0
   private pending = new Map<number, PendingCall>()
   private started = false
@@ -121,7 +122,11 @@ export class Client {
     this.rl = readline.createInterface({ input: socket, crlfDelay: Infinity })
     this.callTimeout = opts?.callTimeoutMs ?? 30_000
     this.socket.on('error', (err: Error) => {
+      this.closed = true
       this.pushEvent({ event: 'protocol-error', message: err.message })
+    })
+    this.socket.on('close', () => {
+      this.closed = true
     })
   }
 
@@ -166,6 +171,7 @@ export class Client {
     })
 
     this.rl.on('close', () => {
+      this.closed = true
       for (const [, pc] of this.pending) {
         clearTimeout(pc.timer)
         pc.reject(new Error('read response: connection closed'))
@@ -197,6 +203,9 @@ export class Client {
   }
 
   async call(method: string, params?: unknown): Promise<unknown> {
+    if (this.isClosed()) {
+      throw new Error('control socket is closed')
+    }
     this.startReadLoop()
 
     const id = ++this.nextID
@@ -217,6 +226,7 @@ export class Client {
 
       this.socket.write(data, (err?: Error | null) => {
         if (err) {
+          this.closed = true
           clearTimeout(timer)
           this.pending.delete(id)
           reject(new Error(`write request: ${err.message}`))
@@ -370,7 +380,12 @@ export class Client {
     await this.call('cancel', params)
   }
 
+  isClosed(): boolean {
+    return this.closed || this.socket.destroyed || this.socket.writableEnded
+  }
+
   close(): void {
+    this.closed = true
     this.rl.close()
     this.socket.destroy()
   }

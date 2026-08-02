@@ -259,6 +259,26 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
     let pollingGeneration = 0
     let pollInFlight: Promise<RunStatusEntry[]> | null = null
     let sessionCtx: ExtensionContext | null = null
+    // Supervisor connections can disappear while the Pi session keeps running
+    // (for example, when an orchestrator switches supervisors). Polling is
+    // best-effort, so report each failure once until that source recovers
+    // instead of writing the same stack trace every poll interval.
+    const reportedPollingFailures = new Set<string>()
+
+    function reportPollingFailure(key: string, message: string, error: unknown): void {
+      if (reportedPollingFailures.has(key)) return
+      reportedPollingFailures.add(key)
+      console.error(message, error)
+    }
+
+    function clearPollingFailure(key: string): void {
+      reportedPollingFailures.delete(key)
+    }
+
+    function clearRunPollingFailures(run: Pick<WatchRunRef, 'runId' | 'supervisorId'>): void {
+      clearPollingFailure(`run-status:${run.supervisorId ?? 'singleton'}:${run.runId}`)
+      clearPollingFailure(`spawn-status:${run.supervisorId ?? 'singleton'}:${run.runId}`)
+    }
 
     function upsertTrackedRun(run: WatchRunRef, status?: StatusResult, blocking = false): void {
       const current = trackedRuns.get(run.runId)
@@ -299,8 +319,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
         for (const result of liveList) {
           liveMap.set(result.run_id, result)
         }
+        clearPollingFailure('singleton-list')
       } catch (err) {
-        console.error('avenor pollRuns: failed to list singleton runs', err)
+        reportPollingFailure('singleton-list', 'avenor pollRuns: failed to list singleton runs', err)
       }
 
       const entries: RunStatusEntry[] = []
@@ -308,6 +329,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
         const live = findLiveStatusForTrackedRun(run, liveMap.values())
         if (live) {
           liveMap.delete(live.run_id)
+          clearPollingFailure(`run-status:${run.supervisorId ?? 'singleton'}:${run.runId}`)
           run.lastStatus = live
           entries.push({
             runId: run.runId,
@@ -332,6 +354,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
           })
           const result = Array.isArray(raw) ? raw[0] : raw
           if (!result) throw new Error('status response was empty')
+          clearPollingFailure(`run-status:${run.supervisorId ?? 'singleton'}:${run.runId}`)
           run.lastStatus = result
           entries.push({
             runId: run.runId,
@@ -348,7 +371,11 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
             backend: result.backend,
           })
         } catch (err) {
-          console.error(`avenor pollRuns: statusTool failed for ${run.runId}`, err)
+          reportPollingFailure(
+            `run-status:${run.supervisorId ?? 'singleton'}:${run.runId}`,
+            `avenor pollRuns: statusTool failed for ${run.runId}`,
+            err,
+          )
           const previous = run.lastStatus
           entries.push({
             runId: run.runId,
@@ -508,6 +535,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
                 backend: entry.backend,
               }),
             )
+            clearRunPollingFailures(run)
             trackedRuns.delete(entry.runId)
           } else if (
             entry.pendingPermission &&
@@ -540,6 +568,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
           }, POLL_INTERVAL_MS)
         } else {
           pollingActive = false
+          reportedPollingFailures.clear()
           sessionCtx?.ui.setStatus('avenor', '')
           sessionCtx?.ui.setWidget('avenor-status', undefined)
         }
@@ -554,6 +583,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
     async function stopPolling(): Promise<void> {
       pollingActive = false
       pollingGeneration++
+      reportedPollingFailures.clear()
       await pollInFlight?.catch(() => {})
       sessionCtx?.ui.setStatus('avenor', '')
       sessionCtx?.ui.setWidget('avenor-status', undefined)
@@ -758,6 +788,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
           const text = status.pending_permission
             ? `[blocked] ${run.label ?? run.runId} — permission: ${status.pending_permission.description}`
             : `${run.label ?? run.runId}${status.phase_label ? ` (${status.phase_label})` : ''}`
+          clearPollingFailure(`spawn-status:${run.supervisorId ?? 'singleton'}:${run.runId}`)
           onUpdate?.({
             content: [{ type: 'text', text }],
             details: { status: status.status, run_id: run.runId },
@@ -767,7 +798,11 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
             return { status, aborted: false }
           }
         } catch (err) {
-          console.error('avenor spawn poll: statusTool failed', err)
+          reportPollingFailure(
+            `spawn-status:${run.supervisorId ?? 'singleton'}:${run.runId}`,
+            'avenor spawn poll: statusTool failed',
+            err,
+          )
         }
       }
 
@@ -915,6 +950,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
 
         const waitResult = await waitForRun(runRef, signal, onUpdate)
         if (waitResult.aborted) {
+          clearRunPollingFailures(runRef)
           trackedRuns.delete(result.run_id)
           return {
             content: [{ type: 'text', text: `Monitoring of "${label}" (run_id: ${result.run_id}) was interrupted. Use avenor_status or avenor_inspect to check.` }],
@@ -961,6 +997,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
               backend: status.backend,
             }),
           )
+          clearRunPollingFailures(runRef)
           trackedRuns.delete(result.run_id)
           return {
             content: [{ type: 'text', text: buildCompletionText({ runId: result.run_id, label }, status, finalOutput) }],
@@ -1069,6 +1106,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
                 status: result.status ?? 'done',
               }),
             )
+            clearRunPollingFailures({
+              runId: params.run_id,
+              supervisorId: tracked?.supervisorId ?? params.supervisor_id,
+            })
             trackedRuns.delete(params.run_id)
           } else if (tracked && result.status === 'waiting') {
             tracked.permissionNotified = true

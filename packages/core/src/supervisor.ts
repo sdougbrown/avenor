@@ -112,8 +112,19 @@ export class Supervisor {
   }
 
   static get(opts?: SupervisorOptions): Promise<Supervisor> {
-    if (Supervisor.instance && !Supervisor.instance.crashed) {
-      return Promise.resolve(Supervisor.instance)
+    const current = Supervisor.instance
+    if (current && !current.crashed) {
+      if (current.client && !current.client.isClosed()) {
+        return Promise.resolve(current)
+      }
+
+      // The peer may close the control socket before the child-process exit
+      // event runs. Invalidate the stale singleton immediately so the next
+      // caller starts a replacement instead of retrying a dead socket.
+      current.crashed = true
+      current.crashCode = 0
+      current.client?.close()
+      current.client = null
     }
     if (Supervisor.starting) return Supervisor.starting
 
@@ -202,17 +213,18 @@ export class Supervisor {
           )
           return
         }
-        if (code !== 0 || signal) {
-          this.crashed = true
-          this.crashCode = code ?? -1
-          if (this.client) {
-            try {
-              this.client.close()
-            } catch {
-              // ignore
-            }
-            this.client = null
+        // A clean supervisor exit still invalidates the cached client (for
+        // example, after an explicit shutdown or idle timeout). Treat every
+        // post-start exit as unavailable so the next get() can reconnect.
+        this.crashed = true
+        this.crashCode = code ?? -1
+        if (this.client) {
+          try {
+            this.client.close()
+          } catch {
+            // ignore
           }
+          this.client = null
         }
       })
 
@@ -264,12 +276,19 @@ export class Supervisor {
 
   getClient(): Client {
     if (this.crashed) {
+      const state = this.crashCode === 0 ? 'exited' : 'crashed'
       throw new Error(
-        `avenor supervisor crashed (exit code ${this.crashCode}). Call avenor_shutdown to clean up and retry.`,
+        `avenor supervisor ${state} (exit code ${this.crashCode}). Call avenor_shutdown to clean up and retry.`,
       )
     }
     if (!this.client) {
       throw new Error('supervisor not started')
+    }
+    if (this.client.isClosed()) {
+      this.crashed = true
+      this.crashCode = 0
+      this.client = null
+      throw new Error('avenor supervisor connection closed')
     }
     return this.client
   }

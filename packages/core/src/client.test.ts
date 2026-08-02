@@ -617,6 +617,20 @@ describe('Client.call error handling', () => {
     server?.close()
   })
 
+  it('marks the client closed when the peer ends the connection', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (_req, sock) => {
+      sock.destroy()
+    })
+
+    const client = await dial(socketPath)
+    await expect(client.status()).rejects.toThrow()
+    expect(client.isClosed()).toBe(true)
+    await expect(client.status()).rejects.toThrow('control socket is closed')
+    client.close()
+  })
+
   it('rejects on error response', async () => {
     const socketPath = tempSocketPath()
 
