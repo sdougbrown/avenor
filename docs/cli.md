@@ -93,7 +93,7 @@ avenor run --prompt "Analyze the repository" \\
   --roster-file /repo/roster.json --roster-entry planner
 ```
 
-The direct selector is intentionally permissive when no roster is selected: `--agent`, `--model`, and `--backend` are independently optional. This allow-neither form is valid; omitted identity values use the selected runtime's defaults, and the last command uses the explicit backend with no agent or model:
+The direct selector is intentionally permissive when no roster is selected: `--agent`, `--model`, and `--backend` are independently optional. Any combination of the three may be supplied — including none at all — and omitted identity values use the selected runtime's defaults, and the last command uses the explicit backend with no agent or model:
 
 ```sh
 avenor run --prompt "Use the runtime defaults"
