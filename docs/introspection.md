@@ -25,13 +25,13 @@ The inspector shows assistant and reasoning text exposed by the backend, live an
 
 The model-facing `avenor_inspect` tool returns the same kind of bounded snapshot as JSON. Use it for transcript and tool diagnostics without consuming raw `avenor_events` records. When the parent only needs the sub-agent's conclusion, `avenor_result` waits for the run and returns its complete final output without the snapshot.
 
-The Pi renderer changes only the host's visual presentation. It renders all Avenor tool calls and results as themed, bounded summaries. Tools other than `avenor_spawn` continue to return JSON in `content[0].text` for the agent and preserve structured details. Collapsed, expanded, and defensive partial views are presentation-only. The renderer does not add `onUpdate` callbacks; therefore, non-spawn tools retain their existing behavior.
+Pi returns JSON model content in `content[0].text` and structured `details` for all tools except `avenor_spawn`. The renderer creates themed, bounded summaries for display. It does not modify the underlying model content or the `details` object.
 
 ## OpenCode
 
 The OpenCode plugin uses the shared observer for live tool metadata, waiting/permission transitions, and final output. It also exposes `avenor_inspect`. OpenCode does not currently reproduce Pi's full-screen overlay; presentation remains host-specific.
 
-For `avenor_status`, `avenor_result`, `avenor_answer_permission`, `avenor_follow_up`, `avenor_events`, `avenor_inspect`, and `avenor_shutdown`, OpenCode emits concise bounded prose plus structured metadata. D008 accepts OpenCode's change from raw JSON to prose in `output`. The model sees only that prose. OpenCode stores metadata in host/session tool state. It does not include metadata in `output` or a second model channel. `avenor_spawn` keeps its existing presentation. OpenCode input rendering and MCP-client human rendering are host responsibilities.
+OpenCode returns concise, bounded prose in its shared `output` for `avenor_status`, `avenor_result`, `avenor_answer_permission`, `avenor_follow_up`, `avenor_events`, `avenor_inspect`, and `avenor_shutdown`. Structured metadata stays in host/session state. MCP clients render their own results.
 
 ## Fidelity boundaries
 

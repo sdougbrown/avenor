@@ -47,3 +47,25 @@ The correction commit is authored and committed as `avenor horse <019fc055-8912-
 ### Delivery
 
 This follow-up is committed as `avenor horse <019fc061-e369-7125-9fba-007a26e1d0f1>`. No push, PR, or merge was performed.
+
+## Documentation follow-up
+
+- Branch: `issue/132-pretty-tool-calls`
+- Session: `019fc0bb-43d0-7900-8ce8-aecea2efe79b`
+- Agent: `horse`
+- Model: `gpt-5.6-terra` (`openai-codex`)
+- Restored the three documentation files to `4fd4e01` before applying the narrow correction.
+- Pi docs now state that non-spawn tools return JSON model content and `details`, while rendering changes only Pi's display.
+- OpenCode docs now state that seven non-spawn tools return bounded prose in shared `output`, metadata stays in host/session state, and MCP clients render results.
+- Preserved the Pi renderer/channel documentation and the OpenCode `avenor_inspect` reference.
+
+### Verification
+
+- `writetighter lint` and `writetighter revise` completed for the PR-added documentation prose.
+- `bun run --cwd docs build` — passed.
+- `env -u PI_AGENT_PROFILE bun run --cwd packages/pi test` — passed (67 tests).
+- `env -u PI_AGENT_PROFILE bun run --cwd packages/opencode test` — passed (20 tests).
+
+### Delivery
+
+This follow-up is committed locally as `avenor horse <019fc0bb-43d0-7900-8ce8-aecea2efe79b>`. The branch remains unpushed and unmerged.

@@ -42,9 +42,9 @@ When a run is dispatched with `avenor_spawn`, the plugin:
 1. **Blocks by default** — the tool call stays open, updating its title and metadata as the sub-agent runs, exactly like OpenCode's own sub-agent tool calls. The tool returns when the run reaches a terminal state.
 2. **Re-prompts on completion** — when a `wait=false` (fire-and-forget) run finishes, the plugin automatically injects a completion message into the orchestrating session so the LLM picks up without manual polling.
 3. **Routes permissions** — when a sub-agent running under the `opencode-http` backend requests a permission, the plugin injects a re-prompt into the orchestrating session. The LLM can call `avenor_answer_permission` to respond; the normal permission dialog is also shown as a fallback.
-4. **Formats results** — `avenor_status`, `avenor_result`, `avenor_answer_permission`, `avenor_follow_up`, `avenor_events`, `avenor_inspect`, and `avenor_shutdown` return concise, bounded prose with structured metadata. D008 accepts OpenCode's change from raw JSON to prose in `output`. The model sees only that prose. OpenCode stores metadata in host/session tool state. It does not include metadata in `output` or a second model channel. `avenor_spawn` keeps its existing presentation.
+4. **Formats results** — OpenCode returns concise, bounded prose in its shared `output` for `avenor_status`, `avenor_result`, `avenor_answer_permission`, `avenor_follow_up`, `avenor_events`, `avenor_inspect`, and `avenor_shutdown`. Structured metadata stays in host/session state.
 
-OpenCode controls tool-call input presentation. The plugin does not change MCP result text because MCP clients control their own human rendering.
+MCP clients render their own results.
 
 ## Tools
 
@@ -94,7 +94,7 @@ A blocked run returns its pending permission instead of waiting forever. If this
 
 ### `avenor_inspect`
 
-Review a bounded snapshot with transcript, completed and live tools, permissions, and final output. Use `avenor_events` when raw event records are required.
+Use `avenor_inspect` to review a bounded snapshot. The snapshot includes transcript, completed and live tools, permissions, and final output. Use `avenor_events` when raw event records are required.
 
 | Argument | Required | Description |
 |---|---|---|

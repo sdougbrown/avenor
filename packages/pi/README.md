@@ -129,7 +129,7 @@ Beyond the tools, the extension integrates with Pi's TUI and event system:
 - **Footer status** — active runs shown in the Pi footer bar
 - **Live progress** — blocking `avenor_spawn` calls stream progress updates via `onUpdate`
 - **Context enrichment** — active sub-agents are automatically surfaced in the system prompt via `before_agent_start`
-- **Custom rendering** — all Avenor tool calls and results use themed, bounded host-only summaries. Results have collapsed and expanded views. When Pi passes `isPartial`, the renderer reads available status or plain-text content. This renderer never calls `onUpdate`.
+- **Custom rendering** — The Pi extension renders all Avenor tool calls and results as themed, bounded summaries. Results have collapsed and expanded views.
 - **Commands** — interactive commands for run management:
   - `/avenor-status` — show status of all runs
   - `/avenor-watch <run_id>` — open a live event feed overlay
@@ -137,16 +137,15 @@ Beyond the tools, the extension integrates with Pi's TUI and event system:
 
 ### Tool-result channels
 
-Pi keeps the agent and terminal channels separate. Every Avenor tool call and
-result has a host-only themed summary. Tools other than `avenor_spawn` continue
-to return JSON in `content[0].text` for the agent and preserve structured
-`details`. The renderer reads those details without changing either channel.
-Long output, events, and snapshot rows are sanitized and bounded; use
-`avenor_result`, `avenor_inspect`, or `avenor_events` for the corresponding
-hand-off.
+Pi returns JSON model content in `content[0].text` and structured `details` for
+all tools except `avenor_spawn`. The renderer creates themed, bounded summaries for display. It does not modify
+the underlying model content or the `details` object.
 
-MCP clients choose their own human presentation. This extension does not change
-Go or TypeScript MCP result text or add an OpenCode input renderer.
+Pi's rendered summaries sanitize and bound the output, events, and snapshot rows
+they display. Use `avenor_result`, `avenor_inspect`, or `avenor_events` for the
+corresponding data.
+
+MCP clients render their own results.
 
 ### Agent profiles
 
