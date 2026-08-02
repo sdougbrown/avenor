@@ -67,6 +67,7 @@ describe('Avenor telemetry event bridge', () => {
 
     expect(received).toEqual([payload])
     expect(received[0]?.entries[0]?.runId).toBe('run-1')
+    expect(received[0]?.entries[0]?.phaseLabel).toBe('reading')
     expect(received[0]?.generation).toBe(7)
     unsubscribe()
   })
@@ -95,16 +96,18 @@ describe('Avenor telemetry event bridge', () => {
       status: 'failed',
     }))
 
-    expect(received).toEqual([{
+    expect(received).toHaveLength(1)
+    expect(received[0]).toMatchObject({
       runId: 'run-1',
-      supervisorId: '/tmp/parent.sock',
       runtimeId: 'runtime-1',
       label: 'explore',
       agent: 'horse',
       status: 'done',
       nestedCount: 5,
       backend: 'pi',
-    }])
+    })
+    expect(received[0]?.supervisorKey).toMatch(/^supervisor:[0-9a-f]{16}$/)
+    expect(received[0]).not.toHaveProperty('supervisorId')
   })
 
   it('copies and freezes the bounded poll payload', () => {
@@ -115,35 +118,51 @@ describe('Avenor telemetry event bridge', () => {
       label: 'task-a',
       status: 'running',
       agent: 'horse',
+      phase: 'tool',
       phaseLabel: 'reading',
-      pendingPermission: false,
+      pendingPermission: true,
+      permissionDescription: 'Allow bash',
       pid: 100,
       backend: 'pi',
       nestedCount: 2,
-      // Deliberately present at runtime to verify explicit field selection.
+      // Include transcript/final_output at runtime to verify the explicit allowlist.
       transcript: 'not-public',
       final_output: 'not-public',
     } as any
 
     const payload = createPollCompletedPayload([source], 1, 1)
-    expect(payload.entries).toEqual([{
+    expect(payload.entries).toHaveLength(1)
+    expect(payload.entries[0]).toMatchObject({
       runId: 'run-1',
-      supervisorId: '/tmp/parent.sock',
       runtimeId: 'runtime-1',
       label: 'task-a',
       status: 'running',
       agent: 'horse',
+      phase: 'tool',
       phaseLabel: 'reading',
-      pendingPermission: false,
-      pid: 100,
+      pendingPermission: true,
       backend: 'pi',
       nestedCount: 2,
-    }])
+    })
+    expect(payload.entries[0]?.supervisorKey).toMatch(/^supervisor:[0-9a-f]{16}$/)
+    expect(payload.entries[0]).not.toHaveProperty('supervisorId')
+    expect(payload.entries[0]).not.toHaveProperty('permissionDescription')
+    expect(payload.entries[0]).not.toHaveProperty('pid')
     expect(payload.entries[0]).not.toHaveProperty('transcript')
     expect(payload.entries[0]).not.toHaveProperty('final_output')
     expect(Object.isFrozen(payload)).toBe(true)
     expect(Object.isFrozen(payload.entries)).toBe(true)
     expect(Object.isFrozen(payload.entries[0])).toBe(true)
+  })
+
+  it('handles empty poll payloads', () => {
+    const payload = createPollCompletedPayload([], 1, 2)
+
+    expect(payload.entries).toEqual([])
+    expect(payload.timestamp).toBe(1)
+    expect(payload.generation).toBe(2)
+    expect(Object.isFrozen(payload)).toBe(true)
+    expect(Object.isFrozen(payload.entries)).toBe(true)
   })
 
   it('copies and freezes terminal payloads', () => {
@@ -154,17 +173,40 @@ describe('Avenor telemetry event bridge', () => {
       label: 'task-a',
       agent: 'horse',
       status: 'done',
+      nestedCount: 5,
       backend: 'pi',
     })
 
-    expect(payload).toEqual({
+    expect(payload).toMatchObject({
       runId: 'run-1',
-      supervisorId: '/tmp/parent.sock',
       runtimeId: 'runtime-1',
-      label: 'task-a',      agent: 'horse',
+      label: 'task-a',
+      agent: 'horse',
       status: 'done',
+      nestedCount: 5,
       backend: 'pi',
     })
+    expect(payload.supervisorKey).toMatch(/^supervisor:[0-9a-f]{16}$/)
+    expect(payload).not.toHaveProperty('supervisorId')
+    expect(Object.isFrozen(payload)).toBe(true)
+  })
+
+  it('omits optional terminal fields when they are unavailable', () => {
+    const payload = createRunTerminalPayload({
+      runId: 'run-2',
+      label: 'task-b',
+      agent: 'mule',
+      status: 'failed',
+    })
+
+    expect(payload).toEqual({
+      runId: 'run-2',
+      supervisorKey: 'singleton',
+      label: 'task-b',
+      agent: 'mule',
+      status: 'failed',
+    })
+    expect(payload.supervisorKey).toBe('singleton')
     expect(Object.isFrozen(payload)).toBe(true)
   })
 

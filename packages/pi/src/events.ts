@@ -5,23 +5,29 @@
  * handlers or singleton state, so consumers can use the surface even when
  * package dependencies are resolved from different module instances.
  *
- * Payloads are limited status views. They do not contain transcripts, final
- * output, directories, raw status objects, or tool arguments.
+ * Payloads select status fields and omit transcripts, final output, directories,
+ * socket paths, raw status objects, and tool arguments.
  */
 
+import { createHash } from 'node:crypto'
 import type { EventBus } from '@earendil-works/pi-coding-agent'
 import type { RunStatusEntry } from './types.js'
 
-/** Event channel for a completed official-extension polling cycle. */
+/** Emitted when the official extension completes a polling cycle. */
 export const CHANNEL_POLL_COMPLETED = 'avenor:poll:completed' as const
 
-/** Event channel for a terminal run result observed by the extension. */
+/** Emitted when the extension observes a terminal run result. */
 export const CHANNEL_RUN_TERMINAL = 'avenor:run:terminal' as const
 
-export type AvenorRunStatus = Readonly<RunStatusEntry>
+export type AvenorRunStatus = Readonly<Omit<
+  RunStatusEntry,
+  'supervisorId' | 'pid' | 'permissionDescription'
+> & {
+  supervisorKey: string
+}>
 
 export interface PollCompletedPayload {
-  /** Direct run statuses known to the official extension. */
+  /** Status for each direct run tracked by the official extension. */
   readonly entries: readonly AvenorRunStatus[]
   /** Wall-clock timestamp in epoch milliseconds. */
   readonly timestamp: number
@@ -31,14 +37,25 @@ export interface PollCompletedPayload {
 
 export interface RunTerminalPayload {
   readonly runId: string
-  /** Supervisor socket that scopes the run/runtime identity, when explicit. */
-  readonly supervisorId?: string
-  /** Runtime identity, scoped by supervisorId (or the singleton supervisor). */
+  /** Stable opaque scope for the explicit or singleton supervisor. */
+  readonly supervisorKey: string
   readonly runtimeId?: string
   readonly label: string
   readonly agent: string
   readonly status: string
-  /** Active descendant count at removal time, when it was available. */
+  /** Number of active descendants when the run was removed, if available. */
+  readonly nestedCount?: number
+  readonly backend?: string
+}
+
+export interface RunTerminalPayloadInput {
+  readonly runId: string
+  /** Local supervisor socket, converted to an opaque supervisorKey. */
+  readonly supervisorId?: string
+  readonly runtimeId?: string
+  readonly label: string
+  readonly agent: string
+  readonly status: string
   readonly nestedCount?: number
   readonly backend?: string
 }
@@ -51,7 +68,13 @@ export interface AvenorEventMap {
 export type AvenorEventChannel = keyof AvenorEventMap
 export type AvenorEventBus = Pick<EventBus, 'emit' | 'on'>
 
-/** Emit a typed Avenor event through Pi's shared event bus. */
+/** Derive a stable non-connectable scope from a local supervisor socket. */
+function createSupervisorKey(supervisorId?: string): string {
+  if (!supervisorId) return 'singleton'
+  return `supervisor:${createHash('sha256').update(supervisorId).digest('hex').slice(0, 16)}`
+}
+
+/** Emit an Avenor event with a type-checked payload. */
 export function emitAvenorEvent<K extends AvenorEventChannel>(
   bus: Pick<EventBus, 'emit'>,
   event: K,
@@ -60,19 +83,20 @@ export function emitAvenorEvent<K extends AvenorEventChannel>(
   bus.emit(event, data)
 }
 
-/** Subscribe to a typed Avenor event and receive Pi's unsubscribe function. */
+/** Subscribe to an Avenor event and return Pi's unsubscribe function. */
 export function onAvenorEvent<K extends AvenorEventChannel>(
   bus: Pick<EventBus, 'on'>,
   event: K,
   handler: (data: AvenorEventMap[K]) => void,
 ): () => void {
+  // Pi's bus accepts unknown payloads, so this cast preserves the generic handler type.
   return bus.on(event, handler as (data: unknown) => void)
 }
 
 /**
- * Copy and freeze the bounded fields intended for companion consumers.
- * `RunStatusEntry` currently contains only display-safe status metadata, but
- * selecting fields explicitly keeps future private fields out of the event.
+ * Copy and freeze the selected fields exposed to companion consumers.
+ * Keep this allowlist explicit so future private RunStatusEntry fields are not
+ * included in the event accidentally.
  */
 export function createPollCompletedPayload(
   entries: readonly RunStatusEntry[],
@@ -81,7 +105,7 @@ export function createPollCompletedPayload(
 ): PollCompletedPayload {
   const publicEntries: readonly AvenorRunStatus[] = entries.map(entry => Object.freeze({
     runId: entry.runId,
-    ...(entry.supervisorId !== undefined && { supervisorId: entry.supervisorId }),
+    supervisorKey: createSupervisorKey(entry.supervisorId),
     ...(entry.runtimeId !== undefined && { runtimeId: entry.runtimeId }),
     label: entry.label,
     status: entry.status,
@@ -89,8 +113,6 @@ export function createPollCompletedPayload(
     ...(entry.phaseLabel !== undefined && { phaseLabel: entry.phaseLabel }),
     agent: entry.agent,
     ...(entry.pendingPermission !== undefined && { pendingPermission: entry.pendingPermission }),
-    ...(entry.permissionDescription !== undefined && { permissionDescription: entry.permissionDescription }),
-    ...(entry.pid !== undefined && { pid: entry.pid }),
     ...(entry.backend !== undefined && { backend: entry.backend }),
     ...(entry.nestedCount !== undefined && { nestedCount: entry.nestedCount }),
   }))
@@ -102,13 +124,13 @@ export function createPollCompletedPayload(
   })
 }
 
-/** Copy and freeze a terminal transition before publishing it. */
+/** Copy and freeze a terminal payload before publishing it. */
 export function createRunTerminalPayload(
-  payload: RunTerminalPayload,
+  payload: RunTerminalPayloadInput,
 ): RunTerminalPayload {
   return Object.freeze({
     runId: payload.runId,
-    ...(payload.supervisorId !== undefined && { supervisorId: payload.supervisorId }),
+    supervisorKey: createSupervisorKey(payload.supervisorId),
     ...(payload.runtimeId !== undefined && { runtimeId: payload.runtimeId }),
     label: payload.label,
     agent: payload.agent,

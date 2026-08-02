@@ -4,6 +4,7 @@ import { RunReducer } from '@dougbots/avenor-core'
 import extensionFactory, {
   buildCompletionText,
   buildInspectPayload,
+  CHANNEL_RUN_TERMINAL,
   compactWhitespace,
   createExtension,
   isTerminalStatus,
@@ -174,7 +175,12 @@ describe('Avenor Pi extension', () => {
       events: mockBus,
     }
 
-    const statusToolMock = mock(async () => ({ run_id: 'run-1', label: 'demo', status: 'running', runtime_id: 'rt-1' }))
+    const statusToolMock = mock(async (args: { runId?: string } = {}) => {
+      if (args.runId === 'run-wait') {
+        return { run_id: 'run-wait', label: 'waited', status: 'done', runtime_id: 'rt-wait', backend: 'pi', agent: 'explore' }
+      }
+      return { run_id: 'run-1', label: 'demo', status: 'running', runtime_id: 'rt-1' }
+    })
     const resultToolMock = mock(async () => ({ run_id: 'run-1', label: 'demo', status: 'done', ready: true, output: 'hello world' }))
     const singletonInterruptAndPrompt = mock(async () => {})
     const singletonCancel = mock(async () => {})
@@ -183,11 +189,13 @@ describe('Avenor Pi extension', () => {
     const singletonClient = { close() {}, cancel: singletonCancel, interruptAndPrompt: singletonInterruptAndPrompt, events() { throw new Error('unused') } }
     const externalClient = { close: externalClose, cancel: async () => {}, interruptAndPrompt: externalInterruptAndPrompt, events() { throw new Error('unused') } }
 
-    const spawnToolMock = mock(async (args: { supervisorId?: string }) => ({
-      run_id: args.supervisorId === '/tmp/external.sock' ? 'run-external' : 'run-1',
-      label: 'demo',
+    const spawnToolMock = mock(async (args: { supervisorId?: string; label?: string }) => ({
+      run_id: args.label === 'waited'
+        ? 'run-wait'
+        : args.supervisorId === '/tmp/external.sock' ? 'run-external' : 'run-1',
+      label: args.label ?? 'demo',
       supervisor_id: args.supervisorId ?? '/tmp/sock',
-      runtime_id: 'rt-1',
+      runtime_id: args.label === 'waited' ? 'rt-wait' : 'rt-1',
     }))
 
     await createExtension({
@@ -314,6 +322,29 @@ describe('Avenor Pi extension', () => {
     expect(externalInterruptAndPrompt).toHaveBeenCalledWith('rt-1', 'continue')
     expect(externalClose).toHaveBeenCalledTimes(1)
 
+    await registeredTools.avenor_spawn.execute(
+      'tool-wait',
+      { agent: 'explore', label: 'waited', supervisor_id: '/tmp/sock', wait: true },
+      undefined,
+      undefined,
+      { cwd: '/tmp' },
+    )
+    expect(mockBus.emit).toHaveBeenCalledWith(
+      CHANNEL_RUN_TERMINAL,
+      expect.objectContaining({
+        runId: 'run-wait',
+        runtimeId: 'rt-wait',
+        supervisorKey: expect.stringMatching(/^supervisor:[0-9a-f]{16}$/),
+        status: 'done',
+        backend: 'pi',
+      }),
+    )
+    const waitedTerminalPayload = mockBus.emit.mock.calls
+      .filter(([channel]) => channel === CHANNEL_RUN_TERMINAL)
+      .map(([, payload]) => payload as Record<string, unknown>)
+      .find(payload => payload.runId === 'run-wait')
+    expect(waitedTerminalPayload).not.toHaveProperty('supervisorId')
+
     const result = await registeredTools.avenor_result.execute('tool-result', { run_id: 'run-1', timeout: '5m' })
     expect(result.content[0].text).toContain('"output": "hello world"')
     expect(resultToolMock).toHaveBeenCalledWith({
@@ -323,6 +354,20 @@ describe('Avenor Pi extension', () => {
       timeout: '5m',
       signal: undefined,
     })
+    expect(mockBus.emit).toHaveBeenCalledWith(
+      CHANNEL_RUN_TERMINAL,
+      expect.objectContaining({
+        runId: 'run-1',
+        runtimeId: 'rt-1',
+        supervisorKey: expect.stringMatching(/^supervisor:[0-9a-f]{16}$/),
+        status: 'done',
+      }),
+    )
+    const resultTerminalPayload = mockBus.emit.mock.calls
+      .filter(([channel]) => channel === CHANNEL_RUN_TERMINAL)
+      .map(([, payload]) => payload as Record<string, unknown>)
+      .find(payload => payload.runId === 'run-1')
+    expect(resultTerminalPayload).not.toHaveProperty('supervisorId')
 
     for (const handler of eventHandlers.get('session_shutdown') ?? []) await handler()
 

@@ -367,6 +367,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
         }
       }
 
+      // Singleton runs discovered outside this extension remain poll-visible;
+      // terminal events only apply to runs in trackedRuns.
       for (const live of liveMap.values()) {
         entries.push({
           runId: live.run_id,
@@ -446,9 +448,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
 
         updateWidget(entries)
 
-        // Emit telemetry event for companion extensions. The payload is
-        // copied and frozen by createPollCompletedPayload so subscribers
-        // cannot mutate the official extension's local entries.
+        // Publish a copied, frozen payload so subscribers cannot mutate status entries.
         emitAvenorEvent(
           pi.events,
           CHANNEL_POLL_COMPLETED,
@@ -1301,9 +1301,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
   }
 }
 
-// Re-export the typed event channels, adapters, and payload types for
-// companion extensions. The adapters wrap Pi's shared event bus; they do not
-// own a second module-level bus.
+// Re-export event channels, adapters, and payload types for companion extensions.
+// These adapters use Pi's shared bus and do not create a second bus.
 export {
   CHANNEL_POLL_COMPLETED,
   CHANNEL_RUN_TERMINAL,
@@ -1319,6 +1318,7 @@ export type {
   AvenorRunStatus,
   PollCompletedPayload,
   RunTerminalPayload,
+  RunTerminalPayloadInput,
 } from './events.js'
 
 export default createExtension()
