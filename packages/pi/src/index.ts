@@ -376,7 +376,6 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
         for (const result of liveList) {
           liveMap.set(result.run_id, result)
         }
-        clearPollingFailure('singleton-list')
       } catch (err) {
         recordPollingError('singleton-list', 'failed to list singleton runs', err)
       }
@@ -386,7 +385,6 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
         const live = findLiveStatusForTrackedRun(run, liveMap.values())
         if (live) {
           liveMap.delete(live.run_id)
-          clearPollingFailure(`run-status:${run.supervisorId ?? 'singleton'}:${run.runId}`)
           run.lastStatus = live
           run.agent = live.agent ?? run.agent
           entries.push({
@@ -412,7 +410,6 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
           })
           const result = Array.isArray(raw) ? raw[0] : raw
           if (!result) throw new Error('status response was empty')
-          clearPollingFailure(`run-status:${run.supervisorId ?? 'singleton'}:${run.runId}`)
           run.lastStatus = result
           run.agent = result.agent ?? run.agent
           entries.push({
@@ -600,7 +597,6 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
                 backend: entry.backend,
               }),
             )
-            clearRunPollingFailures(run)
             trackedRuns.delete(entry.runId)
           } else if (
             entry.pendingPermission &&
@@ -852,7 +848,6 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
           const text = status.pending_permission
             ? `[blocked] ${run.label ?? run.runId} — permission: ${status.pending_permission.description}`
             : `${run.label ?? run.runId}${status.phase_label ? ` (${status.phase_label})` : ''}`
-          clearPollingFailure(`spawn-status:${run.supervisorId ?? 'singleton'}:${run.runId}`)
           onUpdate?.({
             content: [{ type: 'text', text }],
             details: { status: status.status, run_id: run.runId },
@@ -1031,7 +1026,6 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
 
         const waitResult = await waitForRun(runRef, signal, onUpdate)
         if (waitResult.aborted) {
-          clearRunPollingFailures(runRef)
           trackedRuns.delete(result.run_id)
           return {
             content: [{ type: 'text', text: `Monitoring of "${label}" (run_id: ${result.run_id}) was interrupted. Use avenor_status or avenor_inspect to check.` }],
@@ -1086,7 +1080,6 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
               backend: status.backend,
             }),
           )
-          clearRunPollingFailures(runRef)
           trackedRuns.delete(result.run_id)
           return {
             content: [{ type: 'text', text: buildCompletionText({ runId: result.run_id, label }, status, finalOutput) }],
@@ -1206,10 +1199,6 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
                 status: result.status ?? 'done',
               }),
             )
-            clearRunPollingFailures({
-              runId: params.run_id,
-              supervisorId: tracked?.supervisorId ?? params.supervisor_id,
-            })
             trackedRuns.delete(params.run_id)
           } else if (tracked && result.status === 'waiting') {
             tracked.permissionNotified = true
