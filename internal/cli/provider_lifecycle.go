@@ -154,9 +154,23 @@ func (t *ProviderTurn) RequestCancel(sessionID string, timeout time.Duration) <-
 		go func() {
 			cancelCtx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
-			call.err = l.provider.Cancel(cancelCtx, sessionID)
+			err := l.provider.Cancel(cancelCtx, sessionID)
+
+			l.mu.Lock()
+			call.err = err
 			close(call.done)
-			l.finishCall()
+			if l.activeCancels[sessionID] == call {
+				delete(l.activeCancels, sessionID)
+			}
+			l.liveCalls--
+			closeNow := l.closing && l.liveCalls == 0 && !l.closeStarted
+			if closeNow {
+				l.closeStarted = true
+			}
+			l.mu.Unlock()
+			if closeNow {
+				go l.closeProvider()
+			}
 		}()
 	})
 	return t.cancelCall.done

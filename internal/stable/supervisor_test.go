@@ -472,6 +472,56 @@ func TestRunChildAttemptUsesInitialSpawnSession(t *testing.T) {
 	}
 }
 
+func TestStableChildCancelsProviderOnNonCleanSessionWait(t *testing.T) {
+	baseProvider := &stableScriptedProvider{
+		attempt: 0,
+		scripts: []stableScriptedAttempt{{sessionID: "ses_stable_non_clean"}},
+	}
+	provider := &stableNonCleanCancelProvider{
+		stableScriptedProvider: baseProvider,
+		cancelled:              make(chan string, 2),
+	}
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-stable-non-clean-cancel.sock", MaxRuntimes: 1})
+	defer func() { _ = sup.broker.Stop() }()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	child := &childRuntime{
+		id:           "rt_stable_non_clean",
+		provider:     provider,
+		session:      runtime.Session{SessionID: "ses_stable_non_clean"},
+		eventWriter:  stableTestSink{},
+		lifecycleCtx: ctx,
+		cancelFn:     cancel,
+		done:         make(chan struct{}),
+		promptCh:     make(chan struct{}, 1),
+	}
+	sup.runtimes[child.id] = child
+
+	go sup.runChild(ctx, child, "close without session.end", 0, 0)
+	waitForStableDone(t, child)
+
+	select {
+	case sessionID := <-provider.cancelled:
+		if sessionID != "ses_stable_non_clean" {
+			t.Fatalf("Cancel session = %q, want ses_stable_non_clean", sessionID)
+		}
+	default:
+		t.Fatal("stable child did not cancel its provider after a non-clean WaitForSession return")
+	}
+	provider.mu.Lock()
+	cancelCalls := provider.cancelCalls
+	provider.mu.Unlock()
+	if cancelCalls != 1 {
+		t.Fatalf("stable child Cancel calls = %d, want 1", cancelCalls)
+	}
+	child.mu.Lock()
+	exitCode := child.exitCode
+	child.mu.Unlock()
+	if exitCode != 1 {
+		t.Fatalf("stable child exit code = %d, want 1", exitCode)
+	}
+}
+
 func TestRunChildAttemptClearsPhaseAfterSessionEnd(t *testing.T) {
 	provider := &stableScriptedProvider{
 		attempt: 0,
@@ -1945,6 +1995,21 @@ type stableScriptedAttempt struct {
 	sessionID string
 	startErr  error
 	events    []stableScriptedEvent
+}
+
+type stableNonCleanCancelProvider struct {
+	*stableScriptedProvider
+	cancelled   chan string
+	mu          sync.Mutex
+	cancelCalls int
+}
+
+func (p *stableNonCleanCancelProvider) Cancel(_ context.Context, sessionID string) error {
+	p.mu.Lock()
+	p.cancelCalls++
+	p.mu.Unlock()
+	p.cancelled <- sessionID
+	return nil
 }
 
 type stableScriptedProvider struct {

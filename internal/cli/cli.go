@@ -1035,6 +1035,7 @@ type SessionWaitDeps struct {
 func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionWaitConfig, deps SessionWaitDeps) sessionResult {
 	var finalStopReason string
 	var bufferedUsage map[string]any
+	sessionEnded := false
 	promptReturned := false
 	var permissionDone <-chan permissionResult
 	permissionCtx, cancelPermission := context.WithCancel(ctx)
@@ -1055,7 +1056,6 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 	}
 	permissionProvider := permissionTurnProvider{Provider: provider, turn: providerTurn}
 
-	// Every return path attempts to join an in-flight permission resolver.
 	// Context cancellation stops cooperative resolvers; the bound prevents a
 	// third-party provider that ignores context from deadlocking teardown.
 	synchronizePermission := func() {
@@ -1071,16 +1071,36 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 		}
 		permissionDone = nil
 	}
-	defer synchronizePermission()
+
+	// Default to stopping the provider. The only return that can skip Cancel is
+	// a fully observed provider completion: session.end was authoritative,
+	// Prompt returned successfully, and no permission resolver remains live.
+	cleanReturn := false
+	var stopOnce sync.Once
+	stopProvider := func() {
+		stopOnce.Do(func() {
+			// Cancel before joining: some providers ignore the permission-answer
+			// context and only unblock AnswerPermission when Cancel is called.
+			cancelPermission()
+			cancelProvider(providerTurn, deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, deps.Stderr, permissionJoinTimeout)
+			synchronizePermission()
+		})
+	}
+	defer func() {
+		cancelPermission()
+		if !cleanReturn {
+			stopProvider()
+		}
+	}()
+	complete := func() sessionResult {
+		cleanReturn = sessionEnded && promptReturned && permissionDone == nil
+		return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), LoopDirective: loopDirective, LoopLabel: loopLabel, Output: output.String(), FinalReply: finalReply.String(), Usage: bufferedUsage}
+	}
 	terminate := func(stopReason string) sessionResult {
 		// The termination branch owns the outcome. In particular, the expected
 		// context.Canceled result from the resolver must not replace "cancelled"
-		// with a generic permission-handler failure. Issue provider cancellation
-		// before joining: some providers ignore the answer context and only
-		// unblock AnswerPermission when Cancel is called.
-		cancelPermission()
-		cancelProvider(providerTurn, deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, deps.Stderr, permissionJoinTimeout)
-		synchronizePermission()
+		// with a generic permission-handler failure.
+		stopProvider()
 		return endSession(deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, stopReason, deps.Stderr, bufferedUsage, fullReply.String(), finalReply.String())
 	}
 
@@ -1154,7 +1174,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 		// If session.end + promptDone already arrived while we were waiting for
 		// AnswerPermission, exit now that the permission goroutine has resolved.
 		if finalStopReason != "" && promptReturned {
-			return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), LoopDirective: loopDirective, LoopLabel: loopLabel, Output: output.String(), FinalReply: finalReply.String(), Usage: bufferedUsage}, true
+			return complete(), true
 		}
 		if eventChClosed && finalStopReason == "" {
 			return sessionResult{ExitCode: 1}, true
@@ -1177,7 +1197,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				if finalStopReason == "" {
 					return sessionResult{ExitCode: 1}
 				}
-				return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), LoopDirective: loopDirective, LoopLabel: loopLabel, Output: output.String(), FinalReply: finalReply.String(), Usage: bufferedUsage}
+				return complete()
 			}
 			if event.Event == "session.start" {
 				externalID, _ := event.Fields["conversation_id"].(string)
@@ -1320,6 +1340,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				continue
 			}
 			if event.Event == "session.end" {
+				sessionEnded = true
 				finalStopReason, _ = event.Fields["stop_reason"].(string)
 				if event.Fields == nil {
 					event.Fields = map[string]any{}
@@ -1333,7 +1354,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				return sessionResult{ExitCode: 1}
 			}
 			if event.Event == "session.end" && promptReturned && permissionDone == nil {
-				return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), LoopDirective: loopDirective, LoopLabel: loopLabel, Output: output.String(), FinalReply: finalReply.String(), Usage: bufferedUsage}
+				return complete()
 			}
 		case err := <-cfg.PromptDone:
 			promptReturned = true
@@ -1345,7 +1366,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				return sessionResult{ExitCode: 1}
 			}
 			if finalStopReason != "" && permissionDone == nil {
-				return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), LoopDirective: loopDirective, LoopLabel: loopLabel, Output: output.String(), FinalReply: finalReply.String(), Usage: bufferedUsage}
+				return complete()
 			}
 		case res := <-permissionDone:
 			permissionDone = nil

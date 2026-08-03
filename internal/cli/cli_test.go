@@ -1757,6 +1757,103 @@ func (p *multiSessionCancelProvider) sessions() []string {
 	return append([]string(nil), p.sessionIDs...)
 }
 
+type reusableLifecycleCancelProvider struct {
+	cliFakeProvider
+	started chan int
+	gates   []chan struct{}
+	mu      sync.Mutex
+	calls   int
+}
+
+func newReusableLifecycleCancelProvider(callCount int) *reusableLifecycleCancelProvider {
+	gates := make([]chan struct{}, callCount)
+	for i := range gates {
+		gates[i] = make(chan struct{})
+	}
+	return &reusableLifecycleCancelProvider{
+		started: make(chan int, callCount),
+		gates:   gates,
+	}
+}
+
+func (p *reusableLifecycleCancelProvider) Cancel(ctx context.Context, _ string) error {
+	p.mu.Lock()
+	p.calls++
+	call := p.calls
+	gate := p.gates[call-1]
+	p.mu.Unlock()
+	p.started <- call
+	select {
+	case <-gate:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (p *reusableLifecycleCancelProvider) release(call int) {
+	select {
+	case <-p.gates[call-1]:
+	default:
+		close(p.gates[call-1])
+	}
+}
+
+func (p *reusableLifecycleCancelProvider) releaseAll() {
+	for call := range p.gates {
+		p.release(call + 1)
+	}
+}
+
+type waitExitMatrixProvider struct {
+	cliFakeProvider
+	mu       sync.Mutex
+	cancels  int
+	sessions []string
+}
+
+func (p *waitExitMatrixProvider) Cancel(_ context.Context, sessionID string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.cancels++
+	p.sessions = append(p.sessions, sessionID)
+	return nil
+}
+
+func (p *waitExitMatrixProvider) cancelSnapshot() (int, []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.cancels, append([]string(nil), p.sessions...)
+}
+
+type waitExitMatrixSink struct {
+	mu     sync.Mutex
+	events []events.Event
+}
+
+func (s *waitExitMatrixSink) Write(event events.Event) error {
+	s.mu.Lock()
+	s.events = append(s.events, event)
+	s.mu.Unlock()
+	return nil
+}
+
+func (*waitExitMatrixSink) Close() error { return nil }
+
+func (s *waitExitMatrixSink) counts() (sessionEnds, errors int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, event := range s.events {
+		switch event.Event {
+		case "session.end":
+			sessionEnds++
+		case "avenor.error":
+			errors++
+		}
+	}
+	return sessionEnds, errors
+}
+
 type sequentialPermissionProvider struct {
 	cliFakeProvider
 	mu             sync.Mutex
@@ -1794,6 +1891,122 @@ func (f *sequentialPermissionProvider) answers() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.answerIDs...)
+}
+
+func TestWaitForSessionExitMatrixStopsEveryNonCleanReturn(t *testing.T) {
+	tests := []struct {
+		name            string
+		setup           func(*SessionWaitConfig)
+		wantExitCode    int
+		wantStopReason  string
+		wantCancels     int
+		wantSessionEnds int
+		wantErrors      int
+	}{
+		{
+			name: "clean authoritative completion",
+			setup: func(cfg *SessionWaitConfig) {
+				eventCh := make(chan events.Event, 1)
+				eventCh <- events.Event{Event: "session.end", SessionID: cfg.SessionID, Fields: map[string]any{"stop_reason": "end_turn"}}
+				promptDone := make(chan error, 1)
+				promptDone <- nil
+				cfg.EventCh = eventCh
+				cfg.PromptDone = promptDone
+			},
+			wantExitCode:    0,
+			wantCancels:     0,
+			wantSessionEnds: 1,
+		},
+		{
+			name: "authoritative end without prompt return",
+			setup: func(cfg *SessionWaitConfig) {
+				eventCh := make(chan events.Event, 1)
+				eventCh <- events.Event{Event: "session.end", SessionID: cfg.SessionID, Fields: map[string]any{"stop_reason": "end_turn"}}
+				close(eventCh)
+				cfg.EventCh = eventCh
+			},
+			wantExitCode:    0,
+			wantCancels:     1,
+			wantSessionEnds: 1,
+		},
+		{
+			name: "event stream closes without end",
+			setup: func(cfg *SessionWaitConfig) {
+				eventCh := make(chan events.Event)
+				close(eventCh)
+				cfg.EventCh = eventCh
+			},
+			wantExitCode: 1,
+			wantCancels:  1,
+		},
+		{
+			name: "prompt failure",
+			setup: func(cfg *SessionWaitConfig) {
+				promptDone := make(chan error, 1)
+				promptDone <- errors.New("prompt failed")
+				cfg.PromptDone = promptDone
+			},
+			wantExitCode: 1,
+			wantCancels:  1,
+			wantErrors:   1,
+		},
+		{
+			name: "authoritative identity conflict",
+			setup: func(cfg *SessionWaitConfig) {
+				eventCh := make(chan events.Event, 1)
+				eventCh <- events.Event{Event: "session.start", SessionID: cfg.SessionID, Fields: map[string]any{"conversation_id": "occupied"}}
+				cfg.EventCh = eventCh
+				cfg.AcceptSessionID = func(string) bool { return false }
+			},
+			wantExitCode:   1,
+			wantStopReason: runtime.SessionIDConflictStopReason,
+			wantCancels:    1,
+			wantErrors:     1,
+		},
+		{
+			name: "synthetic timeout",
+			setup: func(cfg *SessionWaitConfig) {
+				timeout := make(chan time.Time, 1)
+				timeout <- time.Now()
+				cfg.Timeout = timeout
+			},
+			wantExitCode:    124,
+			wantStopReason:  "timeout",
+			wantCancels:     1,
+			wantSessionEnds: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			provider := &waitExitMatrixProvider{}
+			sink := &waitExitMatrixSink{}
+			cfg := SessionWaitConfig{SessionID: "ses_exit_matrix", RunID: "run_exit_matrix"}
+			tt.setup(&cfg)
+
+			result := WaitForSession(context.Background(), provider, cfg, SessionWaitDeps{
+				Writer:                sink,
+				Stderr:                io.Discard,
+				permissionJoinTimeout: 20 * time.Millisecond,
+			})
+			if result.ExitCode != tt.wantExitCode || result.StopReason != tt.wantStopReason {
+				t.Fatalf("result = {exit:%d stop:%q}, want {%d %q}", result.ExitCode, result.StopReason, tt.wantExitCode, tt.wantStopReason)
+			}
+			cancelCount, sessions := provider.cancelSnapshot()
+			if cancelCount != tt.wantCancels {
+				t.Fatalf("provider Cancel calls = %d (%v), want %d", cancelCount, sessions, tt.wantCancels)
+			}
+			for _, sessionID := range sessions {
+				if sessionID != cfg.SessionID {
+					t.Fatalf("provider Cancel session = %q, want %q", sessionID, cfg.SessionID)
+				}
+			}
+			sessionEnds, errorEvents := sink.counts()
+			if sessionEnds != tt.wantSessionEnds || errorEvents != tt.wantErrors {
+				t.Fatalf("audit counts = {session.end:%d errors:%d}, want {%d %d}", sessionEnds, errorEvents, tt.wantSessionEnds, tt.wantErrors)
+			}
+		})
+	}
 }
 
 func TestWaitForSessionTerminationCancelsBeforeJoiningPermissionAnswer(t *testing.T) {
@@ -2142,6 +2355,76 @@ func TestProviderLifecycleDoesNotShareCancelAcrossSessions(t *testing.T) {
 	}
 	if got := provider.sessions(); len(got) != 2 {
 		t.Fatalf("provider Cancel calls = %v, want two distinct calls", got)
+	}
+}
+
+func TestProviderLifecycleCleansCompletedCancelAndAllowsSessionReuse(t *testing.T) {
+	provider := newReusableLifecycleCancelProvider(2)
+	t.Cleanup(provider.releaseAll)
+	lifecycle := NewProviderLifecycle(provider)
+
+	firstTurn := lifecycle.NewTurn()
+	firstDone := firstTurn.RequestCancel("ses_reused_cancel", time.Second)
+	select {
+	case call := <-provider.started:
+		if call != 1 {
+			t.Fatalf("first started call = %d, want 1", call)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first Cancel did not start")
+	}
+	sharedTurn := lifecycle.NewTurn()
+	sharedDone := sharedTurn.RequestCancel("ses_reused_cancel", time.Second)
+	if sharedDone != firstDone || sharedTurn.cancelCall != firstTurn.cancelCall {
+		t.Fatal("live same-session Cancel did not share the exact call")
+	}
+	lifecycle.mu.Lock()
+	activeBefore := len(lifecycle.activeCancels)
+	mappedBefore := lifecycle.activeCancels["ses_reused_cancel"]
+	lifecycle.mu.Unlock()
+	if activeBefore != 1 || mappedBefore != firstTurn.cancelCall {
+		t.Fatalf("active cancel before completion = {%d %p}, want {1 %p}", activeBefore, mappedBefore, firstTurn.cancelCall)
+	}
+
+	provider.release(1)
+	for name, done := range map[string]<-chan struct{}{"first": firstDone, "shared": sharedDone} {
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatalf("%s Cancel did not finish", name)
+		}
+	}
+	lifecycle.mu.Lock()
+	activeAfterFirst := len(lifecycle.activeCancels)
+	lifecycle.mu.Unlock()
+	if activeAfterFirst != 0 {
+		t.Fatalf("active cancels after first completion = %d, want 0", activeAfterFirst)
+	}
+
+	laterTurn := lifecycle.NewTurn()
+	laterDone := laterTurn.RequestCancel("ses_reused_cancel", time.Second)
+	select {
+	case call := <-provider.started:
+		if call != 2 {
+			t.Fatalf("later started call = %d, want 2", call)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("later same-session Cancel was incorrectly deduplicated")
+	}
+	if laterTurn.cancelCall == firstTurn.cancelCall {
+		t.Fatal("later same-session Cancel reused a completed call")
+	}
+	provider.release(2)
+	select {
+	case <-laterDone:
+	case <-time.After(time.Second):
+		t.Fatal("later Cancel did not finish")
+	}
+	lifecycle.mu.Lock()
+	activeAfterSecond := len(lifecycle.activeCancels)
+	lifecycle.mu.Unlock()
+	if activeAfterSecond != 0 {
+		t.Fatalf("active cancels after second completion = %d, want 0", activeAfterSecond)
 	}
 }
 
