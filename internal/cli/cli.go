@@ -1096,10 +1096,23 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 		cleanReturn = sessionEnded && promptReturned && permissionDone == nil
 		return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), LoopDirective: loopDirective, LoopLabel: loopLabel, Output: output.String(), FinalReply: finalReply.String(), Usage: bufferedUsage}
 	}
+	completeAuthoritativeAfterStop := func() (sessionResult, bool) {
+		if !sessionEnded {
+			return sessionResult{}, false
+		}
+		// Once the provider's terminal event has been forwarded, teardown may
+		// still need Cancel, but it must not supersede or duplicate that result.
+		stopProvider()
+		return complete(), true
+	}
 	terminate := func(stopReason string) sessionResult {
-		// The termination branch owns the outcome. In particular, the expected
-		// context.Canceled result from the resolver must not replace "cancelled"
-		// with a generic permission-handler failure.
+		// The termination branch owns the outcome unless the provider's terminal
+		// event was already forwarded. In particular, an expected context.Canceled
+		// from the resolver must not replace "cancelled" with a generic handler
+		// failure or replace an earlier authoritative result.
+		if result, ok := completeAuthoritativeAfterStop(); ok {
+			return result
+		}
 		stopProvider()
 		return endSession(deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, stopReason, deps.Stderr, bufferedUsage, fullReply.String(), finalReply.String())
 	}
@@ -1161,6 +1174,9 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 			// the select at the same time as ctx.Done.
 			if errors.Is(res.err, context.Canceled) {
 				return terminate("cancelled"), true
+			}
+			if result, ok := completeAuthoritativeAfterStop(); ok {
+				return result, true
 			}
 			emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "permission", fmt.Sprintf("permission handler: %v", res.err), deps.Stderr, cfg.RunLabel)
 			return sessionResult{ExitCode: 1}, true
@@ -1340,7 +1356,6 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				continue
 			}
 			if event.Event == "session.end" {
-				sessionEnded = true
 				finalStopReason, _ = event.Fields["stop_reason"].(string)
 				if event.Fields == nil {
 					event.Fields = map[string]any{}
@@ -1353,14 +1368,20 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				fmt.Fprintf(deps.Stderr, "avenor: write event: %v\n", err)
 				return sessionResult{ExitCode: 1}
 			}
-			if event.Event == "session.end" && promptReturned && permissionDone == nil {
-				return complete()
+			if event.Event == "session.end" {
+				sessionEnded = true
+				if promptReturned && permissionDone == nil {
+					return complete()
+				}
 			}
 		case err := <-cfg.PromptDone:
 			promptReturned = true
 			if err != nil {
 				if errors.Is(err, context.Canceled) {
 					return terminate("cancelled")
+				}
+				if result, ok := completeAuthoritativeAfterStop(); ok {
+					return result
 				}
 				emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "prompt", fmt.Sprintf("prompt: %v", err), deps.Stderr, cfg.RunLabel)
 				return sessionResult{ExitCode: 1}

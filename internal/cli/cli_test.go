@@ -1807,9 +1807,23 @@ func (p *reusableLifecycleCancelProvider) releaseAll() {
 
 type waitExitMatrixProvider struct {
 	cliFakeProvider
-	mu       sync.Mutex
-	cancels  int
-	sessions []string
+	mu                sync.Mutex
+	cancels           int
+	sessions          []string
+	permissionRelease <-chan struct{}
+	permissionErr     error
+}
+
+func (p *waitExitMatrixProvider) AnswerPermission(ctx context.Context, _, _ string, _ runtime.PermissionResponse) error {
+	if p.permissionRelease == nil {
+		return nil
+	}
+	select {
+	case <-p.permissionRelease:
+		return p.permissionErr
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (p *waitExitMatrixProvider) Cancel(_ context.Context, sessionID string) error {
@@ -1827,14 +1841,19 @@ func (p *waitExitMatrixProvider) cancelSnapshot() (int, []string) {
 }
 
 type waitExitMatrixSink struct {
-	mu     sync.Mutex
-	events []events.Event
+	mu           sync.Mutex
+	events       []events.Event
+	onSessionEnd func()
 }
 
 func (s *waitExitMatrixSink) Write(event events.Event) error {
 	s.mu.Lock()
 	s.events = append(s.events, event)
+	onSessionEnd := s.onSessionEnd
 	s.mu.Unlock()
+	if event.Event == "session.end" && onSessionEnd != nil {
+		onSessionEnd()
+	}
 	return nil
 }
 
@@ -1852,6 +1871,19 @@ func (s *waitExitMatrixSink) counts() (sessionEnds, errors int) {
 		}
 	}
 	return sessionEnds, errors
+}
+
+func (s *waitExitMatrixSink) terminalStopReasons() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var stopReasons []string
+	for _, event := range s.events {
+		if event.Event == "session.end" {
+			stopReason, _ := event.Fields["stop_reason"].(string)
+			stopReasons = append(stopReasons, stopReason)
+		}
+	}
+	return stopReasons
 }
 
 type sequentialPermissionProvider struct {
@@ -2004,6 +2036,142 @@ func TestWaitForSessionExitMatrixStopsEveryNonCleanReturn(t *testing.T) {
 			sessionEnds, errorEvents := sink.counts()
 			if sessionEnds != tt.wantSessionEnds || errorEvents != tt.wantErrors {
 				t.Fatalf("audit counts = {session.end:%d errors:%d}, want {%d %d}", sessionEnds, errorEvents, tt.wantSessionEnds, tt.wantErrors)
+			}
+		})
+	}
+}
+
+func TestWaitForSessionExitMatrixPreservesForwardedAuthoritativeEndDuringTeardown(t *testing.T) {
+	tests := []struct {
+		name              string
+		permissionFailure bool
+		trigger           func(context.CancelFunc, *SessionWaitConfig, *SessionWaitDeps, *waitExitMatrixProvider) func()
+	}{
+		{
+			name: "interrupt",
+			trigger: func(_ context.CancelFunc, cfg *SessionWaitConfig, _ *SessionWaitDeps, _ *waitExitMatrixProvider) func() {
+				interruptCh := make(chan struct{})
+				cfg.InterruptCh = interruptCh
+				return func() { close(interruptCh) }
+			},
+		},
+		{
+			name: "parent context cancellation",
+			trigger: func(cancel context.CancelFunc, _ *SessionWaitConfig, _ *SessionWaitDeps, _ *waitExitMatrixProvider) func() {
+				return cancel
+			},
+		},
+		{
+			name: "prompt context cancellation",
+			trigger: func(_ context.CancelFunc, cfg *SessionWaitConfig, _ *SessionWaitDeps, _ *waitExitMatrixProvider) func() {
+				promptDone := make(chan error, 1)
+				cfg.PromptDone = promptDone
+				return func() { promptDone <- context.Canceled }
+			},
+		},
+		{
+			name: "prompt failure",
+			trigger: func(_ context.CancelFunc, cfg *SessionWaitConfig, _ *SessionWaitDeps, _ *waitExitMatrixProvider) func() {
+				promptDone := make(chan error, 1)
+				cfg.PromptDone = promptDone
+				return func() { promptDone <- errors.New("late prompt failure") }
+			},
+		},
+		{
+			name: "progress timeout",
+			trigger: func(_ context.CancelFunc, _ *SessionWaitConfig, deps *SessionWaitDeps, _ *waitExitMatrixProvider) func() {
+				progressCh := make(chan time.Time, 1)
+				deps.ProgressTimerC = progressCh
+				return func() { progressCh <- time.Now() }
+			},
+		},
+		{
+			name: "configured timeout",
+			trigger: func(_ context.CancelFunc, cfg *SessionWaitConfig, _ *SessionWaitDeps, _ *waitExitMatrixProvider) func() {
+				timeoutCh := make(chan time.Time, 1)
+				cfg.Timeout = timeoutCh
+				return func() { timeoutCh <- time.Now() }
+			},
+		},
+		{
+			name:              "permission failure",
+			permissionFailure: true,
+			trigger: func(_ context.CancelFunc, cfg *SessionWaitConfig, _ *SessionWaitDeps, provider *waitExitMatrixProvider) func() {
+				release := make(chan struct{})
+				provider.permissionRelease = release
+				provider.permissionErr = errors.New("late permission failure")
+				cfg.AutoApprove = true
+				return func() { close(release) }
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			provider := &waitExitMatrixProvider{}
+			eventCh := make(chan events.Event, 3)
+			eventCh <- events.Event{
+				Event:     "agent.message_chunk",
+				SessionID: "ses_authoritative_teardown",
+				Fields:    map[string]any{"content": map[string]any{"text": "authoritative reply"}},
+			}
+			if tt.permissionFailure {
+				eventCh <- events.Event{
+					Event:     "permission.request",
+					SessionID: "ses_authoritative_teardown",
+					Fields: map[string]any{
+						"request_id": "req_authoritative_teardown",
+						"options": []any{
+							map[string]any{"optionId": "allow", "kind": "allow"},
+						},
+					},
+				}
+			}
+			eventCh <- events.Event{
+				Event:     "session.end",
+				SessionID: "ses_authoritative_teardown",
+				Fields: map[string]any{
+					"stop_reason": "refusal",
+					"usage":       map[string]any{"input_tokens": 7},
+				},
+			}
+
+			cfg := SessionWaitConfig{
+				EventCh:    eventCh,
+				PromptDone: make(chan error),
+				SessionID:  "ses_authoritative_teardown",
+				RunID:      "run_authoritative_teardown",
+			}
+			deps := SessionWaitDeps{
+				Stderr:                io.Discard,
+				permissionJoinTimeout: 20 * time.Millisecond,
+			}
+			trigger := tt.trigger(cancel, &cfg, &deps, provider)
+			sink := &waitExitMatrixSink{}
+			var triggerOnce sync.Once
+			sink.onSessionEnd = func() { triggerOnce.Do(trigger) }
+			deps.Writer = sink
+
+			result := WaitForSession(ctx, provider, cfg, deps)
+			if result.ExitCode != 2 || result.StopReason != "" {
+				t.Fatalf("result = {exit:%d stop:%q}, want authoritative {2 %q}", result.ExitCode, result.StopReason, "")
+			}
+			if result.Output != "authoritative reply" || result.FinalReply != "authoritative reply" {
+				t.Fatalf("result reply = {output:%q final:%q}, want authoritative reply", result.Output, result.FinalReply)
+			}
+			if result.Usage == nil || result.Usage["input_tokens"] != 7 {
+				t.Fatalf("result usage = %#v, want authoritative usage", result.Usage)
+			}
+			if got := sink.terminalStopReasons(); len(got) != 1 || got[0] != "refusal" {
+				t.Fatalf("terminal stop reasons = %v, want exactly [refusal]", got)
+			}
+			if sessionEnds, errorEvents := sink.counts(); sessionEnds != 1 || errorEvents != 0 {
+				t.Fatalf("audit counts = {session.end:%d errors:%d}, want {1 0}", sessionEnds, errorEvents)
+			}
+			if cancelCount, sessions := provider.cancelSnapshot(); cancelCount != 1 || len(sessions) != 1 || sessions[0] != cfg.SessionID {
+				t.Fatalf("provider Cancel calls = %d (%v), want one for %q", cancelCount, sessions, cfg.SessionID)
 			}
 		})
 	}
@@ -2764,9 +2932,8 @@ func TestAutoAnswerEmitsPermissionResponse(t *testing.T) {
 }
 
 // TestAutoAnswerAnswerPermissionErrorEmitsError verifies that when
-// AnswerPermission returns an error, the loop emits an avenor.error event
-// and exits with code 1. A session.end is included so the loop waits for the
-// goroutine to complete rather than exiting early on the closed eventCh.
+// AnswerPermission returns an error before an authoritative terminal, the loop
+// emits an avenor.error event and exits with code 1.
 func TestAutoAnswerAnswerPermissionErrorEmitsError(t *testing.T) {
 	dir := t.TempDir()
 	eventsPath := filepath.Join(dir, "events.ndjson")
@@ -2775,7 +2942,7 @@ func TestAutoAnswerAnswerPermissionErrorEmitsError(t *testing.T) {
 		t.Fatalf("newEventWriter: %v", err)
 	}
 
-	eventCh := make(chan events.Event, 3)
+	eventCh := make(chan events.Event, 1)
 	eventCh <- events.Event{
 		Event:     "permission.request",
 		SessionID: "ses_1",
@@ -2785,13 +2952,6 @@ func TestAutoAnswerAnswerPermissionErrorEmitsError(t *testing.T) {
 				map[string]any{"optionId": "allow", "kind": "allow"},
 			},
 		},
-	}
-	// Include session.end so finalStopReason is set and the loop waits
-	// for permissionDone before deciding to exit.
-	eventCh <- events.Event{
-		Event:     "session.end",
-		SessionID: "ses_1",
-		Fields:    map[string]any{"stop_reason": "end_turn"},
 	}
 	close(eventCh)
 
