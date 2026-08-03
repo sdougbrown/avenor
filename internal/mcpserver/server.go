@@ -1,6 +1,7 @@
 package mcpserver
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -96,6 +97,23 @@ type spawnArgs struct {
 	ServerURL    string `json:"server_url,omitempty" jsonschema:"optional opencode serve URL for opencode-http backend"`
 	SupervisorID string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
 	AutoApprove  bool   `json:"auto_approve,omitempty" jsonschema:"optional auto-approve all permission requests so the run executes unattended (no answer_permission needed)"`
+}
+
+// UnmarshalJSON makes the Go MCP spawn tool a strict raw boundary: unknown
+// keys — including misspelled or deferred selector keys such as "rosterFile"
+// or "system" — are refused instead of silently ignored. Declared provider
+// options (thinking, server_url, timeout, ...) remain covered by the struct
+// tags and are unaffected.
+func (a *spawnArgs) UnmarshalJSON(data []byte) error {
+	type alias spawnArgs
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	var out alias
+	if err := dec.Decode(&out); err != nil {
+		return err
+	}
+	*a = spawnArgs(out)
+	return nil
 }
 
 type shutdownArgs struct {

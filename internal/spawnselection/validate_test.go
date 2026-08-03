@@ -1,46 +1,142 @@
 package spawnselection
 
-import "testing"
+import (
+	"encoding/json"
+	"os"
+	"reflect"
+	"strings"
+	"testing"
+)
 
-func TestValidateParityCases(t *testing.T) {
-	tests := []struct {
-		name             string
-		input            Input
-		rosterConfigured bool
-		wantErr          bool
-	}{
-		{name: "direct neither supplied", input: Input{}},
-		{name: "direct backend only", input: Input{Backend: "agy"}},
-		{name: "direct agent only", input: Input{Agent: "reviewer"}},
-		{name: "direct model only", input: Input{Model: "provider/model"}},
-		{name: "direct valid identity", input: Input{Agent: "reviewer", Model: "provider/model", Backend: "opencode-acp"}},
-		{name: "roster pair", input: Input{RosterFile: "/repo/roster.json", RosterEntry: "planner"}},
-		{name: "configured roster context", input: Input{RosterEntry: "planner"}, rosterConfigured: true},
-		{name: "missing roster entry", input: Input{RosterFile: "/repo/roster.json"}, wantErr: true},
-		{name: "missing roster file", input: Input{RosterEntry: "planner"}, wantErr: true},
-		{name: "mixed agent", input: Input{RosterFile: "/repo/roster.json", RosterEntry: "planner", Agent: "reviewer"}, wantErr: true},
-		{name: "mixed model", input: Input{RosterFile: "/repo/roster.json", RosterEntry: "planner", Model: "provider/model"}, wantErr: true},
-		{name: "mixed backend", input: Input{RosterFile: "/repo/roster.json", RosterEntry: "planner", Backend: "agy"}, wantErr: true},
+// conformanceCase mirrors schemas/spawn_selection.conformance.json. The input
+// is kept as raw JSON so the strict ValidateJSON path sees the exact on-wire
+// keys (including unknown/deferred/misspelled ones) that a raw boundary would.
+type conformanceCase struct {
+	Name             string          `json:"name"`
+	Input            json.RawMessage `json:"input"`
+	RosterConfigured bool            `json:"rosterConfigured"`
+	Valid            bool            `json:"valid"`
+	StrictOnly       bool            `json:"strictOnly"`
+}
+
+func loadConformance(t *testing.T) []conformanceCase {
+	t.Helper()
+	data, err := os.ReadFile("../../schemas/spawn_selection.conformance.json")
+	if err != nil {
+		t.Fatalf("read conformance fixture: %v", err)
 	}
+	var fixture struct {
+		Cases []conformanceCase `json:"cases"`
+	}
+	if err := json.Unmarshal(data, &fixture); err != nil {
+		t.Fatalf("parse conformance fixture: %v", err)
+	}
+	if len(fixture.Cases) == 0 {
+		t.Fatal("conformance fixture has no cases")
+	}
+	return fixture.Cases
+}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := Validate(tt.input, tt.rosterConfigured)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+// TestConformanceStrict drives every fixture case through the strict raw
+// validator (ValidateJSON). This is the portable contract as seen at raw wire
+// boundaries: contract semantics plus unknown/deferred/misspelled key
+// rejection, using the exact same cases as the TypeScript evaluator.
+func TestConformanceStrict(t *testing.T) {
+	for _, c := range loadConformance(t) {
+		t.Run(c.Name, func(t *testing.T) {
+			err := ValidateJSON(c.Input, c.RosterConfigured)
+			if (err != nil) == c.Valid {
+				t.Fatalf("ValidateJSON() error = %v, want valid=%v", err, c.Valid)
 			}
 		})
 	}
 }
 
-func TestValidateJSONRejectsDeferredAndMisspelledFields(t *testing.T) {
-	for _, data := range []string{
-		`{"roster_file":"/repo/roster.json","thinking":"high"}`,
-		`{"roster_file":"/repo/roster.json","system":"deferred"}`,
-		`{"rosterFile":"/repo/roster.json","roster_entry":"planner"}`,
-	} {
-		if err := ValidateJSON([]byte(data), false); err == nil {
-			t.Fatalf("ValidateJSON(%s) unexpectedly accepted", data)
+// TestConformanceTyped drives the non-strict-only fixture cases through the
+// typed Validate used at the internal stable/control boundaries. Unknown keys
+// are irrelevant on the typed path because the caller has already projected
+// the selector fields, so strictOnly cases are intentionally excluded.
+func TestConformanceTyped(t *testing.T) {
+	for _, c := range loadConformance(t) {
+		if c.StrictOnly {
+			continue
+		}
+		t.Run(c.Name, func(t *testing.T) {
+			var in Input
+			if err := json.Unmarshal(c.Input, &in); err != nil {
+				t.Fatalf("decode input: %v", err)
+			}
+			err := Validate(in, c.RosterConfigured)
+			if (err != nil) == c.Valid {
+				t.Fatalf("Validate() error = %v, want valid=%v", err, c.Valid)
+			}
+		})
+	}
+}
+
+// TestSchemaFieldSet guards against required-field or field-set drift between
+// the portable Umpire schema and the generated Go struct. If either side adds
+// or renames a selector field, this test fails so the contract stays in one
+// place.
+func TestSchemaFieldSet(t *testing.T) {
+	data, err := os.ReadFile("../../schemas/spawn_selection.umpire.json")
+	if err != nil {
+		t.Fatalf("read umpire schema: %v", err)
+	}
+	var schema struct {
+		Fields     map[string]map[string]any `json:"fields"`
+		Conditions map[string]map[string]any `json:"conditions"`
+	}
+	if err := json.Unmarshal(data, &schema); err != nil {
+		t.Fatalf("parse umpire schema: %v", err)
+	}
+
+	if len(schema.Fields) == 0 || len(schema.Conditions) == 0 {
+		t.Fatalf("schema missing fields or conditions: fields=%d conditions=%d", len(schema.Fields), len(schema.Conditions))
+	}
+
+	// The generated struct must expose exactly the schema's selector fields.
+	// The umpire generator maps snake_case schema names to Go field names, so
+	// compare against struct field names to detect field-set drift.
+	fieldType := reflect.TypeOf(SpawnSelectionFields{})
+	generated := make(map[string]bool)
+	for i := 0; i < fieldType.NumField(); i++ {
+		generated[fieldType.Field(i).Name] = true
+	}
+
+	for name := range schema.Fields {
+		if !generated[goFieldName(name)] {
+			t.Errorf("generated struct missing schema field %q (expected field %q)", name, goFieldName(name))
 		}
 	}
+	if len(generated) != len(schema.Fields) {
+		t.Fatalf("generated field count %d != schema field count %d", len(generated), len(schema.Fields))
+	}
+
+	// The generated conditions struct must carry a matching boolean per
+	// declared condition.
+	condType := reflect.TypeOf(SpawnSelectionConditions{})
+	generatedConds := make(map[string]bool)
+	for i := 0; i < condType.NumField(); i++ {
+		generatedConds[condType.Field(i).Name] = true
+	}
+	for name := range schema.Conditions {
+		if !generatedConds[goFieldName(name)] {
+			t.Errorf("generated conditions struct missing condition %q (expected field %q)", name, goFieldName(name))
+		}
+	}
+}
+
+// goFieldName converts a snake_case schema name to the Go struct field name
+// the umpire generator emits (each underscore-separated segment capitalized).
+func goFieldName(s string) string {
+	var b strings.Builder
+	for _, part := range strings.Split(s, "_") {
+		if part == "" {
+			continue
+		}
+		b.WriteString(strings.ToUpper(part[:1]))
+		b.WriteString(part[1:])
+	}
+	return b.String()
 }

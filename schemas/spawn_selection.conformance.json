@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "description": "Shared portable spawn identity selector conformance fixture. Consumed verbatim by internal/spawnselection (Go, via Validate and ValidateJSON) and packages/core/src/spawn-selection.test.ts (TypeScript, via validateSpawnSelection) so both Umpire evaluators exercise the exact same valid and invalid cases. Cases flagged strictOnly carry unknown/deferred/misspelled selector keys and are only exercisable through a strict raw (unknown-key-rejecting) validator; provider-specific options such as thinking/system are intentionally outside the portable selector contract.",
+  "cases": [
+    { "name": "direct neither supplied", "input": {}, "rosterConfigured": false, "valid": true, "strictOnly": false },
+    { "name": "direct backend only", "input": { "backend": "agy" }, "rosterConfigured": false, "valid": true, "strictOnly": false },
+    { "name": "direct agent only", "input": { "agent": "reviewer" }, "rosterConfigured": false, "valid": true, "strictOnly": false },
+    { "name": "direct model only", "input": { "model": "provider/model" }, "rosterConfigured": false, "valid": true, "strictOnly": false },
+    { "name": "direct valid identity", "input": { "agent": "reviewer", "model": "provider/model", "backend": "opencode-acp" }, "rosterConfigured": false, "valid": true, "strictOnly": false },
+    { "name": "roster pair", "input": { "roster_file": "/repo/roster.json", "roster_entry": "planner" }, "rosterConfigured": false, "valid": true, "strictOnly": false },
+    { "name": "configured roster context", "input": { "roster_entry": "planner" }, "rosterConfigured": true, "valid": true, "strictOnly": false },
+    { "name": "missing roster entry", "input": { "roster_file": "/repo/roster.json" }, "rosterConfigured": false, "valid": false, "strictOnly": false },
+    { "name": "missing roster file", "input": { "roster_entry": "planner" }, "rosterConfigured": false, "valid": false, "strictOnly": false },
+    { "name": "mixed agent", "input": { "roster_file": "/repo/roster.json", "roster_entry": "planner", "agent": "reviewer" }, "rosterConfigured": false, "valid": false, "strictOnly": false },
+    { "name": "mixed model", "input": { "roster_file": "/repo/roster.json", "roster_entry": "planner", "model": "provider/model" }, "rosterConfigured": false, "valid": false, "strictOnly": false },
+    { "name": "mixed backend", "input": { "roster_file": "/repo/roster.json", "roster_entry": "planner", "backend": "agy" }, "rosterConfigured": false, "valid": false, "strictOnly": false },
+    { "name": "deferred thinking with roster_file", "input": { "roster_file": "/repo/roster.json", "thinking": "high" }, "rosterConfigured": false, "valid": false, "strictOnly": true },
+    { "name": "deferred system with roster_file", "input": { "roster_file": "/repo/roster.json", "system": "deferred" }, "rosterConfigured": false, "valid": false, "strictOnly": true },
+    { "name": "misspelled roster file", "input": { "rosterFile": "/repo/roster.json", "roster_entry": "planner" }, "rosterConfigured": false, "valid": false, "strictOnly": true },
+    { "name": "deferred thinking only", "input": { "thinking": "high" }, "rosterConfigured": false, "valid": false, "strictOnly": true },
+    { "name": "deferred system only", "input": { "system": "deferred" }, "rosterConfigured": false, "valid": false, "strictOnly": true }
+  ]
+}
