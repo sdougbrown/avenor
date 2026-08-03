@@ -69,6 +69,31 @@ func TestThinkingErrorsDistinguishUnsupportedValueAndCapability(t *testing.T) {
 	}
 }
 
+func TestValidateThinkingForBackendResume(t *testing.T) {
+	// Codex and Pi accept canonical values on explicit resume.
+	for _, backend := range []string{"codex-app-server", "pi"} {
+		if err := ValidateThinkingForBackendResume(backend, "off"); err != nil {
+			t.Errorf("%s resume off: %v", backend, err)
+		}
+	}
+	// Claude family is start-only on explicit resume.
+	for _, backend := range []string{"claude", "claude-channel"} {
+		err := ValidateThinkingForBackendResume(backend, "low")
+		if err == nil || !strings.Contains(err.Error(), "only when starting a session") {
+			t.Errorf("%s resume low error = %v", backend, err)
+		}
+	}
+	// Backends without support report an unsupported capability.
+	err := ValidateThinkingForBackendResume("agy", "low")
+	if err == nil || !strings.Contains(err.Error(), `does not support parameter "thinking"`) {
+		t.Errorf("agy resume low error = %v", err)
+	}
+	// Non-canonical value is rejected before policy.
+	if err := ValidateThinkingForBackendResume("pi", "HIGH"); err == nil {
+		t.Error("pi resume HIGH accepted")
+	}
+}
+
 func TestJoinThinkingValues(t *testing.T) {
 	if got := joinThinkingValues(nil); got != "none" {
 		t.Fatalf("empty values = %q", got)

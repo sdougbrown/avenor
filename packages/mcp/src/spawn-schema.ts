@@ -1,5 +1,7 @@
 import { z } from 'zod'
 
+import { THINKING_LEVELS } from '@dougbots/avenor-core'
+
 export const spawnInputShape = {
   agent: z.string()
     .optional()
@@ -10,7 +12,7 @@ export const spawnInputShape = {
   label: z.string().optional().describe('Human-readable label for this run'),
   timeout: z.string().optional().describe('Timeout duration (e.g. 5m, 1h)'),
   model: z.string().optional().describe('Model override'),
-  thinking: z.enum(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+  thinking: z.enum(THINKING_LEVELS)
     .optional()
     .describe('Thinking level; omission uses the backend default and unsupported backends reject explicit values'),
   backend: z.string().optional().describe('Backend override'),

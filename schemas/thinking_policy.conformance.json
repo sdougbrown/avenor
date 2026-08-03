@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "description": "Shared portable thinking-policy conformance fixture. Consumed verbatim by internal/thinkingpolicy (Go) and packages/core/src/thinking-policy.test.ts (TypeScript) so generated Go evaluation and the TS evaluator accept and reject the same canonical values and static backend policies. Backend start and explicit-resume support are represented as separate cases.",
+  "canonicalCases": [
+    { "name": "empty value", "value": "", "valid": true },
+    { "name": "off", "value": "off", "valid": true },
+    { "name": "minimal", "value": "minimal", "valid": true },
+    { "name": "low", "value": "low", "valid": true },
+    { "name": "medium", "value": "medium", "valid": true },
+    { "name": "high", "value": "high", "valid": true },
+    { "name": "xhigh", "value": "xhigh", "valid": true },
+    { "name": "max", "value": "max", "valid": true },
+    { "name": "uppercase is not canonical", "value": "HIGH", "valid": false },
+    { "name": "auto is not canonical", "value": "auto", "valid": false },
+    { "name": "leading space is not canonical", "value": " low", "valid": false }
+  ],
+  "backendCases": [
+    { "name": "codex all start", "backend": "codex-app-server", "value": "off", "resume": false, "valid": true },
+    { "name": "codex xhigh start", "backend": "codex-app-server", "value": "xhigh", "resume": false, "valid": true },
+    { "name": "pi max resume", "backend": "pi", "value": "max", "resume": true, "valid": true },
+    { "name": "pi minimal start", "backend": "pi", "value": "minimal", "resume": false, "valid": true },
+    { "name": "claude low start", "backend": "claude", "value": "low", "resume": false, "valid": true },
+    { "name": "claude max start", "backend": "claude", "value": "max", "resume": false, "valid": true },
+    { "name": "claude off start", "backend": "claude", "value": "off", "resume": false, "valid": false },
+    { "name": "claude low resume", "backend": "claude", "value": "low", "resume": true, "valid": false },
+    { "name": "claude-channel medium start", "backend": "claude-channel", "value": "medium", "resume": false, "valid": true },
+    { "name": "claude-channel minimal start", "backend": "claude-channel", "value": "minimal", "resume": false, "valid": false },
+    { "name": "claude-channel low resume", "backend": "claude-channel", "value": "low", "resume": true, "valid": false },
+    { "name": "agy low start", "backend": "agy", "value": "low", "resume": false, "valid": false },
+    { "name": "agy high resume", "backend": "agy", "value": "high", "resume": true, "valid": false },
+    { "name": "opencode-acp off start", "backend": "opencode-acp", "value": "off", "resume": false, "valid": false },
+    { "name": "gemini-acp low resume", "backend": "gemini-acp", "value": "low", "resume": true, "valid": false },
+    { "name": "codex empty start", "backend": "codex-app-server", "value": "", "resume": false, "valid": true }
+  ]
+}

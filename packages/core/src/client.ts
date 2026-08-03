@@ -1,6 +1,8 @@
 import * as net from 'node:net'
 import * as readline from 'node:readline'
 
+import type { ThinkingLevel } from './thinking-policy.js'
+
 export interface JsonRpcRequest {
   jsonrpc: '2.0'
   id?: number
@@ -41,7 +43,7 @@ export interface HistoryResult<TEvent = Event> {
   latest_seq?: number
 }
 
-export type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+export type { ThinkingLevel }
 
 export interface SpawnParams {
   agent?: string

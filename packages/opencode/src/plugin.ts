@@ -27,6 +27,7 @@ import {
   statusTool,
   Supervisor,
   type StatusResult,
+  THINKING_LEVELS,
   validateSpawnSelection,
 } from '@dougbots/avenor-core'
 
@@ -666,7 +667,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
     tool: {
       avenor_spawn: tool({
         description:
-          'Dispatch an agent run via avenor. Optional thinking accepts off, minimal, low, medium, high, xhigh, or max; unsupported backends reject explicit values. Blocks by default, showing live progress as an updating tool call. Set wait=false for fire-and-forget — you will be re-prompted automatically on completion.',
+          `Dispatch an agent run via avenor. Optional thinking accepts ${[...THINKING_LEVELS].slice(0, -1).join(', ')}, or ${THINKING_LEVELS[THINKING_LEVELS.length - 1]}; unsupported backends reject explicit values. Blocks by default, showing live progress as an updating tool call. Set wait=false for fire-and-forget — you will be re-prompted automatically on completion.`,
         args: {
           agent: tool.schema.string().optional().describe('Optional agent name; omission uses the supplied model or runtime defaults'),
           prompt: tool.schema.string().optional().describe('Prompt text'),
@@ -675,7 +676,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
           label: tool.schema.string().optional().describe('Human-readable label for the run'),
           timeout: tool.schema.string().optional().describe('Timeout duration (e.g. 3600s)'),
           model: tool.schema.string().optional().describe('Model override'),
-          thinking: tool.schema.enum(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']).optional().describe('Thinking level; omission uses the backend default'),
+          thinking: tool.schema.enum([...THINKING_LEVELS]).optional().describe('Thinking level; omission uses the backend default'),
           backend: tool.schema.string().optional().describe('Backend override'),
           roster_file: tool.schema.string().optional().describe('Path to the roster map'),
           roster_entry: tool.schema.string().optional().describe('Roster entry to select'),

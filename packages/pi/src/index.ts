@@ -13,6 +13,7 @@ import {
   spawnTool,
   statusTool,
   Supervisor,
+  THINKING_LEVELS,
   validateSpawnSelection,
   type Client,
   type InspectResult,
@@ -924,7 +925,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
       name: 'avenor_spawn',
       label: 'Avenor Spawn',
       description:
-        'Dispatch an agent run via avenor. Optional thinking accepts off, minimal, low, medium, high, xhigh, or max; unsupported backends reject explicit values. Blocks by default, showing live progress. Set wait=false for fire-and-forget.',
+        `Dispatch an agent run via avenor. Optional thinking accepts ${[...THINKING_LEVELS].slice(0, -1).join(', ')}, or ${THINKING_LEVELS[THINKING_LEVELS.length - 1]}; unsupported backends reject explicit values. Blocks by default, showing live progress. Set wait=false for fire-and-forget.`,
       promptSnippet: 'Dispatch sub-agent runs via avenor (spawn, status, result, inspect, events, follow-up, shutdown)',
       promptGuidelines: [
         'Use avenor_spawn to delegate well-defined tasks to sub-agents.',

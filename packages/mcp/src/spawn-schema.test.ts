@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { validateSpawnSelection } from '@dougbots/avenor-core'
+import { THINKING_LEVELS, validateSpawnSelection } from '@dougbots/avenor-core'
 import { z } from 'zod'
 import { spawnInputShape } from './spawn-schema'
 
@@ -60,6 +60,12 @@ describe('MCP spawn schema', () => {
     expect(spawnSchema.safeParse({ agent: 'reviewer' }).success).toBe(false)
 
     expect(expectedFields).not.toContain('mode')
+
+    // Host schema must expose exactly the shared thinking tuple.
+    const thinkingField = spawnInputShape.thinking as z.ZodOptional<
+      z.ZodEnum<typeof THINKING_LEVELS>
+    >
+    expect([...thinkingField.unwrap().options]).toEqual([...THINKING_LEVELS])
   })
 
   it('matches the shared strict selector validation for mixed fields', () => {

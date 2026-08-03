@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "fields": {
+    "thinking": {
+      "isEmpty": "string",
+      "description": "Canonical thinking level, or empty to use the backend default."
+    }
+  },
+  "rules": [
+    {
+      "type": "check",
+      "field": "thinking",
+      "check": {
+        "op": "in",
+        "field": "thinking",
+        "value": ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+      },
+      "reason": "not a canonical thinking value (off, minimal, low, medium, high, xhigh, max)"
+    }
+  ]
+}

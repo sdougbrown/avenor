@@ -4,6 +4,7 @@ import { observeRun } from '../../core/src/run-observer.js'
 import { createRunSnapshot } from '../../core/src/run-reducer.js'
 import { extractEventText } from '../../core/src/run-events.js'
 import { validateSpawnSelection } from '../../core/src/spawn-selection.js'
+import { THINKING_LEVELS } from '../../core/src/thinking-policy.js'
 
 const spawnToolMock = mock(async () => ({
   run_id: 'run-1',
@@ -123,6 +124,7 @@ const dialMock = mock(async () => {
 const currentSupervisorMock = mock(() => ({ supervisorId: '/tmp/avenor.sock' }))
 
 mock.module('@dougbots/avenor-core', () => ({
+  THINKING_LEVELS,
   spawnTool: spawnToolMock,
   validateSpawnSelection,
   statusTool: statusToolMock,

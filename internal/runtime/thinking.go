@@ -1,49 +1,19 @@
 package runtime
 
-import "fmt"
+import (
+	"fmt"
 
-var thinkingValueList = []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"}
-
-var validThinkingValues = map[string]struct{}{
-	"off":     {},
-	"minimal": {},
-	"low":     {},
-	"medium":  {},
-	"high":    {},
-	"xhigh":   {},
-	"max":     {},
-}
-
-var backendThinkingValues = map[string]map[string]struct{}{
-	"codex-app-server": validThinkingValues,
-	"pi":               validThinkingValues,
-	"claude": {
-		"low": {}, "medium": {}, "high": {}, "xhigh": {}, "max": {},
-	},
-	"claude-channel": {
-		"low": {}, "medium": {}, "high": {}, "xhigh": {}, "max": {},
-	},
-	"opencode-acp":  {},
-	"opencode-http": {},
-	"gemini-acp":    {},
-	"cursor-acp":    {},
-	"agy":           {},
-	"pony":          {},
-}
+	"github.com/sdougbrown/avenor/internal/thinkingpolicy"
+)
 
 // ValidateThinking accepts the canonical thinking controls and an empty value.
 func ValidateThinking(value string) error {
-	if value == "" {
-		return nil
-	}
-	if _, ok := validThinkingValues[value]; !ok {
-		return fmt.Errorf("invalid thinking value %q (allowed: %s)", value, joinThinkingValues(thinkingValueList))
-	}
-	return nil
+	return thinkingpolicy.ValidateCanonical(value)
 }
 
 // ValidateThinkingForBackend applies the conservative backend policy after
-// validating the canonical value.
+// validating the canonical value. This is the start-session policy; explicit
+// resume support is represented separately (see thinkingpolicy.Policies).
 func ValidateThinkingForBackend(backend, value string) error {
 	if err := ValidateThinking(value); err != nil {
 		return err
@@ -51,17 +21,35 @@ func ValidateThinkingForBackend(backend, value string) error {
 	if value == "" {
 		return nil
 	}
-	values, ok := backendThinkingValues[backend]
-	if !ok {
+	switch thinkingpolicy.Evaluate(backend, value, false) {
+	case thinkingpolicy.OK, thinkingpolicy.StartOnly:
+		return nil
+	case thinkingpolicy.UnsupportedValue:
+		return NewUnsupportedThinkingValueError(backend, value)
+	default:
 		return NewUnsupportedThinkingError(backend)
 	}
-	if _, ok := values[value]; !ok {
-		if len(values) == 0 {
-			return NewUnsupportedThinkingError(backend)
-		}
-		return NewUnsupportedThinkingValueError(backend, value)
+}
+
+// ValidateThinkingForBackendResume applies the conservative backend policy for
+// an explicit resume, distinguishing start-only support from capability gaps.
+func ValidateThinkingForBackendResume(backend, value string) error {
+	if err := ValidateThinking(value); err != nil {
+		return err
 	}
-	return nil
+	if value == "" {
+		return nil
+	}
+	switch thinkingpolicy.Evaluate(backend, value, true) {
+	case thinkingpolicy.OK:
+		return nil
+	case thinkingpolicy.UnsupportedValue:
+		return NewUnsupportedThinkingValueError(backend, value)
+	case thinkingpolicy.StartOnly:
+		return NewStartOnlyThinkingError(backend, value)
+	default:
+		return NewUnsupportedThinkingError(backend)
+	}
 }
 
 // NewUnsupportedThinkingError returns the shared unsupported-parameter error.
@@ -72,13 +60,7 @@ func NewUnsupportedThinkingError(backend string) error {
 // NewUnsupportedThinkingValueError reports a canonical value that the backend
 // supports in general but cannot apply natively.
 func NewUnsupportedThinkingValueError(backend, value string) error {
-	values := backendThinkingValues[backend]
-	allowed := make([]string, 0, len(values))
-	for _, candidate := range thinkingValueList {
-		if _, ok := values[candidate]; ok {
-			allowed = append(allowed, candidate)
-		}
-	}
+	allowed := thinkingpolicy.StartValues(backend)
 	return fmt.Errorf("backend %q does not support thinking value %q (allowed: %s)", backend, value, joinThinkingValues(allowed))
 }
 
