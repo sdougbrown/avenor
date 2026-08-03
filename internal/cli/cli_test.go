@@ -594,6 +594,48 @@ func TestPermissionRequestEmitsEffectiveResolverAndClaimState(t *testing.T) {
 	}
 }
 
+func TestPermissionRequestResolverInjectionDoesNotMutateSourceEvent(t *testing.T) {
+	source := events.Event{
+		Event:     "permission.request",
+		SessionID: "ses_source_event",
+		Fields: map[string]any{
+			"request_id": "req_source_event",
+			"options": []any{
+				map[string]any{"optionId": "allow", "kind": "allow"},
+			},
+		},
+	}
+	sourceBefore, err := json.Marshal(source)
+	if err != nil {
+		t.Fatalf("marshal source permission event: %v", err)
+	}
+	eventCh := make(chan events.Event, 2)
+	eventCh <- source
+	eventCh <- events.Event{Event: "session.end", SessionID: source.SessionID, Fields: map[string]any{"stop_reason": "end_turn"}}
+	close(eventCh)
+	promptDone := make(chan error, 1)
+	promptDone <- nil
+	sink := &permissionRequestCaptureSink{}
+
+	result := waitForSessionForTest(context.Background(), &cliFakeProvider{}, sink, nil, nil, eventCh, promptDone, nil, source.SessionID, "run_source_event", "", true, DefaultPermissionClaimTimeout, nil, io.Discard)
+	if result.ExitCode != 0 {
+		t.Fatalf("WaitForSession exit code = %d, want 0", result.ExitCode)
+	}
+	sourceAfter, err := json.Marshal(source)
+	if err != nil {
+		t.Fatalf("marshal source permission event after wait: %v", err)
+	}
+	if string(sourceAfter) != string(sourceBefore) {
+		t.Fatalf("source permission event mutated: got %s, want %s", sourceAfter, sourceBefore)
+	}
+	sink.mu.Lock()
+	resolver := sink.request.Fields["resolver"]
+	sink.mu.Unlock()
+	if resolver != "automatic" {
+		t.Fatalf("written permission.request resolver = %v, want automatic", resolver)
+	}
+}
+
 func TestWaitForSessionFilePermissionEmitsOneEffectiveRequestAndCleansUp(t *testing.T) {
 	dir := t.TempDir()
 	base := filepath.Join(dir, "permission")
@@ -1574,26 +1616,29 @@ func (p *nonCooperativePermissionProvider) release() {
 
 type coordinatedLifecycleProvider struct {
 	cliFakeProvider
-	answerStarted     chan struct{}
-	answerRelease     chan struct{}
-	answerReturned    chan struct{}
-	cancelStarted     chan struct{}
-	cancelRelease     chan struct{}
-	cancelReturned    chan struct{}
-	closeCalled       chan struct{}
-	answerStartOnce   sync.Once
-	answerDoneOnce    sync.Once
-	cancelStartOnce   sync.Once
-	cancelDoneOnce    sync.Once
-	closeOnce         sync.Once
-	answerReleaseOnce sync.Once
-	cancelReleaseOnce sync.Once
-	mu                sync.Mutex
-	cancelCalls       int
-	closeCalls        int
-	answerInFlight    bool
-	cancelInFlight    bool
-	closeRaced        bool
+	answerStarted         chan struct{}
+	answerRelease         chan struct{}
+	answerReturned        chan struct{}
+	cancelStarted         chan struct{}
+	cancelRelease         chan struct{}
+	cancelReturned        chan struct{}
+	closeCalled           chan struct{}
+	completionReady       chan struct{}
+	completionRelease     chan struct{}
+	answerStartOnce       sync.Once
+	answerDoneOnce        sync.Once
+	cancelStartOnce       sync.Once
+	cancelDoneOnce        sync.Once
+	closeOnce             sync.Once
+	answerReleaseOnce     sync.Once
+	cancelReleaseOnce     sync.Once
+	completionReleaseOnce sync.Once
+	mu                    sync.Mutex
+	cancelCalls           int
+	closeCalls            int
+	answerInFlight        bool
+	cancelInFlight        bool
+	closeRaced            bool
 }
 
 func newCoordinatedLifecycleProvider() *coordinatedLifecycleProvider {
@@ -1620,6 +1665,7 @@ func (p *coordinatedLifecycleProvider) AnswerPermission(context.Context, string,
 	}()
 	p.answerStartOnce.Do(func() { close(p.answerStarted) })
 	<-p.answerRelease
+	p.waitForConcurrentCompletion()
 	return nil
 }
 
@@ -1636,6 +1682,7 @@ func (p *coordinatedLifecycleProvider) Cancel(context.Context, string) error {
 	}()
 	p.cancelStartOnce.Do(func() { close(p.cancelStarted) })
 	<-p.cancelRelease
+	p.waitForConcurrentCompletion()
 	return nil
 }
 
@@ -1661,6 +1708,25 @@ func (p *coordinatedLifecycleProvider) releaseCancel() {
 func (p *coordinatedLifecycleProvider) release() {
 	p.releaseAnswer()
 	p.releaseCancel()
+}
+
+func (p *coordinatedLifecycleProvider) enableConcurrentCompletion() {
+	p.completionReady = make(chan struct{}, 2)
+	p.completionRelease = make(chan struct{})
+}
+
+func (p *coordinatedLifecycleProvider) waitForConcurrentCompletion() {
+	if p.completionReady == nil {
+		return
+	}
+	p.completionReady <- struct{}{}
+	<-p.completionRelease
+}
+
+func (p *coordinatedLifecycleProvider) releaseConcurrentCompletion() {
+	if p.completionRelease != nil {
+		p.completionReleaseOnce.Do(func() { close(p.completionRelease) })
+	}
 }
 
 func (p *coordinatedLifecycleProvider) lifecycleCounts() (int, int, bool) {
@@ -2416,6 +2482,75 @@ func TestProviderLifecycleDefersCloseAndSharesBlockedCancel(t *testing.T) {
 				t.Fatalf("provider lifecycle = {cancel calls:%d close calls:%d close raced:%v}, want {1 1 false}", cancelCalls, closeCalls, raced)
 			}
 		})
+	}
+}
+
+func TestProviderLifecycleConcurrentCompletionStartsOneClose(t *testing.T) {
+	provider := newCoordinatedLifecycleProvider()
+	provider.enableConcurrentCompletion()
+	t.Cleanup(func() {
+		provider.release()
+		provider.releaseConcurrentCompletion()
+	})
+	lifecycle := NewProviderLifecycle(provider)
+	turn := lifecycle.NewTurn()
+	answerDone := make(chan error, 1)
+	go func() {
+		answerDone <- turn.AnswerPermission(context.Background(), "ses_concurrent_close", "req_concurrent_close", runtime.PermissionResponse{})
+	}()
+	select {
+	case <-provider.answerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("AnswerPermission did not start")
+	}
+
+	cancelDone := turn.RequestCancel("ses_concurrent_close", time.Second)
+	select {
+	case <-provider.cancelStarted:
+	case <-time.After(time.Second):
+		t.Fatal("Cancel did not start")
+	}
+	closeDone := lifecycle.RequestClose()
+	select {
+	case <-closeDone:
+		t.Fatal("provider closed while AnswerPermission and Cancel were live")
+	default:
+	}
+
+	provider.release()
+	for range 2 {
+		select {
+		case <-provider.completionReady:
+		case <-time.After(time.Second):
+			t.Fatal("provider calls did not reach the concurrent completion barrier")
+		}
+	}
+	provider.releaseConcurrentCompletion()
+
+	select {
+	case err := <-answerDone:
+		if err != nil {
+			t.Fatalf("AnswerPermission: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("AnswerPermission did not return")
+	}
+	select {
+	case <-cancelDone:
+		if err := turn.cancelError(); err != nil {
+			t.Fatalf("Cancel: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Cancel did not return")
+	}
+	select {
+	case <-closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("provider did not close after concurrent completions")
+	}
+	_, closeCalls, raced := provider.lifecycleCounts()
+	if closeCalls != 1 || raced {
+		t.Fatalf("provider close lifecycle = {calls:%d raced:%v}, want {1 false}", closeCalls, raced)
 	}
 }
 

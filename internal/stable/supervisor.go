@@ -2585,6 +2585,9 @@ func (s *Supervisor) beginChildShutdown(child *childRuntime) *permissionProvider
 	}
 	if lifecycle != nil {
 		lifecycle.closing = true
+		// Preserve this admission-boundary order: answerCtx must interrupt
+		// admitted answers before shared RequestCancel and the parent cancelFn
+		// run outside writeMu. The parent context reaches answerCtx later.
 		lifecycle.cancelAnswers()
 	}
 	cancel := child.cancelFn

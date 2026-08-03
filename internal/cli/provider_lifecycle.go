@@ -64,16 +64,23 @@ func (l *ProviderLifecycle) beginCall() bool {
 func (l *ProviderLifecycle) finishCall() {
 	l.mu.Lock()
 	l.liveCalls--
-	closeNow := l.closing && l.liveCalls == 0 && !l.closeStarted
-	if closeNow {
-		l.closeStarted = true
-	}
+	closeNow := l.startCloseIfDrainedLocked()
 	l.mu.Unlock()
 	if closeNow {
 		// A deferred close must not delay the provider call that made teardown
 		// safe. This also contains a third-party Close implementation that blocks.
 		go l.closeProvider()
 	}
+}
+
+// startCloseIfDrainedLocked records the one deferred close after a tracked
+// call leaves the lifecycle. l.mu must be held.
+func (l *ProviderLifecycle) startCloseIfDrainedLocked() bool {
+	if l.closing && l.liveCalls == 0 && !l.closeStarted {
+		l.closeStarted = true
+		return true
+	}
+	return false
 }
 
 func (l *ProviderLifecycle) closeProvider() {
@@ -163,10 +170,7 @@ func (t *ProviderTurn) RequestCancel(sessionID string, timeout time.Duration) <-
 				delete(l.activeCancels, sessionID)
 			}
 			l.liveCalls--
-			closeNow := l.closing && l.liveCalls == 0 && !l.closeStarted
-			if closeNow {
-				l.closeStarted = true
-			}
+			closeNow := l.startCloseIfDrainedLocked()
 			l.mu.Unlock()
 			if closeNow {
 				go l.closeProvider()

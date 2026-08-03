@@ -1288,6 +1288,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 			}
 			if event.Event == "permission.request" {
 				// Auto-answer / control-owner / file fallback resolver.
+				event = events.Clone(event)
 				if event.Fields == nil {
 					event.Fields = map[string]any{}
 				}
