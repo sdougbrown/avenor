@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -317,6 +318,8 @@ func TestCloseReleasesHandle(t *testing.T) {
 	b.Release("anything")
 	if _, err := b.Acquire("rt"); err == nil {
 		t.Fatal("Acquire after Close should error")
+	} else if !strings.Contains(err.Error(), "budget is closed") {
+		t.Fatalf("Acquire error = %q, want to contain %q", err.Error(), "budget is closed")
 	}
 }
 
@@ -407,5 +410,23 @@ func TestReapReclaimsDeadPIDAcrossHandles(t *testing.T) {
 	active, _, _ = root.Status()
 	if active != 0 {
 		t.Fatalf("active = %d, want 0 after reap", active)
+	}
+}
+
+func TestCapacityErrorFormat(t *testing.T) {
+	local := &CapacityError{Source: "local", Limit: 16, Active: 16}
+	if msg := local.Error(); msg != "max runtimes (16) reached" {
+		t.Fatalf("local Error() = %q, want %q", msg, "max runtimes (16) reached")
+	}
+	if !local.Retryable() {
+		t.Fatal("local CapacityError should be retryable")
+	}
+
+	tree := &CapacityError{Source: "tree", Limit: 64, Active: 64, RootID: "abc123"}
+	if msg := tree.Error(); msg != "tree budget exhausted (64/64 active)" {
+		t.Fatalf("tree Error() = %q, want %q", msg, "tree budget exhausted (64/64 active)")
+	}
+	if !tree.Retryable() {
+		t.Fatal("tree CapacityError should be retryable")
 	}
 }
