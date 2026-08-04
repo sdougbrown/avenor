@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/client"
+	"github.com/sdougbrown/avenor/internal/admission"
 	"github.com/sdougbrown/avenor/internal/events"
 )
 
@@ -1600,6 +1601,14 @@ func (m *mockStableHandler) RuntimeSendToParent(runtimeID, message string) error
 	return nil
 }
 
+func (m *mockStableHandler) TreeBudgetStatus() any {
+	return map[string]any{"active": 0, "capacity": 0, "root_id": ""}
+}
+
+func (m *mockStableHandler) WaitForCapacityMS(timeoutMS int) error {
+	return nil
+}
+
 func TestStableSpawnMethod(t *testing.T) {
 	state := NewState("run_1", "", 0)
 	s := NewServer(state)
@@ -1626,6 +1635,99 @@ func TestStableSpawnMethod(t *testing.T) {
 	}
 	if v, _ := res["runtime_id"].(string); v != "rt_1" {
 		t.Errorf("runtime_id = %q, want rt_1", v)
+	}
+}
+
+func TestStableSpawnCapacityErrorIsTyped(t *testing.T) {
+	state := NewState("run_1", "", 0)
+	s := NewServer(state)
+	s.SetStableHandler(&mockStableHandler{
+		spawnErr: &admission.CapacityError{Source: "tree", Limit: 3, Active: 3, RootID: "root_x"},
+	})
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	c := mustDial(t, path)
+	defer c.Close()
+	params, _ := json.Marshal(map[string]any{"prompt": "hello", "dir": "/tmp"})
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "spawn", Params: params})
+	r := readResp(t, c)
+	if r.Error == nil {
+		t.Fatal("expected capacity error")
+	}
+	if r.Error.Code != -32050 {
+		t.Fatalf("error code = %d, want -32050", r.Error.Code)
+	}
+	data, ok := r.Error.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("error data type: %T", r.Error.Data)
+	}
+	if data["source"] != "tree" {
+		t.Fatalf("source = %v, want tree", data["source"])
+	}
+	if data["retryable"] != true {
+		t.Fatalf("retryable = %v, want true", data["retryable"])
+	}
+	if data["root_id"] != "root_x" {
+		t.Fatalf("root_id = %v, want root_x", data["root_id"])
+	}
+}
+
+func TestStableTreeBudgetMethod(t *testing.T) {
+	state := NewState("run_1", "", 0)
+	s := NewServer(state)
+	s.SetStableHandler(&mockStableHandler{})
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	c := mustDial(t, path)
+	defer c.Close()
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "tree_budget"})
+	r := readResp(t, c)
+	if r.Error != nil {
+		t.Fatalf("tree_budget error: %+v", r.Error)
+	}
+	res, ok := r.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("result type: %T", r.Result)
+	}
+	if _, ok := res["active"]; !ok {
+		t.Fatalf("result missing active: %+v", res)
+	}
+}
+
+func TestStableWaitForCapacityMethod(t *testing.T) {
+	state := NewState("run_1", "", 0)
+	s := NewServer(state)
+	s.SetStableHandler(&mockStableHandler{})
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	c := mustDial(t, path)
+	defer c.Close()
+
+	// Success case: handler returns nil (capacity may be available).
+	params, _ := json.Marshal(map[string]any{"timeout_ms": 100})
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "wait_for_capacity", Params: params})
+	r := readResp(t, c)
+	if r.Error != nil {
+		t.Fatalf("wait_for_capacity error: %+v", r.Error)
+	}
+	res, ok := r.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("result type: %T", r.Result)
+	}
+	if _, ok := res["capacity_available"]; !ok {
+		t.Fatalf("result missing capacity_available: %+v", res)
 	}
 }
 

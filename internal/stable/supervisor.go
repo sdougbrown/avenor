@@ -3,6 +3,7 @@ package stable
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sdougbrown/avenor/internal/admission"
 	"github.com/sdougbrown/avenor/internal/cli"
 	"github.com/sdougbrown/avenor/internal/control"
 	"github.com/sdougbrown/avenor/internal/events"
@@ -35,6 +37,19 @@ type Config struct {
 	ShutdownTimeout        time.Duration
 	PermissionClaimTimeout time.Duration
 	ChildQuestionTimeout   time.Duration
+
+	// MaxTreeBudget is the inherited descendant budget capacity for a root
+	// supervisor tree. It bounds the total concurrent runtimes across the
+	// whole tree, including nested supervisors. Zero uses
+	// admission.DefaultTreeBudget. Ignored when TreeBudgetFile is set (a
+	// nested supervisor joins an existing tree rather than creating one).
+	MaxTreeBudget int
+
+	// TreeBudgetFile is the path of an existing tree budget to join. When
+	// empty, the supervisor is a root and creates a new budget file derived
+	// from ControlSocket. When set, the supervisor opens the existing file as
+	// a nested participant sharing the root's capacity.
+	TreeBudgetFile string
 }
 
 type SpawnParams struct {
@@ -172,6 +187,15 @@ type childRuntime struct {
 	writerClosed      bool
 	directAnswers     int
 	directAnswersDone chan struct{}
+
+	// treeToken is the current tree-budget admission token held by this runtime.
+	// It is non-empty while the runtime is actively executing a turn and empty
+	// while parked between turns. Managed by runChild; released by complete()
+	// as a safety net for terminal failure paths.
+	treeToken string
+	// treeBudgetRelease returns a token to the tree budget. Set by spawn when
+	// admission is active. Nil in degraded mode (no tree budget).
+	treeBudgetRelease func(token string)
 }
 
 type effectiveIdentity struct {
@@ -295,6 +319,19 @@ type Supervisor struct {
 	beforeChildWriterCloseWait   func()
 	beforeChildProviderCloseWait func()
 	afterShutdownAdmissionClosed func()
+
+	// Tree-scoped admission controller. Nil when the budget could not be
+	// created or opened (degraded mode: only the local MaxRuntimes limit is
+	// enforced). Protected by treeBudgetMu for the reaper goroutine.
+	treeBudgetMu sync.Mutex
+	treeBudget   *admission.Budget
+	reaperStop   chan struct{}
+	reaperDone   chan struct{}
+	// capacityMu guards capacityCh, a broadcast channel closed (and replaced) on
+	// every tree-budget release so callers waiting for capacity can retry. It
+	// does not schedule or prioritize work.
+	capacityMu sync.Mutex
+	capacityCh chan struct{}
 }
 
 func NewSupervisor(cfg Config) *Supervisor {
@@ -323,11 +360,13 @@ func NewSupervisor(cfg Config) *Supervisor {
 		// Non-fatal — broker is optional. Runs will still work without it.
 	}
 	sup.httpServerCond = sync.NewCond(&sup.httpServerMu)
+	sup.capacityCh = make(chan struct{})
 	if sup.childQuestionTimeout <= 0 {
 		sup.childQuestionTimeout = 120 * time.Second
 	}
 	sup.control.SetStableHandler(sup)
 	sup.newProviderFunc = factory.NewProvider
+	sup.initTreeBudget()
 	return sup
 }
 
@@ -379,6 +418,9 @@ func (s *Supervisor) Run() int {
 		idleDeadline = time.Now().Add(s.config.IdleTimeout)
 	}
 
+	s.startReaper()
+	defer s.stopReaper()
+
 	for {
 		idleCh := idleCheck(s.config.IdleTimeout, s.activeRuntimeCount(), &idleDeadline)
 		select {
@@ -395,6 +437,234 @@ func (s *Supervisor) Run() int {
 			continue
 		}
 	}
+}
+
+// initTreeBudget creates or joins the tree-scoped admission budget. A root
+// supervisor (TreeBudgetFile empty) creates a new budget file derived from the
+// control socket path. A nested supervisor (TreeBudgetFile set) opens the
+// existing file to share the root's capacity. Failure is non-fatal: the
+// supervisor continues with only its local MaxRuntimes limit enforced.
+func (s *Supervisor) initTreeBudget() {
+	path := s.config.TreeBudgetFile
+	if path == "" {
+		// Root: derive a budget path next to the control socket.
+		path = s.config.ControlSocket + ".tree-budget"
+		budget, err := admission.CreateRoot(path, s.config.MaxTreeBudget)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "avenor stable: create tree budget: %v\n", err)
+			return
+		}
+		budget.AddNotifier(s.signalCapacityChange)
+		s.treeBudget = budget
+	} else {
+		budget, err := admission.Open(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "avenor stable: join tree budget: %v\n", err)
+			return
+		}
+		budget.AddNotifier(s.signalCapacityChange)
+		s.treeBudget = budget
+	}
+}
+
+// TreeBudgetPath returns the path of the tree budget file, or empty when no
+// budget is active. The root command entry point sets AVENOR_TREE_BUDGET to
+// this value so descendant processes inherit the tree identity.
+func (s *Supervisor) TreeBudgetPath() string {
+	s.treeBudgetMu.Lock()
+	defer s.treeBudgetMu.Unlock()
+	if s.treeBudget == nil {
+		return ""
+	}
+	return s.treeBudget.Path()
+}
+
+// treeBudgetStatusValues returns the active count, capacity, and root id of
+// the tree budget, or zeros and an empty root id when no budget is active.
+func (s *Supervisor) treeBudgetStatusValues() (active, capacity int, rootID string) {
+	s.treeBudgetMu.Lock()
+	defer s.treeBudgetMu.Unlock()
+	if s.treeBudget == nil {
+		return 0, 0, ""
+	}
+	return s.treeBudget.Status()
+}
+
+// TreeBudgetStatus implements control.StableHandler and returns a
+// diagnostic snapshot of the tree-scoped admission budget.
+func (s *Supervisor) TreeBudgetStatus() any {
+	active, capacity, rootID := s.treeBudgetStatusValues()
+	return map[string]any{
+		"active":   active,
+		"capacity": capacity,
+		"root_id":  rootID,
+	}
+}
+
+// startReaper launches a background goroutine that periodically reclaims
+// capacity held by dead descendant processes. It runs only while the
+// supervisor is active and stops before Run returns.
+func (s *Supervisor) startReaper() {
+	s.treeBudgetMu.Lock()
+	if s.treeBudget == nil {
+		s.treeBudgetMu.Unlock()
+		return
+	}
+	s.reaperStop = make(chan struct{})
+	s.reaperDone = make(chan struct{})
+	stop := s.reaperStop
+	s.treeBudgetMu.Unlock()
+	go s.reapLoop(stop)
+}
+
+func (s *Supervisor) reapLoop(stop <-chan struct{}) {
+	defer close(s.reaperDone)
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			s.treeBudgetMu.Lock()
+			budget := s.treeBudget
+			s.treeBudgetMu.Unlock()
+			if budget == nil {
+				return
+			}
+			if budget.Reap() > 0 {
+				s.signalCapacityChange()
+			}
+		}
+	}
+}
+
+// stopReaper halts the background reaper and waits for it to exit.
+func (s *Supervisor) stopReaper() {
+	s.treeBudgetMu.Lock()
+	stop := s.reaperStop
+	s.reaperStop = nil
+	s.treeBudgetMu.Unlock()
+	if stop == nil {
+		return
+	}
+	close(stop)
+	<-s.reaperDone
+}
+
+// signalCapacityChange wakes callers waiting in WaitForCapacity. It does not
+// choose which caller runs next; it only notifies that capacity may be
+// available.
+func (s *Supervisor) signalCapacityChange() {
+	s.capacityMu.Lock()
+	if s.capacityCh != nil {
+		close(s.capacityCh)
+	}
+	s.capacityCh = make(chan struct{})
+	s.capacityMu.Unlock()
+}
+
+// acquireTreeAdmission reserves one tree-budget slot. It returns an empty
+// token (no-op) when no tree budget is active (degraded mode) or a non-empty
+// token on success. A tree-exhaustion failure returns a *admission.CapacityError
+// with Source "tree".
+func (s *Supervisor) acquireTreeAdmission() (string, error) {
+	s.treeBudgetMu.Lock()
+	budget := s.treeBudget
+	s.treeBudgetMu.Unlock()
+	if budget == nil {
+		return "", nil
+	}
+	token, err := budget.Acquire(s.runID + ":pending")
+	if err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+// acquireChildTreeToken acquires a tree-budget slot for a resuming runtime and
+// stores it on the child. It blocks until a slot is available, ctx is canceled,
+// or the supervisor shuts down. Returns an error only when the wait is
+// abandoned (cancel/shutdown); a nil error means the child holds a token (or
+// is in degraded mode with no budget).
+func (s *Supervisor) acquireChildTreeToken(ctx context.Context, child *childRuntime) error {
+	s.treeBudgetMu.Lock()
+	budget := s.treeBudget
+	s.treeBudgetMu.Unlock()
+	if budget == nil {
+		return nil // degraded mode
+	}
+	for {
+		token, err := budget.Acquire(child.id)
+		if err == nil {
+			child.mu.Lock()
+			child.treeToken = token
+			child.treeBudgetRelease = func(tok string) {
+				s.treeBudgetMu.Lock()
+				b := s.treeBudget
+				s.treeBudgetMu.Unlock()
+				if b != nil {
+					b.Release(tok)
+				}
+				s.signalCapacityChange()
+			}
+			child.mu.Unlock()
+			return nil
+		}
+		var ce *admission.CapacityError
+		if !errors.As(err, &ce) {
+			return err
+		}
+		// Tree is exhausted; wait for a capacity change before retrying.
+		if err := s.WaitForCapacity(ctx); err != nil {
+			return err
+		}
+	}
+}
+
+// releaseChildTreeToken releases the runtime's current tree-budget slot, if
+// any. Safe to call when no token is held.
+func (s *Supervisor) releaseChildTreeToken(child *childRuntime) {
+	child.releaseTreeToken()
+}
+
+// WaitForCapacity blocks until a tree budget slot may be available, ctx is
+// canceled, or the supervisor shuts down. It does not reserve capacity; the
+// caller must retry Acquire/spawn after waking. This primitive lets callers
+// that can wait avoid busy-polling without requiring the admission layer to
+// schedule or prioritize their work.
+func (s *Supervisor) WaitForCapacity(ctx context.Context) error {
+	s.capacityMu.Lock()
+	ch := s.capacityCh
+	s.capacityMu.Unlock()
+	// A bounded poll acts as a cross-process fallback: a nested supervisor in
+	// a different process releases into the shared file but cannot signal this
+	// supervisor's in-process channel directly.
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-ch:
+		return nil // capacity changed; caller should retry
+	case <-timer.C:
+		return nil // poll fallback; caller should retry
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.shutdownCh:
+		return errors.New("supervisor is shutting down")
+	}
+}
+
+// WaitForCapacityMS implements control.StableHandler. It waits for up to
+// timeoutMS milliseconds for a capacity change notification, then returns so the
+// caller can retry spawn. It does not reserve capacity. A bounded wait keeps the
+// control connection responsive; callers that need longer waits poll.
+func (s *Supervisor) WaitForCapacityMS(timeoutMS int) error {
+	if timeoutMS <= 0 {
+		timeoutMS = 5000
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMS)*time.Millisecond)
+	defer cancel()
+	return s.WaitForCapacity(ctx)
 }
 
 func (s *Supervisor) writeTombstone(reason string) {
@@ -484,14 +754,37 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 		}
 	}
 
+	// Acquire tree-scoped admission first. The tree budget is a cross-process
+	// authority, so it must be reserved before the local slot to avoid
+	// transiently inflating the local count for a spawn that will fail. If the
+	// tree budget is unavailable the error is typed and retryable; the local
+	// limit is not consumed.
+	treeToken, err := s.acquireTreeAdmission()
+	if err != nil {
+		return SpawnResult{}, err
+	}
+	// releaseTree releases the tree slot for the early-failure paths before a
+	// child exists to own it. Once the child is created it owns the release.
+	releaseTree := func() {
+		s.treeBudgetMu.Lock()
+		budget := s.treeBudget
+		s.treeBudgetMu.Unlock()
+		if budget != nil {
+			budget.Release(treeToken)
+		}
+		s.signalCapacityChange()
+	}
+
 	s.controlMu.Lock()
 	if s.shuttingDown {
 		s.controlMu.Unlock()
+		releaseTree()
 		return SpawnResult{}, fmt.Errorf("supervisor is shutting down")
 	}
 	if s.activeRuntimeCountLocked() >= s.config.MaxRuntimes {
 		s.controlMu.Unlock()
-		return SpawnResult{}, fmt.Errorf("max runtimes (%d) reached", s.config.MaxRuntimes)
+		releaseTree()
+		return SpawnResult{}, &admission.CapacityError{Source: "local", Limit: s.config.MaxRuntimes, Active: s.activeRuntimeCountLocked()}
 	}
 	s.nextID++
 	rtID := fmt.Sprintf("rt_%d", s.nextID)
@@ -507,6 +800,18 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 		done:         make(chan struct{}),
 		promptCh:     make(chan struct{}, 1),
 		autoApprove:  params.AutoApprove,
+	}
+	if treeToken != "" {
+		child.treeToken = treeToken
+		child.treeBudgetRelease = func(token string) {
+			s.treeBudgetMu.Lock()
+			budget := s.treeBudget
+			s.treeBudgetMu.Unlock()
+			if budget != nil {
+				budget.Release(token)
+			}
+			s.signalCapacityChange()
+		}
 	}
 	s.runtimes[rtID] = child
 	s.controlMu.Unlock()
@@ -875,11 +1180,23 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 	}
 
 	resumeID := ""
+	needAcquire := false // tree token held from spawn for the first attempt
 	for attempt := 1; ; attempt++ {
 		if attempt > 1 && resumeID == "" {
 			resumeID = child.sessionID()
 		}
+		if needAcquire {
+			if err := s.acquireChildTreeToken(ctx, child); err != nil {
+				return
+			}
+			needAcquire = false
+		}
 		result := s.runChildAttempt(ctx, child, resumeID, promptText, timer)
+		// Release tree admission after the turn so a parked runtime does not
+		// consume descendant budget while idle. A subsequent prompt
+		// re-acquires before its turn.
+		s.releaseChildTreeToken(child)
+		needAcquire = true
 		if !runtime.IsRetryableFailure(result.exitCode, result.stopReason) || attempt > maxRetries {
 			stopReason := result.stopReason
 			if stopReason == "" {
@@ -2179,6 +2496,14 @@ func (s *Supervisor) shutdown(mode string) int {
 	if s.broker != nil {
 		_ = s.broker.Stop()
 	}
+	s.treeBudgetMu.Lock()
+	budget := s.treeBudget
+	s.treeBudget = nil
+	s.treeBudgetMu.Unlock()
+	if budget != nil {
+		_ = budget.Close()
+	}
+	s.signalCapacityChange()
 	return 0
 }
 
@@ -2455,11 +2780,25 @@ func (s *Supervisor) clearRuntimePermissionOptions(runtimeID string) {
 // teardown. It is safe for reservation rollback and a child goroutine to race.
 func (child *childRuntime) complete() {
 	child.doneOnce.Do(func() {
+		child.releaseTreeToken()
 		child.mu.Lock()
 		child.completed = true
 		child.mu.Unlock()
 		close(child.done)
 	})
+}
+
+// releaseTreeToken returns the runtime's current tree-budget slot, if any. It
+// is safe to call when no token is held and to call more than once.
+func (child *childRuntime) releaseTreeToken() {
+	child.mu.Lock()
+	tok := child.treeToken
+	child.treeToken = ""
+	child.mu.Unlock()
+	if tok == "" || child.treeBudgetRelease == nil {
+		return
+	}
+	child.treeBudgetRelease(tok)
 }
 
 func newPermissionProviderLifecycle(child *childRuntime, provider runtime.Provider, sessionID string) *permissionProviderLifecycle {
