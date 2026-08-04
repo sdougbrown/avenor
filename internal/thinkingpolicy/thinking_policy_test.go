@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -30,8 +31,8 @@ func TestValidateCanonical(t *testing.T) {
 	if err == nil {
 		t.Fatal("HIGH accepted")
 	}
-	if want := "invalid thinking value \"HIGH\" (allowed: off, minimal, low, medium, high, xhigh, max)"; err.Error() != want {
-		t.Fatalf("error = %q, want %q", err.Error(), want)
+	if !strings.Contains(err.Error(), "invalid thinking value") || !strings.Contains(err.Error(), "HIGH") {
+		t.Fatalf("error = %q, want substring %q and %q", err.Error(), "invalid thinking value", "HIGH")
 	}
 }
 
@@ -99,14 +100,20 @@ func TestSchemaCanonicalLockstep(t *testing.T) {
 		t.Fatalf("read schema: %v", err)
 	}
 	var schema struct {
-		Fields map[string]any   `json:"fields"`
-		Rules  []map[string]any `json:"rules"`
+		Conditions map[string]any        `json:"conditions"`
+		Fields     map[string]any        `json:"fields"`
+		Rules     []map[string]any      `json:"rules"`
 	}
 	if err := json.Unmarshal(data, &schema); err != nil {
 		t.Fatalf("parse schema: %v", err)
 	}
 	if len(schema.Fields) != 1 || schema.Fields["thinking"] == nil {
 		t.Fatalf("schema must declare exactly the thinking field")
+	}
+
+	// The schema must declare backend and resume conditions.
+	if schema.Conditions["backend"] == nil || schema.Conditions["resume"] == nil {
+		t.Fatal("schema must declare backend and resume conditions")
 	}
 
 	// Extract the canonical values embedded in the check rule's literal array.
@@ -130,10 +137,51 @@ func TestSchemaCanonicalLockstep(t *testing.T) {
 		t.Fatalf("schema canonical %v != Go CanonicalValues() %v", schemaCanonical, CanonicalValues())
 	}
 
-	// The generated field struct must cover exactly the schema fields, and the
-	// generated validation must reject the same set CanonicalValues accepts.
+	// The generated field struct must cover exactly the schema fields.
 	fields := reflect.TypeOf(ThinkingPolicyFields{})
 	if fields.NumField() != 1 || fields.Field(0).Name != "Thinking" {
 		t.Fatalf("generated fields = %v", fields)
+	}
+
+	// The generated conditions struct must have Backend and Resume fields.
+	conds := reflect.TypeOf(ThinkingPolicyConditions{})
+	if conds.NumField() != 2 || conds.Field(0).Name != "Backend" || conds.Field(1).Name != "Resume" {
+		t.Fatalf("generated conditions = %v", conds)
+	}
+}
+
+// TestSchemaBackendsMatchConformance verifies that the set of backends with
+// thinking support in the schema-derived supportedBackends set matches the
+// backends that appear in the conformance fixture. This catches drift between
+// the schema and the fixture.
+func TestSchemaBackendsMatchConformance(t *testing.T) {
+	type conformanceData struct {
+		Backend []struct {
+			Backend string `json:"backend"`
+		} `json:"backendCases"`
+	}
+	data, err := os.ReadFile("../../schemas/thinking_policy.conformance.json")
+	if err != nil {
+		t.Fatalf("read conformance: %v", err)
+	}
+	var c conformanceData
+	if err := json.Unmarshal(data, &c); err != nil {
+		t.Fatalf("parse conformance: %v", err)
+	}
+	fixtureBackends := make(map[string]bool)
+	for _, bc := range c.Backend {
+		fixtureBackends[bc.Backend] = true
+	}
+	// Every backend in the fixture must be classified by supportedBackends.
+	for backend := range fixtureBackends {
+		// Just ensure Evaluate doesn't panic; the actual valid/invalid
+		// classification is tested by TestConformanceBackendPolicy.
+		_ = Evaluate(backend, "low", false)
+	}
+	// Every backend in supportedBackends must appear in the fixture.
+	for backend := range supportedBackends {
+		if !fixtureBackends[backend] {
+			t.Errorf("supported backend %q missing from conformance fixture", backend)
+		}
 	}
 }

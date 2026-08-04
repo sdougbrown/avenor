@@ -30,6 +30,9 @@
     { "name": "agy high resume", "backend": "agy", "value": "high", "resume": true, "valid": false },
     { "name": "opencode-acp off start", "backend": "opencode-acp", "value": "off", "resume": false, "valid": false },
     { "name": "gemini-acp low resume", "backend": "gemini-acp", "value": "low", "resume": true, "valid": false },
+    { "name": "opencode-http off start", "backend": "opencode-http", "value": "off", "resume": false, "valid": false },
+    { "name": "cursor-acp high start", "backend": "cursor-acp", "value": "high", "resume": false, "valid": false },
+    { "name": "pony medium resume", "backend": "pony", "value": "medium", "resume": true, "valid": false },
     { "name": "codex empty start", "backend": "codex-app-server", "value": "", "resume": false, "valid": true }
   ]
 }

@@ -73,4 +73,25 @@ describe('thinking policy helpers', () => {
       'only when starting a session',
     )
   })
+
+  it('all 10 backends are exercised by the conformance fixture', () => {
+    const allBackends = [
+      'codex-app-server',
+      'pi',
+      'claude',
+      'claude-channel',
+      'opencode-acp',
+      'opencode-http',
+      'gemini-acp',
+      'cursor-acp',
+      'agy',
+      'pony',
+    ]
+    const fixtureBackends = new Set(
+      conformanceData.backendCases.map((c) => c.backend),
+    )
+    for (const backend of allBackends) {
+      expect(fixtureBackends.has(backend)).toBe(true)
+    }
+  })
 })

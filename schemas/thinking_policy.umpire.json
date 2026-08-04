@@ -1,5 +1,15 @@
 {
   "version": 1,
+  "conditions": {
+    "backend": {
+      "type": "string",
+      "description": "Backend identifier (e.g. codex-app-server, pi, claude)."
+    },
+    "resume": {
+      "type": "boolean",
+      "description": "Whether the value is being applied on an explicit resume rather than a fresh start."
+    }
+  },
   "fields": {
     "thinking": {
       "isEmpty": "string",
@@ -16,6 +26,53 @@
         "value": ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
       },
       "reason": "not a canonical thinking value (off, minimal, low, medium, high, xhigh, max)"
+    },
+    {
+      "type": "eitherOf",
+      "group": "thinkingPolicy",
+      "field": "thinking",
+      "branches": {
+        "empty": [
+          {
+            "type": "fairWhen",
+            "field": "thinking",
+            "when": {
+              "op": "absent",
+              "field": "thinking"
+            },
+            "reason": "thinking is empty (backend default)"
+          }
+        ],
+        "fullSupport": [
+          {
+            "type": "fairWhen",
+            "field": "thinking",
+            "when": {
+              "op": "and",
+              "exprs": [
+                { "op": "condIn", "condition": "backend", "values": ["codex-app-server", "pi"] },
+                { "op": "in", "field": "thinking", "values": ["off", "minimal", "low", "medium", "high", "xhigh", "max"] }
+              ]
+            },
+            "reason": "codex-app-server and pi support all canonical thinking values on start and resume"
+          }
+        ],
+        "claudeStart": [
+          {
+            "type": "fairWhen",
+            "field": "thinking",
+            "when": {
+              "op": "and",
+              "exprs": [
+                { "op": "condIn", "condition": "backend", "values": ["claude", "claude-channel"] },
+                { "op": "condEq", "condition": "resume", "value": false },
+                { "op": "in", "field": "thinking", "values": ["low", "medium", "high", "xhigh", "max"] }
+              ]
+            },
+            "reason": "claude and claude-channel support low through max only on a new session"
+          }
+        ]
+      }
     }
   ]
 }

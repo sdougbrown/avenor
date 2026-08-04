@@ -48,75 +48,98 @@ const (
 	StartOnly
 )
 
-// Policy holds the canonical thinking values a backend supports on a fresh
-// start and on an explicit resume.
-type Policy struct {
-	Start  []string
-	Resume []string
-}
-
-// Policies is the single source for the static backend thinking policy. Start
-// and explicit-resume support are represented separately. It is mirrored by
-// the TypeScript packages and exercised by the shared conformance fixture.
-var Policies = map[string]Policy{
-	"codex-app-server": {Start: CanonicalValues(), Resume: CanonicalValues()},
-	"pi":               {Start: CanonicalValues(), Resume: CanonicalValues()},
-	"claude":           {Start: []string{"low", "medium", "high", "xhigh", "max"}}, // start-only on resume
-	"claude-channel":   {Start: []string{"low", "medium", "high", "xhigh", "max"}}, // start-only on resume
-	"opencode-acp":     {},
-	"opencode-http":    {},
-	"gemini-acp":       {},
-	"cursor-acp":       {},
-	"agy":              {},
-	"pony":             {},
-}
-
-// StartValues returns the thinking values supported by backend when starting,
-// or nil if the backend is unknown.
-func StartValues(backend string) []string {
-	p, ok := Policies[backend]
-	if !ok {
-		return nil
+// supportedBackends is the set of backends that have thinking support, derived
+// from the Umpire schema's eitherOf branches at init time.
+var supportedBackends = func() map[string]bool {
+	data, err := readSchemaRules()
+	if err != nil {
+		// Fallback: derive from the generated branch constants. The schema
+		// includes branches for these backends in their condIn expressions.
+		return map[string]bool{
+			"codex-app-server": true,
+			"pi":               true,
+			"claude":           true,
+			"claude-channel":   true,
+		}
 	}
-	return p.Start
-}
+	return extractBackendsFromRules(data)
+}()
 
-// ResumeValues returns the thinking values supported by backend on an explicit
-// resume, or nil if the backend is unknown.
-func ResumeValues(backend string) []string {
-	p, ok := Policies[backend]
-	if !ok {
-		return nil
-	}
-	return p.Resume
-}
-
-// Evaluate applies the static policy for a (backend, value, resume) combination.
-// An empty value is always accepted. UnsupportedCapability takes precedence
-// over StartOnly, and UnsupportedValue over both, matching the existing
-// conservative runtime behavior.
+// Evaluate applies the backend policy for a (backend, value, resume) combination
+// using the generated Umpire Check function with backend and resume conditions.
+// An empty value is always accepted. The outcome classification
+// (UnsupportedCapability / UnsupportedValue / StartOnly) is derived from the
+// generated Fair flag and the active branch.
 func Evaluate(backend, value string, resume bool) Outcome {
 	if value == "" {
 		return OK
 	}
-	p, known := Policies[backend]
-	if !known {
+	v := value
+	avail := Check(
+		ThinkingPolicyFields{Thinking: &v},
+		ThinkingPolicyConditions{Backend: backend, Resume: resume},
+		ThinkingPolicyFields{},
+	)
+	if avail.Thinking.Fair {
+		return OK
+	}
+	// Fair is false: classify the failure mode.
+	if !supportedBackends[backend] {
 		return UnsupportedCapability
 	}
-	set := p.Start
+	// The backend is known but the value was rejected. Check if it would be
+	// accepted on a fresh start (resume=false) to distinguish StartOnly.
 	if resume {
-		set = p.Resume
-	}
-	if len(set) == 0 {
-		if resume && len(p.Start) > 0 {
+		startAvail := Check(
+			ThinkingPolicyFields{Thinking: &v},
+			ThinkingPolicyConditions{Backend: backend, Resume: false},
+			ThinkingPolicyFields{},
+		)
+		if startAvail.Thinking.Fair {
 			return StartOnly
 		}
-		return UnsupportedCapability
 	}
-	if !contains(set, value) {
-		return UnsupportedValue
+	return UnsupportedValue
+}
+
+// StartValues returns the thinking values supported by backend when starting,
+// or nil if the backend is unknown or has no thinking support.
+func StartValues(backend string) []string {
+	if !supportedBackends[backend] {
+		return nil
 	}
-	return OK
+	var result []string
+	for _, v := range CanonicalValues() {
+		avail := Check(
+			ThinkingPolicyFields{Thinking: &v},
+			ThinkingPolicyConditions{Backend: backend, Resume: false},
+			ThinkingPolicyFields{},
+		)
+		if avail.Thinking.Fair {
+			result = append(result, v)
+		}
+	}
+	return result
+}
+
+// ResumeValues returns the thinking values supported by backend on an explicit
+// resume, or nil if the backend is unknown or has no thinking support.
+func ResumeValues(backend string) []string {
+	if !supportedBackends[backend] {
+		return nil
+	}
+	var result []string
+	for _, v := range CanonicalValues() {
+		avail := Check(
+			ThinkingPolicyFields{Thinking: &v},
+			ThinkingPolicyConditions{Backend: backend, Resume: true},
+			ThinkingPolicyFields{},
+		)
+		if avail.Thinking.Fair {
+			result = append(result, v)
+		}
+	}
+	return result
 }
 
 func joinValues(values []string) string {
