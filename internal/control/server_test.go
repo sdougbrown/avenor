@@ -1604,7 +1604,7 @@ func (m *mockStableHandler) RuntimeSendToParent(runtimeID, message string) error
 }
 
 func (m *mockStableHandler) TreeBudgetStatus() any {
-	return map[string]any{"active": 0, "capacity": 0, "root_id": "root_0"}
+	return map[string]any{"active": 0, "capacity": 0, "root_id": "root_0", "mode": "active"}
 }
 
 func (m *mockStableHandler) WaitForCapacityMS(timeoutMS int) error {
@@ -1707,6 +1707,9 @@ func TestStableTreeBudgetMethod(t *testing.T) {
 	}
 	if res["root_id"] != "root_0" {
 		t.Fatalf("root_id = %v, want root_0", res["root_id"])
+	}
+	if res["mode"] != "active" {
+		t.Fatalf("mode = %v, want active", res["mode"])
 	}
 }
 

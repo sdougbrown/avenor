@@ -300,6 +300,12 @@ When the tree budget is exhausted, spawn requests fail with a typed, retryable e
 
 The `source` field distinguishes `"local"` (the per-supervisor fan-out limit) from `"tree"` (the inherited descendant budget). Callers that can wait may poll `wait_for_capacity` to be notified on a capacity change; callers that cannot wait receive the typed error and may retry.
 
+#### Optional coordination and degraded mode
+
+The budget is a same-user coordination primitive, not a security boundary: descendants that can access the inherited path are trusted to share it. If a root cannot create its file, or a descendant cannot join the inherited file, the supervisor continues with its local `--max-runtimes` limit. This preserves availability but no longer bounds the full supervisor tree, so it is a weaker guarantee. A warning is written to stderr and `tree_budget` reports `"mode": "degraded"` with a `reason`; an active budget reports `"mode": "active"`.
+
+The budget counts supervisor-managed runtimes. A runtime that internally fans out to provider sessions, such as a team workflow, holds one supervisor runtime slot rather than one slot per provider process.
+
 #### Parked runtimes and re-admission
 
 A runtime that finishes a turn (for example, `end_turn`) parks and **releases** its tree-budget slot — a parked (resident) runtime does not consume descendant budget while idle. When a parked runtime receives a follow-up prompt, it **re-acquires** tree admission before executing; if the tree budget is full, it waits for capacity rather than bypassing the budget. The local fan-out limit still counts a parked runtime as a resident child.
@@ -321,10 +327,14 @@ avenor control --socket /tmp/avenor.sock tree_budget
 ```
 
 ```json
-{"active": 3, "capacity": 64, "root_id": "a1b2c3..."}
+{"active": 3, "capacity": 64, "root_id": "a1b2c3...", "mode": "active"}
 ```
 
-A root without an active budget (degraded mode) reports `active: 0`, `capacity: 0`, `root_id: ""`.
+A root without an active budget reports degraded mode and its cause:
+
+```json
+{"active": 0, "capacity": 0, "root_id": "", "mode": "degraded", "reason": "create tree budget: ..."}
+```
 
 
 ## Idle Timeout

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -446,6 +447,9 @@ func TestTreeBudgetStatusViaHandler(t *testing.T) {
 	if status["root_id"] == "" {
 		t.Fatal("root_id is empty")
 	}
+	if status["mode"] != "active" {
+		t.Fatalf("mode = %v, want active", status["mode"])
+	}
 }
 
 func TestWaitForCapacityWakesOnRelease(t *testing.T) {
@@ -498,6 +502,10 @@ func TestDegradedModeNoBudgetStillEnforcesLocal(t *testing.T) {
 	if sup.treeBudget != nil {
 		t.Fatal("expected nil tree budget in degraded mode")
 	}
+	status := sup.TreeBudgetStatus().(map[string]any)
+	if status["mode"] != "degraded" || status["reason"] == "" {
+		t.Fatalf("status = %+v, want degraded mode with a reason", status)
+	}
 
 	// Install a blocking provider and verify the local limit is enforced even
 	// without a tree budget.
@@ -525,6 +533,24 @@ func TestDegradedModeNoBudgetStillEnforcesLocal(t *testing.T) {
 	}
 	if ce.Source != "local" {
 		t.Fatalf("source = %q, want %q (degraded mode has no tree budget)", ce.Source, "local")
+	}
+}
+
+func TestInheritedBudgetFailureReportsDegradedMode(t *testing.T) {
+	sup := NewSupervisor(Config{
+		ControlSocket:  filepath.Join(t.TempDir(), "control.sock"),
+		MaxRuntimes:    1,
+		TreeBudgetFile: filepath.Join(t.TempDir(), "missing.tree-budget"),
+	})
+	defer func() { _ = sup.broker.Stop() }()
+
+	status := sup.TreeBudgetStatus().(map[string]any)
+	if status["mode"] != "degraded" {
+		t.Fatalf("mode = %v, want degraded", status["mode"])
+	}
+	reason, _ := status["reason"].(string)
+	if !strings.Contains(reason, "join tree budget") {
+		t.Fatalf("reason = %q, want join failure", reason)
 	}
 }
 

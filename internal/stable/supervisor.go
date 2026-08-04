@@ -325,6 +325,7 @@ type Supervisor struct {
 	// enforced). Protected by treeBudgetMu for the reaper goroutine.
 	treeBudgetMu   sync.Mutex
 	treeBudget     *admission.Budget
+	treeBudgetErr  string // non-empty when the optional budget is unavailable
 	reaperStop     chan struct{}
 	reaperDone     chan struct{}
 	reaperInterval time.Duration
@@ -466,11 +467,21 @@ func (s *Supervisor) initTreeBudget() {
 		if path != "" {
 			action = "join"
 		}
-		fmt.Fprintf(os.Stderr, "avenor stable: %s tree budget: %v\n", action, err)
+		message := fmt.Sprintf("%s tree budget: %v", action, err)
+		s.treeBudgetMu.Lock()
+		s.treeBudgetErr = message
+		s.treeBudgetMu.Unlock()
+		// Admission is optional: preserve the local per-supervisor limit when
+		// cross-process coordination state is unavailable, but make the weaker
+		// guarantee visible through stderr and tree_budget status.
+		fmt.Fprintf(os.Stderr, "avenor stable: %s\n", message)
 		return
 	}
 	budget.AddNotifier(s.signalCapacityChange)
+	s.treeBudgetMu.Lock()
 	s.treeBudget = budget
+	s.treeBudgetErr = ""
+	s.treeBudgetMu.Unlock()
 }
 
 // closeTreeBudget closes the active budget. Closing a root also removes its
@@ -511,13 +522,25 @@ func (s *Supervisor) treeBudgetStatusValues() (active, capacity int, rootID stri
 }
 
 // TreeBudgetStatus implements control.StableHandler and returns a
-// diagnostic snapshot of the tree-scoped admission budget.
+// diagnostic snapshot of the optional tree-scoped admission budget.
 func (s *Supervisor) TreeBudgetStatus() any {
-	active, capacity, rootID := s.treeBudgetStatusValues()
+	s.treeBudgetMu.Lock()
+	defer s.treeBudgetMu.Unlock()
+	if s.treeBudget == nil {
+		return map[string]any{
+			"active":   0,
+			"capacity": 0,
+			"root_id":  "",
+			"mode":     "degraded",
+			"reason":   s.treeBudgetErr,
+		}
+	}
+	active, capacity, rootID := s.treeBudget.Status()
 	return map[string]any{
 		"active":   active,
 		"capacity": capacity,
 		"root_id":  rootID,
+		"mode":     "active",
 	}
 }
 
