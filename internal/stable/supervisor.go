@@ -801,10 +801,11 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 		releaseTree()
 		return SpawnResult{}, fmt.Errorf("supervisor is shutting down")
 	}
-	if s.activeRuntimeCountLocked() >= s.config.MaxRuntimes {
+	activeRuntimes := s.activeRuntimeCountLocked()
+	if activeRuntimes >= s.config.MaxRuntimes {
 		s.controlMu.Unlock()
 		releaseTree()
-		return SpawnResult{}, &admission.CapacityError{Source: "local", Limit: s.config.MaxRuntimes, Active: s.activeRuntimeCountLocked()}
+		return SpawnResult{}, &admission.CapacityError{Source: "local", Limit: s.config.MaxRuntimes, Active: activeRuntimes}
 	}
 	s.nextID++
 	rtID := fmt.Sprintf("rt_%d", s.nextID)

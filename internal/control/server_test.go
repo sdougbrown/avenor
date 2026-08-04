@@ -1734,8 +1734,8 @@ func TestStableWaitForCapacityMethod(t *testing.T) {
 	if !ok {
 		t.Fatalf("result type: %T", r.Result)
 	}
-	if _, ok := res["capacity_available"]; !ok {
-		t.Fatalf("result missing capacity_available: %+v", res)
+	if res["capacity_available"] != true {
+		t.Fatalf("capacity_available = %v, want true", res["capacity_available"])
 	}
 
 	c2 := mustDial(t, path)
