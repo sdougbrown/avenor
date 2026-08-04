@@ -161,12 +161,7 @@ func TestSpawnSelectorParity(t *testing.T) {
 // validation. Cases with truly unknown keys (system, rosterFile) must be
 // rejected by spawnArgs.UnmarshalJSON.
 func TestSpawnArgsRejectsUnknownKeys(t *testing.T) {
-	knownSpawnArgsFields := map[string]bool{
-		"agent": true, "repo_dir": true, "prompt": true, "prompt_file": true,
-		"label": true, "timeout": true, "model": true, "thinking": true,
-		"backend": true, "roster_file": true, "roster_entry": true,
-		"server_url": true, "supervisor_id": true, "auto_approve": true,
-	}
+	knownFields := knownSpawnArgsFieldSet()
 	for _, c := range loadConformanceCases(t) {
 		if !c.StrictOnly {
 			continue
@@ -182,7 +177,7 @@ func TestSpawnArgsRejectsUnknownKeys(t *testing.T) {
 			}
 			hasUnknown := false
 			for key := range raw {
-				if !knownSpawnArgsFields[key] {
+				if !knownFields[key] {
 					hasUnknown = true
 					break
 				}
@@ -195,6 +190,16 @@ func TestSpawnArgsRejectsUnknownKeys(t *testing.T) {
 			}
 		})
 	}
+
+	// Mixed input: a known provider option coexisting with an unknown key must
+	// still be rejected — the strict boundary does not relax for familiar keys.
+	t.Run("known plus unknown key", func(t *testing.T) {
+		var args spawnArgs
+		data := `{"repo_dir":"/tmp/r","thinking":"high","system":"deferred"}`
+		if err := json.Unmarshal([]byte(data), &args); err == nil {
+			t.Errorf("spawnArgs accepted unknown key alongside known field: %s", data)
+		}
+	})
 
 	// Declared provider-specific options must remain accepted — asserted
 	// individually so a failure names the exact field.
@@ -216,6 +221,9 @@ func TestSpawnArgsRejectsUnknownKeys(t *testing.T) {
 		{"server_url", `{"repo_dir":"/tmp/r","server_url":"http://x"}`},
 		{"supervisor_id", `{"repo_dir":"/tmp/r","supervisor_id":"s"}`},
 		{"auto_approve", `{"repo_dir":"/tmp/r","auto_approve":true}`},
+		// Combined: all provider options together to verify no interactions
+		// cause unexpected rejection.
+		{"all provider options", `{"repo_dir":"/tmp/r","agent":"reviewer","model":"provider/model","backend":"opencode-acp","prompt":"hi","prompt_file":"/tmp/p","label":"l","timeout":"5m","thinking":"high","server_url":"http://x","supervisor_id":"s","auto_approve":true}`},
 	}
 	for _, tt := range acceptedIndividual {
 		t.Run("accepts/"+tt.name, func(t *testing.T) {
@@ -230,6 +238,21 @@ func TestSpawnArgsRejectsUnknownKeys(t *testing.T) {
 	// same json.Unmarshaler contract exercised above (segmentio/encoding/json
 	// and encoding/json both honor UnmarshalJSON), so the strict boundary holds
 	// on the real wire path, not just under encoding/json.
+}
+
+// knownSpawnArgsFieldSet derives the accepted JSON field names from the
+// spawnArgs struct tags so the set stays in sync with the struct definition.
+func knownSpawnArgsFieldSet() map[string]bool {
+	set := make(map[string]bool)
+	t := reflect.TypeOf(spawnArgs{})
+	for i := 0; i < t.NumField(); i++ {
+		tag := t.Field(i).Tag.Get("json")
+		name := strings.Split(tag, ",")[0]
+		if name != "" && name != "-" {
+			set[name] = true
+		}
+	}
+	return set
 }
 
 func assertFields(t *testing.T, structName string, allowed, required []string) {
@@ -383,78 +406,6 @@ func assertSchemaTags(t *testing.T, structName string, allowed, required []strin
 	}
 	if len(seen) != len(allowed) {
 		t.Errorf("%s: field count %d != expected %d", structName, len(seen), len(allowed))
-	}
-}
-
-func assertMissingRequiredFieldsRemainZero(t *testing.T, structName string, required []string) {
-	t.Helper()
-	if len(required) > 0 {
-		emptyData := map[string]any{}
-		emptyJSON, _ := json.Marshal(emptyData)
-		switch structName {
-		case "spawnArgs":
-			var a spawnArgs
-			json.Unmarshal(emptyJSON, &a)
-			for _, req := range required {
-				switch req {
-				case "agent":
-					if a.Agent != "" {
-						t.Errorf("spawnArgs: required field %q should be zero when missing", req)
-					}
-				case "repo_dir":
-					if a.RepoDir != "" {
-						t.Errorf("spawnArgs: required field %q should be zero when missing", req)
-					}
-				}
-			}
-		case "resultArgs":
-			var a resultArgs
-			json.Unmarshal(emptyJSON, &a)
-			if a.RunID != "" {
-				t.Errorf("resultArgs: required field %q should be zero when missing", "run_id")
-			}
-		case "permissionArgs":
-			var a permissionArgs
-			json.Unmarshal(emptyJSON, &a)
-			for _, req := range required {
-				switch req {
-				case "run_id":
-					if a.RunID != "" {
-						t.Errorf("permissionArgs: required field %q should be zero when missing", req)
-					}
-				case "option_id":
-					if a.OptionID != "" {
-						t.Errorf("permissionArgs: required field %q should be zero when missing", req)
-					}
-				}
-			}
-		case "followUpArgs":
-			var a followUpArgs
-			json.Unmarshal(emptyJSON, &a)
-			for _, req := range required {
-				switch req {
-				case "run_id":
-					if a.RunID != "" {
-						t.Errorf("followUpArgs: required field %q should be zero when missing", req)
-					}
-				case "message":
-					if a.Message != "" {
-						t.Errorf("followUpArgs: required field %q should be zero when missing", req)
-					}
-				}
-			}
-		case "eventsArgs":
-			var a eventsArgs
-			json.Unmarshal(emptyJSON, &a)
-			for _, req := range required {
-				switch req {
-				case "run_id":
-					if a.RunID != "" {
-						t.Errorf("eventsArgs: required field %q should be zero when missing", req)
-					}
-				}
-			}
-		}
 	}
 }
 

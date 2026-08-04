@@ -31,6 +31,9 @@ func TestConformanceStrict(t *testing.T) {
 			if (err != nil) == c.Valid {
 				t.Fatalf("ValidateJSON() error = %v, want valid=%v", err, c.Valid)
 			}
+			if err != nil && c.ErrorContains != "" && !strings.Contains(err.Error(), c.ErrorContains) {
+				t.Errorf("ValidateJSON() error %q does not contain %q", err.Error(), c.ErrorContains)
+			}
 		})
 	}
 }
@@ -52,6 +55,9 @@ func TestConformanceTyped(t *testing.T) {
 			err := Validate(in, c.RosterConfigured)
 			if (err != nil) == c.Valid {
 				t.Fatalf("Validate() error = %v, want valid=%v", err, c.Valid)
+			}
+			if err != nil && c.ErrorContains != "" && !strings.Contains(err.Error(), c.ErrorContains) {
+				t.Errorf("Validate() error %q does not contain %q", err.Error(), c.ErrorContains)
 			}
 		})
 	}

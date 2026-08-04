@@ -20,12 +20,7 @@ describe('validateSpawnSelection conformance', () => {
       if (c.valid) {
         expect(() => validateSpawnSelection(c.input, c.rosterConfigured)).not.toThrow()
       } else {
-        expect(() => validateSpawnSelection(c.input, c.rosterConfigured)).toThrow()
-        try {
-          validateSpawnSelection(c.input, c.rosterConfigured)
-        } catch (e) {
-          expect((e as Error).message).toContain(c.errorContains)
-        }
+        expect(() => validateSpawnSelection(c.input, c.rosterConfigured)).toThrow(c.errorContains)
       }
     })
   }
