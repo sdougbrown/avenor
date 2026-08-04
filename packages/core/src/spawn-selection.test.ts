@@ -7,6 +7,7 @@ const cases = (conformance as { cases: Array<{
   input: Record<string, unknown>
   rosterConfigured: boolean
   valid: boolean
+  errorContains: string
 }> }).cases
 
 describe('validateSpawnSelection conformance', () => {
@@ -20,6 +21,11 @@ describe('validateSpawnSelection conformance', () => {
         expect(() => validateSpawnSelection(c.input, c.rosterConfigured)).not.toThrow()
       } else {
         expect(() => validateSpawnSelection(c.input, c.rosterConfigured)).toThrow()
+        try {
+          validateSpawnSelection(c.input, c.rosterConfigured)
+        } catch (e) {
+          expect((e as Error).message).toContain(c.errorContains)
+        }
       }
     })
   }

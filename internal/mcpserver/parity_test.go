@@ -2,7 +2,6 @@ package mcpserver
 
 import (
 	"encoding/json"
-	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -125,15 +124,27 @@ func TestSchemaFieldParity(t *testing.T) {
 // assertFields verifies that the Go struct's JSON fields match the
 // expected allowed/required fields. It builds JSON objects and unmarshals
 // them into the struct to confirm field mapping.
+func loadConformanceCases(t *testing.T) []spawnselection.ConformanceCase {
+	t.Helper()
+	cases, err := spawnselection.LoadConformanceCases("../../schemas/spawn_selection.conformance.json")
+	if err != nil {
+		t.Fatalf("load conformance fixture: %v", err)
+	}
+	if len(cases) == 0 {
+		t.Fatal("conformance fixture has no cases")
+	}
+	return cases
+}
+
 func TestSpawnSelectorParity(t *testing.T) {
 	// The Go MCP server is a strict raw boundary. Drive it through the same
 	// shared conformance fixture (ValidateJSON rejects unknown selector keys)
 	// as packages/core/src/spawn-selection.test.ts so both share one fixture.
-	for _, c := range loadSpawnConformance(t) {
-		t.Run(c.name, func(t *testing.T) {
-			err := spawnselection.ValidateJSON(c.input, c.rosterConfigured)
-			if (err != nil) == c.valid {
-				t.Fatalf("ValidateJSON() error = %v, want valid=%v", err, c.valid)
+	for _, c := range loadConformanceCases(t) {
+		t.Run(c.Name, func(t *testing.T) {
+			err := spawnselection.ValidateJSON(c.Input, c.RosterConfigured)
+			if (err != nil) == c.Valid {
+				t.Fatalf("ValidateJSON() error = %v, want valid=%v", err, c.Valid)
 			}
 		})
 	}
@@ -142,81 +153,83 @@ func TestSpawnSelectorParity(t *testing.T) {
 // TestSpawnArgsRejectsUnknownKeys verifies the Go MCP spawn tool is a strict
 // raw boundary: unknown/deferred/misspelled keys (including selector look-alikes)
 // are rejected while every declared provider option remains accepted.
+//
+// Rejection cases are driven from the shared conformance fixture's strictOnly
+// cases so the test stays in lockstep with the fixture. Strict-only cases may
+// carry keys that are known spawnArgs provider options (e.g. thinking) — those
+// are accepted at the raw boundary and only rejected later by selector
+// validation. Cases with truly unknown keys (system, rosterFile) must be
+// rejected by spawnArgs.UnmarshalJSON.
 func TestSpawnArgsRejectsUnknownKeys(t *testing.T) {
-	var args spawnArgs
-
-	rejected := []string{
-		`{"repo_dir":"/tmp/r","rosterFile":"/repo/r.json","roster_entry":"planner"}`,
-		`{"repo_dir":"/tmp/r","system":"deferred"}`,
-		`{"repo_dir":"/tmp/r","agentx":"reviewer"}`,
+	knownSpawnArgsFields := map[string]bool{
+		"agent": true, "repo_dir": true, "prompt": true, "prompt_file": true,
+		"label": true, "timeout": true, "model": true, "thinking": true,
+		"backend": true, "roster_file": true, "roster_entry": true,
+		"server_url": true, "supervisor_id": true, "auto_approve": true,
 	}
-	for _, data := range rejected {
-		args = spawnArgs{}
-		if err := json.Unmarshal([]byte(data), &args); err == nil {
-			t.Errorf("spawnArgs accepted unknown key: %s", data)
+	for _, c := range loadConformanceCases(t) {
+		if !c.StrictOnly {
+			continue
 		}
+		t.Run(c.Name, func(t *testing.T) {
+			var args spawnArgs
+			err := json.Unmarshal(c.Input, &args)
+
+			// Determine whether the input contains only known spawnArgs fields.
+			var raw map[string]json.RawMessage
+			if e := json.Unmarshal(c.Input, &raw); e != nil {
+				t.Fatalf("parse input: %v", e)
+			}
+			hasUnknown := false
+			for key := range raw {
+				if !knownSpawnArgsFields[key] {
+					hasUnknown = true
+					break
+				}
+			}
+			if hasUnknown && err == nil {
+				t.Errorf("spawnArgs accepted unknown key in: %s", c.Input)
+			}
+			if !hasUnknown && err != nil {
+				t.Errorf("spawnArgs rejected known-key input: %s: %v", c.Input, err)
+			}
+		})
 	}
 
-	// Declared provider-specific options must remain accepted.
-	accepted := []string{
-		`{"repo_dir":"/tmp/r"}`,
-		`{"repo_dir":"/tmp/r","agent":"reviewer","model":"provider/model","backend":"opencode-acp"}`,
-		`{"repo_dir":"/tmp/r","roster_file":"/repo/r.json","roster_entry":"planner"}`,
-		`{"repo_dir":"/tmp/r","prompt":"hi","prompt_file":"/tmp/p","label":"l","timeout":"5m","thinking":"high","server_url":"http://x","supervisor_id":"s","auto_approve":true}`,
+	// Declared provider-specific options must remain accepted — asserted
+	// individually so a failure names the exact field.
+	acceptedIndividual := []struct {
+		name string
+		data string
+	}{
+		{"repo_dir only", `{"repo_dir":"/tmp/r"}`},
+		{"agent", `{"repo_dir":"/tmp/r","agent":"reviewer"}`},
+		{"model", `{"repo_dir":"/tmp/r","model":"provider/model"}`},
+		{"backend", `{"repo_dir":"/tmp/r","backend":"opencode-acp"}`},
+		{"roster_file", `{"repo_dir":"/tmp/r","roster_file":"/repo/r.json"}`},
+		{"roster_entry", `{"repo_dir":"/tmp/r","roster_entry":"planner"}`},
+		{"prompt", `{"repo_dir":"/tmp/r","prompt":"hi"}`},
+		{"prompt_file", `{"repo_dir":"/tmp/r","prompt_file":"/tmp/p"}`},
+		{"label", `{"repo_dir":"/tmp/r","label":"l"}`},
+		{"timeout", `{"repo_dir":"/tmp/r","timeout":"5m"}`},
+		{"thinking", `{"repo_dir":"/tmp/r","thinking":"high"}`},
+		{"server_url", `{"repo_dir":"/tmp/r","server_url":"http://x"}`},
+		{"supervisor_id", `{"repo_dir":"/tmp/r","supervisor_id":"s"}`},
+		{"auto_approve", `{"repo_dir":"/tmp/r","auto_approve":true}`},
 	}
-	for _, data := range accepted {
-		args = spawnArgs{}
-		if err := json.Unmarshal([]byte(data), &args); err != nil {
-			t.Errorf("spawnArgs rejected declared provider option: %s: %v", data, err)
-		}
+	for _, tt := range acceptedIndividual {
+		t.Run("accepts/"+tt.name, func(t *testing.T) {
+			var args spawnArgs
+			if err := json.Unmarshal([]byte(tt.data), &args); err != nil {
+				t.Errorf("spawnArgs rejected %s: %v", tt.name, err)
+			}
+		})
 	}
 
 	// The go-sdk decodes raw tool arguments into the typed struct through the
 	// same json.Unmarshaler contract exercised above (segmentio/encoding/json
 	// and encoding/json both honor UnmarshalJSON), so the strict boundary holds
 	// on the real wire path, not just under encoding/json.
-}
-
-func loadSpawnConformance(t *testing.T) []struct {
-	name             string
-	input            []byte
-	rosterConfigured bool
-	valid            bool
-} {
-	t.Helper()
-	data, err := os.ReadFile("../../schemas/spawn_selection.conformance.json")
-	if err != nil {
-		t.Fatalf("read conformance fixture: %v", err)
-	}
-	var fixture struct {
-		Cases []struct {
-			Name             string          `json:"name"`
-			Input            json.RawMessage `json:"input"`
-			RosterConfigured bool            `json:"rosterConfigured"`
-			Valid            bool            `json:"valid"`
-		} `json:"cases"`
-	}
-	if err := json.Unmarshal(data, &fixture); err != nil {
-		t.Fatalf("parse conformance fixture: %v", err)
-	}
-	if len(fixture.Cases) == 0 {
-		t.Fatal("conformance fixture has no cases")
-	}
-	out := make([]struct {
-		name             string
-		input            []byte
-		rosterConfigured bool
-		valid            bool
-	}, 0, len(fixture.Cases))
-	for _, c := range fixture.Cases {
-		out = append(out, struct {
-			name             string
-			input            []byte
-			rosterConfigured bool
-			valid            bool
-		}{name: c.Name, input: c.Input, rosterConfigured: c.RosterConfigured, valid: c.Valid})
-	}
-	return out
 }
 
 func assertFields(t *testing.T, structName string, allowed, required []string) {

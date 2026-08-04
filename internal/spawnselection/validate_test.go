@@ -8,33 +8,16 @@ import (
 	"testing"
 )
 
-// conformanceCase mirrors schemas/spawn_selection.conformance.json. The input
-// is kept as raw JSON so the strict ValidateJSON path sees the exact on-wire
-// keys (including unknown/deferred/misspelled ones) that a raw boundary would.
-type conformanceCase struct {
-	Name             string          `json:"name"`
-	Input            json.RawMessage `json:"input"`
-	RosterConfigured bool            `json:"rosterConfigured"`
-	Valid            bool            `json:"valid"`
-	StrictOnly       bool            `json:"strictOnly"`
-}
-
-func loadConformance(t *testing.T) []conformanceCase {
+func loadConformance(t *testing.T) []ConformanceCase {
 	t.Helper()
-	data, err := os.ReadFile("../../schemas/spawn_selection.conformance.json")
+	cases, err := LoadConformanceCases("../../schemas/spawn_selection.conformance.json")
 	if err != nil {
-		t.Fatalf("read conformance fixture: %v", err)
+		t.Fatalf("load conformance fixture: %v", err)
 	}
-	var fixture struct {
-		Cases []conformanceCase `json:"cases"`
-	}
-	if err := json.Unmarshal(data, &fixture); err != nil {
-		t.Fatalf("parse conformance fixture: %v", err)
-	}
-	if len(fixture.Cases) == 0 {
+	if len(cases) == 0 {
 		t.Fatal("conformance fixture has no cases")
 	}
-	return fixture.Cases
+	return cases
 }
 
 // TestConformanceStrict drives every fixture case through the strict raw
