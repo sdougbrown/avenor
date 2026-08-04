@@ -173,7 +173,8 @@ func TestSpawnArgsRejectsUnknownKeys(t *testing.T) {
 			// Determine whether the input contains only known spawnArgs fields.
 			var raw map[string]json.RawMessage
 			if e := json.Unmarshal(c.Input, &raw); e != nil {
-				t.Fatalf("parse input: %v", e)
+				t.Errorf("parse input: %v", e)
+				return
 			}
 			hasUnknown := false
 			for key := range raw {
