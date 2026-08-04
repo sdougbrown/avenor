@@ -28,8 +28,9 @@ func runStable(args []string) int {
 	}
 
 	// A nested supervisor inherits its parent's tree budget via the environment.
-	// A root supervisor (no inherited budget) creates a new one and propagates it
-	// to descendants so the whole tree shares capacity.
+	// A root supervisor (no inherited budget) creates one in Avenor-owned
+	// runtime state and propagates it to descendants so the whole tree shares
+	// capacity.
 	treeBudgetFile := os.Getenv(admission.EnvTreeBudget)
 
 	tombstoneFile := *controlSocket + ".dead"

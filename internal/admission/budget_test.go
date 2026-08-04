@@ -14,6 +14,31 @@ func newBudgetFile(t *testing.T) string {
 	return filepath.Join(t.TempDir(), "tree-budget.json")
 }
 
+func TestCreateRootInRuntimeState(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	b, err := CreateRootInRuntimeState(4)
+	if err != nil {
+		t.Fatalf("CreateRootInRuntimeState: %v", err)
+	}
+	path := b.Path()
+	defer b.Close()
+
+	wantDir := filepath.Join(home, ".avenor", "sockets")
+	if got := filepath.Dir(path); got != wantDir {
+		t.Fatalf("budget directory = %q, want %q", got, wantDir)
+	}
+	if filepath.Ext(path) != ".tree-budget" {
+		t.Fatalf("budget path = %q, want .tree-budget suffix", path)
+	}
+	if info, err := os.Stat(path); err != nil {
+		t.Fatalf("stat budget file: %v", err)
+	} else if info.Mode().Perm() != 0o600 {
+		t.Fatalf("budget mode = %o, want 0600", info.Mode().Perm())
+	}
+}
+
 func TestCreateRootInitialState(t *testing.T) {
 	path := newBudgetFile(t)
 	b, err := CreateRoot(path, 4)

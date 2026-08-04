@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -104,6 +105,30 @@ type Budget struct {
 	notifiers []func()
 }
 
+// CreateRootInRuntimeState creates a root tree budget in Avenor-owned runtime
+// state. It deliberately does not derive the path from a caller-provided
+// control socket, which may be in a project or worktree. The returned root
+// owns the file and removes it when closed.
+func CreateRootInRuntimeState(capacity int) (*Budget, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("admission: get home directory: %w", err)
+	}
+	runtimeStateDir := filepath.Join(home, ".avenor", "sockets")
+	if err := os.MkdirAll(runtimeStateDir, 0o700); err != nil {
+		return nil, fmt.Errorf("admission: create runtime state directory: %w", err)
+	}
+
+	// CreateRoot uses O_EXCL, and the cryptographically random suffix keeps
+	// independent root supervisors from contending for a predictable name.
+	suffix, err := newToken()
+	if err != nil {
+		return nil, fmt.Errorf("admission: generate runtime state name: %w", err)
+	}
+	path := filepath.Join(runtimeStateDir, fmt.Sprintf("tree-budget-%d-%s.tree-budget", os.Getpid(), suffix))
+	return CreateRoot(path, capacity)
+}
+
 // CreateRoot creates a new tree budget file at path and returns a root Budget
 // that owns it. The capacity is the maximum number of concurrent runtimes
 // across the whole supervisor tree.
@@ -125,8 +150,8 @@ func CreateRoot(path string, capacity int) (*Budget, error) {
 		return nil, fmt.Errorf("admission: marshal budget: %w", err)
 	}
 	// Create with O_EXCL|O_NOFOLLOW to refuse a pre-placed symlink or existing
-	// file, preventing a symlink-following overwrite attack on a predictable
-	// path next to the control socket.
+	// file, preventing a symlink-following overwrite attack on the selected
+	// budget path.
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("admission: create budget file: %w", err)

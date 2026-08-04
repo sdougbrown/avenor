@@ -290,7 +290,7 @@ The limit prevents resource exhaustion and gives you a predictable constraint fo
 
 `--max-tree-budget` (default 64) bounds the total number of concurrently **executing** runtimes across the **whole supervisor tree**, including runtimes started by nested supervisors. A child that starts its own supervisor inherits its parent's tree budget rather than receiving an unrelated fresh quota, so recursive spawning cannot multiply capacity at every level.
 
-The tree budget is a cross-process, flock-protected admission controller backed by a file next to the control socket (`<control-socket>.tree-budget`). The root supervisor propagates the budget path to descendants via the `AVENOR_TREE_BUDGET` environment variable so nested supervisors join the same tree.
+The tree budget is a cross-process, flock-protected admission controller backed by a root-owned file in Avenor runtime state (`~/.avenor/sockets/tree-budget-<pid>-<random>.tree-budget`). It is deliberately separate from the control socket, which callers may place in a project or worktree. The root supervisor propagates the budget path to descendants via the `AVENOR_TREE_BUDGET` environment variable so nested supervisors join the same tree; shutdown removes the root-owned file.
 
 When the tree budget is exhausted, spawn requests fail with a typed, retryable error distinct from the local limit:
 

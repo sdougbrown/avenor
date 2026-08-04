@@ -474,12 +474,16 @@ func TestWaitForCapacityWakesOnRelease(t *testing.T) {
 }
 
 func TestDegradedModeNoBudgetStillEnforcesLocal(t *testing.T) {
-	// A supervisor whose budget file cannot be created runs in degraded mode
-	// with only the local limit. Use an unwritable directory path to force
-	// budget creation failure.
-	unwritable := filepath.Join(t.TempDir(), "nonexistent-deep", "sub", "dir")
+	// A supervisor whose Avenor-owned runtime-state directory cannot be
+	// created runs in degraded mode with only the local limit. Point HOME at a
+	// regular file so creating ~/.avenor/sockets fails.
+	unwritable := filepath.Join(t.TempDir(), "home-file")
+	if err := os.WriteFile(unwritable, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", unwritable)
 	sup := NewSupervisor(Config{
-		ControlSocket:   unwritable + ".sock",
+		ControlSocket:   filepath.Join(t.TempDir(), "control.sock"),
 		MaxRuntimes:     1,
 		MaxTreeBudget:   8,
 		ShutdownTimeout: 0,

@@ -46,9 +46,9 @@ type Config struct {
 	MaxTreeBudget int
 
 	// TreeBudgetFile is the path of an existing tree budget to join. When
-	// empty, the supervisor is a root and creates a new budget file derived
-	// from ControlSocket. When set, the supervisor opens the existing file as
-	// a nested participant sharing the root's capacity.
+	// empty, the supervisor is a root and creates a new budget file in
+	// Avenor-owned runtime state. When set, the supervisor opens the existing
+	// file as a nested participant sharing the root's capacity.
 	TreeBudgetFile string
 }
 
@@ -371,6 +371,10 @@ func NewSupervisor(cfg Config) *Supervisor {
 }
 
 func (s *Supervisor) Run() int {
+	// NewSupervisor initializes root admission before the control socket is
+	// bound. Close it on every exit, including a control-server start failure.
+	defer s.closeTreeBudget()
+
 	var reason string
 	defer func() {
 		if r := recover(); r != nil {
@@ -440,31 +444,45 @@ func (s *Supervisor) Run() int {
 }
 
 // initTreeBudget creates or joins the tree-scoped admission budget. A root
-// supervisor (TreeBudgetFile empty) creates a new budget file derived from the
-// control socket path. A nested supervisor (TreeBudgetFile set) opens the
-// existing file to share the root's capacity. Failure is non-fatal: the
+// supervisor (TreeBudgetFile empty) creates a new budget file in
+// Avenor-owned runtime state. A nested supervisor (TreeBudgetFile set) opens
+// the existing file to share the root's capacity. Failure is non-fatal: the
 // supervisor continues with only its local MaxRuntimes limit enforced.
 func (s *Supervisor) initTreeBudget() {
 	path := s.config.TreeBudgetFile
+	var (
+		budget *admission.Budget
+		err    error
+	)
 	if path == "" {
-		// Root: derive a budget path next to the control socket.
-		path = s.config.ControlSocket + ".tree-budget"
-		budget, err := admission.CreateRoot(path, s.config.MaxTreeBudget)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "avenor stable: create tree budget: %v\n", err)
-			return
-		}
-		budget.AddNotifier(s.signalCapacityChange)
-		s.treeBudget = budget
+		budget, err = admission.CreateRootInRuntimeState(s.config.MaxTreeBudget)
 	} else {
-		budget, err := admission.Open(path)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "avenor stable: join tree budget: %v\n", err)
-			return
-		}
-		budget.AddNotifier(s.signalCapacityChange)
-		s.treeBudget = budget
+		budget, err = admission.Open(path)
 	}
+	if err != nil {
+		action := "create"
+		if path != "" {
+			action = "join"
+		}
+		fmt.Fprintf(os.Stderr, "avenor stable: %s tree budget: %v\n", action, err)
+		return
+	}
+	budget.AddNotifier(s.signalCapacityChange)
+	s.treeBudget = budget
+}
+
+// closeTreeBudget closes the active budget. Closing a root also removes its
+// Avenor-owned runtime-state file; nested supervisors only release their file
+// handle. It is safe to call repeatedly.
+func (s *Supervisor) closeTreeBudget() {
+	s.treeBudgetMu.Lock()
+	budget := s.treeBudget
+	s.treeBudget = nil
+	s.treeBudgetMu.Unlock()
+	if budget != nil {
+		_ = budget.Close()
+	}
+	s.signalCapacityChange()
 }
 
 // TreeBudgetPath returns the path of the tree budget file, or empty when no
@@ -2431,6 +2449,15 @@ func (s *Supervisor) emitChildError(child *childRuntime, message, source string)
 }
 
 func (s *Supervisor) shutdown(mode string) int {
+	// Always release the root-owned budget file, including the zero-timeout and
+	// kill paths below. Nested supervisors only close their inherited handle.
+	defer func() {
+		if s.broker != nil {
+			_ = s.broker.Stop()
+		}
+		s.closeTreeBudget()
+	}()
+
 	// This lock is the reservation boundary: a spawn either registers before
 	// shutdown and is included below, or observes shuttingDown and is rejected.
 	s.controlMu.Lock()
@@ -2493,17 +2520,6 @@ func (s *Supervisor) shutdown(mode string) int {
 			fmt.Fprintf(os.Stderr, "avenor stable: %d runtimes did not finish within %v\n", remaining, timeout)
 		}
 	}
-	if s.broker != nil {
-		_ = s.broker.Stop()
-	}
-	s.treeBudgetMu.Lock()
-	budget := s.treeBudget
-	s.treeBudget = nil
-	s.treeBudgetMu.Unlock()
-	if budget != nil {
-		_ = budget.Close()
-	}
-	s.signalCapacityChange()
 	return 0
 }
 

@@ -5,10 +5,35 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sdougbrown/avenor/internal/admission"
 )
+
+func TestRunStableJoinsInheritedTreeBudget(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	root, err := admission.CreateRootInRuntimeState(2)
+	if err != nil {
+		t.Fatalf("create root tree budget: %v", err)
+	}
+	defer root.Close()
+	t.Setenv(admission.EnvTreeBudget, root.Path())
+
+	socketPath := filepath.Join(tmpDir, "socket-path-is-dir")
+	if err := os.Mkdir(socketPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if code := runStable([]string{"--control-socket", socketPath}); code != 1 {
+		t.Fatalf("runStable() = %d, want 1", code)
+	}
+	if _, err := os.Stat(root.Path()); err != nil {
+		t.Fatalf("inherited root tree budget was removed: %v", err)
+	}
+}
 
 func TestRunStableWritesTombstoneOnStartFailure(t *testing.T) {
 	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
 	socketPath := filepath.Join(tmpDir, "socket-path-is-dir")
 	if err := os.Mkdir(socketPath, 0o700); err != nil {
 		t.Fatal(err)
@@ -37,5 +62,13 @@ func TestRunStableWritesTombstoneOnStartFailure(t *testing.T) {
 	}
 	if !strings.Contains(content, "reason=start_failed") {
 		t.Fatalf("tombstone = %q, want reason=start_failed", content)
+	}
+
+	budgetFiles, err := filepath.Glob(filepath.Join(tmpDir, ".avenor", "sockets", "*.tree-budget"))
+	if err != nil {
+		t.Fatalf("glob tree budget files: %v", err)
+	}
+	if len(budgetFiles) != 0 {
+		t.Fatalf("tree budget files remain after start failure: %v", budgetFiles)
 	}
 }
