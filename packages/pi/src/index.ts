@@ -1422,28 +1422,38 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         force: Type.Optional(Type.Boolean({ description: 'Force shutdown instead of graceful' })),
       }),
       async execute(_toolCallId, params) {
-        await stopPolling()
-        // Shutting down one supervisor removes only its tracked runs; runs on
-        // other supervisors must stay tracked and keep being polled. Runs that
+        // Remove only the target supervisor's tracked runs first so we can
+        // decide whether polling should continue or stop cleanly. Runs that
         // carry the current singleton socket (or no socket) all belong to the
         // singleton namespace and are removed together.
         const target = params.supervisor_id
         const targetIsSingleton = target === undefined
           || Boolean(deps.Supervisor.isCurrentInstance?.(target))
+        let removed = 0
         for (const [key, run] of trackedRuns) {
-          if (targetIsSingleton) {
-            const runIsSingleton = !run.supervisorId
-              || Boolean(deps.Supervisor.isCurrentInstance?.(run.supervisorId))
-            if (runIsSingleton) trackedRuns.delete(key)
-          } else if (run.supervisorId === target) {
+          const matches = targetIsSingleton
+            ? !run.supervisorId || Boolean(deps.Supervisor.isCurrentInstance?.(run.supervisorId))
+            : run.supervisorId === target
+          if (matches) {
             trackedRuns.delete(key)
+            removed++
           }
+        }
+        if (removed > 0 && trackedRuns.size === 0) {
+          await stopPolling()
+        } else if (removed > 0) {
+          // Runs on other supervisors remain. Invalidate any in-flight tick so
+          // the deleted runs never emit terminal events, then resume polling
+          // immediately so the status widget is not blanked for a frame.
+          pollingActive = false
+          pollingGeneration++
+          await pollInFlight?.catch(() => {})
+          startPolling()
         }
         const result = await deps.shutdownTool({
           supervisorId: params.supervisor_id,
           force: params.force,
         })
-        if (trackedRuns.size > 0) startPolling()
         return {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
           details: result,

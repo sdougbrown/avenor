@@ -424,6 +424,43 @@ describe('openRunInspector', () => {
     expect(inspectRun).toHaveBeenCalledWith(expect.objectContaining({ runId: 'run-explore', agent: 'explore' }))
   })
 
+  it('uses the picker to disambiguate shared run ids across supervisors', async () => {
+    const inspectRun = mock(async () => makeInspectResult(buildSnapshot([]), { status: 'running' }))
+    const select = mock(async (_title: string, choices: string[]) => {
+      expect(choices).toEqual([
+        'factory · explore · /tmp/factory.sock · rt_1',
+        'advisor · explore · /tmp/advisor.sock · rt_1',
+      ])
+      return choices[1]
+    })
+
+    await openRunInspector({
+      hasUI: true,
+      ui: {
+        notify: mock(() => {}),
+        select,
+        custom: mock(async (factory: any) => {
+          const component = factory(tui, theme, keybindings, mock(() => {})) as RunInspectorOverlay
+          component.dispose()
+        }),
+      },
+    } as any, {
+      // Two supervisors both expose rt_1; the picker must offer both and the
+      // choice line must show the supervisor socket for disambiguation.
+      trackedRuns: [
+        { runId: 'rt_1', label: 'factory', agent: 'explore', supervisorId: '/tmp/factory.sock' },
+        { runId: 'rt_1', label: 'advisor', agent: 'explore', supervisorId: '/tmp/advisor.sock' },
+      ],
+      initialRunId: 'rt_1',
+      deps: makeDeps({ inspectRun }),
+    })
+
+    expect(select).toHaveBeenCalledTimes(1)
+    expect(inspectRun).toHaveBeenCalledWith(expect.objectContaining({
+      runId: 'rt_1', label: 'advisor', supervisorId: '/tmp/advisor.sock',
+    }))
+  })
+
   it('uses the picker to disambiguate multiple runs for one agent', async () => {
     const inspectRun = mock(async () => makeInspectResult(buildSnapshot([]), { status: 'running' }))
     const select = mock(async (_title: string, choices: string[]) => {
