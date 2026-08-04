@@ -654,8 +654,10 @@ function matchingWatchRuns(
 ): WatchRunRef[] {
   const query = selector.trim().toLowerCase()
   if (!query) return []
-  const byId = runs.find(run => run.runId.toLowerCase() === query)
-  if (byId) return [byId]
+  // A run id is only unique within a supervisor; custom supervisors may reuse
+  // ids (e.g. rt_1), so surface every match and let the picker disambiguate.
+  const byId = runs.filter(run => run.runId.toLowerCase() === query)
+  if (byId.length > 0) return byId
   return runs.filter(run =>
     run.label?.toLowerCase() === query || run.agent?.toLowerCase() === query,
   )
@@ -664,7 +666,8 @@ function matchingWatchRuns(
 function watchRunChoice(run: WatchRunRef): string {
   const label = sanitizeText(run.label ?? run.runId)
   const agent = run.agent ? ` · ${sanitizeText(run.agent)}` : ''
-  return `${label}${agent} · ${sanitizeText(run.runId).slice(0, 8)}`
+  const supervisor = run.supervisorId ? ` · ${sanitizeText(run.supervisorId)}` : ''
+  return `${label}${agent}${supervisor} · ${sanitizeText(run.runId).slice(0, 8)}`
 }
 
 async function selectWatchRun(

@@ -298,8 +298,25 @@ function toWatchRunRef(run: TrackedRun): WatchRunRef {
   }
 }
 
-export function createExtension(deps: ExtensionDeps = defaultDeps) {
+/**
+ * Namespace a run id by its supervisor so runs on different supervisors can
+ * never collide or be correlated, even when they share runtime ids (e.g.
+ * `rt_1`). An undefined supervisorId denotes the singleton namespace. The
+ * NUL separator cannot appear in socket paths or generated run ids, so the
+ * singleton and each explicit supervisor stay disjoint.
+ */
+function trackedRunKey(supervisorId: string | undefined, runId: string): string {
+  return `${supervisorId ?? ''}\u0000${runId}`
+}
+
+export interface ExtensionOptions {
+  /** Polling cadence; injectable so tests can drive deterministic ticks. */
+  pollIntervalMs?: number
+}
+
+export function createExtension(deps: ExtensionDeps = defaultDeps, options: ExtensionOptions = {}) {
   return async function (pi: ExtensionAPI) {
+    const pollIntervalMs = options.pollIntervalMs ?? POLL_INTERVAL_MS
     let telemetryGeneration = 0
     const trackedRuns = new Map<string, TrackedRun>()
     let pollingActive = false
@@ -337,8 +354,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
     }
 
     function upsertTrackedRun(run: WatchRunRef, status?: StatusResult, blocking = false): void {
-      const current = trackedRuns.get(run.runId)
-      trackedRuns.set(run.runId, {
+      const key = trackedRunKey(run.supervisorId, run.runId)
+      const current = trackedRuns.get(key)
+      trackedRuns.set(key, {
         runId: run.runId,
         agent: run.agent ?? status?.agent ?? current?.agent ?? 'unknown',
         label: run.label ?? status?.label ?? current?.label ?? run.runId,
@@ -350,6 +368,29 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
         permissionNotified: current?.permissionNotified,
         completionPending: current?.completionPending,
       })
+    }
+
+    /**
+     * Look a run up in the per-supervisor tracking namespace. When a
+     * supervisor is supplied, resolve exactly. Without one, prefer the
+     * singleton namespace and only fall back to a run id walk when it is
+     * unambiguous across supervisors. Duplicate run ids across supervisors
+     * without an explicit supervisor return undefined so callers never bind
+     * flags or telemetry to the wrong supervisor's run.
+     */
+    function getTrackedRun(runId: string, supervisorId?: string): TrackedRun | undefined {
+      if (supervisorId !== undefined) {
+        return trackedRuns.get(trackedRunKey(supervisorId, runId))
+      }
+      const singleton = trackedRuns.get(trackedRunKey(undefined, runId))
+      if (singleton) return singleton
+      let match: TrackedRun | undefined
+      for (const run of trackedRuns.values()) {
+        if (run.runId !== runId) continue
+        if (match) return undefined // ambiguous without a supervisor
+        match = run
+      }
+      return match
     }
 
     async function resolveFinalOutput(run: Pick<TrackedRun, 'runId' | 'supervisorId'>, status: StatusResult): Promise<string | undefined> {
@@ -382,7 +423,15 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
 
       const entries: RunStatusEntry[] = []
       for (const run of trackedRuns.values()) {
-        const live = findLiveStatusForTrackedRun(run, liveMap.values())
+        // The unqualified live-status list only describes the current singleton
+        // supervisor. Runs on another supervisor must be polled through their
+        // own supervisor; matching them against this list could correlate a run
+        // with a colliding id (e.g. a shared rt_1) from another supervisor.
+        const singletonScope = !run.supervisorId
+          || Boolean(deps.Supervisor.isCurrentInstance?.(run.supervisorId))
+        const live = singletonScope
+          ? findLiveStatusForTrackedRun(run, liveMap.values(), singletonScope)
+          : undefined
         if (live) {
           liveMap.delete(live.run_id)
           run.lastStatus = live
@@ -545,11 +594,12 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
         )
 
         for (const entry of entries) {
-          const run = trackedRuns.get(entry.runId)
+          const entryKey = trackedRunKey(entry.supervisorId, entry.runId)
+          const run = trackedRuns.get(entryKey)
           if (!run) continue
 
           if (isTerminalStatus(entry.status)) {
-            const prevStatus = prevStatuses.get(entry.runId)
+            const prevStatus = prevStatuses.get(entryKey)
             const wasTerminal = prevStatus && isTerminalStatus(prevStatus)
             if (!wasTerminal) {
               // Notify immediately on first terminal transition.
@@ -597,7 +647,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
                 backend: entry.backend,
               }),
             )
-            trackedRuns.delete(entry.runId)
+            trackedRuns.delete(entryKey)
           } else if (
             entry.pendingPermission &&
             !run.blocking &&
@@ -626,7 +676,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
               pollingActive = false
               console.error('avenor polling loop failed', err)
             })
-          }, POLL_INTERVAL_MS)
+          }, pollIntervalMs)
         } else {
           pollingActive = false
           updateWidget([])
@@ -834,7 +884,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
     ): Promise<{ status?: StatusResult; aborted: boolean }> {
       let firstPoll = true
       while (!signal?.aborted) {
-        if (!firstPoll) await sleep(POLL_INTERVAL_MS)
+        if (!firstPoll) await sleep(pollIntervalMs)
         firstPoll = false
 
         try {
@@ -1026,7 +1076,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
 
         const waitResult = await waitForRun(runRef, signal, onUpdate)
         if (waitResult.aborted) {
-          trackedRuns.delete(result.run_id)
+          trackedRuns.delete(trackedRunKey(supervisorId, result.run_id))
           return {
             content: [{ type: 'text', text: `Monitoring of "${label}" (run_id: ${result.run_id}) was interrupted. Use avenor_status or avenor_inspect to check.` }],
             details: {
@@ -1051,7 +1101,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
         upsertTrackedRun(runRef, status, wait)
 
         if (status.status === 'waiting') {
-          const tracked = trackedRuns.get(result.run_id)
+          const tracked = getTrackedRun(result.run_id, supervisorId)
           if (tracked) tracked.permissionNotified = true
           return {
             content: [{ type: 'text', text: buildWaitingText({ runId: result.run_id, label, agent: params.agent }, status) }],
@@ -1080,7 +1130,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
               backend: status.backend,
             }),
           )
-          trackedRuns.delete(result.run_id)
+          trackedRuns.delete(trackedRunKey(supervisorId, result.run_id))
           return {
             content: [{ type: 'text', text: buildCompletionText({ runId: result.run_id, label }, status, finalOutput) }],
             details: {
@@ -1172,7 +1222,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
         supervisor_id: Type.Optional(Type.String({ description: 'Reuse an existing supervisor by socket path' })),
       }),
       async execute(_toolCallId, params, signal) {
-        const tracked = trackedRuns.get(params.run_id)
+        const tracked = getTrackedRun(params.run_id, params.supervisor_id)
         const previousBlocking = tracked?.blocking
         if (tracked) tracked.blocking = true
         let completed = false
@@ -1199,7 +1249,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
                 status: result.status ?? 'done',
               }),
             )
-            trackedRuns.delete(params.run_id)
+            if (tracked) trackedRuns.delete(trackedRunKey(tracked.supervisorId, tracked.runId))
           } else if (tracked && result.status === 'waiting') {
             tracked.permissionNotified = true
           }
@@ -1208,7 +1258,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
             details: result,
           }
         } finally {
-          if (!completed && tracked && trackedRuns.get(params.run_id) === tracked) {
+          if (!completed && tracked && getTrackedRun(params.run_id, params.supervisor_id) === tracked) {
             tracked.blocking = previousBlocking ?? false
           }
         }
@@ -1373,11 +1423,27 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
       }),
       async execute(_toolCallId, params) {
         await stopPolling()
-        trackedRuns.clear()
+        // Shutting down one supervisor removes only its tracked runs; runs on
+        // other supervisors must stay tracked and keep being polled. Runs that
+        // carry the current singleton socket (or no socket) all belong to the
+        // singleton namespace and are removed together.
+        const target = params.supervisor_id
+        const targetIsSingleton = target === undefined
+          || Boolean(deps.Supervisor.isCurrentInstance?.(target))
+        for (const [key, run] of trackedRuns) {
+          if (targetIsSingleton) {
+            const runIsSingleton = !run.supervisorId
+              || Boolean(deps.Supervisor.isCurrentInstance?.(run.supervisorId))
+            if (runIsSingleton) trackedRuns.delete(key)
+          } else if (run.supervisorId === target) {
+            trackedRuns.delete(key)
+          }
+        }
         const result = await deps.shutdownTool({
           supervisorId: params.supervisor_id,
           force: params.force,
         })
+        if (trackedRuns.size > 0) startPolling()
         return {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
           details: result,
@@ -1455,12 +1521,20 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
     pi.registerCommand('avenor-cancel', {
       description: 'Cancel a running avenor sub-agent',
       getArgumentCompletions: (prefix: string) => {
-        const items = Array.from(trackedRuns.values())
+        const runs = Array.from(trackedRuns.values())
+        const items = runs
           .filter(run => run.label.startsWith(prefix) || run.agent?.startsWith(prefix) || run.runId.startsWith(prefix))
-          .map(run => ({
-            value: run.runId,
-            label: `${sanitizeText(run.label)} (${sanitizeText(run.agent ?? 'roster')}, ${sanitizeText(run.runId).slice(0, 8)})`,
-          }))
+          .map(run => {
+            // A run id is only unique within a supervisor; when custom
+            // supervisors reuse ids (e.g. rt_1), encode the supervisor so the
+            // cancel command routes through the recorded socket.
+            const shared = runs.some(other => other !== run && other.runId === run.runId)
+            const value = shared ? `${run.supervisorId ?? ''}::${run.runId}` : run.runId
+            return {
+              value,
+              label: `${sanitizeText(run.label)} (${sanitizeText(run.agent ?? 'roster')}, ${sanitizeText(run.runId).slice(0, 8)})`,
+            }
+          })
         return items.length > 0 ? items : null
       },
       handler: async (args, ctx) => {
@@ -1468,8 +1542,14 @@ export function createExtension(deps: ExtensionDeps = defaultDeps) {
           ctx.ui.notify('Usage: /avenor-cancel <run_id>', 'warning')
           return
         }
-        const runId = args.trim()
-        const run = trackedRuns.get(runId)
+        const raw = args.trim()
+        // Core's validateRunId restricts run ids to [a-zA-Z0-9_-], so '::'
+        // never appears in the run id part and the last '::' is always the
+        // boundary, even when a supervisor socket name itself contains '::'.
+        const sep = raw.lastIndexOf('::')
+        const supervisorId = sep >= 0 ? raw.slice(0, sep) || undefined : undefined
+        const runId = sep >= 0 ? raw.slice(sep + 2) : raw
+        const run = getTrackedRun(runId, supervisorId)
         const label = run?.label ?? runId
         const runtimeId = run?.runtimeId ?? run?.lastStatus?.runtime_id
         if (!runtimeId) {

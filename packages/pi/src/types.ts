@@ -18,10 +18,24 @@ export interface TrackedRun {
   completionPending?: boolean
 }
 
+/**
+ * Find a live status for a tracked run from the unqualified live-status list.
+ *
+ * `statusTool({})` only describes the current singleton supervisor, so it is
+ * authoritative solely for runs that live in the singleton namespace. Runs on
+ * another supervisor must be polled through their own supervisor; matching
+ * them against this list could correlate a run with a colliding id (for
+ * example a shared `rt_1`) owned by a different supervisor.
+ *
+ * @param singletonScope true when the tracked run belongs to the singleton
+ *   supervisor (no explicit socket, or a socket equal to the current instance).
+ */
 export function findLiveStatusForTrackedRun(
   run: Pick<TrackedRun, 'runId' | 'runtimeId' | 'supervisorId' | 'lastStatus'>,
   liveStatuses: Iterable<StatusResult>,
+  singletonScope: boolean,
 ): StatusResult | undefined {
+  if (!singletonScope) return undefined
   const knownRunIds = new Set([run.runId, run.lastStatus?.run_id].filter((id): id is string => !!id))
   let runtimeMatch: StatusResult | undefined
   for (const status of liveStatuses) {
