@@ -212,6 +212,9 @@ func TestSpawnReleaseOnLoopFileFailure(t *testing.T) {
 	if active != 0 {
 		t.Fatalf("active = %d, want 0 after loop failure", active)
 	}
+	if got := sup.activeRuntimeCount(); got != 0 {
+		t.Fatalf("local active = %d, want 0 after loop failure", got)
+	}
 }
 
 func TestSpawnTreeExhaustionReturnsTreeCapacityError(t *testing.T) {
@@ -630,7 +633,8 @@ func TestParkedRuntimeReacquiresOnResume(t *testing.T) {
 }
 func TestSupervisorReaperReclaimsStaleDescendant(t *testing.T) {
 	sup, _, _ := newBlockingScriptedSupervisor(t, 8, 4)
-	defer sup.stopReaper()
+	sup.reaperInterval = 10 * time.Millisecond
+	sup.startReaper()
 
 	sup.treeBudgetMu.Lock()
 	budget := sup.treeBudget
@@ -656,15 +660,8 @@ func TestSupervisorReaperReclaimsStaleDescendant(t *testing.T) {
 	// descendant supervisor that never released its slot.
 	injectDeadPID(t, budget, 999999)
 
-	// The reaper should reclaim the stale reservation.
-	reclaimed := budget.Reap()
-	if reclaimed != 1 {
-		t.Fatalf("reclaimed = %d, want 1", reclaimed)
-	}
-	active, _, _ = sup.treeBudgetStatusValues()
-	if active != 0 {
-		t.Fatalf("active = %d, want 0 after reap", active)
-	}
+	// The supervisor's reaper goroutine should reclaim the stale reservation.
+	waitTreeActive(t, sup, 0)
 }
 
 // injectDeadPID rewrites all reservations in the budget file to the given PID.
@@ -687,8 +684,8 @@ func injectDeadPID(t *testing.T, b *admission.Budget, pid int) {
 		t.Fatalf("read: %v", err)
 	}
 	var bf struct {
-		RootID   string           `json:"root_id"`
-		Capacity int              `json:"capacity"`
+		RootID   string `json:"root_id"`
+		Capacity int    `json:"capacity"`
 		Active   map[string]struct {
 			PID    int    `json:"pid"`
 			Holder string `json:"holder"`

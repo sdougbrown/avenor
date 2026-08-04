@@ -61,14 +61,20 @@ func TestCreateRootInitialState(t *testing.T) {
 
 func TestCreateRootDefaultCapacity(t *testing.T) {
 	path := newBudgetFile(t)
-	b, err := CreateRoot(path, 0)
-	if err != nil {
-		t.Fatalf("CreateRoot: %v", err)
-	}
-	defer b.Close()
-	_, cap, _ := b.Status()
-	if cap != DefaultTreeBudget {
-		t.Fatalf("capacity = %d, want default %d", cap, DefaultTreeBudget)
+	for _, input := range []int{0, -1} {
+		b, err := CreateRoot(path, input)
+		if err != nil {
+			t.Fatalf("CreateRoot(%d): %v", input, err)
+		}
+		_, cap, _ := b.Status()
+		if cap != DefaultTreeBudget {
+			b.Close()
+			t.Fatalf("capacity(%d) = %d, want default %d", input, cap, DefaultTreeBudget)
+		}
+		if err := b.Close(); err != nil {
+			t.Fatalf("Close(%d): %v", input, err)
+		}
+		_ = os.Remove(path)
 	}
 }
 
@@ -274,6 +280,81 @@ func TestReapRemovesDeadProcess(t *testing.T) {
 	}
 }
 
+func TestReleaseDoesNotNotifyWhenPersistFails(t *testing.T) {
+	path := newBudgetFile(t)
+	b, err := CreateRoot(path, 1)
+	if err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	defer b.Close()
+
+	tok, err := b.Acquire("rt")
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	ro, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("Open read-only: %v", err)
+	}
+	b.mu.Lock()
+	original := b.f
+	b.f = ro
+	b.mu.Unlock()
+	defer original.Close()
+
+	notified := false
+	b.AddNotifier(func() { notified = true })
+	b.Release(tok)
+	if notified {
+		t.Fatal("Release notified waiters after write failure")
+	}
+	active, _, _ := b.Status()
+	if active != 1 {
+		t.Fatalf("active = %d, want 1 after failed release", active)
+	}
+}
+
+func TestReapDoesNotNotifyWhenPersistFails(t *testing.T) {
+	path := newBudgetFile(t)
+	b, err := CreateRoot(path, 4)
+	if err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	defer b.Close()
+
+	if err := lock(b.f); err != nil {
+		t.Fatal(err)
+	}
+	bf, _ := readBudget(b.f)
+	bf.Active["dead-tok"] = &reservation{PID: 999999, Holder: "dead", Token: "dead-tok"}
+	_ = writeBudget(b.f, bf)
+	unlock(b.f)
+
+	ro, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("Open read-only: %v", err)
+	}
+	b.mu.Lock()
+	original := b.f
+	b.f = ro
+	b.mu.Unlock()
+	defer original.Close()
+
+	notified := false
+	b.AddNotifier(func() { notified = true })
+	reclaimed := b.Reap()
+	if reclaimed != 0 {
+		t.Fatalf("reclaimed = %d, want 0 after failed persist", reclaimed)
+	}
+	if notified {
+		t.Fatal("Reap notified waiters after write failure")
+	}
+	active, _, _ := b.Status()
+	if active != 1 {
+		t.Fatalf("active = %d, want 1 after failed reap", active)
+	}
+}
+
 func TestReapKeepsLiveProcess(t *testing.T) {
 	path := newBudgetFile(t)
 	b, err := CreateRoot(path, 4)
@@ -389,6 +470,7 @@ func TestBudgetFilePermissions(t *testing.T) {
 		t.Fatalf("perms = %o, want 0600", info.Mode().Perm())
 	}
 }
+
 // TestReapReclaimsDeadPIDAcrossHandles simulates a nested supervisor that
 // acquires a token and crashes. A second handle reaps the stale reservation.
 func TestReapReclaimsDeadPIDAcrossHandles(t *testing.T) {
@@ -421,7 +503,7 @@ func TestReapReclaimsDeadPIDAcrossHandles(t *testing.T) {
 	for _, r := range bf.Active {
 		r.PID = 999999 // a PID that does not exist
 	}
-	_ = writeBudget(root.f,	bf)
+	_ = writeBudget(root.f, bf)
 	unlock(root.f)
 
 	active, _, _ := root.Status()

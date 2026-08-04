@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"os"
@@ -1565,6 +1566,7 @@ type mockStableHandler struct {
 	spawnResult          any
 	spawnErr             error
 	listResult           any
+	waitErr              error
 	sendToParentCalled   int
 	sendToParentMessages []string
 }
@@ -1602,11 +1604,11 @@ func (m *mockStableHandler) RuntimeSendToParent(runtimeID, message string) error
 }
 
 func (m *mockStableHandler) TreeBudgetStatus() any {
-	return map[string]any{"active": 0, "capacity": 0, "root_id": ""}
+	return map[string]any{"active": 0, "capacity": 0, "root_id": "root_0"}
 }
 
 func (m *mockStableHandler) WaitForCapacityMS(timeoutMS int) error {
-	return nil
+	return m.waitErr
 }
 
 func TestStableSpawnMethod(t *testing.T) {
@@ -1697,8 +1699,14 @@ func TestStableTreeBudgetMethod(t *testing.T) {
 	if !ok {
 		t.Fatalf("result type: %T", r.Result)
 	}
-	if _, ok := res["active"]; !ok {
-		t.Fatalf("result missing active: %+v", res)
+	if res["active"] != float64(0) {
+		t.Fatalf("active = %v, want 0", res["active"])
+	}
+	if res["capacity"] != float64(0) {
+		t.Fatalf("capacity = %v, want 0", res["capacity"])
+	}
+	if res["root_id"] != "root_0" {
+		t.Fatalf("root_id = %v, want root_0", res["root_id"])
 	}
 }
 
@@ -1728,6 +1736,18 @@ func TestStableWaitForCapacityMethod(t *testing.T) {
 	}
 	if _, ok := res["capacity_available"]; !ok {
 		t.Fatalf("result missing capacity_available: %+v", res)
+	}
+
+	c2 := mustDial(t, path)
+	defer c2.Close()
+	s.SetStableHandler(&mockStableHandler{waitErr: errors.New("capacity unavailable")})
+	_ = writeReq(t, c2, Request{JSONRPC: "2.0", ID: 2, Method: "wait_for_capacity", Params: params})
+	r2 := readResp(t, c2)
+	if r2.Error == nil || r2.Error.Code != -32000 {
+		t.Fatalf("wait_for_capacity error = %+v, want code -32000", r2.Error)
+	}
+	if data, ok := r2.Error.Data.(map[string]any); !ok || data["retryable"] != true {
+		t.Fatalf("wait_for_capacity error data = %+v, want retryable true", r2.Error.Data)
 	}
 }
 

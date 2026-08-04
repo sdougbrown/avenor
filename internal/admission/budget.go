@@ -333,7 +333,11 @@ func (b *Budget) releaseLocked(token string) bool {
 		return false
 	}
 	delete(bf.Active, token)
-	_ = writeBudget(b.f, bf)
+	if err := writeBudget(b.f, bf); err != nil {
+		unlock(b.f)
+		b.mu.Unlock()
+		return false
+	}
 	unlock(b.f)
 	b.mu.Unlock()
 	return true
@@ -374,7 +378,11 @@ func (b *Budget) Reap() int {
 		}
 	}
 	if reclaimed > 0 {
-		_ = writeBudget(b.f, bf)
+		if err := writeBudget(b.f, bf); err != nil {
+			unlock(b.f)
+			b.mu.Unlock()
+			return 0
+		}
 	}
 	unlock(b.f)
 	b.mu.Unlock()

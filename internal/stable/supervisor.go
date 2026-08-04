@@ -323,10 +323,11 @@ type Supervisor struct {
 	// Tree-scoped admission controller. Nil when the budget could not be
 	// created or opened (degraded mode: only the local MaxRuntimes limit is
 	// enforced). Protected by treeBudgetMu for the reaper goroutine.
-	treeBudgetMu sync.Mutex
-	treeBudget   *admission.Budget
-	reaperStop   chan struct{}
-	reaperDone   chan struct{}
+	treeBudgetMu   sync.Mutex
+	treeBudget     *admission.Budget
+	reaperStop     chan struct{}
+	reaperDone     chan struct{}
+	reaperInterval time.Duration
 	// capacityMu guards capacityCh, a broadcast channel closed (and replaced) on
 	// every tree-budget release so callers waiting for capacity can retry. It
 	// does not schedule or prioritize work.
@@ -349,6 +350,7 @@ func NewSupervisor(cfg Config) *Supervisor {
 		handledQuestions:     map[string]handledChildQuestion{},
 		childQuestionTimeout: cfg.ChildQuestionTimeout,
 		permOptions:          map[string][]any{},
+		reaperInterval:       5 * time.Second,
 		permissionProviders:  map[string]permissionProviderBinding{},
 		httpServers:          map[string]any{},
 		fileSnapshots:        map[string][]string{},
@@ -537,7 +539,7 @@ func (s *Supervisor) startReaper() {
 
 func (s *Supervisor) reapLoop(stop <-chan struct{}) {
 	defer close(s.reaperDone)
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(s.reaperInterval)
 	defer ticker.Stop()
 	for {
 		select {
