@@ -153,7 +153,8 @@ avenor stable --control-socket /tmp/avenor.sock
 |------|---------|-------------|
 | `--control-socket` | (required) | Unix socket path for control plane commands |
 | `--http-debug` | (none) | HTTP debug adapter bind address (e.g., `127.0.0.1:8080`) |
-| `--max-runtimes` | `16` | Maximum concurrent child runtimes |
+| `--max-runtimes` | `16` | Maximum concurrent child runtimes for this supervisor |
+| `--max-tree-budget` | `64` | Maximum concurrent executing runtimes across the whole supervisor tree including nested supervisors |
 | `--idle-timeout` | `0` (disabled) | Exit after this duration with no child runtimes and no control connections |
 | `--shutdown-timeout` | `10s` | Graceful shutdown timeout before killing children |
 | `--permission-claim-timeout` | `0` (disabled) | Optional permission claim deadline; with 0, fallback occurs only after all control clients disconnect |

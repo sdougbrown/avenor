@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sdougbrown/avenor/internal/admission"
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
 )
@@ -96,6 +97,15 @@ type StableHandler interface {
 	RuntimeAnswerPermission(runtimeID, requestID, optionID, message string) error
 	RuntimeInterruptAndPrompt(runtimeID, text string, keepQueue bool) error
 	RuntimeSendToParent(runtimeID, message string) error
+
+	// TreeBudgetStatus reports the tree-scoped admission budget status for
+	// supervisor-level diagnostics. Returns nil when no budget is active.
+	TreeBudgetStatus() any
+
+	// WaitForCapacityMS blocks until a tree budget slot may be available or the
+	// given timeout (milliseconds) elapses. Returns nil when capacity may be
+	// available, or an error on timeout/shutdown. It does not reserve capacity.
+	WaitForCapacityMS(timeoutMS int) error
 }
 
 type connState struct {
@@ -1117,6 +1127,19 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		}
 		result, err := s.stableHandler.Spawn(req.Params)
 		if err != nil {
+			var ce *admission.CapacityError
+			if errors.As(err, &ce) {
+				data := map[string]any{
+					"source":    ce.Source,
+					"retryable": ce.Retryable(),
+					"limit":     ce.Limit,
+					"active":    ce.Active,
+				}
+				if ce.RootID != "" {
+					data["root_id"] = ce.RootID
+				}
+				return failure(req.ID, -32050, ce.Error(), data)
+			}
 			return failure(req.ID, -32000, err.Error(), nil)
 		}
 		return success(req.ID, result)
@@ -1170,6 +1193,28 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 			return success(req.ID, map[string]any{"accepted": true})
 		}
 		return failure(req.ID, -32602, "invalid params", map[string]any{"required": []string{"runtime_id"}})
+	case "tree_budget":
+		if s.stableHandler == nil {
+			return failure(req.ID, -32601, "method not found", nil)
+		}
+		return success(req.ID, s.stableHandler.TreeBudgetStatus())
+	case "wait_for_capacity":
+		if s.stableHandler == nil {
+			return failure(req.ID, -32601, "method not found", nil)
+		}
+		var p struct {
+			TimeoutMS int `json:"timeout_ms"`
+		}
+		if len(req.Params) > 0 {
+			_ = json.Unmarshal(req.Params, &p)
+		}
+		if p.TimeoutMS <= 0 {
+			p.TimeoutMS = 5000
+		}
+		if err := s.stableHandler.WaitForCapacityMS(p.TimeoutMS); err != nil {
+			return failure(req.ID, -32000, err.Error(), map[string]any{"retryable": true})
+		}
+		return success(req.ID, map[string]any{"capacity_available": true})
 	default:
 		return failure(req.ID, -32601, "method not found", nil)
 	}

@@ -26,7 +26,8 @@ Flags:
 | Flag | Default | Description |
 |---|---|---|
 | `--control-socket` `<path>` | (required) | Unix socket path for the control plane. Avenor writes a tombstone file at `<path>.dead` to signal abnormal shutdown |
-| `--max-runtimes` | 16 | Maximum concurrent child runtimes. Spawn requests are rejected once this limit is hit |
+| `--max-runtimes` | 16 | Maximum concurrent child runtimes for this supervisor. Spawn requests are rejected once this limit is hit |
+| `--max-tree-budget` | 64 | Maximum concurrent executing runtimes across the whole supervisor tree including nested supervisors. Bounds recursive fan-out |
 | `--idle-timeout` | 0 | Exit cleanly after this duration with no child runtimes running and no control connections active. 0 disables (supervisor runs until signaled) |
 | `--shutdown-timeout` | 10s | How long to wait for child runtimes to finish gracefully before killing them |
 | `--http-debug` | (empty) | If set, bind an HTTP debug adapter to this address (e.g. `:8080`). Useful for rapid inspection and testing |
@@ -273,13 +274,58 @@ This cancels all runtimes without waiting. Any in-flight sessions are terminated
 
 ## Max Runtimes Limit
 
-The supervisor enforces a maximum number of concurrent child runtimes set by `--max-runtimes` (default 16). When this limit is reached, spawn requests fail with an error:
+The supervisor enforces two independent capacity bounds:
+
+### Local fan-out limit
+
+`--max-runtimes` (default 16) bounds the number of concurrent child runtimes managed by a **single** supervisor. When this limit is reached, spawn requests fail with a typed, retryable capacity error:
 
 ```
 max runtimes (16) reached
 ```
 
-To spawn more runtimes, you must wait for existing ones to finish. The limit prevents resource exhaustion and gives you a predictable constraint for scheduling.
+The limit prevents resource exhaustion and gives you a predictable constraint for scheduling.
+
+### Tree descendant budget
+
+`--max-tree-budget` (default 64) bounds the total number of concurrently **executing** runtimes across the **whole supervisor tree**, including runtimes started by nested supervisors. A child that starts its own supervisor inherits its parent's tree budget rather than receiving an unrelated fresh quota, so recursive spawning cannot multiply capacity at every level.
+
+The tree budget is a cross-process, flock-protected admission controller backed by a file next to the control socket (`<control-socket>.tree-budget`). The root supervisor propagates the budget path to descendants via the `AVENOR_TREE_BUDGET` environment variable so nested supervisors join the same tree.
+
+When the tree budget is exhausted, spawn requests fail with a typed, retryable error distinct from the local limit:
+
+```json
+{"source": "tree", "retryable": true, "limit": 64, "active": 64}
+```
+
+The `source` field distinguishes `"local"` (the per-supervisor fan-out limit) from `"tree"` (the inherited descendant budget). Callers that can wait may poll `wait_for_capacity` to be notified on a capacity change; callers that cannot wait receive the typed error and may retry.
+
+#### Parked runtimes and re-admission
+
+A runtime that finishes a turn (for example, `end_turn`) parks and **releases** its tree-budget slot — a parked (resident) runtime does not consume descendant budget while idle. When a parked runtime receives a follow-up prompt, it **re-acquires** tree admission before executing; if the tree budget is full, it waits for capacity rather than bypassing the budget. The local fan-out limit still counts a parked runtime as a resident child.
+
+#### Stale descendant recovery
+
+Each reservation records the PID of the supervisor process that holds it. The root supervisor runs a background reaper that periodically reclaims capacity held by dead (crashed or orphaned) descendant processes and notifies capacity waiters.
+
+#### Independent roots
+
+Two independently launched `avenor stable` supervisors do not share a tree budget. Each root creates its own budget file and propagates only to its own descendants.
+
+### Inspecting tree budget status
+
+The `tree_budget` control method reports the current tree admission state:
+
+```bash
+avenor control --socket /tmp/avenor.sock tree_budget
+```
+
+```json
+{"active": 3, "capacity": 64, "root_id": "a1b2c3..."}
+```
+
+A root without an active budget (degraded mode) reports `active: 0`, `capacity: 0`, `root_id: ""`.
+
 
 ## Idle Timeout
 
