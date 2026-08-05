@@ -19,10 +19,9 @@ func TestRunStableJoinsInheritedTreeBudget(t *testing.T) {
 	defer root.Close()
 	t.Setenv(admission.EnvTreeBudget, root.Path())
 
-	socketPath := filepath.Join(tmpDir, "socket-path-is-dir")
-	if err := os.Mkdir(socketPath, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	// An overlong Unix-socket path fails in Listen without probing an existing
+	// path. A directory at the socket path can make Unix Dial block on Linux.
+	socketPath := filepath.Join(tmpDir, strings.Repeat("s", 200))
 	if code := runStable([]string{"--control-socket", socketPath}); code != 1 {
 		t.Fatalf("runStable() = %d, want 1", code)
 	}
