@@ -1677,6 +1677,9 @@ func TestStableSpawnCapacityErrorIsTyped(t *testing.T) {
 		if data["root_id"] != "root_x" {
 			t.Fatalf("root_id = %v, want root_x", data["root_id"])
 		}
+		if data["limit"] != float64(3) || data["active"] != float64(3) {
+			t.Fatalf("limit/active = %#v/%#v, want 3/3", data["limit"], data["active"])
+		}
 	})
 
 	t.Run("local", func(t *testing.T) {
