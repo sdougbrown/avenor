@@ -804,7 +804,6 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 		if budget != nil {
 			budget.Release(treeToken)
 		}
-		s.signalCapacityChange()
 	}
 
 	s.controlMu.Lock()
@@ -843,7 +842,6 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 			if budget != nil {
 				budget.Release(token)
 			}
-			s.signalCapacityChange()
 		}
 	}
 	s.runtimes[rtID] = child

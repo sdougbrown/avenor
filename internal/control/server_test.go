@@ -1641,41 +1641,81 @@ func TestStableSpawnMethod(t *testing.T) {
 }
 
 func TestStableSpawnCapacityErrorIsTyped(t *testing.T) {
-	state := NewState("run_1", "", 0)
-	s := NewServer(state)
-	s.SetStableHandler(&mockStableHandler{
-		spawnErr: &admission.CapacityError{Source: "tree", Limit: 3, Active: 3, RootID: "root_x"},
-	})
-	path := testSocketPath(t)
-	if err := s.Start(path); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	defer s.Stop()
+	t.Run("tree", func(t *testing.T) {
+		state := NewState("run_1", "", 0)
+		s := NewServer(state)
+		s.SetStableHandler(&mockStableHandler{
+			spawnErr: &admission.CapacityError{Source: "tree", Limit: 3, Active: 3, RootID: "root_x"},
+		})
+		path := testSocketPath(t)
+		if err := s.Start(path); err != nil {
+			t.Fatalf("start: %v", err)
+		}
+		defer s.Stop()
 
-	c := mustDial(t, path)
-	defer c.Close()
-	params, _ := json.Marshal(map[string]any{"prompt": "hello", "dir": "/tmp"})
-	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "spawn", Params: params})
-	r := readResp(t, c)
-	if r.Error == nil {
-		t.Fatal("expected capacity error")
-	}
-	if r.Error.Code != -32050 {
-		t.Fatalf("error code = %d, want -32050", r.Error.Code)
-	}
-	data, ok := r.Error.Data.(map[string]any)
-	if !ok {
-		t.Fatalf("error data type: %T", r.Error.Data)
-	}
-	if data["source"] != "tree" {
-		t.Fatalf("source = %v, want tree", data["source"])
-	}
-	if data["retryable"] != true {
-		t.Fatalf("retryable = %v, want true", data["retryable"])
-	}
-	if data["root_id"] != "root_x" {
-		t.Fatalf("root_id = %v, want root_x", data["root_id"])
-	}
+		c := mustDial(t, path)
+		defer c.Close()
+		params, _ := json.Marshal(map[string]any{"prompt": "hello", "dir": "/tmp"})
+		_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "spawn", Params: params})
+		r := readResp(t, c)
+		if r.Error == nil {
+			t.Fatal("expected capacity error")
+		}
+		if r.Error.Code != -32050 {
+			t.Fatalf("error code = %d, want -32050", r.Error.Code)
+		}
+		data, ok := r.Error.Data.(map[string]any)
+		if !ok {
+			t.Fatalf("error data type: %T", r.Error.Data)
+		}
+		if data["source"] != "tree" {
+			t.Fatalf("source = %v, want tree", data["source"])
+		}
+		if data["retryable"] != true {
+			t.Fatalf("retryable = %v, want true", data["retryable"])
+		}
+		if data["root_id"] != "root_x" {
+			t.Fatalf("root_id = %v, want root_x", data["root_id"])
+		}
+	})
+
+	t.Run("local", func(t *testing.T) {
+		state := NewState("run_1", "", 0)
+		s := NewServer(state)
+		s.SetStableHandler(&mockStableHandler{
+			spawnErr: &admission.CapacityError{Source: "local", Limit: 7, Active: 7},
+		})
+		path := testSocketPath(t)
+		if err := s.Start(path); err != nil {
+			t.Fatalf("start: %v", err)
+		}
+		defer s.Stop()
+
+		c := mustDial(t, path)
+		defer c.Close()
+		params, _ := json.Marshal(map[string]any{"prompt": "hello", "dir": "/tmp"})
+		_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "spawn", Params: params})
+		r := readResp(t, c)
+		if r.Error == nil {
+			t.Fatal("expected capacity error")
+		}
+		if r.Error.Code != -32050 {
+			t.Fatalf("error code = %d, want -32050", r.Error.Code)
+		}
+		data, ok := r.Error.Data.(map[string]any)
+		if !ok {
+			t.Fatalf("error data type: %T", r.Error.Data)
+		}
+		if data["source"] != "local" {
+			t.Fatalf("source = %v, want local", data["source"])
+		}
+		if data["retryable"] != true {
+			t.Fatalf("retryable = %v, want true", data["retryable"])
+		}
+		if data["limit"] != float64(7) || data["active"] != float64(7) {
+			t.Fatalf("limit/active = %#v/%#v, want 7/7", data["limit"], data["active"])
+		}
+	})
 }
 
 func TestStableTreeBudgetMethod(t *testing.T) {

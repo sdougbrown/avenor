@@ -422,6 +422,9 @@ func TestCloseReleasesHandle(t *testing.T) {
 	}
 	// Operations after close are safe no-ops / errors.
 	b.Release("anything")
+	if active, cap, rootID := b.Status(); active != 0 || cap != 2 || rootID != b.RootID() {
+		t.Fatalf("Status after Close = (%d, %d, %q), want (0, 2, %q)", active, cap, rootID, b.RootID())
+	}
 	if _, err := b.Acquire("rt"); err == nil {
 		t.Fatal("Acquire after Close should error")
 	} else if !strings.Contains(err.Error(), "budget is closed") {

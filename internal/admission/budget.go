@@ -65,10 +65,6 @@ func (e *CapacityError) Error() string {
 // completes or a stale descendant is reaped.
 func (e *CapacityError) Retryable() bool { return true }
 
-// ErrNotRoot is returned when an operation requires a root budget but the
-// budget was opened as a nested participant.
-var ErrNotRoot = errors.New("admission: budget is not the root")
-
 // reservation records a single held capacity slot.
 type reservation struct {
 	PID    int    `json:"pid"`
@@ -182,7 +178,7 @@ func Open(path string) (*Budget, error) {
 	b := &Budget{path: path, isRoot: false, f: f}
 	// Read the root identity once for diagnostics; capacity is read fresh on
 	// every Acquire so a root resize (future) is observed.
-	bf, err := b.readLocked()
+	bf, err := b.readWithFlock()
 	if err != nil {
 		_ = f.Close()
 		return nil, err
@@ -411,9 +407,8 @@ func (b *Budget) Status() (active, capacity int, rootID string) {
 	return len(bf.Active), bf.Capacity, bf.RootID
 }
 
-// readLocked reads the budget file without taking the in-process mutex. The
-// caller must hold the flock.
-func (b *Budget) readLocked() (*budgetFile, error) {
+// readWithFlock reads the budget file after acquiring the flock itself.
+func (b *Budget) readWithFlock() (*budgetFile, error) {
 	if err := lock(b.f); err != nil {
 		return nil, err
 	}
