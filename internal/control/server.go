@@ -98,8 +98,8 @@ type StableHandler interface {
 	RuntimeInterruptAndPrompt(runtimeID, text string, keepQueue bool) error
 	RuntimeSendToParent(runtimeID, message string) error
 
-	// TreeBudgetStatus reports the tree-scoped admission budget status for
-	// supervisor-level diagnostics. Returns nil when no budget is active.
+	// TreeBudgetStatus reports tree-budget diagnostics. A supervisor without an
+	// active budget returns a degraded status map with its reason.
 	TreeBudgetStatus() any
 
 	// WaitForCapacityMS blocks until a tree budget slot may be available or the

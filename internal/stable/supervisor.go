@@ -474,7 +474,7 @@ func (s *Supervisor) initTreeBudget() {
 		// Admission is optional: preserve the local per-supervisor limit when
 		// cross-process coordination state is unavailable, but make the weaker
 		// guarantee visible through stderr and tree_budget status.
-		fmt.Fprintf(os.Stderr, "avenor stable: %s\n", message)
+		fmt.Fprintf(os.Stderr, "avenor stable: tree budget unavailable; using degraded local-only mode: %s\n", message)
 		return
 	}
 	budget.AddNotifier(s.signalCapacityChange)

@@ -15,10 +15,36 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sdougbrown/avenor/client"
 	"github.com/sdougbrown/avenor/internal/admission"
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
 )
+
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create stderr pipe: %v", err)
+	}
+	original := os.Stderr
+	os.Stderr = writer
+	defer func() {
+		os.Stderr = original
+		_ = reader.Close()
+		_ = writer.Close()
+	}()
+
+	fn()
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close stderr writer: %v", err)
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read stderr: %v", err)
+	}
+	return string(data)
+}
 
 func newBlockingScriptedSupervisor(t *testing.T, maxRuntimes, maxTreeBudget int) (*Supervisor, chan struct{}, func()) {
 	t.Helper()
@@ -270,8 +296,8 @@ func TestSpawnLocalExhaustionReturnsLocalCapacityError(t *testing.T) {
 	if ce.Source != "local" {
 		t.Fatalf("source = %q, want %q", ce.Source, "local")
 	}
-	if ce.Limit != 2 {
-		t.Fatalf("limit = %d, want 2", ce.Limit)
+	if ce.Limit != 2 || ce.Active != 2 {
+		t.Fatalf("capacity error = %+v, want limit=2 active=2", ce)
 	}
 	// Tree budget should not be consumed for a rejected spawn.
 	waitTreeActive(t, sup, 2)
@@ -489,12 +515,18 @@ func TestDegradedModeNoBudgetStillEnforcesLocal(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", unwritable)
-	sup := NewSupervisor(Config{
-		ControlSocket:   filepath.Join(t.TempDir(), "control.sock"),
-		MaxRuntimes:     1,
-		MaxTreeBudget:   8,
-		ShutdownTimeout: 0,
+	var sup *Supervisor
+	stderr := captureStderr(t, func() {
+		sup = NewSupervisor(Config{
+			ControlSocket:   filepath.Join(t.TempDir(), "control.sock"),
+			MaxRuntimes:     1,
+			MaxTreeBudget:   8,
+			ShutdownTimeout: 0,
+		})
 	})
+	if !strings.Contains(stderr, "tree budget unavailable; using degraded local-only mode") {
+		t.Fatalf("stderr = %q, want degraded-mode warning", stderr)
+	}
 	if sup.broker == nil {
 		t.Fatal("supervisor did not create a broker")
 	}
@@ -537,12 +569,19 @@ func TestDegradedModeNoBudgetStillEnforcesLocal(t *testing.T) {
 }
 
 func TestInheritedBudgetFailureReportsDegradedMode(t *testing.T) {
-	sup := NewSupervisor(Config{
-		ControlSocket:  filepath.Join(t.TempDir(), "control.sock"),
-		MaxRuntimes:    1,
-		TreeBudgetFile: filepath.Join(t.TempDir(), "missing.tree-budget"),
+	socket := newStableSocketPath(t, "degraded-tree-budget")
+	var sup *Supervisor
+	stderr := captureStderr(t, func() {
+		sup = NewSupervisor(Config{
+			ControlSocket:  socket,
+			MaxRuntimes:    1,
+			TreeBudgetFile: filepath.Join(t.TempDir(), "missing.tree-budget"),
+		})
 	})
 	defer func() { _ = sup.broker.Stop() }()
+	if !strings.Contains(stderr, "tree budget unavailable; using degraded local-only mode") {
+		t.Fatalf("stderr = %q, want degraded-mode warning", stderr)
+	}
 
 	status := sup.TreeBudgetStatus().(map[string]any)
 	if status["mode"] != "degraded" {
@@ -551,6 +590,23 @@ func TestInheritedBudgetFailureReportsDegradedMode(t *testing.T) {
 	reason, _ := status["reason"].(string)
 	if !strings.Contains(reason, "join tree budget") {
 		t.Fatalf("reason = %q, want join failure", reason)
+	}
+
+	if err := sup.control.Start(socket); err != nil {
+		t.Fatalf("start control server: %v", err)
+	}
+	defer sup.control.Stop()
+	cl, err := client.Dial(socket)
+	if err != nil {
+		t.Fatalf("dial control server: %v", err)
+	}
+	defer cl.Close()
+	var publicStatus map[string]any
+	if err := cl.Call("tree_budget", nil, &publicStatus); err != nil {
+		t.Fatalf("tree_budget: %v", err)
+	}
+	if publicStatus["mode"] != "degraded" || publicStatus["reason"] != reason {
+		t.Fatalf("public status = %+v, want degraded join failure", publicStatus)
 	}
 }
 
