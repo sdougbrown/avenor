@@ -358,9 +358,9 @@ func TestProviderCancelEmitsOneTerminalEvent(t *testing.T) {
 	if end.Event != "session.end" || end.Fields["stop_reason"] != "cancelled" {
 		t.Fatalf("cancel event = %#v", end)
 	}
-	if err := p.Prompt(context.Background(), "conv-cancel", "too soon"); err == nil || !strings.Contains(err.Error(), "prompt already active") {
-		t.Fatalf("Prompt during cancellation cleanup = %v", err)
-	}
+	// The cancellation terminal is emitted before Prompt's deferred cleanup.
+	// Wait for that cleanup to finish before checking that it emitted no second
+	// terminal; a new Prompt may validly observe either side of that boundary.
 	_ = out.Close()
 	<-promptDone
 	select {
@@ -368,7 +368,7 @@ func TestProviderCancelEmitsOneTerminalEvent(t *testing.T) {
 		if evt.Event == "session.end" {
 			t.Fatal("duplicate session.end")
 		}
-	case <-time.After(100 * time.Millisecond):
+	default:
 	}
 }
 
