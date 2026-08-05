@@ -46,6 +46,16 @@ func captureStderr(t *testing.T, fn func()) string {
 	return string(data)
 }
 
+// treeBudgetStatusValues is test-only polling support for the admission suite.
+func (s *Supervisor) treeBudgetStatusValues() (active, capacity int, rootID string) {
+	s.treeBudgetMu.Lock()
+	defer s.treeBudgetMu.Unlock()
+	if s.treeBudget == nil {
+		return 0, 0, ""
+	}
+	return s.treeBudget.Status()
+}
+
 func newBlockingScriptedSupervisor(t *testing.T, maxRuntimes, maxTreeBudget int) (*Supervisor, chan struct{}, func()) {
 	t.Helper()
 	socket := newStableSocketPath(t, "admission-block")

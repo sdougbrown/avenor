@@ -510,17 +510,6 @@ func (s *Supervisor) TreeBudgetPath() string {
 	return s.treeBudget.Path()
 }
 
-// treeBudgetStatusValues returns the active count, capacity, and root id of
-// the tree budget, or zeros and an empty root id when no budget is active.
-func (s *Supervisor) treeBudgetStatusValues() (active, capacity int, rootID string) {
-	s.treeBudgetMu.Lock()
-	defer s.treeBudgetMu.Unlock()
-	if s.treeBudget == nil {
-		return 0, 0, ""
-	}
-	return s.treeBudget.Status()
-}
-
 // TreeBudgetStatus implements control.StableHandler and returns a
 // diagnostic snapshot of the optional tree-scoped admission budget.
 func (s *Supervisor) TreeBudgetStatus() any {
