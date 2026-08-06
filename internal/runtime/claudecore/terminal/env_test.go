@@ -37,6 +37,13 @@ func TestScrubParentClaudeEnvKeepsUnrelatedAndNearMisses(t *testing.T) {
 	}
 }
 
+func TestScrubParentClaudeEnvEmptyInput(t *testing.T) {
+	got := ScrubParentClaudeEnv([]string{})
+	if !slices.Equal(got, []string{}) {
+		t.Fatalf("ScrubParentClaudeEnv([]string{}) = %q, want empty", got)
+	}
+}
+
 func TestScrubParentClaudeEnvDropsValuelessNames(t *testing.T) {
 	got := ScrubParentClaudeEnv([]string{"CLAUDE_CODE_CHILD_SESSION", "PATH=/bin"})
 	if !slices.Equal(got, []string{"PATH=/bin"}) {
