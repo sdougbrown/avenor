@@ -4,8 +4,8 @@ import "testing"
 
 const testRule = "────────────────────────────────────────"
 
-// readyPane is what Claude Code 2.1.x renders once it is taking input: no
-// "Tips for getting started" column and no "❯ Try" placeholder, just the
+// readyPane is what Claude Code 2.1.x renders once it is taking input. It has
+// no "Tips for getting started" column and no "❯ Try" placeholder, just the
 // framed empty input box.
 const readyPane = " ▐▛███▜▌   Claude Code v2.1.219\n" +
 	"▝▜█████▛▘  Opus 5 · Claude Team\n" +
@@ -35,8 +35,9 @@ func TestPaneHasInputBoxRejectsPanesThatAreNotTakingInput(t *testing.T) {
 			pane: " ▐▛███▜▌   Claude Code v2.1.219\n▝▜█████▛▘  Opus 5\n",
 		},
 		{
-			// Options render as "❯ 1. Yes" — a bare chevron search matches
-			// here and the paste would dismiss the dialog, not submit.
+			// Options render as "❯ 1. Yes". A bare chevron pattern matches
+			// these lines, so the paste dismisses the dialog instead of
+			// submitting input.
 			name: "selection dialog with a chevron-marked option",
 			pane: "Quick safety check\n" + testRule + "\n❯ 1. Yes, I trust this folder\n  2. No\n" + testRule + "\n",
 		},
