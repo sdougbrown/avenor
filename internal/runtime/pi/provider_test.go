@@ -223,7 +223,7 @@ func TestFreshStartUsesThinkingFlagWithoutSetter(t *testing.T) {
 	piHelpOutput = func(context.Context) ([]byte, error) { return []byte("--thinking <level>"), nil }
 	t.Cleanup(func() { piHelpOutput = originalHelp })
 
-	for _, level := range []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"} {
+	for _, level := range []string{"off", "low", "medium", "high", "xhigh", "max"} {
 		t.Run(level, func(t *testing.T) {
 			p := NewWithOptions(runtime.StartOptions{})
 			var launched runtime.StartOptions

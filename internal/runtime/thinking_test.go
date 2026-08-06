@@ -26,8 +26,8 @@ func TestValidateThinking(t *testing.T) {
 func TestThinkingBackendPolicy(t *testing.T) {
 	all := []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"}
 	policy := map[string]map[string]bool{
-		"codex-app-server": {"off": true, "minimal": true, "low": true, "medium": true, "high": true, "xhigh": true, "max": true},
-		"pi":               {"off": true, "minimal": true, "low": true, "medium": true, "high": true, "xhigh": true, "max": true},
+		"codex-app-server": {"low": true, "medium": true, "high": true, "xhigh": true, "max": true},
+		"pi":               {"off": true, "low": true, "medium": true, "high": true, "xhigh": true, "max": true},
 		"claude":           {"low": true, "medium": true, "high": true, "xhigh": true, "max": true},
 		"claude-channel":   {"low": true, "medium": true, "high": true, "xhigh": true, "max": true},
 		"opencode-acp":     {},
@@ -70,10 +70,24 @@ func TestThinkingErrorsDistinguishUnsupportedValueAndCapability(t *testing.T) {
 }
 
 func TestValidateThinkingForBackendResume(t *testing.T) {
-	// Codex and Pi accept canonical values on explicit resume.
+	// Codex and Pi accept their supported values on explicit resume, so an
+	// unsupported value there is a value error rather than start-only.
 	for _, backend := range []string{"codex-app-server", "pi"} {
-		if err := ValidateThinkingForBackendResume(backend, "off"); err != nil {
-			t.Errorf("%s resume off: %v", backend, err)
+		if err := ValidateThinkingForBackendResume(backend, "high"); err != nil {
+			t.Errorf("%s resume high: %v", backend, err)
+		}
+	}
+	if err := ValidateThinkingForBackendResume("pi", "off"); err != nil {
+		t.Errorf("pi resume off: %v", err)
+	}
+	for _, tc := range []struct{ backend, value string }{
+		{"codex-app-server", "off"},
+		{"codex-app-server", "minimal"},
+		{"pi", "minimal"},
+	} {
+		err := ValidateThinkingForBackendResume(tc.backend, tc.value)
+		if err == nil || !strings.Contains(err.Error(), "does not support thinking value") {
+			t.Errorf("%s resume %s error = %v", tc.backend, tc.value, err)
 		}
 	}
 	// Claude family is start-only on explicit resume.

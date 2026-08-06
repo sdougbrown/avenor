@@ -37,7 +37,7 @@ Both `claude` and `claude-channel` require `claude` to be on `PATH`. `claude-cha
 
 `—` means not verified; `✗` means not supported, `⚠ ` means experimental. `agy` permission relay requires the explicit RPC transport.
 
-Thinking control is native for Codex and Pi. Claude and Claude Channel support five startup values but no explicit resume value. Every other backend rejects explicit thinking. See [Thinking level](thinking-level.md) for values, version scope, validation order, and resume behavior.
+Thinking control is native for Codex and Pi, on both start and explicit resume, but neither takes every canonical value: Codex rejects `off` and `minimal`, and Pi rejects `minimal`. Claude and Claude Channel support five startup values but no explicit resume value. Every other backend rejects explicit thinking. See [Thinking level](thinking-level.md) for values, version scope, validation order, and resume behavior.
 
 Session resume for `claude` and `claude-channel` is in-memory only: a long-lived avenor process (stable mode) keeps sessions in its map and lets clients reattach by `session_id` while the session is alive. Cross-restart resume (avenor process exits, then a new one tries to pick up the same session) is not yet supported by either backend.
 

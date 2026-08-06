@@ -43,18 +43,32 @@
             "reason": "thinking is empty (backend default)"
           }
         ],
-        "fullSupport": [
+        "codexSupport": [
           {
             "type": "fairWhen",
             "field": "thinking",
             "when": {
               "op": "and",
               "exprs": [
-                { "op": "condIn", "condition": "backend", "values": ["codex-app-server", "pi"] },
-                { "op": "in", "field": "thinking", "values": ["off", "minimal", "low", "medium", "high", "xhigh", "max"] }
+                { "op": "condIn", "condition": "backend", "values": ["codex-app-server"] },
+                { "op": "in", "field": "thinking", "values": ["low", "medium", "high", "xhigh", "max"] }
               ]
             },
-            "reason": "codex-app-server and pi support all canonical thinking values on start and resume"
+            "reason": "codex-app-server supports low through max on start and resume; off and minimal are rejected by the API"
+          }
+        ],
+        "piSupport": [
+          {
+            "type": "fairWhen",
+            "field": "thinking",
+            "when": {
+              "op": "and",
+              "exprs": [
+                { "op": "condIn", "condition": "backend", "values": ["pi"] },
+                { "op": "in", "field": "thinking", "values": ["off", "low", "medium", "high", "xhigh", "max"] }
+              ]
+            },
+            "reason": "pi supports off and low through max on start and resume; it has no minimal level"
           }
         ],
         "claudeStart": [

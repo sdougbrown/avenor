@@ -55,7 +55,8 @@ type thinkingPolicyBranch int
 const (
 	thinkingPolicyBranchNone thinkingPolicyBranch = iota
 	Empty                    thinkingPolicyBranch = iota
-	FullSupport              thinkingPolicyBranch = iota
+	CodexSupport             thinkingPolicyBranch = iota
+	PiSupport                thinkingPolicyBranch = iota
 	ClaudeStart              thinkingPolicyBranch = iota
 )
 
@@ -65,8 +66,11 @@ func Check(f ThinkingPolicyFields, c ThinkingPolicyConditions, prev ThinkingPoli
 	if f.Thinking == nil {
 		thinkingPolicyBranchActive = Empty
 	}
-	if (c.Backend == "codex-app-server" || c.Backend == "pi") && (f.Thinking != nil && *f.Thinking == "off" || f.Thinking != nil && *f.Thinking == "minimal" || f.Thinking != nil && *f.Thinking == "low" || f.Thinking != nil && *f.Thinking == "medium" || f.Thinking != nil && *f.Thinking == "high" || f.Thinking != nil && *f.Thinking == "xhigh" || f.Thinking != nil && *f.Thinking == "max") {
-		thinkingPolicyBranchActive = FullSupport
+	if c.Backend == "codex-app-server" && (f.Thinking != nil && *f.Thinking == "low" || f.Thinking != nil && *f.Thinking == "medium" || f.Thinking != nil && *f.Thinking == "high" || f.Thinking != nil && *f.Thinking == "xhigh" || f.Thinking != nil && *f.Thinking == "max") {
+		thinkingPolicyBranchActive = CodexSupport
+	}
+	if c.Backend == "pi" && (f.Thinking != nil && *f.Thinking == "off" || f.Thinking != nil && *f.Thinking == "low" || f.Thinking != nil && *f.Thinking == "medium" || f.Thinking != nil && *f.Thinking == "high" || f.Thinking != nil && *f.Thinking == "xhigh" || f.Thinking != nil && *f.Thinking == "max") {
+		thinkingPolicyBranchActive = PiSupport
 	}
 	if (c.Backend == "claude" || c.Backend == "claude-channel") && c.Resume == false && (f.Thinking != nil && *f.Thinking == "low" || f.Thinking != nil && *f.Thinking == "medium" || f.Thinking != nil && *f.Thinking == "high" || f.Thinking != nil && *f.Thinking == "xhigh" || f.Thinking != nil && *f.Thinking == "max") {
 		thinkingPolicyBranchActive = ClaudeStart
@@ -77,14 +81,17 @@ func Check(f ThinkingPolicyFields, c ThinkingPolicyConditions, prev ThinkingPoli
 			Required:  false,
 			Enabled:   true,
 			Satisfied: func() bool { v := f.Thinking; return v != nil && *v != "" }(),
-			Fair:      (f.Thinking == nil || ((c.Backend == "codex-app-server" || c.Backend == "pi") && (f.Thinking != nil && *f.Thinking == "off" || f.Thinking != nil && *f.Thinking == "minimal" || f.Thinking != nil && *f.Thinking == "low" || f.Thinking != nil && *f.Thinking == "medium" || f.Thinking != nil && *f.Thinking == "high" || f.Thinking != nil && *f.Thinking == "xhigh" || f.Thinking != nil && *f.Thinking == "max")) || ((c.Backend == "claude" || c.Backend == "claude-channel") && c.Resume == false && (f.Thinking != nil && *f.Thinking == "low" || f.Thinking != nil && *f.Thinking == "medium" || f.Thinking != nil && *f.Thinking == "high" || f.Thinking != nil && *f.Thinking == "xhigh" || f.Thinking != nil && *f.Thinking == "max"))),
+			Fair:      (f.Thinking == nil || (c.Backend == "codex-app-server" && (f.Thinking != nil && *f.Thinking == "low" || f.Thinking != nil && *f.Thinking == "medium" || f.Thinking != nil && *f.Thinking == "high" || f.Thinking != nil && *f.Thinking == "xhigh" || f.Thinking != nil && *f.Thinking == "max")) || (c.Backend == "pi" && (f.Thinking != nil && *f.Thinking == "off" || f.Thinking != nil && *f.Thinking == "low" || f.Thinking != nil && *f.Thinking == "medium" || f.Thinking != nil && *f.Thinking == "high" || f.Thinking != nil && *f.Thinking == "xhigh" || f.Thinking != nil && *f.Thinking == "max")) || ((c.Backend == "claude" || c.Backend == "claude-channel") && c.Resume == false && (f.Thinking != nil && *f.Thinking == "low" || f.Thinking != nil && *f.Thinking == "medium" || f.Thinking != nil && *f.Thinking == "high" || f.Thinking != nil && *f.Thinking == "xhigh" || f.Thinking != nil && *f.Thinking == "max"))),
 			Reason: func() *string {
 				var reasons []string
 				if !(f.Thinking == nil) && "thinking is empty (backend default)" != "" {
 					reasons = append(reasons, "thinking is empty (backend default)")
 				}
-				if !((c.Backend == "codex-app-server" || c.Backend == "pi") && (f.Thinking != nil && *f.Thinking == "off" || f.Thinking != nil && *f.Thinking == "minimal" || f.Thinking != nil && *f.Thinking == "low" || f.Thinking != nil && *f.Thinking == "medium" || f.Thinking != nil && *f.Thinking == "high" || f.Thinking != nil && *f.Thinking == "xhigh" || f.Thinking != nil && *f.Thinking == "max")) && "codex-app-server and pi support all canonical thinking values on start and resume" != "" {
-					reasons = append(reasons, "codex-app-server and pi support all canonical thinking values on start and resume")
+				if !(c.Backend == "codex-app-server" && (f.Thinking != nil && *f.Thinking == "low" || f.Thinking != nil && *f.Thinking == "medium" || f.Thinking != nil && *f.Thinking == "high" || f.Thinking != nil && *f.Thinking == "xhigh" || f.Thinking != nil && *f.Thinking == "max")) && "codex-app-server supports low through max on start and resume; off and minimal are rejected by the API" != "" {
+					reasons = append(reasons, "codex-app-server supports low through max on start and resume; off and minimal are rejected by the API")
+				}
+				if !(c.Backend == "pi" && (f.Thinking != nil && *f.Thinking == "off" || f.Thinking != nil && *f.Thinking == "low" || f.Thinking != nil && *f.Thinking == "medium" || f.Thinking != nil && *f.Thinking == "high" || f.Thinking != nil && *f.Thinking == "xhigh" || f.Thinking != nil && *f.Thinking == "max")) && "pi supports off and low through max on start and resume; it has no minimal level" != "" {
+					reasons = append(reasons, "pi supports off and low through max on start and resume; it has no minimal level")
 				}
 				if !((c.Backend == "claude" || c.Backend == "claude-channel") && c.Resume == false && (f.Thinking != nil && *f.Thinking == "low" || f.Thinking != nil && *f.Thinking == "medium" || f.Thinking != nil && *f.Thinking == "high" || f.Thinking != nil && *f.Thinking == "xhigh" || f.Thinking != nil && *f.Thinking == "max")) && "claude and claude-channel support low through max only on a new session" != "" {
 					reasons = append(reasons, "claude and claude-channel support low through max only on a new session")
@@ -99,8 +106,11 @@ func Check(f ThinkingPolicyFields, c ThinkingPolicyConditions, prev ThinkingPoli
 				if !(f.Thinking == nil) && "thinking is empty (backend default)" != "" {
 					reasons = append(reasons, "thinking is empty (backend default)")
 				}
-				if !((c.Backend == "codex-app-server" || c.Backend == "pi") && (f.Thinking != nil && *f.Thinking == "off" || f.Thinking != nil && *f.Thinking == "minimal" || f.Thinking != nil && *f.Thinking == "low" || f.Thinking != nil && *f.Thinking == "medium" || f.Thinking != nil && *f.Thinking == "high" || f.Thinking != nil && *f.Thinking == "xhigh" || f.Thinking != nil && *f.Thinking == "max")) && "codex-app-server and pi support all canonical thinking values on start and resume" != "" {
-					reasons = append(reasons, "codex-app-server and pi support all canonical thinking values on start and resume")
+				if !(c.Backend == "codex-app-server" && (f.Thinking != nil && *f.Thinking == "low" || f.Thinking != nil && *f.Thinking == "medium" || f.Thinking != nil && *f.Thinking == "high" || f.Thinking != nil && *f.Thinking == "xhigh" || f.Thinking != nil && *f.Thinking == "max")) && "codex-app-server supports low through max on start and resume; off and minimal are rejected by the API" != "" {
+					reasons = append(reasons, "codex-app-server supports low through max on start and resume; off and minimal are rejected by the API")
+				}
+				if !(c.Backend == "pi" && (f.Thinking != nil && *f.Thinking == "off" || f.Thinking != nil && *f.Thinking == "low" || f.Thinking != nil && *f.Thinking == "medium" || f.Thinking != nil && *f.Thinking == "high" || f.Thinking != nil && *f.Thinking == "xhigh" || f.Thinking != nil && *f.Thinking == "max")) && "pi supports off and low through max on start and resume; it has no minimal level" != "" {
+					reasons = append(reasons, "pi supports off and low through max on start and resume; it has no minimal level")
 				}
 				if !((c.Backend == "claude" || c.Backend == "claude-channel") && c.Resume == false && (f.Thinking != nil && *f.Thinking == "low" || f.Thinking != nil && *f.Thinking == "medium" || f.Thinking != nil && *f.Thinking == "high" || f.Thinking != nil && *f.Thinking == "xhigh" || f.Thinking != nil && *f.Thinking == "max")) && "claude and claude-channel support low through max only on a new session" != "" {
 					reasons = append(reasons, "claude and claude-channel support low through max only on a new session")

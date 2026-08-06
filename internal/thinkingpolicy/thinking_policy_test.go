@@ -54,14 +54,27 @@ func TestEvaluate(t *testing.T) {
 		}
 	}
 
-	// Full-support backends accept everything on start and resume.
-	for _, backend := range []string{"codex-app-server", "pi"} {
-		for _, value := range []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"} {
-			if got := Evaluate(backend, value, false); got != OK {
-				t.Errorf("%s start %s = %v", backend, value, got)
+	// Codex and pi accept their supported values identically on start and
+	// resume, so nothing they reject is ever StartOnly.
+	supported := map[string][]string{
+		"codex-app-server": {"low", "medium", "high", "xhigh", "max"},
+		"pi":               {"off", "low", "medium", "high", "xhigh", "max"},
+	}
+	for backend, values := range supported {
+		accepted := make(map[string]bool, len(values))
+		for _, value := range values {
+			accepted[value] = true
+		}
+		for _, value := range CanonicalValues() {
+			want := UnsupportedValue
+			if accepted[value] {
+				want = OK
 			}
-			if got := Evaluate(backend, value, true); got != OK {
-				t.Errorf("%s resume %s = %v", backend, value, got)
+			if got := Evaluate(backend, value, false); got != want {
+				t.Errorf("%s start %s = %v, want %v", backend, value, got, want)
+			}
+			if got := Evaluate(backend, value, true); got != want {
+				t.Errorf("%s resume %s = %v, want %v", backend, value, got, want)
 			}
 		}
 	}
@@ -85,8 +98,39 @@ func TestStartValues(t *testing.T) {
 	if got := StartValues("claude"); !reflect.DeepEqual(got, []string{"low", "medium", "high", "xhigh", "max"}) {
 		t.Errorf("claude start = %v", got)
 	}
+	if got := StartValues("codex-app-server"); !reflect.DeepEqual(got, []string{"low", "medium", "high", "xhigh", "max"}) {
+		t.Errorf("codex start = %v", got)
+	}
+	if got := StartValues("pi"); !reflect.DeepEqual(got, []string{"off", "low", "medium", "high", "xhigh", "max"}) {
+		t.Errorf("pi start = %v", got)
+	}
 	if got := StartValues("agy"); len(got) != 0 {
 		t.Errorf("agy start = %v, want empty", got)
+	}
+}
+
+// TestResumeValuesMatchStartForNonClaudeBackends pins the shape the outcome
+// classification depends on: only the claude family narrows on resume, so
+// StartOnly must be unreachable for codex and pi.
+func TestResumeValuesMatchStartForNonClaudeBackends(t *testing.T) {
+	for _, backend := range []string{"codex-app-server", "pi"} {
+		if start, resume := StartValues(backend), ResumeValues(backend); !reflect.DeepEqual(start, resume) {
+			t.Errorf("%s start %v != resume %v", backend, start, resume)
+		}
+	}
+}
+
+// TestMinimalIsCanonicalButUnsupported records that minimal stays in the
+// canonical tuple hosts derive their enums from while no backend accepts it.
+// Codex rejects it at the API and pi has no such level.
+func TestMinimalIsCanonicalButUnsupported(t *testing.T) {
+	if !IsCanonical("minimal") {
+		t.Fatal("minimal must remain canonical")
+	}
+	for backend := range supportedBackends {
+		if got := Evaluate(backend, "minimal", false); got == OK {
+			t.Errorf("%s accepts minimal; update this test and the policy docs", backend)
+		}
 	}
 }
 

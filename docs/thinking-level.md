@@ -24,14 +24,16 @@ The control is also available in stable spawn JSON, `avenor control spawn`, the 
 
 Omit the setting to use the backend default. Avenor passes the same explicit spawn-level value to retries, loop and team phases, queued prompts, and follow-up runs. Avenor does not normalize case, clamp values, or add thinking instructions to prompts. An invalid value returns an error that lists the accepted values.
 
+This tuple is the shared vocabulary that hosts derive their enums from, so it is wider than any single backend. No backend currently accepts `minimal`, and only Pi accepts `off`. Both stay canonical because a backend can gain them without a vocabulary change; the per-backend table below is what decides an actual run.
+
 ## Backend support
 
 The native mechanisms below were verified with Codex CLI 0.144.6, Pi 0.83.0, and Claude Code 2.1.220. A required feature check that does not match returns the same unsupported-parameter error instead of guessing.
 
 | Backend | New session | Explicit resume | Native control |
 |---|---|---|---|
-| `codex-app-server` | all seven values | all seven values | `turn/start.effort` |
-| `pi` | all seven values | all seven values | fresh client: `--thinking`; reused client: `set_thinking_level` |
+| `codex-app-server` | `low`, `medium`, `high`, `xhigh`, `max` | same as new session | `turn/start.effort` |
+| `pi` | `off`, `low`, `medium`, `high`, `xhigh`, `max` | same as new session | fresh client: `--thinking`; reused client: `set_thinking_level` |
 | `claude` | `low`, `medium`, `high`, `xhigh`, `max` | unsupported | `--effort` at startup |
 | `claude-channel` | `low`, `medium`, `high`, `xhigh`, `max` | unsupported | `--effort` at startup |
 | `opencode-acp` | unsupported | unsupported | none verified |
@@ -55,6 +57,8 @@ The rejection occurs before Avenor starts a provider, reserves a stable runtime,
 
 Avenor stores an explicit effort as thread-scoped outbound state and sends the exact value on the first and each later `turn/start` request. It does not add `reasoning_effort` to `thread/start`, query `model/list` as a gate, require a model, or clamp the value.
 
+`off` and `minimal` are rejected before the provider starts. The app-server has no such effort levels and answers with an HTTP 400 across the GPT-5.6 family. Accepting them only moves a certain failure to after the session exists.
+
 The app-server validates effort against the active thread model on the actual turn. If Codex rejects it, Avenor adds the backend and requested value while retaining the app-server error text.
 
 An explicit resume replaces Avenor's outbound override. A resume with omitted thinking clears only that override and omits `effort`; it does not reset the effort retained by Codex.
@@ -65,7 +69,9 @@ For each fresh explicit start or resume, Avenor first checks that `pi --help` ad
 
 For a reused client, Avenor sends `set_thinking_level` on that client and requires a successful response before state lookup, session registration, or the next prompt. Avenor does not start an extra Pi process to probe the setter. Omitted thinking sends neither the flag nor the setter.
 
-Pi owns model-specific mapping and clamping. The seven Avenor controls do not promise identical effective behavior for every Pi model.
+Pi has no `minimal` level, so Avenor rejects that value before starting a client. `off` is supported and reaches Pi verbatim.
+
+Pi owns model-specific mapping and clamping. The Avenor controls do not promise identical effective behavior for every Pi model.
 
 ### Claude and Claude Channel
 
