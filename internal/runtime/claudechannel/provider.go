@@ -173,15 +173,15 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	// Build claude args.
 	claudeArgs := claudeutil.BuildArgs(sessionID, serverName, merged)
 
-	// Build the shell command for the tmux session. Using `exec` replaces the
-	// shell with claude so that #{pane_pid} reports claude's actual PID and the
-	// tmux session exits when claude exits.
-	parts := make([]string, 0, len(claudeArgs)+2)
-	parts = append(parts, "exec", "claude")
-	for _, arg := range claudeArgs {
-		parts = append(parts, claudecore.ShellQuote(arg))
+	// Build the shell command for the tmux session. See LaunchCommand for why it
+	// uses `exec` and where claude's stderr goes.
+	stderrLog, err := claudecore.CreateStderrLog()
+	if err != nil {
+		_ = removeProjectMCPServer(projectMCPPath, serverName)
+		_ = os.RemoveAll(mcpDir)
+		return runtime.Session{}, fmt.Errorf("create stderr log: %w", err)
 	}
-	shellCmd := strings.Join(parts, " ")
+	shellCmd := claudecore.LaunchCommand(claudeArgs, stderrLog)
 
 	// Launch claude in a detached tmux session. tmux provides a real virtual
 	// terminal, which is what prevents claude from falling back to --print mode.
@@ -198,6 +198,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		Dir:        merged.Dir,
 		TmuxName:   tmuxName,
 		Transcript: transcript,
+		StderrLog:  stderrLog,
 		EventsBuf:  64,
 	})
 
@@ -221,6 +222,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	if err != nil {
 		_ = removeProjectMCPServer(projectMCPPath, serverName)
 		_ = os.RemoveAll(mcpDir)
+		s.RemoveStderrLog()
 		return runtime.Session{}, fmt.Errorf("terminal launch: %w", err)
 	}
 	s.Term = term
@@ -278,6 +280,9 @@ func (p *Provider) runSession(ctx context.Context, s *session) {
 		_ = s.Term.Kill(ctx)
 		_ = removeProjectMCPServer(s.mcpProject, s.mcpServer)
 		_ = os.RemoveAll(s.mcpDir)
+		// Deferred, so the log is still there for EmitTerminalGone to classify
+		// the exit with.
+		s.RemoveStderrLog()
 	}()
 
 	// Watch for the tmux session to disappear (claude exited).
@@ -310,20 +315,15 @@ func (p *Provider) runSession(ctx context.Context, s *session) {
 			_ = s.Term.Kill(ctx)
 			return
 		case <-sessionGone:
-			if s.MarkFinished() {
-				// Claude exited without calling avenor_finish. This runs in the
-				// runSession goroutine, so it cannot race teardown. Using s.Emit
-				// for consistency with the claude backend and for the s.Ctx.Done()
-				// escape hatch if the buffer is full.
-				s.Emit(events.Event{
-					Event:     "session.end",
-					SessionID: s.SessionID,
-					Fields: map[string]any{
-						"status":      "done",
-						"stop_reason": "end_turn",
-					},
-				})
-			}
+			// Claude exited without calling avenor_finish. EmitTerminalGone
+			// classifies the exit before reporting it, because a launch Claude
+			// Code refused leaves the same dead terminal as a finished turn and
+			// calling it done hides the failure. It runs in the runSession
+			// goroutine, so it cannot race teardown, and it emits through s.Emit
+			// for consistency with the claude backend and for the s.Ctx.Done()
+			// escape hatch if the buffer is full. MarkFinished guards the
+			// double-emit.
+			s.EmitTerminalGone(ctx)
 			return
 		case <-pollTick.C:
 			p.pollBrokerEvents(s)

@@ -589,21 +589,30 @@ func TestSessionGoneEmitsEndEvent(t *testing.T) {
 		SessionID: "ses-gone",
 		EventsBuf: 8,
 	})
-	// Prompted=false keeps the pane/transcript tickers as no-ops so the only
-	// event we can observe is the session.end from the sessionGone branch.
+	// Prompted=false keeps the pane/transcript tickers as no-ops, so the only
+	// events here come from the sessionGone branch. A terminal that died without
+	// a prompt ever being submitted is a failed launch, so that branch leads with
+	// agent.launch_failed and the session.end follows it.
 	s.Term = terminal.NewFakeSession("test-term", 1, "ready")
 	s.Term.(*terminal.FakeSession).SetAlive(false)
 	p.sessions[s.SessionID] = s
 
 	go p.runSession(s.Ctx, s)
 
-	select {
-	case ev := <-s.Events:
-		if ev.Event != "session.end" {
-			t.Fatalf("event = %q, want session.end", ev.Event)
+	deadline := time.After(3 * time.Second)
+	for done := false; !done; {
+		select {
+		case ev := <-s.Events:
+			if ev.Event != "session.end" {
+				continue
+			}
+			if ev.Fields["stop_reason"] == "" {
+				t.Fatalf("session.end missing stop_reason: %+v", ev.Fields)
+			}
+			done = true
+		case <-deadline:
+			t.Fatal("timeout waiting for session.end event")
 		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("timeout waiting for session.end event")
 	}
 
 	select {

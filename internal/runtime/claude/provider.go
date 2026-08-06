@@ -99,12 +99,11 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 
 	claudeArgs := claudeutil.BuildArgs(sessionID, "", merged)
 
-	parts := make([]string, 0, len(claudeArgs)+2)
-	parts = append(parts, "exec", "claude")
-	for _, arg := range claudeArgs {
-		parts = append(parts, claudecore.ShellQuote(arg))
+	stderrLog, err := claudecore.CreateStderrLog()
+	if err != nil {
+		return runtime.Session{}, fmt.Errorf("create stderr log: %w", err)
 	}
-	shellCmd := strings.Join(parts, " ")
+	shellCmd := claudecore.LaunchCommand(claudeArgs, stderrLog)
 
 	var transcript *claudecore.TranscriptReader
 	if home, err := os.UserHomeDir(); err == nil {
@@ -115,6 +114,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		SessionID:  sessionID,
 		Dir:        merged.Dir,
 		Transcript: transcript,
+		StderrLog:  stderrLog,
 		EventsBuf:  64,
 	})
 
@@ -127,6 +127,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	})
 	if err != nil {
 		s.CancelFn()
+		s.RemoveStderrLog()
 		return runtime.Session{}, fmt.Errorf("terminal launch: %w", err)
 	}
 	s.Term = term
@@ -173,6 +174,9 @@ func (p *Provider) runSession(ctx context.Context, s *claudecore.Session) {
 	}()
 	defer func() {
 		_ = s.Term.Kill(context.Background())
+		// Deferred, so the log is still there for EmitTerminalGone to classify
+		// the exit with.
+		s.RemoveStderrLog()
 	}()
 
 	sessionGone := make(chan struct{})
@@ -200,16 +204,11 @@ func (p *Provider) runSession(ctx context.Context, s *claudecore.Session) {
 		case <-ctx.Done():
 			return
 		case <-sessionGone:
-			if s.MarkFinished() {
-				s.Emit(events.Event{
-					Event:     "session.end",
-					SessionID: s.SessionID,
-					Fields: map[string]any{
-						"status":      "done",
-						"stop_reason": "end_turn",
-					},
-				})
-			}
+			// Claude exited on its own. EmitTerminalGone classifies the exit
+			// before reporting it: a launch Claude Code refused leaves the same
+			// dead terminal as a finished turn, and calling it done hides the
+			// failure. MarkFinished guards the double-emit.
+			s.EmitTerminalGone(ctx)
 			return
 		case <-paneTick.C:
 			s.ScanTerminalTick()

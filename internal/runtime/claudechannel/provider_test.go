@@ -1414,14 +1414,23 @@ func TestSessionGoneEmitsFallbackEnd(t *testing.T) {
 	term.SetAlive(false)
 	go p.runSession(s.Ctx, s)
 
-	// Wait for session.end event.
-	select {
-	case ev := <-s.Events:
-		if ev.Event != "session.end" {
-			t.Fatalf("event = %q, want session.end", ev.Event)
+	// Wait for the session.end event. The terminal died without a prompt ever
+	// being submitted, which is a failed launch, so the sessionGone branch leads
+	// with agent.launch_failed and the session.end follows it.
+	deadline := time.After(3 * time.Second)
+	for done := false; !done; {
+		select {
+		case ev := <-s.Events:
+			if ev.Event != "session.end" {
+				continue
+			}
+			if ev.Fields["stop_reason"] == "" {
+				t.Fatalf("session.end missing stop_reason: %+v", ev.Fields)
+			}
+			done = true
+		case <-deadline:
+			t.Fatal("timeout waiting for session.end event after session went away")
 		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("timeout waiting for session.end event after session went away")
 	}
 
 	select {

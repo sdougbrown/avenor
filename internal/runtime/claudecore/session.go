@@ -19,6 +19,11 @@ type Session struct {
 	Term       terminal.Session
 	Transcript *TranscriptReader
 
+	// StderrLog is the file claude's stderr is redirected into by LaunchCommand.
+	// It outlives the terminal, which is the only way to read a fatal launch
+	// banner — see LaunchCommand for why the pane cannot be used.
+	StderrLog string
+
 	Events    chan events.Event
 	Done      chan struct{}
 	Ctx       context.Context
@@ -39,6 +44,7 @@ type SessionOptions struct {
 	TmuxName   string
 	Term       terminal.Session
 	Transcript *TranscriptReader
+	StderrLog  string
 	EventsBuf  int
 }
 
@@ -51,6 +57,7 @@ func NewSession(ctx context.Context, opts SessionOptions) *Session {
 		TmuxName:   opts.TmuxName,
 		Term:       opts.Term,
 		Transcript: opts.Transcript,
+		StderrLog:  opts.StderrLog,
 		Events:     make(chan events.Event, opts.EventsBuf),
 		Done:       make(chan struct{}),
 		Ctx:        sessCtx,
