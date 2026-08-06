@@ -1430,3 +1430,18 @@ func TestSessionGoneEmitsFallbackEnd(t *testing.T) {
 		t.Fatal("timeout waiting for runSession to exit")
 	}
 }
+
+func TestChannelPolicyBlocked(t *testing.T) {
+	blocked := " ▎ --dangerously-load-development-channels blocked by org policy (server:avenor-channel-0b129f4d)\n" +
+		" ▎ Inbound messages will be silently dropped\n" +
+		" ▎ Have an administrator set channelsEnabled: true in managed settings to enable\n"
+	if !channelPolicyBlocked(blocked) {
+		t.Fatal("policy-block banner not detected; run would hang until timeout")
+	}
+	if channelPolicyBlocked("❯ \nLoading development channels\n") {
+		t.Fatal("normal channel startup misreported as policy-blocked")
+	}
+	if channelPolicyBlocked("") {
+		t.Fatal("empty pane misreported as policy-blocked")
+	}
+}
