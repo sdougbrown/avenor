@@ -5,55 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math/big"
-	"strconv"
+	"reflect"
 	"strings"
 )
-
-// templateEnvelope is the temporary Stage 1 wire shape. Stage 2 replaces it
-// with the canonical serializable Template model while retaining the
-// ValidateTemplateJSON boundary.
-type templateEnvelope struct {
-	SchemaVersion     json.RawMessage   `json:"schema_version"`
-	TemplateID        string            `json:"template_id"`
-	TemplateVersion   string            `json:"template_version"`
-	Metadata          map[string]any    `json:"metadata,omitempty"`
-	EntryNodes        []string          `json:"entry_nodes"`
-	Nodes             []nodeEnvelope    `json:"nodes"`
-	TerminalOutcomes  []string          `json:"terminal_outcomes"`
-	BoundedLoops      []json.RawMessage `json:"bounded_loops,omitempty"`
-	DefaultLease      map[string]any    `json:"default_lease_policy,omitempty"`
-	DefaultRetry      map[string]any    `json:"default_retry_policy,omitempty"`
-	CompositionLimits map[string]any    `json:"composition_limits,omitempty"`
-}
-
-type nodeEnvelope struct {
-	ID           string            `json:"id"`
-	Name         string            `json:"name,omitempty"`
-	Dependencies []string          `json:"dependencies,omitempty"`
-	Outcomes     []json.RawMessage `json:"outcomes,omitempty"`
-	Branches     map[string]string `json:"branches,omitempty"`
-	Action       json.RawMessage   `json:"action"`
-	Assignment   json.RawMessage   `json:"assignment,omitempty"`
-	Completion   json.RawMessage   `json:"completion,omitempty"`
-	Outputs      []json.RawMessage `json:"outputs,omitempty"`
-	Gates        []json.RawMessage `json:"gates,omitempty"`
-	RetryPolicy  json.RawMessage   `json:"retry_policy,omitempty"`
-	LoopID       string            `json:"loop_id,omitempty"`
-	Checkpoint   json.RawMessage   `json:"checkpoint,omitempty"`
-	LeasePolicy  json.RawMessage   `json:"lease_policy,omitempty"`
-	SkipRule     json.RawMessage   `json:"skip_rule,omitempty"`
-	WaiveRules   []json.RawMessage `json:"waive_rules,omitempty"`
-}
-
-var actionKinds = map[string]struct{}{
-	"run":      {},
-	"loop":     {},
-	"team":     {},
-	"manual":   {},
-	"external": {},
-	"workflow": {},
-}
 
 const (
 	maxTemplateBytes  = 4 << 20
@@ -61,33 +15,30 @@ const (
 	maxContainerItems = 10_000
 )
 
-// ValidateTemplateJSON strictly decodes a workflow template, evaluates the
-// generated portable Umpire contract, and applies the Stage 1 wire checks.
-// Graph and context-dependent validation is added after the canonical model
-// lands in Stages 2 and 3.
+// ValidateTemplateJSON strictly decodes and validates a workflow template.
 func ValidateTemplateJSON(data []byte) error {
-	var template templateEnvelope
+	var template Template
 	if err := decodeStrict(data, &template); err != nil {
 		return fmt.Errorf("invalid workflow template: %w", err)
 	}
+	return ValidateTemplate(template)
+}
 
-	schemaVersion, err := exactSchemaVersion(template.SchemaVersion)
-	if err != nil {
-		return fmt.Errorf("invalid workflow template: schema_version: %w", err)
-	}
-
+// ValidateTemplate evaluates the generated portable Umpire contract and the
+// typed structural checks. Stage 3 adds graph- and context-dependent rules.
+func ValidateTemplate(template Template) error {
 	fields := WorkflowFields{
-		BoundedLoops:       projectIDs(template.BoundedLoops),
-		CompositionLimits:  template.CompositionLimits,
-		DefaultLeasePolicy: template.DefaultLease,
-		DefaultRetryPolicy: template.DefaultRetry,
-		EntryNodes:         template.EntryNodes,
+		BoundedLoops:       loopIDs(template.BoundedLoops),
+		CompositionLimits:  compositionFields(template.CompositionLimits),
+		DefaultLeasePolicy: leaseFields(template.DefaultLease),
+		DefaultRetryPolicy: retryFields(template.DefaultRetry),
+		EntryNodes:         nodeIDs(template.EntryNodes),
 		Metadata:           template.Metadata,
-		Nodes:              projectNodeIDs(template.Nodes),
-		SchemaVersion:      schemaVersion,
-		TemplateId:         stringValue(template.TemplateID),
-		TemplateVersion:    stringValue(template.TemplateVersion),
-		TerminalOutcomes:   template.TerminalOutcomes,
+		Nodes:              definitionIDs(template.Nodes),
+		SchemaVersion:      integerValue(template.SchemaVersion),
+		TemplateId:         stringValue(string(template.TemplateID)),
+		TemplateVersion:    stringValue(string(template.TemplateVersion)),
+		TerminalOutcomes:   outcomeNames(template.TerminalOutcomes),
 	}
 	availability := Check(fields, WorkflowConditions{}, WorkflowFields{})
 	for _, field := range []struct {
@@ -110,48 +61,27 @@ func ValidateTemplateJSON(data []byte) error {
 			return err
 		}
 	}
-
-	if strings.TrimSpace(template.TemplateID) == "" {
+	if strings.TrimSpace(string(template.TemplateID)) == "" {
 		return fmt.Errorf("invalid workflow template: template_id is required")
 	}
-	if strings.TrimSpace(template.TemplateVersion) == "" {
+	if strings.TrimSpace(string(template.TemplateVersion)) == "" {
 		return fmt.Errorf("invalid workflow template: template_version is required")
 	}
-
 	for index, node := range template.Nodes {
-		if strings.TrimSpace(node.ID) == "" {
+		if strings.TrimSpace(string(node.ID)) == "" {
 			return fmt.Errorf("invalid workflow template: nodes[%d].id is required", index)
 		}
-		if len(node.Action) == 0 || string(node.Action) == "null" {
-			return fmt.Errorf("invalid workflow template: node %q action is required", node.ID)
-		}
-		var actionFields map[string]json.RawMessage
-		if err := json.Unmarshal(node.Action, &actionFields); err != nil {
-			return fmt.Errorf("invalid workflow template: node %q action: %w", node.ID, err)
-		}
-		typeJSON, ok := actionFields["type"]
-		if !ok {
-			return fmt.Errorf("invalid workflow template: node %q action.type is required", node.ID)
-		}
-		var actionType string
-		if err := json.Unmarshal(typeJSON, &actionType); err != nil {
-			return fmt.Errorf("invalid workflow template: node %q action.type: %w", node.ID, err)
-		}
-		if strings.TrimSpace(actionType) == "" {
-			return fmt.Errorf("invalid workflow template: node %q action.type is required", node.ID)
-		}
-		if _, ok := actionKinds[actionType]; !ok {
-			return fmt.Errorf("invalid workflow template: node %q has unsupported action %q", node.ID, actionType)
+		if err := validateAction(node.Action); err != nil {
+			return fmt.Errorf("invalid workflow template: node %q: %w", node.ID, err)
 		}
 	}
-
 	for index, id := range template.EntryNodes {
-		if strings.TrimSpace(id) == "" {
+		if strings.TrimSpace(string(id)) == "" {
 			return fmt.Errorf("invalid workflow template: entry_nodes[%d] is empty", index)
 		}
 	}
 	for index, outcome := range template.TerminalOutcomes {
-		if strings.TrimSpace(outcome) == "" {
+		if strings.TrimSpace(string(outcome)) == "" {
 			return fmt.Errorf("invalid workflow template: terminal_outcomes[%d] is empty", index)
 		}
 	}
@@ -272,6 +202,12 @@ func rejectNonCanonicalKeys(data []byte) error {
 	}); err != nil {
 		return err
 	}
+	if version, ok := templateFields["schema_version"]; ok && !bytes.Equal(bytes.TrimSpace(version), []byte("1")) {
+		return fmt.Errorf("workflow schema_version must be the JSON integer 1")
+	}
+	if err := requireCanonicalTypedValue(data, reflect.TypeOf(Template{}), ""); err != nil {
+		return err
+	}
 
 	nodesJSON, ok := templateFields["nodes"]
 	if !ok {
@@ -307,6 +243,123 @@ func rejectNonCanonicalKeys(data []byte) error {
 	return nil
 }
 
+func requireCanonicalActionKeys(data []byte) error {
+	return requireCanonicalTypedValue(data, reflect.TypeOf(Action{}), "")
+}
+
+func requireCanonicalSnapshotKeys(data []byte) error {
+	return requireCanonicalTypedValue(data, reflect.TypeOf(Snapshot{}), "")
+}
+
+func requireCanonicalTypedValue(data []byte, valueType reflect.Type, path string) error {
+	for valueType.Kind() == reflect.Pointer {
+		valueType = valueType.Elem()
+	}
+	if valueType == reflect.TypeOf(json.RawMessage{}) || valueType.Kind() == reflect.Interface {
+		return nil
+	}
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return atJSONPath(path, fmt.Errorf("value cannot be null"))
+	}
+
+	switch valueType.Kind() {
+	case reflect.Struct:
+		if valueType == reflect.TypeOf(Action{}) {
+			var discriminator struct {
+				Type ActionKind `json:"type"`
+			}
+			if json.Unmarshal(data, &discriminator) != nil {
+				return nil
+			}
+			switch discriminator.Type {
+			case ActionRun:
+				valueType = reflect.TypeOf(RunAction{})
+			case ActionLoop:
+				valueType = reflect.TypeOf(LoopAction{})
+			case ActionTeam:
+				valueType = reflect.TypeOf(TeamAction{})
+			case ActionManual:
+				valueType = reflect.TypeOf(ManualAction{})
+			case ActionExternal:
+				valueType = reflect.TypeOf(ExternalAction{})
+			case ActionWorkflow:
+				valueType = reflect.TypeOf(WorkflowAction{})
+			default:
+				return nil
+			}
+		}
+
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(data, &fields) != nil {
+			return nil
+		}
+		canonical := make([]string, 0, valueType.NumField())
+		fieldTypes := make(map[string]reflect.Type, valueType.NumField())
+		for index := 0; index < valueType.NumField(); index++ {
+			field := valueType.Field(index)
+			name := strings.Split(field.Tag.Get("json"), ",")[0]
+			if name == "-" {
+				continue
+			}
+			if name == "" {
+				name = field.Name
+			}
+			canonical = append(canonical, name)
+			fieldTypes[name] = field.Type
+		}
+		if err := requireCanonicalKeys(fields, canonical); err != nil {
+			return atJSONPath(path, err)
+		}
+		for name, raw := range fields {
+			fieldType, ok := fieldTypes[name]
+			if !ok {
+				continue
+			}
+			if err := requireCanonicalTypedValue(raw, fieldType, appendJSONPath(path, name)); err != nil {
+				return err
+			}
+		}
+	case reflect.Slice, reflect.Array:
+		var values []json.RawMessage
+		if json.Unmarshal(data, &values) != nil {
+			return nil
+		}
+		for index, raw := range values {
+			if err := requireCanonicalTypedValue(raw, valueType.Elem(), fmt.Sprintf("%s[%d]", path, index)); err != nil {
+				return err
+			}
+		}
+	case reflect.Map:
+		if valueType.Key().Kind() != reflect.String {
+			return nil
+		}
+		var values map[string]json.RawMessage
+		if json.Unmarshal(data, &values) != nil {
+			return nil
+		}
+		for key, raw := range values {
+			if err := requireCanonicalTypedValue(raw, valueType.Elem(), appendJSONPath(path, key)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func appendJSONPath(path, field string) string {
+	if path == "" {
+		return field
+	}
+	return path + "." + field
+}
+
+func atJSONPath(path string, err error) error {
+	if path == "" {
+		return err
+	}
+	return fmt.Errorf("%s: %w", path, err)
+}
+
 func requireCanonicalKeys(fields map[string]json.RawMessage, canonical []string) error {
 	for key, value := range fields {
 		if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
@@ -340,25 +393,169 @@ func validateFieldStatus(name string, status FieldStatus) error {
 	return nil
 }
 
-func projectNodeIDs(nodes []nodeEnvelope) []string {
+func validateAction(action Action) error {
+	variants := 0
+	for _, present := range []bool{
+		action.Run != nil, action.Loop != nil, action.Team != nil,
+		action.Manual != nil, action.External != nil, action.Workflow != nil,
+	} {
+		if present {
+			variants++
+		}
+	}
+	if action.Kind == "" || variants == 0 {
+		return fmt.Errorf("action is required")
+	}
+	if variants != 1 {
+		return fmt.Errorf("action %q must contain exactly one variant", action.Kind)
+	}
+	matches := action.Kind == ActionRun && action.Run != nil ||
+		action.Kind == ActionLoop && action.Loop != nil ||
+		action.Kind == ActionTeam && action.Team != nil ||
+		action.Kind == ActionManual && action.Manual != nil ||
+		action.Kind == ActionExternal && action.External != nil ||
+		action.Kind == ActionWorkflow && action.Workflow != nil
+	if !matches {
+		return fmt.Errorf("action %q does not match its variant", action.Kind)
+	}
+
+	switch action.Kind {
+	case ActionRun:
+		hasPrompt := strings.TrimSpace(action.Run.Prompt) != ""
+		hasPromptFile := strings.TrimSpace(action.Run.PromptFile) != ""
+		if hasPrompt == hasPromptFile {
+			return fmt.Errorf("run action requires exactly one of prompt or prompt_file")
+		}
+	case ActionLoop:
+		if strings.TrimSpace(action.Loop.LoopFile) == "" {
+			return fmt.Errorf("loop action requires loop_file")
+		}
+	case ActionTeam:
+		if strings.TrimSpace(action.Team.TeamFile) == "" {
+			return fmt.Errorf("team action requires team_file")
+		}
+	case ActionExternal:
+		if strings.TrimSpace(action.External.Source) == "" {
+			return fmt.Errorf("external action requires source")
+		}
+	case ActionWorkflow:
+		if strings.TrimSpace(string(action.Workflow.TemplateID)) == "" {
+			return fmt.Errorf("workflow action requires template_id")
+		}
+		if strings.TrimSpace(string(action.Workflow.TemplateVersion)) == "" {
+			return fmt.Errorf("workflow action requires template_version")
+		}
+		if strings.TrimSpace(action.Workflow.ChildKey) == "" {
+			return fmt.Errorf("workflow action requires child_key")
+		}
+		if len(action.Workflow.OutcomeMap) == 0 {
+			return fmt.Errorf("workflow action requires outcome_map")
+		}
+		for index, binding := range action.Workflow.InputBindings {
+			if strings.TrimSpace(binding.Input) == "" {
+				return fmt.Errorf("workflow action input_bindings[%d] requires input", index)
+			}
+			hasValue := len(bytes.TrimSpace(binding.Value)) != 0
+			hasReference := binding.From != nil
+			if hasValue == hasReference {
+				return fmt.Errorf("workflow action input_bindings[%d] requires exactly one of value or from", index)
+			}
+			if hasValue {
+				if bytes.Equal(bytes.TrimSpace(binding.Value), []byte("null")) {
+					return fmt.Errorf("workflow action input_bindings[%d].value cannot be null", index)
+				}
+				if err := preflightJSON(binding.Value); err != nil {
+					return fmt.Errorf("workflow action input_bindings[%d].value: %w", index, err)
+				}
+			}
+			if hasReference {
+				if strings.TrimSpace(string(binding.From.NodeID)) == "" {
+					return fmt.Errorf("workflow action input_bindings[%d].from requires node_id", index)
+				}
+				if strings.TrimSpace(string(binding.From.OutputID)) == "" {
+					return fmt.Errorf("workflow action input_bindings[%d].from requires output_id", index)
+				}
+			}
+		}
+		for index, binding := range action.Workflow.OutputBindings {
+			if strings.TrimSpace(binding.ChildOutput) == "" {
+				return fmt.Errorf("workflow action output_bindings[%d] requires child_output", index)
+			}
+			if strings.TrimSpace(binding.ParentOutput) == "" {
+				return fmt.Errorf("workflow action output_bindings[%d] requires parent_output", index)
+			}
+		}
+		for child, parent := range action.Workflow.OutcomeMap {
+			if strings.TrimSpace(string(child)) == "" {
+				return fmt.Errorf("workflow action outcome_map contains a blank child outcome")
+			}
+			if strings.TrimSpace(string(parent)) == "" {
+				return fmt.Errorf("workflow action outcome_map[%q] contains a blank parent outcome", child)
+			}
+		}
+	}
+	return nil
+}
+
+func definitionIDs(nodes []NodeDefinition) []string {
 	ids := make([]string, len(nodes))
 	for index := range nodes {
-		ids[index] = nodes[index].ID
+		ids[index] = string(nodes[index].ID)
 	}
 	return ids
 }
 
-func projectIDs(values []json.RawMessage) []string {
-	ids := make([]string, 0, len(values))
-	for _, value := range values {
-		var named struct {
-			ID string `json:"id"`
-		}
-		if json.Unmarshal(value, &named) == nil {
-			ids = append(ids, named.ID)
-		}
+func nodeIDs(nodes []NodeID) []string {
+	ids := make([]string, len(nodes))
+	for index := range nodes {
+		ids[index] = string(nodes[index])
 	}
 	return ids
+}
+
+func loopIDs(loops []BoundedLoopDefinition) []string {
+	ids := make([]string, len(loops))
+	for index := range loops {
+		ids[index] = string(loops[index].ID)
+	}
+	return ids
+}
+
+func outcomeNames(outcomes []OutcomeName) []string {
+	names := make([]string, len(outcomes))
+	for index := range outcomes {
+		names[index] = string(outcomes[index])
+	}
+	return names
+}
+
+func compositionFields(limits *CompositionLimits) map[string]any {
+	if limits == nil {
+		return nil
+	}
+	return map[string]any{"max_depth": limits.MaximumDepth, "max_children": limits.MaximumChildren}
+}
+
+func leaseFields(policy *LeasePolicy) map[string]any {
+	if policy == nil {
+		return nil
+	}
+	return map[string]any{"ttl_seconds": policy.TTLSeconds, "heartbeat_interval_seconds": policy.HeartbeatIntervalSeconds}
+}
+
+func retryFields(policy *RetryPolicy) map[string]any {
+	if policy == nil {
+		return nil
+	}
+	return map[string]any{"max_attempts": policy.MaximumAttempts, "exhaustion": policy.Exhaustion, "outcome": policy.Outcome}
+}
+
+func integerValue(value int) *float64 {
+	if value == 0 {
+		return nil
+	}
+	converted := float64(value)
+	return &converted
 }
 
 func stringValue(value string) *string {
@@ -366,30 +563,4 @@ func stringValue(value string) *string {
 		return nil
 	}
 	return &value
-}
-
-func exactSchemaVersion(value json.RawMessage) (*float64, error) {
-	value = bytes.TrimSpace(value)
-	if len(value) == 0 {
-		return nil, nil
-	}
-	if len(value) > 64 || !isJSONNumberStart(value[0]) {
-		return nil, fmt.Errorf("workflow schema_version must be the JSON number 1")
-	}
-	if exponentIndex := bytes.IndexAny(value, "eE"); exponentIndex >= 0 {
-		exponent, err := strconv.ParseInt(string(value[exponentIndex+1:]), 10, 16)
-		if err != nil || exponent < -1024 || exponent > 1024 {
-			return nil, fmt.Errorf("workflow schema_version must be the JSON number 1")
-		}
-	}
-	rational, ok := new(big.Rat).SetString(string(value))
-	if !ok || rational.Cmp(big.NewRat(1, 1)) != 0 {
-		return nil, fmt.Errorf("workflow schema_version must be 1")
-	}
-	version := 1.0
-	return &version, nil
-}
-
-func isJSONNumberStart(value byte) bool {
-	return value == '-' || value >= '0' && value <= '9'
 }

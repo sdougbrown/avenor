@@ -90,7 +90,7 @@ func TestValidateTemplateJSONRejectsInvalidNodes(t *testing.T) {
 			mutate: mutateFirstNode(func(node map[string]any) {
 				delete(node, "action")
 			}),
-			wantErr: `node "intake" action is required`,
+			wantErr: `node "intake": action is required`,
 		},
 		{
 			name: "null action",
@@ -104,35 +104,35 @@ func TestValidateTemplateJSONRejectsInvalidNodes(t *testing.T) {
 			mutate: mutateFirstNode(func(node map[string]any) {
 				node["action"] = "manual"
 			}),
-			wantErr: `node "intake" action:`,
+			wantErr: `workflow action:`,
 		},
 		{
 			name: "missing action type",
 			mutate: mutateFirstNode(func(node map[string]any) {
 				node["action"] = map[string]any{}
 			}),
-			wantErr: `node "intake" action.type is required`,
+			wantErr: `workflow action.type is required`,
 		},
 		{
 			name: "blank action type",
 			mutate: mutateFirstNode(func(node map[string]any) {
 				node["action"] = map[string]any{"type": "  "}
 			}),
-			wantErr: `node "intake" action.type is required`,
+			wantErr: `workflow action.type is required`,
 		},
 		{
 			name: "non-string action type",
 			mutate: mutateFirstNode(func(node map[string]any) {
 				node["action"] = map[string]any{"type": 1}
 			}),
-			wantErr: `node "intake" action.type:`,
+			wantErr: `workflow action:`,
 		},
 		{
 			name: "invalid action discriminator",
 			mutate: mutateFirstNode(func(node map[string]any) {
 				node["action"] = map[string]any{"type": "shell"}
 			}),
-			wantErr: `unsupported action "shell"`,
+			wantErr: `unsupported workflow action "shell"`,
 		},
 		{
 			name: "unknown node field",
@@ -150,6 +150,29 @@ func TestValidateTemplateJSONRejectsInvalidNodes(t *testing.T) {
 	}
 }
 
+func TestValidateTemplateJSONRejectsIncompleteActionVariants(t *testing.T) {
+	tests := []struct {
+		name    string
+		action  map[string]any
+		wantErr string
+	}{
+		{name: "run", action: map[string]any{"type": "run"}, wantErr: "exactly one of prompt or prompt_file"},
+		{name: "loop", action: map[string]any{"type": "loop"}, wantErr: "requires loop_file"},
+		{name: "team", action: map[string]any{"type": "team", "team_file": " "}, wantErr: "requires team_file"},
+		{name: "external", action: map[string]any{"type": "external"}, wantErr: "requires source"},
+		{name: "workflow", action: map[string]any{"type": "workflow", "template_id": "child", "template_version": "1", "child_key": "child"}, wantErr: "requires outcome_map"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input := mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
+				node["action"] = test.action
+			}))
+			assertTemplateError(t, input, test.wantErr)
+		})
+	}
+}
+
 func TestValidateTemplateJSONRejectsAmbiguousOrUnboundedJSON(t *testing.T) {
 	t.Run("unknown top-level field", func(t *testing.T) {
 		assertTemplateError(t, mutateTemplate(t, setField("misspelled", true)), `unknown field "misspelled"`)
@@ -161,26 +184,28 @@ func TestValidateTemplateJSONRejectsAmbiguousOrUnboundedJSON(t *testing.T) {
 		input := mutateTemplate(t, mutateFirstNode(func(node map[string]any) { node["name"] = nil }))
 		assertTemplateError(t, input, `field "name" cannot be null`)
 	})
+	t.Run("explicit null typed slice element", func(t *testing.T) {
+		input := mutateTemplate(t, mutateFirstNode(func(node map[string]any) { node["outputs"] = []any{nil} }))
+		assertTemplateError(t, input, `nodes[0].outputs[0]: value cannot be null`)
+	})
 	t.Run("unsupported schema version", func(t *testing.T) {
-		assertTemplateError(t, mutateTemplate(t, setField("schema_version", 2)), "schema_version must be 1")
+		assertTemplateError(t, mutateTemplate(t, setField("schema_version", 2)), "schema_version must be the JSON integer 1")
 	})
 	t.Run("schema version must compare exactly", func(t *testing.T) {
 		input := strings.Replace(validTemplateJSON, `"schema_version": 1`, `"schema_version": 1.0000000000000000000000000001`, 1)
-		assertTemplateError(t, []byte(input), "schema_version must be 1")
+		assertTemplateError(t, []byte(input), "schema_version must be the JSON integer 1")
 	})
 	t.Run("quoted schema version", func(t *testing.T) {
 		input := strings.Replace(validTemplateJSON, `"schema_version": 1`, `"schema_version": "1"`, 1)
-		assertTemplateError(t, []byte(input), "schema_version must be the JSON number 1")
+		assertTemplateError(t, []byte(input), "schema_version must be the JSON integer 1")
 	})
 	t.Run("schema version exponent is bounded", func(t *testing.T) {
 		input := strings.Replace(validTemplateJSON, `"schema_version": 1`, `"schema_version": 1e2000000000`, 1)
-		assertTemplateError(t, []byte(input), "schema_version must be the JSON number 1")
+		assertTemplateError(t, []byte(input), "schema_version must be the JSON integer 1")
 	})
-	t.Run("numerically equivalent schema version", func(t *testing.T) {
+	t.Run("schema version uses canonical integer syntax", func(t *testing.T) {
 		input := strings.Replace(validTemplateJSON, `"schema_version": 1`, `"schema_version": 1e0`, 1)
-		if err := ValidateTemplateJSON([]byte(input)); err != nil {
-			t.Fatalf("ValidateTemplateJSON() rejected schema_version 1e0: %v", err)
-		}
+		assertTemplateError(t, []byte(input), "schema_version must be the JSON integer 1")
 	})
 	t.Run("multiple values", func(t *testing.T) {
 		assertTemplateError(t, []byte(validTemplateJSON+` {"large":"value"}`), "multiple JSON values")
@@ -200,6 +225,16 @@ func TestValidateTemplateJSONRejectsAmbiguousOrUnboundedJSON(t *testing.T) {
 	t.Run("case-folded node field", func(t *testing.T) {
 		input := strings.Replace(validTemplateJSON, `"id": "intake"`, `"ID": "intake"`, 1)
 		assertTemplateError(t, []byte(input), `non-canonical field "ID"`)
+	})
+	t.Run("case-folded nested policy field", func(t *testing.T) {
+		input := mutateTemplate(t, setField("default_lease_policy", map[string]any{"TTL_SECONDS": 900}))
+		assertTemplateError(t, input, `non-canonical field "TTL_SECONDS"; use "ttl_seconds"`)
+	})
+	t.Run("case-folded nested output field", func(t *testing.T) {
+		input := mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
+			node["outputs"] = []any{map[string]any{"id": "result", "Name": "Result", "type": "string"}}
+		}))
+		assertTemplateError(t, input, `non-canonical field "Name"; use "name"`)
 	})
 	t.Run("case-folded nested discriminator", func(t *testing.T) {
 		input := strings.Replace(validTemplateJSON, `"type": "manual"`, `"Type": "run", "type": "manual"`, 1)
@@ -232,7 +267,7 @@ func TestJSONPreflightAcceptsExactLimits(t *testing.T) {
 		suffix := []byte(`"}}`)
 		input := append(prefix, bytes.Repeat([]byte{'x'}, maxTemplateBytes-len(prefix)-len(suffix))...)
 		input = append(input, suffix...)
-		var template templateEnvelope
+		var template Template
 		if err := decodeStrict(input, &template); err != nil {
 			t.Fatalf("decodeStrict() rejected exact byte limit: %v", err)
 		}

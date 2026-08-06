@@ -4,11 +4,10 @@
 //
 // The portable Umpire schema is intentionally limited to stable top-level
 // template fields and their presence. Umpire v1 is an availability schema
-// rather than a general nested JSON-schema language. Stage 1 strictly decodes
-// the top-level envelope and node fields and validates the action discriminator;
-// Stage 2 replaces its temporary envelope with typed node, gate, output, loop,
-// and child-workflow values and strict action variants. The generated Check
-// function is always called by the hand-written adapter; it is
+// rather than a general nested JSON-schema language. The strict JSON boundary
+// decodes canonical typed node, gate, output, loop, and child-workflow values.
+// Actions use a tagged union that rejects unknown and cross-variant fields. The
+// generated Check function is always called by the hand-written adapter; it is
 // not the reducer and does not replace graph- or state-dependent validation.
 // The strict JSON boundary rejects duplicate keys and bounds templates to 4 MiB,
 // 64 levels of nesting, and 10,000 members per object or array.
