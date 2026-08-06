@@ -19,12 +19,12 @@ jobs:
       - name: Verify generated Umpire output
         run: |
           set -euo pipefail
-          for generated in internal/spawnselection/spawn_selection.gen.go internal/thinkingpolicy/thinking_policy.gen.go; do
+          for generated in internal/spawnselection/spawn_selection.gen.go internal/thinkingpolicy/thinking_policy.gen.go internal/workflow/workflow_schema.gen.go; do
             git ls-files --error-unmatch -- "$generated"
             first_generated="$(mktemp)"
             cp -- "$generated" "$first_generated"
             first_checksum="$(sha256sum "$first_generated" | awk '{print $1}')"
-            go generate ./internal/spawnselection ./internal/thinkingpolicy
+            go generate ./internal/spawnselection ./internal/thinkingpolicy ./internal/workflow
             test "$first_checksum" = "$(sha256sum "$generated" | awk '{print $1}')"
             cmp -- "$first_generated" "$generated"
             git diff --exit-code -- "$generated"
