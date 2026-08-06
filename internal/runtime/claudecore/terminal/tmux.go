@@ -13,6 +13,21 @@ import (
 // TmuxLauncher implements Launcher by spawning tmux sessions.
 type TmuxLauncher struct{}
 
+// tmuxNewSessionArgs renders the new-session argv. It prefixes the command with
+// UnsetParentClaudeEnvPrefix rather than setting the child's environment. A pane
+// inherits the tmux server's environment, not avenor's, so the command itself is
+// the only place a leaked variable can be removed.
+func tmuxNewSessionArgs(opts StartOptions) []string {
+	return []string{
+		"new-session", "-d",
+		"-s", opts.Name,
+		"-c", opts.Dir,
+		"-x", strconv.Itoa(opts.Cols),
+		"-y", strconv.Itoa(opts.Rows),
+		UnsetParentClaudeEnvPrefix() + opts.Command,
+	}
+}
+
 func (TmuxLauncher) Start(ctx context.Context, opts StartOptions) (Session, error) {
 	if opts.Cols == 0 {
 		opts.Cols = 220
@@ -21,21 +36,11 @@ func (TmuxLauncher) Start(ctx context.Context, opts StartOptions) (Session, erro
 		opts.Rows = 50
 	}
 
-	shellCmd := opts.Command
-	if shellCmd == "" {
+	if opts.Command == "" {
 		return nil, fmt.Errorf("tmux launcher: Command is required")
 	}
 
-	args := []string{
-		"new-session", "-d",
-		"-s", opts.Name,
-		"-c", opts.Dir,
-		"-x", strconv.Itoa(opts.Cols),
-		"-y", strconv.Itoa(opts.Rows),
-		shellCmd,
-	}
-
-	if _, err := exec.CommandContext(ctx, "tmux", args...).CombinedOutput(); err != nil {
+	if _, err := exec.CommandContext(ctx, "tmux", tmuxNewSessionArgs(opts)...).CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("tmux new-session: %w", err)
 	}
 

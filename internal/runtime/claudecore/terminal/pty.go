@@ -40,7 +40,10 @@ func (l PTYLauncher) Start(ctx context.Context, opts StartOptions) (Session, err
 			"FORCE_COLOR=1",
 		}
 	}
-	cmd.Env = append(os.Environ(), env...)
+	// Scrub before appending. The hosted process is an independent Claude Code
+	// session, and inheriting the launching session's marker turns a completed
+	// turn into a silent hang. See parentClaudeSessionEnv.
+	cmd.Env = append(ScrubParentClaudeEnv(os.Environ()), env...)
 
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
 		Cols: uint16(opts.Cols),
