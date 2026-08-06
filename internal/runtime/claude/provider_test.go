@@ -600,14 +600,22 @@ func TestSessionGoneEmitsEndEvent(t *testing.T) {
 	go p.runSession(s.Ctx, s)
 
 	deadline := time.After(3 * time.Second)
+	var foundLaunchFailed bool
 	for done := false; !done; {
 		select {
 		case ev := <-s.Events:
+			if ev.Event == "agent.launch_failed" {
+				foundLaunchFailed = true
+				continue
+			}
 			if ev.Event != "session.end" {
 				continue
 			}
-			if ev.Fields["stop_reason"] == "" {
-				t.Fatalf("session.end missing stop_reason: %+v", ev.Fields)
+			if got := ev.Fields["stop_reason"]; got != claudecore.StopReasonLaunchFailed {
+				t.Fatalf("session.end stop_reason = %v, want %s", got, claudecore.StopReasonLaunchFailed)
+			}
+			if !foundLaunchFailed {
+				t.Fatal("expected agent.launch_failed event before session.end")
 			}
 			done = true
 		case <-deadline:

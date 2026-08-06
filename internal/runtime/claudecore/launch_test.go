@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime/claudecore/terminal"
@@ -275,6 +276,81 @@ func drainEvent(t *testing.T, s *Session) events.Event {
 		t.Fatal("no event emitted")
 		return events.Event{}
 	}
+}
+
+func TestTruncateRunesPreservesValidUTF8(t *testing.T) {
+	// "hello 🌍 world" — the emoji is a 4-byte rune (U+1F30D). Bytes 5-8.
+	s := "hello 🌍 world"
+
+	// Byte limit that falls inside the emoji's trailing bytes (byte 7).
+	got := truncateRunes(s, 7)
+	if !utf8.ValidString(got) {
+		t.Errorf("truncated string is not valid UTF-8: %q", got)
+	}
+	// The cut should retreat to before the emoji start.
+	want := "hello "
+	if got != want {
+		t.Errorf("truncateRunes(%q, 7) = %q, want %q", s, got, want)
+	}
+
+	// Byte limit that lands exactly on the emoji start byte (byte 6).
+	// max=6 fits "hello " exactly; the emoji starts at byte 6 and needs
+	// 4 more bytes, so it cannot be included.
+	got = truncateRunes(s, 6)
+	if !utf8.ValidString(got) {
+		t.Errorf("truncated string is not valid UTF-8: %q", got)
+	}
+	want = "hello "
+	if got != want {
+		t.Errorf("truncateRunes(%q, 6) = %q, want %q", s, got, want)
+	}
+
+	// Limit larger than the string length returns the original.
+	got = truncateRunes(s, 20)
+	if got != s {
+		t.Errorf("truncateRunes(%q, 20) = %q, want %q", s, got, s)
+	}
+
+	// Multi-rune CJK text: each character is 3 bytes in UTF-8.
+	cjk := "你好世界"
+	got = truncateRunes(cjk, 5)
+	if !utf8.ValidString(got) {
+		t.Errorf("truncated CJK string is not valid UTF-8: %q", got)
+	}
+	// Byte 5 falls inside the second character's 3-byte sequence; should keep
+	// only the first character (bytes 0-2), so result is "你".
+	want = "你"
+	if got != want {
+		t.Errorf("truncateRunes(%q, 5) = %q, want %q", cjk, got, want)
+	}
+}
+
+func TestReadStderrLogEmptyAndMissingPath(t *testing.T) {
+	t.Run("empty path returns empty string", func(t *testing.T) {
+		s := newTestSession(t, "")
+		if got := s.readStderrLog(); got != "" {
+			t.Errorf("readStderrLog with empty path = %q, want empty", got)
+		}
+	})
+
+	t.Run("empty file returns empty string", func(t *testing.T) {
+		s := newTestSession(t, "")
+		s.StderrLog = filepath.Join(t.TempDir(), "stderr.log")
+		if err := os.WriteFile(s.StderrLog, nil, 0o600); err != nil {
+			t.Fatalf("create empty stderr log: %v", err)
+		}
+		if got := s.readStderrLog(); got != "" {
+			t.Errorf("readStderrLog with empty file = %q, want empty", got)
+		}
+	})
+
+	t.Run("missing file returns empty string", func(t *testing.T) {
+		s := newTestSession(t, "")
+		s.StderrLog = filepath.Join(t.TempDir(), "missing.log")
+		if got := s.readStderrLog(); got != "" {
+			t.Errorf("readStderrLog with missing file = %q, want empty", got)
+		}
+	})
 }
 
 func assertAgentNotFoundEnd(t *testing.T, end events.Event) {
