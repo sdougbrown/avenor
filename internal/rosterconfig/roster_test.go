@@ -1,6 +1,7 @@
 package rosterconfig
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,21 @@ func writeRoster(t *testing.T, contents string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestLoadMissingRosterFile(t *testing.T) {
+	_, err := Load(filepath.Join(t.TempDir(), "nonexistent.json"))
+	if err == nil {
+		t.Fatal("Load() error = nil, want error for missing roster")
+	}
+	errStr := err.Error()
+	if !strings.Contains(errStr, "load roster config") {
+		t.Fatalf("Load() error = %v, want roster-config boundary", err)
+	}
+	// The underlying cause (e.g. ENOENT) must be preserved via %w.
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Load() error = %v, expected to preserve underlying ENOENT via %%w", err)
+	}
 }
 
 func TestLoadValidRosterAndLookup(t *testing.T) {

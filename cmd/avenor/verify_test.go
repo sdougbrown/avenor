@@ -64,8 +64,9 @@ func TestVerifyValidLoopConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify failed: %v\n%s", err, out)
 	}
-	if !contains(string(out), "ok: loop") {
-		t.Fatalf("expected ok message, got: %s", out)
+	expected := "ok: loop loop.json (1 phases, max_iterations=3)\n"
+	if string(out) != expected {
+		t.Fatalf("expected %q, got %q", expected, out)
 	}
 }
 

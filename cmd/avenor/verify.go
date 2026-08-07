@@ -42,7 +42,6 @@ func runVerify(args []string) int {
 	v.addRoster(*rosterFile, *rosterEntry)
 	v.addLoop(*loopFile, *rosterFile)
 	v.addTeam(*teamFile, *rosterFile)
-	v.run()
 
 	// Print errors first so they surface ahead of successes in merged
 	// stdout/stderr (e.g. CI logs). In separate streams the ordering is
@@ -180,9 +179,4 @@ func (v *verifier) resolve(path string) string {
 		return filepath.Clean(path)
 	}
 	return filepath.Clean(filepath.Join(v.dir, path))
-}
-
-func (v *verifier) run() {
-	// All work is done in the add* methods; this is a hook for future
-	// cross-config consistency checks.
 }

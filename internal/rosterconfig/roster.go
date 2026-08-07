@@ -27,7 +27,7 @@ type Config map[string]Entry
 func Load(path string) (*Config, error) {
 	var config Config
 	if err := configfile.Load(path, &config); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("load roster config %s: %w", path, err)
 	}
 	if config == nil {
 		return nil, fmt.Errorf("decode roster config %s: top-level value must be an object", path)
