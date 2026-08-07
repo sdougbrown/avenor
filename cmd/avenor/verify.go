@@ -28,6 +28,11 @@ func runVerify(args []string) int {
 		return 1
 	}
 
+	if *rosterEntry != "" && *rosterFile == "" {
+		fmt.Fprintln(os.Stderr, "avenor verify: --roster-entry requires --roster-file")
+		return 1
+	}
+
 	if *loopFile == "" && *teamFile == "" && *rosterFile == "" {
 		fmt.Fprintln(os.Stderr, "avenor verify: at least one of --loop-file, --team-file, or --roster-file is required")
 		return 1
@@ -112,9 +117,9 @@ func (v *verifier) addLoop(loopPath, rosterFallback string) {
 	v.oks = append(v.oks, fmt.Sprintf("loop %s (%d phases, max_iterations=%d)", loopPath, phaseCount, cfg.MaxIterations))
 
 	configDir := filepath.Dir(abs)
-	v.checkNested(roster, cfg.Pre, configDir, loopPath)
-	v.checkNested(roster, cfg.Loop, configDir, loopPath)
-	v.checkNested(roster, cfg.Post, configDir, loopPath)
+	v.checkNested(roster, cfg.Pre, configDir)
+	v.checkNested(roster, cfg.Loop, configDir)
+	v.checkNested(roster, cfg.Post, configDir)
 }
 
 func (v *verifier) addTeam(teamPath, rosterFallback string) {
@@ -137,15 +142,15 @@ func (v *verifier) addTeam(teamPath, rosterFallback string) {
 	v.oks = append(v.oks, fmt.Sprintf("team %s (%d phases)", teamPath, phaseCount))
 
 	configDir := filepath.Dir(abs)
-	v.checkNested(roster, cfg.Pre, configDir, teamPath)
-	v.checkNested(roster, cfg.Team, configDir, teamPath)
-	v.checkNested(roster, cfg.Post, configDir, teamPath)
+	v.checkNested(roster, cfg.Pre, configDir)
+	v.checkNested(roster, cfg.Team, configDir)
+	v.checkNested(roster, cfg.Post, configDir)
 }
 
 // checkNested recursively validates loop_file and team_file references in
 // phases. These are only loaded on demand during a real run, so verify walks
 // them eagerly to catch errors before a run starts.
-func (v *verifier) checkNested(roster *rosterconfig.Config, phases []phaseconfig.Phase, configDir, parentPath string) {
+func (v *verifier) checkNested(roster *rosterconfig.Config, phases []phaseconfig.Phase, configDir string) {
 	for _, phase := range phases {
 		if phase.LoopFile != "" {
 			nestedPath := phase.LoopFile

@@ -116,6 +116,9 @@ func yamlToJSON(path string, data []byte) ([]byte, error) {
 	}
 	var extra any
 	if err := dec.Decode(&extra); err != io.EOF {
+		if err != nil {
+			return nil, fmt.Errorf("decode config %s: %w", path, err)
+		}
 		return nil, fmt.Errorf("decode config %s: multiple YAML documents", path)
 	}
 	out, err := json.Marshal(node)

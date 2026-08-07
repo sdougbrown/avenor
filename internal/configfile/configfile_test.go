@@ -144,6 +144,17 @@ func TestLoadYAMLRejectsEmptyDocument(t *testing.T) {
 	}
 }
 
+func TestLoadYAMLRejectsCommentsOnly(t *testing.T) {
+	type cfg struct {
+		Name string `json:"name"`
+	}
+	path := writeConfig(t, "config.yaml", "# just a comment\n")
+	var got cfg
+	if err := Load(path, &got); err == nil {
+		t.Fatal("expected error for comments-only YAML, got nil")
+	}
+}
+
 // --- TOML ---
 
 func TestLoadTOMLDecodesIntoStruct(t *testing.T) {
@@ -173,6 +184,21 @@ func TestLoadTOMLRejectsUnknownFields(t *testing.T) {
 	var got cfg
 	if err := Load(path, &got); err == nil {
 		t.Fatal("expected unknown-field error, got nil")
+	}
+}
+
+func TestLoadTOMLRejectsNestedUnknownFields(t *testing.T) {
+	type inner struct {
+		Name string `json:"name"`
+	}
+	type cfg struct {
+		Title string `json:"title"`
+		Inner inner  `json:"inner"`
+	}
+	path := writeConfig(t, "config.toml", `title = "hi"`+"\n"+`[inner]`+"\n"+`name = "bob"`+"\n"+`bogus = true`+"\n")
+	var got cfg
+	if err := Load(path, &got); err == nil {
+		t.Fatal("expected unknown-field error for nested TOML table, got nil")
 	}
 }
 

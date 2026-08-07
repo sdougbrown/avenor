@@ -1,23 +1,45 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 )
 
-// buildVerifyBinary builds the avenor binary and returns its path so that
-// tests can exercise the verify subcommand end-to-end.
+var (
+	buildOnce   sync.Once
+	builtBinPath string
+	buildErr    error
+)
+
+// buildVerifyBinary builds the avenor binary once and caches the path so
+// that all verify tests share a single compilation. The binary is placed
+// in a process-level temp directory (not t.TempDir) so it survives across
+// test functions.
 func buildVerifyBinary(t *testing.T) string {
 	t.Helper()
-	binPath := filepath.Join(t.TempDir(), "avenor")
-	cmd := exec.Command("go", "build", "-o", binPath, ".")
-	cmd.Dir = "."
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("go build: %v\n%s", err, out)
+	buildOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "avenor-verify-test-")
+		if err != nil {
+			buildErr = fmt.Errorf("create temp dir: %w", err)
+			return
+		}
+		builtBinPath = filepath.Join(dir, "avenor")
+		cmd := exec.Command("go", "build", "-o", builtBinPath, ".")
+		cmd.Dir = "."
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			buildErr = fmt.Errorf("go build: %v\n%s", err, out)
+		}
+	})
+	if buildErr != nil {
+		t.Fatal(buildErr)
 	}
-	return binPath
+	return builtBinPath
 }
 
 func writeVerifyFile(t *testing.T, dir, name, contents string) string {
@@ -214,10 +236,13 @@ func TestVerifyNestedLoopFile(t *testing.T) {
 	if !contains(string(out), "ok: loop") {
 		t.Fatalf("expected ok messages, got: %s", out)
 	}
-	// Should have validated both the outer and inner loop
-	outerCount := containsCount(string(out), "ok: loop")
-	if outerCount < 2 {
-		t.Fatalf("expected at least 2 ok: loop messages (outer + nested), got %d: %s", outerCount, out)
+	// Both the outer and inner loop should be validated — assert on file paths
+	// rather than just counting occurrences.
+	if !contains(string(out), "outer.json") {
+		t.Fatalf("expected outer.json in output, got: %s", out)
+	}
+	if !contains(string(out), "inner.json") {
+		t.Fatalf("expected inner.json in output, got: %s", out)
 	}
 }
 
@@ -263,6 +288,9 @@ func TestVerifyLoopWithRosterAndRosterEntryRef(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify failed: %v\n%s", err, out)
 	}
+	if !contains(string(out), "ok: loop") {
+		t.Fatalf("expected ok: loop message, got: %s", out)
+	}
 }
 
 func TestVerifyLoopWithMissingRosterEntryRef(t *testing.T) {
@@ -302,30 +330,81 @@ func TestVerifyFileNotFound(t *testing.T) {
 	}
 }
 
+func TestVerifyRosterEntryWithoutRosterFile(t *testing.T) {
+	bin := buildVerifyBinary(t)
+	cmd := exec.Command(bin, "verify", "--roster-entry", "planner")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected non-zero exit, got nil\n%s", out)
+	}
+	if !contains(string(out), "--roster-entry requires --roster-file") {
+		t.Fatalf("expected usage error, got: %s", out)
+	}
+}
+
+func TestVerifyNestedTeamFile(t *testing.T) {
+	bin := buildVerifyBinary(t)
+	dir := t.TempDir()
+
+	// Outer team has a phase that delegates to a nested team file.
+	writeVerifyFile(t, dir, "outer.json", `{
+		"team": [{"name":"delegate","team_file":"inner.json"}]
+	}`)
+	writeVerifyFile(t, dir, "inner.json", `{
+		"team": [{"name":"inner-work","prompt":"do inner work"}]
+	}`)
+
+	cmd := exec.Command(bin, "verify", "--dir", dir, "--team-file", "outer.json")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("verify failed: %v\n%s", err, out)
+	}
+	if !contains(string(out), "outer.json") {
+		t.Fatalf("expected outer.json in output, got: %s", out)
+	}
+	if !contains(string(out), "inner.json") {
+		t.Fatalf("expected inner.json in output, got: %s", out)
+	}
+}
+
+func TestVerifyCombinedLoopTeamRoster(t *testing.T) {
+	bin := buildVerifyBinary(t)
+	dir := t.TempDir()
+
+	writeVerifyFile(t, dir, "roster.json", `{
+		"reviewer": {"backend": "agy", "agent": "reviewer"}
+	}`)
+	writeVerifyFile(t, dir, "loop.json", `{
+		"max_iterations": 3,
+		"loop": [{"name":"test","prompt":"run tests"}]
+	}`)
+	writeVerifyFile(t, dir, "team.json", `{
+		"team": [{"name":"work","prompt":"do work"}]
+	}`)
+
+	cmd := exec.Command(bin, "verify", "--dir", dir,
+		"--loop-file", "loop.json", "--team-file", "team.json", "--roster-file", "roster.json")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("verify failed: %v\n%s", err, out)
+	}
+	if !contains(string(out), "ok: loop") {
+		t.Fatalf("expected loop ok, got: %s", out)
+	}
+	if !contains(string(out), "ok: team") {
+		t.Fatalf("expected team ok, got: %s", out)
+	}
+	if !contains(string(out), "ok: roster") {
+		t.Fatalf("expected roster ok, got: %s", out)
+	}
+}
+
 // helpers
 
 func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && indexOf(s, substr) >= 0)
-}
-
-func indexOf(s, substr string) int {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return i
-		}
-	}
-	return -1
+	return strings.Contains(s, substr)
 }
 
 func containsCount(s, substr string) int {
-	count := 0
-	for {
-		idx := indexOf(s, substr)
-		if idx < 0 {
-			break
-		}
-		count++
-		s = s[idx+len(substr):]
-	}
-	return count
+	return strings.Count(s, substr)
 }
