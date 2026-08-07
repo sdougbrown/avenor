@@ -53,6 +53,12 @@ Avenor runs `plan` once, then launches `auth-tests`, `api-tests`, and `db-tests`
 
 `--prompt` and `--prompt-file` are optional when `--team-file` is set. If you provide one, it runs as an implicit pre-phase (named `(initial)`) before any config phases.
 
+To check that your config is valid without starting a run, use `avenor verify`:
+
+```sh
+avenor verify --team-file team.json
+```
+
 ## How a team run works
 
 **Pre phases** run once, in sequence, before the team starts. If any pre phase exits with a stop reason other than `end_turn`, the entire run fails immediately — the team never starts.
@@ -67,7 +73,7 @@ Phases run to the natural end of their session before Avenor acts on a marker. A
 
 ## Team config file
 
-A JSON file with three top-level keys:
+A config file with three top-level keys. The file can be JSON, YAML, or TOML — the format is detected from the file extension:
 
 | Key | Type | Required | Description |
 |---|---|---|---|
@@ -85,8 +91,8 @@ Each phase object:
 | `name` | `string` | Yes | Unique within the config. Reserved: `(initial)` |
 | `prompt` | `string` | One of `prompt`, `prompt_file`, `loop_file`, or `team_file` | Inline prompt text sent to the agent. Supports template variables |
 | `prompt_file` | `string` | One of `prompt`, `prompt_file`, `loop_file`, or `team_file` | Path to a file containing the prompt. Relative paths resolve from the config file's directory. Supports template variables |
-| `loop_file` | `string` | One of `prompt`, `prompt_file`, `loop_file`, or `team_file` | Path to a loop config JSON. This phase dispatches a nested loop run instead of a direct agent session |
-| `team_file` | `string` | One of `prompt`, `prompt_file`, `loop_file`, or `team_file` | Path to a team config JSON. This phase dispatches a nested team run instead of a direct agent session |
+| `loop_file` | `string` | One of `prompt`, `prompt_file`, `loop_file`, or `team_file` | Path to a loop config (JSON, YAML, or TOML). This phase dispatches a nested loop run instead of a direct agent session |
+| `team_file` | `string` | One of `prompt`, `prompt_file`, `loop_file`, or `team_file` | Path to a team config (JSON, YAML, or TOML). This phase dispatches a nested team run instead of a direct agent session |
 | `resume_from_previous` | `boolean` | No — defaults to `false` | Resume the immediately preceding phase's session instead of starting fresh. Only meaningful in pre and post phases |
 | `conditional` | `boolean` | No — defaults to `false` | Whether the pre phase can instruct Avenor to skip this team member |
 | `agent` | `string` | No | Agent override for this team member. Ignored for pre and post phases |
@@ -99,7 +105,7 @@ Phase names must be unique across `pre`, `team`, and `post`. The name `(initial)
 
 ## Roster-backed phases
 
-A roster file is a top-level JSON map. `roster_file` names the file and `roster_entry` names an entry. Each entry requires `backend` and at least one of `agent` or `model`; `system` and `thinking` are not roster fields and are rejected by strict decoding.
+A roster file is a top-level map (JSON, YAML, or TOML). `roster_file` names the file and `roster_entry` names an entry. Each entry requires `backend` and at least one of `agent` or `model`; `system` and `thinking` are not roster fields and are rejected by strict decoding.
 
 This is a complete team configuration with per-phase backend selection:
 
@@ -412,7 +418,7 @@ avenor run --team-file <path> [other flags...]
 
 ### What's required
 
-`--team-file` is the path to your team config JSON. When set, `--prompt` and `--prompt-file` become optional. If you provide one, it runs as an implicit pre-phase named `(initial)` before any config phases.
+`--team-file` is the path to your team config (JSON, YAML, or TOML). When set, `--prompt` and `--prompt-file` become optional. If you provide one, it runs as an implicit pre-phase named `(initial)` before any config phases.
 
 ### Mutual exclusions
 
