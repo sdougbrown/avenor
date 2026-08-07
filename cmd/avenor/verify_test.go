@@ -170,6 +170,9 @@ func TestVerifyEmptyPhaseName(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected non-zero exit, got nil\n%s", out)
 	}
+	if !contains(string(out), "name must not be empty") {
+		t.Fatalf("expected name-empty error, got: %s", out)
+	}
 }
 
 func TestVerifyNoArgs(t *testing.T) {
@@ -268,6 +271,9 @@ func TestVerifyNestedLoopFileInvalid(t *testing.T) {
 	if !contains(string(out), "error:") {
 		t.Fatalf("expected error message for nested config, got: %s", out)
 	}
+	if !contains(string(out), "inner.json") {
+		t.Fatalf("expected inner.json in error output, got: %s", out)
+	}
 }
 
 func TestVerifyLoopWithRosterAndRosterEntryRef(t *testing.T) {
@@ -327,6 +333,9 @@ func TestVerifyFileNotFound(t *testing.T) {
 	}
 	if !contains(string(out), "error:") {
 		t.Fatalf("expected error message, got: %s", out)
+	}
+	if !contains(string(out), "nonexistent.json") {
+		t.Fatalf("expected nonexistent.json in error, got: %s", out)
 	}
 }
 
@@ -403,8 +412,4 @@ func TestVerifyCombinedLoopTeamRoster(t *testing.T) {
 
 func contains(s, substr string) bool {
 	return strings.Contains(s, substr)
-}
-
-func containsCount(s, substr string) int {
-	return strings.Count(s, substr)
 }

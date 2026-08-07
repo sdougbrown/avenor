@@ -44,11 +44,14 @@ func runVerify(args []string) int {
 	v.addTeam(*teamFile, *rosterFile)
 	v.run()
 
-	for _, msg := range v.oks {
-		fmt.Fprintf(os.Stdout, "ok: %s\n", msg)
-	}
+	// Print errors first so they surface ahead of successes in merged
+	// stdout/stderr (e.g. CI logs). In separate streams the ordering is
+	// immaterial.
 	for _, msg := range v.errors {
 		fmt.Fprintf(os.Stderr, "error: %s\n", msg)
+	}
+	for _, msg := range v.oks {
+		fmt.Fprintf(os.Stdout, "ok: %s\n", msg)
 	}
 
 	if len(v.errors) > 0 {

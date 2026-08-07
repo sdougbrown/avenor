@@ -202,6 +202,34 @@ func TestLoadTOMLRejectsNestedUnknownFields(t *testing.T) {
 	}
 }
 
+func TestDecodeInvalidTOMLPreservesParseError(t *testing.T) {
+	type cfg struct {
+		Name string `json:"name"`
+	}
+	var got cfg
+	err := Decode("config.toml", []byte("name = \n"), &got)
+	if err == nil {
+		t.Fatal("expected decode error, got nil")
+	}
+	if !strings.Contains(err.Error(), "decode config") {
+		t.Fatalf("error should wrap with 'decode config', got: %v", err)
+	}
+}
+
+func TestDecodeInvalidYAMLPreservesParseError(t *testing.T) {
+	type cfg struct {
+		Name string `json:"name"`
+	}
+	var got cfg
+	err := Decode("config.yaml", []byte("name: [unclosed\n"), &got)
+	if err == nil {
+		t.Fatal("expected decode error, got nil")
+	}
+	if !strings.Contains(err.Error(), "decode config") {
+		t.Fatalf("error should wrap with 'decode config', got: %v", err)
+	}
+}
+
 // --- Format equivalence ---
 
 func TestFormatEquivalenceAcrossJSONYAMLTOML(t *testing.T) {

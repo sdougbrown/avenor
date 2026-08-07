@@ -133,6 +133,9 @@ func tomlToJSON(path string, data []byte) ([]byte, error) {
 	if err := gotoml.Unmarshal(data, &node); err != nil {
 		return nil, fmt.Errorf("decode config %s: %w", path, err)
 	}
+	if node == nil {
+		return nil, fmt.Errorf("decode config %s: empty TOML document", path)
+	}
 	out, err := json.Marshal(node)
 	if err != nil {
 		return nil, fmt.Errorf("normalize TOML config %s: %w", path, err)
