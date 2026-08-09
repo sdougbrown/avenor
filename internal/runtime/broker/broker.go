@@ -301,7 +301,7 @@ type Broker struct {
 	// Global ask-edge registry for cross-run lookups.
 	// Keys are "senderRunID/messageID" to prevent cross-sender collisions.
 	globalAskEdgesMu sync.RWMutex
-	globalAskEdges   map[string]*AskEdge        // messageID -> edge
+	globalAskEdges   map[string]*AskEdge        // "senderRunID/messageID" -> edge
 	globalWaitReplies  map[string]chan AskReply   // "sender/messageID" -> reply channel
 
 	// Shutdown signal for background goroutines.
@@ -1110,14 +1110,18 @@ func (b *Broker) handleSessions(w http.ResponseWriter, r *http.Request) {
 
 	sessions := make([]SessionInfo, 0, len(b.runs))
 	for _, st := range b.runs {
-		info := &SessionInfo{RunID: st.RunID}
+		st.Mu.Lock()
+		info := SessionInfo{RunID: st.RunID}
 		if st.Info != nil {
-			info = st.Info
-			info.LastSeen = st.LastSeen.Unix()
-		} else {
-			info.LastSeen = st.LastSeen.Unix()
+			info.Label = st.Info.Label
+			info.Backend = st.Info.Backend
+			info.Model = st.Info.Model
+			info.Dir = st.Info.Dir
+			info.Status = st.Info.Status
 		}
-		sessions = append(sessions, *info)
+		info.LastSeen = st.LastSeen.Unix()
+		st.Mu.Unlock()
+		sessions = append(sessions, info)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
