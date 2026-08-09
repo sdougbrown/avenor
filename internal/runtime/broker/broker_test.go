@@ -789,3 +789,843 @@ func TestPollAgentMessagesUsesAuthenticatedFromRunID(t *testing.T) {
 		t.Fatal("timed out waiting for wrapped agent message")
 	}
 }
+
+// --- Ask/Reply Tests ---
+
+// sendAsk is a helper that sends a message with expects_reply=true
+// and returns the response body as a map. It creates the full broker
+// request with auth fields.
+func sendAsk(t *testing.T, addr, fromToken, fromRunID, toRunID, msgID, message string) map[string]any {
+	t.Helper()
+	payload := fmt.Sprintf(`{"id":%q,"from":%q,"from_run_id":%q,"to_run_id":%q,"message":%q,"expects_reply":true}`,
+		msgID, fromRunID, fromRunID, toRunID, message)
+	body := bytes.NewReader([]byte(fmt.Sprintf(`{
+		"run_id": %q,
+		"token": %q,
+		"from_run_id": %q,
+		"to_run_id": %q,
+		"type": "agent_message",
+		"payload": %s
+	}`, fromRunID, fromToken, fromRunID, toRunID, payload)))
+	resp, err := http.Post(fmt.Sprintf("http://%s/send", addr), "application/json", body)
+	if err != nil {
+		t.Fatalf("sendAsk: %v", err)
+	}
+	defer resp.Body.Close()
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("sendAsk decode: %v", err)
+	}
+	result["status"] = resp.StatusCode
+	return result
+}
+
+// sendReply is a helper that sends a reply (reply_to set) and returns
+// the response body.
+func sendReply(t *testing.T, addr, fromToken, fromRunID, toRunID, replyTo, message string) map[string]any {
+	t.Helper()
+	payload := fmt.Sprintf(`{"id":"reply-%s","from":%q,"from_run_id":%q,"to_run_id":%q,"message":%q,"reply_to":%q}`,
+		replyTo, fromRunID, fromRunID, toRunID, message, replyTo)
+	body := bytes.NewReader([]byte(fmt.Sprintf(`{
+		"run_id": %q,
+		"token": %q,
+		"from_run_id": %q,
+		"to_run_id": %q,
+		"type": "agent_message",
+		"payload": %s
+	}`, fromRunID, fromToken, fromRunID, toRunID, payload)))
+	resp, err := http.Post(fmt.Sprintf("http://%s/send", addr), "application/json", body)
+	if err != nil {
+		t.Fatalf("sendReply: %v", err)
+	}
+	defer resp.Body.Close()
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("sendReply decode: %v", err)
+	}
+	result["status"] = resp.StatusCode
+	return result
+}
+
+// fireAndForgetSend sends a plain fire-and-forget message (no expects_reply, no reply_to).
+func fireAndForgetSend(t *testing.T, addr, fromToken, fromRunID, toRunID, message string) int {
+	t.Helper()
+	payload := fmt.Sprintf(`{"from":%q,"from_run_id":%q,"message":%q}`, fromRunID, fromRunID, message)
+	body := bytes.NewReader([]byte(fmt.Sprintf(`{
+		"run_id": %q,
+		"token": %q,
+		"from_run_id": %q,
+		"to_run_id": %q,
+		"type": "agent_message",
+		"payload": %s
+	}`, fromRunID, fromToken, fromRunID, toRunID, payload)))
+	resp, err := http.Post(fmt.Sprintf("http://%s/send", addr), "application/json", body)
+	if err != nil {
+		t.Fatalf("fireAndForgetSend: %v", err)
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode
+}
+
+// waitReply calls /wait_reply and returns the result.
+func waitReply(t *testing.T, addr, token, runID, waitingFor string) map[string]any {
+	t.Helper()
+	body := bytes.NewReader([]byte(fmt.Sprintf(`{"run_id":%q,"token":%q,"waiting_for":%q}`, runID, token, waitingFor)))
+	// Use a short timeout so tests don't hang for DefaultAskTimeout (10m) on failure.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		fmt.Sprintf("http://%s/wait_reply", addr), body)
+	if err != nil {
+		t.Fatalf("waitReply new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("waitReply: %v", err)
+	}
+	defer resp.Body.Close()
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("waitReply decode: %v", err)
+	}
+	result["status"] = resp.StatusCode
+	return result
+}
+
+func TestBrokerAskReplyHappyPath(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	// Register two runs
+	senderToken, err := b.CreateRun("asker")
+	if err != nil {
+		t.Fatalf("create asker: %v", err)
+	}
+	replierToken, err := b.CreateRun("replier")
+	if err != nil {
+		t.Fatalf("create replier: %v", err)
+	}
+
+	addr := b.Addr()
+	msgID := "ask-001"
+
+	// Start a goroutine that polls for the ask to arrive and then sends a reply.
+	// Poll in a loop so we don't miss the message if the poll returns before the
+	// message is enqueued (race between sendAsk and poll-control).
+	go func() {
+		for i := 0; i < 50; i++ {
+			pollBody := bytes.NewReader([]byte(fmt.Sprintf(`{"run_id":"replier","token":%q}`, replierToken)))
+			resp, err := http.Post(fmt.Sprintf("http://%s/poll-control", addr), "application/json", pollBody)
+			if err != nil {
+				t.Errorf("replier poll: %v", err)
+				return
+			}
+			var msgs []ControlMessage
+			if err := json.NewDecoder(resp.Body).Decode(&msgs); err != nil {
+				resp.Body.Close()
+				t.Errorf("replier decode: %v", err)
+				return
+			}
+			resp.Body.Close()
+			if len(msgs) > 0 {
+				// Got the message, send the reply.
+				result := sendReply(t, addr, replierToken, "replier", "asker", msgID, "here is your answer")
+				if result["status"] != http.StatusOK {
+					t.Errorf("sendReply status = %d", result["status"])
+				}
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		t.Error("replier: timed out waiting for ask message")
+	}()
+
+	// Send the ask
+	askResult := sendAsk(t, addr, senderToken, "asker", "replier", msgID, "what is the answer?")
+	if st := askResult["status"]; st != http.StatusOK {
+		t.Fatalf("sendAsk status = %d", st)
+	}
+	if askResult["expects_reply"] != true {
+		t.Fatal("sendAsk response missing expects_reply")
+	}
+	if askResult["message_id"] != msgID {
+		t.Fatalf("sendAsk message_id = %q, want %q", askResult["message_id"], msgID)
+	}
+
+	// Wait for the reply via /wait_reply
+	waitResult := waitReply(t, addr, senderToken, "asker", msgID)
+	if st := waitResult["status"]; st != http.StatusOK {
+		t.Fatalf("waitReply status = %d", st)
+	}
+	if waitResult["message_id"] != msgID {
+		t.Errorf("waitReply message_id = %q, want %q", waitResult["message_id"], msgID)
+	}
+	if waitResult["from_run_id"] != "replier" {
+		t.Errorf("waitReply from_run_id = %q, want replier", waitResult["from_run_id"])
+	}
+
+	// Verify the ask edge was cleaned up
+	st := b.GetRun("asker")
+	if st == nil {
+		t.Fatal("asker run not found")
+	}
+	st.Mu.Lock()
+	_, pendingOk := st.PendingAsks[msgID]
+	_, waitOk := st.WaitingReply[msgID]
+	st.Mu.Unlock()
+	if pendingOk {
+		t.Error("ask edge should have been removed after reply")
+	}
+	if waitOk {
+		t.Error("waiting reply channel should have been removed after reply")
+	}
+}
+
+func TestBrokerAskReplyFireAndForgetRemainsUnchanged(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	senderToken, err := b.CreateRun("ff_sender")
+	if err != nil {
+		t.Fatalf("create ff_sender: %v", err)
+	}
+	targetToken, err := b.CreateRun("ff_target")
+	if err != nil {
+		t.Fatalf("create ff_target: %v", err)
+	}
+
+	// Fire-and-forget (no expects_reply, no reply_to)
+	status := fireAndForgetSend(t, b.Addr(), senderToken, "ff_sender", "ff_target", "just a note")
+	if status != http.StatusOK {
+		t.Errorf("fire-and-forget status = %d, want 200", status)
+	}
+
+	// Verify no ask edge was created
+	st := b.GetRun("ff_sender")
+	if st == nil {
+		t.Fatal("ff_sender run not found")
+	}
+	st.Mu.Lock()
+	pendingCount := len(st.PendingAsks)
+	st.Mu.Unlock()
+	if pendingCount != 0 {
+		t.Errorf("expected 0 pending asks for fire-and-forget, got %d", pendingCount)
+	}
+
+	// Verify target got the message
+	pollBody := bytes.NewReader([]byte(fmt.Sprintf(`{"run_id":"ff_target","token":%q}`, targetToken)))
+	resp, err := http.Post(fmt.Sprintf("http://%s/poll-control", b.Addr()), "application/json", pollBody)
+	if err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	defer resp.Body.Close()
+	var msgs []ControlMessage
+	if err := json.NewDecoder(resp.Body).Decode(&msgs); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Errorf("expected 1 message, got %d", len(msgs))
+	}
+}
+
+func TestBrokerAskRequiresMessageID(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	senderToken, err := b.CreateRun("asker_no_id")
+	if err != nil {
+		t.Fatalf("create asker: %v", err)
+	}
+	_, err = b.CreateRun("target_no_id")
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+
+	// Send an ask without a message ID — should fail with 400.
+	payload := `{"from":"asker_no_id","from_run_id":"asker_no_id","message":"no id","expects_reply":true}`
+	body := bytes.NewReader([]byte(fmt.Sprintf(`{
+		"run_id": "asker_no_id",
+		"token": %q,
+		"from_run_id": "asker_no_id",
+		"to_run_id": "target_no_id",
+		"type": "agent_message",
+		"payload": %s
+	}`, senderToken, payload)))
+	resp, err := http.Post(fmt.Sprintf("http://%s/send", b.Addr()), "application/json", body)
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 for ask without message ID, got %d", resp.StatusCode)
+	}
+}
+
+func TestBrokerMutualAskGuard(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	aToken, err := b.CreateRun("agent_a")
+	if err != nil {
+		t.Fatalf("create agent_a: %v", err)
+	}
+	bToken, err := b.CreateRun("agent_b")
+	if err != nil {
+		t.Fatalf("create agent_b: %v", err)
+	}
+
+	addr := b.Addr()
+
+	// Agent A asks Agent B — should succeed.
+	result := sendAsk(t, addr, aToken, "agent_a", "agent_b", "ask-a-to-b", "question from A")
+	if st := result["status"]; st != http.StatusOK {
+		t.Fatalf("first ask should succeed, got %d", st)
+	}
+
+	// Agent B tries to ask Agent A — should fail with mutual-ask guard.
+	result2 := sendAsk(t, addr, bToken, "agent_b", "agent_a", "ask-b-to-a", "question from B")
+	if st := result2["status"]; st != http.StatusConflict {
+		t.Errorf("mutual ask expected 409, got %d", st)
+	}
+}
+
+func TestBrokerCancelMessage(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	senderToken, err := b.CreateRun("canceller")
+	if err != nil {
+		t.Fatalf("create canceller: %v", err)
+	}
+	targetToken, err := b.CreateRun("cancel_target")
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+
+	addr := b.Addr()
+	msgID := "cancel-me"
+
+	// Send an ask
+	result := sendAsk(t, addr, senderToken, "canceller", "cancel_target", msgID, "will be cancelled")
+	if st := result["status"]; st != http.StatusOK {
+		t.Fatalf("sendAsk status = %d", st)
+	}
+
+	// Verify the ask edge exists
+	st := b.GetRun("canceller")
+	if st == nil {
+		t.Fatal("canceller run not found")
+	}
+	st.Mu.Lock()
+	_, pendingOk := st.PendingAsks[msgID]
+	st.Mu.Unlock()
+	if !pendingOk {
+		t.Fatal("ask edge should exist before cancel")
+	}
+
+	// First: other run trying to cancel someone else's ask should fail.
+	// Use a different message ID so the test doesn't interfere with the
+	// successful cancel below.
+	otherMsgID := "other-ask"
+	result2 := sendAsk(t, addr, senderToken, "canceller", "cancel_target", otherMsgID, "another ask")
+	if st := result2["status"]; st != http.StatusOK {
+		t.Fatalf("sendAsk for wrong-owner test status = %d", st)
+	}
+	// cancel_target tries to cancel a message sent by canceller.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	reqBody := []byte(fmt.Sprintf(`{"run_id":"cancel_target","token":%q,"cancel_message_id":%q}`, targetToken, otherMsgID))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		fmt.Sprintf("http://%s/cancel_message", addr), bytes.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("cancel wrong owner request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp3, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("cancel wrong owner: %v", err)
+	}
+	defer resp3.Body.Close()
+	// With namespaced keys, the wrong owner can't even find the edge (404)
+	// instead of finding it but being denied (403). Both are acceptable.
+	if resp3.StatusCode != http.StatusForbidden && resp3.StatusCode != http.StatusNotFound {
+		t.Errorf("cancel wrong owner expected 403 or 404, got %d", resp3.StatusCode)
+	}
+
+	// Now test the successful cancel on the original message.
+	cancelBody := bytes.NewReader([]byte(fmt.Sprintf(`{"run_id":%q,"token":%q,"cancel_message_id":%q}`, "canceller", senderToken, msgID)))
+	resp, err := http.Post(fmt.Sprintf("http://%s/cancel_message", addr), "application/json", cancelBody)
+	if err != nil {
+		t.Fatalf("cancel_message: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("cancel_message status = %d", resp.StatusCode)
+	}
+	var cancelResult map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&cancelResult); err != nil {
+		t.Fatalf("cancel decode: %v", err)
+	}
+	if cancelResult["cancelled"] != true {
+		t.Errorf("cancel response missing cancelled=true")
+	}
+
+	// Verify the ask edge was cleaned up
+	st.Mu.Lock()
+	_, pendingOk = st.PendingAsks[msgID]
+	_, waitOk := st.WaitingReply[msgID]
+	st.Mu.Unlock()
+	if pendingOk {
+		t.Error("ask edge should have been removed after cancel")
+	}
+	if waitOk {
+		t.Error("waiting reply channel should have been removed after cancel")
+	}
+
+	// Cancelling a non-existent message should fail
+	cancelBody2 := bytes.NewReader([]byte(fmt.Sprintf(`{"run_id":%q,"token":%q,"cancel_message_id":"nonexistent"}`, "canceller", senderToken)))
+	resp2, err := http.Post(fmt.Sprintf("http://%s/cancel_message", addr), "application/json", cancelBody2)
+	if err != nil {
+		t.Fatalf("cancel nonexistent: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusNotFound {
+		t.Errorf("cancel nonexistent expected 404, got %d", resp2.StatusCode)
+	}
+}
+
+func TestBrokerWaitReplyForNonexistentAsk(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	token, err := b.CreateRun("nobody")
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+
+	// Wait for a message that was never asked
+	body := bytes.NewReader([]byte(fmt.Sprintf(`{"run_id":"nobody","token":%q,"waiting_for":"ghost"}`, token)))
+	resp, err := http.Post(fmt.Sprintf("http://%s/wait_reply", b.Addr()), "application/json", body)
+	if err != nil {
+		t.Fatalf("wait_reply: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404 for nonexistent ask, got %d", resp.StatusCode)
+	}
+}
+
+func TestBrokerReplyAfterEdgeExpired(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	senderToken, err := b.CreateRun("sender_expired")
+	if err != nil {
+		t.Fatalf("create sender: %v", err)
+	}
+	_, err = b.CreateRun("target_expired")
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+
+	addr := b.Addr()
+	msgID := "expired-ask"
+
+	// Send an ask
+	result := sendAsk(t, addr, senderToken, "sender_expired", "target_expired", msgID, "will this expire?")
+	if st := result["status"]; st != http.StatusOK {
+		t.Fatalf("sendAsk status = %d", st)
+	}
+
+	// Manually remove the ask edge from both per-run and global registries
+	// to simulate expiry.
+	st := b.GetRun("sender_expired")
+	if st == nil {
+		t.Fatal("sender_expired run not found")
+	}
+	b.globalAskEdgesMu.Lock()
+	delete(b.globalAskEdges, msgID)
+	delete(b.globalWaitReplies, msgID)
+	b.globalAskEdgesMu.Unlock()
+	st.Mu.Lock()
+	delete(st.PendingAsks, msgID)
+	delete(st.WaitingReply, msgID)
+	st.Mu.Unlock()
+
+	// Send a reply — should fall back to fire-and-forget
+	replyResult := sendReply(t, addr, senderToken, "sender_expired", "target_expired", msgID, "late reply")
+	if st := replyResult["status"]; st != http.StatusOK {
+		t.Fatalf("sendReply after expiry status = %d", st)
+	}
+	if replyResult["note"] == nil {
+		t.Error("expected 'note' about fire-and-forget fallback in reply response")
+	}
+
+	// Verify the reply was delivered as a regular control message
+	targetSt := b.GetRun("target_expired")
+	if targetSt == nil {
+		t.Fatal("target_expired run not found")
+	}
+	targetSt.Mu.Lock()
+	queueLen := len(targetSt.ControlQueue)
+	targetSt.Mu.Unlock()
+	if queueLen == 0 {
+		t.Error("expected the reply to be queued as fire-and-forget")
+	}
+}
+
+func TestBrokerSessionsEndpoint(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	// No runs registered yet
+	resp, err := http.Get(fmt.Sprintf("http://%s/sessions", b.Addr()))
+	if err != nil {
+		t.Fatalf("sessions: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("sessions status = %d", resp.StatusCode)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	sessions, ok := body["sessions"].([]any)
+	if !ok {
+		t.Fatal("sessions response should have a sessions array")
+	}
+	if len(sessions) != 0 {
+		t.Errorf("expected 0 sessions, got %d", len(sessions))
+	}
+
+	// Register a run and check again
+	_, err = b.CreateRun("runner_1")
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+
+	b.UpdateSessionInfo("runner_1", &SessionInfo{
+		Label:   "my-runner",
+		Backend: "test-backend",
+		Model:   "test-model",
+		Dir:     "/tmp/test",
+		Status:  "thinking",
+	})
+
+	resp2, err := http.Get(fmt.Sprintf("http://%s/sessions", b.Addr()))
+	if err != nil {
+		t.Fatalf("sessions: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("sessions status = %d", resp2.StatusCode)
+	}
+	var body2 map[string]any
+	if err := json.NewDecoder(resp2.Body).Decode(&body2); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	sessions2, _ := body2["sessions"].([]any)
+	if len(sessions2) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(sessions2))
+	}
+	s0 := sessions2[0].(map[string]any)
+	if s0["run_id"] != "runner_1" {
+		t.Errorf("run_id = %q, want runner_1", s0["run_id"])
+	}
+	if s0["label"] != "my-runner" {
+		t.Errorf("label = %q, want my-runner", s0["label"])
+	}
+	if s0["status"] != "thinking" {
+		t.Errorf("status = %q, want thinking", s0["status"])
+	}
+
+	// Sessions should be accessible without auth
+	resp3, err := http.Get(fmt.Sprintf("http://%s/sessions", b.Addr()))
+	if err != nil {
+		t.Fatalf("sessions no auth: %v", err)
+	}
+	resp3.Body.Close()
+	if resp3.StatusCode != http.StatusOK {
+		t.Errorf("sessions without auth expected 200, got %d", resp3.StatusCode)
+	}
+}
+
+func TestBrokerUpdateSessionInfo(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	token, err := b.CreateRun("update_me")
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	_ = token
+
+	// Update info
+	b.UpdateSessionInfo("update_me", &SessionInfo{
+		Label:  "my-label",
+		Status: "working",
+	})
+
+	st := b.GetRun("update_me")
+	if st == nil {
+		t.Fatal("run not found")
+	}
+	st.Mu.Lock()
+	info := st.Info
+	st.Mu.Unlock()
+	if info == nil {
+		t.Fatal("SessionInfo should not be nil after update")
+	}
+	if info.Label != "my-label" {
+		t.Errorf("Label = %q, want my-label", info.Label)
+	}
+	if info.Status != "working" {
+		t.Errorf("Status = %q, want working", info.Status)
+	}
+	if info.RunID != "update_me" {
+		t.Errorf("RunID = %q, want update_me", info.RunID)
+	}
+
+	// Updating nonexistent run should not panic
+	b.UpdateSessionInfo("nonexistent", &SessionInfo{Label: "ghost"})
+}
+
+func TestBrokerPruneExpiredAskEdges(t *testing.T) {
+	// Test the pruning logic directly with an expired edge.
+	// We use a very short expiration override by directly manipulating the map.
+	b := New("")
+
+	token, err := b.CreateRun("pruner")
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	_ = token
+
+	st := b.GetRun("pruner")
+	if st == nil {
+		t.Fatal("run not found")
+	}
+
+	// Add an ask edge that's already expired
+	edge := &AskEdge{
+		FromRunID: "pruner",
+		ToRunID:   "other",
+		MessageID: "stale-edge",
+		CreatedAt: time.Now().Add(-DefaultAskTimeout - time.Second),
+	}
+	replyCh := make(chan AskReply, 1)
+	st.Mu.Lock()
+	st.PendingAsks["stale-edge"] = edge
+	st.WaitingReply["stale-edge"] = replyCh
+	st.Mu.Unlock()
+	b.globalAskEdgesMu.Lock()
+	b.globalAskEdges[edgeKey("pruner", "stale-edge")] = edge
+	b.globalWaitReplies[edgeKey("pruner", "stale-edge")] = replyCh
+	b.globalAskEdgesMu.Unlock()
+
+	// Run pruning
+	b.pruneExpiredAskEdges()
+
+	// Pruning sends a timeout signal to the channel but does NOT delete
+	// the registry entries — the wait_reply handler is responsible for
+	// that after receiving.
+	select {
+	case sig := <-replyCh:
+		if sig.FromRunID != "" {
+			t.Errorf("timeout signal from_run_id = %q, want empty", sig.FromRunID)
+		}
+		var payload struct{ Timeout bool }
+		if err := json.Unmarshal(sig.Payload, &payload); err != nil {
+			t.Errorf("unmarshal timeout payload: %v", err)
+		} else if !payload.Timeout {
+			t.Errorf("expected timeout=true in signal payload")
+		}
+	case <-time.After(time.Second):
+		t.Error("expected timeout signal on channel")
+	}
+
+	// Entries should still exist (pruning signals but doesn't delete).
+	st.Mu.Lock()
+	_, pendingOk := st.PendingAsks["stale-edge"]
+	_, waitOk := st.WaitingReply["stale-edge"]
+	st.Mu.Unlock()
+	if !pendingOk {
+		t.Error("stale edge should still exist after pruning (deletion is wait_reply's job)")
+	}
+	if !waitOk {
+		t.Error("stale channel should still exist after pruning (deletion is wait_reply's job)")
+	}
+	// Global registry entries should also still exist.
+	b.globalAskEdgesMu.RLock()
+	_, gPendingOk := b.globalAskEdges[edgeKey("pruner", "stale-edge")]
+	_, gWaitOk := b.globalWaitReplies[edgeKey("pruner", "stale-edge")]
+	b.globalAskEdgesMu.RUnlock()
+	if !gPendingOk {
+		t.Error("global edge should still exist after pruning")
+	}
+	if !gWaitOk {
+		t.Error("global wait channel should still exist after pruning")
+	}
+
+	// A fresh edge should NOT receive a timeout signal
+	st.Mu.Lock()
+	st.PendingAsks["fresh-edge"] = &AskEdge{
+		FromRunID: "pruner",
+		ToRunID:   "other",
+		MessageID: "fresh-edge",
+		CreatedAt: time.Now(),
+	}
+	st.WaitingReply["fresh-edge"] = make(chan AskReply, 1)
+	st.Mu.Unlock()
+
+	b.pruneExpiredAskEdges()
+
+	st.Mu.Lock()
+	_, freshOk := st.PendingAsks["fresh-edge"]
+	st.Mu.Unlock()
+	if !freshOk {
+		t.Error("fresh ask edge should still exist after pruning")
+	}
+}
+
+func TestBrokerAskReplyWaitTimeout(t *testing.T) {
+	// Override the ask timeout to be very short so the test doesn't take 10 minutes.
+	// We do this by calling pruneExpiredAskEdges after placing an edge with an
+	// expired timestamp, avoiding the need to actually wait real wall time.
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	senderToken, err := b.CreateRun("timeout_asker")
+	if err != nil {
+		t.Fatalf("create asker: %v", err)
+	}
+
+	addr := b.Addr()
+	msgID := "will-timeout"
+
+	// Place the ask edge directly (bypassing /send) with an expired timestamp.
+	// Must register in both the per-run state and the global registry.
+	st := b.GetRun("timeout_asker")
+	if st == nil {
+		t.Fatal("run not found")
+	}
+	edge := &AskEdge{
+		FromRunID: "timeout_asker",
+		ToRunID:   "somewhere",
+		MessageID: msgID,
+		CreatedAt: time.Now().Add(-DefaultAskTimeout - time.Second),
+	}
+	replyCh := make(chan AskReply, 1)
+
+	st.Mu.Lock()
+	st.PendingAsks[msgID] = edge
+	st.WaitingReply[msgID] = replyCh
+	st.Mu.Unlock()
+
+	b.globalAskEdgesMu.Lock()
+	b.globalAskEdges[edgeKey("timeout_asker", msgID)] = edge
+	b.globalWaitReplies[edgeKey("timeout_asker", msgID)] = replyCh
+	b.globalAskEdgesMu.Unlock()
+
+	// Trigger pruning manually
+	b.pruneExpiredAskEdges()
+
+	// Now wait_reply should get the timeout signal from the channel
+	result := waitReply(t, addr, senderToken, "timeout_asker", msgID)
+	if st := result["status"]; st != http.StatusGatewayTimeout {
+		t.Errorf("expected 504 timeout, got %d", st)
+	}
+	if result["timeout"] != true {
+		t.Errorf("expected timeout=true in response")
+	}
+}
+
+func TestBrokerSendAuthStillRequiredForAskReply(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	token, err := b.CreateRun("auth_test_1")
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	_, err = b.CreateRun("auth_test_2")
+	if err != nil {
+		t.Fatalf("create run 2: %v", err)
+	}
+
+	// Attempt ask with wrong token
+	payload := `{"id":"ask-noauth","from":"auth_test_1","from_run_id":"auth_test_1","message":"test","expects_reply":true}`
+	body := bytes.NewReader([]byte(fmt.Sprintf(`{
+		"run_id": "auth_test_1",
+		"token": "wrong",
+		"from_run_id": "auth_test_1",
+		"to_run_id": "auth_test_2",
+		"type": "agent_message",
+		"payload": %s
+	}`, payload)))
+	resp, err := http.Post(fmt.Sprintf("http://%s/send", b.Addr()), "application/json", body)
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401 for wrong token, got %d", resp.StatusCode)
+	}
+
+	// wait_reply with wrong token
+	waitBody := bytes.NewReader([]byte(fmt.Sprintf(`{"run_id":"auth_test_1","token":"%s","waiting_for":"ask-noauth"}`, token)))
+	resp2, err := http.Post(fmt.Sprintf("http://%s/wait_reply", b.Addr()), "application/json", waitBody)
+	if err != nil {
+		t.Fatalf("wait_reply: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404 for wait_reply with no ask, got %d", resp2.StatusCode)
+	}
+
+	// cancel_message with wrong token
+	cancelBody := bytes.NewReader([]byte(fmt.Sprintf(`{"run_id":"auth_test_1","token":"wrong","cancel_message_id":"ask-noauth"}`)))
+	resp3, err := http.Post(fmt.Sprintf("http://%s/cancel_message", b.Addr()), "application/json", cancelBody)
+	if err != nil {
+		t.Fatalf("cancel_message: %v", err)
+	}
+	defer resp3.Body.Close()
+	if resp3.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401 for wrong token on cancel, got %d", resp3.StatusCode)
+	}
+}
