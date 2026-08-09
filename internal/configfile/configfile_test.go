@@ -329,8 +329,8 @@ func TestDetectFormat(t *testing.T) {
 		{"config.YAML", FormatYAML},
 		{"config.toml", FormatTOML},
 		{"config.TOML", FormatTOML},
-		{"config", FormatJSON},      // no extension defaults to JSON
-		{"config.txt", FormatJSON},  // unknown extension defaults to JSON
+		{"config", FormatJSON},     // no extension defaults to JSON
+		{"config.txt", FormatJSON}, // unknown extension defaults to JSON
 		{"/path/to/roster", FormatJSON},
 	}
 	for _, tc := range tests {
