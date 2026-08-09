@@ -624,7 +624,7 @@ func toolSchemas() []map[string]any {
 		},
 		{
 			"name":        "avenor_upsend",
-			"description": "Send a message upward to your parent or supervisor agent. Use this for status updates, findings, or questions that the parent should see as a channel notification.",
+			"description": "Send a message upward to your parent or supervisor agent.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -633,6 +633,38 @@ func toolSchemas() []map[string]any {
 					"role":      map[string]any{"type": "string", "description": "Role to display (e.g., reviewer, implementer)"},
 				},
 				"required": []string{"to_run_id", "message"},
+			},
+		},
+		{
+			"name":        "avenor_ask",
+			"description": "Ask another agent run a question and wait for a reply (blocks until answer arrives or times out)",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"to_run_id": map[string]any{"type": "string", "description": "Target run ID"},
+					"message":   map[string]any{"type": "string", "description": "Question to ask"},
+					"role":      map[string]any{"type": "string", "description": "Role to display (defaults to agent)"},
+				},
+				"required": []string{"to_run_id", "message"},
+			},
+		},
+		{
+			"name":        "avenor_peers",
+			"description": "List all connected agent sessions with their status, backend, and model",
+			"inputSchema": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{},
+			},
+		},
+		{
+			"name":        "avenor_cancel",
+			"description": "Cancel a pending ask message by its message ID",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"message_id": map[string]any{"type": "string", "description": "Message ID of the pending ask to cancel"},
+				},
+				"required": []string{"message_id"},
 			},
 		},
 	}
