@@ -100,6 +100,10 @@ type StableHandler interface {
 	RuntimeAnswerPermission(runtimeID, requestID, optionID, message string) error
 	RuntimeInterruptAndPrompt(runtimeID, text string, keepQueue bool) error
 	RuntimeSendToParent(runtimeID, message string) error
+	BrokerSend(fromRunID, toRunID, message, role string) error
+	BrokerAsk(toRunID, message, role string) (any, error)
+	BrokerPeers() (any, error)
+	BrokerCancel(messageID string) error
 
 	// TreeBudgetStatus reports tree-budget diagnostics. A supervisor without an
 	// active budget returns a degraded status map with its reason.
@@ -1175,6 +1179,73 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 			return failure(req.ID, -32601, "method not found", nil)
 		}
 		return success(req.ID, s.stableHandler.List())
+
+	case "broker_send":
+		if s.stableHandler == nil {
+			return failure(req.ID, -32601, "method not found", nil)
+		}
+		if !s.ensureOwner(c) {
+			return failure(req.ID, -32010, "permission_denied", nil)
+		}
+		var p struct {
+			FromRunID string `json:"from_run_id"`
+			ToRunID   string `json:"to_run_id"`
+			Message   string `json:"message"`
+			Role      string `json:"role,omitempty"`
+		}
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return failure(req.ID, -32602, "invalid params", nil)
+		}
+		if err := s.stableHandler.BrokerSend(p.FromRunID, p.ToRunID, p.Message, p.Role); err != nil {
+			return failure(req.ID, -32000, err.Error(), nil)
+		}
+		return success(req.ID, map[string]any{"ok": true})
+	case "broker_ask":
+		if s.stableHandler == nil {
+			return failure(req.ID, -32601, "method not found", nil)
+		}
+		if !s.ensureOwner(c) {
+			return failure(req.ID, -32010, "permission_denied", nil)
+		}
+		var p struct {
+			ToRunID string `json:"to_run_id"`
+			Message string `json:"message"`
+			Role    string `json:"role,omitempty"`
+		}
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return failure(req.ID, -32602, "invalid params", nil)
+		}
+		result, err := s.stableHandler.BrokerAsk(p.ToRunID, p.Message, p.Role)
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), nil)
+		}
+		return success(req.ID, result)
+	case "broker_peers":
+		if s.stableHandler == nil {
+			return failure(req.ID, -32601, "method not found", nil)
+		}
+		result, err := s.stableHandler.BrokerPeers()
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), nil)
+		}
+		return success(req.ID, result)
+	case "broker_cancel":
+		if s.stableHandler == nil {
+			return failure(req.ID, -32601, "method not found", nil)
+		}
+		if !s.ensureOwner(c) {
+			return failure(req.ID, -32010, "permission_denied", nil)
+		}
+		var p struct {
+			MessageID string `json:"message_id"`
+		}
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return failure(req.ID, -32602, "invalid params", nil)
+		}
+		if err := s.stableHandler.BrokerCancel(p.MessageID); err != nil {
+			return failure(req.ID, -32000, err.Error(), nil)
+		}
+		return success(req.ID, map[string]any{"ok": true})
 	case "shutdown":
 		if !s.ensureOwner(c) {
 			return failure(req.ID, -32010, "permission_denied", nil)

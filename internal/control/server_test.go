@@ -1597,6 +1597,22 @@ func (m *mockStableHandler) RuntimeInterruptAndPrompt(runtimeID, text string, ke
 	return nil
 }
 
+func (m *mockStableHandler) BrokerSend(fromRunID, toRunID, message, role string) error {
+	return nil
+}
+
+func (m *mockStableHandler) BrokerAsk(toRunID, message, role string) (any, error) {
+	return map[string]any{"reply": "mock reply"}, nil
+}
+
+func (m *mockStableHandler) BrokerPeers() (any, error) {
+	return map[string]any{"sessions": []any{}}, nil
+}
+
+func (m *mockStableHandler) BrokerCancel(messageID string) error {
+	return nil
+}
+
 func (m *mockStableHandler) RuntimeSendToParent(runtimeID, message string) error {
 	m.sendToParentCalled++
 	m.sendToParentMessages = append(m.sendToParentMessages, message)

@@ -1,11 +1,15 @@
 package stable
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -340,6 +344,8 @@ type Supervisor struct {
 	fileSnapshots                map[string][]string // runtimeID → pre-run file list for output detection
 	fileSnapMu                   sync.Mutex
 	broker                       *broker.Broker
+	brokerRunID                  string
+	brokerToken                  string
 	newProviderFunc              func(startOpts runtime.StartOptions, backend string) (runtime.Provider, error)
 	sessionIdentityMu            sync.RWMutex
 	sessionIdentities            map[string]sessionIdentityEntry
@@ -1213,6 +1219,144 @@ func (s *Supervisor) brokerURL() string {
 	}
 	return fmt.Sprintf("http://%s", s.broker.Addr())
 }
+
+// registerBrokerRun ensures the supervisor has its own run registered in the
+// broker for authentication. Returns the run ID and token.
+func (s *Supervisor) registerBrokerRun() (string, string) {
+	if s.brokerRunID != "" {
+		return s.brokerRunID, s.brokerToken
+	}
+	token, err := s.broker.CreateRun("supervisor")
+	if err != nil {
+		return "", ""
+	}
+	s.brokerRunID = "supervisor"
+	s.brokerToken = token
+	return s.brokerRunID, token
+}
+
+// brokerPost sends an authenticated POST to the broker HTTP endpoint.
+func (s *Supervisor) brokerPost(path string, body map[string]any) ([]byte, error) {
+	runID, token := s.registerBrokerRun()
+	if runID == "" {
+		return nil, fmt.Errorf("broker not available")
+	}
+	body["run_id"] = runID
+	body["token"] = token
+	url := s.brokerURL() + path
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("marshal: %w", err)
+	}
+	resp, err := http.Post(url, "application/json", bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Errorf("broker %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read broker %s: %w", path, err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("broker %s: %s: %s", path, resp.Status, strings.TrimSpace(string(respBody)))
+	}
+	return respBody, nil
+}
+
+// brokerGet sends an authenticated GET to the broker HTTP endpoint.
+func (s *Supervisor) brokerGet(path string) ([]byte, error) {
+	runID, token := s.registerBrokerRun()
+	if runID == "" {
+		return nil, fmt.Errorf("broker not available")
+	}
+	url := fmt.Sprintf("%s%s?run_id=%s&token=%s", s.brokerURL(), path, url.QueryEscape(runID), url.QueryEscape(token))
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("broker %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read broker %s: %w", path, err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("broker %s: %s: %s", path, resp.Status, strings.TrimSpace(string(respBody)))
+	}
+	return respBody, nil
+}
+
+func (s *Supervisor) BrokerSend(fromRunID, toRunID, message, role string) error {
+	payload := map[string]any{
+		"from":        fromRunID,
+		"from_run_id": fromRunID,
+		"to_run_id":   toRunID,
+		"message":     message,
+		"role":        role,
+	}
+	_, err := s.brokerPost("/send", map[string]any{
+		"from_run_id": fromRunID,
+		"to_run_id":   toRunID,
+		"type":        "agent_message",
+		"payload":     payload,
+	})
+	return err
+}
+
+func (s *Supervisor) BrokerAsk(toRunID, message, role string) (any, error) {
+	msgID := broker.MakeToken()[:16]
+	payload := map[string]any{
+		"id":            msgID,
+		"from":          "supervisor",
+		"from_run_id":   "supervisor",
+		"to_run_id":     toRunID,
+		"message":       message,
+		"role":          role,
+		"expects_reply": true,
+	}
+	// Send with expects_reply
+	sendBody := map[string]any{
+		"from_run_id": "supervisor",
+		"to_run_id":   toRunID,
+		"type":        "agent_message",
+		"payload":     payload,
+	}
+	if _, err := s.brokerPost("/send", sendBody); err != nil {
+		return nil, fmt.Errorf("send ask: %w", err)
+	}
+	// Wait for reply
+	replyBody, err := s.brokerPost("/wait_reply", map[string]any{
+		"waiting_for": msgID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("wait for reply: %w", err)
+	}
+	// Parse the reply
+	var result map[string]any
+	if err := json.Unmarshal(replyBody, &result); err != nil {
+		return nil, fmt.Errorf("parse reply: %w", err)
+	}
+	return result, nil
+}
+
+func (s *Supervisor) BrokerPeers() (any, error) {
+	body, err := s.brokerGet("/sessions")
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]any
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("parse sessions: %w", err)
+	}
+	return result, nil
+}
+
+func (s *Supervisor) BrokerCancel(messageID string) error {
+	_, err := s.brokerPost("/cancel_message", map[string]any{
+		"cancel_message_id": messageID,
+	})
+	return err
+}
+
 
 func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptText string, timeoutSec, maxRetries int) {
 	defer func() {

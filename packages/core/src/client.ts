@@ -533,6 +533,22 @@ export class Client {
     }
     if (params.activation_id !== undefined) command.activation_id = params.activation_id
     return this.workflowCommand(params.workflow_id, command)
+
+  async brokerSend(fromRunId: string, toRunId: string, message: string, role?: string): Promise<void> {
+    await this.call('broker_send', { from_run_id: fromRunId, to_run_id: toRunId, message, role: role ?? 'agent' })
+  }
+
+  async brokerAsk(toRunId: string, message: string, role?: string): Promise<Record<string, unknown>> {
+    return await this.call('broker_ask', { to_run_id: toRunId, message, role: role ?? 'agent' }) as Record<string, unknown>
+  }
+
+  async brokerPeers(): Promise<Array<Record<string, unknown>>> {
+    const result = await this.call('broker_peers') as { sessions?: Array<Record<string, unknown>> }
+    return result.sessions ?? []
+  }
+
+  async brokerCancel(messageId: string): Promise<void> {
+    await this.call('broker_cancel', { message_id: messageId })
   }
 
   isClosed(): boolean {
