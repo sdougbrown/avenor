@@ -63,6 +63,13 @@ export { inspectTool } from './tools/inspect.js'
 export type { InspectResult } from './tools/inspect.js'
 export { shutdownTool } from './tools/shutdown.js'
 
+export { askTool } from './tools/ask.js'
+export type { AskToolArgs, AskResult } from './tools/ask.js'
+export { peersTool } from './tools/peers.js'
+export type { PeersResult, PeerEntry } from './tools/peers.js'
+export { cancelTool } from './tools/cancel.js'
+export type { CancelToolArgs, CancelResult } from './tools/cancel.js'
+
 export type { ExecutionIdentity, WorkflowGateOperation, WorkflowCompleteParams, WorkflowGateParams, WorkflowHeartbeatParams } from './client.js'
 export { workflowStatusTool, createWorkflowStatusTool, type WorkflowStatusToolArgs, type WorkflowStatusResult } from './tools/workflow-status.js'
 export { workflowWaitTool, createWorkflowWaitTool, type WorkflowWaitToolArgs, type WorkflowWaitResult } from './tools/workflow-wait.js'
@@ -70,3 +77,4 @@ export { workflowInspectTool, createWorkflowInspectTool, type WorkflowInspectToo
 export { workflowEventsTool, createWorkflowEventsTool, type WorkflowEventsToolArgs, type WorkflowEventsResult } from './tools/workflow-events.js'
 export { workflowCompleteTool, createWorkflowCompleteTool, type WorkflowCompleteToolArgs, type WorkflowCompleteResult } from './tools/workflow-complete.js'
 export { workflowGateTool, createWorkflowGateTool, type WorkflowGateToolArgs, type WorkflowGateResult } from './tools/workflow-gate.js'
+
