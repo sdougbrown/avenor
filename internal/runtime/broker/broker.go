@@ -354,7 +354,7 @@ func (b *Broker) Start() error {
 	router.HandleFunc("/send", b.withMethod("POST", b.withAuth(b.handleSend)))
 	router.HandleFunc("/wait_reply", b.withMethod("POST", b.withAuth(b.handleWaitReply)))
 	router.HandleFunc("/cancel_message", b.withMethod("POST", b.withAuth(b.handleCancelMessage)))
-	router.HandleFunc("/sessions", b.withMethod("GET", b.handleSessions))
+	router.HandleFunc("/sessions", b.withMethod("GET", b.withAuth(b.handleSessions)))
 	router.HandleFunc("/permission_request", b.withMethod("POST", b.withAuth(b.handlePermissionRequest)))
 	router.HandleFunc("/permission", b.withMethod("POST", b.withAuth(b.handlePermission)))
 
@@ -424,26 +424,35 @@ func (b *Broker) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			next(w, r)
 			return
 		}
-		// Sidecar auth: token + run_id in JSON body.
-		// Read body into memory so it can be consumed again by the handler.
-		const maxBody = 1 << 20 // 1 MiB
-		limited := io.LimitReader(r.Body, maxBody+1)
-		bodyBytes, err := io.ReadAll(limited)
-		if err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
-			return
-		}
-		if len(bodyBytes) > maxBody {
-			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
-			return
-		}
+		// Auth: accept credentials in JSON body (POST) or query parameters (GET).
 		var cred struct {
 			RunID string `json:"run_id"`
 			Token string `json:"token"`
 		}
-		if err := json.Unmarshal(bodyBytes, &cred); err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
-			return
+		if r.Method == http.MethodGet {
+			cred.RunID = r.URL.Query().Get("run_id")
+			cred.Token = r.URL.Query().Get("token")
+		} else {
+			const maxBody = 1 << 20 // 1 MiB
+			limited := io.LimitReader(r.Body, maxBody+1)
+			bodyBytes, err := io.ReadAll(limited)
+			if err != nil {
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			if len(bodyBytes) > maxBody {
+				http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+				return
+			}
+			if err := json.Unmarshal(bodyBytes, &cred); err != nil {
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			// Replace request body with a fresh reader containing the same bytes.
+			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			if r.ContentLength > 0 {
+				r.ContentLength = int64(len(bodyBytes))
+			}
 		}
 		if cred.RunID == "" || cred.Token == "" {
 			http.Error(w, "unauthorized: missing run_id or token", http.StatusUnauthorized)
@@ -455,12 +464,6 @@ func (b *Broker) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		if !ok || subtle.ConstantTimeCompare([]byte(cred.Token), []byte(st.Token)) != 1 {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
-		}
-		// Replace request body with a fresh reader containing the same bytes.
-		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-		// Update ContentLength to reflect the actual body length for downstream decoders.
-		if r.ContentLength > 0 {
-			r.ContentLength = int64(len(bodyBytes))
 		}
 		next(w, r)
 	}

@@ -504,7 +504,7 @@ func extractReplyMessage(result map[string]any) string {
 }
 
 func (s *Server) makeMsgID() string {
-	b := make([]byte, 8)
+	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }

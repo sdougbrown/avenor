@@ -21,13 +21,17 @@ async function executePeersTool(
   args: PeersToolArgs,
   getSupervisorClient: typeof realGetSupervisorClient,
 ): Promise<PeersResult> {
-  const { client, isSingleton, sup, supervisorId } = await getSupervisorClient(args.supervisorId)
+  const { client, isSingleton, sup } = await getSupervisorClient(args.supervisorId)
   try {
     if (!sup?.brokerUrl) {
       return { peers: [] }
     }
 
-    const res = await fetch(`${sup.brokerUrl}/sessions`)
+    // /sessions requires broker authentication. From a Pi session
+    // running under a supervisor, the child has broker credentials
+    // but the parent Pi session does not. Returns empty until broker
+    // auth propagation is wired through the control protocol.
+    const res = await fetch(sup.brokerUrl + '/sessions')
     if (!res.ok) {
       return { peers: [] }
     }

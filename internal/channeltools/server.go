@@ -325,7 +325,7 @@ func (s *Server) brokerGet(ctx context.Context, path string, out any) error {
 }
 
 func (s *Server) makeMsgID() string {
-	b := make([]byte, 8)
+	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
