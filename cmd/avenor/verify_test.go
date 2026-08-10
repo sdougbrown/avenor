@@ -11,9 +11,9 @@ import (
 )
 
 var (
-	buildOnce   sync.Once
+	buildOnce    sync.Once
 	builtBinPath string
-	buildErr    error
+	buildErr     error
 )
 
 // buildVerifyBinary builds the avenor binary once and caches the path so
@@ -83,8 +83,26 @@ func TestVerifyValidTeamConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify failed: %v\n%s", err, out)
 	}
-	if !contains(string(out), "ok: team") {
+	if !strings.Contains(string(out), "ok: team") {
 		t.Fatalf("expected ok message, got: %s", out)
+	}
+}
+
+func TestVerifyInvalidTeamConfig(t *testing.T) {
+	bin := buildVerifyBinary(t)
+	dir := t.TempDir()
+	writeVerifyFile(t, dir, "team.json", `{
+		"pre": [{"name":"setup","prompt":"init"}],
+		"team": [{"name":"work","prompt":"do work","bogus":true}]
+	}`)
+
+	cmd := exec.Command(bin, "verify", "--dir", dir, "--team-file", "team.json")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected non-zero exit, got nil\n%s", out)
+	}
+	if !strings.Contains(string(out), "error:") {
+		t.Fatalf("expected error message, got: %s", out)
 	}
 }
 
@@ -101,7 +119,7 @@ func TestVerifyValidRoster(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify failed: %v\n%s", err, out)
 	}
-	if !contains(string(out), "ok: roster") {
+	if !strings.Contains(string(out), "ok: roster") {
 		t.Fatalf("expected ok message, got: %s", out)
 	}
 }
@@ -118,7 +136,7 @@ func TestVerifyRosterWithEntryLookup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify failed: %v\n%s", err, out)
 	}
-	if !contains(string(out), "entry \"planner\" found") {
+	if !strings.Contains(string(out), "entry \"planner\" found") {
 		t.Fatalf("expected entry found message, got: %s", out)
 	}
 }
@@ -135,7 +153,7 @@ func TestVerifyRosterEntryNotFound(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected non-zero exit, got nil\n%s", out)
 	}
-	if !contains(string(out), "entry \"missing\"") {
+	if !strings.Contains(string(out), "entry \"missing\"") {
 		t.Fatalf("expected entry error, got: %s", out)
 	}
 }
@@ -153,7 +171,7 @@ func TestVerifyInvalidLoopConfig(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected non-zero exit, got nil\n%s", out)
 	}
-	if !contains(string(out), "error:") {
+	if !strings.Contains(string(out), "error:") {
 		t.Fatalf("expected error message, got: %s", out)
 	}
 }
@@ -171,7 +189,7 @@ func TestVerifyEmptyPhaseName(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected non-zero exit, got nil\n%s", out)
 	}
-	if !contains(string(out), "name must not be empty") {
+	if !strings.Contains(string(out), "name must not be empty") {
 		t.Fatalf("expected name-empty error, got: %s", out)
 	}
 }
@@ -183,7 +201,7 @@ func TestVerifyNoArgs(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected non-zero exit, got nil\n%s", out)
 	}
-	if !contains(string(out), "at least one of") {
+	if !strings.Contains(string(out), "at least one of") {
 		t.Fatalf("expected usage error, got: %s", out)
 	}
 }
@@ -198,7 +216,7 @@ func TestVerifyYAMLConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify failed: %v\n%s", err, out)
 	}
-	if !contains(string(out), "ok: loop") {
+	if !strings.Contains(string(out), "ok: loop") {
 		t.Fatalf("expected ok message, got: %s", out)
 	}
 }
@@ -213,7 +231,7 @@ func TestVerifyTOMLConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify failed: %v\n%s", err, out)
 	}
-	if !contains(string(out), "ok: loop") {
+	if !strings.Contains(string(out), "ok: loop") {
 		t.Fatalf("expected ok message, got: %s", out)
 	}
 }
@@ -237,15 +255,15 @@ func TestVerifyNestedLoopFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify failed: %v\n%s", err, out)
 	}
-	if !contains(string(out), "ok: loop") {
+	if !strings.Contains(string(out), "ok: loop") {
 		t.Fatalf("expected ok messages, got: %s", out)
 	}
 	// Both the outer and inner loop should be validated — assert on file paths
 	// rather than just counting occurrences.
-	if !contains(string(out), "outer.json") {
+	if !strings.Contains(string(out), "outer.json") {
 		t.Fatalf("expected outer.json in output, got: %s", out)
 	}
-	if !contains(string(out), "inner.json") {
+	if !strings.Contains(string(out), "inner.json") {
 		t.Fatalf("expected inner.json in output, got: %s", out)
 	}
 }
@@ -269,10 +287,10 @@ func TestVerifyNestedLoopFileInvalid(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected non-zero exit for invalid nested config, got nil\n%s", out)
 	}
-	if !contains(string(out), "error:") {
+	if !strings.Contains(string(out), "error:") {
 		t.Fatalf("expected error message for nested config, got: %s", out)
 	}
-	if !contains(string(out), "inner.json") {
+	if !strings.Contains(string(out), "inner.json") {
 		t.Fatalf("expected inner.json in error output, got: %s", out)
 	}
 }
@@ -295,7 +313,7 @@ func TestVerifyLoopWithRosterAndRosterEntryRef(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify failed: %v\n%s", err, out)
 	}
-	if !contains(string(out), "ok: loop") {
+	if !strings.Contains(string(out), "ok: loop") {
 		t.Fatalf("expected ok: loop message, got: %s", out)
 	}
 }
@@ -318,7 +336,7 @@ func TestVerifyLoopWithMissingRosterEntryRef(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected non-zero exit for missing roster entry, got nil\n%s", out)
 	}
-	if !contains(string(out), "missing-entry") {
+	if !strings.Contains(string(out), "missing-entry") {
 		t.Fatalf("expected missing-entry error, got: %s", out)
 	}
 }
@@ -332,10 +350,10 @@ func TestVerifyFileNotFound(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected non-zero exit, got nil\n%s", out)
 	}
-	if !contains(string(out), "error:") {
+	if !strings.Contains(string(out), "error:") {
 		t.Fatalf("expected error message, got: %s", out)
 	}
-	if !contains(string(out), "nonexistent.json") {
+	if !strings.Contains(string(out), "nonexistent.json") {
 		t.Fatalf("expected nonexistent.json in error, got: %s", out)
 	}
 }
@@ -347,7 +365,7 @@ func TestVerifyRosterEntryWithoutRosterFile(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected non-zero exit, got nil\n%s", out)
 	}
-	if !contains(string(out), "--roster-entry requires --roster-file") {
+	if !strings.Contains(string(out), "--roster-entry requires --roster-file") {
 		t.Fatalf("expected usage error, got: %s", out)
 	}
 }
@@ -369,11 +387,61 @@ func TestVerifyNestedTeamFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify failed: %v\n%s", err, out)
 	}
-	if !contains(string(out), "outer.json") {
+	if !strings.Contains(string(out), "outer.json") {
 		t.Fatalf("expected outer.json in output, got: %s", out)
 	}
-	if !contains(string(out), "inner.json") {
+	if !strings.Contains(string(out), "inner.json") {
 		t.Fatalf("expected inner.json in output, got: %s", out)
+	}
+}
+
+func TestVerifyNestedTeamFileInvalid(t *testing.T) {
+	bin := buildVerifyBinary(t)
+	dir := t.TempDir()
+
+	// Outer team delegates to a nested team file that has an invalid config.
+	writeVerifyFile(t, dir, "outer.json", `{
+		"team": [{"name":"delegate","team_file":"inner.json"}]
+	}`)
+	writeVerifyFile(t, dir, "inner.json", `{
+		"team": [{"name":"inner-work","prompt":"do work","bogus":true}]
+	}`)
+
+	cmd := exec.Command(bin, "verify", "--dir", dir, "--team-file", "outer.json")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected non-zero exit for invalid nested team, got nil\n%s", out)
+	}
+	if !strings.Contains(string(out), "error:") {
+		t.Fatalf("expected error message for nested team config, got: %s", out)
+	}
+	if !strings.Contains(string(out), "inner.json") {
+		t.Fatalf("expected inner.json in error output, got: %s", out)
+	}
+}
+
+func TestVerifyCrossReferencingConfigs(t *testing.T) {
+	bin := buildVerifyBinary(t)
+	dir := t.TempDir()
+
+	// Two config files that reference each other (A->B->A) exercises the seen
+	// map deduplication: verify should not loop forever and should report both.
+	writeVerifyFile(t, dir, "a.yaml", "max_iterations: 1\nloop:\n  - name: delegate\n    loop_file: b.yaml\n")
+	writeVerifyFile(t, dir, "b.yaml", "max_iterations: 2\nloop:\n  - name: delegate\n    loop_file: a.yaml\n")
+
+	cmd := exec.Command(bin, "verify", "--dir", dir, "--loop-file", "a.yaml")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("verify failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "ok: loop") {
+		t.Fatalf("expected ok messages, got: %s", out)
+	}
+	if !strings.Contains(string(out), "a.yaml") {
+		t.Fatalf("expected a.yaml in output, got: %s", out)
+	}
+	if !strings.Contains(string(out), "b.yaml") {
+		t.Fatalf("expected b.yaml in output, got: %s", out)
 	}
 }
 
@@ -398,19 +466,13 @@ func TestVerifyCombinedLoopTeamRoster(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify failed: %v\n%s", err, out)
 	}
-	if !contains(string(out), "ok: loop") {
+	if !strings.Contains(string(out), "ok: loop") {
 		t.Fatalf("expected loop ok, got: %s", out)
 	}
-	if !contains(string(out), "ok: team") {
+	if !strings.Contains(string(out), "ok: team") {
 		t.Fatalf("expected team ok, got: %s", out)
 	}
-	if !contains(string(out), "ok: roster") {
+	if !strings.Contains(string(out), "ok: roster") {
 		t.Fatalf("expected roster ok, got: %s", out)
 	}
-}
-
-// helpers
-
-func contains(s, substr string) bool {
-	return strings.Contains(s, substr)
 }

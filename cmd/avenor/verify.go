@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -25,6 +26,9 @@ func runVerify(args []string) int {
 	rosterFile := fs.String("roster-file", "", "path to roster config to validate (standalone or as fallback for loop/team)")
 	rosterEntry := fs.String("roster-entry", "", "roster entry name to look up (requires --roster-file)")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 1
 	}
 

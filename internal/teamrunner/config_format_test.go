@@ -68,3 +68,21 @@ func TestLoadTeamConfigYAMLRejectsUnknownFields(t *testing.T) {
 		t.Fatal("expected unknown-field error for YAML, got nil")
 	}
 }
+
+// TestLoadTeamConfigTOMLRejectsUnknownFields confirms that DisallowUnknownFields
+// semantics carry through the TOML normalization path.
+func TestLoadTeamConfigTOMLRejectsUnknownFields(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	data := `[[team]]
+name = "work"
+prompt = "work"
+bogus = true`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadTeamConfig(path); err == nil {
+		t.Fatal("expected unknown-field error for TOML, got nil")
+	}
+}
