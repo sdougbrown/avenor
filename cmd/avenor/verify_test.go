@@ -83,8 +83,9 @@ func TestVerifyValidTeamConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify failed: %v\n%s", err, out)
 	}
-	if !strings.Contains(string(out), "ok: team") {
-		t.Fatalf("expected ok message, got: %s", out)
+	expected := "ok: team team.json (2 phases)\n"
+	if string(out) != expected {
+		t.Fatalf("expected %q, got %q", expected, out)
 	}
 }
 
@@ -119,8 +120,9 @@ func TestVerifyValidRoster(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify failed: %v\n%s", err, out)
 	}
-	if !strings.Contains(string(out), "ok: roster") {
-		t.Fatalf("expected ok message, got: %s", out)
+	expected := "ok: roster roster.json (2 entries)\n"
+	if string(out) != expected {
+		t.Fatalf("expected %q, got %q", expected, out)
 	}
 }
 
@@ -171,8 +173,8 @@ func TestVerifyInvalidLoopConfig(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected non-zero exit, got nil\n%s", out)
 	}
-	if !strings.Contains(string(out), "error:") {
-		t.Fatalf("expected error message, got: %s", out)
+	if !strings.Contains(string(out), "unknown field \"bogus\"") {
+		t.Fatalf("expected unknown-field error, got: %s", out)
 	}
 }
 

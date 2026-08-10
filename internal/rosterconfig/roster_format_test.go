@@ -34,7 +34,7 @@ agent = "windsurf-swe"
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "roster"+tc.ext)
-			if err := os.WriteFile(path, []byte(tc.data), 0o600); err != nil {
+			if err := os.WriteFile(path, []byte(tc.data), 0o644); err != nil {
 				t.Fatal(err)
 			}
 			config, err := Load(path)
@@ -67,7 +67,7 @@ agent = "windsurf-swe"
 func TestLoadYAMLRejectsUnknownFields(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "roster.yaml")
 	data := "planner:\n  backend: agy\n  agent: planner\n  bogus: true\n"
-	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Load(path); err == nil {
@@ -84,7 +84,7 @@ backend = "agy"
 agent = "planner"
 bogus = true
 `
-	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Load(path); err == nil {
