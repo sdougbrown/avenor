@@ -28,8 +28,8 @@ avenor [flags]  # equivalent; explicit "run" is optional
 | `--agent` | (none) | Agent name; used to resolve configured model from opencode config if `--model` is not set |
 | `--prompt` | (none) | Inline prompt text; mutually exclusive with `--prompt-file` |
 | `--prompt-file` | (none) | Path to prompt file; mutually exclusive with `--prompt` |
-| `--loop-file` | (none) | Path to multi-phase loop config JSON; enables looping mode (incompatible with `--resume`) |
-| `--roster-file` | (none) | Path to a roster map for direct selection, or the root workflow fallback |
+| `--loop-file` | (none) | Path to multi-phase loop config (JSON, YAML, or TOML); enables looping mode (incompatible with `--resume`) |
+| `--roster-file` | (none) | Path to a roster map (JSON, YAML, or TOML) for direct selection, or the root workflow fallback |
 | `--roster-entry` | (none) | Entry key within `--roster-file` for a direct spawn; invalid with a workflow file |
 | `--label` | (none) | Free-form label for log correlation; appears in events and sentinel |
 | `--dir` | `.` | Working directory for the agent |
@@ -71,7 +71,7 @@ See [loop.md](loop.md) for multi-phase loop config.
 
 ### Roster selection
 
-A roster is a JSON map from a name to a complete backend/agent/model loadout. `roster_file` names the map; `roster_entry` names one key inside it. Every entry must contain `backend` and at least one of `agent` or `model`:
+A roster is a map from a name to a complete backend/agent/model loadout. `roster_file` names the map; `roster_entry` names one key inside it. Every entry must contain `backend` and at least one of `agent` or `model`. Roster files can be authored in JSON, YAML, or TOML — the format is detected from the file extension:
 
 ```json
 {
@@ -102,7 +102,7 @@ avenor run --prompt "Use this model" --model provider/model
 avenor run --prompt "Use backend defaults" --backend opencode-acp
 ```
 
-`--roster-file` and `--roster-entry` must be supplied together for a direct request. A roster request cannot also supply `--agent`, `--model`, or `--backend`; the roster entry supplies all three identity fields. A roster file is strict: `system`, `thinking`, and unknown entry fields are rejected. Run-level `--thinking` remains separate and is checked against the effective backend selected by the direct entry or by each workflow phase.
+`--roster-file` and `--roster-entry` must be supplied together for a direct request. A roster request cannot also supply `--agent`, `--model`, or `--backend`; the roster entry supplies all three identity fields. A roster file is strict: `system`, `thinking`, and unknown entry fields are rejected in all formats. Run-level `--thinking` remains separate and is checked against the effective backend selected by the direct entry or by each workflow phase.
 
 For a workflow, `--roster-file` is only a root fallback and `--roster-entry` is invalid. The workflow config selects entries per direct phase:
 
@@ -138,6 +138,54 @@ A phase roster entry overrides the run-level backend, agent, and model for that 
 For CLI workflows, a declared `roster_file` is resolved relative to its loop/team config. If the root config has no declaration, the command-level `--roster-file` fallback is resolved relative to `--dir`; nested CLI loads do not reuse that fallback. A child with no declaration inherits the already loaded parent entries, recursively; a child declaration replaces them. Stable-mode nesting keeps its existing behavior and does not gain this CLI-only inheritance rule. For direct selection, pass a path that is valid from the invoking process (an absolute path avoids ambiguity).
 
 A phase with `resume_from_previous: true` must match four values stored for the session: effective backend, agent, model, and agent profile. If its roster selection changes any value, Avenor fails the phase before creating a provider. Matching only the backend is insufficient.
+
+## avenor verify
+
+Validate config files without starting a run. Loads and checks loop, team, and roster configs for structural correctness — format decoding, unknown-field rejection, mutual exclusions, prompt presence, roster entry references, and prompt\_file resolution. Recursively validates nested `loop_file`/`team_file` references that are only loaded on demand during a real run.
+
+```
+avenor verify [flags]
+```
+
+### Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--dir` | `.` | Working directory (relative config paths are resolved from here) |
+| `--loop-file` | (none) | Path to loop config to validate |
+| `--team-file` | (none) | Path to team config to validate |
+| `--roster-file` | (none) | Path to roster config to validate (standalone, or as fallback for loop/team) |
+| `--roster-entry` | (none) | Roster entry name to look up (requires `--roster-file`) |
+
+At least one of `--loop-file`, `--team-file`, or `--roster-file` is required.
+
+### Examples
+
+Validate a loop config and its nested references:
+
+```sh
+avenor verify --loop-file loop.json
+# ok: loop loop.json (3 phases, max_iterations=5)
+# ok: loop inner.json (2 phases, max_iterations=2)
+```
+
+Validate a team config with a roster fallback and check a specific entry:
+
+```sh
+avenor verify --team-file team.json --roster-file roster.json --roster-entry reviewer
+# ok: roster roster.json (3 entries)
+# ok: roster roster.json: entry "reviewer" found
+# ok: team team.json (4 phases)
+```
+
+Catch an invalid config before a run:
+
+```sh
+avenor verify --loop-file loop.yaml
+# error: loop loop.yaml: decode config loop.yaml: unknown field "bogus"
+```
+
+Works with JSON, YAML, and TOML configs. Exit code 0 with `ok:` messages on success; exit code 1 with `error:` messages on failure.
 
 ## avenor stable
 

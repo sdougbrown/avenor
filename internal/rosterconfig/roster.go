@@ -2,13 +2,11 @@
 package rosterconfig
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
-	"io"
-	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/sdougbrown/avenor/internal/configfile"
 )
 
 // Entry is one complete roster identity. Backend is required; an entry must
@@ -27,28 +25,12 @@ type Config map[string]Entry
 // object and all objects are decoded with unknown fields rejected. This keeps
 // deferred fields such as system and thinking from silently becoming no-ops.
 func Load(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read roster config %s: %w", path, err)
-	}
-
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-
 	var config Config
-	if err := decoder.Decode(&config); err != nil {
-		return nil, fmt.Errorf("decode roster config %s: %w", path, err)
+	if err := configfile.Load(path, &config); err != nil {
+		return nil, fmt.Errorf("load roster config %s: %w", path, err)
 	}
 	if config == nil {
 		return nil, fmt.Errorf("decode roster config %s: top-level value must be an object", path)
-	}
-
-	var extra any
-	if err := decoder.Decode(&extra); err != io.EOF {
-		if err == nil {
-			return nil, fmt.Errorf("decode roster config %s: multiple JSON values", path)
-		}
-		return nil, fmt.Errorf("decode roster config %s: trailing JSON: %w", path, err)
 	}
 
 	if err := config.Validate(); err != nil {

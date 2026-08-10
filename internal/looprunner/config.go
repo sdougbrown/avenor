@@ -1,11 +1,10 @@
 package looprunner
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 
+	"github.com/sdougbrown/avenor/internal/configfile"
 	"github.com/sdougbrown/avenor/internal/phaseconfig"
 	"github.com/sdougbrown/avenor/internal/rosterconfig"
 )
@@ -27,13 +26,8 @@ func LoadLoopConfig(path string) (*LoopConfig, error) {
 // roster. A declared roster file is relative to the loop config, then the
 // inherited loaded roster is used, and finally fallbackPath is used.
 func LoadLoopConfigWithRoster(path string, inherited *rosterconfig.Config, fallbackPath string) (*LoopConfig, *rosterconfig.Config, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, nil, err
-	}
-
 	var cfg LoopConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
+	if err := configfile.Load(path, &cfg); err != nil {
 		return nil, nil, err
 	}
 

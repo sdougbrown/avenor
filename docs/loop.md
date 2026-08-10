@@ -43,6 +43,12 @@ Avenor runs `build` once, then repeats `test` → `fix` until the test phase emi
 
 `--prompt` and `--prompt-file` are optional when `--loop-file` is set. If you provide one, it runs as an implicit pre-phase (named `(initial)`) before any config phases.
 
+To check that your config is valid without starting a run, use `avenor verify`:
+
+```sh
+avenor verify --loop-file loop.json
+```
+
 ## How a loop run works
 
 **Pre phases** run once, before the loop starts. If any pre phase exits with a stop reason other than `end_turn`, the entire run fails immediately — the loop never begins.
@@ -59,7 +65,7 @@ Phases always run to the natural end of their session before Avenor acts on a ma
 
 ## Loop config file
 
-A JSON file with three top-level keys:
+A config file with three top-level keys. The file can be JSON, YAML, or TOML — the format is detected from the file extension:
 
 | Key | Type | Required | Description |
 |---|---|---|---|
@@ -84,7 +90,7 @@ Phase names must be unique across `pre` and `loop`. The name `(initial)` is rese
 
 ## Roster-backed phases
 
-A roster is a top-level JSON map. `roster_file` identifies that map; `roster_entry` identifies one key within it. Every entry requires `backend` and at least one of `agent` or `model`:
+A roster is a top-level map. `roster_file` identifies that map; `roster_entry` identifies one key within it. Every entry requires `backend` and at least one of `agent` or `model`:
 
 ```json
 {
@@ -389,7 +395,7 @@ avenor run --loop-file <path> [other flags...]
 
 ### What's required
 
-`--loop-file` is the path to your loop config JSON. When set, `--prompt` and `--prompt-file` become optional. If you provide one, it runs as an implicit pre-phase named `(initial)` before any config phases.
+`--loop-file` is the path to your loop config (JSON, YAML, or TOML). When set, `--prompt` and `--prompt-file` become optional. If you provide one, it runs as an implicit pre-phase named `(initial)` before any config phases.
 
 ### Mutual exclusions
 
