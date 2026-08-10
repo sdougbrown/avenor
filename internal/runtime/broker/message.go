@@ -38,19 +38,4 @@ type AgentMessage struct {
 	// ExpectsReply, when true, signals that the sender is blocking and
 	// expects a reply with ReplyTo pointing back to this message's ID.
 	ExpectsReply bool `json:"expects_reply,omitempty"`
-
-	// Supersedes optionally names a previous message ID that this
-	// message replaces (same sender, same receiver).
-	Supersedes string `json:"supersedes,omitempty"`
-
-	// Attachments carry optional typed inline payloads.
-	Attachments []Attachment `json:"attachments,omitempty"`
-}
-
-// Attachment is a typed inline payload attached to an agent message.
-type Attachment struct {
-	Type     string `json:"type"`               // "file", "snippet", or "context"
-	Name     string `json:"name"`
-	Content  string `json:"content"`
-	Language string `json:"language,omitempty"`
 }

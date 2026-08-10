@@ -159,8 +159,8 @@ type RunState struct {
 	Notify              chan struct{}
 
 	// Ask/reply tracking
-	PendingAsks  map[string]*AskEdge        // messageID -> edge (sender is waiting)
-	WaitingReply map[string]chan AskReply   // messageID -> buffered(1) channel for /wait_reply
+	PendingAsks  map[string]*AskEdge      // messageID -> edge (sender is waiting)
+	WaitingReply map[string]chan AskReply // messageID -> buffered(1) channel for /wait_reply
 
 	// Session metadata for peer discovery
 	Info *SessionInfo
@@ -300,9 +300,9 @@ type Broker struct {
 
 	// Global ask-edge registry for cross-run lookups.
 	// Keys are "senderRunID/messageID" to prevent cross-sender collisions.
-	globalAskEdgesMu sync.RWMutex
-	globalAskEdges   map[string]*AskEdge        // "senderRunID/messageID" -> edge
-	globalWaitReplies  map[string]chan AskReply   // "sender/messageID" -> reply channel
+	globalAskEdgesMu    sync.RWMutex
+	globalAskEdges      map[string]*AskEdge      // "senderRunID/messageID" -> edge
+	globalReplyChannels map[string]chan AskReply // "sender/messageID" -> reply channel
 
 	// Shutdown signal for background goroutines.
 	closeOnce sync.Once
@@ -313,12 +313,12 @@ type Broker struct {
 // The resulting addr is available after Start.
 func New(globalToken string) *Broker {
 	b := &Broker{
-		runs:             make(map[string]*RunState),
-		httpToken:        globalToken,
-		pollTimeout:      2 * time.Second,
-		globalAskEdges:   make(map[string]*AskEdge),
-		globalWaitReplies: make(map[string]chan AskReply),
-		closeCh:          make(chan struct{}),
+		runs:                make(map[string]*RunState),
+		httpToken:           globalToken,
+		pollTimeout:         2 * time.Second,
+		globalAskEdges:      make(map[string]*AskEdge),
+		globalReplyChannels: make(map[string]chan AskReply),
+		closeCh:             make(chan struct{}),
 	}
 	return b
 }
@@ -754,51 +754,61 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Mutual-ask guard: check if the TARGET is already waiting for a
-		// reply from the SENDER. Edges are stored on the asker's RunState,
-		// so we check if the target (toSt) has a pending ask whose ToRunID
-		// matches the current sender's run ID.
+		sender := fullBody.FromRunID
+		target := fullBody.ToRunID
+
 		b.mu.RLock()
-		toSt, toOk := b.runs[fullBody.ToRunID]
+		_, toOk := b.runs[target]
 		b.mu.RUnlock()
 		if !toOk {
 			http.Error(w, "to run not found", http.StatusNotFound)
 			return
 		}
-		toSt.Mu.Lock()
-		for _, edge := range toSt.PendingAsks {
-			if edge.ToRunID == fullBody.FromRunID {
-				toSt.Mu.Unlock()
+
+		// Mutual-ask guard and edge registration are performed atomically
+		// under the global registry lock. This closes the TOCTOU window:
+		// two concurrent asks in opposite directions (A→B and B→A) serialize
+		// here, so whichever registers first is visible to the other, which
+		// then refuses with a mutual-ask conflict.
+		key := edgeKey(sender, msgID)
+		b.globalAskEdgesMu.Lock()
+		if _, dup := b.globalAskEdges[key]; dup {
+			b.globalAskEdgesMu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": "message id already in use"})
+			return
+		}
+		// Refuse this ask if the target is already waiting on a pending ask
+		// from the sender (i.e. the target has an edge pointing back at us).
+		for _, e := range b.globalAskEdges {
+			if e.FromRunID == target && e.ToRunID == sender {
+				b.globalAskEdgesMu.Unlock()
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusConflict)
 				_ = json.NewEncoder(w).Encode(map[string]any{"error": "mutual ask refused"})
 				return
 			}
 		}
-		toSt.Mu.Unlock()
+		edge := &AskEdge{
+			FromRunID: sender,
+			ToRunID:   target,
+			MessageID: msgID,
+			CreatedAt: time.Now(),
+		}
+		replyCh := make(chan AskReply, 1)
+		b.globalAskEdges[key] = edge
+		b.globalReplyChannels[key] = replyCh
+		b.globalAskEdgesMu.Unlock()
 
-			// Store edge on the SENDER's RunState.
+		// Mirror the edge on the SENDER's RunState so wait_reply and
+		// cancel_message can find it without a global lookup.
 		if fromSt.PendingAsks == nil {
 			fromSt.PendingAsks = make(map[string]*AskEdge)
 		}
 		if fromSt.WaitingReply == nil {
 			fromSt.WaitingReply = make(map[string]chan AskReply)
 		}
-
-		// Register the edge in both the per-RunState and global registries.
-		edge := &AskEdge{
-			FromRunID: fullBody.FromRunID,
-			ToRunID:   fullBody.ToRunID,
-			MessageID: msgID,
-			CreatedAt: time.Now(),
-		}
-		key := edgeKey(fullBody.FromRunID, msgID)
-		b.globalAskEdgesMu.Lock()
-		b.globalAskEdges[key] = edge
-		replyCh := make(chan AskReply, 1)
-		b.globalWaitReplies[key] = replyCh
-		b.globalAskEdgesMu.Unlock()
-
 		fromSt.Mu.Lock()
 		fromSt.PendingAsks[msgID] = edge
 		fromSt.WaitingReply[msgID] = replyCh
@@ -810,7 +820,7 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 			// Roll back ask edge on delivery failure.
 			b.globalAskEdgesMu.Lock()
 			delete(b.globalAskEdges, key)
-			delete(b.globalWaitReplies, key)
+			delete(b.globalReplyChannels, key)
 			b.globalAskEdgesMu.Unlock()
 			fromSt.Mu.Lock()
 			delete(fromSt.PendingAsks, msgID)
@@ -831,7 +841,7 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 		askerKey := edgeKey(fullBody.ToRunID, replyTo)
 		b.globalAskEdgesMu.RLock()
 		edge, edgeOk := b.globalAskEdges[askerKey]
-		replyCh, chOk := b.globalWaitReplies[askerKey]
+		replyCh, chOk := b.globalReplyChannels[askerKey]
 		b.globalAskEdgesMu.RUnlock()
 
 		if !edgeOk || !chOk {
@@ -921,7 +931,7 @@ func (b *Broker) handleWaitReply(w http.ResponseWriter, r *http.Request) {
 	// by sender run ID to prevent cross-session ask ID collisions.
 	key := edgeKey(fullBody.RunID, fullBody.WaitingFor)
 	b.globalAskEdgesMu.RLock()
-	replyCh, chOk := b.globalWaitReplies[key]
+	replyCh, chOk := b.globalReplyChannels[key]
 	edge, edgeOk := b.globalAskEdges[key]
 	b.globalAskEdgesMu.RUnlock()
 
@@ -945,7 +955,7 @@ func (b *Broker) handleWaitReply(w http.ResponseWriter, r *http.Request) {
 		// Got the reply. Clean up both global and per-run registries.
 		b.globalAskEdgesMu.Lock()
 		delete(b.globalAskEdges, key)
-		delete(b.globalWaitReplies, key)
+		delete(b.globalReplyChannels, key)
 		b.globalAskEdgesMu.Unlock()
 		if ownerSt := b.GetRun(edge.FromRunID); ownerSt != nil {
 			ownerSt.Mu.Lock()
@@ -957,7 +967,7 @@ func (b *Broker) handleWaitReply(w http.ResponseWriter, r *http.Request) {
 	case <-time.After(DefaultAskTimeout):
 		b.globalAskEdgesMu.Lock()
 		delete(b.globalAskEdges, key)
-		delete(b.globalWaitReplies, key)
+		delete(b.globalReplyChannels, key)
 		b.globalAskEdgesMu.Unlock()
 		if ownerSt := b.GetRun(edge.FromRunID); ownerSt != nil {
 			ownerSt.Mu.Lock()
@@ -974,7 +984,7 @@ func (b *Broker) handleWaitReply(w http.ResponseWriter, r *http.Request) {
 	case <-r.Context().Done():
 		b.globalAskEdgesMu.Lock()
 		delete(b.globalAskEdges, key)
-		delete(b.globalWaitReplies, key)
+		delete(b.globalReplyChannels, key)
 		b.globalAskEdgesMu.Unlock()
 		if ownerSt := b.GetRun(edge.FromRunID); ownerSt != nil {
 			ownerSt.Mu.Lock()
@@ -1021,6 +1031,7 @@ func respondWaitReply(w http.ResponseWriter, reply AskReply, waitingFor string) 
 		"payload":     reply.Payload,
 	})
 }
+
 // edgeKey builds a namespaced key for the global ask registry.
 func edgeKey(runID, messageID string) string {
 	return runID + "/" + messageID
@@ -1059,7 +1070,7 @@ func (b *Broker) handleCancelMessage(w http.ResponseWriter, r *http.Request) {
 	key := edgeKey(fullBody.RunID, fullBody.CancelMessageID)
 	b.globalAskEdgesMu.RLock()
 	edge, edgeOk := b.globalAskEdges[key]
-	replyCh, chOk := b.globalWaitReplies[key]
+	replyCh, chOk := b.globalReplyChannels[key]
 	b.globalAskEdgesMu.RUnlock()
 
 	if !edgeOk {
@@ -1090,7 +1101,7 @@ func (b *Broker) handleCancelMessage(w http.ResponseWriter, r *http.Request) {
 	// Clean up all registries.
 	b.globalAskEdgesMu.Lock()
 	delete(b.globalAskEdges, key)
-	delete(b.globalWaitReplies, key)
+	delete(b.globalReplyChannels, key)
 	b.globalAskEdgesMu.Unlock()
 	if ownerSt := b.GetRun(edge.FromRunID); ownerSt != nil {
 		ownerSt.Mu.Lock()
@@ -1224,9 +1235,13 @@ func (b *Broker) pruneExpiredAskEdges() {
 		for msgID, edge := range st.PendingAsks {
 			if now.Sub(edge.CreatedAt) > DefaultAskTimeout {
 				key := edgeKey(edge.FromRunID, msgID)
+				// Signal any waiter, then remove the edge from every registry.
+				// Deleting here (rather than deferring to /wait_reply) prevents
+				// these entries leaking when no one ever calls /wait_reply. A
+				// concurrent /wait_reply that already captured the channel still
+				// receives the timeout signal before the entry is removed.
 				b.globalAskEdgesMu.Lock()
-				ch, chOk := b.globalWaitReplies[key]
-				if chOk {
+				if ch, chOk := b.globalReplyChannels[key]; chOk {
 					select {
 					case ch <- AskReply{
 						MessageID: msgID,
@@ -1236,11 +1251,11 @@ func (b *Broker) pruneExpiredAskEdges() {
 					default:
 					}
 				}
-				// Send the timeout signal but do NOT delete the registries.
-				// The /wait_reply handler is responsible for cleaning up
-				// after it receives the signal, so a concurrent wait_reply
-				// call can still find the edge and channel.
+				delete(b.globalAskEdges, key)
+				delete(b.globalReplyChannels, key)
 				b.globalAskEdgesMu.Unlock()
+				delete(st.PendingAsks, msgID)
+				delete(st.WaitingReply, msgID)
 			}
 		}
 		st.Mu.Unlock()
@@ -1319,8 +1334,28 @@ func (b *Broker) EnsureRun(runID string) (string, bool) {
 // does not exist.
 func (b *Broker) DeleteRun(runID string) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	delete(b.runs, runID)
+	st, ok := b.runs[runID]
+	if ok {
+		delete(b.runs, runID)
+	}
+	b.mu.Unlock()
+	if !ok {
+		return
+	}
+	// Remove any pending ask edges this run registered as a sender so they
+	// don't leak in the global registries (no owner is left to ever call
+	// /wait_reply or /cancel_message).
+	st.Mu.Lock()
+	for _, edge := range st.PendingAsks {
+		key := edgeKey(edge.FromRunID, edge.MessageID)
+		b.globalAskEdgesMu.Lock()
+		delete(b.globalAskEdges, key)
+		delete(b.globalReplyChannels, key)
+		b.globalAskEdgesMu.Unlock()
+	}
+	st.PendingAsks = nil
+	st.WaitingReply = nil
+	st.Mu.Unlock()
 }
 
 func (b *Broker) RunCount() int {
@@ -1357,4 +1392,9 @@ func (b *Broker) Reset() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.runs = make(map[string]*RunState)
+	// Drop orphaned ask/reply registrations so Reset leaves no stale state.
+	b.globalAskEdgesMu.Lock()
+	b.globalAskEdges = make(map[string]*AskEdge)
+	b.globalReplyChannels = make(map[string]chan AskReply)
+	b.globalAskEdgesMu.Unlock()
 }
