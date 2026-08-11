@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/sdougbrown/avenor/internal/runstate"
 )
 
 type sentinelData struct {
@@ -40,7 +42,7 @@ func readSentinel(path string) (*sentinelData, error) {
 func translateStatus(raw map[string]any, sentinelPath string) map[string]any {
 	result := make(map[string]any)
 
-	for _, k := range []string{"runtime_id", "label", "dir", "phase", "phase_label", "pending_permission", "backend", "agent", "agent_profile", "model", "roster_file", "roster_entry", "effective_backend", "effective_agent", "effective_model", "parent_id", "children", "event_path", "usage", "latest_seq", "final_output", "final_output_truncated"} {
+	for _, k := range []string{"runtime_id", "label", "dir", "phase", "phase_label", "pending_permission", "backend", "agent", "agent_profile", "model", "roster_file", "roster_entry", "effective_backend", "effective_agent", "effective_model", "parent_id", "children", "event_path", "usage", "latest_seq", "final_output", "final_output_truncated", "started_at"} {
 		if v, ok := raw[k]; ok {
 			result[k] = v
 		}
@@ -49,6 +51,8 @@ func translateStatus(raw map[string]any, sentinelPath string) map[string]any {
 	rawStatus, _ := raw["status"].(string)
 	rawSession, _ := raw["session_id"].(string)
 	rawPhase, _ := raw["phase"].(string)
+	translated := runstate.Translate(rawStatus, rawPhase)
+	result["status"] = translated.Status
 
 	switch rawStatus {
 	case "running":
@@ -56,10 +60,9 @@ func translateStatus(raw map[string]any, sentinelPath string) map[string]any {
 		// phase before the attempt defer clears child.active; retry selection can
 		// still be pending. Team members share child.active, so this also covers
 		// concurrent work.
-		result["status"] = "running"
-		if isTerminalPhase(rawPhase) {
+		if translated.Phase != rawPhase {
 			// Keep phase empty until deferred cleanup sets child.active false.
-			result["phase"] = ""
+			result["phase"] = translated.Phase
 			result["phase_label"] = ""
 		}
 		if rawSession != "" {
@@ -67,9 +70,8 @@ func translateStatus(raw map[string]any, sentinelPath string) map[string]any {
 		}
 
 	case "idle":
-		if isTerminalPhase(rawPhase) {
+		if translated.TurnComplete {
 			// Use raw metadata because a failed sentinel write can leave an earlier turn's file.
-			result["status"] = rawPhase
 			if rawSession != "" {
 				result["session_id"] = rawSession
 			}
@@ -78,7 +80,6 @@ func translateStatus(raw map[string]any, sentinelPath string) map[string]any {
 			}
 			return result
 		}
-		result["status"] = "running"
 		if rawSession != "" {
 			result["session_id"] = rawSession
 		}
@@ -89,12 +90,10 @@ func translateStatus(raw map[string]any, sentinelPath string) map[string]any {
 				return result
 			}
 		}
-		result["status"] = "done"
 		if rawSession != "" {
 			result["session_id"] = rawSession
 		}
 	case "done", "failed", "timeout", "killed", "waiting":
-		result["status"] = rawStatus
 		if rawSession != "" {
 			result["session_id"] = rawSession
 		}
@@ -102,12 +101,12 @@ func translateStatus(raw map[string]any, sentinelPath string) map[string]any {
 			result["stop_reason"] = stopReason
 		}
 	case "blocked":
-		result["status"] = "failed"
 		if rawSession != "" {
 			result["session_id"] = rawSession
 		}
 	default:
-		result["status"] = "running"
+		// Sentinels are an MCP registry fallback, not part of shared supervisor
+		// state translation. Preserve the live session ID as authoritative.
 		if sentinelPath != "" {
 			if sd, err := readSentinel(sentinelPath); err == nil {
 				applySentinelStatus(result, sd)
@@ -157,15 +156,6 @@ func applyRunInfoIdentity(status map[string]any, info *RunInfo) {
 	setIfMissing("effective_agent", effectiveAgent)
 	setIfMissing("effective_model", effectiveModel)
 	setIfMissing("effective_backend", effectiveBackend)
-}
-
-func isTerminalPhase(phase string) bool {
-	switch phase {
-	case "done", "failed", "timeout", "killed":
-		return true
-	default:
-		return false
-	}
 }
 
 func readSentinelSession(path string) (string, error) {
