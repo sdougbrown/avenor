@@ -99,6 +99,256 @@ func TestBrokerRegisterExistingRunWithMatchingToken(t *testing.T) {
 	}
 }
 
+// httpRegister registers a run over the HTTP /register endpoint and returns
+// its token, exercising the real auth-credential path used by the endpoints.
+func httpRegister(t *testing.T, addr, runID string) string {
+	t.Helper()
+	resp, err := http.Post(fmt.Sprintf("http://%s/register", addr),
+		"application/json", bytes.NewReader([]byte(fmt.Sprintf(`{"run_id":%q}`, runID))))
+	if err != nil {
+		t.Fatalf("register %s: %v", runID, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("register %s: %d", runID, resp.StatusCode)
+	}
+	var r map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+		t.Fatalf("decode register %s: %v", runID, err)
+	}
+	if r["token"] == "" {
+		t.Fatalf("register %s: empty token in response", runID)
+	}
+	return r["token"]
+}
+
+func TestBrokerRegisterBadJSON(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+	resp, err := http.Post(fmt.Sprintf("http://%s/register", b.Addr()),
+		"application/json", bytes.NewReader([]byte(`{not valid json`)))
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("bad JSON register expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestBrokerRegisterEmptyRunID(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+	resp, err := http.Post(fmt.Sprintf("http://%s/register", b.Addr()),
+		"application/json", bytes.NewReader([]byte(`{}`)))
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("empty run_id register expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestBrokerPushControlHTTP(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+	addr := b.Addr()
+	token := httpRegister(t, addr, "pc_http")
+
+	body := bytes.NewReader([]byte(fmt.Sprintf(`{"run_id":"pc_http","token":%q,"id":"pc_1","type":"continue"}`, token)))
+	resp, err := http.Post(fmt.Sprintf("http://%s/push-control", addr), "application/json", body)
+	if err != nil {
+		t.Fatalf("push-control: %v", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("push-control status = %d", resp.StatusCode)
+	}
+
+	// Confirm the message reached the control queue over the HTTP poll path.
+	pollBody := bytes.NewReader([]byte(fmt.Sprintf(`{"run_id":"pc_http","token":%q}`, token)))
+	presp, err := http.Post(fmt.Sprintf("http://%s/poll-control", addr), "application/json", pollBody)
+	if err != nil {
+		t.Fatalf("poll-control: %v", err)
+	}
+	defer presp.Body.Close()
+	if presp.StatusCode != http.StatusOK {
+		t.Fatalf("poll-control status = %d", presp.StatusCode)
+	}
+	var msgs []ControlMessage
+	if err := json.NewDecoder(presp.Body).Decode(&msgs); err != nil {
+		t.Fatalf("decode poll: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].ID != "pc_1" || msgs[0].Type != "continue" {
+		t.Fatalf("expected queued pc_1/continue, got %+v", msgs)
+	}
+}
+
+func TestBrokerReplyHTTP(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+	addr := b.Addr()
+	token := httpRegister(t, addr, "reply_src")
+
+	body := bytes.NewReader([]byte(fmt.Sprintf(`{"run_id":"reply_src","token":%q,"to":"reply_dst","payload":%s}`, token, `{"text":"hi"}`)))
+	resp, err := http.Post(fmt.Sprintf("http://%s/reply", addr), "application/json", body)
+	if err != nil {
+		t.Fatalf("reply: %v", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("reply status = %d", resp.StatusCode)
+	}
+
+	st := b.GetRun("reply_src")
+	if st == nil {
+		t.Fatal("run not found")
+	}
+	st.Mu.Lock()
+	n := len(st.Replies)
+	st.Mu.Unlock()
+	if n != 1 {
+		t.Fatalf("expected 1 reply ingested, got %d", n)
+	}
+}
+
+func TestBrokerPermissionRequestHTTP(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+	addr := b.Addr()
+	token := httpRegister(t, addr, "perm_req_run")
+
+	body := bytes.NewReader([]byte(fmt.Sprintf(
+		`{"run_id":"perm_req_run","token":%q,"request_id":"pr1","tool_name":"bash","description":"run cmd","input_preview":"ls"}`, token)))
+	resp, err := http.Post(fmt.Sprintf("http://%s/permission_request", addr), "application/json", body)
+	if err != nil {
+		t.Fatalf("permission_request: %v", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("permission_request status = %d", resp.StatusCode)
+	}
+
+	st := b.GetRun("perm_req_run")
+	if st == nil {
+		t.Fatal("run not found")
+	}
+	st.Mu.Lock()
+	pr := st.PermissionRequests["pr1"]
+	st.Mu.Unlock()
+	if pr == nil || pr.ToolName != "bash" || pr.Desc != "run cmd" {
+		t.Errorf("permission request not stored correctly: %+v", pr)
+	}
+}
+
+func TestBrokerPermissionHTTP(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+	addr := b.Addr()
+	token := httpRegister(t, addr, "perm_dec_run")
+
+	body := bytes.NewReader([]byte(fmt.Sprintf(
+		`{"run_id":"perm_dec_run","token":%q,"request_id":"pd1","behavior":"allow"}`, token)))
+	resp, err := http.Post(fmt.Sprintf("http://%s/permission", addr), "application/json", body)
+	if err != nil {
+		t.Fatalf("permission: %v", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("permission status = %d", resp.StatusCode)
+	}
+
+	st := b.GetRun("perm_dec_run")
+	if st == nil {
+		t.Fatal("run not found")
+	}
+	st.Mu.Lock()
+	v := st.PermissionDecisions["pd1"]
+	st.Mu.Unlock()
+	if v != "allow" {
+		t.Errorf("permission decision = %q, want allow", v)
+	}
+}
+
+func TestBrokerSendHTTPToNonexistentTarget(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+	addr := b.Addr()
+	token := httpRegister(t, addr, "send_src")
+
+	send := func(payload string) int {
+		body := bytes.NewReader([]byte(fmt.Sprintf(
+			`{"run_id":"send_src","token":%q,"from_run_id":"send_src","to_run_id":"ghost","type":"agent_message","payload":%s}`, token, payload)))
+		resp, err := http.Post(fmt.Sprintf("http://%s/send", addr), "application/json", body)
+		if err != nil {
+			t.Fatalf("send: %v", err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	// Fire-and-forget to a nonexistent target -> 404.
+	if st := send(`{"message":"fire"}`); st != http.StatusNotFound {
+		t.Errorf("fire-and-forget to nonexistent target expected 404, got %d", st)
+	}
+	// Ask (expects_reply) to a nonexistent target -> 404.
+	if st := send(`{"id":"ask-ghost","message":"ask","expects_reply":true}`); st != http.StatusNotFound {
+		t.Errorf("ask to nonexistent target expected 404, got %d", st)
+	}
+}
+
+func TestPollAgentMessagesStopsOnCancel(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+	if _, err := b.CreateRun("poll_cancel"); err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		b.PollAgentMessages(ctx, "poll_cancel", func(string) {})
+		close(done)
+	}()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("PollAgentMessages did not stop after context cancellation")
+	}
+}
+
 func TestBrokerPushControlAndPoll(t *testing.T) {
 	b := New("")
 	if err := b.Start(); err != nil {
