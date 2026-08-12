@@ -366,7 +366,7 @@ Plain format emits line-buffered transition records:
 
 - `ATTENTION permission <runtime_id> <summary>`
 - `TURN-DONE <runtime_id>`
-- `END <done|failed|timeout|killed> <runtime_id> [reason]`
+- `END <failed|timeout|killed> <runtime_id> [reason]` (completion emits `TURN-DONE`)
 
 With `--print-output`, the final payload is printed after `---`.
 With `--format json`, the same transitions are emitted as structured records.

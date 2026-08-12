@@ -319,6 +319,20 @@ func TestAwaitEndReasonUsesStopReason(t *testing.T) {
 	}
 }
 
+func TestAwaitPrintOutputSuppressedOnAttentionExit(t *testing.T) {
+	gate := awaitStatus("running", "waiting", true)
+	gate["permission"] = map[string]any{"tool": "exec"}
+	server := newAwaitSocketServer(t, []map[string]any{gate}, nil)
+	server.result = "should not be printed"
+	var stdout, stderr bytes.Buffer
+	if got := runAwaitTo([]string{"run_1", "--socket", server.socket(), "--print-output"}, &stdout, &stderr); got != awaitExitPendingPermission {
+		t.Fatalf("exit code = %d, want %d (stderr %q)", got, awaitExitPendingPermission, stderr.String())
+	}
+	if stdout.String() != "ATTENTION permission rt_1 exec\n" {
+		t.Fatalf("stdout = %q, want only the attention line (no result payload)", stdout.String())
+	}
+}
+
 func TestAwaitPrintOutputIsLossless(t *testing.T) {
 	server := newAwaitSocketServer(t, []map[string]any{awaitStatus("idle", "done", false)}, nil)
 	server.result = "first line\nsecond line\nno newline after this"
@@ -353,6 +367,77 @@ func TestAwaitJSONOutput(t *testing.T) {
 	}
 }
 
+func TestAwaitJSONAttention(t *testing.T) {
+	gate := awaitStatus("running", "waiting", true)
+	gate["permission"] = map[string]any{"summary": "run command"}
+	server := newAwaitSocketServer(t, []map[string]any{gate}, nil)
+	var stdout, stderr bytes.Buffer
+	if got := runAwaitTo([]string{"--format=json", "run_1", "--socket", server.socket()}, &stdout, &stderr); got != awaitExitPendingPermission {
+		t.Fatalf("exit code = %d, want %d (stderr %q)", got, awaitExitPendingPermission, stderr.String())
+	}
+	var records []map[string]any
+	for _, line := range bytes.Split(bytes.TrimSpace(stdout.Bytes()), []byte{'\n'}) {
+		var record map[string]any
+		if err := json.Unmarshal(line, &record); err != nil {
+			t.Fatalf("invalid NDJSON %q: %v", line, err)
+		}
+		records = append(records, record)
+	}
+	want := []map[string]any{{"event": "attention", "kind": "permission", "runtime_id": "rt_1", "summary": "run command"}}
+	if !reflect.DeepEqual(records, want) {
+		t.Fatalf("json records = %#v, want %#v", records, want)
+	}
+	if calls, _ := server.calls(); !reflect.DeepEqual(calls, []string{"list", "status"}) {
+		t.Fatalf("gate snapshot unexpectedly subscribed: %v", calls)
+	}
+}
+
+func TestAwaitJSONEnd(t *testing.T) {
+	status := awaitStatus("idle", "failed", false)
+	status["stop_reason"] = "process exited"
+	server := newAwaitSocketServer(t, []map[string]any{status}, nil)
+	var stdout, stderr bytes.Buffer
+	if got := runAwaitTo([]string{"--format=json", "run_1", "--socket", server.socket()}, &stdout, &stderr); got != awaitExitFailed {
+		t.Fatalf("exit code = %d, want %d (stderr %q)", got, awaitExitFailed, stderr.String())
+	}
+	var records []map[string]any
+	for _, line := range bytes.Split(bytes.TrimSpace(stdout.Bytes()), []byte{'\n'}) {
+		var record map[string]any
+		if err := json.Unmarshal(line, &record); err != nil {
+			t.Fatalf("invalid NDJSON %q: %v", line, err)
+		}
+		records = append(records, record)
+	}
+	want := []map[string]any{{"event": "end", "phase": "failed", "runtime_id": "rt_1", "reason": "process exited"}}
+	if !reflect.DeepEqual(records, want) {
+		t.Fatalf("json records = %#v, want %#v", records, want)
+	}
+}
+
+func TestPermissionSummaryFallbackAndPriority(t *testing.T) {
+	tests := []struct {
+		name       string
+		permission map[string]any
+		want       string
+	}{
+		{name: "empty map falls back", permission: map[string]any{}, want: "permission requested"},
+		{name: "nil falls back", permission: nil, want: "permission requested"},
+		{name: "non-string fields ignored then fallback", permission: map[string]any{"tool": 42}, want: "permission requested"},
+		{name: "summary wins over tool", permission: map[string]any{"summary": "run command", "tool": "bash"}, want: "run command"},
+		{name: "tool used when summary absent", permission: map[string]any{"tool": "bash"}, want: "bash"},
+		{name: "whitespace collapsed", permission: map[string]any{"summary": " run   command "}, want: "run command"},
+		{name: "whitespace-only skipped then fallback", permission: map[string]any{"summary": "   "}, want: "permission requested"},
+		{name: "whitespace-only skipped, next key used", permission: map[string]any{"summary": "   ", "question": "Allow?"}, want: "Allow?"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := permissionSummary(tt.permission); got != tt.want {
+				t.Fatalf("permissionSummary(%#v) = %q, want %q", tt.permission, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestAwaitCleanupRaceSettlesFromReplayWithoutAnotherEvent(t *testing.T) {
 	// session.end is replayed from the history/subscribe gap. Cleanup remains
 	// running/done across more than three polls and emits no later event.
@@ -380,6 +465,30 @@ func TestAwaitCleanupRaceSettlesFromReplayWithoutAnotherEvent(t *testing.T) {
 		t.Fatalf("calls = %v, want replay resnapshot and cleanup polls", calls)
 	} else if params["subscribe"]["after_seq"] != float64(9) {
 		t.Fatalf("subscribe params = %#v, want replay after history latest_seq", params["subscribe"])
+	}
+}
+
+func TestAwaitCleanupGapIdleEmptyPhaseSettlesFromPoll(t *testing.T) {
+	// session.end sets a terminal phase, then teardown clears active and phase
+	// before the raw status settles on ended. Status briefly reads idle with an
+	// empty phase, and the ended transition emits no further event, so await
+	// must keep polling through the gap instead of waiting forever.
+	server := newAwaitSocketServer(t,
+		[]map[string]any{
+			awaitStatus("running", "done", false),
+			awaitStatus("running", "done", false),
+			awaitStatus("idle", "", false),
+			awaitStatus("ended", "", false),
+		},
+		nil,
+	)
+	var stdout, stderr bytes.Buffer
+	got := runAwaitTo([]string{"run_1", "--socket", server.socket(), "--timeout", "2s"}, &stdout, &stderr)
+	if got != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr %q)", got, stderr.String())
+	}
+	if stdout.String() != "TURN-DONE rt_1\n" {
+		t.Fatalf("stdout = %q", stdout.String())
 	}
 }
 
@@ -487,10 +596,9 @@ func TestAwaitTimeoutAndConnectionLoss(t *testing.T) {
 
 func TestAwaitUsageNotFoundAndDeadSocket(t *testing.T) {
 	t.Run("usage", func(t *testing.T) {
-		home := t.TempDir()
-		t.Setenv("HOME", home)
+		// No target is a genuine parser error, not a discovery miss.
 		var stdout, stderr bytes.Buffer
-		if got := runAwaitTo([]string{"run_1"}, &stdout, &stderr); got != 2 {
+		if got := runAwaitTo(nil, &stdout, &stderr); got != 2 {
 			t.Fatalf("exit code = %d, want 2", got)
 		}
 	})
@@ -505,10 +613,11 @@ func TestAwaitUsageNotFoundAndDeadSocket(t *testing.T) {
 		}
 	})
 	t.Run("dead socket", func(t *testing.T) {
+		// A socket file with no listener must fail the dial.
 		var stdout, stderr bytes.Buffer
-		temp := t.TempDir()
-		writeSocketTombstone(t, temp, "missing.sock.dead")
-		if got := runAwaitTo([]string{"run_1", "--socket", filepath.Join(temp, "missing.sock")}, &stdout, &stderr); got != 2 {
+		refused := filepath.Join(t.TempDir(), "refused.sock")
+		makeRefusedUnixSocket(t, refused)
+		if got := runAwaitTo([]string{"run_1", "--socket", refused}, &stdout, &stderr); got != 2 {
 			t.Fatalf("exit code = %d, want 2", got)
 		}
 	})

@@ -100,11 +100,12 @@ func runAwaitTo(args []string, stdout, stderr io.Writer) int {
 
 	// A second authoritative snapshot immediately after subscribing covers a
 	// transition that lands between the first snapshot and the subscription.
+	settling := false
 	snapshot, decision, previous, err = resnapshotAwait(ctx, c, runtimeID, &machine, out, previous)
 	if err != nil {
 		return awaitCallError(stderr, err)
 	}
-	snapshot, decision, previous, err = settleAwaitCleanup(ctx, c, runtimeID, &machine, out, previous, snapshot, decision)
+	snapshot, decision, previous, settling, err = settleAwaitCleanup(ctx, c, runtimeID, &machine, out, previous, snapshot, decision, settling)
 	if err != nil {
 		return awaitCallError(stderr, err)
 	}
@@ -130,6 +131,10 @@ func runAwaitTo(args []string, stdout, stderr io.Writer) int {
 				continue
 			}
 			decision = machine.ObserveEvent(event.Event)
+			// A replayed session.end opens the cleanup window even if this
+			// process attached after the run's status already lost its
+			// terminal phase.
+			settling = settling || event.Event == "session.end"
 			if decision.Action != runstate.ActionResnapshot {
 				continue
 			}
@@ -137,7 +142,7 @@ func runAwaitTo(args []string, stdout, stderr io.Writer) int {
 			if err != nil {
 				return awaitCallError(stderr, err)
 			}
-			snapshot, decision, previous, err = settleAwaitCleanup(ctx, c, runtimeID, &machine, out, previous, snapshot, decision)
+			snapshot, decision, previous, settling, err = settleAwaitCleanup(ctx, c, runtimeID, &machine, out, previous, snapshot, decision, settling)
 			if err != nil {
 				return awaitCallError(stderr, err)
 			}
@@ -510,12 +515,19 @@ func resnapshotAwait(ctx context.Context, c *client.Client, runtimeID string, ma
 	return snapshot, decision, previous, nil
 }
 
-// settleAwaitCleanup handles the interval where session.end has set a terminal
-// phase but runtime cleanup has not yet changed status from running. No later
-// event is emitted for this transition, so polling continues until cleanup
-// settles or the caller's wall-clock context expires.
-func settleAwaitCleanup(ctx context.Context, c *client.Client, runtimeID string, machine *runstate.Machine, out *awaitOutput, previous runstate.State, snapshot awaitSnapshot, decision runstate.Decision) (awaitSnapshot, runstate.Decision, runstate.State, error) {
-	for awaitCleanupTransient(snapshot, decision) {
+// settleAwaitCleanup keeps polling once a session.end terminal signal has
+// opened the cleanup window, instead of returning to event-only waiting. The
+// session.end event sets a terminal phase, but the runtime teardown then clears
+// active and phase (so status can briefly read idle with an empty phase) before
+// the raw status settles on a terminal outcome, and that final transition emits
+// no further event. So from the first terminal signal we poll until the outcome
+// resolves or the caller's wall-clock context expires. A fresh non-empty,
+// non-terminal phase (a new attempt) resumes normal event-driven waiting.
+func settleAwaitCleanup(ctx context.Context, c *client.Client, runtimeID string, machine *runstate.Machine, out *awaitOutput, previous runstate.State, snapshot awaitSnapshot, decision runstate.Decision, settling bool) (awaitSnapshot, runstate.Decision, runstate.State, bool, error) {
+	if settling = settling || opensSettle(snapshot); !settling {
+		return snapshot, decision, previous, false, nil
+	}
+	for decision.State == runstate.StateActive && cleanupWaitsForOutcome(snapshot) {
 		timer := time.NewTimer(awaitCleanupPollDelay)
 		select {
 		case <-ctx.Done():
@@ -525,23 +537,33 @@ func settleAwaitCleanup(ctx context.Context, c *client.Client, runtimeID string,
 				default:
 				}
 			}
-			return awaitSnapshot{}, runstate.Decision{}, previous, ctx.Err()
+			return awaitSnapshot{}, runstate.Decision{}, previous, settling, ctx.Err()
 		case <-timer.C:
 		}
 
 		var err error
 		snapshot, decision, previous, err = resnapshotAwait(ctx, c, runtimeID, machine, out, previous)
 		if err != nil {
-			return awaitSnapshot{}, runstate.Decision{}, previous, err
+			return awaitSnapshot{}, runstate.Decision{}, previous, settling, err
 		}
 	}
-	return snapshot, decision, previous, nil
+	return snapshot, decision, previous, settling, nil
 }
 
-func awaitCleanupTransient(snapshot awaitSnapshot, decision runstate.Decision) bool {
-	return snapshot.rawStatus == "running" &&
-		runstate.IsTerminalStatus(snapshot.rawPhase) &&
-		decision.State == runstate.StateActive
+// opensSettle reports whether this observation opens the post-session cleanup
+// window: a terminal phase has arrived for a run that is not yet settled.
+func opensSettle(snapshot awaitSnapshot) bool {
+	return runstate.IsTerminalStatus(snapshot.rawPhase)
+}
+
+// cleanupWaitsForOutcome reports whether the await should keep polling instead
+// of waiting on events. Between a session-end terminal phase and a settled
+// terminal outcome, the teardown clears active and phase (so status can briefly
+// read idle with an empty phase) and the ended transition emits no event. A
+// fresh non-empty, non-terminal phase means a new attempt started, which
+// resumes normal event-driven waiting.
+func cleanupWaitsForOutcome(snapshot awaitSnapshot) bool {
+	return snapshot.rawPhase == "" || runstate.IsTerminalStatus(snapshot.rawPhase)
 }
 
 func awaitShouldExit(state runstate.State, until string) bool {
@@ -581,8 +603,10 @@ func emitAwaitTransition(out *awaitOutput, previous, state runstate.State, snaps
 
 func permissionSummary(permission map[string]any) string {
 	for _, key := range []string{"summary", "question", "description", "message", "tool", "command"} {
-		if value, ok := permission[key].(string); ok && value != "" {
-			return strings.Join(strings.Fields(value), " ")
+		if value, ok := permission[key].(string); ok {
+			if normalized := strings.Join(strings.Fields(value), " "); normalized != "" {
+				return normalized
+			}
 		}
 	}
 	return "permission requested"
@@ -629,7 +653,9 @@ func (out *awaitOutput) json(record map[string]any) {
 }
 
 func finishAwait(ctx context.Context, c *client.Client, out *awaitOutput, stderr io.Writer, runtimeID string, printOutput bool, state runstate.State) int {
-	if printOutput {
+	// A pending-permission exit is not a completed run: there is no final
+	// output yet, so do not fetch or print a result payload.
+	if printOutput && state != runstate.StatePendingPermission {
 		var result map[string]any
 		if err := awaitCall(ctx, c, func() error {
 			var err error
