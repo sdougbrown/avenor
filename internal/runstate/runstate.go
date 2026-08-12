@@ -9,10 +9,10 @@ type Translation struct {
 	TurnComplete bool
 }
 
-// Translate normalizes a raw supervisor status and phase. In particular, an
-// idle runtime is complete only when its phase is terminal, while a running
-// runtime remains running even if terminal phase metadata has arrived before
-// active-attempt cleanup finishes.
+// Translate normalizes a raw supervisor status and phase. An idle runtime is
+// complete only when its phase is terminal. A running runtime stays running
+// even when terminal phase metadata arrives before active-attempt cleanup
+// finishes.
 func Translate(status, phase string) Translation {
 	translatedStatus := status
 	translatedPhase := phase

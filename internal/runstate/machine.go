@@ -1,7 +1,7 @@
 package runstate
 
 // Snapshot contains the authoritative lifecycle fields used to decide whether
-// an await operation should keep waiting or return.
+// an await operation keeps waiting or returns.
 type Snapshot struct {
 	Status            string
 	Phase             string
@@ -42,7 +42,7 @@ type Machine struct {
 }
 
 // ObserveSnapshot replaces the machine state with the state derived from the
-// supplied snapshot. Applying the same snapshot repeatedly is idempotent.
+// supplied snapshot. The update is idempotent for a repeated snapshot.
 func (m *Machine) ObserveSnapshot(snapshot Snapshot) Decision {
 	next := stateFromSnapshot(snapshot)
 	m.state = next
