@@ -95,13 +95,25 @@ loop:
 - **Watching only for `session.end`.** A permission-blocked run never reaches
   `session.end`. Use the polling pattern above, which checks both terminal
   and waiting states.
+- **Monitoring from outside the MCP surface.** When you orchestrate from a
+  shell script or cron rather than the MCP tools, do not tail the event log
+  for `session.end`. Block with `avenor await <run-id|label>` — it waits on a
+  run until it needs attention or reaches a terminal state and emits
+  `ATTENTION`/`TURN-DONE`/`END` transition lines with meaningful exit codes.
+  Inside the MCP surface, the blocking/polling patterns above remain the
+  way to supervise; keep the explicit "do not replace MCP tools with shell
+  commands while they are available" boundary.
 - **Confusing "done but empty" with "still running."** A file-watch cannot
   distinguish them. One needs a follow-up; the other needs patience.
 
 ### When to inspect or follow up
 
-- On Claude Code, call `avenor_status` with `view: "full"` after a `done`
-  lifecycle result. The full view includes `final_output` when present.
+- For the complete terminal output, call `avenor_result`. It waits for the
+  run to finish (or hit a permission gate) and returns the full `final_output`
+  on every host, including Claude Code.
+- `avenor_status` with `view: "full"` returns lifecycle detail and may include
+  a bounded `final_output` preview, flagged `final_output_truncated` when cut.
+  For the authoritative, unbounded reply use `avenor_result` instead.
 - Do not look for `final_output` in `view: "lifecycle"`; that compact polling
   view omits it.
 - On Pi and OpenCode, call `avenor_inspect` after a `done` run for a bounded
