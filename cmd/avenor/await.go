@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -39,9 +40,7 @@ func runAwait(args []string) int {
 	return runAwaitTo(args, os.Stdout, os.Stderr)
 }
 
-// runAwaitTo is the testable form of runAwait. Stage 2 deliberately requires
-// --socket: socket discovery is a later command stage, not an implicit
-// fallback that can select an unrelated supervisor.
+// runAwaitTo is the testable form of runAwait.
 func runAwaitTo(args []string, stdout, stderr io.Writer) int {
 	opts, code := parseAwaitArgs(args, stderr)
 	if code != 0 {
@@ -55,22 +54,13 @@ func runAwaitTo(args []string, stdout, stderr io.Writer) int {
 	}
 	defer cancel()
 
-	c, err := client.Dial(opts.socket)
-	if err != nil {
-		fmt.Fprintf(stderr, "avenor await: %v\n", err)
-		return 2
-	}
-	defer c.Close()
-
-	runtimes, err := awaitList(ctx, c)
+	resolved, err := awaitResolveTarget(ctx, stderr, opts.socket, opts.target)
 	if err != nil {
 		return awaitCallError(stderr, err)
 	}
-	runtimeID, err := resolveAwaitRuntime(opts.target, runtimes)
-	if err != nil {
-		fmt.Fprintf(stderr, "avenor await: %v\n", err)
-		return 2
-	}
+	c := resolved.client
+	defer c.Close()
+	runtimeID := resolved.runtimeID
 
 	out := newAwaitOutput(stdout, opts.format, runtimeID)
 	var machine runstate.Machine
@@ -161,7 +151,7 @@ func runAwaitTo(args []string, stdout, stderr io.Writer) int {
 func parseAwaitArgs(args []string, stderr io.Writer) (awaitOptions, int) {
 	fs := flag.NewFlagSet("avenor await", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	socket := fs.String("socket", "", "control socket path (required)")
+	socket := fs.String("socket", "", "explicit control socket path; omitting scans ~/.avenor/sockets")
 	until := fs.String("until", "attention", "wait until: attention or done")
 	timeout := fs.Duration("timeout", 0, "wall-clock timeout")
 	printOutput := fs.Bool("print-output", false, "print complete result output before exiting")
@@ -199,10 +189,6 @@ func parseAwaitArgs(args []string, stderr io.Writer) (awaitOptions, int) {
 		fmt.Fprintln(stderr, "avenor await: <run-id|label> is required")
 		return awaitOptions{}, 2
 	}
-	if *socket == "" {
-		fmt.Fprintln(stderr, "avenor await: --socket is required")
-		return awaitOptions{}, 2
-	}
 	if *until != "attention" && *until != "done" {
 		fmt.Fprintf(stderr, "avenor await: unsupported --until %q\n", *until)
 		return awaitOptions{}, 2
@@ -228,22 +214,157 @@ func awaitList(ctx context.Context, c *client.Client) ([]map[string]any, error) 
 	return runtimes, err
 }
 
-func resolveAwaitRuntime(target string, runtimes []map[string]any) (string, error) {
+type awaitRuntimeResolution struct {
+	runtimeID string
+	runID     string
+	startedAt time.Time
+	exact     bool
+	losers    []string
+}
+
+type awaitResolvedTarget struct {
+	client      *client.Client
+	runtimeID   string
+	targetRunID string
+}
+
+func awaitResolveTarget(ctx context.Context, stderr io.Writer, socket, target string) (awaitResolvedTarget, error) {
+	if socket != "" {
+		c, err := client.Dial(socket)
+		if err != nil {
+			return awaitResolvedTarget{}, err
+		}
+		runtimes, err := awaitList(ctx, c)
+		if err != nil {
+			_ = c.Close()
+			return awaitResolvedTarget{}, err
+		}
+		resolution := resolveAwaitRuntime(target, runtimes)
+		for _, loser := range resolution.losers {
+			fmt.Fprintf(stderr, "avenor await: label collision: losing run_id %s to winner run_id %s\n", loser, resolution.runID)
+		}
+		if !resolution.exact && resolution.runtimeID == "" {
+			_ = c.Close()
+			return awaitResolvedTarget{}, fmt.Errorf("run %q not found", target)
+		}
+		return awaitResolvedTarget{client: c, runtimeID: resolution.runtimeID, targetRunID: resolution.runID}, nil
+	}
+	return awaitResolveTargetFromSockets(ctx, stderr, target)
+}
+
+func awaitResolveTargetFromSockets(ctx context.Context, stderr io.Writer, target string) (awaitResolvedTarget, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return awaitResolvedTarget{}, err
+	}
+	dir := filepath.Join(home, ".avenor", "sockets")
+	entries, err := os.ReadDir(dir)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return awaitResolvedTarget{}, ctxErr
+	}
+	if err != nil {
+		return awaitResolvedTarget{}, err
+	}
+	var best *awaitResolvedTarget
+	var bestStartedAt time.Time
+	for _, entry := range entries {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			if best != nil {
+				_ = best.client.Close()
+			}
+			return awaitResolvedTarget{}, ctxErr
+		}
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sock") {
+			continue
+		}
+		c, err := client.Dial(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			_ = c.Close()
+			if best != nil {
+				_ = best.client.Close()
+			}
+			return awaitResolvedTarget{}, ctxErr
+		}
+		runtimes, err := awaitList(ctx, c)
+		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				if best != nil {
+					_ = best.client.Close()
+				}
+				_ = c.Close()
+				return awaitResolvedTarget{}, ctx.Err()
+			}
+			_ = c.Close()
+			continue
+		}
+		resolution := resolveAwaitRuntime(target, runtimes)
+		for _, loser := range resolution.losers {
+			fmt.Fprintf(stderr, "avenor await: label collision: losing run_id %s to winner run_id %s\n", loser, resolution.runID)
+		}
+		if resolution.exact {
+			if best != nil {
+				_ = best.client.Close()
+			}
+			return awaitResolvedTarget{client: c, runtimeID: resolution.runtimeID, targetRunID: resolution.runID}, nil
+		}
+		if resolution.runtimeID == "" {
+			_ = c.Close()
+			continue
+		}
+		if best == nil || resolution.startedAt.After(bestStartedAt) {
+			if best != nil {
+				fmt.Fprintf(stderr, "avenor await: label collision: losing run_id %s to winner run_id %s\n", best.targetRunID, resolution.runID)
+				_ = best.client.Close()
+			}
+			best = &awaitResolvedTarget{client: c, runtimeID: resolution.runtimeID, targetRunID: resolution.runID}
+			bestStartedAt = resolution.startedAt
+			continue
+		}
+		fmt.Fprintf(stderr, "avenor await: label collision: losing run_id %s to winner run_id %s\n", resolution.runID, best.targetRunID)
+		_ = c.Close()
+	}
+	if best != nil {
+		return *best, nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return awaitResolvedTarget{}, ctxErr
+	}
+	return awaitResolvedTarget{}, fmt.Errorf("run %q not found", target)
+}
+
+func resolveAwaitRuntime(target string, runtimes []map[string]any) awaitRuntimeResolution {
 	for _, runtime := range runtimes {
 		if runtimeString(runtime, "run_id") == target {
 			if id := runtimeString(runtime, "runtime_id"); id != "" {
-				return id, nil
+				return awaitRuntimeResolution{runtimeID: id, runID: runtimeString(runtime, "run_id"), exact: true}
 			}
 		}
 	}
+	var best awaitRuntimeResolution
 	for _, runtime := range runtimes {
-		if runtimeString(runtime, "label") == target {
-			if id := runtimeString(runtime, "runtime_id"); id != "" {
-				return id, nil
+		if runtimeString(runtime, "label") != target {
+			continue
+		}
+		if id := runtimeString(runtime, "runtime_id"); id != "" {
+			startedAt := runtimeStartedAt(runtime["started_at"])
+			runID := runtimeString(runtime, "run_id")
+			if best.runtimeID == "" || startedAt.After(best.startedAt) {
+				if best.runtimeID != "" {
+					losers := append([]string{}, best.losers...)
+					losers = append(losers, best.runID)
+					best = awaitRuntimeResolution{runtimeID: id, runID: runID, startedAt: startedAt, losers: losers}
+					continue
+				}
+				best = awaitRuntimeResolution{runtimeID: id, runID: runID, startedAt: startedAt}
+				continue
 			}
+			best.losers = append(best.losers, runID)
 		}
 	}
-	return "", fmt.Errorf("run %q not found", target)
+	return best
 }
 
 const awaitCleanupPollDelay = 15 * time.Millisecond
@@ -340,6 +461,25 @@ func runtimeString(values map[string]any, key string) string {
 func runtimeBool(values map[string]any, key string) bool {
 	value, _ := values[key].(bool)
 	return value
+}
+
+func runtimeStartedAt(value any) time.Time {
+	switch startedAt := value.(type) {
+	case int:
+		return time.Unix(0, int64(startedAt)*int64(time.Millisecond))
+	case int64:
+		return time.Unix(0, startedAt*int64(time.Millisecond))
+	case float64:
+		return time.Unix(0, int64(startedAt)*int64(time.Millisecond))
+	case json.Number:
+		ms, err := startedAt.Int64()
+		if err != nil {
+			return time.Time{}
+		}
+		return time.Unix(0, ms*int64(time.Millisecond))
+	default:
+		return time.Time{}
+	}
 }
 
 func runtimeExitCode(value any) (int, bool) {

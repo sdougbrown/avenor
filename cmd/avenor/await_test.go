@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"reflect"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -43,7 +45,7 @@ func newAwaitSocketServer(t *testing.T, statuses []map[string]any, events []map[
 		listener: listener,
 		statuses: statuses,
 		events:   events,
-		list:     []map[string]any{{"runtime_id": "rt_1", "run_id": "run_1", "label": "label_1"}},
+		list:     []map[string]any{{"runtime_id": "rt_1", "run_id": "run_1", "label": "label_1", "started_at": float64(1700000000000)}},
 	}
 	go s.serve()
 	t.Cleanup(func() {
@@ -485,12 +487,16 @@ func TestAwaitTimeoutAndConnectionLoss(t *testing.T) {
 
 func TestAwaitUsageNotFoundAndDeadSocket(t *testing.T) {
 	t.Run("usage", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
 		var stdout, stderr bytes.Buffer
 		if got := runAwaitTo([]string{"run_1"}, &stdout, &stderr); got != 2 {
 			t.Fatalf("exit code = %d, want 2", got)
 		}
 	})
 	t.Run("not found", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
 		server := newAwaitSocketServer(t, nil, nil)
 		server.list = []map[string]any{{"runtime_id": "other", "run_id": "other"}}
 		var stdout, stderr bytes.Buffer
@@ -500,8 +506,24 @@ func TestAwaitUsageNotFoundAndDeadSocket(t *testing.T) {
 	})
 	t.Run("dead socket", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
-		if got := runAwaitTo([]string{"run_1", "--socket", filepath.Join(t.TempDir(), "missing.sock")}, &stdout, &stderr); got != 2 {
+		temp := t.TempDir()
+		writeSocketTombstone(t, temp, "missing.sock.dead")
+		if got := runAwaitTo([]string{"run_1", "--socket", filepath.Join(temp, "missing.sock")}, &stdout, &stderr); got != 2 {
 			t.Fatalf("exit code = %d, want 2", got)
+		}
+	})
+	t.Run("missing discovered run", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		server := newAwaitSocketServer(t, nil, nil)
+		server.list = []map[string]any{{"runtime_id": "rt_1", "run_id": "other"}}
+		writeSocketLink(t, filepath.Join(home, ".avenor", "sockets"), "live.sock", server.socket())
+		var stdout, stderr bytes.Buffer
+		if got := runAwaitTo([]string{"missing"}, &stdout, &stderr); got != 2 {
+			t.Fatalf("exit code = %d, want 2 (stderr %q)", got, stderr.String())
+		}
+		if !bytes.Contains(stderr.Bytes(), []byte("run \"missing\" not found")) {
+			t.Fatalf("stderr = %q, want missing-run message", stderr.String())
 		}
 	})
 }
@@ -537,5 +559,184 @@ func TestAwaitTimeoutDoesNotWaitForClientCallDeadline(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("timeout took %v, expected wall-clock bound", elapsed)
+	}
+}
+
+func TestAwaitDiscoveryTimeout(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	socketsDir := filepath.Join(home, ".avenor", "sockets")
+	if err := os.MkdirAll(socketsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(socketsDir, "silent.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopServer := make(chan struct{})
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		<-stopServer
+	}()
+	t.Cleanup(func() {
+		close(stopServer)
+		_ = listener.Close()
+		<-serverDone
+	})
+	var stdout, stderr bytes.Buffer
+	start := time.Now()
+	if got := runAwaitTo([]string{"missing", "--timeout", "20ms"}, &stdout, &stderr); got != awaitExitWallTimeout {
+		t.Fatalf("exit code = %d, want %d (stderr %q)", got, awaitExitWallTimeout, stderr.String())
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte("timeout elapsed")) {
+		t.Fatalf("stderr = %q, want timeout elapsed", stderr.String())
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("timeout took %v, expected wall-clock bound", elapsed)
+	}
+}
+
+func writeSocketLink(t *testing.T, dir, name, target string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, name)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeSocketTombstone(t *testing.T, dir, name string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte{}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func makeRefusedUnixSocket(t *testing.T, path string) {
+	t.Helper()
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sa := &syscall.SockaddrUnix{Name: path}
+	if err := syscall.Bind(fd, sa); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Listen(fd, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Close(fd); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAwaitDiscoveryExplicitSocketBypassesScan(t *testing.T) {
+	server := newAwaitSocketServer(t, []map[string]any{awaitStatus("idle", "done", false)}, nil)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	competing := newAwaitSocketServer(t, []map[string]any{awaitStatus("idle", "done", false)}, nil)
+	writeSocketLink(t, filepath.Join(home, ".avenor", "sockets"), "competing.sock", competing.socket())
+	var stdout, stderr bytes.Buffer
+	if got := runAwaitTo([]string{"run_1", "--socket", server.socket()}, &stdout, &stderr); got != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr %q)", got, stderr.String())
+	}
+	if stdout.String() != "TURN-DONE rt_1\n" {
+		t.Fatalf("stdout = %q, want exact TURN-DONE output", stdout.String())
+	}
+	if calls, _ := server.calls(); !reflect.DeepEqual(calls, []string{"list", "status"}) {
+		t.Fatalf("calls = %v, want explicit socket only", calls)
+	}
+	if calls, _ := competing.calls(); len(calls) != 0 {
+		t.Fatalf("competing socket = %v, want zero calls", calls)
+	}
+}
+
+func TestAwaitDiscoverySkipsDeadSockets(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".avenor", "sockets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	makeRefusedUnixSocket(t, filepath.Join(home, ".avenor", "sockets", "refused.sock"))
+	writeSocketTombstone(t, filepath.Join(home, ".avenor", "sockets"), "stale.sock.dead")
+	probe := newAwaitSocketServer(t, []map[string]any{awaitStatus("idle", "done", false)}, nil)
+	writeSocketLink(t, filepath.Join(home, ".avenor", "sockets"), "probe.sock.dead", probe.socket())
+	server := newAwaitSocketServer(t, []map[string]any{awaitStatus("idle", "done", false)}, nil)
+	writeSocketLink(t, filepath.Join(home, ".avenor", "sockets"), "live.sock", server.socket())
+	var stdout, stderr bytes.Buffer
+	if got := runAwaitTo([]string{"run_1"}, &stdout, &stderr); got != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr %q)", got, stderr.String())
+	}
+	if calls, _ := server.calls(); !reflect.DeepEqual(calls, []string{"list", "status"}) {
+		t.Fatalf("calls = %v, want dead socket skipped", calls)
+	}
+	if calls, _ := probe.calls(); len(calls) != 0 {
+		t.Fatalf("probe socket = %v, want zero calls", calls)
+	}
+}
+
+func TestAwaitDiscoveryExactRunIDPrecedesLabel(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	exact := newAwaitSocketServer(t, []map[string]any{{"runtime_id": "rt_1", "run_id": "run_1", "label": "other", "status": "idle", "phase": "done"}}, nil)
+	exact.list = []map[string]any{{"runtime_id": "rt_1", "run_id": "run_1", "label": "other", "status": "idle", "phase": "done"}}
+	label := newAwaitSocketServer(t, []map[string]any{{"runtime_id": "rt_1", "run_id": "run_other", "label": "run_1", "status": "idle", "phase": "done"}}, nil)
+	label.list = []map[string]any{{"runtime_id": "rt_1", "run_id": "run_other", "label": "run_1", "status": "idle", "phase": "done"}}
+	writeSocketLink(t, filepath.Join(home, ".avenor", "sockets"), "a.sock", label.socket())
+	writeSocketLink(t, filepath.Join(home, ".avenor", "sockets"), "b.sock", exact.socket())
+	var stdout, stderr bytes.Buffer
+	if got := runAwaitTo([]string{"run_1"}, &stdout, &stderr); got != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr %q)", got, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want exactly empty", stderr.String())
+	}
+	if calls, _ := exact.calls(); !reflect.DeepEqual(calls, []string{"list", "status"}) {
+		t.Fatalf("exact calls = %v, want exact match", calls)
+	}
+	if calls, _ := label.calls(); !reflect.DeepEqual(calls, []string{"list"}) {
+		t.Fatalf("label socket = %v, want list-only scan before exact match", calls)
+	}
+}
+
+func TestAwaitDiscoveryLabelCollisionChoosesNewestStartedAt(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	winner := newAwaitSocketServer(t, []map[string]any{{"runtime_id": "rt_1", "run_id": "run_new", "label": "shared", "started_at": float64(1704153600000), "status": "idle", "phase": "done"}}, nil)
+	winner.list = []map[string]any{{"runtime_id": "rt_old", "run_id": "run_old", "label": "shared", "started_at": float64(1703980800000), "status": "idle", "phase": "done"}, {"runtime_id": "rt_mid", "run_id": "run_mid", "label": "shared", "started_at": float64(1704067200000), "status": "idle", "phase": "done"}, {"runtime_id": "rt_1", "run_id": "run_new", "label": "shared", "started_at": float64(1704153600000), "status": "idle", "phase": "done"}}
+	cross := newAwaitSocketServer(t, []map[string]any{{"runtime_id": "rt_cross", "run_id": "run_cross", "label": "shared", "started_at": float64(1703894400000), "status": "idle", "phase": "done"}}, nil)
+	cross.list = []map[string]any{{"runtime_id": "rt_cross", "run_id": "run_cross", "label": "shared", "started_at": float64(1703894400000), "status": "idle", "phase": "done"}}
+	writeSocketLink(t, filepath.Join(home, ".avenor", "sockets"), "a.sock", winner.socket())
+	writeSocketLink(t, filepath.Join(home, ".avenor", "sockets"), "b.sock", cross.socket())
+	var stdout, stderr bytes.Buffer
+	if got := runAwaitTo([]string{"shared"}, &stdout, &stderr); got != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr %q)", got, stderr.String())
+	}
+	if calls, _ := winner.calls(); !reflect.DeepEqual(calls, []string{"list", "status"}) {
+		t.Fatalf("winner calls = %v, want winning socket", calls)
+	}
+	if calls, _ := cross.calls(); !reflect.DeepEqual(calls, []string{"list"}) {
+		t.Fatalf("cross calls = %v, want list only", calls)
+	}
+	wantStderr := "avenor await: label collision: losing run_id run_old to winner run_id run_new\navenor await: label collision: losing run_id run_mid to winner run_id run_new\navenor await: label collision: losing run_id run_cross to winner run_id run_new\n"
+	if stderr.String() != wantStderr {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), wantStderr)
 	}
 }
