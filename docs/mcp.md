@@ -155,6 +155,9 @@ Go SDK exposes notification capability, but Claude Code host rendering and
 useful progress semantics are not established. Wait correctness is independent
 of notifications.
 
+For background callers, a shell-side `avenor await` replaces log-tail monitors;
+`avenor_result` remains the in-protocol equivalent.
+
 ## Supervisor lifecycle
 
 By default, `avenor mcp` starts a private child supervisor:

@@ -2,7 +2,7 @@
 
 Read and digest event logs produced by `--on-event`. The raw log is newline-delimited JSON (NDJSON); `watch` parses it and outputs human-readable digest lines, optional classification tags, or pass-through JSON.
 
-`watch` is the tool to inspect what happened in a completed run, or to tail a live run from a separate process. An agent or operator uses it to detect milestones, read findings, and react to structural events without parsing raw JSON.
+`watch` is the tool to inspect what happened in a completed run, or to tail a live run from a separate process. An agent or operator uses it to detect milestones, read findings, and react to structural events without parsing raw JSON. Watch digests a log; `avenor await` waits on a run — the two are complementary.
 
 ## Basic usage
 

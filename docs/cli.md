@@ -330,6 +330,53 @@ Shut down the supervisor. Mode is `graceful` (default, waits for children) or `i
 avenor control --socket /tmp/avenor.sock shutdown graceful
 ```
 
+## avenor await
+
+Wait on a run until it reaches attention or done. Resolves a run by ID or label over a control socket, or by scanning `~/.avenor/sockets` when `--socket` is omitted.
+
+```
+avenor await [flags] <run-id|label>
+```
+
+### Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--socket` | (none) | Control socket path; when omitted, `avenor await` scans `~/.avenor/sockets` |
+| `--until` | `attention` | Wait target: `attention` (stop at `pending_permission`) or `done` (continue to terminal state) |
+| `--timeout` | `0` (disabled) | Wall-clock backstop duration; exits `124` when reached |
+| `--print-output` | `false` | Print the result payload after `---` |
+| `--format` | `plain` | Output format: `plain` or `json` |
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Reached `done` |
+| `2` | Usage, not found, or dead socket |
+| `10` | Reached `failed` |
+| `11` | Reached phase timeout |
+| `12` | Reached `killed` |
+| `20` | Reached `attention` (`pending_permission`) |
+| `124` | Wall-clock timeout |
+
+### Output
+
+Plain format emits line-buffered transition records:
+
+- `ATTENTION permission <runtime_id> <summary>`
+- `TURN-DONE <runtime_id>`
+- `END <done|failed|timeout|killed> <runtime_id> [reason]`
+
+With `--print-output`, the final payload is printed after `---`.
+With `--format json`, the same transitions are emitted as structured records.
+
+### Example
+
+```sh
+avenor await --socket /tmp/avenor.sock run-123 --until done --print-output
+```
+
 ## avenor watch
 
 Read or tail NDJSON event logs, with optional digestion into human-readable format.
