@@ -82,6 +82,35 @@ func TestStableHandlerNoRuntimes(t *testing.T) {
 	}
 }
 
+func TestStableHandlerListIncludesStartedAt(t *testing.T) {
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-stable-started-at.sock", MaxRuntimes: 4})
+	sup.runtimes["rt_1"] = &childRuntime{id: "rt_1", startedAt: 123456789}
+
+	list := sup.List()
+	runtimes, ok := list.([]map[string]any)
+	if !ok {
+		t.Fatalf("List() returned %T, want []map[string]any", list)
+	}
+	if len(runtimes) != 1 {
+		t.Fatalf("List() = %d runtimes, want 1", len(runtimes))
+	}
+	if got, ok := runtimes[0]["started_at"].(int64); !ok || got != 123456789 {
+		t.Fatalf("started_at = %#v, want 123456789", runtimes[0]["started_at"])
+	}
+
+	status, err := sup.RuntimeStatus("rt_1")
+	if err != nil {
+		t.Fatalf("RuntimeStatus() error = %v", err)
+	}
+	statusMap, ok := status.(map[string]any)
+	if !ok {
+		t.Fatalf("RuntimeStatus() returned %T, want map[string]any", status)
+	}
+	if got, ok := statusMap["started_at"].(int64); !ok || got != 123456789 {
+		t.Fatalf("RuntimeStatus started_at = %#v, want 123456789", statusMap["started_at"])
+	}
+}
+
 func TestShutdownModeValidation(t *testing.T) {
 	sup := NewSupervisor(Config{
 		ControlSocket: "/tmp/test-shutdown.sock",

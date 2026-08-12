@@ -6,7 +6,7 @@ The control protocol lets you interact with an Avenor process from outside — q
 
 Fire-and-wait mode is simple: start Avenor with a prompt, point to an event log and a sentinel file, and it runs to completion. You check in later. That works fine for simple tasks.
 
-The control protocol kicks in when you need real-time visibility or external decision-making. Typical cases: a daemon that spawns many child LLM runs and needs to cancel them without killing the parent, a human operator who wants to interrupt a stuck run and inject a new prompt, or a multi-agent orchestrator where one run's completion triggers another.
+The control protocol kicks in when you need real-time visibility or external decision-making. Typical cases: a daemon that spawns many child LLM runs and needs to cancel them without killing the parent, a human operator who wants to interrupt a stuck run and inject a new prompt, or a multi-agent orchestrator where one run's completion triggers another. If you just need to wait for a run to surface attention or finish, use `avenor await` instead of composing `status` + `subscribe` by hand.
 
 It's also additive to fire-and-wait mode. When `--control-socket` is absent, the process behaves exactly as before — no socket, no extra goroutines, hot path unchanged.
 

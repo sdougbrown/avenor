@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/sdougbrown/avenor/internal/runstate"
 )
 
 type waitCondition string
@@ -39,12 +41,7 @@ func (c waitCondition) valid() bool {
 
 func isTerminalStatus(status map[string]any) bool {
 	state, _ := status["status"].(string)
-	switch state {
-	case "done", "failed", "timeout", "killed":
-		return true
-	default:
-		return false
-	}
+	return runstate.IsTerminalStatus(state)
 }
 
 func hasPendingPermission(status map[string]any) bool {

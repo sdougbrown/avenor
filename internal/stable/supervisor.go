@@ -141,6 +141,7 @@ type childRuntime struct {
 	roster           *rosterconfig.Config
 	parentID         string   // runtime ID of the parent agent, empty for top-level
 	children         []string // runtime IDs spawned by this runtime
+	startedAt        int64
 	provider         runtime.Provider
 	session          runtime.Session
 	eventWriter      cli.EventSink
@@ -827,6 +828,7 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 	// can be canceled before writer teardown waits for them.
 	child := &childRuntime{
 		id:           rtID,
+		startedAt:    time.Now().UnixMilli(),
 		lifecycleCtx: childCtx,
 		cancelFn:     childCancel,
 		done:         make(chan struct{}),
@@ -2573,6 +2575,7 @@ func (s *Supervisor) listRuntimes() []map[string]any {
 			"effective_backend":  identity.Backend,
 			"dir":                rt.dir,
 			"status":             status,
+			"started_at":         rt.startedAt,
 			"exit_code":          rt.exitCode,
 			"on_event":           rt.onEvent,
 			"event_path":         rt.onEvent,
@@ -3399,6 +3402,7 @@ func (s *Supervisor) RuntimeStatus(rtID string) (any, error) {
 		"effective_backend":  identity.Backend,
 		"dir":                rt.dir,
 		"status":             status,
+		"started_at":         rt.startedAt,
 		"exit_code":          rt.exitCode,
 		"on_event":           rt.onEvent,
 		"event_path":         rt.onEvent,
