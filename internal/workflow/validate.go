@@ -166,6 +166,9 @@ func ValidateTemplate(template Template) error {
 			return fmt.Errorf("invalid workflow template: terminal_outcomes[%d] is empty", index)
 		}
 	}
+	if err := ValidateGraph(template); err != nil {
+		return err
+	}
 	return nil
 }
 
