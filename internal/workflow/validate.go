@@ -17,30 +17,111 @@ const (
 
 // ValidateTemplateJSON strictly decodes and validates a workflow template.
 func ValidateTemplateJSON(data []byte) error {
+	// 1. Bounds and lexical structure first, so their exact messages win and no
+	// work is spent parsing hostile input beyond the strict limits.
+	if err := preflightJSON(data); err != nil {
+		return fmt.Errorf("invalid workflow template: %w", err)
+	}
+	// 2. Canonical-key case-fold rejection, top-level/nested null rejection, and
+	// the schema_version == JSON integer 1 canonical form. These must run before
+	// the generated structural validator so their specific messages are kept.
+	if err := rejectNonCanonicalKeys(data); err != nil {
+		return fmt.Errorf("invalid workflow template: %w", err)
+	}
+
+	// 3. The generated Profile structural validator is now the authority for
+	// additionalProperties, required, type mismatches, and the action
+	// discriminator. Issues rooted at the arbitrary-JSON leaves that typed Go
+	// governs are dropped so the closed Profile vocabulary does not govern them.
+	issues, err := ValidateWorkflowProfileJSON(data)
+	if err != nil {
+		return fmt.Errorf("invalid workflow template: %w", err)
+	}
+	reported := issues[:0]
+	for _, issue := range issues {
+		if !isOpenLeafPath(issue.Path) {
+			reported = append(reported, issue)
+		}
+	}
+	if len(reported) > 0 {
+		parts := make([]string, 0, len(reported))
+		for _, issue := range reported {
+			parts = append(parts, fmt.Sprintf("%s at %s", issue.Code, issue.Path))
+		}
+		return fmt.Errorf("invalid workflow template: %s", strings.Join(parts, "; "))
+	}
+
+	// 4. Strict typed decode as a backstop. model.go's custom Action decoder runs
+	// its own checks and must still reject anything that slipped past the
+	// structural validator.
 	var template Template
 	if err := decodeStrict(data, &template); err != nil {
 		return fmt.Errorf("invalid workflow template: %w", err)
 	}
+
+	// 5. The in-memory rules (Umpire presence/availability plus typed Go checks).
 	return ValidateTemplate(template)
+}
+
+// isOpenLeafPath reports whether a generated-structural-validator issue path is
+// rooted at one of the arbitrary-JSON leaves that typed Go owns exclusively.
+// Those leaves are metadata, node branches, the workflow-action outcome_map,
+// and the workflow-action input_bindings[*].value. Their structural issues are
+// suppressed by path so the closed Profile vocabulary does not reject
+// arbitrary-JSON content that only typed Go can interpret.
+func isOpenLeafPath(path string) bool {
+	segs := strings.Split(path, "/")
+	if len(segs) > 0 && segs[0] == "" {
+		segs = segs[1:]
+	}
+	if len(segs) == 0 {
+		return false
+	}
+	if segs[0] == "metadata" {
+		return true
+	}
+	if len(segs) < 3 || segs[0] != "nodes" || !isJSONArrayIndex(segs[1]) {
+		return false
+	}
+	switch {
+	case segs[2] == "branches":
+		return true
+	case len(segs) >= 4 && segs[2] == "action" && segs[3] == "outcome_map":
+		return true
+	case len(segs) >= 6 && segs[2] == "action" && segs[3] == "input_bindings" && isJSONArrayIndex(segs[4]) && segs[5] == "value":
+		return true
+	}
+	return false
+}
+
+func isJSONArrayIndex(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // ValidateTemplate evaluates the generated portable Umpire contract and the
 // typed structural checks. Stage 3 adds graph- and context-dependent rules.
 func ValidateTemplate(template Template) error {
-	fields := WorkflowFields{
-		BoundedLoops:       loopIDs(template.BoundedLoops),
-		CompositionLimits:  compositionFields(template.CompositionLimits),
-		DefaultLeasePolicy: leaseFields(template.DefaultLease),
-		DefaultRetryPolicy: retryFields(template.DefaultRetry),
-		EntryNodes:         nodeIDs(template.EntryNodes),
-		Metadata:           template.Metadata,
-		Nodes:              definitionIDs(template.Nodes),
-		SchemaVersion:      integerValue(template.SchemaVersion),
-		TemplateId:         stringValue(string(template.TemplateID)),
-		TemplateVersion:    stringValue(string(template.TemplateVersion)),
-		TerminalOutcomes:   outcomeNames(template.TerminalOutcomes),
+	fields := WorkflowProfileFields{
+		// Only required, presence-driven fields are projected; the five optional
+		// fields (metadata, bounded_loops, lease/retry policies, composition
+		// limits) carry no Umpire validators, so their status is trivially
+		// available and typed Go governs their content.
+		EntryNodes:       stringSlicePtr(nodeIDs(template.EntryNodes)),
+		Nodes:            nodeSlicePtr(len(template.Nodes)),
+		SchemaVersion:    integerValue(template.SchemaVersion),
+		TemplateId:       stringValue(string(template.TemplateID)),
+		TemplateVersion:  stringValue(string(template.TemplateVersion)),
+		TerminalOutcomes: stringSlicePtr(outcomeNames(template.TerminalOutcomes)),
 	}
-	availability := Check(fields, WorkflowConditions{}, WorkflowFields{})
+	availability := Check(fields, WorkflowProfileConditions{}, WorkflowProfileFields{})
 	for _, field := range []struct {
 		name   string
 		status FieldStatus
@@ -89,9 +170,6 @@ func ValidateTemplate(template Template) error {
 }
 
 func decodeStrict(data []byte, target any) error {
-	if len(data) > maxTemplateBytes {
-		return fmt.Errorf("template exceeds %d-byte limit", maxTemplateBytes)
-	}
 	if err := preflightJSON(data); err != nil {
 		return err
 	}
@@ -108,6 +186,9 @@ func decodeStrict(data []byte, target any) error {
 // preflightJSON bounds work before the typed decoder allocates the template
 // envelope and rejects duplicate keys that encoding/json otherwise accepts.
 func preflightJSON(data []byte) error {
+	if len(data) > maxTemplateBytes {
+		return fmt.Errorf("template exceeds %d-byte limit", maxTemplateBytes)
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
 	if err := scanJSONValue(decoder, 0); err != nil {
@@ -550,11 +631,11 @@ func retryFields(policy *RetryPolicy) map[string]any {
 	return map[string]any{"max_attempts": policy.MaximumAttempts, "exhaustion": policy.Exhaustion, "outcome": policy.Outcome}
 }
 
-func integerValue(value int) *float64 {
+func integerValue(value int) *int64 {
 	if value == 0 {
 		return nil
 	}
-	converted := float64(value)
+	converted := int64(value)
 	return &converted
 }
 
@@ -563,4 +644,20 @@ func stringValue(value string) *string {
 		return nil
 	}
 	return &value
+}
+
+func stringSlicePtr(values []string) *[]string {
+	if len(values) == 0 {
+		return nil
+	}
+	copy := append([]string(nil), values...)
+	return &copy
+}
+
+func nodeSlicePtr(count int) *[]WorkflowProfileNode {
+	if count == 0 {
+		return nil
+	}
+	empty := make([]WorkflowProfileNode, count)
+	return &empty
 }

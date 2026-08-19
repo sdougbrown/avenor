@@ -43,17 +43,17 @@ func TestValidateTemplateJSONRejectsRequiredFields(t *testing.T) {
 		mutate  func(map[string]any)
 		wantErr string
 	}{
-		{name: "missing schema version", mutate: deleteField("schema_version"), wantErr: "schema_version is required"},
-		{name: "missing template id", mutate: deleteField("template_id"), wantErr: "template_id is required"},
+		{name: "missing schema version", mutate: deleteField("schema_version"), wantErr: "required at /schema_version"},
+		{name: "missing template id", mutate: deleteField("template_id"), wantErr: "required at /template_id"},
 		{name: "blank template id", mutate: setField("template_id", "  "), wantErr: "template_id is required"},
-		{name: "missing template version", mutate: deleteField("template_version"), wantErr: "template_version is required"},
+		{name: "missing template version", mutate: deleteField("template_version"), wantErr: "required at /template_version"},
 		{name: "blank template version", mutate: setField("template_version", "\t"), wantErr: "template_version is required"},
-		{name: "missing entry nodes", mutate: deleteField("entry_nodes"), wantErr: "entry_nodes is required"},
+		{name: "missing entry nodes", mutate: deleteField("entry_nodes"), wantErr: "required at /entry_nodes"},
 		{name: "empty entry nodes", mutate: setField("entry_nodes", []any{}), wantErr: "entry_nodes is required"},
 		{name: "blank entry node", mutate: setField("entry_nodes", []any{" "}), wantErr: "entry_nodes[0] is empty"},
-		{name: "missing nodes", mutate: deleteField("nodes"), wantErr: "nodes is required"},
+		{name: "missing nodes", mutate: deleteField("nodes"), wantErr: "required at /nodes"},
 		{name: "empty nodes", mutate: setField("nodes", []any{}), wantErr: "nodes is required"},
-		{name: "missing terminal outcomes", mutate: deleteField("terminal_outcomes"), wantErr: "terminal_outcomes is required"},
+		{name: "missing terminal outcomes", mutate: deleteField("terminal_outcomes"), wantErr: "required at /terminal_outcomes"},
 		{name: "empty terminal outcomes", mutate: setField("terminal_outcomes", []any{}), wantErr: "terminal_outcomes is required"},
 		{name: "blank terminal outcome", mutate: setField("terminal_outcomes", []any{"\n"}), wantErr: "terminal_outcomes[0] is empty"},
 	}
@@ -76,7 +76,7 @@ func TestValidateTemplateJSONRejectsInvalidNodes(t *testing.T) {
 			mutate: mutateFirstNode(func(node map[string]any) {
 				delete(node, "id")
 			}),
-			wantErr: "nodes[0].id is required",
+			wantErr: "required at /nodes/0/id",
 		},
 		{
 			name: "blank node id",
@@ -90,7 +90,7 @@ func TestValidateTemplateJSONRejectsInvalidNodes(t *testing.T) {
 			mutate: mutateFirstNode(func(node map[string]any) {
 				delete(node, "action")
 			}),
-			wantErr: `node "intake": action is required`,
+			wantErr: `required at /nodes/0/action`,
 		},
 		{
 			name: "null action",
@@ -104,42 +104,42 @@ func TestValidateTemplateJSONRejectsInvalidNodes(t *testing.T) {
 			mutate: mutateFirstNode(func(node map[string]any) {
 				node["action"] = "manual"
 			}),
-			wantErr: `workflow action:`,
+			wantErr: `type at /nodes/0/action`,
 		},
 		{
 			name: "missing action type",
 			mutate: mutateFirstNode(func(node map[string]any) {
 				node["action"] = map[string]any{}
 			}),
-			wantErr: `workflow action.type is required`,
+			wantErr: `required at /nodes/0/action/type`,
 		},
 		{
 			name: "blank action type",
 			mutate: mutateFirstNode(func(node map[string]any) {
 				node["action"] = map[string]any{"type": "  "}
 			}),
-			wantErr: `workflow action.type is required`,
+			wantErr: `discriminator at /nodes/0/action/type`,
 		},
 		{
 			name: "non-string action type",
 			mutate: mutateFirstNode(func(node map[string]any) {
 				node["action"] = map[string]any{"type": 1}
 			}),
-			wantErr: `workflow action:`,
+			wantErr: `discriminator at /nodes/0/action/type`,
 		},
 		{
 			name: "invalid action discriminator",
 			mutate: mutateFirstNode(func(node map[string]any) {
 				node["action"] = map[string]any{"type": "shell"}
 			}),
-			wantErr: `unsupported workflow action "shell"`,
+			wantErr: `discriminator at /nodes/0/action/type`,
 		},
 		{
 			name: "unknown node field",
 			mutate: mutateFirstNode(func(node map[string]any) {
 				node["misspelled"] = true
 			}),
-			wantErr: `unknown field "misspelled"`,
+			wantErr: `additionalProperties at /nodes/0/misspelled`,
 		},
 	}
 
@@ -148,6 +148,29 @@ func TestValidateTemplateJSONRejectsInvalidNodes(t *testing.T) {
 			assertTemplateError(t, mutateTemplate(t, test.mutate), test.wantErr)
 		})
 	}
+}
+
+// TestGeneratedStructuralValidatorAuthority proves the generated Profile
+// structural validator is the authority for additionalProperties and the action
+// discriminator at nested paths, beyond the typed Go checks retained in
+// validateAction.
+func TestGeneratedStructuralValidatorAuthority(t *testing.T) {
+	t.Run("cross-variant action field rejected", func(t *testing.T) {
+		input := mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
+			node["action"] = map[string]any{"type": "run", "loop_file": "extra.json"}
+		}))
+		assertTemplateError(t, input, `additionalProperties at /nodes/0/action/loop_file`)
+	})
+	t.Run("unknown nested policy field rejected at path", func(t *testing.T) {
+		input := mutateTemplate(t, setField("default_lease_policy", map[string]any{"ttl_seconds": 900, "wrong_field": 1}))
+		assertTemplateError(t, input, `additionalProperties at /default_lease_policy/wrong_field`)
+	})
+	t.Run("unknown completion field rejected at path", func(t *testing.T) {
+		input := mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
+			node["completion"] = map[string]any{"kind": "artifacts", "typo": true}
+		}))
+		assertTemplateError(t, input, `additionalProperties at /nodes/0/completion/typo`)
+	})
 }
 
 func TestValidateTemplateJSONRejectsIncompleteActionVariants(t *testing.T) {
@@ -175,7 +198,7 @@ func TestValidateTemplateJSONRejectsIncompleteActionVariants(t *testing.T) {
 
 func TestValidateTemplateJSONRejectsAmbiguousOrUnboundedJSON(t *testing.T) {
 	t.Run("unknown top-level field", func(t *testing.T) {
-		assertTemplateError(t, mutateTemplate(t, setField("misspelled", true)), `unknown field "misspelled"`)
+		assertTemplateError(t, mutateTemplate(t, setField("misspelled", true)), `additionalProperties at /misspelled`)
 	})
 	t.Run("explicit null optional field", func(t *testing.T) {
 		assertTemplateError(t, mutateTemplate(t, setField("metadata", nil)), `field "metadata" cannot be null`)
@@ -300,20 +323,20 @@ func TestJSONPreflightAcceptsExactLimits(t *testing.T) {
 }
 
 func TestGeneratedWorkflowSchemaAPI(t *testing.T) {
-	version := 1.0
+	version := int64(1)
 	templateID := "example"
 	templateVersion := "1"
 	availability := Check(
-		WorkflowFields{
+		WorkflowProfileFields{
 			SchemaVersion:    &version,
 			TemplateId:       &templateID,
 			TemplateVersion:  &templateVersion,
-			EntryNodes:       []string{"start"},
-			Nodes:            []string{"start"},
-			TerminalOutcomes: []string{"done"},
+			EntryNodes:       &[]string{"start"},
+			Nodes:            &[]WorkflowProfileNode{{}},
+			TerminalOutcomes: &[]string{"done"},
 		},
-		WorkflowConditions{},
-		WorkflowFields{},
+		WorkflowProfileConditions{},
+		WorkflowProfileFields{},
 	)
 	for name, status := range map[string]FieldStatus{
 		"schema_version":    availability.SchemaVersion,
@@ -328,11 +351,11 @@ func TestGeneratedWorkflowSchemaAPI(t *testing.T) {
 		}
 	}
 
-	badVersion := 2.0
+	badVersion := int64(2)
 	availability = Check(
-		WorkflowFields{SchemaVersion: &badVersion},
-		WorkflowConditions{},
-		WorkflowFields{},
+		WorkflowProfileFields{SchemaVersion: &badVersion},
+		WorkflowProfileConditions{},
+		WorkflowProfileFields{},
 	)
 	if availability.SchemaVersion.Fair || availability.SchemaVersion.Reason == nil {
 		t.Fatalf("generated Check() accepted schema version 2: %+v", availability.SchemaVersion)
@@ -395,4 +418,53 @@ func boundedTestInput(input []byte) string {
 		return string(input)
 	}
 	return fmt.Sprintf("%s... (%d bytes)", input[:limit], len(input))
+}
+
+const openLeafTemplateJSON = `{
+  "schema_version": 1,
+  "template_id": "software-factory-work",
+  "template_version": "1.0.0",
+  "metadata": {"title": "Software factory work", "count": 5},
+  "entry_nodes": ["intake"],
+  "nodes": [
+    {"id": "intake", "name": "Intake", "action": {"type": "manual"}},
+    {"id": "execute", "dependencies": ["intake"], "branches": {"clean": "review"}, "action": {"type": "loop", "loop_file": "execute.json"}},
+    {"id": "review", "dependencies": ["execute"], "action": {"type": "workflow", "template_id": "child", "template_version": "1", "child_key": "child-1", "input_bindings": [{"input": "head", "value": "\"abc123\""}], "output_bindings": [{"child_output": "verdict", "parent_output": "review_verdict"}], "outcome_map": {"clean": "approved"}}}
+  ],
+  "terminal_outcomes": ["clean", "abandoned"]
+}`
+
+func TestOpenLeafLeavesAreTypedGoGoverned(t *testing.T) {
+	if err := ValidateTemplateJSON([]byte(openLeafTemplateJSON)); err != nil {
+		t.Fatalf("ValidateTemplateJSON() rejected valid open-leaf template: %v", err)
+	}
+
+	// A wrong-type value under a suppressed-but-typed leaf must still be
+	// rejected by typed Go (branches {clean: <node-id>} requires a string).
+	input := mutateOpenLeafTemplate(t, func(template map[string]any) {
+		nodes := template["nodes"].([]any)
+		for _, n := range nodes {
+			node := n.(map[string]any)
+			if node["id"] == "execute" {
+				node["branches"] = map[string]any{"clean": 123}
+			}
+		}
+	})
+	if err := ValidateTemplateJSON(input); err == nil {
+		t.Fatal("ValidateTemplateJSON() accepted wrong-type branch value under typed leaf")
+	}
+}
+
+func mutateOpenLeafTemplate(t *testing.T, mutate func(map[string]any)) []byte {
+	t.Helper()
+	var template map[string]any
+	if err := json.Unmarshal([]byte(openLeafTemplateJSON), &template); err != nil {
+		t.Fatalf("decode open-leaf template fixture: %v", err)
+	}
+	mutate(template)
+	data, err := json.Marshal(template)
+	if err != nil {
+		t.Fatalf("encode mutated open-leaf template fixture: %v", err)
+	}
+	return data
 }

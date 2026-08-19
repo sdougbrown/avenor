@@ -2,15 +2,20 @@
 //
 // # Contract boundary
 //
-// The portable Umpire schema is intentionally limited to stable top-level
-// template fields and their presence. Umpire v1 is an availability schema
-// rather than a general nested JSON-schema language. The strict JSON boundary
-// decodes canonical typed node, gate, output, loop, and child-workflow values.
-// Actions use a tagged union that rejects unknown and cross-variant fields. The
-// generated Check function is always called by the hand-written adapter; it is
-// not the reducer and does not replace graph- or state-dependent validation.
-// The strict JSON boundary rejects duplicate keys and bounds templates to 4 MiB,
-// 64 levels of nesting, and 10,000 members per object or array.
+// The contract boundary is owned by three cooperating layers. The JSON Schema
+// Composition Profile v1 (schemas/workflow.profile.json) owns nested template
+// structure (valueSchema): node, gate, output, loop, and child-workflow shapes,
+// the action discriminator (a tagged union that rejects unknown and
+// cross-variant fields), and additionalProperties rejection at every level. The
+// embedded Umpire availability document owns top-level presence and required
+// fields, plus the schema_version == 1 fairness rule. Typed Go owns the
+// cross-node/graph/context rules and retains the checks the closed Profile
+// vocabulary cannot express: the arbitrary-JSON leaves metadata, branches,
+// outcome_map, and input_bindings[*].value, whose structural issues are
+// suppressed by path so typed Go governs them; and the strict boundary
+// guarantees of duplicate-key rejection, the 4 MiB size cap, the 64-level depth
+// cap, and the 10,000-members-per-container cap, which the generated validator
+// does not cover.
 //
 // A template pins a schema version, template ID and version, entry nodes,
 // declared nodes, and terminal outcomes. Nodes declare one of the action kinds
@@ -35,4 +40,4 @@
 // automatic scheduler or broker routing for workflow events.
 package workflow
 
-//go:generate go run github.com/umpire-tools/umpire-go-gen@v0.1.1 -i ../../schemas/workflow.umpire.json -output-file workflow_schema.gen.go -pkg workflow
+//go:generate go run github.com/umpire-tools/umpire-go-gen@v0.2.1 -profile ../../schemas/workflow.profile.json -output-file workflow_schema.gen.go -pkg workflow
