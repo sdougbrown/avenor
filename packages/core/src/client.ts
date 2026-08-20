@@ -61,6 +61,10 @@ export interface SpawnParams {
   server_url?: string
   session_id?: string
   sentinel_file?: string
+  workflow_id?: string
+  node_id?: string
+  activation_id?: string
+  attempt_id?: string
   on_event?: string
   auto_approve?: boolean
   [key: string]: unknown
