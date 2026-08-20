@@ -74,7 +74,7 @@ func runWorkflowTo(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
-func printWorkflowResult(stdout io.Writer, result map[string]any, name string) {
+func printWorkflowResult(stdout io.Writer, result map[string]any) {
 	data, _ := json.MarshalIndent(result, "", "  ")
 	fmt.Fprintln(stdout, string(data))
 }
@@ -154,7 +154,7 @@ func cmdWorkflowCreate(c *client.Client, args []string, stdout, stderr io.Writer
 		fmt.Fprintf(stderr, "avenor workflow: create: %v\n", err)
 		return 1
 	}
-	printWorkflowResult(stdout, result, "create")
+	printWorkflowResult(stdout, result)
 	return 0
 }
 
@@ -186,7 +186,7 @@ func cmdWorkflowInstantiate(c *client.Client, args []string, stdout, stderr io.W
 		fmt.Fprintf(stderr, "avenor workflow: instantiate: %v\n", err)
 		return 1
 	}
-	printWorkflowResult(stdout, result, "instantiate")
+	printWorkflowResult(stdout, result)
 	return 0
 }
 
@@ -203,7 +203,7 @@ func cmdWorkflowStatus(c *client.Client, args []string, stdout, stderr io.Writer
 		fmt.Fprintf(stderr, "avenor workflow: status: %v\n", err)
 		return 1
 	}
-	printWorkflowResult(stdout, result, "status")
+	printWorkflowResult(stdout, result)
 	return 0
 }
 
@@ -232,7 +232,7 @@ func cmdWorkflowWait(c *client.Client, args []string, stdout, stderr io.Writer) 
 		fmt.Fprintf(stderr, "avenor workflow: wait: %v\n", err)
 		return 1
 	}
-	printWorkflowResult(stdout, result, "wait")
+	printWorkflowResult(stdout, result)
 	return 0
 }
 
@@ -249,7 +249,7 @@ func cmdWorkflowInspect(c *client.Client, args []string, stdout, stderr io.Write
 		fmt.Fprintf(stderr, "avenor workflow: inspect: %v\n", err)
 		return 1
 	}
-	printWorkflowResult(stdout, result, "inspect")
+	printWorkflowResult(stdout, result)
 	return 0
 }
 
@@ -274,6 +274,6 @@ func cmdWorkflowEvents(c *client.Client, args []string, stdout, stderr io.Writer
 		fmt.Fprintf(stderr, "avenor workflow: events: %v\n", err)
 		return 1
 	}
-	printWorkflowResult(stdout, result, "events")
+	printWorkflowResult(stdout, result)
 	return 0
 }

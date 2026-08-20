@@ -255,6 +255,14 @@ func (s *Store) LoadTemplate(templateID TemplateID, templateVersion TemplateVers
 // to the end of the event log (the replay write is ignored; readers never
 // mutate). It reports whether the instance exists.
 func (s *Store) loadCurrent(workflowID WorkflowID) (Snapshot, bool, error) {
+	// Reads must not materialize an empty instance directory for a workflow
+	// that does not exist. Writes create the directory via ensureInstanceDir.
+	if _, err := os.Stat(s.workflowPath(workflowID)); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return Snapshot{}, false, nil
+		}
+		return Snapshot{}, false, err
+	}
 	if err := os.MkdirAll(s.instanceDir(workflowID), 0o755); err != nil {
 		return Snapshot{}, false, err
 	}
