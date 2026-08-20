@@ -722,3 +722,98 @@ func TestManagerWaitUnknownWorkflow(t *testing.T) {
 		t.Fatalf("err=%v, want workflow not found", err)
 	}
 }
+
+// TestRecordAttemptTerminatedRecordsTerminalFact verifies the Stage-7 manager
+// termination path: a failed attempt records a failed terminal fact and
+// regresses the activation; a succeeded attempt records a succeeded terminal
+// fact but is inert on activation/lease state (acceptance requires completion,
+// Stage 11).
+func TestRecordAttemptTerminatedRecordsTerminalFact(t *testing.T) {
+	findAttemptByID := func(inst *WorkflowInstance, id AttemptID) *Attempt {
+		for i := range inst.Attempts {
+			if inst.Attempts[i].ID == id {
+				return &inst.Attempts[i]
+			}
+		}
+		return nil
+	}
+
+	// Failure path.
+	{
+		m, s, wf := newRunTemplateFixture(t)
+		fake := &fakeExecutor{}
+		m.RegisterExecutor(ActionRun, fake)
+		snap, _, err := s.loadCurrent(wf)
+		if err != nil {
+			t.Fatalf("loadCurrent: %v", err)
+		}
+		actID := activationByNode(&snap.Instance, NodeID("start")).ID
+		res := claimActivation(t, m, wf, "start", string(actID), "alice")
+		leaseID, _ := res["lease_id"].(string)
+		out, err := m.WorkflowCommand(string(wf), startCommandPayload(t, "start", string(actID), res, nil))
+		if err != nil {
+			t.Fatalf("start: %v", err)
+		}
+		attemptID, _ := out.(map[string]any)["attempt_id"].(string)
+		if attemptID == "" {
+			t.Fatal("start result missing attempt_id")
+		}
+		if err := m.RecordAttemptTerminated(wf, NodeID("start"), ActivationID(actID), AttemptID(attemptID), LeaseID(leaseID), AttemptFailed); err != nil {
+			t.Fatalf("RecordAttemptTerminated(failed): %v", err)
+		}
+		snap, _, err = s.loadCurrent(wf)
+		if err != nil {
+			t.Fatalf("reload after failed: %v", err)
+		}
+		act := activationByNode(&snap.Instance, NodeID("start"))
+		// The run template's retry policy exhausts to a block on the first
+		// plain failure, so the activation is blocked (not attempt_failed).
+		if act.Status != ActivationBlocked {
+			t.Fatalf("activation status after failed termination = %s, want blocked", act.Status)
+		}
+		at := findAttemptByID(&snap.Instance, AttemptID(attemptID))
+		if at == nil || at.Status != AttemptFailed || at.EndedAt == nil {
+			t.Fatalf("attempt after failed termination = %+v, want status failed + ended", at)
+		}
+	}
+
+	// Success path (inert on activation/lease).
+	{
+		m, s, wf := newRunTemplateFixture(t)
+		fake := &fakeExecutor{}
+		m.RegisterExecutor(ActionRun, fake)
+		snap, _, err := s.loadCurrent(wf)
+		if err != nil {
+			t.Fatalf("loadCurrent: %v", err)
+		}
+		actID := activationByNode(&snap.Instance, NodeID("start")).ID
+		res := claimActivation(t, m, wf, "start", string(actID), "alice")
+		leaseID, _ := res["lease_id"].(string)
+		out, err := m.WorkflowCommand(string(wf), startCommandPayload(t, "start", string(actID), res, nil))
+		if err != nil {
+			t.Fatalf("start: %v", err)
+		}
+		attemptID, _ := out.(map[string]any)["attempt_id"].(string)
+		if attemptID == "" {
+			t.Fatal("start result missing attempt_id")
+		}
+		if err := m.RecordAttemptTerminated(wf, NodeID("start"), ActivationID(actID), AttemptID(attemptID), LeaseID(leaseID), AttemptSucceeded); err != nil {
+			t.Fatalf("RecordAttemptTerminated(succeeded): %v", err)
+		}
+		snap, _, err = s.loadCurrent(wf)
+		if err != nil {
+			t.Fatalf("reload after succeeded: %v", err)
+		}
+		act := activationByNode(&snap.Instance, NodeID("start"))
+		if act.Status != ActivationRunning {
+			t.Fatalf("activation status after succeeded termination = %s, want running (inert)", act.Status)
+		}
+		if act.ActiveLease == nil {
+			t.Fatal("ActiveLease released on succeeded termination, want retained")
+		}
+		at := findAttemptByID(&snap.Instance, AttemptID(attemptID))
+		if at == nil || at.Status != AttemptSucceeded || at.EndedAt == nil {
+			t.Fatalf("attempt after succeeded termination = %+v, want status succeeded + ended", at)
+		}
+	}
+}

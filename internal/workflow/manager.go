@@ -540,3 +540,34 @@ func (m *Manager) applyStart(wf WorkflowID, snap Snapshot, act *Activation, req 
 		Selection:        req.Selection,
 	})
 }
+
+// RecordAttemptTerminated records the terminal status of an already-started
+// attempt after its backend run finishes. It is called by a runtime executor
+// (the stable supervisor's direct-run executor) on every terminal path:
+// success, failure, panic, cancellation, timeout, and provider-start error.
+// It is idempotent per attempt so duplicate terminations are safe.
+func (m *Manager) RecordAttemptTerminated(wf WorkflowID, nodeID NodeID, activationID ActivationID, attemptID AttemptID, leaseID LeaseID, status AttemptStatus) error {
+	if status == "" {
+		return errors.New("attempt termination status is required")
+	}
+	snap, exists, err := m.store.loadCurrent(wf)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("workflow not found: %s", wf)
+	}
+	_, err = m.store.ApplyCommand(wf, Command{
+		ID:               NewCommandID(),
+		Kind:             CommandTerminate,
+		ExpectedRevision: snap.Instance.Revision,
+		IdempotencyKey:   "terminate-" + string(attemptID),
+		Identity:         ExecutionIdentity{WorkflowID: wf, NodeID: nodeID, ActivationID: activationID, AttemptID: attemptID},
+		LeaseID:          leaseID,
+		AttemptStatus:    status,
+	})
+	if err != nil {
+		return err
+	}
+	return nil
+}

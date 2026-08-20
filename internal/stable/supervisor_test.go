@@ -25,6 +25,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
 	"github.com/sdougbrown/avenor/internal/teamrunner"
+	"github.com/sdougbrown/avenor/internal/workflow"
 )
 
 func TestNewSupervisor(t *testing.T) {
@@ -1404,6 +1405,86 @@ func TestRuntimeAnswerPermissionRejectsRuntimeWithoutActiveSession(t *testing.T)
 // fanout writer. Without this, a stable-mode sub-agent asking a question or
 // requesting a permission is invisible to status polling — the orchestrator
 // spins forever because it never observes the blocked state.
+// TestNonWorkflowEventMetadataHasNoWorkflowFields is the Stage-7 backward
+// compatibility regression: a direct run without workflow metadata must keep
+// exactly its prior run/runtime/label identity and must NOT gain any workflow
+// fields.
+func TestNonWorkflowEventMetadataHasNoWorkflowFields(t *testing.T) {
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-non-wf-meta.sock", MaxRuntimes: 1})
+	defer func() { _ = sup.broker.Stop() }()
+	child := &childRuntime{id: "rt_meta", label: "lbl"}
+	meta := workflowEventMetadata(sup, child)
+	stamped := meta.Stamp(events.Event{Event: "session.start", Fields: map[string]any{}})
+	if stamped.Fields["run_id"] != sup.runID {
+		t.Fatalf("run_id = %v, want %s", stamped.Fields["run_id"], sup.runID)
+	}
+	if stamped.Fields["runtime_id"] != "rt_meta" {
+		t.Fatalf("runtime_id = %v, want rt_meta", stamped.Fields["runtime_id"])
+	}
+	if stamped.Fields["run_label"] != "lbl" {
+		t.Fatalf("run_label = %v, want lbl", stamped.Fields["run_label"])
+	}
+	for _, k := range []string{"workflow_id", "node_id", "activation_id", "attempt_id"} {
+		if _, ok := stamped.Fields[k]; ok {
+			t.Fatalf("non-workflow event unexpectedly carries %q = %v", k, stamped.Fields[k])
+		}
+	}
+}
+
+// TestWorkflowRunChildRecordsSucceededTermination verifies the direct-run
+// termination hook: a workflow child that ends its turn successfully records
+// AttemptSucceeded (and does not park awaiting a follow-up prompt).
+func TestWorkflowRunChildRecordsSucceededTermination(t *testing.T) {
+	provider := &stableScriptedProvider{
+		attempt: 0,
+		scripts: []stableScriptedAttempt{{
+			sessionID: "ses_wf_0",
+			events:    []stableScriptedEvent{{event: events.Event{Event: "session.end", SessionID: "ses_wf_0", Fields: map[string]any{"stop_reason": "end_turn"}}}},
+		}},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	child := &childRuntime{
+		id:           "rt_wf_success",
+		workflowID:   "wf1",
+		nodeID:       "start",
+		activationID: "act1",
+		attemptID:    "att1",
+		provider:     provider,
+		session:      runtime.Session{SessionID: "ses_wf_0"},
+		eventWriter:  stableTestSink{},
+		lifecycleCtx: ctx,
+		cancelFn:     cancel,
+		done:         make(chan struct{}),
+		promptCh:     make(chan struct{}, 1),
+	}
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-wf-success.sock", MaxRuntimes: 1})
+	defer func() { _ = sup.broker.Stop() }()
+	sup.runtimes[child.id] = child
+
+	var mu sync.Mutex
+	var called bool
+	var gotStatus workflow.AttemptStatus
+	child.onWorkflowTerminate = func(status workflow.AttemptStatus) {
+		mu.Lock()
+		called = true
+		gotStatus = status
+		mu.Unlock()
+	}
+
+	go sup.runChild(ctx, child, "hello", 0, 0)
+	waitForStableDone(t, child)
+
+	mu.Lock()
+	wasCalled, status := called, gotStatus
+	mu.Unlock()
+	if !wasCalled {
+		t.Fatal("workflow child did not record termination on successful end_turn")
+	}
+	if status != workflow.AttemptSucceeded {
+		t.Fatalf("workflow termination status = %s, want succeeded", status)
+	}
+}
+
 func TestRuntimeStatusSurfacesPhaseAndPermission(t *testing.T) {
 	sup := NewSupervisor(Config{
 		ControlSocket: "/tmp/test-runtime-status-surface.sock",
