@@ -197,6 +197,80 @@ func fsyncDir(dir string) error {
 	return d.Sync()
 }
 
+// StoreTemplate atomically persists a versioned template under
+// <root>/templates/<templateID>/<version>.json.
+func (s *Store) StoreTemplate(templateID TemplateID, templateVersion TemplateVersion, template Template) error {
+	dir := filepath.Join(s.root, "templates", string(templateID))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	path := filepath.Join(dir, string(templateVersion)+".json")
+	data, err := template.MarshalJSON()
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, string(templateVersion)+".json.tmp*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := os.Chmod(tmpName, 0o644); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	return fsyncDir(dir)
+}
+
+// LoadTemplate reads a versioned template, returning a not-found error if it
+// has not been stored.
+func (s *Store) LoadTemplate(templateID TemplateID, templateVersion TemplateVersion) (Template, error) {
+	path := filepath.Join(s.root, "templates", string(templateID), string(templateVersion)+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Template{}, err
+	}
+	var template Template
+	if err := json.Unmarshal(data, &template); err != nil {
+		return Template{}, err
+	}
+	return template, nil
+}
+
+// loadCurrent locks the instance and returns its snapshot advanced in memory
+// to the end of the event log (the replay write is ignored; readers never
+// mutate). It reports whether the instance exists.
+func (s *Store) loadCurrent(workflowID WorkflowID) (Snapshot, bool, error) {
+	if err := os.MkdirAll(s.instanceDir(workflowID), 0o755); err != nil {
+		return Snapshot{}, false, err
+	}
+	unlock, err := lockFile(s.lockPath(workflowID))
+	if err != nil {
+		return Snapshot{}, false, err
+	}
+	defer unlock()
+	snap, exists, err := s.loadSnapshot(workflowID)
+	if err != nil || !exists {
+		return snap, exists, err
+	}
+	replayed, _, _, err := replayEvents(snap, s.eventsPath(workflowID))
+	return replayed, true, err
+}
+
 // regenerateProjections regenerates derived projections for an instance after a
 // snapshot change. Projections are derived artifacts, never authoritative: a
 // failure to write them must not fail an already-committed state transition,
