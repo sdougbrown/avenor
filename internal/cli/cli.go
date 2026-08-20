@@ -1452,12 +1452,16 @@ type eventWriter struct {
 }
 
 type EventMetadata struct {
-	mu        sync.Mutex
-	runID     string
-	runLabel  string
-	runtimeID string
-	latestSeq int64
-	now       func() time.Time
+	mu           sync.Mutex
+	runID        string
+	runLabel     string
+	runtimeID    string
+	latestSeq    int64
+	workflowID   string
+	nodeID       string
+	activationID string
+	attemptID    string
+	now          func() time.Time
 }
 
 func NewEventMetadata(runID, runLabel, runtimeID string) *EventMetadata {
@@ -1467,6 +1471,17 @@ func NewEventMetadata(runID, runLabel, runtimeID string) *EventMetadata {
 		runtimeID: runtimeID,
 		now:       time.Now,
 	}
+}
+
+// WithWorkflow attaches workflow execution identity to the metadata so every
+// stamped event carries it as workflow metadata on the run. It must be called
+// once, before the metadata is used concurrently.
+func (m *EventMetadata) WithWorkflow(workflowID, nodeID, activationID, attemptID string) *EventMetadata {
+	m.workflowID = workflowID
+	m.nodeID = nodeID
+	m.activationID = activationID
+	m.attemptID = attemptID
+	return m
 }
 
 func (m *EventMetadata) Stamp(event events.Event) events.Event {
@@ -1492,6 +1507,18 @@ func (m *EventMetadata) Stamp(event events.Event) events.Event {
 	}
 	if _, ok := out.Fields["run_label"]; !ok && m.runLabel != "" {
 		out.Fields["run_label"] = m.runLabel
+	}
+	if _, ok := out.Fields["workflow_id"]; !ok && m.workflowID != "" {
+		out.Fields["workflow_id"] = m.workflowID
+	}
+	if _, ok := out.Fields["node_id"]; !ok && m.nodeID != "" {
+		out.Fields["node_id"] = m.nodeID
+	}
+	if _, ok := out.Fields["activation_id"]; !ok && m.activationID != "" {
+		out.Fields["activation_id"] = m.activationID
+	}
+	if _, ok := out.Fields["attempt_id"]; !ok && m.attemptID != "" {
+		out.Fields["attempt_id"] = m.attemptID
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
