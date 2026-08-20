@@ -3391,6 +3391,13 @@ func (s *Supervisor) Spawn(raw json.RawMessage) (any, error) {
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return nil, fmt.Errorf("invalid spawn params: %w", err)
 	}
+	// Workflow identity is attached only by the internal direct-run executor
+	// (which calls the unexported spawn directly, bypassing this method).
+	// External control-socket callers cannot spoof workflow identity.
+	p.WorkflowID = ""
+	p.NodeID = ""
+	p.ActivationID = ""
+	p.AttemptID = ""
 	// Auto-populate ParentID when the spawn is called by a known runtime.
 	// The caller embeds its own runtime_id in the spawn params; if it maps to
 	// a registered runtime, treat it as the parent.

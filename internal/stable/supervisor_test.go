@@ -5666,3 +5666,60 @@ func TestResolveWorkflowRoot(t *testing.T) {
 		})
 	}
 }
+
+// TestWorkflowRunChildRecordsFailedTermination verifies the direct-run
+// termination hook records a plain failure as AttemptFailed.
+func TestWorkflowRunChildRecordsFailedTermination(t *testing.T) {
+	provider := &stableScriptedProvider{
+		attempt: 0,
+		scripts: []stableScriptedAttempt{{
+			sessionID: "ses_wf_fail",
+			events: []stableScriptedEvent{{event: events.Event{
+				Event:     "session.end",
+				SessionID: "ses_wf_fail",
+				Fields:    map[string]any{"stop_reason": "refusal"},
+			}}},
+		}},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	child := &childRuntime{
+		id:           "rt_wf_fail",
+		workflowID:   "wf1",
+		nodeID:       "start",
+		activationID: "act1",
+		attemptID:    "att2",
+		provider:     provider,
+		session:      runtime.Session{SessionID: "ses_wf_fail"},
+		eventWriter:  stableTestSink{},
+		lifecycleCtx: ctx,
+		cancelFn:     cancel,
+		done:         make(chan struct{}),
+		promptCh:     make(chan struct{}, 1),
+	}
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-wf-fail.sock", MaxRuntimes: 1})
+	defer func() { _ = sup.broker.Stop() }()
+	sup.runtimes[child.id] = child
+
+	var mu sync.Mutex
+	var called bool
+	var gotStatus workflow.AttemptStatus
+	child.onWorkflowTerminate = func(status workflow.AttemptStatus) {
+		mu.Lock()
+		called = true
+		gotStatus = status
+		mu.Unlock()
+	}
+
+	go sup.runChild(ctx, child, "hello", 0, 0)
+	waitForStableDone(t, child)
+
+	mu.Lock()
+	wasCalled, status := called, gotStatus
+	mu.Unlock()
+	if !wasCalled {
+		t.Fatal("workflow child did not record termination on failed run")
+	}
+	if status != workflow.AttemptFailed {
+		t.Fatalf("workflow termination status = %s, want failed", status)
+	}
+}
