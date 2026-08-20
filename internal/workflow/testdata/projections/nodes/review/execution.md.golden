@@ -1,0 +1,25 @@
+# Node review
+
+## Activations
+
+| Activation | Iteration | Status | Outcome |
+| --- | --- | --- | --- |
+| act_review_1 | review | 0 | awaiting_gate |  |
+
+## Attempts
+
+| Attempt | Activation | Status | Backend | Model |
+| --- | --- | --- | --- | --- |
+| att_review_1 | act_review_1 | succeeded | pi | claude |
+
+## Evidence
+
+| Evidence | Kind | Source | Authority | Stored Path | SHA256 |
+| --- | --- | --- | --- | --- | --- |
+| ev_review_1 | diff | agent | reviewer | evidence/ev_review_1.bin | bbbb |
+
+## Gates
+
+| Gate Instance | Activation | Status | Outcome | Actor |
+| --- | --- | --- | --- | --- |
+| gate_review_1 | act_review_1 | action_required |  | human |

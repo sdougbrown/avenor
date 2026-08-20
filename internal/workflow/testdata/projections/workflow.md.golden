@@ -1,0 +1,36 @@
+# Workflow wf_golden
+
+- Template: tmpl@2
+- Instance: wfi_golden
+- Status: awaiting_gate
+- Revision: 4
+
+## Nodes
+
+| Node | Activations |
+| --- | --- |
+| build | 2 |
+| review | 1 |
+
+## Activations
+
+| Activation | Node | Iteration | Status | Outcome |
+| --- | --- | --- | --- | --- |
+| act_build_1 | build | 0 | satisfied | ok |
+| act_build_2 | build | 1 | running |  |
+| act_review_1 | review | 0 | awaiting_gate |  |
+
+## Gates
+
+| Gate Instance | Node | Activation | Status | Outcome | Actor |
+| --- | --- | --- | --- | --- | --- |
+| gate_build_1 | build | act_build_1 | passed | approve | ci |
+| gate_review_1 | review | act_review_1 | action_required |  | human |
+
+## Attempts
+
+| Attempt | Node | Activation | Status | Backend | Model |
+| --- | --- | --- | --- | --- | --- |
+| att_build_1 | build | act_build_1 | succeeded | pi | qwen |
+| att_build_2 | build | act_build_2 | running | pi | qwen |
+| att_review_1 | review | act_review_1 | succeeded | pi | claude |

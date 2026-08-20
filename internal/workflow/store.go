@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 )
@@ -197,8 +198,11 @@ func fsyncDir(dir string) error {
 }
 
 // regenerateProjections regenerates derived projections for an instance after a
-// snapshot change. Stage 4 is a no-op placeholder; Stage 5 owns projections.
+// snapshot change. Projections are derived artifacts, never authoritative: a
+// failure to write them must not fail an already-committed state transition,
+// so the error is logged (non-fatal) and swallowed.
 func (s *Store) regenerateProjections(workflowID WorkflowID, snap Snapshot) {
-	_ = workflowID
-	_ = snap
+	if err := WriteProjections(s.instanceDir(workflowID), snap); err != nil {
+		log.Printf("workflow %s: projection: %v", workflowID, err)
+	}
 }
