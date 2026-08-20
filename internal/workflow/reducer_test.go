@@ -917,3 +917,36 @@ func testGatePendingOnComplete(t *testing.T) {
 			"(reducer has no gate-on-complete representation)")
 	}
 }
+
+// TestReduceDoesNotMutateInput guards the reducer purity contract: a successful
+// Reduce must never alias or mutate the caller's snapshot, including the nested
+// activations array the reducer writes into (via act.Status). Before the
+// cloneSnapshot fix this leaked into the caller's array and the test fails.
+func TestReduceDoesNotMutateInput(t *testing.T) {
+	state := newInstance(t)
+	actID := actStart(state).ID
+	events, err := Apply(state, Command{
+		Kind:             CommandClaim,
+		ExpectedRevision: state.Instance.Revision,
+		IdempotencyKey:   "claim-1",
+		Identity:         baseIdentity(actID, ""),
+		LeaseID:          "lease-1",
+		Actor:            "alice",
+	})
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	want := cloneSnapshot(state) // independent deep copy taken before Reduce
+	if !reflect.DeepEqual(state, want) {
+		t.Fatalf("baseline mismatch: apply mutated its input")
+	}
+	if _, err := Reduce(state, events[0]); err != nil {
+		t.Fatalf("reduce: %v", err)
+	}
+	if !reflect.DeepEqual(state, want) {
+		t.Fatalf("Reduce mutated its input snapshot (activation should still be %q)", state.Instance.Activations[0].Status)
+	}
+	if state.Instance.Activations[0].Status != ActivationPending {
+		t.Fatalf("Reduce leaked mutation: activation became %q", state.Instance.Activations[0].Status)
+	}
+}

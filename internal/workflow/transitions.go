@@ -146,11 +146,15 @@ func applyEvent(next *Snapshot, event Event) error {
 	// not require an existing one; every other kind must resolve one.
 	var act *Activation
 	if event.Kind != EventInstantiated && event.Kind != EventRerouted {
-		act = findActivation(&next.Instance, event.Identity.NodeID, event.Identity.ActivationID)
-		if act == nil {
+		a, err := findActivation(&next.Instance, event.Identity.NodeID, event.Identity.ActivationID)
+		if err != nil {
+			return err
+		}
+		if a == nil {
 			return fmt.Errorf("activation not found for node %q activation %q",
 				event.Identity.NodeID, event.Identity.ActivationID)
 		}
+		act = a
 	}
 
 	switch event.Kind {
@@ -205,17 +209,31 @@ func applyEvent(next *Snapshot, event Event) error {
 // findActivation resolves the live, mutable activation record for a visit to
 // a node. When only the node is given and it has exactly one activation, that
 // activation is returned; otherwise both node and activation ID must match.
-func findActivation(inst *WorkflowInstance, nodeID NodeID, activationID ActivationID) *Activation {
+func findActivation(inst *WorkflowInstance, nodeID NodeID, activationID ActivationID) (*Activation, error) {
+	matches := make([]*Activation, 0, len(inst.Activations))
 	for i := range inst.Activations {
 		a := &inst.Activations[i]
 		if a.NodeID != nodeID {
 			continue
 		}
 		if activationID == "" || a.ID == activationID {
-			return a
+			matches = append(matches, a)
 		}
 	}
-	return nil
+	if activationID != "" {
+		if len(matches) == 0 {
+			return nil, nil
+		}
+		return matches[0], nil
+	}
+	// activationID == ""
+	if len(matches) == 1 {
+		return matches[0], nil
+	}
+	if len(matches) == 0 {
+		return nil, nil
+	}
+	return nil, fmt.Errorf("ambiguous activation for node %q: activation_id required", nodeID)
 }
 
 // applyInstantiated materializes the initial instance from the event's

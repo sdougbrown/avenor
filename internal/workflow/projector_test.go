@@ -10,6 +10,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -288,4 +289,20 @@ func TestProjectionErrorIsNonFatal(t *testing.T) {
 		}()
 		s.regenerateProjections(wf, snap)
 	}()
+}
+
+// TestMdEsc locks Markdown escaping: pipe and every control/newline character
+// are neutralized so rendered projections cannot inject table rows or arbitrary
+// Markdown lines.
+func TestMdEsc(t *testing.T) {
+	got := mdEsc("a|b\nc\rd\te\x00f")
+	if strings.ContainsAny(got, "\n\r\t\x00") {
+		t.Fatalf("mdEsc leaked a control character: %q", got)
+	}
+	if !strings.Contains(got, `\|`) {
+		t.Fatalf("mdEsc did not escape the pipe: %q", got)
+	}
+	if strings.Contains(got, "|") && !strings.Contains(got, `\|`) {
+		t.Fatalf("mdEsc left an unescaped pipe: %q", got)
+	}
 }

@@ -1,6 +1,117 @@
 package workflow
 
-import "errors"
+import (
+	"errors"
+	"time"
+)
+
+// cloneSnapshot returns a deep copy of state so Reduce never aliases or
+// mutates the caller's snapshot. A JSON round-trip would trip the snapshot's
+// own canonical null-rejection on zero-value slices (e.g. nil Activations
+// before instantiate), so this is an explicit Go deep copy of the nested
+// slices and pointers the reducer mutates.
+func cloneSnapshot(state Snapshot) Snapshot {
+	next := state
+	next.AppliedEventIDs = append([]EventID(nil), state.AppliedEventIDs...)
+	next.Idempotency = make(map[string][]EventID, len(state.Idempotency))
+	for key, ids := range state.Idempotency {
+		next.Idempotency[key] = append([]EventID(nil), ids...)
+	}
+	inst := &next.Instance
+	inst.Metadata = cloneMap(inst.Metadata)
+	inst.Activations = cloneSlice(inst.Activations, cloneActivation)
+	inst.Attempts = cloneSlice(inst.Attempts, cloneAttempt)
+	inst.Evidence = cloneSlice(inst.Evidence, cloneEvidence)
+	inst.Gates = cloneSlice(inst.Gates, cloneGate)
+	inst.Outputs = cloneSlice(inst.Outputs, cloneOutput)
+	inst.Children = cloneSlice(inst.Children, cloneChild)
+	return next
+}
+
+// cloneSlice returns a fresh slice whose elements are deep copies of src via fn.
+func cloneSlice[T any](src []T, fn func(T) T) []T {
+	if src == nil {
+		return nil
+	}
+	out := make([]T, len(src))
+	for i := range src {
+		out[i] = fn(src[i])
+	}
+	return out
+}
+
+func cloneMap(src map[string]any) map[string]any {
+	if src == nil {
+		return nil
+	}
+	out := make(map[string]any, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneActivation(a Activation) Activation {
+	a.AttemptIDs = append([]AttemptID(nil), a.AttemptIDs...)
+	if a.Selection != nil {
+		sel := *a.Selection
+		a.Selection = &sel
+	}
+	if a.ActiveLease != nil {
+		lease := *a.ActiveLease
+		lease.LastHeartbeatAt = derefTime(a.ActiveLease.LastHeartbeatAt)
+		lease.LastActivityAt = derefTime(a.ActiveLease.LastActivityAt)
+		a.ActiveLease = &lease
+	}
+	return a
+}
+
+func cloneAttempt(at Attempt) Attempt {
+	at.ArtifactPaths = append([]string(nil), at.ArtifactPaths...)
+	at.EndedAt = derefTime(at.EndedAt)
+	return at
+}
+
+func cloneEvidence(ev Evidence) Evidence {
+	ev.Result = append([]byte(nil), ev.Result...)
+	ev.Subject = cloneSubject(ev.Subject)
+	return ev
+}
+
+func cloneGate(g GateInstance) GateInstance {
+	g.EvidenceIDs = append([]EvidenceID(nil), g.EvidenceIDs...)
+	g.Subject = cloneSubject(g.Subject)
+	g.ObservedAt = derefTime(g.ObservedAt)
+	g.DecidedAt = derefTime(g.DecidedAt)
+	return g
+}
+
+func cloneOutput(o OutputValue) OutputValue {
+	o.Value = append([]byte(nil), o.Value...)
+	o.EvidenceIDs = append([]EvidenceID(nil), o.EvidenceIDs...)
+	return o
+}
+
+func cloneChild(c ChildReference) ChildReference {
+	c.Outputs = cloneSlice(c.Outputs, func(r OutputReference) OutputReference { return r })
+	return c
+}
+
+func cloneSubject(s *Subject) *Subject {
+	if s == nil {
+		return nil
+	}
+	copy := *s
+	return &copy
+}
+
+func derefTime(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	v := *t
+	return &v
+}
 
 // Apply turns a validated command into the batch of events that records its
 // effect. It is a pure projection of (Snapshot, Command) -> []Event: nothing
@@ -30,7 +141,7 @@ func Reduce(state Snapshot, event Event) (Snapshot, error) {
 	if containsID(state.AppliedEventIDs, event.ID) {
 		return state, nil
 	}
-	next := state
+	next := cloneSnapshot(state)
 	if err := applyEvent(&next, event); err != nil {
 		return state, err
 	}

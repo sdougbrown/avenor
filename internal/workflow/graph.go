@@ -5,6 +5,17 @@ import (
 	"strings"
 )
 
+// validateNodeIDsAreSafeComponents ensures every node ID is a safe path component
+// so the projector can't traverse outside the instance directory.
+func validateNodeIDsAreSafeComponents(nodes []NodeDefinition) error {
+	for _, node := range nodes {
+		if !safeComponent(string(node.ID)) {
+			return fmt.Errorf("invalid workflow template: node %q is not a safe path component", node.ID)
+		}
+	}
+	return nil
+}
+
 // ValidateGraph enforces the typed, cross-node graph rules that the closed
 // Profile vocabulary cannot express. It is pure: it reads only template and
 // never touches I/O. It assumes the structural (field-presence, action-variant,
@@ -22,6 +33,11 @@ import (
 // pinpoints the earliest structural break, mirroring the sibling ValidateTemplate
 // walk's fail-fast contract.
 func ValidateGraph(template Template) error {
+	// Node IDs must be safe path components so the projector cannot escape the
+	// instance directory.
+	if err := validateNodeIDsAreSafeComponents(template.Nodes); err != nil {
+		return err
+	}
 	nodeIndex := make(map[NodeID]int, len(template.Nodes))
 	for index, node := range template.Nodes {
 		if _, exists := nodeIndex[node.ID]; exists {

@@ -14,6 +14,24 @@ import (
 	"strings"
 )
 
+// mdEsc escapes a field value for safe use in generated Markdown: pipe char
+// and all control characters (newline, CR, tab, and 0x00-0x1F) are replaced.
+func mdEsc(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r == '|':
+			b.WriteString(`\|`)
+		case r < 0x20 || r == 0x7f || r == '\n' || r == '\r' || r == '\t':
+			b.WriteRune(' ')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
 // WriteProjections renders every projection for snap and writes the files
 // under dir (the instance directory). It creates node directories as needed.
 // A projection is a derived artifact: callers (the store) treat an error as
@@ -23,6 +41,9 @@ func WriteProjections(dir string, snap Snapshot) error {
 		return err
 	}
 	for _, nodeID := range distinctNodes(snap.Instance.Activations) {
+		if !safeComponent(string(nodeID)) {
+			continue // never write outside the instance dir (path traversal guard)
+		}
 		nodeDir := filepath.Join(dir, "nodes", string(nodeID))
 		if err := os.MkdirAll(nodeDir, 0o755); err != nil {
 			return err
@@ -44,13 +65,13 @@ func WriteProjections(dir string, snap Snapshot) error {
 func ProjectWorkflowMD(snap Snapshot) string {
 	var b strings.Builder
 	inst := snap.Instance
-	b.WriteString("# Workflow " + string(inst.WorkflowID) + "\n\n")
-	b.WriteString("- Template: " + string(inst.TemplateID) + "@" + string(inst.TemplateVersion) + "\n")
-	b.WriteString("- Instance: " + string(inst.InstanceID) + "\n")
-	b.WriteString("- Status: " + string(inst.Status) + "\n")
+	b.WriteString("# Workflow " + mdEsc(string(inst.WorkflowID)) + "\n\n")
+	b.WriteString("- Template: " + mdEsc(string(inst.TemplateID)) + "@" + mdEsc(string(inst.TemplateVersion)) + "\n")
+	b.WriteString("- Instance: " + mdEsc(string(inst.InstanceID)) + "\n")
+	b.WriteString("- Status: " + mdEsc(string(inst.Status)) + "\n")
 	b.WriteString("- Revision: " + strconv.FormatInt(inst.Revision, 10) + "\n")
 	if inst.TerminalOutcome != "" {
-		b.WriteString("- Terminal outcome: " + string(inst.TerminalOutcome) + "\n")
+		b.WriteString("- Terminal outcome: " + mdEsc(string(inst.TerminalOutcome)) + "\n")
 	}
 	b.WriteString("\n")
 
@@ -76,7 +97,7 @@ func ProjectExecutionMD(snap Snapshot, nodeID NodeID) string {
 	acts := activationsForNode(snap.Instance.Activations, nodeID)
 	activationIDs := activationIDSet(acts)
 
-	b.WriteString("# Node " + string(nodeID) + "\n\n")
+	b.WriteString("# Node " + mdEsc(string(nodeID)) + "\n\n")
 
 	b.WriteString("## Activations\n\n")
 	writeTable(&b, []string{"Activation", "Iteration", "Status", "Outcome"}, activationRows(acts))
@@ -128,22 +149,22 @@ func ProjectReviewMD(snap Snapshot, gi GateInstance) string {
 	var b strings.Builder
 	nodeID := activationNode(snap.Instance.Activations, gi.ActivationID)
 
-	b.WriteString("# Gate " + string(gi.ID) + "\n\n")
-	b.WriteString("- Gate: " + string(gi.GateID) + "\n")
-	b.WriteString("- Node: " + string(nodeID) + "\n")
-	b.WriteString("- Activation: " + string(gi.ActivationID) + "\n")
-	b.WriteString("- Status: " + string(gi.Status) + "\n")
+	b.WriteString("# Gate " + mdEsc(string(gi.ID)) + "\n\n")
+	b.WriteString("- Gate: " + mdEsc(string(gi.GateID)) + "\n")
+	b.WriteString("- Node: " + mdEsc(string(nodeID)) + "\n")
+	b.WriteString("- Activation: " + mdEsc(string(gi.ActivationID)) + "\n")
+	b.WriteString("- Status: " + mdEsc(string(gi.Status)) + "\n")
 	if gi.Outcome != "" {
-		b.WriteString("- Outcome: " + string(gi.Outcome) + "\n")
+		b.WriteString("- Outcome: " + mdEsc(string(gi.Outcome)) + "\n")
 	}
 	if gi.Actor != "" {
-		b.WriteString("- Actor: " + gi.Actor + "\n")
+		b.WriteString("- Actor: " + mdEsc(gi.Actor) + "\n")
 	}
 	if gi.Reason != "" {
-		b.WriteString("- Reason: " + gi.Reason + "\n")
+		b.WriteString("- Reason: " + mdEsc(gi.Reason) + "\n")
 	}
 	if gi.Source != "" {
-		b.WriteString("- Source: " + gi.Source + "\n")
+		b.WriteString("- Source: " + mdEsc(gi.Source) + "\n")
 	}
 	b.WriteString("\n")
 
@@ -156,10 +177,10 @@ func ProjectReviewMD(snap Snapshot, gi GateInstance) string {
 	for _, id := range gi.EvidenceIDs {
 		e, ok := evidenceByID[id]
 		if !ok {
-			rows = append(rows, []string{string(id), "", "", ""})
+			rows = append(rows, []string{mdEsc(string(id)), "", "", ""})
 			continue
 		}
-		rows = append(rows, []string{string(e.ID), e.Kind, e.Authority, e.SHA256})
+		rows = append(rows, []string{mdEsc(string(e.ID)), mdEsc(e.Kind), mdEsc(e.Authority), mdEsc(e.SHA256)})
 	}
 	writeTable(&b, []string{"Evidence", "Kind", "Authority", "SHA256"}, rows)
 
@@ -180,7 +201,7 @@ func writeTable(b *strings.Builder, header []string, rows [][]string) {
 	for _, r := range rows {
 		cells := make([]string, 0, len(header))
 		for _, c := range r {
-			cells = append(cells, strings.ReplaceAll(c, "|", "\\|"))
+			cells = append(cells, mdEsc(c))
 		}
 		b.WriteString("| " + strings.Join(cells, " | ") + " |\n")
 	}
