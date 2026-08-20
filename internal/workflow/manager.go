@@ -8,21 +8,60 @@ package workflow
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
 type Manager struct {
 	store *Store
+
+	mu        sync.Mutex
+	executors map[ActionKind]Executor
 }
 
 func NewManager(store *Store) *Manager {
-	return &Manager{store: store}
+	return &Manager{store: store, executors: make(map[ActionKind]Executor)}
+}
+
+// Executor dispatches a started action to its runtime backend. The manager
+// records the attempt durably before calling Dispatch, so an executor that
+// crashes leaves the attempt in the log for recovery. Stage 6 registers no
+// real providers; tests use a fake.
+type Executor interface {
+	Dispatch(ctx context.Context, ec ExecutorContext) error
+}
+
+// ExecutorContext carries everything a backend needs to run one attempt.
+type ExecutorContext struct {
+	WorkflowID   WorkflowID
+	NodeID       NodeID
+	ActivationID ActivationID
+	AttemptID    AttemptID
+	LeaseID      LeaseID
+	Action       Action
+	Selection    *ExecutionSelection
+}
+
+// RegisterExecutor attaches the dispatch backend for one action kind.
+func (m *Manager) RegisterExecutor(kind ActionKind, exec Executor) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.executors[kind] = exec
+}
+
+// executor returns the registered backend for an action kind, or nil when no
+// executor is registered (the action is unsupported until a later stage).
+func (m *Manager) executor(kind ActionKind) Executor {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.executors[kind]
 }
 
 // safeComponent rejects empty, ".", "..", and any component containing a path
@@ -273,7 +312,231 @@ func (m *Manager) WorkflowEvents(id string, afterSeq int64, limit int) (any, err
 	}, nil
 }
 
-// WorkflowCommand is a stub: instance commands are a later stage.
+// WorkflowCommand routes an instance command by its "op" discriminator.
 func (m *Manager) WorkflowCommand(id string, payload json.RawMessage) (any, error) {
-	return nil, errors.New("workflow commands (claim/start/complete/gate/skip/unblock/reroute/heartbeat) are unsupported until a later stage")
+	wf, err := m.checkWorkflowID(id)
+	if err != nil {
+		return nil, err
+	}
+	var op struct {
+		Op string `json:"op"`
+	}
+	if err := json.Unmarshal(payload, &op); err != nil {
+		return nil, fmt.Errorf("command payload: %w", err)
+	}
+	switch op.Op {
+	case "claim":
+		return m.commandClaim(wf, payload)
+	case "start":
+		return m.commandStart(wf, payload)
+	default:
+		return nil, fmt.Errorf("workflow command op %q is unsupported until a later stage", op.Op)
+	}
+}
+
+// templateFor loads the instance's versioned template from the store.
+func (m *Manager) templateFor(snap *Snapshot) (*Template, error) {
+	tmpl, err := m.store.LoadTemplate(snap.Instance.TemplateID, snap.Instance.TemplateVersion)
+	if err != nil {
+		return nil, err
+	}
+	return &tmpl, nil
+}
+
+// findNode locates a node definition in the template by ID.
+func findNode(tmpl *Template, nodeID NodeID) (*NodeDefinition, error) {
+	for i := range tmpl.Nodes {
+		if tmpl.Nodes[i].ID == nodeID {
+			return &tmpl.Nodes[i], nil
+		}
+	}
+	return nil, fmt.Errorf("node %q not found in template %s@%s", nodeID, tmpl.TemplateID, tmpl.TemplateVersion)
+}
+
+type commandClaimRequest struct {
+	NodeID       NodeID       `json:"node_id"`
+	ActivationID ActivationID `json:"activation_id"`
+	Actor        string       `json:"actor"`
+}
+
+// commandClaim grants a lease on a pending/ready activation and hands the
+// caller the raw owner token. It does not start any provider or allocate an
+// attempt.
+func (m *Manager) commandClaim(wf WorkflowID, payload json.RawMessage) (any, error) {
+	var req commandClaimRequest
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return nil, fmt.Errorf("claim payload: %w", err)
+	}
+	if req.NodeID == "" {
+		return nil, errors.New("claim requires node_id")
+	}
+	snap, exists, err := m.store.loadCurrent(wf)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, fmt.Errorf("workflow not found: %s", wf)
+	}
+	act, err := findActivation(&snap.Instance, req.NodeID, req.ActivationID)
+	if err != nil {
+		return nil, err
+	}
+	if act == nil {
+		return nil, fmt.Errorf("activation not found for node %q", req.NodeID)
+	}
+	if act.Status != ActivationPending && act.Status != ActivationReady {
+		return nil, fmt.Errorf("cannot claim activation in status %q", act.Status)
+	}
+	tmpl, err := m.templateFor(&snap)
+	if err != nil {
+		return nil, err
+	}
+	node, err := findNode(tmpl, req.NodeID)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	ttl := leaseTTL(node, tmpl.DefaultLease)
+	expiresAt := now.Add(ttl)
+	token := newOwnerToken()
+	leaseID := NewLeaseID()
+	snap, err = m.store.ApplyCommand(wf, Command{
+		ID:               NewCommandID(),
+		Kind:             CommandClaim,
+		ExpectedRevision: snap.Instance.Revision,
+		IdempotencyKey:   "claim-" + string(leaseID),
+		Identity:         ExecutionIdentity{WorkflowID: wf, NodeID: req.NodeID, ActivationID: act.ID},
+		LeaseID:          leaseID,
+		Actor:            req.Actor,
+		Lease: &Lease{
+			ID:           leaseID,
+			ActivationID: act.ID,
+			Owner:        req.Actor,
+			TokenDigest:  ownerTokenDigest(token),
+			AcquiredAt:   now,
+			ExpiresAt:    expiresAt,
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"lease_id":    string(leaseID),
+		"owner_token": token,
+		"expires_at":  expiresAt,
+		"action":      node.Action,
+		"revision":    snap.Instance.Revision,
+	}, nil
+}
+
+type commandStartRequest struct {
+	NodeID       NodeID              `json:"node_id"`
+	ActivationID ActivationID        `json:"activation_id"`
+	LeaseID      LeaseID             `json:"lease_id"`
+	OwnerToken   string              `json:"owner_token"`
+	Selection    *ExecutionSelection `json:"selection"`
+}
+
+// commandStart validates the lease/owner pair against the activation, records
+// a new attempt durably, and dispatches it. Manual/external actions park in
+// awaiting-completion; provider-backed actions require a registered executor.
+func (m *Manager) commandStart(wf WorkflowID, payload json.RawMessage) (any, error) {
+	var req commandStartRequest
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return nil, fmt.Errorf("start payload: %w", err)
+	}
+	if req.NodeID == "" {
+		return nil, errors.New("start requires node_id")
+	}
+	if req.LeaseID == "" {
+		return nil, errors.New("start requires lease_id")
+	}
+	if req.OwnerToken == "" {
+		return nil, errors.New("start requires owner_token")
+	}
+	snap, exists, err := m.store.loadCurrent(wf)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, fmt.Errorf("workflow not found: %s", wf)
+	}
+	act, err := findActivation(&snap.Instance, req.NodeID, req.ActivationID)
+	if err != nil {
+		return nil, err
+	}
+	if act == nil {
+		return nil, fmt.Errorf("activation not found for node %q", req.NodeID)
+	}
+	if act.Status != ActivationLeased {
+		return nil, fmt.Errorf("cannot start activation in status %q", act.Status)
+	}
+	if act.ActiveLease == nil {
+		return nil, errors.New("activation has no active lease")
+	}
+	if req.LeaseID != act.ActiveLease.ID {
+		return nil, errors.New("lease_id does not match the active lease")
+	}
+	if ownerTokenDigest(req.OwnerToken) != act.ActiveLease.TokenDigest {
+		return nil, errors.New("owner token does not match the lease")
+	}
+	tmpl, err := m.templateFor(&snap)
+	if err != nil {
+		return nil, err
+	}
+	node, err := findNode(tmpl, req.NodeID)
+	if err != nil {
+		return nil, err
+	}
+	attemptID := NewAttemptID()
+	if node.Action.Kind == ActionManual || node.Action.Kind == ActionExternal {
+		_, err := m.applyStart(wf, snap, act, req, attemptID)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"attempt_id":        string(attemptID),
+			"status":            string(ActivationRunning),
+			"requires_complete": true,
+			"action":            node.Action,
+		}, nil
+	}
+	exec := m.executor(node.Action.Kind)
+	if exec == nil {
+		return nil, fmt.Errorf("executor for action %q is unsupported until a later stage (executor not registered)", node.Action.Kind)
+	}
+	if _, err := m.applyStart(wf, snap, act, req, attemptID); err != nil {
+		return nil, err
+	}
+	if err := exec.Dispatch(context.Background(), ExecutorContext{
+		WorkflowID:   wf,
+		NodeID:       req.NodeID,
+		ActivationID: act.ID,
+		AttemptID:    attemptID,
+		LeaseID:      req.LeaseID,
+		Action:       node.Action,
+		Selection:    req.Selection,
+	}); err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"attempt_id": string(attemptID),
+		"status":     string(ActivationRunning),
+		"action":     node.Action,
+	}, nil
+}
+
+// applyStart durably records a new attempt on a leased activation. It must run
+// under the store's revision guard so a concurrent start is rejected without
+// mutating the snapshot.
+func (m *Manager) applyStart(wf WorkflowID, snap Snapshot, act *Activation, req commandStartRequest, attemptID AttemptID) (Snapshot, error) {
+	return m.store.ApplyCommand(wf, Command{
+		ID:               NewCommandID(),
+		Kind:             CommandStart,
+		ExpectedRevision: snap.Instance.Revision,
+		IdempotencyKey:   "start-" + string(attemptID),
+		Identity:         ExecutionIdentity{WorkflowID: wf, NodeID: req.NodeID, ActivationID: act.ID, AttemptID: attemptID},
+		LeaseID:          req.LeaseID,
+		Selection:        req.Selection,
+	})
 }
