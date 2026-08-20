@@ -43,12 +43,14 @@ func buildCommandEvents(state Snapshot, command Command) ([]Event, error) {
 		e := newEvent(EventLeased)
 		e.LeaseID = command.LeaseID
 		e.Actor = command.Actor
+		e.Lease = command.Lease
 		return []Event{e}, nil
 
 	case CommandStart:
 		e := newEvent(EventStarted)
 		e.AttemptID = command.Identity.AttemptID
 		e.LeaseID = command.LeaseID
+		e.Selection = command.Selection
 		return []Event{e}, nil
 
 	case CommandComplete:
@@ -296,6 +298,15 @@ func applyLeased(next *Snapshot, act *Activation, event Event) error {
 	}
 	act.Status = ActivationLeased
 	act.ActiveLease = &Lease{ID: event.LeaseID, ActivationID: act.ID, Owner: event.Actor}
+	if event.Lease != nil {
+		// Deterministically carry the claim's expiry metadata so a lease
+		// reconstructed from replay keeps the same real TTL. A bare
+		// (legacy/crash-window) leased event with no lease metadata keeps a
+		// zero expiry and is conservatively swept on recovery.
+		act.ActiveLease.TokenDigest = event.Lease.TokenDigest
+		act.ActiveLease.AcquiredAt = event.Lease.AcquiredAt
+		act.ActiveLease.ExpiresAt = event.Lease.ExpiresAt
+	}
 	act.UpdatedAt = nowUTC()
 	return nil
 }
@@ -322,6 +333,11 @@ func applyStarted(next *Snapshot, act *Activation, event Event) error {
 	act.AttemptIDs = append(act.AttemptIDs, attemptID)
 	act.Status = ActivationRunning
 	act.UpdatedAt = nowUTC()
+	if event.Selection != nil {
+		// Pin the resolved ExecutionSelection on the start; retries/runtime
+		// inherit it. Deterministic because it is carried on the event.
+		act.Selection = event.Selection
+	}
 	next.Instance.Attempts = append(next.Instance.Attempts, attempt)
 	return nil
 }
