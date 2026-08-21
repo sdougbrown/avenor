@@ -253,7 +253,7 @@ func (m *Manager) commandComplete(wf WorkflowID, payload json.RawMessage) (any, 
 			return map[string]any{
 				"idempotent":        true,
 				"already_completed": true,
-				"status":            string(act.Status),
+				"status":            string(m.currentActivationStatus(wf, req.NodeID, act.ID, act.Status)),
 			}, nil
 		}
 		if !errors.Is(err, errRevisionMismatch) {
