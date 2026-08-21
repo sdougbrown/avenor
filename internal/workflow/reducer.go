@@ -5,6 +5,14 @@ import (
 	"time"
 )
 
+// errRevisionMismatch is returned by Apply when the command's expected revision
+// differs from the current instance revision (optimistic-concurrency guard).
+var errRevisionMismatch = errors.New("revision mismatch")
+
+// errDuplicateIdempotency is returned by Apply when a command reuses an already
+// applied idempotency key (a retried command that already landed).
+var errDuplicateIdempotency = errors.New("duplicate command idempotency key")
+
 // cloneSnapshot returns a deep copy of state so Reduce never aliases or
 // mutates the caller's snapshot. A JSON round-trip would trip the snapshot's
 // own canonical null-rejection on zero-value slices (e.g. nil Activations
@@ -123,11 +131,11 @@ func derefTime(t *time.Time) *time.Time {
 // transitions.go (applyEvent), which stays purely replay-driven.
 func Apply(state Snapshot, command Command) ([]Event, error) {
 	if command.ExpectedRevision != state.Instance.Revision {
-		return nil, errors.New("revision mismatch")
+		return nil, errRevisionMismatch
 	}
 	if command.IdempotencyKey != "" {
 		if _, ok := state.Idempotency[command.IdempotencyKey]; ok {
-			return nil, errors.New("duplicate command idempotency key")
+			return nil, errDuplicateIdempotency
 		}
 	}
 	return buildCommandEvents(state, command)

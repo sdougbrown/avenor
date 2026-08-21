@@ -895,3 +895,58 @@ func TestRecordAttemptTerminatedRecordsMarker(t *testing.T) {
 		}
 	}
 }
+
+// TestManagerRecordAttemptTerminatedRecordsAndIsIdempotent locks the Stage-8
+// termination fix: RecordAttemptTerminated records the terminal fact and is
+// idempotent per attempt (a duplicate terminate returns success, not an error),
+// and the attempt's status is durably recorded.
+func TestManagerRecordAttemptTerminatedRecordsAndIsIdempotent(t *testing.T) {
+	m, s, wf, node := newManagerFixture(t)
+	snap, ok, err := s.loadSnapshot(wf)
+	if err != nil || !ok {
+		t.Fatalf("load snapshot: %v / %v", err, ok)
+	}
+	actID := snap.Instance.Activations[0].ID
+	nodeID := NodeID(node)
+	snap = mustStoreApply(t, s, wf, Command{
+		Kind:             CommandClaim,
+		ExpectedRevision: snap.Instance.Revision,
+		IdempotencyKey:   "claim",
+		Identity:         ExecutionIdentity{WorkflowID: wf, NodeID: nodeID, ActivationID: actID},
+		LeaseID:          "lease-1",
+		Actor:            "alice",
+	})
+	snap = mustStoreApply(t, s, wf, Command{
+		Kind:             CommandStart,
+		ExpectedRevision: snap.Instance.Revision,
+		IdempotencyKey:   "start",
+		Identity:         ExecutionIdentity{WorkflowID: wf, NodeID: nodeID, ActivationID: actID, AttemptID: "att-9"},
+		LeaseID:          "lease-1",
+	})
+	const attempt = AttemptID("att-9")
+	if err := m.RecordAttemptTerminated(wf, nodeID, actID, attempt, "lease-1", AttemptFailed); err != nil {
+		t.Fatalf("terminate: %v", err)
+	}
+	// Duplicate terminate for the same attempt must be treated as already
+	// recorded (idempotent), not an error.
+	if err := m.RecordAttemptTerminated(wf, nodeID, actID, attempt, "lease-1", AttemptFailed); err != nil {
+		t.Fatalf("duplicate terminate: %v", err)
+	}
+	snap, _, _ = s.loadSnapshot(wf)
+	var found *Attempt
+	for i := range snap.Instance.Attempts {
+		if snap.Instance.Attempts[i].ID == attempt {
+			found = &snap.Instance.Attempts[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("attempt %s not found", attempt)
+	}
+	if found.Status != AttemptFailed {
+		t.Fatalf("attempt status = %s, want %s", found.Status, AttemptFailed)
+	}
+	if found.EndedAt == nil {
+		t.Fatalf("attempt %s has no EndedAt", attempt)
+	}
+}

@@ -562,26 +562,42 @@ func (m *Manager) RecordAttemptTerminated(wf WorkflowID, nodeID NodeID, activati
 	if len(marker) >= 2 {
 		markerLabel = marker[1]
 	}
-	snap, exists, err := m.store.loadCurrent(wf)
-	if err != nil {
-		return err
+	// The command is idempotent per attempt (stable "terminate-<attemptID>"
+	// key), so it is safe to retry: a concurrent command on the same instance
+	// can bump the revision in the window between the read and the apply. Without
+	// this, a lost termination leaves the activation running with its lease held
+	// and no reaper, deadlocking the instance. Bounded to avoid spinning.
+	const maxTerminateAttempts = 4
+	for attempt := 0; attempt < maxTerminateAttempts; attempt++ {
+		snap, exists, err := m.store.loadCurrent(wf)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return fmt.Errorf("workflow not found: %s", wf)
+		}
+		_, err = m.store.ApplyCommand(wf, Command{
+			ID:               NewCommandID(),
+			Kind:             CommandTerminate,
+			ExpectedRevision: snap.Instance.Revision,
+			IdempotencyKey:   "terminate-" + string(attemptID),
+			Identity:         ExecutionIdentity{WorkflowID: wf, NodeID: nodeID, ActivationID: activationID, AttemptID: attemptID},
+			LeaseID:          leaseID,
+			AttemptStatus:    status,
+			MarkerKind:       markerKind,
+			MarkerLabel:      markerLabel,
+		})
+		if err == nil {
+			return nil
+		}
+		if errors.Is(err, errDuplicateIdempotency) {
+			// Already recorded for this attempt.
+			return nil
+		}
+		if !errors.Is(err, errRevisionMismatch) {
+			return err
+		}
+		// Optimistic-concurrency conflict; re-read under a fresh lock and retry.
 	}
-	if !exists {
-		return fmt.Errorf("workflow not found: %s", wf)
-	}
-	_, err = m.store.ApplyCommand(wf, Command{
-		ID:               NewCommandID(),
-		Kind:             CommandTerminate,
-		ExpectedRevision: snap.Instance.Revision,
-		IdempotencyKey:   "terminate-" + string(attemptID),
-		Identity:         ExecutionIdentity{WorkflowID: wf, NodeID: nodeID, ActivationID: activationID, AttemptID: attemptID},
-		LeaseID:          leaseID,
-		AttemptStatus:    status,
-		MarkerKind:       markerKind,
-		MarkerLabel:      markerLabel,
-	})
-	if err != nil {
-		return err
-	}
-	return nil
+	return fmt.Errorf("terminate attempt %s: revision kept moving under concurrent commands", attemptID)
 }
