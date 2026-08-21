@@ -45,6 +45,8 @@ type Event struct {
 	Reason         string              `json:"reason,omitempty"`
 	Outcome        OutcomeName         `json:"outcome,omitempty"`
 	AttemptStatus  AttemptStatus       `json:"attempt_status,omitempty"`
+	MarkerKind     string              `json:"marker_kind,omitempty"`
+	MarkerLabel    string              `json:"marker_label,omitempty"`
 	Gate           *GateInstance       `json:"gate,omitempty"`
 	Transition     *Transition         `json:"transition,omitempty"`
 	Evidence       []Evidence          `json:"evidence,omitempty"`

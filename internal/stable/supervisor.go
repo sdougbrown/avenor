@@ -1349,7 +1349,9 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 	var brokerAttemptIDsMu sync.Mutex
 	sessions := newWorkflowSessionTracker()
 	defer func() {
+		panicked := false
 		if r := recover(); r != nil {
+			panicked = true
 			fmt.Fprintf(os.Stderr, "avenor stable: child %s panic: %v\n", child.id, r)
 			s.emitChildError(child, fmt.Sprintf("panic: %v", r), "error")
 			if final, ok := sessions.latest(); ok {
@@ -1359,6 +1361,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				cli.WriteSentinel(child.sentinelFile, 1, child.sessionID(), "error", s.runID, os.Stderr)
 			}
 		}
+		s.recordWorkflowTermination(child, panicked, ctx)
 		s.beginChildShutdown(child)
 		s.closeChildEventWriter(child)
 		s.clearRuntimePermissionOptions(child.id)
@@ -3788,6 +3791,7 @@ func (s *Supervisor) workflowManager() *workflow.Manager {
 	}
 	m := workflow.NewManager(workflow.New(resolveWorkflowRoot(s.config.WorkflowRoot)))
 	m.RegisterExecutor(workflow.ActionRun, s.directRunExecutor())
+	m.RegisterExecutor(workflow.ActionLoop, s.loopExecutor())
 	s.workflowMgr = m
 	s.control.SetWorkflowHandler(m)
 	return m
@@ -3842,6 +3846,67 @@ func (e *directRunExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorCo
 	return nil
 }
 
+// loopExecutor returns the Executor that dispatches a workflow loop action to
+// a real stable loop child, threading workflow identity through the spawn and
+// recording attempt termination on every terminal path.
+func (s *Supervisor) loopExecutor() workflow.Executor {
+	return &loopExecutor{sup: s}
+}
+
+type loopExecutor struct{ sup *Supervisor }
+
+func (e *loopExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext) error {
+	params := SpawnParams{
+		WorkflowID:   string(ec.WorkflowID),
+		NodeID:       string(ec.NodeID),
+		ActivationID: string(ec.ActivationID),
+		AttemptID:    string(ec.AttemptID),
+		Dir:          ".",
+	}
+	if ec.Selection != nil {
+		params.Agent = ec.Selection.Agent
+		params.Model = ec.Selection.Model
+		params.Backend = ec.Selection.Backend
+		params.Thinking = ec.Selection.Thinking
+	}
+	if ec.Action.Loop != nil {
+		params.LoopFile = ec.Action.Loop.LoopFile
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		params.Dir = cwd
+	}
+
+	result, err := e.sup.spawn(params)
+	if err != nil {
+		// Provider-start (or any synchronous spawn) error: the attempt was
+		// already started durably by the manager; record termination before
+		// returning so the attempt is never left dangling.
+		kind, label := workflowMarkerForKind(ec.Action.Kind)
+		_ = e.sup.workflowManager().RecordAttemptTerminated(
+			ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, workflow.AttemptFailed, kind, label)
+		return err
+	}
+	e.sup.registerWorkflowTermination(result.RuntimeID, ec)
+	return nil
+}
+
+// workflowMarkerForKind returns the action-level marker evidence recorded on
+// a workflow attempt at termination. Direct runs (run) have no marker. Loop
+// and team record the action-declared constant as MarkerKind because the
+// aggregate child RunResult does not expose the terminal marker
+// directive/label (looprunner/teamrunner keep those internal) — this is the
+// decision-2 documented fallback; the parsed exit/abort/continue marker
+// remains action-local and is never a kernel command.
+func workflowMarkerForKind(kind workflow.ActionKind) (string, string) {
+	switch kind {
+	case workflow.ActionLoop:
+		return "loop", ""
+	case workflow.ActionTeam:
+		return "team", ""
+	}
+	return "", ""
+}
+
 // registerWorkflowTermination attaches a termination callback to the spawned
 // direct-run child so the workflow manager learns the attempt's final status
 // before the child's runtime state is cleaned up.
@@ -3855,8 +3920,9 @@ func (s *Supervisor) registerWorkflowTermination(rtID string, ec workflow.Execut
 	child.mu.Lock()
 	defer child.mu.Unlock()
 	child.onWorkflowTerminate = func(status workflow.AttemptStatus) {
+		kind, label := workflowMarkerForKind(ec.Action.Kind)
 		_ = s.workflowManager().RecordAttemptTerminated(
-			ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, status)
+			ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, status, kind, label)
 	}
 }
 

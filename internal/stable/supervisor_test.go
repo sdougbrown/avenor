@@ -5723,3 +5723,147 @@ func TestWorkflowRunChildRecordsFailedTermination(t *testing.T) {
 		t.Fatalf("workflow termination status = %s, want failed", status)
 	}
 }
+
+// TestWorkflowMarkerForKind pins the action-level marker evidence recorded on
+// a workflow attempt at termination: loop/team record the action-declared
+// constant as MarkerKind (the aggregate RunResult does not expose the
+// terminal marker directive/label), direct runs have no marker, and the label
+// is dropped for all kinds.
+func TestWorkflowMarkerForKind(t *testing.T) {
+	tests := []struct {
+		kind workflow.ActionKind
+		wantKind, wantLabel string
+	}{
+		{workflow.ActionRun, "", ""},
+		{workflow.ActionLoop, "loop", ""},
+		{workflow.ActionTeam, "team", ""},
+	}
+	for _, tt := range tests {
+		kind, label := workflowMarkerForKind(tt.kind)
+		if kind != tt.wantKind || label != tt.wantLabel {
+			t.Fatalf("workflowMarkerForKind(%s) = %q/%q, want %q/%q", tt.kind, kind, label, tt.wantKind, tt.wantLabel)
+		}
+	}
+}
+
+// TestWorkflowLoopChildRecordsTermination mirrors
+// TestWorkflowRunChildRecordsFailedTermination for the loop child: a loop
+// child carrying workflow identity fires the termination callback with
+// AttemptSucceeded when the loop completes cleanly.
+func TestWorkflowLoopChildRecordsTermination(t *testing.T) {
+	provider := &stableScriptedProvider{
+		attempt: -1,
+		scripts: []stableScriptedAttempt{{
+			sessionID: "ses_wf_loop",
+			events: []stableScriptedEvent{{event: events.Event{
+				Event:     "session.end",
+				SessionID: "ses_wf_loop",
+				Fields:    map[string]any{"stop_reason": "end_turn"},
+			}}},
+		}},
+	}
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-wf-loop-term.sock", MaxRuntimes: 1})
+	defer func() { _ = sup.broker.Stop() }()
+	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
+	ctx, cancel := context.WithCancel(context.Background())
+	child := &childRuntime{
+		id:           "rt_wf_loop_term",
+		workflowID:   "wf1",
+		nodeID:       "start",
+		activationID: "act1",
+		attemptID:    "att2",
+		done:         make(chan struct{}),
+		promptCh:     make(chan struct{}, 1),
+		eventWriter:  stableTestSink{},
+		cancelFn:     cancel,
+	}
+	sup.runtimes[child.id] = child
+
+	var mu sync.Mutex
+	var called bool
+	var gotStatus workflow.AttemptStatus
+	child.onWorkflowTerminate = func(status workflow.AttemptStatus) {
+		mu.Lock()
+		called = true
+		gotStatus = status
+		mu.Unlock()
+	}
+
+	go sup.runLoopChild(ctx, child, &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}, 0, "", "", "", "", "", "")
+	waitForStableDone(t, child)
+
+	mu.Lock()
+	wasCalled, status := called, gotStatus
+	mu.Unlock()
+	if !wasCalled {
+		t.Fatal("workflow loop child did not record termination on clean run")
+	}
+	if status != workflow.AttemptSucceeded {
+		t.Fatalf("workflow loop termination status = %s, want succeeded", status)
+	}
+}
+
+// TestWorkflowLoopExecutorRegistered proves the loop action is wired into the
+// supervisor's workflow manager: a start command for a loop action reaches the
+// loop executor (spawn fails loading the missing loop file) instead of being
+// rejected as an unsupported/unregistered executor.
+func TestWorkflowLoopExecutorRegistered(t *testing.T) {
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-wf-loop-reg.sock", MaxRuntimes: 1, WorkflowRoot: filepath.Join(t.TempDir(), "wfroot")})
+	mgr := sup.workflowManager()
+	const loopTemplate = `{
+  "schema_version": 1,
+  "template_id": "loop-reg",
+  "template_version": "1",
+  "entry_nodes": ["start"],
+  "nodes": [{"id": "start", "action": {"type": "loop", "loop_file": "missing.json"}}],
+  "terminal_outcomes": ["done"]
+}`
+	if _, err := mgr.WorkflowCreate([]byte(loopTemplate)); err != nil {
+		t.Fatalf("WorkflowCreate: %v", err)
+	}
+	inst, err := mgr.WorkflowInstantiate([]byte(`{"template_id": "loop-reg", "template_version": "1"}`))
+	if err != nil {
+		t.Fatalf("WorkflowInstantiate: %v", err)
+	}
+	wfID, _ := inst.(map[string]any)["workflow_id"].(string)
+	if wfID == "" {
+		t.Fatalf("instantiate result missing workflow_id: %#v", inst)
+	}
+	insp, err := mgr.WorkflowInspect(wfID)
+	if err != nil {
+		t.Fatalf("WorkflowInspect: %v", err)
+	}
+	acts, ok := insp.(map[string]any)["activations"].([]workflow.Activation)
+	if !ok || len(acts) == 0 {
+		t.Fatalf("inspect activations = %#v, want one activation", insp.(map[string]any)["activations"])
+	}
+	actID := string(acts[0].ID)
+
+	mustMarshal := func(v map[string]any) []byte {
+		data, err := json.Marshal(v)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return data
+	}
+	claim, err := mgr.WorkflowCommand(wfID, mustMarshal(map[string]any{
+		"op": "claim", "node_id": "start", "activation_id": actID, "actor": "alice",
+	}))
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	cm := claim.(map[string]any)
+	_, err = mgr.WorkflowCommand(wfID, mustMarshal(map[string]any{
+		"op": "start", "node_id": "start", "activation_id": actID,
+		"lease_id": cm["lease_id"], "owner_token": cm["owner_token"],
+	}))
+	if err == nil {
+		t.Fatal("start succeeded, want the loop executor's missing-loop-file spawn error")
+	}
+	if strings.Contains(err.Error(), "unsupported") || strings.Contains(err.Error(), "not registered") {
+		t.Fatalf("loop executor not registered: %v", err)
+	}
+	if !strings.Contains(err.Error(), "load loop config") {
+		t.Fatalf("start error = %v, want loop executor spawn (load loop config) error", err)
+	}
+}

@@ -546,9 +546,21 @@ func (m *Manager) applyStart(wf WorkflowID, snap Snapshot, act *Activation, req 
 // (the stable supervisor's direct-run executor) on every terminal path:
 // success, failure, panic, cancellation, timeout, and provider-start error.
 // It is idempotent per attempt so duplicate terminations are safe.
-func (m *Manager) RecordAttemptTerminated(wf WorkflowID, nodeID NodeID, activationID ActivationID, attemptID AttemptID, leaseID LeaseID, status AttemptStatus) error {
+//
+// The optional trailing marker args carry inert terminal-marker evidence
+// (marker kind first, marker label second). Markers are recorded on the
+// attempt as evidence only; they are never a workflow-store command and
+// cannot satisfy an activation or select an outcome.
+func (m *Manager) RecordAttemptTerminated(wf WorkflowID, nodeID NodeID, activationID ActivationID, attemptID AttemptID, leaseID LeaseID, status AttemptStatus, marker ...string) error {
 	if status == "" {
 		return errors.New("attempt termination status is required")
+	}
+	var markerKind, markerLabel string
+	if len(marker) >= 1 {
+		markerKind = marker[0]
+	}
+	if len(marker) >= 2 {
+		markerLabel = marker[1]
 	}
 	snap, exists, err := m.store.loadCurrent(wf)
 	if err != nil {
@@ -565,6 +577,8 @@ func (m *Manager) RecordAttemptTerminated(wf WorkflowID, nodeID NodeID, activati
 		Identity:         ExecutionIdentity{WorkflowID: wf, NodeID: nodeID, ActivationID: activationID, AttemptID: attemptID},
 		LeaseID:          leaseID,
 		AttemptStatus:    status,
+		MarkerKind:       markerKind,
+		MarkerLabel:      markerLabel,
 	})
 	if err != nil {
 		return err

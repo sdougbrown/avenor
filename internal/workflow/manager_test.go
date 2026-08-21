@@ -815,5 +815,83 @@ func TestRecordAttemptTerminatedRecordsTerminalFact(t *testing.T) {
 		if at == nil || at.Status != AttemptSucceeded || at.EndedAt == nil {
 			t.Fatalf("attempt after succeeded termination = %+v, want status succeeded + ended", at)
 		}
+		if at.MarkerKind != "" || at.MarkerLabel != "" {
+			t.Fatalf("no-marker termination recorded marker %q/%q, want empty", at.MarkerKind, at.MarkerLabel)
+		}
+	}
+}
+
+// TestRecordAttemptTerminatedRecordsMarker verifies the Stage-8 marker path:
+// the optional trailing marker args on RecordAttemptTerminated are recorded on
+// the attempt as inert evidence, and a no-marker call leaves them empty.
+func TestRecordAttemptTerminatedRecordsMarker(t *testing.T) {
+	findAttemptByID := func(inst *WorkflowInstance, id AttemptID) *Attempt {
+		for i := range inst.Attempts {
+			if inst.Attempts[i].ID == id {
+				return &inst.Attempts[i]
+			}
+		}
+		return nil
+	}
+
+	startAttempt := func(m *Manager, wf WorkflowID) (ActivationID, AttemptID, LeaseID) {
+		snap, _, err := m.store.loadCurrent(wf)
+		if err != nil {
+			t.Fatalf("loadCurrent: %v", err)
+		}
+		actID := activationByNode(&snap.Instance, NodeID("start")).ID
+		res := claimActivation(t, m, wf, "start", string(actID), "alice")
+		leaseID, _ := res["lease_id"].(string)
+		out, err := m.WorkflowCommand(string(wf), startCommandPayload(t, "start", string(actID), res, nil))
+		if err != nil {
+			t.Fatalf("start: %v", err)
+		}
+		attemptID, _ := out.(map[string]any)["attempt_id"].(string)
+		if attemptID == "" {
+			t.Fatal("start result missing attempt_id")
+		}
+		return actID, AttemptID(attemptID), LeaseID(leaseID)
+	}
+
+	// Marker path: two trailing args are recorded on the attempt.
+	{
+		m, s, wf := newRunTemplateFixture(t)
+		m.RegisterExecutor(ActionRun, &fakeExecutor{})
+		actID, attemptID, leaseID := startAttempt(m, wf)
+		if err := m.RecordAttemptTerminated(wf, NodeID("start"), actID, attemptID, leaseID, AttemptSucceeded, "loop", "wf-loop"); err != nil {
+			t.Fatalf("RecordAttemptTerminated(succeeded, marker): %v", err)
+		}
+		snap, _, err := s.loadCurrent(wf)
+		if err != nil {
+			t.Fatalf("reload after marked termination: %v", err)
+		}
+		at := findAttemptByID(&snap.Instance, attemptID)
+		if at == nil {
+			t.Fatalf("attempt %s not found after marked termination", attemptID)
+		}
+		if at.MarkerKind != "loop" || at.MarkerLabel != "wf-loop" {
+			t.Fatalf("attempt marker = %q/%q, want loop/wf-loop", at.MarkerKind, at.MarkerLabel)
+		}
+	}
+
+	// No-marker path: attempt marker fields stay empty.
+	{
+		m, s, wf := newRunTemplateFixture(t)
+		m.RegisterExecutor(ActionRun, &fakeExecutor{})
+		actID, attemptID, leaseID := startAttempt(m, wf)
+		if err := m.RecordAttemptTerminated(wf, NodeID("start"), actID, attemptID, leaseID, AttemptSucceeded); err != nil {
+			t.Fatalf("RecordAttemptTerminated(succeeded): %v", err)
+		}
+		snap, _, err := s.loadCurrent(wf)
+		if err != nil {
+			t.Fatalf("reload after unmarked termination: %v", err)
+		}
+		at := findAttemptByID(&snap.Instance, attemptID)
+		if at == nil {
+			t.Fatalf("attempt %s not found after unmarked termination", attemptID)
+		}
+		if at.MarkerKind != "" || at.MarkerLabel != "" {
+			t.Fatalf("no-marker termination recorded marker %q/%q, want empty", at.MarkerKind, at.MarkerLabel)
+		}
 	}
 }

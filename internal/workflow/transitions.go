@@ -125,6 +125,8 @@ func buildCommandEvents(state Snapshot, command Command) ([]Event, error) {
 		e.AttemptStatus = command.AttemptStatus
 		e.LeaseID = command.LeaseID
 		e.AttemptID = command.Identity.AttemptID
+		e.MarkerKind = command.MarkerKind
+		e.MarkerLabel = command.MarkerLabel
 		return []Event{e}, nil
 
 	default:
@@ -362,6 +364,12 @@ func applyAttemptTerminated(next *Snapshot, act *Activation, event Event) error 
 	attempt.Status = status
 	ended := nowUTC()
 	attempt.EndedAt = &ended
+	// The marker kind/label is inert evidence of the terminal directive the
+	// backend observed (e.g. the loop exit marker). It is recorded on every
+	// terminal path — including the early returns below — but must never
+	// affect status, lease, retry, or exhaustion logic.
+	attempt.MarkerKind = event.MarkerKind
+	attempt.MarkerLabel = event.MarkerLabel
 	// A successful termination is a recordable terminal fact. It never
 	// satisfies the node on its own — acceptance requires explicit completion
 	// (evidence + completed event, Stage 11) — so it must not regress the
