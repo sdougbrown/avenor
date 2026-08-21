@@ -82,15 +82,27 @@ func (m *Manager) commandComplete(wf WorkflowID, payload json.RawMessage) (any, 
 		return nil, fmt.Errorf("activation not found for node %q", req.NodeID)
 	}
 
+	// Attempt ownership: the presenting attempt must belong to this
+	// activation. Without this check a foreign attempt ID could borrow that
+	// attempt's terminal fact and consume the idempotency key
+	// complete-<foreignAttempt>, permanently blocking the owning
+	// activation's legitimate completion.
+	if !activationHasAttempt(act, req.AttemptID) {
+		return nil, fmt.Errorf("attempt %q does not belong to activation %q for node %q", req.AttemptID, act.ID, req.NodeID)
+	}
+
 	// Idempotent duplicate: a repeated workflow.complete for the same attempt
 	// is a safe no-op. Checked before status/lease validation because a
 	// successful completion has already moved the activation (satisfied, or
-	// parked awaiting_gate) and released the lease.
+	// parked awaiting_gate) and released the lease. A fresh loadCurrent
+	// reports the CURRENT status (a later command may have advanced the
+	// activation since the initial snapshot read), falling back to the
+	// snapshot's status if the fresh read fails.
 	if _, done := snap.Idempotency["complete-"+string(req.AttemptID)]; done {
 		return map[string]any{
 			"idempotent":        true,
 			"already_completed": true,
-			"status":            string(act.Status),
+			"status":            string(m.currentActivationStatus(wf, req.NodeID, act.ID, act.Status)),
 		}, nil
 	}
 
@@ -196,7 +208,7 @@ func (m *Manager) commandComplete(wf WorkflowID, payload json.RawMessage) (any, 
 		gated := len(unsatisfiedRequiredGates(&fresh.Instance, node.Gates, act)) > 0
 		var branch json.RawMessage
 		if !gated && target != "" {
-			branch, err = json.Marshal(&Transition{Outcome: req.Outcome, TargetNodeID: target})
+			branch, err = json.Marshal(&Transition{Outcome: req.Outcome, TargetNodeID: target, ActivationID: act.ID})
 			if err != nil {
 				cleanupStaged(m, wf, staged)
 				return nil, fmt.Errorf("encode transition: %w", err)
@@ -252,6 +264,33 @@ func (m *Manager) commandComplete(wf WorkflowID, payload json.RawMessage) (any, 
 	}
 	cleanupStaged(m, wf, staged)
 	return nil, fmt.Errorf("complete attempt %s: revision kept moving under concurrent commands", req.AttemptID)
+}
+
+// activationHasAttempt reports whether the activation's append-only attempt
+// list contains the given attempt ID. The list is never cleared, so a
+// legitimate duplicate re-send of the same attempt still passes.
+func activationHasAttempt(act *Activation, attemptID AttemptID) bool {
+	for _, id := range act.AttemptIDs {
+		if id == attemptID {
+			return true
+		}
+	}
+	return false
+}
+
+// currentActivationStatus reads the activation's status via a fresh
+// loadCurrent, falling back to the supplied stale status if the read fails or
+// the activation is gone.
+func (m *Manager) currentActivationStatus(wf WorkflowID, nodeID NodeID, actID ActivationID, stale ActivationStatus) ActivationStatus {
+	fresh, ok, err := m.store.loadCurrent(wf)
+	if err != nil || !ok {
+		return stale
+	}
+	fa, err := findActivation(&fresh.Instance, nodeID, actID)
+	if err != nil || fa == nil {
+		return stale
+	}
+	return fa.Status
 }
 
 // buildCompleteOutputs materializes the OutputValue records for a completion
