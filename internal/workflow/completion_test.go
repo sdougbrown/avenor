@@ -476,3 +476,291 @@ func TestCommandCompleteGatedAwaitsGate(t *testing.T) {
 			len(snap.Instance.Evidence), len(snap.Instance.Outputs))
 	}
 }
+
+// completeToRunningNoTerminal drives a fresh instance to a running activation
+// with a live lease but NO terminal attempt fact yet (start only, no
+// RecordAttemptTerminated).
+func completeToRunningNoTerminal(t *testing.T, m *Manager, s *Store, wf WorkflowID) (map[string]any, ActivationID, AttemptID) {
+	t.Helper()
+	snap, ok, err := s.loadCurrent(wf)
+	if err != nil || !ok {
+		t.Fatalf("load current: %v", err)
+	}
+	actID := snap.Instance.Activations[0].ID
+	res := claimActivation(t, m, wf, "start", string(actID), "alice")
+	out, err := m.WorkflowCommand(string(wf), startCommandPayload(t, "start", string(actID), res, nil))
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	attemptID := AttemptID(out.(map[string]any)["attempt_id"].(string))
+	return res, actID, attemptID
+}
+
+// TestCommandCompleteWaitsForTerminalFact pins the wait-for-terminal-fact
+// contract: a machine contract depending on terminal output waits for the
+// corresponding termination fact; explicit handoff may not precede it.
+func TestCommandCompleteWaitsForTerminalFact(t *testing.T) {
+	m, s, wf := newCompleteFixture(t, completeTemplateJSON, "complete-test", "1")
+	res, actID, attemptID := completeToRunningNoTerminal(t, m, s, wf)
+	src, digest := writeEvidence(t, "evidence.txt", "run output\n")
+	payload := completePayload(t, string(actID), string(attemptID), res, "done", standardOutputs(), []map[string]any{{
+		"src_path": src, "stored_path": "evidence.txt", "non_empty": true, "sha256": digest,
+	}})
+
+	// No terminal fact yet: the completion must be rejected and nothing may
+	// change (no revision bump, no completion event, no staged evidence).
+	revBefore := revision(t, s, wf)
+	_, err := m.commandComplete(wf, payload)
+	if err == nil {
+		t.Fatal("complete before terminal fact: expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "terminal") {
+		t.Fatalf("error = %q, want mention of terminal fact", err)
+	}
+	if got := revision(t, s, wf); got != revBefore {
+		t.Fatalf("revision changed %d -> %d", revBefore, got)
+	}
+	if n := evidenceEntries(t, s, wf); n != 0 {
+		t.Fatalf("evidence staged before terminal fact: %d entries", n)
+	}
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("load current: %v", err)
+	}
+	if got := activationByNode(&snap.Instance, "start").Status; got != ActivationRunning {
+		t.Fatalf("activation status = %q, want running (no completion event)", got)
+	}
+
+	// Once the attempt's terminal fact is recorded, the same payload succeeds.
+	leaseID := LeaseID(res["lease_id"].(string))
+	if err := m.RecordAttemptTerminated(wf, "start", actID, attemptID, leaseID, AttemptSucceeded); err != nil {
+		t.Fatalf("RecordAttemptTerminated: %v", err)
+	}
+	out, err := m.commandComplete(wf, payload)
+	if err != nil {
+		t.Fatalf("complete after terminal fact: %v", err)
+	}
+	if mm := out.(map[string]any); mm["status"] != "completed" || mm["activation_status"] != "satisfied" {
+		t.Fatalf("complete after terminal fact = %#v", mm)
+	}
+}
+
+// TestCommandCompleteForeignAttemptRejected pins attempt-ownership validation:
+// a complete presenting an attempt that is not in the activation's attempt
+// list is rejected, and the foreign idempotency key is not consumed (the
+// legitimate completion still succeeds afterward).
+func TestCommandCompleteForeignAttemptRejected(t *testing.T) {
+	m, s, wf := newCompleteFixture(t, completeTemplateJSON, "complete-test", "1")
+	res, actID, attemptID := completeToRunning(t, m, s, wf)
+	src, digest := writeEvidence(t, "evidence.txt", "run output\n")
+	artifacts := []map[string]any{{"src_path": src, "stored_path": "evidence.txt", "non_empty": true, "sha256": digest}}
+
+	// A foreign attempt ID (not in act.AttemptIDs) must be rejected.
+	foreign := string(NewAttemptID())
+	revBefore := revision(t, s, wf)
+	_, err := m.commandComplete(wf, completePayload(t, string(actID), foreign, res, "done", standardOutputs(), artifacts))
+	if err == nil {
+		t.Fatal("complete with foreign attempt: expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "does not belong") {
+		t.Fatalf("error = %q, want ownership rejection", err)
+	}
+	if got := revision(t, s, wf); got != revBefore {
+		t.Fatalf("revision changed %d -> %d", revBefore, got)
+	}
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("load current: %v", err)
+	}
+	if got := activationByNode(&snap.Instance, "start").Status; got != ActivationRunning {
+		t.Fatalf("activation status = %q, want running (no completion event)", got)
+	}
+
+	// The real attempt's completion still succeeds: the foreign key was not
+	// consumed and did not block the owning activation.
+	out, err := m.commandComplete(wf, completePayload(t, string(actID), string(attemptID), res, "done", standardOutputs(), artifacts))
+	if err != nil {
+		t.Fatalf("genuine complete after foreign attempt rejection: %v", err)
+	}
+	if mm := out.(map[string]any); mm["status"] != "completed" || mm["activation_status"] != "satisfied" {
+		t.Fatalf("genuine complete result = %#v", mm)
+	}
+}
+
+// TestCommandCompleteViaWorkflowCommand pins the public surface path: the
+// workflow command dispatcher routes op "complete" to the same atomic handler.
+func TestCommandCompleteViaWorkflowCommand(t *testing.T) {
+	m, s, wf := newCompleteFixture(t, completeTemplateJSON, "complete-test", "1")
+	res, actID, attemptID := completeToRunning(t, m, s, wf)
+	src, digest := writeEvidence(t, "evidence.txt", "run output\n")
+
+	opPayload := map[string]any{
+		"op":            "complete",
+		"node_id":       "start",
+		"activation_id": string(actID),
+		"attempt_id":    string(attemptID),
+		"lease_id":      res["lease_id"],
+		"owner_token":   res["owner_token"],
+		"outcome":       "done",
+		"outputs":       []map[string]any{{"definition_id": "summary", "value": "all good"}, {"definition_id": "log", "value": "evidence.txt"}},
+		"artifacts":     []map[string]any{{"src_path": src, "stored_path": "evidence.txt", "non_empty": true, "sha256": digest}},
+	}
+	data, err := json.Marshal(opPayload)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	out, err := m.WorkflowCommand(string(wf), data)
+	if err != nil {
+		t.Fatalf("WorkflowCommand complete: %v", err)
+	}
+	mm, ok := out.(map[string]any)
+	if !ok {
+		t.Fatalf("complete result = %#v, want map", out)
+	}
+	if mm["status"] != "completed" || mm["activation_status"] != "satisfied" {
+		t.Fatalf("complete via surface = %#v", mm)
+	}
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("load current: %v", err)
+	}
+	if got := activationByNode(&snap.Instance, "start").Status; got != ActivationSatisfied {
+		t.Fatalf("activation status = %q, want satisfied", got)
+	}
+}
+
+// selfBranchTemplateJSON is a single manual node whose outcome "again" is a
+// branch back to itself, exercising a real later activation of the same node;
+// "ok" is the template terminal outcome.
+const selfBranchTemplateJSON = `{
+  "schema_version": 1,
+  "template_id": "self-branch",
+  "template_version": "1",
+  "entry_nodes": ["start"],
+  "nodes": [{
+    "id": "start",
+    "action": {"type": "manual"},
+    "outputs": [{"id": "summary", "name": "Summary", "type": "string", "required": true}],
+    "outcomes": [{"name": "again", "target_node_id": "start"}]
+  }],
+  "terminal_outcomes": ["ok"]
+}`
+
+// TestCommandCompleteAppendOnlyRevisionE2E pins append-only output revisions
+// end to end: a second activation of the same node produces a new OutputValue
+// with revision 2, while the first record stays byte-identical (revision 1,
+// same value) — prior facts are never mutated.
+func TestCommandCompleteAppendOnlyRevisionE2E(t *testing.T) {
+	m, s, wf := newCompleteFixture(t, selfBranchTemplateJSON, "self-branch", "1")
+
+	// Activation 1: claim, start, complete with the self-branch outcome.
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("load current: %v", err)
+	}
+	act1 := snap.Instance.Activations[0].ID
+	res1 := claimActivation(t, m, wf, "start", string(act1), "alice")
+	out1, err := m.WorkflowCommand(string(wf), startCommandPayload(t, "start", string(act1), res1, nil))
+	if err != nil {
+		t.Fatalf("start 1: %v", err)
+	}
+	att1 := AttemptID(out1.(map[string]any)["attempt_id"].(string))
+	done1, err := m.commandComplete(wf, completePayload(t, string(act1), string(att1), res1, "again",
+		[]map[string]any{{"definition_id": "summary", "value": "first"}}, nil))
+	if err != nil {
+		t.Fatalf("complete 1: %v", err)
+	}
+	if mm := done1.(map[string]any); mm["activation_status"] != "satisfied" {
+		t.Fatalf("complete 1 result = %#v, want satisfied", mm)
+	}
+
+	// The branch created a second pending activation of "start".
+	snap, _, err = s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("load current: %v", err)
+	}
+	var act2 *Activation
+	startCount := 0
+	for i := range snap.Instance.Activations {
+		if snap.Instance.Activations[i].NodeID == "start" {
+			startCount++
+			if snap.Instance.Activations[i].Status != ActivationSatisfied {
+				act2 = &snap.Instance.Activations[i]
+			}
+		}
+	}
+	if startCount != 2 {
+		t.Fatalf("start activation count = %d, want 2 (satisfied + branch-created)", startCount)
+	}
+	if act2 == nil {
+		t.Fatal("no non-satisfied activation found for the branch target")
+	}
+
+	// Capture the first OutputValue record; it must be unchanged afterward.
+	first := OutputValue{}
+	found := false
+	for i := range snap.Instance.Outputs {
+		if snap.Instance.Outputs[i].DefinitionID == "summary" {
+			first = snap.Instance.Outputs[i]
+			found = true
+		}
+	}
+	if !found || first.Revision != 1 {
+		t.Fatalf("first summary output = %+v found=%v, want revision 1", first, found)
+	}
+
+	// Activation 2: claim, start, complete with the terminal outcome.
+	res2 := claimActivation(t, m, wf, "start", string(act2.ID), "bob")
+	out2, err := m.WorkflowCommand(string(wf), startCommandPayload(t, "start", string(act2.ID), res2, nil))
+	if err != nil {
+		t.Fatalf("start 2: %v", err)
+	}
+	att2 := AttemptID(out2.(map[string]any)["attempt_id"].(string))
+	done2, err := m.commandComplete(wf, completePayload(t, string(act2.ID), string(att2), res2, "ok",
+		[]map[string]any{{"definition_id": "summary", "value": "second"}}, nil))
+	if err != nil {
+		t.Fatalf("complete 2: %v", err)
+	}
+	if mm := done2.(map[string]any); mm["status"] != "completed" {
+		t.Fatalf("complete 2 result = %#v, want completed", mm)
+	}
+
+	// Verify append-only revisions: the new entry is revision 2, and the
+	// first record is byte-identical to the captured one.
+	snap, _, err = s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("load current: %v", err)
+	}
+	var second *OutputValue
+	for i := range snap.Instance.Outputs {
+		if snap.Instance.Outputs[i].DefinitionID == "summary" && snap.Instance.Outputs[i].ActivationID == act2.ID {
+			second = &snap.Instance.Outputs[i]
+		}
+	}
+	if second == nil {
+		t.Fatal("second summary output not recorded")
+	}
+	if second.Revision != 2 {
+		t.Fatalf("second summary revision = %d, want 2", second.Revision)
+	}
+	if got, err := json.Marshal(first); err == nil {
+		for i := range snap.Instance.Outputs {
+			if snap.Instance.Outputs[i].ID == first.ID {
+				b, _ := json.Marshal(snap.Instance.Outputs[i])
+				if string(b) != string(got) {
+					t.Fatalf("prior OutputValue mutated: got %s want %s", b, got)
+				}
+				if snap.Instance.Outputs[i].Revision != 1 {
+					t.Fatalf("prior OutputValue revision = %d, want 1", snap.Instance.Outputs[i].Revision)
+				}
+				if string(snap.Instance.Outputs[i].Value) != `"first"` {
+					t.Fatalf("prior OutputValue value = %s, want \"first\"", snap.Instance.Outputs[i].Value)
+				}
+			}
+		}
+	}
+	if snap.Instance.Status != WorkflowCompleted || snap.Instance.TerminalOutcome != "ok" {
+		t.Fatalf("workflow = %q terminal %q, want completed/ok", snap.Instance.Status, snap.Instance.TerminalOutcome)
+	}
+}
