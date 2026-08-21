@@ -78,6 +78,17 @@ const (
 	GateWaived           GateStatus = "waived"
 )
 
+// GateOperation selects the decision recorded by a CommandGate. It is a
+// closed set: the manager validates against it, and the reducer re-validates.
+type GateOperation string
+
+const (
+	GateOpSatisfy        GateOperation = "satisfy"
+	GateOpReject         GateOperation = "reject"
+	GateOpWaive          GateOperation = "waive"
+	GateOpExternalResult GateOperation = "external_result"
+)
+
 // EvidenceSource identifies the authority that supplied evidence.
 type EvidenceSource string
 
