@@ -136,6 +136,10 @@ func buildCommandEvents(state Snapshot, command Command) ([]Event, error) {
 	case CommandHeartbeat:
 		e := newEvent(EventHeartbeat)
 		e.LeaseID = command.LeaseID
+		// Additively carry the renewal metadata (wall-clock heartbeat time +
+		// renewed expiry, stamped by the manager) so it persists to the event
+		// log and replay reproduces the same liveness fields.
+		e.Lease = command.Lease
 		return []Event{e}, nil
 
 	case CommandTerminate:
@@ -340,7 +344,10 @@ func applyInstantiated(next *Snapshot, event Event) error {
 	return nil
 }
 
-// applyLeased claims an activation: pending/ready advances to leased.
+// applyLeased claims an activation: pending/ready advances to leased. A
+// lease_expired activation is also re-claimable: this is the replacement path
+// where a fresh worker re-arms the same activation on a new claim after its
+// previous lease expired.
 func applyLeased(next *Snapshot, act *Activation, event Event) error {
 	if act == nil {
 		return errors.New("leased event requires an activation")
@@ -348,7 +355,7 @@ func applyLeased(next *Snapshot, act *Activation, event Event) error {
 	if event.LeaseID == "" {
 		return errors.New("leased event requires a lease id")
 	}
-	if act.Status != ActivationPending && act.Status != ActivationReady {
+	if act.Status != ActivationPending && act.Status != ActivationReady && act.Status != ActivationLeaseExpired {
 		return fmt.Errorf("cannot lease activation in status %q", act.Status)
 	}
 	if act.ActiveLease != nil && act.ActiveLease.ID != event.LeaseID {
@@ -783,9 +790,13 @@ func applyRerouted(next *Snapshot, event Event) {
 	})
 }
 
-// applyHeartbeat requires a live lease and records a deterministic heartbeat
-// marker. Wall-clock renewal is owned by the store; the reducer only touches
-// LastHeartbeatAt with a fixed sentinel so replay stays stable.
+// applyHeartbeat requires a live lease and records the heartbeat. When the
+// event carries lease-renewal metadata (event.Lease, stamped by the manager
+// layer), the heartbeat renews the lease durably: LastHeartbeatAt and
+// ExpiresAt are copied from the event so replay reproduces the exact liveness
+// fields deterministically (the reducer never calls nowUTC()). A legacy /
+// reducer-only heartbeat event without lease metadata falls back to the fixed
+// zero-time sentinel so LastHeartbeatAt stays non-nil and replay is stable.
 func applyHeartbeat(act *Activation, event Event) error {
 	if act == nil {
 		return errors.New("heartbeat event requires an activation")
@@ -795,6 +806,11 @@ func applyHeartbeat(act *Activation, event Event) error {
 	}
 	if event.LeaseID != "" && event.LeaseID != act.ActiveLease.ID {
 		return errors.New("heartbeat lease does not match the active lease")
+	}
+	if event.Lease != nil {
+		act.ActiveLease.LastHeartbeatAt = event.Lease.LastHeartbeatAt
+		act.ActiveLease.ExpiresAt = event.Lease.ExpiresAt
+		return nil
 	}
 	marker := time.Time{}
 	act.ActiveLease.LastHeartbeatAt = &marker
