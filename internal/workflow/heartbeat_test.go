@@ -863,5 +863,71 @@ func TestRecoveryRetainsHeartbeatedLeaseSweepsUnheartbeated(t *testing.T) {
 	}
 }
 
+// TestManagerHeartbeatRenewsExpiringLease proves the typed
+// Manager.Heartbeat seam (the executor-facing wrapper around the heartbeat
+// command): with a near-past expiry, Heartbeat(leaseID, ownerToken) moves
+// ExpiresAt into the future, stamps LastHeartbeatAt, and the renewed lease
+// survives a subsequent live sweep. A wrong owner token is rejected through
+// the same seam.
+func TestManagerHeartbeatRenewsExpiringLease(t *testing.T) {
+	m, s, wf, node := newManagerFixture(t)
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	nodeID := NodeID(node)
+	actID := activationByNode(&snap.Instance, nodeID).ID
+
+	// Claim with a near-past expiry (the holder's clock slipped just past
+	// the default 30s TTL) and start on it.
+	nearPast := time.Now().UTC().Add(-29 * time.Second)
+	claimWithLease(t, s, wf, nodeID, Lease{
+		ID:           "lease-seam",
+		ActivationID: actID,
+		Owner:        "alice",
+		TokenDigest:  ownerTokenDigest("seam-token"),
+		AcquiredAt:   nearPast.Add(-time.Minute),
+		ExpiresAt:    nearPast,
+	}, "alice")
+	startWithToken(t, m, wf, node, string(actID), "lease-seam", "seam-token")
+
+	// A wrong owner token is rejected through the seam.
+	if err := m.Heartbeat(wf, nodeID, actID, "lease-seam", "wrong-token"); err == nil || !strings.Contains(err.Error(), "owner token does not match") {
+		t.Fatalf("wrong-token heartbeat err = %v, want owner token mismatch", err)
+	}
+
+	// The typed seam renews the expiring lease.
+	if err := m.Heartbeat(wf, nodeID, actID, "lease-seam", "seam-token"); err != nil {
+		t.Fatalf("Heartbeat: %v", err)
+	}
+	snap, _, err = s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("reload after heartbeat: %v", err)
+	}
+	act := activationByNode(&snap.Instance, nodeID)
+	if act.ActiveLease == nil {
+		t.Fatal("active lease missing after heartbeat")
+	}
+	if !act.ActiveLease.ExpiresAt.After(time.Now().UTC()) {
+		t.Fatalf("post-heartbeat expiry = %v, want renewed into the future", act.ActiveLease.ExpiresAt)
+	}
+	if act.ActiveLease.LastHeartbeatAt == nil || act.ActiveLease.LastHeartbeatAt.IsZero() {
+		t.Fatalf("post-heartbeat LastHeartbeatAt = %v, want a stamped time", act.ActiveLease.LastHeartbeatAt)
+	}
+
+	// The renewed lease survives a subsequent live sweep.
+	if _, err := m.ExpireStaleLeases(); err != nil {
+		t.Fatalf("ExpireStaleLeases: %v", err)
+	}
+	snap, _, err = s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("reload after sweep: %v", err)
+	}
+	act = activationByNode(&snap.Instance, nodeID)
+	if act.Status != ActivationRunning || act.ActiveLease == nil {
+		t.Fatalf("post-sweep = status %s lease %+v, want running with the renewed lease", act.Status, act.ActiveLease)
+	}
+}
+
 // ptrTime returns a pointer to t (test helper for inline lease metadata).
 func ptrTime(t time.Time) *time.Time { return &t }

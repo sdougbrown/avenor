@@ -83,6 +83,9 @@ func TestStartDispatchesToRegisteredExecutorOnce(t *testing.T) {
 	if call.LeaseID != LeaseID(leaseID) {
 		t.Errorf("dispatch lease = %s, want the claim lease %s", call.LeaseID, leaseID)
 	}
+	if call.OwnerToken != res["owner_token"] {
+		t.Errorf("dispatch owner token = %q, want the claim token %q (heartbeat seam)", call.OwnerToken, res["owner_token"])
+	}
 	if call.Action.Kind != ActionRun {
 		t.Errorf("dispatch action kind = %s, want run", call.Action.Kind)
 	}
