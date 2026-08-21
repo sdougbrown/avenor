@@ -22,10 +22,11 @@ const (
 // InstanceRecord is the payload of EventInstantiated: enough immutable context
 // to reconstruct the initial instance from the template entry contract.
 type InstanceRecord struct {
-	TemplateID       TemplateID      `json:"template_id"`
-	TemplateVersion  TemplateVersion `json:"template_version"`
-	TerminalOutcomes []OutcomeName   `json:"terminal_outcomes"`
-	EntryNodes       []NodeID        `json:"entry_nodes"`
+	TemplateID       TemplateID       `json:"template_id"`
+	TemplateVersion  TemplateVersion  `json:"template_version"`
+	TerminalOutcomes []OutcomeName    `json:"terminal_outcomes"`
+	EntryNodes       []NodeID         `json:"entry_nodes"`
+	Children         []ChildReference `json:"children,omitempty"`
 }
 
 // Event is one record in the workflow store's NDJSON log. It carries its own

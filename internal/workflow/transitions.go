@@ -272,6 +272,9 @@ func applyInstantiated(next *Snapshot, event Event) error {
 	next.Instance.Status = WorkflowActive
 	next.Instance.CreatedAt = now
 	next.Instance.UpdatedAt = now
+	// The composition manifest (durable child references) is carried on the
+	// instance record so replay reconstructs it without re-derivation.
+	next.Instance.Children = append(next.Instance.Children, rec.Children...)
 	for _, nodeID := range rec.EntryNodes {
 		next.Instance.Activations = append(next.Instance.Activations, Activation{
 			ID:        NewActivationID(),

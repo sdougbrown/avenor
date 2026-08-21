@@ -522,6 +522,7 @@ type GateInstance struct {
 
 type ChildReference struct {
 	ID               ChildReferenceID  `json:"child_reference_id"`
+	NodeID           NodeID            `json:"node_id,omitempty"`
 	ParentActivation ActivationID      `json:"parent_activation_id"`
 	WorkflowID       WorkflowID        `json:"workflow_id"`
 	TemplateID       TemplateID        `json:"template_id"`
