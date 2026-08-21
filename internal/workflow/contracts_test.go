@@ -60,10 +60,10 @@ func TestResolveOutcome(t *testing.T) {
 	}
 
 	tests := []struct {
-		outcome   OutcomeName
-		target    NodeID
-		terminal  bool
-		declared  bool
+		outcome  OutcomeName
+		target   NodeID
+		terminal bool
+		declared bool
 	}{
 		{outcome: "rebuild", target: "build", terminal: false, declared: true},
 		{outcome: "next", target: "test", terminal: false, declared: true},
