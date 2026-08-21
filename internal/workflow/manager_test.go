@@ -429,7 +429,7 @@ func TestManagerCommandStub(t *testing.T) {
 
 func TestManagerCommandUnknownOp(t *testing.T) {
 	m, _, wf, _ := newManagerFixture(t)
-	_, err := m.WorkflowCommand(string(wf), json.RawMessage(`{"op":"complete","node_id":"start"}`))
+	_, err := m.WorkflowCommand(string(wf), json.RawMessage(`{"op":"poke","node_id":"start"}`))
 	if err == nil || !strings.Contains(err.Error(), "unsupported until a later stage") {
 		t.Fatalf("unknown op err = %v, want unsupported until a later stage", err)
 	}
