@@ -5642,6 +5642,204 @@ func TestLazyWorkflowHandlerForwardsToManager(t *testing.T) {
 	}
 }
 
+// stageTerminalChildComposition pre-stages a durable composition state a
+// supervisor would find after a crash: a parent parked awaiting_child on a
+// durable claim whose composed child is already terminal (completed with the
+// mapped outcome). It returns the parent and child workflow IDs.
+func stageTerminalChildComposition(t *testing.T, root string) (parentID, childID string) {
+	t.Helper()
+	stage := workflow.New(root)
+	if err := stage.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	child := workflow.Template{
+		SchemaVersion:    1,
+		TemplateID:       "wfres-child",
+		TemplateVersion:  "1",
+		EntryNodes:       []workflow.NodeID{"start"},
+		Nodes:            []workflow.NodeDefinition{{ID: "start", Action: workflow.Action{Kind: workflow.ActionManual, Manual: &workflow.ManualAction{Instructions: "do"}}}},
+		TerminalOutcomes: []workflow.OutcomeName{"done"},
+	}
+	parent := workflow.Template{
+		SchemaVersion:   1,
+		TemplateID:      "wfres-parent",
+		TemplateVersion: "1",
+		EntryNodes:      []workflow.NodeID{"spawn"},
+		Nodes: []workflow.NodeDefinition{{
+			ID: "spawn",
+			Action: workflow.Action{Kind: workflow.ActionWorkflow, Workflow: &workflow.WorkflowAction{
+				TemplateID:      "wfres-child",
+				TemplateVersion: "1",
+				ChildKey:        "c1",
+				OutcomeMap:      map[workflow.OutcomeName]workflow.OutcomeName{"done": "done"},
+			}},
+		}},
+		TerminalOutcomes: []workflow.OutcomeName{"done"},
+	}
+	for _, tmpl := range []workflow.Template{child, parent} {
+		if err := stage.StoreTemplate(tmpl.TemplateID, tmpl.TemplateVersion, tmpl); err != nil {
+			t.Fatalf("StoreTemplate %s: %v", tmpl.TemplateID, err)
+		}
+	}
+	m := workflow.NewManager(stage)
+	payload, err := json.Marshal(map[string]string{"template_id": "wfres-parent", "template_version": "1"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	out, err := m.WorkflowInstantiate(payload)
+	if err != nil {
+		t.Fatalf("WorkflowInstantiate: %v", err)
+	}
+	parentID = out.(map[string]any)["workflow_id"].(string)
+	childID = string(workflow.DeriveChildWorkflowID(workflow.WorkflowID(parentID), "spawn", "c1"))
+
+	inspect := func(id string) map[string]any {
+		t.Helper()
+		res, err := m.WorkflowInspect(id)
+		if err != nil {
+			t.Fatalf("WorkflowInspect %s: %v", id, err)
+		}
+		mm, ok := res.(map[string]any)
+		if !ok {
+			t.Fatalf("inspect %s result = %#v, want map", id, res)
+		}
+		return mm
+	}
+	activationFor := func(id, node string) workflow.Activation {
+		t.Helper()
+		acts := inspect(id)["activations"].([]workflow.Activation)
+		for _, a := range acts {
+			if string(a.NodeID) == node {
+				return a
+			}
+		}
+		t.Fatalf("activation for node %q of %s not found: %+v", node, id, acts)
+		return workflow.Activation{}
+	}
+	apply := func(wfID string, cmd workflow.Command) {
+		t.Helper()
+		if _, err := stage.ApplyCommand(workflow.WorkflowID(wfID), cmd); err != nil {
+			t.Fatalf("%s: %v", cmd.Kind, err)
+		}
+	}
+
+	// Parent: claim -> start -> durable child attach (parked awaiting_child).
+	pact := activationFor(parentID, "spawn")
+	now := time.Now().UTC()
+	apply(parentID, workflow.Command{
+		Kind:             workflow.CommandClaim,
+		ExpectedRevision: inspect(parentID)["revision"].(int64),
+		IdempotencyKey:   "wfres-claim",
+		Identity:         workflow.ExecutionIdentity{WorkflowID: workflow.WorkflowID(parentID), NodeID: "spawn", ActivationID: pact.ID},
+		LeaseID:          "wfres-lease",
+		Actor:            "alice",
+		Lease:            &workflow.Lease{ID: "wfres-lease", ActivationID: pact.ID, Owner: "alice", AcquiredAt: now, ExpiresAt: now.Add(time.Hour)},
+	})
+	apply(parentID, workflow.Command{
+		Kind:             workflow.CommandStart,
+		ExpectedRevision: inspect(parentID)["revision"].(int64),
+		IdempotencyKey:   "wfres-start",
+		Identity:         workflow.ExecutionIdentity{WorkflowID: workflow.WorkflowID(parentID), NodeID: "spawn", ActivationID: pact.ID, AttemptID: "wfres-att-1"},
+		LeaseID:          "wfres-lease",
+	})
+	apply(parentID, workflow.Command{
+		Kind:             workflow.CommandChildAttach,
+		ExpectedRevision: inspect(parentID)["revision"].(int64),
+		IdempotencyKey:   "child-attach-wfres-att-1",
+		Identity:         workflow.ExecutionIdentity{WorkflowID: workflow.WorkflowID(parentID), NodeID: "spawn", ActivationID: pact.ID, AttemptID: "wfres-att-1"},
+		LeaseID:          "wfres-lease",
+	})
+	if act := activationFor(parentID, "spawn"); act.Status != workflow.ActivationAwaitingChild {
+		t.Fatalf("pre-state: parent spawn status = %q, want awaiting_child", act.Status)
+	}
+
+	// Child: claim -> start -> complete with the terminal outcome.
+	cact := activationFor(childID, "start")
+	apply(childID, workflow.Command{
+		Kind:             workflow.CommandClaim,
+		ExpectedRevision: inspect(childID)["revision"].(int64),
+		IdempotencyKey:   "wfres-child-claim",
+		Identity:         workflow.ExecutionIdentity{WorkflowID: workflow.WorkflowID(childID), NodeID: "start", ActivationID: cact.ID},
+		LeaseID:          "wfres-child-lease",
+		Actor:            "bob",
+		Lease:            &workflow.Lease{ID: "wfres-child-lease", ActivationID: cact.ID, Owner: "bob", AcquiredAt: now, ExpiresAt: now.Add(time.Hour)},
+	})
+	apply(childID, workflow.Command{
+		Kind:             workflow.CommandStart,
+		ExpectedRevision: inspect(childID)["revision"].(int64),
+		IdempotencyKey:   "wfres-child-start",
+		Identity:         workflow.ExecutionIdentity{WorkflowID: workflow.WorkflowID(childID), NodeID: "start", ActivationID: cact.ID, AttemptID: "wfres-child-att-1"},
+		LeaseID:          "wfres-child-lease",
+	})
+	apply(childID, workflow.Command{
+		Kind:             workflow.CommandComplete,
+		ExpectedRevision: inspect(childID)["revision"].(int64),
+		IdempotencyKey:   "wfres-child-complete",
+		Identity:         workflow.ExecutionIdentity{WorkflowID: workflow.WorkflowID(childID), NodeID: "start", ActivationID: cact.ID, AttemptID: "wfres-child-att-1"},
+		LeaseID:          "wfres-child-lease",
+		Outcome:          "done",
+	})
+	if st := func() workflow.WorkflowStatus {
+		cres, err := m.WorkflowInspect(childID)
+		if err != nil {
+			t.Fatalf("WorkflowInspect %s: %v", childID, err)
+		}
+		return cres.(map[string]any)["instance"].(workflow.WorkflowInstance).Status
+	}(); st != workflow.WorkflowCompleted {
+		t.Fatalf("pre-state: child status = %q, want completed", st)
+	}
+	return parentID, childID
+}
+
+// TestWorkflowManagerStartupResumesAwaitingChildren proves the startup
+// composition resume is wired into workflowManager's first construction: a
+// pre-staged durable state (a parent parked awaiting_child whose child is
+// already terminal) is resolved by the best-effort resume hook on the first
+// workflowManager() call, before any normal workflow operation.
+func TestWorkflowManagerStartupResumesAwaitingChildren(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "wfroot")
+	parentID, childID := stageTerminalChildComposition(t, root)
+
+	sup := NewSupervisor(Config{ControlSocket: newStableSocketPath(t, "wf-startup-resume"), WorkflowRoot: root})
+	mgr := sup.workflowManager() // first construction: the startup resume runs here
+	if mgr == nil || sup.workflowMgr != mgr {
+		t.Fatalf("workflowManager = %v, sup.workflowMgr = %v, want the same cached manager", mgr, sup.workflowMgr)
+	}
+
+	// The startup resume resolved the parent: the spawn activation left
+	// awaiting_child (the terminal child's mapped outcome was replayed) and
+	// the single-node parent completed with the terminal outcome.
+	res, err := mgr.WorkflowInspect(parentID)
+	if err != nil {
+		t.Fatalf("WorkflowInspect parent: %v", err)
+	}
+	mm := res.(map[string]any)
+	inst := mm["instance"].(workflow.WorkflowInstance)
+	if inst.Status != workflow.WorkflowCompleted {
+		t.Fatalf("parent status after startup resume = %q, want completed", inst.Status)
+	}
+	acts := mm["activations"].([]workflow.Activation)
+	for _, a := range acts {
+		if string(a.NodeID) == "spawn" {
+			if a.Status == workflow.ActivationAwaitingChild {
+				t.Fatalf("parent spawn still awaiting_child after startup resume: %+v", a)
+			}
+			if a.Status != workflow.ActivationSatisfied {
+				t.Fatalf("parent spawn status after startup resume = %q, want satisfied", a.Status)
+			}
+			break
+		}
+	}
+	// The child is untouched by the resume.
+	cres, err := mgr.WorkflowInspect(childID)
+	if err != nil {
+		t.Fatalf("WorkflowInspect child: %v", err)
+	}
+	if cst := cres.(map[string]any)["instance"].(workflow.WorkflowInstance).Status; cst != workflow.WorkflowCompleted {
+		t.Fatalf("child status after startup resume = %q, want completed (untouched)", cst)
+	}
+}
+
 func TestResolveWorkflowRoot(t *testing.T) {
 	tests := []struct {
 		name       string
