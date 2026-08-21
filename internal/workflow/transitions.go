@@ -853,14 +853,15 @@ func SetCompletionGateResolver(fn func(templateID TemplateID, templateVersion Te
 
 // retryResolve is an optional template-aware retry policy lookup installed by
 // the workflow store/manager. The reducer cannot see templates, so without it
-// any failure exhausts immediately (blocked).
-var retryResolve func(templateID TemplateID, nodeID NodeID) *RetryPolicy
+// any failure exhausts immediately (blocked). A template is versioned, so the
+// resolver also carries the template version (mirroring the gate resolver).
+var retryResolve func(templateID TemplateID, templateVersion TemplateVersion, nodeID NodeID) *RetryPolicy
 
 // SetRetryPolicyResolver wires the template-aware retry policy lookup used by
 // attempt_terminated handling. It is owned by the store (which can resolve the
-// instance's template); the reducer defaults to single-attempt behavior when
-// unset.
-func SetRetryPolicyResolver(fn func(templateID TemplateID, nodeID NodeID) *RetryPolicy) {
+// instance's versioned template); the reducer defaults to single-attempt
+// behavior when unset.
+func SetRetryPolicyResolver(fn func(templateID TemplateID, templateVersion TemplateVersion, nodeID NodeID) *RetryPolicy) {
 	retryResolve = fn
 }
 
@@ -870,7 +871,7 @@ func retryPolicyFor(next *Snapshot, nodeID NodeID) *RetryPolicy {
 	if retryResolve == nil {
 		return nil
 	}
-	return retryResolve(next.Instance.TemplateID, nodeID)
+	return retryResolve(next.Instance.TemplateID, next.Instance.TemplateVersion, nodeID)
 }
 
 // nowUTC returns the current time in UTC for event/record timestamps.

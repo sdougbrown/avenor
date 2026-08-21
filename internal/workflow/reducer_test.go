@@ -109,7 +109,7 @@ func runToStart(t *testing.T, state Snapshot) (Snapshot, LeaseID, AttemptID) {
 // subtest and guarantees it is reset to nil when the subtest finishes.
 func setRetryPolicy(t *testing.T, maximum int, exhaustion RetryExhaustionKind, outcome OutcomeName) {
 	t.Helper()
-	SetRetryPolicyResolver(func(TemplateID, NodeID) *RetryPolicy {
+	SetRetryPolicyResolver(func(TemplateID, TemplateVersion, NodeID) *RetryPolicy {
 		return &RetryPolicy{MaximumAttempts: maximum, Exhaustion: exhaustion, Outcome: outcome}
 	})
 	t.Cleanup(func() { SetRetryPolicyResolver(nil) })

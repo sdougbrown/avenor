@@ -3842,6 +3842,20 @@ func (s *Supervisor) directRunExecutor() workflow.Executor {
 
 type directRunExecutor struct{ sup *Supervisor }
 
+// Replacement path (Stage 13, phase 3): when a lease expires (live detector
+// or restart recovery), the activation is durably left lease_expired with no
+// lease and is re-claimable; a replacement claim + start through the manager
+// dispatches a new attempt to the same executor, and the kernel appends it
+// to the SAME activation (prior attempts preserved). Executors are
+// attempt-agnostic, so the replacement attempt is dispatchable with no
+// executor change. The owner-token heartbeat seam is reachable here too: the
+// executor holds e.sup.workflowManager() and the start carries the claim
+// token in ExecutorContext.OwnerToken, so an executor can renew its own
+// lease via workflowManager().Heartbeat(workflowID, nodeID, activationID,
+// leaseID, ec.OwnerToken). A live periodic heartbeat goroutine in the
+// executors is a later hardening, intentionally not implemented in this
+// stage.
+
 func (e *directRunExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext) error {
 	params := SpawnParams{
 		WorkflowID:   string(ec.WorkflowID),
