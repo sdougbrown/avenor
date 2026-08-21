@@ -710,3 +710,147 @@ func selectChildOutputs(child *Snapshot, action *WorkflowAction) []OutputReferen
 	}
 	return refs
 }
+
+// ---------------------------------------------------------------------------
+// Recovery resume (restart-safe continuation of awaiting_child parents)
+// ---------------------------------------------------------------------------
+
+// ResumeAwaitingChildrenSummary reports the outcome of one resume sweep.
+type ResumeAwaitingChildrenSummary struct {
+	// Resolved is the number of awaiting_child parents whose child is already
+	// terminal and whose mapped outcome was replayed on this call.
+	Resolved int
+	// StillAwaiting is the number of awaiting_child parents that remain
+	// awaiting_child afterwards: the child is not yet terminal (or is missing
+	// or unmappable), so a real driver must re-dispatch the wait later.
+	StillAwaiting int
+	// Errors is one entry per parent whose replay failed (child instance
+	// unreadable, unmapped terminal outcome, ...). Error parents remain
+	// awaiting_child and are retried on the next resume.
+	Errors []string
+}
+
+// ResumeAwaitingChildren is the manager's restart hook: after a supervisor
+// restart it resumes every awaiting_child activation in the store by
+// identity. For each such activation it reads the durable composition-manifest
+// child reference for the node and loads the child workflow; when the child
+// is already terminal it replays the same outcome-mapping resolution the live
+// executor uses (resolveChildOutcome), reconstructing the ExecutorContext from
+// durable state only — the activation's active claim lease and its existing
+// attempt ID (so the child-attach/child-outcome idempotency keys stay stable
+// across the restart). A parent whose child is not yet terminal is left in
+// awaiting_child: this is not a scheduler, and it never re-creates a child,
+// re-attaches, or re-awaits. It is idempotent — an already-resolved parent is
+// no longer awaiting_child and is skipped, and the child-outcome command is
+// idempotent per attempt — so a duplicate resume is a safe no-op.
+func (m *Manager) ResumeAwaitingChildren() (ResumeAwaitingChildrenSummary, error) {
+	catalog, err := m.store.Catalog()
+	if err != nil {
+		return ResumeAwaitingChildrenSummary{}, err
+	}
+	exec := &workflowExecutor{manager: m}
+	var summary ResumeAwaitingChildrenSummary
+	for _, item := range catalog {
+		snap := item.Snapshot
+		for i := range snap.Instance.Activations {
+			act := &snap.Instance.Activations[i]
+			if act.Status != ActivationAwaitingChild {
+				continue
+			}
+			ref := findChildReference(&snap.Instance, act.NodeID)
+			if ref == nil {
+				// No manifest entry to resume by identity; leave it in place.
+				summary.StillAwaiting++
+				continue
+			}
+			resolved, err := exec.resumeAwaitingChild(&snap, act, ref)
+			if err != nil {
+				summary.Errors = append(summary.Errors, fmt.Sprintf(
+					"%s node %s: %v", snap.Instance.WorkflowID, act.NodeID, err))
+				summary.StillAwaiting++
+				continue
+			}
+			if resolved {
+				summary.Resolved++
+			} else {
+				summary.StillAwaiting++
+			}
+		}
+	}
+	return summary, nil
+}
+
+// resumeAwaitingChild replays the child-outcome resolution for one
+// awaiting_child activation. It returns true when the activation left
+// awaiting_child (resolved, or already resolved before this call), false when
+// the child is not yet terminal and the parent must keep waiting.
+func (e *workflowExecutor) resumeAwaitingChild(parent *Snapshot, act *Activation, ref *ChildReference) (bool, error) {
+	childSnap, exists, err := e.manager.store.loadCurrent(ref.WorkflowID)
+	if err != nil {
+		return false, err
+	}
+	if !exists {
+		// The child is missing (corruption, or an orphaned pre-instantiate
+		// instance): leave the parent awaiting_child for a later driver.
+		return false, nil
+	}
+	if !isTerminalStatus(childSnap.Instance.Status) {
+		// The child is still running: no auto-scheduler, nothing to replay.
+		return false, nil
+	}
+	// Reconstruct the executor context from durable state. The lease is the
+	// kernel-held claim the attach recorded (recovery exempts awaiting_child
+	// from the lease sweep, so it is still active on the activation); the
+	// attempt ID is reused so the child-outcome idempotency key
+	// ("child-outcome-<attemptID>") is stable across the restart. A
+	// fresh attempt ID is derived only when the activation recorded none.
+	var leaseID LeaseID
+	if act.ActiveLease != nil {
+		leaseID = act.ActiveLease.ID
+	}
+	var attemptID AttemptID
+	if n := len(act.AttemptIDs); n > 0 {
+		attemptID = act.AttemptIDs[n-1]
+	} else {
+		attemptID = NewAttemptID()
+	}
+	tmpl, err := e.manager.templateFor(parent)
+	if err != nil {
+		return false, err
+	}
+	node, err := findNode(tmpl, act.NodeID)
+	if err != nil {
+		return false, err
+	}
+	if node.Action.Workflow == nil {
+		return false, fmt.Errorf("node %s has no workflow action to resume", act.NodeID)
+	}
+	ec := ExecutorContext{
+		WorkflowID:   parent.Instance.WorkflowID,
+		NodeID:       act.NodeID,
+		ActivationID: act.ID,
+		AttemptID:    attemptID,
+		LeaseID:      leaseID,
+		Action:       node.Action,
+	}
+	if err := e.resolveChildOutcome(ec, ref.WorkflowID, childSnap); err != nil {
+		return false, err
+	}
+	// Observe the post-replay status to classify the outcome (resolveChildOutcome
+	// can legitimately be a no-op on an already-resolved activation).
+	fresh, exists, err := e.manager.store.loadCurrent(parent.Instance.WorkflowID)
+	if err != nil {
+		return false, err
+	}
+	if !exists {
+		return false, fmt.Errorf("parent workflow %s vanished after resume", parent.Instance.WorkflowID)
+	}
+	fact, err := findActivation(&fresh.Instance, act.NodeID, act.ID)
+	if err != nil {
+		return false, err
+	}
+	if fact == nil {
+		return false, fmt.Errorf("activation %s not found after resume", act.ID)
+	}
+	return fact.Status != ActivationAwaitingChild, nil
+}

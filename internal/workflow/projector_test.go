@@ -60,6 +60,14 @@ func goldenSnapshot() Snapshot {
 					Status:     ActivationAwaitingGate,
 					AttemptIDs: []AttemptID{"att_review_1"},
 				},
+				{
+					// Attached but its child has not reached a terminal outcome.
+					ID:          "act_spawn_1",
+					NodeID:      "spawn",
+					Status:      ActivationAwaitingChild,
+					AttemptIDs:  []AttemptID{"att_spawn_1"},
+					ActiveLease: &Lease{ID: "lease_spawn_1", ActivationID: "act_spawn_1", Owner: "kernel"},
+				},
 			},
 			Attempts: []Attempt{
 				{
@@ -144,6 +152,36 @@ func goldenSnapshot() Snapshot {
 					Reason:       "waiting on human",
 					Source:       "web",
 					EvidenceIDs:  []EvidenceID{"ev_review_1"},
+				},
+			},
+			Children: []ChildReference{
+				{
+					// Attached but the child has no terminal outcome yet: no
+					// outcome or outputs recorded on the manifest entry.
+					ID:               "cref_spawn_1",
+					NodeID:           "spawn",
+					ParentActivation: "act_spawn_1",
+					WorkflowID:       "wf_child_golden",
+					TemplateID:       "child-tmpl",
+					TemplateVersion:  "1",
+				},
+				{
+					// Resolved: the mapped outcome and the bound child output
+					// reference are recorded on the manifest entry.
+					ID:               "cref_spawn2_1",
+					NodeID:           "spawn2",
+					ParentActivation: "act_spawn2_1",
+					WorkflowID:       "wf_child_golden_2",
+					TemplateID:       "child-tmpl",
+					TemplateVersion:  "2",
+					Outcome:          "done",
+					Outputs: []OutputReference{{
+						WorkflowID:   "wf_child_golden_2",
+						NodeID:       "build",
+						ActivationID: "act_build_1",
+						OutputID:     "co",
+						Revision:     2,
+					}},
 				},
 			},
 		},

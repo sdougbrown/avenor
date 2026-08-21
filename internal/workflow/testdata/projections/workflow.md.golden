@@ -11,6 +11,7 @@
 | --- | --- |
 | build | 2 |
 | review | 1 |
+| spawn | 1 |
 
 ## Activations
 
@@ -19,6 +20,14 @@
 | act_build_1 | build | 0 | satisfied | ok |
 | act_build_2 | build | 1 | running |  |
 | act_review_1 | review | 0 | awaiting_gate |  |
+| act_spawn_1 | spawn | 0 | awaiting_child |  |
+
+## Children
+
+| Node | Child Workflow | Template | Parent Activation | Outcome | Outputs |
+| --- | --- | --- | --- | --- | --- |
+| spawn | wf_child_golden | child-tmpl@1 | act_spawn_1 |  |  |
+| spawn2 | wf_child_golden_2 | child-tmpl@2 | act_spawn2_1 | done | wf_child_golden_2/build/act_build_1/co@2 |
 
 ## Gates
 

@@ -84,6 +84,15 @@ func (s *Store) appendExpiredLeases(workflowID WorkflowID, snap *Snapshot) (int,
 	now := nowUTC()
 	var events []Event
 	for _, a := range snap.Instance.Activations {
+		// An awaiting_child activation holds the kernel's composition claim
+		// on its composed child until the child's terminal outcome lands; the
+		// child-outcome resolution requires awaiting_child, so expiring the
+		// lease here would strand the parent after a restart. The claim must
+		// survive recovery — the manager's resume (composition.go) replays
+		// the child outcome from that state.
+		if a.Status == ActivationAwaitingChild {
+			continue
+		}
 		if a.ActiveLease != nil && a.ActiveLease.ExpiresAt.Before(now) {
 			events = append(events, Event{
 				ID:       NewEventID(),

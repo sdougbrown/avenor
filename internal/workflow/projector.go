@@ -81,6 +81,9 @@ func ProjectWorkflowMD(snap Snapshot) string {
 	b.WriteString("\n## Activations\n\n")
 	writeTable(&b, []string{"Activation", "Node", "Iteration", "Status", "Outcome"}, activationRows(snap.Instance.Activations))
 
+	b.WriteString("\n## Children\n\n")
+	writeTable(&b, []string{"Node", "Child Workflow", "Template", "Parent Activation", "Outcome", "Outputs"}, childRows(snap.Instance.Children))
+
 	b.WriteString("\n## Gates\n\n")
 	writeTable(&b, []string{"Gate Instance", "Node", "Activation", "Status", "Outcome", "Actor"}, gateRows(snap))
 
@@ -213,6 +216,29 @@ func activationRows(acts []Activation) [][]string {
 	rows := make([][]string, 0, len(acts))
 	for _, a := range acts {
 		rows = append(rows, []string{string(a.ID), string(a.NodeID), strconv.Itoa(a.Iteration), string(a.Status), string(a.SelectedOutcome)})
+	}
+	return rows
+}
+
+// childRows renders each composition-manifest child reference in stored
+// order: parent node, child workflow, template pin, parent activation, mapped
+// outcome, and each output reference as "workflow/node/activation/output@revision".
+func childRows(children []ChildReference) [][]string {
+	rows := make([][]string, 0, len(children))
+	for _, c := range children {
+		outputs := make([]string, 0, len(c.Outputs))
+		for _, o := range c.Outputs {
+			outputs = append(outputs,
+				string(o.WorkflowID)+"/"+string(o.NodeID)+"/"+string(o.ActivationID)+"/"+string(o.OutputID)+"@"+strconv.FormatInt(o.Revision, 10))
+		}
+		rows = append(rows, []string{
+			string(c.NodeID),
+			string(c.WorkflowID),
+			string(c.TemplateID) + "@" + string(c.TemplateVersion),
+			string(c.ParentActivation),
+			string(c.Outcome),
+			strings.Join(outputs, ", "),
+		})
 	}
 	return rows
 }

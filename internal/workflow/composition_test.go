@@ -1345,3 +1345,158 @@ func TestWorkflowExecutorStopsWaitingOnceParentLeavesAwaitingChild(t *testing.T)
 		t.Fatalf("dispatch took %s, want fast return after the parent left awaiting_child", elapsed)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Phase 3: restart recovery — ResumeAwaitingChildren
+// ---------------------------------------------------------------------------
+
+// freshManager simulates a supervisor restart: a fresh store and manager over
+// the same root, with the default (kernel-local) workflow executor in place.
+func freshManager(t *testing.T, s *Store) *Manager {
+	t.Helper()
+	return NewManager(New(s.Root()))
+}
+
+func TestResumeAwaitingChildrenResolvesTerminalChildAfterRestart(t *testing.T) {
+	_, s, wf, childID := compositionPhase2Fixture(t, map[OutcomeName]OutcomeName{"done": "done"})
+	// The child reached terminal while the (now-dead) supervisor was waiting.
+	driveChildTerminal(t, s, childID, "done", nil)
+	// The parent is durably awaiting_child with a zero-expiry lease (the kind
+	// a crash leaves behind); without the recovery exemption it would be
+	// swept to lease_expired and become unresumable.
+	actID := startSpawnDirect(t, s, wf, "lease-r1", "att-r1")
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	if act := activationByNode(&snap.Instance, "spawn"); act.Status != ActivationAwaitingChild {
+		t.Fatalf("spawn status before restart = %s, want awaiting_child", act.Status)
+	}
+
+	m2 := freshManager(t, s)
+	summary, err := m2.ResumeAwaitingChildren()
+	if err != nil {
+		t.Fatalf("ResumeAwaitingChildren: %v", err)
+	}
+	if summary.Resolved != 1 || summary.StillAwaiting != 0 || len(summary.Errors) != 0 {
+		t.Fatalf("summary = %+v, want one resolved and none awaiting", summary)
+	}
+
+	// The parent resolved to the mapped outcome with a single child reference.
+	resnap, exists, err := s.loadCurrent(wf)
+	if err != nil || !exists {
+		t.Fatalf("loadCurrent after resume: exists=%v err=%v", exists, err)
+	}
+	act := activationByNode(&resnap.Instance, "spawn")
+	if act.Status != ActivationSatisfied || act.SelectedOutcome != "done" {
+		t.Fatalf("spawn = %s/%s, want satisfied/done", act.Status, act.SelectedOutcome)
+	}
+	if act.ActiveLease != nil {
+		t.Fatalf("spawn lease = %+v, want released after resolution", act.ActiveLease)
+	}
+	if resnap.Instance.Status != WorkflowCompleted || resnap.Instance.TerminalOutcome != "done" {
+		t.Fatalf("workflow = %s/%s, want completed/done", resnap.Instance.Status, resnap.Instance.TerminalOutcome)
+	}
+	if len(resnap.Instance.Children) != 1 {
+		t.Fatalf("instance children = %d, want 1", len(resnap.Instance.Children))
+	}
+	ref := resnap.Instance.Children[0]
+	if ref.WorkflowID != childID || ref.ParentActivation != actID || ref.Outcome != "done" {
+		t.Fatalf("child reference = %+v, want child %s attached to %s with outcome done", ref, childID, actID)
+	}
+	// The kernel-owned composition attempt was terminated with the resolution.
+	if got := phase2AttemptStatus(t, s, wf, "att-r1"); got != AttemptSucceeded {
+		t.Fatalf("attempt status after resume = %q, want succeeded", got)
+	}
+	// No duplicate child was created by the resume.
+	if n := countInstances(t, s); n != 2 {
+		t.Fatalf("instance count = %d, want 2 (parent + child)", n)
+	}
+}
+
+func TestResumeAwaitingChildrenKeepsNonTerminalChildAwaiting(t *testing.T) {
+	_, s, wf, _ := compositionPhase2Fixture(t, map[OutcomeName]OutcomeName{"done": "done"})
+	// Parent is awaiting_child but the child never started.
+	startSpawnDirect(t, s, wf, "lease-r2", "att-r2")
+	before, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+
+	m2 := freshManager(t, s)
+	summary, err := m2.ResumeAwaitingChildren()
+	if err != nil {
+		t.Fatalf("ResumeAwaitingChildren: %v", err)
+	}
+	if summary.Resolved != 0 || summary.StillAwaiting != 1 || len(summary.Errors) != 0 {
+		t.Fatalf("summary = %+v, want one still awaiting and none resolved", summary)
+	}
+
+	// The parent stays awaiting_child with its claim lease intact, and the
+	// resume wrote no events at all (no sweep of the exempt lease, no
+	// re-attach, no re-await).
+	after, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent after resume: %v", err)
+	}
+	act := activationByNode(&after.Instance, "spawn")
+	if act.Status != ActivationAwaitingChild {
+		t.Fatalf("spawn status after resume = %s, want awaiting_child (still running child)", act.Status)
+	}
+	if act.ActiveLease == nil || act.ActiveLease.ID != "lease-r2" {
+		t.Fatalf("spawn lease after resume = %+v, want the claim lease intact", act.ActiveLease)
+	}
+	if before.Instance.Revision != after.Instance.Revision {
+		t.Fatalf("revision %d -> %d, want no events written by a no-op resume", before.Instance.Revision, after.Instance.Revision)
+	}
+	if n := countInstances(t, s); n != 2 {
+		t.Fatalf("instance count = %d, want 2 (no child re-created)", n)
+	}
+}
+
+func TestResumeAwaitingChildrenIsIdempotent(t *testing.T) {
+	_, s, wf, childID := compositionPhase2Fixture(t, map[OutcomeName]OutcomeName{"done": "done"})
+	driveChildTerminal(t, s, childID, "done", nil)
+	startSpawnDirect(t, s, wf, "lease-r3", "att-r3")
+
+	// First resume (fresh store): resolves the parent.
+	m2 := freshManager(t, s)
+	summary, err := m2.ResumeAwaitingChildren()
+	if err != nil {
+		t.Fatalf("first resume: %v", err)
+	}
+	if summary.Resolved != 1 || summary.StillAwaiting != 0 || len(summary.Errors) != 0 {
+		t.Fatalf("first resume summary = %+v, want one resolved", summary)
+	}
+	rev1, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+
+	// Second resume (another fresh store): everything is already resolved, so
+	// it must be a pure no-op — no duplicate child, no double-applied outcome.
+	m3 := freshManager(t, s)
+	summary, err = m3.ResumeAwaitingChildren()
+	if err != nil {
+		t.Fatalf("second resume: %v", err)
+	}
+	if summary.Resolved != 0 || summary.StillAwaiting != 0 || len(summary.Errors) != 0 {
+		t.Fatalf("second resume summary = %+v, want a pure no-op", summary)
+	}
+	rev2, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent after second resume: %v", err)
+	}
+	if rev1.Instance.Revision != rev2.Instance.Revision {
+		t.Fatalf("second resume advanced revision %d -> %d, want no-op", rev1.Instance.Revision, rev2.Instance.Revision)
+	}
+	if rev2.Instance.Status != WorkflowCompleted || rev2.Instance.TerminalOutcome != "done" {
+		t.Fatalf("workflow = %s/%s, want completed/done", rev2.Instance.Status, rev2.Instance.TerminalOutcome)
+	}
+	if len(rev2.Instance.Children) != 1 {
+		t.Fatalf("instance children = %d, want 1 (no duplicate)", len(rev2.Instance.Children))
+	}
+	if n := countInstances(t, s); n != 2 {
+		t.Fatalf("instance count = %d, want 2 (no duplicate children)", n)
+	}
+}
