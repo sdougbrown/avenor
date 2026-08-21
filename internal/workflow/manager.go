@@ -447,6 +447,8 @@ func (m *Manager) WorkflowCommand(id string, payload json.RawMessage) (any, erro
 		return m.commandClaim(wf, payload)
 	case "start":
 		return m.commandStart(wf, payload)
+	case "heartbeat":
+		return m.commandHeartbeat(wf, payload)
 	case "complete":
 		return m.commandComplete(wf, payload)
 	case "gate":
@@ -510,7 +512,7 @@ func (m *Manager) commandClaim(wf WorkflowID, payload json.RawMessage) (any, err
 	if act == nil {
 		return nil, fmt.Errorf("activation not found for node %q", req.NodeID)
 	}
-	if act.Status != ActivationPending && act.Status != ActivationReady {
+	if act.Status != ActivationPending && act.Status != ActivationReady && act.Status != ActivationLeaseExpired {
 		return nil, fmt.Errorf("cannot claim activation in status %q", act.Status)
 	}
 	tmpl, err := m.templateFor(&snap)
