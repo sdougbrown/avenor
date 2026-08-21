@@ -526,8 +526,14 @@ func validateAction(action Action) error {
 		if strings.TrimSpace(string(action.Workflow.TemplateID)) == "" {
 			return fmt.Errorf("workflow action requires template_id")
 		}
+		if !safeComponent(string(action.Workflow.TemplateID)) {
+			return fmt.Errorf("workflow action requires a safe template_id component (no path separators)")
+		}
 		if strings.TrimSpace(string(action.Workflow.TemplateVersion)) == "" {
 			return fmt.Errorf("workflow action requires template_version")
+		}
+		if !safeComponent(string(action.Workflow.TemplateVersion)) {
+			return fmt.Errorf("workflow action requires a safe template_version component (no path separators)")
 		}
 		if strings.TrimSpace(action.Workflow.ChildKey) == "" {
 			return fmt.Errorf("workflow action requires child_key")

@@ -245,6 +245,12 @@ func (m *Manager) ensureChildInstance(child CompositionChild, materialized *int)
 // a pinned child template must be resolvable, and a missing pin is reported
 // as a clear pinned-version error rather than a raw store error.
 func (m *Manager) resolveTemplate(templateID TemplateID, templateVersion TemplateVersion) (Template, error) {
+	// Defense-in-depth: the pin is validated with safeComponent at create time
+	// (validateAction), but re-check here so no caller can reach LoadTemplate's
+	// filepath.Join with a path-breaking component (template-ID path traversal).
+	if !safeComponent(string(templateID)) || !safeComponent(string(templateVersion)) {
+		return Template{}, fmt.Errorf("invalid pinned child template reference %s@%s", templateID, templateVersion)
+	}
 	template, err := m.store.LoadTemplate(templateID, templateVersion)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
