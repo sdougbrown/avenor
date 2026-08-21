@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -3786,18 +3787,44 @@ func resolveWorkflowRoot(configured string) string {
 // workflowManager returns the lazily-constructed workflow manager for the
 // configured workflow root, registering it with the control server on first
 // construction. Safe for concurrent use.
+//
+// On first construction (before any normal workflow operation) it runs the
+// startup composition resume once: every awaiting_child activation is resumed
+// by identity, and those whose child is already terminal are resolved. It is a
+// best-effort hook — errors are logged and never block manager construction.
+// It never transitions a freshly-recovered lease that is not a terminal-child
+// awaiting_child parent: ResumeAwaitingChildren only iterates awaiting_child
+// activations and only resolves those whose child is terminal, so
+// non-awaiting_child leases and awaiting_child parents with non-terminal
+// children are untouched.
 func (s *Supervisor) workflowManager() *workflow.Manager {
 	s.workflowMgrMu.Lock()
 	defer s.workflowMgrMu.Unlock()
 	if s.workflowMgr != nil {
 		return s.workflowMgr
 	}
-	m := workflow.NewManager(workflow.New(resolveWorkflowRoot(s.config.WorkflowRoot)))
+	root := resolveWorkflowRoot(s.config.WorkflowRoot)
+	m := workflow.NewManager(workflow.New(root))
 	m.RegisterExecutor(workflow.ActionRun, s.directRunExecutor())
 	m.RegisterExecutor(workflow.ActionLoop, s.loopExecutor())
 	m.RegisterExecutor(workflow.ActionTeam, s.teamExecutor())
 	s.workflowMgr = m
 	s.control.SetWorkflowHandler(m)
+	// Startup composition resume: the manager is lazily constructed, so this
+	// runs exactly once, on first construction, before normal workflow
+	// operation. ResumeAwaitingChildren internally recovers the store (Catalog)
+	// first and is idempotent, so a duplicate invocation would be a safe no-op.
+	// It is skipped when the workflow root does not exist yet: there is nothing
+	// to resume, and construction must stay side-effect free (it must not
+	// create the root for a never-used workflow surface).
+	if _, err := os.Stat(root); err == nil {
+		summary, err := m.ResumeAwaitingChildren()
+		if err != nil {
+			log.Printf("workflow: startup composition resume: %v", err)
+		} else {
+			log.Printf("workflow: startup composition resume: resolved=%d still_awaiting=%d errors=%d", summary.Resolved, summary.StillAwaiting, len(summary.Errors))
+		}
+	}
 	return m
 }
 
