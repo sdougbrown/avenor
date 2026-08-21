@@ -81,12 +81,30 @@ func buildCommandEvents(state Snapshot, command Command) ([]Event, error) {
 		return []Event{e, next}, nil
 
 	case CommandGate:
-		if command.Gate == nil {
-			return nil, errors.New("gate command requires a gate instance")
+		if err := validateGateCommand(command); err != nil {
+			return nil, err
 		}
 		e := newEvent(EventGate)
 		e.Gate = command.Gate
-		return []Event{e}, nil
+		e.Outcome = command.Outcome
+		if len(command.Payload) == 0 {
+			return []Event{e}, nil
+		}
+		t := &Transition{}
+		if err := json.Unmarshal(command.Payload, t); err != nil {
+			return nil, fmt.Errorf("gate command: %w", err)
+		}
+		if t.Outcome == "" {
+			t.Outcome = command.Outcome
+		}
+		e.Transition = t
+		if t.TargetNodeID == "" {
+			return []Event{e}, nil
+		}
+		next := newEvent(EventTransition)
+		next.Transition = t
+		next.Outcome = command.Outcome
+		return []Event{e, next}, nil
 
 	case CommandSkip:
 		e := newEvent(EventSkipped)
@@ -639,9 +657,17 @@ func applyChildOutcome(next *Snapshot, act *Activation, event Event) error {
 	return satisfyActivation(next, act, event)
 }
 
-// applyGate records a gate decision on the activation. The reducer has no
-// template, so an accepted gate satisfies the activation directly, a rejected
-// or failed gate rejects it, and an undecided gate parks it awaiting_gate.
+// applyGate records a gate decision on the activation and, for a resolving
+// decision, settles the parked awaiting_gate activation exactly as a
+// successful machine completion would: the decision is recorded on the
+// instance first (append-only; the matching gate projection is replaced so a
+// re-poll of the same gate does not grow the history), the node's remaining
+// required gates are rechecked with the template-aware resolver, and — once
+// every required gate is passed or waived — the activation is satisfied and
+// its declared branch (or the workflow's terminal resolution) is followed.
+// A rejected or failed decision rejects the activation; a declared
+// failure/correction/checkpoint branch, if any, is carried by the sibling
+// EventTransition. The workflow status is never set to failed here.
 func applyGate(next *Snapshot, act *Activation, event Event) error {
 	if act == nil {
 		return errors.New("gate event requires an activation")
@@ -649,6 +675,17 @@ func applyGate(next *Snapshot, act *Activation, event Event) error {
 	gate := event.Gate
 	if gate == nil {
 		return errors.New("gate event requires a gate instance")
+	}
+
+	// A gate decision is only meaningful on an unresolved activation. Once
+	// the activation has already been satisfied or rejected, or the workflow
+	// is terminal, a late decision is a dropped no-op: a resolved gate must
+	// not be re-decided or spawn a phantom branch. The event still lands on
+	// the event log for audit; only the snapshot projection is left
+	// untouched.
+	if act.Status == ActivationSatisfied || act.Status == ActivationRejected ||
+		next.Instance.Status == WorkflowCompleted || next.Instance.Status == WorkflowFailed {
+		return nil
 	}
 	replaced := false
 	for i := range next.Instance.Gates {
@@ -669,9 +706,24 @@ func applyGate(next *Snapshot, act *Activation, event Event) error {
 	}
 	switch gate.Status {
 	case GatePassed, GateWaived:
-		act.Status = ActivationSatisfied
 		if gate.Outcome != "" {
 			act.SelectedOutcome = gate.Outcome
+		}
+		// The decision is recorded before the recheck so it counts as a
+		// satisfied gate, mirroring satisfyActivation.
+		defs := []GateDefinition(nil)
+		if completionGateResolve != nil {
+			defs = completionGateResolve(next.Instance.TemplateID, next.Instance.TemplateVersion, act.NodeID)
+		}
+		if missing := unsatisfiedRequiredGates(&next.Instance, defs, act); len(missing) > 0 {
+			act.Status = ActivationAwaitingGate
+		} else {
+			act.Status = ActivationSatisfied
+			if event.Transition == nil || event.Transition.TargetNodeID == "" {
+				// No branch: the accepted gate completes the workflow.
+				next.Instance.Status = WorkflowCompleted
+				next.Instance.TerminalOutcome = act.SelectedOutcome
+			}
 		}
 	case GateRejected, GateFailed:
 		act.Status = ActivationRejected
