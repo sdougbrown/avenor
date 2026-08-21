@@ -1,12 +1,14 @@
 package workflow
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // in-memory template helpers for the pure composition tests.
@@ -624,5 +626,722 @@ func TestCompositionPartialFailureLeavesOrphans(t *testing.T) {
 	}
 	if _, exists, err := m.store.loadCurrent(parent); err != nil || exists {
 		t.Fatalf("parent instance: exists=%v err=%v, want uncommitted", exists, err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2: the local workflow executor (attach -> awaiting_child -> outcome)
+// ---------------------------------------------------------------------------
+
+// compositionPhase2Templates builds the child leaf template (a single manual
+// node; terminal outcomes done and failed) and a parent composing it under
+// child_key "c1" with the given outcome map.
+func compositionPhase2Templates(t *testing.T, outcomeMap map[OutcomeName]OutcomeName) (parent, child Template) {
+	t.Helper()
+	child = Template{
+		SchemaVersion:    1,
+		TemplateID:       "p2-child",
+		TemplateVersion:  "1",
+		EntryNodes:       []NodeID{"start"},
+		Nodes:            []NodeDefinition{{ID: "start", Action: Action{Kind: ActionManual, Manual: &ManualAction{Instructions: "do"}}}},
+		TerminalOutcomes: []OutcomeName{"done", "failed"},
+	}
+	node := compositionWorkflowNode("spawn", "p2-child", "c1")
+	node.Action.Workflow.OutcomeMap = outcomeMap
+	parent = Template{
+		SchemaVersion:    1,
+		TemplateID:       "p2-parent",
+		TemplateVersion:  "1",
+		EntryNodes:       []NodeID{"spawn"},
+		Nodes:            []NodeDefinition{node},
+		TerminalOutcomes: []OutcomeName{"done", "failed"},
+	}
+	return parent, child
+}
+
+// compositionPhase2Fixture stores the templates, instantiates the parent, and
+// returns (manager, store, parent wf, child wf). The manager's default
+// workflow executor is in place; tests that need a bounded wait re-register
+// one.
+func compositionPhase2Fixture(t *testing.T, outcomeMap map[OutcomeName]OutcomeName) (*Manager, *Store, WorkflowID, WorkflowID) {
+	t.Helper()
+	parent, child := compositionPhase2Templates(t, outcomeMap)
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	m := NewManager(s)
+	for _, template := range []Template{child, parent} {
+		if err := s.StoreTemplate(template.TemplateID, template.TemplateVersion, template); err != nil {
+			t.Fatalf("StoreTemplate %s: %v", template.TemplateID, err)
+		}
+	}
+	payload, _ := json.Marshal(map[string]string{"template_id": "p2-parent", "template_version": "1"})
+	out, err := m.WorkflowInstantiate(payload)
+	if err != nil {
+		t.Fatalf("WorkflowInstantiate: %v", err)
+	}
+	wf := WorkflowID(out.(map[string]any)["workflow_id"].(string))
+	return m, s, wf, DeriveChildWorkflowID(wf, "spawn", "c1")
+}
+
+// registerBoundedWorkflowExecutor replaces the manager's workflow executor
+// with one whose wait is bounded so a failure cannot hang the suite.
+func registerBoundedWorkflowExecutor(t *testing.T, m *Manager, maxWait time.Duration) {
+	t.Helper()
+	m.RegisterExecutor(ActionWorkflow, &workflowExecutor{manager: m, maxWait: maxWait})
+}
+
+// claimStartSpawn claims the parent's spawn activation and returns the start
+// command payload plus the claim result.
+func claimStartSpawn(t *testing.T, m *Manager, s *Store, wf WorkflowID) (json.RawMessage, map[string]any) {
+	t.Helper()
+	snap, exists, err := s.loadCurrent(wf)
+	if err != nil || !exists {
+		t.Fatalf("loadCurrent: exists=%v err=%v", exists, err)
+	}
+	act := activationByNode(&snap.Instance, "spawn")
+	if act == nil {
+		t.Fatalf("spawn activation not found")
+	}
+	res := claimActivation(t, m, wf, "spawn", string(act.ID), "alice")
+	return startCommandPayload(t, "spawn", string(act.ID), res, nil), res
+}
+
+// waitParentAwaitingChild polls the parent until its spawn activation reaches
+// the durable awaiting_child status (the composition executor's attach point)
+// or the deadline elapses.
+func waitParentAwaitingChild(s *Store, wf WorkflowID, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		snap, exists, err := s.loadCurrent(wf)
+		if err != nil {
+			return err
+		}
+		if exists {
+			for i := range snap.Instance.Activations {
+				a := snap.Instance.Activations[i]
+				if a.NodeID == "spawn" && a.Status == ActivationAwaitingChild {
+					return nil
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("parent spawn activation never reached awaiting_child within %s", timeout)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// driveChildTerminalErr drives a single-node manual child instance to a
+// terminal completion with outcome (and optional outputs) directly through
+// store commands — no provider, no campaign. It errors instead of failing so
+// it is safe from a helper goroutine.
+func driveChildTerminalErr(s *Store, wf WorkflowID, outcome string, outputs []OutputValue) error {
+	snap, exists, err := s.loadCurrent(wf)
+	if err != nil {
+		return err
+	}
+	if !exists || len(snap.Instance.Activations) == 0 {
+		return fmt.Errorf("child workflow %s has no activation (exists=%v)", wf, exists)
+	}
+	childAct := snap.Instance.Activations[0].ID
+	identity := ExecutionIdentity{WorkflowID: wf, NodeID: "start", ActivationID: childAct}
+	snap, err = s.ApplyCommand(wf, Command{
+		Kind:             CommandClaim,
+		ExpectedRevision: snap.Instance.Revision,
+		IdempotencyKey:   "c-claim",
+		Identity:         identity,
+		LeaseID:          "c-lease-1",
+		Actor:            "alice",
+	})
+	if err != nil {
+		return fmt.Errorf("child claim: %w", err)
+	}
+	snap, err = s.ApplyCommand(wf, Command{
+		Kind:             CommandStart,
+		ExpectedRevision: snap.Instance.Revision,
+		IdempotencyKey:   "c-start",
+		Identity:         ExecutionIdentity{WorkflowID: wf, NodeID: "start", ActivationID: childAct, AttemptID: "c-att-1"},
+		LeaseID:          "c-lease-1",
+	})
+	if err != nil {
+		return fmt.Errorf("child start: %w", err)
+	}
+	snap, err = s.ApplyCommand(wf, Command{
+		Kind:             CommandComplete,
+		ExpectedRevision: snap.Instance.Revision,
+		IdempotencyKey:   "c-complete",
+		Identity:         identity,
+		LeaseID:          "c-lease-1",
+		Outcome:          OutcomeName(outcome),
+		Outputs:          outputs,
+	})
+	if err != nil {
+		return fmt.Errorf("child complete: %w", err)
+	}
+	if !isTerminalStatus(snap.Instance.Status) {
+		return fmt.Errorf("child status = %s, want terminal", snap.Instance.Status)
+	}
+	return nil
+}
+
+// driveChildTerminal is driveChildTerminalErr that fails the test on error
+// (main goroutine only).
+func driveChildTerminal(t *testing.T, s *Store, wf WorkflowID, outcome string, outputs []OutputValue) {
+	t.Helper()
+	if err := driveChildTerminalErr(s, wf, outcome, outputs); err != nil {
+		t.Fatalf("drive child terminal: %v", err)
+	}
+}
+
+// countInstances counts the materialized workflow instances on disk.
+func countInstances(t *testing.T, s *Store) int {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(s.Root(), "instances"))
+	if err != nil {
+		t.Fatalf("read instances dir: %v", err)
+	}
+	return len(entries)
+}
+
+// workflowEventKinds returns the set of event kinds in the instance's log.
+func workflowEventKinds(t *testing.T, m *Manager, wf WorkflowID) map[string]bool {
+	t.Helper()
+	out, err := m.WorkflowEvents(string(wf), 0, 1000)
+	if err != nil {
+		t.Fatalf("WorkflowEvents: %v", err)
+	}
+	kinds := map[string]bool{}
+	events := out.(map[string]any)["events"].([]map[string]any)
+	for _, e := range events {
+		kinds[e["kind"].(string)] = true
+	}
+	return kinds
+}
+
+func TestWorkflowStartAttachesAndResolvesChildOutcome(t *testing.T) {
+	m, s, wf, childID := compositionPhase2Fixture(t, map[OutcomeName]OutcomeName{"done": "done"})
+	registerBoundedWorkflowExecutor(t, m, 10*time.Second)
+	payload, res := claimStartSpawn(t, m, s, wf)
+	leaseID, _ := res["lease_id"].(string)
+
+	// The child is driven to terminal only after the durable attach is
+	// visible in the parent's snapshot: this asserts the await is real and
+	// durable, and exercises the poll loop.
+	driveErr := make(chan error, 1)
+	go func() {
+		if err := waitParentAwaitingChild(s, wf, 10*time.Second); err != nil {
+			driveErr <- err
+			return
+		}
+		driveErr <- driveChildTerminalErr(s, childID, "done", nil)
+	}()
+
+	if _, err := m.WorkflowCommand(string(wf), payload); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if e := <-driveErr; e != nil {
+		t.Fatalf("child driver: %v", e)
+	}
+
+	snap, exists, err := s.loadCurrent(wf)
+	if err != nil || !exists {
+		t.Fatalf("loadCurrent: exists=%v err=%v", exists, err)
+	}
+	act := activationByNode(&snap.Instance, "spawn")
+	if act.Status != ActivationSatisfied {
+		t.Fatalf("spawn status = %s, want satisfied", act.Status)
+	}
+	if act.SelectedOutcome != "done" {
+		t.Fatalf("spawn selected outcome = %q, want done", act.SelectedOutcome)
+	}
+	if act.ActiveLease != nil {
+		t.Fatalf("spawn lease still held after resolution")
+	}
+	if snap.Instance.Status != WorkflowCompleted || snap.Instance.TerminalOutcome != "done" {
+		t.Fatalf("workflow status = %s/%s, want completed/done", snap.Instance.Status, snap.Instance.TerminalOutcome)
+	}
+	// The child reference carries identity + mapped outcome only.
+	if len(snap.Instance.Children) != 1 {
+		t.Fatalf("instance children = %d, want 1", len(snap.Instance.Children))
+	}
+	ref := snap.Instance.Children[0]
+	if ref.ParentActivation != act.ID || ref.WorkflowID != childID || ref.Outcome != "done" {
+		t.Fatalf("child reference = %+v, want attached to %s / child %s / outcome done", ref, act.ID, childID)
+	}
+	// No child state is copied into the parent.
+	if len(snap.Instance.Outputs) != 0 {
+		t.Fatalf("parent instance outputs = %v, want none (no child state copied)", snap.Instance.Outputs)
+	}
+	// The kernel-owned composition attempt terminates with the resolution.
+	if len(snap.Instance.Attempts) != 1 || snap.Instance.Attempts[0].Status != AttemptSucceeded {
+		t.Fatalf("attempts = %+v, want one succeeded kernel attempt", snap.Instance.Attempts)
+	}
+	// No duplicate child instance was created by the executor path.
+	if n := countInstances(t, s); n != 2 {
+		t.Fatalf("instance count = %d, want 2 (parent + child)", n)
+	}
+	// The attach and outcome are durable events in the parent's log.
+	kinds := workflowEventKinds(t, m, wf)
+	if !kinds[string(EventChildAttached)] || !kinds[string(EventChildOutcome)] {
+		t.Fatalf("event kinds = %v, want child_attached and child_outcome", kinds)
+	}
+	_ = leaseID
+}
+
+func TestWorkflowStartResolvesAlreadyTerminalChild(t *testing.T) {
+	m, s, wf, childID := compositionPhase2Fixture(t, map[OutcomeName]OutcomeName{"done": "done", "failed": "failed"})
+	registerBoundedWorkflowExecutor(t, m, 5*time.Second)
+	// The child reaches terminal BEFORE the parent's workflow node starts:
+	// the attach must resolve immediately, not double-await.
+	driveChildTerminal(t, s, childID, "done", nil)
+
+	payload, _ := claimStartSpawn(t, m, s, wf)
+	if _, err := m.WorkflowCommand(string(wf), payload); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	act := activationByNode(&snap.Instance, "spawn")
+	if act.Status != ActivationSatisfied || act.SelectedOutcome != "done" {
+		t.Fatalf("spawn = %s/%s, want satisfied/done", act.Status, act.SelectedOutcome)
+	}
+	if snap.Instance.Status != WorkflowCompleted {
+		t.Fatalf("workflow status = %s, want completed", snap.Instance.Status)
+	}
+	if ref := snap.Instance.Children[0]; ref.Outcome != "done" || ref.ParentActivation != act.ID {
+		t.Fatalf("child reference = %+v, want outcome done attached to %s", ref, act.ID)
+	}
+}
+
+func TestWorkflowChildUnmappedOutcomeIsSafe(t *testing.T) {
+	// "failed" is a declared terminal outcome of the child template but the
+	// parent's outcome_map does not map it: the executor must fail safely,
+	// never fabricate a parent outcome, and leave the parent durably in
+	// awaiting_child (resumable).
+	m, s, wf, childID := compositionPhase2Fixture(t, map[OutcomeName]OutcomeName{"done": "done"})
+	registerBoundedWorkflowExecutor(t, m, 5*time.Second)
+	driveChildTerminal(t, s, childID, "failed", nil)
+
+	payload, _ := claimStartSpawn(t, m, s, wf)
+	_, err := m.WorkflowCommand(string(wf), payload)
+	if err == nil || !strings.Contains(err.Error(), "not mapped") {
+		t.Fatalf("start err = %v, want unmapped-outcome rejection", err)
+	}
+
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	act := activationByNode(&snap.Instance, "spawn")
+	if act.Status != ActivationAwaitingChild {
+		t.Fatalf("spawn status = %s, want awaiting_child (durable, resumable)", act.Status)
+	}
+	if ref := snap.Instance.Children[0]; ref.Outcome != "" || len(ref.Outputs) != 0 {
+		t.Fatalf("child reference = %+v, want no outcome/outputs recorded", ref)
+	}
+	if snap.Instance.Status != WorkflowActive {
+		t.Fatalf("workflow status = %s, want active", snap.Instance.Status)
+	}
+	// Nothing resolved, so the instance is still fully readable (no log
+	// corruption).
+	if _, err := m.WorkflowStatus(string(wf)); err != nil {
+		t.Fatalf("WorkflowStatus after safe failure: %v", err)
+	}
+}
+
+func TestWorkflowChildTypedOutputsMapped(t *testing.T) {
+	// The child produces a typed output; the parent binds it by identity
+	// only (no value copied).
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	m := NewManager(s)
+	child := Template{
+		SchemaVersion:   1,
+		TemplateID:      "p2-child",
+		TemplateVersion: "1",
+		EntryNodes:      []NodeID{"start"},
+		Nodes: []NodeDefinition{{
+			ID:      "start",
+			Action:  Action{Kind: ActionManual, Manual: &ManualAction{Instructions: "do"}},
+			Outputs: []OutputDefinition{{ID: "co", Name: "co", Type: OutputString}},
+		}},
+		TerminalOutcomes: []OutcomeName{"done"},
+	}
+	parentNode := compositionWorkflowNode("spawn", "p2-child", "c1")
+	parentNode.Outputs = []OutputDefinition{{ID: "po", Name: "po", Type: OutputString}}
+	parentNode.Action.Workflow.OutputBindings = []OutputBinding{{ChildOutput: "co", ParentOutput: "po"}}
+	parent := Template{
+		SchemaVersion:    1,
+		TemplateID:       "p2-parent",
+		TemplateVersion:  "1",
+		EntryNodes:       []NodeID{"spawn"},
+		Nodes:            []NodeDefinition{parentNode},
+		TerminalOutcomes: []OutcomeName{"done"},
+	}
+	for _, template := range []Template{child, parent} {
+		if err := s.StoreTemplate(template.TemplateID, template.TemplateVersion, template); err != nil {
+			t.Fatalf("StoreTemplate %s: %v", template.TemplateID, err)
+		}
+	}
+	payload, _ := json.Marshal(map[string]string{"template_id": "p2-parent", "template_version": "1"})
+	out, err := m.WorkflowInstantiate(payload)
+	if err != nil {
+		t.Fatalf("WorkflowInstantiate: %v", err)
+	}
+	wf := WorkflowID(out.(map[string]any)["workflow_id"].(string))
+	childID := DeriveChildWorkflowID(wf, "spawn", "c1")
+	registerBoundedWorkflowExecutor(t, m, 10*time.Second)
+
+	childSnap, exists, err := s.loadCurrent(childID)
+	if err != nil || !exists || len(childSnap.Instance.Activations) == 0 {
+		t.Fatalf("child loadCurrent: exists=%v err=%v", exists, err)
+	}
+	childActID := childSnap.Instance.Activations[0].ID
+
+	driveErr := make(chan error, 1)
+	go func() {
+		if err := waitParentAwaitingChild(s, wf, 10*time.Second); err != nil {
+			driveErr <- err
+			return
+		}
+		driveErr <- driveChildTerminalErr(s, childID, "done", []OutputValue{{
+			ID:           "ov1",
+			DefinitionID: "co",
+			ActivationID: childActID,
+			Revision:     1,
+			Value:        []byte(`"result"`),
+		}})
+	}()
+
+	parentPayload, res := claimStartSpawn(t, m, s, wf)
+	if _, err := m.WorkflowCommand(string(wf), parentPayload); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if e := <-driveErr; e != nil {
+		t.Fatalf("child driver: %v", e)
+	}
+	_ = res
+
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	ref := snap.Instance.Children[0]
+	wantRefs := []OutputReference{{
+		WorkflowID:   childID,
+		NodeID:       "start",
+		ActivationID: childActID,
+		OutputID:     "co",
+		Revision:     1,
+	}}
+	if len(ref.Outputs) != 1 || ref.Outputs[0] != wantRefs[0] {
+		t.Fatalf("child reference outputs = %+v, want %+v", ref.Outputs, wantRefs)
+	}
+	// The output VALUE stays in the child; the parent holds identity only.
+	if len(snap.Instance.Outputs) != 0 {
+		t.Fatalf("parent instance outputs = %v, want none", snap.Instance.Outputs)
+	}
+}
+
+func TestWorkflowChildOutcomeBranchesToTarget(t *testing.T) {
+	// A non-terminal mapped parent outcome (branch key) creates the target
+	// activation instead of completing the workflow.
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	m := NewManager(s)
+	child := Template{
+		SchemaVersion:    1,
+		TemplateID:       "p2-child",
+		TemplateVersion:  "1",
+		EntryNodes:       []NodeID{"start"},
+		Nodes:            []NodeDefinition{{ID: "start", Action: Action{Kind: ActionManual, Manual: &ManualAction{Instructions: "do"}}}},
+		TerminalOutcomes: []OutcomeName{"done"},
+	}
+	spawn := compositionWorkflowNode("spawn", "p2-child", "c1")
+	spawn.Action.Workflow.OutcomeMap = map[OutcomeName]OutcomeName{"done": "next"}
+	spawn.Branches = map[OutcomeName]NodeID{"next": "after"}
+	parent := Template{
+		SchemaVersion:   1,
+		TemplateID:      "p2-branch-parent",
+		TemplateVersion: "1",
+		EntryNodes:      []NodeID{"spawn"},
+		Nodes: []NodeDefinition{
+			spawn,
+			{ID: "after", Action: Action{Kind: ActionManual, Manual: &ManualAction{Instructions: "next"}}},
+		},
+		TerminalOutcomes: []OutcomeName{"done"},
+	}
+	for _, template := range []Template{child, parent} {
+		if err := s.StoreTemplate(template.TemplateID, template.TemplateVersion, template); err != nil {
+			t.Fatalf("StoreTemplate %s: %v", template.TemplateID, err)
+		}
+	}
+	payload, _ := json.Marshal(map[string]string{"template_id": "p2-branch-parent", "template_version": "1"})
+	out, err := m.WorkflowInstantiate(payload)
+	if err != nil {
+		t.Fatalf("WorkflowInstantiate: %v", err)
+	}
+	wf := WorkflowID(out.(map[string]any)["workflow_id"].(string))
+	childID := DeriveChildWorkflowID(wf, "spawn", "c1")
+	registerBoundedWorkflowExecutor(t, m, 10*time.Second)
+
+	driveErr := make(chan error, 1)
+	go func() {
+		if err := waitParentAwaitingChild(s, wf, 10*time.Second); err != nil {
+			driveErr <- err
+			return
+		}
+		driveErr <- driveChildTerminalErr(s, childID, "done", nil)
+	}()
+
+	parentPayload, res := claimStartSpawn(t, m, s, wf)
+	if _, err := m.WorkflowCommand(string(wf), parentPayload); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if e := <-driveErr; e != nil {
+		t.Fatalf("child driver: %v", e)
+	}
+	_ = res
+
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	act := activationByNode(&snap.Instance, "spawn")
+	if act.Status != ActivationSatisfied || act.SelectedOutcome != "next" {
+		t.Fatalf("spawn = %s/%s, want satisfied/next", act.Status, act.SelectedOutcome)
+	}
+	if snap.Instance.Status != WorkflowActive {
+		t.Fatalf("workflow status = %s, want active (branched, not terminal)", snap.Instance.Status)
+	}
+	after := activationByNode(&snap.Instance, "after")
+	if after == nil || after.Status != ActivationPending || after.IncomingOutcome != "next" {
+		t.Fatalf("after activation = %+v, want pending with incoming next", after)
+	}
+	if ref := snap.Instance.Children[0]; ref.Outcome != "next" {
+		t.Fatalf("child reference outcome = %q, want next", ref.Outcome)
+	}
+}
+
+func TestWorkflowExecutorRedispatchIsIdempotent(t *testing.T) {
+	// Re-dispatching the same attempt (resume semantics) is a no-op: the
+	// attach idempotency key skips the attach, and the satisfied activation
+	// makes the outcome resolution a no-op.
+	m, s, wf, childID := compositionPhase2Fixture(t, map[OutcomeName]OutcomeName{"done": "done"})
+	registerBoundedWorkflowExecutor(t, m, 5*time.Second)
+	driveChildTerminal(t, s, childID, "done", nil)
+
+	payload, res := claimStartSpawn(t, m, s, wf)
+	out, err := m.WorkflowCommand(string(wf), payload)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	mm, ok := out.(map[string]any)
+	if !ok {
+		t.Fatalf("start result = %#v, want map", out)
+	}
+	attemptID := mm["attempt_id"].(string)
+
+	before, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	exec, ok := m.executor(ActionWorkflow).(*workflowExecutor)
+	if !ok {
+		t.Fatalf("workflow executor = %T, want *workflowExecutor", m.executor(ActionWorkflow))
+	}
+	err = exec.Dispatch(context.Background(), ExecutorContext{
+		WorkflowID:   wf,
+		NodeID:       "spawn",
+		ActivationID: activationByNode(&before.Instance, "spawn").ID,
+		AttemptID:    AttemptID(attemptID),
+		LeaseID:      LeaseID(res["lease_id"].(string)),
+		Action:       Action{Kind: ActionWorkflow, Workflow: &WorkflowAction{TemplateID: "p2-child", TemplateVersion: "1", ChildKey: "c1", OutcomeMap: map[OutcomeName]OutcomeName{"done": "done"}}},
+	})
+	if err != nil {
+		t.Fatalf("re-dispatch: %v", err)
+	}
+	after, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent after re-dispatch: %v", err)
+	}
+	if before.Instance.Revision != after.Instance.Revision {
+		t.Fatalf("re-dispatch advanced revision %d -> %d, want no-op", before.Instance.Revision, after.Instance.Revision)
+	}
+	if after.Instance.Status != WorkflowCompleted {
+		t.Fatalf("workflow status = %s, want completed (unchanged)", after.Instance.Status)
+	}
+}
+
+// startSpawnDirect claims, starts, and attaches the parent's spawn activation
+// directly through store commands (no executor), using the executor's own
+// idempotency keys for the attach so a later re-dispatch of the same attempt
+// dedupes against it. It returns the activation ID.
+func startSpawnDirect(t *testing.T, s *Store, wf WorkflowID, lease LeaseID, attempt AttemptID) ActivationID {
+	t.Helper()
+	identity := ExecutionIdentity{WorkflowID: wf, NodeID: "spawn"}
+	snap, exists, err := s.loadCurrent(wf)
+	if err != nil || !exists {
+		t.Fatalf("loadCurrent: exists=%v err=%v", exists, err)
+	}
+	actID := activationByNode(&snap.Instance, "spawn").ID
+	identity.ActivationID = actID
+	if _, err := s.ApplyCommand(wf, Command{
+		Kind:             CommandClaim,
+		ExpectedRevision: snap.Instance.Revision,
+		IdempotencyKey:   "claim-" + string(attempt),
+		Identity:         ExecutionIdentity{WorkflowID: wf, NodeID: "spawn", ActivationID: actID},
+		LeaseID:          lease,
+		Actor:            "alice",
+	}); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	snap, _, err = s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent after claim: %v", err)
+	}
+	if _, err := s.ApplyCommand(wf, Command{
+		Kind:             CommandStart,
+		ExpectedRevision: snap.Instance.Revision,
+		IdempotencyKey:   "start-" + string(attempt),
+		Identity:         ExecutionIdentity{WorkflowID: wf, NodeID: "spawn", ActivationID: actID, AttemptID: attempt},
+		LeaseID:          lease,
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	snap, _, err = s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent after start: %v", err)
+	}
+	if _, err := s.ApplyCommand(wf, Command{
+		Kind:             CommandChildAttach,
+		ExpectedRevision: snap.Instance.Revision,
+		IdempotencyKey:   "child-attach-" + string(attempt),
+		Identity:         ExecutionIdentity{WorkflowID: wf, NodeID: "spawn", ActivationID: actID, AttemptID: attempt},
+		LeaseID:          lease,
+	}); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	return actID
+}
+
+// applyChildOutcomeDirect resolves the spawn activation through a direct
+// child-outcome command (no executor).
+func applyChildOutcomeDirect(t *testing.T, s *Store, wf WorkflowID, actID ActivationID, lease LeaseID, attempt AttemptID, outcome string) {
+	t.Helper()
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	if _, err := s.ApplyCommand(wf, Command{
+		Kind:             CommandChildOutcome,
+		ExpectedRevision: snap.Instance.Revision,
+		IdempotencyKey:   "child-outcome-" + string(attempt),
+		Identity:         ExecutionIdentity{WorkflowID: wf, NodeID: "spawn", ActivationID: actID, AttemptID: attempt},
+		LeaseID:          lease,
+		Outcome:          OutcomeName(outcome),
+	}); err != nil {
+		t.Fatalf("child outcome: %v", err)
+	}
+}
+
+func phase2ReDispatchContext(wf WorkflowID, actID ActivationID, attempt AttemptID, lease LeaseID) ExecutorContext {
+	return ExecutorContext{
+		WorkflowID:   wf,
+		NodeID:       "spawn",
+		ActivationID: actID,
+		AttemptID:    attempt,
+		LeaseID:      lease,
+		Action: Action{Kind: ActionWorkflow, Workflow: &WorkflowAction{
+			TemplateID: "p2-child", TemplateVersion: "1", ChildKey: "c1",
+			OutcomeMap: map[OutcomeName]OutcomeName{"done": "done"},
+		}},
+	}
+}
+
+func phase2AttemptStatus(t *testing.T, s *Store, wf WorkflowID, attempt AttemptID) AttemptStatus {
+	t.Helper()
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	for i := range snap.Instance.Attempts {
+		if snap.Instance.Attempts[i].ID == attempt {
+			return snap.Instance.Attempts[i].Status
+		}
+	}
+	t.Fatalf("attempt %s not found in instance attempts", attempt)
+	return ""
+}
+
+func TestWorkflowExecutorRedispatchTerminatesUnrecordedAttempt(t *testing.T) {
+	// Crash-window recovery: the child_outcome event landed but the process
+	// died before the kernel attempt termination was recorded, leaving the
+	// attempt stuck "starting" forever. A re-dispatch of the same attempt
+	// must record the termination (succeeded) and change nothing else.
+	m, s, wf, childID := compositionPhase2Fixture(t, map[OutcomeName]OutcomeName{"done": "done"})
+	registerBoundedWorkflowExecutor(t, m, 5*time.Second)
+	driveChildTerminal(t, s, childID, "done", nil)
+
+	const attempt = AttemptID("att-crash")
+	actID := startSpawnDirect(t, s, wf, "crash-lease", attempt)
+	applyChildOutcomeDirect(t, s, wf, actID, "crash-lease", attempt, "done")
+
+	if got := phase2AttemptStatus(t, s, wf, attempt); got != AttemptStarting {
+		t.Fatalf("attempt status before re-dispatch = %q, want starting (termination never recorded)", got)
+	}
+
+	exec, ok := m.executor(ActionWorkflow).(*workflowExecutor)
+	if !ok {
+		t.Fatalf("workflow executor = %T, want *workflowExecutor", m.executor(ActionWorkflow))
+	}
+	if err := exec.Dispatch(context.Background(), phase2ReDispatchContext(wf, actID, attempt, "crash-lease")); err != nil {
+		t.Fatalf("re-dispatch: %v", err)
+	}
+	if got := phase2AttemptStatus(t, s, wf, attempt); got != AttemptSucceeded {
+		t.Fatalf("attempt status after re-dispatch = %q, want succeeded", got)
+	}
+
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	if snap.Instance.Status != WorkflowCompleted || snap.Instance.TerminalOutcome != "done" {
+		t.Fatalf("workflow = %s/%s, want completed/done", snap.Instance.Status, snap.Instance.TerminalOutcome)
+	}
+}
+
+func TestWorkflowExecutorStopsWaitingOnceParentLeavesAwaitingChild(t *testing.T) {
+	// Parent-side check in the poll loop: once the activation has left
+	// awaiting_child, a re-dispatch must stop waiting for the (still
+	// running) child instead of polling to the bound. The bound is set long
+	// so a missing check would fail rather than pass.
+	m, s, wf, _ := compositionPhase2Fixture(t, map[OutcomeName]OutcomeName{"done": "done"})
+	registerBoundedWorkflowExecutor(t, m, 30*time.Second)
+
+	const attempt = AttemptID("att-parent-check")
+	actID := startSpawnDirect(t, s, wf, "pc-lease", attempt)
+	// Resolve the activation while the child is still non-terminal.
+	applyChildOutcomeDirect(t, s, wf, actID, "pc-lease", attempt, "done")
+
+	exec, ok := m.executor(ActionWorkflow).(*workflowExecutor)
+	if !ok {
+		t.Fatalf("workflow executor = %T, want *workflowExecutor", m.executor(ActionWorkflow))
+	}
+	start := time.Now()
+	if err := exec.Dispatch(context.Background(), phase2ReDispatchContext(wf, actID, attempt, "pc-lease")); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("dispatch took %s, want fast return after the parent left awaiting_child", elapsed)
 	}
 }

@@ -17,6 +17,8 @@ const (
 	EventHeartbeat         EventKind = "workflow.event.heartbeat"
 	EventLeaseExpired      EventKind = "workflow.event.lease_expired"
 	EventTransition        EventKind = "workflow.event.transition"
+	EventChildAttached     EventKind = "workflow.event.child_attached"
+	EventChildOutcome      EventKind = "workflow.event.child_outcome"
 )
 
 // InstanceRecord is the payload of EventInstantiated: enough immutable context
@@ -34,27 +36,31 @@ type InstanceRecord struct {
 // Stage 4). The batch produced for one command shares the command's
 // idempotency key. Fields are optional per Kind.
 type Event struct {
-	ID             EventID             `json:"id"`
-	Kind           EventKind           `json:"kind"`
-	Sequence       int64               `json:"sequence"`
-	CommandID      CommandID           `json:"command_id,omitempty"`
-	IdempotencyKey string              `json:"idempotency_key,omitempty"`
-	Identity       ExecutionIdentity   `json:"identity"`
-	AttemptID      AttemptID           `json:"attempt_id,omitempty"`
-	LeaseID        LeaseID             `json:"lease_id,omitempty"`
-	Actor          string              `json:"actor,omitempty"`
-	Reason         string              `json:"reason,omitempty"`
-	Outcome        OutcomeName         `json:"outcome,omitempty"`
-	AttemptStatus  AttemptStatus       `json:"attempt_status,omitempty"`
-	MarkerKind     string              `json:"marker_kind,omitempty"`
-	MarkerLabel    string              `json:"marker_label,omitempty"`
-	Gate           *GateInstance       `json:"gate,omitempty"`
-	Transition     *Transition         `json:"transition,omitempty"`
-	Evidence       []Evidence          `json:"evidence,omitempty"`
-	Outputs        []OutputValue       `json:"outputs,omitempty"`
-	Iteration      int                 `json:"iteration,omitempty"`
-	Selection      *ExecutionSelection `json:"selection,omitempty"`
-	Instantiated   *InstanceRecord     `json:"instantiated,omitempty"`
-	LeaseTargets   []NodeID            `json:"lease_targets,omitempty"`
-	Lease          *Lease              `json:"lease,omitempty"`
+	ID             EventID           `json:"id"`
+	Kind           EventKind         `json:"kind"`
+	Sequence       int64             `json:"sequence"`
+	CommandID      CommandID         `json:"command_id,omitempty"`
+	IdempotencyKey string            `json:"idempotency_key,omitempty"`
+	Identity       ExecutionIdentity `json:"identity"`
+	AttemptID      AttemptID         `json:"attempt_id,omitempty"`
+	LeaseID        LeaseID           `json:"lease_id,omitempty"`
+	Actor          string            `json:"actor,omitempty"`
+	Reason         string            `json:"reason,omitempty"`
+	Outcome        OutcomeName       `json:"outcome,omitempty"`
+	AttemptStatus  AttemptStatus     `json:"attempt_status,omitempty"`
+	MarkerKind     string            `json:"marker_kind,omitempty"`
+	MarkerLabel    string            `json:"marker_label,omitempty"`
+	Gate           *GateInstance     `json:"gate,omitempty"`
+	Transition     *Transition       `json:"transition,omitempty"`
+	Evidence       []Evidence        `json:"evidence,omitempty"`
+	Outputs        []OutputValue     `json:"outputs,omitempty"`
+	// ChildOutputs is the EventChildOutcome payload's selection of child
+	// output references (identity only, no child state) recorded on the
+	// parent's durable child reference.
+	ChildOutputs []OutputReference   `json:"child_outputs,omitempty"`
+	Iteration    int                 `json:"iteration,omitempty"`
+	Selection    *ExecutionSelection `json:"selection,omitempty"`
+	Instantiated *InstanceRecord     `json:"instantiated,omitempty"`
+	LeaseTargets []NodeID            `json:"lease_targets,omitempty"`
+	Lease        *Lease              `json:"lease,omitempty"`
 }

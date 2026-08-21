@@ -27,7 +27,11 @@ type Manager struct {
 }
 
 func NewManager(store *Store) *Manager {
-	return &Manager{store: store, executors: make(map[ActionKind]Executor)}
+	m := &Manager{store: store, executors: make(map[ActionKind]Executor)}
+	// The workflow action is kernel-local composition (no provider
+	// admission), so its executor ships with the manager by default.
+	m.executors[ActionWorkflow] = &workflowExecutor{manager: m}
+	return m
 }
 
 // Executor dispatches a started action to its runtime backend. The manager

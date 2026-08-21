@@ -558,7 +558,10 @@ type Command struct {
 	Gate             *GateInstance       `json:"gate,omitempty"`
 	Lease            *Lease              `json:"lease,omitempty"`
 	Selection        *ExecutionSelection `json:"selection,omitempty"`
-	Payload          json.RawMessage     `json:"payload,omitempty"`
+	// ChildOutputs is the CommandChildOutcome selection of child output
+	// references (identity only, no child state copied into the parent).
+	ChildOutputs []OutputReference `json:"child_outputs,omitempty"`
+	Payload      json.RawMessage   `json:"payload,omitempty"`
 }
 
 type Snapshot struct {
