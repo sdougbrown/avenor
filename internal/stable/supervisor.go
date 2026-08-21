@@ -1616,7 +1616,9 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 	var brokerAttemptIDsMu sync.Mutex
 	sessions := newWorkflowSessionTracker()
 	defer func() {
+		panicked := false
 		if r := recover(); r != nil {
+			panicked = true
 			fmt.Fprintf(os.Stderr, "avenor stable: child %s panic: %v\n", child.id, r)
 			s.emitChildError(child, fmt.Sprintf("panic: %v", r), "error")
 			if final, ok := sessions.final(cfg.Post, cfg.Team, cfg.Pre); ok {
@@ -1626,6 +1628,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				cli.WriteSentinel(child.sentinelFile, 1, child.sessionID(), "error", s.runID, os.Stderr)
 			}
 		}
+		s.recordWorkflowTermination(child, panicked, ctx)
 		s.beginChildShutdown(child)
 		s.closeChildEventWriter(child)
 		s.clearRuntimePermissionOptions(child.id)
@@ -3792,6 +3795,7 @@ func (s *Supervisor) workflowManager() *workflow.Manager {
 	m := workflow.NewManager(workflow.New(resolveWorkflowRoot(s.config.WorkflowRoot)))
 	m.RegisterExecutor(workflow.ActionRun, s.directRunExecutor())
 	m.RegisterExecutor(workflow.ActionLoop, s.loopExecutor())
+	m.RegisterExecutor(workflow.ActionTeam, s.teamExecutor())
 	s.workflowMgr = m
 	s.control.SetWorkflowHandler(m)
 	return m
@@ -3871,6 +3875,50 @@ func (e *loopExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext
 	}
 	if ec.Action.Loop != nil {
 		params.LoopFile = ec.Action.Loop.LoopFile
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		params.Dir = cwd
+	}
+
+	result, err := e.sup.spawn(params)
+	if err != nil {
+		// Provider-start (or any synchronous spawn) error: the attempt was
+		// already started durably by the manager; record termination before
+		// returning so the attempt is never left dangling.
+		kind, label := workflowMarkerForKind(ec.Action.Kind)
+		_ = e.sup.workflowManager().RecordAttemptTerminated(
+			ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, workflow.AttemptFailed, kind, label)
+		return err
+	}
+	e.sup.registerWorkflowTermination(result.RuntimeID, ec)
+	return nil
+}
+
+// teamExecutor returns the Executor that dispatches a workflow team action to
+// a real stable team child, threading workflow identity through the spawn and
+// recording attempt termination on every terminal path.
+func (s *Supervisor) teamExecutor() workflow.Executor {
+	return &teamExecutor{sup: s}
+}
+
+type teamExecutor struct{ sup *Supervisor }
+
+func (e *teamExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext) error {
+	params := SpawnParams{
+		WorkflowID:   string(ec.WorkflowID),
+		NodeID:       string(ec.NodeID),
+		ActivationID: string(ec.ActivationID),
+		AttemptID:    string(ec.AttemptID),
+		Dir:          ".",
+	}
+	if ec.Selection != nil {
+		params.Agent = ec.Selection.Agent
+		params.Model = ec.Selection.Model
+		params.Backend = ec.Selection.Backend
+		params.Thinking = ec.Selection.Thinking
+	}
+	if ec.Action.Team != nil {
+		params.TeamFile = ec.Action.Team.TeamFile
 	}
 	if cwd, err := os.Getwd(); err == nil {
 		params.Dir = cwd

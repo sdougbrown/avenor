@@ -5867,3 +5867,127 @@ func TestWorkflowLoopExecutorRegistered(t *testing.T) {
 		t.Fatalf("start error = %v, want loop executor spawn (load loop config) error", err)
 	}
 }
+
+// TestWorkflowTeamChildRecordsTermination mirrors
+// TestWorkflowLoopChildRecordsTermination for the team child: a team child
+// carrying workflow identity fires the termination callback with
+// AttemptSucceeded when the team completes cleanly. The marker directive
+// semantics are teamrunner-local (member exit/continue stay action-local);
+// only the aggregate terminal state reaches the kernel.
+func TestWorkflowTeamChildRecordsTermination(t *testing.T) {
+	provider := &stableScriptedProvider{
+		attempt: -1,
+		scripts: []stableScriptedAttempt{{
+			sessionID: "ses_wf_team",
+			events: []stableScriptedEvent{{event: events.Event{
+				Event:     "session.end",
+				SessionID: "ses_wf_team",
+				Fields:    map[string]any{"stop_reason": "end_turn"},
+			}}},
+		}},
+	}
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-wf-team-term.sock", MaxRuntimes: 1})
+	defer func() { _ = sup.broker.Stop() }()
+	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
+	ctx, cancel := context.WithCancel(context.Background())
+	child := &childRuntime{
+		id:           "rt_wf_team_term",
+		workflowID:   "wf1",
+		nodeID:       "start",
+		activationID: "act1",
+		attemptID:    "att2",
+		done:         make(chan struct{}),
+		promptCh:     make(chan struct{}, 1),
+		eventWriter:  stableTestSink{},
+		cancelFn:     cancel,
+	}
+	sup.runtimes[child.id] = child
+
+	var mu sync.Mutex
+	var called bool
+	var gotStatus workflow.AttemptStatus
+	child.onWorkflowTerminate = func(status workflow.AttemptStatus) {
+		mu.Lock()
+		called = true
+		gotStatus = status
+		mu.Unlock()
+	}
+
+	go sup.runTeamChild(ctx, child, &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}, 0, "", "", "", "", "", "")
+	waitForStableDone(t, child)
+
+	mu.Lock()
+	wasCalled, status := called, gotStatus
+	mu.Unlock()
+	if !wasCalled {
+		t.Fatal("workflow team child did not record termination on clean run")
+	}
+	if status != workflow.AttemptSucceeded {
+		t.Fatalf("workflow team termination status = %s, want succeeded", status)
+	}
+}
+
+// TestWorkflowTeamExecutorRegistered proves the team action is wired into the
+// supervisor's workflow manager: a start command for a team action reaches the
+// team executor (spawn fails loading the missing team file) instead of being
+// rejected as an unsupported/unregistered executor.
+func TestWorkflowTeamExecutorRegistered(t *testing.T) {
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-wf-team-reg.sock", MaxRuntimes: 1, WorkflowRoot: filepath.Join(t.TempDir(), "wfroot")})
+	mgr := sup.workflowManager()
+	const teamTemplate = `{
+  "schema_version": 1,
+  "template_id": "team-reg",
+  "template_version": "1",
+  "entry_nodes": ["start"],
+  "nodes": [{"id": "start", "action": {"type": "team", "team_file": "missing.json"}}],
+  "terminal_outcomes": ["done"]
+}`
+	if _, err := mgr.WorkflowCreate([]byte(teamTemplate)); err != nil {
+		t.Fatalf("WorkflowCreate: %v", err)
+	}
+	inst, err := mgr.WorkflowInstantiate([]byte(`{"template_id": "team-reg", "template_version": "1"}`))
+	if err != nil {
+		t.Fatalf("WorkflowInstantiate: %v", err)
+	}
+	wfID, _ := inst.(map[string]any)["workflow_id"].(string)
+	if wfID == "" {
+		t.Fatalf("instantiate result missing workflow_id: %#v", inst)
+	}
+	insp, err := mgr.WorkflowInspect(wfID)
+	if err != nil {
+		t.Fatalf("WorkflowInspect: %v", err)
+	}
+	acts, ok := insp.(map[string]any)["activations"].([]workflow.Activation)
+	if !ok || len(acts) == 0 {
+		t.Fatalf("inspect activations = %#v, want one activation", insp.(map[string]any)["activations"])
+	}
+	actID := string(acts[0].ID)
+
+	mustMarshal := func(v map[string]any) []byte {
+		data, err := json.Marshal(v)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return data
+	}
+	claim, err := mgr.WorkflowCommand(wfID, mustMarshal(map[string]any{
+		"op": "claim", "node_id": "start", "activation_id": actID, "actor": "alice",
+	}))
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	cm := claim.(map[string]any)
+	_, err = mgr.WorkflowCommand(wfID, mustMarshal(map[string]any{
+		"op": "start", "node_id": "start", "activation_id": actID,
+		"lease_id": cm["lease_id"], "owner_token": cm["owner_token"],
+	}))
+	if err == nil {
+		t.Fatal("start succeeded, want the team executor's missing-team-file spawn error")
+	}
+	if strings.Contains(err.Error(), "unsupported") || strings.Contains(err.Error(), "not registered") {
+		t.Fatalf("team executor not registered: %v", err)
+	}
+	if !strings.Contains(err.Error(), "load team config") {
+		t.Fatalf("start error = %v, want team executor spawn (load team config) error", err)
+	}
+}
