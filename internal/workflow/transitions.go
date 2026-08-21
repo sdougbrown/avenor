@@ -517,8 +517,32 @@ func applyCompleted(next *Snapshot, act *Activation, event Event) error {
 // no declared branch transition — terminates the workflow with the outcome.
 // Both applyCompleted and applyChildOutcome delegate here so the
 // child-terminal-outcome resolution stays in lockstep with completion
-// semantics.
+// semantics. When the node declares required gates that are still
+// unsatisfied, the activation is parked awaiting_gate instead (evidence and
+// outputs are still recorded; the workflow is not completed).
 func satisfyActivation(next *Snapshot, act *Activation, event Event) error {
+	// Gate-aware completion (Stage 11): if the node declares required gates
+	// that are not yet satisfied, completion parks the activation in
+	// awaiting_gate instead of satisfying it. Evidence and outputs are still
+	// recorded and the lease released atomically; the workflow is NOT
+	// completed and NO branch is followed until the gates resolve.
+	defs := []GateDefinition(nil)
+	if completionGateResolve != nil {
+		defs = completionGateResolve(next.Instance.TemplateID, next.Instance.TemplateVersion, act.NodeID)
+	}
+	if missing := unsatisfiedRequiredGates(&next.Instance, defs, act); len(missing) > 0 {
+		act.Status = ActivationAwaitingGate
+		act.SelectedOutcome = event.Outcome
+		act.ActiveLease = nil
+		act.UpdatedAt = nowUTC()
+		if len(event.Evidence) > 0 {
+			next.Instance.Evidence = append(next.Instance.Evidence, event.Evidence...)
+		}
+		if len(event.Outputs) > 0 {
+			next.Instance.Outputs = append(next.Instance.Outputs, event.Outputs...)
+		}
+		return nil
+	}
 	act.Status = ActivationSatisfied
 	act.SelectedOutcome = event.Outcome
 	act.ActiveLease = nil
@@ -741,6 +765,22 @@ func applyLeaseExpired(act *Activation, event Event) error {
 	act.ActiveLease = nil
 	act.UpdatedAt = nowUTC()
 	return nil
+}
+
+// completionGateResolve is an optional template-aware gate lookup installed
+// by the workflow manager. The reducer cannot see templates, so without it
+// gate-awareness on completion is disabled entirely (a completion always
+// satisfies). A template is versioned, so the resolver also carries the
+// template version.
+var completionGateResolve func(templateID TemplateID, templateVersion TemplateVersion, nodeID NodeID) []GateDefinition
+
+// SetCompletionGateResolver wires the template-aware gate lookup used by the
+// completion path: when a completion leaves required gates unsatisfied, the
+// activation is parked awaiting_gate instead of being satisfied. It is owned
+// by the manager (which can resolve the instance's versioned template); the
+// reducer defaults to no-gate behavior when unset.
+func SetCompletionGateResolver(fn func(templateID TemplateID, templateVersion TemplateVersion, nodeID NodeID) []GateDefinition) {
+	completionGateResolve = fn
 }
 
 // retryResolve is an optional template-aware retry policy lookup installed by

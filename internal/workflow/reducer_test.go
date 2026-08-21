@@ -141,7 +141,7 @@ func TestApply(t *testing.T) {
 		{"completion_before_termination", testCompletionBeforeTermination},
 		{"termination_before_completion", testTerminationBeforeCompletion},
 		{"terminate_marker_inert", testTerminateMarkerInert},
-		{"required_gate_pending_on_complete", testGatePendingOnComplete},
+		{"required_gate_awaits_on_complete", testGateAwaitedOnComplete},
 		{"child_attach_moves_running_to_awaiting_child", testChildAttachAwaitingChild},
 		{"child_attach_rejects_invalid_states", testChildAttachRejectsInvalidStates},
 		{"child_attach_lease_guard", testChildAttachLeaseGuard},
@@ -954,44 +954,51 @@ func testTerminateMarkerInert(t *testing.T) {
 	}
 }
 
-func testGatePendingOnComplete(t *testing.T) {
-	// applyCompleted has no gate-awareness: there is no awaiting_gate-on-
-	// complete representation. The reducer's actual behavior is pinned here:
-	// a pending gate parks the activation in ActivationAwaitingGate, and a
-	// completion command issued from that state is rejected, because
-	// applyCompleted only accepts ActivationRunning/ActivationAwaitingCompletion.
+func testGateAwaitedOnComplete(t *testing.T) {
+	// Gate-aware completion (Stage 11, phase 2): a completion issued while a
+	// required gate is unsatisfied parks the activation in awaiting_gate
+	// instead of satisfying it. Evidence and outputs are still recorded and
+	// the lease is released atomically; the workflow is NOT completed and no
+	// branch is followed until the gates resolve.
 	state := newInstance(t)
+	SetCompletionGateResolver(func(TemplateID, TemplateVersion, NodeID) []GateDefinition {
+		return []GateDefinition{{ID: "review", Required: true}}
+	})
+	t.Cleanup(func() { SetCompletionGateResolver(nil) })
 	actID := actStart(state).ID
-	state, leaseID, _ := runToStart(t, state)
+	state, leaseID, attemptID := runToStart(t, state)
 
 	state = mustApply(t, state, Command{
-		Kind:             CommandGate,
-		ExpectedRevision: state.Instance.Revision,
-		IdempotencyKey:   "gate-pending",
-		Identity:         baseIdentity(actID, "att-1"),
-		Gate: &GateInstance{
-			ID:           "gate-1",
-			GateID:       "gate1",
-			ActivationID: actID,
-			Status:       GatePending,
-		},
-	}, "gate (pending)")
-	if got := actStart(state).Status; got != ActivationAwaitingGate {
-		t.Fatalf("pending gate: activation status got %q want %q",
-			got, ActivationAwaitingGate)
-	}
-
-	_, err := applyCmd(state, Command{
 		Kind:             CommandComplete,
 		ExpectedRevision: state.Instance.Revision,
-		IdempotencyKey:   "complete-with-gate-pending",
-		Identity:         baseIdentity(actID, "att-1"),
+		IdempotencyKey:   "complete-with-gates",
+		Identity:         baseIdentity(actID, attemptID),
 		LeaseID:          leaseID,
 		Outcome:          "done",
-	})
-	if err == nil {
-		t.Fatalf("complete from awaiting_gate: expected error, got nil " +
-			"(reducer has no gate-on-complete representation)")
+		Evidence:         []Evidence{{ID: "ev-1", Kind: "artifact", Source: EvidenceMachine, StoredPath: "evidence/ev-1/file", ActivationID: actID}},
+		Outputs:          []OutputValue{{ID: "out-1", DefinitionID: "summary", ActivationID: actID, Revision: 1, Value: json.RawMessage(`"done"`)}},
+	}, "complete with unsatisfied required gates")
+
+	act := actStart(state)
+	if act.Status != ActivationAwaitingGate {
+		t.Fatalf("gated completion: activation status got %q want %q",
+			act.Status, ActivationAwaitingGate)
+	}
+	if state.Instance.Status != WorkflowActive {
+		t.Fatalf("gated completion: workflow status got %q want %q",
+			state.Instance.Status, WorkflowActive)
+	}
+	if act.SelectedOutcome != "done" {
+		t.Fatalf("gated completion: selected outcome got %q want \"done\"", act.SelectedOutcome)
+	}
+	if act.ActiveLease != nil {
+		t.Fatalf("gated completion: lease not released: %+v", act.ActiveLease)
+	}
+	if len(state.Instance.Evidence) != 1 || state.Instance.Evidence[0].ID != "ev-1" {
+		t.Fatalf("gated completion: evidence got %+v want the staged evidence", state.Instance.Evidence)
+	}
+	if len(state.Instance.Outputs) != 1 || state.Instance.Outputs[0].ID != "out-1" {
+		t.Fatalf("gated completion: outputs got %+v want the declared output", state.Instance.Outputs)
 	}
 }
 
