@@ -12,14 +12,10 @@ import "fmt"
 // ids, and every required definition present.
 func validateDeclaredOutputs(node *NodeDefinition, outputs []OutputValue) error {
 	declared := make(map[OutputID]bool, len(node.Outputs))
-	required := make(map[OutputID]bool)
+	seen := make(map[OutputID]bool, len(outputs))
 	for _, def := range node.Outputs {
 		declared[def.ID] = true
-		if def.Required {
-			required[def.ID] = true
-		}
 	}
-	seen := make(map[OutputID]bool, len(outputs))
 	for _, output := range outputs {
 		if !declared[output.DefinitionID] {
 			return fmt.Errorf("workflow output %q is not declared on node %q", output.DefinitionID, node.ID)
@@ -29,9 +25,12 @@ func validateDeclaredOutputs(node *NodeDefinition, outputs []OutputValue) error 
 		}
 		seen[output.DefinitionID] = true
 	}
-	for id := range required {
-		if !seen[id] {
-			return fmt.Errorf("required workflow output %q is missing on node %q", id, node.ID)
+	for _, def := range node.Outputs {
+		if !def.Required {
+			continue
+		}
+		if !seen[def.ID] {
+			return fmt.Errorf("required workflow output %q is missing on node %q", def.ID, node.ID)
 		}
 	}
 	return nil
@@ -125,7 +124,6 @@ func unsatisfiedRequiredGates(inst *WorkflowInstance, defs []GateDefinition, act
 			continue
 		}
 		satisfied[gi.GateID] = true
-		satisfied[GateID(gi.ID)] = true
 	}
 	var missing []GateID
 	for _, def := range defs {
