@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sdougbrown/avenor/internal/mcpserver"
 )
@@ -57,4 +58,18 @@ func (s *stubControlClient) AnswerPermission(runtimeID, requestID, optionID stri
 }
 func (s *stubControlClient) AnswerPermissionWithMessage(runtimeID, requestID, optionID, message string) error {
 	return nil
+}
+func (s *stubControlClient) WorkflowStatus(string) (map[string]any, error) { return nil, nil }
+func (s *stubControlClient) WorkflowWait(string, time.Duration) (map[string]any, error) {
+	return nil, nil
+}
+func (s *stubControlClient) WorkflowInspect(string) (map[string]any, error) { return nil, nil }
+func (s *stubControlClient) WorkflowEvents(string, int64, int) (map[string]any, error) {
+	return nil, nil
+}
+func (s *stubControlClient) WorkflowComplete(string, map[string]any) (map[string]any, error) {
+	return nil, nil
+}
+func (s *stubControlClient) WorkflowGate(string, map[string]any) (map[string]any, error) {
+	return nil, nil
 }

@@ -21,6 +21,17 @@ var tsToolNames = []string{
 	"avenor_shutdown",
 }
 
+// workflowToolNames lists the six Go-only MCP workflow tools (Stage 14). These
+// have no TypeScript reference yet; JS host parity is deferred to Stage 15.
+var workflowToolNames = []string{
+	"avenor_workflow_status",
+	"avenor_workflow_wait",
+	"avenor_workflow_inspect",
+	"avenor_workflow_events",
+	"avenor_workflow_complete",
+	"avenor_workflow_gate",
+}
+
 func TestToolNameParity(t *testing.T) {
 	s, err := NewServer(Options{
 		Transport:     "stdio",
@@ -32,30 +43,33 @@ func TestToolNameParity(t *testing.T) {
 	}
 	defer s.Close()
 
+	wanted := append(append([]string{}, tsToolNames...), workflowToolNames...)
+	wantedSet := make(map[string]bool, len(wanted))
+	for _, n := range wanted {
+		wantedSet[n] = true
+	}
+
 	// Query registered tool names from the actual server instance.
 	registeredNames := make(map[string]bool)
 	for _, name := range s.RegisteredToolNames() {
 		registeredNames[name] = true
 	}
 
-	if len(registeredNames) != len(tsToolNames) {
-		t.Errorf("registered tool count %d != expected %d", len(registeredNames), len(tsToolNames))
+	if len(registeredNames) != len(wanted) {
+		t.Errorf("registered tool count %d != expected %d", len(registeredNames), len(wanted))
 	}
 
-	for _, name := range tsToolNames {
+	for _, name := range wanted {
 		if !registeredNames[name] {
-			t.Errorf("registered tools missing TS tool: %s", name)
+			t.Errorf("registered tools missing tool: %s", name)
 		}
 	}
 
-	// Also verify no extra tools are registered that TS doesn't have
-	tsSet := make(map[string]bool, len(tsToolNames))
-	for _, n := range tsToolNames {
-		tsSet[n] = true
-	}
+	// Also verify no tools are registered outside the union of the TS reference
+	// and the Go-only workflow surface.
 	for name := range registeredNames {
-		if !tsSet[name] {
-			t.Errorf("registered tool not in TS reference: %s", name)
+		if !wantedSet[name] {
+			t.Errorf("registered tool not in TS reference or workflow surface: %s", name)
 		}
 	}
 }
@@ -441,12 +455,13 @@ func TestMCPStdioHandshake(t *testing.T) {
 		registeredNames[name] = true
 	}
 
-	if len(registeredNames) != 7 {
-		t.Fatalf("expected 7 registered tools, got %d", len(registeredNames))
+	expected := append(append([]string{}, tsToolNames...), workflowToolNames...)
+	if len(registeredNames) != len(expected) {
+		t.Fatalf("expected %d registered tools, got %d", len(expected), len(registeredNames))
 	}
-	for _, expected := range tsToolNames {
-		if !registeredNames[expected] {
-			t.Errorf("missing tool: %s", expected)
+	for _, name := range expected {
+		if !registeredNames[name] {
+			t.Errorf("missing tool: %s", name)
 		}
 	}
 }
