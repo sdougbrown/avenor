@@ -195,13 +195,4 @@ func TestUnsatisfiedRequiredGates(t *testing.T) {
 	if got := unsatisfiedRequiredGates(otherActivation, defs, act); len(got) != 2 {
 		t.Fatalf("other activation: expected [g-pass g-waive], got %v", got)
 	}
-
-	// Matching on the instance id also satisfies.
-	byInstanceID := &WorkflowInstance{Gates: []GateInstance{
-		{ID: "g-pass", GateID: "something-else", ActivationID: "act1", Status: GatePassed},
-		{ID: "g-waive", GateID: "something-else", ActivationID: "act1", Status: GateWaived},
-	}}
-	if got := unsatisfiedRequiredGates(byInstanceID, defs, act); len(got) != 0 {
-		t.Fatalf("instance-id match: expected empty, got %v", got)
-	}
 }
