@@ -5731,7 +5731,7 @@ func TestWorkflowRunChildRecordsFailedTermination(t *testing.T) {
 // is dropped for all kinds.
 func TestWorkflowMarkerForKind(t *testing.T) {
 	tests := []struct {
-		kind workflow.ActionKind
+		kind                workflow.ActionKind
 		wantKind, wantLabel string
 	}{
 		{workflow.ActionRun, "", ""},
@@ -5989,5 +5989,24 @@ func TestWorkflowTeamExecutorRegistered(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "load team config") {
 		t.Fatalf("start error = %v, want team executor spawn (load team config) error", err)
+	}
+}
+
+// TestWorkflowMarkerEvidenceParity locks the Stage-8 "all three record the same
+// attempt contract" requirement at the marker-evidence seam: run records no
+// marker, and loop/team record the action-declared constant MarkerKind, with an
+// empty label (the parsed terminal directive stays action-local and never
+// becomes a kernel command).
+func TestWorkflowMarkerEvidenceParity(t *testing.T) {
+	cases := map[workflow.ActionKind]struct{ kind, label string }{
+		workflow.ActionRun:  {"", ""},
+		workflow.ActionLoop: {"loop", ""},
+		workflow.ActionTeam: {"team", ""},
+	}
+	for action, want := range cases {
+		kind, label := workflowMarkerForKind(action)
+		if kind != want.kind || label != want.label {
+			t.Errorf("workflowMarkerForKind(%s) = (%q,%q), want (%q,%q)", action, kind, label, want.kind, want.label)
+		}
 	}
 }
