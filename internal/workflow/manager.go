@@ -449,6 +449,12 @@ func (m *Manager) WorkflowCommand(id string, payload json.RawMessage) (any, erro
 		return m.commandStart(wf, payload)
 	case "complete":
 		return m.commandComplete(wf, payload)
+	case "gate":
+		return m.commandGate(wf, payload)
+	case "skip":
+		return m.commandSkip(wf, payload)
+	case "unblock":
+		return m.commandUnblock(wf, payload)
 	default:
 		return nil, fmt.Errorf("workflow command op %q is unsupported until a later stage", op.Op)
 	}

@@ -499,6 +499,50 @@ func (c *Client) WorkflowCommand(workflowID string, command json.RawMessage) (ma
 	return result, err
 }
 
+// workflowCommand builds a workflow.command payload with the given op
+// discriminator and field map and routes it through WorkflowCommand. Fields
+// are passed through verbatim; the server-side command handler validates
+// them.
+func (c *Client) workflowCommand(workflowID, op string, fields map[string]any) (map[string]any, error) {
+	payload := make(map[string]any, len(fields)+1)
+	for k, v := range fields {
+		payload[k] = v
+	}
+	payload["op"] = op
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("workflow %s command: %w", op, err)
+	}
+	return c.WorkflowCommand(workflowID, data)
+}
+
+// WorkflowComplete atomically completes a machine/external handoff
+// activation (op "complete").
+func (c *Client) WorkflowComplete(workflowID string, fields map[string]any) (map[string]any, error) {
+	return c.workflowCommand(workflowID, "complete", fields)
+}
+
+// WorkflowGate records a gate decision on a parked awaiting_gate activation
+// (op "gate"); fields carry node_id, activation_id, gate_id, operation, and
+// the operation's required fields (actor/reason/evidence for human ops, the
+// external result envelope for external_result).
+func (c *Client) WorkflowGate(workflowID string, fields map[string]any) (map[string]any, error) {
+	return c.workflowCommand(workflowID, "gate", fields)
+}
+
+// WorkflowSkip waives every unsatisfied required gate on a parked
+// awaiting_gate activation (op "skip"); fields carry node_id, actor,
+// reason, evidence_ids, and optionally activation_id.
+func (c *Client) WorkflowSkip(workflowID string, fields map[string]any) (map[string]any, error) {
+	return c.workflowCommand(workflowID, "skip", fields)
+}
+
+// WorkflowUnblock returns a blocked activation to ready (op "unblock");
+// fields carry node_id, actor, reason, and optionally activation_id.
+func (c *Client) WorkflowUnblock(workflowID string, fields map[string]any) (map[string]any, error) {
+	return c.workflowCommand(workflowID, "unblock", fields)
+}
+
 // SendToParent sends a message from a child runtime to its parent.
 func (c *Client) SendToParent(runtimeID, message string) error {
 	if runtimeID == "" {
