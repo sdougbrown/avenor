@@ -170,7 +170,7 @@ func TestSchemaFieldParity(t *testing.T) {
 	t.Run("avenor_workflow_gate", func(t *testing.T) {
 		// workflowGateArgs — required: workflow_id, node_id, gate_id,
 		// activation_id, operation; operation-specific fields are optional
-		allowed := []string{"workflow_id", "node_id", "gate_id", "activation_id", "operation", "actor", "reason", "subject", "poll_id", "source", "result", "response_hash", "observed_at", "evidence_ids", "supervisor_id"}
+		allowed := []string{"workflow_id", "node_id", "gate_id", "activation_id", "operation", "actor", "reason", "outcome", "subject", "poll_id", "source", "result", "response_hash", "observed_at", "evidence_ids", "supervisor_id"}
 		required := []string{"workflow_id", "node_id", "gate_id", "activation_id", "operation"}
 		assertFields(t, "workflowGateArgs", allowed, required)
 	})
@@ -473,6 +473,7 @@ func assertFields(t *testing.T, structName string, allowed, required []string) {
 			"activation_id": "a1",
 			"operation":     "external_result",
 			"actor":         "bob",
+			"outcome":       "failure",
 			"subject":       `{"type":"pr","repository":"org/repo","pull_request":12,"revision":"abc"}`,
 			"observed_at":   "2024-01-01T00:00:00Z",
 			"evidence_ids":  []string{"e1"},
@@ -483,7 +484,7 @@ func assertFields(t *testing.T, structName string, allowed, required []string) {
 		if err := json.Unmarshal(b, &a); err != nil {
 			t.Fatalf("%s: unmarshal: %v", structName, err)
 		}
-		if a.WorkflowID != "wf-1" || a.NodeID != "n1" || a.GateID != "g1" || a.ActivationID != "a1" || a.Operation != "external_result" || a.SupervisorID != "s" {
+		if a.WorkflowID != "wf-1" || a.NodeID != "n1" || a.GateID != "g1" || a.ActivationID != "a1" || a.Operation != "external_result" || a.Outcome != "failure" || a.SupervisorID != "s" {
 			t.Errorf("%s: fields not populated correctly", structName)
 		}
 		if string(a.Subject) == "" || a.ObservedAt != "2024-01-01T00:00:00Z" || len(a.EvidenceIDs) != 1 {
@@ -566,9 +567,9 @@ func assertSchemaTags(t *testing.T, structName string, allowed, required []strin
 }
 
 // TestMCPStdioHandshake verifies that a NewServer with a fake client
-// registers exactly 7 tools with the correct names, matching the
-// TypeScript MCP tool surface. Uses in-process server inspection
-// instead of spawning a subprocess.
+// registers the full tool surface (the seven TypeScript-reference tools plus
+// the six Go-only workflow tools) with the correct names, matching the Go MCP
+// surface. Uses in-process server inspection instead of spawning a subprocess.
 func TestPermissionArgsRejectsUnpairedSurrogateMessage(t *testing.T) {
 	var args permissionArgs
 	if err := json.Unmarshal([]byte(`{"run_id":"r","option_id":"o","message":"\uD800"}`), &args); err == nil {
