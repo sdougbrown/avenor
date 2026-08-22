@@ -4,6 +4,12 @@ import * as path from 'node:path'
 import * as os from 'node:os'
 import { PassThrough } from 'node:stream'
 import { Client, dial, type Event } from './client.js'
+import type {
+  ExecutionIdentity,
+  WorkflowCompleteParams,
+  WorkflowGateParams,
+  WorkflowHeartbeatParams,
+} from './client.js'
 
 function tempSocketPath(): string {
   const rand = Math.random().toString(36).substring(2, 10)
@@ -937,5 +943,316 @@ describe('Client.event lagged', () => {
       client.close()
       server.close()
     }
+  })
+})
+
+describe('Client.workflow', () => {
+  let server: net.Server
+
+  afterEach(() => {
+    server?.close()
+  })
+
+  it('sends workflow.status with workflow_id', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      expect(req.method).toBe('workflow.status')
+      expect(req.params).toEqual({ workflow_id: 'wf-1' })
+      sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: { phase: 'running' } }) + '\n')
+    })
+
+    const client = await dial(socketPath)
+    try {
+      const result = await client.workflowStatus('wf-1')
+      expect(result).toEqual({ phase: 'running' })
+    } finally {
+      client.close()
+    }
+  })
+
+  it('sends workflow.wait with timeout_ms when provided', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      expect(req.method).toBe('workflow.wait')
+      expect(req.params).toEqual({ workflow_id: 'wf-1', timeout_ms: 300000 })
+      sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: { phase: 'complete' } }) + '\n')
+    })
+
+    const client = await dial(socketPath)
+    try {
+      const result = await client.workflowWait('wf-1', 300000)
+      expect(result).toEqual({ phase: 'complete' })
+    } finally {
+      client.close()
+    }
+  })
+
+  it('sends workflow.wait without timeout_ms when omitted', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      expect(req.method).toBe('workflow.wait')
+      expect(req.params).toEqual({ workflow_id: 'wf-1' })
+      expect(Object.hasOwn(req.params, 'timeout_ms')).toBe(false)
+      sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: { phase: 'running' } }) + '\n')
+    })
+
+    const client = await dial(socketPath)
+    try {
+      await client.workflowWait('wf-1')
+    } finally {
+      client.close()
+    }
+  })
+
+  it('sends workflow.inspect with workflow_id', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      expect(req.method).toBe('workflow.inspect')
+      expect(req.params).toEqual({ workflow_id: 'wf-1' })
+      sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: { nodes: [] } }) + '\n')
+    })
+
+    const client = await dial(socketPath)
+    try {
+      const result = await client.workflowInspect('wf-1')
+      expect(result).toEqual({ nodes: [] })
+    } finally {
+      client.close()
+    }
+  })
+
+  it('sends workflow.events with after_seq and limit when provided', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      expect(req.method).toBe('workflow.events')
+      expect(req.params).toEqual({ workflow_id: 'wf-1', after_seq: 7, limit: 25 })
+      sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: { events: [] } }) + '\n')
+    })
+
+    const client = await dial(socketPath)
+    try {
+      await client.workflowEvents('wf-1', { afterSeq: 7, limit: 25 })
+    } finally {
+      client.close()
+    }
+  })
+
+  it('sends workflow.events without after_seq or limit when omitted', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      expect(req.method).toBe('workflow.events')
+      expect(req.params).toEqual({ workflow_id: 'wf-1' })
+      expect(Object.hasOwn(req.params, 'after_seq')).toBe(false)
+      expect(Object.hasOwn(req.params, 'limit')).toBe(false)
+      sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: { events: [] } }) + '\n')
+    })
+
+    const client = await dial(socketPath)
+    try {
+      await client.workflowEvents('wf-1')
+    } finally {
+      client.close()
+    }
+  })
+
+  it('sends workflow.command complete with the full ExecutionIdentity contract', async () => {
+    const socketPath = tempSocketPath()
+
+    const params: WorkflowCompleteParams = {
+      workflow_id: 'wf-1',
+      node_id: 'n-1',
+      activation_id: 'act-1',
+      attempt_id: 'at-1',
+      lease_id: 'lease-1',
+      owner_token: 'tok-1',
+      outcome: 'success',
+      outputs: { value: 42 },
+      artifacts: [{ path: '/tmp/out.bin' }],
+    }
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      expect(req.method).toBe('workflow.command')
+      expect(req.params.workflow_id).toBe('wf-1')
+      expect(req.params.command.op).toBe('complete')
+      expect(req.params.command).toEqual({
+        op: 'complete',
+        node_id: 'n-1',
+        activation_id: 'act-1',
+        attempt_id: 'at-1',
+        lease_id: 'lease-1',
+        owner_token: 'tok-1',
+        outcome: 'success',
+        outputs: { value: 42 },
+        artifacts: [{ path: '/tmp/out.bin' }],
+      })
+      sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: { ok: true } }) + '\n')
+    })
+
+    const client = await dial(socketPath)
+    try {
+      await client.workflowComplete(params)
+    } finally {
+      client.close()
+    }
+  })
+
+  it('sends workflow.command complete without outputs or artifacts when omitted', async () => {
+    const socketPath = tempSocketPath()
+
+    const params: WorkflowCompleteParams = {
+      workflow_id: 'wf-1',
+      node_id: 'n-1',
+      activation_id: 'act-1',
+      attempt_id: 'at-1',
+      lease_id: 'lease-1',
+      owner_token: 'tok-1',
+      outcome: 'success',
+    }
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      expect(req.method).toBe('workflow.command')
+      expect(req.params.command.op).toBe('complete')
+      expect(Object.hasOwn(req.params.command, 'outputs')).toBe(false)
+      expect(Object.hasOwn(req.params.command, 'artifacts')).toBe(false)
+      sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: { ok: true } }) + '\n')
+    })
+
+    const client = await dial(socketPath)
+    try {
+      await client.workflowComplete(params)
+    } finally {
+      client.close()
+    }
+  })
+
+  it('sends workflow.command gate external_result with the forwarded fields', async () => {
+    const socketPath = tempSocketPath()
+
+    const params: WorkflowGateParams = {
+      workflow_id: 'wf-1',
+      node_id: 'n-1',
+      gate_id: 'gate-1',
+      activation_id: 'act-1',
+      operation: 'external_result',
+      poll_id: 'poll-1',
+      source: 'http',
+      result: 'ok',
+      response_hash: 'sha256:abc',
+      observed_at: '2024-01-01T00:00:00Z',
+      evidence_ids: ['ev-1', 'ev-2'],
+      subject: { kind: 'external' },
+    }
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      expect(req.method).toBe('workflow.command')
+      expect(req.params.workflow_id).toBe('wf-1')
+      expect(req.params.command.op).toBe('gate')
+      expect(req.params.command.operation).toBe('external_result')
+      expect(req.params.command).toEqual({
+        op: 'gate',
+        node_id: 'n-1',
+        activation_id: 'act-1',
+        gate_id: 'gate-1',
+        operation: 'external_result',
+        subject: { kind: 'external' },
+        poll_id: 'poll-1',
+        source: 'http',
+        result: 'ok',
+        response_hash: 'sha256:abc',
+        observed_at: '2024-01-01T00:00:00Z',
+        evidence_ids: ['ev-1', 'ev-2'],
+      })
+      sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: { ok: true } }) + '\n')
+    })
+
+    const client = await dial(socketPath)
+    try {
+      await client.workflowGate(params)
+    } finally {
+      client.close()
+    }
+  })
+
+  it('sends workflow.command gate with only required fields when optionals are omitted', async () => {
+    const socketPath = tempSocketPath()
+
+    const params: WorkflowGateParams = {
+      workflow_id: 'wf-1',
+      node_id: 'n-1',
+      gate_id: 'gate-1',
+      activation_id: 'act-1',
+      operation: 'satisfy',
+    }
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      expect(req.method).toBe('workflow.command')
+      expect(req.params.command.op).toBe('gate')
+      expect(Object.hasOwn(req.params.command, 'actor')).toBe(false)
+      expect(Object.hasOwn(req.params.command, 'reason')).toBe(false)
+      expect(Object.hasOwn(req.params.command, 'poll_id')).toBe(false)
+      expect(Object.hasOwn(req.params.command, 'observed_at')).toBe(false)
+      expect(Object.hasOwn(req.params.command, 'evidence_ids')).toBe(false)
+      sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: { ok: true } }) + '\n')
+    })
+
+    const client = await dial(socketPath)
+    try {
+      await client.workflowGate(params)
+    } finally {
+      client.close()
+    }
+  })
+
+  it('sends workflow.command heartbeat with the forwarded fields', async () => {
+    const socketPath = tempSocketPath()
+
+    const params: WorkflowHeartbeatParams = {
+      workflow_id: 'wf-1',
+      node_id: 'n-1',
+      lease_id: 'lease-1',
+      owner_token: 'tok-1',
+      activation_id: 'act-1',
+    }
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      expect(req.method).toBe('workflow.command')
+      expect(req.params.workflow_id).toBe('wf-1')
+      expect(req.params.command.op).toBe('heartbeat')
+      expect(req.params.command).toEqual({
+        op: 'heartbeat',
+        node_id: 'n-1',
+        lease_id: 'lease-1',
+        owner_token: 'tok-1',
+        activation_id: 'act-1',
+      })
+      sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: { ok: true } }) + '\n')
+    })
+
+    const client = await dial(socketPath)
+    try {
+      await client.workflowHeartbeat(params)
+    } finally {
+      client.close()
+    }
+  })
+
+  it('exports the ExecutionIdentity contract', () => {
+    const identity: ExecutionIdentity = {
+      supervisor_id: 's',
+      workflow_id: 'wf-1',
+      node_id: 'n',
+      activation_id: 'a',
+      attempt_id: 'at',
+      run_id: 'r',
+      runtime_id: 'rt_1',
+      session_id: 'ses',
+    }
+    expect(identity.workflow_id).toBe('wf-1')
   })
 })
