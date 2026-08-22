@@ -15,6 +15,12 @@ import {
   Supervisor,
   THINKING_LEVELS,
   validateSpawnSelection,
+  workflowStatusTool,
+  workflowWaitTool,
+  workflowInspectTool,
+  workflowEventsTool,
+  workflowCompleteTool,
+  workflowGateTool,
   type Client,
   type InspectResult,
   type RunObserver,
@@ -79,6 +85,12 @@ export interface ExtensionDeps {
   inspectTool: typeof inspectTool
   resultTool: typeof resultTool
   shutdownTool: typeof shutdownTool
+  workflowStatusTool: typeof workflowStatusTool
+  workflowWaitTool: typeof workflowWaitTool
+  workflowInspectTool: typeof workflowInspectTool
+  workflowEventsTool: typeof workflowEventsTool
+  workflowCompleteTool: typeof workflowCompleteTool
+  workflowGateTool: typeof workflowGateTool
   observeRun: typeof observeRun
   dial: typeof dial
   Supervisor: typeof Supervisor
@@ -93,6 +105,12 @@ const defaultDeps: ExtensionDeps = {
   inspectTool,
   resultTool,
   shutdownTool,
+  workflowStatusTool,
+  workflowWaitTool,
+  workflowInspectTool,
+  workflowEventsTool,
+  workflowCompleteTool,
+  workflowGateTool,
   observeRun,
   dial,
   Supervisor,
@@ -1465,6 +1483,161 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       },
       renderResult(result, { expanded, isPartial }, theme, context) {
         return renderShutdownResult(result, { expanded, isPartial }, theme, context.args)
+      },
+    })
+
+    pi.registerTool({
+      name: 'avenor_workflow_status',
+      label: 'Avenor Workflow Status',
+      description: 'Get lightweight status for a workflow instance',
+      parameters: Type.Object({
+        workflow_id: Type.String({ description: 'Workflow ID' }),
+        supervisor_id: Type.Optional(Type.String({ description: 'Supervisor ID for multi-supervisor mode' })),
+      }),
+      async execute(_toolCallId, params) {
+        const result = await deps.workflowStatusTool({
+          workflowId: params.workflow_id,
+          supervisorId: params.supervisor_id,
+        })
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          details: result,
+        }
+      },
+    })
+
+    pi.registerTool({
+      name: 'avenor_workflow_wait',
+      label: 'Avenor Workflow Wait',
+      description: 'Wait for a workflow to reach a terminal state or until timeout',
+      parameters: Type.Object({
+        workflow_id: Type.String({ description: 'Workflow ID' }),
+        timeout: Type.Optional(Type.String({ description: 'Timeout (e.g. 30s, 5m)' })),
+        supervisor_id: Type.Optional(Type.String({ description: 'Supervisor ID for multi-supervisor mode' })),
+      }),
+      async execute(_toolCallId, params) {
+        const result = await deps.workflowWaitTool({
+          workflowId: params.workflow_id,
+          timeout: params.timeout,
+          supervisorId: params.supervisor_id,
+        })
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          details: result,
+        }
+      },
+    })
+
+    pi.registerTool({
+      name: 'avenor_workflow_inspect',
+      label: 'Avenor Workflow Inspect',
+      description: 'Return the full instance detail for a workflow',
+      parameters: Type.Object({
+        workflow_id: Type.String({ description: 'Workflow ID' }),
+        supervisor_id: Type.Optional(Type.String({ description: 'Supervisor ID for multi-supervisor mode' })),
+      }),
+      async execute(_toolCallId, params) {
+        const result = await deps.workflowInspectTool({
+          workflowId: params.workflow_id,
+          supervisorId: params.supervisor_id,
+        })
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          details: result,
+        }
+      },
+    })
+
+    pi.registerTool({
+      name: 'avenor_workflow_events',
+      label: 'Avenor Workflow Events',
+      description: 'Read log events from a workflow instance\'s event log',
+      parameters: Type.Object({
+        workflow_id: Type.String({ description: 'Workflow ID' }),
+        after_seq: Type.Optional(Type.Number({ description: 'Only include events after this sequence number' })),
+        limit: Type.Optional(Type.Number({ description: 'Max events to return (default 50)' })),
+        supervisor_id: Type.Optional(Type.String({ description: 'Supervisor ID for multi-supervisor mode' })),
+      }),
+      async execute(_toolCallId, params) {
+        const result = await deps.workflowEventsTool({
+          workflowId: params.workflow_id,
+          afterSeq: params.after_seq,
+          limit: params.limit,
+          supervisorId: params.supervisor_id,
+        })
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          details: result,
+        }
+      },
+    })
+
+    pi.registerTool({
+      name: 'avenor_workflow_complete',
+      label: 'Avenor Workflow Complete',
+      description: 'Atomically complete a machine/external handoff activation',
+      parameters: Type.Object({
+        workflow_id: Type.String({ description: 'Workflow ID' }),
+        node_id: Type.String({ description: 'Node ID' }),
+        activation_id: Type.String({ description: 'Activation ID' }),
+        attempt_id: Type.String({ description: 'Attempt ID' }),
+        lease_id: Type.String({ description: 'Lease ID' }),
+        owner_token: Type.String({ description: 'Owner token' }),
+        outcome: Type.String({ description: 'Outcome' }),
+        outputs: Type.Optional(Type.Unknown({ description: 'Outputs' })),
+        artifacts: Type.Optional(Type.Unknown({ description: 'Artifacts' })),
+        supervisor_id: Type.Optional(Type.String({ description: 'Supervisor ID for multi-supervisor mode' })),
+      }),
+      async execute(_toolCallId, params) {
+        const { supervisor_id, ...rest } = params
+        const result = await deps.workflowCompleteTool({
+          ...rest,
+          supervisorId: supervisor_id,
+        })
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          details: result,
+        }
+      },
+    })
+
+    pi.registerTool({
+      name: 'avenor_workflow_gate',
+      label: 'Avenor Workflow Gate',
+      description: 'Record a gate decision on a parked awaiting_gate activation',
+      parameters: Type.Object({
+        workflow_id: Type.String({ description: 'Workflow ID' }),
+        node_id: Type.String({ description: 'Node ID' }),
+        gate_id: Type.String({ description: 'Gate ID' }),
+        activation_id: Type.String({ description: 'Activation ID' }),
+        operation: Type.Union([
+          Type.Literal('satisfy'),
+          Type.Literal('reject'),
+          Type.Literal('waive'),
+          Type.Literal('external_result'),
+        ], { description: 'Gate operation' }),
+        actor: Type.Optional(Type.String({ description: 'Actor' })),
+        reason: Type.Optional(Type.String({ description: 'Reason' })),
+        outcome: Type.Optional(Type.String({ description: 'Outcome' })),
+        subject: Type.Optional(Type.Unknown({ description: 'Subject' })),
+        poll_id: Type.Optional(Type.String({ description: 'Poll ID' })),
+        source: Type.Optional(Type.String({ description: 'Source' })),
+        result: Type.Optional(Type.String({ description: 'Result' })),
+        response_hash: Type.Optional(Type.String({ description: 'Response hash' })),
+        observed_at: Type.Optional(Type.String({ description: 'Observed at' })),
+        evidence_ids: Type.Optional(Type.Array(Type.String(), { description: 'Evidence IDs' })),
+        supervisor_id: Type.Optional(Type.String({ description: 'Supervisor ID for multi-supervisor mode' })),
+      }),
+      async execute(_toolCallId, params) {
+        const { supervisor_id, ...rest } = params
+        const result = await deps.workflowGateTool({
+          ...rest,
+          supervisorId: supervisor_id,
+        })
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          details: result,
+        }
       },
     })
 
