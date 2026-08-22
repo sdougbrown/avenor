@@ -550,6 +550,8 @@ type Command struct {
 	Reason           string              `json:"reason,omitempty"`
 	Outcome          OutcomeName         `json:"outcome,omitempty"`
 	AttemptStatus    AttemptStatus       `json:"attempt_status,omitempty"`
+	MarkerKind       string              `json:"marker_kind,omitempty"`
+	MarkerLabel      string              `json:"marker_label,omitempty"`
 	Evidence         []Evidence          `json:"evidence,omitempty"`
 	Outputs          []OutputValue       `json:"outputs,omitempty"`
 	Gate             *GateInstance       `json:"gate,omitempty"`

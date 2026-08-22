@@ -139,6 +139,7 @@ func TestApply(t *testing.T) {
 		{"exhaustion_outcome", testExhaustionOutcome},
 		{"completion_before_termination", testCompletionBeforeTermination},
 		{"termination_before_completion", testTerminationBeforeCompletion},
+		{"terminate_marker_inert", testTerminateMarkerInert},
 		{"required_gate_pending_on_complete", testGatePendingOnComplete},
 	}
 	for _, tt := range tests {
@@ -874,6 +875,73 @@ func testTerminationBeforeCompletion(t *testing.T) {
 	if state.Instance.Status != WorkflowCompleted {
 		t.Fatalf("completion after termination: workflow status got %q want %q",
 			state.Instance.Status, WorkflowCompleted)
+	}
+}
+
+func testTerminateMarkerInert(t *testing.T) {
+	// Markers are inert terminal evidence: an attempt_terminated event that
+	// carries a marker kind/label (the loop exit/abort/continue directives) is
+	// recorded on the attempt but must never satisfy the activation, select an
+	// outcome or branch, or complete the workflow. The directive stays
+	// action-local; only an explicit completion advances the workflow.
+	for _, kind := range []string{"exit", "abort", "continue"} {
+		state := newInstance(t)
+		actID := actStart(state).ID
+		state, _, attemptID := runToStart(t, state)
+
+		cmd := Command{
+			Kind:             CommandTerminate,
+			ExpectedRevision: state.Instance.Revision,
+			IdempotencyKey:   "term-" + kind,
+			Identity:         baseIdentity(actID, attemptID),
+			AttemptStatus:    AttemptSucceeded,
+			MarkerKind:       kind,
+			MarkerLabel:      "labeled",
+		}
+		// The generated event must carry the marker evidence through.
+		events, err := Apply(state, cmd)
+		if err != nil {
+			t.Fatalf("%s: Apply: %v", kind, err)
+		}
+		if len(events) != 1 || events[0].Kind != EventAttemptTerminated {
+			t.Fatalf("%s: events = %+v, want single attempt_terminated", kind, events)
+		}
+		if events[0].MarkerKind != kind || events[0].MarkerLabel != "labeled" {
+			t.Fatalf("%s: event marker = %q/%q, want %q/labeled", kind, events[0].MarkerKind, events[0].MarkerLabel, kind)
+		}
+		for _, e := range events {
+			state, err = Reduce(state, e)
+			if err != nil {
+				t.Fatalf("%s: Reduce: %v", kind, err)
+			}
+		}
+
+		// The marker is recorded on the attempt.
+		var at *Attempt
+		for i := range state.Instance.Attempts {
+			if state.Instance.Attempts[i].ID == attemptID {
+				at = &state.Instance.Attempts[i]
+			}
+		}
+		if at == nil {
+			t.Fatalf("%s: attempt %s not found after termination", kind, attemptID)
+		}
+		if at.MarkerKind != kind || at.MarkerLabel != "labeled" {
+			t.Fatalf("%s: attempt marker = %q/%q, want %q/labeled", kind, at.MarkerKind, at.MarkerLabel, kind)
+		}
+
+		// ...but it satisfies nothing: the activation is not satisfied, no
+		// outcome/branch is selected, and the workflow is not completed.
+		act := actStart(state)
+		if act.Status == ActivationSatisfied {
+			t.Fatalf("%s: marker satisfied the activation (status %q); markers must be inert", kind, act.Status)
+		}
+		if act.SelectedOutcome != "" {
+			t.Fatalf("%s: marker selected outcome %q; markers must not select branches", kind, act.SelectedOutcome)
+		}
+		if state.Instance.Status == WorkflowCompleted {
+			t.Fatalf("%s: marker completed the workflow; markers must be inert", kind)
+		}
 	}
 }
 

@@ -851,3 +851,25 @@ func TestRunTeamChildStaleAttemptCleanupDoesNotEraseNewerSession(t *testing.T) {
 		t.Fatalf("completed workflow retained live provider state: provider=%v pid=%d", provider, pid)
 	}
 }
+
+// TestWorkflowChildEventCarriesExecutionIdentity verifies that a workflow
+// child's event metadata threads workflow ExecutionIdentity onto runtime
+// events (used by events, notifications, and host metadata).
+func TestWorkflowChildEventCarriesExecutionIdentity(t *testing.T) {
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-wf-meta.sock", MaxRuntimes: 1})
+	defer func() { _ = sup.broker.Stop() }()
+	child := &childRuntime{
+		id: "rt_wf_meta", label: "lbl",
+		workflowID: "wf9", nodeID: "n1", activationID: "a1", attemptID: "att9",
+	}
+	meta := workflowEventMetadata(sup, child)
+	fields := meta.Stamp(events.Event{Event: "session.end", Fields: map[string]any{"stop_reason": "end_turn"}}).Fields
+	want := map[string]string{
+		"workflow_id": "wf9", "node_id": "n1", "activation_id": "a1", "attempt_id": "att9",
+	}
+	for k, v := range want {
+		if got, _ := fields[k].(string); got != v {
+			t.Fatalf("%s = %v, want %q", k, fields[k], v)
+		}
+	}
+}

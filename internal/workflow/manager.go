@@ -540,3 +540,64 @@ func (m *Manager) applyStart(wf WorkflowID, snap Snapshot, act *Activation, req 
 		Selection:        req.Selection,
 	})
 }
+
+// RecordAttemptTerminated records the terminal status of an already-started
+// attempt after its backend run finishes. It is called by a runtime executor
+// (the stable supervisor's direct-run executor) on every terminal path:
+// success, failure, panic, cancellation, timeout, and provider-start error.
+// It is idempotent per attempt so duplicate terminations are safe.
+//
+// The optional trailing marker args carry inert terminal-marker evidence
+// (marker kind first, marker label second). Markers are recorded on the
+// attempt as evidence only; they are never a workflow-store command and
+// cannot satisfy an activation or select an outcome.
+func (m *Manager) RecordAttemptTerminated(wf WorkflowID, nodeID NodeID, activationID ActivationID, attemptID AttemptID, leaseID LeaseID, status AttemptStatus, marker ...string) error {
+	if status == "" {
+		return errors.New("attempt termination status is required")
+	}
+	var markerKind, markerLabel string
+	if len(marker) >= 1 {
+		markerKind = marker[0]
+	}
+	if len(marker) >= 2 {
+		markerLabel = marker[1]
+	}
+	// The command is idempotent per attempt (stable "terminate-<attemptID>"
+	// key), so it is safe to retry: a concurrent command on the same instance
+	// can bump the revision in the window between the read and the apply. Without
+	// this, a lost termination leaves the activation running with its lease held
+	// and no reaper, deadlocking the instance. Bounded to avoid spinning.
+	const maxTerminateAttempts = 4
+	for attempt := 0; attempt < maxTerminateAttempts; attempt++ {
+		snap, exists, err := m.store.loadCurrent(wf)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return fmt.Errorf("workflow not found: %s", wf)
+		}
+		_, err = m.store.ApplyCommand(wf, Command{
+			ID:               NewCommandID(),
+			Kind:             CommandTerminate,
+			ExpectedRevision: snap.Instance.Revision,
+			IdempotencyKey:   "terminate-" + string(attemptID),
+			Identity:         ExecutionIdentity{WorkflowID: wf, NodeID: nodeID, ActivationID: activationID, AttemptID: attemptID},
+			LeaseID:          leaseID,
+			AttemptStatus:    status,
+			MarkerKind:       markerKind,
+			MarkerLabel:      markerLabel,
+		})
+		if err == nil {
+			return nil
+		}
+		if errors.Is(err, errDuplicateIdempotency) {
+			// Already recorded for this attempt.
+			return nil
+		}
+		if !errors.Is(err, errRevisionMismatch) {
+			return err
+		}
+		// Optimistic-concurrency conflict; re-read under a fresh lock and retry.
+	}
+	return fmt.Errorf("terminate attempt %s: revision kept moving under concurrent commands", attemptID)
+}

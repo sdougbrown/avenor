@@ -125,6 +125,8 @@ func buildCommandEvents(state Snapshot, command Command) ([]Event, error) {
 		e.AttemptStatus = command.AttemptStatus
 		e.LeaseID = command.LeaseID
 		e.AttemptID = command.Identity.AttemptID
+		e.MarkerKind = command.MarkerKind
+		e.MarkerLabel = command.MarkerLabel
 		return []Event{e}, nil
 
 	default:
@@ -351,7 +353,7 @@ func applyAttemptTerminated(next *Snapshot, act *Activation, event Event) error 
 	}
 	status := event.AttemptStatus
 	switch status {
-	case AttemptFailed, AttemptCanceled, AttemptTimedOut, AttemptPanicked:
+	case AttemptSucceeded, AttemptFailed, AttemptCanceled, AttemptTimedOut, AttemptPanicked:
 	default:
 		return fmt.Errorf("attempt_terminated event has invalid status %q", status)
 	}
@@ -362,6 +364,19 @@ func applyAttemptTerminated(next *Snapshot, act *Activation, event Event) error 
 	attempt.Status = status
 	ended := nowUTC()
 	attempt.EndedAt = &ended
+	// The marker kind/label is inert evidence of the terminal directive the
+	// backend observed (e.g. the loop exit marker). It is recorded on every
+	// terminal path — including the early returns below — but must never
+	// affect status, lease, retry, or exhaustion logic.
+	attempt.MarkerKind = event.MarkerKind
+	attempt.MarkerLabel = event.MarkerLabel
+	// A successful termination is a recordable terminal fact. It never
+	// satisfies the node on its own — acceptance requires explicit completion
+	// (evidence + completed event, Stage 11) — so it must not regress the
+	// activation status or release the worker's lease.
+	if status == AttemptSucceeded {
+		return nil
+	}
 	// Out-of-order termination: if the activation was already satisfied by an
 	// earlier completion, or the workflow is already completed, the termination
 	// is a distinct terminal attempt-fact and must not regress satisfaction or

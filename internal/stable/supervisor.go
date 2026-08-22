@@ -82,6 +82,13 @@ type SpawnParams struct {
 	SessionID         string `json:"session_id,omitempty"`
 	ParentID          string `json:"parent_id,omitempty"`     // runtime ID of the parent agent
 	ParentRunID       string `json:"parent_run_id,omitempty"` // broker run ID of the parent, for channel messaging
+	// Workflow execution identity attached to this run. Populated by the
+	// workflow direct-run executor; the supervisor attaches its own identity
+	// and callers cannot spoof it.
+	WorkflowID   string `json:"workflow_id,omitempty"`
+	NodeID       string `json:"node_id,omitempty"`
+	ActivationID string `json:"activation_id,omitempty"`
+	AttemptID    string `json:"attempt_id,omitempty"`
 }
 
 type SpawnResult struct {
@@ -194,6 +201,16 @@ type childRuntime struct {
 	writerClosed      bool
 	directAnswers     int
 	directAnswersDone chan struct{}
+
+	// workflow execution identity. Populated by the workflow direct-run executor;
+	// the supervisor attaches its own identity and callers cannot spoof it.
+	workflowID   string
+	nodeID       string
+	activationID string
+	attemptID    string
+	// onWorkflowTerminate records the terminal workflow attempt fact before the
+	// child's runtime state is cleaned up. Nil for non-workflow direct runs.
+	onWorkflowTerminate func(workflow.AttemptStatus)
 
 	// treeToken is the current tree-budget admission token held by this runtime.
 	// It is non-empty while the runtime is actively executing a turn and empty
@@ -844,6 +861,10 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 		done:         make(chan struct{}),
 		promptCh:     make(chan struct{}, 1),
 		autoApprove:  params.AutoApprove,
+		workflowID:   params.WorkflowID,
+		nodeID:       params.NodeID,
+		activationID: params.ActivationID,
+		attemptID:    params.AttemptID,
 	}
 	if treeToken != "" {
 		child.treeToken = treeToken
@@ -1194,13 +1215,16 @@ func (s *Supervisor) brokerURL() string {
 
 func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptText string, timeoutSec, maxRetries int) {
 	defer func() {
+		panicked := false
 		if r := recover(); r != nil {
+			panicked = true
 			fmt.Fprintf(os.Stderr, "avenor stable: child %s panic: %v\n", child.id, r)
 			s.emitChildError(child, fmt.Sprintf("panic: %v", r), "error")
 			if child.sentinelFile != "" {
 				cli.WriteSentinel(child.sentinelFile, 1, child.sessionID(), "error", s.runID, os.Stderr)
 			}
 		}
+		s.recordWorkflowTermination(child, panicked, ctx)
 		providerLifecycle := s.beginChildShutdown(child)
 		s.closeChildEventWriter(child)
 		s.clearRuntimePermissionOptions(child.id)
@@ -1256,6 +1280,15 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 				child.mu.Lock()
 				child.phase = "done"
 				child.mu.Unlock()
+
+				// A workflow direct run is a single-shot task with no follow-up
+				// prompt queue, so a successful end_turn is terminal. Terminate
+				// the attempt now (recorded in the runChild defer) rather than
+				// parking for a follow-up prompt, which would otherwise defer
+				// and mislabel the result as cancelled at teardown.
+				if child.workflowID != "" {
+					return
+				}
 				nextPrompt, ok := child.waitForNextPrompt(ctx)
 				if !ok {
 					if ctx.Err() != nil {
@@ -1316,7 +1349,9 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 	var brokerAttemptIDsMu sync.Mutex
 	sessions := newWorkflowSessionTracker()
 	defer func() {
+		panicked := false
 		if r := recover(); r != nil {
+			panicked = true
 			fmt.Fprintf(os.Stderr, "avenor stable: child %s panic: %v\n", child.id, r)
 			s.emitChildError(child, fmt.Sprintf("panic: %v", r), "error")
 			if final, ok := sessions.latest(); ok {
@@ -1326,6 +1361,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				cli.WriteSentinel(child.sentinelFile, 1, child.sessionID(), "error", s.runID, os.Stderr)
 			}
 		}
+		s.recordWorkflowTermination(child, panicked, ctx)
 		s.beginChildShutdown(child)
 		s.closeChildEventWriter(child)
 		s.clearRuntimePermissionOptions(child.id)
@@ -1580,7 +1616,9 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 	var brokerAttemptIDsMu sync.Mutex
 	sessions := newWorkflowSessionTracker()
 	defer func() {
+		panicked := false
 		if r := recover(); r != nil {
+			panicked = true
 			fmt.Fprintf(os.Stderr, "avenor stable: child %s panic: %v\n", child.id, r)
 			s.emitChildError(child, fmt.Sprintf("panic: %v", r), "error")
 			if final, ok := sessions.final(cfg.Post, cfg.Team, cfg.Pre); ok {
@@ -1590,6 +1628,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				cli.WriteSentinel(child.sentinelFile, 1, child.sessionID(), "error", s.runID, os.Stderr)
 			}
 		}
+		s.recordWorkflowTermination(child, panicked, ctx)
 		s.beginChildShutdown(child)
 		s.closeChildEventWriter(child)
 		s.clearRuntimePermissionOptions(child.id)
@@ -2281,7 +2320,7 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 		runtimeID:       child.id,
 		child:           child,
 		control:         s.control,
-		metadata:        cli.NewEventMetadata(s.runID, child.label, child.id),
+		metadata:        workflowEventMetadata(s, child),
 		onPermissionReq: s.cachePermissionOptions,
 		recorder:        newRecorderFor(s, child.id),
 	}
@@ -3162,6 +3201,16 @@ func (s *Supervisor) closeChildEventWriter(child *childRuntime) {
 	child.writeMu.Unlock()
 }
 
+// workflowEventMetadata returns event metadata threaded with workflow execution
+// identity when the child is part of a workflow run, otherwise plain metadata.
+func workflowEventMetadata(s *Supervisor, child *childRuntime) *cli.EventMetadata {
+	meta := cli.NewEventMetadata(s.runID, child.label, child.id)
+	if child.workflowID != "" {
+		meta = meta.WithWorkflow(child.workflowID, child.nodeID, child.activationID, child.attemptID)
+	}
+	return meta
+}
+
 func (s *Supervisor) setFanoutWriter(child *childRuntime, writer *runtimeFanoutWriter) {
 	child.writeMu.Lock()
 	child.mu.Lock()
@@ -3348,6 +3397,13 @@ func (s *Supervisor) Spawn(raw json.RawMessage) (any, error) {
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return nil, fmt.Errorf("invalid spawn params: %w", err)
 	}
+	// Workflow identity is attached only by the internal direct-run executor
+	// (which calls the unexported spawn directly, bypassing this method).
+	// External control-socket callers cannot spoof workflow identity.
+	p.WorkflowID = ""
+	p.NodeID = ""
+	p.ActivationID = ""
+	p.AttemptID = ""
 	// Auto-populate ParentID when the spawn is called by a known runtime.
 	// The caller embeds its own runtime_id in the spawn params; if it maps to
 	// a registered runtime, treat it as the parent.
@@ -3445,6 +3501,12 @@ func (s *Supervisor) RuntimeStatus(rtID string) (any, error) {
 	}
 	if rt.finalOutputTruncated {
 		entry["final_output_truncated"] = true
+	}
+	if rt.workflowID != "" {
+		entry["workflow_id"] = rt.workflowID
+		entry["node_id"] = rt.nodeID
+		entry["activation_id"] = rt.activationID
+		entry["attempt_id"] = rt.attemptID
 	}
 	rt.mu.Unlock()
 	return entry, nil
@@ -3731,6 +3793,9 @@ func (s *Supervisor) workflowManager() *workflow.Manager {
 		return s.workflowMgr
 	}
 	m := workflow.NewManager(workflow.New(resolveWorkflowRoot(s.config.WorkflowRoot)))
+	m.RegisterExecutor(workflow.ActionRun, s.directRunExecutor())
+	m.RegisterExecutor(workflow.ActionLoop, s.loopExecutor())
+	m.RegisterExecutor(workflow.ActionTeam, s.teamExecutor())
 	s.workflowMgr = m
 	s.control.SetWorkflowHandler(m)
 	return m
@@ -3740,6 +3805,200 @@ func (s *Supervisor) workflowManager() *workflow.Manager {
 // lazily-constructed workflow manager so the manager is only built when a
 // workflow command is first issued.
 type lazyWorkflowHandler struct{ s *Supervisor }
+
+// directRunExecutor returns the Executor that dispatches a workflow run action
+// to a real stable direct run, threading workflow identity through the run and
+// recording attempt termination on every terminal path.
+func (s *Supervisor) directRunExecutor() workflow.Executor {
+	return &directRunExecutor{sup: s}
+}
+
+type directRunExecutor struct{ sup *Supervisor }
+
+func (e *directRunExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext) error {
+	params := SpawnParams{
+		WorkflowID:   string(ec.WorkflowID),
+		NodeID:       string(ec.NodeID),
+		ActivationID: string(ec.ActivationID),
+		AttemptID:    string(ec.AttemptID),
+		Dir:          ".",
+	}
+	if ec.Selection != nil {
+		params.Agent = ec.Selection.Agent
+		params.Model = ec.Selection.Model
+		params.Backend = ec.Selection.Backend
+		params.Thinking = ec.Selection.Thinking
+	}
+	if ec.Action.Run != nil {
+		params.Prompt = ec.Action.Run.Prompt
+		params.PromptFile = ec.Action.Run.PromptFile
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		params.Dir = cwd
+	}
+
+	result, err := e.sup.spawn(params)
+	if err != nil {
+		// Provider-start (or any synchronous spawn) error: the attempt was
+		// already started durably by the manager; record termination before
+		// returning so the attempt is never left dangling.
+		_ = e.sup.workflowManager().RecordAttemptTerminated(
+			ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, workflow.AttemptFailed)
+		return err
+	}
+	e.sup.registerWorkflowTermination(result.RuntimeID, ec)
+	return nil
+}
+
+// loopExecutor returns the Executor that dispatches a workflow loop action to
+// a real stable loop child, threading workflow identity through the spawn and
+// recording attempt termination on every terminal path.
+func (s *Supervisor) loopExecutor() workflow.Executor {
+	return &loopExecutor{sup: s}
+}
+
+type loopExecutor struct{ sup *Supervisor }
+
+func (e *loopExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext) error {
+	params := SpawnParams{
+		WorkflowID:   string(ec.WorkflowID),
+		NodeID:       string(ec.NodeID),
+		ActivationID: string(ec.ActivationID),
+		AttemptID:    string(ec.AttemptID),
+		Dir:          ".",
+	}
+	if ec.Selection != nil {
+		params.Agent = ec.Selection.Agent
+		params.Model = ec.Selection.Model
+		params.Backend = ec.Selection.Backend
+		params.Thinking = ec.Selection.Thinking
+	}
+	if ec.Action.Loop != nil {
+		params.LoopFile = ec.Action.Loop.LoopFile
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		params.Dir = cwd
+	}
+
+	result, err := e.sup.spawn(params)
+	if err != nil {
+		// Provider-start (or any synchronous spawn) error: the attempt was
+		// already started durably by the manager; record termination before
+		// returning so the attempt is never left dangling.
+		kind, label := workflowMarkerForKind(ec.Action.Kind)
+		_ = e.sup.workflowManager().RecordAttemptTerminated(
+			ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, workflow.AttemptFailed, kind, label)
+		return err
+	}
+	e.sup.registerWorkflowTermination(result.RuntimeID, ec)
+	return nil
+}
+
+// teamExecutor returns the Executor that dispatches a workflow team action to
+// a real stable team child, threading workflow identity through the spawn and
+// recording attempt termination on every terminal path.
+func (s *Supervisor) teamExecutor() workflow.Executor {
+	return &teamExecutor{sup: s}
+}
+
+type teamExecutor struct{ sup *Supervisor }
+
+func (e *teamExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext) error {
+	params := SpawnParams{
+		WorkflowID:   string(ec.WorkflowID),
+		NodeID:       string(ec.NodeID),
+		ActivationID: string(ec.ActivationID),
+		AttemptID:    string(ec.AttemptID),
+		Dir:          ".",
+	}
+	if ec.Selection != nil {
+		params.Agent = ec.Selection.Agent
+		params.Model = ec.Selection.Model
+		params.Backend = ec.Selection.Backend
+		params.Thinking = ec.Selection.Thinking
+	}
+	if ec.Action.Team != nil {
+		params.TeamFile = ec.Action.Team.TeamFile
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		params.Dir = cwd
+	}
+
+	result, err := e.sup.spawn(params)
+	if err != nil {
+		// Provider-start (or any synchronous spawn) error: the attempt was
+		// already started durably by the manager; record termination before
+		// returning so the attempt is never left dangling.
+		kind, label := workflowMarkerForKind(ec.Action.Kind)
+		_ = e.sup.workflowManager().RecordAttemptTerminated(
+			ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, workflow.AttemptFailed, kind, label)
+		return err
+	}
+	e.sup.registerWorkflowTermination(result.RuntimeID, ec)
+	return nil
+}
+
+// workflowMarkerForKind returns the action-level marker evidence recorded on
+// a workflow attempt at termination. Direct runs (run) have no marker. Loop
+// and team record the action-declared constant as MarkerKind because the
+// aggregate child RunResult does not expose the terminal marker
+// directive/label (looprunner/teamrunner keep those internal) — this is the
+// decision-2 documented fallback; the parsed exit/abort/continue marker
+// remains action-local and is never a kernel command.
+func workflowMarkerForKind(kind workflow.ActionKind) (string, string) {
+	switch kind {
+	case workflow.ActionLoop:
+		return "loop", ""
+	case workflow.ActionTeam:
+		return "team", ""
+	}
+	return "", ""
+}
+
+// registerWorkflowTermination attaches a termination callback to the spawned
+// direct-run child so the workflow manager learns the attempt's final status
+// before the child's runtime state is cleaned up.
+func (s *Supervisor) registerWorkflowTermination(rtID string, ec workflow.ExecutorContext) {
+	s.controlMu.Lock()
+	child := s.runtimes[rtID]
+	s.controlMu.Unlock()
+	if child == nil {
+		return
+	}
+	child.mu.Lock()
+	defer child.mu.Unlock()
+	child.onWorkflowTerminate = func(status workflow.AttemptStatus) {
+		kind, label := workflowMarkerForKind(ec.Action.Kind)
+		_ = s.workflowManager().RecordAttemptTerminated(
+			ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, status, kind, label)
+	}
+}
+
+// recordWorkflowTermination records the terminal workflow attempt fact for a
+// direct-run child before its runtime state is cleaned up. No-op when the
+// child is not part of a workflow run.
+func (s *Supervisor) recordWorkflowTermination(child *childRuntime, panicked bool, ctx context.Context) {
+	child.mu.Lock()
+	cb := child.onWorkflowTerminate
+	workflowID := child.workflowID
+	exitCode := child.exitCode
+	child.mu.Unlock()
+	if workflowID == "" || cb == nil {
+		return
+	}
+	status := workflow.AttemptFailed
+	switch {
+	case panicked:
+		status = workflow.AttemptPanicked
+	case exitCode == 124:
+		status = workflow.AttemptTimedOut
+	case ctx.Err() != nil || exitCode == 130:
+		status = workflow.AttemptCanceled
+	case exitCode == 0:
+		status = workflow.AttemptSucceeded
+	}
+	cb(status)
+}
 
 func (h lazyWorkflowHandler) WorkflowCreate(p json.RawMessage) (any, error) {
 	return h.s.workflowManager().WorkflowCreate(p)
