@@ -89,6 +89,57 @@ export interface SpawnResult {
   [key: string]: unknown
 }
 
+export interface ExecutionIdentity {
+  supervisor_id?: string
+  workflow_id?: string
+  node_id?: string
+  activation_id?: string
+  attempt_id?: string
+  run_id?: string
+  runtime_id?: string
+  session_id?: string
+}
+
+export type WorkflowGateOperation = 'satisfy' | 'reject' | 'waive' | 'external_result'
+
+export interface WorkflowCompleteParams {
+  workflow_id: string
+  node_id: string
+  activation_id: string
+  attempt_id: string
+  lease_id: string
+  owner_token: string
+  outcome: string
+  outputs?: unknown
+  artifacts?: unknown
+}
+
+export interface WorkflowGateParams {
+  workflow_id: string
+  node_id: string
+  gate_id: string
+  activation_id: string
+  operation: WorkflowGateOperation
+  actor?: string
+  reason?: string
+  outcome?: string
+  subject?: unknown
+  poll_id?: string
+  source?: string
+  result?: string
+  response_hash?: string
+  observed_at?: string
+  evidence_ids?: string[]
+}
+
+export interface WorkflowHeartbeatParams {
+  workflow_id: string
+  node_id: string
+  activation_id?: string
+  lease_id: string
+  owner_token: string
+}
+
 type PendingCall = {
   resolve: (value: unknown) => void
   reject: (reason: Error) => void
@@ -405,6 +456,83 @@ export class Client {
   async cancel(runtimeId?: string): Promise<void> {
     const params = runtimeId ? { runtime_id: runtimeId } : undefined
     await this.call('cancel', params)
+  }
+
+  async workflowStatus(workflowId: string): Promise<Record<string, unknown>> {
+    return this.call('workflow.status', { workflow_id: workflowId }) as Promise<Record<string, unknown>>
+  }
+
+  async workflowWait(workflowId: string, timeoutMs?: number): Promise<Record<string, unknown>> {
+    const params: Record<string, unknown> = { workflow_id: workflowId }
+    if (timeoutMs !== undefined) params.timeout_ms = timeoutMs
+    return this.call('workflow.wait', params) as Promise<Record<string, unknown>>
+  }
+
+  async workflowInspect(workflowId: string): Promise<Record<string, unknown>> {
+    return this.call('workflow.inspect', { workflow_id: workflowId }) as Promise<Record<string, unknown>>
+  }
+
+  async workflowEvents(workflowId: string, opts?: { afterSeq?: number; limit?: number }): Promise<Record<string, unknown>> {
+    const params: Record<string, unknown> = { workflow_id: workflowId }
+    if (opts?.afterSeq !== undefined) params.after_seq = opts.afterSeq
+    if (opts?.limit !== undefined) params.limit = opts.limit
+    return this.call('workflow.events', params) as Promise<Record<string, unknown>>
+  }
+
+  async workflowCommand(workflowId: string, command: unknown): Promise<Record<string, unknown>> {
+    return this.call('workflow.command', { workflow_id: workflowId, command }) as Promise<Record<string, unknown>>
+  }
+
+  async workflowComplete(params: WorkflowCompleteParams): Promise<Record<string, unknown>> {
+    const command: Record<string, unknown> = {
+      op: 'complete',
+      node_id: params.node_id,
+      activation_id: params.activation_id,
+      attempt_id: params.attempt_id,
+      lease_id: params.lease_id,
+      owner_token: params.owner_token,
+      outcome: params.outcome,
+    }
+    if (params.outputs !== undefined) command.outputs = params.outputs
+    if (params.artifacts !== undefined) command.artifacts = params.artifacts
+    return this.workflowCommand(params.workflow_id, command)
+  }
+
+  async workflowGate(params: WorkflowGateParams): Promise<Record<string, unknown>> {
+    const command: Record<string, unknown> = {
+      op: 'gate',
+      node_id: params.node_id,
+      activation_id: params.activation_id,
+      gate_id: params.gate_id,
+      operation: params.operation,
+    }
+    const optional: Array<[string, unknown]> = [
+      ['actor', params.actor],
+      ['reason', params.reason],
+      ['outcome', params.outcome],
+      ['subject', params.subject],
+      ['poll_id', params.poll_id],
+      ['source', params.source],
+      ['result', params.result],
+      ['response_hash', params.response_hash],
+      ['observed_at', params.observed_at],
+      ['evidence_ids', params.evidence_ids],
+    ]
+    for (const [key, value] of optional) {
+      if (value !== undefined) command[key] = value
+    }
+    return this.workflowCommand(params.workflow_id, command)
+  }
+
+  async workflowHeartbeat(params: WorkflowHeartbeatParams): Promise<Record<string, unknown>> {
+    const command: Record<string, unknown> = {
+      op: 'heartbeat',
+      node_id: params.node_id,
+      lease_id: params.lease_id,
+      owner_token: params.owner_token,
+    }
+    if (params.activation_id !== undefined) command.activation_id = params.activation_id
+    return this.workflowCommand(params.workflow_id, command)
   }
 
   isClosed(): boolean {
