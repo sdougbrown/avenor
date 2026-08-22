@@ -1,0 +1,243 @@
+{
+  "schema_version": 1,
+  "template_id": "software-factory-work",
+  "template_version": "1.0.0",
+  "metadata": {
+    "title": "Software factory work",
+    "description": "One review unit of software-factory work: intake, assessment, plan, hardening, execution, verification, publication, and exact-head CI + external review with declared review branches. Campaign coordination is out of scope; this template is one workflow for one review unit.",
+    "source": "https://github.com/sdougbrown/avenor"
+  },
+  "entry_nodes": ["intake"],
+  "nodes": [
+    {
+      "id": "intake",
+      "name": "Intake",
+      "action": {
+        "type": "manual",
+        "instructions": "A human supplies the verbatim issue body and the exact base SHA. This is a manual node: claim it, start it, then complete it with the issue text, the base SHA, and the issue artifact as evidence. Do not infer the issue from its number, title, or branch history."
+      },
+      "outputs": [
+        { "id": "issue", "name": "Issue", "type": "string", "required": true },
+        { "id": "base_sha", "name": "Base SHA", "type": "string", "required": true }
+      ],
+      "completion": { "kind": "explicit" },
+      "branches": { "ready": "assessment" }
+    },
+    {
+      "id": "assessment",
+      "name": "Assessment",
+      "dependencies": ["intake"],
+      "action": { "type": "run", "prompt_file": "prompts/assessment.md" },
+      "assignment": { "role": "assessor", "roster_entry": "assessor" },
+      "outputs": [
+        { "id": "assessment", "name": "Assessment", "type": "file", "required": true }
+      ],
+      "completion": {
+        "kind": "files",
+        "artifacts": [{ "path": "assessment.md", "non_empty": true }]
+      },
+      "branches": { "ready": "draft-plan" }
+    },
+    {
+      "id": "draft-plan",
+      "name": "Draft plan",
+      "dependencies": ["assessment"],
+      "action": { "type": "run", "prompt_file": "prompts/draft-plan.md" },
+      "assignment": { "role": "planner", "roster_entry": "planner" },
+      "outputs": [
+        { "id": "plan", "name": "Plan", "type": "file", "required": true }
+      ],
+      "completion": {
+        "kind": "files",
+        "artifacts": [{ "path": "plan.md", "non_empty": true }]
+      },
+      "branches": { "ready": "hardening" }
+    },
+    {
+      "id": "hardening",
+      "name": "Hardening",
+      "dependencies": ["draft-plan"],
+      "action": { "type": "run", "prompt_file": "prompts/hardening.md" },
+      "assignment": { "role": "hardener", "roster_entry": "hardener" },
+      "outputs": [
+        { "id": "hardened_plan", "name": "Hardened plan", "type": "file", "required": true }
+      ],
+      "completion": {
+        "kind": "files",
+        "artifacts": [{ "path": "plan.md", "non_empty": true }]
+      },
+      "branches": { "ready": "execution" }
+    },
+    {
+      "id": "execution",
+      "name": "Execution",
+      "dependencies": ["hardening"],
+      "action": { "type": "loop", "loop_file": "loops/execution.json" },
+      "assignment": { "role": "executor", "roster_entry": "executor" },
+      "outputs": [
+        { "id": "summary", "name": "Execution summary", "type": "string" }
+      ],
+      "completion": {
+        "kind": "files",
+        "artifacts": [{ "path": "execution.md", "non_empty": true }]
+      },
+      "branches": { "done": "verification" }
+    },
+    {
+      "id": "verification",
+      "name": "Tests + independent review",
+      "dependencies": ["execution"],
+      "action": { "type": "team", "team_file": "teams/verification.json" },
+      "assignment": { "role": "reviewer", "roster_entry": "reviewer" },
+      "outputs": [
+        { "id": "verification", "name": "Verification", "type": "file", "required": true }
+      ],
+      "completion": {
+        "kind": "files",
+        "artifacts": [{ "path": "verification.md", "non_empty": true }]
+      },
+      "branches": { "passed": "publication", "failed": "execution" }
+    },
+    {
+      "id": "publication",
+      "name": "Publication",
+      "dependencies": ["verification"],
+      "action": { "type": "run", "prompt_file": "prompts/publication.md" },
+      "assignment": { "role": "publisher", "roster_entry": "publisher" },
+      "outputs": [
+        { "id": "pr_head", "name": "PR head SHA", "type": "string", "required": true },
+        { "id": "pr_number", "name": "PR number", "type": "number", "required": true }
+      ],
+      "completion": {
+        "kind": "files",
+        "artifacts": [{ "path": "pr-info.md", "non_empty": true }]
+      },
+      "branches": { "published": "review" }
+    },
+    {
+      "id": "review",
+      "name": "CI + external review",
+      "dependencies": ["publication"],
+      "action": { "type": "external", "source": "github", "subject_type": "pull_request" },
+      "outputs": [
+        { "id": "pr_head", "name": "Reviewed head SHA", "type": "string", "required": true }
+      ],
+      "completion": { "kind": "explicit" },
+      "gates": [
+        {
+          "id": "ci",
+          "name": "CI",
+          "type": "external",
+          "required": true,
+          "subject_type": "pull_request",
+          "allowed_outcomes": ["clean", "changes_requested", "action_required", "replan", "checkpoint"]
+        },
+        {
+          "id": "review-verdict",
+          "name": "External review",
+          "type": "external",
+          "required": true,
+          "subject_type": "pull_request",
+          "allowed_outcomes": ["clean", "changes_requested", "action_required", "replan", "checkpoint"]
+        }
+      ],
+      "waive_rules": [
+        { "authorities": ["human"], "reason_required": true }
+      ],
+      "branches": {
+        "clean": "merge-auth",
+        "changes_requested": "correction",
+        "action_required": "correction",
+        "replan": "assessment",
+        "checkpoint": "advisor"
+      }
+    },
+    {
+      "id": "correction",
+      "name": "Correction",
+      "dependencies": ["review"],
+      "action": { "type": "run", "prompt_file": "prompts/correction.md" },
+      "assignment": { "role": "executor", "roster_entry": "executor" },
+      "outputs": [
+        { "id": "correction_summary", "name": "Correction summary", "type": "string" }
+      ],
+      "completion": {
+        "kind": "files",
+        "artifacts": [{ "path": "correction.md", "non_empty": true }]
+      },
+      "branches": { "fixed": "reverify" }
+    },
+    {
+      "id": "reverify",
+      "name": "Reverify",
+      "dependencies": ["correction"],
+      "action": { "type": "team", "team_file": "teams/reverify.json" },
+      "assignment": { "role": "reviewer", "roster_entry": "reviewer" },
+      "outputs": [
+        { "id": "reverify", "name": "Reverify", "type": "file", "required": true }
+      ],
+      "completion": {
+        "kind": "files",
+        "artifacts": [{ "path": "reverify.md", "non_empty": true }]
+      },
+      "branches": { "passed": "publication" }
+    },
+    {
+      "id": "merge-auth",
+      "name": "Human merge authorization",
+      "dependencies": ["review"],
+      "action": {
+        "type": "manual",
+        "instructions": "A human authorizes merging the exact PR head that was reviewed. Complete this node with the authorized head SHA, then satisfy the merge-authorization gate with the exact subject (repository, pull request, and head SHA). The gate cannot be satisfied by PR state alone."
+      },
+      "outputs": [
+        { "id": "authorized_head", "name": "Authorized head SHA", "type": "string", "required": true }
+      ],
+      "completion": { "kind": "explicit" },
+      "gates": [
+        {
+          "id": "merge-authorization",
+          "name": "Merge authorization",
+          "type": "human",
+          "required": true,
+          "subject_type": "pull_request",
+          "allowed_outcomes": ["authorized"]
+        }
+      ],
+      "branches": { "authorized": "reconciliation" }
+    },
+    {
+      "id": "advisor",
+      "name": "Advisor checkpoint",
+      "dependencies": ["review"],
+      "action": {
+        "type": "manual",
+        "instructions": "A manual checkpoint gate reached when review reports a checkpoint. A human or advisor decides whether to proceed to correction or abandon the work unit. Complete this node with the decision, then follow the declared branch."
+      },
+      "outputs": [
+        { "id": "advisor_decision", "name": "Advisor decision", "type": "string" }
+      ],
+      "completion": { "kind": "explicit" },
+      "skip_rule": { "authorities": ["human"], "reason_required": true },
+      "branches": { "proceed": "correction" }
+    },
+    {
+      "id": "reconciliation",
+      "name": "Reconciliation",
+      "dependencies": ["merge-auth"],
+      "action": { "type": "run", "prompt_file": "prompts/reconciliation.md" },
+      "assignment": { "role": "reconciler", "roster_entry": "reconciler" },
+      "outputs": [
+        { "id": "reconciliation", "name": "Reconciliation", "type": "file", "required": true }
+      ],
+      "completion": {
+        "kind": "files",
+        "artifacts": [{ "path": "reconciliation.md", "non_empty": true }]
+      }
+    }
+  ],
+  "terminal_outcomes": ["merged", "abandoned"],
+  "default_lease_policy": { "ttl_seconds": 900, "heartbeat_interval_seconds": 300 },
+  "default_retry_policy": { "max_attempts": 2, "exhaustion": "block" },
+  "composition_limits": { "max_depth": 4, "max_children": 32 }
+}

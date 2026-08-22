@@ -1,0 +1,28 @@
+{
+  "pre": [
+    {
+      "name": "scope",
+      "prompt": "Read the hardened plan and the execution summary. Identify the changed files and the acceptance criteria they map to. Write a brief scope note to scope.md."
+    }
+  ],
+  "team": [
+    {
+      "name": "acceptance",
+      "prompt": "Independently verify each acceptance criterion against the implementation and its evidence. Report any criterion that is not implemented or not evidenced. Write findings to acceptance.md."
+    },
+    {
+      "name": "regression",
+      "prompt": "Run the repository's full test suite and the plan's broader verification. Report any regression or failure. Write findings to regression.md."
+    },
+    {
+      "name": "review",
+      "prompt": "Review the diff for correctness, scope drift, and missing work. Report findings at confidence 60 or higher. Write findings to review.md."
+    }
+  ],
+  "post": [
+    {
+      "name": "synthesize",
+      "prompt": "Synthesize acceptance.md, regression.md, and review.md into verification.md. State PASS or FAIL with evidence. Do not lower the bar to make it pass."
+    }
+  ]
+}
