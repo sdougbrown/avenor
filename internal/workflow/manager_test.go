@@ -281,8 +281,10 @@ func TestManagerInstantiateRejectsWorkflowAction(t *testing.T) {
 	if err == nil {
 		t.Fatalf("instantiate of workflow-action template succeeded: %#v", out)
 	}
-	if !strings.Contains(err.Error(), "workflow actions") {
-		t.Fatalf("error = %v, want workflow-action rejection", err)
+	// The fixture pins child@1, which is never stored, so composition must be
+	// rejected because the pinned child template version cannot be resolved.
+	if !strings.Contains(err.Error(), `pinned child template child@1 not found`) {
+		t.Fatalf("error = %v, want pinned-version rejection", err)
 	}
 	// The rejection must not create any instance on disk.
 	entries, err := os.ReadDir(filepath.Join(s.Root(), "instances"))

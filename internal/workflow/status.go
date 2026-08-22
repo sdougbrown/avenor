@@ -121,14 +121,16 @@ const (
 type CommandKind string
 
 const (
-	CommandInstantiate CommandKind = "instantiate"
-	CommandClaim       CommandKind = "claim"
-	CommandStart       CommandKind = "start"
-	CommandComplete    CommandKind = "complete"
-	CommandGate        CommandKind = "gate"
-	CommandSkip        CommandKind = "skip"
-	CommandUnblock     CommandKind = "unblock"
-	CommandReroute     CommandKind = "reroute"
-	CommandHeartbeat   CommandKind = "heartbeat"
-	CommandTerminate   CommandKind = "terminate_attempt"
+	CommandInstantiate  CommandKind = "instantiate"
+	CommandClaim        CommandKind = "claim"
+	CommandStart        CommandKind = "start"
+	CommandComplete     CommandKind = "complete"
+	CommandGate         CommandKind = "gate"
+	CommandSkip         CommandKind = "skip"
+	CommandUnblock      CommandKind = "unblock"
+	CommandReroute      CommandKind = "reroute"
+	CommandHeartbeat    CommandKind = "heartbeat"
+	CommandTerminate    CommandKind = "terminate_attempt"
+	CommandChildAttach  CommandKind = "child_attach"
+	CommandChildOutcome CommandKind = "child_outcome"
 )

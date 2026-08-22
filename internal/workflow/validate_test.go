@@ -196,6 +196,30 @@ func TestValidateTemplateJSONRejectsIncompleteActionVariants(t *testing.T) {
 	}
 }
 
+func TestValidateTemplateJSONRejectsPathTraversalChildPin(t *testing.T) {
+	// The workflow action's pinned child template ref flows into
+	// Store.LoadTemplate's filepath.Join; it is a path component and must be
+	// safeComponent-validated (rejected at create time) to block traversal.
+	cases := []struct{ name, tid, ver, wantErr string }{
+		{"template-id traversal", "../instances/x", "1", "safe template_id component"},
+		{"template-version traversal", "child", "../1", "safe template_version component"},
+		{"absolute template-id", "/etc/passwd", "1", "safe template_id component"},
+		{"backslash template-id", `child\\x`, "1", "safe template_id component"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			input := mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
+				node["action"] = map[string]any{
+					"type": "workflow", "template_id": c.tid,
+					"template_version": c.ver, "child_key": "c1",
+					"outcome_map": map[string]any{"done": "done"},
+				}
+			}))
+			assertTemplateError(t, input, c.wantErr)
+		})
+	}
+}
+
 func TestValidateTemplateJSONRejectsAmbiguousOrUnboundedJSON(t *testing.T) {
 	t.Run("unknown top-level field", func(t *testing.T) {
 		assertTemplateError(t, mutateTemplate(t, setField("misspelled", true)), `additionalProperties at /misspelled`)

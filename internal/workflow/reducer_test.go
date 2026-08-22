@@ -8,6 +8,7 @@ package workflow
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -141,6 +142,14 @@ func TestApply(t *testing.T) {
 		{"termination_before_completion", testTerminationBeforeCompletion},
 		{"terminate_marker_inert", testTerminateMarkerInert},
 		{"required_gate_pending_on_complete", testGatePendingOnComplete},
+		{"child_attach_moves_running_to_awaiting_child", testChildAttachAwaitingChild},
+		{"child_attach_rejects_invalid_states", testChildAttachRejectsInvalidStates},
+		{"child_attach_lease_guard", testChildAttachLeaseGuard},
+		{"child_outcome_resolves_awaiting_child", testChildOutcomeResolvesAwaitingChild},
+		{"child_outcome_requires_awaiting_child", testChildOutcomeRequiresAwaitingChild},
+		{"child_outcome_wrong_lease", testChildOutcomeWrongLease},
+		{"child_outcome_branch_target", testChildOutcomeBranchTarget},
+		{"child_events_replay_idempotent", testChildEventsReplayIdempotent},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, tt.run)
@@ -1016,5 +1025,358 @@ func TestReduceDoesNotMutateInput(t *testing.T) {
 	}
 	if state.Instance.Activations[0].Status != ActivationPending {
 		t.Fatalf("Reduce leaked mutation: activation became %q", state.Instance.Activations[0].Status)
+	}
+}
+
+// newInstanceWithChild is newInstance plus a composition-manifest child
+// reference for the single "start" node.
+func newInstanceWithChild(t *testing.T) Snapshot {
+	t.Helper()
+	payload, err := json.Marshal(InstanceRecord{
+		TemplateID:       "t1",
+		TemplateVersion:  "1",
+		TerminalOutcomes: []OutcomeName{"done"},
+		EntryNodes:       []NodeID{"start"},
+		Children: []ChildReference{{
+			ID:              "child-1",
+			NodeID:          "start",
+			WorkflowID:      "wfchild-1",
+			TemplateID:      "t2",
+			TemplateVersion: "1",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("marshal instance record: %v", err)
+	}
+	return mustApply(t, Snapshot{}, Command{
+		Kind:             CommandInstantiate,
+		ExpectedRevision: 0,
+		IdempotencyKey:   "inst",
+		Identity:         ExecutionIdentity{WorkflowID: "wf1"},
+		Payload:          payload,
+	}, "instantiate")
+}
+
+// childAttachCmd builds the child_attach command for the given identity.
+func childAttachCmd(state Snapshot, idem string, lease LeaseID, identity ExecutionIdentity) Command {
+	return Command{
+		Kind:             CommandChildAttach,
+		ExpectedRevision: state.Instance.Revision,
+		IdempotencyKey:   idem,
+		Identity:         identity,
+		LeaseID:          lease,
+	}
+}
+
+func testChildAttachAwaitingChild(t *testing.T) {
+	state := newInstanceWithChild(t)
+	state, leaseID, _ := runToStart(t, state)
+	actID := actStart(state).ID
+
+	state = mustApply(t, state, childAttachCmd(state, "attach-1", leaseID, baseIdentity(actID, "att-1")), "attach")
+	act := actStart(state)
+	if act.Status != ActivationAwaitingChild {
+		t.Fatalf("after attach: activation status got %q want %q", act.Status, ActivationAwaitingChild)
+	}
+	// The attach keeps the claim lease live; the child outcome must present it.
+	if act.ActiveLease == nil || act.ActiveLease.ID != leaseID {
+		t.Fatalf("after attach: lease = %+v, want the claim lease kept live", act.ActiveLease)
+	}
+	// The durable child reference records the attach.
+	if got := state.Instance.Children[0].ParentActivation; got != actID {
+		t.Fatalf("child reference parent activation got %q want %q", got, actID)
+	}
+	if state.Instance.Status != WorkflowActive {
+		t.Fatalf("after attach: workflow status got %q want active", state.Instance.Status)
+	}
+}
+
+func testChildAttachRejectsInvalidStates(t *testing.T) {
+	// Not running: a pending activation cannot attach a child.
+	pending := newInstanceWithChild(t)
+	pActID := actStart(pending).ID
+	before := pending
+	_, err := applyCmd(pending, childAttachCmd(pending, "attach-pending", LeaseID(""), baseIdentity(pActID, "")))
+	if err == nil {
+		t.Fatalf("attach on pending activation: expected error, got nil")
+	}
+	if !reflect.DeepEqual(before, pending) {
+		t.Fatalf("rejected attach on pending activation changed state")
+	}
+
+	// No composition-manifest entry for the node.
+	plain := newInstance(t)
+	plain, leaseID, _ := runToStart(t, plain)
+	pActID = actStart(plain).ID
+	before = plain
+	_, err = applyCmd(plain, childAttachCmd(plain, "attach-noref", leaseID, baseIdentity(pActID, "att-1")))
+	if err == nil || !strings.Contains(err.Error(), "no child reference") {
+		t.Fatalf("attach without manifest reference: err = %v, want no-child-reference", err)
+	}
+	if !reflect.DeepEqual(before, plain) {
+		t.Fatalf("rejected attach without reference changed state")
+	}
+
+	// Re-attaching an already-attached child to a different activation.
+	state := newInstanceWithChild(t)
+	state, leaseID, _ = runToStart(t, state)
+	actID := actStart(state).ID
+	state = mustApply(t, state, childAttachCmd(state, "attach-1", leaseID, baseIdentity(actID, "att-1")), "attach (first)")
+
+	// A reroute introduces a second activation on the same node.
+	state = mustApply(t, state, Command{
+		Kind:             CommandReroute,
+		ExpectedRevision: state.Instance.Revision,
+		IdempotencyKey:   "reroute-1",
+		Identity:         ExecutionIdentity{WorkflowID: "wf1", NodeID: "start"},
+	}, "reroute")
+	act2 := state.Instance.Activations[len(state.Instance.Activations)-1]
+	state = mustApply(t, state, Command{
+		Kind:             CommandClaim,
+		ExpectedRevision: state.Instance.Revision,
+		IdempotencyKey:   "claim-act2",
+		Identity:         baseIdentity(act2.ID, ""),
+		LeaseID:          "lease-2",
+		Actor:            "alice",
+	}, "claim (second activation)")
+	state = mustApply(t, state, Command{
+		Kind:             CommandStart,
+		ExpectedRevision: state.Instance.Revision,
+		IdempotencyKey:   "start-act2",
+		Identity:         baseIdentity(act2.ID, "att-2"),
+		LeaseID:          "lease-2",
+	}, "start (second activation)")
+
+	_, err = applyCmd(state, childAttachCmd(state, "attach-2", "lease-2", baseIdentity(act2.ID, "att-2")))
+	if err == nil || !strings.Contains(err.Error(), "already attached") {
+		t.Fatalf("foreign re-attach: err = %v, want already-attached rejection", err)
+	}
+	if got := state.Instance.Children[0].ParentActivation; got != actID {
+		t.Fatalf("child reference parent activation got %q want first attach %q", got, actID)
+	}
+}
+
+func testChildAttachLeaseGuard(t *testing.T) {
+	state := newInstanceWithChild(t)
+	state, leaseID, _ := runToStart(t, state)
+	actID := actStart(state).ID
+
+	// A leased/running activation must not be parked into awaiting_child by
+	// a foreign attach: wrong or missing lease is rejected, state unchanged.
+	for _, lease := range []LeaseID{"not-the-active-lease", ""} {
+		before := state
+		_, err := applyCmd(before, childAttachCmd(before, "attach-guard-"+string(lease), lease, baseIdentity(actID, "att-1")))
+		if err == nil || !strings.Contains(err.Error(), "lease does not match") {
+			t.Fatalf("attach with lease %q: err = %v, want active-lease mismatch", lease, err)
+		}
+		if !reflect.DeepEqual(before, state) {
+			t.Fatalf("rejected attach with lease %q changed state", lease)
+		}
+	}
+
+	// The lease holder's attach is accepted and parks the activation.
+	state = mustApply(t, state, childAttachCmd(state, "attach-guard-match", leaseID, baseIdentity(actID, "att-1")), "attach (matching lease)")
+	if actStart(state).Status != ActivationAwaitingChild {
+		t.Fatalf("attach with matching lease: status = %q, want awaiting_child", actStart(state).Status)
+	}
+}
+
+func testChildOutcomeResolvesAwaitingChild(t *testing.T) {
+	state := newInstanceWithChild(t)
+	state, leaseID, attemptID := runToStart(t, state)
+	actID := actStart(state).ID
+	state = mustApply(t, state, childAttachCmd(state, "attach-1", leaseID, baseIdentity(actID, "att-1")), "attach")
+
+	refs := []OutputReference{{
+		WorkflowID:   "wfchild-1",
+		NodeID:       "start",
+		ActivationID: "act-child-1",
+		OutputID:     "co",
+		Revision:     1,
+	}}
+	state = mustApply(t, state, Command{
+		Kind:             CommandChildOutcome,
+		ExpectedRevision: state.Instance.Revision,
+		IdempotencyKey:   "outcome-1",
+		Identity:         baseIdentity(actID, attemptID),
+		LeaseID:          leaseID,
+		Outcome:          "done",
+		ChildOutputs:     refs,
+	}, "child outcome")
+
+	act := actStart(state)
+	if act.Status != ActivationSatisfied {
+		t.Fatalf("after child outcome: activation status got %q want satisfied", act.Status)
+	}
+	if act.SelectedOutcome != "done" {
+		t.Fatalf("after child outcome: selected outcome got %q want done", act.SelectedOutcome)
+	}
+	if act.ActiveLease != nil {
+		t.Fatalf("after child outcome: lease still held, want released")
+	}
+	ref := state.Instance.Children[0]
+	if ref.Outcome != "done" {
+		t.Fatalf("child reference outcome got %q want done", ref.Outcome)
+	}
+	if !reflect.DeepEqual(ref.Outputs, refs) {
+		t.Fatalf("child reference outputs got %+v want %+v", ref.Outputs, refs)
+	}
+	if state.Instance.Status != WorkflowCompleted {
+		t.Fatalf("after child outcome: workflow status got %q want completed", state.Instance.Status)
+	}
+	if state.Instance.TerminalOutcome != "done" {
+		t.Fatalf("after child outcome: terminal outcome got %q want done", state.Instance.TerminalOutcome)
+	}
+
+	// A double child outcome (fresh idempotency key) is rejected and changes
+	// nothing: the reducer only resolves from awaiting_child.
+	before := state
+	_, err := applyCmd(state, Command{
+		Kind:             CommandChildOutcome,
+		ExpectedRevision: state.Instance.Revision,
+		IdempotencyKey:   "outcome-2",
+		Identity:         baseIdentity(actID, attemptID),
+		LeaseID:          leaseID,
+		Outcome:          "done",
+	})
+	if err == nil {
+		t.Fatalf("double child outcome: expected error, got nil")
+	}
+	if !reflect.DeepEqual(before, state) {
+		t.Fatalf("rejected double child outcome changed state")
+	}
+}
+
+func testChildOutcomeRequiresAwaitingChild(t *testing.T) {
+	state := newInstanceWithChild(t)
+	state, leaseID, attemptID := runToStart(t, state)
+	actID := actStart(state).ID
+
+	// Running (never attached) is not a resolvable state.
+	before := state
+	_, err := applyCmd(state, Command{
+		Kind:             CommandChildOutcome,
+		ExpectedRevision: state.Instance.Revision,
+		IdempotencyKey:   "outcome-nowait",
+		Identity:         baseIdentity(actID, attemptID),
+		LeaseID:          leaseID,
+		Outcome:          "done",
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot resolve child outcome") {
+		t.Fatalf("child outcome without attach: err = %v, want awaiting-child requirement", err)
+	}
+	if !reflect.DeepEqual(before, state) {
+		t.Fatalf("rejected child outcome changed state")
+	}
+}
+
+func testChildOutcomeWrongLease(t *testing.T) {
+	state := newInstanceWithChild(t)
+	state, leaseID, attemptID := runToStart(t, state)
+	actID := actStart(state).ID
+	state = mustApply(t, state, childAttachCmd(state, "attach-1", leaseID, baseIdentity(actID, "att-1")), "attach")
+
+	before := state
+	_, err := applyCmd(state, Command{
+		Kind:             CommandChildOutcome,
+		ExpectedRevision: state.Instance.Revision,
+		IdempotencyKey:   "outcome-wronglease",
+		Identity:         baseIdentity(actID, attemptID),
+		LeaseID:          "not-the-active-lease",
+		Outcome:          "done",
+	})
+	if err == nil {
+		t.Fatalf("child outcome with wrong lease: expected error, got nil")
+	}
+	if !reflect.DeepEqual(before, state) {
+		t.Fatalf("child outcome with wrong lease changed state")
+	}
+}
+
+func testChildOutcomeBranchTarget(t *testing.T) {
+	state := newInstanceWithChild(t)
+	state, leaseID, attemptID := runToStart(t, state)
+	actID := actStart(state).ID
+	state = mustApply(t, state, childAttachCmd(state, "attach-1", leaseID, baseIdentity(actID, "att-1")), "attach")
+
+	branch, err := json.Marshal(Transition{ActivationID: actID, Outcome: "next", TargetNodeID: "after"})
+	if err != nil {
+		t.Fatalf("marshal transition: %v", err)
+	}
+	state = mustApply(t, state, Command{
+		Kind:             CommandChildOutcome,
+		ExpectedRevision: state.Instance.Revision,
+		IdempotencyKey:   "outcome-branch",
+		Identity:         baseIdentity(actID, attemptID),
+		LeaseID:          leaseID,
+		Outcome:          "next",
+		Payload:          branch,
+	}, "child outcome (branch)")
+
+	act := actStart(state)
+	if act.Status != ActivationSatisfied || act.SelectedOutcome != "next" {
+		t.Fatalf("after branch child outcome: status/outcome got %q/%q want satisfied/next",
+			act.Status, act.SelectedOutcome)
+	}
+	if state.Instance.Status != WorkflowActive {
+		t.Fatalf("after branch child outcome: workflow status got %q want active", state.Instance.Status)
+	}
+	if got := state.Instance.Children[0].Outcome; got != "next" {
+		t.Fatalf("child reference outcome got %q want next", got)
+	}
+	// The declared branch target materializes as a fresh pending activation.
+	last := state.Instance.Activations[len(state.Instance.Activations)-1]
+	if last.NodeID != "after" || last.Status != ActivationPending || last.IncomingOutcome != "next" {
+		t.Fatalf("branch target activation got %+v, want node after pending incoming next", last)
+	}
+}
+
+func testChildEventsReplayIdempotent(t *testing.T) {
+	state := newInstanceWithChild(t)
+	state, leaseID, attemptID := runToStart(t, state)
+	actID := actStart(state).ID
+
+	attachEvents, err := Apply(state, childAttachCmd(state, "attach-r", leaseID, baseIdentity(actID, "att-1")))
+	if err != nil {
+		t.Fatalf("apply attach: %v", err)
+	}
+	for _, e := range attachEvents {
+		state, err = Reduce(state, e)
+		if err != nil {
+			t.Fatalf("reduce attach: %v", err)
+		}
+	}
+	// Replaying the same attach event is a no-op.
+	if again, err := Reduce(state, attachEvents[0]); err != nil {
+		t.Fatalf("replay attach: %v", err)
+	} else if !reflect.DeepEqual(state, again) {
+		t.Fatalf("replayed attach event changed state")
+	}
+
+	outcomeEvents, err := Apply(state, Command{
+		Kind:             CommandChildOutcome,
+		ExpectedRevision: state.Instance.Revision,
+		IdempotencyKey:   "outcome-r",
+		Identity:         baseIdentity(actID, attemptID),
+		LeaseID:          leaseID,
+		Outcome:          "done",
+	})
+	if err != nil {
+		t.Fatalf("apply child outcome: %v", err)
+	}
+	for _, e := range outcomeEvents {
+		state, err = Reduce(state, e)
+		if err != nil {
+			t.Fatalf("reduce child outcome: %v", err)
+		}
+	}
+	// Replaying the outcome batch is a no-op (no double-apply).
+	if again, err := Reduce(state, outcomeEvents[0]); err != nil {
+		t.Fatalf("replay child outcome: %v", err)
+	} else if !reflect.DeepEqual(state, again) {
+		t.Fatalf("replayed child outcome event changed state")
+	}
+	if state.Instance.Children[0].Outcome != "done" || actStart(state).Status != ActivationSatisfied {
+		t.Fatalf("replay final state wrong: %+v", state.Instance)
 	}
 }

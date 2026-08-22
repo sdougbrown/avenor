@@ -129,6 +129,37 @@ func buildCommandEvents(state Snapshot, command Command) ([]Event, error) {
 		e.MarkerLabel = command.MarkerLabel
 		return []Event{e}, nil
 
+	case CommandChildAttach:
+		e := newEvent(EventChildAttached)
+		e.LeaseID = command.LeaseID
+		return []Event{e}, nil
+
+	case CommandChildOutcome:
+		e := newEvent(EventChildOutcome)
+		e.Outcome = command.Outcome
+		e.ChildOutputs = command.ChildOutputs
+		e.LeaseID = command.LeaseID
+		if len(command.Payload) == 0 {
+			// No declared branch: the mapped outcome terminates the workflow.
+			return []Event{e}, nil
+		}
+		t := &Transition{}
+		if err := json.Unmarshal(command.Payload, t); err != nil {
+			return nil, fmt.Errorf("child_outcome command: %w", err)
+		}
+		if t.Outcome == "" {
+			t.Outcome = command.Outcome
+		}
+		e.Transition = t
+		if t.TargetNodeID == "" {
+			// Declared branch resolved to no target: terminal outcome.
+			return []Event{e}, nil
+		}
+		next := newEvent(EventTransition)
+		next.Transition = t
+		next.Outcome = command.Outcome
+		return []Event{e, next}, nil
+
 	default:
 		return nil, fmt.Errorf("unsupported command kind %q", command.Kind)
 	}
@@ -186,6 +217,10 @@ func applyEvent(next *Snapshot, event Event) error {
 		return applyHeartbeat(act, event)
 	case EventLeaseExpired:
 		return applyLeaseExpired(act, event)
+	case EventChildAttached:
+		return applyChildAttached(next, act, event)
+	case EventChildOutcome:
+		return applyChildOutcome(next, act, event)
 	case EventTransition:
 		if event.Transition == nil {
 			return errors.New("transition event requires a transition")
@@ -272,6 +307,9 @@ func applyInstantiated(next *Snapshot, event Event) error {
 	next.Instance.Status = WorkflowActive
 	next.Instance.CreatedAt = now
 	next.Instance.UpdatedAt = now
+	// The composition manifest (durable child references) is carried on the
+	// instance record so replay reconstructs it without re-derivation.
+	next.Instance.Children = append(next.Instance.Children, rec.Children...)
 	for _, nodeID := range rec.EntryNodes {
 		next.Instance.Activations = append(next.Instance.Activations, Activation{
 			ID:        NewActivationID(),
@@ -470,6 +508,17 @@ func applyCompleted(next *Snapshot, act *Activation, event Event) error {
 			return errors.New("completed event lease does not match the active lease")
 		}
 	}
+	return satisfyActivation(next, act, event)
+}
+
+// satisfyActivation is the shared satisfaction tail of the completion path:
+// it marks the activation satisfied with the event's outcome, releases the
+// lease, records the event's evidence/outputs, and — when the event carries
+// no declared branch transition — terminates the workflow with the outcome.
+// Both applyCompleted and applyChildOutcome delegate here so the
+// child-terminal-outcome resolution stays in lockstep with completion
+// semantics.
+func satisfyActivation(next *Snapshot, act *Activation, event Event) error {
 	act.Status = ActivationSatisfied
 	act.SelectedOutcome = event.Outcome
 	act.ActiveLease = nil
@@ -485,6 +534,85 @@ func applyCompleted(next *Snapshot, act *Activation, event Event) error {
 		next.Instance.TerminalOutcome = event.Outcome
 	}
 	return nil
+}
+
+// findChildReference locates the composition-manifest child reference for a
+// node (one per workflow-action node, keyed by NodeID).
+func findChildReference(inst *WorkflowInstance, nodeID NodeID) *ChildReference {
+	for i := range inst.Children {
+		if inst.Children[i].NodeID == nodeID {
+			return &inst.Children[i]
+		}
+	}
+	return nil
+}
+
+// applyChildAttached durably parks a leased/running activation in the
+// awaiting_child state and records the attach on the durable child reference.
+// It is the parent side of kernel-local composition: no child state is
+// copied, only the manifest reference is claimed. Re-attaching the same child
+// to a different activation is rejected; an attach without a manifest entry
+// for the node is rejected as well.
+func applyChildAttached(next *Snapshot, act *Activation, event Event) error {
+	if act == nil {
+		return errors.New("child_attached event requires an activation")
+	}
+	switch act.Status {
+	case ActivationLeased, ActivationRunning:
+	default:
+		return fmt.Errorf("cannot attach child to activation in status %q", act.Status)
+	}
+	// A leased activation must be attached by its lease holder — mirroring
+	// the completion and child-outcome lease guards — so a foreign attach can
+	// never park a leased/running activation into awaiting_child.
+	if act.ActiveLease != nil {
+		if event.LeaseID == "" || act.ActiveLease.ID != event.LeaseID {
+			return errors.New("child_attached event lease does not match the active lease")
+		}
+	}
+	ref := findChildReference(&next.Instance, act.NodeID)
+	if ref == nil {
+		return fmt.Errorf("no child reference for node %q in the composition manifest", act.NodeID)
+	}
+	if ref.ParentActivation != "" && ref.ParentActivation != act.ID {
+		return fmt.Errorf("child %s already attached to activation %q", ref.WorkflowID, ref.ParentActivation)
+	}
+	ref.ParentActivation = act.ID
+	act.Status = ActivationAwaitingChild
+	act.UpdatedAt = nowUTC()
+	return nil
+}
+
+// applyChildOutcome resolves the parent activation for a durable child
+// terminal outcome. It requires the activation to be awaiting_child (only a
+// child's terminal outcome advances it from that state), records the mapped
+// parent outcome and the selected child output references on the child
+// reference, and satisfies the activation through the same completion tail
+// as applyCompleted.
+func applyChildOutcome(next *Snapshot, act *Activation, event Event) error {
+	if act == nil {
+		return errors.New("child_outcome event requires an activation")
+	}
+	if event.Outcome == "" {
+		return errors.New("child_outcome event requires an outcome")
+	}
+	if act.Status != ActivationAwaitingChild {
+		return fmt.Errorf("cannot resolve child outcome for activation in status %q", act.Status)
+	}
+	// The attach keeps the claim lease live until the child resolves, so a
+	// live lease must be presented — mirroring the completion lease guard.
+	if act.ActiveLease != nil {
+		if event.LeaseID == "" || act.ActiveLease.ID != event.LeaseID {
+			return errors.New("child_outcome event lease does not match the active lease")
+		}
+	}
+	ref := findChildReference(&next.Instance, act.NodeID)
+	if ref == nil || ref.ParentActivation != act.ID {
+		return fmt.Errorf("child reference for node %q is not attached to this activation", act.NodeID)
+	}
+	ref.Outcome = event.Outcome
+	ref.Outputs = append([]OutputReference(nil), event.ChildOutputs...)
+	return satisfyActivation(next, act, event)
 }
 
 // applyGate records a gate decision on the activation. The reducer has no

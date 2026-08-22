@@ -27,7 +27,11 @@ type Manager struct {
 }
 
 func NewManager(store *Store) *Manager {
-	return &Manager{store: store, executors: make(map[ActionKind]Executor)}
+	m := &Manager{store: store, executors: make(map[ActionKind]Executor)}
+	// The workflow action is kernel-local composition (no provider
+	// admission), so its executor ships with the manager by default.
+	m.executors[ActionWorkflow] = &workflowExecutor{manager: m}
+	return m
 }
 
 // Executor dispatches a started action to its runtime backend. The manager
@@ -105,6 +109,23 @@ func (m *Manager) WorkflowCreate(payload json.RawMessage) (any, error) {
 }
 
 // WorkflowInstantiate instantiates a stored template as a new active workflow.
+// When the template composes child workflows, the compose prerequisites are
+// validated up front (pinned versions resolve across the whole descendant
+// tree, no cycles, all bounds respected) and the child instances are
+// materialized eagerly — idempotently, under deterministic derived IDs —
+// before the parent's instantiate command is applied, so the parent's event
+// log never references children that do not exist. The eager materialization
+// is intentional: every composed child is created as an active instance (its
+// entry activation pending) ahead of the parent's own commit, and child
+// execution stays gated on the parent's workflow-node attach in a later
+// phase — nothing auto-claims a child. Child creation is idempotent through
+// the derived IDs: a replay that finds the child already present resumes it
+// as-is, while a concurrent creator surfaces as a revision mismatch rather
+// than being silently absorbed. If materialization fails partway, the
+// already-created children are left on disk as active, unparented workflows
+// and the caller receives only the error; orphan cleanup is out of scope for
+// this stage. The composition manifest rides on the instantiate event record
+// and is applied into the instance by the reducer.
 func (m *Manager) WorkflowInstantiate(payload json.RawMessage) (any, error) {
 	var req struct {
 		TemplateID      TemplateID      `json:"template_id"`
@@ -127,29 +148,9 @@ func (m *Manager) WorkflowInstantiate(payload json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	for _, node := range template.Nodes {
-		if node.Action.Kind == ActionWorkflow {
-			return nil, fmt.Errorf("template %s@%s contains workflow actions, which are unsupported until the composition stage", req.TemplateID, req.TemplateVersion)
-		}
-	}
 	wf := NewWorkflowID()
-	record := InstanceRecord{
-		TemplateID:       template.TemplateID,
-		TemplateVersion:  template.TemplateVersion,
-		TerminalOutcomes: template.TerminalOutcomes,
-		EntryNodes:       template.EntryNodes,
-	}
-	recordJSON, err := json.Marshal(record)
-	if err != nil {
-		return nil, err
-	}
-	snap, err := m.store.ApplyCommand(wf, Command{
-		Kind:             CommandInstantiate,
-		ExpectedRevision: 0,
-		IdempotencyKey:   "inst-" + string(wf),
-		Identity:         ExecutionIdentity{WorkflowID: wf},
-		Payload:          recordJSON,
-	})
+	var materialized int
+	snap, err := m.instantiateTemplate(wf, template, &materialized)
 	if err != nil {
 		return nil, err
 	}
@@ -157,6 +158,107 @@ func (m *Manager) WorkflowInstantiate(payload json.RawMessage) (any, error) {
 		"workflow_id": string(wf),
 		"revision":    snap.Instance.Revision,
 	}, nil
+}
+
+// instantiateTemplate materializes one workflow instance under wf for
+// template. It validates the template's composition — BuildComposition
+// enforcing the global instance bound over the whole descendant tree —
+// idempotently ensures each declared child instance exists (recursing into
+// nested compositions), and applies the parent's instantiate command with the
+// composition manifest recorded on the instance record. materialized, when
+// non-nil, is threaded through the recursion as a running count of instances
+// this call has materialized; the path rejects should the cumulative count
+// ever exceed DefaultMaximumCompositionInstances (defense in depth on top of
+// BuildComposition's tree bound).
+func (m *Manager) instantiateTemplate(wf WorkflowID, template Template, materialized *int) (Snapshot, error) {
+	comp, _, err := BuildComposition(wf, template, m.resolveTemplate)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	if materialized != nil {
+		*materialized++
+		if *materialized > DefaultMaximumCompositionInstances {
+			return Snapshot{}, fmt.Errorf(
+				"composition: template %s@%s would exceed the maximum of %d total materialized instances",
+				template.TemplateID, template.TemplateVersion, DefaultMaximumCompositionInstances,
+			)
+		}
+	}
+	for _, child := range comp.Children {
+		if _, err := m.ensureChildInstance(child, materialized); err != nil {
+			return Snapshot{}, err
+		}
+	}
+	record := InstanceRecord{
+		TemplateID:       template.TemplateID,
+		TemplateVersion:  template.TemplateVersion,
+		TerminalOutcomes: template.TerminalOutcomes,
+		EntryNodes:       template.EntryNodes,
+	}
+	for _, child := range comp.Children {
+		record.Children = append(record.Children, ChildReference{
+			ID:              NewChildReferenceID(),
+			NodeID:          child.NodeID,
+			WorkflowID:      child.ChildWorkflowID,
+			TemplateID:      child.Template.TemplateID,
+			TemplateVersion: child.Template.TemplateVersion,
+		})
+	}
+	recordJSON, err := json.Marshal(record)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	return m.store.ApplyCommand(wf, Command{
+		Kind:             CommandInstantiate,
+		ExpectedRevision: 0,
+		IdempotencyKey:   "inst-" + string(wf),
+		Identity:         ExecutionIdentity{WorkflowID: wf},
+		Payload:          recordJSON,
+	})
+}
+
+// ensureChildInstance idempotently ensures the child instance named by child
+// exists, threading materialized (the running count of instances this
+// instantiation has materialized) into the recursion. The child's workflow ID
+// is deterministic in the parent's identity, node, and child key (see
+// DeriveChildWorkflowID), so replay and retries always target the same
+// instance: the real reuse path is the loadCurrent hit below, which resumes
+// the existing child as-is, and a fresh one is created through the same
+// instantiation path (recursing into its own composition). A concurrent
+// creator is not absorbed and must not be: instantiate applies at
+// ExpectedRevision 0 and the reducer checks the expected revision before the
+// idempotency key, so a racing second creator of an existing child gets
+// errRevisionMismatch (never errDuplicateIdempotency), and that error is
+// surfaced to the caller rather than swallowed.
+func (m *Manager) ensureChildInstance(child CompositionChild, materialized *int) (WorkflowID, error) {
+	childID := child.ChildWorkflowID
+	if _, exists, err := m.store.loadCurrent(childID); err == nil && exists {
+		return childID, nil
+	}
+	if _, err := m.instantiateTemplate(childID, child.Template, materialized); err != nil {
+		return "", err
+	}
+	return childID, nil
+}
+
+// resolveTemplate is the store-backed TemplateResolver for composition:
+// a pinned child template must be resolvable, and a missing pin is reported
+// as a clear pinned-version error rather than a raw store error.
+func (m *Manager) resolveTemplate(templateID TemplateID, templateVersion TemplateVersion) (Template, error) {
+	// Defense-in-depth: the pin is validated with safeComponent at create time
+	// (validateAction), but re-check here so no caller can reach LoadTemplate's
+	// filepath.Join with a path-breaking component (template-ID path traversal).
+	if !safeComponent(string(templateID)) || !safeComponent(string(templateVersion)) {
+		return Template{}, fmt.Errorf("invalid pinned child template reference %s@%s", templateID, templateVersion)
+	}
+	template, err := m.store.LoadTemplate(templateID, templateVersion)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return Template{}, fmt.Errorf("pinned child template %s@%s not found", templateID, templateVersion)
+		}
+		return Template{}, err
+	}
+	return template, nil
 }
 
 // WorkflowStatus returns a compact status view of a workflow instance.
