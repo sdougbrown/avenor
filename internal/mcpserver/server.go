@@ -213,6 +213,7 @@ type workflowGateArgs struct {
 	Operation    string          `json:"operation" jsonschema:"required gate operation (satisfy, reject, waive, or external_result)"`
 	Actor        string          `json:"actor,omitempty" jsonschema:"optional actor id for human gate operations"`
 	Reason       string          `json:"reason,omitempty" jsonschema:"optional reason for human gate operations"`
+	Outcome      string          `json:"outcome,omitempty" jsonschema:"optional outcome for the gate decision (used to branch reject/fail cases)"`
 	Subject      json.RawMessage `json:"subject,omitempty" jsonschema:"optional bound exact subject as JSON, for example {\"type\":\"pr\",\"repository\":\"org/repo\",\"pull_request\":12,\"revision\":\"abc\"}"`
 	PollID       string          `json:"poll_id,omitempty" jsonschema:"optional external poll id (external_result)"`
 	Source       string          `json:"source,omitempty" jsonschema:"optional external result source (external_result)"`
@@ -1367,6 +1368,7 @@ func (s *Server) handleAvenorWorkflowGate(ctx context.Context, req *mcp.CallTool
 	for key, value := range map[string]any{
 		"actor":         args.Actor,
 		"reason":        args.Reason,
+		"outcome":       args.Outcome,
 		"poll_id":       args.PollID,
 		"source":        args.Source,
 		"result":        args.Result,

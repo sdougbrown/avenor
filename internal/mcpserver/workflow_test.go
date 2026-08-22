@@ -11,12 +11,9 @@ import (
 
 // newWorkflowTestServer builds a server wired to a fake control client and no
 // autostart, the same harness the sibling control-tool tests use.
-func newWorkflowTestServer(t *testing.T, cl ControlClient) (*Server, *fakeClient) {
+func newWorkflowTestServer(t *testing.T) (*Server, *fakeClient) {
 	t.Helper()
-	fake, _ := cl.(*fakeClient)
-	if fake == nil {
-		fake = &fakeClient{}
-	}
+	fake := &fakeClient{}
 	s, err := NewServer(Options{
 		Transport:     "stdio",
 		NoAutostart:   true,
@@ -78,7 +75,7 @@ func TestWorkflowRequiredArgs(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			s, _ := newWorkflowTestServer(t, &fakeClient{})
+			s, _ := newWorkflowTestServer(t)
 			err := tc.call(s)
 			if err == nil {
 				t.Fatalf("expected required-arg error, got nil")
@@ -91,7 +88,7 @@ func TestWorkflowRequiredArgs(t *testing.T) {
 }
 
 func TestWorkflowGateUnknownOperation(t *testing.T) {
-	s, fake := newWorkflowTestServer(t, &fakeClient{})
+	s, fake := newWorkflowTestServer(t)
 	ctx := context.Background()
 	_, _, err := s.handleAvenorWorkflowGate(ctx, nil, workflowGateArgs{
 		WorkflowID: "wf", NodeID: "n", GateID: "g", ActivationID: "a", Operation: "bogus",
@@ -105,7 +102,7 @@ func TestWorkflowGateUnknownOperation(t *testing.T) {
 }
 
 func TestWorkflowWaitInvalidTimeout(t *testing.T) {
-	s, _ := newWorkflowTestServer(t, &fakeClient{})
+	s, _ := newWorkflowTestServer(t)
 	ctx := context.Background()
 	_, _, err := s.handleAvenorWorkflowWait(ctx, nil, workflowWaitArgs{WorkflowID: "wf", Timeout: "not-a-timeout"})
 	if err == nil {
@@ -114,7 +111,7 @@ func TestWorkflowWaitInvalidTimeout(t *testing.T) {
 }
 
 func TestWorkflowCompleteInvalidJSON(t *testing.T) {
-	s, fake := newWorkflowTestServer(t, &fakeClient{})
+	s, fake := newWorkflowTestServer(t)
 	ctx := context.Background()
 	_, _, err := s.handleAvenorWorkflowComplete(ctx, nil, workflowCompleteArgs{
 		WorkflowID: "wf", NodeID: "n", ActivationID: "a", AttemptID: "at", LeaseID: "l",
@@ -129,7 +126,7 @@ func TestWorkflowCompleteInvalidJSON(t *testing.T) {
 }
 
 func TestWorkflowGateInvalidObservedAt(t *testing.T) {
-	s, fake := newWorkflowTestServer(t, &fakeClient{})
+	s, fake := newWorkflowTestServer(t)
 	ctx := context.Background()
 	_, _, err := s.handleAvenorWorkflowGate(ctx, nil, workflowGateArgs{
 		WorkflowID: "wf", NodeID: "n", GateID: "g", ActivationID: "a", Operation: "external_result",
@@ -148,11 +145,12 @@ func TestWorkflowGateInvalidObservedAt(t *testing.T) {
 // identifier is dropped, remapped, or rewritten between registration/argument
 // plumbing and the handler.
 func TestWorkflowIdentifierRoundTrip(t *testing.T) {
-	s, fake := newWorkflowTestServer(t, &fakeClient{})
+	s, fake := newWorkflowTestServer(t)
 	ctx := context.Background()
 
 	fake.workflowStatusResult = map[string]any{"workflow_id": "wf-abc", "status": "running"}
-	if _, _, err := s.handleAvenorWorkflowStatus(ctx, nil, workflowStatusArgs{WorkflowID: "wf-abc"}); err != nil {
+	_, result, err := s.handleAvenorWorkflowStatus(ctx, nil, workflowStatusArgs{WorkflowID: "wf-abc"})
+	if err != nil {
 		t.Fatal(err)
 	}
 	if len(fake.workflowStatusCalls) != 1 || fake.workflowStatusCalls[0] != "wf-abc" {
@@ -160,13 +158,14 @@ func TestWorkflowIdentifierRoundTrip(t *testing.T) {
 	}
 
 	// The returned snapshot must carry the same workflow_id the caller supplied.
-	if result := fake.workflowStatusResult; result["workflow_id"] != "wf-abc" {
-		t.Fatalf("workflow_id munged in result: %v", result["workflow_id"])
+	res, _ := result.(map[string]any)
+	if res["workflow_id"] != "wf-abc" {
+		t.Fatalf("workflow_id munged in result: %v", res["workflow_id"])
 	}
 }
 
 func TestWorkflowEventsForwarding(t *testing.T) {
-	s, fake := newWorkflowTestServer(t, &fakeClient{})
+	s, fake := newWorkflowTestServer(t)
 	ctx := context.Background()
 	fake.workflowEventsResult = map[string]any{"events": []any{}}
 	if _, _, err := s.handleAvenorWorkflowEvents(ctx, nil, workflowEventsArgs{WorkflowID: "wf-1", AfterSeq: 7, Limit: 25}); err != nil {
@@ -182,7 +181,7 @@ func TestWorkflowEventsForwarding(t *testing.T) {
 }
 
 func TestWorkflowWaitDuration(t *testing.T) {
-	s, fake := newWorkflowTestServer(t, &fakeClient{})
+	s, fake := newWorkflowTestServer(t)
 	ctx := context.Background()
 	if _, _, err := s.handleAvenorWorkflowWait(ctx, nil, workflowWaitArgs{WorkflowID: "wf-1", Timeout: "5m"}); err != nil {
 		t.Fatal(err)
@@ -253,7 +252,7 @@ func TestWorkflowErrorPropagation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			s, fake := newWorkflowTestServer(t, &fakeClient{})
+			s, fake := newWorkflowTestServer(t)
 			tc.setup(fake)
 			if err := tc.call(s); err == nil {
 				t.Fatal("expected propagated error, got nil")

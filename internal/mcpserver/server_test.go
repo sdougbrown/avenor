@@ -53,8 +53,6 @@ type fakeClient struct {
 	workflowEventsErr      error
 	workflowCompleteErr    error
 	workflowGateErr        error
-	workflowCompleteErrOn  func(fields map[string]any) error
-	workflowGateErrOn      func(fields map[string]any) error
 	workflowStatusCalls    []string
 	workflowWaitCalls      []workflowWaitCall
 	workflowEventsCalls    []workflowEventsCall
@@ -157,21 +155,11 @@ func (f *fakeClient) WorkflowEvents(workflowID string, afterSeq int64, limit int
 
 func (f *fakeClient) WorkflowComplete(workflowID string, fields map[string]any) (map[string]any, error) {
 	f.workflowCompleteCalls = append(f.workflowCompleteCalls, workflowCompleteCall{workflowID, fields})
-	if f.workflowCompleteErrOn != nil {
-		if err := f.workflowCompleteErrOn(fields); err != nil {
-			return nil, err
-		}
-	}
 	return f.workflowCompleteResult, f.workflowCompleteErr
 }
 
 func (f *fakeClient) WorkflowGate(workflowID string, fields map[string]any) (map[string]any, error) {
 	f.workflowGateCalls = append(f.workflowGateCalls, workflowGateCall{workflowID, fields})
-	if f.workflowGateErrOn != nil {
-		if err := f.workflowGateErrOn(fields); err != nil {
-			return nil, err
-		}
-	}
 	return f.workflowGateResult, f.workflowGateErr
 }
 
