@@ -1,0 +1,27 @@
+# Node build
+
+## Activations
+
+| Activation | Iteration | Status | Outcome |
+| --- | --- | --- | --- |
+| act_build_1 | build | 0 | satisfied | ok |
+| act_build_2 | build | 1 | running |  |
+
+## Attempts
+
+| Attempt | Activation | Status | Backend | Model |
+| --- | --- | --- | --- | --- |
+| att_build_1 | act_build_1 | succeeded | pi | qwen |
+| att_build_2 | act_build_2 | running | pi | qwen |
+
+## Evidence
+
+| Evidence | Kind | Source | Authority | Stored Path | SHA256 |
+| --- | --- | --- | --- | --- | --- |
+| ev_build_1 | git | machine | ci | evidence/ev_build_1.bin | aaaa |
+
+## Gates
+
+| Gate Instance | Activation | Status | Outcome | Actor |
+| --- | --- | --- | --- | --- |
+| gate_build_1 | act_build_1 | passed | approve | ci |

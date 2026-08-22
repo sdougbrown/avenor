@@ -1,6 +1,9 @@
 package control
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
 
 type Request struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -26,6 +29,18 @@ type Notification struct {
 	JSONRPC string `json:"jsonrpc"`
 	Method  string `json:"method"`
 	Params  any    `json:"params,omitempty"`
+}
+
+// WorkflowHandler is the control-plane surface for workflow management. The
+// Phase 2 workflow.Manager implements it directly.
+type WorkflowHandler interface {
+	WorkflowCreate(json.RawMessage) (any, error)
+	WorkflowInstantiate(json.RawMessage) (any, error)
+	WorkflowStatus(string) (any, error)
+	WorkflowWait(string, time.Duration) (any, error)
+	WorkflowInspect(string) (any, error)
+	WorkflowEvents(string, int64, int) (any, error)
+	WorkflowCommand(string, json.RawMessage) (any, error)
 }
 
 func success(id any, result any) Response {

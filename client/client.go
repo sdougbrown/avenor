@@ -432,6 +432,73 @@ func (c *Client) InterruptAndPrompt(runtimeID, text string, keepQueue bool) erro
 	return c.Call("interrupt_and_prompt", params, nil)
 }
 
+// WorkflowCreate stores a workflow template given as raw template JSON.
+func (c *Client) WorkflowCreate(template json.RawMessage) (map[string]any, error) {
+	var result map[string]any
+	err := c.Call("workflow.create", template, &result)
+	return result, err
+}
+
+// WorkflowInstantiate creates a workflow instance from a stored template.
+func (c *Client) WorkflowInstantiate(templateID, templateVersion string, metadata map[string]any) (map[string]any, error) {
+	params := map[string]any{
+		"template_id":      templateID,
+		"template_version": templateVersion,
+	}
+	if metadata != nil {
+		params["metadata"] = metadata
+	}
+	var result map[string]any
+	err := c.Call("workflow.instantiate", params, &result)
+	return result, err
+}
+
+// WorkflowStatus returns the lightweight status for a workflow instance.
+func (c *Client) WorkflowStatus(workflowID string) (map[string]any, error) {
+	var result map[string]any
+	err := c.Call("workflow.status", map[string]string{"workflow_id": workflowID}, &result)
+	return result, err
+}
+
+// WorkflowWait polls until the workflow is terminal or timeout elapses.
+// A timeout <= 0 returns after the first poll; the server defaults to 5s.
+func (c *Client) WorkflowWait(workflowID string, timeout time.Duration) (map[string]any, error) {
+	var result map[string]any
+	err := c.Call("workflow.wait", map[string]any{
+		"workflow_id": workflowID,
+		"timeout_ms":  int64(timeout.Milliseconds()),
+	}, &result)
+	return result, err
+}
+
+// WorkflowInspect returns the full instance detail for a workflow.
+func (c *Client) WorkflowInspect(workflowID string) (map[string]any, error) {
+	var result map[string]any
+	err := c.Call("workflow.inspect", map[string]string{"workflow_id": workflowID}, &result)
+	return result, err
+}
+
+// WorkflowEvents returns log events with Sequence > afterSeq, capped at limit.
+func (c *Client) WorkflowEvents(workflowID string, afterSeq int64, limit int) (map[string]any, error) {
+	var result map[string]any
+	err := c.Call("workflow.events", map[string]any{
+		"workflow_id": workflowID,
+		"after_seq":   afterSeq,
+		"limit":       limit,
+	}, &result)
+	return result, err
+}
+
+// WorkflowCommand sends a raw command payload to a workflow instance.
+func (c *Client) WorkflowCommand(workflowID string, command json.RawMessage) (map[string]any, error) {
+	var result map[string]any
+	err := c.Call("workflow.command", map[string]any{
+		"workflow_id": workflowID,
+		"command":     command,
+	}, &result)
+	return result, err
+}
+
 // SendToParent sends a message from a child runtime to its parent.
 func (c *Client) SendToParent(runtimeID, message string) error {
 	if runtimeID == "" {

@@ -43,12 +43,14 @@ func buildCommandEvents(state Snapshot, command Command) ([]Event, error) {
 		e := newEvent(EventLeased)
 		e.LeaseID = command.LeaseID
 		e.Actor = command.Actor
+		e.Lease = command.Lease
 		return []Event{e}, nil
 
 	case CommandStart:
 		e := newEvent(EventStarted)
 		e.AttemptID = command.Identity.AttemptID
 		e.LeaseID = command.LeaseID
+		e.Selection = command.Selection
 		return []Event{e}, nil
 
 	case CommandComplete:
@@ -146,11 +148,15 @@ func applyEvent(next *Snapshot, event Event) error {
 	// not require an existing one; every other kind must resolve one.
 	var act *Activation
 	if event.Kind != EventInstantiated && event.Kind != EventRerouted {
-		act = findActivation(&next.Instance, event.Identity.NodeID, event.Identity.ActivationID)
-		if act == nil {
+		a, err := findActivation(&next.Instance, event.Identity.NodeID, event.Identity.ActivationID)
+		if err != nil {
+			return err
+		}
+		if a == nil {
 			return fmt.Errorf("activation not found for node %q activation %q",
 				event.Identity.NodeID, event.Identity.ActivationID)
 		}
+		act = a
 	}
 
 	switch event.Kind {
@@ -205,17 +211,31 @@ func applyEvent(next *Snapshot, event Event) error {
 // findActivation resolves the live, mutable activation record for a visit to
 // a node. When only the node is given and it has exactly one activation, that
 // activation is returned; otherwise both node and activation ID must match.
-func findActivation(inst *WorkflowInstance, nodeID NodeID, activationID ActivationID) *Activation {
+func findActivation(inst *WorkflowInstance, nodeID NodeID, activationID ActivationID) (*Activation, error) {
+	matches := make([]*Activation, 0, len(inst.Activations))
 	for i := range inst.Activations {
 		a := &inst.Activations[i]
 		if a.NodeID != nodeID {
 			continue
 		}
 		if activationID == "" || a.ID == activationID {
-			return a
+			matches = append(matches, a)
 		}
 	}
-	return nil
+	if activationID != "" {
+		if len(matches) == 0 {
+			return nil, nil
+		}
+		return matches[0], nil
+	}
+	// activationID == ""
+	if len(matches) == 1 {
+		return matches[0], nil
+	}
+	if len(matches) == 0 {
+		return nil, nil
+	}
+	return nil, fmt.Errorf("ambiguous activation for node %q: activation_id required", nodeID)
 }
 
 // applyInstantiated materializes the initial instance from the event's
@@ -278,6 +298,15 @@ func applyLeased(next *Snapshot, act *Activation, event Event) error {
 	}
 	act.Status = ActivationLeased
 	act.ActiveLease = &Lease{ID: event.LeaseID, ActivationID: act.ID, Owner: event.Actor}
+	if event.Lease != nil {
+		// Deterministically carry the claim's expiry metadata so a lease
+		// reconstructed from replay keeps the same real TTL. A bare
+		// (legacy/crash-window) leased event with no lease metadata keeps a
+		// zero expiry and is conservatively swept on recovery.
+		act.ActiveLease.TokenDigest = event.Lease.TokenDigest
+		act.ActiveLease.AcquiredAt = event.Lease.AcquiredAt
+		act.ActiveLease.ExpiresAt = event.Lease.ExpiresAt
+	}
 	act.UpdatedAt = nowUTC()
 	return nil
 }
@@ -304,6 +333,11 @@ func applyStarted(next *Snapshot, act *Activation, event Event) error {
 	act.AttemptIDs = append(act.AttemptIDs, attemptID)
 	act.Status = ActivationRunning
 	act.UpdatedAt = nowUTC()
+	if event.Selection != nil {
+		// Pin the resolved ExecutionSelection on the start; retries/runtime
+		// inherit it. Deterministic because it is carried on the event.
+		act.Selection = event.Selection
+	}
 	next.Instance.Attempts = append(next.Instance.Attempts, attempt)
 	return nil
 }

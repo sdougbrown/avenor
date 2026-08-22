@@ -71,3 +71,27 @@ func TestRunStableWritesTombstoneOnStartFailure(t *testing.T) {
 		t.Fatalf("tree budget files remain after start failure: %v", budgetFiles)
 	}
 }
+
+func TestRunStableWorkflowRootFlagParses(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	socketPath := filepath.Join(tmpDir, strings.Repeat("s", 200)) // fails fast in Listen
+	dir := filepath.Join(tmpDir, "wfroot")
+	if code := runStable([]string{"--control-socket", socketPath, "--workflow-root", dir}); code != 1 {
+		t.Fatalf("runStable() = %d, want 1 (start failure on bad socket)", code)
+	}
+	// Reaching a start failure is only possible after the flag parsed; the
+	// tombstone confirms Run() executed.
+	data, err := os.ReadFile(socketPath + ".dead")
+	if err != nil {
+		t.Fatalf("tombstone not written: %v", err)
+	}
+	if !strings.Contains(string(data), "reason=start_failed") {
+		t.Fatalf("tombstone = %q, want reason=start_failed", data)
+	}
+	// The workflow root stays uncreated: the manager is lazy and never
+	// constructed on a start failure.
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("workflow root dir created on start failure: %v", err)
+	}
+}

@@ -26,6 +26,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime/factory"
 	"github.com/sdougbrown/avenor/internal/spawnselection"
 	"github.com/sdougbrown/avenor/internal/teamrunner"
+	"github.com/sdougbrown/avenor/internal/workflow"
 )
 
 type Config struct {
@@ -50,6 +51,11 @@ type Config struct {
 	// Avenor-owned runtime state. When set, the supervisor opens the existing
 	// file as a nested participant sharing the root's capacity.
 	TreeBudgetFile string
+
+	// WorkflowRoot is the durable workflow-store root. When empty it defaults
+	// to $XDG_STATE_HOME/avenor/workflows (or $HOME/.avenor/workflows). The
+	// workflow manager creates the directory lazily on first workflow use.
+	WorkflowRoot string
 }
 
 type SpawnParams struct {
@@ -288,9 +294,12 @@ type handledChildQuestion struct {
 }
 
 type Supervisor struct {
-	config                       Config
-	runID                        string
-	control                      *control.ControlServer
+	config  Config
+	runID   string
+	control *control.ControlServer
+	// workflowMgrMu guards lazy construction of the workflow store/manager.
+	workflowMgrMu                sync.Mutex
+	workflowMgr                  *workflow.Manager
 	state                        *control.ControlState
 	controlMu                    sync.Mutex
 	runtimes                     map[string]*childRuntime
@@ -369,6 +378,7 @@ func NewSupervisor(cfg Config) *Supervisor {
 		sup.childQuestionTimeout = 120 * time.Second
 	}
 	sup.control.SetStableHandler(sup)
+	sup.control.SetWorkflowHandler(lazyWorkflowHandler{sup})
 	sup.newProviderFunc = factory.NewProvider
 	sup.initTreeBudget()
 	return sup
@@ -3687,4 +3697,68 @@ func analyzeCommandPaths(command, cwd string) (resolved []string, escapes bool) 
 		}
 	}
 	return resolved, escapes
+}
+
+// resolveWorkflowRoot returns the configured workflow root, or the default
+// under XDG_STATE_HOME (falling back to $HOME/.avenor) when unset. It never
+// creates directories; the manager creates them on first use.
+func resolveWorkflowRoot(configured string) string {
+	if configured != "" {
+		return configured
+	}
+	if xdg := os.Getenv("XDG_STATE_HOME"); xdg != "" && filepath.IsAbs(xdg) {
+		return filepath.Join(xdg, "avenor", "workflows")
+	}
+	home := os.Getenv("HOME")
+	if home == "" {
+		if u, err := os.UserHomeDir(); err == nil && u != "" {
+			home = u
+		}
+	}
+	if home == "" {
+		return "avenor/workflows"
+	}
+	return filepath.Join(home, ".avenor", "workflows")
+}
+
+// workflowManager returns the lazily-constructed workflow manager for the
+// configured workflow root, registering it with the control server on first
+// construction. Safe for concurrent use.
+func (s *Supervisor) workflowManager() *workflow.Manager {
+	s.workflowMgrMu.Lock()
+	defer s.workflowMgrMu.Unlock()
+	if s.workflowMgr != nil {
+		return s.workflowMgr
+	}
+	m := workflow.NewManager(workflow.New(resolveWorkflowRoot(s.config.WorkflowRoot)))
+	s.workflowMgr = m
+	s.control.SetWorkflowHandler(m)
+	return m
+}
+
+// lazyWorkflowHandler forwards workflow.* methods to the supervisor's
+// lazily-constructed workflow manager so the manager is only built when a
+// workflow command is first issued.
+type lazyWorkflowHandler struct{ s *Supervisor }
+
+func (h lazyWorkflowHandler) WorkflowCreate(p json.RawMessage) (any, error) {
+	return h.s.workflowManager().WorkflowCreate(p)
+}
+func (h lazyWorkflowHandler) WorkflowInstantiate(p json.RawMessage) (any, error) {
+	return h.s.workflowManager().WorkflowInstantiate(p)
+}
+func (h lazyWorkflowHandler) WorkflowStatus(id string) (any, error) {
+	return h.s.workflowManager().WorkflowStatus(id)
+}
+func (h lazyWorkflowHandler) WorkflowWait(id string, d time.Duration) (any, error) {
+	return h.s.workflowManager().WorkflowWait(id, d)
+}
+func (h lazyWorkflowHandler) WorkflowInspect(id string) (any, error) {
+	return h.s.workflowManager().WorkflowInspect(id)
+}
+func (h lazyWorkflowHandler) WorkflowEvents(id string, afterSeq int64, limit int) (any, error) {
+	return h.s.workflowManager().WorkflowEvents(id, afterSeq, limit)
+}
+func (h lazyWorkflowHandler) WorkflowCommand(id string, p json.RawMessage) (any, error) {
+	return h.s.workflowManager().WorkflowCommand(id, p)
 }

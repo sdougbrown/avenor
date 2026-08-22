@@ -53,4 +53,5 @@ type Event struct {
 	Selection      *ExecutionSelection `json:"selection,omitempty"`
 	Instantiated   *InstanceRecord     `json:"instantiated,omitempty"`
 	LeaseTargets   []NodeID            `json:"lease_targets,omitempty"`
+	Lease          *Lease              `json:"lease,omitempty"`
 }

@@ -5525,3 +5525,63 @@ func TestSpawnDirectPathPreservesExplicitBackend(t *testing.T) {
 		t.Fatalf("direct spawn backend = %q, want gemini-acp", capturedBackend)
 	}
 }
+
+func TestWorkflowManagerLazyConstruction(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "wfroot") // path that does not exist yet
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/lazy-wf.sock", WorkflowRoot: root})
+	if sup.workflowMgr != nil {
+		t.Fatal("workflow manager constructed eagerly")
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("workflow root exists before any workflow use: %v", err)
+	}
+	mgr := sup.workflowManager()
+	if mgr == nil {
+		t.Fatal("workflowManager returned nil")
+	}
+	if sup.workflowMgr == nil {
+		t.Fatal("manager not cached after construction")
+	}
+	if sup.workflowManager() != mgr {
+		t.Fatal("workflowManager not idempotent")
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("manager construction created workflow root: %v", err)
+	}
+}
+
+func TestLazyWorkflowHandlerForwardsToManager(t *testing.T) {
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/lazy-fwd.sock", WorkflowRoot: filepath.Join(t.TempDir(), "wfroot")})
+	_, err := (lazyWorkflowHandler{sup}).WorkflowStatus("wf-missing")
+	if err == nil || !strings.Contains(err.Error(), "workflow not found") {
+		t.Fatalf("lazy handler forward err = %v, want workflow not found", err)
+	}
+	if sup.workflowMgr == nil {
+		t.Fatal("forwarding a workflow method did not construct the manager")
+	}
+}
+
+func TestResolveWorkflowRoot(t *testing.T) {
+	tests := []struct {
+		name       string
+		configured string
+		xdg        string
+		home       string
+		want       string
+	}{
+		{"configured wins", "/cfg/root", "/xdg", "/home/u", "/cfg/root"},
+		{"xdg default", "", "/state", "", filepath.Join("/state", "avenor", "workflows")},
+		{"home fallback", "", "", "/home/u", filepath.Join("/home/u", ".avenor", "workflows")},
+		{"degenerate", "", "", "", "avenor/workflows"},
+		{"relative xdg ignored", "", "rel/state", "/home/u", filepath.Join("/home/u", ".avenor", "workflows")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", tt.xdg)
+			t.Setenv("HOME", tt.home)
+			if got := resolveWorkflowRoot(tt.configured); got != tt.want {
+				t.Fatalf("resolveWorkflowRoot(%q) = %q, want %q", tt.configured, got, tt.want)
+			}
+		})
+	}
+}

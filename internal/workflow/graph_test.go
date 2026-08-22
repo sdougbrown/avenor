@@ -351,3 +351,17 @@ func TestDeclaredTerminalOutcomes(t *testing.T) {
 		t.Fatalf("declaredTerminalOutcomes() = %v, want %v", got, want)
 	}
 }
+
+// TestValidateGraphRejectsUnsafeNodeIDs locks the path-traversal guard: a node
+// ID that is not a safe path component must be rejected at template validation
+// so the projector cannot write outside the instance directory.
+func TestValidateGraphRejectsUnsafeNodeIDs(t *testing.T) {
+	for _, id := range []NodeID{"../../etc", "a/b", `..\..\x`, "a\x00b"} {
+		tmpl := validGraphTemplate()
+		tmpl.Nodes[0].ID = id
+		tmpl.EntryNodes = []NodeID{id}
+		if err := ValidateGraph(tmpl); err == nil {
+			t.Errorf("expected rejection for unsafe node id %q", id)
+		}
+	}
+}

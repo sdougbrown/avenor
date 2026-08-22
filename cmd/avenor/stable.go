@@ -19,6 +19,7 @@ func runStable(args []string) int {
 	idleTimeout := fs.Duration("idle-timeout", 0, "exit after this duration with no child runtimes and no control connections")
 	shutdownTimeout := fs.Duration("shutdown-timeout", 10*time.Second, "graceful shutdown timeout before killing children")
 	permClaimTimeout := fs.Duration("permission-claim-timeout", 0, "how long to wait for a connected socket client to answer a permission request before falling through to the file handler or 'none' resolver (0 = disabled: fall through only when all clients disconnect; use a non-zero value for unattended automation where client processes may hang)")
+	workflowRoot := fs.String("workflow-root", "", "workflow store root (default: $XDG_STATE_HOME/avenor/workflows, else $HOME/.avenor/workflows)")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -48,6 +49,7 @@ func runStable(args []string) int {
 		IdleTimeout:            *idleTimeout,
 		ShutdownTimeout:        *shutdownTimeout,
 		PermissionClaimTimeout: *permClaimTimeout,
+		WorkflowRoot:           *workflowRoot,
 	})
 	if treeBudgetFile == "" {
 		// Root: propagate the tree budget path to descendant processes.

@@ -10,7 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -84,7 +86,8 @@ type ControlServer struct {
 	interruptMu sync.Mutex
 	interruptCh chan struct{}
 
-	stableHandler StableHandler
+	stableHandler   StableHandler
+	workflowHandler atomic.Pointer[WorkflowHandler]
 }
 
 type StableHandler interface {
@@ -141,6 +144,30 @@ func NewServer(state *ControlState) *ControlServer {
 }
 
 func (s *ControlServer) SetStableHandler(h StableHandler) { s.stableHandler = h }
+
+func (s *ControlServer) SetWorkflowHandler(h WorkflowHandler) {
+	if h == nil {
+		s.workflowHandler.Store(nil)
+		return
+	}
+	s.workflowHandler.Store(&h)
+}
+
+func workflowIDFromParams(params json.RawMessage) (string, error) {
+	if len(params) == 0 {
+		return "", errors.New("missing workflow_id")
+	}
+	var p struct {
+		WorkflowID string `json:"workflow_id"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return "", err
+	}
+	if p.WorkflowID == "" {
+		return "", errors.New("missing workflow_id")
+	}
+	return p.WorkflowID, nil
+}
 
 func runtimeIDFromParams(params json.RawMessage) string {
 	if len(params) == 0 {
@@ -1215,6 +1242,107 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 			return failure(req.ID, -32000, err.Error(), map[string]any{"retryable": true})
 		}
 		return success(req.ID, map[string]any{"capacity_available": true})
+	default:
+		if strings.HasPrefix(req.Method, "workflow.") {
+			return s.dispatchWorkflow(c, req)
+		}
+		return failure(req.ID, -32601, "method not found", nil)
+	}
+}
+
+// dispatchWorkflow routes workflow.* methods to the optional WorkflowHandler.
+// It is only reached from the dispatch default branch, so no method name
+// collides with an existing stable handler method.
+func (s *ControlServer) dispatchWorkflow(c *connState, req Request) Response {
+	hp := s.workflowHandler.Load()
+	if hp == nil {
+		return failure(req.ID, -32601, "method not found", nil)
+	}
+	h := *hp
+	switch req.Method {
+	case "workflow.create":
+		result, err := h.WorkflowCreate(req.Params)
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), nil)
+		}
+		return success(req.ID, result)
+	case "workflow.instantiate":
+		result, err := h.WorkflowInstantiate(req.Params)
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), nil)
+		}
+		return success(req.ID, result)
+	case "workflow.status", "workflow.inspect":
+		id, err := workflowIDFromParams(req.Params)
+		if err != nil {
+			return failure(req.ID, -32602, "invalid params", map[string]any{"detail": err.Error()})
+		}
+		var result any
+		if req.Method == "workflow.status" {
+			result, err = h.WorkflowStatus(id)
+		} else {
+			result, err = h.WorkflowInspect(id)
+		}
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), nil)
+		}
+		return success(req.ID, result)
+	case "workflow.wait":
+		var p struct {
+			WorkflowID string `json:"workflow_id"`
+			TimeoutMS  int64  `json:"timeout_ms"`
+		}
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return failure(req.ID, -32602, "invalid params", map[string]any{"detail": err.Error()})
+		}
+		if p.WorkflowID == "" {
+			return failure(req.ID, -32602, "invalid params", map[string]any{"required": []string{"workflow_id"}})
+		}
+		if p.TimeoutMS <= 0 {
+			p.TimeoutMS = 5000
+		}
+		result, err := h.WorkflowWait(p.WorkflowID, time.Duration(p.TimeoutMS)*time.Millisecond)
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), nil)
+		}
+		return success(req.ID, result)
+	case "workflow.events":
+		var p struct {
+			WorkflowID string `json:"workflow_id"`
+			AfterSeq   int64  `json:"after_seq"`
+			Limit      int    `json:"limit"`
+		}
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return failure(req.ID, -32602, "invalid params", map[string]any{"detail": err.Error()})
+		}
+		if p.WorkflowID == "" {
+			return failure(req.ID, -32602, "invalid params", map[string]any{"required": []string{"workflow_id"}})
+		}
+		result, err := h.WorkflowEvents(p.WorkflowID, p.AfterSeq, p.Limit)
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), nil)
+		}
+		return success(req.ID, result)
+	case "workflow.command":
+		var p struct {
+			WorkflowID string          `json:"workflow_id"`
+			Command    json.RawMessage `json:"command"`
+		}
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return failure(req.ID, -32602, "invalid params", map[string]any{"detail": err.Error()})
+		}
+		if p.WorkflowID == "" {
+			return failure(req.ID, -32602, "invalid params", map[string]any{"required": []string{"workflow_id"}})
+		}
+		payload := p.Command
+		if len(payload) == 0 {
+			payload = req.Params
+		}
+		result, err := h.WorkflowCommand(p.WorkflowID, payload)
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), nil)
+		}
+		return success(req.ID, result)
 	default:
 		return failure(req.ID, -32601, "method not found", nil)
 	}
