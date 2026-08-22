@@ -1,0 +1,24 @@
+{
+  "pre": [
+    {
+      "name": "scope",
+      "prompt": "Read the correction summary and the prior review evidence. Identify what changed since the last head. Write a brief scope note to scope.md."
+    }
+  ],
+  "team": [
+    {
+      "name": "findings",
+      "prompt": "Re-check each finding from the prior review against the corrected head. Report any finding that is not resolved. Write findings to findings.md."
+    },
+    {
+      "name": "regression",
+      "prompt": "Run the repository's full test suite and the plan's broader verification on the corrected head. Report any regression or failure. Write findings to regression.md."
+    }
+  ],
+  "post": [
+    {
+      "name": "synthesize",
+      "prompt": "Synthesize findings.md and regression.md into reverify.md. State PASS or FAIL with evidence. Do not lower the bar to make it pass."
+    }
+  ]
+}

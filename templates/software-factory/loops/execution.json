@@ -1,0 +1,26 @@
+{
+  "max_iterations": 5,
+  "pre": [
+    {
+      "name": "implement",
+      "prompt": "Implement every stage of the hardened plan in this worktree. Preserve acceptance-criterion traceability and record the planned evidence results in execution.md. Commit coherent checkpoints. Do not push or open a PR."
+    }
+  ],
+  "loop": [
+    {
+      "name": "test",
+      "prompt": "Run the focused verification commands from the plan, then the repository-required broader verification. If everything passes, emit <|workflow: exit | tests green|>. Otherwise report the failures precisely."
+    },
+    {
+      "name": "fix",
+      "resume_from_previous": true,
+      "prompt": "Fix the failures reported by the test phase. Keep the change minimal and coherent with the hardened plan. Do not reduce scope or defer acceptance criteria."
+    }
+  ],
+  "post": [
+    {
+      "name": "record",
+      "prompt": "Write the execution summary to execution.md: stages completed, evidence results, commits, and any in-band refinements. Leave the worktree clean."
+    }
+  ]
+}
