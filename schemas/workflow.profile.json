@@ -1,0 +1,656 @@
+{
+  "$schema": "https://spec.umpire.tools/profiles/json-schema/v1/profile.schema.json",
+  "profileVersion": 1,
+  "valueSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "schema_version": {
+        "type": "integer",
+        "const": 1
+      },
+      "template_id": {
+        "type": "string"
+      },
+      "template_version": {
+        "type": "string"
+      },
+      "metadata": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "entry_nodes": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "nodes": {
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/node"
+        }
+      },
+      "terminal_outcomes": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "bounded_loops": {
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/bounded_loop"
+        }
+      },
+      "default_lease_policy": {
+        "$ref": "#/$defs/lease_policy"
+      },
+      "default_retry_policy": {
+        "$ref": "#/$defs/retry_policy"
+      },
+      "composition_limits": {
+        "$ref": "#/$defs/composition_limits"
+      }
+    },
+    "required": [
+      "schema_version",
+      "template_id",
+      "template_version",
+      "entry_nodes",
+      "nodes",
+      "terminal_outcomes"
+    ],
+    "additionalProperties": false,
+    "$defs": {
+      "node": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "name": {
+            "type": "string"
+          },
+          "dependencies": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "outcomes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/outcome"
+            }
+          },
+          "branches": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+          },
+          "action": {
+            "$ref": "#/$defs/action"
+          },
+          "assignment": {
+            "$ref": "#/$defs/assignment"
+          },
+          "completion": {
+            "$ref": "#/$defs/completion"
+          },
+          "outputs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/output"
+            }
+          },
+          "gates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/gate"
+            }
+          },
+          "retry_policy": {
+            "$ref": "#/$defs/retry_policy"
+          },
+          "loop_id": {
+            "type": "string"
+          },
+          "checkpoint": {
+            "$ref": "#/$defs/checkpoint"
+          },
+          "lease_policy": {
+            "$ref": "#/$defs/lease_policy"
+          },
+          "skip_rule": {
+            "$ref": "#/$defs/authority_rule"
+          },
+          "waive_rules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/authority_rule"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "action"
+        ],
+        "additionalProperties": false
+      },
+      "action": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "const": "run"
+              },
+              "prompt": {
+                "type": "string"
+              },
+              "prompt_file": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "const": "loop"
+              },
+              "loop_file": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "const": "team"
+              },
+              "team_file": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "const": "manual"
+              },
+              "instructions": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "const": "external"
+              },
+              "source": {
+                "type": "string"
+              },
+              "subject_type": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "const": "workflow"
+              },
+              "template_id": {
+                "type": "string"
+              },
+              "template_version": {
+                "type": "string"
+              },
+              "child_key": {
+                "type": "string"
+              },
+              "input_bindings": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/input_binding"
+                }
+              },
+              "output_bindings": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/output_binding"
+                }
+              },
+              "outcome_map": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "outcome": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "target_node_id": {
+            "type": "string"
+          },
+          "terminal": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "bounded_loop": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "body_nodes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "entry_node_id": {
+            "type": "string"
+          },
+          "checkpoint_node_id": {
+            "type": "string"
+          },
+          "maximum_iterations": {
+            "type": "integer"
+          },
+          "exit_outcomes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "body_nodes",
+          "entry_node_id",
+          "checkpoint_node_id",
+          "maximum_iterations"
+        ],
+        "additionalProperties": false
+      },
+      "lease_policy": {
+        "type": "object",
+        "properties": {
+          "ttl_seconds": {
+            "type": "integer"
+          },
+          "heartbeat_interval_seconds": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "ttl_seconds"
+        ],
+        "additionalProperties": false
+      },
+      "retry_policy": {
+        "type": "object",
+        "properties": {
+          "max_attempts": {
+            "type": "integer"
+          },
+          "exhaustion": {
+            "type": "string"
+          },
+          "outcome": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "max_attempts",
+          "exhaustion"
+        ],
+        "additionalProperties": false
+      },
+      "composition_limits": {
+        "type": "object",
+        "properties": {
+          "max_depth": {
+            "type": "integer"
+          },
+          "max_children": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "max_depth",
+          "max_children"
+        ],
+        "additionalProperties": false
+      },
+      "assignment": {
+        "type": "object",
+        "properties": {
+          "role": {
+            "type": "string"
+          },
+          "roster_file": {
+            "type": "string"
+          },
+          "roster_entry": {
+            "type": "string"
+          },
+          "backend": {
+            "type": "string"
+          },
+          "agent": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "thinking": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "completion": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "artifacts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/artifact_requirement"
+            }
+          },
+          "git": {
+            "$ref": "#/$defs/git_requirement"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "additionalProperties": false
+      },
+      "artifact_requirement": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "non_empty": {
+            "type": "boolean"
+          },
+          "sha256": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      },
+      "git_requirement": {
+        "type": "object",
+        "properties": {
+          "clean": {
+            "type": "boolean"
+          },
+          "head": {
+            "type": "string"
+          },
+          "changed_from_base": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "type"
+        ],
+        "additionalProperties": false
+      },
+      "gate": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "allowed_outcomes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "subject_type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "type"
+        ],
+        "additionalProperties": false
+      },
+      "checkpoint": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "exit_outcomes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "requires_release": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      },
+      "authority_rule": {
+        "type": "object",
+        "properties": {
+          "authorities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "reason_required": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "authorities"
+        ],
+        "additionalProperties": false
+      },
+      "input_binding": {
+        "type": "object",
+        "properties": {
+          "input": {
+            "type": "string"
+          },
+          "value": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+          },
+          "from": {
+            "$ref": "#/$defs/template_output_ref"
+          }
+        },
+        "required": [
+          "input"
+        ],
+        "additionalProperties": false
+      },
+      "template_output_ref": {
+        "type": "object",
+        "properties": {
+          "node_id": {
+            "type": "string"
+          },
+          "output_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "node_id",
+          "output_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_binding": {
+        "type": "object",
+        "properties": {
+          "child_output": {
+            "type": "string"
+          },
+          "parent_output": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "child_output",
+          "parent_output"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "umpire": {
+    "version": 1,
+    "conditions": {},
+    "fields": {
+      "schema_version": {
+        "required": true,
+        "isEmpty": "number"
+      },
+      "template_id": {
+        "required": true,
+        "isEmpty": "string"
+      },
+      "template_version": {
+        "required": true,
+        "isEmpty": "string"
+      },
+      "metadata": {
+        "isEmpty": "object"
+      },
+      "entry_nodes": {
+        "required": true,
+        "isEmpty": "array"
+      },
+      "nodes": {
+        "required": true,
+        "isEmpty": "array"
+      },
+      "terminal_outcomes": {
+        "required": true,
+        "isEmpty": "array"
+      },
+      "bounded_loops": {
+        "isEmpty": "array"
+      },
+      "default_lease_policy": {
+        "isEmpty": "object"
+      },
+      "default_retry_policy": {
+        "isEmpty": "object"
+      },
+      "composition_limits": {
+        "isEmpty": "object"
+      }
+    },
+    "rules": [
+      {
+        "type": "fairWhen",
+        "field": "schema_version",
+        "when": {
+          "op": "eq",
+          "field": "schema_version",
+          "value": 1
+        },
+        "reason": "workflow schema_version must be 1"
+      }
+    ]
+  }
+}
