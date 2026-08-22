@@ -491,6 +491,71 @@ avenor mcp --transport stdio --supervisor-socket /tmp/avenor.sock --no-autostart
 
 See [mcp.md](mcp.md) for protocol details and client configuration.
 
+## avenor workflow
+
+Drive a [durable workflow](workflow.md) through a stable supervisor's control socket. All subcommands take `--socket` (before or after the subcommand). `claim`, `start`, and `heartbeat` are control-plane commands sent through the `workflow.command` control method, not CLI subcommands.
+
+```
+avenor workflow <command> [args] [flags]
+```
+
+### Commands
+
+| Command | Purpose |
+|------|---------|
+| `create --request-file FILE` | Register a versioned template. |
+| `instantiate --template-id ID --template-version V --request-file FILE` | Create an instance of a template version. |
+| `status <workflow-id>` | Current workflow snapshot summary. |
+| `wait <workflow-id> [--timeout 30s]` | Block until terminal or timeout. |
+| `inspect <workflow-id>` | Full instance detail. |
+| `events <workflow-id> [--after-seq N] [--limit N]` | Event log. |
+| `complete <workflow-id> <node-id> --activation-id ID --attempt-id ID --lease-id ID --request-file FILE` | Complete a machine/external handoff activation. |
+| `gate <workflow-id> <node-id> <gate-id> --activation-id ID --operation OP --request-file FILE` | Record a gate decision (`satisfy`, `reject`, `waive`, `external_result`). |
+| `skip <workflow-id> <node-id> --request-file FILE` | Waive every unsatisfied required gate on a parked activation. |
+| `unblock <workflow-id> <node-id> --request-file FILE` | Return a blocked activation to ready. |
+
+### Examples
+
+Register a template and instantiate a work unit:
+
+```sh
+avenor workflow create --socket /tmp/avenor.sock \
+  --request-file templates/software-factory/work.json
+
+echo '{"metadata":{"issue":"115"}}' > /tmp/instance.json
+avenor workflow instantiate --socket /tmp/avenor.sock \
+  --template-id software-factory-work --template-version 1.0.0 \
+  --request-file /tmp/instance.json
+```
+
+Observe the workflow:
+
+```sh
+avenor workflow status --socket /tmp/avenor.sock wf_...
+avenor workflow inspect --socket /tmp/avenor.sock wf_...
+avenor workflow events --socket /tmp/avenor.sock wf_... --after-seq 0 --limit 50
+```
+
+Complete a run node with evidence and a declared outcome:
+
+```sh
+avenor workflow complete --socket /tmp/avenor.sock \
+  wf_... assessment \
+  --activation-id act_... --attempt-id att_... --lease-id lease_... \
+  --request-file /tmp/complete.json
+```
+
+Record an external gate result bound to an exact PR head:
+
+```sh
+avenor workflow gate --socket /tmp/avenor.sock \
+  wf_... review ci \
+  --activation-id act_... --operation external_result \
+  --request-file /tmp/ci-result.json
+```
+
+See [workflow.md](workflow.md) for the full durable-workflow reference and the `templates/software-factory/README.md` guide for a complete example.
+
 ## avenor probe
 
 Run a diagnostic probe against an OpenCode ACP backend to discover its capabilities and configuration.
@@ -693,4 +758,5 @@ See [loop.md](loop.md) for how exit codes interact with multi-phase loops.
 - [mcp.md](mcp.md) — MCP server configuration and protocol
 - [backends.md](backends.md) — Supported runtime backends
 - [loop.md](loop.md) — Multi-phase loop configuration
+- [workflow.md](workflow.md) — Durable workflows: templates, gates, composition, recovery
 - [events.md](events.md) — Event schema and types
