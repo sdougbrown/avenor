@@ -662,3 +662,63 @@ func TestManagerClaimLeaseSurvivesReplay(t *testing.T) {
 		t.Fatalf("post-replay expires_at = %v, want in the future (lease must not be swept)", act.ActiveLease.ExpiresAt)
 	}
 }
+
+// TestManagerInstantiateRejectsUnsafeTemplateID covers the safeComponent
+// rejection path in WorkflowInstantiate (path separators, NUL, absolute/..).
+func TestManagerInstantiateRejectsUnsafeTemplateID(t *testing.T) {
+	m, _, _, _ := newManagerFixture(t)
+	for _, tid := range []string{"../evil", "a/b", `a\b`, "x\x00y"} {
+		payload, err := json.Marshal(map[string]string{"template_id": tid, "template_version": "1"})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if _, err := m.WorkflowInstantiate(payload); err == nil || !strings.Contains(err.Error(), "invalid template id") {
+			t.Fatalf("instantiate template_id=%q err=%v, want invalid template id", tid, err)
+		}
+	}
+}
+
+// TestManagerStartRequiresFields covers commandStart's empty-field validation.
+func TestManagerStartRequiresFields(t *testing.T) {
+	m, _, wf, _ := newManagerFixture(t)
+	cases := []struct {
+		payload map[string]string
+		want    string
+	}{
+		{map[string]string{"op": "start"}, "start requires node_id"},
+		{map[string]string{"op": "start", "node_id": "start"}, "start requires lease_id"},
+		{map[string]string{"op": "start", "node_id": "start", "lease_id": "L"}, "start requires owner_token"},
+	}
+	for _, c := range cases {
+		p, _ := json.Marshal(c.payload)
+		if _, err := m.WorkflowCommand(string(wf), p); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Fatalf("payload=%v err=%v, want %q", c.payload, err, c.want)
+		}
+	}
+}
+
+// TestManagerStartRejectsUnclaimedActivation covers the not-in-ActivationLeased
+// error path for a freshly instantiated (never claimed) activation.
+func TestManagerStartRejectsUnclaimedActivation(t *testing.T) {
+	m, s, wf, _ := newManagerFixture(t)
+	snap, exists, err := s.loadSnapshot(wf)
+	if err != nil || !exists {
+		t.Fatalf("loadSnapshot: %v %v", err, exists)
+	}
+	actID := snap.Instance.Activations[0].ID
+	p, _ := json.Marshal(map[string]any{
+		"op": "start", "node_id": "start",
+		"activation_id": string(actID), "lease_id": "L", "owner_token": "T",
+	})
+	if _, err := m.WorkflowCommand(string(wf), p); err == nil || !strings.Contains(err.Error(), "cannot start activation in status") {
+		t.Fatalf("err=%v, want cannot-start-status rejection", err)
+	}
+}
+
+// TestManagerWaitUnknownWorkflow covers the not-found error path in WorkflowWait.
+func TestManagerWaitUnknownWorkflow(t *testing.T) {
+	m, _, _, _ := newManagerFixture(t)
+	if _, err := m.WorkflowWait("doesnotexist", 10*time.Millisecond); err == nil || !strings.Contains(err.Error(), "workflow not found") {
+		t.Fatalf("err=%v, want workflow not found", err)
+	}
+}
