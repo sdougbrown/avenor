@@ -31,6 +31,22 @@ func NewManager(store *Store) *Manager {
 	// The workflow action is kernel-local composition (no provider
 	// admission), so its executor ships with the manager by default.
 	m.executors[ActionWorkflow] = &workflowExecutor{manager: m}
+	// Completion is gate-aware: the reducer resolves the node's declared
+	// required gates from the instance's versioned template, so a completion
+	// with unsatisfied required gates parks the activation in awaiting_gate.
+	// Load errors return nil, which disables gating for that node (a
+	// template that loads fine with no required gates is unaffected).
+	SetCompletionGateResolver(func(templateID TemplateID, templateVersion TemplateVersion, nodeID NodeID) []GateDefinition {
+		tmpl, err := m.store.LoadTemplate(templateID, templateVersion)
+		if err != nil {
+			return nil
+		}
+		node, err := findNode(&tmpl, nodeID)
+		if err != nil {
+			return nil
+		}
+		return node.Gates
+	})
 	return m
 }
 
@@ -431,6 +447,8 @@ func (m *Manager) WorkflowCommand(id string, payload json.RawMessage) (any, erro
 		return m.commandClaim(wf, payload)
 	case "start":
 		return m.commandStart(wf, payload)
+	case "complete":
+		return m.commandComplete(wf, payload)
 	default:
 		return nil, fmt.Errorf("workflow command op %q is unsupported until a later stage", op.Op)
 	}
