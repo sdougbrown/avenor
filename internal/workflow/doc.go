@@ -38,6 +38,8 @@
 // Missing snapshots are not cataloged. The manager is hosted by the stable
 // supervisor and is driven through explicit claim/start commands; there is no
 // automatic scheduler or broker routing for workflow events.
+//
+// Stage 4 builds the file-backed durable store: a locked append-only events.ndjson log, an atomically replaced workflow.json snapshot, POSIX flock serialization, malformed-tail-safe event replay, and a recovery catalog that replays events beyond the snapshot revision and expires only stale leases. Projection regeneration (Stage 5) is a no-op placeholder here.
 package workflow
 
 //go:generate go run github.com/umpire-tools/umpire-go-gen@v0.2.1 -profile ../../schemas/workflow.profile.json -output-file workflow_schema.gen.go -pkg workflow
