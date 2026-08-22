@@ -311,11 +311,12 @@ An external subject is typed and includes its immutable revision:
   "pull_request": 123, "revision": "<head-sha>" }
 ```
 
-CI, reviewer evidence, and merge authorization bind to the subject. A new head
-invalidates the prior gate instance and creates a gate instance for the
-correction activation; history remains immutable. A human merge-authorization
-gate requires an explicit actor, reason, evidence, and the exact subject — it
-cannot be satisfied by PR state alone.
+CI, reviewer evidence, and merge authorization bind to the subject. Gate
+instances are scoped to their activation and the gate history is append-only:
+a new head creates a new activation with its own gate instances, so a prior
+head's gate decision no longer applies, and the prior instances are retained
+unchanged. A human merge-authorization gate requires an explicit actor, reason,
+evidence, and the exact subject — it cannot be satisfied by PR state alone.
 
 ## Composition
 
@@ -380,8 +381,9 @@ coordinator memory. One work workflow can be:
   generated `workflow.md`, `execution.md`, and gate projections are
   deterministic reads of the store.
 - **Reviewed** through the exact-head gates. CI, review, and merge
-  authorization bind to an immutable revision. A new head invalidates the prior
-  gate instance; history is immutable.
+  authorization bind to an immutable revision. Gate instances are scoped to
+  their activation and the gate history is append-only, so a new head's gate
+  decision is distinct from a prior head's.
 - **Reconciled** through explicit commands and evidence. Human-supplied plans
   and waived gates are represented as explicit `workflow.complete` /
   `workflow.gate` commands with evidence — never inferred from files.

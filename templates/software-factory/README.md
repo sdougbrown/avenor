@@ -165,7 +165,8 @@ coordinator memory. A work unit can be:
   deterministic reads of the store.
 - **Reviewed** through the exact-head gates. CI, review, and merge
   authorization bind to an immutable revision (repository, pull request, head
-  SHA). A new head invalidates the prior gate instance; history is immutable.
+  SHA). Gate instances are scoped to their activation and the gate history is
+  append-only, so a new head's gate decision is distinct from a prior head's.
 - **Reconciled** through explicit commands and evidence. Human-supplied plans
   and waived gates are represented as explicit `workflow.complete` /
   `workflow.gate` commands with evidence — never inferred from files.
