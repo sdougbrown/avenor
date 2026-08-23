@@ -591,6 +591,91 @@ func TestSubscribeRuntimeIgnoresOtherSessionIDs(t *testing.T) {
 	}
 }
 
+// TestClientWorkflowCommandHelpers pins the typed workflow command helpers:
+// each emits method "workflow.command" whose params carry the workflow id and
+// a command object with the right op discriminator and the caller's fields.
+func TestClientWorkflowCommandHelpers(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	c := &Client{
+		conn:    clientConn,
+		pending: map[int]chan Response{},
+		eventCh: make(chan Event, 4),
+	}
+
+	got := make(chan map[string]any, 4)
+	go func() {
+		dec := json.NewDecoder(serverConn)
+		for i := 0; i < 4; i++ {
+			var raw map[string]any
+			if err := dec.Decode(&raw); err != nil {
+				return
+			}
+			resp := map[string]any{"jsonrpc": "2.0", "id": raw["id"], "result": map[string]any{"ok": true}}
+			data, _ := json.Marshal(resp)
+			data = append(data, '\n')
+			serverConn.Write(data)
+			got <- raw
+		}
+	}()
+
+	cases := []struct {
+		name    string
+		op      string
+		check   string
+		wantVal any
+		call    func() (map[string]any, error)
+	}{
+		{"complete", "complete", "node_id", "start",
+			func() (map[string]any, error) {
+				return c.WorkflowComplete("wf_1", map[string]any{"node_id": "start", "outcome": "done"})
+			}},
+		{"gate", "gate", "gate_id", "review",
+			func() (map[string]any, error) {
+				return c.WorkflowGate("wf_1", map[string]any{"gate_id": "review", "operation": "satisfy"})
+			}},
+		{"skip", "skip", "actor", "alice",
+			func() (map[string]any, error) { return c.WorkflowSkip("wf_1", map[string]any{"actor": "alice"}) }},
+		{"unblock", "unblock", "reason", "fixed",
+			func() (map[string]any, error) { return c.WorkflowUnblock("wf_1", map[string]any{"reason": "fixed"}) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := tc.call()
+			if err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			if res["ok"] != true {
+				t.Fatalf("%s result = %#v, want ok=true", tc.name, res)
+			}
+			select {
+			case raw := <-got:
+				if raw["method"] != "workflow.command" {
+					t.Fatalf("method = %v, want workflow.command", raw["method"])
+				}
+				params, _ := raw["params"].(map[string]any)
+				if params == nil || params["workflow_id"] != "wf_1" {
+					t.Fatalf("params = %v, want workflow_id wf_1", raw["params"])
+				}
+				command, _ := params["command"].(map[string]any)
+				if command == nil {
+					t.Fatalf("params.command missing: %v", params)
+				}
+				if command["op"] != tc.op {
+					t.Errorf("command.op = %v, want %q", command["op"], tc.op)
+				}
+				if command[tc.check] != tc.wantVal {
+					t.Errorf("command.%s = %v, want %v", tc.check, command[tc.check], tc.wantVal)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("%s: timed out waiting for captured request", tc.name)
+			}
+		})
+	}
+}
+
 func TestClientAnswerPermissionWithMessage(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
 	defer serverConn.Close()

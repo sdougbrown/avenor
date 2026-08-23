@@ -541,23 +541,26 @@ type Transition struct {
 // Command is the pure reducer input. Stage-specific handlers validate and fill
 // only the fields relevant to Kind.
 type Command struct {
-	ID               CommandID           `json:"command_id"`
-	Kind             CommandKind         `json:"kind"`
-	Identity         ExecutionIdentity   `json:"identity"`
-	ExpectedRevision int64               `json:"expected_revision"`
-	IdempotencyKey   string              `json:"idempotency_key"`
-	LeaseID          LeaseID             `json:"lease_id,omitempty"`
-	Actor            string              `json:"actor,omitempty"`
-	Reason           string              `json:"reason,omitempty"`
-	Outcome          OutcomeName         `json:"outcome,omitempty"`
-	AttemptStatus    AttemptStatus       `json:"attempt_status,omitempty"`
-	MarkerKind       string              `json:"marker_kind,omitempty"`
-	MarkerLabel      string              `json:"marker_label,omitempty"`
-	Evidence         []Evidence          `json:"evidence,omitempty"`
-	Outputs          []OutputValue       `json:"outputs,omitempty"`
-	Gate             *GateInstance       `json:"gate,omitempty"`
-	Lease            *Lease              `json:"lease,omitempty"`
-	Selection        *ExecutionSelection `json:"selection,omitempty"`
+	ID               CommandID         `json:"command_id"`
+	Kind             CommandKind       `json:"kind"`
+	Identity         ExecutionIdentity `json:"identity"`
+	ExpectedRevision int64             `json:"expected_revision"`
+	IdempotencyKey   string            `json:"idempotency_key"`
+	LeaseID          LeaseID           `json:"lease_id,omitempty"`
+	Actor            string            `json:"actor,omitempty"`
+	Reason           string            `json:"reason,omitempty"`
+	Outcome          OutcomeName       `json:"outcome,omitempty"`
+	AttemptStatus    AttemptStatus     `json:"attempt_status,omitempty"`
+	MarkerKind       string            `json:"marker_kind,omitempty"`
+	MarkerLabel      string            `json:"marker_label,omitempty"`
+	Evidence         []Evidence        `json:"evidence,omitempty"`
+	Outputs          []OutputValue     `json:"outputs,omitempty"`
+	Gate             *GateInstance     `json:"gate,omitempty"`
+	// Operation selects the gate decision; only meaningful for CommandGate,
+	// ignored for every other command kind.
+	Operation GateOperation       `json:"operation,omitempty"`
+	Lease     *Lease              `json:"lease,omitempty"`
+	Selection *ExecutionSelection `json:"selection,omitempty"`
 	// ChildOutputs is the CommandChildOutcome selection of child output
 	// references (identity only, no child state copied into the parent).
 	ChildOutputs []OutputReference `json:"child_outputs,omitempty"`
