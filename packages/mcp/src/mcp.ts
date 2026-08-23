@@ -13,6 +13,12 @@ import {
   followUpTool,
   eventsTool,
   shutdownTool,
+  workflowStatusTool,
+  workflowWaitTool,
+  workflowInspectTool,
+  workflowEventsTool,
+  workflowCompleteTool,
+  workflowGateTool,
   validateSpawnSelection,
 } from '@dougbots/avenor-core'
 
@@ -177,6 +183,93 @@ server.registerTool('avenor_shutdown', {
   },
 }, async ({ supervisor_id, force }) => {
   return shutdownTool({ supervisorId: supervisor_id, force })
+})
+
+server.registerTool('avenor_workflow_status', {
+  description: 'Get lightweight status for a workflow instance',
+  inputSchema: {
+    workflow_id: z.string().describe('Workflow ID'),
+    supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
+  },
+}, async ({ workflow_id, supervisor_id }) => {
+  return workflowStatusTool({ workflowId: workflow_id, supervisorId: supervisor_id })
+})
+
+server.registerTool('avenor_workflow_wait', {
+  description: 'Wait for a workflow to reach a terminal state or until timeout',
+  inputSchema: {
+    workflow_id: z.string().describe('Workflow ID'),
+    timeout: z.string().optional().describe('Timeout (e.g. 30s, 5m)'),
+    supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
+  },
+}, async ({ workflow_id, timeout, supervisor_id }) => {
+  return workflowWaitTool({ workflowId: workflow_id, timeout, supervisorId: supervisor_id })
+})
+
+server.registerTool('avenor_workflow_inspect', {
+  description: 'Return the full instance detail for a workflow',
+  inputSchema: {
+    workflow_id: z.string().describe('Workflow ID'),
+    supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
+  },
+}, async ({ workflow_id, supervisor_id }) => {
+  return workflowInspectTool({ workflowId: workflow_id, supervisorId: supervisor_id })
+})
+
+server.registerTool('avenor_workflow_events', {
+  description: 'Read log events from a workflow instance\'s event log',
+  inputSchema: {
+    workflow_id: z.string().describe('Workflow ID'),
+    after_seq: z.number().optional().describe('Only include events after this sequence number'),
+    limit: z.number().optional().describe('Max events to return (default 50)'),
+    supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
+  },
+}, async ({ workflow_id, after_seq, limit, supervisor_id }) => {
+  return workflowEventsTool({ workflowId: workflow_id, afterSeq: after_seq, limit, supervisorId: supervisor_id })
+})
+
+server.registerTool('avenor_workflow_complete', {
+  description: 'Atomically complete a machine/external handoff activation',
+  inputSchema: {
+    workflow_id: z.string().describe('Workflow ID'),
+    node_id: z.string().describe('Node ID'),
+    activation_id: z.string().describe('Activation ID'),
+    attempt_id: z.string().describe('Attempt ID'),
+    lease_id: z.string().describe('Lease ID'),
+    owner_token: z.string().describe('Owner token'),
+    outcome: z.string().describe('Outcome'),
+    outputs: z.unknown().optional().describe('Outputs'),
+    artifacts: z.unknown().optional().describe('Artifacts'),
+    supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
+  },
+}, async (args) => {
+  const { supervisor_id, ...rest } = args
+  return workflowCompleteTool({ ...rest, supervisorId: supervisor_id })
+})
+
+server.registerTool('avenor_workflow_gate', {
+  description: 'Record a gate decision on a parked awaiting_gate activation',
+  inputSchema: {
+    workflow_id: z.string().describe('Workflow ID'),
+    node_id: z.string().describe('Node ID'),
+    gate_id: z.string().describe('Gate ID'),
+    activation_id: z.string().describe('Activation ID'),
+    operation: z.enum(['satisfy','reject','waive','external_result']).describe('Gate operation'),
+    actor: z.string().optional().describe('Actor'),
+    reason: z.string().optional().describe('Reason'),
+    outcome: z.string().optional().describe('Outcome'),
+    subject: z.unknown().optional().describe('Subject'),
+    poll_id: z.string().optional().describe('Poll ID'),
+    source: z.string().optional().describe('Source'),
+    result: z.string().optional().describe('Result'),
+    response_hash: z.string().optional().describe('Response hash'),
+    observed_at: z.string().optional().describe('Observed at'),
+    evidence_ids: z.array(z.string()).optional().describe('Evidence IDs'),
+    supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
+  },
+}, async (args) => {
+  const { supervisor_id, ...rest } = args
+  return workflowGateTool({ ...rest, supervisorId: supervisor_id })
 })
 
 if (import.meta.main) {

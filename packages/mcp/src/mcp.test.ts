@@ -71,6 +71,79 @@ describe('avenor MCP server', () => {
       },
     }, async () => ({ ok: true, cleaned_up: [] }))
 
+    server.registerTool('avenor_workflow_status', {
+      description: 'Get lightweight status for a workflow instance',
+      inputSchema: {
+        workflow_id: z.string(),
+        supervisor_id: z.string().optional(),
+      },
+    }, async () => ({ status: 'running' }))
+
+    server.registerTool('avenor_workflow_wait', {
+      description: 'Wait for a workflow to reach a terminal state or until timeout',
+      inputSchema: {
+        workflow_id: z.string(),
+        timeout: z.string().optional(),
+        supervisor_id: z.string().optional(),
+      },
+    }, async () => ({ status: 'done', output: 'done' }))
+
+    server.registerTool('avenor_workflow_inspect', {
+      description: 'Return the full instance detail for a workflow',
+      inputSchema: {
+        workflow_id: z.string(),
+        supervisor_id: z.string().optional(),
+      },
+    }, async () => ({ workflow_id: 'test', nodes: [] }))
+
+    server.registerTool('avenor_workflow_events', {
+      description: 'Read log events from a workflow instance\'s event log',
+      inputSchema: {
+        workflow_id: z.string(),
+        after_seq: z.number().optional(),
+        limit: z.number().optional(),
+        supervisor_id: z.string().optional(),
+      },
+    }, async () => ({ events: [] }))
+
+    server.registerTool('avenor_workflow_complete', {
+      description: 'Atomically complete a machine/external handoff activation',
+      inputSchema: {
+        workflow_id: z.string(),
+        node_id: z.string(),
+        activation_id: z.string(),
+        attempt_id: z.string(),
+        lease_id: z.string(),
+        owner_token: z.string(),
+        outcome: z.string(),
+        outputs: z.unknown().optional(),
+        artifacts: z.unknown().optional(),
+        supervisor_id: z.string().optional(),
+      },
+    }, async () => ({ completed: true }))
+
+    server.registerTool('avenor_workflow_gate', {
+      description: 'Record a gate decision on a parked awaiting_gate activation',
+      inputSchema: {
+        workflow_id: z.string(),
+        node_id: z.string(),
+        gate_id: z.string(),
+        activation_id: z.string(),
+        operation: z.enum(['satisfy','reject','waive','external_result']),
+        actor: z.string().optional(),
+        reason: z.string().optional(),
+        outcome: z.string().optional(),
+        subject: z.unknown().optional(),
+        poll_id: z.string().optional(),
+        source: z.string().optional(),
+        result: z.string().optional(),
+        response_hash: z.string().optional(),
+        observed_at: z.string().optional(),
+        evidence_ids: z.array(z.string()).optional(),
+        supervisor_id: z.string().optional(),
+      },
+    }, async () => ({ decided: true }))
+
     expect(server).toBeDefined()
   })
 

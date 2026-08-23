@@ -29,6 +29,12 @@ import {
   type StatusResult,
   THINKING_LEVELS,
   validateSpawnSelection,
+  workflowStatusTool,
+  workflowWaitTool,
+  workflowInspectTool,
+  workflowEventsTool,
+  workflowCompleteTool,
+  workflowGateTool,
 } from '@dougbots/avenor-core'
 
 type TrackedRun = {
@@ -961,6 +967,126 @@ export const AvenorPlugin: Plugin = async (ctx) => {
             force: args.force,
           })
           return formatShutdownOutput(args, result)
+        },
+      }),
+
+      avenor_workflow_status: tool({
+        description: 'Get lightweight status for a workflow instance',
+        args: {
+          workflow_id: tool.schema.string().describe('Workflow ID'),
+          supervisor_id: tool.schema.string().optional().describe('Supervisor ID for multi-supervisor mode'),
+        },
+        async execute(args, _context) {
+          const result = await workflowStatusTool({
+            workflowId: args.workflow_id,
+            supervisorId: args.supervisor_id,
+          })
+          return { title: 'workflow', output: JSON.stringify(result, null, 2) }
+        },
+      }),
+
+      avenor_workflow_wait: tool({
+        description: 'Wait for a workflow to reach a terminal state or until timeout',
+        args: {
+          workflow_id: tool.schema.string().describe('Workflow ID'),
+          timeout: tool.schema.string().optional().describe('Timeout (e.g. 30s, 5m)'),
+          supervisor_id: tool.schema.string().optional().describe('Supervisor ID for multi-supervisor mode'),
+        },
+        async execute(args, _context) {
+          const result = await workflowWaitTool({
+            workflowId: args.workflow_id,
+            timeout: args.timeout,
+            supervisorId: args.supervisor_id,
+          })
+          return { title: 'workflow', output: JSON.stringify(result, null, 2) }
+        },
+      }),
+
+      avenor_workflow_inspect: tool({
+        description: 'Return the full instance detail for a workflow',
+        args: {
+          workflow_id: tool.schema.string().describe('Workflow ID'),
+          supervisor_id: tool.schema.string().optional().describe('Supervisor ID for multi-supervisor mode'),
+        },
+        async execute(args, _context) {
+          const result = await workflowInspectTool({
+            workflowId: args.workflow_id,
+            supervisorId: args.supervisor_id,
+          })
+          return { title: 'workflow', output: JSON.stringify(result, null, 2) }
+        },
+      }),
+
+      avenor_workflow_events: tool({
+        description: 'Read log events from a workflow instance\'s event log',
+        args: {
+          workflow_id: tool.schema.string().describe('Workflow ID'),
+          after_seq: tool.schema.number().optional().describe('Only include events after this sequence number'),
+          limit: tool.schema.number().optional().describe('Max events to return (default 50)'),
+          supervisor_id: tool.schema.string().optional().describe('Supervisor ID for multi-supervisor mode'),
+        },
+        async execute(args, _context) {
+          const result = await workflowEventsTool({
+            workflowId: args.workflow_id,
+            afterSeq: args.after_seq,
+            limit: args.limit,
+            supervisorId: args.supervisor_id,
+          })
+          return { title: 'workflow', output: JSON.stringify(result, null, 2) }
+        },
+      }),
+
+      avenor_workflow_complete: tool({
+        description: 'Atomically complete a machine/external handoff activation',
+        args: {
+          workflow_id: tool.schema.string().describe('Workflow ID'),
+          node_id: tool.schema.string().describe('Node ID'),
+          activation_id: tool.schema.string().describe('Activation ID'),
+          attempt_id: tool.schema.string().describe('Attempt ID'),
+          lease_id: tool.schema.string().describe('Lease ID'),
+          owner_token: tool.schema.string().describe('Owner token'),
+          outcome: tool.schema.string().describe('Outcome'),
+          outputs: tool.schema.unknown().optional().describe('Outputs'),
+          artifacts: tool.schema.unknown().optional().describe('Artifacts'),
+          supervisor_id: tool.schema.string().optional().describe('Supervisor ID for multi-supervisor mode'),
+        },
+        async execute(args, _context) {
+          const { supervisor_id, ...rest } = args
+          const result = await workflowCompleteTool({
+            ...rest,
+            supervisorId: supervisor_id,
+          })
+          return { title: 'workflow', output: JSON.stringify(result, null, 2) }
+        },
+      }),
+
+      avenor_workflow_gate: tool({
+        description: 'Record a gate decision on a parked awaiting_gate activation',
+        args: {
+          workflow_id: tool.schema.string().describe('Workflow ID'),
+          node_id: tool.schema.string().describe('Node ID'),
+          gate_id: tool.schema.string().describe('Gate ID'),
+          activation_id: tool.schema.string().describe('Activation ID'),
+          operation: tool.schema.enum(['satisfy','reject','waive','external_result']).describe('Gate operation'),
+          actor: tool.schema.string().optional().describe('Actor'),
+          reason: tool.schema.string().optional().describe('Reason'),
+          outcome: tool.schema.string().optional().describe('Outcome'),
+          subject: tool.schema.unknown().optional().describe('Subject'),
+          poll_id: tool.schema.string().optional().describe('Poll ID'),
+          source: tool.schema.string().optional().describe('Source'),
+          result: tool.schema.string().optional().describe('Result'),
+          response_hash: tool.schema.string().optional().describe('Response hash'),
+          observed_at: tool.schema.string().optional().describe('Observed at'),
+          evidence_ids: tool.schema.array(tool.schema.string()).optional().describe('Evidence IDs'),
+          supervisor_id: tool.schema.string().optional().describe('Supervisor ID for multi-supervisor mode'),
+        },
+        async execute(args, _context) {
+          const { supervisor_id, ...rest } = args
+          const result = await workflowGateTool({
+            ...rest,
+            supervisorId: supervisor_id,
+          })
+          return { title: 'workflow', output: JSON.stringify(result, null, 2) }
         },
       }),
     },

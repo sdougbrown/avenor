@@ -40,6 +40,45 @@ type fakeClient struct {
 	closeCalls               int
 	statusCapturedRuntimeIDs []string
 	resultCapturedRuntimeIDs []string
+
+	workflowStatusResult   map[string]any
+	workflowWaitResult     map[string]any
+	workflowInspectResult  map[string]any
+	workflowEventsResult   map[string]any
+	workflowCompleteResult map[string]any
+	workflowGateResult     map[string]any
+	workflowStatusErr      error
+	workflowWaitErr        error
+	workflowInspectErr     error
+	workflowEventsErr      error
+	workflowCompleteErr    error
+	workflowGateErr        error
+	workflowStatusCalls    []string
+	workflowWaitCalls      []workflowWaitCall
+	workflowEventsCalls    []workflowEventsCall
+	workflowCompleteCalls  []workflowCompleteCall
+	workflowGateCalls      []workflowGateCall
+}
+
+type workflowWaitCall struct {
+	workflowID string
+	timeout    time.Duration
+}
+
+type workflowEventsCall struct {
+	workflowID string
+	afterSeq   int64
+	limit      int
+}
+
+type workflowCompleteCall struct {
+	workflowID string
+	fields     map[string]any
+}
+
+type workflowGateCall struct {
+	workflowID string
+	fields     map[string]any
 }
 
 type permissionCall struct {
@@ -95,6 +134,35 @@ func (f *fakeClient) Close() error {
 	return nil
 }
 
+func (f *fakeClient) WorkflowStatus(workflowID string) (map[string]any, error) {
+	f.workflowStatusCalls = append(f.workflowStatusCalls, workflowID)
+	return f.workflowStatusResult, f.workflowStatusErr
+}
+
+func (f *fakeClient) WorkflowWait(workflowID string, timeout time.Duration) (map[string]any, error) {
+	f.workflowWaitCalls = append(f.workflowWaitCalls, workflowWaitCall{workflowID, timeout})
+	return f.workflowWaitResult, f.workflowWaitErr
+}
+
+func (f *fakeClient) WorkflowInspect(workflowID string) (map[string]any, error) {
+	return f.workflowInspectResult, f.workflowInspectErr
+}
+
+func (f *fakeClient) WorkflowEvents(workflowID string, afterSeq int64, limit int) (map[string]any, error) {
+	f.workflowEventsCalls = append(f.workflowEventsCalls, workflowEventsCall{workflowID, afterSeq, limit})
+	return f.workflowEventsResult, f.workflowEventsErr
+}
+
+func (f *fakeClient) WorkflowComplete(workflowID string, fields map[string]any) (map[string]any, error) {
+	f.workflowCompleteCalls = append(f.workflowCompleteCalls, workflowCompleteCall{workflowID, fields})
+	return f.workflowCompleteResult, f.workflowCompleteErr
+}
+
+func (f *fakeClient) WorkflowGate(workflowID string, fields map[string]any) (map[string]any, error) {
+	f.workflowGateCalls = append(f.workflowGateCalls, workflowGateCall{workflowID, fields})
+	return f.workflowGateResult, f.workflowGateErr
+}
+
 type spawnCountingClient struct {
 	spawns atomic.Int32
 }
@@ -108,6 +176,20 @@ func (c *spawnCountingClient) Spawn(map[string]any) (map[string]any, error) {
 func (c *spawnCountingClient) Shutdown(string) error                         { return nil }
 func (c *spawnCountingClient) Close() error                                  { return nil }
 func (c *spawnCountingClient) AnswerPermission(string, string, string) error { return nil }
+func (c *spawnCountingClient) WorkflowStatus(string) (map[string]any, error) { return nil, nil }
+func (c *spawnCountingClient) WorkflowWait(string, time.Duration) (map[string]any, error) {
+	return nil, nil
+}
+func (c *spawnCountingClient) WorkflowInspect(string) (map[string]any, error) { return nil, nil }
+func (c *spawnCountingClient) WorkflowEvents(string, int64, int) (map[string]any, error) {
+	return nil, nil
+}
+func (c *spawnCountingClient) WorkflowComplete(string, map[string]any) (map[string]any, error) {
+	return nil, nil
+}
+func (c *spawnCountingClient) WorkflowGate(string, map[string]any) (map[string]any, error) {
+	return nil, nil
+}
 
 func TestParallelSpawnLazilyStartsOneSharedSupervisor(t *testing.T) {
 	origStart := startSupervisorFunc

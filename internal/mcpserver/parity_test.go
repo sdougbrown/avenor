@@ -21,6 +21,17 @@ var tsToolNames = []string{
 	"avenor_shutdown",
 }
 
+// workflowToolNames lists the six Go-only MCP workflow tools (Stage 14). These
+// have no TypeScript reference yet; JS host parity is deferred to Stage 15.
+var workflowToolNames = []string{
+	"avenor_workflow_status",
+	"avenor_workflow_wait",
+	"avenor_workflow_inspect",
+	"avenor_workflow_events",
+	"avenor_workflow_complete",
+	"avenor_workflow_gate",
+}
+
 func TestToolNameParity(t *testing.T) {
 	s, err := NewServer(Options{
 		Transport:     "stdio",
@@ -32,30 +43,33 @@ func TestToolNameParity(t *testing.T) {
 	}
 	defer s.Close()
 
+	wanted := append(append([]string{}, tsToolNames...), workflowToolNames...)
+	wantedSet := make(map[string]bool, len(wanted))
+	for _, n := range wanted {
+		wantedSet[n] = true
+	}
+
 	// Query registered tool names from the actual server instance.
 	registeredNames := make(map[string]bool)
 	for _, name := range s.RegisteredToolNames() {
 		registeredNames[name] = true
 	}
 
-	if len(registeredNames) != len(tsToolNames) {
-		t.Errorf("registered tool count %d != expected %d", len(registeredNames), len(tsToolNames))
+	if len(registeredNames) != len(wanted) {
+		t.Errorf("registered tool count %d != expected %d", len(registeredNames), len(wanted))
 	}
 
-	for _, name := range tsToolNames {
+	for _, name := range wanted {
 		if !registeredNames[name] {
-			t.Errorf("registered tools missing TS tool: %s", name)
+			t.Errorf("registered tools missing tool: %s", name)
 		}
 	}
 
-	// Also verify no extra tools are registered that TS doesn't have
-	tsSet := make(map[string]bool, len(tsToolNames))
-	for _, n := range tsToolNames {
-		tsSet[n] = true
-	}
+	// Also verify no tools are registered outside the union of the TS reference
+	// and the Go-only workflow surface.
 	for name := range registeredNames {
-		if !tsSet[name] {
-			t.Errorf("registered tool not in TS reference: %s", name)
+		if !wantedSet[name] {
+			t.Errorf("registered tool not in TS reference or workflow surface: %s", name)
 		}
 	}
 }
@@ -118,6 +132,47 @@ func TestSchemaFieldParity(t *testing.T) {
 		// shutdownArgs — all optional: supervisor_id, force
 		allowed := []string{"supervisor_id", "force"}
 		assertFields(t, "shutdownArgs", allowed, nil)
+	})
+
+	t.Run("avenor_workflow_status", func(t *testing.T) {
+		// workflowStatusArgs — required: workflow_id; optional: supervisor_id
+		allowed := []string{"workflow_id", "supervisor_id"}
+		assertFields(t, "workflowStatusArgs", allowed, []string{"workflow_id"})
+	})
+
+	t.Run("avenor_workflow_wait", func(t *testing.T) {
+		// workflowWaitArgs — required: workflow_id; optional: timeout, supervisor_id
+		allowed := []string{"workflow_id", "timeout", "supervisor_id"}
+		assertFields(t, "workflowWaitArgs", allowed, []string{"workflow_id"})
+	})
+
+	t.Run("avenor_workflow_inspect", func(t *testing.T) {
+		// workflowInspectArgs — required: workflow_id; optional: supervisor_id
+		allowed := []string{"workflow_id", "supervisor_id"}
+		assertFields(t, "workflowInspectArgs", allowed, []string{"workflow_id"})
+	})
+
+	t.Run("avenor_workflow_events", func(t *testing.T) {
+		// workflowEventsArgs — required: workflow_id; optional: after_seq, limit, supervisor_id
+		allowed := []string{"workflow_id", "after_seq", "limit", "supervisor_id"}
+		assertFields(t, "workflowEventsArgs", allowed, []string{"workflow_id"})
+	})
+
+	t.Run("avenor_workflow_complete", func(t *testing.T) {
+		// workflowCompleteArgs — required: workflow_id, node_id, activation_id,
+		// attempt_id, lease_id, owner_token, outcome; optional: outputs,
+		// artifacts, supervisor_id
+		allowed := []string{"workflow_id", "node_id", "activation_id", "attempt_id", "lease_id", "owner_token", "outcome", "outputs", "artifacts", "supervisor_id"}
+		required := []string{"workflow_id", "node_id", "activation_id", "attempt_id", "lease_id", "owner_token", "outcome"}
+		assertFields(t, "workflowCompleteArgs", allowed, required)
+	})
+
+	t.Run("avenor_workflow_gate", func(t *testing.T) {
+		// workflowGateArgs — required: workflow_id, node_id, gate_id,
+		// activation_id, operation; operation-specific fields are optional
+		allowed := []string{"workflow_id", "node_id", "gate_id", "activation_id", "operation", "actor", "reason", "outcome", "subject", "poll_id", "source", "result", "response_hash", "observed_at", "evidence_ids", "supervisor_id"}
+		required := []string{"workflow_id", "node_id", "gate_id", "activation_id", "operation"}
+		assertFields(t, "workflowGateArgs", allowed, required)
 	})
 }
 
@@ -346,6 +401,95 @@ func assertFields(t *testing.T, structName string, allowed, required []string) {
 		if a.SupervisorID != "s" || !a.Force {
 			t.Errorf("%s: fields not populated correctly", structName)
 		}
+	case "workflowStatusArgs":
+		data := map[string]any{"workflow_id": "wf-1", "supervisor_id": "s"}
+		b, _ := json.Marshal(data)
+		var a workflowStatusArgs
+		if err := json.Unmarshal(b, &a); err != nil {
+			t.Fatalf("%s: unmarshal: %v", structName, err)
+		}
+		if a.WorkflowID != "wf-1" || a.SupervisorID != "s" {
+			t.Errorf("%s: fields not populated correctly", structName)
+		}
+	case "workflowWaitArgs":
+		data := map[string]any{"workflow_id": "wf-1", "timeout": "5m", "supervisor_id": "s"}
+		b, _ := json.Marshal(data)
+		var a workflowWaitArgs
+		if err := json.Unmarshal(b, &a); err != nil {
+			t.Fatalf("%s: unmarshal: %v", structName, err)
+		}
+		if a.WorkflowID != "wf-1" || a.Timeout != "5m" || a.SupervisorID != "s" {
+			t.Errorf("%s: fields not populated correctly", structName)
+		}
+	case "workflowInspectArgs":
+		data := map[string]any{"workflow_id": "wf-1", "supervisor_id": "s"}
+		b, _ := json.Marshal(data)
+		var a workflowInspectArgs
+		if err := json.Unmarshal(b, &a); err != nil {
+			t.Fatalf("%s: unmarshal: %v", structName, err)
+		}
+		if a.WorkflowID != "wf-1" || a.SupervisorID != "s" {
+			t.Errorf("%s: fields not populated correctly", structName)
+		}
+	case "workflowEventsArgs":
+		data := map[string]any{"workflow_id": "wf-1", "after_seq": float64(5), "limit": float64(10), "supervisor_id": "s"}
+		b, _ := json.Marshal(data)
+		var a workflowEventsArgs
+		if err := json.Unmarshal(b, &a); err != nil {
+			t.Fatalf("%s: unmarshal: %v", structName, err)
+		}
+		if a.WorkflowID != "wf-1" || a.AfterSeq != 5 || a.Limit != 10 || a.SupervisorID != "s" {
+			t.Errorf("%s: fields not populated correctly", structName)
+		}
+	case "workflowCompleteArgs":
+		data := map[string]any{
+			"workflow_id":   "wf-1",
+			"node_id":       "n1",
+			"activation_id": "a1",
+			"attempt_id":    "at1",
+			"lease_id":      "l1",
+			"owner_token":   "tok",
+			"outcome":       "success",
+			"outputs":       `[{"definition_id":"o1","value":1}]`,
+			"artifacts":     `[{"src_path":"/tmp/x"}]`,
+			"supervisor_id": "s",
+		}
+		b, _ := json.Marshal(data)
+		var a workflowCompleteArgs
+		if err := json.Unmarshal(b, &a); err != nil {
+			t.Fatalf("%s: unmarshal: %v", structName, err)
+		}
+		if a.WorkflowID != "wf-1" || a.NodeID != "n1" || a.ActivationID != "a1" || a.AttemptID != "at1" || a.LeaseID != "l1" || a.OwnerToken != "tok" || a.Outcome != "success" || a.SupervisorID != "s" {
+			t.Errorf("%s: fields not populated correctly", structName)
+		}
+		if string(a.Outputs) == "" || string(a.Artifacts) == "" {
+			t.Errorf("%s: raw JSON fields not populated", structName)
+		}
+	case "workflowGateArgs":
+		data := map[string]any{
+			"workflow_id":   "wf-1",
+			"node_id":       "n1",
+			"gate_id":       "g1",
+			"activation_id": "a1",
+			"operation":     "external_result",
+			"actor":         "bob",
+			"outcome":       "failure",
+			"subject":       `{"type":"pr","repository":"org/repo","pull_request":12,"revision":"abc"}`,
+			"observed_at":   "2024-01-01T00:00:00Z",
+			"evidence_ids":  []string{"e1"},
+			"supervisor_id": "s",
+		}
+		b, _ := json.Marshal(data)
+		var a workflowGateArgs
+		if err := json.Unmarshal(b, &a); err != nil {
+			t.Fatalf("%s: unmarshal: %v", structName, err)
+		}
+		if a.WorkflowID != "wf-1" || a.NodeID != "n1" || a.GateID != "g1" || a.ActivationID != "a1" || a.Operation != "external_result" || a.Outcome != "failure" || a.SupervisorID != "s" {
+			t.Errorf("%s: fields not populated correctly", structName)
+		}
+		if string(a.Subject) == "" || a.ObservedAt != "2024-01-01T00:00:00Z" || len(a.EvidenceIDs) != 1 {
+			t.Errorf("%s: structured fields not populated correctly", structName)
+		}
 	}
 
 	// Verify required fields: send JSON without required fields and confirm
@@ -377,6 +521,18 @@ func assertSchemaTags(t *testing.T, structName string, allowed, required []strin
 		typ = reflect.TypeOf(eventsArgs{})
 	case "shutdownArgs":
 		typ = reflect.TypeOf(shutdownArgs{})
+	case "workflowStatusArgs":
+		typ = reflect.TypeOf(workflowStatusArgs{})
+	case "workflowWaitArgs":
+		typ = reflect.TypeOf(workflowWaitArgs{})
+	case "workflowInspectArgs":
+		typ = reflect.TypeOf(workflowInspectArgs{})
+	case "workflowEventsArgs":
+		typ = reflect.TypeOf(workflowEventsArgs{})
+	case "workflowCompleteArgs":
+		typ = reflect.TypeOf(workflowCompleteArgs{})
+	case "workflowGateArgs":
+		typ = reflect.TypeOf(workflowGateArgs{})
 	default:
 		t.Fatalf("unknown struct: %s", structName)
 	}
@@ -411,9 +567,9 @@ func assertSchemaTags(t *testing.T, structName string, allowed, required []strin
 }
 
 // TestMCPStdioHandshake verifies that a NewServer with a fake client
-// registers exactly 7 tools with the correct names, matching the
-// TypeScript MCP tool surface. Uses in-process server inspection
-// instead of spawning a subprocess.
+// registers the full tool surface (the seven TypeScript-reference tools plus
+// the six Go-only workflow tools) with the correct names, matching the Go MCP
+// surface. Uses in-process server inspection instead of spawning a subprocess.
 func TestPermissionArgsRejectsUnpairedSurrogateMessage(t *testing.T) {
 	var args permissionArgs
 	if err := json.Unmarshal([]byte(`{"run_id":"r","option_id":"o","message":"\uD800"}`), &args); err == nil {
@@ -441,12 +597,13 @@ func TestMCPStdioHandshake(t *testing.T) {
 		registeredNames[name] = true
 	}
 
-	if len(registeredNames) != 7 {
-		t.Fatalf("expected 7 registered tools, got %d", len(registeredNames))
+	expected := append(append([]string{}, tsToolNames...), workflowToolNames...)
+	if len(registeredNames) != len(expected) {
+		t.Fatalf("expected %d registered tools, got %d", len(expected), len(registeredNames))
 	}
-	for _, expected := range tsToolNames {
-		if !registeredNames[expected] {
-			t.Errorf("missing tool: %s", expected)
+	for _, name := range expected {
+		if !registeredNames[name] {
+			t.Errorf("missing tool: %s", name)
 		}
 	}
 }

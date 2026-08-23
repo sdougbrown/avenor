@@ -41,3 +41,11 @@ export function validateSupervisorSocketPath(supervisorId: string): string {
   }
   return path.join(parent, basename)
 }
+
+export function validateObservedAt(observedAt: string): void {
+  // RFC3339 pattern that matches ISO 8601 dates with timezone
+  const rfc3339Regex = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+  if (!rfc3339Regex.test(observedAt)) {
+    throw new Error('observed_at must be an RFC3339 timestamp')
+  }
+}
