@@ -377,6 +377,30 @@ These are the same methods as above but applied to a specific child runtime inst
 - `interrupt_and_prompt {"runtime_id":"rt_1","text":"Stop and do this","keep_queue":false}` — interrupt and re-prompt. Requires ownership.
 - `answer_permission {"runtime_id":"rt_1","request_id":"req_1","option_id":"allow","message":"optional write-in"}` — answer a permission for one runtime. `message` is optional unless the selected option requires it. Requires ownership.
 
+### Workflow methods
+
+The `workflow.*` methods drive a [durable workflow](workflow.md). They are dispatched to an optional workflow handler; when the supervisor has no workflow support (no `--workflow-root` manager), they return `-32601` (`method not found`). They do not use the run-scoped ownership model.
+
+| Method | Params | Purpose |
+|------|------|---------|
+| `workflow.create` | template JSON | Register a versioned template. |
+| `workflow.instantiate` | `{template_id, template_version, metadata?}` | Create an instance. |
+| `workflow.status` | `{workflow_id}` | Snapshot summary. |
+| `workflow.wait` | `{workflow_id, timeout_ms?}` | Block until terminal or timeout (default 5000ms). |
+| `workflow.inspect` | `{workflow_id}` | Full instance detail. |
+| `workflow.events` | `{workflow_id, after_seq?, limit?}` | Event log. |
+| `workflow.command` | `{workflow_id, command}` | Route an instance command by its `op` discriminator. |
+
+`workflow.command` routes `op` to the instance command: `claim`, `start`, `heartbeat`, `complete`, `gate`, `skip`, or `unblock`. The command payload carries the op's fields. Example — claim a ready node:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"workflow.command",
+ "params":{"workflow_id":"wf_...",
+   "command":{"op":"claim","node_id":"intake","activation_id":"act_...","actor":"controller"}}}
+```
+
+`claim` returns `lease_id`, `owner_token`, and `expiry`. `start` validates the lease, allocates an `attempt_id`, and dispatches the declared action. `heartbeat` renews the lease with the claim's `(lease_id, owner_token)` pair. `complete`, `gate`, `skip`, and `unblock` carry their operation's fields (see [workflow.md](workflow.md#driving-a-workflow)).
+
 ## Owner Semantics
 
 The first client connection to issue a mutating method (`cancel`, `prompt`, `interrupt_and_prompt`, `answer_permission`, `spawn`, `shutdown`) becomes the owner. Non-owner calls fail with error code `-32010` (`permission_denied`).
