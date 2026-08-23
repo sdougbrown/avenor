@@ -47,6 +47,22 @@ func NewManager(store *Store) *Manager {
 		}
 		return node.Gates
 	})
+	// Retry policies are resolved from the instance's versioned template so
+	// the reducer's retry/exhaustion logic sees the node's durable policy
+	// (matching production): without this resolver every failure would
+	// exhaust to a single attempt. Load errors return nil, which keeps
+	// single-attempt behavior for that node.
+	SetRetryPolicyResolver(func(templateID TemplateID, templateVersion TemplateVersion, nodeID NodeID) *RetryPolicy {
+		tmpl, err := m.store.LoadTemplate(templateID, templateVersion)
+		if err != nil {
+			return nil
+		}
+		node, err := findNode(&tmpl, nodeID)
+		if err != nil {
+			return nil
+		}
+		return node.RetryPolicy
+	})
 	return m
 }
 
@@ -65,8 +81,15 @@ type ExecutorContext struct {
 	ActivationID ActivationID
 	AttemptID    AttemptID
 	LeaseID      LeaseID
-	Action       Action
-	Selection    *ExecutionSelection
+	// OwnerToken is the raw claim owner token for this attempt's lease. It is
+	// additive and inert: the reducer/store never sees it, but the executor
+	// layer can use it (with LeaseID) to renew its own lease via
+	// Manager.Heartbeat — the owner-token heartbeat seam. A live heartbeat
+	// goroutine in the executors is a later hardening, not part of this stage.
+	// Executors must never marshal ExecutorContext (or OwnerToken) into the workflow store's snapshots or event log, so the raw claim token can never become durable.
+	OwnerToken string
+	Action     Action
+	Selection  *ExecutionSelection
 }
 
 // RegisterExecutor attaches the dispatch backend for one action kind.
@@ -447,6 +470,8 @@ func (m *Manager) WorkflowCommand(id string, payload json.RawMessage) (any, erro
 		return m.commandClaim(wf, payload)
 	case "start":
 		return m.commandStart(wf, payload)
+	case "heartbeat":
+		return m.commandHeartbeat(wf, payload)
 	case "complete":
 		return m.commandComplete(wf, payload)
 	case "gate":
@@ -510,7 +535,7 @@ func (m *Manager) commandClaim(wf WorkflowID, payload json.RawMessage) (any, err
 	if act == nil {
 		return nil, fmt.Errorf("activation not found for node %q", req.NodeID)
 	}
-	if act.Status != ActivationPending && act.Status != ActivationReady {
+	if act.Status != ActivationPending && act.Status != ActivationReady && act.Status != ActivationLeaseExpired {
 		return nil, fmt.Errorf("cannot claim activation in status %q", act.Status)
 	}
 	tmpl, err := m.templateFor(&snap)
@@ -640,6 +665,7 @@ func (m *Manager) commandStart(wf WorkflowID, payload json.RawMessage) (any, err
 		ActivationID: act.ID,
 		AttemptID:    attemptID,
 		LeaseID:      req.LeaseID,
+		OwnerToken:   req.OwnerToken,
 		Action:       node.Action,
 		Selection:    req.Selection,
 	}); err != nil {
@@ -665,6 +691,26 @@ func (m *Manager) applyStart(wf WorkflowID, snap Snapshot, act *Activation, req 
 		LeaseID:          req.LeaseID,
 		Selection:        req.Selection,
 	})
+}
+
+// Heartbeat is the executor-facing convenience wrapper around the "heartbeat"
+// command (see commandHeartbeat): it renews the activation's active lease for
+// a caller identified by the claim's (leaseID, ownerToken) pair — the same
+// pair a claim returns and that the start carries into
+// ExecutorContext.OwnerToken. It never transitions the activation status.
+func (m *Manager) Heartbeat(wf WorkflowID, nodeID NodeID, activationID ActivationID, leaseID LeaseID, ownerToken string) error {
+	payload, err := json.Marshal(map[string]string{
+		"op":            "heartbeat",
+		"node_id":       string(nodeID),
+		"activation_id": string(activationID),
+		"lease_id":      string(leaseID),
+		"owner_token":   ownerToken,
+	})
+	if err != nil {
+		return err
+	}
+	_, err = m.commandHeartbeat(wf, payload)
+	return err
 }
 
 // RecordAttemptTerminated records the terminal status of an already-started

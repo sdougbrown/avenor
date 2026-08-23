@@ -42,8 +42,6 @@ func gateStatusLegal(op GateOperation, status GateStatus) bool {
 	return false
 }
 
-
-
 // validateGateCommand is the reducer-authoritative field validation for
 // CommandGate, called from buildCommandEvents before any event is emitted so
 // an invalid command never mutates the store. An empty operation is the
