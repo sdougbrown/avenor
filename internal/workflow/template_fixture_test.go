@@ -172,10 +172,11 @@ func TestSoftwareFactoryTemplateExactHeadGates(t *testing.T) {
 	}
 }
 
-// TestSoftwareFactoryTemplateNoUndeclaredOutcome asserts every branch key and
-// non-terminal outcome on every node resolves to a declared outcome (a branch
-// target, a node outcome, or a template terminal outcome). An undeclared
-// outcome would be rejected at completion time.
+// TestSoftwareFactoryTemplateNoUndeclaredOutcome asserts every non-terminal
+// outcome on every node resolves to a declared template terminal outcome (an
+// undeclared outcome would be rejected at completion time). Branch-key /
+// branch-target existence is covered separately by
+// TestSoftwareFactoryTemplateBranchTargetsExist and runtime graph validation.
 func TestSoftwareFactoryTemplateNoUndeclaredOutcome(t *testing.T) {
 	tmpl := loadSoftwareFactoryTemplate(t)
 	terminal := make(map[OutcomeName]struct{}, len(tmpl.TerminalOutcomes))
@@ -183,11 +184,6 @@ func TestSoftwareFactoryTemplateNoUndeclaredOutcome(t *testing.T) {
 		terminal[name] = struct{}{}
 	}
 	for _, node := range tmpl.Nodes {
-		for outcome := range node.Branches {
-			if _, ok := node.Branches[outcome]; !ok {
-				t.Errorf("node %q branch %q is not declared", node.ID, outcome)
-			}
-		}
 		for _, outcome := range node.Outcomes {
 			if outcome.Terminal {
 				if _, ok := terminal[outcome.Name]; !ok {
