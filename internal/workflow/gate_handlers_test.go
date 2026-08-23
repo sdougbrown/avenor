@@ -785,3 +785,103 @@ func unblockCommandPayload(t *testing.T, actor, reason string) json.RawMessage {
 	}
 	return data
 }
+
+// TestCommandGateExternalResultRequiredFields covers the Manager-level
+// pre-mutation validation for external_result: omitting any of poll_id,
+// source, observed_at, subject, response_hash, or evidence_ids must fail
+// before any store mutation.
+func TestCommandGateExternalResultRequiredFields(t *testing.T) {
+	drops := []struct{ drop, want string }{
+		{"poll_id", "external_result requires poll_id"},
+		{"source", "external_result requires source"},
+		{"observed_at", "external_result requires a non-zero observed_at"},
+		{"subject", "external_result requires a subject"},
+		{"response_hash", "external_result requires response_hash"},
+		{"evidence_ids", "external_result requires at least one evidence id"},
+	}
+	for _, d := range drops {
+		t.Run("drop "+d.drop, func(t *testing.T) {
+			m, s, wf := newCompleteFixture(t, completeGatedTemplateJSON, "complete-gated", "1")
+			actID := parkGatedActivation(t, m, s, wf)
+			revBefore := revision(t, s, wf)
+			extras := externalResultExtras("passed")
+			delete(extras, d.drop)
+			_, err := m.WorkflowCommand(string(wf), gateCommandPayload(t, string(actID), "review", "external_result", extras))
+			if err == nil || !strings.Contains(err.Error(), d.want) {
+				t.Fatalf("err=%v, want %q", err, d.want)
+			}
+			snapshotUnchanged(t, s, wf, revBefore, ActivationAwaitingGate)
+		})
+	}
+}
+
+// TestCommandGateHumanOpsRequiredFields covers Manager-level validation for
+// satisfy/reject/waive: omitting reason or evidence_ids fails for every human
+// operation before mutation (actor is already covered elsewhere).
+func TestCommandGateHumanOpsRequiredFields(t *testing.T) {
+	for _, op := range []string{"satisfy", "reject", "waive"} {
+		for _, d := range []struct{ drop, want string }{
+			{"reason", "requires a reason"},
+			{"evidence_ids", "requires at least one evidence id"},
+		} {
+			t.Run(op+"-drop-"+d.drop, func(t *testing.T) {
+				m, s, wf := newCompleteFixture(t, completeGatedTemplateJSON, "complete-gated", "1")
+				actID := parkGatedActivation(t, m, s, wf)
+				revBefore := revision(t, s, wf)
+				extras := map[string]any{"actor": "alice", "reason": "r", "evidence_ids": []string{"ev_1"}}
+				delete(extras, d.drop)
+				_, err := m.WorkflowCommand(string(wf), gateCommandPayload(t, string(actID), "review", op, extras))
+				if err == nil || !strings.Contains(err.Error(), d.want) {
+					t.Fatalf("err=%v, want %q", err, d.want)
+				}
+				snapshotUnchanged(t, s, wf, revBefore, ActivationAwaitingGate)
+			})
+		}
+	}
+}
+
+// TestCommandSkipUnblockRequiredFields covers the Manager-level field
+// validation for skip (node_id/actor/reason/evidence_ids) and unblock
+// (node_id/actor/reason).
+func TestCommandSkipUnblockRequiredFields(t *testing.T) {
+	skipCases := []struct {
+		payload map[string]any
+		want    string
+	}{
+		{map[string]any{"op": "skip", "actor": "a", "reason": "r", "evidence_ids": []string{"e"}}, "skip requires node_id"},
+		{map[string]any{"op": "skip", "node_id": "start", "reason": "r", "evidence_ids": []string{"e"}}, "skip requires actor"},
+		{map[string]any{"op": "skip", "node_id": "start", "actor": "a", "evidence_ids": []string{"e"}}, "skip requires reason"},
+		{map[string]any{"op": "skip", "node_id": "start", "actor": "a", "reason": "r"}, "skip requires at least one evidence id"},
+	}
+	for _, c := range skipCases {
+		m, s, wf := newCompleteFixture(t, completeGatedTemplateJSON, "complete-gated", "1")
+		revBefore := revision(t, s, wf)
+		p, _ := json.Marshal(c.payload)
+		if _, err := m.WorkflowCommand(string(wf), p); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Fatalf("skip err=%v, want %q", err, c.want)
+		}
+		if got := revision(t, s, wf); got != revBefore {
+			t.Fatalf("skip mutated the store: revision %d -> %d", revBefore, got)
+		}
+	}
+
+	unblockCases := []struct {
+		payload map[string]any
+		want    string
+	}{
+		{map[string]any{"op": "unblock", "actor": "a", "reason": "r"}, "unblock requires node_id"},
+		{map[string]any{"op": "unblock", "node_id": "start", "reason": "r"}, "unblock requires actor"},
+		{map[string]any{"op": "unblock", "node_id": "start", "actor": "a"}, "unblock requires reason"},
+	}
+	for _, c := range unblockCases {
+		m, s, wf := newCompleteFixture(t, completeGatedTemplateJSON, "complete-gated", "1")
+		revBefore := revision(t, s, wf)
+		p, _ := json.Marshal(c.payload)
+		if _, err := m.WorkflowCommand(string(wf), p); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Fatalf("unblock err=%v, want %q", err, c.want)
+		}
+		if got := revision(t, s, wf); got != revBefore {
+			t.Fatalf("unblock mutated the store: revision %d -> %d", revBefore, got)
+		}
+	}
+}

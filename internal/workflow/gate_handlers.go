@@ -301,12 +301,18 @@ func (m *Manager) commandSkip(wf WorkflowID, payload json.RawMessage) (any, erro
 		}
 		waived = append(waived, string(gateID))
 	}
-	return map[string]any{
+	resp := map[string]any{
 		"skipped":           true,
 		"activation_status": last["activation_status"],
 		"waived_gates":      waived,
-		"revision":          last["revision"],
-	}, nil
+	}
+	// A concurrent decision may resolve the activation mid-loop, so the final
+	// decision can be an idempotent no-op with no revision; only surface the
+	// key when present.
+	if rev, ok := last["revision"]; ok {
+		resp["revision"] = rev
+	}
+	return resp, nil
 }
 
 // commandUnblock returns a blocked activation to ready after an authorized
@@ -446,13 +452,13 @@ func (m *Manager) applyGateDecision(wf WorkflowID, snap Snapshot, tmpl *Template
 		if fa.Status != ActivationAwaitingGate {
 			// A concurrent decision already resolved this activation; this is
 			// a benign no-op (do not re-apply a payload computed from stale
-			// state, which would fire a phantom sibling transition).
+			// state, which would fire a phantom sibling transition). Report the
+			// canonical idempotent shape (no dangling gate fields, no revision)
+			// to match the other idempotent paths.
 			return map[string]any{
 				"status":            gateResultStatus(fa.Status),
 				"activation_status": string(fa.Status),
 				"idempotent":        true,
-				"gate_instance_id":  string(gateInstance.ID),
-				"gate_status":       string(status),
 			}, nil
 		}
 		payload, err := m.gateTransitionPayload(&fresh.Instance, tmpl, node, fa, gateID, op, status, req)
