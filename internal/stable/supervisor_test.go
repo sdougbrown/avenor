@@ -1194,8 +1194,8 @@ func assertShutdownWaitsForNestedChildCleanup(t *testing.T, kind string, run fun
 	if optionsCached {
 		t.Fatal("nested child permission options remained after completion")
 	}
-	if got := sup.broker.RunCount(); got != 0 {
-		t.Fatalf("broker run count = %d, want 0 after nested cleanup", got)
+	if got := sup.broker.RunCount(); got != 1 {
+		t.Fatalf("broker run count = %d, want 1 (supervisor run only) after nested cleanup", got)
 	}
 }
 

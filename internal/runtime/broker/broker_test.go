@@ -2485,3 +2485,61 @@ func TestBrokerWaitReplyDisconnectCleanup(t *testing.T) {
 		t.Error("expected per-run state to be cleaned up on context cancellation")
 	}
 }
+
+
+func TestBrokerDrainAgentMessages(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	token, err := b.CreateRun("receiver")
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	_ = token
+	senderToken, err := b.CreateRun("sender")
+	if err != nil {
+		t.Fatalf("create sender: %v", err)
+	}
+
+	// Send an ask targeting the receiver.
+	sendAsk(t, b.Addr(), senderToken, "sender", "receiver", "drain-ask", "hello from subagent")
+
+	// Also queue a non-agent control message to verify it is not drained.
+	b.PushControl("receiver", ControlMessage{ID: "ctrl-keep", Type: "continue", RunID: "receiver"})
+
+	// Drain agent messages for the receiver.
+	msgs, err := b.DrainAgentMessages("receiver")
+	if err != nil {
+		t.Fatalf("DrainAgentMessages: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 agent message, got %d", len(msgs))
+	}
+	if msgs[0].FromRunID != "sender" {
+		t.Errorf("FromRunID = %q, want sender", msgs[0].FromRunID)
+	}
+	if msgs[0].Type != "agent_message" {
+		t.Errorf("Type = %q, want agent_message", msgs[0].Type)
+	}
+
+	// The non-agent control message must remain.
+	st := b.GetRun("receiver")
+	st.Mu.Lock()
+	remaining := len(st.ControlQueue)
+	st.Mu.Unlock()
+	if remaining != 1 {
+		t.Errorf("expected 1 non-agent control message to remain, got %d", remaining)
+	}
+
+	// Draining again yields nothing.
+	msgs2, err := b.DrainAgentMessages("receiver")
+	if err != nil {
+		t.Fatalf("drain again: %v", err)
+	}
+	if len(msgs2) != 0 {
+		t.Errorf("expected 0 after second drain, got %d", len(msgs2))
+	}
+}
