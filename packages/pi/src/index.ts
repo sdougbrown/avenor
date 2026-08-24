@@ -4,6 +4,8 @@ import { Type } from 'typebox'
 import {
   answerPermissionTool,
   askTool,
+  brokerReceiveTool,
+  brokerReplyTool,
   cancelTool,
   dial,
   eventsTool,
@@ -87,6 +89,8 @@ export interface ExtensionDeps {
   followUpTool: typeof followUpTool
   inspectTool: typeof inspectTool
   resultTool: typeof resultTool
+  brokerReceiveTool: typeof brokerReceiveTool
+  brokerReplyTool: typeof brokerReplyTool
   shutdownTool: typeof shutdownTool
   workflowStatusTool: typeof workflowStatusTool
   workflowWaitTool: typeof workflowWaitTool
@@ -107,6 +111,8 @@ const defaultDeps: ExtensionDeps = {
   followUpTool,
   inspectTool,
   resultTool,
+  brokerReceiveTool,
+  brokerReplyTool,
   shutdownTool,
   workflowStatusTool,
   workflowWaitTool,
@@ -117,6 +123,41 @@ const defaultDeps: ExtensionDeps = {
   observeRun,
   dial,
   Supervisor,
+}
+
+
+// Host-side inbound ask reception (sub-agent asks surfaced into the top-level session).
+let hostPollTimer: ReturnType<typeof setInterval> | null = null
+// pending inbound asks keyed by broker message_id, so a host avenor_reply can target them.
+const hostPendingAsks = new Map<string, { from_run_id: string; message_id: string }>()
+
+function stopHostAskPoll(): void {
+  if (hostPollTimer) {
+    clearInterval(hostPollTimer)
+    hostPollTimer = null
+  }
+}
+
+async function startHostAskPoll(ctx: ExtensionContext): Promise<void> {
+  stopHostAskPoll()
+  // Poll every 2s (mirrors the sidecar's pollControlLoop cadence) for inbound asks.
+  hostPollTimer = setInterval(async () => {
+    try {
+      const { asks } = await deps.brokerReceiveTool({})
+      for (const ask of asks) {
+        hostPendingAsks.set(ask.message_id, { from_run_id: ask.from_run_id, message_id: ask.message_id })
+        const from = ask.role && ask.role !== 'agent' ? `${ask.from_run_id} (${ask.role})` : ask.from_run_id
+        const body =
+          `**📨 Ask from sub-agent** (\`${from}\`)\n\n` +
+          `${ask.message}\n\n` +
+          `To answer, use the intercom tool: avenor_reply({ from_run_id: ${JSON.stringify(ask.from_run_id)}, reply_to_message_id: ${JSON.stringify(ask.message_id)}, message: "..." })`
+        await ctx.sendUserMessage(body, { deliverAs: 'steer' as const })
+      }
+    } catch (error) {
+      // No supervisor/broker yet — this is expected until a supervisor starts a broker.
+    }
+  }, 2000)
+  hostPollTimer.unref?.()
 }
 
 export function statusSupervisorId(
@@ -951,10 +992,13 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       lastStatusEntries = []
       pollingErrorCount = 0
       pollingErrors.length = 0
+      void startHostAskPoll(ctx)
     })
 
     pi.on('session_shutdown', async () => {
       await stopPolling()
+      stopHostAskPoll()
+      hostPendingAsks.clear()
       sessionCtx = null
     })
 
@@ -1415,6 +1459,39 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       }),
       async execute(_toolCallId, params) {
         return askTool({ toRunId: params.to_run_id, message: params.message })
+      },
+    })
+
+    pi.registerTool({
+      name: 'avenor_reply',
+      label: 'Avenor Reply (host)',
+      description: 'Reply to an inbound ask received from a sub-agent. Answer the most recent ask from a given sub-agent, or reply to a specific message_id from avenor_ask.',
+      parameters: Type.Object({
+        from_run_id: Type.Optional(Type.String({ description: 'Sub-agent run id to reply to (the asker)' })),
+        reply_to_message_id: Type.Optional(Type.String({ description: 'The ask\'s broker message id to answer specifically' })),
+        message: Type.String({ description: 'Your answer' }),
+        supervisor_id: Type.Optional(Type.String({ description: 'Reuse an existing supervisor by socket path' })),
+      }),
+      async execute(_toolCallId, params) {
+        // Resolve the asker + message id: prefer explicit params, else the
+        // most recent pending ask from that sub-agent.
+        let fromRunId = params.from_run_id
+        let messageId = params.reply_to_message_id
+        if (!messageId) {
+          let match: { from_run_id: string; message_id: string } | undefined
+          for (const [, pending] of hostPendingAsks) {
+            if (pending.from_run_id === fromRunId && (!match || pending.message_id > match.message_id)) {
+              match = pending
+            }
+          }
+          if (match) messageId = match.message_id
+        }
+        if (!fromRunId || !messageId) {
+          return { content: [{ type: 'text', text: 'No pending ask found to reply to. Pass from_run_id and/or reply_to_message_id.' }], details: { error: true } }
+        }
+        await deps.brokerReplyTool({ toRunId: fromRunId, replyTo: messageId, message: params.message, supervisorId: params.supervisor_id })
+        hostPendingAsks.delete(messageId)
+        return { content: [{ type: 'text', text: 'Reply sent' }] }
       },
     })
 
