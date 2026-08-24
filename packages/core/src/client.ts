@@ -533,6 +533,7 @@ export class Client {
     }
     if (params.activation_id !== undefined) command.activation_id = params.activation_id
     return this.workflowCommand(params.workflow_id, command)
+  }
 
   async brokerSend(fromRunId: string, toRunId: string, message: string, role?: string): Promise<void> {
     await this.call('broker_send', { from_run_id: fromRunId, to_run_id: toRunId, message, role: role ?? 'agent' })
