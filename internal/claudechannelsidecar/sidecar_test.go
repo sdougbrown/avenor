@@ -502,7 +502,7 @@ func TestAvenorUpsendToolCallIncludesRole(t *testing.T) {
 
 	input := bytes.NewBufferString(
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}` + "\n" +
-			`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"avenor_upsend","arguments":{"to_run_id":"parent_run","message":"status update","role":"reviewer"}}}` + "\n",
+			`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"avenor_send","arguments":{"to_run_id":"parent_run","message":"status update","role":"reviewer"}}}` + "\n",
 	)
 	var stdout bytes.Buffer
 	ctx, cancel := context.WithCancel(context.Background())
@@ -528,8 +528,8 @@ func TestAvenorUpsendToolCallIncludesRole(t *testing.T) {
 	result := responses[1]["result"].(map[string]any)
 	content := result["content"].([]any)
 	text := content[0].(map[string]any)["text"].(string)
-	if text != `sent upward message to run "parent_run"` {
-		t.Fatalf("avenor_upsend result text = %q", text)
+	if text != `sent message to run "parent_run"` {
+		t.Fatalf("avenor_send result text = %q", text)
 	}
 	payload := sentBody["payload"].(map[string]any)
 	if payload["role"] != "reviewer" {

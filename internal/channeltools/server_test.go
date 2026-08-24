@@ -47,18 +47,26 @@ func TestToolListIncludesAvenorUpsend(t *testing.T) {
 	responses := decodeRPCResponses(t, stdout.Bytes())
 	tools := responses[1]["result"].(map[string]any)["tools"].([]any)
 	foundSend := false
-	foundUpsend := false
+	foundAsk := false
+	foundPeers := false
+	foundCancel := false
 	for _, tool := range tools {
 		m := tool.(map[string]any)
-		switch m["name"] {
-		case "avenor_send":
+		if m["name"] == "avenor_send" {
 			foundSend = true
-		case "avenor_upsend":
-			foundUpsend = true
+		}
+		if m["name"] == "avenor_ask" {
+			foundAsk = true
+		}
+		if m["name"] == "avenor_peers" {
+			foundPeers = true
+		}
+		if m["name"] == "avenor_cancel" {
+			foundCancel = true
 		}
 	}
-	if !foundSend || !foundUpsend {
-		t.Fatalf("tools/list missing send tools: %#v", tools)
+	if !foundSend || !foundAsk || !foundPeers || !foundCancel {
+		t.Fatalf("tools/list missing send/ask/peers/cancel: %#v", tools)
 	}
 }
 
@@ -81,7 +89,7 @@ func TestAvenorUpsendToolCallIncludesRole(t *testing.T) {
 
 	input := bytes.NewBufferString(
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}` + "\n" +
-			`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"avenor_upsend","arguments":{"to_run_id":"parent_run","message":"status update","role":"reviewer"}}}` + "\n",
+			`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"avenor_send","arguments":{"to_run_id":"parent_run","message":"status update","role":"reviewer"}}}` + "\n",
 	)
 	var stdout bytes.Buffer
 	err := Run(context.Background(), Options{
@@ -98,8 +106,8 @@ func TestAvenorUpsendToolCallIncludesRole(t *testing.T) {
 	}
 	responses := decodeRPCResponses(t, stdout.Bytes())
 	text := responses[1]["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
-	if text != `sent upward message to run "parent_run"` {
-		t.Fatalf("avenor_upsend result text = %q", text)
+	if text != `sent message to run "parent_run"` {
+		t.Fatalf("avenor_send result text = %q", text)
 	}
 	payload := sentBody["payload"].(map[string]any)
 	if payload["message"] != "status update" {

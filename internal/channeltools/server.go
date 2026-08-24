@@ -113,7 +113,7 @@ func (s *Server) handleRequest(ctx context.Context, method string, params json.R
 
 func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage) (any, error) {
 	switch name {
-	case "avenor_send", "avenor_upsend":
+	case "avenor_send":
 		var p struct {
 			ToRunID string `json:"to_run_id"`
 			Message string `json:"message"`
@@ -137,11 +137,7 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 		}); err != nil {
 			return nil, err
 		}
-		resultText := fmt.Sprintf("sent message to run %q", p.ToRunID)
-		if name == "avenor_upsend" {
-			resultText = fmt.Sprintf("sent upward message to run %q", p.ToRunID)
-		}
-		return map[string]any{"content": []map[string]any{{"type": "text", "text": resultText}}}, nil
+		return map[string]any{"content": []map[string]any{{"type": "text", "text": fmt.Sprintf("sent message to run %q", p.ToRunID)}}}, nil
 	case "avenor_ask":
 		var p struct {
 			ToRunID string `json:"to_run_id"`
@@ -252,19 +248,6 @@ func toolSchemas() []map[string]any {
 					"to_run_id": map[string]any{"type": "string"},
 					"message":   map[string]any{"type": "string"},
 					"role":      map[string]any{"type": "string", "description": "Role to display on the receiving side (defaults to agent)"},
-				},
-				"required": []string{"to_run_id", "message"},
-			},
-		},
-		{
-			"name":        "avenor_upsend",
-			"description": "Send a message upward to your parent or supervisor agent (fire-and-forget)",
-			"inputSchema": map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"to_run_id": map[string]any{"type": "string", "description": "Target parent/supervisor run ID"},
-					"message":   map[string]any{"type": "string", "description": "Message content"},
-					"role":      map[string]any{"type": "string", "description": "Role to display (e.g., reviewer, implementer)"},
 				},
 				"required": []string{"to_run_id", "message"},
 			},
