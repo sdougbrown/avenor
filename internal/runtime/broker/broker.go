@@ -1204,6 +1204,29 @@ func (b *Broker) PollAgentMessages(ctx context.Context, runID string, onMessage 
 	}
 }
 
+// DrainAgentMessages returns and clears the agent_message control messages
+// queued for runID (asks / sends from peers). Non-agent control messages are
+// left untouched so other consumers still see them.
+func (b *Broker) DrainAgentMessages(runID string) ([]ControlMessage, error) {
+	st := b.GetRun(runID)
+	if st == nil {
+		return nil, fmt.Errorf("run not found: %s", runID)
+	}
+	st.Mu.Lock()
+	defer st.Mu.Unlock()
+	var out []ControlMessage
+	remaining := st.ControlQueue[:0]
+	for _, msg := range st.ControlQueue {
+		if msg.Type == "agent_message" {
+			out = append(out, *msg)
+			continue
+		}
+		remaining = append(remaining, msg)
+	}
+	st.ControlQueue = remaining
+	return out, nil
+}
+
 // pruneAskEdgesLoop periodically removes expired ask edges from all runs.
 func (b *Broker) pruneAskEdgesLoop() {
 	ticker := time.NewTicker(askEdgePruneInterval)

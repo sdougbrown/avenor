@@ -396,6 +396,11 @@ func NewSupervisor(cfg Config) *Supervisor {
 	sup.broker = broker.New("")
 	if err := sup.broker.Start(); err != nil {
 		// Non-fatal — broker is optional. Runs will still work without it.
+	} else {
+		// Register the supervisor run eagerly so sub-agents can target it for
+		// asks before the host performs any outbound broker call. Without this,
+		// a child asking its parent first would fail "to run not found".
+		sup.registerBrokerRun()
 	}
 	sup.httpServerCond = sync.NewCond(&sup.httpServerMu)
 	sup.capacityCh = make(chan struct{})
@@ -1365,6 +1370,59 @@ func (s *Supervisor) BrokerCancel(messageID string) error {
 	})
 	return err
 }
+
+// BrokerReceive drains inbound agent_message control messages (asks from
+// sub-agents) queued for the supervisor run, returning them structured so the
+// top-level Pi host can surface them in the session and reply.
+func (s *Supervisor) BrokerReceive() (any, error) {
+	if s.broker == nil {
+		return nil, fmt.Errorf("broker not available")
+	}
+	runID, _ := s.registerBrokerRun()
+	msgs, err := s.broker.DrainAgentMessages(runID)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]map[string]any, 0, len(msgs))
+	for _, msg := range msgs {
+		var am broker.AgentMessage
+		if err := json.Unmarshal(msg.Payload, &am); err != nil {
+			continue
+		}
+		entry := map[string]any{
+			"from_run_id": msg.FromRunID,
+			"message_id":  am.ID,
+			"message":     am.Message,
+			"role":        am.Role,
+		}
+		result = append(result, entry)
+	}
+	return result, nil
+}
+
+// BrokerReply sends an answer (as the supervisor run) back to the asker for the
+// given ask. replyTo is the original ask message id; toRunID the asker run.
+func (s *Supervisor) BrokerReply(toRunID, replyTo, message string) error {
+	runID, _ := s.registerBrokerRun()
+	payload := map[string]any{
+		"id":          broker.MakeToken()[:16],
+		"from":        runID,
+		"from_run_id": runID,
+		"to_run_id":   toRunID,
+		"message":     message,
+		"role":        "supervisor",
+		"reply_to":    replyTo,
+	}
+	_, err := s.brokerPost("/send", map[string]any{
+		"from_run_id": runID,
+		"to_run_id":   toRunID,
+		"type":        "agent_message",
+		"payload":     payload,
+	})
+	return err
+}
+
+
 
 func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptText string, timeoutSec, maxRetries int) {
 	defer func() {

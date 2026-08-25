@@ -104,6 +104,8 @@ type StableHandler interface {
 	BrokerAsk(toRunID, message, role string) (any, error)
 	BrokerPeers() (any, error)
 	BrokerCancel(messageID string) error
+	BrokerReceive() (any, error)
+	BrokerReply(toRunID, replyTo, message string) error
 
 	// TreeBudgetStatus reports tree-budget diagnostics. A supervisor without an
 	// active budget returns a degraded status map with its reason.
@@ -1243,6 +1245,34 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 			return failure(req.ID, -32602, "invalid params", nil)
 		}
 		if err := s.stableHandler.BrokerCancel(p.MessageID); err != nil {
+			return failure(req.ID, -32000, err.Error(), nil)
+		}
+		return success(req.ID, map[string]any{"ok": true})
+	case "broker_receive":
+		if s.stableHandler == nil {
+			return failure(req.ID, -32601, "method not found", nil)
+		}
+		result, err := s.stableHandler.BrokerReceive()
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), nil)
+		}
+		return success(req.ID, result)
+	case "broker_reply":
+		if s.stableHandler == nil {
+			return failure(req.ID, -32601, "method not found", nil)
+		}
+		if !s.ensureOwner(c) {
+			return failure(req.ID, -32010, "permission_denied", nil)
+		}
+		var p struct {
+			ToRunID  string `json:"to_run_id"`
+			ReplyTo  string `json:"reply_to"`
+			Message  string `json:"message"`
+		}
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return failure(req.ID, -32602, "invalid params", nil)
+		}
+		if err := s.stableHandler.BrokerReply(p.ToRunID, p.ReplyTo, p.Message); err != nil {
 			return failure(req.ID, -32000, err.Error(), nil)
 		}
 		return success(req.ID, map[string]any{"ok": true})

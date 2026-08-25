@@ -552,6 +552,14 @@ export class Client {
     await this.call('broker_cancel', { message_id: messageId })
   }
 
+  async brokerReceive(): Promise<Array<{ from_run_id: string; message_id: string; message: string; role?: string }>> {
+    return await this.call('broker_receive') as Array<{ from_run_id: string; message_id: string; message: string; role?: string }>
+  }
+
+  async brokerReply(toRunId: string, replyTo: string, message: string): Promise<void> {
+    await this.call('broker_reply', { to_run_id: toRunId, reply_to: replyTo, message })
+  }
+
   isClosed(): boolean {
     return this.closed || this.socket.destroyed || this.socket.writableEnded
   }

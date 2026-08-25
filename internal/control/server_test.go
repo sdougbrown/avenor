@@ -1613,6 +1613,14 @@ func (m *mockStableHandler) BrokerCancel(messageID string) error {
 	return nil
 }
 
+func (m *mockStableHandler) BrokerReceive() (any, error) {
+	return []any{}, nil
+}
+
+func (m *mockStableHandler) BrokerReply(toRunID, replyTo, message string) error {
+	return nil
+}
+
 func (m *mockStableHandler) RuntimeSendToParent(runtimeID, message string) error {
 	m.sendToParentCalled++
 	m.sendToParentMessages = append(m.sendToParentMessages, message)
