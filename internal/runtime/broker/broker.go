@@ -117,6 +117,32 @@ type PermissionState struct {
 	CreatedAt time.Time
 }
 
+// AskEdge tracks a pending ask (blocking request for reply).
+type AskEdge struct {
+	FromRunID string    `json:"from_run_id"`
+	ToRunID   string    `json:"to_run_id"`
+	MessageID string    `json:"message_id"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// AskReply carries a reply routed to a waiting sender.
+type AskReply struct {
+	MessageID string          `json:"message_id"`
+	FromRunID string          `json:"from_run_id"`
+	Payload   json.RawMessage `json:"payload,omitempty"`
+}
+
+// SessionInfo describes a registered run for peer discovery.
+type SessionInfo struct {
+	RunID    string `json:"run_id"`
+	Label    string `json:"label,omitempty"`
+	Backend  string `json:"backend,omitempty"`
+	Model    string `json:"model,omitempty"`
+	Dir      string `json:"dir,omitempty"`
+	Status   string `json:"status,omitempty"`
+	LastSeen int64  `json:"last_seen"`
+}
+
 // RunState holds all per-run broker state.
 type RunState struct {
 	RunID               string
@@ -131,7 +157,23 @@ type RunState struct {
 	PermissionDecisions map[string]string // requestID -> "allow" or "deny"
 	Mu                  sync.Mutex
 	Notify              chan struct{}
+
+	// Ask/reply tracking
+	PendingAsks  map[string]*AskEdge      // messageID -> edge (sender is waiting)
+	WaitingReply map[string]chan AskReply // messageID -> buffered(1) channel for /wait_reply
+
+	// Session metadata for peer discovery
+	Info *SessionInfo
 }
+
+const (
+	// DefaultAskTimeout is how long a sender waits for a reply before
+	// the ask edge is pruned and the waiter unblocks with a timeout.
+	DefaultAskTimeout = 10 * time.Minute
+
+	// askEdgePruneInterval is how often the broker checks for expired ask edges.
+	askEdgePruneInterval = 30 * time.Second
+)
 
 func (st *RunState) Lock()   { st.Mu.Lock() }
 func (st *RunState) Unlock() { st.Mu.Unlock() }
@@ -255,16 +297,30 @@ type Broker struct {
 	server      *http.Server
 	httpToken   string        // optional global HTTP auth token for push-control endpoint
 	pollTimeout time.Duration // max wait for poll-control before returning empty
+
+	// Global ask-edge registry for cross-run lookups.
+	// Keys are "senderRunID/messageID" to prevent cross-sender collisions.
+	globalAskEdgesMu    sync.RWMutex
+	globalAskEdges      map[string]*AskEdge      // "senderRunID/messageID" -> edge
+	globalReplyChannels map[string]chan AskReply // "sender/messageID" -> reply channel
+
+	// Shutdown signal for background goroutines.
+	closeOnce sync.Once
+	closeCh   chan struct{}
 }
 
 // New creates a broker on an ephemeral loopback port.
 // The resulting addr is available after Start.
 func New(globalToken string) *Broker {
-	return &Broker{
-		runs:        make(map[string]*RunState),
-		httpToken:   globalToken,
-		pollTimeout: 2 * time.Second,
+	b := &Broker{
+		runs:                make(map[string]*RunState),
+		httpToken:           globalToken,
+		pollTimeout:         2 * time.Second,
+		globalAskEdges:      make(map[string]*AskEdge),
+		globalReplyChannels: make(map[string]chan AskReply),
+		closeCh:             make(chan struct{}),
 	}
+	return b
 }
 
 func MakeToken() string {
@@ -296,17 +352,24 @@ func (b *Broker) Start() error {
 	router.HandleFunc("/finish", b.withMethod("POST", b.withAuth(b.handleFinish)))
 	router.HandleFunc("/reply", b.withMethod("POST", b.withAuth(b.handleReply)))
 	router.HandleFunc("/send", b.withMethod("POST", b.withAuth(b.handleSend)))
+	router.HandleFunc("/wait_reply", b.withMethod("POST", b.withAuth(b.handleWaitReply)))
+	router.HandleFunc("/cancel_message", b.withMethod("POST", b.withAuth(b.handleCancelMessage)))
+	router.HandleFunc("/sessions", b.withMethod("GET", b.handleSessions))
 	router.HandleFunc("/permission_request", b.withMethod("POST", b.withAuth(b.handlePermissionRequest)))
 	router.HandleFunc("/permission", b.withMethod("POST", b.withAuth(b.handlePermission)))
 
 	b.server = &http.Server{
 		Handler:      router,
 		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 5 * time.Second,
+		WriteTimeout: 30 * time.Second, // /wait_reply long-poll handled by handler's time.After (DefaultAskTimeout)
 	}
 	go func() {
 		_ = b.server.Serve(l)
 	}()
+
+	// Start periodic ask-edge cleanup
+	go b.pruneAskEdgesLoop()
+
 	return nil
 }
 
@@ -320,6 +383,9 @@ func (b *Broker) Addr() string {
 }
 
 func (b *Broker) Stop() error {
+	b.closeOnce.Do(func() {
+		close(b.closeCh)
+	})
 	if b.server != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -453,6 +519,8 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 		Notify:              make(chan struct{}, 1),
 		PermissionRequests:  make(map[string]*PermissionState),
 		PermissionDecisions: make(map[string]string),
+		PendingAsks:         make(map[string]*AskEdge),
+		WaitingReply:        make(map[string]chan AskReply),
 	}
 	b.runs[body.RunID] = st
 	b.mu.Unlock()
@@ -623,6 +691,9 @@ func (b *Broker) handlePermission(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleSend routes a message from one run to another. It supports
+// fire-and-forget (no special fields), ask (expects_reply=true), and
+// reply (reply_to is set).
 func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 	// withAuth already read and replaced the body. Parse the full body
 	// once to extract both credentials and send fields.
@@ -660,6 +731,161 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Parse the agent_message payload to inspect ask/reply fields.
+	msgID := ""
+	replyTo := ""
+	expectsReply := false
+	if fullBody.Type == "agent_message" && len(fullBody.Payload) > 0 {
+		var am AgentMessage
+		if err := json.Unmarshal(fullBody.Payload, &am); err == nil {
+			msgID = am.ID
+			replyTo = am.ReplyTo
+			expectsReply = am.ExpectsReply
+		}
+	}
+
+	if expectsReply {
+		// Sender expects a reply -- register a pending ask edge.
+		// The edge is stored on the SENDER's (fromSt) RunState so that
+		// wait_reply and cancel_message (both called by the sender) can
+		// find it without a global lookup.
+		if msgID == "" {
+			http.Error(w, "expects_reply requires a message id", http.StatusBadRequest)
+			return
+		}
+
+		sender := fullBody.FromRunID
+		target := fullBody.ToRunID
+
+		b.mu.RLock()
+		_, toOk := b.runs[target]
+		b.mu.RUnlock()
+		if !toOk {
+			http.Error(w, "to run not found", http.StatusNotFound)
+			return
+		}
+
+		// Mutual-ask guard and edge registration are performed atomically
+		// under the global registry lock. This closes the TOCTOU window:
+		// two concurrent asks in opposite directions (A→B and B→A) serialize
+		// here, so whichever registers first is visible to the other, which
+		// then refuses with a mutual-ask conflict.
+		key := edgeKey(sender, msgID)
+		b.globalAskEdgesMu.Lock()
+		if _, dup := b.globalAskEdges[key]; dup {
+			b.globalAskEdgesMu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": "message id already in use"})
+			return
+		}
+		// Refuse this ask if the target is already waiting on a pending ask
+		// from the sender (i.e. the target has an edge pointing back at us).
+		for _, e := range b.globalAskEdges {
+			if e.FromRunID == target && e.ToRunID == sender {
+				b.globalAskEdgesMu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusConflict)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": "mutual ask refused"})
+				return
+			}
+		}
+		edge := &AskEdge{
+			FromRunID: sender,
+			ToRunID:   target,
+			MessageID: msgID,
+			CreatedAt: time.Now(),
+		}
+		replyCh := make(chan AskReply, 1)
+		b.globalAskEdges[key] = edge
+		b.globalReplyChannels[key] = replyCh
+		b.globalAskEdgesMu.Unlock()
+
+		// Mirror the edge on the SENDER's RunState so wait_reply and
+		// cancel_message can find it without a global lookup.
+		if fromSt.PendingAsks == nil {
+			fromSt.PendingAsks = make(map[string]*AskEdge)
+		}
+		if fromSt.WaitingReply == nil {
+			fromSt.WaitingReply = make(map[string]chan AskReply)
+		}
+		fromSt.Mu.Lock()
+		fromSt.PendingAsks[msgID] = edge
+		fromSt.WaitingReply[msgID] = replyCh
+		fromSt.Mu.Unlock()
+
+		// Deliver the message to the target's control queue as usual.
+		err = b.SendTo(fullBody.FromRunID, fullBody.ToRunID, fullBody.Type, fullBody.Payload, "")
+		if err != nil {
+			// Roll back ask edge on delivery failure.
+			b.globalAskEdgesMu.Lock()
+			delete(b.globalAskEdges, key)
+			delete(b.globalReplyChannels, key)
+			b.globalAskEdgesMu.Unlock()
+			fromSt.Mu.Lock()
+			delete(fromSt.PendingAsks, msgID)
+			delete(fromSt.WaitingReply, msgID)
+			fromSt.Mu.Unlock()
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"queued": true, "message_id": msgID, "expects_reply": true})
+		return
+	}
+
+	if replyTo != "" {
+		// This is a reply to a previous ask. The asker is the ToRunID
+		// (the reply's destination). Look up the channel from the
+		// global registry using the namespaced key.
+		askerKey := edgeKey(fullBody.ToRunID, replyTo)
+		b.globalAskEdgesMu.RLock()
+		edge, edgeOk := b.globalAskEdges[askerKey]
+		replyCh, chOk := b.globalReplyChannels[askerKey]
+		b.globalAskEdgesMu.RUnlock()
+
+		if !edgeOk || !chOk {
+			// Edge may have timed out; deliver as fire-and-forget instead.
+			err = b.SendTo(fullBody.FromRunID, fullBody.ToRunID, fullBody.Type, fullBody.Payload, "")
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"queued": true, "note": "reply_to edge not found, delivered as fire-and-forget"})
+			return
+		}
+
+		// Authorization: only the intended ask target may reply.
+		if edge.ToRunID != fullBody.FromRunID {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": "not the target of this ask"})
+			return
+		}
+
+		// Route the reply to the waiting sender's channel.
+		// Do NOT clean up registries here — the wait_reply handler
+		// will do that after receiving.
+		select {
+		case replyCh <- AskReply{
+			MessageID: replyTo,
+			FromRunID: fullBody.FromRunID,
+			Payload:   fullBody.Payload,
+		}:
+		default:
+			// Channel already has a value (timeout or cancel signal).
+			// The waiter will get that signal instead; this reply
+			// is dropped. This is an edge case that indicates a race
+			// between the reply arriving and a timeout/cancel.
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"queued": true, "reply_to": replyTo})
+		return
+	}
+
+	// Fire-and-forget: deliver to the target's control queue.
 	err = b.SendTo(fullBody.FromRunID, fullBody.ToRunID, fullBody.Type, fullBody.Payload, "")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -667,6 +893,250 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]bool{"queued": true})
+}
+
+// handleWaitReply long-polls for a reply to a previously sent ask.
+// The caller must have previously sent a message with expects_reply=true
+// via /send. The response blocks until a matching reply arrives or
+// the ask timeout expires.
+func (b *Broker) handleWaitReply(w http.ResponseWriter, r *http.Request) {
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	var fullBody struct {
+		RunID      string `json:"run_id"`
+		Token      string `json:"token"`
+		WaitingFor string `json:"waiting_for"`
+	}
+	if err := json.Unmarshal(bodyBytes, &fullBody); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if fullBody.WaitingFor == "" {
+		http.Error(w, "missing waiting_for", http.StatusBadRequest)
+		return
+	}
+
+	b.mu.RLock()
+	_, ok := b.runs[fullBody.RunID]
+	b.mu.RUnlock()
+	if !ok {
+		http.Error(w, "run not found", http.StatusNotFound)
+		return
+	}
+
+	// Only the original sender can wait for a reply. Namespace the key
+	// by sender run ID to prevent cross-session ask ID collisions.
+	key := edgeKey(fullBody.RunID, fullBody.WaitingFor)
+	b.globalAskEdgesMu.RLock()
+	replyCh, chOk := b.globalReplyChannels[key]
+	edge, edgeOk := b.globalAskEdges[key]
+	b.globalAskEdgesMu.RUnlock()
+
+	if !chOk || !edgeOk {
+		http.Error(w, "no pending ask for this message id", http.StatusNotFound)
+		return
+	}
+
+	// Authorization: only the sender of the original ask may wait for its reply.
+	if edge.FromRunID != fullBody.RunID {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "not the sender of this ask"})
+		return
+	}
+
+	// Wait for the reply with a timeout.
+	var reply AskReply
+	select {
+	case reply = <-replyCh:
+		// Got the reply. Clean up both global and per-run registries.
+		b.globalAskEdgesMu.Lock()
+		delete(b.globalAskEdges, key)
+		delete(b.globalReplyChannels, key)
+		b.globalAskEdgesMu.Unlock()
+		if ownerSt := b.GetRun(edge.FromRunID); ownerSt != nil {
+			ownerSt.Mu.Lock()
+			delete(ownerSt.PendingAsks, fullBody.WaitingFor)
+			delete(ownerSt.WaitingReply, fullBody.WaitingFor)
+			ownerSt.Mu.Unlock()
+		}
+		respondWaitReply(w, reply, fullBody.WaitingFor)
+	case <-time.After(DefaultAskTimeout):
+		b.globalAskEdgesMu.Lock()
+		delete(b.globalAskEdges, key)
+		delete(b.globalReplyChannels, key)
+		b.globalAskEdgesMu.Unlock()
+		if ownerSt := b.GetRun(edge.FromRunID); ownerSt != nil {
+			ownerSt.Mu.Lock()
+			delete(ownerSt.PendingAsks, fullBody.WaitingFor)
+			delete(ownerSt.WaitingReply, fullBody.WaitingFor)
+			ownerSt.Mu.Unlock()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusGatewayTimeout)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"timeout":    true,
+			"message_id": fullBody.WaitingFor,
+		})
+	case <-r.Context().Done():
+		b.globalAskEdgesMu.Lock()
+		delete(b.globalAskEdges, key)
+		delete(b.globalReplyChannels, key)
+		b.globalAskEdgesMu.Unlock()
+		if ownerSt := b.GetRun(edge.FromRunID); ownerSt != nil {
+			ownerSt.Mu.Lock()
+			delete(ownerSt.PendingAsks, fullBody.WaitingFor)
+			delete(ownerSt.WaitingReply, fullBody.WaitingFor)
+			ownerSt.Mu.Unlock()
+		}
+	}
+}
+
+// respondWaitReply writes the wait_reply response for a received AskReply.
+// If from_run_id is empty, the reply is a system signal (timeout or cancel).
+func respondWaitReply(w http.ResponseWriter, reply AskReply, waitingFor string) {
+	if reply.FromRunID == "" {
+		// System signal -- check payload for type.
+		var signal struct {
+			Timeout   *bool `json:"timeout,omitempty"`
+			Cancelled *bool `json:"cancelled,omitempty"`
+		}
+		_ = json.Unmarshal(reply.Payload, &signal)
+		if signal.Timeout != nil && *signal.Timeout {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusGatewayTimeout)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"timeout":    true,
+				"message_id": waitingFor,
+			})
+			return
+		}
+		if signal.Cancelled != nil && *signal.Cancelled {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"cancelled":  true,
+				"message_id": waitingFor,
+			})
+			return
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"message_id":  reply.MessageID,
+		"from_run_id": reply.FromRunID,
+		"payload":     reply.Payload,
+	})
+}
+
+// edgeKey builds a namespaced key for the global ask registry.
+func edgeKey(runID, messageID string) string {
+	return runID + "/" + messageID
+}
+
+// handleCancelMessage cancels a pending ask by message ID.
+func (b *Broker) handleCancelMessage(w http.ResponseWriter, r *http.Request) {
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	var fullBody struct {
+		RunID           string `json:"run_id"`
+		Token           string `json:"token"`
+		CancelMessageID string `json:"cancel_message_id"`
+	}
+	if err := json.Unmarshal(bodyBytes, &fullBody); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if fullBody.CancelMessageID == "" {
+		http.Error(w, "missing cancel_message_id", http.StatusBadRequest)
+		return
+	}
+
+	b.mu.RLock()
+	_, ok := b.runs[fullBody.RunID]
+	b.mu.RUnlock()
+	if !ok {
+		http.Error(w, "run not found", http.StatusNotFound)
+		return
+	}
+
+	// Cancel only works for asks sent by this run, so the key is scoped to the sender.
+	key := edgeKey(fullBody.RunID, fullBody.CancelMessageID)
+	b.globalAskEdgesMu.RLock()
+	edge, edgeOk := b.globalAskEdges[key]
+	replyCh, chOk := b.globalReplyChannels[key]
+	b.globalAskEdgesMu.RUnlock()
+
+	if !edgeOk {
+		http.Error(w, "no pending ask for this message id", http.StatusNotFound)
+		return
+	}
+
+	// Verify the caller owns this ask.
+	if edge.FromRunID != fullBody.RunID {
+		http.Error(w, "not the sender of this ask", http.StatusForbidden)
+		return
+	}
+
+	// Deliver a cancellation signal to the waiting channel.
+	if chOk {
+		select {
+		case replyCh <- AskReply{
+			MessageID: fullBody.CancelMessageID,
+			FromRunID: "",
+			Payload:   json.RawMessage(`{"cancelled": true}`),
+		}:
+		default:
+			// Channel full: the waiter is no longer listening (already got a signal),
+			// which is harmless -- the edge will be cleaned up below.
+		}
+	}
+
+	// Clean up all registries.
+	b.globalAskEdgesMu.Lock()
+	delete(b.globalAskEdges, key)
+	delete(b.globalReplyChannels, key)
+	b.globalAskEdgesMu.Unlock()
+	if ownerSt := b.GetRun(edge.FromRunID); ownerSt != nil {
+		ownerSt.Mu.Lock()
+		delete(ownerSt.PendingAsks, fullBody.CancelMessageID)
+		delete(ownerSt.WaitingReply, fullBody.CancelMessageID)
+		ownerSt.Mu.Unlock()
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"cancelled": true, "message_id": fullBody.CancelMessageID})
+}
+
+// handleSessions returns a list of all registered runs and their metadata.
+func (b *Broker) handleSessions(w http.ResponseWriter, r *http.Request) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	sessions := make([]SessionInfo, 0, len(b.runs))
+	for _, st := range b.runs {
+		st.Mu.Lock()
+		info := SessionInfo{RunID: st.RunID}
+		if st.Info != nil {
+			info.Label = st.Info.Label
+			info.Backend = st.Info.Backend
+			info.Model = st.Info.Model
+			info.Dir = st.Info.Dir
+			info.Status = st.Info.Status
+		}
+		info.LastSeen = st.LastSeen.Unix()
+		st.Mu.Unlock()
+		sessions = append(sessions, info)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"sessions": sessions})
 }
 
 func (b *Broker) ingest(w http.ResponseWriter, runID string, fn func(*RunState)) {
@@ -718,10 +1188,93 @@ func (b *Broker) PollAgentMessages(ctx context.Context, runID string, onMessage 
 			if err := json.Unmarshal(msg.Payload, &payload); err != nil || payload.Message == "" {
 				continue
 			}
-			wrapped := channelwrap.ChannelWrap(payload.Message, channelwrap.AgentName("agent"), map[string]string{"from_run_id": msg.FromRunID})
+
+			// Include from_run_id in the channel metadata so the
+			// receiving agent knows which run sent the message.
+			meta := map[string]string{"from_run_id": msg.FromRunID}
+			if msg.FromRunID != "" {
+				meta["from_run_id"] = msg.FromRunID
+			}
+			wrapped := channelwrap.ChannelWrap(payload.Message, channelwrap.AgentName("agent"), meta)
 			onMessage(wrapped)
 		}
 	}
+}
+
+// pruneAskEdgesLoop periodically removes expired ask edges from all runs.
+func (b *Broker) pruneAskEdgesLoop() {
+	ticker := time.NewTicker(askEdgePruneInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-b.closeCh:
+			return
+		case <-ticker.C:
+			b.pruneExpiredAskEdges()
+		}
+	}
+}
+
+// pruneExpiredAskEdges removes ask edges older than DefaultAskTimeout and
+// unblocks any waiters with a timeout signal.
+func (b *Broker) pruneExpiredAskEdges() {
+	now := time.Now()
+	b.mu.RLock()
+	runIDs := make([]string, 0, len(b.runs))
+	for id := range b.runs {
+		runIDs = append(runIDs, id)
+	}
+	b.mu.RUnlock()
+
+	for _, runID := range runIDs {
+		st := b.GetRun(runID)
+		if st == nil {
+			continue
+		}
+		st.Mu.Lock()
+		for msgID, edge := range st.PendingAsks {
+			if now.Sub(edge.CreatedAt) > DefaultAskTimeout {
+				key := edgeKey(edge.FromRunID, msgID)
+				// Signal any waiter, then remove the edge from every registry.
+				// Deleting here (rather than deferring to /wait_reply) prevents
+				// these entries leaking when no one ever calls /wait_reply. A
+				// concurrent /wait_reply that already captured the channel still
+				// receives the timeout signal before the entry is removed.
+				b.globalAskEdgesMu.Lock()
+				if ch, chOk := b.globalReplyChannels[key]; chOk {
+					select {
+					case ch <- AskReply{
+						MessageID: msgID,
+						FromRunID: "",
+						Payload:   json.RawMessage(`{"timeout": true}`),
+					}:
+					default:
+					}
+				}
+				delete(b.globalAskEdges, key)
+				delete(b.globalReplyChannels, key)
+				b.globalAskEdgesMu.Unlock()
+				delete(st.PendingAsks, msgID)
+				delete(st.WaitingReply, msgID)
+			}
+		}
+		st.Mu.Unlock()
+	}
+}
+
+// UpdateSessionInfo sets or updates the metadata for a registered run.
+func (b *Broker) UpdateSessionInfo(runID string, info *SessionInfo) {
+	st := b.GetRun(runID)
+	if st == nil {
+		return
+	}
+	st.Mu.Lock()
+	if info != nil {
+		info.LastSeen = time.Now().Unix()
+		info.RunID = runID
+	}
+	st.Info = info
+	st.Mu.Unlock()
 }
 
 // --- accessors ---
@@ -747,6 +1300,8 @@ func (b *Broker) CreateRun(runID string) (string, error) {
 		Notify:              make(chan struct{}, 1),
 		PermissionRequests:  make(map[string]*PermissionState),
 		PermissionDecisions: make(map[string]string),
+		PendingAsks:         make(map[string]*AskEdge),
+		WaitingReply:        make(map[string]chan AskReply),
 	}
 	b.runs[runID] = st
 	return st.Token, nil
@@ -768,6 +1323,8 @@ func (b *Broker) EnsureRun(runID string) (string, bool) {
 		Notify:              make(chan struct{}, 1),
 		PermissionRequests:  make(map[string]*PermissionState),
 		PermissionDecisions: make(map[string]string),
+		PendingAsks:         make(map[string]*AskEdge),
+		WaitingReply:        make(map[string]chan AskReply),
 	}
 	b.runs[runID] = st
 	return st.Token, true
@@ -777,8 +1334,28 @@ func (b *Broker) EnsureRun(runID string) (string, bool) {
 // does not exist.
 func (b *Broker) DeleteRun(runID string) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	delete(b.runs, runID)
+	st, ok := b.runs[runID]
+	if ok {
+		delete(b.runs, runID)
+	}
+	b.mu.Unlock()
+	if !ok {
+		return
+	}
+	// Remove any pending ask edges this run registered as a sender so they
+	// don't leak in the global registries (no owner is left to ever call
+	// /wait_reply or /cancel_message).
+	st.Mu.Lock()
+	for _, edge := range st.PendingAsks {
+		key := edgeKey(edge.FromRunID, edge.MessageID)
+		b.globalAskEdgesMu.Lock()
+		delete(b.globalAskEdges, key)
+		delete(b.globalReplyChannels, key)
+		b.globalAskEdgesMu.Unlock()
+	}
+	st.PendingAsks = nil
+	st.WaitingReply = nil
+	st.Mu.Unlock()
 }
 
 func (b *Broker) RunCount() int {
@@ -815,4 +1392,9 @@ func (b *Broker) Reset() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.runs = make(map[string]*RunState)
+	// Drop orphaned ask/reply registrations so Reset leaves no stale state.
+	b.globalAskEdgesMu.Lock()
+	b.globalAskEdges = make(map[string]*AskEdge)
+	b.globalReplyChannels = make(map[string]chan AskReply)
+	b.globalAskEdgesMu.Unlock()
 }
