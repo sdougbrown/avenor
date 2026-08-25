@@ -446,6 +446,11 @@ func (p *Provider) sessionExists(sessionID string) (string, error) {
 // presencePush writes the current presence state to the broker under the
 // provider's run ID. It sends a complete SessionInfo so the broker's overwrite
 // semantics cleanly reflect the latest values.
+//
+// Context fields (context_pct/context_tokens/context_window) are intentionally
+// omitted: the pi backend exposes no model-context usage data, so there is
+// nothing to report. The ACP provider pushes them because its response
+// payloads carry token counts.
 func (p *Provider) presencePush() {
 	p.mu.Lock()
 	b := p.broker
