@@ -27,11 +27,17 @@ async function executePeersTool(
       return { peers: [] }
     }
 
-    // /sessions requires broker authentication. From a Pi session
-    // running under a supervisor, the child has broker credentials
-    // but the parent Pi session does not. Returns empty until broker
-    // auth propagation is wired through the control protocol.
-    const res = await fetch(sup.brokerUrl + '/sessions')
+    // /sessions requires broker auth. A worker Pi session's parent is the
+    // supervisor, whose broker run id is "supervisor" and whose token is
+    // parentToken (EnsureRun(ParentRunID)). Reuse those to authenticate.
+    const parentToken = sup.parentToken
+    if (!sup.brokerUrl || !parentToken) {
+      // No broker credential available; peers is unavailable until the
+      // control-proxy path carries broker auth.
+      return { peers: [] }
+    }
+    const qs = `?run_id=${encodeURIComponent('supervisor')}&token=${encodeURIComponent(parentToken)}`
+    const res = await fetch(sup.brokerUrl + '/sessions' + qs)
     if (!res.ok) {
       return { peers: [] }
     }

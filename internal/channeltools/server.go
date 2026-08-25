@@ -4,15 +4,16 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"strings"
 	"net/http"
+	"net/url"
 	"os"
+
+	"github.com/sdougbrown/avenor/internal/brokertools"
+	"strings"
 	"sync"
 	"time"
 )
@@ -154,7 +155,7 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 		if role == "" {
 			role = "agent"
 		}
-		msgID := s.makeMsgID()
+		msgID := brokertools.MakeMsgID()
 		if err := s.brokerPost(ctx, "/send", map[string]any{
 			"from_run_id": s.opts.RunID,
 			"to_run_id":   p.ToRunID,
@@ -178,7 +179,7 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 		}, &replyResult); err != nil {
 			return nil, fmt.Errorf("waiting for reply: %w", err)
 		}
-		replyText := extractReplyMessage(replyResult)
+		replyText := brokertools.ExtractReplyMessage(replyResult)
 		return map[string]any{"content": []map[string]any{{"type": "text", "text": fmt.Sprintf("Reply from %s:\n%s", p.ToRunID, replyText)}}}, nil
 	case "avenor_peers":
 		var sessionsResult map[string]any
@@ -288,7 +289,7 @@ func toolSchemas() []map[string]any {
 }
 
 func (s *Server) brokerGet(ctx context.Context, path string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.opts.BrokerURL+path, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.opts.BrokerURL+path+"?run_id="+url.QueryEscape(s.opts.RunID)+"&token="+url.QueryEscape(s.opts.Token), nil)
 	if err != nil {
 		return err
 	}
@@ -305,32 +306,6 @@ func (s *Server) brokerGet(ctx context.Context, path string, out any) error {
 		return json.NewDecoder(resp.Body).Decode(out)
 	}
 	return nil
-}
-
-func (s *Server) makeMsgID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
-}
-
-func extractReplyMessage(result map[string]any) string {
-	if p, ok := result["payload"]; ok {
-		if payloadBytes, err := json.Marshal(p); err == nil {
-			var payload struct {
-				Message string `json:"message"`
-			}
-			if json.Unmarshal(payloadBytes, &payload) == nil && payload.Message != "" {
-				return payload.Message
-			}
-		}
-	}
-	if timeout, ok := result["timeout"]; ok && timeout == true {
-		return "(timeout: no reply received)"
-	}
-	if b, err := json.Marshal(result); err == nil {
-		return string(b)
-	}
-	return "(empty reply)"
 }
 
 func (s *Server) brokerPost(ctx context.Context, path string, body map[string]any) error {
