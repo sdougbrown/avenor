@@ -2486,7 +2486,6 @@ func TestBrokerWaitReplyDisconnectCleanup(t *testing.T) {
 	}
 }
 
-
 func TestBrokerDrainAgentMessages(t *testing.T) {
 	b := New("")
 	if err := b.Start(); err != nil {
@@ -2541,5 +2540,86 @@ func TestBrokerDrainAgentMessages(t *testing.T) {
 	}
 	if len(msgs2) != 0 {
 		t.Errorf("expected 0 after second drain, got %d", len(msgs2))
+	}
+}
+
+func TestBrokerSessionInfoContextFields(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	token, err := b.CreateRun("ctx_run")
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+
+	b.UpdateSessionInfo("ctx_run", &SessionInfo{
+		Backend:       "acp",
+		Model:         "test-model",
+		Status:        "idle",
+		ContextPct:    42,
+		ContextTokens: 82000,
+		ContextWindow: 200000,
+	})
+
+	// The stored metadata reflects the new fields.
+	st := b.GetRun("ctx_run")
+	if st == nil {
+		t.Fatal("run not found")
+	}
+	st.Mu.Lock()
+	info := st.Info
+	st.Mu.Unlock()
+	if info == nil {
+		t.Fatal("SessionInfo should not be nil after update")
+	}
+	if info.ContextPct != 42 {
+		t.Errorf("ContextPct = %d, want 42", info.ContextPct)
+	}
+	if info.ContextTokens != 82000 {
+		t.Errorf("ContextTokens = %d, want 82000", info.ContextTokens)
+	}
+	if info.ContextWindow != 200000 {
+		t.Errorf("ContextWindow = %d, want 200000", info.ContextWindow)
+	}
+
+	// /sessions must surface the context fields (with auth).
+	resp, err := http.Get(fmt.Sprintf("http://%s/sessions?run_id=ctx_run&token=%s", b.Addr(), token))
+	if err != nil {
+		t.Fatalf("sessions: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("sessions status = %d", resp.StatusCode)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	sessions, _ := body["sessions"].([]any)
+	var found bool
+	for _, s := range sessions {
+		entry, ok := s.(map[string]any)
+		if !ok {
+			continue
+		}
+		if entry["run_id"] == "ctx_run" {
+			found = true
+			if pct, _ := entry["context_pct"].(float64); int(pct) != 42 {
+				t.Errorf("context_pct = %v, want 42", entry["context_pct"])
+			}
+			if toks, _ := entry["context_tokens"].(float64); int(toks) != 82000 {
+				t.Errorf("context_tokens = %v, want 82000", entry["context_tokens"])
+			}
+			if win, _ := entry["context_window"].(float64); int(win) != 200000 {
+				t.Errorf("context_window = %v, want 200000", entry["context_window"])
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("ctx_run not found in sessions list")
 	}
 }
