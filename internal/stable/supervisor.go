@@ -346,6 +346,7 @@ type Supervisor struct {
 	broker                       *broker.Broker
 	brokerRunID                  string
 	brokerToken                  string
+	brokerRunMu                  sync.Mutex
 	newProviderFunc              func(startOpts runtime.StartOptions, backend string) (runtime.Provider, error)
 	sessionIdentityMu            sync.RWMutex
 	sessionIdentities            map[string]sessionIdentityEntry
@@ -1223,11 +1224,19 @@ func (s *Supervisor) brokerURL() string {
 // registerBrokerRun ensures the supervisor has its own run registered in the
 // broker for authentication. Returns the run ID and token.
 func (s *Supervisor) registerBrokerRun() (string, string) {
+	s.brokerRunMu.Lock()
+	defer s.brokerRunMu.Unlock()
 	if s.brokerRunID != "" {
 		return s.brokerRunID, s.brokerToken
 	}
-	token, err := s.broker.CreateRun("supervisor")
-	if err != nil {
+	if s.broker == nil {
+		return "", ""
+	}
+	// EnsureRun is idempotent, so concurrent first-use calls settle on the
+	// same run and token instead of racing CreateRun and failing "already
+	// registered" on the second call.
+	token, _ := s.broker.EnsureRun("supervisor")
+	if token == "" {
 		return "", ""
 	}
 	s.brokerRunID = "supervisor"
@@ -1356,7 +1365,6 @@ func (s *Supervisor) BrokerCancel(messageID string) error {
 	})
 	return err
 }
-
 
 func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptText string, timeoutSec, maxRetries int) {
 	defer func() {

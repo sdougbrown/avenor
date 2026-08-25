@@ -26,7 +26,7 @@ async function executeAskTool(
   args: AskToolArgs,
   getSupervisorClient: typeof realGetSupervisorClient,
 ): Promise<AskResult> {
-  const { client, isSingleton, sup } = await getSupervisorClient(args.supervisorId)
+  const { client, isSingleton } = await getSupervisorClient(args.supervisorId)
   try {
     const result = await client.brokerAsk(args.toRunId, args.message)
     return {
