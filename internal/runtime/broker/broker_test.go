@@ -1729,8 +1729,14 @@ func TestBrokerSessionsEndpoint(t *testing.T) {
 	}
 	defer b.Stop()
 
-	// No runs registered yet
-	resp, err := http.Get(fmt.Sprintf("http://%s/sessions", b.Addr()))
+	// Register a run so we have auth credentials.
+	token, err := b.CreateRun("sessions_user")
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+
+	// No sessions metadata set yet
+	resp, err := http.Get(fmt.Sprintf("http://%s/sessions?run_id=sessions_user&token=%s", b.Addr(), token))
 	if err != nil {
 		t.Fatalf("sessions: %v", err)
 	}
@@ -1746,8 +1752,9 @@ func TestBrokerSessionsEndpoint(t *testing.T) {
 	if !ok {
 		t.Fatal("sessions response should have a sessions array")
 	}
-	if len(sessions) != 0 {
-		t.Errorf("expected 0 sessions, got %d", len(sessions))
+	// Our own run is registered, so we have 1 session.
+	if len(sessions) != 1 {
+		t.Errorf("expected 1 session (ourselves), got %d", len(sessions))
 	}
 
 	// Register a run and check again
@@ -1764,7 +1771,7 @@ func TestBrokerSessionsEndpoint(t *testing.T) {
 		Status:  "thinking",
 	})
 
-	resp2, err := http.Get(fmt.Sprintf("http://%s/sessions", b.Addr()))
+	resp2, err := http.Get(fmt.Sprintf("http://%s/sessions?run_id=sessions_user&token=%s", b.Addr(), token))
 	if err != nil {
 		t.Fatalf("sessions: %v", err)
 	}
@@ -1777,28 +1784,40 @@ func TestBrokerSessionsEndpoint(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	sessions2, _ := body2["sessions"].([]any)
-	if len(sessions2) != 1 {
-		t.Fatalf("expected 1 session, got %d", len(sessions2))
+	// We have sessions_user + runner_1 = 2 sessions.
+	if len(sessions2) != 2 {
+		t.Fatalf("expected 2 sessions, got %d", len(sessions2))
 	}
-	s0 := sessions2[0].(map[string]any)
-	if s0["run_id"] != "runner_1" {
-		t.Errorf("run_id = %q, want runner_1", s0["run_id"])
+	// Find runner_1 in the list (map iteration order is non-deterministic).
+	var found bool
+	for _, s := range sessions2 {
+		entry, ok := s.(map[string]any)
+		if !ok {
+			continue
+		}
+		if entry["run_id"] == "runner_1" {
+			found = true
+			if entry["label"] != "my-runner" {
+				t.Errorf("label = %q, want my-runner", entry["label"])
+			}
+			if entry["status"] != "thinking" {
+				t.Errorf("status = %q, want thinking", entry["status"])
+			}
+			break
+		}
 	}
-	if s0["label"] != "my-runner" {
-		t.Errorf("label = %q, want my-runner", s0["label"])
-	}
-	if s0["status"] != "thinking" {
-		t.Errorf("status = %q, want thinking", s0["status"])
+	if !found {
+		t.Error("runner_1 not found in sessions list")
 	}
 
-	// Sessions should be accessible without auth
+	// Sessions should reject without auth
 	resp3, err := http.Get(fmt.Sprintf("http://%s/sessions", b.Addr()))
 	if err != nil {
 		t.Fatalf("sessions no auth: %v", err)
 	}
 	resp3.Body.Close()
-	if resp3.StatusCode != http.StatusOK {
-		t.Errorf("sessions without auth expected 200, got %d", resp3.StatusCode)
+	if resp3.StatusCode != http.StatusUnauthorized {
+		t.Errorf("sessions without auth expected 401, got %d", resp3.StatusCode)
 	}
 }
 

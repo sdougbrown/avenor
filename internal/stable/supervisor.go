@@ -926,7 +926,7 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 	var parentToken string
 	if params.ParentRunID != "" && s.broker != nil {
 		parentToken, _ = s.broker.EnsureRun(params.ParentRunID)
-		parentNote := fmt.Sprintf("Your parent's broker run ID is %q. Use avenor_upsend with this run ID to send status updates, findings, or questions back to your parent.\n\n", params.ParentRunID)
+		parentNote := fmt.Sprintf("Your parent's broker run ID is %q. Use avenor_send with this run ID to send status updates, findings, or questions back to your parent.\n\n", params.ParentRunID)
 		promptText = parentNote + promptText
 	}
 

@@ -2,13 +2,16 @@ import type { ExtensionAPI, ExtensionContext, Theme } from '@earendil-works/pi-c
 import { Text } from '@earendil-works/pi-tui'
 import { Type } from 'typebox'
 import {
+  answerPermissionTool,
+  askTool,
+  cancelTool,
   dial,
   eventsTool,
   followUpTool,
   inspectTool,
   observeRun,
+  peersTool,
   resultTool,
-  answerPermissionTool,
   shutdownTool,
   spawnTool,
   statusTool,
@@ -1402,6 +1405,50 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       },
     })
 
+    pi.registerTool({
+      name: 'avenor_ask',
+      label: 'Avenor Ask',
+      description: 'Ask another agent run a question and block until it replies.',
+      parameters: Type.Object({
+        to_run_id: Type.String({ description: 'Target run ID' }),
+        message: Type.String({ description: 'Question to ask the other agent' }),
+      }),
+      async execute(_toolCallId, params) {
+        return askTool({ toRunId: params.to_run_id, message: params.message })
+      },
+    })
+
+    pi.registerTool({
+      name: 'avenor_peers',
+      label: 'Avenor Peers',
+      description: 'List all connected agent sessions with their status and metadata.',
+      parameters: Type.Object({}),
+      async execute() {
+        const result = await peersTool({})
+        if (result.peers.length === 0) {
+          return { content: [{ type: 'text', text: 'No other agent sessions connected.' }] }
+        }
+        const lines = result.peers.map(p => {
+          const parts = [p.label ? `${p.label} (${p.run_id})` : p.run_id]
+          const tags = [p.status, p.backend, p.model].filter(Boolean)
+          if (tags.length) parts.push(`[${tags.join(', ')}]`)
+          return `  ${parts.join(' ')}`
+        })
+        return { content: [{ type: 'text', text: `**Active sessions:**\n${lines.join('\n')}` }] }
+      },
+    })
+
+    pi.registerTool({
+      name: 'avenor_cancel',
+      label: 'Avenor Cancel',
+      description: 'Cancel a pending ask by its message ID.',
+      parameters: Type.Object({
+        message_id: Type.String({ description: 'Message ID of the pending ask to cancel' }),
+      }),
+      async execute(_toolCallId, params) {
+        return cancelTool({ messageId: params.message_id })
+      },
+    })
     pi.registerTool({
       name: 'avenor_events',
       label: 'Avenor Events',
