@@ -21,29 +21,12 @@ async function executePeersTool(
   args: PeersToolArgs,
   getSupervisorClient: typeof realGetSupervisorClient,
 ): Promise<PeersResult> {
-  const { client, isSingleton, sup } = await getSupervisorClient(args.supervisorId)
+  const { client, isSingleton } = await getSupervisorClient(args.supervisorId)
   try {
-    if (!sup?.brokerUrl) {
-      return { peers: [] }
-    }
 
-    // /sessions requires broker auth. A worker Pi session's parent is the
-    // supervisor, whose broker run id is "supervisor" and whose token is
-    // parentToken (EnsureRun(ParentRunID)). Reuse those to authenticate.
-    const parentToken = sup.parentToken
-    if (!sup.brokerUrl || !parentToken) {
-      // No broker credential available; peers is unavailable until the
-      // control-proxy path carries broker auth.
-      return { peers: [] }
-    }
-    const qs = `?run_id=${encodeURIComponent('supervisor')}&token=${encodeURIComponent(parentToken)}`
-    const res = await fetch(sup.brokerUrl + '/sessions' + qs)
-    if (!res.ok) {
-      return { peers: [] }
-    }
+    const sessions = await client.brokerPeers()
+    return { peers: sessions as PeerEntry[] }
 
-    const body = await res.json() as { sessions?: PeerEntry[] }
-    return { peers: body.sessions ?? [] }
   } finally {
     if (!isSingleton) {
       client.close()

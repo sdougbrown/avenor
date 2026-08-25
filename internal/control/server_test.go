@@ -1597,6 +1597,22 @@ func (m *mockStableHandler) RuntimeInterruptAndPrompt(runtimeID, text string, ke
 	return nil
 }
 
+func (m *mockStableHandler) BrokerSend(fromRunID, toRunID, message, role string) error {
+	return nil
+}
+
+func (m *mockStableHandler) BrokerAsk(toRunID, message, role string) (any, error) {
+	return map[string]any{"reply": "mock reply"}, nil
+}
+
+func (m *mockStableHandler) BrokerPeers() (any, error) {
+	return map[string]any{"sessions": []any{}}, nil
+}
+
+func (m *mockStableHandler) BrokerCancel(messageID string) error {
+	return nil
+}
+
 func (m *mockStableHandler) RuntimeSendToParent(runtimeID, message string) error {
 	m.sendToParentCalled++
 	m.sendToParentMessages = append(m.sendToParentMessages, message)
@@ -2240,5 +2256,95 @@ func TestDeliverPendingPermissionPreservesMessage(t *testing.T) {
 		}
 	default:
 		t.Fatal("answer not queued")
+	}
+}
+
+func TestBrokerRPCDispatch(t *testing.T) {
+	state := NewState("run_1", "", 0)
+	s := NewServer(state)
+	s.SetStableHandler(&mockStableHandler{})
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	c1 := mustDial(t, path) // owner
+	defer c1.Close()
+	c2 := mustDial(t, path) // non-owner
+	defer c2.Close()
+
+	// broker_send success (owner)
+	_ = writeReq(t, c1, Request{JSONRPC: "2.0", ID: 1, Method: "broker_send", Params: json.RawMessage(`{"from_run_id":"rt_1","to_run_id":"rt_2","message":"hi"}`)})
+	r := readResp(t, c1)
+	if r.Error != nil {
+		t.Fatalf("broker_send owner: %+v", r.Error)
+	}
+	if v, _ := r.Result.(map[string]any); v["ok"] != true {
+		t.Errorf("broker_send result missing ok=true: %v", r.Result)
+	}
+
+	// broker_send permission denied (non-owner)
+	_ = writeReq(t, c2, Request{JSONRPC: "2.0", ID: 2, Method: "broker_send", Params: json.RawMessage(`{"from_run_id":"rt_1","to_run_id":"rt_2","message":"hi"}`)})
+	r2 := readResp(t, c2)
+	if r2.Error == nil || r2.Error.Code != -32010 {
+		t.Fatalf("broker_send non-owner expected -32010, got %+v", r2)
+	}
+
+	// broker_ask success (owner)
+	_ = writeReq(t, c1, Request{JSONRPC: "2.0", ID: 3, Method: "broker_ask", Params: json.RawMessage(`{"to_run_id":"rt_2","message":"what is up"}`)})
+	r3 := readResp(t, c1)
+	if r3.Error != nil {
+		t.Fatalf("broker_ask owner: %+v", r3.Error)
+	}
+	if v, _ := r3.Result.(map[string]any); v["reply"] != "mock reply" {
+		t.Errorf("broker_ask result = %v, want mock reply", r3.Result)
+	}
+
+	// broker_ask permission denied (non-owner)
+	_ = writeReq(t, c2, Request{JSONRPC: "2.0", ID: 4, Method: "broker_ask", Params: json.RawMessage(`{"to_run_id":"rt_2","message":"x"}`)})
+	r4 := readResp(t, c2)
+	if r4.Error == nil || r4.Error.Code != -32010 {
+		t.Fatalf("broker_ask non-owner expected -32010, got %+v", r4)
+	}
+
+	// broker_peers has no owner gate: both owner and non-owner succeed
+	_ = writeReq(t, c2, Request{JSONRPC: "2.0", ID: 5, Method: "broker_peers"})
+	r5 := readResp(t, c2)
+	if r5.Error != nil {
+		t.Fatalf("broker_peers should not require owner, got %+v", r5.Error)
+	}
+
+	// broker_cancel success (owner) + permission denied (non-owner)
+	_ = writeReq(t, c1, Request{JSONRPC: "2.0", ID: 6, Method: "broker_cancel", Params: json.RawMessage(`{"message_id":"ask-1"}`)})
+	r6 := readResp(t, c1)
+	if r6.Error != nil {
+		t.Fatalf("broker_cancel owner: %+v", r6.Error)
+	}
+	_ = writeReq(t, c2, Request{JSONRPC: "2.0", ID: 7, Method: "broker_cancel", Params: json.RawMessage(`{"message_id":"ask-1"}`)})
+	r7 := readResp(t, c2)
+	if r7.Error == nil || r7.Error.Code != -32010 {
+		t.Fatalf("broker_cancel non-owner expected -32010, got %+v", r7)
+	}
+}
+
+func TestBrokerRPCDispatchInvalidParams(t *testing.T) {
+	state := NewState("run_1", "", 0)
+	s := NewServer(state)
+	s.SetStableHandler(&mockStableHandler{})
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	c1 := mustDial(t, path)
+	defer c1.Close()
+
+	// broker_send with malformed JSON -> parse error (-32700)
+	_ = writeReq(t, c1, Request{JSONRPC: "2.0", ID: 1, Method: "broker_send", Params: json.RawMessage(`{bad json`)})
+	r := readResp(t, c1)
+	if r.Error == nil || r.Error.Code != -32700 {
+		t.Fatalf("broker_send malformed params expected -32700 parse error, got %+v", r)
 	}
 }
