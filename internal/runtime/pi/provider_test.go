@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
 
 func TestCapabilities(t *testing.T) {
@@ -592,5 +593,55 @@ func TestAnswerPermissionNotApproved(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("error = %v, want not found", err)
+	}
+}
+
+func TestProviderPresencePush(t *testing.T) {
+	b := broker.New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	defer b.Stop()
+
+	b.EnsureRun("pi_run")
+
+	p := NewWithOptions(runtime.StartOptions{})
+	p.broker = b
+	p.runID = "pi_run"
+	p.presenceStatus = "starting"
+	p.presenceModel = "test-model"
+
+	p.presencePush()
+
+	st := b.GetRun("pi_run")
+	if st == nil {
+		t.Fatal("run not found")
+	}
+	st.Mu.Lock()
+	info := st.Info
+	st.Mu.Unlock()
+	if info == nil {
+		t.Fatal("SessionInfo should not be nil after presence push")
+	}
+	if info.RunID != "pi_run" {
+		t.Errorf("RunID = %q, want pi_run", info.RunID)
+	}
+	if info.Backend != "pi" {
+		t.Errorf("Backend = %q, want pi", info.Backend)
+	}
+	if info.Model != "test-model" {
+		t.Errorf("Model = %q, want test-model", info.Model)
+	}
+	if info.Status != "starting" {
+		t.Errorf("Status = %q, want starting", info.Status)
+	}
+
+	// A status change is reflected on the next push.
+	p.setPresenceStatus("idle")
+	st.Mu.Lock()
+	info = st.Info
+	st.Mu.Unlock()
+	if info.Status != "idle" {
+		t.Errorf("Status = %q, want idle", info.Status)
 	}
 }

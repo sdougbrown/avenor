@@ -6,12 +6,18 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
 
 const backendID = "pi"
+
+// piPresenceInterval is how often the Pi provider re-pushes its live session
+// metadata to the broker so /sessions reflects presence between turns.
+const piPresenceInterval = 5 * time.Second
 
 type Provider struct {
 	opts        runtime.StartOptions
@@ -19,6 +25,13 @@ type Provider struct {
 	client      *client
 	sessions    map[string]struct{}
 	startClient func(context.Context, runtime.StartOptions) (*client, error)
+
+	// Presence state for peer discovery via the broker.
+	broker         *broker.Broker
+	runID          string
+	presenceStatus string
+	presenceModel  string
+	presenceCancel context.CancelFunc
 }
 
 func NewWithOptions(opts runtime.StartOptions) *Provider {
@@ -80,6 +93,26 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	p.mu.Unlock()
 
 	c.setSessionID(sessionID)
+
+	// Mirror the ACP provider: register live presence with the broker so
+	// /sessions reflects a Pi session, then refresh it periodically.
+	if merged.Broker != nil {
+		runID := merged.RuntimeID
+		if runID == "" {
+			runID = sessionID
+		}
+		merged.Broker.EnsureRun(runID)
+		runCtx, cancel := context.WithCancel(context.Background())
+		p.mu.Lock()
+		p.broker = merged.Broker
+		p.runID = runID
+		p.presenceStatus = "starting"
+		p.presenceModel = merged.Model
+		p.presenceCancel = cancel
+		p.mu.Unlock()
+		p.presencePush()
+		go p.presenceTicker(runCtx)
+	}
 
 	return runtime.Session{
 		SessionID: sessionID,
@@ -191,8 +224,10 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 		"message": prompt,
 		"id":      newRequestID(),
 	}
+	p.setPresenceStatus("thinking")
 	_, err = c.sendCommand(ctx, cmd)
 	if err != nil {
+		p.setPresenceStatus("idle")
 		c.unsubscribe(sessionID, subCh)
 		close(subCh)
 		<-done
@@ -208,16 +243,20 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 		reason, _ := ev.Fields["stop_reason"]
 		switch reason {
 		case "end_turn", "end_of_turn":
+			p.setPresenceStatus("idle")
 			return nil
 		case "cancelled":
+			p.setPresenceStatus("idle")
 			return fmt.Errorf("turn cancelled for session %s", sessionID)
 		case "error":
 			msg, _ := ev.Fields["error_message"].(string)
 			if msg == "" {
 				msg = "unknown error"
 			}
+			p.setPresenceStatus("idle")
 			return fmt.Errorf("turn failed for session %s: %s", sessionID, msg)
 		default:
+			p.setPresenceStatus("idle")
 			return nil
 		}
 	case <-ctx.Done():
@@ -326,7 +365,12 @@ func (p *Provider) Close() error {
 	p.mu.Lock()
 	c := p.client
 	p.client = nil
+	cancel := p.presenceCancel
+	p.presenceCancel = nil
 	p.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	if c == nil {
 		return nil
 	}
@@ -397,6 +441,50 @@ func (p *Provider) sessionExists(sessionID string) (string, error) {
 		return "", fmt.Errorf("session %q not found", sessionID)
 	}
 	return sessionID, nil
+}
+
+// presencePush writes the current presence state to the broker under the
+// provider's run ID. It sends a complete SessionInfo so the broker's overwrite
+// semantics cleanly reflect the latest values.
+func (p *Provider) presencePush() {
+	p.mu.Lock()
+	b := p.broker
+	runID := p.runID
+	status := p.presenceStatus
+	model := p.presenceModel
+	p.mu.Unlock()
+	if b == nil || runID == "" {
+		return
+	}
+	b.UpdateSessionInfo(runID, &broker.SessionInfo{
+		Backend:  backendID,
+		Model:    model,
+		Status:   status,
+		LastSeen: time.Now().Unix(),
+	})
+}
+
+// setPresenceStatus records a presence status and pushes it to the broker.
+func (p *Provider) setPresenceStatus(status string) {
+	p.mu.Lock()
+	p.presenceStatus = status
+	p.mu.Unlock()
+	p.presencePush()
+}
+
+// presenceTicker periodically re-pushes presence so /sessions reflects a live
+// session even when no prompt boundary has fired recently.
+func (p *Provider) presenceTicker(ctx context.Context) {
+	ticker := time.NewTicker(piPresenceInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			p.presencePush()
+		}
+	}
 }
 
 func (p *Provider) getClient() (*client, error) {
