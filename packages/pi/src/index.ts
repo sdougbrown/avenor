@@ -429,7 +429,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         lastStatus: status ?? current?.lastStatus,
         blocking: current?.blocking ?? blocking,
         permissionNotified: current?.permissionNotified,
-        completionPending: current?.completionPending,
+        consumed: current?.consumed,
       })
     }
 
@@ -662,31 +662,27 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           if (!run) continue
 
           if (isTerminalStatus(entry.status)) {
+            const action = decideCompletion(run)
+            if (action === 'skip') {
+              // Result is spoken for: either avenor_result is actively waiting
+              // (blocking — it will deliver the result and set consumed when it
+              // returns) or it already returned successfully (consumed). In the
+              // consumed case the automatic message is suppressed but the run
+              // is no longer needed, so clean it up here.
+              if (run.consumed) trackedRuns.delete(entryKey)
+              continue
+            }
             const prevStatus = prevStatuses.get(entryKey)
             const wasTerminal = prevStatus && isTerminalStatus(prevStatus)
             if (!wasTerminal) {
-              // Notify immediately on first terminal transition.
               sessionCtx?.ui.notify(
                 `Sub-agent "${entry.label}" finished: ${entry.status}`,
                 entry.status === 'done' ? 'info' : 'warning',
               )
             }
-            if (run.blocking) {
-              // avenor_result is actively waiting — it will delete the run
-              // when it returns, so skip the completion message entirely.
-              continue
-            }
-            const action = decideCompletion(run)
-            if (action === 'defer') {
-              // First tick seeing terminal status: defer the completion
-              // message by one cycle so avenor_result can consume the
-              // result first without a duplicate steering message.
-              run.completionPending = true
-              continue
-            }
-            if (action === 'skip') continue
-            // Second tick seeing terminal status: the agent did not call
-            // avenor_result within one cycle, so deliver the completion.
+            // Deliver the completion on this same terminal tick rather than
+            // deferring to a later cycle, so a run that is the last active one
+            // is never left dangling when polling stops.
             const finalOutput = await resolveFinalOutput(run, run.lastStatus)
             try {
               pi.sendUserMessage(
@@ -1303,6 +1299,12 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           })
           completed = result.ready
           if (completed) {
+            // Only mark the run consumed (and suppress the automatic completion)
+            // when the result was actually delivered. If this call was
+            // interrupted — aborted by signal, timed out, or still waiting —
+            // the caller did not receive the output, so leave `consumed` unset
+            // and let the polling tick deliver the completion later.
+            if (tracked) tracked.consumed = true
             emitAvenorEvent(
               pi.events,
               CHANNEL_RUN_TERMINAL,
