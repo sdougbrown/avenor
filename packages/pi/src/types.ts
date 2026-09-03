@@ -12,10 +12,10 @@ export interface TrackedRun {
   blocking?: boolean
   /** true if we've injected a permission notification via sendUserMessage */
   permissionNotified?: boolean
-  /** true if the run reached terminal status and a completion message is pending.
-   * The message is deferred by one tick cycle so avenor_result can consume
-   * the result first without a duplicate steering message. */
-  completionPending?: boolean
+  /** true once avenor_result has successfully returned this run's final result to
+   * the caller. Set only on a successful (non-interrupted) result; suppresses the
+   * automatic completion notification without deleting the run. */
+  consumed?: boolean
 }
 
 /**
@@ -99,24 +99,26 @@ export function formatRunLine(entry: RunStatusEntry): string {
  * CompletionAction represents the decision for a tracked run that has
  * reached terminal status during a polling tick.
  *
- * - `skip` — the run is blocking (avenor_result is waiting); do nothing.
- * - `defer` — first tick seeing terminal status; set completionPending and
- *   wait one cycle so avenor_result can consume the result first.
- * - `send` — second tick seeing terminal status; deliver the completion
+ * - `skip` — the result is spoken for: avenor_result is actively waiting
+ *   (`blocking`) or has already returned the result successfully
+ *   (`consumed`); do not notify.
+ * - `send` — the caller has not obtained the result; deliver the completion
  *   steering message and remove the run from tracking.
  */
-export type CompletionAction = 'skip' | 'defer' | 'send'
+export type CompletionAction = 'skip' | 'send'
 
 /**
- * decideCompletion determines whether to skip, defer, or send the completion
+ * decideCompletion determines whether to skip or send the completion
  * steering message for a tracked run that has reached terminal status.
  *
- * The deferral prevents duplication when avenor_result consumes the result
- * in the same turn: if the agent calls avenor_result between the defer and
- * the next tick, the run is deleted from tracking and the send never fires.
+ * The message is delivered on the same terminal tick — never deferred to a
+ * later cycle — so a run that is the last live one still gets its completion.
+ * `blocking` suppresses it while avenor_result is awaiting (it will deliver
+ * the result itself and set `consumed`), and `consumed` suppresses it once
+ * avenor_result has already returned the result successfully.
  */
-export function decideCompletion(run: Pick<TrackedRun, 'blocking' | 'completionPending'>): CompletionAction {
+export function decideCompletion(run: Pick<TrackedRun, 'blocking' | 'consumed'>): CompletionAction {
   if (run.blocking) return 'skip'
-  if (!run.completionPending) return 'defer'
+  if (run.consumed) return 'skip'
   return 'send'
 }
