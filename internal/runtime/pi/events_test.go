@@ -105,11 +105,69 @@ func TestTranslateAgentEndWithStopReasonAndFinalOutput(t *testing.T) {
 	if ev.Event != "session.end" {
 		t.Fatalf("event = %q, want session.end", ev.Event)
 	}
-	if got, _ := ev.Fields["stop_reason"].(string); got != "end_of_turn" {
-		t.Fatalf("stop_reason = %q, want end_of_turn", got)
+	// end_of_turn normalises to the canonical end_turn.
+	if got, _ := ev.Fields["stop_reason"].(string); got != "end_turn" {
+		t.Fatalf("stop_reason = %q, want end_turn", got)
 	}
 	if got, _ := ev.Fields["final_output"].(string); got != "done" {
 		t.Fatalf("final_output = %q, want done", got)
+	}
+}
+
+// pi serialises AgentMessage.stopReason in camelCase with OpenAI-style values
+// ("stop" for a successful turn). The translator must read that key and map
+// the value, or every completed pi run ends as a generic exit-1 failure.
+func TestTranslateAgentEndReadsCamelCaseStopReasonAndNormalises(t *testing.T) {
+	evs := translateNotification(map[string]any{
+		"type": "agent_end",
+		"messages": []any{
+			map[string]any{
+				"role":       "user",
+				"content":    []any{map[string]any{"type": "text", "text": "exit 0"}},
+				"timestamp":  1788653598138,
+			},
+			map[string]any{
+				"role":       "assistant",
+				"api":        "openai-completions",
+				"provider":   "openai",
+				"stopReason": "stop",
+				"content":    []any{map[string]any{"type": "text", "text": "Goodbye!"}},
+				"usage":      map[string]any{"input": 1, "output": 1},
+			},
+		},
+	}, "pi-s1")
+	if len(evs) != 1 {
+		t.Fatalf("len(events) = %d, want 1", len(evs))
+	}
+	ev := evs[0]
+	if ev.Event != "session.end" {
+		t.Fatalf("event = %q, want session.end", ev.Event)
+	}
+	if got, _ := ev.Fields["stop_reason"].(string); got != "end_turn" {
+		t.Fatalf("stop_reason = %q, want end_turn", got)
+	}
+	if got, _ := ev.Fields["final_output"].(string); got != "Goodbye!" {
+		t.Fatalf("final_output = %q, want Goodbye!", got)
+	}
+}
+
+func TestTranslateAgentEndMapsPiStopReasons(t *testing.T) {
+	cases := map[string]string{
+		"stop":      "end_turn",
+		"length":    "max_tokens",
+		"aborted":   "cancelled",
+		"end_of_turn": "end_turn",
+		"end_turn":  "end_turn",
+		"cancelled": "cancelled",
+	}
+	for raw, want := range cases {
+		evs := translateNotification(map[string]any{
+			"type":     "agent_end",
+			"messages": []any{map[string]any{"stopReason": raw}},
+		}, "pi-s1")
+		if got, _ := evs[0].Fields["stop_reason"].(string); got != want {
+			t.Fatalf("stopReason %q: got %q, want %q", raw, got, want)
+		}
 	}
 }
 
