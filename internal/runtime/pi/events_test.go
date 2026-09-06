@@ -122,9 +122,9 @@ func TestTranslateAgentEndReadsCamelCaseStopReasonAndNormalises(t *testing.T) {
 		"type": "agent_end",
 		"messages": []any{
 			map[string]any{
-				"role":       "user",
-				"content":    []any{map[string]any{"type": "text", "text": "exit 0"}},
-				"timestamp":  1788653598138,
+				"role":      "user",
+				"content":   []any{map[string]any{"type": "text", "text": "exit 0"}},
+				"timestamp": 1788653598138,
 			},
 			map[string]any{
 				"role":       "assistant",
@@ -153,21 +153,29 @@ func TestTranslateAgentEndReadsCamelCaseStopReasonAndNormalises(t *testing.T) {
 
 func TestTranslateAgentEndMapsPiStopReasons(t *testing.T) {
 	cases := map[string]string{
-		"stop":      "end_turn",
-		"length":    "max_tokens",
-		"aborted":   "cancelled",
+		"stop":        "end_turn",
+		"length":      "max_tokens",
+		"aborted":     "cancelled",
 		"end_of_turn": "end_turn",
-		"end_turn":  "end_turn",
-		"cancelled": "cancelled",
+		"end_turn":    "end_turn",
+		"cancelled":   "cancelled",
+		// Unmapped pi values pass through unchanged and land on the generic
+		// exit-1 (retryable) path — pinned so a future remapping is a
+		// conscious choice. toolUse as a terminal stopReason is anomalous:
+		// agent_end only fires once the run settles.
+		"toolUse":        "toolUse",
+		"unknown_reason": "unknown_reason",
 	}
 	for raw, want := range cases {
-		evs := translateNotification(map[string]any{
-			"type":     "agent_end",
-			"messages": []any{map[string]any{"stopReason": raw}},
-		}, "pi-s1")
-		if got, _ := evs[0].Fields["stop_reason"].(string); got != want {
-			t.Fatalf("stopReason %q: got %q, want %q", raw, got, want)
-		}
+		t.Run(raw, func(t *testing.T) {
+			evs := translateNotification(map[string]any{
+				"type":     "agent_end",
+				"messages": []any{map[string]any{"stopReason": raw}},
+			}, "pi-s1")
+			if got, _ := evs[0].Fields["stop_reason"].(string); got != want {
+				t.Fatalf("stopReason %q: got %q, want %q", raw, got, want)
+			}
+		})
 	}
 }
 
