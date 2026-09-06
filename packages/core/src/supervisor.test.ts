@@ -131,7 +131,20 @@ describe.skipIf(skipIfNoBinary)('Supervisor lifecycle', () => {
   }, 15_000)
 
   it('retains auto-approval across singleton follow-ups when no sentinel exists', async () => {
-    fs.rmSync(originalRun.sentinelPath, { force: true })
+    // The run must be complete before each follow-up: resuming a still-running
+    // session is rejected by the supervisor's session-ownership guard. Against
+    // the real binary, wait for the sentinel, then remove it to exercise the
+    // no-sentinel fallback. The fake fixture never writes sentinels.
+    const awaitSentinel = async (sentinelPath: string) => {
+      if (process.env.AVENOR_REAL_INTEGRATION !== '1') return
+      for (let i = 0; i < 60; i++) {
+        if (fs.existsSync(sentinelPath)) break
+        await new Promise(resolve => setTimeout(resolve, 1_000))
+      }
+      expect(fs.existsSync(sentinelPath)).toBe(true)
+      fs.rmSync(sentinelPath, { force: true })
+    }
+    await awaitSentinel(originalRun.sentinelPath)
 
     const result = await followUpTool({
       runId: originalRun.runId,
@@ -144,6 +157,7 @@ describe.skipIf(skipIfNoBinary)('Supervisor lifecycle', () => {
     expect(followUpRun.backend).toBe('pi')
     expect(followUpRun.dir).toBe('/tmp/original-repo')
     expect(followUpRun.autoApprove).toBe(true)
+    await awaitSentinel(followUpRun.sentinelPath)
     expect(await supervisor.getClient().status(followUpRun.runtimeId)).toMatchObject({
       auto_approve: true,
     })

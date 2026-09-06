@@ -1458,9 +1458,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       parameters: Type.Object({
         to_run_id: Type.String({ description: 'Target run ID' }),
         message: Type.String({ description: 'Question to ask the other agent' }),
+        supervisor_id: Type.Optional(Type.String({ description: 'Reuse an existing supervisor by socket path' })),
       }),
       async execute(_toolCallId, params) {
-        return askTool({ toRunId: params.to_run_id, message: params.message })
+        return askTool({ toRunId: params.to_run_id, message: params.message, supervisorId: params.supervisor_id })
       },
     })
 

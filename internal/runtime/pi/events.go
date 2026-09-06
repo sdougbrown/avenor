@@ -54,8 +54,10 @@ func translateAgentEnd(payload map[string]any, sessionID string) events.Event {
 	if messages, ok := payload["messages"].([]any); ok && len(messages) > 0 {
 		lastMsg, _ := messages[len(messages)-1].(map[string]any)
 		if lastMsg != nil {
-			if stopReason, ok := lastMsg["stop_reason"]; ok {
-				fields["stop_reason"] = stopReason
+			// pi serialises AgentMessage fields in camelCase (stopReason);
+			// accept the snake_case alias for older shims.
+			if stopReason := firstNonEmptyString(lastMsg, "stopReason", "stop_reason"); stopReason != "" {
+				fields["stop_reason"] = normalizePiStopReason(stopReason)
 			}
 			if finalOutput := extractPiText(lastMsg); finalOutput != "" {
 				fields["final_output"] = finalOutput
@@ -63,11 +65,29 @@ func translateAgentEnd(payload map[string]any, sessionID string) events.Event {
 		}
 	}
 	if _, ok := fields["stop_reason"]; !ok {
-		if stopReason, _ := payload["stop_reason"].(string); stopReason != "" {
-			fields["stop_reason"] = stopReason
+		if stopReason := firstNonEmptyString(payload, "stopReason", "stop_reason"); stopReason != "" {
+			fields["stop_reason"] = normalizePiStopReason(stopReason)
 		}
 	}
 	return events.Event{Event: "session.end", SessionID: sessionID, Fields: fields}
+}
+
+// normalizePiStopReason maps pi's raw stop reasons onto avenor's canonical
+// stop reasons (see runtime.ExitCodeForStopReason). pi reports OpenAI-style
+// values on AgentMessage.stopReason (e.g. "stop" for a successful turn);
+// an unmapped value would fall through to the generic exit-1 failure path
+// and classify every completed pi run as retryable.
+func normalizePiStopReason(stopReason string) string {
+	switch stopReason {
+	case "stop", "end_of_turn":
+		return "end_turn"
+	case "length":
+		return "max_tokens"
+	case "aborted":
+		return "cancelled"
+	default:
+		return stopReason
+	}
 }
 
 func translateMessageUpdate(payload map[string]any, sessionID string) []events.Event {

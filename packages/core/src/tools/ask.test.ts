@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, mock } from 'bun:test'
+import { afterEach, beforeAll, afterAll, describe, expect, it, mock } from 'bun:test'
 
 const brokerAskMock = mock(async () => ({ payload: { message: 'hello back' }, from_run_id: 'sender' }))
 const closeMock = mock(() => {})
@@ -9,7 +9,8 @@ const getSupervisorClientMock = mock(async () => ({
   supervisorId: '/tmp/avenor-ask-test.sock',
 }))
 
-const { createAskTool } = await import('./ask.js')
+const { Supervisor } = await import('../supervisor.js')
+const { createAskTool, askTool: realAskTool } = await import('./ask.js')
 const askTool = createAskTool(getSupervisorClientMock)
 
 describe('askTool', () => {
@@ -47,5 +48,39 @@ describe('askTool', () => {
   it('closes a non-singleton client in the finally block', async () => {
     await askTool({ toRunId: 'rt_1', message: 'hello' })
     expect(closeMock).toHaveBeenCalled()
+  })
+})
+
+describe('askTool without supervisor_id (singleton fallback)', () => {
+  const singletonBrokerAsk = mock(async () => ({ payload: { message: 'singleton reply' }, from_run_id: 'sender' }))
+  const singletonClose = mock(() => {})
+  const originalSupervisorGet = Supervisor.get
+
+  beforeAll(() => {
+    // Regression: an omitted supervisor_id previously hit
+    // path.dirname(undefined) in validateSupervisorSocketPath and threw
+    // "The \"path\" argument must be of type string". It must resolve the
+    // in-process singleton instead.
+    Supervisor.get = mock(async () => ({
+      getClient: () => ({ brokerAsk: singletonBrokerAsk, close: singletonClose }),
+      supervisorId: '/tmp/avenor-ask-singleton.sock',
+    })) as any
+  })
+
+  afterAll(() => {
+    Supervisor.get = originalSupervisorGet
+  })
+
+  afterEach(() => {
+    singletonBrokerAsk.mockClear()
+    singletonClose.mockClear()
+  })
+
+  it('resolves the in-process singleton instead of validating an undefined socket path', async () => {
+    const res = await realAskTool({ toRunId: 'rt_1', message: 'hello' })
+    expect(res.reply).toBe('singleton reply')
+    expect(res.from_run_id).toBe('sender')
+    expect(singletonBrokerAsk).toHaveBeenCalledWith('rt_1', 'hello')
+    expect(singletonClose).not.toHaveBeenCalled()
   })
 })
