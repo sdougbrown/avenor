@@ -19,6 +19,9 @@ const runInfo = {
   runtimeId: 'runtime-id-regression',
 }
 
+const localRuns = new Map([[runInfo.runId, runInfo]])
+const localAliases = new Map([[runInfo.label, runInfo]])
+
 const getSupervisorClientMock = mock(async () => ({
   client: {
     status: statusMock,
@@ -26,12 +29,15 @@ const getSupervisorClientMock = mock(async () => ({
   },
   isSingleton: true,
   sup: {
-    runs: new Map([
-      [runInfo.runId, runInfo],
-    ]),
-    aliases: new Map([
-      [runInfo.label, runInfo],
-    ]),
+    runs: localRuns,
+    aliases: localAliases,
+    getRunByReference: (reference: string) => localRuns.get(reference) ?? localAliases.get(reference),
+    getRunByRuntimeId: (runtimeId: string) => {
+      for (const info of localRuns.values()) {
+        if (info.runtimeId === runtimeId) return info
+      }
+      return undefined
+    },
   },
   supervisorId: '/tmp/avenor-mcp-test.sock',
 }))

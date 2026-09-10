@@ -6,6 +6,10 @@
 
 - `avenor await`: new wait-only subcommand from this feature work. Waits on a run until attention or done, with plain transition lines or JSON output.
 
+### Fixed
+
+- `avenor_ask` now resolves its run reference (public run id, label, or broker runtime id) the way the sibling tools do. Addressing a live run by its canonical spawn id previously failed with "to run not found" because the broker registers runs only under their runtime id.
+
 ## v0.7.1 — 2026-05-11
 
 ### Fixed

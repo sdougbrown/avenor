@@ -1,4 +1,6 @@
 import { getSupervisorClient as realGetSupervisorClient } from './get-supervisor-client.js'
+import { findExternalRun } from './run-registry.js'
+import { findLocalRunByReference } from './run-resolution.js'
 
 export interface AskToolArgs {
   toRunId: string
@@ -26,9 +28,18 @@ async function executeAskTool(
   args: AskToolArgs,
   getSupervisorClient: typeof realGetSupervisorClient,
 ): Promise<AskResult> {
-  const { client, isSingleton } = await getSupervisorClient(args.supervisorId)
+  const { client, isSingleton, sup, supervisorId } = await getSupervisorClient(args.supervisorId)
   try {
-    const result = await client.brokerAsk(args.toRunId, args.message)
+    // Resolve the caller's reference (public run ID, label, or broker runtime
+    // ID) to the broker's runtime ID, mirroring the sibling tools. The broker
+    // registers runs only under their internal runtime ID; addressing it by the
+    // canonical spawn ID or a label would otherwise 404 "to run not found" even
+    // for a fully active run.
+    const runInfo = isSingleton && sup
+      ? findLocalRunByReference(sup, args.toRunId)
+      : findExternalRun(supervisorId, args.toRunId)
+    const target = runInfo?.runtimeId ?? args.toRunId
+    const result = await client.brokerAsk(target, args.message)
     return {
       reply: extractReplyMessage(result),
       from_run_id: (result.from_run_id as string) ?? '',
