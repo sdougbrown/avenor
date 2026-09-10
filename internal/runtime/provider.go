@@ -32,6 +32,7 @@ type StartOptions struct {
 	Thinking     string
 	RuntimeID    string         // supervisor-assigned runtime ID (rt_N), for parent-child routing
 	Broker       *broker.Broker // optional shared broker instance; backends may create their own if nil
+	BrokerToken  string         // broker token for RuntimeID, so the child can poll/reply as itself
 }
 
 // Session represents an active ACP session.

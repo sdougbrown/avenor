@@ -96,10 +96,10 @@ func StartClientWithAgentAndDir(ctx context.Context, provider string, model stri
 }
 
 func StartClientWithAgentProfileAndDir(ctx context.Context, provider string, model string, sessionDir string, agent string, agentProfile string, cwd string) (*client, error) {
-	return StartClientWithAgentProfileThinkingAndDir(ctx, provider, model, sessionDir, agent, agentProfile, "", cwd)
+	return StartClientWithAgentProfileThinkingAndDir(ctx, provider, model, sessionDir, agent, agentProfile, "", cwd, "", "", "")
 }
 
-func StartClientWithAgentProfileThinkingAndDir(ctx context.Context, provider string, model string, sessionDir string, agent string, agentProfile string, thinking string, cwd string) (*client, error) {
+func StartClientWithAgentProfileThinkingAndDir(ctx context.Context, provider string, model string, sessionDir string, agent string, agentProfile string, thinking string, cwd string, brokerURL string, brokerRunID string, brokerToken string) (*client, error) {
 	args := []string{"--mode", "rpc", "--no-session"}
 	if provider != "" {
 		args = append(args, "--provider", provider)
@@ -116,12 +116,15 @@ func StartClientWithAgentProfileThinkingAndDir(ctx context.Context, provider str
 
 	proc := piExecCommandContext(ctx, "pi", args...)
 	proc.Dir = cwd
-	if agent != "" || agentProfile != "" {
+	if agent != "" || agentProfile != "" || brokerURL != "" {
 		env := proc.Environ()
 		filtered := env[:0]
 		for _, e := range env {
 			if !strings.HasPrefix(e, "PI_AGENT=") &&
-				!strings.HasPrefix(e, "PI_AGENT_PROFILE=") {
+				!strings.HasPrefix(e, "PI_AGENT_PROFILE=") &&
+				!strings.HasPrefix(e, "AVENOR_BROKER_URL=") &&
+				!strings.HasPrefix(e, "AVENOR_RUN_ID=") &&
+				!strings.HasPrefix(e, "AVENOR_BROKER_TOKEN=") {
 				filtered = append(filtered, e)
 			}
 		}
@@ -130,6 +133,17 @@ func StartClientWithAgentProfileThinkingAndDir(ctx context.Context, provider str
 		}
 		if agentProfile != "" {
 			filtered = append(filtered, "PI_AGENT_PROFILE="+agentProfile)
+		}
+		// Broker credentials let the pi sub-process poll its own inbound asks and
+		// reply via avenor_reply as its own run.
+		if brokerURL != "" {
+			filtered = append(filtered, "AVENOR_BROKER_URL="+brokerURL)
+		}
+		if brokerRunID != "" {
+			filtered = append(filtered, "AVENOR_RUN_ID="+brokerRunID)
+		}
+		if brokerToken != "" {
+			filtered = append(filtered, "AVENOR_BROKER_TOKEN="+brokerToken)
 		}
 		proc.Env = filtered
 	}

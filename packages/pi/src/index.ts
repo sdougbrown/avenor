@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext, Theme } from '@earendil-works/pi-coding-agent'
 import { Text } from '@earendil-works/pi-tui'
 import { Type } from 'typebox'
+import { randomUUID } from 'node:crypto'
 import {
   answerPermissionTool,
   askTool,
@@ -137,7 +138,6 @@ function stopHostAskPoll(): void {
     hostPollTimer = null
   }
 }
-
 async function startHostAskPoll(ctx: ExtensionContext): Promise<void> {
   stopHostAskPoll()
   // Poll every 2s (mirrors the sidecar's pollControlLoop cadence) for inbound asks.
@@ -158,6 +158,66 @@ async function startHostAskPoll(ctx: ExtensionContext): Promise<void> {
     }
   }, 2000)
   hostPollTimer.unref?.()
+}
+
+// --- Sub-agent broker mode ----------------------------------------------------
+// When the avenor pi provider launches a pi sub-process, it injects broker
+// credentials via AVENOR_BROKER_URL / AVENOR_RUN_ID / AVENOR_BROKER_TOKEN. In
+// that mode this extension polls its own run for inbound asks (a host calling
+// avenor_ask on it) and lets the sub-agent reply as its own run, instead of
+// acting as a top-level host.
+const SUBAGENT_BROKER_URL = process.env.AVENOR_BROKER_URL ?? ''
+const SUBAGENT_RUN_ID = process.env.AVENOR_RUN_ID ?? ''
+const SUBAGENT_TOKEN = process.env.AVENOR_BROKER_TOKEN ?? ''
+const isSubAgentBrokerMode = !!(SUBAGENT_BROKER_URL && SUBAGENT_RUN_ID && SUBAGENT_TOKEN)
+
+let subAgentPollTimer: ReturnType<typeof setInterval> | null = null
+// pending inbound asks keyed by broker message_id so avenor_reply can target them.
+const subAgentPendingAsks = new Map<string, { from_run_id: string; message_id: string }>()
+
+async function subAgentBrokerRequest(path: string, body: Record<string, unknown>): Promise<unknown> {
+  const res = await fetch(`${SUBAGENT_BROKER_URL}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ run_id: SUBAGENT_RUN_ID, token: SUBAGENT_TOKEN, ...body }),
+  })
+  if (!res.ok) throw new Error(`broker ${path}: ${res.status} ${(await res.text()).trim()}`)
+  return res.json()
+}
+
+function stopSubAgentPoll(): void {
+  if (subAgentPollTimer) {
+    clearInterval(subAgentPollTimer)
+    subAgentPollTimer = null
+  }
+}
+
+async function startSubAgentPoll(ctx: ExtensionContext): Promise<void> {
+  if (!isSubAgentBrokerMode) return
+  stopSubAgentPoll()
+  subAgentPollTimer = setInterval(async () => {
+    try {
+      const msgs = (await subAgentBrokerRequest('/poll-control', {})) as Array<Record<string, unknown>>
+      for (const msg of msgs) {
+        if (msg.type !== 'agent_message') continue
+        let payload = msg.payload
+        if (typeof payload === 'string') {
+          try { payload = JSON.parse(payload) } catch { continue }
+        }
+        const p = payload as Record<string, unknown> | undefined
+        if (!p || typeof p.message !== 'string' || !p.message) continue
+        const messageId = String(p.id ?? '')
+        if (!messageId) continue
+        const from = String(p.from_run_id ?? p.from ?? '')
+        subAgentPendingAsks.set(messageId, { from_run_id: from, message_id: messageId })
+        const body = `**📨 Inbound ask**${from ? ` from \`${from}\`` : ''}\n\n${p.message}\n\nTo answer, use avenor_reply({ reply_to_message_id: ${JSON.stringify(messageId)}, message: "..." }).`
+        await ctx.sendUserMessage(body, { deliverAs: 'steer' as const })
+      }
+    } catch {
+      // broker not reachable yet — expected until the broker is up
+    }
+  }, 2000)
+  subAgentPollTimer.unref?.()
 }
 
 export function statusSupervisorId(
@@ -989,12 +1049,15 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       pollingErrorCount = 0
       pollingErrors.length = 0
       void startHostAskPoll(ctx)
+      void startSubAgentPoll(ctx)
     })
 
     pi.on('session_shutdown', async () => {
       await stopPolling()
       stopHostAskPoll()
+      stopSubAgentPoll()
       hostPendingAsks.clear()
+      subAgentPendingAsks.clear()
       sessionCtx = null
     })
 
@@ -1476,6 +1539,41 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         supervisor_id: Type.Optional(Type.String({ description: 'Reuse an existing supervisor by socket path' })),
       }),
       async execute(_toolCallId, params) {
+        // In a pi sub-agent, reply directly over the broker as its own run so
+        // the answer reaches the host's waiting avenor_ask.
+        if (isSubAgentBrokerMode) {
+          let fromRunId = params.from_run_id
+          let messageId = params.reply_to_message_id
+          if (!messageId) {
+            let match: { from_run_id: string; message_id: string } | undefined
+            for (const [, pending] of subAgentPendingAsks) {
+              if ((!fromRunId || pending.from_run_id === fromRunId) && (!match || pending.message_id > match.message_id)) {
+                match = pending
+              }
+            }
+            if (match) messageId = match.message_id
+            if (match && !fromRunId) fromRunId = match.from_run_id
+          }
+          if (!fromRunId || !messageId) {
+            return { content: [{ type: 'text', text: 'No pending ask found to reply to. Pass from_run_id and/or reply_to_message_id.' }], details: { error: true } }
+          }
+          await subAgentBrokerRequest('/send', {
+            from_run_id: SUBAGENT_RUN_ID,
+            to_run_id: fromRunId,
+            type: 'agent_message',
+            payload: {
+              id: randomUUID(),
+              from_run_id: SUBAGENT_RUN_ID,
+              to_run_id: fromRunId,
+              message: params.message,
+              role: 'agent',
+              reply_to: messageId,
+            },
+          })
+          subAgentPendingAsks.delete(messageId)
+          return { content: [{ type: 'text', text: 'Reply sent' }] }
+        }
+
         // Resolve the asker + message id: prefer explicit params, else the
         // most recent pending ask from that sub-agent.
         let fromRunId = params.from_run_id

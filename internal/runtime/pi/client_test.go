@@ -465,7 +465,7 @@ func TestStartClientForwardsThinkingFlag(t *testing.T) {
 		return exec.Command("cat")
 	}
 	client, err := StartClientWithAgentProfileThinkingAndDir(
-		context.Background(), "", "", "", "", "", "high", "",
+		context.Background(), "", "", "", "", "", "high", "", "", "", "",
 	)
 	if err != nil {
 		t.Fatalf("StartClientWithAgentProfileThinkingAndDir: %v", err)
@@ -946,5 +946,54 @@ func TestClientToolCallCorrelationPreservesBackendFields(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for permission request")
+	}
+}
+
+func TestStartClientForwardsBrokerEnv(t *testing.T) {
+	original := piExecCommandContext
+	t.Cleanup(func() { piExecCommandContext = original })
+
+	var captured *exec.Cmd
+	t.Setenv("AVENOR_BROKER_URL", "http://stale.invalid")
+	t.Setenv("AVENOR_RUN_ID", "stale-run")
+	t.Setenv("AVENOR_BROKER_TOKEN", "stale-token")
+	piExecCommandContext = func(_ context.Context, _ string, args ...string) *exec.Cmd {
+		captured = exec.Command("cat", args...)
+		return captured
+	}
+
+	client, err := StartClientWithAgentProfileThinkingAndDir(
+		context.Background(), "", "sonnet", "", "jockey", "", "", "",
+		"http://127.0.0.1:9999", "rt_1", "secret-token",
+	)
+	if err != nil {
+		t.Fatalf("StartClientWithAgentProfileThinkingAndDir: %v", err)
+	}
+	defer client.Close()
+
+	if captured == nil {
+		t.Fatal("pi command was not created")
+	}
+	env := make(map[string]string)
+	for _, entry := range captured.Env {
+		if k, v, ok := strings.Cut(entry, "="); ok {
+			env[k] = v
+		}
+	}
+
+	want := map[string]string{
+		"AVENOR_BROKER_URL":   "http://127.0.0.1:9999",
+		"AVENOR_RUN_ID":       "rt_1",
+		"AVENOR_BROKER_TOKEN": "secret-token",
+		"PI_AGENT":            "jockey",
+	}
+	for key, val := range want {
+		if env[key] != val {
+			t.Fatalf("%s = %q, want %q", key, env[key], val)
+		}
+	}
+	// Stale broker env from the parent must not leak through.
+	if env["AVENOR_RUN_ID"] == "stale-run" || env["AVENOR_RUN_ID"] == "" {
+		t.Fatalf("expected AVENOR_RUN_ID to be set to rt_1, got %q", env["AVENOR_RUN_ID"])
 	}
 }
