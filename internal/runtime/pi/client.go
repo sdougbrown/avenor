@@ -116,7 +116,7 @@ func StartClientWithAgentProfileThinkingAndDir(ctx context.Context, provider str
 
 	proc := piExecCommandContext(ctx, "pi", args...)
 	proc.Dir = cwd
-	if agent != "" || agentProfile != "" || brokerURL != "" {
+	if agent != "" || agentProfile != "" || brokerURL != "" || brokerRunID != "" || brokerToken != "" {
 		env := proc.Environ()
 		filtered := env[:0]
 		for _, e := range env {
