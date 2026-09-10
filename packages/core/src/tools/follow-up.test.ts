@@ -30,6 +30,13 @@ function singletonSupervisor(runs: Map<string, any>): any {
   return {
     runs,
     aliases,
+    getRunByReference: (reference: string) => runs.get(reference) ?? aliases.get(reference),
+    getRunByRuntimeId: (runtimeId: string) => {
+      for (const runInfo of runs.values()) {
+        if (runInfo.runtimeId === runtimeId) return runInfo
+      }
+      return undefined
+    },
     spawn: async (params: Record<string, unknown>, runId: string) => {
       const result = await spawnMock(params)
       const runInfo = {
@@ -494,6 +501,13 @@ describe('followUpTool with a local supervisor (no supervisorId)', () => {
     Supervisor.get = mock(async () => ({
       runs: localSupRuns,
       aliases: localSupAliases,
+      getRunByReference: (reference: string) => localSupRuns.get(reference) ?? localSupAliases.get(reference),
+      getRunByRuntimeId: (runtimeId: string) => {
+        for (const info of localSupRuns.values()) {
+          if (info.runtimeId === runtimeId) return info
+        }
+        return undefined
+      },
       getClient: localSupGetClientMock,
       spawn: localSupSpawnMock,
       supervisorId: '/tmp/local-supervisor.sock',

@@ -315,6 +315,23 @@ export class Supervisor {
     return this.socketPath
   }
 
+  /**
+   * Look up a run by its public run ID first, then by its label alias.
+   * Public run IDs are canonical; labels are lookup-only aliases.
+   */
+  getRunByReference(reference: string): RunInfo | undefined {
+    return this.runs.get(reference) ?? this.aliases.get(reference)
+  }
+
+  /** Match a stored run by its broker runtime ID. */
+  getRunByRuntimeId(runtimeId: string): RunInfo | undefined {
+    if (!runtimeId) return undefined
+    for (const runInfo of this.runs.values()) {
+      if (runInfo.runtimeId === runtimeId) return runInfo
+    }
+    return undefined
+  }
+
   static isCurrentInstance(supervisorId: string): boolean {
     return Supervisor.instance !== null && Supervisor.instance.supervisorId === supervisorId
   }

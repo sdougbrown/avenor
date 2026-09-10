@@ -69,6 +69,8 @@ describe('askTool without supervisor_id (singleton fallback)', () => {
     Supervisor.get = mock(async () => ({
       runs: new Map(),
       aliases: new Map(),
+      getRunByReference: () => undefined,
+      getRunByRuntimeId: () => undefined,
       getClient: () => ({ brokerAsk: singletonBrokerAsk, close: singletonClose }),
       supervisorId: '/tmp/avenor-ask-singleton.sock',
     })) as any
@@ -144,5 +146,46 @@ describe('askTool resolves run references to broker runtime ids', () => {
   it('passes an unresolved id through unchanged (e.g. supervisor)', async () => {
     await externalAskTool({ toRunId: 'supervisor', message: 'hello' })
     expect(externalBrokerAsk).toHaveBeenCalledWith('supervisor', 'hello')
+  })
+
+  it('falls back to the disk-read registry when in-memory state is cleared', async () => {
+    // registerExternalRun persisted run.json in beforeEach; drop the in-memory
+    // index so findExternalRun must resolve 'public-run' via readPersistedRun.
+    forgetExternalRuns(supervisorId)
+    await externalAskTool({ toRunId: 'public-run', message: 'hello' })
+    expect(externalBrokerAsk).toHaveBeenCalledWith('rt-9', 'hello')
+  })
+})
+
+describe('askTool resolves local singleton run references', () => {
+  const localBrokerAsk = mock(async () => ({ payload: { message: 'local reply' }, from_run_id: 'sender' }))
+  const localClose = mock(() => {})
+  const localSup = Object.create(Supervisor.prototype) as any
+  localSup.runs = new Map<string, any>([
+    ['local-run', { runId: 'local-run', label: 'my-label', runtimeId: 'rt-77' }],
+  ])
+  localSup.aliases = new Map<string, any>([['my-label', localSup.runs.get('local-run')]])
+  const localGetClient = mock(async () => ({
+    client: { brokerAsk: localBrokerAsk, close: localClose },
+    isSingleton: true,
+    sup: localSup,
+    supervisorId: '/tmp/avenor-ask-local.sock',
+  }))
+  const localAskTool = createAskTool(localGetClient)
+
+  afterEach(() => {
+    localBrokerAsk.mockClear()
+    localClose.mockClear()
+    localGetClient.mockClear()
+  })
+
+  it('substitutes the resolved runtime id for a local public run id', async () => {
+    await localAskTool({ toRunId: 'local-run', message: 'hello' })
+    expect(localBrokerAsk).toHaveBeenCalledWith('rt-77', 'hello')
+  })
+
+  it('substitutes the resolved runtime id for a local label alias', async () => {
+    await localAskTool({ toRunId: 'my-label', message: 'hello' })
+    expect(localBrokerAsk).toHaveBeenCalledWith('rt-77', 'hello')
   })
 })
