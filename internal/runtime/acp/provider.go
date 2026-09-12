@@ -2,6 +2,7 @@ package acp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -23,6 +24,19 @@ type ProviderConfig struct {
 	Authenticate        string // optional: if non-empty, call Client.Authenticate with this methodId after Initialize
 	ConfigureSession    func(ctx context.Context, session *Session, opts runtime.StartOptions) error
 	BuildClientEnv      func(opts runtime.StartOptions, runID, brokerToken, brokerAddr string) (map[string]string, func() error)
+}
+
+// presenceInterval is how often a provider re-pushes its live session
+// metadata to the broker so /sessions reflects presence even between turns.
+const presenceInterval = 5 * time.Second
+
+// presenceState tracks the live metadata a session pushes to the broker for
+// peer discovery. ctx carries the context-token count from the most recent
+// completed prompt so periodic refreshes never lose it.
+type presenceState struct {
+	status string
+	model  string
+	ctx    int
 }
 
 type Provider struct {
@@ -51,6 +65,9 @@ type Provider struct {
 	pollCancels     map[string]context.CancelFunc
 	pendingMu       sync.Mutex
 	pendingMessages map[string][]string // sessionID → queued wrapped prompts
+
+	// presence holds the live peer-discovery metadata per active session.
+	presence map[string]*presenceState
 }
 
 func NewProvider(cfg ProviderConfig) runtime.Provider {
@@ -64,6 +81,7 @@ func NewProvider(cfg ProviderConfig) runtime.Provider {
 		pollContexts:        map[string]context.Context{},
 		pollCancels:         map[string]context.CancelFunc{},
 		pendingMessages:     map[string][]string{},
+		presence:            map[string]*presenceState{},
 		subprocessDiscovery: cfg.SubprocessDiscovery,
 		appendCWDArg:        cfg.AppendCWDArg,
 		authenticateID:      cfg.Authenticate,
@@ -144,11 +162,15 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	p.sessions[session.SessionID] = session
 	if runID != "" {
 		p.runIDs[session.SessionID] = runID
+		p.presence[session.SessionID] = &presenceState{status: "starting", model: merged.Model}
 	}
 	p.mu.Unlock()
 
 	// Start the broker message polling goroutine if we have a broker and runID.
 	if runID != "" {
+		// Push initial presence so the session is visible immediately.
+		p.presencePush(session.SessionID)
+
 		pollCtx, cancel := context.WithCancel(ctx)
 		p.mu.Lock()
 		p.pollContexts[session.SessionID] = pollCtx
@@ -159,6 +181,8 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 			p.pendingMessages[session.SessionID] = append(p.pendingMessages[session.SessionID], wrapped)
 			p.pendingMu.Unlock()
 		})
+		// Periodic refresh so /sessions reflects presence between turns.
+		go p.presenceTicker(pollCtx, session.SessionID)
 	}
 
 	return runtime.Session{
@@ -204,11 +228,14 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 	if err != nil {
 		return err
 	}
+	p.setPresence(sessionID, "thinking", 0)
 	event, err := session.Prompt(ctx, prompt)
 	if err != nil {
+		p.setPresence(sessionID, "idle", 0)
 		return err
 	}
 	p.publish(event)
+	p.refreshPresence(sessionID, event)
 	return nil
 }
 
@@ -307,6 +334,7 @@ func (p *Provider) Close() error {
 	p.runIDs = nil
 	p.pollContexts = map[string]context.Context{}
 	p.pollCancels = map[string]context.CancelFunc{}
+	p.presence = map[string]*presenceState{}
 	p.mu.Unlock()
 	for _, cancel := range cancels {
 		cancel()
@@ -433,6 +461,86 @@ func (p *Provider) session(sessionID string) (*Session, error) {
 		return nil, fmt.Errorf("session %q not found", sessionID)
 	}
 	return session, nil
+}
+
+// setPresence updates the recorded presence state for a session. An empty
+// status leaves the existing status untouched; a non-zero ctx overrides the
+// recorded context-token count.
+func (p *Provider) setPresence(sessionID, status string, ctxTokens int) {
+	p.mu.Lock()
+	if ps := p.presence[sessionID]; ps != nil {
+		if status != "" {
+			ps.status = status
+		}
+		if ctxTokens > 0 {
+			ps.ctx = ctxTokens
+		}
+	}
+	p.mu.Unlock()
+}
+
+// presencePush writes the current presence state for a session to the broker
+// under its run ID. It sends a complete SessionInfo so the broker's overwrite
+// semantics cleanly reflect the latest values.
+func (p *Provider) presencePush(sessionID string) {
+	p.mu.Lock()
+	b := p.broker
+	runID := p.runIDs[sessionID]
+	ps := p.presence[sessionID]
+	var status, model string
+	var ctx int
+	if ps != nil {
+		status, model, ctx = ps.status, ps.model, ps.ctx
+	}
+	p.mu.Unlock()
+	if b == nil || runID == "" || ps == nil {
+		return
+	}
+	b.UpdateSessionInfo(runID, &broker.SessionInfo{
+		Backend:       p.backendID,
+		Model:         model,
+		Status:        status,
+		LastSeen:      time.Now().Unix(),
+		ContextTokens: ctx,
+	})
+}
+
+// refreshPresence records the outcome of a just-completed prompt turn and
+// pushes it to the broker. Context tokens are read from the prompt response's
+// usage block when present.
+func (p *Provider) refreshPresence(sessionID string, event events.Event) {
+	ctxTokens := 0
+	if usage, ok := event.Fields["usage"].(map[string]any); ok {
+		switch v := usage["total_tokens"].(type) {
+		case float64:
+			ctxTokens = int(v)
+		case int64:
+			ctxTokens = int(v)
+		case int:
+			ctxTokens = v
+		case json.Number:
+			if i, err := v.Int64(); err == nil {
+				ctxTokens = int(i)
+			}
+		}
+	}
+	p.setPresence(sessionID, "idle", ctxTokens)
+	p.presencePush(sessionID)
+}
+
+// presenceTicker periodically re-pushes presence so /sessions reflects a live
+// session even when no prompt boundary has fired recently.
+func (p *Provider) presenceTicker(ctx context.Context, sessionID string) {
+	ticker := time.NewTicker(presenceInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			p.presencePush(sessionID)
+		}
+	}
 }
 
 func pendingPermissionOptions(pending map[string]map[string][]any, sessionID, requestID string) (string, []any) {

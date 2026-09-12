@@ -562,3 +562,60 @@ func TestCloseRunsClientEnvCleanup(t *testing.T) {
 		t.Fatalf("config file still exists after Close cleanup: %v", err)
 	}
 }
+
+func TestPresencePushContextTokens(t *testing.T) {
+	b := broker.New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	defer b.Stop()
+
+	b.EnsureRun("acp_run")
+
+	p := &Provider{
+		backendID: "acp",
+		broker:    b,
+		runIDs:    map[string]string{"ses": "acp_run"},
+		presence:  map[string]*presenceState{"ses": {status: "starting", model: "test-model"}},
+	}
+
+	p.refreshPresence("ses", events.Event{
+		Event:     "session.end",
+		SessionID: "ses",
+		Fields: map[string]any{
+			"usage": map[string]any{"total_tokens": 82000},
+		},
+	})
+
+	st := b.GetRun("acp_run")
+	if st == nil {
+		t.Fatal("run not found")
+	}
+	st.Mu.Lock()
+	info := st.Info
+	st.Mu.Unlock()
+	if info == nil {
+		t.Fatal("SessionInfo should not be nil after refresh")
+	}
+	if info.Status != "idle" {
+		t.Errorf("Status = %q, want idle", info.Status)
+	}
+	if info.ContextTokens != 82000 {
+		t.Errorf("ContextTokens = %d, want 82000", info.ContextTokens)
+	}
+	if info.Model != "test-model" {
+		t.Errorf("Model = %q, want test-model", info.Model)
+	}
+	if info.Backend != "acp" {
+		t.Errorf("Backend = %q, want acp", info.Backend)
+	}
+
+	// Without a usage block, the recorded token count is preserved, not wiped.
+	p.refreshPresence("ses", events.Event{Event: "session.end", SessionID: "ses", Fields: map[string]any{}})
+	st.Mu.Lock()
+	info = st.Info
+	st.Mu.Unlock()
+	if info.ContextTokens != 82000 {
+		t.Errorf("ContextTokens = %d, want preserved 82000", info.ContextTokens)
+	}
+}

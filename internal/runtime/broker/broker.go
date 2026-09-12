@@ -132,15 +132,22 @@ type AskReply struct {
 	Payload   json.RawMessage `json:"payload,omitempty"`
 }
 
-// SessionInfo describes a registered run for peer discovery.
+// SessionInfo describes a registered run for peer discovery. Context fields
+// describe the live model context: the token count currently in use, the
+// percentage of the context window that represents, and the window size.
+// They are populated by backends where the data is available and omitted when
+// unknown.
 type SessionInfo struct {
-	RunID    string `json:"run_id"`
-	Label    string `json:"label,omitempty"`
-	Backend  string `json:"backend,omitempty"`
-	Model    string `json:"model,omitempty"`
-	Dir      string `json:"dir,omitempty"`
-	Status   string `json:"status,omitempty"`
-	LastSeen int64  `json:"last_seen"`
+	RunID         string `json:"run_id"`
+	Label         string `json:"label,omitempty"`
+	Backend       string `json:"backend,omitempty"`
+	Model         string `json:"model,omitempty"`
+	Dir           string `json:"dir,omitempty"`
+	Status        string `json:"status,omitempty"`
+	LastSeen      int64  `json:"last_seen"`
+	ContextPct    int    `json:"context_pct,omitempty"`
+	ContextTokens int    `json:"context_tokens,omitempty"`
+	ContextWindow int    `json:"context_window,omitempty"`
 }
 
 // RunState holds all per-run broker state.
@@ -1132,6 +1139,9 @@ func (b *Broker) handleSessions(w http.ResponseWriter, r *http.Request) {
 			info.Model = st.Info.Model
 			info.Dir = st.Info.Dir
 			info.Status = st.Info.Status
+			info.ContextPct = st.Info.ContextPct
+			info.ContextTokens = st.Info.ContextTokens
+			info.ContextWindow = st.Info.ContextWindow
 		}
 		info.LastSeen = st.LastSeen.Unix()
 		st.Mu.Unlock()

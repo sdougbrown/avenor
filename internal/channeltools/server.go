@@ -195,6 +195,8 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 				status, _ := entry["status"].(string)
 				backend, _ := entry["backend"].(string)
 				model, _ := entry["model"].(string)
+				contextPct, _ := entry["context_pct"].(float64)
+				contextTokens, _ := entry["context_tokens"].(float64)
 				line := "  " + id
 				if label != "" {
 					line = fmt.Sprintf("  %s (%s)", label, id)
@@ -208,6 +210,12 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 						line += ", " + model
 					}
 					line += "]"
+				}
+				if contextPct > 0 {
+					line += fmt.Sprintf(" %d%% context", int(contextPct))
+				}
+				if contextTokens > 0 {
+					line += fmt.Sprintf(" (%d tokens)", int(contextTokens))
 				}
 				lines = append(lines, line)
 			}
