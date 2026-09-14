@@ -992,4 +992,28 @@ func TestStartClientForwardsBrokerEnv(t *testing.T) {
 			t.Fatalf("%s = %q, want %q", key, env[key], val)
 		}
 	}
+
+	// With no broker identity at all, stale AVENOR_* env must be stripped
+	// from the child rather than leaked through unfiltered.
+	client2, err := StartClientWithAgentProfileThinkingAndDir(
+		context.Background(), "", "sonnet", "", "", "", "", "", "", "", "",
+	)
+	if err != nil {
+		t.Fatalf("second StartClientWithAgentProfileThinkingAndDir: %v", err)
+	}
+	defer client2.Close()
+	if captured == nil {
+		t.Fatal("second pi command was not created")
+	}
+	emptyEnv := make(map[string]string)
+	for _, entry := range captured.Env {
+		if k, v, ok := strings.Cut(entry, "="); ok {
+			emptyEnv[k] = v
+		}
+	}
+	for _, key := range []string{"AVENOR_BROKER_URL", "AVENOR_RUN_ID", "AVENOR_BROKER_TOKEN"} {
+		if v, ok := emptyEnv[key]; ok {
+			t.Errorf("%s = %q leaked into child env with empty broker args", key, v)
+		}
+	}
 }

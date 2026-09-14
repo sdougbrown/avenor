@@ -2617,6 +2617,7 @@ func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, re
 	fallbackAgent, fallbackModel := child.agent, child.model
 	fallbackProfile := child.agentProfile
 	label, dir, thinking := child.label, child.dir, child.thinking
+	brokerToken := child.brokerToken
 	child.mu.Unlock()
 	_, mapped := s.sessionIdentity(resumeID)
 	if mappedIdentity, ok := s.sessionIdentity(resumeID); ok {
@@ -2641,6 +2642,9 @@ func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, re
 		Dir:          dir,
 		Model:        identity.Model,
 		Thinking:     thinking,
+		RuntimeID:    child.id,
+		Broker:       s.broker,
+		BrokerToken:  brokerToken,
 	}, resumeID)
 }
 

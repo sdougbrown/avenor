@@ -15,6 +15,10 @@ describe('readSubAgentEnv', () => {
     expect(readSubAgentEnv({})).toBeNull()
   })
 
+  it('treats a present-but-empty credential as missing', () => {
+    expect(readSubAgentEnv({ AVENOR_BROKER_URL: 'http://x', AVENOR_RUN_ID: 'rt_1', AVENOR_BROKER_TOKEN: '' })).toBeNull()
+  })
+
   it('reads the three broker credentials', () => {
     expect(readSubAgentEnv({
       AVENOR_BROKER_URL: 'http://x',
@@ -44,6 +48,8 @@ describe('parseControlMessage', () => {
     expect(parseControlMessage({ type: 'agent_message', payload: 'not-json' })).toBeNull()
     expect(parseControlMessage({ type: 'agent_message', payload: { message: '' } })).toBeNull()
     expect(parseControlMessage({ type: 'agent_message', payload: { message: 'x' } })).toBeNull()
+    // An ask with no asker could never be answered.
+    expect(parseControlMessage({ type: 'agent_message', payload: { id: 'ask-9', message: 'x' } })).toBeNull()
   })
 })
 
@@ -88,6 +94,10 @@ describe('resolveReplyTarget', () => {
     expect(resolveReplyTarget(pending, undefined, 'ask-2')).toEqual({ from_run_id: 'supervisor', message_id: 'ask-2' })
   })
 
+  it('lets an explicit message id take precedence over a disagreeing asker', () => {
+    expect(resolveReplyTarget(pending, 'other', 'ask-1')).toEqual({ from_run_id: 'other', message_id: 'ask-1' })
+  })
+
   it('falls back to the most recent pending ask for a given asker', () => {
     expect(resolveReplyTarget(pending, 'supervisor', undefined)).toEqual({ from_run_id: 'supervisor', message_id: 'ask-2' })
   })
@@ -105,7 +115,9 @@ describe('resolveReplyTarget', () => {
   it('returns null when nothing matches', () => {
     expect(resolveReplyTarget(pending, 'ghost', undefined)).toBeNull()
     expect(resolveReplyTarget(new Map(), undefined, undefined)).toBeNull()
-    // Stale reply_to_message_id with no asker must not route to an empty to_run_id.
+    // A reply_to_message_id that is not a pending ask must not be answered
+    // fire-and-forget, with or without an asker.
     expect(resolveReplyTarget(pending, undefined, 'ask-unknown')).toBeNull()
+    expect(resolveReplyTarget(pending, 'supervisor', 'ask-unknown')).toBeNull()
   })
 })

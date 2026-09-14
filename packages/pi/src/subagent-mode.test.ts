@@ -35,9 +35,10 @@ interface FetchCall {
 }
 
 /** Stub global fetch with canned /poll-control responses; records /send bodies. */
-function stubBrokerFetch(pollResponses: unknown[]) {
+function stubBrokerFetch(pollResponses: unknown[], sendFailures = 0) {
   const calls: FetchCall[] = []
   let pollIndex = 0
+  let pendingSendFailures = sendFailures
   const previous = globalThis.fetch
   globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
     const href = String(url)
@@ -48,6 +49,10 @@ function stubBrokerFetch(pollResponses: unknown[]) {
       const value = pollIndex < pollResponses.length ? pollResponses[pollIndex] : []
       pollIndex++
       return { ok: true, status: 200, json: async () => value, text: async () => '' } as Response
+    }
+    if (pendingSendFailures > 0) {
+      pendingSendFailures--
+      return { ok: false, status: 500, json: async () => ({}), text: async () => 'boom' } as Response
     }
     return { ok: true, status: 200, json: async () => ({ queued: true }), text: async () => '' } as Response
   }) as typeof fetch
@@ -149,6 +154,29 @@ describe('sub-agent broker mode (integration)', () => {
       await waitFor(() => sendUserMessage.mock.calls.length > 0)
       const [body] = sendUserMessage.mock.calls[0] as [string]
       expect(body).toContain('later ask')
+    } finally {
+      await harness?.eventHandlers.session_shutdown({}, {})
+      fetchStub.restore()
+    }
+  })
+
+  it('keeps the pending ask retryable when /send fails', async () => {
+    const fetchStub = stubBrokerFetch(
+      [[{ type: 'agent_message', payload: { id: 'ask-r', from_run_id: 'supervisor', message: 'retry me' } }]],
+      1,
+    )
+    let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
+    try {
+      harness = await startSubAgentExtension({ fetchStub })
+      const { registeredTools, sendUserMessage } = harness
+      await waitFor(() => sendUserMessage.mock.calls.length > 0)
+
+      await expect(registeredTools.avenor_reply.execute('t1', { message: 'first try' })).rejects.toThrow('broker /send: 500 boom')
+
+      const result = await registeredTools.avenor_reply.execute('t2', { message: 'retry' })
+      expect(result.content[0].text).toBe('Reply sent')
+      const payload = fetchStub.calls.filter(call => call.path === '/send').at(-1)!.body.payload as Record<string, unknown>
+      expect(payload).toMatchObject({ to_run_id: 'supervisor', reply_to: 'ask-r' })
     } finally {
       await harness?.eventHandlers.session_shutdown({}, {})
       fetchStub.restore()

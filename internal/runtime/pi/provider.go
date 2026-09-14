@@ -351,7 +351,7 @@ func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions) 
 	if starter == nil {
 		starter = func(ctx context.Context, opts runtime.StartOptions) (*client, error) {
 			var brokerURL string
-			if opts.Broker != nil && opts.RuntimeID != "" {
+			if opts.Broker != nil && opts.RuntimeID != "" && opts.BrokerToken != "" {
 				brokerURL = "http://" + opts.Broker.Addr()
 			}
 			return StartClientWithAgentProfileThinkingAndDir(

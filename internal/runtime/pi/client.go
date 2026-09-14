@@ -116,37 +116,38 @@ func StartClientWithAgentProfileThinkingAndDir(ctx context.Context, provider str
 
 	proc := piExecCommandContext(ctx, "pi", args...)
 	proc.Dir = cwd
-	if agent != "" || agentProfile != "" || brokerURL != "" || brokerRunID != "" || brokerToken != "" {
-		env := proc.Environ()
-		filtered := env[:0]
-		for _, e := range env {
-			if !strings.HasPrefix(e, "PI_AGENT=") &&
-				!strings.HasPrefix(e, "PI_AGENT_PROFILE=") &&
-				!strings.HasPrefix(e, "AVENOR_BROKER_URL=") &&
-				!strings.HasPrefix(e, "AVENOR_RUN_ID=") &&
-				!strings.HasPrefix(e, "AVENOR_BROKER_TOKEN=") {
-				filtered = append(filtered, e)
-			}
+	// Stale PI_AGENT / broker credentials from the parent must never leak into
+	// the child: they would activate sub-agent broker mode under the wrong
+	// identity, so the filter runs regardless of which values are injected.
+	env := proc.Environ()
+	filtered := env[:0]
+	for _, e := range env {
+		if !strings.HasPrefix(e, "PI_AGENT=") &&
+			!strings.HasPrefix(e, "PI_AGENT_PROFILE=") &&
+			!strings.HasPrefix(e, "AVENOR_BROKER_URL=") &&
+			!strings.HasPrefix(e, "AVENOR_RUN_ID=") &&
+			!strings.HasPrefix(e, "AVENOR_BROKER_TOKEN=") {
+			filtered = append(filtered, e)
 		}
-		if agent != "" {
-			filtered = append(filtered, "PI_AGENT="+agent)
-		}
-		if agentProfile != "" {
-			filtered = append(filtered, "PI_AGENT_PROFILE="+agentProfile)
-		}
-		// Broker credentials let the pi sub-process poll its own inbound asks and
-		// reply via avenor_reply as its own run.
-		if brokerURL != "" {
-			filtered = append(filtered, "AVENOR_BROKER_URL="+brokerURL)
-		}
-		if brokerRunID != "" {
-			filtered = append(filtered, "AVENOR_RUN_ID="+brokerRunID)
-		}
-		if brokerToken != "" {
-			filtered = append(filtered, "AVENOR_BROKER_TOKEN="+brokerToken)
-		}
-		proc.Env = filtered
 	}
+	if agent != "" {
+		filtered = append(filtered, "PI_AGENT="+agent)
+	}
+	if agentProfile != "" {
+		filtered = append(filtered, "PI_AGENT_PROFILE="+agentProfile)
+	}
+	// Broker credentials let the pi sub-process poll its own inbound asks and
+	// reply via avenor_reply as its own run.
+	if brokerURL != "" {
+		filtered = append(filtered, "AVENOR_BROKER_URL="+brokerURL)
+	}
+	if brokerRunID != "" {
+		filtered = append(filtered, "AVENOR_RUN_ID="+brokerRunID)
+	}
+	if brokerToken != "" {
+		filtered = append(filtered, "AVENOR_BROKER_TOKEN="+brokerToken)
+	}
+	proc.Env = filtered
 	stdin, err := proc.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("pi stdin pipe: %w", err)
