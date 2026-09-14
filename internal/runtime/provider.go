@@ -195,5 +195,8 @@ func MergeStartOptions(base, override StartOptions) StartOptions {
 	if override.Broker != nil {
 		merged.Broker = override.Broker
 	}
+	if override.BrokerToken != "" {
+		merged.BrokerToken = override.BrokerToken
+	}
 	return merged
 }

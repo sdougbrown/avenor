@@ -350,13 +350,18 @@ func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions) 
 	starter := p.startClient
 	if starter == nil {
 		starter = func(ctx context.Context, opts runtime.StartOptions) (*client, error) {
-			var brokerURL string
+			// The child is broker-configured only as a whole: URL, run id, and
+			// token travel together or not at all, so it can never poll with a
+			// half-configured identity.
+			var brokerURL, brokerRunID, brokerToken string
 			if opts.Broker != nil && opts.RuntimeID != "" && opts.BrokerToken != "" {
 				brokerURL = "http://" + opts.Broker.Addr()
+				brokerRunID = opts.RuntimeID
+				brokerToken = opts.BrokerToken
 			}
 			return StartClientWithAgentProfileThinkingAndDir(
 				ctx, "", opts.Model, "", opts.Agent, opts.AgentProfile, opts.Thinking, opts.Dir,
-				brokerURL, opts.RuntimeID, opts.BrokerToken,
+				brokerURL, brokerRunID, brokerToken,
 			)
 		}
 	}

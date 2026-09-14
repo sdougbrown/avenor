@@ -957,8 +957,11 @@ func TestStartClientForwardsBrokerEnv(t *testing.T) {
 	t.Setenv("AVENOR_BROKER_URL", "http://stale.invalid")
 	t.Setenv("AVENOR_RUN_ID", "stale-run")
 	t.Setenv("AVENOR_BROKER_TOKEN", "stale-token")
+	t.Setenv("PI_AGENT", "stale-agent")
+	commands := make([]*exec.Cmd, 0, 2)
 	piExecCommandContext = func(_ context.Context, _ string, args ...string) *exec.Cmd {
 		captured = exec.Command("cat", args...)
+		commands = append(commands, captured)
 		return captured
 	}
 
@@ -993,8 +996,8 @@ func TestStartClientForwardsBrokerEnv(t *testing.T) {
 		}
 	}
 
-	// With no broker identity at all, stale AVENOR_* env must be stripped
-	// from the child rather than leaked through unfiltered.
+	// With no broker identity at all, stale AVENOR_*/PI_AGENT env must be
+	// stripped from the child rather than leaked through unfiltered.
 	client2, err := StartClientWithAgentProfileThinkingAndDir(
 		context.Background(), "", "sonnet", "", "", "", "", "", "", "", "",
 	)
@@ -1002,16 +1005,20 @@ func TestStartClientForwardsBrokerEnv(t *testing.T) {
 		t.Fatalf("second StartClientWithAgentProfileThinkingAndDir: %v", err)
 	}
 	defer client2.Close()
-	if captured == nil {
+	if len(commands) < 2 || commands[1] == nil {
 		t.Fatal("second pi command was not created")
 	}
+	// A nil Env means the child inherits the stale parent env unchecked.
+	if commands[1].Env == nil {
+		t.Fatal("second pi command env was not assigned; child would inherit stale parent env")
+	}
 	emptyEnv := make(map[string]string)
-	for _, entry := range captured.Env {
+	for _, entry := range commands[1].Env {
 		if k, v, ok := strings.Cut(entry, "="); ok {
 			emptyEnv[k] = v
 		}
 	}
-	for _, key := range []string{"AVENOR_BROKER_URL", "AVENOR_RUN_ID", "AVENOR_BROKER_TOKEN"} {
+	for _, key := range []string{"AVENOR_BROKER_URL", "AVENOR_RUN_ID", "AVENOR_BROKER_TOKEN", "PI_AGENT"} {
 		if v, ok := emptyEnv[key]; ok {
 			t.Errorf("%s = %q leaked into child env with empty broker args", key, v)
 		}

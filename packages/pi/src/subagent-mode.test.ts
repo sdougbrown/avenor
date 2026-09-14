@@ -1,6 +1,7 @@
 import { describe, expect, it, mock } from 'bun:test'
 import type { ExtensionDeps } from './index.js'
 import { createExtension } from './index.js'
+import type { SubAgentEnv } from './subagent-broker.js'
 
 const subAgentEnv = { brokerUrl: 'http://127.0.0.1:1', runId: 'rt_child', token: 'tok' } as const
 
@@ -66,7 +67,8 @@ function stubBrokerFetch(pollResponses: unknown[], sendFailures = 0) {
 
 async function startSubAgentExtension(opts: {
   fetchStub: ReturnType<typeof stubBrokerFetch>
-  subAgentEnv?: { brokerUrl: string; runId: string; token: string } | null
+  subAgentEnv?: SubAgentEnv | null
+  deps?: Partial<ExtensionDeps>
 }) {
   const registeredTools: Record<string, any> = {}
   const eventHandlers: Record<string, any> = {}
@@ -82,7 +84,9 @@ async function startSubAgentExtension(opts: {
     registerMessageRenderer: () => {},
     events: { emit: mock(() => {}), on: mock(() => () => {}) },
   }
-  await createExtension(buildMockDeps(), { pollIntervalMs: 5, subAgentEnv: opts.subAgentEnv ?? subAgentEnv })(mockPi as any)
+  // null must stay null: it is the declared way to force non-sub-agent mode.
+  const subAgentEnvOption = opts.subAgentEnv === undefined ? subAgentEnv : opts.subAgentEnv
+  await createExtension(buildMockDeps(opts.deps), { pollIntervalMs: 5, subAgentEnv: subAgentEnvOption })(mockPi as any)
   const ctx = { cwd: '/tmp', sendUserMessage, ui: { setStatus: mock(() => {}), setWidget: mock(() => {}), notify: mock(() => {}) } }
   await eventHandlers.session_start({}, ctx)
   return { ctx, eventHandlers, registeredTools, sendUserMessage }
@@ -183,12 +187,35 @@ describe('sub-agent broker mode (integration)', () => {
     }
   })
 
+  it('routes avenor_reply through the host broker tool outside sub-agent mode', async () => {
+    const fetchStub = stubBrokerFetch([])
+    const brokerReplyTool = mock(async () => ({ ok: true }))
+    let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
+    try {
+      harness = await startSubAgentExtension({ fetchStub, subAgentEnv: null, deps: { brokerReplyTool } })
+      const result = await harness.registeredTools.avenor_reply.execute('t1', {
+        from_run_id: 'rt_sub',
+        reply_to_message_id: 'ask-h',
+        message: 'host answer',
+      })
+      expect(result.content[0].text).toBe('Reply sent')
+      expect(brokerReplyTool).toHaveBeenCalledTimes(1)
+      expect(brokerReplyTool.mock.calls[0][0]).toMatchObject({ toRunId: 'rt_sub', replyTo: 'ask-h', message: 'host answer' })
+      // Sub-agent polling must not run in host mode.
+      expect(fetchStub.calls.some(call => call.path === '/poll-control')).toBe(false)
+    } finally {
+      await harness?.eventHandlers.session_shutdown({}, {})
+      fetchStub.restore()
+    }
+  })
+
   it('stops polling on session_shutdown', async () => {
     const fetchStub = stubBrokerFetch([])
+    let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
     try {
-      const { eventHandlers } = await startSubAgentExtension({ fetchStub })
+      harness = await startSubAgentExtension({ fetchStub })
       await waitFor(() => fetchStub.calls.some(call => call.path === '/poll-control'))
-      await eventHandlers.session_shutdown({}, {})
+      await harness.eventHandlers.session_shutdown({}, {})
       // Let any in-flight tick land, then assert no further polls arrive.
       await new Promise(resolve => setTimeout(resolve, 30))
       const after = fetchStub.calls.filter(call => call.path === '/poll-control').length
@@ -196,6 +223,7 @@ describe('sub-agent broker mode (integration)', () => {
       const later = fetchStub.calls.filter(call => call.path === '/poll-control').length
       expect(later).toBe(after)
     } finally {
+      await harness?.eventHandlers.session_shutdown({}, {})
       fetchStub.restore()
     }
   })

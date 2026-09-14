@@ -518,9 +518,14 @@ func TestProviderStartOmitsBrokerURLWithoutToken(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("Pi command was not created")
 	}
+	if cmd.Env == nil {
+		t.Fatal("pi command env was not assigned; child would inherit the parent env")
+	}
 	for _, entry := range cmd.Env {
-		if strings.HasPrefix(entry, "AVENOR_BROKER_URL=") {
-			t.Errorf("AVENOR_BROKER_URL set without a broker token: %q", entry)
+		for _, key := range []string{"AVENOR_BROKER_URL", "AVENOR_RUN_ID", "AVENOR_BROKER_TOKEN"} {
+			if strings.HasPrefix(entry, key+"=") {
+				t.Errorf("%s set without a broker token: %q", key, entry)
+			}
 		}
 	}
 }
