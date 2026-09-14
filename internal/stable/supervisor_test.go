@@ -1311,6 +1311,10 @@ func TestRunTeamChildCleansUpBrokerRuns(t *testing.T) {
 	}
 	sup.runtimes[child.id] = child
 
+	// Pre-register the child's broker run so the EnsureRun inside runTeamChild
+	// settles on this exact token.
+	wantToken, _ := b.EnsureRun(child.id)
+
 	cfg := &teamrunner.TeamConfig{
 		Team: []phaseconfig.Phase{{Name: "review", Prompt: "review"}},
 	}
@@ -1326,9 +1330,13 @@ func TestRunTeamChildCleansUpBrokerRuns(t *testing.T) {
 	}
 	child.mu.Lock()
 	completed := child.completed
+	brokerToken := child.brokerToken
 	child.mu.Unlock()
 	if !completed {
 		t.Fatal("team child was not marked completed")
+	}
+	if brokerToken != wantToken {
+		t.Fatalf("child.brokerToken = %q, want the token from broker.EnsureRun (%q)", brokerToken, wantToken)
 	}
 	if retained := sup.runtimes[child.id]; retained != child {
 		t.Fatal("completed team child was not retained as a status tombstone")

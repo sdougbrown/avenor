@@ -8,6 +8,7 @@ import {
   postBroker,
   readSubAgentEnv,
   resolveReplyTarget,
+  type SubAgentEnv,
 } from './subagent-broker.js'
 import {
   answerPermissionTool,
@@ -165,45 +166,6 @@ async function startHostAskPoll(ctx: ExtensionContext): Promise<void> {
     }
   }, 2000)
   hostPollTimer.unref?.()
-}
-
-// --- Sub-agent broker mode ----------------------------------------------------
-// When the avenor pi provider launches a pi sub-process, it injects broker
-// credentials via AVENOR_BROKER_URL / AVENOR_RUN_ID / AVENOR_BROKER_TOKEN. In
-// that mode this extension polls its own run for inbound asks (a host calling
-// avenor_ask on it) and lets the sub-agent reply as its own run, instead of
-// acting as a top-level host.
-const subAgentEnv = readSubAgentEnv()
-const isSubAgentBrokerMode = subAgentEnv !== null
-
-let subAgentPollTimer: ReturnType<typeof setInterval> | null = null
-// pending inbound asks keyed by broker message_id so avenor_reply can target them.
-const subAgentPendingAsks = new Map<string, { from_run_id: string; message_id: string }>()
-
-function stopSubAgentPoll(): void {
-  if (subAgentPollTimer) {
-    clearInterval(subAgentPollTimer)
-    subAgentPollTimer = null
-  }
-}
-
-async function startSubAgentPoll(ctx: ExtensionContext): Promise<void> {
-  if (!subAgentEnv) return
-  stopSubAgentPoll()
-  subAgentPollTimer = setInterval(async () => {
-    try {
-      const msgs = (await postBroker(subAgentEnv, '/poll-control', {})) as Array<Record<string, unknown>>
-      for (const msg of msgs) {
-        const ask = parseControlMessage(msg)
-        if (!ask) continue
-        subAgentPendingAsks.set(ask.message_id, { from_run_id: ask.from_run_id, message_id: ask.message_id })
-        await ctx.sendUserMessage(formatInboundAskBody(ask), { deliverAs: 'steer' as const })
-      }
-    } catch {
-      // broker not reachable yet — expected until the broker is up
-    }
-  }, 2000)
-  subAgentPollTimer.unref?.()
 }
 
 export function statusSupervisorId(
@@ -421,6 +383,8 @@ function trackedRunKey(supervisorId: string | undefined, runId: string): string 
 export interface ExtensionOptions {
   /** Polling cadence; injectable so tests can drive deterministic ticks. */
   pollIntervalMs?: number
+  /** Overrides broker-credential autodetection for sub-agent broker mode (tests). */
+  subAgentEnv?: SubAgentEnv | null
 }
 
 export function createExtension(deps: ExtensionDeps = defaultDeps, options: ExtensionOptions = {}) {
@@ -435,6 +399,44 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     let pollingErrorCount = 0
     const pollingErrors: PollErrorPayload[] = []
     let lastStatusEntries: RunStatusEntry[] = []
+
+    // Sub-agent broker mode: when the avenor pi provider launches a pi
+    // sub-process it injects broker credentials via AVENOR_BROKER_URL /
+    // AVENOR_RUN_ID / AVENOR_BROKER_TOKEN. In that mode this extension polls
+    // its own run for inbound asks (a host calling avenor_ask on it) and lets
+    // the sub-agent reply as its own run, instead of acting as a top-level host.
+    const subAgentEnv = options.subAgentEnv !== undefined ? options.subAgentEnv : readSubAgentEnv()
+    const isSubAgentBrokerMode = subAgentEnv !== null
+    let subAgentPollTimer: ReturnType<typeof setInterval> | null = null
+    // pending inbound asks keyed by broker message_id so avenor_reply can target them.
+    const subAgentPendingAsks = new Map<string, { from_run_id: string; message_id: string }>()
+
+    function stopSubAgentPoll(): void {
+      if (subAgentPollTimer) {
+        clearInterval(subAgentPollTimer)
+        subAgentPollTimer = null
+      }
+    }
+
+    async function startSubAgentPoll(ctx: ExtensionContext): Promise<void> {
+      if (!subAgentEnv) return
+      stopSubAgentPoll()
+      subAgentPollTimer = setInterval(async () => {
+        try {
+          // The broker encodes an empty queue as JSON null.
+          const msgs = ((await postBroker(subAgentEnv, '/poll-control', {})) ?? []) as Array<Record<string, unknown>>
+          for (const msg of msgs) {
+            const ask = parseControlMessage(msg)
+            if (!ask) continue
+            subAgentPendingAsks.set(ask.message_id, { from_run_id: ask.from_run_id, message_id: ask.message_id })
+            await ctx.sendUserMessage(formatInboundAskBody(ask), { deliverAs: 'steer' as const })
+          }
+        } catch {
+          // broker not reachable yet — expected until the broker is up
+        }
+      }, options.pollIntervalMs ?? 2000)
+      subAgentPollTimer.unref?.()
+    }
 
     function recordPollingError(
       source: PollErrorPayload['source'],

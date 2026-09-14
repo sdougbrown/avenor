@@ -992,8 +992,4 @@ func TestStartClientForwardsBrokerEnv(t *testing.T) {
 			t.Fatalf("%s = %q, want %q", key, env[key], val)
 		}
 	}
-	// Stale broker env from the parent must not leak through.
-	if env["AVENOR_RUN_ID"] == "stale-run" || env["AVENOR_RUN_ID"] == "" {
-		t.Fatalf("expected AVENOR_RUN_ID to be set to rt_1, got %q", env["AVENOR_RUN_ID"])
-	}
 }

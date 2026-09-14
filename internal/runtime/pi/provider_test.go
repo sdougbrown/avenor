@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
 
 func TestCapabilities(t *testing.T) {
@@ -460,6 +461,42 @@ func withFakePiCommand(t *testing.T) func() *exec.Cmd {
 		return command
 	}
 	return func() *exec.Cmd { return command }
+}
+
+func TestProviderStartBuildsBrokerURLForChild(t *testing.T) {
+	b := broker.New("url-test-token")
+	if err := b.Start(); err != nil {
+		t.Fatalf("broker.Start: %v", err)
+	}
+	defer b.Stop()
+	token, _ := b.EnsureRun("rt_1")
+
+	captured := withFakePiCommand(t)
+	p := NewWithOptions(runtime.StartOptions{Broker: b, RuntimeID: "rt_1", BrokerToken: token})
+	defer p.Close()
+
+	if _, err := p.Start(context.Background(), runtime.StartOptions{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	cmd := captured()
+	if cmd == nil {
+		t.Fatal("Pi command was not created")
+	}
+	env := make(map[string]string)
+	for _, entry := range cmd.Env {
+		if k, v, ok := strings.Cut(entry, "="); ok {
+			env[k] = v
+		}
+	}
+	if want := "http://" + b.Addr(); env["AVENOR_BROKER_URL"] != want {
+		t.Errorf("AVENOR_BROKER_URL = %q, want %q", env["AVENOR_BROKER_URL"], want)
+	}
+	if env["AVENOR_RUN_ID"] != "rt_1" {
+		t.Errorf("AVENOR_RUN_ID = %q, want rt_1", env["AVENOR_RUN_ID"])
+	}
+	if env["AVENOR_BROKER_TOKEN"] != token {
+		t.Errorf("AVENOR_BROKER_TOKEN = %q, want %q", env["AVENOR_BROKER_TOKEN"], token)
+	}
 }
 
 func TestProviderStartUsesRequestedWorkingDirectory(t *testing.T) {

@@ -83,11 +83,11 @@ export function resolveReplyTarget(
     if (!from) return null
     return { from_run_id: from, message_id: replyToMessageId }
   }
+  // Message ids are random tokens, so recency comes from Map insertion
+  // order: the last inserted match is the most recent ask.
   let match: { from_run_id: string; message_id: string } | undefined
   for (const [, entry] of pending) {
-    if ((!fromRunId || entry.from_run_id === fromRunId) && (!match || entry.message_id > match.message_id)) {
-      match = entry
-    }
+    if (!fromRunId || entry.from_run_id === fromRunId) match = entry
   }
   return match ?? null
 }

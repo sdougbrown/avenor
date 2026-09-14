@@ -73,7 +73,7 @@ describe('postBroker', () => {
 
   it('throws on a non-ok response', async () => {
     const fetchMock = mock(async () => ({ ok: false, status: 404, text: async () => 'nope' }))
-    await expect(postBroker(env, '/send', {}, fetchMock as unknown as typeof fetch)).rejects.toThrow('404')
+    await expect(postBroker(env, '/send', {}, fetchMock as unknown as typeof fetch)).rejects.toThrow('broker /send: 404 nope')
   })
 })
 
@@ -92,8 +92,20 @@ describe('resolveReplyTarget', () => {
     expect(resolveReplyTarget(pending, 'supervisor', undefined)).toEqual({ from_run_id: 'supervisor', message_id: 'ask-2' })
   })
 
+  it('picks by insertion order, not lexicographic message-id order', () => {
+    // Ask ids are random tokens; the lexically-larger id was inserted first.
+    const ordered = new Map<string, { from_run_id: string; message_id: string }>([
+      ['zz-older', { from_run_id: 'supervisor', message_id: 'zz-older' }],
+      ['aa-newer', { from_run_id: 'supervisor', message_id: 'aa-newer' }],
+    ])
+    expect(resolveReplyTarget(ordered, 'supervisor', undefined)).toEqual({ from_run_id: 'supervisor', message_id: 'aa-newer' })
+    expect(resolveReplyTarget(ordered, undefined, undefined)).toEqual({ from_run_id: 'supervisor', message_id: 'aa-newer' })
+  })
+
   it('returns null when nothing matches', () => {
     expect(resolveReplyTarget(pending, 'ghost', undefined)).toBeNull()
     expect(resolveReplyTarget(new Map(), undefined, undefined)).toBeNull()
+    // Stale reply_to_message_id with no asker must not route to an empty to_run_id.
+    expect(resolveReplyTarget(pending, undefined, 'ask-unknown')).toBeNull()
   })
 })
