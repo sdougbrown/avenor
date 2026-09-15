@@ -407,13 +407,17 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     // the sub-agent reply as its own run, instead of acting as a top-level host.
     const subAgentEnv = options.subAgentEnv !== undefined ? options.subAgentEnv : readSubAgentEnv()
     const isSubAgentBrokerMode = subAgentEnv !== null
-    let subAgentPollTimer: ReturnType<typeof setInterval> | null = null
+    let subAgentPollTimer: ReturnType<typeof setTimeout> | null = null
+    // Bumped on every start/stop so an in-flight tick cannot reschedule
+    // itself after the poll was stopped.
+    let subAgentPollGeneration = 0
     // pending inbound asks keyed by broker message_id so avenor_reply can target them.
     const subAgentPendingAsks = new Map<string, { from_run_id: string; message_id: string }>()
 
     function stopSubAgentPoll(): void {
+      subAgentPollGeneration++
       if (subAgentPollTimer) {
-        clearInterval(subAgentPollTimer)
+        clearTimeout(subAgentPollTimer)
         subAgentPollTimer = null
       }
     }
@@ -421,20 +425,36 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     async function startSubAgentPoll(ctx: ExtensionContext): Promise<void> {
       if (!subAgentEnv) return
       stopSubAgentPoll()
-      subAgentPollTimer = setInterval(async () => {
+      const generation = subAgentPollGeneration
+      const intervalMs = options.pollIntervalMs ?? 2000
+      let consecutiveFailures = 0
+      // Recursive setTimeout (not setInterval): a slow poll must not overlap
+      // the next tick and surface asks out of order.
+      const tick = async (): Promise<void> => {
         try {
           // The broker encodes an empty queue as JSON null.
           const msgs = ((await postBroker(subAgentEnv, '/poll-control', {})) ?? []) as Array<Record<string, unknown>>
+          if (consecutiveFailures >= 3) console.error('[avenor] sub-agent broker poll recovered')
+          consecutiveFailures = 0
           for (const msg of msgs) {
             const ask = parseControlMessage(msg)
             if (!ask) continue
             subAgentPendingAsks.set(ask.message_id, { from_run_id: ask.from_run_id, message_id: ask.message_id })
             await ctx.sendUserMessage(formatInboundAskBody(ask), { deliverAs: 'steer' as const })
           }
-        } catch {
-          // broker not reachable yet — expected until the broker is up
+        } catch (error) {
+          // Broker unreachable while it is starting up is expected; persistent
+          // failure (e.g. a rejected token) must not stay silent.
+          consecutiveFailures++
+          if (consecutiveFailures === 3) {
+            console.error('[avenor] sub-agent broker poll failing:', error instanceof Error ? error.message : error)
+          }
         }
-      }, options.pollIntervalMs ?? 2000)
+        if (generation !== subAgentPollGeneration) return
+        subAgentPollTimer = setTimeout(() => void tick(), intervalMs)
+        subAgentPollTimer.unref?.()
+      }
+      subAgentPollTimer = setTimeout(() => void tick(), intervalMs)
       subAgentPollTimer.unref?.()
     }
 
@@ -1534,20 +1554,28 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           if (!target) {
             return { content: [{ type: 'text', text: 'No pending ask found to reply to. Pass from_run_id and/or reply_to_message_id.' }], details: { error: true } }
           }
-          await postBroker(subAgentEnv, '/send', {
-            from_run_id: subAgentEnv.runId,
-            to_run_id: target.from_run_id,
-            type: 'agent_message',
-            payload: {
-              id: randomUUID(),
+          // Claim the ask before awaiting the send so a concurrent reply for
+          // the same ask cannot resolve the same target and double-answer it.
+          subAgentPendingAsks.delete(target.message_id)
+          try {
+            await postBroker(subAgentEnv, '/send', {
               from_run_id: subAgentEnv.runId,
               to_run_id: target.from_run_id,
-              message: params.message,
-              role: 'agent',
-              reply_to: target.message_id,
-            },
-          })
-          subAgentPendingAsks.delete(target.message_id)
+              type: 'agent_message',
+              payload: {
+                id: randomUUID(),
+                from_run_id: subAgentEnv.runId,
+                to_run_id: target.from_run_id,
+                message: params.message,
+                role: 'agent',
+                reply_to: target.message_id,
+              },
+            })
+          } catch (error) {
+            // A failed send leaves the asker waiting; keep the ask retryable.
+            subAgentPendingAsks.set(target.message_id, target)
+            throw error
+          }
           return { content: [{ type: 'text', text: 'Reply sent' }] }
         }
 

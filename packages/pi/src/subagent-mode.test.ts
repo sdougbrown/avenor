@@ -36,29 +36,37 @@ interface FetchCall {
 }
 
 /** Stub global fetch with canned /poll-control responses; records /send bodies. */
-function stubBrokerFetch(pollResponses: unknown[], sendFailures = 0) {
+function stubBrokerFetch(pollResponses: unknown[], sendFailures = 0, pollDelayMs = 0) {
   const calls: FetchCall[] = []
   let pollIndex = 0
   let pendingSendFailures = sendFailures
+  let inflight = 0
   const previous = globalThis.fetch
   globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
-    const href = String(url)
-    const path = new URL(href).pathname
-    const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
-    calls.push({ path, body })
-    if (path === '/poll-control') {
-      const value = pollIndex < pollResponses.length ? pollResponses[pollIndex] : []
-      pollIndex++
-      return { ok: true, status: 200, json: async () => value, text: async () => '' } as Response
+    inflight++
+    try {
+      const href = String(url)
+      const path = new URL(href).pathname
+      const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+      calls.push({ path, body })
+      if (path === '/poll-control') {
+        if (pollDelayMs > 0) await new Promise(resolve => setTimeout(resolve, pollDelayMs))
+        const value = pollIndex < pollResponses.length ? pollResponses[pollIndex] : []
+        pollIndex++
+        return { ok: true, status: 200, json: async () => value, text: async () => '' } as Response
+      }
+      if (pendingSendFailures > 0) {
+        pendingSendFailures--
+        return { ok: false, status: 500, json: async () => ({}), text: async () => 'boom' } as Response
+      }
+      return { ok: true, status: 200, json: async () => ({ queued: true }), text: async () => '' } as Response
+    } finally {
+      inflight--
     }
-    if (pendingSendFailures > 0) {
-      pendingSendFailures--
-      return { ok: false, status: 500, json: async () => ({}), text: async () => 'boom' } as Response
-    }
-    return { ok: true, status: 200, json: async () => ({ queued: true }), text: async () => '' } as Response
   }) as typeof fetch
   return {
     calls,
+    getInflight: () => inflight,
     restore: () => {
       globalThis.fetch = previous
     },
@@ -209,6 +217,26 @@ describe('sub-agent broker mode (integration)', () => {
     }
   })
 
+  it('does not reschedule when shutdown lands during an in-flight poll', async () => {
+    const fetchStub = stubBrokerFetch([], 0, 40)
+    let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
+    try {
+      harness = await startSubAgentExtension({ fetchStub })
+      // Catch a tick mid-flight, then shut down; its completion must not
+      // schedule another poll.
+      await waitFor(() => fetchStub.getInflight() > 0)
+      await harness.eventHandlers.session_shutdown({}, {})
+      await waitFor(() => fetchStub.getInflight() === 0)
+      const after = fetchStub.calls.filter(call => call.path === '/poll-control').length
+      await new Promise(resolve => setTimeout(resolve, 60))
+      const later = fetchStub.calls.filter(call => call.path === '/poll-control').length
+      expect(later).toBe(after)
+    } finally {
+      await harness?.eventHandlers.session_shutdown({}, {})
+      fetchStub.restore()
+    }
+  })
+
   it('stops polling on session_shutdown', async () => {
     const fetchStub = stubBrokerFetch([])
     let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
@@ -216,8 +244,9 @@ describe('sub-agent broker mode (integration)', () => {
       harness = await startSubAgentExtension({ fetchStub })
       await waitFor(() => fetchStub.calls.some(call => call.path === '/poll-control'))
       await harness.eventHandlers.session_shutdown({}, {})
-      // Let any in-flight tick land, then assert no further polls arrive.
-      await new Promise(resolve => setTimeout(resolve, 30))
+      // Drain any in-flight tick first (the barrier), then assert no new poll
+      // starts. Counting only after quiescence removes the timing flake.
+      await waitFor(() => fetchStub.getInflight() === 0)
       const after = fetchStub.calls.filter(call => call.path === '/poll-control').length
       await new Promise(resolve => setTimeout(resolve, 60))
       const later = fetchStub.calls.filter(call => call.path === '/poll-control').length
