@@ -2,33 +2,9 @@ import { describe, expect, it, mock } from 'bun:test'
 import type { ExtensionDeps } from './index.js'
 import { createExtension } from './index.js'
 import type { SubAgentEnv } from './subagent-broker.js'
+import { buildMockDeps } from './test-fixtures.js'
 
 const subAgentEnv = { brokerUrl: 'http://127.0.0.1:1', runId: 'rt_child', token: 'tok' } as const
-
-function buildMockDeps(partial: Partial<ExtensionDeps> = {}): ExtensionDeps {
-  return {
-    spawnTool: mock(async () => ({ run_id: 'run-1', label: 'demo', supervisor_id: '/tmp/sock' })),
-    statusTool: mock(async () => []),
-    eventsTool: mock(async () => ({ events: [] })),
-    answerPermissionTool: mock(async () => ({ ok: true })),
-    followUpTool: mock(async () => ({ run_id: 'run-2', label: 'follow-up' })),
-    inspectTool: mock(async () => ({ status: 'running' })),
-    resultTool: mock(async () => ({ run_id: 'run-1', status: 'done', ready: true })),
-    brokerReceiveTool: mock(async () => ({ asks: [] })),
-    brokerReplyTool: mock(async () => ({ ok: true })),
-    shutdownTool: mock(async () => ({ ok: true })),
-    workflowStatusTool: mock(async () => ({})),
-    workflowWaitTool: mock(async () => ({})),
-    workflowInspectTool: mock(async () => ({})),
-    workflowEventsTool: mock(async () => ({})),
-    workflowCompleteTool: mock(async () => ({})),
-    workflowGateTool: mock(async () => ({})),
-    observeRun: mock(() => null),
-    dial: mock(async () => ({ close() {} })),
-    Supervisor: class {} as any,
-    ...partial,
-  }
-}
 
 interface FetchCall {
   path: string
@@ -36,10 +12,11 @@ interface FetchCall {
 }
 
 /** Stub global fetch with canned /poll-control responses; records /send bodies. */
-function stubBrokerFetch(pollResponses: unknown[], sendFailures = 0, pollDelayMs = 0) {
+function stubBrokerFetch(pollResponses: unknown[], sendFailures = 0, pollDelayMs = 0, pollFailures = 0) {
   const calls: FetchCall[] = []
   let pollIndex = 0
   let pendingSendFailures = sendFailures
+  let pendingPollFailures = pollFailures
   let inflight = 0
   const previous = globalThis.fetch
   globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
@@ -51,6 +28,10 @@ function stubBrokerFetch(pollResponses: unknown[], sendFailures = 0, pollDelayMs
       calls.push({ path, body })
       if (path === '/poll-control') {
         if (pollDelayMs > 0) await new Promise(resolve => setTimeout(resolve, pollDelayMs))
+        if (pendingPollFailures > 0) {
+          pendingPollFailures--
+          return { ok: false, status: 503, json: async () => ({}), text: async () => 'unavailable' } as Response
+        }
         const value = pollIndex < pollResponses.length ? pollResponses[pollIndex] : []
         pollIndex++
         return { ok: true, status: 200, json: async () => value, text: async () => '' } as Response
@@ -166,6 +147,56 @@ describe('sub-agent broker mode (integration)', () => {
       await waitFor(() => sendUserMessage.mock.calls.length > 0)
       const [body] = sendUserMessage.mock.calls[0] as [string]
       expect(body).toContain('later ask')
+    } finally {
+      await harness?.eventHandlers.session_shutdown({}, {})
+      fetchStub.restore()
+    }
+  })
+
+  it('keeps polling after a non-ok /poll-control response', async () => {
+    const fetchStub = stubBrokerFetch(
+      [[{ type: 'agent_message', payload: { id: 'ask-e', from_run_id: 'supervisor', message: 'after the error' } }]],
+      0,
+      0,
+      1,
+    )
+    let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
+    try {
+      harness = await startSubAgentExtension({ fetchStub })
+      const { sendUserMessage } = harness
+      // The first tick gets a 503; the loop must reschedule and still surface
+      // the ask on a later tick.
+      await waitFor(() => sendUserMessage.mock.calls.length > 0)
+      const polls = fetchStub.calls.filter(call => call.path === '/poll-control').length
+      expect(polls).toBeGreaterThanOrEqual(2)
+      const [body] = sendUserMessage.mock.calls[0] as [string]
+      expect(body).toContain('after the error')
+    } finally {
+      await harness?.eventHandlers.session_shutdown({}, {})
+      fetchStub.restore()
+    }
+  })
+
+  it('answers a shared ask at most once under concurrent avenor_reply calls', async () => {
+    const fetchStub = stubBrokerFetch(
+      [[{ type: 'agent_message', payload: { id: 'ask-c', from_run_id: 'supervisor', message: 'race me' } }]],
+    )
+    let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
+    try {
+      harness = await startSubAgentExtension({ fetchStub })
+      const { registeredTools, sendUserMessage } = harness
+      await waitFor(() => sendUserMessage.mock.calls.length > 0)
+
+      const [first, second] = await Promise.all([
+        registeredTools.avenor_reply.execute('t1', { message: 'A' }),
+        registeredTools.avenor_reply.execute('t2', { message: 'B' }),
+      ])
+      const texts = [first.content[0].text, second.content[0].text].sort()
+      expect(texts).toEqual([
+        'No pending ask found to reply to. Pass from_run_id and/or reply_to_message_id.',
+        'Reply sent',
+      ])
+      expect(fetchStub.calls.filter(call => call.path === '/send')).toHaveLength(1)
     } finally {
       await harness?.eventHandlers.session_shutdown({}, {})
       fetchStub.restore()

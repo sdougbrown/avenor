@@ -48,6 +48,7 @@ describe('parseControlMessage', () => {
     expect(parseControlMessage({ type: 'agent_message', payload: 'not-json' })).toBeNull()
     expect(parseControlMessage({ type: 'agent_message', payload: { message: '' } })).toBeNull()
     expect(parseControlMessage({ type: 'agent_message', payload: { message: 'x' } })).toBeNull()
+    expect(parseControlMessage({ type: 'agent_message' })).toBeNull()
     // An ask with no asker could never be answered.
     expect(parseControlMessage({ type: 'agent_message', payload: { id: 'ask-9', message: 'x' } })).toBeNull()
   })

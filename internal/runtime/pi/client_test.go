@@ -1023,4 +1023,34 @@ func TestStartClientForwardsBrokerEnv(t *testing.T) {
 			t.Errorf("%s = %q leaked into child env with empty broker args", key, v)
 		}
 	}
+
+	// Intermediate case: PI_AGENT injected while broker credentials are empty
+	// must still strip the stale AVENOR_* vars.
+	client3, err := StartClientWithAgentProfileThinkingAndDir(
+		context.Background(), "", "sonnet", "", "jockey", "", "", "", "", "", "",
+	)
+	if err != nil {
+		t.Fatalf("third StartClientWithAgentProfileThinkingAndDir: %v", err)
+	}
+	defer client3.Close()
+	if len(commands) < 3 || commands[2] == nil {
+		t.Fatal("third pi command was not created")
+	}
+	if commands[2].Env == nil {
+		t.Fatal("third pi command env was not assigned; child would inherit stale parent env")
+	}
+	agentEnv := make(map[string]string)
+	for _, entry := range commands[2].Env {
+		if k, v, ok := strings.Cut(entry, "="); ok {
+			agentEnv[k] = v
+		}
+	}
+	if agentEnv["PI_AGENT"] != "jockey" {
+		t.Errorf("PI_AGENT = %q, want jockey", agentEnv["PI_AGENT"])
+	}
+	for _, key := range []string{"AVENOR_BROKER_URL", "AVENOR_RUN_ID", "AVENOR_BROKER_TOKEN"} {
+		if v, ok := agentEnv[key]; ok {
+			t.Errorf("%s = %q leaked into child env with only PI_AGENT set", key, v)
+		}
+	}
 }
