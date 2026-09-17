@@ -465,7 +465,7 @@ func TestStartClientForwardsThinkingFlag(t *testing.T) {
 		return exec.Command("cat")
 	}
 	client, err := StartClientWithAgentProfileThinkingAndDir(
-		context.Background(), "", "", "", "", "", "high", "",
+		context.Background(), "", "", "", "", "", "high", "", "", "", "",
 	)
 	if err != nil {
 		t.Fatalf("StartClientWithAgentProfileThinkingAndDir: %v", err)
@@ -946,5 +946,111 @@ func TestClientToolCallCorrelationPreservesBackendFields(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for permission request")
+	}
+}
+
+func TestStartClientForwardsBrokerEnv(t *testing.T) {
+	original := piExecCommandContext
+	t.Cleanup(func() { piExecCommandContext = original })
+
+	var captured *exec.Cmd
+	t.Setenv("AVENOR_BROKER_URL", "http://stale.invalid")
+	t.Setenv("AVENOR_RUN_ID", "stale-run")
+	t.Setenv("AVENOR_BROKER_TOKEN", "stale-token")
+	t.Setenv("PI_AGENT", "stale-agent")
+	commands := make([]*exec.Cmd, 0, 2)
+	piExecCommandContext = func(_ context.Context, _ string, args ...string) *exec.Cmd {
+		captured = exec.Command("cat", args...)
+		commands = append(commands, captured)
+		return captured
+	}
+
+	client, err := StartClientWithAgentProfileThinkingAndDir(
+		context.Background(), "", "sonnet", "", "jockey", "", "", "",
+		"http://127.0.0.1:9999", "rt_1", "secret-token",
+	)
+	if err != nil {
+		t.Fatalf("StartClientWithAgentProfileThinkingAndDir: %v", err)
+	}
+	defer client.Close()
+
+	if captured == nil {
+		t.Fatal("pi command was not created")
+	}
+	env := make(map[string]string)
+	for _, entry := range captured.Env {
+		if k, v, ok := strings.Cut(entry, "="); ok {
+			env[k] = v
+		}
+	}
+
+	want := map[string]string{
+		"AVENOR_BROKER_URL":   "http://127.0.0.1:9999",
+		"AVENOR_RUN_ID":       "rt_1",
+		"AVENOR_BROKER_TOKEN": "secret-token",
+		"PI_AGENT":            "jockey",
+	}
+	for key, val := range want {
+		if env[key] != val {
+			t.Fatalf("%s = %q, want %q", key, env[key], val)
+		}
+	}
+
+	// With no broker identity at all, stale AVENOR_*/PI_AGENT env must be
+	// stripped from the child rather than leaked through unfiltered.
+	client2, err := StartClientWithAgentProfileThinkingAndDir(
+		context.Background(), "", "sonnet", "", "", "", "", "", "", "", "",
+	)
+	if err != nil {
+		t.Fatalf("second StartClientWithAgentProfileThinkingAndDir: %v", err)
+	}
+	defer client2.Close()
+	if len(commands) < 2 || commands[1] == nil {
+		t.Fatal("second pi command was not created")
+	}
+	// A nil Env means the child inherits the stale parent env unchecked.
+	if commands[1].Env == nil {
+		t.Fatal("second pi command env was not assigned; child would inherit stale parent env")
+	}
+	emptyEnv := make(map[string]string)
+	for _, entry := range commands[1].Env {
+		if k, v, ok := strings.Cut(entry, "="); ok {
+			emptyEnv[k] = v
+		}
+	}
+	for _, key := range []string{"AVENOR_BROKER_URL", "AVENOR_RUN_ID", "AVENOR_BROKER_TOKEN", "PI_AGENT"} {
+		if v, ok := emptyEnv[key]; ok {
+			t.Errorf("%s = %q leaked into child env with empty broker args", key, v)
+		}
+	}
+
+	// Intermediate case: PI_AGENT injected while broker credentials are empty
+	// must still strip the stale AVENOR_* vars.
+	client3, err := StartClientWithAgentProfileThinkingAndDir(
+		context.Background(), "", "sonnet", "", "jockey", "", "", "", "", "", "",
+	)
+	if err != nil {
+		t.Fatalf("third StartClientWithAgentProfileThinkingAndDir: %v", err)
+	}
+	defer client3.Close()
+	if len(commands) < 3 || commands[2] == nil {
+		t.Fatal("third pi command was not created")
+	}
+	if commands[2].Env == nil {
+		t.Fatal("third pi command env was not assigned; child would inherit stale parent env")
+	}
+	agentEnv := make(map[string]string)
+	for _, entry := range commands[2].Env {
+		if k, v, ok := strings.Cut(entry, "="); ok {
+			agentEnv[k] = v
+		}
+	}
+	if agentEnv["PI_AGENT"] != "jockey" {
+		t.Errorf("PI_AGENT = %q, want jockey", agentEnv["PI_AGENT"])
+	}
+	for _, key := range []string{"AVENOR_BROKER_URL", "AVENOR_RUN_ID", "AVENOR_BROKER_TOKEN"} {
+		if v, ok := agentEnv[key]; ok {
+			t.Errorf("%s = %q leaked into child env with only PI_AGENT set", key, v)
+		}
 	}
 }

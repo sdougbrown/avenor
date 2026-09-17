@@ -3,6 +3,8 @@ package runtime
 import (
 	"strings"
 	"testing"
+
+	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
 
 func TestValidatePermissionMessageEmpty(t *testing.T) {
@@ -76,5 +78,24 @@ func TestDecodePermissionMessageJSONRejectsMalformedText(t *testing.T) {
 	message, err = DecodePermissionMessageJSON([]byte(`"\\uD800"`))
 	if err != nil || message != `\uD800` {
 		t.Fatalf("escaped literal = %q, %v", message, err)
+	}
+}
+
+func TestMergeStartOptionsBrokerFields(t *testing.T) {
+	b := broker.New("merge-test-token")
+	base := StartOptions{RuntimeID: "rt_base", BrokerToken: "tok_base"}
+
+	// Empty overrides keep the base broker identity.
+	merged := MergeStartOptions(base, StartOptions{})
+	if merged.RuntimeID != "rt_base" || merged.BrokerToken != "tok_base" {
+		t.Fatalf("base broker fields lost: %+v", merged)
+	}
+
+	// A start override carrying broker identity must survive the merge;
+	// dropping BrokerToken silently disables sub-agent broker mode.
+	override := StartOptions{RuntimeID: "rt_child", Broker: b, BrokerToken: "tok_child"}
+	merged = MergeStartOptions(StartOptions{}, override)
+	if merged.RuntimeID != "rt_child" || merged.Broker != b || merged.BrokerToken != "tok_child" {
+		t.Fatalf("override broker fields lost: %+v", merged)
 	}
 }

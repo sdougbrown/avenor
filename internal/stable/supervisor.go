@@ -202,6 +202,8 @@ type childRuntime struct {
 	fanoutWriter      *runtimeFanoutWriter
 	providerLifecycle *permissionProviderLifecycle
 	shuttingDown      bool
+	brokerToken       string // broker token for this run (mirrors StartOptions.BrokerToken)
+
 	writerClosing     bool
 	writerClosed      bool
 	directAnswers     int
@@ -1107,6 +1109,12 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 	}
 
 	// Start provider and session.
+	// Register the child's broker run and capture its token so the pi provider
+	// can hand broker credentials to the sub-process for inbound ask polling and
+	// avenor_reply. Idempotent; the run may already exist for tasking.
+	if s.broker != nil {
+		s.ensureChildBrokerRun(child)
+	}
 	startOpts := runtime.StartOptions{
 		Agent:        params.Agent,
 		AgentProfile: params.AgentProfile,
@@ -1116,6 +1124,7 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 		Thinking:     params.Thinking,
 		RuntimeID:    rtID,
 		Broker:       s.broker,
+		BrokerToken:  child.brokerToken,
 	}
 	discovery := cli.DiscoverServer(params.ServerURL, os.Getenv)
 	startOpts.ServerURL = discovery.URL
@@ -1247,6 +1256,21 @@ func (s *Supervisor) registerBrokerRun() (string, string) {
 	s.brokerRunID = "supervisor"
 	s.brokerToken = token
 	return s.brokerRunID, token
+}
+
+// ensureChildBrokerRun registers a child's broker run under its runtime ID and
+// captures the token so the child can poll for and reply to inbound asks. The
+// run may already exist (e.g. pre-registered for tasking), in which case EnsureRun
+// returns the existing token.
+func (s *Supervisor) ensureChildBrokerRun(child *childRuntime) string {
+	if s.broker == nil {
+		return ""
+	}
+	token, _ := s.broker.EnsureRun(child.id)
+	child.mu.Lock()
+	child.brokerToken = token
+	child.mu.Unlock()
+	return token
 }
 
 // brokerPost sends an authenticated POST to the broker HTTP endpoint.
@@ -1422,8 +1446,6 @@ func (s *Supervisor) BrokerReply(toRunID, replyTo, message string) error {
 	return err
 }
 
-
-
 func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptText string, timeoutSec, maxRetries int) {
 	defer func() {
 		panicked := false
@@ -1447,7 +1469,7 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 	}()
 
 	if s.broker != nil {
-		s.broker.CreateRun(child.id)
+		s.ensureChildBrokerRun(child)
 	}
 
 	var timer <-chan time.Time
@@ -1593,7 +1615,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 	}()
 
 	if s.broker != nil {
-		s.broker.CreateRun(child.id)
+		s.ensureChildBrokerRun(child)
 	}
 	taggedWriter := &runtimeFanoutWriter{
 		base:            child.eventWriter,
@@ -1665,6 +1687,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				ServerURL:    serverURL,
 				RuntimeID:    child.id,
 				Broker:       s.broker,
+				BrokerToken:  child.brokerToken,
 			}
 
 			resumeID := prevSessionID
@@ -1860,7 +1883,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 	}()
 
 	if s.broker != nil {
-		s.broker.CreateRun(child.id)
+		s.ensureChildBrokerRun(child)
 	}
 	taggedWriter := &runtimeFanoutWriter{
 		base:            child.eventWriter,
@@ -1930,6 +1953,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				ServerURL:    serverURL,
 				RuntimeID:    child.id,
 				Broker:       s.broker,
+				BrokerToken:  child.brokerToken,
 			}
 
 			resumeID := prevSessionID
@@ -2593,6 +2617,7 @@ func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, re
 	fallbackAgent, fallbackModel := child.agent, child.model
 	fallbackProfile := child.agentProfile
 	label, dir, thinking := child.label, child.dir, child.thinking
+	brokerToken := child.brokerToken
 	child.mu.Unlock()
 	_, mapped := s.sessionIdentity(resumeID)
 	if mappedIdentity, ok := s.sessionIdentity(resumeID); ok {
@@ -2617,6 +2642,9 @@ func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, re
 		Dir:          dir,
 		Model:        identity.Model,
 		Thinking:     thinking,
+		RuntimeID:    child.id,
+		Broker:       s.broker,
+		BrokerToken:  brokerToken,
 	}, resumeID)
 }
 
