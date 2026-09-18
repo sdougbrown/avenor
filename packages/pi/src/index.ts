@@ -1351,7 +1351,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       label: 'Avenor Result',
       description: 'Retrieve the complete final output of a run without transcript or event details. Waits by default; set wait=false to retrieve an already-completed run without blocking.',
       parameters: Type.Object({
-        run_id: Type.String({ description: 'Run ID' }),
+        run_id: Type.String({ description: 'Run ID or label' }),
         wait: Type.Optional(Type.Boolean({ description: 'Wait for a terminal result (default true); false retrieves the current state without blocking' })),
         timeout: Type.Optional(Type.String({ description: 'Maximum time to wait (e.g. 30s, 5m)' })),
         supervisor_id: Type.Optional(Type.String({ description: 'Reuse an existing supervisor by socket path' })),
