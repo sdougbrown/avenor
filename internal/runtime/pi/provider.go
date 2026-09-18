@@ -218,10 +218,15 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 				msg = "unknown error"
 			}
 			// The child pi process prints model/API failures to stderr; the
-			// session.end event does not always carry them, so surface the
-			// captured stderr tail in the turn error.
+			// session.end event does not always carry them. Surface only the
+			// tail of the captured stderr: the rolling buffer also accumulates
+			// client-side diagnostics and stale lines from earlier turns.
 			if stderr := strings.TrimSpace(c.Stderr()); stderr != "" {
-				msg = fmt.Sprintf("%s (stderr: %s)", msg, stderr)
+				lines := strings.Split(stderr, "\n")
+				if len(lines) > 3 {
+					lines = lines[len(lines)-3:]
+				}
+				msg = fmt.Sprintf("%s (stderr: %s)", msg, strings.Join(lines, " | "))
 			}
 			return fmt.Errorf("turn failed for session %s: %s", sessionID, msg)
 		default:

@@ -684,11 +684,50 @@ func TestPromptTurnErrorSurfacesStderrDetail(t *testing.T) {
 		writeLine(wOut, map[string]any{"type": "agent_end", "stopReason": "error"})
 	}()
 
-	err := <-errCh
+	var err error
+	select {
+	case err = <-errCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for prompt result")
+	}
 	if err == nil {
 		t.Fatal("expected a turn error")
 	}
 	if !strings.Contains(err.Error(), "model 429: rate limited") {
 		t.Fatalf("error = %v; want the stderr detail in the message", err)
+	}
+}
+
+func TestPromptTurnErrorOmitsEmptyStderr(t *testing.T) {
+	p := NewWithOptions(runtime.StartOptions{})
+	c, wOut, rIn := fakeClient()
+	defer c.Close()
+	c.setSessionID("ses-pi-clean")
+	p.client = c
+	p.sessions = map[string]struct{}{"ses-pi-clean": {}}
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- p.Prompt(context.Background(), "ses-pi-clean", "hi") }()
+
+	go func() {
+		cmd, err := readCommand(rIn)
+		if err != nil {
+			return
+		}
+		writeLine(wOut, map[string]any{"type": "response", "id": cmd["id"], "success": true})
+		writeLine(wOut, map[string]any{"type": "agent_end", "stopReason": "error"})
+	}()
+
+	var err error
+	select {
+	case err = <-errCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for prompt result")
+	}
+	if err == nil {
+		t.Fatal("expected a turn error")
+	}
+	if strings.Contains(err.Error(), "(stderr") {
+		t.Fatalf("error = %v; want no stderr suffix when nothing was captured", err)
 	}
 }
