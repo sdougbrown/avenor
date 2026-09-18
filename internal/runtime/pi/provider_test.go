@@ -662,3 +662,33 @@ func TestAnswerPermissionNotApproved(t *testing.T) {
 		t.Fatalf("error = %v, want not found", err)
 	}
 }
+
+func TestPromptTurnErrorSurfacesStderrDetail(t *testing.T) {
+	p := NewWithOptions(runtime.StartOptions{})
+	c, wOut, rIn := fakeClient()
+	defer c.Close()
+	c.setSessionID("ses-pi-err")
+	p.client = c
+	p.sessions = map[string]struct{}{"ses-pi-err": {}}
+	c.stderr.Append("model 429: rate limited")
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- p.Prompt(context.Background(), "ses-pi-err", "hi") }()
+
+	go func() {
+		cmd, err := readCommand(rIn)
+		if err != nil {
+			return
+		}
+		writeLine(wOut, map[string]any{"type": "response", "id": cmd["id"], "success": true})
+		writeLine(wOut, map[string]any{"type": "agent_end", "stopReason": "error"})
+	}()
+
+	err := <-errCh
+	if err == nil {
+		t.Fatal("expected a turn error")
+	}
+	if !strings.Contains(err.Error(), "model 429: rate limited") {
+		t.Fatalf("error = %v; want the stderr detail in the message", err)
+	}
+}
