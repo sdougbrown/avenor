@@ -121,10 +121,10 @@ server.registerTool('avenor_status', {
 })
 
 server.registerTool('avenor_result', {
-  description: 'Wait for a run to finish and return its complete final output without event details',
+  description: 'Retrieve the complete final output of a run without event details. Waits by default; set wait=false to retrieve a completed run without blocking',
   inputSchema: {
-    run_id: z.string().describe('Run ID or label to await'),
-    wait: z.boolean().optional().describe('Wait for a terminal result (default true)'),
+    run_id: z.string().describe('Run ID or label'),
+    wait: z.boolean().optional().describe('Wait for a terminal result (default true); false retrieves the current state without blocking'),
     timeout: z.string().optional().describe('Maximum time to wait (e.g. 30s, 5m)'),
     supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
   },
