@@ -1175,10 +1175,12 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 			if errors.Is(res.err, context.Canceled) {
 				return terminate("cancelled"), true
 			}
+			// The permission error always leaves a diagnostic in the event log,
+			// even when the authoritative session-end result owns the outcome.
+			emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "permission", fmt.Sprintf("permission handler: %v", res.err), deps.Stderr, cfg.RunLabel)
 			if result, ok := completeAuthoritativeAfterStop(); ok {
 				return result, true
 			}
-			emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "permission", fmt.Sprintf("permission handler: %v", res.err), deps.Stderr, cfg.RunLabel)
 			return sessionResult{ExitCode: 1}, true
 		}
 		if res.requestID != "" {
@@ -1381,10 +1383,12 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				if errors.Is(err, context.Canceled) {
 					return terminate("cancelled")
 				}
+				// The prompt error always leaves a diagnostic in the event log,
+				// even when the authoritative session-end result owns the outcome.
+				emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "prompt", fmt.Sprintf("prompt: %v", err), deps.Stderr, cfg.RunLabel)
 				if result, ok := completeAuthoritativeAfterStop(); ok {
 					return result
 				}
-				emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "prompt", fmt.Sprintf("prompt: %v", err), deps.Stderr, cfg.RunLabel)
 				return sessionResult{ExitCode: 1}
 			}
 			if finalStopReason != "" && permissionDone == nil {

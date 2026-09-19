@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/sdougbrown/avenor/internal/events"
@@ -215,6 +216,17 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 			msg, _ := ev.Fields["error_message"].(string)
 			if msg == "" {
 				msg = "unknown error"
+			}
+			// The child pi process prints model/API failures to stderr; the
+			// session.end event does not always carry them. Surface only the
+			// tail of the captured stderr: the rolling buffer also accumulates
+			// client-side diagnostics and stale lines from earlier turns.
+			if stderr := strings.TrimSpace(c.Stderr()); stderr != "" {
+				lines := strings.Split(stderr, "\n")
+				if len(lines) > 3 {
+					lines = lines[len(lines)-3:]
+				}
+				msg = fmt.Sprintf("%s (stderr: %s)", msg, strings.Join(lines, " | "))
 			}
 			return fmt.Errorf("turn failed for session %s: %s", sessionID, msg)
 		default:

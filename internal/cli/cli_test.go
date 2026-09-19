@@ -2049,6 +2049,28 @@ func TestWaitForSessionExitMatrixStopsEveryNonCleanReturn(t *testing.T) {
 			wantErrors:   1,
 		},
 		{
+			// A provider turn error arrives after the session.end event has been
+			// forwarded (the real ordering for pi backend failures): the
+			// authoritative result still wins, but the error event must be
+			// written so the failure leaves a diagnostic in the event log.
+			name: "prompt failure after authoritative session end",
+			setup: func(cfg *SessionWaitConfig) {
+				eventCh := make(chan events.Event, 1)
+				eventCh <- events.Event{Event: "session.end", SessionID: cfg.SessionID, Fields: map[string]any{"stop_reason": "error"}}
+				promptDone := make(chan error, 1)
+				go func() {
+					time.Sleep(50 * time.Millisecond)
+					promptDone <- errors.New("model stream failed: 429 rate limited")
+				}()
+				cfg.EventCh = eventCh
+				cfg.PromptDone = promptDone
+			},
+			wantExitCode:    1,
+			wantCancels:     1,
+			wantErrors:      1,
+			wantSessionEnds: 1,
+		},
+		{
 			name: "authoritative identity conflict",
 			setup: func(cfg *SessionWaitConfig) {
 				eventCh := make(chan events.Event, 1)
@@ -2111,6 +2133,7 @@ func TestWaitForSessionExitMatrixPreservesForwardedAuthoritativeEndDuringTeardow
 	tests := []struct {
 		name              string
 		permissionFailure bool
+		wantErrors        int
 		trigger           func(context.CancelFunc, *SessionWaitConfig, *SessionWaitDeps, *waitExitMatrixProvider) func()
 	}{
 		{
@@ -2136,7 +2159,8 @@ func TestWaitForSessionExitMatrixPreservesForwardedAuthoritativeEndDuringTeardow
 			},
 		},
 		{
-			name: "prompt failure",
+			name:       "prompt failure",
+			wantErrors: 1,
 			trigger: func(_ context.CancelFunc, cfg *SessionWaitConfig, _ *SessionWaitDeps, _ *waitExitMatrixProvider) func() {
 				promptDone := make(chan error, 1)
 				cfg.PromptDone = promptDone
@@ -2162,6 +2186,7 @@ func TestWaitForSessionExitMatrixPreservesForwardedAuthoritativeEndDuringTeardow
 		{
 			name:              "permission failure",
 			permissionFailure: true,
+			wantErrors:        1,
 			trigger: func(_ context.CancelFunc, cfg *SessionWaitConfig, _ *SessionWaitDeps, provider *waitExitMatrixProvider) func() {
 				release := make(chan struct{})
 				provider.permissionRelease = release
@@ -2233,8 +2258,8 @@ func TestWaitForSessionExitMatrixPreservesForwardedAuthoritativeEndDuringTeardow
 			if got := sink.terminalStopReasons(); len(got) != 1 || got[0] != "refusal" {
 				t.Fatalf("terminal stop reasons = %v, want exactly [refusal]", got)
 			}
-			if sessionEnds, errorEvents := sink.counts(); sessionEnds != 1 || errorEvents != 0 {
-				t.Fatalf("audit counts = {session.end:%d errors:%d}, want {1 0}", sessionEnds, errorEvents)
+			if sessionEnds, errorEvents := sink.counts(); sessionEnds != 1 || errorEvents != tt.wantErrors {
+				t.Fatalf("audit counts = {session.end:%d errors:%d}, want {1 %d}", sessionEnds, errorEvents, tt.wantErrors)
 			}
 			if cancelCount, sessions := provider.cancelSnapshot(); cancelCount != 1 || len(sessions) != 1 || sessions[0] != cfg.SessionID {
 				t.Fatalf("provider Cancel calls = %d (%v), want one for %q", cancelCount, sessions, cfg.SessionID)
