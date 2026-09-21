@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "template_id": "escalation-demo",
+  "template_version": "1.0.0",
+  "metadata": {
+    "title": "Escalation demo",
+    "description": "Minimal workflow for exercising the remote-human gate escalation surface: a run node publishes a change, then parks on a human merge-authorization gate until a bridge records an attributed decision.",
+    "source": "https://github.com/sdougbrown/avenor"
+  },
+  "entry_nodes": ["publish"],
+  "nodes": [
+    {
+      "id": "publish",
+      "name": "Publish",
+      "action": {
+        "type": "manual",
+        "instructions": "A caller (human or agent) completes the change being published. Complete this node with a summary, the repository, the pull request number, and the exact head SHA under review."
+      },
+      "outputs": [
+        { "id": "summary", "name": "Summary", "type": "string", "required": true },
+        { "id": "repository", "name": "Repository", "type": "string", "required": true },
+        { "id": "pull_number", "name": "Pull request number", "type": "integer", "required": true },
+        { "id": "head_sha", "name": "Head SHA", "type": "string", "required": true }
+      ],
+      "completion": { "kind": "explicit" },
+      "branches": { "ready": "merge-auth" }
+    },
+    {
+      "id": "merge-auth",
+      "name": "Merge authorization",
+      "dependencies": ["publish"],
+      "action": {
+        "type": "manual",
+        "instructions": "A human authorizes merging the exact PR head that was published. Complete this node with the authorized head SHA, then satisfy the merge-authorization gate with the exact subject (repository, pull request, and head SHA). The gate cannot be satisfied by PR state alone."
+      },
+      "gates": [
+        {
+          "id": "merge-authorization",
+          "name": "Merge authorization",
+          "type": "human",
+          "required": true,
+          "subject_type": "pull_request",
+          "allowed_outcomes": ["authorized"]
+        }
+      ],
+      "outputs": [
+        { "id": "authorized_head", "name": "Authorized head", "type": "string", "required": true }
+      ],
+      "completion": { "kind": "explicit" },
+      "branches": { "authorized": "reconcile" }
+    },
+    {
+      "id": "reconcile",
+      "name": "Reconcile",
+      "dependencies": ["merge-auth"],
+      "action": {
+        "type": "manual",
+        "instructions": "Record the merge outcome. Complete this node with the terminal outcome 'merged' once the authorized head is merged, or 'abandoned' if the work unit is closed out without merging."
+      },
+      "completion": { "kind": "explicit" }
+    }
+  ],
+  "terminal_outcomes": ["merged", "abandoned"]
+}
