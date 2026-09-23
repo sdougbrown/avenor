@@ -39,6 +39,17 @@ Skills for Codex. Codex can dispatch outward to OpenCode jockey.
 
 - `skills/dispatch-jockey/` — Codex dispatches to OC jockey via `opencode-acp`
 
+### `escalation-bridge/`
+
+A reference integration for the remote-human gate escalation surface (see [docs/escalation.md](../docs/escalation.md)).
+
+- `demo.json` — minimal workflow template with a human merge-authorization gate
+- `bridge.py` — reference bridge: long-polls a workflow, carries parked human gates to a generic webhook transport, records attributed decisions
+
+### `software-factory/`
+
+Durable workflow template for one review unit: intake through exact-head review and human merge authorization. See its README for the full flow.
+
 ## How it fits together
 
 The intended pattern: a top-level Claude Code or Codex session receives a complex task, dispatches to OpenCode jockey via Avenor, and jockey in turn delegates bounded work to horse or mule sub-agents within OpenCode. Avenor brokers the runtime boundary; the agent hierarchy handles the work.

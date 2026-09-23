@@ -288,6 +288,12 @@ A gate is a named, typed decision point. Gate types: `machine`, `external`,
 `human`. A gate cannot be satisfied by silence, a successful run, a green PR,
 or an agent-authored marker.
 
+For human gates, the deciding human does not have to be at the terminal: an
+external bridge can carry the question to Slack or any other transport and
+record the attributed answer through the ordinary gate command path. See
+[escalation.md](escalation.md) and the reference bridge in
+[`templates/escalation-bridge/`](../templates/escalation-bridge/).
+
 The `workflow.gate` command records a decision with a closed operation enum:
 
 | Operation | Requires | Effect |
