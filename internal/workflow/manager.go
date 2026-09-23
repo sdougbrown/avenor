@@ -847,10 +847,10 @@ func (m *Manager) commandStart(wf WorkflowID, payload json.RawMessage) (any, err
 	if err != nil {
 		return nil, err
 	}
-	// Catalog() also performs lease-expiry recovery, so it runs before the
-	// attempt commit's revision is read inside applyStart.
+	// Key derivation is a pure read (no lease recovery), so it cannot move
+	// the revision the attempt commit below validates against.
 	if concurrencyKey != "" {
-		held, err := m.heldConcurrencyKeys()
+		held, err := m.heldConcurrencyKeys(wf, act.ID)
 		if err != nil {
 			unlockDispatch()
 			return nil, err

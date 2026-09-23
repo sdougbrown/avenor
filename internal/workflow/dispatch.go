@@ -91,8 +91,10 @@ func (m *Manager) lockDispatch() (func() error, error) {
 
 // heldConcurrencyKeys returns the set of concurrency keys held by live
 // (non-terminal) attempts across every non-terminal workflow in the root,
-// read from current on-disk snapshots. No key table is ever persisted.
-func (m *Manager) heldConcurrencyKeys() (map[string]bool, error) {
+// read from current on-disk snapshots. Attempts on skipWorkflow/skipActivation
+// are excluded so a node's own dead attempt never blocks its replacement. No
+// key table is ever persisted.
+func (m *Manager) heldConcurrencyKeys(skipWorkflow WorkflowID, skipActivation ActivationID) (map[string]bool, error) {
 	held := map[string]bool{}
 	// Recovery-style sweeps would expire stale leases and move revisions
 	// under the caller; key derivation must be a pure read, so snapshots are
@@ -113,18 +115,21 @@ func (m *Manager) heldConcurrencyKeys() (map[string]bool, error) {
 		if err != nil || !ok {
 			continue
 		}
-		collectHeldKeys(held, snap)
+		collectHeldKeys(held, snap, skipWorkflow, skipActivation)
 	}
 	return held, nil
 }
 
-func collectHeldKeys(held map[string]bool, snap Snapshot) {
+func collectHeldKeys(held map[string]bool, snap Snapshot, skipWorkflow WorkflowID, skipActivation ActivationID) {
 	if isTerminalStatus(snap.Instance.Status) {
 		return
 	}
 	for i := range snap.Instance.Activations {
 		act := &snap.Instance.Activations[i]
 		if act.Dispatch == nil || act.Dispatch.ConcurrencyKey == "" {
+			continue
+		}
+		if snap.Instance.WorkflowID == skipWorkflow && act.ID == skipActivation {
 			continue
 		}
 		for _, id := range act.AttemptIDs {
@@ -163,13 +168,6 @@ func (m *Manager) BeginDispatch(req BeginDispatchRequest) (BeginDispatchResult, 
 	}
 	defer unlock()
 
-	// Key derivation is a pure read (no lease recovery), so it cannot move
-	// the revision the commit below validates against.
-	held, err := m.heldConcurrencyKeys()
-	if err != nil {
-		return BeginDispatchResult{}, err
-	}
-
 	snap, exists, err := m.store.loadCurrent(req.WorkflowID)
 	if err != nil {
 		return BeginDispatchResult{}, err
@@ -204,6 +202,12 @@ func (m *Manager) BeginDispatch(req BeginDispatchRequest) (BeginDispatchResult, 
 		selection = act.Selection
 	}
 	concurrencyKey := act.Dispatch.ConcurrencyKey
+	// Key derivation is a pure read (no lease recovery), so it cannot move
+	// the revision the commit below validates against.
+	held, err := m.heldConcurrencyKeys(req.WorkflowID, act.ID)
+	if err != nil {
+		return BeginDispatchResult{}, err
+	}
 	if held[concurrencyKey] {
 		return BeginDispatchResult{}, ErrConcurrencyKeyHeld
 	}

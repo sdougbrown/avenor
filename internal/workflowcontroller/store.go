@@ -463,6 +463,9 @@ func (s *ControllerStore) WithLeader(controllerID, leaseID string, ownerEpoch in
 	if err := validateControllerID(controllerID); err != nil {
 		return err
 	}
+	if _, err := os.Stat(s.snapshotPath(controllerID)); errors.Is(err, fs.ErrNotExist) {
+		return ErrNotLeader
+	}
 	unlock, err := s.lockController(controllerID)
 	if err != nil {
 		return err
