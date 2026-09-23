@@ -174,6 +174,11 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		*backend = entry.Backend
 		*agent = entry.Agent
 		*model = entry.Model
+		// Roster supplies a default; an explicit --thinking wins. Validation
+		// against the backend happens below, once the roster has set it.
+		if *thinking == "" {
+			*thinking = entry.Thinking
+		}
 		if *agent != "" && *model == "" {
 			resolved, resolveErr := resolveAgentModel(*agent, *backend, getenv)
 			if resolveErr != nil {

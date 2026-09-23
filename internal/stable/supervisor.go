@@ -813,6 +813,11 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 			return SpawnResult{}, err
 		}
 		backend, params.Agent, params.Model = entry.Backend, entry.Agent, entry.Model
+		// Roster supplies a default; an explicitly spawned thinking level
+		// wins. ValidateThinkingForBackend below sees the merged value.
+		if params.Thinking == "" {
+			params.Thinking = entry.Thinking
+		}
 	}
 	if !workflowMode {
 		resolved, err := s.resolveDirectResumeIdentity(params.SessionID, directSupplied, effectiveIdentity{

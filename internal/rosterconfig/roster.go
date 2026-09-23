@@ -7,15 +7,23 @@ import (
 	"strings"
 
 	"github.com/sdougbrown/avenor/internal/configfile"
+	"github.com/sdougbrown/avenor/internal/thinkingpolicy"
 )
 
 // Entry is one complete roster identity. Backend is required; an entry must
 // also provide an agent, a model, or both. An agent may intentionally omit a
 // model so the selected backend can apply its default.
+//
+// Thinking is optional and acts as the entry's default thinking level. It is
+// not part of the resolved identity: an explicit run-level thinking value
+// wins, so a roster only supplies the level when the caller did not. Keeping
+// it here lets the level travel with the backend it was chosen for, which is
+// the pair that thinking validity actually depends on.
 type Entry struct {
-	Backend string `json:"backend"`
-	Agent   string `json:"agent,omitempty"`
-	Model   string `json:"model,omitempty"`
+	Backend  string `json:"backend"`
+	Agent    string `json:"agent,omitempty"`
+	Model    string `json:"model,omitempty"`
+	Thinking string `json:"thinking,omitempty"`
 }
 
 // Config is the top-level roster map, keyed by roster entry name.
@@ -23,7 +31,7 @@ type Config map[string]Entry
 
 // Load reads and validates a roster file. The top-level value must be a JSON
 // object and all objects are decoded with unknown fields rejected. This keeps
-// deferred fields such as system and thinking from silently becoming no-ops.
+// deferred fields such as system from silently becoming no-ops.
 func Load(path string) (*Config, error) {
 	var config Config
 	if err := configfile.Load(path, &config); err != nil {
@@ -81,6 +89,13 @@ func (e Entry) Validate() error {
 	if strings.TrimSpace(e.Agent) == "" && strings.TrimSpace(e.Model) == "" {
 		return fmt.Errorf("at least one of agent or model must be set")
 	}
+	// Canonical form only. The backend policy check stays downstream, where
+	// the resolved backend and the run's start-versus-resume mode are both
+	// known; catching a misspelled level here names the offending entry
+	// instead of failing much later with only a backend to go on.
+	if err := thinkingpolicy.ValidateCanonical(e.Thinking); err != nil {
+		return fmt.Errorf("thinking: %w", err)
+	}
 	return nil
 }
 
@@ -124,6 +139,11 @@ type ResolveInput struct {
 // ResolvedSelection is the effective backend/agent/model identity. Run-level
 // agent_profile and thinking remain outside this type and must be carried by
 // the caller as orthogonal execution context.
+//
+// A roster entry's Thinking is therefore not applied here. Callers that
+// select an identity directly read it off the entry; phase selection does not
+// yet carry it, so a per-phase roster entry still falls back to the run-level
+// level. See the tracking issue for closing that gap.
 type ResolvedSelection struct {
 	Backend string
 	Agent   string

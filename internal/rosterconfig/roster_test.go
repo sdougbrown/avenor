@@ -141,7 +141,8 @@ func TestLoadRejectsInvalidEntries(t *testing.T) {
 }
 
 func TestLoadRejectsUnknownAndDeferredFields(t *testing.T) {
-	for _, field := range []string{"system", "thinking", "misspelled"} {
+	// "thinking" is no longer in this list: it is a supported entry field.
+	for _, field := range []string{"system", "misspelled"} {
 		t.Run(field, func(t *testing.T) {
 			_, err := Load(writeRoster(t, `{"planner":{"backend":"agy","agent":"planner","`+field+`":"deferred"}}`))
 			if err == nil {
@@ -258,5 +259,84 @@ func TestResolveRejectsLoopInlineOverrides(t *testing.T) {
 	}
 	if selection != (ResolvedSelection{Backend: "agy", Agent: "loop-agent"}) {
 		t.Fatalf("loop roster selection = %+v", selection)
+	}
+}
+
+func TestLoadAcceptsThinkingOnAnEntry(t *testing.T) {
+	config, err := Load(writeRoster(t, `{
+		"horse": {"backend": "codex-app-server", "model": "gpt-5.6-terra", "thinking": "high"},
+		"mule": {"backend": "codex-app-server", "model": "gpt-5.6-luna", "thinking": "low"},
+		"plain": {"backend": "agy", "agent": "windsurf-swe"}
+	}`))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	horse, err := config.Lookup("horse")
+	if err != nil {
+		t.Fatalf("Lookup(horse) error = %v", err)
+	}
+	if horse.Thinking != "high" {
+		t.Fatalf("horse.Thinking = %q, want %q", horse.Thinking, "high")
+	}
+
+	mule, err := config.Lookup("mule")
+	if err != nil {
+		t.Fatalf("Lookup(mule) error = %v", err)
+	}
+	if mule.Thinking != "low" {
+		t.Fatalf("mule.Thinking = %q, want %q", mule.Thinking, "low")
+	}
+
+	// Thinking stays optional; an entry without it is unchanged.
+	plain, err := config.Lookup("plain")
+	if err != nil {
+		t.Fatalf("Lookup(plain) error = %v", err)
+	}
+	if plain.Thinking != "" {
+		t.Fatalf("plain.Thinking = %q, want empty", plain.Thinking)
+	}
+}
+
+func TestLoadRejectsAnUnknownThinkingLevelAndNamesTheEntry(t *testing.T) {
+	// A misspelled level used to be impossible to express. Now that it is, it
+	// must fail at load with the offending entry named, rather than surfacing
+	// much later with only a backend for context.
+	_, err := Load(writeRoster(t, `{"horse":{"backend":"codex-app-server","model":"m","thinking":"hgih"}}`))
+	if err == nil {
+		t.Fatal("Load() accepted an unknown thinking level")
+	}
+	if !strings.Contains(err.Error(), "horse") {
+		t.Fatalf("Load() error = %v, want the offending entry named", err)
+	}
+	if !strings.Contains(err.Error(), "thinking") {
+		t.Fatalf("Load() error = %v, want the offending field named", err)
+	}
+}
+
+func TestLoadAcceptsEveryCanonicalThinkingLevel(t *testing.T) {
+	for _, level := range []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"} {
+		t.Run(level, func(t *testing.T) {
+			if _, err := Load(writeRoster(t,
+				`{"e":{"backend":"codex-app-server","model":"m","thinking":"`+level+`"}}`)); err != nil {
+				t.Fatalf("Load() rejected canonical level %q: %v", level, err)
+			}
+		})
+	}
+}
+
+func TestResolveStillLeavesRosterThinkingOutOfTheIdentity(t *testing.T) {
+	// Thinking is a default carried alongside the identity, not part of it.
+	// Phase selection does not apply it yet; this pins that boundary so the
+	// follow-up work has to change the test deliberately.
+	roster := &Entry{Backend: "agy", Agent: "roster-agent", Thinking: "max"}
+
+	resolved, err := Resolve(ResolveInput{Roster: roster, Thinking: "low"})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	want := ResolvedSelection{Backend: "agy", Agent: "roster-agent"}
+	if resolved != want {
+		t.Fatalf("resolved = %+v, want %+v", resolved, want)
 	}
 }
