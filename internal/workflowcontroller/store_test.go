@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -547,5 +548,28 @@ func TestListSortedAndMissingDir(t *testing.T) {
 	}
 	if strings.Join(ids, ",") != "alpha,beta,gamma" {
 		t.Fatalf("list order: got %v, want [alpha beta gamma]", ids)
+	}
+}
+
+func TestUnknownControllerIsNotFound(t *testing.T) {
+	s, _ := newTestStore(t)
+	id := "ghost"
+
+	if _, err := s.SetDesiredState(id, DesiredEnabled, ""); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("SetDesiredState unknown: got err=%v, want ErrNotFound", err)
+	}
+	if _, _, err := s.AcquireLease(id, "owner-1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("AcquireLease unknown: got err=%v, want ErrNotFound", err)
+	}
+	if _, err := s.RenewLease(id, "lease-1", 1); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("RenewLease unknown: got err=%v, want ErrNotFound", err)
+	}
+	if _, err := s.ReleaseLease(id, "lease-1", 1); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("ReleaseLease unknown: got err=%v, want ErrNotFound", err)
+	}
+
+	// None of the commands should have created the controller directory.
+	if _, err := os.Stat(s.controllerDir(id)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("unknown controller commands created the directory: err=%v", err)
 	}
 }

@@ -58,10 +58,18 @@ func (s *ControllerStore) lockPath(controllerID string) string {
 	return filepath.Join(s.controllerDir(controllerID), controllerID+".lock")
 }
 
-// lockController takes the controller's exclusive flock. The caller must have
-// ensured the controller directory exists.
+// lockController takes the controller's exclusive flock. If the controller
+// directory does not exist, the lock open fails with ENOENT and this returns
+// ErrNotFound, so callers that lock before checking existence report not-found.
 func (s *ControllerStore) lockController(controllerID string) (func() error, error) {
-	return lockFile(s.lockPath(controllerID))
+	unlock, err := lockFile(s.lockPath(controllerID))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("controller %s: %w", controllerID, ErrNotFound)
+		}
+		return nil, err
+	}
+	return unlock, nil
 }
 
 // Create registers a controller with the given in-flight limit. Re-creating an
