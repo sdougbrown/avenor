@@ -490,6 +490,71 @@ func (s *ControllerStore) WithLeader(controllerID, leaseID string, ownerEpoch in
 	return fn()
 }
 
+// RecordCapacityBlocked appends a capacity_blocked event when the blocked
+// reason differs from the record's current reason; an unchanged reason is a
+// no-op returning (rec, false, nil). detail is diagnostic text only.
+func (s *ControllerStore) RecordCapacityBlocked(controllerID, reason, detail string) (ControllerRecord, bool, error) {
+	if err := validateControllerID(controllerID); err != nil {
+		return ControllerRecord{}, false, err
+	}
+	unlock, err := s.lockController(controllerID)
+	if err != nil {
+		return ControllerRecord{}, false, err
+	}
+	defer unlock()
+	rec, err := s.loadForCommand(controllerID)
+	if err != nil {
+		return ControllerRecord{}, false, err
+	}
+
+	if rec.CapacityBlocked == reason {
+		return rec, false, nil
+	}
+	now := s.now().UTC()
+	event := ControllerEvent{
+		Kind:          EventCapacityBlocked,
+		Seq:           rec.Revision + 1,
+		Time:          now,
+		BlockedReason: reason,
+		BlockedDetail: detail,
+	}
+	if err := s.commitLocked(controllerID, &rec, []ControllerEvent{event}); err != nil {
+		return ControllerRecord{}, false, err
+	}
+	return rec, true, nil
+}
+
+// ClearCapacityBlocked appends a capacity_cleared event when the record is
+// currently blocked; an unblocked record is a no-op (rec, false, nil).
+func (s *ControllerStore) ClearCapacityBlocked(controllerID string) (ControllerRecord, bool, error) {
+	if err := validateControllerID(controllerID); err != nil {
+		return ControllerRecord{}, false, err
+	}
+	unlock, err := s.lockController(controllerID)
+	if err != nil {
+		return ControllerRecord{}, false, err
+	}
+	defer unlock()
+	rec, err := s.loadForCommand(controllerID)
+	if err != nil {
+		return ControllerRecord{}, false, err
+	}
+
+	if rec.CapacityBlocked == "" {
+		return rec, false, nil
+	}
+	now := s.now().UTC()
+	event := ControllerEvent{
+		Kind: EventCapacityCleared,
+		Seq:  rec.Revision + 1,
+		Time: now,
+	}
+	if err := s.commitLocked(controllerID, &rec, []ControllerEvent{event}); err != nil {
+		return ControllerRecord{}, false, err
+	}
+	return rec, true, nil
+}
+
 // loadForCommand validates the id, verifies the controller exists, and loads
 // its record. It must be called with the controller's flock already held.
 func (s *ControllerStore) loadForCommand(controllerID string) (ControllerRecord, error) {
