@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -157,14 +158,34 @@ func TestControllerBarrierCatalogFailureDisablesControllers(t *testing.T) {
 	sup := NewSupervisor(Config{ControlSocket: newStableSocketPath(t, "wfctl-catalog-fail"), WorkflowRoot: root})
 	stopLoopsAtCleanup(t, sup)
 
+	// The first controller command triggers the barrier and retains its error.
 	if _, err := sup.WorkflowControllerCreate(createControllerParams(t, "c1", 5)); err == nil {
 		t.Fatal("controller create succeeded despite failed catalog recovery")
 	}
-	if _, err := sup.WorkflowControllerList(); err == nil {
-		t.Fatal("controller list succeeded despite failed catalog recovery")
+	if sup.workflowBarrierErr == nil {
+		t.Fatal("barrier error not retained after failed catalog recovery")
 	}
-	if _, err := sup.WorkflowReady("c1", 10); err == nil {
-		t.Fatal("workflow.ready succeeded despite failed catalog recovery")
+	barrierErr := sup.workflowBarrierErr
+
+	raw, err := json.Marshal(map[string]string{"reason": "ops pause"})
+	if err != nil {
+		t.Fatalf("marshal disable params: %v", err)
+	}
+	checks := []struct {
+		name string
+		fn   func() error
+	}{
+		{"create", func() error { _, err := sup.WorkflowControllerCreate(createControllerParams(t, "c1", 5)); return err }},
+		{"enable", func() error { _, err := sup.WorkflowControllerEnable("c1"); return err }},
+		{"disable", func() error { _, err := sup.WorkflowControllerDisable("c1", raw); return err }},
+		{"status", func() error { _, err := sup.WorkflowControllerStatus("c1"); return err }},
+		{"list", func() error { _, err := sup.WorkflowControllerList(); return err }},
+		{"ready", func() error { _, err := sup.WorkflowReady("c1", 10); return err }},
+	}
+	for _, check := range checks {
+		if err := check.fn(); !errors.Is(err, barrierErr) {
+			t.Fatalf("controller %s after barrier failure: err = %v, want retained barrier error", check.name, err)
+		}
 	}
 
 	// Workflow RPCs keep serving: the parent instance's own state is intact.
@@ -234,7 +255,11 @@ func TestControllerRestartReacquiresLease(t *testing.T) {
 			if got := leader["owner_id"]; got != supB.supervisorIdentity() {
 				t.Fatalf("B leader owner_id = %v, want %v", got, supB.supervisorIdentity())
 			}
-			if epoch := leader["owner_epoch"].(int64); epoch <= recA.Leader.OwnerEpoch {
+			epoch, ok := leader["owner_epoch"].(int64)
+			if !ok {
+				t.Fatalf("B leader owner_epoch = %#v, want int64", leader["owner_epoch"])
+			}
+			if epoch <= recA.Leader.OwnerEpoch {
 				t.Fatalf("B leader epoch = %d, want > %d", epoch, recA.Leader.OwnerEpoch)
 			}
 			break
@@ -342,5 +367,211 @@ func TestControllerEnableTwiceSingleLoop(t *testing.T) {
 	}
 	if rec.Leader == nil || rec.Leader.LeaseID != leaseID {
 		t.Fatalf("lease churned from duplicate loops: was %q, now %+v", leaseID, rec.Leader)
+	}
+}
+
+// TestControllerSelfExitThenReenable proves a leader loop that exits on its
+// own (it observes a desired state of disabled, changed out-of-band as by
+// another process) removes its own map entry, so a later enable in the same
+// process starts a fresh loop that acquires leadership instead of finding a
+// stale entry and no-oping.
+func TestControllerSelfExitThenReenable(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "wfroot")
+	store := workflowcontroller.NewStore(root)
+	sup := NewSupervisor(Config{ControlSocket: newStableSocketPath(t, "wfctl-self-exit"), WorkflowRoot: root})
+	sup.controllerRenewInterval = 20 * time.Millisecond
+	stopLoopsAtCleanup(t, sup)
+
+	if _, err := sup.WorkflowControllerCreate(createControllerParams(t, "c1", 5)); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := sup.WorkflowControllerEnable("c1"); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	waitForControllerLeader(t, store, "c1", func(rec workflowcontroller.ControllerRecord) bool {
+		return rec.Leader.OwnerID == sup.supervisorIdentity()
+	})
+
+	// Disable out-of-band, bypassing the supervisor handler: the loop must
+	// observe the desired state, exit on its own, and remove its entry.
+	if _, err := store.SetDesiredState("c1", workflowcontroller.DesiredDisabled, "out-of-band"); err != nil {
+		t.Fatalf("out-of-band disable: %v", err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		sup.controllerLoopsMu.Lock()
+		loops := len(sup.controllerLoops)
+		sup.controllerLoopsMu.Unlock()
+		if loops == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("self-exited loop still tracked after disable; loops = %d", loops)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Re-enabling in the same process must start a fresh loop that acquires
+	// leadership.
+	if _, err := sup.WorkflowControllerEnable("c1"); err != nil {
+		t.Fatalf("re-enable: %v", err)
+	}
+	rec := waitForControllerLeader(t, store, "c1", func(rec workflowcontroller.ControllerRecord) bool {
+		return rec.Leader.OwnerID == sup.supervisorIdentity()
+	})
+	sup.controllerLoopsMu.Lock()
+	loops := len(sup.controllerLoops)
+	sup.controllerLoopsMu.Unlock()
+	if loops != 1 {
+		t.Fatalf("leader loops after re-enable = %d, want 1", loops)
+	}
+	if rec.Leader.OwnerEpoch != 2 {
+		t.Fatalf("leader epoch after re-enable = %d, want 2", rec.Leader.OwnerEpoch)
+	}
+}
+
+// TestControllerEnableDisableRaceMatchesDesiredState hammers concurrent
+// enable/disable RPCs and proves the serialization invariant: when both
+// goroutines finish, loop presence matches the last persisted desired state
+// and exactly one loop serves an enabled controller.
+func TestControllerEnableDisableRaceMatchesDesiredState(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "wfroot")
+	store := workflowcontroller.NewStore(root)
+	sup := NewSupervisor(Config{ControlSocket: newStableSocketPath(t, "wfctl-race-hammer"), WorkflowRoot: root})
+	stopLoopsAtCleanup(t, sup)
+
+	if _, err := sup.WorkflowControllerCreate(createControllerParams(t, "c1", 5)); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	raw, err := json.Marshal(map[string]string{"reason": "race"})
+	if err != nil {
+		t.Fatalf("marshal disable params: %v", err)
+	}
+
+	const iterations = 50
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			if _, err := sup.WorkflowControllerEnable("c1"); err != nil {
+				t.Errorf("enable %d: %v", i, err)
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			if _, err := sup.WorkflowControllerDisable("c1", raw); err != nil {
+				t.Errorf("disable %d: %v", i, err)
+			}
+		}
+	}()
+	wg.Wait()
+
+	rec, ok, err := store.Get("c1")
+	if err != nil || !ok {
+		t.Fatalf("final get: ok=%v err=%v", ok, err)
+	}
+	sup.controllerLoopsMu.Lock()
+	loops := len(sup.controllerLoops)
+	sup.controllerLoopsMu.Unlock()
+	if rec.DesiredState == workflowcontroller.DesiredEnabled {
+		if loops != 1 {
+			t.Fatalf("durably enabled but leader loops = %d, want 1", loops)
+		}
+		waitForControllerLeader(t, store, "c1", func(rec workflowcontroller.ControllerRecord) bool {
+			return rec.Leader.OwnerID == sup.supervisorIdentity()
+		})
+	} else {
+		if loops != 0 {
+			t.Fatalf("durably disabled but leader loops = %d, want 0", loops)
+		}
+		if _, _, err := store.AcquireLease("c1", "someone"); !errors.Is(err, workflowcontroller.ErrDisabled) {
+			t.Fatalf("acquire while disabled: err = %v, want ErrDisabled", err)
+		}
+	}
+}
+
+// TestControllerEagerBarrierStartsLeaderWithoutRPC pre-creates durable
+// controller state (an enabled controller record) and starts a Supervisor
+// through Run, its normal startup path: the eager startup barrier recovers
+// state and the enabled controller gains a leader without any workflow or
+// controller RPC being issued, and the candidate index is recovered.
+func TestControllerEagerBarrierStartsLeaderWithoutRPC(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "wfroot")
+	prev := workflowcontroller.NewStore(root)
+	if _, err := prev.Create("c1", 5); err != nil {
+		t.Fatalf("previous-process create: %v", err)
+	}
+	if _, err := prev.SetDesiredState("c1", workflowcontroller.DesiredEnabled, ""); err != nil {
+		t.Fatalf("previous-process enable: %v", err)
+	}
+
+	sup := NewSupervisor(Config{ControlSocket: newStableSocketPath(t, "wfctl-eager"), WorkflowRoot: root})
+	stopLoopsAtCleanup(t, sup)
+	t.Cleanup(func() { _ = sup.Shutdown("graceful") })
+	done := make(chan int, 1)
+	go func() { done <- sup.Run() }()
+
+	store := workflowcontroller.NewStore(root)
+	waitForControllerLeader(t, store, "c1", func(rec workflowcontroller.ControllerRecord) bool {
+		return rec.Leader.OwnerID == sup.supervisorIdentity()
+	})
+	if sup.workflowMgr == nil {
+		t.Fatal("eager barrier did not construct the workflow manager")
+	}
+	if _, err := sup.workflowMgr.CandidatesForController("c1", 10); err != nil {
+		t.Fatalf("candidate index not recovered by eager barrier: %v", err)
+	}
+}
+
+// TestControllerLeaseRenewalObserved proves the leader loop renews its lease:
+// with a small injectable renew interval, RenewedAt advances across at least
+// two renewals and ExpiresAt moves forward.
+func TestControllerLeaseRenewalObserved(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "wfroot")
+	store := workflowcontroller.NewStore(root)
+	sup := NewSupervisor(Config{ControlSocket: newStableSocketPath(t, "wfctl-renew"), WorkflowRoot: root})
+	sup.controllerRenewInterval = 25 * time.Millisecond
+	stopLoopsAtCleanup(t, sup)
+
+	if _, err := sup.WorkflowControllerCreate(createControllerParams(t, "c1", 5)); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := sup.WorkflowControllerEnable("c1"); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	rec := waitForControllerLeader(t, store, "c1", func(rec workflowcontroller.ControllerRecord) bool {
+		return rec.Leader.OwnerID == sup.supervisorIdentity()
+	})
+	baseRenewedAt := rec.Leader.RenewedAt
+	baseExpiresAt := rec.Leader.ExpiresAt
+
+	// Consecutive renewals are at least one interval apart, so two observed
+	// advances of RenewedAt prove two renewals happened.
+	deadline := time.Now().Add(10 * time.Second)
+	renewals := 0
+	last := baseRenewedAt
+	var err error
+	for renewals < 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for two renewals; observed %d after %s", renewals, baseRenewedAt)
+		}
+		time.Sleep(5 * time.Millisecond)
+		rec, _, err = store.Get("c1")
+		if err != nil {
+			t.Fatalf("store.Get during renewals: %v", err)
+		}
+		if rec.Leader == nil {
+			t.Fatal("lease lost while waiting for renewals")
+		}
+		if rec.Leader.RenewedAt.After(last) {
+			last = rec.Leader.RenewedAt
+			renewals++
+		}
+	}
+	if !rec.Leader.ExpiresAt.After(baseExpiresAt) {
+		t.Fatalf("expires_at did not advance across renewals: %s -> %s", baseExpiresAt, rec.Leader.ExpiresAt)
 	}
 }

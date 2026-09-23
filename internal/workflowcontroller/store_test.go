@@ -3,9 +3,11 @@ package workflowcontroller
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -153,6 +155,110 @@ func TestCompetingLeadersSequential(t *testing.T) {
 	}
 	if rec2.Leader.OwnerID != "owner-2" || rec2.Leader.OwnerEpoch != epoch1+1 {
 		t.Fatalf("unexpected new lease: %+v", rec2.Leader)
+	}
+}
+
+// TestConcurrentCompetingLeaders hammers one controller through two store
+// handles on the same root with overlapping AcquireLease/RenewLease calls.
+// The flock must keep the record consistent: owner epochs strictly increase
+// across successful acquisitions, no revision is ever observed with two
+// different lease ids, and the final leader matches the highest epoch seen.
+func TestConcurrentCompetingLeaders(t *testing.T) {
+	root := t.TempDir()
+	s1 := NewStore(root)
+	s2 := NewStore(root)
+	mustEnable(t, s1, mustCreate(t, s1, "alpha", 1).ControllerID)
+
+	const workers = 8
+	const iters = 40
+	var mu sync.Mutex
+	lastEpoch := int64(0)
+	revisionLease := map[int64]string{}
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			s := s1
+			if w%2 == 1 {
+				s = s2
+			}
+			owner := fmt.Sprintf("owner-%d", w)
+			var leaseID string
+			var epoch int64
+			for i := 0; i < iters; i++ {
+				if leaseID != "" {
+					if _, err := s.RenewLease("alpha", leaseID, epoch); err != nil {
+						// Lost the lease (a competitor took over after an
+						// expiry): fall back to acquisition.
+						leaseID, epoch = "", 0
+					}
+				}
+				rec, acquired, err := s.AcquireLease("alpha", owner)
+				if err != nil {
+					t.Errorf("owner %d acquire: %v", w, err)
+					continue
+				}
+				if acquired {
+					mu.Lock()
+					if rec.Leader.OwnerEpoch <= lastEpoch {
+						t.Errorf("owner epoch did not strictly increase: %d after %d", rec.Leader.OwnerEpoch, lastEpoch)
+					}
+					if rec.Leader.OwnerEpoch > lastEpoch {
+						lastEpoch = rec.Leader.OwnerEpoch
+					}
+					mu.Unlock()
+					leaseID, epoch = rec.Leader.LeaseID, rec.Leader.OwnerEpoch
+				}
+				if obs, _, err := s.Get("alpha"); err == nil && obs.Leader != nil {
+					mu.Lock()
+					if prev, ok := revisionLease[obs.Revision]; ok && prev != obs.Leader.LeaseID {
+						t.Errorf("revision %d observed with two leaders: %s and %s", obs.Revision, prev, obs.Leader.LeaseID)
+					}
+					revisionLease[obs.Revision] = obs.Leader.LeaseID
+					mu.Unlock()
+				}
+			}
+		}(w)
+	}
+	wg.Wait()
+
+	rec, ok, err := s1.Get("alpha")
+	if err != nil || !ok {
+		t.Fatalf("final get: ok=%v err=%v", ok, err)
+	}
+	if rec.Leader == nil {
+		t.Fatalf("no leader after hammering; lastEpoch=%d", lastEpoch)
+	}
+	if rec.Leader.OwnerEpoch != lastEpoch {
+		t.Fatalf("final leader epoch = %d, want %d", rec.Leader.OwnerEpoch, lastEpoch)
+	}
+
+	// The durable event log must record one serialized history: sequence
+	// numbers strictly increasing by one, and leader_acquired owner epochs
+	// strictly increasing. Interleaved read-modify-write (a lost flock) shows
+	// up as duplicate or regressed sequence numbers.
+	data, err := os.ReadFile(s1.eventsPath("alpha"))
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+	lastSeq := int64(0)
+	lastAcquiredEpoch := int64(0)
+	for i, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+		var e ControllerEvent
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			t.Fatalf("unmarshal event line %d: %v", i, err)
+		}
+		if e.Seq != lastSeq+1 {
+			t.Errorf("event %d: seq = %d, want %d", i, e.Seq, lastSeq+1)
+		}
+		lastSeq = e.Seq
+		if e.Kind == EventLeaderAcquired {
+			if e.OwnerEpoch <= lastAcquiredEpoch {
+				t.Errorf("event %d: leader_acquired epoch %d after %d, want strictly increasing", i, e.OwnerEpoch, lastAcquiredEpoch)
+			}
+			lastAcquiredEpoch = e.OwnerEpoch
+		}
 	}
 }
 
