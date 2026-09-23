@@ -200,7 +200,7 @@ func TestDispatchLegacyReadsManual(t *testing.T) {
 // autoDispatchTemplateJSON builds a single run-node template with an auto
 // dispatch policy and a retry policy for re-arm coverage.
 func autoDispatchTemplateJSON(templateID, controllerID string, priority int) []byte {
-	policy := map[string]any{"mode": "auto", "controller_id": controllerID}
+	policy := map[string]any{"mode": "auto", "controller_id": controllerID, "concurrency_key": "deploys"}
 	if priority >= 0 {
 		policy["priority"] = priority
 	}
@@ -473,6 +473,9 @@ func TestCandidatesForControllerQuery(t *testing.T) {
 	}
 	if c.Priority != 70 {
 		t.Fatalf("candidate priority = %d, want 70", c.Priority)
+	}
+	if c.ConcurrencyKey != "deploys" {
+		t.Fatalf("candidate concurrency_key = %q, want deploys", c.ConcurrencyKey)
 	}
 	if c.ReadyAt.IsZero() {
 		t.Fatal("candidate ready_at is zero")
