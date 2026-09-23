@@ -95,8 +95,8 @@ type ControllerEvent struct {
 	ExpiresAt   time.Time `json:"expires_at,omitempty"`
 }
 
-// LastRenewalEventAt is unexported, so encoding/json would silently drop it;
-// MarshalJSON and UnmarshalJSON below persist it explicitly.
+// LastRenewalEventAt is exported on ControllerRecord; the custom
+// MarshalJSON/UnmarshalJSON below omit the zero value and round-trip it.
 type controllerRecordJSON struct {
 	SchemaVersion      int                         `json:"schema_version"`
 	ControllerID       string                      `json:"controller_id"`

@@ -337,10 +337,11 @@ type Supervisor struct {
 	workflowMgr         *workflow.Manager
 	workflowBarrierErr  error
 	workflowControllers *workflowcontroller.ControllerStore
-	// controllerLoopsMu guards controllerLoops: one leader-loop handle per
-	// enabled controller id in this process.
+	// controllerLoopsMu guards controllerLoops and loopsStopped: one
+	// leader-loop handle per enabled controller id in this process.
 	controllerLoopsMu            sync.Mutex
 	controllerLoops              map[string]*controllerLoop
+	loopsStopped                 bool
 	state                        *control.ControlState
 	controlMu                    sync.Mutex
 	runtimes                     map[string]*childRuntime
@@ -4213,8 +4214,15 @@ func (s *Supervisor) supervisorIdentity() string {
 // controllerLoop tracks one leader-loop goroutine for a single controller in
 // this process.
 type controllerLoop struct {
-	stop chan struct{}
-	done chan struct{}
+	stopCh    chan struct{}
+	done      chan struct{}
+	closeOnce sync.Once
+}
+
+// stop closes the loop's stop channel exactly once, so concurrent stoppers
+// (disable and shutdown) cannot double-close it.
+func (l *controllerLoop) stop() {
+	l.closeOnce.Do(func() { close(l.stopCh) })
 }
 
 // startControllerLoop starts the process's single leader loop for controllerID
@@ -4222,10 +4230,13 @@ type controllerLoop struct {
 func (s *Supervisor) startControllerLoop(store *workflowcontroller.ControllerStore, controllerID string) {
 	s.controllerLoopsMu.Lock()
 	defer s.controllerLoopsMu.Unlock()
+	if s.loopsStopped {
+		return
+	}
 	if _, ok := s.controllerLoops[controllerID]; ok {
 		return
 	}
-	loop := &controllerLoop{stop: make(chan struct{}), done: make(chan struct{})}
+	loop := &controllerLoop{stopCh: make(chan struct{}), done: make(chan struct{})}
 	s.controllerLoops[controllerID] = loop
 	go s.runControllerLoop(store, controllerID, loop)
 }
@@ -4240,7 +4251,7 @@ func (s *Supervisor) stopControllerLoop(controllerID string) {
 	if loop == nil {
 		return
 	}
-	close(loop.stop)
+	loop.stop()
 	<-loop.done
 }
 
@@ -4249,10 +4260,11 @@ func (s *Supervisor) stopControllerLoop(controllerID string) {
 func (s *Supervisor) stopControllerLoops() {
 	s.controllerLoopsMu.Lock()
 	loops := s.controllerLoops
-	s.controllerLoops = nil
+	s.controllerLoops = map[string]*controllerLoop{}
+	s.loopsStopped = true
 	s.controllerLoopsMu.Unlock()
 	for _, loop := range loops {
-		close(loop.stop)
+		loop.stop()
 	}
 	for _, loop := range loops {
 		<-loop.done
@@ -4281,7 +4293,7 @@ func (s *Supervisor) runControllerLoop(store *workflowcontroller.ControllerStore
 	}
 	for {
 		select {
-		case <-loop.stop:
+		case <-loop.stopCh:
 			release()
 			return
 		default:
@@ -4331,7 +4343,7 @@ func (s *Supervisor) runControllerLoop(store *workflowcontroller.ControllerStore
 // was stopped while waiting.
 func controllerLoopSleep(loop *controllerLoop) bool {
 	select {
-	case <-loop.stop:
+	case <-loop.stopCh:
 		return false
 	case <-time.After(workflowcontroller.RenewInterval):
 		return true

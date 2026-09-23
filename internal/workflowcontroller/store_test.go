@@ -267,6 +267,37 @@ func TestRecoverExpiresLease(t *testing.T) {
 	}
 }
 
+func TestAcquireLeaseReplacesExpiredLease(t *testing.T) {
+	s, clock := newTestStore(t)
+	mustEnable(t, s, mustCreate(t, s, "alpha", 1).ControllerID)
+	rec := mustAcquire(t, s, "alpha", "owner-1")
+	oldEpoch := rec.OwnerEpoch
+
+	clock.Advance(LeaseTTL + time.Second)
+
+	// Re-acquire directly without Recover: the expired lease must be cleared
+	// in place so a new owner can take leadership.
+	rec, acquired, err := s.AcquireLease("alpha", "owner-2")
+	if err != nil || !acquired {
+		t.Fatalf("acquire over expired lease: acquired=%v err=%v", acquired, err)
+	}
+	if rec.OwnerEpoch != oldEpoch+1 {
+		t.Fatalf("owner epoch after re-acquire: got %d, want %d", rec.OwnerEpoch, oldEpoch+1)
+	}
+	if rec.Leader == nil || rec.Leader.OwnerID != "owner-2" {
+		t.Fatalf("new leader not recorded: %+v", rec.Leader)
+	}
+
+	kinds := eventKinds(t, s, "alpha")
+	want := []string{EventCreated, EventEnabled, EventLeaderAcquired, EventLeaderExpired, EventLeaderAcquired}
+	if strings.Join(kinds, ",") != strings.Join(want, ",") {
+		t.Fatalf("event kinds: got %v, want %v", kinds, want)
+	}
+	if reasons := eventReasons(t, s, "alpha", EventLeaderExpired); len(reasons) != 1 || reasons[0] != "timeout" {
+		t.Fatalf("leader_expired reasons: got %v, want [timeout]", reasons)
+	}
+}
+
 func TestTruncatedFinalEventLine(t *testing.T) {
 	s, _ := newTestStore(t)
 	mustCreate(t, s, "alpha", 1)

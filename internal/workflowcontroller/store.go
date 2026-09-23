@@ -182,15 +182,15 @@ func (s *ControllerStore) SetDesiredState(controllerID string, desired DesiredSt
 	if desired != DesiredEnabled && desired != DesiredDisabled {
 		return ControllerRecord{}, fmt.Errorf("%w: unknown desired state %q", ErrInvalidController, desired)
 	}
-	rec, err := s.loadForCommand(controllerID)
-	if err != nil {
-		return ControllerRecord{}, err
-	}
 	unlock, err := s.lockController(controllerID)
 	if err != nil {
 		return ControllerRecord{}, err
 	}
 	defer unlock()
+	rec, err := s.loadForCommand(controllerID)
+	if err != nil {
+		return ControllerRecord{}, err
+	}
 
 	now := s.now().UTC()
 	seq := rec.Revision
@@ -226,15 +226,15 @@ func (s *ControllerStore) AcquireLease(controllerID, ownerID string) (Controller
 	if err := validateControllerID(controllerID); err != nil {
 		return ControllerRecord{}, false, err
 	}
-	rec, err := s.loadForCommand(controllerID)
-	if err != nil {
-		return ControllerRecord{}, false, err
-	}
 	unlock, err := s.lockController(controllerID)
 	if err != nil {
 		return ControllerRecord{}, false, err
 	}
 	defer unlock()
+	rec, err := s.loadForCommand(controllerID)
+	if err != nil {
+		return ControllerRecord{}, false, err
+	}
 
 	now := s.now().UTC()
 	if rec.DesiredState != DesiredEnabled {
@@ -244,7 +244,7 @@ func (s *ControllerStore) AcquireLease(controllerID, ownerID string) (Controller
 	var events []ControllerEvent
 	if leaseExpired(now, rec.Leader) {
 		seq++
-		events = append(events, ControllerEvent{
+		event := ControllerEvent{
 			Kind:       EventLeaderExpired,
 			Seq:        seq,
 			Time:       now,
@@ -252,7 +252,11 @@ func (s *ControllerStore) AcquireLease(controllerID, ownerID string) (Controller
 			LeaseID:    rec.Leader.LeaseID,
 			OwnerID:    rec.Leader.OwnerID,
 			OwnerEpoch: rec.Leader.OwnerEpoch,
-		})
+		}
+		events = append(events, event)
+		if err := applyEvent(&rec, event); err != nil {
+			return ControllerRecord{}, false, err
+		}
 	}
 	if rec.Leader != nil {
 		return rec, false, nil
@@ -285,15 +289,15 @@ func (s *ControllerStore) RenewLease(controllerID, leaseID string, ownerEpoch in
 	if err := validateControllerID(controllerID); err != nil {
 		return ControllerRecord{}, err
 	}
-	rec, err := s.loadForCommand(controllerID)
-	if err != nil {
-		return ControllerRecord{}, err
-	}
 	unlock, err := s.lockController(controllerID)
 	if err != nil {
 		return ControllerRecord{}, err
 	}
 	defer unlock()
+	rec, err := s.loadForCommand(controllerID)
+	if err != nil {
+		return ControllerRecord{}, err
+	}
 
 	if err := checkLeaseCAS(rec, leaseID, ownerEpoch); err != nil {
 		return ControllerRecord{}, fmt.Errorf("controller %s renew lease: %w", controllerID, err)
@@ -317,7 +321,10 @@ func (s *ControllerStore) RenewLease(controllerID, leaseID string, ownerEpoch in
 		return rec, nil
 	}
 	// Event suppressed: the renewed snapshot is written in place without
-	// bumping Revision, since no event was appended.
+	// bumping Revision, since no event was appended. The snapshot-only renewal
+	// intentionally diverges from the event log's ExpiresAt until the next
+	// renewal event is appended; a snapshot lost after this point replays the
+	// older expiry.
 	if err := s.writeSnapshot(controllerID, rec); err != nil {
 		return ControllerRecord{}, err
 	}
@@ -332,15 +339,15 @@ func (s *ControllerStore) ReleaseLease(controllerID, leaseID string, ownerEpoch 
 	if err := validateControllerID(controllerID); err != nil {
 		return ControllerRecord{}, err
 	}
-	rec, err := s.loadForCommand(controllerID)
-	if err != nil {
-		return ControllerRecord{}, err
-	}
 	unlock, err := s.lockController(controllerID)
 	if err != nil {
 		return ControllerRecord{}, err
 	}
 	defer unlock()
+	rec, err := s.loadForCommand(controllerID)
+	if err != nil {
+		return ControllerRecord{}, err
+	}
 
 	if err := checkLeaseCAS(rec, leaseID, ownerEpoch); err != nil {
 		return ControllerRecord{}, fmt.Errorf("controller %s release lease: %w", controllerID, err)
@@ -438,8 +445,8 @@ func (s *ControllerStore) recoverController(controllerID string) (ControllerReco
 	return rec, true, nil
 }
 
-// loadForCommand validates the id, verifies the controller exists, and returns
-// with the caller positioned to take the flock.
+// loadForCommand validates the id, verifies the controller exists, and loads
+// its record. It must be called with the controller's flock already held.
 func (s *ControllerStore) loadForCommand(controllerID string) (ControllerRecord, error) {
 	if err := validateControllerID(controllerID); err != nil {
 		return ControllerRecord{}, err
@@ -450,11 +457,6 @@ func (s *ControllerStore) loadForCommand(controllerID string) (ControllerRecord,
 		}
 		return ControllerRecord{}, err
 	}
-	unlock, err := s.lockController(controllerID)
-	if err != nil {
-		return ControllerRecord{}, err
-	}
-	defer unlock()
 	rec, _, err := s.loadLocked(controllerID)
 	return rec, err
 }
