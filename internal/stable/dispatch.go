@@ -3,6 +3,8 @@ package stable
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 
 	"github.com/sdougbrown/avenor/internal/admission"
 	"github.com/sdougbrown/avenor/internal/runtime"
@@ -30,6 +32,11 @@ const (
 	// DispatchNotLeader means the caller's controller leader lease did not
 	// validate.
 	DispatchNotLeader DispatchOutcomeKind = "not_leader"
+	// DispatchCanceled means the dispatch was canceled through its context.
+	// Before the attempt intent is committed nothing is reserved and no event
+	// is appended; after the commit the granted lease stays authoritative and
+	// the attempt is finalized as canceled (retry semantics apply).
+	DispatchCanceled DispatchOutcomeKind = "canceled"
 	// DispatchStartFailed means the executor's runtime start failed after the
 	// attempt intent was durably recorded; kernel attempt/retry semantics
 	// apply.
@@ -67,9 +74,12 @@ type DispatchOutcome struct {
 // for the controller runner: it is never registered on the control socket,
 // CLI, MCP, or client.
 //
-// Order: selection validation → admission reservation (no locks held) →
-// controller lease validation → root dispatch lock + claim/attempt-intent
-// commit → executor start with the reservation handed off → finalization.
+// Order: selection validation → cancellation check → admission reservation
+// (no locks held) → cancellation check → controller lease validation → root
+// dispatch lock + claim/attempt-intent commit → cancellation check → executor
+// start with the reservation handed off → finalization. Cancellation is
+// honored only between these boundaries; the executor start itself runs
+// uninterruptibly.
 func (s *Supervisor) dispatchWorkflowNode(ctx context.Context, req DispatchRequest) (DispatchOutcome, error) {
 	out := DispatchOutcome{WorkflowID: req.WorkflowID, NodeID: req.NodeID, ActivationID: req.ActivationID}
 	mgr, controllerStore, err := s.workflowBarrierResult()
@@ -92,6 +102,13 @@ func (s *Supervisor) dispatchWorkflowNode(ctx context.Context, req DispatchReque
 		}
 	}
 
+	// A cancel before the reservation leaves nothing reserved and no event
+	// appended.
+	if err := ctx.Err(); err != nil {
+		out.Kind = DispatchCanceled
+		return out, nil
+	}
+
 	// Reserve admission while holding no workflow-store, controller-store, or
 	// dispatch lock. A capacity denial is a no-event, no-revision-change
 	// result; the node stays a candidate.
@@ -103,6 +120,18 @@ func (s *Supervisor) dispatchWorkflowNode(ctx context.Context, req DispatchReque
 			return out, nil
 		}
 		return out, err
+	}
+	// Every path from here to the executor start releases the reservation.
+	// On a successful start the ownership transferred to the runtime inside
+	// spawnReserved (consumeLocked marks the reservation released), so the
+	// deferred Release below is a no-op.
+	defer res.Release()
+
+	// A cancel after the reservation but before any workflow state: the
+	// reservation is released unused (deferred) and nothing is appended.
+	if err := ctx.Err(); err != nil {
+		out.Kind = DispatchCanceled
+		return out, nil
 	}
 
 	// Under the validated leader lease, claim the node and record the attempt
@@ -123,7 +152,6 @@ func (s *Supervisor) dispatchWorkflowNode(ctx context.Context, req DispatchReque
 		return nil
 	})
 	if withLeaderErr != nil {
-		res.Release()
 		if errors.Is(withLeaderErr, workflowcontroller.ErrNotLeader) {
 			out.Kind = DispatchNotLeader
 			return out, nil
@@ -131,7 +159,6 @@ func (s *Supervisor) dispatchWorkflowNode(ctx context.Context, req DispatchReque
 		return out, withLeaderErr
 	}
 	if beginErr != nil {
-		res.Release()
 		switch {
 		case errors.Is(beginErr, workflow.ErrStaleCandidate):
 			out.Kind = DispatchStale
@@ -144,6 +171,29 @@ func (s *Supervisor) dispatchWorkflowNode(ctx context.Context, req DispatchReque
 		}
 	}
 	out.AttemptID = string(begin.AttemptID)
+
+	// A cancel after the attempt intent was committed: the workflow-node lease
+	// is already granted and stays authoritative, so the attempt is finalized
+	// as a terminal pre-start cancellation (kernel retry semantics apply), the
+	// reservation is released (deferred), and the cancellation is reported.
+	if err := ctx.Err(); err != nil {
+		kind, label := workflowMarkerForKind(begin.Action.Kind)
+		if ferr := mgr.FinalizeDispatch(workflow.FinalizeDispatchRequest{
+			WorkflowID:    workflow.WorkflowID(req.WorkflowID),
+			NodeID:        workflow.NodeID(req.NodeID),
+			ActivationID:  workflow.ActivationID(req.ActivationID),
+			AttemptID:     begin.AttemptID,
+			LeaseID:       begin.LeaseID,
+			FailureStatus: workflow.AttemptCanceled,
+			MarkerKind:    kind,
+			MarkerLabel:   label,
+		}); ferr != nil {
+			fmt.Fprintf(os.Stderr, "avenor stable: workflow %s node %s attempt %s: record canceled dispatch: %v\n",
+				req.WorkflowID, req.NodeID, begin.AttemptID, ferr)
+		}
+		out.Kind = DispatchCanceled
+		return out, nil
+	}
 
 	// Start the declared executor with the reservation handed off, so the
 	// node's first runtime consumes it instead of reserving again.
@@ -163,10 +213,9 @@ func (s *Supervisor) dispatchWorkflowNode(ctx context.Context, req DispatchReque
 	if startErr != nil {
 		// Pre-start failure: record the terminal attempt fact (idempotent
 		// with the executor's own termination record) and release the
-		// reservation after the manager lock is free. Provider/session
-		// startup failures keep kernel attempt/retry semantics and are not
-		// capacity failures.
-		_ = mgr.FinalizeDispatch(workflow.FinalizeDispatchRequest{
+		// reservation (deferred). Provider/session startup failures keep
+		// kernel attempt/retry semantics and are not capacity failures.
+		if ferr := mgr.FinalizeDispatch(workflow.FinalizeDispatchRequest{
 			WorkflowID:    ec.WorkflowID,
 			NodeID:        ec.NodeID,
 			ActivationID:  ec.ActivationID,
@@ -175,8 +224,10 @@ func (s *Supervisor) dispatchWorkflowNode(ctx context.Context, req DispatchReque
 			FailureStatus: workflow.AttemptFailed,
 			MarkerKind:    kind,
 			MarkerLabel:   label,
-		})
-		res.Release()
+		}); ferr != nil {
+			fmt.Fprintf(os.Stderr, "avenor stable: workflow %s node %s attempt %s: record start failure: %v\n",
+				req.WorkflowID, req.NodeID, begin.AttemptID, ferr)
+		}
 		out.Kind = DispatchStartFailed
 		out.Detail = startErr.Error()
 		return out, nil
@@ -184,7 +235,7 @@ func (s *Supervisor) dispatchWorkflowNode(ctx context.Context, req DispatchReque
 
 	// Record the actual runtime identity of the started attempt.
 	rtID, sessionID := s.runtimeForAttempt(string(begin.AttemptID))
-	_ = mgr.FinalizeDispatch(workflow.FinalizeDispatchRequest{
+	if ferr := mgr.FinalizeDispatch(workflow.FinalizeDispatchRequest{
 		WorkflowID:   ec.WorkflowID,
 		NodeID:       ec.NodeID,
 		ActivationID: ec.ActivationID,
@@ -193,7 +244,10 @@ func (s *Supervisor) dispatchWorkflowNode(ctx context.Context, req DispatchReque
 		RuntimeID:    rtID,
 		RunID:        s.runID,
 		SessionID:    sessionID,
-	})
+	}); ferr != nil {
+		fmt.Fprintf(os.Stderr, "avenor stable: workflow %s node %s attempt %s: record runtime identity: %v\n",
+			req.WorkflowID, req.NodeID, begin.AttemptID, ferr)
+	}
 	out.Kind = Dispatched
 	out.RuntimeID = rtID
 	return out, nil

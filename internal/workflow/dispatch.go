@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -22,6 +23,11 @@ var ErrConcurrencyKeyHeld = errors.New("concurrency key is held by a live attemp
 // ErrSelectionConflict reports that a caller-supplied selection conflicts
 // with the selection already pinned on the activation. No event is appended.
 var ErrSelectionConflict = errors.New("selection conflicts with the pinned selection")
+
+// beginDispatchPreCommit, when non-nil (set by tests), runs after the
+// snapshot read and key check but before the attempt commit so a concurrent
+// command can land in the read–commit window deterministically.
+var beginDispatchPreCommit func()
 
 // BeginDispatchRequest asks the manager to claim one candidate activation and
 // record its attempt intent in a single atomic command.
@@ -99,6 +105,9 @@ func (m *Manager) heldConcurrencyKeys(skipWorkflow WorkflowID, skipActivation Ac
 	// Recovery-style sweeps would expire stale leases and move revisions
 	// under the caller; key derivation must be a pure read, so snapshots are
 	// loaded without the recovery sweep.
+	//
+	// Unreadable snapshots are fail-open: the workflow is skipped (with a
+	// log line) rather than failing every dispatch on one bad instance.
 	instancesDir := filepath.Join(m.store.Root(), "instances")
 	entries, err := os.ReadDir(instancesDir)
 	if err != nil {
@@ -112,7 +121,11 @@ func (m *Manager) heldConcurrencyKeys(skipWorkflow WorkflowID, skipActivation Ac
 			continue
 		}
 		snap, ok, err := m.store.loadCurrent(WorkflowID(entry.Name()))
-		if err != nil || !ok {
+		if err != nil {
+			log.Printf("workflow %s: skipping unreadable snapshot while deriving held concurrency keys: %v", entry.Name(), err)
+			continue
+		}
+		if !ok {
 			continue
 		}
 		collectHeldKeys(held, snap, skipWorkflow, skipActivation)
@@ -211,6 +224,9 @@ func (m *Manager) BeginDispatch(req BeginDispatchRequest) (BeginDispatchResult, 
 	if held[concurrencyKey] {
 		return BeginDispatchResult{}, ErrConcurrencyKeyHeld
 	}
+	if beginDispatchPreCommit != nil {
+		beginDispatchPreCommit()
+	}
 	tmpl, err := m.templateFor(&snap)
 	if err != nil {
 		return BeginDispatchResult{}, err
@@ -250,6 +266,12 @@ func (m *Manager) BeginDispatch(req BeginDispatchRequest) (BeginDispatchResult, 
 	}); err != nil {
 		if errors.Is(err, errDuplicateIdempotency) {
 			return stale()
+		}
+		if errors.Is(err, errRevisionMismatch) {
+			// Another command on the same workflow committed between the read
+			// above and this commit: the candidate is stale by definition.
+			return BeginDispatchResult{}, fmt.Errorf("begin dispatch %s/%s: revision advanced under a concurrent command: %w",
+				req.WorkflowID, req.NodeID, ErrStaleCandidate)
 		}
 		return BeginDispatchResult{}, err
 	}
