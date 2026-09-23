@@ -347,11 +347,16 @@ type Supervisor struct {
 	workflowControllerMu sync.Mutex
 	// controllerRenewInterval is the leader loop's renew cadence; defaults to
 	// workflowcontroller.RenewInterval.
-	controllerRenewInterval      time.Duration
-	state                        *control.ControlState
-	controlMu                    sync.Mutex
-	runtimes                     map[string]*childRuntime
-	nextID                       int
+	controllerRenewInterval time.Duration
+	state                   *control.ControlState
+	controlMu               sync.Mutex
+	runtimes                map[string]*childRuntime
+	nextID                  int
+	// outstandingReservations counts admission reservations that hold a local
+	// slot but have not yet converted into a registered runtime. Guarded by
+	// controlMu; the local capacity limit is enforced against active runtimes
+	// plus this count.
+	outstandingReservations      int
 	shuttingDown                 bool
 	shutdownCh                   chan struct{}
 	shutdownChOnce               sync.Once
@@ -809,7 +814,7 @@ func (s *Supervisor) acquireLocalRuntimeSlot(ctx context.Context, child *childRu
 			s.controlMu.Unlock()
 			return errors.New("supervisor is shutting down")
 		}
-		if s.activeRuntimeCountLocked() < s.config.MaxRuntimes {
+		if s.activeRuntimeCountLocked()+s.outstandingReservations < s.config.MaxRuntimes {
 			child.mu.Lock()
 			child.parked = false
 			child.mu.Unlock()
@@ -821,6 +826,98 @@ func (s *Supervisor) acquireLocalRuntimeSlot(ctx context.Context, child *childRu
 			return err
 		}
 	}
+}
+
+// admissionReservation holds one runtime-start admission: a tree-budget token
+// (empty in degraded local-only mode) plus one held local runtime slot.
+// Exactly one owner holds a reservation at a time; it is either released back
+// to the budget and local limit or converted into a registered child runtime
+// by spawnReserved. Release is idempotent and safe from every pre-start
+// failure, panic, cancellation, and shutdown path.
+type admissionReservation struct {
+	sup       *Supervisor
+	treeToken string
+	held      bool
+	release   sync.Once
+}
+
+// Release returns the reservation's tree token and local slot. After the
+// reservation has been converted into a runtime (or already released) it is a
+// no-op.
+func (r *admissionReservation) Release() {
+	r.release.Do(func() {
+		s := r.sup
+		s.controlMu.Lock()
+		if r.held {
+			r.held = false
+			if s.outstandingReservations > 0 {
+				s.outstandingReservations--
+			}
+		}
+		s.controlMu.Unlock()
+		if r.treeToken != "" {
+			s.treeBudgetMu.Lock()
+			budget := s.treeBudget
+			s.treeBudgetMu.Unlock()
+			if budget != nil {
+				budget.Release(r.treeToken)
+			}
+		}
+		s.signalCapacityChange()
+	})
+}
+
+// consumeLocked transfers the reservation into a freshly registered child
+// under controlMu: the local slot becomes the registered runtime and the tree
+// token moves to the child (returned so the caller can attach it). The
+// reservation is marked released so a later Release is a no-op.
+func (r *admissionReservation) consumeLocked() string {
+	token := r.treeToken
+	if r.held {
+		r.held = false
+		if r.sup.outstandingReservations > 0 {
+			r.sup.outstandingReservations--
+		}
+	}
+	r.treeToken = ""
+	r.release.Do(func() {})
+	return token
+}
+
+// reserveAdmission reserves admission for one runtime start: the tree-budget
+// slot first (typed tree CapacityError when exhausted), then one held local
+// slot under controlMu (typed local CapacityError when outstanding
+// reservations plus active runtimes reach MaxRuntimes). In degraded
+// local-only mode the reservation holds only the local slot. It must never be
+// called while holding a workflow-store, controller-store, or dispatch lock.
+func (s *Supervisor) reserveAdmission() (*admissionReservation, error) {
+	treeToken, err := s.acquireTreeAdmission()
+	if err != nil {
+		return nil, err
+	}
+	res := &admissionReservation{sup: s, treeToken: treeToken, held: true}
+	s.controlMu.Lock()
+	defer s.controlMu.Unlock()
+	fail := func(err error) (*admissionReservation, error) {
+		if treeToken != "" {
+			s.treeBudgetMu.Lock()
+			budget := s.treeBudget
+			s.treeBudgetMu.Unlock()
+			if budget != nil {
+				budget.Release(treeToken)
+			}
+		}
+		return nil, err
+	}
+	if s.shuttingDown {
+		return fail(fmt.Errorf("supervisor is shutting down"))
+	}
+	active := s.activeRuntimeCountLocked() + s.outstandingReservations
+	if active >= s.config.MaxRuntimes {
+		return fail(&admission.CapacityError{Source: "local", Limit: s.config.MaxRuntimes, Active: active})
+	}
+	s.outstandingReservations++
+	return res, nil
 }
 
 func (s *Supervisor) activeRuntimeCountLocked() int {
@@ -838,6 +935,19 @@ func (s *Supervisor) activeRuntimeCountLocked() int {
 }
 
 func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
+	res, err := s.reserveAdmission()
+	if err != nil {
+		return SpawnResult{}, err
+	}
+	return s.spawnReserved(params, res)
+}
+
+// spawnReserved starts a runtime using a pre-reserved admission. It never
+// acquires admission itself: the reservation's tree token moves to the child
+// on success and its local slot becomes the registered runtime. On any
+// pre-start failure the reservation is released.
+func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation) (SpawnResult, error) {
+	defer res.Release()
 	workflowMode := params.LoopFile != "" || params.TeamFile != ""
 	if workflowMode {
 		if params.RosterEntry != "" {
@@ -896,37 +1006,12 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 		}
 	}
 
-	// Acquire tree-scoped admission first. The tree budget is a cross-process
-	// authority, so it must be reserved before the local slot to avoid
-	// transiently inflating the local count for a spawn that will fail. If the
-	// tree budget is unavailable the error is typed and retryable; the local
-	// limit is not consumed.
-	treeToken, err := s.acquireTreeAdmission()
-	if err != nil {
-		return SpawnResult{}, err
-	}
-	// releaseTree releases the tree slot for the early-failure paths before a
-	// child exists to own it. Once the child is created it owns the release.
-	releaseTree := func() {
-		s.treeBudgetMu.Lock()
-		budget := s.treeBudget
-		s.treeBudgetMu.Unlock()
-		if budget != nil {
-			budget.Release(treeToken)
-		}
-	}
-
+	// The admission reservation already holds the tree slot and one local
+	// slot; convert it into this child instead of acquiring again.
 	s.controlMu.Lock()
 	if s.shuttingDown {
 		s.controlMu.Unlock()
-		releaseTree()
 		return SpawnResult{}, fmt.Errorf("supervisor is shutting down")
-	}
-	activeRuntimes := s.activeRuntimeCountLocked()
-	if activeRuntimes >= s.config.MaxRuntimes {
-		s.controlMu.Unlock()
-		releaseTree()
-		return SpawnResult{}, &admission.CapacityError{Source: "local", Limit: s.config.MaxRuntimes, Active: activeRuntimes}
 	}
 	s.nextID++
 	rtID := fmt.Sprintf("rt_%d", s.nextID)
@@ -948,6 +1033,7 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 		activationID: params.ActivationID,
 		attemptID:    params.AttemptID,
 	}
+	treeToken := res.consumeLocked()
 	if treeToken != "" {
 		child.treeToken = treeToken
 		child.treeBudgetRelease = func(token string) {
