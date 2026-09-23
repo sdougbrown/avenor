@@ -19,7 +19,7 @@
       "outputs": [
         { "id": "summary", "name": "Summary", "type": "string", "required": true },
         { "id": "repository", "name": "Repository", "type": "string", "required": true },
-        { "id": "pull_number", "name": "Pull request number", "type": "integer", "required": true },
+        { "id": "pull_number", "name": "Pull request number", "type": "number", "required": true },
         { "id": "head_sha", "name": "Head SHA", "type": "string", "required": true }
       ],
       "completion": { "kind": "explicit" },

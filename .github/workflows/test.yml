@@ -42,6 +42,20 @@ jobs:
       - name: Test Go packages
         run: mise run go-test
 
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Test escalation bridge
+        run: python3 -m unittest discover -s templates/escalation-bridge -v
+
   js:
     runs-on: ubuntu-latest
     steps:

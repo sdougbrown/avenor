@@ -112,7 +112,10 @@ avenor workflow inspect --socket /tmp/avenor-stable.sock wf_...
 
 The bridge derives the `response_hash` and the `evidence_id` from the decision
 payload and archives the answered file under `recorded/`, so the local audit
-trail survives recording.
+trail survives recording. An invalid answer — a subject whose `type` doesn't
+match the gate's declaration, a missing actor/reason, or a malformed file — is
+parked under `rejected/` and never recorded; the next ask carries the
+rejection reason as `previous_decision_error` so the human can correct it.
 
 ## Adapting a real transport
 

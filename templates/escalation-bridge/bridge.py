@@ -202,17 +202,27 @@ def build_gate_command(workflow_id, node_id, activation_id, gate, decision):
 def wait_for_decision(ctl, decisions, workflow_id, activation_id, gate, gate_timeout, poll):
     """Poll for the transport's decision file, re-checking workflow state.
 
-    Returns (decision, decision_file), or (None, None) if the gate-timeout
-    expired while the activation is still parked (the caller re-asks) or the
-    workflow reached a terminal state while waiting. The file is left in place
-    for the caller to archive only after the decision is recorded kernel-side:
-    a failed record must not consume the human's answer.
+    Returns (decision, decision_file, reason). reason is 'answered',
+    'timeout' (gate-timeout expired while still parked; the caller re-asks),
+    'unparked' (the activation resolved another way), or 'terminal' (the
+    workflow reached a terminal state while waiting). The file is left in
+    place for the caller to archive only after the decision is recorded
+    kernel-side: a failed record must not consume the human's answer.
     """
     decision_file = decisions / f"decision-{activation_id}-{gate['id']}.json"
     deadline = time.monotonic() + gate_timeout
     while time.monotonic() < deadline:
         if decision_file.exists():
-            return json.loads(decision_file.read_text()), decision_file
+            try:
+                return json.loads(decision_file.read_text()), decision_file, "answered"
+            except json.JSONDecodeError as exc:
+                # Malformed file: move it out of the way so the transport can
+                # write a fresh one, and surface the parse error on the next
+                # ask instead of looping on the same broken file.
+                rejected = decisions / "rejected" / f"{activation_id}-{gate['id']}-{int(time.time())}.json"
+                rejected.parent.mkdir(parents=True, exist_ok=True)
+                decision_file.rename(rejected)
+                return None, None, f"invalid decision file ({exc}); rewritten to {rejected.name}"
         time.sleep(poll)
         # Re-check state on every tick: another path may resolve the gate or
         # the workflow while this decision is pending.
@@ -224,10 +234,10 @@ def wait_for_decision(ctl, decisions, workflow_id, activation_id, gate, gate_tim
         )
         if act is None or act.get("status") != "awaiting_gate":
             print(f"bridge: {activation_id} no longer parked; dropping wait on {gate['id']}", flush=True)
-            return None, None
+            return None, None, "unparked"
         if detail.get("instance", {}).get("status") in ("completed", "failed", "canceled"):
-            return None, None
-    return None, None
+            return None, None, "terminal"
+    return None, None, "timeout"
 
 
 def main():
@@ -250,6 +260,7 @@ def main():
     template_gates = load_human_gates(args.template)
 
     ctl = None
+    decision_errors = {}
     print(f"bridge: watching {args.workflow_id} on {args.socket}", flush=True)
     while True:
         try:
@@ -284,17 +295,36 @@ def main():
                     # The human must be able to decide from the message alone.
                     "note": "Include what is being authorized, its exact scope, and what denial means.",
                 }
+                error_key = (activation_id, gate["id"])
+                if error_key in decision_errors:
+                    question["previous_decision_error"] = decision_errors.pop(error_key)
                 print(f"bridge: asking {gate['id']} on {node_id} ({activation_id})", flush=True)
                 ask(args.webhook_url, question)
 
-                decision, decision_file = wait_for_decision(
+                decision, decision_file, reason = wait_for_decision(
                     ctl, decisions, args.workflow_id, activation_id, gate, gate_timeout, poll
                 )
                 if decision is None:
-                    continue  # still parked; the next tick re-asks
-                command = build_gate_command(
-                    args.workflow_id, node_id, activation_id, gate, decision
-                )
+                    if reason == "terminal":
+                        break  # workflow ended while waiting; stop asking anyone
+                    continue  # timeout or unparked; the next tick re-asks
+                try:
+                    command = build_gate_command(
+                        args.workflow_id, node_id, activation_id, gate, decision
+                    )
+                except ValueError as exc:
+                    # The human's answer is invalid (bad operation, missing
+                    # actor/reason, subject type mismatch). Park the file under
+                    # rejected/ so the same answer is not re-read forever, and
+                    # carry the reason on the next ask.
+                    rejected = decisions / "rejected" / (
+                        f"{activation_id}-{gate['id']}-{int(time.time())}.json"
+                    )
+                    rejected.parent.mkdir(parents=True, exist_ok=True)
+                    decision_file.rename(rejected)
+                    decision_errors[error_key] = str(exc)
+                    print(f"bridge: rejected decision on {gate['id']}: {exc}", flush=True)
+                    continue
                 ctl.call(
                     "workflow.command",
                     {"workflow_id": args.workflow_id, "command": command},
