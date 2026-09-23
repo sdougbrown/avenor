@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,20 @@ type Manager struct {
 
 	mu        sync.Mutex
 	executors map[ActionKind]Executor
+
+	candidateMu    sync.Mutex
+	candidates     map[WorkflowID]candidateEntry
+	candidateSuper string
+	candidatesOK   bool
+}
+
+// candidateEntry caches one recovered snapshot with the node dispatch
+// policies resolved from its versioned template. The index is a discardable
+// optimization rebuilt only from Catalog() results; the final claim
+// revalidation always happens under the workflow store lock.
+type candidateEntry struct {
+	snapshot Snapshot
+	dispatch map[NodeID]DispatchPolicy
 }
 
 func NewManager(store *Store) *Manager {
@@ -62,6 +77,21 @@ func NewManager(store *Store) *Manager {
 			return nil
 		}
 		return node.RetryPolicy
+	})
+	// Dispatch policies are resolved from the instance's versioned template so
+	// activation creation copies the node's auto-dispatch metadata into the
+	// snapshot (mirroring the retry resolver). Load errors return nil, which
+	// reads as manual for that node.
+	SetDispatchPolicyResolver(func(templateID TemplateID, templateVersion TemplateVersion, nodeID NodeID) *DispatchPolicy {
+		tmpl, err := m.store.LoadTemplate(templateID, templateVersion)
+		if err != nil {
+			return nil
+		}
+		node, err := findNode(&tmpl, nodeID)
+		if err != nil {
+			return nil
+		}
+		return node.Dispatch
 	})
 	return m
 }
@@ -510,6 +540,123 @@ type commandClaimRequest struct {
 	Actor        string       `json:"actor"`
 }
 
+// claimableActivationStatus is the single claim-eligibility status rule shared
+// by the command boundary and the read-only candidate query. Checkpoint and
+// gate parking stay ineligible because they rest in non-claimable statuses.
+func claimableActivationStatus(status ActivationStatus) bool {
+	switch status {
+	case ActivationPending, ActivationReady, ActivationLeaseExpired:
+		return true
+	}
+	return false
+}
+
+// ErrCandidatesNotRecovered is returned by CandidatesForController until the
+// candidate index has been rebuilt from a full catalog recovery. Stage 2's
+// startup barrier owns the rebuild call.
+var ErrCandidatesNotRecovered = errors.New("workflow candidate index not recovered; rebuild after catalog recovery")
+
+// ReadyCandidate is one ready auto-dispatch node exposed to a controller.
+// It is advisory: the query never mutates state and never grants a lease.
+type ReadyCandidate struct {
+	Identity       ExecutionIdentity `json:"identity"`
+	Revision       int64             `json:"revision"`
+	ReadyAt        time.Time         `json:"ready_at"`
+	Priority       int               `json:"priority"`
+	ConcurrencyKey string            `json:"concurrency_key,omitempty"`
+	ControllerID   string            `json:"controller_id"`
+}
+
+// RebuildCandidateIndex rebuilds the discardable in-memory candidate index
+// from Store.Catalog() results. supervisorID is stamped onto every candidate
+// identity. Stage 2's startup barrier calls this once catalog recovery has
+// completed; until then the query returns ErrCandidatesNotRecovered.
+func (m *Manager) RebuildCandidateIndex(supervisorID string) error {
+	catalog, err := m.store.Catalog()
+	if err != nil {
+		return err
+	}
+	entries := make(map[WorkflowID]candidateEntry, len(catalog))
+	for _, c := range catalog {
+		policies := make(map[NodeID]DispatchPolicy)
+		if tmpl, err := m.store.LoadTemplate(c.Snapshot.Instance.TemplateID, c.Snapshot.Instance.TemplateVersion); err == nil {
+			for i := range tmpl.Nodes {
+				if tmpl.Nodes[i].Dispatch != nil {
+					policies[tmpl.Nodes[i].ID] = tmpl.Nodes[i].Dispatch.effective()
+				}
+			}
+		}
+		entries[c.WorkflowID] = candidateEntry{snapshot: c.Snapshot, dispatch: policies}
+	}
+	m.candidateMu.Lock()
+	defer m.candidateMu.Unlock()
+	m.candidates = entries
+	m.candidateSuper = supervisorID
+	m.candidatesOK = true
+	return nil
+}
+
+// CandidatesForController returns the ready auto-dispatch activations owned
+// by controllerID, per the cached recovered snapshots. Manual nodes, other
+// controllers' nodes, claimed/leased, blocked, and legacy activations without
+// a ready timestamp never appear. Attempt identity is absent until dispatch.
+func (m *Manager) CandidatesForController(controllerID string, limit int) ([]ReadyCandidate, error) {
+	m.candidateMu.Lock()
+	defer m.candidateMu.Unlock()
+	if !m.candidatesOK {
+		return nil, ErrCandidatesNotRecovered
+	}
+	ids := make([]WorkflowID, 0, len(m.candidates))
+	for id := range m.candidates {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	candidates := make([]ReadyCandidate, 0)
+	for _, wf := range ids {
+		entry := m.candidates[wf]
+		if isTerminalStatus(entry.snapshot.Instance.Status) {
+			continue
+		}
+		for i := range entry.snapshot.Instance.Activations {
+			act := &entry.snapshot.Instance.Activations[i]
+			if !claimableActivationStatus(act.Status) || act.ReadyAt == nil || act.Dispatch == nil {
+				continue
+			}
+			// act.Dispatch carries the node's effective policy copied at
+			// activation creation; the template-resolved index is the fallback
+			// for snapshots that predate activation-level metadata.
+			policy := *act.Dispatch
+			if !policy.IsAuto() {
+				indexed, ok := entry.dispatch[act.NodeID]
+				if !ok || !indexed.IsAuto() {
+					continue
+				}
+				policy = indexed
+			}
+			if policy.ControllerID != controllerID {
+				continue
+			}
+			candidates = append(candidates, ReadyCandidate{
+				Identity: ExecutionIdentity{
+					SupervisorID: m.candidateSuper,
+					WorkflowID:   wf,
+					NodeID:       act.NodeID,
+					ActivationID: act.ID,
+				},
+				Revision:       entry.snapshot.Instance.Revision,
+				ReadyAt:        *act.ReadyAt,
+				Priority:       policy.priority(),
+				ConcurrencyKey: policy.ConcurrencyKey,
+				ControllerID:   policy.ControllerID,
+			})
+			if limit > 0 && len(candidates) >= limit {
+				return candidates, nil
+			}
+		}
+	}
+	return candidates, nil
+}
+
 // commandClaim grants a lease on a pending/ready activation and hands the
 // caller the raw owner token. It does not start any provider or allocate an
 // attempt.
@@ -535,7 +682,7 @@ func (m *Manager) commandClaim(wf WorkflowID, payload json.RawMessage) (any, err
 	if act == nil {
 		return nil, fmt.Errorf("activation not found for node %q", req.NodeID)
 	}
-	if act.Status != ActivationPending && act.Status != ActivationReady && act.Status != ActivationLeaseExpired {
+	if !claimableActivationStatus(act.Status) {
 		return nil, fmt.Errorf("cannot claim activation in status %q", act.Status)
 	}
 	tmpl, err := m.templateFor(&snap)

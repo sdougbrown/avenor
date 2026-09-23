@@ -65,6 +65,15 @@ func cloneActivation(a Activation) Activation {
 		sel := *a.Selection
 		a.Selection = &sel
 	}
+	if a.Dispatch != nil {
+		policy := *a.Dispatch
+		if policy.Priority != nil {
+			priority := *policy.Priority
+			policy.Priority = &priority
+		}
+		a.Dispatch = &policy
+	}
+	a.ReadyAt = derefTime(a.ReadyAt)
 	if a.ActiveLease != nil {
 		lease := *a.ActiveLease
 		lease.LastHeartbeatAt = derefTime(a.ActiveLease.LastHeartbeatAt)

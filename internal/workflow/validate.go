@@ -155,6 +155,9 @@ func ValidateTemplate(template Template) error {
 		if err := validateAction(node.Action); err != nil {
 			return fmt.Errorf("invalid workflow template: node %q: %w", node.ID, err)
 		}
+		if err := validateDispatch(node.Dispatch, node.Action.Kind); err != nil {
+			return fmt.Errorf("invalid workflow template: node %q: %w", node.ID, err)
+		}
 	}
 	for index, id := range template.EntryNodes {
 		if strings.TrimSpace(string(id)) == "" {
@@ -309,7 +312,7 @@ func rejectNonCanonicalKeys(data []byte) error {
 		if err := requireCanonicalKeys(nodeFields, []string{
 			"id", "name", "dependencies", "outcomes", "branches", "action",
 			"assignment", "completion", "outputs", "gates", "retry_policy",
-			"loop_id", "checkpoint", "lease_policy", "skip_rule", "waive_rules",
+			"loop_id", "checkpoint", "lease_policy", "dispatch", "skip_rule", "waive_rules",
 		}); err != nil {
 			return fmt.Errorf("nodes[%d]: %w", index, err)
 		}
@@ -583,6 +586,45 @@ func validateAction(action Action) error {
 				return fmt.Errorf("workflow action outcome_map[%q] contains a blank parent outcome", child)
 			}
 		}
+	}
+	return nil
+}
+
+// validateDispatch enforces the dispatch rules the JSON Schema cannot
+// express: mode/controller_id coupling, the provider-backed action-kind
+// restriction, and whitespace-only concurrency keys.
+func validateDispatch(policy *DispatchPolicy, kind ActionKind) error {
+	if policy == nil {
+		return nil
+	}
+	mode := policy.Mode
+	if mode == "" {
+		mode = DispatchManual
+	}
+	switch mode {
+	case DispatchManual, DispatchAuto:
+	default:
+		return fmt.Errorf("dispatch.mode %q must be %q or %q", mode, DispatchManual, DispatchAuto)
+	}
+	if policy.Priority != nil && (*policy.Priority < 0 || *policy.Priority > 100) {
+		return fmt.Errorf("dispatch.priority %d is outside the range 0 through 100", *policy.Priority)
+	}
+	if policy.ConcurrencyKey != "" && strings.TrimSpace(policy.ConcurrencyKey) == "" {
+		return fmt.Errorf("dispatch.concurrency_key cannot be blank")
+	}
+	if mode == DispatchAuto {
+		if strings.TrimSpace(policy.ControllerID) == "" {
+			return fmt.Errorf("dispatch.mode %q requires controller_id", DispatchAuto)
+		}
+		switch kind {
+		case ActionRun, ActionLoop, ActionTeam:
+		default:
+			return fmt.Errorf("dispatch.mode %q is limited to provider-backed %s, %s, and %s nodes", DispatchAuto, ActionRun, ActionLoop, ActionTeam)
+		}
+		return nil
+	}
+	if policy.ControllerID != "" {
+		return fmt.Errorf("dispatch.controller_id is forbidden for %q nodes", DispatchManual)
 	}
 	return nil
 }
