@@ -86,8 +86,9 @@ type ControlServer struct {
 	interruptMu sync.Mutex
 	interruptCh chan struct{}
 
-	stableHandler   StableHandler
-	workflowHandler atomic.Pointer[WorkflowHandler]
+	stableHandler     StableHandler
+	workflowHandler   atomic.Pointer[WorkflowHandler]
+	controllerHandler atomic.Pointer[WorkflowControllerHandler]
 }
 
 type StableHandler interface {
@@ -151,12 +152,31 @@ func NewServer(state *ControlState) *ControlServer {
 
 func (s *ControlServer) SetStableHandler(h StableHandler) { s.stableHandler = h }
 
+// WorkflowControllerHandler is the optional handler for workflow-controller
+// read and configuration methods. It is distinct from WorkflowHandler.
+type WorkflowControllerHandler interface {
+	WorkflowControllerCreate(json.RawMessage) (any, error)
+	WorkflowControllerEnable(string) (any, error)
+	WorkflowControllerDisable(string, json.RawMessage) (any, error)
+	WorkflowControllerStatus(string) (any, error)
+	WorkflowControllerList() (any, error)
+	WorkflowReady(string, int) (any, error)
+}
+
 func (s *ControlServer) SetWorkflowHandler(h WorkflowHandler) {
 	if h == nil {
 		s.workflowHandler.Store(nil)
 		return
 	}
 	s.workflowHandler.Store(&h)
+}
+
+func (s *ControlServer) SetWorkflowControllerHandler(h WorkflowControllerHandler) {
+	if h == nil {
+		s.controllerHandler.Store(nil)
+		return
+	}
+	s.controllerHandler.Store(&h)
 }
 
 func workflowIDFromParams(params json.RawMessage) (string, error) {
@@ -1265,9 +1285,9 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 			return failure(req.ID, -32010, "permission_denied", nil)
 		}
 		var p struct {
-			ToRunID  string `json:"to_run_id"`
-			ReplyTo  string `json:"reply_to"`
-			Message  string `json:"message"`
+			ToRunID string `json:"to_run_id"`
+			ReplyTo string `json:"reply_to"`
+			Message string `json:"message"`
 		}
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return failure(req.ID, -32602, "invalid params", nil)
@@ -1344,6 +1364,9 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		}
 		return success(req.ID, map[string]any{"capacity_available": true})
 	default:
+		if req.Method == "workflow.ready" || strings.HasPrefix(req.Method, "workflow.controller.") {
+			return s.dispatchWorkflowController(c, req)
+		}
 		if strings.HasPrefix(req.Method, "workflow.") {
 			return s.dispatchWorkflow(c, req)
 		}
@@ -1440,6 +1463,103 @@ func (s *ControlServer) dispatchWorkflow(c *connState, req Request) Response {
 			payload = req.Params
 		}
 		result, err := h.WorkflowCommand(p.WorkflowID, payload)
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), nil)
+		}
+		return success(req.ID, result)
+	default:
+		return failure(req.ID, -32601, "method not found", nil)
+	}
+}
+
+// dispatchWorkflowController routes workflow.controller.* and workflow.ready
+// methods to the optional WorkflowControllerHandler. It is only reached from
+// the dispatch default branch, so no method name collides with an existing
+// stable or workflow handler method.
+func (s *ControlServer) dispatchWorkflowController(c *connState, req Request) Response {
+	hp := s.controllerHandler.Load()
+	if hp == nil {
+		return failure(req.ID, -32601, "method not found", nil)
+	}
+	h := *hp
+	switch req.Method {
+	case "workflow.controller.create":
+		result, err := h.WorkflowControllerCreate(req.Params)
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), nil)
+		}
+		return success(req.ID, result)
+	case "workflow.controller.enable":
+		var p struct {
+			ControllerID string `json:"controller_id"`
+		}
+		if len(req.Params) > 0 {
+			if err := json.Unmarshal(req.Params, &p); err != nil {
+				return failure(req.ID, -32602, "invalid params", map[string]any{"detail": err.Error()})
+			}
+		}
+		if p.ControllerID == "" {
+			return failure(req.ID, -32602, "invalid params", map[string]any{"required": []string{"controller_id"}})
+		}
+		result, err := h.WorkflowControllerEnable(p.ControllerID)
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), nil)
+		}
+		return success(req.ID, result)
+	case "workflow.controller.disable":
+		var p struct {
+			ControllerID string `json:"controller_id"`
+		}
+		if len(req.Params) > 0 {
+			if err := json.Unmarshal(req.Params, &p); err != nil {
+				return failure(req.ID, -32602, "invalid params", map[string]any{"detail": err.Error()})
+			}
+		}
+		if p.ControllerID == "" {
+			return failure(req.ID, -32602, "invalid params", map[string]any{"required": []string{"controller_id"}})
+		}
+		result, err := h.WorkflowControllerDisable(p.ControllerID, req.Params)
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), nil)
+		}
+		return success(req.ID, result)
+	case "workflow.controller.status":
+		var p struct {
+			ControllerID string `json:"controller_id"`
+		}
+		if len(req.Params) > 0 {
+			if err := json.Unmarshal(req.Params, &p); err != nil {
+				return failure(req.ID, -32602, "invalid params", map[string]any{"detail": err.Error()})
+			}
+		}
+		if p.ControllerID == "" {
+			return failure(req.ID, -32602, "invalid params", map[string]any{"required": []string{"controller_id"}})
+		}
+		result, err := h.WorkflowControllerStatus(p.ControllerID)
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), nil)
+		}
+		return success(req.ID, result)
+	case "workflow.controller.list":
+		result, err := h.WorkflowControllerList()
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), nil)
+		}
+		return success(req.ID, result)
+	case "workflow.ready":
+		var p struct {
+			ControllerID string `json:"controller_id"`
+			Limit        int    `json:"limit"`
+		}
+		if len(req.Params) > 0 {
+			if err := json.Unmarshal(req.Params, &p); err != nil {
+				return failure(req.ID, -32602, "invalid params", map[string]any{"detail": err.Error()})
+			}
+		}
+		if p.ControllerID == "" {
+			return failure(req.ID, -32602, "invalid params", map[string]any{"required": []string{"controller_id"}})
+		}
+		result, err := h.WorkflowReady(p.ControllerID, p.Limit)
 		if err != nil {
 			return failure(req.ID, -32000, err.Error(), nil)
 		}
