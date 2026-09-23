@@ -95,6 +95,15 @@ func NewManager(store *Store) *Manager {
 	return m
 }
 
+// AdmissionHandle is an opaque, never-persisted admission reservation handed
+// to an executor so its first runtime start consumes the caller's reservation
+// instead of acquiring a second one. Kernel transitions never read it, and
+// executors must never marshal it (or any ExecutorContext carrying it) into
+// the workflow store's snapshots or event log.
+type AdmissionHandle interface {
+	Release()
+}
+
 // Executor dispatches a started action to its runtime backend. The manager
 // records the attempt durably before calling Dispatch, so an executor that
 // crashes leaves the attempt in the log for recovery. Stage 6 registers no
@@ -119,6 +128,10 @@ type ExecutorContext struct {
 	OwnerToken string
 	Action     Action
 	Selection  *ExecutionSelection
+	// Admission optionally carries a pre-reserved runtime admission for this
+	// attempt's first start. Nil means the executor's start self-reserves
+	// through the ordinary spawn path (manual and legacy starts).
+	Admission AdmissionHandle
 }
 
 // RegisterExecutor attaches the dispatch backend for one action kind.

@@ -4688,7 +4688,7 @@ func (e *directRunExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorCo
 		params.Dir = cwd
 	}
 
-	result, err := e.sup.spawn(params)
+	result, err := e.sup.spawnForAttempt(params, ec.Admission)
 	if err != nil {
 		// Provider-start (or any synchronous spawn) error: the attempt was
 		// already started durably by the manager; record termination before
@@ -4731,7 +4731,7 @@ func (e *loopExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext
 		params.Dir = cwd
 	}
 
-	result, err := e.sup.spawn(params)
+	result, err := e.sup.spawnForAttempt(params, ec.Admission)
 	if err != nil {
 		// Provider-start (or any synchronous spawn) error: the attempt was
 		// already started durably by the manager; record termination before
@@ -4775,7 +4775,7 @@ func (e *teamExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext
 		params.Dir = cwd
 	}
 
-	result, err := e.sup.spawn(params)
+	result, err := e.sup.spawnForAttempt(params, ec.Admission)
 	if err != nil {
 		// Provider-start (or any synchronous spawn) error: the attempt was
 		// already started durably by the manager; record termination before
@@ -4787,6 +4787,17 @@ func (e *teamExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext
 	}
 	e.sup.registerWorkflowTermination(result.RuntimeID, ec)
 	return nil
+}
+
+// spawnForAttempt starts one workflow attempt's runtime. When the executor
+// context carries a stable admission reservation, the start consumes it
+// instead of reserving admission a second time; manual and legacy starts
+// self-reserve through the ordinary spawn path.
+func (s *Supervisor) spawnForAttempt(params SpawnParams, admission workflow.AdmissionHandle) (SpawnResult, error) {
+	if res, ok := admission.(*admissionReservation); ok {
+		return s.spawnReserved(params, res)
+	}
+	return s.spawn(params)
 }
 
 // workflowMarkerForKind returns the action-level marker evidence recorded on
