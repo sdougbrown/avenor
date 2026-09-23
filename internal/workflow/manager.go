@@ -26,19 +26,13 @@ type Manager struct {
 	mu        sync.Mutex
 	executors map[ActionKind]Executor
 
-	candidateMu    sync.Mutex
-	candidates     map[WorkflowID]candidateEntry
+	candidateMu sync.Mutex
+	// candidates caches one recovered snapshot per workflow. The index is a
+	// discardable optimization rebuilt only from Catalog() results; the final
+	// claim revalidation always happens under the workflow store lock.
+	candidates     map[WorkflowID]Snapshot
 	candidateSuper string
 	candidatesOK   bool
-}
-
-// candidateEntry caches one recovered snapshot with the node dispatch
-// policies resolved from its versioned template. The index is a discardable
-// optimization rebuilt only from Catalog() results; the final claim
-// revalidation always happens under the workflow store lock.
-type candidateEntry struct {
-	snapshot Snapshot
-	dispatch map[NodeID]DispatchPolicy
 }
 
 func NewManager(store *Store) *Manager {
@@ -576,17 +570,9 @@ func (m *Manager) RebuildCandidateIndex(supervisorID string) error {
 	if err != nil {
 		return err
 	}
-	entries := make(map[WorkflowID]candidateEntry, len(catalog))
+	entries := make(map[WorkflowID]Snapshot, len(catalog))
 	for _, c := range catalog {
-		policies := make(map[NodeID]DispatchPolicy)
-		if tmpl, err := m.store.LoadTemplate(c.Snapshot.Instance.TemplateID, c.Snapshot.Instance.TemplateVersion); err == nil {
-			for i := range tmpl.Nodes {
-				if tmpl.Nodes[i].Dispatch != nil {
-					policies[tmpl.Nodes[i].ID] = tmpl.Nodes[i].Dispatch.effective()
-				}
-			}
-		}
-		entries[c.WorkflowID] = candidateEntry{snapshot: c.Snapshot, dispatch: policies}
+		entries[c.WorkflowID] = c.Snapshot
 	}
 	m.candidateMu.Lock()
 	defer m.candidateMu.Unlock()
@@ -613,25 +599,18 @@ func (m *Manager) CandidatesForController(controllerID string, limit int) ([]Rea
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	candidates := make([]ReadyCandidate, 0)
 	for _, wf := range ids {
-		entry := m.candidates[wf]
-		if isTerminalStatus(entry.snapshot.Instance.Status) {
+		snap := m.candidates[wf]
+		if isTerminalStatus(snap.Instance.Status) {
 			continue
 		}
-		for i := range entry.snapshot.Instance.Activations {
-			act := &entry.snapshot.Instance.Activations[i]
+		for i := range snap.Instance.Activations {
+			act := &snap.Instance.Activations[i]
 			if !claimableActivationStatus(act.Status) || act.ReadyAt == nil || act.Dispatch == nil {
 				continue
 			}
-			// act.Dispatch carries the node's effective policy copied at
-			// activation creation; the template-resolved index is the fallback
-			// for snapshots that predate activation-level metadata.
 			policy := *act.Dispatch
 			if !policy.IsAuto() {
-				indexed, ok := entry.dispatch[act.NodeID]
-				if !ok || !indexed.IsAuto() {
-					continue
-				}
-				policy = indexed
+				continue
 			}
 			if policy.ControllerID != controllerID {
 				continue
@@ -643,7 +622,7 @@ func (m *Manager) CandidatesForController(controllerID string, limit int) ([]Rea
 					NodeID:       act.NodeID,
 					ActivationID: act.ID,
 				},
-				Revision:       entry.snapshot.Instance.Revision,
+				Revision:       snap.Instance.Revision,
 				ReadyAt:        *act.ReadyAt,
 				Priority:       policy.priority(),
 				ConcurrencyKey: policy.ConcurrencyKey,

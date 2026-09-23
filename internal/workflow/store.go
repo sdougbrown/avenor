@@ -18,7 +18,7 @@ type Store struct {
 }
 
 // readinessCommandKinds are the command kinds whose event batch can create a
-// claimable activation (instantiate, and the transition siblings of
+// claimable activation (instantiate, reroute, and the transition siblings of
 // complete/gate/child_outcome) or re-arm one (terminate retry re-arm,
 // unblock). The store stamps their ReadyAt when unset.
 var readinessCommandKinds = map[CommandKind]bool{
@@ -28,6 +28,7 @@ var readinessCommandKinds = map[CommandKind]bool{
 	CommandChildOutcome: true,
 	CommandTerminate:    true,
 	CommandUnblock:      true,
+	CommandReroute:      true,
 }
 
 func New(root string) *Store {

@@ -59,6 +59,8 @@ func TestDispatchTemplateValidation(t *testing.T) {
 		{"auto priority upper bound", "intake", runAction, map[string]any{"mode": "auto", "controller_id": "ctl-a", "priority": 100}},
 		{"manual default", "intake", runAction, map[string]any{}},
 		{"manual explicit", "intake", runAction, map[string]any{"mode": "manual"}},
+		{"manual on external", "intake", externalAction, map[string]any{"mode": "manual"}},
+		{"manual on workflow composition", "intake", workflowAction, map[string]any{"mode": "manual"}},
 	}
 	for _, tc := range valid {
 		tc := tc
@@ -83,6 +85,7 @@ func TestDispatchTemplateValidation(t *testing.T) {
 		{"priority above range", "intake", runAction, map[string]any{"mode": "auto", "controller_id": "c", "priority": 101}, "dispatch"},
 		{"priority non-integer", "intake", runAction, map[string]any{"mode": "auto", "controller_id": "c", "priority": 1.5}, "dispatch"},
 		{"empty concurrency_key", "intake", runAction, map[string]any{"mode": "auto", "controller_id": "c", "concurrency_key": ""}, "dispatch"},
+		{"blank concurrency_key", "intake", runAction, map[string]any{"mode": "auto", "controller_id": "c", "concurrency_key": "  "}, "cannot be blank"},
 		{"auto on external", "intake", externalAction, map[string]any{"mode": "auto", "controller_id": "c"}, "run, loop, and team"},
 		{"auto on workflow composition", "intake", workflowAction, map[string]any{"mode": "auto", "controller_id": "c"}, "run, loop, and team"},
 		{"unknown mode", "intake", runAction, map[string]any{"mode": "teleport"}, "dispatch"},
@@ -239,6 +242,34 @@ func newAutoDispatchFixture(t *testing.T, templateID, controllerID string, prior
 	return m, s, wf
 }
 
+// resetToPostInstantiate returns a copy of the materialized snapshot with the
+// entry activation reset to its post-instantiate state (pending, no lease,
+// no attempts, ReadyAt nil) and only the instantiate event marked applied,
+// so a replay re-derives ReadyAt from the event log. The entry activation's
+// materialized ID is preserved because the log's later events reference it
+// and activation IDs are generated during reduction (not stored in the log).
+func resetToPostInstantiate(snap Snapshot, nodeID NodeID) Snapshot {
+	base := snap
+	for i := range base.Instance.Activations {
+		act := &base.Instance.Activations[i]
+		if act.NodeID != nodeID {
+			continue
+		}
+		act.Status = ActivationPending
+		act.ReadyAt = nil
+		act.ActiveLease = nil
+		act.AttemptIDs = nil
+		act.SelectedOutcome = ""
+		act.Selection = nil
+		act.IncomingOutcome = ""
+	}
+	base.Instance.Attempts = nil
+	if len(base.AppliedEventIDs) > 0 {
+		base.AppliedEventIDs = base.AppliedEventIDs[:1]
+	}
+	return base
+}
+
 // TestDispatchReadyAtOnCreateAndRearm asserts ready_at is stamped from the
 // explicit event timestamp on instantiation, updated on retry re-arm, and
 // reproduced identically by replay.
@@ -305,20 +336,103 @@ func TestDispatchReadyAtOnCreateAndRearm(t *testing.T) {
 	}
 	rearmed := *act.ReadyAt
 
-	// Replay from the event log reproduces the identical values.
-	replayed, ok, err := s.loadCurrent(wf)
+	// A genuine from-scratch replay (replayEvents(Snapshot{}, ...)) is
+	// impossible: activation IDs are generated during reduction and are not
+	// stored in the event log, so the log's later events (which reference the
+	// materialized activation ID) cannot resolve against a freshly generated
+	// one. The minimal base the replay needs therefore preserves the entry
+	// activation's materialized ID while resetting the fields under test and
+	// marking only the instantiate event as applied, so the subsequent events
+	// replay and re-derive ReadyAt from the log.
+	base := resetToPostInstantiate(snap, node)
+	replayed, _, _, err := replayEvents(base, s.eventsPath(wf))
 	if err != nil {
-		t.Fatalf("replay loadCurrent: %v", err)
-	}
-	if !ok {
-		t.Fatal("replayed snapshot not found")
+		t.Fatalf("replayEvents: %v", err)
 	}
 	ract := activationByNode(&replayed.Instance, node)
+	if ract == nil {
+		t.Fatal("replayed start activation not found")
+	}
 	if ract.ReadyAt == nil || !ract.ReadyAt.Equal(rearmed) {
 		t.Fatalf("replayed ready_at = %v, want %v", ract.ReadyAt, rearmed)
 	}
 	if ract.Dispatch == nil || !ract.Dispatch.IsAuto() || ract.Dispatch.ControllerID != "ctl-a" {
 		t.Fatalf("replayed dispatch = %+v, want auto/ctl-a", ract.Dispatch)
+	}
+}
+
+// TestRerouteStampsReadyAtAndDispatch asserts a rerouted auto-dispatch node
+// gets a stamped ReadyAt and an auto dispatch policy, and surfaces as a
+// candidate after a rebuild.
+func TestRerouteStampsReadyAtAndDispatch(t *testing.T) {
+	m, s, wf := newAutoDispatchFixture(t, "dispatch-reroute", "ctl-a", -1)
+	node := NodeID("start")
+
+	snap, ok, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	if !ok {
+		t.Fatal("instance snapshot not found")
+	}
+	payload, err := json.Marshal(struct {
+		Selection *ExecutionSelection `json:"selection,omitempty"`
+		Iteration int                 `json:"iteration,omitempty"`
+	}{
+		Selection: &ExecutionSelection{Role: "role-x", Backend: "b1", Model: "m1"},
+		Iteration: 2,
+	})
+	if err != nil {
+		t.Fatalf("marshal reroute payload: %v", err)
+	}
+	snap, err = s.ApplyCommand(wf, Command{
+		Kind:             CommandReroute,
+		ExpectedRevision: snap.Instance.Revision,
+		IdempotencyKey:   "reroute-1",
+		Identity:         ExecutionIdentity{WorkflowID: wf, NodeID: node},
+		Payload:          payload,
+	})
+	if err != nil {
+		t.Fatalf("ApplyCommand reroute: %v", err)
+	}
+
+	// The rerouted activation is the one carrying the supplied iteration.
+	var rerouted *Activation
+	for i := range snap.Instance.Activations {
+		act := &snap.Instance.Activations[i]
+		if act.Iteration == 2 {
+			rerouted = act
+		}
+	}
+	if rerouted == nil {
+		t.Fatal("rerouted activation not found")
+	}
+	if rerouted.ReadyAt == nil {
+		t.Fatal("rerouted activation ready_at is nil")
+	}
+	if rerouted.Dispatch == nil || !rerouted.Dispatch.IsAuto() {
+		t.Fatalf("rerouted activation dispatch = %+v, want auto", rerouted.Dispatch)
+	}
+	if rerouted.Dispatch.ControllerID != "ctl-a" {
+		t.Fatalf("rerouted controller_id = %q, want ctl-a", rerouted.Dispatch.ControllerID)
+	}
+
+	// The rerouted activation must surface as a candidate after a rebuild.
+	if err := m.RebuildCandidateIndex("sup-1"); err != nil {
+		t.Fatalf("RebuildCandidateIndex: %v", err)
+	}
+	candidates, err := m.CandidatesForController("ctl-a", 10)
+	if err != nil {
+		t.Fatalf("CandidatesForController: %v", err)
+	}
+	found := false
+	for _, c := range candidates {
+		if c.Identity.NodeID == node && c.Identity.ActivationID == rerouted.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("rerouted activation not in candidates: %v", candidates)
 	}
 }
 
