@@ -121,7 +121,9 @@ the kernel's existing properties hold unchanged:
 
 - A `human` gate cannot be satisfied by silence, a successful run, a green PR,
   or an agent-authored marker.
-- `waive` is authority-gated; a bridge should never waive on a human's behalf.
+- The kernel applies no authority checks to `waive` — it carries the same
+  requirements as `satisfy`/`reject` and is protected exactly as much as the
+  control socket. A bridge should never waive on a human's behalf.
 - The bridge holds whatever credential reaches the stable control socket —
   protect it like the terminal it stands in for.
 

@@ -211,6 +211,28 @@ class WaitForDecisionTest(unittest.TestCase):
         self.assertEqual(decision["decision"], "satisfy")
         self.assertTrue(path.exists())
 
+    def test_answered_after_file_arrives_on_a_later_poll(self):
+        # The real-world sequence: the transport writes the decision file only
+        # after the bridge asks, so the file must be re-checked each poll tick.
+        detail = {"activations": [parked_activation()], "gates": None,
+                  "instance": {"status": "active"}}
+
+        class LateTransport(FakeControl):
+            def call(self, method, params=None, timeout=35.0):
+                result = super().call(method, params, timeout)
+                self.decisions.joinpath(
+                    "decision-act_1-merge-authorization.json"
+                ).write_text(json.dumps({"decision": "satisfy", "actor": "a", "reason": "r"}))
+                return result
+
+        ctl = LateTransport([detail])
+        ctl.decisions = self.decisions
+        decision, _, reason = bridge.wait_for_decision(
+            ctl, self.decisions, "wf_1", "act_1", self.gate, 5, 0.01
+        )
+        self.assertEqual(reason, "answered")
+        self.assertEqual(decision["decision"], "satisfy")
+
     def test_terminal_reason(self):
         detail = {"activations": [parked_activation()], "gates": None,
                   "instance": {"status": "completed"}}
