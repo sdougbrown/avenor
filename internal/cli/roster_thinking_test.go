@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -59,5 +60,40 @@ func TestRosterThinkingIsADefaultAndExplicitThinkingWins(t *testing.T) {
 				t.Fatalf("StartOptions.Thinking = %q, want %q", got.Thinking, tc.want)
 			}
 		})
+	}
+}
+
+// A roster entry's thinking level is a default that must be validated against
+// the backend on the direct CLI path, just like a flag's. A regression that
+// validates only the flag (or reorders the check after the attempt) would let
+// a roster-supplied level for a thinking-rejecting backend reach the attempt;
+// failing before the attempt is invoked pins the check to the roster value too.
+func TestRosterSuppliedThinkingIsCheckedAgainstTheBackend(t *testing.T) {
+	oldRunAttempt := runAttempt
+	t.Cleanup(func() { runAttempt = oldRunAttempt })
+	called := false
+	runAttempt = func(context.Context, attemptConfig, attemptDeps) attemptResult {
+		called = true
+		return attemptResult{}
+	}
+
+	dir := t.TempDir()
+	rosterPath := filepath.Join(dir, "roster.json")
+	contents := `{"horse":{"backend":"agy","agent":"windsurf-swe","thinking":"low"}}`
+	if err := os.WriteFile(rosterPath, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr strings.Builder
+	if code := run([]string{
+		"--dir", dir,
+		"--roster-file", rosterPath,
+		"--roster-entry", "horse",
+		"--prompt", "work",
+	}, func(string) string { return "" }, &stderr); code == 0 {
+		t.Fatalf("run = %d, want non-zero; stderr=%s", code, stderr.String())
+	}
+	if called || !strings.Contains(stderr.String(), "agy") || !strings.Contains(stderr.String(), "thinking") {
+		t.Fatalf("called=%v stderr=%q", called, stderr.String())
 	}
 }

@@ -280,6 +280,14 @@ func TestLoadAcceptsThinkingOnAnEntry(t *testing.T) {
 		t.Fatalf("horse.Thinking = %q, want %q", horse.Thinking, "high")
 	}
 
+	mule, err := config.Lookup("mule")
+	if err != nil {
+		t.Fatalf("Lookup(mule) error = %v", err)
+	}
+	if mule.Thinking != "low" {
+		t.Fatalf("mule.Thinking = %q, want %q", mule.Thinking, "low")
+	}
+
 	// Thinking stays optional; an entry without it is unchanged.
 	plain, err := config.Lookup("plain")
 	if err != nil {

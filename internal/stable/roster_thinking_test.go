@@ -1,6 +1,7 @@
 package stable
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/sdougbrown/avenor/internal/runtime"
@@ -58,5 +59,35 @@ func TestStableDirectRosterSuppliesThinkingUnlessSpawnOverridesIt(t *testing.T) 
 				t.Fatalf("StartOptions.Thinking = %q, want %q", gotOpts.Thinking, tc.want)
 			}
 		})
+	}
+}
+
+// A roster entry's thinking level is a default that must be validated against
+// the backend on the spawn path, just like a spawn-supplied level. A
+// regression that validates only the spawn value (or moves the check after
+// reservation) would let a roster-supplied level for a thinking-rejecting
+// backend consume a runtime; failing with nothing reserved pins the check to
+// the merged roster value too.
+func TestStableRosterThinkingIsCheckedAgainstTheBackend(t *testing.T) {
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/roster-thinking-agy.sock", MaxRuntimes: 1})
+	providerCalled := false
+	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) {
+		providerCalled = true
+		return scriptedStage5Provider("ses_roster_agy", "end_turn"), nil
+	}
+
+	rosterPath := writeStage5Roster(t, t.TempDir(),
+		`{"horse":{"backend":"agy","agent":"windsurf-swe","thinking":"low"}}`)
+	_, err := sup.spawn(SpawnParams{
+		Prompt:      "work",
+		Dir:         t.TempDir(),
+		RosterFile:  rosterPath,
+		RosterEntry: "horse",
+	})
+	if err == nil || !strings.Contains(err.Error(), "agy") || !strings.Contains(err.Error(), "thinking") {
+		t.Fatalf("spawn error = %v, want a thinking-rejection naming agy", err)
+	}
+	if providerCalled || len(sup.runtimes) != 0 || sup.nextID != 0 {
+		t.Fatalf("provider=%v runtimes=%d nextID=%d", providerCalled, len(sup.runtimes), sup.nextID)
 	}
 }
