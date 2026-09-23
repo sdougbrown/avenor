@@ -13,6 +13,13 @@ templates/escalation-bridge/
   bridge.py    reference bridge: watches for parked gates, asks, records decisions
 ```
 
+A TypeScript port of the bridge ships as
+[`@dougbots/avenor-escalation-bridge`](../../packages/escalation-bridge/) for
+consumption from TypeScript applications; it derives identical `response_hash`
+values for the same decision (for the string/integer/bool/null payloads the
+protocol calls for), so decision files and the audit trail are
+interchangeable between the two implementations.
+
 ## The protocol in one pass
 
 Avenor side (all existing control-socket commands — no Avenor changes):

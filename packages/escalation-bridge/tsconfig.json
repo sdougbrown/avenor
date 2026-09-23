@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "outDir": "./dist",
+    "target": "ESNext",
+    "declaration": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "types": ["node", "bun", "bun-types"],
+    "skipLibCheck": true
+  },
+  "include": ["src"]
+}
