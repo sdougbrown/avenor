@@ -186,6 +186,33 @@ func buildCommandEvents(state Snapshot, command Command) ([]Event, error) {
 		e.MarkerLabel = command.MarkerLabel
 		return []Event{e}, nil
 
+	case CommandBeginDispatch:
+		if command.Lease == nil {
+			return nil, errors.New("begin_dispatch command requires lease metadata")
+		}
+		if command.Identity.AttemptID == "" {
+			return nil, errors.New("begin_dispatch command requires an attempt id")
+		}
+		lease := newEvent(EventLeased)
+		lease.LeaseID = command.LeaseID
+		lease.Actor = command.Actor
+		lease.Lease = command.Lease
+		started := newEvent(EventStarted)
+		started.AttemptID = command.Identity.AttemptID
+		started.LeaseID = command.LeaseID
+		started.Selection = command.Selection
+		started.Diagnostics = command.Diagnostics
+		return []Event{lease, started}, nil
+
+	case CommandAttemptIdentified:
+		if command.Identity.AttemptID == "" {
+			return nil, errors.New("attempt_identified command requires an attempt id")
+		}
+		e := newEvent(EventAttemptIdentified)
+		e.AttemptID = command.Identity.AttemptID
+		e.LeaseID = command.LeaseID
+		return []Event{e}, nil
+
 	case CommandChildAttach:
 		e := newEvent(EventChildAttached)
 		e.LeaseID = command.LeaseID
@@ -258,6 +285,8 @@ func applyEvent(next *Snapshot, event Event) error {
 		return applyLeased(next, act, event)
 	case EventStarted:
 		return applyStarted(next, act, event)
+	case EventAttemptIdentified:
+		return applyAttemptIdentified(next, act, event)
 	case EventAttemptTerminated:
 		return applyAttemptTerminated(next, act, event)
 	case EventCompleted:
@@ -444,7 +473,34 @@ func applyStarted(next *Snapshot, act *Activation, event Event) error {
 		// inherit it. Deterministic because it is carried on the event.
 		act.Selection = event.Selection
 	}
+	if event.Diagnostics != nil {
+		d := *event.Diagnostics
+		attempt.Diagnostics = &d
+	}
 	next.Instance.Attempts = append(next.Instance.Attempts, attempt)
+	return nil
+}
+
+// applyAttemptIdentified records the actual runtime identity of an already
+// started attempt. It never changes the activation's status or lease state.
+func applyAttemptIdentified(next *Snapshot, act *Activation, event Event) error {
+	if act == nil {
+		return errors.New("attempt_identified event requires an activation")
+	}
+	attempt := findAttempt(next, act, event.AttemptID)
+	if attempt == nil {
+		return errors.New("identified attempt not found")
+	}
+	if event.Identity.RuntimeID != "" {
+		attempt.Identity.RuntimeID = event.Identity.RuntimeID
+	}
+	if event.Identity.SessionID != "" {
+		attempt.Identity.SessionID = event.Identity.SessionID
+	}
+	if event.Identity.RunID != "" {
+		attempt.Identity.RunID = event.Identity.RunID
+	}
+	act.UpdatedAt = nowUTC()
 	return nil
 }
 

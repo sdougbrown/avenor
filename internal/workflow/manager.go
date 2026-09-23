@@ -797,6 +797,10 @@ func (m *Manager) commandStart(wf WorkflowID, payload json.RawMessage) (any, err
 	if act.Status != ActivationLeased {
 		return nil, fmt.Errorf("cannot start activation in status %q", act.Status)
 	}
+	if act.Selection != nil && req.Selection != nil && !sameSelection(act.Selection, req.Selection) {
+		// Never silently replace an already-pinned selection.
+		return nil, ErrSelectionConflict
+	}
 	if act.ActiveLease == nil {
 		return nil, errors.New("activation has no active lease")
 	}
@@ -831,9 +835,42 @@ func (m *Manager) commandStart(wf WorkflowID, payload json.RawMessage) (any, err
 	if exec == nil {
 		return nil, fmt.Errorf("executor for action %q is unsupported until a later stage (executor not registered)", node.Action.Kind)
 	}
-	if _, err := m.applyStart(wf, snap, act, req, attemptID); err != nil {
+	// Provider-backed starts share the controller dispatch boundary: the root
+	// dispatch lock spans the final concurrency-key check and the attempt
+	// commit. It is released before the executor starts so admission is never
+	// acquired while holding it.
+	concurrencyKey := ""
+	if act.Dispatch != nil {
+		concurrencyKey = act.Dispatch.ConcurrencyKey
+	}
+	unlockDispatch, err := m.lockDispatch()
+	if err != nil {
 		return nil, err
 	}
+	// Catalog() also performs lease-expiry recovery, so it runs before the
+	// attempt commit's revision is read inside applyStart.
+	if concurrencyKey != "" {
+		held, err := m.heldConcurrencyKeys()
+		if err != nil {
+			unlockDispatch()
+			return nil, err
+		}
+		if held[concurrencyKey] {
+			unlockDispatch()
+			return nil, ErrConcurrencyKeyHeld
+		}
+	}
+	selection := req.Selection
+	if selection == nil {
+		selection = act.Selection
+	}
+	startReq := req
+	startReq.Selection = selection
+	if _, err := m.applyStart(wf, snap, act, startReq, attemptID); err != nil {
+		unlockDispatch()
+		return nil, err
+	}
+	unlockDispatch()
 	if err := exec.Dispatch(context.Background(), ExecutorContext{
 		WorkflowID:   wf,
 		NodeID:       req.NodeID,
@@ -842,7 +879,7 @@ func (m *Manager) commandStart(wf WorkflowID, payload json.RawMessage) (any, err
 		LeaseID:      req.LeaseID,
 		OwnerToken:   req.OwnerToken,
 		Action:       node.Action,
-		Selection:    req.Selection,
+		Selection:    selection,
 	}); err != nil {
 		return nil, err
 	}
