@@ -101,10 +101,10 @@ func (s *Store) ApplyCommand(workflowID WorkflowID, cmd Command) (Snapshot, erro
 	if err != nil {
 		return Snapshot{}, err
 	}
-	snap, err := s.applyLocked(workflowID, cmd)
-	if unlockErr := unlock(); err == nil {
-		err = unlockErr
-	}
+	snap, err := func() (Snapshot, error) {
+		defer unlock()
+		return s.applyLocked(workflowID, cmd)
+	}()
 	if err != nil {
 		return Snapshot{}, err
 	}

@@ -86,6 +86,25 @@ func TestCommitHookNoopBeforeRecovery(t *testing.T) {
 	}
 }
 
+// TestObserveCommitIgnoresStaleRevision proves the commit hook does not
+// regress the candidate index when an older revision is observed after a
+// newer one (out-of-order delivery from concurrent commits).
+func TestObserveCommitIgnoresStaleRevision(t *testing.T) {
+	s := New(filepath.Join(t.TempDir(), "wfroot"))
+	m := NewManager(s)
+	m.MarkCandidateIndexEmpty("sup-1")
+
+	wf := WorkflowID("wf-stale")
+	m.observeCommit(wf, Snapshot{Instance: WorkflowInstance{WorkflowID: wf, Revision: 5}})
+	m.observeCommit(wf, Snapshot{Instance: WorkflowInstance{WorkflowID: wf, Revision: 4}})
+
+	m.candidateMu.Lock()
+	defer m.candidateMu.Unlock()
+	if got := m.candidates[wf].Instance.Revision; got != 5 {
+		t.Fatalf("candidate revision = %d, want 5 (stale observation must not regress)", got)
+	}
+}
+
 // TestMarkCandidateIndexEmptyAbsentRoot proves an absent workflow root is an
 // empty catalog: the index is marked recovered-and-empty without creating the
 // root, and later instances enter the index through the commit hook.
