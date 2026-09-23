@@ -404,6 +404,11 @@ type Supervisor struct {
 	// does not schedule or prioritize work.
 	capacityMu sync.Mutex
 	capacityCh chan struct{}
+	// capacitySubMu guards capacitySubs, a coalescing fan-out of buffered(1)
+	// wake channels notified on every capacity change.
+	capacitySubMu     sync.Mutex
+	capacitySubs      []chan struct{}
+	nextCapacitySubID int
 }
 
 func NewSupervisor(cfg Config) *Supervisor {
@@ -682,6 +687,42 @@ func (s *Supervisor) signalCapacityChange() {
 	}
 	s.capacityCh = make(chan struct{})
 	s.capacityMu.Unlock()
+	s.notifyCapacitySubscribers()
+}
+
+// notifyCapacitySubscribers performs a non-blocking send to every capacity
+// change subscriber. A subscriber that falls behind coalesces to a single
+// signal. It never fails or blocks the caller.
+func (s *Supervisor) notifyCapacitySubscribers() {
+	s.capacitySubMu.Lock()
+	defer s.capacitySubMu.Unlock()
+	for _, ch := range s.capacitySubs {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// SubscribeCapacityChanges returns a coalescing wake channel and a cancel
+// func, notified whenever admission capacity may have changed. Hints only.
+func (s *Supervisor) SubscribeCapacityChanges() (<-chan struct{}, func()) {
+	ch := make(chan struct{}, 1)
+	s.capacitySubMu.Lock()
+	s.nextCapacitySubID++
+	s.capacitySubs = append(s.capacitySubs, ch)
+	s.capacitySubMu.Unlock()
+	cancel := func() {
+		s.capacitySubMu.Lock()
+		defer s.capacitySubMu.Unlock()
+		for i, c := range s.capacitySubs {
+			if c == ch {
+				s.capacitySubs = append(s.capacitySubs[:i], s.capacitySubs[i+1:]...)
+				break
+			}
+		}
+	}
+	return ch, cancel
 }
 
 // acquireTreeAdmission reserves one tree-budget slot. It returns an empty
