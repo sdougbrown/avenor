@@ -455,6 +455,38 @@ func (s *ControllerStore) recoverController(controllerID string) (ControllerReco
 	return rec, true, nil
 }
 
+// WithLeader verifies that (leaseID, ownerEpoch) is the current unexpired
+// leader lease of an enabled controller and runs fn while holding the
+// controller's flock. ErrNotLeader is returned when the controller does not
+// exist, is disabled, or the pair is not the live leader.
+func (s *ControllerStore) WithLeader(controllerID, leaseID string, ownerEpoch int64, fn func() error) error {
+	if err := validateControllerID(controllerID); err != nil {
+		return err
+	}
+	unlock, err := s.lockController(controllerID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	rec, err := s.loadForCommand(controllerID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return ErrNotLeader
+		}
+		return err
+	}
+	if rec.DesiredState != DesiredEnabled {
+		return ErrNotLeader
+	}
+	if checkLeaseCAS(rec, leaseID, ownerEpoch) != nil {
+		return ErrNotLeader
+	}
+	if leaseExpired(s.now().UTC(), rec.Leader) {
+		return ErrNotLeader
+	}
+	return fn()
+}
+
 // loadForCommand validates the id, verifies the controller exists, and loads
 // its record. It must be called with the controller's flock already held.
 func (s *ControllerStore) loadForCommand(controllerID string) (ControllerRecord, error) {

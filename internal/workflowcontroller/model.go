@@ -47,6 +47,9 @@ var (
 	// ErrDisabled is returned when leadership is requested while the
 	// controller's desired state is disabled.
 	ErrDisabled = errors.New("controller disabled")
+	// ErrNotLeader is returned when the caller's (lease id, owner epoch) pair
+	// is not the current unexpired leader lease of an enabled controller.
+	ErrNotLeader = errors.New("not the current leader")
 )
 
 // LeaderLease is the leadership lease held by one controller owner.
