@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -522,6 +523,56 @@ func TestCandidatesForControllerQuery(t *testing.T) {
 		t.Fatalf("revision changed by queries: %d -> %d", claimedRevision, snapAfter.Instance.Revision)
 	}
 	_ = res
+}
+
+// TestCandidatesForControllerLimitAndOrdering covers the query's limit
+// truncation and its deterministic workflow-ID iteration order: three ready
+// candidates across three workflows must truncate to the limit in ascending
+// workflow-ID order.
+func TestCandidatesForControllerLimitAndOrdering(t *testing.T) {
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	m := NewManager(s)
+	m.RegisterExecutor(ActionRun, &fakeExecutor{})
+	wfs := make([]WorkflowID, 0, 3)
+	for _, templateID := range []string{"dispatch-limit-a", "dispatch-limit-b", "dispatch-limit-c"} {
+		if _, err := m.WorkflowCreate(autoDispatchTemplateJSON(templateID, "ctl-a", 50)); err != nil {
+			t.Fatalf("WorkflowCreate %s: %v", templateID, err)
+		}
+		wfs = append(wfs, mustInstantiateTemplate(t, m, templateID, "1"))
+	}
+	sort.Slice(wfs, func(i, j int) bool { return wfs[i] < wfs[j] })
+	if err := m.RebuildCandidateIndex("sup-1"); err != nil {
+		t.Fatalf("RebuildCandidateIndex: %v", err)
+	}
+
+	all, err := m.CandidatesForController("ctl-a", 0)
+	if err != nil {
+		t.Fatalf("CandidatesForController unbounded: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("unbounded candidates = %d, want 3", len(all))
+	}
+	for i, c := range all {
+		if c.Identity.WorkflowID != wfs[i] {
+			t.Fatalf("candidate %d workflow = %s, want %s (ascending order)", i, c.Identity.WorkflowID, wfs[i])
+		}
+	}
+
+	truncated, err := m.CandidatesForController("ctl-a", 2)
+	if err != nil {
+		t.Fatalf("CandidatesForController limit=2: %v", err)
+	}
+	if len(truncated) != 2 {
+		t.Fatalf("limited candidates = %d, want 2", len(truncated))
+	}
+	for i := range truncated {
+		if truncated[i] != all[i] {
+			t.Fatalf("truncated candidate %d = %+v, want %+v (prefix of full result)", i, truncated[i], all[i])
+		}
+	}
 }
 
 // TestClaimableActivationStatus pins the shared claim-eligibility predicate:
