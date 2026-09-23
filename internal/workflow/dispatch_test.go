@@ -451,9 +451,6 @@ func TestCandidatesForControllerQuery(t *testing.T) {
 	if !ok {
 		t.Fatal("instance snapshot not found")
 	}
-	if !ok {
-		t.Fatal("instance snapshot not found")
-	}
 	act := activationByNode(&snap.Instance, "start")
 
 	candidates, err := m.CandidatesForController("ctl-a", 10)
