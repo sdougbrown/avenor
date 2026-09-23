@@ -11,7 +11,7 @@ and no transport integration; a bridge process (external to Avenor) watches for
 parked gates, carries the question to a human, and records the answer through the
 ordinary gate command path. [Challah](https://github.com/afresh-technologies/challah)
 is one such transport; the reference bridge in
-[`templates/escalation-bridge/`](../templates/escalation-bridge/) demonstrates the
+[`templates/escalation-bridge/`](https://github.com/sdougbrown/avenor/tree/main/templates/escalation-bridge) demonstrates the
 protocol against a generic webhook.
 
 ## The recipe
