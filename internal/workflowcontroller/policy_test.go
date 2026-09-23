@@ -337,8 +337,8 @@ func TestSelectInflightCounting(t *testing.T) {
 			inflight: []InFlightAttempt{
 				inf("wf0", "n0", "a0", withInfController("")),
 			},
-			maxInflight: 0,
-			wantIDs:     "",
+			maxInflight: 1,
+			wantIDs:     "wf1/n1/a1",
 		},
 		{
 			name:        "max_inflight at or below zero selects no provider candidates",
@@ -364,9 +364,10 @@ func TestSelectInflightCounting(t *testing.T) {
 
 func TestSelectConcurrencyKeys(t *testing.T) {
 	tests := []struct {
-		name     string
-		inflight []InFlightAttempt
-		wantIDs  string
+		name       string
+		inflight   []InFlightAttempt
+		candidates []Candidate
+		wantIDs    string
 	}{
 		{
 			name: "cross-controller attempt holds key",
@@ -381,6 +382,17 @@ func TestSelectConcurrencyKeys(t *testing.T) {
 				inf("wf0", "n0", "a0", withInfController(""), withInfKey("k1")),
 			},
 			wantIDs: "",
+		},
+		{
+			name: "manual attempt holds key while leaving slot free",
+			inflight: []InFlightAttempt{
+				inf("wf0", "n0", "a0", withInfController(""), withInfKey("k1")),
+			},
+			candidates: []Candidate{
+				cand("wf1", "n1", "a1", withKey("k1")),
+				cand("wf2", "n2", "a2"),
+			},
+			wantIDs: "wf2/n2/a2",
 		},
 		{
 			name: "terminal attempt releases key and slot",
@@ -399,9 +411,13 @@ func TestSelectConcurrencyKeys(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			candidates := tt.candidates
+			if candidates == nil {
+				candidates = []Candidate{cand("wf1", "n1", "a1", withKey("k1"))}
+			}
 			got := Select(SelectInput{
 				ControllerID: "ctrl",
-				Candidates:   []Candidate{cand("wf1", "n1", "a1", withKey("k1"))},
+				Candidates:   candidates,
 				InFlight:     tt.inflight,
 				Now:          now,
 				MaxInflight:  1,

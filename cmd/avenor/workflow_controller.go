@@ -63,7 +63,9 @@ func cmdWorkflowControllerCreate(c *client.Client, args []string, stdout, stderr
 func cmdWorkflowControllerEnable(c *client.Client, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("controller enable", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
 	id, code := workflowArgID("controller enable", fs, stderr)
 	if code != 0 {
 		return code
@@ -108,7 +110,9 @@ func cmdWorkflowControllerDisable(c *client.Client, args []string, stdout, stder
 func cmdWorkflowControllerStatus(c *client.Client, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("controller status", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
 	id, code := workflowArgID("controller status", fs, stderr)
 	if code != 0 {
 		return code
