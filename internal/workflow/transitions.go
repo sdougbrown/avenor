@@ -29,13 +29,17 @@ func copyReadyAt(act *Activation, event Event) {
 }
 
 // applyDispatchPolicy copies the node's effective dispatch policy onto a
-// freshly created activation when it resolves to auto; manual nodes leave
-// Dispatch nil, which is how legacy snapshots read as manual.
+// freshly created activation when it resolves to auto or declares a
+// concurrency key. A keyed manual node carries its policy so both the manual
+// start boundary and the root-wide held-key check can serialize it; a
+// policy-less manual node leaves Dispatch nil, which is how legacy snapshots
+// read as manual.
 func applyDispatchPolicy(next *Snapshot, act *Activation, nodeID NodeID) {
 	if act == nil {
 		return
 	}
-	if policy := dispatchPolicyFor(next, nodeID); policy != nil && policy.IsAuto() {
+	if policy := dispatchPolicyFor(next, nodeID); policy != nil &&
+		(policy.IsAuto() || policy.ConcurrencyKey != "") {
 		act.Dispatch = policy
 	}
 }

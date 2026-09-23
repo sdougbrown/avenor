@@ -494,7 +494,9 @@ type Activation struct {
 	ActiveLease     *Lease              `json:"active_lease,omitempty"`
 	SelectedOutcome OutcomeName         `json:"selected_outcome,omitempty"`
 	// Dispatch carries the node's effective dispatch policy when it resolves
-	// to auto; manual nodes leave it nil (legacy snapshots read as manual).
+	// to auto or declares a concurrency key (a keyed manual node carries its
+	// policy so manual starts serialize on the key); policy-less manual nodes
+	// leave it nil (legacy snapshots read as manual).
 	Dispatch *DispatchPolicy `json:"dispatch,omitempty"`
 	// ReadyAt is the timestamp of the most recent transition into a claimable
 	// state, copied from the event's explicit timestamp during replay. A nil
