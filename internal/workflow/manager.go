@@ -29,7 +29,9 @@ type Manager struct {
 	candidateMu sync.Mutex
 	// candidates caches one recovered snapshot per workflow. The index is a
 	// discardable optimization rebuilt only from Catalog() results; the final
-	// claim revalidation always happens under the workflow store lock.
+	// claim revalidation always happens under the workflow store lock. It
+	// reflects this process's commits (via the store commit hook) plus the
+	// last rebuild.
 	candidates     map[WorkflowID]Snapshot
 	candidateSuper string
 	candidatesOK   bool
@@ -37,6 +39,9 @@ type Manager struct {
 
 func NewManager(store *Store) *Manager {
 	m := &Manager{store: store, executors: make(map[ActionKind]Executor)}
+	// Keep the candidate index fresh across commands: every committed
+	// snapshot upserts into the index once it has been recovered.
+	store.SetCommitObserver(m.observeCommit)
 	// The workflow action is kernel-local composition (no provider
 	// admission), so its executor ships with the manager by default.
 	m.executors[ActionWorkflow] = &workflowExecutor{manager: m}
@@ -564,7 +569,8 @@ type ReadyCandidate struct {
 // RebuildCandidateIndex rebuilds the discardable in-memory candidate index
 // from Store.Catalog() results. supervisorID is stamped onto every candidate
 // identity. Stage 2's startup barrier calls this once catalog recovery has
-// completed; until then the query returns ErrCandidatesNotRecovered.
+// completed; until then the query returns ErrCandidatesNotRecovered. Between
+// rebuilds the index stays fresh via the store's commit hook.
 func (m *Manager) RebuildCandidateIndex(supervisorID string) error {
 	catalog, err := m.store.Catalog()
 	if err != nil {
@@ -580,6 +586,30 @@ func (m *Manager) RebuildCandidateIndex(supervisorID string) error {
 	m.candidateSuper = supervisorID
 	m.candidatesOK = true
 	return nil
+}
+
+// MarkCandidateIndexEmpty marks the candidate index recovered and empty for
+// a workflow root that does not exist yet (an absent root is an empty catalog)
+// without creating any on-disk state. New workflows land in the index through
+// the store's commit hook.
+func (m *Manager) MarkCandidateIndexEmpty(supervisorID string) {
+	m.candidateMu.Lock()
+	defer m.candidateMu.Unlock()
+	m.candidates = map[WorkflowID]Snapshot{}
+	m.candidateSuper = supervisorID
+	m.candidatesOK = true
+}
+
+// observeCommit is the store commit hook: it upserts the committed snapshot
+// into the candidate index once the index has been recovered. Before recovery
+// it is a no-op, and it never fails or blocks the command.
+func (m *Manager) observeCommit(wf WorkflowID, snap Snapshot) {
+	m.candidateMu.Lock()
+	defer m.candidateMu.Unlock()
+	if !m.candidatesOK {
+		return
+	}
+	m.candidates[wf] = snap
 }
 
 // CandidatesForController returns the ready auto-dispatch activations owned

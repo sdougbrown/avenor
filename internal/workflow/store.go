@@ -15,6 +15,10 @@ import (
 // snapshot per instance.
 type Store struct {
 	root string
+	// onCommit, when non-nil, is invoked after every successfully committed
+	// command snapshot, outside the flock. Set with SetCommitObserver before
+	// the store starts serving commands.
+	onCommit func(WorkflowID, Snapshot)
 }
 
 // readinessCommandKinds are the command kinds whose event batch can create a
@@ -33,6 +37,29 @@ var readinessCommandKinds = map[CommandKind]bool{
 
 func New(root string) *Store {
 	return &Store{root: root}
+}
+
+// SetCommitObserver registers fn as the commit hook: after every successfully
+// committed command snapshot (post atomic write, outside the flock), fn is
+// invoked with the workflow ID and the committed snapshot. It must be called
+// before the store starts serving commands. The observer must never fail or
+// block the command: its errors and panics are swallowed.
+func (s *Store) SetCommitObserver(fn func(WorkflowID, Snapshot)) {
+	s.onCommit = fn
+}
+
+// notifyCommit invokes the registered commit observer, isolating the command
+// path from observer failures.
+func (s *Store) notifyCommit(workflowID WorkflowID, snap Snapshot) {
+	if s.onCommit == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("workflow %s: commit observer panicked: %v", workflowID, r)
+		}
+	}()
+	s.onCommit(workflowID, snap)
 }
 
 func (s *Store) Root() string { return s.root }
@@ -64,7 +91,8 @@ func (s *Store) CreateRoot() error {
 	return nil
 }
 
-// ApplyCommand applies one command under the instance's exclusive flock.
+// ApplyCommand applies one command under the instance's exclusive flock. On
+// success the commit observer (if any) is invoked after the lock is released.
 func (s *Store) ApplyCommand(workflowID WorkflowID, cmd Command) (Snapshot, error) {
 	if err := s.ensureInstanceDir(workflowID); err != nil {
 		return Snapshot{}, err
@@ -73,8 +101,15 @@ func (s *Store) ApplyCommand(workflowID WorkflowID, cmd Command) (Snapshot, erro
 	if err != nil {
 		return Snapshot{}, err
 	}
-	defer unlock()
-	return s.applyLocked(workflowID, cmd)
+	snap, err := s.applyLocked(workflowID, cmd)
+	if unlockErr := unlock(); err == nil {
+		err = unlockErr
+	}
+	if err != nil {
+		return Snapshot{}, err
+	}
+	s.notifyCommit(workflowID, snap)
+	return snap, nil
 }
 
 func (s *Store) ensureInstanceDir(workflowID WorkflowID) error {

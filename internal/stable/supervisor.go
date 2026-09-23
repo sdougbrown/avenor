@@ -4170,9 +4170,11 @@ func (s *Supervisor) runWorkflowStartupBarrier() {
 	s.workflowControllers = workflowcontroller.NewStore(root)
 
 	var barrierErr error
-	// Catalog recovery is skipped entirely when the workflow root does not
-	// exist: the catalog is empty, and construction must stay side-effect free
-	// (Catalog creates the root). ResumeAwaitingChildren performs the catalog
+	// Catalog recovery is skipped when the workflow root does not exist: the
+	// catalog is empty, and construction must stay side-effect free (Catalog
+	// creates the root). The candidate index is still marked recovered-empty
+	// so workflow.ready serves immediately instead of reporting a permanent
+	// not-recovered error. ResumeAwaitingChildren performs the catalog
 	// recovery internally, so it sequences before RebuildCandidateIndex.
 	if _, err := os.Stat(root); err == nil {
 		summary, err := m.ResumeAwaitingChildren()
@@ -4184,6 +4186,8 @@ func (s *Supervisor) runWorkflowStartupBarrier() {
 				barrierErr = fmt.Errorf("workflow candidate index rebuild: %w", err)
 			}
 		}
+	} else {
+		m.MarkCandidateIndexEmpty(s.supervisorIdentity())
 	}
 	if barrierErr == nil {
 		records, err := s.workflowControllers.Recover()
