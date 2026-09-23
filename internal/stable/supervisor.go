@@ -339,9 +339,15 @@ type Supervisor struct {
 	workflowControllers *workflowcontroller.ControllerStore
 	// controllerLoopsMu guards controllerLoops and loopsStopped: one
 	// leader-loop handle per enabled controller id in this process.
-	controllerLoopsMu            sync.Mutex
-	controllerLoops              map[string]*controllerLoop
-	loopsStopped                 bool
+	controllerLoopsMu sync.Mutex
+	controllerLoops   map[string]*controllerLoop
+	loopsStopped      bool
+	// workflowControllerMu serializes the enable/disable handler bodies so the
+	// in-process loop state always matches the last persisted desired state.
+	workflowControllerMu sync.Mutex
+	// controllerRenewInterval is the leader loop's renew cadence; defaults to
+	// workflowcontroller.RenewInterval.
+	controllerRenewInterval      time.Duration
 	state                        *control.ControlState
 	controlMu                    sync.Mutex
 	runtimes                     map[string]*childRuntime
@@ -395,24 +401,25 @@ func NewSupervisor(cfg Config) *Supervisor {
 	runID := cli.GenerateRunID()
 	state := control.NewState(runID, "", 0)
 	sup := &Supervisor{
-		config:               cfg,
-		runID:                runID,
-		state:                state,
-		control:              control.NewServer(state),
-		runtimes:             map[string]*childRuntime{},
-		controllerLoops:      map[string]*controllerLoop{},
-		shutdownCh:           make(chan struct{}),
-		runtimeActivity:      make(chan struct{}),
-		pendingQuestions:     map[string]pendingChildQuestion{},
-		handledQuestions:     map[string]handledChildQuestion{},
-		childQuestionTimeout: cfg.ChildQuestionTimeout,
-		permOptions:          map[string][]any{},
-		reaperInterval:       5 * time.Second,
-		permissionProviders:  map[string]permissionProviderBinding{},
-		httpServers:          map[string]any{},
-		fileSnapshots:        map[string][]string{},
-		sessionIdentities:    map[string]sessionIdentityEntry{},
-		sessionOwners:        map[string]*sessionAttempt{},
+		config:                  cfg,
+		runID:                   runID,
+		state:                   state,
+		control:                 control.NewServer(state),
+		runtimes:                map[string]*childRuntime{},
+		controllerLoops:         map[string]*controllerLoop{},
+		controllerRenewInterval: workflowcontroller.RenewInterval,
+		shutdownCh:              make(chan struct{}),
+		runtimeActivity:         make(chan struct{}),
+		pendingQuestions:        map[string]pendingChildQuestion{},
+		handledQuestions:        map[string]handledChildQuestion{},
+		childQuestionTimeout:    cfg.ChildQuestionTimeout,
+		permOptions:             map[string][]any{},
+		reaperInterval:          5 * time.Second,
+		permissionProviders:     map[string]permissionProviderBinding{},
+		httpServers:             map[string]any{},
+		fileSnapshots:           map[string][]string{},
+		sessionIdentities:       map[string]sessionIdentityEntry{},
+		sessionOwners:           map[string]*sessionAttempt{},
 	}
 	sup.broker = broker.New("")
 	if err := sup.broker.Start(); err != nil {
@@ -4226,15 +4233,22 @@ func (l *controllerLoop) stop() {
 }
 
 // startControllerLoop starts the process's single leader loop for controllerID
-// if one is not already running. Call only after a successful barrier.
+// if one is not already running. A map entry whose loop has already exited is
+// replaced. Call only after a successful barrier.
 func (s *Supervisor) startControllerLoop(store *workflowcontroller.ControllerStore, controllerID string) {
 	s.controllerLoopsMu.Lock()
 	defer s.controllerLoopsMu.Unlock()
 	if s.loopsStopped {
 		return
 	}
-	if _, ok := s.controllerLoops[controllerID]; ok {
-		return
+	if existing, ok := s.controllerLoops[controllerID]; ok {
+		select {
+		case <-existing.done:
+			// Stale entry from a loop that already exited on its own; the
+			// exited loop's own cleanup races with us, so replace it here.
+		default:
+			return
+		}
 	}
 	loop := &controllerLoop{stopCh: make(chan struct{}), done: make(chan struct{})}
 	s.controllerLoops[controllerID] = loop
@@ -4277,6 +4291,19 @@ func (s *Supervisor) stopControllerLoops() {
 // back to acquisition retry; a disabled desired state ends the loop. On stop
 // it releases a still-held lease before exiting.
 func (s *Supervisor) runControllerLoop(store *workflowcontroller.ControllerStore, controllerID string, loop *controllerLoop) {
+	// Self-exit cleanup: remove this loop's map entry, but only while the
+	// entry still refers to this loop — a concurrent disable (or shutdown)
+	// may have already deleted it, or an enable may have replaced it with a
+	// fresh loop. Registration order runs this removal before close(done),
+	// so a waiter in stopControllerLoop never observes a deleted-but-live
+	// window.
+	defer func() {
+		s.controllerLoopsMu.Lock()
+		if s.controllerLoops[controllerID] == loop {
+			delete(s.controllerLoops, controllerID)
+		}
+		s.controllerLoopsMu.Unlock()
+	}()
 	defer close(loop.done)
 	ownerID := s.supervisorIdentity()
 	var leaseID string
@@ -4305,7 +4332,7 @@ func (s *Supervisor) runControllerLoop(store *workflowcontroller.ControllerStore
 					return
 				}
 				log.Printf("workflow controller %s: acquire lease: %v", controllerID, err)
-				if !controllerLoopSleep(loop) {
+				if !controllerLoopSleep(loop, s.controllerRenewInterval) {
 					return
 				}
 				continue
@@ -4316,7 +4343,7 @@ func (s *Supervisor) runControllerLoop(store *workflowcontroller.ControllerStore
 				holding = true
 				continue
 			}
-			if !controllerLoopSleep(loop) {
+			if !controllerLoopSleep(loop, s.controllerRenewInterval) {
 				return
 			}
 			continue
@@ -4332,7 +4359,7 @@ func (s *Supervisor) runControllerLoop(store *workflowcontroller.ControllerStore
 			release()
 			return
 		}
-		if !controllerLoopSleep(loop) {
+		if !controllerLoopSleep(loop, s.controllerRenewInterval) {
 			release()
 			return
 		}
@@ -4341,11 +4368,11 @@ func (s *Supervisor) runControllerLoop(store *workflowcontroller.ControllerStore
 
 // controllerLoopSleep waits one renew interval, returning false when the loop
 // was stopped while waiting.
-func controllerLoopSleep(loop *controllerLoop) bool {
+func controllerLoopSleep(loop *controllerLoop, interval time.Duration) bool {
 	select {
 	case <-loop.stopCh:
 		return false
-	case <-time.After(workflowcontroller.RenewInterval):
+	case <-time.After(interval):
 		return true
 	}
 }
@@ -4394,6 +4421,10 @@ func (s *Supervisor) WorkflowControllerEnable(id string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Serialize against disable (and other enables) so the final in-process
+	// loop state always matches the last persisted desired state.
+	s.workflowControllerMu.Lock()
+	defer s.workflowControllerMu.Unlock()
 	rec, err := store.SetDesiredState(id, workflowcontroller.DesiredEnabled, "")
 	if err != nil {
 		return nil, err
@@ -4418,8 +4449,12 @@ func (s *Supervisor) WorkflowControllerDisable(id string, raw json.RawMessage) (
 	if err != nil {
 		return nil, err
 	}
-	// Persist desired=disabled (which durably releases any live lease) before
-	// stopping this process's loop. Workflow nodes are never touched.
+	// Serialize against enable (and other disables): persist desired=disabled
+	// (which durably releases any live lease) before stopping this process's
+	// loop, so the final loop state matches the last persisted desired state.
+	// Workflow nodes are never touched.
+	s.workflowControllerMu.Lock()
+	defer s.workflowControllerMu.Unlock()
 	rec, err := store.SetDesiredState(id, workflowcontroller.DesiredDisabled, p.Reason)
 	if err != nil {
 		return nil, err
