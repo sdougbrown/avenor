@@ -307,6 +307,10 @@ def main():
                 if decision is None:
                     if reason == "terminal":
                         break  # workflow ended while waiting; stop asking anyone
+                    if reason.startswith("invalid decision file"):
+                        # Malformed file: surface the parse error on the next
+                        # ask instead of re-asking silently.
+                        decision_errors[error_key] = reason
                     continue  # timeout or unparked; the next tick re-asks
                 try:
                     command = build_gate_command(

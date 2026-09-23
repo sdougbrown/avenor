@@ -68,11 +68,14 @@ class PendingHumanGatesTest(unittest.TestCase):
         self.assertEqual(list(bridge.pending_human_gates(detail, self.gates)), [])
 
     def test_skips_settled_gate_instances(self):
-        detail = {
-            "activations": [parked_activation()],
-            "gates": [{"activation_id": "act_1", "gate_id": "merge-authorization", "status": "passed"}],
-        }
-        self.assertEqual(list(bridge.pending_human_gates(detail, self.gates)), [])
+        for settled_status in ("passed", "waived"):
+            with self.subTest(status=settled_status):
+                detail = {
+                    "activations": [parked_activation()],
+                    "gates": [{"activation_id": "act_1", "gate_id": "merge-authorization",
+                               "status": settled_status}],
+                }
+                self.assertEqual(list(bridge.pending_human_gates(detail, self.gates)), [])
 
     def test_skips_unrequired_gates(self):
         gate = merge_auth_gate()
@@ -132,6 +135,12 @@ class BuildGateCommandTest(unittest.TestCase):
         first = bridge.build_gate_command("wf_1", "n", "act_1", self.gate, self.decision)
         second = bridge.build_gate_command("wf_1", "n", "act_1", self.gate, dict(self.decision))
         self.assertEqual(first["response_hash"], second["response_hash"])
+        # The hash doubles as the evidence id and archive filename, so it must
+        # be a fixed width and must distinguish decisions.
+        self.assertEqual(len(first["response_hash"]), 32)
+        other = dict(self.decision, reason="declined after review")
+        third = bridge.build_gate_command("wf_1", "n", "act_1", self.gate, other)
+        self.assertNotEqual(first["response_hash"], third["response_hash"])
 
     def test_reject_requires_operation_value(self):
         self.decision["decision"] = "approve"
@@ -224,7 +233,12 @@ class WaitForDecisionTest(unittest.TestCase):
         detail = {"activations": [parked_activation()], "gates": None,
                   "instance": {"status": "active"}}
         ctl = FakeControl([detail])
-        with mock.patch.object(bridge.time, "monotonic", side_effect=[0, 0, 100]):
+        # Script the monotonic clock but fall back to a value past the
+        # deadline for any extra call, so a loop change fails the assertion
+        # instead of raising StopIteration inside the patched clock.
+        scripted = iter([0, 0, 100])
+        with mock.patch.object(bridge.time, "monotonic",
+                               side_effect=lambda: next(scripted, 100)):
             _, _, reason = bridge.wait_for_decision(
                 ctl, self.decisions, "wf_1", "act_1", self.gate, 5, 0.01
             )
