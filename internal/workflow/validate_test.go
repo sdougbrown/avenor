@@ -38,9 +38,9 @@ func TestValidateTemplateJSON(t *testing.T) {
 }
 
 // TestValidateEscalationBridgeDemoTemplate pins the escalation-bridge demo
-// template to the kernel's validator so the reference bridge's contract
-// (human gate with a declared subject_type on an explicit-completion node)
-// stays valid as the template schema evolves.
+// template to the kernel's validator and asserts the contract the reference
+// bridge relies on: a required human gate with a declared subject_type on an
+// explicit-completion node.
 func TestValidateEscalationBridgeDemoTemplate(t *testing.T) {
 	data, err := os.ReadFile("../../templates/escalation-bridge/demo.json")
 	if err != nil {
@@ -48,6 +48,34 @@ func TestValidateEscalationBridgeDemoTemplate(t *testing.T) {
 	}
 	if err := ValidateTemplateJSON(data); err != nil {
 		t.Fatalf("ValidateTemplateJSON(demo.json) error = %v", err)
+	}
+	var template struct {
+		Nodes []struct {
+			ID         string `json:"id"`
+			Completion struct {
+				Kind string `json:"kind"`
+			} `json:"completion"`
+			Gates []struct {
+				ID          string `json:"id"`
+				Type        string `json:"type"`
+				Required    bool   `json:"required"`
+				SubjectType string `json:"subject_type"`
+			} `json:"gates"`
+		} `json:"nodes"`
+	}
+	if err := json.Unmarshal(data, &template); err != nil {
+		t.Fatalf("unmarshal demo template: %v", err)
+	}
+	var sawHumanGate bool
+	for _, node := range template.Nodes {
+		for _, gate := range node.Gates {
+			if gate.Type == "human" && gate.Required && gate.SubjectType != "" && node.Completion.Kind == "explicit" {
+				sawHumanGate = true
+			}
+		}
+	}
+	if !sawHumanGate {
+		t.Fatal("demo template lost its required human gate with a declared subject_type on an explicit-completion node")
 	}
 }
 

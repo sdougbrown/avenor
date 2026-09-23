@@ -108,7 +108,7 @@ avenor workflow inspect --socket /tmp/avenor-stable.sock wf_...
 | `reason` | yes | Free-text rationale; the bridge appends the evidence pointer |
 | `evidence` | recommended | The transport's immutable pointer (permalink, timestamp) |
 | `subject` | when the gate declares `subject_type` | Must carry a matching non-empty `type` — e.g. the exact PR head from the publish outputs |
-| `outcome` | no | Overrides the branch outcome; defaults to the activation's selected outcome |
+| `outcome` | no | For `satisfy`, overrides the branch outcome; defaults to the activation's selected outcome. For `reject`, an outcome is needed to follow a declared failure/correction branch — without one the activation settles rejected with no branch. |
 
 The bridge derives the `response_hash` and the `evidence_id` from the decision
 payload and archives the answered file under `recorded/`, so the local audit

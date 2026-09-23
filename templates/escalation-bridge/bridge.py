@@ -74,6 +74,8 @@ class Control:
 
 def parse_duration(text):
     """Parse '30s' / '5m' / '1h' into seconds."""
+    if not text:
+        raise ValueError("empty duration")
     units = {"s": 1, "m": 60, "h": 3600}
     unit = text[-1].lower()
     if unit not in units or not text[:-1].isdigit():
@@ -200,34 +202,32 @@ def build_gate_command(workflow_id, node_id, activation_id, gate, decision):
 def wait_for_decision(ctl, decisions, workflow_id, activation_id, gate, gate_timeout, poll):
     """Poll for the transport's decision file, re-checking workflow state.
 
-    Returns the parsed decision, or None if the gate-timeout expired while the
-    activation is still parked (the caller re-asks) or the workflow reached a
-    terminal state while waiting.
+    Returns (decision, decision_file), or (None, None) if the gate-timeout
+    expired while the activation is still parked (the caller re-asks) or the
+    workflow reached a terminal state while waiting. The file is left in place
+    for the caller to archive only after the decision is recorded kernel-side:
+    a failed record must not consume the human's answer.
     """
     decision_file = decisions / f"decision-{activation_id}-{gate['id']}.json"
     deadline = time.monotonic() + gate_timeout
     while time.monotonic() < deadline:
         if decision_file.exists():
-            decision = json.loads(decision_file.read_text())
-            recorded = decisions / "recorded" / f"{activation_id}-{gate['id']}-{decision_response_hash(decision)}.json"
-            recorded.parent.mkdir(parents=True, exist_ok=True)
-            decision_file.rename(recorded)
-            return decision
+            return json.loads(decision_file.read_text()), decision_file
         time.sleep(poll)
         # Re-check state on every tick: another path may resolve the gate or
         # the workflow while this decision is pending.
         detail = ctl.call("workflow.inspect", {"workflow_id": workflow_id})
         act = next(
-            (a for a in detail.get("activations", [])
+            (a for a in (detail.get("activations") or [])
              if a.get("activation_id") == activation_id),
             None,
         )
         if act is None or act.get("status") != "awaiting_gate":
             print(f"bridge: {activation_id} no longer parked; dropping wait on {gate['id']}", flush=True)
-            return None
+            return None, None
         if detail.get("instance", {}).get("status") in ("completed", "failed", "canceled"):
-            return None
-    return None
+            return None, None
+    return None, None
 
 
 def main():
@@ -244,7 +244,7 @@ def main():
 
     wait_ms = parse_duration(args.wait) * 1000
     gate_timeout = parse_duration(args.gate_timeout)
-    poll = parse_duration(args.poll)
+    poll = max(parse_duration(args.poll), 1.0)
     decisions = Path(args.decision_dir)
     decisions.mkdir(parents=True, exist_ok=True)
     template_gates = load_human_gates(args.template)
@@ -287,7 +287,7 @@ def main():
                 print(f"bridge: asking {gate['id']} on {node_id} ({activation_id})", flush=True)
                 ask(args.webhook_url, question)
 
-                decision = wait_for_decision(
+                decision, decision_file = wait_for_decision(
                     ctl, decisions, args.workflow_id, activation_id, gate, gate_timeout, poll
                 )
                 if decision is None:
@@ -299,6 +299,14 @@ def main():
                     "workflow.command",
                     {"workflow_id": args.workflow_id, "command": command},
                 )
+                # Archive only once the kernel accepted the decision; a failed
+                # record leaves the file in place so the next tick retries it
+                # (the kernel's gate idempotency key makes that a safe no-op).
+                recorded = decisions / "recorded" / (
+                    f"{activation_id}-{gate['id']}-{command['response_hash']}.json"
+                )
+                recorded.parent.mkdir(parents=True, exist_ok=True)
+                decision_file.rename(recorded)
                 print(
                     f"bridge: recorded {decision['decision']} by {decision['actor']} "
                     f"on {gate['id']} ({activation_id})", flush=True

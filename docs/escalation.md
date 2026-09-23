@@ -94,20 +94,25 @@ state. The kernel validates and records the decision as a durable, append-only
   Slack message timestamp and thread ID, a ticket link. Gate history is
   append-only and is the audit record; the transport must not be the only
   place the decision lives.
-- **Idempotency.** Use `response_hash` to carry the transport's response identity
-  so a retried delivery cannot double-apply. The kernel's own command
-  idempotency additionally protects against duplicate commands.
+- **Idempotency.** The kernel's dedup key for a human decision is
+  `gate-<operation>-<gate_id>-<activation_id>`, so a re-issued decision for the
+  same operation on the same gate is a safe no-op — that, not `response_hash`,
+  is what protects against double-apply. Record `response_hash` anyway: it is
+  stored on the gate instance for audit and lets the transport correlate a
+  retried delivery with the decision already recorded.
 - **Expiry.** The kernel never satisfies a gate by silence. A transport that
   renders deadlines (buttons expiring, threads closing) maps naturally: expiry
   is the transport declining to decide, and the activation stays parked.
 - **Exact-head binding.** When the gate declares `subject_type`, the
-  decision-maker supplies the subject and the kernel validates its non-empty
-  `type` against the declaration — nothing pre-binds it. A bridge should
-  ground the subject in the workflow's own recorded outputs (for example, the
-  repository, pull request, and exact head SHA a publish node emitted), never
-  in transport-side state. A new head creates a new activation and a new gate
-  instance; a prior decision never carries over, and a bridge must never cache
-  a subject across activations.
+  decision-maker supplies the subject; the kernel only requires that it be
+  present with a non-empty `type` — it does not compare the type against the
+  declaration, so a careful bridge enforces that match itself (the reference
+  bridge rejects a decision whose subject type differs from the gate's
+  declaration). Ground the subject in the workflow's own recorded outputs (for
+  example, the repository, pull request, and exact head SHA a publish node
+  emitted), never in transport-side state. A new head creates a new activation
+  and a new gate instance; a prior decision never carries over, and a bridge
+  must never cache a subject across activations.
 
 ## Trust boundary
 
