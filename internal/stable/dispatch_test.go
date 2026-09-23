@@ -1,6 +1,7 @@
 package stable
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,6 +45,35 @@ func dispatchTemplateJSONTTL(t *testing.T, templateID, controllerID, concurrency
 	return mustJSON(t, template)
 }
 
+// dispatchActionTemplateJSON returns a one-node template whose entry node
+// runs the given action type, auto-dispatched to controllerID.
+func dispatchActionTemplateJSON(t *testing.T, templateID, controllerID, actionType, filePath string) []byte {
+	var action map[string]any
+	switch actionType {
+	case "loop":
+		action = map[string]any{"type": "loop", "loop_file": filePath}
+	case "team":
+		action = map[string]any{"type": "team", "team_file": filePath}
+	default:
+		action = map[string]any{"type": "run", "prompt": "do the thing"}
+	}
+	template := map[string]any{
+		"schema_version":   1,
+		"template_id":      templateID,
+		"template_version": "1",
+		"entry_nodes":      []string{"start"},
+		"nodes": []any{map[string]any{
+			"id":           "start",
+			"action":       action,
+			"dispatch":     map[string]any{"mode": "auto", "controller_id": controllerID},
+			"retry_policy": map[string]any{"max_attempts": 3, "exhaustion": "block"},
+		}},
+		"terminal_outcomes":    []string{"done"},
+		"default_lease_policy": map[string]any{"ttl_seconds": 900},
+	}
+	return mustJSON(t, template)
+}
+
 // mustJSON marshals v or fails the test.
 func mustJSON(t *testing.T, v any) []byte {
 	t.Helper()
@@ -75,6 +105,13 @@ func newDispatchFixture(t *testing.T, name string, maxRuntimes, maxTreeBudget in
 }
 
 func newDispatchFixtureTTL(t *testing.T, name string, maxRuntimes, maxTreeBudget int, concurrencyKey string, ttlSeconds int) *dispatchFixture {
+	return newDispatchFixtureTemplate(t, name, maxRuntimes, maxTreeBudget,
+		dispatchTemplateJSONTTL(t, "tmpl-dispatch-"+name, "c1", concurrencyKey, ttlSeconds))
+}
+
+// newDispatchFixtureTemplate is newDispatchFixture with a caller-supplied
+// template instead of the default auto run template.
+func newDispatchFixtureTemplate(t *testing.T, name string, maxRuntimes, maxTreeBudget int, template []byte) *dispatchFixture {
 	t.Helper()
 	sup := NewSupervisor(Config{
 		ControlSocket:   newStableSocketPath(t, name),
@@ -87,7 +124,7 @@ func newDispatchFixtureTTL(t *testing.T, name string, maxRuntimes, maxTreeBudget
 	if err != nil {
 		t.Fatalf("workflow barrier: %v", err)
 	}
-	if _, err := mgr.WorkflowCreate(dispatchTemplateJSONTTL(t, "tmpl-dispatch-"+name, "c1", concurrencyKey, ttlSeconds)); err != nil {
+	if _, err := mgr.WorkflowCreate(template); err != nil {
 		t.Fatalf("WorkflowCreate: %v", err)
 	}
 	out, err := mgr.WorkflowInstantiate(mustJSON(t, map[string]string{"template_id": "tmpl-dispatch-" + name, "template_version": "1"}))
@@ -783,5 +820,282 @@ func TestSpawnConsumesReservationOnSuccess(t *testing.T) {
 	sup.controlMu.Unlock()
 	if outstanding != 0 {
 		t.Fatalf("outstanding = %d, want 0 after conversion", outstanding)
+	}
+}
+
+// cancelAfterContext taps ctx.Err() so a test can cancel a dispatch at its
+// nth internal checkpoint: the first after Err calls report the parent's
+// result, every later one reports context.Canceled. The dispatch checkpoints
+// are ordered (before the reservation, after it, after BeginDispatch), so a
+// count selects the exact boundary under test.
+type cancelAfterContext struct {
+	context.Context
+	after int
+	calls int
+}
+
+func (c *cancelAfterContext) Err() error {
+	c.calls++
+	if c.calls > c.after {
+		return context.Canceled
+	}
+	return c.Context.Err()
+}
+
+// TestDispatchCanceledBeforeReservation proves a cancel arriving before the
+// admission reservation reports canceled with nothing reserved and no
+// workflow state appended.
+func TestDispatchCanceledBeforeReservation(t *testing.T) {
+	f := newDispatchFixture(t, "dispatch-cancel-pre", 4, 4, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	out, err := f.sup.dispatchWorkflowNode(ctx, f.dispatchRequest(nil))
+	if err != nil {
+		t.Fatalf("dispatchWorkflowNode: %v", err)
+	}
+	if out.Kind != DispatchCanceled {
+		t.Fatalf("outcome = %s, want canceled", out.Kind)
+	}
+	f.sup.controlMu.Lock()
+	outstanding := f.sup.outstandingReservations
+	f.sup.controlMu.Unlock()
+	if outstanding != 0 {
+		t.Fatalf("outstanding reservations = %d, want 0", outstanding)
+	}
+	if got := f.treeActive(t); got != 0 {
+		t.Fatalf("tree slots active = %d, want 0", got)
+	}
+	if f.workflowRevision(t) != f.revision {
+		t.Fatal("canceled dispatch changed the workflow revision")
+	}
+}
+
+// TestDispatchCanceledAfterReservation proves a cancel arriving after the
+// reservation but before leader validation releases the reservation unused.
+func TestDispatchCanceledAfterReservation(t *testing.T) {
+	f := newDispatchFixture(t, "dispatch-cancel-resv", 4, 4, "")
+	out, err := f.sup.dispatchWorkflowNode(&cancelAfterContext{Context: t.Context(), after: 1}, f.dispatchRequest(nil))
+	if err != nil {
+		t.Fatalf("dispatchWorkflowNode: %v", err)
+	}
+	if out.Kind != DispatchCanceled {
+		t.Fatalf("outcome = %s, want canceled", out.Kind)
+	}
+	f.sup.controlMu.Lock()
+	outstanding := f.sup.outstandingReservations
+	f.sup.controlMu.Unlock()
+	if outstanding != 0 {
+		t.Fatalf("reservation leaked: outstanding = %d", outstanding)
+	}
+	if got := f.treeActive(t); got != 0 {
+		t.Fatalf("tree slots active = %d, want 0", got)
+	}
+	if f.workflowRevision(t) != f.revision {
+		t.Fatal("canceled dispatch changed the workflow revision")
+	}
+}
+
+// TestDispatchCanceledAfterBeginDispatch proves a cancel arriving after the
+// attempt intent was committed keeps the granted lease authoritative: the
+// attempt is finalized as canceled (retry semantics), the reservation is
+// released, and the outcome reports canceled.
+func TestDispatchCanceledAfterBeginDispatch(t *testing.T) {
+	f := newDispatchFixture(t, "dispatch-cancel-post", 4, 4, "")
+	out, err := f.sup.dispatchWorkflowNode(&cancelAfterContext{Context: t.Context(), after: 2}, f.dispatchRequest(nil))
+	if err != nil {
+		t.Fatalf("dispatchWorkflowNode: %v", err)
+	}
+	if out.Kind != DispatchCanceled {
+		t.Fatalf("outcome = %s, want canceled", out.Kind)
+	}
+	if out.AttemptID == "" {
+		t.Fatal("canceled-after-begin outcome missing attempt id")
+	}
+	f.sup.controlMu.Lock()
+	outstanding := f.sup.outstandingReservations
+	f.sup.controlMu.Unlock()
+	if outstanding != 0 {
+		t.Fatalf("reservation leaked: outstanding = %d", outstanding)
+	}
+	if got := f.treeActive(t); got != 0 {
+		t.Fatalf("tree slots active = %d, want 0", got)
+	}
+	waitFor(t, "runtime absent after cancel", func() bool { return f.sup.activeRuntimeCount() == 0 })
+	insp, err := f.mgr.WorkflowInspect(f.wf)
+	if err != nil {
+		t.Fatalf("WorkflowInspect: %v", err)
+	}
+	ins := insp.(map[string]any)
+	activations := ins["activations"].([]workflow.Activation)
+	attempts := ins["attempts"].([]workflow.Attempt)
+	if len(attempts) != 1 || attempts[0].Status != workflow.AttemptCanceled {
+		t.Fatalf("attempts = %+v, want one canceled attempt", attempts)
+	}
+	act := activationByNodeStable(activations, "start")
+	if act == nil || act.Status != workflow.ActivationAttemptFailed || act.ActiveLease != nil {
+		t.Fatalf("activation = %+v, want attempt_failed with no lease", act)
+	}
+}
+
+// activationByNodeStable returns the first activation for a node, or nil.
+func activationByNodeStable(acts []workflow.Activation, nodeID string) *workflow.Activation {
+	for i := range acts {
+		if string(acts[i].NodeID) == nodeID {
+			return &acts[i]
+		}
+	}
+	return nil
+}
+
+// TestDispatchKeyHeldOutcomeReleasesReservation proves a key-held bounce
+// through dispatchWorkflowNode reports key_held and leaves no reservation or
+// extra tree token behind.
+func TestDispatchKeyHeldOutcomeReleasesReservation(t *testing.T) {
+	f := newDispatchFixture(t, "dispatch-key-outcome", 4, 4, "deploys")
+	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
+	if err != nil {
+		t.Fatalf("first dispatch: %v", err)
+	}
+	if out.Kind != Dispatched {
+		t.Fatalf("first outcome = %s (%s), want dispatched", out.Kind, out.Detail)
+	}
+	waitFor(t, "first runtime live", func() bool { return f.sup.activeRuntimeCount() == 1 })
+
+	// A second workflow sharing the key under the same controller.
+	if _, err := f.mgr.WorkflowCreate(dispatchTemplateJSONTTL(t, "tmpl-dispatch-key-outcome-2", "c1", "deploys", 900)); err != nil {
+		t.Fatalf("WorkflowCreate 2: %v", err)
+	}
+	inst, err := f.mgr.WorkflowInstantiate(mustJSON(t, map[string]string{"template_id": "tmpl-dispatch-key-outcome-2", "template_version": "1"}))
+	if err != nil {
+		t.Fatalf("WorkflowInstantiate 2: %v", err)
+	}
+	wf2 := inst.(map[string]any)["workflow_id"].(string)
+	if err := f.mgr.RebuildCandidateIndex("test"); err != nil {
+		t.Fatalf("RebuildCandidateIndex: %v", err)
+	}
+	cands, err := f.mgr.CandidatesForController("c1", 10)
+	if err != nil {
+		t.Fatalf("CandidatesForController: %v", err)
+	}
+	var cand *workflow.ReadyCandidate
+	for i := range cands {
+		if string(cands[i].Identity.WorkflowID) == wf2 {
+			cand = &cands[i]
+		}
+	}
+	if cand == nil {
+		t.Fatalf("second workflow candidate missing: %+v", cands)
+	}
+	held, err := f.sup.dispatchWorkflowNode(t.Context(), DispatchRequest{
+		WorkflowID:       wf2,
+		NodeID:           string(cand.Identity.NodeID),
+		ActivationID:     string(cand.Identity.ActivationID),
+		ExpectedRevision: cand.Revision,
+		ControllerID:     "c1",
+		LeaderLeaseID:    f.leaseID,
+		OwnerEpoch:       f.ownerEpoch,
+	})
+	if err != nil {
+		t.Fatalf("held dispatch: %v", err)
+	}
+	if held.Kind != DispatchKeyHeld {
+		t.Fatalf("held outcome = %s (%s), want key_held", held.Kind, held.Detail)
+	}
+	f.sup.controlMu.Lock()
+	outstanding := f.sup.outstandingReservations
+	f.sup.controlMu.Unlock()
+	if outstanding != 0 {
+		t.Fatalf("outstanding reservations = %d, want 0 after key-held bounce", outstanding)
+	}
+	if got := f.treeActive(t); got != 1 {
+		t.Fatalf("tree slots active = %d, want exactly the first runtime's 1", got)
+	}
+}
+
+// TestDispatchSingleAcquirePerAction proves one controller dispatch consumes
+// exactly one reservation even at the tightest budget: with one free tree slot
+// and one local slot, the run, loop, and team executors all start without a
+// release-and-reacquire, which would fail the local limit.
+func TestDispatchSingleAcquirePerAction(t *testing.T) {
+	actions := []struct {
+		name     string
+		writeCfg func(t *testing.T, dir string) string
+	}{
+		{"run", nil},
+		{"loop", func(t *testing.T, dir string) string {
+			path := filepath.Join(dir, "loop.json")
+			cfg := map[string]any{"max_iterations": 1, "loop": []any{map[string]any{"name": "work", "prompt": "work"}}}
+			if err := os.WriteFile(path, mustJSON(t, cfg), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}},
+		{"team", func(t *testing.T, dir string) string {
+			path := filepath.Join(dir, "team.json")
+			cfg := map[string]any{"team": []any{map[string]any{"name": "work", "prompt": "work"}}}
+			if err := os.WriteFile(path, mustJSON(t, cfg), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}},
+	}
+	for _, action := range actions {
+		action := action
+		t.Run(action.name, func(t *testing.T) {
+			filePath := ""
+			if action.writeCfg != nil {
+				filePath = action.writeCfg(t, t.TempDir())
+			}
+			template := dispatchActionTemplateJSON(t, "tmpl-dispatch-"+action.name, "c1", action.name, filePath)
+			f := newDispatchFixtureTemplate(t, action.name, 1, 1, template)
+			out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
+			if err != nil {
+				t.Fatalf("dispatchWorkflowNode: %v", err)
+			}
+			if out.Kind != Dispatched {
+				t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
+			}
+			waitFor(t, "runtime registration", func() bool { return f.sup.activeRuntimeCount() == 1 })
+			if got := f.treeActive(t); got != 1 {
+				t.Fatalf("tree slots active = %d, want exactly 1 (no second acquire)", got)
+			}
+			if got := f.sup.activeRuntimeCount(); got != 1 {
+				t.Fatalf("active runtimes = %d, want 1", got)
+			}
+			f.sup.controlMu.Lock()
+			outstanding := f.sup.outstandingReservations
+			f.sup.controlMu.Unlock()
+			if outstanding != 0 {
+				t.Fatalf("outstanding reservations = %d, want 0 after conversion", outstanding)
+			}
+		})
+	}
+}
+
+// TestDispatchPersistsRuntimeIdentityOnSnapshot proves a successful dispatch
+// records the attempt_identified runtime identity in the persisted snapshot,
+// not only in the in-memory outcome.
+func TestDispatchPersistsRuntimeIdentityOnSnapshot(t *testing.T) {
+	f := newDispatchFixture(t, "dispatch-identity", 4, 4, "")
+	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
+	if err != nil {
+		t.Fatalf("dispatchWorkflowNode: %v", err)
+	}
+	if out.Kind != Dispatched || out.RuntimeID == "" {
+		t.Fatalf("outcome = %s runtime=%q, want dispatched with a runtime id", out.Kind, out.RuntimeID)
+	}
+	insp, err := f.mgr.WorkflowInspect(f.wf)
+	if err != nil {
+		t.Fatalf("WorkflowInspect: %v", err)
+	}
+	attempts := insp.(map[string]any)["attempts"].([]workflow.Attempt)
+	if len(attempts) != 1 {
+		t.Fatalf("attempts = %+v, want exactly one", attempts)
+	}
+	if attempts[0].Identity.RuntimeID != out.RuntimeID {
+		t.Fatalf("persisted runtime id = %q, want %q", attempts[0].Identity.RuntimeID, out.RuntimeID)
+	}
+	if attempts[0].Identity.SessionID == "" {
+		t.Fatal("persisted attempt identity missing session id")
 	}
 }
