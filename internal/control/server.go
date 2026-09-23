@@ -1475,7 +1475,8 @@ func (s *ControlServer) dispatchWorkflow(c *connState, req Request) Response {
 // dispatchWorkflowController routes workflow.controller.* and workflow.ready
 // methods to the optional WorkflowControllerHandler. It is only reached from
 // the dispatch default branch, so no method name collides with an existing
-// stable or workflow handler method.
+// stable or workflow handler method. These methods, like workflow.*, do not
+// use the run-scoped ownership model (ensureOwner).
 func (s *ControlServer) dispatchWorkflowController(c *connState, req Request) Response {
 	hp := s.controllerHandler.Load()
 	if hp == nil {

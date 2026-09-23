@@ -381,6 +381,8 @@ These are the same methods as above but applied to a specific child runtime inst
 
 The `workflow.*` methods drive a [durable workflow](workflow.md). They are dispatched to an optional workflow handler; when the supervisor has no workflow support (no `--workflow-root` manager), they return `-32601` (`method not found`). They do not use the run-scoped ownership model.
 
+The `workflow.controller.create`, `workflow.controller.enable`, `workflow.controller.disable`, `workflow.controller.status`, `workflow.controller.list`, and `workflow.ready` methods route to an optional workflow-controller handler. When the supervisor has no controller support, they return `-32601` (`method not found`). Like the other `workflow.*` methods, they do not use the run-scoped ownership model. `workflow.ready` is advisory and grants no lease.
+
 | Method | Params | Purpose |
 |------|------|---------|
 | `workflow.create` | template JSON | Register a versioned template. |
