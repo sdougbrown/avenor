@@ -71,7 +71,7 @@ See [loop.md](loop.md) for multi-phase loop config.
 
 ### Roster selection
 
-A roster is a map from a name to a complete backend/agent/model loadout. `roster_file` names the map; `roster_entry` names one key inside it. Every entry must contain `backend` and at least one of `agent` or `model`. Roster files can be authored in JSON, YAML, or TOML — the format is detected from the file extension:
+A roster is a map from a name to a complete backend/agent/model loadout. `roster_file` names the map; `roster_entry` names one key inside it. Every entry must contain `backend` and at least one of `agent` or `model`. An entry may also carry `thinking`. Roster files can be authored in JSON, YAML, or TOML — the format is detected from the file extension:
 
 ```json
 {
@@ -82,9 +82,18 @@ A roster is a map from a name to a complete backend/agent/model loadout. `roster
   "executor": {
     "backend": "agy",
     "agent": "windsurf-swe"
+  },
+  "reviewer": {
+    "backend": "codex-app-server",
+    "model": "provider/reviewer",
+    "thinking": "high"
   }
 }
 ```
+
+`thinking` is a **default, not part of the identity**: an explicit `--thinking` wins over the entry's value, so a roster only supplies the level when the caller did not. An unknown level is rejected when the roster loads, with the offending entry named. Whether a level is usable at all still depends on the backend, and that check happens when the run starts.
+
+Per-phase roster entries in loop and team configs do not apply `thinking` yet — those phases fall back to the run-level value.
 
 Direct mode selects an entry with both flags and does not accept direct identity overrides:
 
