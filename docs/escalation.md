@@ -20,30 +20,42 @@ A bridge needs three control-socket methods, all documented in
 [control-protocol.md](control-protocol.md) and [workflow.md](workflow.md):
 
 ```text
-1. wake      workflow.wait    — long-poll until the workflow leaves its prior status
-2. observe   workflow.status / workflow.inspect
-             → activation parked awaiting_gate, pending gate definitions
+1. wake      workflow.wait    — tick: returns on a terminal status or timeout
+2. observe   workflow.inspect → activations parked awaiting_gate
 3. decide    workflow.command { op: "gate" }
-             → durable GateInstance with actor, reason, evidence
+             → durable GateInstance with actor, reason, evidence, subject
 ```
 
 ### 1. Wake
 
-Call `workflow.wait` with a timeout. It blocks until the workflow status changes
-or the timeout expires. On `awaiting_gate`, inspect.
+Call `workflow.wait` with a timeout. It returns when the workflow reaches a
+terminal status (`completed`, `failed`, or `canceled`) or when the timeout
+expires, and its result carries top-level `terminal` and `timed_out` flags
+beside the full inspect map.
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"workflow.wait","params":{"workflow_id":"wf_...","timeout_ms":30000}}
 ```
 
+Parking is an activation-level state: a gate parking an activation does **not**
+move the workflow status off `active`, so a parked gate never wakes `wait`
+early. A bridge therefore treats every wait return as a tick: on `terminal`,
+exit; otherwise inspect for parked activations and repeat.
+
 ### 2. Observe
 
-`workflow.status` returns the workflow snapshot summary; `workflow.inspect` returns
-full instance detail, including each parked activation and its unsatisfied gates.
-The bridge reads the pending gate's `id`, `name`, `type` (`human`), `subject_type`,
-and `allowed_outcomes`, plus the subject bound to the activation (for example, the
-exact PR head that merge authorization applies to). This is the content the bridge
-renders for the human — see the "composing the question" guidance in
+`workflow.status` returns the compact summary; `workflow.inspect` returns full
+instance detail with flat `activations`, `gates`, `evidence`, and `outputs`
+lists. An activation parked on its gates has `status: "awaiting_gate"`.
+
+Inspect carries no template definitions and a `GateInstance` is recorded only
+when a decision lands, so the bridge derives the pending human gates from the
+parked activations plus the gate definitions loaded out-of-band from the
+template the workflow was instantiated from (`id`, `name`, `subject_type`,
+`allowed_outcomes`), skipping gates with a `passed`/`waived` instance for that
+activation. The activation's `selected_outcome` and the instance's latest
+`outputs` are the decision context — this is the content the bridge renders
+for the human, see the "composing the question" guidance in
 [workflow.md](workflow.md#gates): the human must be able to decide from the
 message alone.
 
@@ -55,16 +67,19 @@ Record the decision through `workflow.command` with the `gate` op
 ```json
 {"op":"gate","node_id":"merge-auth","gate_id":"merge-authorization",
  "activation_id":"act_...","operation":"satisfy","actor":"austin@slack",
- "reason":"Reviewed the diff in Slack; approved",
+ "reason":"Reviewed the diff in Slack; approved [evidence: <thread permalink>]",
+ "evidence_ids":["ev_bridge_<hash of the transport response>"],
  "subject":{"type":"pull_request","repository":"org/repo","pull_request":123,"revision":"<head-sha>"},
  "response_hash":"<opaque idempotency hash of the transport response>",
  "source":"slack"}
 ```
 
 Required context differs per operation — `satisfy`, `reject`, and `waive` need
-`actor`, `reason`, and `subject` (when the gate declares a `subject_type`);
-`external_result` needs `poll_id`, `source`, `result`, and `observed_at`. The
-kernel validates and records the decision as a durable, append-only
+`actor`, `reason`, at least one `evidence_id`, and `subject` (when the gate
+declares a `subject_type`); `external_result` needs `poll_id`, `source`,
+`result`, `observed_at`, `subject`, `response_hash`, and at least one
+`evidence_id`. The kernel rejects any decision missing these before it mutates
+state. The kernel validates and records the decision as a durable, append-only
 `GateInstance`; the activation follows its declared branch.
 
 ## Conventions for remote decisions
@@ -72,9 +87,12 @@ kernel validates and records the decision as a durable, append-only
 - **Actor identity.** `actor` should name the deciding human in the transport's
   namespace (e.g. a Slack member ID or email). The kernel does not resolve it;
   it records it for audit.
-- **Evidence.** Put the transport's immutable pointer in `reason` or attach
-  evidence — a Slack message timestamp and thread ID, a ticket link. Gate history
-  is append-only and is the audit record; the transport must not be the only
+- **Evidence.** The kernel requires at least one `evidence_id` on every human
+  decision but does not resolve the id against the instance's evidence store —
+  a bridge records a stable, derived id (the reference bridge hashes the
+  decision payload) and puts the transport's immutable pointer in `reason` — a
+  Slack message timestamp and thread ID, a ticket link. Gate history is
+  append-only and is the audit record; the transport must not be the only
   place the decision lives.
 - **Idempotency.** Use `response_hash` to carry the transport's response identity
   so a retried delivery cannot double-apply. The kernel's own command
@@ -82,11 +100,14 @@ kernel validates and records the decision as a durable, append-only
 - **Expiry.** The kernel never satisfies a gate by silence. A transport that
   renders deadlines (buttons expiring, threads closing) maps naturally: expiry
   is the transport declining to decide, and the activation stays parked.
-- **Exact-head binding.** When the gate declares `subject_type`, the decision
-  binds to the immutable subject recorded on the activation. A new head creates
-  a new activation and a new gate instance; a prior decision never carries over.
-  A bridge must read the subject from `workflow.inspect` per activation, never
-  cache it across activations.
+- **Exact-head binding.** When the gate declares `subject_type`, the
+  decision-maker supplies the subject and the kernel validates its non-empty
+  `type` against the declaration — nothing pre-binds it. A bridge should
+  ground the subject in the workflow's own recorded outputs (for example, the
+  repository, pull request, and exact head SHA a publish node emitted), never
+  in transport-side state. A new head creates a new activation and a new gate
+  instance; a prior decision never carries over, and a bridge must never cache
+  a subject across activations.
 
 ## Trust boundary
 

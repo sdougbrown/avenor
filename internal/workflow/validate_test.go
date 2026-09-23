@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 )
@@ -28,12 +29,25 @@ func TestValidateTemplateJSON(t *testing.T) {
 	if err := ValidateTemplateJSON([]byte(validTemplateJSON)); err != nil {
 		t.Fatalf("ValidateTemplateJSON() error = %v", err)
 	}
-
 	largeNumber := mutateTemplate(t, func(template map[string]any) {
 		template["metadata"] = map[string]any{"large_number": json.Number("1e400")}
 	})
 	if err := ValidateTemplateJSON(largeNumber); err != nil {
 		t.Fatalf("ValidateTemplateJSON() rejected unrestricted metadata number: %v", err)
+	}
+}
+
+// TestValidateEscalationBridgeDemoTemplate pins the escalation-bridge demo
+// template to the kernel's validator so the reference bridge's contract
+// (human gate with a declared subject_type on an explicit-completion node)
+// stays valid as the template schema evolves.
+func TestValidateEscalationBridgeDemoTemplate(t *testing.T) {
+	data, err := os.ReadFile("../../templates/escalation-bridge/demo.json")
+	if err != nil {
+		t.Fatalf("read demo template: %v", err)
+	}
+	if err := ValidateTemplateJSON(data); err != nil {
+		t.Fatalf("ValidateTemplateJSON(demo.json) error = %v", err)
 	}
 }
 
