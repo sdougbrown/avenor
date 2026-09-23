@@ -174,19 +174,20 @@ func (s *Supervisor) dispatchWorkflowNode(ctx context.Context, req DispatchReque
 
 	// A cancel after the attempt intent was committed: the workflow-node lease
 	// is already granted and stays authoritative, so the attempt is finalized
-	// as a terminal pre-start cancellation (kernel retry semantics apply), the
-	// reservation is released (deferred), and the cancellation is reported.
+	// as a pre-start failure (not a cancellation) — a runner shutting down
+	// between BeginDispatch and executor start never ran the node, so it must
+	// fall back to the node's retry policy rather than exhaust the activation.
+	// The reservation is released (deferred) and the cancellation is reported.
 	if err := ctx.Err(); err != nil {
-		kind, label := workflowMarkerForKind(begin.Action.Kind)
 		if ferr := mgr.FinalizeDispatch(workflow.FinalizeDispatchRequest{
 			WorkflowID:    workflow.WorkflowID(req.WorkflowID),
 			NodeID:        workflow.NodeID(req.NodeID),
 			ActivationID:  workflow.ActivationID(req.ActivationID),
 			AttemptID:     begin.AttemptID,
 			LeaseID:       begin.LeaseID,
-			FailureStatus: workflow.AttemptCanceled,
-			MarkerKind:    kind,
-			MarkerLabel:   label,
+			FailureStatus: workflow.AttemptFailed,
+			MarkerKind:    "dispatch",
+			MarkerLabel:   "dispatch_canceled",
 		}); ferr != nil {
 			fmt.Fprintf(os.Stderr, "avenor stable: workflow %s node %s attempt %s: record canceled dispatch: %v\n",
 				req.WorkflowID, req.NodeID, begin.AttemptID, ferr)

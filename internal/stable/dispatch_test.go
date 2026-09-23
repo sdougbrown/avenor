@@ -897,8 +897,9 @@ func TestDispatchCanceledAfterReservation(t *testing.T) {
 
 // TestDispatchCanceledAfterBeginDispatch proves a cancel arriving after the
 // attempt intent was committed keeps the granted lease authoritative: the
-// attempt is finalized as canceled (retry semantics), the reservation is
-// released, and the outcome reports canceled.
+// attempt is finalized as a pre-start failure (not a cancellation), so the
+// node's retry policy re-arms the activation, the reservation is released,
+// and the outcome reports canceled.
 func TestDispatchCanceledAfterBeginDispatch(t *testing.T) {
 	f := newDispatchFixture(t, "dispatch-cancel-post", 4, 4, "")
 	out, err := f.sup.dispatchWorkflowNode(&cancelAfterContext{Context: t.Context(), after: 2}, f.dispatchRequest(nil))
@@ -928,12 +929,15 @@ func TestDispatchCanceledAfterBeginDispatch(t *testing.T) {
 	ins := insp.(map[string]any)
 	activations := ins["activations"].([]workflow.Activation)
 	attempts := ins["attempts"].([]workflow.Attempt)
-	if len(attempts) != 1 || attempts[0].Status != workflow.AttemptCanceled {
-		t.Fatalf("attempts = %+v, want one canceled attempt", attempts)
+	if len(attempts) != 1 || attempts[0].Status != workflow.AttemptFailed {
+		t.Fatalf("attempts = %+v, want one failed attempt", attempts)
+	}
+	if attempts[0].MarkerKind != "dispatch" || attempts[0].MarkerLabel != "dispatch_canceled" {
+		t.Fatalf("attempt marker = %q/%q, want dispatch/dispatch_canceled", attempts[0].MarkerKind, attempts[0].MarkerLabel)
 	}
 	act := activationByNodeStable(activations, "start")
-	if act == nil || act.Status != workflow.ActivationAttemptFailed || act.ActiveLease != nil {
-		t.Fatalf("activation = %+v, want attempt_failed with no lease", act)
+	if act == nil || act.Status != workflow.ActivationReady || act.ActiveLease != nil {
+		t.Fatalf("activation = %+v, want ready with no lease", act)
 	}
 }
 
