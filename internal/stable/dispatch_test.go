@@ -433,7 +433,20 @@ func TestDispatchKeyHeldAcrossControllersAndManual(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second barrier: %v", err)
 	}
-	t.Cleanup(func() { _ = sup2.broker.Stop(); sup2.stopReaper() })
+	t.Cleanup(func() {
+		// sup2's dispatched runtime blocks in the shared release-gated provider;
+		// it must be canceled and driven to its terminal write before the
+		// TempDir cleanup below removes the workflow root, or its final
+		// attempt-termination write races the directory removal.
+		for _, rt := range sup2.listRuntimes() {
+			if id, ok := rt["runtime_id"].(string); ok {
+				_ = sup2.cancelRuntime(id)
+			}
+		}
+		waitFor(t, "sup2 runtimes terminal at cleanup", func() bool { return sup2.activeRuntimeCount() == 0 })
+		_ = sup2.broker.Stop()
+		sup2.stopReaper()
+	})
 	if _, err := cstore2.Create("c2", 10); err != nil {
 		t.Fatalf("controller c2 create: %v", err)
 	}
