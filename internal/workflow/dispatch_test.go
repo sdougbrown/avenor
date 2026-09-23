@@ -550,3 +550,142 @@ func TestClaimableActivationStatus(t *testing.T) {
 		t.Fatal("sentinel error message is empty")
 	}
 }
+
+// TestTransitionCreatesAutoDispatchCandidate asserts an EventTransition (the
+// complete/gate path) creates a target-node activation that carries the
+// node's auto Dispatch policy and a stamped ReadyAt, and surfaces as a
+// candidate after a rebuild. The template is two-node so the transition
+// actually crosses nodes: a manual entry node branches to an auto target.
+func TestTransitionCreatesAutoDispatchCandidate(t *testing.T) {
+	template := map[string]any{
+		"schema_version":   1,
+		"template_id":      "transition-auto",
+		"template_version": "1",
+		"entry_nodes":      []string{"start"},
+		"nodes": []any{
+			map[string]any{
+				"id":       "start",
+				"action":   map[string]any{"type": "run", "prompt": "first"},
+				"branches": map[string]any{"done": "next"},
+			},
+			map[string]any{
+				"id":       "next",
+				"action":   map[string]any{"type": "run", "prompt": "second"},
+				"dispatch": map[string]any{"mode": "auto", "controller_id": "ctl-a", "priority": 80, "concurrency_key": "pool-x"},
+			},
+		},
+		"terminal_outcomes":    []string{"done"},
+		"default_lease_policy": map[string]any{"ttl_seconds": 900},
+	}
+	data, err := json.Marshal(template)
+	if err != nil {
+		t.Fatalf("marshal template: %v", err)
+	}
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	m := NewManager(s)
+	m.RegisterExecutor(ActionRun, &fakeExecutor{})
+	if _, err := m.WorkflowCreate(data); err != nil {
+		t.Fatalf("WorkflowCreate: %v", err)
+	}
+	wf := mustInstantiateTemplate(t, m, "transition-auto", "1")
+
+	snap, ok, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	if !ok {
+		t.Fatal("instance snapshot not found")
+	}
+	start := activationByNode(&snap.Instance, "start")
+	if start == nil {
+		t.Fatal("start activation not found")
+	}
+
+	// Drive start to completion: claim -> start -> terminal fact -> complete
+	// with the "done" branch outcome. The complete handler resolves the branch
+	// to next and the reducer's EventTransition path creates the next
+	// activation.
+	res := claimActivation(t, m, wf, "start", string(start.ID), "alice")
+	out, err := m.WorkflowCommand(string(wf), startCommandPayload(t, "start", string(start.ID), res, nil))
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	attemptID := out.(map[string]any)["attempt_id"].(string)
+	leaseID := res["lease_id"].(string)
+	if err := m.RecordAttemptTerminated(wf, "start", start.ID, AttemptID(attemptID), LeaseID(leaseID), AttemptSucceeded); err != nil {
+		t.Fatalf("RecordAttemptTerminated: %v", err)
+	}
+	complete := map[string]any{
+		"op":            "complete",
+		"node_id":       "start",
+		"activation_id": string(start.ID),
+		"attempt_id":    attemptID,
+		"lease_id":      leaseID,
+		"owner_token":   res["owner_token"],
+		"outcome":       "done",
+	}
+	cdata, err := json.Marshal(complete)
+	if err != nil {
+		t.Fatalf("marshal complete: %v", err)
+	}
+	if _, err := m.WorkflowCommand(string(wf), cdata); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+
+	snap, ok, err = s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent after complete: %v", err)
+	}
+	if !ok {
+		t.Fatal("instance snapshot not found after complete")
+	}
+	next := activationByNode(&snap.Instance, "next")
+	if next == nil {
+		t.Fatal("next activation not found")
+	}
+	if next.Dispatch == nil {
+		t.Fatal("next activation dispatch is nil, want auto policy")
+	}
+	if !next.Dispatch.IsAuto() {
+		t.Fatalf("next activation dispatch = %+v, want auto", next.Dispatch)
+	}
+	if next.Dispatch.ControllerID != "ctl-a" {
+		t.Fatalf("next activation controller_id = %q, want ctl-a", next.Dispatch.ControllerID)
+	}
+	if next.Dispatch.priority() != 80 {
+		t.Fatalf("next activation priority = %d, want 80", next.Dispatch.priority())
+	}
+	if next.Dispatch.ConcurrencyKey != "pool-x" {
+		t.Fatalf("next activation concurrency_key = %q, want pool-x", next.Dispatch.ConcurrencyKey)
+	}
+	if next.ReadyAt == nil {
+		t.Fatal("next activation ready_at is nil")
+	}
+
+	if err := m.RebuildCandidateIndex("sup-1"); err != nil {
+		t.Fatalf("RebuildCandidateIndex: %v", err)
+	}
+	candidates, err := m.CandidatesForController("ctl-a", 10)
+	if err != nil {
+		t.Fatalf("CandidatesForController: %v", err)
+	}
+	found := false
+	for _, c := range candidates {
+		if c.Identity.NodeID == "next" && c.Identity.ActivationID == next.ID {
+			found = true
+			if c.Priority != 80 {
+				t.Fatalf("candidate priority = %d, want 80", c.Priority)
+			}
+			if c.ConcurrencyKey != "pool-x" {
+				t.Fatalf("candidate concurrency_key = %q, want pool-x", c.ConcurrencyKey)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("next activation not in candidates: %v", candidates)
+	}
+}
