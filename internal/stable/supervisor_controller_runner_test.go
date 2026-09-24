@@ -555,7 +555,6 @@ func TestControllerRunnerGateParkedActivationNeverDispatched(t *testing.T) {
 // continues progress without duplicating an already-running attempt: the
 // surviving live attempt from the old supervisor is stale for selection and
 // only the new workflow is dispatched.
-var debugRestart = os.Getenv("DEBUG_RESTART") != ""
 
 // waitForDeadline is waitFor with a caller-supplied deadline.
 func waitForDeadline(t *testing.T, d time.Duration, what string, cond func() bool) {

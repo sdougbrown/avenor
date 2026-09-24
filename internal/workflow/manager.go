@@ -40,7 +40,6 @@ type Manager struct {
 	// channels notified on every committed workflow transition.
 	subMu       sync.Mutex
 	subscribers []chan struct{}
-	nextSubID   int
 }
 
 func NewManager(store *Store) *Manager {
@@ -666,7 +665,6 @@ func (m *Manager) notifySubscribers() {
 func (m *Manager) SubscribeChanges() (<-chan struct{}, func()) {
 	ch := make(chan struct{}, 1)
 	m.subMu.Lock()
-	m.nextSubID++
 	m.subscribers = append(m.subscribers, ch)
 	m.subMu.Unlock()
 	cancel := func() {

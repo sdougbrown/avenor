@@ -406,9 +406,8 @@ type Supervisor struct {
 	capacityCh chan struct{}
 	// capacitySubMu guards capacitySubs, a coalescing fan-out of buffered(1)
 	// wake channels notified on every capacity change.
-	capacitySubMu     sync.Mutex
-	capacitySubs      []chan struct{}
-	nextCapacitySubID int
+	capacitySubMu sync.Mutex
+	capacitySubs  []chan struct{}
 }
 
 func NewSupervisor(cfg Config) *Supervisor {
@@ -709,7 +708,6 @@ func (s *Supervisor) notifyCapacitySubscribers() {
 func (s *Supervisor) SubscribeCapacityChanges() (<-chan struct{}, func()) {
 	ch := make(chan struct{}, 1)
 	s.capacitySubMu.Lock()
-	s.nextCapacitySubID++
 	s.capacitySubs = append(s.capacitySubs, ch)
 	s.capacitySubMu.Unlock()
 	cancel := func() {
