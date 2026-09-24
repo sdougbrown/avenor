@@ -980,3 +980,91 @@ func TestCopyMap(t *testing.T) {
 		}
 	}
 }
+
+// pi's auto-retry layer emits agent_end with willRetry=true when it has
+// classified the failed turn as retryable and will re-attempt it after
+// backoff (captured from a live LiteLLM 500 "connection error" transient).
+// The translator must NOT emit a terminal session.end for that agent_end:
+// the provider would tear the session down before the retry fires.
+func TestTranslateAgentEndDefersTerminalWhenPiWillRetry(t *testing.T) {
+	raw := `{"type":"agent_end","messages":[
+		{"role":"user","content":[{"type":"text","text":"Reply with exactly \"OK\" and nothing else."}],"timestamp":1790278371974},
+		{"role":"assistant","content":[],"api":"openai-completions","provider":"sparky","model":"qwen3.8:27b",
+		 "usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},
+		 "stopReason":"error","timestamp":1790278371987,
+		 "errorMessage":"500: {\"message\":\"litellm.InternalServerError: InternalServerError: OpenAIException - Connection error.No fallback model group found for original model_group=qwen3.8:27b. LiteLLM Retried: 2 times\",\"code\":\"500\"}"}
+	],"willRetry":true}`
+	payload := mustPiPayload(t, raw)
+	evs := translateNotification(payload, "pi-s1")
+	if len(evs) != 1 {
+		t.Fatalf("len(events) = %d, want 1", len(evs))
+	}
+	if evs[0].Event != "avenor.auto_retry.pending" {
+		t.Fatalf("event = %q, want avenor.auto_retry.pending (no terminal session.end)", evs[0].Event)
+	}
+	if got, _ := evs[0].Fields["stop_reason"].(string); got != "error" {
+		t.Fatalf("stop_reason = %q, want error", got)
+	}
+	if got, _ := evs[0].Fields["error_message"].(string); !strings.Contains(got, "litellm.InternalServerError") {
+		t.Fatalf("error_message = %q, want the LiteLLM detail", got)
+	}
+}
+
+// A settled agent_end (willRetry absent) still terminates, and the real
+// provider error text must be carried through instead of "unknown error".
+func TestTranslateAgentEndCarriesErrorMessage(t *testing.T) {
+	for _, key := range []string{"errorMessage", "error_message"} {
+		t.Run(key, func(t *testing.T) {
+			evs := translateNotification(map[string]any{
+				"type": "agent_end",
+				"messages": []any{
+					map[string]any{"role": "user", "content": []any{}},
+					map[string]any{
+						"role":       "assistant",
+						"stopReason": "error",
+						key:          "500: upstream connection error",
+					},
+				},
+			}, "pi-s1")
+			if len(evs) != 1 || evs[0].Event != "session.end" {
+				t.Fatalf("events = %v, want one session.end", evs)
+			}
+			if got, _ := evs[0].Fields["error_message"].(string); got != "500: upstream connection error" {
+				t.Fatalf("error_message = %q, want the provider detail", got)
+			}
+		})
+	}
+}
+
+// payload-level errorMessage is used when no message-level field exists.
+func TestTranslateAgentEndCarriesPayloadLevelErrorMessage(t *testing.T) {
+	evs := translateNotification(map[string]any{
+		"type":         "agent_end",
+		"stopReason":   "error",
+		"errorMessage": "model load failed",
+	}, "pi-s1")
+	if len(evs) != 1 || evs[0].Event != "session.end" {
+		t.Fatalf("events = %v, want one session.end", evs)
+	}
+	if got, _ := evs[0].Fields["error_message"].(string); got != "model load failed" {
+		t.Fatalf("error_message = %q, want %q", got, "model load failed")
+	}
+}
+
+// A successful turn carries willRetry=false and stays terminal.
+func TestTranslateAgentEndTerminalWhenWillRetryFalse(t *testing.T) {
+	evs := translateNotification(map[string]any{
+		"type": "agent_end",
+		"messages": []any{
+			map[string]any{"role": "assistant", "stopReason": "stop",
+				"content": []any{map[string]any{"type": "text", "text": "OK"}}},
+		},
+		"willRetry": false,
+	}, "pi-s1")
+	if len(evs) != 1 || evs[0].Event != "session.end" {
+		t.Fatalf("events = %v, want one session.end", evs)
+	}
+	if got, _ := evs[0].Fields["stop_reason"].(string); got != "end_turn" {
+		t.Fatalf("stop_reason = %q, want end_turn", got)
+	}
+}
