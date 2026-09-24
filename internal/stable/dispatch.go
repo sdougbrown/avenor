@@ -255,6 +255,120 @@ func (s *Supervisor) dispatchWorkflowNode(ctx context.Context, req DispatchReque
 	return out, nil
 }
 
+// stableRunnerDeps adapts the supervisor's workflow manager and dispatch
+// boundary to the workflowcontroller.RunnerDeps interface. The manager and
+// controller store are resolved lazily so a runner started before the
+// workflow barrier completes still resolves them correctly.
+type stableRunnerDeps struct {
+	s            *Supervisor
+	controllerID string
+}
+
+// barrier returns the lazily-resolved workflow manager.
+func (d *stableRunnerDeps) manager() (*workflow.Manager, error) {
+	mgr, _, err := d.s.workflowBarrierResult()
+	return mgr, err
+}
+
+// Candidates returns the controller's ready candidates as policy candidates.
+func (d *stableRunnerDeps) Candidates(controllerID string) ([]workflowcontroller.Candidate, error) {
+	mgr, err := d.manager()
+	if err != nil {
+		return nil, err
+	}
+	ready, err := mgr.CandidatesForController(controllerID, 0)
+	if err != nil {
+		return nil, err
+	}
+	candidates := make([]workflowcontroller.Candidate, 0, len(ready))
+	for _, rc := range ready {
+		candidates = append(candidates, workflowcontroller.Candidate{
+			Identity:       rc.Identity,
+			Kind:           workflowcontroller.CandidateProvider,
+			ControllerID:   rc.ControllerID,
+			Revision:       rc.Revision,
+			ReadyAt:        rc.ReadyAt,
+			Priority:       rc.Priority,
+			ConcurrencyKey: rc.ConcurrencyKey,
+		})
+	}
+	return candidates, nil
+}
+
+// InFlight returns the live attempts visible in the candidate index. Only
+// starting/running attempts are returned, so Terminal is always false.
+func (d *stableRunnerDeps) InFlight() ([]workflowcontroller.InFlightAttempt, error) {
+	mgr, err := d.manager()
+	if err != nil {
+		return nil, err
+	}
+	live := mgr.LiveAttempts()
+	attempts := make([]workflowcontroller.InFlightAttempt, 0, len(live))
+	for _, la := range live {
+		attempts = append(attempts, workflowcontroller.InFlightAttempt{
+			Identity:       la.Identity,
+			ControllerID:   la.ControllerID,
+			ConcurrencyKey: la.ConcurrencyKey,
+			Terminal:       false,
+		})
+	}
+	return attempts, nil
+}
+
+// Refresh rebuilds the manager's candidate index for this supervisor.
+func (d *stableRunnerDeps) Refresh() error {
+	mgr, err := d.manager()
+	if err != nil {
+		return err
+	}
+	return mgr.RebuildCandidateIndex(d.s.supervisorIdentity())
+}
+
+// Dispatch dispatches one selected candidate through the supervisor's
+// dispatch boundary under the runner's lease. The activation's own declared
+// selection is used (Selection is nil on the request).
+func (d *stableRunnerDeps) Dispatch(ctx context.Context, dec workflowcontroller.Decision, lease workflowcontroller.LeaderLease) (workflowcontroller.DispatchResult, error) {
+	identity := dec.Candidate.Identity
+	out, err := d.s.dispatchWorkflowNode(ctx, DispatchRequest{
+		WorkflowID:       string(identity.WorkflowID),
+		NodeID:           string(identity.NodeID),
+		ActivationID:     string(identity.ActivationID),
+		ExpectedRevision: dec.Candidate.Revision,
+		ControllerID:     d.controllerID,
+		LeaderLeaseID:    lease.LeaseID,
+		OwnerEpoch:       lease.OwnerEpoch,
+		Selection:        nil,
+	})
+	if err != nil {
+		return workflowcontroller.DispatchResult{}, err
+	}
+	return workflowcontroller.DispatchResult{
+		Kind:   translateDispatchOutcome(out.Kind),
+		Source: out.Source,
+	}, nil
+}
+
+// translateDispatchOutcome maps the stable dispatch outcome kinds onto the
+// runner's result kinds.
+func translateDispatchOutcome(kind DispatchOutcomeKind) workflowcontroller.DispatchResultKind {
+	switch kind {
+	case Dispatched:
+		return workflowcontroller.ResultDispatched
+	case DispatchCapacityBlocked:
+		return workflowcontroller.ResultCapacityBlocked
+	case DispatchStale:
+		return workflowcontroller.ResultStale
+	case DispatchKeyHeld:
+		return workflowcontroller.ResultKeyHeld
+	case DispatchNotLeader:
+		return workflowcontroller.ResultNotLeader
+	case DispatchStartFailed:
+		return workflowcontroller.ResultStartFailed
+	default:
+		return workflowcontroller.ResultCanceled
+	}
+}
+
 // runtimeForAttempt finds the child runtime registered for a workflow
 // attempt, if it is live.
 func (s *Supervisor) runtimeForAttempt(attemptID string) (runtimeID, sessionID string) {
