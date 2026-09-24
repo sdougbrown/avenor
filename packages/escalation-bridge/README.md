@@ -15,7 +15,8 @@ kept deliberately generic:
 This is a port of the stdlib-only Python reference in
 [`templates/escalation-bridge/bridge.py`](../../templates/escalation-bridge/bridge.py)
 and produces identical `response_hash` values for the same decision (parity
-holds for the string/integer/bool/null payloads the protocol calls for;\nfloat-valued fields may hash differently across the two implementations). Use
+holds for the string/integer/bool/null payloads the protocol calls for;
+float-valued fields may hash differently across the two implementations). Use
 this package from TypeScript applications that already depend on
 [`@dougbots/avenor-core`](../core/); pull the Python reference into Python
 environments instead. The protocol contract itself is documented in
