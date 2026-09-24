@@ -53,6 +53,11 @@ type fakeDeps struct {
 	errScript     []error          // popped per dispatch before the result script
 	defaultResult DispatchResult
 
+	park             bool // dispatches return ResultParked with parkSeeds
+	parkSeeds        []PollSeed
+	unresolved       bool // dispatches return ResultUnresolvedBinding
+	unresolvedDetail string
+
 	block                chan struct{} // when non-nil, dispatches block until closed
 	blockAll             bool          // block every dispatch
 	blockFirst           int           // or only the first N dispatches
@@ -116,6 +121,12 @@ func (d *fakeDeps) Dispatch(ctx context.Context, dec Decision, lease LeaderLease
 	select {
 	case d.started <- struct{}{}:
 	default:
+	}
+	if d.park {
+		return DispatchResult{Kind: ResultParked, PollSeeds: d.parkSeeds}, nil
+	}
+	if d.unresolved {
+		return DispatchResult{Kind: ResultUnresolvedBinding, Detail: d.unresolvedDetail}, nil
 	}
 
 	if block {

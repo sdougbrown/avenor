@@ -34,12 +34,33 @@ const (
 	ResultStartFailed DispatchResultKind = "start_failed"
 	// ResultCanceled means the dispatch was canceled through its context.
 	ResultCanceled DispatchResultKind = "canceled"
+	// ResultParked means the candidate was an auto external activation parked
+	// kernel-locally; its poll seeds schedule the gate's polling cursors.
+	ResultParked DispatchResultKind = "parked"
+	// ResultUnresolvedBinding means the candidate's gate bindings were not
+	// fully resolved; the activation stays ready and a deduplicated
+	// diagnostic is recorded.
+	ResultUnresolvedBinding DispatchResultKind = "unresolved_binding"
 )
 
 // DispatchResult is the outcome of one host dispatch attempt.
 type DispatchResult struct {
 	Kind   DispatchResultKind
 	Source string // capacity source: "local" or "tree"
+	Detail string // inert diagnostic detail
+	// PollSeeds carries the parked activation's required external gates when
+	// Kind is ResultParked; each seed becomes a poll cursor.
+	PollSeeds []PollSeed
+}
+
+// PollSeed identifies one poll cursor to create after a successful park.
+type PollSeed struct {
+	WorkflowID   string
+	NodeID       string
+	ActivationID string
+	GateID       string
+	AdapterID    string
+	SubjectHash  string
 }
 
 // RunnerDeps is the host-side surface the runner drives. The host implements
@@ -85,6 +106,12 @@ type RunnerConfig struct {
 	ChangeCh      <-chan struct{}
 	CapacityCh    <-chan struct{}
 	Now           func() time.Time
+	// Poll, when non-nil, enables external-gate adapter polling alongside
+	// dispatch. PollJitter returns a bounded jitter scalar in [-1, 1];
+	// MaxPollWorkers bounds concurrent adapter invocations.
+	Poll           Poller
+	PollJitter     func() float64
+	MaxPollWorkers int
 }
 
 // dispatchWorkerResult carries one worker's outcome back to the leader loop.
@@ -143,6 +170,21 @@ type Runner struct {
 	// a worker never blocks longer than one outstanding result while the
 	// leader is inside a pass.
 	results chan dispatchWorkerResult
+	// pollResults carries poll worker outcomes to the leader loop.
+	pollResults chan pollWorkerResult
+	// pollInFlight holds the cursor keys with a poll worker still running
+	// (leader-goroutine-local), so a due cursor is never re-offered while its
+	// invocation runs.
+	pollInFlight map[string]bool
+	// pendingPolls is the number of poll workers that have not delivered a
+	// result yet. Leader-goroutine-local.
+	pendingPolls int
+	// poll is the optional host poll surface; nil disables polling.
+	poll Poller
+	// pollJitter scales backoff delays within bounded bounds.
+	pollJitter func() float64
+	// maxPollWorkers bounds concurrent adapter invocations.
+	maxPollWorkers int
 	// unreported tracks decisions handed to workers whose results have not
 	// arrived yet, keyed by execution identity. Leader-goroutine-local.
 	unreported map[workflow.ExecutionIdentity]unreportedEntry
@@ -165,21 +207,34 @@ func NewRunner(cfg RunnerConfig) *Runner {
 		now = time.Now
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	jitter := cfg.PollJitter
+	if jitter == nil {
+		jitter = defaultPollJitter
+	}
+	maxPollWorkers := cfg.MaxPollWorkers
+	if maxPollWorkers <= 0 {
+		maxPollWorkers = defaultMaxPollWorkers
+	}
 	r := &Runner{
-		deps:          cfg.Deps,
-		store:         cfg.Store,
-		controllerID:  cfg.ControllerID,
-		ownerID:       cfg.OwnerID,
-		now:           now,
-		renewInterval: cfg.RenewInterval,
-		antiEntropy:   cfg.AntiEntropy,
-		changeCh:      cfg.ChangeCh,
-		capacityCh:    cfg.CapacityCh,
-		ctx:           ctx,
-		cancel:        cancel,
-		done:          make(chan struct{}),
-		results:       make(chan dispatchWorkerResult, 1),
-		unreported:    map[workflow.ExecutionIdentity]unreportedEntry{},
+		deps:           cfg.Deps,
+		store:          cfg.Store,
+		controllerID:   cfg.ControllerID,
+		ownerID:        cfg.OwnerID,
+		now:            now,
+		renewInterval:  cfg.RenewInterval,
+		antiEntropy:    cfg.AntiEntropy,
+		changeCh:       cfg.ChangeCh,
+		capacityCh:     cfg.CapacityCh,
+		ctx:            ctx,
+		cancel:         cancel,
+		done:           make(chan struct{}),
+		results:        make(chan dispatchWorkerResult, 1),
+		pollResults:    make(chan pollWorkerResult, 1),
+		pollInFlight:   map[string]bool{},
+		poll:           cfg.Poll,
+		pollJitter:     jitter,
+		maxPollWorkers: maxPollWorkers,
+		unreported:     map[workflow.ExecutionIdentity]unreportedEntry{},
 	}
 	go r.loop()
 	return r
@@ -328,6 +383,27 @@ func (r *Runner) loop() {
 		case ResultNotLeader:
 			dropLeadership()
 			lostLead = true
+		case ResultParked:
+			for _, seed := range res.result.PollSeeds {
+				cursor := PollCursor{
+					WorkflowID:   seed.WorkflowID,
+					NodeID:       seed.NodeID,
+					ActivationID: seed.ActivationID,
+					GateID:       seed.GateID,
+					AdapterID:    seed.AdapterID,
+					SubjectHash:  seed.SubjectHash,
+				}
+				if _, _, err := r.store.EnsurePollCursor(r.controllerID, cursor, r.now().Add(pollBaseDelay)); err != nil {
+					log.Printf("workflow controller %s: ensure poll cursor %s: %v", r.controllerID, PollCursorKey(cursor), err)
+				}
+			}
+			r.setStatus(func(s *RunnerStatus) { s.LastOutcome = string(ResultParked) })
+		case ResultUnresolvedBinding:
+			name := string(res.identity.WorkflowID) + "/" + string(res.identity.NodeID) + "/" + string(res.identity.ActivationID)
+			if _, err := r.store.RecordDiagnostic(r.controllerID, "unresolved_binding", name, res.result.Detail); err != nil {
+				log.Printf("workflow controller %s: record unresolved_binding: %v", r.controllerID, err)
+			}
+			r.setStatus(func(s *RunnerStatus) { s.LastOutcome = string(ResultUnresolvedBinding) })
 		default:
 			r.setStatus(func(s *RunnerStatus) { s.LastOutcome = string(res.result.Kind) })
 		}
@@ -362,6 +438,19 @@ func (r *Runner) loop() {
 			}
 		}
 	}
+	// drainPollResults consumes completed poll worker results without
+	// blocking, folding their outcomes into the current pass.
+	drainPollResults := func() {
+		for {
+			select {
+			case res := <-r.pollResults:
+				r.pendingPolls--
+				r.handlePollOutcome(res.outcome)
+			default:
+				return
+			}
+		}
+	}
 	// drainWorkers waits for every outstanding worker before exiting so no
 	// goroutine outlives the runner.
 	drainWorkers := func() {
@@ -369,6 +458,11 @@ func (r *Runner) loop() {
 			res := <-r.results
 			r.outstanding--
 			decrementUnreported(res.identity)
+		}
+		for r.pendingPolls > 0 {
+			res := <-r.pollResults
+			r.pendingPolls--
+			r.handlePollOutcome(res.outcome)
 		}
 	}
 	// arm schedules the next wakeup at d.
@@ -389,6 +483,9 @@ func (r *Runner) loop() {
 			r.outstanding--
 			decrementUnreported(res.identity)
 			handleResult(res)
+		case res := <-r.pollResults:
+			r.pendingPolls--
+			r.handlePollOutcome(res.outcome)
 		}
 	}
 	// waitOrCancel arms the timer at d and waits for it, cancellation, or a
@@ -413,6 +510,10 @@ func (r *Runner) loop() {
 			r.outstanding--
 			decrementUnreported(res.identity)
 			handleResult(res)
+			return wakeResult, false
+		case res := <-r.pollResults:
+			r.pendingPolls--
+			r.handlePollOutcome(res.outcome)
 			return wakeResult, false
 		}
 	}
@@ -479,6 +580,13 @@ func (r *Runner) loop() {
 		wait := r.antiEntropy
 		if d := nextRenewDue.Sub(r.now()); d < wait {
 			wait = d
+		}
+		// Poll scheduling shares the pass: due cursors are offered to bounded
+		// workers and the wait folds in the earliest scheduled next poll.
+		if r.poll != nil {
+			drainPollResults()
+			r.offerPolls()
+			wait = r.nextPollWait(wait)
 		}
 		refreshed := false
 		if lastRefresh.IsZero() || r.now().Sub(lastRefresh) >= r.antiEntropy {
