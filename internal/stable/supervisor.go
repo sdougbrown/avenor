@@ -356,10 +356,14 @@ type Supervisor struct {
 	// slot but have not yet converted into a registered runtime. Guarded by
 	// controlMu; the local capacity limit is enforced against active runtimes
 	// plus this count.
-	outstandingReservations      int
-	shuttingDown                 bool
-	shutdownCh                   chan struct{}
-	shutdownChOnce               sync.Once
+	outstandingReservations int
+	shuttingDown            bool
+	shutdownCh              chan struct{}
+	shutdownChOnce          sync.Once
+	// heartbeatMu guards heartbeats, the registry of live executor lease
+	// heartbeat goroutines stopped on supervisor shutdown.
+	heartbeatMu                  sync.Mutex
+	heartbeats                   map[*leaseHeartbeat]struct{}
 	runtimeActivity              chan struct{}
 	childQuestionSeq             int
 	pendingQuestions             map[string]pendingChildQuestion // child runtime ID -> pending question
@@ -425,6 +429,7 @@ func NewSupervisor(cfg Config) *Supervisor {
 		fileSnapshots:           map[string][]string{},
 		sessionIdentities:       map[string]sessionIdentityEntry{},
 		sessionOwners:           map[string]*sessionAttempt{},
+		heartbeats:              map[*leaseHeartbeat]struct{}{},
 	}
 	sup.broker = broker.New("")
 	if err := sup.broker.Start(); err != nil {
@@ -2962,6 +2967,7 @@ func (s *Supervisor) shutdown(mode string) int {
 		runtimes = append(runtimes, rt)
 	}
 	s.controlMu.Unlock()
+	s.stopLeaseHeartbeats()
 
 	if s.afterShutdownAdmissionClosed != nil {
 		s.afterShutdownAdmissionClosed()
@@ -4652,19 +4658,21 @@ func (s *Supervisor) directRunExecutor() workflow.Executor {
 
 type directRunExecutor struct{ sup *Supervisor }
 
-// Replacement path (Stage 13, phase 3): when a lease expires (live detector
-// or restart recovery), the activation is durably left lease_expired with no
-// lease and is re-claimable; a replacement claim + start through the manager
+// Replacement path: when a lease expires (live detector or restart
+// recovery), the activation is durably left lease_expired with no lease and
+// is re-claimable; a replacement claim + start through the manager
 // dispatches a new attempt to the same executor, and the kernel appends it
 // to the SAME activation (prior attempts preserved). Executors are
 // attempt-agnostic, so the replacement attempt is dispatchable with no
-// executor change. The owner-token heartbeat seam is reachable here too: the
-// executor holds e.sup.workflowManager() and the start carries the claim
-// token in ExecutorContext.OwnerToken, so an executor can renew its own
-// lease via workflowManager().Heartbeat(workflowID, nodeID, activationID,
-// leaseID, ec.OwnerToken). A live periodic heartbeat goroutine in the
-// executors is a later hardening, intentionally not implemented in this
-// stage.
+// executor change.
+//
+// Lease liveness: every executor starts one heartbeat goroutine per attempt
+// once its runtime has started (see startLeaseHeartbeat). The heartbeat
+// renews the attempt's lease every TTL/3 via
+// workflowManager().Heartbeat(workflowID, nodeID, activationID, leaseID,
+// ec.OwnerToken) and stops when the runtime reaches a terminal state (via
+// registerWorkflowTermination), when the lease is no longer held, or on
+// supervisor shutdown — it never outlives the runtime.
 
 func (e *directRunExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext) error {
 	params := SpawnParams{
@@ -4697,7 +4705,8 @@ func (e *directRunExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorCo
 			ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, workflow.AttemptFailed)
 		return err
 	}
-	e.sup.registerWorkflowTermination(result.RuntimeID, ec)
+	hb := e.sup.startLeaseHeartbeat(ec)
+	e.sup.registerWorkflowTermination(result.RuntimeID, ec, hb)
 	return nil
 }
 
@@ -4741,7 +4750,8 @@ func (e *loopExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext
 			ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, workflow.AttemptFailed, kind, label)
 		return err
 	}
-	e.sup.registerWorkflowTermination(result.RuntimeID, ec)
+	hb := e.sup.startLeaseHeartbeat(ec)
+	e.sup.registerWorkflowTermination(result.RuntimeID, ec, hb)
 	return nil
 }
 
@@ -4785,7 +4795,8 @@ func (e *teamExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext
 			ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, workflow.AttemptFailed, kind, label)
 		return err
 	}
-	e.sup.registerWorkflowTermination(result.RuntimeID, ec)
+	hb := e.sup.startLeaseHeartbeat(ec)
+	e.sup.registerWorkflowTermination(result.RuntimeID, ec, hb)
 	return nil
 }
 
@@ -4818,9 +4829,11 @@ func workflowMarkerForKind(kind workflow.ActionKind) (string, string) {
 }
 
 // registerWorkflowTermination attaches a termination callback to the spawned
-// direct-run child so the workflow manager learns the attempt's final status
-// before the child's runtime state is cleaned up.
-func (s *Supervisor) registerWorkflowTermination(rtID string, ec workflow.ExecutorContext) {
+// workflow child so the workflow manager learns the attempt's final status
+// before the child's runtime state is cleaned up. The callback first stops
+// the attempt's lease heartbeat and waits for it to exit, so no heartbeat is
+// applied after the terminal fact.
+func (s *Supervisor) registerWorkflowTermination(rtID string, ec workflow.ExecutorContext, hb *leaseHeartbeat) {
 	s.controlMu.Lock()
 	child := s.runtimes[rtID]
 	s.controlMu.Unlock()
@@ -4830,6 +4843,7 @@ func (s *Supervisor) registerWorkflowTermination(rtID string, ec workflow.Execut
 	child.mu.Lock()
 	defer child.mu.Unlock()
 	child.onWorkflowTerminate = func(status workflow.AttemptStatus) {
+		hb.StopAndWait()
 		kind, label := workflowMarkerForKind(ec.Action.Kind)
 		_ = s.workflowManager().RecordAttemptTerminated(
 			ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, status, kind, label)

@@ -121,13 +121,17 @@ type ExecutorContext struct {
 	LeaseID      LeaseID
 	// OwnerToken is the raw claim owner token for this attempt's lease. It is
 	// additive and inert: the reducer/store never sees it, but the executor
-	// layer can use it (with LeaseID) to renew its own lease via
-	// Manager.Heartbeat — the owner-token heartbeat seam. A live heartbeat
-	// goroutine in the executors is a later hardening, not part of this stage.
-	// Executors must never marshal ExecutorContext (or OwnerToken) into the workflow store's snapshots or event log, so the raw claim token can never become durable.
+	// layer uses it (with LeaseID) to renew its own lease via
+	// Manager.Heartbeat — the owner-token heartbeat seam. Executors must
+	// never marshal ExecutorContext (or OwnerToken) into the workflow store's
+	// snapshots or event log, so the raw claim token can never become durable.
 	OwnerToken string
-	Action     Action
-	Selection  *ExecutionSelection
+	// LeaseTTL is the effective TTL of this attempt's lease at claim time. It
+	// sets the executor heartbeat cadence (TTL/3); zero falls back to
+	// DefaultLeaseTTL.
+	LeaseTTL  time.Duration
+	Action    Action
+	Selection *ExecutionSelection
 	// Admission optionally carries a pre-reserved runtime admission for this
 	// attempt's first start. Nil means the executor's start self-reserves
 	// through the ordinary spawn path (manual and legacy starts).
@@ -878,6 +882,7 @@ func (m *Manager) commandStart(wf WorkflowID, payload json.RawMessage) (any, err
 		AttemptID:    attemptID,
 		LeaseID:      req.LeaseID,
 		OwnerToken:   req.OwnerToken,
+		LeaseTTL:     leaseTTL(node, tmpl.DefaultLease),
 		Action:       node.Action,
 		Selection:    selection,
 	}); err != nil {

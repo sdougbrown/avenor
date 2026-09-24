@@ -205,6 +205,7 @@ func (s *Supervisor) dispatchWorkflowNode(ctx context.Context, req DispatchReque
 		AttemptID:    begin.AttemptID,
 		LeaseID:      begin.LeaseID,
 		OwnerToken:   begin.OwnerToken,
+		LeaseTTL:     begin.LeaseTTL,
 		Action:       begin.Action,
 		Selection:    begin.Selection,
 		Admission:    res,

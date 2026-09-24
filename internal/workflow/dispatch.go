@@ -62,8 +62,11 @@ type BeginDispatchResult struct {
 	AttemptID    AttemptID
 	LeaseID      LeaseID
 	OwnerToken   string
-	Action       Action
-	Selection    *ExecutionSelection
+	// LeaseTTL is the effective TTL of the granted lease; the executor uses
+	// it as the base for its heartbeat cadence (TTL/3).
+	LeaseTTL  time.Duration
+	Action    Action
+	Selection *ExecutionSelection
 }
 
 // FinalizeDispatchRequest records the outcome of one dispatch: the actual
@@ -284,6 +287,7 @@ func (m *Manager) BeginDispatch(req BeginDispatchRequest) (BeginDispatchResult, 
 		AttemptID:    attemptID,
 		LeaseID:      leaseID,
 		OwnerToken:   token,
+		LeaseTTL:     ttl,
 		Action:       node.Action,
 		Selection:    selection,
 	}, nil
