@@ -58,6 +58,22 @@ type fakeClient struct {
 	workflowEventsCalls    []workflowEventsCall
 	workflowCompleteCalls  []workflowCompleteCall
 	workflowGateCalls      []workflowGateCall
+
+	workflowControllerStatusResult  map[string]any
+	workflowControllerListResult    map[string]any
+	workflowControllerCreateResult  map[string]any
+	workflowControllerEnableResult  map[string]any
+	workflowControllerDisableResult map[string]any
+	workflowControllerStatusErr     error
+	workflowControllerListErr       error
+	workflowControllerCreateErr     error
+	workflowControllerEnableErr     error
+	workflowControllerDisableErr    error
+	workflowControllerStatusCalls   []string
+	workflowControllerListCalls     int
+	workflowControllerCreateCalls   []json.RawMessage
+	workflowControllerEnableCalls   []string
+	workflowControllerDisableCalls  []workflowControllerDisableCall
 }
 
 type workflowWaitCall struct {
@@ -79,6 +95,11 @@ type workflowCompleteCall struct {
 type workflowGateCall struct {
 	workflowID string
 	fields     map[string]any
+}
+
+type workflowControllerDisableCall struct {
+	controllerID string
+	reason       string
 }
 
 type permissionCall struct {
@@ -163,6 +184,31 @@ func (f *fakeClient) WorkflowGate(workflowID string, fields map[string]any) (map
 	return f.workflowGateResult, f.workflowGateErr
 }
 
+func (f *fakeClient) WorkflowControllerCreate(request json.RawMessage) (map[string]any, error) {
+	f.workflowControllerCreateCalls = append(f.workflowControllerCreateCalls, request)
+	return f.workflowControllerCreateResult, f.workflowControllerCreateErr
+}
+
+func (f *fakeClient) WorkflowControllerEnable(controllerID string) (map[string]any, error) {
+	f.workflowControllerEnableCalls = append(f.workflowControllerEnableCalls, controllerID)
+	return f.workflowControllerEnableResult, f.workflowControllerEnableErr
+}
+
+func (f *fakeClient) WorkflowControllerDisable(controllerID, reason string) (map[string]any, error) {
+	f.workflowControllerDisableCalls = append(f.workflowControllerDisableCalls, workflowControllerDisableCall{controllerID, reason})
+	return f.workflowControllerDisableResult, f.workflowControllerDisableErr
+}
+
+func (f *fakeClient) WorkflowControllerStatus(controllerID string) (map[string]any, error) {
+	f.workflowControllerStatusCalls = append(f.workflowControllerStatusCalls, controllerID)
+	return f.workflowControllerStatusResult, f.workflowControllerStatusErr
+}
+
+func (f *fakeClient) WorkflowControllerList() (map[string]any, error) {
+	f.workflowControllerListCalls++
+	return f.workflowControllerListResult, f.workflowControllerListErr
+}
+
 type spawnCountingClient struct {
 	spawns atomic.Int32
 }
@@ -188,6 +234,21 @@ func (c *spawnCountingClient) WorkflowComplete(string, map[string]any) (map[stri
 	return nil, nil
 }
 func (c *spawnCountingClient) WorkflowGate(string, map[string]any) (map[string]any, error) {
+	return nil, nil
+}
+func (c *spawnCountingClient) WorkflowControllerCreate(json.RawMessage) (map[string]any, error) {
+	return nil, nil
+}
+func (c *spawnCountingClient) WorkflowControllerEnable(string) (map[string]any, error) {
+	return nil, nil
+}
+func (c *spawnCountingClient) WorkflowControllerDisable(string, string) (map[string]any, error) {
+	return nil, nil
+}
+func (c *spawnCountingClient) WorkflowControllerStatus(string) (map[string]any, error) {
+	return nil, nil
+}
+func (c *spawnCountingClient) WorkflowControllerList() (map[string]any, error) {
 	return nil, nil
 }
 

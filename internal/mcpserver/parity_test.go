@@ -21,8 +21,9 @@ var tsToolNames = []string{
 	"avenor_shutdown",
 }
 
-// workflowToolNames lists the six Go-only MCP workflow tools (Stage 14). These
-// have no TypeScript reference yet; JS host parity is deferred to Stage 15.
+// workflowToolNames lists the six Go-only MCP workflow tools (Stage 14) plus
+// the five Go-only MCP workflow-controller tools. These have no TypeScript
+// reference yet; JS host parity is deferred to Stage 15.
 var workflowToolNames = []string{
 	"avenor_workflow_status",
 	"avenor_workflow_wait",
@@ -30,6 +31,11 @@ var workflowToolNames = []string{
 	"avenor_workflow_events",
 	"avenor_workflow_complete",
 	"avenor_workflow_gate",
+	"avenor_workflow_controller_status",
+	"avenor_workflow_controller_list",
+	"avenor_workflow_controller_create",
+	"avenor_workflow_controller_enable",
+	"avenor_workflow_controller_disable",
 }
 
 func TestToolNameParity(t *testing.T) {
@@ -173,6 +179,40 @@ func TestSchemaFieldParity(t *testing.T) {
 		allowed := []string{"workflow_id", "node_id", "gate_id", "activation_id", "operation", "actor", "reason", "outcome", "subject", "poll_id", "source", "result", "response_hash", "observed_at", "evidence_ids", "supervisor_id"}
 		required := []string{"workflow_id", "node_id", "gate_id", "activation_id", "operation"}
 		assertFields(t, "workflowGateArgs", allowed, required)
+	})
+
+	t.Run("avenor_workflow_controller_status", func(t *testing.T) {
+		// workflowControllerStatusArgs — required: controller_id; optional: supervisor_id
+		allowed := []string{"controller_id", "supervisor_id"}
+		assertFields(t, "workflowControllerStatusArgs", allowed, []string{"controller_id"})
+	})
+
+	t.Run("avenor_workflow_controller_list", func(t *testing.T) {
+		// workflowControllerListArgs — all optional: supervisor_id
+		allowed := []string{"supervisor_id"}
+		assertFields(t, "workflowControllerListArgs", allowed, nil)
+	})
+
+	t.Run("avenor_workflow_controller_create", func(t *testing.T) {
+		// workflowControllerCreateArgs — required: controller_id, max_inflight;
+		// optional: supervisor_id
+		allowed := []string{"controller_id", "max_inflight", "supervisor_id"}
+		required := []string{"controller_id", "max_inflight"}
+		assertFields(t, "workflowControllerCreateArgs", allowed, required)
+	})
+
+	t.Run("avenor_workflow_controller_enable", func(t *testing.T) {
+		// workflowControllerEnableArgs — required: controller_id; optional: supervisor_id
+		allowed := []string{"controller_id", "supervisor_id"}
+		assertFields(t, "workflowControllerEnableArgs", allowed, []string{"controller_id"})
+	})
+
+	t.Run("avenor_workflow_controller_disable", func(t *testing.T) {
+		// workflowControllerDisableArgs — required: controller_id, reason;
+		// optional: supervisor_id
+		allowed := []string{"controller_id", "reason", "supervisor_id"}
+		required := []string{"controller_id", "reason"}
+		assertFields(t, "workflowControllerDisableArgs", allowed, required)
 	})
 }
 
@@ -490,6 +530,56 @@ func assertFields(t *testing.T, structName string, allowed, required []string) {
 		if string(a.Subject) == "" || a.ObservedAt != "2024-01-01T00:00:00Z" || len(a.EvidenceIDs) != 1 {
 			t.Errorf("%s: structured fields not populated correctly", structName)
 		}
+	case "workflowControllerStatusArgs":
+		data := map[string]any{"controller_id": "c-1", "supervisor_id": "s"}
+		b, _ := json.Marshal(data)
+		var a workflowControllerStatusArgs
+		if err := json.Unmarshal(b, &a); err != nil {
+			t.Fatalf("%s: unmarshal: %v", structName, err)
+		}
+		if a.ControllerID != "c-1" || a.SupervisorID != "s" {
+			t.Errorf("%s: fields not populated correctly", structName)
+		}
+	case "workflowControllerListArgs":
+		data := map[string]any{"supervisor_id": "s"}
+		b, _ := json.Marshal(data)
+		var a workflowControllerListArgs
+		if err := json.Unmarshal(b, &a); err != nil {
+			t.Fatalf("%s: unmarshal: %v", structName, err)
+		}
+		if a.SupervisorID != "s" {
+			t.Errorf("%s: fields not populated correctly", structName)
+		}
+	case "workflowControllerCreateArgs":
+		data := map[string]any{"controller_id": "c-1", "max_inflight": float64(5), "supervisor_id": "s"}
+		b, _ := json.Marshal(data)
+		var a workflowControllerCreateArgs
+		if err := json.Unmarshal(b, &a); err != nil {
+			t.Fatalf("%s: unmarshal: %v", structName, err)
+		}
+		if a.ControllerID != "c-1" || a.MaxInflight != 5 || a.SupervisorID != "s" {
+			t.Errorf("%s: fields not populated correctly", structName)
+		}
+	case "workflowControllerEnableArgs":
+		data := map[string]any{"controller_id": "c-1", "supervisor_id": "s"}
+		b, _ := json.Marshal(data)
+		var a workflowControllerEnableArgs
+		if err := json.Unmarshal(b, &a); err != nil {
+			t.Fatalf("%s: unmarshal: %v", structName, err)
+		}
+		if a.ControllerID != "c-1" || a.SupervisorID != "s" {
+			t.Errorf("%s: fields not populated correctly", structName)
+		}
+	case "workflowControllerDisableArgs":
+		data := map[string]any{"controller_id": "c-1", "reason": "why", "supervisor_id": "s"}
+		b, _ := json.Marshal(data)
+		var a workflowControllerDisableArgs
+		if err := json.Unmarshal(b, &a); err != nil {
+			t.Fatalf("%s: unmarshal: %v", structName, err)
+		}
+		if a.ControllerID != "c-1" || a.Reason != "why" || a.SupervisorID != "s" {
+			t.Errorf("%s: fields not populated correctly", structName)
+		}
 	}
 
 	// Verify required fields: send JSON without required fields and confirm
@@ -533,6 +623,16 @@ func assertSchemaTags(t *testing.T, structName string, allowed, required []strin
 		typ = reflect.TypeOf(workflowCompleteArgs{})
 	case "workflowGateArgs":
 		typ = reflect.TypeOf(workflowGateArgs{})
+	case "workflowControllerStatusArgs":
+		typ = reflect.TypeOf(workflowControllerStatusArgs{})
+	case "workflowControllerListArgs":
+		typ = reflect.TypeOf(workflowControllerListArgs{})
+	case "workflowControllerCreateArgs":
+		typ = reflect.TypeOf(workflowControllerCreateArgs{})
+	case "workflowControllerEnableArgs":
+		typ = reflect.TypeOf(workflowControllerEnableArgs{})
+	case "workflowControllerDisableArgs":
+		typ = reflect.TypeOf(workflowControllerDisableArgs{})
 	default:
 		t.Fatalf("unknown struct: %s", structName)
 	}
