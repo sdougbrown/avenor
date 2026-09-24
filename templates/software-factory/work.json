@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
   "template_id": "software-factory-work",
-  "template_version": "1.0.0",
+  "template_version": "1.1.0",
   "metadata": {
     "title": "Software factory work",
-    "description": "One review unit of software-factory work: intake, assessment, plan, hardening, execution, verification, publication, and exact-head CI + external review with declared review branches. Campaign coordination is out of scope; this template is one workflow for one review unit.",
+    "description": "One review unit of software-factory work: intake, assessment, plan, hardening, execution, verification, publication, and exact-head CI + external review with declared review branches. Provider-backed nodes dispatch automatically under the software-factory workflow controller and serialize on one worktree concurrency key; hardening stays a provider-backed run with manual dispatch; merge authorization remains a manual human gate. Campaign coordination is out of scope; this template is one workflow for one review unit.",
     "source": "https://github.com/sdougbrown/avenor"
   },
   "entry_nodes": ["intake"],
@@ -29,6 +29,12 @@
       "dependencies": ["intake"],
       "action": { "type": "run", "prompt_file": "prompts/assessment.md" },
       "assignment": { "role": "assessor", "roster_entry": "assessor" },
+      "dispatch": {
+        "mode": "auto",
+        "controller_id": "software-factory",
+        "priority": 30,
+        "concurrency_key": "worktree:software-factory-review-unit"
+      },
       "outputs": [
         { "id": "assessment", "name": "Assessment", "type": "file", "required": true }
       ],
@@ -44,6 +50,12 @@
       "dependencies": ["assessment"],
       "action": { "type": "run", "prompt_file": "prompts/draft-plan.md" },
       "assignment": { "role": "planner", "roster_entry": "planner" },
+      "dispatch": {
+        "mode": "auto",
+        "controller_id": "software-factory",
+        "priority": 30,
+        "concurrency_key": "worktree:software-factory-review-unit"
+      },
       "outputs": [
         { "id": "plan", "name": "Plan", "type": "file", "required": true }
       ],
@@ -59,6 +71,7 @@
       "dependencies": ["draft-plan"],
       "action": { "type": "run", "prompt_file": "prompts/hardening.md" },
       "assignment": { "role": "hardener", "roster_entry": "hardener" },
+      "dispatch": { "mode": "manual" },
       "outputs": [
         { "id": "hardened_plan", "name": "Hardened plan", "type": "file", "required": true }
       ],
@@ -74,6 +87,12 @@
       "dependencies": ["hardening"],
       "action": { "type": "loop", "loop_file": "loops/execution.json" },
       "assignment": { "role": "executor", "roster_entry": "executor" },
+      "dispatch": {
+        "mode": "auto",
+        "controller_id": "software-factory",
+        "priority": 40,
+        "concurrency_key": "worktree:software-factory-review-unit"
+      },
       "outputs": [
         { "id": "summary", "name": "Execution summary", "type": "string" }
       ],
@@ -89,6 +108,12 @@
       "dependencies": ["execution"],
       "action": { "type": "team", "team_file": "teams/verification.json" },
       "assignment": { "role": "reviewer", "roster_entry": "reviewer" },
+      "dispatch": {
+        "mode": "auto",
+        "controller_id": "software-factory",
+        "priority": 40,
+        "concurrency_key": "worktree:software-factory-review-unit"
+      },
       "outputs": [
         { "id": "verification", "name": "Verification", "type": "file", "required": true }
       ],
@@ -104,7 +129,14 @@
       "dependencies": ["verification"],
       "action": { "type": "run", "prompt_file": "prompts/publication.md" },
       "assignment": { "role": "publisher", "roster_entry": "publisher" },
+      "dispatch": {
+        "mode": "auto",
+        "controller_id": "software-factory",
+        "priority": 60,
+        "concurrency_key": "worktree:software-factory-review-unit"
+      },
       "outputs": [
+        { "id": "repository", "name": "Repository", "type": "string", "required": true },
         { "id": "pr_head", "name": "PR head SHA", "type": "string", "required": true },
         { "id": "pr_number", "name": "PR number", "type": "number", "required": true }
       ],
@@ -119,9 +151,13 @@
       "name": "CI + external review",
       "dependencies": ["publication"],
       "action": { "type": "external", "source": "github", "subject_type": "pull_request" },
-      "outputs": [
-        { "id": "pr_head", "name": "Reviewed head SHA", "type": "string", "required": true }
-      ],
+      "dispatch": {
+        "mode": "auto",
+        "controller_id": "software-factory",
+        "priority": 60,
+        "concurrency_key": "worktree:software-factory-review-unit",
+        "success_outcome": "clean"
+      },
       "completion": { "kind": "explicit" },
       "gates": [
         {
@@ -130,6 +166,23 @@
           "type": "external",
           "required": true,
           "subject_type": "pull_request",
+          "adapter_id": "circleci-pipeline",
+          "inputs": {
+            "repository": { "from_node_output": { "node_id": "publication", "output_id": "repository" } },
+            "pull_number": { "from_node_output": { "node_id": "publication", "output_id": "pr_number" } },
+            "head_sha": { "from_node_output": { "node_id": "publication", "output_id": "pr_head" } }
+          },
+          "subject_binding": {
+            "type": "pull_request",
+            "repository": { "from_node_output": { "node_id": "publication", "output_id": "repository" } },
+            "pull_request": { "from_node_output": { "node_id": "publication", "output_id": "pr_number" } },
+            "revision": { "from_node_output": { "node_id": "publication", "output_id": "pr_head" } }
+          },
+          "result_outcomes": {
+            "changes_requested": "changes_requested",
+            "action_required": "action_required",
+            "failed": "replan"
+          },
           "allowed_outcomes": ["clean", "changes_requested", "action_required", "replan", "checkpoint"]
         },
         {
@@ -138,6 +191,23 @@
           "type": "external",
           "required": true,
           "subject_type": "pull_request",
+          "adapter_id": "github-pr-review",
+          "inputs": {
+            "repository": { "from_node_output": { "node_id": "publication", "output_id": "repository" } },
+            "pull_number": { "from_node_output": { "node_id": "publication", "output_id": "pr_number" } },
+            "head_sha": { "from_node_output": { "node_id": "publication", "output_id": "pr_head" } }
+          },
+          "subject_binding": {
+            "type": "pull_request",
+            "repository": { "from_node_output": { "node_id": "publication", "output_id": "repository" } },
+            "pull_request": { "from_node_output": { "node_id": "publication", "output_id": "pr_number" } },
+            "revision": { "from_node_output": { "node_id": "publication", "output_id": "pr_head" } }
+          },
+          "result_outcomes": {
+            "changes_requested": "changes_requested",
+            "action_required": "action_required",
+            "failed": "replan"
+          },
           "allowed_outcomes": ["clean", "changes_requested", "action_required", "replan", "checkpoint"]
         }
       ],
@@ -158,6 +228,12 @@
       "dependencies": ["review"],
       "action": { "type": "run", "prompt_file": "prompts/correction.md" },
       "assignment": { "role": "executor", "roster_entry": "executor" },
+      "dispatch": {
+        "mode": "auto",
+        "controller_id": "software-factory",
+        "priority": 70,
+        "concurrency_key": "worktree:software-factory-review-unit"
+      },
       "outputs": [
         { "id": "correction_summary", "name": "Correction summary", "type": "string" }
       ],
@@ -173,6 +249,12 @@
       "dependencies": ["correction"],
       "action": { "type": "team", "team_file": "teams/reverify.json" },
       "assignment": { "role": "reviewer", "roster_entry": "reviewer" },
+      "dispatch": {
+        "mode": "auto",
+        "controller_id": "software-factory",
+        "priority": 60,
+        "concurrency_key": "worktree:software-factory-review-unit"
+      },
       "outputs": [
         { "id": "reverify", "name": "Reverify", "type": "file", "required": true }
       ],
@@ -201,6 +283,12 @@
           "type": "human",
           "required": true,
           "subject_type": "pull_request",
+          "subject_binding": {
+            "type": "pull_request",
+            "repository": { "from_node_output": { "node_id": "publication", "output_id": "repository" } },
+            "pull_request": { "from_node_output": { "node_id": "publication", "output_id": "pr_number" } },
+            "revision": { "from_node_output": { "node_id": "publication", "output_id": "pr_head" } }
+          },
           "allowed_outcomes": ["authorized"]
         }
       ],
@@ -227,6 +315,12 @@
       "dependencies": ["merge-auth"],
       "action": { "type": "run", "prompt_file": "prompts/reconciliation.md" },
       "assignment": { "role": "reconciler", "roster_entry": "reconciler" },
+      "dispatch": {
+        "mode": "auto",
+        "controller_id": "software-factory",
+        "priority": 50,
+        "concurrency_key": "worktree:software-factory-review-unit"
+      },
       "outputs": [
         { "id": "reconciliation", "name": "Reconciliation", "type": "file", "required": true }
       ],
