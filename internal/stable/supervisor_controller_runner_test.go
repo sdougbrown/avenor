@@ -709,6 +709,32 @@ func TestControllerRunnerCollidingRuntimeIDsIndependentProgress(t *testing.T) {
 		t.Fatalf("live attempts after refresh = %+v, want wf1 under c1 and wf2 under c2 (independent identities)", byWorkflow)
 	}
 
+	// Candidate identities carry the full execution identity — supervisor ID
+	// plus workflow, node, and activation — and controller c1's candidate
+	// query and in-flight count cover only its own workflow despite the
+	// shared colliding runtime id.
+	cands, err := f1.mgr.CandidatesForController("c1", 0)
+	if err != nil {
+		t.Fatalf("CandidatesForController: %v", err)
+	}
+	for _, c := range cands {
+		if c.Identity.SupervisorID != f1.sup.supervisorIdentity() {
+			t.Fatalf("candidate identity supervisor = %q, want %q", c.Identity.SupervisorID, f1.sup.supervisorIdentity())
+		}
+		if c.Identity.WorkflowID != workflow.WorkflowID(wf1) {
+			t.Fatalf("controller c1 candidate for foreign workflow %s", c.Identity.WorkflowID)
+		}
+	}
+	owned := 0
+	for _, la := range live {
+		if la.ControllerID == "c1" {
+			owned++
+		}
+	}
+	if owned != 1 {
+		t.Fatalf("controller c1 in-flight count = %d, want exactly its own 1", owned)
+	}
+
 	// Releasing one supervisor's runtime does not disturb the other's
 	// progress.
 	_ = f1.sup.cancelRuntime("rt_1")
@@ -717,6 +743,121 @@ func TestControllerRunnerCollidingRuntimeIDsIndependentProgress(t *testing.T) {
 	})
 	if got := len(f2.runningAttempts(t, wf2)); got != 1 {
 		t.Fatalf("wf2 live attempts after wf1 termination = %d, want its own attempt untouched", got)
+	}
+}
+
+// TestControllerViewsIsolatedAcrossSupervisorRoots proves two supervisors on
+// separate workflow roots whose first runtimes share the colliding id rt_1
+// keep their controller views distinct: candidate identities and the
+// live-attempt view are keyed by supervisor ID plus workflow, node,
+// activation, and attempt, so the controller on supervisor A never counts or
+// selects supervisor B's rt_1 attempt.
+func TestControllerViewsIsolatedAcrossSupervisorRoots(t *testing.T) {
+	f1 := newRunnerFixture(t, "runner-iso-a", filepath.Join(t.TempDir(), "root-a"), 2, 4, true)
+	f1.controllerID = "c1"
+	wf1 := f1.addWorkflow(t, "iso-a", "c1", "")
+	// The workflow package resolves dispatch policies through the most
+	// recently constructed manager, so supervisor B and its workflow are
+	// created only after supervisor A's workflow snapshot exists.
+	f2 := newRunnerFixture(t, "runner-iso-b", filepath.Join(t.TempDir(), "root-b"), 2, 4, true)
+	f2.controllerID = "c2"
+	wf2 := f2.addWorkflow(t, "iso-b", "c2", "")
+
+	// Before any dispatch, each supervisor's candidate index holds only its
+	// own workflow's activation, identified by its own supervisor identity,
+	// and controller c2's candidates are invisible to supervisor A.
+	for _, f := range []*runnerFixture{f1, f2} {
+		if err := f.mgr.RebuildCandidateIndex(f.sup.supervisorIdentity()); err != nil {
+			t.Fatalf("RebuildCandidateIndex: %v", err)
+		}
+	}
+	cands, err := f1.mgr.CandidatesForController("c1", 0)
+	if err != nil {
+		t.Fatalf("CandidatesForController on A: %v", err)
+	}
+	if len(cands) != 1 || cands[0].Identity.WorkflowID != workflow.WorkflowID(wf1) || cands[0].Identity.SupervisorID != f1.sup.supervisorIdentity() {
+		t.Fatalf("candidates on A = %+v, want exactly its own workflow under supervisor %q", cands, f1.sup.supervisorIdentity())
+	}
+	if foreign, err := f1.mgr.CandidatesForController("c2", 0); err != nil || len(foreign) != 0 {
+		t.Fatalf("candidates on A for B's controller = %+v (err %v), want none", foreign, err)
+	}
+
+	f1.enableController(t, "c1", 4)
+	f2.enableController(t, "c2", 4)
+	waitFor(t, "both supervisors dispatched their own workflow", func() bool {
+		return f1.sup.activeRuntimeCount() == 1 && f2.sup.activeRuntimeCount() == 1
+	})
+
+	// Both runtimes exist under the colliding id rt_1, one per supervisor.
+	for _, f := range []*runnerFixture{f1, f2} {
+		rts := f.sup.listRuntimes()
+		if len(rts) != 1 || rts[0]["runtime_id"] != "rt_1" {
+			t.Fatalf("runtime list = %+v, want exactly one runtime with the colliding id rt_1", rts)
+		}
+	}
+
+	// The runner's anti-entropy refresh rebuilds the index; the live-attempt
+	// view must still carry exactly one attempt per supervisor, keyed by the
+	// full identity tuple rather than the runtime id.
+	for _, f := range []*runnerFixture{f1, f2} {
+		if err := f.mgr.RebuildCandidateIndex(f.sup.supervisorIdentity()); err != nil {
+			t.Fatalf("RebuildCandidateIndex: %v", err)
+		}
+	}
+	for _, tc := range []struct {
+		f          *runnerFixture
+		wf         string
+		controller string
+	}{{f1, wf1, "c1"}, {f2, wf2, "c2"}} {
+		live := tc.f.mgr.LiveAttempts()
+		if len(live) != 1 {
+			t.Fatalf("live attempts on %s = %+v, want exactly its own one", tc.f.sup.supervisorIdentity(), live)
+		}
+		att := tc.f.runningAttempts(t, tc.wf)
+		if len(att) != 1 {
+			t.Fatalf("workflow %s live attempts = %d, want exactly 1", tc.wf, len(att))
+		}
+		la := live[0]
+		if la.Identity.SupervisorID != tc.f.sup.supervisorIdentity() ||
+			la.Identity.WorkflowID != workflow.WorkflowID(tc.wf) ||
+			la.Identity.NodeID != att[0].Identity.NodeID ||
+			la.Identity.ActivationID != att[0].Identity.ActivationID ||
+			la.AttemptID != att[0].ID ||
+			la.ControllerID != tc.controller {
+			t.Fatalf("live attempt identity = %+v attempt %s, want supervisor %q workflow %s node %s activation %s attempt %s controller %s",
+				la.Identity, la.AttemptID, tc.f.sup.supervisorIdentity(), tc.wf,
+				att[0].Identity.NodeID, att[0].Identity.ActivationID, att[0].ID, tc.controller)
+		}
+	}
+
+	// The controller status on A reports exactly its own in-flight attempt
+	// even though supervisor B's live attempt carries the same runtime id.
+	waitFor(t, "controller c1 inflight = its own single attempt", func() bool {
+		status, err := f1.sup.WorkflowControllerStatus("c1")
+		if err != nil {
+			return false
+		}
+		sm, ok := status.(map[string]any)
+		if !ok {
+			return false
+		}
+		n, _ := sm["inflight"].(int)
+		return n == 1
+	})
+
+	// Both controllers keep their single attempt across several reconcile
+	// passes: no cross-counted dispatch and no duplicate replacement.
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		for _, tc := range []struct {
+			f  *runnerFixture
+			wf string
+		}{{f1, wf1}, {f2, wf2}} {
+			if got := len(tc.f.runningAttempts(t, tc.wf)); got != 1 {
+				t.Fatalf("workflow %s live attempts = %d during reconcile passes, want exactly 1", tc.wf, got)
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
