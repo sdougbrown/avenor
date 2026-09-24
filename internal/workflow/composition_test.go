@@ -557,7 +557,7 @@ func TestCompositionChildCreationIsIdempotent(t *testing.T) {
 	if len(comp.Children) != 1 {
 		t.Fatalf("replay manifest children = %d, want 1", len(comp.Children))
 	}
-	childID, err := m.ensureChildInstance(comp.Children[0], nil)
+	childID, err := m.ensureChildInstance(comp.Children[0], nil, nil)
 	if err != nil {
 		t.Fatalf("replayed ensureChildInstance: %v", err)
 	}
@@ -606,10 +606,10 @@ func TestCompositionPartialFailureLeavesOrphans(t *testing.T) {
 		{NodeID: "spawn1", ChildWorkflowID: DeriveChildWorkflowID(parent, "spawn1", "c1"), Template: broken},
 	}
 
-	if _, err := m.ensureChildInstance(children[0], nil); err != nil {
+	if _, err := m.ensureChildInstance(children[0], nil, nil); err != nil {
 		t.Fatalf("first child: %v", err)
 	}
-	if _, err := m.ensureChildInstance(children[1], nil); err == nil {
+	if _, err := m.ensureChildInstance(children[1], nil, nil); err == nil {
 		t.Fatal("second child materialized, want failure on unresolvable pinned grandchild")
 	} else if !strings.Contains(err.Error(), "pinned child template never-stored@1 not found") {
 		t.Fatalf("error = %v, want pinned-version rejection", err)

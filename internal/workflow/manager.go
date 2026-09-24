@@ -224,29 +224,34 @@ func (m *Manager) WorkflowCreate(payload json.RawMessage) (any, error) {
 	}, nil
 }
 
-// WorkflowInstantiate instantiates a stored template as a new active workflow.
-// When the template composes child workflows, the compose prerequisites are
-// validated up front (pinned versions resolve across the whole descendant
-// tree, no cycles, all bounds respected) and the child instances are
-// materialized eagerly — idempotently, under deterministic derived IDs —
-// before the parent's instantiate command is applied, so the parent's event
-// log never references children that do not exist. The eager materialization
-// is intentional: every composed child is created as an active instance (its
-// entry activation pending) ahead of the parent's own commit, and child
-// execution stays gated on the parent's workflow-node attach in a later
-// phase — nothing auto-claims a child. Child creation is idempotent through
-// the derived IDs: a replay that finds the child already present resumes it
-// as-is, while a concurrent creator surfaces as a revision mismatch rather
-// than being silently absorbed. If materialization fails partway, the
-// already-created children are left on disk as active, unparented workflows
-// and the caller receives only the error; orphan cleanup is out of scope for
-// this stage. The composition manifest rides on the instantiate event record
-// and is applied into the instance by the reducer.
+// WorkflowInstantiate instantiates a stored template as a new active
+// workflow. The optional params object supplies the instance parameters the
+// template declares: unknown names, missing required names, and invalid
+// values are rejected, and the accepted params are recorded immutably on the
+// instance record. When the template composes child workflows, the compose
+// prerequisites are validated up front (pinned versions resolve across the
+// whole descendant tree, no cycles, all bounds respected) and the child
+// instances are materialized eagerly — idempotently, under deterministic
+// derived IDs — before the parent's instantiate command is applied, so the
+// parent's event log never references children that do not exist. The eager
+// materialization is intentional: every composed child is created as an
+// active instance (its entry activation pending) ahead of the parent's own
+// commit, and child execution stays gated on the parent's workflow-node
+// attach in a later phase — nothing auto-claims a child. Child creation is
+// idempotent through the derived IDs: a replay that finds the child already
+// present resumes it as-is, while a concurrent creator surfaces as a
+// revision mismatch rather than being silently absorbed. If materialization
+// fails partway, the already-created children are left on disk as active,
+// unparented workflows and the caller receives only the error; orphan
+// cleanup is out of scope for this stage. The composition manifest rides on
+// the instantiate event record and is applied into the instance by the
+// reducer.
 func (m *Manager) WorkflowInstantiate(payload json.RawMessage) (any, error) {
 	var req struct {
-		TemplateID      TemplateID      `json:"template_id"`
-		TemplateVersion TemplateVersion `json:"template_version"`
-		Metadata        map[string]any  `json:"metadata,omitempty"`
+		TemplateID      TemplateID        `json:"template_id"`
+		TemplateVersion TemplateVersion   `json:"template_version"`
+		Metadata        map[string]any    `json:"metadata,omitempty"`
+		Params          map[string]string `json:"params,omitempty"`
 	}
 	if err := json.Unmarshal(payload, &req); err != nil {
 		return nil, fmt.Errorf("instantiate payload: %w", err)
@@ -264,9 +269,12 @@ func (m *Manager) WorkflowInstantiate(payload json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := validateInstanceParams(template, req.Params); err != nil {
+		return nil, err
+	}
 	wf := NewWorkflowID()
 	var materialized int
-	snap, err := m.instantiateTemplate(wf, template, &materialized)
+	snap, err := m.instantiateTemplate(wf, template, &materialized, req.Params)
 	if err != nil {
 		return nil, err
 	}
@@ -286,7 +294,7 @@ func (m *Manager) WorkflowInstantiate(payload json.RawMessage) (any, error) {
 // this call has materialized; the path rejects should the cumulative count
 // ever exceed DefaultMaximumCompositionInstances (defense in depth on top of
 // BuildComposition's tree bound).
-func (m *Manager) instantiateTemplate(wf WorkflowID, template Template, materialized *int) (Snapshot, error) {
+func (m *Manager) instantiateTemplate(wf WorkflowID, template Template, materialized *int, params map[string]string) (Snapshot, error) {
 	comp, _, err := BuildComposition(wf, template, m.resolveTemplate)
 	if err != nil {
 		return Snapshot{}, err
@@ -301,7 +309,11 @@ func (m *Manager) instantiateTemplate(wf WorkflowID, template Template, material
 		}
 	}
 	for _, child := range comp.Children {
-		if _, err := m.ensureChildInstance(child, materialized); err != nil {
+		childParams, err := resolveChildParams(template, child.NodeID, params)
+		if err != nil {
+			return Snapshot{}, err
+		}
+		if _, err := m.ensureChildInstance(child, childParams, materialized); err != nil {
 			return Snapshot{}, err
 		}
 	}
@@ -310,6 +322,7 @@ func (m *Manager) instantiateTemplate(wf WorkflowID, template Template, material
 		TemplateVersion:  template.TemplateVersion,
 		TerminalOutcomes: template.TerminalOutcomes,
 		EntryNodes:       template.EntryNodes,
+		Params:           cloneParams(params),
 	}
 	for _, child := range comp.Children {
 		record.Children = append(record.Children, ChildReference{
@@ -346,15 +359,45 @@ func (m *Manager) instantiateTemplate(wf WorkflowID, template Template, material
 // idempotency key, so a racing second creator of an existing child gets
 // errRevisionMismatch (never errDuplicateIdempotency), and that error is
 // surfaced to the caller rather than swallowed.
-func (m *Manager) ensureChildInstance(child CompositionChild, materialized *int) (WorkflowID, error) {
+func (m *Manager) ensureChildInstance(child CompositionChild, childParams map[string]string, materialized *int) (WorkflowID, error) {
 	childID := child.ChildWorkflowID
 	if _, exists, err := m.store.loadCurrent(childID); err == nil && exists {
 		return childID, nil
 	}
-	if _, err := m.instantiateTemplate(childID, child.Template, materialized); err != nil {
+	if _, err := m.instantiateTemplate(childID, child.Template, materialized, childParams); err != nil {
 		return "", err
 	}
 	return childID, nil
+}
+
+// resolveChildParams resolves one workflow-action node's declared child
+// param bindings against the parent instance's recorded params. A literal
+// binding passes its value; a from_instance_param binding passes the parent's
+// recorded value. An undeclared parent source is a composition error.
+func resolveChildParams(template Template, nodeID NodeID, params map[string]string) (map[string]string, error) {
+	node, err := findNode(&template, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	action := node.Action.Workflow
+	if action == nil || len(action.Params) == 0 {
+		return nil, nil
+	}
+	resolved := make(map[string]string, len(action.Params))
+	for _, binding := range action.Params {
+		if binding.Value != "" {
+			resolved[binding.Param] = binding.Value
+			continue
+		}
+		value, ok := params[binding.FromInstanceParam]
+		if !ok {
+			return nil, fmt.Errorf(
+				"composition: node %q passes undeclared parent instance param %q to child param %q",
+				nodeID, binding.FromInstanceParam, binding.Param)
+		}
+		resolved[binding.Param] = value
+	}
+	return resolved, nil
 }
 
 // resolveTemplate is the store-backed TemplateResolver for composition:

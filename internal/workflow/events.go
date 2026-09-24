@@ -33,6 +33,9 @@ type InstanceRecord struct {
 	TerminalOutcomes []OutcomeName    `json:"terminal_outcomes"`
 	EntryNodes       []NodeID         `json:"entry_nodes"`
 	Children         []ChildReference `json:"children,omitempty"`
+	// Params are the instance's immutable parameters, recorded so replay
+	// resolves templated concurrency keys identically to the live path.
+	Params map[string]string `json:"params,omitempty"`
 }
 
 // Event is one record in the workflow store's NDJSON log. It carries its own

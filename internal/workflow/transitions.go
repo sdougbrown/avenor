@@ -38,10 +38,32 @@ func applyDispatchPolicy(next *Snapshot, act *Activation, nodeID NodeID) {
 	if act == nil {
 		return
 	}
-	if policy := dispatchPolicyFor(next, nodeID); policy != nil &&
-		(policy.IsAuto() || policy.ConcurrencyKey != "") {
+	policy := dispatchPolicyFor(next, nodeID)
+	if policy == nil {
+		return
+	}
+	// A templated key freezes into a plain string from the instance's
+	// recorded params; replay resolves the identical string from the same
+	// durable params, so live processing and replay always agree.
+	freezeConcurrencyKey(policy, next.Instance.Params)
+	if policy.IsAuto() || policy.ConcurrencyKey != "" {
 		act.Dispatch = policy
 	}
+}
+
+// freezeConcurrencyKey resolves a templated concurrency key against the
+// instance's recorded params, replacing the policy's key spec with the plain
+// string every downstream consumer (candidate query, held-key derivation,
+// runner, manual start) reads. An undeclared or missing parameter resolves
+// to the prefix alone; instantiate-time validation makes this unreachable
+// for created instances.
+func freezeConcurrencyKey(policy *DispatchPolicy, params map[string]string) {
+	if policy.ConcurrencyKeyParams == nil {
+		return
+	}
+	spec := *policy.ConcurrencyKeyParams
+	policy.ConcurrencyKey = spec.Prefix + params[spec.FromInstanceParam]
+	policy.ConcurrencyKeyParams = nil
 }
 
 // buildCommandEvents projects a command into its event batch. Every emitted
@@ -419,6 +441,7 @@ func applyInstantiated(next *Snapshot, event Event) error {
 	next.Instance.InstanceID = instanceID
 	next.Instance.TemplateID = rec.TemplateID
 	next.Instance.TemplateVersion = rec.TemplateVersion
+	next.Instance.Params = cloneParams(rec.Params)
 	next.Instance.Revision = event.Sequence
 	next.Instance.Status = WorkflowActive
 	next.Instance.CreatedAt = now
@@ -1115,4 +1138,17 @@ func retryPolicyFor(next *Snapshot, nodeID NodeID) *RetryPolicy {
 // nowUTC returns the current time in UTC for event/record timestamps.
 func nowUTC() time.Time {
 	return time.Now().UTC()
+}
+
+// cloneParams copies an instance-parameter map so no caller-side map aliasing
+// reaches the durable snapshot.
+func cloneParams(params map[string]string) map[string]string {
+	if params == nil {
+		return nil
+	}
+	out := make(map[string]string, len(params))
+	for key, value := range params {
+		out[key] = value
+	}
+	return out
 }

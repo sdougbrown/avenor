@@ -66,7 +66,8 @@ func ValidateTemplateJSON(data []byte) error {
 // isOpenLeafPath reports whether a generated-structural-validator issue path is
 // rooted at one of the arbitrary-JSON leaves that typed Go owns exclusively.
 // Those leaves are metadata, node branches, the workflow-action outcome_map,
-// and the workflow-action input_bindings[*].value. Their structural issues are
+// the workflow-action input_bindings[*].value, and the dispatch
+// concurrency_key string-or-object union. Their structural issues are
 // suppressed by path so the closed Profile vocabulary does not reject
 // arbitrary-JSON content that only typed Go can interpret.
 func isOpenLeafPath(path string) bool {
@@ -85,6 +86,8 @@ func isOpenLeafPath(path string) bool {
 	}
 	switch {
 	case segs[2] == "branches":
+		return true
+	case len(segs) == 4 && segs[2] == "dispatch" && segs[3] == "concurrency_key":
 		return true
 	case len(segs) >= 4 && segs[2] == "action" && segs[3] == "outcome_map":
 		return true
@@ -174,6 +177,9 @@ func ValidateTemplate(template Template) error {
 			return fmt.Errorf("invalid workflow template: node %q: %w", node.ID, err)
 		}
 	}
+	if err := validateTemplateParams(template); err != nil {
+		return err
+	}
 	for index, id := range template.EntryNodes {
 		if strings.TrimSpace(string(id)) == "" {
 			return fmt.Errorf("invalid workflow template: entry_nodes[%d] is empty", index)
@@ -188,6 +194,109 @@ func ValidateTemplate(template Template) error {
 		return err
 	}
 	return nil
+}
+
+// maxInstanceParamValueLength bounds one instance-parameter value.
+const maxInstanceParamValueLength = 256
+
+// validateTemplateParams enforces the template-side parameter contract: each
+// declared param is a path-safe identifier typed as string, and every
+// templated concurrency key names a declared param.
+func validateTemplateParams(template Template) error {
+	declared := make(map[string]struct{}, len(template.Params))
+	for _, param := range template.Params {
+		if !isValidParamID(param.ID) {
+			return fmt.Errorf("invalid workflow template: params[%q].id must be a path-safe identifier", param.ID)
+		}
+		if _, duplicate := declared[param.ID]; duplicate {
+			return fmt.Errorf("invalid workflow template: params declares %q twice", param.ID)
+		}
+		declared[param.ID] = struct{}{}
+		if param.Type != "string" {
+			return fmt.Errorf("invalid workflow template: params[%q].type %q is not supported (only \"string\")", param.ID, param.Type)
+		}
+	}
+	for _, node := range template.Nodes {
+		policy := node.Dispatch
+		if policy == nil || policy.ConcurrencyKeyParams == nil {
+			continue
+		}
+		spec := policy.ConcurrencyKeyParams
+		if strings.TrimSpace(spec.FromInstanceParam) == "" {
+			return fmt.Errorf("invalid workflow template: node %q dispatch.concurrency_key.from_instance_param is required", node.ID)
+		}
+		if _, ok := declared[spec.FromInstanceParam]; !ok {
+			return fmt.Errorf("invalid workflow template: node %q dispatch.concurrency_key names undeclared instance param %q", node.ID, spec.FromInstanceParam)
+		}
+	}
+	return nil
+}
+
+// validateInstanceParams checks a create-time params object against the
+// template's declared params: unknown names are rejected, required names must
+// be present, and every value must be a non-empty string of at most 256
+// characters with no control characters. Params are immutable once recorded.
+func validateInstanceParams(template Template, params map[string]string) error {
+	if len(params) == 0 && len(template.Params) == 0 {
+		return nil
+	}
+	declared := make(map[string]TemplateParam, len(template.Params))
+	for _, param := range template.Params {
+		declared[param.ID] = param
+	}
+	for name, value := range params {
+		if _, ok := declared[name]; !ok {
+			return fmt.Errorf("instance params: %q is not declared by template %s@%s", name, template.TemplateID, template.TemplateVersion)
+		}
+		if err := validateParamValue(name, value); err != nil {
+			return err
+		}
+	}
+	for _, param := range template.Params {
+		if !param.Required {
+			continue
+		}
+		if _, ok := params[param.ID]; !ok {
+			return fmt.Errorf("instance params: required param %q is missing", param.ID)
+		}
+	}
+	return nil
+}
+
+// validateParamValue enforces the value rules for one instance parameter.
+func validateParamValue(name, value string) error {
+	if value == "" {
+		return fmt.Errorf("instance params: %q must not be empty", name)
+	}
+	if len(value) > maxInstanceParamValueLength {
+		return fmt.Errorf("instance params: %q exceeds %d characters", name, maxInstanceParamValueLength)
+	}
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("instance params: %q must not contain control characters", name)
+		}
+	}
+	return nil
+}
+
+// isValidParamID reports whether name is a path-safe identifier: letters,
+// digits, and underscores, not starting with a digit, at most 64 characters.
+func isValidParamID(name string) bool {
+	if name == "" || len(name) > 64 {
+		return false
+	}
+	for i, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r == '_':
+		case r >= '0' && r <= '9':
+			if i == 0 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func decodeStrict(data []byte, target any) error {
@@ -585,6 +694,16 @@ func validateAction(action Action) error {
 				}
 			}
 		}
+		for index, binding := range action.Workflow.Params {
+			if strings.TrimSpace(binding.Param) == "" {
+				return fmt.Errorf("workflow action params[%d] requires param", index)
+			}
+			hasValue := binding.Value != ""
+			hasParam := binding.FromInstanceParam != ""
+			if hasValue == hasParam {
+				return fmt.Errorf("workflow action params[%d] requires exactly one of value or from_instance_param", index)
+			}
+		}
 		for index, binding := range action.Workflow.OutputBindings {
 			if strings.TrimSpace(binding.ChildOutput) == "" {
 				return fmt.Errorf("workflow action output_bindings[%d] requires child_output", index)
@@ -626,6 +745,9 @@ func validateDispatch(policy *DispatchPolicy, node NodeDefinition) error {
 	}
 	if policy.ConcurrencyKey != "" && strings.TrimSpace(policy.ConcurrencyKey) == "" {
 		return fmt.Errorf("dispatch.concurrency_key cannot be blank")
+	}
+	if policy.ConcurrencyKeyParams != nil && policy.ConcurrencyKey != "" {
+		return fmt.Errorf("dispatch.concurrency_key must be either a string or a {prefix, from_instance_param} object, not both")
 	}
 	if policy.SuccessOutcome != "" && node.Action.Kind != ActionExternal {
 		return fmt.Errorf("dispatch.success_outcome is forbidden on %s nodes", node.Action.Kind)

@@ -217,7 +217,9 @@ func formatTemplateChain(chain []TemplateID) string {
 // (its terminal outcomes or any node's outcomes/branches), and values must be
 // outcomes the parent node may produce (its own outcomes/branches or the
 // parent template's terminal outcomes). Input-binding From references are
-// already enforced locally by ValidateGraph.
+// already enforced locally by ValidateGraph. Child param bindings must name
+// params the child template declares, and a from_instance_param source must
+// be a param the parent template declares.
 func validateCompositionBindings(node NodeDefinition, parent Template, child Template) error {
 	action := node.Action.Workflow
 	childOutputs := templateOutputIDs(child)
@@ -235,6 +237,25 @@ func validateCompositionBindings(node NodeDefinition, parent Template, child Tem
 				"composition: node %q output_bindings[%d]: parent_output %q is not a declared output of node %q",
 				node.ID, i, binding.ParentOutput, node.ID,
 			)
+		}
+	}
+
+	childParams := templateParamIDs(child)
+	parentParams := templateParamIDs(parent)
+	for index, binding := range action.Params {
+		if _, declared := childParams[binding.Param]; !declared {
+			return fmt.Errorf(
+				"composition: node %q params[%d]: param %q is not declared by child template %s@%s",
+				node.ID, index, binding.Param, child.TemplateID, child.TemplateVersion,
+			)
+		}
+		if binding.FromInstanceParam != "" {
+			if _, declared := parentParams[binding.FromInstanceParam]; !declared {
+				return fmt.Errorf(
+					"composition: node %q params[%d]: from_instance_param %q is not declared by parent template %s@%s",
+					node.ID, index, binding.FromInstanceParam, parent.TemplateID, parent.TemplateVersion,
+				)
+			}
 		}
 	}
 
@@ -269,6 +290,16 @@ func validateCompositionBindings(node NodeDefinition, parent Template, child Tem
 		}
 	}
 	return nil
+}
+
+// templateParamIDs returns the ids of the template's declared instance
+// parameters.
+func templateParamIDs(template Template) map[string]struct{} {
+	ids := make(map[string]struct{}, len(template.Params))
+	for _, param := range template.Params {
+		ids[param.ID] = struct{}{}
+	}
+	return ids
 }
 
 // templateOutputIDs returns every output ID declared on any node of template.
