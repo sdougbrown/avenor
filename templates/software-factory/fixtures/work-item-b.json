@@ -1,0 +1,9 @@
+{
+  "template_id": "software-factory-work",
+  "template_version": "1.1.0",
+  "metadata": {
+    "issue": "130",
+    "title": "Roster-backed execution selection",
+    "base_sha": "9c41f02"
+  }
+}

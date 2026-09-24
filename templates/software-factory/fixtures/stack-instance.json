@@ -1,0 +1,8 @@
+{
+  "template_id": "software-factory-stack",
+  "template_version": "1.0.0",
+  "metadata": {
+    "stack": "115+130",
+    "note": "Two review units composed by one bounded parent; the units merge in declared order."
+  }
+}
