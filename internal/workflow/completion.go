@@ -138,6 +138,9 @@ func (m *Manager) commandComplete(wf WorkflowID, payload json.RawMessage) (any, 
 	if err := validateDeclaredOutputs(node, declared); err != nil {
 		return nil, err
 	}
+	if err := validateCompleteOutputValues(tmpl, node, req.Outputs); err != nil {
+		return nil, err
+	}
 	if err := validateDeclaredOutcome(tmpl, node, req.Outcome); err != nil {
 		return nil, err
 	}
@@ -264,6 +267,91 @@ func (m *Manager) commandComplete(wf WorkflowID, payload json.RawMessage) (any, 
 	}
 	cleanupStaged(m, wf, staged)
 	return nil, fmt.Errorf("complete attempt %s: revision kept moving under concurrent commands", req.AttemptID)
+}
+
+// validateCompleteOutputValues hardens the primitive values of a completion
+// against the node's declared output types: strings must be JSON strings,
+// booleans strict true/false, and numbers finite. Numbers referenced as a
+// pull_request subject or as a number-typed adapter input anywhere in the
+// template must additionally be integral within the safe integer range, so a
+// gate binding can never pin a value no consumer can read. Null values are
+// always rejected (the canonical snapshot wire format cannot persist them).
+// Any failure rejects the whole completion before evidence staging, so no
+// output and no completion is recorded.
+func validateCompleteOutputValues(tmpl *Template, node *NodeDefinition, outputs []completeOutput) error {
+	integral := integralOutputRefs(tmpl)
+	declared := make(map[OutputID]OutputDefinition, len(node.Outputs))
+	for _, def := range node.Outputs {
+		declared[def.ID] = def
+	}
+	for _, o := range outputs {
+		def, ok := declared[o.DefinitionID]
+		if !ok {
+			continue
+		}
+		trimmed := trimmedJSON(o.Value)
+		if len(trimmed) == 0 || string(trimmed) == "null" {
+			// A null output value is never persistable: the canonical snapshot
+			// wire format rejects null struct fields, so an explicit null would
+			// fail at snapshot write after the completion had landed.
+			return fmt.Errorf("workflow output %q on node %q cannot be null", o.DefinitionID, node.ID)
+		}
+		what := fmt.Sprintf("workflow output %q on node %q", o.DefinitionID, node.ID)
+		switch def.Type {
+		case OutputString:
+			if trimmed[0] != '"' {
+				return fmt.Errorf("%s requires a string value", what)
+			}
+		case OutputBoolean:
+			if string(trimmed) != "true" && string(trimmed) != "false" {
+				return fmt.Errorf("%s requires a boolean value", what)
+			}
+		case OutputNumber:
+			if err := validateSafeJSONNumber(trimmed, integral[node.ID][o.DefinitionID], what); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// integralOutputRefs collects the outputs the template's gate bindings
+// consume as exact integers: every subject_binding pull_request reference
+// and every adapter input reference whose declared output type is number.
+// The map is per source node because bindings resolve against a specific
+// node's outputs.
+func integralOutputRefs(tmpl *Template) map[NodeID]map[OutputID]bool {
+	outputTypes := make(map[NodeID]map[OutputID]OutputType, len(tmpl.Nodes))
+	for _, n := range tmpl.Nodes {
+		types := make(map[OutputID]OutputType, len(n.Outputs))
+		for _, def := range n.Outputs {
+			types[def.ID] = def.Type
+		}
+		outputTypes[n.ID] = types
+	}
+	refs := make(map[NodeID]map[OutputID]bool)
+	add := func(nodeID NodeID, outputID OutputID) {
+		if refs[nodeID] == nil {
+			refs[nodeID] = make(map[OutputID]bool)
+		}
+		refs[nodeID][outputID] = true
+	}
+	for _, n := range tmpl.Nodes {
+		for _, gate := range n.Gates {
+			if binding := gate.SubjectBinding; binding != nil && binding.PullRequest != nil {
+				add(binding.PullRequest.FromNodeOutput.NodeID, binding.PullRequest.FromNodeOutput.OutputID)
+			}
+			for _, value := range gate.Inputs {
+				if value.FromNodeOutput == nil {
+					continue
+				}
+				if outputTypes[value.FromNodeOutput.NodeID][value.FromNodeOutput.OutputID] == OutputNumber {
+					add(value.FromNodeOutput.NodeID, value.FromNodeOutput.OutputID)
+				}
+			}
+		}
+	}
+	return refs
 }
 
 // activationHasAttempt reports whether the activation's append-only attempt
