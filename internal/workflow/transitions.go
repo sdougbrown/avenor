@@ -117,7 +117,7 @@ func buildCommandEvents(state Snapshot, command Command) ([]Event, error) {
 		next := newEvent(EventTransition)
 		next.Transition = t
 		next.Outcome = command.Outcome
-		if err := attachGateBindings(state, &next, t.TargetNodeID, t.ActivationID); err != nil {
+		if err := attachTransitionGateBindings(state, &e, &next, t.TargetNodeID, t.ActivationID); err != nil {
 			return nil, err
 		}
 		return []Event{e, next}, nil
@@ -146,7 +146,7 @@ func buildCommandEvents(state Snapshot, command Command) ([]Event, error) {
 		next := newEvent(EventTransition)
 		next.Transition = t
 		next.Outcome = command.Outcome
-		if err := attachGateBindings(state, &next, t.TargetNodeID, t.ActivationID); err != nil {
+		if err := attachTransitionGateBindings(state, &e, &next, t.TargetNodeID, t.ActivationID); err != nil {
 			return nil, err
 		}
 		return []Event{e, next}, nil
@@ -252,7 +252,7 @@ func buildCommandEvents(state Snapshot, command Command) ([]Event, error) {
 		next := newEvent(EventTransition)
 		next.Transition = t
 		next.Outcome = command.Outcome
-		if err := attachGateBindings(state, &next, t.TargetNodeID, t.ActivationID); err != nil {
+		if err := attachTransitionGateBindings(state, &e, &next, t.TargetNodeID, t.ActivationID); err != nil {
 			return nil, err
 		}
 		return []Event{e, next}, nil

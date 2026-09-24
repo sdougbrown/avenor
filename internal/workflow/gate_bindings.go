@@ -307,6 +307,38 @@ func attachGateBindings(state Snapshot, event *Event, targetNodeID NodeID, cause
 	return nil
 }
 
+// attachTransitionGateBindings pins the target node's bound gates onto a
+// transition event at command time. Resolution runs against a scratch copy
+// of the snapshot with the command's primary resolving event applied: the
+// completing activation is only satisfied, and its outputs only recorded,
+// inside this same event batch, and references must pin against the state
+// the command itself creates — never the pre-command snapshot.
+func attachTransitionGateBindings(state Snapshot, primary *Event, transition *Event, targetNodeID NodeID, causedBy ActivationID) error {
+	if bindingTemplateResolve == nil {
+		transition.CausedBy = append([]ActivationID(nil), causedBy)
+		return nil
+	}
+	sim, err := simulateResolvedState(state, primary)
+	if err != nil {
+		return err
+	}
+	return attachGateBindings(sim, transition, targetNodeID, causedBy)
+}
+
+// simulateResolvedState returns a scratch deep copy of the snapshot with the
+// command's primary resolving event applied, so bound-gate references pin
+// against the post-command state. The copy is discarded after resolution;
+// the reducer applies the real events to the live snapshot.
+func simulateResolvedState(state Snapshot, primary *Event) (Snapshot, error) {
+	sim := cloneSnapshot(state)
+	if primary != nil {
+		if err := applyEvent(&sim, *primary); err != nil {
+			return state, err
+		}
+	}
+	return sim, nil
+}
+
 // nodeDeclaresBoundGates reports whether any gate on the node carries a
 // subject binding or a from_node_output input reference.
 func nodeDeclaresBoundGates(node *NodeDefinition) bool {
