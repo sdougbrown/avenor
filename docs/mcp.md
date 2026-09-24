@@ -363,8 +363,17 @@ The `avenor_workflow_*` tools drive a [durable workflow](workflow.md) against a 
 | `avenor_workflow_events` | Read log events from a workflow instance's event log. |
 | `avenor_workflow_complete` | Atomically complete a machine/external handoff activation. |
 | `avenor_workflow_gate` | Record a gate decision on a parked `awaiting_gate` activation. |
+| `avenor_workflow_controller_status` | Get the status for a workflow controller. |
+| `avenor_workflow_controller_list` | List all workflow controllers. |
+| `avenor_workflow_controller_create` | Register a workflow controller; it starts disabled. |
+| `avenor_workflow_controller_enable` | Enable a workflow controller so it dispatches and polls. |
+| `avenor_workflow_controller_disable` | Disable a workflow controller; it stops future dispatch and polling but never cancels running attempts. |
 
 All take an optional `supervisor_id` (supervisor socket path). `avenor_workflow_status`, `avenor_workflow_inspect`, and `avenor_workflow_events` take `workflow_id` (and `after_seq`/`limit` for events). `avenor_workflow_wait` takes `workflow_id` and an optional `timeout` (e.g. `30s`, `5m`). `avenor_workflow_complete` takes `workflow_id`, `node_id`, `activation_id`, `attempt_id`, `lease_id`, `owner_token`, `outcome`, and optional `outputs`/`artifacts`. `avenor_workflow_gate` takes `workflow_id`, `node_id`, `gate_id`, `activation_id`, `operation` (`satisfy`, `reject`, `waive`, or `external_result`), and the operation's fields.
+
+### Workflow controllers
+
+The `avenor_workflow_controller_*` tools manage a supervisor's workflow controllers, which dispatch and poll workflow work on the supervisor's behalf. A controller is registered with `avenor_workflow_controller_create` (`controller_id` and a positive `max_inflight`) and starts **disabled**; `avenor_workflow_controller_enable` turns it on so it dispatches and polls, and `avenor_workflow_controller_disable` (with a `reason`) stops future dispatch and polling but never cancels running attempts. `avenor_workflow_controller_status` and `avenor_workflow_controller_list` read controller state. The underlying control methods are documented in [control-protocol.md](control-protocol.md#workflow-methods).
 
 ## Registry scope: important limitation
 
