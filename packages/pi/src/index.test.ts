@@ -72,6 +72,11 @@ async function createHarnessBase(options: {
     workflowEventsTool: mock(async () => ({})),
     workflowCompleteTool: mock(async () => ({})),
     workflowGateTool: mock(async () => ({})),
+    workflowControllerStatusTool: mock(async () => ({})),
+    workflowControllerListTool: mock(async () => ({})),
+    workflowControllerCreateTool: mock(async () => ({})),
+    workflowControllerEnableTool: mock(async () => ({})),
+    workflowControllerDisableTool: mock(async () => ({})),
     observeRun: mock(() => null),
     dial: mock(async () => ({ close() {} })),
     Supervisor: class {} as any,
@@ -490,6 +495,11 @@ describe('Avenor Pi extension', () => {
     expect(Object.keys(registeredTools)).toContain('avenor_workflow_events')
     expect(Object.keys(registeredTools)).toContain('avenor_workflow_complete')
     expect(Object.keys(registeredTools)).toContain('avenor_workflow_gate')
+    expect(Object.keys(registeredTools)).toContain('avenor_workflow_controller_status')
+    expect(Object.keys(registeredTools)).toContain('avenor_workflow_controller_list')
+    expect(Object.keys(registeredTools)).toContain('avenor_workflow_controller_create')
+    expect(Object.keys(registeredTools)).toContain('avenor_workflow_controller_enable')
+    expect(Object.keys(registeredTools)).toContain('avenor_workflow_controller_disable')
     for (const name of [
       'avenor_status',
       'avenor_result',

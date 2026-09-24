@@ -144,6 +144,47 @@ describe('avenor MCP server', () => {
       },
     }, async () => ({ decided: true }))
 
+    server.registerTool('avenor_workflow_controller_status', {
+      description: 'Get the status for a workflow controller',
+      inputSchema: {
+        controller_id: z.string(),
+        supervisor_id: z.string().optional(),
+      },
+    }, async () => ({ state: 'enabled' }))
+
+    server.registerTool('avenor_workflow_controller_list', {
+      description: 'List all workflow controllers',
+      inputSchema: {
+        supervisor_id: z.string().optional(),
+      },
+    }, async () => ({ controllers: [] }))
+
+    server.registerTool('avenor_workflow_controller_create', {
+      description: 'Register a workflow controller; it starts disabled',
+      inputSchema: {
+        controller_id: z.string(),
+        max_inflight: z.number().int().positive(),
+        supervisor_id: z.string().optional(),
+      },
+    }, async () => ({ state: 'disabled' }))
+
+    server.registerTool('avenor_workflow_controller_enable', {
+      description: 'Enable a workflow controller so it dispatches and polls',
+      inputSchema: {
+        controller_id: z.string(),
+        supervisor_id: z.string().optional(),
+      },
+    }, async () => ({ state: 'enabled' }))
+
+    server.registerTool('avenor_workflow_controller_disable', {
+      description: 'Disable a workflow controller; it stops future dispatch and polling but never cancels running attempts',
+      inputSchema: {
+        controller_id: z.string(),
+        reason: z.string(),
+        supervisor_id: z.string().optional(),
+      },
+    }, async () => ({ state: 'disabled' }))
+
     expect(server).toBeDefined()
   })
 

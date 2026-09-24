@@ -35,6 +35,11 @@ import {
   workflowEventsTool,
   workflowCompleteTool,
   workflowGateTool,
+  workflowControllerStatusTool,
+  workflowControllerListTool,
+  workflowControllerCreateTool,
+  workflowControllerEnableTool,
+  workflowControllerDisableTool,
   type Client,
   type InspectResult,
   type RunObserver,
@@ -107,6 +112,11 @@ export interface ExtensionDeps {
   workflowEventsTool: typeof workflowEventsTool
   workflowCompleteTool: typeof workflowCompleteTool
   workflowGateTool: typeof workflowGateTool
+  workflowControllerStatusTool: typeof workflowControllerStatusTool
+  workflowControllerListTool: typeof workflowControllerListTool
+  workflowControllerCreateTool: typeof workflowControllerCreateTool
+  workflowControllerEnableTool: typeof workflowControllerEnableTool
+  workflowControllerDisableTool: typeof workflowControllerDisableTool
   observeRun: typeof observeRun
   dial: typeof dial
   Supervisor: typeof Supervisor
@@ -129,6 +139,11 @@ const defaultDeps: ExtensionDeps = {
   workflowEventsTool,
   workflowCompleteTool,
   workflowGateTool,
+  workflowControllerStatusTool,
+  workflowControllerListTool,
+  workflowControllerCreateTool,
+  workflowControllerEnableTool,
+  workflowControllerDisableTool,
   observeRun,
   dial,
   Supervisor,
@@ -1865,6 +1880,108 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         const result = await deps.workflowGateTool({
           ...rest,
           supervisorId: supervisor_id,
+        })
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          details: result,
+        }
+      },
+    })
+
+    pi.registerTool({
+      name: 'avenor_workflow_controller_status',
+      label: 'Avenor Workflow Controller Status',
+      description: 'Get the status for a workflow controller',
+      parameters: Type.Object({
+        controller_id: Type.String({ description: 'Controller ID' }),
+        supervisor_id: Type.Optional(Type.String({ description: 'Supervisor ID for multi-supervisor mode' })),
+      }),
+      async execute(_toolCallId, params) {
+        const result = await deps.workflowControllerStatusTool({
+          controllerId: params.controller_id,
+          supervisorId: params.supervisor_id,
+        })
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          details: result,
+        }
+      },
+    })
+
+    pi.registerTool({
+      name: 'avenor_workflow_controller_list',
+      label: 'Avenor Workflow Controller List',
+      description: 'List all workflow controllers',
+      parameters: Type.Object({
+        supervisor_id: Type.Optional(Type.String({ description: 'Supervisor ID for multi-supervisor mode' })),
+      }),
+      async execute(_toolCallId, params) {
+        const result = await deps.workflowControllerListTool({
+          supervisorId: params.supervisor_id,
+        })
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          details: result,
+        }
+      },
+    })
+
+    pi.registerTool({
+      name: 'avenor_workflow_controller_create',
+      label: 'Avenor Workflow Controller Create',
+      description: 'Register a workflow controller; it starts disabled',
+      parameters: Type.Object({
+        controller_id: Type.String({ description: 'Controller ID' }),
+        max_inflight: Type.Number({ description: 'Max concurrent dispatches' }),
+        supervisor_id: Type.Optional(Type.String({ description: 'Supervisor ID for multi-supervisor mode' })),
+      }),
+      async execute(_toolCallId, params) {
+        const result = await deps.workflowControllerCreateTool({
+          controllerId: params.controller_id,
+          maxInflight: params.max_inflight,
+          supervisorId: params.supervisor_id,
+        })
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          details: result,
+        }
+      },
+    })
+
+    pi.registerTool({
+      name: 'avenor_workflow_controller_enable',
+      label: 'Avenor Workflow Controller Enable',
+      description: 'Enable a workflow controller so it dispatches and polls',
+      parameters: Type.Object({
+        controller_id: Type.String({ description: 'Controller ID' }),
+        supervisor_id: Type.Optional(Type.String({ description: 'Supervisor ID for multi-supervisor mode' })),
+      }),
+      async execute(_toolCallId, params) {
+        const result = await deps.workflowControllerEnableTool({
+          controllerId: params.controller_id,
+          supervisorId: params.supervisor_id,
+        })
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          details: result,
+        }
+      },
+    })
+
+    pi.registerTool({
+      name: 'avenor_workflow_controller_disable',
+      label: 'Avenor Workflow Controller Disable',
+      description: 'Disable a workflow controller; it stops future dispatch and polling but never cancels running attempts',
+      parameters: Type.Object({
+        controller_id: Type.String({ description: 'Controller ID' }),
+        reason: Type.String({ description: 'Reason for disabling' }),
+        supervisor_id: Type.Optional(Type.String({ description: 'Supervisor ID for multi-supervisor mode' })),
+      }),
+      async execute(_toolCallId, params) {
+        const result = await deps.workflowControllerDisableTool({
+          controllerId: params.controller_id,
+          reason: params.reason,
+          supervisorId: params.supervisor_id,
         })
         return {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],

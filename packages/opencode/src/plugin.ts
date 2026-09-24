@@ -35,6 +35,11 @@ import {
   workflowEventsTool,
   workflowCompleteTool,
   workflowGateTool,
+  workflowControllerStatusTool,
+  workflowControllerListTool,
+  workflowControllerCreateTool,
+  workflowControllerEnableTool,
+  workflowControllerDisableTool,
 } from '@dougbots/avenor-core'
 
 type TrackedRun = {
@@ -1085,6 +1090,83 @@ export const AvenorPlugin: Plugin = async (ctx) => {
           const result = await workflowGateTool({
             ...rest,
             supervisorId: supervisor_id,
+          })
+          return { title: 'workflow', output: JSON.stringify(result, null, 2) }
+        },
+      }),
+
+      avenor_workflow_controller_status: tool({
+        description: 'Get the status for a workflow controller',
+        args: {
+          controller_id: tool.schema.string().describe('Controller ID'),
+          supervisor_id: tool.schema.string().optional().describe('Supervisor ID for multi-supervisor mode'),
+        },
+        async execute(args, _context) {
+          const result = await workflowControllerStatusTool({
+            controllerId: args.controller_id,
+            supervisorId: args.supervisor_id,
+          })
+          return { title: 'workflow', output: JSON.stringify(result, null, 2) }
+        },
+      }),
+
+      avenor_workflow_controller_list: tool({
+        description: 'List all workflow controllers',
+        args: {
+          supervisor_id: tool.schema.string().optional().describe('Supervisor ID for multi-supervisor mode'),
+        },
+        async execute(args, _context) {
+          const result = await workflowControllerListTool({
+            supervisorId: args.supervisor_id,
+          })
+          return { title: 'workflow', output: JSON.stringify(result, null, 2) }
+        },
+      }),
+
+      avenor_workflow_controller_create: tool({
+        description: 'Register a workflow controller; it starts disabled',
+        args: {
+          controller_id: tool.schema.string().describe('Controller ID'),
+          max_inflight: tool.schema.number().int().positive().describe('Max concurrent dispatches'),
+          supervisor_id: tool.schema.string().optional().describe('Supervisor ID for multi-supervisor mode'),
+        },
+        async execute(args, _context) {
+          const result = await workflowControllerCreateTool({
+            controllerId: args.controller_id,
+            maxInflight: args.max_inflight,
+            supervisorId: args.supervisor_id,
+          })
+          return { title: 'workflow', output: JSON.stringify(result, null, 2) }
+        },
+      }),
+
+      avenor_workflow_controller_enable: tool({
+        description: 'Enable a workflow controller so it dispatches and polls',
+        args: {
+          controller_id: tool.schema.string().describe('Controller ID'),
+          supervisor_id: tool.schema.string().optional().describe('Supervisor ID for multi-supervisor mode'),
+        },
+        async execute(args, _context) {
+          const result = await workflowControllerEnableTool({
+            controllerId: args.controller_id,
+            supervisorId: args.supervisor_id,
+          })
+          return { title: 'workflow', output: JSON.stringify(result, null, 2) }
+        },
+      }),
+
+      avenor_workflow_controller_disable: tool({
+        description: 'Disable a workflow controller; it stops future dispatch and polling but never cancels running attempts',
+        args: {
+          controller_id: tool.schema.string().describe('Controller ID'),
+          reason: tool.schema.string().describe('Reason for disabling'),
+          supervisor_id: tool.schema.string().optional().describe('Supervisor ID for multi-supervisor mode'),
+        },
+        async execute(args, _context) {
+          const result = await workflowControllerDisableTool({
+            controllerId: args.controller_id,
+            reason: args.reason,
+            supervisorId: args.supervisor_id,
           })
           return { title: 'workflow', output: JSON.stringify(result, null, 2) }
         },

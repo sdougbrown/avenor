@@ -19,6 +19,11 @@ import {
   workflowEventsTool,
   workflowCompleteTool,
   workflowGateTool,
+  workflowControllerStatusTool,
+  workflowControllerListTool,
+  workflowControllerCreateTool,
+  workflowControllerEnableTool,
+  workflowControllerDisableTool,
   validateSpawnSelection,
 } from '@dougbots/avenor-core'
 
@@ -270,6 +275,57 @@ server.registerTool('avenor_workflow_gate', {
 }, async (args) => {
   const { supervisor_id, ...rest } = args
   return workflowGateTool({ ...rest, supervisorId: supervisor_id })
+})
+
+server.registerTool('avenor_workflow_controller_status', {
+  description: 'Get the status for a workflow controller',
+  inputSchema: {
+    controller_id: z.string().describe('Controller ID'),
+    supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
+  },
+}, async ({ controller_id, supervisor_id }) => {
+  return workflowControllerStatusTool({ controllerId: controller_id, supervisorId: supervisor_id })
+})
+
+server.registerTool('avenor_workflow_controller_list', {
+  description: 'List all workflow controllers',
+  inputSchema: {
+    supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
+  },
+}, async ({ supervisor_id }) => {
+  return workflowControllerListTool({ supervisorId: supervisor_id })
+})
+
+server.registerTool('avenor_workflow_controller_create', {
+  description: 'Register a workflow controller; it starts disabled',
+  inputSchema: {
+    controller_id: z.string().describe('Controller ID'),
+    max_inflight: z.number().int().positive().describe('Max concurrent dispatches'),
+    supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
+  },
+}, async ({ controller_id, max_inflight, supervisor_id }) => {
+  return workflowControllerCreateTool({ controllerId: controller_id, maxInflight: max_inflight, supervisorId: supervisor_id })
+})
+
+server.registerTool('avenor_workflow_controller_enable', {
+  description: 'Enable a workflow controller so it dispatches and polls',
+  inputSchema: {
+    controller_id: z.string().describe('Controller ID'),
+    supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
+  },
+}, async ({ controller_id, supervisor_id }) => {
+  return workflowControllerEnableTool({ controllerId: controller_id, supervisorId: supervisor_id })
+})
+
+server.registerTool('avenor_workflow_controller_disable', {
+  description: 'Disable a workflow controller; it stops future dispatch and polling but never cancels running attempts',
+  inputSchema: {
+    controller_id: z.string().describe('Controller ID'),
+    reason: z.string().describe('Reason for disabling'),
+    supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
+  },
+}, async ({ controller_id, reason, supervisor_id }) => {
+  return workflowControllerDisableTool({ controllerId: controller_id, reason, supervisorId: supervisor_id })
 })
 
 if (import.meta.main) {
