@@ -211,9 +211,11 @@ func applyEvent(rec *ControllerRecord, e ControllerEvent) error {
 	case EventEnabled:
 		rec.DesiredState = DesiredEnabled
 		rec.DisabledReason = ""
+		rec.CapacityBlocked = ""
 	case EventDisabled:
 		rec.DesiredState = DesiredDisabled
 		rec.DisabledReason = e.Reason
+		rec.CapacityBlocked = ""
 	case EventLeaderAcquired:
 		rec.OwnerEpoch = e.OwnerEpoch
 		rec.LastRenewalEventAt = time.Time{}
