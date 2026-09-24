@@ -1,36 +1,52 @@
-# Software factory work template
+# Software factory work templates
 
-A durable [Avenor workflow](../../docs/workflow.md) template for one review
-unit of software-factory work: intake, assessment, plan drafting, hardening,
-execution, verification, publication, and exact-head CI + external review with
-declared review branches.
+Durable [Avenor workflow](../../docs/workflow.md) templates for
+software-factory work:
 
-This is **one workflow for one review unit**. Campaign coordination —
-scheduling, indexing, and grouping many issues — is a separate concern and is
-**out of scope** for the workflow kernel. For a stack of review units, the
-planning workflow emits a typed immutable topology and an explicit caller
-instantiates a bounded parent with declared review-unit child workflows before
-execution starts.
+- `work.json` (`software-factory-work@1.1.0`) — one review unit: intake,
+  assessment, plan drafting, hardening, execution, verification, publication,
+  and exact-head CI + external review with declared review branches.
+- `stack.json` (`software-factory-stack@1.0.0`) — a bounded parent whose
+  planning node records a typed, immutable stack topology and whose
+  kernel-local `workflow` actions compose review-unit children of the work
+  template. The parent owns only declared composition and typed handoff.
+
+Campaign coordination — scheduling, indexing, and grouping many issues
+beyond the declared stack composition — is **out of scope** for the workflow
+kernel and for the workflow controller. For anything richer, an explicit
+caller instantiates additional bounded parents.
 
 ## The flow
 
 ```text
 intake                         [manual]
-  → assessment                 [run]
-  → draft-plan                 [run]
-  → hardening                  [run]
-  → execution                  [loop]
-  → verification               [team]   tests + independent review
-  → publication                [run]    outputs the exact PR head
-  → review                     [external]  CI + external review, exact-head gates
+  → assessment                 [run, auto]
+  → draft-plan                 [run, auto]
+  → hardening                  [run, manual — the plan checkpoint]
+  → execution                  [loop, auto]
+  → verification               [team, auto]   tests + independent review
+  → publication                [run, auto]    outputs repository + PR head
+  → review                     [external, auto-park]  CI + external review,
+                               exact-head gates via trusted adapters
       clean                    → merge-auth [manual, exact-head human gate]
-                                 → reconciliation [run] → merged
-      changes_requested        → correction [run]
-      action_required          → correction [run]
-                                 → reverify [team] → publication → review
+                                 → reconciliation [run, auto] → merged
+      changes_requested        → correction [run, auto]
+      action_required          → correction [run, auto]
+                                 → reverify [team, auto] → publication → review
       replan                   → assessment (re-assess, re-plan, re-harden)
       checkpoint               → advisor [manual checkpoint gate]
 ```
+
+Provider-backed nodes dispatch automatically under the `software-factory`
+workflow controller with explicit priorities that rank later-pipeline work
+(correction 70, publication/review/reverify 60) above intake (assessment and
+draft-plan 30). Every node that writes the review unit's worktree shares the
+`worktree:software-factory-review-unit` concurrency key, so one work item
+runs at a time per worktree across the whole workflow root. Hardening is a
+provider-backed run with **manual** dispatch — the plan checkpoint a human or
+advisor releases deliberately. Merge authorization remains a manual human
+gate bound to the exact published subject; the controller never parks it,
+satisfies it, or merges.
 
 The dependency edges declare the primary path; the declared branches declare
 the review outcomes. Branches may point back to earlier nodes (correction,
@@ -40,7 +56,8 @@ replan) — only the ordinary dependency graph must be acyclic.
 
 ```text
 templates/software-factory/
-  work.json              the workflow template (validates against the profile schema)
+  work.json              the review-unit template (validates against the profile schema)
+  stack.json             the bounded stack parent composing review-unit children
   prompts/               prompt fixtures for the run nodes
     assessment.md
     draft-plan.md
@@ -53,6 +70,8 @@ templates/software-factory/
   teams/
     verification.json    team config for the verification node
     reverify.json        team config for the reverify node
+  fixtures/              example request files (controller, work items, stack)
+  adapters/              example trusted-adapter manifests (placeholder executables)
 ```
 
 The template's `prompt_file`, `loop_file`, and `team_file` references are
@@ -69,35 +88,45 @@ supervisor first:
 avenor stable --workflow-root /path/to/workflows
 ```
 
-### 1. Create and instantiate
+### 1. Register the controller, adapters, and template
 
 ```sh
 # Register the versioned template.
 avenor workflow create --socket /path/to/socket \
   --request-file templates/software-factory/work.json
 
-# Instantiate one work unit. The instance metadata is free-form.
+# Create the disabled software-factory controller (max_inflight 2), then
+# enable it once at least one work item exists.
+avenor workflow controller create --socket /path/to/socket \
+  --request-file templates/software-factory/fixtures/controller.json
+avenor workflow controller enable --socket /path/to/socket software-factory
+```
+
+Install trusted adapter manifests for the review node's bound gates first —
+see `adapters/README.md` — and pass `--workflow-adapter-dir` when starting
+the supervisor. See [the workflow controller example](../../docs/workflow-controller.md)
+for the full walkthrough.
+
+### 2. Instantiate one work unit per review unit
+
+```sh
+# Instantiate one work unit. The instance metadata is free-form; the
+# fixtures/ directory ships examples for two independent work items and for
+# the stack parent.
 echo '{"metadata":{"issue":"115","base_sha":"6e77a0d"}}' > /tmp/instance.json
 avenor workflow instantiate --socket /path/to/socket \
-  --template-id software-factory-work --template-version 1.0.0 \
+  --template-id software-factory-work --template-version 1.1.0 \
   --request-file /tmp/instance.json
 ```
 
 Instantiation returns the `workflow_id`. Every later command takes it.
 
-### 2. Drive a node: claim → start → complete
+### 3. Drive the human nodes
 
-There is no automatic scheduler. The controller explicitly claims a ready node
-and starts its declared action.
-
-```sh
-# Claim the intake node (returns lease_id, owner_token, expiry).
-# The activation id comes from `avenor workflow status` or `inspect`.
-```
-
-`claim` and `start` are control-plane commands (they are not CLI subcommands;
-send them through the `workflow.command` control method or the MCP tools).
-`complete`, `gate`, `skip`, and `unblock` are CLI subcommands:
+The controller dispatches every auto node itself — claiming ready nodes,
+starting their actions, and parking the review node — while a manual claim on
+an auto node remains valid (the kernel claim is the race arbiter). Only the
+manual nodes need a human:
 
 ```sh
 # Complete a run node with evidence and a declared outcome.
@@ -111,12 +140,13 @@ A complete request file carries `owner_token`, `outcome`, `outputs`, and
 `artifacts`. The `outcome` must be a declared branch key or a template
 terminal outcome — undeclared outcomes are rejected.
 
-### 3. Resolve the review gates
+### 4. Resolve the review gates
 
 The `review` node is an `external` action with two required external gates
-(`ci` and `review-verdict`), both bound to an exact pull-request subject.
-After the node completes with a declared outcome, it parks `awaiting_gate`.
-Record each observed external result with `external_result`:
+(`ci` and `review-verdict`), both bound to an exact pull-request subject
+pinned from publication's outputs and polled through the trusted adapters.
+The controller parks the node `awaiting_gate` automatically and records each
+observed external result:
 
 ```sh
 avenor workflow gate --socket /path/to/socket \
@@ -125,11 +155,12 @@ avenor workflow gate --socket /path/to/socket \
   --request-file /tmp/ci-result.json
 ```
 
-An `external_result` request file carries `poll_id`, `source`, `observed_at`,
-`result` (`pending`, `passed`, `failed`, `action_required`, or
-`changes_requested`), `subject` (the exact PR + head SHA), `response_hash`, and
-`evidence_ids`. When every required gate resolves, the activation follows the
-declared branch for the completed outcome.
+An adapter result of `passed` on every required gate follows the node's
+declared `success_outcome` (`clean`). Advisory and failed results route
+through the gates' declared `result_outcomes`:
+`changes_requested`/`action_required` to the correction branches, `failed`
+to replan. A manual `external_result` command remains available for a
+declared reporter.
 
 The `merge-auth` node's human gate requires an explicit actor, reason,
 evidence, and the exact subject:
@@ -141,7 +172,7 @@ avenor workflow gate --socket /path/to/socket \
   --request-file /tmp/merge-auth.json
 ```
 
-### 4. Observe
+### 5. Observe
 
 ```sh
 avenor workflow status  --socket /path/to/socket <workflow-id>
@@ -158,7 +189,10 @@ coordinator memory. A work unit can be:
 
 - **Resumed** after a supervisor restart. On startup the catalog replays events
   after the snapshot revision, expires only leases whose persisted expiry has
-  passed, and re-arms `awaiting_child` compositions. A stalled attempt expires
+  passed, and re-arms `awaiting_child` compositions. The controller record,
+  its leader lease, and its poll cursors recover from the same root; a fresh
+  supervisor resumes parked reviews and provider work without coordinator
+  memory. A stalled attempt expires
   and a replacement worker can claim the node.
 - **Inspected** at any time with `status`, `inspect`, and `events`. The
   generated `workflow.md`, `execution.md`, and gate projections are

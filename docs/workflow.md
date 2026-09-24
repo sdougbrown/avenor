@@ -193,8 +193,11 @@ parent can execute.
 
 ## Driving a workflow
 
-There is **no automatic scheduler**. A controller explicitly claims a ready
-node and starts its declared action. The activation lifecycle:
+By default there is no automatic scheduler: a controller or agent explicitly
+claims a ready node and starts its declared action. Nodes that opt in with a
+declared `dispatch` policy are instead dispatched automatically by the
+optional [workflow controller](workflow-controller.md) — see the [workflow
+controller example](workflow-controller.md). The activation lifecycle:
 
 ```text
 pending → ready → leased → running
@@ -445,7 +448,9 @@ for **one** work unit. It deliberately does **not** own:
 - **Campaign coordination** — grouping, indexing, scheduling, or merge trains
   across many issues. That is a separate concern (the software-factory
   campaign record) and stays outside the kernel.
-- Automatic scheduling beyond explicit `claim`/`start` commands.
+- Automatic scheduling beyond the optional workflow controller's dispatch of
+  explicitly `auto`-declared nodes (see [Workflow controller
+  example](workflow-controller.md)).
 - Arbitrary dynamic graph mutation, unbounded loops, or unbounded child
   recursion.
 - Automatic merge or merge authorization based on PR state alone.
@@ -455,6 +460,9 @@ For a stack of review units, the planning workflow ends with a typed immutable
 topology; an explicit caller instantiates a bounded parent with declared
 review-unit child workflows before execution. Each child owns its state, review
 loop, evidence, and gates. The parent owns composition and typed handoff only.
+The shipped software-factory templates demonstrate the whole shape — dispatch
+policy, worktree concurrency keys, trusted-adapter gates, and the stack
+parent — in [the workflow controller example](workflow-controller.md).
 
 ## Kitchen-sink example
 

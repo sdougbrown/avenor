@@ -29,6 +29,7 @@ export default defineConfig({
           { text: 'Loop', link: '/loop' },
           { text: 'Team', link: '/team' },
           { text: 'Workflow', link: '/workflow' },
+          { text: 'Workflow Controller', link: '/workflow-controller' },
           { text: 'Events', link: '/events' },
           { text: 'Watch', link: '/watch' },
           { text: 'Permission Handler', link: '/permission-handler' },
