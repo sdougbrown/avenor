@@ -790,3 +790,124 @@ func TestControllerRunnerCapacityBlockedEventDedup(t *testing.T) {
 		t.Fatalf("capacity_cleared events = %d, want exactly 1", cleared)
 	}
 }
+
+// TestControllerRunnerRenewsLeaseWhileStartBlocked proves the leader loop
+// keeps renewing its lease while a dispatch worker is held inside provider
+// start: across a window spanning many renew intervals, RenewedAt keeps
+// advancing and ExpiresAt always sits beyond the wall clock, so the lease
+// never lapses even though the outstanding worker never reports back.
+func TestControllerRunnerRenewsLeaseWhileStartBlocked(t *testing.T) {
+	f := newRunnerFixture(t, "runner-renew-blocked", "", 4, 4, false)
+	f.sup.controllerRenewInterval = 15 * time.Millisecond
+	wf := f.addWorkflow(t, "renew-1", "c1", "")
+	f.enableController(t, "c1", 2)
+
+	// The dispatch worker blocks inside the executor's start.
+	waitFor(t, "dispatch blocked in provider start", func() bool { return len(f.exec.started) >= 1 })
+
+	var firstRenewed, lastRenewed time.Time
+	deadline := time.Now().Add(400 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		st, err := f.sup.WorkflowControllerStatus("c1")
+		if err != nil {
+			t.Fatalf("controller status: %v", err)
+		}
+		leader, ok := st.(map[string]any)["leader"].(map[string]any)
+		if !ok || leader == nil {
+			t.Fatal("leader lease missing while the controller leads")
+		}
+		renewed := leader["renewed_at"].(time.Time)
+		expires := leader["expires_at"].(time.Time)
+		if !lastRenewed.IsZero() && renewed.Before(lastRenewed) {
+			t.Fatalf("RenewedAt went backwards: %s after %s", renewed, lastRenewed)
+		}
+		if !time.Now().Before(expires) {
+			t.Fatalf("lease expired while the start was blocked: expires %s", expires)
+		}
+		if firstRenewed.IsZero() {
+			firstRenewed = renewed
+		}
+		lastRenewed = renewed
+		time.Sleep(5 * time.Millisecond)
+	}
+	if lastRenewed.IsZero() {
+		t.Fatal("never observed a leader lease")
+	}
+	if advance := lastRenewed.Sub(firstRenewed); advance < 5*15*time.Millisecond {
+		t.Fatalf("RenewedAt advanced only %s across the window, want at least five renew intervals (%s): the lease was not renewed while the start was blocked", advance, 5*15*time.Millisecond)
+	}
+
+	// Unblock the start: the attempt completes and the workflow reaches its
+	// terminal outcome under the still-live lease.
+	f.exec.finish()
+	f.waitRunning(t, wf)
+	waitFor(t, "workflow terminal after unblock", func() bool {
+		return f.workflowInstance(t, wf).Status == workflow.WorkflowCompleted
+	})
+}
+
+// TestControllerRunnerDisableReleasesLeaseAndStopsDispatch proves disabling
+// a leading controller durably releases its lease and stops dispatching:
+// immediately after WorkflowControllerDisable — before any fixture cleanup —
+// the persisted record has no leader and desired state disabled, and newly
+// ready candidates are never dispatched.
+func TestControllerRunnerDisableReleasesLeaseAndStopsDispatch(t *testing.T) {
+	f := newRunnerFixture(t, "runner-disable", "", 4, 4, false)
+	f.sup.controllerRenewInterval = 15 * time.Millisecond
+	wf := f.addWorkflow(t, "disable-1", "c1", "")
+	f.enableController(t, "c1", 2)
+
+	// The dispatch worker blocks inside the executor's start while the
+	// controller leads and holds the lease.
+	waitFor(t, "dispatch blocked in provider start", func() bool { return len(f.exec.started) >= 1 })
+	if rec, ok, err := f.cstore.Get("c1"); err != nil || !ok || rec.Leader == nil {
+		t.Fatalf("leader lease before disable: rec=%+v ok=%v err=%v", rec, ok, err)
+	}
+
+	// Disable persists the disabled state (durably releasing the lease)
+	// before stopping this process's leader loop, and the loop's stop waits
+	// for the held dispatch to finish — so run it concurrently and assert the
+	// persisted record while the stop is still draining.
+	disabled := make(chan error, 1)
+	go func() {
+		_, err := f.sup.WorkflowControllerDisable("c1", mustJSON(t, map[string]string{"reason": "test disable"}))
+		disabled <- err
+	}()
+	waitFor(t, "lease released and desired disabled", func() bool {
+		rec, ok, err := f.cstore.Get("c1")
+		return err == nil && ok && rec.Leader == nil && rec.DesiredState == workflowcontroller.DesiredDisabled
+	})
+	rec, ok, err := f.cstore.Get("c1")
+	if err != nil || !ok {
+		t.Fatalf("get after disable: ok=%v err=%v", ok, err)
+	}
+	if rec.Leader != nil {
+		t.Fatalf("disable left a live lease: %+v", rec.Leader)
+	}
+	if rec.DesiredState != workflowcontroller.DesiredDisabled {
+		t.Fatalf("desired state after disable = %q, want disabled", rec.DesiredState)
+	}
+
+	// A new workflow becomes ready; with the leader loop stopped it is never
+	// dispatched, across several would-be reconcile passes.
+	wf2 := f.addWorkflow(t, "disable-2", "c1", "")
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if n := len(f.exec.started); n > 1 {
+			t.Fatalf("%d executor starts after disable, want only the pre-disable one", n)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := len(f.workflowInstance(t, wf2).Attempts); got != 0 {
+		t.Fatalf("workflow dispatched %d attempts after disable, want 0", got)
+	}
+
+	// Release the held start: the disable's loop stop drains it and returns.
+	f.exec.finish()
+	if err := <-disabled; err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	waitFor(t, "first workflow terminal after disable", func() bool {
+		return f.workflowInstance(t, wf).Status == workflow.WorkflowCompleted
+	})
+}
