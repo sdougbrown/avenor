@@ -4333,6 +4333,9 @@ func hasExistingWorkflowState(root string) bool {
 // the process restarts.
 func (s *Supervisor) runWorkflowStartupBarrier() {
 	root := resolveWorkflowRoot(s.config.WorkflowRoot)
+	// Orphaned adapter staging files predate every live state; sweep them
+	// before recovery hands leadership back out.
+	sweepOrphanedAdapterFiles(root)
 	m := workflow.NewManager(workflow.New(root))
 	m.RegisterExecutor(workflow.ActionRun, s.directRunExecutor())
 	m.RegisterExecutor(workflow.ActionLoop, s.loopExecutor())
