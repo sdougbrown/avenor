@@ -69,6 +69,12 @@ type Config struct {
 	// to $XDG_STATE_HOME/avenor/workflows (or $HOME/.avenor/workflows). The
 	// workflow manager creates the directory lazily on first workflow use.
 	WorkflowRoot string
+
+	// WorkflowAdapterDir is the host-owned directory of trusted external-gate
+	// adapter manifests. When empty it defaults to
+	// $XDG_CONFIG_HOME/avenor/workflow-adapters (or
+	// $HOME/.config/avenor/workflow-adapters).
+	WorkflowAdapterDir string
 }
 
 type SpawnParams struct {
@@ -4252,7 +4258,7 @@ func analyzeCommandPaths(command, cwd string) (resolved []string, escapes bool) 
 
 // resolveWorkflowRoot returns the configured workflow root, or the default
 // under XDG_STATE_HOME (falling back to $HOME/.avenor) when unset. It never
-// creates directories; the manager creates them on first use.
+// creates directories; the manager creates them on first workflow use.
 func resolveWorkflowRoot(configured string) string {
 	if configured != "" {
 		return configured
@@ -4270,6 +4276,28 @@ func resolveWorkflowRoot(configured string) string {
 		return "avenor/workflows"
 	}
 	return filepath.Join(home, ".avenor", "workflows")
+}
+
+// resolveWorkflowAdapterDir returns the configured adapter manifest directory,
+// or the default under XDG_CONFIG_HOME (falling back to
+// $HOME/.config/avenor) when unset. It never creates directories.
+func resolveWorkflowAdapterDir(configured string) string {
+	if configured != "" {
+		return configured
+	}
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" && filepath.IsAbs(xdg) {
+		return filepath.Join(xdg, "avenor", "workflow-adapters")
+	}
+	home := os.Getenv("HOME")
+	if home == "" {
+		if u, err := os.UserHomeDir(); err == nil && u != "" {
+			home = u
+		}
+	}
+	if home == "" {
+		return "avenor/workflow-adapters"
+	}
+	return filepath.Join(home, ".config", "avenor", "workflow-adapters")
 }
 
 // workflowManager returns the workflow manager for the configured workflow
