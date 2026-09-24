@@ -97,6 +97,23 @@ func NewManager(store *Store) *Manager {
 		}
 		return node.Dispatch
 	})
+	// Bound-gate pinning resolves at command time in event building: the
+	// template lookup supplies the target node's gate bindings, and the child
+	// snapshot lookup resolves subject values that flow through child output
+	// bindings. Load errors leave the binding unresolved rather than failing
+	// the command. The child read takes the child instance's flock while the
+	// parent command holds the parent's; no code path takes them in the
+	// reverse order.
+	SetBindingTemplateResolver(func(templateID TemplateID, templateVersion TemplateVersion) (*Template, error) {
+		tmpl, err := m.store.LoadTemplate(templateID, templateVersion)
+		if err != nil {
+			return nil, err
+		}
+		return &tmpl, nil
+	})
+	SetChildSnapshotResolver(func(workflowID WorkflowID) (Snapshot, bool, error) {
+		return m.store.loadCurrent(workflowID)
+	})
 	return m
 }
 

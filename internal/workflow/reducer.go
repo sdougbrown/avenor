@@ -61,6 +61,8 @@ func cloneMap(src map[string]any) map[string]any {
 
 func cloneActivation(a Activation) Activation {
 	a.AttemptIDs = append([]AttemptID(nil), a.AttemptIDs...)
+	a.CausedBy = append([]ActivationID(nil), a.CausedBy...)
+	a.ResolvedGates = cloneResolvedGates(a.ResolvedGates)
 	if a.Selection != nil {
 		sel := *a.Selection
 		a.Selection = &sel
@@ -124,6 +126,31 @@ func cloneSubject(s *Subject) *Subject {
 	}
 	copy := *s
 	return &copy
+}
+
+func cloneResolvedGates(gates map[GateID]ResolvedGate) map[GateID]ResolvedGate {
+	if gates == nil {
+		return nil
+	}
+	out := make(map[GateID]ResolvedGate, len(gates))
+	for id, gate := range gates {
+		gate.Subject = cloneSubject(gate.Subject)
+		gate.Unresolved = append([]string(nil), gate.Unresolved...)
+		if gate.Inputs != nil {
+			inputs := make(map[string]ResolvedGateInput, len(gate.Inputs))
+			for name, input := range gate.Inputs {
+				input.Literal = append([]byte(nil), input.Literal...)
+				if input.Reference != nil {
+					ref := *input.Reference
+					input.Reference = &ref
+				}
+				inputs[name] = input
+			}
+			gate.Inputs = inputs
+		}
+		out[id] = gate
+	}
+	return out
 }
 
 func derefTime(t *time.Time) *time.Time {

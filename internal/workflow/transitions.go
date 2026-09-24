@@ -117,6 +117,9 @@ func buildCommandEvents(state Snapshot, command Command) ([]Event, error) {
 		next := newEvent(EventTransition)
 		next.Transition = t
 		next.Outcome = command.Outcome
+		if err := attachGateBindings(state, &next, t.TargetNodeID, t.ActivationID); err != nil {
+			return nil, err
+		}
 		return []Event{e, next}, nil
 
 	case CommandGate:
@@ -143,6 +146,9 @@ func buildCommandEvents(state Snapshot, command Command) ([]Event, error) {
 		next := newEvent(EventTransition)
 		next.Transition = t
 		next.Outcome = command.Outcome
+		if err := attachGateBindings(state, &next, t.TargetNodeID, t.ActivationID); err != nil {
+			return nil, err
+		}
 		return []Event{e, next}, nil
 
 	case CommandSkip:
@@ -246,6 +252,9 @@ func buildCommandEvents(state Snapshot, command Command) ([]Event, error) {
 		next := newEvent(EventTransition)
 		next.Transition = t
 		next.Outcome = command.Outcome
+		if err := attachGateBindings(state, &next, t.TargetNodeID, t.ActivationID); err != nil {
+			return nil, err
+		}
 		return []Event{e, next}, nil
 
 	default:
@@ -327,6 +336,10 @@ func applyEvent(next *Snapshot, event Event) error {
 			CreatedAt:       now,
 			UpdatedAt:       now,
 		}
+		// Provenance and gate pinning are command-time facts carried on the
+		// event; replay copies exactly what the event carries.
+		created.CausedBy = append([]ActivationID(nil), event.CausedBy...)
+		created.ResolvedGates = cloneResolvedGates(event.ResolvedGates)
 		copyReadyAt(&created, event)
 		applyDispatchPolicy(next, &created, event.Transition.TargetNodeID)
 		next.Instance.Activations = append(next.Instance.Activations, created)

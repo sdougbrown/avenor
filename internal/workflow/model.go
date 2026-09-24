@@ -118,6 +118,10 @@ type DispatchPolicy struct {
 	ControllerID   string       `json:"controller_id,omitempty"`
 	Priority       *int         `json:"priority,omitempty"`
 	ConcurrencyKey string       `json:"concurrency_key,omitempty"`
+	// SuccessOutcome names the declared branch an auto external node follows
+	// once every required external gate has passed. It is declared only on
+	// external nodes and required exactly when such a node is auto.
+	SuccessOutcome OutcomeName `json:"success_outcome,omitempty"`
 }
 
 // effective resolves the policy with its defaults applied: manual mode and
@@ -138,6 +142,7 @@ func (d *DispatchPolicy) effective() DispatchPolicy {
 		out.Priority = &p
 	}
 	out.ConcurrencyKey = d.ConcurrencyKey
+	out.SuccessOutcome = d.SuccessOutcome
 	return out
 }
 
@@ -450,6 +455,139 @@ type GateDefinition struct {
 	Required        bool          `json:"required"`
 	AllowedOutcomes []OutcomeName `json:"allowed_outcomes,omitempty"`
 	SubjectType     string        `json:"subject_type,omitempty"`
+	// AdapterID names the trusted external adapter that polls this gate. It
+	// is declared only on external gates.
+	AdapterID string `json:"adapter_id,omitempty"`
+	// Inputs are the adapter's late-bound input values: strict primitive
+	// literals or from_node_output references to a transitive dependency's
+	// declared output. Declared only on external gates.
+	Inputs map[string]GateInputValue `json:"inputs,omitempty"`
+	// SubjectBinding declares that every decision on this gate must address
+	// the exact subject pinned from one causal source activation. Declared
+	// on external and human gates; forbidden on machine gates.
+	SubjectBinding *SubjectBinding `json:"subject_binding,omitempty"`
+	// ResultOutcomes routes advisory external results to the node's declared
+	// branch outcomes. It is declared only on bound external gates; passed
+	// is excluded (a pass always follows the dispatch success_outcome).
+	ResultOutcomes map[GateResultName]OutcomeName `json:"result_outcomes,omitempty"`
+}
+
+// GateResultName names one external gate result that a result_outcomes
+// mapping may route. passed is deliberately absent: a passed result follows
+// the node's dispatch success_outcome.
+type GateResultName string
+
+const (
+	GateResultFailed           GateResultName = "failed"
+	GateResultActionRequired   GateResultName = "action_required"
+	GateResultChangesRequested GateResultName = "changes_requested"
+)
+
+// gateResultNameFor maps a durable gate status to its result_outcomes key.
+// Statuses without a mapping key (pending, passed, rejected, waived) return
+// an empty name.
+func gateResultNameFor(status GateStatus) GateResultName {
+	switch status {
+	case GateFailed:
+		return GateResultFailed
+	case GateActionRequired:
+		return GateResultActionRequired
+	case GateChangesRequested:
+		return GateResultChangesRequested
+	}
+	return ""
+}
+
+// GateInputValue is one declared adapter input value: either a strict
+// primitive literal (string, number, or boolean) or a from_node_output
+// reference to a dependency node's declared output. Exactly one form is set.
+type GateInputValue struct {
+	Literal        json.RawMessage          `json:"-"`
+	FromNodeOutput *TemplateOutputReference `json:"from_node_output,omitempty"`
+}
+
+// MarshalJSON emits the declared wire shape: a bare primitive literal or the
+// {"from_node_output": {...}} reference object.
+func (v GateInputValue) MarshalJSON() ([]byte, error) {
+	if v.FromNodeOutput != nil {
+		return json.Marshal(struct {
+			FromNodeOutput *TemplateOutputReference `json:"from_node_output"`
+		}{v.FromNodeOutput})
+	}
+	if len(bytes.TrimSpace(v.Literal)) == 0 {
+		return nil, fmt.Errorf("gate input value requires a primitive literal or a from_node_output reference")
+	}
+	return v.Literal, nil
+}
+
+// UnmarshalJSON accepts exactly one of a strict primitive literal or the
+// from_node_output reference object. null, arrays, objects without the
+// reference key, and unknown keys are rejected.
+func (v *GateInputValue) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if bytes.Equal(trimmed, []byte("null")) {
+		return fmt.Errorf("gate input value cannot be null")
+	}
+	if len(trimmed) == 0 {
+		return fmt.Errorf("gate input value requires a primitive literal or a from_node_output reference")
+	}
+	switch trimmed[0] {
+	case '"', 't', 'f', '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+		v.Literal = append([]byte(nil), trimmed...)
+		return nil
+	case '{':
+		decoder := json.NewDecoder(bytes.NewReader(data))
+		decoder.DisallowUnknownFields()
+		decoder.UseNumber()
+		var wire struct {
+			FromNodeOutput *TemplateOutputReference `json:"from_node_output"`
+		}
+		if err := decoder.Decode(&wire); err != nil {
+			return fmt.Errorf("gate input value: %w", err)
+		}
+		if wire.FromNodeOutput == nil {
+			return fmt.Errorf(`gate input value object requires "from_node_output"`)
+		}
+		v.FromNodeOutput = wire.FromNodeOutput
+		return nil
+	}
+	return fmt.Errorf("gate input value must be a primitive literal or a from_node_output reference")
+}
+
+// SubjectBinding declares the durable output references whose causal source
+// activation pins a gate's exact subject. All three references must resolve
+// from the same activation; only the pull_request subject type exists in
+// this release.
+type SubjectOutputRef struct {
+	FromNodeOutput TemplateOutputReference `json:"from_node_output"`
+}
+
+type SubjectBinding struct {
+	Type        string            `json:"type"`
+	Repository  *SubjectOutputRef `json:"repository"`
+	PullRequest *SubjectOutputRef `json:"pull_request"`
+	Revision    *SubjectOutputRef `json:"revision"`
+}
+
+// ResolvedGateInput is one pinned adapter input on a gate activation: a
+// declared literal passes through unchanged, while a declared reference is
+// pinned to the exact causal source activation, output, and revision (child
+// workflow identity included when the output came through a child).
+type ResolvedGateInput struct {
+	Literal   json.RawMessage  `json:"literal,omitempty"`
+	Reference *OutputReference `json:"reference,omitempty"`
+}
+
+// ResolvedGate is the activation-scoped pinning of one bound gate: the exact
+// input references and the resolved subject recorded when the activation was
+// created. A nil Subject (with the reference listed under Unresolved) means
+// the subject could not be resolved yet; later consumers wait until a
+// command resolves it. The record is immutable once pinned: a correction
+// branch creates a new activation with new pins instead of mutating these.
+type ResolvedGate struct {
+	Inputs     map[string]ResolvedGateInput `json:"inputs,omitempty"`
+	Subject    *Subject                     `json:"subject,omitempty"`
+	Unresolved []string                     `json:"unresolved,omitempty"`
 }
 
 type Subject struct {
@@ -502,9 +640,18 @@ type Activation struct {
 	// state, copied from the event's explicit timestamp during replay. A nil
 	// ReadyAt (legacy activations) falls back to CreatedAt for advisory
 	// display only and is never auto-selectable.
-	ReadyAt   *time.Time `json:"ready_at,omitempty"`
-	CreatedAt time.Time  `json:"created_at"`
-	UpdatedAt time.Time  `json:"updated_at"`
+	// CausedBy carries the causal provenance of a transition-created
+	// activation: the ID(s) of the activation(s) whose resolution caused this
+	// visit. Bound gate references resolve only along this chain, never from
+	// the latest workflow-global output value.
+	CausedBy []ActivationID `json:"caused_by,omitempty"`
+	// ResolvedGates pins the bound gate inputs and subjects of the node onto
+	// this activation, resolved at command time from the causal provenance
+	// chain. Legacy activations without bound gates leave it nil.
+	ResolvedGates map[GateID]ResolvedGate `json:"resolved_gates,omitempty"`
+	ReadyAt       *time.Time              `json:"ready_at,omitempty"`
+	CreatedAt     time.Time               `json:"created_at"`
+	UpdatedAt     time.Time               `json:"updated_at"`
 }
 
 type ExecutionIdentity struct {

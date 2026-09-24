@@ -107,6 +107,15 @@ func ValidateGraph(template Template) error {
 		outputSets[node.ID] = outputs
 	}
 
+	// Bound-gate declarations: adapter inputs, subject bindings, and result
+	// routing are validated against the dependency graph and declared
+	// outputs, which the structural vocabulary cannot express.
+	for _, node := range template.Nodes {
+		if err := validateGateBindings(template, nodeIndex, node); err != nil {
+			return err
+		}
+	}
+
 	// Ordinary dependency graph must be acyclic, self-dependency included and
 	// loop body nodes included: cycles are legal only through explicit bounded
 	// loops.
