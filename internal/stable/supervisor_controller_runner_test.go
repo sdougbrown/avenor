@@ -756,12 +756,15 @@ func TestControllerRunnerCapacityBlockedEventDedup(t *testing.T) {
 		t.Fatalf("workflow dispatched despite exhausted admission")
 	}
 
-	// Exhaust the tree budget too: the next pass changes the reason to tree
-	// and appends the second event.
+	// Exhaust the tree budget too: the composed capacity changed, so the
+	// capacity-change signal fires (the budget notifier only announces
+	// releases) and the next pass re-attempts dispatch, changing the reason
+	// to tree and appending the second event.
 	token, err := f.sup.acquireTreeAdmission()
 	if err != nil {
 		t.Fatalf("exhaust tree: %v", err)
 	}
+	f.sup.signalCapacityChange()
 	waitBlocked("tree")
 	blocked, _ = capacityEvents(t)
 	if len(blocked) != 2 || blocked[0] != "local" || blocked[1] != "tree" {

@@ -202,6 +202,30 @@ func waitUntil(t *testing.T, what string, cond func() bool) {
 	}
 }
 
+// manualClock is a mutex-guarded clock the test advances explicitly. The
+// runner reads it from its leader goroutine while the test advances it, so
+// reads and writes must not race.
+type manualClock struct {
+	mu  sync.Mutex
+	cur time.Time
+}
+
+func newManualClock() *manualClock {
+	return &manualClock{cur: time.Date(2025, 3, 4, 5, 6, 7, 0, time.UTC)}
+}
+
+func (c *manualClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.cur
+}
+
+func (c *manualClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	c.cur = c.cur.Add(d)
+	c.mu.Unlock()
+}
+
 // newRunnerStore builds a real ControllerStore over a temp dir with the given
 // max_inflight, enabled and ready for a runner to lead.
 func newRunnerStore(t *testing.T, maxInflight int) (*ControllerStore, *tickClock) {
@@ -378,101 +402,109 @@ func TestRunnerMaxInflightCountsUnreportedWorkers(t *testing.T) {
 	waitUntil(t, "third dispatch after capacity freed", func() bool { return deps.dispatchCount() >= 3 })
 }
 
-// TestRunnerCapacityBlockedRecordsAndBoundsRetries covers the capacity_blocked
-// outcome handling.
-//
-// KNOWN GAP (bug report, not worked around in code): the intended contract is
-// that a capacity_blocked result suppresses further dispatch until a capacity
-// signal arrives or the anti-entropy tick fires. The runner implements only
-// current-pass suppression (handleResult's `blocked` breaks the dispatch loop
-// for that pass); the next pass re-dispatches at the renew cadence. This test
-// therefore pins the guarantees that hold today: retries stay bounded by the
-// pass cadence (no hot spin), the runner status and controller record report
-// the block, and the store dedups repeated capacity_blocked events to one per
-// reason.
-func TestRunnerCapacityBlockedRecordsAndBoundsRetries(t *testing.T) {
+// TestRunnerCapacityBlockedSuppressionPersistsAcrossPasses proves the
+// capacity_blocked contract: one blocked dispatch suppresses every later
+// dispatch attempt until a capacity-change signal or an anti-entropy pass
+// clears the block, and each clear produces exactly one new dispatch attempt.
+// Workflow change signals and worker results never clear the block.
+func TestRunnerCapacityBlockedSuppressionPersistsAcrossPasses(t *testing.T) {
 	store, _ := newRunnerStore(t, 4)
 	deps := newFakeDeps(store, "c1")
+	// First dispatch holds the pass open until released, then reports stale;
+	// second dispatch reports capacity_blocked immediately. Both results
+	// must leave the persisted block in place.
+	deps.setScript(
+		DispatchResult{Kind: ResultStale},
+		DispatchResult{Kind: ResultCapacityBlocked, Source: "local"},
+	)
 	deps.setDefaultResult(DispatchResult{Kind: ResultCapacityBlocked, Source: "local"})
+	deps.setCandidates([]Candidate{runnerCand("wf1", "start", "a1"), runnerCand("wf2", "start", "a2")})
+	block := make(chan struct{})
+	deps.mu.Lock()
+	deps.block = block
+	deps.blockFirst = 1 // only the first dispatch blocks
+	deps.mu.Unlock()
+
+	clock := newManualClock()
+	changeCh := make(chan struct{}, 1)
+	capacityCh := make(chan struct{}, 1)
+	r := NewRunner(RunnerConfig{
+		Deps:          deps,
+		Store:         store,
+		ControllerID:  "c1",
+		OwnerID:       "owner-test",
+		RenewInterval: 20 * time.Millisecond,
+		AntiEntropy:   5 * time.Second,
+		ChangeCh:      changeCh,
+		CapacityCh:    capacityCh,
+		Now:           clock.Now,
+	})
+	t.Cleanup(r.Stop)
+
+	// Both candidates dispatch in the first pass: the first call blocks, the
+	// second returns capacity_blocked and the block is recorded.
+	waitUntil(t, "two dispatch attempts", func() bool { return deps.dispatchCount() >= 2 })
+	waitUntil(t, "block recorded in status", func() bool {
+		s := r.Status()
+		return s.CapacityBlocked == "local" && s.LastOutcome == "capacity_blocked(local)"
+	})
+
+	// Fifty workflow change signals while blocked: no pass may dispatch.
+	for i := 0; i < 50; i++ {
+		select {
+		case changeCh <- struct{}{}:
+		default:
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if n := deps.dispatchCount(); n != 2 {
+		t.Fatalf("%d dispatches after 50 change signals while blocked, want 2", n)
+	}
+
+	// The held first worker completes with stale: the worker result is
+	// processed (status shows it) but must not clear the block.
+	close(block)
+	waitUntil(t, "stale worker result processed while blocked", func() bool {
+		return r.Status().LastOutcome == "stale"
+	})
+	for i := 0; i < 50; i++ {
+		select {
+		case changeCh <- struct{}{}:
+		default:
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if n := deps.dispatchCount(); n != 2 {
+		t.Fatalf("%d dispatches after change signals and worker results while blocked, want 2", n)
+	}
+	if s := r.Status(); s.CapacityBlocked != "local" {
+		t.Fatalf("status capacity blocked = %q, want local (worker results must not clear the block)", s.CapacityBlocked)
+	}
+
+	// The host view shrinks to one dispatchable candidate so each cleared
+	// pass makes exactly one dispatch attempt.
 	deps.setCandidates([]Candidate{runnerCand("wf1", "start", "a1")})
 
-	changeCh := make(chan struct{}, 1)
-	r := startRunner(t, store, deps, 20*time.Millisecond, 50*time.Millisecond, changeCh, nil)
+	// One capacity-change signal: exactly one new dispatch attempt follows,
+	// which re-blocks (the default result is capacity_blocked).
+	capacityCh <- struct{}{}
+	waitUntil(t, "one dispatch after capacity signal", func() bool { return deps.dispatchCount() >= 3 })
+	time.Sleep(150 * time.Millisecond)
+	if n := deps.dispatchCount(); n != 3 {
+		t.Fatalf("%d dispatches after capacity signal, want exactly 3", n)
+	}
+	waitUntil(t, "block re-recorded", func() bool { return r.Status().CapacityBlocked == "local" })
 
-	waitUntil(t, "first capacity-blocked dispatch", func() bool { return deps.dispatchCount() >= 1 })
-
-	// Hammer change signals: the host view keeps reporting new work while
-	// capacity is blocked. Dispatch attempts must stay bounded by the pass
-	// cadence, never a tight spin.
-	stop := make(chan struct{})
-	go func() {
-		for {
-			select {
-			case changeCh <- struct{}{}:
-			default:
-			}
-			select {
-			case <-stop:
-				return
-			case <-time.After(5 * time.Millisecond):
-			}
-		}
-	}()
-	time.Sleep(250 * time.Millisecond)
-	close(stop)
-
-	// 250ms at a 20ms pass cadence allows ~12 passes; far fewer than a spin
-	// would produce, far more than the not-yet-implemented suppression
-	// would allow. The bound documents the current cadence pacing.
-	if n := deps.dispatchCount(); n == 0 || n > 20 {
-		t.Fatalf("%d dispatch attempts in 250ms with change signals: want cadence-bounded retries, got %d", n, n)
+	// Advancing the clock past the anti-entropy interval: exactly one new
+	// dispatch attempt follows, then the block is re-recorded.
+	clock.Advance(6 * time.Second)
+	waitUntil(t, "one dispatch after anti-entropy", func() bool { return deps.dispatchCount() >= 4 })
+	time.Sleep(150 * time.Millisecond)
+	if n := deps.dispatchCount(); n != 4 {
+		t.Fatalf("%d dispatches after anti-entropy tick, want exactly 4", n)
 	}
-
-	// The runner status reports the block.
-	s := r.Status()
-	if s.CapacityBlocked != "local" {
-		t.Fatalf("status capacity blocked = %q, want local", s.CapacityBlocked)
-	}
-	if s.LastOutcome != "capacity_blocked(local)" {
-		t.Fatalf("status last outcome = %q, want capacity_blocked(local)", s.LastOutcome)
-	}
-
-	// The controller record and event log reflect exactly one deduplicated
-	// capacity_blocked event despite many blocked passes.
-	rec, ok, err := store.Get("c1")
-	if err != nil || !ok {
-		t.Fatalf("get: ok=%v err=%v", ok, err)
-	}
-	if rec.CapacityBlocked != "local" {
-		t.Fatalf("record capacity blocked = %q, want local", rec.CapacityBlocked)
-	}
-	waitUntil(t, "capacity_blocked event in log", func() bool {
-		return len(eventKinds(t, store, "c1")) > 0
-	})
-	blocked := 0
-	for _, kind := range eventKinds(t, store, "c1") {
-		if kind == EventCapacityBlocked {
-			blocked++
-		}
-	}
-	if blocked != 1 {
-		t.Fatalf("capacity_blocked events = %d, want exactly 1 (dedup across passes)", blocked)
-	}
-
-	// A successful dispatch clears the block: the next result is dispatched,
-	// the status clears, and a capacity_cleared event is appended.
-	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
-	waitUntil(t, "capacity cleared after successful dispatch", func() bool {
-		return r.Status().CapacityBlocked == ""
-	})
-	cleared := 0
-	for _, kind := range eventKinds(t, store, "c1") {
-		if kind == EventCapacityCleared {
-			cleared++
-		}
-	}
-	if cleared != 1 {
-		t.Fatalf("capacity_cleared events = %d, want exactly 1", cleared)
+	if s := r.Status(); s.CapacityBlocked != "local" {
+		t.Fatalf("status capacity blocked = %q, want local after re-block", s.CapacityBlocked)
 	}
 }
 

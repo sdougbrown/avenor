@@ -94,6 +94,19 @@ type dispatchWorkerResult struct {
 	err      error
 }
 
+// wakeReason reports which wakeup ended the previous pass. Only a
+// capacity-change wakeup or an anti-entropy pass clears a persisted capacity
+// block; workflow changes and worker results must not.
+type wakeReason int
+
+const (
+	wakeNone     wakeReason = iota // no wakeup observed yet (first pass)
+	wakeTimer                      // cadence timer elapsed
+	wakeChange                     // workflow change signal
+	wakeCapacity                   // capacity-change signal
+	wakeResult                     // worker result arrived
+)
+
 // Runner is one controller's in-process reconciler. It holds the controller's
 // leadership lease, periodically selects ready candidates via Select, and
 // hands each decision to an untracked worker goroutine that calls the host's
@@ -215,6 +228,14 @@ func (r *Runner) loop() {
 	var ownerEpoch int64
 	holding := false
 	var lastRefresh time.Time
+	wake := wakeNone
+	var exit bool
+	// blockedSource is the persisted capacity block: while set, passes keep
+	// renewing the lease, refreshing views, publishing status, and processing
+	// worker results, but take no dispatch decisions. It clears on a
+	// capacity-change signal, an anti-entropy pass, a successful dispatch, or
+	// a leadership loss.
+	var blockedSource string
 
 	release := func() {
 		if !holding {
@@ -228,20 +249,31 @@ func (r *Runner) loop() {
 	dropLeadership := func() {
 		holding = false
 		leaseID = ""
+		blockedSource = ""
 		r.clearLeadStatus()
 	}
 
+	// clearBlock drops the persisted capacity block and its status fields.
+	clearBlock := func() {
+		blockedSource = ""
+		r.setStatus(func(s *RunnerStatus) {
+			s.CapacityBlocked = ""
+			s.CapacityDetail = ""
+		})
+	}
 	// handleResult incorporates one worker outcome. It reports whether the
-	// outcome was a capacity block (stop dispatching for the current pass)
-	// or a leadership loss (stop the pass and drop leadership).
-	handleResult := func(res dispatchWorkerResult) (blocked, lostLead bool) {
+	// outcome was a leadership loss (stop the pass and drop leadership). A
+	// capacity block persists across passes until a capacity-change signal or
+	// an anti-entropy pass clears it.
+	handleResult := func(res dispatchWorkerResult) (lostLead bool) {
 		if res.err != nil {
 			log.Printf("workflow controller %s: dispatch %v: %v", r.controllerID, res.identity, res.err)
 			r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "dispatch_error" })
-			return false, false
+			return false
 		}
 		switch res.result.Kind {
 		case ResultDispatched:
+			blockedSource = ""
 			if _, _, err := r.store.ClearCapacityBlocked(r.controllerID); err != nil {
 				log.Printf("workflow controller %s: clear capacity blocked: %v", r.controllerID, err)
 			}
@@ -256,6 +288,7 @@ func (r *Runner) loop() {
 			if source == "tree" {
 				detail = "descendant_budget"
 			}
+			blockedSource = source
 			if _, _, err := r.store.RecordCapacityBlocked(r.controllerID, source, detail); err != nil {
 				log.Printf("workflow controller %s: record capacity blocked: %v", r.controllerID, err)
 			}
@@ -264,14 +297,13 @@ func (r *Runner) loop() {
 				s.CapacityBlocked = source
 				s.CapacityDetail = detail
 			})
-			blocked = true
 		case ResultNotLeader:
 			dropLeadership()
 			lostLead = true
 		default:
 			r.setStatus(func(s *RunnerStatus) { s.LastOutcome = string(res.result.Kind) })
 		}
-		return blocked, lostLead
+		return lostLead
 	}
 	// decrementUnreported drops one pending-decision count for an identity.
 	decrementUnreported := func(identity workflow.ExecutionIdentity) {
@@ -285,17 +317,17 @@ func (r *Runner) loop() {
 	}
 	// drainResults consumes completed worker results without blocking,
 	// folding their outcomes into the current pass.
-	drainResults := func() (blocked, lostLead bool) {
+	drainResults := func() (lostLead bool) {
 		for {
 			select {
 			case res := <-r.results:
 				r.outstanding--
 				decrementUnreported(res.identity)
-				b, l := handleResult(res)
-				blocked = blocked || b
-				lostLead = lostLead || l
+				if handleResult(res) {
+					lostLead = true
+				}
 			default:
-				return blocked, lostLead
+				return lostLead
 			}
 		}
 	}
@@ -329,27 +361,28 @@ func (r *Runner) loop() {
 		}
 	}
 	// waitOrCancel arms the timer at d and waits for it, cancellation, or a
-	// wake signal; it reports whether the runner should exit.
-	waitOrCancel := func(d time.Duration) bool {
+	// wake signal; it reports the wakeup reason and whether the runner should
+	// exit.
+	waitOrCancel := func(d time.Duration) (wake wakeReason, exit bool) {
 		arm(d)
 		select {
 		case <-r.ctx.Done():
 			release()
 			drainWorkers()
-			return true
+			return wakeNone, true
 		case <-timer.C:
-			return false
+			return wakeTimer, false
 		case <-r.changeCh:
 			drainSignal(r.changeCh)
-			return false
+			return wakeChange, false
 		case <-r.capacityCh:
 			drainSignal(r.capacityCh)
-			return false
+			return wakeCapacity, false
 		case res := <-r.results:
 			r.outstanding--
 			decrementUnreported(res.identity)
 			handleResult(res)
-			return false
+			return wakeResult, false
 		}
 	}
 
@@ -379,6 +412,7 @@ func (r *Runner) loop() {
 			leaseID = rec.Leader.LeaseID
 			ownerEpoch = rec.Leader.OwnerEpoch
 			holding = true
+			blockedSource = ""
 			lastRefresh = time.Time{}
 			r.setStatus(func(s *RunnerStatus) { s.Leading = true })
 		}
@@ -398,7 +432,8 @@ func (r *Runner) loop() {
 			// tick rather than releasing leadership.
 			log.Printf("workflow controller %s: read state: %v", r.controllerID, err)
 			r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "state_error" })
-			if sleepOrExit := waitOrCancel(r.renewInterval); sleepOrExit {
+			wake, exit = waitOrCancel(r.renewInterval)
+			if exit {
 				return
 			}
 			continue
@@ -414,22 +449,42 @@ func (r *Runner) loop() {
 		if d := nextRenewDue.Sub(r.now()); d < wait {
 			wait = d
 		}
+		refreshed := false
 		if lastRefresh.IsZero() || r.now().Sub(lastRefresh) >= r.antiEntropy {
 			if err := r.deps.Refresh(); err != nil {
 				log.Printf("workflow controller %s: refresh: %v", r.controllerID, err)
 				r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "refresh_error" })
-				if exit := waitOrCancel(wait); exit {
+				wake, exit = waitOrCancel(wait)
+				if exit {
 					return
 				}
 				continue
 			}
 			lastRefresh = r.now()
+			refreshed = true
+		}
+		// A capacity-change signal or an anti-entropy pass clears a persisted
+		// capacity block; the pass that clears it dispatches again.
+		if blockedSource != "" && (wake == wakeCapacity || refreshed) {
+			clearBlock()
+		}
+		wake = wakeNone
+		if blockedSource != "" {
+			// Blocked: this pass renews, refreshes, and publishes status but
+			// takes no dispatch decisions until the block clears.
+			r.setStatus(func(s *RunnerStatus) { s.LastReconcile = r.now() })
+			wake, exit = waitOrCancel(wait)
+			if exit {
+				return
+			}
+			continue
 		}
 		candidates, err := r.deps.Candidates(r.controllerID)
 		if err != nil {
 			log.Printf("workflow controller %s: candidates: %v", r.controllerID, err)
 			r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "candidates_error" })
-			if exit := waitOrCancel(wait); exit {
+			wake, exit = waitOrCancel(wait)
+			if exit {
 				return
 			}
 			continue
@@ -438,14 +493,16 @@ func (r *Runner) loop() {
 		if err != nil {
 			log.Printf("workflow controller %s: in-flight: %v", r.controllerID, err)
 			r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "inflight_error" })
-			if exit := waitOrCancel(wait); exit {
+			wake, exit = waitOrCancel(wait)
+			if exit {
 				return
 			}
 			continue
 		}
 		if rec.MaxInflight <= 0 {
 			r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "no_capacity" })
-			if exit := waitOrCancel(wait); exit {
+			wake, exit = waitOrCancel(wait)
+			if exit {
 				return
 			}
 			continue
@@ -482,10 +539,11 @@ func (r *Runner) loop() {
 		})
 
 		// Dispatch loop: renew before each hand-off, and honor worker
-		// results that land mid-pass.
+		// results that land mid-pass. A capacity block from any result
+		// suppresses the remaining hand-offs and persists across passes.
 		for _, d := range decisions {
-			blocked, lostLead := drainResults()
-			if blocked || lostLead || !holding {
+			lostLead := drainResults()
+			if lostLead || blockedSource != "" || !holding {
 				break
 			}
 			if r.ctx.Err() != nil {
@@ -505,7 +563,8 @@ func (r *Runner) loop() {
 			sleep(r.renewInterval)
 			continue
 		}
-		if exit := waitOrCancel(wait); exit {
+		wake, exit = waitOrCancel(wait)
+		if exit {
 			return
 		}
 	}
