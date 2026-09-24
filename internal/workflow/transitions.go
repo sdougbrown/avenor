@@ -306,7 +306,7 @@ func applyEvent(next *Snapshot, event Event) error {
 	case EventHeartbeat:
 		return applyHeartbeat(act, event)
 	case EventLeaseExpired:
-		return applyLeaseExpired(act, event)
+		return applyLeaseExpired(next, act, event)
 	case EventChildAttached:
 		return applyChildAttached(next, act, event)
 	case EventChildOutcome:
@@ -524,6 +524,14 @@ func applyAttemptTerminated(next *Snapshot, act *Activation, event Event) error 
 	attempt := findAttempt(next, act, event.AttemptID)
 	if attempt == nil {
 		return errors.New("terminated attempt not found")
+	}
+	// An already-terminal attempt is an idempotent no-op: a runtime whose
+	// lease expired under it (sweep-timed-out) or whose status was recorded
+	// by another terminal path must never be re-terminated, regress status,
+	// or re-run the lease-release/retry logic below.
+	switch attempt.Status {
+	case AttemptSucceeded, AttemptFailed, AttemptCanceled, AttemptTimedOut, AttemptPanicked:
+		return nil
 	}
 	attempt.Status = status
 	ended := nowUTC()
@@ -923,9 +931,14 @@ func applyHeartbeat(act *Activation, event Event) error {
 	return nil
 }
 
-// applyLeaseExpired releases a stale lease and parks the activation in the
-// expired state so the store can requeue it.
-func applyLeaseExpired(act *Activation, event Event) error {
+// applyLeaseExpired releases a stale lease, terminalizes every non-terminal
+// attempt the crashed holder left behind, and parks the activation in the
+// expired state so the store can requeue it. Timing the attempts out (rather
+// than leaving them starting/running) keeps them from holding concurrency
+// keys and counting as live forever; it consumes no retry budget — the
+// activation's attempt list is untouched and the expired activation is
+// simply claimable again.
+func applyLeaseExpired(next *Snapshot, act *Activation, event Event) error {
 	if act == nil {
 		return errors.New("lease_expired event requires an activation")
 	}
@@ -934,6 +947,19 @@ func applyLeaseExpired(act *Activation, event Event) error {
 	}
 	if event.LeaseID != "" && event.LeaseID != act.ActiveLease.ID {
 		return errors.New("lease_expired lease does not match the active lease")
+	}
+	expiredAt := act.ActiveLease.ExpiresAt
+	for _, id := range act.AttemptIDs {
+		attempt := findAttempt(next, act, id)
+		if attempt == nil {
+			continue
+		}
+		switch attempt.Status {
+		case AttemptStarting, AttemptRunning:
+			attempt.Status = AttemptTimedOut
+			ended := expiredAt
+			attempt.EndedAt = &ended
+		}
 	}
 	act.Status = ActivationLeaseExpired
 	act.ActiveLease = nil
