@@ -94,6 +94,14 @@ type dispatchWorkerResult struct {
 	err      error
 }
 
+// unreportedEntry tracks the pending-decision count for one identity and the
+// candidate's concurrency key, so the seeded in-flight view keeps the key held
+// while the worker's result is still outstanding.
+type unreportedEntry struct {
+	count int
+	key   string
+}
+
 // wakeReason reports which wakeup ended the previous pass. Only a
 // capacity-change wakeup or an anti-entropy pass clears a persisted capacity
 // block; workflow changes and worker results must not.
@@ -135,9 +143,9 @@ type Runner struct {
 	// a worker never blocks longer than one outstanding result while the
 	// leader is inside a pass.
 	results chan dispatchWorkerResult
-	// unreported counts decisions handed to workers whose results have not
+	// unreported tracks decisions handed to workers whose results have not
 	// arrived yet, keyed by execution identity. Leader-goroutine-local.
-	unreported map[workflow.ExecutionIdentity]int
+	unreported map[workflow.ExecutionIdentity]unreportedEntry
 	// outstanding is the number of workers that have not delivered a result
 	// yet. Leader-goroutine-local.
 	outstanding int
@@ -171,7 +179,7 @@ func NewRunner(cfg RunnerConfig) *Runner {
 		cancel:        cancel,
 		done:          make(chan struct{}),
 		results:       make(chan dispatchWorkerResult, 1),
-		unreported:    map[workflow.ExecutionIdentity]int{},
+		unreported:    map[workflow.ExecutionIdentity]unreportedEntry{},
 	}
 	go r.loop()
 	return r
@@ -210,6 +218,26 @@ func (r *Runner) clearLeadStatus() {
 		s.CapacityBlocked = ""
 		s.CapacityDetail = ""
 	})
+}
+
+// buildInflightView seeds the live in-flight view with decisions handed to
+// workers whose results have not arrived yet, so a pass never double-dispatches
+// them. Each seeded entry carries the candidate's concurrency key so the key
+// stays held while the worker's result is outstanding.
+func (r *Runner) buildInflightView(inflight []InFlightAttempt) []InFlightAttempt {
+	view := make([]InFlightAttempt, 0, len(inflight)+len(r.unreported))
+	view = append(view, inflight...)
+	for identity, entry := range r.unreported {
+		for i := 0; i < entry.count; i++ {
+			view = append(view, InFlightAttempt{
+				Identity:       identity,
+				ControllerID:   r.controllerID,
+				ConcurrencyKey: entry.key,
+				Terminal:       false,
+			})
+		}
+	}
+	return view
 }
 
 // loop is the leader goroutine: it acquires and holds the controller's lease
@@ -307,12 +335,15 @@ func (r *Runner) loop() {
 	}
 	// decrementUnreported drops one pending-decision count for an identity.
 	decrementUnreported := func(identity workflow.ExecutionIdentity) {
-		if r.unreported[identity] <= 0 {
+		e := r.unreported[identity]
+		if e.count <= 0 {
 			return
 		}
-		r.unreported[identity]--
-		if r.unreported[identity] == 0 {
+		e.count--
+		if e.count == 0 {
 			delete(r.unreported, identity)
+		} else {
+			r.unreported[identity] = e
 		}
 	}
 	// drainResults consumes completed worker results without blocking,
@@ -471,8 +502,23 @@ func (r *Runner) loop() {
 		wake = wakeNone
 		if blockedSource != "" {
 			// Blocked: this pass renews, refreshes, and publishes status but
-			// takes no dispatch decisions until the block clears.
-			r.setStatus(func(s *RunnerStatus) { s.LastReconcile = r.now() })
+			// takes no dispatch decisions until the block clears. The in-flight
+			// count is refreshed from the live view so it never goes stale
+			// while the block persists.
+			inflight, err := r.deps.InFlight()
+			if err != nil {
+				log.Printf("workflow controller %s: in-flight: %v", r.controllerID, err)
+				r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "inflight_error" })
+				wake, exit = waitOrCancel(wait)
+				if exit {
+					return
+				}
+				continue
+			}
+			r.setStatus(func(s *RunnerStatus) {
+				s.LastReconcile = r.now()
+				s.Inflight = activeCount(r.buildInflightView(inflight), r.controllerID)
+			})
 			wake, exit = waitOrCancel(wait)
 			if exit {
 				return
@@ -511,17 +557,7 @@ func (r *Runner) loop() {
 		// Seed the in-flight view with decisions handed to workers whose
 		// results have not arrived yet, so a pass never double-dispatches
 		// them.
-		view := make([]InFlightAttempt, 0, len(inflight)+len(r.unreported))
-		view = append(view, inflight...)
-		for identity, count := range r.unreported {
-			for i := 0; i < count; i++ {
-				view = append(view, InFlightAttempt{
-					Identity:     identity,
-					ControllerID: r.controllerID,
-					Terminal:     false,
-				})
-			}
-		}
+		view := r.buildInflightView(inflight)
 		decisions := Select(SelectInput{
 			ControllerID: r.controllerID,
 			Candidates:   candidates,
@@ -553,7 +589,10 @@ func (r *Runner) loop() {
 				dropLeadership()
 				break
 			}
-			r.unreported[d.Candidate.Identity]++
+			e := r.unreported[d.Candidate.Identity]
+			e.count++
+			e.key = d.Candidate.ConcurrencyKey
+			r.unreported[d.Candidate.Identity] = e
 			r.outstanding++
 			go r.dispatchWorker(d, LeaderLease{LeaseID: leaseID, OwnerEpoch: ownerEpoch})
 		}

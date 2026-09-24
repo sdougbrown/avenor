@@ -41,10 +41,11 @@ type fakeDeps struct {
 	store      *ControllerStore
 	controller string
 
-	cands     []Candidate // candidates visible to Candidates()
-	pending   []Candidate // candidates revealed only by Refresh()
-	inflight  []InFlightAttempt
-	refreshes int
+	cands      []Candidate // candidates visible to Candidates()
+	pending    []Candidate // candidates revealed only by Refresh()
+	inflight   []InFlightAttempt
+	refreshes  int
+	refreshErr error // returned by Refresh() when non-nil
 
 	scripted      []DispatchResult // popped per dispatch; falls back to defaultResult
 	errScript     []error          // popped per dispatch before the result script
@@ -80,14 +81,14 @@ func (d *fakeDeps) InFlight() ([]InFlightAttempt, error) {
 }
 
 // Refresh swaps the pending candidates into view, simulating a host-side
-// cached view that only a rebuild can update.
+// cached view that only a rebuild can update. It returns refreshErr when set.
 func (d *fakeDeps) Refresh() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.refreshes++
 	d.cands = append(d.cands, d.pending...)
 	d.pending = nil
-	return nil
+	return d.refreshErr
 }
 
 func (d *fakeDeps) Dispatch(ctx context.Context, dec Decision, lease LeaderLease) (DispatchResult, error) {
@@ -190,6 +191,12 @@ func (d *fakeDeps) setDefaultResult(res DispatchResult) {
 	d.defaultResult = res
 }
 
+func (d *fakeDeps) setRefreshError(err error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.refreshErr = err
+}
+
 // waitUntil polls cond until it holds or the deadline passes.
 func waitUntil(t *testing.T, what string, cond func() bool) {
 	t.Helper()
@@ -241,6 +248,14 @@ func newRunnerStore(t *testing.T, maxInflight int) (*ControllerStore, *tickClock
 // cand helper with controller/kind overrides).
 func runnerCand(wf, node, act string) Candidate {
 	c := cand(wf, node, act, withController("c1"), withKind(CandidateProvider))
+	c.Revision = 7
+	return c
+}
+
+// runnerCandWithKey builds a provider candidate owned by c1 with the given
+// concurrency key.
+func runnerCandWithKey(wf, node, act, key string) Candidate {
+	c := cand(wf, node, act, withController("c1"), withKind(CandidateProvider), withKey(key))
 	c.Revision = 7
 	return c
 }
@@ -699,5 +714,131 @@ func TestRunnerDispatchErrorDoesNotStopPasses(t *testing.T) {
 	waitUntil(t, "later pass dispatched again", func() bool { return deps.dispatchCount() >= 2 })
 	if s := r.Status(); !s.Leading {
 		t.Fatal("runner dropped leadership after a dispatch error")
+	}
+}
+
+// TestRunnerInflightRefreshedDuringCapacityBlock proves a blocked pass
+// refreshes the published in-flight count from the live view: while the
+// capacity block persists, the count tracks the live in-flight set (a worker
+// reporting or a live attempt terminating changes it) instead of holding the
+// value from the last unblocked pass.
+func TestRunnerInflightRefreshedDuringCapacityBlock(t *testing.T) {
+	store, _ := newRunnerStore(t, 4)
+	deps := newFakeDeps(store, "c1")
+	deps.setDefaultResult(DispatchResult{Kind: ResultCapacityBlocked, Source: "local"})
+	deps.setCandidates([]Candidate{runnerCand("wf1", "start", "a1"), runnerCand("wf2", "start", "a2")})
+
+	changeCh := make(chan struct{}, 1)
+	capacityCh := make(chan struct{}, 1)
+	r := startRunner(t, store, deps, 20*time.Millisecond, 5*time.Second, changeCh, capacityCh)
+
+	// Block on the first pass, then wait for the two blocked workers to
+	// report so the unreported set is empty and the live view is the only
+	// source of the count.
+	waitUntil(t, "capacity blocked", func() bool { return r.Status().CapacityBlocked == "local" })
+	waitUntil(t, "inflight back to zero while blocked", func() bool {
+		s := r.Status()
+		return s.CapacityBlocked == "local" && s.Inflight == 0
+	})
+
+	// The live in-flight set grows to three c1-owned attempts; a blocked
+	// pass (workflow change signal, which does not clear the block) must
+	// publish the new count.
+	deps.setInFlight([]InFlightAttempt{
+		inf("wf1", "start", "a1", withInfController("c1")),
+		inf("wf2", "start", "a2", withInfController("c1")),
+		inf("wf3", "start", "a3", withInfController("c1")),
+	})
+	select {
+	case changeCh <- struct{}{}:
+	default:
+	}
+	waitUntil(t, "inflight refreshed to 3 while blocked", func() bool {
+		s := r.Status()
+		return s.CapacityBlocked == "local" && s.Inflight == 3
+	})
+
+	// The live set shrinks to one (a worker reported / an attempt
+	// terminated); the next blocked pass must publish the lower count.
+	deps.setInFlight([]InFlightAttempt{
+		inf("wf1", "start", "a1", withInfController("c1")),
+	})
+	select {
+	case changeCh <- struct{}{}:
+	default:
+	}
+	waitUntil(t, "inflight refreshed to 1 while blocked", func() bool {
+		s := r.Status()
+		return s.CapacityBlocked == "local" && s.Inflight == 1
+	})
+}
+
+// TestRunnerUnreportedWorkerHoldsConcurrencyKey proves a decision handed to a
+// worker that has not reported yet keeps its candidate's concurrency key held:
+// with two same-key candidates and a blocked first dispatch, the second
+// candidate must never be selected (and thus never dispatched) while the first
+// worker is unreported, instead of being picked and failing host-side as
+// key_held.
+func TestRunnerUnreportedWorkerHoldsConcurrencyKey(t *testing.T) {
+	store, _ := newRunnerStore(t, 2)
+	deps := newFakeDeps(store, "c1")
+	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
+	deps.setCandidates([]Candidate{
+		runnerCandWithKey("wf1", "start", "a1", "k"),
+		runnerCandWithKey("wf2", "start", "a2", "k"),
+	})
+	block := make(chan struct{})
+	deps.mu.Lock()
+	deps.block = block
+	deps.blockAll = true // every dispatch blocks
+	deps.mu.Unlock()
+
+	startRunner(t, store, deps, 20*time.Millisecond, 50*time.Millisecond, nil, nil)
+
+	// The first candidate is handed to a worker that blocks (has not
+	// reported).
+	waitUntil(t, "first dispatch started", func() bool { return deps.dispatchCount() >= 1 })
+
+	// Across several fast reconcile passes, the second candidate (same
+	// concurrency key) must never dispatch while the first worker is
+	// unreported: the seeded in-flight entry holds the key.
+	deadline := time.Now().Add(400 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if n := deps.dispatchCount(); n > 1 {
+			t.Fatalf("%d dispatches started with two same-key candidates and one unreported worker", n)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := deps.dispatchCount(); got != 1 {
+		t.Fatalf("dispatch count after window = %d, want exactly 1", got)
+	}
+}
+
+// TestRunnerRefreshErrorKeepsRunningAndRecovers proves an anti-entropy refresh
+// error is contained: the runner records a refresh_error outcome, keeps
+// leading, and dispatches on the following pass once the error is cleared.
+func TestRunnerRefreshErrorKeepsRunningAndRecovers(t *testing.T) {
+	store, _ := newRunnerStore(t, 4)
+	deps := newFakeDeps(store, "c1")
+	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
+	deps.setCandidates([]Candidate{runnerCand("wf1", "start", "a1")})
+	deps.setRefreshError(errors.New("injected refresh failure"))
+
+	r := startRunner(t, store, deps, 20*time.Millisecond, 50*time.Millisecond, nil, nil)
+
+	waitUntil(t, "refresh_error outcome recorded", func() bool {
+		return r.Status().LastOutcome == "refresh_error"
+	})
+	if s := r.Status(); !s.Leading {
+		t.Fatal("runner dropped leadership after a refresh error")
+	}
+
+	// Clear the error; the next pass refreshes and dispatches.
+	deps.setRefreshError(nil)
+	waitUntil(t, "dispatch after refresh error cleared", func() bool {
+		return deps.dispatchCount() >= 1
+	})
+	if s := r.Status(); !s.Leading {
+		t.Fatal("runner not leading after recovery")
 	}
 }

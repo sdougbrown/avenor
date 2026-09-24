@@ -248,6 +248,27 @@ func (f *runnerFixture) waitRunning(t *testing.T, wf string) {
 	})
 }
 
+// exhaustTreeBudget acquires a tree-budget slot and signals the capacity
+// change, returning a release func that frees the slot (and signals the
+// release). It lets a test exhaust the tree budget without touching the
+// supervisor's tree-budget fields directly.
+func (f *runnerFixture) exhaustTreeBudget() (release func()) {
+	token, err := f.sup.acquireTreeAdmission()
+	if err != nil {
+		panic(fmt.Sprintf("exhaust tree budget: %v", err))
+	}
+	f.sup.signalCapacityChange()
+	return func() {
+		f.sup.treeBudgetMu.Lock()
+		b := f.sup.treeBudget
+		f.sup.treeBudgetMu.Unlock()
+		if b != nil {
+			b.Release(token)
+		}
+		f.sup.signalCapacityChange()
+	}
+}
+
 // TestControllerRunnerAutoProgressesMultipleWorkflows proves several
 // independent controller-dispatched workflows run to terminal completion with
 // no manual start: the runner dispatches every ready candidate, the executor
@@ -759,11 +780,7 @@ func TestControllerRunnerCapacityBlockedEventDedup(t *testing.T) {
 	// capacity-change signal fires (the budget notifier only announces
 	// releases) and the next pass re-attempts dispatch, changing the reason
 	// to tree and appending the second event.
-	token, err := f.sup.acquireTreeAdmission()
-	if err != nil {
-		t.Fatalf("exhaust tree: %v", err)
-	}
-	f.sup.signalCapacityChange()
+	releaseTree := f.exhaustTreeBudget()
 	waitBlocked("tree")
 	blocked, _ = capacityEvents(t)
 	if len(blocked) != 2 || blocked[0] != "local" || blocked[1] != "tree" {
@@ -772,9 +789,7 @@ func TestControllerRunnerCapacityBlockedEventDedup(t *testing.T) {
 
 	// Free everything: the next dispatch succeeds, clears the block, and
 	// appends exactly one capacity_cleared event.
-	f.sup.treeBudgetMu.Lock()
-	f.sup.treeBudget.Release(token)
-	f.sup.treeBudgetMu.Unlock()
+	releaseTree()
 	_ = f.sup.cancelRuntime(res.RuntimeID)
 	f.waitRunning(t, wf)
 	waitFor(t, "capacity cleared", func() bool {
