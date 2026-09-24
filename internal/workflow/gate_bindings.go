@@ -437,7 +437,7 @@ func resolvePinnedSubject(state Snapshot, tmpl *Template, byID map[ActivationID]
 	var (
 		subject     Subject
 		unresolved  []string
-		numbers     []json.RawMessage
+		rawValues   []json.RawMessage
 		haveSubject = true
 	)
 	for _, field := range fields {
@@ -459,7 +459,7 @@ func resolvePinnedSubject(state Snapshot, tmpl *Template, byID map[ActivationID]
 			unresolved = append(unresolved, field.name)
 			continue
 		}
-		numbers = append(numbers, value)
+		rawValues = append(rawValues, value)
 	}
 	if !haveSubject {
 		return nil, unresolved, nil
@@ -469,7 +469,7 @@ func resolvePinnedSubject(state Snapshot, tmpl *Template, byID map[ActivationID]
 		switch field.name {
 		case "subject.repository", "subject.revision":
 			var text string
-			if err := json.Unmarshal(numbers[i], &text); err != nil {
+			if err := json.Unmarshal(rawValues[i], &text); err != nil {
 				haveSubject = false
 				unresolved = append(unresolved, field.name)
 				continue
@@ -481,7 +481,7 @@ func resolvePinnedSubject(state Snapshot, tmpl *Template, byID map[ActivationID]
 			}
 		case "subject.pull_request":
 			var number float64
-			if err := json.Unmarshal(numbers[i], &number); err != nil || number != math.Trunc(number) || math.Abs(number) > maxSafeOutputFloat {
+			if err := json.Unmarshal(rawValues[i], &number); err != nil || number != math.Trunc(number) || math.Abs(number) > maxSafeOutputFloat {
 				haveSubject = false
 				unresolved = append(unresolved, field.name)
 				continue

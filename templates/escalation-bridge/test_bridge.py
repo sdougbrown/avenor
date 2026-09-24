@@ -330,6 +330,43 @@ class WaitForDecisionTest(unittest.TestCase):
         self.assertEqual(len(rejected), 1)
 
 
+class SubjectUnchangedTest(unittest.TestCase):
+    """The pre-submit re-inspect of a bound-gate decision."""
+
+    PINNED = {"type": "pull_request", "repository": "org/repo",
+              "pull_request": 123, "revision": "abc123"}
+
+    def inspect(self, act):
+        return {"activations": [act], "gates": None,
+                "instance": {"status": "active"}}
+
+    def test_ok_when_still_parked_with_same_pinned_subject(self):
+        act = parked_activation()
+        act["resolved_gates"] = {"g1": {"subject": dict(self.PINNED)}}
+        ctl = FakeControl([self.inspect(act)])
+        ok, why = bridge.subject_unchanged(ctl, "wf_1", "act_1", "g1", self.PINNED)
+        self.assertTrue(ok)
+        self.assertEqual(why, "ok")
+
+    def test_unparked_when_activation_resolved(self):
+        act = parked_activation()
+        act["status"] = "satisfied"
+        act["resolved_gates"] = {"g1": {"subject": dict(self.PINNED)}}
+        ctl = FakeControl([self.inspect(act)])
+        ok, why = bridge.subject_unchanged(ctl, "wf_1", "act_1", "g1", self.PINNED)
+        self.assertFalse(ok)
+        self.assertEqual(why, "unparked")
+
+    def test_subject_changed_when_pinned_subject_differs(self):
+        act = parked_activation()
+        changed = dict(self.PINNED, revision="deadbeef")
+        act["resolved_gates"] = {"g1": {"subject": changed}}
+        ctl = FakeControl([self.inspect(act)])
+        ok, why = bridge.subject_unchanged(ctl, "wf_1", "act_1", "g1", self.PINNED)
+        self.assertFalse(ok)
+        self.assertEqual(why, "subject changed")
+
+
 class LoadHumanGatesTest(unittest.TestCase):
     def test_maps_only_human_gates_by_node(self):
         with tempfile.TemporaryDirectory() as tmp:

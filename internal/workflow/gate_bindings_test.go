@@ -25,6 +25,7 @@ const boundGateTemplateJSON = `{
         {"id": "repository", "name": "Repository", "type": "string", "required": true},
         {"id": "pr_number", "name": "PR number", "type": "number", "required": true},
         {"id": "pr_head", "name": "PR head SHA", "type": "string", "required": true},
+        {"id": "is_draft", "name": "Is draft", "type": "boolean"},
         {"id": "report", "name": "Report", "type": "json"}
       ],
       "outcomes": [{"name": "published", "target_node_id": "review"}]

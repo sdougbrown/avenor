@@ -272,14 +272,6 @@ func (m *Manager) commandGate(wf WorkflowID, payload json.RawMessage) (any, erro
 			return nil, fmt.Errorf("gate %q requires a subject (node declares subject_type %q)", req.GateID, def.SubjectType)
 		}
 	}
-	// A bound gate requires the supplied subject to equal the subject pinned
-	// on the activation at command time, on every field. An unresolved pin
-	// cannot be decided yet. Nothing is appended on a mismatch.
-	if def.SubjectBinding != nil {
-		if err := validatePinnedGateSubject(act, req.GateID, req.Subject); err != nil {
-			return nil, err
-		}
-	}
 	return m.applyGateDecision(wf, snap, tmpl, node, act, req.GateID, op, status, req, idemKey)
 }
 

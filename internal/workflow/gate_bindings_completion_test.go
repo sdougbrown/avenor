@@ -79,6 +79,7 @@ func TestCompleteRejectsMalformedBoundOutputs(t *testing.T) {
 		{"non-finite number", `{"definition_id":"repository","value":"org/repo"},{"definition_id":"pr_number","value":1e999},{"definition_id":"pr_head","value":"abc"}`, "finite number"},
 		{"null required output", `{"definition_id":"repository","value":"org/repo"},{"definition_id":"pr_number","value":null},{"definition_id":"pr_head","value":"abc"}`, "cannot be null"},
 		{"number in string output", `{"definition_id":"repository","value":42},{"definition_id":"pr_number","value":7},{"definition_id":"pr_head","value":"abc"}`, "requires a string value"},
+		{"number in boolean output", `{"definition_id":"repository","value":"org/repo"},{"definition_id":"pr_number","value":7},{"definition_id":"pr_head","value":"abc"},{"definition_id":"is_draft","value":42}`, "requires a boolean value"},
 	}
 	for _, tc := range malformed {
 		tc := tc
