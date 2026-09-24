@@ -697,21 +697,50 @@ func TestRunnerStopCleanNoGoroutineLeak(t *testing.T) {
 
 // TestRunnerDispatchErrorDoesNotStopPasses proves a deps.Dispatch error is
 // contained: the runner records a dispatch_error outcome, keeps leading, and
-// later passes keep dispatching.
+// later passes keep dispatching. Timer cadences are long so no timer-driven
+// pass can run during the assertions; both dispatch attempts are held
+// blocked until released, so the follow-up pass triggered by the failed
+// worker's result cannot overwrite the recorded outcome.
 func TestRunnerDispatchErrorDoesNotStopPasses(t *testing.T) {
 	store, _ := newRunnerStore(t, 2)
 	deps := newFakeDeps(store, "c1")
 	deps.setCandidates([]Candidate{runnerCand("wf1", "start", "a1")})
 	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
 	deps.setErrors(errors.New("injected dispatch failure"))
+	block := make(chan struct{}, 2)
+	deps.mu.Lock()
+	deps.block = block
+	deps.blockFirst = 2 // both dispatch attempts block until released
+	deps.mu.Unlock()
 
-	r := startRunner(t, store, deps, 20*time.Millisecond, 50*time.Millisecond, nil, nil)
+	changeCh := make(chan struct{}, 1)
+	r := startRunner(t, store, deps, 10*time.Second, 10*time.Second, changeCh, nil)
 
+	// The first pass runs on startup; release the held dispatch so it
+	// reports the injected error.
 	waitUntil(t, "first dispatch attempted", func() bool { return deps.dispatchCount() >= 1 })
+	block <- struct{}{}
 	waitUntil(t, "dispatch_error outcome recorded", func() bool {
 		return r.Status().LastOutcome == "dispatch_error"
 	})
-	waitUntil(t, "later pass dispatched again", func() bool { return deps.dispatchCount() >= 2 })
+	// The failed worker's result wakes a follow-up pass whose dispatch is
+	// held blocked, so the outcome above is stable here.
+	if s := r.Status(); !s.Leading {
+		t.Fatal("runner dropped leadership after a dispatch error")
+	}
+
+	// Clear the injected error, wake the runner, and release the held
+	// second dispatch so the follow-up pass dispatches successfully.
+	deps.setErrors()
+	select {
+	case changeCh <- struct{}{}:
+	default:
+	}
+	waitUntil(t, "second dispatch attempted", func() bool { return deps.dispatchCount() >= 2 })
+	block <- struct{}{}
+	waitUntil(t, "second dispatch recorded", func() bool {
+		return r.Status().LastOutcome == "dispatched"
+	})
 	if s := r.Status(); !s.Leading {
 		t.Fatal("runner dropped leadership after a dispatch error")
 	}
