@@ -7,6 +7,8 @@ import {
   formatResultOutput,
   formatShutdownOutput,
   formatStatusOutput,
+  formatWorkflowControllerListOutput,
+  formatWorkflowControllerStatusOutput,
 } from './render.js'
 
 describe('OpenCode Avenor result renderers', () => {
@@ -338,5 +340,61 @@ describe('OpenCode Avenor result renderers', () => {
     expect(formatted.output).toContain('lines omitted')
     expect(formatted.output.indexOf('[preview clipped:')).toBeLessThan(formatted.output.indexOf('lines omitted'))
     expect(formatted.metadata.output).toBe(rawOutput)
+  })
+
+  it('formats controller status and list prose without exposing lease identifiers', () => {
+    const status = {
+      controller_id: 'software-factory',
+      desired_state: 'enabled',
+      max_inflight: 3,
+      revision: 7,
+      leader: { owner_id: 'sup-1:42', lease_id: 'lease-1', owner_epoch: 2, is_this_process: true, expires_at: '2026-01-01T00:00:05Z' },
+      last_reconcile: '2026-01-01T00:00:01Z',
+      inflight: 2,
+      candidate_count: 5,
+      capacity_blocked: { source: 'local', detail: 'no runtime slots' },
+      next_poll_at: '2026-01-01T00:00:09Z',
+    }
+    const statusOutput = formatWorkflowControllerStatusOutput({ controller_id: 'call-ctl' }, status)
+    expect(statusOutput).toEqual({
+      title: 'Workflow controller software-factory',
+      output: [
+        'Controller: software-factory — enabled',
+        'Leader: this process — lease expires 2026-01-01T00:00:05Z',
+        'Candidates: 5 (advisory)',
+        'In-flight: 2 of 3',
+        'Last reconcile: 2026-01-01T00:00:01Z',
+        'Capacity blocked: local — no runtime slots',
+        'Next external poll: 2026-01-01T00:00:09Z',
+        'Guidance: Call avenor_workflow_controller_list to review all controllers.',
+      ].join('\n'),
+      metadata: status,
+    })
+    expect(statusOutput.output).not.toContain('lease-1')
+
+    const list = {
+      controllers: [
+        { controller_id: 'a', desired_state: 'enabled', leader: { owner_id: 'sup-1:42', lease_id: 'lease-2', is_this_process: true } },
+        { controller_id: 'b', desired_state: 'disabled', leader: null },
+      ],
+    }
+    const listOutput = formatWorkflowControllerListOutput({}, list)
+    expect(listOutput).toEqual({
+      title: 'Avenor workflow controllers — 2',
+      output: [
+        'Workflow controllers — 2',
+        'a — enabled — leader: this process',
+        'b — disabled — leader: none',
+      ].join('\n'),
+      metadata: list,
+    })
+    expect(listOutput.output).not.toContain('lease-2')
+    expect(formatWorkflowControllerListOutput({}, { controllers: [] }).output).toBe('No workflow controllers configured.')
+
+    const fallback = formatWorkflowControllerStatusOutput({}, { unexpected: true })
+    expect(fallback.output).toBe([
+      'Avenor workflow controller status result unavailable.',
+      'Retry the tool or use avenor_status/avenor_inspect.',
+    ].join('\n'))
   })
 })

@@ -145,6 +145,7 @@ mock.module('@dougbots/avenor-core', () => ({
   workflowControllerCreateTool: mock(async () => ({})),
   workflowControllerEnableTool: mock(async () => ({})),
   workflowControllerDisableTool: mock(async () => ({})),
+  workflowReadyTool: mock(async () => ({})),
   createRunSnapshot,
   extractEventText,
   observeRun,

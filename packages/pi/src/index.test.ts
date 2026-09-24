@@ -77,6 +77,7 @@ async function createHarnessBase(options: {
     workflowControllerCreateTool: mock(async () => ({})),
     workflowControllerEnableTool: mock(async () => ({})),
     workflowControllerDisableTool: mock(async () => ({})),
+    workflowReadyTool: mock(async () => ({})),
     observeRun: mock(() => null),
     dial: mock(async () => ({ close() {} })),
     Supervisor: class {} as any,
@@ -153,6 +154,35 @@ async function createMultiSupervisorHarness(options: {
 describe('Avenor Pi extension', () => {
   it('exports a function', () => {
     expect(typeof extensionFactory).toBe('function')
+  })
+
+  it('enriches controller status details with an advisory candidate count', async () => {
+    const statusPayload = { controller_id: 'ctl', desired_state: 'enabled', inflight: 1 }
+    const harness = await createHarnessBase({
+      deps: {
+        workflowControllerStatusTool: mock(async () => statusPayload),
+        workflowReadyTool: mock(async () => ({ advisory: true, controller_id: 'ctl', candidates: [{}, {}] })),
+      },
+    })
+    const tool = harness.registeredTools.avenor_workflow_controller_status
+    const outcome = await tool.execute('tool-1', { controller_id: 'ctl' })
+    expect(JSON.parse(outcome.content[0].text)).toEqual(statusPayload)
+    expect(outcome.details.candidate_count).toBe(2)
+  })
+
+  it('omits the candidate count when the ready query fails', async () => {
+    const harness = await createHarnessBase({
+      deps: {
+        workflowControllerStatusTool: mock(async () => ({ controller_id: 'ctl', desired_state: 'enabled' })),
+        workflowReadyTool: mock(async () => {
+          throw new Error('-32601 method not found')
+        }),
+      },
+    })
+    const tool = harness.registeredTools.avenor_workflow_controller_status
+    const outcome = await tool.execute('tool-1', { controller_id: 'ctl' })
+    expect(outcome.details.candidate_count).toBeUndefined()
+    expect(outcome.details.controller_id).toBe('ctl')
   })
 
   it('only reuses a supervisor socket when the caller supplied one', () => {
@@ -508,6 +538,8 @@ describe('Avenor Pi extension', () => {
       'avenor_follow_up',
       'avenor_events',
       'avenor_shutdown',
+      'avenor_workflow_controller_status',
+      'avenor_workflow_controller_list',
     ]) {
       expect(typeof registeredTools[name]?.renderCall).toBe('function')
       expect(typeof registeredTools[name]?.renderResult).toBe('function')

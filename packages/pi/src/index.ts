@@ -40,6 +40,7 @@ import {
   workflowControllerCreateTool,
   workflowControllerEnableTool,
   workflowControllerDisableTool,
+  workflowReadyTool,
   type Client,
   type InspectResult,
   type RunObserver,
@@ -84,6 +85,10 @@ import {
   renderShutdownResult,
   renderStatusCall,
   renderStatusResult,
+  renderWorkflowControllerListCall,
+  renderWorkflowControllerListResult,
+  renderWorkflowControllerStatusCall,
+  renderWorkflowControllerStatusResult,
 } from './render.js'
 
 const POLL_INTERVAL_MS = 3_000
@@ -117,6 +122,7 @@ export interface ExtensionDeps {
   workflowControllerCreateTool: typeof workflowControllerCreateTool
   workflowControllerEnableTool: typeof workflowControllerEnableTool
   workflowControllerDisableTool: typeof workflowControllerDisableTool
+  workflowReadyTool: typeof workflowReadyTool
   observeRun: typeof observeRun
   dial: typeof dial
   Supervisor: typeof Supervisor
@@ -144,6 +150,7 @@ const defaultDeps: ExtensionDeps = {
   workflowControllerCreateTool,
   workflowControllerEnableTool,
   workflowControllerDisableTool,
+  workflowReadyTool,
   observeRun,
   dial,
   Supervisor,
@@ -1901,10 +1908,28 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           controllerId: params.controller_id,
           supervisorId: params.supervisor_id,
         })
+        const details = { ...result }
+        try {
+          // Advisory candidate count; absent when the supervisor has no
+          // workflow.ready support or the query fails.
+          const ready = await deps.workflowReadyTool({
+            controllerId: params.controller_id,
+            supervisorId: params.supervisor_id,
+          })
+          if (Array.isArray(ready.candidates)) details.candidate_count = ready.candidates.length
+        } catch {
+          // Advisory only — the status view renders without it.
+        }
         return {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-          details: result,
+          details,
         }
+      },
+      renderCall(args, theme, context) {
+        return renderWorkflowControllerStatusCall(context.args, theme)
+      },
+      renderResult(result, { expanded, isPartial }, theme, context) {
+        return renderWorkflowControllerStatusResult(result, { expanded, isPartial }, theme, context.args)
       },
     })
 
@@ -1923,6 +1948,12 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
           details: result,
         }
+      },
+      renderCall(args, theme, context) {
+        return renderWorkflowControllerListCall(context.args, theme)
+      },
+      renderResult(result, { expanded, isPartial }, theme, context) {
+        return renderWorkflowControllerListResult(result, { expanded, isPartial }, theme, context.args)
       },
     })
 

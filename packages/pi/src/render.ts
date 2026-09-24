@@ -27,6 +27,8 @@ type PermissionArgs = { run_id?: string; option_id?: string; request_id?: string
 type FollowUpArgs = { run_id?: string; message?: string; label?: string; supervisor_id?: string }
 type EventsArgs = { run_id?: string; types?: string[]; limit?: number; supervisor_id?: string }
 type ShutdownArgs = { supervisor_id?: string; force?: boolean }
+type WorkflowControllerStatusArgs = { controller_id?: string; supervisor_id?: string }
+type WorkflowControllerListArgs = { supervisor_id?: string }
 
 function asRecord(value: unknown): RecordValue | undefined {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -452,6 +454,83 @@ function shutdownLines(details: unknown, args: ShutdownArgs, expanded: boolean):
   ]
 }
 
+function controllerLeaderLine(leader: RecordValue | undefined): string {
+  if (!leader) return 'Leader: none'
+  const owner = leader.is_this_process === true ? 'this process' : `other owner (${scalar(leader.owner_id)})`
+  const expires = optionalScalar(leader.expires_at)
+  return `Leader: ${owner}${expires ? ` — lease expires ${expires}` : ''}`
+}
+
+function controllerStatusLines(details: unknown, args: WorkflowControllerStatusArgs, expanded: boolean): string[] | undefined {
+  const status = asRecord(details)
+  if (!status || !stringValue(status.controller_id) || !stringValue(status.desired_state)) return undefined
+  const controllerId = selected(status, 'controller_id', args.controller_id)
+  const desiredState = selected(status, 'desired_state')
+  const inflight = numberValue(status.inflight) ?? 0
+  const maxInflight = numberValue(status.max_inflight)
+  const blocked = asRecord(status.capacity_blocked)
+  const blockedDetail = blocked ? optionalScalar(blocked.detail) : undefined
+  const lines = [
+    `Controller: ${controllerId} — ${desiredState}`,
+    controllerLeaderLine(asRecord(status.leader)),
+  ]
+  const candidates = numberValue(status.candidate_count)
+  if (candidates !== undefined) lines.push(`Candidates: ${candidates} (advisory)`)
+  lines.push(`In-flight: ${inflight}${maxInflight !== undefined ? ` of ${maxInflight}` : ''}`)
+  const lastReconcile = optionalScalar(status.last_reconcile)
+  if (lastReconcile) lines.push(`Last reconcile: ${lastReconcile}`)
+  if (blocked) lines.push(`Capacity blocked: ${selected(blocked, 'source')}${blockedDetail ? ` — ${blockedDetail}` : ''}`)
+  const nextPoll = optionalScalar(status.next_poll_at)
+  if (nextPoll) lines.push(`Next external poll: ${nextPoll}`)
+  lines.push(
+    desiredState === 'disabled'
+      ? `Guidance: Call avenor_workflow_controller_enable with controller_id "${controllerId}" to start dispatch and polling.`
+      : `Guidance: Call avenor_workflow_controller_list to review all controllers.`,
+  )
+  if (!expanded) return lines
+  const supervisor = stringValue(args.supervisor_id) ? scalar(args.supervisor_id) : 'singleton'
+  return [
+    ...lines,
+    `Supervisor: ${supervisor}`,
+    ...(maxInflight !== undefined ? [`Max in-flight: ${maxInflight}`] : []),
+    ...optionalNumber(status.revision) !== undefined ? [`Revision: ${optionalNumber(status.revision)}`] : [],
+    ...optionalNumber(status.owner_epoch) !== undefined ? [`Owner epoch: ${optionalNumber(status.owner_epoch)}`] : [],
+  ]
+}
+
+function controllerListLines(details: unknown, args: WorkflowControllerListArgs, expanded: boolean): string[] | undefined {
+  const result = asRecord(details)
+  if (!result || !Array.isArray(result.controllers) || result.controllers.some(controller => !asRecord(controller))) return undefined
+  const controllers = result.controllers.map(controller => controller as RecordValue)
+  const supervisor = stringValue(args.supervisor_id) ? scalar(args.supervisor_id) : 'singleton'
+  if (controllers.length === 0) return ['No workflow controllers configured.']
+  const displayed = controllers.slice(0, STATUS_ROWS)
+  const lines = [
+    `Workflow controllers — ${controllers.length}`,
+    ...displayed.map(controllerListRow),
+    ...(controllers.length > displayed.length ? [itemMarker(controllers.length - displayed.length)] : []),
+  ]
+  if (!expanded) return lines
+  for (const controller of displayed) {
+    const leader = asRecord(controller.leader)
+    const ownerEpoch = leader ? numberValue(leader.owner_epoch) : undefined
+    lines.push(
+      `${selected(controller, 'controller_id')}:`,
+      controllerLeaderLine(leader),
+      ...(ownerEpoch !== undefined ? [`Owner epoch: ${ownerEpoch}`] : []),
+    )
+  }
+  return lines
+}
+
+function controllerListRow(controller: RecordValue): string {
+  const leader = asRecord(controller.leader)
+  const owner = leader
+    ? leader.is_this_process === true ? 'this process' : `other owner (${scalar(leader.owner_id)})`
+    : 'none'
+  return `${selected(controller, 'controller_id')} — ${selected(controller, 'desired_state')} — leader: ${owner}`
+}
+
 function render(tool: string, result: ToolResult, options: ToolRenderResultOptions, theme: Theme, build: () => string[] | undefined): Text {
   try {
     const lines = options.isPartial ? partial(result) : build() ?? fallback(tool)
@@ -566,4 +645,26 @@ export function renderEventsResult(result: ToolResult, options: ToolRenderResult
 
 export function renderShutdownResult(result: ToolResult, options: ToolRenderResultOptions, theme: Theme, args: ShutdownArgs): Text {
   return render('shutdown', result, options, theme, () => shutdownLines(result.details, args, options.expanded))
+}
+
+export function renderWorkflowControllerStatusCall(args: WorkflowControllerStatusArgs, theme: Theme): Text {
+  const pieces = [`avenor_workflow_controller_status controller_id ${quoted(args.controller_id)}`]
+  const supervisor = optionalQuoted(args.supervisor_id)
+  if (supervisor) pieces.push(`supervisor_id ${supervisor}`)
+  return linesText([pieces.join(' ')], theme)
+}
+
+export function renderWorkflowControllerStatusResult(result: ToolResult, options: ToolRenderResultOptions, theme: Theme, args: WorkflowControllerStatusArgs): Text {
+  return render('workflow controller status', result, options, theme, () => controllerStatusLines(result.details, args, options.expanded))
+}
+
+export function renderWorkflowControllerListCall(args: WorkflowControllerListArgs, theme: Theme): Text {
+  const pieces = ['avenor_workflow_controller_list']
+  const supervisor = optionalQuoted(args.supervisor_id)
+  if (supervisor) pieces.push(`supervisor_id ${supervisor}`)
+  return linesText([pieces.join(' ')], theme)
+}
+
+export function renderWorkflowControllerListResult(result: ToolResult, options: ToolRenderResultOptions, theme: Theme, args: WorkflowControllerListArgs): Text {
+  return render('workflow controller list', result, options, theme, () => controllerListLines(result.details, args, options.expanded))
 }

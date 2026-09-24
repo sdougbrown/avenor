@@ -10,6 +10,8 @@ import {
   formatResultOutput,
   formatShutdownOutput,
   formatStatusOutput,
+  formatWorkflowControllerListOutput,
+  formatWorkflowControllerStatusOutput,
 } from './render.js'
 import {
   answerPermissionTool,
@@ -40,6 +42,7 @@ import {
   workflowControllerCreateTool,
   workflowControllerEnableTool,
   workflowControllerDisableTool,
+  workflowReadyTool,
 } from '@dougbots/avenor-core'
 
 type TrackedRun = {
@@ -1106,7 +1109,19 @@ export const AvenorPlugin: Plugin = async (ctx) => {
             controllerId: args.controller_id,
             supervisorId: args.supervisor_id,
           })
-          return { title: 'workflow', output: JSON.stringify(result, null, 2) }
+          const details = { ...result }
+          try {
+            // Advisory candidate count; absent when the supervisor has no
+            // workflow.ready support or the query fails.
+            const ready = await workflowReadyTool({
+              controllerId: args.controller_id,
+              supervisorId: args.supervisor_id,
+            })
+            if (Array.isArray(ready.candidates)) details.candidate_count = ready.candidates.length
+          } catch {
+            // Advisory only — the status view renders without it.
+          }
+          return formatWorkflowControllerStatusOutput(args, details)
         },
       }),
 
@@ -1119,7 +1134,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
           const result = await workflowControllerListTool({
             supervisorId: args.supervisor_id,
           })
-          return { title: 'workflow', output: JSON.stringify(result, null, 2) }
+          return formatWorkflowControllerListOutput(args, result)
         },
       }),
 

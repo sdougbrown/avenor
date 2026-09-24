@@ -544,6 +544,14 @@ export class Client {
     return this.call('workflow.controller.status', { controller_id: controllerId }) as Promise<Record<string, unknown>>
   }
 
+  // workflow.ready is advisory: it reports claimable auto-dispatch candidates
+  // and grants no lease. A missing limit lets the server apply its default.
+  async workflowReady(controllerId: string, limit?: number): Promise<Record<string, unknown>> {
+    const params: Record<string, unknown> = { controller_id: controllerId }
+    if (limit !== undefined) params.limit = limit
+    return this.call('workflow.ready', params) as Promise<Record<string, unknown>>
+  }
+
   async workflowControllerList(): Promise<Record<string, unknown>> {
     return this.call('workflow.controller.list') as Promise<Record<string, unknown>>
   }

@@ -15,6 +15,10 @@ import {
   renderShutdownResult,
   renderStatusCall,
   renderStatusResult,
+  renderWorkflowControllerListCall,
+  renderWorkflowControllerListResult,
+  renderWorkflowControllerStatusCall,
+  renderWorkflowControllerStatusResult,
 } from './render.js'
 
 const theme = {
@@ -369,5 +373,93 @@ describe('Avenor Pi renderers', () => {
       'Retry the tool or use avenor_status/avenor_inspect.',
     ].join('\n'))
     expect(getterRead).toBe(true)
+  })
+
+  it('uses exact controller call templates and renders controller status diagnostics', () => {
+    expect(text(renderWorkflowControllerStatusCall({ controller_id: 'ctl', supervisor_id: '/tmp/sock' }, theme))).toBe(
+      'avenor_workflow_controller_status controller_id "ctl" supervisor_id "/tmp/sock"',
+    )
+    expect(text(renderWorkflowControllerListCall({ supervisor_id: '/tmp/sock' }, theme))).toBe(
+      'avenor_workflow_controller_list supervisor_id "/tmp/sock"',
+    )
+
+    const enabled = text(renderWorkflowControllerStatusResult(result({
+      controller_id: 'software-factory',
+      desired_state: 'enabled',
+      max_inflight: 3,
+      leader: { owner_id: 'sup-1:42', owner_epoch: 2, is_this_process: true, expires_at: '2026-01-01T00:00:05Z' },
+      last_reconcile: '2026-01-01T00:00:01Z',
+      inflight: 2,
+      candidate_count: 5,
+      capacity_blocked: { source: 'local', detail: 'no runtime slots' },
+      next_poll_at: '2026-01-01T00:00:09Z',
+    }), collapsed, theme, {}))
+    expect(enabled).toBe([
+      'Controller: software-factory — enabled',
+      'Leader: this process — lease expires 2026-01-01T00:00:05Z',
+      'Candidates: 5 (advisory)',
+      'In-flight: 2 of 3',
+      'Last reconcile: 2026-01-01T00:00:01Z',
+      'Capacity blocked: local — no runtime slots',
+      'Next external poll: 2026-01-01T00:00:09Z',
+      'Guidance: Call avenor_workflow_controller_list to review all controllers.',
+    ].join('\n'))
+
+    const minimal = text(renderWorkflowControllerStatusResult(result({
+      controller_id: 'idle',
+      desired_state: 'disabled',
+      inflight: 0,
+      leader: null,
+    }), collapsed, theme, {}))
+    expect(minimal).toBe([
+      'Controller: idle — disabled',
+      'Leader: none',
+      'In-flight: 0',
+      'Guidance: Call avenor_workflow_controller_enable with controller_id "idle" to start dispatch and polling.',
+    ].join('\n'))
+
+    const expandedView = text(renderWorkflowControllerStatusResult(result({
+      controller_id: 'ctl',
+      desired_state: 'enabled',
+      max_inflight: 2,
+      revision: 7,
+      owner_epoch: 3,
+      inflight: 1,
+      supervisor_marker: 'ignored',
+    }), expanded, theme, { supervisor_id: '/tmp/sock' }))
+    expect(expandedView).toContain('Supervisor: /tmp/sock')
+    expect(expandedView).toContain('Max in-flight: 2')
+    expect(expandedView).toContain('Revision: 7')
+    expect(expandedView).toContain('Owner epoch: 3')
+  })
+
+  it('renders controller lists, hides lease identifiers, and falls back on malformed payloads', () => {
+    const listed = text(renderWorkflowControllerListResult(result({
+      controllers: [
+        { controller_id: 'a', desired_state: 'enabled', leader: { owner_id: 'sup-1:42', lease_id: 'lease-1', is_this_process: true } },
+        { controller_id: 'b', desired_state: 'disabled', leader: { owner_id: 'sup-2:7', lease_id: 'lease-2', is_this_process: false } },
+        { controller_id: 'c', desired_state: 'enabled', leader: null },
+      ],
+    }), collapsed, theme, {}))
+    expect(listed).toBe([
+      'Workflow controllers — 3',
+      'a — enabled — leader: this process',
+      'b — disabled — leader: other owner (sup-2:7)',
+      'c — enabled — leader: none',
+    ].join('\n'))
+    expect(listed).not.toContain('lease-1')
+    expect(listed).not.toContain('lease-2')
+
+    expect(text(renderWorkflowControllerListResult(result({ controllers: [] }), collapsed, theme, {}))).toBe(
+      'No workflow controllers configured.',
+    )
+    expect(text(renderWorkflowControllerStatusResult(result('nope'), collapsed, theme, {}))).toBe([
+      'Avenor workflow controller status result unavailable.',
+      'Retry the tool or use avenor_status/avenor_inspect.',
+    ].join('\n'))
+    expect(text(renderWorkflowControllerListResult(result({ controllers: ['bad'] }), collapsed, theme, {}))).toBe([
+      'Avenor workflow controller list result unavailable.',
+      'Retry the tool or use avenor_status/avenor_inspect.',
+    ].join('\n'))
   })
 })

@@ -26,6 +26,8 @@ type PermissionArgs = { run_id?: string; option_id?: string; request_id?: string
 type FollowUpArgs = { run_id?: string; message?: string; label?: string; supervisor_id?: string }
 type EventsArgs = { run_id?: string; types?: string[]; limit?: number; supervisor_id?: string }
 type ShutdownArgs = { supervisor_id?: string; force?: boolean }
+type WorkflowControllerStatusArgs = { controller_id?: string; supervisor_id?: string }
+type WorkflowControllerListArgs = { supervisor_id?: string }
 
 const ANSI_PATTERN =
   // eslint-disable-next-line no-control-regex
@@ -497,5 +499,79 @@ export function formatShutdownOutput(args: ShutdownArgs, result: { ok: boolean; 
       supervisor_id: args.supervisor_id,
       force: args.force ?? false,
     },
+  }
+}
+
+function controllerLeaderLine(leader: RecordValue | undefined): string {
+  if (!leader) return 'Leader: none'
+  const owner = leader.is_this_process === true ? 'this process' : `other owner (${scalar(leader.owner_id)})`
+  const expires = selectedOptional(leader, 'expires_at')
+  return `Leader: ${owner}${expires ? ` — lease expires ${expires}` : ''}`
+}
+
+function controllerListRow(controller: RecordValue): string {
+  const leader = asRecord(controller.leader)
+  const owner = leader
+    ? leader.is_this_process === true ? 'this process' : `other owner (${scalar(leader.owner_id)})`
+    : 'none'
+  return `${selected(controller, 'controller_id')} — ${selected(controller, 'desired_state')} — leader: ${owner}`
+}
+
+function controllerStatusLines(details: unknown, args: WorkflowControllerStatusArgs): string[] | undefined {
+  const status = asRecord(details)
+  if (!status || !stringValue(status.controller_id) || !stringValue(status.desired_state)) return undefined
+  const controllerId = selected(status, 'controller_id', args.controller_id)
+  const desiredState = selected(status, 'desired_state')
+  const inflight = numberValue(status.inflight) ?? 0
+  const maxInflight = numberValue(status.max_inflight)
+  const blocked = asRecord(status.capacity_blocked)
+  const blockedDetail = blocked ? selectedOptional(blocked, 'detail') : undefined
+  const lines = [
+    `Controller: ${controllerId} — ${desiredState}`,
+    controllerLeaderLine(asRecord(status.leader)),
+  ]
+  const candidates = numberValue(status.candidate_count)
+  if (candidates !== undefined) lines.push(`Candidates: ${candidates} (advisory)`)
+  lines.push(`In-flight: ${inflight}${maxInflight !== undefined ? ` of ${maxInflight}` : ''}`)
+  const lastReconcile = selectedOptional(status, 'last_reconcile')
+  if (lastReconcile) lines.push(`Last reconcile: ${lastReconcile}`)
+  if (blocked) lines.push(`Capacity blocked: ${selected(blocked, 'source')}${blockedDetail ? ` — ${blockedDetail}` : ''}`)
+  const nextPoll = selectedOptional(status, 'next_poll_at')
+  if (nextPoll) lines.push(`Next external poll: ${nextPoll}`)
+  lines.push(
+    desiredState === 'disabled'
+      ? `Guidance: Call avenor_workflow_controller_enable with controller_id "${controllerId}" to start dispatch and polling.`
+      : `Guidance: Call avenor_workflow_controller_list to review all controllers.`,
+  )
+  return lines
+}
+
+function controllerListLines(details: unknown): string[] | undefined {
+  const result = asRecord(details)
+  if (!result || !Array.isArray(result.controllers) || result.controllers.some(controller => !asRecord(controller))) return undefined
+  const controllers = result.controllers.map(controller => controller as RecordValue)
+  if (controllers.length === 0) return ['No workflow controllers configured.']
+  return [
+    `Workflow controllers — ${controllers.length}`,
+    ...controllers.slice(0, STATUS_ROWS).map(controllerListRow),
+    ...(controllers.length > STATUS_ROWS ? [itemMarker(controllers.length - STATUS_ROWS)] : []),
+  ]
+}
+
+export function formatWorkflowControllerStatusOutput(args: WorkflowControllerStatusArgs, result: Record<string, unknown>): RichToolResult {
+  const controllerId = selected(asRecord(result), 'controller_id', args.controller_id)
+  return {
+    title: `Workflow controller ${controllerId}`,
+    output: output(controllerStatusLines(result, args), 'workflow controller status'),
+    metadata: { ...result },
+  }
+}
+
+export function formatWorkflowControllerListOutput(_args: WorkflowControllerListArgs, result: Record<string, unknown>): RichToolResult {
+  const controllers = Array.isArray(asRecord(result)?.controllers) ? (asRecord(result)!.controllers as unknown[]).length : 0
+  return {
+    title: `Avenor workflow controllers — ${controllers}`,
+    output: output(controllerListLines(result), 'workflow controller list'),
+    metadata: { ...result },
   }
 }
