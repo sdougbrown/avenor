@@ -79,9 +79,16 @@ the bridge treats a file that fails to parse once as possibly still
 in-flight, but one whose content fails two consecutive polls as invalid
 and moves it aside before it is complete.
 
+Unlike the Python reference (whose `urllib` client follows redirects), the
+TypeScript bridge refuses 3xx webhook responses: a 307/308 redirect
+preserves method and body, so the question payload would be forwarded to
+the target. Address the transport at its final URL (e.g. `https://` directly).
+
 ## Trust model
 
-The decision directory is created `0700` and must stay local-user scoped:
+The decision directory is created `0700`, the bridge refuses to start on a
+pre-existing dir that is group- or other-writable, and both must stay
+local-user scoped:
 a decision file's `actor` is self-asserted, so any local user who can
 write there can forge an attributed gate decision. The ask payload also
 POSTs the workflow's full `latestOutputs` map to the webhook; if those

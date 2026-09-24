@@ -80,17 +80,26 @@ function setupDir(): string {
 describe('askWebhook', () => {
   test('refuses redirects, surfaces the non-OK status, and POSTs JSON', async () => {
     let received: { method?: string; contentType?: string; body?: string } | undefined
+    let redirectTargetHits = 0
+    let base = ''
     const server = Bun.serve({
       port: 0,
       fetch: async (req) => {
         const url = new URL(req.url)
         if (url.pathname === '/redirect') {
           // A redirecting endpoint would receive the question payload; the
-          // client must refuse to follow rather than forward it.
+          // client must refuse to follow rather than forward it. The
+          // location is a live endpoint on this server so a client that
+          // followed the redirect would be observable (a follow + connection
+          // failure to a dead port is not proof the redirect was refused).
           return new Response(null, {
             status: 302,
-            headers: { location: 'http://127.0.0.1:1/elsewhere' },
+            headers: { location: `${base}/elsewhere` },
           })
+        }
+        if (url.pathname === '/elsewhere') {
+          redirectTargetHits += 1
+          return new Response('ok', { status: 200 })
         }
         if (url.pathname === '/fail') return new Response('nope', { status: 500 })
         received = {
@@ -101,9 +110,10 @@ describe('askWebhook', () => {
         return new Response('ok', { status: 200 })
       },
     })
-    const base = `http://127.0.0.1:${server.port}`
+    base = `http://127.0.0.1:${server.port}`
 
     await expect(askWebhook(`${base}/redirect`, { q: 1 })).rejects.toThrow(Error)
+    expect(redirectTargetHits).toBe(0)
 
     const err = await askWebhook(`${base}/fail`, { q: 1 }).catch((e: Error) => e)
     expect(err.message).toContain('500')
@@ -309,5 +319,130 @@ describe('runBridge', () => {
     expect(code).toBe(0)
     expect(connectCalls).toBe(2)
     expect(sleeps).toContain(5000)
+  })
+
+  const runOptions = (dir: string, overrides: Record<string, unknown> = {}) => ({
+    socketPath: '/tmp/does-not-matter.sock',
+    workflowId: 'wf_1',
+    webhookUrl: 'http://127.0.0.1:1/ask',
+    decisionDir: dir,
+    templatePath: templateFile(dir),
+    sleep: async () => {},
+    log: () => {},
+    ...overrides,
+  })
+
+  test('floors the decision poll at one second', async () => {
+    const dir = setupDir()
+    const decision = {
+      decision: 'satisfy',
+      actor: 'austin',
+      reason: 'ok',
+      subject: { type: 'pull_request', repository: 'org/repo', pull_request: 123, revision: 'abc123' },
+    }
+    const client = new FakeClient({
+      detail: parkedDetail(),
+      waitResults: [{ terminal: false }, { terminal: true, instance: { status: 'completed' } }],
+    })
+    const sleeps: number[] = []
+    // The decision file is written by the ask, so the first wait tick
+    // sleeps on the (floored) poll interval: `pollMs: 100` must become 1000.
+    const code = await runBridge(
+      runOptions(dir, {
+        pollMs: 100,
+        connect: async () => client,
+        ask: async () => {
+          fs.writeFileSync(
+            path.join(dir, 'decision-act_1-merge-authorization.json'),
+            JSON.stringify(decision),
+          )
+        },
+        sleep: async (ms) => {
+          sleeps.push(ms)
+        },
+      }),
+    )
+    expect(code).toBe(0)
+    expect(sleeps.length).toBeGreaterThan(0)
+    expect(sleeps.every((ms) => ms === 1000)).toBe(true)
+  })
+
+  test('creates the decision dir 0700', async () => {
+    const parent = setupDir()
+    const dir = path.join(parent, 'decisions')
+    const decision = {
+      decision: 'satisfy',
+      actor: 'austin',
+      reason: 'ok',
+      subject: { type: 'pull_request', repository: 'org/repo', pull_request: 123, revision: 'abc123' },
+    }
+    const client = new FakeClient({
+      detail: parkedDetail(),
+      waitResults: [{ terminal: false }, { terminal: true, instance: { status: 'completed' } }],
+    })
+    const code = await runBridge(
+      runOptions(dir, {
+        connect: async () => client,
+        ask: async () => {
+          fs.writeFileSync(
+            path.join(dir, 'decision-act_1-merge-authorization.json'),
+            JSON.stringify(decision),
+          )
+        },
+      }),
+    )
+    expect(code).toBe(0)
+    expect(fs.statSync(dir).mode & 0o777).toBe(0o700)
+  })
+
+  test('refuses a group- or other-writable pre-existing decision dir', async () => {
+    const dir = setupDir()
+    fs.chmodSync(dir, 0o755)
+    const client = new FakeClient({ detail: parkedDetail(), waitResults: [] })
+    await expect(
+      runBridge(runOptions(dir, { connect: async () => client, ask: async () => {} })),
+    ).rejects.toThrow(/must not be group- or other-writable/)
+  })
+
+  test('rejects a missing or malformed template before the loop', async () => {
+    const missingDir = setupDir()
+    const badDir = setupDir()
+    fs.writeFileSync(path.join(badDir, 'template.json'), 'not json')
+    const client = new FakeClient({ detail: parkedDetail(), waitResults: [] })
+    await expect(
+      runBridge({
+        ...runOptions(missingDir),
+        templatePath: path.join(missingDir, 'nope.json'),
+        connect: async () => client,
+        ask: async () => {},
+      }),
+    ).rejects.toThrow()
+    // runOptions would overwrite the malformed template.json with a valid
+    // one, so pin the path after the spread.
+    await expect(
+      runBridge({
+        ...runOptions(badDir, { connect: async () => client, ask: async () => {} }),
+        templatePath: path.join(badDir, 'template.json'),
+      }),
+    ).rejects.toThrow()
+  })
+
+  test('rejects traversal-prone gate ids before the loop', async () => {
+    const dir = setupDir()
+    const templatePath = path.join(dir, 'template.json')
+    fs.writeFileSync(
+      templatePath,
+      JSON.stringify({
+        nodes: [{ id: 'merge-auth', gates: [{ ...mergeAuthGate(), id: '../../evil' }] }],
+      }),
+    )
+    const client = new FakeClient({ detail: parkedDetail(), waitResults: [] })
+    await expect(
+      runBridge(runOptions(dir, {
+        templatePath,
+        connect: async () => client,
+        ask: async () => {},
+      })),
+    ).rejects.toThrow(/unsafe gate id/)
   })
 })

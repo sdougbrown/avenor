@@ -6,7 +6,7 @@ import { dial } from '@dougbots/avenor-core'
 import { buildGateCommand } from './command.js'
 import { latestOutputs, loadHumanGates, pendingHumanGates } from './gates.js'
 import type { ControlClient, Decision, GateCommand, WorkflowDetail } from './types.js'
-import { moveAside, waitForDecision } from './wait.js'
+import { assertSafeId, moveAside, waitForDecision } from './wait.js'
 
 export const BACKOFF_MS = 5000
 
@@ -16,8 +16,12 @@ const defaultLog = (message: string, error?: Error) => {
   if (error) console.error(error.stack ?? error.message)
 }
 
-/** POST a JSON question payload to the transport webhook. Redirects are
- * refused: a redirecting endpoint would receive the question payload. */
+/** POST a JSON question payload to the transport webhook.
+ *
+ * Unlike the Python reference (urllib follows redirects), 3xx responses are
+ * refused outright: a 307/308 redirect preserves method and body, so the
+ * question payload would be forwarded to the target. A transport behind an
+ * HTTP→HTTPS redirect must be addressed at its final URL here. */
 export async function askWebhook(url: string, payload: unknown): Promise<void> {
   const resp = await fetch(url, {
     method: 'POST',
@@ -72,7 +76,20 @@ export async function runBridge(options: BridgeOptions): Promise<number> {
   const log = options.log ?? defaultLog
 
   fs.mkdirSync(options.decisionDir, { recursive: true, mode: 0o700 })
+  // The decision dir must stay local-user scoped: on a group- or
+  // other-writable pre-existing dir, any local user could drop a
+  // decision-*.json and forge an attributed decision (the actor is
+  // self-asserted). Refuse to start on one.
+  if ((fs.statSync(options.decisionDir).mode & 0o077) !== 0) {
+    throw new Error(`decision dir ${options.decisionDir} must not be group- or other-writable`)
+  }
   const templateGates = loadHumanGates(options.templatePath)
+  // Gate ids are operator-supplied and interpolated into decision file
+  // names; reject traversal-prone ids up front so runBridge fails clean
+  // instead of backing off forever.
+  for (const gates of templateGates.values()) {
+    for (const gate of gates) assertSafeId(gate.id, 'gate id')
+  }
 
   let ctl: ControlClient | null = null
   const decisionErrors = new Map<string, string>()
@@ -106,7 +123,7 @@ export async function runBridge(options: BridgeOptions): Promise<number> {
           gate_name: gate.name ?? gate.id,
           subject_type: gate.subject_type ?? null,
           allowed_outcomes: gate.allowed_outcomes ?? [],
-          selected_outcome: act.selected_outcome,
+          selected_outcome: act.selected_outcome ?? null,
           outputs: latestOutputs(detail),
           decision_file: `decision-${act.activation_id}-${gate.id}.json`,
           // The human must be able to decide from the message alone.
@@ -162,6 +179,7 @@ export async function runBridge(options: BridgeOptions): Promise<number> {
           'recorded',
           `${act.activation_id}-${gate.id}-${command.response_hash}.json`,
         )
+        assertSafeId(act.activation_id, 'activation_id')
         fs.mkdirSync(path.dirname(recorded), { recursive: true })
         fs.renameSync(wait.decisionFile!, recorded)
         log(

@@ -18,6 +18,16 @@ export interface WaitResult {
   reason: string
 }
 
+const SAFE_FILE_COMPONENT = /^[A-Za-z0-9._-]+$/
+
+/** Gate/activation ids are interpolated into decision file names; anything
+ * outside this set could be a path traversal (e.g. `a/../..`). */
+export function assertSafeId(value: string, what: string): void {
+  if (!SAFE_FILE_COMPONENT.test(value)) {
+    throw new Error(`unsafe ${what} for decision file naming: ${JSON.stringify(value)}`)
+  }
+}
+
 /**
  * Poll for the transport's decision file, re-checking workflow state.
  *
@@ -38,6 +48,8 @@ export async function waitForDecision(
   const now = opts.now ?? (() => performance.now())
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)))
   const log = opts.log ?? (() => {})
+  assertSafeId(activationId, 'activation_id')
+  assertSafeId(gate.id, 'gate id')
   const decisionFile = path.join(decisionsDir, `decision-${activationId}-${gate.id}.json`)
   const deadline = now() + opts.gateTimeoutMs
   // Content of the last unreadable decision file; a move to rejected/ happens
@@ -121,6 +133,8 @@ export function moveAside(
   gateId: string,
   from: string,
 ): string {
+  assertSafeId(activationId, 'activation_id')
+  assertSafeId(gateId, 'gate id')
   const rejectedDir = path.join(decisionsDir, 'rejected')
   fs.mkdirSync(rejectedDir, { recursive: true })
   const rejected = path.join(rejectedDir, `${activationId}-${gateId}-${Math.floor(Date.now() / 1000)}.json`)

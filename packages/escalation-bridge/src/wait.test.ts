@@ -171,17 +171,79 @@ describe('waitForDecision', () => {
     expect(fs.existsSync(path.join(decisions, 'rejected'))).toBe(false)
   })
 
-  test('a non-object JSON file is invalid, not an answer', async () => {
-    writeDecision('null')
+  test('non-object JSON files are invalid, not answers', async () => {
+    const file = path.join(decisions, 'decision-act_1-merge-authorization.json')
+    const detail: WorkflowDetail = {
+      activations: [parkedActivation()],
+      gates: null,
+      instance: { status: 'active' },
+    }
+    for (const raw of ['null', '[1, 2]', '"answer"', '42', 'true']) {
+      fs.writeFileSync(file, raw)
+      const ctl = new FakeControl([detail])
+      const result = await waitForDecision(ctl, decisions, 'wf_1', 'act_1', gate, opts)
+      // This path moves the file aside on the first poll.
+      expect(result.decision, raw).toBeNull()
+      expect(result.reason, raw).toContain('invalid decision file')
+      expect(fs.existsSync(file), raw).toBe(false)
+    }
+  })
+
+  test('a read failure propagates instead of parking the file', async () => {
+    // A directory where the decision file should be: existsSync is true but
+    // readFileSync throws a non-ENOENT fs error (EISDIR/EACCES).
+    fs.mkdirSync(path.join(decisions, 'decision-act_1-merge-authorization.json'))
     const detail: WorkflowDetail = {
       activations: [parkedActivation()],
       gates: null,
       instance: { status: 'active' },
     }
     const ctl = new FakeControl([detail])
-    const result = await waitForDecision(ctl, decisions, 'wf_1', 'act_1', gate, opts)
-    expect(result.decision).toBeNull()
-    expect(result.reason).toContain('invalid decision file')
-    expect(fs.existsSync(path.join(decisions, 'rejected'))).toBe(true)
+    await expect(waitForDecision(ctl, decisions, 'wf_1', 'act_1', gate, opts)).rejects.toThrow()
+    expect(fs.existsSync(path.join(decisions, 'rejected'))).toBe(false)
+  })
+
+  test('an ENOENT between polls resets the malformed hold', async () => {
+    const file = path.join(decisions, 'decision-act_1-merge-authorization.json')
+    fs.writeFileSync(file, '{not json yet')
+    const detail: WorkflowDetail = {
+      activations: [parkedActivation()],
+      gates: null,
+      instance: { status: 'active' },
+    }
+    // Four parked ticks: read 1 malformed (hold), read 2 ENOENT (reset),
+    // read 3 same content (fresh first failure, hold), read 4 same content
+    // (second consecutive failure) -> moved aside. Without the reset, read 3
+    // would have moved the file aside.
+    const ctl = new FakeControl([detail, detail, detail, detail])
+    const realRead = fs.readFileSync
+    let reads = 0
+    fs.readFileSync = ((target: fs.PathOrFileDescriptor) => {
+      reads += 1
+      if (reads === 2) {
+        const err = new Error('ENOENT: no such file or directory')
+        ;(err as NodeJS.ErrnoException).code = 'ENOENT'
+        throw err
+      }
+      return realRead(target, 'utf8')
+    }) as typeof fs.readFileSync
+    try {
+      const result = await waitForDecision(ctl, decisions, 'wf_1', 'act_1', gate, opts)
+      expect(result.decision).toBeNull()
+      expect(result.reason).toContain('invalid decision file')
+      const rejected = fs.readdirSync(path.join(decisions, 'rejected'))
+      expect(rejected).toHaveLength(1)
+      expect(fs.readFileSync(path.join(decisions, 'rejected', rejected[0]), 'utf8')).toBe('{not json yet')
+    } finally {
+      fs.readFileSync = realRead
+    }
+  })
+
+  test('rejects unsafe ids before touching paths', async () => {
+    const evil = { ...mergeAuthGate(), id: '../../evil' }
+    const ctl = new FakeControl([])
+    await expect(waitForDecision(ctl, decisions, 'wf_1', 'act_1', evil, opts)).rejects.toThrow(
+      /unsafe gate id/,
+    )
   })
 })
