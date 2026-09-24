@@ -205,7 +205,8 @@ describe('waitForDecision', () => {
 
   test('an ENOENT between polls resets the malformed hold', async () => {
     const file = path.join(decisions, 'decision-act_1-merge-authorization.json')
-    fs.writeFileSync(file, '{not json yet')
+    const payload = '{not json yet'
+    fs.writeFileSync(file, payload)
     const detail: WorkflowDetail = {
       activations: [parkedActivation()],
       gates: null,
@@ -214,29 +215,22 @@ describe('waitForDecision', () => {
     // Four parked ticks: read 1 malformed (hold), read 2 ENOENT (reset),
     // read 3 same content (fresh first failure, hold), read 4 same content
     // (second consecutive failure) -> moved aside. Without the reset, read 3
-    // would have moved the file aside.
+    // would have moved the file aside. The file's disappearance between polls
+    // is driven by the inspect callback (call 1 removes it, call 2 rewrites
+    // the same content); fs.readFileSync cannot be monkey-patched in Bun.
     const ctl = new FakeControl([detail, detail, detail, detail])
-    const realRead = fs.readFileSync
-    let reads = 0
-    fs.readFileSync = ((target: fs.PathOrFileDescriptor) => {
-      reads += 1
-      if (reads === 2) {
-        const err = new Error('ENOENT: no such file or directory')
-        ;(err as NodeJS.ErrnoException).code = 'ENOENT'
-        throw err
-      }
-      return realRead(target, 'utf8')
-    }) as typeof fs.readFileSync
-    try {
-      const result = await waitForDecision(ctl, decisions, 'wf_1', 'act_1', gate, opts)
-      expect(result.decision).toBeNull()
-      expect(result.reason).toContain('invalid decision file')
-      const rejected = fs.readdirSync(path.join(decisions, 'rejected'))
-      expect(rejected).toHaveLength(1)
-      expect(fs.readFileSync(path.join(decisions, 'rejected', rejected[0]), 'utf8')).toBe('{not json yet')
-    } finally {
-      fs.readFileSync = realRead
+    let inspects = 0
+    ctl.onCall = () => {
+      inspects += 1
+      if (inspects === 1) fs.unlinkSync(file)
+      if (inspects === 2) fs.writeFileSync(file, payload)
     }
+    const result = await waitForDecision(ctl, decisions, 'wf_1', 'act_1', gate, opts)
+    expect(result.decision).toBeNull()
+    expect(result.reason).toContain('invalid decision file')
+    const rejected = fs.readdirSync(path.join(decisions, 'rejected'))
+    expect(rejected).toHaveLength(1)
+    expect(fs.readFileSync(path.join(decisions, 'rejected', rejected[0]), 'utf8')).toBe(payload)
   })
 
   test('rejects unsafe ids before touching paths', async () => {

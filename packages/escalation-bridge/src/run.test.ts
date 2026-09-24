@@ -326,7 +326,10 @@ describe('runBridge', () => {
     workflowId: 'wf_1',
     webhookUrl: 'http://127.0.0.1:1/ask',
     decisionDir: dir,
-    templatePath: templateFile(dir),
+    // Tests that pin a templatePath (missing/malformed/traversal/external)
+    // must not have the default template written over it.
+    templatePath:
+      'templatePath' in overrides ? (overrides.templatePath as string) : templateFile(dir),
     sleep: async () => {},
     log: () => {},
     ...overrides,
@@ -334,32 +337,27 @@ describe('runBridge', () => {
 
   test('floors the decision poll at one second', async () => {
     const dir = setupDir()
-    const decision = {
-      decision: 'satisfy',
-      actor: 'austin',
-      reason: 'ok',
-      subject: { type: 'pull_request', repository: 'org/repo', pull_request: 123, revision: 'abc123' },
-    }
     const client = new FakeClient({
       detail: parkedDetail(),
       waitResults: [{ terminal: false }, { terminal: true, instance: { status: 'completed' } }],
     })
     const sleeps: number[] = []
-    // The decision file is written by the ask, so the first wait tick
-    // sleeps on the (floored) poll interval: `pollMs: 100` must become 1000.
+    // No decision file ever appears, so waitForDecision runs its poll loop to
+    // the gate timeout and every recorded sleep is a poll interval: with the
+    // scripted clock, `pollMs: 100` must be floored to the Python reference's
+    // 1.0s (deadline 2500ms / three 1000ms ticks).
+    const scripted = [0, 0, 1000, 2000, 3000]
+    const now = () => (scripted.length > 1 ? scripted.shift()! : scripted[0])
     const code = await runBridge(
       runOptions(dir, {
         pollMs: 100,
+        gateTimeoutMs: 2500,
         connect: async () => client,
-        ask: async () => {
-          fs.writeFileSync(
-            path.join(dir, 'decision-act_1-merge-authorization.json'),
-            JSON.stringify(decision),
-          )
-        },
+        ask: async () => {},
         sleep: async (ms) => {
           sleeps.push(ms)
         },
+        now,
       }),
     )
     expect(code).toBe(0)
@@ -370,6 +368,8 @@ describe('runBridge', () => {
   test('creates the decision dir 0700', async () => {
     const parent = setupDir()
     const dir = path.join(parent, 'decisions')
+    // The template lives outside the decision dir so the dir does not exist
+    // before runBridge; the assertion pins the 0700 creation itself.
     const decision = {
       decision: 'satisfy',
       actor: 'austin',
@@ -382,6 +382,7 @@ describe('runBridge', () => {
     })
     const code = await runBridge(
       runOptions(dir, {
+        templatePath: templateFile(parent),
         connect: async () => client,
         ask: async () => {
           fs.writeFileSync(
@@ -417,14 +418,16 @@ describe('runBridge', () => {
         ask: async () => {},
       }),
     ).rejects.toThrow()
-    // runOptions would overwrite the malformed template.json with a valid
-    // one, so pin the path after the spread.
+    // runOptions skips the fixture write when templatePath is overridden, so
+    // the malformed template survives to be read.
     await expect(
-      runBridge({
-        ...runOptions(badDir, { connect: async () => client, ask: async () => {} }),
+      runBridge(runOptions(badDir, {
         templatePath: path.join(badDir, 'template.json'),
-      }),
+        connect: async () => client,
+        ask: async () => {},
+      })),
     ).rejects.toThrow()
+    expect(fs.readFileSync(path.join(badDir, 'template.json'), 'utf8')).toBe('not json')
   })
 
   test('rejects traversal-prone gate ids before the loop', async () => {
