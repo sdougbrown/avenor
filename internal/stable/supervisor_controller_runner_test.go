@@ -861,6 +861,82 @@ func TestControllerViewsIsolatedAcrossSupervisorRoots(t *testing.T) {
 	}
 }
 
+// TestControllerInflightViewDistinguishesSupervisorsOnSharedRoot proves two
+// supervisors on the SAME workflow root whose first runtimes both expose the
+// colliding id rt_1 keep their in-flight views distinct: after a refresh that
+// makes one supervisor's manager see both snapshots, LiveAttempts returns two
+// entries keyed by the full identity (supervisor, workflow, node, activation,
+// attempt) rather than collapsing the two rt_1 attempts into one, and a
+// controller that owns only one of the attempts counts exactly one in flight.
+func TestControllerInflightViewDistinguishesSupervisorsOnSharedRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "wfroot")
+	f1 := newRunnerFixture(t, "runner-shared-a", root, 2, 4, true)
+	f1.controllerID = "c1"
+	f2 := newRunnerFixture(t, "runner-shared-b", root, 2, 4, true)
+	f2.controllerID = "c2"
+	wf1 := f1.addWorkflow(t, "shared-a", "c1", "")
+	wf2 := f2.addWorkflow(t, "shared-b", "c2", "")
+	f1.enableController(t, "c1", 1)
+	f2.enableController(t, "c2", 1)
+
+	waitFor(t, "both supervisors dispatched their own workflow", func() bool {
+		return f1.sup.activeRuntimeCount() == 1 && f2.sup.activeRuntimeCount() == 1
+	})
+
+	// Both runtimes exist under the colliding id rt_1, one per supervisor.
+	for _, f := range []*runnerFixture{f1, f2} {
+		rts := f.sup.listRuntimes()
+		if len(rts) != 1 || rts[0]["runtime_id"] != "rt_1" {
+			t.Fatalf("runtime list = %+v, want exactly one runtime with the colliding id rt_1", rts)
+		}
+	}
+
+	// Refresh f1's candidate index so its manager sees BOTH snapshots from the
+	// shared root. The in-flight view must return two entries — one per
+	// supervisor — keyed by the full identity rather than the runtime id.
+	if err := f1.mgr.RebuildCandidateIndex(f1.sup.supervisorIdentity()); err != nil {
+		t.Fatalf("RebuildCandidateIndex: %v", err)
+	}
+	live := f1.mgr.LiveAttempts()
+	if len(live) != 2 {
+		t.Fatalf("live attempts after refresh = %+v, want two entries (one per supervisor), not one", live)
+	}
+
+	// The two entries are distinct by workflow, activation, and attempt — the
+	// full identity tuple the view keys on — even though both carry the
+	// colliding runtime id rt_1.
+	var id1, id2 workflow.ExecutionIdentity
+	var att1, att2 workflow.AttemptID
+	for _, la := range live {
+		switch string(la.Identity.WorkflowID) {
+		case wf1:
+			id1, att1 = la.Identity, la.AttemptID
+		case wf2:
+			id2, att2 = la.Identity, la.AttemptID
+		default:
+			t.Fatalf("live attempts after refresh include foreign workflow %s: %+v", la.Identity.WorkflowID, live)
+		}
+	}
+	if id1.WorkflowID == id2.WorkflowID || id1.ActivationID == id2.ActivationID {
+		t.Fatalf("live attempts share workflow/activation identity: %+v vs %+v", id1, id2)
+	}
+	if att1 == att2 {
+		t.Fatalf("live attempts share attempt id %s, want distinct", att1)
+	}
+
+	// A controller that owns only one of the attempts counts exactly one in
+	// flight, not the other supervisor's colliding rt_1 attempt.
+	owned := 0
+	for _, la := range live {
+		if la.ControllerID == "c1" {
+			owned++
+		}
+	}
+	if owned != 1 {
+		t.Fatalf("controller c1 in-flight count = %d, want exactly its own 1", owned)
+	}
+}
+
 // TestControllerRunnerCapacityBlockedEventDedup proves capacity_blocked
 // controller events are appended once per reason change: many blocked passes
 // under one reason append a single event, a reason change local→tree appends
