@@ -22,10 +22,10 @@ const (
 
 	// factoryControllerID is the controller every auto factory node declares.
 	factoryControllerID = "software-factory"
-	// factoryWorktreeKey is the shared worktree concurrency key: every
-	// provider-backed node that writes the review unit's worktree serializes
-	// on it across the whole workflow root.
-	factoryWorktreeKey = "worktree:software-factory-review-unit"
+	// factoryWorktreeParam is the instance param every keyed factory node
+	// resolves its concurrency key from, with the shared prefix.
+	factoryWorktreeParam     = "worktree"
+	factoryWorktreeKeyPrefix = "worktree:"
 )
 
 // loadFactoryTemplate reads and strictly validates a shipped factory
@@ -57,12 +57,20 @@ func factoryNodeByID(tmpl Template) map[NodeID]*NodeDefinition {
 
 // TestSoftwareFactoryTemplateAutoDispatchIsExplicit asserts every provider
 // node intended for automatic dispatch declares mode auto under the
-// software-factory controller with the shared worktree key, that hardening
-// keeps manual dispatch as its provider-backed checkpoint, and that the
-// human nodes (intake, merge-auth, advisor) never request automatic
-// dispatch.
+// software-factory controller with the templated worktree key resolved from
+// the instance's worktree param, that hardening keeps manual dispatch as its
+// provider-backed checkpoint, and that the human nodes (intake, merge-auth,
+// advisor) never request automatic dispatch.
 func TestSoftwareFactoryTemplateAutoDispatchIsExplicit(t *testing.T) {
 	tmpl := loadFactoryTemplate(t, factoryWorkTemplatePath)
+
+	// The template declares exactly one required instance param: worktree.
+	if len(tmpl.Params) != 1 {
+		t.Fatalf("template params = %+v, want exactly one declared param", tmpl.Params)
+	}
+	if tmpl.Params[0].ID != factoryWorktreeParam || tmpl.Params[0].Type != "string" || !tmpl.Params[0].Required {
+		t.Fatalf("template param = %+v, want required string %q", tmpl.Params[0], factoryWorktreeParam)
+	}
 
 	// The audit classifies every node: these dispatch automatically, these
 	// stay manual, and anything unclassified fails the audit.
@@ -100,8 +108,17 @@ func TestSoftwareFactoryTemplateAutoDispatchIsExplicit(t *testing.T) {
 		if policy.Priority == nil {
 			t.Errorf("node %q must declare an explicit priority", node.ID)
 		}
-		if policy.ConcurrencyKey != factoryWorktreeKey {
-			t.Errorf("node %q concurrency_key = %q, want %q", node.ID, policy.ConcurrencyKey, factoryWorktreeKey)
+		if policy.ConcurrencyKeyParams == nil {
+			t.Errorf("node %q must declare the templated worktree concurrency key", node.ID)
+			continue
+		}
+		if policy.ConcurrencyKey != "" {
+			t.Errorf("node %q declares a plain concurrency key %q alongside the templated form", node.ID, policy.ConcurrencyKey)
+		}
+		if policy.ConcurrencyKeyParams.FromInstanceParam != factoryWorktreeParam || policy.ConcurrencyKeyParams.Prefix != factoryWorktreeKeyPrefix {
+			t.Errorf("node %q concurrency key = {%q, %q}, want prefix %q from param %q",
+				node.ID, policy.ConcurrencyKeyParams.Prefix, policy.ConcurrencyKeyParams.FromInstanceParam,
+				factoryWorktreeKeyPrefix, factoryWorktreeParam)
 		}
 	}
 }
@@ -289,6 +306,9 @@ func TestSoftwareFactoryStackTemplateComposesPinnedWorkChildren(t *testing.T) {
 		}
 		if action.ChildKey == "" {
 			t.Errorf("node %q declares no child_key", node.ID)
+		}
+		if len(action.Params) != 1 || action.Params[0].Param != "worktree" || action.Params[0].Value == "" || action.Params[0].FromInstanceParam != "" {
+			t.Errorf("node %q must pass the child worktree param as an explicit literal, got %+v", node.ID, action.Params)
 		}
 		for _, binding := range action.InputBindings {
 			if binding.From == nil || binding.From.NodeID != "plan-stack" {

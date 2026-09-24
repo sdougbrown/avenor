@@ -1,15 +1,16 @@
 package stable
 
 // workflow_factory_e2e_test.go runs the shipped software-factory work
-// template (templates/software-factory/work.json@1.1.0) end to end over a
+// template (templates/software-factory/work.json@1.2.0) end to end over a
 // real supervisor with fake providers and the Stage 7b fixture adapters:
 // one work item flows from intake through publication, the auto external
 // review parks and polls its bound gates, a clean verdict stops at the
 // manual merge-authorization human gate, a changes_requested verdict routes
 // correction and re-publishes under a new exact head the old results cannot
-// land on, two independent work items sharing the worktree concurrency key
-// never run concurrently, and a fresh supervisor on the same root resumes
-// the parked work without coordinator memory.
+// land on, two work items resolving different worktree params run
+// concurrently while two sharing one worktree param serialize, and a fresh
+// supervisor on the same root resumes the parked work without coordinator
+// memory.
 
 import (
 	"encoding/json"
@@ -119,8 +120,9 @@ func newFactoryE2E(t *testing.T, name string, ciScript, reviewScript string) *fa
 	if _, err := mgr.WorkflowCreate(factoryWorkTemplateJSON(t)); err != nil {
 		t.Fatalf("WorkflowCreate: %v", err)
 	}
-	out, err := mgr.WorkflowInstantiate(mustJSON(t, map[string]string{
-		"template_id": "software-factory-work", "template_version": "1.1.0",
+	out, err := mgr.WorkflowInstantiate(mustJSON(t, map[string]any{
+		"template_id": "software-factory-work", "template_version": "1.2.0",
+		"params": map[string]string{"worktree": "avenor-issue-115"},
 	}))
 	if err != nil {
 		t.Fatalf("WorkflowInstantiate: %v", err)
@@ -496,24 +498,33 @@ func TestFactoryWorkChangesRequestedCorrectsAndRepublishes(t *testing.T) {
 	}
 }
 
-// TestFactoryWorkItemsShareWorktreeKeySerialize proves two independent work
-// items instantiated from the same template serialize on the template's
-// worktree concurrency key: while item A's assessment attempt is live, item
-// B's assessment is never dispatched; when A's attempt terminates, the
-// controller replenishes B.
-func TestFactoryWorkItemsShareWorktreeKeySerialize(t *testing.T) {
+// TestFactoryWorkItemsResolveWorktreeKeysProvesParamConcurrency proves two
+// independent work items instantiated from the same template resolve their
+// concurrency keys from the instance's worktree param: two items pinned to
+// different worktrees run concurrently under one controller, while two items
+// sharing a worktree param serialize — item B's assessment is never
+// dispatched while item A's attempt is live, and the controller replenishes
+// B once A's attempt terminates.
+func TestFactoryWorkItemsResolveWorktreeKeysProveParamConcurrency(t *testing.T) {
 	f := newFactoryE2E(t, "factory-e2e-key", "passed.sh", "passed.sh")
-	out, err := f.mgr.WorkflowInstantiate(mustJSON(t, map[string]string{
-		"template_id": "software-factory-work", "template_version": "1.1.0",
-	}))
-	if err != nil {
-		t.Fatalf("second instantiate: %v", err)
+	instantiate := func(name string, worktree string) string {
+		t.Helper()
+		out, err := f.mgr.WorkflowInstantiate(mustJSON(t, map[string]any{
+			"template_id": "software-factory-work", "template_version": "1.2.0",
+			"params": map[string]string{"worktree": worktree},
+		}))
+		if err != nil {
+			t.Fatalf("instantiate %s: %v", name, err)
+		}
+		return out.(map[string]any)["workflow_id"].(string)
 	}
-	wfB := out.(map[string]any)["workflow_id"].(string)
+	// Item B shares item A's worktree param; item C pins a different one.
+	wfB := instantiate("B", "avenor-issue-115")
+	wfC := instantiate("C", "avenor-issue-130")
 
-	// Both items sit at intake; complete both intakes so both assessments
-	// become ready candidates under the same worktree key.
-	for _, wf := range []string{f.wf, wfB} {
+	// All three items sit at intake; complete all intakes so the
+	// assessments become ready candidates under their resolved keys.
+	for _, wf := range []string{f.wf, wfB, wfC} {
 		prev := f.wf
 		f.wf = wf
 		f.completeNode(t, "intake", "ready",
@@ -525,13 +536,21 @@ func TestFactoryWorkItemsShareWorktreeKeySerialize(t *testing.T) {
 	}
 	f.enable(t)
 
-	// Item A's assessment dispatches and runs under the fake provider.
-	waitFor(t, "item A assessment running", func() bool {
-		act := f.activationOn(t, f.wf, "assessment")
-		return act != nil && act.Status == workflow.ActivationRunning && len(act.AttemptIDs) > 0
+	// Items A and C resolve different worktree keys, so both assessments
+	// dispatch concurrently under the same controller.
+	waitFor(t, "items A and C assessment running concurrently", func() bool {
+		concurrent := 0
+		for _, wf := range []string{f.wf, wfC} {
+			act := f.activationOn(t, wf, "assessment")
+			if act != nil && act.Status == workflow.ActivationRunning && len(act.AttemptIDs) > 0 {
+				concurrent++
+			}
+		}
+		return concurrent == 2
 	})
 
-	// While A holds the worktree key, item B's assessment never starts.
+	// While A holds the shared worktree key, item B's assessment never
+	// starts.
 	deadline := time.Now().Add(1500 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		b := f.activationOn(t, wfB, "assessment")
@@ -539,13 +558,13 @@ func TestFactoryWorkItemsShareWorktreeKeySerialize(t *testing.T) {
 			t.Fatalf("item B has no assessment activation")
 		}
 		if b.Status != workflow.ActivationPending {
-			t.Fatalf("item B assessment = %s with A still live, want pending (worktree key held)", b.Status)
+			t.Fatalf("item B assessment = %s with A still live, want pending (shared worktree key held)", b.Status)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	// End item A's attempt (the fake runtime parks); the key releases and
-	// the controller replenishes item B.
+	// End item A's attempt (the fake runtime parks); the shared key
+	// releases and the controller replenishes item B.
 	f.endTurns()
 	f.waitActivationStatusOn(t, wfB, "assessment", workflow.ActivationRunning)
 }

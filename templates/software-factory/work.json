@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "template_id": "software-factory-work",
-  "template_version": "1.1.0",
+  "template_version": "1.2.0",
   "metadata": {
     "title": "Software factory work",
     "description": "One review unit of software-factory work: intake, assessment, plan, hardening, execution, verification, publication, and exact-head CI + external review with declared review branches. Provider-backed nodes dispatch automatically under the software-factory workflow controller and serialize on one worktree concurrency key; hardening stays a provider-backed run with manual dispatch; merge authorization remains a manual human gate. Campaign coordination is out of scope; this template is one workflow for one review unit.",
@@ -33,7 +33,7 @@
         "mode": "auto",
         "controller_id": "software-factory",
         "priority": 30,
-        "concurrency_key": "worktree:software-factory-review-unit"
+        "concurrency_key": { "prefix": "worktree:", "from_instance_param": "worktree" }
       },
       "outputs": [
         { "id": "assessment", "name": "Assessment", "type": "file", "required": true }
@@ -54,7 +54,7 @@
         "mode": "auto",
         "controller_id": "software-factory",
         "priority": 30,
-        "concurrency_key": "worktree:software-factory-review-unit"
+        "concurrency_key": { "prefix": "worktree:", "from_instance_param": "worktree" }
       },
       "outputs": [
         { "id": "plan", "name": "Plan", "type": "file", "required": true }
@@ -91,7 +91,7 @@
         "mode": "auto",
         "controller_id": "software-factory",
         "priority": 40,
-        "concurrency_key": "worktree:software-factory-review-unit"
+        "concurrency_key": { "prefix": "worktree:", "from_instance_param": "worktree" }
       },
       "outputs": [
         { "id": "summary", "name": "Execution summary", "type": "string" }
@@ -112,7 +112,7 @@
         "mode": "auto",
         "controller_id": "software-factory",
         "priority": 40,
-        "concurrency_key": "worktree:software-factory-review-unit"
+        "concurrency_key": { "prefix": "worktree:", "from_instance_param": "worktree" }
       },
       "outputs": [
         { "id": "verification", "name": "Verification", "type": "file", "required": true }
@@ -133,7 +133,7 @@
         "mode": "auto",
         "controller_id": "software-factory",
         "priority": 60,
-        "concurrency_key": "worktree:software-factory-review-unit"
+        "concurrency_key": { "prefix": "worktree:", "from_instance_param": "worktree" }
       },
       "outputs": [
         { "id": "repository", "name": "Repository", "type": "string", "required": true },
@@ -155,7 +155,7 @@
         "mode": "auto",
         "controller_id": "software-factory",
         "priority": 60,
-        "concurrency_key": "worktree:software-factory-review-unit",
+        "concurrency_key": { "prefix": "worktree:", "from_instance_param": "worktree" },
         "success_outcome": "clean"
       },
       "completion": { "kind": "explicit" },
@@ -232,7 +232,7 @@
         "mode": "auto",
         "controller_id": "software-factory",
         "priority": 70,
-        "concurrency_key": "worktree:software-factory-review-unit"
+        "concurrency_key": { "prefix": "worktree:", "from_instance_param": "worktree" }
       },
       "outputs": [
         { "id": "correction_summary", "name": "Correction summary", "type": "string" }
@@ -253,7 +253,7 @@
         "mode": "auto",
         "controller_id": "software-factory",
         "priority": 60,
-        "concurrency_key": "worktree:software-factory-review-unit"
+        "concurrency_key": { "prefix": "worktree:", "from_instance_param": "worktree" }
       },
       "outputs": [
         { "id": "reverify", "name": "Reverify", "type": "file", "required": true }
@@ -319,7 +319,7 @@
         "mode": "auto",
         "controller_id": "software-factory",
         "priority": 50,
-        "concurrency_key": "worktree:software-factory-review-unit"
+        "concurrency_key": { "prefix": "worktree:", "from_instance_param": "worktree" }
       },
       "outputs": [
         { "id": "reconciliation", "name": "Reconciliation", "type": "file", "required": true }
@@ -331,6 +331,9 @@
     }
   ],
   "terminal_outcomes": ["merged", "abandoned"],
+  "params": [
+    { "id": "worktree", "type": "string", "required": true }
+  ],
   "default_lease_policy": { "ttl_seconds": 900, "heartbeat_interval_seconds": 300 },
   "default_retry_policy": { "max_attempts": 2, "exhaustion": "block" },
   "composition_limits": { "max_depth": 4, "max_children": 32 }

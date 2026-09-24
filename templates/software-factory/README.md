@@ -3,13 +3,16 @@
 Durable [Avenor workflow](../../docs/workflow.md) templates for
 software-factory work:
 
-- `work.json` (`software-factory-work@1.1.0`) — one review unit: intake,
+- `work.json` (`software-factory-work@1.2.0`) — one review unit: intake,
   assessment, plan drafting, hardening, execution, verification, publication,
-  and exact-head CI + external review with declared review branches.
-- `stack.json` (`software-factory-stack@1.0.0`) — a bounded parent whose
+  and exact-head CI + external review with declared review branches. It
+  declares one required instance param, `worktree`, and every keyed node
+  resolves its concurrency key from that param at instantiation.
+- `stack.json` (`software-factory-stack@1.1.0`) — a bounded parent whose
   planning node records a typed, immutable stack topology and whose
   kernel-local `workflow` actions compose review-unit children of the work
-  template. The parent owns only declared composition and typed handoff.
+  template, passing each child its worktree param explicitly. The parent
+  owns only declared composition and typed handoff.
 
 Campaign coordination — scheduling, indexing, and grouping many issues
 beyond the declared stack composition — is **out of scope** for the workflow
@@ -40,13 +43,16 @@ intake                         [manual]
 Provider-backed nodes dispatch automatically under the `software-factory`
 workflow controller with explicit priorities that rank later-pipeline work
 (correction 70, publication/review/reverify 60) above intake (assessment and
-draft-plan 30). Every node that writes the review unit's worktree shares the
-`worktree:software-factory-review-unit` concurrency key, so one work item
-runs at a time per worktree across the whole workflow root. Hardening is a
-provider-backed run with **manual** dispatch — the plan checkpoint a human or
-advisor releases deliberately. Merge authorization remains a manual human
-gate bound to the exact published subject; the controller never parks it,
-satisfies it, or merges.
+draft-plan 30). Every node that writes the review unit's worktree carries
+the templated concurrency key `{"prefix": "worktree:",
+"from_instance_param": "worktree"}`, resolved from the instance's recorded
+`worktree` param at instantiation: instances pinned to different worktrees
+run concurrently under one controller, while two instances sharing a
+worktree param serialize — one work item at a time per worktree across the
+whole workflow root. Hardening is a provider-backed run with **manual**
+dispatch — the plan checkpoint a human or advisor releases deliberately.
+Merge authorization remains a manual human gate bound to the exact published
+subject; the controller never parks it, satisfies it, or merges.
 
 The dependency edges declare the primary path; the declared branches declare
 the review outcomes. Branches may point back to earlier nodes (correction,
@@ -110,12 +116,12 @@ for the full walkthrough.
 ### 2. Instantiate one work unit per review unit
 
 ```sh
-# Instantiate one work unit. The instance metadata is free-form; the
-# fixtures/ directory ships examples for two independent work items and for
-# the stack parent.
-echo '{"metadata":{"issue":"115","base_sha":"6e77a0d"}}' > /tmp/instance.json
+# Instantiate one work unit. The worktree param is required by the template
+# and immutable once recorded; the fixtures/ directory ships examples for two
+# independent work items and for the stack parent.
+echo '{"params":{"worktree":"avenor-issue-115"},"metadata":{"issue":"115","base_sha":"6e77a0d"}}' > /tmp/instance.json
 avenor workflow instantiate --socket /path/to/socket \
-  --template-id software-factory-work --template-version 1.1.0 \
+  --template-id software-factory-work --template-version 1.2.0 \
   --request-file /tmp/instance.json
 ```
 
