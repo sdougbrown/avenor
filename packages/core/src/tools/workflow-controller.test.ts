@@ -37,6 +37,11 @@ const getSupervisorClientMock = mock(async (supervisorId: string) => {
       reason,
       state: 'disabled',
     })),
+    workflowReady: mock(async (controllerId: string, limit?: number) => ({
+      supervisor: supervisorId,
+      controllerId,
+      limit,
+    })),
     close: mock(() => {}),
   } as any
 
@@ -54,6 +59,7 @@ import { createWorkflowControllerListTool, workflowControllerListTool } from './
 import { createWorkflowControllerCreateTool, workflowControllerCreateTool } from './workflow-controller-create.js'
 import { createWorkflowControllerEnableTool, workflowControllerEnableTool } from './workflow-controller-enable.js'
 import { createWorkflowControllerDisableTool, workflowControllerDisableTool } from './workflow-controller-disable.js'
+import { createWorkflowReadyTool } from './workflow-ready.js'
 
 describe('workflow controller tools basic forwarding', () => {
   it('workflowControllerStatusTool forwards to client.workflowControllerStatus with controllerId', async () => {
@@ -161,6 +167,35 @@ describe('workflow controller tools required-arg validation', () => {
   it('disable tool throws when reason missing', async () => {
     const tool = createWorkflowControllerDisableTool(getSupervisorClientMock)
     await expect(tool({ controllerId: 'c-123', supervisorId: '/tmp/avenor-mcp-sup-a-123.sock' })).rejects.toThrow('reason is required')
+  })
+})
+
+describe('workflow ready tool', () => {
+  it('throws when controllerId missing', async () => {
+    const tool = createWorkflowReadyTool(getSupervisorClientMock)
+    await expect(tool({ supervisorId: '/tmp/avenor-mcp-sup-a-123.sock' })).rejects.toThrow('controllerId is required')
+  })
+
+  it('forwards to client.workflowReady with limit when supplied', async () => {
+    const tool = createWorkflowReadyTool(getSupervisorClientMock)
+    const result = await tool({ controllerId: 'c-123', limit: 5, supervisorId: '/tmp/avenor-mcp-sup-a-123.sock' })
+    expect(result).toEqual({
+      supervisor: '/tmp/avenor-mcp-sup-a-123.sock',
+      controllerId: 'c-123',
+      limit: 5,
+    })
+    expect(getSupervisorClientMock).toHaveBeenCalledWith('/tmp/avenor-mcp-sup-a-123.sock')
+  })
+
+  it('forwards to client.workflowReady without limit when omitted', async () => {
+    const tool = createWorkflowReadyTool(getSupervisorClientMock)
+    const result = await tool({ controllerId: 'c-123', supervisorId: '/tmp/avenor-mcp-sup-a-123.sock' })
+    expect(result).toEqual({
+      supervisor: '/tmp/avenor-mcp-sup-a-123.sock',
+      controllerId: 'c-123',
+      limit: undefined,
+    })
+    expect(getSupervisorClientMock).toHaveBeenCalledWith('/tmp/avenor-mcp-sup-a-123.sock')
   })
 })
 

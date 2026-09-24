@@ -1,191 +1,100 @@
-import { describe, it, expect } from 'bun:test'
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { describe, it, expect, mock } from 'bun:test'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { validateSpawnSelection } from '@dougbots/avenor-core'
 import { z } from 'zod'
-import { getMcpAuthToken, isAllowedHost, isAllowedOrigin, parseBearerToken } from './mcp'
 import { spawnInputShape } from './spawn-schema'
 
+// Stub the core controller tools so the production registrations never dial a
+// real supervisor; the stubs record the camelCase args the registrations
+// forward.
+const controllerCalls: {
+  status: Array<Record<string, unknown>>
+  list: Array<Record<string, unknown>>
+  create: Array<Record<string, unknown>>
+  enable: Array<Record<string, unknown>>
+  disable: Array<Record<string, unknown>>
+} = { status: [], list: [], create: [], enable: [], disable: [] }
+
+mock.module('@dougbots/avenor-core', () => ({
+  spawnTool: mock(async () => ({})),
+  statusTool: mock(async () => ({})),
+  resultTool: mock(async () => ({})),
+  answerPermissionTool: mock(async () => ({})),
+  followUpTool: mock(async () => ({})),
+  eventsTool: mock(async () => ({})),
+  shutdownTool: mock(async () => ({})),
+  workflowStatusTool: mock(async () => ({})),
+  workflowWaitTool: mock(async () => ({})),
+  workflowInspectTool: mock(async () => ({})),
+  workflowEventsTool: mock(async () => ({})),
+  workflowCompleteTool: mock(async () => ({})),
+  workflowGateTool: mock(async () => ({})),
+  workflowControllerStatusTool: mock(async (args: Record<string, unknown>) => {
+    controllerCalls.status.push(args)
+    return { state: 'enabled' }
+  }),
+  workflowControllerListTool: mock(async (args: Record<string, unknown>) => {
+    controllerCalls.list.push(args)
+    return { controllers: [] }
+  }),
+  workflowControllerCreateTool: mock(async (args: Record<string, unknown>) => {
+    controllerCalls.create.push(args)
+    return { state: 'disabled' }
+  }),
+  workflowControllerEnableTool: mock(async (args: Record<string, unknown>) => {
+    controllerCalls.enable.push(args)
+    return { state: 'enabled' }
+  }),
+  workflowControllerDisableTool: mock(async (args: Record<string, unknown>) => {
+    controllerCalls.disable.push(args)
+    return { state: 'disabled' }
+  }),
+  validateSpawnSelection,
+}))
+
+const { server, getMcpAuthToken, isAllowedHost, isAllowedOrigin, parseBearerToken } = await import('./mcp.js')
+
 describe('avenor MCP server', () => {
-  it('registers all 7 tools without throwing', () => {
-    const server = new McpServer({ name: 'avenor', version: '0.1.0' })
+  it('registers the controller tools on the production server and maps snake_case to camelCase', async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    const client = new Client({ name: 'test-client', version: '0.1.0' })
+    await Promise.all([client.connect(clientTransport), server.connect(serverTransport)])
 
-    server.registerTool('avenor_spawn', {
-      description: 'Spawn a new agent run',
-      inputSchema: spawnInputShape,
-    }, async () => ({ run_id: 'test', label: 'test', supervisor_id: 'test' }))
+    const status = await client.callTool({
+      name: 'avenor_workflow_controller_status',
+      arguments: { controller_id: 'ctl-1', supervisor_id: 'sup-1' },
+    })
+    expect(status).toBeDefined()
+    expect(controllerCalls.status.at(-1)).toEqual({ controllerId: 'ctl-1', supervisorId: 'sup-1' })
 
-    server.registerTool('avenor_status', {
-      description: 'Get status',
-      inputSchema: {
-        run_id: z.string().optional(),
-        view: z.enum(['lifecycle', 'full']).optional(),
-        supervisor_id: z.string().optional(),
-      },
-    }, async () => ({ run_id: 'test', label: 'test', status: 'running' }))
+    const list = await client.callTool({
+      name: 'avenor_workflow_controller_list',
+      arguments: { supervisor_id: 'sup-1' },
+    })
+    expect(list).toBeDefined()
+    expect(controllerCalls.list.at(-1)).toEqual({ supervisorId: 'sup-1' })
 
-    server.registerTool('avenor_result', {
-      description: 'Get result',
-      inputSchema: {
-        run_id: z.string(),
-        wait: z.boolean().optional(),
-        timeout: z.string().optional(),
-        supervisor_id: z.string().optional(),
-      },
-    }, async () => ({ run_id: 'test', label: 'test', status: 'done', ready: true, output: 'done' }))
+    const create = await client.callTool({
+      name: 'avenor_workflow_controller_create',
+      arguments: { controller_id: 'ctl-1', max_inflight: 5, supervisor_id: 'sup-1' },
+    })
+    expect(create).toBeDefined()
+    expect(controllerCalls.create.at(-1)).toEqual({ controllerId: 'ctl-1', maxInflight: 5, supervisorId: 'sup-1' })
 
-    server.registerTool('avenor_answer_permission', {
-      description: 'Answer permission',
-      inputSchema: {
-        run_id: z.string(),
-        option_id: z.string(),
-        request_id: z.string().optional(),
-        supervisor_id: z.string().optional(),
-      },
-    }, async () => ({ ok: true }))
+    const enable = await client.callTool({
+      name: 'avenor_workflow_controller_enable',
+      arguments: { controller_id: 'ctl-1', supervisor_id: 'sup-1' },
+    })
+    expect(enable).toBeDefined()
+    expect(controllerCalls.enable.at(-1)).toEqual({ controllerId: 'ctl-1', supervisorId: 'sup-1' })
 
-    server.registerTool('avenor_follow_up', {
-      description: 'Follow up',
-      inputSchema: {
-        run_id: z.string(),
-        message: z.string(),
-        label: z.string().optional(),
-        supervisor_id: z.string().optional(),
-      },
-    }, async () => ({ run_id: 'test', label: 'test' }))
-
-    server.registerTool('avenor_events', {
-      description: 'Get events',
-      inputSchema: {
-        run_id: z.string(),
-        types: z.array(z.string()).optional(),
-        limit: z.number().optional(),
-        supervisor_id: z.string().optional(),
-      },
-    }, async () => [])
-
-    server.registerTool('avenor_shutdown', {
-      description: 'Shutdown',
-      inputSchema: {
-        supervisor_id: z.string().optional(),
-        force: z.boolean().optional(),
-      },
-    }, async () => ({ ok: true, cleaned_up: [] }))
-
-    server.registerTool('avenor_workflow_status', {
-      description: 'Get lightweight status for a workflow instance',
-      inputSchema: {
-        workflow_id: z.string(),
-        supervisor_id: z.string().optional(),
-      },
-    }, async () => ({ status: 'running' }))
-
-    server.registerTool('avenor_workflow_wait', {
-      description: 'Wait for a workflow to reach a terminal state or until timeout',
-      inputSchema: {
-        workflow_id: z.string(),
-        timeout: z.string().optional(),
-        supervisor_id: z.string().optional(),
-      },
-    }, async () => ({ status: 'done', output: 'done' }))
-
-    server.registerTool('avenor_workflow_inspect', {
-      description: 'Return the full instance detail for a workflow',
-      inputSchema: {
-        workflow_id: z.string(),
-        supervisor_id: z.string().optional(),
-      },
-    }, async () => ({ workflow_id: 'test', nodes: [] }))
-
-    server.registerTool('avenor_workflow_events', {
-      description: 'Read log events from a workflow instance\'s event log',
-      inputSchema: {
-        workflow_id: z.string(),
-        after_seq: z.number().optional(),
-        limit: z.number().optional(),
-        supervisor_id: z.string().optional(),
-      },
-    }, async () => ({ events: [] }))
-
-    server.registerTool('avenor_workflow_complete', {
-      description: 'Atomically complete a machine/external handoff activation',
-      inputSchema: {
-        workflow_id: z.string(),
-        node_id: z.string(),
-        activation_id: z.string(),
-        attempt_id: z.string(),
-        lease_id: z.string(),
-        owner_token: z.string(),
-        outcome: z.string(),
-        outputs: z.unknown().optional(),
-        artifacts: z.unknown().optional(),
-        supervisor_id: z.string().optional(),
-      },
-    }, async () => ({ completed: true }))
-
-    server.registerTool('avenor_workflow_gate', {
-      description: 'Record a gate decision on a parked awaiting_gate activation',
-      inputSchema: {
-        workflow_id: z.string(),
-        node_id: z.string(),
-        gate_id: z.string(),
-        activation_id: z.string(),
-        operation: z.enum(['satisfy','reject','waive','external_result']),
-        actor: z.string().optional(),
-        reason: z.string().optional(),
-        outcome: z.string().optional(),
-        subject: z.unknown().optional(),
-        poll_id: z.string().optional(),
-        source: z.string().optional(),
-        result: z.string().optional(),
-        response_hash: z.string().optional(),
-        observed_at: z.string().optional(),
-        evidence_ids: z.array(z.string()).optional(),
-        supervisor_id: z.string().optional(),
-      },
-    }, async () => ({ decided: true }))
-
-    server.registerTool('avenor_workflow_controller_status', {
-      description: 'Get the status for a workflow controller',
-      inputSchema: {
-        controller_id: z.string(),
-        supervisor_id: z.string().optional(),
-      },
-    }, async () => ({ state: 'enabled' }))
-
-    server.registerTool('avenor_workflow_controller_list', {
-      description: 'List all workflow controllers',
-      inputSchema: {
-        supervisor_id: z.string().optional(),
-      },
-    }, async () => ({ controllers: [] }))
-
-    server.registerTool('avenor_workflow_controller_create', {
-      description: 'Register a workflow controller; it starts disabled',
-      inputSchema: {
-        controller_id: z.string(),
-        max_inflight: z.number().int().positive(),
-        supervisor_id: z.string().optional(),
-      },
-    }, async () => ({ state: 'disabled' }))
-
-    server.registerTool('avenor_workflow_controller_enable', {
-      description: 'Enable a workflow controller so it dispatches and polls',
-      inputSchema: {
-        controller_id: z.string(),
-        supervisor_id: z.string().optional(),
-      },
-    }, async () => ({ state: 'enabled' }))
-
-    server.registerTool('avenor_workflow_controller_disable', {
-      description: 'Disable a workflow controller; it stops future dispatch and polling but never cancels running attempts',
-      inputSchema: {
-        controller_id: z.string(),
-        reason: z.string(),
-        supervisor_id: z.string().optional(),
-      },
-    }, async () => ({ state: 'disabled' }))
-
-    expect(server).toBeDefined()
+    const disable = await client.callTool({
+      name: 'avenor_workflow_controller_disable',
+      arguments: { controller_id: 'ctl-1', reason: 'maintenance', supervisor_id: 'sup-1' },
+    })
+    expect(disable).toBeDefined()
+    expect(controllerCalls.disable.at(-1)).toEqual({ controllerId: 'ctl-1', reason: 'maintenance', supervisorId: 'sup-1' })
   })
 
   it('keeps direct and roster selectors as optional flat fields', () => {

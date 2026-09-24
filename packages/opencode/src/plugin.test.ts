@@ -52,6 +52,8 @@ const inspectToolMock = mock(async () => {
     final_output: 'final answer',
   }
 })
+const workflowControllerStatusToolMock = mock(async () => ({ controller_id: 'ctl', desired_state: 'enabled' }))
+const workflowReadyToolMock = mock(async () => ({}))
 
 function makeEventClient(events: unknown[], options: { hangAfterExhausted?: boolean; errorAfterExhausted?: Error } = {}) {
   let index = 0
@@ -140,12 +142,12 @@ mock.module('@dougbots/avenor-core', () => ({
   workflowEventsTool: mock(async () => ({})),
   workflowCompleteTool: mock(async () => ({})),
   workflowGateTool: mock(async () => ({})),
-  workflowControllerStatusTool: mock(async () => ({})),
+  workflowControllerStatusTool: workflowControllerStatusToolMock,
   workflowControllerListTool: mock(async () => ({})),
   workflowControllerCreateTool: mock(async () => ({})),
   workflowControllerEnableTool: mock(async () => ({})),
   workflowControllerDisableTool: mock(async () => ({})),
-  workflowReadyTool: mock(async () => ({})),
+  workflowReadyTool: workflowReadyToolMock,
   createRunSnapshot,
   extractEventText,
   observeRun,
@@ -927,5 +929,30 @@ describe('AvenorPlugin', () => {
         final_output: expect.any(String),
       }),
     }))
+  })
+
+  it('enriches controller status details with an advisory candidate count', async () => {
+    workflowControllerStatusToolMock.mockImplementation(async () => ({ controller_id: 'ctl', desired_state: 'enabled', inflight: 1 }))
+    workflowReadyToolMock.mockImplementation(async () => ({ advisory: true, controller_id: 'ctl', candidates: [{}, {}] }))
+
+    const hooks = await AvenorPlugin(makeCtx() as any)
+    const context = { sessionID: 'orchestrator-session', directory: '/tmp/test', abort: new AbortController().signal }
+    const output = await (hooks.tool?.avenor_workflow_controller_status as any).execute({ controller_id: 'ctl' }, context)
+
+    expect(output.metadata.candidate_count).toBe(2)
+  })
+
+  it('omits the candidate count when the ready query fails', async () => {
+    workflowControllerStatusToolMock.mockImplementation(async () => ({ controller_id: 'ctl', desired_state: 'enabled' }))
+    workflowReadyToolMock.mockImplementation(async () => {
+      throw new Error('-32601 method not found')
+    })
+
+    const hooks = await AvenorPlugin(makeCtx() as any)
+    const context = { sessionID: 'orchestrator-session', directory: '/tmp/test', abort: new AbortController().signal }
+    const output = await (hooks.tool?.avenor_workflow_controller_status as any).execute({ controller_id: 'ctl' }, context)
+
+    expect(output.metadata.candidate_count).toBeUndefined()
+    expect(output.metadata.controller_id).toBe('ctl')
   })
 })
