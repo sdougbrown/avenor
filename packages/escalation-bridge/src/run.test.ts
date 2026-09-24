@@ -125,6 +125,28 @@ describe('askWebhook', () => {
 
     server.stop()
   })
+
+  test('aborts when the endpoint accepts the connection but never responds', async () => {
+    let requests = 0
+    const server = Bun.serve({
+      port: 0,
+      fetch: async () => {
+        requests += 1
+        // Long past the injected timeout; only the abort path can release
+        // the caller (the default is 10s, far too slow for a test).
+        await new Promise((resolve) => setTimeout(resolve, 2000))
+        return new Response('late', { status: 200 })
+      },
+    })
+    try {
+      await expect(
+        askWebhook(`http://127.0.0.1:${server.port}/slow`, { q: 1 }, { timeoutMs: 50 }),
+      ).rejects.toThrow(/timed out/)
+      expect(requests).toBe(1)
+    } finally {
+      server.stop()
+    }
+  })
 })
 
 describe('runBridge', () => {
@@ -417,7 +439,7 @@ describe('runBridge', () => {
         connect: async () => client,
         ask: async () => {},
       }),
-    ).rejects.toThrow()
+    ).rejects.toThrow(/ENOENT/)
     // runOptions skips the fixture write when templatePath is overridden, so
     // the malformed template survives to be read.
     await expect(
@@ -426,7 +448,7 @@ describe('runBridge', () => {
         connect: async () => client,
         ask: async () => {},
       })),
-    ).rejects.toThrow()
+    ).rejects.toThrow(/JSON Parse error/)
     expect(fs.readFileSync(path.join(badDir, 'template.json'), 'utf8')).toBe('not json')
   })
 
@@ -447,5 +469,64 @@ describe('runBridge', () => {
         ask: async () => {},
       })),
     ).rejects.toThrow(/unsafe gate id/)
+  })
+
+  test('stops asking once waitForDecision sees a terminal workflow', async () => {
+    // The run-level consequence of waitForDecision's 'terminal' reason: the
+    // per-tick re-check observes the workflow end and the bridge must break
+    // out of the gate loop instead of re-asking the transport on the next
+    // tick. wait.test.ts covers the reason itself; this covers the break.
+    const dir = setupDir()
+    const parked = parkedDetail()
+    const terminalDetail: WorkflowDetail = {
+      instance: { status: 'completed', terminal_outcome: 'merged' },
+      activations: parked.activations,
+      gates: null,
+      outputs: [],
+    }
+    const waitResults = [
+      { terminal: false },
+      { terminal: true, instance: { status: 'completed', terminal_outcome: 'merged' } },
+    ]
+    const calls: Array<{ method: string; params?: unknown }> = []
+    let inspects = 0
+    const client: ControlClient = {
+      async call(method, params) {
+        calls.push({ method, params })
+        if (method === 'workflow.wait') return waitResults.shift()
+        if (method === 'workflow.inspect') {
+          inspects += 1
+          // First inspect (after the ask) still sees the parked gate; the
+          // second one (inside waitForDecision's re-check) sees terminal.
+          return inspects === 1 ? parked : terminalDetail
+        }
+        if (method === 'workflow.command') return {}
+        throw new Error(`unexpected method ${method}`)
+      },
+      isClosed: () => false,
+      close: () => {},
+    }
+    const asks: unknown[] = []
+
+    const code = await runBridge({
+      socketPath: '/tmp/does-not-matter.sock',
+      workflowId: 'wf_1',
+      webhookUrl: 'http://127.0.0.1:1/ask',
+      decisionDir: dir,
+      templatePath: templateFile(dir),
+      connect: async () => client,
+      ask: async (_url, payload) => {
+        asks.push(payload)
+      },
+      sleep: async () => {},
+      log: () => {},
+    })
+
+    expect(code).toBe(0)
+    // Exactly one ask: after the terminal re-check the gate loop broke and
+    // the next workflow.wait ended the run — no second question was sent for
+    // a workflow that can no longer answer.
+    expect(asks).toHaveLength(1)
+    expect(calls.filter((c) => c.method === 'workflow.command')).toHaveLength(0)
   })
 })

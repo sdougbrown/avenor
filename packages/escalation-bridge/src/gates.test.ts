@@ -113,4 +113,23 @@ describe('loadHumanGates', () => {
     expect([...gates.keys()]).toEqual(['a'])
     expect(gates.get('a')![0].id).toBe('g1')
   })
+
+  test('throws on a node that declares human gates without an id', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'escalation-bridge-'))
+    const templatePath = path.join(dir, 't.json')
+    fs.writeFileSync(
+      templatePath,
+      JSON.stringify({
+        nodes: [
+          { id: 'a', gates: [{ id: 'g1', type: 'human' }] },
+          { gates: [{ id: 'typoed-node-gate', type: 'human' }] },
+        ],
+      }),
+    )
+    // The gates would be silently unreachable (no activation can match an
+    // id-less node), parking the workflow forever; Python fails the same
+    // template with a KeyError on node["id"].
+    expect(() => loadHumanGates(templatePath)).toThrow(/without an id/)
+    expect(() => loadHumanGates(templatePath)).toThrow(/typoed-node-gate/)
+  })
 })

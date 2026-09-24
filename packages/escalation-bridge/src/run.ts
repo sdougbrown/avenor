@@ -22,13 +22,17 @@ const defaultLog = (message: string, error?: Error) => {
  * refused outright: a 307/308 redirect preserves method and body, so the
  * question payload would be forwarded to the target. A transport behind an
  * HTTP→HTTPS redirect must be addressed at its final URL here. */
-export async function askWebhook(url: string, payload: unknown): Promise<void> {
+export async function askWebhook(
+  url: string,
+  payload: unknown,
+  opts?: { timeoutMs?: number },
+): Promise<void> {
   const resp = await fetch(url, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(payload),
     redirect: 'error',
-    signal: AbortSignal.timeout(10_000),
+    signal: AbortSignal.timeout(opts?.timeoutMs ?? 10_000),
   })
   await resp.arrayBuffer()
   if (!resp.ok) throw new Error(`webhook responded ${resp.status}`)

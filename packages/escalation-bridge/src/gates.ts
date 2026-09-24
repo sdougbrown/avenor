@@ -10,7 +10,17 @@ export function loadHumanGates(templatePath: string): Map<string, GateDefinition
   const gates = new Map<string, GateDefinition[]>()
   for (const node of template.nodes ?? []) {
     const human = (node.gates ?? []).filter((g) => g.type === 'human')
-    if (human.length > 0 && node.id) gates.set(node.id, human)
+    if (human.length > 0) {
+      // An id-less node can never match an activation, so its gates would be
+      // silently unreachable and the workflow would park forever. The Python
+      // reference fails the same template (KeyError on node["id"]).
+      if (!node.id) {
+        throw new Error(
+          `template node declares human gates without an id: ${human.map((g) => g.id ?? '<no gate id>').join(', ')}`,
+        )
+      }
+      gates.set(node.id, human)
+    }
   }
   return gates
 }
