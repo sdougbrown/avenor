@@ -370,10 +370,13 @@ type Supervisor struct {
 	// candidateRebuilds counts every candidate-index rebuild performed by
 	// stableRunnerDeps.Refresh (test instrumentation).
 	candidateRebuilds atomic.Int64
-	state             *control.ControlState
-	controlMu         sync.Mutex
-	runtimes          map[string]*childRuntime
-	nextID            int
+	// controllerPollBaseDelay is the interval before a parked gate's first
+	// adapter poll; defaults to 30s. Tests shorten it.
+	controllerPollBaseDelay time.Duration
+	state                   *control.ControlState
+	controlMu               sync.Mutex
+	runtimes                map[string]*childRuntime
+	nextID                  int
 	// outstandingReservations counts admission reservations that hold a local
 	// slot but have not yet converted into a registered runtime. Guarded by
 	// controlMu; the local capacity limit is enforced against active runtimes
@@ -4478,6 +4481,7 @@ func (s *Supervisor) startControllerLoop(store *workflowcontroller.ControllerSto
 		ChangeCh:      changeCh,
 		CapacityCh:    capacityCh,
 		Poll:          &stablePoller{s: s, controllerID: controllerID},
+		PollBaseDelay: s.controllerPollBaseDelay,
 	})
 	loop := &controllerLoop{done: make(chan struct{}), runner: runner}
 	s.controllerLoops[controllerID] = loop

@@ -107,9 +107,11 @@ type RunnerConfig struct {
 	CapacityCh    <-chan struct{}
 	Now           func() time.Time
 	// Poll, when non-nil, enables external-gate adapter polling alongside
-	// dispatch. PollJitter returns a bounded jitter scalar in [-1, 1];
-	// MaxPollWorkers bounds concurrent adapter invocations.
+	// dispatch. PollBaseDelay is the interval before the first poll after a
+	// park (production: 30s). PollJitter returns a bounded jitter scalar in
+	// [-1, 1]; MaxPollWorkers bounds concurrent adapter invocations.
 	Poll           Poller
+	PollBaseDelay  time.Duration
 	PollJitter     func() float64
 	MaxPollWorkers int
 }
@@ -181,6 +183,9 @@ type Runner struct {
 	pendingPolls int
 	// poll is the optional host poll surface; nil disables polling.
 	poll Poller
+	// pollBase is the interval before the first poll after a park and the
+	// floor for adapter-requested delays.
+	pollBase time.Duration
 	// pollJitter scales backoff delays within bounded bounds.
 	pollJitter func() float64
 	// maxPollWorkers bounds concurrent adapter invocations.
@@ -215,6 +220,10 @@ func NewRunner(cfg RunnerConfig) *Runner {
 	if maxPollWorkers <= 0 {
 		maxPollWorkers = defaultMaxPollWorkers
 	}
+	pollBase := cfg.PollBaseDelay
+	if pollBase <= 0 {
+		pollBase = pollBaseDelay
+	}
 	r := &Runner{
 		deps:           cfg.Deps,
 		store:          cfg.Store,
@@ -232,6 +241,7 @@ func NewRunner(cfg RunnerConfig) *Runner {
 		pollResults:    make(chan pollWorkerResult, 1),
 		pollInFlight:   map[string]bool{},
 		poll:           cfg.Poll,
+		pollBase:       pollBase,
 		pollJitter:     jitter,
 		maxPollWorkers: maxPollWorkers,
 		unreported:     map[workflow.ExecutionIdentity]unreportedEntry{},
@@ -393,7 +403,7 @@ func (r *Runner) loop() {
 					AdapterID:    seed.AdapterID,
 					SubjectHash:  seed.SubjectHash,
 				}
-				if _, _, err := r.store.EnsurePollCursor(r.controllerID, cursor, r.now().Add(pollBaseDelay)); err != nil {
+				if _, _, err := r.store.EnsurePollCursor(r.controllerID, cursor, r.now().Add(r.pollBase)); err != nil {
 					log.Printf("workflow controller %s: ensure poll cursor %s: %v", r.controllerID, PollCursorKey(cursor), err)
 				}
 			}
@@ -445,7 +455,7 @@ func (r *Runner) loop() {
 			select {
 			case res := <-r.pollResults:
 				r.pendingPolls--
-				r.handlePollOutcome(res.outcome)
+				r.handlePollOutcome(res.outcome, LeaderLease{LeaseID: leaseID, OwnerEpoch: ownerEpoch})
 			default:
 				return
 			}
@@ -462,7 +472,7 @@ func (r *Runner) loop() {
 		for r.pendingPolls > 0 {
 			res := <-r.pollResults
 			r.pendingPolls--
-			r.handlePollOutcome(res.outcome)
+			r.handlePollOutcome(res.outcome, LeaderLease{LeaseID: leaseID, OwnerEpoch: ownerEpoch})
 		}
 	}
 	// arm schedules the next wakeup at d.
@@ -485,7 +495,7 @@ func (r *Runner) loop() {
 			handleResult(res)
 		case res := <-r.pollResults:
 			r.pendingPolls--
-			r.handlePollOutcome(res.outcome)
+			r.handlePollOutcome(res.outcome, LeaderLease{LeaseID: leaseID, OwnerEpoch: ownerEpoch})
 		}
 	}
 	// waitOrCancel arms the timer at d and waits for it, cancellation, or a
@@ -513,7 +523,7 @@ func (r *Runner) loop() {
 			return wakeResult, false
 		case res := <-r.pollResults:
 			r.pendingPolls--
-			r.handlePollOutcome(res.outcome)
+			r.handlePollOutcome(res.outcome, LeaderLease{LeaseID: leaseID, OwnerEpoch: ownerEpoch})
 			return wakeResult, false
 		}
 	}

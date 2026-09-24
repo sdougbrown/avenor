@@ -214,7 +214,7 @@ func retryAfterOf(res *AdapterResult) *int64 {
 // clamped retry_after when it requested one, otherwise the doubling interval
 // bounded by the cap, with bounded jitter.
 func (r *Runner) schedulePollRetry(cursor PollCursor, retryAfterMS *int64) {
-	delay, nextRetry := PollBackoffDelay(cursor.RetryCount, retryAfterMS, r.pollJitter)
+	delay, nextRetry := PollBackoffDelay(r.pollBase, cursor.RetryCount, retryAfterMS, r.pollJitter)
 	if _, err := r.store.SchedulePollRetry(r.controllerID, cursor, r.now().Add(delay), nextRetry); err != nil {
 		log.Printf("workflow controller %s: schedule poll retry %s: %v", r.controllerID, PollCursorKey(cursor), err)
 	}

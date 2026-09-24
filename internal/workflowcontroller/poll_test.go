@@ -183,12 +183,13 @@ func TestPollDueIncludesCrashedInFlight(t *testing.T) {
 }
 
 func TestPollBackoffSequence(t *testing.T) {
-	// With no jitter the interval doubles from 30s and caps at 5m.
-	want := []time.Duration{30 * time.Second, 60 * time.Second, 120 * time.Second,
-		240 * time.Second, 5 * time.Minute, 5 * time.Minute, 5 * time.Minute}
+	// With no jitter the post-park sequence continues at 60s (the first poll
+	// after a park waits the 30s base), doubling to the 5m cap.
+	want := []time.Duration{60 * time.Second, 120 * time.Second,
+		240 * time.Second, 5 * time.Minute, 5 * time.Minute}
 	retry := 0
 	for i, d := range want {
-		got, next := PollBackoffDelay(retry, nil, nil)
+		got, next := PollBackoffDelay(pollBaseDelay, retry, nil, nil)
 		if got != d {
 			t.Fatalf("step %d: delay = %v, want %v", i, got, d)
 		}
@@ -197,43 +198,38 @@ func TestPollBackoffSequence(t *testing.T) {
 }
 
 func TestPollBackoffJitterBounds(t *testing.T) {
-	delay, _ := PollBackoffDelay(2, nil, func() float64 { return 0 })
+	delay, _ := PollBackoffDelay(pollBaseDelay, 1, nil, func() float64 { return 0 })
 	if delay != 120*time.Second {
 		t.Fatalf("mid jitter = %v, want 120s", delay)
 	}
-	lo, _ := PollBackoffDelay(2, nil, func() float64 { return -1 })
+	lo, _ := PollBackoffDelay(pollBaseDelay, 1, nil, func() float64 { return -1 })
 	if lo != 108*time.Second {
 		t.Fatalf("low jitter = %v, want 108s", lo)
 	}
-	hi, _ := PollBackoffDelay(2, nil, func() float64 { return 1 })
+	hi, _ := PollBackoffDelay(pollBaseDelay, 1, nil, func() float64 { return 1 })
 	if hi != 132*time.Second {
 		t.Fatalf("high jitter = %v, want 132s", hi)
-	}
-	// Jitter never escapes the clamped range.
-	min, _ := PollBackoffDelay(0, nil, func() float64 { return -1 })
-	if min != 30*time.Second {
-		t.Fatalf("jittered first delay = %v, want clamped 30s", min)
 	}
 }
 
 func TestPollBackoffHonorsClampedRetryAfter(t *testing.T) {
 	requested := int64(600000) // 10m: clamped to the 5m cap
-	delay, _ := PollBackoffDelay(0, &requested, nil)
+	delay, _ := PollBackoffDelay(pollBaseDelay, 0, &requested, nil)
 	if delay != 5*time.Minute {
 		t.Fatalf("clamped delay = %v, want 5m", delay)
 	}
 	requested = int64(500) // 500ms: raised to the 30s floor
-	delay, _ = PollBackoffDelay(0, &requested, nil)
+	delay, _ = PollBackoffDelay(pollBaseDelay, 0, &requested, nil)
 	if delay != 30*time.Second {
 		t.Fatalf("clamped delay = %v, want 30s", delay)
 	}
 	requested = int64(200000) // 200s: inside the range, honored as-is
-	delay, _ = PollBackoffDelay(0, &requested, nil)
+	delay, _ = PollBackoffDelay(pollBaseDelay, 0, &requested, nil)
 	if delay != 200*time.Second {
 		t.Fatalf("honored delay = %v, want 3m20s", delay)
 	}
 	requested = int64(45000)
-	delay, _ = PollBackoffDelay(4, &requested, nil)
+	delay, _ = PollBackoffDelay(pollBaseDelay, 4, &requested, nil)
 	if delay != 45*time.Second {
 		t.Fatalf("honored delay = %v, want 45s (retry count ignored)", delay)
 	}

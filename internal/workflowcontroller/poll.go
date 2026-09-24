@@ -62,30 +62,36 @@ func diagnosticKey(kind, name string) string { return kind + "/" + name }
 // it doubles on every consecutive pending or transient-failed poll.
 const pollBaseDelay = 30 * time.Second
 
-// PollBackoffDelay returns the delay before the next poll after an
-// unsuccessful poll with the cursor's retry count, and the incremented retry
-// count to persist. An adapter-requested retry_after_ms is honored after
-// clamping into the [30s, 5m] range; otherwise the base interval doubles per
-// retry and caps at five minutes. jitter, when non-nil, returns a value in
-// [-1, 1] scaling the delay by ±10%; the result always stays inside the
-// clamped range.
-func PollBackoffDelay(retryCount int, retryAfterMS *int64, jitter func() float64) (time.Duration, int) {
+// PollBackoffDelay returns the delay before the next poll after the k-th
+// consecutive unsuccessful poll (retryCount = k) and the incremented retry
+// count to persist. The interval doubles from the base — the first post-park
+// poll already waited one base interval — and caps at five minutes. An
+// adapter-requested retry_after_ms is honored after clamping into the
+// [base, 5m] range. jitter, when non-nil, returns a value in [-1, 1] scaling
+// the delay by ±10%; the result always stays inside the clamped range.
+func PollBackoffDelay(base time.Duration, retryCount int, retryAfterMS *int64, jitter func() float64) (time.Duration, int) {
 	delay := time.Duration(0)
 	if retryAfterMS != nil {
-		delay = ClampRetryDelay(time.Duration(*retryAfterMS) * time.Millisecond)
+		delay = time.Duration(*retryAfterMS) * time.Millisecond
+		if delay > AdapterMaxRetryDelay || delay <= 0 {
+			delay = AdapterMaxRetryDelay
+		}
 	} else {
-		delay = pollBaseDelay
-		for i := 0; i < retryCount && delay < AdapterMaxRetryDelay; i++ {
+		delay = base
+		for i := 0; i <= retryCount && delay < AdapterMaxRetryDelay; i++ {
 			delay *= 2
 		}
 		if delay > AdapterMaxRetryDelay || delay <= 0 {
 			delay = AdapterMaxRetryDelay
 		}
 	}
+	if delay < base {
+		delay = base
+	}
 	if jitter != nil {
 		scaled := time.Duration(float64(delay) * (1 + 0.1*jitter()))
-		if scaled < AdapterMinRetryDelay {
-			scaled = AdapterMinRetryDelay
+		if scaled < base {
+			scaled = base
 		}
 		if scaled > AdapterMaxRetryDelay {
 			scaled = AdapterMaxRetryDelay

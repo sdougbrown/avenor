@@ -125,6 +125,16 @@ func (s *Supervisor) pollExternalGate(ctx context.Context, cursor workflowcontro
 	if err != nil {
 		return workflowcontroller.AdapterResult{}, workflowcontroller.PollFailureTransient, err
 	}
+	// A cursor whose activation resolved or whose pinned subject moved on is
+	// obsolete: no adapter invocation is spent on it.
+	subject, parked, err := mgr.ParkedGateSubject(workflow.WorkflowID(cursor.WorkflowID), workflow.NodeID(cursor.NodeID),
+		workflow.ActivationID(cursor.ActivationID), workflow.GateID(cursor.GateID))
+	if err != nil {
+		return workflowcontroller.AdapterResult{}, workflowcontroller.PollFailureTransient, err
+	}
+	if !parked || workflow.SubjectHash(subject) != cursor.SubjectHash {
+		return workflowcontroller.AdapterResult{}, workflowcontroller.PollFailureObsolete, nil
+	}
 	state, err := mgr.ExternalGateState(workflow.WorkflowID(cursor.WorkflowID), workflow.NodeID(cursor.NodeID),
 		workflow.ActivationID(cursor.ActivationID), workflow.GateID(cursor.GateID))
 	if err != nil {
