@@ -740,9 +740,13 @@ type GateInstance struct {
 	PollID       string         `json:"poll_id,omitempty"`
 	Source       string         `json:"source,omitempty"`
 	ResponseHash string         `json:"response_hash,omitempty"`
-	EvidenceIDs  []EvidenceID   `json:"evidence_ids,omitempty"`
-	ObservedAt   *time.Time     `json:"observed_at,omitempty"`
-	DecidedAt    *time.Time     `json:"decided_at,omitempty"`
+	// Diagnostic records an inert routing note for an advisory or failed
+	// external result that has no result_outcomes mapping (the gate stays
+	// parked). It never affects kernel transitions.
+	Diagnostic  string       `json:"diagnostic,omitempty"`
+	EvidenceIDs []EvidenceID `json:"evidence_ids,omitempty"`
+	ObservedAt  *time.Time   `json:"observed_at,omitempty"`
+	DecidedAt   *time.Time   `json:"decided_at,omitempty"`
 }
 
 type ChildReference struct {

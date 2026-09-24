@@ -22,13 +22,62 @@ import (
 // decision. Human operations are fully discriminated by the operation; an
 // external_result is additionally discriminated by its observed result so a
 // later report on the same gate (e.g. pending -> passed) is a distinct
-// command rather than a swallowed duplicate.
+// command rather than a swallowed duplicate. Bound external gates (with a
+// subject_binding) use gatePollIdempotencyKey instead: their reports are
+// keyed by poll ID.
 func gateIdempotencyKey(op GateOperation, gateID GateID, actID ActivationID, result string) string {
 	key := "gate-" + string(op) + "-" + string(gateID) + "-" + string(actID)
 	if op == GateOpExternalResult {
 		key += "-" + result
 	}
 	return key
+}
+
+// gatePollIdempotencyKey returns the idempotency key for one poll of a bound
+// external gate: the poll ID, not the observed result. A replay of the same
+// poll is a safe no-op regardless of how the result was phrased, while a
+// genuinely new poll (new poll ID) records a new fact.
+func gatePollIdempotencyKey(gateID GateID, actID ActivationID, pollID string) string {
+	return "gate-" + string(GateOpExternalResult) + "-" + string(gateID) + "-" + string(actID) + "-poll-" + pollID
+}
+
+// validatePinnedGateSubject requires the supplied subject to equal the
+// subject pinned on the activation when the gate was created: every field
+// (type, repository, pull request number, revision) must match. An
+// unresolved pin cannot be decided at all, and a nil subject never matches.
+func validatePinnedGateSubject(act *Activation, gateID GateID, supplied *Subject) error {
+	resolved, bound := act.ResolvedGates[gateID]
+	if !bound || resolved.Subject == nil {
+		return fmt.Errorf("%w: gate %q on activation %s has no pinned subject yet", ErrSubjectUnresolved, gateID, act.ID)
+	}
+	if supplied == nil {
+		return fmt.Errorf("%w: gate %q requires a subject equal to the pinned subject", ErrSubjectMismatch, gateID)
+	}
+	pinned := resolved.Subject
+	if supplied.Type != pinned.Type || supplied.Repository != pinned.Repository ||
+		supplied.PullRequest != pinned.PullRequest || supplied.Revision != pinned.Revision {
+		return fmt.Errorf("%w: gate %q subject %q/%d@%q does not equal the pinned subject %q/%d@%q",
+			ErrSubjectMismatch, gateID, supplied.Type, supplied.PullRequest, supplied.Revision,
+			pinned.Type, pinned.PullRequest, pinned.Revision)
+	}
+	return nil
+}
+
+// gateDefinitionByID returns the declared gate definition with the given ID,
+// or nil when the gate is not declared on the node.
+func gateDefinitionByID(node *NodeDefinition, gateID GateID) *GateDefinition {
+	for i := range node.Gates {
+		if node.Gates[i].ID == gateID {
+			return &node.Gates[i]
+		}
+	}
+	return nil
+}
+
+// isAutoExternalNode reports whether the node is an external action with an
+// auto dispatch policy (the shape that carries a required success_outcome).
+func isAutoExternalNode(node *NodeDefinition) bool {
+	return node.Action.Kind == ActionExternal && node.Dispatch != nil && node.Dispatch.IsAuto()
 }
 
 // commandGateRequest is the wire shape of a gate decision command. Fields are
@@ -107,12 +156,50 @@ func (m *Manager) commandGate(wf WorkflowID, payload json.RawMessage) (any, erro
 	if act == nil {
 		return nil, fmt.Errorf("activation not found for node %q", req.NodeID)
 	}
-	// Idempotent duplicate: a re-issued decision for the same gate operation
-	// on the same activation is a safe no-op. Checked before the status
-	// check because a successful decision has already resolved the
-	// activation (satisfied or rejected), and the fresh status is reported
-	// via a fresh read.
-	if _, done := snap.Idempotency[gateIdempotencyKey(op, req.GateID, act.ID, req.Result)]; done {
+	tmpl, err := m.templateFor(&snap)
+	if err != nil {
+		return nil, err
+	}
+	node, err := findNode(tmpl, req.NodeID)
+	if err != nil {
+		return nil, err
+	}
+	def := gateDefinitionByID(node, req.GateID)
+	if def == nil {
+		return nil, fmt.Errorf("gate %q is not declared on node %q", req.GateID, req.NodeID)
+	}
+	// Idempotency and poll-replay checks come before the status check: a
+	// re-issued decision for an already-resolved activation is a safe no-op,
+	// and the fresh status is reported via a fresh read. Bound external
+	// gates key by poll ID: a recorded poll with the same ID and response
+	// hash is an idempotent replay, while the same poll ID with a different
+	// hash is a replay conflict. Unbound gates keep the legacy
+	// result-discriminated key.
+	idemKey := gateIdempotencyKey(op, req.GateID, act.ID, req.Result)
+	if op == GateOpExternalResult && def.SubjectBinding != nil {
+		replayed := false
+		for i := range snap.Instance.Gates {
+			gi := &snap.Instance.Gates[i]
+			if gi.ActivationID != act.ID || gi.GateID != req.GateID || gi.PollID != req.PollID {
+				continue
+			}
+			if gi.ResponseHash != req.ResponseHash {
+				return nil, fmt.Errorf("%w: poll %q on gate %q was already recorded with a different response hash", ErrPollReplayConflict, req.PollID, req.GateID)
+			}
+			replayed = true
+			break
+		}
+		if replayed {
+			postStatus := m.currentActivationStatus(wf, req.NodeID, act.ID, act.Status)
+			return map[string]any{
+				"idempotent":        true,
+				"status":            gateResultStatus(postStatus),
+				"activation_status": string(postStatus),
+			}, nil
+		}
+		idemKey = gatePollIdempotencyKey(req.GateID, act.ID, req.PollID)
+	}
+	if _, done := snap.Idempotency[idemKey]; done {
 		postStatus := m.currentActivationStatus(wf, req.NodeID, act.ID, act.Status)
 		return map[string]any{
 			"idempotent":        true,
@@ -122,24 +209,6 @@ func (m *Manager) commandGate(wf WorkflowID, payload json.RawMessage) (any, erro
 	}
 	if act.Status != ActivationAwaitingGate {
 		return nil, fmt.Errorf("cannot gate activation in status %q", act.Status)
-	}
-	tmpl, err := m.templateFor(&snap)
-	if err != nil {
-		return nil, err
-	}
-	node, err := findNode(tmpl, req.NodeID)
-	if err != nil {
-		return nil, err
-	}
-	var def *GateDefinition
-	for i := range node.Gates {
-		if node.Gates[i].ID == req.GateID {
-			def = &node.Gates[i]
-			break
-		}
-	}
-	if def == nil {
-		return nil, fmt.Errorf("gate %q is not declared on node %q", req.GateID, req.NodeID)
 	}
 
 	// Map the operation to the durable gate status and run the operation's
@@ -192,7 +261,15 @@ func (m *Manager) commandGate(wf WorkflowID, payload json.RawMessage) (any, erro
 			return nil, fmt.Errorf("gate %q requires a subject (node declares subject_type %q)", req.GateID, def.SubjectType)
 		}
 	}
-	return m.applyGateDecision(wf, snap, tmpl, node, act, req.GateID, op, status, req)
+	// A bound gate requires the supplied subject to equal the subject pinned
+	// on the activation at command time, on every field. An unresolved pin
+	// cannot be decided yet. Nothing is appended on a mismatch.
+	if def.SubjectBinding != nil {
+		if err := validatePinnedGateSubject(act, req.GateID, req.Subject); err != nil {
+			return nil, err
+		}
+	}
+	return m.applyGateDecision(wf, snap, tmpl, node, act, req.GateID, op, status, req, idemKey)
 }
 
 // externalResultStatus maps the closed external result enum to the durable
@@ -295,7 +372,7 @@ func (m *Manager) commandSkip(wf WorkflowID, payload json.RawMessage) (any, erro
 			Reason:       req.Reason,
 			EvidenceIDs:  req.EvidenceIDs,
 		}
-		last, err = m.applyGateDecision(wf, fresh, tmpl, node, fa, gateID, GateOpWaive, GateWaived, gateReq)
+		last, err = m.applyGateDecision(wf, fresh, tmpl, node, fa, gateID, GateOpWaive, GateWaived, gateReq, gateIdempotencyKey(GateOpWaive, gateID, act.ID, ""))
 		if err != nil {
 			return nil, err
 		}
@@ -407,8 +484,11 @@ func (m *Manager) commandUnblock(wf WorkflowID, payload json.RawMessage) (any, e
 // applyGateDecision builds one gate-decision command (the durable gate
 // instance plus the optional transition payload) and applies it atomically
 // with bounded retry. It is the shared core of commandGate (single
-// decision) and commandSkip (a waive per unsatisfied required gate).
-func (m *Manager) applyGateDecision(wf WorkflowID, snap Snapshot, tmpl *Template, node *NodeDefinition, act *Activation, gateID GateID, op GateOperation, status GateStatus, req commandGateRequest) (map[string]any, error) {
+// decision) and commandSkip (a waive per unsatisfied required gate). The
+// idempotency key is supplied by the caller: bound external results key by
+// poll ID, everything else by the legacy result-discriminated key.
+func (m *Manager) applyGateDecision(wf WorkflowID, snap Snapshot, tmpl *Template, node *NodeDefinition, act *Activation, gateID GateID, op GateOperation, status GateStatus, req commandGateRequest, idemKey string) (map[string]any, error) {
+	def := gateDefinitionByID(node, gateID)
 	now := time.Now().UTC()
 	gateInstance := &GateInstance{
 		ID:           NewGateInstanceID(),
@@ -428,6 +508,17 @@ func (m *Manager) applyGateDecision(wf WorkflowID, snap Snapshot, tmpl *Template
 	if req.ObservedAt != nil {
 		v := *req.ObservedAt
 		gateInstance.ObservedAt = &v
+	}
+	// An advisory or failed result on a gate that declares result_outcomes
+	// routing but does not map this result stays parked; the diagnostic on
+	// the gate instance explains why nothing advanced.
+	if op == GateOpExternalResult && def != nil && len(def.ResultOutcomes) > 0 {
+		switch status {
+		case GateFailed, GateActionRequired, GateChangesRequested:
+			if _, mapped := def.ResultOutcomes[gateResultNameFor(status)]; !mapped {
+				gateInstance.Diagnostic = fmt.Sprintf("result %q has no result_outcomes mapping; the gate stays parked", req.Result)
+			}
+		}
 	}
 
 	// Bounded-retry apply (mirrors commandComplete): a concurrent command
@@ -461,15 +552,19 @@ func (m *Manager) applyGateDecision(wf WorkflowID, snap Snapshot, tmpl *Template
 				"idempotent":        true,
 			}, nil
 		}
-		payload, err := m.gateTransitionPayload(&fresh.Instance, tmpl, node, fa, gateID, op, status, req)
+		payload, outcome, err := m.gateTransitionPayload(&fresh.Instance, tmpl, node, fa, gateID, op, status, req)
 		if err != nil {
 			return nil, err
 		}
+		// The effective outcome rides on the gate instance so the reducer
+		// records the same branch selection the transition payload carries
+		// (e.g. a success_outcome on an auto external node).
+		gateInstance.Outcome = outcome
 		result, err := m.store.ApplyCommand(wf, Command{
 			ID:               NewCommandID(),
 			Kind:             CommandGate,
 			ExpectedRevision: fresh.Instance.Revision,
-			IdempotencyKey:   gateIdempotencyKey(op, gateID, act.ID, req.Result),
+			IdempotencyKey:   idemKey,
 			Identity:         ExecutionIdentity{WorkflowID: wf, NodeID: node.ID, ActivationID: act.ID},
 			Operation:        op,
 			Outcome:          req.Outcome,
@@ -502,37 +597,66 @@ func (m *Manager) applyGateDecision(wf WorkflowID, snap Snapshot, tmpl *Template
 	return nil, fmt.Errorf("gate %q on activation %s: revision kept moving under concurrent commands", gateID, act.ID)
 }
 
-// gateTransitionPayload computes the optional sibling-transition payload for
-// a gate decision from the CURRENT instance state. It returns a marshaled
-// Transition for exactly two cases: a pass/waive that leaves every required
-// gate resolved (following the declared branch target, or the terminal
-// resolution when there is none), and a reject/fail whose explicit outcome
-// resolves to a declared failure/correction/checkpoint target. Everything
-// else returns nil (no payload): pending/action_required/changes_requested,
+// gateTransitionPayload computes the optional sibling-transition payload
+// for a gate decision from the CURRENT instance state. It returns the
+// marshaled Transition and the effective outcome for exactly three cases: a
+// pass/waive that leaves every required gate resolved (following the
+// declared branch target, or the node's success_outcome on an auto external
+// node), a bound external result routed through the gate's result_outcomes
+// mapping, and a reject/fail whose explicit outcome resolves to a declared
+// failure/correction/checkpoint target. Everything else returns nil (no
+// payload) with the request's outcome: pending, an unmapped bound result,
 // a pass with remaining required gates, or a reject/fail without a declared
 // branch.
-func (m *Manager) gateTransitionPayload(inst *WorkflowInstance, tmpl *Template, node *NodeDefinition, act *Activation, gateID GateID, op GateOperation, status GateStatus, req commandGateRequest) (json.RawMessage, error) {
+func (m *Manager) gateTransitionPayload(inst *WorkflowInstance, tmpl *Template, node *NodeDefinition, act *Activation, gateID GateID, op GateOperation, status GateStatus, req commandGateRequest) (json.RawMessage, OutcomeName, error) {
 	now := time.Now().UTC()
+	marshal := func(outcome OutcomeName) (json.RawMessage, OutcomeName, error) {
+		if err := validateDeclaredOutcome(tmpl, node, outcome); err != nil {
+			return nil, "", err
+		}
+		target, _, _ := resolveOutcome(tmpl, node, outcome)
+		payload, err := json.Marshal(&Transition{ActivationID: act.ID, Outcome: outcome, TargetNodeID: target, CreatedAt: now})
+		return payload, outcome, err
+	}
 	switch {
 	case (status == GatePassed || status == GateWaived) && len(remainingRequiredGates(inst, node, act.ID, gateID, status)) == 0:
 		outcome := req.Outcome
 		if outcome == "" {
 			outcome = act.SelectedOutcome
 		}
+		// On an auto external node a pass selects the node's declared
+		// success_outcome — and only once every required gate on the
+		// activation has passed; one gate passing never advances a sibling.
+		if status == GatePassed && isAutoExternalNode(node) {
+			outcome = node.Dispatch.SuccessOutcome
+		}
 		if outcome == "" {
-			return nil, fmt.Errorf("gate %q resolution requires an outcome", gateID)
+			return nil, "", fmt.Errorf("gate %q resolution requires an outcome", gateID)
 		}
-		if err := validateDeclaredOutcome(tmpl, node, outcome); err != nil {
-			return nil, err
+		return marshal(outcome)
+	case op == GateOpExternalResult && status != GatePending && status != GatePassed && status != GateWaived:
+		// A bound external gate routes failed/advisory results through its
+		// declared result_outcomes mapping; an unmapped result stays parked
+		// (the diagnostic lives on the gate instance).
+		if def := gateDefinitionByID(node, gateID); def != nil && len(def.ResultOutcomes) > 0 {
+			if outcome, mapped := def.ResultOutcomes[gateResultNameFor(status)]; mapped {
+				if target, _, declared := resolveOutcome(tmpl, node, outcome); declared && target != "" {
+					return marshal(outcome)
+				}
+			}
+			return nil, req.Outcome, nil
 		}
-		target, _, _ := resolveOutcome(tmpl, node, outcome)
-		return json.Marshal(&Transition{ActivationID: act.ID, Outcome: outcome, TargetNodeID: target, CreatedAt: now})
+		if (status == GateRejected || status == GateFailed) && req.Outcome != "" {
+			if target, _, declared := resolveOutcome(tmpl, node, req.Outcome); declared && target != "" {
+				return marshal(req.Outcome)
+			}
+		}
 	case (status == GateRejected || status == GateFailed) && req.Outcome != "":
 		if target, _, declared := resolveOutcome(tmpl, node, req.Outcome); declared && target != "" {
-			return json.Marshal(&Transition{ActivationID: act.ID, Outcome: req.Outcome, TargetNodeID: target, CreatedAt: now})
+			return marshal(req.Outcome)
 		}
 	}
-	return nil, nil
+	return nil, req.Outcome, nil
 }
 
 // remainingRequiredGates returns the required gate definitions of node that
