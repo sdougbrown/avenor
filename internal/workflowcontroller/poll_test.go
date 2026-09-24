@@ -235,6 +235,36 @@ func TestPollBackoffHonorsClampedRetryAfter(t *testing.T) {
 	}
 }
 
+// TestPollBackoffRetryAfterTable proves the retry_after_ms contract across
+// the absent, zero, sub-floor, in-range, and over-cap cases: only an absent
+// retry_after follows the backoff schedule; an explicit zero clamps to the
+// base minimum.
+func TestPollBackoffRetryAfterTable(t *testing.T) {
+	zero := int64(0)
+	halfMs := int64(1)
+	fortyFiveSec := int64(45000)
+	tenMin := int64(600000)
+	tests := []struct {
+		name         string
+		retryAfterMS *int64
+		want         time.Duration
+	}{
+		{"absent uses backoff schedule", nil, 60 * time.Second},
+		{"explicit zero clamps to base", &zero, pollBaseDelay},
+		{"1ms raises to base", &halfMs, pollBaseDelay},
+		{"45s honored as-is", &fortyFiveSec, 45 * time.Second},
+		{"10m caps at max", &tenMin, AdapterMaxRetryDelay},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			delay, _ := PollBackoffDelay(pollBaseDelay, 0, tc.retryAfterMS, nil)
+			if delay != tc.want {
+				t.Fatalf("delay = %v, want %v", delay, tc.want)
+			}
+		})
+	}
+}
+
 func TestRecordDiagnosticDeduplicates(t *testing.T) {
 	s, id := newPollStore(t)
 	recorded, err := s.RecordDiagnostic(id, "adapter_unavailable", "gh-review", "not registered")

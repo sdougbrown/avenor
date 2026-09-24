@@ -67,13 +67,15 @@ const pollBaseDelay = 30 * time.Second
 // count to persist. The interval doubles from the base — the first post-park
 // poll already waited one base interval — and caps at five minutes. An
 // adapter-requested retry_after_ms is honored after clamping into the
-// [base, 5m] range. jitter, when non-nil, returns a value in [-1, 1] scaling
-// the delay by ±10%; the result always stays inside the clamped range.
+// [base, 5m] range, so an explicit zero lands on the base floor (only an
+// absent retry_after follows the backoff schedule). jitter, when non-nil,
+// returns a value in [-1, 1] scaling the delay by ±10%; the result always
+// stays inside the clamped range.
 func PollBackoffDelay(base time.Duration, retryCount int, retryAfterMS *int64, jitter func() float64) (time.Duration, int) {
 	delay := time.Duration(0)
 	if retryAfterMS != nil {
 		delay = time.Duration(*retryAfterMS) * time.Millisecond
-		if delay > AdapterMaxRetryDelay || delay <= 0 {
+		if delay > AdapterMaxRetryDelay {
 			delay = AdapterMaxRetryDelay
 		}
 	} else {
