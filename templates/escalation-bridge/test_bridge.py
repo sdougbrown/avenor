@@ -104,6 +104,35 @@ class LatestOutputsTest(unittest.TestCase):
         self.assertEqual(bridge.latest_outputs(detail), {"x": None})
 
 
+class PinnedSubjectTest(unittest.TestCase):
+    def test_returns_pinned_subject_when_resolved(self):
+        act = {"activation_id": "act_1",
+               "resolved_gates": {"g1": {"subject": {
+                   "type": "pull_request", "repository": "org/repo",
+                   "pull_request": 123, "revision": "abc123"}}}}
+        self.assertEqual(
+            bridge.pinned_subject(act, "g1"),
+            {"type": "pull_request", "repository": "org/repo",
+             "pull_request": 123, "revision": "abc123"},
+        )
+
+    def test_returns_none_when_unresolved(self):
+        # An unresolved pin has no subject key (omitempty) and lists the
+        # unresolved fields instead.
+        act = {"activation_id": "act_1",
+               "resolved_gates": {"g1": {"unresolved": ["subject.repository"]}}}
+        self.assertIsNone(bridge.pinned_subject(act, "g1"))
+
+    def test_returns_none_when_gate_absent(self):
+        act = {"activation_id": "act_1",
+               "resolved_gates": {"other": {"subject": {}}}}
+        self.assertIsNone(bridge.pinned_subject(act, "g1"))
+
+    def test_returns_none_when_no_resolved_gates(self):
+        act = {"activation_id": "act_1"}
+        self.assertIsNone(bridge.pinned_subject(act, "g1"))
+
+
 class BuildGateCommandTest(unittest.TestCase):
     def setUp(self):
         self.gate = merge_auth_gate()
@@ -175,6 +204,29 @@ class BuildGateCommandTest(unittest.TestCase):
         self.decision["outcome"] = "authorized"
         command = bridge.build_gate_command("wf_1", "n", "act_1", self.gate, self.decision)
         self.assertEqual(command["outcome"], "authorized")
+
+    def test_bound_gate_submits_pinned_subject_not_transport(self):
+        # The transport supplies a different subject; a bound gate must submit
+        # exactly the pinned one, ignoring the transport's.
+        self.decision["subject"] = {"type": "pull_request", "repository": "wrong/repo",
+                                    "pull_request": 999, "revision": "deadbeef"}
+        pinned = {"type": "pull_request", "repository": "org/repo",
+                  "pull_request": 123, "revision": "abc123"}
+        command = bridge.build_gate_command("wf_1", "n", "act_1", self.gate,
+                                           self.decision, pinned)
+        self.assertEqual(command["subject"], pinned)
+        self.assertEqual(command["subject"]["revision"], "abc123")
+        self.assertEqual(command["subject"]["pull_request"], 123)
+
+    def test_bound_gate_requires_no_transport_subject(self):
+        # A bound gate submits the pinned subject even when the transport
+        # supplies none at all.
+        broken = {k: v for k, v in self.decision.items() if k != "subject"}
+        pinned = {"type": "pull_request", "repository": "org/repo",
+                  "pull_request": 123, "revision": "abc123"}
+        command = bridge.build_gate_command("wf_1", "n", "act_1", self.gate,
+                                           broken, pinned)
+        self.assertEqual(command["subject"], pinned)
 
 
 class FakeControl:

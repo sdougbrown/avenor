@@ -24,6 +24,12 @@ Contract notes (see docs/escalation.md for the full protocol):
     — when the gate declares a subject_type — a subject whose type matches.
     The bridge derives a stable evidence id from the decision payload; the
     transport's durable pointer travels in the reason text.
+  - A gate that declares subject_binding is decided against the subject the
+    kernel pinned on the activation (inspect resolved_gates). The bridge reads
+    that pinned subject, carries it in the question, and submits exactly it —
+    never a transport-supplied or output-derived subject. An unresolved pin is
+    skipped until it resolves; a subject that changes before submit drops the
+    decision.
 
 Stdlib only; Python 3.9+.
 
@@ -132,6 +138,19 @@ def latest_outputs(detail):
     return {oid: value for oid, (_, value) in latest.items()}
 
 
+def pinned_subject(activation, gate_id):
+    """Return the gate's pinned subject from the activation's resolved_gates.
+
+    A bound gate's subject is pinned onto the activation when it is created
+    (resolved_gates[gate_id].subject). Returns the subject dict when resolved,
+    or None when the gate is unbound, has no pin, or its pin is unresolved.
+    """
+    resolved = (activation.get("resolved_gates") or {}).get(gate_id)
+    if not resolved:
+        return None
+    return resolved.get("subject")
+
+
 def ask(webhook_url, payload):
     body = json.dumps(payload).encode()
     req = urllib.request.Request(
@@ -147,14 +166,17 @@ def decision_response_hash(decision):
     ).hexdigest()[:32]
 
 
-def build_gate_command(workflow_id, node_id, activation_id, gate, decision):
+def build_gate_command(workflow_id, node_id, activation_id, gate, decision,
+                      pinned_subject=None):
     """Build the workflow.command gate payload from the transport's decision.
 
     The kernel requires actor, reason, and at least one evidence id for
     satisfy/reject/waive, plus a subject with a non-empty type when the gate
-    declares a subject_type. Evidence ids on a bridge-recorded decision are
-    opaque audit references: the transport's durable pointer is appended to
-    the reason so it survives in the append-only gate history.
+    declares a subject_type. For a bound gate (pinned_subject supplied), the
+    subject is exactly the one pinned on the activation — never the
+    transport's. Evidence ids on a bridge-recorded decision are opaque audit
+    references: the transport's durable pointer is appended to the reason so it
+    survives in the append-only gate history.
     """
     decision = dict(decision)
     op = decision.get("decision")
@@ -165,14 +187,19 @@ def build_gate_command(workflow_id, node_id, activation_id, gate, decision):
     if not actor or not reason:
         raise ValueError("decision requires 'actor' and 'reason'")
 
-    subject_type = gate.get("subject_type")
-    subject = decision.get("subject")
-    if subject_type:
-        if not subject or subject.get("type") != subject_type:
-            raise ValueError(
-                f"gate declares subject_type {subject_type!r}; decision.subject "
-                f"must carry a matching non-empty type"
-            )
+    if pinned_subject is not None:
+        # Bound gate: submit exactly the subject pinned on the activation,
+        # never one supplied by the transport or derived from latest outputs.
+        subject = dict(pinned_subject)
+    else:
+        subject_type = gate.get("subject_type")
+        subject = decision.get("subject")
+        if subject_type:
+            if not subject or subject.get("type") != subject_type:
+                raise ValueError(
+                    f"gate declares subject_type {subject_type!r}; decision.subject "
+                    f"must carry a matching non-empty type"
+                )
 
     evidence_pointer = decision.get("evidence")
     if evidence_pointer:
@@ -240,6 +267,26 @@ def wait_for_decision(ctl, decisions, workflow_id, activation_id, gate, gate_tim
     return None, None, "timeout"
 
 
+def subject_unchanged(ctl, workflow_id, activation_id, gate_id, expected_subject):
+    """Re-inspect before submitting a bound-gate decision.
+
+    Confirms the activation is still awaiting_gate and its pinned subject is
+    unchanged since the question was asked. Returns (ok, reason): reason is
+    'ok', 'unparked', or 'subject changed'.
+    """
+    detail = ctl.call("workflow.inspect", {"workflow_id": workflow_id})
+    act = next(
+        (a for a in (detail.get("activations") or [])
+         if a.get("activation_id") == activation_id),
+        None,
+    )
+    if act is None or act.get("status") != "awaiting_gate":
+        return False, "unparked"
+    if pinned_subject(act, gate_id) != expected_subject:
+        return False, "subject changed"
+    return True, "ok"
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--socket", required=True, help="Avenor stable control socket path")
@@ -281,6 +328,19 @@ def main():
             for act, gate in pending_human_gates(detail, template_gates):
                 node_id = act["node_id"]
                 activation_id = act["activation_id"]
+                gate_id = gate["id"]
+                bound = gate.get("subject_binding") is not None
+                pinned = pinned_subject(act, gate_id) if bound else None
+                if bound and pinned is None:
+                    # A bound gate whose subject has not resolved yet cannot be
+                    # decided; skip it and let the next tick retry once the
+                    # pin resolves.
+                    print(
+                        f"bridge: {gate_id} on {node_id} ({activation_id}) has "
+                        f"an unresolved subject pin; skipping until resolved",
+                        flush=True,
+                    )
+                    continue
                 question = {
                     "workflow_id": args.workflow_id,
                     "node_id": node_id,
@@ -295,6 +355,10 @@ def main():
                     # The human must be able to decide from the message alone.
                     "note": "Include what is being authorized, its exact scope, and what denial means.",
                 }
+                if bound:
+                    # Carry the exact pinned subject so the human sees the
+                    # precise PR/head being decided.
+                    question["subject"] = pinned
                 error_key = (activation_id, gate["id"])
                 if error_key in decision_errors:
                     question["previous_decision_error"] = decision_errors.pop(error_key)
@@ -314,7 +378,8 @@ def main():
                     continue  # timeout or unparked; the next tick re-asks
                 try:
                     command = build_gate_command(
-                        args.workflow_id, node_id, activation_id, gate, decision
+                        args.workflow_id, node_id, activation_id, gate, decision,
+                        pinned if bound else None,
                     )
                 except ValueError as exc:
                     # The human's answer is invalid (bad operation, missing
@@ -329,6 +394,26 @@ def main():
                     decision_errors[error_key] = str(exc)
                     print(f"bridge: rejected decision on {gate['id']}: {exc}", flush=True)
                     continue
+                if bound:
+                    # A new head creates a new activation with a new pin; the
+                    # decision was made against the old subject. Re-inspect and
+                    # confirm the activation is still parked on the same pinned
+                    # subject before submitting; otherwise drop the decision.
+                    ok, why = subject_unchanged(
+                        ctl, args.workflow_id, activation_id, gate_id, pinned
+                    )
+                    if not ok:
+                        rejected = decisions / "rejected" / (
+                            f"{activation_id}-{gate_id}-{int(time.time())}.json"
+                        )
+                        rejected.parent.mkdir(parents=True, exist_ok=True)
+                        decision_file.rename(rejected)
+                        print(
+                            f"bridge: {gate_id} on {activation_id} {why} before "
+                            f"submit; dropping decision",
+                            flush=True,
+                        )
+                        continue
                 ctl.call(
                     "workflow.command",
                     {"workflow_id": args.workflow_id, "command": command},
