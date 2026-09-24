@@ -731,3 +731,108 @@ func TestPromptTurnErrorOmitsEmptyStderr(t *testing.T) {
 		t.Fatalf("error = %v; want no stderr suffix when nothing was captured", err)
 	}
 }
+
+// pi emits agent_end with willRetry=true when its auto-retry layer will
+// re-attempt the turn after backoff. The provider must keep waiting for the
+// settled agent_end instead of treating the retry-pending turn as terminal,
+// and the settled error must carry the real provider message.
+func TestPromptWaitsThroughPiAutoRetryBeforeTerminalError(t *testing.T) {
+	p := NewWithOptions(runtime.StartOptions{})
+	c, wOut, rIn := fakeClient()
+	defer c.Close()
+	c.setSessionID("ses-retry")
+	p.client = c
+	p.sessions = map[string]struct{}{"ses-retry": {}}
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- p.Prompt(context.Background(), "ses-retry", "hi") }()
+
+	go func() {
+		cmd, err := readCommand(rIn)
+		if err != nil {
+			return
+		}
+		writeLine(wOut, map[string]any{"type": "response", "id": cmd["id"], "success": true})
+		// First agent_end: failed turn, pi will retry.
+		writeLine(wOut, map[string]any{
+			"type": "agent_end",
+			"messages": []any{
+				map[string]any{"role": "assistant", "stopReason": "error",
+					"errorMessage": "500: litellm.InternalServerError - Connection error"},
+			},
+			"willRetry": true,
+		})
+		// pi's own retry markers, then the settled second attempt.
+		writeLine(wOut, map[string]any{"type": "auto_retry_start", "attempt": 1, "maxAttempts": 3, "delayMs": 2000})
+		writeLine(wOut, map[string]any{
+			"type": "agent_end",
+			"messages": []any{
+				map[string]any{"role": "assistant", "stopReason": "error",
+					"errorMessage": "500: litellm.InternalServerError - Connection error"},
+			},
+			"willRetry": false,
+		})
+	}()
+
+	var err error
+	select {
+	case err = <-errCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for prompt result; provider must wait past a retry-pending agent_end")
+	}
+	if err == nil {
+		t.Fatal("expected a turn error from the settled agent_end")
+	}
+	if !strings.Contains(err.Error(), "litellm.InternalServerError") {
+		t.Fatalf("error = %v; want the real provider error text", err)
+	}
+}
+
+// A retry that succeeds settles the turn with no error.
+func TestPromptRecoversWhenPiAutoRetrySucceeds(t *testing.T) {
+	p := NewWithOptions(runtime.StartOptions{})
+	c, wOut, rIn := fakeClient()
+	defer c.Close()
+	c.setSessionID("ses-recover")
+	p.client = c
+	p.sessions = map[string]struct{}{"ses-recover": {}}
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- p.Prompt(context.Background(), "ses-recover", "hi") }()
+
+	go func() {
+		cmd, err := readCommand(rIn)
+		if err != nil {
+			return
+		}
+		writeLine(wOut, map[string]any{"type": "response", "id": cmd["id"], "success": true})
+		writeLine(wOut, map[string]any{
+			"type": "agent_end",
+			"messages": []any{
+				map[string]any{"role": "assistant", "stopReason": "error",
+					"errorMessage": "503: service unavailable"},
+			},
+			"willRetry": true,
+		})
+		writeLine(wOut, map[string]any{"type": "auto_retry_start", "attempt": 1, "maxAttempts": 3, "delayMs": 2000})
+		writeLine(wOut, map[string]any{"type": "auto_retry_end", "success": true, "attempt": 1})
+		writeLine(wOut, map[string]any{
+			"type": "agent_end",
+			"messages": []any{
+				map[string]any{"role": "assistant", "stopReason": "stop",
+					"content": []any{map[string]any{"type": "text", "text": "OK"}}},
+			},
+			"willRetry": false,
+		})
+	}()
+
+	var err error
+	select {
+	case err = <-errCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for prompt result")
+	}
+	if err != nil {
+		t.Fatalf("Prompt: %v; want recovery after the successful retry", err)
+	}
+}

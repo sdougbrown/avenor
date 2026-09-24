@@ -15,7 +15,7 @@ func translateNotification(payload map[string]any, sessionID string) []events.Ev
 	case "agent_start":
 		return []events.Event{{Event: "session.start", SessionID: sessionID, Fields: map[string]any{}}}
 	case "agent_end":
-		return []events.Event{translateAgentEnd(payload, sessionID)}
+		return translateAgentEnd(payload, sessionID)
 	case "turn_start":
 		return []events.Event{{Event: "avenor.turn.start", SessionID: sessionID, Fields: map[string]any{}}}
 	case "turn_end":
@@ -49,7 +49,7 @@ func translateNotification(payload map[string]any, sessionID string) []events.Ev
 	}
 }
 
-func translateAgentEnd(payload map[string]any, sessionID string) events.Event {
+func translateAgentEnd(payload map[string]any, sessionID string) []events.Event {
 	fields := map[string]any{}
 	if messages, ok := payload["messages"].([]any); ok && len(messages) > 0 {
 		lastMsg, _ := messages[len(messages)-1].(map[string]any)
@@ -58,6 +58,9 @@ func translateAgentEnd(payload map[string]any, sessionID string) events.Event {
 			// accept the snake_case alias for older shims.
 			if stopReason := firstNonEmptyString(lastMsg, "stopReason", "stop_reason"); stopReason != "" {
 				fields["stop_reason"] = normalizePiStopReason(stopReason)
+			}
+			if errorMessage := firstNonEmptyString(lastMsg, "errorMessage", "error_message"); errorMessage != "" {
+				fields["error_message"] = errorMessage
 			}
 			if finalOutput := extractPiText(lastMsg); finalOutput != "" {
 				fields["final_output"] = finalOutput
@@ -69,7 +72,30 @@ func translateAgentEnd(payload map[string]any, sessionID string) events.Event {
 			fields["stop_reason"] = normalizePiStopReason(stopReason)
 		}
 	}
-	return events.Event{Event: "session.end", SessionID: sessionID, Fields: fields}
+	if errorMessage := firstNonEmptyString(payload, "errorMessage", "error_message"); errorMessage != "" {
+		if _, ok := fields["error_message"]; !ok {
+			fields["error_message"] = errorMessage
+		}
+	}
+	// pi sets willRetry=true when its auto-retry layer classified the failed
+	// turn as retryable and will re-attempt it after backoff. The agent_end is
+	// not a settlement then: emitting a terminal session.end would make the
+	// provider tear the session down before the retry fires. pi follows up
+	// with auto_retry_start/end events and a final settled agent_end; the
+	// pending marker keeps the failed turn visible in the run log meanwhile.
+	if willRetry, _ := payload["willRetry"].(bool); willRetry {
+		if stopReason, _ := fields["stop_reason"].(string); stopReason == "error" {
+			return []events.Event{{
+				Event:     "avenor.auto_retry.pending",
+				SessionID: sessionID,
+				Fields: map[string]any{
+					"stop_reason":   "error",
+					"error_message": fields["error_message"],
+				},
+			}}
+		}
+	}
+	return []events.Event{{Event: "session.end", SessionID: sessionID, Fields: fields}}
 }
 
 // normalizePiStopReason maps pi's raw stop reasons onto avenor's canonical
