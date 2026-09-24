@@ -283,9 +283,13 @@ func (d *stableRunnerDeps) Candidates(controllerID string) ([]workflowcontroller
 	}
 	candidates := make([]workflowcontroller.Candidate, 0, len(ready))
 	for _, rc := range ready {
+		kind := workflowcontroller.CandidateProvider
+		if rc.Kind == workflow.ReadyCandidateExternalPark {
+			kind = workflowcontroller.CandidateExternalPark
+		}
 		candidates = append(candidates, workflowcontroller.Candidate{
 			Identity:       rc.Identity,
-			Kind:           workflowcontroller.CandidateProvider,
+			Kind:           kind,
 			ControllerID:   rc.ControllerID,
 			Revision:       rc.Revision,
 			ReadyAt:        rc.ReadyAt,
@@ -344,10 +348,14 @@ func (d *stableRunnerDeps) Refresh() error {
 }
 
 // Dispatch dispatches one selected candidate through the supervisor's
-// dispatch boundary under the runner's lease. The activation's own declared
-// selection is used (Selection is nil on the request).
+// dispatch boundary under the runner's lease. External-park candidates park
+// kernel-locally instead of consuming admission; provider candidates use the
+// activation's own declared selection (Selection is nil on the request).
 func (d *stableRunnerDeps) Dispatch(ctx context.Context, dec workflowcontroller.Decision, lease workflowcontroller.LeaderLease) (workflowcontroller.DispatchResult, error) {
 	identity := dec.Candidate.Identity
+	if dec.Candidate.Kind == workflowcontroller.CandidateExternalPark {
+		return d.s.parkExternalNode(dec, lease)
+	}
 	out, err := d.s.dispatchWorkflowNode(ctx, DispatchRequest{
 		WorkflowID:       string(identity.WorkflowID),
 		NodeID:           string(identity.NodeID),

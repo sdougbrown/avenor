@@ -220,6 +220,32 @@ func (m *Manager) ParkExternal(req ParkExternalRequest) (ParkExternalResult, err
 	return ParkExternalResult{}, fmt.Errorf("park external %s/%s: revision kept moving under concurrent commands", req.WorkflowID, req.NodeID)
 }
 
+// ParkedGateSubject returns the pinned subject of a bound external gate
+// while its activation is still parked awaiting_gate. ok=false reports an
+// activation that resolved, vanished, or whose pinned subject changed (a new
+// head) — the caller must not land results for it.
+func (m *Manager) ParkedGateSubject(wf WorkflowID, nodeID NodeID, actID ActivationID, gateID GateID) (*Subject, bool, error) {
+	snap, exists, err := m.store.loadCurrent(wf)
+	if err != nil {
+		return nil, false, err
+	}
+	if !exists {
+		return nil, false, fmt.Errorf("workflow not found: %s", wf)
+	}
+	act, err := findActivation(&snap.Instance, nodeID, actID)
+	if err != nil {
+		return nil, false, err
+	}
+	if act == nil || act.Status != ActivationAwaitingGate {
+		return nil, false, nil
+	}
+	resolved, ok := act.ResolvedGates[gateID]
+	if !ok || resolved.Subject == nil {
+		return nil, false, nil
+	}
+	return resolved.Subject, true, nil
+}
+
 // ExternalGatePollState is the poll-time view of one bound external gate on a
 // parked activation: the resolved adapter inputs and the pinned subject.
 type ExternalGatePollState struct {

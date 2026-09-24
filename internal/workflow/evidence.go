@@ -203,3 +203,18 @@ func (s *Store) StageEvidence(workflowID WorkflowID, srcPath, storedName string,
 		SHA256:       digest,
 	}, nil
 }
+
+// DiscardEvidence removes one staged evidence directory. It exists for the
+// poller's failure path: a gate command that fails to land must not leave
+// freshly staged evidence orphaned in the instance. Discarding an absent
+// evidence ID is a no-op.
+func (s *Store) DiscardEvidence(workflowID WorkflowID, id EvidenceID) error {
+	if !safeComponent(string(workflowID)) || !safeComponent(string(id)) {
+		return errors.New("invalid evidence id")
+	}
+	dir := evidenceDir(s.instanceDir(workflowID), id)
+	if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	return os.RemoveAll(dir)
+}

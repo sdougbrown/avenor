@@ -65,7 +65,7 @@ func (f *fakePoller) Poll(ctx context.Context, cursor PollCursor) (AdapterResult
 	return fn()
 }
 
-func (f *fakePoller) ApplyResult(cursor PollCursor, res *AdapterResult) (PollApplyOutcome, error) {
+func (f *fakePoller) ApplyResult(cursor PollCursor, res *AdapterResult, lease LeaderLease) (PollApplyOutcome, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.applys = append(f.applys, cursor)

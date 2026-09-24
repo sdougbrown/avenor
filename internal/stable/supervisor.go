@@ -344,6 +344,10 @@ type Supervisor struct {
 	workflowMgr         *workflow.Manager
 	workflowBarrierErr  error
 	workflowControllers *workflowcontroller.ControllerStore
+	// workflowAdapters is the immutable adapter manifest registry loaded at
+	// startup and on every enable; nil when no directory loaded (every
+	// adapter reports unavailable).
+	workflowAdapters atomic.Pointer[workflowcontroller.AdapterRegistry]
 	// controllerLoopsMu guards controllerLoops and loopsStopped: one
 	// leader-loop handle per enabled controller id in this process.
 	controllerLoopsMu sync.Mutex
@@ -4300,6 +4304,22 @@ func resolveWorkflowAdapterDir(configured string) string {
 	return filepath.Join(home, ".config", "avenor", "workflow-adapters")
 }
 
+// loadWorkflowAdapters loads the adapter manifest registry from the
+// configured (or default) adapter directory into the supervisor's immutable
+// registry slot. A load failure leaves the registry nil — every adapter
+// reports unavailable — and is logged; manifests are host configuration and
+// a broken one must not disable the controller.
+func (s *Supervisor) loadWorkflowAdapters() {
+	dir := resolveWorkflowAdapterDir(s.config.WorkflowAdapterDir)
+	reg, err := workflowcontroller.LoadAdapterRegistry(dir)
+	if err != nil {
+		log.Printf("workflow: adapter registry load from %s failed (adapters unavailable): %v", dir, err)
+		s.workflowAdapters.Store(nil)
+		return
+	}
+	s.workflowAdapters.Store(reg)
+}
+
 // workflowManager returns the workflow manager for the configured workflow
 // root, running the exactly-once startup barrier on first use. Safe for
 // concurrent use; every caller waits on the same barrier and shares its
@@ -4376,6 +4396,9 @@ func (s *Supervisor) runWorkflowStartupBarrier() {
 			}
 		}
 	}
+	// Recovered enabled controllers poll adapters; load the registry here so
+	// an enabled startup never runs without it.
+	s.loadWorkflowAdapters()
 	if barrierErr != nil {
 		s.workflowBarrierErr = barrierErr
 		log.Printf("workflow: startup barrier failed (workflow RPCs remain available; controllers disabled for this process): %v", barrierErr)
@@ -4454,6 +4477,7 @@ func (s *Supervisor) startControllerLoop(store *workflowcontroller.ControllerSto
 		RenewInterval: s.controllerRenewInterval,
 		ChangeCh:      changeCh,
 		CapacityCh:    capacityCh,
+		Poll:          &stablePoller{s: s, controllerID: controllerID},
 	})
 	loop := &controllerLoop{done: make(chan struct{}), runner: runner}
 	s.controllerLoops[controllerID] = loop
@@ -4558,6 +4582,9 @@ func (s *Supervisor) WorkflowControllerEnable(id string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The adapter registry is loaded at enable and at startup and stays
+	// immutable while the controller is enabled.
+	s.loadWorkflowAdapters()
 	// Serialize against disable (and other enables) so the final in-process
 	// loop state always matches the last persisted desired state.
 	s.workflowControllerMu.Lock()
@@ -4612,7 +4639,11 @@ func (s *Supervisor) WorkflowControllerStatus(id string) (any, error) {
 	if !ok {
 		return nil, fmt.Errorf("controller %s: %w", id, workflowcontroller.ErrNotFound)
 	}
-	return controllerStatusMap(rec, s.supervisorIdentity(), s.controllerRunnerStatus(id, rec)), nil
+	var nextPollAt any
+	if earliest, has, err := store.NextPollTime(id); err == nil && has {
+		nextPollAt = earliest
+	}
+	return controllerStatusMap(rec, s.supervisorIdentity(), s.controllerRunnerStatus(id, rec), nextPollAt), nil
 }
 
 // controllerRunnerStatus returns this process's live runner status for the
@@ -4689,7 +4720,7 @@ func controllerLeaderMap(rec workflowcontroller.ControllerRecord, ownIdentity st
 // record's leader is owned by this process and this process has a live
 // runner for the controller, the reconciliation fields come from the
 // runner's status; otherwise they stay nil/0.
-func controllerStatusMap(rec workflowcontroller.ControllerRecord, ownIdentity string, runner *workflowcontroller.RunnerStatus) map[string]any {
+func controllerStatusMap(rec workflowcontroller.ControllerRecord, ownIdentity string, runner *workflowcontroller.RunnerStatus, nextPollAt any) map[string]any {
 	var lastReconcile any
 	inflight := 0
 	var capacityBlocked any
@@ -4715,7 +4746,7 @@ func controllerStatusMap(rec workflowcontroller.ControllerRecord, ownIdentity st
 		"last_reconcile":   lastReconcile,
 		"inflight":         inflight,
 		"capacity_blocked": capacityBlocked,
-		"next_poll_at":     nil,
+		"next_poll_at":     nextPollAt,
 	}
 }
 

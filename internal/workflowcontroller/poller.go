@@ -28,6 +28,10 @@ const (
 	// executable could not be run; the gate stays pending and the failure is
 	// recorded as a deduplicated diagnostic.
 	PollFailureUnavailable PollFailureKind = "adapter_unavailable"
+	// PollFailureObsolete means the cursor no longer matches the parked
+	// activation (resolved or superseded by a new head); its cursor is
+	// dropped.
+	PollFailureObsolete PollFailureKind = "obsolete"
 )
 
 // PollOutcome is one poll worker's outcome delivered to the leader loop.
@@ -55,13 +59,13 @@ const (
 
 // Poller is the host-side external-poll surface. Poll performs one adapter
 // invocation for the cursor — I/O only, never gate state — and classifies a
-// missing result as transient or unavailable. ApplyResult runs on the leader
-// goroutine: it revalidates the leader lease and the parked activation, stages
-// the bounded raw stdout as evidence, and submits the structured
-// external_result gate command.
+// missing result as transient, unavailable, or obsolete. ApplyResult runs on
+// the leader goroutine: it revalidates the leader lease and the parked
+// activation, stages the bounded raw stdout as evidence, and submits the
+// structured external_result gate command.
 type Poller interface {
 	Poll(ctx context.Context, cursor PollCursor) (AdapterResult, PollFailureKind, error)
-	ApplyResult(cursor PollCursor, res *AdapterResult) (PollApplyOutcome, error)
+	ApplyResult(cursor PollCursor, res *AdapterResult, lease LeaderLease) (PollApplyOutcome, error)
 }
 
 // defaultMaxPollWorkers bounds the adapter invocations running concurrently.
@@ -122,7 +126,7 @@ func (r *Runner) offerPolls() {
 // handlePollOutcome folds one poll result into the schedule: backoff on
 // pending, transient, or unavailable outcomes; the host's ApplyResult on a
 // completed verdict, with the cursor cleared once the result is applied.
-func (r *Runner) handlePollOutcome(out PollOutcome) {
+func (r *Runner) handlePollOutcome(out PollOutcome, lease LeaderLease) {
 	key := PollCursorKey(out.Cursor)
 	delete(r.pollInFlight, key)
 
@@ -133,6 +137,14 @@ func (r *Runner) handlePollOutcome(out PollOutcome) {
 		return
 	}
 
+	if out.Failure == PollFailureObsolete {
+		// The cursor no longer matches the parked activation; drop it.
+		if err := r.store.ClearPollCursor(r.controllerID, out.Cursor); err != nil {
+			log.Printf("workflow controller %s: clear obsolete poll cursor %s: %v", r.controllerID, key, err)
+		}
+		r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "poll_obsolete" })
+		return
+	}
 	if out.Failure == PollFailureUnavailable {
 		detail := "adapter unavailable"
 		if out.Err != nil {
@@ -162,7 +174,7 @@ func (r *Runner) handlePollOutcome(out PollOutcome) {
 		r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "pending" })
 		return
 	}
-	apply, err := r.poll.ApplyResult(out.Cursor, res)
+	apply, err := r.poll.ApplyResult(out.Cursor, res, lease)
 	if err != nil {
 		log.Printf("workflow controller %s: apply poll result %s: %v", r.controllerID, key, err)
 		r.schedulePollRetry(out.Cursor, nil)

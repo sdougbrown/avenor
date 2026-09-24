@@ -121,6 +121,11 @@ func NewManager(store *Store) *Manager {
 	return m
 }
 
+// Store returns the underlying workflow store. It exists for host surfaces
+// that need store-level primitives (evidence staging) outside the command
+// boundary; it never bypasses command validation for state transitions.
+func (m *Manager) Store() *Store { return m.store }
+
 // AdmissionHandle is an opaque, never-persisted admission reservation handed
 // to an executor so its first runtime start consumes the caller's reservation
 // instead of acquiring a second one. Kernel transitions never read it, and
