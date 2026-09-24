@@ -9,7 +9,11 @@
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "types": ["node", "bun", "bun-types"],
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "paths": {
+      "@dougbots/avenor-core": ["../core/src/index.ts"],
+      "@dougbots/avenor-core/*": ["../core/src/*"]
+    }
   },
   "include": ["src"]
 }
