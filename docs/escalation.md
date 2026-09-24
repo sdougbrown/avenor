@@ -103,15 +103,32 @@ state. The kernel validates and records the decision as a durable, append-only
 - **Expiry.** The kernel never satisfies a gate by silence. A transport that
   renders deadlines (buttons expiring, threads closing) maps naturally: expiry
   is the transport declining to decide, and the activation stays parked.
-- **Exact-head binding.** When the gate declares `subject_type`, the
-  decision-maker supplies the subject; the kernel only requires that it be
-  present with a non-empty `type` — it does not compare the type against the
-  declaration, so a careful bridge enforces that match itself (the reference
-  bridge rejects a decision whose subject type differs from the gate's
-  declaration). Ground the subject in the workflow's own recorded outputs (for
-  example, the repository, pull request, and exact head SHA a publish node
-  emitted), never in transport-side state. A new head creates a new activation
-  and a new gate instance; a prior decision never carries over, and a bridge
+- **Exact-head binding.** A gate binds a decision to an exact subject in one of
+  two ways.
+  - **Unbound (`subject_type` only).** The decision-maker supplies the subject;
+    the kernel only requires that it be present with a non-empty `type` — it
+    does not compare the type against the declaration, so a careful bridge
+    enforces that match itself (the reference bridge rejects a decision whose
+    subject type differs from the gate's declaration).
+  - **Bound (`subject_binding`).** The gate declares a `subject_binding` whose
+    `repository`, `pull_request`, and `revision` each name a `from_node_output`
+    reference to a transitive dependency's declared output. When the activation
+    is created, the kernel resolves those references along the causal
+    provenance chain and pins the resulting `subject` (type, repository, pull
+    request number, revision) onto the activation under
+    `resolved_gates[<gate_id>]`, visible in `workflow.inspect`. A decision on a
+    bound gate — `satisfy`, `reject`, `waive`, or `external_result` — must
+    carry a subject that equals the pinned subject on all four fields; the
+    kernel rejects any other subject with `ErrSubjectMismatch`, and a gate
+    whose pin has not resolved yet cannot be decided at all
+    (`ErrSubjectUnresolved`). The bridge reads the pinned subject from inspect,
+    carries it in the question so the human sees the exact PR/head being
+    decided, and submits exactly it — never a transport-supplied or
+    output-derived subject.
+  Ground the subject in the workflow's own recorded outputs (for example, the
+  repository, pull request, and exact head SHA a publish node emitted), never
+  in transport-side state. A new head creates a new activation and a new gate
+  instance with a new pin; a prior decision never carries over, and a bridge
   must never cache a subject across activations.
 
 ## Trust boundary

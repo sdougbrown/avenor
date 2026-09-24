@@ -324,6 +324,46 @@ head's gate decision no longer applies, and the prior instances are retained
 unchanged. A human merge-authorization gate requires an explicit actor, reason,
 evidence, and the exact subject — it cannot be satisfied by PR state alone.
 
+### Bound gate subjects and inputs
+
+A gate can bind its decision to a subject and to late-bound adapter inputs,
+both resolved from the workflow's own recorded outputs rather than supplied at
+decision time.
+
+- **`subject_binding`.** Declared on `external` and `human` gates (forbidden on
+  `machine` gates). Its `type` is `pull_request`, and its `repository`,
+  `pull_request`, and `revision` fields each name a `from_node_output`
+  reference to a transitive dependency's declared output (string, number, and
+  string respectively); all three must resolve from the same source node. When
+  the activation is created, the kernel resolves the references along the
+  causal provenance chain and pins the resulting `subject` onto the
+  activation; a decision on a bound gate must carry a subject equal to the
+  pinned subject on all four fields.
+- **`inputs`.** Declared only on `external` gates. Each entry is a strict
+  primitive literal (string, number, or boolean) or a `from_node_output`
+  reference to a transitive dependency's declared primitive output. The kernel
+  pins each reference to the exact causal source activation, output, and
+  revision.
+- **`adapter_id`.** Names the trusted external adapter that polls the gate.
+  Declared only on `external` gates.
+- **`result_outcomes`.** Routes advisory external results to the node's
+  declared branch outcomes. Declared only on bound `external` gates; `passed`
+  is excluded (a pass always follows the node's dispatch `success_outcome`).
+  The routable keys are `failed`, `action_required`, and `changes_requested`.
+- **`dispatch.success_outcome`.** The declared branch an auto external node
+  follows on a pass. An external node may dispatch automatically only when it
+  declares no outputs, names a declared `success_outcome` branch, carries at
+  least one required external gate, has no human or machine gates, and every
+  required gate declares a `subject_binding`.
+- **`resolved_gates` in inspect.** Each activation carries `resolved_gates`,
+  keyed by gate id, recording the pinned `inputs` and the resolved `subject`
+  (or the `unresolved` fields when a reference could not resolve). A bound
+  gate with an unresolved pin cannot be decided yet.
+- **`poll_id` idempotency.** A bound `external_result` is keyed by `poll_id`:
+  a re-reported poll with the same `poll_id` and `response_hash` is an
+  idempotent replay, while the same `poll_id` with a different hash is a
+  replay conflict. Unbound gates keep the legacy result-discriminated key.
+
 ## Composition
 
 A `workflow` action names a pinned child template version and a typed
