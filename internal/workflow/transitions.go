@@ -862,7 +862,7 @@ func applyGate(next *Snapshot, act *Activation, event Event) error {
 			// A bound gate's mapped result routing resolves the activation
 			// onto its declared branch (the sibling transition event).
 			act.Status = ActivationRejected
-		} else if gateRoutesResults(next, act, gate) {
+		} else if gateIsBound(next, act, gate) {
 			// A bound gate result with no result_outcomes mapping stays
 			// parked; the diagnostic lives on the gate instance.
 			act.Status = ActivationAwaitingGate
@@ -999,17 +999,18 @@ func applyLeaseExpired(next *Snapshot, act *Activation, event Event) error {
 	return nil
 }
 
-// gateRoutesResults reports whether the decided gate declares
-// result_outcomes routing (bound external gates only). The reducer cannot
-// see templates without the resolver, so legacy/recovered histories read as
-// unrouted and keep the legacy failed-rejects behavior.
-func gateRoutesResults(next *Snapshot, act *Activation, gate *GateInstance) bool {
+// gateIsBound reports whether the decided gate carries a subject_binding
+// (a bound external gate): its results route only through result_outcomes,
+// so an unmapped failed result parks instead of rejecting. The reducer
+// cannot see templates without the resolver, so legacy/recovered histories
+// read as unbound and keep the legacy failed-rejects behavior.
+func gateIsBound(next *Snapshot, act *Activation, gate *GateInstance) bool {
 	if completionGateResolve == nil {
 		return false
 	}
 	for _, def := range completionGateResolve(next.Instance.TemplateID, next.Instance.TemplateVersion, act.NodeID) {
 		if def.ID == gate.GateID {
-			return len(def.ResultOutcomes) > 0
+			return def.SubjectBinding != nil
 		}
 	}
 	return false

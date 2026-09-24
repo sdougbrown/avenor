@@ -211,6 +211,17 @@ func (m *Manager) commandGate(wf WorkflowID, payload json.RawMessage) (any, erro
 		return nil, fmt.Errorf("cannot gate activation in status %q", act.Status)
 	}
 
+	// A bound gate requires the supplied subject to equal the subject pinned
+	// on the activation at command time, on every field. An unresolved pin
+	// cannot be decided yet. Nothing is appended on a mismatch. The check
+	// runs before the per-operation field checks so a missing subject on a
+	// bound gate is the typed mismatch, not a generic field error.
+	if def.SubjectBinding != nil {
+		if err := validatePinnedGateSubject(act, req.GateID, req.Subject); err != nil {
+			return nil, err
+		}
+	}
+
 	// Map the operation to the durable gate status and run the operation's
 	// friendly, pre-mutation field checks (the reducer re-checks the
 	// resulting instance, but failing early keeps the error message clear).
@@ -509,10 +520,10 @@ func (m *Manager) applyGateDecision(wf WorkflowID, snap Snapshot, tmpl *Template
 		v := *req.ObservedAt
 		gateInstance.ObservedAt = &v
 	}
-	// An advisory or failed result on a gate that declares result_outcomes
-	// routing but does not map this result stays parked; the diagnostic on
-	// the gate instance explains why nothing advanced.
-	if op == GateOpExternalResult && def != nil && len(def.ResultOutcomes) > 0 {
+	// An advisory or failed result on a bound gate with no result_outcomes
+	// mapping for it stays parked; the diagnostic on the gate instance
+	// explains why nothing advanced.
+	if op == GateOpExternalResult && def != nil && def.SubjectBinding != nil {
 		switch status {
 		case GateFailed, GateActionRequired, GateChangesRequested:
 			if _, mapped := def.ResultOutcomes[gateResultNameFor(status)]; !mapped {
@@ -635,10 +646,10 @@ func (m *Manager) gateTransitionPayload(inst *WorkflowInstance, tmpl *Template, 
 		}
 		return marshal(outcome)
 	case op == GateOpExternalResult && status != GatePending && status != GatePassed && status != GateWaived:
-		// A bound external gate routes failed/advisory results through its
-		// declared result_outcomes mapping; an unmapped result stays parked
-		// (the diagnostic lives on the gate instance).
-		if def := gateDefinitionByID(node, gateID); def != nil && len(def.ResultOutcomes) > 0 {
+		// A bound external gate routes failed/advisory results only through
+		// its declared result_outcomes mapping; an unmapped result stays
+		// parked (the diagnostic lives on the gate instance).
+		if def := gateDefinitionByID(node, gateID); def != nil && def.SubjectBinding != nil {
 			if outcome, mapped := def.ResultOutcomes[gateResultNameFor(status)]; mapped {
 				if target, _, declared := resolveOutcome(tmpl, node, outcome); declared && target != "" {
 					return marshal(outcome)
