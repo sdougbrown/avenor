@@ -58,6 +58,38 @@ func TestWithLeaderRejectsWrongLeaseOrEpoch(t *testing.T) {
 	}
 }
 
+// TestWithLeaderHoldsControllerLock proves WithLeader holds the
+// controller's flock for the whole callback: a second store handle on the
+// same root cannot run a locked command until the callback returns.
+func TestWithLeaderHoldsControllerLock(t *testing.T) {
+	s, id, leaseID, epoch := newWithLeaderStore(t)
+	second := NewStore(s.Root())
+	done := make(chan error, 1)
+	if err := s.WithLeader(id, leaseID, epoch, func() error {
+		go func() {
+			_, err := second.SetDesiredState(id, DesiredDisabled, "second-handle")
+			done <- err
+		}()
+		time.Sleep(100 * time.Millisecond)
+		select {
+		case err := <-done:
+			t.Errorf("SetDesiredState completed while the callback was still running: err=%v", err)
+		default:
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("WithLeader: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("second-handle SetDesiredState: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("SetDesiredState did not complete after WithLeader returned")
+	}
+}
+
 func TestWithLeaderRejectsDisabledAndExpired(t *testing.T) {
 	s, id, leaseID, epoch := newWithLeaderStore(t)
 	if _, err := s.SetDesiredState(id, DesiredDisabled, "test"); err != nil {

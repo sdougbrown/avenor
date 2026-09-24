@@ -270,3 +270,201 @@ func TestBeginDispatchKeyHeldRejectsSecondLiveAttempt(t *testing.T) {
 	}
 	_ = s
 }
+
+// mustTerminateRetryably fails the activation's latest attempt through the
+// terminate command so the retry policy re-arms it to ready, and returns the
+// re-armed candidate.
+func mustTerminateRetryably(t *testing.T, m *Manager, s *Store, wf WorkflowID, cand ReadyCandidate) ReadyCandidate {
+	t.Helper()
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	if _, err := m.store.ApplyCommand(wf, Command{
+		ID:               NewCommandID(),
+		Kind:             CommandTerminate,
+		ExpectedRevision: snap.Instance.Revision,
+		IdempotencyKey:   "terminate-" + string(cand.Identity.ActivationID) + "-retry",
+		Identity:         ExecutionIdentity{WorkflowID: wf, NodeID: cand.Identity.NodeID, ActivationID: cand.Identity.ActivationID},
+		AttemptStatus:    AttemptFailed,
+	}); err != nil {
+		t.Fatalf("terminate: %v", err)
+	}
+	reCands, err := m.CandidatesForController("ctl-a", 10)
+	if err != nil {
+		t.Fatalf("re-read candidates: %v", err)
+	}
+	for _, c := range reCands {
+		if c.Identity.WorkflowID == wf && c.Identity.ActivationID == cand.Identity.ActivationID {
+			return c
+		}
+	}
+	t.Fatal("terminated activation did not re-arm")
+	return ReadyCandidate{}
+}
+
+// TestBeginDispatchAcceptsIdenticalSelectionAfterRearm proves an identical
+// selection never trips the conflict guard: (a) a controller re-dispatch of
+// the re-armed activation with the pinned selection succeeds and leaves the
+// pin unchanged, and (b) a manual claim + start with the same selection
+// succeeds and the new attempt runs under the pinned selection.
+func TestBeginDispatchAcceptsIdenticalSelectionAfterRearm(t *testing.T) {
+	sel := &ExecutionSelection{Backend: "codex", Agent: "agent-a", Model: "m1"}
+
+	// (a) BeginDispatch re-run with exactly the pinned selection.
+	m, s, wf := newAutoDispatchFixture(t, "begin-same", "ctl-a", -1)
+	if err := m.RebuildCandidateIndex("test"); err != nil {
+		t.Fatalf("RebuildCandidateIndex: %v", err)
+	}
+	cands, err := m.CandidatesForController("ctl-a", 1)
+	if err != nil || len(cands) != 1 {
+		t.Fatalf("candidates: n=%d err=%v", len(cands), err)
+	}
+	if _, err := m.BeginDispatch(BeginDispatchRequest{
+		WorkflowID:       wf,
+		NodeID:           cands[0].Identity.NodeID,
+		ActivationID:     cands[0].Identity.ActivationID,
+		ExpectedRevision: cands[0].Revision,
+		ControllerID:     "ctl-a",
+		LeaderLeaseID:    "lease_leader_1",
+		Selection:        sel,
+	}); err != nil {
+		t.Fatalf("first BeginDispatch: %v", err)
+	}
+	reCand := mustTerminateRetryably(t, m, s, wf, cands[0])
+	if _, err := m.BeginDispatch(BeginDispatchRequest{
+		WorkflowID:       wf,
+		NodeID:           reCand.Identity.NodeID,
+		ActivationID:     reCand.Identity.ActivationID,
+		ExpectedRevision: reCand.Revision,
+		ControllerID:     "ctl-a",
+		LeaderLeaseID:    "lease_leader_1",
+		Selection:        sel,
+	}); err != nil {
+		t.Fatalf("BeginDispatch with identical selection: %v", err)
+	}
+	snap, _, _ := s.loadCurrent(wf)
+	act := activationByNode(&snap.Instance, reCand.Identity.NodeID)
+	if act == nil || act.Selection == nil || *act.Selection != *sel {
+		t.Fatalf("pinned selection = %+v, want unchanged %+v", act.Selection, sel)
+	}
+
+	// (b) Manual claim + start with exactly the pinned selection.
+	m2, s2, wf2 := newAutoDispatchFixture(t, "begin-same-manual", "ctl-a", -1)
+	if err := m2.RebuildCandidateIndex("test"); err != nil {
+		t.Fatalf("RebuildCandidateIndex 2: %v", err)
+	}
+	cands2, err := m2.CandidatesForController("ctl-a", 1)
+	if err != nil || len(cands2) != 1 {
+		t.Fatalf("candidates 2: n=%d err=%v", len(cands2), err)
+	}
+	if _, err := m2.BeginDispatch(BeginDispatchRequest{
+		WorkflowID:       wf2,
+		NodeID:           cands2[0].Identity.NodeID,
+		ActivationID:     cands2[0].Identity.ActivationID,
+		ExpectedRevision: cands2[0].Revision,
+		ControllerID:     "ctl-a",
+		LeaderLeaseID:    "lease_leader_1",
+		Selection:        sel,
+	}); err != nil {
+		t.Fatalf("first BeginDispatch 2: %v", err)
+	}
+	reCand2 := mustTerminateRetryably(t, m2, s2, wf2, cands2[0])
+	leaseID, token := mustClaimWorkflow(t, m2, wf2, reCand2.Identity.NodeID, reCand2.Identity.ActivationID, "manual-1")
+	mustManualStart(t, m2, wf2, reCand2.Identity.NodeID, reCand2.Identity.ActivationID, leaseID, token,
+		map[string]any{"backend": "codex", "agent": "agent-a", "model": "m1"})
+	snap2, _, _ := s2.loadCurrent(wf2)
+	act2 := activationByNode(&snap2.Instance, reCand2.Identity.NodeID)
+	if act2 == nil || act2.Status != ActivationRunning {
+		t.Fatalf("activation 2 status = %v, want running after manual start", act2)
+	}
+	if act2.Selection == nil || *act2.Selection != *sel {
+		t.Fatalf("pinned selection 2 = %+v, want %+v", act2.Selection, sel)
+	}
+	if len(act2.AttemptIDs) != 2 {
+		t.Fatalf("attempt ids 2 = %v, want one per dispatch", act2.AttemptIDs)
+	}
+}
+
+// TestFinalizeDispatchRetriesRevisionMismatch proves the identify commit
+// retries when a concurrent command lands in the read–commit window: a claim
+// on another node of the same workflow commits inside the window, the first
+// identify commit hits a revision mismatch, and the retry records the runtime
+// identity exactly once.
+func TestFinalizeDispatchRetriesRevisionMismatch(t *testing.T) {
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	m := NewManager(s)
+	m.RegisterExecutor(ActionRun, &fakeExecutor{})
+	if _, err := m.WorkflowCreate(twoNodeDispatchTemplateJSON("finalize-retry", "ctl-a", "deploys")); err != nil {
+		t.Fatalf("WorkflowCreate: %v", err)
+	}
+	wf := mustInstantiateTemplate(t, m, "finalize-retry", "1")
+	if err := m.RebuildCandidateIndex("test"); err != nil {
+		t.Fatalf("RebuildCandidateIndex: %v", err)
+	}
+	cands, err := m.CandidatesForController("ctl-a", 10)
+	if err != nil || len(cands) != 1 {
+		t.Fatalf("candidates: n=%d err=%v", len(cands), err)
+	}
+	cand := cands[0]
+	res, err := m.BeginDispatch(BeginDispatchRequest{
+		WorkflowID:       wf,
+		NodeID:           cand.Identity.NodeID,
+		ActivationID:     cand.Identity.ActivationID,
+		ExpectedRevision: cand.Revision,
+		ControllerID:     "ctl-a",
+		LeaderLeaseID:    "lease_leader_1",
+	})
+	if err != nil {
+		t.Fatalf("BeginDispatch: %v", err)
+	}
+
+	// While FinalizeDispatch sits in its read window, a claim on the manual
+	// side node commits and moves the revision.
+	orig := finalizeDispatchPreCommit
+	finalizeDispatchPreCommit = func() {
+		finalizeDispatchPreCommit = orig
+		side := activationByNode(mustLoadInstance(t, s, wf), "side")
+		if side == nil {
+			t.Error("side activation not found")
+			return
+		}
+		mustClaimWorkflow(t, m, wf, "side", side.ID, "manual-1")
+	}
+	t.Cleanup(func() { finalizeDispatchPreCommit = orig })
+
+	err = m.FinalizeDispatch(FinalizeDispatchRequest{
+		WorkflowID:   wf,
+		NodeID:       cand.Identity.NodeID,
+		ActivationID: cand.Identity.ActivationID,
+		AttemptID:    res.AttemptID,
+		LeaseID:      res.LeaseID,
+		RuntimeID:    "rt_retry",
+		SessionID:    "ses_retry",
+		RunID:        "run_retry",
+	})
+	if err != nil {
+		t.Fatalf("FinalizeDispatch: %v", err)
+	}
+	identified := 0
+	for _, e := range readEvents(t, s, wf) {
+		if e.Kind == EventAttemptIdentified && e.AttemptID == res.AttemptID {
+			identified++
+		}
+	}
+	if identified != 1 {
+		t.Fatalf("attempt_identified events = %d, want exactly 1", identified)
+	}
+	snap, ok, err := s.loadCurrent(wf)
+	if err != nil || !ok {
+		t.Fatalf("loadCurrent: ok=%v err=%v", ok, err)
+	}
+	act := activationByNode(&snap.Instance, cand.Identity.NodeID)
+	attempt := findAttempt(&snap, act, res.AttemptID)
+	if attempt == nil || attempt.Identity.RuntimeID != "rt_retry" || attempt.Identity.SessionID != "ses_retry" {
+		t.Fatalf("attempt identity = %+v, want rt_retry/ses_retry", attempt)
+	}
+}
