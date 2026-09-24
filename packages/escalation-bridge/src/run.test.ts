@@ -4,7 +4,7 @@ import * as path from 'node:path'
 
 import { describe, expect, test } from 'bun:test'
 
-import { runBridge } from './run.js'
+import { askWebhook, runBridge } from './run.js'
 import { decisionResponseHash } from './command.js'
 import type { ControlClient, WorkflowDetail } from './types.js'
 
@@ -77,6 +77,46 @@ function setupDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'escalation-bridge-'))
 }
 
+describe('askWebhook', () => {
+  test('refuses redirects, surfaces the non-OK status, and POSTs JSON', async () => {
+    let received: { method?: string; contentType?: string; body?: string } | undefined
+    const server = Bun.serve({
+      port: 0,
+      fetch: async (req) => {
+        const url = new URL(req.url)
+        if (url.pathname === '/redirect') {
+          // A redirecting endpoint would receive the question payload; the
+          // client must refuse to follow rather than forward it.
+          return new Response(null, {
+            status: 302,
+            headers: { location: 'http://127.0.0.1:1/elsewhere' },
+          })
+        }
+        if (url.pathname === '/fail') return new Response('nope', { status: 500 })
+        received = {
+          method: req.method,
+          contentType: req.headers.get('content-type'),
+          body: await req.text(),
+        }
+        return new Response('ok', { status: 200 })
+      },
+    })
+    const base = `http://127.0.0.1:${server.port}`
+
+    await expect(askWebhook(`${base}/redirect`, { q: 1 })).rejects.toThrow(Error)
+
+    const err = await askWebhook(`${base}/fail`, { q: 1 }).catch((e: Error) => e)
+    expect(err.message).toContain('500')
+
+    await askWebhook(`${base}/ok`, { q: 1 })
+    expect(received?.method).toBe('POST')
+    expect(received?.contentType).toBe('application/json')
+    expect(JSON.parse(received!.body)).toEqual({ q: 1 })
+
+    server.stop()
+  })
+})
+
 describe('runBridge', () => {
   test('asks, records the decision, and exits when the workflow turns terminal', async () => {
     const dir = setupDir()
@@ -131,6 +171,7 @@ describe('runBridge', () => {
     expect(recorded).toEqual([`act_1-merge-authorization-${command.response_hash}.json`])
     expect(fs.existsSync(path.join(dir, 'decision-act_1-merge-authorization.json'))).toBe(false)
     expect(logs.some((l) => l.includes('workflow terminal'))).toBe(true)
+    expect(logs.some((l) => l.includes('outcome merged'))).toBe(true)
   })
 
   test('parks an invalid decision under rejected/ and carries the error on the next ask', async () => {

@@ -131,15 +131,57 @@ describe('waitForDecision', () => {
       sleep: async () => {},
     })
     expect(result.reason).toBe('timeout')
+    // Pin the iteration count: an extra loop tick would draw an inspect
+    // result the fake cannot supply.
+    expect(ctl.calls).toEqual(['workflow.inspect'])
   })
 
-  test('malformed file moves aside and reports', async () => {
+  test('malformed file moves aside once stable across two polls', async () => {
     writeDecision('{not json')
-    const ctl = new FakeControl([])
+    const detail: WorkflowDetail = {
+      activations: [parkedActivation()],
+      gates: null,
+      instance: { status: 'active' },
+    }
+    // Two parked ticks: the first poll sees the malformed content, the
+    // second poll sees the same content and moves it aside.
+    const ctl = new FakeControl([detail, detail])
     const result = await waitForDecision(ctl, decisions, 'wf_1', 'act_1', gate, opts)
     expect(result.decision).toBeNull()
     expect(result.reason).toContain('invalid decision file')
     const rejected = fs.readdirSync(path.join(decisions, 'rejected'))
     expect(rejected).toHaveLength(1)
+  })
+
+  test('a file still being written is not moved aside until stable', async () => {
+    writeDecision('{not json yet')
+    const detail: WorkflowDetail = {
+      activations: [parkedActivation()],
+      gates: null,
+      instance: { status: 'active' },
+    }
+    const ctl = new FakeControl([detail])
+    ctl.onCall = () => {
+      // The transport finishes the write between polls; the completed file
+      // must be answered, not parked under rejected/.
+      writeDecision({ decision: 'satisfy', actor: 'a', reason: 'r' })
+    }
+    const result = await waitForDecision(ctl, decisions, 'wf_1', 'act_1', gate, opts)
+    expect(result.reason).toBe('answered')
+    expect(fs.existsSync(path.join(decisions, 'rejected'))).toBe(false)
+  })
+
+  test('a non-object JSON file is invalid, not an answer', async () => {
+    writeDecision('null')
+    const detail: WorkflowDetail = {
+      activations: [parkedActivation()],
+      gates: null,
+      instance: { status: 'active' },
+    }
+    const ctl = new FakeControl([detail])
+    const result = await waitForDecision(ctl, decisions, 'wf_1', 'act_1', gate, opts)
+    expect(result.decision).toBeNull()
+    expect(result.reason).toContain('invalid decision file')
+    expect(fs.existsSync(path.join(decisions, 'rejected'))).toBe(true)
   })
 })

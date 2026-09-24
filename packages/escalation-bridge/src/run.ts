@@ -62,14 +62,16 @@ export interface BridgeOptions {
 export async function runBridge(options: BridgeOptions): Promise<number> {
   const waitMs = options.waitMs ?? 30_000
   const gateTimeoutMs = options.gateTimeoutMs ?? 15 * 60_000
-  const pollMs = Math.max(options.pollMs ?? 2_000, 1)
+  // The Python reference floors the poll at 1.0 *seconds*; a lower floor
+  // would tight-loop the file check + inspect RPC for the workflow's life.
+  const pollMs = Math.max(options.pollMs ?? 2_000, 1_000)
   const connect =
     options.connect ?? ((socketPath, callTimeoutMs) => dial(socketPath, { callTimeoutMs }))
   const ask = options.ask ?? askWebhook
   const sleep = options.sleep ?? defaultSleep
   const log = options.log ?? defaultLog
 
-  fs.mkdirSync(options.decisionDir, { recursive: true })
+  fs.mkdirSync(options.decisionDir, { recursive: true, mode: 0o700 })
   const templateGates = loadHumanGates(options.templatePath)
 
   let ctl: ControlClient | null = null

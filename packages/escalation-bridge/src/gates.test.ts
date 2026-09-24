@@ -86,9 +86,12 @@ describe('latestOutputs', () => {
 
   test('tolerates null and raw values', () => {
     const detail: WorkflowDetail = {
-      outputs: [{ definition_id: 'x', revision: 1, value: null }],
+      outputs: [
+        { definition_id: 'x', revision: 1, value: null },
+        { definition_id: 'y', revision: 1, value: 'not json' },
+      ],
     }
-    expect(latestOutputs(detail)).toEqual({ x: null })
+    expect(latestOutputs(detail)).toEqual({ x: null, y: 'not json' })
   })
 })
 

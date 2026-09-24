@@ -40,21 +40,59 @@ export async function waitForDecision(
   const log = opts.log ?? (() => {})
   const decisionFile = path.join(decisionsDir, `decision-${activationId}-${gate.id}.json`)
   const deadline = now() + opts.gateTimeoutMs
+  // Content of the last unreadable decision file; a move to rejected/ happens
+  // only once the same content fails two consecutive polls (a single failure
+  // may be a file the transport is still writing in place).
+  let malformedRaw: string | null = null
   while (now() < deadline) {
+    let raw: string | null = null
     if (fs.existsSync(decisionFile)) {
       try {
-        const decision = JSON.parse(fs.readFileSync(decisionFile, 'utf8')) as Decision
-        return { decision, decisionFile, reason: 'answered' }
+        raw = fs.readFileSync(decisionFile, 'utf8')
       } catch (exc) {
-        // Malformed file: move it out of the way so the transport can write a
-        // fresh one, and surface the parse error on the next ask instead of
-        // looping on the same broken file.
-        const rejected = moveAside(decisionsDir, activationId, gate.id, decisionFile)
-        return {
-          decision: null,
-          decisionFile: null,
-          reason: `invalid decision file (${(exc as Error).message}); rewritten to ${path.basename(rejected)}`,
+        // A read failure (EACCES/EBUSY/...) must not park a possibly-valid
+        // decision under rejected/; propagate it to the caller's backoff
+        // path. ENOENT is only the existsSync→readFileSync race: the next
+        // tick retries.
+        if ((exc as NodeJS.ErrnoException).code !== 'ENOENT') throw exc
+      }
+    }
+    if (raw === null) {
+      malformedRaw = null
+    } else {
+      let parsed: unknown = undefined
+      let parseFailed = false
+      try {
+        parsed = JSON.parse(raw)
+      } catch (exc) {
+        if (raw === malformedRaw) {
+          // Same content failed two consecutive polls: not a partial write.
+          // Move it out of the way so the transport can write a fresh one,
+          // and surface the parse error on the next ask instead of looping
+          // on the same broken file.
+          const rejected = moveAside(decisionsDir, activationId, gate.id, decisionFile)
+          return {
+            decision: null,
+            decisionFile: null,
+            reason: `invalid decision file (${(exc as Error).message}); rewritten to ${path.basename(rejected)}`,
+          }
         }
+        malformedRaw = raw
+        parseFailed = true
+      }
+      if (!parseFailed) {
+        // The file must hold an object; a JSON null/primitive/array would
+        // otherwise fall through the caller's null-decision path and be
+        // re-asked forever without ever being parked.
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          const rejected = moveAside(decisionsDir, activationId, gate.id, decisionFile)
+          return {
+            decision: null,
+            decisionFile: null,
+            reason: `invalid decision file (expected a JSON object); rewritten to ${path.basename(rejected)}`,
+          }
+        }
+        return { decision: parsed as Decision, decisionFile, reason: 'answered' }
       }
     }
     await sleep(opts.pollMs)

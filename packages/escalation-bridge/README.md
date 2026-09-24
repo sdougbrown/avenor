@@ -72,3 +72,18 @@ in the template README. Answered files are archived under `recorded/`; invalid
 answers (bad operation, missing actor/reason, subject-type mismatch,
 malformed JSON) are parked under `rejected/` and never recorded, with the
 rejection reason carried to the next ask as `previous_decision_error`.
+
+Transport-side, write decision files atomically (write a temp file in the
+directory, then rename it into `decision-<activation>-<gate>.json`):
+the bridge treats a file that fails to parse once as possibly still
+in-flight, but one whose content fails two consecutive polls as invalid
+and moves it aside before it is complete.
+
+## Trust model
+
+The decision directory is created `0700` and must stay local-user scoped:
+a decision file's `actor` is self-asserted, so any local user who can
+write there can forge an attributed gate decision. The ask payload also
+POSTs the workflow's full `latestOutputs` map to the webhook; if those
+outputs can carry secrets, point the bridge at a transport you trust with
+them (or filter on the transport side).
