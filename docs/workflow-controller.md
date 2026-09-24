@@ -55,11 +55,18 @@ avenor workflow instantiate --socket /path/to/socket \
 There is no campaign resource and no cross-workflow inference: each
 instantiation is one independent review unit. Every provider-backed node in
 the work template declares `dispatch: {mode: auto, controller_id:
-software-factory, priority: N, concurrency_key: worktree:...}`, so the
-controller — and only that controller — will claim them. Nodes that write the
-same worktree share one concurrency key, so two work items never execute
-concurrently against one worktree even though they are independent
-workflows.
+software-factory, priority: N, concurrency_key: {prefix: "worktree:",
+from_instance_param: "worktree"}}`, so the controller — and only that
+controller — will claim them. The concurrency key resolves from the
+instance's recorded `worktree` param at instantiation: two work items pinned
+to different worktrees run concurrently under one controller, while two
+items sharing a worktree param serialize — one work item at a time per
+worktree, no per-worktree template versions required.
+
+The controller also resolves each node's declared assignment through the
+supervisor's roster path before dispatching: the roster entry supplies the
+pinned backend/agent/model, the roster file's digest and the declared
+thinking level ride on the pinned selection, and retries inherit that pin.
 
 ## 3. Create and enable the controller
 

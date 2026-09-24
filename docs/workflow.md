@@ -106,6 +106,7 @@ fields:
 | `entry_nodes` | yes | Node IDs that activate at instantiation. |
 | `nodes` | yes | Node definitions. |
 | `terminal_outcomes` | yes | Template-global terminal outcome vocabulary. |
+| `params` | no | Declared instance parameters: `[{id, type, required?}]`. Only `type: "string"` exists; ids are path-safe identifiers. |
 | `bounded_loops` | no | Explicit bounded loop constructs. |
 | `default_lease_policy` | no | `{ttl_seconds, heartbeat_interval_seconds}`. |
 | `default_retry_policy` | no | `{max_attempts, exhaustion, outcome}`. |
@@ -121,7 +122,7 @@ fields:
 | `outcomes` | Declared outcomes: `{name, target_node_id?, terminal?}`. |
 | `branches` | Map of outcome name → target node ID. The branch map is itself the declaration of the node's branch outcomes. |
 | `action` | The execution action (see [Action types](#action-types)). |
-| `assignment` | Role / roster / backend / agent / model / thinking selection. |
+| `assignment` | Role / roster / backend / agent / model / thinking selection. Automatic dispatch resolves it through the roster path and pins the effective selection on the activation. |
 | `completion` | Completion contract (see [Completion](#completion)). |
 | `outputs` | Declared typed outputs: `{id, name, type, required?}`. |
 | `gates` | Declared gates: `{id, name?, type, required?, allowed_outcomes?, subject_type?}`. |
@@ -187,9 +188,27 @@ version. It returns the `workflow_id` and initial revision. Instantiation
 creates activations for the declared entry nodes and records
 `workflow.instantiated`.
 
+An instantiate request may carry a `params` object satisfying the template's
+declared `params`: unknown names are rejected, required names must be
+present, and values must be non-empty strings of at most 256 characters
+without control characters. Params are recorded on the instance and are
+immutable facts of it.
+
+A node's `dispatch.concurrency_key` is either a non-empty string or
+`{"prefix": "...", "from_instance_param": "..."}` naming a declared param.
+The templated form resolves at activation creation — the optional prefix
+followed by the instance's recorded param value — and freezes on the
+activation as a plain string, so candidate views, held-key serialization,
+and manual starts all read the same resolved key. Replay reproduces it from
+the recorded params. Templates whose keys are plain strings and that declare
+no params behave exactly as before.
+
 For a template with a `workflow` (child) action, instantiation idempotently
 creates each pinned child and freezes the composition manifest before the
-parent can execute.
+parent can execute. The parent's workflow action may pass instance params to
+the child explicitly with `params` bindings — each binding supplies either a
+literal `value` or the parent's `from_instance_param`; nothing is inherited
+implicitly.
 
 ## Driving a workflow
 
