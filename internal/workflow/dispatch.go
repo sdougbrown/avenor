@@ -264,9 +264,6 @@ func (m *Manager) BeginDispatch(req BeginDispatchRequest) (BeginDispatchResult, 
 			AdmissionRef:   req.AdmissionRef,
 		},
 	}); err != nil {
-		if errors.Is(err, errDuplicateIdempotency) {
-			return stale()
-		}
 		if errors.Is(err, errRevisionMismatch) {
 			// Another command on the same workflow committed between the read
 			// above and this commit: the candidate is stale by definition.
