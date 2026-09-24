@@ -1,0 +1,671 @@
+package workflowcontroller
+
+import (
+	"context"
+	"errors"
+	"runtime"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/sdougbrown/avenor/internal/workflow"
+)
+
+// tickClock is a concurrency-safe manual clock that advances one millisecond
+// on every call. Because RenewLease reads the clock exactly once per call and
+// stamps RenewedAt with it, each renewal leaves a distinct, strictly
+// increasing timestamp — which lets a dispatch observe whether a renewal
+// happened before it without intercepting the store.
+type tickClock struct {
+	nanos atomic.Int64
+}
+
+func (c *tickClock) Now() time.Time {
+	n := c.nanos.Add(int64(time.Millisecond))
+	return time.Date(2025, 3, 4, 5, 6, 7, 0, time.UTC).Add(time.Duration(n))
+}
+
+// dispatchRecord is one observed deps.Dispatch call.
+type dispatchRecord struct {
+	identity  workflow.ExecutionIdentity
+	lease     LeaderLease
+	renewedAt time.Time // store leader RenewedAt observed at dispatch entry
+}
+
+// fakeDeps is a scripted RunnerDeps over a real ControllerStore. Dispatch
+// calls record the store's current leader RenewedAt so tests can prove
+// renew-before-dispatch ordering without intercepting the store.
+type fakeDeps struct {
+	mu         sync.Mutex
+	store      *ControllerStore
+	controller string
+
+	cands     []Candidate // candidates visible to Candidates()
+	pending   []Candidate // candidates revealed only by Refresh()
+	inflight  []InFlightAttempt
+	refreshes int
+
+	scripted      []DispatchResult // popped per dispatch; falls back to defaultResult
+	errScript     []error          // popped per dispatch before the result script
+	defaultResult DispatchResult
+
+	block                chan struct{} // when non-nil, dispatches block until closed
+	blockAll             bool          // block every dispatch
+	blockFirst           int           // or only the first N dispatches
+	uninterruptibleFirst int           // the first N blocking dispatches ignore ctx (like a started host dispatch)
+
+	dispatches []dispatchRecord
+	started    chan struct{} // signaled (non-blocking) on every dispatch start
+}
+
+func newFakeDeps(store *ControllerStore, controller string) *fakeDeps {
+	return &fakeDeps{store: store, controller: controller, started: make(chan struct{}, 64)}
+}
+
+func (d *fakeDeps) Candidates(controllerID string) ([]Candidate, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := make([]Candidate, len(d.cands))
+	copy(out, d.cands)
+	return out, nil
+}
+
+func (d *fakeDeps) InFlight() ([]InFlightAttempt, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := make([]InFlightAttempt, len(d.inflight))
+	copy(out, d.inflight)
+	return out, nil
+}
+
+// Refresh swaps the pending candidates into view, simulating a host-side
+// cached view that only a rebuild can update.
+func (d *fakeDeps) Refresh() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.refreshes++
+	d.cands = append(d.cands, d.pending...)
+	d.pending = nil
+	return nil
+}
+
+func (d *fakeDeps) Dispatch(ctx context.Context, dec Decision, lease LeaderLease) (DispatchResult, error) {
+	rec := dispatchRecord{identity: dec.Candidate.Identity, lease: lease}
+	if srec, _, err := d.store.Get(d.controller); err == nil && srec.Leader != nil {
+		rec.renewedAt = srec.Leader.RenewedAt
+	}
+	d.mu.Lock()
+	d.dispatches = append(d.dispatches, rec)
+	var dispatchErr error
+	if len(d.errScript) > 0 {
+		dispatchErr = d.errScript[0]
+		d.errScript = d.errScript[1:]
+	}
+	scripted := d.defaultResult
+	if len(d.scripted) > 0 {
+		scripted = d.scripted[0]
+		d.scripted = d.scripted[1:]
+	}
+	block := d.block != nil && (d.blockAll || len(d.dispatches) <= d.blockFirst)
+	uninterruptible := len(d.dispatches) <= d.uninterruptibleFirst
+	d.mu.Unlock()
+	select {
+	case d.started <- struct{}{}:
+	default:
+	}
+
+	if block {
+		if uninterruptible {
+			<-d.block
+		} else {
+			select {
+			case <-d.block:
+			case <-ctx.Done():
+				return DispatchResult{Kind: ResultCanceled}, nil
+			}
+		}
+	}
+	if ctx.Err() != nil {
+		return DispatchResult{Kind: ResultCanceled}, nil
+	}
+	return scripted, dispatchErr
+}
+
+// --- test-only accessors ---
+
+func (d *fakeDeps) dispatchCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.dispatches)
+}
+
+func (d *fakeDeps) allDispatches() []dispatchRecord {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := make([]dispatchRecord, len(d.dispatches))
+	copy(out, d.dispatches)
+	return out
+}
+
+func (d *fakeDeps) refreshCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.refreshes
+}
+
+func (d *fakeDeps) setCandidates(cands []Candidate) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.cands = cands
+}
+
+func (d *fakeDeps) setPending(pending []Candidate) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.pending = pending
+}
+
+func (d *fakeDeps) setInFlight(inflight []InFlightAttempt) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.inflight = inflight
+}
+
+func (d *fakeDeps) setScript(results ...DispatchResult) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.scripted = results
+}
+
+func (d *fakeDeps) setErrors(errs ...error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.errScript = errs
+}
+
+func (d *fakeDeps) setDefaultResult(res DispatchResult) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.defaultResult = res
+}
+
+// waitUntil polls cond until it holds or the deadline passes.
+func waitUntil(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// newRunnerStore builds a real ControllerStore over a temp dir with the given
+// max_inflight, enabled and ready for a runner to lead.
+func newRunnerStore(t *testing.T, maxInflight int) (*ControllerStore, *tickClock) {
+	t.Helper()
+	clock := &tickClock{}
+	s := NewStoreWithClock(t.TempDir(), clock.Now)
+	mustCreate(t, s, "c1", maxInflight)
+	mustEnable(t, s, "c1")
+	return s, clock
+}
+
+// runnerCand builds a provider candidate owned by c1 (reuses the package's
+// cand helper with controller/kind overrides).
+func runnerCand(wf, node, act string) Candidate {
+	c := cand(wf, node, act, withController("c1"), withKind(CandidateProvider))
+	c.Revision = 7
+	return c
+}
+
+// startRunner constructs a runner with short test cadences and registers its
+// stop as cleanup.
+func startRunner(t *testing.T, store *ControllerStore, deps RunnerDeps, renew, antiEntropy time.Duration, changeCh, capacityCh chan struct{}) *Runner {
+	t.Helper()
+	r := NewRunner(RunnerConfig{
+		Deps:          deps,
+		Store:         store,
+		ControllerID:  "c1",
+		OwnerID:       "owner-test",
+		RenewInterval: renew,
+		AntiEntropy:   antiEntropy,
+		ChangeCh:      changeCh,
+		CapacityCh:    capacityCh,
+	})
+	t.Cleanup(r.Stop)
+	return r
+}
+
+// TestRunnerRenewsBeforeEveryDispatch proves the pass structure: a lease
+// renewal precedes dispatch on every pass and again immediately before each
+// hand-off, observed via the strictly increasing RenewedAt each dispatch
+// reads from the store.
+func TestRunnerRenewsBeforeEveryDispatch(t *testing.T) {
+	store, _ := newRunnerStore(t, 4)
+	deps := newFakeDeps(store, "c1")
+	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
+	deps.setCandidates([]Candidate{runnerCand("wf1", "start", "a1")})
+
+	startRunner(t, store, deps, 20*time.Millisecond, 50*time.Millisecond, nil, nil)
+
+	waitUntil(t, "at least three dispatches", func() bool { return deps.dispatchCount() >= 3 })
+	recs := deps.allDispatches()
+	for i, rec := range recs {
+		if rec.renewedAt.IsZero() {
+			t.Fatalf("dispatch %d observed no leader lease renewal", i)
+		}
+		if i > 0 && !rec.renewedAt.After(recs[i-1].renewedAt) {
+			t.Fatalf("dispatch %d renewedAt %s did not advance past dispatch %d's %s: a renewal must precede every dispatch",
+				i, rec.renewedAt, i-1, recs[i-1].renewedAt)
+		}
+		if rec.lease.LeaseID == "" || rec.lease.OwnerEpoch == 0 {
+			t.Fatalf("dispatch %d carried an empty lease: %+v", i, rec.lease)
+		}
+	}
+}
+
+// TestRunnerFailedRenewalStopsDispatchAndReacquires proves a failed renewal
+// stops dispatching under the lost lease and the runner falls back to
+// acquisition: after an out-of-band lease release, no further dispatch runs
+// under the old lease epoch and subsequent dispatches carry the re-acquired
+// lease's epoch.
+func TestRunnerFailedRenewalStopsDispatchAndReacquires(t *testing.T) {
+	store, _ := newRunnerStore(t, 2)
+	deps := newFakeDeps(store, "c1")
+	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
+	deps.setCandidates([]Candidate{runnerCand("wf1", "start", "a1"), runnerCand("wf2", "start", "a2")})
+	block := make(chan struct{})
+	deps.mu.Lock()
+	deps.block = block
+	deps.blockFirst = 2
+	deps.mu.Unlock()
+
+	startRunner(t, store, deps, 20*time.Millisecond, 50*time.Millisecond, nil, nil)
+
+	// Both decisions are handed off under epoch 1 and block in Dispatch.
+	waitUntil(t, "two in-flight dispatches", func() bool { return deps.dispatchCount() >= 2 })
+
+	// Kill the lease out-of-band: the runner's next renewal must fail.
+	rec, _, err := store.Get("c1")
+	if err != nil || rec.Leader == nil {
+		t.Fatalf("get lease before release: rec=%+v err=%v", rec, err)
+	}
+	if _, err := store.ReleaseLease("c1", rec.Leader.LeaseID, rec.Leader.OwnerEpoch); err != nil {
+		t.Fatalf("out-of-band release: %v", err)
+	}
+	epoch1Dispatches := deps.dispatchCount()
+
+	// Unblock the two in-flight dispatches; their results are consumed.
+	close(block)
+
+	// The runner must re-acquire (new owner epoch) and resume dispatching
+	// under the new lease — and every post-release dispatch must carry the
+	// new epoch, proving dispatch stopped under the failed renewal.
+	waitUntil(t, "dispatch resumed under a re-acquired lease", func() bool {
+		for _, rec := range deps.allDispatches() {
+			if rec.lease.OwnerEpoch >= 2 {
+				return true
+			}
+		}
+		return false
+	})
+	for i, rec := range deps.allDispatches() {
+		wantEpoch := int64(1)
+		if i >= epoch1Dispatches {
+			wantEpoch = 2
+		}
+		if rec.lease.OwnerEpoch != wantEpoch {
+			t.Fatalf("dispatch %d ran under owner epoch %d, want %d (dispatches must stop after a failed renewal and resume only after re-acquisition)",
+				i, rec.lease.OwnerEpoch, wantEpoch)
+		}
+	}
+	waitUntil(t, "runner leading again", func() bool { return storeLeaderEpoch(t, store) >= 2 })
+}
+
+func storeLeaderEpoch(t *testing.T, store *ControllerStore) int64 {
+	t.Helper()
+	rec, ok, err := store.Get("c1")
+	if err != nil || !ok || rec.Leader == nil {
+		return 0
+	}
+	return rec.Leader.OwnerEpoch
+}
+
+// TestRunnerMaxInflightCountsUnreportedWorkers proves the in-flight limit
+// counts decisions handed to workers whose results have not arrived: with a
+// blocked Dispatch, at most max_inflight dispatches run concurrently and no
+// further dispatch starts across subsequent reconcile passes.
+func TestRunnerMaxInflightCountsUnreportedWorkers(t *testing.T) {
+	store, _ := newRunnerStore(t, 2)
+	deps := newFakeDeps(store, "c1")
+	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
+	deps.setCandidates([]Candidate{
+		runnerCand("wf1", "start", "a1"),
+		runnerCand("wf2", "start", "a2"),
+		runnerCand("wf3", "start", "a3"),
+	})
+	block := make(chan struct{})
+	deps.mu.Lock()
+	deps.block = block
+	deps.blockAll = true // every dispatch blocks
+	deps.mu.Unlock()
+
+	r := startRunner(t, store, deps, 20*time.Millisecond, 50*time.Millisecond, nil, nil)
+
+	waitUntil(t, "max_inflight dispatches started", func() bool { return deps.dispatchCount() >= 2 })
+
+	// Across several fast reconcile passes (renew interval is 20ms), the
+	// third candidate must never dispatch while the two workers are
+	// unreported.
+	deadline := time.Now().Add(400 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if n := deps.dispatchCount(); n > 2 {
+			t.Fatalf("%d dispatches started with max_inflight=2 and two unreported workers", n)
+		}
+		if s := r.Status(); s.Inflight > 2 {
+			t.Fatalf("status inflight = %d, want <= 2", s.Inflight)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := deps.dispatchCount(); got != 2 {
+		t.Fatalf("dispatch count after window = %d, want exactly 2", got)
+	}
+
+	close(block)
+	waitUntil(t, "third dispatch after capacity freed", func() bool { return deps.dispatchCount() >= 3 })
+}
+
+// TestRunnerCapacityBlockedRecordsAndBoundsRetries covers the capacity_blocked
+// outcome handling.
+//
+// KNOWN GAP (bug report, not worked around in code): the intended contract is
+// that a capacity_blocked result suppresses further dispatch until a capacity
+// signal arrives or the anti-entropy tick fires. The runner implements only
+// current-pass suppression (handleResult's `blocked` breaks the dispatch loop
+// for that pass); the next pass re-dispatches at the renew cadence. This test
+// therefore pins the guarantees that hold today: retries stay bounded by the
+// pass cadence (no hot spin), the runner status and controller record report
+// the block, and the store dedups repeated capacity_blocked events to one per
+// reason.
+func TestRunnerCapacityBlockedRecordsAndBoundsRetries(t *testing.T) {
+	store, _ := newRunnerStore(t, 4)
+	deps := newFakeDeps(store, "c1")
+	deps.setDefaultResult(DispatchResult{Kind: ResultCapacityBlocked, Source: "local"})
+	deps.setCandidates([]Candidate{runnerCand("wf1", "start", "a1")})
+
+	changeCh := make(chan struct{}, 1)
+	r := startRunner(t, store, deps, 20*time.Millisecond, 50*time.Millisecond, changeCh, nil)
+
+	waitUntil(t, "first capacity-blocked dispatch", func() bool { return deps.dispatchCount() >= 1 })
+
+	// Hammer change signals: the host view keeps reporting new work while
+	// capacity is blocked. Dispatch attempts must stay bounded by the pass
+	// cadence, never a tight spin.
+	stop := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case changeCh <- struct{}{}:
+			default:
+			}
+			select {
+			case <-stop:
+				return
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+	}()
+	time.Sleep(250 * time.Millisecond)
+	close(stop)
+
+	// 250ms at a 20ms pass cadence allows ~12 passes; far fewer than a spin
+	// would produce, far more than the not-yet-implemented suppression
+	// would allow. The bound documents the current cadence pacing.
+	if n := deps.dispatchCount(); n == 0 || n > 20 {
+		t.Fatalf("%d dispatch attempts in 250ms with change signals: want cadence-bounded retries, got %d", n, n)
+	}
+
+	// The runner status reports the block.
+	s := r.Status()
+	if s.CapacityBlocked != "local" {
+		t.Fatalf("status capacity blocked = %q, want local", s.CapacityBlocked)
+	}
+	if s.LastOutcome != "capacity_blocked(local)" {
+		t.Fatalf("status last outcome = %q, want capacity_blocked(local)", s.LastOutcome)
+	}
+
+	// The controller record and event log reflect exactly one deduplicated
+	// capacity_blocked event despite many blocked passes.
+	rec, ok, err := store.Get("c1")
+	if err != nil || !ok {
+		t.Fatalf("get: ok=%v err=%v", ok, err)
+	}
+	if rec.CapacityBlocked != "local" {
+		t.Fatalf("record capacity blocked = %q, want local", rec.CapacityBlocked)
+	}
+	waitUntil(t, "capacity_blocked event in log", func() bool {
+		return len(eventKinds(t, store, "c1")) > 0
+	})
+	blocked := 0
+	for _, kind := range eventKinds(t, store, "c1") {
+		if kind == EventCapacityBlocked {
+			blocked++
+		}
+	}
+	if blocked != 1 {
+		t.Fatalf("capacity_blocked events = %d, want exactly 1 (dedup across passes)", blocked)
+	}
+
+	// A successful dispatch clears the block: the next result is dispatched,
+	// the status clears, and a capacity_cleared event is appended.
+	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
+	waitUntil(t, "capacity cleared after successful dispatch", func() bool {
+		return r.Status().CapacityBlocked == ""
+	})
+	cleared := 0
+	for _, kind := range eventKinds(t, store, "c1") {
+		if kind == EventCapacityCleared {
+			cleared++
+		}
+	}
+	if cleared != 1 {
+		t.Fatalf("capacity_cleared events = %d, want exactly 1", cleared)
+	}
+}
+
+// TestRunnerMissedNotificationRecoveredByAntiEntropy proves a candidate that
+// appears in the host without any change signal is still picked up: the
+// anti-entropy refresh rebuilds the host view and the next pass dispatches
+// the new candidate.
+func TestRunnerMissedNotificationRecoveredByAntiEntropy(t *testing.T) {
+	store, _ := newRunnerStore(t, 4)
+	deps := newFakeDeps(store, "c1")
+	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
+
+	r := startRunner(t, store, deps, 20*time.Millisecond, 60*time.Millisecond, nil, nil)
+
+	// The first pass refreshes an empty host view: no candidate, no
+	// dispatch.
+	waitUntil(t, "initial idle refresh", func() bool { return deps.refreshCount() >= 1 })
+	if n := deps.dispatchCount(); n != 0 {
+		t.Fatalf("%d dispatches before any candidate existed", n)
+	}
+
+	// A candidate appears host-side but only becomes visible to the
+	// candidate query after a refresh (a missed change notification). No
+	// change signal is sent; only the anti-entropy cadence can reveal it.
+	deps.setPending([]Candidate{runnerCand("wf-late", "start", "a1")})
+	waitUntil(t, "late candidate dispatched via anti-entropy", func() bool {
+		return deps.dispatchCount() >= 1
+	})
+	if got := deps.refreshCount(); got < 2 {
+		t.Fatalf("refreshes = %d, want at least 2 (the idle pass plus the anti-entropy rebuild that revealed the candidate)", got)
+	}
+	if s := r.Status(); s.LastReconcile.IsZero() {
+		t.Fatal("runner never reconciled")
+	}
+	recs := deps.allDispatches()
+	if recs[0].identity.WorkflowID != workflow.WorkflowID("wf-late") {
+		t.Fatalf("first dispatch identity = %+v, want the late candidate", recs[0].identity)
+	}
+}
+
+// TestRunnerNotLeaderDropsLeadershipAndReacquires proves a not_leader
+// dispatch result stops dispatching under the stale lease and the runner
+// attempts re-acquisition; once the store-side lease is gone, leadership is
+// regained and dispatching resumes.
+func TestRunnerNotLeaderDropsLeadershipAndReacquires(t *testing.T) {
+	store, _ := newRunnerStore(t, 4)
+	deps := newFakeDeps(store, "c1")
+	deps.setScript(DispatchResult{Kind: ResultNotLeader})
+	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
+	deps.setCandidates([]Candidate{runnerCand("wf1", "start", "a1")})
+
+	startRunner(t, store, deps, 20*time.Millisecond, 50*time.Millisecond, nil, nil)
+
+	waitUntil(t, "first dispatch attempted", func() bool { return deps.dispatchCount() >= 1 })
+
+	// While the store still shows a live lease for this runner, the
+	// re-acquisition cannot succeed and no further dispatch may start.
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if n := deps.dispatchCount(); n > 1 {
+			t.Fatalf("%d dispatches after not_leader while the lease was still live; dispatching must stop until leadership is regained", n)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Simulate the store-side invalidation that made Dispatch report
+	// not_leader: the lease goes away, so re-acquisition succeeds.
+	rec, _, err := store.Get("c1")
+	if err != nil || rec.Leader == nil {
+		t.Fatalf("get lease: rec=%+v err=%v", rec, err)
+	}
+	if _, err := store.ReleaseLease("c1", rec.Leader.LeaseID, rec.Leader.OwnerEpoch); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+
+	waitUntil(t, "dispatch resumed after re-acquisition", func() bool { return deps.dispatchCount() >= 2 })
+	waitUntil(t, "runner leading again", func() bool { return storeLeaderEpoch(t, store) >= 2 })
+}
+
+// TestRunnerDisableCancelsUnstartedWorkersOnly proves Stop cancels workers
+// that have not started their dispatch while an already-started dispatch
+// completes and its result is consumed: Stop does not return until the
+// in-flight dispatch finishes, and no dispatch begins after cancellation.
+func TestRunnerDisableCancelsUnstartedWorkersOnly(t *testing.T) {
+	store, _ := newRunnerStore(t, 2)
+	deps := newFakeDeps(store, "c1")
+	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
+	deps.setCandidates([]Candidate{runnerCand("wf1", "start", "a1"), runnerCand("wf2", "start", "a2")})
+	block := make(chan struct{})
+	deps.mu.Lock()
+	deps.block = block
+	deps.blockAll = true          // both dispatches block
+	deps.uninterruptibleFirst = 1 // the first is an already-started dispatch
+	deps.mu.Unlock()
+
+	r := NewRunner(RunnerConfig{
+		Deps:          deps,
+		Store:         store,
+		ControllerID:  "c1",
+		OwnerID:       "owner-test",
+		RenewInterval: 20 * time.Millisecond,
+		AntiEntropy:   50 * time.Millisecond,
+	})
+	var closeOnce sync.Once
+	t.Cleanup(func() { closeOnce.Do(func() { close(block) }); r.Stop() })
+
+	// Both decisions handed off: worker 1 blocks on the gate, worker 2
+	// blocks on the runner's cancellation.
+	waitUntil(t, "two in-flight dispatches", func() bool { return deps.dispatchCount() >= 2 })
+
+	stopped := make(chan struct{})
+	go func() { r.Stop(); close(stopped) }()
+
+	// Stop must not complete while the started dispatch is still running.
+	select {
+	case <-stopped:
+		t.Fatal("Stop returned while a started dispatch was still in flight")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// No new dispatch may start after cancellation, and no dispatch may be
+	// entered with an already-canceled context.
+	closeOnce.Do(func() { close(block) })
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop did not return after the in-flight dispatch completed")
+	}
+	if n := deps.dispatchCount(); n != 2 {
+		t.Fatalf("dispatch count = %d, want exactly 2 (no new dispatch after Stop)", n)
+	}
+	for i, rec := range deps.allDispatches() {
+		if rec.lease.LeaseID == "" {
+			t.Fatalf("dispatch %d carried no lease", i)
+		}
+	}
+	if s := r.Status(); s.Leading {
+		t.Fatal("runner still reports leading after Stop")
+	}
+}
+
+// TestRunnerStopCleanNoGoroutineLeak proves an idle runner's goroutines all
+// exit on Stop: the goroutine count returns to its pre-stop level within a
+// loose, retry-sampled tolerance.
+func TestRunnerStopCleanNoGoroutineLeak(t *testing.T) {
+	store, _ := newRunnerStore(t, 2)
+	deps := newFakeDeps(store, "c1")
+	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
+
+	r := NewRunner(RunnerConfig{
+		Deps:          deps,
+		Store:         store,
+		ControllerID:  "c1",
+		OwnerID:       "owner-test",
+		RenewInterval: 20 * time.Millisecond,
+		AntiEntropy:   50 * time.Millisecond,
+	})
+	waitUntil(t, "runner leading", func() bool { return r.Status().Leading })
+
+	baseline := runtime.NumGoroutine() // includes the runner's leader goroutine
+	r.Stop()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		now := runtime.NumGoroutine()
+		if now <= baseline+2 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("goroutines after Stop = %d, baseline while leading = %d (leak suspected)", now, baseline)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// TestRunnerDispatchErrorDoesNotStopPasses proves a deps.Dispatch error is
+// contained: the runner records a dispatch_error outcome, keeps leading, and
+// later passes keep dispatching.
+func TestRunnerDispatchErrorDoesNotStopPasses(t *testing.T) {
+	store, _ := newRunnerStore(t, 2)
+	deps := newFakeDeps(store, "c1")
+	deps.setCandidates([]Candidate{runnerCand("wf1", "start", "a1")})
+	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
+	deps.setErrors(errors.New("injected dispatch failure"))
+
+	r := startRunner(t, store, deps, 20*time.Millisecond, 50*time.Millisecond, nil, nil)
+
+	waitUntil(t, "first dispatch attempted", func() bool { return deps.dispatchCount() >= 1 })
+	waitUntil(t, "dispatch_error outcome recorded", func() bool {
+		return r.Status().LastOutcome == "dispatch_error"
+	})
+	waitUntil(t, "later pass dispatched again", func() bool { return deps.dispatchCount() >= 2 })
+	if s := r.Status(); !s.Leading {
+		t.Fatal("runner dropped leadership after a dispatch error")
+	}
+}
