@@ -303,6 +303,61 @@ func (f *pollFixture) gateInstances(t *testing.T) []workflow.GateInstance {
 	return f.workflowInstance(t).Gates
 }
 
+// TestControllerRunnerReseedsParkedCursor proves the anti-entropy pass
+// repairs a lost poll cursor: an activation parked through the manager
+// directly with no cursor (the state after a crash between the park commit
+// and cursor creation) gets its cursor re-seeded by a freshly started runner
+// and the gate is polled.
+func TestControllerRunnerReseedsParkedCursor(t *testing.T) {
+	f := newPollFixture(t, "poll-reseed", "poll-reseed-tmpl",
+		map[string]string{"gh-review": "passed.sh"},
+		[]map[string]any{{"id": "pr-review", "type": "external", "required": true, "adapter_id": "gh-review"}})
+	// Stop the leader loop so the park below lands through the manager
+	// directly, without the runner's post-park cursor creation.
+	f.sup.stopControllerLoop("c1")
+	f.drivePublication(t, "sdougbrown/avenor", 143, "cc793f7")
+
+	// Park the ready review activation under a manually acquired leader
+	// lease, then release the lease: awaiting_gate, no cursor anywhere.
+	inst := f.workflowInstance(t)
+	act := f.activationByNode(t, "review")
+	rec, granted, err := f.cstore.AcquireLease("c1", "park-owner")
+	if err != nil || !granted {
+		t.Fatalf("acquire lease: granted=%v err=%v", granted, err)
+	}
+	parkErr := f.cstore.WithLeader("c1", rec.Leader.LeaseID, rec.Leader.OwnerEpoch, func() error {
+		_, err := f.mgr.ParkExternal(workflow.ParkExternalRequest{
+			WorkflowID:       workflow.WorkflowID(f.wf),
+			NodeID:           "review",
+			ActivationID:     act.ID,
+			ExpectedRevision: inst.Revision,
+			ControllerID:     "c1",
+			LeaderLeaseID:    rec.Leader.LeaseID,
+		})
+		return err
+	})
+	if parkErr != nil {
+		t.Fatalf("park external: %v", parkErr)
+	}
+	if _, err := f.cstore.ReleaseLease("c1", rec.Leader.LeaseID, rec.Leader.OwnerEpoch); err != nil {
+		t.Fatalf("release lease: %v", err)
+	}
+	f.waitReviewStatus(t, workflow.ActivationAwaitingGate)
+	if _, ok := f.findCursor("pr-review"); ok {
+		t.Fatalf("cursor exists before the runner re-seeds it")
+	}
+
+	// A fresh runner re-seeds the missing cursor on its first anti-entropy
+	// pass and polls the gate; the adapter drives the success outcome.
+	f.sup.startControllerLoop(f.cstore, "c1")
+	f.waitCursor(t, "pr-review")
+	waitFor(t, "re-seeded cursor polled", func() bool {
+		c, ok := f.findCursor("pr-review")
+		return ok && c.PollCount >= 1
+	})
+	f.waitReviewStatus(t, workflow.ActivationSatisfied)
+}
+
 // TestControllerPollAutoParkPassesWithEvidence proves the full happy path:
 // the review activation parks automatically after publication completes
 // (no attempt, no admission), the registered passed adapter drives the

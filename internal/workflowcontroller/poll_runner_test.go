@@ -167,6 +167,57 @@ func TestRunnerParkSeedsCursorCommitsBeforeInvoke(t *testing.T) {
 	}
 }
 
+// TestRunnerReseedsMissingPollCursor proves the anti-entropy pass repairs a
+// lost cursor: a gate already parked awaiting_gate with no cursor (a crash
+// between the park commit and cursor creation) is re-seeded on the pass that
+// refreshes and then polled, and later passes never reset the live cursor.
+func TestRunnerReseedsMissingPollCursor(t *testing.T) {
+	store, clock := newManualRunnerStore(t)
+	deps := newFakeDeps(store, "c1")
+	// No candidate and no cursor: the activation is parked awaiting_gate and
+	// only ParkedGates knows about its gate.
+	deps.setParked([]PollSeed{pollSeed()})
+	poller := &fakePoller{store: store, defaultPoll: pendingResult}
+	pollRunner(t, store, deps, poller, clock.Now)
+
+	waitUntil(t, "missing cursor re-seeded", func() bool {
+		_, ok, _ := store.NextPollTime("c1")
+		return ok
+	})
+	deps.mu.Lock()
+	calls := deps.parkedCalls
+	deps.mu.Unlock()
+	if calls == 0 {
+		t.Fatalf("ParkedGates was never consulted")
+	}
+	earliest, ok, _ := store.NextPollTime("c1")
+	if !ok || !earliest.Equal(clock.Now().Add(pollBaseDelay)) {
+		t.Fatalf("re-seeded first poll at %v, want %v", earliest, clock.Now().Add(pollBaseDelay))
+	}
+	clock.Advance(pollBaseDelay + time.Second)
+	waitUntil(t, "re-seeded gate polled", func() bool { return poller.pollCount() > 0 })
+
+	// The cursor is live: further passes skip it (a ParkedGates failure
+	// leaves it untouched) and its backoff schedule survives.
+	rec, _, _ := store.Get("c1")
+	live := rec.PollCursors[PollCursorKey(pollSeedCursor())]
+	if live == nil || live.RetryCount != 1 {
+		t.Fatalf("cursor after first poll = %+v, want retry count 1", live)
+	}
+	deps.setParkedErr(errors.New("parked gates unavailable"))
+	clock.Advance(2 * defaultAntiEntropy)
+	rec, _, _ = store.Get("c1")
+	after := rec.PollCursors[PollCursorKey(pollSeedCursor())]
+	if after.RetryCount != live.RetryCount || !after.NextPollAt.Equal(live.NextPollAt) {
+		t.Fatalf("cursor disturbed by re-seed pass: %+v, want %+v", after, live)
+	}
+	clock.Advance(60 * time.Second)
+	waitRetryCount(t, store, 2)
+	if polls := poller.pollCount(); polls != 2 {
+		t.Fatalf("poll count = %d, want the re-seeded schedule intact (2 polls)", polls)
+	}
+}
+
 // pollSeedCursor rebuilds the test seed's cursor for poll ID derivation.
 func pollSeedCursor() PollCursor {
 	s := pollSeed()

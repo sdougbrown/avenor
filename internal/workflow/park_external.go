@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 )
 
 // ErrUnresolvedBinding reports an auto external activation whose required
@@ -218,6 +219,86 @@ func (m *Manager) ParkExternal(req ParkExternalRequest) (ParkExternalResult, err
 		}, nil
 	}
 	return ParkExternalResult{}, fmt.Errorf("park external %s/%s: revision kept moving under concurrent commands", req.WorkflowID, req.NodeID)
+}
+
+// ParkedGateRef identifies one pollable external gate on a parked awaiting_gate
+// auto external activation: the seed a controller re-creates its poll cursor
+// from.
+type ParkedGateRef struct {
+	WorkflowID   WorkflowID
+	NodeID       NodeID
+	ActivationID ActivationID
+	GateID       GateID
+	AdapterID    string
+	SubjectHash  string
+}
+
+// ParkedExternalGates returns, read-only from the recovered candidate index,
+// every resolved bound required external gate of controllerID's parked
+// awaiting_gate auto external activations. A gate whose pins are unresolved
+// is skipped: a parked activation never carries one, and re-reporting it is
+// the park path's ErrUnresolvedBinding job. Templates load under the index
+// lock, matching RebuildCandidateIndex's full-catalog precedent.
+func (m *Manager) ParkedExternalGates(controllerID string) ([]ParkedGateRef, error) {
+	m.candidateMu.Lock()
+	defer m.candidateMu.Unlock()
+	if !m.candidatesOK {
+		return nil, ErrCandidatesNotRecovered
+	}
+	ids := make([]WorkflowID, 0, len(m.candidates))
+	for id := range m.candidates {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	refs := make([]ParkedGateRef, 0)
+	templates := make(map[WorkflowID]*Template, len(ids))
+	for _, wf := range ids {
+		snap := m.candidates[wf]
+		if isTerminalStatus(snap.Instance.Status) {
+			continue
+		}
+		for i := range snap.Instance.Activations {
+			act := &snap.Instance.Activations[i]
+			if act.Status != ActivationAwaitingGate || act.Dispatch == nil {
+				continue
+			}
+			policy := *act.Dispatch
+			if !policy.IsAuto() || policy.ControllerID != controllerID || policy.ActionKind != ActionExternal {
+				continue
+			}
+			tmpl, ok := templates[wf]
+			if !ok {
+				loaded, err := m.templateFor(&snap)
+				if err != nil {
+					return nil, err
+				}
+				templates[wf] = loaded
+				tmpl = loaded
+			}
+			node, err := findNode(tmpl, act.NodeID)
+			if err != nil {
+				return nil, err
+			}
+			for _, gate := range node.Gates {
+				if gate.Type != GateExternal || !gate.Required {
+					continue
+				}
+				resolved, ok := act.ResolvedGates[gate.ID]
+				if !ok || resolved.Subject == nil || len(resolved.Unresolved) > 0 {
+					continue
+				}
+				refs = append(refs, ParkedGateRef{
+					WorkflowID:   wf,
+					NodeID:       act.NodeID,
+					ActivationID: act.ID,
+					GateID:       gate.ID,
+					AdapterID:    gate.AdapterID,
+					SubjectHash:  SubjectHash(resolved.Subject),
+				})
+			}
+		}
+	}
+	return refs, nil
 }
 
 // ParkedGateSubject returns the pinned subject of a bound external gate

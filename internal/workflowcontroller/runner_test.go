@@ -58,6 +58,10 @@ type fakeDeps struct {
 	unresolved       bool // dispatches return ResultUnresolvedBinding
 	unresolvedDetail string
 
+	parked      []PollSeed // seeds reported by ParkedGates()
+	parkedErr   error      // error returned by ParkedGates()
+	parkedCalls int        // number of ParkedGates() calls
+
 	block                chan struct{} // when non-nil, dispatches block until closed
 	blockAll             bool          // block every dispatch
 	blockFirst           int           // or only the first N dispatches
@@ -96,6 +100,15 @@ func (d *fakeDeps) Refresh() error {
 	d.cands = append(d.cands, d.pending...)
 	d.pending = nil
 	return d.refreshErr
+}
+
+func (d *fakeDeps) ParkedGates(controllerID string) ([]PollSeed, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.parkedCalls++
+	out := make([]PollSeed, len(d.parked))
+	copy(out, d.parked)
+	return out, d.parkedErr
 }
 
 func (d *fakeDeps) Dispatch(ctx context.Context, dec Decision, lease LeaderLease) (DispatchResult, error) {
@@ -184,6 +197,21 @@ func (d *fakeDeps) setInFlight(inflight []InFlightAttempt) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.inflight = inflight
+}
+
+// setParked scripts the seeds ParkedGates reports (the parked awaiting_gate
+// activations a re-seeding pass reads).
+func (d *fakeDeps) setParked(seeds []PollSeed) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.parked = seeds
+}
+
+// setParkedErr scripts a ParkedGates failure.
+func (d *fakeDeps) setParkedErr(err error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.parkedErr = err
 }
 
 func (d *fakeDeps) setScript(results ...DispatchResult) {

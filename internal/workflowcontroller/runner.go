@@ -74,6 +74,10 @@ type RunnerDeps interface {
 	// Refresh rebuilds any host-side cached view the candidate and in-flight
 	// queries read from.
 	Refresh() error
+	// ParkedGates returns one seed per resolved bound required external gate
+	// on the controller's parked awaiting_gate activations. The runner
+	// re-seeds missing poll cursors from it on every anti-entropy pass.
+	ParkedGates(controllerID string) ([]PollSeed, error)
 	// Dispatch dispatches one selected candidate under the runner's lease.
 	Dispatch(ctx context.Context, d Decision, lease LeaderLease) (DispatchResult, error)
 }
@@ -307,6 +311,42 @@ func (r *Runner) buildInflightView(inflight []InFlightAttempt) []InFlightAttempt
 
 // loop is the leader goroutine: it acquires and holds the controller's lease
 // and runs reconcile passes while leading.
+// seedCursor builds the poll cursor a poll seed stands for.
+func seedCursor(seed PollSeed) PollCursor {
+	return PollCursor{
+		WorkflowID:   seed.WorkflowID,
+		NodeID:       seed.NodeID,
+		ActivationID: seed.ActivationID,
+		GateID:       seed.GateID,
+		AdapterID:    seed.AdapterID,
+		SubjectHash:  seed.SubjectHash,
+	}
+}
+
+// reseedPollCursors re-creates poll cursors for parked external gates whose
+// cursor is missing. A crash or a failed EnsurePollCursor between a park
+// commit and cursor creation would otherwise strand the activation in
+// awaiting_gate with nothing polling it; the anti-entropy pass repairs that.
+// EnsurePollCursor is idempotent, so an existing cursor is never reset; the
+// known cursor keys only prune the work.
+func (r *Runner) reseedPollCursors(existing map[string]*PollCursor) {
+	seeds, err := r.deps.ParkedGates(r.controllerID)
+	if err != nil {
+		log.Printf("workflow controller %s: parked gates: %v", r.controllerID, err)
+		r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "parked_gates_error" })
+		return
+	}
+	for _, seed := range seeds {
+		cursor := seedCursor(seed)
+		if _, ok := existing[PollCursorKey(cursor)]; ok {
+			continue
+		}
+		if _, _, err := r.store.EnsurePollCursor(r.controllerID, cursor, r.now().Add(r.pollBase)); err != nil {
+			log.Printf("workflow controller %s: ensure poll cursor %s: %v", r.controllerID, PollCursorKey(cursor), err)
+		}
+	}
+}
+
 func (r *Runner) loop() {
 	defer close(r.done)
 	defer r.clearLeadStatus()
@@ -395,14 +435,7 @@ func (r *Runner) loop() {
 			lostLead = true
 		case ResultParked:
 			for _, seed := range res.result.PollSeeds {
-				cursor := PollCursor{
-					WorkflowID:   seed.WorkflowID,
-					NodeID:       seed.NodeID,
-					ActivationID: seed.ActivationID,
-					GateID:       seed.GateID,
-					AdapterID:    seed.AdapterID,
-					SubjectHash:  seed.SubjectHash,
-				}
+				cursor := seedCursor(seed)
 				if _, _, err := r.store.EnsurePollCursor(r.controllerID, cursor, r.now().Add(r.pollBase)); err != nil {
 					log.Printf("workflow controller %s: ensure poll cursor %s: %v", r.controllerID, PollCursorKey(cursor), err)
 				}
@@ -611,6 +644,11 @@ func (r *Runner) loop() {
 			}
 			lastRefresh = r.now()
 			refreshed = true
+			// The same pass that refreshes re-seeds poll cursors lost to a
+			// crash between a park commit and cursor creation.
+			if r.poll != nil {
+				r.reseedPollCursors(rec.PollCursors)
+			}
 		}
 		// A capacity-change signal or an anti-entropy pass clears a persisted
 		// capacity block; the pass that clears it dispatches again.
