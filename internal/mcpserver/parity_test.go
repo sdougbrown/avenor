@@ -22,8 +22,9 @@ var tsToolNames = []string{
 }
 
 // workflowToolNames lists the six Go-only MCP workflow tools (Stage 14) plus
-// the five Go-only MCP workflow-controller tools. These have no TypeScript
-// reference yet; JS host parity is deferred to Stage 15.
+// the five MCP workflow-controller tools. The controller tools now have
+// TypeScript references in the mcp, opencode, and pi packages; the six
+// workflow tools remain Go-only.
 var workflowToolNames = []string{
 	"avenor_workflow_status",
 	"avenor_workflow_wait",
