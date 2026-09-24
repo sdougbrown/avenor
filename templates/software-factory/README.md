@@ -76,14 +76,15 @@ templates/software-factory/
   teams/
     verification.json    team config for the verification node
     reverify.json        team config for the reverify node
+  roster.json            roster entries the node assignments resolve through
   fixtures/              example request files (controller, work items, stack)
   adapters/              example trusted-adapter manifests (placeholder executables)
 ```
 
-The template's `prompt_file`, `loop_file`, and `team_file` references are
-resolved relative to the stable supervisor's working directory at dispatch
-time. Run the supervisor with this directory as its working directory (or copy
-the fixtures and adjust the paths).
+The template's `prompt_file`, `loop_file`, `team_file`, and `roster_file`
+references are resolved relative to the stable supervisor's working directory
+at dispatch time. Run the supervisor with this directory as its working
+directory (or copy the fixtures and adjust the paths).
 
 ## Using the template
 

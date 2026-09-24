@@ -28,7 +28,7 @@
       "name": "Assessment",
       "dependencies": ["intake"],
       "action": { "type": "run", "prompt_file": "prompts/assessment.md" },
-      "assignment": { "role": "assessor", "roster_entry": "assessor" },
+      "assignment": { "role": "assessor", "roster_file": "roster.json", "roster_entry": "assessor", "thinking": "high" },
       "dispatch": {
         "mode": "auto",
         "controller_id": "software-factory",
@@ -49,7 +49,7 @@
       "name": "Draft plan",
       "dependencies": ["assessment"],
       "action": { "type": "run", "prompt_file": "prompts/draft-plan.md" },
-      "assignment": { "role": "planner", "roster_entry": "planner" },
+      "assignment": { "role": "planner", "roster_file": "roster.json", "roster_entry": "planner", "thinking": "high" },
       "dispatch": {
         "mode": "auto",
         "controller_id": "software-factory",
@@ -70,7 +70,7 @@
       "name": "Hardening",
       "dependencies": ["draft-plan"],
       "action": { "type": "run", "prompt_file": "prompts/hardening.md" },
-      "assignment": { "role": "hardener", "roster_entry": "hardener" },
+      "assignment": { "role": "hardener", "roster_file": "roster.json", "roster_entry": "hardener", "thinking": "high" },
       "dispatch": { "mode": "manual" },
       "outputs": [
         { "id": "hardened_plan", "name": "Hardened plan", "type": "file", "required": true }
@@ -86,7 +86,7 @@
       "name": "Execution",
       "dependencies": ["hardening"],
       "action": { "type": "loop", "loop_file": "loops/execution.json" },
-      "assignment": { "role": "executor", "roster_entry": "executor" },
+      "assignment": { "role": "executor", "roster_file": "roster.json", "roster_entry": "executor", "thinking": "medium" },
       "dispatch": {
         "mode": "auto",
         "controller_id": "software-factory",
@@ -107,7 +107,7 @@
       "name": "Tests + independent review",
       "dependencies": ["execution"],
       "action": { "type": "team", "team_file": "teams/verification.json" },
-      "assignment": { "role": "reviewer", "roster_entry": "reviewer" },
+      "assignment": { "role": "reviewer", "roster_file": "roster.json", "roster_entry": "reviewer", "thinking": "medium" },
       "dispatch": {
         "mode": "auto",
         "controller_id": "software-factory",
@@ -128,7 +128,7 @@
       "name": "Publication",
       "dependencies": ["verification"],
       "action": { "type": "run", "prompt_file": "prompts/publication.md" },
-      "assignment": { "role": "publisher", "roster_entry": "publisher" },
+      "assignment": { "role": "publisher", "roster_file": "roster.json", "roster_entry": "publisher", "thinking": "medium" },
       "dispatch": {
         "mode": "auto",
         "controller_id": "software-factory",
@@ -227,7 +227,7 @@
       "name": "Correction",
       "dependencies": ["review"],
       "action": { "type": "run", "prompt_file": "prompts/correction.md" },
-      "assignment": { "role": "executor", "roster_entry": "executor" },
+      "assignment": { "role": "executor", "roster_file": "roster.json", "roster_entry": "executor", "thinking": "medium" },
       "dispatch": {
         "mode": "auto",
         "controller_id": "software-factory",
@@ -248,7 +248,7 @@
       "name": "Reverify",
       "dependencies": ["correction"],
       "action": { "type": "team", "team_file": "teams/reverify.json" },
-      "assignment": { "role": "reviewer", "roster_entry": "reviewer" },
+      "assignment": { "role": "reviewer", "roster_file": "roster.json", "roster_entry": "reviewer", "thinking": "medium" },
       "dispatch": {
         "mode": "auto",
         "controller_id": "software-factory",
@@ -314,7 +314,7 @@
       "name": "Reconciliation",
       "dependencies": ["merge-auth"],
       "action": { "type": "run", "prompt_file": "prompts/reconciliation.md" },
-      "assignment": { "role": "reconciler", "roster_entry": "reconciler" },
+      "assignment": { "role": "reconciler", "roster_file": "roster.json", "roster_entry": "reconciler", "thinking": "medium" },
       "dispatch": {
         "mode": "auto",
         "controller_id": "software-factory",

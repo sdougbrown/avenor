@@ -31,9 +31,9 @@ import (
 const factoryTemplateDir = "../../templates/software-factory"
 
 // factoryWorkTemplateJSON loads the shipped work template and rewrites its
-// prompt_file/loop_file/team_file references to absolute repo paths so the
-// template dispatches from the test's working directory without modification
-// of the shipped fixture.
+// prompt_file/loop_file/team_file/roster_file references to absolute repo
+// paths so the template dispatches from the test's working directory without
+// modification of the shipped fixture.
 func factoryWorkTemplateJSON(t *testing.T) []byte {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join(factoryTemplateDir, "work.json"))
@@ -62,6 +62,11 @@ func factoryWorkTemplateJSON(t *testing.T) []byte {
 		}
 		if rel, ok := action["team_file"].(string); ok {
 			action["team_file"] = abs(rel)
+		}
+		if assignment, ok := node["assignment"].(map[string]any); ok {
+			if rel, ok := assignment["roster_file"].(string); ok {
+				assignment["roster_file"] = abs(rel)
+			}
 		}
 	}
 	out, err := json.Marshal(template)

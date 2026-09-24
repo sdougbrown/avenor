@@ -1,20 +1,22 @@
 package stable
 
 // workflow_factory_selection_test.go audits roster selection pinning for the
-// software-factory factory fixtures (Stage 8): automatic dispatch pins the
-// effective backend, agent, model, thinking, and roster digest on the
-// activation; retries inherit the pinned selection and conflicting
-// selections are rejected; and a declared reroute creates a fresh activation
-// that can pin a different selection while the rerouted activation keeps
-// its own. The roster entry is resolved through the same rosterconfig
-// fixtures the spawn path uses.
+// software-factory factory fixtures (Stage 8): automatic dispatch resolves
+// the node's declared assignment through the supervisor's roster resolution
+// path and pins the effective backend, agent, model, thinking, and roster
+// digest on the activation; retries inherit the pinned selection and
+// conflicting selections are rejected; a declared reroute creates a fresh
+// activation that can pin a different selection while the rerouted
+// activation keeps its own; and a resolution failure is a start_failed-class
+// outcome with no attempt recorded.
 
 import (
+	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/sdougbrown/avenor/internal/rosterconfig"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/workflow"
 	"github.com/sdougbrown/avenor/internal/workflowcontroller"
@@ -22,8 +24,9 @@ import (
 
 // factorySelectionTemplateJSON is a factory-shaped template: a manual intake
 // node hands off to an auto-dispatched assessment run node that reroutes to a
-// publication run node on its ready outcome.
-func factorySelectionTemplateJSON(t *testing.T, templateID string, ttlSeconds int) []byte {
+// publication run node on its ready outcome. Both provider nodes declare
+// roster-backed assignments resolved at dispatch time.
+func factorySelectionTemplateJSON(t *testing.T, templateID string, ttlSeconds int, rosterPath string) []byte {
 	policy := map[string]any{"mode": "auto", "controller_id": "c1", "priority": 30}
 	template := map[string]any{
 		"schema_version":   1,
@@ -42,7 +45,9 @@ func factorySelectionTemplateJSON(t *testing.T, templateID string, ttlSeconds in
 				"id":           "assessment",
 				"dependencies": []string{"intake"},
 				"action":       map[string]any{"type": "run", "prompt": "assess the issue"},
-				"assignment":   map[string]any{"role": "assessor", "roster_entry": "assessor"},
+				"assignment": map[string]any{
+					"role": "assessor", "roster_file": rosterPath, "roster_entry": "assessor", "thinking": "high",
+				},
 				"dispatch":     policy,
 				"retry_policy": map[string]any{"max_attempts": 2, "exhaustion": "block"},
 				"branches":     map[string]any{"ready": "publication"},
@@ -51,8 +56,10 @@ func factorySelectionTemplateJSON(t *testing.T, templateID string, ttlSeconds in
 				"id":           "publication",
 				"dependencies": []string{"assessment"},
 				"action":       map[string]any{"type": "run", "prompt": "publish the work"},
-				"assignment":   map[string]any{"role": "publisher", "roster_entry": "publisher"},
-				"dispatch":     map[string]any{"mode": "auto", "controller_id": "c1", "priority": 60},
+				"assignment": map[string]any{
+					"role": "publisher", "roster_file": rosterPath, "roster_entry": "publisher", "thinking": "medium",
+				},
+				"dispatch": map[string]any{"mode": "auto", "controller_id": "c1", "priority": 60},
 			},
 		},
 		"terminal_outcomes":    []string{"merged"},
@@ -72,32 +79,32 @@ type factorySelectionFixture struct {
 	leaseID    string
 	ownerEpoch int64
 	release    chan struct{}
-	// selection is the roster-resolved execution selection every assessment
-	// dispatch pins.
-	selection *workflow.ExecutionSelection
+	// selection is the production-resolved execution selection every
+	// assessment dispatch pins; publisherSelection is the publication
+	// node's.
+	selection          *workflow.ExecutionSelection
+	publisherSelection *workflow.ExecutionSelection
+	// rosterPath is the fixture roster file the assignments resolve through.
+	rosterPath string
 }
 
 func newFactorySelectionFixture(t *testing.T, name string, ttlSeconds int) *factorySelectionFixture {
 	t.Helper()
-	rosterPath := writeStage5Roster(t, t.TempDir(), `{"assessor":{"backend":"codex","agent":"factory-assessor","model":"glm-5.3"},"publisher":{"backend":"pi","agent":"factory-publisher","model":"claude-opus"}}`)
-	roster, err := rosterconfig.Load(rosterPath)
+	rosterPath := writeStage5Roster(t, t.TempDir(), `{"assessor":{"backend":"codex-app-server","agent":"factory-assessor","model":"glm-5.3"},"publisher":{"backend":"pi","agent":"factory-publisher","model":"claude-opus"}}`)
+	// The effective selections come from the supervisor's production
+	// assignment resolver — the same path automatic dispatch uses — never
+	// from test-local resolution logic.
+	assessment, err := resolveAssignmentSelection(&workflow.Assignment{
+		Role: "assessor", RosterFile: rosterPath, RosterEntry: "assessor", Thinking: "high",
+	})
 	if err != nil {
-		t.Fatalf("rosterconfig.Load: %v", err)
+		t.Fatalf("resolve assessor assignment: %v", err)
 	}
-	entry, err := roster.Lookup("assessor")
+	publisher, err := resolveAssignmentSelection(&workflow.Assignment{
+		Role: "publisher", RosterFile: rosterPath, RosterEntry: "publisher", Thinking: "medium",
+	})
 	if err != nil {
-		t.Fatalf("roster lookup assessor: %v", err)
-	}
-	// The effective selection adds the run's thinking level and the roster
-	// digest to the resolved entry, exactly as the spawn path's resolver
-	// produces them for roster-driven work.
-	selection := &workflow.ExecutionSelection{
-		Role:         "assessor",
-		Backend:      entry.Backend,
-		Agent:        entry.Agent,
-		Model:        entry.Model,
-		Thinking:     "high",
-		RosterDigest: "sha256:factory-roster-digest",
+		t.Fatalf("resolve publisher assignment: %v", err)
 	}
 
 	sup := NewSupervisor(Config{
@@ -111,7 +118,7 @@ func newFactorySelectionFixture(t *testing.T, name string, ttlSeconds int) *fact
 	if err != nil {
 		t.Fatalf("workflow barrier: %v", err)
 	}
-	if _, err := mgr.WorkflowCreate(factorySelectionTemplateJSON(t, "factory-sel-"+name, ttlSeconds)); err != nil {
+	if _, err := mgr.WorkflowCreate(factorySelectionTemplateJSON(t, "factory-sel-"+name, ttlSeconds, rosterPath)); err != nil {
 		t.Fatalf("WorkflowCreate: %v", err)
 	}
 	out, err := mgr.WorkflowInstantiate(mustJSON(t, map[string]string{"template_id": "factory-sel-" + name, "template_version": "1.0.0"}))
@@ -137,7 +144,8 @@ func newFactorySelectionFixture(t *testing.T, name string, ttlSeconds int) *fact
 	f := &factorySelectionFixture{
 		sup: sup, mgr: mgr, cstore: cstore, wf: wf,
 		leaseID: rec.Leader.LeaseID, ownerEpoch: rec.Leader.OwnerEpoch,
-		release: release, selection: selection,
+		release: release, selection: assessment, publisherSelection: publisher,
+		rosterPath: rosterPath,
 	}
 	t.Cleanup(func() {
 		close(release)
@@ -274,16 +282,69 @@ func assertSelection(t *testing.T, what string, got, want *workflow.ExecutionSel
 	}
 }
 
-// TestFactoryDispatchPinsRosterSelection proves automatic dispatch pins the
-// resolved roster selection — backend, agent, model, thinking, and roster
-// digest — on the activation itself, not just on the attempt.
+// TestFactoryDispatchPinsRosterSelection proves the full automatic dispatch
+// path resolves the node's declared assignment through the supervisor's
+// roster resolution and pins the resolved selection — backend, agent, model,
+// thinking, and roster digest — on the activation itself, not just on the
+// attempt.
 func TestFactoryDispatchPinsRosterSelection(t *testing.T) {
 	f := newFactorySelectionFixture(t, "sel-pin", 900)
-	begin := f.dispatchAssessment(t)
+	f.completeIntake(t)
 	act := f.activationByNode(t, "assessment")
-	assertSelection(t, "assessment activation", act.Selection, f.selection)
-	if begin.Selection != f.selection {
-		t.Errorf("begin result selection = %+v, want the resolved roster selection", begin.Selection)
+	if act == nil || act.Status != workflow.ActivationPending {
+		t.Fatalf("no pending assessment activation: %+v", act)
+	}
+	out, err := f.sup.dispatchWorkflowNode(context.Background(), DispatchRequest{
+		WorkflowID:       f.wf,
+		NodeID:           "assessment",
+		ActivationID:     string(act.ID),
+		ExpectedRevision: actRevision(t, f, act),
+		ControllerID:     "c1",
+		LeaderLeaseID:    f.leaseID,
+		OwnerEpoch:       f.ownerEpoch,
+		Selection:        nil,
+	})
+	if err != nil {
+		t.Fatalf("dispatchWorkflowNode: %v", err)
+	}
+	if out.Kind != Dispatched {
+		t.Fatalf("dispatch outcome = %s (%s), want dispatched", out.Kind, out.Detail)
+	}
+	assertSelection(t, "assessment activation", f.activationByNode(t, "assessment").Selection, f.selection)
+}
+
+// TestFactoryDispatchResolutionFailureIsStartFailed proves a dispatch whose
+// assignment cannot resolve (the roster file the assignment references is
+// gone) is a start_failed-class outcome with no reservation held, no attempt
+// recorded, and no workflow event appended: the activation stays pending.
+func TestFactoryDispatchResolutionFailureIsStartFailed(t *testing.T) {
+	f := newFactorySelectionFixture(t, "sel-fail", 900)
+	f.completeIntake(t)
+	act := f.activationByNode(t, "assessment")
+	if act == nil || act.Status != workflow.ActivationPending {
+		t.Fatalf("no pending assessment activation: %+v", act)
+	}
+	if err := os.Remove(f.rosterPath); err != nil {
+		t.Fatalf("remove roster: %v", err)
+	}
+	out, err := f.sup.dispatchWorkflowNode(context.Background(), DispatchRequest{
+		WorkflowID:       f.wf,
+		NodeID:           "assessment",
+		ActivationID:     string(act.ID),
+		ExpectedRevision: actRevision(t, f, act),
+		ControllerID:     "c1",
+		LeaderLeaseID:    f.leaseID,
+		OwnerEpoch:       f.ownerEpoch,
+	})
+	if err != nil {
+		t.Fatalf("dispatchWorkflowNode: %v", err)
+	}
+	if out.Kind != DispatchStartFailed {
+		t.Fatalf("dispatch outcome = %s (%s), want start_failed", out.Kind, out.Detail)
+	}
+	fresh := f.activationByNode(t, "assessment")
+	if fresh.Status != workflow.ActivationPending || len(fresh.AttemptIDs) != 0 {
+		t.Fatalf("post-failure assessment = %s with %d attempts, want pending with none", fresh.Status, len(fresh.AttemptIDs))
 	}
 }
 
@@ -355,16 +416,14 @@ func TestFactoryRerouteCreatesNewActivationSelection(t *testing.T) {
 	old := f.activationByNode(t, "assessment")
 	assertSelection(t, "completed assessment", old.Selection, f.selection)
 
-	// The new publication activation starts unpinned and pins a different
-	// resolved roster selection (the publisher entry).
+	// The new publication activation starts unpinned and pins its own
+	// resolved roster selection (the publisher entry, resolved through the
+	// production helper).
 	pub := f.activationByNode(t, "publication")
 	if pub == nil || pub.Status != workflow.ActivationPending {
 		t.Fatalf("no pending publication activation after reroute: %+v", pub)
 	}
-	publisher := &workflow.ExecutionSelection{
-		Role: "publisher", Backend: "pi", Agent: "factory-publisher", Model: "claude-opus",
-		Thinking: "medium", RosterDigest: "sha256:factory-roster-digest",
-	}
+	publisher := f.publisherSelection
 	res, err := f.sup.reserveAdmission()
 	if err != nil {
 		t.Fatalf("reserve: %v", err)
