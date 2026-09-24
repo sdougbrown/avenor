@@ -123,6 +123,7 @@ describe('loadHumanGates', () => {
         nodes: [
           { id: 'a', gates: [{ id: 'g1', type: 'human' }] },
           { gates: [{ id: 'typoed-node-gate', type: 'human' }] },
+          { gates: [{ type: 'human' }] },
         ],
       }),
     )
@@ -131,5 +132,10 @@ describe('loadHumanGates', () => {
     // template with a KeyError on node["id"].
     expect(() => loadHumanGates(templatePath)).toThrow(/without an id/)
     expect(() => loadHumanGates(templatePath)).toThrow(/typoed-node-gate/)
+    // The message falls back for a gate that has no id of its own (its own
+    // template: the first offending node throws and stops the walk).
+    const noGateIdPath = path.join(dir, 't2.json')
+    fs.writeFileSync(noGateIdPath, JSON.stringify({ nodes: [{ gates: [{ type: 'human' }] }] }))
+    expect(() => loadHumanGates(noGateIdPath)).toThrow(/no gate id/)
   })
 })

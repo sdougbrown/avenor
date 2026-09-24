@@ -38,12 +38,12 @@ describe('cli argument validation', () => {
   test('exits 2 with usage text when required arguments are missing', async () => {
     const run = await spawnCli(['--socket', '/tmp/bridge.sock'])
     expect(run.exitCode).toBe(2)
+    // Pinned to the full error line: flag names alone would be satisfied by
+    // the usage banner, which lists every flag name.
     expect(run.stderr).toContain('Usage: avenor-escalation-bridge')
-    expect(run.stderr).toContain('missing required arguments:')
-    expect(run.stderr).toContain('workflow-id')
-    expect(run.stderr).toContain('webhook-url')
-    expect(run.stderr).toContain('decision-dir')
-    expect(run.stderr).toContain('template')
+    expect(run.stderr).toContain(
+      'error: missing required arguments: workflow-id, webhook-url, decision-dir, template',
+    )
   })
 
   test('exits 2 with the parse error surfaced when a duration has no unit', async () => {

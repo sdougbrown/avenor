@@ -133,14 +133,16 @@ describe('askWebhook', () => {
       fetch: async () => {
         requests += 1
         // Long past the injected timeout; only the abort path can release
-        // the caller (the default is 10s, far too slow for a test).
+        // the caller (the default is 10s, far too slow for a test). The
+        // 500ms margin leaves room for the loopback request to be delivered
+        // on a loaded machine before the 50ms deadline fires.
         await new Promise((resolve) => setTimeout(resolve, 2000))
         return new Response('late', { status: 200 })
       },
     })
     try {
       await expect(
-        askWebhook(`http://127.0.0.1:${server.port}/slow`, { q: 1 }, { timeoutMs: 50 }),
+        askWebhook(`http://127.0.0.1:${server.port}/slow`, { q: 1 }, { timeoutMs: 500 }),
       ).rejects.toThrow(/timed out/)
       expect(requests).toBe(1)
     } finally {
@@ -476,7 +478,24 @@ describe('runBridge', () => {
     // per-tick re-check observes the workflow end and the bridge must break
     // out of the gate loop instead of re-asking the transport on the next
     // tick. wait.test.ts covers the reason itself; this covers the break.
+    // The node carries TWO required gates: under `continue` the same tick
+    // would go on to ask the second gate (asks=2); `break` stops at one.
     const dir = setupDir()
+    const templatePath = path.join(dir, 'template.json')
+    fs.writeFileSync(
+      templatePath,
+      JSON.stringify({
+        nodes: [
+          {
+            id: 'merge-auth',
+            gates: [
+              mergeAuthGate(),
+              { ...mergeAuthGate(), id: 'merge-authorization-2', name: 'Merge authorization 2' },
+            ],
+          },
+        ],
+      }),
+    )
     const parked = parkedDetail()
     const terminalDetail: WorkflowDetail = {
       instance: { status: 'completed', terminal_outcome: 'merged' },
@@ -513,7 +532,7 @@ describe('runBridge', () => {
       workflowId: 'wf_1',
       webhookUrl: 'http://127.0.0.1:1/ask',
       decisionDir: dir,
-      templatePath: templateFile(dir),
+      templatePath,
       connect: async () => client,
       ask: async (_url, payload) => {
         asks.push(payload)
@@ -524,8 +543,8 @@ describe('runBridge', () => {
 
     expect(code).toBe(0)
     // Exactly one ask: after the terminal re-check the gate loop broke and
-    // the next workflow.wait ended the run — no second question was sent for
-    // a workflow that can no longer answer.
+    // the next workflow.wait ended the run. A `continue` here would still
+    // ask the second gate in the same tick (asks=2) before re-checking.
     expect(asks).toHaveLength(1)
     expect(calls.filter((c) => c.method === 'workflow.command')).toHaveLength(0)
   })
