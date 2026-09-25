@@ -356,38 +356,45 @@ type ExternalGatePollState struct {
 
 // ExternalGateState returns the pinned poll state of one external gate on an
 // activation: the adapter ID, the concrete input values (literals and
-// resolved output references), and the pinned subject. A gate whose pins are
+// resolved output references), and the pinned subject. The parked result
+// reports whether the activation is still parked awaiting_gate with the gate
+// subject pinned — false means the activation resolved, vanished, or lost its
+// pin, and the caller must not land results for it. A gate whose pins are
 // not fully resolved returns an error; callers treat that as a stale cursor.
-func (m *Manager) ExternalGateState(wf WorkflowID, nodeID NodeID, actID ActivationID, gateID GateID) (ExternalGatePollState, error) {
+// The snapshot is read once for both the parked check and the state.
+func (m *Manager) ExternalGateState(wf WorkflowID, nodeID NodeID, actID ActivationID, gateID GateID) (ExternalGatePollState, bool, error) {
 	snap, exists, err := m.store.loadCurrent(wf)
 	if err != nil {
-		return ExternalGatePollState{}, err
+		return ExternalGatePollState{}, false, err
 	}
 	if !exists {
-		return ExternalGatePollState{}, fmt.Errorf("workflow not found: %s", wf)
+		return ExternalGatePollState{}, false, fmt.Errorf("workflow not found: %s", wf)
 	}
 	act, err := findActivation(&snap.Instance, nodeID, actID)
 	if err != nil {
-		return ExternalGatePollState{}, err
+		return ExternalGatePollState{}, false, err
 	}
-	if act == nil {
-		return ExternalGatePollState{}, fmt.Errorf("activation not found for node %q", nodeID)
+	if act == nil || act.Status != ActivationAwaitingGate {
+		return ExternalGatePollState{}, false, nil
 	}
 	resolved, ok := act.ResolvedGates[gateID]
-	if !ok || resolved.Subject == nil || len(resolved.Unresolved) > 0 {
-		return ExternalGatePollState{}, fmt.Errorf("%w: gate %q on activation %s", ErrUnresolvedBinding, gateID, actID)
+	if !ok || resolved.Subject == nil {
+		return ExternalGatePollState{}, false, nil
+	}
+	if len(resolved.Unresolved) > 0 {
+		return ExternalGatePollState{}, false, fmt.Errorf("%w: gate %q on activation %s", ErrUnresolvedBinding, gateID, actID)
 	}
 	tmpl, err := m.templateFor(&snap)
 	if err != nil {
-		return ExternalGatePollState{}, err
+		return ExternalGatePollState{}, false, err
 	}
 	node, err := findNode(tmpl, nodeID)
 	if err != nil {
-		return ExternalGatePollState{}, err
+		return ExternalGatePollState{}, false, err
 	}
 	def := gateDefinitionByID(node, gateID)
 	if def == nil {
-		return ExternalGatePollState{}, fmt.Errorf("gate %q is not declared on node %q", gateID, nodeID)
+		return ExternalGatePollState{}, false, fmt.Errorf("gate %q is not declared on node %q", gateID, nodeID)
 	}
 	inputs := make(map[string]json.RawMessage, len(resolved.Inputs))
 	for name, input := range resolved.Inputs {
@@ -396,14 +403,14 @@ func (m *Manager) ExternalGateState(wf WorkflowID, nodeID NodeID, actID Activati
 			continue
 		}
 		if input.Reference == nil {
-			return ExternalGatePollState{}, fmt.Errorf("%w: gate %q input %q has no pin", ErrUnresolvedBinding, gateID, name)
+			return ExternalGatePollState{}, false, fmt.Errorf("%w: gate %q input %q has no pin", ErrUnresolvedBinding, gateID, name)
 		}
 		value, err := m.outputValue(input.Reference)
 		if err != nil {
-			return ExternalGatePollState{}, err
+			return ExternalGatePollState{}, false, err
 		}
 		if value == nil {
-			return ExternalGatePollState{}, fmt.Errorf("%w: gate %q input %q references output %q with no recorded value", ErrUnresolvedBinding, gateID, name, input.Reference.OutputID)
+			return ExternalGatePollState{}, false, fmt.Errorf("%w: gate %q input %q references output %q with no recorded value", ErrUnresolvedBinding, gateID, name, input.Reference.OutputID)
 		}
 		inputs[name] = value
 	}
@@ -412,7 +419,7 @@ func (m *Manager) ExternalGateState(wf WorkflowID, nodeID NodeID, actID Activati
 		AdapterID: def.AdapterID,
 		Inputs:    inputs,
 		Subject:   resolved.Subject,
-	}, nil
+	}, true, nil
 }
 
 // outputValue reads the recorded value of one pinned output reference,

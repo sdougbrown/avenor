@@ -125,17 +125,11 @@ func (s *Supervisor) pollExternalGate(ctx context.Context, cursor workflowcontro
 	if err != nil {
 		return workflowcontroller.AdapterResult{}, workflowcontroller.PollFailureTransient, err
 	}
-	// A cursor whose activation resolved or whose pinned subject moved on is
-	// obsolete: no adapter invocation is spent on it.
-	subject, parked, err := mgr.ParkedGateSubject(workflow.WorkflowID(cursor.WorkflowID), workflow.NodeID(cursor.NodeID),
-		workflow.ActivationID(cursor.ActivationID), workflow.GateID(cursor.GateID))
-	if err != nil {
-		return workflowcontroller.AdapterResult{}, workflowcontroller.PollFailureTransient, err
-	}
-	if !parked || workflow.SubjectHash(subject) != cursor.SubjectHash {
-		return workflowcontroller.AdapterResult{}, workflowcontroller.PollFailureObsolete, nil
-	}
-	state, err := mgr.ExternalGateState(workflow.WorkflowID(cursor.WorkflowID), workflow.NodeID(cursor.NodeID),
+	// One snapshot read answers both "is this gate still parked" and "what
+	// are its pinned inputs"; a cursor whose activation resolved or whose
+	// pinned subject moved on is obsolete: no adapter invocation is spent on
+	// it.
+	state, parked, err := mgr.ExternalGateState(workflow.WorkflowID(cursor.WorkflowID), workflow.NodeID(cursor.NodeID),
 		workflow.ActivationID(cursor.ActivationID), workflow.GateID(cursor.GateID))
 	if err != nil {
 		if errors.Is(err, workflow.ErrUnresolvedBinding) {
@@ -143,8 +137,7 @@ func (s *Supervisor) pollExternalGate(ctx context.Context, cursor workflowcontro
 		}
 		return workflowcontroller.AdapterResult{}, workflowcontroller.PollFailureTransient, err
 	}
-	if workflow.SubjectHash(state.Subject) != cursor.SubjectHash {
-		// The activation was superseded by a new head; the cursor is stale.
+	if !parked || workflow.SubjectHash(state.Subject) != cursor.SubjectHash {
 		return workflowcontroller.AdapterResult{}, workflowcontroller.PollFailureObsolete, nil
 	}
 	input, err := json.Marshal(state.Inputs)
