@@ -96,6 +96,30 @@ describe('buildGateCommand', () => {
     expect(command.reason).toContain('slack.com/archives')
   })
 
+  test('valid reject', () => {
+    const command = buildGateCommand('merge-auth', 'act_1', mergeAuthGate(), {
+      decision: 'reject',
+      actor: 'austin',
+      reason: 'Unsafe to merge',
+      subject: {
+        type: 'pull_request',
+        repository: 'org/repo',
+        pull_request: 123,
+        revision: 'abc123',
+      },
+    })
+    expect(command.operation).toBe('reject')
+    expect(command.actor).toBe('austin')
+    expect(command.node_id).toBe('merge-auth')
+    expect(command.activation_id).toBe('act_1')
+    expect(command.gate_id).toBe('merge-authorization')
+    expect(command.subject?.revision).toBe('abc123')
+    expect(command.source).toBe('escalation-bridge')
+    expect(command.evidence_ids).toHaveLength(1)
+    expect(command.evidence_ids[0].startsWith('ev_bridge_')).toBe(true)
+    expect(command.response_hash).toHaveLength(32)
+  })
+
   test('response hash is stable per decision', () => {
     const gate = mergeAuthGate()
     const first = buildGateCommand('n', 'act_1', gate, decision)
@@ -144,6 +168,20 @@ describe('buildGateCommand', () => {
       decision: 'satisfy',
       actor: 'a',
       reason: 'r',
+    })
+    expect(command.subject).toBeUndefined()
+  })
+
+  test('an empty subject object emits no subject', () => {
+    // Mirror Python's `if subject:` — an empty dict is falsy there, so an
+    // empty object must not reach the kernel as a subject either.
+    const gate = mergeAuthGate()
+    delete gate.subject_type
+    const command = buildGateCommand('n', 'act_1', gate, {
+      decision: 'satisfy',
+      actor: 'a',
+      reason: 'r',
+      subject: {},
     })
     expect(command.subject).toBeUndefined()
   })

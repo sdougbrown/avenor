@@ -93,6 +93,18 @@ describe('latestOutputs', () => {
     }
     expect(latestOutputs(detail)).toEqual({ x: null, y: 'not json' })
   })
+
+  test('keeps the later entry when revisions tie', () => {
+    // Python's `rev >= best` keeps the later list entry on a tie; the TS
+    // loop must too, so both bridges ask with the same payload.
+    const detail: WorkflowDetail = {
+      outputs: [
+        { definition_id: 'head_sha', revision: 2, value: '"first"' },
+        { definition_id: 'head_sha', revision: 2, value: '"second"' },
+      ],
+    }
+    expect(latestOutputs(detail)).toEqual({ head_sha: 'second' })
+  })
 })
 
 describe('loadHumanGates', () => {

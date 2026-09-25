@@ -91,11 +91,11 @@ describe('waitForDecision', () => {
     expect(result.decision!.decision).toBe('satisfy')
   })
 
-  test('terminal reason', async () => {
+  test.each(['completed', 'failed', 'canceled'])('terminal reason (%s)', async (status) => {
     const detail: WorkflowDetail = {
       activations: [parkedActivation()],
       gates: null,
-      instance: { status: 'completed' },
+      instance: { status },
     }
     const ctl = new FakeControl([detail])
     const result = await waitForDecision(ctl, decisions, 'wf_1', 'act_1', gate, opts)

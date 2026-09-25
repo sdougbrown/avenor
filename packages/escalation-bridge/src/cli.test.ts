@@ -1,5 +1,9 @@
 import * as path from 'node:path'
 
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
+
 import { describe, expect, test } from 'bun:test'
 
 const CLI = path.join(import.meta.dir, 'cli.ts')
@@ -58,4 +62,49 @@ describe('cli argument validation', () => {
     expect(run.exitCode).toBe(2)
     expect(run.stderr).toContain('invalid duration "lots"')
   })
+
+  test('exits 130 with the interrupted message on SIGINT', async () => {
+    if (process.platform === 'win32') return // no SIGINT on Windows
+    // Point the bridge at a nonexistent socket so it sits in its
+    // reconnect/backoff loop; a real template keeps startup validation
+    // from failing before the loop is reached.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'escalation-bridge-cli-'))
+    fs.writeFileSync(path.join(dir, 'template.json'), JSON.stringify({ nodes: [] }))
+    const proc = Bun.spawn({
+      cmd: [
+        process.execPath,
+        CLI,
+        '--socket', path.join(dir, 'missing.sock'),
+        '--workflow-id', 'wf_1',
+        '--webhook-url', 'http://127.0.0.1:1/ask',
+        '--decision-dir', path.join(dir, 'decisions'),
+        '--template', path.join(dir, 'template.json'),
+      ],
+      stdout: 'pipe',
+      stderr: 'ignore',
+      stdin: 'ignore',
+    })
+    const decoder = new TextDecoder()
+    let stdout = ''
+    const reader = proc.stdout.getReader()
+    try {
+      // Interrupt once the bridge has entered its watch loop (it logs the
+      // watching line before the first dial fails and backs off).
+      while (!stdout.includes('bridge: watching')) {
+        const { value, done } = await reader.read()
+        if (done) break
+        stdout += decoder.decode(value)
+      }
+      proc.kill('SIGINT')
+      for (;;) {
+        const { value, done } = await reader.read()
+        if (done) break
+        stdout += decoder.decode(value)
+      }
+    } finally {
+      reader.releaseLock()
+    }
+    expect(await proc.exited).toBe(130)
+    expect(stdout).toContain('bridge: interrupted')
+  }, 20_000)
 })

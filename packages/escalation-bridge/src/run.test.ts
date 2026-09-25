@@ -251,6 +251,45 @@ describe('runBridge', () => {
     expect(fs.readdirSync(path.join(dir, 'rejected'))).toHaveLength(1)
   })
 
+  test('parks a raw malformed decision file under rejected/ and carries the error on the next ask', async () => {
+    // Exercises the wait loop's parse-error path (not the invalid-operation
+    // branch): a file that is not JSON at all must be parked once its content
+    // is stable across two polls, and the parse error surfaced on the next ask.
+    const dir = setupDir()
+    fs.writeFileSync(path.join(dir, 'decision-act_1-merge-authorization.json'), '{not json')
+    const client = new FakeClient({
+      detail: parkedDetail(),
+      waitResults: [
+        { terminal: false },
+        { terminal: false },
+        { terminal: true, instance: { status: 'completed' } },
+      ],
+    })
+    const asks: Array<Record<string, unknown>> = []
+
+    const code = await runBridge({
+      socketPath: '/tmp/does-not-matter.sock',
+      workflowId: 'wf_1',
+      webhookUrl: 'http://127.0.0.1:1/ask',
+      decisionDir: dir,
+      templatePath: templateFile(dir),
+      gateTimeoutMs: 10,
+      connect: async () => client,
+      ask: async (_url, payload) => {
+        asks.push(payload as Record<string, unknown>)
+      },
+      sleep: async () => {},
+      log: () => {},
+    })
+
+    expect(code).toBe(0)
+    expect(client.commands()).toHaveLength(0)
+    expect(asks).toHaveLength(2)
+    expect(asks[0].previous_decision_error).toBeUndefined()
+    expect(asks[1].previous_decision_error).toContain('invalid decision file')
+    expect(fs.readdirSync(path.join(dir, 'rejected'))).toHaveLength(1)
+  })
+
   test('leaves the decision file in place when the kernel rejects the command', async () => {
     // Archive must happen only after the kernel accepted the record; a failed
     // command must not consume the human's answer.
