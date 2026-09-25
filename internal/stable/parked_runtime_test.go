@@ -354,3 +354,74 @@ func TestRunningRuntimeStillCountsAgainstMaxRuntimes(t *testing.T) {
 	}
 	safeClose()
 }
+
+// A follow-up prompt to a parked runtime must wait for a free local slot:
+// parking freed the slot, and a later spawn may have claimed it.
+func TestParkedRuntimeResumeWaitsForLocalCapacity(t *testing.T) {
+	sup := NewSupervisor(Config{
+		ControlSocket:        newStableSocketPath(t, "parked-resume-capacity"),
+		MaxRuntimes:          1,
+		ParkedRuntimeTimeout: 0,
+		ShutdownTimeout:      0,
+	})
+	release := make(chan struct{})
+	var closeOnce sync.Once
+	safeClose := func() { closeOnce.Do(func() { close(release) }) }
+	t.Cleanup(func() {
+		safeClose()
+		_ = sup.Shutdown("kill")
+		_ = sup.broker.Stop()
+	})
+	provider := newParkedScriptedProvider("ses_parked_resume_cap", 2)
+	var providerCalls int32
+	sup.newProviderFunc = func(_ runtime.StartOptions, _ string) (runtime.Provider, error) {
+		if atomic.AddInt32(&providerCalls, 1) == 1 {
+			return provider, nil
+		}
+		return &blockingAdmissionProvider{release: release}, nil
+	}
+	dir := t.TempDir()
+
+	first, err := sup.spawn(SpawnParams{Prompt: "hello", Dir: dir})
+	if err != nil {
+		t.Fatalf("first spawn: %v", err)
+	}
+	waitForActiveRuntimeCount(t, sup, 0) // first parks, count 0
+
+	// Claim the freed slot with a second runtime blocked mid-turn.
+	if _, err := sup.spawn(SpawnParams{Prompt: "fill", Dir: dir}); err != nil {
+		t.Fatalf("second spawn: %v", err)
+	}
+	waitForActiveRuntimeCount(t, sup, 1)
+	for len(provider.emitted) > 0 {
+		<-provider.emitted
+	}
+
+	if err := sup.RuntimePrompt(first.RuntimeID, "second", ""); err != nil {
+		t.Fatalf("RuntimePrompt: %v", err)
+	}
+	// The resumed turn must not start while the only slot is held.
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if len(provider.emitted) > 0 {
+			t.Fatal("resumed turn started while the local cap was full")
+		}
+		if got := sup.activeRuntimeCount(); got > 1 {
+			t.Fatalf("activeRuntimeCount = %d, want <= 1", got)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Releasing the second runtime parks it, freeing the slot; the first
+	// runtime's follow-up then proceeds.
+	safeClose()
+	select {
+	case <-provider.emitted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("parked runtime did not resume after a slot freed")
+	}
+	if got := sup.activeRuntimeCount(); got > 1 {
+		t.Fatalf("activeRuntimeCount = %d, want <= 1 while resumed turn runs", got)
+	}
+	waitForActiveRuntimeCount(t, sup, 0) // parks again
+}

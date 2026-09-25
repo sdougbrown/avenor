@@ -772,6 +772,31 @@ func idleCheck(idleTimeout time.Duration, active int, deadline *time.Time) <-cha
 	return time.After(time.Until(*deadline))
 }
 
+// acquireLocalRuntimeSlot re-gates a parked runtime on the local
+// MaxRuntimes cap before a follow-up turn resumes. Parking released the
+// runtime's slot and another spawn may have claimed it, so block until a
+// slot is free — the local mirror of acquireChildTreeToken.
+func (s *Supervisor) acquireLocalRuntimeSlot(ctx context.Context, child *childRuntime) error {
+	for {
+		s.controlMu.Lock()
+		if s.shuttingDown {
+			s.controlMu.Unlock()
+			return errors.New("supervisor is shutting down")
+		}
+		if s.activeRuntimeCountLocked() < s.config.MaxRuntimes {
+			child.mu.Lock()
+			child.parked = false
+			child.mu.Unlock()
+			s.controlMu.Unlock()
+			return nil
+		}
+		s.controlMu.Unlock()
+		if err := s.WaitForCapacity(ctx); err != nil {
+			return err
+		}
+	}
+}
+
 func (s *Supervisor) activeRuntimeCountLocked() int {
 	n := 0
 	for _, rt := range s.runtimes {
@@ -1482,6 +1507,7 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 		// provider close drains it. Sweep again so no late binding survives.
 		s.clearRuntimePermissionOptions(child.id)
 		child.complete()
+		s.signalCapacityChange()
 	}()
 
 	if s.broker != nil {
@@ -1544,10 +1570,16 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 				// Parking frees a local slot; wake spawn waiters blocked on the cap.
 				s.signalCapacityChange()
 				nextPrompt, ok := child.waitForNextPrompt(ctx, s.config.ParkedRuntimeTimeout)
-				child.mu.Lock()
-				child.parked = false
-				child.mu.Unlock()
 				if !ok {
+					child.mu.Lock()
+					child.parked = false
+					child.mu.Unlock()
+					if ctx.Err() != nil {
+						s.writeIdleCancelled(child)
+					}
+					return
+				}
+				if err := s.acquireLocalRuntimeSlot(ctx, child); err != nil {
 					if ctx.Err() != nil {
 						s.writeIdleCancelled(child)
 					}
