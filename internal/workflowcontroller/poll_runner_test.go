@@ -207,7 +207,7 @@ func TestRunnerReseedsMissingPollCursor(t *testing.T) {
 		t.Fatalf("cursor after first poll = %+v, want retry count 1", live)
 	}
 	deps.setParkedErr(errors.New("parked gates unavailable"))
-	clock.Advance(2 * defaultAntiEntropy)
+	clock.Advance(2 * DefaultAntiEntropy)
 	rec, _, _ = store.Get("c1")
 	after := rec.PollCursors[PollCursorKey(pollSeedCursor())]
 	if after.RetryCount != live.RetryCount || !after.NextPollAt.Equal(live.NextPollAt) {
