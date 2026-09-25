@@ -2,9 +2,10 @@ package workflowcontroller
 
 // Runner-level tests for external-gate polling: a park seeds its cursors,
 // the poll count commits before the adapter runs, a crash between commit and
-// result reuses the same poll ID, backoff doubles with bounded jitter,
-// stale results leave the cursor untouched, unavailable adapters record a
-// deduplicated diagnostic, and disable cancels an in-flight invocation.
+// result reuses the same poll ID, backoff doubles with bounded jitter, a
+// stale apply drops leadership instead of hot re-polling, unavailable
+// adapters record a deduplicated diagnostic, and disable cancels an in-flight
+// invocation.
 
 import (
 	"bytes"
@@ -376,56 +377,72 @@ func TestRunnerJitterBoundsNextPoll(t *testing.T) {
 	}
 }
 
-func TestRunnerStaleResultLeavesCursor(t *testing.T) {
+// TestRunnerStaleApplyDropsLeadership proves a stale apply (lost leadership)
+// drops leadership instead of hot re-polling: the in-flight cursor is left
+// untouched, the adapter is not invoked again until leadership is
+// re-acquired, and only then does the crash-recovery re-offer reuse the
+// committed count and poll ID.
+func TestRunnerStaleApplyDropsLeadership(t *testing.T) {
 	store, clock := newManualRunnerStore(t)
 	deps := newFakeDeps(store, "c1")
 	deps.cands = []Candidate{runnerCand("wf-1", "review", "act-1")}
 	deps.park = true
 	deps.parkSeeds = []PollSeed{pollSeed()}
 	poller := &fakePoller{store: store, applyResult: PollStale, defaultPoll: pendingResult}
-	pollRunner(t, store, deps, poller, clock.Now)
+	r := pollRunner(t, store, deps, poller, clock.Now)
 
 	waitUntil(t, "cursor seeded", func() bool {
 		_, ok, _ := store.NextPollTime("c1")
 		return ok
 	})
-	clock.Advance(pollBaseDelay + 50*time.Millisecond)
-	waitUntil(t, "poll fired", func() bool { return poller.pollCount() > 0 })
-	waitRetryCount(t, store, 1)
-	// A passed verdict that revalidates stale is discarded: the cursor keeps
-	// its previous schedule untouched.
-	// Every poll after the scripted stale one blocks on a gate. When the
-	// stale result is discarded the cursor is left in flight, and the
-	// runner's crash-recovery re-offer treats an in-flight cursor as due and
-	// commits the next poll immediately — mutating the cursor again before
-	// any assertion could run on a slower host. Blocking that follow-up poll
-	// freezes the cursor in the post-discard state.
-	gate := make(chan struct{})
-	// Unblocked on return (including failures) so cleanup's Stop never waits
-	// behind a blocked poll worker.
-	defer close(gate)
+	// The first poll returns a passed verdict whose apply revalidates stale:
+	// the lease was lost mid-poll.
 	poller.mu.Lock()
 	poller.script = []func() (AdapterResult, PollFailureKind, error){
 		func() (AdapterResult, PollFailureKind, error) {
 			return AdapterResult{Result: AdapterResultPassed}, PollFailureNone, nil
 		},
 	}
-	poller.defaultPoll = func() (AdapterResult, PollFailureKind, error) {
-		<-gate
-		return pendingResult()
-	}
 	poller.mu.Unlock()
-	clock.Advance(61 * time.Second)
-	// The stale result is discarded and the runner re-offers the in-flight
-	// cursor: the follow-up poll commits (reusing the count and poll ID) and
-	// then blocks in the gated poll, leaving the store quiescent.
-	waitUntil(t, "stale result discarded", func() bool { return poller.pollCount() > 2 })
+	clock.Advance(pollBaseDelay + 50*time.Millisecond)
+	waitUntil(t, "poll fired", func() bool { return poller.pollCount() > 0 })
+	waitUntil(t, "stale apply consumed", func() bool { return poller.applyCount() > 0 })
+
+	// The runner drops leadership. With the lease still unexpired it cannot
+	// re-acquire, so the adapter is never re-invoked in the meantime even
+	// though the in-flight cursor is due on every pass.
+	waitUntil(t, "leadership dropped", func() bool { return !r.Status().Leading })
+	clock.Advance(10 * time.Second)
+	time.Sleep(200 * time.Millisecond)
+	if r.Status().Leading {
+		t.Fatalf("status reports leading after a stale apply")
+	}
+	if polls := poller.pollCount(); polls != 1 {
+		t.Fatalf("poll count = %d, want no adapter re-invocation before re-acquiring leadership", polls)
+	}
 	rec, _, _ := store.Get("c1")
 	c := rec.PollCursors[PollCursorKey(pollSeedCursor())]
-	// The stale result is discarded without rescheduling or clearing: the
-	// cursor is left in flight (its next poll reuses the committed poll ID).
-	if c == nil || !c.NextPollAt.IsZero() || c.RetryCount != 1 {
-		t.Fatalf("cursor after stale discard = %+v, want the in-flight cursor left untouched", c)
+	if c == nil || !c.inFlight() {
+		t.Fatalf("cursor after stale apply = %+v, want it left in flight", c)
+	}
+
+	// Once the lease expires the runner re-acquires and only then re-offers
+	// the in-flight cursor, reusing the committed count and poll ID.
+	clock.Advance(LeaseTTL + time.Second)
+	waitUntil(t, "re-acquired leadership", func() bool { return r.Status().Leading })
+	waitUntil(t, "adapter re-invoked after re-acquiring", func() bool { return poller.pollCount() > 1 })
+	poller.mu.Lock()
+	recovered := poller.polls[1]
+	poller.mu.Unlock()
+	if recovered.PollCount != 1 || recovered.PollID != DerivePollID("c1", pollSeedCursor(), 1) {
+		t.Fatalf("re-offered poll = count %d id %q, want reused count 1", recovered.PollCount, recovered.PollID)
+	}
+	// The pending verdict arms the normal backoff schedule.
+	waitRetryCount(t, store, 1)
+	rec, _, _ = store.Get("c1")
+	c = rec.PollCursors[PollCursorKey(pollSeedCursor())]
+	if c == nil || c.NextPollAt.IsZero() || !c.NextPollAt.After(clock.Now()) {
+		t.Fatalf("cursor after recovery = %+v, want a future next poll", c)
 	}
 }
 
@@ -479,7 +496,6 @@ func TestRunnerAdapterUnavailableDiagnosticDeduped(t *testing.T) {
 		return !open
 	})
 }
-
 func TestRunnerDisableCancelsInFlightPoll(t *testing.T) {
 	store, clock := newManualRunnerStore(t)
 	deps := newFakeDeps(store, "c1")

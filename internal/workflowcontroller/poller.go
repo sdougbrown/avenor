@@ -49,8 +49,10 @@ const (
 	// PollApplied means the evidence was staged and the external_result gate
 	// command landed (or was an idempotent replay).
 	PollApplied PollApplyOutcome = "applied"
-	// PollStale means the leader lease or the parked activation revalidation
-	// failed; the result was discarded and the cursor left untouched.
+	// PollStale means the leader lease no longer validates: leadership was
+	// lost mid-poll, the result was discarded, and the cursor left untouched
+	// for the next leader. Every other stale-apply failure is reported as an
+	// error alongside the outcome.
 	PollStale PollApplyOutcome = "stale"
 	// PollObsolete means the activation is no longer parked on this gate
 	// (resolved or superseded by a new head); the cursor is dropped.
@@ -125,8 +127,10 @@ func (r *Runner) offerPolls() {
 
 // handlePollOutcome folds one poll result into the schedule: backoff on
 // pending, transient, or unavailable outcomes; the host's ApplyResult on a
-// completed verdict, with the cursor cleared once the result is applied.
-func (r *Runner) handlePollOutcome(out PollOutcome, lease LeaderLease) {
+// completed verdict, with the cursor cleared once the result is applied. It
+// reports whether the outcome lost leadership, so the caller can drop
+// leadership before offering any further polls.
+func (r *Runner) handlePollOutcome(out PollOutcome, lease LeaderLease) (lostLead bool) {
 	key := PollCursorKey(out.Cursor)
 	delete(r.pollInFlight, key)
 
@@ -134,7 +138,7 @@ func (r *Runner) handlePollOutcome(out PollOutcome, lease LeaderLease) {
 		// The runner is exiting (disable or shutdown): the canceled poll is
 		// left in flight so the next leader reuses its count and poll ID,
 		// exactly as after a crash.
-		return
+		return false
 	}
 
 	if out.Failure == PollFailureObsolete {
@@ -143,7 +147,7 @@ func (r *Runner) handlePollOutcome(out PollOutcome, lease LeaderLease) {
 			log.Printf("workflow controller %s: clear obsolete poll cursor %s: %v", r.controllerID, key, err)
 		}
 		r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "poll_obsolete" })
-		return
+		return false
 	}
 	if out.Failure == PollFailureUnavailable {
 		detail := "adapter unavailable"
@@ -155,13 +159,13 @@ func (r *Runner) handlePollOutcome(out PollOutcome, lease LeaderLease) {
 		}
 		r.schedulePollRetry(out.Cursor, nil)
 		r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "adapter_unavailable" })
-		return
+		return false
 	}
 	if out.Err != nil {
 		log.Printf("workflow controller %s: poll %s: %v", r.controllerID, key, out.Err)
 		r.schedulePollRetry(out.Cursor, nil)
 		r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "poll_error" })
-		return
+		return false
 	}
 	// A successful invocation clears any open unavailable diagnostic for the
 	// adapter.
@@ -172,34 +176,42 @@ func (r *Runner) handlePollOutcome(out PollOutcome, lease LeaderLease) {
 	if res == nil || res.Result == AdapterResultPending {
 		r.schedulePollRetry(out.Cursor, retryAfterOf(res))
 		r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "pending" })
-		return
+		return false
 	}
 	apply, err := r.poll.ApplyResult(out.Cursor, res, lease)
 	if err != nil {
 		log.Printf("workflow controller %s: apply poll result %s: %v", r.controllerID, key, err)
 		r.schedulePollRetry(out.Cursor, nil)
 		r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "apply_error" })
-		return
+		return false
 	}
 	if apply == PollStale {
-		// The leader lease or the parked activation no longer matches; the
-		// result is discarded and the cursor left for the active leader.
+		// The leader lease no longer validates: the result is discarded and
+		// the cursor left in flight for the next leader. The caller drops
+		// leadership so the runner re-acquires before offering further polls —
+		// an in-flight cursor is due on every pass, so re-offering under a
+		// dead lease would re-invoke the adapter without backoff.
 		r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "poll_stale" })
-		return
+		return true
 	}
 	if apply == PollObsolete {
 		// The gate is no longer parked on this activation; no further polls
-		// are meaningful, so drop the cursor.
+		// are meaningful, so drop the cursor and record the outcome as a
+		// deduplicated diagnostic.
 		if err := r.store.ClearPollCursor(r.controllerID, out.Cursor); err != nil {
 			log.Printf("workflow controller %s: clear obsolete poll cursor %s: %v", r.controllerID, key, err)
 		}
+		if _, err := r.store.RecordDiagnostic(r.controllerID, "poll_obsolete", key, "gate no longer parked on this activation"); err != nil {
+			log.Printf("workflow controller %s: record poll_obsolete: %v", r.controllerID, err)
+		}
 		r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "poll_obsolete" })
-		return
+		return false
 	}
 	if err := r.store.ClearPollCursor(r.controllerID, out.Cursor); err != nil {
 		log.Printf("workflow controller %s: clear poll cursor %s: %v", r.controllerID, key, err)
 	}
 	r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "applied:" + res.Result })
+	return false
 }
 
 // retryAfterOf returns the adapter's requested retry delay, if any.

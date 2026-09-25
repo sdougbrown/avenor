@@ -174,8 +174,9 @@ func (s *Supervisor) pollExternalGate(ctx context.Context, cursor workflowcontro
 // parked activation's pinned subject, stages the bounded raw stdout as
 // evidence, and submits the structured external_result gate command. A
 // failed gate command discards the freshly staged evidence. The outcome
-// tells the runner whether the result was applied, stale (leave the
-// cursor), or obsolete (drop the cursor).
+// tells the runner whether the result was applied, stale (leadership lost —
+// the runner drops leadership and leaves the cursor for the next leader), or
+// obsolete (drop the cursor).
 func (s *Supervisor) applyPollResult(controllerID string, cursor workflowcontroller.PollCursor, res *workflowcontroller.AdapterResult, lease workflowcontroller.LeaderLease) (workflowcontroller.PollApplyOutcome, error) {
 	mgr, store, err := s.workflowBarrierResult()
 	if err != nil {
@@ -233,6 +234,9 @@ func (s *Supervisor) applyPollResult(controllerID string, cursor workflowcontrol
 	})
 	if applyErr != nil {
 		if errors.Is(applyErr, workflowcontroller.ErrNotLeader) {
+			// Lost leadership mid-apply: PollStale with no error is reserved
+			// for this case, so the runner drops leadership instead of
+			// re-offering the in-flight cursor under a dead lease.
 			return workflowcontroller.PollStale, nil
 		}
 		return workflowcontroller.PollStale, applyErr

@@ -484,7 +484,9 @@ func (r *Runner) loop() {
 	// handlePollResult folds one poll worker outcome into the current pass.
 	handlePollResult := func(res pollWorkerResult) {
 		r.pendingPolls--
-		r.handlePollOutcome(res.outcome, LeaderLease{LeaseID: leaseID, OwnerEpoch: ownerEpoch})
+		if r.handlePollOutcome(res.outcome, LeaderLease{LeaseID: leaseID, OwnerEpoch: ownerEpoch}) {
+			dropLeadership()
+		}
 	}
 	// drainPollResults consumes completed poll worker results without
 	// blocking, folding their outcomes into the current pass.
@@ -628,6 +630,12 @@ func (r *Runner) loop() {
 		// workers and the wait folds in the earliest scheduled next poll.
 		if r.poll != nil {
 			drainPollResults()
+			if !holding {
+				// A stale apply dropped leadership mid-pass; re-acquire before
+				// offering any further polls.
+				sleep(r.renewInterval)
+				continue
+			}
 			r.offerPolls()
 			wait = r.nextPollWait(wait)
 		}
