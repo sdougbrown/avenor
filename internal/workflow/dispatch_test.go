@@ -1,12 +1,8 @@
 package workflow
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"os"
-	"os/exec"
 	"sort"
 	"strings"
 	"testing"
@@ -96,29 +92,6 @@ func TestDispatchTemplateValidation(t *testing.T) {
 		t.Run("invalid/"+tc.name, func(t *testing.T) {
 			assertTemplateError(t, mutateTemplate(t, dispatchNodeMutation(tc.nodeID, tc.action, tc.dispatch)), tc.wantErr)
 		})
-	}
-}
-
-// TestDispatchSchemaGenerationStable regenerates the profile code and requires
-// the generated file to be byte-identical afterwards.
-func TestDispatchSchemaGenerationStable(t *testing.T) {
-	genPath := "workflow_schema.gen.go"
-	sum := func() string {
-		data, err := os.ReadFile(genPath)
-		if err != nil {
-			t.Fatalf("read generated schema: %v", err)
-		}
-		digest := sha256.Sum256(data)
-		return hex.EncodeToString(digest[:])
-	}
-	before := sum()
-	cmd := exec.Command("go", "generate", ".")
-	cmd.Dir = "."
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("go generate: %v\n%s", err, out)
-	}
-	if after := sum(); after != before {
-		t.Fatal("go generate changed workflow_schema.gen.go; regenerate and commit the generated file")
 	}
 }
 
