@@ -404,6 +404,28 @@ func TestDisableEnableClearsCapacityBlocked(t *testing.T) {
 	}
 }
 
+// TestClearCapacityBlockedNoopUnblocked proves ClearCapacityBlocked on a
+// record that is not capacity-blocked is a no-op: no error, changed is
+// false, and no event is appended.
+func TestClearCapacityBlockedNoopUnblocked(t *testing.T) {
+	s, _ := newTestStore(t)
+	mustCreate(t, s, "alpha", 10)
+
+	rec, changed, err := s.ClearCapacityBlocked("alpha")
+	if err != nil {
+		t.Fatalf("ClearCapacityBlocked: %v", err)
+	}
+	if changed {
+		t.Fatal("changed = true, want false for an unblocked record")
+	}
+	if rec.CapacityBlocked != "" {
+		t.Fatalf("record capacity block = %q, want empty", rec.CapacityBlocked)
+	}
+	if kinds := eventKinds(t, s, "alpha"); len(kinds) != 1 || kinds[0] != EventCreated {
+		t.Fatalf("event kinds = %v, want exactly [created] (no event appended)", kinds)
+	}
+}
+
 func TestRecoverExpiresLease(t *testing.T) {
 	s, clock := newTestStore(t)
 	mustEnable(t, s, mustCreate(t, s, "alpha", 1).ControllerID)
