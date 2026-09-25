@@ -198,7 +198,10 @@ func TestRunnerReseedsMissingPollCursor(t *testing.T) {
 	waitUntil(t, "re-seeded gate polled", func() bool { return poller.pollCount() > 0 })
 
 	// The cursor is live: further passes skip it (a ParkedGates failure
-	// leaves it untouched) and its backoff schedule survives.
+	// leaves it untouched) and its backoff schedule survives. The first
+	// pending outcome is folded by the leader loop, so wait for the retry it
+	// schedules.
+	waitRetryCount(t, store, 1)
 	rec, _, _ := store.Get("c1")
 	live := rec.PollCursors[PollCursorKey(pollSeedCursor())]
 	if live == nil || live.RetryCount != 1 {
