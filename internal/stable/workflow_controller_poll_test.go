@@ -390,11 +390,15 @@ func TestControllerRunnerReseedsParkedCursor(t *testing.T) {
 
 	// A fresh runner re-seeds the missing cursor on its first anti-entropy
 	// pass and polls the gate; the adapter drives the success outcome.
+	// The committed event is durable in the controller's event log, unlike
+	// the cursor itself, which the applied result clears — a commit-then-
+	// clear can complete entirely between two polls of a cursor-based wait
+	// on a fast host.
 	f.sup.startControllerLoop(f.cstore, "c1")
-	f.waitCursor(t, "pr-review")
+	eventsPath := filepath.Join(f.cstore.ControllersRoot(), "c1", "events.ndjson")
 	waitFor(t, "re-seeded cursor polled", func() bool {
-		c, ok := f.findCursor("pr-review")
-		return ok && c.PollCount >= 1
+		data, err := os.ReadFile(eventsPath)
+		return err == nil && bytes.Count(data, []byte(`"kind":"poll_committed"`)) >= 1
 	})
 	f.waitReviewStatus(t, workflow.ActivationSatisfied)
 }
