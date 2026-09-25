@@ -97,12 +97,27 @@ func newFactoryE2E(t *testing.T, name string, ciScript, reviewScript string) *fa
 	t.Helper()
 	root := filepath.Join(t.TempDir(), "wfroot")
 	adapterDir := t.TempDir()
+	if err := os.Chmod(adapterDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	for id, script := range map[string]string{
 		"circleci-pipeline": ciScript,
 		"github-pr-review":  reviewScript,
 	} {
 		exe := stagePollFixture(t, adapterDir, script)
 		writePollManifest(t, adapterDir, id+".json", id, exe)
+	}
+	// Fail loudly here rather than as a silent timeout later: a trust or
+	// manifest load failure leaves the supervisor's registry empty and every
+	// poll reporting adapter_unavailable forever.
+	reg, err := workflowcontroller.LoadAdapterRegistry(adapterDir)
+	if err != nil {
+		t.Fatalf("adapter registry load from %s: %v", adapterDir, err)
+	}
+	for _, wantID := range []string{"circleci-pipeline", "github-pr-review"} {
+		if _, ok := reg.Lookup(wantID); !ok {
+			t.Fatalf("adapter registry missing %s", wantID)
+		}
 	}
 	sup := NewSupervisor(Config{
 		ControlSocket:      newStableSocketPath(t, name),

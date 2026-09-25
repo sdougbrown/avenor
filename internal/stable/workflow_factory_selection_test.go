@@ -12,6 +12,8 @@ package stable
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -271,14 +273,26 @@ func (f *factorySelectionFixture) completeAssessment(t *testing.T, begin workflo
 	}
 }
 
-// assertSelection compares an activation's pinned selection field by field.
-func assertSelection(t *testing.T, what string, got, want *workflow.ExecutionSelection) {
+// assertSelection compares an activation's pinned selection field by field and
+// independently verifies the pinned roster digest against the raw bytes of the
+// roster file the fixture staged, rather than trusting the value
+// resolveAssignmentSelection produced.
+func assertSelection(t *testing.T, what string, got, want *workflow.ExecutionSelection, rosterPath string) {
 	t.Helper()
 	if got == nil {
 		t.Fatalf("%s: selection is nil, want %+v", what, *want)
 	}
 	if *got != *want {
 		t.Fatalf("%s: pinned selection = %+v, want %+v", what, *got, *want)
+	}
+	data, err := os.ReadFile(rosterPath)
+	if err != nil {
+		t.Fatalf("%s: read roster file: %v", what, err)
+	}
+	sum := sha256.Sum256(data)
+	wantDigest := "sha256:" + hex.EncodeToString(sum[:])
+	if got.RosterDigest != wantDigest {
+		t.Fatalf("%s: roster digest = %q, want %q", what, got.RosterDigest, wantDigest)
 	}
 }
 
@@ -310,7 +324,7 @@ func TestFactoryDispatchPinsRosterSelection(t *testing.T) {
 	if out.Kind != Dispatched {
 		t.Fatalf("dispatch outcome = %s (%s), want dispatched", out.Kind, out.Detail)
 	}
-	assertSelection(t, "assessment activation", f.activationByNode(t, "assessment").Selection, f.selection)
+	assertSelection(t, "assessment activation", f.activationByNode(t, "assessment").Selection, f.selection, f.rosterPath)
 }
 
 // TestFactoryDispatchResolutionFailureIsStartFailed proves a dispatch whose
@@ -414,7 +428,7 @@ func TestFactoryRerouteCreatesNewActivationSelection(t *testing.T) {
 
 	// The rerouted activation still carries its pinned selection.
 	old := f.activationByNode(t, "assessment")
-	assertSelection(t, "completed assessment", old.Selection, f.selection)
+	assertSelection(t, "completed assessment", old.Selection, f.selection, f.rosterPath)
 
 	// The new publication activation starts unpinned and pins its own
 	// resolved roster selection (the publisher entry, resolved through the
@@ -442,8 +456,8 @@ func TestFactoryRerouteCreatesNewActivationSelection(t *testing.T) {
 	}
 	res.Release()
 	pub = f.activationByNode(t, "publication")
-	assertSelection(t, "publication activation", pub.Selection, publisher)
-	assertSelection(t, "assessment after reroute", old.Selection, f.selection)
+	assertSelection(t, "publication activation", pub.Selection, publisher, f.rosterPath)
+	assertSelection(t, "assessment after reroute", old.Selection, f.selection, f.rosterPath)
 	// A reroute is a new activation, never a mutation of the pinned one.
 	if pub.ID == begin.ActivationID {
 		t.Fatal("reroute reused the assessment activation")
