@@ -4644,10 +4644,19 @@ func (s *Supervisor) WorkflowControllerStatus(id string) (any, error) {
 		return nil, fmt.Errorf("controller %s: %w", id, workflowcontroller.ErrNotFound)
 	}
 	var nextPollAt any
+	var nextPollError string
 	if earliest, has, err := store.NextPollTime(id); err == nil && has {
 		nextPollAt = earliest
+	} else if err != nil {
+		// A failed poll-time read is not a failed controller: report the
+		// record with a nil next_poll_at and the read error alongside it.
+		nextPollError = err.Error()
 	}
-	return controllerStatusMap(rec, s.supervisorIdentity(), s.controllerRunnerStatus(id, rec), nextPollAt), nil
+	status := controllerStatusMap(rec, s.supervisorIdentity(), s.controllerRunnerStatus(id, rec), nextPollAt)
+	if nextPollError != "" {
+		status["next_poll_error"] = nextPollError
+	}
+	return status, nil
 }
 
 // controllerRunnerStatus returns this process's live runner status for the

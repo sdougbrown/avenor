@@ -277,6 +277,75 @@ func TestControllerRestartReacquiresLease(t *testing.T) {
 	}
 }
 
+// TestControllerStatusSurfacesNextPollReadError proves a failed poll-time
+// read is reported as next_poll_error instead of silently rendering
+// next_poll_at: nil. The status reads the controller record twice — once for
+// the record and once inside NextPollTime — so the test corrupts the
+// snapshot concurrently until the flip lands in the window between the two
+// reads: a corrupt first read fails the whole call, only a corrupt second
+// read reaches the surfaced error.
+func TestControllerStatusSurfacesNextPollReadError(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "wfroot")
+	sup := NewSupervisor(Config{ControlSocket: newStableSocketPath(t, "wfctl-nextpoll-err"), WorkflowRoot: root})
+	stopLoopsAtCleanup(t, sup)
+	if _, err := sup.WorkflowControllerCreate(createControllerParams(t, "c1", 2)); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	snapshot := filepath.Join(root, "controllers", "c1", "controller.json")
+	valid, err := os.ReadFile(snapshot)
+	if err != nil {
+		t.Fatalf("read snapshot: %v", err)
+	}
+	corrupt := valid[:len(valid)/2]
+
+	stop := make(chan struct{})
+	flipped := make(chan struct{})
+	go func() {
+		defer close(flipped)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_ = os.WriteFile(snapshot, corrupt, 0o600)
+			time.Sleep(200 * time.Microsecond)
+			_ = os.WriteFile(snapshot, valid, 0o600)
+			time.Sleep(200 * time.Microsecond)
+		}
+	}()
+	t.Cleanup(func() {
+		close(stop)
+		<-flipped
+		_ = os.WriteFile(snapshot, valid, 0o600)
+	})
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		st, err := sup.WorkflowControllerStatus("c1")
+		if err != nil {
+			if time.Now().After(deadline) {
+				t.Fatalf("status never got past a corrupt first read: %v", err)
+			}
+			continue // first read hit the corrupt bytes; flip again
+		}
+		status := st.(map[string]any)
+		if got := status["next_poll_error"]; got != nil {
+			msg, ok := got.(string)
+			if !ok || !strings.Contains(msg, "controller c1 snapshot") {
+				t.Fatalf("next_poll_error = %#v, want the snapshot read error", got)
+			}
+			if status["next_poll_at"] != nil {
+				t.Fatalf("next_poll_at = %#v, want nil on a failed read", status["next_poll_at"])
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("next_poll_error never surfaced despite a concurrently corrupt snapshot")
+		}
+	}
+}
+
 // TestControllerDisableReleasesLiveLease proves disabling a live leader
 // persists desired=disabled with the reason, durably releases the lease,
 // removes the loop, and refuses further acquisition.
