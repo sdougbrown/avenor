@@ -4,7 +4,7 @@ import * as path from 'node:path'
 
 import { beforeEach, describe, expect, test } from 'bun:test'
 
-import { subjectUnchanged, waitForDecision } from './wait.js'
+import { moveAside, subjectUnchanged, waitForDecision } from './wait.js'
 import type { ControlClient, GateDefinition, WorkflowDetail } from './types.js'
 
 function parkedActivation(actId = 'act_1', nodeId = 'merge-auth') {
@@ -151,6 +151,22 @@ describe('waitForDecision', () => {
     expect(result.reason).toContain('invalid decision file')
     const rejected = fs.readdirSync(path.join(decisions, 'rejected'))
     expect(rejected).toHaveLength(1)
+  })
+
+  test('two parks of the same gate in one second produce distinct files', () => {
+    // Parked names use a millisecond timestamp plus a per-process counter;
+    // whole-second names would let a second park overwrite the first.
+    const file = writeDecision('{not json')
+    const first = moveAside(decisions, 'act_1', 'merge-authorization', file)
+    fs.writeFileSync(file, '{still not json')
+    const second = moveAside(decisions, 'act_1', 'merge-authorization', file)
+    expect(first).not.toBe(second)
+    const rejected = fs.readdirSync(path.join(decisions, 'rejected')).sort()
+    expect(rejected).toHaveLength(2)
+    expect(fs.readFileSync(path.join(decisions, 'rejected', rejected[0]), 'utf8')).toBe('{not json')
+    expect(fs.readFileSync(path.join(decisions, 'rejected', rejected[1]), 'utf8')).toBe(
+      '{still not json',
+    )
   })
 
   test('a file still being written is not moved aside until stable', async () => {

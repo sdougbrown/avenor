@@ -128,7 +128,12 @@ export async function waitForDecision(
   return { decision: null, decisionFile: null, reason: 'timeout' }
 }
 
-/** Park a decision file under rejected/ so it is never re-read. */
+/** Park a decision file under rejected/ so it is never re-read.
+ *
+ * The name embeds a millisecond timestamp plus a per-process counter:
+ * whole-second timestamps would let two parks of the same activation+gate in
+ * one second overwrite each other. */
+let moveAsideSeq = 0
 export function moveAside(
   decisionsDir: string,
   activationId: string,
@@ -139,7 +144,10 @@ export function moveAside(
   assertSafeId(gateId, 'gate id')
   const rejectedDir = path.join(decisionsDir, 'rejected')
   fs.mkdirSync(rejectedDir, { recursive: true })
-  const rejected = path.join(rejectedDir, `${activationId}-${gateId}-${Math.floor(Date.now() / 1000)}.json`)
+  const rejected = path.join(
+    rejectedDir,
+    `${activationId}-${gateId}-${Date.now()}-${++moveAsideSeq}.json`,
+  )
   fs.renameSync(from, rejected)
   return rejected
 }

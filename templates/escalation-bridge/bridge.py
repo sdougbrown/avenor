@@ -41,6 +41,7 @@ Usage:
 
 import argparse
 import hashlib
+import itertools
 import json
 import socket
 import sys
@@ -246,9 +247,7 @@ def wait_for_decision(ctl, decisions, workflow_id, activation_id, gate, gate_tim
                 # Malformed file: move it out of the way so the transport can
                 # write a fresh one, and surface the parse error on the next
                 # ask instead of looping on the same broken file.
-                rejected = decisions / "rejected" / f"{activation_id}-{gate['id']}-{int(time.time())}.json"
-                rejected.parent.mkdir(parents=True, exist_ok=True)
-                decision_file.rename(rejected)
+                rejected = move_aside(decisions, activation_id, gate["id"], decision_file)
                 return None, None, f"invalid decision file ({exc}); rewritten to {rejected.name}"
         time.sleep(poll)
         # Re-check state on every tick: another path may resolve the gate or
@@ -265,6 +264,24 @@ def wait_for_decision(ctl, decisions, workflow_id, activation_id, gate, gate_tim
         if detail.get("instance", {}).get("status") in ("completed", "failed", "canceled"):
             return None, None, "terminal"
     return None, None, "timeout"
+
+
+_move_aside_seq = itertools.count(1)
+
+
+def move_aside(decisions, activation_id, gate_id, decision_file):
+    """Park a decision file under rejected/ so it is never re-read.
+
+    The name embeds a millisecond timestamp plus a per-process counter:
+    whole-second timestamps would let two parks of the same activation+gate
+    in one second overwrite each other.
+    """
+    rejected = decisions / "rejected" / (
+        f"{activation_id}-{gate_id}-{int(time.time() * 1000)}-{next(_move_aside_seq)}.json"
+    )
+    rejected.parent.mkdir(parents=True, exist_ok=True)
+    decision_file.rename(rejected)
+    return rejected
 
 
 def subject_unchanged(ctl, workflow_id, activation_id, gate_id, expected_subject):
@@ -304,6 +321,13 @@ def main():
     poll = max(parse_duration(args.poll), 1.0)
     decisions = Path(args.decision_dir)
     decisions.mkdir(parents=True, exist_ok=True)
+    # The decision dir must stay local-user scoped: on a group- or
+    # other-writable pre-existing dir, any local user could drop a
+    # decision-*.json and forge an attributed decision (the actor is
+    # self-asserted). Refuse to start on one; group/other read or execute
+    # bits are fine — they cannot forge a decision.
+    if decisions.stat().st_mode & 0o022:
+        raise SystemExit(f"decision dir {decisions} must not be group- or other-writable")
     template_gates = load_human_gates(args.template)
 
     ctl = None
@@ -386,11 +410,7 @@ def main():
                     # actor/reason, subject type mismatch). Park the file under
                     # rejected/ so the same answer is not re-read forever, and
                     # carry the reason on the next ask.
-                    rejected = decisions / "rejected" / (
-                        f"{activation_id}-{gate['id']}-{int(time.time())}.json"
-                    )
-                    rejected.parent.mkdir(parents=True, exist_ok=True)
-                    decision_file.rename(rejected)
+                    rejected = move_aside(decisions, activation_id, gate_id, decision_file)
                     decision_errors[error_key] = str(exc)
                     print(f"bridge: rejected decision on {gate['id']}: {exc}", flush=True)
                     continue
@@ -403,11 +423,7 @@ def main():
                         ctl, args.workflow_id, activation_id, gate_id, pinned
                     )
                     if not ok:
-                        rejected = decisions / "rejected" / (
-                            f"{activation_id}-{gate_id}-{int(time.time())}.json"
-                        )
-                        rejected.parent.mkdir(parents=True, exist_ok=True)
-                        decision_file.rename(rejected)
+                        move_aside(decisions, activation_id, gate_id, decision_file)
                         print(
                             f"bridge: {gate_id} on {activation_id} {why} before "
                             f"submit; dropping decision",

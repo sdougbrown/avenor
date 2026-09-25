@@ -83,8 +83,9 @@ export async function runBridge(options: BridgeOptions): Promise<number> {
   // The decision dir must stay local-user scoped: on a group- or
   // other-writable pre-existing dir, any local user could drop a
   // decision-*.json and forge an attributed decision (the actor is
-  // self-asserted). Refuse to start on one.
-  if ((fs.statSync(options.decisionDir).mode & 0o077) !== 0) {
+  // self-asserted). Refuse to start on one; group/other read or execute
+  // bits are fine — they cannot forge a decision.
+  if ((fs.statSync(options.decisionDir).mode & 0o022) !== 0) {
     throw new Error(`decision dir ${options.decisionDir} must not be group- or other-writable`)
   }
   const templateGates = loadHumanGates(options.templatePath)

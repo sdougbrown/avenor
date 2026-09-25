@@ -420,14 +420,31 @@ describe('runBridge', () => {
     expect(fs.statSync(dir).mode & 0o777).toBe(0o700)
   })
 
-  test('refuses a group- or other-writable pre-existing decision dir', async () => {
+  test('accepts a pre-existing decision dir that is not group- or other-writable', () => {
+    // 0o755 (the umask-022 default) is readable/executable by others but not
+    // writable, so it cannot be used to forge a decision and must be accepted.
     const dir = setupDir()
     fs.chmodSync(dir, 0o755)
-    const client = new FakeClient({ detail: parkedDetail(), waitResults: [] })
-    await expect(
+    const client = new FakeClient({
+      detail: parkedDetail(),
+      waitResults: [{ terminal: true, instance: { status: 'completed' } }],
+    })
+    expect(
       runBridge(runOptions(dir, { connect: async () => client, ask: async () => {} })),
-    ).rejects.toThrow(/must not be group- or other-writable/)
+    ).resolves.toBe(0)
   })
+
+  test.each([0o775, 0o757])(
+    'refuses a group- or other-writable pre-existing decision dir (%o)',
+    async (mode) => {
+      const dir = setupDir()
+      fs.chmodSync(dir, mode)
+      const client = new FakeClient({ detail: parkedDetail(), waitResults: [] })
+      await expect(
+        runBridge(runOptions(dir, { connect: async () => client, ask: async () => {} })),
+      ).rejects.toThrow(/must not be group- or other-writable/)
+    },
+  )
 
   test('rejects a missing or malformed template before the loop', async () => {
     const missingDir = setupDir()
