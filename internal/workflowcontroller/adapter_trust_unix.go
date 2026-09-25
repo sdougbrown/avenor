@@ -13,7 +13,9 @@ import (
 // securePath verifies that path and every parent directory up to / are owned
 // by the current process UID or root, and that none of them (including path
 // itself) are group- or world-writable. Symlinked path components are checked
-// as they appear, without resolution.
+// as they appear, without resolution: a symlink's permission bits are
+// meaningless (the kernel ignores them when walking the path) and vary by OS
+// (Linux lstat always reports 0777), so only their ownership is enforced.
 func securePath(path string) error {
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -42,7 +44,9 @@ func securePath(path string) error {
 // checkOwnedMode enforces the ownership and write-mode rules for one path
 // element. A world-writable directory is tolerated only when it carries the
 // sticky bit (mode 1777, e.g. /tmp): the sticky bit prevents other users from
-// removing or replacing entries they do not own.
+// removing or replacing entries they do not own. Symlinks are exempt from the
+// write-mode check — the kernel ignores a symlink's permission bits when
+// resolving a path — but their ownership is still enforced.
 func checkOwnedMode(fi os.FileInfo, path string) error {
 	st, ok := fi.Sys().(*syscall.Stat_t)
 	if !ok {
@@ -53,6 +57,9 @@ func checkOwnedMode(fi os.FileInfo, path string) error {
 		return fmt.Errorf("%w: %s is owned by uid %d, not the current uid or root", ErrAdapterUntrusted, path, st.Uid)
 	}
 	mode := fi.Mode()
+	if mode&os.ModeSymlink != 0 {
+		return nil
+	}
 	if mode&(0o020|0o002) != 0 && !(mode&0o002 != 0 && mode&os.ModeSticky != 0 && mode.IsDir()) {
 		return fmt.Errorf("%w: %s is group- or world-writable (%o)", ErrAdapterUntrusted, path, mode.Perm())
 	}
