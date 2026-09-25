@@ -14,13 +14,19 @@ import (
 // publication activation to running with a live lease, returning the claim
 // result, activation ID, and attempt ID.
 func boundPublicationFixture(t *testing.T) (*Manager, *Store, WorkflowID, map[string]any, ActivationID, AttemptID) {
+	return boundPublicationFixtureTemplate(t, boundGateTemplateJSON)
+}
+
+// boundPublicationFixtureTemplate is boundPublicationFixture for a mutated
+// template (same template_id/version).
+func boundPublicationFixtureTemplate(t *testing.T, templateJSON string) (*Manager, *Store, WorkflowID, map[string]any, ActivationID, AttemptID) {
 	t.Helper()
 	s := newStore(t)
 	if err := s.CreateRoot(); err != nil {
 		t.Fatalf("CreateRoot: %v", err)
 	}
 	m := NewManager(s)
-	if _, err := m.WorkflowCreate([]byte(boundGateTemplateJSON)); err != nil {
+	if _, err := m.WorkflowCreate([]byte(templateJSON)); err != nil {
 		t.Fatalf("WorkflowCreate: %v", err)
 	}
 	payload, err := json.Marshal(map[string]string{"template_id": "bound-gates", "template_version": "1.0.0"})
@@ -95,6 +101,38 @@ func TestCompleteRejectsMalformedBoundOutputs(t *testing.T) {
 				t.Fatalf("revision changed %d -> %d on rejected completion", revBefore, got)
 			}
 		})
+	}
+}
+
+// TestCompleteRejectsOutOfRangeUnboundNumber pins that the safe integer
+// range applies to every number output, not only the ones a gate binding
+// consumes: score is number-typed but referenced by no binding, and 2^53+1
+// is still rejected with nothing recorded.
+func TestCompleteRejectsOutOfRangeUnboundNumber(t *testing.T) {
+	fixture := string(mutateBoundTemplate(boundGateTemplateJSON, func(template map[string]any) {
+		publication := boundGateNode(template, "publication")
+		publication["outputs"] = append(publication["outputs"].([]any),
+			map[string]any{"id": "score", "name": "Score", "type": "number"})
+	}))
+	m, s, wf, res, actID, attemptID := boundPublicationFixtureTemplate(t, fixture)
+	revBefore := revision(t, s, wf)
+	outputs := validPublicationOutputs + `,` + `{"definition_id":"score","value":9007199254740993}`
+	if _, err := m.commandComplete(wf, boundCompletePayload(t, string(actID), string(attemptID), res, outputs)); err == nil {
+		t.Fatalf("out-of-range unbound number accepted")
+	} else if !strings.Contains(err.Error(), "exceeds the safe integer range") {
+		t.Fatalf("error = %v, want safe-integer-range rejection", err)
+	}
+	if got := revision(t, s, wf); got != revBefore {
+		t.Fatalf("revision changed %d -> %d on rejected completion", revBefore, got)
+	}
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("load current: %v", err)
+	}
+	for _, o := range snap.Instance.Outputs {
+		if o.ActivationID == actID {
+			t.Fatalf("output %q recorded on rejected completion", o.DefinitionID)
+		}
 	}
 }
 
