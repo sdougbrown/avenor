@@ -211,52 +211,35 @@ func TestPollBackoffJitterBounds(t *testing.T) {
 	}
 }
 
-func TestPollBackoffHonorsClampedRetryAfter(t *testing.T) {
-	requested := int64(600000) // 10m: clamped to the 5m cap
-	delay, _ := PollBackoffDelay(pollBaseDelay, 0, &requested, nil)
-	if delay != 5*time.Minute {
-		t.Fatalf("clamped delay = %v, want 5m", delay)
-	}
-	requested = int64(500) // 500ms: raised to the 30s floor
-	delay, _ = PollBackoffDelay(pollBaseDelay, 0, &requested, nil)
-	if delay != 30*time.Second {
-		t.Fatalf("clamped delay = %v, want 30s", delay)
-	}
-	requested = int64(200000) // 200s: inside the range, honored as-is
-	delay, _ = PollBackoffDelay(pollBaseDelay, 0, &requested, nil)
-	if delay != 200*time.Second {
-		t.Fatalf("honored delay = %v, want 3m20s", delay)
-	}
-	requested = int64(45000)
-	delay, _ = PollBackoffDelay(pollBaseDelay, 4, &requested, nil)
-	if delay != 45*time.Second {
-		t.Fatalf("honored delay = %v, want 45s (retry count ignored)", delay)
-	}
-}
-
 // TestPollBackoffRetryAfterTable proves the retry_after_ms contract across
 // the absent, zero, sub-floor, in-range, and over-cap cases: only an absent
 // retry_after follows the backoff schedule; an explicit zero clamps to the
-// base minimum.
+// base minimum; and an explicit retry_after ignores the retry count.
 func TestPollBackoffRetryAfterTable(t *testing.T) {
 	zero := int64(0)
 	halfMs := int64(1)
+	halfSec := int64(500)
 	fortyFiveSec := int64(45000)
+	twoHundredSec := int64(200000)
 	tenMin := int64(600000)
 	tests := []struct {
 		name         string
 		retryAfterMS *int64
+		retryCount   int
 		want         time.Duration
 	}{
-		{"absent uses backoff schedule", nil, 60 * time.Second},
-		{"explicit zero clamps to base", &zero, pollBaseDelay},
-		{"1ms raises to base", &halfMs, pollBaseDelay},
-		{"45s honored as-is", &fortyFiveSec, 45 * time.Second},
-		{"10m caps at max", &tenMin, AdapterMaxRetryDelay},
+		{"absent uses backoff schedule", nil, 0, 60 * time.Second},
+		{"explicit zero clamps to base", &zero, 0, pollBaseDelay},
+		{"1ms raises to base", &halfMs, 0, pollBaseDelay},
+		{"500ms raises to base", &halfSec, 0, pollBaseDelay},
+		{"45s honored as-is", &fortyFiveSec, 0, 45 * time.Second},
+		{"200s honored as-is", &twoHundredSec, 0, 200 * time.Second},
+		{"45s honored at retry 4 (count ignored)", &fortyFiveSec, 4, 45 * time.Second},
+		{"10m caps at max", &tenMin, 0, AdapterMaxRetryDelay},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			delay, _ := PollBackoffDelay(pollBaseDelay, 0, tc.retryAfterMS, nil)
+			delay, _ := PollBackoffDelay(pollBaseDelay, tc.retryCount, tc.retryAfterMS, nil)
 			if delay != tc.want {
 				t.Fatalf("delay = %v, want %v", delay, tc.want)
 			}

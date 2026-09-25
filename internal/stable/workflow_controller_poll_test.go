@@ -713,3 +713,111 @@ func TestControllerParkLostLeaseReportsNotLeader(t *testing.T) {
 		t.Fatalf("park kind = %q, want not_leader", res.Kind)
 	}
 }
+
+// TestStartupSweepRemovesOrphanedStagingFilesOnly proves the startup barrier
+// sweeps orphaned adapter staging files without touching anything else: a
+// pre-staged <root>/adapter-poll loses its temp staging file, keeps its
+// subdirectory (the sweep only removes non-directory entries), and a real
+// evidence copy staged by a live workflow is immutable across the sweep.
+func TestStartupSweepRemovesOrphanedStagingFilesOnly(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "wfroot")
+	staging := filepath.Join(root, "adapter-poll")
+	if err := os.MkdirAll(staging, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	orphan := filepath.Join(staging, "poll-orphan.json")
+	if err := os.WriteFile(orphan, []byte(`{"result":"passed"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	nested := filepath.Join(staging, "nested")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	nestedFile := filepath.Join(nested, "keep.json")
+	if err := os.WriteFile(nestedFile, []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	evidenceFile := filepath.Join(root, "instances", "wf-live", "evidence", "ev-1", "adapter-response.json")
+	if err := os.MkdirAll(filepath.Dir(evidenceFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(evidenceFile, []byte(`{"result":"passed"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sup := NewSupervisor(Config{
+		ControlSocket: newStableSocketPath(t, "poll-sweep"),
+		WorkflowRoot:  root,
+	})
+	_, _, err := sup.workflowBarrierResult() // the barrier runs the sweep
+	if err != nil {
+		t.Fatalf("workflow barrier: %v", err)
+	}
+
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Fatalf("orphaned staging file = %v, want removed", err)
+	}
+	if _, err := os.Stat(nestedFile); err != nil {
+		t.Fatalf("nested staging entry removed: %v (the sweep only removes files)", err)
+	}
+	data, err := os.ReadFile(evidenceFile)
+	if err != nil || string(data) != `{"result":"passed"}` {
+		t.Fatalf("staged evidence copy changed: %q (%v), want immutable", data, err)
+	}
+}
+
+// TestControllerPollFailedGateCommandDiscardsEvidence proves the discard path
+// in applyPollResult: when the external_result gate command fails after the
+// evidence staged successfully, the staged evidence is removed and the gate
+// stays open for the next poll. The workflow's event log is made unwritable
+// after parking, so every store read succeeds but every command commit fails.
+func TestControllerPollFailedGateCommandDiscardsEvidence(t *testing.T) {
+	f := newPollFixture(t, "poll-discard", "poll-discard-tmpl",
+		map[string]string{"gh-review": "passed.sh"},
+		[]map[string]any{{"id": "pr-review", "type": "external", "required": true, "adapter_id": "gh-review"}})
+	f.drivePublication(t, "sdougbrown/avenor", 143, "cc793f7")
+
+	f.waitReviewStatus(t, workflow.ActivationAwaitingGate)
+	f.waitCursor(t, "pr-review")
+
+	// Break only the workflow commit: reads of the parked state succeed, but
+	// the gate command's event append fails after the evidence staged.
+	eventsPath := filepath.Join(f.root, "instances", f.wf, "events.ndjson")
+	if err := os.Chmod(eventsPath, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(eventsPath, 0o644) })
+
+	// The runner keeps polling: each cycle stages the adapter stdout, fails
+	// the gate command, and discards the evidence.
+	eventsCtrl := filepath.Join(f.cstore.ControllersRoot(), "c1", "events.ndjson")
+	waitFor(t, "repeated poll commits under the broken commit", func() bool {
+		data, err := os.ReadFile(eventsCtrl)
+		return err == nil && bytes.Count(data, []byte(`"kind":"poll_committed"`)) >= 2
+	})
+	f.sup.stopControllerLoop("c1")
+
+	// The gate never landed and nothing it staged survived.
+	if gates := f.gateInstances(t); len(gates) != 0 {
+		t.Fatalf("gate instances = %+v, want none (the gate command failed)", gates)
+	}
+	if review := f.activationByNode(t, "review"); review == nil || review.Status != workflow.ActivationAwaitingGate {
+		t.Fatalf("review status = %+v, want still parked awaiting_gate", review)
+	}
+	evidenceRoot := filepath.Join(f.root, "instances", f.wf, "evidence")
+	entries, err := os.ReadDir(evidenceRoot)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read evidence root: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("evidence entries = %v, want all discarded", entries)
+	}
+	// The failed applies leave the cursor parked for retry.
+	cursor, ok := f.findCursor("pr-review")
+	if !ok {
+		t.Fatal("poll cursor vanished after failed applies, want it left for retry")
+	}
+	if cursor.RetryCount < 1 {
+		t.Fatalf("cursor retry count = %d, want backed-off retries", cursor.RetryCount)
+	}
+}
