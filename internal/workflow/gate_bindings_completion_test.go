@@ -153,3 +153,44 @@ func TestCompleteAcceptsWellFormedBoundOutputs(t *testing.T) {
 		t.Fatalf("recorded outputs for activation = %d, want 3", recorded)
 	}
 }
+
+// TestCompleteAcceptsNonIntegralUnboundNumberOutput records the acceptance
+// direction of the unbound number hardening: integrality is required only
+// for outputs referenced by a bound gate or pull_request subject, so a
+// non-integral float delivered to a number output that no gate binding
+// consumes is accepted and its value is recorded.
+func TestCompleteAcceptsNonIntegralUnboundNumberOutput(t *testing.T) {
+	m, s, wf, res, actID, attemptID := boundPublicationFixtureTemplate(t, string(mutateBoundTemplate(boundGateTemplateJSON, func(template map[string]any) {
+		publication := boundGateNode(template, "publication")
+		publication["outputs"] = append(publication["outputs"].([]any),
+			map[string]any{"id": "score", "name": "Score", "type": "number"})
+	})))
+
+	out, err := m.commandComplete(wf, boundCompletePayload(t, string(actID), string(attemptID), res,
+		validPublicationOutputs+`,{"definition_id":"score","value":92.5}`))
+	if err != nil {
+		t.Fatalf("non-integral unbound number completion rejected: %v", err)
+	}
+	mm := out.(map[string]any)
+	if mm["activation_status"] != string(ActivationSatisfied) {
+		t.Fatalf("completion result = %#v, want satisfied", mm)
+	}
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("load current: %v", err)
+	}
+	var score json.RawMessage
+	found := false
+	for _, o := range snap.Instance.Outputs {
+		if o.ActivationID == actID && o.DefinitionID == "score" {
+			score = o.Value
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("score output not recorded for activation %s", actID)
+	}
+	if string(score) != "92.5" {
+		t.Fatalf("score value = %s, want 92.5", score)
+	}
+}
