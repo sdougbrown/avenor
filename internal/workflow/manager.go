@@ -313,6 +313,12 @@ func (m *Manager) instantiateTemplate(wf WorkflowID, template Template, material
 		if err != nil {
 			return Snapshot{}, err
 		}
+		// Validate the resolved child params against the child template before
+		// materializing the child, so an invalid bound value fails the composing
+		// command with no partial child (mirrors top-level instantiate).
+		if err := validateInstanceParams(child.Template, childParams); err != nil {
+			return Snapshot{}, err
+		}
 		if _, err := m.ensureChildInstance(child, childParams, materialized); err != nil {
 			return Snapshot{}, err
 		}

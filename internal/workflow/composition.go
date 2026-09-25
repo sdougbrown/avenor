@@ -258,6 +258,24 @@ func validateCompositionBindings(node NodeDefinition, parent Template, child Tem
 			}
 		}
 	}
+	// Every required child param must be bound by the action; an unbound
+	// required child param would otherwise skip instance-param validation at
+	// child instantiation and leave a templated concurrency key unresolved.
+	bound := make(map[string]bool, len(action.Params))
+	for _, binding := range action.Params {
+		bound[binding.Param] = true
+	}
+	for _, param := range child.Params {
+		if !param.Required {
+			continue
+		}
+		if !bound[param.ID] {
+			return fmt.Errorf(
+				"composition: node %q does not bind required child param %q of child template %s@%s",
+				node.ID, param.ID, child.TemplateID, child.TemplateVersion,
+			)
+		}
+	}
 
 	childOutcomes := templateOutcomeNames(child)
 	nodeOutcomes := nodeOutcomeNames(node)
