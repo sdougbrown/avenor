@@ -184,7 +184,8 @@ func TestWorkflowReadyDispatch(t *testing.T) {
 }
 
 // TestWorkflowControllerMissingControllerID pins the -32602 invalid-params
-// path for the methods that require a controller_id.
+// path for the methods that require a controller_id: both an empty object
+// (missing field) and a non-JSON body (unparseable params).
 func TestWorkflowControllerMissingControllerID(t *testing.T) {
 	s, fake := newWorkflowControllerTestServer(t)
 	methods := []struct {
@@ -195,6 +196,10 @@ func TestWorkflowControllerMissingControllerID(t *testing.T) {
 		{"workflow.controller.disable", json.RawMessage(`{}`)},
 		{"workflow.controller.status", json.RawMessage(`{}`)},
 		{"workflow.ready", json.RawMessage(`{}`)},
+		{"workflow.controller.enable", json.RawMessage(`not-json`)},
+		{"workflow.controller.disable", json.RawMessage(`not-json`)},
+		{"workflow.controller.status", json.RawMessage(`not-json`)},
+		{"workflow.ready", json.RawMessage(`not-json`)},
 	}
 	for _, m := range methods {
 		resp := s.dispatch(nil, Request{JSONRPC: "2.0", ID: 1, Method: m.method, Params: m.params})

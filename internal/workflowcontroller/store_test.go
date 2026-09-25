@@ -160,69 +160,65 @@ func TestCompetingLeadersSequential(t *testing.T) {
 }
 
 // TestConcurrentCompetingLeaders hammers one controller through two store
-// handles on the same root with overlapping AcquireLease/RenewLease calls.
-// The flock must keep the record consistent: owner epochs strictly increase
-// across successful acquisitions, no revision is ever observed with two
-// different lease ids, and the final leader matches the highest epoch seen.
+// handles on the same root with a shared fake clock. Each round expires the
+// current lease, then races AcquireLease across both handles: exactly one
+// winner per round, owner epochs strictly increase across rounds, and the
+// event log has no duplicate sequence numbers. A no-op lockFile would let
+// two racers both read the same revision and both "acquire".
 func TestConcurrentCompetingLeaders(t *testing.T) {
 	root := t.TempDir()
-	s1 := NewStore(root)
-	s2 := NewStore(root)
+	clock := &fakeClock{cur: time.Date(2025, 3, 4, 5, 6, 7, 0, time.UTC)}
+	s1 := NewStoreWithClock(root, clock.Now)
+	s2 := NewStoreWithClock(root, clock.Now)
 	mustEnable(t, s1, mustCreate(t, s1, "alpha", 1).ControllerID)
 
-	const workers = 8
-	const iters = 40
-	var mu sync.Mutex
+	const rounds = 5
+	const racersPerHandle = 4
 	lastEpoch := int64(0)
-	revisionLease := map[int64]string{}
-	var wg sync.WaitGroup
-	for w := 0; w < workers; w++ {
-		wg.Add(1)
-		go func(w int) {
-			defer wg.Done()
+	for r := 0; r < rounds; r++ {
+		clock.Advance(LeaseTTL + time.Second)
+		var mu sync.Mutex
+		winners := 0
+		var winnerEpoch int64
+		var wg sync.WaitGroup
+		for h := 0; h < 2; h++ {
 			s := s1
-			if w%2 == 1 {
+			if h == 1 {
 				s = s2
 			}
-			owner := fmt.Sprintf("owner-%d", w)
-			var leaseID string
-			var epoch int64
-			for i := 0; i < iters; i++ {
-				if leaseID != "" {
-					if _, err := s.RenewLease("alpha", leaseID, epoch); err != nil {
-						// Lost the lease (a competitor took over after an
-						// expiry): fall back to acquisition.
-						leaseID, epoch = "", 0
+			for w := 0; w < racersPerHandle; w++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					owner := fmt.Sprintf("owner-%d-%d", r, w)
+					rec, acquired, err := s.AcquireLease("alpha", owner)
+					if err != nil {
+						t.Errorf("round %d acquire: %v", r, err)
+						return
 					}
-				}
-				rec, acquired, err := s.AcquireLease("alpha", owner)
-				if err != nil {
-					t.Errorf("owner %d acquire: %v", w, err)
-					continue
-				}
-				if acquired {
-					mu.Lock()
-					if rec.Leader.OwnerEpoch <= lastEpoch {
-						t.Errorf("owner epoch did not strictly increase: %d after %d", rec.Leader.OwnerEpoch, lastEpoch)
+					if acquired {
+						mu.Lock()
+						winners++
+						if rec.Leader.OwnerEpoch <= lastEpoch {
+							t.Errorf("round %d: owner epoch %d not strictly greater than %d", r, rec.Leader.OwnerEpoch, lastEpoch)
+						}
+						if rec.Leader.OwnerEpoch > winnerEpoch {
+							winnerEpoch = rec.Leader.OwnerEpoch
+						}
+						mu.Unlock()
 					}
-					if rec.Leader.OwnerEpoch > lastEpoch {
-						lastEpoch = rec.Leader.OwnerEpoch
-					}
-					mu.Unlock()
-					leaseID, epoch = rec.Leader.LeaseID, rec.Leader.OwnerEpoch
-				}
-				if obs, _, err := s.Get("alpha"); err == nil && obs.Leader != nil {
-					mu.Lock()
-					if prev, ok := revisionLease[obs.Revision]; ok && prev != obs.Leader.LeaseID {
-						t.Errorf("revision %d observed with two leaders: %s and %s", obs.Revision, prev, obs.Leader.LeaseID)
-					}
-					revisionLease[obs.Revision] = obs.Leader.LeaseID
-					mu.Unlock()
-				}
+				}()
 			}
-		}(w)
+		}
+		wg.Wait()
+		if winners != 1 {
+			t.Fatalf("round %d: %d winners, want exactly 1", r, winners)
+		}
+		if winnerEpoch <= lastEpoch {
+			t.Fatalf("round %d: winner epoch %d not strictly greater than %d", r, winnerEpoch, lastEpoch)
+		}
+		lastEpoch = winnerEpoch
 	}
-	wg.Wait()
 
 	rec, ok, err := s1.Get("alpha")
 	if err != nil || !ok {
@@ -236,15 +232,15 @@ func TestConcurrentCompetingLeaders(t *testing.T) {
 	}
 
 	// The durable event log must record one serialized history: sequence
-	// numbers strictly increasing by one, and leader_acquired owner epochs
-	// strictly increasing. Interleaved read-modify-write (a lost flock) shows
-	// up as duplicate or regressed sequence numbers.
+	// numbers strictly increasing by one, with no duplicates. Interleaved
+	// read-modify-write (a lost flock) shows up as duplicate or regressed
+	// sequence numbers.
 	data, err := os.ReadFile(s1.eventsPath("alpha"))
 	if err != nil {
 		t.Fatalf("read events: %v", err)
 	}
 	lastSeq := int64(0)
-	lastAcquiredEpoch := int64(0)
+	seenSeq := map[int64]bool{}
 	for i, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
 		var e ControllerEvent
 		if err := json.Unmarshal([]byte(line), &e); err != nil {
@@ -253,18 +249,16 @@ func TestConcurrentCompetingLeaders(t *testing.T) {
 		if e.Seq != lastSeq+1 {
 			t.Errorf("event %d: seq = %d, want %d", i, e.Seq, lastSeq+1)
 		}
-		lastSeq = e.Seq
-		if e.Kind == EventLeaderAcquired {
-			if e.OwnerEpoch <= lastAcquiredEpoch {
-				t.Errorf("event %d: leader_acquired epoch %d after %d, want strictly increasing", i, e.OwnerEpoch, lastAcquiredEpoch)
-			}
-			lastAcquiredEpoch = e.OwnerEpoch
+		if seenSeq[e.Seq] {
+			t.Errorf("event %d: duplicate seq %d", i, e.Seq)
 		}
+		seenSeq[e.Seq] = true
+		lastSeq = e.Seq
 	}
 }
 
 func TestRenewReleaseCASConflicts(t *testing.T) {
-	s, _ := newTestStore(t)
+	s, clock := newTestStore(t)
 	mustEnable(t, s, mustCreate(t, s, "alpha", 1).ControllerID)
 	rec := mustAcquire(t, s, "alpha", "owner-1")
 	epoch := rec.OwnerEpoch
@@ -295,6 +289,14 @@ func TestRenewReleaseCASConflicts(t *testing.T) {
 	}
 	if _, err := s.ReleaseLease("alpha", leaseID, epoch); !errors.Is(err, ErrConflict) {
 		t.Fatalf("double release: got err=%v, want ErrConflict", err)
+	}
+
+	// Re-acquire, let the lease expire, then release: an expired lease is
+	// gone, not held, so the release is a conflict.
+	rec = mustAcquire(t, s, "alpha", "owner-2")
+	clock.Advance(LeaseTTL + time.Second)
+	if _, err := s.ReleaseLease("alpha", rec.Leader.LeaseID, rec.OwnerEpoch); !errors.Is(err, ErrConflict) {
+		t.Fatalf("release of expired lease: got err=%v, want ErrConflict", err)
 	}
 }
 

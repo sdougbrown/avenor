@@ -185,8 +185,8 @@ func TestWorkflowControllerCLIRoundTrip(t *testing.T) {
 }
 
 // TestWorkflowControllerCLIArgErrors pins the CLI-level validation: a missing
-// controller subcommand and a disable without --reason both exit nonzero
-// before any server mutation.
+// controller subcommand, a create without --request-file, and a disable
+// without --reason all exit nonzero before any server mutation.
 func TestWorkflowControllerCLIArgErrors(t *testing.T) {
 	run, fake := cliControllerEnv(t)
 
@@ -196,6 +196,9 @@ func TestWorkflowControllerCLIArgErrors(t *testing.T) {
 	if _, code := run("controller", "bogus"); code != 1 {
 		t.Fatalf("controller with unknown subcommand: want exit 1, got %d", code)
 	}
+	if _, code := run("controller", "create"); code != 1 {
+		t.Fatalf("controller create without --request-file: want exit 1, got %d", code)
+	}
 	if _, code := run("controller", "disable", "c1"); code == 0 {
 		t.Fatal("disable without --reason: want nonzero exit, got 0")
 	}
@@ -204,5 +207,8 @@ func TestWorkflowControllerCLIArgErrors(t *testing.T) {
 	}
 	if fake.disableID != "" {
 		t.Fatalf("disable without --reason should not reach the handler, got %q", fake.disableID)
+	}
+	if len(fake.createParams) != 0 {
+		t.Fatalf("create without --request-file should not reach the handler, got %s", fake.createParams)
 	}
 }
