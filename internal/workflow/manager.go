@@ -586,6 +586,7 @@ func (m *Manager) RebuildCandidateIndex(supervisorID string) error {
 // by controllerID, per the cached recovered snapshots. Manual nodes, other
 // controllers' nodes, claimed/leased, blocked, and legacy activations without
 // a ready timestamp never appear. Attempt identity is absent until dispatch.
+// A limit of zero or less returns every candidate (no truncation).
 func (m *Manager) CandidatesForController(controllerID string, limit int) ([]ReadyCandidate, error) {
 	m.candidateMu.Lock()
 	defer m.candidateMu.Unlock()

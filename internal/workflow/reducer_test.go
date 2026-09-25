@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // actStart returns the live "start" activation of the instance.
@@ -1032,6 +1033,72 @@ func TestReduceDoesNotMutateInput(t *testing.T) {
 	}
 	if state.Instance.Activations[0].Status != ActivationPending {
 		t.Fatalf("Reduce leaked mutation: activation became %q", state.Instance.Activations[0].Status)
+	}
+}
+
+// TestReduceDoesNotMutateInputDispatch pins the cloneSnapshot deep-copy of the
+// activation's Dispatch (incl. its *int Priority) and ReadyAt pointers, which
+// TestReduceDoesNotMutateInput never exercises (its activation carries nil
+// Dispatch/ReadyAt). A successful Reduce must not alias these nested pointers
+// into the caller's snapshot: mutating the result must not leak into the input,
+// and vice versa.
+func TestReduceDoesNotMutateInputDispatch(t *testing.T) {
+	state := newInstance(t)
+	act := actStart(state)
+	prio := 42
+	act.Dispatch = &DispatchPolicy{
+		Mode:           DispatchAuto,
+		Priority:       &prio,
+		ConcurrencyKey: "ck-1",
+	}
+	now := time.Now()
+	act.ReadyAt = &now
+
+	events, err := Apply(state, Command{
+		Kind:             CommandClaim,
+		ExpectedRevision: state.Instance.Revision,
+		IdempotencyKey:   "claim-1",
+		Identity:         baseIdentity(act.ID, ""),
+		LeaseID:          "lease-1",
+		Actor:            "alice",
+	})
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	next, err := Reduce(state, events[0])
+	if err != nil {
+		t.Fatalf("reduce: %v", err)
+	}
+
+	// Mutate the RESULT's nested dispatch pointers; the INPUT must be untouched.
+	*next.Instance.Activations[0].Dispatch.Priority = 99
+	next.Instance.Activations[0].Dispatch.ConcurrencyKey = "ck-mutated"
+	mutatedTime := time.Now().Add(48 * time.Hour)
+	*next.Instance.Activations[0].ReadyAt = mutatedTime
+	if got := *state.Instance.Activations[0].Dispatch.Priority; got != 42 {
+		t.Fatalf("Reduce leaked into input: priority got %d want 42", got)
+	}
+	if got := state.Instance.Activations[0].Dispatch.ConcurrencyKey; got != "ck-1" {
+		t.Fatalf("Reduce leaked into input: concurrency key got %q want \"ck-1\"", got)
+	}
+	if got := *state.Instance.Activations[0].ReadyAt; !got.Equal(now) {
+		t.Fatalf("Reduce leaked into input: ready_at got %v want %v", got, now)
+	}
+
+	// Vice versa: mutate the INPUT's nested dispatch pointers; the RESULT must
+	// be untouched.
+	*state.Instance.Activations[0].Dispatch.Priority = 7
+	state.Instance.Activations[0].Dispatch.ConcurrencyKey = "ck-input"
+	inputTime := time.Now().Add(72 * time.Hour)
+	*state.Instance.Activations[0].ReadyAt = inputTime
+	if got := *next.Instance.Activations[0].Dispatch.Priority; got != 99 {
+		t.Fatalf("input mutation leaked into result: priority got %d want 99", got)
+	}
+	if got := next.Instance.Activations[0].Dispatch.ConcurrencyKey; got != "ck-mutated" {
+		t.Fatalf("input mutation leaked into result: concurrency key got %q want \"ck-mutated\"", got)
+	}
+	if got := *next.Instance.Activations[0].ReadyAt; !got.Equal(mutatedTime) {
+		t.Fatalf("input mutation leaked into result: ready_at got %v want %v", got, mutatedTime)
 	}
 }
 
