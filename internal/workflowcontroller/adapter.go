@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -134,6 +135,23 @@ func Invoke(ctx context.Context, m *AdapterManifest, req PollRequest) (AdapterRe
 	}
 	stdoutBuf := &boundedBuffer{limit: m.MaxStdoutBytes}
 	stderrBuf := &boundedBuffer{limit: m.MaxStderrBytes}
+	// The child's pid (its process-group id) is only known after Start, so
+	// the buffers' kill hook waits for it; Start never waits on child output,
+	// so the wait cannot deadlock. A kill before Start succeeded is a no-op
+	// (pgid stays zero), and SIGKILL to a vanished group is not an error, so
+	// repeated kills from stdout and stderr racing to the limit are safe.
+	pgidReady := make(chan struct{})
+	var pgid int
+	var killOnce sync.Once
+	kill := func() {
+		<-pgidReady
+		if pgid == 0 {
+			return
+		}
+		killOnce.Do(func() { killProcessGroup(pgid) })
+	}
+	stdoutBuf.kill = kill
+	stderrBuf.kill = kill
 	cmd.Stdout = stdoutBuf
 	cmd.Stderr = stderrBuf
 
@@ -142,8 +160,11 @@ func Invoke(ctx context.Context, m *AdapterManifest, req PollRequest) (AdapterRe
 		return AdapterResult{}, err
 	}
 	if err := cmd.Start(); err != nil {
+		close(pgidReady)
 		return AdapterResult{}, fmt.Errorf("adapter %s start: %w", m.ID, err)
 	}
+	pgid = cmd.Process.Pid
+	close(pgidReady)
 	go func() {
 		// A child that exits early makes this write fail with EPIPE; that is
 		// the child's outcome, not a controller error.
@@ -151,7 +172,6 @@ func Invoke(ctx context.Context, m *AdapterManifest, req PollRequest) (AdapterRe
 		_ = stdin.Close()
 	}()
 
-	pgid := cmd.Process.Pid
 	waitCh := make(chan error, 1)
 	go func() { waitCh <- cmd.Wait() }()
 
@@ -205,16 +225,21 @@ func killProcessGroup(pgid int) {
 }
 
 // boundedBuffer captures a stream up to limit bytes; a write that would
-// exceed the limit fails the stream and flags the buffer.
+// exceed the limit fails the stream, flags the buffer, and runs kill so the
+// still-writing child is killed instead of running until its timeout.
 type boundedBuffer struct {
 	buf      bytes.Buffer
 	limit    int64
 	exceeded bool
+	kill     func()
 }
 
 func (b *boundedBuffer) Write(p []byte) (int, error) {
 	if int64(b.buf.Len())+int64(len(p)) > b.limit {
 		b.exceeded = true
+		if b.kill != nil {
+			b.kill()
+		}
 		return 0, fmt.Errorf("%w: %d bytes exceeds the %d byte limit", ErrAdapterOutputTooLarge, int64(b.buf.Len())+int64(len(p)), b.limit)
 	}
 	return b.buf.Write(p)

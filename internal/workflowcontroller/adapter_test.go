@@ -219,6 +219,61 @@ func TestInvokeStderrBound(t *testing.T) {
 	}
 }
 
+// TestInvokeOutputLimitKillsStillWritingAdapter proves the documented kill on
+// an output-limit violation: an adapter that keeps writing past the limit is
+// killed immediately (well before its 30s timeout) and its whole process
+// group is gone by the time Invoke returns.
+func TestInvokeOutputLimitKillsStillWritingAdapter(t *testing.T) {
+	dir := stageAdapterDir(t)
+	exe := stageFixture(t, dir, "spew.sh")
+	writeManifest(t, dir, "spew.json", "spew", exe, nil, 30000)
+	m := loadOne(t, dir, "spew")
+
+	start := time.Now()
+	_, err := Invoke(context.Background(), m, testRequest(testInputJSON))
+	elapsed := time.Since(start)
+	if !errors.Is(err, ErrAdapterOutputTooLarge) {
+		t.Fatalf("error = %v, want ErrAdapterOutputTooLarge", err)
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("Invoke returned after %v, want an immediate limit kill well under the 30s timeout", elapsed)
+	}
+
+	// Both group members (the script shell and its unbounded writer) and the
+	// group itself must be gone.
+	pids := make(map[string]int)
+	for _, name := range []string{"sh.pid", "child.pid"} {
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err != nil {
+			t.Fatalf("bad pid %q in %s: %v", data, name, err)
+		}
+		pids[name] = pid
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		alive := false
+		for _, pid := range pids {
+			if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
+				alive = true
+			}
+		}
+		if err := syscall.Kill(-pids["sh.pid"], 0); !errors.Is(err, syscall.ESRCH) {
+			alive = true
+		}
+		if !alive {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("adapter process group %d still alive after the output-limit kill", pids["sh.pid"])
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 func TestInvokeRedactsStderr(t *testing.T) {
 	t.Setenv("GH_SECRET", "supersecret-value-42")
 	res, err := invokeFixture(t, "stderr-secret.sh", "secret", testInputJSON)
