@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/sdougbrown/avenor/internal/durablefile"
 )
 
 // evidenceLink is the hard-link primitive used by the stager. It is a
@@ -171,7 +173,7 @@ func stageInto(srcPath, destDir, storedName string, required bool, expectedSHA s
 	if err != nil {
 		return 0, "", err
 	}
-	if err := fsyncDir(destDir); err != nil {
+	if err := durablefile.FsyncDir(destDir); err != nil {
 		return 0, "", err
 	}
 	return storedInfo.Size(), storedDigest, nil

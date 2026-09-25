@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+
+	"github.com/sdougbrown/avenor/internal/durablefile"
 )
 
 // ControllerStore applies commands to controller records under a single POSIX
@@ -62,7 +64,7 @@ func (s *ControllerStore) lockPath(controllerID string) string {
 // directory does not exist, the lock open fails with ENOENT and this returns
 // ErrNotFound, so callers that lock before checking existence report not-found.
 func (s *ControllerStore) lockController(controllerID string) (func() error, error) {
-	unlock, err := lockFile(s.lockPath(controllerID))
+	unlock, err := durablefile.Lock(s.lockPath(controllerID))
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, fmt.Errorf("controller %s: %w", controllerID, ErrNotFound)
@@ -502,12 +504,12 @@ func (s *ControllerStore) replayEvents(controllerID string, rec ControllerRecord
 	if len(bytes.TrimSpace(data)) == 0 {
 		return rec, 0, nil
 	}
-	lines := splitLines(data)
+	lines := durablefile.SplitLines(data)
 	replayed := 0
 	var lastGoodEnd int64
 	for i, line := range lines {
 		var e ControllerEvent
-		if err := json.Unmarshal(data[line.start:line.end], &e); err != nil {
+		if err := json.Unmarshal(data[line.Start:line.End], &e); err != nil {
 			if i == len(lines)-1 {
 				log.Printf("controller %s: truncating incomplete final event at byte %d", controllerID, lastGoodEnd)
 				if err := os.Truncate(path, lastGoodEnd); err != nil {
@@ -523,31 +525,9 @@ func (s *ControllerStore) replayEvents(controllerID string, rec ControllerRecord
 			}
 			replayed++
 		}
-		lastGoodEnd = line.end
+		lastGoodEnd = line.End
 	}
 	return rec, replayed, nil
-}
-
-type lineSpan struct {
-	start int64
-	end   int64
-}
-
-// splitLines splits data on '\n', recording each line's byte end offset (just
-// after the newline, or len(data) for a final line with no trailing newline).
-func splitLines(data []byte) []lineSpan {
-	var lines []lineSpan
-	start := int64(0)
-	for i, b := range data {
-		if b == '\n' {
-			lines = append(lines, lineSpan{start: start, end: int64(i) + 1})
-			start = int64(i) + 1
-		}
-	}
-	if start < int64(len(data)) {
-		lines = append(lines, lineSpan{start: start, end: int64(len(data))})
-	}
-	return lines
 }
 
 // commitLocked durably appends events, reduces them into rec, and persists the
@@ -627,17 +607,7 @@ func (s *ControllerStore) writeSnapshot(controllerID string, rec ControllerRecor
 	if err := os.Rename(tmpName, s.snapshotPath(controllerID)); err != nil {
 		return err
 	}
-	return fsyncDir(dir)
-}
-
-// fsyncDir fsyncs a directory so renames into it are durable.
-func fsyncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
+	return durablefile.FsyncDir(dir)
 }
 
 // regenerateProjection rewrites the controller's Markdown projection. The

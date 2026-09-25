@@ -5,6 +5,8 @@ import (
 	"io/fs"
 	"os"
 	"time"
+
+	"github.com/sdougbrown/avenor/internal/durablefile"
 )
 
 // This file owns restart recovery for the durable store: replaying each
@@ -31,7 +33,7 @@ func (s *Store) recoverInstance(workflowID WorkflowID) (Snapshot, bool, error) {
 		}
 		return Snapshot{}, false, err
 	}
-	unlock, err := lockFile(s.lockPath(workflowID))
+	unlock, err := durablefile.Lock(s.lockPath(workflowID))
 	if err != nil {
 		return Snapshot{}, false, err
 	}
@@ -134,7 +136,7 @@ func (s *Store) sweepStaleLeases(workflowID WorkflowID, reason string, now time.
 	if err := s.ensureInstanceDir(workflowID); err != nil {
 		return 0, 0, err
 	}
-	unlock, err := lockFile(s.lockPath(workflowID))
+	unlock, err := durablefile.Lock(s.lockPath(workflowID))
 	if err != nil {
 		return 0, 0, err
 	}

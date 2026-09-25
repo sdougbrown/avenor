@@ -12,6 +12,8 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/sdougbrown/avenor/internal/durablefile"
 )
 
 // newStore builds an ephemeral store under a fresh temp directory.
@@ -380,9 +382,9 @@ func TestStore_LockContentionSerializes(t *testing.T) {
 	snap := mustInstantiate(t, s, wf)
 
 	// Hold the instance lock manually outside ApplyCommand.
-	unlock, err := lockFile(s.lockPath(wf))
+	unlock, err := durablefile.Lock(s.lockPath(wf))
 	if err != nil {
-		t.Fatalf("lockFile: %v", err)
+		t.Fatalf("lock: %v", err)
 	}
 
 	type claimResult struct {

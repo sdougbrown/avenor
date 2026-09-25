@@ -8,6 +8,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+
+	"github.com/sdougbrown/avenor/internal/durablefile"
 )
 
 // Store applies commands to workflow instances under a single POSIX flock and
@@ -97,7 +99,7 @@ func (s *Store) ApplyCommand(workflowID WorkflowID, cmd Command) (Snapshot, erro
 	if err := s.ensureInstanceDir(workflowID); err != nil {
 		return Snapshot{}, err
 	}
-	unlock, err := lockFile(s.lockPath(workflowID))
+	unlock, err := durablefile.Lock(s.lockPath(workflowID))
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -239,17 +241,7 @@ func (s *Store) writeSnapshot(workflowID WorkflowID, snap Snapshot) error {
 	if err := os.Rename(tmpName, s.workflowPath(workflowID)); err != nil {
 		return err
 	}
-	return fsyncDir(s.instanceDir(workflowID))
-}
-
-// fsyncDir fsyncs a directory so renames into it are durable.
-func fsyncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
+	return durablefile.FsyncDir(s.instanceDir(workflowID))
 }
 
 // StoreTemplate atomically persists a versioned template under
@@ -288,7 +280,7 @@ func (s *Store) StoreTemplate(templateID TemplateID, templateVersion TemplateVer
 	if err := os.Rename(tmpName, path); err != nil {
 		return err
 	}
-	return fsyncDir(dir)
+	return durablefile.FsyncDir(dir)
 }
 
 // LoadTemplate reads a versioned template, returning a not-found error if it
@@ -321,7 +313,7 @@ func (s *Store) loadCurrent(workflowID WorkflowID) (Snapshot, bool, error) {
 	if err := os.MkdirAll(s.instanceDir(workflowID), 0o755); err != nil {
 		return Snapshot{}, false, err
 	}
-	unlock, err := lockFile(s.lockPath(workflowID))
+	unlock, err := durablefile.Lock(s.lockPath(workflowID))
 	if err != nil {
 		return Snapshot{}, false, err
 	}
