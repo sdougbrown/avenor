@@ -215,8 +215,6 @@ class BuildGateCommandTest(unittest.TestCase):
         command = bridge.build_gate_command("wf_1", "n", "act_1", self.gate,
                                            self.decision, pinned)
         self.assertEqual(command["subject"], pinned)
-        self.assertEqual(command["subject"]["revision"], "abc123")
-        self.assertEqual(command["subject"]["pull_request"], 123)
 
     def test_bound_gate_requires_no_transport_subject(self):
         # A bound gate submits the pinned subject even when the transport

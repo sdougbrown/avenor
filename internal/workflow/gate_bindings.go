@@ -422,9 +422,6 @@ func resolveGates(state Snapshot, tmpl *Template, node *NodeDefinition, causedBy
 			record.Subject = subject
 			record.Unresolved = append(record.Unresolved, unresolved...)
 		}
-		if len(record.Unresolved) == 0 && record.Subject != nil {
-			record.Unresolved = nil
-		}
 		resolved[gate.ID] = record
 	}
 	if len(resolved) == 0 {

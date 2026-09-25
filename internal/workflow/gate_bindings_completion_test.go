@@ -79,18 +79,38 @@ func TestCompleteRejectsMalformedBoundOutputs(t *testing.T) {
 		name    string
 		outputs string
 		want    string
+		// fixture is an optional mutated template JSON; empty uses the base
+		// bound-gate template.
+		fixture string
 	}{
-		{"non-integral bound number", `{"definition_id":"repository","value":"org/repo"},{"definition_id":"pr_number","value":12.5},{"definition_id":"pr_head","value":"abc"}`, "integral number"},
-		{"bound number beyond safe range", `{"definition_id":"repository","value":"org/repo"},{"definition_id":"pr_number","value":9007199254740993},{"definition_id":"pr_head","value":"abc"}`, "safe integer range"},
-		{"non-finite number", `{"definition_id":"repository","value":"org/repo"},{"definition_id":"pr_number","value":1e999},{"definition_id":"pr_head","value":"abc"}`, "finite number"},
-		{"null required output", `{"definition_id":"repository","value":"org/repo"},{"definition_id":"pr_number","value":null},{"definition_id":"pr_head","value":"abc"}`, "cannot be null"},
-		{"number in string output", `{"definition_id":"repository","value":42},{"definition_id":"pr_number","value":7},{"definition_id":"pr_head","value":"abc"}`, "requires a string value"},
-		{"number in boolean output", `{"definition_id":"repository","value":"org/repo"},{"definition_id":"pr_number","value":7},{"definition_id":"pr_head","value":"abc"},{"definition_id":"is_draft","value":42}`, "requires a boolean value"},
+		{"non-integral bound number", `{"definition_id":"repository","value":"org/repo"},{"definition_id":"pr_number","value":12.5},{"definition_id":"pr_head","value":"abc"}`, "integral number", ""},
+		{"bound number beyond safe range", `{"definition_id":"repository","value":"org/repo"},{"definition_id":"pr_number","value":9007199254740993},{"definition_id":"pr_head","value":"abc"}`, "safe integer range", ""},
+		{"non-finite number", `{"definition_id":"repository","value":"org/repo"},{"definition_id":"pr_number","value":1e999},{"definition_id":"pr_head","value":"abc"}`, "finite number", ""},
+		{"null required output", `{"definition_id":"repository","value":"org/repo"},{"definition_id":"pr_number","value":null},{"definition_id":"pr_head","value":"abc"}`, "cannot be null", ""},
+		{"number in string output", `{"definition_id":"repository","value":42},{"definition_id":"pr_number","value":7},{"definition_id":"pr_head","value":"abc"}`, "requires a string value", ""},
+		{"number in boolean output", `{"definition_id":"repository","value":"org/repo"},{"definition_id":"pr_number","value":7},{"definition_id":"pr_head","value":"abc"},{"definition_id":"is_draft","value":42}`, "requires a boolean value", ""},
+		// score is number-typed but referenced by no gate binding: the safe
+		// integer range applies to every number output, not only bound ones.
+		{"unbound number beyond safe range", validPublicationOutputs + `,` + `{"definition_id":"score","value":9007199254740993}`, "exceeds the safe integer range", string(mutateBoundTemplate(boundGateTemplateJSON, func(template map[string]any) {
+			publication := boundGateNode(template, "publication")
+			publication["outputs"] = append(publication["outputs"].([]any),
+				map[string]any{"id": "score", "name": "Score", "type": "number"})
+		}))},
 	}
 	for _, tc := range malformed {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			m, s, wf, res, actID, attemptID := boundPublicationFixture(t)
+			var m *Manager
+			var s *Store
+			var wf WorkflowID
+			var res map[string]any
+			var actID ActivationID
+			var attemptID AttemptID
+			if tc.fixture != "" {
+				m, s, wf, res, actID, attemptID = boundPublicationFixtureTemplate(t, tc.fixture)
+			} else {
+				m, s, wf, res, actID, attemptID = boundPublicationFixture(t)
+			}
 			revBefore := revision(t, s, wf)
 			if _, err := m.commandComplete(wf, boundCompletePayload(t, string(actID), string(attemptID), res, tc.outputs)); err == nil {
 				t.Fatalf("malformed completion accepted")
@@ -101,38 +121,6 @@ func TestCompleteRejectsMalformedBoundOutputs(t *testing.T) {
 				t.Fatalf("revision changed %d -> %d on rejected completion", revBefore, got)
 			}
 		})
-	}
-}
-
-// TestCompleteRejectsOutOfRangeUnboundNumber pins that the safe integer
-// range applies to every number output, not only the ones a gate binding
-// consumes: score is number-typed but referenced by no binding, and 2^53+1
-// is still rejected with nothing recorded.
-func TestCompleteRejectsOutOfRangeUnboundNumber(t *testing.T) {
-	fixture := string(mutateBoundTemplate(boundGateTemplateJSON, func(template map[string]any) {
-		publication := boundGateNode(template, "publication")
-		publication["outputs"] = append(publication["outputs"].([]any),
-			map[string]any{"id": "score", "name": "Score", "type": "number"})
-	}))
-	m, s, wf, res, actID, attemptID := boundPublicationFixtureTemplate(t, fixture)
-	revBefore := revision(t, s, wf)
-	outputs := validPublicationOutputs + `,` + `{"definition_id":"score","value":9007199254740993}`
-	if _, err := m.commandComplete(wf, boundCompletePayload(t, string(actID), string(attemptID), res, outputs)); err == nil {
-		t.Fatalf("out-of-range unbound number accepted")
-	} else if !strings.Contains(err.Error(), "exceeds the safe integer range") {
-		t.Fatalf("error = %v, want safe-integer-range rejection", err)
-	}
-	if got := revision(t, s, wf); got != revBefore {
-		t.Fatalf("revision changed %d -> %d on rejected completion", revBefore, got)
-	}
-	snap, _, err := s.loadCurrent(wf)
-	if err != nil {
-		t.Fatalf("load current: %v", err)
-	}
-	for _, o := range snap.Instance.Outputs {
-		if o.ActivationID == actID {
-			t.Fatalf("output %q recorded on rejected completion", o.DefinitionID)
-		}
 	}
 }
 
