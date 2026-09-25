@@ -103,21 +103,62 @@ func TestInvokeIntegerBounds(t *testing.T) {
 }
 
 func TestInvokeDetectsReplacedExecutable(t *testing.T) {
-	dir := stageAdapterDir(t)
-	exe := stageFixture(t, dir, "passed.sh")
-	writeManifest(t, dir, "review.json", "review", exe, nil, 5000)
-	m := loadOne(t, dir, "review")
+	t.Run("different content", func(t *testing.T) {
+		dir := stageAdapterDir(t)
+		exe := stageFixture(t, dir, "passed.sh")
+		writeManifest(t, dir, "review.json", "review", exe, nil, 5000)
+		m := loadOne(t, dir, "review")
 
-	if err := os.Remove(exe); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(exe, []byte("#!/bin/sh\ncat > /dev/null\nexit 0\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	_, err := Invoke(context.Background(), m, testRequest(testInputJSON))
-	if !errors.Is(err, ErrAdapterChanged) {
-		t.Fatalf("error = %v, want ErrAdapterChanged", err)
-	}
+		if err := os.Remove(exe); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(exe, []byte("#!/bin/sh\ncat > /dev/null\nexit 0\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Invoke(context.Background(), m, testRequest(testInputJSON))
+		if !errors.Is(err, ErrAdapterChanged) {
+			t.Fatalf("error = %v, want ErrAdapterChanged", err)
+		}
+	})
+	// Linux filesystems reuse inode numbers after a delete-and-recreate, so
+	// device+inode alone cannot detect a replacement. Identical bytes defeat
+	// a size check too; only the timestamps remain, and they are pinned to a
+	// later time explicitly instead of trusting clock granularity.
+	t.Run("identical content and reused inode", func(t *testing.T) {
+		dir := stageAdapterDir(t)
+		exe := stageFixture(t, dir, "passed.sh")
+		writeManifest(t, dir, "review.json", "review", exe, nil, 5000)
+		m := loadOne(t, dir, "review")
+		data, err := os.ReadFile(exe)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := os.Remove(exe); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(exe, data, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(exe, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		later := time.Now().Add(time.Hour)
+		if err := os.Chtimes(exe, later, later); err != nil {
+			t.Fatal(err)
+		}
+		if m.Dev != 0 && m.Ino != 0 {
+			if st, err := os.Stat(exe); err == nil {
+				if s := st.Sys().(*syscall.Stat_t); uint64(s.Dev) == m.Dev && s.Ino == m.Ino {
+					t.Log("inode was reused; the timestamps must carry the detection")
+				}
+			}
+		}
+		_, err = Invoke(context.Background(), m, testRequest(testInputJSON))
+		if !errors.Is(err, ErrAdapterChanged) {
+			t.Fatalf("error = %v, want ErrAdapterChanged even with identical content", err)
+		}
+	})
 }
 
 func TestInvokeDetectsEditedManifest(t *testing.T) {

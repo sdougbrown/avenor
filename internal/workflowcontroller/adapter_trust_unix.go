@@ -66,41 +66,62 @@ func checkOwnedMode(fi os.FileInfo, path string) error {
 	return nil
 }
 
+// execIdentity is the full stat identity of a resolved executable, recorded
+// at load time and rechecked before every execution. Size, mtime, and ctime
+// accompany device and inode because Linux filesystems (ext4, tmpfs) reuse
+// inode numbers: deleting an executable and writing a new one can produce the
+// same device and inode, and only a metadata or content difference exposes the
+// replacement.
+type execIdentity struct {
+	dev     uint64
+	ino     uint64
+	size    int64
+	mtimeNS int64
+	ctimeNS int64
+}
+
 // resolveSecureExecutable validates a manifest executable and records its
 // resolved identity. The path must be absolute, resolve through symlinks to a
 // regular file executable by its owner, and every directory from it up to /
 // plus the resolved file itself must pass the ownership/mode checks.
-func resolveSecureExecutable(executable string) (resolved string, dev, ino uint64, err error) {
+func resolveSecureExecutable(executable string) (resolved string, id execIdentity, err error) {
 	if !filepath.IsAbs(executable) {
-		return "", 0, 0, fmt.Errorf("executable %q must be an absolute path", executable)
+		return "", execIdentity{}, fmt.Errorf("executable %q must be an absolute path", executable)
 	}
 	if err := securePath(executable); err != nil {
-		return "", 0, 0, err
+		return "", execIdentity{}, err
 	}
 	resolved, err = filepath.EvalSymlinks(executable)
 	if err != nil {
-		return "", 0, 0, err
+		return "", execIdentity{}, err
 	}
 	if resolved != executable {
 		if err := securePath(resolved); err != nil {
-			return "", 0, 0, err
+			return "", execIdentity{}, err
 		}
 	}
 	fi, err := os.Lstat(resolved)
 	if err != nil {
-		return "", 0, 0, err
+		return "", execIdentity{}, err
 	}
 	if !fi.Mode().IsRegular() {
-		return "", 0, 0, fmt.Errorf("%w: %s is not a regular file", ErrAdapterUntrusted, resolved)
+		return "", execIdentity{}, fmt.Errorf("%w: %s is not a regular file", ErrAdapterUntrusted, resolved)
 	}
 	if fi.Mode()&0o100 == 0 {
-		return "", 0, 0, fmt.Errorf("%w: %s is not executable by its owner", ErrAdapterUntrusted, resolved)
+		return "", execIdentity{}, fmt.Errorf("%w: %s is not executable by its owner", ErrAdapterUntrusted, resolved)
 	}
 	st, ok := fi.Sys().(*syscall.Stat_t)
 	if !ok {
-		return "", 0, 0, fmt.Errorf("%w: cannot read file identity of %s", ErrAdapterUntrusted, resolved)
+		return "", execIdentity{}, fmt.Errorf("%w: cannot read file identity of %s", ErrAdapterUntrusted, resolved)
 	}
-	return resolved, uint64(st.Dev), uint64(st.Ino), nil
+	mtimeNS, ctimeNS := statTimestamps(fi, st)
+	return resolved, execIdentity{
+		dev:     uint64(st.Dev),
+		ino:     uint64(st.Ino),
+		size:    fi.Size(),
+		mtimeNS: mtimeNS,
+		ctimeNS: ctimeNS,
+	}, nil
 }
 
 // recheckTrust re-verifies the executable and manifest immediately before
@@ -118,11 +139,12 @@ func (m *AdapterManifest) recheckTrust() error {
 	if sha256.Sum256(data) != m.digest {
 		return fmt.Errorf("%w: manifest %s changed since load", ErrAdapterChanged, m.manifestPath)
 	}
-	resolved, dev, ino, err := resolveSecureExecutable(m.Executable)
+	resolved, id, err := resolveSecureExecutable(m.Executable)
 	if err != nil {
 		return fmt.Errorf("%w: executable: %v", ErrAdapterChanged, err)
 	}
-	if resolved != m.ResolvedPath || dev != m.Dev || ino != m.Ino {
+	if resolved != m.ResolvedPath || id.dev != m.Dev || id.ino != m.Ino ||
+		id.size != m.Size || id.mtimeNS != m.MtimeNS || id.ctimeNS != m.CtimeNS {
 		return fmt.Errorf("%w: executable %s changed since load", ErrAdapterChanged, m.Executable)
 	}
 	return nil

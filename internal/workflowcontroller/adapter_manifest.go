@@ -51,9 +51,14 @@ type AdapterManifest struct {
 	manifestDir  string
 	// ResolvedPath is the Executable path after symlink resolution.
 	ResolvedPath string
-	// Dev and Ino identify the resolved executable's file.
-	Dev uint64
-	Ino uint64
+	// Dev, Ino, Size, MtimeNS, and CtimeNS identify the resolved executable's
+	// file. Size and the nanosecond timestamps accompany device and inode
+	// because filesystems reuse inode numbers after a delete-and-recreate.
+	Dev     uint64
+	Ino     uint64
+	Size    int64
+	MtimeNS int64
+	CtimeNS int64
 	// digest is the SHA-256 of the manifest file bytes.
 	digest [sha256.Size]byte
 }
@@ -136,15 +141,18 @@ func loadAdapterManifest(path string) (*AdapterManifest, error) {
 	if err := securePath(path); err != nil {
 		return nil, fmt.Errorf("%w: manifest: %v", ErrAdapterUntrusted, err)
 	}
-	resolved, dev, ino, err := resolveSecureExecutable(wire.Executable)
+	resolved, id, err := resolveSecureExecutable(wire.Executable)
 	if err != nil {
 		return nil, fmt.Errorf("%w: executable: %v", ErrAdapterUntrusted, err)
 	}
 	wire.manifestPath = path
 	wire.manifestDir = filepath.Dir(path)
 	wire.ResolvedPath = resolved
-	wire.Dev = dev
-	wire.Ino = ino
+	wire.Dev = id.dev
+	wire.Ino = id.ino
+	wire.Size = id.size
+	wire.MtimeNS = id.mtimeNS
+	wire.CtimeNS = id.ctimeNS
 	wire.digest = sha256.Sum256(data)
 	return &wire, nil
 }
