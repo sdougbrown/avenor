@@ -575,3 +575,206 @@ func TestControllerLeaseRenewalObserved(t *testing.T) {
 		t.Fatalf("expires_at did not advance across renewals: %s -> %s", baseExpiresAt, rec.Leader.ExpiresAt)
 	}
 }
+
+// TestWorkflowReadyAdvisoryCandidates proves the success path of
+// Supervisor.WorkflowReady: after the barrier recovers the candidate index,
+// instantiating auto-dispatch workflows surfaces them as advisory candidates
+// for the owning controller, and the limit is honored.
+func TestWorkflowReadyAdvisoryCandidates(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "wfroot")
+	if err := workflow.New(root).CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	sup := NewSupervisor(Config{ControlSocket: newStableSocketPath(t, "wfctl-ready"), WorkflowRoot: root})
+	stopLoopsAtCleanup(t, sup)
+
+	if _, err := sup.WorkflowControllerCreate(createControllerParams(t, "c1", 5)); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := sup.WorkflowControllerEnable("c1"); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+
+	// The barrier ran (create is a controller command) and recovered the
+	// candidate index; new instances enter it via the store commit hook.
+	template := map[string]any{
+		"schema_version":   1,
+		"template_id":      "ready-tmpl",
+		"template_version": "1",
+		"entry_nodes":      []string{"start"},
+		"nodes": []any{map[string]any{
+			"id":       "start",
+			"action":   map[string]any{"type": "run", "prompt": "do the thing"},
+			"dispatch": map[string]any{"mode": "auto", "controller_id": "c1", "concurrency_key": "deploys"},
+		}},
+		"terminal_outcomes": []string{"done"},
+	}
+	tmplJSON, err := json.Marshal(template)
+	if err != nil {
+		t.Fatalf("marshal template: %v", err)
+	}
+	if _, err := (lazyWorkflowHandler{sup}).WorkflowCreate(tmplJSON); err != nil {
+		t.Fatalf("workflow create: %v", err)
+	}
+
+	instantiate := func() workflow.WorkflowID {
+		t.Helper()
+		payload, err := json.Marshal(map[string]string{"template_id": "ready-tmpl", "template_version": "1"})
+		if err != nil {
+			t.Fatalf("marshal instantiate: %v", err)
+		}
+		out, err := (lazyWorkflowHandler{sup}).WorkflowInstantiate(payload)
+		if err != nil {
+			t.Fatalf("workflow instantiate: %v", err)
+		}
+		id, ok := out.(map[string]any)["workflow_id"].(string)
+		if !ok || id == "" {
+			t.Fatalf("instantiate result = %#v, want workflow_id", out)
+		}
+		return workflow.WorkflowID(id)
+	}
+	wf1 := instantiate()
+	wf2 := instantiate()
+
+	ready := func(limit int) (map[string]any, error) {
+		res, err := sup.WorkflowReady("c1", limit)
+		if err != nil {
+			return nil, err
+		}
+		m, ok := res.(map[string]any)
+		if !ok {
+			t.Fatalf("ready result = %#v, want map", res)
+		}
+		return m, nil
+	}
+
+	// limit=0 returns every ready candidate (both instances).
+	resAll, err := ready(0)
+	if err != nil {
+		t.Fatalf("ready(0): %v", err)
+	}
+	if got := resAll["advisory"]; got != true {
+		t.Fatalf("advisory = %v, want true", got)
+	}
+	if got := resAll["controller_id"]; got != "c1" {
+		t.Fatalf("controller_id = %v, want c1", got)
+	}
+	candsAll, ok := resAll["candidates"].([]workflow.ReadyCandidate)
+	if !ok {
+		t.Fatalf("candidates = %#v, want []workflow.ReadyCandidate", resAll["candidates"])
+	}
+	if len(candsAll) != 2 {
+		t.Fatalf("candidates(0) = %d, want 2", len(candsAll))
+	}
+	seen := map[workflow.WorkflowID]workflow.NodeID{}
+	for _, c := range candsAll {
+		if c.ControllerID != "c1" {
+			t.Fatalf("candidate controller_id = %q, want c1", c.ControllerID)
+		}
+		if c.Identity.NodeID != "start" {
+			t.Fatalf("candidate node = %q, want start", c.Identity.NodeID)
+		}
+		if c.Identity.ActivationID == "" {
+			t.Fatal("candidate activation id is empty")
+		}
+		seen[c.Identity.WorkflowID] = c.Identity.NodeID
+	}
+	if seen[wf1] != "start" || seen[wf2] != "start" {
+		t.Fatalf("candidates do not cover both workflows: %#v", seen)
+	}
+
+	// limit=1 returns at most one candidate.
+	resOne, err := ready(1)
+	if err != nil {
+		t.Fatalf("ready(1): %v", err)
+	}
+	candsOne, ok := resOne["candidates"].([]workflow.ReadyCandidate)
+	if !ok {
+		t.Fatalf("candidates = %#v, want []workflow.ReadyCandidate", resOne["candidates"])
+	}
+	if len(candsOne) != 1 {
+		t.Fatalf("candidates(1) = %d, want 1 (limit honored)", len(candsOne))
+	}
+}
+
+// TestControllerRenewFailureYieldsAndReacquires proves the leader loop's
+// renew-failure branch: when the lease is taken out-of-band (a CAS conflict
+// on the next renew), the loop yields (holding=false) instead of exiting,
+// keeps its map entry, and re-acquires once the lease is released.
+func TestControllerRenewFailureYieldsAndReacquires(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "wfroot")
+	if err := workflow.New(root).CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	store := workflowcontroller.NewStore(root)
+	sup := NewSupervisor(Config{ControlSocket: newStableSocketPath(t, "wfctl-renew-fail"), WorkflowRoot: root})
+	sup.controllerRenewInterval = 20 * time.Millisecond
+	stopLoopsAtCleanup(t, sup)
+
+	if _, err := sup.WorkflowControllerCreate(createControllerParams(t, "c1", 5)); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := sup.WorkflowControllerEnable("c1"); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	recA := waitForControllerLeader(t, store, "c1", func(rec workflowcontroller.ControllerRecord) bool {
+		return rec.Leader.OwnerID == sup.supervisorIdentity()
+	})
+	if recA.Leader.OwnerEpoch != 1 {
+		t.Fatalf("A leader epoch = %d, want 1", recA.Leader.OwnerEpoch)
+	}
+
+	// Out-of-band: a second store handle with an advanced clock expires A's
+	// lease and acquires it as owner B, bumping the epoch.
+	advanced := time.Now().Add(2 * workflowcontroller.LeaseTTL)
+	ooStore := workflowcontroller.NewStoreWithClock(root, func() time.Time { return advanced })
+	recB, ok, err := ooStore.AcquireLease("c1", "owner-b")
+	if err != nil {
+		t.Fatalf("B acquire: %v", err)
+	}
+	if !ok {
+		t.Fatalf("B acquire: not granted; rec=%+v", recB)
+	}
+	if recB.Leader.OwnerEpoch != recA.Leader.OwnerEpoch+1 {
+		t.Fatalf("B leader epoch = %d, want %d", recB.Leader.OwnerEpoch, recA.Leader.OwnerEpoch+1)
+	}
+	leaseB := recB.Leader.LeaseID
+	epochB := recB.Leader.OwnerEpoch
+
+	// A's next renew is a CAS conflict: the loop yields (holding=false) and
+	// falls back to acquisition retry. Wait for the yield to settle: B is
+	// the leader and A's loop entry is still present (A did not exit).
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		rec, _, err := store.Get("c1")
+		if err != nil {
+			t.Fatalf("store.Get: %v", err)
+		}
+		if rec.Leader != nil && rec.Leader.OwnerID == "owner-b" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for B to be leader; last=%+v", rec.Leader)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// Give A's loop a renew cycle to hit the renew-failure branch and yield.
+	time.Sleep(50 * time.Millisecond)
+	sup.controllerLoopsMu.Lock()
+	_, loopPresent := sup.controllerLoops["c1"]
+	sup.controllerLoopsMu.Unlock()
+	if !loopPresent {
+		t.Fatal("A's loop entry is gone after the renew-failure yield; A exited instead of yielding")
+	}
+
+	// Release B's lease: A's acquisition retry re-acquires with epoch+1.
+	if _, err := store.ReleaseLease("c1", leaseB, epochB); err != nil {
+		t.Fatalf("release B lease: %v", err)
+	}
+	recA2 := waitForControllerLeader(t, store, "c1", func(rec workflowcontroller.ControllerRecord) bool {
+		return rec.Leader.OwnerID == sup.supervisorIdentity()
+	})
+	if recA2.Leader.OwnerEpoch != epochB+1 {
+		t.Fatalf("A re-acquired epoch = %d, want %d", recA2.Leader.OwnerEpoch, epochB+1)
+	}
+}

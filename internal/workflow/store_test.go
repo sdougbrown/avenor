@@ -108,6 +108,20 @@ func TestStore_InstantiatePersists(t *testing.T) {
 	}
 }
 
+// TestCommitObserverPanicIsolation proves that a panicking commit observer is
+// isolated from the command path: the command still commits and the panic
+// does not propagate past ApplyCommand.
+func TestCommitObserverPanicIsolation(t *testing.T) {
+	s := newStore(t)
+	s.SetCommitObserver(func(wf WorkflowID, snap Snapshot) {
+		panic("observer must not break the command path")
+	})
+	snap := mustInstantiate(t, s, "wf1")
+	if snap.Instance.Revision != 1 {
+		t.Fatalf("command did not commit: revision = %d, want 1", snap.Instance.Revision)
+	}
+}
+
 func TestStore_ApplyAdvancesRevisionAndRoundTrips(t *testing.T) {
 	s := newStore(t)
 	wf := WorkflowID("wf1")

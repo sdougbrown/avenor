@@ -239,12 +239,8 @@ func TestSelectPermutationInvariance(t *testing.T) {
 	}
 
 	// Repeated rotations of the input slices must produce identical output.
-	rotate := func(s []Candidate) []Candidate {
-		out := make([]Candidate, len(s))
-		copy(out, s)
-		return out
-	}
-	rotated := rotate(candidates)
+	rotated := make([]Candidate, len(candidates))
+	copy(rotated, candidates)
 	for i := 0; i < len(candidates); i++ {
 		rotatedInFlight := append([]InFlightAttempt{inflight[len(inflight)-1]}, inflight[:len(inflight)-1]...)
 		got := ids(Select(SelectInput{

@@ -106,7 +106,7 @@ func TestWorkflowControllerCLIRoundTrip(t *testing.T) {
 
 	// create via request file.
 	reqPath := filepath.Join(dir, "controller.json")
-	if err := os.WriteFile(reqPath, []byte(`{"name":"c1"}`), 0o644); err != nil {
+	if err := os.WriteFile(reqPath, []byte(`{"controller_id":"c1","max_inflight":5}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	out, code := run("controller", "create", "--request-file", reqPath)
@@ -116,7 +116,7 @@ func TestWorkflowControllerCLIRoundTrip(t *testing.T) {
 	if !strings.Contains(out, "created") {
 		t.Fatalf("create output missing created: %s", out)
 	}
-	if string(fake.createParams) != `{"name":"c1"}` {
+	if string(fake.createParams) != `{"controller_id":"c1","max_inflight":5}` {
 		t.Fatalf("create raw params = %s, want the file bytes", fake.createParams)
 	}
 
