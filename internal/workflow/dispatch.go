@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/sdougbrown/avenor/internal/durablefile"
 )
 
 // ErrStaleCandidate reports that a candidate activation is no longer
@@ -97,7 +99,7 @@ func (m *Manager) lockDispatch() (func() error, error) {
 		}
 		return nil, err
 	}
-	return lockFile(filepath.Join(root, "dispatch.lock"))
+	return durablefile.Lock(filepath.Join(root, "dispatch.lock"))
 }
 
 // heldConcurrencyKeys returns the set of concurrency keys held by live
