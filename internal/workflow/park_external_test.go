@@ -9,6 +9,8 @@ package workflow
 import (
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -137,6 +139,66 @@ func TestParkExternalParksEligibleActivation(t *testing.T) {
 	}
 	if len(cands) != 0 {
 		t.Fatalf("candidates after park = %+v, want none", cands)
+	}
+}
+
+// TestParkedExternalGatesSkipsUnloadableTemplate verifies that one workflow
+// whose template can no longer be loaded does not stall re-seeding: the other
+// workflows' parked gates are still returned and only the broken workflow is
+// skipped.
+func TestParkedExternalGatesSkipsUnloadableTemplate(t *testing.T) {
+	m, s, wf1 := parkFixture(t, boundGateTemplateJSON)
+	second := mutateBoundTemplate(boundGateTemplateJSON, func(template map[string]any) {
+		template["template_id"] = "bound-gates-two"
+	})
+	if _, err := m.WorkflowCreate(second); err != nil {
+		t.Fatalf("WorkflowCreate: %v", err)
+	}
+	payload, err := json.Marshal(map[string]string{
+		"template_id": "bound-gates-two", "template_version": "1.0.0",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	out, err := m.WorkflowInstantiate(payload)
+	if err != nil {
+		t.Fatalf("WorkflowInstantiate: %v", err)
+	}
+	wf2 := WorkflowID(out.(map[string]any)["workflow_id"].(string))
+
+	driveBoundPublication(t, m, s, wf1, boundPublicationOutputs("org/repo", 42, "abc123"))
+	driveBoundPublication(t, m, s, wf2, boundPublicationOutputs("org/repo", 43, "def456"))
+	for _, wf := range []WorkflowID{wf1, wf2} {
+		review := latestActivation(t, s, wf, "review")
+		if _, err := m.ParkExternal(ParkExternalRequest{
+			WorkflowID:       wf,
+			NodeID:           "review",
+			ActivationID:     review.ID,
+			ExpectedRevision: revision(t, s, wf),
+			ControllerID:     "ctl",
+		}); err != nil {
+			t.Fatalf("ParkExternal %s: %v", wf, err)
+		}
+	}
+
+	// Corrupt the second workflow's template on disk after parking so its
+	// template load fails during the parked-gate query.
+	templatePath := filepath.Join(s.root, "templates", "bound-gates-two", "1.0.0.json")
+	if err := os.WriteFile(templatePath, []byte("{corrupt"), 0o644); err != nil {
+		t.Fatalf("corrupt template: %v", err)
+	}
+
+	refs, err := m.ParkedExternalGates("ctl")
+	if err != nil {
+		t.Fatalf("ParkedExternalGates: %v", err)
+	}
+	if len(refs) == 0 {
+		t.Fatal("ParkedExternalGates returned no gates")
+	}
+	for _, ref := range refs {
+		if ref.WorkflowID != wf1 {
+			t.Fatalf("gate ref from wrong workflow: %+v, want only %s", ref, wf1)
+		}
 	}
 }
 

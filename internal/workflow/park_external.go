@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"sort"
 )
 
@@ -265,6 +266,7 @@ func (m *Manager) ParkedExternalGates(controllerID string) ([]ParkedGateRef, err
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	refs := make([]ParkedGateRef, 0)
 	templates := make(map[WorkflowID]*Template, len(ids))
+wfLoop:
 	for _, wf := range ids {
 		snap := m.candidates[wf]
 		if isTerminalStatus(snap.Instance.Status) {
@@ -283,7 +285,10 @@ func (m *Manager) ParkedExternalGates(controllerID string) ([]ParkedGateRef, err
 			if !ok {
 				loaded, err := m.templateFor(&snap)
 				if err != nil {
-					return nil, err
+					// One unloadable template must not stall re-seeding for
+					// the controller's other parked gates.
+					log.Printf("workflow %s: parked gate template load: %v", wf, err)
+					continue wfLoop
 				}
 				templates[wf] = loaded
 				tmpl = loaded
