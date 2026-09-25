@@ -585,3 +585,123 @@ func TestChildOutputProvenancePinning(t *testing.T) {
 		t.Fatalf("first visit pin changed to %+v, want child identity %+v", got, want)
 	}
 }
+
+// TestChildOutputSubjectValuesPinnedThroughBindings resolves a downstream
+// gate's subject_binding through a workflow-action node's child
+// output_bindings and asserts the pinned subject fields carry the child's
+// output VALUES (repository, pull request number, revision) — not just the
+// pinned references.
+func TestChildOutputSubjectValuesPinnedThroughBindings(t *testing.T) {
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	m := NewManager(s)
+	child := Template{
+		SchemaVersion:   1,
+		TemplateID:      "bnd-child-subj",
+		TemplateVersion: "1",
+		EntryNodes:      []NodeID{"start"},
+		Nodes: []NodeDefinition{{
+			ID:     "start",
+			Action: Action{Kind: ActionManual, Manual: &ManualAction{Instructions: "do"}},
+			Outputs: []OutputDefinition{
+				{ID: "co_repo", Name: "co_repo", Type: OutputString},
+				{ID: "co_pr", Name: "co_pr", Type: OutputNumber},
+				{ID: "co_rev", Name: "co_rev", Type: OutputString},
+			},
+		}},
+		TerminalOutcomes: []OutcomeName{"done"},
+	}
+	spawn := compositionWorkflowNode("spawn", "bnd-child-subj", "c1")
+	spawn.Action.Workflow.OutcomeMap = map[OutcomeName]OutcomeName{"done": "done"}
+	spawn.Branches = map[OutcomeName]NodeID{"done": "review"}
+	spawn.Outputs = []OutputDefinition{
+		{ID: "po_repo", Name: "po_repo", Type: OutputString},
+		{ID: "po_pr", Name: "po_pr", Type: OutputNumber},
+		{ID: "po_rev", Name: "po_rev", Type: OutputString},
+	}
+	spawn.Action.Workflow.OutputBindings = []OutputBinding{
+		{ChildOutput: "co_repo", ParentOutput: "po_repo"},
+		{ChildOutput: "co_pr", ParentOutput: "po_pr"},
+		{ChildOutput: "co_rev", ParentOutput: "po_rev"},
+	}
+	review := NodeDefinition{
+		ID:           "review",
+		Dependencies: []NodeID{"spawn"},
+		Action:       Action{Kind: ActionExternal, External: &ExternalAction{Source: "github"}},
+		Gates: []GateDefinition{{
+			ID:        GateID("pr-review"),
+			Type:      GateExternal,
+			Required:  true,
+			AdapterID: "gh-review",
+			SubjectBinding: &SubjectBinding{
+				Type:        "pull_request",
+				Repository:  &SubjectOutputRef{FromNodeOutput: TemplateOutputReference{NodeID: "spawn", OutputID: "po_repo"}},
+				PullRequest: &SubjectOutputRef{FromNodeOutput: TemplateOutputReference{NodeID: "spawn", OutputID: "po_pr"}},
+				Revision:    &SubjectOutputRef{FromNodeOutput: TemplateOutputReference{NodeID: "spawn", OutputID: "po_rev"}},
+			},
+		}},
+	}
+	parent := Template{
+		SchemaVersion:    1,
+		TemplateID:       "bnd-parent-subj",
+		TemplateVersion:  "1",
+		EntryNodes:       []NodeID{"spawn"},
+		Nodes:            []NodeDefinition{spawn, review},
+		TerminalOutcomes: []OutcomeName{"done"},
+	}
+	for _, template := range []Template{child, parent} {
+		if err := s.StoreTemplate(template.TemplateID, template.TemplateVersion, template); err != nil {
+			t.Fatalf("StoreTemplate %s: %v", template.TemplateID, err)
+		}
+	}
+	payload, _ := json.Marshal(map[string]string{"template_id": "bnd-parent-subj", "template_version": "1"})
+	out, err := m.WorkflowInstantiate(payload)
+	if err != nil {
+		t.Fatalf("WorkflowInstantiate: %v", err)
+	}
+	wf := WorkflowID(out.(map[string]any)["workflow_id"].(string))
+	childID := DeriveChildWorkflowID(wf, "spawn", "c1")
+	registerBoundedWorkflowExecutor(t, m, 10*time.Second)
+
+	childSnap, exists, err := s.loadCurrent(childID)
+	if err != nil || !exists || len(childSnap.Instance.Activations) == 0 {
+		t.Fatalf("child loadCurrent: exists=%v err=%v", exists, err)
+	}
+	childActID := childSnap.Instance.Activations[0].ID
+
+	driveErr := make(chan error, 1)
+	go func() {
+		if err := waitParentAwaitingChild(s, wf, 10*time.Second); err != nil {
+			driveErr <- err
+			return
+		}
+		driveErr <- driveChildTerminalErr(s, childID, "done", []OutputValue{
+			{ID: "ov1", DefinitionID: "co_repo", ActivationID: childActID, Revision: 1, Value: json.RawMessage(`"acme/repo"`)},
+			{ID: "ov2", DefinitionID: "co_pr", ActivationID: childActID, Revision: 1, Value: json.RawMessage(`7`)},
+			{ID: "ov3", DefinitionID: "co_rev", ActivationID: childActID, Revision: 1, Value: json.RawMessage(`"cafe123"`)},
+		})
+	}()
+
+	parentPayload, _ := claimStartSpawn(t, m, s, wf)
+	if _, err := m.WorkflowCommand(string(wf), parentPayload); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if e := <-driveErr; e != nil {
+		t.Fatalf("child driver: %v", e)
+	}
+
+	review1 := latestActivation(t, s, wf, "review")
+	resolved, ok := review1.ResolvedGates[GateID("pr-review")]
+	if !ok {
+		t.Fatalf("review has no pinned gates")
+	}
+	wantSubject := &Subject{Type: "pull_request", Repository: "acme/repo", PullRequest: 7, Revision: "cafe123"}
+	if !reflect.DeepEqual(resolved.Subject, wantSubject) {
+		t.Fatalf("pinned subject = %+v, want the child output values %+v", resolved.Subject, wantSubject)
+	}
+	if len(resolved.Unresolved) != 0 {
+		t.Fatalf("unresolved = %v, want none", resolved.Unresolved)
+	}
+}

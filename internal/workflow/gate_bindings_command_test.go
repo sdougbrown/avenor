@@ -10,6 +10,7 @@ package workflow
 import (
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -475,6 +476,81 @@ func TestSuccessOutcomeRequiresAllGatesPassed(t *testing.T) {
 	}
 	if act := activationByNode(&snap.Instance, "merge"); act == nil {
 		t.Fatalf("success_outcome branch did not create the merge activation")
+	}
+}
+
+// TestChangesRequestedRoutesOntoBoundGateTarget routes a mapped
+// changes_requested result onto a branch whose TARGET node itself declares a
+// bound gate: the created target activation carries CausedBy = the review
+// activation, and its own gate pins resolve through the review's causal
+// chain to the publication's outputs (subject values and input references).
+func TestChangesRequestedRoutesOntoBoundGateTarget(t *testing.T) {
+	fixture := mutateBoundTemplate(boundGateTemplateJSON, func(template map[string]any) {
+		review := boundGateNode(template, "review")
+		review["branches"] = map[string]any{"clean": "merge", "failed": "rework"}
+		template["nodes"] = append(template["nodes"].([]any), map[string]any{
+			"id":           "rework",
+			"dependencies": []any{"review"},
+			"action":       map[string]any{"type": "external", "source": "github"},
+			"dispatch":     map[string]any{"mode": "auto", "controller_id": "ctl", "success_outcome": "clean"},
+			"branches":     map[string]any{"clean": "merge", "failed": "publication"},
+			"gates": []any{map[string]any{
+				"id":         "rework-review",
+				"type":       "external",
+				"required":   true,
+				"adapter_id": "gh-review",
+				"inputs": map[string]any{
+					"pull_number": map[string]any{"from_node_output": map[string]any{"node_id": "publication", "output_id": "pr_number"}},
+					"head_sha":    map[string]any{"from_node_output": map[string]any{"node_id": "publication", "output_id": "pr_head"}},
+					"level":       "high",
+				},
+				"subject_binding": map[string]any{
+					"type":         "pull_request",
+					"repository":   map[string]any{"from_node_output": map[string]any{"node_id": "publication", "output_id": "repository"}},
+					"pull_request": map[string]any{"from_node_output": map[string]any{"node_id": "publication", "output_id": "pr_number"}},
+					"revision":     map[string]any{"from_node_output": map[string]any{"node_id": "publication", "output_id": "pr_head"}},
+				},
+			}},
+		})
+	})
+	m, s, wf := newCompleteFixture(t, string(fixture), "bound-gates", "1.0.0")
+	pubID := driveBoundPublication(t, m, s, wf, boundPublicationOutputs("org/repo", 42, "abc123"))
+	reviewID := parkBoundReview(t, m, s, wf)
+
+	if _, err := m.WorkflowCommand(string(wf), boundExternalResult(t, reviewID, "pr-review", "changes_requested", "poll-1", "hash-1", boundSubject("org/repo", 42, "abc123"))); err != nil {
+		t.Fatalf("changes_requested poll: %v", err)
+	}
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("load current: %v", err)
+	}
+	rework := activationByNode(&snap.Instance, "rework")
+	if rework == nil {
+		t.Fatal("changes_requested did not create the bound-gate target activation")
+	}
+	if rework.Status != ActivationPending {
+		t.Fatalf("rework status = %q, want pending", rework.Status)
+	}
+	if !reflect.DeepEqual(rework.CausedBy, []ActivationID{reviewID}) {
+		t.Fatalf("rework caused_by = %v, want [%s]", rework.CausedBy, reviewID)
+	}
+	resolved, ok := rework.ResolvedGates[GateID("rework-review")]
+	if !ok {
+		t.Fatalf("rework has no pinned gates: %+v", rework.ResolvedGates)
+	}
+	wantSubject := &Subject{Type: "pull_request", Repository: "org/repo", PullRequest: 42, Revision: "abc123"}
+	if !reflect.DeepEqual(resolved.Subject, wantSubject) {
+		t.Fatalf("pinned subject = %+v, want %+v", resolved.Subject, wantSubject)
+	}
+	wantRef := OutputReference{
+		WorkflowID:   wf,
+		NodeID:       "publication",
+		ActivationID: pubID,
+		OutputID:     "pr_number",
+		Revision:     outputRevision(t, s, wf, pubID, "pr_number"),
+	}
+	if ref := resolved.Inputs["pull_number"].Reference; ref == nil || *ref != wantRef {
+		t.Fatalf("pull_number pin = %+v, want %+v", ref, wantRef)
 	}
 }
 
