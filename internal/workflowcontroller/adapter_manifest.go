@@ -63,10 +63,31 @@ type AdapterManifest struct {
 	digest [sha256.Size]byte
 }
 
+// AdapterLoadError records one manifest file that could not be loaded: a
+// validation or trust failure, or a duplicate adapter ID shared with another
+// file. Valid manifests in the same directory still load.
+type AdapterLoadError struct {
+	// File is the manifest filename the error is attributed to (base name
+	// within the adapter directory).
+	File string
+	Err  error
+}
+
 // AdapterRegistry is the immutable set of loaded adapter manifests, keyed by
 // adapter ID.
 type AdapterRegistry struct {
 	byID map[string]*AdapterManifest
+	errs []AdapterLoadError
+}
+
+// Errors returns the per-file load errors recorded while building the
+// registry, in directory order. Valid manifests load alongside them; only a
+// failure to read the directory itself fails the whole load.
+func (r *AdapterRegistry) Errors() []AdapterLoadError {
+	if r == nil {
+		return nil
+	}
+	return r.errs
 }
 
 // Lookup returns the manifest registered under id.
@@ -91,7 +112,10 @@ func (r *AdapterRegistry) IDs() []string {
 // LoadAdapterRegistry loads every immediate *.json file in dir as one adapter
 // manifest. Subdirectories and non-.json files are ignored; the filename is
 // not the adapter ID. A missing directory yields an empty registry, not an
-// error. Duplicate adapter IDs across files are rejected.
+// error. Loading is per manifest: an invalid or untrusted file is recorded as
+// a load error on the returned registry while valid manifests still load;
+// only a failure to read the directory itself fails the whole load. Duplicate
+// adapter IDs across files reject every file declaring the ID.
 func LoadAdapterRegistry(dir string) (*AdapterRegistry, error) {
 	reg := &AdapterRegistry{byID: map[string]*AdapterManifest{}}
 	entries, err := os.ReadDir(dir)
@@ -101,6 +125,9 @@ func LoadAdapterRegistry(dir string) (*AdapterRegistry, error) {
 		}
 		return nil, err
 	}
+	// Group loaded manifests by adapter ID so duplicate IDs reject every
+	// file declaring the ID instead of silently keeping one of them.
+	byID := map[string][]*AdapterManifest{}
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
@@ -108,13 +135,34 @@ func LoadAdapterRegistry(dir string) (*AdapterRegistry, error) {
 		path := filepath.Join(dir, entry.Name())
 		m, err := loadAdapterManifest(path)
 		if err != nil {
-			return nil, fmt.Errorf("adapter manifest %s: %w", entry.Name(), err)
+			reg.errs = append(reg.errs, AdapterLoadError{
+				File: entry.Name(),
+				Err:  fmt.Errorf("adapter manifest %s: %w", entry.Name(), err),
+			})
+			continue
 		}
-		if prev, dup := reg.byID[m.ID]; dup {
-			return nil, fmt.Errorf("%w: adapter id %q declared by both %s and %s",
-				ErrAdapterManifest, m.ID, filepath.Base(prev.manifestPath), entry.Name())
+		byID[m.ID] = append(byID[m.ID], m)
+	}
+	ids := make([]string, 0, len(byID))
+	for id := range byID {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		ms := byID[id]
+		if len(ms) == 1 {
+			reg.byID[id] = ms[0]
+			continue
 		}
-		reg.byID[m.ID] = m
+		files := make([]string, 0, len(ms))
+		for _, m := range ms {
+			files = append(files, filepath.Base(m.manifestPath))
+		}
+		reg.errs = append(reg.errs, AdapterLoadError{
+			File: files[0],
+			Err: fmt.Errorf("%w: adapter id %q declared by %s; all rejected",
+				ErrAdapterManifest, id, strings.Join(files, ", ")),
+		})
 	}
 	return reg, nil
 }

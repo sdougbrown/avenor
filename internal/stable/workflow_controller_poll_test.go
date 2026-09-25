@@ -714,6 +714,36 @@ func TestControllerParkLostLeaseReportsNotLeader(t *testing.T) {
 	}
 }
 
+// TestControllerLoadAdapterRegistrySkipsBadManifest proves one broken
+// manifest file does not disable the other adapters: the good adapter stays
+// registered and its gate still polls to the success outcome, while the bad
+// file is reported as a per-file load error.
+func TestControllerLoadAdapterRegistrySkipsBadManifest(t *testing.T) {
+	f := newPollFixture(t, "poll-badmanifest", "poll-badmanifest-tmpl",
+		map[string]string{"gh-review": "passed.sh"},
+		[]map[string]any{{"id": "pr-review", "type": "external", "required": true, "adapter_id": "gh-review"}})
+	// A broken sibling manifest in the same directory.
+	if err := os.WriteFile(filepath.Join(f.adapterDir, "broken.json"), []byte(`{"version":2}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.sup.loadWorkflowAdapters()
+	reg := f.sup.workflowAdapters.Load()
+	if reg == nil {
+		t.Fatal("adapter registry nil after reload")
+	}
+	if got := reg.IDs(); len(got) != 1 || got[0] != "gh-review" {
+		t.Fatalf("loaded adapter IDs = %v, want [gh-review] (bad file must not block good ones)", got)
+	}
+	errs := reg.Errors()
+	if len(errs) != 1 || errs[0].File != "broken.json" {
+		t.Fatalf("Errors() = %+v, want one error for broken.json", errs)
+	}
+
+	// The good adapter still polls its gate to the pinned success outcome.
+	f.drivePublication(t, "sdougbrown/avenor", 143, "cc793f7")
+	f.waitReviewStatus(t, workflow.ActivationSatisfied)
+}
+
 // TestStartupSweepRemovesOrphanedStagingFilesOnly proves the startup barrier
 // sweeps orphaned adapter staging files without touching anything else: a
 // pre-staged <root>/adapter-poll loses its temp staging file, keeps its

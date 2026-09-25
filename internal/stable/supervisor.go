@@ -4309,9 +4309,11 @@ func resolveWorkflowAdapterDir(configured string) string {
 
 // loadWorkflowAdapters loads the adapter manifest registry from the
 // configured (or default) adapter directory into the supervisor's immutable
-// registry slot. A load failure leaves the registry nil — every adapter
-// reports unavailable — and is logged; manifests are host configuration and
-// a broken one must not disable the controller.
+// registry slot. A directory-level load failure leaves the registry nil —
+// every adapter reports unavailable — and is logged. Per-manifest failures
+// (invalid, untrusted, or duplicate IDs) are logged and skip only their own
+// file; manifests are host configuration and a broken one must not disable
+// the other adapters.
 func (s *Supervisor) loadWorkflowAdapters() {
 	dir := resolveWorkflowAdapterDir(s.config.WorkflowAdapterDir)
 	reg, err := workflowcontroller.LoadAdapterRegistry(dir)
@@ -4319,6 +4321,9 @@ func (s *Supervisor) loadWorkflowAdapters() {
 		log.Printf("workflow: adapter registry load from %s failed (adapters unavailable): %v", dir, err)
 		s.workflowAdapters.Store(nil)
 		return
+	}
+	for _, loadErr := range reg.Errors() {
+		log.Printf("workflow: adapter manifest %s not loaded: %v", loadErr.File, loadErr.Err)
 	}
 	s.workflowAdapters.Store(reg)
 }

@@ -162,14 +162,56 @@ func TestLoadAdapterRegistryDuplicateIDs(t *testing.T) {
 	exe := stageFixture(t, dir, "passed.sh")
 	writeManifest(t, dir, "a.json", "dup", exe, nil, 5000)
 	writeManifest(t, dir, "b.json", "dup", exe, nil, 5000)
-	_, err := LoadAdapterRegistry(dir)
-	if err == nil || !errors.Is(err, ErrAdapterManifest) {
-		t.Fatalf("duplicate id error = %v, want ErrAdapterManifest", err)
+	reg, err := LoadAdapterRegistry(dir)
+	if err != nil {
+		t.Fatalf("LoadAdapterRegistry: %v", err)
+	}
+	if got := reg.IDs(); len(got) != 0 {
+		t.Fatalf("IDs() = %v, want empty (both duplicates rejected)", got)
+	}
+	errs := reg.Errors()
+	if len(errs) != 1 {
+		t.Fatalf("Errors() = %+v, want one duplicate-id error", errs)
+	}
+	if !errors.Is(errs[0].Err, ErrAdapterManifest) {
+		t.Fatalf("duplicate id error = %v, want ErrAdapterManifest", errs[0].Err)
 	}
 	for _, name := range []string{"a.json", "b.json"} {
-		if !strings.Contains(err.Error(), name) {
-			t.Errorf("error %q does not name %s", err, name)
+		if !strings.Contains(errs[0].Err.Error(), name) {
+			t.Errorf("error %q does not name %s", errs[0].Err, name)
 		}
+	}
+}
+
+// TestLoadAdapterRegistryIsolatesBadManifest proves one invalid manifest does
+// not disable its valid neighbors: the good adapter loads and the bad file is
+// reported as a single per-file load error.
+func TestLoadAdapterRegistryIsolatesBadManifest(t *testing.T) {
+	dir := stageAdapterDir(t)
+	exe := stageFixture(t, dir, "passed.sh")
+	writeManifest(t, dir, "review.json", "review", exe, nil, 5000)
+	writeManifestContent(t, dir, "broken.json", `{"version":2}`)
+
+	reg, err := LoadAdapterRegistry(dir)
+	if err != nil {
+		t.Fatalf("LoadAdapterRegistry: %v", err)
+	}
+	if got := reg.IDs(); len(got) != 1 || got[0] != "review" {
+		t.Fatalf("IDs() = %v, want [review] (bad file must not block good ones)", got)
+	}
+	m, ok := reg.Lookup("review")
+	if !ok || m.TimeoutMS != 5000 {
+		t.Fatalf("Lookup(review) = %+v, %v; want the loaded manifest", m, ok)
+	}
+	errs := reg.Errors()
+	if len(errs) != 1 {
+		t.Fatalf("Errors() = %+v, want one per-file error", errs)
+	}
+	if errs[0].File != "broken.json" {
+		t.Fatalf("error file = %q, want broken.json", errs[0].File)
+	}
+	if !errors.Is(errs[0].Err, ErrAdapterManifest) {
+		t.Fatalf("error = %v, want ErrAdapterManifest", errs[0].Err)
 	}
 }
 
@@ -256,9 +298,16 @@ func TestLoadAdapterManifestValidation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			sub := stageAdapterDir(t)
 			writeManifestContent(t, sub, "m.json", tc.content)
-			_, err := LoadAdapterRegistry(sub)
-			if err == nil || !errors.Is(err, ErrAdapterManifest) || !strings.Contains(err.Error(), tc.wantErr) {
-				t.Fatalf("error = %v, want ErrAdapterManifest containing %q", err, tc.wantErr)
+			reg, err := LoadAdapterRegistry(sub)
+			if err != nil {
+				t.Fatalf("LoadAdapterRegistry: %v", err)
+			}
+			if got := reg.IDs(); len(got) != 0 {
+				t.Fatalf("IDs() = %v, want empty", got)
+			}
+			errs := reg.Errors()
+			if len(errs) != 1 || !errors.Is(errs[0].Err, ErrAdapterManifest) || !strings.Contains(errs[0].Err.Error(), tc.wantErr) {
+				t.Fatalf("Errors() = %+v, want one ErrAdapterManifest containing %q", errs, tc.wantErr)
 			}
 		})
 	}
@@ -271,9 +320,13 @@ func TestLoadAdapterRegistryRejectsGroupWritableDir(t *testing.T) {
 	if err := os.Chmod(dir, 0o770); err != nil {
 		t.Fatal(err)
 	}
-	_, err := LoadAdapterRegistry(dir)
-	if err == nil || !errors.Is(err, ErrAdapterUntrusted) {
-		t.Fatalf("error = %v, want ErrAdapterUntrusted", err)
+	reg, err := LoadAdapterRegistry(dir)
+	if err != nil {
+		t.Fatalf("LoadAdapterRegistry: %v", err)
+	}
+	errs := reg.Errors()
+	if len(errs) != 1 || !errors.Is(errs[0].Err, ErrAdapterUntrusted) {
+		t.Fatalf("Errors() = %+v, want one ErrAdapterUntrusted", errs)
 	}
 }
 
@@ -284,9 +337,13 @@ func TestLoadAdapterRegistryRejectsWorldWritableExecutable(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeManifest(t, dir, "review.json", "review", exe, nil, 5000)
-	_, err := LoadAdapterRegistry(dir)
-	if err == nil || !errors.Is(err, ErrAdapterUntrusted) {
-		t.Fatalf("error = %v, want ErrAdapterUntrusted", err)
+	reg, err := LoadAdapterRegistry(dir)
+	if err != nil {
+		t.Fatalf("LoadAdapterRegistry: %v", err)
+	}
+	errs := reg.Errors()
+	if len(errs) != 1 || !errors.Is(errs[0].Err, ErrAdapterUntrusted) {
+		t.Fatalf("Errors() = %+v, want one ErrAdapterUntrusted", errs)
 	}
 }
 
