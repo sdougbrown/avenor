@@ -195,6 +195,23 @@ func workflowIDFromParams(params json.RawMessage) (string, error) {
 	return p.WorkflowID, nil
 }
 
+func controllerIDFromParams(req Request) (string, *Response) {
+	var p struct {
+		ControllerID string `json:"controller_id"`
+	}
+	if len(req.Params) > 0 {
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			resp := failure(req.ID, -32602, "invalid params", map[string]any{"detail": err.Error()})
+			return "", &resp
+		}
+	}
+	if p.ControllerID == "" {
+		resp := failure(req.ID, -32602, "invalid params", map[string]any{"required": []string{"controller_id"}})
+		return "", &resp
+	}
+	return p.ControllerID, nil
+}
+
 func runtimeIDFromParams(params json.RawMessage) string {
 	if len(params) == 0 {
 		return ""
@@ -1491,52 +1508,31 @@ func (s *ControlServer) dispatchWorkflowController(c *connState, req Request) Re
 		}
 		return success(req.ID, result)
 	case "workflow.controller.enable":
-		var p struct {
-			ControllerID string `json:"controller_id"`
+		id, errResp := controllerIDFromParams(req)
+		if errResp != nil {
+			return *errResp
 		}
-		if len(req.Params) > 0 {
-			if err := json.Unmarshal(req.Params, &p); err != nil {
-				return failure(req.ID, -32602, "invalid params", map[string]any{"detail": err.Error()})
-			}
-		}
-		if p.ControllerID == "" {
-			return failure(req.ID, -32602, "invalid params", map[string]any{"required": []string{"controller_id"}})
-		}
-		result, err := h.WorkflowControllerEnable(p.ControllerID)
+		result, err := h.WorkflowControllerEnable(id)
 		if err != nil {
 			return failure(req.ID, -32000, err.Error(), nil)
 		}
 		return success(req.ID, result)
 	case "workflow.controller.disable":
-		var p struct {
-			ControllerID string `json:"controller_id"`
+		id, errResp := controllerIDFromParams(req)
+		if errResp != nil {
+			return *errResp
 		}
-		if len(req.Params) > 0 {
-			if err := json.Unmarshal(req.Params, &p); err != nil {
-				return failure(req.ID, -32602, "invalid params", map[string]any{"detail": err.Error()})
-			}
-		}
-		if p.ControllerID == "" {
-			return failure(req.ID, -32602, "invalid params", map[string]any{"required": []string{"controller_id"}})
-		}
-		result, err := h.WorkflowControllerDisable(p.ControllerID, req.Params)
+		result, err := h.WorkflowControllerDisable(id, req.Params)
 		if err != nil {
 			return failure(req.ID, -32000, err.Error(), nil)
 		}
 		return success(req.ID, result)
 	case "workflow.controller.status":
-		var p struct {
-			ControllerID string `json:"controller_id"`
+		id, errResp := controllerIDFromParams(req)
+		if errResp != nil {
+			return *errResp
 		}
-		if len(req.Params) > 0 {
-			if err := json.Unmarshal(req.Params, &p); err != nil {
-				return failure(req.ID, -32602, "invalid params", map[string]any{"detail": err.Error()})
-			}
-		}
-		if p.ControllerID == "" {
-			return failure(req.ID, -32602, "invalid params", map[string]any{"required": []string{"controller_id"}})
-		}
-		result, err := h.WorkflowControllerStatus(p.ControllerID)
+		result, err := h.WorkflowControllerStatus(id)
 		if err != nil {
 			return failure(req.ID, -32000, err.Error(), nil)
 		}
@@ -1548,19 +1544,17 @@ func (s *ControlServer) dispatchWorkflowController(c *connState, req Request) Re
 		}
 		return success(req.ID, result)
 	case "workflow.ready":
+		id, errResp := controllerIDFromParams(req)
+		if errResp != nil {
+			return *errResp
+		}
 		var p struct {
-			ControllerID string `json:"controller_id"`
-			Limit        int    `json:"limit"`
+			Limit int `json:"limit"`
 		}
-		if len(req.Params) > 0 {
-			if err := json.Unmarshal(req.Params, &p); err != nil {
-				return failure(req.ID, -32602, "invalid params", map[string]any{"detail": err.Error()})
-			}
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return failure(req.ID, -32602, "invalid params", map[string]any{"detail": err.Error()})
 		}
-		if p.ControllerID == "" {
-			return failure(req.ID, -32602, "invalid params", map[string]any{"required": []string{"controller_id"}})
-		}
-		result, err := h.WorkflowReady(p.ControllerID, p.Limit)
+		result, err := h.WorkflowReady(id, p.Limit)
 		if err != nil {
 			return failure(req.ID, -32000, err.Error(), nil)
 		}
