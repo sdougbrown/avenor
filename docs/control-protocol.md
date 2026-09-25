@@ -392,6 +392,12 @@ The `workflow.controller.create`, `workflow.controller.enable`, `workflow.contro
 | `workflow.inspect` | `{workflow_id}` | Full instance detail. |
 | `workflow.events` | `{workflow_id, after_seq?, limit?}` | Event log. |
 | `workflow.command` | `{workflow_id, command}` | Route an instance command by its `op` discriminator. |
+| `workflow.controller.create` | `{controller_id, max_inflight}` | Register a controller with its in-flight limit. |
+| `workflow.controller.enable` | `{controller_id}` | Set the desired state to enabled and start the leader loop. |
+| `workflow.controller.disable` | `{controller_id, reason}` | Set the desired state to disabled (releasing any live lease) and stop the leader loop. |
+| `workflow.controller.status` | `{controller_id}` | Snapshot of the controller record. |
+| `workflow.controller.list` | none | All controller records, sorted by id. |
+| `workflow.ready` | `{controller_id, limit?}` | Advisory candidate list for a controller; grants no lease. |
 
 `workflow.command` routes `op` to the instance command: `claim`, `start`, `heartbeat`, `complete`, `gate`, `skip`, or `unblock`. The command payload carries the op's fields. Example — claim a ready node:
 
