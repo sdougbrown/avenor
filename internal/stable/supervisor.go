@@ -2209,9 +2209,22 @@ func (c *childRuntime) waitForNextPrompt(ctx context.Context, parkedTimeout time
 		case <-ctx.Done():
 			return "", false
 		case <-parkedTimeoutCh:
-			// The grace window for a follow-up prompt elapsed. The runtime
-			// ends; whether its session survives for a later cross-process
-			// resume is backend-dependent, not guaranteed.
+			// The grace window for a follow-up prompt elapsed. Whether its
+			// session survives for a later cross-process resume is
+			// backend-dependent, not guaranteed. Take a prompt that raced the
+			// deadline and end the runtime in one critical section, so a
+			// prompt queued before the deadline is honored while later
+			// RuntimePrompt calls see the runtime ended instead of queueing
+			// onto a runtime about to reap.
+			c.mu.Lock()
+			if len(c.promptQueue) > 0 {
+				prompt := c.promptQueue[0]
+				c.promptQueue = c.promptQueue[1:]
+				c.mu.Unlock()
+				return prompt, true
+			}
+			c.completed = true
+			c.mu.Unlock()
 			return "", false
 		}
 	}
