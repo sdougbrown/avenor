@@ -309,8 +309,6 @@ func (r *Runner) buildInflightView(inflight []InFlightAttempt) []InFlightAttempt
 	return view
 }
 
-// loop is the leader goroutine: it acquires and holds the controller's lease
-// and runs reconcile passes while leading.
 // seedCursor builds the poll cursor a poll seed stands for.
 func seedCursor(seed PollSeed) PollCursor {
 	return PollCursor{
@@ -347,6 +345,8 @@ func (r *Runner) reseedPollCursors(existing map[string]*PollCursor) {
 	}
 }
 
+// loop is the leader goroutine: it acquires and holds the controller's lease
+// and runs reconcile passes while leading.
 func (r *Runner) loop() {
 	defer close(r.done)
 	defer r.clearLeadStatus()
@@ -481,14 +481,18 @@ func (r *Runner) loop() {
 			}
 		}
 	}
+	// handlePollResult folds one poll worker outcome into the current pass.
+	handlePollResult := func(res pollWorkerResult) {
+		r.pendingPolls--
+		r.handlePollOutcome(res.outcome, LeaderLease{LeaseID: leaseID, OwnerEpoch: ownerEpoch})
+	}
 	// drainPollResults consumes completed poll worker results without
 	// blocking, folding their outcomes into the current pass.
 	drainPollResults := func() {
 		for {
 			select {
 			case res := <-r.pollResults:
-				r.pendingPolls--
-				r.handlePollOutcome(res.outcome, LeaderLease{LeaseID: leaseID, OwnerEpoch: ownerEpoch})
+				handlePollResult(res)
 			default:
 				return
 			}
@@ -503,9 +507,7 @@ func (r *Runner) loop() {
 			decrementUnreported(res.identity)
 		}
 		for r.pendingPolls > 0 {
-			res := <-r.pollResults
-			r.pendingPolls--
-			r.handlePollOutcome(res.outcome, LeaderLease{LeaseID: leaseID, OwnerEpoch: ownerEpoch})
+			handlePollResult(<-r.pollResults)
 		}
 	}
 	// arm schedules the next wakeup at d.
@@ -527,8 +529,7 @@ func (r *Runner) loop() {
 			decrementUnreported(res.identity)
 			handleResult(res)
 		case res := <-r.pollResults:
-			r.pendingPolls--
-			r.handlePollOutcome(res.outcome, LeaderLease{LeaseID: leaseID, OwnerEpoch: ownerEpoch})
+			handlePollResult(res)
 		}
 	}
 	// waitOrCancel arms the timer at d and waits for it, cancellation, or a
@@ -555,8 +556,7 @@ func (r *Runner) loop() {
 			handleResult(res)
 			return wakeResult, false
 		case res := <-r.pollResults:
-			r.pendingPolls--
-			r.handlePollOutcome(res.outcome, LeaderLease{LeaseID: leaseID, OwnerEpoch: ownerEpoch})
+			handlePollResult(res)
 			return wakeResult, false
 		}
 	}
