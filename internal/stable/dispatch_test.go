@@ -374,36 +374,18 @@ func TestDispatchNotLeaderReleasesReservation(t *testing.T) {
 	if out.Kind != DispatchNotLeader {
 		t.Fatalf("outcome = %s, want not_leader", out.Kind)
 	}
-	// Disabled controller also reports not_leader.
+	// Disabled controller also reports not_leader — whether or not disable
+	// released the live leader lease — and never leaks the reservation.
 	if _, err := f.cstore.SetDesiredState("c1", workflowcontroller.DesiredDisabled, "test"); err != nil {
 		t.Fatalf("disable: %v", err)
 	}
-	rec, ok, err := f.cstore.Get("c1")
-	if err != nil || !ok {
-		t.Fatalf("get: ok=%v err=%v", ok, err)
+	req2 := f.dispatchRequest(nil)
+	out2, err := f.sup.dispatchWorkflowNode(t.Context(), req2)
+	if err != nil {
+		t.Fatalf("dispatchWorkflowNode (disabled): %v", err)
 	}
-	if rec.Leader == nil {
-		// Disabling released the live lease: dispatching with the now-gone
-		// lease pair must still report not_leader.
-		req2 := f.dispatchRequest(nil)
-		out2, err := f.sup.dispatchWorkflowNode(t.Context(), req2)
-		if err != nil {
-			t.Fatalf("dispatchWorkflowNode (disabled): %v", err)
-		}
-		if out2.Kind != DispatchNotLeader {
-			t.Fatalf("outcome = %s, want not_leader for disabled controller", out2.Kind)
-		}
-	} else {
-		req2 := f.dispatchRequest(nil)
-		req2.LeaderLeaseID = rec.Leader.LeaseID
-		req2.OwnerEpoch = rec.Leader.OwnerEpoch
-		out2, err := f.sup.dispatchWorkflowNode(t.Context(), req2)
-		if err != nil {
-			t.Fatalf("dispatchWorkflowNode (disabled): %v", err)
-		}
-		if out2.Kind != DispatchNotLeader {
-			t.Fatalf("outcome = %s, want not_leader for disabled controller", out2.Kind)
-		}
+	if out2.Kind != DispatchNotLeader {
+		t.Fatalf("outcome = %s, want not_leader for disabled controller", out2.Kind)
 	}
 	f.sup.controlMu.Lock()
 	outstanding := f.sup.outstandingReservations

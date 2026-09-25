@@ -1,9 +1,9 @@
 package stable
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 
@@ -165,7 +165,7 @@ func TestHeartbeatKeepsLeaseAliveWhileRuntimeLive(t *testing.T) {
 			}
 			// The expiry actually advanced over the window (renewals landed).
 			act := workflowActivation(t, f)
-			if !act.ActiveLease.ExpiresAt.After(lastExpiry.Add(-2 * time.Second)) || lastExpiry.IsZero() {
+			if !act.ActiveLease.ExpiresAt.After(lastExpiry.Add(-2*time.Second)) || lastExpiry.IsZero() {
 				t.Fatalf("lease expiry advanced only to %v over 3.5s", lastExpiry)
 			}
 			if heartbeatEventCount(t, f) < 3 {
@@ -214,12 +214,90 @@ func workflowAttempt(t *testing.T, f *dispatchFixture, act workflow.Activation) 
 	return workflow.Attempt{}
 }
 
+// TestHeartbeatExitsWhenLeaseSweptWhileRuntimeLive proves a heartbeat
+// goroutine stops on its own when its attempt's lease is made stale out from
+// under it: a heartbeat command carrying a past ExpiresAt (the reducer takes
+// the command's lease metadata verbatim) plus the expiry sweep releases the
+// lease, the next renewal gets ErrLeaseNotHeld, and the goroutine leaves
+// sup.heartbeats while the runtime is still live.
+func TestHeartbeatExitsWhenLeaseSweptWhileRuntimeLive(t *testing.T) {
+	template := dispatchActionTemplateJSONTTL(t, "tmpl-dispatch-heartbeat-stale-lease", "c1", "run", "", 1)
+	f := newDispatchFixtureTemplate(t, "heartbeat-stale-lease", 4, 4, template)
+	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
+	if err != nil {
+		t.Fatalf("dispatchWorkflowNode: %v", err)
+	}
+	if out.Kind != Dispatched {
+		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
+	}
+	waitFor(t, "runtime registration", func() bool { return f.sup.activeRuntimeCount() == 1 })
+	waitHeartbeatEvents(t, f, 1)
+
+	act := workflowActivation(t, f)
+	leaseID := act.ActiveLease.ID
+
+	// Make the lease stale out from under the live heartbeat: apply a
+	// heartbeat command whose ExpiresAt is in the past, then run the expiry
+	// sweep. The live heartbeat can renew in between the two steps, so retry
+	// until the sweep actually expires the lease.
+	staleStore := workflow.New(f.sup.config.WorkflowRoot)
+	deadline := time.Now().Add(5 * time.Second)
+	var lastErr error
+	for i := 0; ; i++ {
+		if i > 0 && time.Now().After(deadline) {
+			t.Fatalf("lease never swept despite stale expiry commands (last apply err: %v)", lastErr)
+		}
+		inspect, err := f.mgr.WorkflowInspect(f.wf)
+		if err != nil {
+			t.Fatalf("WorkflowInspect: %v", err)
+		}
+		rev := inspect.(map[string]any)["revision"].(int64)
+		past := time.Now().UTC().Add(-time.Hour)
+		_, err = staleStore.ApplyCommand(workflow.WorkflowID(f.wf), workflow.Command{
+			ID:               workflow.NewCommandID(),
+			Kind:             workflow.CommandHeartbeat,
+			ExpectedRevision: rev,
+			IdempotencyKey:   fmt.Sprintf("test-stale-lease-%d", i),
+			Identity: workflow.ExecutionIdentity{
+				WorkflowID:   workflow.WorkflowID(f.wf),
+				NodeID:       "start",
+				ActivationID: act.ID,
+			},
+			LeaseID: leaseID,
+			Lease:   &workflow.Lease{ExpiresAt: past, LastHeartbeatAt: &past},
+		})
+		if err == nil {
+			lastErr = nil
+			if _, err := f.mgr.ExpireStaleLeases(); err != nil {
+				t.Fatalf("ExpireStaleLeases: %v", err)
+			}
+		} else {
+			// A concurrent renewal bumped the revision between the inspect
+			// and the apply; retry with a fresh revision.
+			lastErr = err
+		}
+		if workflowActivation(t, f).Status == workflow.ActivationLeaseExpired {
+			break
+		}
+	}
+
+	// The heartbeat goroutine receives ErrLeaseNotHeld on its next renewal
+	// and exits, leaving the registry empty while the runtime is still live.
+	waitFor(t, "heartbeat registry empty after lease sweep", func() bool {
+		f.sup.heartbeatMu.Lock()
+		defer f.sup.heartbeatMu.Unlock()
+		return len(f.sup.heartbeats) == 0
+	})
+	if got := f.sup.activeRuntimeCount(); got != 1 {
+		t.Fatalf("active runtime count = %d, want 1 (runtime must stay live)", got)
+	}
+}
+
 // TestHeartbeatStopsWhenRuntimeTerminates proves the heartbeat goroutine
 // stops once the runtime reaches a terminal state: no heartbeat events land
-// after termination and the goroutine count returns to its baseline.
+// after termination and the heartbeat leaves the supervisor's registry.
 func TestHeartbeatStopsWhenRuntimeTerminates(t *testing.T) {
 	f := newDispatchFixtureTTL(t, "heartbeat-stop-terminal", 4, 4, "", 1)
-	baseGoroutines := runtime.NumGoroutine()
 	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
 	if err != nil {
 		t.Fatalf("dispatchWorkflowNode: %v", err)
@@ -240,7 +318,11 @@ func TestHeartbeatStopsWhenRuntimeTerminates(t *testing.T) {
 	if got := heartbeatEventCount(t, f); got != count {
 		t.Fatalf("heartbeat events after terminal = %d, want the pre-terminal count %d", got, count)
 	}
-	waitFor(t, "goroutines back to baseline", func() bool { return runtime.NumGoroutine() <= baseGoroutines+2 })
+	waitFor(t, "heartbeat registry empty after terminal runtime", func() bool {
+		f.sup.heartbeatMu.Lock()
+		defer f.sup.heartbeatMu.Unlock()
+		return len(f.sup.heartbeats) == 0
+	})
 }
 
 // TestHeartbeatStopsOnSupervisorShutdown proves a registered heartbeat
