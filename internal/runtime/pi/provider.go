@@ -114,48 +114,26 @@ func (p *Provider) resume(ctx context.Context, sessionID string, opts runtime.St
 	_, exists := p.sessions[sessionID]
 	c := p.client
 	p.mu.Unlock()
-	if exists {
-		if merged.Thinking != "" {
-			if c == nil {
-				return runtime.Session{}, errors.New("provider has not been started")
-			}
-			if err := p.setThinkingLevel(ctx, c, merged.Thinking); err != nil {
-				return runtime.Session{}, err
-			}
-		}
-		var pid int
-		if c != nil {
-			pid = c.Pid()
-		}
-		return runtime.Session{SessionID: sessionID, Backend: backendID, Dir: merged.Dir, PID: pid}, nil
+	if !exists {
+		// Sessions are launched with --no-session, so nothing persists on
+		// disk. A new process would run a fresh session under this ID's
+		// name; refuse instead of silently losing the prior context.
+		return runtime.Session{}, fmt.Errorf("session not found: %s (pi sessions run with --no-session; cross-process resume is not supported)", sessionID)
 	}
 
-	c, fresh, err := p.ensureClient(ctx, merged)
-	if err != nil {
-		return runtime.Session{}, err
-	}
-	if !fresh && merged.Thinking != "" {
+	if merged.Thinking != "" {
+		if c == nil {
+			return runtime.Session{}, errors.New("provider has not been started")
+		}
 		if err := p.setThinkingLevel(ctx, c, merged.Thinking); err != nil {
 			return runtime.Session{}, err
 		}
 	}
-
-	p.mu.Lock()
-	if len(p.sessions) > 0 {
-		p.mu.Unlock()
-		return runtime.Session{}, errors.New("pi rpc supports only one active session per provider")
+	var pid int
+	if c != nil {
+		pid = c.Pid()
 	}
-	p.sessions[sessionID] = struct{}{}
-	p.mu.Unlock()
-
-	c.setSessionID(sessionID)
-
-	return runtime.Session{
-		SessionID: sessionID,
-		Backend:   backendID,
-		Dir:       merged.Dir,
-		PID:       c.Pid(),
-	}, nil
+	return runtime.Session{SessionID: sessionID, Backend: backendID, Dir: merged.Dir, PID: pid}, nil
 }
 
 func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) error {

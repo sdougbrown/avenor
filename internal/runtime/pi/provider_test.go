@@ -71,8 +71,8 @@ func TestResumeRejectsSecondDistinctSession(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for second pi session")
 	}
-	if !strings.Contains(err.Error(), "only one active session") {
-		t.Fatalf("error = %v, want single-session validation", err)
+	if !strings.Contains(err.Error(), "session not found") {
+		t.Fatalf("error = %v, want session-not-found refusal", err)
 	}
 }
 
@@ -383,26 +383,6 @@ func TestThinkingSetterTransportAndDecodeErrorsAreNotCapabilityErrors(t *testing
 	})
 }
 
-func TestFreshResumeUsesStartupThinkingWithoutSetter(t *testing.T) {
-	originalHelp := piHelpOutput
-	piHelpOutput = func(context.Context) ([]byte, error) { return []byte("--thinking <level>"), nil }
-	t.Cleanup(func() { piHelpOutput = originalHelp })
-	p := NewWithOptions(runtime.StartOptions{Dir: "/work"})
-	c, _, _ := fakeClient()
-	var launched runtime.StartOptions
-	p.startClient = func(_ context.Context, opts runtime.StartOptions) (*client, error) {
-		launched = opts
-		return c, nil
-	}
-	defer p.Close()
-	if _, err := p.ResumeWithOptions(context.Background(), "pi-resume", runtime.StartOptions{Thinking: "xhigh"}); err != nil {
-		t.Fatalf("ResumeWithOptions: %v", err)
-	}
-	if launched.Thinking != "xhigh" {
-		t.Fatalf("launch thinking = %q", launched.Thinking)
-	}
-}
-
 func TestThinkingHelpMismatchRejectsBeforeLaunch(t *testing.T) {
 	originalHelp := piHelpOutput
 	piHelpOutput = func(context.Context) ([]byte, error) { return []byte("usage: pi"), nil }
@@ -574,24 +554,27 @@ func TestProviderStartUsesRequestedWorkingDirectory(t *testing.T) {
 	}
 }
 
-func TestProviderResumeUsesProviderWorkingDirectory(t *testing.T) {
+func TestProviderColdResumeRefusesBeforeStartingPi(t *testing.T) {
 	dir := t.TempDir()
 	captured := withFakePiCommand(t)
 	p := NewWithOptions(runtime.StartOptions{Dir: dir})
 	defer p.Close()
 
-	sess, err := p.Resume(context.Background(), "pi-resumed")
-	if err != nil {
-		t.Fatalf("Resume: %v", err)
+	_, err := p.Resume(context.Background(), "pi-resumed")
+	if err == nil || !strings.Contains(err.Error(), "cross-process resume") {
+		t.Fatalf("error = %v, want cross-process resume refusal", err)
 	}
-	if sess.Dir != dir {
-		t.Errorf("session dir = %q, want %q", sess.Dir, dir)
+	if captured() != nil {
+		t.Fatal("cold resume must not create a pi command")
 	}
-	if captured() == nil {
-		t.Fatal("Pi command was not created")
+
+	// The thinking variant must refuse at the same point, before any
+	// capability probing or client launch.
+	if _, err := p.ResumeWithOptions(context.Background(), "pi-resumed", runtime.StartOptions{Thinking: "xhigh"}); err == nil || !strings.Contains(err.Error(), "cross-process resume") {
+		t.Fatalf("error = %v, want cross-process resume refusal for thinking resume", err)
 	}
-	if captured().Dir != dir {
-		t.Errorf("Pi command cwd = %q, want %q", captured().Dir, dir)
+	if captured() != nil {
+		t.Fatal("cold resume with thinking must not create a pi command")
 	}
 }
 
