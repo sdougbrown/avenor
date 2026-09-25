@@ -176,7 +176,12 @@ func (m *Manager) ParkExternal(req ParkExternalRequest) (ParkExternalResult, err
 				Gates:          reseeded,
 			}, nil
 		}
-		if fresh.Instance.Revision != req.ExpectedRevision {
+		// Only the first attempt validates the caller's pinned revision: a
+		// retry revalidates the candidate against fresh state (claimable
+		// status, auto policy, gate bindings) and commits against the fresh
+		// revision, so a harmless concurrent command on the same workflow
+		// does not spuriously stale the park.
+		if attempt == 0 && fresh.Instance.Revision != req.ExpectedRevision {
 			return stale()
 		}
 		if !claimableActivationStatus(fa.Status) || fa.ActiveLease != nil {
