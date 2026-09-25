@@ -44,3 +44,48 @@ func TestCheckOwnedModeIgnoresSymlinkModeBits(t *testing.T) {
 		t.Fatalf("foreign-owned symlink: %v, want ErrAdapterUntrusted", err)
 	}
 }
+
+// TestCheckOwnedModeStickyDirectory proves the sticky-bit exception: a
+// world-writable directory is tolerated only when it also carries the sticky
+// bit (mode 1777, e.g. /tmp), which prevents other users from removing or
+// replacing entries they do not own. A world-writable directory without the
+// sticky bit, and a world-writable regular file even with the sticky bit,
+// are both rejected — the exception excuses directories only.
+func TestCheckOwnedModeStickyDirectory(t *testing.T) {
+	owned := &syscall.Stat_t{Uid: uint32(os.Getuid())}
+
+	tests := []struct {
+		name    string
+		mode    os.FileMode
+		wantErr bool
+	}{
+		{
+			name:    "world-writable directory with sticky bit is accepted",
+			mode:    os.ModeDir | 0o777 | os.ModeSticky,
+			wantErr: false,
+		},
+		{
+			name:    "world-writable directory without sticky bit is rejected",
+			mode:    os.ModeDir | 0o777,
+			wantErr: true,
+		},
+		{
+			name:    "world-writable regular file with sticky bit is rejected",
+			mode:    0o777 | os.ModeSticky,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkOwnedMode(fakeFileInfo{mode: tt.mode, st: owned}, "/x")
+			if tt.wantErr {
+				if !errors.Is(err, ErrAdapterUntrusted) {
+					t.Fatalf("got %v, want ErrAdapterUntrusted", err)
+				}
+			} else if err != nil {
+				t.Fatalf("got %v, want nil", err)
+			}
+		})
+	}
+}
