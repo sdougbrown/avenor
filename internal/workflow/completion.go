@@ -274,8 +274,12 @@ func (m *Manager) commandComplete(wf WorkflowID, payload json.RawMessage) (any, 
 // booleans strict true/false, and numbers finite. Numbers referenced as a
 // pull_request subject or as a number-typed adapter input anywhere in the
 // template must additionally be integral within the safe integer range, so a
-// gate binding can never pin a value no consumer can read. Null values are
-// always rejected (the canonical snapshot wire format cannot persist them).
+// gate binding can never pin a value no consumer can read. Null and empty
+// values are rejected for every declared output — even json and file, whose
+// nulls would otherwise be legitimate — because the canonical snapshot wire
+// format rejects null for any struct field, including the raw-JSON output
+// value field, so an explicit null would fail at snapshot write after the
+// completion had landed.
 // Any failure rejects the whole completion before evidence staging, so no
 // output and no completion is recorded.
 func validateCompleteOutputValues(tmpl *Template, node *NodeDefinition, outputs []completeOutput) error {
@@ -291,9 +295,11 @@ func validateCompleteOutputValues(tmpl *Template, node *NodeDefinition, outputs 
 		}
 		trimmed := trimmedJSON(o.Value)
 		if len(trimmed) == 0 || string(trimmed) == "null" {
-			// A null output value is never persistable: the canonical snapshot
-			// wire format rejects null struct fields, so an explicit null would
-			// fail at snapshot write after the completion had landed.
+			// A null output value is never persistable, even for json and file
+			// outputs: the canonical snapshot wire format rejects null for any
+			// struct field (requireCanonicalKeys), including the raw-JSON output
+			// value field, so an explicit null would fail at snapshot write
+			// after the completion had landed.
 			return fmt.Errorf("workflow output %q on node %q cannot be null", o.DefinitionID, node.ID)
 		}
 		what := fmt.Sprintf("workflow output %q on node %q", o.DefinitionID, node.ID)

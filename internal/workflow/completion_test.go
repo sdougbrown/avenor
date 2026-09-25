@@ -34,6 +34,26 @@ const completeTemplateJSON = `{
   "terminal_outcomes": ["done"]
 }`
 
+// jsonNullTemplateJSON declares a single required json output alongside the
+// files completion, so a null value for the json output is exercisable.
+const jsonNullTemplateJSON = `{
+  "schema_version": 1,
+  "template_id": "json-null-test",
+  "template_version": "1",
+  "entry_nodes": ["start"],
+  "nodes": [{
+    "id": "start",
+    "action": {"type": "manual"},
+    "outputs": [
+      {"id": "artifacts", "name": "Artifacts", "type": "json", "required": true},
+      {"id": "log", "name": "Log", "type": "file"}
+    ],
+    "completion": {"kind": "files", "artifacts": [{"path": "evidence.txt", "non_empty": true}]},
+    "outcomes": [{"name": "done", "terminal": true}]
+  }],
+  "terminal_outcomes": ["done"]
+}`
+
 // completeGatedTemplateJSON is the same contract plus a required human gate,
 // with "done" declared as a branch to a second node so the gated completion's
 // branch-suppression is observable (a premature transition would create the
@@ -235,6 +255,44 @@ func TestCommandCompleteSatisfies(t *testing.T) {
 	ev := snap.Instance.Evidence[0]
 	if ev.Size <= 0 || ev.SHA256 != digest || !strings.HasPrefix(ev.StoredPath, "evidence/") {
 		t.Fatalf("evidence record = %+v, want staged artifact", ev)
+	}
+}
+
+// TestCommandCompleteNullJSONOutputRejected pins that a null value is
+// rejected even for a declared json output: the canonical snapshot wire
+// format rejects null for any struct field — including the raw-JSON output
+// value field (requireCanonicalKeys) — so an explicit null would fail at
+// snapshot write after the completion had landed. The completion handler
+// must therefore reject it up front, before any evidence is staged.
+func TestCommandCompleteNullJSONOutputRejected(t *testing.T) {
+	m, s, wf := newCompleteFixture(t, jsonNullTemplateJSON, "json-null-test", "1")
+	res, actID, attemptID := completeToRunning(t, m, s, wf)
+	src, digest := writeEvidence(t, "evidence.txt", "run output\n")
+	revBefore := revision(t, s, wf)
+
+	out, err := m.commandComplete(wf, completePayload(t, string(actID), string(attemptID), res, "done",
+		[]map[string]any{{"definition_id": "artifacts", "value": nil}}, []map[string]any{{
+			"src_path": src, "stored_path": "evidence.txt", "non_empty": true, "sha256": digest,
+		}}))
+	if err == nil {
+		t.Fatalf("complete with null json output = %#v, want error", out)
+	}
+	if !strings.Contains(err.Error(), "cannot be null") {
+		t.Fatalf("error = %v, want null-value rejection", err)
+	}
+	// Validation fails before staging: nothing is written to disk.
+	if n := evidenceEntries(t, s, wf); n != 0 {
+		t.Fatalf("evidence staged before validation: %d entries", n)
+	}
+	if got := revision(t, s, wf); got != revBefore {
+		t.Fatalf("revision changed %d -> %d", revBefore, got)
+	}
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("load current: %v", err)
+	}
+	if got := activationByNode(&snap.Instance, "start").Status; got != ActivationRunning {
+		t.Fatalf("activation status = %q, want running (no completion event)", got)
 	}
 }
 
