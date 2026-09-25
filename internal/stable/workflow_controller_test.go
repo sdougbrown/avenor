@@ -279,11 +279,11 @@ func TestControllerRestartReacquiresLease(t *testing.T) {
 
 // TestControllerStatusSurfacesNextPollReadError proves a failed poll-time
 // read is reported as next_poll_error instead of silently rendering
-// next_poll_at: nil. The status reads the controller record twice — once for
-// the record and once inside NextPollTime — so the test corrupts the
-// snapshot concurrently until the flip lands in the window between the two
-// reads: a corrupt first read fails the whole call, only a corrupt second
-// read reaches the surfaced error.
+// next_poll_at: nil. The controllerStatusPreNextPoll seam fires between
+// WorkflowControllerStatus's record read and the NextPollTime re-read, so
+// the test corrupts the snapshot exactly inside that window: a corrupt
+// first read fails the whole call, only a corrupt second read reaches the
+// surfaced error.
 func TestControllerStatusSurfacesNextPollReadError(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "wfroot")
 	sup := NewSupervisor(Config{ControlSocket: newStableSocketPath(t, "wfctl-nextpoll-err"), WorkflowRoot: root})
@@ -298,51 +298,23 @@ func TestControllerStatusSurfacesNextPollReadError(t *testing.T) {
 	}
 	corrupt := valid[:len(valid)/2]
 
-	stop := make(chan struct{})
-	flipped := make(chan struct{})
-	go func() {
-		defer close(flipped)
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			_ = os.WriteFile(snapshot, corrupt, 0o600)
-			time.Sleep(200 * time.Microsecond)
-			_ = os.WriteFile(snapshot, valid, 0o600)
-			time.Sleep(200 * time.Microsecond)
-		}
-	}()
-	t.Cleanup(func() {
-		close(stop)
-		<-flipped
-		_ = os.WriteFile(snapshot, valid, 0o600)
-	})
+	controllerStatusPreNextPoll = func() {
+		_ = os.WriteFile(snapshot, corrupt, 0o600)
+	}
+	t.Cleanup(func() { controllerStatusPreNextPoll = nil })
 
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		st, err := sup.WorkflowControllerStatus("c1")
-		if err != nil {
-			if time.Now().After(deadline) {
-				t.Fatalf("status never got past a corrupt first read: %v", err)
-			}
-			continue // first read hit the corrupt bytes; flip again
-		}
-		status := st.(map[string]any)
-		if got := status["next_poll_error"]; got != nil {
-			msg, ok := got.(string)
-			if !ok || !strings.Contains(msg, "controller c1 snapshot") {
-				t.Fatalf("next_poll_error = %#v, want the snapshot read error", got)
-			}
-			if status["next_poll_at"] != nil {
-				t.Fatalf("next_poll_at = %#v, want nil on a failed read", status["next_poll_at"])
-			}
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("next_poll_error never surfaced despite a concurrently corrupt snapshot")
-		}
+	st, err := sup.WorkflowControllerStatus("c1")
+	_ = os.WriteFile(snapshot, valid, 0o600)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	status := st.(map[string]any)
+	msg, ok := status["next_poll_error"].(string)
+	if !ok || !strings.Contains(msg, "controller c1 snapshot") {
+		t.Fatalf("next_poll_error = %#v, want the snapshot read error", status["next_poll_error"])
+	}
+	if status["next_poll_at"] != nil {
+		t.Fatalf("next_poll_at = %#v, want nil on a failed read", status["next_poll_at"])
 	}
 }
 

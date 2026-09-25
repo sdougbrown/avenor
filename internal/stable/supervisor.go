@@ -4636,6 +4636,11 @@ func (s *Supervisor) WorkflowControllerDisable(id string, raw json.RawMessage) (
 	return rec, nil
 }
 
+// controllerStatusPreNextPoll, when non-nil (set by tests), runs after the
+// controller record is read but before the next-poll re-read so a test can
+// corrupt the snapshot inside that window deterministically.
+var controllerStatusPreNextPoll func()
+
 func (s *Supervisor) WorkflowControllerStatus(id string) (any, error) {
 	store, err := s.controllerBarrierStore()
 	if err != nil {
@@ -4647,6 +4652,9 @@ func (s *Supervisor) WorkflowControllerStatus(id string) (any, error) {
 	}
 	if !ok {
 		return nil, fmt.Errorf("controller %s: %w", id, workflowcontroller.ErrNotFound)
+	}
+	if controllerStatusPreNextPoll != nil {
+		controllerStatusPreNextPoll()
 	}
 	var nextPollAt any
 	var nextPollError string

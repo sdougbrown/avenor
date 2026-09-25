@@ -59,22 +59,39 @@ func TestInvokeTypedInputReachesAdapter(t *testing.T) {
 func TestInvokeRejectsInvalidInputBeforeExec(t *testing.T) {
 	cases := []struct {
 		name    string
+		inputs  string // manifest inputs schema; "" uses the shared test schema
 		input   string
 		wantErr string
 	}{
-		{"missing input", `{"repository":"sdougbrown/avenor","pull_number":143}`, "missing input"},
-		{"extra input", `{"repository":"r","pull_number":1,"head_sha":"h","extra":true}`, "unexpected input"},
-		{"mistyped input", `{"repository":"r","pull_number":"143","head_sha":"h"}`, "must be an integer"},
-		{"non-integer number", `{"repository":"r","pull_number":1.5,"head_sha":"h"}`, "integral"},
-		{"non-object input", `[1,2]`, "JSON object"},
+		{"missing input", "", `{"repository":"sdougbrown/avenor","pull_number":143}`, "missing input"},
+		{"extra input", "", `{"repository":"r","pull_number":1,"head_sha":"h","extra":true}`, "unexpected input"},
+		{"mistyped input", "", `{"repository":"r","pull_number":"143","head_sha":"h"}`, "must be an integer"},
+		{"non-integer number", "", `{"repository":"r","pull_number":1.5,"head_sha":"h"}`, "integral"},
+		{"non-object input", "", `[1,2]`, "JSON object"},
+		{"mistyped boolean", `{"flag":"boolean"}`, `{"flag":1}`, "must be a boolean"},
+		{"mistyped number", `{"ratio":"number"}`, `{"ratio":"half"}`, "must be a number"},
+		{"boolean accepted", `{"flag":"boolean"}`, `{"flag":true}`, ""},
+		{"number accepted", `{"ratio":"number"}`, `{"ratio":0.5}`, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := stageAdapterDir(t)
 			exe := stageFixture(t, dir, "echo-input.sh")
-			writeManifest(t, dir, "echo.json", "echo", exe, nil, 5000)
+			if tc.inputs == "" {
+				writeManifest(t, dir, "echo.json", "echo", exe, nil, 5000)
+			} else {
+				writeManifestContent(t, dir, "echo.json", fmt.Sprintf(
+					`{"version":1,"id":"echo","executable":%q,"args":[],"timeout_ms":5000,"max_stdout_bytes":65536,"max_stderr_bytes":65536,"inputs":%s}`,
+					exe, tc.inputs))
+			}
 			m := loadOne(t, dir, "echo")
 			_, err := Invoke(context.Background(), m, testRequest(tc.input))
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Invoke accepted a correctly typed input: %v", err)
+				}
+				return
+			}
 			if err == nil || !errors.Is(err, ErrAdapterInvalidInput) || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("error = %v, want ErrAdapterInvalidInput containing %q", err, tc.wantErr)
 			}
