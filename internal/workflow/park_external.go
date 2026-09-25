@@ -22,6 +22,11 @@ import (
 // The activation stays ready so a later transition can resolve the pins.
 var ErrUnresolvedBinding = errors.New("gate binding unresolved")
 
+// parkExternalPreCommit, when non-nil (set by tests), runs after the
+// snapshot read and revalidation checks but before the park commit so a
+// concurrent command can land in the read–commit window deterministically.
+var parkExternalPreCommit func()
+
 // ParkExternalRequest asks the manager to park one eligible auto external
 // activation. The caller must hold the controller leader lease and validate
 // it (WithLeader) around the call.
@@ -186,6 +191,9 @@ func (m *Manager) ParkExternal(req ParkExternalRequest) (ParkExternalResult, err
 		seeds, err := externalGateSeeds(fa, node)
 		if err != nil {
 			return ParkExternalResult{}, err
+		}
+		if parkExternalPreCommit != nil {
+			parkExternalPreCommit()
 		}
 		if _, err := m.store.ApplyCommand(req.WorkflowID, Command{
 			ID:               NewCommandID(),

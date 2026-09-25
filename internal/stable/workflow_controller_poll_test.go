@@ -673,3 +673,43 @@ func TestControllerDisableKillsInFlightAdapter(t *testing.T) {
 		t.Fatalf("cursor after disable = %+v, want frozen in flight with a committed poll ID", found)
 	}
 }
+
+// TestControllerParkLostLeaseReportsNotLeader proves a park under a lost or
+// foreign leader lease maps the store's ErrNotLeader onto ResultNotLeader
+// with a nil error, so the runner records not_leader instead of a raw
+// dispatch_error and keeps leadership.
+func TestControllerParkLostLeaseReportsNotLeader(t *testing.T) {
+	f := newPollFixture(t, "poll-notleader", "poll-notleader-tmpl",
+		map[string]string{"gh-review": "passed.sh"},
+		[]map[string]any{{"id": "pr-review", "type": "external", "required": true, "adapter_id": "gh-review"}})
+	// Stop the leader loop so the park below lands through the test
+	// directly, without the runner's post-park cursor creation.
+	f.sup.stopControllerLoop("c1")
+	f.drivePublication(t, "sdougbrown/avenor", 143, "cc793f7")
+	inst := f.workflowInstance(t)
+	act := f.activationByNode(t, "review")
+	if act == nil {
+		t.Fatal("no review activation")
+	}
+	dec := workflowcontroller.Decision{
+		Candidate: workflowcontroller.Candidate{
+			Identity: workflow.ExecutionIdentity{
+				WorkflowID:   workflow.WorkflowID(f.wf),
+				NodeID:       "review",
+				ActivationID: act.ID,
+			},
+			Kind:         workflowcontroller.CandidateExternalPark,
+			ControllerID: "c1",
+			Revision:     inst.Revision,
+		},
+	}
+	// A foreign lease (not the live leader) makes WithLeader return
+	// ErrNotLeader before ParkExternal runs.
+	res, err := f.sup.parkExternalNode(dec, workflowcontroller.LeaderLease{LeaseID: "foreign-lease", OwnerEpoch: 0})
+	if err != nil {
+		t.Fatalf("park under foreign lease: %v", err)
+	}
+	if res.Kind != workflowcontroller.ResultNotLeader {
+		t.Fatalf("park kind = %q, want not_leader", res.Kind)
+	}
+}

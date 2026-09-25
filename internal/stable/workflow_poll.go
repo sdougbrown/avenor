@@ -93,6 +93,9 @@ func (s *Supervisor) parkExternalNode(dec workflowcontroller.Decision, lease wor
 		return nil
 	})
 	if parkErr != nil {
+		if errors.Is(parkErr, workflowcontroller.ErrNotLeader) {
+			return workflowcontroller.DispatchResult{Kind: workflowcontroller.ResultNotLeader}, nil
+		}
 		if errors.Is(parkErr, workflow.ErrStaleCandidate) {
 			out.Kind = workflowcontroller.ResultStale
 			return out, nil
@@ -103,9 +106,6 @@ func (s *Supervisor) parkExternalNode(dec workflowcontroller.Decision, lease wor
 			return out, nil
 		}
 		return out, parkErr
-	}
-	if out.Kind != workflowcontroller.ResultParked {
-		out.Kind = workflowcontroller.ResultNotLeader
 	}
 	return out, nil
 }
