@@ -41,11 +41,13 @@ type fakeDeps struct {
 	store      *ControllerStore
 	controller string
 
-	cands      []Candidate // candidates visible to Candidates()
-	pending    []Candidate // candidates revealed only by Refresh()
-	inflight   []InFlightAttempt
-	refreshes  int
-	refreshErr error // returned by Refresh() when non-nil
+	cands       []Candidate // candidates visible to Candidates()
+	pending     []Candidate // candidates revealed only by Refresh()
+	inflight    []InFlightAttempt
+	refreshes   int
+	refreshErr  error // returned by Refresh() when non-nil
+	candsErr    error // returned by Candidates() when non-nil
+	inflightErr error // returned by InFlight() when non-nil
 
 	scripted      []DispatchResult // popped per dispatch; falls back to defaultResult
 	errScript     []error          // popped per dispatch before the result script
@@ -69,7 +71,7 @@ func (d *fakeDeps) Candidates(controllerID string) ([]Candidate, error) {
 	defer d.mu.Unlock()
 	out := make([]Candidate, len(d.cands))
 	copy(out, d.cands)
-	return out, nil
+	return out, d.candsErr
 }
 
 func (d *fakeDeps) InFlight() ([]InFlightAttempt, error) {
@@ -77,7 +79,7 @@ func (d *fakeDeps) InFlight() ([]InFlightAttempt, error) {
 	defer d.mu.Unlock()
 	out := make([]InFlightAttempt, len(d.inflight))
 	copy(out, d.inflight)
-	return out, nil
+	return out, d.inflightErr
 }
 
 // Refresh swaps the pending candidates into view, simulating a host-side
@@ -195,6 +197,18 @@ func (d *fakeDeps) setRefreshError(err error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.refreshErr = err
+}
+
+func (d *fakeDeps) setCandidatesError(err error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.candsErr = err
+}
+
+func (d *fakeDeps) setInFlightError(err error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.inflightErr = err
 }
 
 // waitUntil polls cond until it holds or the deadline passes.
@@ -865,6 +879,72 @@ func TestRunnerRefreshErrorKeepsRunningAndRecovers(t *testing.T) {
 	// Clear the error; the next pass refreshes and dispatches.
 	deps.setRefreshError(nil)
 	waitUntil(t, "dispatch after refresh error cleared", func() bool {
+		return deps.dispatchCount() >= 1
+	})
+	if s := r.Status(); !s.Leading {
+		t.Fatal("runner not leading after recovery")
+	}
+}
+
+// TestRunnerCandidatesErrorKeepsRunningAndRecovers proves a candidate view
+// error is contained: the runner records a candidates_error outcome, keeps
+// leading without dispatching, and dispatches on the following pass once the
+// error is cleared.
+func TestRunnerCandidatesErrorKeepsRunningAndRecovers(t *testing.T) {
+	store, _ := newRunnerStore(t, 4)
+	deps := newFakeDeps(store, "c1")
+	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
+	deps.setCandidates([]Candidate{runnerCand("wf1", "start", "a1")})
+	deps.setCandidatesError(errors.New("injected candidates failure"))
+
+	r := startRunner(t, store, deps, 20*time.Millisecond, 50*time.Millisecond, nil, nil)
+
+	waitUntil(t, "candidates_error outcome recorded", func() bool {
+		return r.Status().LastOutcome == "candidates_error"
+	})
+	if s := r.Status(); !s.Leading {
+		t.Fatal("runner dropped leadership after a candidates error")
+	}
+	if n := deps.dispatchCount(); n != 0 {
+		t.Fatalf("runner dispatched %d times despite a candidates error", n)
+	}
+
+	// Clear the error; the next pass reads candidates and dispatches.
+	deps.setCandidatesError(nil)
+	waitUntil(t, "dispatch after candidates error cleared", func() bool {
+		return deps.dispatchCount() >= 1
+	})
+	if s := r.Status(); !s.Leading {
+		t.Fatal("runner not leading after recovery")
+	}
+}
+
+// TestRunnerInFlightErrorKeepsRunningAndRecovers proves an in-flight view
+// error is contained: the runner records an inflight_error outcome, keeps
+// leading without dispatching, and dispatches on the following pass once the
+// error is cleared.
+func TestRunnerInFlightErrorKeepsRunningAndRecovers(t *testing.T) {
+	store, _ := newRunnerStore(t, 4)
+	deps := newFakeDeps(store, "c1")
+	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
+	deps.setCandidates([]Candidate{runnerCand("wf1", "start", "a1")})
+	deps.setInFlightError(errors.New("injected in-flight failure"))
+
+	r := startRunner(t, store, deps, 20*time.Millisecond, 50*time.Millisecond, nil, nil)
+
+	waitUntil(t, "inflight_error outcome recorded", func() bool {
+		return r.Status().LastOutcome == "inflight_error"
+	})
+	if s := r.Status(); !s.Leading {
+		t.Fatal("runner dropped leadership after an in-flight error")
+	}
+	if n := deps.dispatchCount(); n != 0 {
+		t.Fatalf("runner dispatched %d times despite an in-flight error", n)
+	}
+
+	// Clear the error; the next pass reads the in-flight view and dispatches.
+	deps.setInFlightError(nil)
+	waitUntil(t, "dispatch after in-flight error cleared", func() bool {
 		return deps.dispatchCount() >= 1
 	})
 	if s := r.Status(); !s.Leading {
