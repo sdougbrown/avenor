@@ -496,6 +496,109 @@ func TestRunnerAdapterUnavailableDiagnosticDeduped(t *testing.T) {
 		return !open
 	})
 }
+
+// TestRunnerUnresolvedBindingDiagnosticDeduped proves an unresolved-binding
+// dispatch records a deduplicated diagnostic keyed by workflow, node, and
+// activation.
+func TestRunnerUnresolvedBindingDiagnosticDeduped(t *testing.T) {
+	store, clock := newManualRunnerStore(t)
+	deps := newFakeDeps(store, "c1")
+	deps.cands = []Candidate{runnerCand("wf-1", "review", "act-1")}
+	deps.unresolved = true
+	deps.unresolvedDetail = "gate pr-review binds unknown adapter gh-review"
+	poller := &fakePoller{store: store}
+	r := pollRunner(t, store, deps, poller, clock.Now)
+
+	countDiagEvents := func() int {
+		data, err := os.ReadFile(store.eventsPath("c1"))
+		if err != nil {
+			return 0
+		}
+		return bytes.Count(data, []byte(`"kind":"diagnostic_recorded"`))
+	}
+	waitUntil(t, "unresolved_binding diagnostic recorded", func() bool { return countDiagEvents() == 1 })
+	rec, _, _ := store.Get("c1")
+	detail, open := rec.Diagnostics["unresolved_binding/wf-1/review/act-1"]
+	if !open || detail != deps.unresolvedDetail {
+		t.Fatalf("diagnostic unresolved_binding/wf-1/review/act-1 = %q open=%v, want detail %q", detail, open, deps.unresolvedDetail)
+	}
+	if got := r.Status().LastOutcome; got != string(ResultUnresolvedBinding) {
+		t.Fatalf("last outcome = %q, want %q", got, string(ResultUnresolvedBinding))
+	}
+
+	// Further dispatches of the same unresolved binding append no events.
+	waitUntil(t, "second dispatch", func() bool { return deps.dispatchCount() > 1 })
+	clock.Advance(30 * time.Second)
+	waitUntil(t, "third dispatch", func() bool { return deps.dispatchCount() > 2 })
+	if n := countDiagEvents(); n != 1 {
+		t.Fatalf("diagnostic_recorded events = %d, want deduplicated 1", n)
+	}
+}
+
+// TestRunnerObsoleteApplyDropsCursor proves an obsolete apply (the gate is no
+// longer parked on this activation) clears the cursor and records a
+// deduplicated poll_obsolete diagnostic.
+func TestRunnerObsoleteApplyDropsCursor(t *testing.T) {
+	store, clock := newManualRunnerStore(t)
+	deps := newFakeDeps(store, "c1")
+	deps.cands = []Candidate{runnerCand("wf-1", "review", "act-1")}
+	deps.park = true
+	deps.parkSeeds = []PollSeed{pollSeed()}
+	poller := &fakePoller{store: store, applyResult: PollObsolete, defaultPoll: pendingResult}
+	pollRunner(t, store, deps, poller, clock.Now)
+
+	waitUntil(t, "cursor seeded", func() bool {
+		_, ok, _ := store.NextPollTime("c1")
+		return ok
+	})
+	// The first poll returns a passed verdict whose apply finds the gate no
+	// longer parked on this activation.
+	poller.mu.Lock()
+	poller.script = []func() (AdapterResult, PollFailureKind, error){
+		func() (AdapterResult, PollFailureKind, error) {
+			return AdapterResult{Result: AdapterResultPassed}, PollFailureNone, nil
+		},
+	}
+	poller.mu.Unlock()
+	clock.Advance(pollBaseDelay + 50*time.Millisecond)
+	waitUntil(t, "poll fired", func() bool { return poller.pollCount() > 0 })
+	waitUntil(t, "obsolete apply consumed", func() bool { return poller.applyCount() > 0 })
+
+	// The cursor clear is durable in the controller's event log, unlike the
+	// cursor itself, which the runner's reseed re-creates for the
+	// still-parked gate.
+	eventsPath := store.eventsPath("c1")
+	waitUntil(t, "cursor cleared", func() bool {
+		data, err := os.ReadFile(eventsPath)
+		return err == nil && bytes.Count(data, []byte(`"kind":"poll_cleared"`)) >= 1
+	})
+	waitUntil(t, "poll_obsolete diagnostic recorded", func() bool {
+		data, err := os.ReadFile(eventsPath)
+		return err == nil && bytes.Count(data, []byte(`"kind":"diagnostic_recorded"`)) >= 1
+	})
+
+	// The still-parked gate is re-parked by the dispatch loop and its cursor
+	// re-seeded; wait for the fresh cursor before advancing the clock, so
+	// its first poll lands inside the test window.
+	waitUntil(t, "cursor re-seeded", func() bool {
+		rec, _, _ := store.Get("c1")
+		c := rec.PollCursors[PollCursorKey(pollSeedCursor())]
+		return c != nil && c.PollCount == 0 && !c.NextPollAt.IsZero()
+	})
+	rec, _, _ := store.Get("c1")
+	if detail, open := rec.Diagnostics["poll_obsolete/"+PollCursorKey(pollSeedCursor())]; !open || detail == "" {
+		t.Fatalf("diagnostic poll_obsolete = %q open=%v, want it recorded for the cursor", detail, open)
+	}
+
+	// The re-seeded cursor polls again, but a pending verdict never reaches
+	// ApplyResult: the obsolete apply happened exactly once.
+	clock.Advance(pollBaseDelay + time.Second)
+	waitUntil(t, "re-seeded poll fired", func() bool { return poller.pollCount() > 1 })
+	if n := poller.applyCount(); n != 1 {
+		t.Fatalf("apply count = %d, want 1", n)
+	}
+}
+
 func TestRunnerDisableCancelsInFlightPoll(t *testing.T) {
 	store, clock := newManualRunnerStore(t)
 	deps := newFakeDeps(store, "c1")
