@@ -103,6 +103,12 @@ type pollFixture struct {
 // supervisor, registers and instantiates the review template, and enables
 // the controller (which loads the registry).
 func newPollFixture(t *testing.T, name string, templateID string, manifests map[string]string, gates []map[string]any) *pollFixture {
+	return newPollFixtureWithTemplate(t, name, manifests, pollReviewTemplate(t, templateID, gates))
+}
+
+// newPollFixtureWithTemplate is newPollFixture with a caller-supplied
+// template body.
+func newPollFixtureWithTemplate(t *testing.T, name string, manifests map[string]string, template []byte) *pollFixture {
 	t.Helper()
 	root := filepath.Join(t.TempDir(), "wfroot")
 	adapterDir := t.TempDir()
@@ -135,10 +141,16 @@ func newPollFixture(t *testing.T, name string, templateID string, manifests map[
 		t.Fatalf("workflow barrier: %v", err)
 	}
 	f := &pollFixture{sup: sup, mgr: mgr, cstore: cstore, root: root, adapterDir: adapterDir, wf: ""}
-	if _, err := mgr.WorkflowCreate(pollReviewTemplate(t, templateID, gates)); err != nil {
+	if _, err := mgr.WorkflowCreate(template); err != nil {
 		t.Fatalf("WorkflowCreate: %v", err)
 	}
-	out, err := mgr.WorkflowInstantiate(mustJSON(t, map[string]string{"template_id": templateID, "template_version": "1.0.0"}))
+	var tmplHead struct {
+		TemplateID string `json:"template_id"`
+	}
+	if err := json.Unmarshal(template, &tmplHead); err != nil || tmplHead.TemplateID == "" {
+		t.Fatalf("template_id: id=%q err=%v", tmplHead.TemplateID, err)
+	}
+	out, err := mgr.WorkflowInstantiate(mustJSON(t, map[string]string{"template_id": tmplHead.TemplateID, "template_version": "1.0.0"}))
 	if err != nil {
 		t.Fatalf("WorkflowInstantiate: %v", err)
 	}
@@ -711,6 +723,159 @@ func TestControllerParkLostLeaseReportsNotLeader(t *testing.T) {
 	}
 	if res.Kind != workflowcontroller.ResultNotLeader {
 		t.Fatalf("park kind = %q, want not_leader", res.Kind)
+	}
+}
+
+// pollUnresolvedSubjectTemplate builds the integration template whose review
+// gate pins its subject's revision (and head_sha input) on a non-required
+// publication output that the publication command never records: static
+// validation passes, but the pin resolves with no subject and the reference
+// listed as unresolved.
+func pollUnresolvedSubjectTemplate(t *testing.T, templateID string) []byte {
+	t.Helper()
+	fromPublication := func(output string) map[string]any {
+		return map[string]any{"from_node_output": map[string]any{"node_id": "publication", "output_id": output}}
+	}
+	template := map[string]any{
+		"schema_version":   1,
+		"template_id":      templateID,
+		"template_version": "1.0.0",
+		"entry_nodes":      []string{"publication"},
+		"nodes": []any{
+			map[string]any{
+				"id":     "publication",
+				"action": map[string]any{"type": "manual"},
+				"outputs": []any{
+					map[string]any{"id": "repository", "name": "Repository", "type": "string", "required": true},
+					map[string]any{"id": "pr_number", "name": "PR number", "type": "number", "required": true},
+					map[string]any{"id": "pr_head", "name": "PR head SHA", "type": "string", "required": true},
+					map[string]any{"id": "pr_head_opt", "name": "Optional head SHA", "type": "string", "required": false},
+				},
+				"outcomes": []any{map[string]any{"name": "published", "target_node_id": "review"}},
+			},
+			map[string]any{
+				"id":           "review",
+				"dependencies": []string{"publication"},
+				"action":       map[string]any{"type": "external", "source": "github"},
+				"dispatch":     map[string]any{"mode": "auto", "controller_id": "c1", "success_outcome": "clean"},
+				"branches":     map[string]any{"clean": "merge", "failed": "publication"},
+				"gates": []any{map[string]any{
+					"id": "pr-review", "type": "external", "required": true, "adapter_id": "gh-review",
+					"inputs": map[string]any{
+						"repository":  fromPublication("repository"),
+						"pull_number": fromPublication("pr_number"),
+						"head_sha":    fromPublication("pr_head_opt"),
+					},
+					"subject_binding": map[string]any{
+						"type":         "pull_request",
+						"repository":   fromPublication("repository"),
+						"pull_request": fromPublication("pr_number"),
+						"revision":     fromPublication("pr_head_opt"),
+					},
+				}},
+			},
+			map[string]any{
+				"id":           "merge",
+				"dependencies": []string{"review"},
+				"action":       map[string]any{"type": "manual"},
+				"gates":        []any{map[string]any{"id": "merge-auth", "type": "human", "required": true}},
+			},
+		},
+		"terminal_outcomes": []string{"done"},
+	}
+	return mustJSON(t, template)
+}
+
+// TestControllerParkStaleCandidateReportsStale proves a park whose pinned
+// revision no longer matches the live workflow maps the manager's
+// ErrStaleCandidate onto ResultStale with a nil error, so the runner records
+// stale instead of a raw dispatch error.
+func TestControllerParkStaleCandidateReportsStale(t *testing.T) {
+	f := newPollFixture(t, "poll-stale", "poll-stale-tmpl",
+		map[string]string{"gh-review": "passed.sh"},
+		[]map[string]any{{"id": "pr-review", "type": "external", "required": true, "adapter_id": "gh-review"}})
+	f.sup.stopControllerLoop("c1")
+	f.drivePublication(t, "sdougbrown/avenor", 143, "cc793f7")
+	inst := f.workflowInstance(t)
+	act := f.activationByNode(t, "review")
+	if act == nil {
+		t.Fatal("no review activation")
+	}
+	rec, granted, err := f.cstore.AcquireLease("c1", "park-owner")
+	if err != nil || !granted {
+		t.Fatalf("acquire lease: granted=%v err=%v", granted, err)
+	}
+	dec := workflowcontroller.Decision{
+		Candidate: workflowcontroller.Candidate{
+			Identity: workflow.ExecutionIdentity{
+				WorkflowID:   workflow.WorkflowID(f.wf),
+				NodeID:       "review",
+				ActivationID: act.ID,
+			},
+			Kind:         workflowcontroller.CandidateExternalPark,
+			ControllerID: "c1",
+			// One revision behind the live instance: the park's expected
+			// revision check fails.
+			Revision: inst.Revision - 1,
+		},
+	}
+	res, err := f.sup.parkExternalNode(dec, workflowcontroller.LeaderLease{LeaseID: rec.Leader.LeaseID, OwnerEpoch: rec.Leader.OwnerEpoch})
+	if err != nil {
+		t.Fatalf("park with stale revision: %v", err)
+	}
+	if res.Kind != workflowcontroller.ResultStale {
+		t.Fatalf("park kind = %q, want stale", res.Kind)
+	}
+	if after := f.activationByNode(t, "review"); after == nil || after.Status == workflow.ActivationAwaitingGate {
+		t.Fatalf("review status after stale park = %+v, want still claimable", after)
+	}
+}
+
+// TestControllerParkUnresolvedBindingReportsUnresolved proves a park on an
+// activation whose gate pins never resolved maps the manager's
+// ErrUnresolvedBinding onto ResultUnresolvedBinding with a nil error and a
+// diagnostic detail, leaving the activation claimable.
+func TestControllerParkUnresolvedBindingReportsUnresolved(t *testing.T) {
+	f := newPollFixtureWithTemplate(t, "poll-unresolved", map[string]string{"gh-review": "passed.sh"},
+		pollUnresolvedSubjectTemplate(t, "poll-unresolved-tmpl"))
+	f.sup.stopControllerLoop("c1")
+	f.drivePublication(t, "sdougbrown/avenor", 143, "cc793f7")
+	inst := f.workflowInstance(t)
+	act := f.activationByNode(t, "review")
+	if act == nil {
+		t.Fatal("no review activation")
+	}
+	if resolved := act.ResolvedGates["pr-review"]; resolved.Subject != nil || len(resolved.Unresolved) == 0 {
+		t.Fatalf("pr-review pin = %+v, want unresolved with no subject", resolved)
+	}
+	rec, granted, err := f.cstore.AcquireLease("c1", "park-owner")
+	if err != nil || !granted {
+		t.Fatalf("acquire lease: granted=%v err=%v", granted, err)
+	}
+	dec := workflowcontroller.Decision{
+		Candidate: workflowcontroller.Candidate{
+			Identity: workflow.ExecutionIdentity{
+				WorkflowID:   workflow.WorkflowID(f.wf),
+				NodeID:       "review",
+				ActivationID: act.ID,
+			},
+			Kind:         workflowcontroller.CandidateExternalPark,
+			ControllerID: "c1",
+			Revision:     inst.Revision,
+		},
+	}
+	res, err := f.sup.parkExternalNode(dec, workflowcontroller.LeaderLease{LeaseID: rec.Leader.LeaseID, OwnerEpoch: rec.Leader.OwnerEpoch})
+	if err != nil {
+		t.Fatalf("park with unresolved bindings: %v", err)
+	}
+	if res.Kind != workflowcontroller.ResultUnresolvedBinding {
+		t.Fatalf("park kind = %q, want unresolved_binding", res.Kind)
+	}
+	if res.Detail == "" {
+		t.Fatal("unresolved_binding result carries no diagnostic detail")
+	}
+	if after := f.activationByNode(t, "review"); after == nil || after.Status == workflow.ActivationAwaitingGate {
+		t.Fatalf("review status after unresolved park = %+v, want still claimable", after)
 	}
 }
 
