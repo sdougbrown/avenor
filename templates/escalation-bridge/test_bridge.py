@@ -365,6 +365,94 @@ class SubjectUnchangedTest(unittest.TestCase):
         self.assertEqual(why, "subject changed")
 
 
+class BoundGateLoopTest(unittest.TestCase):
+    """Loop-level tests: main() driven over a scripted control socket.
+
+    Each run scripts the sequence of workflow.wait / workflow.inspect results
+    the bridge consumes, stubs the webhook and time.sleep so the loop runs
+    fast, and asserts on what the bridge asked and submitted.
+    """
+
+    PINNED = {"type": "pull_request", "repository": "org/repo",
+              "pull_request": 123, "revision": "abc123"}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.decisions = Path(self.tmp.name)
+        self.template = self.decisions / "template.json"
+        self.template.write_text(json.dumps({"nodes": [
+            {"id": "merge-auth", "gates": [{
+                "id": "merge-authorization", "type": "human", "required": True,
+                "subject_binding": {"type": "pull_request"},
+            }]},
+        ]}))
+        self.asked = []
+
+    def run_bridge(self, results):
+        ctl = FakeControl(results)
+        argv = ["bridge.py", "--socket", "/tmp/unused.sock", "--workflow-id", "wf_1",
+                "--webhook-url", "http://127.0.0.1:1/ask",
+                "--decision-dir", str(self.decisions),
+                "--template", str(self.template),
+                "--wait", "1s", "--gate-timeout", "5m", "--poll", "1s"]
+        with mock.patch.object(bridge, "Control", lambda path: ctl), \
+                mock.patch.object(bridge, "ask", lambda url, q: self.asked.append(q)), \
+                mock.patch.object(bridge.time, "sleep", lambda *_: None), \
+                mock.patch("sys.argv", argv):
+            rc = bridge.main()
+        return rc, ctl
+
+    def inspect(self, subject):
+        act = parked_activation()
+        resolved = {"unresolved": ["subject.repository"]} if subject is None else {"subject": subject}
+        act["resolved_gates"] = {"merge-authorization": resolved}
+        return {"activations": [act], "gates": None, "instance": {"status": "active"}}
+
+    def test_unresolved_pin_skips_ask_until_resolved(self):
+        # Tick 1: the bound gate's pin is unresolved -> no ask. Tick 2: the
+        # pin has resolved -> the question carries the exact pinned subject.
+        results = [
+            {"terminal": False},                       # wait 1
+            self.inspect(None),                        # inspect 1: unresolved
+            {"terminal": False},                       # wait 2
+            self.inspect(self.PINNED),                 # inspect 2: resolved
+            {**self.inspect(self.PINNED),              # wait_for_decision re-check
+             "activations": [{**parked_activation(), "status": "satisfied"}]},
+            {"terminal": True, "instance": {"status": "completed", "terminal_outcome": "done"}},
+        ]
+        rc, ctl = self.run_bridge(results)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(self.asked), 1)
+        question = self.asked[0]
+        self.assertEqual(question["gate_id"], "merge-authorization")
+        self.assertEqual(question["activation_id"], "act_1")
+        self.assertEqual(question["subject"], self.PINNED)
+        self.assertNotIn("workflow.command", ctl.calls)
+
+    def test_stale_subject_before_submit_rejects_decision(self):
+        # The decision file arrives, but the pre-submit re-inspect shows a
+        # different pinned subject (a new head): no command is submitted and
+        # the decision file is moved into rejected/.
+        changed = dict(self.PINNED, revision="deadbeef")
+        (self.decisions / "decision-act_1-merge-authorization.json").write_text(
+            json.dumps({"decision": "satisfy", "actor": "austin", "reason": "looks good"}))
+        results = [
+            {"terminal": False},        # wait 1
+            self.inspect(self.PINNED),  # inspect 1: ask + read decision file
+            self.inspect(changed),      # subject_unchanged re-inspect: changed
+            {"terminal": True, "instance": {"status": "completed", "terminal_outcome": "done"}},
+        ]
+        rc, ctl = self.run_bridge(results)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(self.asked), 1)
+        self.assertEqual(self.asked[0]["subject"], self.PINNED)
+        self.assertNotIn("workflow.command", ctl.calls)
+        rejected = list((self.decisions / "rejected").glob("act_1-*.json"))
+        self.assertEqual(len(rejected), 1)
+        self.assertFalse((self.decisions / "decision-act_1-merge-authorization.json").exists())
+
+
 class LoadHumanGatesTest(unittest.TestCase):
     def test_maps_only_human_gates_by_node(self):
         with tempfile.TemporaryDirectory() as tmp:
