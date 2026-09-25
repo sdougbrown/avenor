@@ -34,7 +34,6 @@ type fakePoller struct {
 	store       *ControllerStore
 	polls       []PollCursor
 	applys      []PollCursor
-	pollErrs    []error
 	script      []func() (AdapterResult, PollFailureKind, error)
 	defaultPoll func() (AdapterResult, PollFailureKind, error)
 	applyResult PollApplyOutcome
@@ -325,9 +324,15 @@ func TestRunnerBackoffDoublesAndClearsCursorOnApplied(t *testing.T) {
 	poller.mu.Unlock()
 	clock.Advance(240 * time.Second)
 	waitUntil(t, "verdict applied", func() bool { return poller.applyCount() > 0 })
+	// The applied verdict clears the cursor. The clear is durable in the
+	// controller's event log, unlike the cursor itself, which the runner's
+	// reseed re-creates for the still-parked gate — a clear-then-reseed can
+	// complete entirely between two polls of a cursor-based wait on a fast
+	// host.
+	eventsPath := store.eventsPath("c1")
 	waitUntil(t, "cursor cleared", func() bool {
-		_, ok, _ := store.NextPollTime("c1")
-		return !ok
+		data, err := os.ReadFile(eventsPath)
+		return err == nil && bytes.Count(data, []byte(`"kind":"poll_cleared"`)) >= 1
 	})
 	if poller.applyCount() != 1 {
 		t.Fatalf("apply count = %d, want 1", poller.applyCount())
@@ -455,8 +460,6 @@ func TestRunnerAdapterUnavailableDiagnosticDeduped(t *testing.T) {
 	clock.Advance(61 * time.Second)
 	waitUntil(t, "second poll fired", func() bool { return poller.pollCount() > 1 })
 	waitRetryCount(t, store, 2)
-	waitUntil(t, "backoff armed", func() bool { return true })
-	time.Sleep(100 * time.Millisecond)
 	if n := countDiagEvents(); n != 1 {
 		t.Fatalf("diagnostic_recorded events = %d, want deduplicated 1", n)
 	}

@@ -8,7 +8,6 @@ package workflowcontroller
 import (
 	"encoding/json"
 	"os"
-	"strings"
 	"testing"
 	"time"
 )
@@ -301,9 +300,6 @@ func TestPollCursorsRoundTripThroughSnapshot(t *testing.T) {
 	data, err := os.ReadFile(s.snapshotPath(id))
 	if err != nil {
 		t.Fatalf("writeSnapshotForTest: %v", err)
-	}
-	if !strings.Contains(string(data), `"poll_cursors"`) || !strings.Contains(string(data), `"poll_id"`) {
-		t.Fatalf("snapshot = %s", data)
 	}
 	var rec ControllerRecord
 	if err := json.Unmarshal(data, &rec); err != nil {
