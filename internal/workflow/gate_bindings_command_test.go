@@ -389,6 +389,41 @@ func TestMappedChangesRequestedTransitionsToDeclaredBranch(t *testing.T) {
 	}
 }
 
+// TestMappedFailedTransitionsToDeclaredBranch mirrors the changes_requested
+// routing for a hard failure: a bound gate whose result_outcomes maps the
+// `failed` result onto the node's declared `failed` branch resolves the
+// parked review onto that branch — the activation is rejected and a fresh
+// publication activation is created.
+func TestMappedFailedTransitionsToDeclaredBranch(t *testing.T) {
+	fixture := mutateBoundTemplate(boundGateTemplateJSON, func(template map[string]any) {
+		gate := boundGateNode(template, "review")["gates"].([]any)[0].(map[string]any)
+		gate["result_outcomes"] = map[string]any{"failed": "failed"}
+	})
+	m, s, wf := newCompleteFixture(t, string(fixture), "bound-gates", "1.0.0")
+	driveBoundPublication(t, m, s, wf, boundPublicationOutputs("org/repo", 42, "abc123"))
+	actID := parkBoundReview(t, m, s, wf)
+
+	if _, err := m.WorkflowCommand(string(wf), boundExternalResult(t, actID, "pr-review", "failed", "poll-1", "hash-1", boundSubject("org/repo", 42, "abc123"))); err != nil {
+		t.Fatalf("failed poll: %v", err)
+	}
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("load current: %v", err)
+	}
+	if act := activationByNode(&snap.Instance, "review"); act.Status != ActivationRejected {
+		t.Fatalf("review status = %q, want rejected after mapped failed routing", act.Status)
+	}
+	publications := 0
+	for i := range snap.Instance.Activations {
+		if snap.Instance.Activations[i].NodeID == "publication" {
+			publications++
+		}
+	}
+	if publications != 2 {
+		t.Fatalf("publication activations = %d, want 2 (mapped failed re-opens publication)", publications)
+	}
+}
+
 func TestSuccessOutcomeRequiresAllGatesPassed(t *testing.T) {
 	fixture := mutateBoundTemplate(boundGateTemplateJSON, func(template map[string]any) {
 		review := boundGateNode(template, "review")
