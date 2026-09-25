@@ -266,6 +266,89 @@ func TestBoundGateTemplateValidation(t *testing.T) {
 	}
 }
 
+// entryBoundGateTemplateJSON is a template whose entry node is an
+// external node declaring a bound gate: a subject_binding and a
+// from_node_output input that reference a node the entry node does not
+// depend on. The entry-node rule rejects the template before reference
+// validation runs.
+const entryBoundGateTemplateJSON = `{
+  "schema_version": 1,
+  "template_id": "bound-gates-entry",
+  "template_version": "1.0.0",
+  "entry_nodes": ["review"],
+  "nodes": [
+    {
+      "id": "publication",
+      "action": {"type": "manual"},
+      "outputs": [
+        {"id": "repository", "name": "Repository", "type": "string", "required": true},
+        {"id": "pr_number", "name": "PR number", "type": "number", "required": true},
+        {"id": "pr_head", "name": "PR head SHA", "type": "string", "required": true}
+      ]
+    },
+    {
+      "id": "review",
+      "action": {"type": "external", "source": "github"},
+      "dispatch": {"mode": "manual"},
+      "branches": {"clean": "merge"},
+      "gates": [{
+        "id": "pr-review",
+        "type": "external",
+        "required": true,
+        "adapter_id": "gh-review",
+        "inputs": {
+          "pull_number": {"from_node_output": {"node_id": "publication", "output_id": "pr_number"}}
+        },
+        "subject_binding": {
+          "type": "pull_request",
+          "repository": {"from_node_output": {"node_id": "publication", "output_id": "repository"}},
+          "pull_request": {"from_node_output": {"node_id": "publication", "output_id": "pr_number"}},
+          "revision": {"from_node_output": {"node_id": "publication", "output_id": "pr_head"}}
+        }
+      }]
+    },
+    {"id": "merge", "action": {"type": "manual"}}
+  ],
+  "terminal_outcomes": ["done"]
+}`
+
+func entryBoundGateMutation(mutate func(template map[string]any)) []byte {
+	return mutateBoundTemplate(entryBoundGateTemplateJSON, mutate)
+}
+
+func TestBoundGateEntryNodeValidation(t *testing.T) {
+	invalid := []struct {
+		name   string
+		mutate func(map[string]any)
+		want   string
+	}{
+		{"entry node with subject_binding", func(t map[string]any) {
+			gate := boundGateNode(t, "review")["gates"].([]any)[0].(map[string]any)
+			delete(gate, "inputs")
+		}, `entry node "review" gate "pr-review" declares a bound subject or input`},
+		{"entry node with from_node_output input", func(t map[string]any) {
+			gate := boundGateNode(t, "review")["gates"].([]any)[0].(map[string]any)
+			delete(gate, "subject_binding")
+		}, `entry node "review" gate "pr-review" declares a bound subject or input`},
+	}
+	for _, tc := range invalid {
+		tc := tc
+		t.Run("invalid/"+tc.name, func(t *testing.T) {
+			assertTemplateError(t, entryBoundGateMutation(tc.mutate), tc.want)
+		})
+	}
+
+	t.Run("valid/entry node with literal-only inputs", func(t *testing.T) {
+		if err := ValidateTemplateJSON(entryBoundGateMutation(func(template map[string]any) {
+			gate := boundGateNode(template, "review")["gates"].([]any)[0].(map[string]any)
+			delete(gate, "subject_binding")
+			gate["inputs"] = map[string]any{"level": "high", "strict": true}
+		})); err != nil {
+			t.Fatalf("ValidateTemplateJSON() error = %v", err)
+		}
+	})
+}
+
 func TestAutoExternalDispatchEligibility(t *testing.T) {
 	valid := []struct {
 		name   string

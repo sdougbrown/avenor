@@ -79,6 +79,13 @@ func SetChildSnapshotResolver(fn func(workflowID WorkflowID) (Snapshot, bool, er
 // declared output existence and primitive types, the same-source-node rule
 // for subject references, and the result_outcomes routing contract.
 func validateGateBindings(template Template, nodeIndex map[NodeID]int, node NodeDefinition) error {
+	if isEntryNode(template, node.ID) {
+		for _, gate := range node.Gates {
+			if gateDeclaresBoundReference(gate) {
+				return fmt.Errorf("invalid workflow template: entry node %q gate %q declares a bound subject or input; entry activations have no causal source to pin from", node.ID, gate.ID)
+			}
+		}
+	}
 	outputTypes := make(map[NodeID]map[OutputID]OutputType, len(template.Nodes))
 	for _, n := range template.Nodes {
 		types := make(map[OutputID]OutputType, len(n.Outputs))
@@ -196,6 +203,32 @@ func subjectBindingRef(ref *SubjectOutputRef) *TemplateOutputReference {
 	}
 	out := ref.FromNodeOutput
 	return &out
+}
+
+// isEntryNode reports whether nodeID is listed in the template's entry_nodes.
+func isEntryNode(template Template, id NodeID) bool {
+	for _, entry := range template.EntryNodes {
+		if entry == id {
+			return true
+		}
+	}
+	return false
+}
+
+// gateDeclaresBoundReference reports whether a gate carries a subject
+// binding or a from_node_output input reference — the declarations that
+// need a causal source activation to pin at command time. Literal-only
+// inputs declare no reference and stay allowed on entry nodes.
+func gateDeclaresBoundReference(gate GateDefinition) bool {
+	if gate.SubjectBinding != nil {
+		return true
+	}
+	for _, value := range gate.Inputs {
+		if value.FromNodeOutput != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // transitiveDependencies returns every node reachable from node through its
