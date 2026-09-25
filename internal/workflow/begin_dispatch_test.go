@@ -27,7 +27,6 @@ func TestBeginDispatchRecordsClaimAndAttemptAtomically(t *testing.T) {
 		ControllerID:     "ctl-a",
 		LeaderLeaseID:    "lease_leader_1",
 		Selection:        sel,
-		AdmissionRef:     "resv-1",
 	})
 	if err != nil {
 		t.Fatalf("BeginDispatch: %v", err)
@@ -59,8 +58,7 @@ func TestBeginDispatchRecordsClaimAndAttemptAtomically(t *testing.T) {
 	if attempt.Diagnostics == nil ||
 		attempt.Diagnostics.ControllerID != "ctl-a" ||
 		attempt.Diagnostics.LeaderLeaseID != "lease_leader_1" ||
-		attempt.Diagnostics.ConcurrencyKey != "deploys" ||
-		attempt.Diagnostics.AdmissionRef != "resv-1" {
+		attempt.Diagnostics.ConcurrencyKey != "deploys" {
 		t.Fatalf("attempt diagnostics = %+v", attempt.Diagnostics)
 	}
 	// The raw owner token must never become durable: the stored digest is not

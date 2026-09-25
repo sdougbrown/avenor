@@ -47,9 +47,6 @@ type BeginDispatchRequest struct {
 	// all its retries. A selection conflicting with an already pinned one is
 	// rejected; a nil selection inherits the pinned selection.
 	Selection *ExecutionSelection
-	// AdmissionRef is an optional inert diagnostic reference to the
-	// reservation holding this dispatch's admission.
-	AdmissionRef string
 }
 
 // BeginDispatchResult reports the claim + attempt intent recorded by
@@ -269,7 +266,6 @@ func (m *Manager) BeginDispatch(req BeginDispatchRequest) (BeginDispatchResult, 
 			ControllerID:   req.ControllerID,
 			LeaderLeaseID:  req.LeaderLeaseID,
 			ConcurrencyKey: concurrencyKey,
-			AdmissionRef:   req.AdmissionRef,
 		},
 	}); err != nil {
 		if errors.Is(err, errRevisionMismatch) {

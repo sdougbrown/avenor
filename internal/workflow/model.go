@@ -539,8 +539,8 @@ type Attempt struct {
 	FailureClass     string            `json:"failure_class,omitempty"`
 	Corrections      int               `json:"corrections,omitempty"`
 	// Diagnostics records inert dispatch provenance (controller, leader lease,
-	// concurrency key, admission reference) captured with the attempt intent.
-	// It never affects kernel transitions.
+	// concurrency key) captured with the attempt intent. It never affects
+	// kernel transitions.
 	Diagnostics *AttemptDiagnostics `json:"diagnostics,omitempty"`
 }
 
@@ -550,7 +550,9 @@ type AttemptDiagnostics struct {
 	ControllerID   string `json:"controller_id,omitempty"`
 	LeaderLeaseID  string `json:"leader_lease_id,omitempty"`
 	ConcurrencyKey string `json:"concurrency_key,omitempty"`
-	AdmissionRef   string `json:"admission_ref,omitempty"`
+	// AdmissionRef is deprecated and never populated by the kernel. It is
+	// retained only so old snapshots that persisted it still decode.
+	AdmissionRef string `json:"admission_ref,omitempty"`
 }
 
 type Lease struct {
