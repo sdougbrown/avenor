@@ -400,6 +400,7 @@ func TestInvokeRejectsBadResults(t *testing.T) {
 		{"trailing-data", fmt.Sprintf(`{"version":1,"result":"pending","subject":%s,"observed_at":"2026-01-01T00:00:00Z","summary":"s"} trailing`, subject), "trailing data"},
 		{"unknown-field", fmt.Sprintf(`{"version":1,"result":"pending","subject":%s,"observed_at":"2026-01-01T00:00:00Z","summary":"s","extra":1}`, subject), "unknown field"},
 		{"bad-verdict", fmt.Sprintf(`{"version":1,"result":"approved","subject":%s,"observed_at":"2026-01-01T00:00:00Z","summary":"s"}`, subject), "unknown result"},
+		{"bad-version", fmt.Sprintf(`{"version":2,"result":"pending","subject":%s,"observed_at":"2026-01-01T00:00:00Z","summary":"s"}`, subject), "version must be 1"},
 		{"missing-subject", `{"version":1,"result":"pending","observed_at":"2026-01-01T00:00:00Z","summary":"s"}`, "subject is required"},
 		{"bad-timestamp", fmt.Sprintf(`{"version":1,"result":"pending","subject":%s,"observed_at":"not-a-time","summary":"s"}`, subject), "invalid result"},
 		{"negative-retry", fmt.Sprintf(`{"version":1,"result":"pending","subject":%s,"observed_at":"2026-01-01T00:00:00Z","summary":"s","retry_after_ms":-5}`, subject), "non-negative"},

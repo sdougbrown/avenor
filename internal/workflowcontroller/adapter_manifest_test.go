@@ -215,6 +215,61 @@ func TestLoadAdapterRegistryIsolatesBadManifest(t *testing.T) {
 	}
 }
 
+// TestLoadAdapterRegistryUnusableExecutable proves an adapter whose executable
+// is gone or non-executable is reported as a per-file untrusted load error
+// while the registry itself still loads and the bad adapter ID is absent.
+func TestLoadAdapterRegistryUnusableExecutable(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, dir string) string
+	}{
+		{"deleted", func(t *testing.T, dir string) string {
+			exe := stageFixture(t, dir, "passed.sh")
+			if err := os.Remove(exe); err != nil {
+				t.Fatal(err)
+			}
+			return exe
+		}},
+		{"chmod-000", func(t *testing.T, dir string) string {
+			exe := stageFixture(t, dir, "passed.sh")
+			if err := os.Chmod(exe, 0); err != nil {
+				t.Fatal(err)
+			}
+			return exe
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.name == "chmod-000" && os.Geteuid() == 0 {
+				t.Skip("chmod 000 is not meaningful as root")
+			}
+			dir := stageAdapterDir(t)
+			exe := tc.setup(t, dir)
+			writeManifest(t, dir, "review.json", "review", exe, nil, 5000)
+			reg, err := LoadAdapterRegistry(dir)
+			if err != nil {
+				t.Fatalf("LoadAdapterRegistry: %v (must not fail the whole load)", err)
+			}
+			if _, ok := reg.Lookup("review"); ok {
+				t.Fatal("review must be absent (unusable executable)")
+			}
+			if got := reg.IDs(); len(got) != 0 {
+				t.Fatalf("IDs() = %v, want empty", got)
+			}
+			errs := reg.Errors()
+			if len(errs) != 1 {
+				t.Fatalf("Errors() = %+v, want one per-file error", errs)
+			}
+			if errs[0].File != "review.json" {
+				t.Fatalf("error file = %q, want review.json", errs[0].File)
+			}
+			if !errors.Is(errs[0].Err, ErrAdapterUntrusted) {
+				t.Fatalf("error = %v, want ErrAdapterUntrusted", errs[0].Err)
+			}
+		})
+	}
+}
+
 func TestLoadAdapterManifestValidation(t *testing.T) {
 	dir := stageAdapterDir(t)
 	exe := stageFixture(t, dir, "passed.sh")
