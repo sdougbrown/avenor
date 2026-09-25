@@ -366,7 +366,7 @@ func TestInvokePendingRetryAfter(t *testing.T) {
 	if res.RetryAfterMS == nil || *res.RetryAfterMS != 45000 {
 		t.Fatalf("retry_after_ms = %v, want 45000", res.RetryAfterMS)
 	}
-	if got := ClampRetryDelay(time.Duration(*res.RetryAfterMS) * time.Millisecond); got != 45*time.Second {
+	if got := ClampRetryDelay(time.Duration(*res.RetryAfterMS)*time.Millisecond, AdapterMinRetryDelay); got != 45*time.Second {
 		t.Fatalf("ClampRetryDelay = %v, want 45s", got)
 	}
 }
@@ -416,17 +416,20 @@ func TestInvokeResponseHash(t *testing.T) {
 
 func TestClampRetryDelay(t *testing.T) {
 	cases := []struct {
-		in, want time.Duration
+		in, floor, want time.Duration
 	}{
-		{0, 30 * time.Second},
-		{10 * time.Second, 30 * time.Second},
-		{45 * time.Second, 45 * time.Second},
-		{5 * time.Minute, 5 * time.Minute},
-		{time.Hour, 5 * time.Minute},
+		{0, AdapterMinRetryDelay, 30 * time.Second},
+		{10 * time.Second, AdapterMinRetryDelay, 30 * time.Second},
+		{45 * time.Second, AdapterMinRetryDelay, 45 * time.Second},
+		{5 * time.Minute, AdapterMinRetryDelay, 5 * time.Minute},
+		{time.Hour, AdapterMinRetryDelay, 5 * time.Minute},
+		// Poll backoff floors at the configurable base, which tests shorten.
+		{0, 20 * time.Millisecond, 20 * time.Millisecond},
+		{45 * time.Second, 20 * time.Millisecond, 45 * time.Second},
 	}
 	for _, tc := range cases {
-		if got := ClampRetryDelay(tc.in); got != tc.want {
-			t.Errorf("ClampRetryDelay(%v) = %v, want %v", tc.in, got, tc.want)
+		if got := ClampRetryDelay(tc.in, tc.floor); got != tc.want {
+			t.Errorf("ClampRetryDelay(%v, %v) = %v, want %v", tc.in, tc.floor, got, tc.want)
 		}
 	}
 }

@@ -90,10 +90,11 @@ type AdapterResult struct {
 }
 
 // ClampRetryDelay clamps an adapter-requested retry delay into the
-// controller's [30s, 5m] range.
-func ClampRetryDelay(requested time.Duration) time.Duration {
-	if requested < AdapterMinRetryDelay {
-		return AdapterMinRetryDelay
+// [floor, 5m] range. Callers choose the floor: adapter retry handling uses
+// AdapterMinRetryDelay, poll backoff uses the configurable base interval.
+func ClampRetryDelay(requested, floor time.Duration) time.Duration {
+	if requested < floor {
+		return floor
 	}
 	if requested > AdapterMaxRetryDelay {
 		return AdapterMaxRetryDelay

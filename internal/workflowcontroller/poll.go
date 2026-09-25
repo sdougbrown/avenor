@@ -75,9 +75,7 @@ func PollBackoffDelay(base time.Duration, retryCount int, retryAfterMS *int64, j
 	delay := time.Duration(0)
 	if retryAfterMS != nil {
 		delay = time.Duration(*retryAfterMS) * time.Millisecond
-		if delay > AdapterMaxRetryDelay {
-			delay = AdapterMaxRetryDelay
-		}
+		delay = ClampRetryDelay(delay, base)
 	} else {
 		delay = base
 		for i := 0; i <= retryCount && delay < AdapterMaxRetryDelay; i++ {
@@ -92,13 +90,7 @@ func PollBackoffDelay(base time.Duration, retryCount int, retryAfterMS *int64, j
 	}
 	if jitter != nil {
 		scaled := time.Duration(float64(delay) * (1 + 0.1*jitter()))
-		if scaled < base {
-			scaled = base
-		}
-		if scaled > AdapterMaxRetryDelay {
-			scaled = AdapterMaxRetryDelay
-		}
-		delay = scaled
+		delay = ClampRetryDelay(scaled, base)
 	}
 	return delay, retryCount + 1
 }
