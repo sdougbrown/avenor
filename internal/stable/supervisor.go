@@ -44,6 +44,12 @@ type Config struct {
 	PermissionClaimTimeout time.Duration
 	ChildQuestionTimeout   time.Duration
 
+	// ParkedRuntimeTimeout reaps a runtime parked after a successful turn.
+	// A parked runtime holds a live backend process for follow-up prompts but
+	// does not count against MaxRuntimes. Zero disables reaping: parked
+	// runtimes are kept until the supervisor shuts down or they are canceled.
+	ParkedRuntimeTimeout time.Duration
+
 	// MaxTreeBudget is the inherited descendant budget capacity for a root
 	// supervisor tree. It bounds the total concurrent runtimes across the
 	// whole tree, including nested supervisors. Zero uses
@@ -177,6 +183,9 @@ type childRuntime struct {
 	doneOnce         sync.Once
 	exitCode         int
 	completed        bool
+	// parked is set while the runtime waits for a follow-up prompt after a
+	// successful turn. Parked runtimes do not count against MaxRuntimes.
+	parked           bool
 	active           bool
 	activeAttempts   int
 	promptCh         chan struct{}
@@ -767,7 +776,9 @@ func (s *Supervisor) activeRuntimeCountLocked() int {
 	n := 0
 	for _, rt := range s.runtimes {
 		rt.mu.Lock()
-		if !rt.completed {
+		// Parked runtimes await an optional follow-up prompt; they hold no
+		// turn in flight, so they must not consume a MaxRuntimes slot.
+		if !rt.completed && !rt.parked {
 			n++
 		}
 		rt.mu.Unlock()
@@ -1527,7 +1538,15 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 				if child.workflowID != "" {
 					return
 				}
-				nextPrompt, ok := child.waitForNextPrompt(ctx)
+				child.mu.Lock()
+				child.parked = true
+				child.mu.Unlock()
+				// Parking frees a local slot; wake spawn waiters blocked on the cap.
+				s.signalCapacityChange()
+				nextPrompt, ok := child.waitForNextPrompt(ctx, s.config.ParkedRuntimeTimeout)
+				child.mu.Lock()
+				child.parked = false
+				child.mu.Unlock()
 				if !ok {
 					if ctx.Err() != nil {
 						s.writeIdleCancelled(child)
@@ -2135,7 +2154,13 @@ func (c *childRuntime) dequeuePrompt() (string, bool) {
 	return prompt, true
 }
 
-func (c *childRuntime) waitForNextPrompt(ctx context.Context) (string, bool) {
+func (c *childRuntime) waitForNextPrompt(ctx context.Context, parkedTimeout time.Duration) (string, bool) {
+	var parkedTimeoutCh <-chan time.Time
+	if parkedTimeout > 0 {
+		timer := time.NewTimer(parkedTimeout)
+		defer timer.Stop()
+		parkedTimeoutCh = timer.C
+	}
 	for {
 		if prompt, ok := c.dequeuePrompt(); ok {
 			return prompt, true
@@ -2150,6 +2175,10 @@ func (c *childRuntime) waitForNextPrompt(ctx context.Context) (string, bool) {
 		select {
 		case <-ch:
 		case <-ctx.Done():
+			return "", false
+		case <-parkedTimeoutCh:
+			// The grace window for a follow-up prompt elapsed. The runtime
+			// ends (its session persists on disk for resume-based follow-up).
 			return "", false
 		}
 	}

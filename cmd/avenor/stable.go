@@ -18,6 +18,7 @@ func runStable(args []string) int {
 	maxTreeBudget := fs.Int("max-tree-budget", admission.DefaultTreeBudget, "maximum concurrent runtimes across the whole supervisor tree including nested supervisors (0 uses the default)")
 	idleTimeout := fs.Duration("idle-timeout", 0, "exit after this duration with no child runtimes and no control connections")
 	shutdownTimeout := fs.Duration("shutdown-timeout", 10*time.Second, "graceful shutdown timeout before killing children")
+	parkedTimeout := fs.Duration("parked-timeout", 5*time.Minute, "how long a finished runtime stays parked awaiting a follow-up prompt before it is reaped (0 = park until shutdown)")
 	permClaimTimeout := fs.Duration("permission-claim-timeout", 0, "how long to wait for a connected socket client to answer a permission request before falling through to the file handler or 'none' resolver (0 = disabled: fall through only when all clients disconnect; use a non-zero value for unattended automation where client processes may hang)")
 	workflowRoot := fs.String("workflow-root", "", "workflow store root (default: $XDG_STATE_HOME/avenor/workflows, else $HOME/.avenor/workflows)")
 	if err := fs.Parse(args); err != nil {
@@ -48,6 +49,7 @@ func runStable(args []string) int {
 		TreeBudgetFile:         treeBudgetFile,
 		IdleTimeout:            *idleTimeout,
 		ShutdownTimeout:        *shutdownTimeout,
+		ParkedRuntimeTimeout:   *parkedTimeout,
 		PermissionClaimTimeout: *permClaimTimeout,
 		WorkflowRoot:           *workflowRoot,
 	})

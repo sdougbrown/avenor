@@ -26,9 +26,10 @@ Flags:
 | Flag | Default | Description |
 |---|---|---|
 | `--control-socket` `<path>` | (required) | Unix socket path for the control plane. Avenor writes a tombstone file at `<path>.dead` to signal abnormal shutdown |
-| `--max-runtimes` | 16 | Maximum concurrent child runtimes for this supervisor. Spawn requests are rejected once this limit is hit |
+| `--max-runtimes` | 16 | Maximum concurrent child runtimes for this supervisor. Spawn requests are rejected once this limit is hit. Runtimes parked after a successful turn do not count against this limit |
 | `--max-tree-budget` | 64 | Maximum concurrent executing runtimes across the whole supervisor tree including nested supervisors. Bounds recursive fan-out |
 | `--idle-timeout` | 0 | Exit cleanly after this duration with no child runtimes running and no control connections active. 0 disables (supervisor runs until signaled) |
+| `--parked-timeout` | 5m | How long a finished runtime stays parked awaiting a follow-up prompt before it is reaped. Parked runtimes hold a live backend process but do not count against `--max-runtimes`. 0 parks until supervisor shutdown or cancellation |
 | `--shutdown-timeout` | 10s | How long to wait for child runtimes to finish gracefully before killing them |
 | `--http-debug` | (empty) | If set, bind an HTTP debug adapter to this address (e.g. `:8080`). Useful for rapid inspection and testing |
 | `--permission-claim-timeout` | 0 | Optional deadline for a connected control client to answer a permission request. With 0, control retains the request until it is answered or all clients disconnect |
@@ -285,6 +286,8 @@ max runtimes (16) reached
 ```
 
 The limit prevents resource exhaustion and gives you a predictable constraint for scheduling.
+
+A runtime that finishes its turn successfully does not keep its slot: it parks (holding its backend process open for a potential follow-up prompt) and stops counting against the limit. A parked runtime is reaped after `--parked-timeout` (default 5m); its session persists on disk, so `avenor_follow_up` and `session_id` resume still work after the runtime is reaped.
 
 ### Tree descendant budget
 
