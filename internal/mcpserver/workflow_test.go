@@ -378,35 +378,36 @@ func TestWorkflowControllerCreateForwarding(t *testing.T) {
 // propagate from the control client without being swallowed.
 func TestWorkflowControllerErrorPropagation(t *testing.T) {
 	cases := []struct {
-		name  string
-		setup func(*fakeClient)
-		call  func(*Server) error
+		name       string
+		wantPrefix string
+		setup      func(*fakeClient)
+		call       func(*Server) error
 	}{
-		{"controller status error", func(f *fakeClient) {
+		{"controller status error", "workflow controller status", func(f *fakeClient) {
 			f.workflowControllerStatusErr = errors.New("controller not found: c-missing")
 		}, func(s *Server) error {
 			_, _, err := s.handleAvenorWorkflowControllerStatus(context.Background(), nil, workflowControllerStatusArgs{ControllerID: "c-missing"})
 			return err
 		}},
-		{"controller list error", func(f *fakeClient) {
+		{"controller list error", "workflow controller list", func(f *fakeClient) {
 			f.workflowControllerListErr = errors.New("list failed")
 		}, func(s *Server) error {
 			_, _, err := s.handleAvenorWorkflowControllerList(context.Background(), nil, workflowControllerListArgs{})
 			return err
 		}},
-		{"controller create error", func(f *fakeClient) {
+		{"controller create error", "workflow controller create", func(f *fakeClient) {
 			f.workflowControllerCreateErr = errors.New("create failed")
 		}, func(s *Server) error {
 			_, _, err := s.handleAvenorWorkflowControllerCreate(context.Background(), nil, workflowControllerCreateArgs{ControllerID: "c", MaxInflight: 5})
 			return err
 		}},
-		{"controller enable error", func(f *fakeClient) {
+		{"controller enable error", "workflow controller enable", func(f *fakeClient) {
 			f.workflowControllerEnableErr = errors.New("enable failed")
 		}, func(s *Server) error {
 			_, _, err := s.handleAvenorWorkflowControllerEnable(context.Background(), nil, workflowControllerEnableArgs{ControllerID: "c"})
 			return err
 		}},
-		{"controller disable error", func(f *fakeClient) {
+		{"controller disable error", "workflow controller disable", func(f *fakeClient) {
 			f.workflowControllerDisableErr = errors.New("disable failed")
 		}, func(s *Server) error {
 			_, _, err := s.handleAvenorWorkflowControllerDisable(context.Background(), nil, workflowControllerDisableArgs{ControllerID: "c", Reason: "why"})
@@ -417,8 +418,12 @@ func TestWorkflowControllerErrorPropagation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s, fake := newWorkflowTestServer(t)
 			tc.setup(fake)
-			if err := tc.call(s); err == nil {
+			err := tc.call(s)
+			if err == nil {
 				t.Fatal("expected propagated error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantPrefix) {
+				t.Fatalf("error %q should contain prefix %q", err.Error(), tc.wantPrefix)
 			}
 		})
 	}

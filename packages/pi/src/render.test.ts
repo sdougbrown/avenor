@@ -427,10 +427,16 @@ describe('Avenor Pi renderers', () => {
       inflight: 1,
       supervisor_marker: 'ignored',
     }), expanded, theme, { supervisor_id: '/tmp/sock' }))
-    expect(expandedView).toContain('Supervisor: /tmp/sock')
-    expect(expandedView).toContain('Max in-flight: 2')
-    expect(expandedView).toContain('Revision: 7')
-    expect(expandedView).toContain('Owner epoch: 3')
+    expect(expandedView).toBe([
+      'Controller: ctl — enabled',
+      'Leader: none',
+      'In-flight: 1 of 2',
+      'Guidance: Call avenor_workflow_controller_list to review all controllers.',
+      'Supervisor: /tmp/sock',
+      'Max in-flight: 2',
+      'Revision: 7',
+      'Owner epoch: 3',
+    ].join('\n'))
   })
 
   it('renders controller lists, hides lease identifiers, and falls back on malformed payloads', () => {

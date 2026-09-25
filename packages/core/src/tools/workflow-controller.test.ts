@@ -7,39 +7,29 @@ import { type WorkflowControllerDisableToolArgs, type WorkflowControllerDisableR
 
 // Mock getSupervisorClient that returns distinct fake clients per supervisor ID
 const getSupervisorClientMock = mock(async (supervisorId: string) => {
-  const clientId = `client-${supervisorId}`
   const client = {
     workflowControllerStatus: mock(async (controllerId: string) => ({
-      supervisor: supervisorId,
-      controllerId,
       controller_id: controllerId,
-      state: 'enabled',
+      desired_state: 'enabled',
     })),
     workflowControllerList: mock(async () => ({
-      supervisor: supervisorId,
       controllers: [],
     })),
     workflowControllerCreate: mock(async (params) => ({
-      supervisor: supervisorId,
       ...params,
-      state: 'disabled',
+      desired_state: 'disabled',
     })),
     workflowControllerEnable: mock(async (controllerId: string) => ({
-      supervisor: supervisorId,
-      controllerId,
       controller_id: controllerId,
-      state: 'enabled',
+      desired_state: 'enabled',
     })),
     workflowControllerDisable: mock(async (controllerId: string, reason: string) => ({
-      supervisor: supervisorId,
-      controllerId,
       controller_id: controllerId,
+      desired_state: 'disabled',
       reason,
-      state: 'disabled',
     })),
     workflowReady: mock(async (controllerId: string, limit?: number) => ({
-      supervisor: supervisorId,
-      controllerId,
+      controller_id: controllerId,
       limit,
     })),
     close: mock(() => {}),
@@ -67,10 +57,8 @@ describe('workflow controller tools basic forwarding', () => {
     const args: WorkflowControllerStatusToolArgs = { controllerId: 'c-123', supervisorId: '/tmp/avenor-mcp-sup-a-123.sock' }
     const result = await tool(args)
     expect(result).toEqual({
-      supervisor: '/tmp/avenor-mcp-sup-a-123.sock',
-      controllerId: 'c-123',
       controller_id: 'c-123',
-      state: 'enabled',
+      desired_state: 'enabled',
     })
     expect(getSupervisorClientMock).toHaveBeenCalledWith('/tmp/avenor-mcp-sup-a-123.sock')
     expect(getSupervisorClientMock.mock.calls[0]?.[0]).toBe('/tmp/avenor-mcp-sup-a-123.sock')
@@ -81,7 +69,6 @@ describe('workflow controller tools basic forwarding', () => {
     const args: WorkflowControllerListToolArgs = { supervisorId: '/tmp/avenor-mcp-sup-a-123.sock' }
     const result = await tool(args)
     expect(result).toEqual({
-      supervisor: '/tmp/avenor-mcp-sup-a-123.sock',
       controllers: [],
     })
     expect(getSupervisorClientMock).toHaveBeenCalledWith('/tmp/avenor-mcp-sup-a-123.sock')
@@ -92,10 +79,9 @@ describe('workflow controller tools basic forwarding', () => {
     const args: WorkflowControllerCreateToolArgs = { controllerId: 'c-123', maxInflight: 5, supervisorId: '/tmp/avenor-mcp-sup-a-123.sock' }
     const result = await tool(args)
     expect(result).toEqual({
-      supervisor: '/tmp/avenor-mcp-sup-a-123.sock',
       controller_id: 'c-123',
       max_inflight: 5,
-      state: 'disabled',
+      desired_state: 'disabled',
     })
     expect(getSupervisorClientMock).toHaveBeenCalledWith('/tmp/avenor-mcp-sup-a-123.sock')
   })
@@ -105,10 +91,8 @@ describe('workflow controller tools basic forwarding', () => {
     const args: WorkflowControllerEnableToolArgs = { controllerId: 'c-123', supervisorId: '/tmp/avenor-mcp-sup-a-123.sock' }
     const result = await tool(args)
     expect(result).toEqual({
-      supervisor: '/tmp/avenor-mcp-sup-a-123.sock',
-      controllerId: 'c-123',
       controller_id: 'c-123',
-      state: 'enabled',
+      desired_state: 'enabled',
     })
     expect(getSupervisorClientMock).toHaveBeenCalledWith('/tmp/avenor-mcp-sup-a-123.sock')
   })
@@ -118,11 +102,9 @@ describe('workflow controller tools basic forwarding', () => {
     const args: WorkflowControllerDisableToolArgs = { controllerId: 'c-123', reason: 'why', supervisorId: '/tmp/avenor-mcp-sup-a-123.sock' }
     const result = await tool(args)
     expect(result).toEqual({
-      supervisor: '/tmp/avenor-mcp-sup-a-123.sock',
-      controllerId: 'c-123',
       controller_id: 'c-123',
+      desired_state: 'disabled',
       reason: 'why',
-      state: 'disabled',
     })
     expect(getSupervisorClientMock).toHaveBeenCalledWith('/tmp/avenor-mcp-sup-a-123.sock')
   })
@@ -180,8 +162,7 @@ describe('workflow ready tool', () => {
     const tool = createWorkflowReadyTool(getSupervisorClientMock)
     const result = await tool({ controllerId: 'c-123', limit: 5, supervisorId: '/tmp/avenor-mcp-sup-a-123.sock' })
     expect(result).toEqual({
-      supervisor: '/tmp/avenor-mcp-sup-a-123.sock',
-      controllerId: 'c-123',
+      controller_id: 'c-123',
       limit: 5,
     })
     expect(getSupervisorClientMock).toHaveBeenCalledWith('/tmp/avenor-mcp-sup-a-123.sock')
@@ -191,8 +172,7 @@ describe('workflow ready tool', () => {
     const tool = createWorkflowReadyTool(getSupervisorClientMock)
     const result = await tool({ controllerId: 'c-123', supervisorId: '/tmp/avenor-mcp-sup-a-123.sock' })
     expect(result).toEqual({
-      supervisor: '/tmp/avenor-mcp-sup-a-123.sock',
-      controllerId: 'c-123',
+      controller_id: 'c-123',
       limit: undefined,
     })
     expect(getSupervisorClientMock).toHaveBeenCalledWith('/tmp/avenor-mcp-sup-a-123.sock')
@@ -206,11 +186,8 @@ describe('two-supervisor no-collision routing', () => {
     const argsA: WorkflowControllerStatusToolArgs = { controllerId: 'c-shared', supervisorId: '/tmp/avenor-mcp-sup-a-123.sock' }
     const argsB: WorkflowControllerStatusToolArgs = { controllerId: 'c-shared', supervisorId: '/tmp/avenor-mcp-sup-b-456.sock' }
 
-    const resultA = await tool(argsA)
-    const resultB = await tool(argsB)
-
-    expect(resultA.supervisor).toBe('/tmp/avenor-mcp-sup-a-123.sock')
-    expect(resultB.supervisor).toBe('/tmp/avenor-mcp-sup-b-456.sock')
+    await tool(argsA)
+    await tool(argsB)
 
     // Ensure separate client calls were made for each supervisor
     expect(getSupervisorClientMock).toHaveBeenCalledWith('/tmp/avenor-mcp-sup-a-123.sock')
@@ -223,11 +200,8 @@ describe('two-supervisor no-collision routing', () => {
     const argsA: WorkflowControllerDisableToolArgs = { controllerId: 'c-shared', reason: 'why', supervisorId: '/tmp/avenor-mcp-sup-a-123.sock' }
     const argsB: WorkflowControllerDisableToolArgs = { controllerId: 'c-shared', reason: 'why', supervisorId: '/tmp/avenor-mcp-sup-b-456.sock' }
 
-    const resultA = await tool(argsA)
-    const resultB = await tool(argsB)
-
-    expect(resultA.supervisor).toBe('/tmp/avenor-mcp-sup-a-123.sock')
-    expect(resultB.supervisor).toBe('/tmp/avenor-mcp-sup-b-456.sock')
+    await tool(argsA)
+    await tool(argsB)
 
     expect(getSupervisorClientMock).toHaveBeenCalledWith('/tmp/avenor-mcp-sup-a-123.sock')
     expect(getSupervisorClientMock).toHaveBeenCalledWith('/tmp/avenor-mcp-sup-b-456.sock')

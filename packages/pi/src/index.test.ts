@@ -185,6 +185,19 @@ describe('Avenor Pi extension', () => {
     expect(outcome.details.controller_id).toBe('ctl')
   })
 
+  it('forwards controller status to the supervisor client with the requested supervisor', async () => {
+    const statusTool = mock(async () => ({ controller_id: 'ctl', desired_state: 'enabled' }))
+    const harness = await createHarnessBase({
+      deps: {
+        workflowControllerStatusTool: statusTool,
+        workflowReadyTool: mock(async () => ({})),
+      },
+    })
+    const tool = harness.registeredTools.avenor_workflow_controller_status
+    await tool.execute('tool-1', { controller_id: 'ctl', supervisor_id: 'sup-a' })
+    expect(statusTool).toHaveBeenCalledWith({ controllerId: 'ctl', supervisorId: 'sup-a' })
+  })
+
   it('only reuses a supervisor socket when the caller supplied one', () => {
     expect(statusSupervisorId(undefined, '/tmp/spawned.sock')).toBeUndefined()
     expect(statusSupervisorId('/tmp/requested.sock', '/tmp/spawned.sock')).toBe('/tmp/spawned.sock')
