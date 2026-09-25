@@ -64,17 +64,25 @@ func TestWithLeaderRejectsWrongLeaseOrEpoch(t *testing.T) {
 func TestWithLeaderHoldsControllerLock(t *testing.T) {
 	s, id, leaseID, epoch := newWithLeaderStore(t)
 	second := NewStore(s.Root())
+	ready := make(chan struct{})
 	done := make(chan error, 1)
 	if err := s.WithLeader(id, leaseID, epoch, func() error {
 		go func() {
+			close(ready)
 			_, err := second.SetDesiredState(id, DesiredDisabled, "second-handle")
 			done <- err
 		}()
-		time.Sleep(100 * time.Millisecond)
-		select {
-		case err := <-done:
-			t.Errorf("SetDesiredState completed while the callback was still running: err=%v", err)
-		default:
+		<-ready
+		// Poll for a bounded window: SetDesiredState must not return while
+		// the callback still holds the controller lock.
+		deadline := time.Now().Add(200 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			select {
+			case err := <-done:
+				t.Fatalf("SetDesiredState completed while the callback was still running: err=%v", err)
+			default:
+			}
+			time.Sleep(10 * time.Millisecond)
 		}
 		return nil
 	}); err != nil {

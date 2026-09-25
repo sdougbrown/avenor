@@ -313,16 +313,24 @@ func TestHeartbeatStopsWhenRuntimeTerminates(t *testing.T) {
 	_ = f.sup.cancelRuntime(out.RuntimeID)
 	waitFor(t, "runtime terminal", func() bool { return f.sup.activeRuntimeCount() == 0 })
 
-	count := heartbeatEventCount(t, f)
-	time.Sleep(2 * time.Second) // two full TTL windows
-	if got := heartbeatEventCount(t, f); got != count {
-		t.Fatalf("heartbeat events after terminal = %d, want the pre-terminal count %d", got, count)
-	}
+	// The heartbeat goroutine exits once the runtime is terminal: wait for
+	// its registry entry to be gone before sampling.
 	waitFor(t, "heartbeat registry empty after terminal runtime", func() bool {
 		f.sup.heartbeatMu.Lock()
 		defer f.sup.heartbeatMu.Unlock()
 		return len(f.sup.heartbeats) == 0
 	})
+
+	// No heartbeat event lands after the goroutine has exited: sample the
+	// count a few times over a bounded window (5 samples at the heartbeat
+	// interval, TTL/3 = 1s/3 for this fixture) and assert it never grows.
+	count := heartbeatEventCount(t, f)
+	for i := 0; i < 5; i++ {
+		time.Sleep(time.Second / 3)
+		if got := heartbeatEventCount(t, f); got != count {
+			t.Fatalf("heartbeat events after terminal = %d, want the pre-terminal count %d", got, count)
+		}
+	}
 }
 
 // TestHeartbeatStopsOnSupervisorShutdown proves a registered heartbeat
