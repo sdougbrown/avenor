@@ -782,6 +782,9 @@ func TestControllerPollFailedGateCommandDiscardsEvidence(t *testing.T) {
 
 	// Break only the workflow commit: reads of the parked state succeed, but
 	// the gate command's event append fails after the evidence staged.
+	if os.Geteuid() == 0 {
+		t.Skip("file permissions do not block root; cannot force the commit failure")
+	}
 	eventsPath := filepath.Join(f.root, "instances", f.wf, "events.ndjson")
 	if err := os.Chmod(eventsPath, 0o444); err != nil {
 		t.Fatal(err)
