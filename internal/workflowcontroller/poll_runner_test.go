@@ -16,6 +16,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/sdougbrown/avenor/internal/workflow"
 )
 
 // newManualRunnerStore builds a controller store and runner clock over a
@@ -108,8 +110,8 @@ func pollRunner(t *testing.T, store *ControllerStore, deps RunnerDeps, poller *f
 	return r
 }
 
-func pollSeed() PollSeed {
-	return PollSeed{
+func pollSeed() workflow.ParkedGateRef {
+	return workflow.ParkedGateRef{
 		WorkflowID:   "wf-1",
 		NodeID:       "review",
 		ActivationID: "act-1",
@@ -124,7 +126,7 @@ func TestRunnerParkSeedsCursorCommitsBeforeInvoke(t *testing.T) {
 	deps := newFakeDeps(store, "c1")
 	deps.cands = []Candidate{runnerCand("wf-1", "review", "act-1")}
 	deps.park = true
-	deps.parkSeeds = []PollSeed{pollSeed()}
+	deps.parkSeeds = []workflow.ParkedGateRef{pollSeed()}
 	poller := &fakePoller{store: store, defaultPoll: pendingResult}
 	pollRunner(t, store, deps, poller, clock.Now)
 
@@ -176,7 +178,7 @@ func TestRunnerReseedsMissingPollCursor(t *testing.T) {
 	deps := newFakeDeps(store, "c1")
 	// No candidate and no cursor: the activation is parked awaiting_gate and
 	// only ParkedGates knows about its gate.
-	deps.setParked([]PollSeed{pollSeed()})
+	deps.setParked([]workflow.ParkedGateRef{pollSeed()})
 	poller := &fakePoller{store: store, defaultPoll: pendingResult}
 	pollRunner(t, store, deps, poller, clock.Now)
 
@@ -223,15 +225,7 @@ func TestRunnerReseedsMissingPollCursor(t *testing.T) {
 
 // pollSeedCursor rebuilds the test seed's cursor for poll ID derivation.
 func pollSeedCursor() PollCursor {
-	s := pollSeed()
-	return PollCursor{
-		WorkflowID:   s.WorkflowID,
-		NodeID:       s.NodeID,
-		ActivationID: s.ActivationID,
-		GateID:       s.GateID,
-		AdapterID:    s.AdapterID,
-		SubjectHash:  s.SubjectHash,
-	}
+	return seedCursor(pollSeed())
 }
 
 func TestRunnerCrashAfterCommitReusesPollID(t *testing.T) {
@@ -239,7 +233,7 @@ func TestRunnerCrashAfterCommitReusesPollID(t *testing.T) {
 	deps := newFakeDeps(store, "c1")
 	deps.cands = []Candidate{runnerCand("wf-1", "review", "act-1")}
 	deps.park = true
-	deps.parkSeeds = []PollSeed{pollSeed()}
+	deps.parkSeeds = []workflow.ParkedGateRef{pollSeed()}
 	// The first poll blocks until canceled (a hung adapter); stopping the
 	// runner simulates the crash between commit and result.
 	poller := &fakePoller{store: store, block: make(chan struct{})}
@@ -299,7 +293,7 @@ func TestRunnerBackoffDoublesAndClearsCursorOnApplied(t *testing.T) {
 	deps := newFakeDeps(store, "c1")
 	deps.cands = []Candidate{runnerCand("wf-1", "review", "act-1")}
 	deps.park = true
-	deps.parkSeeds = []PollSeed{pollSeed()}
+	deps.parkSeeds = []workflow.ParkedGateRef{pollSeed()}
 	poller := &fakePoller{store: store, defaultPoll: pendingResult}
 	pollRunner(t, store, deps, poller, clock.Now)
 
@@ -345,7 +339,7 @@ func TestRunnerJitterBoundsNextPoll(t *testing.T) {
 	deps := newFakeDeps(store, "c1")
 	deps.cands = []Candidate{runnerCand("wf-1", "review", "act-1")}
 	deps.park = true
-	deps.parkSeeds = []PollSeed{pollSeed()}
+	deps.parkSeeds = []workflow.ParkedGateRef{pollSeed()}
 	// Jitter +1 scales the 60s post-pending delay up by 10%.
 	poller := &fakePoller{store: store, defaultPoll: pendingResult}
 	r := NewRunner(RunnerConfig{
@@ -387,7 +381,7 @@ func TestRunnerStaleApplyDropsLeadership(t *testing.T) {
 	deps := newFakeDeps(store, "c1")
 	deps.cands = []Candidate{runnerCand("wf-1", "review", "act-1")}
 	deps.park = true
-	deps.parkSeeds = []PollSeed{pollSeed()}
+	deps.parkSeeds = []workflow.ParkedGateRef{pollSeed()}
 	poller := &fakePoller{store: store, applyResult: PollStale, defaultPoll: pendingResult}
 	r := pollRunner(t, store, deps, poller, clock.Now)
 
@@ -451,7 +445,7 @@ func TestRunnerAdapterUnavailableDiagnosticDeduped(t *testing.T) {
 	deps := newFakeDeps(store, "c1")
 	deps.cands = []Candidate{runnerCand("wf-1", "review", "act-1")}
 	deps.park = true
-	deps.parkSeeds = []PollSeed{pollSeed()}
+	deps.parkSeeds = []workflow.ParkedGateRef{pollSeed()}
 	unavailable := func() (AdapterResult, PollFailureKind, error) {
 		return AdapterResult{}, PollFailureUnavailable, errors.New("adapter gh-review is not registered")
 	}
@@ -543,7 +537,7 @@ func TestRunnerObsoleteApplyDropsCursor(t *testing.T) {
 	deps := newFakeDeps(store, "c1")
 	deps.cands = []Candidate{runnerCand("wf-1", "review", "act-1")}
 	deps.park = true
-	deps.parkSeeds = []PollSeed{pollSeed()}
+	deps.parkSeeds = []workflow.ParkedGateRef{pollSeed()}
 	poller := &fakePoller{store: store, applyResult: PollObsolete, defaultPoll: pendingResult}
 	pollRunner(t, store, deps, poller, clock.Now)
 
@@ -604,7 +598,7 @@ func TestRunnerDisableCancelsInFlightPoll(t *testing.T) {
 	deps := newFakeDeps(store, "c1")
 	deps.cands = []Candidate{runnerCand("wf-1", "review", "act-1")}
 	deps.park = true
-	deps.parkSeeds = []PollSeed{pollSeed()}
+	deps.parkSeeds = []workflow.ParkedGateRef{pollSeed()}
 	poller := &fakePoller{store: store, block: make(chan struct{})}
 	r := NewRunner(RunnerConfig{
 		Deps:          deps,

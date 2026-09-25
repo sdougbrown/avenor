@@ -56,8 +56,8 @@ func sweepOrphanedAdapterFiles(root string) {
 // parkExternalNode parks one selected auto external candidate under the
 // runner's leader lease. Stale candidates (manual claim, revision change)
 // and unresolved bindings map onto their own dispatch result kinds; a
-// successful park returns the gate seeds the runner turns into poll
-// cursors. No admission is consumed and no attempt is recorded.
+// successful park returns the parked gate references the runner turns into
+// poll cursors. No admission is consumed and no attempt is recorded.
 func (s *Supervisor) parkExternalNode(dec workflowcontroller.Decision, lease workflowcontroller.LeaderLease) (workflowcontroller.DispatchResult, error) {
 	identity := dec.Candidate.Identity
 	out := workflowcontroller.DispatchResult{}
@@ -77,19 +77,8 @@ func (s *Supervisor) parkExternalNode(dec workflowcontroller.Decision, lease wor
 		if err != nil {
 			return err
 		}
-		seeds := make([]workflowcontroller.PollSeed, 0, len(park.Gates))
-		for _, g := range park.Gates {
-			seeds = append(seeds, workflowcontroller.PollSeed{
-				WorkflowID:   string(identity.WorkflowID),
-				NodeID:       string(identity.NodeID),
-				ActivationID: string(identity.ActivationID),
-				GateID:       string(g.GateID),
-				AdapterID:    g.AdapterID,
-				SubjectHash:  g.SubjectHash,
-			})
-		}
 		out.Kind = workflowcontroller.ResultParked
-		out.PollSeeds = seeds
+		out.PollSeeds = park.Gates
 		return nil
 	})
 	if parkErr != nil {

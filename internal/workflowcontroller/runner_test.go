@@ -54,13 +54,13 @@ type fakeDeps struct {
 	defaultResult DispatchResult
 
 	park             bool // dispatches return ResultParked with parkSeeds
-	parkSeeds        []PollSeed
+	parkSeeds        []workflow.ParkedGateRef
 	unresolved       bool // dispatches return ResultUnresolvedBinding
 	unresolvedDetail string
 
-	parked      []PollSeed // seeds reported by ParkedGates()
-	parkedErr   error      // error returned by ParkedGates()
-	parkedCalls int        // number of ParkedGates() calls
+	parked      []workflow.ParkedGateRef // seeds reported by ParkedGates()
+	parkedErr   error                    // error returned by ParkedGates()
+	parkedCalls int                      // number of ParkedGates() calls
 
 	block                chan struct{} // when non-nil, dispatches block until closed
 	blockAll             bool          // block every dispatch
@@ -102,11 +102,11 @@ func (d *fakeDeps) Refresh() error {
 	return d.refreshErr
 }
 
-func (d *fakeDeps) ParkedGates(controllerID string) ([]PollSeed, error) {
+func (d *fakeDeps) ParkedGates(controllerID string) ([]workflow.ParkedGateRef, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.parkedCalls++
-	out := make([]PollSeed, len(d.parked))
+	out := make([]workflow.ParkedGateRef, len(d.parked))
 	copy(out, d.parked)
 	return out, d.parkedErr
 }
@@ -201,7 +201,7 @@ func (d *fakeDeps) setInFlight(inflight []InFlightAttempt) {
 
 // setParked scripts the seeds ParkedGates reports (the parked awaiting_gate
 // activations a re-seeding pass reads).
-func (d *fakeDeps) setParked(seeds []PollSeed) {
+func (d *fakeDeps) setParked(seeds []workflow.ParkedGateRef) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.parked = seeds

@@ -40,16 +40,6 @@ type ParkExternalRequest struct {
 	LeaderLeaseID    string
 }
 
-// ParkedGateSeed describes one required external gate of a parked activation
-// that a controller must poll: its adapter ID and the hash of the pinned
-// subject at park time. The subject hash keys the controller's poll cursor
-// and poll IDs; a new publication head yields a different hash.
-type ParkedGateSeed struct {
-	GateID      GateID `json:"gate_id"`
-	AdapterID   string `json:"adapter_id"`
-	SubjectHash string `json:"subject_hash"`
-}
-
 // ParkExternalResult reports the recorded park.
 type ParkExternalResult struct {
 	WorkflowID     WorkflowID
@@ -57,7 +47,7 @@ type ParkExternalResult struct {
 	ActivationID   ActivationID
 	Revision       int64
 	SuccessOutcome OutcomeName
-	Gates          []ParkedGateSeed
+	Gates          []ParkedGateRef
 }
 
 // readyCandidateKind classifies a candidate activation for the controller
@@ -87,8 +77,8 @@ func SubjectHash(subject *Subject) string {
 // activation's pinned ResolvedGates. Every required gate must carry a fully
 // resolved pin (subject present, no unresolved references); otherwise
 // ErrUnresolvedBinding is returned and nothing is recorded.
-func externalGateSeeds(act *Activation, node *NodeDefinition) ([]ParkedGateSeed, error) {
-	var seeds []ParkedGateSeed
+func externalGateSeeds(wf WorkflowID, act *Activation, node *NodeDefinition) ([]ParkedGateRef, error) {
+	var seeds []ParkedGateRef
 	for _, gate := range node.Gates {
 		if gate.Type != GateExternal || !gate.Required {
 			continue
@@ -97,10 +87,13 @@ func externalGateSeeds(act *Activation, node *NodeDefinition) ([]ParkedGateSeed,
 		if !ok || resolved.Subject == nil || len(resolved.Unresolved) > 0 {
 			return nil, fmt.Errorf("%w: gate %q on activation %s has unresolved bindings", ErrUnresolvedBinding, gate.ID, act.ID)
 		}
-		seeds = append(seeds, ParkedGateSeed{
-			GateID:      gate.ID,
-			AdapterID:   gate.AdapterID,
-			SubjectHash: SubjectHash(resolved.Subject),
+		seeds = append(seeds, ParkedGateRef{
+			WorkflowID:   wf,
+			NodeID:       act.NodeID,
+			ActivationID: act.ID,
+			GateID:       gate.ID,
+			AdapterID:    gate.AdapterID,
+			SubjectHash:  SubjectHash(resolved.Subject),
 		})
 	}
 	return seeds, nil
@@ -164,7 +157,7 @@ func (m *Manager) ParkExternal(req ParkExternalRequest) (ParkExternalResult, err
 			if fa.Status != ActivationAwaitingGate {
 				return stale()
 			}
-			reseeded, err := externalGateSeeds(fa, node)
+			reseeded, err := externalGateSeeds(req.WorkflowID, fa, node)
 			if err != nil {
 				return ParkExternalResult{}, err
 			}
@@ -194,7 +187,7 @@ func (m *Manager) ParkExternal(req ParkExternalRequest) (ParkExternalResult, err
 		if fa.Dispatch.ActionKind != ActionExternal || fa.Dispatch.SuccessOutcome == "" {
 			return stale()
 		}
-		seeds, err := externalGateSeeds(fa, node)
+		seeds, err := externalGateSeeds(req.WorkflowID, fa, node)
 		if err != nil {
 			return ParkExternalResult{}, err
 		}
@@ -236,8 +229,12 @@ func (m *Manager) ParkExternal(req ParkExternalRequest) (ParkExternalResult, err
 }
 
 // ParkedGateRef identifies one pollable external gate on a parked awaiting_gate
-// auto external activation: the seed a controller re-creates its poll cursor
-// from.
+// auto external activation: the workflow location the gate hangs off, its
+// adapter ID, and the hash of the pinned subject at park time. The subject
+// hash keys the controller's poll cursor and poll IDs; a new publication head
+// yields a different hash. It is the single representation of a pollable
+// gate: the park result and ParkedExternalGates both report it, and the
+// controller turns it directly into a poll cursor.
 type ParkedGateRef struct {
 	WorkflowID   WorkflowID
 	NodeID       NodeID

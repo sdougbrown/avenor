@@ -49,18 +49,8 @@ type DispatchResult struct {
 	Source string // capacity source: "local" or "tree"
 	Detail string // inert diagnostic detail
 	// PollSeeds carries the parked activation's required external gates when
-	// Kind is ResultParked; each seed becomes a poll cursor.
-	PollSeeds []PollSeed
-}
-
-// PollSeed identifies one poll cursor to create after a successful park.
-type PollSeed struct {
-	WorkflowID   string
-	NodeID       string
-	ActivationID string
-	GateID       string
-	AdapterID    string
-	SubjectHash  string
+	// Kind is ResultParked; each gate becomes a poll cursor.
+	PollSeeds []workflow.ParkedGateRef
 }
 
 // RunnerDeps is the host-side surface the runner drives. The host implements
@@ -74,10 +64,10 @@ type RunnerDeps interface {
 	// Refresh rebuilds any host-side cached view the candidate and in-flight
 	// queries read from.
 	Refresh() error
-	// ParkedGates returns one seed per resolved bound required external gate
-	// on the controller's parked awaiting_gate activations. The runner
-	// re-seeds missing poll cursors from it on every anti-entropy pass.
-	ParkedGates(controllerID string) ([]PollSeed, error)
+	// ParkedGates returns one gate reference per resolved bound required
+	// external gate on the controller's parked awaiting_gate activations. The
+	// runner re-seeds missing poll cursors from it on every anti-entropy pass.
+	ParkedGates(controllerID string) ([]workflow.ParkedGateRef, error)
 	// Dispatch dispatches one selected candidate under the runner's lease.
 	Dispatch(ctx context.Context, d Decision, lease LeaderLease) (DispatchResult, error)
 }
@@ -309,13 +299,13 @@ func (r *Runner) buildInflightView(inflight []InFlightAttempt) []InFlightAttempt
 	return view
 }
 
-// seedCursor builds the poll cursor a poll seed stands for.
-func seedCursor(seed PollSeed) PollCursor {
+// seedCursor builds the poll cursor a parked gate reference stands for.
+func seedCursor(seed workflow.ParkedGateRef) PollCursor {
 	return PollCursor{
-		WorkflowID:   seed.WorkflowID,
-		NodeID:       seed.NodeID,
-		ActivationID: seed.ActivationID,
-		GateID:       seed.GateID,
+		WorkflowID:   string(seed.WorkflowID),
+		NodeID:       string(seed.NodeID),
+		ActivationID: string(seed.ActivationID),
+		GateID:       string(seed.GateID),
 		AdapterID:    seed.AdapterID,
 		SubjectHash:  seed.SubjectHash,
 	}

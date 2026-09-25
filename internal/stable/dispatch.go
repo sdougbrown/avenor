@@ -347,29 +347,15 @@ func (d *stableRunnerDeps) Refresh() error {
 	return nil
 }
 
-// ParkedGates returns the external gate seeds of this controller's parked
-// awaiting_gate activations, read-only from the manager's candidate index.
-func (d *stableRunnerDeps) ParkedGates(controllerID string) ([]workflowcontroller.PollSeed, error) {
+// ParkedGates returns the external gate references of this controller's
+// parked awaiting_gate activations, read-only from the manager's
+// candidate index.
+func (d *stableRunnerDeps) ParkedGates(controllerID string) ([]workflow.ParkedGateRef, error) {
 	mgr, err := d.manager()
 	if err != nil {
 		return nil, err
 	}
-	gates, err := mgr.ParkedExternalGates(controllerID)
-	if err != nil {
-		return nil, err
-	}
-	seeds := make([]workflowcontroller.PollSeed, 0, len(gates))
-	for _, g := range gates {
-		seeds = append(seeds, workflowcontroller.PollSeed{
-			WorkflowID:   string(g.WorkflowID),
-			NodeID:       string(g.NodeID),
-			ActivationID: string(g.ActivationID),
-			GateID:       string(g.GateID),
-			AdapterID:    g.AdapterID,
-			SubjectHash:  g.SubjectHash,
-		})
-	}
-	return seeds, nil
+	return mgr.ParkedExternalGates(controllerID)
 }
 
 // Dispatch dispatches one selected candidate through the supervisor's
