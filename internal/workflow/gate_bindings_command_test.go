@@ -108,17 +108,95 @@ func TestBoundGateStaleHeadRejected(t *testing.T) {
 	reviewStillParked(t, s, wf, actID, rev)
 }
 
-func TestBoundGateSubjectUnresolvedRefusesDecision(t *testing.T) {
-	fixture := mutateBoundTemplate(boundGateTemplateJSON, func(template map[string]any) {
-		publication := boundGateNode(template, "publication")
-		outputs := publication["outputs"].([]any)
-		for _, raw := range outputs {
-			def := raw.(map[string]any)
-			if def["id"] == "pr_head" {
-				delete(def, "required")
-			}
-		}
+// TestCommandSkipWaivesRequiredBoundGate skips an auto external review node
+// parked on a required BOUND external gate: the skip waives the gate, the
+// activation resolves to satisfied, and the transition follows the branch
+// determined by the activation's SelectedOutcome. gateTransitionPayload's
+// success_outcome override on auto external nodes applies only to a GatePassed
+// status, so a waive falls back to SelectedOutcome — "clean", recorded when
+// the completion parked the review — whose declared branch target is "merge".
+func TestCommandSkipWaivesRequiredBoundGate(t *testing.T) {
+	m, s, wf := newCompleteFixture(t, boundGateTemplateJSON, "bound-gates", "1.0.0")
+	driveBoundPublication(t, m, s, wf, boundPublicationOutputs("org/repo", 42, "abc123"))
+	actID := parkBoundReview(t, m, s, wf)
+	rev := revision(t, s, wf)
+
+	payload, err := json.Marshal(map[string]any{
+		"op":            "skip",
+		"node_id":       "review",
+		"activation_id": actID,
+		"actor":         "alice",
+		"reason":        "review not needed for this run",
+		"evidence_ids":  []string{"ev_skip"},
 	})
+	if err != nil {
+		t.Fatalf("marshal skip: %v", err)
+	}
+	out, err := m.WorkflowCommand(string(wf), payload)
+	if err != nil {
+		t.Fatalf("skip: %v", err)
+	}
+	mm, ok := out.(map[string]any)
+	if !ok {
+		t.Fatalf("skip result = %#v, want map", out)
+	}
+	if mm["skipped"] != true || mm["activation_status"] != string(ActivationSatisfied) {
+		t.Fatalf("skip result = %#v, want skipped with satisfied activation", mm)
+	}
+	waived, ok := mm["waived_gates"].([]string)
+	if !ok || len(waived) != 1 || waived[0] != "pr-review" {
+		t.Fatalf("waived_gates = %#v, want [pr-review]", mm["waived_gates"])
+	}
+	if got := revision(t, s, wf); got <= rev {
+		t.Fatalf("revision = %d, want advanced past %d", got, rev)
+	}
+
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("load current: %v", err)
+	}
+	var review *Activation
+	for i := range snap.Instance.Activations {
+		if snap.Instance.Activations[i].ID == actID {
+			review = &snap.Instance.Activations[i]
+		}
+	}
+	if review == nil {
+		t.Fatalf("review activation %s vanished", actID)
+	}
+	if review.Status != ActivationSatisfied {
+		t.Fatalf("review status = %q, want satisfied", review.Status)
+	}
+	if review.SelectedOutcome != "clean" {
+		t.Fatalf("review selected outcome = %q, want clean", review.SelectedOutcome)
+	}
+	seen := map[GateID]GateStatus{}
+	for _, gi := range snap.Instance.Gates {
+		if gi.ActivationID == actID {
+			seen[gi.GateID] = gi.Status
+		}
+	}
+	if seen["pr-review"] != GateWaived {
+		t.Fatalf("pr-review gate status = %q, want waived", seen["pr-review"])
+	}
+	// The waived branch is SelectedOutcome's declared branch ("clean" ->
+	// "merge"), not the node's success_outcome path nor the "failed" branch.
+	merge := activationByNode(&snap.Instance, "merge")
+	if merge == nil {
+		t.Fatal("branch target activation \"merge\" was not created")
+	}
+	if merge.Status != ActivationPending {
+		t.Fatalf("merge activation status = %q, want pending", merge.Status)
+	}
+	for i := range snap.Instance.Activations {
+		if snap.Instance.Activations[i].NodeID == "publication" && snap.Instance.Activations[i].Status == ActivationPending {
+			t.Fatal("unexpected pending publication activation (\"failed\" branch followed)")
+		}
+	}
+}
+
+func TestBoundGateSubjectUnresolvedRefusesDecision(t *testing.T) {
+	fixture := boundGateFixtureWithoutRequiredHead()
 	m, s, wf := newCompleteFixture(t, string(fixture), "bound-gates", "1.0.0")
 	driveBoundPublication(t, m, s, wf, []map[string]any{
 		{"definition_id": "repository", "value": "org/repo"},

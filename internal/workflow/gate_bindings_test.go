@@ -89,6 +89,22 @@ func boundGateNode(template map[string]any, nodeID string) map[string]any {
 	return nil
 }
 
+// boundGateFixtureWithoutRequiredHead drops the required flag from the
+// pr_head output definition, so completing the publication without it leaves
+// the review gate's pinned subject and head_sha input unresolved.
+func boundGateFixtureWithoutRequiredHead() []byte {
+	return mutateBoundTemplate(boundGateTemplateJSON, func(template map[string]any) {
+		publication := boundGateNode(template, "publication")
+		outputs := publication["outputs"].([]any)
+		for _, raw := range outputs {
+			def := raw.(map[string]any)
+			if def["id"] == "pr_head" {
+				delete(def, "required")
+			}
+		}
+	})
+}
+
 func TestBoundGateTemplateValidation(t *testing.T) {
 	if err := ValidateTemplateJSON([]byte(boundGateTemplateJSON)); err != nil {
 		t.Fatalf("ValidateTemplateJSON() error = %v", err)

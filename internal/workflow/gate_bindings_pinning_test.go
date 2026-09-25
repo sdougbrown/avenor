@@ -303,16 +303,7 @@ func TestFanInAmbiguousBindingFailsCommand(t *testing.T) {
 }
 
 func TestMissingOutputLeavesGateUnresolved(t *testing.T) {
-	fixture := mutateBoundTemplate(boundGateTemplateJSON, func(template map[string]any) {
-		publication := boundGateNode(template, "publication")
-		outputs := publication["outputs"].([]any)
-		for _, raw := range outputs {
-			def := raw.(map[string]any)
-			if def["id"] == "pr_head" {
-				delete(def, "required")
-			}
-		}
-	})
+	fixture := boundGateFixtureWithoutRequiredHead()
 	m, s, wf := newCompleteFixture(t, string(fixture), "bound-gates", "1.0.0")
 	driveBoundPublication(t, m, s, wf, []map[string]any{
 		{"definition_id": "repository", "value": "org/repo"},
