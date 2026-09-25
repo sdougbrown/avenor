@@ -277,6 +277,13 @@ func TestAutoExternalDispatchEligibility(t *testing.T) {
 			gates = append(gates, map[string]any{"id": "extra", "type": "external"})
 			boundGateNode(t, "review")["gates"] = gates
 		}},
+		{"success_outcome via outcomes entry", func(t map[string]any) {
+			// The success outcome is declared through a non-terminal
+			// node-outcomes entry with a target instead of a branches entry.
+			review := boundGateNode(t, "review")
+			delete(review["branches"].(map[string]any), "clean")
+			review["outcomes"] = []any{map[string]any{"name": "clean", "target_node_id": "merge"}}
+		}},
 	}
 	for _, tc := range valid {
 		tc := tc
@@ -304,6 +311,20 @@ func TestAutoExternalDispatchEligibility(t *testing.T) {
 		{"success_outcome without branch", func(t map[string]any) {
 			boundGateNode(t, "review")["branches"].(map[string]any)["clean"] = "merge"
 			delete(boundGateNode(t, "review")["branches"].(map[string]any), "clean")
+		}, "declared node outcome with a branch"},
+		{"terminal outcomes success_outcome", func(t map[string]any) {
+			// A terminal outcomes entry declares no branch, so it cannot
+			// serve as the dispatch success outcome.
+			review := boundGateNode(t, "review")
+			delete(review["branches"].(map[string]any), "clean")
+			review["outcomes"] = []any{map[string]any{"name": "clean", "terminal": true}}
+		}, "declared node outcome with a branch"},
+		{"outcomes success_outcome without target", func(t map[string]any) {
+			// A non-terminal outcomes entry without a target_node_id declares
+			// no branch either.
+			review := boundGateNode(t, "review")
+			delete(review["branches"].(map[string]any), "clean")
+			review["outcomes"] = []any{map[string]any{"name": "clean"}}
 		}, "declared node outcome with a branch"},
 		{"no required external gate", func(t map[string]any) {
 			gates := boundGateNode(t, "review")["gates"].([]any)
