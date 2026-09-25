@@ -1,6 +1,7 @@
 package stable
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -424,4 +425,53 @@ func TestParkedRuntimeResumeWaitsForLocalCapacity(t *testing.T) {
 		t.Fatalf("activeRuntimeCount = %d, want <= 1 while resumed turn runs", got)
 	}
 	waitForActiveRuntimeCount(t, sup, 0) // parks again
+}
+
+func newWaitTestChild() *childRuntime {
+	return &childRuntime{
+		done:     make(chan struct{}),
+		promptCh: make(chan struct{}, 1),
+	}
+}
+
+// The parked-timeout timer branch must honor a prompt queued before the
+// deadline instead of reaping. Queueing without signaling promptCh leaves the
+// wait loop parked in its select, so the timer branch is the path that finds
+// the prompt. (A prompt queued via RuntimePrompt would usually be dequeued at
+// the top of the loop instead; both paths must return the prompt.)
+func TestWaitForNextPromptTimerHonorsQueuedPrompt(t *testing.T) {
+	c := newWaitTestChild()
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		c.mu.Lock()
+		c.promptQueue = []string{"boundary prompt"}
+		c.mu.Unlock()
+	}()
+	prompt, ok := c.waitForNextPrompt(context.Background(), 150*time.Millisecond)
+	if !ok || prompt != "boundary prompt" {
+		t.Fatalf("waitForNextPrompt = (%q, %v), want the queued prompt honored", prompt, ok)
+	}
+	c.mu.Lock()
+	completed := c.completed
+	c.mu.Unlock()
+	if completed {
+		t.Fatal("runtime that honored a boundary prompt must not be completed")
+	}
+}
+
+// With no prompt queued, the timer branch reaps: it marks the runtime
+// completed in the same critical section, so later RuntimePrompt calls see
+// the runtime ended instead of queueing onto a runtime about to tear down.
+func TestWaitForNextPromptTimerReapsWithoutPrompt(t *testing.T) {
+	c := newWaitTestChild()
+	prompt, ok := c.waitForNextPrompt(context.Background(), 50*time.Millisecond)
+	if ok || prompt != "" {
+		t.Fatalf("waitForNextPrompt = (%q, %v), want a reap with no prompt", prompt, ok)
+	}
+	c.mu.Lock()
+	completed := c.completed
+	c.mu.Unlock()
+	if !completed {
+		t.Fatal("timer branch must mark the runtime completed so late prompts are rejected")
+	}
 }
