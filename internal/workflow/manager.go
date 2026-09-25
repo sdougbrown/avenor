@@ -623,24 +623,28 @@ func (m *Manager) MarkCandidateIndexEmpty(supervisorID string) {
 }
 
 // observeCommit is the store commit hook: it upserts the committed snapshot
-// into the candidate index once the index has been recovered. Older revisions
-// are ignored so out-of-order observations from concurrent commits do not
-// regress the index. Before recovery it is a no-op, and it never fails or
-// blocks the command.
+// into the candidate index once the index has been recovered, then wakes
+// subscribers. The wake fires only after the upsert (and outside
+// candidateMu) so a woken subscriber that immediately re-queries observes
+// the committed state, not the pre-commit index. Older revisions are
+// ignored so out-of-order observations from concurrent commits do not
+// regress the index. Before recovery the upsert is skipped, and the hook
+// never fails or blocks the command.
 func (m *Manager) observeCommit(wf WorkflowID, snap Snapshot) {
+	m.candidateMu.Lock()
+	if m.candidatesOK {
+		if cur, ok := m.candidates[wf]; ok && cur.Instance.Revision > snap.Instance.Revision {
+			m.candidateMu.Unlock()
+			m.notifySubscribers()
+			return
+		}
+		m.candidates[wf] = snap
+	}
+	m.candidateMu.Unlock()
 	// Fire the coalescing change notification unconditionally — even before
 	// the candidate index is recovered — so subscribers observe every
 	// committed transition. Non-blocking; never fails or blocks the commit.
 	m.notifySubscribers()
-	m.candidateMu.Lock()
-	defer m.candidateMu.Unlock()
-	if !m.candidatesOK {
-		return
-	}
-	if cur, ok := m.candidates[wf]; ok && cur.Instance.Revision > snap.Instance.Revision {
-		return
-	}
-	m.candidates[wf] = snap
 }
 
 // notifySubscribers performs a non-blocking send to every change subscriber.
