@@ -9,6 +9,7 @@ package workflow
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -216,6 +217,69 @@ func TestParkExternalStaleCandidate(t *testing.T) {
 	claimed := latestActivation(t, s, wf, "review")
 	if claimed.Status != ActivationLeased {
 		t.Fatalf("activation status = %q, want the manual claim intact (leased)", claimed.Status)
+	}
+}
+
+// TestParkExternalRevisionKeptMovingExhausts proves the park retry loop is
+// bounded: a concurrent command on the same workflow lands inside every
+// read→commit window, each attempt hits a revision mismatch, and after
+// maxParkAttempts the park gives up with an error and persists nothing.
+func TestParkExternalRevisionKeptMovingExhausts(t *testing.T) {
+	// The park fixture has no sibling activation to race on, so add a pending
+	// manual entry node whose claims and heartbeats bump the workflow revision
+	// without touching the parkable review activation.
+	templateJSON := mutateBoundTemplate(boundGateTemplateJSON, func(template map[string]any) {
+		template["entry_nodes"] = []any{"publication", "side"}
+		template["nodes"] = append(template["nodes"].([]any), map[string]any{
+			"id":     "side",
+			"action": map[string]any{"type": "manual"},
+		})
+	})
+	m, s, wf := parkFixture(t, string(templateJSON))
+	driveBoundPublication(t, m, s, wf, boundPublicationOutputs("org/repo", 42, "abc123"))
+	review := latestActivation(t, s, wf, "review")
+	rev := revision(t, s, wf)
+
+	const maxParkAttempts = 4
+	calls := 0
+	var sideLease LeaseID
+	var sideToken string
+	orig := parkExternalPreCommit
+	parkExternalPreCommit = func() {
+		calls++
+		side := activationByNode(mustLoadInstance(t, s, wf), "side")
+		if side == nil {
+			t.Error("side activation not found")
+			return
+		}
+		if calls == 1 {
+			// First attempt claims the sibling; later attempts renew that
+			// lease, since a leased activation is not claimable again.
+			sideLease, sideToken = mustClaimWorkflow(t, m, wf, "side", side.ID, "manual-1")
+			return
+		}
+		if err := m.Heartbeat(wf, "side", side.ID, sideLease, sideToken); err != nil {
+			t.Errorf("heartbeat side: %v", err)
+		}
+	}
+	t.Cleanup(func() { parkExternalPreCommit = orig })
+
+	_, err := m.ParkExternal(ParkExternalRequest{
+		WorkflowID:       wf,
+		NodeID:           "review",
+		ActivationID:     review.ID,
+		ExpectedRevision: rev,
+		ControllerID:     "ctl",
+	})
+	if err == nil || !strings.Contains(err.Error(), "revision kept moving") {
+		t.Fatalf("ParkExternal error = %v, want revision kept moving", err)
+	}
+	if calls != maxParkAttempts {
+		t.Fatalf("pre-commit hook ran %d times, want %d", calls, maxParkAttempts)
+	}
+	after := latestActivation(t, s, wf, "review")
+	if after.Status == ActivationAwaitingGate {
+		t.Fatalf("activation status = %q, want no park persisted", after.Status)
 	}
 }
 
