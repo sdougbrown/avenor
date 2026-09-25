@@ -112,6 +112,7 @@ func (p *Provider) resume(ctx context.Context, sessionID string, opts runtime.St
 
 	p.mu.Lock()
 	_, exists := p.sessions[sessionID]
+	c := p.client
 	p.mu.Unlock()
 	if !exists {
 		// Sessions are launched with --no-session, so nothing persists on
@@ -120,7 +121,6 @@ func (p *Provider) resume(ctx context.Context, sessionID string, opts runtime.St
 		return runtime.Session{}, fmt.Errorf("session not found: %s (pi sessions run with --no-session; cross-process resume is not supported)", sessionID)
 	}
 
-	c := p.client
 	if merged.Thinking != "" {
 		if c == nil {
 			return runtime.Session{}, errors.New("provider has not been started")
