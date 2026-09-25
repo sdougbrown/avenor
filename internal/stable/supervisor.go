@@ -185,13 +185,13 @@ type childRuntime struct {
 	completed        bool
 	// parked is set while the runtime waits for a follow-up prompt after a
 	// successful turn. Parked runtimes do not count against MaxRuntimes.
-	parked           bool
-	active           bool
-	activeAttempts   int
-	promptCh         chan struct{}
-	promptQueue      []string
-	latestSeq        int64
-	usage            map[string]any
+	parked         bool
+	active         bool
+	activeAttempts int
+	promptCh       chan struct{}
+	promptQueue    []string
+	latestSeq      int64
+	usage          map[string]any
 	// finalOutput is a bounded status preview; fullFinalOutput is returned
 	// only through the explicit result control method.
 	finalOutput          string
@@ -2178,7 +2178,8 @@ func (c *childRuntime) waitForNextPrompt(ctx context.Context, parkedTimeout time
 			return "", false
 		case <-parkedTimeoutCh:
 			// The grace window for a follow-up prompt elapsed. The runtime
-			// ends (its session persists on disk for resume-based follow-up).
+			// ends; whether its session survives for a later cross-process
+			// resume is backend-dependent, not guaranteed.
 			return "", false
 		}
 	}

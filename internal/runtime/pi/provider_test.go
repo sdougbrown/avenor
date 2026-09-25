@@ -383,26 +383,6 @@ func TestThinkingSetterTransportAndDecodeErrorsAreNotCapabilityErrors(t *testing
 	})
 }
 
-func TestFreshResumeRefusesWithoutLaunching(t *testing.T) {
-	originalHelp := piHelpOutput
-	piHelpOutput = func(context.Context) ([]byte, error) { return []byte("--thinking <level>"), nil }
-	t.Cleanup(func() { piHelpOutput = originalHelp })
-	p := NewWithOptions(runtime.StartOptions{Dir: "/work"})
-	launched := false
-	p.startClient = func(context.Context, runtime.StartOptions) (*client, error) {
-		launched = true
-		return nil, errors.New("unexpected launch")
-	}
-	defer p.Close()
-	_, err := p.ResumeWithOptions(context.Background(), "pi-resume", runtime.StartOptions{Thinking: "xhigh"})
-	if err == nil || !strings.Contains(err.Error(), "cross-process resume") {
-		t.Fatalf("error = %v, want cross-process resume refusal", err)
-	}
-	if launched {
-		t.Fatal("cold resume must not launch a pi process")
-	}
-}
-
 func TestThinkingHelpMismatchRejectsBeforeLaunch(t *testing.T) {
 	originalHelp := piHelpOutput
 	piHelpOutput = func(context.Context) ([]byte, error) { return []byte("usage: pi"), nil }
@@ -586,6 +566,15 @@ func TestProviderColdResumeRefusesBeforeStartingPi(t *testing.T) {
 	}
 	if captured() != nil {
 		t.Fatal("cold resume must not create a pi command")
+	}
+
+	// The thinking variant must refuse at the same point, before any
+	// capability probing or client launch.
+	if _, err := p.ResumeWithOptions(context.Background(), "pi-resumed", runtime.StartOptions{Thinking: "xhigh"}); err == nil || !strings.Contains(err.Error(), "cross-process resume") {
+		t.Fatalf("error = %v, want cross-process resume refusal for thinking resume", err)
+	}
+	if captured() != nil {
+		t.Fatal("cold resume with thinking must not create a pi command")
 	}
 }
 

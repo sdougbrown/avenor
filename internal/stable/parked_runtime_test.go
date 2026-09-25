@@ -127,11 +127,18 @@ func TestParkedRuntimeDoesNotCountAgainstMaxRuntimes(t *testing.T) {
 	}
 	waitForActiveRuntimeCount(t, sup, 0)
 
-	// With reaping disabled the parked runtime stays alive, but it still must
-	// not hold a slot.
-	time.Sleep(150 * time.Millisecond)
-	if childCompleted(fetchChild(t, sup, first.RuntimeID)) {
-		t.Fatal("parked runtime with timeout 0 should not be reaped")
+	// With reaping disabled (ParkedRuntimeTimeout 0) no reap timer exists,
+	// so the parked runtime must stay alive. Hold a bounded window and
+	// sample the completed flag throughout to catch an unconditional reap.
+	deadline := time.Now().Add(150 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if childCompleted(fetchChild(t, sup, first.RuntimeID)) {
+			t.Fatal("parked runtime with timeout 0 should not be reaped")
+		}
+		if !childParked(fetchChild(t, sup, first.RuntimeID)) {
+			t.Fatal("parked runtime with timeout 0 should remain parked")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	_ = second
 }
