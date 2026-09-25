@@ -389,15 +389,32 @@ func TestRunnerStaleResultLeavesCursor(t *testing.T) {
 	waitRetryCount(t, store, 1)
 	// A passed verdict that revalidates stale is discarded: the cursor keeps
 	// its previous schedule untouched.
+	// Every poll after the scripted stale one blocks on a gate. When the
+	// stale result is discarded the cursor is left in flight, and the
+	// runner's crash-recovery re-offer treats an in-flight cursor as due and
+	// commits the next poll immediately — mutating the cursor again before
+	// any assertion could run on a slower host. Blocking that follow-up poll
+	// freezes the cursor in the post-discard state.
+	gate := make(chan struct{})
+	// Unblocked on return (including failures) so cleanup's Stop never waits
+	// behind a blocked poll worker.
+	defer close(gate)
 	poller.mu.Lock()
 	poller.script = []func() (AdapterResult, PollFailureKind, error){
 		func() (AdapterResult, PollFailureKind, error) {
 			return AdapterResult{Result: AdapterResultPassed}, PollFailureNone, nil
 		},
 	}
+	poller.defaultPoll = func() (AdapterResult, PollFailureKind, error) {
+		<-gate
+		return pendingResult()
+	}
 	poller.mu.Unlock()
 	clock.Advance(61 * time.Second)
-	waitUntil(t, "stale result discarded", func() bool { return poller.applyCount() > 0 })
+	// The stale result is discarded and the runner re-offers the in-flight
+	// cursor: the follow-up poll commits (reusing the count and poll ID) and
+	// then blocks in the gated poll, leaving the store quiescent.
+	waitUntil(t, "stale result discarded", func() bool { return poller.pollCount() > 2 })
 	rec, _, _ := store.Get("c1")
 	c := rec.PollCursors[PollCursorKey(pollSeedCursor())]
 	// The stale result is discarded without rescheduling or clearing: the

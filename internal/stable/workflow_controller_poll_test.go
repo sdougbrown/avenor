@@ -9,10 +9,13 @@ package stable
 // diagnostics, and disable kills an in-flight adapter's process group.
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"syscall"
 	"testing"
@@ -103,9 +106,21 @@ func newPollFixture(t *testing.T, name string, templateID string, manifests map[
 	t.Helper()
 	root := filepath.Join(t.TempDir(), "wfroot")
 	adapterDir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(adapterDir); err == nil {
+		adapterDir = resolved
+	}
+	if err := os.Chmod(adapterDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	for id, script := range manifests {
 		exe := stagePollFixture(t, adapterDir, script)
 		writePollManifest(t, adapterDir, id+".json", id, exe)
+	}
+	// Fail loudly here rather than as a silent timeout later: a trust or
+	// manifest load failure leaves the supervisor's registry empty and every
+	// poll reporting adapter_unavailable forever.
+	if _, err := workflowcontroller.LoadAdapterRegistry(adapterDir); err != nil {
+		t.Fatalf("adapter registry load from %s: %v", adapterDir, err)
 	}
 	sup := NewSupervisor(Config{
 		ControlSocket:      newStableSocketPath(t, name),
@@ -133,6 +148,20 @@ func newPollFixture(t *testing.T, name string, templateID string, manifests map[
 	}
 	if _, err := sup.WorkflowControllerEnable("c1"); err != nil {
 		t.Fatalf("controller enable: %v", err)
+	}
+	// The enable-time registry load must have produced exactly the staged
+	// adapters; an empty registry means every poll fails unavailable.
+	wantIDs := make([]string, 0, len(manifests))
+	for id := range manifests {
+		wantIDs = append(wantIDs, id)
+	}
+	sort.Strings(wantIDs)
+	reg := sup.workflowAdapters.Load()
+	if reg == nil {
+		t.Fatal("adapter registry not loaded after controller enable")
+	}
+	if got := reg.IDs(); !slices.Equal(got, wantIDs) {
+		t.Fatalf("loaded adapter IDs = %v, want %v", got, wantIDs)
 	}
 	t.Cleanup(func() { f.stop(t) })
 	return f
@@ -373,15 +402,15 @@ func TestControllerPollAutoParkPassesWithEvidence(t *testing.T) {
 
 	f.waitReviewStatus(t, workflow.ActivationAwaitingGate)
 	f.waitCursor(t, "pr-review")
-	// The first poll commits before the adapter runs.
+	// The first poll commits before the adapter runs. The committed event is
+	// durable in the controller's event log, unlike the cursor itself, which
+	// the applied result clears — a commit-then-clear can complete entirely
+	// between two polls of a cursor-based wait on a fast host.
+	eventsPath := filepath.Join(f.cstore.ControllersRoot(), "c1", "events.ndjson")
 	waitFor(t, "committed first poll", func() bool {
-		cursor, ok := f.findCursor("pr-review")
-		return ok && cursor.PollCount >= 1 && cursor.PollID != ""
+		data, err := os.ReadFile(eventsPath)
+		return err == nil && bytes.Count(data, []byte(`"kind":"poll_committed"`)) >= 1
 	})
-	cursor, _ := f.findCursor("pr-review")
-	if cursor.PollCount < 1 || cursor.PollID == "" {
-		t.Fatalf("cursor = %+v, want a committed poll", cursor)
-	}
 	// The parked activation carries no runtime state.
 	review := f.activationByNode(t, "review")
 	if len(review.AttemptIDs) != 0 || review.ActiveLease != nil {
@@ -398,7 +427,7 @@ func TestControllerPollAutoParkPassesWithEvidence(t *testing.T) {
 		t.Fatalf("gate instances = %+v, want one passed gate with evidence", gates)
 	}
 	evidenceID := gates[0].EvidenceIDs[0]
-	if gates[0].PollID != cursor.PollID || gates[0].ResponseHash == "" {
+	if gates[0].PollID == "" || gates[0].ResponseHash == "" {
 		t.Fatalf("gate instance = %+v, want the poll id and response hash", gates[0])
 	}
 	evPath := filepath.Join(f.root, "instances", f.wf, "evidence", string(evidenceID), "adapter-response.json")
