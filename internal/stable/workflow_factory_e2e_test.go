@@ -662,6 +662,20 @@ func TestFactoryWorkRecoveryOnFreshSupervisor(t *testing.T) {
 		t.Fatalf("final inspect: %v", err)
 	}
 	final := insp.(map[string]any)["instance"].(workflow.WorkflowInstance)
+	// The re-poll must have driven the review to satisfied; without this the
+	// merge-auth assertions below are vacuous (they hold even if the review
+	// never satisfied).
+	var reviewStatus workflow.ActivationStatus
+	reviewFound := false
+	for i := range final.Activations {
+		if final.Activations[i].NodeID == workflow.NodeID("review") {
+			reviewStatus = final.Activations[i].Status
+			reviewFound = true
+		}
+	}
+	if !reviewFound || reviewStatus != workflow.ActivationSatisfied {
+		t.Fatalf("recovered review status = %s, want satisfied (re-poll did not complete)", reviewStatus)
+	}
 	for i := range final.Activations {
 		a := final.Activations[i]
 		if a.NodeID == workflow.NodeID("review") && a.SelectedOutcome != workflow.OutcomeName("clean") && a.Status == workflow.ActivationSatisfied {
