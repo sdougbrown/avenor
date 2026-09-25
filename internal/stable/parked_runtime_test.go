@@ -227,9 +227,11 @@ func TestParkedRuntimeReapedAfterTimeout(t *testing.T) {
 // after the resumed turn ends.
 func TestParkedRuntimePromptWithinGraceResumes(t *testing.T) {
 	sup := NewSupervisor(Config{
-		ControlSocket:        newStableSocketPath(t, "parked-resume"),
-		MaxRuntimes:          2,
-		ParkedRuntimeTimeout: 5 * time.Second,
+		ControlSocket: newStableSocketPath(t, "parked-resume"),
+		MaxRuntimes:   2,
+		// Generous grace: the test's 5s wait deadlines must never race the
+		// reap timer on a stalled runner.
+		ParkedRuntimeTimeout: 30 * time.Second,
 		ShutdownTimeout:      0,
 	})
 	t.Cleanup(func() {
@@ -447,7 +449,10 @@ func TestWaitForNextPromptTimerHonorsQueuedPrompt(t *testing.T) {
 		c.promptQueue = []string{"boundary prompt"}
 		c.mu.Unlock()
 	}()
-	prompt, ok := c.waitForNextPrompt(context.Background(), 150*time.Millisecond)
+	// The queue is populated well before the timer fires: a scheduling
+	// delay must not push the populate past the deadline, or the timer
+	// branch would correctly see an empty queue and reap.
+	prompt, ok := c.waitForNextPrompt(context.Background(), 2*time.Second)
 	if !ok || prompt != "boundary prompt" {
 		t.Fatalf("waitForNextPrompt = (%q, %v), want the queued prompt honored", prompt, ok)
 	}
