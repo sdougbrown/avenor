@@ -462,8 +462,8 @@ func TestChildOutputProvenancePinning(t *testing.T) {
 		t.Fatalf("child driver: %v", e)
 	}
 
-	revAct := latestActivation(t, s, wf, "review")
-	resolved, ok := revAct.ResolvedGates[GateID("pr-review")]
+	review1 := latestActivation(t, s, wf, "review")
+	resolved, ok := review1.ResolvedGates[GateID("pr-review")]
 	if !ok {
 		t.Fatalf("review has no pinned gates")
 	}
@@ -481,5 +481,107 @@ func TestChildOutputProvenancePinning(t *testing.T) {
 	}
 	if *ref != want {
 		t.Fatalf("target reference = %+v, want child identity %+v", *ref, want)
+	}
+
+	// --- Second visit of the workflow-action node ---
+	//
+	// The composition manifest carries ONE child reference per workflow-action
+	// node, and the first visit's attach pins it to the first spawn
+	// activation. The code therefore keeps the child reference with the
+	// FIRST visit: the executor rejects the second visit's attach (covered at
+	// the reducer level by the foreign re-attach test), and if the second
+	// visit's completion lands anyway, the downstream bound gate stays
+	// unresolved — provenance pinning never serves one visit's child
+	// reference to another visit's activation. This test names that
+	// behavior. The revisit below is driven with raw store commands because
+	// the executor path stops at the rejected attach.
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("load current: %v", err)
+	}
+	if _, err := s.ApplyCommand(wf, Command{
+		Kind:             CommandReroute,
+		ExpectedRevision: snap.Instance.Revision,
+		IdempotencyKey:   "reroute-visit-2",
+		Identity:         ExecutionIdentity{WorkflowID: wf, NodeID: "spawn"},
+	}); err != nil {
+		t.Fatalf("reroute spawn: %v", err)
+	}
+	spawn2 := latestActivation(t, s, wf, "spawn")
+	snap, _, err = s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("load current: %v", err)
+	}
+	if _, err := s.ApplyCommand(wf, Command{
+		Kind:             CommandClaim,
+		ExpectedRevision: snap.Instance.Revision,
+		IdempotencyKey:   "claim-visit-2",
+		Identity:         ExecutionIdentity{WorkflowID: wf, NodeID: "spawn", ActivationID: spawn2.ID},
+		LeaseID:          "lease-visit-2",
+		Actor:            "alice",
+	}); err != nil {
+		t.Fatalf("claim second visit: %v", err)
+	}
+	snap, _, err = s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("load current: %v", err)
+	}
+	if _, err := s.ApplyCommand(wf, Command{
+		Kind:             CommandStart,
+		ExpectedRevision: snap.Instance.Revision,
+		IdempotencyKey:   "start-visit-2",
+		Identity:         ExecutionIdentity{WorkflowID: wf, NodeID: "spawn", ActivationID: spawn2.ID, AttemptID: "att-visit-2"},
+		LeaseID:          "lease-visit-2",
+	}); err != nil {
+		t.Fatalf("start second visit: %v", err)
+	}
+	snap, _, err = s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("load current: %v", err)
+	}
+	transition, err := json.Marshal(&Transition{Outcome: "done", TargetNodeID: "review", ActivationID: spawn2.ID})
+	if err != nil {
+		t.Fatalf("marshal transition: %v", err)
+	}
+	if _, err := s.ApplyCommand(wf, Command{
+		Kind:             CommandComplete,
+		ExpectedRevision: snap.Instance.Revision,
+		IdempotencyKey:   "complete-visit-2",
+		Identity:         ExecutionIdentity{WorkflowID: wf, NodeID: "spawn", ActivationID: spawn2.ID, AttemptID: "att-visit-2"},
+		LeaseID:          "lease-visit-2",
+		Outcome:          "done",
+		Payload:          transition,
+		Outputs: []OutputValue{{
+			ID:           "ov2",
+			DefinitionID: "po",
+			ActivationID: spawn2.ID,
+			Revision:     1,
+			Value:        json.RawMessage(`"head-sha-second"`),
+		}},
+	}); err != nil {
+		t.Fatalf("complete second visit: %v", err)
+	}
+
+	// The downstream bound gate created by the second visit cannot pin the
+	// child reference: the reference belongs to the first visit's activation
+	// (ref.ParentActivation != source.ID), so the input stays unresolved.
+	review2 := latestActivation(t, s, wf, "review")
+	if review2.ID == review1.ID {
+		t.Fatalf("second visit did not create a new review activation")
+	}
+	resolved2, ok := review2.ResolvedGates[GateID("pr-review")]
+	if !ok {
+		t.Fatalf("second review activation has no resolved gates")
+	}
+	if ref := resolved2.Inputs["target"].Reference; ref != nil {
+		t.Fatalf("second visit pinned target reference = %+v, want unresolved (child reference belongs to the first visit)", *ref)
+	}
+	if len(resolved2.Unresolved) != 1 || resolved2.Unresolved[0] != "target" {
+		t.Fatalf("second visit unresolved = %v, want [target]", resolved2.Unresolved)
+	}
+
+	// The first visit's pin is untouched by the revisit.
+	if got := review1.ResolvedGates[GateID("pr-review")].Inputs["target"].Reference; got == nil || *got != want {
+		t.Fatalf("first visit pin changed to %+v, want child identity %+v", got, want)
 	}
 }
