@@ -816,3 +816,67 @@ func TestClientAnswerPermissionWithMessageOmitsEmpty(t *testing.T) {
 		t.Fatal("timed out waiting for command")
 	}
 }
+
+// TestWorkflowInstantiateParamsWire pins the wire contract: params are sent
+// only when non-empty (omitted from the JSON when empty).
+func TestWorkflowInstantiateParamsWire(t *testing.T) {
+	call := func(metadata map[string]any, params map[string]string) map[string]any {
+		t.Helper()
+		serverConn, clientConn := net.Pipe()
+		defer serverConn.Close()
+		c := &Client{
+			conn:    clientConn,
+			pending: map[int]chan Response{},
+			eventCh: make(chan Event, 1),
+		}
+		done := make(chan map[string]any, 1)
+		go func() {
+			dec := json.NewDecoder(serverConn)
+			var raw map[string]any
+			if err := dec.Decode(&raw); err != nil {
+				done <- map[string]any{"error": err.Error()}
+				return
+			}
+			id := raw["id"]
+			resp := map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{"workflow_id": "wf_1"}}
+			respData, _ := json.Marshal(resp)
+			respData = append(respData, '\n')
+			serverConn.Write(respData)
+			done <- raw
+		}()
+		if _, err := c.WorkflowInstantiate("tmpl_1", "1", metadata, params); err != nil {
+			t.Fatalf("WorkflowInstantiate: %v", err)
+		}
+		select {
+		case raw := <-done:
+			return raw
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for command")
+			return nil
+		}
+	}
+
+	// Non-empty params are sent on the wire (nested under the JSON-RPC params object).
+	raw := call(nil, map[string]string{"worktree": "avenor-issue-130"})
+	outer, _ := raw["params"].(map[string]any)
+	if outer == nil {
+		t.Fatalf("params missing from request: %v", raw)
+	}
+	params, _ := outer["params"].(map[string]any)
+	if params == nil {
+		t.Fatalf("params missing from request: %v", raw)
+	}
+	if got := params["worktree"]; got != "avenor-issue-130" {
+		t.Fatalf("params[worktree] = %v, want avenor-issue-130", got)
+	}
+
+	// Empty params are omitted from the wire.
+	raw = call(nil, nil)
+	outer, _ = raw["params"].(map[string]any)
+	if outer == nil {
+		t.Fatalf("params missing from request: %v", raw)
+	}
+	if _, hasParams := outer["params"]; hasParams {
+		t.Fatalf("params should be omitted when empty: %v", raw)
+	}
+}

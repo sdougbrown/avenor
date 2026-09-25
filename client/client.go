@@ -440,16 +440,21 @@ func (c *Client) WorkflowCreate(template json.RawMessage) (map[string]any, error
 }
 
 // WorkflowInstantiate creates a workflow instance from a stored template.
-func (c *Client) WorkflowInstantiate(templateID, templateVersion string, metadata map[string]any) (map[string]any, error) {
-	params := map[string]any{
+// params supplies the instance parameters the template declares; an empty
+// params is omitted from the wire.
+func (c *Client) WorkflowInstantiate(templateID, templateVersion string, metadata map[string]any, params map[string]string) (map[string]any, error) {
+	req := map[string]any{
 		"template_id":      templateID,
 		"template_version": templateVersion,
 	}
 	if metadata != nil {
-		params["metadata"] = metadata
+		req["metadata"] = metadata
+	}
+	if len(params) > 0 {
+		req["params"] = params
 	}
 	var result map[string]any
-	err := c.Call("workflow.instantiate", params, &result)
+	err := c.Call("workflow.instantiate", req, &result)
 	return result, err
 }
 

@@ -214,7 +214,7 @@ func cmdWorkflowInstantiate(c *client.Client, args []string, stdout, stderr io.W
 	fs.SetOutput(stderr)
 	templateID := fs.String("template-id", "", "template id (required)")
 	templateVersion := fs.String("template-version", "", "template version (required)")
-	requestFile := fs.String("request-file", "", "path to instance JSON file (required; {\"metadata\":{...}} or {})")
+	requestFile := fs.String("request-file", "", "path to instance JSON file (required; {\"metadata\":{...},\"params\":{...}} or {})")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -223,7 +223,8 @@ func cmdWorkflowInstantiate(c *client.Client, args []string, stdout, stderr io.W
 		return 1
 	}
 	var instance struct {
-		Metadata map[string]any `json:"metadata,omitempty"`
+		Metadata map[string]any    `json:"metadata,omitempty"`
+		Params   map[string]string `json:"params,omitempty"`
 	}
 	if data, err := os.ReadFile(*requestFile); err == nil {
 		_ = json.Unmarshal(data, &instance)
@@ -232,7 +233,11 @@ func cmdWorkflowInstantiate(c *client.Client, args []string, stdout, stderr io.W
 	if len(instance.Metadata) > 0 {
 		metadata = instance.Metadata
 	}
-	result, err := c.WorkflowInstantiate(*templateID, *templateVersion, metadata)
+	var params map[string]string
+	if len(instance.Params) > 0 {
+		params = instance.Params
+	}
+	result, err := c.WorkflowInstantiate(*templateID, *templateVersion, metadata, params)
 	if err != nil {
 		fmt.Fprintf(stderr, "avenor workflow: instantiate: %v\n", err)
 		return 1
