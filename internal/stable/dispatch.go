@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/sdougbrown/avenor/internal/admission"
 	"github.com/sdougbrown/avenor/internal/runtime"
@@ -315,13 +316,31 @@ func (d *stableRunnerDeps) InFlight() ([]workflowcontroller.InFlightAttempt, err
 	return attempts, nil
 }
 
-// Refresh rebuilds the manager's candidate index for this supervisor.
+// Refresh rebuilds the manager's candidate index for this supervisor,
+// shared across every controller's runner deps: a rebuild performed within
+// the runner's anti-entropy window is skipped, so N enabled controllers on
+// one anti-entropy tick cause one catalog scan instead of N. The first
+// refresh after startup always rebuilds.
 func (d *stableRunnerDeps) Refresh() error {
 	mgr, err := d.manager()
 	if err != nil {
 		return err
 	}
-	return mgr.RebuildCandidateIndex(d.s.supervisorIdentity())
+	s := d.s
+	s.candidateRefreshMu.Lock()
+	if !s.lastCandidateRebuild.IsZero() && time.Since(s.lastCandidateRebuild) < s.candidateRefreshWindow {
+		s.candidateRefreshMu.Unlock()
+		return nil
+	}
+	s.candidateRefreshMu.Unlock()
+	if err := mgr.RebuildCandidateIndex(s.supervisorIdentity()); err != nil {
+		return err
+	}
+	s.candidateRebuilds.Add(1)
+	s.candidateRefreshMu.Lock()
+	s.lastCandidateRebuild = time.Now()
+	s.candidateRefreshMu.Unlock()
+	return nil
 }
 
 // Dispatch dispatches one selected candidate through the supervisor's

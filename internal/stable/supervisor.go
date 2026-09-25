@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/admission"
@@ -348,10 +349,21 @@ type Supervisor struct {
 	// controllerRenewInterval is the leader loop's renew cadence; defaults to
 	// workflowcontroller.RenewInterval.
 	controllerRenewInterval time.Duration
-	state                   *control.ControlState
-	controlMu               sync.Mutex
-	runtimes                map[string]*childRuntime
-	nextID                  int
+	// candidateRefreshMu guards lastCandidateRebuild and
+	// candidateRefreshWindow: the supervisor-wide share of candidate-index
+	// rebuilds across every controller's runner deps. candidateRefreshWindow
+	// matches the runner's anti-entropy interval so a tick's N enabled
+	// controllers cause one catalog scan instead of N.
+	candidateRefreshMu     sync.Mutex
+	lastCandidateRebuild   time.Time
+	candidateRefreshWindow time.Duration
+	// candidateRebuilds counts every candidate-index rebuild performed by
+	// stableRunnerDeps.Refresh (test instrumentation).
+	candidateRebuilds atomic.Int64
+	state             *control.ControlState
+	controlMu         sync.Mutex
+	runtimes          map[string]*childRuntime
+	nextID            int
 	// outstandingReservations counts admission reservations that hold a local
 	// slot but have not yet converted into a registered runtime. Guarded by
 	// controlMu; the local capacity limit is enforced against active runtimes
@@ -421,6 +433,7 @@ func NewSupervisor(cfg Config) *Supervisor {
 		runtimes:                map[string]*childRuntime{},
 		controllerLoops:         map[string]*controllerLoop{},
 		controllerRenewInterval: workflowcontroller.RenewInterval,
+		candidateRefreshWindow:  workflowcontroller.DefaultAntiEntropy,
 		shutdownCh:              make(chan struct{}),
 		runtimeActivity:         make(chan struct{}),
 		pendingQuestions:        map[string]pendingChildQuestion{},

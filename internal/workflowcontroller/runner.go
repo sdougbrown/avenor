@@ -68,9 +68,9 @@ type RunnerStatus struct {
 	CapacityDetail  string
 }
 
-// defaultAntiEntropy is the cadence at which a leading runner refreshes the
+// DefaultAntiEntropy is the cadence at which a leading runner refreshes the
 // host view and reconciles even without change signals.
-const defaultAntiEntropy = 5 * time.Second
+const DefaultAntiEntropy = 5 * time.Second
 
 // RunnerConfig configures one Runner. Deps, Store, ControllerID, and OwnerID
 // are required; zero durations fall back to the package defaults and nil
@@ -158,7 +158,7 @@ func NewRunner(cfg RunnerConfig) *Runner {
 		cfg.RenewInterval = RenewInterval
 	}
 	if cfg.AntiEntropy <= 0 {
-		cfg.AntiEntropy = defaultAntiEntropy
+		cfg.AntiEntropy = DefaultAntiEntropy
 	}
 	now := cfg.Now
 	if now == nil {
