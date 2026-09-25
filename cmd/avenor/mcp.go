@@ -18,6 +18,7 @@ func runMCP(args []string) int {
 	idleTimeout := fs.Duration("idle-timeout", 30*time.Minute, "idle timeout before server exits")
 	addr := fs.String("addr", "127.0.0.1:3748", "address to listen on for HTTP transport")
 	authToken := fs.String("auth-token", "", "bearer token required for HTTP transport (defaults to MCP_AUTH_TOKEN)")
+	scope := fs.String("scope", "", "tool scope: \"supervisor\" (default) or \"agent\"")
 
 	if err := fs.Parse(args); err != nil {
 		return 1
@@ -35,6 +36,20 @@ func runMCP(args []string) int {
 		*authToken = os.Getenv("MCP_AUTH_TOKEN")
 	}
 
+	// Resolve the tool scope: an explicit --scope flag wins; otherwise fall
+	// back to AVENOR_MCP_SCOPE, then to the default supervisor scope.
+	scopeVal := *scope
+	if scopeVal == "" {
+		scopeVal = os.Getenv("AVENOR_MCP_SCOPE")
+	}
+	if scopeVal == "" {
+		scopeVal = mcpserver.ScopeSupervisor
+	}
+	if scopeVal != mcpserver.ScopeSupervisor && scopeVal != mcpserver.ScopeAgent {
+		fmt.Fprintf(os.Stderr, "avenor mcp: --scope only supports \"supervisor\" or \"agent\"\n")
+		return 1
+	}
+
 	s, err := mcpserver.NewServer(mcpserver.Options{
 		Transport:        *transport,
 		ControlSocket:    *controlSocket,
@@ -44,6 +59,7 @@ func runMCP(args []string) int {
 		Addr:             *addr,
 		AuthToken:        *authToken,
 		ControlClient:    nil,
+		Scope:            scopeVal,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "avenor mcp: %v\n", err)

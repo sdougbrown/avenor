@@ -53,6 +53,59 @@ type Options struct {
 	Addr             string
 	AuthToken        string
 	ControlClient    ControlClient
+	Scope            string
+}
+
+// Tool scopes for the avenor MCP server. Supervisor scope registers the full
+// control surface; agent scope registers only the read-only introspection
+// tools so spawned children can observe the supervisor without mutating it.
+const (
+	ScopeSupervisor = "supervisor"
+	ScopeAgent      = "agent"
+)
+
+// supervisorToolNames lists every tool the server can register, in
+// registration order. Both the scope-filtered registered-tool metadata and the
+// per-call registerScopeTool registrations below derive their names from this
+// list; a new tool must be added here and in its registerScopeTool call
+// together to keep the exposed surface in sync.
+var supervisorToolNames = []string{
+	"avenor_status",
+	"avenor_result",
+	"avenor_spawn",
+	"avenor_shutdown",
+	"avenor_answer_permission",
+	"avenor_events",
+	"avenor_follow_up",
+	"avenor_workflow_status",
+	"avenor_workflow_wait",
+	"avenor_workflow_inspect",
+	"avenor_workflow_events",
+	"avenor_workflow_complete",
+	"avenor_workflow_gate",
+}
+
+// agentScopeTools are the tools registered in agent scope. Orchestrate,
+// admin, and workflow-control tools are intentionally absent so an
+// agent-scoped consumer (such as a spawned child) can observe runs but never
+// spawn, shut down, answer permissions, or drive workflow handoffs.
+var agentScopeTools = map[string]bool{
+	"avenor_status":           true,
+	"avenor_result":           true,
+	"avenor_events":           true,
+	"avenor_workflow_status":  true,
+	"avenor_workflow_inspect": true,
+	"avenor_workflow_events":  true,
+}
+
+// scopeAllows reports whether a tool is registered in the given scope. Agent
+// scope keeps only the read-only introspection tools; any other scope
+// (including the empty default) registers the full control surface.
+func scopeAllows(scope, tool string) bool {
+	if scope == ScopeAgent {
+		return agentScopeTools[tool]
+	}
+	return true
 }
 
 type Server struct {
@@ -243,6 +296,18 @@ func NewServer(opts Options) (*Server, error) {
 		Version: "dev",
 	}, nil)
 
+	scope := opts.Scope
+	if scope == "" {
+		scope = ScopeSupervisor
+	}
+
+	var toolNames []string
+	for _, name := range supervisorToolNames {
+		if scopeAllows(scope, name) {
+			toolNames = append(toolNames, name)
+		}
+	}
+
 	s := &Server{
 		opts:          opts,
 		mcpServer:     mcpServer,
@@ -250,21 +315,7 @@ func NewServer(opts Options) (*Server, error) {
 		registry:      NewRunRegistry(),
 		clock:         time.Now,
 		sleep:         sleepWithContext,
-		toolNames: []string{
-			"avenor_status",
-			"avenor_result",
-			"avenor_spawn",
-			"avenor_shutdown",
-			"avenor_answer_permission",
-			"avenor_events",
-			"avenor_follow_up",
-			"avenor_workflow_status",
-			"avenor_workflow_wait",
-			"avenor_workflow_inspect",
-			"avenor_workflow_events",
-			"avenor_workflow_complete",
-			"avenor_workflow_gate",
-		},
+		toolNames:     toolNames,
 	}
 
 	// Explicit sockets retain their eager, no-autostart dial semantics. The
@@ -281,72 +332,81 @@ func NewServer(opts Options) (*Server, error) {
 		s.controlClient = cl
 	}
 
-	mcp.AddTool(mcpServer, &mcp.Tool{
+	registerScopeTool(s, &mcp.Tool{
 		Name:        "avenor_status",
 		Description: "Get lifecycle status of avenor runs; optionally wait for terminal, phase_change, turn_complete, or permission",
 	}, s.handleAvenorStatus)
 
-	mcp.AddTool(mcpServer, &mcp.Tool{
+	registerScopeTool(s, &mcp.Tool{
 		Name:        "avenor_result",
 		Description: "Wait for a run to finish and return its complete final output",
 	}, s.handleAvenorResult)
 
-	mcp.AddTool(mcpServer, &mcp.Tool{
+	registerScopeTool(s, &mcp.Tool{
 		Name:        "avenor_spawn",
 		Description: "Spawn a new avenor run",
 	}, s.handleAvenorSpawn)
 
-	mcp.AddTool(mcpServer, &mcp.Tool{
+	registerScopeTool(s, &mcp.Tool{
 		Name:        "avenor_shutdown",
 		Description: "Shutdown the avenor supervisor and clean up run artifacts",
 	}, s.handleAvenorShutdown)
 
-	mcp.AddTool(mcpServer, &mcp.Tool{
+	registerScopeTool(s, &mcp.Tool{
 		Name:        "avenor_answer_permission",
 		Description: "Answer a pending permission request for a run",
 	}, s.handleAvenorAnswerPermission)
 
-	mcp.AddTool(mcpServer, &mcp.Tool{
+	registerScopeTool(s, &mcp.Tool{
 		Name:        "avenor_events",
 		Description: "Read recent events from a run's event log",
 	}, s.handleAvenorEvents)
 
-	mcp.AddTool(mcpServer, &mcp.Tool{
+	registerScopeTool(s, &mcp.Tool{
 		Name:        "avenor_follow_up",
 		Description: "Spawn a follow-up run continuing a prior session",
 	}, s.handleAvenorFollowUp)
 
-	mcp.AddTool(mcpServer, &mcp.Tool{
+	registerScopeTool(s, &mcp.Tool{
 		Name:        "avenor_workflow_status",
 		Description: "Get lightweight status for a workflow instance",
 	}, s.handleAvenorWorkflowStatus)
 
-	mcp.AddTool(mcpServer, &mcp.Tool{
+	registerScopeTool(s, &mcp.Tool{
 		Name:        "avenor_workflow_wait",
 		Description: "Wait for a workflow to reach a terminal state or until timeout",
 	}, s.handleAvenorWorkflowWait)
 
-	mcp.AddTool(mcpServer, &mcp.Tool{
+	registerScopeTool(s, &mcp.Tool{
 		Name:        "avenor_workflow_inspect",
 		Description: "Return the full instance detail for a workflow",
 	}, s.handleAvenorWorkflowInspect)
 
-	mcp.AddTool(mcpServer, &mcp.Tool{
+	registerScopeTool(s, &mcp.Tool{
 		Name:        "avenor_workflow_events",
 		Description: "Read log events from a workflow instance's event log",
 	}, s.handleAvenorWorkflowEvents)
 
-	mcp.AddTool(mcpServer, &mcp.Tool{
+	registerScopeTool(s, &mcp.Tool{
 		Name:        "avenor_workflow_complete",
 		Description: "Atomically complete a machine/external handoff activation",
 	}, s.handleAvenorWorkflowComplete)
 
-	mcp.AddTool(mcpServer, &mcp.Tool{
+	registerScopeTool(s, &mcp.Tool{
 		Name:        "avenor_workflow_gate",
 		Description: "Record a gate decision on a parked awaiting_gate activation",
 	}, s.handleAvenorWorkflowGate)
 
 	return s, nil
+}
+
+// registerScopeTool adds a tool to the server only when its name is allowed
+// in the given scope. Scoping is enforced at registration time: tools outside
+// scope are never listed, so no permission dialogs are needed to hide them.
+func registerScopeTool[In, Out any](s *Server, tool *mcp.Tool, handler mcp.ToolHandlerFor[In, Out]) {
+	if scopeAllows(s.opts.Scope, tool.Name) {
+		mcp.AddTool(s.mcpServer, tool, handler)
+	}
 }
 
 func (s *Server) Close() error {
