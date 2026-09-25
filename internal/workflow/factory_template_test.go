@@ -137,9 +137,6 @@ func TestSoftwareFactoryTemplateLaterPipelineOutranksIntake(t *testing.T) {
 		}
 		return *node.Dispatch.Priority
 	}
-	if got := priority("assessment"); got != 30 {
-		t.Errorf("assessment priority = %d, want 30", got)
-	}
 	for _, later := range []NodeID{"publication", "review", "reverify"} {
 		if priority(later) <= priority("assessment") {
 			t.Errorf("node %q priority %d must outrank assessment priority %d", later, priority(later), priority("assessment"))

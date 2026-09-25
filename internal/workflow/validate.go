@@ -694,10 +694,15 @@ func validateAction(action Action) error {
 				}
 			}
 		}
+		seenChildParams := make(map[string]struct{}, len(action.Workflow.Params))
 		for index, binding := range action.Workflow.Params {
 			if strings.TrimSpace(binding.Param) == "" {
 				return fmt.Errorf("workflow action params[%d] requires param", index)
 			}
+			if _, dup := seenChildParams[binding.Param]; dup {
+				return fmt.Errorf("workflow action params: duplicate param %q", binding.Param)
+			}
+			seenChildParams[binding.Param] = struct{}{}
 			hasValue := binding.Value != ""
 			hasParam := binding.FromInstanceParam != ""
 			if hasValue == hasParam {

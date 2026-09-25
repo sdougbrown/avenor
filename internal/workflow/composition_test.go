@@ -1625,3 +1625,64 @@ func TestCompositionInstantiateFreezesChildTemplatedKey(t *testing.T) {
 		t.Fatalf("child concurrency key = %q, want worktree:avenor-issue-130", got)
 	}
 }
+
+// TestCompositionInstantiateFreezesChildFromInstanceParam pins that a
+// from_instance_param child binding resolves against the parent instance's
+// recorded params, that the child records the resolved value, and that a
+// templated child concurrency key freezes from that value.
+func TestCompositionInstantiateFreezesChildFromInstanceParam(t *testing.T) {
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	m := NewManager(s)
+	child := compositionLeaf(t, "comp-child")
+	child.Nodes[0].Action = Action{Kind: ActionRun, Run: &RunAction{Prompt: "do the thing"}}
+	child.Params = []TemplateParam{{ID: "worktree", Type: "string", Required: true}}
+	child.Nodes[0].Dispatch = &DispatchPolicy{
+		Mode:                 DispatchAuto,
+		ControllerID:         "c1",
+		ConcurrencyKeyParams: &ConcurrencyKeyTemplate{Prefix: "worktree:", FromInstanceParam: "worktree"},
+	}
+	node := compositionWorkflowNode("spawn", "comp-child", "c1")
+	node.Action.Workflow.Params = []ChildParamBinding{{Param: "worktree", FromInstanceParam: "worktree"}}
+	parent := Template{
+		SchemaVersion:    1,
+		TemplateID:       "comp-parent",
+		TemplateVersion:  "1",
+		EntryNodes:       []NodeID{"spawn"},
+		Nodes:            []NodeDefinition{node},
+		TerminalOutcomes: []OutcomeName{"done"},
+		Params:           []TemplateParam{{ID: "worktree", Type: "string", Required: true}},
+	}
+	for _, template := range []Template{child, parent} {
+		if err := s.StoreTemplate(template.TemplateID, template.TemplateVersion, template); err != nil {
+			t.Fatalf("StoreTemplate %s: %v", template.TemplateID, err)
+		}
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"template_id":      "comp-parent",
+		"template_version": "1",
+		"params":           map[string]string{"worktree": "avenor-issue-777"},
+	})
+	out, err := m.WorkflowInstantiate(payload)
+	if err != nil {
+		t.Fatalf("WorkflowInstantiate: %v", err)
+	}
+	parentID := out.(map[string]any)["workflow_id"].(string)
+	childID := string(DeriveChildWorkflowID(WorkflowID(parentID), "spawn", "c1"))
+	insp, err := m.WorkflowInspect(childID)
+	if err != nil {
+		t.Fatalf("WorkflowInspect child: %v", err)
+	}
+	inst := insp.(map[string]any)["instance"].(WorkflowInstance)
+	if got := inst.Params["worktree"]; got != "avenor-issue-777" {
+		t.Fatalf("child params[worktree] = %q, want avenor-issue-777", got)
+	}
+	if len(inst.Activations) != 1 || inst.Activations[0].Dispatch == nil {
+		t.Fatalf("child has no dispatched activation: %+v", inst.Activations)
+	}
+	if got := inst.Activations[0].Dispatch.ConcurrencyKey; got != "worktree:avenor-issue-777" {
+		t.Fatalf("child concurrency key = %q, want worktree:avenor-issue-777", got)
+	}
+}
