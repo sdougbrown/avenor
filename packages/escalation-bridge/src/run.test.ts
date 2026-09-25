@@ -548,4 +548,202 @@ describe('runBridge', () => {
     expect(asks).toHaveLength(1)
     expect(calls.filter((c) => c.method === 'workflow.command')).toHaveLength(0)
   })
+
+  describe('bound gates (subject_binding)', () => {
+    const PINNED = {
+      type: 'pull_request',
+      repository: 'org/repo',
+      pull_request: 123,
+      revision: 'abc123',
+    }
+
+    function boundTemplateFile(dir: string): string {
+      const templatePath = path.join(dir, 'template.json')
+      fs.writeFileSync(
+        templatePath,
+        JSON.stringify({
+          nodes: [
+            {
+              id: 'merge-auth',
+              gates: [{ ...mergeAuthGate(), subject_binding: { repository: { from_node_output: 'head_sha' } } }],
+            },
+          ],
+        }),
+      )
+      return templatePath
+    }
+
+    function boundDetail(pin: Record<string, unknown> | null, overrides: Record<string, unknown> = {}): WorkflowDetail {
+      return {
+        instance: { status: 'active' },
+        activations: [
+          {
+            activation_id: 'act_1',
+            node_id: 'merge-auth',
+            status: 'awaiting_gate',
+            selected_outcome: 'authorized',
+            resolved_gates: {
+              'merge-authorization': pin === null ? { unresolved: ['subject.repository'] } : { subject: pin },
+            },
+            ...overrides,
+          },
+        ],
+        gates: null,
+        outputs: [],
+      }
+    }
+
+    /** Client whose workflow.inspect pops from a queue of details and whose
+     * workflow.command calls are recorded in `commands`. */
+    function queuedClient(inspects: WorkflowDetail[], waitResults: unknown[], commands: unknown[]): ControlClient {
+      return {
+        async call(method, params) {
+          if (method === 'workflow.wait') return waitResults.shift()
+          if (method === 'workflow.inspect') return inspects.shift()
+          if (method === 'workflow.command') {
+            commands.push((params as { command: unknown }).command)
+            return {}
+          }
+          throw new Error(`unexpected method ${method}`)
+        },
+        isClosed: () => false,
+        close: () => {},
+      }
+    }
+
+    function transportDecision(): Record<string, unknown> {
+      return {
+        decision: 'satisfy',
+        actor: 'austin',
+        reason: 'Diff reviewed; approved',
+        // The transport supplies its own subject; a bound gate must ignore
+        // it in favor of the pinned one.
+        subject: { type: 'pull_request', repository: 'wrong/repo', pull_request: 999, revision: 'deadbeef' },
+      }
+    }
+
+    test('carries the pinned subject in the question and submits it, not the transport\'s', async () => {
+      const dir = setupDir()
+      fs.writeFileSync(path.join(dir, 'decision-act_1-merge-authorization.json'), JSON.stringify(transportDecision()))
+      const asks: Array<Record<string, unknown>> = []
+      const commands: unknown[] = []
+      const client = queuedClient(
+        [boundDetail(PINNED), boundDetail(PINNED)],
+        [{ terminal: false }, { terminal: true, instance: { status: 'completed' } }],
+        commands,
+      )
+
+      const code = await runBridge({
+        socketPath: '/tmp/does-not-matter.sock',
+        workflowId: 'wf_1',
+        webhookUrl: 'http://127.0.0.1:1/ask',
+        decisionDir: dir,
+        templatePath: boundTemplateFile(dir),
+        connect: async () => client,
+        ask: async (_url, payload) => {
+          asks.push(payload as Record<string, unknown>)
+        },
+        sleep: async () => {},
+        log: () => {},
+      })
+
+      expect(code).toBe(0)
+      expect(asks).toHaveLength(1)
+      expect(asks[0].subject).toEqual(PINNED)
+      // The pinned subject was submitted, not the transport's wrong/repo one.
+      expect(commands).toHaveLength(1)
+      expect((commands[0] as Record<string, unknown>).subject).toEqual(PINNED)
+      const recorded = fs.readdirSync(path.join(dir, 'recorded'))
+      expect(recorded).toHaveLength(1)
+    })
+
+    test('skips a bound gate whose pin has not resolved yet', async () => {
+      const dir = setupDir()
+      const asks: Array<Record<string, unknown>> = []
+      const commands: unknown[] = []
+      const client = queuedClient(
+        [boundDetail(null)],
+        [{ terminal: false }, { terminal: true, instance: { status: 'completed' } }],
+        commands,
+      )
+
+      const code = await runBridge({
+        socketPath: '/tmp/does-not-matter.sock',
+        workflowId: 'wf_1',
+        webhookUrl: 'http://127.0.0.1:1/ask',
+        decisionDir: dir,
+        templatePath: boundTemplateFile(dir),
+        connect: async () => client,
+        ask: async (_url, payload) => {
+          asks.push(payload as Record<string, unknown>)
+        },
+        sleep: async () => {},
+        log: () => {},
+      })
+
+      expect(code).toBe(0)
+      expect(asks).toHaveLength(0)
+      expect(commands).toHaveLength(0)
+    })
+
+    test('drops the decision when the pinned subject changed before submit', async () => {
+      const dir = setupDir()
+      fs.writeFileSync(path.join(dir, 'decision-act_1-merge-authorization.json'), JSON.stringify(transportDecision()))
+      const logs: string[] = []
+      const commands: unknown[] = []
+      // Main inspect sees the original pin; the pre-submit re-inspect sees a
+      // new head's pin on the still-parked activation.
+      const client = queuedClient(
+        [boundDetail(PINNED), boundDetail({ ...PINNED, revision: 'deadbeef' })],
+        [{ terminal: false }, { terminal: true, instance: { status: 'completed' } }],
+        commands,
+      )
+
+      const code = await runBridge({
+        socketPath: '/tmp/does-not-matter.sock',
+        workflowId: 'wf_1',
+        webhookUrl: 'http://127.0.0.1:1/ask',
+        decisionDir: dir,
+        templatePath: boundTemplateFile(dir),
+        connect: async () => client,
+        ask: async () => {},
+        sleep: async () => {},
+        log: (message) => logs.push(message),
+      })
+
+      expect(code).toBe(0)
+      expect(commands).toHaveLength(0)
+      expect(fs.readdirSync(path.join(dir, 'rejected'))).toHaveLength(1)
+      expect(logs.some((l) => l.includes('subject changed before submit'))).toBe(true)
+    })
+
+    test('drops the decision when the activation unparked before submit', async () => {
+      const dir = setupDir()
+      fs.writeFileSync(path.join(dir, 'decision-act_1-merge-authorization.json'), JSON.stringify(transportDecision()))
+      const logs: string[] = []
+      const commands: unknown[] = []
+      const client = queuedClient(
+        [boundDetail(PINNED), boundDetail(PINNED, { status: 'satisfied' })],
+        [{ terminal: false }, { terminal: true, instance: { status: 'completed' } }],
+        commands,
+      )
+
+      const code = await runBridge({
+        socketPath: '/tmp/does-not-matter.sock',
+        workflowId: 'wf_1',
+        webhookUrl: 'http://127.0.0.1:1/ask',
+        decisionDir: dir,
+        templatePath: boundTemplateFile(dir),
+        connect: async () => client,
+        ask: async () => {},
+        sleep: async () => {},
+        log: (message) => logs.push(message),
+      })
+
+      expect(code).toBe(0)
+      expect(commands).toHaveLength(0)
+      expect(fs.readdirSync(path.join(dir, 'rejected'))).toHaveLength(1)
+      expect(logs.some((l) => l.includes('unparked before submit'))).toBe(true)
+    })
+  })
 })

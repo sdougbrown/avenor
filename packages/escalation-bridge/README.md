@@ -46,6 +46,8 @@ import {
   buildGateCommand,    // decision file -> workflow.command gate payload
   waitForDecision,     // poll a decision file with state re-checks
   pendingHumanGates,   // parked activations x human gate definitions
+  pinnedSubject,       // activation's resolved_gates pin for a bound gate
+  subjectUnchanged,    // pre-submit re-inspect for a bound-gate decision
   latestOutputs,       // inspect outputs -> decoded decision context
   loadHumanGates,      // template JSON -> node_id -> human gates
   parseDuration,
@@ -64,6 +66,31 @@ await runBridge({
 functions for embedding in a host's own runtime; the control connection only
 requires the structural `ControlClient` interface (`call`/`isClosed`/`close`),
 which `dial()` from `@dougbots/avenor-core` satisfies.
+
+## Bound gates (`subject_binding`)
+
+A gate that declares a `subject_binding` is **bound**: when the activation is
+created, the kernel resolves the binding's `from_node_output` references and
+pins the exact subject onto the activation under `resolved_gates[<gate_id>]`,
+visible in `workflow.inspect`. For bound gates the bridge:
+
+- reads the pinned subject from the inspected activation; while the pin is
+  unresolved it skips the gate entirely (no ask) and retries on the next tick
+- carries the pinned subject in the question payload, so the human sees the
+  exact PR/head being decided
+- submits exactly the pinned subject — never a transport-supplied subject and
+  never one derived from the workflow's outputs. The kernel rejects any other
+  subject with `ErrSubjectMismatch`.
+- re-inspects just before submitting: if the activation is no longer parked
+  (`awaiting_gate`) or its pinned subject changed, the decision file is parked
+  under `rejected/` unrecorded and logged — a new head creates a new
+  activation with a new pin, so a decision made against the old subject must
+  not be replayed against it
+
+The `response_hash` still covers the transport's decision payload as
+delivered, exactly as the unbound path and the Python reference do. Gates
+with only a `subject_type` (unbound) keep the existing behavior: the
+transport supplies the subject and the bridge enforces the type match.
 
 ## Decision file schema
 

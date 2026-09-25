@@ -4,7 +4,7 @@ import * as path from 'node:path'
 
 import { describe, expect, test } from 'bun:test'
 
-import { latestOutputs, loadHumanGates, pendingHumanGates } from './gates.js'
+import { latestOutputs, loadHumanGates, pendingHumanGates, pinnedSubject } from './gates.js'
 import type { Activation, GateDefinition, WorkflowDetail } from './types.js'
 
 function parkedActivation(actId = 'act_1', nodeId = 'merge-auth'): Activation {
@@ -137,5 +137,55 @@ describe('loadHumanGates', () => {
     const noGateIdPath = path.join(dir, 't2.json')
     fs.writeFileSync(noGateIdPath, JSON.stringify({ nodes: [{ gates: [{ type: 'human' }] }] }))
     expect(() => loadHumanGates(noGateIdPath)).toThrow(/no gate id/)
+  })
+})
+
+describe('pinnedSubject', () => {
+  const PINNED = {
+    type: 'pull_request',
+    repository: 'org/repo',
+    pull_request: 123,
+    revision: 'abc123',
+  }
+
+  test('returns the pinned subject when resolved', () => {
+    const act: Activation = {
+      activation_id: 'act_1',
+      node_id: 'merge-auth',
+      status: 'awaiting_gate',
+      resolved_gates: { g1: { subject: { ...PINNED } } },
+    }
+    expect(pinnedSubject(act, 'g1')).toEqual(PINNED)
+  })
+
+  test('returns null when the pin is unresolved', () => {
+    // An unresolved pin has no subject key (omitempty) and lists the
+    // unresolved fields instead.
+    const act: Activation = {
+      activation_id: 'act_1',
+      node_id: 'merge-auth',
+      status: 'awaiting_gate',
+      resolved_gates: { g1: { unresolved: ['subject.repository'] } },
+    }
+    expect(pinnedSubject(act, 'g1')).toBeNull()
+  })
+
+  test('returns null when the gate has no pin', () => {
+    const act: Activation = {
+      activation_id: 'act_1',
+      node_id: 'merge-auth',
+      status: 'awaiting_gate',
+      resolved_gates: { other: { subject: { type: 'pull_request' } } },
+    }
+    expect(pinnedSubject(act, 'g1')).toBeNull()
+  })
+
+  test('returns null when there are no resolved gates', () => {
+    const act: Activation = {
+      activation_id: 'act_1',
+      node_id: 'merge-auth',
+      status: 'awaiting_gate',
+    }
+    expect(pinnedSubject(act, 'g1')).toBeNull()
   })
 })

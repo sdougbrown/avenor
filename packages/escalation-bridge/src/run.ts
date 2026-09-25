@@ -4,9 +4,9 @@ import * as path from 'node:path'
 import { dial } from '@dougbots/avenor-core'
 
 import { buildGateCommand } from './command.js'
-import { latestOutputs, loadHumanGates, pendingHumanGates } from './gates.js'
-import type { ControlClient, Decision, GateCommand, WorkflowDetail } from './types.js'
-import { assertSafeId, moveAside, waitForDecision } from './wait.js'
+import { latestOutputs, loadHumanGates, pendingHumanGates, pinnedSubject } from './gates.js'
+import type { ControlClient, Decision, DecisionSubject, GateCommand, WorkflowDetail } from './types.js'
+import { assertSafeId, moveAside, subjectUnchanged, waitForDecision } from './wait.js'
 
 export const BACKOFF_MS = 5000
 
@@ -119,6 +119,17 @@ export async function runBridge(options: BridgeOptions): Promise<number> {
         workflow_id: options.workflowId,
       })) as WorkflowDetail
       for (const [act, gate] of pendingHumanGates(detail, templateGates)) {
+        const bound = gate.subject_binding != null
+        const pinned = bound ? pinnedSubject(act, gate.id) : null
+        if (bound && pinned === null) {
+          // A bound gate whose subject has not resolved yet cannot be
+          // decided; skip it and let the next tick retry once the pin
+          // resolves.
+          log(
+            `bridge: ${gate.id} on ${act.node_id} (${act.activation_id}) has an unresolved subject pin; skipping until resolved`,
+          )
+          continue
+        }
         const question: Record<string, unknown> = {
           workflow_id: options.workflowId,
           node_id: act.node_id,
@@ -132,6 +143,11 @@ export async function runBridge(options: BridgeOptions): Promise<number> {
           decision_file: `decision-${act.activation_id}-${gate.id}.json`,
           // The human must be able to decide from the message alone.
           note: 'Include what is being authorized, its exact scope, and what denial means.',
+        }
+        if (bound) {
+          // Carry the exact pinned subject so the human sees the precise
+          // PR/head being decided.
+          question.subject = pinned
         }
         const errorKey = `${act.activation_id}\u0000${gate.id}`
         const previousError = decisionErrors.get(errorKey)
@@ -164,7 +180,7 @@ export async function runBridge(options: BridgeOptions): Promise<number> {
         const decision = wait.decision
         let command: GateCommand
         try {
-          command = buildGateCommand(act.node_id, act.activation_id, gate, decision)
+          command = buildGateCommand(act.node_id, act.activation_id, gate, decision, bound ? pinned : null)
         } catch (exc) {
           // The human's answer is invalid (bad operation, missing actor/reason,
           // subject type mismatch). Park the file under rejected/ so the same
@@ -173,6 +189,26 @@ export async function runBridge(options: BridgeOptions): Promise<number> {
           decisionErrors.set(errorKey, (exc as Error).message)
           log(`bridge: rejected decision on ${gate.id}: ${(exc as Error).message}`)
           continue
+        }
+        if (bound) {
+          // A new head creates a new activation with a new_id, pinned
+          // to the new subject; the decision was made against the old
+          // subject. Confirm the activation is still parked on the same
+          // pinned subject before submitting; otherwise drop the decision.
+          const check = await subjectUnchanged(
+            ctl,
+            options.workflowId,
+            act.activation_id,
+            gate.id,
+            pinned as DecisionSubject,
+          )
+          if (!check.ok) {
+            moveAside(options.decisionDir, act.activation_id, gate.id, wait.decisionFile!)
+            log(
+              `bridge: ${gate.id} on ${act.activation_id} ${check.reason} before submit; dropping decision`,
+            )
+            continue
+          }
         }
         await ctl.call('workflow.command', { workflow_id: options.workflowId, command })
         // Archive only once the kernel accepted the decision; a failed record

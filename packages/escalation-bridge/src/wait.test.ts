@@ -4,7 +4,7 @@ import * as path from 'node:path'
 
 import { beforeEach, describe, expect, test } from 'bun:test'
 
-import { waitForDecision } from './wait.js'
+import { subjectUnchanged, waitForDecision } from './wait.js'
 import type { ControlClient, GateDefinition, WorkflowDetail } from './types.js'
 
 function parkedActivation(actId = 'act_1', nodeId = 'merge-auth') {
@@ -239,5 +239,58 @@ describe('waitForDecision', () => {
     await expect(waitForDecision(ctl, decisions, 'wf_1', 'act_1', evil, opts)).rejects.toThrow(
       /unsafe gate id/,
     )
+  })
+})
+
+describe('subjectUnchanged', () => {
+  // The pre-submit re-inspect of a bound-gate decision.
+  const PINNED = {
+    type: 'pull_request',
+    repository: 'org/repo',
+    pull_request: 123,
+    revision: 'abc123',
+  }
+
+  function inspectWith(act: Record<string, unknown>): WorkflowDetail {
+    return { activations: [act as never], gates: null, instance: { status: 'active' } }
+  }
+
+  function parkedWithPin(subject: Record<string, unknown>): Record<string, unknown> {
+    return {
+      ...parkedActivation(),
+      resolved_gates: { 'merge-authorization': { subject } },
+    }
+  }
+
+  test('ok when still parked with the same pinned subject', async () => {
+    const ctl = new FakeControl([inspectWith(parkedWithPin({ ...PINNED }))])
+    const result = await subjectUnchanged(ctl, 'wf_1', 'act_1', 'merge-authorization', PINNED)
+    expect(result.ok).toBe(true)
+    expect(result.reason).toBe('ok')
+  })
+
+  test('unparked when the activation resolved', async () => {
+    const ctl = new FakeControl([
+      inspectWith({ ...parkedWithPin({ ...PINNED }), status: 'satisfied' }),
+    ])
+    const result = await subjectUnchanged(ctl, 'wf_1', 'act_1', 'merge-authorization', PINNED)
+    expect(result.ok).toBe(false)
+    expect(result.reason).toBe('unparked')
+  })
+
+  test('subject changed when the pinned subject differs', async () => {
+    const ctl = new FakeControl([
+      inspectWith(parkedWithPin({ ...PINNED, revision: 'deadbeef' })),
+    ])
+    const result = await subjectUnchanged(ctl, 'wf_1', 'act_1', 'merge-authorization', PINNED)
+    expect(result.ok).toBe(false)
+    expect(result.reason).toBe('subject changed')
+  })
+
+  test('unparked when the activation is gone', async () => {
+    const ctl = new FakeControl([{ activations: null, gates: null }])
+    const result = await subjectUnchanged(ctl, 'wf_1', 'act_1', 'merge-authorization', PINNED)
+    expect(result.ok).toBe(false)
+    expect(result.reason).toBe('unparked')
   })
 })

@@ -152,4 +152,52 @@ describe('buildGateCommand', () => {
     const command = buildGateCommand('n', 'act_1', mergeAuthGate(), { ...decision, outcome: 'authorized' })
     expect(command.outcome).toBe('authorized')
   })
+
+  test('bound gate submits the pinned subject, not the transport\'s', () => {
+    // The transport supplies a different subject; a bound gate must submit
+    // exactly the pinned one, ignoring the transport's.
+    const transportSubject = {
+      type: 'pull_request',
+      repository: 'wrong/repo',
+      pull_request: 999,
+      revision: 'deadbeef',
+    }
+    const pinned = {
+      type: 'pull_request',
+      repository: 'org/repo',
+      pull_request: 123,
+      revision: 'abc123',
+    }
+    const command = buildGateCommand('wf_1', 'n', mergeAuthGate(), { ...decision, subject: transportSubject }, pinned)
+    expect(command.subject).toEqual(pinned)
+    expect(command.subject!.revision).toBe('abc123')
+    expect(command.subject!.pull_request).toBe(123)
+  })
+
+  test('bound gate requires no transport subject', () => {
+    // A bound gate submits the pinned subject even when the transport
+    // supplies none at all, and skips the subject_type validation that
+    // would otherwise reject the missing subject.
+    const { subject: _omitted, ...broken } = decision
+    const pinned = {
+      type: 'pull_request',
+      repository: 'org/repo',
+      pull_request: 123,
+      revision: 'abc123',
+    }
+    const command = buildGateCommand('wf_1', 'n', mergeAuthGate(), broken, pinned)
+    expect(command.subject).toEqual(pinned)
+  })
+
+  test('pinned substitution does not change the response hash', () => {
+    // Both bridges hash the transport's decision payload as delivered; the
+    // kernel-side subject substitution happens after hashing.
+    const command = buildGateCommand('n', 'act_1', mergeAuthGate(), decision, {
+      type: 'pull_request',
+      repository: 'org/repo',
+      pull_request: 123,
+      revision: 'abc123',
+    })
+    expect(command.response_hash).toBe(decisionResponseHash(decision))
+  })
 })

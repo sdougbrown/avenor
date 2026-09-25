@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 
-import type { Decision, GateCommand, GateDefinition } from './types.js'
+import type { Decision, DecisionSubject, GateCommand, GateDefinition } from './types.js'
 
 // String escaping matching Python's json.dumps(ensure_ascii=True): escapes
 // anything outside printable ASCII, including astral chars as surrogate
@@ -91,6 +91,7 @@ export function buildGateCommand(
   activationId: string,
   gate: GateDefinition,
   decision: Decision,
+  pinnedSubject?: DecisionSubject | null,
 ): GateCommand {
   if (!gate.id) throw new Error('gate definition is missing an id')
   const op = decision.decision
@@ -101,14 +102,24 @@ export function buildGateCommand(
   let reason = decision.reason
   if (!actor || !reason) throw new Error("decision requires 'actor' and 'reason'")
 
-  const subjectType = gate.subject_type
-  const subject = decision.subject
-  if (subjectType) {
-    if (!subject || subject.type !== subjectType) {
-      throw new Error(
-        `gate declares subject_type ${JSON.stringify(subjectType)}; decision.subject ` +
-          'must carry a matching non-empty type',
-      )
+  // The response hash covers the transport's decision payload as delivered —
+  // same as the Python bridge — so a bound gate's pinned substitution does
+  // not change what gets hashed.
+  let subject: DecisionSubject | undefined
+  if (pinnedSubject != null) {
+    // Bound gate: submit exactly the subject pinned on the activation, never
+    // one supplied by the transport or derived from latest outputs.
+    subject = { ...pinnedSubject }
+  } else {
+    const subjectType = gate.subject_type
+    subject = decision.subject
+    if (subjectType) {
+      if (!subject || subject.type !== subjectType) {
+        throw new Error(
+          `gate declares subject_type ${JSON.stringify(subjectType)}; decision.subject ` +
+            'must carry a matching non-empty type',
+        )
+      }
     }
   }
 
@@ -131,7 +142,9 @@ export function buildGateCommand(
     response_hash: responseHash,
     evidence_ids: evidenceIds,
   }
-  if (subject) command.subject = subject
+  // Mirror Python's `if subject:` — an empty dict is falsy there, so neither
+  // bridge emits a subject for an empty one.
+  if (subject && Object.keys(subject).length > 0) command.subject = subject
   if (decision.outcome) command.outcome = decision.outcome
   return command
 }

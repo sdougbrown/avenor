@@ -5,6 +5,13 @@ export interface GateDefinition {
   type?: string
   required?: boolean
   subject_type?: string
+  /**
+   * Declares the gate as bound: `from_node_output` references the kernel
+   * resolves along the causal provenance chain to pin an exact subject onto
+   * the activation (`resolved_gates[<gate_id>].subject`). Presence (not
+   * value) is what matters to the bridge; the shape is kernel-owned.
+   */
+  subject_binding?: { [key: string]: unknown } | null
   allowed_outcomes?: string[]
   [key: string]: unknown
 }
@@ -15,6 +22,18 @@ export interface Activation {
   node_id: string
   status: string
   selected_outcome?: string
+  /** Per-gate pins recorded when the activation was created. */
+  resolved_gates?: Record<string, ResolvedGate> | null
+  [key: string]: unknown
+}
+
+/** A gate's kernel-resolved pin on an activation (`resolved_gates[<id>]`).
+ *
+ * An unresolved pin omits `subject` (the kernel serializes it omitempty) and
+ * lists the fields that could not be resolved under `unresolved`. */
+export interface ResolvedGate {
+  subject?: DecisionSubject | null
+  unresolved?: string[]
   [key: string]: unknown
 }
 

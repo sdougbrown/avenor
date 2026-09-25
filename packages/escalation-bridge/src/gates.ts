@@ -1,6 +1,6 @@
 import * as fs from 'node:fs'
 
-import type { Activation, GateDefinition, OutputEntry, WorkflowDetail } from './types.js'
+import type { Activation, DecisionSubject, GateDefinition, OutputEntry, WorkflowDetail } from './types.js'
 
 /** Map node_id -> [gate definition] for human gates declared in the template. */
 export function loadHumanGates(templatePath: string): Map<string, GateDefinition[]> {
@@ -49,6 +49,17 @@ export function* pendingHumanGates(
       yield [act, gate]
     }
   }
+}
+
+/** Return the gate's pinned subject from the activation's resolved_gates.
+ *
+ * A bound gate's subject is pinned onto the activation when it is created
+ * (resolved_gates[gate_id].subject). Returns the subject when resolved, or
+ * null when the gate is unbound, has no pin, or its pin is unresolved. */
+export function pinnedSubject(activation: Activation, gateId: string): DecisionSubject | null {
+  const resolved = (activation.resolved_gates ?? {})[gateId]
+  if (!resolved) return null
+  return resolved.subject ?? null
 }
 
 /** Map definition_id -> decoded value, keeping the highest revision per output. */

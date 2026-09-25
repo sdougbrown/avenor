@@ -1,7 +1,9 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 
-import type { ControlClient, Decision, GateDefinition, WorkflowDetail } from './types.js'
+import type { ControlClient, Decision, DecisionSubject, GateDefinition, WorkflowDetail } from './types.js'
+import { pinnedSubject } from './gates.js'
+import { stableStringify } from './command.js'
 
 export interface WaitForDecisionOptions {
   gateTimeoutMs: number
@@ -140,4 +142,34 @@ export function moveAside(
   const rejected = path.join(rejectedDir, `${activationId}-${gateId}-${Math.floor(Date.now() / 1000)}.json`)
   fs.renameSync(from, rejected)
   return rejected
+}
+
+/** Pre-submit re-inspect result for a bound-gate decision. */
+export interface SubjectUnchangedResult {
+  ok: boolean
+  reason: 'ok' | 'unparked' | 'subject changed'
+}
+
+/** Re-inspect before submitting a bound-gate decision.
+ *
+ * Confirms the activation is still awaiting_gate and its pinned subject is
+ * unchanged since the question was asked: a new head creates a new activation
+ * with a new pin, so a decision made against the old subject must be dropped,
+ * not submitted. */
+export async function subjectUnchanged(
+  ctl: ControlClient,
+  workflowId: string,
+  activationId: string,
+  gateId: string,
+  expectedSubject: DecisionSubject,
+): Promise<SubjectUnchangedResult> {
+  const detail = (await ctl.call('workflow.inspect', {
+    workflow_id: workflowId,
+  })) as WorkflowDetail
+  const act = (detail.activations ?? []).find((a) => a.activation_id === activationId)
+  if (!act || act.status !== 'awaiting_gate') return { ok: false, reason: 'unparked' }
+  if (stableStringify(pinnedSubject(act, gateId)) !== stableStringify(expectedSubject)) {
+    return { ok: false, reason: 'subject changed' }
+  }
+  return { ok: true, reason: 'ok' }
 }
