@@ -306,8 +306,7 @@ func TestParkExternalRevisionKeptMovingExhausts(t *testing.T) {
 	calls := 0
 	var sideLease LeaseID
 	var sideToken string
-	orig := parkExternalPreCommit
-	parkExternalPreCommit = func() {
+	m.testHooks.parkExternalPreCommit = func() {
 		calls++
 		side := activationByNode(mustLoadInstance(t, s, wf), "side")
 		if side == nil {
@@ -324,7 +323,6 @@ func TestParkExternalRevisionKeptMovingExhausts(t *testing.T) {
 			t.Errorf("heartbeat side: %v", err)
 		}
 	}
-	t.Cleanup(func() { parkExternalPreCommit = orig })
 
 	_, err := m.ParkExternal(ParkExternalRequest{
 		WorkflowID:       wf,

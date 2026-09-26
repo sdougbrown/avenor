@@ -422,9 +422,8 @@ func TestFinalizeDispatchRetriesRevisionMismatch(t *testing.T) {
 
 	// While FinalizeDispatch sits in its read window, a claim on the manual
 	// side node commits and moves the revision.
-	orig := finalizeDispatchPreCommit
-	finalizeDispatchPreCommit = func() {
-		finalizeDispatchPreCommit = orig
+	m.testHooks.finalizeDispatchPreCommit = func() {
+		m.testHooks.finalizeDispatchPreCommit = nil
 		side := activationByNode(mustLoadInstance(t, s, wf), "side")
 		if side == nil {
 			t.Error("side activation not found")
@@ -432,7 +431,6 @@ func TestFinalizeDispatchRetriesRevisionMismatch(t *testing.T) {
 		}
 		mustClaimWorkflow(t, m, wf, "side", side.ID, "manual-1")
 	}
-	t.Cleanup(func() { finalizeDispatchPreCommit = orig })
 
 	err = m.FinalizeDispatch(FinalizeDispatchRequest{
 		WorkflowID:   wf,

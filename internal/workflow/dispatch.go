@@ -26,16 +26,6 @@ var ErrConcurrencyKeyHeld = errors.New("concurrency key is held by a live attemp
 // with the selection already pinned on the activation. No event is appended.
 var ErrSelectionConflict = errors.New("selection conflicts with the pinned selection")
 
-// beginDispatchPreCommit, when non-nil (set by tests), runs after the
-// snapshot read and key check but before the attempt commit so a concurrent
-// command can land in the read–commit window deterministically.
-var beginDispatchPreCommit func()
-
-// finalizeDispatchPreCommit, when non-nil (set by tests), runs after the
-// snapshot read but before the identify commit so a concurrent command can
-// land in the read–commit window deterministically.
-var finalizeDispatchPreCommit func()
-
 // BeginDispatchRequest asks the manager to claim one candidate activation and
 // record its attempt intent in a single atomic command.
 type BeginDispatchRequest struct {
@@ -231,8 +221,8 @@ func (m *Manager) BeginDispatch(req BeginDispatchRequest) (BeginDispatchResult, 
 	if held[concurrencyKey] {
 		return BeginDispatchResult{}, ErrConcurrencyKeyHeld
 	}
-	if beginDispatchPreCommit != nil {
-		beginDispatchPreCommit()
+	if h := m.testHooks.beginDispatchPreCommit; h != nil {
+		h()
 	}
 	tmpl, err := m.templateFor(&snap)
 	if err != nil {
@@ -309,8 +299,8 @@ func (m *Manager) FinalizeDispatch(req FinalizeDispatchRequest) error {
 		if !exists {
 			return fmt.Errorf("workflow not found: %s", req.WorkflowID)
 		}
-		if attempt == 0 && finalizeDispatchPreCommit != nil {
-			finalizeDispatchPreCommit()
+		if attempt == 0 && m.testHooks.finalizeDispatchPreCommit != nil {
+			m.testHooks.finalizeDispatchPreCommit()
 		}
 		_, err = m.store.ApplyCommand(req.WorkflowID, Command{
 			ID:               NewCommandID(),

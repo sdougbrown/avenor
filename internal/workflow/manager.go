@@ -20,8 +20,27 @@ import (
 	"time"
 )
 
+// testHooks holds pre-commit seams used by tests to deterministically
+// interleave concurrent commands with the manager's read–commit windows.
+type testHooks struct {
+	// beginDispatchPreCommit runs after the snapshot read and key check but
+	// before the attempt commit.
+	beginDispatchPreCommit func()
+	// finalizeDispatchPreCommit runs after the snapshot read but before the
+	// identify commit.
+	finalizeDispatchPreCommit func()
+	// parkExternalPreCommit runs after the snapshot read and revalidation
+	// checks but before the park commit.
+	parkExternalPreCommit func()
+}
+
 type Manager struct {
 	store *Store
+
+	// testHooks holds seams set only by tests. nil in production; tests set
+	// them on the instance they drive to make concurrent commands land
+	// deterministically inside read–commit windows.
+	testHooks testHooks
 
 	mu        sync.Mutex
 	executors map[ActionKind]Executor
