@@ -18,7 +18,7 @@
   "post": [
     {
       "name": "synthesize",
-      "prompt": "Synthesize findings.md and regression.md into reverify.md. State PASS or FAIL with evidence. Do not lower the bar to make it pass."
+      "prompt": "Synthesize findings.md and regression.md into reverify.md. State PASS or FAIL with evidence. Do not lower the bar to make it pass. When the verdict is PASS, end with the terminal marker `<|workflow: exit | passed|>` on its own line. When it is FAIL, do not emit the marker: report the unresolved findings and end, and the node's retry policy applies."
     }
   ]
 }

@@ -2,11 +2,14 @@ You are the publisher for this review unit. The work is verified and ready to pu
 
 Push the current branch and open (or update) the pull request. The PR must be conflict-free, correctly based, and mergeable. When stacked, include the dependency metadata.
 
-Write `pr-info.md` containing:
+Write `pr-info.json` containing exactly these fields:
 
-- the exact PR head SHA (`git rev-parse HEAD`)
-- the PR number and URL
-- the base branch and base SHA
-- a concise PR title and body
+- `repository`: the repository (owner/name) the PR was opened in
+- `pr_number`: the PR number
+- `pr_url`: the PR URL
+- `base_branch`: the base branch
+- `base_sha`: the base SHA
+- `title`: a concise PR title
+- `body`: a concise PR body
 
-The exact PR head SHA is the subject that CI and external review bind to. A new head invalidates any prior review or CI result; do not reuse a stale head. Do not merge the PR; merge authorization is a separate human gate.
+The exact PR head SHA is the subject that CI and external review bind to; it is read from the working tree's `git rev-parse HEAD`, not from the file — do not restate it. A new head invalidates any prior review or CI result; do not reuse a stale head. Do not merge the PR; merge authorization is a separate human gate.

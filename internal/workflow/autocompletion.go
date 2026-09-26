@@ -114,10 +114,11 @@ func autoCompletionOutcome(tmpl *Template, node *NodeDefinition, markerLabel str
 	return "", fmt.Errorf("node declares %d candidate outcomes and no terminal marker selected one of them", len(vocabulary))
 }
 
-// declaredOutcomeVocabulary lists, in declaration order, every outcome name
-// the node and template declare: branch keys, node outcomes, template
-// terminal outcomes, and checkpoint exit outcomes — the same names
-// resolveOutcome accepts.
+// declaredOutcomeVocabulary lists, in declaration order, the outcome names
+// the completion is selected from: the node's own declared outcomes (branch
+// keys, node outcomes, checkpoint exits) when it declares any, falling back
+// to the template's terminal outcomes for a node with no declared outcomes —
+// the same names resolveOutcome accepts.
 func declaredOutcomeVocabulary(tmpl *Template, node *NodeDefinition) []OutcomeName {
 	seen := make(map[OutcomeName]bool)
 	var out []OutcomeName
@@ -134,11 +135,13 @@ func declaredOutcomeVocabulary(tmpl *Template, node *NodeDefinition) []OutcomeNa
 	for _, def := range node.Outcomes {
 		add(def.Name)
 	}
-	for _, name := range tmpl.TerminalOutcomes {
-		add(name)
-	}
 	if node.Checkpoint != nil {
 		for _, name := range node.Checkpoint.ExitOutcomes {
+			add(name)
+		}
+	}
+	if len(out) == 0 {
+		for _, name := range tmpl.TerminalOutcomes {
 			add(name)
 		}
 	}

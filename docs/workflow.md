@@ -174,6 +174,19 @@ hashes the supplied artifacts and validates the declared outputs and outcome.
 A `files` or `git` contract cannot complete before the attempt reaches a
 terminal status.
 
+An auto-dispatched `run`, `loop`, or `team` node is completed by the
+supervisor itself when its attempt exits successfully — the worker never
+sees the owner token and files no completion. The supervisor evaluates the
+declared contract against the attempt's working directory: the outcome comes
+from the node's declared outcome vocabulary when it has exactly one
+candidate, otherwise from the loop/team terminal marker label; the files/git
+requirements and the declared output sources are checked against the work
+product. A contract that is not met is recorded as a failed attempt with the
+`contract_unmet` marker, so the node's retry policy and exhaustion apply.
+For that reason an auto provider node must not declare `completion.kind:
+explicit` — such templates are rejected. Manual nodes and external nodes
+keep explicit worker/operator handoff.
+
 ### Outputs
 
 Each node declares typed outputs. The `workflow.complete` command supplies
@@ -181,6 +194,22 @@ values for the declared output definitions. Output types: `string`, `number`,
 `boolean`, `json`, `file`. A `file` output references the staged artifact
 evidence. Output values are append-only revisions: a later authorized
 activation can produce a new revision without mutating prior facts.
+
+An output may declare a `source`, which the supervisor's auto-completion
+resolves against the attempt's working directory:
+
+| Source | Resolves to |
+|---|---|
+| `{"artifact": "path"}` | The whole declared artifact (file outputs): the output value is the artifact path, bound to the staged evidence. |
+| `{"artifact": "path", "pointer": "/json/pointer"}` | One RFC 6901 pointer location inside a JSON artifact; the resolved value must match the declared output type. |
+| `{"git": "head"}` | `git rev-parse HEAD` in the attempt's working directory (string outputs). |
+
+An `artifact` source path must be one of the node's `files` contract
+artifacts, a `pointer` requires an `artifact`, and exactly one of `artifact`
+or `git` may be declared. Without a `source`, a `file` output on a node
+whose files contract declares exactly one artifact binds to that artifact.
+Required outputs that do not resolve leave the contract unmet; optional
+ones are omitted.
 
 ### Dispatch policy
 
@@ -198,7 +227,9 @@ started explicitly, and ordinary `avenor_spawn` behavior is unaffected.
 
 `mode: auto` is limited to `run`, `loop`, and `team` nodes, and to `external`
 nodes that declare a `success_outcome` with at least one required external
-gate.
+gate. An auto `run`, `loop`, or `team` node must not declare
+`completion.kind: explicit`: the supervisor completes it from the declared
+contract, and no worker handoff exists.
 
 ## Instantiation
 
@@ -284,7 +315,9 @@ lease, allocates an `attempt_id`, and dispatches the declared action.
 
 ### The claim → start → complete cycle
 
-For a provider-backed node (`run`/`loop`/`team`):
+For a manual provider-backed node (`run`/`loop`/`team` without `mode:
+auto`); an auto node is completed by the supervisor instead (see
+[Completion](#completion)):
 
 ```sh
 # 1. Claim (control method) → lease_id, owner_token.

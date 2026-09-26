@@ -136,13 +136,13 @@
         "concurrency_key": { "prefix": "worktree:", "from_instance_param": "worktree" }
       },
       "outputs": [
-        { "id": "repository", "name": "Repository", "type": "string", "required": true },
-        { "id": "pr_head", "name": "PR head SHA", "type": "string", "required": true },
-        { "id": "pr_number", "name": "PR number", "type": "number", "required": true }
+        { "id": "repository", "name": "Repository", "type": "string", "required": true, "source": { "artifact": "pr-info.json", "pointer": "/repository" } },
+        { "id": "pr_head", "name": "PR head SHA", "type": "string", "required": true, "source": { "git": "head" } },
+        { "id": "pr_number", "name": "PR number", "type": "number", "required": true, "source": { "artifact": "pr-info.json", "pointer": "/pr_number" } }
       ],
       "completion": {
         "kind": "files",
-        "artifacts": [{ "path": "pr-info.md", "non_empty": true }]
+        "artifacts": [{ "path": "pr-info.json", "non_empty": true }]
       },
       "branches": { "published": "review" }
     },
@@ -327,7 +327,8 @@
       "completion": {
         "kind": "files",
         "artifacts": [{ "path": "reconciliation.md", "non_empty": true }]
-      }
+      },
+      "outcomes": [{ "name": "merged", "terminal": true }]
     }
   ],
   "terminal_outcomes": ["merged", "abandoned"],

@@ -340,7 +340,7 @@ func (f *factoryE2E) driveThroughPublication(t *testing.T, repository string, pu
 			{"definition_id": "pr_number", "value": pullNumber},
 			{"definition_id": "pr_head", "value": head},
 		},
-		[]map[string]any{factoryArtifact(t, "pr-info.md", "PR 143 head "+head)})
+		[]map[string]any{factoryArtifact(t, "pr-info.json", "PR 143 head "+head)})
 }
 
 // findCursor returns the poll cursor for one activation's gate.
@@ -482,7 +482,7 @@ func TestFactoryWorkChangesRequestedCorrectsAndRepublishes(t *testing.T) {
 			{"definition_id": "pr_number", "value": 143},
 			{"definition_id": "pr_head", "value": "def456"},
 		},
-		[]map[string]any{factoryArtifact(t, "pr-info.md", "PR 143 head def456")})
+		[]map[string]any{factoryArtifact(t, "pr-info.json", "PR 143 head def456")})
 
 	// A fresh review activation parks on the new subject; the old cursor is
 	// obsolete and the old activation can never land another result.

@@ -131,21 +131,27 @@ Instantiation returns the `workflow_id`. Every later command takes it.
 ### 3. Drive the human nodes
 
 The controller dispatches every auto node itself — claiming ready nodes,
-starting their actions, and parking the review node — while a manual claim on
-an auto node remains valid (the kernel claim is the race arbiter). Only the
-manual nodes need a human:
+starting their actions, and recording the attempt's terminal facts. On a
+successful exit the supervisor completes an auto node from the node's
+declared contract: the selected outcome, the artifact/output sources, and
+the files/git requirements. A clean exit that does not meet the contract is
+recorded as a failed attempt (`contract_unmet`) and the node's retry policy
+applies. Only the manual nodes need a human — intake, hardening,
+merge-auth, and advisor:
 
 ```sh
-# Complete a run node with evidence and a declared outcome.
+# Complete a manual node with evidence and a declared outcome.
 avenor workflow complete --socket /path/to/socket \
-  <workflow-id> assessment \
+  <workflow-id> intake \
   --activation-id <act> --attempt-id <attempt> --lease-id <lease> \
-  --request-file /tmp/complete-assessment.json
+  --request-file /tmp/complete-intake.json
 ```
 
 A complete request file carries `owner_token`, `outcome`, `outputs`, and
 `artifacts`. The `outcome` must be a declared branch key or a template
-terminal outcome — undeclared outcomes are rejected.
+terminal outcome — undeclared outcomes are rejected. Manual claim/start of
+an auto node remains possible (the kernel claim is the race arbiter), but an
+auto node is always completed by the supervisor, never by hand.
 
 ### 4. Resolve the review gates
 

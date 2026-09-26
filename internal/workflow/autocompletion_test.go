@@ -68,6 +68,18 @@ func TestEvaluateAutoCompletionTerminalOutcomeVocabulary(t *testing.T) {
 		t.Fatalf("outcome = %q, want done", plan.Outcome)
 	}
 
+	// A node that declares its own outcomes is not widened by the template's
+	// terminal outcomes: one declared branch stays the single candidate even
+	// in a multi-terminal template.
+	tmpl = evalTemplate(autoEvalNode(nil, nil, map[OutcomeName]NodeID{"done": "next"}), "done", "abandoned")
+	plan, err = EvaluateAutoCompletion(tmpl, &tmpl.Nodes[0], t.TempDir(), "")
+	if err != nil {
+		t.Fatalf("EvaluateAutoCompletion: %v", err)
+	}
+	if plan.Outcome != "done" {
+		t.Fatalf("outcome = %q, want done (the node's only declared outcome)", plan.Outcome)
+	}
+
 	// Two candidates and no marker: contract unmet.
 	tmpl = evalTemplate(autoEvalNode(nil, nil, map[OutcomeName]NodeID{"passed": "x", "failed": "x"}), "done")
 	if _, err := EvaluateAutoCompletion(tmpl, &tmpl.Nodes[0], t.TempDir(), ""); err == nil ||
