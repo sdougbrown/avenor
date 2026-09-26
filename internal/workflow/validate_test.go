@@ -534,3 +534,60 @@ func mutateOpenLeafTemplate(t *testing.T, mutate func(map[string]any)) []byte {
 	}
 	return data
 }
+
+// workflowActionTemplate builds a minimal valid template whose single node is a
+// workflow action composing child@1 under childKey with the given child param
+// bindings.
+func workflowActionTemplate(params []ChildParamBinding) Template {
+	return Template{
+		SchemaVersion:   1,
+		TemplateID:      "comp-parent",
+		TemplateVersion: "1",
+		EntryNodes:      []NodeID{"spawn"},
+		Nodes: []NodeDefinition{{
+			ID: "spawn",
+			Action: Action{Kind: ActionWorkflow, Workflow: &WorkflowAction{
+				TemplateID:      "comp-child",
+				TemplateVersion: "1",
+				ChildKey:        "c1",
+				OutcomeMap:      map[OutcomeName]OutcomeName{"done": "done"},
+				Params:          params,
+			}},
+		}},
+		TerminalOutcomes: []OutcomeName{"done"},
+	}
+}
+
+// TestValidateTemplateRejectsDuplicateChildParamBindings pins that a workflow
+// action whose params bindings name the same child param twice is rejected,
+// rather than letting the last binding silently win at resolve time.
+func TestValidateTemplateRejectsDuplicateChildParamBindings(t *testing.T) {
+	tmpl := workflowActionTemplate([]ChildParamBinding{
+		{Param: "worktree", Value: "avenor-issue-1"},
+		{Param: "worktree", FromInstanceParam: "worktree"},
+	})
+	if err := ValidateTemplate(tmpl); err == nil || !strings.Contains(err.Error(), "duplicate param \"worktree\"") {
+		t.Fatalf("ValidateTemplate() error = %v, want duplicate param \"worktree\"", err)
+	}
+}
+
+// TestValidateTemplateChildParamBindingRequiresExactlyOneSource pins the
+// exactly-one guard on a child param binding: a binding that sets both value
+// and from_instance_param, and one that sets neither, are both rejected.
+func TestValidateTemplateChildParamBindingRequiresExactlyOneSource(t *testing.T) {
+	tests := []struct {
+		name    string
+		binding ChildParamBinding
+	}{
+		{name: "both value and from_instance_param", binding: ChildParamBinding{Param: "worktree", Value: "avenor-issue-1", FromInstanceParam: "worktree"}},
+		{name: "neither value nor from_instance_param", binding: ChildParamBinding{Param: "worktree"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			tmpl := workflowActionTemplate([]ChildParamBinding{test.binding})
+			if err := ValidateTemplate(tmpl); err == nil || !strings.Contains(err.Error(), "requires exactly one of value or from_instance_param") {
+				t.Fatalf("ValidateTemplate() error = %v, want requiring exactly one of value or from_instance_param", err)
+			}
+		})
+	}
+}

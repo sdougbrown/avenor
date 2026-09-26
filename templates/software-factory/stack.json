@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "template_id": "software-factory-stack",
+  "template_version": "1.1.0",
+  "metadata": {
+    "title": "Software factory review stack",
+    "description": "A bounded parent workflow whose planning node records a typed, immutable stack topology and whose kernel-local workflow actions compose logical PR review-unit children (one software-factory-work workflow per unit). The parent owns only declared composition and typed handoff: no campaign coordination, no cross-workflow inference, no merge authority.",
+    "source": "https://github.com/sdougbrown/avenor"
+  },
+  "entry_nodes": ["plan-stack"],
+  "nodes": [
+    {
+      "id": "plan-stack",
+      "name": "Plan review stack",
+      "action": {
+        "type": "manual",
+        "instructions": "A human (or a planning workflow run elsewhere) decides the logical PR stack: the ordered review units, each with its verbatim issue body and exact base SHA. Record the typed topology as the stack artifact and complete this node with each unit's issue and base SHA. The topology is immutable once recorded; re-planning means instantiating a new parent."
+      },
+      "outputs": [
+        { "id": "topology", "name": "Stack topology", "type": "file", "required": true },
+        { "id": "unit_1_issue", "name": "Unit 1 issue", "type": "string", "required": true },
+        { "id": "unit_1_base_sha", "name": "Unit 1 base SHA", "type": "string", "required": true },
+        { "id": "unit_2_issue", "name": "Unit 2 issue", "type": "string", "required": true },
+        { "id": "unit_2_base_sha", "name": "Unit 2 base SHA", "type": "string", "required": true }
+      ],
+      "completion": { "kind": "explicit" },
+      "branches": { "ready": "review-unit-1" }
+    },
+    {
+      "id": "review-unit-1",
+      "name": "Review unit 1",
+      "dependencies": ["plan-stack"],
+      "action": {
+        "type": "workflow",
+        "template_id": "software-factory-work",
+        "template_version": "1.2.0",
+        "child_key": "unit-1",
+        "params": [
+          { "param": "worktree", "value": "avenor-issue-115" }
+        ],
+        "input_bindings": [
+          { "input": "issue", "from": { "node_id": "plan-stack", "output_id": "unit_1_issue" } },
+          { "input": "base_sha", "from": { "node_id": "plan-stack", "output_id": "unit_1_base_sha" } }
+        ],
+        "outcome_map": { "merged": "unit_merged", "abandoned": "abandoned" }
+      },
+      "outcomes": [
+        { "name": "unit_merged", "target_node_id": "review-unit-2" }
+      ],
+      "branches": { "unit_merged": "review-unit-2" }
+    },
+    {
+      "id": "review-unit-2",
+      "name": "Review unit 2",
+      "dependencies": ["review-unit-1"],
+      "action": {
+        "type": "workflow",
+        "template_id": "software-factory-work",
+        "template_version": "1.2.0",
+        "child_key": "unit-2",
+        "params": [
+          { "param": "worktree", "value": "avenor-issue-130" }
+        ],
+        "input_bindings": [
+          { "input": "issue", "from": { "node_id": "plan-stack", "output_id": "unit_2_issue" } },
+          { "input": "base_sha", "from": { "node_id": "plan-stack", "output_id": "unit_2_base_sha" } }
+        ],
+        "outcome_map": { "merged": "done", "abandoned": "abandoned" }
+      }
+    }
+  ],
+  "terminal_outcomes": ["done", "abandoned"],
+  "default_lease_policy": { "ttl_seconds": 900, "heartbeat_interval_seconds": 300 },
+  "default_retry_policy": { "max_attempts": 2, "exhaustion": "block" },
+  "composition_limits": { "max_depth": 1, "max_children": 4 }
+}

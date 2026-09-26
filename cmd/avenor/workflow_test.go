@@ -403,3 +403,74 @@ func TestWorkflowCLIArgErrors(t *testing.T) {
 		t.Fatalf("no-subcommand stderr: %q", errBuf.String())
 	}
 }
+
+const workflowCLIParamsTemplateJSON = `{
+  "schema_version": 1,
+  "template_id": "cli-params",
+  "template_version": "1",
+  "entry_nodes": ["start"],
+  "params": [{"id": "worktree", "type": "string", "required": true}],
+  "nodes": [{"id": "start", "action": {"type": "manual"}}],
+  "terminal_outcomes": ["done"]
+}`
+
+// TestWorkflowCLIInstantiateParamsRoundTrip drives the instantiate CLI with a
+// params object and asserts the server recorded them on the instance, proving
+// params reach the server end-to-end (not just metadata).
+func TestWorkflowCLIInstantiateParamsRoundTrip(t *testing.T) {
+	root := t.TempDir()
+	store := workflow.New(root)
+	mgr := workflow.NewManager(store)
+
+	srv := control.NewServer(control.NewState("run_cli_params", "", 0))
+	srv.SetWorkflowHandler(mgr)
+	sock := filepath.Join(t.TempDir(), "control.sock")
+	if err := srv.Start(sock); err != nil {
+		t.Fatalf("start control server: %v", err)
+	}
+	t.Cleanup(srv.Stop)
+
+	dir := t.TempDir()
+	tmplPath := filepath.Join(dir, "template.json")
+	if err := os.WriteFile(tmplPath, []byte(workflowCLIParamsTemplateJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	instPath := filepath.Join(dir, "instance.json")
+	if err := os.WriteFile(instPath, []byte(`{"metadata":{"a":1},"params":{"worktree":"avenor-cli-130"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(args ...string) (string, int) {
+		var out, errBuf bytes.Buffer
+		code := runWorkflowTo(append([]string{"--socket", sock}, args...), &out, &errBuf)
+		if code != 0 {
+			t.Logf("stderr for %v: %s", args, errBuf.String())
+		}
+		return out.String(), code
+	}
+
+	out, code := run("create", "--request-file", tmplPath)
+	if code != 0 {
+		t.Fatalf("create: exit %d", code)
+	}
+	out, code = run("instantiate", "--template-id", "cli-params", "--template-version", "1", "--request-file", instPath)
+	if code != 0 {
+		t.Fatalf("instantiate: exit %d", code)
+	}
+	var inst struct {
+		WorkflowID string `json:"workflow_id"`
+	}
+	if err := json.Unmarshal([]byte(out), &inst); err != nil || inst.WorkflowID == "" {
+		t.Fatalf("instantiate output: %s", out)
+	}
+
+	// The server must have recorded the params on the instance.
+	insp, err := mgr.WorkflowInspect(inst.WorkflowID)
+	if err != nil {
+		t.Fatalf("inspect: %v", err)
+	}
+	wfInst := insp.(map[string]any)["instance"].(workflow.WorkflowInstance)
+	if got := wfInst.Params["worktree"]; got != "avenor-cli-130" {
+		t.Fatalf("server recorded worktree = %q, want avenor-cli-130", got)
+	}
+}

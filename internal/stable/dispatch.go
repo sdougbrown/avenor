@@ -2,12 +2,15 @@ package stable
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/admission"
+	"github.com/sdougbrown/avenor/internal/rosterconfig"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/spawnselection"
 	"github.com/sdougbrown/avenor/internal/workflow"
@@ -54,7 +57,11 @@ type DispatchRequest struct {
 	ControllerID     string
 	LeaderLeaseID    string
 	OwnerEpoch       int64
-	Selection        *workflow.ExecutionSelection
+	// Selection pins the execution selection for this dispatch. Nil means the
+	// node's declared assignment is resolved here: an already-pinned
+	// activation (a retry) keeps its pin unchanged, otherwise the assignment
+	// resolves through the roster and spawn-selection rules.
+	Selection *workflow.ExecutionSelection
 }
 
 // DispatchOutcome reports the result of one dispatch attempt. Only
@@ -88,17 +95,32 @@ func (s *Supervisor) dispatchWorkflowNode(ctx context.Context, req DispatchReque
 		return out, err
 	}
 
-	// Validate the declared selection against the same spawn-selection and
+	// Resolve the effective selection before anything is reserved: a pinned
+	// selection (a retry) is used unchanged, otherwise the node's declared
+	// assignment resolves through the roster path. A resolution failure is a
+	// start_failed-class outcome with no reservation held and no event
+	// appended; the node stays a candidate for operator attention.
+	selection := req.Selection
+	if selection == nil {
+		selection, err = s.resolveDispatchSelection(mgr, req.WorkflowID, req.NodeID, req.ActivationID)
+		if err != nil {
+			out.Kind = DispatchStartFailed
+			out.Detail = err.Error()
+			return out, nil
+		}
+	}
+
+	// Validate the effective selection against the same spawn-selection and
 	// thinking rules the ordinary spawn path enforces.
-	if req.Selection != nil {
+	if selection != nil {
 		if err := spawnselection.Validate(spawnselection.Input{
-			Agent:   req.Selection.Agent,
-			Model:   req.Selection.Model,
-			Backend: req.Selection.Backend,
+			Agent:   selection.Agent,
+			Model:   selection.Model,
+			Backend: selection.Backend,
 		}, false); err != nil {
 			return out, err
 		}
-		if err := runtime.ValidateThinkingForBackend(req.Selection.Backend, req.Selection.Thinking); err != nil {
+		if err := runtime.ValidateThinkingForBackend(selection.Backend, selection.Thinking); err != nil {
 			return out, err
 		}
 	}
@@ -148,7 +170,7 @@ func (s *Supervisor) dispatchWorkflowNode(ctx context.Context, req DispatchReque
 			ExpectedRevision: req.ExpectedRevision,
 			ControllerID:     req.ControllerID,
 			LeaderLeaseID:    req.LeaderLeaseID,
-			Selection:        req.Selection,
+			Selection:        selection,
 		})
 		return nil
 	})
@@ -428,4 +450,114 @@ func (s *Supervisor) runtimeForAttempt(attemptID string) (runtimeID, sessionID s
 		return "", ""
 	}
 	return child.id, child.sessionID()
+}
+
+// resolveDispatchSelection resolves the execution selection for one
+// controller dispatch of a node whose request carries no selection. A pinned
+// activation (a retry) keeps its pin unchanged; otherwise the node's
+// declared assignment resolves through the roster and spawn-selection rules
+// via resolveAssignmentSelection. A node with no declared assignment
+// dispatches without a pin.
+func (s *Supervisor) resolveDispatchSelection(mgr *workflow.Manager, workflowID, nodeID, activationID string) (*workflow.ExecutionSelection, error) {
+	insp, err := mgr.WorkflowInspect(workflowID)
+	if err != nil {
+		return nil, err
+	}
+	inst, ok := insp.(map[string]any)["instance"].(workflow.WorkflowInstance)
+	if !ok {
+		return nil, fmt.Errorf("workflow %s: unreadable instance", workflowID)
+	}
+	var act *workflow.Activation
+	for i := range inst.Activations {
+		if inst.Activations[i].ID == workflow.ActivationID(activationID) && inst.Activations[i].NodeID == workflow.NodeID(nodeID) {
+			act = &inst.Activations[i]
+			break
+		}
+	}
+	if act == nil {
+		return nil, fmt.Errorf("workflow %s: activation %s not found for node %s", workflowID, activationID, nodeID)
+	}
+	if act.Selection != nil {
+		return act.Selection, nil
+	}
+	tmpl, err := mgr.Store().LoadTemplate(inst.TemplateID, inst.TemplateVersion)
+	if err != nil {
+		return nil, fmt.Errorf("workflow %s: load template %s@%s: %w", workflowID, inst.TemplateID, inst.TemplateVersion, err)
+	}
+	var assignment *workflow.Assignment
+	for i := range tmpl.Nodes {
+		if tmpl.Nodes[i].ID == workflow.NodeID(nodeID) {
+			assignment = tmpl.Nodes[i].Assignment
+			break
+		}
+	}
+	return resolveAssignmentSelection(assignment)
+}
+
+// resolveAssignmentSelection resolves a node's declared assignment into an
+// execution selection through the same roster and spawn-selection rules the
+// direct spawn path enforces: the roster entry supplies the complete
+// backend/agent/model identity, the roster file's SHA-256 digest pins the
+// configuration the selection was resolved from, and thinking is validated
+// for the effective backend. A nil or empty assignment resolves to nil (no
+// pin). It is shared by the automatic dispatch boundary and the manual
+// start path's assignment resolution.
+func resolveAssignmentSelection(assignment *workflow.Assignment) (*workflow.ExecutionSelection, error) {
+	if assignment == nil || assignmentEmpty(assignment) {
+		return nil, nil
+	}
+	if err := spawnselection.Validate(spawnselection.Input{
+		Agent:       assignment.Agent,
+		Model:       assignment.Model,
+		Backend:     assignment.Backend,
+		RosterFile:  assignment.RosterFile,
+		RosterEntry: assignment.RosterEntry,
+	}, false); err != nil {
+		return nil, fmt.Errorf("node assignment: %w", err)
+	}
+	selection := &workflow.ExecutionSelection{
+		Role:    assignment.Role,
+		Backend: assignment.Backend,
+		Agent:   assignment.Agent,
+		Model:   assignment.Model,
+	}
+	if assignment.RosterEntry != "" {
+		roster, err := rosterconfig.Load(assignment.RosterFile)
+		if err != nil {
+			return nil, fmt.Errorf("node assignment: %w", err)
+		}
+		entry, err := roster.Lookup(assignment.RosterEntry)
+		if err != nil {
+			return nil, fmt.Errorf("node assignment: %w", err)
+		}
+		selection.Backend, selection.Agent, selection.Model = entry.Backend, entry.Agent, entry.Model
+		digest, err := rosterFileDigest(assignment.RosterFile)
+		if err != nil {
+			return nil, fmt.Errorf("node assignment: %w", err)
+		}
+		selection.RosterDigest = digest
+	}
+	if err := runtime.ValidateThinkingForBackend(selection.Backend, assignment.Thinking); err != nil {
+		return nil, fmt.Errorf("node assignment: %w", err)
+	}
+	selection.Thinking = assignment.Thinking
+	return selection, nil
+}
+
+// assignmentEmpty reports whether an assignment declares nothing to resolve.
+func assignmentEmpty(assignment *workflow.Assignment) bool {
+	return assignment.Role == "" && assignment.RosterFile == "" && assignment.RosterEntry == "" &&
+		assignment.Backend == "" && assignment.Agent == "" && assignment.Model == "" && assignment.Thinking == ""
+}
+
+// rosterFileDigest returns the "sha256:<hex>" digest of a roster file's
+// bytes, the immutable fingerprint pinned with the selection the roster
+// resolved.
+func rosterFileDigest(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read roster file: %w", err)
+	}
+	sum := sha256.Sum256(data)
+	return "sha256:" + hex.EncodeToString(sum[:]), nil
 }

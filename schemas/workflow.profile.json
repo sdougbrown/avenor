@@ -52,6 +52,12 @@
       },
       "composition_limits": {
         "$ref": "#/$defs/composition_limits"
+      },
+      "params": {
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/template_param"
+        }
       }
     },
     "required": [
@@ -251,6 +257,12 @@
                 "type": "array",
                 "items": {
                   "$ref": "#/$defs/output_binding"
+                }
+              },
+              "params": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/child_param_binding"
                 }
               },
               "outcome_map": {
@@ -625,6 +637,47 @@
         ],
         "additionalProperties": false
       },
+      "template_param": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "type": {
+            "type": "string",
+            "enum": ["string"]
+          },
+          "required": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "type"
+        ],
+        "additionalProperties": false
+      },
+      "child_param_binding": {
+        "type": "object",
+        "properties": {
+          "param": {
+            "type": "string",
+            "minLength": 1
+          },
+          "value": {
+            "type": "string"
+          },
+          "from_instance_param": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "param"
+        ],
+        "additionalProperties": false
+      },
       "input_binding": {
         "type": "object",
         "properties": {
@@ -721,6 +774,9 @@
       },
       "composition_limits": {
         "isEmpty": "object"
+      },
+      "params": {
+        "isEmpty": "array"
       }
     },
     "rules": [
