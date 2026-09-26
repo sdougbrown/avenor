@@ -117,6 +117,9 @@ func buildCommandEvents(state Snapshot, command Command) ([]Event, error) {
 		next := newEvent(EventTransition)
 		next.Transition = t
 		next.Outcome = command.Outcome
+		if err := attachTransitionGateBindings(state, &e, &next, t.TargetNodeID, t.ActivationID); err != nil {
+			return nil, err
+		}
 		return []Event{e, next}, nil
 
 	case CommandGate:
@@ -143,6 +146,9 @@ func buildCommandEvents(state Snapshot, command Command) ([]Event, error) {
 		next := newEvent(EventTransition)
 		next.Transition = t
 		next.Outcome = command.Outcome
+		if err := attachTransitionGateBindings(state, &e, &next, t.TargetNodeID, t.ActivationID); err != nil {
+			return nil, err
+		}
 		return []Event{e, next}, nil
 
 	case CommandSkip:
@@ -246,6 +252,9 @@ func buildCommandEvents(state Snapshot, command Command) ([]Event, error) {
 		next := newEvent(EventTransition)
 		next.Transition = t
 		next.Outcome = command.Outcome
+		if err := attachTransitionGateBindings(state, &e, &next, t.TargetNodeID, t.ActivationID); err != nil {
+			return nil, err
+		}
 		return []Event{e, next}, nil
 
 	default:
@@ -327,6 +336,10 @@ func applyEvent(next *Snapshot, event Event) error {
 			CreatedAt:       now,
 			UpdatedAt:       now,
 		}
+		// Provenance and gate pinning are command-time facts carried on the
+		// event; replay copies exactly what the event carries.
+		created.CausedBy = append([]ActivationID(nil), event.CausedBy...)
+		created.ResolvedGates = cloneResolvedGates(event.ResolvedGates)
 		copyReadyAt(&created, event)
 		applyDispatchPolicy(next, &created, event.Transition.TargetNodeID)
 		next.Instance.Activations = append(next.Instance.Activations, created)
@@ -842,10 +855,28 @@ func applyGate(next *Snapshot, act *Activation, event Event) error {
 				next.Instance.TerminalOutcome = act.SelectedOutcome
 			}
 		}
-	case GateRejected, GateFailed:
+	case GateRejected:
 		act.Status = ActivationRejected
+	case GateFailed:
+		if event.Transition != nil && event.Transition.TargetNodeID != "" {
+			// A bound gate's mapped result routing resolves the activation
+			// onto its declared branch (the sibling transition event).
+			act.Status = ActivationRejected
+		} else if gateIsBound(next, act, gate) {
+			// A bound gate result with no result_outcomes mapping stays
+			// parked; the diagnostic lives on the gate instance.
+			act.Status = ActivationAwaitingGate
+		} else {
+			act.Status = ActivationRejected
+		}
 	default: // pending, action_required, changes_requested
-		act.Status = ActivationAwaitingGate
+		if event.Transition != nil && event.Transition.TargetNodeID != "" && gate.Status != GatePending {
+			// A bound gate's mapped advisory result resolves the activation
+			// onto its declared branch.
+			act.Status = ActivationRejected
+		} else {
+			act.Status = ActivationAwaitingGate
+		}
 	}
 	act.UpdatedAt = nowUTC()
 	return nil
@@ -966,6 +997,23 @@ func applyLeaseExpired(next *Snapshot, act *Activation, event Event) error {
 	copyReadyAt(act, event)
 	act.UpdatedAt = nowUTC()
 	return nil
+}
+
+// gateIsBound reports whether the decided gate carries a subject_binding
+// (a bound external gate): its results route only through result_outcomes,
+// so an unmapped failed result parks instead of rejecting. The reducer
+// cannot see templates without the resolver, so legacy/recovered histories
+// read as unbound and keep the legacy failed-rejects behavior.
+func gateIsBound(next *Snapshot, act *Activation, gate *GateInstance) bool {
+	if completionGateResolve == nil {
+		return false
+	}
+	for _, def := range completionGateResolve(next.Instance.TemplateID, next.Instance.TemplateVersion, act.NodeID) {
+		if def.ID == gate.GateID {
+			return def.SubjectBinding != nil
+		}
+	}
+	return false
 }
 
 // completionGateResolve is an optional template-aware gate lookup installed
