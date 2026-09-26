@@ -176,6 +176,9 @@ func ValidateTemplate(template Template) error {
 		if err := validateDispatch(node.Dispatch, node); err != nil {
 			return fmt.Errorf("invalid workflow template: node %q: %w", node.ID, err)
 		}
+		if err := validateOutputSources(node); err != nil {
+			return fmt.Errorf("invalid workflow template: node %q: %w", node.ID, err)
+		}
 	}
 	if err := validateTemplateParams(template); err != nil {
 		return err
@@ -821,6 +824,46 @@ func validateAutoExternalDispatch(policy *DispatchPolicy, node NodeDefinition) e
 	}
 	if requiredExternal == 0 {
 		return fmt.Errorf("dispatch.mode %q external nodes must declare at least one required external gate", DispatchAuto)
+	}
+	return nil
+}
+
+// validateOutputSources enforces the output-source rules the JSON Schema
+// cannot express: exactly one of artifact or git is declared, a pointer
+// requires an artifact source, the git source can only name head, and an
+// artifact source must name an artifact declared in the node's files
+// completion contract.
+func validateOutputSources(node NodeDefinition) error {
+	contractArtifacts := make(map[string]bool)
+	if node.Completion != nil && node.Completion.Kind == CompletionFiles {
+		for _, artifact := range node.Completion.Artifacts {
+			contractArtifacts[artifact.Path] = true
+		}
+	}
+	for _, def := range node.Outputs {
+		src := def.Source
+		if src == nil {
+			continue
+		}
+		switch {
+		case src.Artifact != "" && src.Git != "":
+			return fmt.Errorf("output %q declares both artifact and git source", def.ID)
+		case src.Artifact == "" && src.Git == "" && src.Pointer != "":
+			return fmt.Errorf("output %q: pointer requires an artifact source", def.ID)
+		case src.Artifact == "" && src.Git == "":
+			return fmt.Errorf("output %q declares an empty source", def.ID)
+		case src.Git != "":
+			if src.Pointer != "" {
+				return fmt.Errorf("output %q: pointer requires an artifact source", def.ID)
+			}
+			if src.Git != "head" {
+				return fmt.Errorf("output %q: git source %q must be %q", def.ID, src.Git, "head")
+			}
+		default:
+			if !contractArtifacts[src.Artifact] {
+				return fmt.Errorf("output %q artifact source %q is not declared in the node's files completion contract", def.ID, src.Artifact)
+			}
+		}
 	}
 	return nil
 }

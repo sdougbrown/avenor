@@ -532,10 +532,24 @@ type GitRequirement struct {
 }
 
 type OutputDefinition struct {
-	ID       OutputID   `json:"id"`
-	Name     string     `json:"name"`
-	Type     OutputType `json:"type"`
-	Required bool       `json:"required,omitempty"`
+	ID       OutputID      `json:"id"`
+	Name     string        `json:"name"`
+	Type     OutputType    `json:"type"`
+	Required bool          `json:"required,omitempty"`
+	// Source declares where supervisor-side auto-completion resolves the
+	// output's value from. Nil means the default binding: a file output on a
+	// files contract with exactly one declared artifact binds to that
+	// artifact.
+	Source *OutputSource `json:"source,omitempty"`
+}
+
+// OutputSource is one declared output resolution source. Exactly one of
+// artifact or git is declared; a pointer narrows an artifact source to one
+// RFC 6901 location inside a JSON artifact.
+type OutputSource struct {
+	Artifact string `json:"artifact,omitempty"`
+	Pointer  string `json:"pointer,omitempty"`
+	Git      string `json:"git,omitempty"`
 }
 
 type OutputValue struct {
