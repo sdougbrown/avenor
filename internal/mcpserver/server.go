@@ -38,9 +38,6 @@ type ControlClient interface {
 	WorkflowEvents(workflowID string, afterSeq int64, limit int) (map[string]any, error)
 	WorkflowComplete(workflowID string, fields map[string]any) (map[string]any, error)
 	WorkflowGate(workflowID string, fields map[string]any) (map[string]any, error)
-	WorkflowControllerCreate(request json.RawMessage) (map[string]any, error)
-	WorkflowControllerEnable(controllerID string) (map[string]any, error)
-	WorkflowControllerDisable(controllerID, reason string) (map[string]any, error)
 	WorkflowControllerStatus(controllerID string) (map[string]any, error)
 	WorkflowControllerList() (map[string]any, error)
 }
@@ -230,28 +227,7 @@ type workflowGateArgs struct {
 }
 
 type workflowControllerStatusArgs struct {
-	ControllerID string `json:"controller_id" jsonschema:"required controller ID"`
-	SupervisorID string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
-}
-
-type workflowControllerListArgs struct {
-	SupervisorID string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
-}
-
-type workflowControllerCreateArgs struct {
-	ControllerID string `json:"controller_id" jsonschema:"required controller ID"`
-	MaxInflight  int    `json:"max_inflight" jsonschema:"required positive integer max concurrent dispatches"`
-	SupervisorID string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
-}
-
-type workflowControllerEnableArgs struct {
-	ControllerID string `json:"controller_id" jsonschema:"required controller ID"`
-	SupervisorID string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
-}
-
-type workflowControllerDisableArgs struct {
-	ControllerID string `json:"controller_id" jsonschema:"required controller ID"`
-	Reason       string `json:"reason" jsonschema:"required reason for disabling"`
+	ControllerID string `json:"controller_id,omitempty" jsonschema:"optional controller ID; omit to list all controllers"`
 	SupervisorID string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
 }
 
@@ -296,10 +272,6 @@ func NewServer(opts Options) (*Server, error) {
 			"avenor_workflow_complete",
 			"avenor_workflow_gate",
 			"avenor_workflow_controller_status",
-			"avenor_workflow_controller_list",
-			"avenor_workflow_controller_create",
-			"avenor_workflow_controller_enable",
-			"avenor_workflow_controller_disable",
 		},
 	}
 
@@ -384,28 +356,8 @@ func NewServer(opts Options) (*Server, error) {
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
 		Name:        "avenor_workflow_controller_status",
-		Description: "Get the status for a workflow controller",
+		Description: "Show workflow controller status. With controller_id, returns that controller's full status; without it, lists all controllers with summary state. Create, enable, and disable are CLI-only (avenor workflow controller ...).",
 	}, s.handleAvenorWorkflowControllerStatus)
-
-	mcp.AddTool(mcpServer, &mcp.Tool{
-		Name:        "avenor_workflow_controller_list",
-		Description: "List all workflow controllers",
-	}, s.handleAvenorWorkflowControllerList)
-
-	mcp.AddTool(mcpServer, &mcp.Tool{
-		Name:        "avenor_workflow_controller_create",
-		Description: "Register a workflow controller; it starts disabled",
-	}, s.handleAvenorWorkflowControllerCreate)
-
-	mcp.AddTool(mcpServer, &mcp.Tool{
-		Name:        "avenor_workflow_controller_enable",
-		Description: "Enable a workflow controller so it dispatches and polls",
-	}, s.handleAvenorWorkflowControllerEnable)
-
-	mcp.AddTool(mcpServer, &mcp.Tool{
-		Name:        "avenor_workflow_controller_disable",
-		Description: "Disable a workflow controller; it stops future dispatch and polling but never cancels running attempts",
-	}, s.handleAvenorWorkflowControllerDisable)
 
 	return s, nil
 }
@@ -1468,102 +1420,27 @@ func (s *Server) handleAvenorWorkflowGate(ctx context.Context, req *mcp.CallTool
 }
 
 // handleAvenorWorkflowControllerStatus mirrors the workflow.controller.status
-// control verb against the typed WorkflowControllerStatus client method. The
-// controller ID is passed through unchanged; no identifier is remapped.
+// and workflow.controller.list control verbs against the typed
+// WorkflowControllerStatus and WorkflowControllerList client methods. With a
+// controller ID it returns that controller's full status; without one it
+// lists all controllers. The controller ID is passed through unchanged; no
+// identifier is remapped.
 func (s *Server) handleAvenorWorkflowControllerStatus(ctx context.Context, req *mcp.CallToolRequest, args workflowControllerStatusArgs) (*mcp.CallToolResult, any, error) {
-	if args.ControllerID == "" {
-		return nil, nil, fmt.Errorf("controller_id is required")
-	}
 	cl, cleanup, err := s.getClientForSupervisor(args.SupervisorID)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer cleanup()
+	if args.ControllerID == "" {
+		result, err := cl.WorkflowControllerList()
+		if err != nil {
+			return nil, nil, fmt.Errorf("workflow controller list: %w", err)
+		}
+		return nil, result, nil
+	}
 	result, err := cl.WorkflowControllerStatus(args.ControllerID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("workflow controller status: %w", err)
-	}
-	return nil, result, nil
-}
-
-// handleAvenorWorkflowControllerList mirrors the workflow.controller.list
-// control verb against the typed WorkflowControllerList client method.
-func (s *Server) handleAvenorWorkflowControllerList(ctx context.Context, req *mcp.CallToolRequest, args workflowControllerListArgs) (*mcp.CallToolResult, any, error) {
-	cl, cleanup, err := s.getClientForSupervisor(args.SupervisorID)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer cleanup()
-	result, err := cl.WorkflowControllerList()
-	if err != nil {
-		return nil, nil, fmt.Errorf("workflow controller list: %w", err)
-	}
-	return nil, result, nil
-}
-
-// handleAvenorWorkflowControllerCreate registers a workflow controller. The
-// controller starts disabled; the caller must enable it to dispatch.
-func (s *Server) handleAvenorWorkflowControllerCreate(ctx context.Context, req *mcp.CallToolRequest, args workflowControllerCreateArgs) (*mcp.CallToolResult, any, error) {
-	if args.ControllerID == "" {
-		return nil, nil, fmt.Errorf("controller_id is required")
-	}
-	if args.MaxInflight <= 0 {
-		return nil, nil, fmt.Errorf("max_inflight must be a positive integer")
-	}
-	request, err := json.Marshal(map[string]any{
-		"controller_id": args.ControllerID,
-		"max_inflight":  args.MaxInflight,
-	})
-	if err != nil {
-		return nil, nil, fmt.Errorf("marshal create request: %w", err)
-	}
-	cl, cleanup, err := s.getClientForSupervisor(args.SupervisorID)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer cleanup()
-	result, err := cl.WorkflowControllerCreate(request)
-	if err != nil {
-		return nil, nil, fmt.Errorf("workflow controller create: %w", err)
-	}
-	return nil, result, nil
-}
-
-// handleAvenorWorkflowControllerEnable enables a workflow controller so it
-// dispatches and polls.
-func (s *Server) handleAvenorWorkflowControllerEnable(ctx context.Context, req *mcp.CallToolRequest, args workflowControllerEnableArgs) (*mcp.CallToolResult, any, error) {
-	if args.ControllerID == "" {
-		return nil, nil, fmt.Errorf("controller_id is required")
-	}
-	cl, cleanup, err := s.getClientForSupervisor(args.SupervisorID)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer cleanup()
-	result, err := cl.WorkflowControllerEnable(args.ControllerID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("workflow controller enable: %w", err)
-	}
-	return nil, result, nil
-}
-
-// handleAvenorWorkflowControllerDisable disables a workflow controller. It
-// stops future dispatch and polling but never cancels running attempts.
-func (s *Server) handleAvenorWorkflowControllerDisable(ctx context.Context, req *mcp.CallToolRequest, args workflowControllerDisableArgs) (*mcp.CallToolResult, any, error) {
-	if args.ControllerID == "" {
-		return nil, nil, fmt.Errorf("controller_id is required")
-	}
-	if args.Reason == "" {
-		return nil, nil, fmt.Errorf("reason is required")
-	}
-	cl, cleanup, err := s.getClientForSupervisor(args.SupervisorID)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer cleanup()
-	result, err := cl.WorkflowControllerDisable(args.ControllerID, args.Reason)
-	if err != nil {
-		return nil, nil, fmt.Errorf("workflow controller disable: %w", err)
 	}
 	return nil, result, nil
 }

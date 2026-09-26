@@ -72,34 +72,6 @@ func TestWorkflowRequiredArgs(t *testing.T) {
 			_, _, err := s.handleAvenorWorkflowGate(context.Background(), nil, workflowGateArgs{WorkflowID: "wf", GateID: "g", ActivationID: "a", Operation: "satisfy"})
 			return err
 		}},
-		{"controller status missing controller_id", "controller_id is required", func(s *Server) error {
-			_, _, err := s.handleAvenorWorkflowControllerStatus(context.Background(), nil, workflowControllerStatusArgs{})
-			return err
-		}},
-		{"controller create missing controller_id", "controller_id is required", func(s *Server) error {
-			_, _, err := s.handleAvenorWorkflowControllerCreate(context.Background(), nil, workflowControllerCreateArgs{})
-			return err
-		}},
-		{"controller create missing max_inflight", "max_inflight must be a positive integer", func(s *Server) error {
-			_, _, err := s.handleAvenorWorkflowControllerCreate(context.Background(), nil, workflowControllerCreateArgs{ControllerID: "c"})
-			return err
-		}},
-		{"controller create negative max_inflight", "max_inflight must be a positive integer", func(s *Server) error {
-			_, _, err := s.handleAvenorWorkflowControllerCreate(context.Background(), nil, workflowControllerCreateArgs{ControllerID: "c", MaxInflight: -1})
-			return err
-		}},
-		{"controller enable missing controller_id", "controller_id is required", func(s *Server) error {
-			_, _, err := s.handleAvenorWorkflowControllerEnable(context.Background(), nil, workflowControllerEnableArgs{})
-			return err
-		}},
-		{"controller disable missing controller_id", "controller_id is required", func(s *Server) error {
-			_, _, err := s.handleAvenorWorkflowControllerDisable(context.Background(), nil, workflowControllerDisableArgs{})
-			return err
-		}},
-		{"controller disable missing reason", "reason is required", func(s *Server) error {
-			_, _, err := s.handleAvenorWorkflowControllerDisable(context.Background(), nil, workflowControllerDisableArgs{ControllerID: "c"})
-			return err
-		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -308,69 +280,28 @@ func TestWorkflowControllerIdentifierRoundTrip(t *testing.T) {
 	if res["controller_id"] != "c-abc" {
 		t.Fatalf("controller_id munged in result: %v", res["controller_id"])
 	}
-
-	fake.workflowControllerEnableResult = map[string]any{"controller_id": "c-abc", "state": "enabled"}
-	_, _, err = s.handleAvenorWorkflowControllerEnable(ctx, nil, workflowControllerEnableArgs{ControllerID: "c-abc"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(fake.workflowControllerEnableCalls) != 1 || fake.workflowControllerEnableCalls[0] != "c-abc" {
-		t.Fatalf("enable controller_id not round-tripped: %v", fake.workflowControllerEnableCalls)
-	}
-
-	fake.workflowControllerDisableResult = map[string]any{"controller_id": "c-abc", "state": "disabled"}
-	_, _, err = s.handleAvenorWorkflowControllerDisable(ctx, nil, workflowControllerDisableArgs{ControllerID: "c-abc", Reason: "why"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(fake.workflowControllerDisableCalls) != 1 || fake.workflowControllerDisableCalls[0].controllerID != "c-abc" || fake.workflowControllerDisableCalls[0].reason != "why" {
-		t.Fatalf("disable controller_id/reason not round-tripped: %v", fake.workflowControllerDisableCalls)
-	}
 }
 
-// TestWorkflowControllerListForwarding verifies the list tool reaches the
-// control client and returns its snapshot unchanged.
+// TestWorkflowControllerListForwarding verifies that omitting controller_id
+// routes the status tool to the control client's list method and returns its
+// snapshot unchanged.
 func TestWorkflowControllerListForwarding(t *testing.T) {
 	s, fake := newWorkflowTestServer(t)
 	ctx := context.Background()
 	fake.workflowControllerListResult = map[string]any{"controllers": []any{}}
-	_, result, err := s.handleAvenorWorkflowControllerList(ctx, nil, workflowControllerListArgs{})
+	_, result, err := s.handleAvenorWorkflowControllerStatus(ctx, nil, workflowControllerStatusArgs{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if fake.workflowControllerListCalls != 1 {
 		t.Fatalf("expected 1 list call, got %d", fake.workflowControllerListCalls)
 	}
+	if len(fake.workflowControllerStatusCalls) != 0 {
+		t.Fatalf("expected 0 status calls when controller_id is omitted, got %d", len(fake.workflowControllerStatusCalls))
+	}
 	res, _ := result.(map[string]any)
 	if _, ok := res["controllers"]; !ok {
 		t.Fatalf("list result missing controllers: %v", res)
-	}
-}
-
-// TestWorkflowControllerCreateForwarding verifies the create tool builds the
-// {"controller_id","max_inflight"} request and forwards it to the control
-// client, and that the controller starts disabled.
-func TestWorkflowControllerCreateForwarding(t *testing.T) {
-	s, fake := newWorkflowTestServer(t)
-	ctx := context.Background()
-	fake.workflowControllerCreateResult = map[string]any{"controller_id": "c-1", "state": "disabled"}
-	_, result, err := s.handleAvenorWorkflowControllerCreate(ctx, nil, workflowControllerCreateArgs{ControllerID: "c-1", MaxInflight: 5})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(fake.workflowControllerCreateCalls) != 1 {
-		t.Fatalf("expected 1 create call, got %d", len(fake.workflowControllerCreateCalls))
-	}
-	var sent map[string]any
-	if err := json.Unmarshal(fake.workflowControllerCreateCalls[0], &sent); err != nil {
-		t.Fatalf("create request not valid JSON: %v", err)
-	}
-	if sent["controller_id"] != "c-1" || sent["max_inflight"] != float64(5) {
-		t.Fatalf("create request not built correctly: %v", sent)
-	}
-	res, _ := result.(map[string]any)
-	if res["state"] != "disabled" {
-		t.Fatalf("create result should report disabled: %v", res)
 	}
 }
 
@@ -392,25 +323,7 @@ func TestWorkflowControllerErrorPropagation(t *testing.T) {
 		{"controller list error", "workflow controller list", func(f *fakeClient) {
 			f.workflowControllerListErr = errors.New("list failed")
 		}, func(s *Server) error {
-			_, _, err := s.handleAvenorWorkflowControllerList(context.Background(), nil, workflowControllerListArgs{})
-			return err
-		}},
-		{"controller create error", "workflow controller create", func(f *fakeClient) {
-			f.workflowControllerCreateErr = errors.New("create failed")
-		}, func(s *Server) error {
-			_, _, err := s.handleAvenorWorkflowControllerCreate(context.Background(), nil, workflowControllerCreateArgs{ControllerID: "c", MaxInflight: 5})
-			return err
-		}},
-		{"controller enable error", "workflow controller enable", func(f *fakeClient) {
-			f.workflowControllerEnableErr = errors.New("enable failed")
-		}, func(s *Server) error {
-			_, _, err := s.handleAvenorWorkflowControllerEnable(context.Background(), nil, workflowControllerEnableArgs{ControllerID: "c"})
-			return err
-		}},
-		{"controller disable error", "workflow controller disable", func(f *fakeClient) {
-			f.workflowControllerDisableErr = errors.New("disable failed")
-		}, func(s *Server) error {
-			_, _, err := s.handleAvenorWorkflowControllerDisable(context.Background(), nil, workflowControllerDisableArgs{ControllerID: "c", Reason: "why"})
+			_, _, err := s.handleAvenorWorkflowControllerStatus(context.Background(), nil, workflowControllerStatusArgs{})
 			return err
 		}},
 	}

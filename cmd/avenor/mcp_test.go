@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -72,15 +71,6 @@ func (s *stubControlClient) WorkflowComplete(string, map[string]any) (map[string
 	return nil, nil
 }
 func (s *stubControlClient) WorkflowGate(string, map[string]any) (map[string]any, error) {
-	return nil, nil
-}
-func (s *stubControlClient) WorkflowControllerCreate(json.RawMessage) (map[string]any, error) {
-	return nil, nil
-}
-func (s *stubControlClient) WorkflowControllerEnable(string) (map[string]any, error) {
-	return nil, nil
-}
-func (s *stubControlClient) WorkflowControllerDisable(string, string) (map[string]any, error) {
 	return nil, nil
 }
 func (s *stubControlClient) WorkflowControllerStatus(string) (map[string]any, error) {

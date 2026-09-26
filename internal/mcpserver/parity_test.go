@@ -22,7 +22,7 @@ var tsToolNames = []string{
 }
 
 // workflowToolNames lists the six Go-only MCP workflow tools (Stage 14) plus
-// the five MCP workflow-controller tools. The controller tools now have
+// the read-only MCP workflow-controller status tool. That tool now has
 // TypeScript references in the mcp, opencode, and pi packages; the six
 // workflow tools remain Go-only.
 var workflowToolNames = []string{
@@ -33,10 +33,6 @@ var workflowToolNames = []string{
 	"avenor_workflow_complete",
 	"avenor_workflow_gate",
 	"avenor_workflow_controller_status",
-	"avenor_workflow_controller_list",
-	"avenor_workflow_controller_create",
-	"avenor_workflow_controller_enable",
-	"avenor_workflow_controller_disable",
 }
 
 func TestToolNameParity(t *testing.T) {
@@ -183,37 +179,9 @@ func TestSchemaFieldParity(t *testing.T) {
 	})
 
 	t.Run("avenor_workflow_controller_status", func(t *testing.T) {
-		// workflowControllerStatusArgs — required: controller_id; optional: supervisor_id
+		// workflowControllerStatusArgs — all optional: controller_id, supervisor_id
 		allowed := []string{"controller_id", "supervisor_id"}
-		assertFields(t, "workflowControllerStatusArgs", allowed, []string{"controller_id"})
-	})
-
-	t.Run("avenor_workflow_controller_list", func(t *testing.T) {
-		// workflowControllerListArgs — all optional: supervisor_id
-		allowed := []string{"supervisor_id"}
-		assertFields(t, "workflowControllerListArgs", allowed, nil)
-	})
-
-	t.Run("avenor_workflow_controller_create", func(t *testing.T) {
-		// workflowControllerCreateArgs — required: controller_id, max_inflight;
-		// optional: supervisor_id
-		allowed := []string{"controller_id", "max_inflight", "supervisor_id"}
-		required := []string{"controller_id", "max_inflight"}
-		assertFields(t, "workflowControllerCreateArgs", allowed, required)
-	})
-
-	t.Run("avenor_workflow_controller_enable", func(t *testing.T) {
-		// workflowControllerEnableArgs — required: controller_id; optional: supervisor_id
-		allowed := []string{"controller_id", "supervisor_id"}
-		assertFields(t, "workflowControllerEnableArgs", allowed, []string{"controller_id"})
-	})
-
-	t.Run("avenor_workflow_controller_disable", func(t *testing.T) {
-		// workflowControllerDisableArgs — required: controller_id, reason;
-		// optional: supervisor_id
-		allowed := []string{"controller_id", "reason", "supervisor_id"}
-		required := []string{"controller_id", "reason"}
-		assertFields(t, "workflowControllerDisableArgs", allowed, required)
+		assertFields(t, "workflowControllerStatusArgs", allowed, nil)
 	})
 }
 
@@ -541,45 +509,12 @@ func assertFields(t *testing.T, structName string, allowed, required []string) {
 		if a.ControllerID != "c-1" || a.SupervisorID != "s" {
 			t.Errorf("%s: fields not populated correctly", structName)
 		}
-	case "workflowControllerListArgs":
-		data := map[string]any{"supervisor_id": "s"}
-		b, _ := json.Marshal(data)
-		var a workflowControllerListArgs
-		if err := json.Unmarshal(b, &a); err != nil {
-			t.Fatalf("%s: unmarshal: %v", structName, err)
+		var listA workflowControllerStatusArgs
+		if err := json.Unmarshal([]byte(`{"supervisor_id":"s"}`), &listA); err != nil {
+			t.Fatalf("%s: unmarshal without controller_id: %v", structName, err)
 		}
-		if a.SupervisorID != "s" {
-			t.Errorf("%s: fields not populated correctly", structName)
-		}
-	case "workflowControllerCreateArgs":
-		data := map[string]any{"controller_id": "c-1", "max_inflight": float64(5), "supervisor_id": "s"}
-		b, _ := json.Marshal(data)
-		var a workflowControllerCreateArgs
-		if err := json.Unmarshal(b, &a); err != nil {
-			t.Fatalf("%s: unmarshal: %v", structName, err)
-		}
-		if a.ControllerID != "c-1" || a.MaxInflight != 5 || a.SupervisorID != "s" {
-			t.Errorf("%s: fields not populated correctly", structName)
-		}
-	case "workflowControllerEnableArgs":
-		data := map[string]any{"controller_id": "c-1", "supervisor_id": "s"}
-		b, _ := json.Marshal(data)
-		var a workflowControllerEnableArgs
-		if err := json.Unmarshal(b, &a); err != nil {
-			t.Fatalf("%s: unmarshal: %v", structName, err)
-		}
-		if a.ControllerID != "c-1" || a.SupervisorID != "s" {
-			t.Errorf("%s: fields not populated correctly", structName)
-		}
-	case "workflowControllerDisableArgs":
-		data := map[string]any{"controller_id": "c-1", "reason": "why", "supervisor_id": "s"}
-		b, _ := json.Marshal(data)
-		var a workflowControllerDisableArgs
-		if err := json.Unmarshal(b, &a); err != nil {
-			t.Fatalf("%s: unmarshal: %v", structName, err)
-		}
-		if a.ControllerID != "c-1" || a.Reason != "why" || a.SupervisorID != "s" {
-			t.Errorf("%s: fields not populated correctly", structName)
+		if listA.ControllerID != "" || listA.SupervisorID != "s" {
+			t.Errorf("%s: omitted controller_id should default to empty", structName)
 		}
 	}
 
@@ -626,14 +561,6 @@ func assertSchemaTags(t *testing.T, structName string, allowed, required []strin
 		typ = reflect.TypeOf(workflowGateArgs{})
 	case "workflowControllerStatusArgs":
 		typ = reflect.TypeOf(workflowControllerStatusArgs{})
-	case "workflowControllerListArgs":
-		typ = reflect.TypeOf(workflowControllerListArgs{})
-	case "workflowControllerCreateArgs":
-		typ = reflect.TypeOf(workflowControllerCreateArgs{})
-	case "workflowControllerEnableArgs":
-		typ = reflect.TypeOf(workflowControllerEnableArgs{})
-	case "workflowControllerDisableArgs":
-		typ = reflect.TypeOf(workflowControllerDisableArgs{})
 	default:
 		t.Fatalf("unknown struct: %s", structName)
 	}
