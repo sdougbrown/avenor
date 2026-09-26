@@ -1,15 +1,17 @@
 //go:build unix
 
-package workflow
+// Package durablefile provides durability primitives shared by the workflow
+// and workflow-controller stores.
+package durablefile
 
 import (
 	"os"
 	"syscall"
 )
 
-// lockFile acquires an exclusive advisory flock on path, creating it if needed.
+// Lock acquires an exclusive advisory flock on path, creating it if needed.
 // Returns an unlock func that releases the lock and closes the file.
-func lockFile(path string) (func() error, error) {
+func Lock(path string) (func() error, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return nil, err

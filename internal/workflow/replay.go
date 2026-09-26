@@ -8,6 +8,8 @@ import (
 	"io/fs"
 	"log"
 	"os"
+
+	"github.com/sdougbrown/avenor/internal/durablefile"
 )
 
 // replayEvents replays events from an NDJSON log beyond the snapshot's applied
@@ -28,14 +30,14 @@ func replayEvents(snap Snapshot, path string) (Snapshot, int, int64, error) {
 	}
 
 	workflowID := string(snap.Instance.WorkflowID)
-	lines := splitLines(data)
+	lines := durablefile.SplitLines(data)
 	next := snap
 	count := 0
 	var lastGoodEnd int64
 
 	for i, line := range lines {
-		end := line.end
-		lineData := data[line.start:line.end]
+		end := line.End
+		lineData := data[line.Start:line.End]
 		var e Event
 		if err := json.Unmarshal(lineData, &e); err == nil {
 			var rerr error
@@ -60,26 +62,4 @@ func replayEvents(snap Snapshot, path string) (Snapshot, int, int64, error) {
 	}
 
 	return next, count, 0, nil
-}
-
-type lineSpan struct {
-	start int64
-	end   int64
-}
-
-// splitLines splits data on '\n', recording each line's byte end offset (just
-// after the newline, or len(data) for a final line with no trailing newline).
-func splitLines(data []byte) []lineSpan {
-	var lines []lineSpan
-	start := int64(0)
-	for i, b := range data {
-		if b == '\n' {
-			lines = append(lines, lineSpan{start: start, end: int64(i) + 1})
-			start = int64(i) + 1
-		}
-	}
-	if start < int64(len(data)) {
-		lines = append(lines, lineSpan{start: start, end: int64(len(data))})
-	}
-	return lines
 }

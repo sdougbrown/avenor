@@ -8,6 +8,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+
+	"github.com/sdougbrown/avenor/internal/durablefile"
 )
 
 // Store applies commands to workflow instances under a single POSIX flock and
@@ -15,6 +17,10 @@ import (
 // snapshot per instance.
 type Store struct {
 	root string
+	// onCommit, when non-nil, is invoked after every successfully committed
+	// command snapshot, outside the flock. Set with SetCommitObserver before
+	// the store starts serving commands.
+	onCommit func(WorkflowID, Snapshot)
 }
 
 // readinessCommandKinds are the command kinds whose event batch can create a
@@ -33,6 +39,29 @@ var readinessCommandKinds = map[CommandKind]bool{
 
 func New(root string) *Store {
 	return &Store{root: root}
+}
+
+// SetCommitObserver registers fn as the commit hook: after every successfully
+// committed command snapshot (post atomic write, outside the flock), fn is
+// invoked with the workflow ID and the committed snapshot. It must be called
+// before the store starts serving commands. The observer must never fail or
+// block the command: its errors and panics are swallowed.
+func (s *Store) SetCommitObserver(fn func(WorkflowID, Snapshot)) {
+	s.onCommit = fn
+}
+
+// notifyCommit invokes the registered commit observer, isolating the command
+// path from observer failures.
+func (s *Store) notifyCommit(workflowID WorkflowID, snap Snapshot) {
+	if s.onCommit == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("workflow %s: commit observer panicked: %v", workflowID, r)
+		}
+	}()
+	s.onCommit(workflowID, snap)
 }
 
 func (s *Store) Root() string { return s.root }
@@ -64,17 +93,25 @@ func (s *Store) CreateRoot() error {
 	return nil
 }
 
-// ApplyCommand applies one command under the instance's exclusive flock.
+// ApplyCommand applies one command under the instance's exclusive flock. On
+// success the commit observer (if any) is invoked after the lock is released.
 func (s *Store) ApplyCommand(workflowID WorkflowID, cmd Command) (Snapshot, error) {
 	if err := s.ensureInstanceDir(workflowID); err != nil {
 		return Snapshot{}, err
 	}
-	unlock, err := lockFile(s.lockPath(workflowID))
+	unlock, err := durablefile.Lock(s.lockPath(workflowID))
 	if err != nil {
 		return Snapshot{}, err
 	}
-	defer unlock()
-	return s.applyLocked(workflowID, cmd)
+	snap, err := func() (Snapshot, error) {
+		defer unlock()
+		return s.applyLocked(workflowID, cmd)
+	}()
+	if err != nil {
+		return Snapshot{}, err
+	}
+	s.notifyCommit(workflowID, snap)
+	return snap, nil
 }
 
 func (s *Store) ensureInstanceDir(workflowID WorkflowID) error {
@@ -204,17 +241,7 @@ func (s *Store) writeSnapshot(workflowID WorkflowID, snap Snapshot) error {
 	if err := os.Rename(tmpName, s.workflowPath(workflowID)); err != nil {
 		return err
 	}
-	return fsyncDir(s.instanceDir(workflowID))
-}
-
-// fsyncDir fsyncs a directory so renames into it are durable.
-func fsyncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
+	return durablefile.FsyncDir(s.instanceDir(workflowID))
 }
 
 // StoreTemplate atomically persists a versioned template under
@@ -253,7 +280,7 @@ func (s *Store) StoreTemplate(templateID TemplateID, templateVersion TemplateVer
 	if err := os.Rename(tmpName, path); err != nil {
 		return err
 	}
-	return fsyncDir(dir)
+	return durablefile.FsyncDir(dir)
 }
 
 // LoadTemplate reads a versioned template, returning a not-found error if it
@@ -286,7 +313,7 @@ func (s *Store) loadCurrent(workflowID WorkflowID) (Snapshot, bool, error) {
 	if err := os.MkdirAll(s.instanceDir(workflowID), 0o755); err != nil {
 		return Snapshot{}, false, err
 	}
-	unlock, err := lockFile(s.lockPath(workflowID))
+	unlock, err := durablefile.Lock(s.lockPath(workflowID))
 	if err != nil {
 		return Snapshot{}, false, err
 	}

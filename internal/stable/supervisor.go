@@ -32,6 +32,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/spawnselection"
 	"github.com/sdougbrown/avenor/internal/teamrunner"
 	"github.com/sdougbrown/avenor/internal/workflow"
+	"github.com/sdougbrown/avenor/internal/workflowcontroller"
 )
 
 type Config struct {
@@ -330,9 +331,23 @@ type Supervisor struct {
 	config  Config
 	runID   string
 	control *control.ControlServer
-	// workflowMgrMu guards lazy construction of the workflow store/manager.
-	workflowMgrMu                sync.Mutex
-	workflowMgr                  *workflow.Manager
+	// workflowOnce runs the startup barrier exactly once and publishes its
+	// retained results below; reads after workflowOnce.Do are safe.
+	workflowOnce        sync.Once
+	workflowMgr         *workflow.Manager
+	workflowBarrierErr  error
+	workflowControllers *workflowcontroller.ControllerStore
+	// controllerLoopsMu guards controllerLoops and loopsStopped: one
+	// leader-loop handle per enabled controller id in this process.
+	controllerLoopsMu sync.Mutex
+	controllerLoops   map[string]*controllerLoop
+	loopsStopped      bool
+	// workflowControllerMu serializes the enable/disable handler bodies so the
+	// in-process loop state always matches the last persisted desired state.
+	workflowControllerMu sync.Mutex
+	// controllerRenewInterval is the leader loop's renew cadence; defaults to
+	// workflowcontroller.RenewInterval.
+	controllerRenewInterval      time.Duration
 	state                        *control.ControlState
 	controlMu                    sync.Mutex
 	runtimes                     map[string]*childRuntime
@@ -386,23 +401,25 @@ func NewSupervisor(cfg Config) *Supervisor {
 	runID := cli.GenerateRunID()
 	state := control.NewState(runID, "", 0)
 	sup := &Supervisor{
-		config:               cfg,
-		runID:                runID,
-		state:                state,
-		control:              control.NewServer(state),
-		runtimes:             map[string]*childRuntime{},
-		shutdownCh:           make(chan struct{}),
-		runtimeActivity:      make(chan struct{}),
-		pendingQuestions:     map[string]pendingChildQuestion{},
-		handledQuestions:     map[string]handledChildQuestion{},
-		childQuestionTimeout: cfg.ChildQuestionTimeout,
-		permOptions:          map[string][]any{},
-		reaperInterval:       5 * time.Second,
-		permissionProviders:  map[string]permissionProviderBinding{},
-		httpServers:          map[string]any{},
-		fileSnapshots:        map[string][]string{},
-		sessionIdentities:    map[string]sessionIdentityEntry{},
-		sessionOwners:        map[string]*sessionAttempt{},
+		config:                  cfg,
+		runID:                   runID,
+		state:                   state,
+		control:                 control.NewServer(state),
+		runtimes:                map[string]*childRuntime{},
+		controllerLoops:         map[string]*controllerLoop{},
+		controllerRenewInterval: workflowcontroller.RenewInterval,
+		shutdownCh:              make(chan struct{}),
+		runtimeActivity:         make(chan struct{}),
+		pendingQuestions:        map[string]pendingChildQuestion{},
+		handledQuestions:        map[string]handledChildQuestion{},
+		childQuestionTimeout:    cfg.ChildQuestionTimeout,
+		permOptions:             map[string][]any{},
+		reaperInterval:          5 * time.Second,
+		permissionProviders:     map[string]permissionProviderBinding{},
+		httpServers:             map[string]any{},
+		fileSnapshots:           map[string][]string{},
+		sessionIdentities:       map[string]sessionIdentityEntry{},
+		sessionOwners:           map[string]*sessionAttempt{},
 	}
 	sup.broker = broker.New("")
 	if err := sup.broker.Start(); err != nil {
@@ -420,6 +437,7 @@ func NewSupervisor(cfg Config) *Supervisor {
 	}
 	sup.control.SetStableHandler(sup)
 	sup.control.SetWorkflowHandler(lazyWorkflowHandler{sup})
+	sup.control.SetWorkflowControllerHandler(sup)
 	sup.newProviderFunc = factory.NewProvider
 	sup.initTreeBudget()
 	return sup
@@ -479,6 +497,14 @@ func (s *Supervisor) Run() int {
 
 	s.startReaper()
 	defer s.stopReaper()
+	defer s.stopControllerLoops()
+
+	// Exactly-once startup barrier: when durable workflow or controller state
+	// already exists, recover it before any leader activity; otherwise the
+	// barrier runs lazily on the first workflow RPC or controller command.
+	if root := resolveWorkflowRoot(s.config.WorkflowRoot); hasExistingWorkflowState(root) {
+		s.workflowOnce.Do(s.runWorkflowStartupBarrier)
+	}
 
 	for {
 		idleCh := idleCheck(s.config.IdleTimeout, s.activeRuntimeCount(), &idleDeadline)
@@ -4102,25 +4128,38 @@ func resolveWorkflowRoot(configured string) string {
 	return filepath.Join(home, ".avenor", "workflows")
 }
 
-// workflowManager returns the lazily-constructed workflow manager for the
-// configured workflow root, registering it with the control server on first
-// construction. Safe for concurrent use.
-//
-// On first construction (before any normal workflow operation) it runs the
-// startup composition resume once: every awaiting_child activation is resumed
-// by identity, and those whose child is already terminal are resolved. It is a
-// best-effort hook — errors are logged and never block manager construction.
-// It never transitions a freshly-recovered lease that is not a terminal-child
-// awaiting_child parent: ResumeAwaitingChildren only iterates awaiting_child
-// activations and only resolves those whose child is terminal, so
-// non-awaiting_child leases and awaiting_child parents with non-terminal
-// children are untouched.
+// workflowManager returns the workflow manager for the configured workflow
+// root, running the exactly-once startup barrier on first use. Safe for
+// concurrent use; every caller waits on the same barrier and shares its
+// retained results.
 func (s *Supervisor) workflowManager() *workflow.Manager {
-	s.workflowMgrMu.Lock()
-	defer s.workflowMgrMu.Unlock()
-	if s.workflowMgr != nil {
-		return s.workflowMgr
+	s.workflowOnce.Do(s.runWorkflowStartupBarrier)
+	return s.workflowMgr
+}
+
+// hasExistingWorkflowState reports whether durable workflow or controller
+// state already exists under root. It is a pure stat check and never creates
+// anything.
+func hasExistingWorkflowState(root string) bool {
+	for _, dir := range []string{
+		filepath.Join(root, "instances"),
+		filepath.Join(root, "controllers"),
+	} {
+		if _, err := os.Stat(dir); err == nil {
+			return true
+		}
 	}
+	return false
+}
+
+// runWorkflowStartupBarrier is the exactly-once startup barrier. It constructs
+// and registers the workflow manager, recovers the workflow catalog, rebuilds
+// the candidate index, and recovers controller records, starting a leader loop
+// for every recovered controller whose desired state is enabled. A recovery
+// failure is retained as the barrier error: workflow RPCs keep serving, the
+// candidate index stays not-recovered, and every controller method fails until
+// the process restarts.
+func (s *Supervisor) runWorkflowStartupBarrier() {
 	root := resolveWorkflowRoot(s.config.WorkflowRoot)
 	m := workflow.NewManager(workflow.New(root))
 	m.RegisterExecutor(workflow.ActionRun, s.directRunExecutor())
@@ -4128,22 +4167,389 @@ func (s *Supervisor) workflowManager() *workflow.Manager {
 	m.RegisterExecutor(workflow.ActionTeam, s.teamExecutor())
 	s.workflowMgr = m
 	s.control.SetWorkflowHandler(m)
-	// Startup composition resume: the manager is lazily constructed, so this
-	// runs exactly once, on first construction, before normal workflow
-	// operation. ResumeAwaitingChildren internally recovers the store (Catalog)
-	// first and is idempotent, so a duplicate invocation would be a safe no-op.
-	// It is skipped when the workflow root does not exist yet: there is nothing
-	// to resume, and construction must stay side-effect free (it must not
-	// create the root for a never-used workflow surface).
+	s.workflowControllers = workflowcontroller.NewStore(root)
+
+	var barrierErr error
+	// Catalog recovery is skipped when the workflow root does not exist: the
+	// catalog is empty, and construction must stay side-effect free (Catalog
+	// creates the root). The candidate index is still marked recovered-empty
+	// so workflow.ready serves immediately instead of reporting a permanent
+	// not-recovered error. ResumeAwaitingChildren performs the catalog
+	// recovery internally, so it sequences before RebuildCandidateIndex.
 	if _, err := os.Stat(root); err == nil {
 		summary, err := m.ResumeAwaitingChildren()
 		if err != nil {
-			log.Printf("workflow: startup composition resume: %v", err)
+			barrierErr = fmt.Errorf("workflow catalog recovery: %w", err)
 		} else {
 			log.Printf("workflow: startup composition resume: resolved=%d still_awaiting=%d errors=%d", summary.Resolved, summary.StillAwaiting, len(summary.Errors))
+			if err := m.RebuildCandidateIndex(s.supervisorIdentity()); err != nil {
+				barrierErr = fmt.Errorf("workflow candidate index rebuild: %w", err)
+			}
+		}
+	} else {
+		m.MarkCandidateIndexEmpty(s.supervisorIdentity())
+	}
+	if barrierErr == nil {
+		records, err := s.workflowControllers.Recover()
+		if err != nil {
+			barrierErr = fmt.Errorf("workflow controller recovery: %w", err)
+		} else {
+			for _, rec := range records {
+				if rec.DesiredState == workflowcontroller.DesiredEnabled {
+					s.startControllerLoop(s.workflowControllers, rec.ControllerID)
+				}
+			}
 		}
 	}
-	return m
+	if barrierErr != nil {
+		s.workflowBarrierErr = barrierErr
+		log.Printf("workflow: startup barrier failed (workflow RPCs remain available; controllers disabled for this process): %v", barrierErr)
+	}
+}
+
+// workflowBarrierResult returns the retained barrier outcome. It always
+// includes the manager (workflow RPCs serve regardless of barrier errors) and
+// reports the barrier error so callers can refuse controller activity.
+func (s *Supervisor) workflowBarrierResult() (*workflow.Manager, *workflowcontroller.ControllerStore, error) {
+	s.workflowOnce.Do(s.runWorkflowStartupBarrier)
+	return s.workflowMgr, s.workflowControllers, s.workflowBarrierErr
+}
+
+// supervisorIdentity is this supervisor's stable owner identity, combining the
+// run ID with the current PID. It stamps rebuilt candidates and identifies the
+// leader-loop lease owner.
+func (s *Supervisor) supervisorIdentity() string {
+	return fmt.Sprintf("%s:%d", s.runID, os.Getpid())
+}
+
+// controllerLoop tracks one leader-loop goroutine for a single controller in
+// this process.
+type controllerLoop struct {
+	stopCh    chan struct{}
+	done      chan struct{}
+	closeOnce sync.Once
+}
+
+// stop closes the loop's stop channel exactly once, so concurrent stoppers
+// (disable and shutdown) cannot double-close it.
+func (l *controllerLoop) stop() {
+	l.closeOnce.Do(func() { close(l.stopCh) })
+}
+
+// startControllerLoop starts the process's single leader loop for controllerID
+// if one is not already running. A map entry whose loop has already exited is
+// replaced. Call only after a successful barrier.
+func (s *Supervisor) startControllerLoop(store *workflowcontroller.ControllerStore, controllerID string) {
+	s.controllerLoopsMu.Lock()
+	defer s.controllerLoopsMu.Unlock()
+	if s.loopsStopped {
+		return
+	}
+	if existing, ok := s.controllerLoops[controllerID]; ok {
+		select {
+		case <-existing.done:
+			// Stale entry from a loop that already exited on its own; the
+			// exited loop's own cleanup races with us, so replace it here.
+		default:
+			return
+		}
+	}
+	loop := &controllerLoop{stopCh: make(chan struct{}), done: make(chan struct{})}
+	s.controllerLoops[controllerID] = loop
+	go s.runControllerLoop(store, controllerID, loop)
+}
+
+// stopControllerLoop signals the controller's leader loop to exit and waits
+// for it to release its lease and finish.
+func (s *Supervisor) stopControllerLoop(controllerID string) {
+	s.controllerLoopsMu.Lock()
+	loop := s.controllerLoops[controllerID]
+	delete(s.controllerLoops, controllerID)
+	s.controllerLoopsMu.Unlock()
+	if loop == nil {
+		return
+	}
+	loop.stop()
+	<-loop.done
+}
+
+// stopControllerLoops signals every leader loop to exit and waits for them to
+// release their leases and finish. It is idempotent.
+func (s *Supervisor) stopControllerLoops() {
+	s.controllerLoopsMu.Lock()
+	loops := s.controllerLoops
+	s.controllerLoops = map[string]*controllerLoop{}
+	s.loopsStopped = true
+	s.controllerLoopsMu.Unlock()
+	for _, loop := range loops {
+		loop.stop()
+	}
+	for _, loop := range loops {
+		<-loop.done
+	}
+}
+
+// runControllerLoop holds the controller's leader lease without dispatching
+// anything: it acquires the lease, renews it every RenewInterval, and re-checks
+// the desired state each tick. Losing the lease (or a renewal failure) falls
+// back to acquisition retry; a disabled desired state ends the loop. On stop
+// it releases a still-held lease before exiting.
+func (s *Supervisor) runControllerLoop(store *workflowcontroller.ControllerStore, controllerID string, loop *controllerLoop) {
+	// Self-exit cleanup: remove this loop's map entry, but only while the
+	// entry still refers to this loop — a concurrent disable (or shutdown)
+	// may have already deleted it, or an enable may have replaced it with a
+	// fresh loop. Registration order runs this removal before close(done),
+	// so a waiter in stopControllerLoop never observes a deleted-but-live
+	// window.
+	defer func() {
+		s.controllerLoopsMu.Lock()
+		if s.controllerLoops[controllerID] == loop {
+			delete(s.controllerLoops, controllerID)
+		}
+		s.controllerLoopsMu.Unlock()
+	}()
+	defer close(loop.done)
+	ownerID := s.supervisorIdentity()
+	var leaseID string
+	var ownerEpoch int64
+	holding := false
+	release := func() {
+		if !holding {
+			return
+		}
+		holding = false
+		// Best-effort: a concurrent disable already released the lease
+		// durably, so a CAS failure here is expected and ignorable.
+		_, _ = store.ReleaseLease(controllerID, leaseID, ownerEpoch)
+	}
+	for {
+		select {
+		case <-loop.stopCh:
+			release()
+			return
+		default:
+		}
+		if !holding {
+			rec, ok, err := store.AcquireLease(controllerID, ownerID)
+			if err != nil {
+				if errors.Is(err, workflowcontroller.ErrDisabled) {
+					return
+				}
+				log.Printf("workflow controller %s: acquire lease: %v", controllerID, err)
+				if !controllerLoopSleep(loop, s.controllerRenewInterval) {
+					return
+				}
+				continue
+			}
+			if ok {
+				leaseID = rec.Leader.LeaseID
+				ownerEpoch = rec.Leader.OwnerEpoch
+				holding = true
+				continue
+			}
+			if !controllerLoopSleep(loop, s.controllerRenewInterval) {
+				return
+			}
+			continue
+		}
+		if _, err := store.RenewLease(controllerID, leaseID, ownerEpoch); err != nil {
+			// Lost the lease (conflict or transient failure): stop acting as
+			// leader and fall back to acquisition retry.
+			holding = false
+			leaseID = ""
+			continue
+		}
+		if rec, ok, err := store.Get(controllerID); err == nil && (!ok || rec.DesiredState != workflowcontroller.DesiredEnabled) {
+			release()
+			return
+		}
+		if !controllerLoopSleep(loop, s.controllerRenewInterval) {
+			release()
+			return
+		}
+	}
+}
+
+// controllerLoopSleep waits one renew interval, returning false when the loop
+// was stopped while waiting.
+func controllerLoopSleep(loop *controllerLoop, interval time.Duration) bool {
+	select {
+	case <-loop.stopCh:
+		return false
+	case <-time.After(interval):
+		return true
+	}
+}
+
+var _ control.WorkflowControllerHandler = (*Supervisor)(nil)
+
+// controllerBarrierStore returns the barrier-recovered controller store, or
+// the retained barrier error when recovery failed.
+func (s *Supervisor) controllerBarrierStore() (*workflowcontroller.ControllerStore, error) {
+	_, store, err := s.workflowBarrierResult()
+	if err != nil {
+		return nil, err
+	}
+	return store, nil
+}
+
+func (s *Supervisor) WorkflowControllerCreate(raw json.RawMessage) (any, error) {
+	var p struct {
+		ControllerID string `json:"controller_id"`
+		MaxInflight  int    `json:"max_inflight"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&p); err != nil {
+		return nil, fmt.Errorf("workflow.controller.create params: %w", err)
+	}
+	if p.ControllerID == "" {
+		return nil, errors.New("workflow.controller.create: controller_id is required")
+	}
+	if p.MaxInflight <= 0 {
+		return nil, errors.New("workflow.controller.create: max_inflight must be positive")
+	}
+	store, err := s.controllerBarrierStore()
+	if err != nil {
+		return nil, err
+	}
+	rec, err := store.Create(p.ControllerID, p.MaxInflight)
+	if err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+func (s *Supervisor) WorkflowControllerEnable(id string) (any, error) {
+	store, err := s.controllerBarrierStore()
+	if err != nil {
+		return nil, err
+	}
+	// Serialize against disable (and other enables) so the final in-process
+	// loop state always matches the last persisted desired state.
+	s.workflowControllerMu.Lock()
+	defer s.workflowControllerMu.Unlock()
+	rec, err := store.SetDesiredState(id, workflowcontroller.DesiredEnabled, "")
+	if err != nil {
+		return nil, err
+	}
+	s.startControllerLoop(store, id)
+	return rec, nil
+}
+
+func (s *Supervisor) WorkflowControllerDisable(id string, raw json.RawMessage) (any, error) {
+	var p struct {
+		Reason string `json:"reason"`
+	}
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, fmt.Errorf("workflow.controller.disable params: %w", err)
+		}
+	}
+	if p.Reason == "" {
+		return nil, errors.New("workflow.controller.disable: reason is required")
+	}
+	store, err := s.controllerBarrierStore()
+	if err != nil {
+		return nil, err
+	}
+	// Serialize against enable (and other disables): persist desired=disabled
+	// (which durably releases any live lease) before stopping this process's
+	// loop, so the final loop state matches the last persisted desired state.
+	// Workflow nodes are never touched.
+	s.workflowControllerMu.Lock()
+	defer s.workflowControllerMu.Unlock()
+	rec, err := store.SetDesiredState(id, workflowcontroller.DesiredDisabled, p.Reason)
+	if err != nil {
+		return nil, err
+	}
+	s.stopControllerLoop(id)
+	return rec, nil
+}
+
+func (s *Supervisor) WorkflowControllerStatus(id string) (any, error) {
+	store, err := s.controllerBarrierStore()
+	if err != nil {
+		return nil, err
+	}
+	rec, ok, err := store.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("controller %s: %w", id, workflowcontroller.ErrNotFound)
+	}
+	return controllerStatusMap(rec, s.supervisorIdentity()), nil
+}
+
+func (s *Supervisor) WorkflowControllerList() (any, error) {
+	store, err := s.controllerBarrierStore()
+	if err != nil {
+		return nil, err
+	}
+	records, err := store.List()
+	if err != nil {
+		return nil, err
+	}
+	controllers := make([]map[string]any, 0, len(records))
+	for _, rec := range records {
+		controllers = append(controllers, map[string]any{
+			"controller_id": rec.ControllerID,
+			"desired_state": string(rec.DesiredState),
+			"leader":        controllerLeaderMap(rec, s.supervisorIdentity()),
+		})
+	}
+	return map[string]any{"controllers": controllers}, nil
+}
+
+func (s *Supervisor) WorkflowReady(id string, limit int) (any, error) {
+	mgr, _, err := s.workflowBarrierResult()
+	if err != nil {
+		return nil, err
+	}
+	candidates, err := mgr.CandidatesForController(id, limit)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"advisory":      true,
+		"controller_id": id,
+		"candidates":    candidates,
+	}, nil
+}
+
+// controllerLeaderMap renders a record's lease for RPC results, or nil when
+// the controller holds no lease.
+func controllerLeaderMap(rec workflowcontroller.ControllerRecord, ownIdentity string) any {
+	if rec.Leader == nil {
+		return nil
+	}
+	return map[string]any{
+		"lease_id":        rec.Leader.LeaseID,
+		"owner_id":        rec.Leader.OwnerID,
+		"owner_epoch":     rec.Leader.OwnerEpoch,
+		"acquired_at":     rec.Leader.AcquiredAt,
+		"renewed_at":      rec.Leader.RenewedAt,
+		"expires_at":      rec.Leader.ExpiresAt,
+		"is_this_process": rec.Leader.OwnerID == ownIdentity,
+	}
+}
+
+// controllerStatusMap renders the controller status RPC result, including the
+// reserved zero-valued reconciliation fields.
+func controllerStatusMap(rec workflowcontroller.ControllerRecord, ownIdentity string) map[string]any {
+	return map[string]any{
+		"controller_id":    rec.ControllerID,
+		"desired_state":    string(rec.DesiredState),
+		"max_inflight":     rec.MaxInflight,
+		"revision":         rec.Revision,
+		"owner_epoch":      rec.OwnerEpoch,
+		"leader":           controllerLeaderMap(rec, ownIdentity),
+		"last_reconcile":   nil,
+		"inflight":         0,
+		"capacity_blocked": nil,
+		"next_poll_at":     nil,
+	}
 }
 
 // lazyWorkflowHandler forwards workflow.* methods to the supervisor's

@@ -381,6 +381,8 @@ These are the same methods as above but applied to a specific child runtime inst
 
 The `workflow.*` methods drive a [durable workflow](workflow.md). They are dispatched to an optional workflow handler; when the supervisor has no workflow support (no `--workflow-root` manager), they return `-32601` (`method not found`). They do not use the run-scoped ownership model.
 
+The `workflow.controller.create`, `workflow.controller.enable`, `workflow.controller.disable`, `workflow.controller.status`, `workflow.controller.list`, and `workflow.ready` methods route to an optional workflow-controller handler. When the supervisor has no controller support, they return `-32601` (`method not found`). Like the other `workflow.*` methods, they do not use the run-scoped ownership model. `workflow.ready` is advisory and grants no lease.
+
 | Method | Params | Purpose |
 |------|------|---------|
 | `workflow.create` | template JSON | Register a versioned template. |
@@ -390,6 +392,12 @@ The `workflow.*` methods drive a [durable workflow](workflow.md). They are dispa
 | `workflow.inspect` | `{workflow_id}` | Full instance detail. |
 | `workflow.events` | `{workflow_id, after_seq?, limit?}` | Event log. |
 | `workflow.command` | `{workflow_id, command}` | Route an instance command by its `op` discriminator. |
+| `workflow.controller.create` | `{controller_id, max_inflight}` | Register a controller with its in-flight limit. |
+| `workflow.controller.enable` | `{controller_id}` | Set the desired state to enabled and start the leader loop. |
+| `workflow.controller.disable` | `{controller_id, reason}` | Set the desired state to disabled (releasing any live lease) and stop the leader loop. |
+| `workflow.controller.status` | `{controller_id}` | Snapshot of the controller record. |
+| `workflow.controller.list` | none | All controller records, sorted by id. |
+| `workflow.ready` | `{controller_id, limit?}` | Advisory candidate list for a controller; grants no lease. |
 
 `workflow.command` routes `op` to the instance command: `claim`, `start`, `heartbeat`, `complete`, `gate`, `skip`, or `unblock`. The command payload carries the op's fields. Example — claim a ready node:
 
