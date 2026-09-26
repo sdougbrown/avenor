@@ -35,6 +35,11 @@ type Manager struct {
 	candidates     map[WorkflowID]Snapshot
 	candidateSuper string
 	candidatesOK   bool
+
+	// subMu guards subscribers, a coalescing fan-out of buffered(1) wake
+	// channels notified on every committed workflow transition.
+	subMu       sync.Mutex
+	subscribers []chan struct{}
 }
 
 func NewManager(store *Store) *Manager {
@@ -618,20 +623,119 @@ func (m *Manager) MarkCandidateIndexEmpty(supervisorID string) {
 }
 
 // observeCommit is the store commit hook: it upserts the committed snapshot
-// into the candidate index once the index has been recovered. Older revisions
-// are ignored so out-of-order observations from concurrent commits do not
-// regress the index. Before recovery it is a no-op, and it never fails or
-// blocks the command.
+// into the candidate index once the index has been recovered, then wakes
+// subscribers. The wake fires only after the upsert (and outside
+// candidateMu) so a woken subscriber that immediately re-queries observes
+// the committed state, not the pre-commit index. Older revisions are
+// ignored so out-of-order observations from concurrent commits do not
+// regress the index. Before recovery the upsert is skipped, and the hook
+// never fails or blocks the command.
 func (m *Manager) observeCommit(wf WorkflowID, snap Snapshot) {
 	m.candidateMu.Lock()
+	if m.candidatesOK {
+		if cur, ok := m.candidates[wf]; ok && cur.Instance.Revision > snap.Instance.Revision {
+			m.candidateMu.Unlock()
+			m.notifySubscribers()
+			return
+		}
+		m.candidates[wf] = snap
+	}
+	m.candidateMu.Unlock()
+	// Fire the coalescing change notification unconditionally — even before
+	// the candidate index is recovered — so subscribers observe every
+	// committed transition. Non-blocking; never fails or blocks the commit.
+	m.notifySubscribers()
+}
+
+// notifySubscribers performs a non-blocking send to every change subscriber.
+// A subscriber that falls behind coalesces to a single signal. It never
+// fails or blocks the commit path.
+func (m *Manager) notifySubscribers() {
+	m.subMu.Lock()
+	defer m.subMu.Unlock()
+	for _, ch := range m.subscribers {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// SubscribeChanges returns a coalescing wake channel and a cancel func. The
+// channel has buffer size 1 and every committed workflow transition performs
+// a non-blocking send, so a subscriber that falls behind observes one
+// coalesced signal instead of one per commit. Notifications are hints only;
+// callers must not rely on lossless delivery. The cancel func unsubscribes.
+func (m *Manager) SubscribeChanges() (<-chan struct{}, func()) {
+	ch := make(chan struct{}, 1)
+	m.subMu.Lock()
+	m.subscribers = append(m.subscribers, ch)
+	m.subMu.Unlock()
+	cancel := func() {
+		m.subMu.Lock()
+		defer m.subMu.Unlock()
+		for i, c := range m.subscribers {
+			if c == ch {
+				m.subscribers = append(m.subscribers[:i], m.subscribers[i+1:]...)
+				break
+			}
+		}
+	}
+	return ch, cancel
+}
+
+// LiveAttempt is one non-terminal attempt visible in the candidate index
+// snapshots.
+type LiveAttempt struct {
+	Identity       ExecutionIdentity
+	AttemptID      AttemptID
+	ControllerID   string
+	ConcurrencyKey string
+}
+
+// LiveAttempts returns every non-terminal (starting or running) attempt
+// across non-terminal workflows, from the cached recovered snapshots. Attempt
+// owner diagnostics come from the attempt's recorded diagnostics; manual
+// starts have an empty ControllerID. SupervisorID in Identity is the
+// supervisor identity stamped on the index.
+func (m *Manager) LiveAttempts() []LiveAttempt {
+	m.candidateMu.Lock()
 	defer m.candidateMu.Unlock()
-	if !m.candidatesOK {
-		return
+	ids := make([]WorkflowID, 0, len(m.candidates))
+	for id := range m.candidates {
+		ids = append(ids, id)
 	}
-	if cur, ok := m.candidates[wf]; ok && cur.Instance.Revision > snap.Instance.Revision {
-		return
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	out := make([]LiveAttempt, 0)
+	for _, wf := range ids {
+		snap := m.candidates[wf]
+		if isTerminalStatus(snap.Instance.Status) {
+			continue
+		}
+		for i := range snap.Instance.Attempts {
+			attempt := &snap.Instance.Attempts[i]
+			if attempt.Status != AttemptStarting && attempt.Status != AttemptRunning {
+				continue
+			}
+			var controllerID, concurrencyKey string
+			if attempt.Diagnostics != nil {
+				controllerID = attempt.Diagnostics.ControllerID
+				concurrencyKey = attempt.Diagnostics.ConcurrencyKey
+			}
+			out = append(out, LiveAttempt{
+				Identity: ExecutionIdentity{
+					SupervisorID: m.candidateSuper,
+					WorkflowID:   wf,
+					NodeID:       attempt.Identity.NodeID,
+					ActivationID: attempt.Identity.ActivationID,
+				},
+				AttemptID:      attempt.ID,
+				ControllerID:   controllerID,
+				ConcurrencyKey: concurrencyKey,
+			})
+		}
 	}
-	m.candidates[wf] = snap
+	return out
 }
 
 // CandidatesForController returns the ready auto-dispatch activations owned

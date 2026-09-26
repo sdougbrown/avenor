@@ -25,13 +25,15 @@ const (
 // its 1-based position in the per-controller log; the snapshot's Revision is
 // the last applied seq.
 const (
-	EventCreated        = "created"
-	EventEnabled        = "enabled"
-	EventDisabled       = "disabled"
-	EventLeaderAcquired = "leader_acquired"
-	EventLeaderRenewed  = "leader_renewed"
-	EventLeaderReleased = "leader_released"
-	EventLeaderExpired  = "leader_expired"
+	EventCreated         = "created"
+	EventEnabled         = "enabled"
+	EventDisabled        = "disabled"
+	EventLeaderAcquired  = "leader_acquired"
+	EventLeaderRenewed   = "leader_renewed"
+	EventLeaderReleased  = "leader_released"
+	EventLeaderExpired   = "leader_expired"
+	EventCapacityBlocked = "capacity_blocked"
+	EventCapacityCleared = "capacity_cleared"
 )
 
 // Sentinel errors returned by the controller store.
@@ -74,10 +76,11 @@ type ControllerRecord struct {
 	Leader        *LeaderLease
 	// PollCursors is reserved for future per-poll checkpoints and is always
 	// nil or empty in this stage; it round-trips through the snapshot.
-	PollCursors    map[string]json.RawMessage
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
-	DisabledReason string
+	PollCursors     map[string]json.RawMessage
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+	DisabledReason  string
+	CapacityBlocked string
 
 	// LastRenewalEventAt is the wall-clock time of the last leader_renewed
 	// event appended for the current lease; it throttles renewal events to at
@@ -87,15 +90,17 @@ type ControllerRecord struct {
 
 // ControllerEvent is one line of a controller's events.ndjson log.
 type ControllerEvent struct {
-	Kind        string    `json:"kind"`
-	Seq         int64     `json:"seq"`
-	Time        time.Time `json:"time"`
-	MaxInflight int       `json:"max_inflight,omitempty"`
-	Reason      string    `json:"reason,omitempty"`
-	LeaseID     string    `json:"lease_id,omitempty"`
-	OwnerID     string    `json:"owner_id,omitempty"`
-	OwnerEpoch  int64     `json:"owner_epoch,omitempty"`
-	ExpiresAt   time.Time `json:"expires_at,omitempty"`
+	Kind          string    `json:"kind"`
+	Seq           int64     `json:"seq"`
+	Time          time.Time `json:"time"`
+	MaxInflight   int       `json:"max_inflight,omitempty"`
+	Reason        string    `json:"reason,omitempty"`
+	LeaseID       string    `json:"lease_id,omitempty"`
+	OwnerID       string    `json:"owner_id,omitempty"`
+	OwnerEpoch    int64     `json:"owner_epoch,omitempty"`
+	ExpiresAt     time.Time `json:"expires_at,omitempty"`
+	BlockedReason string    `json:"blocked_reason,omitempty"`
+	BlockedDetail string    `json:"blocked_detail,omitempty"`
 }
 
 // LastRenewalEventAt is exported on ControllerRecord; the custom
@@ -112,6 +117,7 @@ type controllerRecordJSON struct {
 	CreatedAt          time.Time                   `json:"created_at"`
 	UpdatedAt          time.Time                   `json:"updated_at"`
 	DisabledReason     string                      `json:"disabled_reason,omitempty"`
+	CapacityBlocked    string                      `json:"capacity_blocked,omitempty"`
 	LastRenewalEventAt *time.Time                  `json:"last_renewal_event_at,omitempty"`
 }
 
@@ -119,16 +125,17 @@ type controllerRecordJSON struct {
 // when PollCursors is non-nil, and omits it entirely when nil.
 func (r ControllerRecord) MarshalJSON() ([]byte, error) {
 	a := controllerRecordJSON{
-		SchemaVersion:  r.SchemaVersion,
-		ControllerID:   r.ControllerID,
-		DesiredState:   r.DesiredState,
-		MaxInflight:    r.MaxInflight,
-		Revision:       r.Revision,
-		OwnerEpoch:     r.OwnerEpoch,
-		Leader:         r.Leader,
-		CreatedAt:      r.CreatedAt,
-		UpdatedAt:      r.UpdatedAt,
-		DisabledReason: r.DisabledReason,
+		SchemaVersion:   r.SchemaVersion,
+		ControllerID:    r.ControllerID,
+		DesiredState:    r.DesiredState,
+		MaxInflight:     r.MaxInflight,
+		Revision:        r.Revision,
+		OwnerEpoch:      r.OwnerEpoch,
+		Leader:          r.Leader,
+		CreatedAt:       r.CreatedAt,
+		UpdatedAt:       r.UpdatedAt,
+		DisabledReason:  r.DisabledReason,
+		CapacityBlocked: r.CapacityBlocked,
 	}
 	if r.PollCursors != nil {
 		a.PollCursors = &r.PollCursors
@@ -147,16 +154,17 @@ func (r *ControllerRecord) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*r = ControllerRecord{
-		SchemaVersion:  a.SchemaVersion,
-		ControllerID:   a.ControllerID,
-		DesiredState:   a.DesiredState,
-		MaxInflight:    a.MaxInflight,
-		Revision:       a.Revision,
-		OwnerEpoch:     a.OwnerEpoch,
-		Leader:         a.Leader,
-		CreatedAt:      a.CreatedAt,
-		UpdatedAt:      a.UpdatedAt,
-		DisabledReason: a.DisabledReason,
+		SchemaVersion:   a.SchemaVersion,
+		ControllerID:    a.ControllerID,
+		DesiredState:    a.DesiredState,
+		MaxInflight:     a.MaxInflight,
+		Revision:        a.Revision,
+		OwnerEpoch:      a.OwnerEpoch,
+		Leader:          a.Leader,
+		CreatedAt:       a.CreatedAt,
+		UpdatedAt:       a.UpdatedAt,
+		DisabledReason:  a.DisabledReason,
+		CapacityBlocked: a.CapacityBlocked,
 	}
 	if a.PollCursors != nil {
 		r.PollCursors = *a.PollCursors
@@ -196,15 +204,18 @@ func applyEvent(rec *ControllerRecord, e ControllerEvent) error {
 		rec.DesiredState = DesiredDisabled
 		rec.MaxInflight = e.MaxInflight
 		rec.DisabledReason = ""
+		rec.CapacityBlocked = ""
 		rec.Leader = nil
 		rec.OwnerEpoch = 0
 		rec.LastRenewalEventAt = time.Time{}
 	case EventEnabled:
 		rec.DesiredState = DesiredEnabled
 		rec.DisabledReason = ""
+		rec.CapacityBlocked = ""
 	case EventDisabled:
 		rec.DesiredState = DesiredDisabled
 		rec.DisabledReason = e.Reason
+		rec.CapacityBlocked = ""
 	case EventLeaderAcquired:
 		rec.OwnerEpoch = e.OwnerEpoch
 		rec.LastRenewalEventAt = time.Time{}
@@ -224,6 +235,10 @@ func applyEvent(rec *ControllerRecord, e ControllerEvent) error {
 		rec.LastRenewalEventAt = e.Time
 	case EventLeaderReleased, EventLeaderExpired:
 		rec.Leader = nil
+	case EventCapacityBlocked:
+		rec.CapacityBlocked = e.BlockedReason
+	case EventCapacityCleared:
+		rec.CapacityBlocked = ""
 	default:
 		return fmt.Errorf("unknown controller event kind %q", e.Kind)
 	}

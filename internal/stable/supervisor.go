@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/admission"
@@ -348,10 +349,21 @@ type Supervisor struct {
 	// controllerRenewInterval is the leader loop's renew cadence; defaults to
 	// workflowcontroller.RenewInterval.
 	controllerRenewInterval time.Duration
-	state                   *control.ControlState
-	controlMu               sync.Mutex
-	runtimes                map[string]*childRuntime
-	nextID                  int
+	// candidateRefreshMu guards lastCandidateRebuild and
+	// candidateRefreshWindow: the supervisor-wide share of candidate-index
+	// rebuilds across every controller's runner deps. candidateRefreshWindow
+	// matches the runner's anti-entropy interval so a tick's N enabled
+	// controllers cause one catalog scan instead of N.
+	candidateRefreshMu     sync.Mutex
+	lastCandidateRebuild   time.Time
+	candidateRefreshWindow time.Duration
+	// candidateRebuilds counts every candidate-index rebuild performed by
+	// stableRunnerDeps.Refresh (test instrumentation).
+	candidateRebuilds atomic.Int64
+	state             *control.ControlState
+	controlMu         sync.Mutex
+	runtimes          map[string]*childRuntime
+	nextID            int
 	// outstandingReservations counts admission reservations that hold a local
 	// slot but have not yet converted into a registered runtime. Guarded by
 	// controlMu; the local capacity limit is enforced against active runtimes
@@ -404,6 +416,10 @@ type Supervisor struct {
 	// does not schedule or prioritize work.
 	capacityMu sync.Mutex
 	capacityCh chan struct{}
+	// capacitySubMu guards capacitySubs, a coalescing fan-out of buffered(1)
+	// wake channels notified on every capacity change.
+	capacitySubMu sync.Mutex
+	capacitySubs  []chan struct{}
 }
 
 func NewSupervisor(cfg Config) *Supervisor {
@@ -417,6 +433,7 @@ func NewSupervisor(cfg Config) *Supervisor {
 		runtimes:                map[string]*childRuntime{},
 		controllerLoops:         map[string]*controllerLoop{},
 		controllerRenewInterval: workflowcontroller.RenewInterval,
+		candidateRefreshWindow:  workflowcontroller.DefaultAntiEntropy,
 		shutdownCh:              make(chan struct{}),
 		runtimeActivity:         make(chan struct{}),
 		pendingQuestions:        map[string]pendingChildQuestion{},
@@ -682,6 +699,41 @@ func (s *Supervisor) signalCapacityChange() {
 	}
 	s.capacityCh = make(chan struct{})
 	s.capacityMu.Unlock()
+	s.notifyCapacitySubscribers()
+}
+
+// notifyCapacitySubscribers performs a non-blocking send to every capacity
+// change subscriber. A subscriber that falls behind coalesces to a single
+// signal. It never fails or blocks the caller.
+func (s *Supervisor) notifyCapacitySubscribers() {
+	s.capacitySubMu.Lock()
+	defer s.capacitySubMu.Unlock()
+	for _, ch := range s.capacitySubs {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// SubscribeCapacityChanges returns a coalescing wake channel and a cancel
+// func, notified whenever admission capacity may have changed. Hints only.
+func (s *Supervisor) SubscribeCapacityChanges() (<-chan struct{}, func()) {
+	ch := make(chan struct{}, 1)
+	s.capacitySubMu.Lock()
+	s.capacitySubs = append(s.capacitySubs, ch)
+	s.capacitySubMu.Unlock()
+	cancel := func() {
+		s.capacitySubMu.Lock()
+		defer s.capacitySubMu.Unlock()
+		for i, c := range s.capacitySubs {
+			if c == ch {
+				s.capacitySubs = append(s.capacitySubs[:i], s.capacitySubs[i+1:]...)
+				break
+			}
+		}
+	}
+	return ch, cancel
 }
 
 // acquireTreeAdmission reserves one tree-budget slot. It returns an empty
@@ -4314,18 +4366,24 @@ func (s *Supervisor) supervisorIdentity() string {
 	return fmt.Sprintf("%s:%d", s.runID, os.Getpid())
 }
 
-// controllerLoop tracks one leader-loop goroutine for a single controller in
-// this process.
+// controllerLoop tracks one controller runner for a single controller in
+// this process. The runner is constructed before the handle is published, so
+// stop always reaches a live runner; the handle's goroutine only waits for
+// the runner to exit.
 type controllerLoop struct {
-	stopCh    chan struct{}
-	done      chan struct{}
-	closeOnce sync.Once
+	done   chan struct{}
+	runner *workflowcontroller.Runner
 }
 
-// stop closes the loop's stop channel exactly once, so concurrent stoppers
-// (disable and shutdown) cannot double-close it.
+// stop stops the loop's runner and waits for it to release its lease and
+// finish. Safe to call concurrently and on an already-stopped runner.
 func (l *controllerLoop) stop() {
-	l.closeOnce.Do(func() { close(l.stopCh) })
+	l.runner.Stop()
+}
+
+// runnerStatus returns the runner's current status.
+func (l *controllerLoop) runnerStatus() workflowcontroller.RunnerStatus {
+	return l.runner.Status()
 }
 
 // startControllerLoop starts the process's single leader loop for controllerID
@@ -4346,9 +4404,29 @@ func (s *Supervisor) startControllerLoop(store *workflowcontroller.ControllerSto
 			return
 		}
 	}
-	loop := &controllerLoop{stopCh: make(chan struct{}), done: make(chan struct{})}
+	// The runner is constructed before the handle is published so a
+	// concurrent stop always reaches a live runner. Its goroutine starts
+	// before the map insert; a disable that misses the entry persists the
+	// disabled state first, so the runner self-exits on its next
+	// acquisition attempt. workflowMgr is read directly because both call
+	// sites (the startup barrier and enable) run after the barrier has
+	// assigned it; workflowManager here would re-enter the barrier's
+	// sync.Once and deadlock.
+	changeCh, cancelChange := s.workflowMgr.SubscribeChanges()
+	capacityCh, cancelCapacity := s.SubscribeCapacityChanges()
+	deps := &stableRunnerDeps{s: s, controllerID: controllerID}
+	runner := workflowcontroller.NewRunner(workflowcontroller.RunnerConfig{
+		Deps:          deps,
+		Store:         store,
+		ControllerID:  controllerID,
+		OwnerID:       s.supervisorIdentity(),
+		RenewInterval: s.controllerRenewInterval,
+		ChangeCh:      changeCh,
+		CapacityCh:    capacityCh,
+	})
+	loop := &controllerLoop{done: make(chan struct{}), runner: runner}
 	s.controllerLoops[controllerID] = loop
-	go s.runControllerLoop(store, controllerID, loop)
+	go s.runControllerLoop(controllerID, loop, cancelChange, cancelCapacity)
 }
 
 // stopControllerLoop signals the controller's leader loop to exit and waits
@@ -4381,12 +4459,10 @@ func (s *Supervisor) stopControllerLoops() {
 	}
 }
 
-// runControllerLoop holds the controller's leader lease without dispatching
-// anything: it acquires the lease, renews it every RenewInterval, and re-checks
-// the desired state each tick. Losing the lease (or a renewal failure) falls
-// back to acquisition retry; a disabled desired state ends the loop. On stop
-// it releases a still-held lease before exiting.
-func (s *Supervisor) runControllerLoop(store *workflowcontroller.ControllerStore, controllerID string, loop *controllerLoop) {
+// runControllerLoop waits for the controller's runner to exit (desired
+// disabled, stop request, or a lease loss it declines to retry) and performs
+// the loop's teardown. The runner releases a still-held lease on exit.
+func (s *Supervisor) runControllerLoop(controllerID string, loop *controllerLoop, cancelChange, cancelCapacity func()) {
 	// Self-exit cleanup: remove this loop's map entry, but only while the
 	// entry still refers to this loop — a concurrent disable (or shutdown)
 	// may have already deleted it, or an enable may have replaced it with a
@@ -4401,76 +4477,10 @@ func (s *Supervisor) runControllerLoop(store *workflowcontroller.ControllerStore
 		s.controllerLoopsMu.Unlock()
 	}()
 	defer close(loop.done)
-	ownerID := s.supervisorIdentity()
-	var leaseID string
-	var ownerEpoch int64
-	holding := false
-	release := func() {
-		if !holding {
-			return
-		}
-		holding = false
-		// Best-effort: a concurrent disable already released the lease
-		// durably, so a CAS failure here is expected and ignorable.
-		_, _ = store.ReleaseLease(controllerID, leaseID, ownerEpoch)
-	}
-	for {
-		select {
-		case <-loop.stopCh:
-			release()
-			return
-		default:
-		}
-		if !holding {
-			rec, ok, err := store.AcquireLease(controllerID, ownerID)
-			if err != nil {
-				if errors.Is(err, workflowcontroller.ErrDisabled) {
-					return
-				}
-				log.Printf("workflow controller %s: acquire lease: %v", controllerID, err)
-				if !controllerLoopSleep(loop, s.controllerRenewInterval) {
-					return
-				}
-				continue
-			}
-			if ok {
-				leaseID = rec.Leader.LeaseID
-				ownerEpoch = rec.Leader.OwnerEpoch
-				holding = true
-				continue
-			}
-			if !controllerLoopSleep(loop, s.controllerRenewInterval) {
-				return
-			}
-			continue
-		}
-		if _, err := store.RenewLease(controllerID, leaseID, ownerEpoch); err != nil {
-			// Lost the lease (conflict or transient failure): stop acting as
-			// leader and fall back to acquisition retry.
-			holding = false
-			leaseID = ""
-			continue
-		}
-		if rec, ok, err := store.Get(controllerID); err == nil && (!ok || rec.DesiredState != workflowcontroller.DesiredEnabled) {
-			release()
-			return
-		}
-		if !controllerLoopSleep(loop, s.controllerRenewInterval) {
-			release()
-			return
-		}
-	}
-}
+	defer cancelCapacity()
+	defer cancelChange()
 
-// controllerLoopSleep waits one renew interval, returning false when the loop
-// was stopped while waiting.
-func controllerLoopSleep(loop *controllerLoop, interval time.Duration) bool {
-	select {
-	case <-loop.stopCh:
-		return false
-	case <-time.After(interval):
-		return true
-	}
+	<-loop.runner.Done()
 }
 
 var _ control.WorkflowControllerHandler = (*Supervisor)(nil)
@@ -4571,7 +4581,24 @@ func (s *Supervisor) WorkflowControllerStatus(id string) (any, error) {
 	if !ok {
 		return nil, fmt.Errorf("controller %s: %w", id, workflowcontroller.ErrNotFound)
 	}
-	return controllerStatusMap(rec, s.supervisorIdentity()), nil
+	return controllerStatusMap(rec, s.supervisorIdentity(), s.controllerRunnerStatus(id, rec)), nil
+}
+
+// controllerRunnerStatus returns this process's live runner status for the
+// controller when the record's leader is owned by this process; otherwise it
+// returns nil.
+func (s *Supervisor) controllerRunnerStatus(id string, rec workflowcontroller.ControllerRecord) *workflowcontroller.RunnerStatus {
+	if rec.Leader == nil || rec.Leader.OwnerID != s.supervisorIdentity() {
+		return nil
+	}
+	s.controllerLoopsMu.Lock()
+	loop := s.controllerLoops[id]
+	s.controllerLoopsMu.Unlock()
+	if loop == nil {
+		return nil
+	}
+	status := loop.runnerStatus()
+	return &status
 }
 
 func (s *Supervisor) WorkflowControllerList() (any, error) {
@@ -4627,9 +4654,26 @@ func controllerLeaderMap(rec workflowcontroller.ControllerRecord, ownIdentity st
 	}
 }
 
-// controllerStatusMap renders the controller status RPC result, including the
-// reserved zero-valued reconciliation fields.
-func controllerStatusMap(rec workflowcontroller.ControllerRecord, ownIdentity string) map[string]any {
+// controllerStatusMap renders the controller status RPC result. When the
+// record's leader is owned by this process and this process has a live
+// runner for the controller, the reconciliation fields come from the
+// runner's status; otherwise they stay nil/0.
+func controllerStatusMap(rec workflowcontroller.ControllerRecord, ownIdentity string, runner *workflowcontroller.RunnerStatus) map[string]any {
+	var lastReconcile any
+	inflight := 0
+	var capacityBlocked any
+	if runner != nil {
+		if !runner.LastReconcile.IsZero() {
+			lastReconcile = runner.LastReconcile
+		}
+		inflight = runner.Inflight
+		if runner.CapacityBlocked != "" {
+			capacityBlocked = map[string]any{
+				"source": runner.CapacityBlocked,
+				"detail": runner.CapacityDetail,
+			}
+		}
+	}
 	return map[string]any{
 		"controller_id":    rec.ControllerID,
 		"desired_state":    string(rec.DesiredState),
@@ -4637,9 +4681,9 @@ func controllerStatusMap(rec workflowcontroller.ControllerRecord, ownIdentity st
 		"revision":         rec.Revision,
 		"owner_epoch":      rec.OwnerEpoch,
 		"leader":           controllerLeaderMap(rec, ownIdentity),
-		"last_reconcile":   nil,
-		"inflight":         0,
-		"capacity_blocked": nil,
+		"last_reconcile":   lastReconcile,
+		"inflight":         inflight,
+		"capacity_blocked": capacityBlocked,
 		"next_poll_at":     nil,
 	}
 }

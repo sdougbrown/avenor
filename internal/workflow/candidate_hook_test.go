@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // TestCommitHookKeepsCandidateIndexFresh proves that after one rebuild the
@@ -84,6 +85,37 @@ func TestCommitHookNoopBeforeRecovery(t *testing.T) {
 	if _, err := m.CandidatesForController("ctl-a", 10); !errors.Is(err, ErrCandidatesNotRecovered) {
 		t.Fatalf("candidates before recovery: err = %v, want ErrCandidatesNotRecovered", err)
 	}
+}
+
+// TestObserveCommitWakesAfterIndexUpsert proves a subscriber woken by a
+// committed transition can immediately re-query the candidate index and
+// observe the committed snapshot: the wake fires only after the upsert,
+// so a woken runner never reads the pre-commit index.
+func TestObserveCommitWakesAfterIndexUpsert(t *testing.T) {
+	m, _, _ := newAutoDispatchFixture(t, "hook-wake", "ctl-a", 50)
+	m.MarkCandidateIndexEmpty("sup-1")
+	ch, cancel := m.SubscribeChanges()
+	defer cancel()
+
+	// Instantiate a second instance: the commit makes a new candidate ready.
+	wf2 := mustInstantiateTemplate(t, m, "hook-wake", "1")
+
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the change signal")
+	}
+	// The wake implies the upsert already happened: query immediately.
+	cands, err := m.CandidatesForController("ctl-a", 10)
+	if err != nil {
+		t.Fatalf("candidates after wake: %v", err)
+	}
+	for _, c := range cands {
+		if c.Identity.WorkflowID == wf2 {
+			return
+		}
+	}
+	t.Fatalf("woken query missing candidate for %s: %v", wf2, cands)
 }
 
 // TestObserveCommitIgnoresStaleRevision proves the commit hook does not
