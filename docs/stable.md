@@ -394,7 +394,7 @@ avenor workflow controller list
 avenor workflow controller disable software-factory --reason "maintenance"
 ```
 
-The same operations are available through MCP (`avenor_workflow_controller_create/enable/disable/status/list`) and the control protocol's `workflow.controller.*` methods (see [Control Protocol](control-protocol.md)).
+Status and list are readable through the MCP `avenor_workflow_controller_status` tool (pass `controller_id` for a single controller, omit it to list all); create, enable, and disable are CLI and control-protocol only, via the commands above and the control protocol's `workflow.controller.*` methods (see [Control Protocol](control-protocol.md)).
 
 Pass `--workflow-adapter-dir` to the stable command to point the supervisor at a directory of external-gate adapter manifests (default: `$XDG_CONFIG_HOME/avenor/workflow-adapters`, falling back to `~/.config/avenor/workflow-adapters`).
 
