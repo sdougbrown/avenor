@@ -335,53 +335,67 @@ func (r *Runner) reseedPollCursors(existing map[string]*PollCursor) {
 	}
 }
 
+// leaderState is the leader loop's mutable state. It is confined to the
+// leader goroutine: only the goroutine running Runner.loop reads or writes
+// it, while workers and I/O goroutines communicate with the loop exclusively
+// through channels, so no locking is needed.
+type leaderState struct {
+	// leaseID and ownerEpoch identify the held lease; holding reports whether
+	// the lease is currently held.
+	leaseID    string
+	ownerEpoch int64
+	holding    bool
+	// blockedSource is the persisted capacity block: while set, passes keep
+	// renewing the lease, refreshing views, publishing status, and processing
+	// worker results, but take no dispatch decisions. It clears on a
+	// capacity-change signal, an anti-entropy pass, a successful dispatch, or
+	// a leadership loss.
+	blockedSource string
+	// lastRefresh is when the host view was last refreshed; the zero value
+	// forces a refresh on the next pass.
+	lastRefresh time.Time
+	// wake reports which wakeup ended the previous pass.
+	wake wakeReason
+	// timer schedules the loop's next wakeup.
+	timer *time.Timer
+}
+
 // loop is the leader goroutine: it acquires and holds the controller's lease
 // and runs reconcile passes while leading.
 func (r *Runner) loop() {
 	defer close(r.done)
 	defer r.clearLeadStatus()
 
-	timer := time.NewTimer(0)
-	if !timer.Stop() {
-		<-timer.C
+	s := &leaderState{timer: time.NewTimer(0)}
+	if !s.timer.Stop() {
+		<-s.timer.C
 	}
-	defer timer.Stop()
+	defer s.timer.Stop()
 
-	var leaseID string
-	var ownerEpoch int64
-	holding := false
-	var lastRefresh time.Time
-	wake := wakeNone
 	var exit bool
-	// blockedSource is the persisted capacity block: while set, passes keep
-	// renewing the lease, refreshing views, publishing status, and processing
-	// worker results, but take no dispatch decisions. It clears on a
-	// capacity-change signal, an anti-entropy pass, a successful dispatch, or
-	// a leadership loss.
-	var blockedSource string
 
 	release := func() {
-		if !holding {
+		if !s.holding {
 			return
 		}
-		holding = false
+		s.holding = false
 		// Best-effort: a concurrent disable already released the lease
 		// durably, so a CAS failure here is expected and ignorable.
-		_, _ = r.store.ReleaseLease(r.controllerID, leaseID, ownerEpoch)
+		_, _ = r.store.ReleaseLease(r.controllerID, s.leaseID, s.ownerEpoch)
 	}
 	dropLeadership := func() {
-		holding = false
-		leaseID = ""
-		blockedSource = ""
+		s.holding = false
+		s.leaseID = ""
+		s.blockedSource = ""
 		r.clearLeadStatus()
 	}
 
 	// clearBlock drops the persisted capacity block and its status fields.
 	clearBlock := func() {
-		blockedSource = ""
-		r.setStatus(func(s *RunnerStatus) {
-			s.CapacityBlocked = ""
-			s.CapacityDetail = ""
+		s.blockedSource = ""
+		r.setStatus(func(st *RunnerStatus) {
+			st.CapacityBlocked = ""
+			st.CapacityDetail = ""
 		})
 	}
 	// handleResult incorporates one worker outcome. It reports whether the
@@ -396,14 +410,14 @@ func (r *Runner) loop() {
 		}
 		switch res.result.Kind {
 		case ResultDispatched:
-			blockedSource = ""
+			s.blockedSource = ""
 			if _, _, err := r.store.ClearCapacityBlocked(r.controllerID); err != nil {
 				log.Printf("workflow controller %s: clear capacity blocked: %v", r.controllerID, err)
 			}
-			r.setStatus(func(s *RunnerStatus) {
-				s.LastOutcome = string(ResultDispatched)
-				s.CapacityBlocked = ""
-				s.CapacityDetail = ""
+			r.setStatus(func(st *RunnerStatus) {
+				st.LastOutcome = string(ResultDispatched)
+				st.CapacityBlocked = ""
+				st.CapacityDetail = ""
 			})
 		case ResultCapacityBlocked:
 			source := res.result.Source
@@ -411,14 +425,14 @@ func (r *Runner) loop() {
 			if source == "tree" {
 				detail = "descendant_budget"
 			}
-			blockedSource = source
+			s.blockedSource = source
 			if _, _, err := r.store.RecordCapacityBlocked(r.controllerID, source, detail); err != nil {
 				log.Printf("workflow controller %s: record capacity blocked: %v", r.controllerID, err)
 			}
-			r.setStatus(func(s *RunnerStatus) {
-				s.LastOutcome = string(ResultCapacityBlocked) + "(" + source + ")"
-				s.CapacityBlocked = source
-				s.CapacityDetail = detail
+			r.setStatus(func(st *RunnerStatus) {
+				st.LastOutcome = string(ResultCapacityBlocked) + "(" + source + ")"
+				st.CapacityBlocked = source
+				st.CapacityDetail = detail
 			})
 		case ResultNotLeader:
 			dropLeadership()
@@ -474,7 +488,7 @@ func (r *Runner) loop() {
 	// handlePollResult folds one poll worker outcome into the current pass.
 	handlePollResult := func(res pollWorkerResult) {
 		r.pendingPolls--
-		if r.handlePollOutcome(res.outcome, LeaderLease{LeaseID: leaseID, OwnerEpoch: ownerEpoch}) {
+		if r.handlePollOutcome(res.outcome, LeaderLease{LeaseID: s.leaseID, OwnerEpoch: s.ownerEpoch}) {
 			dropLeadership()
 		}
 	}
@@ -507,14 +521,14 @@ func (r *Runner) loop() {
 		if d < 0 {
 			d = 0
 		}
-		timer.Reset(d)
+		s.timer.Reset(d)
 	}
 	// sleep arms the timer at d and waits for it, cancellation, or a worker
 	// result (so blocked workers are never stranded while not leading).
 	sleep := func(d time.Duration) {
 		arm(d)
 		select {
-		case <-timer.C:
+		case <-s.timer.C:
 		case <-r.ctx.Done():
 		case res := <-r.results:
 			r.outstanding--
@@ -534,7 +548,7 @@ func (r *Runner) loop() {
 			release()
 			drainWorkers()
 			return wakeNone, true
-		case <-timer.C:
+		case <-s.timer.C:
 			return wakeTimer, false
 		case <-r.changeCh:
 			drainSignal(r.changeCh)
@@ -560,7 +574,7 @@ func (r *Runner) loop() {
 			return
 		}
 
-		if !holding {
+		if !s.holding {
 			rec, granted, err := r.store.AcquireLease(r.controllerID, r.ownerID)
 			if err != nil {
 				if errors.Is(err, ErrDisabled) {
@@ -576,17 +590,17 @@ func (r *Runner) loop() {
 				sleep(r.renewInterval)
 				continue
 			}
-			leaseID = rec.Leader.LeaseID
-			ownerEpoch = rec.Leader.OwnerEpoch
-			holding = true
-			blockedSource = ""
-			lastRefresh = time.Time{}
+			s.leaseID = rec.Leader.LeaseID
+			s.ownerEpoch = rec.Leader.OwnerEpoch
+			s.holding = true
+			s.blockedSource = ""
+			s.lastRefresh = time.Time{}
 			r.setStatus(func(s *RunnerStatus) { s.Leading = true })
 		}
 
 		// Renew first on every pass. A failed renewal stops dispatching and
 		// falls back to acquisition.
-		if _, err := r.store.RenewLease(r.controllerID, leaseID, ownerEpoch); err != nil {
+		if _, err := r.store.RenewLease(r.controllerID, s.leaseID, s.ownerEpoch); err != nil {
 			dropLeadership()
 			sleep(r.renewInterval)
 			continue
@@ -599,7 +613,7 @@ func (r *Runner) loop() {
 			// tick rather than releasing leadership.
 			log.Printf("workflow controller %s: read state: %v", r.controllerID, err)
 			r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "state_error" })
-			wake, exit = waitOrCancel(r.renewInterval)
+			s.wake, exit = waitOrCancel(r.renewInterval)
 			if exit {
 				return
 			}
@@ -620,7 +634,7 @@ func (r *Runner) loop() {
 		// workers and the wait folds in the earliest scheduled next poll.
 		if r.poll != nil {
 			drainPollResults()
-			if !holding {
+			if !s.holding {
 				// A stale apply dropped leadership mid-pass; re-acquire before
 				// offering any further polls.
 				sleep(r.renewInterval)
@@ -630,17 +644,17 @@ func (r *Runner) loop() {
 			wait = r.nextPollWait(wait)
 		}
 		refreshed := false
-		if lastRefresh.IsZero() || r.now().Sub(lastRefresh) >= r.antiEntropy {
+		if s.lastRefresh.IsZero() || r.now().Sub(s.lastRefresh) >= r.antiEntropy {
 			if err := r.deps.Refresh(); err != nil {
 				log.Printf("workflow controller %s: refresh: %v", r.controllerID, err)
 				r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "refresh_error" })
-				wake, exit = waitOrCancel(wait)
+				s.wake, exit = waitOrCancel(wait)
 				if exit {
 					return
 				}
 				continue
 			}
-			lastRefresh = r.now()
+			s.lastRefresh = r.now()
 			refreshed = true
 			// The same pass that refreshes re-seeds poll cursors lost to a
 			// crash between a park commit and cursor creation.
@@ -650,11 +664,11 @@ func (r *Runner) loop() {
 		}
 		// A capacity-change signal or an anti-entropy pass clears a persisted
 		// capacity block; the pass that clears it dispatches again.
-		if blockedSource != "" && (wake == wakeCapacity || refreshed) {
+		if s.blockedSource != "" && (s.wake == wakeCapacity || refreshed) {
 			clearBlock()
 		}
-		wake = wakeNone
-		if blockedSource != "" {
+		s.wake = wakeNone
+		if s.blockedSource != "" {
 			// Blocked: this pass renews, refreshes, and publishes status but
 			// takes no dispatch decisions until the block clears. The in-flight
 			// count is refreshed from the live view so it never goes stale
@@ -663,7 +677,7 @@ func (r *Runner) loop() {
 			if err != nil {
 				log.Printf("workflow controller %s: in-flight: %v", r.controllerID, err)
 				r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "inflight_error" })
-				wake, exit = waitOrCancel(wait)
+				s.wake, exit = waitOrCancel(wait)
 				if exit {
 					return
 				}
@@ -673,7 +687,7 @@ func (r *Runner) loop() {
 				s.LastReconcile = r.now()
 				s.Inflight = activeCount(r.buildInflightView(inflight), r.controllerID)
 			})
-			wake, exit = waitOrCancel(wait)
+			s.wake, exit = waitOrCancel(wait)
 			if exit {
 				return
 			}
@@ -683,7 +697,7 @@ func (r *Runner) loop() {
 		if err != nil {
 			log.Printf("workflow controller %s: candidates: %v", r.controllerID, err)
 			r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "candidates_error" })
-			wake, exit = waitOrCancel(wait)
+			s.wake, exit = waitOrCancel(wait)
 			if exit {
 				return
 			}
@@ -693,7 +707,7 @@ func (r *Runner) loop() {
 		if err != nil {
 			log.Printf("workflow controller %s: in-flight: %v", r.controllerID, err)
 			r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "inflight_error" })
-			wake, exit = waitOrCancel(wait)
+			s.wake, exit = waitOrCancel(wait)
 			if exit {
 				return
 			}
@@ -701,7 +715,7 @@ func (r *Runner) loop() {
 		}
 		if rec.MaxInflight <= 0 {
 			r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "no_capacity" })
-			wake, exit = waitOrCancel(wait)
+			s.wake, exit = waitOrCancel(wait)
 			if exit {
 				return
 			}
@@ -733,13 +747,13 @@ func (r *Runner) loop() {
 		// suppresses the remaining hand-offs and persists across passes.
 		for _, d := range decisions {
 			lostLead := drainResults()
-			if lostLead || blockedSource != "" || !holding {
+			if lostLead || s.blockedSource != "" || !s.holding {
 				break
 			}
 			if r.ctx.Err() != nil {
 				break
 			}
-			if _, err := r.store.RenewLease(r.controllerID, leaseID, ownerEpoch); err != nil {
+			if _, err := r.store.RenewLease(r.controllerID, s.leaseID, s.ownerEpoch); err != nil {
 				dropLeadership()
 				break
 			}
@@ -748,15 +762,15 @@ func (r *Runner) loop() {
 			e.key = d.Candidate.ConcurrencyKey
 			r.unreported[d.Candidate.Identity] = e
 			r.outstanding++
-			go r.dispatchWorker(d, LeaderLease{LeaseID: leaseID, OwnerEpoch: ownerEpoch})
+			go r.dispatchWorker(d, LeaderLease{LeaseID: s.leaseID, OwnerEpoch: s.ownerEpoch})
 		}
 
-		if !holding {
+		if !s.holding {
 			// Leadership was lost mid-pass; fall back to acquisition.
 			sleep(r.renewInterval)
 			continue
 		}
-		wake, exit = waitOrCancel(wait)
+		s.wake, exit = waitOrCancel(wait)
 		if exit {
 			return
 		}
