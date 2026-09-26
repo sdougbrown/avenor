@@ -277,6 +277,47 @@ func TestControllerRestartReacquiresLease(t *testing.T) {
 	}
 }
 
+// TestControllerStatusSurfacesNextPollReadError proves a failed poll-time
+// read is reported as next_poll_error instead of silently rendering
+// next_poll_at: nil. The controllerStatusPreNextPoll seam fires between
+// WorkflowControllerStatus's record read and the NextPollTime re-read, so
+// the test corrupts the snapshot exactly inside that window: a corrupt
+// first read fails the whole call, only a corrupt second read reaches the
+// surfaced error.
+func TestControllerStatusSurfacesNextPollReadError(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "wfroot")
+	sup := NewSupervisor(Config{ControlSocket: newStableSocketPath(t, "wfctl-nextpoll-err"), WorkflowRoot: root})
+	stopLoopsAtCleanup(t, sup)
+	if _, err := sup.WorkflowControllerCreate(createControllerParams(t, "c1", 2)); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	snapshot := filepath.Join(root, "controllers", "c1", "controller.json")
+	valid, err := os.ReadFile(snapshot)
+	if err != nil {
+		t.Fatalf("read snapshot: %v", err)
+	}
+	corrupt := valid[:len(valid)/2]
+
+	controllerStatusPreNextPoll = func() {
+		_ = os.WriteFile(snapshot, corrupt, 0o600)
+	}
+	t.Cleanup(func() { controllerStatusPreNextPoll = nil })
+
+	st, err := sup.WorkflowControllerStatus("c1")
+	_ = os.WriteFile(snapshot, valid, 0o600)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	status := st.(map[string]any)
+	msg, ok := status["next_poll_error"].(string)
+	if !ok || !strings.Contains(msg, "controller c1 snapshot") {
+		t.Fatalf("next_poll_error = %#v, want the snapshot read error", status["next_poll_error"])
+	}
+	if status["next_poll_at"] != nil {
+		t.Fatalf("next_poll_at = %#v, want nil on a failed read", status["next_poll_at"])
+	}
+}
+
 // TestControllerDisableReleasesLiveLease proves disabling a live leader
 // persists desired=disabled with the reason, durably releases the lease,
 // removes the loop, and refuses further acquisition.

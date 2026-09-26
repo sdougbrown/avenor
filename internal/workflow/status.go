@@ -146,4 +146,5 @@ const (
 	CommandAttemptIdentified CommandKind = "attempt_identified"
 	CommandChildAttach       CommandKind = "child_attach"
 	CommandChildOutcome      CommandKind = "child_outcome"
+	CommandParkExternal      CommandKind = "park_external"
 )

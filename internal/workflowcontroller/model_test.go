@@ -66,7 +66,7 @@ func TestControllerRecordJSONRoundTrip(t *testing.T) {
 	}
 
 	// A non-nil empty PollCursors persists as {} and round-trips non-nil.
-	rec.PollCursors = map[string]json.RawMessage{}
+	rec.PollCursors = map[string]*PollCursor{}
 	rec.Leader = nil
 	rec.LastRenewalEventAt = time.Time{}
 	data, err = json.Marshal(rec)

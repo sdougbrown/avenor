@@ -22,6 +22,7 @@ const (
 	EventTransition        EventKind = "workflow.event.transition"
 	EventChildAttached     EventKind = "workflow.event.child_attached"
 	EventChildOutcome      EventKind = "workflow.event.child_outcome"
+	EventExternalParked    EventKind = "workflow.event.external_parked"
 )
 
 // InstanceRecord is the payload of EventInstantiated: enough immutable context

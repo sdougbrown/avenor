@@ -34,12 +34,23 @@ const (
 	ResultStartFailed DispatchResultKind = "start_failed"
 	// ResultCanceled means the dispatch was canceled through its context.
 	ResultCanceled DispatchResultKind = "canceled"
+	// ResultParked means the candidate was an auto external activation parked
+	// kernel-locally; its poll seeds schedule the gate's polling cursors.
+	ResultParked DispatchResultKind = "parked"
+	// ResultUnresolvedBinding means the candidate's gate bindings were not
+	// fully resolved; the activation stays ready and a deduplicated
+	// diagnostic is recorded.
+	ResultUnresolvedBinding DispatchResultKind = "unresolved_binding"
 )
 
 // DispatchResult is the outcome of one host dispatch attempt.
 type DispatchResult struct {
 	Kind   DispatchResultKind
 	Source string // capacity source: "local" or "tree"
+	Detail string // inert diagnostic detail
+	// PollSeeds carries the parked activation's required external gates when
+	// Kind is ResultParked; each gate becomes a poll cursor.
+	PollSeeds []workflow.ParkedGateRef
 }
 
 // RunnerDeps is the host-side surface the runner drives. The host implements
@@ -53,6 +64,10 @@ type RunnerDeps interface {
 	// Refresh rebuilds any host-side cached view the candidate and in-flight
 	// queries read from.
 	Refresh() error
+	// ParkedGates returns one gate reference per resolved bound required
+	// external gate on the controller's parked awaiting_gate activations. The
+	// runner re-seeds missing poll cursors from it on every anti-entropy pass.
+	ParkedGates(controllerID string) ([]workflow.ParkedGateRef, error)
 	// Dispatch dispatches one selected candidate under the runner's lease.
 	Dispatch(ctx context.Context, d Decision, lease LeaderLease) (DispatchResult, error)
 }
@@ -85,6 +100,14 @@ type RunnerConfig struct {
 	ChangeCh      <-chan struct{}
 	CapacityCh    <-chan struct{}
 	Now           func() time.Time
+	// Poll, when non-nil, enables external-gate adapter polling alongside
+	// dispatch. PollBaseDelay is the interval before the first poll after a
+	// park (production: 30s). PollJitter returns a bounded jitter scalar in
+	// [-1, 1]; MaxPollWorkers bounds concurrent adapter invocations.
+	Poll           Poller
+	PollBaseDelay  time.Duration
+	PollJitter     func() float64
+	MaxPollWorkers int
 }
 
 // dispatchWorkerResult carries one worker's outcome back to the leader loop.
@@ -143,6 +166,24 @@ type Runner struct {
 	// a worker never blocks longer than one outstanding result while the
 	// leader is inside a pass.
 	results chan dispatchWorkerResult
+	// pollResults carries poll worker outcomes to the leader loop.
+	pollResults chan pollWorkerResult
+	// pollInFlight holds the cursor keys with a poll worker still running
+	// (leader-goroutine-local), so a due cursor is never re-offered while its
+	// invocation runs.
+	pollInFlight map[string]bool
+	// pendingPolls is the number of poll workers that have not delivered a
+	// result yet. Leader-goroutine-local.
+	pendingPolls int
+	// poll is the optional host poll surface; nil disables polling.
+	poll Poller
+	// pollBase is the interval before the first poll after a park and the
+	// floor for adapter-requested delays.
+	pollBase time.Duration
+	// pollJitter scales backoff delays within bounded bounds.
+	pollJitter func() float64
+	// maxPollWorkers bounds concurrent adapter invocations.
+	maxPollWorkers int
 	// unreported tracks decisions handed to workers whose results have not
 	// arrived yet, keyed by execution identity. Leader-goroutine-local.
 	unreported map[workflow.ExecutionIdentity]unreportedEntry
@@ -165,21 +206,39 @@ func NewRunner(cfg RunnerConfig) *Runner {
 		now = time.Now
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	jitter := cfg.PollJitter
+	if jitter == nil {
+		jitter = defaultPollJitter
+	}
+	maxPollWorkers := cfg.MaxPollWorkers
+	if maxPollWorkers <= 0 {
+		maxPollWorkers = defaultMaxPollWorkers
+	}
+	pollBase := cfg.PollBaseDelay
+	if pollBase <= 0 {
+		pollBase = pollBaseDelay
+	}
 	r := &Runner{
-		deps:          cfg.Deps,
-		store:         cfg.Store,
-		controllerID:  cfg.ControllerID,
-		ownerID:       cfg.OwnerID,
-		now:           now,
-		renewInterval: cfg.RenewInterval,
-		antiEntropy:   cfg.AntiEntropy,
-		changeCh:      cfg.ChangeCh,
-		capacityCh:    cfg.CapacityCh,
-		ctx:           ctx,
-		cancel:        cancel,
-		done:          make(chan struct{}),
-		results:       make(chan dispatchWorkerResult, 1),
-		unreported:    map[workflow.ExecutionIdentity]unreportedEntry{},
+		deps:           cfg.Deps,
+		store:          cfg.Store,
+		controllerID:   cfg.ControllerID,
+		ownerID:        cfg.OwnerID,
+		now:            now,
+		renewInterval:  cfg.RenewInterval,
+		antiEntropy:    cfg.AntiEntropy,
+		changeCh:       cfg.ChangeCh,
+		capacityCh:     cfg.CapacityCh,
+		ctx:            ctx,
+		cancel:         cancel,
+		done:           make(chan struct{}),
+		results:        make(chan dispatchWorkerResult, 1),
+		pollResults:    make(chan pollWorkerResult, 1),
+		pollInFlight:   map[string]bool{},
+		poll:           cfg.Poll,
+		pollBase:       pollBase,
+		pollJitter:     jitter,
+		maxPollWorkers: maxPollWorkers,
+		unreported:     map[workflow.ExecutionIdentity]unreportedEntry{},
 	}
 	go r.loop()
 	return r
@@ -238,6 +297,42 @@ func (r *Runner) buildInflightView(inflight []InFlightAttempt) []InFlightAttempt
 		}
 	}
 	return view
+}
+
+// seedCursor builds the poll cursor a parked gate reference stands for.
+func seedCursor(seed workflow.ParkedGateRef) PollCursor {
+	return PollCursor{
+		WorkflowID:   string(seed.WorkflowID),
+		NodeID:       string(seed.NodeID),
+		ActivationID: string(seed.ActivationID),
+		GateID:       string(seed.GateID),
+		AdapterID:    seed.AdapterID,
+		SubjectHash:  seed.SubjectHash,
+	}
+}
+
+// reseedPollCursors re-creates poll cursors for parked external gates whose
+// cursor is missing. A crash or a failed EnsurePollCursor between a park
+// commit and cursor creation would otherwise strand the activation in
+// awaiting_gate with nothing polling it; the anti-entropy pass repairs that.
+// EnsurePollCursor is idempotent, so an existing cursor is never reset; the
+// known cursor keys only prune the work.
+func (r *Runner) reseedPollCursors(existing map[string]*PollCursor) {
+	seeds, err := r.deps.ParkedGates(r.controllerID)
+	if err != nil {
+		log.Printf("workflow controller %s: parked gates: %v", r.controllerID, err)
+		r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "parked_gates_error" })
+		return
+	}
+	for _, seed := range seeds {
+		cursor := seedCursor(seed)
+		if _, ok := existing[PollCursorKey(cursor)]; ok {
+			continue
+		}
+		if _, _, err := r.store.EnsurePollCursor(r.controllerID, cursor, r.now().Add(r.pollBase)); err != nil {
+			log.Printf("workflow controller %s: ensure poll cursor %s: %v", r.controllerID, PollCursorKey(cursor), err)
+		}
+	}
 }
 
 // loop is the leader goroutine: it acquires and holds the controller's lease
@@ -328,6 +423,20 @@ func (r *Runner) loop() {
 		case ResultNotLeader:
 			dropLeadership()
 			lostLead = true
+		case ResultParked:
+			for _, seed := range res.result.PollSeeds {
+				cursor := seedCursor(seed)
+				if _, _, err := r.store.EnsurePollCursor(r.controllerID, cursor, r.now().Add(r.pollBase)); err != nil {
+					log.Printf("workflow controller %s: ensure poll cursor %s: %v", r.controllerID, PollCursorKey(cursor), err)
+				}
+			}
+			r.setStatus(func(s *RunnerStatus) { s.LastOutcome = string(ResultParked) })
+		case ResultUnresolvedBinding:
+			name := string(res.identity.WorkflowID) + "/" + string(res.identity.NodeID) + "/" + string(res.identity.ActivationID)
+			if _, err := r.store.RecordDiagnostic(r.controllerID, "unresolved_binding", name, res.result.Detail); err != nil {
+				log.Printf("workflow controller %s: record unresolved_binding: %v", r.controllerID, err)
+			}
+			r.setStatus(func(s *RunnerStatus) { s.LastOutcome = string(ResultUnresolvedBinding) })
 		default:
 			r.setStatus(func(s *RunnerStatus) { s.LastOutcome = string(res.result.Kind) })
 		}
@@ -362,6 +471,25 @@ func (r *Runner) loop() {
 			}
 		}
 	}
+	// handlePollResult folds one poll worker outcome into the current pass.
+	handlePollResult := func(res pollWorkerResult) {
+		r.pendingPolls--
+		if r.handlePollOutcome(res.outcome, LeaderLease{LeaseID: leaseID, OwnerEpoch: ownerEpoch}) {
+			dropLeadership()
+		}
+	}
+	// drainPollResults consumes completed poll worker results without
+	// blocking, folding their outcomes into the current pass.
+	drainPollResults := func() {
+		for {
+			select {
+			case res := <-r.pollResults:
+				handlePollResult(res)
+			default:
+				return
+			}
+		}
+	}
 	// drainWorkers waits for every outstanding worker before exiting so no
 	// goroutine outlives the runner.
 	drainWorkers := func() {
@@ -369,6 +497,9 @@ func (r *Runner) loop() {
 			res := <-r.results
 			r.outstanding--
 			decrementUnreported(res.identity)
+		}
+		for r.pendingPolls > 0 {
+			handlePollResult(<-r.pollResults)
 		}
 	}
 	// arm schedules the next wakeup at d.
@@ -389,6 +520,8 @@ func (r *Runner) loop() {
 			r.outstanding--
 			decrementUnreported(res.identity)
 			handleResult(res)
+		case res := <-r.pollResults:
+			handlePollResult(res)
 		}
 	}
 	// waitOrCancel arms the timer at d and waits for it, cancellation, or a
@@ -413,6 +546,9 @@ func (r *Runner) loop() {
 			r.outstanding--
 			decrementUnreported(res.identity)
 			handleResult(res)
+			return wakeResult, false
+		case res := <-r.pollResults:
+			handlePollResult(res)
 			return wakeResult, false
 		}
 	}
@@ -480,6 +616,19 @@ func (r *Runner) loop() {
 		if d := nextRenewDue.Sub(r.now()); d < wait {
 			wait = d
 		}
+		// Poll scheduling shares the pass: due cursors are offered to bounded
+		// workers and the wait folds in the earliest scheduled next poll.
+		if r.poll != nil {
+			drainPollResults()
+			if !holding {
+				// A stale apply dropped leadership mid-pass; re-acquire before
+				// offering any further polls.
+				sleep(r.renewInterval)
+				continue
+			}
+			r.offerPolls()
+			wait = r.nextPollWait(wait)
+		}
 		refreshed := false
 		if lastRefresh.IsZero() || r.now().Sub(lastRefresh) >= r.antiEntropy {
 			if err := r.deps.Refresh(); err != nil {
@@ -493,6 +642,11 @@ func (r *Runner) loop() {
 			}
 			lastRefresh = r.now()
 			refreshed = true
+			// The same pass that refreshes re-seeds poll cursors lost to a
+			// crash between a park commit and cursor creation.
+			if r.poll != nil {
+				r.reseedPollCursors(rec.PollCursors)
+			}
 		}
 		// A capacity-change signal or an anti-entropy pass clears a persisted
 		// capacity block; the pass that clears it dispatches again.

@@ -53,6 +53,15 @@ type fakeDeps struct {
 	errScript     []error          // popped per dispatch before the result script
 	defaultResult DispatchResult
 
+	park             bool // dispatches return ResultParked with parkSeeds
+	parkSeeds        []workflow.ParkedGateRef
+	unresolved       bool // dispatches return ResultUnresolvedBinding
+	unresolvedDetail string
+
+	parked      []workflow.ParkedGateRef // seeds reported by ParkedGates()
+	parkedErr   error                    // error returned by ParkedGates()
+	parkedCalls int                      // number of ParkedGates() calls
+
 	block                chan struct{} // when non-nil, dispatches block until closed
 	blockAll             bool          // block every dispatch
 	blockFirst           int           // or only the first N dispatches
@@ -93,6 +102,15 @@ func (d *fakeDeps) Refresh() error {
 	return d.refreshErr
 }
 
+func (d *fakeDeps) ParkedGates(controllerID string) ([]workflow.ParkedGateRef, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.parkedCalls++
+	out := make([]workflow.ParkedGateRef, len(d.parked))
+	copy(out, d.parked)
+	return out, d.parkedErr
+}
+
 func (d *fakeDeps) Dispatch(ctx context.Context, dec Decision, lease LeaderLease) (DispatchResult, error) {
 	rec := dispatchRecord{identity: dec.Candidate.Identity, lease: lease}
 	if srec, _, err := d.store.Get(d.controller); err == nil && srec.Leader != nil {
@@ -116,6 +134,12 @@ func (d *fakeDeps) Dispatch(ctx context.Context, dec Decision, lease LeaderLease
 	select {
 	case d.started <- struct{}{}:
 	default:
+	}
+	if d.park {
+		return DispatchResult{Kind: ResultParked, PollSeeds: d.parkSeeds}, nil
+	}
+	if d.unresolved {
+		return DispatchResult{Kind: ResultUnresolvedBinding, Detail: d.unresolvedDetail}, nil
 	}
 
 	if block {
@@ -173,6 +197,21 @@ func (d *fakeDeps) setInFlight(inflight []InFlightAttempt) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.inflight = inflight
+}
+
+// setParked scripts the seeds ParkedGates reports (the parked awaiting_gate
+// activations a re-seeding pass reads).
+func (d *fakeDeps) setParked(seeds []workflow.ParkedGateRef) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.parked = seeds
+}
+
+// setParkedErr scripts a ParkedGates failure.
+func (d *fakeDeps) setParkedErr(err error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.parkedErr = err
 }
 
 func (d *fakeDeps) setScript(results ...DispatchResult) {
