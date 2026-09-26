@@ -766,6 +766,9 @@ func validateDispatch(policy *DispatchPolicy, node NodeDefinition) error {
 		}
 		switch node.Action.Kind {
 		case ActionRun, ActionLoop, ActionTeam:
+			if node.Completion != nil && node.Completion.Kind == CompletionExplicit {
+				return fmt.Errorf("dispatch.mode %q %s nodes must not declare completion.kind %q (the supervisor completes auto provider nodes from the declared contract; no worker handoff exists)", DispatchAuto, node.Action.Kind, CompletionExplicit)
+			}
 			return nil
 		case ActionExternal:
 			return validateAutoExternalDispatch(policy, node)
