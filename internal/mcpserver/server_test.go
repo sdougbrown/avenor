@@ -58,6 +58,13 @@ type fakeClient struct {
 	workflowEventsCalls    []workflowEventsCall
 	workflowCompleteCalls  []workflowCompleteCall
 	workflowGateCalls      []workflowGateCall
+
+	workflowControllerStatusResult map[string]any
+	workflowControllerListResult   map[string]any
+	workflowControllerStatusErr    error
+	workflowControllerListErr      error
+	workflowControllerStatusCalls  []string
+	workflowControllerListCalls    int
 }
 
 type workflowWaitCall struct {
@@ -163,6 +170,16 @@ func (f *fakeClient) WorkflowGate(workflowID string, fields map[string]any) (map
 	return f.workflowGateResult, f.workflowGateErr
 }
 
+func (f *fakeClient) WorkflowControllerStatus(controllerID string) (map[string]any, error) {
+	f.workflowControllerStatusCalls = append(f.workflowControllerStatusCalls, controllerID)
+	return f.workflowControllerStatusResult, f.workflowControllerStatusErr
+}
+
+func (f *fakeClient) WorkflowControllerList() (map[string]any, error) {
+	f.workflowControllerListCalls++
+	return f.workflowControllerListResult, f.workflowControllerListErr
+}
+
 type spawnCountingClient struct {
 	spawns atomic.Int32
 }
@@ -188,6 +205,12 @@ func (c *spawnCountingClient) WorkflowComplete(string, map[string]any) (map[stri
 	return nil, nil
 }
 func (c *spawnCountingClient) WorkflowGate(string, map[string]any) (map[string]any, error) {
+	return nil, nil
+}
+func (c *spawnCountingClient) WorkflowControllerStatus(string) (map[string]any, error) {
+	return nil, nil
+}
+func (c *spawnCountingClient) WorkflowControllerList() (map[string]any, error) {
 	return nil, nil
 }
 

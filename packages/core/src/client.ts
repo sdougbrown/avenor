@@ -140,6 +140,11 @@ export interface WorkflowHeartbeatParams {
   owner_token: string
 }
 
+export interface WorkflowControllerCreateParams {
+  controller_id: string
+  max_inflight: number
+}
+
 type PendingCall = {
   resolve: (value: unknown) => void
   reject: (reason: Error) => void
@@ -533,6 +538,37 @@ export class Client {
     }
     if (params.activation_id !== undefined) command.activation_id = params.activation_id
     return this.workflowCommand(params.workflow_id, command)
+  }
+
+  async workflowControllerStatus(controllerId: string): Promise<Record<string, unknown>> {
+    return this.call('workflow.controller.status', { controller_id: controllerId }) as Promise<Record<string, unknown>>
+  }
+
+  // workflow.ready is advisory: it reports claimable auto-dispatch candidates
+  // and grants no lease. A missing limit lets the server apply its default.
+  async workflowReady(controllerId: string, limit?: number): Promise<Record<string, unknown>> {
+    const params: Record<string, unknown> = { controller_id: controllerId }
+    if (limit !== undefined) params.limit = limit
+    return this.call('workflow.ready', params) as Promise<Record<string, unknown>>
+  }
+
+  async workflowControllerList(): Promise<Record<string, unknown>> {
+    return this.call('workflow.controller.list') as Promise<Record<string, unknown>>
+  }
+
+  async workflowControllerCreate(params: WorkflowControllerCreateParams): Promise<Record<string, unknown>> {
+    return this.call('workflow.controller.create', {
+      controller_id: params.controller_id,
+      max_inflight: params.max_inflight,
+    }) as Promise<Record<string, unknown>>
+  }
+
+  async workflowControllerEnable(controllerId: string): Promise<Record<string, unknown>> {
+    return this.call('workflow.controller.enable', { controller_id: controllerId }) as Promise<Record<string, unknown>>
+  }
+
+  async workflowControllerDisable(controllerId: string, reason: string): Promise<Record<string, unknown>> {
+    return this.call('workflow.controller.disable', { controller_id: controllerId, reason }) as Promise<Record<string, unknown>>
   }
 
   async brokerSend(fromRunId: string, toRunId: string, message: string, role?: string): Promise<void> {

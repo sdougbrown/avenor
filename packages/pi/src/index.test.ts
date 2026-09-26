@@ -72,6 +72,8 @@ async function createHarnessBase(options: {
     workflowEventsTool: mock(async () => ({})),
     workflowCompleteTool: mock(async () => ({})),
     workflowGateTool: mock(async () => ({})),
+    workflowControllerStatusTool: mock(async () => ({})),
+    workflowReadyTool: mock(async () => ({})),
     observeRun: mock(() => null),
     dial: mock(async () => ({ close() {} })),
     Supervisor: class {} as any,
@@ -148,6 +150,64 @@ async function createMultiSupervisorHarness(options: {
 describe('Avenor Pi extension', () => {
   it('exports a function', () => {
     expect(typeof extensionFactory).toBe('function')
+  })
+
+  it('enriches controller status details with an advisory candidate count', async () => {
+    const statusPayload = { controller_id: 'ctl', desired_state: 'enabled', inflight: 1 }
+    const harness = await createHarnessBase({
+      deps: {
+        workflowControllerStatusTool: mock(async () => statusPayload),
+        workflowReadyTool: mock(async () => ({ advisory: true, controller_id: 'ctl', candidates: [{}, {}] })),
+      },
+    })
+    const tool = harness.registeredTools.avenor_workflow_controller_status
+    const outcome = await tool.execute('tool-1', { controller_id: 'ctl' })
+    expect(JSON.parse(outcome.content[0].text)).toEqual(statusPayload)
+    expect(outcome.details.candidate_count).toBe(2)
+  })
+
+  it('omits the candidate count when the ready query fails', async () => {
+    const harness = await createHarnessBase({
+      deps: {
+        workflowControllerStatusTool: mock(async () => ({ controller_id: 'ctl', desired_state: 'enabled' })),
+        workflowReadyTool: mock(async () => {
+          throw new Error('-32601 method not found')
+        }),
+      },
+    })
+    const tool = harness.registeredTools.avenor_workflow_controller_status
+    const outcome = await tool.execute('tool-1', { controller_id: 'ctl' })
+    expect(outcome.details.candidate_count).toBeUndefined()
+    expect(outcome.details.controller_id).toBe('ctl')
+  })
+
+  it('forwards controller status to the supervisor client with the requested supervisor', async () => {
+    const statusTool = mock(async () => ({ controller_id: 'ctl', desired_state: 'enabled' }))
+    const harness = await createHarnessBase({
+      deps: {
+        workflowControllerStatusTool: statusTool,
+        workflowReadyTool: mock(async () => ({})),
+      },
+    })
+    const tool = harness.registeredTools.avenor_workflow_controller_status
+    await tool.execute('tool-1', { controller_id: 'ctl', supervisor_id: 'sup-a' })
+    expect(statusTool).toHaveBeenCalledWith({ controllerId: 'ctl', supervisorId: 'sup-a' })
+  })
+
+  it('lists all controllers and skips the advisory ready query when controller_id is omitted', async () => {
+    const statusTool = mock(async () => ({ controllers: [] }))
+    const readyTool = mock(async () => ({}))
+    const harness = await createHarnessBase({
+      deps: {
+        workflowControllerStatusTool: statusTool,
+        workflowReadyTool: readyTool,
+      },
+    })
+    const tool = harness.registeredTools.avenor_workflow_controller_status
+    const outcome = await tool.execute('tool-1', { supervisor_id: 'sup-a' })
+    expect(statusTool).toHaveBeenCalledWith({ controllerId: undefined, supervisorId: 'sup-a' })
+    expect(readyTool).not.toHaveBeenCalled()
+    expect(outcome.details).toEqual({ controllers: [] })
   })
 
   it('only reuses a supervisor socket when the caller supplied one', () => {
@@ -490,6 +550,11 @@ describe('Avenor Pi extension', () => {
     expect(Object.keys(registeredTools)).toContain('avenor_workflow_events')
     expect(Object.keys(registeredTools)).toContain('avenor_workflow_complete')
     expect(Object.keys(registeredTools)).toContain('avenor_workflow_gate')
+    expect(Object.keys(registeredTools)).toContain('avenor_workflow_controller_status')
+    expect(Object.keys(registeredTools)).not.toContain('avenor_workflow_controller_list')
+    expect(Object.keys(registeredTools)).not.toContain('avenor_workflow_controller_create')
+    expect(Object.keys(registeredTools)).not.toContain('avenor_workflow_controller_enable')
+    expect(Object.keys(registeredTools)).not.toContain('avenor_workflow_controller_disable')
     for (const name of [
       'avenor_status',
       'avenor_result',
@@ -498,6 +563,7 @@ describe('Avenor Pi extension', () => {
       'avenor_follow_up',
       'avenor_events',
       'avenor_shutdown',
+      'avenor_workflow_controller_status',
     ]) {
       expect(typeof registeredTools[name]?.renderCall).toBe('function')
       expect(typeof registeredTools[name]?.renderResult).toBe('function')

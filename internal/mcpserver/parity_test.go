@@ -21,8 +21,10 @@ var tsToolNames = []string{
 	"avenor_shutdown",
 }
 
-// workflowToolNames lists the six Go-only MCP workflow tools (Stage 14). These
-// have no TypeScript reference yet; JS host parity is deferred to Stage 15.
+// workflowToolNames lists the six Go-only MCP workflow tools (Stage 14) plus
+// the read-only MCP workflow-controller status tool. That tool now has
+// TypeScript references in the mcp, opencode, and pi packages; the six
+// workflow tools remain Go-only.
 var workflowToolNames = []string{
 	"avenor_workflow_status",
 	"avenor_workflow_wait",
@@ -30,6 +32,7 @@ var workflowToolNames = []string{
 	"avenor_workflow_events",
 	"avenor_workflow_complete",
 	"avenor_workflow_gate",
+	"avenor_workflow_controller_status",
 }
 
 func TestToolNameParity(t *testing.T) {
@@ -173,6 +176,12 @@ func TestSchemaFieldParity(t *testing.T) {
 		allowed := []string{"workflow_id", "node_id", "gate_id", "activation_id", "operation", "actor", "reason", "outcome", "subject", "poll_id", "source", "result", "response_hash", "observed_at", "evidence_ids", "supervisor_id"}
 		required := []string{"workflow_id", "node_id", "gate_id", "activation_id", "operation"}
 		assertFields(t, "workflowGateArgs", allowed, required)
+	})
+
+	t.Run("avenor_workflow_controller_status", func(t *testing.T) {
+		// workflowControllerStatusArgs — all optional: controller_id, supervisor_id
+		allowed := []string{"controller_id", "supervisor_id"}
+		assertFields(t, "workflowControllerStatusArgs", allowed, nil)
 	})
 }
 
@@ -490,6 +499,23 @@ func assertFields(t *testing.T, structName string, allowed, required []string) {
 		if string(a.Subject) == "" || a.ObservedAt != "2024-01-01T00:00:00Z" || len(a.EvidenceIDs) != 1 {
 			t.Errorf("%s: structured fields not populated correctly", structName)
 		}
+	case "workflowControllerStatusArgs":
+		data := map[string]any{"controller_id": "c-1", "supervisor_id": "s"}
+		b, _ := json.Marshal(data)
+		var a workflowControllerStatusArgs
+		if err := json.Unmarshal(b, &a); err != nil {
+			t.Fatalf("%s: unmarshal: %v", structName, err)
+		}
+		if a.ControllerID != "c-1" || a.SupervisorID != "s" {
+			t.Errorf("%s: fields not populated correctly", structName)
+		}
+		var listA workflowControllerStatusArgs
+		if err := json.Unmarshal([]byte(`{"supervisor_id":"s"}`), &listA); err != nil {
+			t.Fatalf("%s: unmarshal without controller_id: %v", structName, err)
+		}
+		if listA.ControllerID != "" || listA.SupervisorID != "s" {
+			t.Errorf("%s: omitted controller_id should default to empty", structName)
+		}
 	}
 
 	// Verify required fields: send JSON without required fields and confirm
@@ -533,6 +559,8 @@ func assertSchemaTags(t *testing.T, structName string, allowed, required []strin
 		typ = reflect.TypeOf(workflowCompleteArgs{})
 	case "workflowGateArgs":
 		typ = reflect.TypeOf(workflowGateArgs{})
+	case "workflowControllerStatusArgs":
+		typ = reflect.TypeOf(workflowControllerStatusArgs{})
 	default:
 		t.Fatalf("unknown struct: %s", structName)
 	}

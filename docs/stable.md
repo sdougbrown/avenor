@@ -378,29 +378,38 @@ If you spawn a runtime with `--backend opencode-http` and no `--server-url`, the
 
 This is convenient for interactive development — you don't have to manually start an OpenCode server, and the supervisor manages its lifecycle.
 
-## Workflow Controller (Optional)
+## Workflow Controllers
 
-Stable can run an optional in-process workflow controller: a reconciler that
-keeps opted-in provider-backed workflow activations moving without an agent
-or human claiming every ready node. Nodes opt in with a declared `dispatch`
-policy in their workflow template; everything else is unaffected. The
-controller's desired state, leader lease, and external-gate poll cursors
-persist under the workflow root, so a replacement supervisor resumes without
-coordinator memory.
+A workflow controller is an optional in-process reconciler that keeps opted-in workflow nodes moving without an agent or human claiming each one. A node opts in by declaring a `dispatch` policy (`mode: auto`, `controller_id`) in its workflow template; every node without that declaration stays manual, and ordinary `avenor_spawn` behavior is unaffected. See [Workflows](workflow.md) for the dispatch policy schema. The controller's desired state, leader lease, and external-gate poll cursors persist under the workflow root, so a replacement supervisor resumes without coordinator memory.
 
-```sh
-# Ad-hoc: instantiate work, then let one controller drive the declared nodes.
-avenor workflow controller create --socket /path/to/socket \
-  --request-file templates/software-factory/fixtures/controller.json
-avenor workflow controller enable --socket /path/to/socket software-factory
-avenor workflow ready --socket /path/to/socket software-factory --limit 10
-avenor workflow controller status --socket /path/to/socket software-factory
+Controllers are created disabled and must be enabled before they dispatch or poll:
+
+```bash
+# Register a controller (starts disabled)
+avenor workflow controller create --request-file controller.json
+avenor workflow controller enable software-factory
+avenor workflow ready software-factory --limit 10
+avenor workflow controller status software-factory
+avenor workflow controller list
+avenor workflow controller disable software-factory --reason "maintenance"
 ```
 
-See [the workflow controller example](workflow-controller.md) for the full
-walkthrough: registering adapters, inspecting decisions, the human
-checkpoints the controller never touches, and recovery on a fresh
-supervisor.
+Status and list are readable through the MCP `avenor_workflow_controller_status` tool (pass `controller_id` for a single controller, omit it to list all); create, enable, and disable are CLI and control-protocol only, via the commands above and the control protocol's `workflow.controller.*` methods (see [Control Protocol](control-protocol.md)).
+
+Pass `--workflow-adapter-dir` to the stable command to point the supervisor at a directory of external-gate adapter manifests (default: `$XDG_CONFIG_HOME/avenor/workflow-adapters`, falling back to `~/.config/avenor/workflow-adapters`).
+
+`avenor workflow controller status` reports:
+
+- `desired_state` — `enabled` or `disabled`; disabled controllers stop future dispatch and polling but never cancel running attempts.
+- `leader` — lease health: `is_this_process` tells you whether this supervisor's runner leads; `expires_at` is when the leader lease lapses if not renewed. A controller with no leader is idle until a process acquires the lease.
+- `inflight` — the controller's non-terminal dispatch attempts, capped by `max_inflight`.
+- `last_reconcile` — the latest reconcile pass of the leading runner.
+- `capacity_blocked` — present when dispatch is suppressed by admission capacity (`local` runtime slots or `tree` budget), with a detail string.
+- `next_poll_at` — the next scheduled external-gate poll time.
+
+The host tools render these fields in a compact controller view (Pi render hooks and OpenCode prose) that appears only when controllers exist on the supervisor; with no controller support the tools report `method not found` and nothing else changes.
+
+See [the workflow controller example](workflow-controller.md) for the full walkthrough: registering adapters, inspecting decisions, the human checkpoints the controller never touches, and recovery on a fresh supervisor.
 
 ## Cross-References
 

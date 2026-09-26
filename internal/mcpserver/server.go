@@ -38,6 +38,8 @@ type ControlClient interface {
 	WorkflowEvents(workflowID string, afterSeq int64, limit int) (map[string]any, error)
 	WorkflowComplete(workflowID string, fields map[string]any) (map[string]any, error)
 	WorkflowGate(workflowID string, fields map[string]any) (map[string]any, error)
+	WorkflowControllerStatus(controllerID string) (map[string]any, error)
+	WorkflowControllerList() (map[string]any, error)
 }
 
 type messagePermissionControlClient interface {
@@ -224,6 +226,11 @@ type workflowGateArgs struct {
 	SupervisorID string          `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
 }
 
+type workflowControllerStatusArgs struct {
+	ControllerID string `json:"controller_id,omitempty" jsonschema:"optional controller ID; omit to list all controllers"`
+	SupervisorID string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
+}
+
 func NewServer(opts Options) (*Server, error) {
 	if opts.Transport == "" {
 		return nil, fmt.Errorf("transport is required")
@@ -264,6 +271,7 @@ func NewServer(opts Options) (*Server, error) {
 			"avenor_workflow_events",
 			"avenor_workflow_complete",
 			"avenor_workflow_gate",
+			"avenor_workflow_controller_status",
 		},
 	}
 
@@ -345,6 +353,11 @@ func NewServer(opts Options) (*Server, error) {
 		Name:        "avenor_workflow_gate",
 		Description: "Record a gate decision on a parked awaiting_gate activation",
 	}, s.handleAvenorWorkflowGate)
+
+	mcp.AddTool(mcpServer, &mcp.Tool{
+		Name:        "avenor_workflow_controller_status",
+		Description: "Show workflow controller status. With controller_id, returns that controller's full status; without it, lists all controllers with summary state. Create, enable, and disable are CLI-only (avenor workflow controller ...).",
+	}, s.handleAvenorWorkflowControllerStatus)
 
 	return s, nil
 }
@@ -1402,6 +1415,32 @@ func (s *Server) handleAvenorWorkflowGate(ctx context.Context, req *mcp.CallTool
 	result, err := cl.WorkflowGate(args.WorkflowID, fields)
 	if err != nil {
 		return nil, nil, fmt.Errorf("workflow gate: %w", err)
+	}
+	return nil, result, nil
+}
+
+// handleAvenorWorkflowControllerStatus mirrors the workflow.controller.status
+// and workflow.controller.list control verbs against the typed
+// WorkflowControllerStatus and WorkflowControllerList client methods. With a
+// controller ID it returns that controller's full status; without one it
+// lists all controllers. The controller ID is passed through unchanged; no
+// identifier is remapped.
+func (s *Server) handleAvenorWorkflowControllerStatus(ctx context.Context, req *mcp.CallToolRequest, args workflowControllerStatusArgs) (*mcp.CallToolResult, any, error) {
+	cl, cleanup, err := s.getClientForSupervisor(args.SupervisorID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer cleanup()
+	if args.ControllerID == "" {
+		result, err := cl.WorkflowControllerList()
+		if err != nil {
+			return nil, nil, fmt.Errorf("workflow controller list: %w", err)
+		}
+		return nil, result, nil
+	}
+	result, err := cl.WorkflowControllerStatus(args.ControllerID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("workflow controller status: %w", err)
 	}
 	return nil, result, nil
 }
