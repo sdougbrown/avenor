@@ -373,6 +373,35 @@ func (s *leaderState) decrementUnreported(identity workflow.ExecutionIdentity) {
 	}
 }
 
+// release gives up the lease if held.
+func (s *leaderState) release(r *Runner) {
+	if !s.holding {
+		return
+	}
+	s.holding = false
+	// Best-effort: a concurrent disable already released the lease
+	// durably, so a CAS failure here is expected and ignorable.
+	_, _ = r.store.ReleaseLease(r.controllerID, s.leaseID, s.ownerEpoch)
+}
+
+// dropLeadership discards the lease and any capacity block after a
+// leadership loss; the status leadership fields are cleared.
+func (s *leaderState) dropLeadership(r *Runner) {
+	s.holding = false
+	s.leaseID = ""
+	s.blockedSource = ""
+	r.clearLeadStatus()
+}
+
+// clearBlock drops the persisted capacity block and its status fields.
+func (s *leaderState) clearBlock(r *Runner) {
+	s.blockedSource = ""
+	r.setStatus(func(st *RunnerStatus) {
+		st.CapacityBlocked = ""
+		st.CapacityDetail = ""
+	})
+}
+
 // loop is the leader goroutine: it acquires and holds the controller's lease
 // and runs reconcile passes while leading.
 func (r *Runner) loop() {
@@ -390,30 +419,6 @@ func (r *Runner) loop() {
 
 	var exit bool
 
-	release := func() {
-		if !s.holding {
-			return
-		}
-		s.holding = false
-		// Best-effort: a concurrent disable already released the lease
-		// durably, so a CAS failure here is expected and ignorable.
-		_, _ = r.store.ReleaseLease(r.controllerID, s.leaseID, s.ownerEpoch)
-	}
-	dropLeadership := func() {
-		s.holding = false
-		s.leaseID = ""
-		s.blockedSource = ""
-		r.clearLeadStatus()
-	}
-
-	// clearBlock drops the persisted capacity block and its status fields.
-	clearBlock := func() {
-		s.blockedSource = ""
-		r.setStatus(func(st *RunnerStatus) {
-			st.CapacityBlocked = ""
-			st.CapacityDetail = ""
-		})
-	}
 	// handleResult incorporates one worker outcome. It reports whether the
 	// outcome was a leadership loss (stop the pass and drop leadership). A
 	// capacity block persists across passes until a capacity-change signal or
@@ -451,7 +456,7 @@ func (r *Runner) loop() {
 				st.CapacityDetail = detail
 			})
 		case ResultNotLeader:
-			dropLeadership()
+			s.dropLeadership(r)
 			lostLead = true
 		case ResultParked:
 			for _, seed := range res.result.PollSeeds {
@@ -492,7 +497,7 @@ func (r *Runner) loop() {
 	handlePollResult := func(res pollWorkerResult) {
 		r.pendingPolls--
 		if r.handlePollOutcome(res.outcome, LeaderLease{LeaseID: s.leaseID, OwnerEpoch: s.ownerEpoch}) {
-			dropLeadership()
+			s.dropLeadership(r)
 		}
 	}
 	// drainPollResults consumes completed poll worker results without
@@ -548,7 +553,7 @@ func (r *Runner) loop() {
 		arm(d)
 		select {
 		case <-r.ctx.Done():
-			release()
+			s.release(r)
 			drainWorkers()
 			return wakeNone, true
 		case <-s.timer.C:
@@ -572,7 +577,7 @@ func (r *Runner) loop() {
 
 	for {
 		if r.ctx.Err() != nil {
-			release()
+			s.release(r)
 			drainWorkers()
 			return
 		}
@@ -604,7 +609,7 @@ func (r *Runner) loop() {
 		// Renew first on every pass. A failed renewal stops dispatching and
 		// falls back to acquisition.
 		if _, err := r.store.RenewLease(r.controllerID, s.leaseID, s.ownerEpoch); err != nil {
-			dropLeadership()
+			s.dropLeadership(r)
 			sleep(r.renewInterval)
 			continue
 		}
@@ -623,7 +628,7 @@ func (r *Runner) loop() {
 			continue
 		}
 		if !ok || rec.DesiredState != DesiredEnabled {
-			release()
+			s.release(r)
 			drainWorkers()
 			return
 		}
@@ -668,7 +673,7 @@ func (r *Runner) loop() {
 		// A capacity-change signal or an anti-entropy pass clears a persisted
 		// capacity block; the pass that clears it dispatches again.
 		if s.blockedSource != "" && (s.wake == wakeCapacity || refreshed) {
-			clearBlock()
+			s.clearBlock(r)
 		}
 		s.wake = wakeNone
 		if s.blockedSource != "" {
@@ -758,7 +763,7 @@ func (r *Runner) loop() {
 				break
 			}
 			if _, err := r.store.RenewLease(r.controllerID, s.leaseID, s.ownerEpoch); err != nil {
-				dropLeadership()
+				s.dropLeadership(r)
 				break
 			}
 			e := s.unreported[d.Candidate.Identity]
