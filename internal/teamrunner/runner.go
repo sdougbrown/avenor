@@ -22,6 +22,11 @@ type RunResult struct {
 	StopReason string
 	SessionID  string
 	Reason     string
+	// MarkerDirective/MarkerLabel carry the terminal marker the team exited
+	// on (the exit directive and its label) so the workflow termination path
+	// can select a declared outcome from it.
+	MarkerDirective string
+	MarkerLabel     string
 }
 
 type NestedResult struct {
@@ -83,13 +88,19 @@ func Run(ctx context.Context, opts RunOptions) (RunResult, error) {
 	}
 
 	if len(members) == 0 {
-		if early, err := runSequentialPhases(ctx, opts, opts.Config.Post, "post", &prevPhaseCommit, "", ""); err != nil {
+		marker, early, err := runSequentialPhases(ctx, opts, opts.Config.Post, "post", &prevPhaseCommit, "", "")
+		if err != nil {
 			return RunResult{}, err
-		} else if early != nil {
+		}
+		if early != nil {
 			return *early, nil
 		}
 		_ = emitTeamEnd(opts.EventSink, opts.RunID, "end_turn", "", 0, 0)
-		return RunResult{ExitCode: 0, StopReason: "end_turn"}, nil
+		final := RunResult{ExitCode: 0, StopReason: "end_turn"}
+		if marker != nil {
+			final.MarkerDirective, final.MarkerLabel = marker.Directive, marker.Label
+		}
+		return final, nil
 	}
 
 	membersCompleted, membersAborted, result, teamOutput, teamFinalOutput := runTeamMembers(ctx, opts, members, &prevPhaseCommit)
@@ -97,13 +108,19 @@ func Run(ctx context.Context, opts RunOptions) (RunResult, error) {
 		return *result, nil
 	}
 
-	if early, err := runSequentialPhases(ctx, opts, opts.Config.Post, "post", &prevPhaseCommit, teamOutput, teamFinalOutput); err != nil {
+	marker, early, err := runSequentialPhases(ctx, opts, opts.Config.Post, "post", &prevPhaseCommit, teamOutput, teamFinalOutput)
+	if err != nil {
 		return RunResult{}, err
-	} else if early != nil {
+	}
+	if early != nil {
 		return *early, nil
 	}
 	_ = emitTeamEnd(opts.EventSink, opts.RunID, "end_turn", "", membersCompleted, membersAborted)
-	return RunResult{ExitCode: 0, StopReason: "end_turn"}, nil
+	final := RunResult{ExitCode: 0, StopReason: "end_turn"}
+	if marker != nil {
+		final.MarkerDirective, final.MarkerLabel = marker.Directive, marker.Label
+	}
+	return final, nil
 }
 
 func injectSkipBlockIntoLastPre(cfg *TeamConfig) {
@@ -320,12 +337,13 @@ func runTeamMembers(ctx context.Context, opts RunOptions, members []phaseconfig.
 	return membersCompleted, membersAborted, nil, memberOutput.String(), memberFinalOutput.String()
 }
 
-func runSequentialPhases(ctx context.Context, opts RunOptions, phases []phaseconfig.Phase, kind string, prevCommit *string, teamOutput, teamFinalOutput string) (*RunResult, error) {
+func runSequentialPhases(ctx context.Context, opts RunOptions, phases []phaseconfig.Phase, kind string, prevCommit *string, teamOutput, teamFinalOutput string) (*phaseconfig.LoopMarker, *RunResult, error) {
 	var prevSessionID string
+	var exitMarker *phaseconfig.LoopMarker
 	for _, phase := range phases {
 		if err := ctx.Err(); err != nil {
 			r, err := cancelledRunResult(ctx, opts)
-			return &r, err
+			return nil, &r, err
 		}
 
 		sessionID := ""
@@ -336,7 +354,7 @@ func runSequentialPhases(ctx context.Context, opts RunOptions, phases []phasecon
 		result, err := executePhase(ctx, opts, phase, kind, sessionID, *prevCommit, teamOutput, teamFinalOutput)
 		if err != nil {
 			_ = emitTeamEnd(opts.EventSink, opts.RunID, kind+"_failure", "", 0, 0)
-			return nil, err
+			return nil, nil, err
 		}
 
 		enrichFromBroker(opts, &result)
@@ -346,13 +364,16 @@ func runSequentialPhases(ctx context.Context, opts RunOptions, phases []phasecon
 
 		if err := ctx.Err(); err != nil {
 			r, err := cancelledRunResult(ctx, opts)
-			return &r, err
+			return nil, &r, err
 		}
 
 		if result.LoopDirective == "abort" {
 			_ = emitTeamEnd(opts.EventSink, opts.RunID, "abort", result.LoopLabel, 0, 0)
 			r := RunResult{ExitCode: 5, StopReason: "blocked", SessionID: result.SessionID, Reason: result.LoopLabel}
-			return &r, nil
+			return nil, &r, nil
+		}
+		if result.LoopDirective == "exit" {
+			exitMarker = &phaseconfig.LoopMarker{Directive: "exit", Label: result.LoopLabel}
 		}
 
 		sr := runtime.StopReasonForExitCode(result.ExitCode)
@@ -363,10 +384,10 @@ func runSequentialPhases(ctx context.Context, opts RunOptions, phases []phasecon
 				stopReason = sr
 			}
 			r := RunResult{ExitCode: result.ExitCode, StopReason: stopReason, SessionID: result.SessionID}
-			return &r, nil
+			return nil, &r, nil
 		}
 	}
-	return nil, nil
+	return exitMarker, nil, nil
 }
 
 func executePhase(ctx context.Context, opts RunOptions, phase phaseconfig.Phase, kind string, prevSessionID string, prevPhaseCommit string, teamOutput, teamFinalOutput string) (result PhaseAttemptResult, rerr error) {

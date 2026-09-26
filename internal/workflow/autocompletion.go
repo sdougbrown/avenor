@@ -242,6 +242,10 @@ func resolveAutoOutputs(node *NodeDefinition, workingDir string) ([]CompleteOutp
 	for _, def := range node.Outputs {
 		value, ok, err := resolveAutoOutput(def, singleArtifact, workingDir)
 		if err != nil {
+			if !def.Required {
+				// An optional output whose source does not resolve is omitted.
+				continue
+			}
 			return nil, err
 		}
 		if !ok {

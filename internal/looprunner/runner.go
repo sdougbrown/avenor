@@ -48,6 +48,11 @@ type RunResult struct {
 	StopReason string
 	SessionID  string
 	Reason     string
+	// MarkerDirective/MarkerLabel carry the terminal marker the loop exited
+	// on (the exit directive and its label) so the workflow termination path
+	// can select a declared outcome from it.
+	MarkerDirective string
+	MarkerLabel     string
 }
 
 func Run(ctx context.Context, opts RunOptions) (RunResult, error) {
@@ -121,9 +126,11 @@ func Run(ctx context.Context, opts RunOptions) (RunResult, error) {
 				}
 				_ = emitLoopEnd(opts.EventSink, opts.RunID, "marker", result.LoopLabel, iterationsCompleted)
 				return RunResult{
-					ExitCode:   0,
-					StopReason: "end_turn",
-					SessionID:  result.SessionID,
+					ExitCode:        0,
+					StopReason:      "end_turn",
+					SessionID:       result.SessionID,
+					MarkerDirective: result.LoopDirective,
+					MarkerLabel:     result.LoopLabel,
 				}, nil
 			}
 

@@ -23,7 +23,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -490,4 +492,412 @@ func TestAutoHandoffSatisfiesNodeAndDispatchesDependent(t *testing.T) {
 	if len(attemptsForNode(&inst, "consume")) == 0 {
 		t.Fatalf("consume has no attempt despite its provider being invoked; observed %s", describeInstance(&inst, f.providerCalls.Load()))
 	}
+}
+
+// appendSessionScript appends one scripted provider attempt: optional agent
+// message chunks (full-line markers are parsed by the CLI session loop)
+// followed by a session end with the given stop reason.
+func appendSessionScript(t *testing.T, provider *stableScriptedProvider, sessionID string, chunks []string, stopReason string) {
+	t.Helper()
+	steps := make([]stableScriptedEvent, 0, len(chunks)+1)
+	for _, chunk := range chunks {
+		steps = append(steps, stableScriptedEvent{event: events.Event{
+			Event:     "agent.message_chunk",
+			SessionID: sessionID,
+			Fields:    map[string]any{"delta": chunk},
+		}})
+	}
+	steps = append(steps, stableScriptedEvent{event: events.Event{
+		Event:     "session.end",
+		SessionID: sessionID,
+		Fields:    map[string]any{"stop_reason": stopReason},
+	}})
+	provider.mu.Lock()
+	provider.scripts = append(provider.scripts, stableScriptedAttempt{sessionID: sessionID, events: steps})
+	provider.mu.Unlock()
+}
+
+// TestAutoHandoffContractUnmetRetriesThenExhausts proves a clean exit that
+// does not meet the declared files contract is recorded as a failed attempt
+// with the contract_unmet marker, so the node's retry policy applies and
+// exhaustion leaves the activation blocked — never running, never looping
+// forever.
+func TestAutoHandoffContractUnmetRetriesThenExhausts(t *testing.T) {
+	t.Chdir(t.TempDir())
+	provider := &stableScriptedProvider{attempt: -1}
+	// Three attempts (the chain template's declared max_attempts), none
+	// writes the required artifact.
+	appendSessionScript(t, provider, "ses_try1", nil, "end_turn")
+	appendSessionScript(t, provider, "ses_try2", nil, "end_turn")
+	appendSessionScript(t, provider, "ses_try3", nil, "end_turn")
+	f := newAutoHandoffFixture(t, "auto-handoff-unmet", provider)
+	wf := f.addWorkflow(t, "tmpl-auto-handoff-unmet", autoHandoffChainTemplate(t, "tmpl-auto-handoff-unmet", 900))
+	f.enableController(t, 2)
+
+	f.waitForInstance(t, wf, "the produce node to exhaust its retries and block", func(inst *workflow.WorkflowInstance) bool {
+		act := activationFor(inst, "produce")
+		return act != nil && act.Status == workflow.ActivationBlocked
+	})
+
+	inst := f.instance(t, wf)
+	if calls := f.providerCalls.Load(); calls != 3 {
+		t.Fatalf("provider invoked %d times, want exactly 3 (max_attempts); observed %s", calls, describeInstance(&inst, calls))
+	}
+	attempts := attemptsForNode(&inst, "produce")
+	if len(attempts) != 3 {
+		t.Fatalf("produce recorded %d attempts, want exactly 3; observed %s", len(attempts), describeInstance(&inst, f.providerCalls.Load()))
+	}
+	for _, attempt := range attempts {
+		if attempt.Status != workflow.AttemptFailed {
+			t.Fatalf("produce attempt %s status = %s, want failed; observed %s", attempt.ID, attempt.Status, describeInstance(&inst, f.providerCalls.Load()))
+		}
+		if attempt.MarkerLabel != "contract_unmet" {
+			t.Fatalf("produce attempt %s marker label = %q, want contract_unmet; observed %s", attempt.ID, attempt.MarkerLabel, describeInstance(&inst, f.providerCalls.Load()))
+		}
+	}
+	if act := activationFor(&inst, "consume"); act != nil {
+		t.Fatalf("consume dispatched despite produce never satisfying its contract; observed %s", describeInstance(&inst, f.providerCalls.Load()))
+	}
+}
+
+// TestAutoHandoffNoContractChainCompletes proves a no-contract auto node
+// auto-completes on a clean exit and its dependent dispatches and completes:
+// the whole two-node workflow reaches completed with no human or worker
+// completion call.
+func TestAutoHandoffNoContractChainCompletes(t *testing.T) {
+	t.Chdir(t.TempDir())
+	provider := &stableScriptedProvider{attempt: -1}
+	appendSessionScript(t, provider, "ses_first", nil, "end_turn")
+	appendSessionScript(t, provider, "ses_second", nil, "end_turn")
+	f := newAutoHandoffFixture(t, "auto-handoff-nocontract", provider)
+	template := map[string]any{
+		"schema_version":   1,
+		"template_id":      "tmpl-auto-handoff-nocontract",
+		"template_version": "1",
+		"entry_nodes":      []string{"first"},
+		"nodes": []any{
+			map[string]any{
+				"id":           "first",
+				"action":       map[string]any{"type": "run", "prompt": "first"},
+				"dispatch":     map[string]any{"mode": "auto", "controller_id": "c1"},
+				"branches":     map[string]any{"done": "second"},
+				"retry_policy": map[string]any{"max_attempts": 2, "exhaustion": "block"},
+			},
+			map[string]any{
+				"id":           "second",
+				"dependencies": []string{"first"},
+				"action":       map[string]any{"type": "run", "prompt": "second"},
+				"dispatch":     map[string]any{"mode": "auto", "controller_id": "c1"},
+				"retry_policy": map[string]any{"max_attempts": 2, "exhaustion": "block"},
+			},
+		},
+		"terminal_outcomes":    []string{"done"},
+		"default_lease_policy": map[string]any{"ttl_seconds": 900},
+	}
+	wf := f.addWorkflow(t, "tmpl-auto-handoff-nocontract", mustJSON(t, template))
+	f.enableController(t, 2)
+
+	f.waitForInstance(t, wf, "the workflow to complete", func(inst *workflow.WorkflowInstance) bool {
+		return inst.Status == workflow.WorkflowCompleted
+	})
+	inst := f.instance(t, wf)
+	if calls := f.providerCalls.Load(); calls != 2 {
+		t.Fatalf("provider invoked %d times, want exactly 2 (one per node); observed %s", calls, describeInstance(&inst, calls))
+	}
+	for _, nodeID := range []workflow.NodeID{"first", "second"} {
+		act := activationFor(&inst, nodeID)
+		if act == nil || act.Status != workflow.ActivationSatisfied {
+			t.Fatalf("node %s not satisfied; observed %s", nodeID, describeInstance(&inst, f.providerCalls.Load()))
+		}
+		if act.SelectedOutcome != workflow.OutcomeName("done") {
+			t.Fatalf("node %s selected outcome = %q, want done; observed %s", nodeID, act.SelectedOutcome, describeInstance(&inst, f.providerCalls.Load()))
+		}
+	}
+}
+
+// TestAutoHandoffPointerAndGitHeadSourcesAndGitContract proves pointer and
+// git-head output sources resolve against the attempt's working directory,
+// and a git completion contract is evaluated there too.
+func TestAutoHandoffPointerAndGitHeadSourcesAndGitContract(t *testing.T) {
+	workDir := t.TempDir()
+	t.Chdir(workDir)
+	provider := &stableScriptedProvider{attempt: -1}
+	// produce writes its declared JSON artifact (the worker's declared
+	// result); git-verify exits cleanly in the same working directory.
+	declared := produceWorkerDeclaredResult(t, provider, "ses_produce", "data.json", `{"repository":"org/repo","n":3}`)
+	appendSessionScript(t, provider, "ses_verify", nil, "end_turn")
+	appendSessionScript(t, provider, "ses_after", nil, "end_turn")
+
+	// The working directory is a git repo with everything committed, so the
+	// git contract's clean check and head pin hold.
+	runGit := func(args ...string) string {
+		t.Helper()
+		out, err := exec.Command("git", args...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+		return string(out)
+	}
+	runGit("init")
+	runGit("config", "user.email", "workflow-test@example.invalid")
+	runGit("config", "user.name", "workflow test")
+	runGit("add", "data.json")
+	runGit("commit", "-m", "declared result")
+	head := strings.TrimSpace(runGit("rev-parse", "HEAD"))
+
+	f := newAutoHandoffFixture(t, "auto-handoff-sources", provider)
+	template := map[string]any{
+		"schema_version":   1,
+		"template_id":      "tmpl-auto-handoff-sources",
+		"template_version": "1",
+		"entry_nodes":      []string{"produce"},
+		"nodes": []any{
+			map[string]any{
+				"id":       "produce",
+				"action":   map[string]any{"type": "run", "prompt": "produce the json artifact"},
+				"dispatch": map[string]any{"mode": "auto", "controller_id": "c1"},
+				"outputs": []any{
+					map[string]any{
+						"id": "repository", "name": "Repository", "type": "string", "required": true,
+						"source": map[string]any{"artifact": declared.ArtifactPath, "pointer": "/repository"},
+					},
+					map[string]any{
+						"id": "head", "name": "Head", "type": "string", "required": true,
+						"source": map[string]any{"git": "head"},
+					},
+				},
+				"completion": map[string]any{
+					"kind":      "files",
+					"artifacts": []any{map[string]any{"path": declared.ArtifactPath, "non_empty": true}},
+				},
+				"branches":     map[string]any{"done": "git-verify"},
+				"retry_policy": map[string]any{"max_attempts": 2, "exhaustion": "block"},
+			},
+			map[string]any{
+				"id":           "git-verify",
+				"dependencies": []string{"produce"},
+				"action":       map[string]any{"type": "run", "prompt": "verify"},
+				"dispatch":     map[string]any{"mode": "auto", "controller_id": "c1"},
+				"completion":   map[string]any{"kind": "git", "git": map[string]any{"clean": true, "head": head}},
+				"branches":     map[string]any{"done": "after"},
+				"retry_policy": map[string]any{"max_attempts": 2, "exhaustion": "block"},
+			},
+			map[string]any{
+				"id":           "after",
+				"dependencies": []string{"git-verify"},
+				"action":       map[string]any{"type": "run", "prompt": "after"},
+				"dispatch":     map[string]any{"mode": "auto", "controller_id": "c1"},
+				"retry_policy": map[string]any{"max_attempts": 2, "exhaustion": "block"},
+			},
+		},
+		"terminal_outcomes":    []string{"done"},
+		"default_lease_policy": map[string]any{"ttl_seconds": 900},
+	}
+	wf := f.addWorkflow(t, "tmpl-auto-handoff-sources", mustJSON(t, template))
+	f.enableController(t, 2)
+
+	f.waitForInstance(t, wf, "produce satisfied and git-verify dispatched", func(inst *workflow.WorkflowInstance) bool {
+		produce := activationFor(inst, "produce")
+		verify := activationFor(inst, "git-verify")
+		return produce != nil && produce.Status == workflow.ActivationSatisfied && verify != nil && len(verify.AttemptIDs) > 0
+	})
+	f.waitForInstance(t, wf, "the workflow to complete", func(inst *workflow.WorkflowInstance) bool {
+		return inst.Status == workflow.WorkflowCompleted
+	})
+
+	inst := f.instance(t, wf)
+	outputValue := func(outputID string) string {
+		t.Helper()
+		for _, o := range inst.Outputs {
+			if string(o.DefinitionID) == outputID {
+				var value string
+				if err := json.Unmarshal(o.Value, &value); err != nil {
+					t.Fatalf("output %q value %s is not a JSON string: %v", outputID, o.Value, err)
+				}
+				return value
+			}
+		}
+		t.Fatalf("output %q not recorded; observed %s", outputID, describeInstance(&inst, f.providerCalls.Load()))
+		return ""
+	}
+	if got := outputValue("repository"); got != "org/repo" {
+		t.Fatalf("pointer output repository = %q, want org/repo; observed %s", got, describeInstance(&inst, f.providerCalls.Load()))
+	}
+	if got := outputValue("head"); got != head {
+		t.Fatalf("git-head output head = %q, want %q; observed %s", got, head, describeInstance(&inst, f.providerCalls.Load()))
+	}
+}
+
+// TestAutoHandoffLoopMarkerSelectsDeclaredOutcome proves a loop node with
+// two declared branches completes on the outcome its terminal marker label
+// names: the loop child's exit marker is plumbed to the termination path and
+// selects the branch, dispatching the dependent.
+func TestAutoHandoffLoopMarkerSelectsDeclaredOutcome(t *testing.T) {
+	t.Chdir(t.TempDir())
+	provider := &stableScriptedProvider{attempt: -1}
+	appendSessionScript(t, provider, "ses_loop", []string{"<|workflow: exit | passed|>\n"}, "end_turn")
+	appendSessionScript(t, provider, "ses_consume", nil, "end_turn")
+	loopPath := "loop.json"
+	if err := os.WriteFile(loopPath, mustJSON(t, map[string]any{
+		"max_iterations": 2,
+		"loop":           []any{map[string]any{"name": "verify", "prompt": "emit the verdict"}},
+	}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f := newAutoHandoffFixture(t, "auto-handoff-loop-marker", provider)
+	wf := f.addWorkflow(t, "tmpl-auto-handoff-loop-marker", autoHandoffLoopTemplate(t, "tmpl-auto-handoff-loop-marker", loopPath))
+	f.enableController(t, 2)
+
+	f.waitForInstance(t, wf, "the workflow to complete", func(inst *workflow.WorkflowInstance) bool {
+		return inst.Status == workflow.WorkflowCompleted
+	})
+	inst := f.instance(t, wf)
+	act := activationFor(&inst, "step")
+	if act == nil || act.Status != workflow.ActivationSatisfied {
+		t.Fatalf("loop node not satisfied; observed %s", describeInstance(&inst, f.providerCalls.Load()))
+	}
+	if act.SelectedOutcome != workflow.OutcomeName("passed") {
+		t.Fatalf("loop node selected outcome = %q, want passed (the terminal marker label); observed %s", act.SelectedOutcome, describeInstance(&inst, f.providerCalls.Load()))
+	}
+	if attempts := attemptsForNode(&inst, "step"); len(attempts) != 1 || attempts[0].MarkerLabel != "passed" {
+		t.Fatalf("loop node attempts = %+v, want one attempt with marker label passed; observed %s", attempts, describeInstance(&inst, f.providerCalls.Load()))
+	}
+	if calls := f.providerCalls.Load(); calls != 2 {
+		t.Fatalf("provider invoked %d times, want exactly 2 (loop + consume); observed %s", calls, describeInstance(&inst, f.providerCalls.Load()))
+	}
+}
+
+// TestAutoHandoffLoopWithoutMarkerIsContractUnmet proves a multi-outcome
+// loop node whose worker exits cleanly without a terminal marker cannot
+// pick an outcome: the attempt is failed with contract_unmet and retry
+// exhaustion blocks the node.
+func TestAutoHandoffLoopWithoutMarkerIsContractUnmet(t *testing.T) {
+	t.Chdir(t.TempDir())
+	provider := &stableScriptedProvider{attempt: -1}
+	appendSessionScript(t, provider, "ses_loop1", nil, "end_turn")
+	appendSessionScript(t, provider, "ses_loop2", nil, "end_turn")
+	loopPath := "loop.json"
+	if err := os.WriteFile(loopPath, mustJSON(t, map[string]any{
+		"max_iterations": 1,
+		"loop":           []any{map[string]any{"name": "verify", "prompt": "emit the verdict"}},
+	}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f := newAutoHandoffFixture(t, "auto-handoff-loop-nomarker", provider)
+	wf := f.addWorkflow(t, "tmpl-auto-handoff-loop-nomarker", autoHandoffLoopTemplate(t, "tmpl-auto-handoff-loop-nomarker", loopPath))
+	f.enableController(t, 2)
+
+	f.waitForInstance(t, wf, "the loop node to exhaust and block", func(inst *workflow.WorkflowInstance) bool {
+		act := activationFor(inst, "step")
+		return act != nil && act.Status == workflow.ActivationBlocked
+	})
+	inst := f.instance(t, wf)
+	if calls := f.providerCalls.Load(); calls != 2 {
+		t.Fatalf("provider invoked %d times, want exactly 2 (max_attempts); observed %s", calls, describeInstance(&inst, calls))
+	}
+	attempts := attemptsForNode(&inst, "step")
+	if len(attempts) != 2 {
+		t.Fatalf("loop node recorded %d attempts, want exactly 2; observed %s", len(attempts), describeInstance(&inst, f.providerCalls.Load()))
+	}
+	for _, attempt := range attempts {
+		if attempt.MarkerLabel != "contract_unmet" {
+			t.Fatalf("loop attempt %s marker label = %q, want contract_unmet; observed %s", attempt.ID, attempt.MarkerLabel, describeInstance(&inst, f.providerCalls.Load()))
+		}
+	}
+}
+
+// TestAutoHandoffNonSuccessExitsDoNotComplete proves failed and canceled
+// exits keep today's behavior: the terminal fact is recorded as-is (no
+// supervisor completion, no contract_unmet relabeling) and the node's retry
+// policy or cancellation handling applies.
+func TestAutoHandoffNonSuccessExitsDoNotComplete(t *testing.T) {
+	t.Run("failed exit retries then blocks", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		provider := &stableScriptedProvider{attempt: -1}
+		// refusal maps to exit code 2: a failed, non-retryable-at-runtime
+		// exit that still applies the node's kernel retry policy.
+		appendSessionScript(t, provider, "ses_fail1", nil, "refusal")
+		appendSessionScript(t, provider, "ses_fail2", nil, "refusal")
+		appendSessionScript(t, provider, "ses_fail3", nil, "refusal")
+		f := newAutoHandoffFixture(t, "auto-handoff-failed-exit", provider)
+		wf := f.addWorkflow(t, "tmpl-auto-handoff-failed-exit", autoHandoffChainTemplate(t, "tmpl-auto-handoff-failed-exit", 900))
+		f.enableController(t, 2)
+
+		f.waitForInstance(t, wf, "the produce node to exhaust and block", func(inst *workflow.WorkflowInstance) bool {
+			act := activationFor(inst, "produce")
+			return act != nil && act.Status == workflow.ActivationBlocked
+		})
+		inst := f.instance(t, wf)
+		if calls := f.providerCalls.Load(); calls != 3 {
+			t.Fatalf("provider invoked %d times, want exactly 3; observed %s", calls, describeInstance(&inst, calls))
+		}
+		attempts := attemptsForNode(&inst, "produce")
+		if len(attempts) != 3 {
+			t.Fatalf("produce recorded %d attempts, want exactly 3; observed %s", len(attempts), describeInstance(&inst, f.providerCalls.Load()))
+		}
+		for _, attempt := range attempts {
+			if attempt.Status != workflow.AttemptFailed {
+				t.Fatalf("produce attempt %s status = %s, want failed; observed %s", attempt.ID, attempt.Status, describeInstance(&inst, f.providerCalls.Load()))
+			}
+			if attempt.MarkerLabel == "contract_unmet" {
+				t.Fatalf("produce attempt %s carries the contract_unmet marker; a non-success exit must keep today's behavior; observed %s", attempt.ID, describeInstance(&inst, f.providerCalls.Load()))
+			}
+		}
+		if act := activationFor(&inst, "consume"); act != nil {
+			t.Fatalf("consume dispatched despite produce never completing; observed %s", describeInstance(&inst, f.providerCalls.Load()))
+		}
+	})
+
+	t.Run("canceled exit does not retry", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		provider := &stableScriptedProvider{attempt: -1}
+		// cancelled maps to exit code 130: an AttemptCanceled terminal fact
+		// that never retries and never completes.
+		appendSessionScript(t, provider, "ses_cancel", nil, "cancelled")
+		f := newAutoHandoffFixture(t, "auto-handoff-cancel-exit", provider)
+		wf := f.addWorkflow(t, "tmpl-auto-handoff-cancel-exit", autoHandoffChainTemplate(t, "tmpl-auto-handoff-cancel-exit", 900))
+		f.enableController(t, 2)
+
+		f.waitForInstance(t, wf, "the canceled attempt to settle", func(inst *workflow.WorkflowInstance) bool {
+			attempts := attemptsForNode(inst, "produce")
+			act := activationFor(inst, "produce")
+			return len(attempts) == 1 && attempts[0].Status == workflow.AttemptCanceled &&
+				act != nil && act.Status == workflow.ActivationAttemptFailed
+		})
+		inst := f.instance(t, wf)
+		if calls := f.providerCalls.Load(); calls != 1 {
+			t.Fatalf("provider invoked %d times, want exactly 1 (canceled attempts do not retry); observed %s", calls, describeInstance(&inst, calls))
+		}
+	})
+}
+
+// autoHandoffLoopTemplate builds a one-loop-node template with passed/failed
+// branches to a dependent consume node.
+func autoHandoffLoopTemplate(t *testing.T, templateID, loopPath string) []byte {
+	t.Helper()
+	template := map[string]any{
+		"schema_version":   1,
+		"template_id":      templateID,
+		"template_version": "1",
+		"entry_nodes":      []string{"step"},
+		"nodes": []any{
+			map[string]any{
+				"id":           "step",
+				"action":       map[string]any{"type": "loop", "loop_file": loopPath},
+				"dispatch":     map[string]any{"mode": "auto", "controller_id": "c1"},
+				"branches":     map[string]any{"passed": "consume", "failed": "consume"},
+				"retry_policy": map[string]any{"max_attempts": 2, "exhaustion": "block"},
+			},
+			map[string]any{
+				"id":           "consume",
+				"dependencies": []string{"step"},
+				"action":       map[string]any{"type": "run", "prompt": "consume the verdict"},
+				"dispatch":     map[string]any{"mode": "auto", "controller_id": "c1"},
+				"retry_policy": map[string]any{"max_attempts": 2, "exhaustion": "block"},
+			},
+		},
+		"terminal_outcomes":    []string{"done"},
+		"default_lease_policy": map[string]any{"ttl_seconds": 900},
+	}
+	return mustJSON(t, template)
 }

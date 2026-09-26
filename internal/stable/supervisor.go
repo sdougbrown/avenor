@@ -2085,6 +2085,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 	child.mu.Lock()
 	child.exitCode = result.ExitCode
 	child.mu.Unlock()
+	child.stashWorkflowTerminalMarker(result.MarkerDirective, result.MarkerLabel)
 
 	// When every iteration phase returns end_turn, looprunner stops at
 	// max_iterations with result.SessionID == "". Use the latest adopted child
@@ -2353,6 +2354,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 	child.mu.Lock()
 	child.exitCode = result.ExitCode
 	child.mu.Unlock()
+	child.stashWorkflowTerminalMarker(result.MarkerDirective, result.MarkerLabel)
 
 	// A successful team can finish all members and post phases with end_turn.
 	// The aggregate RunResult then has no authoritative SessionID. Use the latest
