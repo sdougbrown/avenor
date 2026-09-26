@@ -168,13 +168,6 @@ type Runner struct {
 	results chan dispatchWorkerResult
 	// pollResults carries poll worker outcomes to the leader loop.
 	pollResults chan pollWorkerResult
-	// pollInFlight holds the cursor keys with a poll worker still running
-	// (leader-goroutine-local), so a due cursor is never re-offered while its
-	// invocation runs.
-	pollInFlight map[string]bool
-	// pendingPolls is the number of poll workers that have not delivered a
-	// result yet. Leader-goroutine-local.
-	pendingPolls int
 	// poll is the optional host poll surface; nil disables polling.
 	poll Poller
 	// pollBase is the interval before the first poll after a park and the
@@ -227,7 +220,6 @@ func NewRunner(cfg RunnerConfig) *Runner {
 		done:           make(chan struct{}),
 		results:        make(chan dispatchWorkerResult, 1),
 		pollResults:    make(chan pollWorkerResult, 1),
-		pollInFlight:   map[string]bool{},
 		poll:           cfg.Poll,
 		pollBase:       pollBase,
 		pollJitter:     jitter,
@@ -357,6 +349,12 @@ type leaderState struct {
 	// outstanding is the number of workers that have not delivered a result
 	// yet.
 	outstanding int
+	// pollInFlight holds the cursor keys with a poll worker still running, so
+	// a due cursor is never re-offered while its invocation runs.
+	pollInFlight map[string]bool
+	// pendingPolls is the number of poll workers that have not delivered a
+	// result yet.
+	pendingPolls int
 }
 
 // decrementUnreported drops one pending-decision count for an identity.
@@ -485,8 +483,8 @@ func (r *Runner) drainResults(s *leaderState) (lostLead bool) {
 
 // handlePollResult folds one poll worker outcome into the current pass.
 func (r *Runner) handlePollResult(s *leaderState, res pollWorkerResult) {
-	r.pendingPolls--
-	if r.handlePollOutcome(res.outcome, LeaderLease{LeaseID: s.leaseID, OwnerEpoch: s.ownerEpoch}) {
+	s.pendingPolls--
+	if r.handlePollOutcome(s, res.outcome, LeaderLease{LeaseID: s.leaseID, OwnerEpoch: s.ownerEpoch}) {
 		s.dropLeadership(r)
 	}
 }
@@ -510,78 +508,317 @@ func (r *Runner) drainWorkers(s *leaderState) {
 	for s.outstanding > 0 {
 		s.receiveResult(<-r.results)
 	}
-	for r.pendingPolls > 0 {
+	for s.pendingPolls > 0 {
 		r.handlePollResult(s, <-r.pollResults)
 	}
 }
 
+// stepResult reports how the leader loop should proceed after one step.
+type stepResult int
+
+const (
+	// stepNext proceeds to the next step of the current pass.
+	stepNext stepResult = iota
+	// stepLoop restarts the leader loop from the top.
+	stepLoop
+	// stepExit leaves the leader loop.
+	stepExit
+)
+
+// waitForWake arms the timer at d and blocks for the loop's next event. It
+// is the single place the leader receives on the timer, context, wake
+// channels, and worker/poll result channels: when listenWake is clear (the
+// post-error, re-acquire sleep) the change and capacity channels are nil and
+// therefore never ready, so coalesced wake signals stay pending and
+// cancellation is handled at the top of the loop; when set, cancellation
+// releases the lease and drains workers before reporting an exit. Worker
+// results are folded in here too, so blocked workers are never stranded
+// while not leading. It returns the wakeup that ended the wait and whether
+// the leader loop should exit.
+func (r *Runner) waitForWake(s *leaderState, d time.Duration, listenWake bool) (wakeReason, bool) {
+	if d < 0 {
+		d = 0
+	}
+	s.timer.Reset(d)
+	changeCh, capacityCh := r.changeCh, r.capacityCh
+	if !listenWake {
+		changeCh, capacityCh = nil, nil
+	}
+	select {
+	case <-r.ctx.Done():
+		if listenWake {
+			s.release(r)
+			r.drainWorkers(s)
+			return wakeNone, true
+		}
+		return wakeNone, false
+	case <-s.timer.C:
+		return wakeTimer, false
+	case <-changeCh:
+		drainSignal(r.changeCh)
+		return wakeChange, false
+	case <-capacityCh:
+		drainSignal(r.capacityCh)
+		return wakeCapacity, false
+	case res := <-r.results:
+		s.receiveResult(res)
+		r.handleResult(s, res)
+		return wakeResult, false
+	case res := <-r.pollResults:
+		r.handlePollResult(s, res)
+		return wakeResult, false
+	}
+}
+
+// acquire grants the lease when it is not held. stepExit means the
+// controller is disabled and the leader loop should end.
+func (r *Runner) acquire(s *leaderState) stepResult {
+	if s.holding {
+		return stepNext
+	}
+	rec, granted, err := r.store.AcquireLease(r.controllerID, r.ownerID)
+	if err != nil {
+		if errors.Is(err, ErrDisabled) {
+			r.drainWorkers(s)
+			return stepExit
+		}
+		log.Printf("workflow controller %s: acquire lease: %v", r.controllerID, err)
+		r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "acquire_error" })
+		r.waitForWake(s, r.renewInterval, false)
+		return stepLoop
+	}
+	if !granted {
+		r.waitForWake(s, r.renewInterval, false)
+		return stepLoop
+	}
+	s.leaseID = rec.Leader.LeaseID
+	s.ownerEpoch = rec.Leader.OwnerEpoch
+	s.holding = true
+	s.blockedSource = ""
+	s.lastRefresh = time.Time{}
+	r.setStatus(func(s *RunnerStatus) { s.Leading = true })
+	return stepNext
+}
+
+// renew renews the lease first on every pass — a failed renewal stops
+// dispatching and falls back to acquisition — then reads the controller
+// record, ending the loop when the controller is gone or disabled. It
+// returns the record and when the next renewal is due.
+func (r *Runner) renew(s *leaderState) (ControllerRecord, time.Time, stepResult) {
+	if _, err := r.store.RenewLease(r.controllerID, s.leaseID, s.ownerEpoch); err != nil {
+		s.dropLeadership(r)
+		r.waitForWake(s, r.renewInterval, false)
+		return ControllerRecord{}, time.Time{}, stepLoop
+	}
+	nextRenewDue := r.now().Add(r.renewInterval)
+	rec, ok, err := r.store.Get(r.controllerID)
+	if err != nil {
+		// Transient read error: keep the lease and retry on the next
+		// tick rather than releasing leadership.
+		log.Printf("workflow controller %s: read state: %v", r.controllerID, err)
+		r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "state_error" })
+		w, exit := r.waitForWake(s, r.renewInterval, true)
+		s.wake = w
+		if exit {
+			return ControllerRecord{}, time.Time{}, stepExit
+		}
+		return ControllerRecord{}, time.Time{}, stepLoop
+	}
+	if !ok || rec.DesiredState != DesiredEnabled {
+		s.release(r)
+		r.drainWorkers(s)
+		return ControllerRecord{}, time.Time{}, stepExit
+	}
+	return rec, nextRenewDue, stepNext
+}
+
+// preparePass computes the pass wait, offers due polls to bounded workers,
+// refreshes the host view on the anti-entropy cadence, re-seeds poll cursors
+// lost to a crash, and applies the capacity-block clearing rules. It returns
+// the wait for the pass's end.
+func (r *Runner) preparePass(s *leaderState, rec ControllerRecord, nextRenewDue time.Time) (time.Duration, stepResult) {
+	wait := r.antiEntropy
+	if d := nextRenewDue.Sub(r.now()); d < wait {
+		wait = d
+	}
+	// Poll scheduling shares the pass: due cursors are offered to bounded
+	// workers and the wait folds in the earliest scheduled next poll.
+	if r.poll != nil {
+		r.drainPollResults(s)
+		if !s.holding {
+			// A stale apply dropped leadership mid-pass; re-acquire before
+			// offering any further polls.
+			r.waitForWake(s, r.renewInterval, false)
+			return wait, stepLoop
+		}
+		r.offerPolls(s)
+		wait = r.nextPollWait(wait)
+	}
+	refreshed := false
+	if s.lastRefresh.IsZero() || r.now().Sub(s.lastRefresh) >= r.antiEntropy {
+		if err := r.deps.Refresh(); err != nil {
+			log.Printf("workflow controller %s: refresh: %v", r.controllerID, err)
+			r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "refresh_error" })
+			if w, exit := r.waitForWake(s, wait, true); exit {
+				return wait, stepExit
+			} else {
+				s.wake = w
+			}
+			return wait, stepLoop
+		}
+		s.lastRefresh = r.now()
+		refreshed = true
+		// The same pass that refreshes re-seeds poll cursors lost to a
+		// crash between a park commit and cursor creation.
+		if r.poll != nil {
+			r.reseedPollCursors(rec.PollCursors)
+		}
+	}
+	// A capacity-change signal or an anti-entropy pass clears a persisted
+	// capacity block; the pass that clears it dispatches again.
+	if s.blockedSource != "" && (s.wake == wakeCapacity || refreshed) {
+		s.clearBlock(r)
+	}
+	s.wake = wakeNone
+	return wait, stepNext
+}
+
+// blockedPass runs one capacity-blocked pass: it renews, refreshes, and
+// publishes status but takes no dispatch decisions until the block clears.
+// The in-flight count is refreshed from the live view so it never goes stale
+// while the block persists.
+func (r *Runner) blockedPass(s *leaderState, wait time.Duration) stepResult {
+	inflight, err := r.deps.InFlight()
+	if err != nil {
+		log.Printf("workflow controller %s: in-flight: %v", r.controllerID, err)
+		r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "inflight_error" })
+		w, exit := r.waitForWake(s, wait, true)
+		s.wake = w
+		if exit {
+			return stepExit
+		}
+		return stepLoop
+	}
+	inflightView := r.buildInflightView(s, inflight)
+	r.setStatus(func(st *RunnerStatus) {
+		st.LastReconcile = r.now()
+		st.Inflight = activeCount(inflightView, r.controllerID)
+	})
+	if w, exit := r.waitForWake(s, wait, true); exit {
+		return stepExit
+	} else {
+		s.wake = w
+	}
+	return stepLoop
+}
+
+// dispatchPass selects ready candidates and hands each decision to an
+// untracked worker, renewing the lease before every hand-off and honoring
+// worker results that land mid-pass. A capacity block from any result
+// suppresses the remaining hand-offs and persists across passes.
+func (r *Runner) dispatchPass(s *leaderState, rec ControllerRecord, wait time.Duration) stepResult {
+	candidates, err := r.deps.Candidates(r.controllerID)
+	if err != nil {
+		log.Printf("workflow controller %s: candidates: %v", r.controllerID, err)
+		r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "candidates_error" })
+		w, exit := r.waitForWake(s, wait, true)
+		s.wake = w
+		if exit {
+			return stepExit
+		}
+		return stepLoop
+	}
+	inflight, err := r.deps.InFlight()
+	if err != nil {
+		log.Printf("workflow controller %s: in-flight: %v", r.controllerID, err)
+		r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "inflight_error" })
+		w, exit := r.waitForWake(s, wait, true)
+		s.wake = w
+		if exit {
+			return stepExit
+		}
+		return stepLoop
+	}
+	if rec.MaxInflight <= 0 {
+		r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "no_capacity" })
+		w, exit := r.waitForWake(s, wait, true)
+		s.wake = w
+		if exit {
+			return stepExit
+		}
+		return stepLoop
+	}
+
+	// Seed the in-flight view with decisions handed to workers whose
+	// results have not arrived yet, so a pass never double-dispatches
+	// them.
+	view := r.buildInflightView(s, inflight)
+	decisions := Select(SelectInput{
+		ControllerID: r.controllerID,
+		Candidates:   candidates,
+		InFlight:     view,
+		Now:          r.now(),
+		MaxInflight:  rec.MaxInflight,
+	})
+	reconciledAt := r.now()
+	r.setStatus(func(s *RunnerStatus) {
+		s.LastReconcile = reconciledAt
+		s.Inflight = activeCount(view, r.controllerID)
+		if len(decisions) == 0 && s.CapacityBlocked == "" {
+			s.LastOutcome = "idle"
+		}
+	})
+
+	for _, d := range decisions {
+		lostLead := r.drainResults(s)
+		if lostLead || s.blockedSource != "" || !s.holding {
+			break
+		}
+		if r.ctx.Err() != nil {
+			break
+		}
+		if _, err := r.store.RenewLease(r.controllerID, s.leaseID, s.ownerEpoch); err != nil {
+			s.dropLeadership(r)
+			break
+		}
+		e := s.unreported[d.Candidate.Identity]
+		e.count++
+		e.key = d.Candidate.ConcurrencyKey
+		s.unreported[d.Candidate.Identity] = e
+		s.outstanding++
+		go r.dispatchWorker(d, LeaderLease{LeaseID: s.leaseID, OwnerEpoch: s.ownerEpoch})
+	}
+
+	if !s.holding {
+		// Leadership was lost mid-pass; fall back to acquisition.
+		r.waitForWake(s, r.renewInterval, false)
+		return stepLoop
+	}
+	if w, exit := r.waitForWake(s, wait, true); exit {
+		return stepExit
+	} else {
+		s.wake = w
+	}
+	return stepLoop
+}
+
 // loop is the leader goroutine: it acquires and holds the controller's lease
-// and runs reconcile passes while leading.
+// and runs reconcile passes while leading. All mutable state lives in
+// leaderState, every step below runs on the leader goroutine only, and every
+// channel receive happens in waitForWake or the non-blocking drains.
 func (r *Runner) loop() {
 	defer close(r.done)
 	defer r.clearLeadStatus()
 
 	s := &leaderState{
-		timer:      time.NewTimer(0),
-		unreported: map[workflow.ExecutionIdentity]unreportedEntry{},
+		timer:        time.NewTimer(0),
+		unreported:   map[workflow.ExecutionIdentity]unreportedEntry{},
+		pollInFlight: map[string]bool{},
 	}
 	if !s.timer.Stop() {
 		<-s.timer.C
 	}
 	defer s.timer.Stop()
-
-	var exit bool
-
-	// arm schedules the next wakeup at d.
-	arm := func(d time.Duration) {
-		if d < 0 {
-			d = 0
-		}
-		s.timer.Reset(d)
-	}
-	// sleep arms the timer at d and waits for it, cancellation, or a worker
-	// result (so blocked workers are never stranded while not leading).
-	sleep := func(d time.Duration) {
-		arm(d)
-		select {
-		case <-s.timer.C:
-		case <-r.ctx.Done():
-		case res := <-r.results:
-			s.outstanding--
-			s.decrementUnreported(res.identity)
-			r.handleResult(s, res)
-		case res := <-r.pollResults:
-			r.handlePollResult(s, res)
-		}
-	}
-	// waitOrCancel arms the timer at d and waits for it, cancellation, or a
-	// wake signal; it reports the wakeup reason and whether the runner should
-	// exit.
-	waitOrCancel := func(d time.Duration) (wake wakeReason, exit bool) {
-		arm(d)
-		select {
-		case <-r.ctx.Done():
-			s.release(r)
-			r.drainWorkers(s)
-			return wakeNone, true
-		case <-s.timer.C:
-			return wakeTimer, false
-		case <-r.changeCh:
-			drainSignal(r.changeCh)
-			return wakeChange, false
-		case <-r.capacityCh:
-			drainSignal(r.capacityCh)
-			return wakeCapacity, false
-		case res := <-r.results:
-			s.outstanding--
-			s.decrementUnreported(res.identity)
-			r.handleResult(s, res)
-			return wakeResult, false
-		case res := <-r.pollResults:
-			r.handlePollResult(s, res)
-			return wakeResult, false
-		}
-	}
 
 	for {
 		if r.ctx.Err() != nil {
@@ -589,206 +826,32 @@ func (r *Runner) loop() {
 			r.drainWorkers(s)
 			return
 		}
-
-		if !s.holding {
-			rec, granted, err := r.store.AcquireLease(r.controllerID, r.ownerID)
-			if err != nil {
-				if errors.Is(err, ErrDisabled) {
-					r.drainWorkers(s)
-					return
-				}
-				log.Printf("workflow controller %s: acquire lease: %v", r.controllerID, err)
-				r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "acquire_error" })
-				sleep(r.renewInterval)
-				continue
-			}
-			if !granted {
-				sleep(r.renewInterval)
-				continue
-			}
-			s.leaseID = rec.Leader.LeaseID
-			s.ownerEpoch = rec.Leader.OwnerEpoch
-			s.holding = true
-			s.blockedSource = ""
-			s.lastRefresh = time.Time{}
-			r.setStatus(func(s *RunnerStatus) { s.Leading = true })
-		}
-
-		// Renew first on every pass. A failed renewal stops dispatching and
-		// falls back to acquisition.
-		if _, err := r.store.RenewLease(r.controllerID, s.leaseID, s.ownerEpoch); err != nil {
-			s.dropLeadership(r)
-			sleep(r.renewInterval)
-			continue
-		}
-		nextRenewDue := r.now().Add(r.renewInterval)
-
-		rec, ok, err := r.store.Get(r.controllerID)
-		if err != nil {
-			// Transient read error: keep the lease and retry on the next
-			// tick rather than releasing leadership.
-			log.Printf("workflow controller %s: read state: %v", r.controllerID, err)
-			r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "state_error" })
-			s.wake, exit = waitOrCancel(r.renewInterval)
-			if exit {
-				return
-			}
-			continue
-		}
-		if !ok || rec.DesiredState != DesiredEnabled {
-			s.release(r)
-			r.drainWorkers(s)
+		switch r.acquire(s) {
+		case stepExit:
 			return
+		case stepLoop:
+			continue
 		}
-
-		// Reconcile pass.
-		wait := r.antiEntropy
-		if d := nextRenewDue.Sub(r.now()); d < wait {
-			wait = d
+		rec, nextRenewDue, step := r.renew(s)
+		switch step {
+		case stepExit:
+			return
+		case stepLoop:
+			continue
 		}
-		// Poll scheduling shares the pass: due cursors are offered to bounded
-		// workers and the wait folds in the earliest scheduled next poll.
-		if r.poll != nil {
-			r.drainPollResults(s)
-			if !s.holding {
-				// A stale apply dropped leadership mid-pass; re-acquire before
-				// offering any further polls.
-				sleep(r.renewInterval)
-				continue
-			}
-			r.offerPolls()
-			wait = r.nextPollWait(wait)
+		wait, step := r.preparePass(s, rec, nextRenewDue)
+		switch step {
+		case stepExit:
+			return
+		case stepLoop:
+			continue
 		}
-		refreshed := false
-		if s.lastRefresh.IsZero() || r.now().Sub(s.lastRefresh) >= r.antiEntropy {
-			if err := r.deps.Refresh(); err != nil {
-				log.Printf("workflow controller %s: refresh: %v", r.controllerID, err)
-				r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "refresh_error" })
-				s.wake, exit = waitOrCancel(wait)
-				if exit {
-					return
-				}
-				continue
-			}
-			s.lastRefresh = r.now()
-			refreshed = true
-			// The same pass that refreshes re-seeds poll cursors lost to a
-			// crash between a park commit and cursor creation.
-			if r.poll != nil {
-				r.reseedPollCursors(rec.PollCursors)
-			}
-		}
-		// A capacity-change signal or an anti-entropy pass clears a persisted
-		// capacity block; the pass that clears it dispatches again.
-		if s.blockedSource != "" && (s.wake == wakeCapacity || refreshed) {
-			s.clearBlock(r)
-		}
-		s.wake = wakeNone
 		if s.blockedSource != "" {
-			// Blocked: this pass renews, refreshes, and publishes status but
-			// takes no dispatch decisions until the block clears. The in-flight
-			// count is refreshed from the live view so it never goes stale
-			// while the block persists.
-			inflight, err := r.deps.InFlight()
-			if err != nil {
-				log.Printf("workflow controller %s: in-flight: %v", r.controllerID, err)
-				r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "inflight_error" })
-				s.wake, exit = waitOrCancel(wait)
-				if exit {
-					return
-				}
-				continue
-			}
-			inflightView := r.buildInflightView(s, inflight)
-			r.setStatus(func(st *RunnerStatus) {
-				st.LastReconcile = r.now()
-				st.Inflight = activeCount(inflightView, r.controllerID)
-			})
-			s.wake, exit = waitOrCancel(wait)
-			if exit {
-				return
-			}
-			continue
+			step = r.blockedPass(s, wait)
+		} else {
+			step = r.dispatchPass(s, rec, wait)
 		}
-		candidates, err := r.deps.Candidates(r.controllerID)
-		if err != nil {
-			log.Printf("workflow controller %s: candidates: %v", r.controllerID, err)
-			r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "candidates_error" })
-			s.wake, exit = waitOrCancel(wait)
-			if exit {
-				return
-			}
-			continue
-		}
-		inflight, err := r.deps.InFlight()
-		if err != nil {
-			log.Printf("workflow controller %s: in-flight: %v", r.controllerID, err)
-			r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "inflight_error" })
-			s.wake, exit = waitOrCancel(wait)
-			if exit {
-				return
-			}
-			continue
-		}
-		if rec.MaxInflight <= 0 {
-			r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "no_capacity" })
-			s.wake, exit = waitOrCancel(wait)
-			if exit {
-				return
-			}
-			continue
-		}
-
-		// Seed the in-flight view with decisions handed to workers whose
-		// results have not arrived yet, so a pass never double-dispatches
-		// them.
-		view := r.buildInflightView(s, inflight)
-		decisions := Select(SelectInput{
-			ControllerID: r.controllerID,
-			Candidates:   candidates,
-			InFlight:     view,
-			Now:          r.now(),
-			MaxInflight:  rec.MaxInflight,
-		})
-		reconciledAt := r.now()
-		r.setStatus(func(s *RunnerStatus) {
-			s.LastReconcile = reconciledAt
-			s.Inflight = activeCount(view, r.controllerID)
-			if len(decisions) == 0 && s.CapacityBlocked == "" {
-				s.LastOutcome = "idle"
-			}
-		})
-
-		// Dispatch loop: renew before each hand-off, and honor worker
-		// results that land mid-pass. A capacity block from any result
-		// suppresses the remaining hand-offs and persists across passes.
-		for _, d := range decisions {
-			lostLead := r.drainResults(s)
-			if lostLead || s.blockedSource != "" || !s.holding {
-				break
-			}
-			if r.ctx.Err() != nil {
-				break
-			}
-			if _, err := r.store.RenewLease(r.controllerID, s.leaseID, s.ownerEpoch); err != nil {
-				s.dropLeadership(r)
-				break
-			}
-			e := s.unreported[d.Candidate.Identity]
-			e.count++
-			e.key = d.Candidate.ConcurrencyKey
-			s.unreported[d.Candidate.Identity] = e
-			s.outstanding++
-			go r.dispatchWorker(d, LeaderLease{LeaseID: s.leaseID, OwnerEpoch: s.ownerEpoch})
-		}
-
-		if !s.holding {
-			// Leadership was lost mid-pass; fall back to acquisition.
-			sleep(r.renewInterval)
-			continue
-		}
-		s.wake, exit = waitOrCancel(wait)
-		if exit {
+		if step == stepExit {
 			return
 		}
 	}
