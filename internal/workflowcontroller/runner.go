@@ -402,6 +402,119 @@ func (s *leaderState) clearBlock(r *Runner) {
 	})
 }
 
+// handleResult incorporates one worker outcome. It reports whether the
+// outcome was a leadership loss (stop the pass and drop leadership). A
+// capacity block persists across passes until a capacity-change signal or
+// an anti-entropy pass clears it.
+func (r *Runner) handleResult(s *leaderState, res dispatchWorkerResult) (lostLead bool) {
+	if res.err != nil {
+		log.Printf("workflow controller %s: dispatch %v: %v", r.controllerID, res.identity, res.err)
+		r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "dispatch_error" })
+		return false
+	}
+	switch res.result.Kind {
+	case ResultDispatched:
+		s.blockedSource = ""
+		if _, _, err := r.store.ClearCapacityBlocked(r.controllerID); err != nil {
+			log.Printf("workflow controller %s: clear capacity blocked: %v", r.controllerID, err)
+		}
+		r.setStatus(func(st *RunnerStatus) {
+			st.LastOutcome = string(ResultDispatched)
+			st.CapacityBlocked = ""
+			st.CapacityDetail = ""
+		})
+	case ResultCapacityBlocked:
+		source := res.result.Source
+		detail := "local capacity exhausted"
+		if source == "tree" {
+			detail = "descendant_budget"
+		}
+		s.blockedSource = source
+		if _, _, err := r.store.RecordCapacityBlocked(r.controllerID, source, detail); err != nil {
+			log.Printf("workflow controller %s: record capacity blocked: %v", r.controllerID, err)
+		}
+		r.setStatus(func(st *RunnerStatus) {
+			st.LastOutcome = string(ResultCapacityBlocked) + "(" + source + ")"
+			st.CapacityBlocked = source
+			st.CapacityDetail = detail
+		})
+	case ResultNotLeader:
+		s.dropLeadership(r)
+		lostLead = true
+	case ResultParked:
+		for _, seed := range res.result.PollSeeds {
+			cursor := seedCursor(seed)
+			if _, _, err := r.store.EnsurePollCursor(r.controllerID, cursor, r.now().Add(r.pollBase)); err != nil {
+				log.Printf("workflow controller %s: ensure poll cursor %s: %v", r.controllerID, PollCursorKey(cursor), err)
+			}
+		}
+		r.setStatus(func(s *RunnerStatus) { s.LastOutcome = string(ResultParked) })
+	case ResultUnresolvedBinding:
+		name := string(res.identity.WorkflowID) + "/" + string(res.identity.NodeID) + "/" + string(res.identity.ActivationID)
+		if _, err := r.store.RecordDiagnostic(r.controllerID, "unresolved_binding", name, res.result.Detail); err != nil {
+			log.Printf("workflow controller %s: record unresolved_binding: %v", r.controllerID, err)
+		}
+		r.setStatus(func(s *RunnerStatus) { s.LastOutcome = string(ResultUnresolvedBinding) })
+	default:
+		r.setStatus(func(s *RunnerStatus) { s.LastOutcome = string(res.result.Kind) })
+	}
+	return lostLead
+}
+
+// receiveResult accounts for one delivered worker result.
+func (s *leaderState) receiveResult(res dispatchWorkerResult) {
+	s.outstanding--
+	s.decrementUnreported(res.identity)
+}
+
+// drainResults consumes completed worker results without blocking,
+// folding their outcomes into the current pass.
+func (r *Runner) drainResults(s *leaderState) (lostLead bool) {
+	for {
+		select {
+		case res := <-r.results:
+			s.receiveResult(res)
+			if r.handleResult(s, res) {
+				lostLead = true
+			}
+		default:
+			return lostLead
+		}
+	}
+}
+
+// handlePollResult folds one poll worker outcome into the current pass.
+func (r *Runner) handlePollResult(s *leaderState, res pollWorkerResult) {
+	r.pendingPolls--
+	if r.handlePollOutcome(res.outcome, LeaderLease{LeaseID: s.leaseID, OwnerEpoch: s.ownerEpoch}) {
+		s.dropLeadership(r)
+	}
+}
+
+// drainPollResults consumes completed poll worker results without
+// blocking, folding their outcomes into the current pass.
+func (r *Runner) drainPollResults(s *leaderState) {
+	for {
+		select {
+		case res := <-r.pollResults:
+			r.handlePollResult(s, res)
+		default:
+			return
+		}
+	}
+}
+
+// drainWorkers waits for every outstanding worker before exiting so no
+// goroutine outlives the runner.
+func (r *Runner) drainWorkers(s *leaderState) {
+	for s.outstanding > 0 {
+		s.receiveResult(<-r.results)
+	}
+	for r.pendingPolls > 0 {
+		r.handlePollResult(s, <-r.pollResults)
+	}
+}
+
 // loop is the leader goroutine: it acquires and holds the controller's lease
 // and runs reconcile passes while leading.
 func (r *Runner) loop() {
@@ -419,111 +532,6 @@ func (r *Runner) loop() {
 
 	var exit bool
 
-	// handleResult incorporates one worker outcome. It reports whether the
-	// outcome was a leadership loss (stop the pass and drop leadership). A
-	// capacity block persists across passes until a capacity-change signal or
-	// an anti-entropy pass clears it.
-	handleResult := func(res dispatchWorkerResult) (lostLead bool) {
-		if res.err != nil {
-			log.Printf("workflow controller %s: dispatch %v: %v", r.controllerID, res.identity, res.err)
-			r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "dispatch_error" })
-			return false
-		}
-		switch res.result.Kind {
-		case ResultDispatched:
-			s.blockedSource = ""
-			if _, _, err := r.store.ClearCapacityBlocked(r.controllerID); err != nil {
-				log.Printf("workflow controller %s: clear capacity blocked: %v", r.controllerID, err)
-			}
-			r.setStatus(func(st *RunnerStatus) {
-				st.LastOutcome = string(ResultDispatched)
-				st.CapacityBlocked = ""
-				st.CapacityDetail = ""
-			})
-		case ResultCapacityBlocked:
-			source := res.result.Source
-			detail := "local capacity exhausted"
-			if source == "tree" {
-				detail = "descendant_budget"
-			}
-			s.blockedSource = source
-			if _, _, err := r.store.RecordCapacityBlocked(r.controllerID, source, detail); err != nil {
-				log.Printf("workflow controller %s: record capacity blocked: %v", r.controllerID, err)
-			}
-			r.setStatus(func(st *RunnerStatus) {
-				st.LastOutcome = string(ResultCapacityBlocked) + "(" + source + ")"
-				st.CapacityBlocked = source
-				st.CapacityDetail = detail
-			})
-		case ResultNotLeader:
-			s.dropLeadership(r)
-			lostLead = true
-		case ResultParked:
-			for _, seed := range res.result.PollSeeds {
-				cursor := seedCursor(seed)
-				if _, _, err := r.store.EnsurePollCursor(r.controllerID, cursor, r.now().Add(r.pollBase)); err != nil {
-					log.Printf("workflow controller %s: ensure poll cursor %s: %v", r.controllerID, PollCursorKey(cursor), err)
-				}
-			}
-			r.setStatus(func(s *RunnerStatus) { s.LastOutcome = string(ResultParked) })
-		case ResultUnresolvedBinding:
-			name := string(res.identity.WorkflowID) + "/" + string(res.identity.NodeID) + "/" + string(res.identity.ActivationID)
-			if _, err := r.store.RecordDiagnostic(r.controllerID, "unresolved_binding", name, res.result.Detail); err != nil {
-				log.Printf("workflow controller %s: record unresolved_binding: %v", r.controllerID, err)
-			}
-			r.setStatus(func(s *RunnerStatus) { s.LastOutcome = string(ResultUnresolvedBinding) })
-		default:
-			r.setStatus(func(s *RunnerStatus) { s.LastOutcome = string(res.result.Kind) })
-		}
-		return lostLead
-	}
-	// drainResults consumes completed worker results without blocking,
-	// folding their outcomes into the current pass.
-	drainResults := func() (lostLead bool) {
-		for {
-			select {
-			case res := <-r.results:
-				s.outstanding--
-				s.decrementUnreported(res.identity)
-				if handleResult(res) {
-					lostLead = true
-				}
-			default:
-				return lostLead
-			}
-		}
-	}
-	// handlePollResult folds one poll worker outcome into the current pass.
-	handlePollResult := func(res pollWorkerResult) {
-		r.pendingPolls--
-		if r.handlePollOutcome(res.outcome, LeaderLease{LeaseID: s.leaseID, OwnerEpoch: s.ownerEpoch}) {
-			s.dropLeadership(r)
-		}
-	}
-	// drainPollResults consumes completed poll worker results without
-	// blocking, folding their outcomes into the current pass.
-	drainPollResults := func() {
-		for {
-			select {
-			case res := <-r.pollResults:
-				handlePollResult(res)
-			default:
-				return
-			}
-		}
-	}
-	// drainWorkers waits for every outstanding worker before exiting so no
-	// goroutine outlives the runner.
-	drainWorkers := func() {
-		for s.outstanding > 0 {
-			res := <-r.results
-			s.outstanding--
-			s.decrementUnreported(res.identity)
-		}
-		for r.pendingPolls > 0 {
-			handlePollResult(<-r.pollResults)
-		}
-	}
 	// arm schedules the next wakeup at d.
 	arm := func(d time.Duration) {
 		if d < 0 {
@@ -541,9 +549,9 @@ func (r *Runner) loop() {
 		case res := <-r.results:
 			s.outstanding--
 			s.decrementUnreported(res.identity)
-			handleResult(res)
+			r.handleResult(s, res)
 		case res := <-r.pollResults:
-			handlePollResult(res)
+			r.handlePollResult(s, res)
 		}
 	}
 	// waitOrCancel arms the timer at d and waits for it, cancellation, or a
@@ -554,7 +562,7 @@ func (r *Runner) loop() {
 		select {
 		case <-r.ctx.Done():
 			s.release(r)
-			drainWorkers()
+			r.drainWorkers(s)
 			return wakeNone, true
 		case <-s.timer.C:
 			return wakeTimer, false
@@ -567,10 +575,10 @@ func (r *Runner) loop() {
 		case res := <-r.results:
 			s.outstanding--
 			s.decrementUnreported(res.identity)
-			handleResult(res)
+			r.handleResult(s, res)
 			return wakeResult, false
 		case res := <-r.pollResults:
-			handlePollResult(res)
+			r.handlePollResult(s, res)
 			return wakeResult, false
 		}
 	}
@@ -578,7 +586,7 @@ func (r *Runner) loop() {
 	for {
 		if r.ctx.Err() != nil {
 			s.release(r)
-			drainWorkers()
+			r.drainWorkers(s)
 			return
 		}
 
@@ -586,7 +594,7 @@ func (r *Runner) loop() {
 			rec, granted, err := r.store.AcquireLease(r.controllerID, r.ownerID)
 			if err != nil {
 				if errors.Is(err, ErrDisabled) {
-					drainWorkers()
+					r.drainWorkers(s)
 					return
 				}
 				log.Printf("workflow controller %s: acquire lease: %v", r.controllerID, err)
@@ -629,7 +637,7 @@ func (r *Runner) loop() {
 		}
 		if !ok || rec.DesiredState != DesiredEnabled {
 			s.release(r)
-			drainWorkers()
+			r.drainWorkers(s)
 			return
 		}
 
@@ -641,7 +649,7 @@ func (r *Runner) loop() {
 		// Poll scheduling shares the pass: due cursors are offered to bounded
 		// workers and the wait folds in the earliest scheduled next poll.
 		if r.poll != nil {
-			drainPollResults()
+			r.drainPollResults(s)
 			if !s.holding {
 				// A stale apply dropped leadership mid-pass; re-acquire before
 				// offering any further polls.
@@ -755,7 +763,7 @@ func (r *Runner) loop() {
 		// results that land mid-pass. A capacity block from any result
 		// suppresses the remaining hand-offs and persists across passes.
 		for _, d := range decisions {
-			lostLead := drainResults()
+			lostLead := r.drainResults(s)
 			if lostLead || s.blockedSource != "" || !s.holding {
 				break
 			}
