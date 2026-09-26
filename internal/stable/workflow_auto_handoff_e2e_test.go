@@ -49,12 +49,11 @@ type declaredWorkerResult struct {
 // produceWorkerDeclaredResult is the worker→supervisor result-handoff seam
 // for these tests. It does everything a worker can do today to declare its
 // result on a successful exit: write the artifact file into its environment
-// and end its session with the success stop reason (end_turn, scripted here
-// as the attempt's terminal event). It never touches workflow state — only
-// the supervisor may complete the node, with the owner token it already
-// holds. The Phase 2 fix is expected to replace the supervisor side of this
-// seam (reading the declared result and calling workflow.complete) without
-// changing this helper.
+// (the attempt's working directory — the test's current working directory,
+// which the direct-run executor records as the spawn Dir) and end its
+// session with the success stop reason (end_turn, scripted here as the
+// attempt's terminal event). It never touches workflow state — only the
+// supervisor may complete the node, with the owner token it already holds.
 func produceWorkerDeclaredResult(t *testing.T, provider *stableScriptedProvider, sessionID, artifactName, outputValue string) declaredWorkerResult {
 	t.Helper()
 	provider.mu.Lock()
@@ -69,7 +68,7 @@ func produceWorkerDeclaredResult(t *testing.T, provider *stableScriptedProvider,
 	provider.mu.Unlock()
 	res := declaredWorkerResult{Outcome: "done", OutputID: "summary", OutputValue: outputValue}
 	if artifactName != "" {
-		path := filepath.Join(t.TempDir(), artifactName)
+		path := filepath.Join(".", artifactName)
 		if err := os.WriteFile(path, []byte(outputValue+"\n"), 0o600); err != nil {
 			t.Fatalf("worker artifact write: %v", err)
 		}
@@ -264,7 +263,7 @@ func autoHandoffChainTemplate(t *testing.T, templateID string, ttlSeconds int64)
 				"action":   map[string]any{"type": "run", "prompt": "produce the artifact"},
 				"dispatch": map[string]any{"mode": "auto", "controller_id": "c1"},
 				"outputs": []any{map[string]any{
-					"id": "summary", "name": "Summary", "type": "string", "required": true,
+					"id": "summary", "name": "Summary", "type": "file", "required": true,
 				}},
 				"completion": map[string]any{
 					"kind":      "files",
@@ -298,6 +297,10 @@ func autoHandoffChainTemplate(t *testing.T, templateID string, ttlSeconds int64)
 // activation running with a held lease, the sweep marks it lease_expired, and
 // the controller re-dispatches the node for a second provider run.
 func TestAutoHandoffSuccessExitIsNotRedispatched(t *testing.T) {
+	// The attempt's working directory is the supervisor process cwd (the
+	// direct-run executor's spawn Dir); chdir to a scratch dir so the worker's
+	// environment is isolated.
+	t.Chdir(t.TempDir())
 	const sessionID = "ses_handoff_once"
 	provider := &stableScriptedProvider{attempt: -1}
 	f := newAutoHandoffFixture(t, "auto-handoff-once", provider)
@@ -392,6 +395,7 @@ func TestAutoHandoffSuccessExitIsNotRedispatched(t *testing.T) {
 // ever completes "produce": the succeeded attempt is a fact only, the
 // activation stays running, and "consume" is never created.
 func TestAutoHandoffSatisfiesNodeAndDispatchesDependent(t *testing.T) {
+	t.Chdir(t.TempDir())
 	provider := &stableScriptedProvider{attempt: -1}
 	f := newAutoHandoffFixture(t, "auto-handoff-chain", provider)
 	// Each worker declares its result before dispatch: produce writes the

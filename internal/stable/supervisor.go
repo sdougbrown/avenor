@@ -232,6 +232,11 @@ type childRuntime struct {
 	nodeID       string
 	activationID string
 	attemptID    string
+	// workflowMarkerLabel is the terminal marker label a loop or team child
+	// stashed before exiting (the aggregate run result does not otherwise
+	// reach the termination path). Empty for direct runs and marker-less
+	// loop/team exits.
+	workflowMarkerLabel string
 	// onWorkflowTerminate records the terminal workflow attempt fact before the
 	// child's runtime state is cleaned up. Nil for non-workflow direct runs.
 	onWorkflowTerminate func(workflow.AttemptStatus)
@@ -4969,6 +4974,25 @@ func workflowMarkerForKind(kind workflow.ActionKind) (string, string) {
 	return "", ""
 }
 
+// stashWorkflowTerminalMarker records the terminal marker label a loop or
+// team child observed on its exit, so the attempt's termination path can
+// select a declared outcome from it. Only the exit directive is terminal.
+func (child *childRuntime) stashWorkflowTerminalMarker(directive, label string) {
+	if directive != "exit" || label == "" {
+		return
+	}
+	child.mu.Lock()
+	child.workflowMarkerLabel = label
+	child.mu.Unlock()
+}
+
+// terminalMarkerLabel returns the stashed terminal marker label, if any.
+func (child *childRuntime) terminalMarkerLabel() string {
+	child.mu.Lock()
+	defer child.mu.Unlock()
+	return child.workflowMarkerLabel
+}
+
 // registerWorkflowTermination attaches a termination callback to the spawned
 // workflow child so the workflow manager learns the attempt's final status
 // before the child's runtime state is cleaned up. The callback first stops
@@ -4984,10 +5008,7 @@ func (s *Supervisor) registerWorkflowTermination(rtID string, ec workflow.Execut
 	child.mu.Lock()
 	defer child.mu.Unlock()
 	child.onWorkflowTerminate = func(status workflow.AttemptStatus) {
-		hb.StopAndWait()
-		kind, label := workflowMarkerForKind(ec.Action.Kind)
-		_ = s.workflowManager().RecordAttemptTerminated(
-			ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, status, kind, label)
+		s.finishWorkflowAttempt(ec, hb, status, child)
 	}
 }
 

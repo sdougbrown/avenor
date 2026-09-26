@@ -216,6 +216,7 @@ func buildCommandEvents(state Snapshot, command Command) ([]Event, error) {
 		e.AttemptID = command.Identity.AttemptID
 		e.MarkerKind = command.MarkerKind
 		e.MarkerLabel = command.MarkerLabel
+		e.WorkingDirectory = command.WorkingDirectory
 		return []Event{e}, nil
 
 	case CommandBeginDispatch:
@@ -588,6 +589,9 @@ func applyAttemptTerminated(next *Snapshot, act *Activation, event Event) error 
 	// affect status, lease, retry, or exhaustion logic.
 	attempt.MarkerKind = event.MarkerKind
 	attempt.MarkerLabel = event.MarkerLabel
+	if event.WorkingDirectory != "" {
+		attempt.WorkingDirectory = event.WorkingDirectory
+	}
 	// A successful termination is a recordable terminal fact. It never
 	// satisfies the node on its own — acceptance requires explicit completion
 	// (evidence + completed event, Stage 11) — so it must not regress the

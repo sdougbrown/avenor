@@ -24,20 +24,8 @@ type commandCompleteRequest struct {
 	LeaseID      LeaseID            `json:"lease_id"`
 	OwnerToken   string             `json:"owner_token"`
 	Outcome      OutcomeName        `json:"outcome"`
-	Outputs      []completeOutput   `json:"outputs"`
-	Artifacts    []completeArtifact `json:"artifacts"`
-}
-
-type completeOutput struct {
-	DefinitionID OutputID        `json:"definition_id"`
-	Value        json.RawMessage `json:"value"`
-}
-
-type completeArtifact struct {
-	SrcPath    string `json:"src_path"`
-	StoredPath string `json:"stored_path"`
-	NonEmpty   bool   `json:"non_empty"`
-	SHA256     string `json:"sha256"`
+	Outputs      []CompleteOutput   `json:"outputs"`
+	Artifacts    []CompleteArtifact `json:"artifacts"`
 }
 
 // commandComplete atomically completes a machine/external handoff activation.
@@ -282,7 +270,7 @@ func (m *Manager) commandComplete(wf WorkflowID, payload json.RawMessage) (any, 
 // completion had landed.
 // Any failure rejects the whole completion before evidence staging, so no
 // output and no completion is recorded.
-func validateCompleteOutputValues(tmpl *Template, node *NodeDefinition, outputs []completeOutput) error {
+func validateCompleteOutputValues(tmpl *Template, node *NodeDefinition, outputs []CompleteOutput) error {
 	integral := integralOutputRefs(tmpl)
 	declared := make(map[OutputID]OutputDefinition, len(node.Outputs))
 	for _, def := range node.Outputs {

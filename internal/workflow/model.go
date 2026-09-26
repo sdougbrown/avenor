@@ -532,10 +532,10 @@ type GitRequirement struct {
 }
 
 type OutputDefinition struct {
-	ID       OutputID      `json:"id"`
-	Name     string        `json:"name"`
-	Type     OutputType    `json:"type"`
-	Required bool          `json:"required,omitempty"`
+	ID       OutputID   `json:"id"`
+	Name     string     `json:"name"`
+	Type     OutputType `json:"type"`
+	Required bool       `json:"required,omitempty"`
 	// Source declares where supervisor-side auto-completion resolves the
 	// output's value from. Nil means the default binding: a file output on a
 	// files contract with exactly one declared artifact binds to that
@@ -908,9 +908,12 @@ type Command struct {
 	AttemptStatus    AttemptStatus     `json:"attempt_status,omitempty"`
 	MarkerKind       string            `json:"marker_kind,omitempty"`
 	MarkerLabel      string            `json:"marker_label,omitempty"`
-	Evidence         []Evidence        `json:"evidence,omitempty"`
-	Outputs          []OutputValue     `json:"outputs,omitempty"`
-	Gate             *GateInstance     `json:"gate,omitempty"`
+	// WorkingDirectory records, on a terminate command, the working directory
+	// the attempt's runtime ran in. Inert evidence copied onto the attempt.
+	WorkingDirectory string        `json:"working_directory,omitempty"`
+	Evidence         []Evidence    `json:"evidence,omitempty"`
+	Outputs          []OutputValue `json:"outputs,omitempty"`
+	Gate             *GateInstance `json:"gate,omitempty"`
 	// Operation selects the gate decision; only meaningful for CommandGate,
 	// ignored for every other command kind.
 	Operation GateOperation       `json:"operation,omitempty"`

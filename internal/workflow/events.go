@@ -57,10 +57,13 @@ type Event struct {
 	AttemptStatus  AttemptStatus     `json:"attempt_status,omitempty"`
 	MarkerKind     string            `json:"marker_kind,omitempty"`
 	MarkerLabel    string            `json:"marker_label,omitempty"`
-	Gate           *GateInstance     `json:"gate,omitempty"`
-	Transition     *Transition       `json:"transition,omitempty"`
-	Evidence       []Evidence        `json:"evidence,omitempty"`
-	Outputs        []OutputValue     `json:"outputs,omitempty"`
+	// WorkingDirectory records, on an attempt_terminated event, the working
+	// directory the attempt's runtime ran in. Inert evidence.
+	WorkingDirectory string        `json:"working_directory,omitempty"`
+	Gate             *GateInstance `json:"gate,omitempty"`
+	Transition       *Transition   `json:"transition,omitempty"`
+	Evidence         []Evidence    `json:"evidence,omitempty"`
+	Outputs          []OutputValue `json:"outputs,omitempty"`
 	// ChildOutputs is the EventChildOutcome payload's selection of child
 	// output references (identity only, no child state) recorded on the
 	// parent's durable child reference.

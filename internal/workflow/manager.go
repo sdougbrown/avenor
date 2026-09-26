@@ -1154,15 +1154,32 @@ func (m *Manager) Heartbeat(wf WorkflowID, nodeID NodeID, activationID Activatio
 // attempt as evidence only; they are never a workflow-store command and
 // cannot satisfy an activation or select an outcome.
 func (m *Manager) RecordAttemptTerminated(wf WorkflowID, nodeID NodeID, activationID ActivationID, attemptID AttemptID, leaseID LeaseID, status AttemptStatus, marker ...string) error {
-	if status == "" {
-		return errors.New("attempt termination status is required")
-	}
-	var markerKind, markerLabel string
+	t := AttemptTermination{Status: status}
 	if len(marker) >= 1 {
-		markerKind = marker[0]
+		t.MarkerKind = marker[0]
 	}
 	if len(marker) >= 2 {
-		markerLabel = marker[1]
+		t.MarkerLabel = marker[1]
+	}
+	return m.RecordAttemptTermination(wf, nodeID, activationID, attemptID, leaseID, t)
+}
+
+// AttemptTermination is one attempt's terminal fact: the final status, the
+// optional inert terminal-marker evidence, and the working directory the
+// attempt's runtime ran in (recorded when known).
+type AttemptTermination struct {
+	Status           AttemptStatus
+	MarkerKind       string
+	MarkerLabel      string
+	WorkingDirectory string
+}
+
+// RecordAttemptTermination records the terminal status of an already-started
+// attempt like RecordAttemptTerminated, and additionally carries the
+// attempt's working directory and terminal marker evidence.
+func (m *Manager) RecordAttemptTermination(wf WorkflowID, nodeID NodeID, activationID ActivationID, attemptID AttemptID, leaseID LeaseID, t AttemptTermination) error {
+	if t.Status == "" {
+		return errors.New("attempt termination status is required")
 	}
 	// The command is idempotent per attempt (stable "terminate-<attemptID>"
 	// key), so it is safe to retry: a concurrent command on the same instance
@@ -1185,9 +1202,10 @@ func (m *Manager) RecordAttemptTerminated(wf WorkflowID, nodeID NodeID, activati
 			IdempotencyKey:   "terminate-" + string(attemptID),
 			Identity:         ExecutionIdentity{WorkflowID: wf, NodeID: nodeID, ActivationID: activationID, AttemptID: attemptID},
 			LeaseID:          leaseID,
-			AttemptStatus:    status,
-			MarkerKind:       markerKind,
-			MarkerLabel:      markerLabel,
+			AttemptStatus:    t.Status,
+			MarkerKind:       t.MarkerKind,
+			MarkerLabel:      t.MarkerLabel,
+			WorkingDirectory: t.WorkingDirectory,
 		})
 		if err == nil {
 			return nil
