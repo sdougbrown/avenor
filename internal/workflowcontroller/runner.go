@@ -184,12 +184,6 @@ type Runner struct {
 	pollJitter func() float64
 	// maxPollWorkers bounds concurrent adapter invocations.
 	maxPollWorkers int
-	// unreported tracks decisions handed to workers whose results have not
-	// arrived yet, keyed by execution identity. Leader-goroutine-local.
-	unreported map[workflow.ExecutionIdentity]unreportedEntry
-	// outstanding is the number of workers that have not delivered a result
-	// yet. Leader-goroutine-local.
-	outstanding int
 }
 
 // NewRunner constructs a Runner and starts its leader goroutine. Stop ends
@@ -238,7 +232,6 @@ func NewRunner(cfg RunnerConfig) *Runner {
 		pollBase:       pollBase,
 		pollJitter:     jitter,
 		maxPollWorkers: maxPollWorkers,
-		unreported:     map[workflow.ExecutionIdentity]unreportedEntry{},
 	}
 	go r.loop()
 	return r
@@ -283,10 +276,10 @@ func (r *Runner) clearLeadStatus() {
 // workers whose results have not arrived yet, so a pass never double-dispatches
 // them. Each seeded entry carries the candidate's concurrency key so the key
 // stays held while the worker's result is outstanding.
-func (r *Runner) buildInflightView(inflight []InFlightAttempt) []InFlightAttempt {
-	view := make([]InFlightAttempt, 0, len(inflight)+len(r.unreported))
+func (r *Runner) buildInflightView(s *leaderState, inflight []InFlightAttempt) []InFlightAttempt {
+	view := make([]InFlightAttempt, 0, len(inflight)+len(s.unreported))
 	view = append(view, inflight...)
-	for identity, entry := range r.unreported {
+	for identity, entry := range s.unreported {
 		for i := 0; i < entry.count; i++ {
 			view = append(view, InFlightAttempt{
 				Identity:       identity,
@@ -358,6 +351,26 @@ type leaderState struct {
 	wake wakeReason
 	// timer schedules the loop's next wakeup.
 	timer *time.Timer
+	// unreported tracks decisions handed to workers whose results have not
+	// arrived yet, keyed by execution identity.
+	unreported map[workflow.ExecutionIdentity]unreportedEntry
+	// outstanding is the number of workers that have not delivered a result
+	// yet.
+	outstanding int
+}
+
+// decrementUnreported drops one pending-decision count for an identity.
+func (s *leaderState) decrementUnreported(identity workflow.ExecutionIdentity) {
+	e := s.unreported[identity]
+	if e.count <= 0 {
+		return
+	}
+	e.count--
+	if e.count == 0 {
+		delete(s.unreported, identity)
+	} else {
+		s.unreported[identity] = e
+	}
 }
 
 // loop is the leader goroutine: it acquires and holds the controller's lease
@@ -366,7 +379,10 @@ func (r *Runner) loop() {
 	defer close(r.done)
 	defer r.clearLeadStatus()
 
-	s := &leaderState{timer: time.NewTimer(0)}
+	s := &leaderState{
+		timer:      time.NewTimer(0),
+		unreported: map[workflow.ExecutionIdentity]unreportedEntry{},
+	}
 	if !s.timer.Stop() {
 		<-s.timer.C
 	}
@@ -456,27 +472,14 @@ func (r *Runner) loop() {
 		}
 		return lostLead
 	}
-	// decrementUnreported drops one pending-decision count for an identity.
-	decrementUnreported := func(identity workflow.ExecutionIdentity) {
-		e := r.unreported[identity]
-		if e.count <= 0 {
-			return
-		}
-		e.count--
-		if e.count == 0 {
-			delete(r.unreported, identity)
-		} else {
-			r.unreported[identity] = e
-		}
-	}
 	// drainResults consumes completed worker results without blocking,
 	// folding their outcomes into the current pass.
 	drainResults := func() (lostLead bool) {
 		for {
 			select {
 			case res := <-r.results:
-				r.outstanding--
-				decrementUnreported(res.identity)
+				s.outstanding--
+				s.decrementUnreported(res.identity)
 				if handleResult(res) {
 					lostLead = true
 				}
@@ -507,10 +510,10 @@ func (r *Runner) loop() {
 	// drainWorkers waits for every outstanding worker before exiting so no
 	// goroutine outlives the runner.
 	drainWorkers := func() {
-		for r.outstanding > 0 {
+		for s.outstanding > 0 {
 			res := <-r.results
-			r.outstanding--
-			decrementUnreported(res.identity)
+			s.outstanding--
+			s.decrementUnreported(res.identity)
 		}
 		for r.pendingPolls > 0 {
 			handlePollResult(<-r.pollResults)
@@ -531,8 +534,8 @@ func (r *Runner) loop() {
 		case <-s.timer.C:
 		case <-r.ctx.Done():
 		case res := <-r.results:
-			r.outstanding--
-			decrementUnreported(res.identity)
+			s.outstanding--
+			s.decrementUnreported(res.identity)
 			handleResult(res)
 		case res := <-r.pollResults:
 			handlePollResult(res)
@@ -557,8 +560,8 @@ func (r *Runner) loop() {
 			drainSignal(r.capacityCh)
 			return wakeCapacity, false
 		case res := <-r.results:
-			r.outstanding--
-			decrementUnreported(res.identity)
+			s.outstanding--
+			s.decrementUnreported(res.identity)
 			handleResult(res)
 			return wakeResult, false
 		case res := <-r.pollResults:
@@ -683,9 +686,10 @@ func (r *Runner) loop() {
 				}
 				continue
 			}
-			r.setStatus(func(s *RunnerStatus) {
-				s.LastReconcile = r.now()
-				s.Inflight = activeCount(r.buildInflightView(inflight), r.controllerID)
+			inflightView := r.buildInflightView(s, inflight)
+			r.setStatus(func(st *RunnerStatus) {
+				st.LastReconcile = r.now()
+				st.Inflight = activeCount(inflightView, r.controllerID)
 			})
 			s.wake, exit = waitOrCancel(wait)
 			if exit {
@@ -725,7 +729,7 @@ func (r *Runner) loop() {
 		// Seed the in-flight view with decisions handed to workers whose
 		// results have not arrived yet, so a pass never double-dispatches
 		// them.
-		view := r.buildInflightView(inflight)
+		view := r.buildInflightView(s, inflight)
 		decisions := Select(SelectInput{
 			ControllerID: r.controllerID,
 			Candidates:   candidates,
@@ -757,11 +761,11 @@ func (r *Runner) loop() {
 				dropLeadership()
 				break
 			}
-			e := r.unreported[d.Candidate.Identity]
+			e := s.unreported[d.Candidate.Identity]
 			e.count++
 			e.key = d.Candidate.ConcurrencyKey
-			r.unreported[d.Candidate.Identity] = e
-			r.outstanding++
+			s.unreported[d.Candidate.Identity] = e
+			s.outstanding++
 			go r.dispatchWorker(d, LeaderLease{LeaseID: s.leaseID, OwnerEpoch: s.ownerEpoch})
 		}
 
