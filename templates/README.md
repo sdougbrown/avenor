@@ -46,6 +46,8 @@ A reference integration for the remote-human gate escalation surface (see [docs/
 - `demo.json` — minimal workflow template with a human merge-authorization gate
 - `bridge.py` — reference bridge: long-polls a workflow, carries parked human gates to a generic webhook transport, records attributed decisions
 
+A TypeScript port of the bridge lives at [`packages/escalation-bridge/`](../packages/escalation-bridge/) for consumption from TypeScript applications; this Python reference remains the zero-dependency option for Python environments.
+
 ### `software-factory/`
 
 Durable workflow template for one review unit: intake through exact-head review and human merge authorization. See its README for the full flow.
