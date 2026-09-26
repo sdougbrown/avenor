@@ -495,12 +495,14 @@ func TestHeartbeatValidatesLeaseAndToken(t *testing.T) {
 	}
 
 	// Wrong owner token.
-	if _, err := m.WorkflowCommand(string(wf), heartbeatPayload(t, node, string(actID), "lease-t", "wrong-token")); err == nil || !strings.Contains(err.Error(), "owner token does not match") {
-		t.Fatalf("wrong token err = %v, want owner token mismatch", err)
+	_, err = m.WorkflowCommand(string(wf), heartbeatPayload(t, node, string(actID), "lease-t", "wrong-token"))
+	if err == nil || !strings.Contains(err.Error(), "owner token does not match") || !errors.Is(err, ErrLeaseNotHeld) {
+		t.Fatalf("wrong token err = %v, want owner token mismatch wrapping ErrLeaseNotHeld", err)
 	}
 	// Wrong lease id.
-	if _, err := m.WorkflowCommand(string(wf), heartbeatPayload(t, node, string(actID), "lease-wrong", "tok-t")); err == nil || !strings.Contains(err.Error(), "does not match the active lease") {
-		t.Fatalf("wrong lease err = %v, want lease mismatch", err)
+	_, err = m.WorkflowCommand(string(wf), heartbeatPayload(t, node, string(actID), "lease-wrong", "tok-t"))
+	if err == nil || !strings.Contains(err.Error(), "does not match the active lease") || !errors.Is(err, ErrLeaseNotHeld) {
+		t.Fatalf("wrong lease err = %v, want lease mismatch wrapping ErrLeaseNotHeld", err)
 	}
 
 	// A pending activation with no lease is rejected.
@@ -510,8 +512,9 @@ func TestHeartbeatValidatesLeaseAndToken(t *testing.T) {
 		t.Fatalf("loadCurrent 2: %v", err)
 	}
 	actID2 := activationByNode(&snap2.Instance, NodeID(node2)).ID
-	if _, err := m2.WorkflowCommand(string(wf2), heartbeatPayload(t, node2, string(actID2), "lease-none", "tok-none")); err == nil || !strings.Contains(err.Error(), "no active lease") {
-		t.Fatalf("no-lease heartbeat err = %v, want no active lease", err)
+	_, err = m2.WorkflowCommand(string(wf2), heartbeatPayload(t, node2, string(actID2), "lease-none", "tok-none"))
+	if err == nil || !strings.Contains(err.Error(), "no active lease") || !errors.Is(err, ErrLeaseNotHeld) {
+		t.Fatalf("no-lease heartbeat err = %v, want no active lease wrapping ErrLeaseNotHeld", err)
 	}
 
 	// The correct pair renews.

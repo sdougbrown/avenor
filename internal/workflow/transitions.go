@@ -29,13 +29,17 @@ func copyReadyAt(act *Activation, event Event) {
 }
 
 // applyDispatchPolicy copies the node's effective dispatch policy onto a
-// freshly created activation when it resolves to auto; manual nodes leave
-// Dispatch nil, which is how legacy snapshots read as manual.
+// freshly created activation when it resolves to auto or declares a
+// concurrency key. A keyed manual node carries its policy so both the manual
+// start boundary and the root-wide held-key check can serialize it; a
+// policy-less manual node leaves Dispatch nil, which is how legacy snapshots
+// read as manual.
 func applyDispatchPolicy(next *Snapshot, act *Activation, nodeID NodeID) {
 	if act == nil {
 		return
 	}
-	if policy := dispatchPolicyFor(next, nodeID); policy != nil && policy.IsAuto() {
+	if policy := dispatchPolicyFor(next, nodeID); policy != nil &&
+		(policy.IsAuto() || policy.ConcurrencyKey != "") {
 		act.Dispatch = policy
 	}
 }
@@ -186,6 +190,33 @@ func buildCommandEvents(state Snapshot, command Command) ([]Event, error) {
 		e.MarkerLabel = command.MarkerLabel
 		return []Event{e}, nil
 
+	case CommandBeginDispatch:
+		if command.Lease == nil {
+			return nil, errors.New("begin_dispatch command requires lease metadata")
+		}
+		if command.Identity.AttemptID == "" {
+			return nil, errors.New("begin_dispatch command requires an attempt id")
+		}
+		lease := newEvent(EventLeased)
+		lease.LeaseID = command.LeaseID
+		lease.Actor = command.Actor
+		lease.Lease = command.Lease
+		started := newEvent(EventStarted)
+		started.AttemptID = command.Identity.AttemptID
+		started.LeaseID = command.LeaseID
+		started.Selection = command.Selection
+		started.Diagnostics = command.Diagnostics
+		return []Event{lease, started}, nil
+
+	case CommandAttemptIdentified:
+		if command.Identity.AttemptID == "" {
+			return nil, errors.New("attempt_identified command requires an attempt id")
+		}
+		e := newEvent(EventAttemptIdentified)
+		e.AttemptID = command.Identity.AttemptID
+		e.LeaseID = command.LeaseID
+		return []Event{e}, nil
+
 	case CommandChildAttach:
 		e := newEvent(EventChildAttached)
 		e.LeaseID = command.LeaseID
@@ -258,6 +289,8 @@ func applyEvent(next *Snapshot, event Event) error {
 		return applyLeased(next, act, event)
 	case EventStarted:
 		return applyStarted(next, act, event)
+	case EventAttemptIdentified:
+		return applyAttemptIdentified(next, act, event)
 	case EventAttemptTerminated:
 		return applyAttemptTerminated(next, act, event)
 	case EventCompleted:
@@ -273,7 +306,7 @@ func applyEvent(next *Snapshot, event Event) error {
 	case EventHeartbeat:
 		return applyHeartbeat(act, event)
 	case EventLeaseExpired:
-		return applyLeaseExpired(act, event)
+		return applyLeaseExpired(next, act, event)
 	case EventChildAttached:
 		return applyChildAttached(next, act, event)
 	case EventChildOutcome:
@@ -444,7 +477,34 @@ func applyStarted(next *Snapshot, act *Activation, event Event) error {
 		// inherit it. Deterministic because it is carried on the event.
 		act.Selection = event.Selection
 	}
+	if event.Diagnostics != nil {
+		d := *event.Diagnostics
+		attempt.Diagnostics = &d
+	}
 	next.Instance.Attempts = append(next.Instance.Attempts, attempt)
+	return nil
+}
+
+// applyAttemptIdentified records the actual runtime identity of an already
+// started attempt. It never changes the activation's status or lease state.
+func applyAttemptIdentified(next *Snapshot, act *Activation, event Event) error {
+	if act == nil {
+		return errors.New("attempt_identified event requires an activation")
+	}
+	attempt := findAttempt(next, act, event.AttemptID)
+	if attempt == nil {
+		return errors.New("identified attempt not found")
+	}
+	if event.Identity.RuntimeID != "" {
+		attempt.Identity.RuntimeID = event.Identity.RuntimeID
+	}
+	if event.Identity.SessionID != "" {
+		attempt.Identity.SessionID = event.Identity.SessionID
+	}
+	if event.Identity.RunID != "" {
+		attempt.Identity.RunID = event.Identity.RunID
+	}
+	act.UpdatedAt = nowUTC()
 	return nil
 }
 
@@ -464,6 +524,14 @@ func applyAttemptTerminated(next *Snapshot, act *Activation, event Event) error 
 	attempt := findAttempt(next, act, event.AttemptID)
 	if attempt == nil {
 		return errors.New("terminated attempt not found")
+	}
+	// An already-terminal attempt is an idempotent no-op: a runtime whose
+	// lease expired under it (sweep-timed-out) or whose status was recorded
+	// by another terminal path must never be re-terminated, regress status,
+	// or re-run the lease-release/retry logic below.
+	switch attempt.Status {
+	case AttemptSucceeded, AttemptFailed, AttemptCanceled, AttemptTimedOut, AttemptPanicked:
+		return nil
 	}
 	attempt.Status = status
 	ended := nowUTC()
@@ -863,9 +931,14 @@ func applyHeartbeat(act *Activation, event Event) error {
 	return nil
 }
 
-// applyLeaseExpired releases a stale lease and parks the activation in the
-// expired state so the store can requeue it.
-func applyLeaseExpired(act *Activation, event Event) error {
+// applyLeaseExpired releases a stale lease, terminalizes every non-terminal
+// attempt the crashed holder left behind, and parks the activation in the
+// expired state so the store can requeue it. Timing the attempts out (rather
+// than leaving them starting/running) keeps them from holding concurrency
+// keys and counting as live forever; it consumes no retry budget — the
+// activation's attempt list is untouched and the expired activation is
+// simply claimable again.
+func applyLeaseExpired(next *Snapshot, act *Activation, event Event) error {
 	if act == nil {
 		return errors.New("lease_expired event requires an activation")
 	}
@@ -874,6 +947,19 @@ func applyLeaseExpired(act *Activation, event Event) error {
 	}
 	if event.LeaseID != "" && event.LeaseID != act.ActiveLease.ID {
 		return errors.New("lease_expired lease does not match the active lease")
+	}
+	expiredAt := act.ActiveLease.ExpiresAt
+	for _, id := range act.AttemptIDs {
+		attempt := findAttempt(next, act, id)
+		if attempt == nil {
+			continue
+		}
+		switch attempt.Status {
+		case AttemptStarting, AttemptRunning:
+			attempt.Status = AttemptTimedOut
+			ended := expiredAt
+			attempt.EndedAt = &ended
+		}
 	}
 	act.Status = ActivationLeaseExpired
 	act.ActiveLease = nil

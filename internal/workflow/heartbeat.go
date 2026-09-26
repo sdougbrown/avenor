@@ -29,6 +29,14 @@ import (
 // commandStartRequest's naming and strictness: node_id, lease_id, and
 // owner_token are required; activation_id disambiguates when a node has more
 // than one activation.
+
+// ErrLeaseNotHeld reports that a heartbeat's (lease, owner-token) pair no
+// longer matches the activation's active lease: the lease expired and was
+// swept, was replaced by a newer claim, or was never held. Heartbeat callers
+// (the executors' live heartbeat loops) stop renewing on this error instead
+// of retrying.
+var ErrLeaseNotHeld = errors.New("lease is no longer held by this owner")
+
 type commandHeartbeatRequest struct {
 	NodeID       NodeID       `json:"node_id"`
 	ActivationID ActivationID `json:"activation_id"`
@@ -70,13 +78,13 @@ func (m *Manager) commandHeartbeat(wf WorkflowID, payload json.RawMessage) (any,
 		return nil, fmt.Errorf("activation not found for node %q", req.NodeID)
 	}
 	if act.ActiveLease == nil {
-		return nil, errors.New("activation has no active lease")
+		return nil, fmt.Errorf("%w: activation has no active lease", ErrLeaseNotHeld)
 	}
 	if req.LeaseID != act.ActiveLease.ID {
-		return nil, errors.New("lease_id does not match the active lease")
+		return nil, fmt.Errorf("%w: lease_id does not match the active lease", ErrLeaseNotHeld)
 	}
 	if ownerTokenDigest(req.OwnerToken) != act.ActiveLease.TokenDigest {
-		return nil, errors.New("owner token does not match the lease")
+		return nil, fmt.Errorf("%w: owner token does not match the lease", ErrLeaseNotHeld)
 	}
 	tmpl, err := m.templateFor(&snap)
 	if err != nil {

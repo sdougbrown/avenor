@@ -347,14 +347,23 @@ type Supervisor struct {
 	workflowControllerMu sync.Mutex
 	// controllerRenewInterval is the leader loop's renew cadence; defaults to
 	// workflowcontroller.RenewInterval.
-	controllerRenewInterval      time.Duration
-	state                        *control.ControlState
-	controlMu                    sync.Mutex
-	runtimes                     map[string]*childRuntime
-	nextID                       int
-	shuttingDown                 bool
-	shutdownCh                   chan struct{}
-	shutdownChOnce               sync.Once
+	controllerRenewInterval time.Duration
+	state                   *control.ControlState
+	controlMu               sync.Mutex
+	runtimes                map[string]*childRuntime
+	nextID                  int
+	// outstandingReservations counts admission reservations that hold a local
+	// slot but have not yet converted into a registered runtime. Guarded by
+	// controlMu; the local capacity limit is enforced against active runtimes
+	// plus this count.
+	outstandingReservations int
+	shuttingDown            bool
+	shutdownCh              chan struct{}
+	shutdownChOnce          sync.Once
+	// heartbeatMu guards heartbeats, the registry of live executor lease
+	// heartbeat goroutines stopped on supervisor shutdown.
+	heartbeatMu                  sync.Mutex
+	heartbeats                   map[*leaseHeartbeat]struct{}
 	runtimeActivity              chan struct{}
 	childQuestionSeq             int
 	pendingQuestions             map[string]pendingChildQuestion // child runtime ID -> pending question
@@ -420,6 +429,7 @@ func NewSupervisor(cfg Config) *Supervisor {
 		fileSnapshots:           map[string][]string{},
 		sessionIdentities:       map[string]sessionIdentityEntry{},
 		sessionOwners:           map[string]*sessionAttempt{},
+		heartbeats:              map[*leaseHeartbeat]struct{}{},
 	}
 	sup.broker = broker.New("")
 	if err := sup.broker.Start(); err != nil {
@@ -809,7 +819,7 @@ func (s *Supervisor) acquireLocalRuntimeSlot(ctx context.Context, child *childRu
 			s.controlMu.Unlock()
 			return errors.New("supervisor is shutting down")
 		}
-		if s.activeRuntimeCountLocked() < s.config.MaxRuntimes {
+		if s.activeRuntimeCountLocked()+s.outstandingReservations < s.config.MaxRuntimes {
 			child.mu.Lock()
 			child.parked = false
 			child.mu.Unlock()
@@ -821,6 +831,98 @@ func (s *Supervisor) acquireLocalRuntimeSlot(ctx context.Context, child *childRu
 			return err
 		}
 	}
+}
+
+// admissionReservation holds one runtime-start admission: a tree-budget token
+// (empty in degraded local-only mode) plus one held local runtime slot.
+// Exactly one owner holds a reservation at a time; it is either released back
+// to the budget and local limit or converted into a registered child runtime
+// by spawnReserved. Release is idempotent and safe from every pre-start
+// failure, panic, cancellation, and shutdown path.
+type admissionReservation struct {
+	sup       *Supervisor
+	treeToken string
+	held      bool
+	release   sync.Once
+}
+
+// Release returns the reservation's tree token and local slot. After the
+// reservation has been converted into a runtime (or already released) it is a
+// no-op.
+func (r *admissionReservation) Release() {
+	r.release.Do(func() {
+		s := r.sup
+		s.controlMu.Lock()
+		if r.held {
+			r.held = false
+			if s.outstandingReservations > 0 {
+				s.outstandingReservations--
+			}
+		}
+		s.controlMu.Unlock()
+		if r.treeToken != "" {
+			s.treeBudgetMu.Lock()
+			budget := s.treeBudget
+			s.treeBudgetMu.Unlock()
+			if budget != nil {
+				budget.Release(r.treeToken)
+			}
+		}
+		s.signalCapacityChange()
+	})
+}
+
+// consumeLocked transfers the reservation into a freshly registered child
+// under controlMu: the local slot becomes the registered runtime and the tree
+// token moves to the child (returned so the caller can attach it). The
+// reservation is marked released so a later Release is a no-op.
+func (r *admissionReservation) consumeLocked() string {
+	token := r.treeToken
+	if r.held {
+		r.held = false
+		if r.sup.outstandingReservations > 0 {
+			r.sup.outstandingReservations--
+		}
+	}
+	r.treeToken = ""
+	r.release.Do(func() {})
+	return token
+}
+
+// reserveAdmission reserves admission for one runtime start: the tree-budget
+// slot first (typed tree CapacityError when exhausted), then one held local
+// slot under controlMu (typed local CapacityError when outstanding
+// reservations plus active runtimes reach MaxRuntimes). In degraded
+// local-only mode the reservation holds only the local slot. It must never be
+// called while holding a workflow-store, controller-store, or dispatch lock.
+func (s *Supervisor) reserveAdmission() (*admissionReservation, error) {
+	treeToken, err := s.acquireTreeAdmission()
+	if err != nil {
+		return nil, err
+	}
+	res := &admissionReservation{sup: s, treeToken: treeToken, held: true}
+	s.controlMu.Lock()
+	defer s.controlMu.Unlock()
+	fail := func(err error) (*admissionReservation, error) {
+		if treeToken != "" {
+			s.treeBudgetMu.Lock()
+			budget := s.treeBudget
+			s.treeBudgetMu.Unlock()
+			if budget != nil {
+				budget.Release(treeToken)
+			}
+		}
+		return nil, err
+	}
+	if s.shuttingDown {
+		return fail(fmt.Errorf("supervisor is shutting down"))
+	}
+	active := s.activeRuntimeCountLocked() + s.outstandingReservations
+	if active >= s.config.MaxRuntimes {
+		return fail(&admission.CapacityError{Source: "local", Limit: s.config.MaxRuntimes, Active: active})
+	}
+	s.outstandingReservations++
+	return res, nil
 }
 
 func (s *Supervisor) activeRuntimeCountLocked() int {
@@ -838,6 +940,19 @@ func (s *Supervisor) activeRuntimeCountLocked() int {
 }
 
 func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
+	res, err := s.reserveAdmission()
+	if err != nil {
+		return SpawnResult{}, err
+	}
+	return s.spawnReserved(params, res)
+}
+
+// spawnReserved starts a runtime using a pre-reserved admission. It never
+// acquires admission itself: the reservation's tree token moves to the child
+// on success and its local slot becomes the registered runtime. On any
+// pre-start failure the reservation is released.
+func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation) (SpawnResult, error) {
+	defer res.Release()
 	workflowMode := params.LoopFile != "" || params.TeamFile != ""
 	if workflowMode {
 		if params.RosterEntry != "" {
@@ -896,37 +1011,12 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 		}
 	}
 
-	// Acquire tree-scoped admission first. The tree budget is a cross-process
-	// authority, so it must be reserved before the local slot to avoid
-	// transiently inflating the local count for a spawn that will fail. If the
-	// tree budget is unavailable the error is typed and retryable; the local
-	// limit is not consumed.
-	treeToken, err := s.acquireTreeAdmission()
-	if err != nil {
-		return SpawnResult{}, err
-	}
-	// releaseTree releases the tree slot for the early-failure paths before a
-	// child exists to own it. Once the child is created it owns the release.
-	releaseTree := func() {
-		s.treeBudgetMu.Lock()
-		budget := s.treeBudget
-		s.treeBudgetMu.Unlock()
-		if budget != nil {
-			budget.Release(treeToken)
-		}
-	}
-
+	// The admission reservation already holds the tree slot and one local
+	// slot; convert it into this child instead of acquiring again.
 	s.controlMu.Lock()
 	if s.shuttingDown {
 		s.controlMu.Unlock()
-		releaseTree()
 		return SpawnResult{}, fmt.Errorf("supervisor is shutting down")
-	}
-	activeRuntimes := s.activeRuntimeCountLocked()
-	if activeRuntimes >= s.config.MaxRuntimes {
-		s.controlMu.Unlock()
-		releaseTree()
-		return SpawnResult{}, &admission.CapacityError{Source: "local", Limit: s.config.MaxRuntimes, Active: activeRuntimes}
 	}
 	s.nextID++
 	rtID := fmt.Sprintf("rt_%d", s.nextID)
@@ -948,6 +1038,7 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 		activationID: params.ActivationID,
 		attemptID:    params.AttemptID,
 	}
+	treeToken := res.consumeLocked()
 	if treeToken != "" {
 		child.treeToken = treeToken
 		child.treeBudgetRelease = func(token string) {
@@ -2876,6 +2967,7 @@ func (s *Supervisor) shutdown(mode string) int {
 		runtimes = append(runtimes, rt)
 	}
 	s.controlMu.Unlock()
+	s.stopLeaseHeartbeats()
 
 	if s.afterShutdownAdmissionClosed != nil {
 		s.afterShutdownAdmissionClosed()
@@ -4566,19 +4658,21 @@ func (s *Supervisor) directRunExecutor() workflow.Executor {
 
 type directRunExecutor struct{ sup *Supervisor }
 
-// Replacement path (Stage 13, phase 3): when a lease expires (live detector
-// or restart recovery), the activation is durably left lease_expired with no
-// lease and is re-claimable; a replacement claim + start through the manager
+// Replacement path: when a lease expires (live detector or restart
+// recovery), the activation is durably left lease_expired with no lease and
+// is re-claimable; a replacement claim + start through the manager
 // dispatches a new attempt to the same executor, and the kernel appends it
 // to the SAME activation (prior attempts preserved). Executors are
 // attempt-agnostic, so the replacement attempt is dispatchable with no
-// executor change. The owner-token heartbeat seam is reachable here too: the
-// executor holds e.sup.workflowManager() and the start carries the claim
-// token in ExecutorContext.OwnerToken, so an executor can renew its own
-// lease via workflowManager().Heartbeat(workflowID, nodeID, activationID,
-// leaseID, ec.OwnerToken). A live periodic heartbeat goroutine in the
-// executors is a later hardening, intentionally not implemented in this
-// stage.
+// executor change.
+//
+// Lease liveness: every executor starts one heartbeat goroutine per attempt
+// once its runtime has started (see startLeaseHeartbeat). The heartbeat
+// renews the attempt's lease every TTL/3 via
+// workflowManager().Heartbeat(workflowID, nodeID, activationID, leaseID,
+// ec.OwnerToken) and stops when the runtime reaches a terminal state (via
+// registerWorkflowTermination), when the lease is no longer held, or on
+// supervisor shutdown — it never outlives the runtime.
 
 func (e *directRunExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext) error {
 	params := SpawnParams{
@@ -4602,7 +4696,7 @@ func (e *directRunExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorCo
 		params.Dir = cwd
 	}
 
-	result, err := e.sup.spawn(params)
+	result, err := e.sup.spawnForAttempt(params, ec.Admission)
 	if err != nil {
 		// Provider-start (or any synchronous spawn) error: the attempt was
 		// already started durably by the manager; record termination before
@@ -4611,7 +4705,8 @@ func (e *directRunExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorCo
 			ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, workflow.AttemptFailed)
 		return err
 	}
-	e.sup.registerWorkflowTermination(result.RuntimeID, ec)
+	hb := e.sup.startLeaseHeartbeat(ec)
+	e.sup.registerWorkflowTermination(result.RuntimeID, ec, hb)
 	return nil
 }
 
@@ -4645,7 +4740,7 @@ func (e *loopExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext
 		params.Dir = cwd
 	}
 
-	result, err := e.sup.spawn(params)
+	result, err := e.sup.spawnForAttempt(params, ec.Admission)
 	if err != nil {
 		// Provider-start (or any synchronous spawn) error: the attempt was
 		// already started durably by the manager; record termination before
@@ -4655,7 +4750,8 @@ func (e *loopExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext
 			ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, workflow.AttemptFailed, kind, label)
 		return err
 	}
-	e.sup.registerWorkflowTermination(result.RuntimeID, ec)
+	hb := e.sup.startLeaseHeartbeat(ec)
+	e.sup.registerWorkflowTermination(result.RuntimeID, ec, hb)
 	return nil
 }
 
@@ -4689,7 +4785,7 @@ func (e *teamExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext
 		params.Dir = cwd
 	}
 
-	result, err := e.sup.spawn(params)
+	result, err := e.sup.spawnForAttempt(params, ec.Admission)
 	if err != nil {
 		// Provider-start (or any synchronous spawn) error: the attempt was
 		// already started durably by the manager; record termination before
@@ -4699,8 +4795,20 @@ func (e *teamExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext
 			ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, workflow.AttemptFailed, kind, label)
 		return err
 	}
-	e.sup.registerWorkflowTermination(result.RuntimeID, ec)
+	hb := e.sup.startLeaseHeartbeat(ec)
+	e.sup.registerWorkflowTermination(result.RuntimeID, ec, hb)
 	return nil
+}
+
+// spawnForAttempt starts one workflow attempt's runtime. When the executor
+// context carries a stable admission reservation, the start consumes it
+// instead of reserving admission a second time; manual and legacy starts
+// self-reserve through the ordinary spawn path.
+func (s *Supervisor) spawnForAttempt(params SpawnParams, admission workflow.AdmissionHandle) (SpawnResult, error) {
+	if res, ok := admission.(*admissionReservation); ok {
+		return s.spawnReserved(params, res)
+	}
+	return s.spawn(params)
 }
 
 // workflowMarkerForKind returns the action-level marker evidence recorded on
@@ -4721,9 +4829,11 @@ func workflowMarkerForKind(kind workflow.ActionKind) (string, string) {
 }
 
 // registerWorkflowTermination attaches a termination callback to the spawned
-// direct-run child so the workflow manager learns the attempt's final status
-// before the child's runtime state is cleaned up.
-func (s *Supervisor) registerWorkflowTermination(rtID string, ec workflow.ExecutorContext) {
+// workflow child so the workflow manager learns the attempt's final status
+// before the child's runtime state is cleaned up. The callback first stops
+// the attempt's lease heartbeat and waits for it to exit, so no heartbeat is
+// applied after the terminal fact.
+func (s *Supervisor) registerWorkflowTermination(rtID string, ec workflow.ExecutorContext, hb *leaseHeartbeat) {
 	s.controlMu.Lock()
 	child := s.runtimes[rtID]
 	s.controlMu.Unlock()
@@ -4733,6 +4843,7 @@ func (s *Supervisor) registerWorkflowTermination(rtID string, ec workflow.Execut
 	child.mu.Lock()
 	defer child.mu.Unlock()
 	child.onWorkflowTerminate = func(status workflow.AttemptStatus) {
+		hb.StopAndWait()
 		kind, label := workflowMarkerForKind(ec.Action.Kind)
 		_ = s.workflowManager().RecordAttemptTerminated(
 			ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, status, kind, label)

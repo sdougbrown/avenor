@@ -95,6 +95,15 @@ func NewManager(store *Store) *Manager {
 	return m
 }
 
+// AdmissionHandle is an opaque, never-persisted admission reservation handed
+// to an executor so its first runtime start consumes the caller's reservation
+// instead of acquiring a second one. Kernel transitions never read it, and
+// executors must never marshal it (or any ExecutorContext carrying it) into
+// the workflow store's snapshots or event log.
+type AdmissionHandle interface {
+	Release()
+}
+
 // Executor dispatches a started action to its runtime backend. The manager
 // records the attempt durably before calling Dispatch, so an executor that
 // crashes leaves the attempt in the log for recovery. Stage 6 registers no
@@ -112,13 +121,21 @@ type ExecutorContext struct {
 	LeaseID      LeaseID
 	// OwnerToken is the raw claim owner token for this attempt's lease. It is
 	// additive and inert: the reducer/store never sees it, but the executor
-	// layer can use it (with LeaseID) to renew its own lease via
-	// Manager.Heartbeat — the owner-token heartbeat seam. A live heartbeat
-	// goroutine in the executors is a later hardening, not part of this stage.
-	// Executors must never marshal ExecutorContext (or OwnerToken) into the workflow store's snapshots or event log, so the raw claim token can never become durable.
+	// layer uses it (with LeaseID) to renew its own lease via
+	// Manager.Heartbeat — the owner-token heartbeat seam. Executors must
+	// never marshal ExecutorContext (or OwnerToken) into the workflow store's
+	// snapshots or event log, so the raw claim token can never become durable.
 	OwnerToken string
-	Action     Action
-	Selection  *ExecutionSelection
+	// LeaseTTL is the effective TTL of this attempt's lease at claim time. It
+	// sets the executor heartbeat cadence (TTL/3); zero falls back to
+	// DefaultLeaseTTL.
+	LeaseTTL  time.Duration
+	Action    Action
+	Selection *ExecutionSelection
+	// Admission optionally carries a pre-reserved runtime admission for this
+	// attempt's first start. Nil means the executor's start self-reserves
+	// through the ordinary spawn path (manual and legacy starts).
+	Admission AdmissionHandle
 }
 
 // RegisterExecutor attaches the dispatch backend for one action kind.
@@ -784,6 +801,10 @@ func (m *Manager) commandStart(wf WorkflowID, payload json.RawMessage) (any, err
 	if act.Status != ActivationLeased {
 		return nil, fmt.Errorf("cannot start activation in status %q", act.Status)
 	}
+	if act.Selection != nil && req.Selection != nil && !sameSelection(act.Selection, req.Selection) {
+		// Never silently replace an already-pinned selection.
+		return nil, ErrSelectionConflict
+	}
 	if act.ActiveLease == nil {
 		return nil, errors.New("activation has no active lease")
 	}
@@ -818,9 +839,42 @@ func (m *Manager) commandStart(wf WorkflowID, payload json.RawMessage) (any, err
 	if exec == nil {
 		return nil, fmt.Errorf("executor for action %q is unsupported until a later stage (executor not registered)", node.Action.Kind)
 	}
-	if _, err := m.applyStart(wf, snap, act, req, attemptID); err != nil {
+	// Provider-backed starts share the controller dispatch boundary: the root
+	// dispatch lock spans the final concurrency-key check and the attempt
+	// commit. It is released before the executor starts so admission is never
+	// acquired while holding it.
+	concurrencyKey := ""
+	if act.Dispatch != nil {
+		concurrencyKey = act.Dispatch.ConcurrencyKey
+	}
+	unlockDispatch, err := m.lockDispatch()
+	if err != nil {
 		return nil, err
 	}
+	// Key derivation is a pure read (no lease recovery), so it cannot move
+	// the revision the attempt commit below validates against.
+	if concurrencyKey != "" {
+		held, err := m.heldConcurrencyKeys(wf, act.ID)
+		if err != nil {
+			unlockDispatch()
+			return nil, err
+		}
+		if held[concurrencyKey] {
+			unlockDispatch()
+			return nil, ErrConcurrencyKeyHeld
+		}
+	}
+	selection := req.Selection
+	if selection == nil {
+		selection = act.Selection
+	}
+	startReq := req
+	startReq.Selection = selection
+	if _, err := m.applyStart(wf, snap, act, startReq, attemptID); err != nil {
+		unlockDispatch()
+		return nil, err
+	}
+	unlockDispatch()
 	if err := exec.Dispatch(context.Background(), ExecutorContext{
 		WorkflowID:   wf,
 		NodeID:       req.NodeID,
@@ -828,8 +882,9 @@ func (m *Manager) commandStart(wf WorkflowID, payload json.RawMessage) (any, err
 		AttemptID:    attemptID,
 		LeaseID:      req.LeaseID,
 		OwnerToken:   req.OwnerToken,
+		LeaseTTL:     leaseTTL(node, tmpl.DefaultLease),
 		Action:       node.Action,
-		Selection:    req.Selection,
+		Selection:    selection,
 	}); err != nil {
 		return nil, err
 	}
