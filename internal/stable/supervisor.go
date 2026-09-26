@@ -334,6 +334,16 @@ type handledChildQuestion struct {
 	at        time.Time
 }
 
+// testHooks holds test-only seams used by tests to deterministically
+// interleave commands with the supervisor's read windows.
+type testHooks struct {
+	// controllerStatusPreNextPoll, when non-nil (set by tests), runs after
+	// the controller record is read but before the next-poll re-read so a
+	// test can corrupt the snapshot inside that window deterministically.
+	// nil in production.
+	controllerStatusPreNextPoll func()
+}
+
 type Supervisor struct {
 	config  Config
 	runID   string
@@ -373,10 +383,14 @@ type Supervisor struct {
 	// controllerPollBaseDelay is the interval before a parked gate's first
 	// adapter poll; defaults to 30s. Tests shorten it.
 	controllerPollBaseDelay time.Duration
-	state                   *control.ControlState
-	controlMu               sync.Mutex
-	runtimes                map[string]*childRuntime
-	nextID                  int
+	// testHooks holds seams set only by tests. nil in production; tests set
+	// them on the instance they drive to make concurrent commands land
+	// deterministically inside read–commit windows.
+	testHooks testHooks
+	state     *control.ControlState
+	controlMu sync.Mutex
+	runtimes  map[string]*childRuntime
+	nextID    int
 	// outstandingReservations counts admission reservations that hold a local
 	// slot but have not yet converted into a registered runtime. Guarded by
 	// controlMu; the local capacity limit is enforced against active runtimes
@@ -4636,11 +4650,6 @@ func (s *Supervisor) WorkflowControllerDisable(id string, raw json.RawMessage) (
 	return rec, nil
 }
 
-// controllerStatusPreNextPoll, when non-nil (set by tests), runs after the
-// controller record is read but before the next-poll re-read so a test can
-// corrupt the snapshot inside that window deterministically.
-var controllerStatusPreNextPoll func()
-
 func (s *Supervisor) WorkflowControllerStatus(id string) (any, error) {
 	store, err := s.controllerBarrierStore()
 	if err != nil {
@@ -4653,8 +4662,8 @@ func (s *Supervisor) WorkflowControllerStatus(id string) (any, error) {
 	if !ok {
 		return nil, fmt.Errorf("controller %s: %w", id, workflowcontroller.ErrNotFound)
 	}
-	if controllerStatusPreNextPoll != nil {
-		controllerStatusPreNextPoll()
+	if h := s.testHooks.controllerStatusPreNextPoll; h != nil {
+		h()
 	}
 	var nextPollAt any
 	var nextPollError string
