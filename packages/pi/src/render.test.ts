@@ -15,8 +15,6 @@ import {
   renderShutdownResult,
   renderStatusCall,
   renderStatusResult,
-  renderWorkflowControllerListCall,
-  renderWorkflowControllerListResult,
   renderWorkflowControllerStatusCall,
   renderWorkflowControllerStatusResult,
 } from './render.js'
@@ -379,8 +377,8 @@ describe('Avenor Pi renderers', () => {
     expect(text(renderWorkflowControllerStatusCall({ controller_id: 'ctl', supervisor_id: '/tmp/sock' }, theme))).toBe(
       'avenor_workflow_controller_status controller_id "ctl" supervisor_id "/tmp/sock"',
     )
-    expect(text(renderWorkflowControllerListCall({ supervisor_id: '/tmp/sock' }, theme))).toBe(
-      'avenor_workflow_controller_list supervisor_id "/tmp/sock"',
+    expect(text(renderWorkflowControllerStatusCall({ supervisor_id: '/tmp/sock' }, theme))).toBe(
+      'avenor_workflow_controller_status (all controllers) supervisor_id "/tmp/sock"',
     )
 
     const enabled = text(renderWorkflowControllerStatusResult(result({
@@ -402,7 +400,7 @@ describe('Avenor Pi renderers', () => {
       'Last reconcile: 2026-01-01T00:00:01Z',
       'Capacity blocked: local — no runtime slots',
       'Next external poll: 2026-01-01T00:00:09Z',
-      'Guidance: Call avenor_workflow_controller_list to review all controllers.',
+      'Guidance: Call avenor_workflow_controller_status without controller_id to review all controllers.',
     ].join('\n'))
 
     const minimal = text(renderWorkflowControllerStatusResult(result({
@@ -415,7 +413,7 @@ describe('Avenor Pi renderers', () => {
       'Controller: idle — disabled',
       'Leader: none',
       'In-flight: 0',
-      'Guidance: Call avenor_workflow_controller_enable with controller_id "idle" to start dispatch and polling.',
+      'Guidance: Run `avenor workflow controller enable idle` to start dispatch and polling.',
     ].join('\n'))
 
     const expandedView = text(renderWorkflowControllerStatusResult(result({
@@ -431,7 +429,7 @@ describe('Avenor Pi renderers', () => {
       'Controller: ctl — enabled',
       'Leader: none',
       'In-flight: 1 of 2',
-      'Guidance: Call avenor_workflow_controller_list to review all controllers.',
+      'Guidance: Call avenor_workflow_controller_status without controller_id to review all controllers.',
       'Supervisor: /tmp/sock',
       'Max in-flight: 2',
       'Revision: 7',
@@ -440,7 +438,7 @@ describe('Avenor Pi renderers', () => {
   })
 
   it('renders controller lists, hides lease identifiers, and falls back on malformed payloads', () => {
-    const listed = text(renderWorkflowControllerListResult(result({
+    const listed = text(renderWorkflowControllerStatusResult(result({
       controllers: [
         { controller_id: 'a', desired_state: 'enabled', leader: { owner_id: 'sup-1:42', lease_id: 'lease-1', is_this_process: true } },
         { controller_id: 'b', desired_state: 'disabled', leader: { owner_id: 'sup-2:7', lease_id: 'lease-2', is_this_process: false } },
@@ -456,15 +454,15 @@ describe('Avenor Pi renderers', () => {
     expect(listed).not.toContain('lease-1')
     expect(listed).not.toContain('lease-2')
 
-    expect(text(renderWorkflowControllerListResult(result({ controllers: [] }), collapsed, theme, {}))).toBe(
+    expect(text(renderWorkflowControllerStatusResult(result({ controllers: [] }), collapsed, theme, {}))).toBe(
       'No workflow controllers configured.',
     )
     expect(text(renderWorkflowControllerStatusResult(result('nope'), collapsed, theme, {}))).toBe([
       'Avenor workflow controller status result unavailable.',
       'Retry the tool or use avenor_status/avenor_inspect.',
     ].join('\n'))
-    expect(text(renderWorkflowControllerListResult(result({ controllers: ['bad'] }), collapsed, theme, {}))).toBe([
-      'Avenor workflow controller list result unavailable.',
+    expect(text(renderWorkflowControllerStatusResult(result({ controllers: ['bad'] }), collapsed, theme, {}))).toBe([
+      'Avenor workflow controller status result unavailable.',
       'Retry the tool or use avenor_status/avenor_inspect.',
     ].join('\n'))
   })

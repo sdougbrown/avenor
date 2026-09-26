@@ -4,7 +4,7 @@ import { type Client } from '../client.js'
 import { getSupervisorClient as realGetSupervisorClient } from './get-supervisor-client.js'
 
 export interface WorkflowControllerStatusToolArgs {
-  controllerId: string
+  controllerId?: string
   supervisorId?: string
 }
 
@@ -14,8 +14,10 @@ export function createWorkflowControllerStatusTool(
   getSupervisorClient: GetSupervisorClient,
 ): (args: WorkflowControllerStatusToolArgs) => Promise<WorkflowControllerStatusResult> {
   return async args => {
-    if (!args.controllerId) throw new Error('controllerId is required')
-    return withWorkflowClient(args.supervisorId, client => client.workflowControllerStatus(args.controllerId), getSupervisorClient)
+    if (!args.controllerId) {
+      return withWorkflowClient(args.supervisorId, client => client.workflowControllerList(), getSupervisorClient)
+    }
+    return withWorkflowClient(args.supervisorId, client => client.workflowControllerStatus(args.controllerId!), getSupervisorClient)
   }
 }
 

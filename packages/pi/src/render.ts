@@ -28,7 +28,6 @@ type FollowUpArgs = { run_id?: string; message?: string; label?: string; supervi
 type EventsArgs = { run_id?: string; types?: string[]; limit?: number; supervisor_id?: string }
 type ShutdownArgs = { supervisor_id?: string; force?: boolean }
 type WorkflowControllerStatusArgs = { controller_id?: string; supervisor_id?: string }
-type WorkflowControllerListArgs = { supervisor_id?: string }
 
 function asRecord(value: unknown): RecordValue | undefined {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -484,8 +483,8 @@ function controllerStatusLines(details: unknown, args: WorkflowControllerStatusA
   if (nextPoll) lines.push(`Next external poll: ${nextPoll}`)
   lines.push(
     desiredState === 'disabled'
-      ? `Guidance: Call avenor_workflow_controller_enable with controller_id "${controllerId}" to start dispatch and polling.`
-      : `Guidance: Call avenor_workflow_controller_list to review all controllers.`,
+      ? `Guidance: Run \`avenor workflow controller enable ${controllerId}\` to start dispatch and polling.`
+      : `Guidance: Call avenor_workflow_controller_status without controller_id to review all controllers.`,
   )
   if (!expanded) return lines
   const supervisor = stringValue(args.supervisor_id) ? scalar(args.supervisor_id) : 'singleton'
@@ -498,7 +497,7 @@ function controllerStatusLines(details: unknown, args: WorkflowControllerStatusA
   ]
 }
 
-function controllerListLines(details: unknown, args: WorkflowControllerListArgs, expanded: boolean): string[] | undefined {
+function controllerListLines(details: unknown, args: WorkflowControllerStatusArgs, expanded: boolean): string[] | undefined {
   const result = asRecord(details)
   if (!result || !Array.isArray(result.controllers) || result.controllers.some(controller => !asRecord(controller))) return undefined
   const controllers = result.controllers.map(controller => controller as RecordValue)
@@ -648,23 +647,15 @@ export function renderShutdownResult(result: ToolResult, options: ToolRenderResu
 }
 
 export function renderWorkflowControllerStatusCall(args: WorkflowControllerStatusArgs, theme: Theme): Text {
-  const pieces = [`avenor_workflow_controller_status controller_id ${quoted(args.controller_id)}`]
+  const pieces = stringValue(args.controller_id)
+    ? [`avenor_workflow_controller_status controller_id ${quoted(args.controller_id)}`]
+    : ['avenor_workflow_controller_status (all controllers)']
   const supervisor = optionalQuoted(args.supervisor_id)
   if (supervisor) pieces.push(`supervisor_id ${supervisor}`)
   return linesText([pieces.join(' ')], theme)
 }
 
 export function renderWorkflowControllerStatusResult(result: ToolResult, options: ToolRenderResultOptions, theme: Theme, args: WorkflowControllerStatusArgs): Text {
-  return render('workflow controller status', result, options, theme, () => controllerStatusLines(result.details, args, options.expanded))
-}
-
-export function renderWorkflowControllerListCall(args: WorkflowControllerListArgs, theme: Theme): Text {
-  const pieces = ['avenor_workflow_controller_list']
-  const supervisor = optionalQuoted(args.supervisor_id)
-  if (supervisor) pieces.push(`supervisor_id ${supervisor}`)
-  return linesText([pieces.join(' ')], theme)
-}
-
-export function renderWorkflowControllerListResult(result: ToolResult, options: ToolRenderResultOptions, theme: Theme, args: WorkflowControllerListArgs): Text {
-  return render('workflow controller list', result, options, theme, () => controllerListLines(result.details, args, options.expanded))
+  return render('workflow controller status', result, options, theme, () =>
+    controllerStatusLines(result.details, args, options.expanded) ?? controllerListLines(result.details, args, options.expanded))
 }

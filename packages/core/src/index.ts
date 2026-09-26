@@ -82,9 +82,5 @@ export { workflowEventsTool, createWorkflowEventsTool, type WorkflowEventsToolAr
 export { workflowCompleteTool, createWorkflowCompleteTool, type WorkflowCompleteToolArgs, type WorkflowCompleteResult } from './tools/workflow-complete.js'
 export { workflowGateTool, createWorkflowGateTool, type WorkflowGateToolArgs, type WorkflowGateResult } from './tools/workflow-gate.js'
 export { workflowControllerStatusTool, createWorkflowControllerStatusTool, type WorkflowControllerStatusToolArgs, type WorkflowControllerStatusResult } from './tools/workflow-controller-status.js'
-export { workflowControllerListTool, createWorkflowControllerListTool, type WorkflowControllerListToolArgs, type WorkflowControllerListResult } from './tools/workflow-controller-list.js'
-export { workflowControllerCreateTool, createWorkflowControllerCreateTool, type WorkflowControllerCreateToolArgs, type WorkflowControllerCreateResult } from './tools/workflow-controller-create.js'
-export { workflowControllerEnableTool, createWorkflowControllerEnableTool, type WorkflowControllerEnableToolArgs, type WorkflowControllerEnableResult } from './tools/workflow-controller-enable.js'
-export { workflowControllerDisableTool, createWorkflowControllerDisableTool, type WorkflowControllerDisableToolArgs, type WorkflowControllerDisableResult } from './tools/workflow-controller-disable.js'
 export { workflowReadyTool, createWorkflowReadyTool, type WorkflowReadyToolArgs, type WorkflowReadyResult } from './tools/workflow-ready.js'
 

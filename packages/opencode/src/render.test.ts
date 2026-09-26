@@ -7,7 +7,6 @@ import {
   formatResultOutput,
   formatShutdownOutput,
   formatStatusOutput,
-  formatWorkflowControllerListOutput,
   formatWorkflowControllerStatusOutput,
 } from './render.js'
 
@@ -366,11 +365,15 @@ describe('OpenCode Avenor result renderers', () => {
         'Last reconcile: 2026-01-01T00:00:01Z',
         'Capacity blocked: local — no runtime slots',
         'Next external poll: 2026-01-01T00:00:09Z',
-        'Guidance: Call avenor_workflow_controller_list to review all controllers.',
+        'Guidance: Call avenor_workflow_controller_status without controller_id to review all controllers.',
       ].join('\n'),
       metadata: status,
     })
     expect(statusOutput.output).not.toContain('lease-1')
+
+    const disabledStatus = { ...status, controller_id: 'software-factory', desired_state: 'disabled' }
+    const disabledOutput = formatWorkflowControllerStatusOutput({}, disabledStatus)
+    expect(disabledOutput.output).toContain('Guidance: Run `avenor workflow controller enable software-factory` to start dispatch and polling.')
 
     const list = {
       controllers: [
@@ -378,7 +381,7 @@ describe('OpenCode Avenor result renderers', () => {
         { controller_id: 'b', desired_state: 'disabled', leader: null },
       ],
     }
-    const listOutput = formatWorkflowControllerListOutput({}, list)
+    const listOutput = formatWorkflowControllerStatusOutput({}, list)
     expect(listOutput).toEqual({
       title: 'Avenor workflow controllers — 2',
       output: [
@@ -389,7 +392,7 @@ describe('OpenCode Avenor result renderers', () => {
       metadata: list,
     })
     expect(listOutput.output).not.toContain('lease-2')
-    expect(formatWorkflowControllerListOutput({}, { controllers: [] }).output).toBe('No workflow controllers configured.')
+    expect(formatWorkflowControllerStatusOutput({}, { controllers: [] }).output).toBe('No workflow controllers configured.')
 
     const fallback = formatWorkflowControllerStatusOutput({}, { unexpected: true })
     expect(fallback.output).toBe([

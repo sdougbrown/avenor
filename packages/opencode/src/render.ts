@@ -27,7 +27,6 @@ type FollowUpArgs = { run_id?: string; message?: string; label?: string; supervi
 type EventsArgs = { run_id?: string; types?: string[]; limit?: number; supervisor_id?: string }
 type ShutdownArgs = { supervisor_id?: string; force?: boolean }
 type WorkflowControllerStatusArgs = { controller_id?: string; supervisor_id?: string }
-type WorkflowControllerListArgs = { supervisor_id?: string }
 
 const ANSI_PATTERN =
   // eslint-disable-next-line no-control-regex
@@ -540,8 +539,8 @@ function controllerStatusLines(details: unknown, args: WorkflowControllerStatusA
   if (nextPoll) lines.push(`Next external poll: ${nextPoll}`)
   lines.push(
     desiredState === 'disabled'
-      ? `Guidance: Call avenor_workflow_controller_enable with controller_id "${controllerId}" to start dispatch and polling.`
-      : `Guidance: Call avenor_workflow_controller_list to review all controllers.`,
+      ? `Guidance: Run \`avenor workflow controller enable ${controllerId}\` to start dispatch and polling.`
+      : `Guidance: Call avenor_workflow_controller_status without controller_id to review all controllers.`,
   )
   return lines
 }
@@ -559,19 +558,28 @@ function controllerListLines(details: unknown): string[] | undefined {
 }
 
 export function formatWorkflowControllerStatusOutput(args: WorkflowControllerStatusArgs, result: Record<string, unknown>): RichToolResult {
-  const controllerId = selected(asRecord(result), 'controller_id', args.controller_id)
-  return {
-    title: `Workflow controller ${controllerId}`,
-    output: output(controllerStatusLines(result, args), 'workflow controller status'),
-    metadata: { ...result },
+  const status = asRecord(result)
+  const statusLines = controllerStatusLines(result, args)
+  if (statusLines) {
+    const controllerId = selected(status, 'controller_id', args.controller_id)
+    return {
+      title: `Workflow controller ${controllerId}`,
+      output: output(statusLines, 'workflow controller status'),
+      metadata: { ...result },
+    }
   }
-}
-
-export function formatWorkflowControllerListOutput(_args: WorkflowControllerListArgs, result: Record<string, unknown>): RichToolResult {
-  const controllers = Array.isArray(asRecord(result)?.controllers) ? (asRecord(result)!.controllers as unknown[]).length : 0
+  const listLines = controllerListLines(result)
+  if (listLines) {
+    const controllers = Array.isArray(status?.controllers) ? (status!.controllers as unknown[]).length : 0
+    return {
+      title: `Avenor workflow controllers — ${controllers}`,
+      output: output(listLines, 'workflow controller list'),
+      metadata: { ...result },
+    }
+  }
   return {
-    title: `Avenor workflow controllers — ${controllers}`,
-    output: output(controllerListLines(result), 'workflow controller list'),
+    title: 'Avenor workflow controllers',
+    output: output(undefined, 'workflow controller status'),
     metadata: { ...result },
   }
 }

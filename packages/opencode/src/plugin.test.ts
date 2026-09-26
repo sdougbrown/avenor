@@ -143,10 +143,6 @@ mock.module('@dougbots/avenor-core', () => ({
   workflowCompleteTool: mock(async () => ({})),
   workflowGateTool: mock(async () => ({})),
   workflowControllerStatusTool: workflowControllerStatusToolMock,
-  workflowControllerListTool: mock(async () => ({})),
-  workflowControllerCreateTool: mock(async () => ({})),
-  workflowControllerEnableTool: mock(async () => ({})),
-  workflowControllerDisableTool: mock(async () => ({})),
   workflowReadyTool: workflowReadyToolMock,
   createRunSnapshot,
   extractEventText,
@@ -966,5 +962,19 @@ describe('AvenorPlugin', () => {
     await (hooks.tool?.avenor_workflow_controller_status as any).execute({ controller_id: 'ctl', supervisor_id: 'sup-a' }, context)
 
     expect(workflowControllerStatusToolMock).toHaveBeenCalledWith({ controllerId: 'ctl', supervisorId: 'sup-a' })
+  })
+
+  it('lists all controllers and skips the advisory ready query when controller_id is omitted', async () => {
+    workflowControllerStatusToolMock.mockClear()
+    workflowReadyToolMock.mockClear()
+    workflowControllerStatusToolMock.mockImplementation(async () => ({ controllers: [] }))
+
+    const hooks = await AvenorPlugin(makeCtx() as any)
+    const context = { sessionID: 'orchestrator-session', directory: '/tmp/test', abort: new AbortController().signal }
+    const output = await (hooks.tool?.avenor_workflow_controller_status as any).execute({ supervisor_id: 'sup-a' }, context)
+
+    expect(workflowControllerStatusToolMock).toHaveBeenCalledWith({ controllerId: undefined, supervisorId: 'sup-a' })
+    expect(workflowReadyToolMock).not.toHaveBeenCalled()
+    expect(output.title).toBe('Avenor workflow controllers — 0')
   })
 })

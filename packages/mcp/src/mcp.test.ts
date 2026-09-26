@@ -10,11 +10,7 @@ import { spawnInputShape } from './spawn-schema'
 // forward.
 const controllerCalls: {
   status: Array<Record<string, unknown>>
-  list: Array<Record<string, unknown>>
-  create: Array<Record<string, unknown>>
-  enable: Array<Record<string, unknown>>
-  disable: Array<Record<string, unknown>>
-} = { status: [], list: [], create: [], enable: [], disable: [] }
+} = { status: [] }
 
 mock.module('@dougbots/avenor-core', () => ({
   spawnTool: mock(async () => ({})),
@@ -32,23 +28,7 @@ mock.module('@dougbots/avenor-core', () => ({
   workflowGateTool: mock(async () => ({})),
   workflowControllerStatusTool: mock(async (args: Record<string, unknown>) => {
     controllerCalls.status.push(args)
-    return { state: 'enabled' }
-  }),
-  workflowControllerListTool: mock(async (args: Record<string, unknown>) => {
-    controllerCalls.list.push(args)
-    return { controllers: [] }
-  }),
-  workflowControllerCreateTool: mock(async (args: Record<string, unknown>) => {
-    controllerCalls.create.push(args)
-    return { state: 'disabled' }
-  }),
-  workflowControllerEnableTool: mock(async (args: Record<string, unknown>) => {
-    controllerCalls.enable.push(args)
-    return { state: 'enabled' }
-  }),
-  workflowControllerDisableTool: mock(async (args: Record<string, unknown>) => {
-    controllerCalls.disable.push(args)
-    return { state: 'disabled' }
+    return args.controllerId ? { state: 'enabled' } : { controllers: [] }
   }),
   validateSpawnSelection,
 }))
@@ -56,7 +36,7 @@ mock.module('@dougbots/avenor-core', () => ({
 const { server, getMcpAuthToken, isAllowedHost, isAllowedOrigin, parseBearerToken } = await import('./mcp.js')
 
 describe('avenor MCP server', () => {
-  it('registers the controller tools on the production server and maps snake_case to camelCase', async () => {
+  it('registers the controller status tool on the production server and maps snake_case to camelCase', async () => {
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
     const client = new Client({ name: 'test-client', version: '0.1.0' })
     await Promise.all([client.connect(clientTransport), server.connect(serverTransport)])
@@ -69,32 +49,11 @@ describe('avenor MCP server', () => {
     expect(controllerCalls.status.at(-1)).toEqual({ controllerId: 'ctl-1', supervisorId: 'sup-1' })
 
     const list = await client.callTool({
-      name: 'avenor_workflow_controller_list',
+      name: 'avenor_workflow_controller_status',
       arguments: { supervisor_id: 'sup-1' },
     })
     expect(list).toBeDefined()
-    expect(controllerCalls.list.at(-1)).toEqual({ supervisorId: 'sup-1' })
-
-    const create = await client.callTool({
-      name: 'avenor_workflow_controller_create',
-      arguments: { controller_id: 'ctl-1', max_inflight: 5, supervisor_id: 'sup-1' },
-    })
-    expect(create).toBeDefined()
-    expect(controllerCalls.create.at(-1)).toEqual({ controllerId: 'ctl-1', maxInflight: 5, supervisorId: 'sup-1' })
-
-    const enable = await client.callTool({
-      name: 'avenor_workflow_controller_enable',
-      arguments: { controller_id: 'ctl-1', supervisor_id: 'sup-1' },
-    })
-    expect(enable).toBeDefined()
-    expect(controllerCalls.enable.at(-1)).toEqual({ controllerId: 'ctl-1', supervisorId: 'sup-1' })
-
-    const disable = await client.callTool({
-      name: 'avenor_workflow_controller_disable',
-      arguments: { controller_id: 'ctl-1', reason: 'maintenance', supervisor_id: 'sup-1' },
-    })
-    expect(disable).toBeDefined()
-    expect(controllerCalls.disable.at(-1)).toEqual({ controllerId: 'ctl-1', reason: 'maintenance', supervisorId: 'sup-1' })
+    expect(controllerCalls.status.at(-1)).toEqual({ controllerId: undefined, supervisorId: 'sup-1' })
   })
 
   it('keeps direct and roster selectors as optional flat fields', () => {

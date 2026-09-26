@@ -10,7 +10,6 @@ import {
   formatResultOutput,
   formatShutdownOutput,
   formatStatusOutput,
-  formatWorkflowControllerListOutput,
   formatWorkflowControllerStatusOutput,
 } from './render.js'
 import {
@@ -38,10 +37,6 @@ import {
   workflowCompleteTool,
   workflowGateTool,
   workflowControllerStatusTool,
-  workflowControllerListTool,
-  workflowControllerCreateTool,
-  workflowControllerEnableTool,
-  workflowControllerDisableTool,
   workflowReadyTool,
 } from '@dougbots/avenor-core'
 
@@ -1099,9 +1094,9 @@ export const AvenorPlugin: Plugin = async (ctx) => {
       }),
 
       avenor_workflow_controller_status: tool({
-        description: 'Get the status for a workflow controller',
+        description: 'Show workflow controller status. With controller_id, returns that controller\'s full status; without it, lists all controllers with summary state. Create, enable, and disable are CLI-only (avenor workflow controller ...).',
         args: {
-          controller_id: tool.schema.string().describe('Controller ID'),
+          controller_id: tool.schema.string().optional().describe('Controller ID; omit to list all controllers'),
           supervisor_id: tool.schema.string().optional().describe('Supervisor ID for multi-supervisor mode'),
         },
         async execute(args, _context) {
@@ -1110,80 +1105,20 @@ export const AvenorPlugin: Plugin = async (ctx) => {
             supervisorId: args.supervisor_id,
           })
           const details = { ...result }
-          try {
-            // Advisory candidate count; absent when the supervisor has no
-            // workflow.ready support or the query fails.
-            const ready = await workflowReadyTool({
-              controllerId: args.controller_id,
-              supervisorId: args.supervisor_id,
-            })
-            if (Array.isArray(ready.candidates)) details.candidate_count = ready.candidates.length
-          } catch {
-            // Advisory only — the status view renders without it.
+          if (args.controller_id) {
+            try {
+              // Advisory candidate count; absent when the supervisor has no
+              // workflow.ready support or the query fails.
+              const ready = await workflowReadyTool({
+                controllerId: args.controller_id,
+                supervisorId: args.supervisor_id,
+              })
+              if (Array.isArray(ready.candidates)) details.candidate_count = ready.candidates.length
+            } catch {
+              // Advisory only — the status view renders without it.
+            }
           }
           return formatWorkflowControllerStatusOutput(args, details)
-        },
-      }),
-
-      avenor_workflow_controller_list: tool({
-        description: 'List all workflow controllers',
-        args: {
-          supervisor_id: tool.schema.string().optional().describe('Supervisor ID for multi-supervisor mode'),
-        },
-        async execute(args, _context) {
-          const result = await workflowControllerListTool({
-            supervisorId: args.supervisor_id,
-          })
-          return formatWorkflowControllerListOutput(args, result)
-        },
-      }),
-
-      avenor_workflow_controller_create: tool({
-        description: 'Register a workflow controller; it starts disabled',
-        args: {
-          controller_id: tool.schema.string().describe('Controller ID'),
-          max_inflight: tool.schema.number().int().positive().describe('Max concurrent dispatches'),
-          supervisor_id: tool.schema.string().optional().describe('Supervisor ID for multi-supervisor mode'),
-        },
-        async execute(args, _context) {
-          const result = await workflowControllerCreateTool({
-            controllerId: args.controller_id,
-            maxInflight: args.max_inflight,
-            supervisorId: args.supervisor_id,
-          })
-          return { title: 'workflow', output: JSON.stringify(result, null, 2) }
-        },
-      }),
-
-      avenor_workflow_controller_enable: tool({
-        description: 'Enable a workflow controller so it dispatches and polls',
-        args: {
-          controller_id: tool.schema.string().describe('Controller ID'),
-          supervisor_id: tool.schema.string().optional().describe('Supervisor ID for multi-supervisor mode'),
-        },
-        async execute(args, _context) {
-          const result = await workflowControllerEnableTool({
-            controllerId: args.controller_id,
-            supervisorId: args.supervisor_id,
-          })
-          return { title: 'workflow', output: JSON.stringify(result, null, 2) }
-        },
-      }),
-
-      avenor_workflow_controller_disable: tool({
-        description: 'Disable a workflow controller; it stops future dispatch and polling but never cancels running attempts',
-        args: {
-          controller_id: tool.schema.string().describe('Controller ID'),
-          reason: tool.schema.string().describe('Reason for disabling'),
-          supervisor_id: tool.schema.string().optional().describe('Supervisor ID for multi-supervisor mode'),
-        },
-        async execute(args, _context) {
-          const result = await workflowControllerDisableTool({
-            controllerId: args.controller_id,
-            reason: args.reason,
-            supervisorId: args.supervisor_id,
-          })
-          return { title: 'workflow', output: JSON.stringify(result, null, 2) }
         },
       }),
     },
