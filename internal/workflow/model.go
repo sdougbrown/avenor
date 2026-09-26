@@ -69,6 +69,7 @@ type NodeDefinition struct {
 	LoopID       LoopID                 `json:"loop_id,omitempty"`
 	Checkpoint   *CheckpointDefinition  `json:"checkpoint,omitempty"`
 	LeasePolicy  *LeasePolicy           `json:"lease_policy,omitempty"`
+	Dispatch     *DispatchPolicy        `json:"dispatch,omitempty"`
 	SkipRule     *AuthorityRule         `json:"skip_rule,omitempty"`
 	WaiveRules   []AuthorityRule        `json:"waive_rules,omitempty"`
 }
@@ -97,6 +98,58 @@ type CheckpointDefinition struct {
 type CompositionLimits struct {
 	MaximumDepth    int `json:"max_depth"`
 	MaximumChildren int `json:"max_children"`
+}
+
+type DispatchMode string
+
+const (
+	DispatchManual DispatchMode = "manual"
+	DispatchAuto   DispatchMode = "auto"
+)
+
+// DefaultDispatchPriority applies when a node declares no explicit priority.
+const DefaultDispatchPriority = 50
+
+// DispatchPolicy declares whether a node is claimed manually or dispatched
+// automatically by a workflow controller. It is template data copied into the
+// instantiated activation snapshot.
+type DispatchPolicy struct {
+	Mode           DispatchMode `json:"mode,omitempty"`
+	ControllerID   string       `json:"controller_id,omitempty"`
+	Priority       *int         `json:"priority,omitempty"`
+	ConcurrencyKey string       `json:"concurrency_key,omitempty"`
+}
+
+// effective resolves the policy with its defaults applied: manual mode and
+// the default priority. A nil policy is a manual node.
+func (d *DispatchPolicy) effective() DispatchPolicy {
+	out := DispatchPolicy{Mode: DispatchManual}
+	priority := DefaultDispatchPriority
+	out.Priority = &priority
+	if d == nil {
+		return out
+	}
+	if d.Mode != "" {
+		out.Mode = d.Mode
+	}
+	out.ControllerID = d.ControllerID
+	if d.Priority != nil {
+		p := *d.Priority
+		out.Priority = &p
+	}
+	out.ConcurrencyKey = d.ConcurrencyKey
+	return out
+}
+
+// IsAuto reports whether the policy requests automatic dispatch.
+func (d DispatchPolicy) IsAuto() bool { return d.Mode == DispatchAuto }
+
+// priority resolves the effective priority with the default applied.
+func (d DispatchPolicy) priority() int {
+	if d.Priority != nil {
+		return *d.Priority
+	}
+	return DefaultDispatchPriority
 }
 
 type Assignment struct {
@@ -440,8 +493,16 @@ type Activation struct {
 	AttemptIDs      []AttemptID         `json:"attempt_ids,omitempty"`
 	ActiveLease     *Lease              `json:"active_lease,omitempty"`
 	SelectedOutcome OutcomeName         `json:"selected_outcome,omitempty"`
-	CreatedAt       time.Time           `json:"created_at"`
-	UpdatedAt       time.Time           `json:"updated_at"`
+	// Dispatch carries the node's effective dispatch policy when it resolves
+	// to auto; manual nodes leave it nil (legacy snapshots read as manual).
+	Dispatch *DispatchPolicy `json:"dispatch,omitempty"`
+	// ReadyAt is the timestamp of the most recent transition into a claimable
+	// state, copied from the event's explicit timestamp during replay. A nil
+	// ReadyAt (legacy activations) falls back to CreatedAt for advisory
+	// display only and is never auto-selectable.
+	ReadyAt   *time.Time `json:"ready_at,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
 }
 
 type ExecutionIdentity struct {
@@ -564,7 +625,11 @@ type Command struct {
 	// ChildOutputs is the CommandChildOutcome selection of child output
 	// references (identity only, no child state copied into the parent).
 	ChildOutputs []OutputReference `json:"child_outputs,omitempty"`
-	Payload      json.RawMessage   `json:"payload,omitempty"`
+	// ReadyAt is stamped by the store for commands that can create or re-arm
+	// claimability; the reducer copies it onto the affected activation and
+	// never consults the wall clock itself.
+	ReadyAt time.Time       `json:"ready_at,omitempty"`
+	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
 type Snapshot struct {

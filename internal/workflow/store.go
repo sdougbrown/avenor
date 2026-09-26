@@ -17,6 +17,20 @@ type Store struct {
 	root string
 }
 
+// readinessCommandKinds are the command kinds whose event batch can create a
+// claimable activation (instantiate, reroute, and the transition siblings of
+// complete/gate/child_outcome) or re-arm one (terminate retry re-arm,
+// unblock). The store stamps their ReadyAt when unset.
+var readinessCommandKinds = map[CommandKind]bool{
+	CommandInstantiate:  true,
+	CommandComplete:     true,
+	CommandGate:         true,
+	CommandChildOutcome: true,
+	CommandTerminate:    true,
+	CommandUnblock:      true,
+	CommandReroute:      true,
+}
+
 func New(root string) *Store {
 	return &Store{root: root}
 }
@@ -87,6 +101,12 @@ func (s *Store) applyLocked(workflowID WorkflowID, cmd Command) (Snapshot, error
 			}
 			snap = replayed
 		}
+	}
+	// Stamp readiness transitions with an explicit timestamp: the reducer
+	// copies this onto activations during replay and never consults the wall
+	// clock for ready_at itself.
+	if readinessCommandKinds[cmd.Kind] && cmd.ReadyAt.IsZero() {
+		cmd.ReadyAt = nowUTC()
 	}
 	events, err := Apply(snap, cmd)
 	if err != nil {
