@@ -791,11 +791,7 @@ func (s *Supervisor) leaseSweepLoop(interval time.Duration, stop, done chan stru
 			return
 		case <-ticker.C:
 		}
-		mgr := s.workflowMgr
-		if mgr == nil {
-			continue
-		}
-		summary, err := mgr.ExpireStaleLeases()
+		summary, err := s.workflowMgr.ExpireStaleLeases()
 		if err != nil {
 			log.Printf("workflow: live lease sweep failed: %v", err)
 		} else if summary.Expired > 0 || len(summary.Errors) > 0 {
@@ -806,6 +802,15 @@ func (s *Supervisor) leaseSweepLoop(interval time.Duration, stop, done chan stru
 			s.testHooks.leaseSweepPost(summary)
 		}
 	}
+}
+
+// leaseSweepRunning reports whether the live lease-expiry sweep loop is
+// running: the barrier succeeded, the interval is positive, and it has not
+// been stopped.
+func (s *Supervisor) leaseSweepRunning() bool {
+	s.leaseSweepMu.Lock()
+	defer s.leaseSweepMu.Unlock()
+	return s.leaseSweepStop != nil
 }
 
 // stopLeaseSweep halts the live lease-expiry sweep goroutine and waits for it

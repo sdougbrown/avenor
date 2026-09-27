@@ -79,11 +79,15 @@ func (s *Supervisor) finishWorkflowAttempt(ec workflow.ExecutorContext, hb *leas
 	if err != nil {
 		// Residual: the success fact is recorded but the completion (evidence
 		// staging, output recording, or the atomic command itself) failed. The
-		// heartbeat stops here and the live lease-expiry sweep expires the dead
-		// lease within one sweep interval, letting the controller re-dispatch
-		// the node for a replacement attempt.
-		fmt.Fprintf(os.Stderr, "avenor stable: workflow %s node %s attempt %s: supervisor auto-completion failed after the success fact (the live lease sweep will expire the lease and the controller will re-dispatch the node): %v\n",
-			ec.WorkflowID, ec.NodeID, ec.AttemptID, err)
+		// heartbeat stops here, so the lease goes stale; the live lease-expiry
+		// sweep expires it when running, and restart recovery otherwise. The
+		// controller then re-dispatches the node for a replacement attempt.
+		recovery := "the lease expires on the next restart recovery"
+		if s.leaseSweepRunning() {
+			recovery = "the live lease sweep will expire the lease"
+		}
+		fmt.Fprintf(os.Stderr, "avenor stable: workflow %s node %s attempt %s: supervisor auto-completion failed after the success fact (%s and the controller will re-dispatch the node): %v\n",
+			ec.WorkflowID, ec.NodeID, ec.AttemptID, recovery, err)
 	}
 	hb.StopAndWait()
 }
