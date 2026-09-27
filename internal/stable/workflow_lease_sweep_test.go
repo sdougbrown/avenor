@@ -191,6 +191,7 @@ func TestLeaseSweepStopsAfterShutdown(t *testing.T) {
 		WorkflowRoot:               filepath.Join(t.TempDir(), "wfroot"),
 		WorkflowLeaseSweepInterval: 100 * time.Millisecond,
 	})
+	t.Cleanup(func() { _ = sup.broker.Stop() })
 	var sweeps atomic.Int32
 	sup.testHooks.leaseSweepPost = func(workflow.LeaseExpirySummary) { sweeps.Add(1) }
 	if _, _, err := sup.workflowBarrierResult(); err != nil {
@@ -216,7 +217,6 @@ func TestLeaseSweepStopsAfterShutdown(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	_ = sup.broker.Stop()
 }
 
 // TestLeaseSweepNeverStartsAfterStop proves a lazy workflow barrier that
