@@ -516,6 +516,12 @@ compositions. A valid lease is not expired merely because the supervisor
 restarted. A stalled attempt expires and a replacement worker can claim the
 node.
 
+While the supervisor is running, the same expiry runs live: a sweep (default
+every 10s, `--lease-sweep-interval`) expires leases whose persisted expiry has
+passed (reason `stale`) and wakes the controller through the same change
+notification as an ordinary command, so a dead lease is reclaimed and its node
+re-dispatched without a restart. 0 disables the live sweep.
+
 A retry retains the activation and loop iteration, consumes only the retry
 budget, and cannot follow a semantic branch or checkpoint. Exhaustion applies
 only the configured `block`, operational `fail`, or named `outcome`.

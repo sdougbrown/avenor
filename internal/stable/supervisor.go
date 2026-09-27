@@ -75,7 +75,20 @@ type Config struct {
 	// $XDG_CONFIG_HOME/avenor/workflow-adapters (or
 	// $HOME/.config/avenor/workflow-adapters).
 	WorkflowAdapterDir string
+
+	// WorkflowLeaseSweepInterval is the cadence of the supervisor's live
+	// workflow lease-expiry sweep (Manager.ExpireStaleLeases): an activation
+	// whose lease stopped being heartbeated while the supervisor is running
+	// is expired within one interval and its node re-dispatched, without a
+	// restart. Zero disables the sweep: leases then expire only on restart
+	// recovery. The CLI flag defaults to DefaultLeaseSweepInterval.
+	WorkflowLeaseSweepInterval time.Duration
 }
+
+// DefaultLeaseSweepInterval is the default live lease-expiry cadence: a
+// third of workflow.DefaultLeaseTTL, so a dead lease is always detected
+// well within one TTL window.
+const DefaultLeaseSweepInterval = workflow.DefaultLeaseTTL / 3
 
 type SpawnParams struct {
 	Prompt            string `json:"prompt,omitempty"`
@@ -356,6 +369,13 @@ type testHooks struct {
 	// executor right after the attempt's runtime is spawned, with its runtime
 	// ID, so a test can let the runtime finish before Dispatch returns.
 	afterAttemptSpawn func(runtimeID string)
+	// completeAutoPre, when non-nil (set by tests), runs immediately before
+	// the supervisor issues a node's auto-completion command, so a test can
+	// deterministically force that command to fail. nil in production.
+	completeAutoPre func()
+	// leaseSweepPost, when non-nil (set by tests), runs after every live
+	// lease-expiry sweep tick with its summary. nil in production.
+	leaseSweepPost func(summary workflow.LeaseExpirySummary)
 }
 
 type Supervisor struct {
@@ -401,10 +421,16 @@ type Supervisor struct {
 	// them on the instance they drive to make concurrent commands land
 	// deterministically inside read–commit windows.
 	testHooks testHooks
-	state     *control.ControlState
-	controlMu sync.Mutex
-	runtimes  map[string]*childRuntime
-	nextID    int
+	// leaseSweepMu guards leaseSweepStop and leaseSweepDone: the single live
+	// lease-expiry sweep goroutine started once the workflow startup barrier
+	// succeeds and stopped on shutdown.
+	leaseSweepMu   sync.Mutex
+	leaseSweepStop chan struct{}
+	leaseSweepDone chan struct{}
+	state          *control.ControlState
+	controlMu      sync.Mutex
+	runtimes       map[string]*childRuntime
+	nextID         int
 	// outstandingReservations counts admission reservations that hold a local
 	// slot but have not yet converted into a registered runtime. Guarded by
 	// controlMu; the local capacity limit is enforced against active runtimes
@@ -728,6 +754,69 @@ func (s *Supervisor) stopReaper() {
 	}
 	close(stop)
 	<-s.reaperDone
+}
+
+// startLeaseSweepLoop launches the single live lease-expiry sweep goroutine.
+// Call only after the workflow startup barrier has succeeded and only when
+// Config.WorkflowLeaseSweepInterval is positive.
+func (s *Supervisor) startLeaseSweepLoop() {
+	s.leaseSweepMu.Lock()
+	defer s.leaseSweepMu.Unlock()
+	if s.leaseSweepStop != nil {
+		return
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	s.leaseSweepStop = stop
+	s.leaseSweepDone = done
+	go s.leaseSweepLoop(s.config.WorkflowLeaseSweepInterval, stop, done)
+}
+
+// leaseSweepLoop runs Manager.ExpireStaleLeases on its ticker until stopped.
+// An expired dead lease lands through the manager's change notification, so
+// the controller wakes and re-dispatches without waiting for its anti-entropy
+// cadence. Sweep errors are logged, never fatal: the next tick retries.
+func (s *Supervisor) leaseSweepLoop(interval time.Duration, stop, done chan struct{}) {
+	defer close(done)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-s.shutdownCh:
+			return
+		case <-ticker.C:
+		}
+		mgr := s.workflowMgr
+		if mgr == nil {
+			continue
+		}
+		summary, err := mgr.ExpireStaleLeases()
+		if err != nil {
+			log.Printf("workflow: live lease sweep failed: %v", err)
+		} else if summary.Expired > 0 || len(summary.Errors) > 0 {
+			log.Printf("workflow: live lease sweep: expired=%d retained=%d errors=%d",
+				summary.Expired, summary.Retained, len(summary.Errors))
+		}
+		if s.testHooks.leaseSweepPost != nil {
+			s.testHooks.leaseSweepPost(summary)
+		}
+	}
+}
+
+// stopLeaseSweep halts the live lease-expiry sweep goroutine and waits for it
+// to exit, so no sweep outlives Shutdown.
+func (s *Supervisor) stopLeaseSweep() {
+	s.leaseSweepMu.Lock()
+	stop := s.leaseSweepStop
+	s.leaseSweepStop = nil
+	s.leaseSweepMu.Unlock()
+	if stop == nil {
+		return
+	}
+	close(stop)
+	<-s.leaseSweepDone
 }
 
 // signalCapacityChange wakes callers waiting in WaitForCapacity. It does not
@@ -3066,6 +3155,7 @@ func (s *Supervisor) shutdown(mode string) int {
 	}
 	s.controlMu.Unlock()
 	s.stopLeaseHeartbeats()
+	s.stopLeaseSweep()
 
 	if s.afterShutdownAdmissionClosed != nil {
 		s.afterShutdownAdmissionClosed()
@@ -4440,6 +4530,12 @@ func (s *Supervisor) runWorkflowStartupBarrier() {
 	// Recovered enabled controllers poll adapters; load the registry here so
 	// an enabled startup never runs without it.
 	s.loadWorkflowAdapters()
+	if barrierErr == nil && s.config.WorkflowLeaseSweepInterval > 0 {
+		// The loop reads workflowMgr directly: it is assigned above and only
+		// starts after the barrier has fully succeeded, so re-entering the
+		// barrier's sync.Once is neither needed nor safe.
+		s.startLeaseSweepLoop()
+	}
 	if barrierErr != nil {
 		s.workflowBarrierErr = barrierErr
 		log.Printf("workflow: startup barrier failed (workflow RPCs remain available; controllers disabled for this process): %v", barrierErr)

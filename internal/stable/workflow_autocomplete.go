@@ -69,12 +69,19 @@ func (s *Supervisor) finishWorkflowAttempt(ec workflow.ExecutorContext, hb *leas
 			ec.WorkflowID, ec.NodeID, ec.AttemptID, err)
 		return
 	}
+	// The single residual detection point: the success fact is recorded but
+	// the completion failed. A future escalation hook (e.g. retrying the
+	// completion through an external adapter) belongs exactly here.
+	if s.testHooks.completeAutoPre != nil {
+		s.testHooks.completeAutoPre()
+	}
 	if _, err := mgr.CompleteAuto(ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, ec.OwnerToken, plan); err != nil {
 		// Residual: the success fact is recorded but the completion (evidence
 		// staging, output recording, or the atomic command itself) failed. The
-		// activation stays running with a held lease until the lease expires;
-		// no new kernel command exists for this state.
-		fmt.Fprintf(os.Stderr, "avenor stable: workflow %s node %s attempt %s: supervisor auto-completion failed after the success fact (activation stays running until the lease expires): %v\n",
+		// heartbeat stops here and the live lease-expiry sweep expires the dead
+		// lease within one sweep interval, letting the controller re-dispatch
+		// the node for a replacement attempt.
+		fmt.Fprintf(os.Stderr, "avenor stable: workflow %s node %s attempt %s: supervisor auto-completion failed after the success fact (the live lease sweep will expire the lease and the controller will re-dispatch the node): %v\n",
 			ec.WorkflowID, ec.NodeID, ec.AttemptID, err)
 	}
 	hb.StopAndWait()
