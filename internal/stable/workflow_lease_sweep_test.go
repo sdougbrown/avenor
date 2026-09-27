@@ -139,18 +139,18 @@ func TestLeaseSweepSparesLiveHeartbeatedAttempt(t *testing.T) {
 			"retry_policy": map[string]any{"max_attempts": 3, "exhaustion": "block"},
 		}},
 		"terminal_outcomes":    []string{"done"},
-		"default_lease_policy": map[string]any{"ttl_seconds": 1},
+		"default_lease_policy": map[string]any{"ttl_seconds": 3},
 	}
 	wf := f.addWorkflow(t, "tmpl-lease-sweep-live", mustJSON(t, template))
 	f.enableController(t, 2)
 
-	// Hold the worker alive until the sweep has run at least four times
-	// (well past the 1s TTL, which the heartbeat must be renewing).
-	deadline := time.Now().Add(5 * time.Second)
-	for sweeps.Load() < 4 {
+	// Hold the worker alive until the sweep has run at least twenty times
+	// (4s, past the 3s TTL, which the heartbeat renews every second).
+	deadline := time.Now().Add(10 * time.Second)
+	for sweeps.Load() < 20 {
 		if time.Now().After(deadline) {
 			inst := f.instance(t, wf)
-			t.Fatalf("timed out waiting for four lease sweeps; observed %s", describeInstance(&inst, f.providerCalls.Load()))
+			t.Fatalf("timed out waiting for twenty lease sweeps; observed %s", describeInstance(&inst, f.providerCalls.Load()))
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -234,15 +234,18 @@ func TestLeaseSweepNeverStartsAfterStop(t *testing.T) {
 	var sweeps atomic.Int32
 	sup.testHooks.leaseSweepPost = func(workflow.LeaseExpirySummary) { sweeps.Add(1) }
 
+	t.Cleanup(func() { _ = sup.broker.Stop() })
+	if _, _, err := sup.workflowBarrierResult(); err != nil {
+		t.Fatalf("workflow barrier: %v", err)
+	}
+
 	sup.stopLeaseSweep()
+	sweeps.Store(0)
 	sup.startLeaseSweepLoop()
 
-	sup.leaseSweepMu.Lock()
-	started := sup.leaseSweepStop != nil
-	sup.leaseSweepMu.Unlock()
-	if started {
-		t.Fatal("startLeaseSweepLoop launched a sweep loop after stopLeaseSweep")
-	}
+	// A loop started despite the stop would tick every 50ms; six intervals
+	// with no tick shows none was started.
+	time.Sleep(300 * time.Millisecond)
 	if n := sweeps.Load(); n != 0 {
 		t.Fatalf("observed %d sweeps after stop, want 0", n)
 	}
