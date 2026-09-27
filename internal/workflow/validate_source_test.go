@@ -135,3 +135,43 @@ func decodeOutputSource(t *testing.T, raw map[string]any) *OutputSource {
 	}
 	return &src
 }
+
+// TestValidateOutputSourceRejectsUnknownKeys pins the wire-level closure of
+// an output source: an unknown key inside source is rejected at template
+// validation rather than dropped by the decoder.
+func TestValidateOutputSourceRejectsUnknownKeys(t *testing.T) {
+	template := map[string]any{
+		"schema_version":    1,
+		"template_id":       "source-unknown-key",
+		"template_version":  "1",
+		"entry_nodes":       []string{"produce"},
+		"terminal_outcomes": []string{"done"},
+		"nodes": []any{map[string]any{
+			"id":       "produce",
+			"action":   map[string]any{"type": "run", "prompt": "work"},
+			"dispatch": map[string]any{"mode": "auto", "controller_id": "c1"},
+			"outputs": []any{map[string]any{
+				"id": "summary", "name": "Summary", "type": "file",
+				"source": map[string]any{"artifact": "result.md", "bogus": "x"},
+			}},
+			"completion": map[string]any{
+				"kind":      "files",
+				"artifacts": []any{map[string]any{"path": "result.md"}},
+			},
+		}},
+	}
+	data, err := json.Marshal(template)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := ValidateTemplateJSON(data); err == nil || !strings.Contains(err.Error(), "bogus") {
+		t.Fatalf("ValidateTemplateJSON() = %v, want a rejection naming the unknown source key", err)
+	}
+	delete(template["nodes"].([]any)[0].(map[string]any)["outputs"].([]any)[0].(map[string]any)["source"].(map[string]any), "bogus")
+	if data, err = json.Marshal(template); err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := ValidateTemplateJSON(data); err != nil {
+		t.Fatalf("ValidateTemplateJSON() without the unknown key = %v, want nil", err)
+	}
+}
