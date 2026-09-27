@@ -23,6 +23,7 @@ package stable
 // the review gates bind to that exact head.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -206,7 +207,7 @@ func (p *factoryWorkerProvider) Prompt(ctx context.Context, sessionID, _ string)
 		return fmt.Errorf("no scripted worker session %q", sessionID)
 	}
 	for name, content := range script.write {
-		if err := os.WriteFile(name, []byte(content), 0o600); err != nil {
+		if err := writeFileAtomic(name, []byte(content)); err != nil {
 			return err
 		}
 	}
@@ -236,6 +237,26 @@ func (p *factoryWorkerProvider) Prompt(ctx context.Context, sessionID, _ string)
 		return ctx.Err()
 	}
 	return nil
+}
+
+// writeFileAtomic replaces path with content through a temporary file and a
+// rename, so a concurrent reader sees the old or the new file, never a
+// truncated one.
+func writeFileAtomic(path string, content []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	if _, err := tmp.Write(content); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmp.Name())
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }
 
 func (p *factoryWorkerProvider) Cancel(context.Context, string) error { return nil }
@@ -807,6 +828,18 @@ revision="$head_sha"
 ` + factoryAdapterPrintf
 }
 
+// factoryFlagAdapter reports resultBefore until the flag file exists and
+// resultAfter from then on, so a test decides when a parked gate resolves.
+func factoryFlagAdapter(flag, resultBefore, resultAfter string) string {
+	return factoryAdapterBody + `if [ -e "` + flag + `" ]; then
+  result="` + resultAfter + `"
+else
+  result="` + resultBefore + `"
+fi
+revision="$head_sha"
+` + factoryAdapterPrintf
+}
+
 // findCursor returns the poll cursor for one activation's gate.
 func (f *factoryE2E) findCursor(wf, actID, gateID string) (workflowcontroller.PollCursor, bool) {
 	rec, _, err := f.cstore.Get(f.controllerID)
@@ -821,7 +854,36 @@ func (f *factoryE2E) findCursor(wf, actID, gateID string) (workflowcontroller.Po
 	return workflowcontroller.PollCursor{}, false
 }
 
-// waitCursor waits until a committed cursor exists for the activation's gate.
+// committedPollCursor returns the cursor recorded by the most recent
+// poll_committed event for the activation's gate. The controller event log is
+// durable, so this finds a committed poll even after its result applied and
+// the live cursor was cleared.
+func (f *factoryE2E) committedPollCursor(wf, actID, gateID string) (workflowcontroller.PollCursor, bool) {
+	data, err := os.ReadFile(filepath.Join(f.cstore.ControllersRoot(), f.controllerID, "events.ndjson"))
+	if err != nil {
+		return workflowcontroller.PollCursor{}, false
+	}
+	var found workflowcontroller.PollCursor
+	ok := false
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		var ev workflowcontroller.ControllerEvent
+		if len(bytes.TrimSpace(line)) == 0 || json.Unmarshal(line, &ev) != nil {
+			continue
+		}
+		if ev.Kind != workflowcontroller.EventPollCommitted || ev.Cursor == nil {
+			continue
+		}
+		c := ev.Cursor
+		if c.WorkflowID == wf && c.ActivationID == actID && c.GateID == gateID {
+			found, ok = *c, true
+		}
+	}
+	return found, ok
+}
+
+// waitCursor waits until a poll has been committed for the activation's gate
+// and returns its cursor: the live cursor while one exists, otherwise the
+// last committed cursor from the controller event log.
 func (f *factoryE2E) waitCursor(t *testing.T, wf, actID, gateID string) workflowcontroller.PollCursor {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -829,7 +891,11 @@ func (f *factoryE2E) waitCursor(t *testing.T, wf, actID, gateID string) workflow
 		if cursor, ok := f.findCursor(wf, actID, gateID); ok && cursor.PollID != "" {
 			return cursor
 		}
+		if cursor, ok := f.committedPollCursor(wf, actID, gateID); ok {
+			return cursor
+		}
 		if time.Now().After(deadline) {
+			logGoroutines(t)
 			t.Fatalf("timed out waiting for poll cursor %s on %s", gateID, actID)
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -1206,9 +1272,13 @@ func TestFactoryWorkReverifyFailedRoutesCorrection(t *testing.T) {
 // clean stop at merge-auth, and the recovered supervisor never starts a
 // single worker session.
 func TestFactoryWorkRecoveryOnFreshSupervisor(t *testing.T) {
+	// Both gates report pending until the test releases them after the
+	// restart, so the review is still parked with committed cursors when the
+	// first supervisor goes away.
+	release := filepath.Join(t.TempDir(), "release-gates")
 	f := newFactoryE2E(t, "factory-e2e-recover", 4, "avenor-issue-115",
-		func(string) string { return factoryEchoAdapter("passed") },
-		func(string) string { return factoryEchoAdapter("passed") })
+		func(string) string { return factoryFlagAdapter(release, "pending", "passed") },
+		func(string) string { return factoryFlagAdapter(release, "pending", "passed") })
 	scriptRunWorker(f.provider, "ses_assessment", map[string]string{"assessment.md": "## Assessment\n"})
 	scriptRunWorker(f.provider, "ses_draft_plan", map[string]string{"plan.md": "## Plan\n"})
 	scriptRunWorker(f.provider, "ses_hardening", map[string]string{"plan.md": "## Hardened plan\n"})
@@ -1280,9 +1350,12 @@ func TestFactoryWorkRecoveryOnFreshSupervisor(t *testing.T) {
 		t.Fatalf("recovered review activation = %s, want the parked %s", recoveredReview.ID, review.ID)
 	}
 
-	// The recovered controller resumes leadership and re-polls the parked
-	// gates through the same adapters to the same clean stop; surviving
-	// cursors only ever move their poll counters forward.
+	// Release the gates. The recovered controller resumes leadership and
+	// re-polls the parked gates through the same adapters to the same clean
+	// stop; surviving cursors only ever move their poll counters forward.
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatalf("release gates: %v", err)
+	}
 	deadline := time.Now().Add(20 * time.Second)
 	for {
 		inst := f.instanceOn(t, f.wf)
