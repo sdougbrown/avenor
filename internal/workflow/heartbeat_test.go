@@ -935,6 +935,68 @@ func TestManagerHeartbeatRenewsExpiringLease(t *testing.T) {
 // ptrTime returns a pointer to t (test helper for inline lease metadata).
 func ptrTime(t time.Time) *time.Time { return &t }
 
+// TestHeartbeatAfterSweepExpiryIsRejectedBeforeAppend proves a heartbeat that
+// validated against a pre-sweep snapshot cannot append an unreplayable event
+// after the live sweep has expired its lease: Apply rejects it with
+// ErrLeaseNotHeld before anything is written, the event log carries no
+// heartbeat event, and the instance keeps replaying cleanly.
+func TestHeartbeatAfterSweepExpiryIsRejectedBeforeAppend(t *testing.T) {
+	m, s, wf, node := newManagerFixture(t)
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	nodeID := NodeID(node)
+	actID := activationByNode(&snap.Instance, nodeID).ID
+	future := time.Now().UTC().Add(time.Hour)
+	claimWithLease(t, s, wf, nodeID, Lease{
+		ID:           "lease-live",
+		ActivationID: actID,
+		Owner:        "alice",
+		TokenDigest:  ownerTokenDigest("live-token"),
+		AcquiredAt:   future.Add(-time.Minute),
+		ExpiresAt:    future,
+	}, "alice")
+	startWithToken(t, m, wf, node, string(actID), "lease-live", "live-token")
+
+	// The live sweep expires the lease in the window between the heartbeat
+	// command's validation and its locked apply.
+	expired, _, err := s.sweepStaleLeases(wf, "stale", time.Now().UTC().Add(2*time.Hour))
+	if err != nil {
+		t.Fatalf("sweepStaleLeases: %v", err)
+	}
+	if expired != 1 {
+		t.Fatalf("sweep expired %d leases, want 1", expired)
+	}
+
+	// A heartbeat carrying the swept lease and the post-sweep revision must
+	// be rejected before any event is appended.
+	fresh, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("reload after sweep: %v", err)
+	}
+	now := time.Now().UTC()
+	_, err = s.ApplyCommand(wf, Command{
+		Kind:             CommandHeartbeat,
+		ExpectedRevision: fresh.Instance.Revision,
+		IdempotencyKey:   "hb-race",
+		Identity:         ExecutionIdentity{WorkflowID: wf, NodeID: nodeID, ActivationID: actID},
+		LeaseID:          "lease-live",
+		Lease:            &Lease{ExpiresAt: now.Add(time.Hour), LastHeartbeatAt: &now},
+	})
+	if !errors.Is(err, ErrLeaseNotHeld) {
+		t.Fatalf("heartbeat after sweep expiry: err = %v, want ErrLeaseNotHeld", err)
+	}
+	if _, _, err := s.loadCurrent(wf); err != nil {
+		t.Fatalf("replay after rejected heartbeat: %v", err)
+	}
+	for _, e := range readEvents(t, s, wf) {
+		if e.Kind == EventHeartbeat {
+			t.Fatalf("event log contains a heartbeat event after rejection: %+v", e)
+		}
+	}
+}
+
 // TestExpireStaleLeasesNotifiesSubscribersAndIndex proves the live sweep's
 // commits land through the same change path as an ordinary command: after the
 // sweep expires a stale lease, a change subscriber wakes immediately (no
