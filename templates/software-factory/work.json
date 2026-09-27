@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "template_id": "software-factory-work",
-  "template_version": "1.2.0",
+  "template_version": "1.3.0",
   "metadata": {
     "title": "Software factory work",
     "description": "One review unit of software-factory work: intake, assessment, plan, hardening, execution, verification, publication, and exact-head CI + external review with declared review branches. Provider-backed nodes dispatch automatically under the software-factory workflow controller and serialize on one worktree concurrency key; hardening stays a provider-backed run with manual dispatch; merge authorization remains a manual human gate. Campaign coordination is out of scope; this template is one workflow for one review unit.",
@@ -333,8 +333,10 @@
   ],
   "terminal_outcomes": ["merged", "abandoned"],
   "params": [
-    { "id": "worktree", "type": "string", "required": true }
+    { "id": "worktree", "type": "string", "required": true },
+    { "id": "worktree_path", "type": "string", "required": true }
   ],
+  "working_directory": { "from_instance_param": "worktree_path" },
   "default_lease_policy": { "ttl_seconds": 900, "heartbeat_interval_seconds": 300 },
   "default_retry_policy": { "max_attempts": 2, "exhaustion": "block" },
   "composition_limits": { "max_depth": 4, "max_children": 32 }

@@ -26,6 +26,9 @@ const (
 	// resolves its concurrency key from, with the shared prefix.
 	factoryWorktreeParam     = "worktree"
 	factoryWorktreeKeyPrefix = "worktree:"
+	// factoryWorktreePathParam is the instance param the template-level
+	// working_directory resolves from: the worktree's absolute path.
+	factoryWorktreePathParam = "worktree_path"
 )
 
 // loadFactoryTemplate reads and strictly validates a shipped factory
@@ -64,12 +67,19 @@ func factoryNodeByID(tmpl Template) map[NodeID]*NodeDefinition {
 func TestSoftwareFactoryTemplateAutoDispatchIsExplicit(t *testing.T) {
 	tmpl := loadFactoryTemplate(t, factoryWorkTemplatePath)
 
-	// The template declares exactly one required instance param: worktree.
-	if len(tmpl.Params) != 1 {
-		t.Fatalf("template params = %+v, want exactly one declared param", tmpl.Params)
+	// The template declares exactly two required instance params: the
+	// worktree key name and the worktree path.
+	if len(tmpl.Params) != 2 {
+		t.Fatalf("template params = %+v, want exactly two declared params", tmpl.Params)
 	}
 	if tmpl.Params[0].ID != factoryWorktreeParam || tmpl.Params[0].Type != "string" || !tmpl.Params[0].Required {
 		t.Fatalf("template param = %+v, want required string %q", tmpl.Params[0], factoryWorktreeParam)
+	}
+	if tmpl.Params[1].ID != factoryWorktreePathParam || tmpl.Params[1].Type != "string" || !tmpl.Params[1].Required {
+		t.Fatalf("template param = %+v, want required string %q", tmpl.Params[1], factoryWorktreePathParam)
+	}
+	if tmpl.WorkingDirectory == nil || tmpl.WorkingDirectory.FromInstanceParam != factoryWorktreePathParam {
+		t.Fatalf("working_directory = %+v, want from_instance_param %q", tmpl.WorkingDirectory, factoryWorktreePathParam)
 	}
 
 	// The audit classifies every node: these dispatch automatically, these
@@ -304,8 +314,22 @@ func TestSoftwareFactoryStackTemplateComposesPinnedWorkChildren(t *testing.T) {
 		if action.ChildKey == "" {
 			t.Errorf("node %q declares no child_key", node.ID)
 		}
-		if len(action.Params) != 1 || action.Params[0].Param != "worktree" || action.Params[0].Value == "" || action.Params[0].FromInstanceParam != "" {
-			t.Errorf("node %q must pass the child worktree param as an explicit literal, got %+v", node.ID, action.Params)
+		// The worktree key name stays an explicit literal (a stable key name,
+		// never a path); the worktree path binds from the parent's own
+		// instance param so no literal machine-specific path lands in a
+		// template.
+		worktreeLiteral := false
+		pathFromParam := false
+		for _, binding := range action.Params {
+			if binding.Param == "worktree" && binding.Value != "" && binding.FromInstanceParam == "" {
+				worktreeLiteral = true
+			}
+			if binding.Param == "worktree_path" && binding.Value == "" && binding.FromInstanceParam != "" {
+				pathFromParam = true
+			}
+		}
+		if !worktreeLiteral || !pathFromParam {
+			t.Errorf("node %q must pass worktree as a literal and worktree_path from a parent param, got %+v", node.ID, action.Params)
 		}
 		for _, binding := range action.InputBindings {
 			if binding.From == nil || binding.From.NodeID != "plan-stack" {

@@ -198,6 +198,32 @@ func TestSoftwareFactoryTemplateNoUndeclaredOutcome(t *testing.T) {
 	}
 }
 
+// TestSoftwareFactoryTemplateWorkingDirectoryResolves asserts the shipped
+// template pins every attempt to the worktree directory the instance
+// supplies: the template-level working_directory names the worktree_path
+// param, and instantiation rejects non-absolute or unclean path values while
+// accepting a clean absolute path that does not exist yet (existence is a
+// dispatch-time check).
+func TestSoftwareFactoryTemplateWorkingDirectoryResolves(t *testing.T) {
+	tmpl := loadSoftwareFactoryTemplate(t)
+	if tmpl.WorkingDirectory == nil || tmpl.WorkingDirectory.FromInstanceParam != "worktree_path" {
+		t.Fatalf("working_directory = %+v, want from_instance_param worktree_path", tmpl.WorkingDirectory)
+	}
+	for _, node := range tmpl.Nodes {
+		if node.WorkingDirectory != nil {
+			t.Errorf("node %q declares a working_directory override; the template default is authoritative", node.ID)
+		}
+	}
+	for _, value := range []string{"relative/worktree", "/tmp/wt/../escape", "/tmp/wt/"} {
+		if err := validateInstanceParams(tmpl, map[string]string{"worktree": "w", "worktree_path": value}); err == nil {
+			t.Errorf("worktree_path %q accepted", value)
+		}
+	}
+	if err := validateInstanceParams(tmpl, map[string]string{"worktree": "w", "worktree_path": "/tmp/not-created-yet"}); err != nil {
+		t.Errorf("clean absolute worktree_path rejected: %v", err)
+	}
+}
+
 // TestSoftwareFactoryTemplateFixtureFilesExist asserts every prompt, loop,
 // and team file referenced by the template exists on disk and that the
 // loop/team configs are well-formed JSON. A dangling fixture would fail at

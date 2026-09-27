@@ -3,16 +3,22 @@
 Durable [Avenor workflow](../../docs/workflow.md) templates for
 software-factory work:
 
-- `work.json` (`software-factory-work@1.2.0`) — one review unit: intake,
+- `work.json` (`software-factory-work@1.3.0`) — one review unit: intake,
   assessment, plan drafting, hardening, execution, verification, publication,
   and exact-head CI + external review with declared review branches. It
-  declares one required instance param, `worktree`, and every keyed node
-  resolves its concurrency key from that param at instantiation.
-- `stack.json` (`software-factory-stack@1.1.0`) — a bounded parent whose
+  declares two required instance params: `worktree`, the concurrency-key
+  name every keyed node resolves its key from at instantiation, and
+  `worktree_path`, the absolute path to that worktree's directory. The
+  template-level `working_directory` resolves from `worktree_path`, so every
+  attempt (and its completion contract) runs in the work item's own worktree
+  directory — concurrent work items never share an artifact directory. The
+  directory must exist when a node dispatches; it is never created by
+  Avenor.
+- `stack.json` (`software-factory-stack@1.2.0`) — a bounded parent whose
   planning node records a typed, immutable stack topology and whose
   kernel-local `workflow` actions compose review-unit children of the work
-  template, passing each child its worktree param explicitly. The parent
-  owns only declared composition and typed handoff.
+  template, passing each child its worktree key name and worktree path
+  explicitly. The parent owns only declared composition and typed handoff.
 
 Campaign coordination — scheduling, indexing, and grouping many issues
 beyond the declared stack composition — is **out of scope** for the workflow
@@ -119,12 +125,15 @@ for the full walkthrough.
 ### 2. Instantiate one work unit per review unit
 
 ```sh
-# Instantiate one work unit. The worktree param is required by the template
-# and immutable once recorded; the fixtures/ directory ships examples for two
-# independent work items and for the stack parent.
-echo '{"params":{"worktree":"avenor-issue-115"},"metadata":{"issue":"115","base_sha":"6e77a0d"}}' > /tmp/instance.json
+# Instantiate one work unit. Both params are required by the template and
+# immutable once recorded: `worktree` names the worktree (the concurrency
+# key), `worktree_path` is the absolute path to its directory — it must be a
+# clean absolute path and must exist by the time a node dispatches; create
+# the worktree yourself before instantiating. The fixtures/ directory ships
+# examples for two independent work items and for the stack parent.
+echo '{"params":{"worktree":"avenor-issue-115","worktree_path":"/absolute/path/to/worktree-issue-115"},"metadata":{"issue":"115","base_sha":"6e77a0d"}}' > /tmp/instance.json
 avenor workflow instantiate --socket /path/to/socket \
-  --template-id software-factory-work --template-version 1.2.0 \
+  --template-id software-factory-work --template-version 1.3.0 \
   --request-file /tmp/instance.json
 ```
 
