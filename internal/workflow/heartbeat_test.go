@@ -934,3 +934,69 @@ func TestManagerHeartbeatRenewsExpiringLease(t *testing.T) {
 
 // ptrTime returns a pointer to t (test helper for inline lease metadata).
 func ptrTime(t time.Time) *time.Time { return &t }
+
+// TestExpireStaleLeasesNotifiesSubscribersAndIndex proves the live sweep's
+// commits land through the same change path as an ordinary command: after the
+// sweep expires a stale lease, a change subscriber wakes immediately (no
+// anti-entropy wait) and a candidate-index query taken right after the wake
+// already observes the re-armed node — no rebuild required.
+func TestExpireStaleLeasesNotifiesSubscribersAndIndex(t *testing.T) {
+	m, s, wf := newAutoDispatchFixture(t, "sweep-notify", "ctl-a", 50)
+	if err := m.RebuildCandidateIndex("sup-1"); err != nil {
+		t.Fatalf("RebuildCandidateIndex: %v", err)
+	}
+
+	// Claim and start the node with an already-expired lease: the activation
+	// is running with a stale lease, so it is not a candidate.
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	actID := activationByNode(&snap.Instance, "start").ID
+	past := time.Now().UTC().Add(-time.Hour)
+	claimWithLease(t, s, wf, "start", Lease{
+		ID:           "lease-ghost",
+		ActivationID: actID,
+		Owner:        "alice",
+		TokenDigest:  ownerTokenDigest("ghost-token"),
+		AcquiredAt:   past.Add(-time.Minute),
+		ExpiresAt:    past,
+	}, "alice")
+	startWithToken(t, m, wf, "start", string(actID), "lease-ghost", "ghost-token")
+	if cands, err := m.CandidatesForController("ctl-a", 10); err != nil || len(cands) != 0 {
+		t.Fatalf("candidates while the stale lease is held = %v, err = %v, want none", cands, err)
+	}
+	preSweepRevision := snap.Instance.Revision
+
+	ch, cancel := m.SubscribeChanges()
+	defer cancel()
+
+	if _, err := m.ExpireStaleLeases(); err != nil {
+		t.Fatalf("ExpireStaleLeases: %v", err)
+	}
+
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the sweep's change notification")
+	}
+
+	// The wake implies the candidate index upsert already happened: the
+	// expired activation is claimable again and visible without a rebuild.
+	cands, err := m.CandidatesForController("ctl-a", 10)
+	if err != nil {
+		t.Fatalf("candidates after wake: %v", err)
+	}
+	found := false
+	for _, c := range cands {
+		if c.Identity.WorkflowID == wf {
+			found = true
+			if c.Revision <= preSweepRevision {
+				t.Fatalf("re-armed candidate revision = %d, want > %d", c.Revision, preSweepRevision)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("candidates after wake = %v, want the re-armed %s", cands, wf)
+	}
+}
