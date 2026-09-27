@@ -258,12 +258,21 @@ func validateWorkingDirectoryRefs(template Template, declared map[string]struct{
 			refs = append(refs, whereRef{fmt.Sprintf("node %q", node.ID), *node.WorkingDirectory})
 		}
 	}
+	required := make(map[string]bool, len(template.Params))
+	for _, param := range template.Params {
+		required[param.ID] = param.Required
+	}
 	for _, wr := range refs {
 		if strings.TrimSpace(wr.ref.FromInstanceParam) == "" {
 			return fmt.Errorf("invalid workflow template: %s working_directory.from_instance_param is required", wr.where)
 		}
 		if _, ok := declared[wr.ref.FromInstanceParam]; !ok {
 			return fmt.Errorf("invalid workflow template: %s working_directory names undeclared instance param %q", wr.where, wr.ref.FromInstanceParam)
+		}
+		// An unsupplied optional param would silently fall back to the
+		// supervisor's working directory, so the named param must be required.
+		if !required[wr.ref.FromInstanceParam] {
+			return fmt.Errorf("invalid workflow template: %s working_directory names instance param %q, which must be declared required", wr.where, wr.ref.FromInstanceParam)
 		}
 	}
 	return nil

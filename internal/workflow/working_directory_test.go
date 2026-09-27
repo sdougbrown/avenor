@@ -119,8 +119,8 @@ func TestValidateWorkingDirectoryDeclarations(t *testing.T) {
 
 // TestResolveNodeWorkingDirectory proves the resolution rule once: the node
 // override wins over the template default, the template default applies when
-// the node declares none, and an unset declaration (or an unsupplied
-// optional param) resolves to empty — the supervisor's working directory.
+// the node declares none, and an unset declaration resolves to empty — the
+// supervisor's working directory.
 func TestResolveNodeWorkingDirectory(t *testing.T) {
 	template := Template{
 		Params:           []TemplateParam{{ID: "default_dir", Type: "string"}, {ID: "node_dir", Type: "string"}},
@@ -196,5 +196,24 @@ func TestInstantiateWorkingDirectoryParamPathRules(t *testing.T) {
 	// exist yet.
 	if err := instantiate("/tmp/wd-instantiate-not-created-yet"); err != nil {
 		t.Fatalf("instantiate(clean absolute path) = %v, want nil", err)
+	}
+}
+
+// TestValidateWorkingDirectoryRequiresRequiredParam proves a working
+// directory can only name a required param: an unsupplied optional param
+// would otherwise resolve to unset and fall back to the supervisor's
+// working directory.
+func TestValidateWorkingDirectoryRequiresRequiredParam(t *testing.T) {
+	var tmpl map[string]any
+	if err := json.Unmarshal(workingDirTemplateJSON(t, "wd-optional", map[string]any{"from_instance_param": "worktree_path"}, nil), &tmpl); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	tmpl["params"] = []any{map[string]any{"id": "worktree_path", "type": "string"}}
+	data, err := json.Marshal(tmpl)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := ValidateTemplateJSON(data); err == nil || !strings.Contains(err.Error(), "must be declared required") {
+		t.Fatalf("ValidateTemplateJSON() = %v, want the required-param rejection", err)
 	}
 }
