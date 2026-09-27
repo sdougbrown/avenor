@@ -94,7 +94,10 @@ type autoHandoffFixture struct {
 	providerCalls atomic.Int32
 }
 
-func newAutoHandoffFixture(t *testing.T, name string, provider *stableScriptedProvider) *autoHandoffFixture {
+// newAutoHandoffFixture builds the fixture; opts run before the startup
+// barrier, so they can set config (e.g. the lease-sweep interval) that the
+// barrier consumes.
+func newAutoHandoffFixture(t *testing.T, name string, provider *stableScriptedProvider, opts ...func(*autoHandoffFixture)) *autoHandoffFixture {
 	t.Helper()
 	sup := NewSupervisor(Config{
 		ControlSocket:   newStableSocketPath(t, name),
@@ -103,6 +106,10 @@ func newAutoHandoffFixture(t *testing.T, name string, provider *stableScriptedPr
 		ShutdownTimeout: 0,
 		WorkflowRoot:    filepath.Join(t.TempDir(), "wfroot"),
 	})
+	f := &autoHandoffFixture{sup: sup, controllerID: "c1"}
+	for _, opt := range opts {
+		opt(f)
+	}
 	// The startup barrier starts leader loops for recovered enabled
 	// controllers, so the fast test cadence must be set before the barrier
 	// runs.
@@ -111,7 +118,8 @@ func newAutoHandoffFixture(t *testing.T, name string, provider *stableScriptedPr
 	if err != nil {
 		t.Fatalf("workflow barrier: %v", err)
 	}
-	f := &autoHandoffFixture{sup: sup, mgr: mgr, cstore: cstore, controllerID: "c1"}
+	f.mgr = mgr
+	f.cstore = cstore
 	sup.newProviderFunc = func(_ runtime.StartOptions, _ string) (runtime.Provider, error) {
 		f.providerCalls.Add(1)
 		return provider, nil
@@ -130,6 +138,7 @@ func (f *autoHandoffFixture) stop(t *testing.T) {
 		t.Logf("cleanup disable: %v", err)
 	}
 	f.sup.stopControllerLoops()
+	f.sup.stopLeaseSweep()
 	for _, rt := range f.sup.listRuntimes() {
 		if id, ok := rt["runtime_id"].(string); ok {
 			_ = f.sup.cancelRuntime(id)
@@ -321,14 +330,11 @@ func autoHandoffChainTemplate(t *testing.T, templateID string, ttlSeconds int64)
 
 // TestAutoHandoffSuccessExitIsNotRedispatched proves a successful worker exit
 // satisfies the node exactly once: an enabled controller dispatches one auto
-// run node with a short lease TTL, the scripted worker ends successfully, and
-// after the live lease-expiry sweep has had every chance to run (the
-// production Manager.ExpireStaleLeases stall detector, driven in a bounded
-// loop well past the TTL) the provider is still invoked exactly once and the
-// activation carries exactly one attempt. It fails today because the
-// supervisor never completes the node: the succeeded attempt leaves the
-// activation running with a held lease, the sweep marks it lease_expired, and
-// the controller re-dispatches the node for a second provider run.
+// run node with a short lease TTL and the supervisor's own live lease-expiry
+// sweep running at a short interval, the scripted worker ends successfully,
+// and the supervisor's handoff completion satisfies the node before the sweep
+// could expire its lease. The bounded wait runs well past several sweep
+// intervals, so a re-dispatch (the pre-fix behavior) would be observed.
 func TestAutoHandoffSuccessExitIsNotRedispatched(t *testing.T) {
 	// The attempt's working directory is the supervisor process cwd (the
 	// direct-run executor's spawn Dir); chdir to a scratch dir so the worker's
@@ -336,7 +342,9 @@ func TestAutoHandoffSuccessExitIsNotRedispatched(t *testing.T) {
 	t.Chdir(t.TempDir())
 	const sessionID = "ses_handoff_once"
 	provider := &stableScriptedProvider{attempt: -1}
-	f := newAutoHandoffFixture(t, "auto-handoff-once", provider)
+	f := newAutoHandoffFixture(t, "auto-handoff-once", provider, func(f *autoHandoffFixture) {
+		f.sup.config.WorkflowLeaseSweepInterval = 250 * time.Millisecond
+	})
 	_ = produceWorkerDeclaredResult(t, provider, sessionID, "", "")
 	template := map[string]any{
 		"schema_version":   1,
@@ -365,35 +373,13 @@ func TestAutoHandoffSuccessExitIsNotRedispatched(t *testing.T) {
 		t.Fatalf("provider invoked %d times before the successful exit, want exactly 1", calls)
 	}
 
-	// Bounded sweep window: drive the production live stall detector
-	// repeatedly for well past the 1s TTL, giving the lease-expiry sweep and
-	// the controller's re-dispatch every chance to run. The activation must
-	// never become lease_expired and no second attempt may ever start. The
-	// lease_expired status itself is recorded (not fatal) so the failure
-	// observes the actual re-dispatch it causes. The window exceeds the
-	// runner's 5s anti-entropy cadence because the sweep applies the
-	// lease_expired event through the store without a manager change
-	// notification, so re-discovery waits for the next candidate refresh.
-	sawLeaseExpired := false
-	deadline := time.Now().Add(8 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := f.mgr.ExpireStaleLeases(); err != nil {
-			t.Fatalf("ExpireStaleLeases: %v", err)
-		}
-		inst := f.instance(t, wf)
-		if act := activationFor(&inst, "start"); act != nil && act.Status == workflow.ActivationLeaseExpired {
-			sawLeaseExpired = true
-		}
-		if len(inst.Attempts) > 1 {
-			t.Fatalf("second attempt dispatched after a successful exit (activation went lease_expired=%v); observed %s",
-				sawLeaseExpired, describeInstance(&inst, f.providerCalls.Load()))
-		}
-		if calls := f.providerCalls.Load(); calls > 1 {
-			t.Fatalf("provider invoked %d times after a successful exit (activation went lease_expired=%v); observed %s",
-				calls, sawLeaseExpired, describeInstance(&inst, calls))
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
+	// The supervisor's completion must satisfy the node before the live sweep
+	// (250ms cadence, 1s TTL) could expire its lease: bounded wait across
+	// several sweep intervals, then exactly one attempt and one invocation.
+	f.waitForInstance(t, wf, "the supervisor's completion to satisfy the start node", func(inst *workflow.WorkflowInstance) bool {
+		act := activationFor(inst, "start")
+		return act != nil && act.Status == workflow.ActivationSatisfied
+	})
 
 	// Final state: exactly one attempt, exactly one provider invocation, and
 	// the node resolved by the supervisor's own completion (satisfied), never
