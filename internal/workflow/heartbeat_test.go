@@ -1062,3 +1062,34 @@ func TestExpireStaleLeasesNotifiesSubscribersAndIndex(t *testing.T) {
 		t.Fatalf("candidates after wake = %v, want the re-armed %s", cands, wf)
 	}
 }
+
+// TestApplyCommandRejectsUnreducibleEventBeforeAppend proves the store never
+// appends an event the reducer rejects: a terminate command naming an attempt
+// the activation does not have passes Apply but fails Reduce, and the command
+// is refused with the event log untouched and the instance still replayable.
+func TestApplyCommandRejectsUnreducibleEventBeforeAppend(t *testing.T) {
+	_, s, wf, node := newManagerFixture(t)
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	actID := activationByNode(&snap.Instance, NodeID(node)).ID
+	before := len(readEvents(t, s, wf))
+
+	_, err = s.ApplyCommand(wf, Command{
+		Kind:             CommandTerminate,
+		ExpectedRevision: snap.Instance.Revision,
+		IdempotencyKey:   "terminate-ghost",
+		Identity:         ExecutionIdentity{WorkflowID: wf, NodeID: NodeID(node), ActivationID: actID, AttemptID: "att_ghost"},
+		AttemptStatus:    AttemptFailed,
+	})
+	if err == nil {
+		t.Fatal("terminate for an unknown attempt succeeded, want a reducer rejection")
+	}
+	if after := len(readEvents(t, s, wf)); after != before {
+		t.Fatalf("event log grew from %d to %d events after a rejected command", before, after)
+	}
+	if _, _, err := s.loadCurrent(wf); err != nil {
+		t.Fatalf("replay after rejected command: %v", err)
+	}
+}

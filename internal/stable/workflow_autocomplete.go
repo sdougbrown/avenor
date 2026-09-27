@@ -69,9 +69,6 @@ func (s *Supervisor) finishWorkflowAttempt(ec workflow.ExecutorContext, hb *leas
 			ec.WorkflowID, ec.NodeID, ec.AttemptID, err)
 		return
 	}
-	// The single residual detection point: the success fact is recorded but
-	// the completion failed. A future escalation hook (e.g. retrying the
-	// completion through an external adapter) belongs exactly here.
 	if s.testHooks.completeAutoPre != nil {
 		s.testHooks.completeAutoPre()
 	}
