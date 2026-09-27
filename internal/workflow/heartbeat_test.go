@@ -997,20 +997,12 @@ func TestHeartbeatAfterSweepExpiryIsRejectedBeforeAppend(t *testing.T) {
 	}
 }
 
-// TestExpireStaleLeasesNotifiesSubscribersAndIndex proves the live sweep's
-// commits land through the same change path as an ordinary command: after the
-// sweep expires a stale lease, a change subscriber wakes immediately (no
-// anti-entropy wait) and a candidate-index query taken right after the wake
-// already observes the re-armed node — no rebuild required.
 // TestExpireStaleLeasesWithoutExpiryDoesNotNotify proves a sweep that
 // expires nothing leaves subscribers asleep: the notification is a
 // synchronous non-blocking send, so an empty channel right after the sweep
 // returns means none was sent.
 func TestExpireStaleLeasesWithoutExpiryDoesNotNotify(t *testing.T) {
 	m, s, wf := newAutoDispatchFixture(t, "sweep-quiet", "ctl-a", 50)
-	if err := m.RebuildCandidateIndex("sup-1"); err != nil {
-		t.Fatalf("RebuildCandidateIndex: %v", err)
-	}
 	snap, _, err := s.loadCurrent(wf)
 	if err != nil {
 		t.Fatalf("loadCurrent: %v", err)
@@ -1043,6 +1035,11 @@ func TestExpireStaleLeasesWithoutExpiryDoesNotNotify(t *testing.T) {
 	}
 }
 
+// TestExpireStaleLeasesNotifiesSubscribersAndIndex proves the live sweep's
+// commits land through the same change path as an ordinary command: after the
+// sweep expires a stale lease, a change subscriber wakes immediately (no
+// anti-entropy wait) and a candidate-index query taken right after the wake
+// already observes the re-armed node — no rebuild required.
 func TestExpireStaleLeasesNotifiesSubscribersAndIndex(t *testing.T) {
 	m, s, wf := newAutoDispatchFixture(t, "sweep-notify", "ctl-a", 50)
 	if err := m.RebuildCandidateIndex("sup-1"); err != nil {
@@ -1124,8 +1121,8 @@ func TestApplyCommandRejectsUnreducibleEventBeforeAppend(t *testing.T) {
 		Identity:         ExecutionIdentity{WorkflowID: wf, NodeID: NodeID(node), ActivationID: actID, AttemptID: "att_ghost"},
 		AttemptStatus:    AttemptFailed,
 	})
-	if err == nil {
-		t.Fatal("terminate for an unknown attempt succeeded, want a reducer rejection")
+	if err == nil || !strings.Contains(err.Error(), "terminated attempt not found") {
+		t.Fatalf("terminate for an unknown attempt: error = %v, want the reducer's terminated-attempt-not-found rejection", err)
 	}
 	if after := len(readEvents(t, s, wf)); after != before {
 		t.Fatalf("event log grew from %d to %d events after a rejected command", before, after)
