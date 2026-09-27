@@ -196,7 +196,7 @@ func TestInvokeDetectsEditedManifest(t *testing.T) {
 func TestInvokeTimeoutKillsProcessGroup(t *testing.T) {
 	dir := stageAdapterDir(t)
 	exe := stageFixture(t, dir, "hang.sh")
-	writeManifest(t, dir, "hang.json", "hang", exe, nil, 500)
+	writeManifest(t, dir, "hang.json", "hang", exe, nil, 2000)
 	m := loadOne(t, dir, "hang")
 
 	if _, err := Invoke(context.Background(), m, testRequest(testInputJSON)); !errors.Is(err, ErrAdapterTimeout) {
