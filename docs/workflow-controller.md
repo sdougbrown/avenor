@@ -117,8 +117,10 @@ A parked review's gates are polled on the cursor cadence visible in
 `controller status`. An adapter `passed` on every required gate follows the
 node's declared success outcome; advisory results route through the gates'
 declared `result_outcomes` (correction branches, replan). Nothing else lands:
-a result whose subject does not match the pinned exact head is rejected, and
-a superseded head's cursors are dropped.
+a result whose reported subject does not match the pinned exact head is not
+applied (the gate stays parked, polls again with backoff, and the controller
+records a `poll_subject_mismatch` diagnostic until a matching result lands),
+and a superseded head's cursors are dropped.
 
 ## 5. The human checkpoints
 
