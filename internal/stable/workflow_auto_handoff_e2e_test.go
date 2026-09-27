@@ -433,6 +433,15 @@ func TestAutoHandoffSatisfiesNodeAndDispatchesDependent(t *testing.T) {
 	if produce == nil || produce.Status != workflow.ActivationSatisfied {
 		t.Fatalf("produce not satisfied; observed %s", describeInstance(&inst, f.providerCalls.Load()))
 	}
+	wantDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	for _, a := range attemptsForNode(&inst, "produce") {
+		if a.Status == workflow.AttemptSucceeded && a.WorkingDirectory != wantDir {
+			t.Fatalf("produce attempt working directory = %q, want the attempt's spawn dir %q", a.WorkingDirectory, wantDir)
+		}
+	}
 	if produce.SelectedOutcome != workflow.OutcomeName(declared.Outcome) {
 		t.Fatalf("produce selected outcome = %q, want %q; observed %s",
 			produce.SelectedOutcome, declared.Outcome, describeInstance(&inst, f.providerCalls.Load()))

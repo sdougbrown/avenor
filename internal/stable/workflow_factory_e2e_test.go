@@ -611,6 +611,21 @@ func (f *factoryE2E) completeManualNode(t *testing.T, wf, nodeID, outcome string
 			}
 			return false
 		})
+		// A manual node's clean exit is a plain terminal fact: the supervisor
+		// neither completes it nor relabels the attempt, and the activation
+		// waits for the claim holder's completion.
+		inst := f.instanceOn(t, wf)
+		for _, a := range inst.Attempts {
+			if string(a.ID) == attemptID && a.MarkerLabel == "contract_unmet" {
+				t.Fatalf("%s manual attempt relabeled contract_unmet by supervisor completion", nodeID)
+			}
+		}
+		for _, a := range inst.Activations {
+			if a.ID == act.ID && a.Status != workflow.ActivationRunning {
+				t.Fatalf("%s manual activation status = %s after its worker exited, want running until the human completes it; observed %s",
+					nodeID, a.Status, describeInstance(&inst, int32(f.provider.sessionCount())))
+			}
+		}
 	}
 	cmd := map[string]any{
 		"op": "complete", "node_id": nodeID, "activation_id": string(act.ID),
