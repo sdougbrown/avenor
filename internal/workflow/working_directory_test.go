@@ -10,6 +10,8 @@ package workflow
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -215,5 +217,31 @@ func TestValidateWorkingDirectoryRequiresRequiredParam(t *testing.T) {
 	}
 	if err := ValidateTemplateJSON(data); err == nil || !strings.Contains(err.Error(), "must be declared required") {
 		t.Fatalf("ValidateTemplateJSON() = %v, want the required-param rejection", err)
+	}
+}
+
+// TestCheckWorkingDirectory pins the dispatch-time usability check: an
+// existing directory passes, and a relative path, a missing path, and a path
+// to a regular file are each rejected with their own reason.
+func TestCheckWorkingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "not-a-dir")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckWorkingDirectory(dir); err != nil {
+		t.Fatalf("CheckWorkingDirectory(existing dir) = %v, want nil", err)
+	}
+	for _, tc := range []struct {
+		path    string
+		wantErr string
+	}{
+		{"relative/dir", "must be an absolute path"},
+		{filepath.Join(dir, "missing"), "does not exist"},
+		{file, "is not a directory"},
+	} {
+		if err := CheckWorkingDirectory(tc.path); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			t.Fatalf("CheckWorkingDirectory(%q) = %v, want containing %q", tc.path, err, tc.wantErr)
+		}
 	}
 }
