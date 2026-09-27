@@ -75,6 +75,9 @@ func TestWorkflowWorkingDirectoryMissingDirFailsPreStart(t *testing.T) {
 		if attempt.Status != workflow.AttemptFailed {
 			t.Fatalf("start attempt %s status = %s, want failed (pre-start)", attempt.ID, attempt.Status)
 		}
+		if attempt.WorkingDirectory != "" {
+			t.Fatalf("start attempt %s working_directory = %q, want empty (no runtime started)", attempt.ID, attempt.WorkingDirectory)
+		}
 	}
 	if calls := f.providerCalls.Load(); calls != 0 {
 		t.Fatalf("provider invoked %d times, want 0 (the attempt never ran)", calls)

@@ -221,8 +221,9 @@ func TestValidateWorkingDirectoryRequiresRequiredParam(t *testing.T) {
 }
 
 // TestCheckWorkingDirectory pins the dispatch-time usability check: an
-// existing directory passes, and a relative path, a missing path, and a path
-// to a regular file are each rejected with their own reason.
+// existing directory passes, and a relative path, a missing path, a path to a
+// regular file, and a path whose parent is a regular file (a stat error other
+// than not-exist) are each rejected with their own reason.
 func TestCheckWorkingDirectory(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "not-a-dir")
@@ -239,6 +240,7 @@ func TestCheckWorkingDirectory(t *testing.T) {
 		{"relative/dir", "must be an absolute path"},
 		{filepath.Join(dir, "missing"), "does not exist"},
 		{file, "is not a directory"},
+		{filepath.Join(file, "child"), "is unusable"},
 	} {
 		if err := CheckWorkingDirectory(tc.path); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 			t.Fatalf("CheckWorkingDirectory(%q) = %v, want containing %q", tc.path, err, tc.wantErr)
