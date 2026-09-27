@@ -382,9 +382,61 @@ func TestResolveJSONPointer(t *testing.T) {
 			t.Fatalf("resolveJSONPointer(%q) = %s, want %s", test.pointer, got, test.want)
 		}
 	}
-	for _, pointer := range []string{"/missing", "/a/b/9", "no-slash"} {
+	for _, pointer := range []string{"/missing", "/a/b/9", "no-slash", "/s/x"} {
 		if _, err := resolveJSONPointer(data, pointer); err == nil {
 			t.Fatalf("resolveJSONPointer(%q) succeeded, want error", pointer)
 		}
+	}
+}
+
+// TestEvaluateAutoCompletionRejectsPathsOutsideWorkingDir pins the
+// working-directory containment of declared artifact and output-source
+// paths: a traversal and an absolute path are both rejected.
+func TestEvaluateAutoCompletionRejectsPathsOutsideWorkingDir(t *testing.T) {
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "work")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(parent, "secret")
+	if err := os.WriteFile(secret, []byte(`{"v":"s"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"../secret", secret} {
+		node := autoEvalNode(nil, &CompletionContract{
+			Kind:      CompletionFiles,
+			Artifacts: []ArtifactRequirement{{Path: path}},
+		}, map[OutcomeName]NodeID{"done": "next"})
+		if _, err := EvaluateAutoCompletion(evalTemplate(node, "done"), node, dir, ""); err == nil ||
+			!(strings.Contains(err.Error(), "escapes the working directory") || strings.Contains(err.Error(), "must be relative")) {
+			t.Fatalf("artifact %q error = %v, want a working-directory rejection", path, err)
+		}
+
+		def := stringOutput("v", true, &OutputSource{Artifact: path, Pointer: "/v"})
+		if _, _, err := resolveAutoOutput(def, "", dir); err == nil ||
+			!(strings.Contains(err.Error(), "escapes the working directory") || strings.Contains(err.Error(), "must be relative")) {
+			t.Fatalf("output source %q error = %v, want a working-directory rejection", path, err)
+		}
+	}
+}
+
+// TestResolveAutoOutputRejectsMismatchedSourceShape pins the runtime guard
+// behind the validation rule: a pointer source on a file output and a
+// whole-artifact source on a non-file output never resolve.
+func TestResolveAutoOutputRejectsMismatchedSourceShape(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "data.json"), []byte(`{"n":"x"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	filePointer := OutputDefinition{ID: "f", Name: "F", Type: OutputFile, Required: true,
+		Source: &OutputSource{Artifact: "data.json", Pointer: "/n"}}
+	if _, _, err := resolveAutoOutput(filePointer, "", dir); err == nil ||
+		!strings.Contains(err.Error(), "a pointer source requires a non-file output") {
+		t.Fatalf("file output with pointer error = %v, want rejection", err)
+	}
+	stringWhole := stringOutput("s", true, &OutputSource{Artifact: "data.json"})
+	if _, _, err := resolveAutoOutput(stringWhole, "", dir); err == nil ||
+		!strings.Contains(err.Error(), "whole-artifact source requires a file output") {
+		t.Fatalf("string output with whole artifact error = %v, want rejection", err)
 	}
 }

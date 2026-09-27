@@ -8,17 +8,20 @@ import (
 
 // TestValidateOutputSourceShape pins the typed-Go output-source rules the
 // JSON Schema cannot express: exactly one of artifact or git, pointer
-// requires an artifact, git can only name head, and the artifact path must
-// be declared in the node's files completion contract.
+// requires an artifact, git can only name head, the artifact path must be
+// declared in the node's files completion contract, and the source shape
+// must fit the output type.
 func TestValidateOutputSourceShape(t *testing.T) {
 	tests := []struct {
-		name    string
-		source  map[string]any
-		wantErr string
+		name       string
+		outputType OutputType
+		source     map[string]any
+		wantErr    string
 	}{
 		{
-			name:   "whole artifact source",
-			source: map[string]any{"artifact": "result.md"},
+			name:       "whole artifact source",
+			outputType: OutputFile,
+			source:     map[string]any{"artifact": "result.md"},
 		},
 		{
 			name:   "pointer source into declared artifact",
@@ -49,6 +52,23 @@ func TestValidateOutputSourceShape(t *testing.T) {
 			wantErr: `output "summary": git source "tree" must be "head"`,
 		},
 		{
+			name:    "whole artifact source on a non-file output",
+			source:  map[string]any{"artifact": "result.md"},
+			wantErr: `output "summary": a whole-artifact source requires a file output`,
+		},
+		{
+			name:       "pointer source on a file output",
+			outputType: OutputFile,
+			source:     map[string]any{"artifact": "result.md", "pointer": "/name"},
+			wantErr:    `output "summary": a pointer source requires a non-file output`,
+		},
+		{
+			name:       "git source on a non-string output",
+			outputType: OutputNumber,
+			source:     map[string]any{"git": "head"},
+			wantErr:    `output "summary": git source requires a string output`,
+		},
+		{
 			name:    "artifact not declared in the contract",
 			source:  map[string]any{"artifact": "other.md"},
 			wantErr: `output "summary" artifact source "other.md" is not declared in the node's files completion contract`,
@@ -56,6 +76,10 @@ func TestValidateOutputSourceShape(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			outputType := test.outputType
+			if outputType == "" {
+				outputType = OutputString
+			}
 			tmpl := Template{
 				SchemaVersion:    1,
 				TemplateID:       "source-shape",
@@ -69,7 +93,7 @@ func TestValidateOutputSourceShape(t *testing.T) {
 					Outputs: []OutputDefinition{{
 						ID:     "summary",
 						Name:   "Summary",
-						Type:   OutputString,
+						Type:   outputType,
 						Source: decodeOutputSource(t, test.source),
 					}},
 					Completion: &CompletionContract{

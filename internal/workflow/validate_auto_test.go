@@ -113,3 +113,58 @@ func TestValidateAutoProviderNodeRejectsExplicitCompletion(t *testing.T) {
 		})
 	}
 }
+
+// TestValidateAutoProviderNodeRejectsChangedFromBase pins that an auto
+// provider node cannot declare a git contract the supervisor can never
+// evaluate: no base commit is recorded, so changed_from_base would exhaust
+// every attempt. Manual nodes and other git requirements are unaffected.
+func TestValidateAutoProviderNodeRejectsChangedFromBase(t *testing.T) {
+	gitContract := func(node map[string]any, req map[string]any) {
+		node["action"] = map[string]any{"type": "run", "prompt": "work"}
+		node["completion"] = map[string]any{"kind": "git", "git": req}
+	}
+	tests := []struct {
+		name    string
+		mutate  func(map[string]any)
+		wantErr string
+	}{
+		{
+			name: "auto run node with changed_from_base",
+			mutate: func(template map[string]any) {
+				node := template["nodes"].([]any)[1].(map[string]any)
+				gitContract(node, map[string]any{"changed_from_base": true})
+				node["dispatch"] = map[string]any{"mode": "auto", "controller_id": "c1"}
+			},
+			wantErr: "must not declare completion.git.changed_from_base",
+		},
+		{
+			name: "auto run node with clean only",
+			mutate: func(template map[string]any) {
+				node := template["nodes"].([]any)[1].(map[string]any)
+				gitContract(node, map[string]any{"clean": true})
+				node["dispatch"] = map[string]any{"mode": "auto", "controller_id": "c1"}
+			},
+		},
+		{
+			name: "manual run node keeps changed_from_base",
+			mutate: func(template map[string]any) {
+				node := template["nodes"].([]any)[1].(map[string]any)
+				gitContract(node, map[string]any{"changed_from_base": true})
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := ValidateTemplateJSON(mutateTemplate(t, test.mutate))
+			if test.wantErr == "" {
+				if err != nil {
+					t.Fatalf("ValidateTemplateJSON() rejected a valid template: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("ValidateTemplateJSON() error = %v, want containing %q", err, test.wantErr)
+			}
+		})
+	}
+}

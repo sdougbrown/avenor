@@ -772,6 +772,10 @@ func validateDispatch(policy *DispatchPolicy, node NodeDefinition) error {
 			if node.Completion != nil && node.Completion.Kind == CompletionExplicit {
 				return fmt.Errorf("dispatch.mode %q %s nodes must not declare completion.kind %q (the supervisor completes auto provider nodes from the declared contract; no worker handoff exists)", DispatchAuto, node.Action.Kind, CompletionExplicit)
 			}
+			if node.Completion != nil && node.Completion.Kind == CompletionGit &&
+				node.Completion.Git != nil && node.Completion.Git.ChangedFromBase {
+				return fmt.Errorf("dispatch.mode %q %s nodes must not declare completion.git.changed_from_base (no base commit is recorded for supervisor-side evaluation)", DispatchAuto, node.Action.Kind)
+			}
 			return nil
 		case ActionExternal:
 			return validateAutoExternalDispatch(policy, node)
@@ -859,9 +863,18 @@ func validateOutputSources(node NodeDefinition) error {
 			if src.Git != "head" {
 				return fmt.Errorf("output %q: git source %q must be %q", def.ID, src.Git, "head")
 			}
+			if def.Type != OutputString {
+				return fmt.Errorf("output %q: git source requires a %s output", def.ID, OutputString)
+			}
 		default:
 			if !contractArtifacts[src.Artifact] {
 				return fmt.Errorf("output %q artifact source %q is not declared in the node's files completion contract", def.ID, src.Artifact)
+			}
+			if src.Pointer == "" && def.Type != OutputFile {
+				return fmt.Errorf("output %q: a whole-artifact source requires a %s output", def.ID, OutputFile)
+			}
+			if src.Pointer != "" && def.Type == OutputFile {
+				return fmt.Errorf("output %q: a pointer source requires a non-file output", def.ID)
 			}
 		}
 	}

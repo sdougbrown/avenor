@@ -184,8 +184,10 @@ requirements and the declared output sources are checked against the work
 product. A contract that is not met is recorded as a failed attempt with the
 `contract_unmet` marker, so the node's retry policy and exhaustion apply.
 For that reason an auto provider node must not declare `completion.kind:
-explicit` — such templates are rejected. Manual nodes and external nodes
-keep explicit worker/operator handoff.
+explicit`, and must not declare `completion.git.changed_from_base` (no base
+commit is recorded for the supervisor to compare against) — such templates
+are rejected. Manual nodes and external nodes keep explicit worker/operator
+handoff.
 
 ### Outputs
 
@@ -206,7 +208,10 @@ resolves against the attempt's working directory:
 
 An `artifact` source path must be one of the node's `files` contract
 artifacts, a `pointer` requires an `artifact`, and exactly one of `artifact`
-or `git` may be declared. Without a `source`, a `file` output on a node
+or `git` may be declared. The source must fit the output type: a whole
+`artifact` source requires a `file` output, a `pointer` source requires a
+non-`file` output, and a `git` source requires a `string` output. Artifact
+and source paths must stay inside the attempt's working directory. Without a `source`, a `file` output on a node
 whose files contract declares exactly one artifact binds to that artifact.
 Required outputs that do not resolve leave the contract unmet; optional
 ones are omitted.
