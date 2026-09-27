@@ -108,6 +108,11 @@ type SpawnParams struct {
 	NodeID       string `json:"node_id,omitempty"`
 	ActivationID string `json:"activation_id,omitempty"`
 	AttemptID    string `json:"attempt_id,omitempty"`
+	// workflowTerminate is the workflow attempt's termination callback. It is
+	// installed on the runtime at construction, before the runtime can run,
+	// so a runtime that finishes before its executor returns still records
+	// its terminal fact. Set only by workflow executors.
+	workflowTerminate func(child *childRuntime, status workflow.AttemptStatus)
 }
 
 type SpawnResult struct {
@@ -347,6 +352,10 @@ type testHooks struct {
 	// test can corrupt the snapshot inside that window deterministically.
 	// nil in production.
 	controllerStatusPreNextPoll func()
+	// afterAttemptSpawn, when non-nil (set by tests), runs in a workflow
+	// executor right after the attempt's runtime is spawned, with its runtime
+	// ID, so a test can let the runtime finish before Dispatch returns.
+	afterAttemptSpawn func(runtimeID string)
 }
 
 type Supervisor struct {
@@ -1121,6 +1130,9 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		nodeID:       params.NodeID,
 		activationID: params.ActivationID,
 		attemptID:    params.AttemptID,
+	}
+	if terminate := params.workflowTerminate; terminate != nil {
+		child.onWorkflowTerminate = func(status workflow.AttemptStatus) { terminate(child, status) }
 	}
 	treeToken := res.consumeLocked()
 	if treeToken != "" {
@@ -4815,12 +4827,13 @@ type directRunExecutor struct{ sup *Supervisor }
 // executor change.
 //
 // Lease liveness: every executor starts one heartbeat goroutine per attempt
-// once its runtime has started (see startLeaseHeartbeat). The heartbeat
+// just before spawning its runtime (see startLeaseHeartbeat). The heartbeat
 // renews the attempt's lease every TTL/3 via
 // workflowManager().Heartbeat(workflowID, nodeID, activationID, leaseID,
-// ec.OwnerToken) and stops when the runtime reaches a terminal state (via
-// registerWorkflowTermination), when the lease is no longer held, or on
-// supervisor shutdown — it never outlives the runtime.
+// ec.OwnerToken) and stops when the runtime reaches a terminal state (via the
+// workflowTerminator callback the runtime carries from construction), when
+// the spawn fails, when the lease is no longer held, or on supervisor
+// shutdown — it never outlives the runtime.
 
 func (e *directRunExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext) error {
 	params := SpawnParams{
@@ -4844,17 +4857,21 @@ func (e *directRunExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorCo
 		params.Dir = cwd
 	}
 
+	hb := e.sup.startLeaseHeartbeat(ec)
+	params.workflowTerminate = e.sup.workflowTerminator(ec, hb)
 	result, err := e.sup.spawnForAttempt(params, ec.Admission)
 	if err != nil {
 		// Provider-start (or any synchronous spawn) error: the attempt was
 		// already started durably by the manager; record termination before
 		// returning so the attempt is never left dangling.
+		hb.StopAndWait()
 		_ = e.sup.workflowManager().RecordAttemptTerminated(
 			ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, workflow.AttemptFailed)
 		return err
 	}
-	hb := e.sup.startLeaseHeartbeat(ec)
-	e.sup.registerWorkflowTermination(result.RuntimeID, ec, hb)
+	if e.sup.testHooks.afterAttemptSpawn != nil {
+		e.sup.testHooks.afterAttemptSpawn(result.RuntimeID)
+	}
 	return nil
 }
 
@@ -4888,18 +4905,22 @@ func (e *loopExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext
 		params.Dir = cwd
 	}
 
+	hb := e.sup.startLeaseHeartbeat(ec)
+	params.workflowTerminate = e.sup.workflowTerminator(ec, hb)
 	result, err := e.sup.spawnForAttempt(params, ec.Admission)
 	if err != nil {
 		// Provider-start (or any synchronous spawn) error: the attempt was
 		// already started durably by the manager; record termination before
 		// returning so the attempt is never left dangling.
+		hb.StopAndWait()
 		kind, label := workflowMarkerForKind(ec.Action.Kind)
 		_ = e.sup.workflowManager().RecordAttemptTerminated(
 			ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, workflow.AttemptFailed, kind, label)
 		return err
 	}
-	hb := e.sup.startLeaseHeartbeat(ec)
-	e.sup.registerWorkflowTermination(result.RuntimeID, ec, hb)
+	if e.sup.testHooks.afterAttemptSpawn != nil {
+		e.sup.testHooks.afterAttemptSpawn(result.RuntimeID)
+	}
 	return nil
 }
 
@@ -4933,18 +4954,22 @@ func (e *teamExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext
 		params.Dir = cwd
 	}
 
+	hb := e.sup.startLeaseHeartbeat(ec)
+	params.workflowTerminate = e.sup.workflowTerminator(ec, hb)
 	result, err := e.sup.spawnForAttempt(params, ec.Admission)
 	if err != nil {
 		// Provider-start (or any synchronous spawn) error: the attempt was
 		// already started durably by the manager; record termination before
 		// returning so the attempt is never left dangling.
+		hb.StopAndWait()
 		kind, label := workflowMarkerForKind(ec.Action.Kind)
 		_ = e.sup.workflowManager().RecordAttemptTerminated(
 			ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, workflow.AttemptFailed, kind, label)
 		return err
 	}
-	hb := e.sup.startLeaseHeartbeat(ec)
-	e.sup.registerWorkflowTermination(result.RuntimeID, ec, hb)
+	if e.sup.testHooks.afterAttemptSpawn != nil {
+		e.sup.testHooks.afterAttemptSpawn(result.RuntimeID)
+	}
 	return nil
 }
 
@@ -4995,23 +5020,14 @@ func (child *childRuntime) terminalMarkerLabel() string {
 	return child.workflowMarkerLabel
 }
 
-// registerWorkflowTermination attaches a termination callback to the spawned
-// workflow child so the workflow manager learns the attempt's final status
-// before the child's runtime state is cleaned up. The callback runs
-// finishWorkflowAttempt: on a successful auto-provider exit the lease
-// heartbeat keeps running through the terminal fact and the supervisor's
-// completion, so the lease cannot expire in between; on every other path it
-// stops the heartbeat before recording the terminal fact.
-func (s *Supervisor) registerWorkflowTermination(rtID string, ec workflow.ExecutorContext, hb *leaseHeartbeat) {
-	s.controlMu.Lock()
-	child := s.runtimes[rtID]
-	s.controlMu.Unlock()
-	if child == nil {
-		return
-	}
-	child.mu.Lock()
-	defer child.mu.Unlock()
-	child.onWorkflowTerminate = func(status workflow.AttemptStatus) {
+// workflowTerminator returns the termination callback a workflow attempt's
+// runtime carries from construction. It runs finishWorkflowAttempt: on a
+// successful auto-provider exit the lease heartbeat keeps running through the
+// terminal fact and the supervisor's completion, so the lease cannot expire in
+// between; on every other path it stops the heartbeat before recording the
+// terminal fact.
+func (s *Supervisor) workflowTerminator(ec workflow.ExecutorContext, hb *leaseHeartbeat) func(*childRuntime, workflow.AttemptStatus) {
+	return func(child *childRuntime, status workflow.AttemptStatus) {
 		s.finishWorkflowAttempt(ec, hb, status, child)
 	}
 }

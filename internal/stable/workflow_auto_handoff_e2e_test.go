@@ -933,3 +933,51 @@ func autoHandoffLoopTemplate(t *testing.T, templateID, loopPath string) []byte {
 	}
 	return mustJSON(t, template)
 }
+
+// TestAutoHandoffRuntimeFinishingBeforeDispatchReturns proves an attempt
+// whose runtime finishes its turn before the executor's Dispatch returns is
+// still terminated and completed: the afterAttemptSpawn hook holds Dispatch
+// until the runtime is done, and the workflow must still complete with no
+// lease heartbeat left running.
+func TestAutoHandoffRuntimeFinishingBeforeDispatchReturns(t *testing.T) {
+	t.Chdir(t.TempDir())
+	provider := &stableScriptedProvider{attempt: -1}
+	_ = produceWorkerDeclaredResult(t, provider, "ses_fast", "", "")
+	f := newAutoHandoffFixture(t, "auto-handoff-fast-exit", provider)
+	f.sup.testHooks.afterAttemptSpawn = func(runtimeID string) {
+		f.sup.controlMu.Lock()
+		child := f.sup.runtimes[runtimeID]
+		f.sup.controlMu.Unlock()
+		if child == nil {
+			return
+		}
+		select {
+		case <-child.done:
+		case <-time.After(5 * time.Second):
+		}
+	}
+	template := map[string]any{
+		"schema_version":   1,
+		"template_id":      "tmpl-auto-handoff-fast-exit",
+		"template_version": "1",
+		"entry_nodes":      []string{"start"},
+		"nodes": []any{map[string]any{
+			"id":           "start",
+			"action":       map[string]any{"type": "run", "prompt": "do the thing"},
+			"dispatch":     map[string]any{"mode": "auto", "controller_id": "c1"},
+			"retry_policy": map[string]any{"max_attempts": 1, "exhaustion": "block"},
+		}},
+		"terminal_outcomes": []string{"done"},
+	}
+	wf := f.addWorkflow(t, "tmpl-auto-handoff-fast-exit", mustJSON(t, template))
+	f.enableController(t, 2)
+
+	f.waitForInstance(t, wf, "the workflow to complete although the runtime finished before Dispatch returned", func(inst *workflow.WorkflowInstance) bool {
+		return inst.Status == workflow.WorkflowCompleted
+	})
+	f.waitForInstance(t, wf, "every lease heartbeat to stop", func(*workflow.WorkflowInstance) bool {
+		f.sup.heartbeatMu.Lock()
+		defer f.sup.heartbeatMu.Unlock()
+		return len(f.sup.heartbeats) == 0
+	})
+}
