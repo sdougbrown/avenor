@@ -383,37 +383,44 @@ func resolveJSONPointer(data []byte, pointer string) (json.RawMessage, error) {
 // exiting attempt: eligible reports whether the node is an auto-dispatched
 // provider node the supervisor completes itself; plan carries the completion
 // request; rejection names why the declared contract is unmet. Exactly one of
-// plan and rejection is set whenever eligible is true.
-func (m *Manager) DecideAutoCompletion(wf WorkflowID, nodeID NodeID, activationID ActivationID, workingDir, markerLabel string) (eligible bool, plan *AutoCompletion, rejection string) {
+// plan and rejection is set whenever eligible is true. err reports that the
+// workflow or activation could not be read, so eligibility is unknown.
+func (m *Manager) DecideAutoCompletion(wf WorkflowID, nodeID NodeID, activationID ActivationID, workingDir, markerLabel string) (eligible bool, plan *AutoCompletion, rejection string, err error) {
 	snap, exists, err := m.store.loadCurrent(wf)
-	if err != nil || !exists {
-		return false, nil, ""
+	if err != nil {
+		return false, nil, "", fmt.Errorf("load workflow %s: %w", wf, err)
+	}
+	if !exists {
+		return false, nil, "", fmt.Errorf("workflow %s not found", wf)
 	}
 	act, err := findActivation(&snap.Instance, nodeID, activationID)
-	if err != nil || act == nil {
-		return false, nil, ""
+	if err != nil {
+		return false, nil, "", err
+	}
+	if act == nil {
+		return false, nil, "", fmt.Errorf("activation %s for node %s not found", activationID, nodeID)
 	}
 	if act.Dispatch == nil || !act.Dispatch.IsAuto() {
-		return false, nil, ""
+		return false, nil, "", nil
 	}
 	tmpl, err := m.templateFor(&snap)
 	if err != nil {
-		return true, nil, fmt.Sprintf("template unreadable: %v", err)
+		return true, nil, fmt.Sprintf("template unreadable: %v", err), nil
 	}
 	node, err := findNode(tmpl, nodeID)
 	if err != nil {
-		return true, nil, err.Error()
+		return true, nil, err.Error(), nil
 	}
 	switch node.Action.Kind {
 	case ActionRun, ActionLoop, ActionTeam:
 	default:
-		return false, nil, ""
+		return false, nil, "", nil
 	}
 	plan2, evalErr := EvaluateAutoCompletion(tmpl, node, workingDir, markerLabel)
 	if evalErr != nil {
-		return true, nil, evalErr.Error()
+		return true, nil, evalErr.Error(), nil
 	}
-	return true, plan2, ""
+	return true, plan2, "", nil
 }
 
 // CompleteAuto issues the workflow.complete command for a supervisor-side

@@ -503,6 +503,7 @@ func (f *factoryE2E) waitInstanceOn(t *testing.T, wf, what string, cond func(ins
 			return
 		}
 		if time.Now().After(deadline) {
+			logGoroutines(t)
 			t.Fatalf("timed out waiting for %s; observed %s", what, describeInstance(&inst, int32(f.provider.sessionCount())))
 		}
 		time.Sleep(10 * time.Millisecond)

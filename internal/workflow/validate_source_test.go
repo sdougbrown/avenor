@@ -47,6 +47,11 @@ func TestValidateOutputSourceShape(t *testing.T) {
 			wantErr: `output "summary": pointer requires an artifact source`,
 		},
 		{
+			name:    "git source with a pointer",
+			source:  map[string]any{"git": "head", "pointer": "/name"},
+			wantErr: `output "summary": pointer requires an artifact source`,
+		},
+		{
 			name:    "git source other than head",
 			source:  map[string]any{"git": "tree"},
 			wantErr: `output "summary": git source "tree" must be "head"`,

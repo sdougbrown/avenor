@@ -34,8 +34,12 @@ func (s *Supervisor) finishWorkflowAttempt(ec workflow.ExecutorContext, hb *leas
 	}
 
 	mgr := s.workflowManager()
-	eligible, plan, rejection := mgr.DecideAutoCompletion(
+	eligible, plan, rejection, err := mgr.DecideAutoCompletion(
 		ec.WorkflowID, ec.NodeID, ec.ActivationID, child.dir, label)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "avenor stable: workflow %s node %s attempt %s: cannot decide auto-completion, recording the plain terminal fact: %v\n",
+			ec.WorkflowID, ec.NodeID, ec.AttemptID, err)
+	}
 	if !eligible {
 		hb.StopAndWait()
 		s.recordAttemptTerminal(ec, status, kind, label)
@@ -80,6 +84,9 @@ func (s *Supervisor) finishWorkflowAttempt(ec workflow.ExecutorContext, hb *leas
 // supervisor does not auto-complete (manual nodes, external nodes,
 // non-success exits).
 func (s *Supervisor) recordAttemptTerminal(ec workflow.ExecutorContext, status workflow.AttemptStatus, kind, label string) {
-	_ = s.workflowManager().RecordAttemptTerminated(
-		ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, status, kind, label)
+	if err := s.workflowManager().RecordAttemptTerminated(
+		ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, status, kind, label); err != nil {
+		fmt.Fprintf(os.Stderr, "avenor stable: workflow %s node %s attempt %s: record %s terminal fact: %v\n",
+			ec.WorkflowID, ec.NodeID, ec.AttemptID, status, err)
+	}
 }

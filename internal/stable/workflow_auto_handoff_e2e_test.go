@@ -19,12 +19,14 @@ package stable
 // handoff seam below.
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/pprof"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -242,6 +244,7 @@ func (f *autoHandoffFixture) waitForInstance(t *testing.T, wf, what string, cond
 			return
 		}
 		if time.Now().After(deadline) {
+			logGoroutines(t)
 			t.Fatalf("timed out waiting for %s; observed %s", what, describeInstance(&inst, f.providerCalls.Load()))
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -257,6 +260,18 @@ func consumeSucceeded(inst *workflow.WorkflowInstance) bool {
 		}
 	}
 	return false
+}
+
+// logGoroutines writes every goroutine's stack to the test log, so a wait
+// that times out shows where the supervisor stalled.
+func logGoroutines(t *testing.T) {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := pprof.Lookup("goroutine").WriteTo(&buf, 2); err != nil {
+		t.Logf("goroutine dump failed: %v", err)
+		return
+	}
+	t.Logf("goroutine dump at timeout:\n%s", buf.String())
 }
 
 // autoHandoffChainTemplate is the two-node template for the dependent-node

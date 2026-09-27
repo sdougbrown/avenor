@@ -395,18 +395,19 @@ func TestEvaluateAutoCompletionPointerTypeMismatch(t *testing.T) {
 }
 
 func TestResolveJSONPointer(t *testing.T) {
-	data := []byte(`{"a": {"b": [10, {"c": "deep"}]}, "s": "x", "n": 1.5, "t": true, "sl/ash": "esc"}`)
+	data := []byte(`{"a": {"b": [10, {"c": "deep"}]}, "s": "x", "n": 1.5, "t": true, "sl/ash": "esc", "ti~lde": "til"}`)
 	tests := []struct {
 		pointer string
 		want    string
 	}{
-		{"", `{"a": {"b": [10, {"c": "deep"}]}, "s": "x", "n": 1.5, "t": true, "sl/ash": "esc"}`},
+		{"", `{"a": {"b": [10, {"c": "deep"}]}, "s": "x", "n": 1.5, "t": true, "sl/ash": "esc", "ti~lde": "til"}`},
 		{"/s", `"x"`},
 		{"/a/b/0", "10"},
 		{"/a/b/1/c", `"deep"`},
 		{"/n", "1.5"},
 		{"/t", "true"},
 		{"/sl~1ash", `"esc"`},
+		{"/ti~0lde", `"til"`},
 	}
 	for _, test := range tests {
 		got, err := resolveJSONPointer(data, test.pointer)
