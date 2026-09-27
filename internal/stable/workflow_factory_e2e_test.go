@@ -1763,6 +1763,7 @@ func TestFactoryWorkDistinctWorktreePathsIsolateConcurrentItems(t *testing.T) {
 	// draft plan; item A stops behind the human hardening checkpoint.
 	f.waitNodeSatisfied(t, f.wf, "assessment", "ready")
 	f.waitNodeSatisfied(t, wfB, "assessment", "ready")
+	f.waitNodeSatisfied(t, f.wf, "draft-plan", "ready")
 	f.waitNodeSatisfied(t, wfB, "draft-plan", "ready")
 	f.completeManualNode(t, f.wf, "hardening", "ready",
 		[]map[string]any{{"definition_id": "hardened_plan", "value": "plan.md"}},
