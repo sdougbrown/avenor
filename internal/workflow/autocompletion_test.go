@@ -305,6 +305,32 @@ func TestEvaluateAutoCompletionGitHeadSource(t *testing.T) {
 	}
 }
 
+// TestEvaluateAutoCompletionGitHeadSourceOutsideRepo pins the git-head
+// output source's failure path: outside a repository a required output
+// rejects the contract naming the git failure, and an optional one is
+// omitted rather than recorded as the error text.
+func TestEvaluateAutoCompletionGitHeadSourceOutsideRepo(t *testing.T) {
+	dir := t.TempDir()
+	required := autoEvalNode([]OutputDefinition{
+		stringOutput("head", true, &OutputSource{Git: "head"}),
+	}, nil, map[OutcomeName]NodeID{"done": "next"})
+	if _, err := EvaluateAutoCompletion(evalTemplate(required, "done"), required, dir, ""); err == nil ||
+		!strings.Contains(err.Error(), "git-head source") {
+		t.Fatalf("required git-head output outside a repository: error = %v, want git-head source rejection", err)
+	}
+
+	optional := autoEvalNode([]OutputDefinition{
+		stringOutput("head", false, &OutputSource{Git: "head"}),
+	}, nil, map[OutcomeName]NodeID{"done": "next"})
+	plan, err := EvaluateAutoCompletion(evalTemplate(optional, "done"), optional, dir, "")
+	if err != nil {
+		t.Fatalf("optional git-head output outside a repository: %v", err)
+	}
+	if len(plan.Outputs) != 0 {
+		t.Fatalf("outputs = %+v, want the unresolvable optional output omitted", plan.Outputs)
+	}
+}
+
 func TestEvaluateAutoCompletionRequiredOutputUnresolvable(t *testing.T) {
 	dir := t.TempDir()
 	// The contract artifact exists; the required string output has no source

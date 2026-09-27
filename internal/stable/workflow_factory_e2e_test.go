@@ -1152,16 +1152,28 @@ func TestFactoryWorkReverifyFailedRoutesCorrection(t *testing.T) {
 	f.waitNodeSatisfied(t, f.wf, "correction", "fixed")
 	f.waitNodeSatisfied(t, f.wf, "reverify", "failed")
 
-	// The failed reverify recorded its terminal marker on the attempt.
+	// The failed reverify activation's own attempt recorded the terminal
+	// marker that selected its outcome.
 	inst := f.instance(t)
+	var failedAct *workflow.Activation
+	for i := range inst.Activations {
+		a := &inst.Activations[i]
+		if a.NodeID == "reverify" && a.SelectedOutcome == workflow.OutcomeName("failed") {
+			failedAct = a
+			break
+		}
+	}
+	if failedAct == nil || len(failedAct.AttemptIDs) != 1 {
+		t.Fatalf("failed reverify activation = %+v, want one with exactly one attempt; observed %s", failedAct, describeInstance(&inst, int32(f.provider.sessionCount())))
+	}
 	var marker string
 	for _, a := range inst.Attempts {
-		if a.Identity.NodeID == "reverify" {
+		if a.ID == failedAct.AttemptIDs[0] {
 			marker = a.MarkerLabel
 		}
 	}
 	if marker != "failed" {
-		t.Fatalf("reverify attempt marker label = %q, want failed; observed %s", marker, describeInstance(&inst, int32(f.provider.sessionCount())))
+		t.Fatalf("failed reverify attempt marker label = %q, want failed; observed %s", marker, describeInstance(&inst, int32(f.provider.sessionCount())))
 	}
 
 	// A SECOND correction activation dispatched and completed automatically,
