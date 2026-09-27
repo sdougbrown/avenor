@@ -384,7 +384,9 @@ func resolveJSONPointer(data []byte, pointer string) (json.RawMessage, error) {
 // provider node the supervisor completes itself; plan carries the completion
 // request; rejection names why the declared contract is unmet. Exactly one of
 // plan and rejection is set whenever eligible is true. err reports that the
-// workflow or activation could not be read, so eligibility is unknown.
+// workflow, activation, template, or node definition could not be read, so
+// eligibility is unknown; a rejection is only ever a contract the work did
+// not meet.
 func (m *Manager) DecideAutoCompletion(wf WorkflowID, nodeID NodeID, activationID ActivationID, workingDir, markerLabel string) (eligible bool, plan *AutoCompletion, rejection string, err error) {
 	snap, exists, err := m.store.loadCurrent(wf)
 	if err != nil {
@@ -405,11 +407,11 @@ func (m *Manager) DecideAutoCompletion(wf WorkflowID, nodeID NodeID, activationI
 	}
 	tmpl, err := m.templateFor(&snap)
 	if err != nil {
-		return true, nil, fmt.Sprintf("template unreadable: %v", err), nil
+		return false, nil, "", fmt.Errorf("load template for workflow %s: %w", wf, err)
 	}
 	node, err := findNode(tmpl, nodeID)
 	if err != nil {
-		return true, nil, err.Error(), nil
+		return false, nil, "", err
 	}
 	switch node.Action.Kind {
 	case ActionRun, ActionLoop, ActionTeam:

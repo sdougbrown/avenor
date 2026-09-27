@@ -479,3 +479,27 @@ func TestResolveAutoOutputRejectsMismatchedSourceShape(t *testing.T) {
 		t.Fatalf("string output with whole artifact error = %v, want rejection", err)
 	}
 }
+
+// TestDecideAutoCompletionReportsUnreadableTemplateAsError proves a template
+// that cannot be read is an error, not a contract rejection, so the
+// supervisor never records a successful run as contract_unmet and burns a
+// retry because the store could not be read.
+func TestDecideAutoCompletionReportsUnreadableTemplateAsError(t *testing.T) {
+	m, s, wf := newAutoDispatchFixture(t, "auto-decide-unreadable", "ctl-a", 50)
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	act := activationByNode(&snap.Instance, "start")
+	if err := os.Remove(filepath.Join(s.root, "templates", string(snap.Instance.TemplateID), string(snap.Instance.TemplateVersion)+".json")); err != nil {
+		t.Fatalf("remove template: %v", err)
+	}
+
+	eligible, plan, rejection, err := m.DecideAutoCompletion(wf, "start", act.ID, t.TempDir(), "")
+	if err == nil {
+		t.Fatal("DecideAutoCompletion with an unreadable template returned no error")
+	}
+	if eligible || plan != nil || rejection != "" {
+		t.Fatalf("DecideAutoCompletion = eligible %v, plan %+v, rejection %q; want an error only", eligible, plan, rejection)
+	}
+}

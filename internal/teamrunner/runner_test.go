@@ -1346,3 +1346,26 @@ func TestRunTeamPreservesCompletedMembersOnDegenerateStream(t *testing.T) {
 		t.Errorf("reviewer phase.end stop_reason = %q, want end_turn", phaseEndByName["reviewer"])
 	}
 }
+
+// TestRunNoMembersCarriesTerminalMarker proves a member-less team still
+// reports its post phase's terminal marker on the run result, so a workflow
+// can select the node outcome from it.
+func TestRunNoMembersCarriesTerminalMarker(t *testing.T) {
+	cfg := makeConfig(nil, nil, []phaseconfig.Phase{simplePhase("synthesize", "synthesize the verdict")})
+
+	result, err := Run(context.Background(), RunOptions{
+		WorkDir:   t.TempDir(),
+		RunID:     "test-run",
+		EventSink: discardEventWriter{},
+		Config:    cfg,
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
+			return PhaseAttemptResult{ExitCode: 0, SessionID: "s1", LoopDirective: "exit", LoopLabel: "passed"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.MarkerDirective != "exit" || result.MarkerLabel != "passed" {
+		t.Fatalf("marker = %q/%q, want exit/passed", result.MarkerDirective, result.MarkerLabel)
+	}
+}
