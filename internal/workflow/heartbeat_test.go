@@ -1002,6 +1002,47 @@ func TestHeartbeatAfterSweepExpiryIsRejectedBeforeAppend(t *testing.T) {
 // sweep expires a stale lease, a change subscriber wakes immediately (no
 // anti-entropy wait) and a candidate-index query taken right after the wake
 // already observes the re-armed node — no rebuild required.
+// TestExpireStaleLeasesWithoutExpiryDoesNotNotify proves a sweep that
+// expires nothing leaves subscribers asleep: the notification is a
+// synchronous non-blocking send, so an empty channel right after the sweep
+// returns means none was sent.
+func TestExpireStaleLeasesWithoutExpiryDoesNotNotify(t *testing.T) {
+	m, s, wf := newAutoDispatchFixture(t, "sweep-quiet", "ctl-a", 50)
+	if err := m.RebuildCandidateIndex("sup-1"); err != nil {
+		t.Fatalf("RebuildCandidateIndex: %v", err)
+	}
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	actID := activationByNode(&snap.Instance, "start").ID
+	future := time.Now().UTC().Add(time.Hour)
+	claimWithLease(t, s, wf, "start", Lease{
+		ID:           "lease-fresh",
+		ActivationID: actID,
+		Owner:        "alice",
+		TokenDigest:  ownerTokenDigest("fresh-token"),
+		AcquiredAt:   future.Add(-2 * time.Hour),
+		ExpiresAt:    future,
+	}, "alice")
+	startWithToken(t, m, wf, "start", string(actID), "lease-fresh", "fresh-token")
+
+	ch, cancel := m.SubscribeChanges()
+	defer cancel()
+	summary, err := m.ExpireStaleLeases()
+	if err != nil {
+		t.Fatalf("ExpireStaleLeases: %v", err)
+	}
+	if summary.Expired != 0 {
+		t.Fatalf("sweep expired %d leases, want 0 for a fresh lease", summary.Expired)
+	}
+	select {
+	case <-ch:
+		t.Fatal("a sweep that expired nothing woke a change subscriber")
+	default:
+	}
+}
+
 func TestExpireStaleLeasesNotifiesSubscribersAndIndex(t *testing.T) {
 	m, s, wf := newAutoDispatchFixture(t, "sweep-notify", "ctl-a", 50)
 	if err := m.RebuildCandidateIndex("sup-1"); err != nil {
