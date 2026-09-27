@@ -1468,22 +1468,9 @@ func TestFactoryWorkHumanGateAuthorizedDecisionAdvances(t *testing.T) {
 // without the declared artifact is recorded as a failed attempt with the
 // contract_unmet marker, the node's retry policy re-dispatches, and the
 // second worker — which writes the artifact — completes the node through the
-// same handoff.
-//
-// SKIPPED, not green: this test exposes a real production bug. The shipped
-// template declares default_retry_policy {max_attempts: 2, exhaustion:
-// block} and its nodes declare no per-node retry_policy, but the retry
-// resolver (internal/workflow/manager.go SetRetryPolicyResolver) only ever
-// returns node.RetryPolicy — the template's default_retry_policy is parsed,
-// validated, and documented (docs/workflow.md) yet never applied. Observed
-// today: the first assessment attempt records failed/contract_unmet and the
-// activation exhausts to blocked after ONE attempt; no retry is ever
-// dispatched. Proposed fix: in SetRetryPolicyResolver, fall back to
-// tmpl.DefaultRetryPolicy when the node declares no retry policy of its own
-// (mirroring how leaseTTL falls back to tmpl.DefaultLease). Enable this test
-// when the fix lands.
+// same handoff. The node declares no retry_policy, so the template's
+// default_retry_policy supplies the second attempt.
 func TestFactoryWorkContractUnmetRetriesThenSucceeds(t *testing.T) {
-	t.Skip("production bug: template default_retry_policy is never resolved (SetRetryPolicyResolver reads only node.RetryPolicy); the contract_unmet retry never dispatches")
 	f := newFactoryE2E(t, "factory-e2e-contract", 4, "avenor-issue-115",
 		func(string) string { return factoryEchoAdapter("passed") },
 		func(string) string { return factoryEchoAdapter("passed") })
@@ -1518,17 +1505,17 @@ func TestFactoryWorkContractUnmetRetriesThenSucceeds(t *testing.T) {
 
 // TestFactoryWorkContractUnmetFailsTheAttempt pins the observable half of
 // the files-contract failure on an auto node through the production handoff:
-// the worker's clean exit without the declared artifact is rejected by the
-// supervisor's contract evaluation, the attempt is recorded failed with the
+// every clean exit without the declared artifact is rejected by the
+// supervisor's contract evaluation and recorded failed with the
 // contract_unmet marker, nothing downstream dispatches, and the activation
-// exhausts to blocked (see TestFactoryWorkContractUnmetRetriesThenSucceeds
-// for the retry leg, which is blocked by the unresolved default retry
-// policy).
+// exhausts to blocked once the template's default_retry_policy (two
+// attempts) is spent.
 func TestFactoryWorkContractUnmetFailsTheAttempt(t *testing.T) {
 	f := newFactoryE2E(t, "factory-e2e-contract-unmet", 4, "avenor-issue-115",
 		func(string) string { return factoryEchoAdapter("passed") },
 		func(string) string { return factoryEchoAdapter("passed") })
-	f.provider.append(factoryWorkerScript{sessionID: "ses_assess_unmet"})
+	f.provider.append(factoryWorkerScript{sessionID: "ses_assess_unmet_1"})
+	f.provider.append(factoryWorkerScript{sessionID: "ses_assess_unmet_2"})
 	f.enable(t)
 
 	f.driveIntake(t, f.wf)
@@ -1536,17 +1523,19 @@ func TestFactoryWorkContractUnmetFailsTheAttempt(t *testing.T) {
 
 	inst := f.instance(t)
 	attempts := attemptsForNode(&inst, "assessment")
-	if len(attempts) != 1 {
-		t.Fatalf("assessment recorded %d attempts, want exactly 1; observed %s", len(attempts), describeInstance(&inst, int32(f.provider.sessionCount())))
+	if len(attempts) != 2 {
+		t.Fatalf("assessment recorded %d attempts, want exactly 2 (the template default max_attempts); observed %s", len(attempts), describeInstance(&inst, int32(f.provider.sessionCount())))
 	}
-	if attempts[0].Status != workflow.AttemptFailed || attempts[0].MarkerLabel != "contract_unmet" {
-		t.Fatalf("assessment attempt = %s/%s, want failed/contract_unmet", attempts[0].Status, attempts[0].MarkerLabel)
+	for i, a := range attempts {
+		if a.Status != workflow.AttemptFailed || a.MarkerLabel != "contract_unmet" {
+			t.Fatalf("assessment attempt %d = %s/%s, want failed/contract_unmet", i, a.Status, a.MarkerLabel)
+		}
 	}
 	if act := activationFor(&inst, "draft-plan"); act != nil {
 		t.Fatalf("draft-plan dispatched despite assessment never satisfying its contract; observed %s", describeInstance(&inst, int32(f.provider.sessionCount())))
 	}
-	if got := f.provider.sessionCount(); got != 1 {
-		t.Fatalf("provider sessions = %d, want exactly 1 (the unmet worker, never re-dispatched)", got)
+	if got := f.provider.sessionCount(); got != 2 {
+		t.Fatalf("provider sessions = %d, want exactly 2 (both unmet workers, never re-dispatched after exhaustion)", got)
 	}
 	f.disable(t)
 }

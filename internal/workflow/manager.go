@@ -88,7 +88,8 @@ func NewManager(store *Store) *Manager {
 	// Retry policies are resolved from the instance's versioned template so
 	// the reducer's retry/exhaustion logic sees the node's durable policy
 	// (matching production): without this resolver every failure would
-	// exhaust to a single attempt. Load errors return nil, which keeps
+	// exhaust to a single attempt. A node without its own policy inherits the
+	// template's default_retry_policy. Load errors return nil, which keeps
 	// single-attempt behavior for that node.
 	SetRetryPolicyResolver(func(templateID TemplateID, templateVersion TemplateVersion, nodeID NodeID) *RetryPolicy {
 		tmpl, err := m.store.LoadTemplate(templateID, templateVersion)
@@ -99,7 +100,10 @@ func NewManager(store *Store) *Manager {
 		if err != nil {
 			return nil
 		}
-		return node.RetryPolicy
+		if node.RetryPolicy != nil {
+			return node.RetryPolicy
+		}
+		return tmpl.DefaultRetry
 	})
 	// Dispatch policies are resolved from the instance's versioned template so
 	// activation creation copies the node's auto-dispatch metadata into the
