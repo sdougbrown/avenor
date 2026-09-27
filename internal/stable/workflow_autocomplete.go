@@ -69,10 +69,14 @@ func (s *Supervisor) finishWorkflowAttempt(ec workflow.ExecutorContext, hb *leas
 			ec.WorkflowID, ec.NodeID, ec.AttemptID, err)
 		return
 	}
+	err = nil
 	if s.testHooks.completeAutoPre != nil {
-		s.testHooks.completeAutoPre()
+		err = s.testHooks.completeAutoPre()
 	}
-	if _, err := mgr.CompleteAuto(ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, ec.OwnerToken, plan); err != nil {
+	if err == nil {
+		_, err = mgr.CompleteAuto(ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, ec.OwnerToken, plan)
+	}
+	if err != nil {
 		// Residual: the success fact is recorded but the completion (evidence
 		// staging, output recording, or the atomic command itself) failed. The
 		// heartbeat stops here and the live lease-expiry sweep expires the dead

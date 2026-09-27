@@ -370,9 +370,9 @@ type testHooks struct {
 	// ID, so a test can let the runtime finish before Dispatch returns.
 	afterAttemptSpawn func(runtimeID string)
 	// completeAutoPre, when non-nil (set by tests), runs immediately before
-	// the supervisor issues a node's auto-completion command, so a test can
-	// deterministically force that command to fail. nil in production.
-	completeAutoPre func()
+	// the supervisor issues a node's auto-completion command. A non-nil error
+	// stands in for that command failing. nil in production.
+	completeAutoPre func() error
 	// leaseSweepPost, when non-nil (set by tests), runs after every live
 	// lease-expiry sweep tick with its summary. nil in production.
 	leaseSweepPost func(summary workflow.LeaseExpirySummary)
@@ -421,16 +421,19 @@ type Supervisor struct {
 	// them on the instance they drive to make concurrent commands land
 	// deterministically inside read–commit windows.
 	testHooks testHooks
-	// leaseSweepMu guards leaseSweepStop and leaseSweepDone: the single live
-	// lease-expiry sweep goroutine started once the workflow startup barrier
-	// succeeds and stopped on shutdown.
-	leaseSweepMu   sync.Mutex
-	leaseSweepStop chan struct{}
-	leaseSweepDone chan struct{}
-	state          *control.ControlState
-	controlMu      sync.Mutex
-	runtimes       map[string]*childRuntime
-	nextID         int
+	// leaseSweepMu guards leaseSweepStop, leaseSweepDone, and
+	// leaseSweepStopped: the single live lease-expiry sweep goroutine started
+	// once the workflow startup barrier succeeds and stopped on shutdown. Once
+	// stopped, the sweep never starts again, so a lazy barrier that completes
+	// during shutdown cannot launch a loop the shutdown join already passed.
+	leaseSweepMu      sync.Mutex
+	leaseSweepStop    chan struct{}
+	leaseSweepDone    chan struct{}
+	leaseSweepStopped bool
+	state             *control.ControlState
+	controlMu         sync.Mutex
+	runtimes          map[string]*childRuntime
+	nextID            int
 	// outstandingReservations counts admission reservations that hold a local
 	// slot but have not yet converted into a registered runtime. Guarded by
 	// controlMu; the local capacity limit is enforced against active runtimes
@@ -762,7 +765,7 @@ func (s *Supervisor) stopReaper() {
 func (s *Supervisor) startLeaseSweepLoop() {
 	s.leaseSweepMu.Lock()
 	defer s.leaseSweepMu.Unlock()
-	if s.leaseSweepStop != nil {
+	if s.leaseSweepStop != nil || s.leaseSweepStopped {
 		return
 	}
 	stop := make(chan struct{})
@@ -809,14 +812,15 @@ func (s *Supervisor) leaseSweepLoop(interval time.Duration, stop, done chan stru
 // to exit, so no sweep outlives Shutdown.
 func (s *Supervisor) stopLeaseSweep() {
 	s.leaseSweepMu.Lock()
-	stop := s.leaseSweepStop
+	s.leaseSweepStopped = true
+	stop, done := s.leaseSweepStop, s.leaseSweepDone
 	s.leaseSweepStop = nil
 	s.leaseSweepMu.Unlock()
 	if stop == nil {
 		return
 	}
 	close(stop)
-	<-s.leaseSweepDone
+	<-done
 }
 
 // signalCapacityChange wakes callers waiting in WaitForCapacity. It does not

@@ -342,8 +342,10 @@ func TestAutoHandoffSuccessExitIsNotRedispatched(t *testing.T) {
 	t.Chdir(t.TempDir())
 	const sessionID = "ses_handoff_once"
 	provider := &stableScriptedProvider{attempt: -1}
+	var sweeps atomic.Int32
 	f := newAutoHandoffFixture(t, "auto-handoff-once", provider, func(f *autoHandoffFixture) {
 		f.sup.config.WorkflowLeaseSweepInterval = 250 * time.Millisecond
+		f.sup.testHooks.leaseSweepPost = func(workflow.LeaseExpirySummary) { sweeps.Add(1) }
 	})
 	_ = produceWorkerDeclaredResult(t, provider, sessionID, "", "")
 	template := map[string]any{
@@ -373,12 +375,17 @@ func TestAutoHandoffSuccessExitIsNotRedispatched(t *testing.T) {
 		t.Fatalf("provider invoked %d times before the successful exit, want exactly 1", calls)
 	}
 
-	// The supervisor's completion must satisfy the node before the live sweep
-	// (250ms cadence, 1s TTL) could expire its lease: bounded wait across
-	// several sweep intervals, then exactly one attempt and one invocation.
+	// The supervisor's completion satisfies the node and releases its lease.
 	f.waitForInstance(t, wf, "the supervisor's completion to satisfy the start node", func(inst *workflow.WorkflowInstance) bool {
 		act := activationFor(inst, "start")
 		return act != nil && act.Status == workflow.ActivationSatisfied
+	})
+
+	// Let the live sweep (250ms cadence) tick past the 1s TTL: a satisfied
+	// node holds no lease, so no tick may expire or re-dispatch it.
+	after := sweeps.Load()
+	f.waitForInstance(t, wf, "six live sweep ticks after completion", func(*workflow.WorkflowInstance) bool {
+		return sweeps.Load() >= after+6
 	})
 
 	// Final state: exactly one attempt, exactly one provider invocation, and

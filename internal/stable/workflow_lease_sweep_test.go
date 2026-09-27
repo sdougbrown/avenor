@@ -9,7 +9,7 @@ package stable
 // failure is forced through the Supervisor's testHooks.completeAutoPre seam.
 
 import (
-	"os"
+	"errors"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -22,8 +22,8 @@ import (
 // TestLeaseSweepReDispatchesAfterFailedAutoCompletion proves the residual
 // stall case recovers without a restart: the scripted worker exits
 // successfully, the supervisor records the success fact, and its
-// CompleteAuto command fails once (evidence staging blocked through the
-// completeAutoPre seam). The heartbeat has stopped, so the live lease sweep
+// CompleteAuto command fails once (injected through the completeAutoPre
+// seam). The heartbeat has stopped, so the live lease sweep
 // expires the dead lease within one sweep interval, the controller
 // re-dispatches the node, and the second attempt's completion succeeds and
 // dispatches the dependent consume node.
@@ -39,28 +39,20 @@ func TestLeaseSweepReDispatchesAfterFailedAutoCompletion(t *testing.T) {
 	// 2s lease TTL: once the heartbeat stops, the dead lease is sweepable
 	// quickly, while a live heartbeated attempt renews well inside the TTL.
 	wf := f.addWorkflow(t, "tmpl-lease-sweep-residual", autoHandoffChainTemplate(t, "tmpl-lease-sweep-residual", 2))
-	f.enableController(t, 2)
 
-	// Force the first auto-completion to fail after the success fact: make
-	// the instance's evidence staging directory unwritable so evidence
-	// staging I/O fails exactly like the production residual case. The next
-	// completion restores it. The sweep only touches workflow.json and
-	// events.ndjson, so the expiry path stays unaffected.
-	evidenceBase := filepath.Join(f.sup.config.WorkflowRoot, "instances", wf, "evidence")
+	// Force the first auto-completion to fail after the success fact, as an
+	// evidence staging I/O error would in production. Later completions run.
 	var completeCalls atomic.Int32
-	f.sup.testHooks.completeAutoPre = func() {
-		switch completeCalls.Add(1) {
-		case 1:
-			if err := os.MkdirAll(evidenceBase, 0o700); err != nil {
-				t.Logf("evidence dir mkdir: %v", err)
-			}
-			if err := os.Chmod(evidenceBase, 0o500); err != nil {
-				t.Logf("evidence dir chmod: %v", err)
-			}
-		default:
-			_ = os.Chmod(evidenceBase, 0o700)
+	f.sup.testHooks.completeAutoPre = func() error {
+		if completeCalls.Add(1) == 1 {
+			return errors.New("injected evidence staging failure")
 		}
+		return nil
 	}
+
+	// The hook is installed before the controller is enabled, so the first
+	// completion is produce's and the supervisor never races the write.
+	f.enableController(t, 2)
 
 	f.waitForInstance(t, wf, "produce's first attempt to succeed", func(inst *workflow.WorkflowInstance) bool {
 		attempts := attemptsForNode(inst, "produce")
@@ -225,4 +217,33 @@ func TestLeaseSweepStopsAfterShutdown(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	_ = sup.broker.Stop()
+}
+
+// TestLeaseSweepNeverStartsAfterStop proves a lazy workflow barrier that
+// completes during shutdown cannot launch a sweep loop the shutdown join has
+// already passed: once stopLeaseSweep has run, startLeaseSweepLoop is a no-op.
+func TestLeaseSweepNeverStartsAfterStop(t *testing.T) {
+	sup := NewSupervisor(Config{
+		ControlSocket:              newStableSocketPath(t, "lease-sweep-late-start"),
+		MaxRuntimes:                2,
+		MaxTreeBudget:              2,
+		ShutdownTimeout:            0,
+		WorkflowRoot:               filepath.Join(t.TempDir(), "wfroot"),
+		WorkflowLeaseSweepInterval: 50 * time.Millisecond,
+	})
+	var sweeps atomic.Int32
+	sup.testHooks.leaseSweepPost = func(workflow.LeaseExpirySummary) { sweeps.Add(1) }
+
+	sup.stopLeaseSweep()
+	sup.startLeaseSweepLoop()
+
+	sup.leaseSweepMu.Lock()
+	started := sup.leaseSweepStop != nil
+	sup.leaseSweepMu.Unlock()
+	if started {
+		t.Fatal("startLeaseSweepLoop launched a sweep loop after stopLeaseSweep")
+	}
+	if n := sweeps.Load(); n != 0 {
+		t.Fatalf("observed %d sweeps after stop, want 0", n)
+	}
 }
