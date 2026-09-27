@@ -262,7 +262,7 @@
         "kind": "files",
         "artifacts": [{ "path": "reverify.md", "non_empty": true }]
       },
-      "branches": { "passed": "publication" }
+      "branches": { "passed": "publication", "failed": "correction" }
     },
     {
       "id": "merge-auth",

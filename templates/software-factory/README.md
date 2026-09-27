@@ -36,6 +36,8 @@ intake                         [manual]
       changes_requested        → correction [run, auto]
       action_required          → correction [run, auto]
                                  → reverify [team, auto] → publication → review
+                                 (reverify passed → publication,
+                                  reverify failed → correction)
       replan                   → assessment (re-assess, re-plan, re-harden)
       checkpoint               → advisor [manual checkpoint gate]
 ```
