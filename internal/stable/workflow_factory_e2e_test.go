@@ -957,22 +957,9 @@ func TestFactoryWorkCleanPathStopsAtHumanMergeAuth(t *testing.T) {
 // TestFactoryWorkForeignSubjectResultIsNotApplied pins the exact-subject
 // contract of the bound external gates: an adapter result the gate observed
 // on a DIFFERENT revision than the pinned pr_head must not be applied to the
-// parked review — the review stays parked and nothing advances.
-//
-// SKIPPED, not green: this test exposes a real production bug. The adapter's
-// reported subject (AdapterResult.Subject, documented as "the exact external
-// subject an adapter observed") is never compared against the pinned
-// subject. applyPollResult (internal/stable/workflow_poll.go) submits the
-// PINNED subject with the external_result command, so
-// validatePinnedGateSubject trivially passes and a result observed on any
-// other head lands as if it were observed on the pinned head. Proposed fix:
-// in applyPollResult, compare res.Subject against the pinned subject (the
-// same canonical comparison validatePinnedGateSubject uses) and treat a
-// mismatch as a diagnostic — do not stage evidence, do not submit the
-// command, keep the cursor parked for the next poll. Enable this test when
-// the fix lands.
+// parked review — the review stays parked, the controller records the
+// mismatch, and nothing advances.
 func TestFactoryWorkForeignSubjectResultIsNotApplied(t *testing.T) {
-	t.Skip("production bug: the adapter-reported subject is never checked against the pinned gate subject (applyPollResult submits the pinned subject); test fails until that check exists")
 	f := newFactoryE2E(t, "factory-e2e-foreign-subject", 4, "avenor-issue-115",
 		func(string) string { return factoryEchoAdapter("passed") },
 		func(string) string {
@@ -992,7 +979,18 @@ func TestFactoryWorkForeignSubjectResultIsNotApplied(t *testing.T) {
 	// result for a foreign revision. Nothing may advance on it.
 	f.waitNodeStatus(t, f.wf, "review", workflow.ActivationAwaitingGate)
 	review := f.newestActivation(t, f.wf, "review")
-	f.waitCursor(t, f.wf, string(review.ID), "review-verdict")
+	cursor := f.waitCursor(t, f.wf, string(review.ID), "review-verdict")
+
+	// The foreign result reaches the apply path and is refused there.
+	mismatchKey := "poll_subject_mismatch/" + workflowcontroller.PollCursorKey(cursor)
+	waitFor(t, "poll_subject_mismatch diagnostic for the review-verdict cursor", func() bool {
+		rec, _, err := f.cstore.Get("software-factory")
+		if err != nil {
+			return false
+		}
+		_, open := rec.Diagnostics[mismatchKey]
+		return open
+	})
 
 	// A bounded window in which the foreign result must never resolve the
 	// gate: no poll result observed on a different subject is applicable.

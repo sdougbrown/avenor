@@ -57,6 +57,10 @@ const (
 	// PollObsolete means the activation is no longer parked on this gate
 	// (resolved or superseded by a new head); the cursor is dropped.
 	PollObsolete PollApplyOutcome = "obsolete"
+	// PollSubjectMismatch means the adapter reported a result for a different
+	// subject than the gate's pinned one (for example, an older head). Nothing
+	// was staged or submitted; the cursor stays and polls again with backoff.
+	PollSubjectMismatch PollApplyOutcome = "subject_mismatch"
 )
 
 // Poller is the host-side external-poll surface. Poll performs one adapter
@@ -194,6 +198,14 @@ func (r *Runner) handlePollOutcome(s *leaderState, out PollOutcome, lease Leader
 		r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "poll_stale" })
 		return true
 	}
+	if apply == PollSubjectMismatch {
+		if _, err := r.store.RecordDiagnostic(r.controllerID, "poll_subject_mismatch", key, "adapter result observed on a subject other than the pinned gate subject"); err != nil {
+			log.Printf("workflow controller %s: record poll_subject_mismatch: %v", r.controllerID, err)
+		}
+		r.schedulePollRetry(out.Cursor, retryAfterOf(res))
+		r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "poll_subject_mismatch" })
+		return false
+	}
 	if apply == PollObsolete {
 		// The gate is no longer parked on this activation; no further polls
 		// are meaningful, so drop the cursor and record the outcome as a
@@ -209,6 +221,9 @@ func (r *Runner) handlePollOutcome(s *leaderState, out PollOutcome, lease Leader
 	}
 	if err := r.store.ClearPollCursor(r.controllerID, out.Cursor); err != nil {
 		log.Printf("workflow controller %s: clear poll cursor %s: %v", r.controllerID, key, err)
+	}
+	if err := r.store.ClearDiagnostic(r.controllerID, "poll_subject_mismatch", key); err != nil {
+		log.Printf("workflow controller %s: clear poll_subject_mismatch: %v", r.controllerID, err)
 	}
 	r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "applied:" + res.Result })
 	return false
