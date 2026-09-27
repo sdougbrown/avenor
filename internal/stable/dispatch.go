@@ -222,16 +222,17 @@ func (s *Supervisor) dispatchWorkflowNode(ctx context.Context, req DispatchReque
 	// Start the declared executor with the reservation handed off, so the
 	// node's first runtime consumes it instead of reserving again.
 	ec := workflow.ExecutorContext{
-		WorkflowID:   workflow.WorkflowID(req.WorkflowID),
-		NodeID:       workflow.NodeID(req.NodeID),
-		ActivationID: workflow.ActivationID(req.ActivationID),
-		AttemptID:    begin.AttemptID,
-		LeaseID:      begin.LeaseID,
-		OwnerToken:   begin.OwnerToken,
-		LeaseTTL:     begin.LeaseTTL,
-		Action:       begin.Action,
-		Selection:    begin.Selection,
-		Admission:    res,
+		WorkflowID:       workflow.WorkflowID(req.WorkflowID),
+		NodeID:           workflow.NodeID(req.NodeID),
+		ActivationID:     workflow.ActivationID(req.ActivationID),
+		AttemptID:        begin.AttemptID,
+		LeaseID:          begin.LeaseID,
+		OwnerToken:       begin.OwnerToken,
+		LeaseTTL:         begin.LeaseTTL,
+		Action:           begin.Action,
+		Selection:        begin.Selection,
+		WorkingDirectory: begin.WorkingDirectory,
+		Admission:        res,
 	}
 	startErr := mgr.DispatchExecutor(begin.Action.Kind, ec)
 	kind, label := workflowMarkerForKind(begin.Action.Kind)
