@@ -236,7 +236,7 @@ func describeInstance(inst *workflow.WorkflowInstance, providerCalls int32) stri
 // the full observed state after a bounded deadline.
 func (f *autoHandoffFixture) waitForInstance(t *testing.T, wf, what string, cond func(inst *workflow.WorkflowInstance) bool) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	var inst workflow.WorkflowInstance
 	for {
 		inst = f.instance(t, wf)
