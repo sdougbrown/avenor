@@ -10,6 +10,7 @@ package stable
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -248,5 +249,59 @@ func TestLeaseSweepNeverStartsAfterStop(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	if n := sweeps.Load(); n != 0 {
 		t.Fatalf("observed %d sweeps after stop, want 0", n)
+	}
+}
+
+// TestLeaseSweepDoesNotStartWhenDisabledOrBarrierFails pins the start
+// guard: a zero WorkflowLeaseSweepInterval disables the live sweep, and a
+// failed workflow barrier never starts it, so leases then expire only
+// through restart recovery.
+func TestLeaseSweepDoesNotStartWhenDisabledOrBarrierFails(t *testing.T) {
+	tests := []struct {
+		name     string
+		interval time.Duration
+		root     func(t *testing.T) string
+	}{
+		{
+			name:     "zero interval",
+			interval: 0,
+			root:     func(t *testing.T) string { return filepath.Join(t.TempDir(), "wfroot") },
+		},
+		{
+			name:     "barrier failure",
+			interval: 50 * time.Millisecond,
+			root: func(t *testing.T) string {
+				root := filepath.Join(t.TempDir(), "wfroot")
+				_, childID := stageTerminalChildComposition(t, root)
+				eventsPath := filepath.Join(root, "instances", childID, "events.ndjson")
+				if err := os.WriteFile(eventsPath, []byte("not-json\n"+`{"kind":"created","seq":1}`+"\n"), 0o644); err != nil {
+					t.Fatalf("corrupt event log: %v", err)
+				}
+				return root
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sup := NewSupervisor(Config{
+				ControlSocket:              newStableSocketPath(t, "lease-sweep-off"),
+				WorkflowRoot:               tc.root(t),
+				WorkflowLeaseSweepInterval: tc.interval,
+			})
+			t.Cleanup(func() {
+				sup.stopLeaseSweep()
+				_ = sup.broker.Stop()
+			})
+			var sweeps atomic.Int32
+			sup.testHooks.leaseSweepPost = func(workflow.LeaseExpirySummary) { sweeps.Add(1) }
+			_, _, _ = sup.workflowBarrierResult()
+
+			// A started loop would tick every 50ms; six intervals with no
+			// tick shows none was started.
+			time.Sleep(300 * time.Millisecond)
+			if n := sweeps.Load(); n != 0 {
+				t.Fatalf("observed %d live sweeps, want 0", n)
+			}
+		})
 	}
 }
