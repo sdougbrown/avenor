@@ -114,7 +114,7 @@ func autoCompletionOutcome(tmpl *Template, node *NodeDefinition, markerLabel str
 	return "", fmt.Errorf("node declares %d candidate outcomes and no terminal marker selected one of them", len(vocabulary))
 }
 
-// declaredOutcomeVocabulary lists, in declaration order, the outcome names
+// declaredOutcomeVocabulary lists, in no particular order, the outcome names
 // the completion is selected from: the node's own declared outcomes (branch
 // keys, node outcomes, checkpoint exits) when it declares any, falling back
 // to the template's terminal outcomes for a node with no declared outcomes —

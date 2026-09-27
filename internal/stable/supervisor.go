@@ -4997,9 +4997,11 @@ func (child *childRuntime) terminalMarkerLabel() string {
 
 // registerWorkflowTermination attaches a termination callback to the spawned
 // workflow child so the workflow manager learns the attempt's final status
-// before the child's runtime state is cleaned up. The callback first stops
-// the attempt's lease heartbeat and waits for it to exit, so no heartbeat is
-// applied after the terminal fact.
+// before the child's runtime state is cleaned up. The callback runs
+// finishWorkflowAttempt: on a successful auto-provider exit the lease
+// heartbeat keeps running through the terminal fact and the supervisor's
+// completion, so the lease cannot expire in between; on every other path it
+// stops the heartbeat before recording the terminal fact.
 func (s *Supervisor) registerWorkflowTermination(rtID string, ec workflow.ExecutorContext, hb *leaseHeartbeat) {
 	s.controlMu.Lock()
 	child := s.runtimes[rtID]
