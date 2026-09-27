@@ -469,8 +469,9 @@ structured result, a timestamp, and the activation identity plus exact external
 subject when applicable.
 
 The store copies an evidenced artifact into an instance-owned evidence
-directory before recording the evidence event (a same-filesystem hard link is
-an optional optimization; the copied artifact is the portability fallback).
+directory before recording the evidence event. It always copies and never
+hard-links, so a worker that later rewrites the source in place cannot change
+evidence already recorded.
 Completion fails if the artifact cannot be copied and hashed. Agents can
 submit evidence; they cannot edit the workflow snapshot, event log, or
 generated projections.

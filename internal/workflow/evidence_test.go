@@ -24,33 +24,29 @@ func sha256Hex(s string) string {
 	return hex.EncodeToString(digest[:])
 }
 
-func TestStageEvidence_HardLink(t *testing.T) {
+func TestStageEvidence_CopiesIntoItsOwnFile(t *testing.T) {
 	s := newStore(t)
-	src := writeTestFile(t, "hello evidence")
+	src := writeTestFile(t, "same fs content")
+
 	got, err := s.StageEvidence("wf1", src, "out.txt", false, "")
 	if err != nil {
 		t.Fatalf("StageEvidence failed: %v", err)
 	}
-	if got.SHA256 != sha256Hex("hello evidence") {
-		t.Fatalf("SHA256 mismatch: got %s, want %s", got.SHA256, sha256Hex("hello evidence"))
-	}
-	if got.Size != int64(len("hello evidence")) {
-		t.Fatalf("size mismatch: got %d, want %d", got.Size, len("hello evidence"))
-	}
 	if got.StoredPath != filepath.Join("evidence", string(got.EvidenceID), "out.txt") {
 		t.Fatalf("StoredPath mismatch: got %s", got.StoredPath)
 	}
+
+	storedPath := filepath.Join(s.Root(), "instances", "wf1", got.StoredPath)
 	srcInfo, err := os.Stat(src)
 	if err != nil {
 		t.Fatalf("stat src: %v", err)
 	}
-	storedPath := filepath.Join(s.Root(), "instances", "wf1", got.StoredPath)
-	storedInfo, err := os.Stat(storedPath)
+	dstInfo, err := os.Stat(storedPath)
 	if err != nil {
 		t.Fatalf("stat stored: %v", err)
 	}
-	if !os.SameFile(srcInfo, storedInfo) {
-		t.Fatal("hard link failed - files are not the same inode")
+	if os.SameFile(srcInfo, dstInfo) {
+		t.Fatal("staged evidence shares its source's inode, want an independent copy")
 	}
 }
 
@@ -135,13 +131,9 @@ func TestStageEvidence_Sha256Mismatch(t *testing.T) {
 	}
 }
 
-func TestStageEvidence_CopyFallback(t *testing.T) {
+func TestStageEvidence_Copies(t *testing.T) {
 	s := newStore(t)
 	src := writeTestFile(t, "fallback content")
-
-	originalLink := evidenceLink
-	evidenceLink = func(oldname, newname string) error { return errors.New("cross-device") }
-	defer func() { evidenceLink = originalLink }()
 
 	got, err := s.StageEvidence("wf1", src, "out.txt", false, "")
 	if err != nil {
@@ -324,5 +316,34 @@ func TestStageEvidence_CopyFailure(t *testing.T) {
 	// destination cannot be created and staging must fail with an error.
 	if _, _, err := stageInto(src, filepath.Join(blocker, "evidence"), "out.txt", false, ""); err == nil {
 		t.Fatal("expected copy failure for unwritable destination")
+	}
+}
+
+// TestStageEvidence_SourceRewriteLeavesEvidenceIntact proves staged evidence
+// is independent of its source: a worker that rewrites the source file in
+// place after staging (as a later activation in the same working directory
+// does) never changes the staged bytes or invalidates the recorded digest.
+func TestStageEvidence_SourceRewriteLeavesEvidenceIntact(t *testing.T) {
+	s := newStore(t)
+	src := writeTestFile(t, "first activation's findings")
+
+	got, err := s.StageEvidence("wf1", src, "correction.md", true, "")
+	if err != nil {
+		t.Fatalf("StageEvidence: %v", err)
+	}
+	if err := os.WriteFile(src, []byte("second activation's findings"), 0o600); err != nil {
+		t.Fatalf("rewrite source in place: %v", err)
+	}
+
+	storedPath := filepath.Join(s.Root(), "instances", "wf1", got.StoredPath)
+	storedData, err := os.ReadFile(storedPath)
+	if err != nil {
+		t.Fatalf("read stored file: %v", err)
+	}
+	if string(storedData) != "first activation's findings" {
+		t.Fatalf("staged evidence changed with its source: got %q", storedData)
+	}
+	if digest := sha256Hex(string(storedData)); digest != got.SHA256 {
+		t.Fatalf("staged evidence digest = %s, want the recorded %s", digest, got.SHA256)
 	}
 }
