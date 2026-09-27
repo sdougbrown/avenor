@@ -640,6 +640,51 @@ func TestRunnerSubjectMismatchKeepsCursorAndRepolls(t *testing.T) {
 	}
 }
 
+// TestRunnerSubjectMismatchDiagnosticClearsOnApply proves a
+// poll_subject_mismatch diagnostic lasts only until a matching result lands:
+// a mismatched apply records it, and the next applied result on the same
+// cursor clears it.
+func TestRunnerSubjectMismatchDiagnosticClearsOnApply(t *testing.T) {
+	store, clock := newManualRunnerStore(t)
+	deps := newFakeDeps(store, "c1")
+	deps.cands = []Candidate{runnerCand("wf-1", "review", "act-1")}
+	deps.park = true
+	deps.parkSeeds = []workflow.ParkedGateRef{pollSeed()}
+	passed := func() (AdapterResult, PollFailureKind, error) {
+		return AdapterResult{Result: AdapterResultPassed}, PollFailureNone, nil
+	}
+	poller := &fakePoller{store: store, applyResult: PollSubjectMismatch, defaultPoll: passed}
+	pollRunner(t, store, deps, poller, clock.Now)
+
+	waitUntil(t, "cursor seeded", func() bool {
+		_, ok, _ := store.NextPollTime("c1")
+		return ok
+	})
+	clock.Advance(pollBaseDelay + 50*time.Millisecond)
+	key := PollCursorKey(pollSeedCursor())
+	waitUntil(t, "poll_subject_mismatch diagnostic recorded", func() bool {
+		rec, _, _ := store.Get("c1")
+		_, open := rec.Diagnostics["poll_subject_mismatch/"+key]
+		return open
+	})
+	waitUntil(t, "cursor rescheduled", func() bool {
+		rec, _, _ := store.Get("c1")
+		c := rec.PollCursors[key]
+		return c != nil && c.RetryCount > 0
+	})
+
+	// The adapter catches up: the next result matches and applies.
+	poller.mu.Lock()
+	poller.applyResult = PollApplied
+	poller.mu.Unlock()
+	clock.Advance(5*time.Minute + time.Second)
+	waitUntil(t, "poll_subject_mismatch diagnostic cleared after the applied result", func() bool {
+		rec, _, _ := store.Get("c1")
+		_, open := rec.Diagnostics["poll_subject_mismatch/"+key]
+		return !open && poller.applyCount() > 1
+	})
+}
+
 func TestRunnerDisableCancelsInFlightPoll(t *testing.T) {
 	store, clock := newManualRunnerStore(t)
 	deps := newFakeDeps(store, "c1")

@@ -208,6 +208,15 @@ func TestEvaluateAutoCompletionGitContract(t *testing.T) {
 		t.Fatalf("dirty repo error = %v, want clean rejection", err)
 	}
 
+	notRepo := t.TempDir()
+	for _, req := range []*GitRequirement{{Clean: true}, {Head: head}} {
+		node.Completion.Git = req
+		if _, err := EvaluateAutoCompletion(tmpl, node, notRepo, ""); err == nil ||
+			!strings.Contains(err.Error(), "could not be evaluated") {
+			t.Fatalf("git contract %+v outside a repository: error = %v, want could-not-be-evaluated rejection", *req, err)
+		}
+	}
+
 	node.Completion.Git = &GitRequirement{ChangedFromBase: true}
 	if _, err := EvaluateAutoCompletion(tmpl, node, dir, ""); err == nil ||
 		!strings.Contains(err.Error(), "no recorded base commit") {
@@ -386,6 +395,9 @@ func TestResolveJSONPointer(t *testing.T) {
 		if _, err := resolveJSONPointer(data, pointer); err == nil {
 			t.Fatalf("resolveJSONPointer(%q) succeeded, want error", pointer)
 		}
+	}
+	if _, err := resolveJSONPointer([]byte(`{"a": `), "/a"); err == nil || !strings.Contains(err.Error(), "not valid JSON") {
+		t.Fatalf("resolveJSONPointer on invalid JSON: error = %v, want invalid-JSON rejection", err)
 	}
 }
 
