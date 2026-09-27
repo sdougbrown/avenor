@@ -190,6 +190,12 @@ type ExecutorContext struct {
 	// attempt's first start. Nil means the executor's start self-reserves
 	// through the ordinary spawn path (manual and legacy starts).
 	Admission AdmissionHandle
+	// WorkingDirectory is the attempt's resolved working directory: the
+	// node's working_directory override, else the template default, resolved
+	// from the recorded instance params. Empty means the executor falls back
+	// to the supervisor's working directory (templates without a
+	// working_directory declaration behave exactly as before).
+	WorkingDirectory string
 }
 
 // RegisterExecutor attaches the dispatch backend for one action kind.
@@ -1092,16 +1098,18 @@ func (m *Manager) commandStart(wf WorkflowID, payload json.RawMessage) (any, err
 		return nil, err
 	}
 	unlockDispatch()
+	workingDir := ResolveNodeWorkingDirectory(*tmpl, *node, snap.Instance.Params)
 	if err := exec.Dispatch(context.Background(), ExecutorContext{
-		WorkflowID:   wf,
-		NodeID:       req.NodeID,
-		ActivationID: act.ID,
-		AttemptID:    attemptID,
-		LeaseID:      req.LeaseID,
-		OwnerToken:   req.OwnerToken,
-		LeaseTTL:     leaseTTL(node, tmpl.DefaultLease),
-		Action:       node.Action,
-		Selection:    selection,
+		WorkflowID:       wf,
+		NodeID:           req.NodeID,
+		ActivationID:     act.ID,
+		AttemptID:        attemptID,
+		LeaseID:          req.LeaseID,
+		OwnerToken:       req.OwnerToken,
+		LeaseTTL:         leaseTTL(node, tmpl.DefaultLease),
+		Action:           node.Action,
+		Selection:        selection,
+		WorkingDirectory: workingDir,
 	}); err != nil {
 		return nil, err
 	}
