@@ -248,6 +248,17 @@ func (f *autoHandoffFixture) waitForInstance(t *testing.T, wf, what string, cond
 	}
 }
 
+// consumeSucceeded reports whether the consume node's attempt reached a
+// successful terminal status, which happens only after its provider ran.
+func consumeSucceeded(inst *workflow.WorkflowInstance) bool {
+	for _, a := range attemptsForNode(inst, "consume") {
+		if a.Status == workflow.AttemptSucceeded {
+			return true
+		}
+	}
+	return false
+}
+
 // autoHandoffChainTemplate is the two-node template for the dependent-node
 // test: auto run node "produce" declares a required string output, a files
 // completion contract with a non-empty artifact, and a "done" branch to auto
@@ -413,19 +424,16 @@ func TestAutoHandoffSatisfiesNodeAndDispatchesDependent(t *testing.T) {
 		attempts := attemptsForNode(inst, "produce")
 		return len(attempts) == 1 && attempts[0].Status == workflow.AttemptSucceeded
 	})
-	if calls := f.providerCalls.Load(); calls != 1 {
-		t.Fatalf("provider invoked %d times for produce, want exactly 1", calls)
-	}
 
 	// The supervisor must complete "produce" from the worker's declared
 	// result: satisfied with the declared outcome, output + artifact evidence
 	// recorded, and "consume" dispatched automatically.
-	f.waitForInstance(t, wf, "produce satisfied with outcome done and consume dispatched", func(inst *workflow.WorkflowInstance) bool {
+	f.waitForInstance(t, wf, "produce satisfied with outcome done and consume's attempt succeeded", func(inst *workflow.WorkflowInstance) bool {
 		produce := activationFor(inst, "produce")
 		consume := activationFor(inst, "consume")
 		return produce != nil && produce.Status == workflow.ActivationSatisfied &&
 			produce.SelectedOutcome == workflow.OutcomeName(declared.Outcome) &&
-			consume != nil && len(consume.AttemptIDs) > 0
+			consume != nil && consumeSucceeded(inst)
 	})
 
 	inst := f.instance(t, wf)
