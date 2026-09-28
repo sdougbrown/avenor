@@ -536,6 +536,20 @@ type OutputDefinition struct {
 	Name     string     `json:"name"`
 	Type     OutputType `json:"type"`
 	Required bool       `json:"required,omitempty"`
+	// Source declares where supervisor-side auto-completion resolves the
+	// output's value from. Nil means the default binding: a file output on a
+	// files contract with exactly one declared artifact binds to that
+	// artifact.
+	Source *OutputSource `json:"source,omitempty"`
+}
+
+// OutputSource is one declared output resolution source. Exactly one of
+// artifact or git is declared; a pointer narrows an artifact source to one
+// RFC 6901 location inside a JSON artifact.
+type OutputSource struct {
+	Artifact string `json:"artifact,omitempty"`
+	Pointer  string `json:"pointer,omitempty"`
+	Git      string `json:"git,omitempty"`
 }
 
 type OutputValue struct {
@@ -894,9 +908,12 @@ type Command struct {
 	AttemptStatus    AttemptStatus     `json:"attempt_status,omitempty"`
 	MarkerKind       string            `json:"marker_kind,omitempty"`
 	MarkerLabel      string            `json:"marker_label,omitempty"`
-	Evidence         []Evidence        `json:"evidence,omitempty"`
-	Outputs          []OutputValue     `json:"outputs,omitempty"`
-	Gate             *GateInstance     `json:"gate,omitempty"`
+	// WorkingDirectory records, on a terminate command, the working directory
+	// the attempt's runtime ran in. Inert evidence copied onto the attempt.
+	WorkingDirectory string        `json:"working_directory,omitempty"`
+	Evidence         []Evidence    `json:"evidence,omitempty"`
+	Outputs          []OutputValue `json:"outputs,omitempty"`
+	Gate             *GateInstance `json:"gate,omitempty"`
 	// Operation selects the gate decision; only meaningful for CommandGate,
 	// ignored for every other command kind.
 	Operation GateOperation       `json:"operation,omitempty"`

@@ -14,10 +14,6 @@ import (
 	"github.com/sdougbrown/avenor/internal/durablefile"
 )
 
-// evidenceLink is the hard-link primitive used by the stager. It is a
-// variable so tests can force link failure (e.g. cross-device) deterministically.
-var evidenceLink = os.Link
-
 // StagedEvidence describes one artifact copied into an immutable evidence
 // directory. OriginalPath is the caller's original source path; StoredPath is
 // the path of the stored copy RELATIVE TO the instance directory
@@ -147,16 +143,14 @@ func stageInto(srcPath, destDir, storedName string, required bool, expectedSHA s
 		return 0, "", err
 	}
 
-	// Same-filesystem hard link first (an explicit optimization: it shares the
-	// source inode, so the source must be treated as immutable after staging);
-	// fall back to a real byte copy when linking fails (e.g. cross-device).
-	if err := evidenceLink(srcPath, destPath); err != nil {
+	// Always a byte copy, never a hard link: the source usually lives in a
+	// worker's working directory, and a later rewrite of it in place must not
+	// change evidence already staged.
+	if err := copyFile(srcPath, destPath); err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			return 0, "", fmt.Errorf("evidence: stored path %q already exists", storedName)
 		}
-		if err := copyFile(srcPath, destPath); err != nil {
-			return 0, "", err
-		}
+		return 0, "", err
 	}
 
 	// Hash the bytes actually on disk after writing (not just the source) and
@@ -167,11 +161,16 @@ func stageInto(srcPath, destDir, storedName string, required bool, expectedSHA s
 		return 0, "", err
 	}
 	if expectedSHA != "" && !strings.EqualFold(storedDigest, expectedSHA) {
+		os.Remove(destPath)
 		return 0, "", fmt.Errorf("evidence: sha256 mismatch for %q", storedName)
 	}
 	storedInfo, err := os.Stat(destPath)
 	if err != nil {
 		return 0, "", err
+	}
+	if required && storedInfo.Size() == 0 {
+		os.Remove(destPath)
+		return 0, "", errors.New("evidence: required file is empty")
 	}
 	if err := durablefile.FsyncDir(destDir); err != nil {
 		return 0, "", err

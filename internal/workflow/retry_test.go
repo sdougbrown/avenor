@@ -389,3 +389,36 @@ func noBranchEvents(t *testing.T, s *Store, wf WorkflowID) bool {
 	}
 	return false
 }
+
+// TestRetryPolicyFallsBackToTemplateDefault proves the manager's resolver
+// applies the template's default_retry_policy to a node that declares no
+// retry_policy, while a node's own policy still overrides it.
+func TestRetryPolicyFallsBackToTemplateDefault(t *testing.T) {
+	const templateID = "retry-default"
+	templateJSON := []byte(`{
+  "schema_version": 1,
+  "template_id": "retry-default",
+  "template_version": "1",
+  "entry_nodes": ["start"],
+  "nodes": [
+    {"id": "start", "action": {"type": "run", "prompt": "do the thing"}, "branches": {"done": "own"}},
+    {"id": "own", "dependencies": ["start"], "action": {"type": "run", "prompt": "again"}, "retry_policy": {"max_attempts": 5, "exhaustion": "fail"}}
+  ],
+  "terminal_outcomes": ["done"],
+  "default_retry_policy": {"max_attempts": 2, "exhaustion": "block"}
+}`)
+	_, s, wf := newRetryFixture(t, templateJSON, templateID)
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+
+	inherited := retryPolicyFor(&snap, "start")
+	if inherited == nil || inherited.MaximumAttempts != 2 || inherited.Exhaustion != RetryExhaustionBlock {
+		t.Fatalf("start retry policy = %+v, want the template default {2 block}", inherited)
+	}
+	own := retryPolicyFor(&snap, "own")
+	if own == nil || own.MaximumAttempts != 5 || own.Exhaustion != RetryExhaustionFail {
+		t.Fatalf("own retry policy = %+v, want the node's own {5 fail}", own)
+	}
+}

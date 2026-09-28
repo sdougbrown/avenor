@@ -177,6 +177,13 @@ func (s *Supervisor) applyPollResult(controllerID string, cursor workflowcontrol
 			outcome = workflowcontroller.PollObsolete
 			return nil
 		}
+		// A result is only evidence about the subject the adapter actually
+		// observed; one reported for any other subject (such as an older head)
+		// must never resolve the pinned gate.
+		if !adapterSubjectMatches(res.Subject, subject) {
+			outcome = workflowcontroller.PollSubjectMismatch
+			return nil
+		}
 		// Stage the exact bounded stdout as evidence under the workflow root.
 		root := wstore.Root()
 		if err := os.MkdirAll(adapterStagingDir(root), 0o755); err != nil {
@@ -224,6 +231,16 @@ func (s *Supervisor) applyPollResult(controllerID string, cursor workflowcontrol
 		return workflowcontroller.PollStale, applyErr
 	}
 	return outcome, nil
+}
+
+// adapterSubjectMatches reports whether the subject an adapter observed is
+// exactly the gate's pinned subject.
+func adapterSubjectMatches(observed workflowcontroller.AdapterSubject, pinned *workflow.Subject) bool {
+	return pinned != nil &&
+		observed.Type == pinned.Type &&
+		observed.Repository == pinned.Repository &&
+		observed.PullRequest == pinned.PullRequest &&
+		observed.Revision == pinned.Revision
 }
 
 // submitExternalResult submits the structured external_result gate command

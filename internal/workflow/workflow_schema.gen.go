@@ -2119,6 +2119,7 @@ func svalidateWorkflowProfileOutput(raw json.RawMessage, path, schemaPath string
 		"id":       true,
 		"name":     true,
 		"required": true,
+		"source":   true,
 		"type":     true,
 	}
 	for key := range m {
@@ -2155,6 +2156,15 @@ func svalidateWorkflowProfileOutput(raw json.RawMessage, path, schemaPath string
 		switch WorkflowProfileStructuralKind(r) {
 		case "boolean":
 		default:
+			*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
+		}
+	}
+	if r, ok := m["source"]; ok {
+		fpath := path + "/" + escapePtr("source")
+		fspath := schemaPath + "/properties/" + escapePtr("source")
+		if WorkflowProfileStructuralKind(r) == "object" {
+			svalidateWorkflowProfileOutputSource(r, fpath, fspath, issues)
+		} else {
 			*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
 		}
 	}
@@ -2606,6 +2616,59 @@ func svalidateWorkflowProfileNodeBranches(raw json.RawMessage, path, schemaPath 
 			continue
 		}
 		*issues = append(*issues, WorkflowProfileStructuralIssueAt("additionalProperties", path+"/"+escapePtr(key), schemaPath))
+	}
+}
+
+func svalidateWorkflowProfileOutputSource(raw json.RawMessage, path, schemaPath string, issues *[]WorkflowProfileStructuralIssue) {
+	if WorkflowProfileStructuralKind(raw) != "object" {
+		*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", path, schemaPath))
+		return
+	}
+	var m map[string]json.RawMessage
+	_ = json.Unmarshal(raw, &m)
+	allowed := map[string]bool{
+		"artifact": true,
+		"git":      true,
+		"pointer":  true,
+	}
+	for key := range m {
+		if allowed[key] {
+			continue
+		}
+		*issues = append(*issues, WorkflowProfileStructuralIssueAt("additionalProperties", path+"/"+escapePtr(key), schemaPath))
+	}
+	if r, ok := m["artifact"]; ok {
+		fpath := path + "/" + escapePtr("artifact")
+		fspath := schemaPath + "/properties/" + escapePtr("artifact")
+		switch WorkflowProfileStructuralKind(r) {
+		case "string":
+			var sv string
+			_ = json.Unmarshal(r, &sv)
+		default:
+			*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
+		}
+	}
+	if r, ok := m["git"]; ok {
+		fpath := path + "/" + escapePtr("git")
+		fspath := schemaPath + "/properties/" + escapePtr("git")
+		switch WorkflowProfileStructuralKind(r) {
+		case "string":
+			var sv string
+			_ = json.Unmarshal(r, &sv)
+		default:
+			*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
+		}
+	}
+	if r, ok := m["pointer"]; ok {
+		fpath := path + "/" + escapePtr("pointer")
+		fspath := schemaPath + "/properties/" + escapePtr("pointer")
+		switch WorkflowProfileStructuralKind(r) {
+		case "string":
+			var sv string
+			_ = json.Unmarshal(r, &sv)
+		default:
+			*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
+		}
 	}
 }
 
@@ -3236,6 +3299,9 @@ func (v WorkflowProfileOutcome) validate(path string, issues *[]Issue) {
 func (v WorkflowProfileOutput) validate(path string, issues *[]Issue) {
 	if v.Required != nil {
 	}
+	if v.Source != nil {
+		v.Source.validate(path+"/"+escapePtr("source"), issues)
+	}
 }
 
 func (v WorkflowProfileOutputBinding) validate(path string, issues *[]Issue) {
@@ -3288,6 +3354,15 @@ func (v WorkflowProfileInputBindingValue) validate(path string, issues *[]Issue)
 }
 
 func (v WorkflowProfileNodeBranches) validate(path string, issues *[]Issue) {
+}
+
+func (v WorkflowProfileOutputSource) validate(path string, issues *[]Issue) {
+	if v.Artifact != nil {
+	}
+	if v.Git != nil {
+	}
+	if v.Pointer != nil {
+	}
 }
 
 func (v WorkflowProfileMetadata) validate(path string, issues *[]Issue) {
@@ -4702,10 +4777,11 @@ func (v *WorkflowProfileOutcome) UnmarshalJSON(data []byte) error {
 }
 
 type WorkflowProfileOutput struct {
-	Id       string "json:\"id\""
-	Name     string "json:\"name\""
-	Required *bool  "json:\"required,omitempty\""
-	Type     string "json:\"type\""
+	Id       string                       "json:\"id\""
+	Name     string                       "json:\"name\""
+	Required *bool                        "json:\"required,omitempty\""
+	Source   *WorkflowProfileOutputSource "json:\"source,omitempty\""
+	Type     string                       "json:\"type\""
 }
 
 func (v *WorkflowProfileOutput) UnmarshalJSON(data []byte) error {
@@ -4721,6 +4797,7 @@ func (v *WorkflowProfileOutput) UnmarshalJSON(data []byte) error {
 		case "id":
 		case "name":
 		case "required":
+		case "source":
 		case "type":
 		default:
 			return fmt.Errorf("unknown field %q", key)
@@ -4739,6 +4816,11 @@ func (v *WorkflowProfileOutput) UnmarshalJSON(data []byte) error {
 	if r, ok := raw["required"]; ok {
 		if len(r) == 4 && string(r) == "null" {
 			return fmt.Errorf("field \"required\" must not be null")
+		}
+	}
+	if r, ok := raw["source"]; ok {
+		if len(r) == 4 && string(r) == "null" {
+			return fmt.Errorf("field \"source\" must not be null")
 		}
 	}
 	if r, ok := raw["type"]; ok {
@@ -4773,6 +4855,13 @@ func (v *WorkflowProfileOutput) UnmarshalJSON(data []byte) error {
 			return err
 		}
 		next.Required = &decoded0
+	}
+	if encoded, ok := raw["source"]; ok {
+		var decoded1 WorkflowProfileOutputSource
+		if err := json.Unmarshal(encoded, &decoded1); err != nil {
+			return err
+		}
+		next.Source = &decoded1
 	}
 	if encoded, ok := raw["type"]; ok {
 		if err := json.Unmarshal(encoded, &next.Type); err != nil {
@@ -5258,6 +5347,71 @@ func (v *WorkflowProfileNodeBranches) UnmarshalJSON(data []byte) error {
 	type alias WorkflowProfileNodeBranches
 	var next alias
 	*v = WorkflowProfileNodeBranches(next)
+	return nil
+}
+
+type WorkflowProfileOutputSource struct {
+	Artifact *string "json:\"artifact,omitempty\""
+	Git      *string "json:\"git,omitempty\""
+	Pointer  *string "json:\"pointer,omitempty\""
+}
+
+func (v *WorkflowProfileOutputSource) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if raw == nil {
+		return fmt.Errorf("expected object, got null")
+	}
+	for key := range raw {
+		switch key {
+		case "artifact":
+		case "git":
+		case "pointer":
+		default:
+			return fmt.Errorf("unknown field %q", key)
+		}
+	}
+	if r, ok := raw["artifact"]; ok {
+		if len(r) == 4 && string(r) == "null" {
+			return fmt.Errorf("field \"artifact\" must not be null")
+		}
+	}
+	if r, ok := raw["git"]; ok {
+		if len(r) == 4 && string(r) == "null" {
+			return fmt.Errorf("field \"git\" must not be null")
+		}
+	}
+	if r, ok := raw["pointer"]; ok {
+		if len(r) == 4 && string(r) == "null" {
+			return fmt.Errorf("field \"pointer\" must not be null")
+		}
+	}
+	type alias WorkflowProfileOutputSource
+	var next alias
+	if encoded, ok := raw["artifact"]; ok {
+		var decoded0 string
+		if err := json.Unmarshal(encoded, &decoded0); err != nil {
+			return err
+		}
+		next.Artifact = &decoded0
+	}
+	if encoded, ok := raw["git"]; ok {
+		var decoded1 string
+		if err := json.Unmarshal(encoded, &decoded1); err != nil {
+			return err
+		}
+		next.Git = &decoded1
+	}
+	if encoded, ok := raw["pointer"]; ok {
+		var decoded2 string
+		if err := json.Unmarshal(encoded, &decoded2); err != nil {
+			return err
+		}
+		next.Pointer = &decoded2
+	}
+	*v = WorkflowProfileOutputSource(next)
 	return nil
 }
 

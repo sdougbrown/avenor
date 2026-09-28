@@ -504,6 +504,21 @@
           },
           "required": {
             "type": "boolean"
+          },
+          "source": {
+            "type": "object",
+            "properties": {
+              "artifact": {
+                "type": "string"
+              },
+              "pointer": {
+                "type": "string"
+              },
+              "git": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
           }
         },
         "required": [

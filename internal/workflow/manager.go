@@ -88,7 +88,8 @@ func NewManager(store *Store) *Manager {
 	// Retry policies are resolved from the instance's versioned template so
 	// the reducer's retry/exhaustion logic sees the node's durable policy
 	// (matching production): without this resolver every failure would
-	// exhaust to a single attempt. Load errors return nil, which keeps
+	// exhaust to a single attempt. A node without its own policy inherits the
+	// template's default_retry_policy. Load errors return nil, which keeps
 	// single-attempt behavior for that node.
 	SetRetryPolicyResolver(func(templateID TemplateID, templateVersion TemplateVersion, nodeID NodeID) *RetryPolicy {
 		tmpl, err := m.store.LoadTemplate(templateID, templateVersion)
@@ -99,7 +100,10 @@ func NewManager(store *Store) *Manager {
 		if err != nil {
 			return nil
 		}
-		return node.RetryPolicy
+		if node.RetryPolicy != nil {
+			return node.RetryPolicy
+		}
+		return tmpl.DefaultRetry
 	})
 	// Dispatch policies are resolved from the instance's versioned template so
 	// activation creation copies the node's auto-dispatch metadata into the
@@ -1154,15 +1158,32 @@ func (m *Manager) Heartbeat(wf WorkflowID, nodeID NodeID, activationID Activatio
 // attempt as evidence only; they are never a workflow-store command and
 // cannot satisfy an activation or select an outcome.
 func (m *Manager) RecordAttemptTerminated(wf WorkflowID, nodeID NodeID, activationID ActivationID, attemptID AttemptID, leaseID LeaseID, status AttemptStatus, marker ...string) error {
-	if status == "" {
-		return errors.New("attempt termination status is required")
-	}
-	var markerKind, markerLabel string
+	t := AttemptTermination{Status: status}
 	if len(marker) >= 1 {
-		markerKind = marker[0]
+		t.MarkerKind = marker[0]
 	}
 	if len(marker) >= 2 {
-		markerLabel = marker[1]
+		t.MarkerLabel = marker[1]
+	}
+	return m.RecordAttemptTermination(wf, nodeID, activationID, attemptID, leaseID, t)
+}
+
+// AttemptTermination is one attempt's terminal fact: the final status, the
+// optional inert terminal-marker evidence, and the working directory the
+// attempt's runtime ran in (recorded when known).
+type AttemptTermination struct {
+	Status           AttemptStatus
+	MarkerKind       string
+	MarkerLabel      string
+	WorkingDirectory string
+}
+
+// RecordAttemptTermination records the terminal status of an already-started
+// attempt like RecordAttemptTerminated, and additionally carries the
+// attempt's working directory and terminal marker evidence.
+func (m *Manager) RecordAttemptTermination(wf WorkflowID, nodeID NodeID, activationID ActivationID, attemptID AttemptID, leaseID LeaseID, t AttemptTermination) error {
+	if t.Status == "" {
+		return errors.New("attempt termination status is required")
 	}
 	// The command is idempotent per attempt (stable "terminate-<attemptID>"
 	// key), so it is safe to retry: a concurrent command on the same instance
@@ -1185,9 +1206,10 @@ func (m *Manager) RecordAttemptTerminated(wf WorkflowID, nodeID NodeID, activati
 			IdempotencyKey:   "terminate-" + string(attemptID),
 			Identity:         ExecutionIdentity{WorkflowID: wf, NodeID: nodeID, ActivationID: activationID, AttemptID: attemptID},
 			LeaseID:          leaseID,
-			AttemptStatus:    status,
-			MarkerKind:       markerKind,
-			MarkerLabel:      markerLabel,
+			AttemptStatus:    t.Status,
+			MarkerKind:       t.MarkerKind,
+			MarkerLabel:      t.MarkerLabel,
+			WorkingDirectory: t.WorkingDirectory,
 		})
 		if err == nil {
 			return nil

@@ -1023,3 +1023,43 @@ func TestControllerPollFailedGateCommandDiscardsEvidence(t *testing.T) {
 		t.Fatalf("cursor retry count = %d, want backed-off retries", cursor.RetryCount)
 	}
 }
+
+// TestAdapterSubjectMatches pins the exact-subject comparison applyPollResult
+// uses before applying an adapter result: every compared field must match
+// the pinned subject, and a missing pinned subject never matches.
+func TestAdapterSubjectMatches(t *testing.T) {
+	pinned := &workflow.Subject{Type: "pull_request", Repository: "sdougbrown/avenor", PullRequest: 143, Revision: "cc793f7"}
+	exact := workflowcontroller.AdapterSubject{Type: "pull_request", Repository: "sdougbrown/avenor", PullRequest: 143, Revision: "cc793f7"}
+	tests := []struct {
+		name     string
+		observed func(s workflowcontroller.AdapterSubject) workflowcontroller.AdapterSubject
+		pinned   *workflow.Subject
+		want     bool
+	}{
+		{name: "exact match", observed: func(s workflowcontroller.AdapterSubject) workflowcontroller.AdapterSubject { return s }, pinned: pinned, want: true},
+		{name: "type mismatch", observed: func(s workflowcontroller.AdapterSubject) workflowcontroller.AdapterSubject {
+			s.Type = "commit"
+			return s
+		}, pinned: pinned},
+		{name: "repository mismatch", observed: func(s workflowcontroller.AdapterSubject) workflowcontroller.AdapterSubject {
+			s.Repository = "other/repo"
+			return s
+		}, pinned: pinned},
+		{name: "pull request mismatch", observed: func(s workflowcontroller.AdapterSubject) workflowcontroller.AdapterSubject {
+			s.PullRequest = 144
+			return s
+		}, pinned: pinned},
+		{name: "revision mismatch", observed: func(s workflowcontroller.AdapterSubject) workflowcontroller.AdapterSubject {
+			s.Revision = "0000000"
+			return s
+		}, pinned: pinned},
+		{name: "nil pinned subject", observed: func(s workflowcontroller.AdapterSubject) workflowcontroller.AdapterSubject { return s }, pinned: nil},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := adapterSubjectMatches(test.observed(exact), test.pinned); got != test.want {
+				t.Fatalf("adapterSubjectMatches() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}

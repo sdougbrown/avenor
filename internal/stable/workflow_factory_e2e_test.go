@@ -1,34 +1,60 @@
 package stable
 
 // workflow_factory_e2e_test.go runs the shipped software-factory work
-// template (templates/software-factory/work.json@1.2.0) end to end over a
-// real supervisor with fake providers and the Stage 7b fixture adapters:
-// one work item flows from intake through publication, the auto external
-// review parks and polls its bound gates, a clean verdict stops at the
-// manual merge-authorization human gate, a changes_requested verdict routes
-// correction and re-publishes under a new exact head the old results cannot
-// land on, two work items resolving different worktree params run
-// concurrently while two sharing one worktree param serialize, and a fresh
-// supervisor on the same root resumes the parked work without coordinator
-// memory.
+// template (templates/software-factory/work.json) end to end over a real
+// supervisor: the real registered executors (run/loop/team dispatch through
+// the production spawn path), a real enabled controller with its leader loop
+// and poll runner, real admission, the real workflow.Manager over a durable
+// store, and real completion validation. The only fakes are the scripted
+// provider (standing in for the real inference backend behind the production
+// provider-factory seam) and the fixture adapters for the external gates.
+//
+// AUTO nodes are never hand-driven: they advance only through the
+// controller's dispatch, the scripted worker's session, and the
+// supervisor-side completion (internal/workflow/autocompletion.go evaluates
+// the node's declared contract in the attempt's working directory). Manual
+// nodes (intake, hardening, merge-auth) are completed by the test as the
+// human via the claim holder's token — the only token surface the harness
+// ever touches. Workers never see it.
+//
+// All workers share the supervisor process's working directory (the known
+// spawn-cwd gap), so the working dir is a real git repo with a commit:
+// publication's pr_head output resolves from `git rev-parse HEAD` there and
+// the review gates bind to that exact head.
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/workflow"
 	"github.com/sdougbrown/avenor/internal/workflowcontroller"
 )
 
 // factoryTemplateDir is the repo-relative location of the shipped factory
-// template and its prompt/loop/team fixtures.
+// template and its prompt/loop/team fixtures. It is resolved to an absolute
+// path at init, before any test chdirs the process into a scratch working
+// directory.
 const factoryTemplateDir = "../../templates/software-factory"
+
+var factoryTemplateDirAbs = func() string {
+	abs, err := filepath.Abs(factoryTemplateDir)
+	if err != nil {
+		panic(fmt.Sprintf("resolve %s: %v", factoryTemplateDir, err))
+	}
+	return abs
+}()
 
 // factoryWorkTemplateJSON loads the shipped work template and rewrites its
 // prompt_file/loop_file/team_file/roster_file references to absolute repo
@@ -36,7 +62,7 @@ const factoryTemplateDir = "../../templates/software-factory"
 // modification of the shipped fixture.
 func factoryWorkTemplateJSON(t *testing.T) []byte {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join(factoryTemplateDir, "work.json"))
+	data, err := os.ReadFile(filepath.Join(factoryTemplateDirAbs, "work.json"))
 	if err != nil {
 		t.Fatalf("read work template: %v", err)
 	}
@@ -45,10 +71,7 @@ func factoryWorkTemplateJSON(t *testing.T) []byte {
 		t.Fatalf("decode work template: %v", err)
 	}
 	abs := func(rel string) string {
-		absPath, err := filepath.Abs(filepath.Join(factoryTemplateDir, rel))
-		if err != nil {
-			t.Fatalf("resolve %s: %v", rel, err)
-		}
+		absPath := filepath.Join(factoryTemplateDirAbs, rel)
 		return absPath
 	}
 	for _, raw := range template["nodes"].([]any) {
@@ -76,35 +99,254 @@ func factoryWorkTemplateJSON(t *testing.T) []byte {
 	return out
 }
 
-// factoryE2E drives the shipped work template over a supervisor with fixture
-// adapters and a fake provider, with the software-factory controller
-// registered (disabled until the test enables it).
-type factoryE2E struct {
-	sup         *Supervisor
-	mgr         *workflow.Manager
-	cstore      *workflowcontroller.ControllerStore
-	root        string
-	adapterDir  string
-	wf          string
-	release     chan struct{}
-	releaseOnce sync.Once
+// factoryWorkerScript scripts one worker session: the files the worker
+// writes into its working directory when it runs, the message chunks it
+// streams (loop/team terminal markers travel here), an optional action run
+// before the chunks (e.g. committing the republished head), the stop reason
+// it ends with, and an optional hold that blocks the worker mid-run so the
+// test can observe a live attempt holding a lease or concurrency key.
+type factoryWorkerScript struct {
+	sessionID  string
+	write      map[string]string
+	chunks     []string
+	action     func() error
+	stopReason string
+	hold       chan struct{}
 }
 
-// newFactoryE2E stages the named fixture adapter scripts as circleci-pipeline
-// and github-pr-review manifests, registers and instantiates the shipped
-// work template, and creates the disabled software-factory controller.
-func newFactoryE2E(t *testing.T, name string, ciScript, reviewScript string) *factoryE2E {
+// factoryWorkerProvider is the scripted inference provider behind the
+// production provider-factory seam. Sessions are handed out strictly in
+// script order — one script per spawned attempt, exactly like the real
+// backend — and a script's side effects run when its worker is prompted, not
+// when it is queued.
+type factoryWorkerProvider struct {
+	mu        sync.Mutex
+	scripts   []factoryWorkerScript
+	next      int
+	bySession map[string]int
+	channels  map[string]chan events.Event
+	started   []string // ordered session IDs handed to the runtime
+}
+
+func (p *factoryWorkerProvider) append(script factoryWorkerScript) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if script.stopReason == "" {
+		script.stopReason = "end_turn"
+	}
+	if script.sessionID == "" {
+		script.sessionID = fmt.Sprintf("ses_factory_%d", len(p.scripts))
+	}
+	p.scripts = append(p.scripts, script)
+}
+
+// releaseAllHolds unblocks every held worker; safe to call repeatedly.
+func (p *factoryWorkerProvider) releaseAllHolds() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i := range p.scripts {
+		if p.scripts[i].hold != nil {
+			close(p.scripts[i].hold)
+			p.scripts[i].hold = nil
+		}
+	}
+}
+
+// releaseHold unblocks one held worker by session ID; safe to call
+// repeatedly.
+func (p *factoryWorkerProvider) releaseHold(sessionID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i := range p.scripts {
+		if p.scripts[i].sessionID == sessionID && p.scripts[i].hold != nil {
+			close(p.scripts[i].hold)
+			p.scripts[i].hold = nil
+		}
+	}
+}
+
+func (p *factoryWorkerProvider) openSession() (runtime.Session, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.next >= len(p.scripts) {
+		return runtime.Session{}, fmt.Errorf("missing scripted worker attempt %d (only %d scripted)", p.next, len(p.scripts))
+	}
+	index := p.next
+	p.next++
+	sessionID := p.scripts[index].sessionID
+	if p.bySession == nil {
+		p.bySession = make(map[string]int)
+		p.channels = make(map[string]chan events.Event)
+	}
+	p.bySession[sessionID] = index
+	p.channels[sessionID] = make(chan events.Event, len(p.scripts[index].chunks)+1)
+	p.started = append(p.started, sessionID)
+	return runtime.Session{SessionID: sessionID}, nil
+}
+
+func (p *factoryWorkerProvider) Start(context.Context, runtime.StartOptions) (runtime.Session, error) {
+	return p.openSession()
+}
+
+func (p *factoryWorkerProvider) Resume(context.Context, string) (runtime.Session, error) {
+	return p.openSession()
+}
+
+// Prompt runs the worker: side effects first (the worker does its work),
+// then the mid-run hold, then the streamed chunks and the session end.
+func (p *factoryWorkerProvider) Prompt(ctx context.Context, sessionID, _ string) error {
+	p.mu.Lock()
+	index, ok := p.bySession[sessionID]
+	ch := p.channels[sessionID]
+	var script factoryWorkerScript
+	if ok {
+		script = p.scripts[index]
+	}
+	p.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("no scripted worker session %q", sessionID)
+	}
+	for name, content := range script.write {
+		if err := writeFileAtomic(name, []byte(content)); err != nil {
+			return err
+		}
+	}
+	if script.action != nil {
+		if err := script.action(); err != nil {
+			return err
+		}
+	}
+	if script.hold != nil {
+		select {
+		case <-script.hold:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	defer close(ch)
+	for _, chunk := range script.chunks {
+		select {
+		case ch <- events.Event{Event: "agent.message_chunk", SessionID: sessionID, Fields: map[string]any{"delta": chunk}}:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	select {
+	case ch <- events.Event{Event: "session.end", SessionID: sessionID, Fields: map[string]any{"stop_reason": script.stopReason}}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return nil
+}
+
+// writeFileAtomic replaces path with content through a temporary file and a
+// rename, so a concurrent reader sees the old or the new file, never a
+// truncated one.
+func writeFileAtomic(path string, content []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	if _, err := tmp.Write(content); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmp.Name())
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
+}
+
+func (p *factoryWorkerProvider) Cancel(context.Context, string) error { return nil }
+
+func (p *factoryWorkerProvider) Events(_ context.Context, sessionID string) (<-chan events.Event, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if ch, ok := p.channels[sessionID]; ok {
+		return ch, nil
+	}
+	return nil, fmt.Errorf("no scripted worker session %q", sessionID)
+}
+
+func (p *factoryWorkerProvider) AnswerPermission(context.Context, string, string, runtime.PermissionResponse) error {
+	return nil
+}
+
+func (p *factoryWorkerProvider) Capabilities(context.Context) (runtime.Capabilities, error) {
+	return runtime.Capabilities{}, nil
+}
+
+// sessionCount reports how many worker sessions the runtime has started.
+func (p *factoryWorkerProvider) sessionCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.started)
+}
+
+// factoryNodeShape records the two properties the harness must respect when
+// driving a node by hand: its action kind and whether it dispatches auto.
+type factoryNodeShape struct {
+	actionKind   string
+	dispatchAuto bool
+}
+
+// factoryE2E drives the shipped work template over a supervisor with fixture
+// adapters and the scripted worker provider, with the software-factory
+// controller registered (disabled until the test enables it).
+type factoryE2E struct {
+	sup          *Supervisor
+	mgr          *workflow.Manager
+	cstore       *workflowcontroller.ControllerStore
+	root         string
+	adapterDir   string
+	wf           string
+	provider     *factoryWorkerProvider
+	nodes        map[string]factoryNodeShape
+	head         string // the git head the first publication publishes
+	controllerID string
+}
+
+// newFactoryE2E stages the fixture adapters (each rendered with the working
+// directory's git head, which the exact-subject fixtures need), prepares the
+// working directory as a git repo with one commit, registers and
+// instantiates the shipped work template pinned to the given worktree param,
+// and creates the disabled software-factory controller with the given
+// in-flight budget.
+func newFactoryE2E(t *testing.T, name string, maxInflight int, worktree string, ciAdapter, reviewAdapter func(head string) string) *factoryE2E {
 	t.Helper()
+	// The attempt working directory is the supervisor process cwd (the
+	// direct-run executor's spawn Dir); chdir to a scratch dir that is a real
+	// git repo with a commit so publication's git-head output resolves.
+	workDir := t.TempDir()
+	t.Chdir(workDir)
+	factoryGit(t, "init")
+	factoryGit(t, "config", "user.email", "factory-e2e@example.invalid")
+	factoryGit(t, "config", "user.name", "factory e2e")
+	if err := os.WriteFile("README.md", []byte("# factory e2e\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	factoryGit(t, "add", "README.md")
+	factoryGit(t, "commit", "-m", "initial")
+	head := strings.TrimSpace(string(factoryGitOutput(t, "rev-parse", "HEAD")))
+
 	root := filepath.Join(t.TempDir(), "wfroot")
 	adapterDir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(adapterDir); err == nil {
+		adapterDir = resolved
+	}
 	if err := os.Chmod(adapterDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	for id, script := range map[string]string{
-		"circleci-pipeline": ciScript,
-		"github-pr-review":  reviewScript,
+		"circleci-pipeline": ciAdapter(head),
+		"github-pr-review":  reviewAdapter(head),
 	} {
-		exe := stagePollFixture(t, adapterDir, script)
+		exe := filepath.Join(adapterDir, id+".sh")
+		if err := os.WriteFile(exe, []byte(script), 0o700); err != nil {
+			t.Fatalf("stage adapter %s: %v", id, err)
+		}
 		writePollManifest(t, adapterDir, id+".json", id, exe)
 	}
 	// Fail loudly here rather than as a silent timeout later: a trust or
@@ -127,51 +369,70 @@ func newFactoryE2E(t *testing.T, name string, ciScript, reviewScript string) *fa
 		MaxTreeBudget:      16,
 		ShutdownTimeout:    0,
 	})
+	// The startup barrier starts leader loops for recovered enabled
+	// controllers, so the fast test cadence must be set before the barrier
+	// runs.
 	sup.controllerRenewInterval = 25 * time.Millisecond
 	sup.controllerPollBaseDelay = 200 * time.Millisecond
 	mgr, cstore, err := sup.workflowBarrierResult()
 	if err != nil {
 		t.Fatalf("workflow barrier: %v", err)
 	}
-	release := make(chan struct{})
-	sup.newProviderFunc = func(_ runtime.StartOptions, _ string) (runtime.Provider, error) {
-		return &blockingAdmissionProvider{release: release}, nil
+	f := &factoryE2E{
+		sup: sup, mgr: mgr, cstore: cstore, root: root, adapterDir: adapterDir,
+		provider:     &factoryWorkerProvider{},
+		controllerID: "software-factory",
+		head:         head,
 	}
-	if _, err := mgr.WorkflowCreate(factoryWorkTemplateJSON(t)); err != nil {
+	sup.newProviderFunc = func(_ runtime.StartOptions, _ string) (runtime.Provider, error) {
+		return f.provider, nil
+	}
+	templateBody := factoryWorkTemplateJSON(t)
+	if _, err := mgr.WorkflowCreate(templateBody); err != nil {
 		t.Fatalf("WorkflowCreate: %v", err)
+	}
+	var parsed struct {
+		Nodes []struct {
+			ID     string `json:"id"`
+			Action struct {
+				Type string `json:"type"`
+			} `json:"action"`
+			Dispatch *struct {
+				Mode string `json:"mode"`
+			} `json:"dispatch"`
+		} `json:"nodes"`
+	}
+	if err := json.Unmarshal(templateBody, &parsed); err != nil {
+		t.Fatalf("parse template nodes: %v", err)
+	}
+	f.nodes = make(map[string]factoryNodeShape, len(parsed.Nodes))
+	for _, node := range parsed.Nodes {
+		f.nodes[node.ID] = factoryNodeShape{actionKind: node.Action.Type, dispatchAuto: node.Dispatch != nil && node.Dispatch.Mode == "auto"}
 	}
 	out, err := mgr.WorkflowInstantiate(mustJSON(t, map[string]any{
 		"template_id": "software-factory-work", "template_version": "1.2.0",
-		"params": map[string]string{"worktree": "avenor-issue-115"},
+		"params": map[string]string{"worktree": worktree},
 	}))
 	if err != nil {
 		t.Fatalf("WorkflowInstantiate: %v", err)
 	}
-	f := &factoryE2E{
-		sup: sup, mgr: mgr, cstore: cstore, root: root, adapterDir: adapterDir,
-		wf: out.(map[string]any)["workflow_id"].(string), release: release,
-	}
-	if _, err := cstore.Create("software-factory", 2); err != nil {
+	f.wf = out.(map[string]any)["workflow_id"].(string)
+	if _, err := cstore.Create(f.controllerID, maxInflight); err != nil {
 		t.Fatalf("controller create: %v", err)
 	}
 	t.Cleanup(func() { f.stop(t) })
 	return f
 }
 
-// endTurns unblocks every fake provider session so the live runtimes park
-// and their attempts terminate. Safe to call multiple times.
-func (f *factoryE2E) endTurns() {
-	f.releaseOnce.Do(func() { close(f.release) })
-}
-
-// stop tears the fixture down: disable first so no fresh poll starts, then
-// stop the leader loops and the broker.
+// stop tears the fixture down: unblock held workers, disable the controller
+// so no fresh dispatch starts, stop the leader loops, cancel the runtimes,
+// and wait for them to go terminal before the workflow root disappears.
 func (f *factoryE2E) stop(t *testing.T) {
 	t.Helper()
-	if f.cstore != nil {
-		_, _ = f.cstore.SetDesiredState("software-factory", workflowcontroller.DesiredDisabled, "test cleanup")
+	f.provider.releaseAllHolds()
+	if _, err := f.cstore.SetDesiredState(f.controllerID, workflowcontroller.DesiredDisabled, "test cleanup"); err != nil {
+		t.Logf("cleanup disable: %v", err)
 	}
-	f.endTurns()
 	f.sup.stopControllerLoops()
 	for _, rt := range f.sup.listRuntimes() {
 		if id, ok := rt["runtime_id"].(string); ok {
@@ -183,107 +444,175 @@ func (f *factoryE2E) stop(t *testing.T) {
 	f.sup.stopReaper()
 }
 
-// enable turns the controller on and lets its leader loop run.
+// enable turns the controller on and waits until this supervisor holds the
+// leader lease.
 func (f *factoryE2E) enable(t *testing.T) {
 	t.Helper()
-	if _, err := f.sup.WorkflowControllerEnable("software-factory"); err != nil {
+	if _, err := f.sup.WorkflowControllerEnable(f.controllerID); err != nil {
 		t.Fatalf("controller enable: %v", err)
 	}
+	waitForControllerLeader(t, f.cstore, f.controllerID, func(rec workflowcontroller.ControllerRecord) bool {
+		return rec.Leader != nil && rec.Leader.OwnerID == f.sup.supervisorIdentity()
+	})
 }
 
-// disable stops future provider-backed dispatch and releases the leader
-// lease so the test can drive auto nodes manually without racing the
-// runner.
+// disable stops future dispatch and releases the leader lease. Only for
+// cleanup and end-of-test quiescence — never to hand-drive auto nodes.
 func (f *factoryE2E) disable(t *testing.T) {
 	t.Helper()
-	if _, err := f.cstore.SetDesiredState("software-factory", workflowcontroller.DesiredDisabled, "test drives auto nodes"); err != nil {
+	if _, err := f.cstore.SetDesiredState(f.controllerID, workflowcontroller.DesiredDisabled, "test quiesce"); err != nil {
 		t.Fatalf("controller disable: %v", err)
 	}
-	f.sup.stopControllerLoop("software-factory")
+	f.sup.stopControllerLoop(f.controllerID)
 }
 
-// instance returns the workflow's current instance.
-func (f *factoryE2E) instance(t *testing.T) workflow.WorkflowInstance {
+// instantiate creates another work item from the same template and returns
+// its workflow id.
+func (f *factoryE2E) instantiate(t *testing.T, worktree string) string {
 	t.Helper()
-	insp, err := f.mgr.WorkflowInspect(f.wf)
+	out, err := f.mgr.WorkflowInstantiate(mustJSON(t, map[string]any{
+		"template_id": "software-factory-work", "template_version": "1.2.0",
+		"params": map[string]string{"worktree": worktree},
+	}))
 	if err != nil {
-		t.Fatalf("WorkflowInspect: %v", err)
+		t.Fatalf("instantiate worktree %q: %v", worktree, err)
 	}
-	return insp.(map[string]any)["instance"].(workflow.WorkflowInstance)
+	return out.(map[string]any)["workflow_id"].(string)
 }
 
-// activationByNode returns the newest activation of the named node.
-func (f *factoryE2E) activationByNode(t *testing.T, nodeID string) *workflow.Activation {
-	t.Helper()
-	return f.activationOn(t, f.wf, nodeID)
-}
-
-// activationOn is activationByNode against another workflow in the same
-// root.
-func (f *factoryE2E) activationOn(t *testing.T, wf, nodeID string) *workflow.Activation {
+// instanceOn reads one workflow's instance snapshot.
+func (f *factoryE2E) instanceOn(t *testing.T, wf string) workflow.WorkflowInstance {
 	t.Helper()
 	insp, err := f.mgr.WorkflowInspect(wf)
 	if err != nil {
-		t.Fatalf("WorkflowInspect: %v", err)
+		t.Fatalf("WorkflowInspect %s: %v", wf, err)
 	}
-	inst := insp.(map[string]any)["instance"].(workflow.WorkflowInstance)
+	inst, ok := insp.(map[string]any)["instance"].(workflow.WorkflowInstance)
+	if !ok {
+		t.Fatalf("inspect %s missing instance: %#v", wf, insp)
+	}
+	return inst
+}
+
+func (f *factoryE2E) instance(t *testing.T) workflow.WorkflowInstance {
+	t.Helper()
+	return f.instanceOn(t, f.wf)
+}
+
+// newestActivation returns the newest activation of the node, or nil.
+func (f *factoryE2E) newestActivation(t *testing.T, wf, nodeID string) *workflow.Activation {
+	t.Helper()
+	inst := f.instanceOn(t, wf)
 	var found *workflow.Activation
 	for i := range inst.Activations {
-		a := inst.Activations[i]
-		if a.NodeID == workflow.NodeID(nodeID) {
-			found = &a
+		if inst.Activations[i].NodeID == workflow.NodeID(nodeID) {
+			found = &inst.Activations[i]
 		}
 	}
 	return found
 }
 
-// waitActivationStatus polls until the newest activation of the node has
-// the wanted status.
-func (f *factoryE2E) waitActivationStatus(t *testing.T, nodeID string, want workflow.ActivationStatus) {
+// waitInstanceOn polls cond against a fresh snapshot of wf, failing with the
+// full observed state after a bounded deadline.
+func (f *factoryE2E) waitInstanceOn(t *testing.T, wf, what string, cond func(inst *workflow.WorkflowInstance) bool) {
 	t.Helper()
-	f.waitActivationStatusOn(t, f.wf, nodeID, want)
+	deadline := time.Now().Add(10 * time.Second)
+	var inst workflow.WorkflowInstance
+	for {
+		inst = f.instanceOn(t, wf)
+		if cond(&inst) {
+			return
+		}
+		if time.Now().After(deadline) {
+			logGoroutines(t)
+			t.Fatalf("timed out waiting for %s; observed %s", what, describeInstance(&inst, int32(f.provider.sessionCount())))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
-// waitActivationStatusOn is waitActivationStatus against another workflow in
-// the same root.
-func (f *factoryE2E) waitActivationStatusOn(t *testing.T, wf, nodeID string, want workflow.ActivationStatus) {
+// newestActivationFor returns the newest activation of the node in the
+// snapshot (repeated nodes append later activations), or nil.
+func newestActivationFor(inst *workflow.WorkflowInstance, nodeID workflow.NodeID) *workflow.Activation {
+	var found *workflow.Activation
+	for i := range inst.Activations {
+		if inst.Activations[i].NodeID == nodeID {
+			found = &inst.Activations[i]
+		}
+	}
+	return found
+}
+
+// waitNodeSatisfied waits until the node's newest activation is satisfied
+// with the wanted outcome.
+func (f *factoryE2E) waitNodeSatisfied(t *testing.T, wf, nodeID, outcome string) {
 	t.Helper()
-	prev := f.wf
-	f.wf = wf
-	defer func() { f.wf = prev }()
-	waitFor(t, nodeID+" status "+string(want), func() bool {
-		act := f.activationByNode(t, nodeID)
+	f.waitInstanceOn(t, wf, nodeID+" satisfied with outcome "+outcome, func(inst *workflow.WorkflowInstance) bool {
+		act := newestActivationFor(inst, workflow.NodeID(nodeID))
+		return act != nil && act.Status == workflow.ActivationSatisfied && act.SelectedOutcome == workflow.OutcomeName(outcome)
+	})
+}
+
+// waitNodeStatus waits until the node's newest activation has the status.
+func (f *factoryE2E) waitNodeStatus(t *testing.T, wf, nodeID string, want workflow.ActivationStatus) {
+	t.Helper()
+	f.waitInstanceOn(t, wf, nodeID+" status "+string(want), func(inst *workflow.WorkflowInstance) bool {
+		act := newestActivationFor(inst, workflow.NodeID(nodeID))
 		return act != nil && act.Status == want
 	})
 }
 
-// factoryArtifact stages a non-empty artifact file for a completion request.
-func factoryArtifact(t *testing.T, storedPath, content string) map[string]any {
+// outputValue returns the recorded value of a node output as a string.
+// Repeated nodes (a republishing publication) record the output once per
+// activation in chronological order, so the LAST recording is the newest
+// activation's value.
+func (f *factoryE2E) outputValue(t *testing.T, inst *workflow.WorkflowInstance, outputID string) string {
 	t.Helper()
-	src := filepath.Join(t.TempDir(), strings.ReplaceAll(storedPath, "/", "-"))
-	if err := os.WriteFile(src, []byte(content), 0o600); err != nil {
-		t.Fatalf("write artifact %s: %v", storedPath, err)
+	found := ""
+	for _, o := range inst.Outputs {
+		if string(o.DefinitionID) == outputID {
+			found = string(o.Value)
+		}
 	}
-	return map[string]any{"src_path": src, "stored_path": storedPath, "non_empty": true}
+	if found == "" {
+		t.Fatalf("output %q not recorded; observed %s", outputID, describeInstance(inst, int32(f.provider.sessionCount())))
+	}
+	var value any
+	if err := json.Unmarshal([]byte(found), &value); err != nil {
+		return found
+	}
+	if s, ok := value.(string); ok {
+		return s
+	}
+	return found
 }
 
-// completeNode claims, starts, terminates, and completes the newest pending
-// activation of the node: the test acts as the node's worker exactly as a
-// manual claim on an auto node is allowed to.
-func (f *factoryE2E) completeNode(t *testing.T, nodeID, outcome string, outputs []map[string]any, artifacts []map[string]any) {
+// completeManualNode completes a MANUAL node as the human: claim, start,
+// then — for a provider-backed manual run like hardening — wait for the
+// spawned worker's attempt to terminate through the production path before
+// issuing the completion with the claim holder's token. Auto-dispatched
+// nodes are refused: the harness never hand-drives them.
+func (f *factoryE2E) completeManualNode(t *testing.T, wf, nodeID, outcome string, outputs []map[string]any, artifacts []map[string]any) {
 	t.Helper()
-	act := f.activationByNode(t, nodeID)
+	shape, ok := f.nodes[nodeID]
+	if !ok {
+		t.Fatalf("node %q is not in the template", nodeID)
+	}
+	if shape.dispatchAuto {
+		t.Fatalf("refusing to hand-drive auto-dispatched node %q", nodeID)
+	}
+	act := f.newestActivation(t, wf, nodeID)
 	if act == nil || act.Status != workflow.ActivationPending {
 		t.Fatalf("no pending %s activation: %+v", nodeID, act)
 	}
-	res, err := f.mgr.WorkflowCommand(f.wf, mustJSON(t, map[string]any{
-		"op": "claim", "node_id": nodeID, "activation_id": string(act.ID), "actor": "factory-e2e",
+	res, err := f.mgr.WorkflowCommand(wf, mustJSON(t, map[string]any{
+		"op": "claim", "node_id": nodeID, "activation_id": string(act.ID), "actor": "factory-e2e-human",
 	}))
 	if err != nil {
 		t.Fatalf("%s claim: %v", nodeID, err)
 	}
 	claim := res.(map[string]any)
-	start, err := f.mgr.WorkflowCommand(f.wf, mustJSON(t, map[string]any{
+	start, err := f.mgr.WorkflowCommand(wf, mustJSON(t, map[string]any{
 		"op": "start", "node_id": nodeID, "activation_id": string(act.ID),
 		"lease_id": claim["lease_id"], "owner_token": claim["owner_token"],
 	}))
@@ -291,9 +620,34 @@ func (f *factoryE2E) completeNode(t *testing.T, nodeID, outcome string, outputs 
 		t.Fatalf("%s start: %v", nodeID, err)
 	}
 	attemptID := start.(map[string]any)["attempt_id"].(string)
-	if err := f.mgr.RecordAttemptTerminated(workflow.WorkflowID(f.wf), workflow.NodeID(nodeID), act.ID,
-		workflow.AttemptID(attemptID), workflow.LeaseID(claim["lease_id"].(string)), workflow.AttemptSucceeded); err != nil {
-		t.Fatalf("%s terminate: %v", nodeID, err)
+	if shape.actionKind == "run" {
+		// Provider-backed manual dispatch: the start spawned the worker
+		// through the production run executor. Wait for the attempt to
+		// terminate through the supervisor's own terminal path — the test
+		// never records the termination itself.
+		f.waitInstanceOn(t, wf, nodeID+"'s worker attempt to succeed", func(inst *workflow.WorkflowInstance) bool {
+			for _, a := range inst.Attempts {
+				if a.Identity.NodeID == workflow.NodeID(nodeID) && string(a.ID) == attemptID {
+					return a.Status == workflow.AttemptSucceeded
+				}
+			}
+			return false
+		})
+		// A manual node's clean exit is a plain terminal fact: the supervisor
+		// neither completes it nor relabels the attempt, and the activation
+		// waits for the claim holder's completion.
+		inst := f.instanceOn(t, wf)
+		for _, a := range inst.Attempts {
+			if string(a.ID) == attemptID && a.MarkerLabel == "contract_unmet" {
+				t.Fatalf("%s manual attempt relabeled contract_unmet by supervisor completion", nodeID)
+			}
+		}
+		for _, a := range inst.Activations {
+			if a.ID == act.ID && a.Status != workflow.ActivationRunning {
+				t.Fatalf("%s manual activation status = %s after its worker exited, want running until the human completes it; observed %s",
+					nodeID, a.Status, describeInstance(&inst, int32(f.provider.sessionCount())))
+			}
+		}
 	}
 	cmd := map[string]any{
 		"op": "complete", "node_id": nodeID, "activation_id": string(act.ID),
@@ -306,76 +660,252 @@ func (f *factoryE2E) completeNode(t *testing.T, nodeID, outcome string, outputs 
 	if artifacts != nil {
 		cmd["artifacts"] = artifacts
 	}
-	if _, err := f.mgr.WorkflowCommand(f.wf, mustJSON(t, cmd)); err != nil {
+	if _, err := f.mgr.WorkflowCommand(wf, mustJSON(t, cmd)); err != nil {
 		t.Fatalf("%s complete: %v", nodeID, err)
 	}
 }
 
-// driveToIntakeThroughPublication walks the primary pipeline from intake to
-// publication and completes publication with the given exact subject.
-func (f *factoryE2E) driveThroughPublication(t *testing.T, repository string, pullNumber int, head string) {
+// cwdArtifact builds an artifact reference for a file the worker wrote into
+// the shared working directory.
+func cwdArtifact(t *testing.T, storedPath string) map[string]any {
 	t.Helper()
-	f.completeNode(t, "intake", "ready",
+	abs, err := filepath.Abs(storedPath)
+	if err != nil {
+		t.Fatalf("resolve %s: %v", storedPath, err)
+	}
+	return map[string]any{"src_path": abs, "stored_path": storedPath, "non_empty": true}
+}
+
+// driveIntake completes the human intake node with the issue text and base
+// SHA, which makes the auto assessment the first dispatchable candidate.
+func (f *factoryE2E) driveIntake(t *testing.T, wf string) {
+	t.Helper()
+	f.completeManualNode(t, wf, "intake", "ready",
 		[]map[string]any{
 			{"definition_id": "issue", "value": "Harden the candidate index rebuild path"},
 			{"definition_id": "base_sha", "value": "6e77a0d"},
 		}, nil)
-	f.completeNode(t, "assessment", "ready",
-		[]map[string]any{{"definition_id": "assessment", "value": "assessment.md"}},
-		[]map[string]any{factoryArtifact(t, "assessment.md", "## Assessment\n...")})
-	f.completeNode(t, "draft-plan", "ready",
-		[]map[string]any{{"definition_id": "plan", "value": "plan.md"}},
-		[]map[string]any{factoryArtifact(t, "plan.md", "## Plan\n...")})
-	f.completeNode(t, "hardening", "ready",
+}
+
+// waitThroughPublication drives intake → assessment → draft-plan → hardening
+// (human) → execution → verification → publication: the auto nodes complete
+// through the supervisor handoff, the human hardening checkpoint is claimed,
+// started (spawning its worker through the production run executor), and
+// completed with the worker's artifact.
+func (f *factoryE2E) waitThroughPublication(t *testing.T) {
+	t.Helper()
+	f.driveIntake(t, f.wf)
+	f.waitNodeSatisfied(t, f.wf, "assessment", "ready")
+	f.waitNodeSatisfied(t, f.wf, "draft-plan", "ready")
+	f.completeManualNode(t, f.wf, "hardening", "ready",
 		[]map[string]any{{"definition_id": "hardened_plan", "value": "plan.md"}},
-		[]map[string]any{factoryArtifact(t, "plan.md", "## Hardened plan\n...")})
-	f.completeNode(t, "execution", "done", nil,
-		[]map[string]any{factoryArtifact(t, "execution.md", "## Execution\n...")})
-	f.completeNode(t, "verification", "passed",
-		[]map[string]any{{"definition_id": "verification", "value": "verification.md"}},
-		[]map[string]any{factoryArtifact(t, "verification.md", "PASS")})
-	f.completeNode(t, "publication", "published",
-		[]map[string]any{
-			{"definition_id": "repository", "value": repository},
-			{"definition_id": "pr_number", "value": pullNumber},
-			{"definition_id": "pr_head", "value": head},
-		},
-		[]map[string]any{factoryArtifact(t, "pr-info.md", "PR 143 head "+head)})
+		[]map[string]any{cwdArtifact(t, "plan.md")})
+	f.waitNodeSatisfied(t, f.wf, "execution", "done")
+	f.waitNodeSatisfied(t, f.wf, "verification", "passed")
+	f.waitNodeSatisfied(t, f.wf, "publication", "published")
+}
+
+// scriptRunWorker appends one run-node worker session that writes the given
+// files and exits cleanly.
+func scriptRunWorker(p *factoryWorkerProvider, sessionID string, files map[string]string) {
+	p.append(factoryWorkerScript{sessionID: sessionID, write: files})
+}
+
+// scriptExecutionLoop appends the execution loop node's three phase
+// sessions: pre-implement, the loop test phase that exits on the green
+// marker, and the post-record phase that writes the declared artifact.
+func scriptExecutionLoop(p *factoryWorkerProvider) {
+	p.append(factoryWorkerScript{sessionID: "ses_exec_implement"})
+	p.append(factoryWorkerScript{sessionID: "ses_exec_test", chunks: []string{"Focused verification ran clean.\n<|workflow: exit | tests green|>\n"}})
+	p.append(factoryWorkerScript{sessionID: "ses_exec_record", write: map[string]string{
+		"execution.md": "## Execution\nAll plan stages implemented; verification green.\n",
+	}})
+}
+
+// scriptTeam appends the sessions a team node consumes in order: the pre
+// scope phase, one session per team member (they run in parallel but their
+// scripts are interchangeable), and the post synthesize phase that writes
+// the declared artifact and ends with the verdict's terminal marker.
+func scriptTeam(p *factoryWorkerProvider, prefix string, members int, artifact, markerLabel string) {
+	p.append(factoryWorkerScript{sessionID: prefix + "_scope"})
+	for i := 0; i < members; i++ {
+		p.append(factoryWorkerScript{sessionID: fmt.Sprintf("%s_member_%d", prefix, i)})
+	}
+	p.append(factoryWorkerScript{
+		sessionID: prefix + "_synthesize",
+		write:     map[string]string{artifact: "Verdict: " + markerLabel + "\n"},
+		chunks:    []string{"Synthesized the verdict.\n<|workflow: exit | " + markerLabel + "|>\n"},
+	})
+}
+
+// scriptPublication appends one publication worker session. When republish
+// is set the worker commits the accumulated working tree first, so the
+// publication completes under a NEW git head.
+func scriptPublication(p *factoryWorkerProvider, sessionID string, republish bool) {
+	script := factoryWorkerScript{
+		sessionID: sessionID,
+		write:     map[string]string{"pr-info.json": `{"repository":"sdougbrown/avenor","pr_number":143}`},
+	}
+	if republish {
+		script.action = func() error {
+			if err := os.WriteFile("republish-note.txt", []byte("republished under a new head\n"), 0o600); err != nil {
+				return err
+			}
+			if out, err := exec.Command("git", "add", "-A").CombinedOutput(); err != nil {
+				return fmt.Errorf("git add: %v: %s", err, out)
+			}
+			if out, err := exec.Command("git", "commit", "-m", "republish").CombinedOutput(); err != nil {
+				return fmt.Errorf("git commit: %v: %s", err, out)
+			}
+			return nil
+		}
+	}
+	p.append(script)
+}
+
+// factoryGit runs one git command in the working directory and fails the
+// test on error.
+func factoryGit(t *testing.T, args ...string) []byte {
+	t.Helper()
+	out, err := exec.Command("git", args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, out)
+	}
+	return out
+}
+
+func factoryGitOutput(t *testing.T, args ...string) []byte {
+	t.Helper()
+	out, err := exec.Command("git", args...).Output()
+	if err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, out)
+	}
+	return out
+}
+
+// factoryAdapterBody is the shared shell preamble of the fixture adapters:
+// the poll request arrives as one JSON object on stdin and the adapter
+// extracts the pinned gate inputs to build the subject it reports on.
+const factoryAdapterBody = `#!/bin/sh
+input=$(cat)
+repository=$(printf '%s' "$input" | sed -n 's/.*"repository":"\([^"]*\)".*/\1/p')
+pull_number=$(printf '%s' "$input" | sed -n 's/.*"pull_number":\([0-9]*\).*/\1/p')
+head_sha=$(printf '%s' "$input" | sed -n 's/.*"head_sha":"\([^"]*\)".*/\1/p')
+`
+
+// factoryAdapterPrintf is the shared result line; result must already be a
+// shell expansion yielding the raw result enum value.
+const factoryAdapterPrintf = `printf '%s' '{"version":1,"result":"'"$result"'","subject":{"type":"pull_request","repository":"'"$repository"'","pull_request":'"$pull_number"',"revision":"'"$revision"'"},"observed_at":"2026-01-01T00:00:00Z","summary":"fixture"}'
+`
+
+// factoryEchoAdapter reports the given result on the exact subject the gate
+// pinned: every subject field is echoed back from the pinned inputs.
+func factoryEchoAdapter(result string) string {
+	return factoryAdapterBody + `result="` + result + `"
+revision="$head_sha"
+` + factoryAdapterPrintf
+}
+
+// factoryForeignSubjectAdapter reports the given result on a FIXED subject
+// revision regardless of the pinned inputs — a result observed on a
+// different head than the gate's bound subject.
+func factoryForeignSubjectAdapter(result, revision string) string {
+	return factoryAdapterBody + `result="` + result + `"
+revision="` + revision + `"
+` + factoryAdapterPrintf
+}
+
+// factoryHeadSwitchAdapter reports resultOnHead for exactly the given head
+// and resultOtherwise for any other — the exact-head review that demands a
+// fresh verdict after a republish.
+func factoryHeadSwitchAdapter(head, resultOnHead, resultOtherwise string) string {
+	return factoryAdapterBody + `if [ "$head_sha" = "` + head + `" ]; then
+  result="` + resultOnHead + `"
+else
+  result="` + resultOtherwise + `"
+fi
+revision="$head_sha"
+` + factoryAdapterPrintf
+}
+
+// factoryFlagAdapter reports resultBefore until the flag file exists and
+// resultAfter from then on, so a test decides when a parked gate resolves.
+func factoryFlagAdapter(flag, resultBefore, resultAfter string) string {
+	return factoryAdapterBody + `if [ -e "` + flag + `" ]; then
+  result="` + resultAfter + `"
+else
+  result="` + resultBefore + `"
+fi
+revision="$head_sha"
+` + factoryAdapterPrintf
 }
 
 // findCursor returns the poll cursor for one activation's gate.
-func (f *factoryE2E) findCursor(actID workflow.ActivationID, gateID string) (workflowcontroller.PollCursor, bool) {
-	rec, _, err := f.cstore.Get("software-factory")
+func (f *factoryE2E) findCursor(wf, actID, gateID string) (workflowcontroller.PollCursor, bool) {
+	rec, _, err := f.cstore.Get(f.controllerID)
 	if err != nil {
 		return workflowcontroller.PollCursor{}, false
 	}
 	for _, c := range rec.PollCursors {
-		if c.WorkflowID == f.wf && c.ActivationID == string(actID) && c.GateID == gateID {
+		if c.WorkflowID == wf && c.ActivationID == actID && c.GateID == gateID {
 			return *c, true
 		}
 	}
 	return workflowcontroller.PollCursor{}, false
 }
 
-// waitCursor waits until a cursor exists for the activation's gate.
-func (f *factoryE2E) waitCursor(t *testing.T, actID workflow.ActivationID, gateID string) workflowcontroller.PollCursor {
-	t.Helper()
-	waitFor(t, "poll cursor for "+gateID, func() bool {
-		_, ok := f.findCursor(actID, gateID)
-		return ok
-	})
-	cursor, ok := f.findCursor(actID, gateID)
-	if !ok {
-		t.Fatalf("cursor for %s vanished", gateID)
+// committedPollCursor returns the cursor recorded by the most recent
+// poll_committed event for the activation's gate. The controller event log is
+// durable, so this finds a committed poll even after its result applied and
+// the live cursor was cleared.
+func (f *factoryE2E) committedPollCursor(wf, actID, gateID string) (workflowcontroller.PollCursor, bool) {
+	data, err := os.ReadFile(filepath.Join(f.cstore.ControllersRoot(), f.controllerID, "events.ndjson"))
+	if err != nil {
+		return workflowcontroller.PollCursor{}, false
 	}
-	return cursor
+	var found workflowcontroller.PollCursor
+	ok := false
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		var ev workflowcontroller.ControllerEvent
+		if len(bytes.TrimSpace(line)) == 0 || json.Unmarshal(line, &ev) != nil {
+			continue
+		}
+		if ev.Kind != workflowcontroller.EventPollCommitted || ev.Cursor == nil {
+			continue
+		}
+		c := ev.Cursor
+		if c.WorkflowID == wf && c.ActivationID == actID && c.GateID == gateID {
+			found, ok = *c, true
+		}
+	}
+	return found, ok
+}
+
+// waitCursor waits until a poll has been committed for the activation's gate
+// and returns its cursor: the live cursor while one exists, otherwise the
+// last committed cursor from the controller event log.
+func (f *factoryE2E) waitCursor(t *testing.T, wf, actID, gateID string) workflowcontroller.PollCursor {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if cursor, ok := f.findCursor(wf, actID, gateID); ok && cursor.PollID != "" {
+			return cursor
+		}
+		if cursor, ok := f.committedPollCursor(wf, actID, gateID); ok {
+			return cursor
+		}
+		if time.Now().After(deadline) {
+			logGoroutines(t)
+			t.Fatalf("timed out waiting for poll cursor %s on %s", gateID, actID)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // gateInstances returns the gate instances recorded for one activation.
-func (f *factoryE2E) gateInstances(t *testing.T, actID workflow.ActivationID) []workflow.GateInstance {
-	t.Helper()
+func gateInstances(inst *workflow.WorkflowInstance, actID workflow.ActivationID) []workflow.GateInstance {
 	var out []workflow.GateInstance
-	for _, gi := range f.instance(t).Gates {
+	for _, gi := range inst.Gates {
 		if gi.ActivationID == actID {
 			out = append(out, gi)
 		}
@@ -383,40 +913,68 @@ func (f *factoryE2E) gateInstances(t *testing.T, actID workflow.ActivationID) []
 	return out
 }
 
-// TestFactoryWorkEndToEndCleanStopsAtHumanMergeAuth proves the shipped
-// template's clean path: intake through publication drives by explicit
-// claims, the controller parks the auto external review without an attempt,
-// both bound gates pass through their trusted fixture adapters with staged
-// evidence, the pinned clean success outcome routes to merge-auth, and the
-// work stops there behind the human gate — no gate decision, no merge, no
-// reconciliation.
-func TestFactoryWorkEndToEndCleanStopsAtHumanMergeAuth(t *testing.T) {
-	f := newFactoryE2E(t, "factory-e2e-clean", "passed.sh", "passed.sh")
-	f.driveThroughPublication(t, "sdougbrown/avenor", 143, "cc793f7")
+// TestFactoryWorkCleanPathStopsAtHumanMergeAuth proves the shipped template's
+// clean path through the production handoff: intake (human) → assessment and
+// draft-plan (auto run) → hardening (human checkpoint over a spawned worker)
+// → execution (auto loop exiting on its green marker) → verification (auto
+// team passing on its marker) → publication (auto run publishing the exact
+// git head and pr-info outputs) → the external review parks on the bound
+// exact subject with zero runtime state, both fixture adapters report clean
+// through the poll runner with staged evidence, the review resolves clean,
+// and the work stops behind the merge-authorization human gate: no decision,
+// no reconciliation, no merge.
+func TestFactoryWorkCleanPathStopsAtHumanMergeAuth(t *testing.T) {
+	f := newFactoryE2E(t, "factory-e2e-clean", 4, "avenor-issue-115",
+		func(string) string { return factoryEchoAdapter("passed") },
+		func(string) string { return factoryEchoAdapter("passed") })
+	scriptRunWorker(f.provider, "ses_assessment", map[string]string{"assessment.md": "## Assessment\n"})
+	scriptRunWorker(f.provider, "ses_draft_plan", map[string]string{"plan.md": "## Plan\n"})
+	scriptRunWorker(f.provider, "ses_hardening", map[string]string{"plan.md": "## Hardened plan\n"})
+	scriptExecutionLoop(f.provider)
+	scriptTeam(f.provider, "ses_verification", 3, "verification.md", "passed")
+	scriptPublication(f.provider, "ses_publication_1", false)
 	f.enable(t)
 
-	// The review parks kernel-locally: no attempt, no admission.
-	f.waitActivationStatus(t, "review", workflow.ActivationAwaitingGate)
-	review := f.activationByNode(t, "review")
+	f.driveIntake(t, f.wf)
+	f.waitNodeSatisfied(t, f.wf, "assessment", "ready")
+	f.waitNodeSatisfied(t, f.wf, "draft-plan", "ready")
+	f.completeManualNode(t, f.wf, "hardening", "ready",
+		[]map[string]any{{"definition_id": "hardened_plan", "value": "plan.md"}},
+		[]map[string]any{cwdArtifact(t, "plan.md")})
+	f.waitNodeSatisfied(t, f.wf, "execution", "done")
+	f.waitNodeSatisfied(t, f.wf, "verification", "passed")
+	f.waitNodeSatisfied(t, f.wf, "publication", "published")
+
+	// Publication's outputs resolved from the worker's artifact and the git
+	// head of the shared working directory.
+	inst := f.instance(t)
+	if got := f.outputValue(t, &inst, "pr_head"); got != f.head {
+		t.Fatalf("publication pr_head = %q, want the repo head %q; observed %s", got, f.head, describeInstance(&inst, int32(f.provider.sessionCount())))
+	}
+	if got := f.outputValue(t, &inst, "repository"); got != "sdougbrown/avenor" {
+		t.Fatalf("publication repository = %q, want sdougbrown/avenor", got)
+	}
+	if got := f.outputValue(t, &inst, "pr_number"); got != "143" {
+		t.Fatalf("publication pr_number = %q, want 143", got)
+	}
+
+	// The review parks kernel-locally on the bound exact subject: no
+	// attempt, no lease, cursors for both gates, committed polls.
+	f.waitNodeStatus(t, f.wf, "review", workflow.ActivationAwaitingGate)
+	review := f.newestActivation(t, f.wf, "review")
 	if len(review.AttemptIDs) != 0 || review.ActiveLease != nil {
 		t.Fatalf("parked review recorded runtime state: %+v", review)
 	}
 	for _, gateID := range []string{"ci", "review-verdict"} {
-		f.waitCursor(t, review.ID, gateID)
-		waitFor(t, "committed poll for "+gateID, func() bool {
-			cursor, ok := f.findCursor(review.ID, gateID)
-			return ok && cursor.PollCount >= 1 && cursor.PollID != ""
-		})
+		f.waitCursor(t, f.wf, string(review.ID), gateID)
 	}
 
-	// Both fixture adapters pass: the pinned success_outcome resolves the
-	// activation with staged evidence.
-	f.waitActivationStatus(t, "review", workflow.ActivationSatisfied)
-	review = f.activationByNode(t, "review")
-	if review.SelectedOutcome != workflow.OutcomeName("clean") {
-		t.Fatalf("review outcome = %q, want clean", review.SelectedOutcome)
-	}
-	gates := f.gateInstances(t, review.ID)
+	// Both fixture adapters report clean: the pinned success outcome resolves
+	// the review with staged evidence per gate.
+	f.waitNodeSatisfied(t, f.wf, "review", "clean")
+	review = f.newestActivation(t, f.wf, "review")
+	inst = f.instance(t)
+	gates := gateInstances(&inst, review.ID)
 	if len(gates) != 2 {
 		t.Fatalf("review gate instances = %d, want 2", len(gates))
 	}
@@ -426,189 +984,324 @@ func TestFactoryWorkEndToEndCleanStopsAtHumanMergeAuth(t *testing.T) {
 		}
 	}
 
-	// The work stops at merge-auth: pending behind the human gate, no
-	// decision, and reconciliation never starts.
-	f.waitActivationStatus(t, "merge-auth", workflow.ActivationPending)
-	for _, gi := range f.instance(t).Gates {
+	// The work stops at merge-auth: pending behind the human gate, the gate
+	// undecided, reconciliation never started, nothing merged.
+	f.waitNodeStatus(t, f.wf, "merge-auth", workflow.ActivationPending)
+	inst = f.instance(t)
+	for _, gi := range inst.Gates {
 		if gi.GateID == "merge-authorization" {
 			t.Fatalf("human merge gate decided: %+v", gi)
 		}
 	}
-	if act := f.activationByNode(t, "reconciliation"); act != nil {
+	if act := f.newestActivation(t, f.wf, "reconciliation"); act != nil {
 		t.Fatalf("reconciliation activation exists before human authorization: %+v", act)
 	}
-	// The parked pipeline holds no in-flight controller work.
-	rec, _, err := f.cstore.Get("software-factory")
-	if err != nil {
-		t.Fatalf("controller get: %v", err)
+	if inst.Status != workflow.WorkflowActive {
+		t.Fatalf("workflow status = %s, want still active behind the human gate", inst.Status)
 	}
-	if rec.DesiredState != workflowcontroller.DesiredEnabled {
-		t.Fatalf("controller desired state = %q, want enabled", rec.DesiredState)
+
+	// The whole pipeline ran on scripted workers alone: one session per auto
+	// dispatch (loop and team children consume one per phase), no duplicates,
+	// no manual claims of auto nodes. The verification team's three member
+	// sessions run in parallel, so their relative order is asserted as a set.
+	wantPrefix := []string{
+		"ses_assessment", "ses_draft_plan", "ses_hardening",
+		"ses_exec_implement", "ses_exec_test", "ses_exec_record",
+		"ses_verification_scope",
+	}
+	wantSuffix := []string{"ses_verification_synthesize", "ses_publication_1"}
+	started := f.provider.started
+	if len(started) != len(wantPrefix)+3+len(wantSuffix) {
+		t.Fatalf("provider sessions = %d (%v), want exactly %d", len(started), started, len(wantPrefix)+3+len(wantSuffix))
+	}
+	for i, want := range wantPrefix {
+		if started[i] != want {
+			t.Fatalf("session %d = %q, want %q (full log %v)", i, started[i], want, started)
+		}
+	}
+	members := map[string]bool{"ses_verification_member_0": true, "ses_verification_member_1": true, "ses_verification_member_2": true}
+	for _, got := range started[len(wantPrefix) : len(wantPrefix)+3] {
+		if !members[got] {
+			t.Fatalf("session %q is not one of the verification team members (full log %v)", got, started)
+		}
+		delete(members, got)
+	}
+	if len(members) != 0 {
+		t.Fatalf("verification team member sessions missing from %v", started)
+	}
+	for i, want := range wantSuffix {
+		if started[len(wantPrefix)+3+i] != want {
+			t.Fatalf("session %d = %q, want %q (full log %v)", len(wantPrefix)+3+i, started[len(wantPrefix)+3+i], want, started)
+		}
 	}
 }
 
-// TestFactoryWorkChangesRequestedCorrectsAndRepublishes proves the shipped
-// template's correction loop: a changes_requested external result routes
-// correction → reverify → a second publication with a new exact head, the
-// new review parks on a new pinned subject, and the old activation's results
-// can never land again.
-func TestFactoryWorkChangesRequestedCorrectsAndRepublishes(t *testing.T) {
-	f := newFactoryE2E(t, "factory-e2e-changes", "passed.sh", "changes-requested.sh")
-	f.driveThroughPublication(t, "sdougbrown/avenor", 143, "cc793f7")
+// TestFactoryWorkForeignSubjectResultIsNotApplied pins the exact-subject
+// contract of the bound external gates: an adapter result the gate observed
+// on a DIFFERENT revision than the pinned pr_head must not be applied to the
+// parked review — the review stays parked, the controller records the
+// mismatch, and nothing advances.
+func TestFactoryWorkForeignSubjectResultIsNotApplied(t *testing.T) {
+	f := newFactoryE2E(t, "factory-e2e-foreign-subject", 4, "avenor-issue-115",
+		func(string) string { return factoryEchoAdapter("passed") },
+		func(string) string {
+			return factoryForeignSubjectAdapter("passed", "0000000000000000000000000000000000000000")
+		})
+	scriptRunWorker(f.provider, "ses_assessment", map[string]string{"assessment.md": "## Assessment\n"})
+	scriptRunWorker(f.provider, "ses_draft_plan", map[string]string{"plan.md": "## Plan\n"})
+	scriptRunWorker(f.provider, "ses_hardening", map[string]string{"plan.md": "## Hardened plan\n"})
+	scriptExecutionLoop(f.provider)
+	scriptTeam(f.provider, "ses_verification", 3, "verification.md", "passed")
+	scriptPublication(f.provider, "ses_publication_1", false)
 	f.enable(t)
 
-	f.waitActivationStatus(t, "review", workflow.ActivationAwaitingGate)
-	review1 := f.activationByNode(t, "review")
-	oldCursor := f.waitCursor(t, review1.ID, "review-verdict")
+	f.waitThroughPublication(t)
 
-	// The changes_requested result routes through result_outcomes onto the
-	// declared correction branch. Disable the controller before driving the
-	// correction loop manually so the runner never races the test's claims.
-	f.waitActivationStatus(t, "review", workflow.ActivationRejected)
-	f.disable(t)
-	f.waitActivationStatus(t, "correction", workflow.ActivationPending)
-	f.completeNode(t, "correction", "fixed", nil,
-		[]map[string]any{factoryArtifact(t, "correction.md", "Fixed review findings")})
-	f.waitActivationStatus(t, "reverify", workflow.ActivationPending)
-	f.completeNode(t, "reverify", "passed",
-		[]map[string]any{{"definition_id": "reverify", "value": "reverify.md"}},
-		[]map[string]any{factoryArtifact(t, "reverify.md", "PASS after correction")})
+	// The review parks; the review-verdict adapter then reports a passed
+	// result for a foreign revision. Nothing may advance on it.
+	f.waitNodeStatus(t, f.wf, "review", workflow.ActivationAwaitingGate)
+	review := f.newestActivation(t, f.wf, "review")
+	cursor := f.waitCursor(t, f.wf, string(review.ID), "review-verdict")
 
-	// Re-publication creates a NEW publication activation with a new head.
-	f.waitActivationStatus(t, "publication", workflow.ActivationPending)
-	f.completeNode(t, "publication", "published",
-		[]map[string]any{
-			{"definition_id": "repository", "value": "sdougbrown/avenor"},
-			{"definition_id": "pr_number", "value": 143},
-			{"definition_id": "pr_head", "value": "def456"},
-		},
-		[]map[string]any{factoryArtifact(t, "pr-info.md", "PR 143 head def456")})
+	// The foreign result reaches the apply path and is refused there.
+	mismatchKey := "poll_subject_mismatch/" + workflowcontroller.PollCursorKey(cursor)
+	waitFor(t, "poll_subject_mismatch diagnostic for the review-verdict cursor", func() bool {
+		rec, _, err := f.cstore.Get("software-factory")
+		if err != nil {
+			return false
+		}
+		_, open := rec.Diagnostics[mismatchKey]
+		return open
+	})
 
-	// A fresh review activation parks on the new subject; the old cursor is
-	// obsolete and the old activation can never land another result.
+	// A bounded window in which the foreign result must never resolve the
+	// gate: no poll result observed on a different subject is applicable.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		inst := f.instance(t)
+		act := activationFor(&inst, review.NodeID)
+		if act == nil || act.Status != workflow.ActivationAwaitingGate {
+			t.Fatalf("review advanced on a foreign-subject result; observed %s", describeInstance(&inst, int32(f.provider.sessionCount())))
+		}
+		for _, gi := range gateInstances(&inst, review.ID) {
+			if gi.GateID == "review-verdict" && gi.Status == workflow.GatePassed {
+				t.Fatalf("foreign-subject result landed on the bound gate: %+v", gi)
+			}
+		}
+		if act := f.newestActivation(t, f.wf, "merge-auth"); act != nil {
+			t.Fatalf("merge-auth reached on a foreign-subject result: %+v", act)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// TestFactoryWorkChangesRequestedCorrectsRepublishesAndRejectsStaleHead
+// proves the shipped template's correction loop through the production path:
+// a changes_requested verdict routes correction (auto) → reverify (auto team
+// passing on its marker) → a second publication under a NEW exact head (the
+// correction worker commits the working tree) → a fresh review parks on the
+// new subject and passes there — while a late result addressed to the
+// superseded first review can never land, and the first review's verdict
+// stays exactly as it resolved.
+func TestFactoryWorkChangesRequestedCorrectsRepublishesAndRejectsStaleHead(t *testing.T) {
+	f := newFactoryE2E(t, "factory-e2e-changes", 4, "avenor-issue-115",
+		func(string) string { return factoryEchoAdapter("passed") },
+		func(head string) string { return factoryHeadSwitchAdapter(head, "changes_requested", "passed") })
+	scriptRunWorker(f.provider, "ses_assessment", map[string]string{"assessment.md": "## Assessment\n"})
+	scriptRunWorker(f.provider, "ses_draft_plan", map[string]string{"plan.md": "## Plan\n"})
+	scriptRunWorker(f.provider, "ses_hardening", map[string]string{"plan.md": "## Hardened plan\n"})
+	scriptExecutionLoop(f.provider)
+	scriptTeam(f.provider, "ses_verification", 3, "verification.md", "passed")
+	scriptPublication(f.provider, "ses_publication_1", false)
+	scriptRunWorker(f.provider, "ses_correction_1", map[string]string{"correction.md": "Fixed review findings\n"})
+	scriptTeam(f.provider, "ses_reverify", 2, "reverify.md", "passed")
+	scriptPublication(f.provider, "ses_publication_2", true)
 	f.enable(t)
-	review2 := f.activationByNode(t, "review")
+
+	f.waitThroughPublication(t)
+
+	// The first review parks on the first head; the head-switch adapter
+	// reports changes_requested for exactly that head.
+	f.waitNodeStatus(t, f.wf, "review", workflow.ActivationAwaitingGate)
+	review1 := f.newestActivation(t, f.wf, "review")
+	oldCursor := f.waitCursor(t, f.wf, string(review1.ID), "review-verdict")
+
+	// The correction loop runs entirely through the production handoff:
+	// correction (auto) → reverify (auto team, passed marker) → publication
+	// under a NEW head.
+	f.waitNodeStatus(t, f.wf, "review", workflow.ActivationRejected)
+	f.waitNodeSatisfied(t, f.wf, "correction", "fixed")
+	f.waitNodeSatisfied(t, f.wf, "reverify", "passed")
+	f.waitNodeSatisfied(t, f.wf, "publication", "published")
+
+	inst := f.instance(t)
+	newHead := f.outputValue(t, &inst, "pr_head")
+	if newHead == f.head {
+		t.Fatalf("republished under the old head %q; observed %s", f.head, describeInstance(&inst, int32(f.provider.sessionCount())))
+	}
+
+	// A fresh review activation parks on the new subject; the cursors hash
+	// differently because the revision moved.
+	f.waitNodeStatus(t, f.wf, "review", workflow.ActivationAwaitingGate)
+	review2 := f.newestActivation(t, f.wf, "review")
 	if review2.ID == review1.ID {
 		t.Fatal("re-publication reused the old review activation")
 	}
-	f.waitActivationStatus(t, "review", workflow.ActivationAwaitingGate)
-	newCursor := f.waitCursor(t, review2.ID, "review-verdict")
+	newCursor := f.waitCursor(t, f.wf, string(review2.ID), "review-verdict")
 	if newCursor.SubjectHash == oldCursor.SubjectHash {
 		t.Fatalf("new head reused subject hash %q", newCursor.SubjectHash)
 	}
+
+	// The new review passes on the new head and the pipeline again stops at
+	// the human gate.
+	f.waitNodeSatisfied(t, f.wf, "review", "clean")
+	f.waitNodeStatus(t, f.wf, "merge-auth", workflow.ActivationPending)
+
+	// A late result addressed to the superseded first review (its old-head
+	// cursor) is rejected: the activation is resolved, so the command errors
+	// and nothing regresses.
+	staleSubject := map[string]any{"type": "pull_request", "repository": "sdougbrown/avenor", "pull_request": 143, "revision": f.head}
 	if _, err := f.mgr.WorkflowCommand(f.wf, mustJSON(t, map[string]any{
 		"op": "gate", "node_id": "review", "activation_id": string(review1.ID), "gate_id": "review-verdict",
 		"operation": "external_result", "result": "passed", "poll_id": oldCursor.PollID,
-		"source": "github", "subject": pollSubject, "response_hash": "hash-stale",
+		"source": "github", "subject": staleSubject, "response_hash": "hash-stale",
 		"observed_at": time.Now().UTC(), "evidence_ids": []string{"ev-stale"},
 	})); err == nil {
 		t.Fatal("stale review result landed on the superseded activation")
 	}
-	// The superseded activation stays resolved on its changes_requested
-	// outcome: a late poll result on its old-head subject records at most an
-	// inert gate fact and can never re-advance the correction loop.
-	for _, gi := range f.gateInstances(t, review1.ID) {
+
+	// The superseded review stays resolved on changes_requested; the newest
+	// review is the new-head activation that already satisfied clean.
+	inst = f.instance(t)
+	for _, gi := range gateInstances(&inst, review1.ID) {
 		if gi.GateID == "review-verdict" && gi.Status == workflow.GatePassed {
 			t.Fatalf("superseded review verdict flipped to passed: %+v", gi)
 		}
 	}
-	final := f.activationOn(t, f.wf, "review")
-	if final.ID != review2.ID || final.Status != workflow.ActivationAwaitingGate {
-		t.Fatalf("newest review = %s/%s, want the new activation parked on the new head", final.ID, final.Status)
+	final := f.newestActivation(t, f.wf, "review")
+	if final.ID != review2.ID || final.Status != workflow.ActivationSatisfied {
+		t.Fatalf("newest review = %s/%s, want the new activation satisfied clean", final.ID, final.Status)
+	}
+	if act := f.newestActivation(t, f.wf, "reconciliation"); act != nil {
+		t.Fatalf("reconciliation reached without the human gate: %+v", act)
 	}
 }
 
-// TestFactoryWorkItemsResolveWorktreeKeysProvesParamConcurrency proves two
-// independent work items instantiated from the same template resolve their
-// concurrency keys from the instance's worktree param: two items pinned to
-// different worktrees run concurrently under one controller, while two items
-// sharing a worktree param serialize — item B's assessment is never
-// dispatched while item A's attempt is live, and the controller replenishes
-// B once A's attempt terminates.
-func TestFactoryWorkItemsResolveWorktreeKeysProveParamConcurrency(t *testing.T) {
-	f := newFactoryE2E(t, "factory-e2e-key", "passed.sh", "passed.sh")
-	instantiate := func(name string, worktree string) string {
-		t.Helper()
-		out, err := f.mgr.WorkflowInstantiate(mustJSON(t, map[string]any{
-			"template_id": "software-factory-work", "template_version": "1.2.0",
-			"params": map[string]string{"worktree": worktree},
-		}))
-		if err != nil {
-			t.Fatalf("instantiate %s: %v", name, err)
-		}
-		return out.(map[string]any)["workflow_id"].(string)
-	}
-	// Item B shares item A's worktree param; item C pins a different one.
-	wfB := instantiate("B", "avenor-issue-115")
-	wfC := instantiate("C", "avenor-issue-130")
-
-	// All three items sit at intake; complete all intakes so the
-	// assessments become ready candidates under their resolved keys.
-	for _, wf := range []string{f.wf, wfB, wfC} {
-		prev := f.wf
-		f.wf = wf
-		f.completeNode(t, "intake", "ready",
-			[]map[string]any{
-				{"definition_id": "issue", "value": "issue body"},
-				{"definition_id": "base_sha", "value": "6e77a0d"},
-			}, nil)
-		f.wf = prev
-	}
+// TestFactoryWorkReverifyFailedRoutesCorrection proves the failed reverify
+// route: a reverify team whose synthesize emits the FAIL terminal marker
+// completes the reverify node with the failed outcome and routes back to
+// correction, whose second activation dispatches automatically through the
+// production handoff. The corrected work then flows on: reverify passes the
+// second time, republishes, and the review stops the pipeline at the human
+// gate again.
+func TestFactoryWorkReverifyFailedRoutesCorrection(t *testing.T) {
+	f := newFactoryE2E(t, "factory-e2e-reverify-failed", 4, "avenor-issue-115",
+		func(string) string { return factoryEchoAdapter("passed") },
+		func(head string) string { return factoryHeadSwitchAdapter(head, "changes_requested", "passed") })
+	scriptRunWorker(f.provider, "ses_assessment", map[string]string{"assessment.md": "## Assessment\n"})
+	scriptRunWorker(f.provider, "ses_draft_plan", map[string]string{"plan.md": "## Plan\n"})
+	scriptRunWorker(f.provider, "ses_hardening", map[string]string{"plan.md": "## Hardened plan\n"})
+	scriptExecutionLoop(f.provider)
+	scriptTeam(f.provider, "ses_verification", 3, "verification.md", "passed")
+	scriptPublication(f.provider, "ses_publication_1", false)
+	scriptRunWorker(f.provider, "ses_correction_1", map[string]string{"correction.md": "First correction\n"})
+	scriptTeam(f.provider, "ses_reverify_1", 2, "reverify.md", "failed")
+	scriptRunWorker(f.provider, "ses_correction_2", map[string]string{"correction.md": "Second correction\n"})
+	scriptTeam(f.provider, "ses_reverify_2", 2, "reverify.md", "passed")
+	scriptPublication(f.provider, "ses_publication_2", true)
 	f.enable(t)
 
-	// Items A and C resolve different worktree keys, so both assessments
-	// dispatch concurrently under the same controller.
-	waitFor(t, "items A and C assessment running concurrently", func() bool {
-		concurrent := 0
-		for _, wf := range []string{f.wf, wfC} {
-			act := f.activationOn(t, wf, "assessment")
-			if act != nil && act.Status == workflow.ActivationRunning && len(act.AttemptIDs) > 0 {
-				concurrent++
-			}
-		}
-		return concurrent == 2
-	})
+	f.waitThroughPublication(t)
 
-	// While A holds the shared worktree key, item B's assessment never
-	// starts.
-	deadline := time.Now().Add(1500 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		b := f.activationOn(t, wfB, "assessment")
-		if b == nil {
-			t.Fatalf("item B has no assessment activation")
+	// changes_requested routes correction → reverify, whose FAIL marker
+	// completes reverify as failed and routes back to correction.
+	f.waitNodeStatus(t, f.wf, "review", workflow.ActivationRejected)
+	f.waitNodeSatisfied(t, f.wf, "correction", "fixed")
+	f.waitNodeSatisfied(t, f.wf, "reverify", "failed")
+
+	// The failed reverify activation's own attempt recorded the terminal
+	// marker that selected its outcome.
+	inst := f.instance(t)
+	var failedAct *workflow.Activation
+	for i := range inst.Activations {
+		a := &inst.Activations[i]
+		if a.NodeID == "reverify" && a.SelectedOutcome == workflow.OutcomeName("failed") {
+			failedAct = a
+			break
 		}
-		if b.Status != workflow.ActivationPending {
-			t.Fatalf("item B assessment = %s with A still live, want pending (shared worktree key held)", b.Status)
+	}
+	if failedAct == nil || len(failedAct.AttemptIDs) != 1 {
+		t.Fatalf("failed reverify activation = %+v, want one with exactly one attempt; observed %s", failedAct, describeInstance(&inst, int32(f.provider.sessionCount())))
+	}
+	var marker string
+	for _, a := range inst.Attempts {
+		if a.ID == failedAct.AttemptIDs[0] {
+			marker = a.MarkerLabel
 		}
-		time.Sleep(50 * time.Millisecond)
+	}
+	if marker != "failed" {
+		t.Fatalf("failed reverify attempt marker label = %q, want failed; observed %s", marker, describeInstance(&inst, int32(f.provider.sessionCount())))
 	}
 
-	// End item A's attempt (the fake runtime parks); the shared key
-	// releases and the controller replenishes item B.
-	f.endTurns()
-	f.waitActivationStatusOn(t, wfB, "assessment", workflow.ActivationRunning)
+	// A SECOND correction activation dispatched and completed automatically,
+	// then the retried reverify passed and the pipeline republished to the
+	// same human-gate stop.
+	f.waitInstanceOn(t, f.wf, "two correction activations both satisfied fixed", func(inst *workflow.WorkflowInstance) bool {
+		count, satisfied := 0, 0
+		for _, a := range inst.Activations {
+			if a.NodeID == "correction" {
+				count++
+				if a.Status == workflow.ActivationSatisfied && a.SelectedOutcome == workflow.OutcomeName("fixed") {
+					satisfied++
+				}
+			}
+		}
+		return count == 2 && satisfied == 2
+	})
+	f.waitNodeSatisfied(t, f.wf, "reverify", "passed")
+	f.waitNodeSatisfied(t, f.wf, "publication", "published")
+	f.waitNodeSatisfied(t, f.wf, "review", "clean")
+	f.waitNodeStatus(t, f.wf, "merge-auth", workflow.ActivationPending)
 }
 
 // TestFactoryWorkRecoveryOnFreshSupervisor proves a new supervisor on the
 // same workflow root resumes the parked factory work without coordinator
-// memory: the recovered snapshot still parks the review on its exact
-// subject, the controller record and poll cursors survive, and the enabled
-// controller re-polls through to the same clean stop at merge-auth.
+// memory and without re-dispatching any auto node: the recovered snapshot
+// still parks the review on its exact subject, the controller record and
+// poll cursors survive, the enabled controller re-polls through to the same
+// clean stop at merge-auth, and the recovered supervisor never starts a
+// single worker session.
 func TestFactoryWorkRecoveryOnFreshSupervisor(t *testing.T) {
-	f := newFactoryE2E(t, "factory-e2e-recover", "passed.sh", "passed.sh")
-	f.driveThroughPublication(t, "sdougbrown/avenor", 143, "cc793f7")
+	// Both gates report pending until the test releases them after the
+	// restart, so the review is still parked with committed cursors when the
+	// first supervisor goes away.
+	release := filepath.Join(t.TempDir(), "release-gates")
+	f := newFactoryE2E(t, "factory-e2e-recover", 4, "avenor-issue-115",
+		func(string) string { return factoryFlagAdapter(release, "pending", "passed") },
+		func(string) string { return factoryFlagAdapter(release, "pending", "passed") })
+	scriptRunWorker(f.provider, "ses_assessment", map[string]string{"assessment.md": "## Assessment\n"})
+	scriptRunWorker(f.provider, "ses_draft_plan", map[string]string{"plan.md": "## Plan\n"})
+	scriptRunWorker(f.provider, "ses_hardening", map[string]string{"plan.md": "## Hardened plan\n"})
+	scriptExecutionLoop(f.provider)
+	scriptTeam(f.provider, "ses_verification", 3, "verification.md", "passed")
+	scriptPublication(f.provider, "ses_publication_1", false)
 	f.enable(t)
-	f.waitActivationStatus(t, "review", workflow.ActivationAwaitingGate)
-	review1 := f.activationByNode(t, "review")
-	f.waitCursor(t, review1.ID, "ci")
+	f.waitThroughPublication(t)
+	f.waitNodeStatus(t, f.wf, "review", workflow.ActivationAwaitingGate)
+	review := f.newestActivation(t, f.wf, "review")
+	cursorCI := f.waitCursor(t, f.wf, string(review.ID), "ci")
+	cursorVerdict := f.waitCursor(t, f.wf, string(review.ID), "review-verdict")
+	sessionsBefore := f.provider.sessionCount()
 
-	// Tear the first supervisor down without disabling the controller: the
+	// Tear the first supervisor down WITHOUT disabling the controller: the
 	// desired state stays enabled on disk.
 	f.sup.stopControllerLoops()
 	_ = f.sup.broker.Stop()
 	f.sup.stopReaper()
 
-	// A fresh supervisor recovers the same root and adapter registry.
+	// A fresh supervisor recovers the same root and adapter registry. Its
+	// provider factory only counts: any auto re-dispatch after recovery
+	// would show up here and fail the no-duplicate-dispatch assertion.
 	sup2 := NewSupervisor(Config{
 		ControlSocket:      newStableSocketPath(t, "factory-e2e-recover-2"),
 		WorkflowRoot:       f.root,
@@ -617,6 +1310,11 @@ func TestFactoryWorkRecoveryOnFreshSupervisor(t *testing.T) {
 	})
 	sup2.controllerRenewInterval = 25 * time.Millisecond
 	sup2.controllerPollBaseDelay = 200 * time.Millisecond
+	recoveredCalls := atomic.Int32{}
+	sup2.newProviderFunc = func(_ runtime.StartOptions, _ string) (runtime.Provider, error) {
+		recoveredCalls.Add(1)
+		return &factoryWorkerProvider{}, nil
+	}
 	mgr2, cstore2, err := sup2.workflowBarrierResult()
 	if err != nil {
 		t.Fatalf("second supervisor barrier: %v", err)
@@ -628,7 +1326,7 @@ func TestFactoryWorkRecoveryOnFreshSupervisor(t *testing.T) {
 		sup2.stopReaper()
 	})
 
-	// The controller record recovered enabled, with its poll cursors.
+	// The controller record recovered enabled, with its poll cursors intact.
 	rec, _, err := cstore2.Get("software-factory")
 	if err != nil {
 		t.Fatalf("recovered controller record: %v", err)
@@ -636,68 +1334,307 @@ func TestFactoryWorkRecoveryOnFreshSupervisor(t *testing.T) {
 	if rec.DesiredState != workflowcontroller.DesiredEnabled {
 		t.Fatalf("recovered desired state = %q, want enabled", rec.DesiredState)
 	}
+	if len(rec.PollCursors) < 2 {
+		t.Fatalf("recovered poll cursors = %d, want at least the parked review's 2", len(rec.PollCursors))
+	}
 	insp, err := mgr2.WorkflowInspect(f.wf)
 	if err != nil {
 		t.Fatalf("recovered inspect: %v", err)
 	}
 	recovered := insp.(map[string]any)["instance"].(workflow.WorkflowInstance)
-	var recoveredReview *workflow.Activation
-	for i := range recovered.Activations {
-		if recovered.Activations[i].NodeID == workflow.NodeID("review") {
-			recoveredReview = &recovered.Activations[i]
-		}
-	}
+	recoveredReview := activationFor(&recovered, review.NodeID)
 	if recoveredReview == nil || recoveredReview.Status != workflow.ActivationAwaitingGate {
 		t.Fatalf("recovered review = %+v, want parked awaiting_gate", recoveredReview)
 	}
+	if recoveredReview.ID != review.ID {
+		t.Fatalf("recovered review activation = %s, want the parked %s", recoveredReview.ID, review.ID)
+	}
 
-	// The recovered controller resumes leadership and re-polls the parked
-	// gates through the same adapters to the same clean stop.
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		inst, err := mgr2.WorkflowInspect(f.wf)
-		if err != nil {
-			t.Fatalf("inspect: %v", err)
-		}
-		inst2 := inst.(map[string]any)["instance"].(workflow.WorkflowInstance)
-		done := false
-		for i := range inst2.Activations {
-			a := inst2.Activations[i]
-			if a.NodeID == workflow.NodeID("review") && a.Status == workflow.ActivationSatisfied {
-				done = true
-			}
-		}
-		if done {
+	// Release the gates. The recovered controller resumes leadership and
+	// re-polls the parked gates through the same adapters to the same clean
+	// stop; surviving cursors only ever move their poll counters forward.
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatalf("release gates: %v", err)
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		inst := f.instanceOn(t, f.wf)
+		act := activationFor(&inst, review.NodeID)
+		if act != nil && act.Status == workflow.ActivationSatisfied && act.SelectedOutcome == workflow.OutcomeName("clean") {
 			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for the recovered review to satisfy; observed %s", describeInstance(&inst, recoveredCalls.Load()))
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	insp, err = mgr2.WorkflowInspect(f.wf)
-	if err != nil {
-		t.Fatalf("final inspect: %v", err)
+	inst := f.instanceOn(t, f.wf)
+	mergeAuth := activationFor(&inst, "merge-auth")
+	if mergeAuth == nil || mergeAuth.Status != workflow.ActivationPending {
+		t.Fatalf("recovered merge-auth = %+v, want pending behind the human gate", mergeAuth)
 	}
-	final := insp.(map[string]any)["instance"].(workflow.WorkflowInstance)
-	// The re-poll must have driven the review to satisfied; without this the
-	// merge-auth assertions below are vacuous (they hold even if the review
-	// never satisfied).
-	var reviewStatus workflow.ActivationStatus
-	reviewFound := false
-	for i := range final.Activations {
-		if final.Activations[i].NodeID == workflow.NodeID("review") {
-			reviewStatus = final.Activations[i].Status
-			reviewFound = true
+	if act := f.newestActivation(t, f.wf, "reconciliation"); act != nil {
+		t.Fatalf("reconciliation reached after recovery: %+v", act)
+	}
+	for _, want := range []workflowcontroller.PollCursor{cursorCI, cursorVerdict} {
+		got, ok := f.findCursor(f.wf, string(review.ID), want.GateID)
+		if !ok {
+			continue // a resolving gate's cursor may be dropped once applied
+		}
+		if got.PollCount < want.PollCount {
+			t.Fatalf("cursor %s poll count regressed %d -> %d", want.GateID, want.PollCount, got.PollCount)
 		}
 	}
-	if !reviewFound || reviewStatus != workflow.ActivationSatisfied {
-		t.Fatalf("recovered review status = %s, want satisfied (re-poll did not complete)", reviewStatus)
+
+	// The decisive assertion: no auto node was re-dispatched. The first
+	// supervisor's session log is frozen at its pre-restart length and the
+	// recovered supervisor started zero worker sessions.
+	if got := f.provider.sessionCount(); got != sessionsBefore {
+		t.Fatalf("first supervisor's session count moved %d -> %d after teardown", sessionsBefore, got)
 	}
-	for i := range final.Activations {
-		a := final.Activations[i]
-		if a.NodeID == workflow.NodeID("review") && a.SelectedOutcome != workflow.OutcomeName("clean") && a.Status == workflow.ActivationSatisfied {
-			t.Fatalf("recovered review outcome = %q, want clean", a.SelectedOutcome)
+	if calls := recoveredCalls.Load(); calls != 0 {
+		t.Fatalf("recovered supervisor dispatched %d worker sessions after restart, want 0 (no duplicate dispatch)", calls)
+	}
+}
+
+// TestFactoryWorkSharedWorktreeKeySerializesThroughCompletion proves the
+// worktree concurrency key serializes two work items pinned to the same
+// param under the production handoff: the second item's assessment stays
+// pending — with controller capacity to spare — while the first item's
+// worker holds the key, and dispatches automatically once the supervisor's
+// own completion of the first item's node releases the key.
+func TestFactoryWorkSharedWorktreeKeySerializesThroughCompletion(t *testing.T) {
+	f := newFactoryE2E(t, "factory-e2e-key", 3, "avenor-issue-115",
+		func(string) string { return factoryEchoAdapter("passed") },
+		func(string) string { return factoryEchoAdapter("passed") })
+	// Items A (the fixture workflow) and B share the worktree param; item C
+	// pins a different one. The first two queued sessions are held: they are
+	// A's and C's assessments in dispatch order, so whichever workflow grabs
+	// them, both live assessments park mid-run. Later sessions write BOTH
+	// artifacts because the interleaving of B's assessment with A's and C's
+	// draft plans is not deterministic and every contract only checks
+	// existence — the shared working directory (the known spawn-cwd gap) is
+	// what makes identical content harmless.
+	held1, held2 := "ses_assess_held_1", "ses_assess_held_2"
+	f.provider.append(factoryWorkerScript{sessionID: held1, hold: make(chan struct{}),
+		write: map[string]string{"assessment.md": "## Assessment\n", "plan.md": "## Plan\n"}})
+	f.provider.append(factoryWorkerScript{sessionID: held2, hold: make(chan struct{}),
+		write: map[string]string{"assessment.md": "## Assessment\n", "plan.md": "## Plan\n"}})
+	for _, id := range []string{"ses_worker_3", "ses_worker_4", "ses_worker_5", "ses_worker_6"} {
+		f.provider.append(factoryWorkerScript{sessionID: id,
+			write: map[string]string{"assessment.md": "## Assessment\n", "plan.md": "## Plan\n"}})
+	}
+	wfB := f.instantiate(t, "avenor-issue-115")
+	wfC := f.instantiate(t, "avenor-issue-130")
+	f.enable(t)
+
+	// All three items sit at intake; complete all intakes so the assessments
+	// become ready candidates under their resolved keys.
+	f.driveIntake(t, f.wf)
+	f.driveIntake(t, wfB)
+	f.driveIntake(t, wfC)
+
+	// Items A and C dispatch concurrently (different keys) and their workers
+	// park mid-run holding their sessions open.
+	f.waitInstanceOn(t, f.wf, "item A's assessment to run", func(inst *workflow.WorkflowInstance) bool {
+		act := activationFor(inst, "assessment")
+		return act != nil && act.Status == workflow.ActivationRunning && len(act.AttemptIDs) > 0
+	})
+	f.waitInstanceOn(t, wfC, "item C's assessment to run", func(inst *workflow.WorkflowInstance) bool {
+		act := activationFor(inst, "assessment")
+		return act != nil && act.Status == workflow.ActivationRunning && len(act.AttemptIDs) > 0
+	})
+	f.waitInstanceOn(t, f.wf, "both held worker sessions to start", func(*workflow.WorkflowInstance) bool {
+		return f.provider.sessionCount() >= 2
+	})
+
+	// While A holds the shared worktree key, item B's assessment never
+	// starts — with a controller slot free (inflight 3, two in use), so the
+	// block is the key, not capacity.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		b := f.newestActivation(t, wfB, "assessment")
+		if b == nil {
+			t.Fatalf("item B has no assessment activation")
 		}
-		if a.NodeID == workflow.NodeID("merge-auth") && a.Status != workflow.ActivationPending {
-			t.Fatalf("recovered merge-auth = %s, want pending behind the human gate", a.Status)
+		if b.Status != workflow.ActivationPending {
+			t.Fatalf("item B assessment = %s with the shared key still held, want pending", b.Status)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Release the held workers: their attempts end, the supervisor completes
+	// both assessment nodes itself, the key releases, and B's assessment
+	// dispatches and completes through the same handoff — no human help.
+	f.provider.releaseHold(held1)
+	f.provider.releaseHold(held2)
+	f.waitNodeSatisfied(t, wfB, "assessment", "ready")
+	bInst := f.instanceOn(t, wfB)
+	bAttempts := 0
+	for _, a := range bInst.Attempts {
+		if a.Identity.NodeID == "assessment" {
+			bAttempts++
+			if a.Status != workflow.AttemptSucceeded {
+				t.Fatalf("item B assessment attempt status = %s, want succeeded via the supervisor handoff", a.Status)
+			}
 		}
 	}
+	if bAttempts != 1 {
+		t.Fatalf("item B assessment recorded %d attempts, want exactly 1; observed %s", bAttempts, describeInstance(&bInst, int32(f.provider.sessionCount())))
+	}
+	f.disable(t)
+}
+
+// TestFactoryWorkHumanGateAuthorizedDecisionAdvances proves the merge-auth
+// human gate: the node parks behind its bound human gate, malformed and
+// unauthorized decisions are rejected without advancing anything, and one
+// exact-subject authorized decision releases the node — reconciliation then
+// dispatches through the production handoff and merges.
+func TestFactoryWorkHumanGateAuthorizedDecisionAdvances(t *testing.T) {
+	f := newFactoryE2E(t, "factory-e2e-human-gate", 4, "avenor-issue-115",
+		func(string) string { return factoryEchoAdapter("passed") },
+		func(string) string { return factoryEchoAdapter("passed") })
+	scriptRunWorker(f.provider, "ses_assessment", map[string]string{"assessment.md": "## Assessment\n"})
+	scriptRunWorker(f.provider, "ses_draft_plan", map[string]string{"plan.md": "## Plan\n"})
+	scriptRunWorker(f.provider, "ses_hardening", map[string]string{"plan.md": "## Hardened plan\n"})
+	scriptExecutionLoop(f.provider)
+	scriptTeam(f.provider, "ses_verification", 3, "verification.md", "passed")
+	scriptPublication(f.provider, "ses_publication_1", false)
+	scriptRunWorker(f.provider, "ses_reconciliation", map[string]string{"reconciliation.md": "## Reconciliation\nmerged\n"})
+	f.enable(t)
+	f.waitThroughPublication(t)
+	f.waitNodeSatisfied(t, f.wf, "review", "clean")
+
+	// The human completes merge-auth (claim, start, complete with the
+	// authorized head) and the activation parks awaiting its gate.
+	f.waitNodeStatus(t, f.wf, "merge-auth", workflow.ActivationPending)
+	f.completeManualNode(t, f.wf, "merge-auth", "authorized",
+		[]map[string]any{{"definition_id": "authorized_head", "value": f.head}}, nil)
+	f.waitNodeStatus(t, f.wf, "merge-auth", workflow.ActivationAwaitingGate)
+	mergeAuth := f.newestActivation(t, f.wf, "merge-auth")
+
+	// Malformed decisions are rejected without advancing: missing fields,
+	// then a subject that does not equal the pinned published subject.
+	pinned := map[string]any{"type": "pull_request", "repository": "sdougbrown/avenor", "pull_request": 143, "revision": f.head}
+	rejected := []struct {
+		name    string
+		payload map[string]any
+	}{
+		{"missing actor", map[string]any{"operation": "satisfy", "reason": "ok", "evidence_ids": []string{"ev"}, "subject": pinned}},
+		{"missing reason", map[string]any{"operation": "satisfy", "actor": "alice", "evidence_ids": []string{"ev"}, "subject": pinned}},
+		{"missing evidence", map[string]any{"operation": "satisfy", "actor": "alice", "reason": "ok", "subject": pinned}},
+		{"missing subject", map[string]any{"operation": "satisfy", "actor": "alice", "reason": "ok", "evidence_ids": []string{"ev"}}},
+		{"foreign subject", map[string]any{"operation": "satisfy", "actor": "alice", "reason": "ok", "evidence_ids": []string{"ev"},
+			"subject": map[string]any{"type": "pull_request", "repository": "sdougbrown/avenor", "pull_request": 143, "revision": "deadbeef"}}},
+	}
+	for _, tc := range rejected {
+		payload := tc.payload
+		payload["op"] = "gate"
+		payload["node_id"] = "merge-auth"
+		payload["activation_id"] = string(mergeAuth.ID)
+		payload["gate_id"] = "merge-authorization"
+		if _, err := f.mgr.WorkflowCommand(f.wf, mustJSON(t, payload)); err == nil {
+			t.Fatalf("%s decision was accepted", tc.name)
+		}
+		if act := f.newestActivation(t, f.wf, "merge-auth"); act == nil || act.Status != workflow.ActivationAwaitingGate {
+			t.Fatalf("%s decision advanced merge-auth: %+v", tc.name, act)
+		}
+	}
+	if act := f.newestActivation(t, f.wf, "reconciliation"); act != nil {
+		t.Fatalf("reconciliation reached on a rejected decision: %+v", act)
+	}
+
+	// The authorized decision: actor, reason, evidence, and the exact pinned
+	// subject. It resolves the gate and the node, and reconciliation
+	// dispatches automatically through the production handoff.
+	if _, err := f.mgr.WorkflowCommand(f.wf, mustJSON(t, map[string]any{
+		"op": "gate", "node_id": "merge-auth", "activation_id": string(mergeAuth.ID), "gate_id": "merge-authorization",
+		"operation": "satisfy", "actor": "alice", "reason": "authorized the reviewed head",
+		"evidence_ids": []string{"ev-auth"}, "subject": pinned,
+	})); err != nil {
+		t.Fatalf("authorized satisfy: %v", err)
+	}
+	f.waitNodeSatisfied(t, f.wf, "merge-auth", "authorized")
+	f.waitNodeSatisfied(t, f.wf, "reconciliation", "merged")
+	inst := f.instance(t)
+	if inst.Status != workflow.WorkflowCompleted || inst.TerminalOutcome != workflow.OutcomeName("merged") {
+		t.Fatalf("workflow = %s/%s, want completed/merged", inst.Status, inst.TerminalOutcome)
+	}
+}
+
+// TestFactoryWorkContractUnmetRetriesThenSucceeds proves the full files
+// contract failure cycle on an auto node: a worker that exits cleanly
+// without the declared artifact is recorded as a failed attempt with the
+// contract_unmet marker, the node's retry policy re-dispatches, and the
+// second worker — which writes the artifact — completes the node through the
+// same handoff. The node declares no retry_policy, so the template's
+// default_retry_policy supplies the second attempt.
+func TestFactoryWorkContractUnmetRetriesThenSucceeds(t *testing.T) {
+	f := newFactoryE2E(t, "factory-e2e-contract", 4, "avenor-issue-115",
+		func(string) string { return factoryEchoAdapter("passed") },
+		func(string) string { return factoryEchoAdapter("passed") })
+	// The first assessment worker exits cleanly WITHOUT its artifact; the
+	// retry writes it.
+	f.provider.append(factoryWorkerScript{sessionID: "ses_assess_unmet"})
+	scriptRunWorker(f.provider, "ses_assess_retry", map[string]string{"assessment.md": "## Assessment\n"})
+	scriptRunWorker(f.provider, "ses_draft_plan", map[string]string{"plan.md": "## Plan\n"})
+	f.enable(t)
+
+	f.driveIntake(t, f.wf)
+	f.waitNodeSatisfied(t, f.wf, "assessment", "ready")
+	f.waitNodeSatisfied(t, f.wf, "draft-plan", "ready")
+
+	inst := f.instance(t)
+	attempts := attemptsForNode(&inst, "assessment")
+	if len(attempts) != 2 {
+		t.Fatalf("assessment recorded %d attempts, want exactly 2 (contract_unmet retry then success); observed %s",
+			len(attempts), describeInstance(&inst, int32(f.provider.sessionCount())))
+	}
+	if attempts[0].Status != workflow.AttemptFailed || attempts[0].MarkerLabel != "contract_unmet" {
+		t.Fatalf("first assessment attempt = %s/%s, want failed/contract_unmet", attempts[0].Status, attempts[0].MarkerLabel)
+	}
+	if attempts[1].Status != workflow.AttemptSucceeded {
+		t.Fatalf("second assessment attempt = %s, want succeeded", attempts[1].Status)
+	}
+	if got := f.provider.sessionCount(); got != 3 {
+		t.Fatalf("provider sessions = %d, want exactly 3 (unmet, retry, draft-plan)", got)
+	}
+	f.disable(t)
+}
+
+// TestFactoryWorkContractUnmetFailsTheAttempt pins the observable half of
+// the files-contract failure on an auto node through the production handoff:
+// every clean exit without the declared artifact is rejected by the
+// supervisor's contract evaluation and recorded failed with the
+// contract_unmet marker, nothing downstream dispatches, and the activation
+// exhausts to blocked once the template's default_retry_policy (two
+// attempts) is spent.
+func TestFactoryWorkContractUnmetFailsTheAttempt(t *testing.T) {
+	f := newFactoryE2E(t, "factory-e2e-contract-unmet", 4, "avenor-issue-115",
+		func(string) string { return factoryEchoAdapter("passed") },
+		func(string) string { return factoryEchoAdapter("passed") })
+	f.provider.append(factoryWorkerScript{sessionID: "ses_assess_unmet_1"})
+	f.provider.append(factoryWorkerScript{sessionID: "ses_assess_unmet_2"})
+	f.enable(t)
+
+	f.driveIntake(t, f.wf)
+	f.waitNodeStatus(t, f.wf, "assessment", workflow.ActivationBlocked)
+
+	inst := f.instance(t)
+	attempts := attemptsForNode(&inst, "assessment")
+	if len(attempts) != 2 {
+		t.Fatalf("assessment recorded %d attempts, want exactly 2 (the template default max_attempts); observed %s", len(attempts), describeInstance(&inst, int32(f.provider.sessionCount())))
+	}
+	for i, a := range attempts {
+		if a.Status != workflow.AttemptFailed || a.MarkerLabel != "contract_unmet" {
+			t.Fatalf("assessment attempt %d = %s/%s, want failed/contract_unmet", i, a.Status, a.MarkerLabel)
+		}
+	}
+	if act := activationFor(&inst, "draft-plan"); act != nil {
+		t.Fatalf("draft-plan dispatched despite assessment never satisfying its contract; observed %s", describeInstance(&inst, int32(f.provider.sessionCount())))
+	}
+	if got := f.provider.sessionCount(); got != 2 {
+		t.Fatalf("provider sessions = %d, want exactly 2 (both unmet workers, never re-dispatched after exhaustion)", got)
+	}
+	f.disable(t)
 }
