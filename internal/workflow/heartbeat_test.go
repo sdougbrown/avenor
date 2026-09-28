@@ -934,3 +934,200 @@ func TestManagerHeartbeatRenewsExpiringLease(t *testing.T) {
 
 // ptrTime returns a pointer to t (test helper for inline lease metadata).
 func ptrTime(t time.Time) *time.Time { return &t }
+
+// TestHeartbeatAfterSweepExpiryIsRejectedBeforeAppend proves a heartbeat that
+// validated against a pre-sweep snapshot cannot append an unreplayable event
+// after the live sweep has expired its lease: Apply rejects it with
+// ErrLeaseNotHeld before anything is written, the event log carries no
+// heartbeat event, and the instance keeps replaying cleanly.
+func TestHeartbeatAfterSweepExpiryIsRejectedBeforeAppend(t *testing.T) {
+	m, s, wf, node := newManagerFixture(t)
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	nodeID := NodeID(node)
+	actID := activationByNode(&snap.Instance, nodeID).ID
+	future := time.Now().UTC().Add(time.Hour)
+	claimWithLease(t, s, wf, nodeID, Lease{
+		ID:           "lease-live",
+		ActivationID: actID,
+		Owner:        "alice",
+		TokenDigest:  ownerTokenDigest("live-token"),
+		AcquiredAt:   future.Add(-time.Minute),
+		ExpiresAt:    future,
+	}, "alice")
+	startWithToken(t, m, wf, node, string(actID), "lease-live", "live-token")
+
+	// The live sweep expires the lease in the window between the heartbeat
+	// command's validation and its locked apply.
+	expired, _, err := s.sweepStaleLeases(wf, "stale", time.Now().UTC().Add(2*time.Hour))
+	if err != nil {
+		t.Fatalf("sweepStaleLeases: %v", err)
+	}
+	if expired != 1 {
+		t.Fatalf("sweep expired %d leases, want 1", expired)
+	}
+
+	// A heartbeat carrying the swept lease and the post-sweep revision must
+	// be rejected before any event is appended.
+	fresh, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("reload after sweep: %v", err)
+	}
+	now := time.Now().UTC()
+	_, err = s.ApplyCommand(wf, Command{
+		Kind:             CommandHeartbeat,
+		ExpectedRevision: fresh.Instance.Revision,
+		IdempotencyKey:   "hb-race",
+		Identity:         ExecutionIdentity{WorkflowID: wf, NodeID: nodeID, ActivationID: actID},
+		LeaseID:          "lease-live",
+		Lease:            &Lease{ExpiresAt: now.Add(time.Hour), LastHeartbeatAt: &now},
+	})
+	if !errors.Is(err, ErrLeaseNotHeld) {
+		t.Fatalf("heartbeat after sweep expiry: err = %v, want ErrLeaseNotHeld", err)
+	}
+	if _, _, err := s.loadCurrent(wf); err != nil {
+		t.Fatalf("replay after rejected heartbeat: %v", err)
+	}
+	for _, e := range readEvents(t, s, wf) {
+		if e.Kind == EventHeartbeat {
+			t.Fatalf("event log contains a heartbeat event after rejection: %+v", e)
+		}
+	}
+}
+
+// TestExpireStaleLeasesWithoutExpiryDoesNotNotify proves a sweep that
+// expires nothing leaves subscribers asleep: the notification is a
+// synchronous non-blocking send, so an empty channel right after the sweep
+// returns means none was sent.
+func TestExpireStaleLeasesWithoutExpiryDoesNotNotify(t *testing.T) {
+	m, s, wf := newAutoDispatchFixture(t, "sweep-quiet", "ctl-a", 50)
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	actID := activationByNode(&snap.Instance, "start").ID
+	future := time.Now().UTC().Add(time.Hour)
+	claimWithLease(t, s, wf, "start", Lease{
+		ID:           "lease-fresh",
+		ActivationID: actID,
+		Owner:        "alice",
+		TokenDigest:  ownerTokenDigest("fresh-token"),
+		AcquiredAt:   future.Add(-2 * time.Hour),
+		ExpiresAt:    future,
+	}, "alice")
+	startWithToken(t, m, wf, "start", string(actID), "lease-fresh", "fresh-token")
+
+	ch, cancel := m.SubscribeChanges()
+	defer cancel()
+	summary, err := m.ExpireStaleLeases()
+	if err != nil {
+		t.Fatalf("ExpireStaleLeases: %v", err)
+	}
+	if summary.Expired != 0 {
+		t.Fatalf("sweep expired %d leases, want 0 for a fresh lease", summary.Expired)
+	}
+	select {
+	case <-ch:
+		t.Fatal("a sweep that expired nothing woke a change subscriber")
+	default:
+	}
+}
+
+// TestExpireStaleLeasesNotifiesSubscribersAndIndex proves the live sweep's
+// commits land through the same change path as an ordinary command: after the
+// sweep expires a stale lease, a change subscriber wakes immediately (no
+// anti-entropy wait) and a candidate-index query taken right after the wake
+// already observes the re-armed node — no rebuild required.
+func TestExpireStaleLeasesNotifiesSubscribersAndIndex(t *testing.T) {
+	m, s, wf := newAutoDispatchFixture(t, "sweep-notify", "ctl-a", 50)
+	if err := m.RebuildCandidateIndex("sup-1"); err != nil {
+		t.Fatalf("RebuildCandidateIndex: %v", err)
+	}
+
+	// Claim and start the node with an already-expired lease: the activation
+	// is running with a stale lease, so it is not a candidate.
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	actID := activationByNode(&snap.Instance, "start").ID
+	past := time.Now().UTC().Add(-time.Hour)
+	claimWithLease(t, s, wf, "start", Lease{
+		ID:           "lease-ghost",
+		ActivationID: actID,
+		Owner:        "alice",
+		TokenDigest:  ownerTokenDigest("ghost-token"),
+		AcquiredAt:   past.Add(-time.Minute),
+		ExpiresAt:    past,
+	}, "alice")
+	startWithToken(t, m, wf, "start", string(actID), "lease-ghost", "ghost-token")
+	if cands, err := m.CandidatesForController("ctl-a", 10); err != nil || len(cands) != 0 {
+		t.Fatalf("candidates while the stale lease is held = %v, err = %v, want none", cands, err)
+	}
+	preSweepRevision := snap.Instance.Revision
+
+	ch, cancel := m.SubscribeChanges()
+	defer cancel()
+
+	if _, err := m.ExpireStaleLeases(); err != nil {
+		t.Fatalf("ExpireStaleLeases: %v", err)
+	}
+
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the sweep's change notification")
+	}
+
+	// The wake implies the candidate index upsert already happened: the
+	// expired activation is claimable again and visible without a rebuild.
+	cands, err := m.CandidatesForController("ctl-a", 10)
+	if err != nil {
+		t.Fatalf("candidates after wake: %v", err)
+	}
+	found := false
+	for _, c := range cands {
+		if c.Identity.WorkflowID == wf {
+			found = true
+			if c.Revision <= preSweepRevision {
+				t.Fatalf("re-armed candidate revision = %d, want > %d", c.Revision, preSweepRevision)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("candidates after wake = %v, want the re-armed %s", cands, wf)
+	}
+}
+
+// TestApplyCommandRejectsUnreducibleEventBeforeAppend proves the store never
+// appends an event the reducer rejects: a terminate command naming an attempt
+// the activation does not have passes Apply but fails Reduce, and the command
+// is refused with the event log untouched and the instance still replayable.
+func TestApplyCommandRejectsUnreducibleEventBeforeAppend(t *testing.T) {
+	_, s, wf, node := newManagerFixture(t)
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	actID := activationByNode(&snap.Instance, NodeID(node)).ID
+	before := len(readEvents(t, s, wf))
+
+	_, err = s.ApplyCommand(wf, Command{
+		Kind:             CommandTerminate,
+		ExpectedRevision: snap.Instance.Revision,
+		IdempotencyKey:   "terminate-ghost",
+		Identity:         ExecutionIdentity{WorkflowID: wf, NodeID: NodeID(node), ActivationID: actID, AttemptID: "att_ghost"},
+		AttemptStatus:    AttemptFailed,
+	})
+	if err == nil || !strings.Contains(err.Error(), "terminated attempt not found") {
+		t.Fatalf("terminate for an unknown attempt: error = %v, want the reducer's terminated-attempt-not-found rejection", err)
+	}
+	if after := len(readEvents(t, s, wf)); after != before {
+		t.Fatalf("event log grew from %d to %d events after a rejected command", before, after)
+	}
+	if _, _, err := s.loadCurrent(wf); err != nil {
+		t.Fatalf("replay after rejected command: %v", err)
+	}
+}

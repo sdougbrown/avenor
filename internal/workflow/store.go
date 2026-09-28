@@ -149,15 +149,17 @@ func (s *Store) applyLocked(workflowID WorkflowID, cmd Command) (Snapshot, error
 	if err != nil {
 		return Snapshot{}, err
 	}
-	if err := s.appendEvents(workflowID, events); err != nil {
-		return Snapshot{}, err
-	}
+	// Reduce before appending: an event the reducer rejects must never reach
+	// the log, where every later replay would fail on it.
 	next := snap
 	for _, e := range events {
 		next, err = Reduce(next, e)
 		if err != nil {
 			return Snapshot{}, err
 		}
+	}
+	if err := s.appendEvents(workflowID, events); err != nil {
+		return Snapshot{}, err
 	}
 	if err := s.writeSnapshot(workflowID, next); err != nil {
 		return Snapshot{}, err

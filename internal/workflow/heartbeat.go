@@ -192,6 +192,17 @@ func (m *Manager) ExpireStaleLeases() (LeaseExpirySummary, error) {
 			summary.Errors = append(summary.Errors, fmt.Sprintf("workflow %s: %v", wf, err))
 			continue
 		}
+		if expired > 0 {
+			// Route the expiry through the same commit hook an ordinary command
+			// applies: upsert the post-sweep snapshot into the candidate index
+			// and wake change subscribers, so a controller re-queries immediately
+			// instead of waiting for its next anti-entropy rebuild. The recovery
+			// sweep (appendExpiredLeases) deliberately skips this: it runs before
+			// the index is recovered and before any subscriber exists.
+			if snap, ok, err := m.store.loadCurrent(wf); err == nil && ok {
+				m.observeCommit(wf, snap)
+			}
+		}
 		summary.Expired += expired
 		summary.Retained += retained
 	}

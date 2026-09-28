@@ -30,6 +30,7 @@ Flags:
 | `--max-tree-budget` | 64 | Maximum concurrent executing runtimes across the whole supervisor tree including nested supervisors. Bounds recursive fan-out |
 | `--idle-timeout` | 0 | Exit cleanly after this duration with no child runtimes running and no control connections active. 0 disables (supervisor runs until signaled) |
 | `--parked-timeout` | 30m | How long a finished runtime stays parked awaiting a follow-up prompt before it is reaped. Parked runtimes hold a live backend process but do not count against `--max-runtimes`. 0 parks until supervisor shutdown or cancellation |
+| `--lease-sweep-interval` | 10s | How often the supervisor expires workflow leases whose heartbeat stopped (the live stall detector). An expired lease re-arms its node for a replacement claim without a restart. 0 disables the sweep: leases then expire only on supervisor restart |
 | `--shutdown-timeout` | 10s | How long to wait for child runtimes to finish gracefully before killing them |
 | `--http-debug` | (empty) | If set, bind an HTTP debug adapter to this address (e.g. `:8080`). Useful for rapid inspection and testing |
 | `--permission-claim-timeout` | 0 | Optional deadline for a connected control client to answer a permission request. With 0, control retains the request until it is answered or all clients disconnect |

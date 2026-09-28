@@ -201,6 +201,19 @@ func buildCommandEvents(state Snapshot, command Command) ([]Event, error) {
 		return []Event{e}, nil
 
 	case CommandHeartbeat:
+		// Validate against the state the command actually lands on: the
+		// manager validated the lease on a pre-lock snapshot, and a concurrent
+		// lease-expiry sweep may have released it since. Without this check a
+		// heartbeat could append an event that fails reduction, poisoning the
+		// event log for every future replay.
+		act, err := findActivation(&state.Instance, command.Identity.NodeID, command.Identity.ActivationID)
+		if err != nil {
+			return nil, err
+		}
+		if act == nil || act.ActiveLease == nil ||
+			(command.LeaseID != "" && command.LeaseID != act.ActiveLease.ID) {
+			return nil, fmt.Errorf("%w: heartbeat target has no matching active lease", ErrLeaseNotHeld)
+		}
 		e := newEvent(EventHeartbeat)
 		e.LeaseID = command.LeaseID
 		// Additively carry the renewal metadata (wall-clock heartbeat time +

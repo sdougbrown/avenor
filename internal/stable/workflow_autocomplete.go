@@ -69,13 +69,25 @@ func (s *Supervisor) finishWorkflowAttempt(ec workflow.ExecutorContext, hb *leas
 			ec.WorkflowID, ec.NodeID, ec.AttemptID, err)
 		return
 	}
-	if _, err := mgr.CompleteAuto(ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, ec.OwnerToken, plan); err != nil {
+	err = nil
+	if s.testHooks.completeAutoPre != nil {
+		err = s.testHooks.completeAutoPre()
+	}
+	if err == nil {
+		_, err = mgr.CompleteAuto(ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, ec.OwnerToken, plan)
+	}
+	if err != nil {
 		// Residual: the success fact is recorded but the completion (evidence
 		// staging, output recording, or the atomic command itself) failed. The
-		// activation stays running with a held lease until the lease expires;
-		// no new kernel command exists for this state.
-		fmt.Fprintf(os.Stderr, "avenor stable: workflow %s node %s attempt %s: supervisor auto-completion failed after the success fact (activation stays running until the lease expires): %v\n",
-			ec.WorkflowID, ec.NodeID, ec.AttemptID, err)
+		// heartbeat stops here, so the lease goes stale; the live lease-expiry
+		// sweep expires it when running, and restart recovery otherwise. The
+		// controller then re-dispatches the node for a replacement attempt.
+		recovery := "the lease expires on the next restart recovery"
+		if s.leaseSweepRunning() {
+			recovery = "the live lease sweep will expire the lease"
+		}
+		fmt.Fprintf(os.Stderr, "avenor stable: workflow %s node %s attempt %s: supervisor auto-completion failed after the success fact (%s and the controller will re-dispatch the node): %v\n",
+			ec.WorkflowID, ec.NodeID, ec.AttemptID, recovery, err)
 	}
 	hb.StopAndWait()
 }
