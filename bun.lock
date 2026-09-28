@@ -36,6 +36,22 @@
         "unrun": "^0.3.0",
       },
     },
+    "packages/escalation-bridge": {
+      "name": "@dougbots/avenor-escalation-bridge",
+      "version": "0.11.0",
+      "bin": {
+        "avenor-escalation-bridge": "./dist/cli.js",
+      },
+      "dependencies": {
+        "@dougbots/avenor-core": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/bun": "^1.3.12",
+        "@types/node": "^25.8.0",
+        "tsdown": "^0.22.0",
+        "typescript": "^6.0.3",
+      },
+    },
     "packages/mcp": {
       "name": "@dougbots/avenor-mcp",
       "version": "0.11.0",
@@ -231,6 +247,8 @@
     "@dougbots/avenor-board": ["@dougbots/avenor-board@workspace:packages/board"],
 
     "@dougbots/avenor-core": ["@dougbots/avenor-core@workspace:packages/core"],
+
+    "@dougbots/avenor-escalation-bridge": ["@dougbots/avenor-escalation-bridge@workspace:packages/escalation-bridge"],
 
     "@dougbots/avenor-mcp": ["@dougbots/avenor-mcp@workspace:packages/mcp"],
 
@@ -1161,6 +1179,8 @@
     "@babel/types/@babel/helper-validator-identifier": ["@babel/helper-validator-identifier@7.29.7", "", {}, "sha512-qehxGkRj55h/ff8EMaJ+cYhyaKlHIxqYDn682wQD7RNp9UujOQsHog2uS0r2vzr4pW+sXf90NeeayjcNaX3fFg=="],
 
     "@dougbots/avenor-core/typescript": ["typescript@6.0.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw=="],
+
+    "@dougbots/avenor-escalation-bridge/typescript": ["typescript@6.0.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw=="],
 
     "@dougbots/avenor-mcp/typescript": ["typescript@6.0.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw=="],
 

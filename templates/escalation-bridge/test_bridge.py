@@ -328,6 +328,25 @@ class WaitForDecisionTest(unittest.TestCase):
         self.assertEqual(len(rejected), 1)
 
 
+class MoveAsideTest(unittest.TestCase):
+    def test_two_parks_in_one_second_produce_distinct_files(self):
+        # Parked names use a millisecond timestamp plus a per-process
+        # counter; whole-second names would let a second park overwrite the
+        # first.
+        with tempfile.TemporaryDirectory() as tmp:
+            decisions = Path(tmp)
+            source = decisions / "a.json"
+            source.write_text("{not json")
+            first = bridge.move_aside(decisions, "act_1", "g1", source)
+            source.write_text("{still not json")
+            second = bridge.move_aside(decisions, "act_1", "g1", source)
+            self.assertNotEqual(first, second)
+            rejected = sorted((decisions / "rejected").glob("*.json"))
+            self.assertEqual(len(rejected), 2)
+            self.assertEqual(rejected[0].read_text(), "{not json")
+            self.assertEqual(rejected[1].read_text(), "{still not json")
+
+
 class SubjectUnchangedTest(unittest.TestCase):
     """The pre-submit re-inspect of a bound-gate decision."""
 
