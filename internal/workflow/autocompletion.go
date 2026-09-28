@@ -336,12 +336,10 @@ func secureJoin(workingDir, rel string) (string, error) {
 	return abs, nil
 }
 
-// resolveJSONPointer resolves an RFC 6901 JSON Pointer against data and
-// returns the raw JSON at the target location.
+// resolveJSONPointer resolves a non-empty RFC 6901 JSON Pointer against data
+// and returns the raw JSON at the target location. An output source without a
+// pointer never reaches it.
 func resolveJSONPointer(data []byte, pointer string) (json.RawMessage, error) {
-	if pointer == "" {
-		return json.RawMessage(bytes.TrimSpace(data)), nil
-	}
 	if !strings.HasPrefix(pointer, "/") {
 		return nil, fmt.Errorf("pointer must begin with /")
 	}

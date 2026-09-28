@@ -400,7 +400,6 @@ func TestResolveJSONPointer(t *testing.T) {
 		pointer string
 		want    string
 	}{
-		{"", `{"a": {"b": [10, {"c": "deep"}]}, "s": "x", "n": 1.5, "t": true, "sl/ash": "esc", "ti~lde": "til"}`},
 		{"/s", `"x"`},
 		{"/a/b/0", "10"},
 		{"/a/b/1/c", `"deep"`},
@@ -418,7 +417,7 @@ func TestResolveJSONPointer(t *testing.T) {
 			t.Fatalf("resolveJSONPointer(%q) = %s, want %s", test.pointer, got, test.want)
 		}
 	}
-	for _, pointer := range []string{"/missing", "/a/b/9", "no-slash", "/s/x"} {
+	for _, pointer := range []string{"", "/missing", "/a/b/9", "no-slash", "/s/x"} {
 		if _, err := resolveJSONPointer(data, pointer); err == nil {
 			t.Fatalf("resolveJSONPointer(%q) succeeded, want error", pointer)
 		}
