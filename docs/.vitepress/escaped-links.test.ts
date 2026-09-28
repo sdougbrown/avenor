@@ -53,6 +53,13 @@ describe('escapedLinkUrl', () => {
     expect(escapedLinkUrl('page.md', '../templates/escalation-bridge#readme')).toBe(
       'https://github.com/sdougbrown/avenor/tree/main/templates/escalation-bridge#readme',
     )
+    expect(escapedLinkUrl('page.md', '../#readme')).toBe(
+      'https://github.com/sdougbrown/avenor/tree/main#readme',
+    )
+  })
+
+  test('a fragment does not hide escape levels from the depth guard', () => {
+    expect(() => escapedLinkUrl('page.md', '../..#readme')).toThrow(/escapes the repository/)
   })
 
   test('resolves against the page directory', () => {
