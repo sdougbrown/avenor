@@ -69,6 +69,15 @@ type Event struct {
 	// Diagnostics carries inert dispatch provenance recorded with the attempt
 	// intent. It never affects kernel transitions.
 	Diagnostics *AttemptDiagnostics `json:"diagnostics,omitempty"`
+	// CausedBy is the causal provenance carried on a transition event: the
+	// causing activation ID(s) copied onto the created activation during
+	// replay.
+	CausedBy []ActivationID `json:"caused_by,omitempty"`
+	// ResolvedGates carries the command-time pinning of the target node's
+	// bound gate inputs and subjects onto a transition event. The reducer
+	// only copies what the event carries, so replay reproduces identical
+	// pins.
+	ResolvedGates map[GateID]ResolvedGate `json:"resolved_gates,omitempty"`
 	// ReadyAt is the explicit timestamp of a transition into a claimable
 	// state, stamped by the command boundary and copied onto the activation
 	// during replay so the reducer never calls the wall clock.

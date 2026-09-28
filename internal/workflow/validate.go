@@ -90,8 +90,23 @@ func isOpenLeafPath(path string) bool {
 		return true
 	case len(segs) >= 6 && segs[2] == "action" && segs[3] == "input_bindings" && isJSONArrayIndex(segs[4]) && segs[5] == "value":
 		return true
+	case isOpenLeafGateValue(segs):
+		return true
 	}
 	return false
+}
+
+// isOpenLeafGateValue reports whether a structural-validator path points at a
+// gate input value or a result_outcomes mapping entry: the mapped keys are
+// template data that typed Go governs exclusively.
+func isOpenLeafGateValue(segs []string) bool {
+	if len(segs) < 6 {
+		return false
+	}
+	if segs[2] != "gates" || !isJSONArrayIndex(segs[3]) {
+		return false
+	}
+	return segs[4] == "inputs" || segs[4] == "result_outcomes"
 }
 
 func isJSONArrayIndex(s string) bool {
@@ -155,7 +170,7 @@ func ValidateTemplate(template Template) error {
 		if err := validateAction(node.Action); err != nil {
 			return fmt.Errorf("invalid workflow template: node %q: %w", node.ID, err)
 		}
-		if err := validateDispatch(node.Dispatch, node.Action.Kind); err != nil {
+		if err := validateDispatch(node.Dispatch, node); err != nil {
 			return fmt.Errorf("invalid workflow template: node %q: %w", node.ID, err)
 		}
 	}
@@ -593,7 +608,7 @@ func validateAction(action Action) error {
 // validateDispatch enforces the dispatch rules the JSON Schema cannot
 // express: mode/controller_id coupling, the provider-backed action-kind
 // restriction, and whitespace-only concurrency keys.
-func validateDispatch(policy *DispatchPolicy, kind ActionKind) error {
+func validateDispatch(policy *DispatchPolicy, node NodeDefinition) error {
 	if policy == nil {
 		return nil
 	}
@@ -612,19 +627,70 @@ func validateDispatch(policy *DispatchPolicy, kind ActionKind) error {
 	if policy.ConcurrencyKey != "" && strings.TrimSpace(policy.ConcurrencyKey) == "" {
 		return fmt.Errorf("dispatch.concurrency_key cannot be blank")
 	}
+	if policy.SuccessOutcome != "" && node.Action.Kind != ActionExternal {
+		return fmt.Errorf("dispatch.success_outcome is forbidden on %s nodes", node.Action.Kind)
+	}
+	if policy.SuccessOutcome != "" && mode == DispatchManual {
+		return fmt.Errorf("dispatch.success_outcome is forbidden for %q nodes", DispatchManual)
+	}
 	if mode == DispatchAuto {
 		if strings.TrimSpace(policy.ControllerID) == "" {
 			return fmt.Errorf("dispatch.mode %q requires controller_id", DispatchAuto)
 		}
-		switch kind {
+		switch node.Action.Kind {
 		case ActionRun, ActionLoop, ActionTeam:
+			return nil
+		case ActionExternal:
+			return validateAutoExternalDispatch(policy, node)
 		default:
 			return fmt.Errorf("dispatch.mode %q is limited to provider-backed %s, %s, and %s nodes", DispatchAuto, ActionRun, ActionLoop, ActionTeam)
 		}
-		return nil
 	}
 	if policy.ControllerID != "" {
 		return fmt.Errorf("dispatch.controller_id is forbidden for %q nodes", DispatchManual)
+	}
+	return nil
+}
+
+// validateAutoExternalDispatch enforces the eligibility rules that permit an
+// external node to dispatch automatically: it declares no outputs, names a
+// declared success_outcome branch, carries at least one required external
+// gate, has no human or machine gates, and every required gate declares a
+// subject binding.
+func validateAutoExternalDispatch(policy *DispatchPolicy, node NodeDefinition) error {
+	if len(node.Outputs) > 0 {
+		return fmt.Errorf("dispatch.mode %q external nodes must declare no outputs", DispatchAuto)
+	}
+	if strings.TrimSpace(string(policy.SuccessOutcome)) == "" {
+		return fmt.Errorf("dispatch.mode %q external nodes must declare dispatch.success_outcome", DispatchAuto)
+	}
+	if target, declared := node.Branches[policy.SuccessOutcome]; !declared || target == "" {
+		declared = false
+		for _, outcome := range node.Outcomes {
+			if outcome.Name == policy.SuccessOutcome && !outcome.Terminal && outcome.TargetNodeID != "" {
+				declared = true
+				break
+			}
+		}
+		if !declared {
+			return fmt.Errorf("dispatch.success_outcome %q must be a declared node outcome with a branch", policy.SuccessOutcome)
+		}
+	}
+	requiredExternal := 0
+	for _, gate := range node.Gates {
+		if gate.Type != GateExternal {
+			return fmt.Errorf("dispatch.mode %q external nodes must declare no human or machine gates (gate %q is %q)", DispatchAuto, gate.ID, gate.Type)
+		}
+		if !gate.Required {
+			continue
+		}
+		requiredExternal++
+		if gate.SubjectBinding == nil {
+			return fmt.Errorf("dispatch.mode %q external nodes require a subject_binding on every required gate (gate %q has none)", DispatchAuto, gate.ID)
+		}
+	}
+	if requiredExternal == 0 {
+		return fmt.Errorf("dispatch.mode %q external nodes must declare at least one required external gate", DispatchAuto)
 	}
 	return nil
 }

@@ -413,3 +413,51 @@ func TestGateExternalResultFails(t *testing.T) {
 		t.Fatalf("external_result failed: activation count got %d want 1 (no failure branch)", len(state.Instance.Activations))
 	}
 }
+
+// TestGateFailedBoundGateWithoutResolver pins the nil-resolver path of
+// gateIsBound: with no resolver installed (replayed/recovered logs), a
+// failed result on a gate that would be bound cannot be read as bound, so
+// the legacy failed-rejects behavior applies and the activation is
+// rejected, not parked awaiting_gate.
+func TestGateFailedBoundGateWithoutResolver(t *testing.T) {
+	state, actID := parkedGatedCompletion(t, []GateDefinition{{
+		ID:             "review",
+		Type:           GateExternal,
+		Required:       true,
+		SubjectBinding: &SubjectBinding{Type: "pull_request"},
+	}})
+	saved := completionGateResolve
+	completionGateResolve = nil
+	t.Cleanup(func() { completionGateResolve = saved })
+	ts := time.Now().UTC()
+	cmd := Command{
+		Kind:             CommandGate,
+		ExpectedRevision: state.Instance.Revision,
+		IdempotencyKey:   "gate-ext-fail",
+		Identity:         baseIdentity(actID, ""),
+		Operation:        GateOpExternalResult,
+		Outcome:          "failed",
+		Gate: &GateInstance{
+			GateID:       "review",
+			ActivationID: actID,
+			Status:       GateFailed,
+			PollID:       "poll-1",
+			Source:       "github",
+			Subject:      &Subject{Type: "pull_request", Repository: "acme/app", Revision: "sha"},
+			ResponseHash: "hash-3",
+			EvidenceIDs:  []EvidenceID{"ev-ext"},
+			ObservedAt:   &ts,
+		},
+	}
+	state = mustApply(t, state, cmd, "external_result failed (no resolver)")
+
+	if got := actStart(state).Status; got != ActivationRejected {
+		t.Fatalf("failed result without resolver: activation status got %q want rejected (legacy)", got)
+	}
+	if state.Instance.Status != WorkflowActive {
+		t.Fatalf("failed result without resolver: workflow status got %q want active", state.Instance.Status)
+	}
+	if len(state.Instance.Activations) != 1 {
+		t.Fatalf("failed result without resolver: activation count got %d want 1 (no failure branch)", len(state.Instance.Activations))
+	}
+}

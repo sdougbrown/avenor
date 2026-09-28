@@ -83,7 +83,7 @@ func TestDispatchTemplateValidation(t *testing.T) {
 		{"priority non-integer", "intake", runAction, map[string]any{"mode": "auto", "controller_id": "c", "priority": 1.5}, "dispatch"},
 		{"empty concurrency_key", "intake", runAction, map[string]any{"mode": "auto", "controller_id": "c", "concurrency_key": ""}, "dispatch"},
 		{"blank concurrency_key", "intake", runAction, map[string]any{"mode": "auto", "controller_id": "c", "concurrency_key": "  "}, "cannot be blank"},
-		{"auto on external", "intake", externalAction, map[string]any{"mode": "auto", "controller_id": "c"}, "run, loop, and team"},
+		{"auto on ineligible external", "intake", externalAction, map[string]any{"mode": "auto", "controller_id": "c"}, "success_outcome"},
 		{"auto on workflow composition", "intake", workflowAction, map[string]any{"mode": "auto", "controller_id": "c"}, "run, loop, and team"},
 		{"unknown mode", "intake", runAction, map[string]any{"mode": "teleport"}, "dispatch"},
 	}

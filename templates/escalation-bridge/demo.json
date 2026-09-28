@@ -40,6 +40,12 @@
           "type": "human",
           "required": true,
           "subject_type": "pull_request",
+          "subject_binding": {
+            "type": "pull_request",
+            "repository": { "from_node_output": { "node_id": "publish", "output_id": "repository" } },
+            "pull_request": { "from_node_output": { "node_id": "publish", "output_id": "pull_number" } },
+            "revision": { "from_node_output": { "node_id": "publish", "output_id": "head_sha" } }
+          },
           "allowed_outcomes": ["authorized"]
         }
       ],

@@ -340,6 +340,9 @@
           "concurrency_key": {
             "type": "string",
             "minLength": 1
+          },
+          "success_outcome": {
+            "type": "string"
           }
         },
         "additionalProperties": false
@@ -521,11 +524,65 @@
           },
           "subject_type": {
             "type": "string"
+          },
+          "adapter_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "inputs": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+          },
+          "subject_binding": {
+            "$ref": "#/$defs/subject_binding"
+          },
+          "result_outcomes": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
           }
         },
         "required": [
           "id",
           "type"
+        ],
+        "additionalProperties": false
+      },
+      "subject_output_ref": {
+        "type": "object",
+        "properties": {
+          "from_node_output": {
+            "$ref": "#/$defs/template_output_ref"
+          }
+        },
+        "required": [
+          "from_node_output"
+        ],
+        "additionalProperties": false
+      },
+      "subject_binding": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "pull_request"
+          },
+          "repository": {
+            "$ref": "#/$defs/subject_output_ref"
+          },
+          "pull_request": {
+            "$ref": "#/$defs/subject_output_ref"
+          },
+          "revision": {
+            "$ref": "#/$defs/subject_output_ref"
+          }
+        },
+        "required": [
+          "type",
+          "repository",
+          "pull_request",
+          "revision"
         ],
         "additionalProperties": false
       },
