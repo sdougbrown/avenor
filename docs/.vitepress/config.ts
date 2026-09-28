@@ -1,54 +1,22 @@
-import { dirname, extname, join, normalize } from 'node:path'
 import { defineConfig, type MarkdownIt } from 'vitepress'
+import { escapedLinkUrl } from './escaped-links'
 
 // Links that escape the docs source root (e.g. `../templates/foo/README.md`)
-// are dead by construction — VitePress only serves pages under docs/. Rewrite
-// them to GitHub URLs on the default branch: files get /blob/, extension-less
-// paths (directories) get /tree/.
-const GITHUB_BASE = 'https://github.com/sdougbrown/avenor'
-const GITHUB_REF = 'main'
-
-function splitEscapes(resolved: string): { depth: number; path: string } {
-  let rest = resolved
-  let depth = 0
-  while (rest.startsWith('../')) {
-    rest = rest.slice(3)
-    depth++
-  }
-  if (rest === '..') {
-    // A bare trailing `..` has no trailing slash for the loop to consume,
-    // but still escapes one more level.
-    depth++
-    rest = ''
-  }
-  return { depth, path: rest.replace(/\/$/, '') }
-}
+// are dead by construction — VitePress only serves pages under docs/. The
+// rewrite logic lives in escaped-links.ts; see that module for details.
 
 function rewriteEscapedLinks(md: MarkdownIt) {
   md.core.ruler.after('inline', 'rewrite-escaped-links', (state) => {
     const relativePath = state.env.relativePath as string | undefined
     if (!relativePath) return false
-    const dir = dirname(relativePath)
     for (const token of state.tokens) {
       for (const child of token.children ?? []) {
         if (child.type !== 'link_open') continue
         const href = child.attrGet('href')
         if (!href || !href.startsWith('../')) continue
-        const resolved = normalize(join(dir, href))
-        // `..` (the repo root) is not "inside docs/" either — rewrite it too.
-        if (resolved !== '..' && !resolved.startsWith('../')) continue
-        // docs/ sits directly at the repo root, so a resolvable link escapes
-        // by exactly one level; more means it points outside the repository.
-        const { depth, path } = splitEscapes(resolved)
-        if (depth > 1) {
-          throw new Error(
-            `[rewriteEscapedLinks] docs/${relativePath}: link "${href}" resolves to "${resolved}", which escapes the repository. ` +
-              'Links may point inside docs/ (handled by VitePress) or one level up to the repo root.',
-          )
-        }
-        const kind = extname(path) ? 'blob' : 'tree'
-        const suffix = path ? `/${path}` : ''
-        child.attrSet('href', `${GITHUB_BASE}/${kind}/${GITHUB_REF}${suffix}`)
+        const url = escapedLinkUrl(relativePath, href)
+        if (url === null) continue
+        child.attrSet('href', url)
       }
     }
     return false

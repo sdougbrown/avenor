@@ -68,10 +68,34 @@ jobs:
       - name: Install dependencies
         run: bun install
 
-      # VitePress fails the build on dead links, so this doubles as the
-      # docs link check.
+      # VitePress fails the build on dead internal links. Links rewritten to
+      # GitHub URLs are external, so the build cannot see them — run the
+      # transformer's unit tests, then HEAD-check every emitted GitHub URL.
       - name: Build docs
         run: bun run --cwd docs build
+
+      - name: Test link transformer
+        run: bun test ./docs/.vitepress/escaped-links.test.ts
+
+      - name: Check GitHub links resolve
+        run: |
+          set -euo pipefail
+          urls="$(grep -rohE 'href="https://github\.com/sdougbrown/avenor/(blob|tree)/main/[^"#]*' docs/.vitepress/dist \
+            | sed -E 's/^href="//; s/#.*$//' \
+            | sort -u)"
+          if [ -z "$urls" ]; then
+            echo "no rewritten GitHub URLs found in docs build output" >&2
+            exit 1
+          fi
+          status=0
+          while IFS= read -r url; do
+            code="$(curl -s -o /dev/null -I -w '%{http_code}' "$url")"
+            if [ "$code" != "200" ]; then
+              echo "DEAD: $url -> HTTP $code" >&2
+              status=1
+            fi
+          done <<< "$urls"
+          exit "$status"
 
   js:
     runs-on: ubuntu-latest
