@@ -272,9 +272,8 @@ func TestBeginDispatchRevisionRaceMapsToStaleCandidate(t *testing.T) {
 
 	// While BeginDispatch sits in its read window, a claim on the manual side
 	// node commits and moves the revision.
-	orig := beginDispatchPreCommit
-	beginDispatchPreCommit = func() {
-		beginDispatchPreCommit = orig
+	m.testHooks.beginDispatchPreCommit = func() {
+		m.testHooks.beginDispatchPreCommit = nil
 		side := activationByNode(mustLoadInstance(t, s, wf), "side")
 		if side == nil {
 			t.Error("side activation not found")
@@ -282,7 +281,6 @@ func TestBeginDispatchRevisionRaceMapsToStaleCandidate(t *testing.T) {
 		}
 		mustClaimWorkflow(t, m, wf, "side", side.ID, "manual-1")
 	}
-	defer func() { beginDispatchPreCommit = orig }()
 
 	_, err = m.BeginDispatch(BeginDispatchRequest{
 		WorkflowID:       wf,

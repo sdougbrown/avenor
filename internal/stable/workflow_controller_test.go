@@ -298,10 +298,9 @@ func TestControllerStatusSurfacesNextPollReadError(t *testing.T) {
 	}
 	corrupt := valid[:len(valid)/2]
 
-	controllerStatusPreNextPoll = func() {
+	sup.testHooks.controllerStatusPreNextPoll = func() {
 		_ = os.WriteFile(snapshot, corrupt, 0o600)
 	}
-	t.Cleanup(func() { controllerStatusPreNextPoll = nil })
 
 	st, err := sup.WorkflowControllerStatus("c1")
 	_ = os.WriteFile(snapshot, valid, 0o600)
