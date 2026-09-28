@@ -27,6 +27,9 @@ export function splitEscapes(resolved: string): { depth: number; path: string } 
 // Extension-less files (LICENSE, Makefile, …) need the filesystem to
 // distinguish them from directories; for paths that don't exist in the repo,
 // fall back to the extension heuristic and let CI's URL check flag the miss.
+// Classification probes the local working tree while the emitted URL targets
+// the default branch, so a file whose directory-ness differs between them
+// misclassifies until it merges; CI's HEAD check then catches the dead URL.
 function linkKind(repoPath: string): 'blob' | 'tree' {
   try {
     return statSync(join(REPO_ROOT, repoPath)).isDirectory() ? 'tree' : 'blob'
@@ -44,16 +47,17 @@ function linkKind(repoPath: string): 'blob' | 'tree' {
 export function escapedLinkUrl(relativePath: string, href: string): string | null {
   const resolved = normalize(join(dirname(relativePath), href))
   if (resolved !== '..' && !resolved.startsWith('../')) return null
-  const { depth, path } = splitEscapes(resolved)
+  // Strip the fragment before counting escapes, or a trailing fragment hides
+  // `..` components from splitEscapes (e.g. `../..#readme`).
+  const hash = resolved.indexOf('#')
+  const fragment = hash === -1 ? '' : resolved.slice(hash)
+  const { depth, path } = splitEscapes(hash === -1 ? resolved : resolved.slice(0, hash))
   if (depth > 1) {
     throw new Error(
       `[rewriteEscapedLinks] docs/${relativePath}: link "${href}" resolves to "${resolved}", which escapes the repository. ` +
         'Links may point inside docs/ (handled by VitePress) or one level up to the repo root.',
     )
   }
-  const hash = path.indexOf('#')
-  const clean = hash === -1 ? path : path.slice(0, hash)
-  const fragment = hash === -1 ? '' : path.slice(hash)
-  const suffix = clean ? `/${clean}` : ''
-  return `${GITHUB_BASE}/${linkKind(clean)}/${GITHUB_REF}${suffix}${fragment}`
+  const suffix = path ? `/${path}` : ''
+  return `${GITHUB_BASE}/${linkKind(path)}/${GITHUB_REF}${suffix}${fragment}`
 }
