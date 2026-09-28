@@ -397,7 +397,7 @@ For human gates, the deciding human does not have to be at the terminal: an
 external bridge can carry the question to Slack or any other transport and
 record the attributed answer through the ordinary gate command path. See
 [escalation.md](escalation.md) and the reference bridge in
-[`templates/escalation-bridge/`](https://github.com/sdougbrown/avenor/tree/main/templates/escalation-bridge).
+[`templates/escalation-bridge/`](../templates/escalation-bridge).
 
 The `workflow.gate` command records a decision with a closed operation enum:
 

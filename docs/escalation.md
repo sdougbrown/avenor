@@ -10,9 +10,9 @@ This page documents that remote-human recipe. Avenor ships no notification code
 and no transport integration; a bridge process (external to Avenor) watches for
 parked gates, carries the question to a human, and records the answer through the
 ordinary gate command path. The reference bridge in
-[`templates/escalation-bridge/`](https://github.com/sdougbrown/avenor/tree/main/templates/escalation-bridge) demonstrates the protocol with a stdlib-only Python 
+[`templates/escalation-bridge/`](../templates/escalation-bridge) demonstrates the protocol with a stdlib-only Python 
 implementation against a generic webhook, and
-[`packages/escalation-bridge/`](https://github.com/sdougbrown/avenor/tree/main/packages/escalation-bridge/) ships the same bridge as a TypeScript package on top of 
+[`packages/escalation-bridge/`](../packages/escalation-bridge) ships the same bridge as a TypeScript package on top of 
 `@dougbots/avenor-core` (the two derive identical `response_hash` values for the 
 same decision, for the string/integer/bool/null payloads the protocol calls for).
 
@@ -64,7 +64,7 @@ message alone.
 ### 3. Decide
 
 Record the decision through `workflow.command` with the `gate` op
-([request shape](https://github.com/sdougbrown/avenor/blob/main/internal/workflow/gate_handlers.go)):
+([request shape](../internal/workflow/gate_handlers.go)):
 
 ```json
 {"op":"gate","node_id":"merge-auth","gate_id":"merge-authorization",

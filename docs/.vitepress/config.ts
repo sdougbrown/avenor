@@ -1,4 +1,27 @@
-import { defineConfig } from 'vitepress'
+import { defineConfig, type MarkdownIt } from 'vitepress'
+import { escapedLinkUrl } from './escaped-links'
+
+// Links that escape the docs source root (e.g. `../templates/foo/README.md`)
+// are dead by construction — VitePress only serves pages under docs/. The
+// rewrite logic lives in escaped-links.ts; see that module for details.
+
+function rewriteEscapedLinks(md: MarkdownIt) {
+  md.core.ruler.after('inline', 'rewrite-escaped-links', (state) => {
+    const relativePath = state.env.relativePath as string | undefined
+    if (!relativePath) return false
+    for (const token of state.tokens) {
+      for (const child of token.children ?? []) {
+        if (child.type !== 'link_open') continue
+        const href = child.attrGet('href')
+        if (!href || !href.startsWith('../')) continue
+        const url = escapedLinkUrl(relativePath, href)
+        if (url === null) continue
+        child.attrSet('href', url)
+      }
+    }
+    return false
+  })
+}
 
 export default defineConfig({
   title: '🏇 Avenor',
@@ -8,6 +31,9 @@ export default defineConfig({
     ['link', { rel: 'icon', href: '/favicon.svg', type: 'image/svg+xml' }],
     ['link', { rel: 'apple-touch-icon', href: '/apple-touch-icon.png' }],
   ],
+  markdown: {
+    config: rewriteEscapedLinks,
+  },
   themeConfig: {
     appearance: 'dark',
     nav: [
