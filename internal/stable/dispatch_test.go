@@ -1085,3 +1085,121 @@ func TestDispatchPersistsRuntimeIdentityOnSnapshot(t *testing.T) {
 		t.Fatal("persisted attempt identity missing session id")
 	}
 }
+
+// TestDispatchStaleThroughRunnerDeps proves a stale expected revision is
+// translated to ResultStale through the runner deps and leaves no
+// admission reservation held.
+func TestDispatchStaleThroughRunnerDeps(t *testing.T) {
+	f := newDispatchFixture(t, "stale-deps", 4, 4, "")
+	deps := &stableRunnerDeps{s: f.sup, controllerID: "c1"}
+	dec := workflowcontroller.Decision{Candidate: workflowcontroller.Candidate{
+		Identity: workflow.ExecutionIdentity{
+			WorkflowID:   workflow.WorkflowID(f.wf),
+			NodeID:       "start",
+			ActivationID: workflow.ActivationID(f.activation),
+		},
+		ControllerID: "c1",
+		Revision:     f.revision + 1, // stale: the candidate was ready at f.revision
+	}}
+	res, err := deps.Dispatch(t.Context(), dec, workflowcontroller.LeaderLease{LeaseID: f.leaseID, OwnerEpoch: f.ownerEpoch})
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if res.Kind != workflowcontroller.ResultStale {
+		t.Fatalf("result kind = %s, want stale", res.Kind)
+	}
+	f.sup.controlMu.Lock()
+	outstanding := f.sup.outstandingReservations
+	f.sup.controlMu.Unlock()
+	if outstanding != 0 {
+		t.Fatalf("reservation leaked: outstanding = %d", outstanding)
+	}
+	if got := f.treeActive(t); got != 0 {
+		t.Fatalf("tree slots active = %d, want 0", got)
+	}
+}
+
+// TestDispatchKeyHeldThroughRunnerDeps proves a candidate whose
+// concurrency key is held by another live attempt is translated to
+// ResultKeyHeld through the runner deps and leaves no admission
+// reservation held.
+func TestDispatchKeyHeldThroughRunnerDeps(t *testing.T) {
+	f := newDispatchFixture(t, "keyheld-deps", 4, 4, "ck")
+	// A second workflow on the same template (and the same concurrency key).
+	out, err := f.mgr.WorkflowInstantiate(mustJSON(t, map[string]string{"template_id": "tmpl-dispatch-keyheld-deps", "template_version": "1"}))
+	if err != nil {
+		t.Fatalf("WorkflowInstantiate: %v", err)
+	}
+	wf2, ok := out.(map[string]any)["workflow_id"].(string)
+	if !ok || wf2 == "" {
+		t.Fatalf("instantiate result missing workflow_id: %#v", out)
+	}
+
+	// Hold the key: dispatch the first workflow and block its runtime.
+	if _, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil)); err != nil {
+		t.Fatalf("first dispatch: %v", err)
+	}
+	waitFor(t, "first runtime live", func() bool { return f.sup.activeRuntimeCount() == 1 })
+
+	// The second workflow's candidate is ready, but its key is held.
+	cands, err := f.mgr.CandidatesForController("c1", 10)
+	if err != nil {
+		t.Fatalf("candidates: %v", err)
+	}
+	var target *workflow.ReadyCandidate
+	for i := range cands {
+		if cands[i].Identity.WorkflowID == workflow.WorkflowID(wf2) {
+			target = &cands[i]
+		}
+	}
+	if target == nil {
+		t.Fatalf("candidate for %s not found: %v", wf2, cands)
+	}
+
+	deps := &stableRunnerDeps{s: f.sup, controllerID: "c1"}
+	dec := workflowcontroller.Decision{Candidate: workflowcontroller.Candidate{
+		Identity:       target.Identity,
+		ControllerID:   target.ControllerID,
+		Revision:       target.Revision,
+		ConcurrencyKey: target.ConcurrencyKey,
+	}}
+	res, err := deps.Dispatch(t.Context(), dec, workflowcontroller.LeaderLease{LeaseID: f.leaseID, OwnerEpoch: f.ownerEpoch})
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if res.Kind != workflowcontroller.ResultKeyHeld {
+		t.Fatalf("result kind = %s, want key_held", res.Kind)
+	}
+	f.sup.controlMu.Lock()
+	outstanding := f.sup.outstandingReservations
+	f.sup.controlMu.Unlock()
+	if outstanding != 0 {
+		t.Fatalf("reservation leaked: outstanding = %d", outstanding)
+	}
+	if got := f.treeActive(t); got != 1 {
+		t.Fatalf("tree slots active = %d, want 1 (only the key-holding runtime)", got)
+	}
+}
+
+// TestTranslateDispatchOutcome covers every DispatchOutcomeKind to
+// DispatchResultKind mapping, including the default case.
+func TestTranslateDispatchOutcome(t *testing.T) {
+	tests := []struct {
+		in   DispatchOutcomeKind
+		want workflowcontroller.DispatchResultKind
+	}{
+		{Dispatched, workflowcontroller.ResultDispatched},
+		{DispatchCapacityBlocked, workflowcontroller.ResultCapacityBlocked},
+		{DispatchStale, workflowcontroller.ResultStale},
+		{DispatchKeyHeld, workflowcontroller.ResultKeyHeld},
+		{DispatchNotLeader, workflowcontroller.ResultNotLeader},
+		{DispatchStartFailed, workflowcontroller.ResultStartFailed},
+		{DispatchCanceled, workflowcontroller.ResultCanceled},
+		{DispatchOutcomeKind("unknown_kind"), workflowcontroller.ResultCanceled},
+	}
+	for _, tt := range tests {
+		if got := translateDispatchOutcome(tt.in); got != tt.want {
+			t.Errorf("translateDispatchOutcome(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}

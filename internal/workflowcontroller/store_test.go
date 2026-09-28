@@ -346,6 +346,86 @@ func TestDisableReleasesLiveLease(t *testing.T) {
 	}
 }
 
+// TestDisableEnableClearsCapacityBlocked proves a recorded capacity block
+// does not survive a disable/enable round trip: both transitions clear the
+// record's CapacityBlocked, and replaying the event log into a fresh store
+// (no snapshot) reproduces the cleared state.
+func TestDisableEnableClearsCapacityBlocked(t *testing.T) {
+	root := t.TempDir()
+	s := NewStoreWithClock(root, time.Now)
+	mustEnable(t, s, mustCreate(t, s, "alpha", 1).ControllerID)
+
+	if _, _, err := s.RecordCapacityBlocked("alpha", "local", "local capacity exhausted"); err != nil {
+		t.Fatalf("record capacity blocked: %v", err)
+	}
+	// Capture the pre-disable snapshot so a fresh store can later be forced
+	// to rebuild the record by replaying the disable/enable events.
+	stale, err := os.ReadFile(s.snapshotPath("alpha"))
+	if err != nil {
+		t.Fatalf("read snapshot: %v", err)
+	}
+
+	if _, err := s.SetDesiredState("alpha", DesiredDisabled, "maintenance"); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	rec, ok, err := s.Get("alpha")
+	if err != nil || !ok {
+		t.Fatalf("get disabled record: ok=%v err=%v", ok, err)
+	}
+	if rec.CapacityBlocked != "" {
+		t.Fatalf("disabled record keeps capacity block %q, want empty", rec.CapacityBlocked)
+	}
+
+	mustEnable(t, s, "alpha")
+	rec, ok, err = s.Get("alpha")
+	if err != nil || !ok {
+		t.Fatalf("get re-enabled record: ok=%v err=%v", ok, err)
+	}
+	if rec.CapacityBlocked != "" {
+		t.Fatalf("re-enabled record keeps capacity block %q, want empty", rec.CapacityBlocked)
+	}
+
+	// Restore the pre-disable snapshot so a fresh store must rebuild the
+	// record by replaying the disable/enable events from the log; the
+	// replayed state must match.
+	if err := os.WriteFile(s.snapshotPath("alpha"), stale, 0o644); err != nil {
+		t.Fatalf("restore snapshot: %v", err)
+	}
+	replayed := NewStoreWithClock(root, time.Now)
+	rec2, ok, err := replayed.Get("alpha")
+	if err != nil || !ok {
+		t.Fatalf("get replayed record: ok=%v err=%v", ok, err)
+	}
+	if rec2.CapacityBlocked != "" {
+		t.Fatalf("replayed record keeps capacity block %q, want empty", rec2.CapacityBlocked)
+	}
+	if rec2.DesiredState != DesiredEnabled || rec2.DisabledReason != "" {
+		t.Fatalf("replayed desired state = %q reason = %q, want enabled with no reason", rec2.DesiredState, rec2.DisabledReason)
+	}
+}
+
+// TestClearCapacityBlockedNoopUnblocked proves ClearCapacityBlocked on a
+// record that is not capacity-blocked is a no-op: no error, changed is
+// false, and no event is appended.
+func TestClearCapacityBlockedNoopUnblocked(t *testing.T) {
+	s, _ := newTestStore(t)
+	mustCreate(t, s, "alpha", 10)
+
+	rec, changed, err := s.ClearCapacityBlocked("alpha")
+	if err != nil {
+		t.Fatalf("ClearCapacityBlocked: %v", err)
+	}
+	if changed {
+		t.Fatal("changed = true, want false for an unblocked record")
+	}
+	if rec.CapacityBlocked != "" {
+		t.Fatalf("record capacity block = %q, want empty", rec.CapacityBlocked)
+	}
+	if kinds := eventKinds(t, s, "alpha"); len(kinds) != 1 || kinds[0] != EventCreated {
+		t.Fatalf("event kinds = %v, want exactly [created] (no event appended)", kinds)
+	}
+}
+
 func TestRecoverExpiresLease(t *testing.T) {
 	s, clock := newTestStore(t)
 	mustEnable(t, s, mustCreate(t, s, "alpha", 1).ControllerID)
