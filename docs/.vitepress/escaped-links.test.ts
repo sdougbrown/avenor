@@ -34,6 +34,27 @@ describe('escapedLinkUrl', () => {
     )
   })
 
+  test('classifies extension-less files via the filesystem, not extname', () => {
+    expect(escapedLinkUrl('page.md', '../LICENSE')).toBe(
+      'https://github.com/sdougbrown/avenor/blob/main/LICENSE',
+    )
+  })
+
+  test('falls back to the extname heuristic for paths missing from the repo', () => {
+    expect(escapedLinkUrl('page.md', '../templates/not-a-real-dir')).toBe(
+      'https://github.com/sdougbrown/avenor/tree/main/templates/not-a-real-dir',
+    )
+    expect(escapedLinkUrl('page.md', '../templates/not-a-real-file.txt')).toBe(
+      'https://github.com/sdougbrown/avenor/blob/main/templates/not-a-real-file.txt',
+    )
+  })
+
+  test('strips anchors before classifying and re-appends them', () => {
+    expect(escapedLinkUrl('page.md', '../templates/escalation-bridge#readme')).toBe(
+      'https://github.com/sdougbrown/avenor/tree/main/templates/escalation-bridge#readme',
+    )
+  })
+
   test('resolves against the page directory', () => {
     expect(escapedLinkUrl('sub/page.md', '../../templates/foo')).toBe(
       'https://github.com/sdougbrown/avenor/tree/main/templates/foo',

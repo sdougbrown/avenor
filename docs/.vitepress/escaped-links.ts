@@ -1,7 +1,12 @@
+import { statSync } from 'node:fs'
 import { dirname, extname, join, normalize } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 export const GITHUB_BASE = 'https://github.com/sdougbrown/avenor'
 export const GITHUB_REF = 'main'
+
+// docs/.vitepress/ sits two levels below the repository root.
+const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url))
 
 export function splitEscapes(resolved: string): { depth: number; path: string } {
   let rest = resolved
@@ -17,6 +22,17 @@ export function splitEscapes(resolved: string): { depth: number; path: string } 
     rest = ''
   }
   return { depth, path: rest.replace(/\/$/, '') }
+}
+
+// Extension-less files (LICENSE, Makefile, …) need the filesystem to
+// distinguish them from directories; for paths that don't exist in the repo,
+// fall back to the extension heuristic and let CI's URL check flag the miss.
+function linkKind(repoPath: string): 'blob' | 'tree' {
+  try {
+    return statSync(join(REPO_ROOT, repoPath)).isDirectory() ? 'tree' : 'blob'
+  } catch {
+    return extname(repoPath) ? 'blob' : 'tree'
+  }
 }
 
 // Resolve a markdown link against its page's docs-relative path. Returns the
@@ -35,7 +51,9 @@ export function escapedLinkUrl(relativePath: string, href: string): string | nul
         'Links may point inside docs/ (handled by VitePress) or one level up to the repo root.',
     )
   }
-  const kind = extname(path) ? 'blob' : 'tree'
-  const suffix = path ? `/${path}` : ''
-  return `${GITHUB_BASE}/${kind}/${GITHUB_REF}${suffix}`
+  const hash = path.indexOf('#')
+  const clean = hash === -1 ? path : path.slice(0, hash)
+  const fragment = hash === -1 ? '' : path.slice(hash)
+  const suffix = clean ? `/${clean}` : ''
+  return `${GITHUB_BASE}/${linkKind(clean)}/${GITHUB_REF}${suffix}${fragment}`
 }

@@ -80,9 +80,11 @@ jobs:
       - name: Check GitHub links resolve
         run: |
           set -euo pipefail
+          # `|| true` keeps a no-match grep from tripping pipefail before
+          # the empty-result guard below can produce its diagnostic.
           urls="$(grep -rohE 'href="https://github\.com/sdougbrown/avenor/(blob|tree)/main/[^"#]*' docs/.vitepress/dist \
             | sed -E 's/^href="//; s/#.*$//' \
-            | sort -u)"
+            | sort -u)" || true
           if [ -z "$urls" ]; then
             echo "no rewritten GitHub URLs found in docs build output" >&2
             exit 1
