@@ -12,6 +12,8 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/sdougbrown/avenor/internal/durablefile"
 )
 
 // newStore builds an ephemeral store under a fresh temp directory.
@@ -105,6 +107,20 @@ func TestStore_InstantiatePersists(t *testing.T) {
 	}
 	if e.Kind != EventInstantiated {
 		t.Fatalf("event kind = %q, want %q", e.Kind, EventInstantiated)
+	}
+}
+
+// TestCommitObserverPanicIsolation proves that a panicking commit observer is
+// isolated from the command path: the command still commits and the panic
+// does not propagate past ApplyCommand.
+func TestCommitObserverPanicIsolation(t *testing.T) {
+	s := newStore(t)
+	s.SetCommitObserver(func(wf WorkflowID, snap Snapshot) {
+		panic("observer must not break the command path")
+	})
+	snap := mustInstantiate(t, s, "wf1")
+	if snap.Instance.Revision != 1 {
+		t.Fatalf("command did not commit: revision = %d, want 1", snap.Instance.Revision)
 	}
 }
 
@@ -366,9 +382,9 @@ func TestStore_LockContentionSerializes(t *testing.T) {
 	snap := mustInstantiate(t, s, wf)
 
 	// Hold the instance lock manually outside ApplyCommand.
-	unlock, err := lockFile(s.lockPath(wf))
+	unlock, err := durablefile.Lock(s.lockPath(wf))
 	if err != nil {
-		t.Fatalf("lockFile: %v", err)
+		t.Fatalf("lock: %v", err)
 	}
 
 	type claimResult struct {

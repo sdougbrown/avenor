@@ -42,7 +42,7 @@ func runWorkflowTo(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if len(rest) == 0 {
-		fmt.Fprintln(stderr, "avenor workflow: command required (create, instantiate, status, wait, inspect, events, complete, gate, skip, unblock)")
+		fmt.Fprintln(stderr, "avenor workflow: command required (create, instantiate, status, wait, inspect, events, complete, gate, skip, unblock, controller, ready)")
 		return 1
 	}
 
@@ -76,6 +76,10 @@ func runWorkflowTo(args []string, stdout, stderr io.Writer) int {
 		return cmdWorkflowSkip(c, subArgs, stdout, stderr)
 	case "unblock":
 		return cmdWorkflowUnblock(c, subArgs, stdout, stderr)
+	case "controller":
+		return cmdWorkflowController(c, subArgs, stdout, stderr)
+	case "ready":
+		return cmdWorkflowReady(c, subArgs, stdout, stderr)
 	default:
 		fmt.Fprintln(stderr, "avenor workflow: unknown command", sub)
 		return 1

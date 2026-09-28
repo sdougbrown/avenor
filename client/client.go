@@ -543,6 +543,56 @@ func (c *Client) WorkflowUnblock(workflowID string, fields map[string]any) (map[
 	return c.workflowCommand(workflowID, "unblock", fields)
 }
 
+// WorkflowControllerCreate registers a workflow-controller given as raw JSON.
+func (c *Client) WorkflowControllerCreate(request json.RawMessage) (map[string]any, error) {
+	var result map[string]any
+	err := c.Call("workflow.controller.create", request, &result)
+	return result, err
+}
+
+// WorkflowControllerEnable enables a workflow-controller.
+func (c *Client) WorkflowControllerEnable(controllerID string) (map[string]any, error) {
+	var result map[string]any
+	err := c.Call("workflow.controller.enable", map[string]string{"controller_id": controllerID}, &result)
+	return result, err
+}
+
+// WorkflowControllerDisable disables a workflow-controller with a reason.
+func (c *Client) WorkflowControllerDisable(controllerID, reason string) (map[string]any, error) {
+	var result map[string]any
+	err := c.Call("workflow.controller.disable", map[string]string{
+		"controller_id": controllerID,
+		"reason":        reason,
+	}, &result)
+	return result, err
+}
+
+// WorkflowControllerStatus returns the status for a workflow-controller.
+func (c *Client) WorkflowControllerStatus(controllerID string) (map[string]any, error) {
+	var result map[string]any
+	err := c.Call("workflow.controller.status", map[string]string{"controller_id": controllerID}, &result)
+	return result, err
+}
+
+// WorkflowControllerList lists all workflow-controllers.
+func (c *Client) WorkflowControllerList() (map[string]any, error) {
+	var result map[string]any
+	err := c.Call("workflow.controller.list", nil, &result)
+	return result, err
+}
+
+// WorkflowReady reports readiness for a workflow-controller. A limit <= 0
+// omits the field so the server applies its default.
+func (c *Client) WorkflowReady(controllerID string, limit int) (map[string]any, error) {
+	params := map[string]any{"controller_id": controllerID}
+	if limit > 0 {
+		params["limit"] = limit
+	}
+	var result map[string]any
+	err := c.Call("workflow.ready", params, &result)
+	return result, err
+}
+
 // SendToParent sends a message from a child runtime to its parent.
 func (c *Client) SendToParent(runtimeID, message string) error {
 	if runtimeID == "" {
