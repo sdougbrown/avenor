@@ -136,6 +136,15 @@ func TestEvaluateAutoCompletionFilesContract(t *testing.T) {
 	if _, err := EvaluateAutoCompletion(tmpl, node, dir, ""); err == nil || !strings.Contains(err.Error(), "does not exist") {
 		t.Fatalf("missing artifact error = %v, want missing rejection", err)
 	}
+	if err := os.Mkdir(filepath.Join(dir, "result.md"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "result.md", "inner"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EvaluateAutoCompletion(tmpl, node, dir, ""); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("directory artifact error = %v, want non-regular rejection", err)
+	}
 }
 
 func TestEvaluateAutoCompletionFilesContractSHA256(t *testing.T) {

@@ -164,6 +164,9 @@ func evalFilesContract(requirements []ArtifactRequirement, workingDir string) ([
 		if err != nil {
 			return nil, fmt.Errorf("completion artifact %q does not exist in the working directory", req.Path)
 		}
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("completion artifact %q is not a regular file", req.Path)
+		}
 		if req.NonEmpty && info.Size() == 0 {
 			return nil, fmt.Errorf("completion artifact %q is empty", req.Path)
 		}
