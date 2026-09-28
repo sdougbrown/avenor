@@ -15,6 +15,12 @@ function splitEscapes(resolved: string): { depth: number; path: string } {
     rest = rest.slice(3)
     depth++
   }
+  if (rest === '..') {
+    // A bare trailing `..` has no trailing slash for the loop to consume,
+    // but still escapes one more level.
+    depth++
+    rest = ''
+  }
   return { depth, path: rest.replace(/\/$/, '') }
 }
 
