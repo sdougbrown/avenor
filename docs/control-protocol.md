@@ -386,7 +386,7 @@ The `workflow.controller.create`, `workflow.controller.enable`, `workflow.contro
 | Method | Params | Purpose |
 |------|------|---------|
 | `workflow.create` | template JSON | Register a versioned template. |
-| `workflow.instantiate` | `{template_id, template_version, metadata?}` | Create an instance. |
+| `workflow.instantiate` | `{template_id, template_version, params?, metadata?}` | Create an instance. `params` must satisfy the template's declared `params`. |
 | `workflow.status` | `{workflow_id}` | Snapshot summary. |
 | `workflow.wait` | `{workflow_id, timeout_ms?}` | Block until terminal or timeout (default 5000ms). |
 | `workflow.inspect` | `{workflow_id}` | Full instance detail. |

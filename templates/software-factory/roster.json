@@ -1,0 +1,9 @@
+{
+  "assessor": { "backend": "codex-app-server", "agent": "factory-assessor", "model": "glm-5.3" },
+  "planner": { "backend": "codex-app-server", "agent": "factory-planner", "model": "glm-5.3" },
+  "hardener": { "backend": "codex-app-server", "agent": "factory-hardener", "model": "glm-5.3" },
+  "executor": { "backend": "codex-app-server", "agent": "factory-executor", "model": "glm-5.3" },
+  "reviewer": { "backend": "pi", "agent": "factory-reviewer", "model": "claude-opus" },
+  "publisher": { "backend": "pi", "agent": "factory-publisher", "model": "claude-opus" },
+  "reconciler": { "backend": "pi", "agent": "factory-reconciler", "model": "claude-opus" }
+}

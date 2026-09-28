@@ -3,6 +3,7 @@ package workflow
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -22,6 +23,15 @@ type Template struct {
 	DefaultLease      *LeasePolicy            `json:"default_lease_policy,omitempty"`
 	DefaultRetry      *RetryPolicy            `json:"default_retry_policy,omitempty"`
 	CompositionLimits *CompositionLimits      `json:"composition_limits,omitempty"`
+	Params            []TemplateParam         `json:"params,omitempty"`
+}
+
+// TemplateParam declares one instance parameter a template accepts at
+// instantiation. Only string parameters exist.
+type TemplateParam struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Required bool   `json:"required,omitempty"`
 }
 
 // MarshalJSON guarantees that emitted templates satisfy the strict wire syntax.
@@ -118,6 +128,12 @@ type DispatchPolicy struct {
 	ControllerID   string       `json:"controller_id,omitempty"`
 	Priority       *int         `json:"priority,omitempty"`
 	ConcurrencyKey string       `json:"concurrency_key,omitempty"`
+	// ConcurrencyKeyParams is the templated concurrency-key form: the key is
+	// resolved from an instance parameter at activation creation and frozen
+	// onto the activation's ConcurrencyKey as a plain string. It is never
+	// serialized directly; MarshalJSON/UnmarshalJSON translate between the
+	// string and object wire forms of dispatch.concurrency_key.
+	ConcurrencyKeyParams *ConcurrencyKeyTemplate `json:"-"`
 	// SuccessOutcome names the declared branch an auto external node follows
 	// once every required external gate has passed. It is declared only on
 	// external nodes and required exactly when such a node is auto.
@@ -128,6 +144,80 @@ type DispatchPolicy struct {
 	// template. It is never declared in template JSON; the manager stamps it
 	// when resolving the node's policy.
 	ActionKind ActionKind `json:"action_kind,omitempty"`
+}
+
+// ConcurrencyKeyTemplate is the object form of dispatch.concurrency_key: the
+// effective key is the optional prefix followed by the named instance
+// parameter's recorded value.
+type ConcurrencyKeyTemplate struct {
+	Prefix            string `json:"prefix,omitempty"`
+	FromInstanceParam string `json:"from_instance_param,omitempty"`
+}
+
+// MarshalJSON emits concurrency_key in its current form: the object form
+// while the key is still templated, the plain string form once resolved
+// (activations always carry the resolved string).
+func (d DispatchPolicy) MarshalJSON() ([]byte, error) {
+	var concurrencyKey json.RawMessage
+	if d.ConcurrencyKeyParams != nil {
+		encoded, err := json.Marshal(d.ConcurrencyKeyParams)
+		if err != nil {
+			return nil, err
+		}
+		concurrencyKey = encoded
+	} else if d.ConcurrencyKey != "" {
+		encoded, err := json.Marshal(d.ConcurrencyKey)
+		if err != nil {
+			return nil, err
+		}
+		concurrencyKey = encoded
+	}
+	return json.Marshal(struct {
+		Mode           DispatchMode    `json:"mode,omitempty"`
+		ControllerID   string          `json:"controller_id,omitempty"`
+		Priority       *int            `json:"priority,omitempty"`
+		ConcurrencyKey json.RawMessage `json:"concurrency_key,omitempty"`
+		SuccessOutcome OutcomeName     `json:"success_outcome,omitempty"`
+		ActionKind     ActionKind      `json:"action_kind,omitempty"`
+	}{
+		Mode:           d.Mode,
+		ControllerID:   d.ControllerID,
+		Priority:       d.Priority,
+		ConcurrencyKey: concurrencyKey,
+		SuccessOutcome: d.SuccessOutcome,
+		ActionKind:     d.ActionKind,
+	})
+}
+
+// UnmarshalJSON accepts both declared wire forms of concurrency_key: a plain
+// string or the {prefix, from_instance_param} object.
+func (d *DispatchPolicy) UnmarshalJSON(data []byte) error {
+	type dispatchWire DispatchPolicy
+	var wire struct {
+		dispatchWire
+		ConcurrencyKey json.RawMessage `json:"concurrency_key,omitempty"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	*d = DispatchPolicy(wire.dispatchWire)
+	if len(wire.ConcurrencyKey) == 0 {
+		return nil
+	}
+	var key string
+	if err := json.Unmarshal(wire.ConcurrencyKey, &key); err == nil {
+		if key == "" {
+			return errors.New("dispatch.concurrency_key cannot be blank")
+		}
+		d.ConcurrencyKey = key
+		return nil
+	}
+	var spec ConcurrencyKeyTemplate
+	if err := json.Unmarshal(wire.ConcurrencyKey, &spec); err != nil {
+		return fmt.Errorf("dispatch.concurrency_key must be a string or a {prefix, from_instance_param} object: %w", err)
+	}
+	d.ConcurrencyKeyParams = &spec
+	return nil
 }
 
 // effective resolves the policy with its defaults applied: manual mode and
@@ -148,6 +238,7 @@ func (d *DispatchPolicy) effective() DispatchPolicy {
 		out.Priority = &p
 	}
 	out.ConcurrencyKey = d.ConcurrencyKey
+	out.ConcurrencyKeyParams = d.ConcurrencyKeyParams
 	out.SuccessOutcome = d.SuccessOutcome
 	out.ActionKind = d.ActionKind
 	return out
@@ -223,7 +314,17 @@ type WorkflowAction struct {
 	ChildKey        string                      `json:"child_key"`
 	InputBindings   []InputBinding              `json:"input_bindings,omitempty"`
 	OutputBindings  []OutputBinding             `json:"output_bindings,omitempty"`
+	Params          []ChildParamBinding         `json:"params,omitempty"`
 	OutcomeMap      map[OutcomeName]OutcomeName `json:"outcome_map"`
+}
+
+// ChildParamBinding passes one instance parameter to a composed child
+// workflow explicitly: either a literal value or the named parameter of the
+// parent instance. There is no implicit inheritance.
+type ChildParamBinding struct {
+	Param             string `json:"param"`
+	Value             string `json:"value,omitempty"`
+	FromInstanceParam string `json:"from_instance_param,omitempty"`
 }
 
 type InputBinding struct {
@@ -626,6 +727,10 @@ type WorkflowInstance struct {
 	Gates           []GateInstance   `json:"gates,omitempty"`
 	Outputs         []OutputValue    `json:"outputs,omitempty"`
 	Children        []ChildReference `json:"children,omitempty"`
+	// Params are the instance parameters supplied at instantiation. They are
+	// immutable facts of the instance: the concurrency-key resolution reads
+	// them, nothing writes them after instantiation.
+	Params map[string]string `json:"params,omitempty"`
 }
 
 type Activation struct {

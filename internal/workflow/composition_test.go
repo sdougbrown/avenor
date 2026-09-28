@@ -557,7 +557,7 @@ func TestCompositionChildCreationIsIdempotent(t *testing.T) {
 	if len(comp.Children) != 1 {
 		t.Fatalf("replay manifest children = %d, want 1", len(comp.Children))
 	}
-	childID, err := m.ensureChildInstance(comp.Children[0], nil)
+	childID, err := m.ensureChildInstance(comp.Children[0], nil, nil)
 	if err != nil {
 		t.Fatalf("replayed ensureChildInstance: %v", err)
 	}
@@ -606,10 +606,10 @@ func TestCompositionPartialFailureLeavesOrphans(t *testing.T) {
 		{NodeID: "spawn1", ChildWorkflowID: DeriveChildWorkflowID(parent, "spawn1", "c1"), Template: broken},
 	}
 
-	if _, err := m.ensureChildInstance(children[0], nil); err != nil {
+	if _, err := m.ensureChildInstance(children[0], nil, nil); err != nil {
 		t.Fatalf("first child: %v", err)
 	}
-	if _, err := m.ensureChildInstance(children[1], nil); err == nil {
+	if _, err := m.ensureChildInstance(children[1], nil, nil); err == nil {
 		t.Fatal("second child materialized, want failure on unresolvable pinned grandchild")
 	} else if !strings.Contains(err.Error(), "pinned child template never-stored@1 not found") {
 		t.Fatalf("error = %v, want pinned-version rejection", err)
@@ -1498,5 +1498,191 @@ func TestResumeAwaitingChildrenIsIdempotent(t *testing.T) {
 	}
 	if n := countInstances(t, s); n != 2 {
 		t.Fatalf("instance count = %d, want 2 (no duplicate children)", n)
+	}
+}
+
+// TestCompositionRejectsUnboundRequiredChildParam pins the template-validation
+// rejection: a parent whose workflow action composes a child that declares a
+// required param the action does not bind is rejected.
+func TestCompositionRejectsUnboundRequiredChildParam(t *testing.T) {
+	child := compositionLeaf(t, "child")
+	child.Params = []TemplateParam{{ID: "worktree", Type: "string", Required: true}}
+
+	// The parent composes the child but does not bind "worktree".
+	parent := Template{
+		TemplateID:       "parent",
+		TemplateVersion:  "1",
+		EntryNodes:       []NodeID{"spawn"},
+		Nodes:            []NodeDefinition{compositionWorkflowNode("spawn", "child", "c1")},
+		TerminalOutcomes: []OutcomeName{"done"},
+	}
+	templates := map[string]Template{"child@1": child}
+	_, _, err := BuildComposition("wf_parent", parent, memoryResolver(templates))
+	if err == nil {
+		t.Fatal("BuildComposition accepted a parent that does not bind a required child param")
+	}
+	if !strings.Contains(err.Error(), "does not bind required child param") {
+		t.Fatalf("error = %v, want unbound required child param", err)
+	}
+
+	// Binding the required child param is accepted.
+	node := compositionWorkflowNode("spawn", "child", "c1")
+	node.Action.Workflow.Params = []ChildParamBinding{{Param: "worktree", Value: "avenor-issue-130"}}
+	parent = Template{
+		TemplateID:       "parent",
+		TemplateVersion:  "1",
+		EntryNodes:       []NodeID{"spawn"},
+		Nodes:            []NodeDefinition{node},
+		TerminalOutcomes: []OutcomeName{"done"},
+	}
+	if _, _, err := BuildComposition("wf_parent", parent, memoryResolver(templates)); err != nil {
+		t.Fatalf("BuildComposition rejected a bound required child param: %v", err)
+	}
+}
+
+// TestCompositionInstantiateRejectsInvalidChildParamValue pins the
+// instantiation-time rejection: a child whose bound value is invalid fails the
+// composing command with no child (or parent) instance created.
+func TestCompositionInstantiateRejectsInvalidChildParamValue(t *testing.T) {
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	m := NewManager(s)
+	child := compositionLeaf(t, "comp-child")
+	child.Params = []TemplateParam{{ID: "worktree", Type: "string", Required: true}}
+	node := compositionWorkflowNode("spawn", "comp-child", "c1")
+	node.Action.Workflow.Params = []ChildParamBinding{{Param: "worktree", Value: strings.Repeat("x", 257)}}
+	parent := Template{
+		SchemaVersion:    1,
+		TemplateID:       "comp-parent",
+		TemplateVersion:  "1",
+		EntryNodes:       []NodeID{"spawn"},
+		Nodes:            []NodeDefinition{node},
+		TerminalOutcomes: []OutcomeName{"done"},
+	}
+	for _, template := range []Template{child, parent} {
+		if err := s.StoreTemplate(template.TemplateID, template.TemplateVersion, template); err != nil {
+			t.Fatalf("StoreTemplate %s: %v", template.TemplateID, err)
+		}
+	}
+	payload, _ := json.Marshal(map[string]string{"template_id": "comp-parent", "template_version": "1"})
+	if _, err := m.WorkflowInstantiate(payload); err == nil || !strings.Contains(err.Error(), "256") {
+		t.Fatalf("WorkflowInstantiate with invalid child param value = %v, want 256-char rejection", err)
+	}
+	if n := countInstances(t, s); n != 0 {
+		t.Fatalf("instantiate rejection created %d instances, want 0", n)
+	}
+}
+
+// TestCompositionInstantiateFreezesChildTemplatedKey pins that a correctly
+// bound child freezes its templated concurrency key from the bound value.
+func TestCompositionInstantiateFreezesChildTemplatedKey(t *testing.T) {
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	m := NewManager(s)
+	child := compositionLeaf(t, "comp-child")
+	child.Nodes[0].Action = Action{Kind: ActionRun, Run: &RunAction{Prompt: "do the thing"}}
+	child.Params = []TemplateParam{{ID: "worktree", Type: "string", Required: true}}
+	child.Nodes[0].Dispatch = &DispatchPolicy{
+		Mode:                 DispatchAuto,
+		ControllerID:         "c1",
+		ConcurrencyKeyParams: &ConcurrencyKeyTemplate{Prefix: "worktree:", FromInstanceParam: "worktree"},
+	}
+	node := compositionWorkflowNode("spawn", "comp-child", "c1")
+	node.Action.Workflow.Params = []ChildParamBinding{{Param: "worktree", Value: "avenor-issue-130"}}
+	parent := Template{
+		SchemaVersion:    1,
+		TemplateID:       "comp-parent",
+		TemplateVersion:  "1",
+		EntryNodes:       []NodeID{"spawn"},
+		Nodes:            []NodeDefinition{node},
+		TerminalOutcomes: []OutcomeName{"done"},
+	}
+	for _, template := range []Template{child, parent} {
+		if err := s.StoreTemplate(template.TemplateID, template.TemplateVersion, template); err != nil {
+			t.Fatalf("StoreTemplate %s: %v", template.TemplateID, err)
+		}
+	}
+	payload, _ := json.Marshal(map[string]string{"template_id": "comp-parent", "template_version": "1"})
+	out, err := m.WorkflowInstantiate(payload)
+	if err != nil {
+		t.Fatalf("WorkflowInstantiate: %v", err)
+	}
+	parentID := out.(map[string]any)["workflow_id"].(string)
+	childID := string(DeriveChildWorkflowID(WorkflowID(parentID), "spawn", "c1"))
+	insp, err := m.WorkflowInspect(childID)
+	if err != nil {
+		t.Fatalf("WorkflowInspect child: %v", err)
+	}
+	inst := insp.(map[string]any)["instance"].(WorkflowInstance)
+	if len(inst.Activations) != 1 || inst.Activations[0].Dispatch == nil {
+		t.Fatalf("child has no dispatched activation: %+v", inst.Activations)
+	}
+	if got := inst.Activations[0].Dispatch.ConcurrencyKey; got != "worktree:avenor-issue-130" {
+		t.Fatalf("child concurrency key = %q, want worktree:avenor-issue-130", got)
+	}
+}
+
+// TestCompositionInstantiateFreezesChildFromInstanceParam pins that a
+// from_instance_param child binding resolves against the parent instance's
+// recorded params, that the child records the resolved value, and that a
+// templated child concurrency key freezes from that value.
+func TestCompositionInstantiateFreezesChildFromInstanceParam(t *testing.T) {
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	m := NewManager(s)
+	child := compositionLeaf(t, "comp-child")
+	child.Nodes[0].Action = Action{Kind: ActionRun, Run: &RunAction{Prompt: "do the thing"}}
+	child.Params = []TemplateParam{{ID: "worktree", Type: "string", Required: true}}
+	child.Nodes[0].Dispatch = &DispatchPolicy{
+		Mode:                 DispatchAuto,
+		ControllerID:         "c1",
+		ConcurrencyKeyParams: &ConcurrencyKeyTemplate{Prefix: "worktree:", FromInstanceParam: "worktree"},
+	}
+	node := compositionWorkflowNode("spawn", "comp-child", "c1")
+	node.Action.Workflow.Params = []ChildParamBinding{{Param: "worktree", FromInstanceParam: "worktree"}}
+	parent := Template{
+		SchemaVersion:    1,
+		TemplateID:       "comp-parent",
+		TemplateVersion:  "1",
+		EntryNodes:       []NodeID{"spawn"},
+		Nodes:            []NodeDefinition{node},
+		TerminalOutcomes: []OutcomeName{"done"},
+		Params:           []TemplateParam{{ID: "worktree", Type: "string", Required: true}},
+	}
+	for _, template := range []Template{child, parent} {
+		if err := s.StoreTemplate(template.TemplateID, template.TemplateVersion, template); err != nil {
+			t.Fatalf("StoreTemplate %s: %v", template.TemplateID, err)
+		}
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"template_id":      "comp-parent",
+		"template_version": "1",
+		"params":           map[string]string{"worktree": "avenor-issue-777"},
+	})
+	out, err := m.WorkflowInstantiate(payload)
+	if err != nil {
+		t.Fatalf("WorkflowInstantiate: %v", err)
+	}
+	parentID := out.(map[string]any)["workflow_id"].(string)
+	childID := string(DeriveChildWorkflowID(WorkflowID(parentID), "spawn", "c1"))
+	insp, err := m.WorkflowInspect(childID)
+	if err != nil {
+		t.Fatalf("WorkflowInspect child: %v", err)
+	}
+	inst := insp.(map[string]any)["instance"].(WorkflowInstance)
+	if got := inst.Params["worktree"]; got != "avenor-issue-777" {
+		t.Fatalf("child params[worktree] = %q, want avenor-issue-777", got)
+	}
+	if len(inst.Activations) != 1 || inst.Activations[0].Dispatch == nil {
+		t.Fatalf("child has no dispatched activation: %+v", inst.Activations)
+	}
+	if got := inst.Activations[0].Dispatch.ConcurrencyKey; got != "worktree:avenor-issue-777" {
+		t.Fatalf("child concurrency key = %q, want worktree:avenor-issue-777", got)
 	}
 }

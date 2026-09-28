@@ -378,8 +378,33 @@ If you spawn a runtime with `--backend opencode-http` and no `--server-url`, the
 
 This is convenient for interactive development — you don't have to manually start an OpenCode server, and the supervisor manages its lifecycle.
 
+## Workflow Controller (Optional)
+
+Stable can run an optional in-process workflow controller: a reconciler that
+keeps opted-in provider-backed workflow activations moving without an agent
+or human claiming every ready node. Nodes opt in with a declared `dispatch`
+policy in their workflow template; everything else is unaffected. The
+controller's desired state, leader lease, and external-gate poll cursors
+persist under the workflow root, so a replacement supervisor resumes without
+coordinator memory.
+
+```sh
+# Ad-hoc: instantiate work, then let one controller drive the declared nodes.
+avenor workflow controller create --socket /path/to/socket \
+  --request-file templates/software-factory/fixtures/controller.json
+avenor workflow controller enable --socket /path/to/socket software-factory
+avenor workflow ready --socket /path/to/socket software-factory --limit 10
+avenor workflow controller status --socket /path/to/socket software-factory
+```
+
+See [the workflow controller example](workflow-controller.md) for the full
+walkthrough: registering adapters, inspecting decisions, the human
+checkpoints the controller never touches, and recovery on a fresh
+supervisor.
+
 ## Cross-References
 
+- [Workflow Controller Example](workflow-controller.md) — end-to-end optional-controller walkthrough
 - [Control Protocol](control-protocol.md) — JSON-RPC 2.0 protocol reference for all commands
 - [Phase Loop](loop.md) — loop config file format and phase lifecycle
 - [Backends](backends.md) — backend selection, capabilities, and configuration

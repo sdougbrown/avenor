@@ -1,0 +1,12 @@
+{
+  "template_id": "software-factory-work",
+  "template_version": "1.2.0",
+  "params": {
+    "worktree": "avenor-issue-115"
+  },
+  "metadata": {
+    "issue": "115",
+    "title": "Harden the candidate index rebuild path",
+    "base_sha": "6e77a0d"
+  }
+}

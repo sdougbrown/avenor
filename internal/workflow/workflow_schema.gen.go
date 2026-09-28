@@ -202,6 +202,7 @@ func DecodeWorkflowProfile(data []byte) (WorkflowProfileFields, error) {
 		EntryNodes:         &structural.EntryNodes,
 		Metadata:           structural.Metadata,
 		Nodes:              &structural.Nodes,
+		Params:             structural.Params,
 		SchemaVersion:      &structural.SchemaVersion,
 		TemplateId:         &structural.TemplateId,
 		TemplateVersion:    &structural.TemplateVersion,
@@ -243,6 +244,7 @@ func svalidateWorkflowProfile(raw json.RawMessage, path, schemaPath string, issu
 		"entry_nodes":          true,
 		"metadata":             true,
 		"nodes":                true,
+		"params":               true,
 		"schema_version":       true,
 		"template_id":          true,
 		"template_version":     true,
@@ -357,6 +359,30 @@ func svalidateWorkflowProfile(raw json.RawMessage, path, schemaPath string, issu
 					fspath := espath
 					if WorkflowProfileStructuralKind(r) == "object" {
 						svalidateWorkflowProfileNode(r, fpath, fspath, issues)
+					} else {
+						*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
+					}
+				}
+			}
+		}
+	}
+	if r, ok := m["params"]; ok {
+		fpath := path + "/" + escapePtr("params")
+		fspath := schemaPath + "/properties/" + escapePtr("params")
+		if WorkflowProfileStructuralKind(r) != "array" {
+			*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
+		} else {
+			var arr []json.RawMessage
+			_ = json.Unmarshal(r, &arr)
+			for i, el := range arr {
+				epath := fpath + "/" + strconv.Itoa(i)
+				espath := fspath + "/items"
+				{
+					r := el
+					fpath := epath
+					fspath := espath
+					if WorkflowProfileStructuralKind(r) == "object" {
+						svalidateWorkflowProfileTemplateParam(r, fpath, fspath, issues)
 					} else {
 						*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
 					}
@@ -595,6 +621,7 @@ func svalidateWorkflowProfileAction(raw json.RawMessage, path, schemaPath string
 			"input_bindings":   true,
 			"outcome_map":      true,
 			"output_bindings":  true,
+			"params":           true,
 			"template_id":      true,
 			"template_version": true,
 			"type":             true,
@@ -666,6 +693,30 @@ func svalidateWorkflowProfileAction(raw json.RawMessage, path, schemaPath string
 						fspath := espath
 						if WorkflowProfileStructuralKind(r) == "object" {
 							svalidateWorkflowProfileOutputBinding(r, fpath, fspath, issues)
+						} else {
+							*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
+						}
+					}
+				}
+			}
+		}
+		if r, ok := m["params"]; ok {
+			fpath := path + "/" + escapePtr("params")
+			fspath := schemaPath + "/properties/" + escapePtr("params")
+			if WorkflowProfileStructuralKind(r) != "array" {
+				*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
+			} else {
+				var arr []json.RawMessage
+				_ = json.Unmarshal(r, &arr)
+				for i, el := range arr {
+					epath := fpath + "/" + strconv.Itoa(i)
+					espath := fspath + "/items"
+					{
+						r := el
+						fpath := epath
+						fspath := espath
+						if WorkflowProfileStructuralKind(r) == "object" {
+							svalidateWorkflowProfileChildParamBinding(r, fpath, fspath, issues)
 						} else {
 							*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
 						}
@@ -1115,6 +1166,68 @@ func svalidateWorkflowProfileCheckpoint(raw json.RawMessage, path, schemaPath st
 		fspath := schemaPath + "/properties/" + escapePtr("requires_release")
 		switch WorkflowProfileStructuralKind(r) {
 		case "boolean":
+		default:
+			*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
+		}
+	}
+}
+
+func svalidateWorkflowProfileChildParamBinding(raw json.RawMessage, path, schemaPath string, issues *[]WorkflowProfileStructuralIssue) {
+	if WorkflowProfileStructuralKind(raw) != "object" {
+		*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", path, schemaPath))
+		return
+	}
+	var m map[string]json.RawMessage
+	_ = json.Unmarshal(raw, &m)
+	if _, ok := m["param"]; !ok {
+		*issues = append(*issues, WorkflowProfileStructuralIssueAt("required", path+"/"+escapePtr("param"), schemaPath))
+	}
+	allowed := map[string]bool{
+		"from_instance_param": true,
+		"param":               true,
+		"value":               true,
+	}
+	for key := range m {
+		if allowed[key] {
+			continue
+		}
+		*issues = append(*issues, WorkflowProfileStructuralIssueAt("additionalProperties", path+"/"+escapePtr(key), schemaPath))
+	}
+	if r, ok := m["from_instance_param"]; ok {
+		fpath := path + "/" + escapePtr("from_instance_param")
+		fspath := schemaPath + "/properties/" + escapePtr("from_instance_param")
+		switch WorkflowProfileStructuralKind(r) {
+		case "string":
+			var sv string
+			_ = json.Unmarshal(r, &sv)
+			if utf8.RuneCountInString(sv) < 1 {
+				*issues = append(*issues, WorkflowProfileStructuralIssueAt("minLength", fpath, fspath))
+			}
+		default:
+			*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
+		}
+	}
+	if r, ok := m["param"]; ok {
+		fpath := path + "/" + escapePtr("param")
+		fspath := schemaPath + "/properties/" + escapePtr("param")
+		switch WorkflowProfileStructuralKind(r) {
+		case "string":
+			var sv string
+			_ = json.Unmarshal(r, &sv)
+			if utf8.RuneCountInString(sv) < 1 {
+				*issues = append(*issues, WorkflowProfileStructuralIssueAt("minLength", fpath, fspath))
+			}
+		default:
+			*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
+		}
+	}
+	if r, ok := m["value"]; ok {
+		fpath := path + "/" + escapePtr("value")
+		fspath := schemaPath + "/properties/" + escapePtr("value")
+		switch WorkflowProfileStructuralKind(r) {
+		case "string":
+			var sv string
+			_ = json.Unmarshal(r, &sv)
 		default:
 			*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
 		}
@@ -2321,6 +2434,67 @@ func svalidateWorkflowProfileTemplateOutputRef(raw json.RawMessage, path, schema
 	}
 }
 
+func svalidateWorkflowProfileTemplateParam(raw json.RawMessage, path, schemaPath string, issues *[]WorkflowProfileStructuralIssue) {
+	if WorkflowProfileStructuralKind(raw) != "object" {
+		*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", path, schemaPath))
+		return
+	}
+	var m map[string]json.RawMessage
+	_ = json.Unmarshal(raw, &m)
+	if _, ok := m["id"]; !ok {
+		*issues = append(*issues, WorkflowProfileStructuralIssueAt("required", path+"/"+escapePtr("id"), schemaPath))
+	}
+	if _, ok := m["type"]; !ok {
+		*issues = append(*issues, WorkflowProfileStructuralIssueAt("required", path+"/"+escapePtr("type"), schemaPath))
+	}
+	allowed := map[string]bool{
+		"id":       true,
+		"required": true,
+		"type":     true,
+	}
+	for key := range m {
+		if allowed[key] {
+			continue
+		}
+		*issues = append(*issues, WorkflowProfileStructuralIssueAt("additionalProperties", path+"/"+escapePtr(key), schemaPath))
+	}
+	if r, ok := m["id"]; ok {
+		fpath := path + "/" + escapePtr("id")
+		fspath := schemaPath + "/properties/" + escapePtr("id")
+		switch WorkflowProfileStructuralKind(r) {
+		case "string":
+			var sv string
+			_ = json.Unmarshal(r, &sv)
+			if utf8.RuneCountInString(sv) < 1 {
+				*issues = append(*issues, WorkflowProfileStructuralIssueAt("minLength", fpath, fspath))
+			}
+		default:
+			*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
+		}
+	}
+	if r, ok := m["required"]; ok {
+		fpath := path + "/" + escapePtr("required")
+		fspath := schemaPath + "/properties/" + escapePtr("required")
+		switch WorkflowProfileStructuralKind(r) {
+		case "boolean":
+		default:
+			*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
+		}
+	}
+	if r, ok := m["type"]; ok {
+		fpath := path + "/" + escapePtr("type")
+		fspath := schemaPath + "/properties/" + escapePtr("type")
+		svalidateWorkflowProfileTemplateParamTypeValue(r, fpath, fspath, issues)
+		switch WorkflowProfileStructuralKind(r) {
+		case "string":
+			var sv string
+			_ = json.Unmarshal(r, &sv)
+		default:
+			*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
+		}
+	}
+}
+
 func svalidateWorkflowProfileActionWorkflowOutcomeMap(raw json.RawMessage, path, schemaPath string, issues *[]WorkflowProfileStructuralIssue) {
 	if WorkflowProfileStructuralKind(raw) != "object" {
 		*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", path, schemaPath))
@@ -2435,6 +2609,20 @@ func svalidateWorkflowProfileNodeBranches(raw json.RawMessage, path, schemaPath 
 	}
 }
 
+func svalidateWorkflowProfileTemplateParamTypeValue(raw json.RawMessage, path, schemaPath string, issues *[]WorkflowProfileStructuralIssue) {
+	if WorkflowProfileStructuralKind(raw) != "string" {
+		*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", path, schemaPath))
+		return
+	}
+	var value string
+	_ = json.Unmarshal(raw, &value)
+	switch value {
+	case "string":
+	default:
+		*issues = append(*issues, WorkflowProfileStructuralIssueAt("enum", path, schemaPath))
+	}
+}
+
 func svalidateWorkflowProfileMetadata(raw json.RawMessage, path, schemaPath string, issues *[]WorkflowProfileStructuralIssue) {
 	if WorkflowProfileStructuralKind(raw) != "object" {
 		*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", path, schemaPath))
@@ -2459,6 +2647,7 @@ type WorkflowProfile struct {
 	EntryNodes         []string                          "json:\"entry_nodes\""
 	Metadata           *WorkflowProfileMetadata          "json:\"metadata,omitempty\""
 	Nodes              []WorkflowProfileNode             "json:\"nodes\""
+	Params             *[]WorkflowProfileTemplateParam   "json:\"params,omitempty\""
 	SchemaVersion      int64                             "json:\"schema_version\""
 	TemplateId         string                            "json:\"template_id\""
 	TemplateVersion    string                            "json:\"template_version\""
@@ -2482,6 +2671,7 @@ func (v *WorkflowProfile) UnmarshalJSON(data []byte) error {
 		case "entry_nodes":
 		case "metadata":
 		case "nodes":
+		case "params":
 		case "schema_version":
 		case "template_id":
 		case "template_version":
@@ -2523,6 +2713,11 @@ func (v *WorkflowProfile) UnmarshalJSON(data []byte) error {
 	if r, ok := raw["nodes"]; ok {
 		if len(r) == 4 && string(r) == "null" {
 			return fmt.Errorf("field \"nodes\" must not be null")
+		}
+	}
+	if r, ok := raw["params"]; ok {
+		if len(r) == 4 && string(r) == "null" {
+			return fmt.Errorf("field \"params\" must not be null")
 		}
 	}
 	if r, ok := raw["schema_version"]; ok {
@@ -2610,12 +2805,19 @@ func (v *WorkflowProfile) UnmarshalJSON(data []byte) error {
 			return err
 		}
 	}
+	if encoded, ok := raw["params"]; ok {
+		var decoded5 []WorkflowProfileTemplateParam
+		if err := json.Unmarshal(encoded, &decoded5); err != nil {
+			return err
+		}
+		next.Params = &decoded5
+	}
 	if encoded, ok := raw["schema_version"]; ok {
-		integer5, integral, safe := WorkflowProfileStructuralIntParts(encoded)
+		integer6, integral, safe := WorkflowProfileStructuralIntParts(encoded)
 		if !integral || !safe {
 			return fmt.Errorf("integer value is not a safe mathematical integer")
 		}
-		next.SchemaVersion = int64(integer5)
+		next.SchemaVersion = int64(integer6)
 	}
 	if encoded, ok := raw["template_id"]; ok {
 		if err := json.Unmarshal(encoded, &next.TemplateId); err != nil {
@@ -2674,6 +2876,11 @@ func (v WorkflowProfile) validate(path string, issues *[]Issue) {
 	}
 	for i, it := range v.Nodes {
 		it.validate(path+"/"+escapePtr("nodes")+"/"+strconv.Itoa(i), issues)
+	}
+	if v.Params != nil {
+		for i, it := range *v.Params {
+			it.validate(path+"/"+escapePtr("params")+"/"+strconv.Itoa(i), issues)
+		}
 	}
 	if v.SchemaVersion != 1 {
 		*issues = append(*issues, Issue{Code: "const", Path: path + "/" + escapePtr("schema_version")})
@@ -2794,6 +3001,11 @@ func (v WorkflowProfileActionValueWorkflow) validate(path string, issues *[]Issu
 			it.validate(path+"/"+escapePtr("output_bindings")+"/"+strconv.Itoa(i), issues)
 		}
 	}
+	if v.Params != nil {
+		for i, it := range *v.Params {
+			it.validate(path+"/"+escapePtr("params")+"/"+strconv.Itoa(i), issues)
+		}
+	}
 	if v.TemplateId != nil {
 	}
 	if v.TemplateVersion != nil {
@@ -2848,6 +3060,19 @@ func (v WorkflowProfileCheckpoint) validate(path string, issues *[]Issue) {
 	if v.ExitOutcomes != nil {
 	}
 	if v.RequiresRelease != nil {
+	}
+}
+
+func (v WorkflowProfileChildParamBinding) validate(path string, issues *[]Issue) {
+	if v.FromInstanceParam != nil {
+		if utf8.RuneCountInString(*v.FromInstanceParam) < 1 {
+			*issues = append(*issues, Issue{Code: "minLength", Path: path + "/" + escapePtr("from_instance_param")})
+		}
+	}
+	if utf8.RuneCountInString(v.Param) < 1 {
+		*issues = append(*issues, Issue{Code: "minLength", Path: path + "/" + escapePtr("param")})
+	}
+	if v.Value != nil {
 	}
 }
 
@@ -3037,6 +3262,19 @@ func (v WorkflowProfileSubjectOutputRef) validate(path string, issues *[]Issue) 
 func (v WorkflowProfileTemplateOutputRef) validate(path string, issues *[]Issue) {
 }
 
+func (v WorkflowProfileTemplateParam) validate(path string, issues *[]Issue) {
+	if utf8.RuneCountInString(v.Id) < 1 {
+		*issues = append(*issues, Issue{Code: "minLength", Path: path + "/" + escapePtr("id")})
+	}
+	if v.Required != nil {
+	}
+	switch v.Type {
+	case WorkflowProfileTemplateParamTypeValueString:
+	default:
+		*issues = append(*issues, Issue{Code: "enum", Path: path + "/" + escapePtr("type")})
+	}
+}
+
 func (v WorkflowProfileActionWorkflowOutcomeMap) validate(path string, issues *[]Issue) {
 }
 
@@ -3071,6 +3309,12 @@ type WorkflowProfileDispatchModeValue string
 const (
 	WorkflowProfileDispatchModeValueManual WorkflowProfileDispatchModeValue = "manual"
 	WorkflowProfileDispatchModeValueAuto   WorkflowProfileDispatchModeValue = "auto"
+)
+
+type WorkflowProfileTemplateParamTypeValue string
+
+const (
+	WorkflowProfileTemplateParamTypeValueString WorkflowProfileTemplateParamTypeValue = "string"
 )
 
 type WorkflowProfileArtifactRequirement struct {
@@ -3489,6 +3733,72 @@ func (v *WorkflowProfileCheckpoint) UnmarshalJSON(data []byte) error {
 		next.RequiresRelease = &decoded1
 	}
 	*v = WorkflowProfileCheckpoint(next)
+	return nil
+}
+
+type WorkflowProfileChildParamBinding struct {
+	FromInstanceParam *string "json:\"from_instance_param,omitempty\""
+	Param             string  "json:\"param\""
+	Value             *string "json:\"value,omitempty\""
+}
+
+func (v *WorkflowProfileChildParamBinding) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if raw == nil {
+		return fmt.Errorf("expected object, got null")
+	}
+	for key := range raw {
+		switch key {
+		case "from_instance_param":
+		case "param":
+		case "value":
+		default:
+			return fmt.Errorf("unknown field %q", key)
+		}
+	}
+	if r, ok := raw["from_instance_param"]; ok {
+		if len(r) == 4 && string(r) == "null" {
+			return fmt.Errorf("field \"from_instance_param\" must not be null")
+		}
+	}
+	if r, ok := raw["param"]; ok {
+		if len(r) == 4 && string(r) == "null" {
+			return fmt.Errorf("field \"param\" must not be null")
+		}
+	}
+	if r, ok := raw["value"]; ok {
+		if len(r) == 4 && string(r) == "null" {
+			return fmt.Errorf("field \"value\" must not be null")
+		}
+	}
+	if _, ok := raw["param"]; !ok {
+		return fmt.Errorf("missing required field \"param\"")
+	}
+	type alias WorkflowProfileChildParamBinding
+	var next alias
+	if encoded, ok := raw["from_instance_param"]; ok {
+		var decoded0 string
+		if err := json.Unmarshal(encoded, &decoded0); err != nil {
+			return err
+		}
+		next.FromInstanceParam = &decoded0
+	}
+	if encoded, ok := raw["param"]; ok {
+		if err := json.Unmarshal(encoded, &next.Param); err != nil {
+			return err
+		}
+	}
+	if encoded, ok := raw["value"]; ok {
+		var decoded1 string
+		if err := json.Unmarshal(encoded, &decoded1); err != nil {
+			return err
+		}
+		next.Value = &decoded1
+	}
+	*v = WorkflowProfileChildParamBinding(next)
 	return nil
 }
 
@@ -4769,6 +5079,73 @@ func (v *WorkflowProfileTemplateOutputRef) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+type WorkflowProfileTemplateParam struct {
+	Id       string                                "json:\"id\""
+	Required *bool                                 "json:\"required,omitempty\""
+	Type     WorkflowProfileTemplateParamTypeValue "json:\"type\""
+}
+
+func (v *WorkflowProfileTemplateParam) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if raw == nil {
+		return fmt.Errorf("expected object, got null")
+	}
+	for key := range raw {
+		switch key {
+		case "id":
+		case "required":
+		case "type":
+		default:
+			return fmt.Errorf("unknown field %q", key)
+		}
+	}
+	if r, ok := raw["id"]; ok {
+		if len(r) == 4 && string(r) == "null" {
+			return fmt.Errorf("field \"id\" must not be null")
+		}
+	}
+	if r, ok := raw["required"]; ok {
+		if len(r) == 4 && string(r) == "null" {
+			return fmt.Errorf("field \"required\" must not be null")
+		}
+	}
+	if r, ok := raw["type"]; ok {
+		if len(r) == 4 && string(r) == "null" {
+			return fmt.Errorf("field \"type\" must not be null")
+		}
+	}
+	if _, ok := raw["id"]; !ok {
+		return fmt.Errorf("missing required field \"id\"")
+	}
+	if _, ok := raw["type"]; !ok {
+		return fmt.Errorf("missing required field \"type\"")
+	}
+	type alias WorkflowProfileTemplateParam
+	var next alias
+	if encoded, ok := raw["id"]; ok {
+		if err := json.Unmarshal(encoded, &next.Id); err != nil {
+			return err
+		}
+	}
+	if encoded, ok := raw["required"]; ok {
+		var decoded0 bool
+		if err := json.Unmarshal(encoded, &decoded0); err != nil {
+			return err
+		}
+		next.Required = &decoded0
+	}
+	if encoded, ok := raw["type"]; ok {
+		if err := json.Unmarshal(encoded, &next.Type); err != nil {
+			return err
+		}
+	}
+	*v = WorkflowProfileTemplateParam(next)
+	return nil
+}
+
 type WorkflowProfileActionWorkflowOutcomeMap struct {
 }
 
@@ -5217,6 +5594,7 @@ type WorkflowProfileActionValueWorkflow struct {
 	InputBindings   *[]WorkflowProfileInputBinding           "json:\"input_bindings,omitempty\""
 	OutcomeMap      *WorkflowProfileActionWorkflowOutcomeMap "json:\"outcome_map,omitempty\""
 	OutputBindings  *[]WorkflowProfileOutputBinding          "json:\"output_bindings,omitempty\""
+	Params          *[]WorkflowProfileChildParamBinding      "json:\"params,omitempty\""
 	TemplateId      *string                                  "json:\"template_id,omitempty\""
 	TemplateVersion *string                                  "json:\"template_version,omitempty\""
 	Type            WorkflowProfileActionKind                "json:\"type\""
@@ -5238,6 +5616,7 @@ func (v *WorkflowProfileActionValueWorkflow) UnmarshalJSON(data []byte) error {
 		case "input_bindings":
 		case "outcome_map":
 		case "output_bindings":
+		case "params":
 		case "template_id":
 		case "template_version":
 		case "type":
@@ -5263,6 +5642,11 @@ func (v *WorkflowProfileActionValueWorkflow) UnmarshalJSON(data []byte) error {
 	if r, ok := raw["output_bindings"]; ok {
 		if len(r) == 4 && string(r) == "null" {
 			return fmt.Errorf("field \"output_bindings\" must not be null")
+		}
+	}
+	if r, ok := raw["params"]; ok {
+		if len(r) == 4 && string(r) == "null" {
+			return fmt.Errorf("field \"params\" must not be null")
 		}
 	}
 	if r, ok := raw["template_id"]; ok {
@@ -5313,19 +5697,26 @@ func (v *WorkflowProfileActionValueWorkflow) UnmarshalJSON(data []byte) error {
 		}
 		next.OutputBindings = &decoded3
 	}
-	if encoded, ok := raw["template_id"]; ok {
-		var decoded4 string
+	if encoded, ok := raw["params"]; ok {
+		var decoded4 []WorkflowProfileChildParamBinding
 		if err := json.Unmarshal(encoded, &decoded4); err != nil {
 			return err
 		}
-		next.TemplateId = &decoded4
+		next.Params = &decoded4
 	}
-	if encoded, ok := raw["template_version"]; ok {
+	if encoded, ok := raw["template_id"]; ok {
 		var decoded5 string
 		if err := json.Unmarshal(encoded, &decoded5); err != nil {
 			return err
 		}
-		next.TemplateVersion = &decoded5
+		next.TemplateId = &decoded5
+	}
+	if encoded, ok := raw["template_version"]; ok {
+		var decoded6 string
+		if err := json.Unmarshal(encoded, &decoded6); err != nil {
+			return err
+		}
+		next.TemplateVersion = &decoded6
 	}
 	if encoded, ok := raw["type"]; ok {
 		if err := json.Unmarshal(encoded, &next.Type); err != nil {
@@ -5447,6 +5838,7 @@ type WorkflowProfileFields struct {
 	EntryNodes         *[]string                         "json:\"entry_nodes,omitempty\""
 	Metadata           *WorkflowProfileMetadata          "json:\"metadata,omitempty\""
 	Nodes              *[]WorkflowProfileNode            "json:\"nodes,omitempty\""
+	Params             *[]WorkflowProfileTemplateParam   "json:\"params,omitempty\""
 	SchemaVersion      *int64                            "json:\"schema_version,omitempty\""
 	TemplateId         *string                           "json:\"template_id,omitempty\""
 	TemplateVersion    *string                           "json:\"template_version,omitempty\""
@@ -5466,6 +5858,7 @@ type WorkflowProfileAvailability struct {
 	EntryNodes         FieldStatus
 	Metadata           FieldStatus
 	Nodes              FieldStatus
+	Params             FieldStatus
 	SchemaVersion      FieldStatus
 	TemplateId         FieldStatus
 	TemplateVersion    FieldStatus
@@ -5511,6 +5904,8 @@ func Check(f WorkflowProfileFields, c WorkflowProfileConditions, prev WorkflowPr
 	MetadataSatisfied := f.Metadata != nil
 	NodesEnabled := true
 	NodesSatisfied := func() bool { v := f.Nodes; return v != nil && len(*v) > 0 }()
+	ParamsEnabled := true
+	ParamsSatisfied := func() bool { v := f.Params; return v != nil && len(*v) > 0 }()
 	SchemaVersionEnabled := true
 	SchemaVersionSatisfied := f.SchemaVersion != nil
 	TemplateIdEnabled := true
@@ -5675,6 +6070,28 @@ func Check(f WorkflowProfileFields, c WorkflowProfileConditions, prev WorkflowPr
 			Valid: nil,
 			Error: "",
 		},
+		Params: FieldStatus{
+			Required:  ParamsEnabled && false,
+			Enabled:   ParamsEnabled,
+			Satisfied: ParamsSatisfied,
+			Fair:      true,
+			Reason: func() *string {
+				var reasons []string
+				if len(reasons) == 0 {
+					return nil
+				}
+				return &reasons[0]
+			}(),
+			Reasons: func() []string {
+				var reasons []string
+				if reasons == nil {
+					reasons = []string{}
+				}
+				return reasons
+			}(),
+			Valid: nil,
+			Error: "",
+		},
 		SchemaVersion: FieldStatus{
 			Required:  SchemaVersionEnabled && true,
 			Enabled:   SchemaVersionEnabled,
@@ -5791,6 +6208,9 @@ func depSatisfied(f WorkflowProfileFields, name string) bool {
 		return f.Metadata != nil
 	case "Nodes":
 		v := f.Nodes
+		return v != nil && len(*v) > 0
+	case "Params":
+		v := f.Params
 		return v != nil && len(*v) > 0
 	case "SchemaVersion":
 		return f.SchemaVersion != nil
@@ -5971,6 +6391,12 @@ func Challenge(fieldName string, f WorkflowProfileFields, c WorkflowProfileCondi
 	case "Nodes", "nodes":
 		found = true
 		status = avail.Nodes
+		if status.Reason != nil {
+			explanations = append(explanations, "* "+*status.Reason)
+		}
+	case "Params", "params":
+		found = true
+		status = avail.Params
 		if status.Reason != nil {
 			explanations = append(explanations, "* "+*status.Reason)
 		}
