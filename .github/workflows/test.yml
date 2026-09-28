@@ -56,6 +56,23 @@ jobs:
       - name: Test escalation bridge
         run: python3 -m unittest discover -s templates/escalation-bridge -v
 
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install
+
+      # VitePress fails the build on dead links, so this doubles as the
+      # docs link check.
+      - name: Build docs
+        run: bun run --cwd docs build
+
   js:
     runs-on: ubuntu-latest
     steps:

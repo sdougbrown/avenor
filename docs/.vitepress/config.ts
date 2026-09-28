@@ -1,4 +1,33 @@
-import { defineConfig } from 'vitepress'
+import { dirname, extname, join, normalize } from 'node:path'
+import { defineConfig, type MarkdownIt } from 'vitepress'
+
+// Links that escape the docs source root (e.g. `../templates/foo/README.md`)
+// are dead by construction — VitePress only serves pages under docs/. Rewrite
+// them to GitHub URLs on the default branch: files get /blob/, extension-less
+// paths (directories) get /tree/.
+const GITHUB_BASE = 'https://github.com/sdougbrown/avenor'
+const GITHUB_REF = 'main'
+
+function rewriteEscapedLinks(md: MarkdownIt) {
+  md.core.ruler.after('inline', 'rewrite-escaped-links', (state) => {
+    const relativePath = state.env.relativePath as string | undefined
+    if (!relativePath) return false
+    const dir = dirname(relativePath)
+    for (const token of state.tokens) {
+      for (const child of token.children ?? []) {
+        if (child.type !== 'link_open') continue
+        const href = child.attrGet('href')
+        if (!href || !href.startsWith('../')) continue
+        const resolved = normalize(join(dir, href))
+        if (!resolved.startsWith('../')) continue // stays inside docs/ — leave for VitePress
+        const repoPath = resolved.replace(/^(\.\.\/)+/, '').replace(/\/$/, '')
+        const kind = extname(repoPath) ? 'blob' : 'tree'
+        child.attrSet('href', `${GITHUB_BASE}/${kind}/${GITHUB_REF}/${repoPath}`)
+      }
+    }
+    return false
+  })
+}
 
 export default defineConfig({
   title: '🏇 Avenor',
@@ -8,6 +37,9 @@ export default defineConfig({
     ['link', { rel: 'icon', href: '/favicon.svg', type: 'image/svg+xml' }],
     ['link', { rel: 'apple-touch-icon', href: '/apple-touch-icon.png' }],
   ],
+  markdown: {
+    config: rewriteEscapedLinks,
+  },
   themeConfig: {
     appearance: 'dark',
     nav: [
