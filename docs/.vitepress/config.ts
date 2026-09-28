@@ -35,7 +35,8 @@ function rewriteEscapedLinks(md: MarkdownIt) {
         const href = child.attrGet('href')
         if (!href || !href.startsWith('../')) continue
         const resolved = normalize(join(dir, href))
-        if (!resolved.startsWith('../')) continue // stays inside docs/ — leave for VitePress
+        // `..` (the repo root) is not "inside docs/" either — rewrite it too.
+        if (resolved !== '..' && !resolved.startsWith('../')) continue
         // docs/ sits directly at the repo root, so a resolvable link escapes
         // by exactly one level; more means it points outside the repository.
         const { depth, path } = splitEscapes(resolved)
