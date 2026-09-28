@@ -77,6 +77,7 @@ func collectExpiredLeaseEvents(snap *Snapshot, reason string, now time.Time) []E
 			continue
 		}
 		if a.ActiveLease != nil && now.After(a.ActiveLease.ExpiresAt) {
+			stamp := now.UTC()
 			events = append(events, Event{
 				ID:       NewEventID(),
 				Kind:     EventLeaseExpired,
@@ -88,6 +89,7 @@ func collectExpiredLeaseEvents(snap *Snapshot, reason string, now time.Time) []E
 					ActivationID: a.ID,
 				},
 				LeaseID: a.ActiveLease.ID,
+				ReadyAt: &stamp,
 			})
 		}
 	}

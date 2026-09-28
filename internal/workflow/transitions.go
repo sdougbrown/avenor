@@ -7,6 +7,39 @@ import (
 	"time"
 )
 
+// commandReadyAt projects the command's stamped readiness timestamp onto an
+// event; commands that never touched claimability leave it nil.
+func commandReadyAt(command Command) *time.Time {
+	if command.ReadyAt.IsZero() {
+		return nil
+	}
+	stamp := command.ReadyAt
+	return &stamp
+}
+
+// copyReadyAt records the event's explicit readiness timestamp on the
+// activation. Replay is deterministic because the reducer only copies the
+// event's timestamp and never calls the wall clock for this field.
+func copyReadyAt(act *Activation, event Event) {
+	if act == nil || event.ReadyAt == nil {
+		return
+	}
+	stamp := *event.ReadyAt
+	act.ReadyAt = &stamp
+}
+
+// applyDispatchPolicy copies the node's effective dispatch policy onto a
+// freshly created activation when it resolves to auto; manual nodes leave
+// Dispatch nil, which is how legacy snapshots read as manual.
+func applyDispatchPolicy(next *Snapshot, act *Activation, nodeID NodeID) {
+	if act == nil {
+		return
+	}
+	if policy := dispatchPolicyFor(next, nodeID); policy != nil && policy.IsAuto() {
+		act.Dispatch = policy
+	}
+}
+
 // buildCommandEvents projects a command into its event batch. Every emitted
 // event is stamped with a fresh ID, the command's identity/idempotency/ID, and
 // a workflow-local sequence that continues from the snapshot revision. Most
@@ -14,6 +47,7 @@ import (
 // an EventTransition that advances the run to the declared branch target.
 func buildCommandEvents(state Snapshot, command Command) ([]Event, error) {
 	seq := state.Instance.Revision
+	readyAt := commandReadyAt(command)
 	newEvent := func(kind EventKind) Event {
 		seq++
 		return Event{
@@ -23,6 +57,7 @@ func buildCommandEvents(state Snapshot, command Command) ([]Event, error) {
 			CommandID:      command.ID,
 			IdempotencyKey: command.IdempotencyKey,
 			Identity:       command.Identity,
+			ReadyAt:        readyAt,
 		}
 	}
 
@@ -251,14 +286,17 @@ func applyEvent(next *Snapshot, event Event) error {
 			return errors.New("transition event requires a target node")
 		}
 		now := nowUTC()
-		next.Instance.Activations = append(next.Instance.Activations, Activation{
+		created := Activation{
 			ID:              NewActivationID(),
 			NodeID:          event.Transition.TargetNodeID,
 			IncomingOutcome: event.Transition.Outcome,
 			Status:          ActivationPending,
 			CreatedAt:       now,
 			UpdatedAt:       now,
-		})
+		}
+		copyReadyAt(&created, event)
+		applyDispatchPolicy(next, &created, event.Transition.TargetNodeID)
+		next.Instance.Activations = append(next.Instance.Activations, created)
 	default:
 		return fmt.Errorf("unsupported event kind %q", event.Kind)
 	}
@@ -333,13 +371,16 @@ func applyInstantiated(next *Snapshot, event Event) error {
 	// instance record so replay reconstructs it without re-derivation.
 	next.Instance.Children = append(next.Instance.Children, rec.Children...)
 	for _, nodeID := range rec.EntryNodes {
-		next.Instance.Activations = append(next.Instance.Activations, Activation{
+		created := Activation{
 			ID:        NewActivationID(),
 			NodeID:    nodeID,
 			Status:    ActivationPending,
 			CreatedAt: now,
 			UpdatedAt: now,
-		})
+		}
+		copyReadyAt(&created, event)
+		applyDispatchPolicy(next, &created, nodeID)
+		next.Instance.Activations = append(next.Instance.Activations, created)
 	}
 	return nil
 }
@@ -355,7 +396,7 @@ func applyLeased(next *Snapshot, act *Activation, event Event) error {
 	if event.LeaseID == "" {
 		return errors.New("leased event requires a lease id")
 	}
-	if act.Status != ActivationPending && act.Status != ActivationReady && act.Status != ActivationLeaseExpired {
+	if !claimableActivationStatus(act.Status) {
 		return fmt.Errorf("cannot lease activation in status %q", act.Status)
 	}
 	if act.ActiveLease != nil && act.ActiveLease.ID != event.LeaseID {
@@ -467,6 +508,7 @@ func applyAttemptTerminated(next *Snapshot, act *Activation, event Event) error 
 		// Re-arm the same activation for a new attempt; the stale lease was
 		// already released above so the new attempt is freshly claimed.
 		act.Status = ActivationReady
+		copyReadyAt(act, event)
 		return nil
 	}
 	exhaustion := RetryExhaustionBlock
@@ -770,6 +812,7 @@ func applyUnblocked(act *Activation, event Event) error {
 		return fmt.Errorf("cannot unblock activation in status %q", act.Status)
 	}
 	act.Status = ActivationReady
+	copyReadyAt(act, event)
 	act.UpdatedAt = nowUTC()
 	return nil
 }
@@ -779,7 +822,7 @@ func applyUnblocked(act *Activation, event Event) error {
 // is required.
 func applyRerouted(next *Snapshot, event Event) {
 	now := nowUTC()
-	next.Instance.Activations = append(next.Instance.Activations, Activation{
+	created := Activation{
 		ID:        NewActivationID(),
 		NodeID:    event.Identity.NodeID,
 		Iteration: event.Iteration,
@@ -787,7 +830,10 @@ func applyRerouted(next *Snapshot, event Event) {
 		Selection: event.Selection,
 		CreatedAt: now,
 		UpdatedAt: now,
-	})
+	}
+	copyReadyAt(&created, event)
+	applyDispatchPolicy(next, &created, event.Identity.NodeID)
+	next.Instance.Activations = append(next.Instance.Activations, created)
 }
 
 // applyHeartbeat requires a live lease and records the heartbeat. When the
@@ -831,6 +877,7 @@ func applyLeaseExpired(act *Activation, event Event) error {
 	}
 	act.Status = ActivationLeaseExpired
 	act.ActiveLease = nil
+	copyReadyAt(act, event)
 	act.UpdatedAt = nowUTC()
 	return nil
 }
@@ -863,6 +910,32 @@ var retryResolve func(templateID TemplateID, templateVersion TemplateVersion, no
 // behavior when unset.
 func SetRetryPolicyResolver(fn func(templateID TemplateID, templateVersion TemplateVersion, nodeID NodeID) *RetryPolicy) {
 	retryResolve = fn
+}
+
+// dispatchResolve is the optional template-aware dispatch-policy lookup
+// installed by the workflow manager, mirroring the retry resolver. Without it
+// (or without a template) every activation reads as manual.
+var dispatchResolve func(templateID TemplateID, templateVersion TemplateVersion, nodeID NodeID) *DispatchPolicy
+
+// SetDispatchPolicyResolver wires the template-aware dispatch policy lookup
+// used when activations are created. It is owned by the manager (which can
+// resolve the instance's versioned template).
+func SetDispatchPolicyResolver(fn func(templateID TemplateID, templateVersion TemplateVersion, nodeID NodeID) *DispatchPolicy) {
+	dispatchResolve = fn
+}
+
+// dispatchPolicyFor returns the node's effective dispatch policy as resolved
+// by the manager, or nil when no resolver/template is available (manual).
+func dispatchPolicyFor(next *Snapshot, nodeID NodeID) *DispatchPolicy {
+	if dispatchResolve == nil {
+		return nil
+	}
+	policy := dispatchResolve(next.Instance.TemplateID, next.Instance.TemplateVersion, nodeID)
+	if policy == nil {
+		return nil
+	}
+	effective := policy.effective()
+	return &effective
 }
 
 // retryPolicyFor returns the node's retry policy as resolved by the store, or

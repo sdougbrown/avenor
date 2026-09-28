@@ -124,6 +124,9 @@
           "lease_policy": {
             "$ref": "#/$defs/lease_policy"
           },
+          "dispatch": {
+            "$ref": "#/$defs/dispatch"
+          },
           "skip_rule": {
             "$ref": "#/$defs/authority_rule"
           },
@@ -316,6 +319,29 @@
           "checkpoint_node_id",
           "maximum_iterations"
         ],
+        "additionalProperties": false
+      },
+      "dispatch": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": ["manual", "auto"]
+          },
+          "controller_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "concurrency_key": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
         "additionalProperties": false
       },
       "lease_policy": {

@@ -1,5 +1,7 @@
 package workflow
 
+import "time"
+
 // EventKind names a workflow-store event. Workflow events are workflow-local
 // and distinct from runtime session events (internal/events).
 type EventKind string
@@ -63,4 +65,8 @@ type Event struct {
 	Instantiated *InstanceRecord     `json:"instantiated,omitempty"`
 	LeaseTargets []NodeID            `json:"lease_targets,omitempty"`
 	Lease        *Lease              `json:"lease,omitempty"`
+	// ReadyAt is the explicit timestamp of a transition into a claimable
+	// state, stamped by the command boundary and copied onto the activation
+	// during replay so the reducer never calls the wall clock.
+	ReadyAt *time.Time `json:"ready_at,omitempty"`
 }
