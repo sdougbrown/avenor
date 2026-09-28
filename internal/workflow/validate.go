@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 )
@@ -128,16 +130,17 @@ func isJSONArrayIndex(s string) bool {
 // typed structural checks. Stage 3 adds graph- and context-dependent rules.
 func ValidateTemplate(template Template) error {
 	fields := WorkflowProfileFields{
-		// Only required, presence-driven fields are projected; the five optional
-		// fields (metadata, bounded_loops, lease/retry policies, composition
-		// limits) carry no Umpire validators, so their status is trivially
-		// available and typed Go governs their content.
+		// Only required, presence-driven fields are projected; the optional
+		// fields (metadata, bounded_loops, lease/retry policies, working
+		// directory, composition limits) carry no Umpire validators, so their
+		// status is trivially available and typed Go governs their content.
 		EntryNodes:       stringSlicePtr(nodeIDs(template.EntryNodes)),
 		Nodes:            nodeSlicePtr(len(template.Nodes)),
 		SchemaVersion:    integerValue(template.SchemaVersion),
 		TemplateId:       stringValue(string(template.TemplateID)),
 		TemplateVersion:  stringValue(string(template.TemplateVersion)),
 		TerminalOutcomes: stringSlicePtr(outcomeNames(template.TerminalOutcomes)),
+		WorkingDirectory: workingDirectoryField(template.WorkingDirectory),
 	}
 	availability := Check(fields, WorkflowProfileConditions{}, WorkflowProfileFields{})
 	for _, field := range []struct {
@@ -155,6 +158,7 @@ func ValidateTemplate(template Template) error {
 		{name: "default_lease_policy", status: availability.DefaultLeasePolicy},
 		{name: "default_retry_policy", status: availability.DefaultRetryPolicy},
 		{name: "composition_limits", status: availability.CompositionLimits},
+		{name: "working_directory", status: availability.WorkingDirectory},
 	} {
 		if err := validateFieldStatus(field.name, field.status); err != nil {
 			return err
@@ -203,8 +207,9 @@ func ValidateTemplate(template Template) error {
 const maxInstanceParamValueLength = 256
 
 // validateTemplateParams enforces the template-side parameter contract: each
-// declared param is a path-safe identifier typed as string, and every
-// templated concurrency key names a declared param.
+// declared param is a path-safe identifier typed as string, every
+// templated concurrency key names a declared param, and every
+// working-directory declaration names a declared param.
 func validateTemplateParams(template Template) error {
 	declared := make(map[string]struct{}, len(template.Params))
 	for _, param := range template.Params {
@@ -232,13 +237,55 @@ func validateTemplateParams(template Template) error {
 			return fmt.Errorf("invalid workflow template: node %q dispatch.concurrency_key names undeclared instance param %q", node.ID, spec.FromInstanceParam)
 		}
 	}
+	return validateWorkingDirectoryRefs(template, declared)
+}
+
+// validateWorkingDirectoryRefs enforces the working-directory contract: the
+// template default and every node override must name a declared instance
+// param. Literal paths are rejected at decode time (the only declared value
+// form is from_instance_param), so this is the declared-param check.
+func validateWorkingDirectoryRefs(template Template, declared map[string]struct{}) error {
+	type whereRef struct {
+		where string
+		ref   WorkingDirectoryRef
+	}
+	var refs []whereRef
+	if template.WorkingDirectory != nil {
+		refs = append(refs, whereRef{"template", *template.WorkingDirectory})
+	}
+	for _, node := range template.Nodes {
+		if node.WorkingDirectory != nil {
+			refs = append(refs, whereRef{fmt.Sprintf("node %q", node.ID), *node.WorkingDirectory})
+		}
+	}
+	required := make(map[string]bool, len(template.Params))
+	for _, param := range template.Params {
+		required[param.ID] = param.Required
+	}
+	for _, wr := range refs {
+		if strings.TrimSpace(wr.ref.FromInstanceParam) == "" {
+			return fmt.Errorf("invalid workflow template: %s working_directory.from_instance_param is required", wr.where)
+		}
+		if _, ok := declared[wr.ref.FromInstanceParam]; !ok {
+			return fmt.Errorf("invalid workflow template: %s working_directory names undeclared instance param %q", wr.where, wr.ref.FromInstanceParam)
+		}
+		// An unsupplied optional param would silently fall back to the
+		// supervisor's working directory, so the named param must be required.
+		if !required[wr.ref.FromInstanceParam] {
+			return fmt.Errorf("invalid workflow template: %s working_directory names instance param %q, which must be declared required", wr.where, wr.ref.FromInstanceParam)
+		}
+	}
 	return nil
 }
 
 // validateInstanceParams checks a create-time params object against the
 // template's declared params: unknown names are rejected, required names must
 // be present, and every value must be a non-empty string of at most 256
-// characters with no control characters. Params are immutable once recorded.
+// characters with no control characters. A value feeding a working-directory
+// declaration must additionally be an absolute, clean path — relative paths
+// and `..` segments are rejected. Existence is checked at dispatch, not here:
+// a worktree may be created after instantiation. Params are immutable once
+// recorded.
 func validateInstanceParams(template Template, params map[string]string) error {
 	if len(params) == 0 && len(template.Params) == 0 {
 		return nil
@@ -247,12 +294,18 @@ func validateInstanceParams(template Template, params map[string]string) error {
 	for _, param := range template.Params {
 		declared[param.ID] = param
 	}
+	workingDirs := workingDirectoryParams(template)
 	for name, value := range params {
 		if _, ok := declared[name]; !ok {
 			return fmt.Errorf("instance params: %q is not declared by template %s@%s", name, template.TemplateID, template.TemplateVersion)
 		}
 		if err := validateParamValue(name, value); err != nil {
 			return err
+		}
+		if workingDirs[name] {
+			if err := validateWorkingDirectoryParamValue(name, value); err != nil {
+				return err
+			}
 		}
 	}
 	for _, param := range template.Params {
@@ -300,6 +353,77 @@ func isValidParamID(name string) bool {
 		}
 	}
 	return true
+}
+
+// workingDirectoryParams returns the set of instance-param ids the
+// template's working-directory declarations name (the template default and
+// every node override).
+func workingDirectoryParams(template Template) map[string]bool {
+	var out map[string]bool
+	collect := func(ref *WorkingDirectoryRef) {
+		if ref == nil || ref.FromInstanceParam == "" {
+			return
+		}
+		if out == nil {
+			out = make(map[string]bool)
+		}
+		out[ref.FromInstanceParam] = true
+	}
+	collect(template.WorkingDirectory)
+	for _, node := range template.Nodes {
+		collect(node.WorkingDirectory)
+	}
+	return out
+}
+
+// validateWorkingDirectoryParamValue enforces the path rules for a param
+// value that feeds a working-directory declaration: an absolute path with no
+// redundant or upward segments.
+func validateWorkingDirectoryParamValue(name, value string) error {
+	if !filepath.IsAbs(value) {
+		return fmt.Errorf("instance params: %q must be an absolute path (got %q)", name, value)
+	}
+	if value != filepath.Clean(value) {
+		return fmt.Errorf("instance params: %q must be a clean absolute path with no .. or redundant segments (got %q)", name, value)
+	}
+	return nil
+}
+
+// ResolveNodeWorkingDirectory resolves one node's attempt working directory:
+// the node's working_directory override, else the template default, else ""
+// (the attempt runs in the supervisor's working directory). The value is read
+// from the instance params recorded at instantiation; a param that was never
+// supplied resolves to unset.
+func ResolveNodeWorkingDirectory(template Template, node NodeDefinition, params map[string]string) string {
+	ref := node.WorkingDirectory
+	if ref == nil {
+		ref = template.WorkingDirectory
+	}
+	if ref == nil || ref.FromInstanceParam == "" {
+		return ""
+	}
+	return params[ref.FromInstanceParam]
+}
+
+// CheckWorkingDirectory reports whether a resolved working directory is
+// usable as an attempt's spawn directory: an absolute path to an existing
+// directory. It runs at dispatch, so a directory created after instantiation
+// is honored.
+func CheckWorkingDirectory(dir string) error {
+	if !filepath.IsAbs(dir) {
+		return fmt.Errorf("attempt working directory %q must be an absolute path", dir)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("attempt working directory %q does not exist", dir)
+		}
+		return fmt.Errorf("attempt working directory %q is unusable: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("attempt working directory %q is not a directory", dir)
+	}
+	return nil
 }
 
 func decodeStrict(data []byte, target any) error {
@@ -412,17 +536,22 @@ func rejectNonCanonicalKeys(data []byte) error {
 	if err := requireCanonicalKeys(templateFields, []string{
 		"schema_version", "template_id", "template_version", "metadata",
 		"entry_nodes", "nodes", "terminal_outcomes", "bounded_loops",
-		"default_lease_policy", "default_retry_policy", "composition_limits",
+		"default_lease_policy", "default_retry_policy", "working_directory",
+		"composition_limits",
 	}); err != nil {
 		return err
-	}
-	if version, ok := templateFields["schema_version"]; ok && !bytes.Equal(bytes.TrimSpace(version), []byte("1")) {
-		return fmt.Errorf("workflow schema_version must be the JSON integer 1")
 	}
 	if err := requireCanonicalTypedValue(data, reflect.TypeOf(Template{}), ""); err != nil {
 		return err
 	}
-
+	if raw, ok := templateFields["working_directory"]; ok {
+		if err := requireCanonicalWorkingDirectory(raw); err != nil {
+			return fmt.Errorf("working_directory: %w", err)
+		}
+	}
+	if version, ok := templateFields["schema_version"]; ok && !bytes.Equal(bytes.TrimSpace(version), []byte("1")) {
+		return fmt.Errorf("workflow schema_version must be the JSON integer 1")
+	}
 	nodesJSON, ok := templateFields["nodes"]
 	if !ok {
 		return nil
@@ -440,8 +569,14 @@ func rejectNonCanonicalKeys(data []byte) error {
 			"id", "name", "dependencies", "outcomes", "branches", "action",
 			"assignment", "completion", "outputs", "gates", "retry_policy",
 			"loop_id", "checkpoint", "lease_policy", "dispatch", "skip_rule", "waive_rules",
+			"working_directory",
 		}); err != nil {
 			return fmt.Errorf("nodes[%d]: %w", index, err)
+		}
+		if raw, ok := nodeFields["working_directory"]; ok {
+			if err := requireCanonicalWorkingDirectory(raw); err != nil {
+				return fmt.Errorf("nodes[%d].working_directory: %w", index, err)
+			}
 		}
 		actionJSON, ok := nodeFields["action"]
 		if !ok {
@@ -453,6 +588,23 @@ func rejectNonCanonicalKeys(data []byte) error {
 				return fmt.Errorf("nodes[%d].action: %w", index, err)
 			}
 		}
+	}
+	return nil
+}
+
+// requireCanonicalWorkingDirectory rejects any working_directory value form
+// other than the declared {"from_instance_param": "<param id>"} object with
+// a typed-Go message: a literal path is never a valid declaration.
+func requireCanonicalWorkingDirectory(raw json.RawMessage) error {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return fmt.Errorf("must be a {\"from_instance_param\": \"<param id>\"} object; a literal path is not a declared form")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var ref WorkingDirectoryRef
+	if err := decoder.Decode(&ref); err != nil {
+		return err
 	}
 	return nil
 }
@@ -925,6 +1077,13 @@ func leaseFields(policy *LeasePolicy) map[string]any {
 		return nil
 	}
 	return map[string]any{"ttl_seconds": policy.TTLSeconds, "heartbeat_interval_seconds": policy.HeartbeatIntervalSeconds}
+}
+
+func workingDirectoryField(ref *WorkingDirectoryRef) *WorkflowProfileWorkingDirectory {
+	if ref == nil {
+		return nil
+	}
+	return &WorkflowProfileWorkingDirectory{FromInstanceParam: ref.FromInstanceParam}
 }
 
 func retryFields(policy *RetryPolicy) map[string]any {

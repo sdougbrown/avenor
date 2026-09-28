@@ -110,6 +110,7 @@ fields:
 | `bounded_loops` | no | Explicit bounded loop constructs. |
 | `default_lease_policy` | no | `{ttl_seconds, heartbeat_interval_seconds}`. |
 | `default_retry_policy` | no | `{max_attempts, exhaustion, outcome}`. |
+| `working_directory` | no | Default attempt working directory: `{"from_instance_param": "<param id>"}`. |
 | `composition_limits` | no | `{max_depth, max_children}` for child workflows. |
 
 ### Node definition
@@ -128,6 +129,7 @@ fields:
 | `gates` | Declared gates: `{id, name?, type, required?, allowed_outcomes?, subject_type?}`. |
 | `dispatch` | Dispatch policy (see [Dispatch policy](#dispatch-policy)). |
 | `retry_policy` | Per-node retry override. |
+| `working_directory` | Per-node attempt working directory override: `{"from_instance_param": "<param id>"}`. Takes precedence over the template default. |
 | `loop_id` | Bounded-loop membership. |
 | `checkpoint` | Checkpoint definition for a bounded loop. |
 | `lease_policy` | Per-node lease override. |
@@ -257,6 +259,30 @@ activation as a plain string, so candidate views, held-key serialization,
 and manual starts all read the same resolved key. Replay reproduces it from
 the recorded params. Templates whose keys are plain strings and that declare
 no params behave exactly as before.
+
+## Working directories
+
+A template may declare where its attempts run: an optional template-level
+`working_directory` default plus an optional per-node `working_directory`
+override (the node wins), mirroring `default_lease_policy` and node lease
+policy. The only declared value form is
+`{"from_instance_param": "<param id>"}` naming a declared, required `string`
+param —
+templates are write-once, run-N, so a literal, machine-specific path is
+rejected in validation. The machine-specific directory is supplied at
+instantiation: a params value feeding a working-directory declaration must
+be an absolute, clean path (relative paths and `..` segments are rejected),
+while existence is checked at dispatch, not instantiation, so a worktree may
+be created after the instance exists.
+
+At dispatch the directory resolves once per attempt — for controller
+dispatch and for manual starts alike — and the attempt's provider runs
+there; on termination the attempt records that directory as
+`working_directory`. A declared directory that does not exist or is not a
+directory fails the attempt before any runtime starts, so the node's retry
+policy applies. When no working directory is declared, the attempt runs in
+the supervisor's working directory, exactly as templates without the
+declaration always have. Avenor never creates worktrees or directories.
 
 For a template with a `workflow` (child) action, instantiation idempotently
 creates each pinned child and freezes the composition manifest before the

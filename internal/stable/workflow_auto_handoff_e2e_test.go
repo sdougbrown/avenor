@@ -142,16 +142,21 @@ func (f *autoHandoffFixture) stop(t *testing.T) {
 	f.sup.stopReaper()
 }
 
-// addWorkflow registers the given template and instantiates it, returning the
-// workflow id.
-func (f *autoHandoffFixture) addWorkflow(t *testing.T, templateID string, template []byte) string {
+// addWorkflow registers the given template and instantiates it, returning
+// the workflow id. An optional params object supplies the template's
+// instance params.
+func (f *autoHandoffFixture) addWorkflow(t *testing.T, templateID string, template []byte, params ...map[string]string) string {
 	t.Helper()
 	if _, err := f.mgr.WorkflowCreate(template); err != nil {
 		t.Fatalf("WorkflowCreate %s: %v", templateID, err)
 	}
-	out, err := f.mgr.WorkflowInstantiate(mustJSON(t, map[string]string{
+	req := map[string]any{
 		"template_id": templateID, "template_version": "1",
-	}))
+	}
+	if len(params) == 1 {
+		req["params"] = params[0]
+	}
+	out, err := f.mgr.WorkflowInstantiate(mustJSON(t, req))
 	if err != nil {
 		t.Fatalf("WorkflowInstantiate %s: %v", templateID, err)
 	}

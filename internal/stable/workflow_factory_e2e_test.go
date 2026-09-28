@@ -17,10 +17,12 @@ package stable
 // human via the claim holder's token — the only token surface the harness
 // ever touches. Workers never see it.
 //
-// All workers share the supervisor process's working directory (the known
-// spawn-cwd gap), so the working dir is a real git repo with a commit:
-// publication's pr_head output resolves from `git rev-parse HEAD` there and
-// the review gates bind to that exact head.
+// All workers run in the attempt's resolved working directory: the shipped
+// template declares working_directory from the required worktree_path
+// instance param, so each work item stages its own git worktree directory
+// (a real git repo with a commit: publication's pr_head output resolves
+// from `git rev-parse HEAD` there and the review gates bind to that exact
+// head).
 
 import (
 	"bytes"
@@ -102,14 +104,15 @@ func factoryWorkTemplateJSON(t *testing.T) []byte {
 // factoryWorkerScript scripts one worker session: the files the worker
 // writes into its working directory when it runs, the message chunks it
 // streams (loop/team terminal markers travel here), an optional action run
-// before the chunks (e.g. committing the republished head), the stop reason
-// it ends with, and an optional hold that blocks the worker mid-run so the
-// test can observe a live attempt holding a lease or concurrency key.
+// before the chunks with the session's working directory (e.g. committing
+// the republished head), the stop reason it ends with, and an optional hold
+// that blocks the worker mid-run so the test can observe a live attempt
+// holding a lease or concurrency key.
 type factoryWorkerScript struct {
 	sessionID  string
 	write      map[string]string
 	chunks     []string
-	action     func() error
+	action     func(dir string) error
 	stopReason string
 	hold       chan struct{}
 }
@@ -126,6 +129,10 @@ type factoryWorkerProvider struct {
 	bySession map[string]int
 	channels  map[string]chan events.Event
 	started   []string // ordered session IDs handed to the runtime
+	// dirs records the spawn directory each session was started in
+	// (StartOptions.Dir, the attempt's resolved working directory), so a
+	// scripted worker's side effects land in its own attempt directory.
+	dirs map[string]string
 }
 
 func (p *factoryWorkerProvider) append(script factoryWorkerScript) {
@@ -184,8 +191,33 @@ func (p *factoryWorkerProvider) openSession() (runtime.Session, error) {
 	return runtime.Session{SessionID: sessionID}, nil
 }
 
-func (p *factoryWorkerProvider) Start(context.Context, runtime.StartOptions) (runtime.Session, error) {
-	return p.openSession()
+// sessionDir returns the spawn directory recorded for a session, or the
+// process cwd when the session was opened without one.
+func (p *factoryWorkerProvider) sessionDir(sessionID string) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if dir, ok := p.dirs[sessionID]; ok && dir != "" {
+		return dir
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	return cwd
+}
+
+func (p *factoryWorkerProvider) Start(_ context.Context, opts runtime.StartOptions) (runtime.Session, error) {
+	session, err := p.openSession()
+	if err != nil {
+		return session, err
+	}
+	p.mu.Lock()
+	if p.dirs == nil {
+		p.dirs = make(map[string]string)
+	}
+	p.dirs[session.SessionID] = opts.Dir
+	p.mu.Unlock()
+	return session, nil
 }
 
 func (p *factoryWorkerProvider) Resume(context.Context, string) (runtime.Session, error) {
@@ -207,12 +239,12 @@ func (p *factoryWorkerProvider) Prompt(ctx context.Context, sessionID, _ string)
 		return fmt.Errorf("no scripted worker session %q", sessionID)
 	}
 	for name, content := range script.write {
-		if err := writeFileAtomic(name, []byte(content)); err != nil {
+		if err := writeFileAtomic(filepath.Join(p.sessionDir(sessionID), name), []byte(content)); err != nil {
 			return err
 		}
 	}
 	if script.action != nil {
-		if err := script.action(); err != nil {
+		if err := script.action(p.sessionDir(sessionID)); err != nil {
 			return err
 		}
 	}
@@ -296,16 +328,36 @@ type factoryNodeShape struct {
 // adapters and the scripted worker provider, with the software-factory
 // controller registered (disabled until the test enables it).
 type factoryE2E struct {
-	sup          *Supervisor
-	mgr          *workflow.Manager
-	cstore       *workflowcontroller.ControllerStore
-	root         string
-	adapterDir   string
-	wf           string
-	provider     *factoryWorkerProvider
-	nodes        map[string]factoryNodeShape
-	head         string // the git head the first publication publishes
-	controllerID string
+	sup        *Supervisor
+	mgr        *workflow.Manager
+	cstore     *workflowcontroller.ControllerStore
+	root       string
+	adapterDir string
+	wf         string
+	provider   *factoryWorkerProvider
+	nodes      map[string]factoryNodeShape
+	head       string // the git head the first publication publishes
+	workdir    string // the primary work item's working directory
+	// extraWorkdirs holds the working directories of additional work items
+	// created through instantiate.
+	extraWorkdirs []string
+	controllerID  string
+}
+
+// newFactoryWorktree creates one work item's working directory: a real git
+// repo with one commit, used as the worktree_path instance param.
+func newFactoryWorktree(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	factoryGitIn(t, dir, "init")
+	factoryGitIn(t, dir, "config", "user.email", "factory-e2e@example.invalid")
+	factoryGitIn(t, dir, "config", "user.name", "factory e2e")
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# factory e2e\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	factoryGitIn(t, dir, "add", "README.md")
+	factoryGitIn(t, dir, "commit", "-m", "initial")
+	return dir
 }
 
 // newFactoryE2E stages the fixture adapters (each rendered with the working
@@ -316,20 +368,12 @@ type factoryE2E struct {
 // in-flight budget.
 func newFactoryE2E(t *testing.T, name string, maxInflight int, worktree string, ciAdapter, reviewAdapter func(head string) string) *factoryE2E {
 	t.Helper()
-	// The attempt working directory is the supervisor process cwd (the
-	// direct-run executor's spawn Dir); chdir to a scratch dir that is a real
-	// git repo with a commit so publication's git-head output resolves.
-	workDir := t.TempDir()
-	t.Chdir(workDir)
-	factoryGit(t, "init")
-	factoryGit(t, "config", "user.email", "factory-e2e@example.invalid")
-	factoryGit(t, "config", "user.name", "factory e2e")
-	if err := os.WriteFile("README.md", []byte("# factory e2e\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	factoryGit(t, "add", "README.md")
-	factoryGit(t, "commit", "-m", "initial")
-	head := strings.TrimSpace(string(factoryGitOutput(t, "rev-parse", "HEAD")))
+	// The attempt working directory is the template-declared worktree_path;
+	// chdir to an empty scratch dir so any stray relative write would be
+	// visible instead of silently landing in the repository.
+	t.Chdir(t.TempDir())
+	workDir := newFactoryWorktree(t)
+	head := strings.TrimSpace(string(factoryGitOutputIn(t, workDir, "rev-parse", "HEAD")))
 
 	root := filepath.Join(t.TempDir(), "wfroot")
 	adapterDir := t.TempDir()
@@ -383,6 +427,7 @@ func newFactoryE2E(t *testing.T, name string, maxInflight int, worktree string, 
 		provider:     &factoryWorkerProvider{},
 		controllerID: "software-factory",
 		head:         head,
+		workdir:      workDir,
 	}
 	sup.newProviderFunc = func(_ runtime.StartOptions, _ string) (runtime.Provider, error) {
 		return f.provider, nil
@@ -410,8 +455,8 @@ func newFactoryE2E(t *testing.T, name string, maxInflight int, worktree string, 
 		f.nodes[node.ID] = factoryNodeShape{actionKind: node.Action.Type, dispatchAuto: node.Dispatch != nil && node.Dispatch.Mode == "auto"}
 	}
 	out, err := mgr.WorkflowInstantiate(mustJSON(t, map[string]any{
-		"template_id": "software-factory-work", "template_version": "1.2.0",
-		"params": map[string]string{"worktree": worktree},
+		"template_id": "software-factory-work", "template_version": "1.3.0",
+		"params": map[string]string{"worktree": worktree, "worktree_path": workDir},
 	}))
 	if err != nil {
 		t.Fatalf("WorkflowInstantiate: %v", err)
@@ -466,17 +511,19 @@ func (f *factoryE2E) disable(t *testing.T) {
 	f.sup.stopControllerLoop(f.controllerID)
 }
 
-// instantiate creates another work item from the same template and returns
-// its workflow id.
+// instantiate creates another work item from the same template — pinned to
+// its own fresh worktree directory — and returns its workflow id.
 func (f *factoryE2E) instantiate(t *testing.T, worktree string) string {
 	t.Helper()
+	workDir := newFactoryWorktree(t)
 	out, err := f.mgr.WorkflowInstantiate(mustJSON(t, map[string]any{
-		"template_id": "software-factory-work", "template_version": "1.2.0",
-		"params": map[string]string{"worktree": worktree},
+		"template_id": "software-factory-work", "template_version": "1.3.0",
+		"params": map[string]string{"worktree": worktree, "worktree_path": workDir},
 	}))
 	if err != nil {
 		t.Fatalf("instantiate worktree %q: %v", worktree, err)
 	}
+	f.extraWorkdirs = append(f.extraWorkdirs, workDir)
 	return out.(map[string]any)["workflow_id"].(string)
 }
 
@@ -666,14 +713,10 @@ func (f *factoryE2E) completeManualNode(t *testing.T, wf, nodeID, outcome string
 }
 
 // cwdArtifact builds an artifact reference for a file the worker wrote into
-// the shared working directory.
-func cwdArtifact(t *testing.T, storedPath string) map[string]any {
+// the given working directory.
+func cwdArtifact(t *testing.T, dir, storedPath string) map[string]any {
 	t.Helper()
-	abs, err := filepath.Abs(storedPath)
-	if err != nil {
-		t.Fatalf("resolve %s: %v", storedPath, err)
-	}
-	return map[string]any{"src_path": abs, "stored_path": storedPath, "non_empty": true}
+	return map[string]any{"src_path": filepath.Join(dir, storedPath), "stored_path": storedPath, "non_empty": true}
 }
 
 // driveIntake completes the human intake node with the issue text and base
@@ -699,7 +742,7 @@ func (f *factoryE2E) waitThroughPublication(t *testing.T) {
 	f.waitNodeSatisfied(t, f.wf, "draft-plan", "ready")
 	f.completeManualNode(t, f.wf, "hardening", "ready",
 		[]map[string]any{{"definition_id": "hardened_plan", "value": "plan.md"}},
-		[]map[string]any{cwdArtifact(t, "plan.md")})
+		[]map[string]any{cwdArtifact(t, f.workdir, "plan.md")})
 	f.waitNodeSatisfied(t, f.wf, "execution", "done")
 	f.waitNodeSatisfied(t, f.wf, "verification", "passed")
 	f.waitNodeSatisfied(t, f.wf, "publication", "published")
@@ -747,17 +790,22 @@ func scriptPublication(p *factoryWorkerProvider, sessionID string, republish boo
 		write:     map[string]string{"pr-info.json": `{"repository":"sdougbrown/avenor","pr_number":143}`},
 	}
 	if republish {
-		script.action = func() error {
-			if err := os.WriteFile("republish-note.txt", []byte("republished under a new head\n"), 0o600); err != nil {
+		script.action = func(dir string) error {
+			if err := os.WriteFile(filepath.Join(dir, "republish-note.txt"), []byte("republished under a new head\n"), 0o600); err != nil {
 				return err
 			}
-			if out, err := exec.Command("git", "add", "-A").CombinedOutput(); err != nil {
-				return fmt.Errorf("git add: %v: %s", err, out)
+			git := func(args ...string) error {
+				cmd := exec.Command("git", args...)
+				cmd.Dir = dir
+				if out, err := cmd.CombinedOutput(); err != nil {
+					return fmt.Errorf("git %v: %v: %s", args, err, out)
+				}
+				return nil
 			}
-			if out, err := exec.Command("git", "commit", "-m", "republish").CombinedOutput(); err != nil {
-				return fmt.Errorf("git commit: %v: %s", err, out)
+			if err := git("add", "-A"); err != nil {
+				return err
 			}
-			return nil
+			return git("commit", "-m", "republish")
 		}
 	}
 	p.append(script)
@@ -774,11 +822,37 @@ func factoryGit(t *testing.T, args ...string) []byte {
 	return out
 }
 
+// factoryGitIn runs one git command in the given directory and fails the
+// test on error.
+func factoryGitIn(t *testing.T, dir string, args ...string) []byte {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v in %s: %v: %s", args, dir, err, out)
+	}
+	return out
+}
+
 func factoryGitOutput(t *testing.T, args ...string) []byte {
 	t.Helper()
 	out, err := exec.Command("git", args...).Output()
 	if err != nil {
 		t.Fatalf("git %v: %v: %s", args, err, out)
+	}
+	return out
+}
+
+// factoryGitOutputIn runs one git command in the given directory and
+// returns its stdout, failing the test on error.
+func factoryGitOutputIn(t *testing.T, dir string, args ...string) []byte {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git %v in %s: %v: %s", args, dir, err, out)
 	}
 	return out
 }
@@ -940,7 +1014,7 @@ func TestFactoryWorkCleanPathStopsAtHumanMergeAuth(t *testing.T) {
 	f.waitNodeSatisfied(t, f.wf, "draft-plan", "ready")
 	f.completeManualNode(t, f.wf, "hardening", "ready",
 		[]map[string]any{{"definition_id": "hardened_plan", "value": "plan.md"}},
-		[]map[string]any{cwdArtifact(t, "plan.md")})
+		[]map[string]any{cwdArtifact(t, f.workdir, "plan.md")})
 	f.waitNodeSatisfied(t, f.wf, "execution", "done")
 	f.waitNodeSatisfied(t, f.wf, "verification", "passed")
 	f.waitNodeSatisfied(t, f.wf, "publication", "published")
@@ -1407,19 +1481,19 @@ func TestFactoryWorkSharedWorktreeKeySerializesThroughCompletion(t *testing.T) {
 	f := newFactoryE2E(t, "factory-e2e-key", 3, "avenor-issue-115",
 		func(string) string { return factoryEchoAdapter("passed") },
 		func(string) string { return factoryEchoAdapter("passed") })
-	// Items A (the fixture workflow) and B share the worktree param; item C
-	// pins a different one. The first two queued sessions are held: they are
-	// A's and C's assessments in dispatch order, so whichever workflow grabs
-	// them, both live assessments park mid-run. Later sessions write BOTH
-	// artifacts because the interleaving of B's assessment with A's and C's
-	// draft plans is not deterministic and every contract only checks
-	// existence — the shared working directory (the known spawn-cwd gap) is
-	// what makes identical content harmless.
+	// Items A (the fixture workflow) and B share the worktree param — one
+	// concurrency key — while every item pins its own worktree_path working
+	// directory. The first two queued sessions are held: they are A's and C's
+	// assessments in dispatch order, so whichever workflow grabs them, both
+	// live assessments park mid-run. The later sessions may serve either an
+	// assessment or a draft plan (the interleaving is not deterministic), so
+	// they write both artifacts; with per-item directories the writes are
+	// isolated per work item and the cross-write is inert.
 	held1, held2 := "ses_assess_held_1", "ses_assess_held_2"
 	f.provider.append(factoryWorkerScript{sessionID: held1, hold: make(chan struct{}),
-		write: map[string]string{"assessment.md": "## Assessment\n", "plan.md": "## Plan\n"}})
+		write: map[string]string{"assessment.md": "## Assessment\n"}})
 	f.provider.append(factoryWorkerScript{sessionID: held2, hold: make(chan struct{}),
-		write: map[string]string{"assessment.md": "## Assessment\n", "plan.md": "## Plan\n"}})
+		write: map[string]string{"assessment.md": "## Assessment\n"}})
 	for _, id := range []string{"ses_worker_3", "ses_worker_4", "ses_worker_5", "ses_worker_6"} {
 		f.provider.append(factoryWorkerScript{sessionID: id,
 			write: map[string]string{"assessment.md": "## Assessment\n", "plan.md": "## Plan\n"}})
@@ -1637,4 +1711,114 @@ func TestFactoryWorkContractUnmetFailsTheAttempt(t *testing.T) {
 		t.Fatalf("provider sessions = %d, want exactly 2 (both unmet workers, never re-dispatched after exhaustion)", got)
 	}
 	f.disable(t)
+}
+
+// TestFactoryWorkDistinctWorktreePathsIsolateConcurrentItems proves two work
+// items with distinct worktree_path directories run concurrently and stay
+// isolated: each item's attempts record their own working directory, each
+// item's completion contract is evaluated in its own directory (the nodes
+// could not satisfy otherwise), each directory holds only the artifacts its
+// own sessions wrote, and the supervisor's working directory stays
+// untouched. Sessions are consumed in spawn order and the items dispatch
+// concurrently, so the scripts are item-agnostic: an assessment session
+// writes the assessment artifact, a plan session the plan artifact, into
+// whichever item's directory its attempt runs in.
+func TestFactoryWorkDistinctWorktreePathsIsolateConcurrentItems(t *testing.T) {
+	scratch := t.TempDir()
+	t.Chdir(scratch)
+	f := newFactoryE2E(t, "factory-e2e-isolated", 4, "avenor-issue-115",
+		func(string) string { return factoryEchoAdapter("passed") },
+		func(string) string { return factoryEchoAdapter("passed") })
+	// The first two sessions are the two items' assessments, held until both
+	// items are provably running at once.
+	f.provider.append(factoryWorkerScript{sessionID: "ses_assess_held_1", hold: make(chan struct{}),
+		write: map[string]string{"assessment.md": "## Assessment\n"}})
+	f.provider.append(factoryWorkerScript{sessionID: "ses_assess_held_2", hold: make(chan struct{}),
+		write: map[string]string{"assessment.md": "## Assessment\n"}})
+	f.provider.append(factoryWorkerScript{sessionID: "ses_plan_1",
+		write: map[string]string{"plan.md": "## Plan\n"}})
+	f.provider.append(factoryWorkerScript{sessionID: "ses_plan_2",
+		write: map[string]string{"plan.md": "## Plan\n"}})
+	f.provider.append(factoryWorkerScript{sessionID: "ses_hardening",
+		write: map[string]string{"plan.md": "## Hardened plan\n"}})
+	wfB := f.instantiate(t, "avenor-issue-130")
+	f.enable(t)
+
+	f.driveIntake(t, f.wf)
+	f.driveIntake(t, wfB)
+
+	// Both items dispatch concurrently (max_inflight 4, distinct keys): each
+	// item's assessment is running before either completes.
+	f.waitInstanceOn(t, f.wf, "item A's assessment to run", func(inst *workflow.WorkflowInstance) bool {
+		act := activationFor(inst, "assessment")
+		return act != nil && act.Status == workflow.ActivationRunning && len(act.AttemptIDs) > 0
+	})
+	f.waitInstanceOn(t, wfB, "item B's assessment to run", func(inst *workflow.WorkflowInstance) bool {
+		act := activationFor(inst, "assessment")
+		return act != nil && act.Status == workflow.ActivationRunning && len(act.AttemptIDs) > 0
+	})
+	f.provider.releaseAllHolds()
+
+	// Each item advances through its own directories. Item B drives to its
+	// draft plan; item A stops behind the human hardening checkpoint.
+	f.waitNodeSatisfied(t, f.wf, "assessment", "ready")
+	f.waitNodeSatisfied(t, wfB, "assessment", "ready")
+	f.waitNodeSatisfied(t, f.wf, "draft-plan", "ready")
+	f.waitNodeSatisfied(t, wfB, "draft-plan", "ready")
+	f.completeManualNode(t, f.wf, "hardening", "ready",
+		[]map[string]any{{"definition_id": "hardened_plan", "value": "plan.md"}},
+		[]map[string]any{cwdArtifact(t, f.workdir, "plan.md")})
+	f.waitNodeSatisfied(t, f.wf, "hardening", "ready")
+	f.disable(t)
+
+	// Every provider-backed attempt ran in its own item's directory. Manual
+	// action nodes (intake) have no runtime and record no working directory.
+	assertWorkdirs := func(t *testing.T, wf, dir string) {
+		t.Helper()
+		inst := f.instanceOn(t, wf)
+		if len(inst.Attempts) == 0 {
+			t.Fatalf("workflow %s recorded no attempts", wf)
+		}
+		for _, a := range inst.Attempts {
+			if a.WorkingDirectory == "" {
+				continue
+			}
+			if a.WorkingDirectory != dir {
+				t.Fatalf("workflow %s attempt %s (%s) working_directory = %q, want %q",
+					wf, a.ID, a.Identity.NodeID, a.WorkingDirectory, dir)
+			}
+		}
+	}
+	assertWorkdirs(t, f.wf, f.workdir)
+	assertWorkdirs(t, wfB, f.extraWorkdirs[0])
+
+	// Each directory holds exactly the artifacts its sessions wrote, and the
+	// supervisor's scratch cwd stayed untouched.
+	for _, dir := range []string{f.workdir, f.extraWorkdirs[0]} {
+		for _, name := range []string{"assessment.md", "plan.md"} {
+			if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+				t.Fatalf("artifact %s missing from %s: %v", name, dir, err)
+			}
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := map[string]bool{"README.md": true, ".git": true, "assessment.md": true, "plan.md": true}
+		if len(entries) != len(want) {
+			t.Fatalf("directory %s holds %d entries, want exactly the seeded repo plus the item's own artifacts: %v", dir, len(entries), entries)
+		}
+		for _, e := range entries {
+			if !want[e.Name()] {
+				t.Fatalf("directory %s holds unexpected entry %q", dir, e.Name())
+			}
+		}
+	}
+	entries, err := os.ReadDir(scratch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("supervisor working directory was used: %d entries appeared in %s", len(entries), scratch)
+	}
 }

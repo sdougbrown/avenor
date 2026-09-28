@@ -56,6 +56,11 @@ type BeginDispatchResult struct {
 	LeaseTTL  time.Duration
 	Action    Action
 	Selection *ExecutionSelection
+	// WorkingDirectory is the attempt's resolved working directory: the
+	// node's working_directory override, else the template default, resolved
+	// from the recorded instance params. Empty means the attempt runs in the
+	// supervisor's working directory.
+	WorkingDirectory string
 }
 
 // FinalizeDispatchRequest records the outcome of one dispatch: the actual
@@ -234,6 +239,7 @@ func (m *Manager) BeginDispatch(req BeginDispatchRequest) (BeginDispatchResult, 
 	}
 	now := time.Now().UTC()
 	ttl := leaseTTL(node, tmpl.DefaultLease)
+	workingDir := ResolveNodeWorkingDirectory(*tmpl, *node, snap.Instance.Params)
 	leaseID := NewLeaseID()
 	attemptID := NewAttemptID()
 	token := newOwnerToken()
@@ -269,15 +275,16 @@ func (m *Manager) BeginDispatch(req BeginDispatchRequest) (BeginDispatchResult, 
 		return BeginDispatchResult{}, err
 	}
 	return BeginDispatchResult{
-		WorkflowID:   req.WorkflowID,
-		NodeID:       req.NodeID,
-		ActivationID: act.ID,
-		AttemptID:    attemptID,
-		LeaseID:      leaseID,
-		OwnerToken:   token,
-		LeaseTTL:     ttl,
-		Action:       node.Action,
-		Selection:    selection,
+		WorkflowID:       req.WorkflowID,
+		NodeID:           req.NodeID,
+		ActivationID:     act.ID,
+		AttemptID:        attemptID,
+		LeaseID:          leaseID,
+		OwnerToken:       token,
+		LeaseTTL:         ttl,
+		Action:           node.Action,
+		Selection:        selection,
+		WorkingDirectory: workingDir,
 	}, nil
 }
 

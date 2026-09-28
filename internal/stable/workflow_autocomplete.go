@@ -29,7 +29,7 @@ func (s *Supervisor) finishWorkflowAttempt(ec workflow.ExecutorContext, hb *leas
 	}
 	if status != workflow.AttemptSucceeded {
 		hb.StopAndWait()
-		s.recordAttemptTerminal(ec, status, kind, label)
+		s.recordAttemptTerminal(ec, child.dir, string(status), kind, label)
 		return
 	}
 
@@ -42,7 +42,7 @@ func (s *Supervisor) finishWorkflowAttempt(ec workflow.ExecutorContext, hb *leas
 	}
 	if !eligible {
 		hb.StopAndWait()
-		s.recordAttemptTerminal(ec, status, kind, label)
+		s.recordAttemptTerminal(ec, child.dir, string(status), kind, label)
 		return
 	}
 	if plan == nil {
@@ -51,7 +51,7 @@ func (s *Supervisor) finishWorkflowAttempt(ec workflow.ExecutorContext, hb *leas
 		fmt.Fprintf(os.Stderr, "avenor stable: workflow %s node %s attempt %s: auto-completion contract unmet: %s\n",
 			ec.WorkflowID, ec.NodeID, ec.AttemptID, rejection)
 		hb.StopAndWait()
-		s.recordAttemptTerminal(ec, workflow.AttemptFailed, kind, "contract_unmet")
+		s.recordAttemptTerminal(ec, child.dir, string(workflow.AttemptFailed), kind, "contract_unmet")
 		return
 	}
 
@@ -82,10 +82,16 @@ func (s *Supervisor) finishWorkflowAttempt(ec workflow.ExecutorContext, hb *leas
 
 // recordAttemptTerminal records the plain terminal fact for an attempt the
 // supervisor does not auto-complete (manual nodes, external nodes,
-// non-success exits).
-func (s *Supervisor) recordAttemptTerminal(ec workflow.ExecutorContext, status workflow.AttemptStatus, kind, label string) {
-	if err := s.workflowManager().RecordAttemptTerminated(
-		ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, status, kind, label); err != nil {
+// non-success exits), carrying the working directory the attempt's runtime
+// ran in.
+func (s *Supervisor) recordAttemptTerminal(ec workflow.ExecutorContext, dir, status string, kind, label string) {
+	if err := s.workflowManager().RecordAttemptTermination(
+		ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, workflow.AttemptTermination{
+			Status:           workflow.AttemptStatus(status),
+			MarkerKind:       kind,
+			MarkerLabel:      label,
+			WorkingDirectory: dir,
+		}); err != nil {
 		fmt.Fprintf(os.Stderr, "avenor stable: workflow %s node %s attempt %s: record %s terminal fact: %v\n",
 			ec.WorkflowID, ec.NodeID, ec.AttemptID, status, err)
 	}

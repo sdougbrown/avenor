@@ -22,8 +22,17 @@ type Template struct {
 	BoundedLoops      []BoundedLoopDefinition `json:"bounded_loops,omitempty"`
 	DefaultLease      *LeasePolicy            `json:"default_lease_policy,omitempty"`
 	DefaultRetry      *RetryPolicy            `json:"default_retry_policy,omitempty"`
+	WorkingDirectory  *WorkingDirectoryRef    `json:"working_directory,omitempty"`
 	CompositionLimits *CompositionLimits      `json:"composition_limits,omitempty"`
 	Params            []TemplateParam         `json:"params,omitempty"`
+}
+
+// WorkingDirectoryRef declares where an attempt's working directory comes
+// from: the named instance parameter's recorded value. Templates are
+// write-once, run-N, so a literal path is not a declared form — the
+// machine-specific directory is always supplied at instantiation.
+type WorkingDirectoryRef struct {
+	FromInstanceParam string `json:"from_instance_param"`
 }
 
 // TemplateParam declares one instance parameter a template accepts at
@@ -65,23 +74,24 @@ func (template *Template) UnmarshalJSON(data []byte) error {
 }
 
 type NodeDefinition struct {
-	ID           NodeID                 `json:"id"`
-	Name         string                 `json:"name,omitempty"`
-	Dependencies []NodeID               `json:"dependencies,omitempty"`
-	Outcomes     []OutcomeDefinition    `json:"outcomes,omitempty"`
-	Branches     map[OutcomeName]NodeID `json:"branches,omitempty"`
-	Action       Action                 `json:"action"`
-	Assignment   *Assignment            `json:"assignment,omitempty"`
-	Completion   *CompletionContract    `json:"completion,omitempty"`
-	Outputs      []OutputDefinition     `json:"outputs,omitempty"`
-	Gates        []GateDefinition       `json:"gates,omitempty"`
-	RetryPolicy  *RetryPolicy           `json:"retry_policy,omitempty"`
-	LoopID       LoopID                 `json:"loop_id,omitempty"`
-	Checkpoint   *CheckpointDefinition  `json:"checkpoint,omitempty"`
-	LeasePolicy  *LeasePolicy           `json:"lease_policy,omitempty"`
-	Dispatch     *DispatchPolicy        `json:"dispatch,omitempty"`
-	SkipRule     *AuthorityRule         `json:"skip_rule,omitempty"`
-	WaiveRules   []AuthorityRule        `json:"waive_rules,omitempty"`
+	ID               NodeID                 `json:"id"`
+	Name             string                 `json:"name,omitempty"`
+	Dependencies     []NodeID               `json:"dependencies,omitempty"`
+	Outcomes         []OutcomeDefinition    `json:"outcomes,omitempty"`
+	Branches         map[OutcomeName]NodeID `json:"branches,omitempty"`
+	Action           Action                 `json:"action"`
+	Assignment       *Assignment            `json:"assignment,omitempty"`
+	Completion       *CompletionContract    `json:"completion,omitempty"`
+	Outputs          []OutputDefinition     `json:"outputs,omitempty"`
+	Gates            []GateDefinition       `json:"gates,omitempty"`
+	RetryPolicy      *RetryPolicy           `json:"retry_policy,omitempty"`
+	LoopID           LoopID                 `json:"loop_id,omitempty"`
+	Checkpoint       *CheckpointDefinition  `json:"checkpoint,omitempty"`
+	LeasePolicy      *LeasePolicy           `json:"lease_policy,omitempty"`
+	Dispatch         *DispatchPolicy        `json:"dispatch,omitempty"`
+	WorkingDirectory *WorkingDirectoryRef   `json:"working_directory,omitempty"`
+	SkipRule         *AuthorityRule         `json:"skip_rule,omitempty"`
+	WaiveRules       []AuthorityRule        `json:"waive_rules,omitempty"`
 }
 
 type OutcomeDefinition struct {

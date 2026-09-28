@@ -207,6 +207,7 @@ func DecodeWorkflowProfile(data []byte) (WorkflowProfileFields, error) {
 		TemplateId:         &structural.TemplateId,
 		TemplateVersion:    &structural.TemplateVersion,
 		TerminalOutcomes:   &structural.TerminalOutcomes,
+		WorkingDirectory:   structural.WorkingDirectory,
 	}
 	return out, nil
 }
@@ -249,6 +250,7 @@ func svalidateWorkflowProfile(raw json.RawMessage, path, schemaPath string, issu
 		"template_id":          true,
 		"template_version":     true,
 		"terminal_outcomes":    true,
+		"working_directory":    true,
 	}
 	for key := range m {
 		if allowed[key] {
@@ -456,6 +458,15 @@ func svalidateWorkflowProfile(raw json.RawMessage, path, schemaPath string, issu
 					}
 				}
 			}
+		}
+	}
+	if r, ok := m["working_directory"]; ok {
+		fpath := path + "/" + escapePtr("working_directory")
+		fspath := schemaPath + "/properties/" + escapePtr("working_directory")
+		if WorkflowProfileStructuralKind(r) == "object" {
+			svalidateWorkflowProfileWorkingDirectory(r, fpath, fspath, issues)
+		} else {
+			*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
 		}
 	}
 }
@@ -1780,23 +1791,24 @@ func svalidateWorkflowProfileNode(raw json.RawMessage, path, schemaPath string, 
 		*issues = append(*issues, WorkflowProfileStructuralIssueAt("required", path+"/"+escapePtr("id"), schemaPath))
 	}
 	allowed := map[string]bool{
-		"action":       true,
-		"assignment":   true,
-		"branches":     true,
-		"checkpoint":   true,
-		"completion":   true,
-		"dependencies": true,
-		"dispatch":     true,
-		"gates":        true,
-		"id":           true,
-		"lease_policy": true,
-		"loop_id":      true,
-		"name":         true,
-		"outcomes":     true,
-		"outputs":      true,
-		"retry_policy": true,
-		"skip_rule":    true,
-		"waive_rules":  true,
+		"action":            true,
+		"assignment":        true,
+		"branches":          true,
+		"checkpoint":        true,
+		"completion":        true,
+		"dependencies":      true,
+		"dispatch":          true,
+		"gates":             true,
+		"id":                true,
+		"lease_policy":      true,
+		"loop_id":           true,
+		"name":              true,
+		"outcomes":          true,
+		"outputs":           true,
+		"retry_policy":      true,
+		"skip_rule":         true,
+		"waive_rules":       true,
+		"working_directory": true,
 	}
 	for key := range m {
 		if allowed[key] {
@@ -2041,6 +2053,15 @@ func svalidateWorkflowProfileNode(raw json.RawMessage, path, schemaPath string, 
 					}
 				}
 			}
+		}
+	}
+	if r, ok := m["working_directory"]; ok {
+		fpath := path + "/" + escapePtr("working_directory")
+		fspath := schemaPath + "/properties/" + escapePtr("working_directory")
+		if WorkflowProfileStructuralKind(r) == "object" {
+			svalidateWorkflowProfileWorkingDirectory(r, fpath, fspath, issues)
+		} else {
+			*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
 		}
 	}
 }
@@ -2505,6 +2526,41 @@ func svalidateWorkflowProfileTemplateParam(raw json.RawMessage, path, schemaPath
 	}
 }
 
+func svalidateWorkflowProfileWorkingDirectory(raw json.RawMessage, path, schemaPath string, issues *[]WorkflowProfileStructuralIssue) {
+	if WorkflowProfileStructuralKind(raw) != "object" {
+		*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", path, schemaPath))
+		return
+	}
+	var m map[string]json.RawMessage
+	_ = json.Unmarshal(raw, &m)
+	if _, ok := m["from_instance_param"]; !ok {
+		*issues = append(*issues, WorkflowProfileStructuralIssueAt("required", path+"/"+escapePtr("from_instance_param"), schemaPath))
+	}
+	allowed := map[string]bool{
+		"from_instance_param": true,
+	}
+	for key := range m {
+		if allowed[key] {
+			continue
+		}
+		*issues = append(*issues, WorkflowProfileStructuralIssueAt("additionalProperties", path+"/"+escapePtr(key), schemaPath))
+	}
+	if r, ok := m["from_instance_param"]; ok {
+		fpath := path + "/" + escapePtr("from_instance_param")
+		fspath := schemaPath + "/properties/" + escapePtr("from_instance_param")
+		switch WorkflowProfileStructuralKind(r) {
+		case "string":
+			var sv string
+			_ = json.Unmarshal(r, &sv)
+			if utf8.RuneCountInString(sv) < 1 {
+				*issues = append(*issues, WorkflowProfileStructuralIssueAt("minLength", fpath, fspath))
+			}
+		default:
+			*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
+		}
+	}
+}
+
 func svalidateWorkflowProfileActionWorkflowOutcomeMap(raw json.RawMessage, path, schemaPath string, issues *[]WorkflowProfileStructuralIssue) {
 	if WorkflowProfileStructuralKind(raw) != "object" {
 		*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", path, schemaPath))
@@ -2715,6 +2771,7 @@ type WorkflowProfile struct {
 	TemplateId         string                            "json:\"template_id\""
 	TemplateVersion    string                            "json:\"template_version\""
 	TerminalOutcomes   []string                          "json:\"terminal_outcomes\""
+	WorkingDirectory   *WorkflowProfileWorkingDirectory  "json:\"working_directory,omitempty\""
 }
 
 func (v *WorkflowProfile) UnmarshalJSON(data []byte) error {
@@ -2739,6 +2796,7 @@ func (v *WorkflowProfile) UnmarshalJSON(data []byte) error {
 		case "template_id":
 		case "template_version":
 		case "terminal_outcomes":
+		case "working_directory":
 		default:
 			return fmt.Errorf("unknown field %q", key)
 		}
@@ -2801,6 +2859,11 @@ func (v *WorkflowProfile) UnmarshalJSON(data []byte) error {
 	if r, ok := raw["terminal_outcomes"]; ok {
 		if len(r) == 4 && string(r) == "null" {
 			return fmt.Errorf("field \"terminal_outcomes\" must not be null")
+		}
+	}
+	if r, ok := raw["working_directory"]; ok {
+		if len(r) == 4 && string(r) == "null" {
+			return fmt.Errorf("field \"working_directory\" must not be null")
 		}
 	}
 	if _, ok := raw["entry_nodes"]; !ok {
@@ -2897,6 +2960,13 @@ func (v *WorkflowProfile) UnmarshalJSON(data []byte) error {
 			return err
 		}
 	}
+	if encoded, ok := raw["working_directory"]; ok {
+		var decoded7 WorkflowProfileWorkingDirectory
+		if err := json.Unmarshal(encoded, &decoded7); err != nil {
+			return err
+		}
+		next.WorkingDirectory = &decoded7
+	}
 	*v = WorkflowProfile(next)
 	return nil
 }
@@ -2947,6 +3017,9 @@ func (v WorkflowProfile) validate(path string, issues *[]Issue) {
 	}
 	if v.SchemaVersion != 1 {
 		*issues = append(*issues, Issue{Code: "const", Path: path + "/" + escapePtr("schema_version")})
+	}
+	if v.WorkingDirectory != nil {
+		v.WorkingDirectory.validate(path+"/"+escapePtr("working_directory"), issues)
 	}
 }
 
@@ -3287,6 +3360,9 @@ func (v WorkflowProfileNode) validate(path string, issues *[]Issue) {
 			it.validate(path+"/"+escapePtr("waive_rules")+"/"+strconv.Itoa(i), issues)
 		}
 	}
+	if v.WorkingDirectory != nil {
+		v.WorkingDirectory.validate(path+"/"+escapePtr("working_directory"), issues)
+	}
 }
 
 func (v WorkflowProfileOutcome) validate(path string, issues *[]Issue) {
@@ -3338,6 +3414,12 @@ func (v WorkflowProfileTemplateParam) validate(path string, issues *[]Issue) {
 	case WorkflowProfileTemplateParamTypeValueString:
 	default:
 		*issues = append(*issues, Issue{Code: "enum", Path: path + "/" + escapePtr("type")})
+	}
+}
+
+func (v WorkflowProfileWorkingDirectory) validate(path string, issues *[]Issue) {
+	if utf8.RuneCountInString(v.FromInstanceParam) < 1 {
+		*issues = append(*issues, Issue{Code: "minLength", Path: path + "/" + escapePtr("from_instance_param")})
 	}
 }
 
@@ -4448,23 +4530,24 @@ func (v *WorkflowProfileLeasePolicy) UnmarshalJSON(data []byte) error {
 }
 
 type WorkflowProfileNode struct {
-	Action       WorkflowProfileAction           "json:\"action\""
-	Assignment   *WorkflowProfileAssignment      "json:\"assignment,omitempty\""
-	Branches     *WorkflowProfileNodeBranches    "json:\"branches,omitempty\""
-	Checkpoint   *WorkflowProfileCheckpoint      "json:\"checkpoint,omitempty\""
-	Completion   *WorkflowProfileCompletion      "json:\"completion,omitempty\""
-	Dependencies *[]string                       "json:\"dependencies,omitempty\""
-	Dispatch     *WorkflowProfileDispatch        "json:\"dispatch,omitempty\""
-	Gates        *[]WorkflowProfileGate          "json:\"gates,omitempty\""
-	Id           string                          "json:\"id\""
-	LeasePolicy  *WorkflowProfileLeasePolicy     "json:\"lease_policy,omitempty\""
-	LoopId       *string                         "json:\"loop_id,omitempty\""
-	Name         *string                         "json:\"name,omitempty\""
-	Outcomes     *[]WorkflowProfileOutcome       "json:\"outcomes,omitempty\""
-	Outputs      *[]WorkflowProfileOutput        "json:\"outputs,omitempty\""
-	RetryPolicy  *WorkflowProfileRetryPolicy     "json:\"retry_policy,omitempty\""
-	SkipRule     *WorkflowProfileAuthorityRule   "json:\"skip_rule,omitempty\""
-	WaiveRules   *[]WorkflowProfileAuthorityRule "json:\"waive_rules,omitempty\""
+	Action           WorkflowProfileAction            "json:\"action\""
+	Assignment       *WorkflowProfileAssignment       "json:\"assignment,omitempty\""
+	Branches         *WorkflowProfileNodeBranches     "json:\"branches,omitempty\""
+	Checkpoint       *WorkflowProfileCheckpoint       "json:\"checkpoint,omitempty\""
+	Completion       *WorkflowProfileCompletion       "json:\"completion,omitempty\""
+	Dependencies     *[]string                        "json:\"dependencies,omitempty\""
+	Dispatch         *WorkflowProfileDispatch         "json:\"dispatch,omitempty\""
+	Gates            *[]WorkflowProfileGate           "json:\"gates,omitempty\""
+	Id               string                           "json:\"id\""
+	LeasePolicy      *WorkflowProfileLeasePolicy      "json:\"lease_policy,omitempty\""
+	LoopId           *string                          "json:\"loop_id,omitempty\""
+	Name             *string                          "json:\"name,omitempty\""
+	Outcomes         *[]WorkflowProfileOutcome        "json:\"outcomes,omitempty\""
+	Outputs          *[]WorkflowProfileOutput         "json:\"outputs,omitempty\""
+	RetryPolicy      *WorkflowProfileRetryPolicy      "json:\"retry_policy,omitempty\""
+	SkipRule         *WorkflowProfileAuthorityRule    "json:\"skip_rule,omitempty\""
+	WaiveRules       *[]WorkflowProfileAuthorityRule  "json:\"waive_rules,omitempty\""
+	WorkingDirectory *WorkflowProfileWorkingDirectory "json:\"working_directory,omitempty\""
 }
 
 func (v *WorkflowProfileNode) UnmarshalJSON(data []byte) error {
@@ -4494,6 +4577,7 @@ func (v *WorkflowProfileNode) UnmarshalJSON(data []byte) error {
 		case "retry_policy":
 		case "skip_rule":
 		case "waive_rules":
+		case "working_directory":
 		default:
 			return fmt.Errorf("unknown field %q", key)
 		}
@@ -4581,6 +4665,11 @@ func (v *WorkflowProfileNode) UnmarshalJSON(data []byte) error {
 	if r, ok := raw["waive_rules"]; ok {
 		if len(r) == 4 && string(r) == "null" {
 			return fmt.Errorf("field \"waive_rules\" must not be null")
+		}
+	}
+	if r, ok := raw["working_directory"]; ok {
+		if len(r) == 4 && string(r) == "null" {
+			return fmt.Errorf("field \"working_directory\" must not be null")
 		}
 	}
 	if _, ok := raw["action"]; !ok {
@@ -4705,6 +4794,13 @@ func (v *WorkflowProfileNode) UnmarshalJSON(data []byte) error {
 			return err
 		}
 		next.WaiveRules = &decoded14
+	}
+	if encoded, ok := raw["working_directory"]; ok {
+		var decoded15 WorkflowProfileWorkingDirectory
+		if err := json.Unmarshal(encoded, &decoded15); err != nil {
+			return err
+		}
+		next.WorkingDirectory = &decoded15
 	}
 	*v = WorkflowProfileNode(next)
 	return nil
@@ -5232,6 +5328,44 @@ func (v *WorkflowProfileTemplateParam) UnmarshalJSON(data []byte) error {
 		}
 	}
 	*v = WorkflowProfileTemplateParam(next)
+	return nil
+}
+
+type WorkflowProfileWorkingDirectory struct {
+	FromInstanceParam string "json:\"from_instance_param\""
+}
+
+func (v *WorkflowProfileWorkingDirectory) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if raw == nil {
+		return fmt.Errorf("expected object, got null")
+	}
+	for key := range raw {
+		switch key {
+		case "from_instance_param":
+		default:
+			return fmt.Errorf("unknown field %q", key)
+		}
+	}
+	if r, ok := raw["from_instance_param"]; ok {
+		if len(r) == 4 && string(r) == "null" {
+			return fmt.Errorf("field \"from_instance_param\" must not be null")
+		}
+	}
+	if _, ok := raw["from_instance_param"]; !ok {
+		return fmt.Errorf("missing required field \"from_instance_param\"")
+	}
+	type alias WorkflowProfileWorkingDirectory
+	var next alias
+	if encoded, ok := raw["from_instance_param"]; ok {
+		if err := json.Unmarshal(encoded, &next.FromInstanceParam); err != nil {
+			return err
+		}
+	}
+	*v = WorkflowProfileWorkingDirectory(next)
 	return nil
 }
 
@@ -5997,6 +6131,7 @@ type WorkflowProfileFields struct {
 	TemplateId         *string                           "json:\"template_id,omitempty\""
 	TemplateVersion    *string                           "json:\"template_version,omitempty\""
 	TerminalOutcomes   *[]string                         "json:\"terminal_outcomes,omitempty\""
+	WorkingDirectory   *WorkflowProfileWorkingDirectory  "json:\"working_directory,omitempty\""
 }
 
 // WorkflowProfileConditions holds the conditions for WorkflowProfile availability checks.
@@ -6017,6 +6152,7 @@ type WorkflowProfileAvailability struct {
 	TemplateId         FieldStatus
 	TemplateVersion    FieldStatus
 	TerminalOutcomes   FieldStatus
+	WorkingDirectory   FieldStatus
 }
 
 // FieldStatus mirrors the conformance expectedAvailability shape exactly.
@@ -6068,6 +6204,8 @@ func Check(f WorkflowProfileFields, c WorkflowProfileConditions, prev WorkflowPr
 	TemplateVersionSatisfied := func() bool { v := f.TemplateVersion; return v != nil && *v != "" }()
 	TerminalOutcomesEnabled := true
 	TerminalOutcomesSatisfied := func() bool { v := f.TerminalOutcomes; return v != nil && len(*v) > 0 }()
+	WorkingDirectoryEnabled := true
+	WorkingDirectorySatisfied := f.WorkingDirectory != nil
 
 	return WorkflowProfileAvailability{
 		BoundedLoops: FieldStatus{
@@ -6340,6 +6478,28 @@ func Check(f WorkflowProfileFields, c WorkflowProfileConditions, prev WorkflowPr
 			Valid: nil,
 			Error: "",
 		},
+		WorkingDirectory: FieldStatus{
+			Required:  WorkingDirectoryEnabled && false,
+			Enabled:   WorkingDirectoryEnabled,
+			Satisfied: WorkingDirectorySatisfied,
+			Fair:      true,
+			Reason: func() *string {
+				var reasons []string
+				if len(reasons) == 0 {
+					return nil
+				}
+				return &reasons[0]
+			}(),
+			Reasons: func() []string {
+				var reasons []string
+				if reasons == nil {
+					reasons = []string{}
+				}
+				return reasons
+			}(),
+			Valid: nil,
+			Error: "",
+		},
 	}
 }
 
@@ -6377,6 +6537,8 @@ func depSatisfied(f WorkflowProfileFields, name string) bool {
 	case "TerminalOutcomes":
 		v := f.TerminalOutcomes
 		return v != nil && len(*v) > 0
+	case "WorkingDirectory":
+		return f.WorkingDirectory != nil
 	default:
 		return true
 	}
@@ -6576,6 +6738,12 @@ func Challenge(fieldName string, f WorkflowProfileFields, c WorkflowProfileCondi
 	case "TerminalOutcomes", "terminal_outcomes":
 		found = true
 		status = avail.TerminalOutcomes
+		if status.Reason != nil {
+			explanations = append(explanations, "* "+*status.Reason)
+		}
+	case "WorkingDirectory", "working_directory":
+		found = true
+		status = avail.WorkingDirectory
 		if status.Reason != nil {
 			explanations = append(explanations, "* "+*status.Reason)
 		}

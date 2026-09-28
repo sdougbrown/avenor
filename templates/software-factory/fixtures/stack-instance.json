@@ -1,8 +1,12 @@
 {
   "template_id": "software-factory-stack",
-  "template_version": "1.1.0",
+  "template_version": "1.2.0",
   "metadata": {
     "stack": "115+130",
-    "note": "Two review units composed by one bounded parent; the units merge in declared order, each pinned to its own worktree param."
+    "note": "Two review units composed by one bounded parent; the units merge in declared order, each pinned to its own worktree key name and worktree directory."
+  },
+  "params": {
+    "worktree_path_unit_1": "/absolute/path/to/avenor-issue-115",
+    "worktree_path_unit_2": "/absolute/path/to/avenor-issue-130"
   }
 }

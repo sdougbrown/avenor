@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "template_id": "software-factory-stack",
-  "template_version": "1.1.0",
+  "template_version": "1.2.0",
   "metadata": {
     "title": "Software factory review stack",
     "description": "A bounded parent workflow whose planning node records a typed, immutable stack topology and whose kernel-local workflow actions compose logical PR review-unit children (one software-factory-work workflow per unit). The parent owns only declared composition and typed handoff: no campaign coordination, no cross-workflow inference, no merge authority.",
@@ -33,10 +33,11 @@
       "action": {
         "type": "workflow",
         "template_id": "software-factory-work",
-        "template_version": "1.2.0",
+        "template_version": "1.3.0",
         "child_key": "unit-1",
         "params": [
-          { "param": "worktree", "value": "avenor-issue-115" }
+          { "param": "worktree", "value": "avenor-issue-115" },
+          { "param": "worktree_path", "from_instance_param": "worktree_path_unit_1" }
         ],
         "input_bindings": [
           { "input": "issue", "from": { "node_id": "plan-stack", "output_id": "unit_1_issue" } },
@@ -56,10 +57,11 @@
       "action": {
         "type": "workflow",
         "template_id": "software-factory-work",
-        "template_version": "1.2.0",
+        "template_version": "1.3.0",
         "child_key": "unit-2",
         "params": [
-          { "param": "worktree", "value": "avenor-issue-130" }
+          { "param": "worktree", "value": "avenor-issue-130" },
+          { "param": "worktree_path", "from_instance_param": "worktree_path_unit_2" }
         ],
         "input_bindings": [
           { "input": "issue", "from": { "node_id": "plan-stack", "output_id": "unit_2_issue" } },
@@ -70,6 +72,10 @@
     }
   ],
   "terminal_outcomes": ["done", "abandoned"],
+  "params": [
+    { "id": "worktree_path_unit_1", "type": "string", "required": true },
+    { "id": "worktree_path_unit_2", "type": "string", "required": true }
+  ],
   "default_lease_policy": { "ttl_seconds": 900, "heartbeat_interval_seconds": 300 },
   "default_retry_policy": { "max_attempts": 2, "exhaustion": "block" },
   "composition_limits": { "max_depth": 1, "max_children": 4 }

@@ -50,6 +50,9 @@
       "default_retry_policy": {
         "$ref": "#/$defs/retry_policy"
       },
+      "working_directory": {
+        "$ref": "#/$defs/working_directory"
+      },
       "composition_limits": {
         "$ref": "#/$defs/composition_limits"
       },
@@ -129,6 +132,9 @@
           },
           "lease_policy": {
             "$ref": "#/$defs/lease_policy"
+          },
+          "working_directory": {
+            "$ref": "#/$defs/working_directory"
           },
           "dispatch": {
             "$ref": "#/$defs/dispatch"
@@ -357,6 +363,19 @@
             "type": "string"
           }
         },
+        "additionalProperties": false
+      },
+      "working_directory": {
+        "type": "object",
+        "properties": {
+          "from_instance_param": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "from_instance_param"
+        ],
         "additionalProperties": false
       },
       "lease_policy": {
@@ -785,6 +804,9 @@
         "isEmpty": "object"
       },
       "default_retry_policy": {
+        "isEmpty": "object"
+      },
+      "working_directory": {
         "isEmpty": "object"
       },
       "composition_limits": {

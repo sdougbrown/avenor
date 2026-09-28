@@ -4835,6 +4835,26 @@ type directRunExecutor struct{ sup *Supervisor }
 // the spawn fails, when the lease is no longer held, or on supervisor
 // shutdown — it never outlives the runtime.
 
+// attemptSpawnDir resolves the spawn directory for one workflow attempt:
+// the dispatch-resolved working directory when the template declares one,
+// else the supervisor process's working directory (the pre-existing
+// behavior for templates without a working_directory declaration). A
+// declared directory must exist at dispatch time — the resolved value comes
+// from immutable instance params, but the directory itself may be created
+// after instantiation.
+func attemptSpawnDir(ec workflow.ExecutorContext) (string, error) {
+	if ec.WorkingDirectory == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			return cwd, nil
+		}
+		return ".", nil
+	}
+	if err := workflow.CheckWorkingDirectory(ec.WorkingDirectory); err != nil {
+		return "", err
+	}
+	return ec.WorkingDirectory, nil
+}
+
 func (e *directRunExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext) error {
 	params := SpawnParams{
 		WorkflowID:   string(ec.WorkflowID),
@@ -4853,9 +4873,16 @@ func (e *directRunExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorCo
 		params.Prompt = ec.Action.Run.Prompt
 		params.PromptFile = ec.Action.Run.PromptFile
 	}
-	if cwd, err := os.Getwd(); err == nil {
-		params.Dir = cwd
+	dir, err := attemptSpawnDir(ec)
+	if err != nil {
+		// Pre-start failure: the attempt was already started durably by the
+		// manager; record termination before returning so the attempt is
+		// never left dangling.
+		_ = e.sup.workflowManager().RecordAttemptTerminated(
+			ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, workflow.AttemptFailed)
+		return err
 	}
+	params.Dir = dir
 
 	hb := e.sup.startLeaseHeartbeat(ec)
 	params.workflowTerminate = e.sup.workflowTerminator(ec, hb)
@@ -4901,9 +4928,17 @@ func (e *loopExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext
 	if ec.Action.Loop != nil {
 		params.LoopFile = ec.Action.Loop.LoopFile
 	}
-	if cwd, err := os.Getwd(); err == nil {
-		params.Dir = cwd
+	dir, err := attemptSpawnDir(ec)
+	if err != nil {
+		// Pre-start failure: the attempt was already started durably by the
+		// manager; record termination before returning so the attempt is
+		// never left dangling.
+		kind, label := workflowMarkerForKind(ec.Action.Kind)
+		_ = e.sup.workflowManager().RecordAttemptTerminated(
+			ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, workflow.AttemptFailed, kind, label)
+		return err
 	}
+	params.Dir = dir
 
 	hb := e.sup.startLeaseHeartbeat(ec)
 	params.workflowTerminate = e.sup.workflowTerminator(ec, hb)
@@ -4950,9 +4985,17 @@ func (e *teamExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext
 	if ec.Action.Team != nil {
 		params.TeamFile = ec.Action.Team.TeamFile
 	}
-	if cwd, err := os.Getwd(); err == nil {
-		params.Dir = cwd
+	dir, err := attemptSpawnDir(ec)
+	if err != nil {
+		// Pre-start failure: the attempt was already started durably by the
+		// manager; record termination before returning so the attempt is
+		// never left dangling.
+		kind, label := workflowMarkerForKind(ec.Action.Kind)
+		_ = e.sup.workflowManager().RecordAttemptTerminated(
+			ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, workflow.AttemptFailed, kind, label)
+		return err
 	}
+	params.Dir = dir
 
 	hb := e.sup.startLeaseHeartbeat(ec)
 	params.workflowTerminate = e.sup.workflowTerminator(ec, hb)
