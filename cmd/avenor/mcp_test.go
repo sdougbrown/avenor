@@ -73,3 +73,9 @@ func (s *stubControlClient) WorkflowComplete(string, map[string]any) (map[string
 func (s *stubControlClient) WorkflowGate(string, map[string]any) (map[string]any, error) {
 	return nil, nil
 }
+func (s *stubControlClient) WorkflowControllerStatus(string) (map[string]any, error) {
+	return nil, nil
+}
+func (s *stubControlClient) WorkflowControllerList() (map[string]any, error) {
+	return nil, nil
+}

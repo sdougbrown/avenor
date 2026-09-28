@@ -126,6 +126,7 @@ fields:
 | `completion` | Completion contract (see [Completion](#completion)). |
 | `outputs` | Declared typed outputs: `{id, name, type, required?}`. |
 | `gates` | Declared gates: `{id, name?, type, required?, allowed_outcomes?, subject_type?}`. |
+| `dispatch` | Dispatch policy (see [Dispatch policy](#dispatch-policy)). |
 | `retry_policy` | Per-node retry override. |
 | `loop_id` | Bounded-loop membership. |
 | `checkpoint` | Checkpoint definition for a bounded loop. |
@@ -180,6 +181,24 @@ values for the declared output definitions. Output types: `string`, `number`,
 `boolean`, `json`, `file`. A `file` output references the staged artifact
 evidence. Output values are append-only revisions: a later authorized
 activation can produce a new revision without mutating prior facts.
+
+### Dispatch policy
+
+A node opts into automatic dispatch with a `dispatch` object in its node
+definition. A node without a `dispatch` object is manual: it is claimed and
+started explicitly, and ordinary `avenor_spawn` behavior is unaffected.
+
+| Field | Description |
+|---|---|
+| `mode` | `manual` (default) or `auto`. |
+| `controller_id` | The controller that dispatches the node. Required when `mode` is `auto`; forbidden on manual nodes. |
+| `priority` | 0–100, default 50. The controller's dispatcher orders ready candidates by priority, aging a candidate by the whole minutes it has waited. |
+| `concurrency_key` | Optional; must be non-blank. While a live attempt holds the key, the node is blocked. |
+| `success_outcome` | External nodes only. Names the declared branch an auto external node follows once every required external gate has passed; required exactly when an external node is `auto`. |
+
+`mode: auto` is limited to `run`, `loop`, and `team` nodes, and to `external`
+nodes that declare a `success_outcome` with at least one required external
+gate.
 
 ## Instantiation
 

@@ -10,6 +10,7 @@ import {
   formatResultOutput,
   formatShutdownOutput,
   formatStatusOutput,
+  formatWorkflowControllerStatusOutput,
 } from './render.js'
 import {
   answerPermissionTool,
@@ -35,6 +36,8 @@ import {
   workflowEventsTool,
   workflowCompleteTool,
   workflowGateTool,
+  workflowControllerStatusTool,
+  workflowReadyTool,
 } from '@dougbots/avenor-core'
 
 type TrackedRun = {
@@ -1087,6 +1090,35 @@ export const AvenorPlugin: Plugin = async (ctx) => {
             supervisorId: supervisor_id,
           })
           return { title: 'workflow', output: JSON.stringify(result, null, 2) }
+        },
+      }),
+
+      avenor_workflow_controller_status: tool({
+        description: 'Show workflow controller status. With controller_id, returns that controller\'s full status; without it, lists all controllers with summary state. Create, enable, and disable are CLI-only (avenor workflow controller ...).',
+        args: {
+          controller_id: tool.schema.string().optional().describe('Controller ID; omit to list all controllers'),
+          supervisor_id: tool.schema.string().optional().describe('Supervisor ID for multi-supervisor mode'),
+        },
+        async execute(args, _context) {
+          const result = await workflowControllerStatusTool({
+            controllerId: args.controller_id,
+            supervisorId: args.supervisor_id,
+          })
+          const details = { ...result }
+          if (args.controller_id) {
+            try {
+              // Advisory candidate count; absent when the supervisor has no
+              // workflow.ready support or the query fails.
+              const ready = await workflowReadyTool({
+                controllerId: args.controller_id,
+                supervisorId: args.supervisor_id,
+              })
+              if (Array.isArray(ready.candidates)) details.candidate_count = ready.candidates.length
+            } catch {
+              // Advisory only — the status view renders without it.
+            }
+          }
+          return formatWorkflowControllerStatusOutput(args, details)
         },
       }),
     },

@@ -35,6 +35,8 @@ import {
   workflowEventsTool,
   workflowCompleteTool,
   workflowGateTool,
+  workflowControllerStatusTool,
+  workflowReadyTool,
   type Client,
   type InspectResult,
   type RunObserver,
@@ -79,6 +81,8 @@ import {
   renderShutdownResult,
   renderStatusCall,
   renderStatusResult,
+  renderWorkflowControllerStatusCall,
+  renderWorkflowControllerStatusResult,
 } from './render.js'
 
 const POLL_INTERVAL_MS = 3_000
@@ -107,6 +111,8 @@ export interface ExtensionDeps {
   workflowEventsTool: typeof workflowEventsTool
   workflowCompleteTool: typeof workflowCompleteTool
   workflowGateTool: typeof workflowGateTool
+  workflowControllerStatusTool: typeof workflowControllerStatusTool
+  workflowReadyTool: typeof workflowReadyTool
   observeRun: typeof observeRun
   dial: typeof dial
   Supervisor: typeof Supervisor
@@ -129,6 +135,8 @@ const defaultDeps: ExtensionDeps = {
   workflowEventsTool,
   workflowCompleteTool,
   workflowGateTool,
+  workflowControllerStatusTool,
+  workflowReadyTool,
   observeRun,
   dial,
   Supervisor,
@@ -1870,6 +1878,46 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
           details: result,
         }
+      },
+    })
+
+    pi.registerTool({
+      name: 'avenor_workflow_controller_status',
+      label: 'Avenor Workflow Controller Status',
+      description: 'Show workflow controller status. With controller_id, returns that controller\'s full status; without it, lists all controllers with summary state. Create, enable, and disable are CLI-only (avenor workflow controller ...).',
+      parameters: Type.Object({
+        controller_id: Type.Optional(Type.String({ description: 'Controller ID; omit to list all controllers' })),
+        supervisor_id: Type.Optional(Type.String({ description: 'Supervisor ID for multi-supervisor mode' })),
+      }),
+      async execute(_toolCallId, params) {
+        const result = await deps.workflowControllerStatusTool({
+          controllerId: params.controller_id,
+          supervisorId: params.supervisor_id,
+        })
+        const details = { ...result }
+        if (params.controller_id) {
+          try {
+            // Advisory candidate count; absent when the supervisor has no
+            // workflow.ready support or the query fails.
+            const ready = await deps.workflowReadyTool({
+              controllerId: params.controller_id,
+              supervisorId: params.supervisor_id,
+            })
+            if (Array.isArray(ready.candidates)) details.candidate_count = ready.candidates.length
+          } catch {
+            // Advisory only — the status view renders without it.
+          }
+        }
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          details,
+        }
+      },
+      renderCall(args, theme, context) {
+        return renderWorkflowControllerStatusCall(context.args, theme)
+      },
+      renderResult(result, { expanded, isPartial }, theme, context) {
+        return renderWorkflowControllerStatusResult(result, { expanded, isPartial }, theme, context.args)
       },
     })
 

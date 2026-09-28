@@ -74,11 +74,13 @@ export type { BrokerReceiveArgs, InboundAsk, BrokerReceiveResult } from './tools
 export { brokerReplyTool } from './tools/broker-reply.js'
 export type { BrokerReplyArgs, BrokerReplyResult } from './tools/broker-reply.js' 
 
-export type { ExecutionIdentity, WorkflowGateOperation, WorkflowCompleteParams, WorkflowGateParams, WorkflowHeartbeatParams } from './client.js'
+export type { ExecutionIdentity, WorkflowGateOperation, WorkflowCompleteParams, WorkflowGateParams, WorkflowHeartbeatParams, WorkflowControllerCreateParams } from './client.js'
 export { workflowStatusTool, createWorkflowStatusTool, type WorkflowStatusToolArgs, type WorkflowStatusResult } from './tools/workflow-status.js'
 export { workflowWaitTool, createWorkflowWaitTool, type WorkflowWaitToolArgs, type WorkflowWaitResult } from './tools/workflow-wait.js'
 export { workflowInspectTool, createWorkflowInspectTool, type WorkflowInspectToolArgs, type WorkflowInspectResult } from './tools/workflow-inspect.js'
 export { workflowEventsTool, createWorkflowEventsTool, type WorkflowEventsToolArgs, type WorkflowEventsResult } from './tools/workflow-events.js'
 export { workflowCompleteTool, createWorkflowCompleteTool, type WorkflowCompleteToolArgs, type WorkflowCompleteResult } from './tools/workflow-complete.js'
 export { workflowGateTool, createWorkflowGateTool, type WorkflowGateToolArgs, type WorkflowGateResult } from './tools/workflow-gate.js'
+export { workflowControllerStatusTool, createWorkflowControllerStatusTool, type WorkflowControllerStatusToolArgs, type WorkflowControllerStatusResult } from './tools/workflow-controller-status.js'
+export { workflowReadyTool, createWorkflowReadyTool, type WorkflowReadyToolArgs, type WorkflowReadyResult } from './tools/workflow-ready.js'
 

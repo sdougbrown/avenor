@@ -19,6 +19,7 @@ import {
   workflowEventsTool,
   workflowCompleteTool,
   workflowGateTool,
+  workflowControllerStatusTool,
   validateSpawnSelection,
 } from '@dougbots/avenor-core'
 
@@ -64,7 +65,7 @@ export function getMcpAuthToken(): string {
   return token
 }
 
-const server = new McpServer({ name: 'avenor', version: '0.1.0' })
+export const server = new McpServer({ name: 'avenor', version: '0.1.0' })
 
 server.registerTool('avenor_spawn', {
   description: 'Spawn a new agent run with an optional canonical thinking level; unsupported backends reject explicit values',
@@ -270,6 +271,16 @@ server.registerTool('avenor_workflow_gate', {
 }, async (args) => {
   const { supervisor_id, ...rest } = args
   return workflowGateTool({ ...rest, supervisorId: supervisor_id })
+})
+
+server.registerTool('avenor_workflow_controller_status', {
+  description: 'Show workflow controller status. With controller_id, returns that controller\'s full status; without it, lists all controllers with summary state. Create, enable, and disable are CLI-only (avenor workflow controller ...).',
+  inputSchema: {
+    controller_id: z.string().optional().describe('Controller ID; omit to list all controllers'),
+    supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
+  },
+}, async ({ controller_id, supervisor_id }) => {
+  return workflowControllerStatusTool({ controllerId: controller_id, supervisorId: supervisor_id })
 })
 
 if (import.meta.main) {

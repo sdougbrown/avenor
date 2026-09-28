@@ -260,3 +260,84 @@ func TestWorkflowErrorPropagation(t *testing.T) {
 		})
 	}
 }
+
+// TestWorkflowControllerIdentifierRoundTrip verifies that controller IDs and
+// supervisor IDs pass through the MCP tool surface to the typed control client
+// unchanged — no identifier is dropped, remapped, or rewritten.
+func TestWorkflowControllerIdentifierRoundTrip(t *testing.T) {
+	s, fake := newWorkflowTestServer(t)
+	ctx := context.Background()
+
+	fake.workflowControllerStatusResult = map[string]any{"controller_id": "c-abc", "state": "enabled"}
+	_, result, err := s.handleAvenorWorkflowControllerStatus(ctx, nil, workflowControllerStatusArgs{ControllerID: "c-abc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.workflowControllerStatusCalls) != 1 || fake.workflowControllerStatusCalls[0] != "c-abc" {
+		t.Fatalf("controller_id not round-tripped: %v", fake.workflowControllerStatusCalls)
+	}
+	res, _ := result.(map[string]any)
+	if res["controller_id"] != "c-abc" {
+		t.Fatalf("controller_id munged in result: %v", res["controller_id"])
+	}
+}
+
+// TestWorkflowControllerListForwarding verifies that omitting controller_id
+// routes the status tool to the control client's list method and returns its
+// snapshot unchanged.
+func TestWorkflowControllerListForwarding(t *testing.T) {
+	s, fake := newWorkflowTestServer(t)
+	ctx := context.Background()
+	fake.workflowControllerListResult = map[string]any{"controllers": []any{}}
+	_, result, err := s.handleAvenorWorkflowControllerStatus(ctx, nil, workflowControllerStatusArgs{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fake.workflowControllerListCalls != 1 {
+		t.Fatalf("expected 1 list call, got %d", fake.workflowControllerListCalls)
+	}
+	if len(fake.workflowControllerStatusCalls) != 0 {
+		t.Fatalf("expected 0 status calls when controller_id is omitted, got %d", len(fake.workflowControllerStatusCalls))
+	}
+	res, _ := result.(map[string]any)
+	if _, ok := res["controllers"]; !ok {
+		t.Fatalf("list result missing controllers: %v", res)
+	}
+}
+
+// TestWorkflowControllerErrorPropagation verifies controller handler errors
+// propagate from the control client without being swallowed.
+func TestWorkflowControllerErrorPropagation(t *testing.T) {
+	cases := []struct {
+		name       string
+		wantPrefix string
+		setup      func(*fakeClient)
+		call       func(*Server) error
+	}{
+		{"controller status error", "workflow controller status", func(f *fakeClient) {
+			f.workflowControllerStatusErr = errors.New("controller not found: c-missing")
+		}, func(s *Server) error {
+			_, _, err := s.handleAvenorWorkflowControllerStatus(context.Background(), nil, workflowControllerStatusArgs{ControllerID: "c-missing"})
+			return err
+		}},
+		{"controller list error", "workflow controller list", func(f *fakeClient) {
+			f.workflowControllerListErr = errors.New("list failed")
+		}, func(s *Server) error {
+			_, _, err := s.handleAvenorWorkflowControllerStatus(context.Background(), nil, workflowControllerStatusArgs{})
+			return err
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, fake := newWorkflowTestServer(t)
+			tc.setup(fake)
+			err := tc.call(s)
+			if err == nil {
+				t.Fatal("expected propagated error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantPrefix) {
+				t.Fatalf("error %q should contain prefix %q", err.Error(), tc.wantPrefix)
+			}
+		})
+	}
+}

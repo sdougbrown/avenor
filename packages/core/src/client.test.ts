@@ -1242,6 +1242,113 @@ describe('Client.workflow', () => {
     }
   })
 
+  it('sends workflow.controller.status with the controller_id', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      expect(req.method).toBe('workflow.controller.status')
+      expect(req.params).toEqual({ controller_id: 'ctl-1' })
+      sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: { ok: true } }) + '\n')
+    })
+
+    const client = await dial(socketPath)
+    try {
+      await client.workflowControllerStatus('ctl-1')
+    } finally {
+      client.close()
+    }
+  })
+
+  it('sends workflow.ready with limit only when supplied', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      expect(req.method).toBe('workflow.ready')
+      if (req.params.limit === undefined) {
+        expect(req.params).toEqual({ controller_id: 'ctl-1' })
+      } else {
+        expect(req.params).toEqual({ controller_id: 'ctl-1', limit: 5 })
+      }
+      sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: { ok: true } }) + '\n')
+    })
+
+    const client = await dial(socketPath)
+    try {
+      await client.workflowReady('ctl-1')
+      await client.workflowReady('ctl-1', 5)
+    } finally {
+      client.close()
+    }
+  })
+
+  it('sends workflow.controller.list without params', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      expect(req.method).toBe('workflow.controller.list')
+      expect(req.params).toBeUndefined()
+      sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: { controllers: [] } }) + '\n')
+    })
+
+    const client = await dial(socketPath)
+    try {
+      await client.workflowControllerList()
+    } finally {
+      client.close()
+    }
+  })
+
+  it('sends workflow.controller.create with the forwarded fields', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      expect(req.method).toBe('workflow.controller.create')
+      expect(req.params).toEqual({ controller_id: 'ctl-1', max_inflight: 3 })
+      sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: { ok: true } }) + '\n')
+    })
+
+    const client = await dial(socketPath)
+    try {
+      await client.workflowControllerCreate({ controller_id: 'ctl-1', max_inflight: 3 })
+    } finally {
+      client.close()
+    }
+  })
+
+  it('sends workflow.controller.enable with the controller_id', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      expect(req.method).toBe('workflow.controller.enable')
+      expect(req.params).toEqual({ controller_id: 'ctl-1' })
+      sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: { ok: true } }) + '\n')
+    })
+
+    const client = await dial(socketPath)
+    try {
+      await client.workflowControllerEnable('ctl-1')
+    } finally {
+      client.close()
+    }
+  })
+
+  it('sends workflow.controller.disable with the controller_id and reason', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      expect(req.method).toBe('workflow.controller.disable')
+      expect(req.params).toEqual({ controller_id: 'ctl-1', reason: 'maintenance' })
+      sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: { ok: true } }) + '\n')
+    })
+
+    const client = await dial(socketPath)
+    try {
+      await client.workflowControllerDisable('ctl-1', 'maintenance')
+    } finally {
+      client.close()
+    }
+  })
+
   it('exports the ExecutionIdentity contract', () => {
     const identity: ExecutionIdentity = {
       supervisor_id: 's',
