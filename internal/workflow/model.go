@@ -122,6 +122,12 @@ type DispatchPolicy struct {
 	// once every required external gate has passed. It is declared only on
 	// external nodes and required exactly when such a node is auto.
 	SuccessOutcome OutcomeName `json:"success_outcome,omitempty"`
+	// ActionKind records the dispatched node's action kind on the activation's
+	// effective policy copy so candidate classification and kernel-local
+	// parking can identify auto external nodes without reloading the
+	// template. It is never declared in template JSON; the manager stamps it
+	// when resolving the node's policy.
+	ActionKind ActionKind `json:"action_kind,omitempty"`
 }
 
 // effective resolves the policy with its defaults applied: manual mode and
@@ -143,6 +149,7 @@ func (d *DispatchPolicy) effective() DispatchPolicy {
 	}
 	out.ConcurrencyKey = d.ConcurrencyKey
 	out.SuccessOutcome = d.SuccessOutcome
+	out.ActionKind = d.ActionKind
 	return out
 }
 

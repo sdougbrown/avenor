@@ -21,6 +21,7 @@ func runStable(args []string) int {
 	parkedTimeout := fs.Duration("parked-timeout", 30*time.Minute, "how long a finished runtime stays parked awaiting a follow-up prompt before it is reaped (0 = park until shutdown)")
 	permClaimTimeout := fs.Duration("permission-claim-timeout", 0, "how long to wait for a connected socket client to answer a permission request before falling through to the file handler or 'none' resolver (0 = disabled: fall through only when all clients disconnect; use a non-zero value for unattended automation where client processes may hang)")
 	workflowRoot := fs.String("workflow-root", "", "workflow store root (default: $XDG_STATE_HOME/avenor/workflows, else $HOME/.avenor/workflows)")
+	workflowAdapterDir := fs.String("workflow-adapter-dir", "", "host-owned trusted adapter manifest directory (default: $XDG_CONFIG_HOME/avenor/workflow-adapters, else $HOME/.config/avenor/workflow-adapters)")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -52,6 +53,7 @@ func runStable(args []string) int {
 		ParkedRuntimeTimeout:   *parkedTimeout,
 		PermissionClaimTimeout: *permClaimTimeout,
 		WorkflowRoot:           *workflowRoot,
+		WorkflowAdapterDir:     *workflowAdapterDir,
 	})
 	if treeBudgetFile == "" {
 		// Root: propagate the tree budget path to descendant processes.

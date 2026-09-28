@@ -34,6 +34,11 @@ const (
 	EventLeaderExpired   = "leader_expired"
 	EventCapacityBlocked = "capacity_blocked"
 	EventCapacityCleared = "capacity_cleared"
+	EventPollCommitted   = "poll_committed"
+	EventPollScheduled   = "poll_scheduled"
+	EventPollCleared     = "poll_cleared"
+	EventDiagRecorded    = "diagnostic_recorded"
+	EventDiagCleared     = "diagnostic_cleared"
 )
 
 // Sentinel errors returned by the controller store.
@@ -74,9 +79,14 @@ type ControllerRecord struct {
 	Revision      int64
 	OwnerEpoch    int64
 	Leader        *LeaderLease
-	// PollCursors is reserved for future per-poll checkpoints and is always
-	// nil or empty in this stage; it round-trips through the snapshot.
-	PollCursors     map[string]json.RawMessage
+	// PollCursors checkpoints every external-gate poll: last poll, next
+	// poll, retry count, the persisted monotonic poll count, and the poll ID
+	// committed before the adapter runs, keyed by
+	// workflow/node/activation/gate/subject-hash.
+	PollCursors map[string]*PollCursor
+	// Diagnostics holds active structured diagnostics (adapter unavailable,
+	// unresolved bindings) keyed by kind/name, deduplicated by the store.
+	Diagnostics     map[string]string
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 	DisabledReason  string
@@ -101,24 +111,32 @@ type ControllerEvent struct {
 	ExpiresAt     time.Time `json:"expires_at,omitempty"`
 	BlockedReason string    `json:"blocked_reason,omitempty"`
 	BlockedDetail string    `json:"blocked_detail,omitempty"`
+	// Cursor carries the full post-change poll cursor for the poll_* events.
+	Cursor    *PollCursor `json:"cursor,omitempty"`
+	CursorKey string      `json:"cursor_key,omitempty"`
+	// DiagKind/DiagKey/DiagDetail describe a structured diagnostic change.
+	DiagKind   string `json:"diag_kind,omitempty"`
+	DiagKey    string `json:"diag_key,omitempty"`
+	DiagDetail string `json:"diag_detail,omitempty"`
 }
 
 // LastRenewalEventAt is exported on ControllerRecord; the custom
 // MarshalJSON/UnmarshalJSON below omit the zero value and round-trip it.
 type controllerRecordJSON struct {
-	SchemaVersion      int                         `json:"schema_version"`
-	ControllerID       string                      `json:"controller_id"`
-	DesiredState       DesiredState                `json:"desired_state"`
-	MaxInflight        int                         `json:"max_inflight"`
-	Revision           int64                       `json:"revision"`
-	OwnerEpoch         int64                       `json:"owner_epoch"`
-	Leader             *LeaderLease                `json:"leader,omitempty"`
-	PollCursors        *map[string]json.RawMessage `json:"poll_cursors,omitempty"`
-	CreatedAt          time.Time                   `json:"created_at"`
-	UpdatedAt          time.Time                   `json:"updated_at"`
-	DisabledReason     string                      `json:"disabled_reason,omitempty"`
-	CapacityBlocked    string                      `json:"capacity_blocked,omitempty"`
-	LastRenewalEventAt *time.Time                  `json:"last_renewal_event_at,omitempty"`
+	SchemaVersion      int                     `json:"schema_version"`
+	ControllerID       string                  `json:"controller_id"`
+	DesiredState       DesiredState            `json:"desired_state"`
+	MaxInflight        int                     `json:"max_inflight"`
+	Revision           int64                   `json:"revision"`
+	OwnerEpoch         int64                   `json:"owner_epoch"`
+	Leader             *LeaderLease            `json:"leader,omitempty"`
+	PollCursors        *map[string]*PollCursor `json:"poll_cursors,omitempty"`
+	Diagnostics        *map[string]string      `json:"diagnostics,omitempty"`
+	CreatedAt          time.Time               `json:"created_at"`
+	UpdatedAt          time.Time               `json:"updated_at"`
+	DisabledReason     string                  `json:"disabled_reason,omitempty"`
+	CapacityBlocked    string                  `json:"capacity_blocked,omitempty"`
+	LastRenewalEventAt *time.Time              `json:"last_renewal_event_at,omitempty"`
 }
 
 // MarshalJSON writes the record with an empty-but-present poll_cursors object
@@ -139,6 +157,9 @@ func (r ControllerRecord) MarshalJSON() ([]byte, error) {
 	}
 	if r.PollCursors != nil {
 		a.PollCursors = &r.PollCursors
+	}
+	if r.Diagnostics != nil {
+		a.Diagnostics = &r.Diagnostics
 	}
 	if !r.LastRenewalEventAt.IsZero() {
 		t := r.LastRenewalEventAt
@@ -168,6 +189,9 @@ func (r *ControllerRecord) UnmarshalJSON(data []byte) error {
 	}
 	if a.PollCursors != nil {
 		r.PollCursors = *a.PollCursors
+	}
+	if a.Diagnostics != nil {
+		r.Diagnostics = *a.Diagnostics
 	}
 	if a.LastRenewalEventAt != nil {
 		r.LastRenewalEventAt = *a.LastRenewalEventAt
@@ -239,6 +263,27 @@ func applyEvent(rec *ControllerRecord, e ControllerEvent) error {
 		rec.CapacityBlocked = e.BlockedReason
 	case EventCapacityCleared:
 		rec.CapacityBlocked = ""
+	case EventPollCommitted, EventPollScheduled:
+		if e.Cursor != nil && e.CursorKey != "" {
+			if rec.PollCursors == nil {
+				rec.PollCursors = map[string]*PollCursor{}
+			}
+			cursor := *e.Cursor
+			rec.PollCursors[e.CursorKey] = &cursor
+		}
+	case EventPollCleared:
+		if rec.PollCursors != nil {
+			delete(rec.PollCursors, e.CursorKey)
+		}
+	case EventDiagRecorded:
+		if rec.Diagnostics == nil {
+			rec.Diagnostics = map[string]string{}
+		}
+		rec.Diagnostics[diagnosticKey(e.DiagKind, e.DiagKey)] = e.DiagDetail
+	case EventDiagCleared:
+		if rec.Diagnostics != nil {
+			delete(rec.Diagnostics, diagnosticKey(e.DiagKind, e.DiagKey))
+		}
 	default:
 		return fmt.Errorf("unknown controller event kind %q", e.Kind)
 	}

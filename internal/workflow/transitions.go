@@ -223,6 +223,14 @@ func buildCommandEvents(state Snapshot, command Command) ([]Event, error) {
 		e.LeaseID = command.LeaseID
 		return []Event{e}, nil
 
+	case CommandParkExternal:
+		if command.Outcome == "" {
+			return nil, errors.New("park_external command requires the pinned success outcome")
+		}
+		e := newEvent(EventExternalParked)
+		e.Outcome = command.Outcome
+		return []Event{e}, nil
+
 	case CommandChildAttach:
 		e := newEvent(EventChildAttached)
 		e.LeaseID = command.LeaseID
@@ -318,6 +326,8 @@ func applyEvent(next *Snapshot, event Event) error {
 		return applyLeaseExpired(next, act, event)
 	case EventChildAttached:
 		return applyChildAttached(next, act, event)
+	case EventExternalParked:
+		return applyExternalParked(act, event)
 	case EventChildOutcome:
 		return applyChildOutcome(next, act, event)
 	case EventTransition:
@@ -878,6 +888,27 @@ func applyGate(next *Snapshot, act *Activation, event Event) error {
 			act.Status = ActivationAwaitingGate
 		}
 	}
+	act.UpdatedAt = nowUTC()
+	return nil
+}
+
+// applyExternalParked records a controller's kernel-local park of an auto
+// external activation: the claimable activation moves to awaiting_gate with
+// the node's declared success_outcome pinned as its selected outcome. No
+// attempt, lease, evidence, or gate result is involved; the required bound
+// gates resolve exactly as they would after any other park.
+func applyExternalParked(act *Activation, event Event) error {
+	if act == nil {
+		return errors.New("external_parked event requires an activation")
+	}
+	if event.Outcome == "" {
+		return errors.New("external_parked event requires the pinned success outcome")
+	}
+	if !claimableActivationStatus(act.Status) {
+		return fmt.Errorf("cannot park activation in status %q", act.Status)
+	}
+	act.Status = ActivationAwaitingGate
+	act.SelectedOutcome = event.Outcome
 	act.UpdatedAt = nowUTC()
 	return nil
 }

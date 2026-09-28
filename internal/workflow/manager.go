@@ -92,10 +92,14 @@ func NewManager(store *Store) *Manager {
 			return nil
 		}
 		node, err := findNode(&tmpl, nodeID)
-		if err != nil {
+		if err != nil || node.Dispatch == nil {
 			return nil
 		}
-		return node.Dispatch
+		// Stamp the action kind onto the resolved copy so activations carry
+		// the dispatched node's kind without a template reload.
+		effective := node.Dispatch.effective()
+		effective.ActionKind = node.Action.Kind
+		return &effective
 	})
 	// Bound-gate pinning resolves at command time in event building: the
 	// template lookup supplies the target node's gate bindings, and the child
@@ -116,6 +120,11 @@ func NewManager(store *Store) *Manager {
 	})
 	return m
 }
+
+// Store returns the underlying workflow store. It exists for host surfaces
+// that need store-level primitives (evidence staging) outside the command
+// boundary; it never bypasses command validation for state transitions.
+func (m *Manager) Store() *Store { return m.store }
 
 // AdmissionHandle is an opaque, never-persisted admission reservation handed
 // to an executor so its first runtime start consumes the caller's reservation
@@ -594,15 +603,29 @@ func claimableActivationStatus(status ActivationStatus) bool {
 // startup barrier owns the rebuild call.
 var ErrCandidatesNotRecovered = errors.New("workflow candidate index not recovered; rebuild after catalog recovery")
 
+// ReadyCandidateKind classifies how a controller consumes a ready candidate:
+// a provider candidate consumes an in-flight slot and concurrency key, while
+// an external-park candidate parks kernel-locally without either.
+type ReadyCandidateKind string
+
+const (
+	// ReadyCandidateProvider is a provider-backed run/loop/team node.
+	ReadyCandidateProvider ReadyCandidateKind = "provider"
+	// ReadyCandidateExternalPark is an auto external node that parks into
+	// awaiting_gate without admission, attempts, or a dispatch decision.
+	ReadyCandidateExternalPark ReadyCandidateKind = "external_park"
+)
+
 // ReadyCandidate is one ready auto-dispatch node exposed to a controller.
 // It is advisory: the query never mutates state and never grants a lease.
 type ReadyCandidate struct {
-	Identity       ExecutionIdentity `json:"identity"`
-	Revision       int64             `json:"revision"`
-	ReadyAt        time.Time         `json:"ready_at"`
-	Priority       int               `json:"priority"`
-	ConcurrencyKey string            `json:"concurrency_key,omitempty"`
-	ControllerID   string            `json:"controller_id"`
+	Identity       ExecutionIdentity  `json:"identity"`
+	Kind           ReadyCandidateKind `json:"kind"`
+	Revision       int64              `json:"revision"`
+	ReadyAt        time.Time          `json:"ready_at"`
+	Priority       int                `json:"priority"`
+	ConcurrencyKey string             `json:"concurrency_key,omitempty"`
+	ControllerID   string             `json:"controller_id"`
 }
 
 // RebuildCandidateIndex rebuilds the discardable in-memory candidate index
@@ -796,6 +819,7 @@ func (m *Manager) CandidatesForController(controllerID string, limit int) ([]Rea
 					NodeID:       act.NodeID,
 					ActivationID: act.ID,
 				},
+				Kind:           readyCandidateKind(policy),
 				Revision:       snap.Instance.Revision,
 				ReadyAt:        *act.ReadyAt,
 				Priority:       policy.priority(),
