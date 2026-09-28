@@ -18,6 +18,7 @@ const (
 	EventRerouted          EventKind = "workflow.event.rerouted"
 	EventHeartbeat         EventKind = "workflow.event.heartbeat"
 	EventLeaseExpired      EventKind = "workflow.event.lease_expired"
+	EventAttemptIdentified EventKind = "workflow.event.attempt_identified"
 	EventTransition        EventKind = "workflow.event.transition"
 	EventChildAttached     EventKind = "workflow.event.child_attached"
 	EventChildOutcome      EventKind = "workflow.event.child_outcome"
@@ -65,6 +66,9 @@ type Event struct {
 	Instantiated *InstanceRecord     `json:"instantiated,omitempty"`
 	LeaseTargets []NodeID            `json:"lease_targets,omitempty"`
 	Lease        *Lease              `json:"lease,omitempty"`
+	// Diagnostics carries inert dispatch provenance recorded with the attempt
+	// intent. It never affects kernel transitions.
+	Diagnostics *AttemptDiagnostics `json:"diagnostics,omitempty"`
 	// ReadyAt is the explicit timestamp of a transition into a claimable
 	// state, stamped by the command boundary and copied onto the activation
 	// during replay so the reducer never calls the wall clock.

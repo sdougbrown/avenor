@@ -494,7 +494,9 @@ type Activation struct {
 	ActiveLease     *Lease              `json:"active_lease,omitempty"`
 	SelectedOutcome OutcomeName         `json:"selected_outcome,omitempty"`
 	// Dispatch carries the node's effective dispatch policy when it resolves
-	// to auto; manual nodes leave it nil (legacy snapshots read as manual).
+	// to auto or declares a concurrency key (a keyed manual node carries its
+	// policy so manual starts serialize on the key); policy-less manual nodes
+	// leave it nil (legacy snapshots read as manual).
 	Dispatch *DispatchPolicy `json:"dispatch,omitempty"`
 	// ReadyAt is the timestamp of the most recent transition into a claimable
 	// state, copied from the event's explicit timestamp during replay. A nil
@@ -536,6 +538,21 @@ type Attempt struct {
 	MarkerLabel      string            `json:"marker_label,omitempty"`
 	FailureClass     string            `json:"failure_class,omitempty"`
 	Corrections      int               `json:"corrections,omitempty"`
+	// Diagnostics records inert dispatch provenance (controller, leader lease,
+	// concurrency key) captured with the attempt intent. It never affects
+	// kernel transitions.
+	Diagnostics *AttemptDiagnostics `json:"diagnostics,omitempty"`
+}
+
+// AttemptDiagnostics is inert provenance for one attempt intent. The raw
+// claim owner token never appears here or anywhere else durable.
+type AttemptDiagnostics struct {
+	ControllerID   string `json:"controller_id,omitempty"`
+	LeaderLeaseID  string `json:"leader_lease_id,omitempty"`
+	ConcurrencyKey string `json:"concurrency_key,omitempty"`
+	// AdmissionRef is deprecated and never populated by the kernel. It is
+	// retained only so old snapshots that persisted it still decode.
+	AdmissionRef string `json:"admission_ref,omitempty"`
 }
 
 type Lease struct {
@@ -622,6 +639,9 @@ type Command struct {
 	Operation GateOperation       `json:"operation,omitempty"`
 	Lease     *Lease              `json:"lease,omitempty"`
 	Selection *ExecutionSelection `json:"selection,omitempty"`
+	// Diagnostics is inert dispatch provenance recorded onto the attempt by
+	// CommandBeginDispatch; ignored by every other command kind.
+	Diagnostics *AttemptDiagnostics `json:"diagnostics,omitempty"`
 	// ChildOutputs is the CommandChildOutcome selection of child output
 	// references (identity only, no child state copied into the parent).
 	ChildOutputs []OutputReference `json:"child_outputs,omitempty"`

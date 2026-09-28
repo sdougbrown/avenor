@@ -429,6 +429,72 @@ func TestParkedRuntimeResumeWaitsForLocalCapacity(t *testing.T) {
 	waitForActiveRuntimeCount(t, sup, 0) // parks again
 }
 
+// A held admission reservation claims a local slot just like a running
+// runtime, so a parked runtime's follow-up must wait for it and resume once
+// the reservation is released.
+func TestParkedRuntimeResumeWaitsForHeldReservation(t *testing.T) {
+	t.Run("tree budget", func(t *testing.T) { testParkedRuntimeResumeWaitsForHeldReservation(t, false) })
+	t.Run("local only", func(t *testing.T) { testParkedRuntimeResumeWaitsForHeldReservation(t, true) })
+}
+
+func testParkedRuntimeResumeWaitsForHeldReservation(t *testing.T, localOnly bool) {
+	sup := NewSupervisor(Config{
+		ControlSocket:        newStableSocketPath(t, "parked-resume-reservation"),
+		MaxRuntimes:          1,
+		ParkedRuntimeTimeout: 0,
+		ShutdownTimeout:      0,
+	})
+	if localOnly {
+		sup.treeBudgetMu.Lock()
+		sup.treeBudget = nil
+		sup.treeBudgetMu.Unlock()
+	}
+	t.Cleanup(func() {
+		_ = sup.Shutdown("kill")
+		_ = sup.broker.Stop()
+	})
+	provider := newParkedScriptedProvider("ses_parked_resume_res", 2)
+	sup.newProviderFunc = func(_ runtime.StartOptions, _ string) (runtime.Provider, error) {
+		return provider, nil
+	}
+
+	first, err := sup.spawn(SpawnParams{Prompt: "hello", Dir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("first spawn: %v", err)
+	}
+	waitForActiveRuntimeCount(t, sup, 0) // first parks, count 0
+	for len(provider.emitted) > 0 {
+		<-provider.emitted
+	}
+
+	res, err := sup.reserveAdmission()
+	if err != nil {
+		t.Fatalf("reserveAdmission: %v", err)
+	}
+	t.Cleanup(res.Release)
+
+	if err := sup.RuntimePrompt(first.RuntimeID, "second", ""); err != nil {
+		t.Fatalf("RuntimePrompt: %v", err)
+	}
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if len(provider.emitted) > 0 {
+			t.Fatal("resumed turn started while a reservation held the only local slot")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Well inside WaitForCapacity's 2s poll fallback, so the release itself
+	// must wake the waiting resume.
+	res.Release()
+	select {
+	case <-provider.emitted:
+	case <-time.After(time.Second):
+		t.Fatal("parked runtime did not resume promptly after the reservation was released")
+	}
+	waitForActiveRuntimeCount(t, sup, 0) // parks again
+}
+
 func newWaitTestChild() *childRuntime {
 	return &childRuntime{
 		done:     make(chan struct{}),

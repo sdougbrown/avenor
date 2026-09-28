@@ -86,6 +86,10 @@ func cloneActivation(a Activation) Activation {
 func cloneAttempt(at Attempt) Attempt {
 	at.ArtifactPaths = append([]string(nil), at.ArtifactPaths...)
 	at.EndedAt = derefTime(at.EndedAt)
+	if at.Diagnostics != nil {
+		d := *at.Diagnostics
+		at.Diagnostics = &d
+	}
 	return at
 }
 
