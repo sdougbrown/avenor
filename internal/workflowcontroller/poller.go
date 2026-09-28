@@ -100,7 +100,7 @@ func (r *Runner) pollWorker(cursor PollCursor) {
 // offerPolls commits every due cursor and hands it to a bounded worker. The
 // count commits BEFORE the invocation so a crash reuses the same poll ID; a
 // cursor whose worker is still running is never re-offered.
-func (r *Runner) offerPolls() {
+func (r *Runner) offerPolls(s *leaderState) {
 	due, err := r.store.PollDue(r.controllerID, r.now())
 	if err != nil {
 		log.Printf("workflow controller %s: poll due: %v", r.controllerID, err)
@@ -108,10 +108,10 @@ func (r *Runner) offerPolls() {
 	}
 	for _, cursor := range due {
 		key := PollCursorKey(cursor)
-		if r.pollInFlight[key] {
+		if s.pollInFlight[key] {
 			continue
 		}
-		if len(r.pollInFlight) >= r.maxPollWorkers {
+		if len(s.pollInFlight) >= r.maxPollWorkers {
 			return
 		}
 		committed, err := r.store.CommitPoll(r.controllerID, cursor, r.now())
@@ -119,8 +119,8 @@ func (r *Runner) offerPolls() {
 			log.Printf("workflow controller %s: commit poll %s: %v", r.controllerID, key, err)
 			continue
 		}
-		r.pollInFlight[key] = true
-		r.pendingPolls++
+		s.pollInFlight[key] = true
+		s.pendingPolls++
 		go r.pollWorker(committed)
 	}
 }
@@ -130,9 +130,9 @@ func (r *Runner) offerPolls() {
 // completed verdict, with the cursor cleared once the result is applied. It
 // reports whether the outcome lost leadership, so the caller can drop
 // leadership before offering any further polls.
-func (r *Runner) handlePollOutcome(out PollOutcome, lease LeaderLease) (lostLead bool) {
+func (r *Runner) handlePollOutcome(s *leaderState, out PollOutcome, lease LeaderLease) (lostLead bool) {
 	key := PollCursorKey(out.Cursor)
-	delete(r.pollInFlight, key)
+	delete(s.pollInFlight, key)
 
 	if r.ctx.Err() != nil {
 		// The runner is exiting (disable or shutdown): the canceled poll is
