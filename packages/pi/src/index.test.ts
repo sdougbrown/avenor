@@ -1160,10 +1160,21 @@ describe('Avenor Pi extension', () => {
       if (!args.runId) return []
       return { run_id: args.runId, label: args.runId, status: 'running' }
     })
-    // Blocks like the real resultTool, and rejects when the interrupt aborts.
-    const resultTool = mock((args: { signal?: AbortSignal }) => new Promise((_resolve, reject) => {
-      args.signal?.addEventListener('abort', () => reject(new Error('result wait cancelled')))
-    }))
+    // First call blocks until aborted (the interrupt). Re-issued calls block
+    // until released, and reject if the transition gate wrongly re-interrupts.
+    let resolveReissue!: (v: unknown) => void
+    const reissueGate = new Promise(resolve => { resolveReissue = resolve })
+    const resultTool = mock((args: { signal?: AbortSignal }) => {
+      if (resultTool.mock.calls.length === 1) {
+        return new Promise((_resolve, reject) => {
+          args.signal?.addEventListener('abort', () => reject(new Error('result wait cancelled')))
+        })
+      }
+      return new Promise((resolve, reject) => {
+        args.signal?.addEventListener('abort', () => reject(new Error('result wait cancelled')))
+        void reissueGate.then(resolve)
+      })
+    })
 
     const h = await createMultiSupervisorHarness({
       statusTool,
@@ -1191,11 +1202,25 @@ describe('Avenor Pi extension', () => {
       interrupted_by: { run_id: 'rb', label: 'beta', status: 'waiting' },
     })
 
-    // The interrupted wait must not suppress alpha's later auto-delivery.
+    // Re-issuing while beta's permission persists must not livelock: the
+    // persisting stopping point is not a new transition, so the wait holds.
+    const reissued = h.registeredTools.avenor_result.execute('t4', { run_id: 'ra', supervisor_id: SOCK }, undefined, undefined, h.ctx)
+    for (let i = 0; i < 3; i++) {
+      await h.waitPollMatching(payload => payload.entries.some((e: { label: string; pendingPermission: boolean }) => e.label === 'beta' && e.pendingPermission))
+    }
+    expect(resultTool).toHaveBeenCalledTimes(2)
+
+    // The re-issued wait was never interrupted; once it returns (unconsumed),
+    // alpha's later completion flows through auto-delivery again.
+    resolveReissue({ run_id: 'ra', label: 'alpha', status: 'running', ready: false })
+    const reissuedResult = await reissued
+    expect(reissuedResult.details).not.toHaveProperty('interrupted_by')
+
+    alphaDone = true
     let resolveCompletion!: () => void
     const completionSent = new Promise<void>(resolve => { resolveCompletion = resolve })
     h.sendUserMessage.mockImplementation(() => resolveCompletion())
-    alphaDone = true
+    await h.waitPollMatching(payload => payload.entries.some((e: { label: string; status: string }) => e.label === 'alpha' && e.status === 'done'))
     await completionSent
     const completions = h.sendUserMessage.mock.calls.map(([t]) => String(t)).filter(t => t.includes('Sub-agent "alpha" finished'))
     expect(completions).toHaveLength(1)
@@ -1348,6 +1373,11 @@ describe('Avenor Pi extension', () => {
       interrupted_by: { run_id: 'rb', label: 'beta', status: 'done' },
     })
 
+    // The delivered result marked the run consumed: no automatic completion
+    // message may follow.
+    const completions = h.sendUserMessage.mock.calls.map(([t]) => String(t)).filter(t => t.includes('Sub-agent "alpha" finished'))
+    expect(completions).toHaveLength(0)
+
     await h.eventHandlers.session_shutdown()
   })
 
@@ -1365,10 +1395,12 @@ describe('Avenor Pi extension', () => {
       if (!args.runId) return []
       return { run_id: args.runId, label: args.runId, status: 'running' }
     })
-    const resultTool = mock(async () => {
-      const value = await resultGate
-      return value
-    })
+    // Abort-aware: the mock must observe the controller's abort, or the
+    // own-run exclusion this test pins would be untestable.
+    const resultTool = mock((args: { signal?: AbortSignal }) => new Promise((resolve, reject) => {
+      args.signal?.addEventListener('abort', () => reject(new Error('result wait cancelled')))
+      void resultGate.then(resolve)
+    }))
 
     const h = await createMultiSupervisorHarness({
       statusTool,
@@ -1396,6 +1428,33 @@ describe('Avenor Pi extension', () => {
     expect(result.details).not.toHaveProperty('interrupted_by')
 
     await h.eventHandlers.session_shutdown()
+  })
+
+  it('releases blocking waits when the session shuts down', async () => {
+    const SOCK = '/tmp/shutdown-release.sock'
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (args.supervisorId === SOCK) {
+        return { run_id: 'ra', label: 'alpha', status: 'running', runtime_id: 'rt-a' }
+      }
+      if (!args.runId) return []
+      return { run_id: args.runId, label: args.runId, status: 'running' }
+    })
+    const resultTool = mock((args: { signal?: AbortSignal }) => new Promise((_resolve, reject) => {
+      args.signal?.addEventListener('abort', () => reject(new Error('result wait cancelled')))
+    }))
+
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      resultTool,
+      spawnTool: mock(async () => ({ run_id: 'ra', label: 'alpha', supervisor_id: SOCK, runtime_id: 'rt-a' })),
+    })
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    const resultPromise = h.registeredTools.avenor_result.execute('t2', { run_id: 'ra', supervisor_id: SOCK }, undefined, undefined, h.ctx)
+
+    await h.eventHandlers.session_shutdown()
+    const result = await resultPromise
+    expect(result.details).toMatchObject({ run_id: 'ra', status: 'running', ready: false })
   })
 
   it('interrupts a blocking spawn wait when a sibling run stops', async () => {

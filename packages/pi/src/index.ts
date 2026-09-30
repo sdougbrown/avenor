@@ -474,10 +474,14 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
      * (possible when the caller omitted supervisor_id and the registry key
      * diverged), deliver its real state instead of an interruption notice. */
     async function resultAfterInterrupt(
-      runId: string,
-      supervisorId: string | undefined,
+      params: { run_id: string; supervisor_id?: string; wait?: boolean; timeout?: string; signal?: AbortSignal },
       stop: StoppingPoint,
+      tracked: TrackedRun | undefined,
     ): Promise<InterruptedResult> {
+      // Resolve the run the way getTrackedRun did, so callers that passed a
+      // label or omitted supervisor_id still probe the right supervisor.
+      const runId = tracked?.runId ?? params.run_id
+      const supervisorId = tracked?.supervisorId ?? params.supervisor_id
       let current: StatusResult | undefined
       try {
         const raw = await deps.statusTool({ runId, supervisorId, view: 'full' })
@@ -488,7 +492,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       const stoppedItself = current !== undefined && (isTerminalStatus(current.status) || current.status === 'waiting')
       if (stoppedItself) {
         try {
-          const fresh = await deps.resultTool({ runId, supervisorId, wait: true })
+          // Fresh signal: the wait's own controller is already aborted. The
+          // caller's timeout still bounds the redelivery.
+          const fresh = await deps.resultTool({ runId, supervisorId, wait: true, timeout: params.timeout, signal: params.signal })
           return { ...fresh, interrupted_by: { run_id: stop.runId, label: stop.label, status: stop.status } }
         } catch {
           // Fall through to the minimal shape below.
@@ -498,7 +504,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         run_id: current?.run_id ?? runId,
         label: current?.label ?? runId,
         status: current?.status ?? 'running',
-        ready: false,
+        ready: current !== undefined && isTerminalStatus(current.status),
         ...(current?.pending_permission && { pending_permission: current.pending_permission }),
         interrupted_by: { run_id: stop.runId, label: stop.label, status: stop.status },
       }
@@ -807,9 +813,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       const tick = async () => {
         if (!pollingActive || generation !== pollingGeneration) return
 
-        const prevStatuses = new Map<string, string | undefined>()
+        const prevStatuses = new Map<string, { status: string | undefined; pendingPermission: boolean }>()
         for (const [id, run] of trackedRuns) {
-          prevStatuses.set(id, run.lastStatus?.status)
+          prevStatuses.set(id, { status: run.lastStatus?.status, pendingPermission: !!run.lastStatus?.pending_permission })
         }
 
         const currentPoll = pollRuns()
@@ -833,14 +839,20 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           const run = trackedRuns.get(entryKey)
           if (!run) continue
 
-          // Any stopping point (terminal or pending permission) interrupts
-          // sibling blocking waits so the agent can react without waiting for
-          // every parallel run to resolve. The waiter for this run itself is
-          // excluded: its own stop is delivered by the natural result path.
-          // Only tracked runs drive interrupts: pollRuns also folds in live
-          // singleton runs owned by other sessions, which must not wake this
-          // session's waiters.
-          if (entry.pendingPermission || isTerminalStatus(entry.status)) {
+          // Any newly observed stopping point (terminal or pending
+          // permission) interrupts sibling blocking waits so the agent can
+          // react without waiting for every parallel run to resolve. The
+          // waiter for this run itself is excluded: its own stop is delivered
+          // by the natural result path. Only tracked runs drive interrupts:
+          // pollRuns also folds in live singleton runs owned by other
+          // sessions, which must not wake this session's waiters. The
+          // transition gate keeps a persisting stopping point (e.g. an
+          // unanswered permission) from re-interrupting re-issued waits on
+          // every poll cycle.
+          const prevStatus = prevStatuses.get(entryKey)
+          const wasTerminal = prevStatus?.status !== undefined && isTerminalStatus(prevStatus.status)
+          const wasStopped = wasTerminal || !!prevStatus?.pendingPermission
+          if ((entry.pendingPermission || isTerminalStatus(entry.status)) && !wasStopped) {
             interruptPendingWaits(
               {
                 runId: entry.runId,
@@ -862,9 +874,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
               if (run.consumed) trackedRuns.delete(entryKey)
               continue
             }
-            const prevStatus = prevStatuses.get(entryKey)
-            const wasTerminal = prevStatus && isTerminalStatus(prevStatus)
-            if (!wasTerminal) {
+            const wasTerminalBefore = prevStatus?.status !== undefined && isTerminalStatus(prevStatus.status)
+            if (!wasTerminalBefore) {
               sessionCtx?.ui.notify(
                 `Sub-agent "${entry.label}" finished: ${entry.status}`,
                 entry.status === 'done' ? 'info' : 'warning',
@@ -1188,6 +1199,12 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       stopSubAgentPoll()
       hostPendingAsks.clear()
       subAgentPendingAsks.clear()
+      // Release any still-blocking waiters so their tool calls return instead
+      // of parking on a session that no longer exists.
+      for (const wait of [...pendingWaits]) {
+        pendingWaits.delete(wait)
+        wait.interrupt({ runId: '', status: 'shutdown' })
+      }
       sessionCtx = null
     })
 
@@ -1332,8 +1349,12 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         })
 
         const blockingWait = createInterruptibleWait(trackedRunKey(supervisorId, result.run_id), signal)
-        const waitResult = await waitForRun(runRef, blockingWait.signal, onUpdate)
-        blockingWait.dispose()
+        let waitResult: Awaited<ReturnType<typeof waitForRun>>
+        try {
+          waitResult = await waitForRun(runRef, blockingWait.signal, onUpdate)
+        } finally {
+          blockingWait.dispose()
+        }
         if (waitResult.aborted) {
           const stop = blockingWait.stopped
           if (stop) {
@@ -1503,7 +1524,17 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         if (tracked) tracked.blocking = true
         let completed = false
 
-        const blockingWait = createInterruptibleWait(trackedRunKey(params.supervisor_id, params.run_id), signal)
+        // Key on the resolved run (getTrackedRun may have matched by label or
+        // filled in a supervisor) so the waiter's own stopping point is
+        // excluded from sibling interrupts. wait=false calls resolve without
+        // waiting, so they register nothing.
+        const blocking = params.wait ?? true
+        const blockingWait = blocking
+          ? createInterruptibleWait(
+              trackedRunKey(tracked?.supervisorId ?? params.supervisor_id, tracked?.runId ?? params.run_id),
+              signal,
+            )
+          : undefined
         try {
           let result: InterruptedResult
           try {
@@ -1512,11 +1543,11 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
               supervisorId: params.supervisor_id,
               wait: params.wait,
               timeout: params.timeout,
-              signal: blockingWait.signal,
+              signal: blockingWait?.signal ?? signal,
             })
           } catch (err) {
-            if (!blockingWait.stopped) throw err
-            result = await resultAfterInterrupt(params.run_id, params.supervisor_id, blockingWait.stopped)
+            if (!blockingWait?.stopped) throw err
+            result = await resultAfterInterrupt(params, blockingWait.stopped, tracked)
           }
           completed = result.ready
           if (completed) {
@@ -1547,7 +1578,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             details: result,
           }
         } finally {
-          blockingWait.dispose()
+          blockingWait?.dispose()
           if (!completed && tracked && getTrackedRun(params.run_id, params.supervisor_id) === tracked) {
             tracked.blocking = previousBlocking ?? false
           }
