@@ -1452,9 +1452,60 @@ describe('Avenor Pi extension', () => {
     await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
     const resultPromise = h.registeredTools.avenor_result.execute('t2', { run_id: 'ra', supervisor_id: SOCK }, undefined, undefined, h.ctx)
 
+    // Shutdown aborts the wait without a sibling stopping point: the call
+    // fails instead of resolving with a misleading interrupted_by payload.
     await h.eventHandlers.session_shutdown()
-    const result = await resultPromise
-    expect(result.details).toMatchObject({ run_id: 'ra', status: 'running', ready: false })
+    await expect(resultPromise).rejects.toThrow()
+  })
+
+  it('treats a caller-aborted wait as a plain abort, not a sibling interrupt', async () => {
+    const SOCK = '/tmp/caller-abort.sock'
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (args.supervisorId === SOCK) {
+        return { run_id: 'ra', label: 'alpha', status: 'running', runtime_id: 'rt-a' }
+      }
+      if (!args.runId) return []
+      return { run_id: args.runId, label: args.runId, status: 'running' }
+    })
+    const resultTool = mock((args: { signal?: AbortSignal }) => new Promise((_resolve, reject) => {
+      args.signal?.addEventListener('abort', () => reject(new Error('result wait cancelled')))
+    }))
+    const observeRun = mock(async () => ({
+      subscribe: (cb: (snapshot: unknown) => void) => {
+        void cb
+        return () => {}
+      },
+      snapshot: () => ({ last_event: undefined, transcript: [], pending_permission: false, ended: false }),
+      close: async () => {},
+    }))
+
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      resultTool,
+      observeRun,
+      spawnTool: mock(async (args: { label?: string }) => ({
+        run_id: args.label === 'alpha' ? 'ra' : 'rb',
+        label: args.label ?? 'spawned',
+        supervisor_id: SOCK,
+        runtime_id: args.label === 'alpha' ? 'rt-a' : 'rt-b',
+      })),
+    })
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+
+    const controller = new AbortController()
+    const resultPromise = h.registeredTools.avenor_result.execute('t2', { run_id: 'ra', supervisor_id: SOCK }, controller.signal, undefined, h.ctx)
+    controller.abort()
+    await expect(resultPromise).rejects.toThrow()
+
+    const spawnController = new AbortController()
+    const spawnPromise = h.registeredTools.avenor_spawn.execute('t3', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: true }, spawnController.signal, undefined, h.ctx)
+    spawnController.abort()
+    const spawnResult = await spawnPromise
+    expect(String(spawnResult.content[0].text)).toContain('was interrupted')
+    expect(spawnResult.details).not.toHaveProperty('interrupted_by')
+
+    await h.eventHandlers.session_shutdown()
   })
 
   it('interrupts a blocking spawn wait when a sibling run stops', async () => {

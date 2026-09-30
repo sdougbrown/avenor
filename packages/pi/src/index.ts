@@ -417,6 +417,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       runId: string
       label?: string
       status: string
+      /** Set for non-sibling aborts (session shutdown) that must not take the
+       * sibling-interrupt branch: no run stopped, and no auto-delivery can
+       * follow once polling has stopped. */
+      synthetic?: boolean
     }
     interface PendingWait {
       runKey: string
@@ -1203,7 +1207,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       // of parking on a session that no longer exists.
       for (const wait of [...pendingWaits]) {
         pendingWaits.delete(wait)
-        wait.interrupt({ runId: '', status: 'shutdown' })
+        wait.interrupt({ runId: '', status: 'shutdown', synthetic: true })
       }
       sessionCtx = null
     })
@@ -1357,7 +1361,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         }
         if (waitResult.aborted) {
           const stop = blockingWait.stopped
-          if (stop) {
+          if (stop && !stop.synthetic) {
             // A sibling run reached a stopping point first: hand control back
             // to the agent and let the polling tick deliver this run's
             // completion, exactly like a wait=false spawn.
@@ -1546,7 +1550,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
               signal: blockingWait?.signal ?? signal,
             })
           } catch (err) {
-            if (!blockingWait?.stopped) throw err
+            if (!blockingWait?.stopped || blockingWait.stopped.synthetic) throw err
             result = await resultAfterInterrupt(params, blockingWait.stopped, tracked)
           }
           completed = result.ready
