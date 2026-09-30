@@ -831,11 +831,15 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         for (const entry of entries) {
           const entryKey = trackedRunKey(entry.supervisorId, entry.runId)
           const run = trackedRuns.get(entryKey)
+          if (!run) continue
 
           // Any stopping point (terminal or pending permission) interrupts
           // sibling blocking waits so the agent can react without waiting for
           // every parallel run to resolve. The waiter for this run itself is
           // excluded: its own stop is delivered by the natural result path.
+          // Only tracked runs drive interrupts: pollRuns also folds in live
+          // singleton runs owned by other sessions, which must not wake this
+          // session's waiters.
           if (entry.pendingPermission || isTerminalStatus(entry.status)) {
             interruptPendingWaits(
               {
@@ -846,8 +850,6 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
               entryKey,
             )
           }
-
-          if (!run) continue
 
           if (isTerminalStatus(entry.status)) {
             const action = decideCompletion(run)
