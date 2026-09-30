@@ -744,7 +744,8 @@ describe('Avenor Pi extension', () => {
       supervisorId: undefined,
       wait: undefined,
       timeout: '5m',
-      signal: undefined,
+      // The wait is composed with the await registry's interrupt signal.
+      signal: expect.any(AbortSignal),
     })
     expect(mockBus.emit).toHaveBeenCalledWith(
       CHANNEL_RUN_TERMINAL,
@@ -1137,6 +1138,226 @@ describe('Avenor Pi extension', () => {
     const completions = h.sendUserMessage.mock.calls.map(([t]) => String(t)).filter(t => t.includes('Sub-agent "worker" finished'))
     expect(completions).toHaveLength(1)
     expect(completions[0]).toContain('interrupted answer')
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('interrupts a blocking avenor_result when a sibling run requests permission', async () => {
+    const SOCK = '/tmp/sibling-permission.sock'
+    let betaPermission = false
+    let alphaDone = false
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (args.supervisorId === SOCK) {
+        if (args.runId === 'rb') {
+          return betaPermission
+            ? { run_id: 'rb', label: 'beta', status: 'waiting', runtime_id: 'rt-b', pending_permission: { description: 'allow write' } }
+            : { run_id: 'rb', label: 'beta', status: 'running', runtime_id: 'rt-b' }
+        }
+        return alphaDone
+          ? { run_id: 'ra', label: 'alpha', status: 'done', runtime_id: 'rt-a', final_output: 'alpha answer' }
+          : { run_id: 'ra', label: 'alpha', status: 'running', runtime_id: 'rt-a' }
+      }
+      if (!args.runId) return []
+      return { run_id: args.runId, label: args.runId, status: 'running' }
+    })
+    // Blocks like the real resultTool, and rejects when the interrupt aborts.
+    const resultTool = mock((args: { signal?: AbortSignal }) => new Promise((_resolve, reject) => {
+      args.signal?.addEventListener('abort', () => reject(new Error('result wait cancelled')))
+    }))
+
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      resultTool,
+      spawnTool: mock(async (args: { label?: string }) => ({
+        run_id: args.label === 'alpha' ? 'ra' : 'rb',
+        label: args.label ?? 'spawned',
+        supervisor_id: SOCK,
+        runtime_id: args.label === 'alpha' ? 'rt-a' : 'rt-b',
+      })),
+    })
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    await h.registeredTools.avenor_spawn.execute('t2', { agent: 'explore', label: 'beta', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+
+    const resultPromise = h.registeredTools.avenor_result.execute('t3', { run_id: 'ra', supervisor_id: SOCK }, undefined, undefined, h.ctx)
+
+    betaPermission = true
+    await h.waitPollMatching(payload => payload.entries.some((e: { label: string; pendingPermission: boolean }) => e.label === 'beta' && e.pendingPermission))
+    const interrupted = await resultPromise
+    expect(interrupted.details).toMatchObject({
+      run_id: 'ra',
+      status: 'running',
+      ready: false,
+      interrupted_by: { run_id: 'rb', label: 'beta', status: 'waiting' },
+    })
+
+    // The interrupted wait must not suppress alpha's later auto-delivery.
+    let resolveCompletion!: () => void
+    const completionSent = new Promise<void>(resolve => { resolveCompletion = resolve })
+    h.sendUserMessage.mockImplementation(() => resolveCompletion())
+    alphaDone = true
+    await completionSent
+    const completions = h.sendUserMessage.mock.calls.map(([t]) => String(t)).filter(t => t.includes('Sub-agent "alpha" finished'))
+    expect(completions).toHaveLength(1)
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('interrupts a blocking avenor_result when a sibling run completes', async () => {
+    const SOCK = '/tmp/sibling-terminal.sock'
+    let betaDone = false
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (args.supervisorId === SOCK) {
+        if (args.runId === 'rb') {
+          return betaDone
+            ? { run_id: 'rb', label: 'beta', status: 'done', runtime_id: 'rt-b', final_output: 'beta answer' }
+            : { run_id: 'rb', label: 'beta', status: 'running', runtime_id: 'rt-b' }
+        }
+        return { run_id: 'ra', label: 'alpha', status: 'running', runtime_id: 'rt-a' }
+      }
+      if (!args.runId) return []
+      return { run_id: args.runId, label: args.runId, status: 'running' }
+    })
+    const resultTool = mock((args: { signal?: AbortSignal }) => new Promise((_resolve, reject) => {
+      args.signal?.addEventListener('abort', () => reject(new Error('result wait cancelled')))
+    }))
+
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      resultTool,
+      spawnTool: mock(async (args: { label?: string }) => ({
+        run_id: args.label === 'alpha' ? 'ra' : 'rb',
+        label: args.label ?? 'spawned',
+        supervisor_id: SOCK,
+        runtime_id: args.label === 'alpha' ? 'rt-a' : 'rt-b',
+      })),
+    })
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    await h.registeredTools.avenor_spawn.execute('t2', { agent: 'explore', label: 'beta', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+
+    const resultPromise = h.registeredTools.avenor_result.execute('t3', { run_id: 'ra', supervisor_id: SOCK }, undefined, undefined, h.ctx)
+
+    betaDone = true
+    await h.waitPollMatching(payload => payload.entries.some((e: { label: string; status: string }) => e.label === 'beta' && e.status === 'done'))
+    const interrupted = await resultPromise
+    expect(interrupted.details).toMatchObject({
+      run_id: 'ra',
+      status: 'running',
+      ready: false,
+      interrupted_by: { run_id: 'rb', label: 'beta', status: 'done' },
+    })
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('does not interrupt the avenor_result waiting on the run that stopped', async () => {
+    const SOCK = '/tmp/own-stop.sock'
+    let alphaWaiting = false
+    let resolveResult!: (v: unknown) => void
+    const resultGate = new Promise(resolve => { resolveResult = resolve })
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (args.supervisorId === SOCK) {
+        return alphaWaiting
+          ? { run_id: 'ra', label: 'alpha', status: 'waiting', runtime_id: 'rt-a', pending_permission: { description: 'allow write' } }
+          : { run_id: 'ra', label: 'alpha', status: 'running', runtime_id: 'rt-a' }
+      }
+      if (!args.runId) return []
+      return { run_id: args.runId, label: args.runId, status: 'running' }
+    })
+    const resultTool = mock(async () => {
+      const value = await resultGate
+      return value
+    })
+
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      resultTool,
+      spawnTool: mock(async (args: { label?: string }) => ({
+        run_id: args.label === 'alpha' ? 'ra' : 'rb',
+        label: args.label ?? 'spawned',
+        supervisor_id: SOCK,
+        runtime_id: args.label === 'alpha' ? 'rt-a' : 'rt-b',
+      })),
+    })
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    const resultPromise = h.registeredTools.avenor_result.execute('t2', { run_id: 'ra', supervisor_id: SOCK }, undefined, undefined, h.ctx)
+
+    alphaWaiting = true
+    await h.waitPollMatching(payload => payload.entries.some((e: { label: string; pendingPermission: boolean }) => e.label === 'alpha' && e.pendingPermission))
+    // Give the tick a chance to (wrongly) interrupt; the wait must hold.
+    await h.waitPollMatching(payload => payload.entries.some((e: { label: string; pendingPermission: boolean }) => e.label === 'alpha' && e.pendingPermission))
+    expect(resultTool).toHaveBeenCalledTimes(1)
+
+    resolveResult({ run_id: 'ra', label: 'alpha', status: 'waiting', ready: false, pending_permission: { description: 'allow write' } })
+    const result = await resultPromise
+    expect(result.details).toMatchObject({ status: 'waiting', ready: false })
+    expect(result.details).not.toHaveProperty('interrupted_by')
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('interrupts a blocking spawn wait when a sibling run stops', async () => {
+    const SOCK = '/tmp/sibling-spawn.sock'
+    let alphaDone = false
+    let betaDone = false
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (args.supervisorId === SOCK) {
+        if (args.runId === 'rb') {
+          return betaDone
+            ? { run_id: 'rb', label: 'beta', status: 'done', runtime_id: 'rt-b', final_output: 'beta answer' }
+            : { run_id: 'rb', label: 'beta', status: 'running', runtime_id: 'rt-b' }
+        }
+        return alphaDone
+          ? { run_id: 'ra', label: 'alpha', status: 'done', runtime_id: 'rt-a', final_output: 'alpha answer' }
+          : { run_id: 'ra', label: 'alpha', status: 'running', runtime_id: 'rt-a' }
+      }
+      if (!args.runId) return []
+      return { run_id: args.runId, label: args.runId, status: 'running' }
+    })
+
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      // Keeps the blocking spawn wait alive until the sibling's stopping point
+      // aborts it through the await registry.
+      observeRun: mock(async () => ({
+        subscribe: (cb: (snapshot: unknown) => void) => {
+          void cb
+          return () => {}
+        },
+        snapshot: () => ({ last_event: undefined, transcript: [], pending_permission: false, ended: false }),
+        close: async () => {},
+      })),
+      spawnTool: mock(async (args: { label?: string }) => ({
+        run_id: args.label === 'alpha' ? 'ra' : 'rb',
+        label: args.label ?? 'spawned',
+        supervisor_id: SOCK,
+        runtime_id: args.label === 'alpha' ? 'rt-a' : 'rt-b',
+      })),
+    })
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'beta', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    const spawnPromise = h.registeredTools.avenor_spawn.execute('t2', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: true }, undefined, undefined, h.ctx)
+
+    betaDone = true
+    await h.waitPollMatching(payload => payload.entries.some((e: { label: string; status: string }) => e.label === 'beta' && e.status === 'done'))
+    const spawnResult = await spawnPromise
+    expect(String(spawnResult.content[0].text)).toContain('was interrupted')
+    expect(spawnResult.details).toMatchObject({
+      run_id: 'ra',
+      interrupted_by: { run_id: 'rb', label: 'beta', status: 'done' },
+    })
+
+    // Alpha must stay tracked in auto-delivery mode (blocking=false), so its
+    // later completion is delivered as a follow-up message.
+    let resolveCompletion!: () => void
+    const completionSent = new Promise<void>(resolve => { resolveCompletion = resolve })
+    h.sendUserMessage.mockImplementation(() => resolveCompletion())
+    alphaDone = true
+    await completionSent
+    const completions = h.sendUserMessage.mock.calls.map(([t]) => String(t)).filter(t => t.includes('Sub-agent "alpha" finished'))
+    expect(completions).toHaveLength(1)
 
     await h.eventHandlers.session_shutdown()
   })

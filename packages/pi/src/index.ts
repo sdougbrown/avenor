@@ -39,6 +39,7 @@ import {
   workflowReadyTool,
   type Client,
   type InspectResult,
+  type ResultResult,
   type RunObserver,
   type RunSnapshot,
   type StatusResult,
@@ -408,6 +409,101 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     const pollingErrors: PollErrorPayload[] = []
     let lastStatusEntries: RunStatusEntry[] = []
 
+    // Registry of in-flight blocking waits (avenor_result, spawn with
+    // wait=true). When any run reaches a stopping point, sibling waits are
+    // interrupted so the agent regains control instead of staying blocked
+    // until every parallel run resolves.
+    interface StoppingPoint {
+      runId: string
+      label?: string
+      status: string
+    }
+    interface PendingWait {
+      runKey: string
+      interrupt: (stop: StoppingPoint) => void
+    }
+    const pendingWaits = new Set<PendingWait>()
+
+    function interruptPendingWaits(stop: StoppingPoint, excludeRunKey?: string): void {
+      for (const wait of [...pendingWaits]) {
+        if (wait.runKey === excludeRunKey) continue
+        pendingWaits.delete(wait)
+        wait.interrupt(stop)
+      }
+    }
+
+    function registerPendingWait(runKey: string, interrupt: PendingWait['interrupt']): PendingWait {
+      const wait: PendingWait = { runKey, interrupt }
+      pendingWaits.add(wait)
+      return wait
+    }
+
+    interface InterruptibleWait {
+      signal: AbortSignal
+      readonly stopped: StoppingPoint | undefined
+      dispose(): void
+    }
+
+    function createInterruptibleWait(runKey: string, signal: AbortSignal | undefined): InterruptibleWait {
+      const controller = new AbortController()
+      let stopped: StoppingPoint | undefined
+      const onSignalAbort = () => controller.abort()
+      if (signal?.aborted) controller.abort()
+      else signal?.addEventListener('abort', onSignalAbort)
+      const pending = registerPendingWait(runKey, (stop) => {
+        if (controller.aborted) return
+        stopped = stop
+        controller.abort()
+      })
+      return {
+        signal: controller.signal,
+        get stopped() {
+          return stopped
+        },
+        dispose() {
+          pendingWaits.delete(pending)
+          signal?.removeEventListener('abort', onSignalAbort)
+        },
+      }
+    }
+
+    type InterruptedResult = ResultResult & { interrupted_by?: StoppingPoint }
+
+    /** Build the early return for a wait interrupted by a sibling stopping
+     * point. When the awaited run itself has since reached a stopping point
+     * (possible when the caller omitted supervisor_id and the registry key
+     * diverged), deliver its real state instead of an interruption notice. */
+    async function resultAfterInterrupt(
+      runId: string,
+      supervisorId: string | undefined,
+      stop: StoppingPoint,
+    ): Promise<InterruptedResult> {
+      let current: StatusResult | undefined
+      try {
+        const raw = await deps.statusTool({ runId, supervisorId, view: 'full' })
+        current = Array.isArray(raw) ? raw[0] : raw
+      } catch {
+        // Status unavailable; report the interruption without run state.
+      }
+      const stoppedItself = current !== undefined && (isTerminalStatus(current.status) || current.status === 'waiting')
+      if (stoppedItself) {
+        try {
+          const fresh = await deps.resultTool({ runId, supervisorId, wait: true })
+          return { ...fresh, interrupted_by: { run_id: stop.runId, label: stop.label, status: stop.status } }
+        } catch {
+          // Fall through to the minimal shape below.
+        }
+      }
+      return {
+        run_id: current?.run_id ?? runId,
+        label: current?.label ?? runId,
+        status: current?.status ?? 'running',
+        ready: false,
+        ...(current?.pending_permission && { pending_permission: current.pending_permission }),
+        interrupted_by: { run_id: stop.runId, label: stop.label, status: stop.status },
+      }
+    }
+
     // Sub-agent broker mode: when the avenor pi provider launches a pi
     // sub-process it injects broker credentials via AVENOR_BROKER_URL /
     // AVENOR_RUN_ID / AVENOR_BROKER_TOKEN. In that mode this extension polls
@@ -735,6 +831,22 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         for (const entry of entries) {
           const entryKey = trackedRunKey(entry.supervisorId, entry.runId)
           const run = trackedRuns.get(entryKey)
+
+          // Any stopping point (terminal or pending permission) interrupts
+          // sibling blocking waits so the agent can react without waiting for
+          // every parallel run to resolve. The waiter for this run itself is
+          // excluded: its own stop is delivered by the natural result path.
+          if (entry.pendingPermission || isTerminalStatus(entry.status)) {
+            interruptPendingWaits(
+              {
+                runId: entry.runId,
+                label: entry.label,
+                status: isTerminalStatus(entry.status) ? entry.status : 'waiting',
+              },
+              entryKey,
+            )
+          }
+
           if (!run) continue
 
           if (isTerminalStatus(entry.status)) {
@@ -1115,12 +1227,12 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       name: 'avenor_spawn',
       label: 'Avenor Spawn',
       description:
-        `Dispatch an agent run via avenor. Optional thinking accepts ${[...THINKING_LEVELS].slice(0, -1).join(', ')}, or ${THINKING_LEVELS[THINKING_LEVELS.length - 1]}; unsupported backends reject explicit values. Blocks by default, showing live progress. Set wait=false for fire-and-forget.`,
+        `Dispatch an agent run via avenor. Optional thinking accepts ${[...THINKING_LEVELS].slice(0, -1).join(', ')}, or ${THINKING_LEVELS[THINKING_LEVELS.length - 1]}; unsupported backends reject explicit values. Blocks by default, showing live progress. Set wait=false for fire-and-forget. With several blocking spawns in parallel, the first stopping point (permission or completion) interrupts the other waits.`,
       promptSnippet: 'Dispatch sub-agent runs via avenor (spawn, status, result, inspect, events, follow-up, shutdown)',
       promptGuidelines: [
         'Use avenor_spawn to delegate well-defined tasks to sub-agents.',
         'Use avenor_status (view "lifecycle") only to check progress or pending permissions.',
-        'Use avenor_result to retrieve the final result of a sub-agent; it waits by default, but set wait=false for runs that already completed.',
+        'Use avenor_result to retrieve the final result of a sub-agent; it waits by default, but set wait=false for runs that already completed. When awaiting multiple runs, the first stopping point (permission or completion) interrupts the other waits.',
         'Use avenor_inspect to review a bounded transcript and tool activity from a run.',
         'Use avenor_events only when you specifically need raw event payloads.',
         'Use avenor_follow_up to iterate on a completed run.',
@@ -1217,8 +1329,26 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           details: { status: 'running', run_id: result.run_id },
         })
 
-        const waitResult = await waitForRun(runRef, signal, onUpdate)
+        const blockingWait = createInterruptibleWait(trackedRunKey(supervisorId, result.run_id), signal)
+        const waitResult = await waitForRun(runRef, blockingWait.signal, onUpdate)
+        blockingWait.dispose()
         if (waitResult.aborted) {
+          const stop = blockingWait.stopped
+          if (stop) {
+            // A sibling run reached a stopping point first: hand control back
+            // to the agent and let the polling tick deliver this run's
+            // completion, exactly like a wait=false spawn.
+            const tracked = getTrackedRun(result.run_id, supervisorId)
+            if (tracked) tracked.blocking = false
+            return {
+              content: [{ type: 'text', text: `Monitoring of "${label}" (run_id: ${result.run_id}) was interrupted: "${stop.label ?? stop.runId}" reached ${stop.status === 'waiting' ? 'a permission request' : stop.status}. Handle that first; this run's final result is delivered automatically.` }],
+              details: {
+                run_id: result.run_id,
+                interrupted_by: { run_id: stop.runId, label: stop.label, status: stop.status },
+                ...spawnIdentityMetadata(hostParams),
+              },
+            }
+          }
           trackedRuns.delete(trackedRunKey(supervisorId, result.run_id))
           return {
             content: [{ type: 'text', text: `Monitoring of "${label}" (run_id: ${result.run_id}) was interrupted. Use avenor_status or avenor_inspect to check.` }],
@@ -1357,7 +1487,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     pi.registerTool({
       name: 'avenor_result',
       label: 'Avenor Result',
-      description: 'Retrieve the complete final output of a run without transcript or event details. Waits by default; set wait=false to retrieve an already-completed run without blocking.',
+      description:
+        `Retrieve the complete final output of a run without transcript or event details. Waits by default; set wait=false to retrieve an already-completed run without blocking. When several runs are pending, the first stopping point (a permission request or completion on any run) interrupts other blocking waits so they can be handled; re-issue the interrupted wait afterwards.`,
       parameters: Type.Object({
         run_id: Type.String({ description: 'Run ID or label' }),
         wait: Type.Optional(Type.Boolean({ description: 'Wait for a terminal result (default true); false retrieves the current state without blocking' })),
@@ -1370,14 +1501,21 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         if (tracked) tracked.blocking = true
         let completed = false
 
+        const blockingWait = createInterruptibleWait(trackedRunKey(params.supervisor_id, params.run_id), signal)
         try {
-          const result = await deps.resultTool({
-            runId: params.run_id,
-            supervisorId: params.supervisor_id,
-            wait: params.wait,
-            timeout: params.timeout,
-            signal,
-          })
+          let result: InterruptedResult
+          try {
+            result = await deps.resultTool({
+              runId: params.run_id,
+              supervisorId: params.supervisor_id,
+              wait: params.wait,
+              timeout: params.timeout,
+              signal: blockingWait.signal,
+            })
+          } catch (err) {
+            if (!blockingWait.stopped) throw err
+            result = await resultAfterInterrupt(params.run_id, params.supervisor_id, blockingWait.stopped)
+          }
           completed = result.ready
           if (completed) {
             // Only mark the run consumed (and suppress the automatic completion)
@@ -1407,6 +1545,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             details: result,
           }
         } finally {
+          blockingWait.dispose()
           if (!completed && tracked && getTrackedRun(params.run_id, params.supervisor_id) === tracked) {
             tracked.blocking = previousBlocking ?? false
           }
