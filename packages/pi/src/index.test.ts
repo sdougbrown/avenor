@@ -1101,7 +1101,7 @@ describe('Avenor Pi extension', () => {
     await h.eventHandlers.session_shutdown()
   })
 
-  it('delivers the completion after an interrupted avenor_result (never consumed)', async () => {
+  it('does not consume the run when avenor_result returns non-ready (completion still delivered)', async () => {
     const SOCK = '/tmp/interrupted.sock'
     let done = false
     const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
