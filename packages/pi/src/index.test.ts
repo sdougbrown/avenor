@@ -1142,24 +1142,47 @@ describe('Avenor Pi extension', () => {
     await h.eventHandlers.session_shutdown()
   })
 
-  it('interrupts a blocking avenor_result when a sibling run requests permission', async () => {
-    const SOCK = '/tmp/sibling-permission.sock'
-    let betaPermission = false
-    let alphaDone = false
-    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
-      if (args.supervisorId === SOCK) {
+  interface TwoRunFlags {
+    alphaDone?: boolean
+    alphaWaiting?: boolean
+    betaDone?: boolean
+    betaPermission?: boolean
+  }
+
+  /** Status + spawn fixtures for the two-run (alpha/beta) interrupt tests.
+   * `flags` is a getter so tests can flip run state between polls. */
+  function makeTwoRunStatusTool(sock: string, flags: () => TwoRunFlags) {
+    return mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (args.supervisorId === sock) {
+        const f = flags()
         if (args.runId === 'rb') {
-          return betaPermission
-            ? { run_id: 'rb', label: 'beta', status: 'waiting', runtime_id: 'rt-b', pending_permission: { description: 'allow write' } }
-            : { run_id: 'rb', label: 'beta', status: 'running', runtime_id: 'rt-b' }
+          if (f.betaDone) return { run_id: 'rb', label: 'beta', status: 'done', runtime_id: 'rt-b', final_output: 'beta answer' }
+          if (f.betaPermission) return { run_id: 'rb', label: 'beta', status: 'waiting', runtime_id: 'rt-b', pending_permission: { description: 'allow write' } }
+          return { run_id: 'rb', label: 'beta', status: 'running', runtime_id: 'rt-b' }
         }
-        return alphaDone
-          ? { run_id: 'ra', label: 'alpha', status: 'done', runtime_id: 'rt-a', final_output: 'alpha answer' }
-          : { run_id: 'ra', label: 'alpha', status: 'running', runtime_id: 'rt-a' }
+        if (f.alphaDone) return { run_id: 'ra', label: 'alpha', status: 'done', runtime_id: 'rt-a', final_output: 'alpha answer' }
+        if (f.alphaWaiting) return { run_id: 'ra', label: 'alpha', status: 'waiting', runtime_id: 'rt-a', pending_permission: { description: 'allow write' } }
+        return { run_id: 'ra', label: 'alpha', status: 'running', runtime_id: 'rt-a' }
       }
       if (!args.runId) return []
       return { run_id: args.runId, label: args.runId, status: 'running' }
     })
+  }
+
+  function makeTwoRunSpawnTool(sock: string) {
+    return mock(async (args: { label?: string }) => ({
+      run_id: args.label === 'alpha' ? 'ra' : 'rb',
+      label: args.label ?? 'spawned',
+      supervisor_id: sock,
+      runtime_id: args.label === 'alpha' ? 'rt-a' : 'rt-b',
+    }))
+  }
+
+  it('interrupts a blocking avenor_result when a sibling run requests permission', async () => {
+    const SOCK = '/tmp/sibling-permission.sock'
+    let betaPermission = false
+    let alphaDone = false
+    const statusTool = makeTwoRunStatusTool(SOCK, () => ({ betaPermission, alphaDone }))
     // First call blocks until aborted (the interrupt). Re-issued calls block
     // until released, and reject if the transition gate wrongly re-interrupts.
     let resolveReissue!: (v: unknown) => void
@@ -1179,12 +1202,7 @@ describe('Avenor Pi extension', () => {
     const h = await createMultiSupervisorHarness({
       statusTool,
       resultTool,
-      spawnTool: mock(async (args: { label?: string }) => ({
-        run_id: args.label === 'alpha' ? 'ra' : 'rb',
-        label: args.label ?? 'spawned',
-        supervisor_id: SOCK,
-        runtime_id: args.label === 'alpha' ? 'rt-a' : 'rt-b',
-      })),
+      spawnTool: makeTwoRunSpawnTool(SOCK),
     })
 
     await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
@@ -1231,18 +1249,7 @@ describe('Avenor Pi extension', () => {
   it('interrupts a blocking avenor_result when a sibling run completes', async () => {
     const SOCK = '/tmp/sibling-terminal.sock'
     let betaDone = false
-    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
-      if (args.supervisorId === SOCK) {
-        if (args.runId === 'rb') {
-          return betaDone
-            ? { run_id: 'rb', label: 'beta', status: 'done', runtime_id: 'rt-b', final_output: 'beta answer' }
-            : { run_id: 'rb', label: 'beta', status: 'running', runtime_id: 'rt-b' }
-        }
-        return { run_id: 'ra', label: 'alpha', status: 'running', runtime_id: 'rt-a' }
-      }
-      if (!args.runId) return []
-      return { run_id: args.runId, label: args.runId, status: 'running' }
-    })
+    const statusTool = makeTwoRunStatusTool(SOCK, () => ({ betaDone }))
     const resultTool = mock((args: { signal?: AbortSignal }) => new Promise((_resolve, reject) => {
       args.signal?.addEventListener('abort', () => reject(new Error('result wait cancelled')))
     }))
@@ -1250,12 +1257,7 @@ describe('Avenor Pi extension', () => {
     const h = await createMultiSupervisorHarness({
       statusTool,
       resultTool,
-      spawnTool: mock(async (args: { label?: string }) => ({
-        run_id: args.label === 'alpha' ? 'ra' : 'rb',
-        label: args.label ?? 'spawned',
-        supervisor_id: SOCK,
-        runtime_id: args.label === 'alpha' ? 'rt-a' : 'rt-b',
-      })),
+      spawnTool: makeTwoRunSpawnTool(SOCK),
     })
 
     await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
@@ -1318,20 +1320,7 @@ describe('Avenor Pi extension', () => {
     const SOCK = '/tmp/both-stopped.sock'
     let alphaDone = false
     let betaDone = false
-    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
-      if (args.supervisorId === SOCK) {
-        if (args.runId === 'rb') {
-          return betaDone
-            ? { run_id: 'rb', label: 'beta', status: 'done', runtime_id: 'rt-b', final_output: 'beta answer' }
-            : { run_id: 'rb', label: 'beta', status: 'running', runtime_id: 'rt-b' }
-        }
-        return alphaDone
-          ? { run_id: 'ra', label: 'alpha', status: 'done', runtime_id: 'rt-a', final_output: 'alpha answer' }
-          : { run_id: 'ra', label: 'alpha', status: 'running', runtime_id: 'rt-a' }
-      }
-      if (!args.runId) return []
-      return { run_id: args.runId, label: args.runId, status: 'running' }
-    })
+    const statusTool = makeTwoRunStatusTool(SOCK, () => ({ alphaDone, betaDone }))
     // First call blocks until aborted; the post-interrupt redelivery call
     // resolves immediately with alpha's terminal result.
     let firstCall = true
@@ -1348,12 +1337,7 @@ describe('Avenor Pi extension', () => {
     const h = await createMultiSupervisorHarness({
       statusTool,
       resultTool,
-      spawnTool: mock(async (args: { label?: string }) => ({
-        run_id: args.label === 'alpha' ? 'ra' : 'rb',
-        label: args.label ?? 'spawned',
-        supervisor_id: SOCK,
-        runtime_id: args.label === 'alpha' ? 'rt-a' : 'rt-b',
-      })),
+      spawnTool: makeTwoRunSpawnTool(SOCK),
     })
 
     await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'beta', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
@@ -1386,15 +1370,7 @@ describe('Avenor Pi extension', () => {
     let alphaWaiting = false
     let resolveResult!: (v: unknown) => void
     const resultGate = new Promise(resolve => { resolveResult = resolve })
-    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
-      if (args.supervisorId === SOCK) {
-        return alphaWaiting
-          ? { run_id: 'ra', label: 'alpha', status: 'waiting', runtime_id: 'rt-a', pending_permission: { description: 'allow write' } }
-          : { run_id: 'ra', label: 'alpha', status: 'running', runtime_id: 'rt-a' }
-      }
-      if (!args.runId) return []
-      return { run_id: args.runId, label: args.runId, status: 'running' }
-    })
+    const statusTool = makeTwoRunStatusTool(SOCK, () => ({ alphaWaiting }))
     // Abort-aware: the mock must observe the controller's abort, or the
     // own-run exclusion this test pins would be untestable.
     const resultTool = mock((args: { signal?: AbortSignal }) => new Promise((resolve, reject) => {
@@ -1405,12 +1381,7 @@ describe('Avenor Pi extension', () => {
     const h = await createMultiSupervisorHarness({
       statusTool,
       resultTool,
-      spawnTool: mock(async (args: { label?: string }) => ({
-        run_id: args.label === 'alpha' ? 'ra' : 'rb',
-        label: args.label ?? 'spawned',
-        supervisor_id: SOCK,
-        runtime_id: args.label === 'alpha' ? 'rt-a' : 'rt-b',
-      })),
+      spawnTool: makeTwoRunSpawnTool(SOCK),
     })
 
     await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
@@ -1432,13 +1403,7 @@ describe('Avenor Pi extension', () => {
 
   it('releases blocking waits when the session shuts down', async () => {
     const SOCK = '/tmp/shutdown-release.sock'
-    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
-      if (args.supervisorId === SOCK) {
-        return { run_id: 'ra', label: 'alpha', status: 'running', runtime_id: 'rt-a' }
-      }
-      if (!args.runId) return []
-      return { run_id: args.runId, label: args.runId, status: 'running' }
-    })
+    const statusTool = makeTwoRunStatusTool(SOCK, () => ({}))
     const resultTool = mock((args: { signal?: AbortSignal }) => new Promise((_resolve, reject) => {
       args.signal?.addEventListener('abort', () => reject(new Error('result wait cancelled')))
     }))
@@ -1460,13 +1425,7 @@ describe('Avenor Pi extension', () => {
 
   it('treats a caller-aborted wait as a plain abort, not a sibling interrupt', async () => {
     const SOCK = '/tmp/caller-abort.sock'
-    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
-      if (args.supervisorId === SOCK) {
-        return { run_id: 'ra', label: 'alpha', status: 'running', runtime_id: 'rt-a' }
-      }
-      if (!args.runId) return []
-      return { run_id: args.runId, label: args.runId, status: 'running' }
-    })
+    const statusTool = makeTwoRunStatusTool(SOCK, () => ({}))
     const resultTool = mock((args: { signal?: AbortSignal }) => new Promise((_resolve, reject) => {
       args.signal?.addEventListener('abort', () => reject(new Error('result wait cancelled')))
     }))
@@ -1483,12 +1442,7 @@ describe('Avenor Pi extension', () => {
       statusTool,
       resultTool,
       observeRun,
-      spawnTool: mock(async (args: { label?: string }) => ({
-        run_id: args.label === 'alpha' ? 'ra' : 'rb',
-        label: args.label ?? 'spawned',
-        supervisor_id: SOCK,
-        runtime_id: args.label === 'alpha' ? 'rt-a' : 'rt-b',
-      })),
+      spawnTool: makeTwoRunSpawnTool(SOCK),
     })
 
     await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
@@ -1512,20 +1466,7 @@ describe('Avenor Pi extension', () => {
     const SOCK = '/tmp/sibling-spawn.sock'
     let alphaDone = false
     let betaDone = false
-    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
-      if (args.supervisorId === SOCK) {
-        if (args.runId === 'rb') {
-          return betaDone
-            ? { run_id: 'rb', label: 'beta', status: 'done', runtime_id: 'rt-b', final_output: 'beta answer' }
-            : { run_id: 'rb', label: 'beta', status: 'running', runtime_id: 'rt-b' }
-        }
-        return alphaDone
-          ? { run_id: 'ra', label: 'alpha', status: 'done', runtime_id: 'rt-a', final_output: 'alpha answer' }
-          : { run_id: 'ra', label: 'alpha', status: 'running', runtime_id: 'rt-a' }
-      }
-      if (!args.runId) return []
-      return { run_id: args.runId, label: args.runId, status: 'running' }
-    })
+    const statusTool = makeTwoRunStatusTool(SOCK, () => ({ alphaDone, betaDone }))
 
     const h = await createMultiSupervisorHarness({
       statusTool,
@@ -1539,12 +1480,7 @@ describe('Avenor Pi extension', () => {
         snapshot: () => ({ last_event: undefined, transcript: [], pending_permission: false, ended: false }),
         close: async () => {},
       })),
-      spawnTool: mock(async (args: { label?: string }) => ({
-        run_id: args.label === 'alpha' ? 'ra' : 'rb',
-        label: args.label ?? 'spawned',
-        supervisor_id: SOCK,
-        runtime_id: args.label === 'alpha' ? 'rt-a' : 'rt-b',
-      })),
+      spawnTool: makeTwoRunSpawnTool(SOCK),
     })
 
     await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'beta', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
