@@ -49,6 +49,34 @@ describe('askTool', () => {
     expect(err.message).toContain('ask failed')
   })
 
+  it('surfaces withdraw guidance when the failed ask is still pending', async () => {
+    const rpcError = new RpcError(-32000, 'ask failed', { message_id: 'abc123', pending: true })
+    brokerAskMock.mockRejectedValueOnce(rpcError)
+    const err = await askTool({ toRunId: 'rt_1', message: 'hello' }).catch((e) => e)
+    expect(err).toBeInstanceOf(Error)
+    expect(err.message).toContain('message_id: abc123')
+    expect(err.message).toContain('pass to avenor_cancel to withdraw')
+  })
+
+  it('reports an already-withdrawn ask instead of suggesting a cancel', async () => {
+    const rpcError = new RpcError(-32000, 'ask failed', { message_id: 'abc123', pending: false })
+    brokerAskMock.mockRejectedValueOnce(rpcError)
+    const err = await askTool({ toRunId: 'rt_1', message: 'hello' }).catch((e) => e)
+    expect(err).toBeInstanceOf(Error)
+    expect(err.message).toContain('message_id: abc123')
+    expect(err.message).toContain('the pending ask was already withdrawn')
+    expect(err.message).not.toContain('pass to avenor_cancel to withdraw')
+  })
+
+  it('keeps the withdraw guidance when pending is absent (legacy shape)', async () => {
+    const rpcError = new RpcError(-32000, 'ask failed', { message_id: 'abc123' })
+    brokerAskMock.mockRejectedValueOnce(rpcError)
+    const err = await askTool({ toRunId: 'rt_1', message: 'hello' }).catch((e) => e)
+    expect(err).toBeInstanceOf(Error)
+    expect(err.message).toContain('message_id: abc123')
+    expect(err.message).toContain('pass to avenor_cancel to withdraw')
+  })
+
   it('propagates an RpcError without a message_id unchanged', async () => {
     const rpcError = new RpcError(-32000, 'ask failed', { other: 1 })
     brokerAskMock.mockRejectedValueOnce(rpcError)

@@ -2549,14 +2549,13 @@ func TestBrokerDrainAgentMessages(t *testing.T) {
 // wait_reply long-poll and drop a reply that arrives after the deadline.
 func TestBrokerWaitReplyDeliversReplyAfterWriteTimeout(t *testing.T) {
 	b := New("")
+	// Shorten the write deadline before Start so the server is created with a
+	// deadline the wait_reply long-poll can actually exceed in a test.
+	b.writeTimeout = 100 * time.Millisecond
 	if err := b.Start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	defer b.Stop()
-
-	// Shorten the write deadline before Start so the test can observe the old
-	// truncation behavior without a 30s wait.
-	b.writeTimeout = 100 * time.Millisecond
 
 	// Fresh connections per request so each wait_reply gets its own deadline.
 	noKeepAlive := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}

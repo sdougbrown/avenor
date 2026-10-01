@@ -1723,7 +1723,7 @@ func (s *Supervisor) BrokerAsk(ctx context.Context, toRunID, message, role strin
 		"payload":     payload,
 	}
 	if _, err := s.brokerPostContext(ctx, "/send", sendBody); err != nil {
-		return nil, &control.AskError{MessageID: msgID, Err: fmt.Errorf("send ask: %w", err)}
+		return nil, &control.AskError{MessageID: msgID, Pending: false, Err: fmt.Errorf("send ask: %w", err)}
 	}
 	// Wait for reply. If the caller gives up (context cancelled), withdraw the
 	// pending ask so a late-arriving child cannot pair with a dead waiter.
@@ -1731,19 +1731,26 @@ func (s *Supervisor) BrokerAsk(ctx context.Context, toRunID, message, role strin
 		"waiting_for": msgID,
 	})
 	if err != nil {
+		pending := false
 		if ctx.Err() != nil {
+			// The broker clears the ask edge either when it sees the cancelled
+			// wait_reply request or on this cleanup POST. A cleanup that fails
+			// for any other reason leaves the edge pending.
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			_, _ = s.brokerPostContext(cleanupCtx, "/cancel_message", map[string]any{
+			_, cleanErr := s.brokerPostContext(cleanupCtx, "/cancel_message", map[string]any{
 				"cancel_message_id": msgID,
 			})
+			if cleanErr != nil && !strings.Contains(cleanErr.Error(), "no pending ask for this message id") {
+				pending = true
+			}
 		}
-		return nil, &control.AskError{MessageID: msgID, Err: fmt.Errorf("wait for reply: %w", err)}
+		return nil, &control.AskError{MessageID: msgID, Pending: pending, Err: fmt.Errorf("wait for reply: %w", err)}
 	}
 	// Parse the reply
 	var result map[string]any
 	if err := json.Unmarshal(replyBody, &result); err != nil {
-		return nil, &control.AskError{MessageID: msgID, Err: fmt.Errorf("parse reply: %w", err)}
+		return nil, &control.AskError{MessageID: msgID, Pending: false, Err: fmt.Errorf("parse reply: %w", err)}
 	}
 	return result, nil
 }

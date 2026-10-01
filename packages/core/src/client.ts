@@ -297,7 +297,7 @@ export class Client {
     }
   }
 
-  async call(method: string, params?: unknown): Promise<unknown> {
+  async call(method: string, params?: unknown, opts?: { timeoutMs?: number }): Promise<unknown> {
     if (this.isClosed()) {
       throw new Error('control socket is closed')
     }
@@ -311,11 +311,19 @@ export class Client {
 
     const data = JSON.stringify(req) + '\n'
 
+    // A per-call timeout_ms bounds the server-side wait; the client must not
+    // fire first. The +10s margin lets the server's structured ask-error
+    // response (written after bounded cleanup) arrive before the timer fires.
+    const timeout =
+      opts?.timeoutMs !== undefined
+        ? Math.max(this.callTimeout, opts.timeoutMs + 10_000)
+        : this.callTimeout
+
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id)
         reject(new Error('read response: timeout'))
-      }, this.callTimeout)
+      }, timeout)
 
       this.pending.set(id, { resolve, reject, timer })
 
@@ -590,7 +598,7 @@ export class Client {
   async brokerAsk(toRunId: string, message: string, role?: string, timeoutMs?: number): Promise<Record<string, unknown>> {
     const params: Record<string, unknown> = { to_run_id: toRunId, message, role: role ?? 'agent' }
     if (timeoutMs !== undefined) params.timeout_ms = timeoutMs
-    return await this.call('broker_ask', params) as Record<string, unknown>
+    return await this.call('broker_ask', params, timeoutMs !== undefined ? { timeoutMs } : undefined) as Record<string, unknown>
   }
 
   async brokerPeers(): Promise<Array<Record<string, unknown>>> {

@@ -118,10 +118,13 @@ type StableHandler interface {
 	WaitForCapacityMS(timeoutMS int) error
 }
 
-// AskError carries the broker message ID of a failed ask so callers can
-// cancel the pending ask with broker_cancel instead of retrying blind.
+// AskError carries the broker message ID of a failed ask plus whether the
+// ask edge may still be pending on the broker. Pending is true only when the
+// edge was not provably cleaned up; callers can then withdraw it with
+// broker_cancel instead of retrying blind.
 type AskError struct {
 	MessageID string
+	Pending   bool
 	Err       error
 }
 
@@ -132,7 +135,7 @@ func (e *AskError) Unwrap() error { return e.Err }
 func askErrorData(err error) any {
 	var ae *AskError
 	if errors.As(err, &ae) {
-		return map[string]any{"message_id": ae.MessageID}
+		return map[string]any{"message_id": ae.MessageID, "pending": ae.Pending}
 	}
 	return nil
 }
@@ -1303,7 +1306,9 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 				defer cancel()
 			}
 			result, err := s.stableHandler.BrokerAsk(ctx, p.ToRunID, p.Message, p.Role)
-			if c.ctx.Err() != nil {
+			// The ask itself still runs fire-and-forget, but a JSON-RPC
+			// notification (no id) must not get a response frame.
+			if req.ID == nil || c.ctx.Err() != nil {
 				return
 			}
 			if err != nil {

@@ -48,11 +48,21 @@ async function executeAskTool(
         from_run_id: (result.from_run_id as string) ?? '',
       }
     } catch (error) {
-      // A failed ask still has a pending message on the broker; surface its
-      // id so the caller can withdraw it with avenor_cancel.
+      // A failed ask reports its message_id and whether the ask edge is still
+      // pending on the broker (withdrawable via avenor_cancel) or already
+      // withdrawn. Surface the matching guidance.
       if (error instanceof RpcError && error.data && typeof error.data === 'object') {
-        const messageId = (error.data as Record<string, unknown>).message_id
+        const data = error.data as Record<string, unknown>
+        const messageId = data.message_id
         if (typeof messageId === 'string' && messageId) {
+          const pending = data.pending
+          if (pending === false) {
+            throw new Error(
+              `ask failed (message_id: ${messageId} — the pending ask was already withdrawn): ${error.message}`,
+            )
+          }
+          // pending === true, or absent/unknown (legacy shape): the ask edge
+          // may still exist, so the caller can withdraw it.
           throw new Error(
             `ask failed (message_id: ${messageId} — pass to avenor_cancel to withdraw): ${error.message}`,
           )

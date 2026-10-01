@@ -6219,8 +6219,8 @@ func TestWorkflowMarkerEvidenceParity(t *testing.T) {
 }
 
 // TestBrokerAskContextCancellation verifies that a cancelled ask wait returns
-// an AskError carrying the message ID so the caller can withdraw the pending
-// ask (#243).
+// an AskError carrying the message ID and pending=false after the successful
+// cleanup POST withdraws the ask edge (#243).
 func TestBrokerAskContextCancellation(t *testing.T) {
 	b := broker.New("")
 	if err := b.Start(); err != nil {
@@ -6249,5 +6249,42 @@ func TestBrokerAskContextCancellation(t *testing.T) {
 	}
 	if askErr.MessageID == "" {
 		t.Fatal("AskError.MessageID is empty")
+	}
+	if askErr.Pending {
+		t.Fatal("AskError.Pending = true, want false after successful cleanup")
+	}
+}
+
+// TestBrokerAskCleanupFailureReportsPending verifies that when the ask wait is
+// cancelled and the cleanup POST fails (broker unreachable), the AskError
+// reports the edge as still pending so the caller knows cancel is possible.
+func TestBrokerAskCleanupFailureReportsPending(t *testing.T) {
+	b := broker.New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	sup := &Supervisor{broker: b}
+	if _, err := b.CreateRun("target"); err != nil {
+		t.Fatalf("create target run: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		// Stop the broker before cancelling so the cleanup POST fails.
+		b.Stop()
+		cancel()
+	}()
+
+	_, err := sup.BrokerAsk(ctx, "target", "interruption", "agent")
+	if err == nil {
+		t.Fatal("expected error from cancelled ask")
+	}
+	var askErr *control.AskError
+	if !errors.As(err, &askErr) {
+		t.Fatalf("error type = %T, want *control.AskError: %v", err, err)
+	}
+	if !askErr.Pending {
+		t.Fatal("AskError.Pending = false, want true when cleanup fails")
 	}
 }
