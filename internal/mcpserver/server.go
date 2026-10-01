@@ -533,7 +533,7 @@ func shapeStatusForView(status map[string]any, view string) map[string]any {
 	}
 
 	result := make(map[string]any)
-	for _, key := range []string{"run_id", "label", "status", "runtime_id", "phase", "phase_label", "pending_permission", "latest_seq", "timed_out"} {
+	for _, key := range []string{"run_id", "label", "status", "runtime_id", "phase", "phase_label", "pending_permission", "permission", "latest_seq", "timed_out"} {
 		if value, ok := status[key]; ok {
 			result[key] = value
 		}

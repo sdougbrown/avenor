@@ -503,7 +503,7 @@ func TestAvenorStatusListMCPShape(t *testing.T) {
 	fake := &fakeClient{listResult: []map[string]any{
 		{"runtime_id": "rt_1", "status": "running", "label": "one"},
 		{"runtime_id": "rt_2", "status": "done", "label": "two"},
-	}, statusResult: map[string]any{"runtime_id": "rt_1", "status": "running", "label": "one"}}
+	}, statusResult: map[string]any{"runtime_id": "rt_1", "status": "running", "label": "one", "permission": map[string]any{"request_id": "req-1", "description": "Read file"}}}
 	s, err := NewServer(Options{
 		Transport:     "stdio",
 		NoAutostart:   true,
@@ -587,6 +587,10 @@ func TestAvenorStatusListMCPShape(t *testing.T) {
 	}
 	if singleRecord["run_id"] != "rt_1" || singleRecord["status"] != "running" {
 		t.Fatalf("unexpected single-run record: %#v", singleRecord)
+	}
+	perm, ok := singleRecord["permission"].(map[string]any)
+	if !ok || perm["request_id"] != "req-1" {
+		t.Fatalf("permission = %#v, want request record", singleRecord["permission"])
 	}
 	if _, present := singleRecord["runs"]; present {
 		t.Fatal("single-run form should not include runs")
@@ -1112,9 +1116,10 @@ func TestAvenorStatusForwardsSpecialCharsToControlClient(t *testing.T) {
 }
 
 func TestAvenorStatusPendingPermissionShapes(t *testing.T) {
+	permission := map[string]any{"request_id": "req-42", "description": "Read file", "options": []any{map[string]any{"option_id": "allow_once"}}}
 	t.Run("legacy object", func(t *testing.T) {
 		fake := &fakeClient{
-			statusResult: map[string]any{"status": "running", "pending_permission": map[string]any{"request_id": "req-42"}},
+			statusResult: map[string]any{"status": "running", "pending_permission": map[string]any{"request_id": "req-42"}, "permission": permission},
 		}
 		s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
 		if err != nil {
@@ -1132,11 +1137,15 @@ func TestAvenorStatusPendingPermissionShapes(t *testing.T) {
 		if pending["request_id"] != "req-42" {
 			t.Fatalf("request_id = %v, want req-42", pending["request_id"])
 		}
+		perm, ok := m["permission"].(map[string]any)
+		if !ok || perm["request_id"] != "req-42" || perm["description"] != "Read file" {
+			t.Fatalf("permission = %#v, want request record", m["permission"])
+		}
 	})
 
 	t.Run("boolean", func(t *testing.T) {
 		fake := &fakeClient{
-			statusResult: map[string]any{"status": "running", "pending_permission": true},
+			statusResult: map[string]any{"status": "running", "pending_permission": true, "permission": permission},
 		}
 		s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
 		if err != nil {
@@ -1149,6 +1158,32 @@ func TestAvenorStatusPendingPermissionShapes(t *testing.T) {
 		m := statusOutputMap(t, result)
 		if m["pending_permission"] != true {
 			t.Fatalf("pending_permission = %v, want true", m["pending_permission"])
+		}
+		perm, ok := m["permission"].(map[string]any)
+		if !ok || perm["request_id"] != "req-42" {
+			t.Fatalf("permission = %#v, want request record", m["permission"])
+		}
+	})
+
+	t.Run("lifecycle view keeps the permission record", func(t *testing.T) {
+		fake := &fakeClient{
+			statusResult: map[string]any{"status": "running", "pending_permission": true, "permission": permission},
+		}
+		s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{RunID: "rt-x", View: "lifecycle"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := statusOutputMap(t, result)
+		perm, ok := m["permission"].(map[string]any)
+		if !ok || perm["request_id"] != "req-42" {
+			t.Fatalf("lifecycle permission = %#v, want request record", m["permission"])
+		}
+		if _, ok := m["dir"]; ok {
+			t.Fatal("lifecycle view unexpectedly included dir")
 		}
 	})
 }

@@ -253,13 +253,17 @@ one-second cadence; callers do not provide a poll interval.
 
 A pending permission interrupts every wait condition, including `terminal`.
 Inspect `pending_permission`, answer the request with `avenor_answer_permission`,
-and then issue another wait. The legacy `waiting` status remains supported.
+and then issue another wait. When a permission request is pending, the status
+carries a `permission` record with the request details (`request_id`,
+`description`, `options`), so callers can answer without a second query. The
+legacy `waiting` status remains supported.
 
 **Returns:** One status object if `run_id` is given, or an object with `runs`
 (an array of status objects) and `count` if omitted.
 A timed-out wait returns the latest status with `timed_out: true`; it does not
-cancel the underlying run. Lifecycle view retains `timed_out` but omits
-`final_output` and usage. Use `avenor_result` to harvest complete output.
+cancel the underlying run. Lifecycle view retains `timed_out` and the
+`permission` record but omits `final_output` and usage. Use `avenor_result` to
+harvest complete output.
 
 ### `avenor_result`
 
