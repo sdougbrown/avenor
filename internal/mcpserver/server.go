@@ -550,7 +550,7 @@ func resultFromStatus(status map[string]any, timedOut bool) map[string]any {
 		"status": state,
 		"ready":  ready,
 	}
-	for _, key := range []string{"runtime_id", "session_id", "stop_reason", "pending_permission"} {
+	for _, key := range []string{"runtime_id", "session_id", "stop_reason", "pending_permission", "permission"} {
 		if value, ok := status[key]; ok {
 			result[key] = value
 		}

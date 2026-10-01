@@ -277,7 +277,7 @@ Waits for one run and returns its complete final output without transcript or ra
 - `timeout` — maximum time to wait, such as `30s` or `5m`
 - `supervisor_id` — supervisor socket to query
 
-A terminal response has `ready: true` and includes the complete `output` when the backend exposed final assistant text. A blocked run returns its `pending_permission` immediately, even when its public status is still `running`. Answer the request before waiting again. If an older or unavailable control endpoint prevents lossless retrieval and a presentation fallback is returned, `output_truncated: true` and `output_event_path` make its possible truncation explicit; retry `avenor_result` or read the durable event path. If the result tool's own timeout expires, it returns the latest state with `ready: false` and `timed_out: true`; the underlying run keeps going.
+A terminal response has `ready: true` and includes the complete `output` when the backend exposed final assistant text. A blocked run returns its `pending_permission` immediately, even when its public status is still `running`, together with the `permission` record holding the request details. Answer the request before waiting again. If an older or unavailable control endpoint prevents lossless retrieval and a presentation fallback is returned, `output_truncated: true` and `output_event_path` make its possible truncation explicit; retry `avenor_result` or read the durable event path. If the result tool's own timeout expires, it returns the latest state with `ready: false` and `timed_out: true`; the underlying run keeps going.
 
 ### `avenor_answer_permission`
 
