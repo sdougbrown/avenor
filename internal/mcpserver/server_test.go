@@ -2026,16 +2026,38 @@ func TestSpawnAfterShutdownAutostartsNewSupervisor(t *testing.T) {
 	// The first spawn autostarts the default supervisor.
 	spawn("first spawn")
 
-	if _, _, err := s.handleAvenorShutdown(context.Background(), nil, shutdownArgs{}); err != nil {
-		t.Fatalf("shutdown: %v", err)
+	for cycle := 1; cycle <= 2; cycle++ {
+		if _, _, err := s.handleAvenorShutdown(context.Background(), nil, shutdownArgs{}); err != nil {
+			t.Fatalf("shutdown %d: %v", cycle, err)
+		}
+		// Shutdown must leave the server live: closed means only that
+		// Close() ran, so a later tool call may autostart a replacement.
+		if s.closed {
+			t.Fatalf("cycle %d: shutdown set closed, later tools would fail", cycle)
+		}
+		spawn(fmt.Sprintf("spawn after shutdown %d", cycle))
+
+		want := fmt.Sprintf("/tmp/avenor-restart-%d.sock", cycle+1)
+		if s.defaultSupervisorPath != want {
+			t.Fatalf("defaultSupervisorPath after restart %d = %q, want %q", cycle, s.defaultSupervisorPath, want)
+		}
 	}
 
-	// A later spawn without supervisor_id must autostart a fresh supervisor
-	// instead of failing with "control client not available".
-	spawn("spawn after shutdown")
+	if got := starts.Load(); got != 3 {
+		t.Fatalf("supervisor starts after two shutdown+spawn cycles = %d, want 3", got)
+	}
 
-	if got := starts.Load(); got != 2 {
-		t.Fatalf("supervisor starts after shutdown+spawn = %d, want 2", got)
+	// Server teardown still blocks later tool calls: shutdown must not set
+	// closed, but Close() must.
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, _, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
+		Agent:   "test",
+		RepoDir: ".",
+		Prompt:  "hello",
+	}); err == nil || !strings.Contains(err.Error(), "control client not available") {
+		t.Fatalf("spawn after Close error = %v, want 'control client not available'", err)
 	}
 }
 
