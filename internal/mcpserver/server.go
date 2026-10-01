@@ -890,12 +890,15 @@ func (s *Server) handleAvenorShutdown(ctx context.Context, req *mcp.CallToolRequ
 	if useLifecycle {
 		// Shutdown may report an RPC error after it has closed the client and
 		// waited for its child. Retire the owned lifecycle either way so a
-		// closed connection is never retained for another tool call.
+		// closed connection is never retained for another tool call. The
+		// server itself stays live: the next default-supervisor tool call
+		// autostarts a replacement. Resetting the default path drops the
+		// retired autostarted socket instead of reusing it.
 		shutdownErr := lifecycle.ShutdownWithMode(mode)
 		s.supervisorMu.Lock()
 		s.lifecycle = nil
 		s.controlClient = nil
-		s.closed = true
+		s.defaultSupervisorPath = s.opts.SupervisorSocket
 		s.supervisorMu.Unlock()
 		if shutdownErr != nil {
 			return nil, nil, fmt.Errorf("shutdown: %w", shutdownErr)
@@ -1488,7 +1491,7 @@ func (s *Server) getClientForSupervisorWithPath(supervisorID string) (ControlCli
 
 	if s.controlClient == nil {
 		if s.opts.NoAutostart {
-			return nil, nil, "", fmt.Errorf("control client not available")
+			return nil, nil, "", fmt.Errorf("no supervisor running: autostart disabled")
 		}
 		lc, err := startSupervisorFunc(s.opts.ControlSocket, s.opts.IdleTimeout)
 		if err != nil {
