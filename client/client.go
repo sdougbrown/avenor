@@ -38,6 +38,16 @@ type Notification struct {
 	Params  json.RawMessage `json:"params,omitempty"`
 }
 
+// RPCError preserves structured RPC error payloads (e.g. a failed broker ask's
+// message_id in Data) instead of flattening them into a string.
+type RPCError struct {
+	Code    int
+	Message string
+	Data    json.RawMessage
+}
+
+func (e *RPCError) Error() string { return fmt.Sprintf("rpc error [%d]: %s", e.Code, e.Message) }
+
 type Event struct {
 	Event     string         `json:"event"`
 	SessionID string         `json:"session_id,omitempty"`
@@ -149,7 +159,7 @@ func (c *Client) Call(method string, params any, result any) error {
 	}
 
 	if resp.Error != nil {
-		return fmt.Errorf("rpc error [%d]: %s", resp.Error.Code, resp.Error.Message)
+		return &RPCError{Code: resp.Error.Code, Message: resp.Error.Message, Data: resp.Error.Data}
 	}
 	if result != nil && len(resp.Result) > 0 {
 		if err := json.Unmarshal(resp.Result, result); err != nil {

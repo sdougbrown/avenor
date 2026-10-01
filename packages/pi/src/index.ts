@@ -1737,14 +1737,15 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     pi.registerTool({
       name: 'avenor_ask',
       label: 'Avenor Ask',
-      description: 'Ask another agent run a question and block until it replies.',
+      description: 'Ask another agent run a question and block until it replies. An optional timeout_ms bounds the wait; a timed-out or failed ask stays pending and can be withdrawn by passing its message_id to avenor_cancel.',
       parameters: Type.Object({
         to_run_id: Type.String({ description: 'Target run ID' }),
         message: Type.String({ description: 'Question to ask the other agent' }),
+        timeout_ms: Type.Optional(Type.Number({ description: 'Optional timeout in milliseconds for the ask' })),
         supervisor_id: Type.Optional(Type.String({ description: 'Reuse an existing supervisor by socket path' })),
       }),
       async execute(_toolCallId, params) {
-        return askTool({ toRunId: params.to_run_id, message: params.message, supervisorId: params.supervisor_id })
+        return askTool({ toRunId: params.to_run_id, message: params.message, timeoutMs: params.timeout_ms, supervisorId: params.supervisor_id })
       },
     })
 

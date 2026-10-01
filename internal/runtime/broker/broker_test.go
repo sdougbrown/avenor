@@ -2543,3 +2543,99 @@ func TestBrokerDrainAgentMessages(t *testing.T) {
 		t.Errorf("expected 0 after second drain, got %d", len(msgs2))
 	}
 }
+
+// TestBrokerWaitReplyDeliversReplyAfterWriteTimeout is the regression test for
+// the #243 follow-up: the server-wide WriteTimeout must not truncate the
+// wait_reply long-poll and drop a reply that arrives after the deadline.
+func TestBrokerWaitReplyDeliversReplyAfterWriteTimeout(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	// Shorten the write deadline before Start so the test can observe the old
+	// truncation behavior without a 30s wait.
+	b.writeTimeout = 100 * time.Millisecond
+
+	// Fresh connections per request so each wait_reply gets its own deadline.
+	noKeepAlive := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+
+	senderToken, err := b.CreateRun("asker")
+	if err != nil {
+		t.Fatalf("create asker: %v", err)
+	}
+	replierToken, err := b.CreateRun("replier")
+	if err != nil {
+		t.Fatalf("create replier: %v", err)
+	}
+
+	addr := b.Addr()
+	msgID := "ask-late-reply"
+
+	// Replier polls, sleeps past the write deadline, then replies.
+	go func() {
+		for i := 0; i < 50; i++ {
+			pollBody := bytes.NewReader([]byte(fmt.Sprintf(`{"run_id":"replier","token":%q}`, replierToken)))
+			resp, err := noKeepAlive.Post(fmt.Sprintf("http://%s/poll-control", addr), "application/json", pollBody)
+			if err != nil {
+				return
+			}
+			var msgs []ControlMessage
+			_ = json.NewDecoder(resp.Body).Decode(&msgs)
+			resp.Body.Close()
+			if len(msgs) > 0 {
+				time.Sleep(400 * time.Millisecond)
+				replyBody := bytes.NewReader([]byte(fmt.Sprintf(`{
+					"run_id": "replier",
+					"token": %q,
+					"from_run_id": "replier",
+					"to_run_id": "asker",
+					"type": "agent_message",
+					"payload": {"id":"reply-%s","from":"replier","from_run_id":"replier","to_run_id":"asker","message":"late answer","reply_to":%q}
+				}`, replierToken, msgID, msgID)))
+				_, _ = noKeepAlive.Post(fmt.Sprintf("http://%s/send", addr), "application/json", replyBody)
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}()
+
+	// Send the ask, then wait for the reply that arrives after the deadline.
+	askBody := bytes.NewReader([]byte(fmt.Sprintf(`{
+		"run_id": "asker",
+		"token": %q,
+		"from_run_id": "asker",
+		"to_run_id": "replier",
+		"type": "agent_message",
+		"payload": {"id":%q,"from":"asker","from_run_id":"asker","to_run_id":"replier","message":"late ask","expects_reply":true}
+	}`, senderToken, msgID)))
+	resp, err := noKeepAlive.Post(fmt.Sprintf("http://%s/send", addr), "application/json", askBody)
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	resp.Body.Close()
+
+	waitBody := bytes.NewReader([]byte(fmt.Sprintf(`{"run_id":"asker","token":%q,"waiting_for":%q}`, senderToken, msgID)))
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("http://%s/wait_reply", addr), waitBody)
+	if err != nil {
+		t.Fatalf("wait request: %v", err)
+	}
+	waitResp, err := noKeepAlive.Do(req)
+	if err != nil {
+		t.Fatalf("wait_reply after write deadline: %v", err)
+	}
+	defer waitResp.Body.Close()
+	var result map[string]any
+	if err := json.NewDecoder(waitResp.Body).Decode(&result); err != nil {
+		t.Fatalf("wait_reply decode: %v", err)
+	}
+	if waitResp.StatusCode != http.StatusOK {
+		t.Fatalf("wait_reply status = %d, want 200: %v", waitResp.StatusCode, result)
+	}
+	if result["from_run_id"] != "replier" {
+		t.Fatalf("wait_reply from_run_id = %v, want replier", result["from_run_id"])
+	}
+}

@@ -102,7 +102,7 @@ type StableHandler interface {
 	RuntimeInterruptAndPrompt(runtimeID, text string, keepQueue bool) error
 	RuntimeSendToParent(runtimeID, message string) error
 	BrokerSend(fromRunID, toRunID, message, role string) error
-	BrokerAsk(toRunID, message, role string) (any, error)
+	BrokerAsk(ctx context.Context, toRunID, message, role string) (any, error)
 	BrokerPeers() (any, error)
 	BrokerCancel(messageID string) error
 	BrokerReceive() (any, error)
@@ -118,6 +118,25 @@ type StableHandler interface {
 	WaitForCapacityMS(timeoutMS int) error
 }
 
+// AskError carries the broker message ID of a failed ask so callers can
+// cancel the pending ask with broker_cancel instead of retrying blind.
+type AskError struct {
+	MessageID string
+	Err       error
+}
+
+func (e *AskError) Error() string { return e.Err.Error() }
+func (e *AskError) Unwrap() error { return e.Err }
+
+// askErrorData extracts cancel-friendly error data for RPC error responses.
+func askErrorData(err error) any {
+	var ae *AskError
+	if errors.As(err, &ae) {
+		return map[string]any{"message_id": ae.MessageID}
+	}
+	return nil
+}
+
 type connState struct {
 	id      uint64
 	server  *ControlServer
@@ -125,6 +144,11 @@ type connState struct {
 	wmu     sync.Mutex
 	closed  bool
 	isOwner bool
+
+	// ctx is cancelled when the connection drops or the server stops, so
+	// long-running handlers (broker asks) do not outlive their client.
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 type subscriber struct {
@@ -384,6 +408,7 @@ func (s *ControlServer) Stop() {
 		_ = l.Close()
 	}
 	for _, c := range conns {
+		c.cancel()
 		_ = c.conn.Close()
 	}
 }
@@ -928,6 +953,7 @@ func (s *ControlServer) acceptLoop() {
 		}
 		seq++
 		cs := &connState{id: seq, server: s, conn: conn}
+		cs.ctx, cs.cancel = context.WithCancel(context.Background())
 		s.mu.Lock()
 		s.conns[cs] = struct{}{}
 		s.mu.Unlock()
@@ -937,6 +963,7 @@ func (s *ControlServer) acceptLoop() {
 
 func (s *ControlServer) handleConn(c *connState) {
 	defer s.disconnect(c)
+	defer c.cancel()
 	scanner := bufio.NewScanner(c.conn)
 	buf := make([]byte, 0, 64*1024)
 	scanner.Buffer(buf, 4*1024*1024)
@@ -951,11 +978,21 @@ func (s *ControlServer) handleConn(c *connState) {
 			continue
 		}
 		res := s.dispatch(c, req)
+		if res == asyncResponse {
+			// The response is written by the background goroutine once the
+			// long-running handler completes or is cancelled.
+			continue
+		}
 		if req.ID != nil {
 			_ = c.writeJSON(res)
 		}
 	}
 }
+
+// asyncResponse marks a request dispatched to a background goroutine; the
+// response is written when the goroutine completes, so handleConn must not
+// write it a second time.
+var asyncResponse = Response{JSONRPC: "2.0"}
 
 func (s *ControlServer) dispatch(c *connState, req Request) Response {
 	switch req.Method {
@@ -1247,18 +1284,35 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 			return failure(req.ID, -32010, "permission_denied", nil)
 		}
 		var p struct {
-			ToRunID string `json:"to_run_id"`
-			Message string `json:"message"`
-			Role    string `json:"role,omitempty"`
+			ToRunID   string `json:"to_run_id"`
+			Message   string `json:"message"`
+			Role      string `json:"role,omitempty"`
+			TimeoutMS int64  `json:"timeout_ms,omitempty"`
 		}
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return failure(req.ID, -32602, "invalid params", nil)
 		}
-		result, err := s.stableHandler.BrokerAsk(p.ToRunID, p.Message, p.Role)
-		if err != nil {
-			return failure(req.ID, -32000, err.Error(), nil)
-		}
-		return success(req.ID, result)
+		// Run the ask on a background goroutine bound to the connection
+		// context: an unanswered ask must not block subsequent requests on
+		// this connection, and a disconnect must cancel the pending wait.
+		go func() {
+			ctx := c.ctx
+			if p.TimeoutMS > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, time.Duration(p.TimeoutMS)*time.Millisecond)
+				defer cancel()
+			}
+			result, err := s.stableHandler.BrokerAsk(ctx, p.ToRunID, p.Message, p.Role)
+			if c.ctx.Err() != nil {
+				return
+			}
+			if err != nil {
+				_ = c.writeJSON(failure(req.ID, -32000, err.Error(), askErrorData(err)))
+				return
+			}
+			_ = c.writeJSON(success(req.ID, result))
+		}()
+		return asyncResponse
 	case "broker_peers":
 		if s.stableHandler == nil {
 			return failure(req.ID, -32601, "method not found", nil)

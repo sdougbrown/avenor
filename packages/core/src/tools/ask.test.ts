@@ -3,6 +3,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { ensureRunPaths } from '../paths.js'
+import { RpcError } from '../client.js'
 
 const brokerAskMock = mock(async () => ({ payload: { message: 'hello back' }, from_run_id: 'sender' }))
 const closeMock = mock(() => {})
@@ -29,7 +30,35 @@ describe('askTool', () => {
     const res = await askTool({ toRunId: 'rt_1', message: 'hello' })
     expect(res.reply).toBe('hello back')
     expect(res.from_run_id).toBe('sender')
-    expect(brokerAskMock).toHaveBeenCalledWith('rt_1', 'hello')
+    expect(brokerAskMock).toHaveBeenCalledWith('rt_1', 'hello', undefined, undefined)
+  })
+
+  it('passes timeoutMs through to brokerAsk', async () => {
+    await askTool({ toRunId: 'rt_1', message: 'hello', timeoutMs: 5000 })
+    expect(brokerAskMock).toHaveBeenCalledWith('rt_1', 'hello', undefined, 5000)
+  })
+
+  it('surfaces the message_id from an RpcError with data', async () => {
+    const rpcError = new RpcError(-32000, 'ask failed', { message_id: 'abc123' })
+    brokerAskMock.mockRejectedValueOnce(rpcError)
+    const err = await askTool({ toRunId: 'rt_1', message: 'hello' }).catch((e) => e)
+    expect(err).toBeInstanceOf(Error)
+    expect(err).not.toBe(rpcError)
+    expect(err.message).toContain('message_id: abc123')
+    expect(err.message).toContain('avenor_cancel')
+    expect(err.message).toContain('ask failed')
+  })
+
+  it('propagates an RpcError without a message_id unchanged', async () => {
+    const rpcError = new RpcError(-32000, 'ask failed', { other: 1 })
+    brokerAskMock.mockRejectedValueOnce(rpcError)
+    await expect(askTool({ toRunId: 'rt_1', message: 'hello' })).rejects.toBe(rpcError)
+  })
+
+  it('propagates non-RpcError errors unchanged', async () => {
+    const plain = new Error('something else')
+    brokerAskMock.mockRejectedValueOnce(plain)
+    await expect(askTool({ toRunId: 'rt_1', message: 'hello' })).rejects.toBe(plain)
   })
 
   it('returns a timeout notice when the broker times out', async () => {
@@ -89,7 +118,7 @@ describe('askTool without supervisor_id (singleton fallback)', () => {
     const res = await realAskTool({ toRunId: 'rt_1', message: 'hello' })
     expect(res.reply).toBe('singleton reply')
     expect(res.from_run_id).toBe('sender')
-    expect(singletonBrokerAsk).toHaveBeenCalledWith('rt_1', 'hello')
+    expect(singletonBrokerAsk).toHaveBeenCalledWith('rt_1', 'hello', undefined, undefined)
     expect(singletonClose).not.toHaveBeenCalled()
   })
 })
@@ -135,17 +164,17 @@ describe('askTool resolves run references to broker runtime ids', () => {
 
   it('addresses an external run by its public run id', async () => {
     await externalAskTool({ toRunId: 'public-run', message: 'hello' })
-    expect(externalBrokerAsk).toHaveBeenCalledWith('rt-9', 'hello')
+    expect(externalBrokerAsk).toHaveBeenCalledWith('rt-9', 'hello', undefined, undefined)
   })
 
   it('addresses an external run by its label alias', async () => {
     await externalAskTool({ toRunId: 'demo', message: 'hello' })
-    expect(externalBrokerAsk).toHaveBeenCalledWith('rt-9', 'hello')
+    expect(externalBrokerAsk).toHaveBeenCalledWith('rt-9', 'hello', undefined, undefined)
   })
 
   it('passes an unresolved id through unchanged (e.g. supervisor)', async () => {
     await externalAskTool({ toRunId: 'supervisor', message: 'hello' })
-    expect(externalBrokerAsk).toHaveBeenCalledWith('supervisor', 'hello')
+    expect(externalBrokerAsk).toHaveBeenCalledWith('supervisor', 'hello', undefined, undefined)
   })
 
   it('falls back to the disk-read registry when in-memory state is cleared', async () => {
@@ -153,7 +182,7 @@ describe('askTool resolves run references to broker runtime ids', () => {
     // index so findExternalRun must resolve 'public-run' via readPersistedRun.
     forgetExternalRuns(supervisorId)
     await externalAskTool({ toRunId: 'public-run', message: 'hello' })
-    expect(externalBrokerAsk).toHaveBeenCalledWith('rt-9', 'hello')
+    expect(externalBrokerAsk).toHaveBeenCalledWith('rt-9', 'hello', undefined, undefined)
   })
 })
 
@@ -181,11 +210,11 @@ describe('askTool resolves local singleton run references', () => {
 
   it('substitutes the resolved runtime id for a local public run id', async () => {
     await localAskTool({ toRunId: 'local-run', message: 'hello' })
-    expect(localBrokerAsk).toHaveBeenCalledWith('rt-77', 'hello')
+    expect(localBrokerAsk).toHaveBeenCalledWith('rt-77', 'hello', undefined, undefined)
   })
 
   it('substitutes the resolved runtime id for a local label alias', async () => {
     await localAskTool({ toRunId: 'my-label', message: 'hello' })
-    expect(localBrokerAsk).toHaveBeenCalledWith('rt-77', 'hello')
+    expect(localBrokerAsk).toHaveBeenCalledWith('rt-77', 'hello', undefined, undefined)
   })
 })

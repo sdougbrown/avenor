@@ -1601,7 +1601,7 @@ func (m *mockStableHandler) BrokerSend(fromRunID, toRunID, message, role string)
 	return nil
 }
 
-func (m *mockStableHandler) BrokerAsk(toRunID, message, role string) (any, error) {
+func (m *mockStableHandler) BrokerAsk(ctx context.Context, toRunID, message, role string) (any, error) {
 	return map[string]any{"reply": "mock reply"}, nil
 }
 
@@ -2355,4 +2355,184 @@ func TestBrokerRPCDispatchInvalidParams(t *testing.T) {
 	if r.Error == nil || r.Error.Code != -32700 {
 		t.Fatalf("broker_send malformed params expected -32700 parse error, got %+v", r)
 	}
+}
+
+// blockingAskHandler blocks BrokerAsk until released, exposing the handler's
+// context so tests can assert cancellation propagation.
+type blockingAskHandler struct {
+	mockStableHandler
+	entered chan struct{}
+	release chan struct{}
+	askCtx  context.Context
+	askErr  error
+}
+
+func (m *blockingAskHandler) BrokerAsk(ctx context.Context, toRunID, message, role string) (any, error) {
+	m.askCtx = ctx
+	select {
+	case <-m.entered:
+	default:
+		close(m.entered)
+	}
+	select {
+	case <-m.release:
+		if m.askErr != nil {
+			return nil, m.askErr
+		}
+		return map[string]any{"reply": "ok"}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(10 * time.Second):
+		return nil, errors.New("ask handler deadline")
+	}
+}
+
+// TestBrokerAskDoesNotBlockConnection is the regression test for #243: an
+// unanswered broker_ask must not stop the connection from serving status,
+// sibling queries, or new dispatches.
+func TestBrokerAskDoesNotBlockConnection(t *testing.T) {
+	handler := &blockingAskHandler{
+		mockStableHandler: mockStableHandler{},
+		entered:           make(chan struct{}),
+		release:           make(chan struct{}),
+	}
+	state := NewState("run_1", "", 0)
+	s := NewServer(state)
+	s.SetStableHandler(handler)
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	c := mustDial(t, path)
+	defer c.Close()
+
+	// Fire an ask that will never be answered while the test waits on status.
+	askParams, _ := json.Marshal(map[string]any{"to_run_id": "rt_1", "message": "correction"})
+	if err := writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "broker_ask", Params: askParams}); err != nil {
+		t.Fatalf("write ask: %v", err)
+	}
+	select {
+	case <-handler.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ask handler never entered")
+	}
+
+	// While the ask is in flight, the same connection must still answer status.
+	statusParams, _ := json.Marshal(map[string]any{"run_id": "rt_1"})
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 2, Method: "status", Params: statusParams})
+	resp := readRespForID(t, c, 2)
+	if resp.Error != nil {
+		t.Fatalf("status while ask in flight: %+v", resp.Error)
+	}
+
+	// Release the ask and confirm its response still arrives, correlated by ID.
+	close(handler.release)
+	askResp := readRespForID(t, c, 1)
+	if askResp.Error != nil {
+		t.Fatalf("ask response after release: %+v", askResp.Error)
+	}
+}
+
+// TestBrokerAskCancelledOnDisconnect verifies that a connection drop cancels
+// the in-flight server-side ask instead of leaving it parked for the broker's
+// full ask timeout.
+func TestBrokerAskCancelledOnDisconnect(t *testing.T) {
+	handler := &blockingAskHandler{
+		mockStableHandler: mockStableHandler{},
+		entered:           make(chan struct{}),
+		release:           make(chan struct{}),
+	}
+	state := NewState("run_1", "", 0)
+	s := NewServer(state)
+	s.SetStableHandler(handler)
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	c := mustDial(t, path)
+	askParams, _ := json.Marshal(map[string]any{"to_run_id": "rt_1", "message": "correction"})
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "broker_ask", Params: askParams})
+	select {
+	case <-handler.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ask handler never entered")
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		c.Close()
+		close(closed)
+	}()
+
+	select {
+	case <-handler.askCtx.Done():
+		// Cancellation propagated to the ask handler.
+	case <-time.After(2 * time.Second):
+		t.Fatal("ask context was not cancelled after disconnect")
+	}
+	_ = closed
+}
+
+// TestBrokerAskErrorCarriesMessageID verifies the ask error carries the
+// message_id so callers can cancel the pending ask.
+func TestBrokerAskErrorCarriesMessageID(t *testing.T) {
+	handler := &blockingAskHandler{
+		mockStableHandler: mockStableHandler{},
+		entered:           make(chan struct{}),
+		release:           make(chan struct{}),
+		askErr:            &AskError{MessageID: "ask123", Err: errors.New("ask timed out")},
+	}
+	state := NewState("run_1", "", 0)
+	s := NewServer(state)
+	s.SetStableHandler(handler)
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	c := mustDial(t, path)
+	defer c.Close()
+	askParams, _ := json.Marshal(map[string]any{"to_run_id": "rt_1", "message": "correction"})
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "broker_ask", Params: askParams})
+	select {
+	case <-handler.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ask handler never entered")
+	}
+	close(handler.release)
+	resp := readRespForID(t, c, 1)
+	if resp.Error == nil {
+		t.Fatal("expected ask error")
+	}
+	data, ok := resp.Error.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("error data type: %T", resp.Error.Data)
+	}
+	if id, _ := data["message_id"].(string); id != "ask123" {
+		t.Fatalf("message_id = %q, want ask123", id)
+	}
+}
+
+// readRespForID reads responses until one with the given ID arrives, skipping
+// out-of-order responses (e.g. a late ask reply).
+func readRespForID(t *testing.T, c net.Conn, id uint64) Response {
+	t.Helper()
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	scanner := bufio.NewScanner(c)
+	for scanner.Scan() {
+		var r Response
+		if err := json.Unmarshal(scanner.Bytes(), &r); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if num, ok := r.ID.(float64); ok && uint64(num) == id {
+			return r
+		}
+	}
+	t.Fatal("no response with matching id")
+	return Response{}
 }

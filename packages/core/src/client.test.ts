@@ -3,7 +3,7 @@ import * as net from 'node:net'
 import * as path from 'node:path'
 import * as os from 'node:os'
 import { PassThrough } from 'node:stream'
-import { Client, dial, type Event } from './client.js'
+import { Client, dial, RpcError, type Event } from './client.js'
 import type {
   ExecutionIdentity,
   WorkflowCompleteParams,
@@ -1361,5 +1361,106 @@ describe('Client.workflow', () => {
       session_id: 'ses',
     }
     expect(identity.workflow_id).toBe('wf-1')
+  })
+})
+
+describe('Client.call RpcError', () => {
+  let server: net.Server
+
+  afterEach(() => {
+    server?.close()
+  })
+
+  it('rejects with an RpcError preserving code and data', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      sock.write(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: req.id,
+          error: { code: -32000, message: 'ask failed', data: { message_id: 'abc123' } },
+        }) + '\n',
+      )
+    })
+
+    const client = await dial(socketPath)
+    try {
+      const err = await client.status().catch((e) => e)
+      expect(err).toBeInstanceOf(RpcError)
+      expect(err.message).toBe('rpc error [-32000]: ask failed')
+      expect(err.code).toBe(-32000)
+      expect(err.data).toEqual({ message_id: 'abc123' })
+    } finally {
+      client.close()
+    }
+  })
+
+  it('leaves data undefined when the error carries none', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      sock.write(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: req.id,
+          error: { code: -32000, message: 'something went wrong' },
+        }) + '\n',
+      )
+    })
+
+    const client = await dial(socketPath)
+    try {
+      const err = await client.status().catch((e) => e)
+      expect(err).toBeInstanceOf(RpcError)
+      expect(err.message).toBe('rpc error [-32000]: something went wrong')
+      expect(err.code).toBe(-32000)
+      expect(err.data).toBeUndefined()
+    } finally {
+      client.close()
+    }
+  })
+})
+
+describe('Client.brokerAsk', () => {
+  let server: net.Server
+
+  afterEach(() => {
+    server?.close()
+  })
+
+  it('forwards timeout_ms when provided', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      expect(req.method).toBe('broker_ask')
+      expect(req.params).toEqual({ to_run_id: 'rt-1', message: 'hello', role: 'agent', timeout_ms: 5000 })
+      sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: { payload: { message: 'ok' } } }) + '\n')
+    })
+
+    const client = await dial(socketPath)
+    try {
+      await client.brokerAsk('rt-1', 'hello', undefined, 5000)
+    } finally {
+      client.close()
+    }
+  })
+
+  it('omits timeout_ms when not provided', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      expect(req.method).toBe('broker_ask')
+      expect(req.params).toEqual({ to_run_id: 'rt-1', message: 'hello', role: 'agent' })
+      expect(Object.hasOwn(req.params, 'timeout_ms')).toBe(false)
+      sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: {} }) + '\n')
+    })
+
+    const client = await dial(socketPath)
+    try {
+      await client.brokerAsk('rt-1', 'hello')
+    } finally {
+      client.close()
+    }
   })
 })

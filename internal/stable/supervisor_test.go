@@ -3,6 +3,7 @@ package stable
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -6214,5 +6215,39 @@ func TestWorkflowMarkerEvidenceParity(t *testing.T) {
 		if kind != want.kind || label != want.label {
 			t.Errorf("workflowMarkerForKind(%s) = (%q,%q), want (%q,%q)", action, kind, label, want.kind, want.label)
 		}
+	}
+}
+
+// TestBrokerAskContextCancellation verifies that a cancelled ask wait returns
+// an AskError carrying the message ID so the caller can withdraw the pending
+// ask (#243).
+func TestBrokerAskContextCancellation(t *testing.T) {
+	b := broker.New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	defer b.Stop()
+
+	sup := &Supervisor{broker: b}
+	if _, err := b.CreateRun("target"); err != nil {
+		t.Fatalf("create target run: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		cancel()
+	}()
+
+	_, err := sup.BrokerAsk(ctx, "target", "interruption", "agent")
+	if err == nil {
+		t.Fatal("expected error from cancelled ask")
+	}
+	var askErr *control.AskError
+	if !errors.As(err, &askErr) {
+		t.Fatalf("error type = %T, want *control.AskError: %v", err, err)
+	}
+	if askErr.MessageID == "" {
+		t.Fatal("AskError.MessageID is empty")
 	}
 }

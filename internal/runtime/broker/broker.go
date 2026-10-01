@@ -297,6 +297,7 @@ type Broker struct {
 	server      *http.Server
 	httpToken   string        // optional global HTTP auth token for push-control endpoint
 	pollTimeout time.Duration // max wait for poll-control before returning empty
+	writeTimeout time.Duration // per-connection write deadline; 0 uses the 30s default
 
 	// Global ask-edge registry for cross-run lookups.
 	// Keys are "senderRunID/messageID" to prevent cross-sender collisions.
@@ -316,6 +317,7 @@ func New(globalToken string) *Broker {
 		runs:                make(map[string]*RunState),
 		httpToken:           globalToken,
 		pollTimeout:         2 * time.Second,
+		writeTimeout:        30 * time.Second,
 		globalAskEdges:      make(map[string]*AskEdge),
 		globalReplyChannels: make(map[string]chan AskReply),
 		closeCh:             make(chan struct{}),
@@ -361,7 +363,7 @@ func (b *Broker) Start() error {
 	b.server = &http.Server{
 		Handler:      router,
 		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 30 * time.Second, // /wait_reply long-poll handled by handler's time.After (DefaultAskTimeout)
+		WriteTimeout: b.writeTimeout, // /wait_reply extends its own deadline via http.NewResponseController
 	}
 	go func() {
 		_ = b.server.Serve(l)
@@ -951,7 +953,14 @@ func (b *Broker) handleWaitReply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Wait for the reply with a timeout.
+	// Wait for the reply with a timeout. The server-wide WriteTimeout (30s)
+	// would expire the socket's write deadline before the long-poll completes,
+	// dropping the reply after it was consumed, so extend the deadline to cover
+	// the bounded wait plus response margin.
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(DefaultAskTimeout + 30*time.Second)); err != nil {
+		http.Error(w, "set write deadline", http.StatusInternalServerError)
+		return
+	}
 	var reply AskReply
 	select {
 	case reply = <-replyCh:

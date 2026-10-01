@@ -1627,6 +1627,13 @@ func (s *Supervisor) ensureChildBrokerRun(child *childRuntime) string {
 
 // brokerPost sends an authenticated POST to the broker HTTP endpoint.
 func (s *Supervisor) brokerPost(path string, body map[string]any) ([]byte, error) {
+	return s.brokerPostContext(context.Background(), path, body)
+}
+
+// brokerPostContext sends an authenticated POST with a request context so
+// callers can abandon long-polls (e.g. wait_reply) when their own caller
+// gives up.
+func (s *Supervisor) brokerPostContext(ctx context.Context, path string, body map[string]any) ([]byte, error) {
 	runID, token := s.registerBrokerRun()
 	if runID == "" {
 		return nil, fmt.Errorf("broker not available")
@@ -1638,7 +1645,12 @@ func (s *Supervisor) brokerPost(path string, body map[string]any) ([]byte, error
 	if err != nil {
 		return nil, fmt.Errorf("marshal: %w", err)
 	}
-	resp, err := http.Post(url, "application/json", bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Errorf("broker %s: %w", path, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("broker %s: %w", path, err)
 	}
@@ -1692,7 +1704,7 @@ func (s *Supervisor) BrokerSend(fromRunID, toRunID, message, role string) error 
 	return err
 }
 
-func (s *Supervisor) BrokerAsk(toRunID, message, role string) (any, error) {
+func (s *Supervisor) BrokerAsk(ctx context.Context, toRunID, message, role string) (any, error) {
 	msgID := broker.MakeToken()[:16]
 	payload := map[string]any{
 		"id":            msgID,
@@ -1710,20 +1722,28 @@ func (s *Supervisor) BrokerAsk(toRunID, message, role string) (any, error) {
 		"type":        "agent_message",
 		"payload":     payload,
 	}
-	if _, err := s.brokerPost("/send", sendBody); err != nil {
-		return nil, fmt.Errorf("send ask: %w", err)
+	if _, err := s.brokerPostContext(ctx, "/send", sendBody); err != nil {
+		return nil, &control.AskError{MessageID: msgID, Err: fmt.Errorf("send ask: %w", err)}
 	}
-	// Wait for reply
-	replyBody, err := s.brokerPost("/wait_reply", map[string]any{
+	// Wait for reply. If the caller gives up (context cancelled), withdraw the
+	// pending ask so a late-arriving child cannot pair with a dead waiter.
+	replyBody, err := s.brokerPostContext(ctx, "/wait_reply", map[string]any{
 		"waiting_for": msgID,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("wait for reply: %w", err)
+		if ctx.Err() != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, _ = s.brokerPostContext(cleanupCtx, "/cancel_message", map[string]any{
+				"cancel_message_id": msgID,
+			})
+		}
+		return nil, &control.AskError{MessageID: msgID, Err: fmt.Errorf("wait for reply: %w", err)}
 	}
 	// Parse the reply
 	var result map[string]any
 	if err := json.Unmarshal(replyBody, &result); err != nil {
-		return nil, fmt.Errorf("parse reply: %w", err)
+		return nil, &control.AskError{MessageID: msgID, Err: fmt.Errorf("parse reply: %w", err)}
 	}
 	return result, nil
 }
