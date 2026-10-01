@@ -1993,6 +1993,52 @@ func TestAvenorShutdownError(t *testing.T) {
 	}
 }
 
+func TestSpawnAfterShutdownAutostartsNewSupervisor(t *testing.T) {
+	origStart := startSupervisorFunc
+	defer func() { startSupervisorFunc = origStart }()
+
+	var starts atomic.Int32
+	startSupervisorFunc = func(socketPath string, idleTimeout time.Duration) (*supervisorLifecycle, error) {
+		n := starts.Add(1)
+		return &supervisorLifecycle{
+			socketPath: fmt.Sprintf("/tmp/avenor-restart-%d.sock", n),
+			client:     &spawnCountingClient{},
+		}, nil
+	}
+
+	s, err := NewServer(Options{Transport: "stdio"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	spawn := func(what string) {
+		t.Helper()
+		if _, _, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
+			Agent:   "test",
+			RepoDir: ".",
+			Prompt:  "hello",
+		}); err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+	}
+
+	// The first spawn autostarts the default supervisor.
+	spawn("first spawn")
+
+	if _, _, err := s.handleAvenorShutdown(context.Background(), nil, shutdownArgs{}); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+
+	// A later spawn without supervisor_id must autostart a fresh supervisor
+	// instead of failing with "control client not available".
+	spawn("spawn after shutdown")
+
+	if got := starts.Load(); got != 2 {
+		t.Fatalf("supervisor starts after shutdown+spawn = %d, want 2", got)
+	}
+}
+
 func TestOwnedLifecycleShutdownErrorReachesMCPCaller(t *testing.T) {
 	cause := errors.New("shutdown RPC failed")
 	fake := &fakeClient{shutdownErr: cause}
@@ -2011,8 +2057,8 @@ func TestOwnedLifecycleShutdownErrorReachesMCPCaller(t *testing.T) {
 	if !strings.Contains(err.Error(), "shutdown:") {
 		t.Fatalf("shutdown error lacks MCP operation context: %v", err)
 	}
-	if s.lifecycle != nil || s.controlClient != nil || !s.closed {
-		t.Fatalf("shutdown error retained closed lifecycle/client: lifecycle=%v client=%v closed=%v", s.lifecycle, s.controlClient, s.closed)
+	if s.lifecycle != nil || s.controlClient != nil || s.closed || s.defaultSupervisorPath != "" {
+		t.Fatalf("shutdown error retained closed lifecycle/client: lifecycle=%v client=%v closed=%v defaultPath=%q", s.lifecycle, s.controlClient, s.closed, s.defaultSupervisorPath)
 	}
 	if fake.closeCalls != 1 {
 		t.Fatalf("fake client Close calls = %d, want 1", fake.closeCalls)
@@ -2479,8 +2525,8 @@ func TestAvenorStatusControlClientNotAvailable(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for unavailable control client")
 	}
-	if !strings.Contains(err.Error(), "control client not available") {
-		t.Errorf("expected 'control client not available', got: %v", err)
+	if !strings.Contains(err.Error(), "no supervisor running") {
+		t.Errorf("expected 'no supervisor running', got: %v", err)
 	}
 }
 
