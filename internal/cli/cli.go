@@ -437,12 +437,12 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	sessionBackends := newSessionBackendMap()
 
 	execAttempt := func(ctx context.Context, selection rosterconfig.ResolvedSelection, resumeID, prompt string) attemptResult {
-		if err := validateCLISelection(selection.Backend, discovery, *thinking); err != nil {
+		if err := validateCLISelection(selection.Backend, discovery, selection.Thinking); err != nil {
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
 			return attemptResult{exitCode: 1}
 		}
 		return runAttempt(ctx, attemptConfig{
-			startOptions:           runtime.StartOptions{Agent: selection.Agent, Model: selection.Model, Label: *label, Dir: *dir, ServerURL: discovery.URL, Thinking: *thinking},
+			startOptions:           runtime.StartOptions{Agent: selection.Agent, Model: selection.Model, Label: *label, Dir: *dir, ServerURL: discovery.URL, Thinking: selection.Thinking},
 			backend:                selection.Backend,
 			resumeID:               resumeID,
 			sessionBackends:        sessionBackends,
@@ -471,7 +471,12 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 				selection.Model = resolved
 			}
 		}
-		if err := validateCLISelection(selection.Backend, discovery, *thinking); err != nil {
+		// A roster entry supplies a default; an explicit --thinking wins.
+		// The merged level is carried on the selection so execAttempt sees it.
+		if *thinking != "" {
+			selection.Thinking = *thinking
+		}
+		if err := validateCLISelection(selection.Backend, discovery, selection.Thinking); err != nil {
 			return rosterconfig.ResolvedSelection{}, err
 		}
 		return selection, nil

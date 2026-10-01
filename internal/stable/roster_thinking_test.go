@@ -1,10 +1,16 @@
 package stable
 
 import (
+	"context"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/sdougbrown/avenor/internal/looprunner"
+	"github.com/sdougbrown/avenor/internal/phaseconfig"
+	"github.com/sdougbrown/avenor/internal/rosterconfig"
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/teamrunner"
 )
 
 // The spawn path is what MCP-driven delegation uses, so the roster default
@@ -59,6 +65,84 @@ func TestStableDirectRosterSuppliesThinkingUnlessSpawnOverridesIt(t *testing.T) 
 				t.Fatalf("StartOptions.Thinking = %q, want %q", gotOpts.Thinking, tc.want)
 			}
 		})
+	}
+}
+
+// Per-phase roster entries resolve through ResolvedSelection, so the entry's
+// thinking level must surface there and merge with the run-level level
+// (an explicit run-level level wins) before StartOptions. Covers both the
+// loop and the team child paths.
+func TestStablePhaseRosterSuppliesThinkingUnlessRunOverridesIt(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		entry       string
+		runThinking string
+		want        string
+	}{
+		{
+			name:  "roster supplies the level",
+			entry: `{"horse":{"backend":"codex-app-server","model":"gpt-5.6-terra","thinking":"high"}}`,
+			want:  "high",
+		},
+		{
+			name:        "run-level thinking overrides the roster",
+			entry:       `{"horse":{"backend":"codex-app-server","model":"gpt-5.6-terra","thinking":"high"}}`,
+			runThinking: "low",
+			want:        "low",
+		},
+		{
+			name:        "entry without a level keeps the run-level level",
+			entry:       `{"horse":{"backend":"codex-app-server","model":"gpt-5.6-terra"}}`,
+			runThinking: "low",
+			want:        "low",
+		},
+		{
+			name:  "neither supplies a level",
+			entry: `{"horse":{"backend":"codex-app-server","model":"gpt-5.6-terra"}}`,
+			want:  "",
+		},
+	} {
+		for _, kind := range []string{"loop", "team"} {
+			t.Run(kind+"/"+tc.name, func(t *testing.T) {
+				sup := NewSupervisor(Config{ControlSocket: "/tmp/phase-roster-thinking.sock", MaxRuntimes: 1})
+				provider := scriptedStage5Provider("ses_phase_thinking", "end_turn")
+				var gotOpts runtime.StartOptions
+				sup.newProviderFunc = func(opts runtime.StartOptions, _ string) (runtime.Provider, error) {
+					gotOpts = opts
+					return provider, nil
+				}
+
+				roster, err := rosterconfig.Load(writeStage5Roster(t, t.TempDir(), tc.entry))
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				child := &childRuntime{
+					id:          "rt_phase_thinking",
+					done:        make(chan struct{}),
+					promptCh:    make(chan struct{}, 1),
+					eventWriter: stableTestSink{},
+					cancelFn:    func() {},
+					roster:      roster,
+					dir:         t.TempDir(),
+				}
+				if kind == "loop" {
+					cfg := &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "work", Prompt: "work", RosterEntry: "horse"}}}
+					go sup.runLoopChild(context.Background(), child, cfg, 1, "", "", "", tc.runThinking, "", "")
+				} else {
+					cfg := &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work", RosterEntry: "horse"}}}
+					go sup.runTeamChild(context.Background(), child, cfg, 1, "", "", "", tc.runThinking, "", "")
+				}
+				select {
+				case <-child.done:
+				case <-time.After(5 * time.Second):
+					t.Fatal("child did not complete")
+				}
+				if gotOpts.Thinking != tc.want {
+					t.Fatalf("StartOptions.Thinking = %q, want %q", gotOpts.Thinking, tc.want)
+				}
+			})
+		}
 	}
 }
 

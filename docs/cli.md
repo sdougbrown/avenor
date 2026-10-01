@@ -91,9 +91,7 @@ A roster is a map from a name to a complete backend/agent/model loadout. `roster
 }
 ```
 
-`thinking` is a **default, not part of the identity**: an explicit `--thinking` wins over the entry's value, so a roster only supplies the level when the caller did not. An unknown level is rejected when the roster loads, with the offending entry named. Whether a level is usable at all still depends on the backend, and that check happens when the run starts.
-
-Per-phase roster entries in loop and team configs do not apply `thinking` yet — those phases fall back to the run-level value.
+`thinking` is a **default, not part of the identity**: an explicit `--thinking` wins over the entry's value, so a roster only supplies the level when the caller did not. An unknown level is rejected when the roster loads, with the offending entry named. Whether a level is usable at all still depends on the backend, and that check happens when the run starts. In loop and team configs, a per-phase roster entry supplies the same default for that phase: the run-level `--thinking` still wins when set, and the merged level is validated against the phase's resolved backend before the phase starts.
 
 Direct mode selects an entry with both flags and does not accept direct identity overrides:
 

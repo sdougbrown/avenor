@@ -2016,6 +2016,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 			selectionMu.Lock()
 			selection, cached := resolvedSelections[phase.Name]
 			selectionMu.Unlock()
+			phaseThinking := thinking
 			if !cached {
 				runBackend := backend
 				if runBackend == "" {
@@ -2026,7 +2027,12 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				if resolveErr != nil {
 					return looprunner.PhaseAttemptResult{ExitCode: 1}, resolveErr
 				}
-				if resolveErr = runtime.ValidateThinkingForBackend(selection.Backend, thinking); resolveErr != nil {
+				// A roster entry supplies a default; an explicit run-level
+				// level wins. ValidateThinkingForBackend sees the merged value.
+				if thinking == "" {
+					phaseThinking = selection.Thinking
+				}
+				if resolveErr = runtime.ValidateThinkingForBackend(selection.Backend, phaseThinking); resolveErr != nil {
 					return looprunner.PhaseAttemptResult{ExitCode: 1}, resolveErr
 				}
 				selectionMu.Lock()
@@ -2049,7 +2055,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				AgentProfile: identity.AgentProfile,
 				Label:        child.label,
 				Model:        identity.Model,
-				Thinking:     thinking,
+				Thinking:     phaseThinking,
 				Dir:          child.dir,
 				ServerURL:    serverURL,
 				RuntimeID:    child.id,
@@ -2285,6 +2291,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 			selectionMu.Lock()
 			selection, cached := resolvedSelections[phase.Name]
 			selectionMu.Unlock()
+			phaseThinking := thinking
 			if !cached {
 				runBackend := backend
 				if runBackend == "" {
@@ -2295,7 +2302,12 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				if resolveErr != nil {
 					return teamrunner.PhaseAttemptResult{ExitCode: 1}, resolveErr
 				}
-				if resolveErr = runtime.ValidateThinkingForBackend(selection.Backend, thinking); resolveErr != nil {
+				// A roster entry supplies a default; an explicit run-level
+				// level wins. ValidateThinkingForBackend sees the merged value.
+				if thinking == "" {
+					phaseThinking = selection.Thinking
+				}
+				if resolveErr = runtime.ValidateThinkingForBackend(selection.Backend, phaseThinking); resolveErr != nil {
 					return teamrunner.PhaseAttemptResult{ExitCode: 1}, resolveErr
 				}
 				selectionMu.Lock()
@@ -2316,7 +2328,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				AgentProfile: identity.AgentProfile,
 				Label:        child.label,
 				Model:        identity.Model,
-				Thinking:     thinking,
+				Thinking:     phaseThinking,
 				Dir:          child.dir,
 				ServerURL:    serverURL,
 				RuntimeID:    child.id,

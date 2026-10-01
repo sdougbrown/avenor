@@ -117,8 +117,8 @@ func (c Config) Lookup(entryName string) (Entry, error) {
 
 // ResolveInput contains the run-level identity context and any phase-local
 // inline overrides. AgentProfile and Thinking are deliberately context only:
-// neither is part of the resolved identity and neither is read or changed by
-// Resolve.
+// neither is part of the resolved identity and Resolve does not read or
+// change either.
 type ResolveInput struct {
 	Backend      string
 	Agent        string
@@ -137,17 +137,18 @@ type ResolveInput struct {
 }
 
 // ResolvedSelection is the effective backend/agent/model identity. Run-level
-// agent_profile and thinking remain outside this type and must be carried by
-// the caller as orthogonal execution context.
+// agent_profile and thinking remain outside this type as orthogonal execution
+// context: Resolve never reads or mutates them.
 //
-// A roster entry's Thinking is therefore not applied here. Callers that
-// select an identity directly read it off the entry; phase selection does not
-// yet carry it, so a per-phase roster entry still falls back to the run-level
-// level. See the tracking issue for closing that gap.
+// Thinking carries the selected roster entry's default level so phase
+// selection can apply it. It is empty when no roster entry supplies one, and
+// callers still merge it with their run-level value (an explicit run-level
+// level wins).
 type ResolvedSelection struct {
-	Backend string
-	Agent   string
-	Model   string
+	Backend  string
+	Agent    string
+	Model    string
+	Thinking string
 }
 
 // Resolve applies roster and phase selection precedence without mutating any
@@ -167,9 +168,10 @@ func Resolve(input ResolveInput) (ResolvedSelection, error) {
 			return ResolvedSelection{}, fmt.Errorf("roster entry: %w", err)
 		}
 		return ResolvedSelection{
-			Backend: input.Roster.Backend,
-			Agent:   input.Roster.Agent,
-			Model:   input.Roster.Model,
+			Backend:  input.Roster.Backend,
+			Agent:    input.Roster.Agent,
+			Model:    input.Roster.Model,
+			Thinking: input.Roster.Thinking,
 		}, nil
 	}
 
