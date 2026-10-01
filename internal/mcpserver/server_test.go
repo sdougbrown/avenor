@@ -492,6 +492,10 @@ func TestAvenorStatusSingle(t *testing.T) {
 	}
 }
 
+// TestAvenorStatusListMCPShape drives the avenor_status list and single-run
+// forms through a real MCP session: the list form must return a record as
+// structuredContent (the MCP spec forbids arrays there), the tool must
+// declare its output schema, and the SDK validates both forms against it.
 func TestAvenorStatusListMCPShape(t *testing.T) {
 	// The list form (no run_id) must return a record as structuredContent: the
 	// MCP spec forbids arrays there. The tool must also declare its output
@@ -589,6 +593,57 @@ func TestAvenorStatusListMCPShape(t *testing.T) {
 	}
 	if _, present := singleRecord["count"]; present {
 		t.Fatal("single-run form should not include count")
+	}
+}
+
+func TestAvenorStatusListEmptyMCPShape(t *testing.T) {
+	// An empty supervisor must still emit "runs": [] — a plain slice with
+	// omitempty would drop the key.
+	fake := &fakeClient{listResult: []map[string]any{}}
+	s, err := NewServer(Options{
+		Transport:     "stdio",
+		NoAutostart:   true,
+		ControlClient: fake,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	ctx := context.Background()
+	serverTransport, clientTransport := mcpsdk.NewInMemoryTransports()
+	serverSession, err := s.mcpServer.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatalf("connect server: %v", err)
+	}
+	defer serverSession.Close()
+	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "test-client", Version: "dev"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("connect client: %v", err)
+	}
+	defer clientSession.Close()
+
+	res, err := clientSession.CallTool(ctx, &mcpsdk.CallToolParams{
+		Name:      "avenor_status",
+		Arguments: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("call tool: %v", err)
+	}
+	structured, ok := res.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("expected record structuredContent, got %T", res.StructuredContent)
+	}
+	runs, ok := structured["runs"].([]any)
+	if !ok {
+		t.Fatalf("expected runs array in output, got %#v", structured)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("expected empty runs, got %#v", runs)
+	}
+	if structured["count"] != float64(0) {
+		t.Fatalf("expected count 0, got %#v", structured["count"])
 	}
 }
 

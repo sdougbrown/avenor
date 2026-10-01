@@ -449,7 +449,7 @@ func (s *Server) handleAvenorStatus(ctx context.Context, req *mcp.CallToolReques
 			runs = append(runs, statusRunFromMap(ts))
 		}
 		count := len(runs)
-		return nil, statusToolOutput{Runs: runs, Count: &count}, nil
+		return nil, statusToolOutput{Runs: &runs, Count: &count}, nil
 	}
 
 	var timedOut bool

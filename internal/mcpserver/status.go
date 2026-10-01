@@ -58,13 +58,16 @@ type statusRun struct {
 // one type so the SDK can derive the tool's output schema.
 type statusToolOutput struct {
 	statusRun
-	Runs  []statusRun `json:"runs,omitempty"`
-	Count *int        `json:"count,omitempty"`
+	// Runs is a pointer so an empty list still emits "runs": [] — a plain
+	// slice with omitempty would drop the key when len == 0.
+	Runs  *[]statusRun `json:"runs,omitempty"`
+	Count *int         `json:"count,omitempty"`
 }
 
 // statusRunFromMap converts a translated status map into the typed output
-// shape. Keys outside the statusRun fields are dropped, mirroring the
-// TypeScript reference implementation's field allowlist.
+// shape. Keys outside the statusRun fields are dropped (mirroring the
+// TypeScript reference's own field allowlist, whose field set differs
+// slightly — it carries pid, this carries thinking/started_at/timed_out).
 func statusRunFromMap(m map[string]any) statusRun {
 	var run statusRun
 	if m == nil {
