@@ -1,5 +1,5 @@
 import { extractEventText } from '@dougbots/avenor-core'
-import type { InspectResult, ResultResult, StatusResult } from '@dougbots/avenor-core'
+import type { InspectResult, ResultResult, StatusListResult, StatusResult } from '@dougbots/avenor-core'
 
 const FINAL_OUTPUT_CHARS = 1_500
 const SCALAR_CHARS = 240
@@ -411,8 +411,8 @@ function shutdownLines(details: unknown, args: ShutdownArgs): string[] | undefin
   ]
 }
 
-export function formatStatusOutput(args: StatusArgs, result: StatusResult | StatusResult[]): RichToolResult {
-  const statuses = Array.isArray(result) ? result : undefined
+export function formatStatusOutput(args: StatusArgs, result: StatusResult | StatusListResult): RichToolResult {
+  const statuses = 'runs' in result ? result.runs : undefined
   if (statuses) {
     return {
       title: `Avenor status — ${statuses.length} runs`,

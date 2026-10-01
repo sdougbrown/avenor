@@ -59,7 +59,7 @@ async function createHarnessBase(options: {
   }
   const baseDeps: ExtensionDeps = {
     spawnTool: mock(async () => ({ run_id: 'run-1', label: 'demo', supervisor_id: '/tmp/sock', runtime_id: 'rt-1' })),
-    statusTool: mock(async () => []),
+    statusTool: mock(async () => ({ runs: [], count: 0 })),
     eventsTool: mock(async () => ({ events: [] })),
     answerPermissionTool: mock(async () => ({ ok: true })),
     followUpTool: mock(async () => ({ run_id: 'run-2', label: 'follow-up' })),
@@ -390,7 +390,7 @@ describe('Avenor Pi extension', () => {
   })
 
   it('reports an empty polling-error history', async () => {
-    const harness = await createPollingHarness(mock(async () => []))
+    const harness = await createPollingHarness(mock(async () => ({ runs: [], count: 0 })))
 
     await harness.registeredCommands['avenor-errors'].handler('', harness.ctx)
 
@@ -432,7 +432,7 @@ describe('Avenor Pi extension', () => {
     const statusTool = mock(async (args: { runId?: string } = {}) => {
       if (!args.runId) {
         await singletonPending
-        return []
+        return { runs: [], count: 0 }
       }
       if (runStatusCalls++ === 1) controller.abort()
       throw new Error('socket ended')
@@ -905,7 +905,7 @@ describe('Avenor Pi extension', () => {
     const statusCalls: Array<{ runId?: string; supervisorId?: string }> = []
     const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
       statusCalls.push(args)
-      if (!args.runId) return []                                                                              // unqualified list = current singleton (no runs)
+      if (!args.runId) return { runs: [], count: 0 }                                                                              // unqualified list = current singleton (no runs)
       if (args.supervisorId === FACTORY) return factoryStatus
       if (args.supervisorId === ADVISOR) return advisorRunning
       return { run_id: args.runId, label: args.runId, status: 'done' }
@@ -952,7 +952,7 @@ describe('Avenor Pi extension', () => {
     }
     let advisorDone = false
     const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
-      if (!args.runId) return []
+      if (!args.runId) return { runs: [], count: 0 }
       if (args.supervisorId === FACTORY) return factoryStatus
       if (args.supervisorId === ADVISOR) {
         return advisorDone ? { ...advisorRunning, status: 'done', final_output: 'advisor final answer' } : advisorRunning
@@ -1011,7 +1011,7 @@ describe('Avenor Pi extension', () => {
     const SOCK = '/tmp/single-run.sock'
     let done = false
     const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
-      if (!args.runId) return []
+      if (!args.runId) return { runs: [], count: 0 }
       if (args.supervisorId === SOCK) {
         return done
           ? { run_id: 'r1', label: 'worker', status: 'done', runtime_id: 'rt1', final_output: 'last answer' }
@@ -1048,7 +1048,7 @@ describe('Avenor Pi extension', () => {
     let resolveResult!: (v: unknown) => void
     const resultGate = new Promise(resolve => { resolveResult = resolve })
     const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
-      if (!args.runId) return []
+      if (!args.runId) return { runs: [], count: 0 }
       if (args.supervisorId === SOCK) {
         return done
           ? { run_id: 'r1', label: 'worker', status: 'done', runtime_id: 'rt1', final_output: 'consumed answer' }
@@ -1103,7 +1103,7 @@ describe('Avenor Pi extension', () => {
     const SOCK = '/tmp/interrupted.sock'
     let done = false
     const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
-      if (!args.runId) return []
+      if (!args.runId) return { runs: [], count: 0 }
       if (args.supervisorId === SOCK) {
         return done
           ? { run_id: 'r1', label: 'worker', status: 'done', runtime_id: 'rt1', final_output: 'interrupted answer' }
@@ -1162,7 +1162,7 @@ describe('Avenor Pi extension', () => {
         if (f.alphaWaiting) return { run_id: 'ra', label: 'alpha', status: 'waiting', runtime_id: 'rt-a', pending_permission: { description: 'allow write' } }
         return { run_id: 'ra', label: 'alpha', status: 'running', runtime_id: 'rt-a' }
       }
-      if (!args.runId) return []
+      if (!args.runId) return { runs: [], count: 0 }
       return { run_id: args.runId, label: args.runId, status: 'running' }
     })
   }
@@ -1302,7 +1302,7 @@ describe('Avenor Pi extension', () => {
     // The singleton live list contains a run this session never spawned.
     const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
       if (!args.runId) {
-        return [{ run_id: 'foreign', label: 'foreign', status: 'done', runtime_id: 'rt-x' }]
+        return { runs: [{ run_id: 'foreign', label: 'foreign', status: 'done', runtime_id: 'rt-x' }], count: 1 }
       }
       if (args.supervisorId === SOCK) {
         return { run_id: 'ra', label: 'alpha', status: 'running', runtime_id: 'rt-a' }
@@ -1511,7 +1511,7 @@ describe('Avenor Pi extension', () => {
         }
         return { run_id: 'ra', label: 'alpha', status: 'running', runtime_id: 'rt-a' }
       }
-      if (!args.runId) return []
+      if (!args.runId) return { runs: [], count: 0 }
       return { run_id: args.runId, label: args.runId, status: 'running' }
     })
     const resultTool = makeBlockingResultTool()
@@ -1717,7 +1717,7 @@ describe('Avenor Pi extension', () => {
     const statusCalls: Array<{ runId?: string; supervisorId?: string }> = []
     const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
       statusCalls.push(args)
-      if (!args.runId) return []
+      if (!args.runId) return { runs: [], count: 0 }
       if (args.supervisorId === A) return runA
       if (args.supervisorId === B) return runB
       return { run_id: args.runId, label: args.runId, status: 'done' }
@@ -1763,7 +1763,7 @@ describe('Avenor Pi extension', () => {
     const statusCalls: Array<{ runId?: string; supervisorId?: string }> = []
     const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
       statusCalls.push(args)
-      if (!args.runId) return []
+      if (!args.runId) return { runs: [], count: 0 }
       if (args.supervisorId === A) return runA
       // The singleton answers for both its implicit (undefined) and explicit socket.
       if (args.supervisorId === undefined || args.supervisorId === SINGLETON) return runS

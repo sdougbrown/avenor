@@ -170,8 +170,10 @@ describe('local run resolution', () => {
       Supervisor.get = mock(async () => sup) as typeof Supervisor.get
       try {
         const statusList = await statusTool({})
-        expect(statusList).toHaveLength(2)
-        expect(statusList).toEqual(expect.arrayContaining([
+        expect('runs' in statusList).toBe(true)
+        const runs = 'runs' in statusList ? statusList.runs : []
+        expect(runs).toHaveLength(2)
+        expect(runs).toEqual(expect.arrayContaining([
           expect.objectContaining({
             run_id: canonical.runId,
             runtime_id: canonical.runtimeId,

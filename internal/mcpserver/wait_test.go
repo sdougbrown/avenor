@@ -308,7 +308,7 @@ func TestAvenorStatusWaitValidationAndLifecycleTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	status := result.(map[string]any)
+	status := statusOutputMap(t, result)
 	if status["timed_out"] != true || status["status"] != "running" || status["phase"] != "working" {
 		t.Fatalf("status = %#v", status)
 	}
@@ -395,7 +395,7 @@ func TestWaitAutoApprovedFollowUpLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	status := statusResult.(map[string]any)
+	status := statusOutputMap(t, statusResult)
 	if status["status"] != "done" || hasPendingPermission(status) {
 		t.Fatalf("status = %#v, calls = %d", status, len(fake.statusCapturedRuntimeIDs))
 	}

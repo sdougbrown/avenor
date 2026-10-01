@@ -52,7 +52,7 @@ export {
 } from './thinking-policy.js'
 export type { ThinkingOutcome } from './thinking-policy.js'
 export { statusTool } from './tools/status.js'
-export type { StatusResult, StatusToolArgs, StatusView } from './tools/status.js'
+export type { StatusResult, StatusListResult, StatusToolArgs, StatusView } from './tools/status.js'
 export { resultTool } from './tools/result.js'
 export type { ResultResult, ResultToolArgs } from './tools/result.js'
 export { answerPermissionTool } from './tools/answer-permission.js'

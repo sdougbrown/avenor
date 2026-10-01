@@ -291,7 +291,7 @@ func NewServer(opts Options) (*Server, error) {
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
 		Name:        "avenor_status",
-		Description: "Get lifecycle status of avenor runs; optionally wait for terminal, phase_change, turn_complete, or permission",
+		Description: "Get lifecycle status of avenor runs; optionally wait for terminal, phase_change, turn_complete, or permission. Without run_id, returns an object with runs (array of status objects) and count.",
 	}, s.handleAvenorStatus)
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
@@ -380,33 +380,33 @@ func (s *Server) Close() error {
 	return nil
 }
 
-func (s *Server) handleAvenorStatus(ctx context.Context, req *mcp.CallToolRequest, args statusArgs) (*mcp.CallToolResult, any, error) {
+func (s *Server) handleAvenorStatus(ctx context.Context, req *mcp.CallToolRequest, args statusArgs) (*mcp.CallToolResult, statusToolOutput, error) {
 	if args.View != "" && args.View != "lifecycle" && args.View != "full" {
-		return nil, nil, fmt.Errorf("view must be lifecycle or full")
+		return nil, statusToolOutput{}, fmt.Errorf("view must be lifecycle or full")
 	}
 	condition, err := parseWaitCondition(args.WaitFor)
 	if err != nil {
-		return nil, nil, err
+		return nil, statusToolOutput{}, err
 	}
 	if condition == "" && args.Timeout != "" {
-		return nil, nil, fmt.Errorf("timeout requires wait_for")
+		return nil, statusToolOutput{}, fmt.Errorf("timeout requires wait_for")
 	}
 	if condition != "" && args.RunID == "" {
-		return nil, nil, fmt.Errorf("run_id is required when wait_for is set")
+		return nil, statusToolOutput{}, fmt.Errorf("run_id is required when wait_for is set")
 	}
 
 	var deadline time.Time
 	if args.Timeout != "" {
 		seconds, err := parseTimeoutSeconds(args.Timeout)
 		if err != nil {
-			return nil, nil, err
+			return nil, statusToolOutput{}, err
 		}
 		deadline = s.clock().Add(time.Duration(seconds) * time.Second)
 	}
 
 	cl, cleanup, err := s.getClientForSupervisor(args.SupervisorID)
 	if err != nil {
-		return nil, nil, err
+		return nil, statusToolOutput{}, err
 	}
 	defer cleanup()
 	supervisorPath := s.getSupervisorPath(args.SupervisorID)
@@ -414,7 +414,7 @@ func (s *Server) handleAvenorStatus(ctx context.Context, req *mcp.CallToolReques
 	if args.RunID == "" {
 		results, err := cl.List()
 		if err != nil {
-			return nil, nil, fmt.Errorf("list runs: %w", err)
+			return nil, statusToolOutput{}, fmt.Errorf("list runs: %w", err)
 		}
 		translated := make([]map[string]any, 0, len(results))
 		seenRegistryRuns := make(map[string]bool)
@@ -444,7 +444,12 @@ func (s *Server) handleAvenorStatus(ctx context.Context, req *mcp.CallToolReques
 				translated = append(translated, shapeStatusForView(ts, args.View))
 			}
 		}
-		return nil, translated, nil
+		runs := make([]statusRun, 0, len(translated))
+		for _, ts := range translated {
+			runs = append(runs, statusRunFromMap(ts))
+		}
+		count := len(runs)
+		return nil, statusToolOutput{Runs: runs, Count: &count}, nil
 	}
 
 	var timedOut bool
@@ -455,12 +460,12 @@ func (s *Server) handleAvenorStatus(ctx context.Context, req *mcp.CallToolReques
 		ts, err = s.queryRunStatus(cl, args.RunID)
 	}
 	if err != nil {
-		return nil, nil, err
+		return nil, statusToolOutput{}, err
 	}
 	if timedOut {
 		ts["timed_out"] = true
 	}
-	return nil, shapeStatusForView(ts, args.View), nil
+	return nil, statusToolOutput{statusRun: statusRunFromMap(shapeStatusForView(ts, args.View))}, nil
 }
 
 func terminalStatusFromRunInfo(info *RunInfo) (map[string]any, bool) {

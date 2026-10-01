@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- `avenor_status` MCP tool: the list form (no `run_id`) now returns `{ "runs": [...], "count": N }` instead of a bare array. The MCP spec requires `structuredContent` to be an object, so the array form previously failed client-side schema validation in Claude Code. The tool also now declares its output schema, derived from the typed Go result, and the TypeScript reference implementation (`packages/core`) returns the same wrapped shape.
 - `pi` sub-agent turns now honor pi's auto-retry: when pi's `agent_end` carries `willRetry: true`, avenor no longer treats the turn as terminally failed and tears the session down before pi's retry backoff fires. Transient model/gateway errors (e.g. a LiteLLM 500 connection error) are retried by pi itself instead of killing the run. The settled `session.end` now also carries the provider's real `error_message` instead of `unknown error`.
 - `avenor_ask` now resolves its run reference (public run id, label, or broker runtime id) the way the sibling tools do. Addressing a live run by its canonical spawn id previously failed with "to run not found" because the broker registers runs only under their runtime id.
 - `pi` sub-agents now receive inbound asks and can reply: the supervisor provisions a broker run + token for each pi child, the pi provider passes them to the sub-process, and the `packages/pi` extension polls `/poll-control` to surface asks into the session and answers via `avenor_reply` as its own run.

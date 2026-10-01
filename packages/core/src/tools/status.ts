@@ -230,6 +230,13 @@ export interface StatusToolArgs {
   view?: StatusView
 }
 
+/** List form of the status tool result (no runId). structuredContent must be
+ * an object, so the runs array is wrapped with a count. */
+export interface StatusListResult {
+  runs: StatusResult[]
+  count: number
+}
+
 export interface StatusResult {
   run_id: string
   label: string
@@ -335,7 +342,7 @@ async function queryLiveStatus(
 async function executeStatusTool(
   args: StatusToolArgs,
   getSupervisorClient: typeof realGetSupervisorClient,
-): Promise<StatusResult | StatusResult[]> {
+): Promise<StatusResult | StatusListResult> {
   if (args.supervisorId) {
     const { client, isSingleton, sup, supervisorId } = await getSupervisorClient(args.supervisorId)
     try {
@@ -417,7 +424,7 @@ async function executeStatusTool(
           translateStatus(rawStatusPhase(entry), null),
         ), args.view))
       }
-      return results
+      return { runs: results, count: results.length }
     } finally {
       if (!isSingleton) {
         client.close()
@@ -488,12 +495,12 @@ async function executeStatusTool(
     }
   }
 
-  return results
+  return { runs: results, count: results.length }
 }
 
 export function createStatusTool(
   getSupervisorClient: typeof realGetSupervisorClient,
-): (args: StatusToolArgs) => Promise<StatusResult | StatusResult[]> {
+): (args: StatusToolArgs) => Promise<StatusResult | StatusListResult> {
   return args => executeStatusTool(args, getSupervisorClient)
 }
 

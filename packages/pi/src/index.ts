@@ -664,7 +664,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       const liveMap = new Map<string, StatusResult>()
       try {
         const allLive = await deps.statusTool({})
-        const liveList = Array.isArray(allLive) ? allLive : [allLive]
+        const liveList = 'runs' in allLive ? allLive.runs : [allLive]
         for (const result of liveList) {
           liveMap.set(result.run_id, result)
         }

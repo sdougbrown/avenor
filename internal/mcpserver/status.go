@@ -1,6 +1,7 @@
 package mcpserver
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -12,6 +13,68 @@ type sentinelData struct {
 	Status     string
 	SessionID  string
 	StopReason string
+}
+
+// statusRun is the typed shape of one run status in avenor_status structured
+// output. Pointer fields preserve the pass-through presence semantics of the
+// underlying status maps: a key is emitted only when the status source
+// supplied it, including explicit empty strings such as phase_label.
+type statusRun struct {
+	RunID                *string        `json:"run_id,omitempty"`
+	Label                *string        `json:"label,omitempty"`
+	Status               *string        `json:"status,omitempty"`
+	RuntimeID            *string        `json:"runtime_id,omitempty"`
+	SessionID            *string        `json:"session_id,omitempty"`
+	StopReason           *string        `json:"stop_reason,omitempty"`
+	Phase                *string        `json:"phase,omitempty"`
+	PhaseLabel           *string        `json:"phase_label,omitempty"`
+	PendingPermission    *bool          `json:"pending_permission,omitempty"`
+	Dir                  *string        `json:"dir,omitempty"`
+	Thinking             *string        `json:"thinking,omitempty"`
+	Backend              *string        `json:"backend,omitempty"`
+	Agent                *string        `json:"agent,omitempty"`
+	AgentProfile         *string        `json:"agent_profile,omitempty"`
+	Model                *string        `json:"model,omitempty"`
+	RosterFile           *string        `json:"roster_file,omitempty"`
+	RosterEntry          *string        `json:"roster_entry,omitempty"`
+	EffectiveBackend     *string        `json:"effective_backend,omitempty"`
+	EffectiveAgent       *string        `json:"effective_agent,omitempty"`
+	EffectiveModel       *string        `json:"effective_model,omitempty"`
+	ParentID             *string        `json:"parent_id,omitempty"`
+	Children             []string       `json:"children,omitempty"`
+	EventPath            *string        `json:"event_path,omitempty"`
+	Usage                map[string]any `json:"usage,omitempty"`
+	LatestSeq            *int64         `json:"latest_seq,omitempty"`
+	FinalOutput          *string        `json:"final_output,omitempty"`
+	FinalOutputTruncated *bool          `json:"final_output_truncated,omitempty"`
+	StartedAt            *int64         `json:"started_at,omitempty"`
+	TimedOut             *bool          `json:"timed_out,omitempty"`
+}
+
+// statusToolOutput is the structured output of the avenor_status tool. The
+// single-run form carries the status fields themselves; the list form (no
+// run_id) carries runs and count. The embedded value keeps the two forms in
+// one type so the SDK can derive the tool's output schema.
+type statusToolOutput struct {
+	statusRun
+	Runs  []statusRun `json:"runs,omitempty"`
+	Count *int        `json:"count,omitempty"`
+}
+
+// statusRunFromMap converts a translated status map into the typed output
+// shape. Keys outside the statusRun fields are dropped, mirroring the
+// TypeScript reference implementation's field allowlist.
+func statusRunFromMap(m map[string]any) statusRun {
+	var run statusRun
+	if m == nil {
+		return run
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return run
+	}
+	_ = json.Unmarshal(b, &run)
+	return run
 }
 
 func readSentinel(path string) (*sentinelData, error) {
