@@ -739,13 +739,11 @@ describe('Avenor Pi extension', () => {
     ).render(2_000).join('\n').trimEnd()
     expect(renderedResult).toContain('Result: demo — done')
     expect(renderedResult).not.toContain('"output"')
-    expect(resultToolMock).toHaveBeenCalledWith({
+    expect(resultToolMock.mock.calls[0]?.[0]).toMatchObject({
       runId: 'run-1',
       supervisorId: undefined,
       wait: undefined,
       timeout: '5m',
-      // The wait is composed with the await registry's interrupt signal.
-      signal: expect.any(AbortSignal),
     })
     expect(mockBus.emit).toHaveBeenCalledWith(
       CHANNEL_RUN_TERMINAL,
@@ -1581,6 +1579,63 @@ describe('Avenor Pi extension', () => {
     // The delivered terminal fallback consumed the run: no auto-delivery.
     const completions = h.sendUserMessage.mock.calls.map(([t]) => String(t)).filter(t => t.includes('Sub-agent "alpha" finished'))
     expect(completions).toHaveLength(0)
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('delivers inline when the awaited run stops in the same tick as the sibling interrupt', async () => {
+    const SOCK = '/tmp/same-tick-spawn.sock'
+    let alphaDone = false
+    let betaDone = false
+    const statusTool = makeTwoRunStatusTool(SOCK, () => ({ alphaDone, betaDone }))
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      observeRun: makeDormantObserver(),
+      spawnTool: makeTwoRunSpawnTool(SOCK),
+    })
+
+    // Both spawns block (wait=true, held by the dormant observer), so both
+    // runs' terminal handling takes the synchronous skip path.
+    const alphaPromise = h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: true }, undefined, undefined, h.ctx)
+    const betaPromise = h.registeredTools.avenor_spawn.execute('t2', { agent: 'explore', label: 'beta', supervisor_id: SOCK, wait: true }, undefined, undefined, h.ctx)
+
+    alphaDone = true
+    betaDone = true
+    await h.waitPollMatching(payload => payload.entries.some((e: { label: string; status: string }) => e.label === 'alpha' && e.status === 'done'))
+
+    // The sibling interrupt fires while both runs are still marked blocking;
+    // each spawn must probe its own run and deliver inline instead of relying
+    // on a tick that has already stopped (last active run).
+    const alphaResult = await alphaPromise
+    expect(String(alphaResult.content[0].text)).not.toContain('was interrupted')
+    expect(alphaResult.details).toMatchObject({ run_id: 'ra', status: 'done' })
+    const betaResult = await betaPromise
+    expect(betaResult.details).toMatchObject({ run_id: 'rb', status: 'done' })
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('rejects avenor_result when the signal is already aborted before the call', async () => {
+    const SOCK = '/tmp/pre-aborted.sock'
+    const statusTool = makeTwoRunStatusTool(SOCK, () => ({}))
+    // Mirrors the real resultTool: an already-aborted signal rejects at once.
+    const resultTool = mock((args: { signal?: AbortSignal }) => new Promise((_resolve, reject) => {
+      if (args.signal?.aborted) {
+        reject(new Error('result wait cancelled'))
+        return
+      }
+      args.signal?.addEventListener('abort', () => reject(new Error('result wait cancelled')))
+    }))
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      resultTool,
+      spawnTool: makeTwoRunSpawnTool(SOCK),
+    })
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    const controller = new AbortController()
+    controller.abort()
+    await expect(h.registeredTools.avenor_result.execute('t2', { run_id: 'ra', supervisor_id: SOCK }, controller.signal, undefined, h.ctx)).rejects.toThrow()
 
     await h.eventHandlers.session_shutdown()
   })

@@ -1365,34 +1365,47 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         } finally {
           blockingWait.dispose()
         }
+        let waitStatus: StatusResult | undefined = waitResult.status
         if (waitResult.aborted) {
           const stop = blockingWait.stopped
           if (stop && !stop.synthetic) {
-            // A sibling run reached a stopping point first: hand control back
-            // to the agent and let the polling tick deliver this run's
-            // completion, exactly like a wait=false spawn.
-            const tracked = getTrackedRun(result.run_id, supervisorId)
-            if (tracked) tracked.blocking = false
+            // A sibling stopping point interrupted this wait, but the awaited
+            // run may have reached a stopping point in the same tick. Probe
+            // before delegating to the tick: its synchronous skip path can
+            // leave this run undelivered when it was the last active one.
+            const raw = await deps.statusTool({ runId: result.run_id, supervisorId })
+              .catch(() => undefined)
+            const probed = Array.isArray(raw) ? raw[0] : raw
+            if (probed && (isTerminalStatus(probed.status) || probed.status === 'waiting')) {
+              // Deliver/wait inline through the normal status handling.
+              waitStatus = probed
+            } else {
+              // Hand control back to the agent and let the polling tick
+              // deliver this run's completion, exactly like a wait=false spawn.
+              const tracked = getTrackedRun(result.run_id, supervisorId)
+              if (tracked) tracked.blocking = false
+              return {
+                content: [{ type: 'text', text: `Monitoring of "${label}" (run_id: ${result.run_id}) was interrupted: "${stop.label ?? stop.runId}" reached ${stop.status === 'waiting' ? 'a permission request' : stop.status}. Handle that first; this run's final result is delivered automatically.` }],
+                details: {
+                  run_id: result.run_id,
+                  interrupted_by: { run_id: stop.runId, label: stop.label, status: stop.status },
+                  ...spawnIdentityMetadata(hostParams),
+                },
+              }
+            }
+          } else {
+            trackedRuns.delete(trackedRunKey(supervisorId, result.run_id))
             return {
-              content: [{ type: 'text', text: `Monitoring of "${label}" (run_id: ${result.run_id}) was interrupted: "${stop.label ?? stop.runId}" reached ${stop.status === 'waiting' ? 'a permission request' : stop.status}. Handle that first; this run's final result is delivered automatically.` }],
+              content: [{ type: 'text', text: `Monitoring of "${label}" (run_id: ${result.run_id}) was interrupted. Use avenor_status or avenor_inspect to check.` }],
               details: {
                 run_id: result.run_id,
-                interrupted_by: { run_id: stop.runId, label: stop.label, status: stop.status },
                 ...spawnIdentityMetadata(hostParams),
               },
             }
           }
-          trackedRuns.delete(trackedRunKey(supervisorId, result.run_id))
-          return {
-            content: [{ type: 'text', text: `Monitoring of "${label}" (run_id: ${result.run_id}) was interrupted. Use avenor_status or avenor_inspect to check.` }],
-            details: {
-              run_id: result.run_id,
-              ...spawnIdentityMetadata(hostParams),
-            },
-          }
         }
 
-        const status = waitResult.status
+        const status = waitStatus
         if (!status) {
           return {
             content: [{ type: 'text', text: `Sub-agent "${label}" is still running. Use avenor_status or avenor_inspect to check progress.` }],
