@@ -45,6 +45,7 @@ type statusRun struct {
 	Children             []string       `json:"children,omitempty"`
 	EventPath            *string        `json:"event_path,omitempty"`
 	Usage                map[string]any `json:"usage,omitempty"`
+	Permission           map[string]any `json:"permission,omitempty"`
 	LatestSeq            *int64         `json:"latest_seq,omitempty"`
 	FinalOutput          *string        `json:"final_output,omitempty"`
 	FinalOutputTruncated *bool          `json:"final_output_truncated,omitempty"`
@@ -99,6 +100,7 @@ func statusRunFromMap(m map[string]any) statusRun {
 	run.Children = childrenOf(m)
 	run.EventPath = stringPtr(m, "event_path")
 	run.Usage = usageOf(m)
+	run.Permission = recordOf(m, "permission")
 	run.LatestSeq = int64Ptr(m, "latest_seq")
 	run.FinalOutput = stringPtr(m, "final_output")
 	run.FinalOutputTruncated = boolPtr(m, "final_output_truncated")
@@ -158,7 +160,14 @@ func childrenOf(m map[string]any) []string {
 }
 
 func usageOf(m map[string]any) map[string]any {
-	if v, ok := m["usage"]; ok {
+	return recordOf(m, "usage")
+}
+
+// recordOf passes through a free-form record field (usage, permission). The
+// permission record carries provider-dependent request details, so a closed
+// struct would drop keys the wire may carry.
+func recordOf(m map[string]any, key string) map[string]any {
+	if v, ok := m[key]; ok {
 		if u, ok := v.(map[string]any); ok {
 			return u
 		}
@@ -194,7 +203,7 @@ func readSentinel(path string) (*sentinelData, error) {
 func translateStatus(raw map[string]any, sentinelPath string) map[string]any {
 	result := make(map[string]any)
 
-	for _, k := range []string{"runtime_id", "label", "dir", "phase", "phase_label", "pending_permission", "backend", "agent", "agent_profile", "model", "roster_file", "roster_entry", "effective_backend", "effective_agent", "effective_model", "parent_id", "children", "event_path", "usage", "latest_seq", "final_output", "final_output_truncated", "started_at"} {
+	for _, k := range []string{"runtime_id", "label", "dir", "phase", "phase_label", "pending_permission", "permission", "backend", "agent", "agent_profile", "model", "roster_file", "roster_entry", "effective_backend", "effective_agent", "effective_model", "parent_id", "children", "event_path", "usage", "latest_seq", "final_output", "final_output_truncated", "started_at"} {
 		if v, ok := raw[k]; ok {
 			result[k] = v
 		}

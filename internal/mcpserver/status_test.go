@@ -430,6 +430,14 @@ func TestStatusRunFromMapFieldTypes(t *testing.T) {
 		}
 	})
 
+	t.Run("permission record passthrough", func(t *testing.T) {
+		perm := map[string]any{"request_id": "req-9", "options": []any{map[string]any{"option_id": "allow_once"}}}
+		run := statusRunFromMap(map[string]any{"permission": perm})
+		if run.Permission == nil || run.Permission["request_id"] != "req-9" {
+			t.Fatalf("Permission = %v, want passthrough", run.Permission)
+		}
+	})
+
 	t.Run("mismatched type yields nil", func(t *testing.T) {
 		run := statusRunFromMap(map[string]any{"status": 123})
 		if run.Status != nil {

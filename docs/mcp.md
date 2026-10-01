@@ -253,13 +253,17 @@ one-second cadence; callers do not provide a poll interval.
 
 A pending permission interrupts every wait condition, including `terminal`.
 Inspect `pending_permission`, answer the request with `avenor_answer_permission`,
-and then issue another wait. The legacy `waiting` status remains supported.
+and then issue another wait. When a permission request is pending, the status
+carries a `permission` record with the request details (`request_id`,
+`description`, `options`), so callers can answer without a second query. The
+legacy `waiting` status remains supported.
 
 **Returns:** One status object if `run_id` is given, or an object with `runs`
 (an array of status objects) and `count` if omitted.
 A timed-out wait returns the latest status with `timed_out: true`; it does not
-cancel the underlying run. Lifecycle view retains `timed_out` but omits
-`final_output` and usage. Use `avenor_result` to harvest complete output.
+cancel the underlying run. Lifecycle view retains `timed_out` and the
+`permission` record but omits `final_output` and usage. Use `avenor_result` to
+harvest complete output.
 
 ### `avenor_result`
 
@@ -273,7 +277,7 @@ Waits for one run and returns its complete final output without transcript or ra
 - `timeout` — maximum time to wait, such as `30s` or `5m`
 - `supervisor_id` — supervisor socket to query
 
-A terminal response has `ready: true` and includes the complete `output` when the backend exposed final assistant text. A blocked run returns its `pending_permission` immediately, even when its public status is still `running`. Answer the request before waiting again. If an older or unavailable control endpoint prevents lossless retrieval and a presentation fallback is returned, `output_truncated: true` and `output_event_path` make its possible truncation explicit; retry `avenor_result` or read the durable event path. If the result tool's own timeout expires, it returns the latest state with `ready: false` and `timed_out: true`; the underlying run keeps going.
+A terminal response has `ready: true` and includes the complete `output` when the backend exposed final assistant text. A blocked run returns its `pending_permission` immediately, even when its public status is still `running`, together with the `permission` record holding the request details. Answer the request before waiting again. If an older or unavailable control endpoint prevents lossless retrieval and a presentation fallback is returned, `output_truncated: true` and `output_event_path` make its possible truncation explicit; retry `avenor_result` or read the durable event path. If the result tool's own timeout expires, it returns the latest state with `ready: false` and `timed_out: true`; the underlying run keeps going.
 
 ### `avenor_answer_permission`
 

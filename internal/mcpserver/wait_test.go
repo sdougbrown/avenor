@@ -410,6 +410,7 @@ func TestAvenorResultPermissionInterruptWhileRunning(t *testing.T) {
 		"runtime_id":         "rt-permission",
 		"status":             "running",
 		"pending_permission": true,
+		"permission":         map[string]any{"request_id": "req-7", "description": "Read file"},
 	}}
 	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
 	if err != nil {
@@ -422,6 +423,10 @@ func TestAvenorResultPermissionInterruptWhileRunning(t *testing.T) {
 	result := value.(map[string]any)
 	if result["ready"] != false || result["status"] != "running" || result["pending_permission"] != true {
 		t.Fatalf("result = %#v", result)
+	}
+	perm, ok := result["permission"].(map[string]any)
+	if !ok || perm["request_id"] != "req-7" {
+		t.Fatalf("permission = %#v, want request record", result["permission"])
 	}
 	if len(fake.statusCapturedRuntimeIDs) != 1 {
 		t.Fatalf("status calls = %d, want 1", len(fake.statusCapturedRuntimeIDs))
