@@ -455,7 +455,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       if (signal?.aborted) controller.abort()
       else signal?.addEventListener('abort', onSignalAbort)
       const pending = registerPendingWait(runKey, (stop) => {
-        if (controller.aborted) return
+        if (controller.signal.aborted) return
         stopped = stop
         controller.abort()
       })
@@ -471,7 +471,13 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       }
     }
 
-    type InterruptedResult = ResultResult & { interrupted_by?: StoppingPoint }
+    interface InterruptedBy {
+      run_id: string
+      label?: string
+      status: string
+    }
+
+    type InterruptedResult = ResultResult & { interrupted_by?: InterruptedBy }
 
     /** Build the early return for a wait interrupted by a sibling stopping
      * point. When the awaited run itself has since reached a stopping point

@@ -1169,6 +1169,19 @@ describe('Avenor Pi extension', () => {
     })
   }
 
+  /** observeRun mock that holds a spawn's blocking wait open (never emits a
+   * snapshot), so the wait resolves only via the await registry or abort. */
+  function makeDormantObserver() {
+    return mock(async () => ({
+      subscribe: (cb: (snapshot: unknown) => void) => {
+        void cb
+        return () => {}
+      },
+      snapshot: () => ({ last_event: undefined, transcript: [], pending_permission: false, ended: false }),
+      close: async () => {},
+    }))
+  }
+
   /** resultTool mock that blocks until the wait's signal aborts, mirroring
    * the real resultTool's abort behavior so tests exercise the interrupt path. */
   function makeBlockingResultTool() {
@@ -1462,14 +1475,7 @@ describe('Avenor Pi extension', () => {
   it('releases a blocking spawn wait on shutdown without sibling semantics', async () => {
     const SOCK = '/tmp/shutdown-spawn.sock'
     const statusTool = makeTwoRunStatusTool(SOCK, () => ({}))
-    const observeRun = mock(async () => ({
-      subscribe: (cb: (snapshot: unknown) => void) => {
-        void cb
-        return () => {}
-      },
-      snapshot: () => ({ last_event: undefined, transcript: [], pending_permission: false, ended: false }),
-      close: async () => {},
-    }))
+    const observeRun = makeDormantObserver()
 
     const h = await createMultiSupervisorHarness({
       statusTool,
@@ -1493,18 +1499,97 @@ describe('Avenor Pi extension', () => {
     expect(setWidget).not.toHaveBeenCalled()
   })
 
+  it('returns the fallback shape when the post-interrupt status probe fails', async () => {
+    const SOCK = '/tmp/probe-failure.sock'
+    let betaDone = false
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string; view?: string } = {}) => {
+      // The post-interrupt probe is the only call with view: 'full'.
+      if (args.view === 'full') throw new Error('supervisor gone')
+      if (args.supervisorId === SOCK) {
+        if (args.runId === 'rb') {
+          return betaDone
+            ? { run_id: 'rb', label: 'beta', status: 'done', runtime_id: 'rt-b', final_output: 'beta answer' }
+            : { run_id: 'rb', label: 'beta', status: 'running', runtime_id: 'rt-b' }
+        }
+        return { run_id: 'ra', label: 'alpha', status: 'running', runtime_id: 'rt-a' }
+      }
+      if (!args.runId) return []
+      return { run_id: args.runId, label: args.runId, status: 'running' }
+    })
+    const resultTool = makeBlockingResultTool()
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      resultTool,
+      spawnTool: makeTwoRunSpawnTool(SOCK),
+    })
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    await h.registeredTools.avenor_spawn.execute('t2', { agent: 'explore', label: 'beta', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    const resultPromise = h.registeredTools.avenor_result.execute('t3', { run_id: 'ra', supervisor_id: SOCK }, undefined, undefined, h.ctx)
+
+    betaDone = true
+    await h.waitPollMatching(payload => payload.entries.some((e: { label: string; status: string }) => e.label === 'beta' && e.status === 'done'))
+    const result = await resultPromise
+    expect(result.details).toMatchObject({
+      run_id: 'ra',
+      label: 'ra',
+      status: 'running',
+      ready: false,
+      interrupted_by: { run_id: 'rb', label: 'beta', status: 'done' },
+    })
+    expect(result.details).not.toHaveProperty('output')
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('falls back to the terminal state when the self-stopped redelivery fails', async () => {
+    const SOCK = '/tmp/redelivery-failure.sock'
+    let alphaDone = false
+    let betaDone = false
+    const statusTool = makeTwoRunStatusTool(SOCK, () => ({ alphaDone, betaDone }))
+    // First call blocks until aborted; the post-interrupt redelivery fails.
+    const resultTool = mock((args: { signal?: AbortSignal }) => {
+      if (resultTool.mock.calls.length === 1) {
+        return new Promise((_resolve, reject) => {
+          args.signal?.addEventListener('abort', () => reject(new Error('result wait cancelled')))
+        })
+      }
+      return Promise.reject(new Error('redelivery failed'))
+    })
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      resultTool,
+      spawnTool: makeTwoRunSpawnTool(SOCK),
+    })
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'beta', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    await h.registeredTools.avenor_spawn.execute('t2', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    const resultPromise = h.registeredTools.avenor_result.execute('t3', { run_id: 'ra', supervisor_id: SOCK }, undefined, undefined, h.ctx)
+
+    alphaDone = true
+    betaDone = true
+    await h.waitPollMatching(payload => payload.entries.some((e: { label: string; status: string }) => e.label === 'beta' && e.status === 'done'))
+    const result = await resultPromise
+    expect(result.details).toMatchObject({
+      run_id: 'ra',
+      status: 'done',
+      ready: true,
+      interrupted_by: { run_id: 'rb', label: 'beta', status: 'done' },
+    })
+    expect(result.details).not.toHaveProperty('output')
+
+    // The delivered terminal fallback consumed the run: no auto-delivery.
+    const completions = h.sendUserMessage.mock.calls.map(([t]) => String(t)).filter(t => t.includes('Sub-agent "alpha" finished'))
+    expect(completions).toHaveLength(0)
+
+    await h.eventHandlers.session_shutdown()
+  })
+
   it('treats a caller-aborted wait as a plain abort, not a sibling interrupt', async () => {
     const SOCK = '/tmp/caller-abort.sock'
     const statusTool = makeTwoRunStatusTool(SOCK, () => ({}))
     const resultTool = makeBlockingResultTool()
-    const observeRun = mock(async () => ({
-      subscribe: (cb: (snapshot: unknown) => void) => {
-        void cb
-        return () => {}
-      },
-      snapshot: () => ({ last_event: undefined, transcript: [], pending_permission: false, ended: false }),
-      close: async () => {},
-    }))
+    const observeRun = makeDormantObserver()
 
     const h = await createMultiSupervisorHarness({
       statusTool,
@@ -1540,14 +1625,7 @@ describe('Avenor Pi extension', () => {
       statusTool,
       // Keeps the blocking spawn wait alive until the sibling's stopping point
       // aborts it through the await registry.
-      observeRun: mock(async () => ({
-        subscribe: (cb: (snapshot: unknown) => void) => {
-          void cb
-          return () => {}
-        },
-        snapshot: () => ({ last_event: undefined, transcript: [], pending_permission: false, ended: false }),
-        close: async () => {},
-      })),
+      observeRun: makeDormantObserver(),
       spawnTool: makeTwoRunSpawnTool(SOCK),
     })
 
