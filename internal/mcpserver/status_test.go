@@ -368,3 +368,72 @@ func TestReadSentinelError(t *testing.T) {
 		t.Fatal("expected error for nonexistent sentinel")
 	}
 }
+
+func TestStatusRunFromMapFieldTypes(t *testing.T) {
+	t.Run("string field", func(t *testing.T) {
+		run := statusRunFromMap(map[string]any{"status": "running"})
+		if run.Status == nil || *run.Status != "running" {
+			t.Fatalf("Status = %v, want pointer to 'running'", run.Status)
+		}
+	})
+
+	t.Run("empty string phase_label presence", func(t *testing.T) {
+		run := statusRunFromMap(map[string]any{"phase_label": ""})
+		if run.PhaseLabel == nil {
+			t.Fatal("PhaseLabel = nil, want non-nil pointer to empty string")
+		}
+		if *run.PhaseLabel != "" {
+			t.Fatalf("PhaseLabel = %q, want ''", *run.PhaseLabel)
+		}
+	})
+
+	t.Run("pending_permission boolean", func(t *testing.T) {
+		run := statusRunFromMap(map[string]any{"pending_permission": true})
+		if run.PendingPermission != true {
+			t.Fatalf("PendingPermission = %v, want true", run.PendingPermission)
+		}
+	})
+
+	t.Run("pending_permission legacy object", func(t *testing.T) {
+		run := statusRunFromMap(map[string]any{"pending_permission": map[string]any{"request_id": "req-42"}})
+		if run.PendingPermission == nil {
+			t.Fatal("PendingPermission = nil, want non-nil map")
+		}
+		m, ok := run.PendingPermission.(map[string]any)
+		if !ok {
+			t.Fatalf("PendingPermission = %T, want map[string]any", run.PendingPermission)
+		}
+		if m["request_id"] != "req-42" {
+			t.Fatalf("request_id = %v, want req-42", m["request_id"])
+		}
+	})
+
+	t.Run("latest_seq float64 to int64", func(t *testing.T) {
+		run := statusRunFromMap(map[string]any{"latest_seq": float64(42)})
+		if run.LatestSeq == nil || *run.LatestSeq != 42 {
+			t.Fatalf("LatestSeq = %v, want pointer to 42", run.LatestSeq)
+		}
+	})
+
+	t.Run("children as []any of strings", func(t *testing.T) {
+		run := statusRunFromMap(map[string]any{"children": []any{"a", "b"}})
+		if len(run.Children) != 2 || run.Children[0] != "a" || run.Children[1] != "b" {
+			t.Fatalf("Children = %v, want [a b]", run.Children)
+		}
+	})
+
+	t.Run("usage passthrough", func(t *testing.T) {
+		usage := map[string]any{"total_tokens": float64(100)}
+		run := statusRunFromMap(map[string]any{"usage": usage})
+		if run.Usage == nil || run.Usage["total_tokens"] != float64(100) {
+			t.Fatalf("Usage = %v, want passthrough", run.Usage)
+		}
+	})
+
+	t.Run("mismatched type yields nil", func(t *testing.T) {
+		run := statusRunFromMap(map[string]any{"status": 123})
+		if run.Status != nil {
+			t.Fatalf("Status = %v, want nil for mismatched type", run.Status)
+		}
+	})
+}

@@ -255,7 +255,8 @@ A pending permission interrupts every wait condition, including `terminal`.
 Inspect `pending_permission`, answer the request with `avenor_answer_permission`,
 and then issue another wait. The legacy `waiting` status remains supported.
 
-**Returns:** One status object if `run_id` is given, or an array of status objects if omitted.
+**Returns:** One status object if `run_id` is given, or an object with `runs`
+(an array of status objects) and `count` if omitted.
 A timed-out wait returns the latest status with `timed_out: true`; it does not
 cancel the underlying run. Lifecycle view retains `timed_out` but omits
 `final_output` and usage. Use `avenor_result` to harvest complete output.

@@ -4,6 +4,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import type { StatusResult } from './status.js'
+import { Supervisor } from '../supervisor.js'
 
 const statusMock = mock(async () => {
   throw new Error('status call failed')
@@ -379,6 +380,30 @@ describe('statusTool external sentinel fallback', () => {
         stop_reason: 'session_id_conflict',
       })
     } finally {
+      if (previousHome === undefined) delete process.env.AVENOR_HOME
+      else process.env.AVENOR_HOME = previousHome
+      fs.rmSync(home, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('statusTool singleton list shape', () => {
+  it('returns { runs: [], count: 0 } for an empty supervisor', async () => {
+    const previousHome = process.env.AVENOR_HOME
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-status-empty-list-'))
+    process.env.AVENOR_HOME = home
+    const previousSupervisorGet = Supervisor.get
+    const sup = Object.create(Supervisor.prototype) as Supervisor
+    ;(sup as any).client = { list: mock(async () => []), isClosed: () => false }
+    ;(sup as any).crashed = false
+    Supervisor.get = mock(async () => sup) as typeof Supervisor.get
+    try {
+      const { createStatusTool: createFresh } = await import('./status.js')
+      const listTool = createFresh(getSupervisorClientMock)
+      const result = await listTool({})
+      expect(result).toEqual({ runs: [], count: 0 })
+    } finally {
+      Supervisor.get = previousSupervisorGet
       if (previousHome === undefined) delete process.env.AVENOR_HOME
       else process.env.AVENOR_HOME = previousHome
       fs.rmSync(home, { recursive: true, force: true })

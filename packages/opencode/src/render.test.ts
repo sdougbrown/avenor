@@ -40,7 +40,7 @@ describe('OpenCode Avenor result renderers', () => {
     })
 
     const statuses = [status, { run_id: 'run-2', label: 'done worker', status: 'done' }]
-    const allRuns = formatStatusOutput({}, statuses)
+    const allRuns = formatStatusOutput({}, { runs: statuses, count: statuses.length })
     expect(allRuns.title).toBe('Avenor status — 2 runs')
     expect(allRuns.output).toContain('Avenor status — 2 runs\nworker — waiting (run_id: run-1)\ndone worker — done (run_id: run-2)')
     expect(allRuns.metadata).toEqual({ results: statuses, count: 2 })
@@ -191,7 +191,7 @@ describe('OpenCode Avenor result renderers', () => {
       status: 'running',
     }))
     const expectedStatuses = structuredClone(statuses)
-    const statusOutput = formatStatusOutput({}, statuses as any)
+    const statusOutput = formatStatusOutput({}, { runs: statuses, count: statuses.length } as any)
     const statusLines = statusOutput.output.split('\n')
     expect(statusLines.filter(line => line.includes('(run_id:'))).toHaveLength(12)
     expect(statusLines.filter(line => line === marker)).toEqual([marker])

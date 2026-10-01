@@ -14,6 +14,158 @@ type sentinelData struct {
 	StopReason string
 }
 
+// statusRun is the typed shape of one run status in avenor_status structured
+// output. Pointer fields preserve the pass-through presence semantics of the
+// underlying status maps: a key is emitted only when the status source
+// supplied it, including explicit empty strings such as phase_label.
+type statusRun struct {
+	RunID      *string `json:"run_id,omitempty"`
+	Label      *string `json:"label,omitempty"`
+	Status     *string `json:"status,omitempty"`
+	RuntimeID  *string `json:"runtime_id,omitempty"`
+	SessionID  *string `json:"session_id,omitempty"`
+	StopReason *string `json:"stop_reason,omitempty"`
+	Phase      *string `json:"phase,omitempty"`
+	PhaseLabel *string `json:"phase_label,omitempty"`
+	// PendingPermission is genuinely polymorphic on the wire (bool | record),
+	// so `any` is intentional.
+	PendingPermission    any            `json:"pending_permission,omitempty"`
+	Dir                  *string        `json:"dir,omitempty"`
+	Thinking             *string        `json:"thinking,omitempty"`
+	Backend              *string        `json:"backend,omitempty"`
+	Agent                *string        `json:"agent,omitempty"`
+	AgentProfile         *string        `json:"agent_profile,omitempty"`
+	Model                *string        `json:"model,omitempty"`
+	RosterFile           *string        `json:"roster_file,omitempty"`
+	RosterEntry          *string        `json:"roster_entry,omitempty"`
+	EffectiveBackend     *string        `json:"effective_backend,omitempty"`
+	EffectiveAgent       *string        `json:"effective_agent,omitempty"`
+	EffectiveModel       *string        `json:"effective_model,omitempty"`
+	ParentID             *string        `json:"parent_id,omitempty"`
+	Children             []string       `json:"children,omitempty"`
+	EventPath            *string        `json:"event_path,omitempty"`
+	Usage                map[string]any `json:"usage,omitempty"`
+	LatestSeq            *int64         `json:"latest_seq,omitempty"`
+	FinalOutput          *string        `json:"final_output,omitempty"`
+	FinalOutputTruncated *bool          `json:"final_output_truncated,omitempty"`
+	StartedAt            *int64         `json:"started_at,omitempty"`
+	TimedOut             *bool          `json:"timed_out,omitempty"`
+}
+
+// statusToolOutput is the structured output of the avenor_status tool. The
+// single-run form carries the status fields themselves; the list form (no
+// run_id) carries runs and count. The embedded value keeps the two forms in
+// one type so the SDK can derive the tool's output schema.
+type statusToolOutput struct {
+	statusRun
+	// Runs is a pointer so an empty list still emits "runs": [] — a plain
+	// slice with omitempty would drop the key when len == 0.
+	Runs  *[]statusRun `json:"runs,omitempty"`
+	Count *int         `json:"count,omitempty"`
+}
+
+// statusRunFromMap converts a translated status map into the typed output
+// shape. Keys outside the statusRun fields are dropped (mirroring the
+// TypeScript reference's own field allowlist, whose field set differs
+// slightly — it carries pid, this carries thinking/started_at/timed_out).
+func statusRunFromMap(m map[string]any) statusRun {
+	var run statusRun
+	if m == nil {
+		return run
+	}
+	run.RunID = stringPtr(m, "run_id")
+	run.Label = stringPtr(m, "label")
+	run.Status = stringPtr(m, "status")
+	run.RuntimeID = stringPtr(m, "runtime_id")
+	run.SessionID = stringPtr(m, "session_id")
+	run.StopReason = stringPtr(m, "stop_reason")
+	run.Phase = stringPtr(m, "phase")
+	run.PhaseLabel = stringPtr(m, "phase_label")
+	if v, ok := m["pending_permission"]; ok {
+		run.PendingPermission = v
+	}
+	run.Dir = stringPtr(m, "dir")
+	run.Thinking = stringPtr(m, "thinking")
+	run.Backend = stringPtr(m, "backend")
+	run.Agent = stringPtr(m, "agent")
+	run.AgentProfile = stringPtr(m, "agent_profile")
+	run.Model = stringPtr(m, "model")
+	run.RosterFile = stringPtr(m, "roster_file")
+	run.RosterEntry = stringPtr(m, "roster_entry")
+	run.EffectiveBackend = stringPtr(m, "effective_backend")
+	run.EffectiveAgent = stringPtr(m, "effective_agent")
+	run.EffectiveModel = stringPtr(m, "effective_model")
+	run.ParentID = stringPtr(m, "parent_id")
+	run.Children = childrenOf(m)
+	run.EventPath = stringPtr(m, "event_path")
+	run.Usage = usageOf(m)
+	run.LatestSeq = int64Ptr(m, "latest_seq")
+	run.FinalOutput = stringPtr(m, "final_output")
+	run.FinalOutputTruncated = boolPtr(m, "final_output_truncated")
+	run.StartedAt = int64Ptr(m, "started_at")
+	run.TimedOut = boolPtr(m, "timed_out")
+	return run
+}
+
+func stringPtr(m map[string]any, key string) *string {
+	if v, ok := m[key]; ok {
+		if s, ok := v.(string); ok {
+			return &s
+		}
+	}
+	return nil
+}
+
+func boolPtr(m map[string]any, key string) *bool {
+	if v, ok := m[key]; ok {
+		if b, ok := v.(bool); ok {
+			return &b
+		}
+	}
+	return nil
+}
+
+func int64Ptr(m map[string]any, key string) *int64 {
+	if v, ok := m[key]; ok {
+		if f, ok := v.(float64); ok {
+			n := int64(f)
+			return &n
+		}
+	}
+	return nil
+}
+
+func childrenOf(m map[string]any) []string {
+	v, ok := m["children"]
+	if !ok {
+		return nil
+	}
+	switch c := v.(type) {
+	case []string:
+		return c
+	case []any:
+		result := make([]string, 0, len(c))
+		for _, item := range c {
+			s, ok := item.(string)
+			if !ok {
+				return nil
+			}
+			result = append(result, s)
+		}
+		return result
+	}
+	return nil
+}
+
+func usageOf(m map[string]any) map[string]any {
+	if v, ok := m["usage"]; ok {
+		if u, ok := v.(map[string]any); ok {
+			return u
+		}
+	}
+	return nil
+}
+
 func readSentinel(path string) (*sentinelData, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

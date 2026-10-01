@@ -21,6 +21,41 @@ import (
 	"github.com/sdougbrown/avenor/client"
 )
 
+// statusOutputMap flattens a typed avenor_status tool output into the map
+// form used by assertions.
+func statusOutputMap(t *testing.T, v any) map[string]any {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal status output: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("unmarshal status output: %v", err)
+	}
+	return m
+}
+
+// statusOutputRuns returns the runs array from a list-form avenor_status
+// tool output.
+func statusOutputRuns(t *testing.T, v any) []map[string]any {
+	t.Helper()
+	m := statusOutputMap(t, v)
+	raw, ok := m["runs"].([]any)
+	if !ok {
+		t.Fatalf("expected runs array in output, got %#v", m)
+	}
+	runs := make([]map[string]any, 0, len(raw))
+	for _, entry := range raw {
+		r, ok := entry.(map[string]any)
+		if !ok {
+			t.Fatalf("expected run object, got %#v", entry)
+		}
+		runs = append(runs, r)
+	}
+	return runs
+}
+
 type fakeClient struct {
 	listResult               []map[string]any
 	statusResult             map[string]any
@@ -417,10 +452,7 @@ func TestAvenorStatusList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	list, ok := result.([]map[string]any)
-	if !ok {
-		t.Fatalf("expected []map[string]any, got %T", result)
-	}
+	list := statusOutputRuns(t, result)
 	if len(list) != 2 {
 		t.Fatalf("expected 2 results, got %d", len(list))
 	}
@@ -454,12 +486,164 @@ func TestAvenorStatusSingle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, ok := result.(map[string]any)
-	if !ok {
-		t.Fatalf("expected map[string]any, got %T", result)
-	}
+	m := statusOutputMap(t, result)
 	if m["status"] != "running" {
 		t.Fatalf("expected status=running, got %v", m["status"])
+	}
+}
+
+// TestAvenorStatusListMCPShape drives the avenor_status list and single-run
+// forms through a real MCP session: the list form must return a record as
+// structuredContent (the MCP spec forbids arrays there), the tool must
+// declare its output schema, and the SDK validates both forms against it.
+func TestAvenorStatusListMCPShape(t *testing.T) {
+	// The list form (no run_id) must return a record as structuredContent: the
+	// MCP spec forbids arrays there. The tool must also declare its output
+	// schema so clients can validate the result.
+	fake := &fakeClient{listResult: []map[string]any{
+		{"runtime_id": "rt_1", "status": "running", "label": "one"},
+		{"runtime_id": "rt_2", "status": "done", "label": "two"},
+	}, statusResult: map[string]any{"runtime_id": "rt_1", "status": "running", "label": "one"}}
+	s, err := NewServer(Options{
+		Transport:     "stdio",
+		NoAutostart:   true,
+		ControlClient: fake,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	ctx := context.Background()
+	serverTransport, clientTransport := mcpsdk.NewInMemoryTransports()
+	serverSession, err := s.mcpServer.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatalf("connect server: %v", err)
+	}
+	defer serverSession.Close()
+	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "test-client", Version: "dev"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("connect client: %v", err)
+	}
+	defer clientSession.Close()
+
+	tools, err := clientSession.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("list tools: %v", err)
+	}
+	var statusTool *mcpsdk.Tool
+	for _, tool := range tools.Tools {
+		if tool.Name == "avenor_status" {
+			statusTool = tool
+			break
+		}
+	}
+	if statusTool == nil {
+		t.Fatal("avenor_status not listed")
+	}
+	if statusTool.OutputSchema == nil {
+		t.Fatal("avenor_status does not declare an output schema")
+	}
+
+	res, err := clientSession.CallTool(ctx, &mcpsdk.CallToolParams{
+		Name:      "avenor_status",
+		Arguments: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("call tool: %v", err)
+	}
+	structured, ok := res.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("expected record structuredContent, got %T", res.StructuredContent)
+	}
+	runs, ok := structured["runs"].([]any)
+	if !ok {
+		t.Fatalf("expected runs array, got %#v", structured)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("expected 2 runs, got %d", len(runs))
+	}
+	if structured["count"] != float64(2) {
+		t.Fatalf("expected count 2, got %#v", structured["count"])
+	}
+	first, ok := runs[0].(map[string]any)
+	if !ok || first["label"] != "one" || first["status"] != "running" {
+		t.Fatalf("unexpected first run: %#v", runs[0])
+	}
+
+	// The single-run form remains a flat status record and must validate
+	// against the same output schema.
+	single, err := clientSession.CallTool(ctx, &mcpsdk.CallToolParams{
+		Name:      "avenor_status",
+		Arguments: map[string]any{"run_id": "rt_1"},
+	})
+	if err != nil {
+		t.Fatalf("call tool with run_id: %v", err)
+	}
+	singleRecord, ok := single.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("expected record structuredContent, got %T", single.StructuredContent)
+	}
+	if singleRecord["run_id"] != "rt_1" || singleRecord["status"] != "running" {
+		t.Fatalf("unexpected single-run record: %#v", singleRecord)
+	}
+	if _, present := singleRecord["runs"]; present {
+		t.Fatal("single-run form should not include runs")
+	}
+	if _, present := singleRecord["count"]; present {
+		t.Fatal("single-run form should not include count")
+	}
+}
+
+func TestAvenorStatusListEmptyMCPShape(t *testing.T) {
+	// An empty supervisor must still emit "runs": [] — a plain slice with
+	// omitempty would drop the key.
+	fake := &fakeClient{listResult: []map[string]any{}}
+	s, err := NewServer(Options{
+		Transport:     "stdio",
+		NoAutostart:   true,
+		ControlClient: fake,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	ctx := context.Background()
+	serverTransport, clientTransport := mcpsdk.NewInMemoryTransports()
+	serverSession, err := s.mcpServer.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatalf("connect server: %v", err)
+	}
+	defer serverSession.Close()
+	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "test-client", Version: "dev"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("connect client: %v", err)
+	}
+	defer clientSession.Close()
+
+	res, err := clientSession.CallTool(ctx, &mcpsdk.CallToolParams{
+		Name:      "avenor_status",
+		Arguments: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("call tool: %v", err)
+	}
+	structured, ok := res.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("expected record structuredContent, got %T", res.StructuredContent)
+	}
+	runs, ok := structured["runs"].([]any)
+	if !ok {
+		t.Fatalf("expected runs array in output, got %#v", structured)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("expected empty runs, got %#v", runs)
+	}
+	if structured["count"] != float64(0) {
+		t.Fatalf("expected count 0, got %#v", structured["count"])
 	}
 }
 
@@ -486,7 +670,7 @@ func TestAvenorStatusUsesTerminalSentinelAfterWorkflowRuntimeRemoval(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	status := result.(map[string]any)
+	status := statusOutputMap(t, result)
 	if status["status"] != "done" || status["session_id"] != "ses_workflow" {
 		t.Fatalf("terminal status = %#v", status)
 	}
@@ -515,7 +699,7 @@ func TestAvenorStatusListIncludesTerminalRegistryRunAfterWorkflowRemoval(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	list := result.([]map[string]any)
+	list := statusOutputRuns(t, result)
 	if len(list) != 1 || list[0]["run_id"] != "run-workflow-list" || list[0]["status"] != "failed" {
 		t.Fatalf("terminal list = %#v", list)
 	}
@@ -542,7 +726,7 @@ func TestAvenorStatusLifecycleViewOmitsFinalOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	status := result.(map[string]any)
+	status := statusOutputMap(t, result)
 	if status["status"] != "done" {
 		t.Fatalf("status = %v, want done", status["status"])
 	}
@@ -917,10 +1101,7 @@ func TestAvenorStatusForwardsSpecialCharsToControlClient(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected success forwarding special chars to control client, got: %v", err)
 	}
-	m, ok := result.(map[string]any)
-	if !ok {
-		t.Fatalf("expected map[string]any, got %T", result)
-	}
+	m := statusOutputMap(t, result)
 	if m["run_id"] != "../../socket" {
 		t.Errorf("expected run_id ../../socket, got %v", m["run_id"])
 	}
@@ -928,6 +1109,48 @@ func TestAvenorStatusForwardsSpecialCharsToControlClient(t *testing.T) {
 	if len(fake.statusCapturedRuntimeIDs) != 1 || fake.statusCapturedRuntimeIDs[0] != "../../socket" {
 		t.Errorf("expected statusCapturedRuntimeIDs [../../socket], got %v", fake.statusCapturedRuntimeIDs)
 	}
+}
+
+func TestAvenorStatusPendingPermissionShapes(t *testing.T) {
+	t.Run("legacy object", func(t *testing.T) {
+		fake := &fakeClient{
+			statusResult: map[string]any{"status": "running", "pending_permission": map[string]any{"request_id": "req-42"}},
+		}
+		s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{RunID: "rt-x"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := statusOutputMap(t, result)
+		pending, ok := m["pending_permission"].(map[string]any)
+		if !ok {
+			t.Fatalf("pending_permission = %T, want map[string]any", m["pending_permission"])
+		}
+		if pending["request_id"] != "req-42" {
+			t.Fatalf("request_id = %v, want req-42", pending["request_id"])
+		}
+	})
+
+	t.Run("boolean", func(t *testing.T) {
+		fake := &fakeClient{
+			statusResult: map[string]any{"status": "running", "pending_permission": true},
+		}
+		s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{RunID: "rt-x"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := statusOutputMap(t, result)
+		if m["pending_permission"] != true {
+			t.Fatalf("pending_permission = %v, want true", m["pending_permission"])
+		}
+	})
 }
 
 func TestAvenorStatusError(t *testing.T) {
@@ -1069,10 +1292,7 @@ func TestServerWithRealSocketStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handleAvenorStatus: %v", err)
 	}
-	m, ok := result.(map[string]any)
-	if !ok {
-		t.Fatalf("expected map[string]any, got %T", result)
-	}
+	m := statusOutputMap(t, result)
 	if m["session_id"] != "ses_test" {
 		t.Errorf("session_id = %v, want ses_test", m["session_id"])
 	}
@@ -1098,10 +1318,7 @@ func TestServerWithRealSocketList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handleAvenorStatus: %v", err)
 	}
-	list, ok := result.([]map[string]any)
-	if !ok {
-		t.Fatalf("expected []map[string]any, got %T", result)
-	}
+	list := statusOutputRuns(t, result)
 	if len(list) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(list))
 	}
@@ -1902,7 +2119,7 @@ func TestAvenorStatusWithRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, _ := result.(map[string]any)
+	m := statusOutputMap(t, result)
 	if m["status"] != "done" {
 		t.Errorf("expected done, got %v", m["status"])
 	}
@@ -1946,7 +2163,7 @@ func TestAvenorStatusRegisteredParkedTerminalViews(t *testing.T) {
 		if err != nil {
 			t.Fatalf("view %q: %v", view, err)
 		}
-		status := result.(map[string]any)
+		status := statusOutputMap(t, result)
 		if status["status"] != "done" || status["phase"] != "done" {
 			t.Fatalf("view %q status = %#v, want done/done", view, status)
 		}
@@ -2036,7 +2253,7 @@ func TestAvenorStatusListWithParkedAndRetrySnapshots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	list := result.([]map[string]any)
+	list := statusOutputRuns(t, result)
 	if len(list) != 2 {
 		t.Fatalf("list length = %d, want 2", len(list))
 	}
@@ -2097,10 +2314,7 @@ func TestAvenorStatusListWithRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	list, ok := result.([]map[string]any)
-	if !ok {
-		t.Fatalf("expected []map[string]any, got %T", result)
-	}
+	list := statusOutputRuns(t, result)
 	if len(list) != 2 {
 		t.Fatalf("expected 2 results, got %d", len(list))
 	}
@@ -2144,7 +2358,7 @@ func TestAvenorStatusPreservesRosterIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	status := result.(map[string]any)
+	status := statusOutputMap(t, result)
 	for key, want := range map[string]any{
 		"roster_file":       "/repo/roster.json",
 		"roster_entry":      "planner",
@@ -2178,10 +2392,7 @@ func TestAvenorStatusNoRegistryHitWithoutSupervisorID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected success querying runtime ID directly, got: %v", err)
 	}
-	m, ok := result.(map[string]any)
-	if !ok {
-		t.Fatalf("expected map[string]any, got %T", result)
-	}
+	m := statusOutputMap(t, result)
 	if m["run_id"] != "rt_direct" {
 		t.Errorf("expected run_id rt_direct, got %v", m["run_id"])
 	}
@@ -2210,10 +2421,7 @@ func TestAvenorStatusWithExplicitSupervisorID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected success with explicit supervisor_id, got: %v", err)
 	}
-	m, ok := result.(map[string]any)
-	if !ok {
-		t.Fatalf("expected map[string]any, got %T", result)
-	}
+	m := statusOutputMap(t, result)
 	if m["session_id"] != "ses_test" {
 		t.Errorf("expected ses_test, got %v", m["session_id"])
 	}
@@ -2266,7 +2474,7 @@ func TestAvenorAnswerPermission(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, _ := result.(map[string]any)
+	m := statusOutputMap(t, result)
 	if m["ok"] != true {
 		t.Errorf("expected ok=true, got %v", m["ok"])
 	}

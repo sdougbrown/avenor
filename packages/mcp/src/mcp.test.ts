@@ -14,7 +14,7 @@ const controllerCalls: {
 
 mock.module('@dougbots/avenor-core', () => ({
   spawnTool: mock(async () => ({})),
-  statusTool: mock(async () => ({})),
+  statusTool: mock(async () => ({ runs: [], count: 0 })),
   resultTool: mock(async () => ({})),
   answerPermissionTool: mock(async () => ({})),
   followUpTool: mock(async () => ({})),
@@ -54,6 +54,19 @@ describe('avenor MCP server', () => {
     })
     expect(list).toBeDefined()
     expect(controllerCalls.status.at(-1)).toEqual({ controllerId: undefined, supervisorId: 'sup-1' })
+    await client.close()
+    await server.close()
+  })
+
+  it('passes the statusTool result through as the avenor_status tool result', async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    const client = new Client({ name: 'test-client', version: '0.1.0' })
+    await Promise.all([client.connect(clientTransport), server.connect(serverTransport)])
+
+    const result = await client.callTool({ name: 'avenor_status', arguments: {} })
+    expect(result).toBeDefined()
+    expect(result.runs).toEqual([])
+    expect(result.count).toBe(0)
   })
 
   it('keeps direct and roster selectors as optional flat fields', () => {

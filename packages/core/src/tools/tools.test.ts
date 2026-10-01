@@ -61,8 +61,8 @@ describe.skipIf(skipIfNoBinary)('spawnTool + statusTool + shutdownTool integrati
 
   it('statusTool list preserves the stable run ID separately from its label', async () => {
     const list = await statusTool({})
-    expect(Array.isArray(list)).toBe(true)
-    const results = Array.isArray(list) ? list : [list]
+    expect('runs' in list).toBe(true)
+    const results = 'runs' in list ? list.runs : [list]
     const result = results.find(entry => entry.run_id === runId)
     expect(result?.label).toBe('custom-label')
   }, 10_000)

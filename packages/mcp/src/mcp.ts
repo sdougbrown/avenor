@@ -111,7 +111,7 @@ server.registerTool('avenor_spawn', {
 })
 
 server.registerTool('avenor_status', {
-  description: 'Get lifecycle status of one or all runs. Use lifecycle view for compact polling.',
+  description: 'Get lifecycle status of one or all runs. Use lifecycle view for compact polling. Without run_id, returns an object with runs (array of status objects) and count.',
   inputSchema: {
     run_id: z.string().optional().describe('Run ID or label to query'),
     view: z.enum(['lifecycle', 'full']).optional().describe('Response detail (default full for compatibility)'),
