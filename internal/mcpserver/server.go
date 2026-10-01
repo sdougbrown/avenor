@@ -892,8 +892,8 @@ func (s *Server) handleAvenorShutdown(ctx context.Context, req *mcp.CallToolRequ
 		// waited for its child. Retire the owned lifecycle either way so a
 		// closed connection is never retained for another tool call. The
 		// server itself stays live: the next default-supervisor tool call
-		// autostarts a replacement. Reset the default path so a stale socket
-		// is never reused; an explicitly configured supervisor socket is kept.
+		// autostarts a replacement. Resetting the default path drops the
+		// retired autostarted socket instead of reusing it.
 		shutdownErr := lifecycle.ShutdownWithMode(mode)
 		s.supervisorMu.Lock()
 		s.lifecycle = nil
@@ -1490,14 +1490,6 @@ func (s *Server) getClientForSupervisorWithPath(supervisorID string) (ControlCli
 	defer s.supervisorMu.Unlock()
 
 	if s.controlClient == nil {
-		if s.opts.SupervisorSocket != "" {
-			cl, err := client.Dial(s.opts.SupervisorSocket)
-			if err != nil {
-				return nil, nil, "", fmt.Errorf("dial supervisor socket %s: %w", s.opts.SupervisorSocket, err)
-			}
-			s.controlClient = cl
-			return s.controlClient, func() {}, s.defaultSupervisorPath, nil
-		}
 		if s.opts.NoAutostart {
 			return nil, nil, "", fmt.Errorf("no supervisor running: autostart disabled")
 		}
