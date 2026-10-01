@@ -42,6 +42,7 @@ import {
   type ResultResult,
   type RunObserver,
   type RunSnapshot,
+  type StatusListResult,
   type StatusResult,
 } from '@dougbots/avenor-core'
 import {
@@ -85,6 +86,12 @@ import {
   renderWorkflowControllerStatusCall,
   renderWorkflowControllerStatusResult,
 } from './render.js'
+
+// statusTool returns a single StatusResult whenever the call passes runId; the
+// { runs, count } list form is only possible without one.
+function asStatusResult(raw: StatusResult | StatusListResult): StatusResult {
+  return raw as StatusResult
+}
 
 const POLL_INTERVAL_MS = 3_000
 const INSPECT_LIMIT = 128
@@ -495,7 +502,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       let current: StatusResult | undefined
       try {
         const raw = await deps.statusTool({ runId, supervisorId, view: 'full' })
-        current = Array.isArray(raw) ? raw[0] : raw
+        current = asStatusResult(raw)
       } catch {
         // Status unavailable; report the interruption without run state.
       }
@@ -708,7 +715,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             runId: run.runId,
             supervisorId: run.supervisorId,
           })
-          const result = Array.isArray(raw) ? raw[0] : raw
+          const result = asStatusResult(raw)
           if (!result) throw new Error('status response was empty')
           run.lastStatus = result
           run.agent = result.agent ?? run.agent
@@ -1042,7 +1049,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       })
       try {
         const rawStatus = await deps.statusTool({ runId: result.run_id, supervisorId: run.supervisorId })
-        const status = Array.isArray(rawStatus) ? rawStatus[0] : rawStatus
+        const status = asStatusResult(rawStatus)
         upsertTrackedRun({
           runId: result.run_id,
           label: result.label,
@@ -1140,7 +1147,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
 
       try {
         const raw = await deps.statusTool({ runId: run.runId, supervisorId: run.supervisorId })
-        const status = Array.isArray(raw) ? raw[0] : raw
+        const status = asStatusResult(raw)
         return { status, aborted: false }
       } catch {
         return { aborted: false }
@@ -1162,7 +1169,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             runId: run.runId,
             supervisorId: run.supervisorId,
           })
-          const status = Array.isArray(raw) ? raw[0] : raw
+          const status = asStatusResult(raw)
           if (!status) continue
 
           const text = status.pending_permission
@@ -1375,7 +1382,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             // leave this run undelivered when it was the last active one.
             const raw = await deps.statusTool({ runId: result.run_id, supervisorId })
               .catch(() => undefined)
-            const probed = Array.isArray(raw) ? raw[0] : raw
+            const probed = asStatusResult(raw)
             if (probed && (isTerminalStatus(probed.status) || probed.status === 'waiting')) {
               // Deliver/wait inline through the normal status handling.
               waitStatus = probed
@@ -1698,7 +1705,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         })
         try {
           const rawStatus = await deps.statusTool({ runId: result.run_id, supervisorId: params.supervisor_id })
-          const status = Array.isArray(rawStatus) ? rawStatus[0] : rawStatus
+          const status = asStatusResult(rawStatus)
           upsertTrackedRun({
             runId: result.run_id,
             label: result.label,
