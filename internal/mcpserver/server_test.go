@@ -1056,6 +1056,48 @@ func TestAvenorStatusForwardsSpecialCharsToControlClient(t *testing.T) {
 	}
 }
 
+func TestAvenorStatusPendingPermissionShapes(t *testing.T) {
+	t.Run("legacy object", func(t *testing.T) {
+		fake := &fakeClient{
+			statusResult: map[string]any{"status": "running", "pending_permission": map[string]any{"request_id": "req-42"}},
+		}
+		s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{RunID: "rt-x"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := statusOutputMap(t, result)
+		pending, ok := m["pending_permission"].(map[string]any)
+		if !ok {
+			t.Fatalf("pending_permission = %T, want map[string]any", m["pending_permission"])
+		}
+		if pending["request_id"] != "req-42" {
+			t.Fatalf("request_id = %v, want req-42", pending["request_id"])
+		}
+	})
+
+	t.Run("boolean", func(t *testing.T) {
+		fake := &fakeClient{
+			statusResult: map[string]any{"status": "running", "pending_permission": true},
+		}
+		s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{RunID: "rt-x"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := statusOutputMap(t, result)
+		if m["pending_permission"] != true {
+			t.Fatalf("pending_permission = %v, want true", m["pending_permission"])
+		}
+	})
+}
+
 func TestAvenorStatusError(t *testing.T) {
 	t.Run("list error", func(t *testing.T) {
 		fake := &fakeClient{
