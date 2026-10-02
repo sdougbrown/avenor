@@ -324,7 +324,13 @@ func readSentinelSession(path string) (string, error) {
 	if err != nil {
 		return "", err // readSentinel already wraps with descriptive context
 	}
-	if sd.Status != "DONE" {
+	// DONE, FAILED, and BLOCKED settle the provider session itself: the
+	// backend transcript persists, so a follow-up can reload and continue it.
+	// TIMEOUT and KILLED are supervisor-imposed terminations (time budget,
+	// cancellation) where an automatic continuation would surprise.
+	switch strings.ToUpper(sd.Status) {
+	case "DONE", "FAILED", "BLOCKED":
+	default:
 		return "", fmt.Errorf("run is not resumable (status: %s)", strings.ToLower(sd.Status))
 	}
 	if sd.SessionID == "" {
