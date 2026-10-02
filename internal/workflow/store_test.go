@@ -701,6 +701,12 @@ func TestStore_ReducerRejectedCommandLeavesLogClean(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected the reducer to reject the child_outcome command, got nil error")
 	}
+	// The rejection must come from the reduce phase, not an earlier command
+	// guard: otherwise the log-clean property would hold trivially and the
+	// test would no longer guard append-before-reduce reintroduction.
+	if !containsStr(err.Error(), "cannot resolve child outcome for activation in status") {
+		t.Fatalf("expected the reducer's own rejection, got %q", err)
+	}
 
 	afterLines, err := readLines(s.eventsPath(wf))
 	if err != nil {
@@ -732,5 +738,8 @@ func TestStore_ReducerRejectedCommandLeavesLogClean(t *testing.T) {
 	_, err = s.ApplyCommand(wf, childOutcomeCmd("child-outcome-retry"))
 	if err == nil {
 		t.Fatal("expected the retry to be rejected by the reducer, got nil error")
+	}
+	if !containsStr(err.Error(), "cannot resolve child outcome for activation in status") {
+		t.Fatalf("expected the retry to fail in the reduce phase, got %q", err)
 	}
 }
