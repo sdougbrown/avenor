@@ -425,7 +425,7 @@ func TestAutoHandoffSuccessExitIsNotRedispatched(t *testing.T) {
 	// nothing is ever re-dispatched.
 	clock.Advance(2 * time.Second)
 	for i := 0; i < 3; i++ {
-		sweeps.step()
+		sweeps.step(t)
 		if expired := sweeps.lastExpired(); expired != 0 {
 			inst := f.instance(t, wf)
 			t.Fatalf("sweep %d after completion expired %d leases, want 0; observed %s", i+1, expired, describeInstance(&inst, f.providerCalls.Load()))

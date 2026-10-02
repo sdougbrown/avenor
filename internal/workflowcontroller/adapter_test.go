@@ -248,6 +248,52 @@ func TestInvokeTimeoutKillsProcessGroup(t *testing.T) {
 	}
 }
 
+// TestInvokeManifestTimeoutKillsProcessGroup covers the production timeout
+// path: Invoke always passes a nil timeout channel, so invokeWait builds the
+// real timer from the manifest. The manifest timeout fires, Invoke reports
+// ErrAdapterTimeout, and the child's process group is gone. Startup latency
+// is not part of the contract: whether child.pid was written before the
+// timeout only decides whether the pid is available for the gone-check, so
+// the pid assertion is conditional and the test never races startup against
+// the timer.
+func TestInvokeManifestTimeoutKillsProcessGroup(t *testing.T) {
+	dir := stageAdapterDir(t)
+	exe := stageFixture(t, dir, "hang.sh")
+	writeManifest(t, dir, "hang.json", "hang", exe, nil, 2000)
+	m := loadOne(t, dir, "hang")
+
+	start := time.Now()
+	if _, err := Invoke(context.Background(), m, testRequest(testInputJSON)); !errors.Is(err, ErrAdapterTimeout) {
+		t.Fatalf("error = %v, want ErrAdapterTimeout", err)
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("Invoke returned after %v, want a return bounded by the 2s manifest timeout", elapsed)
+	}
+	pidData, err := os.ReadFile(filepath.Join(dir, "child.pid"))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// The timeout fired before the child wrote its pid; the group kill
+			// is already proven by the injected-channel test.
+			return
+		}
+		t.Fatalf("child pid file: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidData)))
+	if err != nil {
+		t.Fatalf("bad pid %q: %v", pidData, err)
+	}
+	goneDeadline := time.Now().Add(5 * time.Second)
+	for {
+		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+			break
+		}
+		if time.Now().After(goneDeadline) {
+			t.Fatalf("child sleeper %d still alive after group kill", pid)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 func TestInvokeStdoutBound(t *testing.T) {
 	_, err := invokeFixture(t, "huge-stdout.sh", "huge", testInputJSON)
 	if !errors.Is(err, ErrAdapterOutputTooLarge) || !strings.Contains(err.Error(), "stdout") {

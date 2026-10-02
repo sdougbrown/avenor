@@ -655,3 +655,70 @@ func TestUnknownControllerIsNotFound(t *testing.T) {
 		t.Fatalf("unknown controller commands created the directory: err=%v", err)
 	}
 }
+
+// TestSubscribeChangesWakeOnCommit proves a committed controller record
+// change wakes a subscriber: the wake lands after the commit returns, so a
+// woken reader observes the committed state.
+func TestSubscribeChangesWakeOnCommit(t *testing.T) {
+	s, _ := newTestStore(t)
+	ch, cancel := s.SubscribeChanges()
+	defer cancel()
+
+	mustCreate(t, s, "alpha", 1)
+
+	select {
+	case <-ch:
+	default:
+		t.Fatal("no wake after a committed record change")
+	}
+}
+
+// TestSubscribeChangesNeverBlocksCommit proves the wake is a hint, not a
+// delivery guarantee: a subscriber that never reads coalesces to one buffered
+// signal while every commit still lands, and no commit ever blocks on it.
+func TestSubscribeChangesNeverBlocksCommit(t *testing.T) {
+	s, _ := newTestStore(t)
+	ch, cancel := s.SubscribeChanges()
+	defer cancel()
+
+	mustCreate(t, s, "alpha", 1)
+	// More commits than the buffer holds; all must return without blocking.
+	for i := 0; i < 5; i++ {
+		if _, err := s.SetDesiredState("alpha", DesiredEnabled, ""); err != nil {
+			t.Fatalf("set desired state %d: %v", i, err)
+		}
+	}
+
+	select {
+	case <-ch:
+	default:
+		t.Fatal("no buffered wake after commits")
+	}
+	select {
+	case <-ch:
+		t.Fatal("more wakes buffered than the coalescing capacity of one")
+	default:
+	}
+}
+
+// TestSubscribeChangesCancelStopsWakes proves the cancel func unsubscribes:
+// commits after the cancel leave no signal in the channel.
+func TestSubscribeChangesCancelStopsWakes(t *testing.T) {
+	s, _ := newTestStore(t)
+	ch, cancel := s.SubscribeChanges()
+
+	mustCreate(t, s, "alpha", 1)
+	select {
+	case <-ch:
+	default:
+		t.Fatal("no wake before cancel")
+	}
+	cancel()
+
+	mustEnable(t, s, "alpha")
+	select {
+	case <-ch:
+		t.Fatal("woke a canceled subscriber")
+	default:
+	}
+}

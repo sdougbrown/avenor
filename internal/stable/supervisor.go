@@ -358,7 +358,10 @@ type handledChildQuestion struct {
 }
 
 // testHooks holds test-only seams used by tests to deterministically
-// interleave commands with the supervisor's read windows.
+// interleave commands with the supervisor's read windows. Every hook must be
+// set before the goroutine that reads it starts (the workflow startup
+// barrier or the loop's launch): the goroutines read hook fields without
+// locking, and the set happens before the launching goroutine statement.
 type testHooks struct {
 	// controllerStatusPreNextPoll, when non-nil (set by tests), runs after
 	// the controller record is read but before the next-poll re-read so a

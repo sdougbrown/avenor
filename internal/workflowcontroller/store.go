@@ -661,7 +661,10 @@ func (s *ControllerStore) commitLocked(controllerID string, rec *ControllerRecor
 // channel has buffer size 1 and every committed controller record change
 // performs a non-blocking send, so a subscriber that falls behind observes one
 // coalesced signal instead of one per commit. Notifications are hints only;
-// callers must not rely on lossless delivery. The cancel func unsubscribes.
+// callers must not rely on lossless delivery, and a wake may follow a failed
+// commit whose events were already durably appended (the wake reflects the
+// event log's committed state, not the in-memory record). Callers must call
+// the cancel func: a leaked subscriber adds a send to every future commit.
 func (s *ControllerStore) SubscribeChanges() (<-chan struct{}, func()) {
 	ch := make(chan struct{}, 1)
 	s.subMu.Lock()

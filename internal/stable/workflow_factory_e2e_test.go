@@ -972,14 +972,17 @@ func (f *factoryE2E) committedPollCursor(wf, actID, gateID string) (workflowcont
 // pipeline.
 func (f *factoryE2E) waitCursor(t *testing.T, wf, actID, gateID string) workflowcontroller.PollCursor {
 	t.Helper()
+	// Subscribe before the first check: a commit landing between the check
+	// and the subscribe must leave its signal in the channel, so no wake is
+	// ever lost.
+	ch, cancel := f.cstore.SubscribeChanges()
+	defer cancel()
 	if cursor, ok := f.findCursor(wf, actID, gateID); ok && cursor.PollID != "" {
 		return cursor
 	}
 	if cursor, ok := f.committedPollCursor(wf, actID, gateID); ok {
 		return cursor
 	}
-	ch, cancel := f.cstore.SubscribeChanges()
-	defer cancel()
 	deadline := time.After(10 * time.Second)
 	for {
 		select {
