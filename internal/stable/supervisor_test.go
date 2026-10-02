@@ -6403,3 +6403,38 @@ func TestShutdownDuringInFlightStartDoesNotOrphanServer(t *testing.T) {
 		t.Fatalf("after raced shutdown: ready=%d starting=%d shutdownStarted=%v, want empty maps and flag set", ready, starting, shutdownStarted)
 	}
 }
+
+// A call that enters getOrCreateHTTPServer after shutdown has begun must not
+// start a new server: the loop-entry shutdown check returns immediately
+// instead of spawning a process the completion guard would only tear down
+// after the full start duration.
+func TestGetOrCreateHTTPServerReturnsErrorOnceShutdownStarted(t *testing.T) {
+	sup := NewSupervisor(Config{
+		ControlSocket: "/tmp/test-http-shutdown-entry.sock",
+		MaxRuntimes:   2,
+	})
+
+	execCalled := false
+	withFakeExec(t, func(name string, arg ...string) *exec.Cmd {
+		execCalled = true
+		return exec.Command("sleep", "30")
+	})
+
+	sup.httpServerMu.Lock()
+	sup.httpShutdownStarted = true
+	sup.httpServerMu.Unlock()
+
+	_, err := sup.getOrCreateHTTPServer("/tmp/after-shutdown")
+	if err == nil || !strings.Contains(err.Error(), "shutting down") {
+		t.Fatalf("error = %v, want the shutting-down rejection", err)
+	}
+	if execCalled {
+		t.Fatal("startHTTPServer ran after shutdown had begun")
+	}
+
+	sup.httpServerMu.Lock()
+	defer sup.httpServerMu.Unlock()
+	if len(sup.httpServers) != 0 || len(sup.httpStarting) != 0 {
+		t.Fatalf("maps after rejected start: ready=%d starting=%d, want empty", len(sup.httpServers), len(sup.httpStarting))
+	}
+}

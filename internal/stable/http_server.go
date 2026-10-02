@@ -98,6 +98,14 @@ func (s *Supervisor) getOrCreateHTTPServer(dir string) (*managedHTTPServer, erro
 	s.httpServerMu.Lock()
 
 	for {
+		if s.httpShutdownStarted {
+			// Shutdown has begun: starting a server here would only be torn
+			// down by the completion guard after the full start duration,
+			// stretching shutdown for this caller.
+			s.httpServerMu.Unlock()
+			return nil, fmt.Errorf("supervisor is shutting down")
+		}
+
 		if _, starting := s.httpStarting[absDir]; starting {
 			// Another goroutine is starting a server for this dir — wait.
 			s.httpServerCond.Wait()
