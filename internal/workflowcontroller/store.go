@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/durablefile"
@@ -22,6 +23,11 @@ import (
 type ControllerStore struct {
 	root string
 	now  func() time.Time
+
+	// subMu guards subscribers, a coalescing fan-out of buffered(1) wake
+	// channels notified after every committed controller record change.
+	subMu       sync.Mutex
+	subscribers []chan struct{}
 }
 
 // NewStore returns a store rooted at workflowRoot, using the wall clock.
@@ -633,6 +639,7 @@ func (s *ControllerStore) replayEvents(controllerID string, rec ControllerRecord
 // commitLocked durably appends events, reduces them into rec, and persists the
 // resulting snapshot; events are fsynced before the snapshot is written.
 func (s *ControllerStore) commitLocked(controllerID string, rec *ControllerRecord, events []ControllerEvent) error {
+	defer s.notifySubscribers()
 	if len(events) > 0 {
 		if err := s.appendEvents(controllerID, events); err != nil {
 			return err
@@ -648,6 +655,42 @@ func (s *ControllerStore) commitLocked(controllerID string, rec *ControllerRecor
 	}
 	s.regenerateProjection(controllerID, *rec)
 	return nil
+}
+
+// SubscribeChanges returns a coalescing wake channel and a cancel func. The
+// channel has buffer size 1 and every committed controller record change
+// performs a non-blocking send, so a subscriber that falls behind observes one
+// coalesced signal instead of one per commit. Notifications are hints only;
+// callers must not rely on lossless delivery. The cancel func unsubscribes.
+func (s *ControllerStore) SubscribeChanges() (<-chan struct{}, func()) {
+	ch := make(chan struct{}, 1)
+	s.subMu.Lock()
+	s.subscribers = append(s.subscribers, ch)
+	s.subMu.Unlock()
+	cancel := func() {
+		s.subMu.Lock()
+		defer s.subMu.Unlock()
+		for i, c := range s.subscribers {
+			if c == ch {
+				s.subscribers = append(s.subscribers[:i], s.subscribers[i+1:]...)
+				break
+			}
+		}
+	}
+	return ch, cancel
+}
+
+// notifySubscribers performs a non-blocking send to every change subscriber
+// after a commit. It never fails, blocks, or rolls back the commit.
+func (s *ControllerStore) notifySubscribers() {
+	s.subMu.Lock()
+	defer s.subMu.Unlock()
+	for _, ch := range s.subscribers {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
 }
 
 // appendEvents durably appends complete JSON events to the NDJSON log.

@@ -102,7 +102,7 @@ func collectExpiredLeaseEvents(snap *Snapshot, reason string, now time.Time) []E
 // slice order and reduces them into the supplied snapshot. It returns the
 // number of leases expired.
 func (s *Store) appendExpiredLeases(workflowID WorkflowID, snap *Snapshot) (int, error) {
-	events := collectExpiredLeaseEvents(snap, "recovery", nowUTC())
+	events := collectExpiredLeaseEvents(snap, "recovery", s.now())
 	if len(events) == 0 {
 		return 0, nil
 	}

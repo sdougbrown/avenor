@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/sdougbrown/avenor/internal/durablefile"
 )
@@ -17,6 +18,10 @@ import (
 // snapshot per instance.
 type Store struct {
 	root string
+	// now is the clock the recovery lease sweep reads for staleness (the
+	// "recovery" reason). It must match the manager's lease-liveness clock so
+	// injected timestamps and staleness comparisons agree.
+	now func() time.Time
 	// onCommit, when non-nil, is invoked after every successfully committed
 	// command snapshot, outside the flock. Set with SetCommitObserver before
 	// the store starts serving commands.
@@ -38,7 +43,13 @@ var readinessCommandKinds = map[CommandKind]bool{
 }
 
 func New(root string) *Store {
-	return &Store{root: root}
+	return &Store{root: root, now: nowUTC}
+}
+
+// NewStoreWithClock returns a store whose recovery lease sweep reads the
+// supplied clock for staleness. Callers must supply a UTC time.
+func NewStoreWithClock(root string, now func() time.Time) *Store {
+	return &Store{root: root, now: now}
 }
 
 // SetCommitObserver registers fn as the commit hook: after every successfully

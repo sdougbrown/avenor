@@ -199,7 +199,31 @@ func TestInvokeTimeoutKillsProcessGroup(t *testing.T) {
 	writeManifest(t, dir, "hang.json", "hang", exe, nil, 2000)
 	m := loadOne(t, dir, "hang")
 
-	if _, err := Invoke(context.Background(), m, testRequest(testInputJSON)); !errors.Is(err, ErrAdapterTimeout) {
+	// The timeout channel is injected, so the test fires it only after the
+	// adapter has started its background sleeper and written child.pid (the
+	// shell creates the file before writing the pid, so readiness means
+	// non-empty content): the group kill is always observed against a live
+	// child, never racing a wall-clock timeout against process startup.
+	timeoutC := make(chan time.Time, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := invoke(context.Background(), m, testRequest(testInputJSON), timeoutC)
+		errCh <- err
+	}()
+	pidPath := filepath.Join(dir, "child.pid")
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if data, err := os.ReadFile(pidPath); err == nil && len(strings.TrimSpace(string(data))) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("child.pid never appeared; the hang adapter never got past startup")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	timeoutC <- time.Now()
+
+	if err := <-errCh; !errors.Is(err, ErrAdapterTimeout) {
 		t.Fatalf("error = %v, want ErrAdapterTimeout", err)
 	}
 	pidData, err := os.ReadFile(filepath.Join(dir, "child.pid"))
@@ -210,12 +234,14 @@ func TestInvokeTimeoutKillsProcessGroup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bad pid %q: %v", pidData, err)
 	}
-	deadline := time.Now().Add(5 * time.Second)
+	// The group kill already happened before Invoke returned; the bounded
+	// poll only observes the reaper finishing.
+	goneDeadline := time.Now().Add(5 * time.Second)
 	for {
 		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
 			break
 		}
-		if time.Now().After(deadline) {
+		if time.Now().After(goneDeadline) {
 			t.Fatalf("child sleeper %d still alive after group kill", pid)
 		}
 		time.Sleep(50 * time.Millisecond)

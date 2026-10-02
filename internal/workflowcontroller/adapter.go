@@ -110,6 +110,14 @@ func ClampRetryDelay(requested, floor time.Duration) time.Duration {
 // runs in its own process group, which is killed on timeout, context
 // cancellation, or output-limit violation.
 func Invoke(ctx context.Context, m *AdapterManifest, req PollRequest) (AdapterResult, error) {
+	return invoke(ctx, m, req, nil)
+}
+
+// invoke is Invoke with an injectable timeout channel: when timeoutC is
+// non-nil it replaces the manifest timeout's real timer so a test can fire
+// the timeout explicitly instead of racing a wall-clock timer against process
+// startup.
+func invoke(ctx context.Context, m *AdapterManifest, req PollRequest, timeoutC <-chan time.Time) (AdapterResult, error) {
 	if req.Version != 1 {
 		return AdapterResult{}, fmt.Errorf("poll request version must be 1, got %d", req.Version)
 	}
@@ -176,19 +184,32 @@ func Invoke(ctx context.Context, m *AdapterManifest, req PollRequest) (AdapterRe
 	waitCh := make(chan error, 1)
 	go func() { waitCh <- cmd.Wait() }()
 
-	timer := time.NewTimer(time.Duration(m.TimeoutMS) * time.Millisecond)
-	defer timer.Stop()
+	return invokeWait(ctx, m, waitCh, stdoutBuf, stderrBuf, pgid, time.Duration(m.TimeoutMS)*time.Millisecond, timeoutC)
+}
+
+// invokeWait selects the child's exit, the manifest's timeout, or the
+// context's cancellation, kills the child's process group on the two
+// deadline paths, and parses or classifies the outcome.
+func invokeWait(ctx context.Context, m *AdapterManifest, waitCh <-chan error, stdoutBuf, stderrBuf *boundedBuffer, pgid int, timeout time.Duration, timeoutC <-chan time.Time) (AdapterResult, error) {
+	var timeoutCh <-chan time.Time
+	if timeoutC != nil {
+		timeoutCh = timeoutC
+	} else {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		timeoutCh = timer.C
+	}
 
 	var waitErr error
 	select {
 	case waitErr = <-waitCh:
-	case <-timer.C:
+	case <-timeoutCh:
 		killProcessGroup(pgid)
 		waitErr = <-waitCh
 		if stdoutBuf.exceeded || stderrBuf.exceeded {
 			return AdapterResult{}, adapterTooLargeError(m, stdoutBuf, stderrBuf)
 		}
-		return AdapterResult{}, fmt.Errorf("%w: adapter %s exceeded %dms", ErrAdapterTimeout, m.ID, m.TimeoutMS)
+		return AdapterResult{}, fmt.Errorf("%w: adapter %s exceeded %s", ErrAdapterTimeout, m.ID, timeout)
 	case <-ctx.Done():
 		killProcessGroup(pgid)
 		waitErr = <-waitCh

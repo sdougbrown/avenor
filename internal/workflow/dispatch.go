@@ -237,7 +237,7 @@ func (m *Manager) BeginDispatch(req BeginDispatchRequest) (BeginDispatchResult, 
 	if err != nil {
 		return BeginDispatchResult{}, err
 	}
-	now := time.Now().UTC()
+	now := m.now()
 	ttl := leaseTTL(node, tmpl.DefaultLease)
 	workingDir := ResolveNodeWorkingDirectory(*tmpl, *node, snap.Instance.Params)
 	leaseID := NewLeaseID()

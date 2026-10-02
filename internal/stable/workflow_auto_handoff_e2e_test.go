@@ -246,20 +246,51 @@ func describeInstance(inst *workflow.WorkflowInstance, providerCalls int32) stri
 	return s + "]"
 }
 
-// waitForInstance polls cond against a fresh instance snapshot, failing with
-// the full observed state after a bounded deadline.
+// waitForInstance waits for cond to hold against a fresh instance snapshot,
+// driven by the manager's change notifications: every committed workflow
+// transition wakes the subscriber, so the wait observes the transition as it
+// lands instead of polling. A single generous wall-clock bound backstops a
+// stalled pipeline with the goroutine dump on timeout.
 func (f *autoHandoffFixture) waitForInstance(t *testing.T, wf, what string, cond func(inst *workflow.WorkflowInstance) bool) {
 	t.Helper()
-	deadline := time.Now().Add(15 * time.Second)
-	var inst workflow.WorkflowInstance
+	ch, cancel := f.mgr.SubscribeChanges()
+	defer cancel()
+	inst := f.instance(t, wf)
+	if cond(&inst) {
+		return
+	}
+	deadline := time.After(15 * time.Second)
 	for {
-		inst = f.instance(t, wf)
-		if cond(&inst) {
+		select {
+		case <-ch:
+			inst = f.instance(t, wf)
+			if cond(&inst) {
+				return
+			}
+		case <-deadline:
+			logGoroutines(t)
+			t.Fatalf("timed out waiting for %s; observed %s", what, describeInstance(&inst, f.providerCalls.Load()))
+		}
+	}
+}
+
+// waitForNoHeartbeats waits until the supervisor has no live lease-heartbeat
+// goroutines. Heartbeat registry removal is not a workflow commit, so this
+// cannot ride the manager's change notifications; the bound is a stall
+// backstop only.
+func (f *autoHandoffFixture) waitForNoHeartbeats(t *testing.T, what string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		f.sup.heartbeatMu.Lock()
+		n := len(f.sup.heartbeats)
+		f.sup.heartbeatMu.Unlock()
+		if n == 0 {
 			return
 		}
 		if time.Now().After(deadline) {
 			logGoroutines(t)
-			t.Fatalf("timed out waiting for %s; observed %s", what, describeInstance(&inst, f.providerCalls.Load()))
+			t.Fatalf("timed out waiting for %s; %d heartbeat(s) still live", what, n)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -330,11 +361,12 @@ func autoHandoffChainTemplate(t *testing.T, templateID string, ttlSeconds int64)
 
 // TestAutoHandoffSuccessExitIsNotRedispatched proves a successful worker exit
 // satisfies the node exactly once: an enabled controller dispatches one auto
-// run node with a short lease TTL and the supervisor's own live lease-expiry
-// sweep running at a short interval, the scripted worker ends successfully,
-// and the supervisor's handoff completion satisfies the node before the sweep
-// could expire its lease. The bounded wait runs well past several sweep
-// intervals, so a re-dispatch (the pre-fix behavior) would be observed.
+// run node with a manual lease clock and a manually stepped live lease-expiry
+// sweep, the scripted worker ends successfully, and the supervisor's handoff
+// completion satisfies the node. The test then advances the lease clock past
+// the TTL and steps sweeps: a satisfied node holds no lease, so no sweep may
+// expire or re-dispatch it — a re-dispatch (the pre-fix behavior) would be
+// observed.
 func TestAutoHandoffSuccessExitIsNotRedispatched(t *testing.T) {
 	// The attempt's working directory is the supervisor process cwd (the
 	// direct-run executor's spawn Dir); chdir to a scratch dir so the worker's
@@ -342,10 +374,15 @@ func TestAutoHandoffSuccessExitIsNotRedispatched(t *testing.T) {
 	t.Chdir(t.TempDir())
 	const sessionID = "ses_handoff_once"
 	provider := &stableScriptedProvider{attempt: -1}
-	var sweeps atomic.Int32
+	clock := newSweepClock()
+	sweeps := newLeaseSweepDriver()
 	f := newAutoHandoffFixture(t, "auto-handoff-once", provider, func(f *autoHandoffFixture) {
+		// The interval only gates loop startup; the injected tick channel
+		// drives every sweep.
 		f.sup.config.WorkflowLeaseSweepInterval = 250 * time.Millisecond
-		f.sup.testHooks.leaseSweepPost = func(workflow.LeaseExpirySummary) { sweeps.Add(1) }
+		f.sup.testHooks.leaseSweepTick = sweeps.tick
+		f.sup.testHooks.leaseSweepPost = sweeps.hook
+		f.sup.testHooks.workflowNow = clock.Now
 	})
 	_ = produceWorkerDeclaredResult(t, provider, sessionID, "", "")
 	template := map[string]any{
@@ -375,18 +412,25 @@ func TestAutoHandoffSuccessExitIsNotRedispatched(t *testing.T) {
 		t.Fatalf("provider invoked %d times before the successful exit, want exactly 1", calls)
 	}
 
-	// The supervisor's completion satisfies the node and releases its lease.
+	// The supervisor's completion satisfies the node and releases its lease;
+	// the heartbeat stops with it, so no renewal can land after this point.
 	f.waitForInstance(t, wf, "the supervisor's completion to satisfy the start node", func(inst *workflow.WorkflowInstance) bool {
 		act := activationFor(inst, "start")
 		return act != nil && act.Status == workflow.ActivationSatisfied
 	})
+	f.waitForNoHeartbeats(t, "the attempt's lease heartbeat to stop after completion")
 
-	// Let the live sweep (250ms cadence) tick past the 1s TTL: a satisfied
-	// node holds no lease, so no tick may expire or re-dispatch it.
-	after := sweeps.Load()
-	f.waitForInstance(t, wf, "six live sweep ticks after completion", func(*workflow.WorkflowInstance) bool {
-		return sweeps.Load() >= after+6
-	})
+	// Advance the lease clock past the 1s TTL and sweep repeatedly: the
+	// satisfied node holds no lease, so every sweep retains everything and
+	// nothing is ever re-dispatched.
+	clock.Advance(2 * time.Second)
+	for i := 0; i < 3; i++ {
+		sweeps.step()
+		if expired := sweeps.lastExpired(); expired != 0 {
+			inst := f.instance(t, wf)
+			t.Fatalf("sweep %d after completion expired %d leases, want 0; observed %s", i+1, expired, describeInstance(&inst, f.providerCalls.Load()))
+		}
+	}
 
 	// Final state: exactly one attempt, exactly one provider invocation, and
 	// the node resolved by the supervisor's own completion (satisfied), never
@@ -973,9 +1017,5 @@ func TestAutoHandoffRuntimeFinishingBeforeDispatchReturns(t *testing.T) {
 	f.waitForInstance(t, wf, "the workflow to complete although the runtime finished before Dispatch returned", func(inst *workflow.WorkflowInstance) bool {
 		return inst.Status == workflow.WorkflowCompleted
 	})
-	f.waitForInstance(t, wf, "every lease heartbeat to stop", func(*workflow.WorkflowInstance) bool {
-		f.sup.heartbeatMu.Lock()
-		defer f.sup.heartbeatMu.Unlock()
-		return len(f.sup.heartbeats) == 0
-	})
+	f.waitForNoHeartbeats(t, "every lease heartbeat to stop")
 }

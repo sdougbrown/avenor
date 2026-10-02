@@ -22,7 +22,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"time"
 )
 
 // commandHeartbeatRequest is the JSON body of the "heartbeat" op. It mirrors
@@ -95,7 +94,7 @@ func (m *Manager) commandHeartbeat(wf WorkflowID, payload json.RawMessage) (any,
 		return nil, err
 	}
 	ttl := leaseTTL(node, tmpl.DefaultLease)
-	now := time.Now().UTC()
+	now := m.now()
 	newExpiry := now.Add(ttl)
 	// One wall-clock read per renewal. The idempotency key is stable for this
 	// renewal (derived from now) so a concurrent duplicate of the same renewal
@@ -180,7 +179,7 @@ func (m *Manager) ExpireStaleLeases() (LeaseExpirySummary, error) {
 	if err != nil {
 		return LeaseExpirySummary{}, err
 	}
-	now := time.Now().UTC()
+	now := m.now()
 	var summary LeaseExpirySummary
 	for _, entry := range entries {
 		if !entry.IsDir() {

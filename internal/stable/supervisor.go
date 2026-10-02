@@ -376,6 +376,18 @@ type testHooks struct {
 	// leaseSweepPost, when non-nil (set by tests), runs after every live
 	// lease-expiry sweep tick with its summary. nil in production.
 	leaseSweepPost func(summary workflow.LeaseExpirySummary)
+	// leaseSweepTick, when non-nil (set by tests), replaces the sweep loop's
+	// real ticker: the loop waits on this channel instead, so a test steps
+	// sweeps explicitly and no tick ever fires on its own. nil in production.
+	leaseSweepTick <-chan time.Time
+	// leaseSweepLoopStart, when non-nil (set by tests), runs in
+	// startLeaseSweepLoop immediately before the loop goroutine launches, so a
+	// test can assert structurally that no loop was started. nil in production.
+	leaseSweepLoopStart func()
+	// workflowNow, when non-nil (set by tests before the workflow startup
+	// barrier), becomes the workflow manager's lease-liveness clock (lease
+	// claims, heartbeat renewals, and stale-lease sweeps). nil in production.
+	workflowNow func() time.Time
 }
 
 type Supervisor struct {
@@ -772,24 +784,36 @@ func (s *Supervisor) startLeaseSweepLoop() {
 	done := make(chan struct{})
 	s.leaseSweepStop = stop
 	s.leaseSweepDone = done
+	if s.testHooks.leaseSweepLoopStart != nil {
+		s.testHooks.leaseSweepLoopStart()
+	}
 	go s.leaseSweepLoop(s.config.WorkflowLeaseSweepInterval, stop, done)
 }
 
 // leaseSweepLoop runs Manager.ExpireStaleLeases on its ticker until stopped.
 // An expired dead lease lands through the manager's change notification, so
 // the controller wakes and re-dispatches without waiting for its anti-entropy
-// cadence. Sweep errors are logged, never fatal: the next tick retries.
+// cadence. Sweep errors are logged, never fatal: the next tick retries. When
+// testHooks.leaseSweepTick is set, the test's channel replaces the ticker so
+// a test steps every sweep explicitly.
 func (s *Supervisor) leaseSweepLoop(interval time.Duration, stop, done chan struct{}) {
 	defer close(done)
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	var ticker *time.Ticker
+	var tickC <-chan time.Time
+	if s.testHooks.leaseSweepTick != nil {
+		tickC = s.testHooks.leaseSweepTick
+	} else {
+		ticker = time.NewTicker(interval)
+		defer ticker.Stop()
+		tickC = ticker.C
+	}
 	for {
 		select {
 		case <-stop:
 			return
 		case <-s.shutdownCh:
 			return
-		case <-ticker.C:
+		case <-tickC:
 		}
 		summary, err := s.workflowMgr.ExpireStaleLeases()
 		if err != nil {
@@ -4510,7 +4534,12 @@ func (s *Supervisor) runWorkflowStartupBarrier() {
 	// Orphaned adapter staging files predate every live state; sweep them
 	// before recovery hands leadership back out.
 	sweepOrphanedAdapterFiles(root)
-	m := workflow.NewManager(workflow.New(root))
+	var m *workflow.Manager
+	if s.testHooks.workflowNow != nil {
+		m = workflow.NewManagerWithClock(workflow.NewStoreWithClock(root, s.testHooks.workflowNow), s.testHooks.workflowNow)
+	} else {
+		m = workflow.NewManager(workflow.New(root))
+	}
 	m.RegisterExecutor(workflow.ActionRun, s.directRunExecutor())
 	m.RegisterExecutor(workflow.ActionLoop, s.loopExecutor())
 	m.RegisterExecutor(workflow.ActionTeam, s.teamExecutor())
