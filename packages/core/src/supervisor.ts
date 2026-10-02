@@ -332,12 +332,30 @@ export class Supervisor {
     return undefined
   }
 
-  static isCurrentInstance(supervisorId: string): boolean {
+  /**
+   * The live singleton when it owns supervisorId, null otherwise. Single
+   * source of truth for the ownership check, so callers cannot observe
+   * isCurrentInstance true while currentInstance is null.
+   */
+  static getInstance(supervisorId: string): Supervisor | null {
     return Supervisor.instance !== null && Supervisor.instance.supervisorId === supervisorId
+      ? Supervisor.instance
+      : null
+  }
+
+  static isCurrentInstance(supervisorId: string): boolean {
+    return Supervisor.getInstance(supervisorId) !== null
   }
 
   static currentInstance(): Supervisor | null {
     return Supervisor.instance
+  }
+
+  /** Iterate stored runs without exposing the internal map. */
+  forEachRun(callback: (info: RunInfo) => void): void {
+    for (const runInfo of this.runs.values()) {
+      callback(runInfo)
+    }
   }
 
   getClient(): Client {

@@ -1,5 +1,5 @@
 import * as fs from 'node:fs'
-import { Supervisor, type RunInfo } from '../supervisor.js'
+import { Supervisor } from '../supervisor.js'
 import { dial } from '../client.js'
 import { validateSupervisorSocketPath } from './validate.js'
 import { clearExternalRuns, externalRunMetadataPath } from './run-registry.js'
@@ -12,27 +12,26 @@ export async function shutdownTool(args: {
 
   if (args.supervisorId) {
     const supervisorId = validateSupervisorSocketPath(args.supervisorId)
-    const isSingleton = Supervisor.isCurrentInstance(supervisorId)
+    const sup = Supervisor.getInstance(supervisorId)
 
-    if (isSingleton) {
-      const sup = Supervisor.currentInstance()
-      if (!sup) {
-        throw new Error('supervisor not started')
-      }
+    if (sup) {
       const client = sup.getClient()
       await client.shutdown(args.force ? 'force' : 'graceful')
 
-      const runs = (sup as any).runs as Map<string, RunInfo>
-      for (const info of runs.values()) {
-        try {
-          await fs.promises.unlink(info.sentinelPath)
-          cleanedUp.push(info.sentinelPath)
-        } catch {}
-        try {
-          await fs.promises.unlink(info.eventLogPath)
-          cleanedUp.push(info.eventLogPath)
-        } catch {}
-      }
+      const cleanups: Promise<void>[] = []
+      sup.forEachRun(info => {
+        cleanups.push((async () => {
+          try {
+            await fs.promises.unlink(info.sentinelPath)
+            cleanedUp.push(info.sentinelPath)
+          } catch {}
+          try {
+            await fs.promises.unlink(info.eventLogPath)
+            cleanedUp.push(info.eventLogPath)
+          } catch {}
+        })())
+      })
+      await Promise.all(cleanups)
 
       await sup.close({ skipShutdown: true })
     } else {
@@ -74,8 +73,7 @@ export async function shutdownTool(args: {
     // shutdown may fail if already shutting down
   }
 
-  const runs = (sup as any).runs as Map<string, RunInfo>
-  for (const info of runs.values()) {
+  sup.forEachRun(info => {
     try {
       fs.unlinkSync(info.sentinelPath)
       cleanedUp.push(info.sentinelPath)
@@ -84,7 +82,7 @@ export async function shutdownTool(args: {
       fs.unlinkSync(info.eventLogPath)
       cleanedUp.push(info.eventLogPath)
     } catch {}
-  }
+  })
 
   await sup.close({ skipShutdown: true })
 

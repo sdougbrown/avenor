@@ -415,3 +415,47 @@ describe('installerBinaryPath', () => {
     }
   })
 })
+
+describe('Supervisor singleton and run accessors', () => {
+  afterEach(async () => {
+    await Supervisor.currentInstance()?.close().catch(() => {})
+    ;(Supervisor as any).instance = null
+  })
+
+  it('getInstance returns the singleton only when it owns the id', async () => {
+    const sup = await Supervisor.get()
+    expect(Supervisor.getInstance(sup.supervisorId)).toBe(sup)
+    expect(Supervisor.getInstance('/tmp/not-the-singleton.sock')).toBeNull()
+  })
+
+  it('getInstance returns null when no singleton is running', () => {
+    ;(Supervisor as any).instance = null
+    expect(Supervisor.getInstance('/tmp/anything.sock')).toBeNull()
+    expect(Supervisor.isCurrentInstance('/tmp/anything.sock')).toBe(false)
+  })
+
+  it('isCurrentInstance stays a boolean predicate over getInstance', async () => {
+    const sup = await Supervisor.get()
+    expect(Supervisor.isCurrentInstance(sup.supervisorId)).toBe(true)
+    expect(Supervisor.isCurrentInstance('/tmp/other.sock')).toBe(false)
+  })
+
+  it('forEachRun iterates stored runs without exposing the map', async () => {
+    const sup = await Supervisor.get()
+    const first: RunInfo = {
+      runId: 'run-iter-1',
+      label: 'iter-one',
+      sentinelPath: '/tmp/iter-1.done',
+      eventLogPath: '/tmp/iter-1.log',
+      runtimeId: 'rt-iter-1',
+      sessionId: 'ses-iter-1',
+    } as RunInfo
+    const second: RunInfo = { ...first, runId: 'run-iter-2', label: 'iter-two' }
+    ;(sup as any).runs = new Map([[first.runId, first], [second.runId, second]])
+    ;(sup as any).aliases = new Map()
+
+    const seen: string[] = []
+    sup.forEachRun(info => seen.push(info.runId))
+    expect(seen).toEqual(['run-iter-1', 'run-iter-2'])
+  })
+})

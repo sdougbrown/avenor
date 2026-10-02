@@ -15,9 +15,8 @@ export async function getSupervisorClient(supervisorId: string | undefined): Pro
     return { client: sup.getClient(), isSingleton: true, sup, supervisorId: sup.supervisorId }
   }
   const id = validateSupervisorSocketPath(supervisorId)
-  const current = Supervisor.currentInstance()
-  const isSingleton = current !== null &&
-    validateSupervisorSocketPath(current.supervisorId) === id
+  const current = Supervisor.getInstance(id)
+  const isSingleton = current !== null
   if (isSingleton) {
     return { client: current.getClient(), isSingleton: true, sup: current, supervisorId: id }
   }
