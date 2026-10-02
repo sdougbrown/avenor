@@ -2625,9 +2625,18 @@ func TestBrokerWaitReplyDeliversReplyAfterWriteTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wait request: %v", err)
 	}
+	// Timing the wait makes the test self-verifying: a reply that arrives
+	// before the wait_reply handler parks would return within the write
+	// deadline and mean the extension path was never exercised.
+	waitStarted := time.Now()
 	waitResp, err := noKeepAlive.Do(req)
 	if err != nil {
 		t.Fatalf("wait_reply after write deadline: %v", err)
+	}
+	elapsed := time.Since(waitStarted)
+	t.Logf("wait_reply returned after %v (write deadline %v)", elapsed, b.writeTimeout)
+	if elapsed <= b.writeTimeout {
+		t.Fatalf("wait_reply returned in %v, within the %v deadline; the long-poll extension was not exercised", elapsed, b.writeTimeout)
 	}
 	defer waitResp.Body.Close()
 	var result map[string]any

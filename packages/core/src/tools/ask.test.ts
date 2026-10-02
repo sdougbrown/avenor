@@ -38,18 +38,12 @@ describe('askTool', () => {
     expect(brokerAskMock).toHaveBeenCalledWith('rt_1', 'hello', undefined, 5000)
   })
 
-  it('does not forward timeoutMs=0 to brokerAsk', async () => {
-    await askTool({ toRunId: 'rt_1', message: 'hello', timeoutMs: 0 })
-    expect(brokerAskMock).toHaveBeenCalledWith('rt_1', 'hello', undefined, undefined)
-  })
-
-  it('does not forward a negative timeoutMs to brokerAsk', async () => {
-    await askTool({ toRunId: 'rt_1', message: 'hello', timeoutMs: -1 })
-    expect(brokerAskMock).toHaveBeenCalledWith('rt_1', 'hello', undefined, undefined)
-  })
-
-  it('does not forward a NaN timeoutMs to brokerAsk', async () => {
-    await askTool({ toRunId: 'rt_1', message: 'hello', timeoutMs: NaN })
+  it.each([
+    ['zero', 0],
+    ['negative', -1],
+    ['NaN', NaN],
+  ])('does not forward a %s timeoutMs to brokerAsk', async (_name, timeoutMs) => {
+    await askTool({ toRunId: 'rt_1', message: 'hello', timeoutMs })
     expect(brokerAskMock).toHaveBeenCalledWith('rt_1', 'hello', undefined, undefined)
   })
 
