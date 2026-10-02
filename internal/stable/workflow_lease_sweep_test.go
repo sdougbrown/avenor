@@ -7,11 +7,19 @@ package stable
 // attempt is never expired, and the sweep's shutdown lifecycle. Only the
 // inference provider is scripted (stableScriptedProvider); the CompleteAuto
 // failure is forced through the Supervisor's testHooks.completeAutoPre seam.
+//
+// Synchronization is deterministic: the sweep loop runs on an injected tick
+// channel (testHooks.leaseSweepTick) the test steps explicitly, the workflow
+// manager's lease-liveness clock is a manual clock (testHooks.workflowNow)
+// the test advances explicitly, and every state transition is awaited through
+// the manager's change notifications (waitForInstance), not by polling the
+// wall clock.
 
 import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -20,25 +28,123 @@ import (
 	"github.com/sdougbrown/avenor/internal/workflow"
 )
 
+// sweepClock is a manual clock the test advances explicitly; it stands in for
+// the workflow manager's lease-liveness clock so TTLs are virtual.
+type sweepClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func newSweepClock() *sweepClock {
+	return &sweepClock{now: time.Date(2025, 3, 4, 5, 6, 7, 0, time.UTC)}
+}
+
+func (c *sweepClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *sweepClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	c.now = c.now.Add(d)
+	c.mu.Unlock()
+}
+
+// leaseSweepDriver couples the injected sweep tick channel with the post-tick
+// hook: step sends one tick and blocks until that sweep has run, recording
+// its summary. Sweeps happen only when the test steps them.
+type leaseSweepDriver struct {
+	tick    chan time.Time
+	ran     chan struct{}
+	mu      sync.Mutex
+	steps   int
+	summary workflow.LeaseExpirySummary
+}
+
+func newLeaseSweepDriver() *leaseSweepDriver {
+	return &leaseSweepDriver{tick: make(chan time.Time), ran: make(chan struct{}, 8)}
+}
+
+// hook is installed as testHooks.leaseSweepPost.
+func (d *leaseSweepDriver) hook(summary workflow.LeaseExpirySummary) {
+	d.mu.Lock()
+	d.steps++
+	d.summary = summary
+	d.mu.Unlock()
+	d.ran <- struct{}{}
+}
+
+// step fires one sweep tick and waits for the sweep to complete. The wait is
+// bounded: a loop that never picks up the tick (or a hook that never runs)
+// fails the test with a goroutine dump instead of hanging the package.
+func (d *leaseSweepDriver) step(t *testing.T) {
+	t.Helper()
+	select {
+	case d.tick <- time.Now():
+	case <-time.After(5 * time.Second):
+		logGoroutines(t)
+		t.Fatal("timed out offering a sweep tick; the sweep loop is not selecting on the injected channel")
+	}
+	select {
+	case <-d.ran:
+	case <-time.After(5 * time.Second):
+		logGoroutines(t)
+		t.Fatal("timed out waiting for the stepped sweep to complete")
+	}
+}
+
+// stepCount reports how many sweeps have completed.
+func (d *leaseSweepDriver) stepCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.steps
+}
+
+// lastExpired reports the Expired count of the most recent completed sweep.
+func (d *leaseSweepDriver) lastExpired() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.summary.Expired
+}
+
+// lastRetained reports the Retained count of the most recent completed sweep.
+// A zero value after a step proves the sweep failed before enumerating any
+// instance (the error path), since a working sweep over a live fixture
+// always retains the dead lease it has not expired yet.
+func (d *leaseSweepDriver) lastRetained() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.summary.Retained
+}
+
 // TestLeaseSweepReDispatchesAfterFailedAutoCompletion proves the residual
 // stall case recovers without a restart: the scripted worker exits
 // successfully, the supervisor records the success fact, and its
 // CompleteAuto command fails once (injected through the completeAutoPre
-// seam). The heartbeat has stopped, so the live lease sweep
-// expires the dead lease within one sweep interval, the controller
-// re-dispatches the node, and the second attempt's completion succeeds and
-// dispatches the dependent consume node.
+// seam). The heartbeat has stopped, so the test advances the lease clock
+// past the TTL and steps one sweep: the live sweep expires the dead lease,
+// the controller re-dispatches the node, and the second attempt's completion
+// succeeds and dispatches the dependent consume node.
 func TestLeaseSweepReDispatchesAfterFailedAutoCompletion(t *testing.T) {
 	t.Chdir(t.TempDir())
 	provider := &stableScriptedProvider{attempt: -1}
 	declared := produceWorkerDeclaredResult(t, provider, "ses_produce1", "result.md", "the declared summary")
 	_ = produceWorkerDeclaredResult(t, provider, "ses_produce2", "result.md", "the declared summary")
 	_ = produceWorkerDeclaredResult(t, provider, "ses_consume", "", "")
+	clock := newSweepClock()
+	sweeps := newLeaseSweepDriver()
 	f := newAutoHandoffFixture(t, "lease-sweep-residual", provider, func(f *autoHandoffFixture) {
+		// The interval only gates loop startup; the injected tick channel
+		// drives every sweep.
 		f.sup.config.WorkflowLeaseSweepInterval = 200 * time.Millisecond
+		f.sup.testHooks.leaseSweepTick = sweeps.tick
+		f.sup.testHooks.leaseSweepPost = sweeps.hook
+		f.sup.testHooks.workflowNow = clock.Now
 	})
-	// 2s lease TTL: once the heartbeat stops, the dead lease is sweepable
-	// quickly, while a live heartbeated attempt renews well inside the TTL.
+	// 2 test-second lease TTL: once the heartbeat stops, one clock advance
+	// past the TTL makes the dead lease sweepable, while a live heartbeated
+	// attempt renews well inside the TTL.
 	wf := f.addWorkflow(t, "tmpl-lease-sweep-residual", autoHandoffChainTemplate(t, "tmpl-lease-sweep-residual", 2))
 
 	// Force the first auto-completion to fail after the success fact, as an
@@ -59,9 +165,19 @@ func TestLeaseSweepReDispatchesAfterFailedAutoCompletion(t *testing.T) {
 		attempts := attemptsForNode(inst, "produce")
 		return len(attempts) == 1 && attempts[0].Status == workflow.AttemptSucceeded
 	})
+	// The failed completion stopped the attempt's heartbeat (StopAndWait
+	// removes it from the registry before returning), so no renewal can land
+	// after this point and the clock advance is final.
+	f.waitForNoHeartbeats(t, "produce's heartbeat to stop after the failed completion")
 
-	// The failed completion leaves the activation running with a dead lease;
-	// the live sweep expires it and the controller re-dispatches.
+	// Advance the lease clock past the 2s TTL and sweep: exactly the dead
+	// lease expires and the controller re-dispatches.
+	clock.Advance(3 * time.Second)
+	sweeps.step(t)
+	if expired := sweeps.lastExpired(); expired != 1 {
+		inst := f.instance(t, wf)
+		t.Fatalf("sweep after the TTL advance expired %d leases, want exactly 1; observed %s", expired, describeInstance(&inst, f.providerCalls.Load()))
+	}
 	f.waitForInstance(t, wf, "the live sweep to expire the dead lease and re-dispatch produce", func(inst *workflow.WorkflowInstance) bool {
 		return len(attemptsForNode(inst, "produce")) == 2
 	})
@@ -103,11 +219,11 @@ func TestLeaseSweepReDispatchesAfterFailedAutoCompletion(t *testing.T) {
 
 // TestLeaseSweepSparesLiveHeartbeatedAttempt proves the sweep never expires a
 // live attempt: the scripted worker stays alive (its session end is gated on
-// a release channel) across several sweep intervals and multiple TTL windows
-// of a 1s lease, while the executor's heartbeat loop keeps renewing. The
-// worker is only released after the sweep has run repeatedly, and the
-// workflow then completes with exactly one attempt — a swept lease would have
-// re-dispatched a second one.
+// a release channel) while the test advances the lease clock across the 3s
+// TTL in repeated steps, letting each step's heartbeat renewal land (observed
+// through the manager's change notification) before stepping one sweep. A
+// swept lease would have re-dispatched a second attempt; after the release
+// the workflow completes with exactly one.
 func TestLeaseSweepSparesLiveHeartbeatedAttempt(t *testing.T) {
 	t.Chdir(t.TempDir())
 	release := make(chan struct{})
@@ -122,11 +238,15 @@ func TestLeaseSweepSparesLiveHeartbeatedAttempt(t *testing.T) {
 		},
 	})
 	provider.mu.Unlock()
-	var sweeps atomic.Int32
+	clock := newSweepClock()
+	sweeps := newLeaseSweepDriver()
 	f := newAutoHandoffFixture(t, "lease-sweep-live", provider, func(f *autoHandoffFixture) {
+		// The interval only gates loop startup; the injected tick channel
+		// drives every sweep.
 		f.sup.config.WorkflowLeaseSweepInterval = 200 * time.Millisecond
-		// Set before the barrier: the sweep loop reads the hook every tick.
-		f.sup.testHooks.leaseSweepPost = func(workflow.LeaseExpirySummary) { sweeps.Add(1) }
+		f.sup.testHooks.leaseSweepTick = sweeps.tick
+		f.sup.testHooks.leaseSweepPost = sweeps.hook
+		f.sup.testHooks.workflowNow = clock.Now
 	})
 	template := map[string]any{
 		"schema_version":   1,
@@ -145,22 +265,44 @@ func TestLeaseSweepSparesLiveHeartbeatedAttempt(t *testing.T) {
 	wf := f.addWorkflow(t, "tmpl-lease-sweep-live", mustJSON(t, template))
 	f.enableController(t, 2)
 
-	// Hold the worker alive until the sweep has run at least twenty times
-	// (4s, past the 3s TTL, which the heartbeat renews every second).
-	deadline := time.Now().Add(10 * time.Second)
-	for sweeps.Load() < 20 {
-		if time.Now().After(deadline) {
+	// Wait for the first heartbeat renewal to land (the heartbeat commit
+	// notifies subscribers), so every clock advance below starts from a
+	// freshly renewed lease.
+	f.waitForInstance(t, wf, "the attempt's first lease heartbeat renewal", func(inst *workflow.WorkflowInstance) bool {
+		act := activationFor(inst, "start")
+		return act != nil && act.ActiveLease != nil && act.ActiveLease.LastHeartbeatAt != nil
+	})
+
+	// Cross the original 3s TTL and keep going: four advance+renew+sweep
+	// cycles. Each cycle advances the clock, waits for a renewal stamped at
+	// the advanced time, asserts that renewal pushed ExpiresAt a full TTL
+	// past it (so a heartbeat that stamps without extending cannot pass),
+	// then sweeps once: the live lease is retained every time even though the
+	// clock has moved well past the original expiry.
+	ttl := 3 * time.Second
+	for i := 1; i <= 4; i++ {
+		clock.Advance(1 * time.Second)
+		want := clock.Now()
+		f.waitForInstance(t, wf, "a lease heartbeat renewal stamped after the clock advance", func(inst *workflow.WorkflowInstance) bool {
+			act := activationFor(inst, "start")
+			return act != nil && act.ActiveLease != nil &&
+				act.ActiveLease.LastHeartbeatAt != nil &&
+				act.ActiveLease.LastHeartbeatAt.Equal(want) &&
+				act.ActiveLease.ExpiresAt.Equal(want.Add(ttl))
+		})
+		sweeps.step(t)
+		if expired := sweeps.lastExpired(); expired != 0 {
 			inst := f.instance(t, wf)
-			t.Fatalf("timed out waiting for twenty lease sweeps; observed %s", describeInstance(&inst, f.providerCalls.Load()))
+			t.Fatalf("sweep %d expired %d live leases, want 0; observed %s", i, expired, describeInstance(&inst, f.providerCalls.Load()))
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
 
-	// Still exactly one live, leased attempt after repeated sweeps.
+	// Still exactly one live, leased attempt after the TTL was crossed three
+	// times under renewal.
 	inst := f.instance(t, wf)
 	act := activationFor(&inst, "start")
 	if act == nil || act.Status != workflow.ActivationRunning || act.ActiveLease == nil {
-		t.Fatalf("start activation not live after %d sweeps; observed %s", sweeps.Load(), describeInstance(&inst, f.providerCalls.Load()))
+		t.Fatalf("start activation not live after the TTL-crossing sweeps; observed %s", describeInstance(&inst, f.providerCalls.Load()))
 	}
 	if len(inst.Attempts) != 1 {
 		t.Fatalf("workflow recorded %d attempts while the worker was alive, want exactly 1; observed %s",
@@ -182,7 +324,9 @@ func TestLeaseSweepSparesLiveHeartbeatedAttempt(t *testing.T) {
 }
 
 // TestLeaseSweepStopsAfterShutdown proves the sweep goroutine is stopped and
-// joined by Shutdown: after the call returns, no further sweep tick ever runs.
+// joined by Shutdown: after the call returns, an offered tick can never run a
+// sweep, because the joined goroutine is the only receiver of the tick
+// channel.
 func TestLeaseSweepStopsAfterShutdown(t *testing.T) {
 	sup := NewSupervisor(Config{
 		ControlSocket:              newStableSocketPath(t, "lease-sweep-stop"),
@@ -193,36 +337,40 @@ func TestLeaseSweepStopsAfterShutdown(t *testing.T) {
 		WorkflowLeaseSweepInterval: 100 * time.Millisecond,
 	})
 	t.Cleanup(func() { _ = sup.broker.Stop() })
-	var sweeps atomic.Int32
-	sup.testHooks.leaseSweepPost = func(workflow.LeaseExpirySummary) { sweeps.Add(1) }
+	sweeps := newLeaseSweepDriver()
+	sup.testHooks.leaseSweepPost = sweeps.hook
+	sup.testHooks.leaseSweepTick = sweeps.tick
 	if _, _, err := sup.workflowBarrierResult(); err != nil {
 		t.Fatalf("workflow barrier: %v", err)
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for sweeps.Load() < 3 {
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for three lease sweeps; observed %d", sweeps.Load())
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	sweeps.step(t)
+	sweeps.step(t)
+	sweeps.step(t)
 	if err := sup.Shutdown("graceful"); err != nil {
 		t.Fatalf("Shutdown: %v", err)
 	}
-	afterShutdown := sweeps.Load()
-	// stopLeaseSweep joined the goroutine before Shutdown returned, so no
-	// further tick can ever run; observe several intervals to prove it.
-	deadline = time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		if cur := sweeps.Load(); cur != afterShutdown {
-			t.Fatalf("sweep ran after Shutdown: %d -> %d", afterShutdown, cur)
-		}
-		time.Sleep(50 * time.Millisecond)
+	// stopLeaseSweep joined the goroutine before Shutdown returned: the done
+	// channel is closed, the offered tick has no receiver, and no sweep can
+	// ever run again.
+	select {
+	case <-sup.leaseSweepDone:
+	default:
+		t.Fatal("sweep goroutine not joined when Shutdown returned")
+	}
+	select {
+	case sweeps.tick <- time.Now():
+		t.Fatal("a tick was received after Shutdown; the sweep loop was not joined")
+	default:
+	}
+	if n := sweeps.stepCount(); n != 3 {
+		t.Fatalf("observed %d sweeps after Shutdown, want exactly the 3 stepped before it", n)
 	}
 }
 
 // TestLeaseSweepNeverStartsAfterStop proves a lazy workflow barrier that
 // completes during shutdown cannot launch a sweep loop the shutdown join has
-// already passed: once stopLeaseSweep has run, startLeaseSweepLoop is a no-op.
+// already passed: once stopLeaseSweep has run, startLeaseSweepLoop is a no-op
+// — structurally, no loop-start is ever reported.
 func TestLeaseSweepNeverStartsAfterStop(t *testing.T) {
 	sup := NewSupervisor(Config{
 		ControlSocket:              newStableSocketPath(t, "lease-sweep-late-start"),
@@ -232,30 +380,33 @@ func TestLeaseSweepNeverStartsAfterStop(t *testing.T) {
 		WorkflowRoot:               filepath.Join(t.TempDir(), "wfroot"),
 		WorkflowLeaseSweepInterval: 50 * time.Millisecond,
 	})
-	var sweeps atomic.Int32
-	sup.testHooks.leaseSweepPost = func(workflow.LeaseExpirySummary) { sweeps.Add(1) }
+	var loopStarts atomic.Int32
+	sup.testHooks.leaseSweepLoopStart = func() { loopStarts.Add(1) }
 
 	t.Cleanup(func() { _ = sup.broker.Stop() })
 	if _, _, err := sup.workflowBarrierResult(); err != nil {
 		t.Fatalf("workflow barrier: %v", err)
 	}
+	if n := loopStarts.Load(); n != 1 {
+		t.Fatalf("loop-start reports after the barrier = %d, want exactly 1", n)
+	}
 
 	sup.stopLeaseSweep()
-	sweeps.Store(0)
+	loopStarts.Store(0)
 	sup.startLeaseSweepLoop()
-
-	// A loop started despite the stop would tick every 50ms; six intervals
-	// with no tick shows none was started.
-	time.Sleep(300 * time.Millisecond)
-	if n := sweeps.Load(); n != 0 {
-		t.Fatalf("observed %d sweeps after stop, want 0", n)
+	if n := loopStarts.Load(); n != 0 {
+		t.Fatalf("loop started after stop (%d starts), want 0", n)
+	}
+	if sup.leaseSweepRunning() {
+		t.Fatal("sweep loop reports running after stop, want stopped")
 	}
 }
 
 // TestLeaseSweepDoesNotStartWhenDisabledOrBarrierFails pins the start
 // guard: a zero WorkflowLeaseSweepInterval disables the live sweep, and a
 // failed workflow barrier never starts it, so leases then expire only
-// through restart recovery.
+// through restart recovery. Both facts are checked structurally through the
+// loop-start seam, with no reliance on observing the absence of ticks.
 func TestLeaseSweepDoesNotStartWhenDisabledOrBarrierFails(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -292,16 +443,104 @@ func TestLeaseSweepDoesNotStartWhenDisabledOrBarrierFails(t *testing.T) {
 				sup.stopLeaseSweep()
 				_ = sup.broker.Stop()
 			})
-			var sweeps atomic.Int32
-			sup.testHooks.leaseSweepPost = func(workflow.LeaseExpirySummary) { sweeps.Add(1) }
+			var loopStarts atomic.Int32
+			sup.testHooks.leaseSweepLoopStart = func() { loopStarts.Add(1) }
 			_, _, _ = sup.workflowBarrierResult()
 
-			// A started loop would tick every 50ms; six intervals with no
-			// tick shows none was started.
-			time.Sleep(300 * time.Millisecond)
-			if n := sweeps.Load(); n != 0 {
-				t.Fatalf("observed %d live sweeps, want 0", n)
+			if n := loopStarts.Load(); n != 0 {
+				t.Fatalf("sweep loop started (%d starts) despite %s, want none", n, tc.name)
+			}
+			if sup.leaseSweepRunning() {
+				t.Fatalf("sweep loop reports running despite %s, want stopped", tc.name)
 			}
 		})
 	}
+}
+
+// TestLeaseSweepSurvivesSweepErrors proves the sweep loop's error contract:
+// a failing sweep is logged and never fatal — the loop comes back for the
+// next tick — and after the underlying fault clears, a stepped sweep still
+// expires a dead lease and the controller re-dispatches. The fault is a
+// regular file where the instances directory must be, which fails every
+// ExpireStaleLeases call until it is renamed back, on every platform and
+// for every user.
+func TestLeaseSweepSurvivesSweepErrors(t *testing.T) {
+	t.Chdir(t.TempDir())
+	provider := &stableScriptedProvider{attempt: -1}
+	declared := produceWorkerDeclaredResult(t, provider, "ses_produce1", "result.md", "the declared summary")
+	_ = produceWorkerDeclaredResult(t, provider, "ses_produce2", "result.md", "the declared summary")
+	_ = produceWorkerDeclaredResult(t, provider, "ses_consume", "", "")
+	clock := newSweepClock()
+	sweeps := newLeaseSweepDriver()
+	f := newAutoHandoffFixture(t, "lease-sweep-error", provider, func(f *autoHandoffFixture) {
+		// The interval only gates loop startup; the injected tick channel
+		// drives every sweep.
+		f.sup.config.WorkflowLeaseSweepInterval = 200 * time.Millisecond
+		f.sup.testHooks.leaseSweepTick = sweeps.tick
+		f.sup.testHooks.leaseSweepPost = sweeps.hook
+		f.sup.testHooks.workflowNow = clock.Now
+	})
+	wf := f.addWorkflow(t, "tmpl-lease-sweep-error", autoHandoffChainTemplate(t, "tmpl-lease-sweep-error", 2))
+
+	// Same residual stall as the re-dispatch test: the success fact is
+	// recorded, the completion fails, the heartbeat stops.
+	var completeCalls atomic.Int32
+	f.sup.testHooks.completeAutoPre = func() error {
+		if completeCalls.Add(1) == 1 {
+			return errors.New("injected evidence staging failure")
+		}
+		return nil
+	}
+	f.enableController(t, 2)
+	f.waitForInstance(t, wf, "produce's first attempt to succeed", func(inst *workflow.WorkflowInstance) bool {
+		attempts := attemptsForNode(inst, "produce")
+		return len(attempts) == 1 && attempts[0].Status == workflow.AttemptSucceeded
+	})
+	f.waitForNoHeartbeats(t, "produce's heartbeat to stop after the failed completion")
+
+	// Break the instance enumeration: a regular file where the instances
+	// directory must be fails every sweep until it is renamed back.
+	root := f.sup.config.WorkflowRoot
+	instancesDir := filepath.Join(root, "instances")
+	brokenDir := filepath.Join(root, "instances.broken")
+	if err := os.Rename(instancesDir, brokenDir); err != nil {
+		t.Fatalf("move instances dir aside: %v", err)
+	}
+	if err := os.WriteFile(instancesDir, nil, 0o644); err != nil {
+		t.Fatalf("plant instances file: %v", err)
+	}
+	sweeps.step(t)
+	// The step returned: the loop survived the failing sweep. The zero
+	// retained count proves the sweep failed before enumerating any instance.
+	if retained := sweeps.lastRetained(); retained != 0 {
+		t.Fatalf("sweep over the broken root retained %d leases, want a failed sweep that enumerated nothing", retained)
+	}
+
+	// Clear the fault: the very next sweep still runs, expires the dead
+	// lease, and the controller re-dispatches.
+	if err := os.Remove(instancesDir); err != nil {
+		t.Fatalf("remove planted file: %v", err)
+	}
+	if err := os.Rename(brokenDir, instancesDir); err != nil {
+		t.Fatalf("restore instances dir: %v", err)
+	}
+	clock.Advance(3 * time.Second)
+	sweeps.step(t)
+	if expired := sweeps.lastExpired(); expired != 1 {
+		inst := f.instance(t, wf)
+		t.Fatalf("sweep after the fault cleared expired %d leases, want exactly 1; observed %s", expired, describeInstance(&inst, f.providerCalls.Load()))
+	}
+	f.waitForInstance(t, wf, "the live sweep to expire the dead lease and re-dispatch produce", func(inst *workflow.WorkflowInstance) bool {
+		return len(attemptsForNode(inst, "produce")) == 2
+	})
+	f.waitForInstance(t, wf, "produce satisfied with outcome done and consume dispatched", func(inst *workflow.WorkflowInstance) bool {
+		produce := activationFor(inst, "produce")
+		consume := activationFor(inst, "consume")
+		return produce != nil && produce.Status == workflow.ActivationSatisfied &&
+			produce.SelectedOutcome == workflow.OutcomeName(declared.Outcome) &&
+			consume != nil && len(consume.AttemptIDs) > 0
+	})
+	f.waitForInstance(t, wf, "the workflow to complete", func(inst *workflow.WorkflowInstance) bool {
+		return inst.Status == workflow.WorkflowCompleted
+	})
 }

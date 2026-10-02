@@ -199,7 +199,31 @@ func TestInvokeTimeoutKillsProcessGroup(t *testing.T) {
 	writeManifest(t, dir, "hang.json", "hang", exe, nil, 2000)
 	m := loadOne(t, dir, "hang")
 
-	if _, err := Invoke(context.Background(), m, testRequest(testInputJSON)); !errors.Is(err, ErrAdapterTimeout) {
+	// The timeout channel is injected, so the test fires it only after the
+	// adapter has started its background sleeper and written child.pid (the
+	// shell creates the file before writing the pid, so readiness means
+	// non-empty content): the group kill is always observed against a live
+	// child, never racing a wall-clock timeout against process startup.
+	timeoutC := make(chan time.Time, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := invoke(context.Background(), m, testRequest(testInputJSON), timeoutC)
+		errCh <- err
+	}()
+	pidPath := filepath.Join(dir, "child.pid")
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if data, err := os.ReadFile(pidPath); err == nil && len(strings.TrimSpace(string(data))) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("child.pid never appeared; the hang adapter never got past startup")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	timeoutC <- time.Now()
+
+	if err := <-errCh; !errors.Is(err, ErrAdapterTimeout) {
 		t.Fatalf("error = %v, want ErrAdapterTimeout", err)
 	}
 	pidData, err := os.ReadFile(filepath.Join(dir, "child.pid"))
@@ -210,12 +234,60 @@ func TestInvokeTimeoutKillsProcessGroup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bad pid %q: %v", pidData, err)
 	}
-	deadline := time.Now().Add(5 * time.Second)
+	// The group kill already happened before Invoke returned; the bounded
+	// poll only observes the reaper finishing.
+	goneDeadline := time.Now().Add(5 * time.Second)
 	for {
 		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
 			break
 		}
-		if time.Now().After(deadline) {
+		if time.Now().After(goneDeadline) {
+			t.Fatalf("child sleeper %d still alive after group kill", pid)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// TestInvokeManifestTimeoutKillsProcessGroup covers the production timeout
+// path: Invoke always passes a nil timeout channel, so invokeWait builds the
+// real timer from the manifest. The manifest timeout fires, Invoke reports
+// ErrAdapterTimeout, and the child's process group is gone. Startup latency
+// is not part of the contract: whether child.pid was written before the
+// timeout only decides whether the pid is available for the gone-check, so
+// the pid assertion is conditional and the test never races startup against
+// the timer.
+func TestInvokeManifestTimeoutKillsProcessGroup(t *testing.T) {
+	dir := stageAdapterDir(t)
+	exe := stageFixture(t, dir, "hang.sh")
+	writeManifest(t, dir, "hang.json", "hang", exe, nil, 2000)
+	m := loadOne(t, dir, "hang")
+
+	start := time.Now()
+	if _, err := Invoke(context.Background(), m, testRequest(testInputJSON)); !errors.Is(err, ErrAdapterTimeout) {
+		t.Fatalf("error = %v, want ErrAdapterTimeout", err)
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("Invoke returned after %v, want a return bounded by the 2s manifest timeout", elapsed)
+	}
+	pidData, err := os.ReadFile(filepath.Join(dir, "child.pid"))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// The timeout fired before the child wrote its pid; the group kill
+			// is already proven by the injected-channel test.
+			return
+		}
+		t.Fatalf("child pid file: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidData)))
+	if err != nil {
+		t.Fatalf("bad pid %q: %v", pidData, err)
+	}
+	goneDeadline := time.Now().Add(5 * time.Second)
+	for {
+		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+			break
+		}
+		if time.Now().After(goneDeadline) {
 			t.Fatalf("child sleeper %d still alive after group kill", pid)
 		}
 		time.Sleep(50 * time.Millisecond)

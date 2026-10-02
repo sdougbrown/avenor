@@ -559,22 +559,31 @@ func (f *factoryE2E) newestActivation(t *testing.T, wf, nodeID string) *workflow
 	return found
 }
 
-// waitInstanceOn polls cond against a fresh snapshot of wf, failing with the
-// full observed state after a bounded deadline.
+// waitInstanceOn waits for cond to hold against a fresh snapshot of wf,
+// driven by the manager's change notifications: every committed workflow
+// transition wakes the subscriber, so the wait observes the transition as it
+// lands instead of polling. A single generous wall-clock bound backstops a
+// stalled pipeline with the goroutine dump on timeout.
 func (f *factoryE2E) waitInstanceOn(t *testing.T, wf, what string, cond func(inst *workflow.WorkflowInstance) bool) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	var inst workflow.WorkflowInstance
+	ch, cancel := f.mgr.SubscribeChanges()
+	defer cancel()
+	inst := f.instanceOn(t, wf)
+	if cond(&inst) {
+		return
+	}
+	deadline := time.After(10 * time.Second)
 	for {
-		inst = f.instanceOn(t, wf)
-		if cond(&inst) {
-			return
-		}
-		if time.Now().After(deadline) {
+		select {
+		case <-ch:
+			inst = f.instanceOn(t, wf)
+			if cond(&inst) {
+				return
+			}
+		case <-deadline:
 			logGoroutines(t)
 			t.Fatalf("timed out waiting for %s; observed %s", what, describeInstance(&inst, int32(f.provider.sessionCount())))
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -957,22 +966,37 @@ func (f *factoryE2E) committedPollCursor(wf, actID, gateID string) (workflowcont
 
 // waitCursor waits until a poll has been committed for the activation's gate
 // and returns its cursor: the live cursor while one exists, otherwise the
-// last committed cursor from the controller event log.
+// last committed cursor from the controller event log. The wait is driven by
+// the controller store's change notifications (every committed record change
+// wakes the subscriber), with one wall-clock bound backstopping a stalled
+// pipeline.
 func (f *factoryE2E) waitCursor(t *testing.T, wf, actID, gateID string) workflowcontroller.PollCursor {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	// Subscribe before the first check: a commit landing between the check
+	// and the subscribe must leave its signal in the channel, so no wake is
+	// ever lost.
+	ch, cancel := f.cstore.SubscribeChanges()
+	defer cancel()
+	if cursor, ok := f.findCursor(wf, actID, gateID); ok && cursor.PollID != "" {
+		return cursor
+	}
+	if cursor, ok := f.committedPollCursor(wf, actID, gateID); ok {
+		return cursor
+	}
+	deadline := time.After(10 * time.Second)
 	for {
-		if cursor, ok := f.findCursor(wf, actID, gateID); ok && cursor.PollID != "" {
-			return cursor
-		}
-		if cursor, ok := f.committedPollCursor(wf, actID, gateID); ok {
-			return cursor
-		}
-		if time.Now().After(deadline) {
+		select {
+		case <-ch:
+			if cursor, ok := f.findCursor(wf, actID, gateID); ok && cursor.PollID != "" {
+				return cursor
+			}
+			if cursor, ok := f.committedPollCursor(wf, actID, gateID); ok {
+				return cursor
+			}
+		case <-deadline:
 			logGoroutines(t)
 			t.Fatalf("timed out waiting for poll cursor %s on %s", gateID, actID)
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
 }
 

@@ -37,6 +37,13 @@ type testHooks struct {
 type Manager struct {
 	store *Store
 
+	// now is the wall-clock source for lease liveness (claim, heartbeat
+	// renewal, and stale-lease sweeps). It is shared by every writer of
+	// ExpiresAt and every reader that decides staleness, so an injected test
+	// clock advances lease time for all of them together. Event timestamps
+	// keep using nowUTC regardless of this clock.
+	now func() time.Time
+
 	// testHooks holds seams set only by tests. nil in production; tests set
 	// them on the instance they drive to make concurrent commands land
 	// deterministically inside read–commit windows.
@@ -61,8 +68,17 @@ type Manager struct {
 	subscribers []chan struct{}
 }
 
+// NewManager returns a manager over store that reads the real wall clock.
 func NewManager(store *Store) *Manager {
-	m := &Manager{store: store, executors: make(map[ActionKind]Executor)}
+	return NewManagerWithClock(store, func() time.Time { return time.Now().UTC() })
+}
+
+// NewManagerWithClock returns a manager whose lease-liveness clock is read
+// through now: every lease's AcquiredAt and ExpiresAt, every heartbeat
+// renewal, and every stale-lease sweep stamp and compare against it. Callers
+// must supply a UTC time.
+func NewManagerWithClock(store *Store, now func() time.Time) *Manager {
+	m := &Manager{store: store, now: now, executors: make(map[ActionKind]Executor)}
 	// Keep the candidate index fresh across commands: every committed
 	// snapshot upserts into the index once it has been recovered.
 	store.SetCommitObserver(m.observeCommit)
@@ -948,7 +964,7 @@ func (m *Manager) commandClaim(wf WorkflowID, payload json.RawMessage) (any, err
 	if err != nil {
 		return nil, err
 	}
-	now := time.Now().UTC()
+	now := m.now()
 	ttl := leaseTTL(node, tmpl.DefaultLease)
 	expiresAt := now.Add(ttl)
 	token := newOwnerToken()
