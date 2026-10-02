@@ -148,6 +148,11 @@ new session continuing from the prior one. Treat the follow-up as a new run
 through the same lifecycle. The existing `auto_approve` policy is inherited by
 follow-ups, so approved runs remain unattended across continuation turns.
 
+A `failed` or permission-`blocked` run whose backend session persisted can also
+be continued with `avenor_follow_up`: the follow-up resumes the recorded
+session instead of rebuilding context from scratch. `timeout` and `killed`
+runs are not resumable.
+
 ### Progress notifications
 
 This issue uses long-poll responses instead of MCP progress notifications. The
@@ -317,7 +322,9 @@ The event log skips malformed lines and returns the last N matching events.
 
 ### `avenor_follow_up`
 
-Spawns a new run continuing a completed run's session.
+Spawns a new run continuing a completed run's session. A `failed` or
+`blocked` run whose session persisted is also resumable; `timeout` and
+`killed` runs are not.
 
 This is not a live prompt into the old runtime; it spawns a new runtime that resumes from the prior session's state.
 

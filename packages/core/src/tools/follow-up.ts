@@ -85,6 +85,19 @@ function rejectSessionConflict(
   }
 }
 
+// DONE, FAILED, and BLOCKED settle the provider session itself, so the
+// recorded session id is a loadable transcript. TIMEOUT and KILLED are
+// supervisor-imposed terminations (time budget, cancellation) where an
+// automatic continuation would surprise. Matches the Go readSentinelSession.
+const RESUMABLE_SENTINEL_STATUSES = new Set(['DONE', 'FAILED', 'BLOCKED'])
+
+function rejectNotResumableStatus(sentinel: Record<string, string> | null): void {
+  const status = (sentinel?._status ?? '').trim().toUpperCase()
+  if (status !== '' && !RESUMABLE_SENTINEL_STATUSES.has(status)) {
+    throw new Error(`run is not resumable (status: ${status.toLowerCase()})`)
+  }
+}
+
 async function executeFollowUpTool(
   args: FollowUpToolArgs,
   getSupervisorClient: typeof realGetSupervisorClient,
@@ -116,6 +129,7 @@ async function executeFollowUpTool(
         path.join(runsRoot(), args.runId, 'sentinel.done')
       const sentinel = await parseSentinel(sentinelPath)
       rejectSessionConflict(sentinel, liveStatus)
+      rejectNotResumableStatus(sentinel)
       const sessionId =
         sentinel?.SESSION ??
         (liveStatus?.session_id as string | undefined) ??
@@ -233,6 +247,7 @@ async function executeFollowUpTool(
 
   const sentinel = await parseSentinel(runInfo.sentinelPath)
   rejectSessionConflict(sentinel, null)
+  rejectNotResumableStatus(sentinel)
   const sessionId = sentinel?.SESSION ?? runInfo.sessionId
 
   if (!sessionId) {

@@ -3326,10 +3326,31 @@ func TestAvenorFollowUpRetriesMissingSentinelAfterStatusRace(t *testing.T) {
 			wantSession:      "ses_after_empty_status",
 		},
 		{
-			name:             "status error then non-resumable sentinel",
+			name:             "status error then failed sentinel",
 			statusErr:        errors.New("status unavailable"),
 			createSentinel:   true,
 			sentinelContents: "FAILED\nSESSION=ses_failed\n",
+			wantSession:      "ses_failed",
+		},
+		{
+			name:             "status error then blocked sentinel",
+			statusErr:        errors.New("status unavailable"),
+			createSentinel:   true,
+			sentinelContents: "BLOCKED\nSESSION=ses_blocked\nSTOP_REASON=blocked\n",
+			wantSession:      "ses_blocked",
+		},
+		{
+			name:             "status error then killed sentinel",
+			statusErr:        errors.New("status unavailable"),
+			createSentinel:   true,
+			sentinelContents: "KILLED\nSESSION=ses_killed\nEXIT_CODE=130\n",
+			wantError:        "not resumable",
+		},
+		{
+			name:             "status error then timeout sentinel",
+			statusErr:        errors.New("status unavailable"),
+			createSentinel:   true,
+			sentinelContents: "TIMEOUT\nSESSION=ses_timeout\n",
 			wantError:        "not resumable",
 		},
 		{
@@ -3547,8 +3568,8 @@ func TestAvenorFollowUpNoSession(t *testing.T) {
 
 func TestAvenorFollowUpNotResumable(t *testing.T) {
 	dir := t.TempDir()
-	sentinelPath := filepath.Join(dir, "followup-failed.done")
-	if err := os.WriteFile(sentinelPath, []byte("FAILED\nSESSION=ses_failed\n"), 0644); err != nil {
+	sentinelPath := filepath.Join(dir, "followup-killed.done")
+	if err := os.WriteFile(sentinelPath, []byte("KILLED\nSESSION=ses_killed\nEXIT_CODE=130\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -3564,9 +3585,9 @@ func TestAvenorFollowUpNotResumable(t *testing.T) {
 
 	s.registry.Store(&RunInfo{
 		RunID:        "run-prior-5",
-		Label:        "prior-failed",
+		Label:        "prior-killed",
 		RuntimeID:    "rt_prior_5",
-		SessionID:    "ses_failed",
+		SessionID:    "ses_killed",
 		SentinelPath: sentinelPath,
 		Agent:        "claude",
 		Dir:          "/tmp/prior-repo",
