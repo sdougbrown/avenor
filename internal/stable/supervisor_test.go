@@ -4523,6 +4523,58 @@ func TestDirectPermissionCleanupBlocksReuseUntilOldOptionsAreDeleted(t *testing.
 	}
 }
 
+func TestChildQuestionTimeoutStartupDiagnostic(t *testing.T) {
+	// The default (120s) is applied when the config leaves the field unset,
+	// and the passthrough keeps an explicit value intact.
+	defaulted := NewSupervisor(Config{
+		ControlSocket: newStableSocketPath(t, "cqt-default"),
+		MaxRuntimes:   1,
+	})
+	if defaulted.childQuestionTimeout != 120*time.Second || !defaulted.childQuestionTimeoutDefaulted {
+		t.Fatalf("childQuestionTimeout = %s defaulted = %v, want 2m0s defaulted",
+			defaulted.childQuestionTimeout, defaulted.childQuestionTimeoutDefaulted)
+	}
+	explicit := NewSupervisor(Config{
+		ControlSocket:        newStableSocketPath(t, "cqt-explicit"),
+		MaxRuntimes:          1,
+		ChildQuestionTimeout: 5 * time.Second,
+	})
+	if explicit.childQuestionTimeout != 5*time.Second || explicit.childQuestionTimeoutDefaulted {
+		t.Fatalf("childQuestionTimeout = %s defaulted = %v, want 5s not defaulted",
+			explicit.childQuestionTimeout, explicit.childQuestionTimeoutDefaulted)
+	}
+
+	// Run() reports the effective value with its source. The control socket
+	// path is unwritable, so Run returns immediately after the diagnostic.
+	tmpDir := newStableSocketTestDir(t, "cqt-log")
+	parentFile := filepath.Join(tmpDir, "not-a-dir")
+	if err := os.WriteFile(parentFile, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reader.Close() }()
+	sup := NewSupervisor(Config{
+		ControlSocket: filepath.Join(parentFile, "test.sock"),
+		MaxRuntimes:   1,
+		Stderr:        writer,
+	})
+	code := sup.Run()
+	_ = writer.Close()
+	if code != 1 {
+		t.Fatalf("Run() = %d, want 1", code)
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read stderr: %v", err)
+	}
+	if got := string(data); !strings.Contains(got, "child question timeout 2m0s (default)") {
+		t.Fatalf("stderr = %q, want the default child question timeout diagnostic", got)
+	}
+}
+
 func TestTombstoneOnStartFailed(t *testing.T) {
 	tmpDir := newStableSocketTestDir(t, "startfail")
 	parentFile := filepath.Join(tmpDir, "not-a-dir")

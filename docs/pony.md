@@ -116,6 +116,8 @@ When a child calls `send_to_parent`, the supervisor emits a `child.question` eve
 
 The parent should reply with `send_prompt` to `child_id`, and should include `request_id` to make duplicate reply handling idempotent.
 
+If the parent does not reply within the child question timeout, the supervisor stops waiting and prompts the child to continue with its best judgment, stating its assumptions. The timeout is 2 minutes unless `ChildQuestionTimeout` is set in the supervisor config; the supervisor logs the effective value at startup, marked `default` or `configured`.
+
 This payload is defined as a shared runtime contract in `internal/runtime/contracts.go` (`ChildQuestionPayload` and `EventChildQuestion`) so other runtimes (including Mustang) can consume the same schema.
 
 ## The Wire Format

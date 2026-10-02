@@ -469,35 +469,38 @@ type Supervisor struct {
 	shutdownChOnce          sync.Once
 	// heartbeatMu guards heartbeats, the registry of live executor lease
 	// heartbeat goroutines stopped on supervisor shutdown.
-	heartbeatMu                  sync.Mutex
-	heartbeats                   map[*leaseHeartbeat]struct{}
-	runtimeActivity              chan struct{}
-	childQuestionSeq             int
-	pendingQuestions             map[string]pendingChildQuestion // child runtime ID -> pending question
-	handledQuestions             map[string]handledChildQuestion // child runtime ID -> latest handled request
-	childQuestionTimeout         time.Duration
-	httpServer                   *control.HTTPDebugServer
-	permOptions                  map[string][]any // keyed by "runtimeID:requestID"
-	permissionProviderMu         sync.Mutex
-	permissionProviders          map[string]permissionProviderBinding // same key; exact direct-answer target
-	httpServers                  map[string]*managedHTTPServer        // dir → ready server
-	httpStarting                 map[string]struct{}                  // dirs with a start in flight
-	httpShutdownStarted          bool
-	httpServerMu                 sync.Mutex
-	httpServerCond               *sync.Cond
-	fileSnapshots                map[string][]string // runtimeID → pre-run file list for output detection
-	fileSnapMu                   sync.Mutex
-	broker                       *broker.Broker
-	brokerRunID                  string
-	brokerToken                  string
-	brokerRunMu                  sync.Mutex
-	newProviderFunc              func(startOpts runtime.StartOptions, backend string) (runtime.Provider, error)
-	sessionIdentityMu            sync.RWMutex
-	sessionIdentities            map[string]sessionIdentityEntry
-	sessionOwners                map[string]*sessionAttempt
-	beforeChildWriterCloseWait   func()
-	beforeChildProviderCloseWait func()
-	afterShutdownAdmissionClosed func()
+	heartbeatMu      sync.Mutex
+	heartbeats       map[*leaseHeartbeat]struct{}
+	runtimeActivity  chan struct{}
+	childQuestionSeq int
+	pendingQuestions map[string]pendingChildQuestion // child runtime ID -> pending question
+	handledQuestions map[string]handledChildQuestion // child runtime ID -> latest handled request
+	// childQuestionTimeout is the deadline for a parent to answer a child's
+	// question before the child is prompted to continue on its own.
+	childQuestionTimeout          time.Duration
+	childQuestionTimeoutDefaulted bool
+	httpServer                    *control.HTTPDebugServer
+	permOptions                   map[string][]any // keyed by "runtimeID:requestID"
+	permissionProviderMu          sync.Mutex
+	permissionProviders           map[string]permissionProviderBinding // same key; exact direct-answer target
+	httpServers                   map[string]*managedHTTPServer        // dir → ready server
+	httpStarting                  map[string]struct{}                  // dirs with a start in flight
+	httpShutdownStarted           bool
+	httpServerMu                  sync.Mutex
+	httpServerCond                *sync.Cond
+	fileSnapshots                 map[string][]string // runtimeID → pre-run file list for output detection
+	fileSnapMu                    sync.Mutex
+	broker                        *broker.Broker
+	brokerRunID                   string
+	brokerToken                   string
+	brokerRunMu                   sync.Mutex
+	newProviderFunc               func(startOpts runtime.StartOptions, backend string) (runtime.Provider, error)
+	sessionIdentityMu             sync.RWMutex
+	sessionIdentities             map[string]sessionIdentityEntry
+	sessionOwners                 map[string]*sessionAttempt
+	beforeChildWriterCloseWait    func()
+	beforeChildProviderCloseWait  func()
+	afterShutdownAdmissionClosed  func()
 
 	// Tree-scoped admission controller. Nil when the budget could not be
 	// created or opened (degraded mode: only the local MaxRuntimes limit is
@@ -560,6 +563,7 @@ func NewSupervisor(cfg Config) *Supervisor {
 	sup.capacityCh = make(chan struct{})
 	if sup.childQuestionTimeout <= 0 {
 		sup.childQuestionTimeout = 120 * time.Second
+		sup.childQuestionTimeoutDefaulted = true
 	}
 	sup.control.SetStableHandler(sup)
 	sup.control.SetWorkflowHandler(lazyWorkflowHandler{sup})
@@ -581,6 +585,14 @@ func (s *Supervisor) Run() int {
 	// NewSupervisor initializes root admission before the control socket is
 	// bound. Close it on every exit, including a control-server start failure.
 	defer s.closeTreeBudget()
+
+	// Operators must be able to tell the effective child question timeout
+	// and whether it was explicitly configured or defaulted.
+	source := "configured"
+	if s.childQuestionTimeoutDefaulted {
+		source = "default"
+	}
+	fmt.Fprintf(s.stderrWriter(), "avenor stable: child question timeout %s (%s)\n", s.childQuestionTimeout, source)
 
 	var reason string
 	defer func() {
