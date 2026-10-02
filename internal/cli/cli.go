@@ -1092,9 +1092,14 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 		permissionDone = nil
 	}
 
-	// Default to stopping the provider. The only return that can skip Cancel is
-	// a fully observed provider completion: session.end was authoritative,
-	// Prompt returned successfully, and no permission resolver remains live.
+	// Default to stopping the provider. The only return that can skip Cancel
+	// is a fully observed provider completion: session.end was authoritative,
+	// Prompt returned (successfully, or with an error — a retry-exhausted turn
+	// settles both ways), and no permission resolver remains live. A settled
+	// turn needs no Cancel, which is why the prompt-error grace path that
+	// completes through the session.end event also skips it. The mirror
+	// ordering (session.end already forwarded when a teardown branch wins)
+	// still Cancels defensively via completeAuthoritativeAfterStop.
 	cleanReturn := false
 	var stopOnce sync.Once
 	stopProvider := func() {
