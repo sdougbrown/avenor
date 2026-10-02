@@ -3,9 +3,9 @@ package stable
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"sync"
@@ -21,6 +21,7 @@ type managedHTTPServer struct {
 	cmd     *exec.Cmd
 	exited  <-chan error
 	healthy bool
+	stderr  io.Writer
 	mu      sync.Mutex
 }
 
@@ -46,11 +47,11 @@ func (s *managedHTTPServer) shutdown() error {
 	case <-time.After(3 * time.Second):
 		if pgid, err := syscall.Getpgid(s.cmd.Process.Pid); err == nil {
 			if killErr := syscall.Kill(-pgid, syscall.SIGKILL); killErr != nil {
-				fmt.Fprintf(os.Stderr, "avenor stable: SIGKILL process group %d: %v\n", pgid, killErr)
+				fmt.Fprintf(s.stderr, "avenor stable: SIGKILL process group %d: %v\n", pgid, killErr)
 			}
 		} else {
 			if killErr := s.cmd.Process.Kill(); killErr != nil {
-				fmt.Fprintf(os.Stderr, "avenor stable: SIGKILL process %d: %v\n", s.cmd.Process.Pid, killErr)
+				fmt.Fprintf(s.stderr, "avenor stable: SIGKILL process %d: %v\n", s.cmd.Process.Pid, killErr)
 			}
 		}
 		<-s.exited
@@ -189,7 +190,7 @@ func (s *Supervisor) getOrCreateHTTPServer(dir string) (*managedHTTPServer, erro
 		m.healthy = false
 		m.mu.Unlock()
 		if err := m.shutdown(); err != nil {
-			fmt.Fprintf(os.Stderr, "avenor stable: shutdown managed http server for %s: %v\n", absDir, err)
+			fmt.Fprintf(s.stderrWriter(), "avenor stable: shutdown managed http server for %s: %v\n", absDir, err)
 		}
 		s.httpServerMu.Lock()
 		if s.httpServers[absDir] == m {
@@ -212,7 +213,7 @@ func (s *Supervisor) startHTTPServer(absDir string) (*managedHTTPServer, error) 
 
 	cmd := httpExecCommand("opencode", "serve", "--port", fmt.Sprintf("%d", port))
 	cmd.Dir = absDir
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = s.stderrWriter()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	if err := cmd.Start(); err != nil {
@@ -229,6 +230,7 @@ func (s *Supervisor) startHTTPServer(absDir string) (*managedHTTPServer, error) 
 		cmd:     cmd,
 		exited:  exited,
 		healthy: false,
+		stderr:  s.stderrWriter(),
 		url:     fmt.Sprintf("http://127.0.0.1:%d", port),
 	}
 
@@ -281,7 +283,7 @@ func (s *Supervisor) shutdownManagedHTTPServers() {
 	// httpShutdownStarted guard, which tears its server down there.
 	for _, m := range ready {
 		if err := m.shutdown(); err != nil {
-			fmt.Fprintf(os.Stderr, "avenor stable: shutdown managed http server for %s: %v\n", m.dir, err)
+			fmt.Fprintf(s.stderrWriter(), "avenor stable: shutdown managed http server for %s: %v\n", m.dir, err)
 		}
 	}
 }

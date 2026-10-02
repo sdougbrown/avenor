@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -712,13 +713,14 @@ func TestReservationDegradedLocalOnlyMode(t *testing.T) {
 	}
 	t.Setenv("HOME", unwritable)
 	var sup *Supervisor
-	stderr := captureStderr(t, func() {
+	stderr := captureStderr(t, func(stderr io.Writer) {
 		sup = NewSupervisor(Config{
 			ControlSocket:   filepath.Join(t.TempDir(), "control.sock"),
 			MaxRuntimes:     2,
 			MaxTreeBudget:   8,
 			ShutdownTimeout: 0,
 			WorkflowRoot:    filepath.Join(t.TempDir(), "wfroot"),
+			Stderr:          stderr,
 		})
 	})
 	if !strings.Contains(stderr, "degraded local-only mode") {

@@ -212,7 +212,7 @@ func (s *Supervisor) dispatchWorkflowNode(ctx context.Context, req DispatchReque
 			MarkerKind:    "dispatch",
 			MarkerLabel:   "dispatch_canceled",
 		}); ferr != nil {
-			fmt.Fprintf(os.Stderr, "avenor stable: workflow %s node %s attempt %s: record canceled dispatch: %v\n",
+			fmt.Fprintf(s.stderrWriter(), "avenor stable: workflow %s node %s attempt %s: record canceled dispatch: %v\n",
 				req.WorkflowID, req.NodeID, begin.AttemptID, ferr)
 		}
 		out.Kind = DispatchCanceled
@@ -251,7 +251,7 @@ func (s *Supervisor) dispatchWorkflowNode(ctx context.Context, req DispatchReque
 			MarkerKind:    kind,
 			MarkerLabel:   label,
 		}); ferr != nil {
-			fmt.Fprintf(os.Stderr, "avenor stable: workflow %s node %s attempt %s: record start failure: %v\n",
+			fmt.Fprintf(s.stderrWriter(), "avenor stable: workflow %s node %s attempt %s: record start failure: %v\n",
 				req.WorkflowID, req.NodeID, begin.AttemptID, ferr)
 		}
 		out.Kind = DispatchStartFailed
@@ -271,7 +271,7 @@ func (s *Supervisor) dispatchWorkflowNode(ctx context.Context, req DispatchReque
 		RunID:        s.runID,
 		SessionID:    sessionID,
 	}); ferr != nil {
-		fmt.Fprintf(os.Stderr, "avenor stable: workflow %s node %s attempt %s: record runtime identity: %v\n",
+		fmt.Fprintf(s.stderrWriter(), "avenor stable: workflow %s node %s attempt %s: record runtime identity: %v\n",
 			req.WorkflowID, req.NodeID, begin.AttemptID, ferr)
 	}
 	out.Kind = Dispatched

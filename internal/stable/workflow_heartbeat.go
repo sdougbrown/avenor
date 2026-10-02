@@ -3,7 +3,6 @@ package stable
 import (
 	"errors"
 	"fmt"
-	"os"
 	"sync"
 	"time"
 
@@ -95,7 +94,7 @@ func (s *Supervisor) startLeaseHeartbeat(ec workflow.ExecutorContext) *leaseHear
 			if errors.Is(err, workflow.ErrLeaseNotHeld) {
 				// The lease was swept or replaced: renewal can never succeed
 				// again, so stop instead of retrying.
-				fmt.Fprintf(os.Stderr, "avenor stable: workflow %s node %s attempt %s: lease no longer held, stopping heartbeat: %v\n",
+				fmt.Fprintf(s.stderrWriter(), "avenor stable: workflow %s node %s attempt %s: lease no longer held, stopping heartbeat: %v\n",
 					ec.WorkflowID, ec.NodeID, ec.AttemptID, err)
 				return
 			}
