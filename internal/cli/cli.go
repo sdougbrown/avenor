@@ -1042,6 +1042,11 @@ type SessionWaitDeps struct {
 	ProviderTurn *ProviderTurn
 }
 
+// promptSettlementGrace is how long WaitForSession waits for an authoritative
+// session.end after a prompt error before classifying the run as a generic
+// exit-1 failure.
+const promptSettlementGrace = 500 * time.Millisecond
+
 func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionWaitConfig, deps SessionWaitDeps) sessionResult {
 	var finalStopReason string
 	var bufferedUsage map[string]any
@@ -1055,6 +1060,11 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 	var finalReply strings.Builder
 	var fullReply strings.Builder
 	eventChClosed := false
+	// promptSettlementGrace bounds how long WaitForSession keeps draining the
+	// event channel after a prompt error, so a provider's authoritative
+	// session.end can still win the run classification. See the PromptDone
+	// branch in the wait loop.
+	var settlementTimerC <-chan time.Time
 	tracker := newStatusTracker(cfg.SessionID, cfg.RunID, cfg.RunLabel)
 	permissionJoinTimeout := permissionResolverJoinTimeout
 	if deps.permissionJoinTimeout > 0 {
@@ -1082,9 +1092,14 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 		permissionDone = nil
 	}
 
-	// Default to stopping the provider. The only return that can skip Cancel is
-	// a fully observed provider completion: session.end was authoritative,
-	// Prompt returned successfully, and no permission resolver remains live.
+	// Default to stopping the provider. The only return that can skip Cancel
+	// is a fully observed provider completion: session.end was authoritative,
+	// Prompt returned (successfully, or with an error — a retry-exhausted turn
+	// settles both ways), and no permission resolver remains live. A settled
+	// turn needs no Cancel, which is why the prompt-error grace path that
+	// completes through the session.end event also skips it. The mirror
+	// ordering (session.end already forwarded when a teardown branch wins)
+	// still Cancels defensively via completeAuthoritativeAfterStop.
 	cleanReturn := false
 	var stopOnce sync.Once
 	stopProvider := func() {
@@ -1104,7 +1119,10 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 	}()
 	complete := func() sessionResult {
 		cleanReturn = sessionEnded && promptReturned && permissionDone == nil
-		return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), LoopDirective: loopDirective, LoopLabel: loopLabel, Output: output.String(), FinalReply: finalReply.String(), Usage: bufferedUsage}
+		// Surface the authoritative stop reason: callers derive the sentinel's
+		// classification from it, and an empty value degrades to exit_1 even
+		// when session.end named the real reason.
+		return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), StopReason: finalStopReason, LoopDirective: loopDirective, LoopLabel: loopLabel, Output: output.String(), FinalReply: finalReply.String(), Usage: bufferedUsage}
 	}
 	completeAuthoritativeAfterStop := func() (sessionResult, bool) {
 		if !sessionEnded {
@@ -1399,11 +1417,25 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				if result, ok := completeAuthoritativeAfterStop(); ok {
 					return result
 				}
+				// The provider may be about to deliver the authoritative
+				// session.end: pi's retry exhaustion settles the turn right around
+				// the prompt error, and whichever arrives first decides the
+				// classification. Keep draining under a short grace window so the
+				// terminal event wins over a generic exit-1 fallback.
+				if cfg.EventCh != nil && settlementTimerC == nil {
+					settlementTimer := time.NewTimer(promptSettlementGrace)
+					defer settlementTimer.Stop()
+					settlementTimerC = settlementTimer.C
+					continue
+				}
 				return sessionResult{ExitCode: 1}
 			}
 			if finalStopReason != "" && permissionDone == nil {
 				return complete()
 			}
+		case <-settlementTimerC:
+			// The grace expired without an authoritative session.end.
+			return sessionResult{ExitCode: 1}
 		case res := <-permissionDone:
 			permissionDone = nil
 			if result, done := handlePermissionResult(res); done {

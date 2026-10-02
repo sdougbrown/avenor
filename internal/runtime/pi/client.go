@@ -42,7 +42,6 @@ type client struct {
 	lastToolPayload map[string]any
 
 	stderr    *rollingBuffer
-	eventsCh  chan events.Event
 	done      chan struct{}
 	closeOnce sync.Once
 	sessionID string
@@ -58,7 +57,6 @@ func newClient(proc *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, stder
 		subs:      map[string][]chan events.Event{},
 		approvals: map[string]pendingApproval{},
 		stderr:    newRollingBuffer(stderrCap),
-		eventsCh:  make(chan events.Event, 4096),
 		done:      make(chan struct{}),
 		sessionCh: make(chan struct{}, 1),
 	}
@@ -209,13 +207,9 @@ func (c *client) Close() error {
 		c.pending = nil
 		c.approvals = nil
 		c.mu.Unlock()
-
-		close(c.eventsCh)
 	})
 	return nil
 }
-
-func (c *client) Events() <-chan events.Event { return c.eventsCh }
 
 func (c *client) Stderr() string { return c.stderr.String() }
 
@@ -550,11 +544,6 @@ func (c *client) enrichWithToolContext(ev *events.Event) {
 func (c *client) fanout(ev *events.Event) {
 	if ev == nil {
 		return
-	}
-	select {
-	case c.eventsCh <- *ev:
-	default:
-		c.stderr.Append(fmt.Sprintf("dropped event %q for session %q: global event buffer full", ev.Event, ev.SessionID))
 	}
 
 	c.mu.Lock()

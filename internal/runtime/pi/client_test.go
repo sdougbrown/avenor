@@ -23,6 +23,19 @@ func fakeClient() (*client, *io.PipeWriter, *io.PipeReader) {
 	return c, clientOutW, clientInR
 }
 
+// subscribeForTest exposes the same event stream the production consumer
+// sees: the per-session subscriber channel. Most tests leave the client on
+// its default (empty) session id, so that subscription catches their events.
+func subscribeForTest(c *client) chan events.Event {
+	return subscribeForSession(c, c.SessionID())
+}
+
+func subscribeForSession(c *client, sessionID string) chan events.Event {
+	ch := make(chan events.Event, 256)
+	c.subscribe(sessionID, ch)
+	return ch
+}
+
 func writeLine(w io.Writer, v any) {
 	b, _ := json.Marshal(v)
 	b = append(b, '\n')
@@ -113,6 +126,7 @@ func TestClientMessageUpdateRoutingCompactsProviderSnapshots(t *testing.T) {
 	defer c.Close()
 
 	c.setSessionID("pi_test")
+	eventCh := subscribeForTest(c)
 	signature := strings.Repeat("opaque-signature", 1_000)
 	updates := []struct {
 		delta       string
@@ -146,7 +160,7 @@ func TestClientMessageUpdateRoutingCompactsProviderSnapshots(t *testing.T) {
 	got := make([]events.Event, 0, len(updates)*2)
 	for len(got) < cap(got) {
 		select {
-		case ev := <-c.eventsCh:
+		case ev := <-eventCh:
 			got = append(got, ev)
 		case <-time.After(time.Second):
 			t.Fatalf("timed out after %d routed events", len(got))
@@ -189,6 +203,7 @@ func TestClientMessageUpdateRoutingCompactsProviderSnapshots(t *testing.T) {
 
 func TestClientMalformedJSON(t *testing.T) {
 	c, wOut, _ := fakeClient()
+	eventCh := subscribeForTest(c)
 	defer c.Close()
 
 	go func() {
@@ -199,7 +214,7 @@ func TestClientMalformedJSON(t *testing.T) {
 	}()
 
 	select {
-	case ev := <-c.eventsCh:
+	case ev := <-eventCh:
 		if ev.Event != "avenor.turn.start" {
 			t.Errorf("expected turn.start after malformed line, got %q", ev.Event)
 		}
@@ -213,6 +228,7 @@ func TestClientMalformedJSON(t *testing.T) {
 
 func TestClientInvalidJSON(t *testing.T) {
 	c, wOut, _ := fakeClient()
+	eventCh := subscribeForTest(c)
 	defer c.Close()
 
 	go func() {
@@ -224,7 +240,7 @@ func TestClientInvalidJSON(t *testing.T) {
 	}()
 
 	select {
-	case ev := <-c.eventsCh:
+	case ev := <-eventCh:
 		if ev.Event != "avenor.turn.start" {
 			t.Errorf("expected turn.start after truncated JSON, got %q", ev.Event)
 		}
@@ -263,6 +279,7 @@ func TestClientExtensionUIRouting(t *testing.T) {
 	defer c.Close()
 
 	c.setSessionID("pi_perm")
+	eventCh := subscribeForTest(c)
 	sub := make(chan events.Event, 4)
 	c.subscribe("pi_perm", sub)
 
@@ -277,7 +294,7 @@ func TestClientExtensionUIRouting(t *testing.T) {
 	}()
 
 	select {
-	case ev := <-c.eventsCh:
+	case ev := <-eventCh:
 		if ev.Event != "permission.request" {
 			t.Errorf("event = %q, want permission.request", ev.Event)
 		}
@@ -373,24 +390,24 @@ func TestClientAnswerExtensionUICancelled(t *testing.T) {
 	}
 }
 
-func TestClientFanoutRecordsDroppedEvents(t *testing.T) {
+func TestClientFanoutRecordsDroppedSubscriberEvents(t *testing.T) {
 	c, _, _ := fakeClient()
 	defer c.Close()
 
-	for i := 0; i < cap(c.eventsCh); i++ {
-		c.eventsCh <- events.Event{Event: "existing"}
-	}
-
-	sub := make(chan events.Event)
+	sub := make(chan events.Event, 1)
+	sub <- events.Event{Event: "existing"} // fill the subscriber buffer
 	c.subscribe("th_drop", sub)
 	c.fanout(&events.Event{Event: "agent.message", SessionID: "th_drop"})
+	// A critical event takes the same non-blocking send, which again finds
+	// no room, but is logged with the critical wording.
+	c.fanout(&events.Event{Event: "session.end", SessionID: "th_drop"})
 
 	stderr := c.Stderr()
-	if !strings.Contains(stderr, "global event buffer full") {
-		t.Fatalf("stderr = %q, want global drop note", stderr)
+	if !strings.Contains(stderr, "dropped critical event") {
+		t.Fatalf("stderr = %q, want the critical drop note for session.end", stderr)
 	}
-	if !strings.Contains(stderr, "subscriber buffer full") {
-		t.Fatalf("stderr = %q, want subscriber drop note", stderr)
+	if strings.Contains(stderr, "global event buffer full") {
+		t.Fatalf("stderr = %q, want no global drop note: the global buffer is gone", stderr)
 	}
 }
 
@@ -648,6 +665,9 @@ func TestClientAgentEndSessionIdFromLastMessage(t *testing.T) {
 	c, wOut, _ := fakeClient()
 	defer c.Close()
 
+	// The event's session id comes from the last agent message, not the client.
+	eventCh := subscribeForSession(c, "pi-msg-session")
+
 	go func() {
 		writeLine(wOut, map[string]any{
 			"type": "agent_end",
@@ -661,7 +681,7 @@ func TestClientAgentEndSessionIdFromLastMessage(t *testing.T) {
 	}()
 
 	select {
-	case ev := <-c.eventsCh:
+	case ev := <-eventCh:
 		if ev.Event != "session.end" {
 			t.Errorf("event = %q, want session.end", ev.Event)
 		}
@@ -678,6 +698,7 @@ func TestClientExtensionUIDialogStoresFields(t *testing.T) {
 	defer c.Close()
 
 	c.setSessionID("pi-dialog-ses")
+	eventCh := subscribeForTest(c)
 
 	go func() {
 		writeLine(wOut, map[string]any{
@@ -690,7 +711,7 @@ func TestClientExtensionUIDialogStoresFields(t *testing.T) {
 	}()
 
 	select {
-	case ev := <-c.eventsCh:
+	case ev := <-eventCh:
 		if ev.Event != "permission.request" {
 			t.Fatalf("event = %q, want permission.request", ev.Event)
 		}
@@ -752,13 +773,14 @@ func TestCRLFStripping(t *testing.T) {
 	defer c.Close()
 
 	c.setSessionID("pi_crlf")
+	eventCh := subscribeForTest(c)
 
 	go func() {
 		_, _ = wOut.Write([]byte("{\"type\":\"turn_start\"}\r\n"))
 	}()
 
 	select {
-	case ev := <-c.eventsCh:
+	case ev := <-eventCh:
 		if ev.Event != "avenor.turn.start" {
 			t.Errorf("event = %q, want avenor.turn.start", ev.Event)
 		}
@@ -772,6 +794,7 @@ func TestClientToolCallCorrelationEnrichesPermission(t *testing.T) {
 	defer c.Close()
 
 	c.setSessionID("pi-corr")
+	eventCh := subscribeForTest(c)
 
 	go func() {
 		writeLine(wOut, map[string]any{
@@ -789,10 +812,10 @@ func TestClientToolCallCorrelationEnrichesPermission(t *testing.T) {
 	}()
 
 	// Drain and verify the tool_execution_start events (canonical + alias).
-	drainAndAssert(t, c.eventsCh, []string{"tool.call", "avenor.tool.start"})
+	drainAndAssert(t, eventCh, []string{"tool.call", "avenor.tool.start"})
 
 	select {
-	case ev := <-c.eventsCh:
+	case ev := <-eventCh:
 		if ev.Event != "permission.request" {
 			t.Fatalf("event = %q, want permission.request", ev.Event)
 		}
@@ -815,6 +838,7 @@ func TestClientToolCallCorrelationNoToolCall(t *testing.T) {
 	defer c.Close()
 
 	c.setSessionID("pi-nocorr")
+	eventCh := subscribeForTest(c)
 
 	go func() {
 		writeLine(wOut, map[string]any{
@@ -827,7 +851,7 @@ func TestClientToolCallCorrelationNoToolCall(t *testing.T) {
 	}()
 
 	select {
-	case ev := <-c.eventsCh:
+	case ev := <-eventCh:
 		if ev.Event != "permission.request" {
 			t.Fatalf("event = %q, want permission.request", ev.Event)
 		}
@@ -847,6 +871,7 @@ func TestClientToolCallClearedOnToolExecutionEnd(t *testing.T) {
 	defer c.Close()
 
 	c.setSessionID("pi-clear")
+	eventCh := subscribeForTest(c)
 
 	go func() {
 		writeLine(wOut, map[string]any{
@@ -868,10 +893,10 @@ func TestClientToolCallClearedOnToolExecutionEnd(t *testing.T) {
 	}()
 
 	// Drain and verify the tool_execution_start + end events.
-	drainAndAssert(t, c.eventsCh, []string{"tool.call", "avenor.tool.start", "tool.call_update", "avenor.tool.end"})
+	drainAndAssert(t, eventCh, []string{"tool.call", "avenor.tool.start", "tool.call_update", "avenor.tool.end"})
 
 	select {
-	case ev := <-c.eventsCh:
+	case ev := <-eventCh:
 		if ev.Event != "permission.request" {
 			t.Fatalf("event = %q, want permission.request", ev.Event)
 		}
@@ -909,6 +934,7 @@ func TestClientToolCallCorrelationPreservesBackendFields(t *testing.T) {
 	defer c.Close()
 
 	c.setSessionID("pi-preserve")
+	eventCh := subscribeForTest(c)
 
 	go func() {
 		// tool_execution_start with a command.
@@ -930,10 +956,10 @@ func TestClientToolCallCorrelationPreservesBackendFields(t *testing.T) {
 		})
 	}()
 
-	drainAndAssert(t, c.eventsCh, []string{"tool.call", "avenor.tool.start"})
+	drainAndAssert(t, eventCh, []string{"tool.call", "avenor.tool.start"})
 
 	select {
-	case ev := <-c.eventsCh:
+	case ev := <-eventCh:
 		if ev.Event != "permission.request" {
 			t.Fatalf("event = %q, want permission.request", ev.Event)
 		}
