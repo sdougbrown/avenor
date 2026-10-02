@@ -150,6 +150,56 @@ describe('followUpTool with an external supervisor', () => {
     })
   })
 
+  it('refuses to resume a killed sentinel', async () => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-follow-up-test-'))
+    process.env.AVENOR_HOME = home
+    const runDir = path.join(home, 'runs', 'killed-run')
+    fs.mkdirSync(runDir, { recursive: true })
+    fs.writeFileSync(path.join(runDir, 'sentinel.done'), 'KILLED\nSESSION=ses-killed\nEXIT_CODE=130\n')
+
+    await expect(followUpTool({
+      runId: 'killed-run',
+      message: 'continue',
+      supervisorId: '/tmp/avenor-mcp-test.sock',
+    })).rejects.toThrow('run is not resumable (status: killed)')
+    expect(spawnMock).not.toHaveBeenCalled()
+  })
+
+  it('refuses to resume a timeout sentinel', async () => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-follow-up-test-'))
+    process.env.AVENOR_HOME = home
+    const runDir = path.join(home, 'runs', 'timeout-run')
+    fs.mkdirSync(runDir, { recursive: true })
+    fs.writeFileSync(path.join(runDir, 'sentinel.done'), 'TIMEOUT\nSESSION=ses-timeout\nEXIT_CODE=124\n')
+
+    await expect(followUpTool({
+      runId: 'timeout-run',
+      message: 'continue',
+      supervisorId: '/tmp/avenor-mcp-test.sock',
+    })).rejects.toThrow('run is not resumable (status: timeout)')
+    expect(spawnMock).not.toHaveBeenCalled()
+  })
+
+  it('resumes a blocked sentinel that carries a session', async () => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-follow-up-test-'))
+    process.env.AVENOR_HOME = home
+    const runDir = path.join(home, 'runs', 'blocked-run')
+    fs.mkdirSync(runDir, { recursive: true })
+    fs.writeFileSync(path.join(runDir, 'sentinel.done'), 'BLOCKED\nSESSION=ses-blocked\nSTOP_REASON=blocked\n')
+
+    await followUpTool({
+      runId: 'blocked-run',
+      message: 'continue after block',
+      supervisorId: '/tmp/avenor-mcp-test.sock',
+    })
+
+    expect(spawnMock).toHaveBeenCalledTimes(1)
+    expect(spawnMock.mock.calls[0]?.[0]).toMatchObject({
+      session_id: 'ses-blocked',
+      prompt: 'continue after block',
+    })
+  })
+
   it('uses resolved identity for roster follow-ups without forwarding the mutable selector', async () => {
     home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-follow-up-test-'))
     process.env.AVENOR_HOME = home
