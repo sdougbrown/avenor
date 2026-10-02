@@ -133,7 +133,7 @@ func (s *Supervisor) getOrCreateHTTPServer(dir string) (*managedHTTPServer, erro
 				s.httpServerCond.Broadcast()
 				s.httpServerMu.Unlock()
 				if err := m.shutdown(); err != nil {
-					fmt.Fprintf(os.Stderr, "avenor stable: shutdown managed http server for %s: %v\n", absDir, err)
+					fmt.Fprintf(s.stderrWriter(), "avenor stable: shutdown managed http server for %s: %v\n", absDir, err)
 				}
 				return nil, fmt.Errorf("supervisor is shutting down")
 			} else {

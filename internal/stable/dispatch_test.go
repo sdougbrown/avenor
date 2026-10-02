@@ -723,9 +723,9 @@ func TestReservationDegradedLocalOnlyMode(t *testing.T) {
 			Stderr:          stderr,
 		})
 	})
-	if !strings.Contains(stderr, "degraded local-only mode") {
+	if !strings.Contains(stderr, "tree budget unavailable; using degraded local-only mode") {
 		t.Fatalf("stderr = %q, want degraded-mode warning", stderr)
-	} // matches supervisor's "tree budget unavailable; using degraded local-only mode"
+	}
 	t.Cleanup(func() { _ = sup.broker.Stop(); sup.stopReaper() })
 	if sup.treeBudget != nil {
 		t.Fatal("expected degraded mode (no tree budget)")
