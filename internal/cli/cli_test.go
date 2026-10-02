@@ -2012,6 +2012,7 @@ func TestWaitForSessionExitMatrixStopsEveryNonCleanReturn(t *testing.T) {
 				cfg.PromptDone = promptDone
 			},
 			wantExitCode:    0,
+			wantStopReason:  "end_turn",
 			wantCancels:     0,
 			wantSessionEnds: 1,
 		},
@@ -2024,6 +2025,7 @@ func TestWaitForSessionExitMatrixStopsEveryNonCleanReturn(t *testing.T) {
 				cfg.EventCh = eventCh
 			},
 			wantExitCode:    0,
+			wantStopReason:  "end_turn",
 			wantCancels:     1,
 			wantSessionEnds: 1,
 		},
@@ -2066,9 +2068,49 @@ func TestWaitForSessionExitMatrixStopsEveryNonCleanReturn(t *testing.T) {
 				cfg.PromptDone = promptDone
 			},
 			wantExitCode:    1,
+			wantStopReason:  "error",
 			wantCancels:     1,
 			wantErrors:      1,
 			wantSessionEnds: 1,
+		},
+		{
+			// The real ordering for pi retry exhaustion: the prompt call returns
+			// its error just before the settled agent_end produces the
+			// authoritative session.end. The grace window must let the terminal
+			// event win the classification instead of a generic exit_1.
+			name: "prompt failure settles on the authoritative session end within the grace window",
+			setup: func(cfg *SessionWaitConfig) {
+				eventCh := make(chan events.Event, 1)
+				cfg.EventCh = eventCh
+				promptDone := make(chan error, 1)
+				promptDone <- errors.New("model stream failed: terminated")
+				go func() {
+					time.Sleep(50 * time.Millisecond)
+					eventCh <- events.Event{Event: "session.end", SessionID: cfg.SessionID, Fields: map[string]any{"stop_reason": "error", "error_message": "terminated"}}
+				}()
+				cfg.PromptDone = promptDone
+			},
+			wantExitCode:    1,
+			wantStopReason:  "error",
+			wantCancels:     0,
+			wantErrors:      1,
+			wantSessionEnds: 1,
+		},
+		{
+			// The grace window only buys classification, not liveness: without
+			// a terminal event the prompt failure still settles exit 1.
+			name: "prompt failure settles after the grace window without a terminal event",
+			setup: func(cfg *SessionWaitConfig) {
+				eventCh := make(chan events.Event)
+				cfg.EventCh = eventCh
+				promptDone := make(chan error, 1)
+				promptDone <- errors.New("prompt failed")
+				cfg.PromptDone = promptDone
+			},
+			wantExitCode:   1,
+			wantStopReason: "",
+			wantCancels:    1,
+			wantErrors:     1,
 		},
 		{
 			name: "authoritative identity conflict",
@@ -2246,8 +2288,8 @@ func TestWaitForSessionExitMatrixPreservesForwardedAuthoritativeEndDuringTeardow
 			deps.Writer = sink
 
 			result := WaitForSession(ctx, provider, cfg, deps)
-			if result.ExitCode != 2 || result.StopReason != "" {
-				t.Fatalf("result = {exit:%d stop:%q}, want authoritative {2 %q}", result.ExitCode, result.StopReason, "")
+			if result.ExitCode != 2 || result.StopReason != "refusal" {
+				t.Fatalf("result = {exit:%d stop:%q}, want authoritative {2 %q}", result.ExitCode, result.StopReason, "refusal")
 			}
 			if result.Output != "authoritative reply" || result.FinalReply != "authoritative reply" {
 				t.Fatalf("result reply = {output:%q final:%q}, want authoritative reply", result.Output, result.FinalReply)
