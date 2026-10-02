@@ -4573,6 +4573,31 @@ func TestChildQuestionTimeoutStartupDiagnostic(t *testing.T) {
 	if got := string(data); !strings.Contains(got, "child question timeout 2m0s (default)") {
 		t.Fatalf("stderr = %q, want the default child question timeout diagnostic", got)
 	}
+
+	// An explicit config renders as "configured": a defect that mislabels
+	// the source (inverted selection, hardcoded string) must fail here.
+	reader2, writer2, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reader2.Close() }()
+	sup = NewSupervisor(Config{
+		ControlSocket:        filepath.Join(parentFile, "explicit.sock"),
+		MaxRuntimes:          1,
+		ChildQuestionTimeout: 5 * time.Second,
+		Stderr:               writer2,
+	})
+	if code := sup.Run(); code != 1 {
+		t.Fatalf("Run() = %d, want 1", code)
+	}
+	_ = writer2.Close()
+	data2, err := io.ReadAll(reader2)
+	if err != nil {
+		t.Fatalf("read stderr: %v", err)
+	}
+	if got := string(data2); !strings.Contains(got, "child question timeout 5s (configured)") {
+		t.Fatalf("stderr = %q, want the configured child question timeout diagnostic", got)
+	}
 }
 
 func TestTombstoneOnStartFailed(t *testing.T) {
