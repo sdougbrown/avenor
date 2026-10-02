@@ -2016,7 +2016,6 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 			selectionMu.Lock()
 			selection, cached := resolvedSelections[phase.Name]
 			selectionMu.Unlock()
-			phaseThinking := thinking
 			if !cached {
 				runBackend := backend
 				if runBackend == "" {
@@ -2027,17 +2026,19 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				if resolveErr != nil {
 					return looprunner.PhaseAttemptResult{ExitCode: 1}, resolveErr
 				}
-				// A roster entry supplies a default; an explicit run-level
-				// level wins. ValidateThinkingForBackend sees the merged value.
-				if thinking == "" {
-					phaseThinking = selection.Thinking
-				}
-				if resolveErr = runtime.ValidateThinkingForBackend(selection.Backend, phaseThinking); resolveErr != nil {
-					return looprunner.PhaseAttemptResult{ExitCode: 1}, resolveErr
-				}
 				selectionMu.Lock()
 				resolvedSelections[phase.Name] = selection
 				selectionMu.Unlock()
+			}
+			// A roster entry supplies a default; an explicit run-level level
+			// wins. The merge runs on the cached path too, and the merged
+			// value is what ValidateThinkingForBackend and StartOptions see.
+			phaseThinking := thinking
+			if thinking == "" {
+				phaseThinking = selection.Thinking
+			}
+			if resolveErr := runtime.ValidateThinkingForBackend(selection.Backend, phaseThinking); resolveErr != nil {
+				return looprunner.PhaseAttemptResult{ExitCode: 1}, resolveErr
 			}
 
 			identity := effectiveIdentity{
@@ -2291,7 +2292,6 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 			selectionMu.Lock()
 			selection, cached := resolvedSelections[phase.Name]
 			selectionMu.Unlock()
-			phaseThinking := thinking
 			if !cached {
 				runBackend := backend
 				if runBackend == "" {
@@ -2302,17 +2302,19 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				if resolveErr != nil {
 					return teamrunner.PhaseAttemptResult{ExitCode: 1}, resolveErr
 				}
-				// A roster entry supplies a default; an explicit run-level
-				// level wins. ValidateThinkingForBackend sees the merged value.
-				if thinking == "" {
-					phaseThinking = selection.Thinking
-				}
-				if resolveErr = runtime.ValidateThinkingForBackend(selection.Backend, phaseThinking); resolveErr != nil {
-					return teamrunner.PhaseAttemptResult{ExitCode: 1}, resolveErr
-				}
 				selectionMu.Lock()
 				resolvedSelections[phase.Name] = selection
 				selectionMu.Unlock()
+			}
+			// A roster entry supplies a default; an explicit run-level level
+			// wins. The merge runs on the cached path too, and the merged
+			// value is what ValidateThinkingForBackend and StartOptions see.
+			phaseThinking := thinking
+			if thinking == "" {
+				phaseThinking = selection.Thinking
+			}
+			if resolveErr := runtime.ValidateThinkingForBackend(selection.Backend, phaseThinking); resolveErr != nil {
+				return teamrunner.PhaseAttemptResult{ExitCode: 1}, resolveErr
 			}
 			identity := effectiveIdentity{
 				Backend: selection.Backend, Agent: selection.Agent, Model: selection.Model,
