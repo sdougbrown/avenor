@@ -325,18 +325,29 @@ func TestLoadAcceptsEveryCanonicalThinkingLevel(t *testing.T) {
 	}
 }
 
-func TestResolveStillLeavesRosterThinkingOutOfTheIdentity(t *testing.T) {
+func TestResolveCarriesRosterThinkingAsADefault(t *testing.T) {
 	// Thinking is a default carried alongside the identity, not part of it.
-	// Phase selection does not apply it yet; this pins that boundary so the
-	// follow-up work has to change the test deliberately.
+	// Resolve surfaces the roster entry's level for the caller to merge with
+	// the run-level value (an explicit run-level level still wins).
 	roster := &Entry{Backend: "agy", Agent: "roster-agent", Thinking: "max"}
 
 	resolved, err := Resolve(ResolveInput{Roster: roster, Thinking: "low"})
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	want := ResolvedSelection{Backend: "agy", Agent: "roster-agent"}
+	want := ResolvedSelection{Backend: "agy", Agent: "roster-agent", Thinking: "max"}
 	if resolved != want {
 		t.Fatalf("resolved = %+v, want %+v", resolved, want)
+	}
+}
+
+func TestResolveLeavesThinkingEmptyWithoutARosterLevel(t *testing.T) {
+	roster := &Entry{Backend: "agy", Agent: "roster-agent"}
+	resolved, err := Resolve(ResolveInput{Roster: roster, Thinking: "low"})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if resolved.Thinking != "" {
+		t.Fatalf("resolved.Thinking = %q, want empty so the run-level level applies", resolved.Thinking)
 	}
 }

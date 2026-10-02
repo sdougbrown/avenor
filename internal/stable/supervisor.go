@@ -2026,12 +2026,19 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				if resolveErr != nil {
 					return looprunner.PhaseAttemptResult{ExitCode: 1}, resolveErr
 				}
-				if resolveErr = runtime.ValidateThinkingForBackend(selection.Backend, thinking); resolveErr != nil {
-					return looprunner.PhaseAttemptResult{ExitCode: 1}, resolveErr
-				}
 				selectionMu.Lock()
 				resolvedSelections[phase.Name] = selection
 				selectionMu.Unlock()
+			}
+			// A roster entry supplies a default; an explicit run-level level
+			// wins. The merge runs on the cached path too, and the merged
+			// value is what ValidateThinkingForBackend and StartOptions see.
+			phaseThinking := thinking
+			if thinking == "" {
+				phaseThinking = selection.Thinking
+			}
+			if resolveErr := runtime.ValidateThinkingForBackend(selection.Backend, phaseThinking); resolveErr != nil {
+				return looprunner.PhaseAttemptResult{ExitCode: 1}, resolveErr
 			}
 
 			identity := effectiveIdentity{
@@ -2049,7 +2056,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				AgentProfile: identity.AgentProfile,
 				Label:        child.label,
 				Model:        identity.Model,
-				Thinking:     thinking,
+				Thinking:     phaseThinking,
 				Dir:          child.dir,
 				ServerURL:    serverURL,
 				RuntimeID:    child.id,
@@ -2295,12 +2302,19 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				if resolveErr != nil {
 					return teamrunner.PhaseAttemptResult{ExitCode: 1}, resolveErr
 				}
-				if resolveErr = runtime.ValidateThinkingForBackend(selection.Backend, thinking); resolveErr != nil {
-					return teamrunner.PhaseAttemptResult{ExitCode: 1}, resolveErr
-				}
 				selectionMu.Lock()
 				resolvedSelections[phase.Name] = selection
 				selectionMu.Unlock()
+			}
+			// A roster entry supplies a default; an explicit run-level level
+			// wins. The merge runs on the cached path too, and the merged
+			// value is what ValidateThinkingForBackend and StartOptions see.
+			phaseThinking := thinking
+			if thinking == "" {
+				phaseThinking = selection.Thinking
+			}
+			if resolveErr := runtime.ValidateThinkingForBackend(selection.Backend, phaseThinking); resolveErr != nil {
+				return teamrunner.PhaseAttemptResult{ExitCode: 1}, resolveErr
 			}
 			identity := effectiveIdentity{
 				Backend: selection.Backend, Agent: selection.Agent, Model: selection.Model,
@@ -2316,7 +2330,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				AgentProfile: identity.AgentProfile,
 				Label:        child.label,
 				Model:        identity.Model,
-				Thinking:     thinking,
+				Thinking:     phaseThinking,
 				Dir:          child.dir,
 				ServerURL:    serverURL,
 				RuntimeID:    child.id,
