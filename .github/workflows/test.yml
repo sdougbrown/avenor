@@ -78,6 +78,8 @@ jobs:
         run: bun test ./docs/.vitepress/escaped-links.test.ts
 
       - name: Check GitHub links resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           # `|| true` keeps a no-match grep from tripping pipefail before
@@ -89,13 +91,34 @@ jobs:
             echo "no rewritten GitHub URLs found in docs build output" >&2
             exit 1
           fi
+          # Resolve each path through the REST API instead of HEAD-checking
+          # the blob/tree page: the html endpoints intermittently answer
+          # anonymous datacenter requests with 503 even when the path exists,
+          # and a 503 says nothing about the link. A 404 is the only verdict
+          # that means the link is dead; 429/5xx are retried with backoff and,
+          # if they persist, reported as unverified rather than dead.
           status=0
           while IFS= read -r url; do
-            code="$(curl -s -o /dev/null -I -w '%{http_code}' "$url")"
-            if [ "$code" != "200" ]; then
-              echo "DEAD: $url -> HTTP $code" >&2
-              status=1
+            path="${url#https://github.com/sdougbrown/avenor/}"
+            path="${path#blob/main/}"
+            path="${path#tree/main/}"
+            api="https://api.github.com/repos/sdougbrown/avenor/contents/$path?ref=main"
+            if [ -z "$path" ]; then
+              api="https://api.github.com/repos/sdougbrown/avenor"
             fi
+            code=000
+            for attempt in 1 2 3 4; do
+              code="$(curl -s -o /dev/null -w '%{http_code}' ${GH_TOKEN:+-H "Authorization: Bearer $GH_TOKEN"} "$api")"
+              case "$code" in
+                200|404) break ;;
+                *) [ "$attempt" -lt 4 ] && sleep $((attempt * 2)) ;;
+              esac
+            done
+            case "$code" in
+              200) ;;
+              404) echo "DEAD: $url -> HTTP 404" >&2; status=1 ;;
+              *) echo "UNVERIFIED (GitHub unavailable): $url -> HTTP $code" >&2 ;;
+            esac
           done <<< "$urls"
           exit "$status"
 
