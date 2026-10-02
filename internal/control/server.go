@@ -152,6 +152,9 @@ type connState struct {
 	// long-running handlers (broker asks) do not outlive their client.
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	// askSlots bounds concurrent in-flight broker asks on this connection.
+	askSlots chan struct{}
 }
 
 type subscriber struct {
@@ -955,7 +958,7 @@ func (s *ControlServer) acceptLoop() {
 			continue
 		}
 		seq++
-		cs := &connState{id: seq, server: s, conn: conn}
+		cs := &connState{id: seq, server: s, conn: conn, askSlots: make(chan struct{}, maxInflightAsksPerConn)}
 		cs.ctx, cs.cancel = context.WithCancel(context.Background())
 		s.mu.Lock()
 		s.conns[cs] = struct{}{}
@@ -991,6 +994,11 @@ func (s *ControlServer) handleConn(c *connState) {
 		}
 	}
 }
+
+// maxInflightAsksPerConn bounds concurrent in-flight broker asks per
+// connection so a single owner cannot accumulate unbounded parked goroutines
+// and broker edges.
+const maxInflightAsksPerConn = 8
 
 // asyncResponse marks a request dispatched to a background goroutine; the
 // response is written when the goroutine completes, so handleConn must not
@@ -1295,10 +1303,27 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return failure(req.ID, -32602, "invalid params", nil)
 		}
+		if p.TimeoutMS < 0 {
+			return failure(req.ID, -32602, "invalid params: timeout_ms must be non-negative", nil)
+		}
+		// The broker long-poll itself expires at its 10-minute ask timeout, so
+		// a larger server-side budget cannot be honored.
+		const maxAskTimeoutMS = int64(10 * time.Minute / time.Millisecond)
+		if p.TimeoutMS > maxAskTimeoutMS {
+			p.TimeoutMS = maxAskTimeoutMS
+		}
+		// Bound concurrent in-flight asks per connection so one owner cannot
+		// accumulate unbounded parked goroutines and broker edges.
+		select {
+		case c.askSlots <- struct{}{}:
+		default:
+			return failure(req.ID, -32000, "too many in-flight broker asks on this connection", nil)
+		}
 		// Run the ask on a background goroutine bound to the connection
 		// context: an unanswered ask must not block subsequent requests on
 		// this connection, and a disconnect must cancel the pending wait.
 		go func() {
+			defer func() { <-c.askSlots }()
 			ctx := c.ctx
 			if p.TimeoutMS > 0 {
 				var cancel context.CancelFunc

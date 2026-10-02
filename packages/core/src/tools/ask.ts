@@ -41,8 +41,12 @@ async function executeAskTool(
       ? findLocalRunByReference(sup, args.toRunId)
       : findExternalRun(supervisorId, args.toRunId)
     const target = runInfo?.runtimeId ?? args.toRunId
+    const timeoutMs =
+      args.timeoutMs !== undefined && Number.isFinite(args.timeoutMs) && args.timeoutMs > 0
+        ? args.timeoutMs
+        : undefined
     try {
-      const result = await client.brokerAsk(target, args.message, undefined, args.timeoutMs)
+      const result = await client.brokerAsk(target, args.message, undefined, timeoutMs)
       return {
         reply: extractReplyMessage(result),
         from_run_id: (result.from_run_id as string) ?? '',

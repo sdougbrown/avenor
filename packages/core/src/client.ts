@@ -314,9 +314,14 @@ export class Client {
     // A per-call timeout_ms bounds the server-side wait; the client must not
     // fire first. The +10s margin lets the server's structured ask-error
     // response (written after bounded cleanup) arrive before the timer fires.
+    // Node's setTimeout clamps values > 2^31-1 to 1ms, so we must keep the
+    // effective delay within range.
+    const MAX_TIMER_MS = 2_147_483_647 // 2^31 - 1
     const timeout =
       opts?.timeoutMs !== undefined
-        ? Math.max(this.callTimeout, opts.timeoutMs + 10_000)
+        ? (!Number.isFinite(opts.timeoutMs) || opts.timeoutMs > MAX_TIMER_MS - 10_000
+            ? MAX_TIMER_MS
+            : Math.max(this.callTimeout, opts.timeoutMs + 10_000))
         : this.callTimeout
 
     return new Promise<unknown>((resolve, reject) => {

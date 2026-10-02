@@ -2486,7 +2486,6 @@ func TestBrokerWaitReplyDisconnectCleanup(t *testing.T) {
 	}
 }
 
-
 func TestBrokerDrainAgentMessages(t *testing.T) {
 	b := New("")
 	if err := b.Start(); err != nil {
@@ -2573,12 +2572,29 @@ func TestBrokerWaitReplyDeliversReplyAfterWriteTimeout(t *testing.T) {
 	msgID := "ask-late-reply"
 
 	// Replier polls, sleeps past the write deadline, then replies.
+	// Send the ask before starting the replier so the poll loop cannot die
+	// on a transient error before the ask exists.
+	askBody := bytes.NewReader([]byte(fmt.Sprintf(`{
+		"run_id": "asker",
+		"token": %q,
+		"from_run_id": "asker",
+		"to_run_id": "replier",
+		"type": "agent_message",
+		"payload": {"id":%q,"from":"asker","from_run_id":"asker","to_run_id":"replier","message":"late ask","expects_reply":true}
+	}`, senderToken, msgID)))
+	resp, err := noKeepAlive.Post(fmt.Sprintf("http://%s/send", addr), "application/json", askBody)
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	resp.Body.Close()
+
 	go func() {
 		for i := 0; i < 50; i++ {
 			pollBody := bytes.NewReader([]byte(fmt.Sprintf(`{"run_id":"replier","token":%q}`, replierToken)))
 			resp, err := noKeepAlive.Post(fmt.Sprintf("http://%s/poll-control", addr), "application/json", pollBody)
 			if err != nil {
-				return
+				time.Sleep(50 * time.Millisecond)
+				continue
 			}
 			var msgs []ControlMessage
 			_ = json.NewDecoder(resp.Body).Decode(&msgs)
@@ -2600,20 +2616,7 @@ func TestBrokerWaitReplyDeliversReplyAfterWriteTimeout(t *testing.T) {
 		}
 	}()
 
-	// Send the ask, then wait for the reply that arrives after the deadline.
-	askBody := bytes.NewReader([]byte(fmt.Sprintf(`{
-		"run_id": "asker",
-		"token": %q,
-		"from_run_id": "asker",
-		"to_run_id": "replier",
-		"type": "agent_message",
-		"payload": {"id":%q,"from":"asker","from_run_id":"asker","to_run_id":"replier","message":"late ask","expects_reply":true}
-	}`, senderToken, msgID)))
-	resp, err := noKeepAlive.Post(fmt.Sprintf("http://%s/send", addr), "application/json", askBody)
-	if err != nil {
-		t.Fatalf("send: %v", err)
-	}
-	resp.Body.Close()
+	// Wait for the reply that arrives after the deadline.
 
 	waitBody := bytes.NewReader([]byte(fmt.Sprintf(`{"run_id":"asker","token":%q,"waiting_for":%q}`, senderToken, msgID)))
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)

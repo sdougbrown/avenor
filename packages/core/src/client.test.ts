@@ -702,7 +702,7 @@ describe('Client.call per-call timeout override', () => {
     const origSetTimeout = globalThis.setTimeout
     globalThis.setTimeout = ((fn: any, ms?: number, ...args: any[]) => {
       delays.push(ms ?? 0)
-      return origSetTimeout(fn, 0, ...args)
+      return { unref() {}, ref() {}, refresh() {}, close() {} } as any
     }) as any
 
     const client = await dial(socketPath, { callTimeoutMs: 100 })
@@ -728,7 +728,7 @@ describe('Client.call per-call timeout override', () => {
     const origSetTimeout = globalThis.setTimeout
     globalThis.setTimeout = ((fn: any, ms?: number, ...args: any[]) => {
       delays.push(ms ?? 0)
-      return origSetTimeout(fn, 0, ...args)
+      return { unref() {}, ref() {}, refresh() {}, close() {} } as any
     }) as any
 
     const client = await dial(socketPath, { callTimeoutMs: 100 })
@@ -778,6 +778,85 @@ describe('Client.call per-call timeout override', () => {
     } finally {
       client.close()
     }
+  })
+
+  it('clamps the timer to 2^31-1 when timeoutMs exceeds the safe range', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: { ok: true } }) + '\n')
+    })
+
+    const delays: number[] = []
+    const origSetTimeout = globalThis.setTimeout
+    globalThis.setTimeout = ((fn: any, ms?: number, ...args: any[]) => {
+      delays.push(ms ?? 0)
+      return { unref() {}, ref() {}, refresh() {}, close() {} } as any
+    }) as any
+
+    const client = await dial(socketPath, { callTimeoutMs: 100 })
+    try {
+      // 2^31 - 1 - 10_000 + 1 should trigger clamping
+      await client.call('noop', undefined, { timeoutMs: 2_147_483_647 - 10_000 + 1 })
+    } finally {
+      globalThis.setTimeout = origSetTimeout
+      client.close()
+    }
+
+    // The timer must be clamped to 2^31 - 1, not 2^31 - 1 + 10_000
+    expect(delays).toContain(2_147_483_647)
+    expect(delays).not.toContain(2_147_483_647 + 10_000)
+  })
+
+  it('clamps the timer to 2^31-1 when timeoutMs is not finite', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: { ok: true } }) + '\n')
+    })
+
+    const delays: number[] = []
+    const origSetTimeout = globalThis.setTimeout
+    globalThis.setTimeout = ((fn: any, ms?: number, ...args: any[]) => {
+      delays.push(ms ?? 0)
+      return { unref() {}, ref() {}, refresh() {}, close() {} } as any
+    }) as any
+
+    const client = await dial(socketPath, { callTimeoutMs: 100 })
+    try {
+      await client.call('noop', undefined, { timeoutMs: Infinity })
+    } finally {
+      globalThis.setTimeout = origSetTimeout
+      client.close()
+    }
+
+    expect(delays).toContain(2_147_483_647)
+  })
+
+  it('passes a finite sane timeoutMs through with the +10s margin', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: { ok: true } }) + '\n')
+    })
+
+    const delays: number[] = []
+    const origSetTimeout = globalThis.setTimeout
+    globalThis.setTimeout = ((fn: any, ms?: number, ...args: any[]) => {
+      delays.push(ms ?? 0)
+      return { unref() {}, ref() {}, refresh() {}, close() {} } as any
+    }) as any
+
+    const client = await dial(socketPath, { callTimeoutMs: 100 })
+    try {
+      await client.call('noop', undefined, { timeoutMs: 5000 })
+    } finally {
+      globalThis.setTimeout = origSetTimeout
+      client.close()
+    }
+
+    // 5000 + 10000 = 15000, well within range
+    expect(delays).toContain(15000)
   })
 })
 

@@ -6255,10 +6255,30 @@ func TestBrokerAskContextCancellation(t *testing.T) {
 	}
 }
 
-// TestBrokerAskCleanupFailureReportsPending verifies that when the ask wait is
-// cancelled and the cleanup POST fails (broker unreachable), the AskError
-// reports the edge as still pending so the caller knows cancel is possible.
-func TestBrokerAskCleanupFailureReportsPending(t *testing.T) {
+// TestWithdrawAskClassification verifies pending classification: a broker
+// that answers "no pending ask" reports the edge gone; an unreachable broker
+// reports the edge as possibly pending.
+func TestWithdrawAskClassification(t *testing.T) {
+	b := broker.New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	sup := &Supervisor{broker: b}
+	if sup.withdrawAsk("never-sent-id") {
+		t.Fatal("withdrawAsk = true, want false when the broker reports no pending ask")
+	}
+	if err := b.Stop(); err != nil {
+		t.Fatalf("stop broker: %v", err)
+	}
+	if !sup.withdrawAsk("never-sent-id") {
+		t.Fatal("withdrawAsk = false, want true when the broker is unreachable")
+	}
+}
+
+// TestBrokerAskSendFailureWithDeadBrokerReportsPending verifies that a send
+// failure against an unreachable broker reports the ask as still pending,
+// since the edge may have been registered before the broker disappeared.
+func TestBrokerAskSendFailureWithDeadBrokerReportsPending(t *testing.T) {
 	b := broker.New("")
 	if err := b.Start(); err != nil {
 		t.Fatalf("start broker: %v", err)
@@ -6267,24 +6287,21 @@ func TestBrokerAskCleanupFailureReportsPending(t *testing.T) {
 	if _, err := b.CreateRun("target"); err != nil {
 		t.Fatalf("create target run: %v", err)
 	}
+	if err := b.Stop(); err != nil {
+		t.Fatalf("stop broker: %v", err)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(200 * time.Millisecond)
-		// Stop the broker before cancelling so the cleanup POST fails.
-		b.Stop()
-		cancel()
-	}()
-
+	cancel()
 	_, err := sup.BrokerAsk(ctx, "target", "interruption", "agent")
 	if err == nil {
-		t.Fatal("expected error from cancelled ask")
+		t.Fatal("expected error from failed ask")
 	}
 	var askErr *control.AskError
 	if !errors.As(err, &askErr) {
 		t.Fatalf("error type = %T, want *control.AskError: %v", err, err)
 	}
 	if !askErr.Pending {
-		t.Fatal("AskError.Pending = false, want true when cleanup fails")
+		t.Fatal("AskError.Pending = false, want true when cleanup is impossible")
 	}
 }

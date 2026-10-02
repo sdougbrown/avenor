@@ -290,14 +290,14 @@ func (st *RunState) signalLocked() {
 // communication between agent harnesses and their orchestrators.
 // It owns run-scoped state, message queuing, and lifecycle event ingestion.
 type Broker struct {
-	addr        string
-	listener    net.Listener
-	mu          sync.RWMutex
-	runs        map[string]*RunState
-	server      *http.Server
-	httpToken   string        // optional global HTTP auth token for push-control endpoint
-	pollTimeout time.Duration // max wait for poll-control before returning empty
-	writeTimeout time.Duration // per-connection write deadline; 0 uses the 30s default
+	addr         string
+	listener     net.Listener
+	mu           sync.RWMutex
+	runs         map[string]*RunState
+	server       *http.Server
+	httpToken    string        // optional global HTTP auth token for push-control endpoint
+	pollTimeout  time.Duration // max wait for poll-control before returning empty
+	writeTimeout time.Duration // per-connection write deadline (New sets 30s; /wait_reply extends its own deadline)
 
 	// Global ask-edge registry for cross-run lookups.
 	// Keys are "senderRunID/messageID" to prevent cross-sender collisions.
@@ -956,11 +956,9 @@ func (b *Broker) handleWaitReply(w http.ResponseWriter, r *http.Request) {
 	// Wait for the reply with a timeout. The server-wide WriteTimeout (30s)
 	// would expire the socket's write deadline before the long-poll completes,
 	// dropping the reply after it was consumed, so extend the deadline to cover
-	// the bounded wait plus response margin.
-	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(DefaultAskTimeout + 30*time.Second)); err != nil {
-		http.Error(w, "set write deadline", http.StatusInternalServerError)
-		return
-	}
+	// the bounded wait plus response margin. Non-fatal on failure: aborting
+	// here would orphan the registered ask edge until the prune.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(DefaultAskTimeout + 30*time.Second))
 	var reply AskReply
 	select {
 	case reply = <-replyCh:

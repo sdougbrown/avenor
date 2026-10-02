@@ -38,6 +38,21 @@ describe('askTool', () => {
     expect(brokerAskMock).toHaveBeenCalledWith('rt_1', 'hello', undefined, 5000)
   })
 
+  it('does not forward timeoutMs=0 to brokerAsk', async () => {
+    await askTool({ toRunId: 'rt_1', message: 'hello', timeoutMs: 0 })
+    expect(brokerAskMock).toHaveBeenCalledWith('rt_1', 'hello', undefined, undefined)
+  })
+
+  it('does not forward a negative timeoutMs to brokerAsk', async () => {
+    await askTool({ toRunId: 'rt_1', message: 'hello', timeoutMs: -1 })
+    expect(brokerAskMock).toHaveBeenCalledWith('rt_1', 'hello', undefined, undefined)
+  })
+
+  it('does not forward a NaN timeoutMs to brokerAsk', async () => {
+    await askTool({ toRunId: 'rt_1', message: 'hello', timeoutMs: NaN })
+    expect(brokerAskMock).toHaveBeenCalledWith('rt_1', 'hello', undefined, undefined)
+  })
+
   it('surfaces the message_id from an RpcError with data', async () => {
     const rpcError = new RpcError(-32000, 'ask failed', { message_id: 'abc123' })
     brokerAskMock.mockRejectedValueOnce(rpcError)
