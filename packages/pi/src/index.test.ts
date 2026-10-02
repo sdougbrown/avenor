@@ -16,6 +16,18 @@ import extensionFactory, {
 } from './index.js'
 import { findLiveStatusForTrackedRun } from './types.js'
 import { makeInspectResult } from './test-fixtures.js'
+import * as coreModule from '@dougbots/avenor-core'
+
+// Stub the core askTool (imported directly by the extension, not via deps) so
+// the avenor_ask wiring test never dials a live supervisor. Everything else in
+// the core module is preserved via the captured original.
+const originalCore = { ...coreModule }
+const askCalls: Array<Record<string, unknown>> = []
+const askToolMock = mock(async (args: Record<string, unknown>) => {
+  askCalls.push(args)
+  return { reply: 'ok', from_run_id: 'run-1' }
+})
+mock.module('@dougbots/avenor-core', () => ({ ...originalCore, askTool: askToolMock }))
 
 async function withoutAmbientAgentProfile<T>(run: () => Promise<T>): Promise<T> {
   const previous = process.env.PI_AGENT_PROFILE
@@ -150,6 +162,23 @@ async function createMultiSupervisorHarness(options: {
 describe('Avenor Pi extension', () => {
   it('exports a function', () => {
     expect(typeof extensionFactory).toBe('function')
+  })
+
+  it('wires avenor_ask timeout_ms through to the ask tool', async () => {
+    const harness = await createHarnessBase({})
+    await harness.registeredTools.avenor_ask.execute(
+      'tool-ask',
+      { to_run_id: 'run-1', message: 'hello', timeout_ms: 2500 },
+    )
+    expect(askCalls.at(-1)).toEqual({ toRunId: 'run-1', message: 'hello', timeoutMs: 2500, supervisorId: undefined })
+
+    // A fractional timeout_ms round-trips through the wiring as-is; schema-level
+    // Integer coercion is TypeBox's concern, not the extension's.
+    await harness.registeredTools.avenor_ask.execute(
+      'tool-ask-fractional',
+      { to_run_id: 'run-1', message: 'hello', timeout_ms: 5.5 },
+    )
+    expect(askCalls.at(-1)?.timeoutMs).toBe(5.5)
   })
 
   it('enriches controller status details with an advisory candidate count', async () => {

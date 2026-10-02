@@ -2494,7 +2494,7 @@ func TestBrokerAskErrorCarriesMessageID(t *testing.T) {
 		entered:           make(chan struct{}),
 		release:           make(chan struct{}),
 		finished:          make(chan struct{}),
-		askErr:            &AskError{MessageID: "ask123", Err: errors.New("ask timed out")},
+		askErr:            &AskError{MessageID: "ask123", Pending: false, Err: errors.New("ask timed out")},
 	}
 	state := NewState("run_1", "", 0)
 	s := NewServer(state)
@@ -2525,6 +2525,51 @@ func TestBrokerAskErrorCarriesMessageID(t *testing.T) {
 	}
 	if id, _ := data["message_id"].(string); id != "ask123" {
 		t.Fatalf("message_id = %q, want ask123", id)
+	}
+	if pending, _ := data["pending"].(bool); pending {
+		t.Fatalf("pending = %v, want false", data["pending"])
+	}
+}
+
+// TestBrokerAskErrorCarriesPendingTrue pins the pending=true wire contract:
+// the ask tool's withdraw guidance keys off this value.
+func TestBrokerAskErrorCarriesPendingTrue(t *testing.T) {
+	handler := &blockingAskHandler{
+		mockStableHandler: mockStableHandler{},
+		entered:           make(chan struct{}),
+		release:           make(chan struct{}),
+		finished:          make(chan struct{}),
+		askErr:            &AskError{MessageID: "ask456", Pending: true, Err: errors.New("cleanup failed")},
+	}
+	state := NewState("run_1", "", 0)
+	s := NewServer(state)
+	s.SetStableHandler(handler)
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	c := mustDial(t, path)
+	defer c.Close()
+	askParams, _ := json.Marshal(map[string]any{"to_run_id": "rt_1", "message": "correction"})
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "broker_ask", Params: askParams})
+	select {
+	case <-handler.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ask handler never entered")
+	}
+	close(handler.release)
+	resp := readRespForID(t, c, 1)
+	if resp.Error == nil {
+		t.Fatal("expected ask error")
+	}
+	data, ok := resp.Error.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("error data type: %T", resp.Error.Data)
+	}
+	if pending, _ := data["pending"].(bool); !pending {
+		t.Fatalf("pending = %v, want true", data["pending"])
 	}
 }
 

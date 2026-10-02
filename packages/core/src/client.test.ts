@@ -833,7 +833,7 @@ describe('Client.call per-call timeout override', () => {
     expect(delays).toContain(2_147_483_647)
   })
 
-  it('passes a finite sane timeoutMs through with the +10s margin', async () => {
+  it('keeps the base callTimeout when it exceeds timeoutMs + 10s', async () => {
     const socketPath = tempSocketPath()
 
     server = await startMockServer(socketPath, (req, sock) => {
@@ -847,16 +847,18 @@ describe('Client.call per-call timeout override', () => {
       return { unref() {}, ref() {}, refresh() {}, close() {} } as any
     }) as any
 
-    const client = await dial(socketPath, { callTimeoutMs: 100 })
+    const client = await dial(socketPath, { callTimeoutMs: 30_000 })
     try {
-      await client.call('noop', undefined, { timeoutMs: 5000 })
+      await client.call('noop', undefined, { timeoutMs: 1000 })
     } finally {
       globalThis.setTimeout = origSetTimeout
       client.close()
     }
 
-    // 5000 + 10000 = 15000, well within range
-    expect(delays).toContain(15000)
+    // 1000 + 10000 = 11000, but the 30000 base timeout is larger, so the
+    // armed delay is the base callTimeout, not the per-call margin.
+    expect(delays).toContain(30_000)
+    expect(delays).not.toContain(11_000)
   })
 })
 

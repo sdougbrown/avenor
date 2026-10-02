@@ -6303,3 +6303,32 @@ func TestBrokerAskSendFailureWithDeadBrokerNotPending(t *testing.T) {
 		t.Fatal("AskError.Pending = true, want false when the request never reached the broker")
 	}
 }
+
+// TestBrokerAskSendTargetMissingRunsCleanup exercises the send-failure branch
+// that runs withdrawAsk against a live broker: a 404 target leaves no edge,
+// so the classification must report pending=false.
+func TestBrokerAskSendTargetMissingRunsCleanup(t *testing.T) {
+	b := broker.New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	defer b.Stop()
+
+	sup := &Supervisor{broker: b}
+	// "target" is never registered, so /send fails with a 404.
+
+	_, err := sup.BrokerAsk(context.Background(), "target", "interruption", "agent")
+	if err == nil {
+		t.Fatal("expected error from failed ask")
+	}
+	var askErr *control.AskError
+	if !errors.As(err, &askErr) {
+		t.Fatalf("error type = %T, want *control.AskError: %v", err, err)
+	}
+	if !strings.Contains(askErr.Error(), "send ask") {
+		t.Fatalf("error = %v, want send-path failure", askErr)
+	}
+	if askErr.Pending {
+		t.Fatal("AskError.Pending = true, want false when the live broker reports no pending ask")
+	}
+}

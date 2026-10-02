@@ -1741,7 +1741,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       parameters: Type.Object({
         to_run_id: Type.String({ description: 'Target run ID' }),
         message: Type.String({ description: 'Question to ask the other agent' }),
-        timeout_ms: Type.Optional(Type.Number({ description: 'Optional timeout in milliseconds for the ask' })),
+        timeout_ms: Type.Optional(Type.Integer({ description: 'Optional timeout in milliseconds for the ask' })),
         supervisor_id: Type.Optional(Type.String({ description: 'Reuse an existing supervisor by socket path' })),
       }),
       async execute(_toolCallId, params) {
