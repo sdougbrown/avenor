@@ -2794,3 +2794,67 @@ func readNextResp(t *testing.T, c net.Conn) Response {
 	}
 	return r
 }
+
+// TestBrokerAskTimeoutClampedToMax verifies that an oversized timeout_ms is
+// clamped to maxAskTimeoutMS, keeping the server-side deadline below the
+// broker's own ask timeout.
+func TestBrokerAskTimeoutClampedToMax(t *testing.T) {
+	handler := &blockingAskHandler{
+		mockStableHandler: mockStableHandler{},
+		entered:           make(chan struct{}),
+		release:           make(chan struct{}),
+		finished:          make(chan struct{}),
+	}
+	state := NewState("run_1", "", 0)
+	s := NewServer(state)
+	s.SetStableHandler(handler)
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	c := mustDial(t, path)
+	defer c.Close()
+
+	askParams, _ := json.Marshal(map[string]any{"to_run_id": "rt_1", "message": "correction", "timeout_ms": 999_999_999})
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "broker_ask", Params: askParams})
+	select {
+	case <-handler.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ask handler never entered")
+	}
+	deadline, ok := handler.askCtxDeadline()
+	if !ok {
+		t.Fatal("ask context has no deadline")
+	}
+	until := time.Until(deadline)
+	if until <= 0 || until > time.Duration(maxAskTimeoutMS)*time.Millisecond {
+		t.Fatalf("ask deadline = %v from now, want clamped to <= %v", until, time.Duration(maxAskTimeoutMS)*time.Millisecond)
+	}
+	close(handler.release)
+	_ = readRespForID(t, c, 1)
+}
+
+// TestBrokerAskNegativeTimeoutRejected verifies the -32602 rejection for a
+// negative timeout_ms.
+func TestBrokerAskNegativeTimeoutRejected(t *testing.T) {
+	state := NewState("run_1", "", 0)
+	s := NewServer(state)
+	s.SetStableHandler(&mockStableHandler{})
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	c := mustDial(t, path)
+	defer c.Close()
+
+	askParams, _ := json.Marshal(map[string]any{"to_run_id": "rt_1", "message": "correction", "timeout_ms": -1})
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "broker_ask", Params: askParams})
+	resp := readRespForID(t, c, 1)
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Fatalf("error = %+v, want -32602 invalid params", resp.Error)
+	}
+}

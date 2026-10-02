@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -878,5 +879,57 @@ func TestWorkflowInstantiateParamsWire(t *testing.T) {
 	}
 	if _, hasParams := outer["params"]; hasParams {
 		t.Fatalf("params should be omitted when empty: %v", raw)
+	}
+}
+
+// TestCallErrorPreservesData pins the RPCError contract: structured error
+// data (e.g. a failed broker ask's message_id) survives instead of being
+// flattened into the message string.
+func TestCallErrorPreservesData(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	c := &Client{
+		conn:    clientConn,
+		pending: map[int]chan Response{},
+		eventCh: make(chan Event, 1),
+	}
+	go func() {
+		line, err := bufio.NewReader(serverConn).ReadBytes('\n')
+		if err != nil {
+			return
+		}
+		var req Request
+		if json.Unmarshal(line, &req) != nil {
+			return
+		}
+		data, _ := json.Marshal(map[string]any{"message_id": "ask123", "pending": false})
+		resp, _ := json.Marshal(Response{JSONRPC: "2.0", ID: req.ID, Error: &RespError{
+			Code: -32000, Message: "wait for reply: context deadline exceeded", Data: data,
+		}})
+		_, _ = serverConn.Write(append(resp, '\n'))
+	}()
+
+	err := c.Call("broker_ask", map[string]any{"to_run_id": "rt_1", "message": "hi"}, nil)
+	var rpcErr *RPCError
+	if err == nil || !errors.As(err, &rpcErr) {
+		t.Fatalf("error type = %T (%v), want *RPCError", err, err)
+	}
+	if rpcErr.Code != -32000 {
+		t.Errorf("code = %d, want -32000", rpcErr.Code)
+	}
+	var payload map[string]any
+	if unmarshalErr := json.Unmarshal(rpcErr.Data, &payload); unmarshalErr != nil {
+		t.Fatalf("unmarshal data: %v", unmarshalErr)
+	}
+	if id, _ := payload["message_id"].(string); id != "ask123" {
+		t.Errorf("message_id = %v, want ask123", payload["message_id"])
+	}
+	if pending, _ := payload["pending"].(bool); pending {
+		t.Errorf("pending = %v, want false", payload["pending"])
+	}
+	if got := rpcErr.Error(); got != "rpc error [-32000]: wait for reply: context deadline exceeded" {
+		t.Errorf("Error() = %q", got)
 	}
 }
