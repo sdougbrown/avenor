@@ -6275,10 +6275,10 @@ func TestWithdrawAskClassification(t *testing.T) {
 	}
 }
 
-// TestBrokerAskSendFailureWithDeadBrokerReportsPending verifies that a send
-// failure against an unreachable broker reports the ask as still pending,
-// since the edge may have been registered before the broker disappeared.
-func TestBrokerAskSendFailureWithDeadBrokerReportsPending(t *testing.T) {
+// TestBrokerAskSendFailureWithDeadBrokerNotPending verifies that a send
+// failure against an unreachable broker (request never delivered) reports the
+// ask as not pending, since no edge can have been registered.
+func TestBrokerAskSendFailureWithDeadBrokerNotPending(t *testing.T) {
 	b := broker.New("")
 	if err := b.Start(); err != nil {
 		t.Fatalf("start broker: %v", err)
@@ -6291,9 +6291,7 @@ func TestBrokerAskSendFailureWithDeadBrokerReportsPending(t *testing.T) {
 		t.Fatalf("stop broker: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, err := sup.BrokerAsk(ctx, "target", "interruption", "agent")
+	_, err := sup.BrokerAsk(context.Background(), "target", "interruption", "agent")
 	if err == nil {
 		t.Fatal("expected error from failed ask")
 	}
@@ -6301,7 +6299,7 @@ func TestBrokerAskSendFailureWithDeadBrokerReportsPending(t *testing.T) {
 	if !errors.As(err, &askErr) {
 		t.Fatalf("error type = %T, want *control.AskError: %v", err, err)
 	}
-	if !askErr.Pending {
-		t.Fatal("AskError.Pending = false, want true when cleanup is impossible")
+	if askErr.Pending {
+		t.Fatal("AskError.Pending = true, want false when the request never reached the broker")
 	}
 }

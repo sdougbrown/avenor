@@ -317,12 +317,13 @@ export class Client {
     // Node's setTimeout clamps values > 2^31-1 to 1ms, so we must keep the
     // effective delay within range.
     const MAX_TIMER_MS = 2_147_483_647 // 2^31 - 1
-    const timeout =
+    const requested =
       opts?.timeoutMs !== undefined
         ? (!Number.isFinite(opts.timeoutMs) || opts.timeoutMs > MAX_TIMER_MS - 10_000
             ? MAX_TIMER_MS
             : Math.max(this.callTimeout, opts.timeoutMs + 10_000))
         : this.callTimeout
+    const timeout = Number.isFinite(requested) ? Math.min(requested, MAX_TIMER_MS) : MAX_TIMER_MS
 
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {

@@ -19,6 +19,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/admission"
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
 
 const subscriberBuffer = 256
@@ -1000,6 +1001,11 @@ func (s *ControlServer) handleConn(c *connState) {
 // and broker edges.
 const maxInflightAsksPerConn = 8
 
+// maxAskTimeoutMS is the server-side cap on a request's timeout_ms. It sits
+// below the broker's DefaultAskTimeout so a clamped value expires on the
+// server (with structured error data) instead of racing the broker's 504.
+const maxAskTimeoutMS = int64(broker.DefaultAskTimeout-5*time.Second) / int64(time.Millisecond)
+
 // asyncResponse marks a request dispatched to a background goroutine; the
 // response is written when the goroutine completes, so handleConn must not
 // write it a second time.
@@ -1308,7 +1314,6 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		}
 		// The broker long-poll itself expires at its 10-minute ask timeout, so
 		// a larger server-side budget cannot be honored.
-		const maxAskTimeoutMS = int64(10 * time.Minute / time.Millisecond)
 		if p.TimeoutMS > maxAskTimeoutMS {
 			p.TimeoutMS = maxAskTimeoutMS
 		}

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -2358,22 +2359,28 @@ func TestBrokerRPCDispatchInvalidParams(t *testing.T) {
 }
 
 // blockingAskHandler blocks BrokerAsk until released, exposing the handler's
-// context so tests can assert cancellation propagation.
+// context so tests can assert cancellation propagation. Safe for concurrent
+// asks (the in-flight cap test dispatches up to 8 at once).
 type blockingAskHandler struct {
 	mockStableHandler
-	entered chan struct{}
-	release chan struct{}
-	askCtx  context.Context
-	askErr  error
+	entered     chan struct{}
+	enteredOnce sync.Once
+	release     chan struct{}
+	finished    chan struct{}
+	finishOnce  sync.Once
+	mu          sync.Mutex
+	askCtx      context.Context
+	askErr      error
 }
 
 func (m *blockingAskHandler) BrokerAsk(ctx context.Context, toRunID, message, role string) (any, error) {
-	m.askCtx = ctx
-	select {
-	case <-m.entered:
-	default:
-		close(m.entered)
+	m.mu.Lock()
+	if m.askCtx == nil {
+		m.askCtx = ctx
 	}
+	m.mu.Unlock()
+	m.enteredOnce.Do(func() { close(m.entered) })
+	defer m.finishOnce.Do(func() { close(m.finished) })
 	select {
 	case <-m.release:
 		if m.askErr != nil {
@@ -2395,6 +2402,7 @@ func TestBrokerAskDoesNotBlockConnection(t *testing.T) {
 		mockStableHandler: mockStableHandler{},
 		entered:           make(chan struct{}),
 		release:           make(chan struct{}),
+		finished:          make(chan struct{}),
 	}
 	state := NewState("run_1", "", 0)
 	s := NewServer(state)
@@ -2443,6 +2451,7 @@ func TestBrokerAskCancelledOnDisconnect(t *testing.T) {
 		mockStableHandler: mockStableHandler{},
 		entered:           make(chan struct{}),
 		release:           make(chan struct{}),
+		finished:          make(chan struct{}),
 	}
 	state := NewState("run_1", "", 0)
 	s := NewServer(state)
@@ -2484,6 +2493,7 @@ func TestBrokerAskErrorCarriesMessageID(t *testing.T) {
 		mockStableHandler: mockStableHandler{},
 		entered:           make(chan struct{}),
 		release:           make(chan struct{}),
+		finished:          make(chan struct{}),
 		askErr:            &AskError{MessageID: "ask123", Err: errors.New("ask timed out")},
 	}
 	state := NewState("run_1", "", 0)
@@ -2558,6 +2568,7 @@ func TestBrokerAskNotificationGetsNoResponse(t *testing.T) {
 		mockStableHandler: mockStableHandler{},
 		entered:           make(chan struct{}),
 		release:           make(chan struct{}),
+		finished:          make(chan struct{}),
 	}
 	state := NewState("run_1", "", 0)
 	s := NewServer(state)
@@ -2578,6 +2589,14 @@ func TestBrokerAskNotificationGetsNoResponse(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("ask handler never entered")
 	}
+	// Let the handler complete while the connection is live so a regressed
+	// guard would produce its frame inside the assertion window.
+	close(handler.release)
+	select {
+	case <-handler.finished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ask handler never finished")
+	}
 	expectNoResponse(t, c, 150*time.Millisecond)
 }
 
@@ -2588,6 +2607,7 @@ func TestBrokerAskWritesResponseExactlyOnce(t *testing.T) {
 		mockStableHandler: mockStableHandler{},
 		entered:           make(chan struct{}),
 		release:           make(chan struct{}),
+		finished:          make(chan struct{}),
 	}
 	state := NewState("run_1", "", 0)
 	s := NewServer(state)
@@ -2609,7 +2629,12 @@ func TestBrokerAskWritesResponseExactlyOnce(t *testing.T) {
 		t.Fatal("ask handler never entered")
 	}
 	close(handler.release)
-	_ = readRespForID(t, c, 1)
+	// The first frame on the wire must be the id-1 response: a regressed
+	// asyncResponse guard would emit an id-less marker frame first.
+	first := readNextResp(t, c)
+	if num, ok := first.ID.(float64); !ok || uint64(num) != 1 {
+		t.Fatalf("first response frame = %+v, want id 1 (no id-less frames allowed)", first)
+	}
 	expectNoResponse(t, c, 150*time.Millisecond)
 }
 
@@ -2621,6 +2646,7 @@ func TestBrokerAskServerSideTimeout(t *testing.T) {
 		mockStableHandler: mockStableHandler{},
 		entered:           make(chan struct{}),
 		release:           make(chan struct{}),
+		finished:          make(chan struct{}),
 	}
 	state := NewState("run_1", "", 0)
 	s := NewServer(state)
@@ -2634,19 +2660,19 @@ func TestBrokerAskServerSideTimeout(t *testing.T) {
 	c := mustDial(t, path)
 	defer c.Close()
 
-	askParams, _ := json.Marshal(map[string]any{"to_run_id": "rt_1", "message": "correction", "timeout_ms": 150})
+	askParams, _ := json.Marshal(map[string]any{"to_run_id": "rt_1", "message": "correction", "timeout_ms": 500})
 	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "broker_ask", Params: askParams})
 	select {
 	case <-handler.entered:
 	case <-time.After(2 * time.Second):
 		t.Fatal("ask handler never entered")
 	}
-	deadline, ok := handler.askCtx.Deadline()
+	deadline, ok := handler.askCtxDeadline()
 	if !ok {
 		t.Fatal("ask context has no deadline")
 	}
-	if until := time.Until(deadline); until <= 0 || until > time.Second {
-		t.Fatalf("ask deadline = %v from now, want ~150ms", until)
+	if until := time.Until(deadline); until <= 0 || until > 500*time.Millisecond {
+		t.Fatalf("ask deadline = %v from now, want ~500ms", until)
 	}
 	resp := readRespForID(t, c, 1)
 	if resp.Error == nil {
@@ -2664,6 +2690,7 @@ func TestBrokerAskCancelledOnServerStop(t *testing.T) {
 		mockStableHandler: mockStableHandler{},
 		entered:           make(chan struct{}),
 		release:           make(chan struct{}),
+		finished:          make(chan struct{}),
 	}
 	state := NewState("run_1", "", 0)
 	s := NewServer(state)
@@ -2698,6 +2725,7 @@ func TestBrokerAskInFlightCap(t *testing.T) {
 		mockStableHandler: mockStableHandler{},
 		entered:           make(chan struct{}),
 		release:           make(chan struct{}),
+		finished:          make(chan struct{}),
 	}
 	state := NewState("run_1", "", 0)
 	s := NewServer(state)
@@ -2735,4 +2763,34 @@ func TestBrokerAskInFlightCap(t *testing.T) {
 		t.Fatalf("status after cap rejection: %+v", r.Error)
 	}
 	close(handler.release)
+}
+
+// askCtxDeadline returns the recorded ask context's deadline safely.
+func (m *blockingAskHandler) askCtxDeadline() (time.Time, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.askCtx == nil {
+		return time.Time{}, false
+	}
+	return m.askCtx.Deadline()
+}
+
+// readNextResp reads exactly one response frame and fails on id-less frames,
+// unlike readRespForID which skips them. Use where the first frame's identity
+// matters (e.g. pinning the asyncResponse guard).
+func readNextResp(t *testing.T, c net.Conn) Response {
+	t.Helper()
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	scanner := bufio.NewScanner(c)
+	if !scanner.Scan() {
+		t.Fatal("no response frame")
+	}
+	var r Response
+	if err := json.Unmarshal(scanner.Bytes(), &r); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if r.ID == nil {
+		t.Fatalf("unexpected id-less response frame: %s", scanner.Bytes())
+	}
+	return r
 }

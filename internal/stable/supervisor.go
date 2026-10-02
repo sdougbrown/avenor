@@ -1723,9 +1723,18 @@ func (s *Supervisor) BrokerAsk(ctx context.Context, toRunID, message, role strin
 		"payload":     payload,
 	}
 	if _, err := s.brokerPostContext(ctx, "/send", sendBody); err != nil {
-		// A transport failure after the broker processed the send can leave
-		// the ask edge registered; attempt cleanup instead of assuming.
-		return nil, &control.AskError{MessageID: msgID, Pending: s.withdrawAsk(msgID), Err: fmt.Errorf("send ask: %w", err)}
+		// A refused connection (or a missing broker registration) means the
+		// request never reached the broker, so no edge can exist.
+		err = fmt.Errorf("send ask: %w", err)
+		pending := true
+		if strings.Contains(err.Error(), "connection refused") || strings.Contains(err.Error(), "broker not available") {
+			pending = false
+		} else {
+			// A transport failure after the broker processed the send can leave
+			// the ask edge registered; attempt cleanup instead of assuming.
+			pending = s.withdrawAsk(msgID)
+		}
+		return nil, &control.AskError{MessageID: msgID, Pending: pending, Err: err}
 	}
 	// Wait for reply. A failed wait (caller cancellation, broker error, or
 	// dropped connection) leaves or already cleaned the ask edge; withdraw
@@ -1757,8 +1766,9 @@ func (s *Supervisor) withdrawAsk(msgID string) bool {
 		return false
 	}
 	// The broker clears the edge itself when a cancelled wait_reply request
-	// disconnects, so "no pending ask" means the edge is already gone.
-	if strings.Contains(err.Error(), "no pending ask for this message id") {
+	// disconnects; either a successful cancel or a 404 "no pending ask"
+	// response means the edge is already gone.
+	if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "no pending ask for this message id") {
 		return false
 	}
 	return true
