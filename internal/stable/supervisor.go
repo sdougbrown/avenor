@@ -83,6 +83,12 @@ type Config struct {
 	// restart. Zero disables the sweep: leases then expire only on restart
 	// recovery. The CLI flag defaults to DefaultLeaseSweepInterval.
 	WorkflowLeaseSweepInterval time.Duration
+
+	// Stderr is the writer diagnostics and sentinel-write failures are
+	// reported to. Nil means s.stderrWriter(). Tests inject a pipe to capture
+	// output without touching the process-global s.stderrWriter(), which leaked
+	// runChild goroutines would otherwise race against.
+	Stderr io.Writer
 }
 
 // DefaultLeaseSweepInterval is the default live lease-expiry cadence: a
@@ -445,10 +451,14 @@ type Supervisor struct {
 	leaseSweepStop    chan struct{}
 	leaseSweepDone    chan struct{}
 	leaseSweepStopped bool
-	state             *control.ControlState
-	controlMu         sync.Mutex
-	runtimes          map[string]*childRuntime
-	nextID            int
+	// errWriter is the diagnostics writer: Config.Stderr when set, else the
+	// process stderr. Set once at construction and only read afterwards, so
+	// goroutines can use it without synchronization.
+	errWriter io.Writer
+	state     *control.ControlState
+	controlMu sync.Mutex
+	runtimes  map[string]*childRuntime
+	nextID    int
 	// outstandingReservations counts admission reservations that hold a local
 	// slot but have not yet converted into a registered runtime. Guarded by
 	// controlMu; the local capacity limit is enforced against active runtimes
@@ -535,6 +545,7 @@ func NewSupervisor(cfg Config) *Supervisor {
 		sessionIdentities:       map[string]sessionIdentityEntry{},
 		sessionOwners:           map[string]*sessionAttempt{},
 		heartbeats:              map[*leaseHeartbeat]struct{}{},
+		errWriter:               cfg.Stderr,
 	}
 	sup.broker = broker.New("")
 	if err := sup.broker.Start(); err != nil {
@@ -558,6 +569,14 @@ func NewSupervisor(cfg Config) *Supervisor {
 	return sup
 }
 
+// stderrWriter returns the writer supervisor diagnostics are reported to:
+// Config.Stderr when set, else the process stderr.
+func (s *Supervisor) stderrWriter() io.Writer {
+	if s.errWriter != nil {
+		return s.errWriter
+	}
+	return os.Stderr
+}
 func (s *Supervisor) Run() int {
 	// NewSupervisor initializes root admission before the control socket is
 	// bound. Close it on every exit, including a control-server start failure.
@@ -578,7 +597,7 @@ func (s *Supervisor) Run() int {
 	defer stop()
 
 	if err := s.control.Start(s.config.ControlSocket); err != nil {
-		fmt.Fprintf(os.Stderr, "avenor stable: start control server: %v\n", err)
+		fmt.Fprintf(s.stderrWriter(), "avenor stable: start control server: %v\n", err)
 		reason = "start_failed"
 		return 1
 	}
@@ -588,13 +607,13 @@ func (s *Supervisor) Run() int {
 		var err error
 		s.httpServer, err = control.NewHTTPDebugServer(s.config.HTTPDebug, s.control)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "avenor stable: start http debug: %v\n", err)
+			fmt.Fprintf(s.stderrWriter(), "avenor stable: start http debug: %v\n", err)
 			reason = "start_failed"
 			return 1
 		}
 		s.httpServer.SetStableAdapter(s)
 		if err := s.httpServer.Start(); err != nil {
-			fmt.Fprintf(os.Stderr, "avenor stable: start http debug: %v\n", err)
+			fmt.Fprintf(s.stderrWriter(), "avenor stable: start http debug: %v\n", err)
 			reason = "start_failed"
 			return 1
 		}
@@ -667,7 +686,7 @@ func (s *Supervisor) initTreeBudget() {
 		// Admission is optional: preserve the local per-supervisor limit when
 		// cross-process coordination state is unavailable, but make the weaker
 		// guarantee visible through stderr and tree_budget status.
-		fmt.Fprintf(os.Stderr, "avenor stable: tree budget unavailable; using degraded local-only mode: %s\n", message)
+		fmt.Fprintf(s.stderrWriter(), "avenor stable: tree budget unavailable; using degraded local-only mode: %s\n", message)
 		return
 	}
 	budget.AddNotifier(s.signalCapacityChange)
@@ -1014,7 +1033,7 @@ func (s *Supervisor) writeTombstone(reason string) {
 	}
 	content := fmt.Sprintf("STOPPED reason=%s pid=%d at=%s\n", reason, os.Getpid(), time.Now().Format(time.RFC3339))
 	if err := os.WriteFile(s.config.TombstoneFile, []byte(content), 0o644); err != nil {
-		fmt.Fprintf(os.Stderr, "avenor stable: write tombstone: %v\n", err)
+		fmt.Fprintf(s.stderrWriter(), "avenor stable: write tombstone: %v\n", err)
 	}
 }
 
@@ -1879,10 +1898,10 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 		panicked := false
 		if r := recover(); r != nil {
 			panicked = true
-			fmt.Fprintf(os.Stderr, "avenor stable: child %s panic: %v\n", child.id, r)
+			fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s panic: %v\n", child.id, r)
 			s.emitChildError(child, fmt.Sprintf("panic: %v", r), "error")
 			if child.sentinelFile != "" {
-				cli.WriteSentinel(child.sentinelFile, 1, child.sessionID(), "error", s.runID, os.Stderr)
+				cli.WriteSentinel(child.sentinelFile, 1, child.sessionID(), "error", s.runID, s.stderrWriter())
 			}
 		}
 		s.recordWorkflowTermination(child, panicked, ctx)
@@ -1937,7 +1956,7 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 
 			if result.exitCode == 0 {
 				if child.sentinelFile != "" {
-					cli.WriteSentinel(child.sentinelFile, result.exitCode, result.sessionID, stopReason, s.runID, os.Stderr)
+					cli.WriteSentinel(child.sentinelFile, result.exitCode, result.sessionID, stopReason, s.runID, s.stderrWriter())
 				}
 				child.mu.Lock()
 				child.phase = "done"
@@ -1984,7 +2003,7 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			if ctx.Err() == nil && result.stopReason != runtime.SessionIDConflictStopReason {
 				if nextPrompt, ok := child.dequeuePrompt(); ok {
 					if child.sentinelFile != "" {
-						cli.WriteSentinel(child.sentinelFile, result.exitCode, result.sessionID, stopReason, s.runID, os.Stderr)
+						cli.WriteSentinel(child.sentinelFile, result.exitCode, result.sessionID, stopReason, s.runID, s.stderrWriter())
 					}
 					promptText = nextPrompt
 					resumeID = result.sessionID
@@ -1997,7 +2016,7 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			}
 
 			if child.sentinelFile != "" {
-				cli.WriteSentinel(child.sentinelFile, result.exitCode, result.sessionID, stopReason, s.runID, os.Stderr)
+				cli.WriteSentinel(child.sentinelFile, result.exitCode, result.sessionID, stopReason, s.runID, s.stderrWriter())
 			}
 			return
 		}
@@ -2028,13 +2047,13 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 		panicked := false
 		if r := recover(); r != nil {
 			panicked = true
-			fmt.Fprintf(os.Stderr, "avenor stable: child %s panic: %v\n", child.id, r)
+			fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s panic: %v\n", child.id, r)
 			s.emitChildError(child, fmt.Sprintf("panic: %v", r), "error")
 			if final, ok := sessions.latest(); ok {
 				s.finalizeWorkflowChild(child, final)
 			}
 			if child.sentinelFile != "" {
-				cli.WriteSentinel(child.sentinelFile, 1, child.sessionID(), "error", s.runID, os.Stderr)
+				cli.WriteSentinel(child.sentinelFile, 1, child.sessionID(), "error", s.runID, s.stderrWriter())
 			}
 		}
 		s.recordWorkflowTermination(child, panicked, ctx)
@@ -2235,7 +2254,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				PreparePermissionClaim: func(ctx context.Context, scope, requestID string, state control.PermissionResolverState, options []any) bool {
 					return s.prepareChildPermissionClaim(ctx, child, providerLifecycle, attemptWriter, session.SessionID, scope, requestID, state, options)
 				},
-				Stderr:       os.Stderr,
+				Stderr:       s.stderrWriter(),
 				ProviderTurn: providerTurn,
 			})
 
@@ -2271,7 +2290,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 		child.exitCode = 1
 		child.mu.Unlock()
 		if child.sentinelFile != "" {
-			cli.WriteSentinel(child.sentinelFile, 1, child.sessionID(), "error", s.runID, os.Stderr)
+			cli.WriteSentinel(child.sentinelFile, 1, child.sessionID(), "error", s.runID, s.stderrWriter())
 		}
 		return
 	}
@@ -2289,9 +2308,9 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 
 	if child.sentinelFile != "" {
 		if result.Reason != "" {
-			cli.WriteSentinelWithReason(child.sentinelFile, result.ExitCode, result.SessionID, result.StopReason, s.runID, result.Reason, os.Stderr)
+			cli.WriteSentinelWithReason(child.sentinelFile, result.ExitCode, result.SessionID, result.StopReason, s.runID, result.Reason, s.stderrWriter())
 		} else {
-			cli.WriteSentinel(child.sentinelFile, result.ExitCode, result.SessionID, result.StopReason, s.runID, os.Stderr)
+			cli.WriteSentinel(child.sentinelFile, result.ExitCode, result.SessionID, result.StopReason, s.runID, s.stderrWriter())
 		}
 	}
 }
@@ -2304,13 +2323,13 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 		panicked := false
 		if r := recover(); r != nil {
 			panicked = true
-			fmt.Fprintf(os.Stderr, "avenor stable: child %s panic: %v\n", child.id, r)
+			fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s panic: %v\n", child.id, r)
 			s.emitChildError(child, fmt.Sprintf("panic: %v", r), "error")
 			if final, ok := sessions.final(cfg.Post, cfg.Team, cfg.Pre); ok {
 				s.finalizeWorkflowChild(child, final)
 			}
 			if child.sentinelFile != "" {
-				cli.WriteSentinel(child.sentinelFile, 1, child.sessionID(), "error", s.runID, os.Stderr)
+				cli.WriteSentinel(child.sentinelFile, 1, child.sessionID(), "error", s.runID, s.stderrWriter())
 			}
 		}
 		s.recordWorkflowTermination(child, panicked, ctx)
@@ -2509,7 +2528,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				PreparePermissionClaim: func(ctx context.Context, scope, requestID string, state control.PermissionResolverState, options []any) bool {
 					return s.prepareChildPermissionClaim(ctx, child, providerLifecycle, attemptWriter, session.SessionID, scope, requestID, state, options)
 				},
-				Stderr:       os.Stderr,
+				Stderr:       s.stderrWriter(),
 				ProviderTurn: providerTurn,
 			})
 
@@ -2547,7 +2566,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 		child.exitCode = 1
 		child.mu.Unlock()
 		if child.sentinelFile != "" {
-			cli.WriteSentinel(child.sentinelFile, 1, child.sessionID(), "error", s.runID, os.Stderr)
+			cli.WriteSentinel(child.sentinelFile, 1, child.sessionID(), "error", s.runID, s.stderrWriter())
 		}
 		return
 	}
@@ -2565,9 +2584,9 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 
 	if child.sentinelFile != "" {
 		if result.Reason != "" {
-			cli.WriteSentinelWithReason(child.sentinelFile, result.ExitCode, result.SessionID, result.StopReason, s.runID, result.Reason, os.Stderr)
+			cli.WriteSentinelWithReason(child.sentinelFile, result.ExitCode, result.SessionID, result.StopReason, s.runID, result.Reason, s.stderrWriter())
 		} else {
-			cli.WriteSentinel(child.sentinelFile, result.ExitCode, result.SessionID, result.StopReason, s.runID, os.Stderr)
+			cli.WriteSentinel(child.sentinelFile, result.ExitCode, result.SessionID, result.StopReason, s.runID, s.stderrWriter())
 		}
 	}
 }
@@ -3072,7 +3091,7 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 		PreparePermissionClaim: func(ctx context.Context, scope, requestID string, state control.PermissionResolverState, options []any) bool {
 			return s.prepareChildPermissionClaim(ctx, child, providerLifecycle, taggedWriter, session.SessionID, scope, requestID, state, options)
 		},
-		Stderr:       os.Stderr,
+		Stderr:       s.stderrWriter(),
 		ProviderTurn: providerTurn,
 	})
 	exitCode := result.ExitCode
@@ -3216,7 +3235,7 @@ func (s *Supervisor) emitSessionEnd(child *childRuntime, exitCode int, stopReaso
 
 func (s *Supervisor) writeIdleCancelled(child *childRuntime) {
 	if child.sentinelFile != "" {
-		cli.WriteSentinel(child.sentinelFile, 130, child.sessionID(), "cancelled", s.runID, os.Stderr)
+		cli.WriteSentinel(child.sentinelFile, 130, child.sessionID(), "cancelled", s.runID, s.stderrWriter())
 	}
 	s.emitSessionEnd(child, 130, "cancelled")
 }
@@ -3305,7 +3324,7 @@ func (s *Supervisor) shutdown(mode string) int {
 			}
 		}
 		if remaining > 0 {
-			fmt.Fprintf(os.Stderr, "avenor stable: %d runtimes did not finish within %v\n", remaining, timeout)
+			fmt.Fprintf(s.stderrWriter(), "avenor stable: %d runtimes did not finish within %v\n", remaining, timeout)
 		}
 	}
 	return 0

@@ -21,21 +21,21 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime"
 )
 
-func captureStderr(t *testing.T, fn func()) string {
+func captureStderr(t *testing.T, fn func(stderr io.Writer)) string {
 	t.Helper()
 	reader, writer, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("create stderr pipe: %v", err)
 	}
-	original := os.Stderr
-	os.Stderr = writer
 	defer func() {
-		os.Stderr = original
 		_ = reader.Close()
-		_ = writer.Close()
 	}()
 
-	fn()
+	// The supervisor under construction writes its diagnostics to the pipe
+	// through Config.Stderr, so the process-global os.Stderr is never
+	// mutated: leaked runChild goroutines from earlier tests read or write
+	// their own supervisor's writer and cannot race with this capture.
+	fn(writer)
 	if err := writer.Close(); err != nil {
 		t.Fatalf("close stderr writer: %v", err)
 	}
@@ -526,12 +526,13 @@ func TestDegradedModeNoBudgetStillEnforcesLocal(t *testing.T) {
 	}
 	t.Setenv("HOME", unwritable)
 	var sup *Supervisor
-	stderr := captureStderr(t, func() {
+	stderr := captureStderr(t, func(stderr io.Writer) {
 		sup = NewSupervisor(Config{
 			ControlSocket:   filepath.Join(t.TempDir(), "control.sock"),
 			MaxRuntimes:     1,
 			MaxTreeBudget:   8,
 			ShutdownTimeout: 0,
+			Stderr:          stderr,
 		})
 	})
 	if !strings.Contains(stderr, "tree budget unavailable; using degraded local-only mode") {
@@ -581,11 +582,12 @@ func TestDegradedModeNoBudgetStillEnforcesLocal(t *testing.T) {
 func TestInheritedBudgetFailureReportsDegradedMode(t *testing.T) {
 	socket := newStableSocketPath(t, "degraded-tree-budget")
 	var sup *Supervisor
-	stderr := captureStderr(t, func() {
+	stderr := captureStderr(t, func(stderr io.Writer) {
 		sup = NewSupervisor(Config{
 			ControlSocket:  socket,
 			MaxRuntimes:    1,
 			TreeBudgetFile: filepath.Join(t.TempDir(), "missing.tree-budget"),
+			Stderr:         stderr,
 		})
 	})
 	defer func() { _ = sup.broker.Stop() }()

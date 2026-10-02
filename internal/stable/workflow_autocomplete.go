@@ -2,7 +2,6 @@ package stable
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/sdougbrown/avenor/internal/workflow"
 )
@@ -37,7 +36,7 @@ func (s *Supervisor) finishWorkflowAttempt(ec workflow.ExecutorContext, hb *leas
 	eligible, plan, rejection, err := mgr.DecideAutoCompletion(
 		ec.WorkflowID, ec.NodeID, ec.ActivationID, child.dir, label)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "avenor stable: workflow %s node %s attempt %s: cannot decide auto-completion, recording the plain terminal fact: %v\n",
+		fmt.Fprintf(s.stderrWriter(), "avenor stable: workflow %s node %s attempt %s: cannot decide auto-completion, recording the plain terminal fact: %v\n",
 			ec.WorkflowID, ec.NodeID, ec.AttemptID, err)
 	}
 	if !eligible {
@@ -48,7 +47,7 @@ func (s *Supervisor) finishWorkflowAttempt(ec workflow.ExecutorContext, hb *leas
 	if plan == nil {
 		// Contract unmet: the node's retry policy and exhaustion apply, and
 		// the activation is never left running after the worker exited.
-		fmt.Fprintf(os.Stderr, "avenor stable: workflow %s node %s attempt %s: auto-completion contract unmet: %s\n",
+		fmt.Fprintf(s.stderrWriter(), "avenor stable: workflow %s node %s attempt %s: auto-completion contract unmet: %s\n",
 			ec.WorkflowID, ec.NodeID, ec.AttemptID, rejection)
 		hb.StopAndWait()
 		s.recordAttemptTerminal(ec, child.dir, string(workflow.AttemptFailed), kind, "contract_unmet")
@@ -65,7 +64,7 @@ func (s *Supervisor) finishWorkflowAttempt(ec workflow.ExecutorContext, hb *leas
 		WorkingDirectory: child.dir,
 	}); err != nil {
 		hb.StopAndWait()
-		fmt.Fprintf(os.Stderr, "avenor stable: workflow %s node %s attempt %s: record success fact: %v\n",
+		fmt.Fprintf(s.stderrWriter(), "avenor stable: workflow %s node %s attempt %s: record success fact: %v\n",
 			ec.WorkflowID, ec.NodeID, ec.AttemptID, err)
 		return
 	}
@@ -86,7 +85,7 @@ func (s *Supervisor) finishWorkflowAttempt(ec workflow.ExecutorContext, hb *leas
 		if s.leaseSweepRunning() {
 			recovery = "the live lease sweep will expire the lease"
 		}
-		fmt.Fprintf(os.Stderr, "avenor stable: workflow %s node %s attempt %s: supervisor auto-completion failed after the success fact (%s and the controller will re-dispatch the node): %v\n",
+		fmt.Fprintf(s.stderrWriter(), "avenor stable: workflow %s node %s attempt %s: supervisor auto-completion failed after the success fact (%s and the controller will re-dispatch the node): %v\n",
 			ec.WorkflowID, ec.NodeID, ec.AttemptID, recovery, err)
 	}
 	hb.StopAndWait()
@@ -104,7 +103,7 @@ func (s *Supervisor) recordAttemptTerminal(ec workflow.ExecutorContext, dir, sta
 			MarkerLabel:      label,
 			WorkingDirectory: dir,
 		}); err != nil {
-		fmt.Fprintf(os.Stderr, "avenor stable: workflow %s node %s attempt %s: record %s terminal fact: %v\n",
+		fmt.Fprintf(s.stderrWriter(), "avenor stable: workflow %s node %s attempt %s: record %s terminal fact: %v\n",
 			ec.WorkflowID, ec.NodeID, ec.AttemptID, status, err)
 	}
 }
