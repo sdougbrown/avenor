@@ -470,7 +470,9 @@ type Supervisor struct {
 	permOptions                  map[string][]any // keyed by "runtimeID:requestID"
 	permissionProviderMu         sync.Mutex
 	permissionProviders          map[string]permissionProviderBinding // same key; exact direct-answer target
-	httpServers                  map[string]any                       // dir → *managedHTTPServer or errHTTPServerStarting sentinel
+	httpServers                  map[string]*managedHTTPServer        // dir → ready server
+	httpStarting                 map[string]struct{}                  // dirs with a start in flight
+	httpShutdownStarted          bool
 	httpServerMu                 sync.Mutex
 	httpServerCond               *sync.Cond
 	fileSnapshots                map[string][]string // runtimeID → pre-run file list for output detection
@@ -527,7 +529,8 @@ func NewSupervisor(cfg Config) *Supervisor {
 		permOptions:             map[string][]any{},
 		reaperInterval:          5 * time.Second,
 		permissionProviders:     map[string]permissionProviderBinding{},
-		httpServers:             map[string]any{},
+		httpServers:             map[string]*managedHTTPServer{},
+		httpStarting:            map[string]struct{}{},
 		fileSnapshots:           map[string][]string{},
 		sessionIdentities:       map[string]sessionIdentityEntry{},
 		sessionOwners:           map[string]*sessionAttempt{},

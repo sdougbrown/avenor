@@ -15,10 +15,6 @@ import (
 
 var httpExecCommand = exec.Command
 
-// errHTTPServerStarting is used as a sentinel value in the httpServers map
-// to indicate a server for this directory is currently being started.
-var errHTTPServerStarting = fmt.Errorf("opencode serve for this directory is starting")
-
 type managedHTTPServer struct {
 	dir     string
 	url     string
@@ -89,6 +85,10 @@ func (s *managedHTTPServer) healthCheckWithURL(ctx context.Context, url string) 
 	return nil
 }
 
+// The httpServers/httpStarting pair makes the three per-directory states
+// explicit: absent (no server), present in httpStarting (a start is in
+// flight — waiters block on the condition variable), and present in
+// httpServers (a ready server). No sentinel values in a map[string]any.
 func (s *Supervisor) getOrCreateHTTPServer(dir string) (*managedHTTPServer, error) {
 	absDir, err := filepath.Abs(dir)
 	if err != nil {
@@ -98,20 +98,43 @@ func (s *Supervisor) getOrCreateHTTPServer(dir string) (*managedHTTPServer, erro
 	s.httpServerMu.Lock()
 
 	for {
-		entry := s.httpServers[absDir]
+		if s.httpShutdownStarted {
+			// Shutdown has begun: starting a server here would only be torn
+			// down by the completion guard after the full start duration,
+			// stretching shutdown for this caller.
+			s.httpServerMu.Unlock()
+			return nil, fmt.Errorf("supervisor is shutting down")
+		}
 
-		if entry == nil {
-			// No server for this dir — claim the slot with a pending sentinel
-			// so concurrent callers for the same dir wait, then release the
-			// mutex to do the expensive start operation.
-			s.httpServers[absDir] = errHTTPServerStarting
+		if _, starting := s.httpStarting[absDir]; starting {
+			// Another goroutine is starting a server for this dir — wait.
+			s.httpServerCond.Wait()
+			continue
+		}
+
+		m := s.httpServers[absDir]
+		if m == nil {
+			// No server for this dir — claim the slot so concurrent callers
+			// for the same dir wait, then release the mutex to do the
+			// expensive start operation.
+			s.httpStarting[absDir] = struct{}{}
 			s.httpServerMu.Unlock()
 
 			m, startErr := s.startHTTPServer(absDir)
 
 			s.httpServerMu.Lock()
+			delete(s.httpStarting, absDir)
 			if startErr != nil {
-				delete(s.httpServers, absDir)
+				// Nothing to insert; waiters wake and retry the start.
+			} else if s.httpShutdownStarted {
+				// Shutdown ran while the start was in flight. Inserting would
+				// orphan the process; tear it down instead.
+				s.httpServerCond.Broadcast()
+				s.httpServerMu.Unlock()
+				if err := m.shutdown(); err != nil {
+					fmt.Fprintf(os.Stderr, "avenor stable: shutdown managed http server for %s: %v\n", absDir, err)
+				}
+				return nil, fmt.Errorf("supervisor is shutting down")
 			} else {
 				s.httpServers[absDir] = m
 			}
@@ -121,19 +144,6 @@ func (s *Supervisor) getOrCreateHTTPServer(dir string) (*managedHTTPServer, erro
 			return m, startErr
 		}
 
-		if entry == errHTTPServerStarting {
-			// Another goroutine is starting a server for this dir — wait.
-			s.httpServerCond.Wait()
-			continue
-		}
-
-		// We have a managedHTTPServer — check if it's still alive.
-		m, ok := entry.(*managedHTTPServer)
-		if !ok {
-			// Shouldn't happen — only sentinels and *managedHTTPServer go in the map.
-			s.httpServerMu.Unlock()
-			continue
-		}
 		s.httpServerMu.Unlock()
 
 		// Re-validate m.url: another goroutine could call shutdown()
@@ -261,18 +271,17 @@ func (s *Supervisor) startHTTPServer(absDir string) (*managedHTTPServer, error) 
 
 func (s *Supervisor) shutdownManagedHTTPServers() {
 	s.httpServerMu.Lock()
-	defer s.httpServerMu.Unlock()
+	s.httpShutdownStarted = true
+	s.httpStarting = map[string]struct{}{}
+	ready := s.httpServers
+	s.httpServers = map[string]*managedHTTPServer{}
+	s.httpServerMu.Unlock()
 
-	for dir, entry := range s.httpServers {
-		if entry == errHTTPServerStarting {
-			delete(s.httpServers, dir)
-			continue
+	// A start in flight when shutdown begins completes into the
+	// httpShutdownStarted guard, which tears its server down there.
+	for _, m := range ready {
+		if err := m.shutdown(); err != nil {
+			fmt.Fprintf(os.Stderr, "avenor stable: shutdown managed http server for %s: %v\n", m.dir, err)
 		}
-		if m, ok := entry.(*managedHTTPServer); ok {
-			if err := m.shutdown(); err != nil {
-				fmt.Fprintf(os.Stderr, "avenor stable: shutdown managed http server for %s: %v\n", dir, err)
-			}
-		}
-		delete(s.httpServers, dir)
 	}
 }
