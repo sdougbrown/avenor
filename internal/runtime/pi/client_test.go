@@ -398,12 +398,13 @@ func TestClientFanoutRecordsDroppedSubscriberEvents(t *testing.T) {
 	sub <- events.Event{Event: "existing"} // fill the subscriber buffer
 	c.subscribe("th_drop", sub)
 	c.fanout(&events.Event{Event: "agent.message", SessionID: "th_drop"})
-	// A critical event retries the send, and still finds no room.
+	// A critical event takes the same non-blocking send, which again finds
+	// no room, but is logged with the critical wording.
 	c.fanout(&events.Event{Event: "session.end", SessionID: "th_drop"})
 
 	stderr := c.Stderr()
-	if !strings.Contains(stderr, "subscriber buffer full") {
-		t.Fatalf("stderr = %q, want subscriber drop note", stderr)
+	if !strings.Contains(stderr, "dropped critical event") {
+		t.Fatalf("stderr = %q, want the critical drop note for session.end", stderr)
 	}
 	if strings.Contains(stderr, "global event buffer full") {
 		t.Fatalf("stderr = %q, want no global drop note: the global buffer is gone", stderr)
