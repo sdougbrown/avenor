@@ -1,4 +1,4 @@
-export { dial } from './client.js'
+export { dial, RpcError } from './client.js'
 export type {
   Client,
   Event,

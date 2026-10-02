@@ -181,6 +181,18 @@ function removeResolver(resolvers: EventResolver[], target: EventResolver): void
   }
 }
 
+export class RpcError extends Error {
+  readonly code: number
+  readonly data?: unknown
+
+  constructor(code: number, message: string, data?: unknown) {
+    super(`rpc error [${code}]: ${message}`)
+    this.name = 'RpcError'
+    this.code = code
+    this.data = data
+  }
+}
+
 export class Client {
   private socket: net.Socket
   private rl: readline.Interface
@@ -233,7 +245,7 @@ export class Client {
           this.pending.delete(id)
           if (parsed.error) {
             pc.reject(
-              new Error(`rpc error [${parsed.error.code}]: ${parsed.error.message}`),
+              new RpcError(parsed.error.code, parsed.error.message, parsed.error.data),
             )
           } else {
             pc.resolve(parsed.result)
@@ -285,7 +297,7 @@ export class Client {
     }
   }
 
-  async call(method: string, params?: unknown): Promise<unknown> {
+  async call(method: string, params?: unknown, opts?: { timeoutMs?: number }): Promise<unknown> {
     if (this.isClosed()) {
       throw new Error('control socket is closed')
     }
@@ -299,11 +311,25 @@ export class Client {
 
     const data = JSON.stringify(req) + '\n'
 
+    // A per-call timeout_ms bounds the server-side wait; the client must not
+    // fire first. The +10s margin lets the server's structured ask-error
+    // response (written after bounded cleanup) arrive before the timer fires.
+    // Node's setTimeout clamps values > 2^31-1 to 1ms, so we must keep the
+    // effective delay within range.
+    const MAX_TIMER_MS = 2_147_483_647 // 2^31 - 1
+    const requested =
+      opts?.timeoutMs !== undefined
+        ? (!Number.isFinite(opts.timeoutMs) || opts.timeoutMs > MAX_TIMER_MS - 10_000
+            ? MAX_TIMER_MS
+            : Math.max(this.callTimeout, opts.timeoutMs + 10_000))
+        : this.callTimeout
+    const timeout = Number.isFinite(requested) ? Math.min(requested, MAX_TIMER_MS) : MAX_TIMER_MS
+
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id)
         reject(new Error('read response: timeout'))
-      }, this.callTimeout)
+      }, timeout)
 
       this.pending.set(id, { resolve, reject, timer })
 
@@ -575,8 +601,10 @@ export class Client {
     await this.call('broker_send', { from_run_id: fromRunId, to_run_id: toRunId, message, role: role ?? 'agent' })
   }
 
-  async brokerAsk(toRunId: string, message: string, role?: string): Promise<Record<string, unknown>> {
-    return await this.call('broker_ask', { to_run_id: toRunId, message, role: role ?? 'agent' }) as Record<string, unknown>
+  async brokerAsk(toRunId: string, message: string, role?: string, timeoutMs?: number): Promise<Record<string, unknown>> {
+    const params: Record<string, unknown> = { to_run_id: toRunId, message, role: role ?? 'agent' }
+    if (timeoutMs !== undefined) params.timeout_ms = timeoutMs
+    return await this.call('broker_ask', params, timeoutMs !== undefined ? { timeoutMs } : undefined) as Record<string, unknown>
   }
 
   async brokerPeers(): Promise<Array<Record<string, unknown>>> {

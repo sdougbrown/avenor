@@ -3,6 +3,7 @@ package stable
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -6214,5 +6215,120 @@ func TestWorkflowMarkerEvidenceParity(t *testing.T) {
 		if kind != want.kind || label != want.label {
 			t.Errorf("workflowMarkerForKind(%s) = (%q,%q), want (%q,%q)", action, kind, label, want.kind, want.label)
 		}
+	}
+}
+
+// TestBrokerAskContextCancellation verifies that a cancelled ask wait returns
+// an AskError carrying the message ID and pending=false after the successful
+// cleanup POST withdraws the ask edge (#243).
+func TestBrokerAskContextCancellation(t *testing.T) {
+	b := broker.New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	defer b.Stop()
+
+	sup := &Supervisor{broker: b}
+	if _, err := b.CreateRun("target"); err != nil {
+		t.Fatalf("create target run: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		cancel()
+	}()
+
+	_, err := sup.BrokerAsk(ctx, "target", "interruption", "agent")
+	if err == nil {
+		t.Fatal("expected error from cancelled ask")
+	}
+	var askErr *control.AskError
+	if !errors.As(err, &askErr) {
+		t.Fatalf("error type = %T, want *control.AskError: %v", err, err)
+	}
+	if askErr.MessageID == "" {
+		t.Fatal("AskError.MessageID is empty")
+	}
+	if askErr.Pending {
+		t.Fatal("AskError.Pending = true, want false after successful cleanup")
+	}
+}
+
+// TestWithdrawAskClassification verifies pending classification: a broker
+// that answers "no pending ask" reports the edge gone; an unreachable broker
+// reports the edge as possibly pending.
+func TestWithdrawAskClassification(t *testing.T) {
+	b := broker.New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	sup := &Supervisor{broker: b}
+	if sup.withdrawAsk("never-sent-id") {
+		t.Fatal("withdrawAsk = true, want false when the broker reports no pending ask")
+	}
+	if err := b.Stop(); err != nil {
+		t.Fatalf("stop broker: %v", err)
+	}
+	if !sup.withdrawAsk("never-sent-id") {
+		t.Fatal("withdrawAsk = false, want true when the broker is unreachable")
+	}
+}
+
+// TestBrokerAskSendFailureWithDeadBrokerNotPending verifies that a send
+// failure against an unreachable broker (request never delivered) reports the
+// ask as not pending, since no edge can have been registered.
+func TestBrokerAskSendFailureWithDeadBrokerNotPending(t *testing.T) {
+	b := broker.New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	sup := &Supervisor{broker: b}
+	if _, err := b.CreateRun("target"); err != nil {
+		t.Fatalf("create target run: %v", err)
+	}
+	if err := b.Stop(); err != nil {
+		t.Fatalf("stop broker: %v", err)
+	}
+
+	_, err := sup.BrokerAsk(context.Background(), "target", "interruption", "agent")
+	if err == nil {
+		t.Fatal("expected error from failed ask")
+	}
+	var askErr *control.AskError
+	if !errors.As(err, &askErr) {
+		t.Fatalf("error type = %T, want *control.AskError: %v", err, err)
+	}
+	if askErr.Pending {
+		t.Fatal("AskError.Pending = true, want false when the request never reached the broker")
+	}
+}
+
+// TestBrokerAskSendTargetMissingRunsCleanup exercises the send-failure branch
+// that runs withdrawAsk against a live broker: a 404 target leaves no edge,
+// so the classification must report pending=false.
+func TestBrokerAskSendTargetMissingRunsCleanup(t *testing.T) {
+	b := broker.New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	defer b.Stop()
+
+	sup := &Supervisor{broker: b}
+	// "target" is never registered, so /send fails with a 404.
+
+	_, err := sup.BrokerAsk(context.Background(), "target", "interruption", "agent")
+	if err == nil {
+		t.Fatal("expected error from failed ask")
+	}
+	var askErr *control.AskError
+	if !errors.As(err, &askErr) {
+		t.Fatalf("error type = %T, want *control.AskError: %v", err, err)
+	}
+	if !strings.Contains(askErr.Error(), "send ask") {
+		t.Fatalf("error = %v, want send-path failure", askErr)
+	}
+	if askErr.Pending {
+		t.Fatal("AskError.Pending = true, want false when the live broker reports no pending ask")
 	}
 }

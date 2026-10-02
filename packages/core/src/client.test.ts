@@ -3,7 +3,7 @@ import * as net from 'node:net'
 import * as path from 'node:path'
 import * as os from 'node:os'
 import { PassThrough } from 'node:stream'
-import { Client, dial, type Event } from './client.js'
+import { Client, dial, RpcError, type Event } from './client.js'
 import type {
   ExecutionIdentity,
   WorkflowCompleteParams,
@@ -684,6 +684,184 @@ describe('Client.call timeout', () => {
   })
 })
 
+describe('Client.call per-call timeout override', () => {
+  let server: net.Server
+
+  afterEach(() => {
+    server?.close()
+  })
+
+  it('arms the per-call timer at max(callTimeout, timeoutMs + 10000)', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: { ok: true } }) + '\n')
+    })
+
+    const delays: number[] = []
+    const origSetTimeout = globalThis.setTimeout
+    globalThis.setTimeout = ((fn: any, ms?: number, ...args: any[]) => {
+      delays.push(ms ?? 0)
+      return { unref() {}, ref() {}, refresh() {}, close() {} } as any
+    }) as any
+
+    const client = await dial(socketPath, { callTimeoutMs: 100 })
+    try {
+      await client.call('noop', undefined, { timeoutMs: 5000 })
+    } finally {
+      globalThis.setTimeout = origSetTimeout
+      client.close()
+    }
+
+    // 5000 + 10000 margin = 15000, which exceeds the 100ms base timeout.
+    expect(delays).toContain(15000)
+  })
+
+  it('keeps the base callTimeout when no per-call override is supplied', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: { ok: true } }) + '\n')
+    })
+
+    const delays: number[] = []
+    const origSetTimeout = globalThis.setTimeout
+    globalThis.setTimeout = ((fn: any, ms?: number, ...args: any[]) => {
+      delays.push(ms ?? 0)
+      return { unref() {}, ref() {}, refresh() {}, close() {} } as any
+    }) as any
+
+    const client = await dial(socketPath, { callTimeoutMs: 100 })
+    try {
+      await client.call('noop')
+    } finally {
+      globalThis.setTimeout = origSetTimeout
+      client.close()
+    }
+
+    expect(delays).toContain(100)
+    expect(delays).not.toContain(15000)
+  })
+
+  it('lets a slow response arrive within the extended per-call window', async () => {
+    const socketPath = tempSocketPath()
+
+    // The server takes 200ms to respond: past the 100ms base timeout, but
+    // well inside the 5000ms + 10000ms per-call window.
+    server = await startMockServer(socketPath, (req, sock) => {
+      setTimeout(() => {
+        sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: { ok: true } }) + '\n')
+      }, 200)
+    })
+
+    const client = await dial(socketPath, { callTimeoutMs: 100 })
+    try {
+      const result = await client.call('noop', undefined, { timeoutMs: 5000 })
+      expect(result).toEqual({ ok: true })
+    } finally {
+      client.close()
+    }
+  })
+
+  it('still times out at the base timeout when no override is supplied', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      setTimeout(() => {
+        sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: { ok: true } }) + '\n')
+      }, 200)
+    })
+
+    const client = await dial(socketPath, { callTimeoutMs: 100 })
+    try {
+      await expect(client.call('noop')).rejects.toThrow('read response: timeout')
+    } finally {
+      client.close()
+    }
+  })
+
+  it('clamps the timer to 2^31-1 when timeoutMs exceeds the safe range', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: { ok: true } }) + '\n')
+    })
+
+    const delays: number[] = []
+    const origSetTimeout = globalThis.setTimeout
+    globalThis.setTimeout = ((fn: any, ms?: number, ...args: any[]) => {
+      delays.push(ms ?? 0)
+      return { unref() {}, ref() {}, refresh() {}, close() {} } as any
+    }) as any
+
+    const client = await dial(socketPath, { callTimeoutMs: 100 })
+    try {
+      // 2^31 - 1 - 10_000 + 1 should trigger clamping
+      await client.call('noop', undefined, { timeoutMs: 2_147_483_647 - 10_000 + 1 })
+    } finally {
+      globalThis.setTimeout = origSetTimeout
+      client.close()
+    }
+
+    // The timer must be clamped to 2^31 - 1, not 2^31 - 1 + 10_000
+    expect(delays).toContain(2_147_483_647)
+    expect(delays).not.toContain(2_147_483_647 + 10_000)
+  })
+
+  it('clamps the timer to 2^31-1 when timeoutMs is not finite', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: { ok: true } }) + '\n')
+    })
+
+    const delays: number[] = []
+    const origSetTimeout = globalThis.setTimeout
+    globalThis.setTimeout = ((fn: any, ms?: number, ...args: any[]) => {
+      delays.push(ms ?? 0)
+      return { unref() {}, ref() {}, refresh() {}, close() {} } as any
+    }) as any
+
+    const client = await dial(socketPath, { callTimeoutMs: 100 })
+    try {
+      await client.call('noop', undefined, { timeoutMs: Infinity })
+    } finally {
+      globalThis.setTimeout = origSetTimeout
+      client.close()
+    }
+
+    expect(delays).toContain(2_147_483_647)
+  })
+
+  it('keeps the base callTimeout when it exceeds timeoutMs + 10s', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: { ok: true } }) + '\n')
+    })
+
+    const delays: number[] = []
+    const origSetTimeout = globalThis.setTimeout
+    globalThis.setTimeout = ((fn: any, ms?: number, ...args: any[]) => {
+      delays.push(ms ?? 0)
+      return { unref() {}, ref() {}, refresh() {}, close() {} } as any
+    }) as any
+
+    const client = await dial(socketPath, { callTimeoutMs: 30_000 })
+    try {
+      await client.call('noop', undefined, { timeoutMs: 1000 })
+    } finally {
+      globalThis.setTimeout = origSetTimeout
+      client.close()
+    }
+
+    // 1000 + 10000 = 11000, but the 30000 base timeout is larger, so the
+    // armed delay is the base callTimeout, not the per-call margin.
+    expect(delays).toContain(30_000)
+    expect(delays).not.toContain(11_000)
+  })
+})
+
 describe('Client.close', () => {
   it('rejects subsequent calls after close', async () => {
     const socketPath = tempSocketPath()
@@ -1361,5 +1539,153 @@ describe('Client.workflow', () => {
       session_id: 'ses',
     }
     expect(identity.workflow_id).toBe('wf-1')
+  })
+})
+
+describe('Client.call RpcError', () => {
+  let server: net.Server
+
+  afterEach(() => {
+    server?.close()
+  })
+
+  it('rejects with an RpcError preserving code and data', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      sock.write(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: req.id,
+          error: { code: -32000, message: 'ask failed', data: { message_id: 'abc123' } },
+        }) + '\n',
+      )
+    })
+
+    const client = await dial(socketPath)
+    try {
+      const err = await client.status().catch((e) => e)
+      expect(err).toBeInstanceOf(RpcError)
+      expect(err.message).toBe('rpc error [-32000]: ask failed')
+      expect(err.code).toBe(-32000)
+      expect(err.data).toEqual({ message_id: 'abc123' })
+    } finally {
+      client.close()
+    }
+  })
+
+  it('leaves data undefined when the error carries none', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      sock.write(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: req.id,
+          error: { code: -32000, message: 'something went wrong' },
+        }) + '\n',
+      )
+    })
+
+    const client = await dial(socketPath)
+    try {
+      const err = await client.status().catch((e) => e)
+      expect(err).toBeInstanceOf(RpcError)
+      expect(err.message).toBe('rpc error [-32000]: something went wrong')
+      expect(err.code).toBe(-32000)
+      expect(err.data).toBeUndefined()
+    } finally {
+      client.close()
+    }
+  })
+})
+
+describe('Client.brokerAsk', () => {
+  let server: net.Server
+
+  afterEach(() => {
+    server?.close()
+  })
+
+  it('forwards timeout_ms when provided', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      expect(req.method).toBe('broker_ask')
+      expect(req.params).toEqual({ to_run_id: 'rt-1', message: 'hello', role: 'agent', timeout_ms: 5000 })
+      sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: { payload: { message: 'ok' } } }) + '\n')
+    })
+
+    const client = await dial(socketPath)
+    try {
+      await client.brokerAsk('rt-1', 'hello', undefined, 5000)
+    } finally {
+      client.close()
+    }
+  })
+
+  it('omits timeout_ms when not provided', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      expect(req.method).toBe('broker_ask')
+      expect(req.params).toEqual({ to_run_id: 'rt-1', message: 'hello', role: 'agent' })
+      expect(Object.hasOwn(req.params, 'timeout_ms')).toBe(false)
+      sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: {} }) + '\n')
+    })
+
+    const client = await dial(socketPath)
+    try {
+      await client.brokerAsk('rt-1', 'hello')
+    } finally {
+      client.close()
+    }
+  })
+
+  it('passes the per-call timeout through to call when timeoutMs is provided', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      expect(req.method).toBe('broker_ask')
+      expect(req.params.timeout_ms).toBe(5000)
+      sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: {} }) + '\n')
+    })
+
+    const client = await dial(socketPath)
+    let capturedOpts: { timeoutMs?: number } | undefined
+    const origCall = client.call.bind(client)
+    client.call = (method: string, params?: unknown, opts?: { timeoutMs?: number }) => {
+      capturedOpts = opts
+      return origCall(method, params, opts)
+    }
+    try {
+      await client.brokerAsk('rt-1', 'hello', undefined, 5000)
+      expect(capturedOpts).toEqual({ timeoutMs: 5000 })
+    } finally {
+      client.close()
+    }
+  })
+
+  it('does not pass a per-call timeout when timeoutMs is omitted', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      expect(req.method).toBe('broker_ask')
+      sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: {} }) + '\n')
+    })
+
+    const client = await dial(socketPath)
+    let capturedOpts: { timeoutMs?: number } | undefined = { timeoutMs: 9999 }
+    const origCall = client.call.bind(client)
+    client.call = (method: string, params?: unknown, opts?: { timeoutMs?: number }) => {
+      capturedOpts = opts
+      return origCall(method, params, opts)
+    }
+    try {
+      await client.brokerAsk('rt-1', 'hello')
+      expect(capturedOpts).toBeUndefined()
+    } finally {
+      client.close()
+    }
   })
 })

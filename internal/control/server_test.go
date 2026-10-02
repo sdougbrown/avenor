@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -1601,7 +1602,7 @@ func (m *mockStableHandler) BrokerSend(fromRunID, toRunID, message, role string)
 	return nil
 }
 
-func (m *mockStableHandler) BrokerAsk(toRunID, message, role string) (any, error) {
+func (m *mockStableHandler) BrokerAsk(ctx context.Context, toRunID, message, role string) (any, error) {
 	return map[string]any{"reply": "mock reply"}, nil
 }
 
@@ -2354,5 +2355,551 @@ func TestBrokerRPCDispatchInvalidParams(t *testing.T) {
 	r := readResp(t, c1)
 	if r.Error == nil || r.Error.Code != -32700 {
 		t.Fatalf("broker_send malformed params expected -32700 parse error, got %+v", r)
+	}
+}
+
+// blockingAskHandler blocks BrokerAsk until released, exposing the handler's
+// context so tests can assert cancellation propagation. Safe for concurrent
+// asks (the in-flight cap test dispatches up to 8 at once).
+type blockingAskHandler struct {
+	mockStableHandler
+	entered     chan struct{}
+	enteredOnce sync.Once
+	release     chan struct{}
+	finished    chan struct{}
+	finishOnce  sync.Once
+	mu          sync.Mutex
+	askCtx      context.Context
+	askErr      error
+}
+
+func (m *blockingAskHandler) BrokerAsk(ctx context.Context, toRunID, message, role string) (any, error) {
+	m.mu.Lock()
+	if m.askCtx == nil {
+		m.askCtx = ctx
+	}
+	m.mu.Unlock()
+	m.enteredOnce.Do(func() { close(m.entered) })
+	defer m.finishOnce.Do(func() { close(m.finished) })
+	select {
+	case <-m.release:
+		if m.askErr != nil {
+			return nil, m.askErr
+		}
+		return map[string]any{"reply": "ok"}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(10 * time.Second):
+		return nil, errors.New("ask handler deadline")
+	}
+}
+
+// TestBrokerAskDoesNotBlockConnection is the regression test for #243: an
+// unanswered broker_ask must not stop the connection from serving status,
+// sibling queries, or new dispatches.
+func TestBrokerAskDoesNotBlockConnection(t *testing.T) {
+	handler := &blockingAskHandler{
+		mockStableHandler: mockStableHandler{},
+		entered:           make(chan struct{}),
+		release:           make(chan struct{}),
+		finished:          make(chan struct{}),
+	}
+	state := NewState("run_1", "", 0)
+	s := NewServer(state)
+	s.SetStableHandler(handler)
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	c := mustDial(t, path)
+	defer c.Close()
+
+	// Fire an ask that will never be answered while the test waits on status.
+	askParams, _ := json.Marshal(map[string]any{"to_run_id": "rt_1", "message": "correction"})
+	if err := writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "broker_ask", Params: askParams}); err != nil {
+		t.Fatalf("write ask: %v", err)
+	}
+	select {
+	case <-handler.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ask handler never entered")
+	}
+
+	// While the ask is in flight, the same connection must still answer status.
+	statusParams, _ := json.Marshal(map[string]any{"run_id": "rt_1"})
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 2, Method: "status", Params: statusParams})
+	resp := readRespForID(t, c, 2)
+	if resp.Error != nil {
+		t.Fatalf("status while ask in flight: %+v", resp.Error)
+	}
+
+	// Release the ask and confirm its response still arrives, correlated by ID.
+	close(handler.release)
+	askResp := readRespForID(t, c, 1)
+	if askResp.Error != nil {
+		t.Fatalf("ask response after release: %+v", askResp.Error)
+	}
+}
+
+// TestBrokerAskCancelledOnDisconnect verifies that a connection drop cancels
+// the in-flight server-side ask instead of leaving it parked for the broker's
+// full ask timeout.
+func TestBrokerAskCancelledOnDisconnect(t *testing.T) {
+	handler := &blockingAskHandler{
+		mockStableHandler: mockStableHandler{},
+		entered:           make(chan struct{}),
+		release:           make(chan struct{}),
+		finished:          make(chan struct{}),
+	}
+	state := NewState("run_1", "", 0)
+	s := NewServer(state)
+	s.SetStableHandler(handler)
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	c := mustDial(t, path)
+	askParams, _ := json.Marshal(map[string]any{"to_run_id": "rt_1", "message": "correction"})
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "broker_ask", Params: askParams})
+	select {
+	case <-handler.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ask handler never entered")
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		c.Close()
+		close(closed)
+	}()
+
+	select {
+	case <-handler.askCtx.Done():
+		// Cancellation propagated to the ask handler.
+	case <-time.After(2 * time.Second):
+		t.Fatal("ask context was not cancelled after disconnect")
+	}
+	_ = closed
+}
+
+// TestBrokerAskErrorCarriesMessageID verifies the ask error carries the
+// message_id so callers can cancel the pending ask.
+func TestBrokerAskErrorCarriesMessageID(t *testing.T) {
+	handler := &blockingAskHandler{
+		mockStableHandler: mockStableHandler{},
+		entered:           make(chan struct{}),
+		release:           make(chan struct{}),
+		finished:          make(chan struct{}),
+		askErr:            &AskError{MessageID: "ask123", Pending: false, Err: errors.New("ask timed out")},
+	}
+	state := NewState("run_1", "", 0)
+	s := NewServer(state)
+	s.SetStableHandler(handler)
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	c := mustDial(t, path)
+	defer c.Close()
+	askParams, _ := json.Marshal(map[string]any{"to_run_id": "rt_1", "message": "correction"})
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "broker_ask", Params: askParams})
+	select {
+	case <-handler.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ask handler never entered")
+	}
+	close(handler.release)
+	resp := readRespForID(t, c, 1)
+	if resp.Error == nil {
+		t.Fatal("expected ask error")
+	}
+	data, ok := resp.Error.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("error data type: %T", resp.Error.Data)
+	}
+	if id, _ := data["message_id"].(string); id != "ask123" {
+		t.Fatalf("message_id = %q, want ask123", id)
+	}
+	if pending, _ := data["pending"].(bool); pending {
+		t.Fatalf("pending = %v, want false", data["pending"])
+	}
+}
+
+// TestBrokerAskErrorCarriesPendingTrue pins the pending=true wire contract:
+// the ask tool's withdraw guidance keys off this value.
+func TestBrokerAskErrorCarriesPendingTrue(t *testing.T) {
+	handler := &blockingAskHandler{
+		mockStableHandler: mockStableHandler{},
+		entered:           make(chan struct{}),
+		release:           make(chan struct{}),
+		finished:          make(chan struct{}),
+		askErr:            &AskError{MessageID: "ask456", Pending: true, Err: errors.New("cleanup failed")},
+	}
+	state := NewState("run_1", "", 0)
+	s := NewServer(state)
+	s.SetStableHandler(handler)
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	c := mustDial(t, path)
+	defer c.Close()
+	askParams, _ := json.Marshal(map[string]any{"to_run_id": "rt_1", "message": "correction"})
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "broker_ask", Params: askParams})
+	select {
+	case <-handler.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ask handler never entered")
+	}
+	close(handler.release)
+	resp := readRespForID(t, c, 1)
+	if resp.Error == nil {
+		t.Fatal("expected ask error")
+	}
+	data, ok := resp.Error.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("error data type: %T", resp.Error.Data)
+	}
+	if pending, _ := data["pending"].(bool); !pending {
+		t.Fatalf("pending = %v, want true", data["pending"])
+	}
+}
+
+// readRespForID reads responses until one with the given ID arrives, skipping
+// out-of-order responses (e.g. a late ask reply).
+func readRespForID(t *testing.T, c net.Conn, id uint64) Response {
+	t.Helper()
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	scanner := bufio.NewScanner(c)
+	for scanner.Scan() {
+		var r Response
+		if err := json.Unmarshal(scanner.Bytes(), &r); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if num, ok := r.ID.(float64); ok && uint64(num) == id {
+			return r
+		}
+	}
+	t.Fatal("no response with matching id")
+	return Response{}
+}
+
+// expectNoResponse asserts that the connection produces no further response
+// frame within the window, pinning the async broker_ask response guards (no
+// double write, no response to notifications).
+func expectNoResponse(t *testing.T, c net.Conn, within time.Duration) {
+	t.Helper()
+	_ = c.SetReadDeadline(time.Now().Add(within))
+	scanner := bufio.NewScanner(c)
+	if scanner.Scan() {
+		t.Fatalf("unexpected response frame: %s", scanner.Text())
+	}
+	_ = c.SetReadDeadline(time.Time{})
+}
+
+// TestBrokerAskNotificationGetsNoResponse verifies the JSON-RPC notification
+// contract on the async path: an id-less broker_ask runs but produces no
+// response frame.
+func TestBrokerAskNotificationGetsNoResponse(t *testing.T) {
+	handler := &blockingAskHandler{
+		mockStableHandler: mockStableHandler{},
+		entered:           make(chan struct{}),
+		release:           make(chan struct{}),
+		finished:          make(chan struct{}),
+	}
+	state := NewState("run_1", "", 0)
+	s := NewServer(state)
+	s.SetStableHandler(handler)
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	c := mustDial(t, path)
+	defer c.Close()
+
+	askParams, _ := json.Marshal(map[string]any{"to_run_id": "rt_1", "message": "correction"})
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: nil, Method: "broker_ask", Params: askParams})
+	select {
+	case <-handler.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ask handler never entered")
+	}
+	// Let the handler complete while the connection is live so a regressed
+	// guard would produce its frame inside the assertion window.
+	close(handler.release)
+	select {
+	case <-handler.finished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ask handler never finished")
+	}
+	expectNoResponse(t, c, 150*time.Millisecond)
+}
+
+// TestBrokerAskWritesResponseExactlyOnce pins the asyncResponse guard: after
+// both the ask and status responses arrive, no duplicate frame follows.
+func TestBrokerAskWritesResponseExactlyOnce(t *testing.T) {
+	handler := &blockingAskHandler{
+		mockStableHandler: mockStableHandler{},
+		entered:           make(chan struct{}),
+		release:           make(chan struct{}),
+		finished:          make(chan struct{}),
+	}
+	state := NewState("run_1", "", 0)
+	s := NewServer(state)
+	s.SetStableHandler(handler)
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	c := mustDial(t, path)
+	defer c.Close()
+
+	askParams, _ := json.Marshal(map[string]any{"to_run_id": "rt_1", "message": "correction"})
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "broker_ask", Params: askParams})
+	select {
+	case <-handler.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ask handler never entered")
+	}
+	close(handler.release)
+	// The first frame on the wire must be the id-1 response: a regressed
+	// asyncResponse guard would emit an id-less marker frame first.
+	first := readNextResp(t, c)
+	if num, ok := first.ID.(float64); !ok || uint64(num) != 1 {
+		t.Fatalf("first response frame = %+v, want id 1 (no id-less frames allowed)", first)
+	}
+	expectNoResponse(t, c, 150*time.Millisecond)
+}
+
+// TestBrokerAskServerSideTimeout verifies the timeout_ms parameter: the ask
+// handler's context carries the requested deadline and expires into an error
+// response without needing an explicit release.
+func TestBrokerAskServerSideTimeout(t *testing.T) {
+	handler := &blockingAskHandler{
+		mockStableHandler: mockStableHandler{},
+		entered:           make(chan struct{}),
+		release:           make(chan struct{}),
+		finished:          make(chan struct{}),
+	}
+	state := NewState("run_1", "", 0)
+	s := NewServer(state)
+	s.SetStableHandler(handler)
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	c := mustDial(t, path)
+	defer c.Close()
+
+	askParams, _ := json.Marshal(map[string]any{"to_run_id": "rt_1", "message": "correction", "timeout_ms": 500})
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "broker_ask", Params: askParams})
+	select {
+	case <-handler.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ask handler never entered")
+	}
+	deadline, ok := handler.askCtxDeadline()
+	if !ok {
+		t.Fatal("ask context has no deadline")
+	}
+	if until := time.Until(deadline); until <= 0 || until > 500*time.Millisecond {
+		t.Fatalf("ask deadline = %v from now, want ~500ms", until)
+	}
+	resp := readRespForID(t, c, 1)
+	if resp.Error == nil {
+		t.Fatal("expected error from expired ask deadline")
+	}
+	if !strings.Contains(resp.Error.Message, "deadline exceeded") {
+		t.Fatalf("error message = %q, want deadline exceeded", resp.Error.Message)
+	}
+}
+
+// TestBrokerAskCancelledOnServerStop verifies that Stop cancels in-flight
+// asks, not just disconnects.
+func TestBrokerAskCancelledOnServerStop(t *testing.T) {
+	handler := &blockingAskHandler{
+		mockStableHandler: mockStableHandler{},
+		entered:           make(chan struct{}),
+		release:           make(chan struct{}),
+		finished:          make(chan struct{}),
+	}
+	state := NewState("run_1", "", 0)
+	s := NewServer(state)
+	s.SetStableHandler(handler)
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	c := mustDial(t, path)
+	defer c.Close()
+	askParams, _ := json.Marshal(map[string]any{"to_run_id": "rt_1", "message": "correction"})
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "broker_ask", Params: askParams})
+	select {
+	case <-handler.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ask handler never entered")
+	}
+
+	s.Stop()
+	select {
+	case <-handler.askCtx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("ask context was not cancelled by Stop")
+	}
+}
+
+// TestBrokerAskInFlightCap verifies the per-connection cap on concurrent
+// in-flight broker asks: excess asks are rejected without blocking the reader.
+func TestBrokerAskInFlightCap(t *testing.T) {
+	handler := &blockingAskHandler{
+		mockStableHandler: mockStableHandler{},
+		entered:           make(chan struct{}),
+		release:           make(chan struct{}),
+		finished:          make(chan struct{}),
+	}
+	state := NewState("run_1", "", 0)
+	s := NewServer(state)
+	s.SetStableHandler(handler)
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	c := mustDial(t, path)
+	defer c.Close()
+
+	askParams, _ := json.Marshal(map[string]any{"to_run_id": "rt_1", "message": "correction"})
+	var firstEntered bool
+	for id := 1; id <= 9; id++ {
+		_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: id, Method: "broker_ask", Params: askParams})
+		if !firstEntered {
+			select {
+			case <-handler.entered:
+				firstEntered = true
+			case <-time.After(2 * time.Second):
+				t.Fatal("ask handler never entered")
+			}
+		}
+	}
+	resp := readRespForID(t, c, 9)
+	if resp.Error == nil || !strings.Contains(resp.Error.Message, "too many in-flight broker asks") {
+		t.Fatalf("9th in-flight ask error = %+v, want cap rejection", resp.Error)
+	}
+	// The capped request must not block the connection: a status call answers.
+	statusParams, _ := json.Marshal(map[string]any{"run_id": "rt_1"})
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 10, Method: "status", Params: statusParams})
+	if r := readRespForID(t, c, 10); r.Error != nil {
+		t.Fatalf("status after cap rejection: %+v", r.Error)
+	}
+	close(handler.release)
+}
+
+// askCtxDeadline returns the recorded ask context's deadline safely.
+func (m *blockingAskHandler) askCtxDeadline() (time.Time, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.askCtx == nil {
+		return time.Time{}, false
+	}
+	return m.askCtx.Deadline()
+}
+
+// readNextResp reads exactly one response frame and fails on id-less frames,
+// unlike readRespForID which skips them. Use where the first frame's identity
+// matters (e.g. pinning the asyncResponse guard).
+func readNextResp(t *testing.T, c net.Conn) Response {
+	t.Helper()
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	scanner := bufio.NewScanner(c)
+	if !scanner.Scan() {
+		t.Fatal("no response frame")
+	}
+	var r Response
+	if err := json.Unmarshal(scanner.Bytes(), &r); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if r.ID == nil {
+		t.Fatalf("unexpected id-less response frame: %s", scanner.Bytes())
+	}
+	return r
+}
+
+// TestBrokerAskTimeoutClampedToMax verifies that an oversized timeout_ms is
+// clamped to maxAskTimeoutMS, keeping the server-side deadline below the
+// broker's own ask timeout.
+func TestBrokerAskTimeoutClampedToMax(t *testing.T) {
+	handler := &blockingAskHandler{
+		mockStableHandler: mockStableHandler{},
+		entered:           make(chan struct{}),
+		release:           make(chan struct{}),
+		finished:          make(chan struct{}),
+	}
+	state := NewState("run_1", "", 0)
+	s := NewServer(state)
+	s.SetStableHandler(handler)
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	c := mustDial(t, path)
+	defer c.Close()
+
+	askParams, _ := json.Marshal(map[string]any{"to_run_id": "rt_1", "message": "correction", "timeout_ms": 999_999_999})
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "broker_ask", Params: askParams})
+	select {
+	case <-handler.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ask handler never entered")
+	}
+	deadline, ok := handler.askCtxDeadline()
+	if !ok {
+		t.Fatal("ask context has no deadline")
+	}
+	until := time.Until(deadline)
+	if until <= 0 || until > time.Duration(maxAskTimeoutMS)*time.Millisecond {
+		t.Fatalf("ask deadline = %v from now, want clamped to <= %v", until, time.Duration(maxAskTimeoutMS)*time.Millisecond)
+	}
+	close(handler.release)
+	_ = readRespForID(t, c, 1)
+}
+
+// TestBrokerAskNegativeTimeoutRejected verifies the -32602 rejection for a
+// negative timeout_ms.
+func TestBrokerAskNegativeTimeoutRejected(t *testing.T) {
+	state := NewState("run_1", "", 0)
+	s := NewServer(state)
+	s.SetStableHandler(&mockStableHandler{})
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	c := mustDial(t, path)
+	defer c.Close()
+
+	askParams, _ := json.Marshal(map[string]any{"to_run_id": "rt_1", "message": "correction", "timeout_ms": -1})
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "broker_ask", Params: askParams})
+	resp := readRespForID(t, c, 1)
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Fatalf("error = %+v, want -32602 invalid params", resp.Error)
 	}
 }

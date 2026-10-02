@@ -1654,6 +1654,13 @@ func (s *Supervisor) ensureChildBrokerRun(child *childRuntime) string {
 
 // brokerPost sends an authenticated POST to the broker HTTP endpoint.
 func (s *Supervisor) brokerPost(path string, body map[string]any) ([]byte, error) {
+	return s.brokerPostContext(context.Background(), path, body)
+}
+
+// brokerPostContext sends an authenticated POST with a request context so
+// callers can abandon long-polls (e.g. wait_reply) when their own caller
+// gives up.
+func (s *Supervisor) brokerPostContext(ctx context.Context, path string, body map[string]any) ([]byte, error) {
 	runID, token := s.registerBrokerRun()
 	if runID == "" {
 		return nil, fmt.Errorf("broker not available")
@@ -1665,7 +1672,12 @@ func (s *Supervisor) brokerPost(path string, body map[string]any) ([]byte, error
 	if err != nil {
 		return nil, fmt.Errorf("marshal: %w", err)
 	}
-	resp, err := http.Post(url, "application/json", bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Errorf("broker %s: %w", path, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("broker %s: %w", path, err)
 	}
@@ -1719,7 +1731,7 @@ func (s *Supervisor) BrokerSend(fromRunID, toRunID, message, role string) error 
 	return err
 }
 
-func (s *Supervisor) BrokerAsk(toRunID, message, role string) (any, error) {
+func (s *Supervisor) BrokerAsk(ctx context.Context, toRunID, message, role string) (any, error) {
 	msgID := broker.MakeToken()[:16]
 	payload := map[string]any{
 		"id":            msgID,
@@ -1737,22 +1749,56 @@ func (s *Supervisor) BrokerAsk(toRunID, message, role string) (any, error) {
 		"type":        "agent_message",
 		"payload":     payload,
 	}
-	if _, err := s.brokerPost("/send", sendBody); err != nil {
-		return nil, fmt.Errorf("send ask: %w", err)
+	if _, err := s.brokerPostContext(ctx, "/send", sendBody); err != nil {
+		// A refused connection (or a missing broker registration) means the
+		// request never reached the broker, so no edge can exist.
+		err = fmt.Errorf("send ask: %w", err)
+		pending := true
+		if strings.Contains(err.Error(), "connection refused") || strings.Contains(err.Error(), "broker not available") {
+			pending = false
+		} else {
+			// A transport failure after the broker processed the send can leave
+			// the ask edge registered; attempt cleanup instead of assuming.
+			pending = s.withdrawAsk(msgID)
+		}
+		return nil, &control.AskError{MessageID: msgID, Pending: pending, Err: err}
 	}
-	// Wait for reply
-	replyBody, err := s.brokerPost("/wait_reply", map[string]any{
+	// Wait for reply. A failed wait (caller cancellation, broker error, or
+	// dropped connection) leaves or already cleaned the ask edge; withdraw
+	// and classify so the caller knows whether cancel can still act.
+	replyBody, err := s.brokerPostContext(ctx, "/wait_reply", map[string]any{
 		"waiting_for": msgID,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("wait for reply: %w", err)
+		return nil, &control.AskError{MessageID: msgID, Pending: s.withdrawAsk(msgID), Err: fmt.Errorf("wait for reply: %w", err)}
 	}
 	// Parse the reply
 	var result map[string]any
 	if err := json.Unmarshal(replyBody, &result); err != nil {
-		return nil, fmt.Errorf("parse reply: %w", err)
+		return nil, &control.AskError{MessageID: msgID, Pending: false, Err: fmt.Errorf("parse reply: %w", err)}
 	}
 	return result, nil
+}
+
+// withdrawAsk attempts to withdraw a pending ask and classifies whether the
+// edge may still exist on the broker. It returns true only when the cleanup
+// attempt failed for a reason other than the edge already being gone.
+func (s *Supervisor) withdrawAsk(msgID string) bool {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := s.brokerPostContext(cleanupCtx, "/cancel_message", map[string]any{
+		"cancel_message_id": msgID,
+	})
+	if err == nil {
+		return false
+	}
+	// The broker clears the edge itself when a cancelled wait_reply request
+	// disconnects; either a successful cancel or a 404 "no pending ask"
+	// response means the edge is already gone.
+	if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "no pending ask for this message id") {
+		return false
+	}
+	return true
 }
 
 func (s *Supervisor) BrokerPeers() (any, error) {

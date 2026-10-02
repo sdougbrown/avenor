@@ -1,11 +1,13 @@
 import { getSupervisorClient as realGetSupervisorClient } from './get-supervisor-client.js'
 import { findExternalRun } from './run-registry.js'
 import { findLocalRunByReference } from './run-resolution.js'
+import { RpcError } from '../client.js'
 
 export interface AskToolArgs {
   toRunId: string
   message: string
   supervisorId?: string
+  timeoutMs?: number
 }
 
 export interface AskResult {
@@ -39,10 +41,38 @@ async function executeAskTool(
       ? findLocalRunByReference(sup, args.toRunId)
       : findExternalRun(supervisorId, args.toRunId)
     const target = runInfo?.runtimeId ?? args.toRunId
-    const result = await client.brokerAsk(target, args.message)
-    return {
-      reply: extractReplyMessage(result),
-      from_run_id: (result.from_run_id as string) ?? '',
+    const timeoutMs =
+      args.timeoutMs !== undefined && Number.isFinite(args.timeoutMs) && args.timeoutMs > 0
+        ? args.timeoutMs
+        : undefined
+    try {
+      const result = await client.brokerAsk(target, args.message, undefined, timeoutMs)
+      return {
+        reply: extractReplyMessage(result),
+        from_run_id: (result.from_run_id as string) ?? '',
+      }
+    } catch (error) {
+      // A failed ask reports its message_id and whether the ask edge is still
+      // pending on the broker (withdrawable via avenor_cancel) or already
+      // withdrawn. Surface the matching guidance.
+      if (error instanceof RpcError && error.data && typeof error.data === 'object') {
+        const data = error.data as Record<string, unknown>
+        const messageId = data.message_id
+        if (typeof messageId === 'string' && messageId) {
+          const pending = data.pending
+          if (pending === false) {
+            throw new Error(
+              `ask failed (message_id: ${messageId} — the pending ask was already withdrawn): ${error.message}`,
+            )
+          }
+          // pending === true, or absent/unknown (legacy shape): the ask edge
+          // may still exist, so the caller can withdraw it.
+          throw new Error(
+            `ask failed (message_id: ${messageId} — pass to avenor_cancel to withdraw): ${error.message}`,
+          )
+        }
+      }
+      throw error
     }
   } finally {
     if (!isSingleton) {
