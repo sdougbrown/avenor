@@ -667,3 +667,79 @@ func containsAt(s, substr string) bool {
 	}
 	return false
 }
+
+// TestStore_ReducerRejectedCommandLeavesLogClean is the regression test for
+// issue #228: a command whose built events the reducer rejects must fail
+// without writing anything to the event log, and the instance must remain
+// loadable and advanceable. Before the reduce-before-append reorder in
+// applyLocked, the rejected batch was already fsynced and every later replay
+// failed on it, bricking the instance.
+func TestStore_ReducerRejectedCommandLeavesLogClean(t *testing.T) {
+	s := newStore(t)
+	wf := WorkflowID("wf-reject")
+	snap := mustInstantiate(t, s, wf)
+
+	beforeLines, err := readLines(s.eventsPath(wf))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// child_outcome against the entry activation: Apply builds the event batch
+	// (it checks only revision and idempotency), but the reducer requires the
+	// activation to be awaiting_child, which a fresh entry activation is not.
+	actID := snap.Instance.Activations[0].ID
+	childOutcomeCmd := func(key string) Command {
+		return Command{
+			Kind:             CommandChildOutcome,
+			ExpectedRevision: snap.Instance.Revision,
+			IdempotencyKey:   key,
+			Identity:         ExecutionIdentity{WorkflowID: wf, NodeID: "start", ActivationID: actID, AttemptID: "att-1"},
+			Outcome:          "done",
+		}
+	}
+	_, err = s.ApplyCommand(wf, childOutcomeCmd("child-outcome-reject"))
+	if err == nil {
+		t.Fatal("expected the reducer to reject the child_outcome command, got nil error")
+	}
+	// The rejection must come from the reduce phase, not an earlier command
+	// guard: otherwise the log-clean property would hold trivially and the
+	// test would no longer guard append-before-reduce reintroduction.
+	if !containsStr(err.Error(), "cannot resolve child outcome for activation in status") {
+		t.Fatalf("expected the reducer's own rejection, got %q", err)
+	}
+
+	afterLines, err := readLines(s.eventsPath(wf))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(afterLines) != len(beforeLines) {
+		t.Fatalf("event log grew from %d to %d lines on a rejected command", len(beforeLines), len(afterLines))
+	}
+	for i := range afterLines {
+		if i >= len(beforeLines) || string(afterLines[i]) != string(beforeLines[i]) {
+			t.Fatalf("event log changed at line %d on a rejected command", i)
+		}
+	}
+
+	// The instance must still load cleanly.
+	loaded, exists, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent after rejection: %v", err)
+	}
+	if !exists {
+		t.Fatal("instance disappeared after rejection")
+	}
+	if loaded.Instance.Revision != snap.Instance.Revision {
+		t.Fatalf("revision = %d, want unchanged %d", loaded.Instance.Revision, snap.Instance.Revision)
+	}
+
+	// And the command path must still work: a distinct command fails with the
+	// reducer's own rejection, not a replay failure from a poisoned log.
+	_, err = s.ApplyCommand(wf, childOutcomeCmd("child-outcome-retry"))
+	if err == nil {
+		t.Fatal("expected the retry to be rejected by the reducer, got nil error")
+	}
+	if !containsStr(err.Error(), "cannot resolve child outcome for activation in status") {
+		t.Fatalf("expected the retry to fail in the reduce phase, got %q", err)
+	}
+}
