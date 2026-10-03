@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -6352,6 +6353,39 @@ func TestWithdrawAskClassification(t *testing.T) {
 	}
 }
 
+// TestWithdrawAskTransportErrorBeforeSubstringCheck pins the ordering inside
+// withdrawAsk: a transport-level *url.Error must classify as cleanup-failed
+// even when its URL happens to contain the digits "404" (e.g. a broker port
+// like 44045). A substring-first implementation would read the "404" in the
+// URL as the broker's "no pending ask" response and wrongly report the edge
+// as already gone.
+func TestWithdrawAskTransportErrorBeforeSubstringCheck(t *testing.T) {
+	b := broker.New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	defer func() { _ = b.Stop() }()
+
+	for _, tc := range []struct {
+		name string
+		url  string
+	}{
+		{"url contains 404", "http://127.0.0.1:44045/cancel_message"},
+		{"url without 404", "http://127.0.0.1:5050/cancel_message"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stubbed := &Supervisor{broker: b}
+			// Consume the lazy client init so the stub client below survives.
+			stubbed.brokerHTTPClientOnce.Do(func() {})
+			stubbed.brokerHTTPClient = &http.Client{Transport: stubBrokerTransport{err: &url.Error{Op: "Post", URL: tc.url, Err: io.EOF}}}
+
+			if !stubbed.withdrawAsk("some-msg") {
+				t.Fatalf("withdrawAsk = false, want true: the transport error drew no HTTP response (URL %q), so the edge must be reported as possibly surviving", tc.url)
+			}
+		})
+	}
+}
+
 // TestBrokerAskSendFailureWithDeadBrokerNotPending verifies that a send
 // failure against an unreachable broker (request never delivered) reports the
 // ask as not pending, since no edge can have been registered.
@@ -6381,6 +6415,54 @@ func TestBrokerAskSendFailureWithDeadBrokerNotPending(t *testing.T) {
 	}
 }
 
+// startBrokerPrimeAndStop starts a real broker, registers a "target" run,
+// hands the broker and a fresh supervisor to prime for connection-pool setup,
+// stops the broker, and returns the supervisor for sends against the stopped
+// broker.
+func startBrokerPrimeAndStop(t *testing.T, prime func(sup *Supervisor, b *broker.Broker)) *Supervisor {
+	t.Helper()
+	b := broker.New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	sup := &Supervisor{broker: b}
+	prime(sup, b)
+	if _, err := b.CreateRun("target"); err != nil {
+		t.Fatalf("create target run: %v", err)
+	}
+	if err := b.Stop(); err != nil {
+		t.Fatalf("stop broker: %v", err)
+	}
+	return sup
+}
+
+// retryBrokerAskAfterStop sends BrokerAsk against a stopped broker up to 10
+// times (10ms apart), asserting on every attempt that the send fails with
+// *control.AskError and Pending=false. It stops early when verdict reports
+// done; a nil verdict runs all 10 attempts.
+func retryBrokerAskAfterStop(t *testing.T, sup *Supervisor, verdict func(attempt int, err error) bool) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for attempt := 0; attempt < 10; attempt++ {
+		_, err := sup.BrokerAsk(ctx, "target", "interruption", "agent")
+		if err == nil {
+			t.Fatalf("attempt %d: expected error from failed ask", attempt)
+		}
+		var askErr *control.AskError
+		if !errors.As(err, &askErr) {
+			t.Fatalf("attempt %d: error type = %T, want *control.AskError: %v", attempt, err, err)
+		}
+		if askErr.Pending {
+			t.Fatalf("attempt %d: AskError.Pending = true, want false when the broker is unreachable and the send drew no HTTP response; send error: %v", attempt, err)
+		}
+		if verdict != nil && verdict(attempt, err) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // TestBrokerAskSendFailureIsolatedConnPool pins the connection-pool isolation
 // behind the pending classification: a supervisor's broker HTTP client must
 // not reuse idle keep-alive connections pooled by another supervisor's
@@ -6398,49 +6480,26 @@ func TestBrokerAskSendFailureWithDeadBrokerNotPending(t *testing.T) {
 // refusal. If brokerPostContext regresses to a shared client, the victim can
 // inherit the stale connection and observe reset/EOF instead of refusal.
 func TestBrokerAskSendFailureIsolatedConnPool(t *testing.T) {
-	b := broker.New("")
-	if err := b.Start(); err != nil {
-		t.Fatalf("start broker: %v", err)
-	}
 	// A neighboring supervisor leaves an idle keep-alive connection to this
 	// broker's address in the HTTP connection pool its client uses.
-	neighbor := &Supervisor{broker: b}
-	if _, err := neighbor.BrokerPeers(); err != nil {
-		t.Fatalf("prime connection pool: %v", err)
-	}
-	if _, err := b.CreateRun("target"); err != nil {
-		t.Fatalf("create target run: %v", err)
-	}
-	if err := b.Stop(); err != nil {
-		t.Fatalf("stop broker: %v", err)
-	}
-
-	sup := &Supervisor{broker: b}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	sup := startBrokerPrimeAndStop(t, func(_ *Supervisor, b *broker.Broker) {
+		neighbor := &Supervisor{broker: b}
+		if _, err := neighbor.BrokerPeers(); err != nil {
+			t.Fatalf("prime connection pool: %v", err)
+		}
+	})
 	refused := false
-	for attempt := 0; attempt < 10 && !refused; attempt++ {
-		_, err := sup.BrokerAsk(ctx, "target", "interruption", "agent")
-		if err == nil {
-			t.Fatalf("attempt %d: expected error from failed ask", attempt)
-		}
-		var askErr *control.AskError
-		if !errors.As(err, &askErr) {
-			t.Fatalf("attempt %d: error type = %T, want *control.AskError: %v", attempt, err, err)
-		}
-		if askErr.Pending {
-			t.Fatalf("attempt %d: AskError.Pending = true, want false when the request never reached the broker; send error: %v", attempt, err)
-		}
+	retryBrokerAskAfterStop(t, sup, func(_ int, err error) bool {
 		if sendNeverReachedBroker(err) {
 			refused = true
-			continue
+			return true
 		}
 		// The victim's private pool is empty, so a non-refused failure means
 		// the dial was accepted and then reset — possible only in a narrow
 		// kernel window around the listener teardown. Retry before concluding
 		// the isolation regressed.
-		time.Sleep(10 * time.Millisecond)
-	}
+		return false
+	})
 	if !refused {
 		t.Fatal("no attempt failed with a fresh-dial refusal (a provably " +
 			"never-reached failure): the victim inherited a stale pooled connection " +
@@ -6483,41 +6542,18 @@ func (rt stubBrokerTransport) RoundTrip(*http.Request) (*http.Response, error) {
 // A reset or EOF reaches neither the sendNeverReachedBroker branch nor a
 // successful withdrawAsk, so Pending=false proves the crux branch ran.
 func TestBrokerAskSendFailureStaleConnNotPending(t *testing.T) {
-	b := broker.New("")
-	if err := b.Start(); err != nil {
-		t.Fatalf("start broker: %v", err)
-	}
-	sup := &Supervisor{broker: b}
-	if _, err := b.CreateRun("target"); err != nil {
-		t.Fatalf("create target run: %v", err)
-	}
 	// Prime this supervisor's private transport with idle keep-alive
 	// connections (withdrawAsk POSTs through brokerHTTPClientDo; the bogus
 	// message id draws a 404 and no edge is touched).
-	for i := 0; i < 5; i++ {
-		sup.withdrawAsk("no-such-message")
-	}
-	if err := b.Stop(); err != nil {
-		t.Fatalf("stop broker: %v", err)
-	}
+	sup := startBrokerPrimeAndStop(t, func(sup *Supervisor, _ *broker.Broker) {
+		for i := 0; i < 5; i++ {
+			sup.withdrawAsk("no-such-message")
+		}
+	})
+	retryBrokerAskAfterStop(t, sup, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	for attempt := 0; attempt < 10; attempt++ {
-		_, err := sup.BrokerAsk(ctx, "target", "interruption", "agent")
-		if err == nil {
-			t.Fatalf("attempt %d: expected error from failed ask", attempt)
-		}
-		var askErr *control.AskError
-		if !errors.As(err, &askErr) {
-			t.Fatalf("attempt %d: error type = %T, want *control.AskError: %v", attempt, err, err)
-		}
-		if askErr.Pending {
-			t.Fatalf("attempt %d: AskError.Pending = true, want false when the broker is unreachable and the send drew no HTTP response; send error: %v", attempt, err)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
 	for _, tc := range []struct {
 		name string
 		err  error
@@ -6527,7 +6563,7 @@ func TestBrokerAskSendFailureStaleConnNotPending(t *testing.T) {
 		{"unexpected eof", fmt.Errorf("read: %w", io.ErrUnexpectedEOF)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			stubbed := &Supervisor{broker: b}
+			stubbed := &Supervisor{broker: sup.broker}
 			// Consume the lazy client init so the stub client below survives.
 			stubbed.brokerHTTPClientOnce.Do(func() {})
 			stubbed.brokerHTTPClient = &http.Client{Transport: stubBrokerTransport{err: tc.err}}
