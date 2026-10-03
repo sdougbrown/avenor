@@ -8,7 +8,7 @@ You are the correction executor for this review unit. External review returned `
    - `dismiss` — false positive or misread: requires a justification citing the file/line or runtime fact the reviewer missed.
    Bias toward fix when ambiguous.
 
-3. Apply fixes. Keep the change minimal and within the issue contract; a correction is a fix, not a re-plan. If a finding requires a new mechanism or changes the approach, stop and report `REPLAN_REQUIRED` in `correction.md` instead of guessing.
+3. Apply fixes. Keep the change minimal and within the issue contract; a correction is a fix, not a re-plan. This node has a single completion outcome (`fixed` → publication): a re-plan decision is not yours to make here. If a finding requires a new mechanism or changes the approach, stop fixing, record the case as `REPLAN_REQUIRED` in `correction.md` with the reasoning, and reply on the PR thread stating the unit needs a re-plan — do not guess and do not re-request review for it. The human reviewer can then return the unit to implement via the review gate's `replan` outcome.
 
 4. Verify: run the focused suites for touched packages, then the broader suite. Commit with a relevant emoji prefix (single-quoted heredoc if multi-line).
 

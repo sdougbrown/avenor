@@ -29,15 +29,21 @@ intake            [manual]   verbatim issue body + base SHA
       failed                   → correction
       replan                   → implement (re-implement from the issue)
       checkpoint               → advisor [manual checkpoint gate]
+                                 proceed   → correction
+                                 abandoned → workflow ends without merging
 ```
 
 The correction prompt carries the full address-pr discipline: paginated
 comment fetch, fix/accept/dismiss triage with justifications, per-thread
 replies with the `👾 AI Agent` prefix, resolve-only-fixed-threads, one
 top-level summary, re-request with the reviewer's bare trigger text, and a
-3-iteration cap per run. The review gate re-parks on each new exact head, so
-the loop repeats until the verdict is clean; the human merge gate always
-stays human.
+3-iteration cap per run. The correction node has a single completion outcome
+(`fixed`): when a finding needs a re-plan rather than a fix, the agent
+reports `REPLAN_REQUIRED` in `correction.md` and on the PR thread, and the
+human reviewer — not the correction run — routes the unit back to implement
+via the review gate's `replan` outcome. The review gate re-parks on each new
+exact head, so the loop repeats until the verdict is clean; the human merge
+gate always stays human.
 
 ## Usage
 

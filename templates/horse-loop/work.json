@@ -175,13 +175,14 @@
       "dependencies": ["review"],
       "action": {
         "type": "manual",
-        "instructions": "A manual checkpoint gate reached when review reports a checkpoint. A human or advisor decides whether to proceed to correction or abandon the work unit. Complete this node with the decision, then follow the declared branch."
+        "instructions": "A manual checkpoint gate reached when review reports a checkpoint. A human or advisor decides whether to proceed to correction or abandon the work unit. Complete this node with outcome `proceed` to route to correction, or outcome `abandoned` to terminate the workflow without merging."
       },
       "outputs": [
         { "id": "advisor_decision", "name": "Advisor decision", "type": "string" }
       ],
       "completion": { "kind": "explicit" },
       "skip_rule": { "authorities": ["human"], "reason_required": true },
+      "outcomes": [{ "name": "abandoned", "terminal": true }],
       "branches": { "proceed": "correction" }
     },
     {
