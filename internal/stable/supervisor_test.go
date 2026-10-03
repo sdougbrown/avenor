@@ -6384,12 +6384,12 @@ func TestBrokerAskSendFailureWithDeadBrokerNotPending(t *testing.T) {
 // TestBrokerAskSendFailureIsolatedConnPool pins the connection-pool isolation
 // behind the pending classification: a supervisor's broker HTTP client must
 // not reuse idle keep-alive connections pooled by another supervisor's
-// client. The neighbor primes the shared pool (brokerGet still goes through
-// http.DefaultClient) with a connection to the broker; after the broker
-// stops, a victim with a private transport reaches it with a fresh dial, so
-// its send failure reports "connection refused". A victim that inherited the
-// neighbor's stale connection would surface "connection reset" or EOF
-// instead — that is the failure shape this test guards against.
+// client. The neighbor primes its own private broker client's pool with a
+// connection to the broker; after the broker stops, a victim with a private
+// transport reaches it with a fresh dial, so its send failure reports
+// "connection refused". A victim that inherited the neighbor's stale
+// connection would surface "connection reset" or EOF instead — that is the
+// failure shape this test guards against.
 //
 // The transport's readLoop usually notices the server-side close and drains
 // the stale connection before the victim's first attempt, so a reset on an
@@ -6431,7 +6431,7 @@ func TestBrokerAskSendFailureIsolatedConnPool(t *testing.T) {
 		if askErr.Pending {
 			t.Fatalf("attempt %d: AskError.Pending = true, want false when the request never reached the broker; send error: %v", attempt, err)
 		}
-		if strings.Contains(err.Error(), "connection refused") {
+		if sendNeverReachedBroker(err) {
 			refused = true
 			continue
 		}
@@ -6442,8 +6442,8 @@ func TestBrokerAskSendFailureIsolatedConnPool(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if !refused {
-		t.Fatal("no attempt failed with a fresh-dial " +
-			"\"connection refused\": the victim inherited a stale pooled connection " +
+		t.Fatal("no attempt failed with a fresh-dial refusal (a provably " +
+			"never-reached failure): the victim inherited a stale pooled connection " +
 			"or the send did not fail as expected")
 	}
 	// Behavioral pin on the isolation itself: the victim must have installed
@@ -6524,6 +6524,7 @@ func TestBrokerAskSendFailureStaleConnNotPending(t *testing.T) {
 	}{
 		{"connection reset", &net.OpError{Op: "read", Net: "tcp", Err: errors.New("connection reset by peer")}},
 		{"eof", io.EOF},
+		{"unexpected eof", fmt.Errorf("read: %w", io.ErrUnexpectedEOF)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stubbed := &Supervisor{broker: b}
@@ -6543,6 +6544,40 @@ func TestBrokerAskSendFailureStaleConnNotPending(t *testing.T) {
 				t.Fatalf("AskError.Pending = true, want false for an established-connection failure (%v) against an unreachable broker; send error: %v", tc.err, err)
 			}
 		})
+	}
+}
+
+// TestBrokerAskSendTransportFailureReachableBrokerWithdraws pins the
+// withdrawAsk fallback: a transport failure (reset/EOF) against a broker
+// that is still accepting connections must not classify as never-delivered,
+// because the send may have reached the broker before the connection broke.
+// The classification must therefore fall through to withdrawAsk; the stub
+// transport fails the withdraw POST too, so withdrawAsk reports the edge as
+// possibly surviving and Pending stays true. If the !brokerReachable() guard
+// were dropped from the classification gate, this case would short-circuit
+// to Pending=false and the test would fail.
+func TestBrokerAskSendTransportFailureReachableBrokerWithdraws(t *testing.T) {
+	b := broker.New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	defer func() { _ = b.Stop() }()
+
+	stubbed := &Supervisor{broker: b}
+	// Consume the lazy client init so the stub client below survives.
+	stubbed.brokerHTTPClientOnce.Do(func() {})
+	stubbed.brokerHTTPClient = &http.Client{Transport: stubBrokerTransport{err: &net.OpError{Op: "read", Net: "tcp", Err: errors.New("connection reset by peer")}}}
+
+	_, err := stubbed.BrokerAsk(context.Background(), "target", "interruption", "agent")
+	if err == nil {
+		t.Fatal("expected error from failed ask")
+	}
+	var askErr *control.AskError
+	if !errors.As(err, &askErr) {
+		t.Fatalf("error type = %T, want *control.AskError: %v", err, err)
+	}
+	if !askErr.Pending {
+		t.Fatalf("AskError.Pending = false, want true when the send drew no HTTP response against a reachable broker and the withdraw cleanup also failed; send error: %v", err)
 	}
 }
 

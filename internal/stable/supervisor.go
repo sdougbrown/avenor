@@ -1752,7 +1752,11 @@ func (s *Supervisor) brokerGet(path string) ([]byte, error) {
 		return nil, fmt.Errorf("broker not available")
 	}
 	url := fmt.Sprintf("%s%s?run_id=%s&token=%s", s.brokerURL(), path, url.QueryEscape(runID), url.QueryEscape(token))
-	resp, err := http.Get(url)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("broker %s: %w", path, err)
+	}
+	resp, err := s.brokerHTTPClientDo(req)
 	if err != nil {
 		return nil, fmt.Errorf("broker %s: %w", path, err)
 	}
@@ -1888,6 +1892,14 @@ func (s *Supervisor) withdrawAsk(msgID string) bool {
 	})
 	if err == nil {
 		return false
+	}
+	// A transport-level failure drew no HTTP response, so it cannot be the
+	// broker's 404 response; report the edge as possibly surviving. This check
+	// must come first: the substring match below would otherwise also match
+	// the digits "404" inside the request URL (e.g. a broker port like 44045).
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return true
 	}
 	// The broker clears the edge itself when a cancelled wait_reply request
 	// disconnects; either a successful cancel or a 404 "no pending ask"
