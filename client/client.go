@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -108,6 +109,13 @@ func (c *Client) Close() error {
 }
 
 func (c *Client) Call(method string, params any, result any) error {
+	return c.call(method, params, result, 0)
+}
+
+// call issues a request and waits for the response. A positive wait bounds
+// the response wait; zero uses the 30s default; a negative wait waits
+// indefinitely (for server-side long-poll methods such as wait_turn).
+func (c *Client) call(method string, params any, result any, wait time.Duration) error {
 	c.mu.Lock()
 	c.nextID++
 	id := c.nextID
@@ -144,6 +152,16 @@ func (c *Client) Call(method string, params any, result any) error {
 	}
 	c.mu.Unlock()
 
+	if wait == 0 {
+		wait = 30 * time.Second
+	}
+	var timerC <-chan time.Time
+	if wait > 0 {
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		timerC = timer.C
+	}
+
 	var resp Response
 	select {
 	case r, ok := <-respCh:
@@ -151,7 +169,7 @@ func (c *Client) Call(method string, params any, result any) error {
 			return fmt.Errorf("read response: connection closed")
 		}
 		resp = r
-	case <-time.After(30 * time.Second):
+	case <-timerC:
 		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
@@ -287,6 +305,35 @@ func (c *Client) Identity() (string, error) {
 		return "", err
 	}
 	return result.Token, nil
+}
+
+// ErrWaitTurnTimeout reports that a wait_turn request timed out before the
+// runtime's turn settled (control.codeWaitTurnTimeout).
+var ErrWaitTurnTimeout = errors.New("wait_turn: timeout before the runtime's turn settled")
+
+// codeWaitTurnTimeout mirrors control.codeWaitTurnTimeout; the client cannot
+// import the control package without an import cycle.
+const codeWaitTurnTimeout = -32020
+
+// WaitTurn blocks until the runtime's next running→idle transition settles:
+// an in-flight turn is waited out, and a turn prompted while the runtime is
+// idle is covered too. A non-positive timeout waits indefinitely. The result
+// carries the turn's stop_reason, the complete final_output (not the bounded
+// status preview), and session_id.
+func (c *Client) WaitTurn(runtimeID string, timeout time.Duration) (map[string]any, error) {
+	params := map[string]any{"runtime_id": runtimeID}
+	wait := time.Duration(-1)
+	if timeout > 0 {
+		params["timeout_ms"] = timeout.Milliseconds()
+		// The server ends the wait at the timeout; allow it delivery margin.
+		wait = timeout + 10*time.Second
+	}
+	var result map[string]any
+	err := c.call("wait_turn", params, &result, wait)
+	if rpcErr, ok := err.(*RPCError); ok && rpcErr.Code == codeWaitTurnTimeout {
+		return result, ErrWaitTurnTimeout
+	}
+	return result, err
 }
 
 // Status returns the snapshot for the one-shot run or a runtime if runtimeID is set.

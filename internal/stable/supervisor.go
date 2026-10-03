@@ -222,6 +222,14 @@ type childRuntime struct {
 	activeAttempts int
 	promptCh       chan struct{}
 	promptQueue    []string
+	// turnWaiters are wait_turn callers blocked on the runtime's next
+	// running→idle transition. Each waiter registers a channel under child.mu;
+	// settleTurnLocked closes them when the active turn settles, so a settle
+	// can never be missed by a waiter that registered before it.
+	turnWaiters []chan struct{}
+	// lastStopReason mirrors the stop_reason of the most recent session.end
+	// observed on this runtime's event path (runtimeFanoutWriter.writeLocked).
+	lastStopReason string
 	latestSeq      int64
 	usage          map[string]any
 	// finalOutput is a bounded status preview; fullFinalOutput is returned
@@ -2933,10 +2941,15 @@ func (s *Supervisor) endWorkflowAttempt(child *childRuntime, provider runtime.Pr
 		// become invalid when it closes.
 		child.session = runtime.Session{SessionID: sessionID}
 	}
+	prevActive := child.active
 	child.active = child.activeAttempts > 0
 	if !child.active {
 		child.phase = ""
 		child.phaseLabel = ""
+		if prevActive {
+			// The last parallel phase settled (running→idle).
+			child.settleTurnLocked()
+		}
 	}
 	child.mu.Unlock()
 }
@@ -2954,6 +2967,7 @@ func (s *Supervisor) finalizeWorkflowChild(child *childRuntime, final workflowSe
 	child.rosterEntry = final.Identity.RosterEntry
 	child.activeAttempts = 0
 	child.active = false
+	child.settleTurnLocked()
 	child.mu.Unlock()
 }
 
@@ -3009,6 +3023,8 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 		child.interruptFn = nil
 		child.phase = ""
 		child.phaseLabel = ""
+		// The turn settled (running→idle): wake wait_turn callers.
+		child.settleTurnLocked()
 		child.mu.Unlock()
 	}()
 
@@ -3612,6 +3628,19 @@ func (s *Supervisor) clearRuntimePermissionOptions(runtimeID string) {
 	s.control.ClearPermissionClaims(runtimeID)
 }
 
+// settleTurnLocked wakes wait_turn callers that registered before the
+// runtime's current turn settled. Callers must hold child.mu.
+func (child *childRuntime) settleTurnLocked() {
+	if len(child.turnWaiters) == 0 {
+		return
+	}
+	waiters := child.turnWaiters
+	child.turnWaiters = nil
+	for _, wait := range waiters {
+		close(wait)
+	}
+}
+
 // complete publishes terminal completion after the caller has finished all
 // teardown. It is safe for reservation rollback and a child goroutine to race.
 func (child *childRuntime) complete() {
@@ -3619,6 +3648,10 @@ func (child *childRuntime) complete() {
 		child.releaseTreeToken()
 		child.mu.Lock()
 		child.completed = true
+		// Safety net for paths that end the runtime without a turn-settle
+		// transition (e.g. an aborted start attempt); waiters report the
+		// terminal snapshot instead of blocking on a done channel race.
+		child.settleTurnLocked()
 		child.mu.Unlock()
 		close(child.done)
 	})
@@ -4109,6 +4142,9 @@ func (w *runtimeFanoutWriter) writeLocked(ev events.Event) error {
 			w.child.permission = nil
 		case "session.end":
 			w.child.phase = "done"
+			if stopReason, _ := presentation.Fields["stop_reason"].(string); stopReason != "" {
+				w.child.lastStopReason = stopReason
+			}
 			if finalOutput, _ := presentation.Fields["final_output"].(string); finalOutput != "" {
 				w.child.finalOutput = finalOutput
 			}
@@ -4285,6 +4321,73 @@ func (s *Supervisor) RuntimeResult(rtID string) (any, error) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	return map[string]any{"final_output": rt.fullFinalOutput}, nil
+}
+
+// RuntimeWaitTurn blocks until the runtime's next running→idle transition
+// settles: an in-flight turn is waited out, and a turn prompted while the
+// runtime is idle is covered too — a pre-existing idle state never returns
+// on its own. The result mirrors the supervisor's own runtime state (the
+// durable fullFinalOutput, the session.end stop_reason, and the session ID)
+// rather than any event-delivery stream. A non-positive timeout waits
+// indefinitely; control.ErrWaitTurnTimeout is returned when the timeout
+// elapses first.
+func (s *Supervisor) RuntimeWaitTurn(rtID string, timeout time.Duration) (any, error) {
+	s.controlMu.Lock()
+	child := s.runtimes[rtID]
+	s.controlMu.Unlock()
+	if child == nil {
+		return nil, fmt.Errorf("runtime %q not found", rtID)
+	}
+
+	child.mu.Lock()
+	if child.completed {
+		// An ended runtime has no further turn to observe.
+		result := s.waitTurnResultLocked(child)
+		child.mu.Unlock()
+		return result, nil
+	}
+	// Register before deciding what to wait for: a settle cannot slip between
+	// the state snapshot and the wait.
+	wait := make(chan struct{})
+	child.turnWaiters = append(child.turnWaiters, wait)
+	child.mu.Unlock()
+
+	var timerC <-chan time.Time
+	if timeout > 0 {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		timerC = timer.C
+	}
+	select {
+	case <-wait:
+	case <-timerC:
+		child.mu.Lock()
+		for i, w := range child.turnWaiters {
+			if w == wait {
+				child.turnWaiters = append(child.turnWaiters[:i], child.turnWaiters[i+1:]...)
+				break
+			}
+		}
+		child.mu.Unlock()
+		return nil, control.ErrWaitTurnTimeout
+	case <-child.done:
+		// The runtime ended without a turn settling since registration (e.g.
+		// an aborted start attempt); report the terminal snapshot.
+	}
+	child.mu.Lock()
+	defer child.mu.Unlock()
+	return s.waitTurnResultLocked(child), nil
+}
+
+// waitTurnResultLocked snapshots the turn result from the supervisor's own
+// runtime state. Callers must hold child.mu.
+func (s *Supervisor) waitTurnResultLocked(child *childRuntime) map[string]any {
+	return map[string]any{
+		"runtime_id":   child.id,
+		"session_id":   child.session.SessionID,
+		"stop_reason":  child.lastStopReason,
+		"final_output": child.fullFinalOutput,
+	}
 }
 
 func (s *Supervisor) RuntimeCancel(rtID string) error {

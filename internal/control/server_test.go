@@ -1588,6 +1588,10 @@ func (m *mockStableHandler) RuntimeStatus(runtimeID string) (any, error) {
 
 func (m *mockStableHandler) RuntimeCancel(runtimeID string) error { return nil }
 
+func (m *mockStableHandler) RuntimeWaitTurn(runtimeID string, timeout time.Duration) (any, error) {
+	return map[string]any{"runtime_id": runtimeID}, nil
+}
+
 func (m *mockStableHandler) RuntimePrompt(runtimeID, text, requestID string) error { return nil }
 
 func (m *mockStableHandler) RuntimeAnswerPermission(runtimeID, requestID, optionID, message string) error {

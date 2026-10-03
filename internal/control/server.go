@@ -97,6 +97,7 @@ type StableHandler interface {
 	List() any
 	Shutdown(mode string) error
 	RuntimeStatus(runtimeID string) (any, error)
+	RuntimeWaitTurn(runtimeID string, timeout time.Duration) (any, error)
 	RuntimeCancel(runtimeID string) error
 	RuntimePrompt(runtimeID, text, requestID string) error
 	RuntimeAnswerPermission(runtimeID, requestID, optionID, message string) error
@@ -150,9 +151,13 @@ type connState struct {
 	isOwner bool
 
 	// ctx is cancelled when the connection drops or the server stops, so
-	// long-running handlers (broker asks) do not outlive their client.
+	// long-running handlers (broker asks, wait_turn) do not outlive their client.
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	// waitSlots bounds concurrent in-flight wait_turn requests per connection
+	// so a single owner cannot accumulate unbounded parked goroutines.
+	waitSlots chan struct{}
 
 	// askSlots bounds concurrent in-flight broker asks on this connection.
 	askSlots chan struct{}
@@ -959,7 +964,7 @@ func (s *ControlServer) acceptLoop() {
 			continue
 		}
 		seq++
-		cs := &connState{id: seq, server: s, conn: conn, askSlots: make(chan struct{}, maxInflightAsksPerConn)}
+		cs := &connState{id: seq, server: s, conn: conn, askSlots: make(chan struct{}, maxInflightAsksPerConn), waitSlots: make(chan struct{}, maxInflightAsksPerConn)}
 		cs.ctx, cs.cancel = context.WithCancel(context.Background())
 		s.mu.Lock()
 		s.conns[cs] = struct{}{}
@@ -1005,6 +1010,15 @@ const maxInflightAsksPerConn = 8
 // below the broker's DefaultAskTimeout so a clamped value expires on the
 // server (with structured error data) instead of racing the broker's 504.
 const maxAskTimeoutMS = int64(broker.DefaultAskTimeout-5*time.Second) / int64(time.Millisecond)
+
+// codeWaitTurnTimeout marks a wait_turn request whose timeout_ms elapsed
+// before the runtime's turn settled. Clients match this code to a typed
+// timeout error (client.ErrWaitTurnTimeout).
+const codeWaitTurnTimeout = -32020
+
+// ErrWaitTurnTimeout is returned by StableHandler.RuntimeWaitTurn when the
+// requested timeout elapsed before the runtime's turn settled.
+var ErrWaitTurnTimeout = errors.New("wait_turn: timeout before the runtime's turn settled")
 
 // asyncResponse marks a request dispatched to a background goroutine; the
 // response is written when the goroutine completes, so handleConn must not
@@ -1086,6 +1100,49 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 			result = append(result, eventToMap(ev))
 		}
 		return success(req.ID, map[string]any{"runtime_id": p.RuntimeID, "events": result, "latest_seq": latestSeq})
+	case "wait_turn":
+		if s.stableHandler == nil {
+			return failure(req.ID, -32601, "method not found", nil)
+		}
+		var p struct {
+			RuntimeID string `json:"runtime_id"`
+			TimeoutMS int64  `json:"timeout_ms"`
+		}
+		if len(req.Params) > 0 {
+			if err := json.Unmarshal(req.Params, &p); err != nil {
+				return failure(req.ID, -32602, "invalid params", map[string]any{"detail": err.Error()})
+			}
+		}
+		if p.RuntimeID == "" {
+			return failure(req.ID, -32602, "invalid params", map[string]any{"required": []string{"runtime_id"}})
+		}
+		// Bound concurrent in-flight waits per connection so one owner cannot
+		// accumulate unbounded parked goroutines.
+		select {
+		case c.waitSlots <- struct{}{}:
+		default:
+			return failure(req.ID, -32000, "too many in-flight wait_turn requests on this connection", nil)
+		}
+		// Run the wait on a background goroutine bound to the connection
+		// context: a blocked wait must not stall subsequent requests on this
+		// connection, and a disconnect cancels the pending wait.
+		go func() {
+			defer func() { <-c.waitSlots }()
+			result, err := s.stableHandler.RuntimeWaitTurn(p.RuntimeID, time.Duration(p.TimeoutMS)*time.Millisecond)
+			if req.ID == nil || c.ctx.Err() != nil {
+				return
+			}
+			if err != nil {
+				code := -32000
+				if errors.Is(err, ErrWaitTurnTimeout) {
+					code = codeWaitTurnTimeout
+				}
+				_ = c.writeJSON(failure(req.ID, code, err.Error(), nil))
+				return
+			}
+			_ = c.writeJSON(success(req.ID, result))
+		}()
+		return asyncResponse
 	case "cancel":
 		if rtID := runtimeIDFromParams(req.Params); rtID != "" {
 			if s.stableHandler == nil {
