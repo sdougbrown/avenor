@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -494,6 +495,8 @@ type Supervisor struct {
 	brokerRunID                   string
 	brokerToken                   string
 	brokerRunMu                   sync.Mutex
+	brokerHTTPClientOnce          sync.Once
+	brokerHTTPClient              *http.Client // private transport: never reuses another broker's pooled connections
 	newProviderFunc               func(startOpts runtime.StartOptions, backend string) (runtime.Provider, error)
 	sessionIdentityMu             sync.RWMutex
 	sessionIdentities             map[string]sessionIdentityEntry
@@ -1691,6 +1694,22 @@ func (s *Supervisor) brokerPost(path string, body map[string]any) ([]byte, error
 	return s.brokerPostContext(context.Background(), path, body)
 }
 
+// brokerHTTPClientDo sends req through a client whose transport is private
+// to this supervisor. Sharing http.DefaultClient here pools idle keep-alive
+// connections by host:port across every supervisor in the process, so a
+// connection left behind by one broker can be reused against another (or
+// against a recycled loopback port) and surface as EOF or connection-reset
+// instead of connection refused — which flips the ask pending classification
+// in BrokerAsk and withdrawAsk.
+func (s *Supervisor) brokerHTTPClientDo(req *http.Request) (*http.Response, error) {
+	s.brokerHTTPClientOnce.Do(func() {
+		s.brokerHTTPClient = &http.Client{
+			Transport: http.DefaultTransport.(*http.Transport).Clone(),
+		}
+	})
+	return s.brokerHTTPClient.Do(req)
+}
+
 // brokerPostContext sends an authenticated POST with a request context so
 // callers can abandon long-polls (e.g. wait_reply) when their own caller
 // gives up.
@@ -1711,7 +1730,7 @@ func (s *Supervisor) brokerPostContext(ctx context.Context, path string, body ma
 		return nil, fmt.Errorf("broker %s: %w", path, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := s.brokerHTTPClientDo(req)
 	if err != nil {
 		return nil, fmt.Errorf("broker %s: %w", path, err)
 	}
@@ -1733,7 +1752,11 @@ func (s *Supervisor) brokerGet(path string) ([]byte, error) {
 		return nil, fmt.Errorf("broker not available")
 	}
 	url := fmt.Sprintf("%s%s?run_id=%s&token=%s", s.brokerURL(), path, url.QueryEscape(runID), url.QueryEscape(token))
-	resp, err := http.Get(url)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("broker %s: %w", path, err)
+	}
+	resp, err := s.brokerHTTPClientDo(req)
 	if err != nil {
 		return nil, fmt.Errorf("broker %s: %w", path, err)
 	}
@@ -1784,15 +1807,24 @@ func (s *Supervisor) BrokerAsk(ctx context.Context, toRunID, message, role strin
 		"payload":     payload,
 	}
 	if _, err := s.brokerPostContext(ctx, "/send", sendBody); err != nil {
-		// A refused connection (or a missing broker registration) means the
-		// request never reached the broker, so no edge can exist.
 		err = fmt.Errorf("send ask: %w", err)
 		pending := true
-		if strings.Contains(err.Error(), "connection refused") || strings.Contains(err.Error(), "broker not available") {
+		switch {
+		case sendNeverReachedBroker(err):
+			// The connection never carried the request to the broker, so no
+			// edge can have been registered.
 			pending = false
-		} else {
-			// A transport failure after the broker processed the send can leave
-			// the ask edge registered; attempt cleanup instead of assuming.
+		case isTransportFailure(err) && !s.brokerReachable():
+			// The send drew no HTTP response and the broker is now
+			// unreachable: its in-memory edge registry cannot hold this ask.
+			// A just-stopped broker can also reset the connection instead of
+			// refusing it, so refusal alone is not the only never-delivered
+			// signal.
+			pending = false
+		default:
+			// A transport failure after the broker processed the send can
+			// leave the ask edge registered; attempt cleanup instead of
+			// assuming.
 			pending = s.withdrawAsk(msgID)
 		}
 		return nil, &control.AskError{MessageID: msgID, Pending: pending, Err: err}
@@ -1814,6 +1846,41 @@ func (s *Supervisor) BrokerAsk(ctx context.Context, toRunID, message, role strin
 	return result, nil
 }
 
+// sendNeverReachedBroker reports whether a failed ask send provably never
+// reached the broker: the dial itself failed (the connection was never
+// established), or there was no broker to talk to at all.
+func sendNeverReachedBroker(err error) bool {
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Op == "dial" {
+		return true
+	}
+	return strings.Contains(err.Error(), "connection refused") || strings.Contains(err.Error(), "broker not available")
+}
+
+// isTransportFailure reports whether a request failed at the connection level
+// without ever drawing an HTTP response.
+func isTransportFailure(err error) bool {
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return true
+	}
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+}
+
+// brokerReachable reports whether the broker's HTTP endpoint currently
+// accepts TCP connections.
+func (s *Supervisor) brokerReachable() bool {
+	if s.broker == nil {
+		return false
+	}
+	conn, err := net.DialTimeout("tcp", s.broker.Addr(), 250*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
 // withdrawAsk attempts to withdraw a pending ask and classifies whether the
 // edge may still exist on the broker. It returns true only when the cleanup
 // attempt failed for a reason other than the edge already being gone.
@@ -1825,6 +1892,14 @@ func (s *Supervisor) withdrawAsk(msgID string) bool {
 	})
 	if err == nil {
 		return false
+	}
+	// A transport-level failure drew no HTTP response, so it cannot be the
+	// broker's 404 response; report the edge as possibly surviving. This check
+	// must come first: the substring match below would otherwise also match
+	// the digits "404" inside the request URL (e.g. a broker port like 44045).
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return true
 	}
 	// The broker clears the edge itself when a cancelled wait_reply request
 	// disconnects; either a successful cancel or a 404 "no pending ask"
