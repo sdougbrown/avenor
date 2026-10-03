@@ -1,0 +1,13 @@
+{
+  "template_id": "horse-loop-work",
+  "template_version": "1.0.0",
+  "params": {
+    "worktree": "avenor-issue-272",
+    "worktree_path": "/home/example/Code/_wt/avenor-272-my-issue"
+  },
+  "metadata": {
+    "issue": "272",
+    "title": "Example issue title",
+    "base_sha": "a3fd960"
+  }
+}
