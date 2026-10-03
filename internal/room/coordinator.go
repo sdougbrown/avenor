@@ -2,8 +2,11 @@ package room
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -50,6 +53,23 @@ type Room struct {
 
 	mu      sync.Mutex
 	pending map[string]*pendingTurn
+	// Mutation-arbiter state for the current operator turn. The gate is armed
+	// for the fan-out window: every head prompted from the same pre-turn
+	// snapshot works against the same revision, so a write that lands after a
+	// peer's turn finished is still a lost update. The gate lifts at the join,
+	// before governor-driven react turns (those heads saw the mutation notice).
+	writeHolder   string
+	deniedOnce    map[string]bool
+	arbiterActive bool
+	revision      int64
+	// lastTool tracks each runtime's most recent tool.call title so
+	// permission.request events (whose tool field is best-effort and often
+	// empty for confirm dialogs) can be attributed to the gated tool.
+	lastTool map[string]string
+	// workspaceFingerprint is the last observed git working-tree state; a
+	// change between turn boundaries counts as a mutation regardless of which
+	// tool (write tool or bash) caused it.
+	workspaceFingerprint string
 }
 
 type pendingTurn struct {
@@ -92,11 +112,13 @@ func New(c *client.Client, opts Options) (*Room, error) {
 		opts.Governor = MarkerGovernor{}
 	}
 	return &Room{
-		client:    c,
-		log:       log,
-		opts:      opts,
-		byRuntime: map[string]*Head{},
-		pending:   map[string]*pendingTurn{},
+		client:     c,
+		log:        log,
+		opts:       opts,
+		byRuntime:  map[string]*Head{},
+		pending:    map[string]*pendingTurn{},
+		deniedOnce: map[string]bool{},
+		lastTool:   map[string]string{},
 	}, nil
 }
 
@@ -107,6 +129,13 @@ func (r *Room) LogPath() string { return filepath.Join(r.opts.Dir, ".room", "log
 // bootstrap orientation turn so each head enters the room with the room
 // contract already in its native history.
 func (r *Room) Start(ctx context.Context, specs []HeadSpec) error {
+	if _, err := InstallArbiterExtension(r.opts.Dir); err != nil {
+		return fmt.Errorf("install arbiter extension: %w", err)
+	}
+	if err := EnsurePiTrust(r.opts.Dir); err != nil {
+		return fmt.Errorf("grant project trust: %w", err)
+	}
+	_, _ = r.log.Append("room", System, "workspace .pi extension room-arbiter.ts installed and project trust granted", VisibilityRoom, nil, 0)
 	for _, spec := range specs {
 		params := map[string]any{
 			"dir":     r.opts.Dir,
@@ -148,6 +177,7 @@ func (r *Room) Start(ctx context.Context, specs []HeadSpec) error {
 		}
 		h.LastOutputSeq = ev.Seq
 	}
+	r.workspaceFingerprint = workspaceFingerprint(r.opts.Dir)
 	_, err := r.log.Append("room", System, "room started with heads: "+headNames(r.heads), VisibilityRoom, nil, 0)
 	return err
 }
@@ -181,6 +211,10 @@ func (r *Room) HumanTurn(ctx context.Context, text string, targets []string) (st
 			targets = append(targets, h.Name)
 		}
 	}
+	r.resetArbiter()
+	r.mu.Lock()
+	r.arbiterActive = true
+	r.mu.Unlock()
 	ev, err := r.log.Append("human", HumanInput, text, VisibilityRoom, nil, 0)
 	if err != nil {
 		return "", err
@@ -219,6 +253,12 @@ func (r *Room) HumanTurn(ctx context.Context, text string, targets []string) (st
 		}
 		settled = append(settled, act)
 	}
+
+	// Join: the fan-out window closes; react turns are single-writer by
+	// construction (their prompts carry the staleness notice).
+	r.mu.Lock()
+	r.arbiterActive = false
+	r.mu.Unlock()
 
 	// Guard: any blocked head returns control to the operator immediately.
 	for _, a := range settled {
@@ -297,6 +337,52 @@ func (r *Room) startTurn(h *Head, mode string, parents []string, depth int) (*pe
 	return p, nil
 }
 
+// workspaceFingerprint hashes the git working-tree state so mutations made by
+// any tool (including bash) are detected at turn boundaries.
+func workspaceFingerprint(dir string) string {
+	out, err := exec.Command("git", "-C", dir, "status", "--porcelain", "-b").CombinedOutput()
+	if err != nil {
+		return ""
+	}
+	// Untracked files show as "??" regardless of content, so hash their
+	// contents too or overwrites of untracked files are invisible.
+	var sb strings.Builder
+	sb.Write(out)
+	for _, line := range strings.Split(string(out), "\n") {
+		if len(line) < 4 || line[3] != '?' && line[2] != '?' {
+			continue
+		}
+		name := strings.TrimPrefix(line, line[:3])
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil || len(content) > 4<<20 {
+			continue
+		}
+		sum := sha256.Sum256(content)
+		sb.WriteString(hex.EncodeToString(sum[:8]))
+	}
+	sum := sha256.Sum256([]byte(sb.String()))
+	return hex.EncodeToString(sum[:8])
+}
+
+// detectMutations logs a Mutation event when the workspace changed since the
+// last observation. Returns true when a change was recorded.
+func (r *Room) detectMutations(author Participant) bool {
+	fp := workspaceFingerprint(r.opts.Dir)
+	if fp == "" || fp == r.workspaceFingerprint {
+		return false
+	}
+	r.mu.Lock()
+	r.workspaceFingerprint = fp
+	r.revision++
+	r.mu.Unlock()
+	_, _ = r.log.Append(author, Mutation, "workspace changed during "+string(author)+"'s turn", VisibilityRoom, nil, 0)
+	return true
+}
+
 // await finalizes one pending activation into the room log. Event delivery
 // from the supervisor is best-effort (events may be deduped or dropped), so a
 // status poll acts as the fallback completion signal: a runtime that was seen
@@ -348,6 +434,7 @@ func (r *Room) await(ctx context.Context, p *pendingTurn) (Activation, error) {
 		return Activation{}, err
 	}
 	p.head.LastOutputSeq = ev.Seq
+	r.detectMutations(Participant(p.head.Name))
 	return Activation{
 		Participant: p.head.Name,
 		EventID:     ev.ID,
@@ -371,7 +458,19 @@ func (r *Room) pump(ctx context.Context) {
 					return
 				case ev := <-ch:
 					debugf("pump %s event=%s", h.Name, ev.Event)
-					if ev.Event != "session.end" {
+					switch ev.Event {
+					case "tool.call":
+						if title, _ := ev.Raw["title"].(string); title != "" {
+							r.mu.Lock()
+							r.lastTool[h.RuntimeID] = title
+							r.mu.Unlock()
+						}
+						continue
+					case "permission.request":
+						r.gatePermission(h, ev)
+						continue
+					case "session.end":
+					default:
 						continue
 					}
 					res := TurnResult{RuntimeID: h.RuntimeID}
@@ -392,6 +491,61 @@ func (r *Room) pump(ctx context.Context) {
 			}
 		}(h)
 	}
+}
+
+// gatePermission resolves one head tool-permission request. The room is the
+// resolver for its heads: allow unless the arbiter denies (parallel window,
+// second writer). Denials carry a re-read instruction as the write-in message.
+func (r *Room) gatePermission(h *Head, ev client.Event) {
+	requestID, _ := ev.Raw["request_id"].(string)
+	if requestID == "" {
+		return
+	}
+	// The permission event's kind field is the dialog kind ("confirm") and
+	// its tool field is best-effort and often empty for confirm dialogs, so
+	// correlate with the runtime's most recent tool.call title.
+	// The permission event's kind field is the dialog kind ("confirm") and
+	// its tool field is best-effort and often empty for confirm dialogs, so
+	// correlate with the runtime's most recent tool.call title.
+	kind, _ := ev.Raw["tool"].(string)
+	if kind == "" {
+		r.mu.Lock()
+		kind = r.lastTool[h.RuntimeID]
+		r.mu.Unlock()
+	}
+	options, _ := ev.Raw["options"].([]any)
+	r.mu.Lock()
+	holder := r.writeHolder
+	dec := Gate(h.Name, holder, kind, r.arbiterActive)
+	if dec.Allow && r.arbiterActive && WriteKinds[strings.ToLower(kind)] && holder == "" {
+		r.writeHolder = h.Name
+	}
+	// One denial per head per window: the first block tells the head to
+	// re-read and reconcile; its reconciled retry is allowed, otherwise a
+	// persistent model turns the gate into a retry livelock.
+	if !dec.Allow {
+		if r.deniedOnce[h.Name] {
+			dec = ArbiterDecision{Allow: true}
+		} else {
+			r.deniedOnce[h.Name] = true
+			_, _ = r.log.Append("room", System, fmt.Sprintf("arbiter denied %s write: %s", h.Name, dec.Message), VisibilityRoom, nil, 0)
+		}
+	}
+	r.mu.Unlock()
+	if dec.Allow {
+		_ = r.client.AnswerPermission(h.RuntimeID, requestID, optionID(options, "allow"))
+		return
+	}
+	_ = r.client.AnswerPermissionWithMessage(h.RuntimeID, requestID, optionID(options, "reject"), dec.Message)
+}
+
+// resetArbiter clears the write holder at the start of each operator turn.
+func (r *Room) resetArbiter() {
+	r.mu.Lock()
+	r.writeHolder = ""
+	r.deniedOnce = map[string]bool{}
+	r.arbiterActive = false
+	r.mu.Unlock()
 }
 
 func (r *Room) head(name string) (*Head, bool) {
