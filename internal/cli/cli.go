@@ -1530,22 +1530,15 @@ func (m *EventMetadata) WithWorkflow(workflowID, nodeID, activationID, attemptID
 	return m
 }
 
-// WithLatestSeq seeds the per-runtime sequence counter so a runtime's event
-// seq stays monotonic across turns. Each turn builds a fresh metadata; without
-// this seed, turn N+1 restarts at seq 1 and subscribers that dedup by
-// (runtime_id, seq) discard the turn's events as replays.
-func (m *EventMetadata) WithLatestSeq(n int64) *EventMetadata {
-	if n > m.latestSeq {
-		m.latestSeq = n
-	}
-	return m
-}
-
-func (m *EventMetadata) Stamp(event events.Event) events.Event {
+// Tag enriches the event with run identity, workflow execution identity, and
+// a timestamp, without assigning a sequence number. Callers that publish
+// through a ControlServer let CanonicalizeEvent own the seq so every emitter
+// shares one per-runtime counter.
+func (m *EventMetadata) Tag(event events.Event) events.Event {
 	if m == nil {
 		return events.Clone(event)
 	}
-	// Stamping happens before durable NDJSON persistence, so it must not alter
+	// Tagging happens before durable NDJSON persistence, so it must not alter
 	// the terminal reply. Control/status paths apply their own preview bound.
 	out := events.Clone(event)
 	if out.Fields == nil {
@@ -1586,6 +1579,13 @@ func (m *EventMetadata) Stamp(event events.Event) events.Event {
 		}
 		out.Fields["ts"] = now().UnixMilli()
 	}
+	return out
+}
+
+func (m *EventMetadata) Stamp(event events.Event) events.Event {
+	out := m.Tag(event)
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if seq, ok := events.Int64(out.Fields["seq"]); ok {
 		if seq > m.latestSeq {
 			m.latestSeq = seq
@@ -1617,10 +1617,15 @@ func (f *fanoutWriter) Write(event events.Event) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	stamped := event
-	if f.metadata != nil {
-		stamped = f.metadata.Stamp(event)
-	} else if f.control != nil {
+	if f.control != nil {
+		// The control server owns the per-runtime seq counter; the durable log
+		// gets the same canonical event the control stream publishes.
+		if f.metadata != nil {
+			event = f.metadata.Tag(event)
+		}
 		stamped = f.control.CanonicalizeEvent(event)
+	} else if f.metadata != nil {
+		stamped = f.metadata.Stamp(event)
 	}
 	if err := f.base.Write(stamped); err != nil {
 		return err

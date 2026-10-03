@@ -6744,3 +6744,75 @@ func TestControlSubscribeDeliversSessionEndAcrossTurns(t *testing.T) {
 		}
 	}
 }
+
+// Regression for the seq-authority unification: supervisor-level events that
+// bypass the runtime writer (avenor.error, child.question, synthetic
+// session.end) are stamped by the control server's canonical event state.
+// Before unification, those stamps never advanced the runtime's own counter,
+// so a control-stamped event published between turns made turn N+1's events
+// carry seqs at or below the subscriber's seen-max — silently dropping the
+// whole turn. With one shared counter, every turn delivers.
+func TestControlStampedEventsBetweenTurnsKeepSeqMonotonic(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "ctrl.sock")
+
+	provider := &turnEndProvider{}
+
+	sup := NewSupervisor(Config{ControlSocket: socketPath, MaxRuntimes: 10})
+	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) {
+		return provider, nil
+	}
+	if err := sup.control.Start(socketPath); err != nil {
+		t.Fatalf("start control server: %v", err)
+	}
+	defer sup.control.Stop()
+
+	c, err := client.Dial(socketPath)
+	if err != nil {
+		t.Fatalf("dial control socket: %v", err)
+	}
+	defer c.Close()
+
+	if err := c.Call("subscribe", nil, nil); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	eventCh := c.Events()
+
+	spawnResult, err := c.Spawn(map[string]any{"prompt": "turn 0", "dir": ".", "backend": "pony"})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	runtimeID, _ := spawnResult["runtime_id"].(string)
+	if runtimeID == "" {
+		t.Fatalf("spawn result missing runtime_id: %v", spawnResult)
+	}
+
+	var seqs []int64
+	for turn := 0; turn < 2; turn++ {
+		turnSeqs := waitControlSessionEnd(t, eventCh, runtimeID, 1)
+		seqs = append(seqs, turnSeqs...)
+		if turn == 0 {
+			// Simulate the supervisor's control-stamped emissions (error,
+			// child.question, synthetic session.end) landing between turns.
+			for i := 0; i < 3; i++ {
+				sup.control.PublishEvent(events.Event{
+					Event: "avenor.error",
+					Fields: map[string]any{
+						"runtime_id": runtimeID,
+						"message":    fmt.Sprintf("boom %d", i),
+						"source":     "error",
+					},
+				})
+			}
+			if err := c.Prompt(runtimeID, "follow up"); err != nil {
+				t.Fatalf("prompt: %v", err)
+			}
+		}
+	}
+
+	if len(seqs) != 2 {
+		t.Fatalf("delivered %d session.end events, want 2", len(seqs))
+	}
+	if seqs[1] <= seqs[0] {
+		t.Fatalf("session.end seqs across turns = %v, want strictly increasing", seqs)
+	}
+}
