@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -6377,7 +6378,55 @@ func TestBrokerAskSendFailureWithDeadBrokerNotPending(t *testing.T) {
 		t.Fatalf("error type = %T, want *control.AskError: %v", err, err)
 	}
 	if askErr.Pending {
-		t.Fatal("AskError.Pending = true, want false when the request never reached the broker")
+		t.Fatalf("AskError.Pending = true, want false when the request never reached the broker; send error: %v", err)
+	}
+}
+
+// TestBrokerAskSendFailureIsolatedConnPool pins the connection-pool isolation
+// behind the pending classification: a supervisor's broker HTTP client must
+// not reuse idle keep-alive connections left in a shared pool by other
+// supervisors. A stale pooled connection to a stopped broker fails with
+// "connection reset by peer" instead of "connection refused", which the
+// send-failure path would misclassify as a possibly-pending ask even though
+// the request never reached the broker.
+func TestBrokerAskSendFailureIsolatedConnPool(t *testing.T) {
+	// Single-threaded scheduling keeps the stale connection's readLoop from
+	// draining it before the victim request picks it out of the shared pool.
+	prev := goruntime.GOMAXPROCS(1)
+	defer goruntime.GOMAXPROCS(prev)
+
+	b := broker.New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	// A neighboring supervisor leaves an idle keep-alive connection to this
+	// broker's address in the (pre-fix shared) HTTP connection pool.
+	neighbor := &Supervisor{broker: b}
+	if _, err := neighbor.BrokerPeers(); err != nil {
+		t.Fatalf("prime connection pool: %v", err)
+	}
+	// Let the pool hand-back (readLoop) finish before tearing down.
+	for i := 0; i < 10; i++ {
+		goruntime.Gosched()
+	}
+	if _, err := b.CreateRun("target"); err != nil {
+		t.Fatalf("create target run: %v", err)
+	}
+	if err := b.Stop(); err != nil {
+		t.Fatalf("stop broker: %v", err)
+	}
+
+	sup := &Supervisor{broker: b}
+	_, err := sup.BrokerAsk(context.Background(), "target", "interruption", "agent")
+	if err == nil {
+		t.Fatal("expected error from failed ask")
+	}
+	var askErr *control.AskError
+	if !errors.As(err, &askErr) {
+		t.Fatalf("error type = %T, want *control.AskError: %v", err, err)
+	}
+	if askErr.Pending {
+		t.Fatalf("AskError.Pending = true, want false when the pooled connection was stale; send error: %v", err)
 	}
 }
 
