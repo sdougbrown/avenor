@@ -708,6 +708,10 @@ func TestTranslateExtensionUIConfirm(t *testing.T) {
 	if desc != "Do you want to proceed?" {
 		t.Errorf("description = %q, want message as description", desc)
 	}
+	question, _ := ev.Fields["question"].(string)
+	if question != "Do you want to proceed?" {
+		t.Errorf("question = %q, want message as question", question)
+	}
 }
 
 func TestTranslateExtensionUIInput(t *testing.T) {
