@@ -17,6 +17,7 @@ type Activation struct {
 // small and structured so a Jev backend can consume it as named fields.
 type State struct {
 	HumanInput      string
+	Participants    []string     // head names in the room
 	Settled         []Activation // this operator turn, causal order
 	Depth           int          // deepest peer hop so far this turn
 	BudgetRemaining int          // auto activations left
@@ -81,10 +82,18 @@ func hasAskMarker(out string) bool {
 func others(s State, speaker string) []string {
 	seen := map[string]bool{}
 	var out []string
-	for _, a := range s.Settled {
-		if a.Participant != speaker && !seen[a.Participant] {
-			seen[a.Participant] = true
-			out = append(out, a.Participant)
+	// Prefer the room roster so a head can wake a peer that has not spoken
+	// this turn yet; fall back to settled participants.
+	source := s.Participants
+	if len(source) == 0 {
+		for _, a := range s.Settled {
+			source = append(source, a.Participant)
+		}
+	}
+	for _, p := range source {
+		if p != speaker && !seen[p] {
+			seen[p] = true
+			out = append(out, p)
 		}
 	}
 	return out
