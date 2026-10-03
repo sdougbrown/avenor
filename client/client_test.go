@@ -933,3 +933,67 @@ func TestCallErrorPreservesData(t *testing.T) {
 		t.Errorf("Error() = %q", got)
 	}
 }
+
+// TestWaitTurnIndefiniteTimeoutPinsWireParams pins the indefinite-wait
+// contract: a non-positive timeout must omit timeout_ms from the wire params
+// (the server then waits indefinitely) and must not arm a client-side
+// response timer — a settle delivered later still unblocks the wait.
+func TestWaitTurnIndefiniteTimeoutPinsWireParams(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	c := &Client{
+		conn:    clientConn,
+		pending: map[int]chan Response{},
+		eventCh: make(chan Event, 1),
+	}
+
+	type waitResult struct {
+		result map[string]any
+		err    error
+	}
+	done := make(chan waitResult, 1)
+	go func() {
+		result, err := c.WaitTurn("rt_1", 0)
+		done <- waitResult{result, err}
+	}()
+
+	var raw map[string]any
+	if err := json.NewDecoder(serverConn).Decode(&raw); err != nil {
+		t.Fatalf("decode request: %v", err)
+	}
+	if raw["method"] != "wait_turn" {
+		t.Fatalf("method = %v, want wait_turn", raw["method"])
+	}
+	params, _ := raw["params"].(map[string]any)
+	if params == nil {
+		t.Fatalf("params missing: %v", raw["params"])
+	}
+	if params["runtime_id"] != "rt_1" {
+		t.Errorf("runtime_id = %v, want rt_1", params["runtime_id"])
+	}
+	if _, ok := params["timeout_ms"]; ok {
+		t.Errorf("params = %v; an indefinite wait must not carry timeout_ms", params)
+	}
+
+	// Deliver the settle late: the indefinite wait must still unblock.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		resp := map[string]any{"jsonrpc": "2.0", "id": raw["id"], "result": map[string]any{"stop_reason": "end_turn"}}
+		data, _ := json.Marshal(resp)
+		_, _ = serverConn.Write(append(data, '\n'))
+	}()
+
+	select {
+	case wr := <-done:
+		if wr.err != nil {
+			t.Fatalf("WaitTurn: %v", wr.err)
+		}
+		if wr.result["stop_reason"] != "end_turn" {
+			t.Errorf("stop_reason = %v, want end_turn", wr.result["stop_reason"])
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("indefinite wait never unblocked after the settle was delivered")
+	}
+}

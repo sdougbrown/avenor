@@ -272,3 +272,17 @@ func TestControlWaitTurnTimesOutWithTypedError(t *testing.T) {
 		t.Fatalf("cancel after timeout: %v", err)
 	}
 }
+
+// Acceptance: wait_turn on a nonexistent runtime must fail fast with a
+// non-timeout error, never the typed timeout error.
+func TestControlWaitTurnRuntimeNotFound(t *testing.T) {
+	c, _ := startWaitTurnSupervisor(t, &waitTurnTestProvider{})
+
+	_, err := c.WaitTurn("nonexistent", 100*time.Millisecond)
+	if err == nil {
+		t.Fatal("WaitTurn on nonexistent runtime: want error, got nil")
+	}
+	if errors.Is(err, client.ErrWaitTurnTimeout) {
+		t.Fatalf("WaitTurn error = %v, want a non-timeout error", err)
+	}
+}
