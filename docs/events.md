@@ -67,6 +67,8 @@ Avenor populates `request_id` (unique for this session), `tool` (best-effort), `
 - `file`: The configured file handler can answer the request.
 - `none`: No resolver is configured, so the backend remains blocked until another path answers it.
 
+For the `pi` backend, `tool` is reliably populated by correlating the request with the in-flight tool call (the `tool.call` title, e.g. `write`, `edit`, `bash`) whenever one is pending; if no tool call is in flight, `tool` is omitted. `kind` is the dialog kind (`command`, `confirm`, or `input`), not the tool kind, and `question` is the prompt text. The in-flight call's raw arguments are attached as a bounded `input` string (capped at 4 KB) so policy resolvers can inspect them.
+
 The latter three values indicate a real block requiring attention when the event is emitted. `--auto-approve` does not make requests with `requires_user_input: true` automatic. Consumers should continue using `pending_permission` as the lifecycle summary; `resolver` is an event-time hint, not a replacement for status. If you're using `--permission-handler file:<path>`, Avenor emits this event once and writes the `.req` file for the file resolver without waiting for the response.
 
 Classifies as MILESTONE because permission gates are decision points.

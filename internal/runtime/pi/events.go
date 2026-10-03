@@ -493,6 +493,7 @@ func translateExtensionUI(payload map[string]any, sessionID string) (*events.Eve
 		// then layer normalized fields on top.
 		fields := copyPassthroughFields(payload, "type", "id", "method", "title", "options")
 		fields["kind"] = "command"
+		fields["question"] = title
 		fields["description"] = title
 		fields["options"] = optList
 		return &events.Event{
@@ -507,6 +508,7 @@ func translateExtensionUI(payload map[string]any, sessionID string) (*events.Eve
 		}
 		fields := copyPassthroughFields(payload, "type", "id", "method", "title", "message")
 		fields["kind"] = "confirm"
+		fields["question"] = msg
 		fields["description"] = msg
 		fields["options"] = []any{
 			map[string]any{"optionId": "yes", "kind": "allow"},
@@ -521,6 +523,7 @@ func translateExtensionUI(payload map[string]any, sessionID string) (*events.Eve
 		defVal, _ := payload["default"].(string)
 		fields := copyPassthroughFields(payload, "type", "id", "method", "title", "default")
 		fields["kind"] = "input"
+		fields["question"] = title
 		fields["description"] = title
 		if defVal != "" {
 			fields["default"] = defVal
