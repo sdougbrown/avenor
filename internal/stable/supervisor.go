@@ -3641,6 +3641,18 @@ func (child *childRuntime) settleTurnLocked() {
 	}
 }
 
+// removeTurnWaiterLocked drops a waiter that is still registered. It is a
+// no-op when settleTurnLocked already consumed it. Callers must hold
+// child.mu.
+func (child *childRuntime) removeTurnWaiterLocked(wait chan struct{}) {
+	for i, w := range child.turnWaiters {
+		if w == wait {
+			child.turnWaiters = append(child.turnWaiters[:i], child.turnWaiters[i+1:]...)
+			break
+		}
+	}
+}
+
 // complete publishes terminal completion after the caller has finished all
 // teardown. It is safe for reservation rollback and a child goroutine to race.
 func (child *childRuntime) complete() {
@@ -4330,8 +4342,8 @@ func (s *Supervisor) RuntimeResult(rtID string) (any, error) {
 // durable fullFinalOutput, the session.end stop_reason, and the session ID)
 // rather than any event-delivery stream. A non-positive timeout waits
 // indefinitely; control.ErrWaitTurnTimeout is returned when the timeout
-// elapses first.
-func (s *Supervisor) RuntimeWaitTurn(rtID string, timeout time.Duration) (any, error) {
+// elapses first. Cancelling ctx abandons the wait, returning ctx.Err().
+func (s *Supervisor) RuntimeWaitTurn(ctx context.Context, rtID string, timeout time.Duration) (any, error) {
 	s.controlMu.Lock()
 	child := s.runtimes[rtID]
 	s.controlMu.Unlock()
@@ -4361,15 +4373,29 @@ func (s *Supervisor) RuntimeWaitTurn(rtID string, timeout time.Duration) (any, e
 	select {
 	case <-wait:
 	case <-timerC:
-		child.mu.Lock()
-		for i, w := range child.turnWaiters {
-			if w == wait {
-				child.turnWaiters = append(child.turnWaiters[:i], child.turnWaiters[i+1:]...)
-				break
-			}
+		// The settle and the timer can become readable together; select picks
+		// randomly between them, so prefer the settled result when it is
+		// already available.
+		select {
+		case <-wait:
+		default:
+			child.mu.Lock()
+			child.removeTurnWaiterLocked(wait)
+			child.mu.Unlock()
+			return nil, control.ErrWaitTurnTimeout
 		}
-		child.mu.Unlock()
-		return nil, control.ErrWaitTurnTimeout
+	case <-ctx.Done():
+		// The settle and the cancellation can become readable together; select
+		// picks randomly between them, so prefer the settled result when it is
+		// already available.
+		select {
+		case <-wait:
+		default:
+			child.mu.Lock()
+			child.removeTurnWaiterLocked(wait)
+			child.mu.Unlock()
+			return nil, ctx.Err()
+		}
 	case <-child.done:
 		// The runtime ended without a turn settling since registration (e.g.
 		// an aborted start attempt); report the terminal snapshot.

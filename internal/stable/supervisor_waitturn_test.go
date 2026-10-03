@@ -90,7 +90,7 @@ func (p *waitTurnTestProvider) Capabilities(context.Context) (runtime.Capabiliti
 	return runtime.Capabilities{}, nil
 }
 
-func startWaitTurnSupervisor(t *testing.T, provider *waitTurnTestProvider) *client.Client {
+func startWaitTurnSupervisor(t *testing.T, provider *waitTurnTestProvider) (*client.Client, *Supervisor) {
 	t.Helper()
 	socketPath := filepath.Join(t.TempDir(), "ctrl.sock")
 	sup := NewSupervisor(Config{ControlSocket: socketPath, MaxRuntimes: 10})
@@ -107,7 +107,32 @@ func startWaitTurnSupervisor(t *testing.T, provider *waitTurnTestProvider) *clie
 		t.Fatalf("dial control socket: %v", err)
 	}
 	t.Cleanup(func() { c.Close() })
-	return c
+	return c, sup
+}
+
+// waitForTurnWaiterRegistered polls until the runtime has at least one
+// wait_turn waiter registered, proving the server-side wait is parked before
+// the test triggers a settle.
+func waitForTurnWaiterRegistered(t *testing.T, sup *Supervisor, runtimeID string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		sup.controlMu.Lock()
+		child := sup.runtimes[runtimeID]
+		sup.controlMu.Unlock()
+		if child != nil {
+			child.mu.Lock()
+			registered := len(child.turnWaiters) > 0
+			child.mu.Unlock()
+			if registered {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("wait_turn waiter never registered for runtime %s", runtimeID)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 func spawnWaitTurnRuntime(t *testing.T, c *client.Client) string {
@@ -145,7 +170,7 @@ func waitForControlStatus(t *testing.T, c *client.Client, runtimeID, want string
 // pre-existing idle state. It covers the next prompted turn and reports that
 // turn's stop_reason, complete final_output, and session_id.
 func TestControlWaitTurnCoversQueuedPromptTurn(t *testing.T) {
-	c := startWaitTurnSupervisor(t, &waitTurnTestProvider{gates: []chan struct{}{nil, nil}})
+	c, _ := startWaitTurnSupervisor(t, &waitTurnTestProvider{gates: []chan struct{}{nil, nil}})
 	runtimeID := spawnWaitTurnRuntime(t, c)
 	waitForControlStatus(t, c, runtimeID, "idle")
 
@@ -193,7 +218,7 @@ func TestControlWaitTurnCoversQueuedPromptTurn(t *testing.T) {
 // in-flight turn, not skip ahead to a later one.
 func TestControlWaitTurnCoversInFlightTurn(t *testing.T) {
 	release := make(chan struct{})
-	c := startWaitTurnSupervisor(t, &waitTurnTestProvider{gates: []chan struct{}{release}})
+	c, sup := startWaitTurnSupervisor(t, &waitTurnTestProvider{gates: []chan struct{}{release}})
 	runtimeID := spawnWaitTurnRuntime(t, c)
 	waitForControlStatus(t, c, runtimeID, "running")
 
@@ -205,8 +230,9 @@ func TestControlWaitTurnCoversInFlightTurn(t *testing.T) {
 		waitErr <- err
 	}()
 
-	// Let the wait register before releasing the turn.
-	time.Sleep(100 * time.Millisecond)
+	// Wait until the server-side waiter is parked before releasing the turn,
+	// so the settle cannot race the registration.
+	waitForTurnWaiterRegistered(t, sup, runtimeID)
 	close(release)
 
 	var result map[string]any
@@ -233,7 +259,7 @@ func TestControlWaitTurnCoversInFlightTurn(t *testing.T) {
 // error, not a stuck call.
 func TestControlWaitTurnTimesOutWithTypedError(t *testing.T) {
 	release := make(chan struct{}) // never closed: the turn never settles
-	c := startWaitTurnSupervisor(t, &waitTurnTestProvider{gates: []chan struct{}{release}})
+	c, _ := startWaitTurnSupervisor(t, &waitTurnTestProvider{gates: []chan struct{}{release}})
 	runtimeID := spawnWaitTurnRuntime(t, c)
 	waitForControlStatus(t, c, runtimeID, "running")
 

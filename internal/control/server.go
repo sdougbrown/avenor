@@ -97,7 +97,7 @@ type StableHandler interface {
 	List() any
 	Shutdown(mode string) error
 	RuntimeStatus(runtimeID string) (any, error)
-	RuntimeWaitTurn(runtimeID string, timeout time.Duration) (any, error)
+	RuntimeWaitTurn(ctx context.Context, runtimeID string, timeout time.Duration) (any, error)
 	RuntimeCancel(runtimeID string) error
 	RuntimePrompt(runtimeID, text, requestID string) error
 	RuntimeAnswerPermission(runtimeID, requestID, optionID, message string) error
@@ -1116,6 +1116,9 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		if p.RuntimeID == "" {
 			return failure(req.ID, -32602, "invalid params", map[string]any{"required": []string{"runtime_id"}})
 		}
+		if p.TimeoutMS < 0 {
+			return failure(req.ID, -32602, "invalid params", map[string]any{"detail": "timeout_ms must be non-negative"})
+		}
 		// Bound concurrent in-flight waits per connection so one owner cannot
 		// accumulate unbounded parked goroutines.
 		select {
@@ -1125,10 +1128,11 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		}
 		// Run the wait on a background goroutine bound to the connection
 		// context: a blocked wait must not stall subsequent requests on this
-		// connection, and a disconnect cancels the pending wait.
+		// connection, and a disconnect cancels the pending wait and frees its
+		// slot.
 		go func() {
 			defer func() { <-c.waitSlots }()
-			result, err := s.stableHandler.RuntimeWaitTurn(p.RuntimeID, time.Duration(p.TimeoutMS)*time.Millisecond)
+			result, err := s.stableHandler.RuntimeWaitTurn(c.ctx, p.RuntimeID, time.Duration(p.TimeoutMS)*time.Millisecond)
 			if req.ID == nil || c.ctx.Err() != nil {
 				return
 			}

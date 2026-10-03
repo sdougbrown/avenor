@@ -223,6 +223,28 @@ func TestSocketLifecycleActiveListenerFails(t *testing.T) {
 	}
 }
 
+// Acceptance: a negative timeout_ms is invalid params, not an unbounded wait.
+func TestWaitTurnRejectsNegativeTimeout(t *testing.T) {
+	state := NewState("run_1", "", 0)
+	s := NewServer(state)
+	s.SetStableHandler(&mockStableHandler{})
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	c := mustDial(t, path)
+	defer c.Close()
+
+	params, _ := json.Marshal(map[string]any{"runtime_id": "rt_1", "timeout_ms": -1})
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "wait_turn", Params: params})
+	r := readResp(t, c)
+	if r.Error == nil || r.Error.Code != -32602 {
+		t.Fatalf("expected -32602 for negative timeout_ms, got %+v", r)
+	}
+}
+
 func TestOwnerRejectionForMutatingMethods(t *testing.T) {
 	state := NewState("run_1", "", 0)
 	s := NewServer(state)
@@ -1588,7 +1610,7 @@ func (m *mockStableHandler) RuntimeStatus(runtimeID string) (any, error) {
 
 func (m *mockStableHandler) RuntimeCancel(runtimeID string) error { return nil }
 
-func (m *mockStableHandler) RuntimeWaitTurn(runtimeID string, timeout time.Duration) (any, error) {
+func (m *mockStableHandler) RuntimeWaitTurn(_ context.Context, runtimeID string, timeout time.Duration) (any, error) {
 	return map[string]any{"runtime_id": runtimeID}, nil
 }
 
