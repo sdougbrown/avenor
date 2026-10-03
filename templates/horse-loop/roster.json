@@ -1,0 +1,5 @@
+{
+  "implementer": { "backend": "pi", "agent": "horse", "model": "sparky/glm-5.3-flash", "thinking": "high" },
+  "publisher": { "backend": "pi", "agent": "factory-publisher", "model": "claude-opus" },
+  "reconciler": { "backend": "pi", "agent": "factory-reconciler", "model": "claude-opus" }
+}
