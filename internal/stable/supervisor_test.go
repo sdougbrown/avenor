@@ -7030,3 +7030,63 @@ func TestControlStampedEventsBetweenTurnsKeepSeqMonotonic(t *testing.T) {
 		t.Fatalf("session.end seqs across turns = %v, want strictly increasing", seqs)
 	}
 }
+
+// TestSubscribeRuntimeOnlyReceivesSessionEnd pins issue #262: a client that
+// calls only SubscribeRuntime — never an explicit subscribe — must still be
+// registered with the control server's subscriber set and receive session.end
+// for the runtime it prompts. Before the client-side auto-subscribe, this
+// scenario hung waiting for events that were never delivered.
+func TestSubscribeRuntimeOnlyReceivesSessionEnd(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "ctrl.sock")
+
+	provider := &turnEndProvider{}
+
+	sup := NewSupervisor(Config{ControlSocket: socketPath, MaxRuntimes: 10})
+	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) {
+		return provider, nil
+	}
+	if err := sup.control.Start(socketPath); err != nil {
+		t.Fatalf("start control server: %v", err)
+	}
+	defer sup.control.Stop()
+
+	c, err := client.Dial(socketPath)
+	if err != nil {
+		t.Fatalf("dial control socket: %v", err)
+	}
+	defer c.Close()
+
+	spawnResult, err := c.Spawn(map[string]any{"prompt": "turn 0", "dir": ".", "backend": "pony"})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	runtimeID, _ := spawnResult["runtime_id"].(string)
+	if runtimeID == "" {
+		t.Fatalf("spawn result missing runtime_id: %v", spawnResult)
+	}
+
+	// Turn 0's session.end may fire before the subscription exists, so
+	// subscribe (with no explicit subscribe call) and then prompt a follow-up
+	// turn whose session.end must arrive on the runtime-filtered channel.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	eventCh := c.SubscribeRuntime(ctx, runtimeID)
+
+	if err := c.Prompt(runtimeID, "follow up"); err != nil {
+		t.Fatalf("prompt: %v", err)
+	}
+
+	for {
+		select {
+		case ev, ok := <-eventCh:
+			if !ok {
+				t.Fatal("event channel closed before session.end was delivered")
+			}
+			if ev.Event == "session.end" && ev.RuntimeID == runtimeID {
+				return
+			}
+		case <-time.After(30 * time.Second):
+			t.Fatalf("timed out waiting for session.end for runtime %s", runtimeID)
+		}
+	}
+}
