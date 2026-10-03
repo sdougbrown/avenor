@@ -86,6 +86,10 @@ type Client struct {
 	eventOnce sync.Once
 	dropped   int // events discarded due to full eventCh; surfaced as client.lagged
 
+	subMu      sync.Mutex
+	subscribed bool
+	subErr     error // first subscribe failure; subscribe is never retried
+
 	subsMu      sync.Mutex
 	runtimeSubs map[string]map[chan Event]struct{}
 }
@@ -116,6 +120,14 @@ func (c *Client) Call(method string, params any, result any) error {
 // the response wait; zero uses the 30s default; a negative wait waits
 // indefinitely (for server-side long-poll methods such as wait_turn).
 func (c *Client) call(method string, params any, result any, wait time.Duration) error {
+	if method == "subscribe" {
+		// An explicit subscribe (global or per-runtime) satisfies the
+		// ensureSubscribed contract; auto-subscribing again would register a
+		// second subscriber and duplicate event delivery.
+		c.subMu.Lock()
+		c.subscribed = true
+		c.subMu.Unlock()
+	}
 	c.mu.Lock()
 	c.nextID++
 	id := c.nextID
@@ -194,12 +206,36 @@ func (c *Client) subscribe() error {
 	return c.Call("subscribe", nil, &result)
 }
 
+// ensureSubscribed issues the global "subscribe" call at most once so the
+// control server registers this connection in its subscriber set and delivers
+// events. A caller that already sent its own subscribe (via Call) takes over:
+// the auto-subscribe is skipped so its subscription mode is preserved. The
+// first error is captured and never retried; callers that need the error can
+// call subscribe themselves before Events()/SubscribeRuntime().
+func (c *Client) ensureSubscribed() error {
+	c.subMu.Lock()
+	if c.subscribed {
+		err := c.subErr
+		c.subMu.Unlock()
+		return err
+	}
+	c.subscribed = true
+	c.subMu.Unlock()
+	err := c.subscribe()
+	c.subMu.Lock()
+	c.subErr = err
+	c.subMu.Unlock()
+	return err
+}
+
 // Events returns a channel of server-sent events. Only one subscriber is
-// supported. Call before any Call() to avoid missing events.
+// supported. The first Events() or SubscribeRuntime() call sends the global
+// subscribe request to the server.
 func (c *Client) Events() <-chan Event {
 	c.eventOnce.Do(func() {
 		go c.readLoop()
 	})
+	_ = c.ensureSubscribed()
 	return c.eventCh
 }
 
@@ -410,9 +446,9 @@ func (c *Client) AnswerPermissionWithMessage(runtimeID, requestID, optionID, mes
 // SubscribeRuntime returns a channel of events filtered to a specific runtime.
 // The caller must drain the channel. The channel closes when ctx is done or
 // the underlying event channel is closed. Calling SubscribeRuntime ensures the
-// readLoop is started.
+// readLoop is started and the global subscribe request is sent.
 func (c *Client) SubscribeRuntime(ctx context.Context, runtimeID string) <-chan Event {
-	_ = c.Events() // ensure readLoop is running
+	_ = c.Events() // ensure readLoop is running and subscription is registered
 	out := make(chan Event, 256)
 	c.subsMu.Lock()
 	if c.runtimeSubs[runtimeID] == nil {

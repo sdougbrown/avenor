@@ -244,6 +244,26 @@ func TestClientSubscribe(t *testing.T) {
 	}
 }
 
+// serveOneSubscribe reads the first request frame and, if it is the global
+// subscribe call, replies with the control server's success result. Tests that
+// build a Client directly over net.Pipe need this so ensureSubscribed's
+// request is consumed and answered before they drive events themselves.
+func serveOneSubscribe(conn net.Conn) {
+	go func() {
+		line, err := bufio.NewReader(conn).ReadBytes('\n')
+		if err != nil {
+			return
+		}
+		var req Request
+		if json.Unmarshal(line, &req) != nil || req.Method != "subscribe" {
+			return
+		}
+		resp := Response{JSONRPC: "2.0", ID: req.ID, Result: json.RawMessage(`{"subscribed":true}`)}
+		data, _ := json.Marshal(resp)
+		_, _ = conn.Write(append(data, '\n'))
+	}()
+}
+
 // waitForBufferLen busy-waits until len(c.eventCh) == n or timeout elapses.
 // It returns false if the timeout is reached before the condition is met,
 // causing the caller to fail the test with a clear message rather than
@@ -281,7 +301,27 @@ func TestLaggedOrdering(t *testing.T) {
 		serverConn.Write(data)
 	}
 
-	ch := c.Events() // starts readLoop
+	servedSubscribe := make(chan struct{})
+	go func() {
+		line, err := bufio.NewReader(serverConn).ReadBytes('\n')
+		if err != nil {
+			return
+		}
+		var req Request
+		if json.Unmarshal(line, &req) == nil && req.Method == "subscribe" {
+			resp := Response{JSONRPC: "2.0", ID: req.ID, Result: json.RawMessage(`{"subscribed":true}`)}
+			data, _ := json.Marshal(resp)
+			_, _ = serverConn.Write(append(data, '\n'))
+		}
+		close(servedSubscribe)
+	}()
+
+	ch := c.Events() // starts readLoop and sends the subscribe request
+	select {
+	case <-servedSubscribe:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for subscribe to be answered")
+	}
 
 	// Fill the channel buffer without consuming, then send more to force drops.
 	sendEvent("first")
@@ -405,21 +445,26 @@ func TestClientCallAfterEventsHandlesImmediateResponse(t *testing.T) {
 		pending: map[int]chan Response{},
 		eventCh: make(chan Event, 2),
 	}
-	_ = c.Events()
-
 	go func() {
+		// The first request is ensureSubscribed's subscribe call (sent by
+		// Events()), the second is the status call under test.
 		scanner := bufio.NewScanner(serverConn)
-		if !scanner.Scan() {
-			return
+		for i := 0; i < 2 && scanner.Scan(); i++ {
+			var req Request
+			_ = json.Unmarshal(scanner.Bytes(), &req)
+			resp := Response{JSONRPC: "2.0", ID: req.ID}
+			if req.Method == "subscribe" {
+				resp.Result, _ = json.Marshal(map[string]any{"subscribed": true})
+			} else {
+				resp.Result, _ = json.Marshal(map[string]any{"ok": true})
+			}
+			data, _ := json.Marshal(resp)
+			data = append(data, '\n')
+			_, _ = serverConn.Write(data)
 		}
-		var req Request
-		_ = json.Unmarshal(scanner.Bytes(), &req)
-		resp := Response{JSONRPC: "2.0", ID: req.ID}
-		resp.Result, _ = json.Marshal(map[string]any{"ok": true})
-		data, _ := json.Marshal(resp)
-		data = append(data, '\n')
-		_, _ = serverConn.Write(data)
 	}()
+
+	_ = c.Events()
 
 	var result map[string]any
 	if err := c.Call("status", nil, &result); err != nil {
@@ -463,6 +508,7 @@ func TestSubscribeRuntimeFanoutIndependent(t *testing.T) {
 		eventCh:     make(chan Event, 8),
 		runtimeSubs: map[string]map[chan Event]struct{}{},
 	}
+	serveOneSubscribe(serverConn)
 
 	ctx1, cancel1 := context.WithCancel(context.Background())
 	defer cancel1()
@@ -513,6 +559,7 @@ func TestSubscribeRuntimeMatchesSessionID(t *testing.T) {
 		eventCh:     make(chan Event, 8),
 		runtimeSubs: map[string]map[chan Event]struct{}{},
 	}
+	serveOneSubscribe(serverConn)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -545,6 +592,7 @@ func TestSubscribeRuntimeIgnoresOtherRuntimeIDs(t *testing.T) {
 		eventCh:     make(chan Event, 8),
 		runtimeSubs: map[string]map[chan Event]struct{}{},
 	}
+	serveOneSubscribe(serverConn)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -574,6 +622,7 @@ func TestSubscribeRuntimeIgnoresOtherSessionIDs(t *testing.T) {
 		eventCh:     make(chan Event, 8),
 		runtimeSubs: map[string]map[chan Event]struct{}{},
 	}
+	serveOneSubscribe(serverConn)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
