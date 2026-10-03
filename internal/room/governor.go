@@ -1,0 +1,91 @@
+package room
+
+import "strings"
+
+// Activation is one turn of one head, finalized when its session ends.
+type Activation struct {
+	Participant string
+	EventID     string // room log event carrying the final output
+	Mode        string // answer | react | bootstrap
+	Depth       int
+	StopReason  string
+	FinalOutput string
+	Blocked     bool
+}
+
+// State is the bounded view the governor decides over. It is deliberately
+// small and structured so a Jev backend can consume it as named fields.
+type State struct {
+	HumanInput      string
+	Settled         []Activation // this operator turn, causal order
+	Depth           int          // deepest peer hop so far this turn
+	BudgetRemaining int          // auto activations left
+	MaxDepth        int          // peer-hop cap, enforced by the coordinator
+}
+
+// Decision names which heads to activate next and why. An empty Activate list
+// returns control to the operator.
+type Decision struct {
+	Activate       []string
+	SpeakerEventID string // room event the activated heads should react to
+	Mode           string
+	Reason         string
+}
+
+// Governor decides whether another head deserves a turn. Implementations must
+// be cheap and side-effect free; the coordinator owns all enforcement.
+type Governor interface {
+	Decide(State) Decision
+}
+
+// MarkerGovernor is the deterministic stub: a head gets a peer round only when
+// some settled output contains an ask-peer marker. It exists so the room is
+// fully testable and terminable without any model in the control plane.
+type MarkerGovernor struct{}
+
+func (MarkerGovernor) Decide(s State) Decision {
+	if s.BudgetRemaining <= 0 {
+		return Decision{Reason: "budget exhausted"}
+	}
+	if s.Depth >= s.MaxDepth {
+		return Decision{Reason: "peer depth cap"}
+	}
+	// First settled output carrying a marker wins; later markers queue for
+	// subsequent rounds.
+	for _, a := range s.Settled {
+		if hasAskMarker(a.FinalOutput) {
+			return Decision{
+				Activate:       others(s, a.Participant),
+				SpeakerEventID: a.EventID,
+				Mode:           "react",
+				Reason:         "ask-peer marker in " + a.EventID,
+			}
+		}
+	}
+	return Decision{Reason: "no peer request"}
+}
+
+// MaxDepth is enforced by the coordinator and carried in State so a Jev
+// backend sees the same envelope.
+
+func hasAskMarker(out string) bool {
+	l := strings.ToLower(out)
+	for _, m := range AskPeerMarkers {
+		if strings.Contains(l, m) {
+			return true
+		}
+	}
+	return false
+}
+
+func others(s State, speaker string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, a := range s.Settled {
+		if a.Participant != speaker && !seen[a.Participant] {
+			seen[a.Participant] = true
+			out = append(out, a.Participant)
+		}
+	}
+	return out
+}
