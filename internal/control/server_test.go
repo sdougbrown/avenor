@@ -223,6 +223,28 @@ func TestSocketLifecycleActiveListenerFails(t *testing.T) {
 	}
 }
 
+// Acceptance: a negative timeout_ms is invalid params, not an unbounded wait.
+func TestWaitTurnRejectsNegativeTimeout(t *testing.T) {
+	state := NewState("run_1", "", 0)
+	s := NewServer(state)
+	s.SetStableHandler(&mockStableHandler{})
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	c := mustDial(t, path)
+	defer c.Close()
+
+	params, _ := json.Marshal(map[string]any{"runtime_id": "rt_1", "timeout_ms": -1})
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "wait_turn", Params: params})
+	r := readResp(t, c)
+	if r.Error == nil || r.Error.Code != -32602 {
+		t.Fatalf("expected -32602 for negative timeout_ms, got %+v", r)
+	}
+}
+
 func TestOwnerRejectionForMutatingMethods(t *testing.T) {
 	state := NewState("run_1", "", 0)
 	s := NewServer(state)
@@ -1568,6 +1590,9 @@ type mockStableHandler struct {
 	spawnErr             error
 	listResult           any
 	waitErr              error
+	waitGate             chan struct{} // non-nil: RuntimeWaitTurn blocks until the gate is closed
+	waitStarted          chan struct{} // non-nil: one send per RuntimeWaitTurn entry
+	waitCanceled         chan struct{} // non-nil: one send when RuntimeWaitTurn exits via ctx cancellation
 	sendToParentCalled   int
 	sendToParentMessages []string
 }
@@ -1587,6 +1612,23 @@ func (m *mockStableHandler) RuntimeStatus(runtimeID string) (any, error) {
 }
 
 func (m *mockStableHandler) RuntimeCancel(runtimeID string) error { return nil }
+
+func (m *mockStableHandler) RuntimeWaitTurn(ctx context.Context, runtimeID string, timeout time.Duration) (any, error) {
+	if m.waitStarted != nil {
+		m.waitStarted <- struct{}{}
+	}
+	if m.waitGate != nil {
+		select {
+		case <-m.waitGate:
+		case <-ctx.Done():
+			if m.waitCanceled != nil {
+				m.waitCanceled <- struct{}{}
+			}
+			return nil, ctx.Err()
+		}
+	}
+	return map[string]any{"runtime_id": runtimeID}, nil
+}
 
 func (m *mockStableHandler) RuntimePrompt(runtimeID, text, requestID string) error { return nil }
 
@@ -1662,6 +1704,93 @@ func TestStableSpawnMethod(t *testing.T) {
 	}
 	if v, _ := res["runtime_id"].(string); v != "rt_1" {
 		t.Errorf("runtime_id = %q, want rt_1", v)
+	}
+}
+
+// waitTurnSlotTestReq builds a wait_turn request for the slot-limit tests.
+func waitTurnSlotTestReq(id uint64) Request {
+	params, _ := json.Marshal(map[string]any{"runtime_id": "rt_1", "timeout_ms": 0})
+	return Request{JSONRPC: "2.0", ID: id, Method: "wait_turn", Params: params}
+}
+
+// TestWaitTurnSlotLimitAndDisconnectCancel pins the per-connection in-flight
+// wait_turn gate: the ninth concurrent wait is rejected with -32000, and
+// closing the connection cancels the pending waits and frees the slots.
+func TestWaitTurnSlotLimitAndDisconnectCancel(t *testing.T) {
+	gate := make(chan struct{})
+	handler := &mockStableHandler{
+		waitGate:     gate,
+		waitStarted:  make(chan struct{}, 16),
+		waitCanceled: make(chan struct{}, 16),
+	}
+	state := NewState("run_1", "", 0)
+	s := NewServer(state)
+	s.SetStableHandler(handler)
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	conn := mustDial(t, path)
+
+	// Fill the connection's wait slots with in-flight waits.
+	for i := uint64(1); i <= 8; i++ {
+		if err := writeReq(t, conn, waitTurnSlotTestReq(i)); err != nil {
+			t.Fatalf("write wait_turn %d: %v", i, err)
+		}
+	}
+	for i := 0; i < 8; i++ {
+		select {
+		case <-handler.waitStarted:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("only %d of 8 in-flight waits reached the handler", i)
+		}
+	}
+
+	// The ninth concurrent wait on the same connection must be rejected.
+	if err := writeReq(t, conn, waitTurnSlotTestReq(9)); err != nil {
+		t.Fatalf("write ninth wait_turn: %v", err)
+	}
+	resp := readResp(t, conn)
+	if resp.Error == nil || resp.Error.Code != -32000 {
+		t.Fatalf("ninth wait_turn response = %+v, want -32000 failure", resp)
+	}
+
+	// Closing the connection while the waits are in flight must cancel them.
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	for i := 0; i < 8; i++ {
+		select {
+		case <-handler.waitCanceled:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("only %d of 8 pending waits were cancelled on disconnect", i)
+		}
+	}
+	close(gate)
+
+	// The server must remain healthy: a fresh connection's wait_turn is
+	// admitted and served once the released handler returns.
+	reconnected := mustDial(t, path)
+	defer reconnected.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if err := writeReq(t, reconnected, waitTurnSlotTestReq(1)); err != nil {
+			t.Fatalf("write wait_turn after disconnect: %v", err)
+		}
+		r := readResp(t, reconnected)
+		if r.Error == nil {
+			break
+		}
+		if r.Error.Code != -32000 {
+			t.Fatalf("wait_turn after disconnect failed unexpectedly: %+v", r.Error)
+		}
+		// Slots not yet reclaimed by the disconnect path; retry briefly.
+		if time.Now().After(deadline) {
+			t.Fatal("wait_turn still rejected after the disconnect freed the slots")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
