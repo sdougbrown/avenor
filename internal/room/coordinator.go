@@ -233,6 +233,7 @@ func (r *Room) HumanTurn(ctx context.Context, text string, targets []string) (st
 	for {
 		dec := r.opts.Governor.Decide(State{
 			HumanInput:      text,
+			Participants:    headNameList(r.heads),
 			Settled:         settled,
 			Depth:           depth,
 			BudgetRemaining: autoBudget,
@@ -437,6 +438,14 @@ func debugf(format string, args ...any) {
 func str(v any) string {
 	s, _ := v.(string)
 	return s
+}
+
+func headNameList(heads []*Head) []string {
+	names := make([]string, len(heads))
+	for i, h := range heads {
+		names[i] = h.Name
+	}
+	return names
 }
 
 func headNames(heads []*Head) string {
