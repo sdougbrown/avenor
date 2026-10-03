@@ -508,10 +508,10 @@ func (c *client) routeEvent(payload map[string]any) {
 	}
 }
 
-// enrichWithToolContext attaches tool name and command/input fields from the
-// most recent tool_execution_start payload to a permission.request event.
-// This is a best-effort correlation: if no tool call preceded the permission
-// request (or was already cleared), no fields are added.
+// enrichWithToolContext attaches the canonical tool name, command, and input
+// fields from the most recent tool_execution_start payload to a
+// permission.request event. This is a best-effort correlation: if no tool call
+// preceded the permission request (or was already cleared), no fields are added.
 func (c *client) enrichWithToolContext(ev *events.Event) {
 	c.mu.Lock()
 	toolPayload := c.lastToolPayload
@@ -520,11 +520,15 @@ func (c *client) enrichWithToolContext(ev *events.Event) {
 		return
 	}
 
-	// Only enrich if the event doesn't already carry a tool_name from the
+	// Only enrich if the event doesn't already carry a tool name from the
 	// passthrough (the backend might include it in the UI request payload).
-	if _, hasToolName := ev.Fields["tool_name"]; !hasToolName {
-		if name := firstNonEmptyString(toolPayload, "toolName", "name", "title"); name != "" {
-			ev.Fields["tool_name"] = name
+	// Stamp both the canonical `tool` field and the legacy `tool_name` alias.
+	if _, hasTool := ev.Fields["tool"]; !hasTool {
+		if _, hasToolName := ev.Fields["tool_name"]; !hasToolName {
+			if name := firstNonEmptyString(toolPayload, "toolName", "name", "title"); name != "" {
+				ev.Fields["tool"] = name
+				ev.Fields["tool_name"] = name
+			}
 		}
 	}
 	if _, hasCommand := ev.Fields["command"]; !hasCommand {

@@ -822,11 +822,62 @@ func TestClientToolCallCorrelationEnrichesPermission(t *testing.T) {
 		if got, _ := ev.Fields["tool_name"].(string); got != "bash" {
 			t.Errorf("tool_name = %q, want bash", got)
 		}
+		if got, _ := ev.Fields["tool"].(string); got != "bash" {
+			t.Errorf("tool = %q, want bash", got)
+		}
 		if got, _ := ev.Fields["command"].(string); got != "ls -la /tmp/agy-stage15-terra/probe-workdir" {
 			t.Errorf("command = %q, want the ls command", got)
 		}
 		if got, _ := ev.Fields["description"].(string); got != "Allow command?" {
 			t.Errorf("description = %q, want Allow command?", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for permission request")
+	}
+}
+
+func TestClientPermissionRequestCarriesWriteTool(t *testing.T) {
+	c, wOut, _ := fakeClient()
+	defer c.Close()
+
+	c.setSessionID("pi-write-corr")
+	eventCh := subscribeForTest(c)
+
+	go func() {
+		writeLine(wOut, map[string]any{
+			"type":     "tool_execution_start",
+			"toolName": "write",
+			"input":    map[string]any{"path": "/tmp/notes.txt", "content": "hi"},
+		})
+		writeLine(wOut, map[string]any{
+			"type":    "extension_ui_request",
+			"id":      "ui-write-1",
+			"method":  "confirm",
+			"title":   "Confirm action?",
+			"message": "Overwrite /tmp/notes.txt?",
+		})
+	}()
+
+	drainAndAssert(t, eventCh, []string{"tool.call", "avenor.tool.start"})
+
+	select {
+	case ev := <-eventCh:
+		if ev.Event != "permission.request" {
+			t.Fatalf("event = %q, want permission.request", ev.Event)
+		}
+		if got, _ := ev.Fields["tool"].(string); got != "write" {
+			t.Errorf("tool = %q, want write", got)
+		}
+		// kind stays the dialog kind, not the tool kind.
+		if got, _ := ev.Fields["kind"].(string); got != "confirm" {
+			t.Errorf("kind = %q, want confirm", got)
+		}
+		if got, _ := ev.Fields["question"].(string); got != "Overwrite /tmp/notes.txt?" {
+			t.Errorf("question = %q, want the prompt text", got)
+		}
+		// Bounded raw input from the in-flight call is available to resolvers.
+		if got, _ := ev.Fields["input"].(string); got == "" {
+			t.Error("input should carry the bounded tool input")
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for permission request")
@@ -857,6 +908,9 @@ func TestClientToolCallCorrelationNoToolCall(t *testing.T) {
 		}
 		if _, ok := ev.Fields["tool_name"]; ok {
 			t.Error("tool_name should not be set when no tool call preceded")
+		}
+		if _, ok := ev.Fields["tool"]; ok {
+			t.Error("tool should not be set when no tool call preceded")
 		}
 		if _, ok := ev.Fields["command"]; ok {
 			t.Error("command should not be set when no tool call preceded")
