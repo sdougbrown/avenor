@@ -1613,20 +1613,46 @@ func newFanoutWriter(base EventSink, cs *control.ControlServer, metadata *EventM
 	return &fanoutWriter{base: base, control: cs, metadata: metadata}
 }
 
+// StampFanoutEvent is the single authority for assigning a per-runtime seq on
+// the fan-out path. When a control server is present it owns the per-runtime
+// seq counter: the event is tagged with run identity and then canonicalized
+// there, so the durable log and the control stream carry one shared sequence
+// per runtime and subscriber dedup, replay cursors, and persistence can never
+// disagree about event order. Without a control server, the EventMetadata
+// stamps the seq itself; with neither, the event only carries its runtime
+// identity. The returned event is the lossless durable form.
+func StampFanoutEvent(ev events.Event, runtimeID string, metadata *EventMetadata, cs *control.ControlServer) events.Event {
+	if cs != nil {
+		if metadata != nil {
+			ev = metadata.Tag(ev)
+		} else if runtimeID != "" {
+			if ev.Fields == nil {
+				ev.Fields = map[string]any{}
+			}
+			if _, ok := ev.Fields["runtime_id"]; !ok {
+				ev.Fields["runtime_id"] = runtimeID
+			}
+		}
+		return cs.CanonicalizeEvent(ev)
+	}
+	if metadata != nil {
+		return metadata.Stamp(ev)
+	}
+	if runtimeID != "" {
+		if ev.Fields == nil {
+			ev.Fields = map[string]any{}
+		}
+		if _, ok := ev.Fields["runtime_id"]; !ok {
+			ev.Fields["runtime_id"] = runtimeID
+		}
+	}
+	return ev
+}
+
 func (f *fanoutWriter) Write(event events.Event) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	stamped := event
-	if f.control != nil {
-		// The control server owns the per-runtime seq counter; the durable log
-		// gets the same canonical event the control stream publishes.
-		if f.metadata != nil {
-			event = f.metadata.Tag(event)
-		}
-		stamped = f.control.CanonicalizeEvent(event)
-	} else if f.metadata != nil {
-		stamped = f.metadata.Stamp(event)
-	}
+	stamped := StampFanoutEvent(event, "", f.metadata, f.control)
 	if err := f.base.Write(stamped); err != nil {
 		return err
 	}

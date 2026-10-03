@@ -4032,33 +4032,7 @@ func (w *runtimeFanoutWriter) Write(ev events.Event) error {
 func (w *runtimeFanoutWriter) writeLocked(ev events.Event) error {
 	// stamped is the lossless durable event (written to file/broker);
 	// presentation is the bounded copy for control/status surfaces.
-	stamped := ev
-	if w.control != nil {
-		// The control server owns the per-runtime seq counter. Tagging first
-		// and stamping second gives the durable log and the control stream one
-		// shared sequence per runtime, so subscriber dedup, replay cursors, and
-		// persistence can never disagree about event order.
-		if w.metadata != nil {
-			ev = w.metadata.Tag(ev)
-		} else {
-			if ev.Fields == nil {
-				ev.Fields = map[string]any{}
-			}
-			if _, ok := ev.Fields["runtime_id"]; !ok && w.runtimeID != "" {
-				ev.Fields["runtime_id"] = w.runtimeID
-			}
-		}
-		stamped = w.control.CanonicalizeEvent(ev)
-	} else if w.metadata != nil {
-		stamped = w.metadata.Stamp(ev)
-	} else {
-		if stamped.Fields == nil {
-			stamped.Fields = map[string]any{}
-		}
-		if _, ok := stamped.Fields["runtime_id"]; !ok && w.runtimeID != "" {
-			stamped.Fields["runtime_id"] = w.runtimeID
-		}
-	}
+	stamped := cli.StampFanoutEvent(ev, w.runtimeID, w.metadata, w.control)
 	presentation := events.BoundFinalOutput(stamped)
 	if presentation.Event == "permission.request" && w.onPermissionReq != nil {
 		if requestID, _ := presentation.Fields["request_id"].(string); requestID != "" {
