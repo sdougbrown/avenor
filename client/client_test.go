@@ -245,11 +245,15 @@ func TestClientSubscribe(t *testing.T) {
 }
 
 // serveOneSubscribe reads the first request frame and, if it is the global
-// subscribe call, replies with the control server's success result. Tests that
-// build a Client directly over net.Pipe need this so ensureSubscribed's
-// request is consumed and answered before they drive events themselves.
-func serveOneSubscribe(conn net.Conn) {
+// subscribe call, replies with the control server's success result. It
+// returns a channel that is closed once the first frame has been read (and
+// the subscribe reply, when applicable, written). Tests that build a Client
+// directly over net.Pipe need this so ensureSubscribed's request is consumed
+// and answered before they drive events themselves.
+func serveOneSubscribe(conn net.Conn) <-chan struct{} {
+	served := make(chan struct{})
 	go func() {
+		defer close(served)
 		line, err := bufio.NewReader(conn).ReadBytes('\n')
 		if err != nil {
 			return
@@ -262,6 +266,7 @@ func serveOneSubscribe(conn net.Conn) {
 		data, _ := json.Marshal(resp)
 		_, _ = conn.Write(append(data, '\n'))
 	}()
+	return served
 }
 
 // waitForBufferLen busy-waits until len(c.eventCh) == n or timeout elapses.
@@ -301,20 +306,7 @@ func TestLaggedOrdering(t *testing.T) {
 		serverConn.Write(data)
 	}
 
-	servedSubscribe := make(chan struct{})
-	go func() {
-		line, err := bufio.NewReader(serverConn).ReadBytes('\n')
-		if err != nil {
-			return
-		}
-		var req Request
-		if json.Unmarshal(line, &req) == nil && req.Method == "subscribe" {
-			resp := Response{JSONRPC: "2.0", ID: req.ID, Result: json.RawMessage(`{"subscribed":true}`)}
-			data, _ := json.Marshal(resp)
-			_, _ = serverConn.Write(append(data, '\n'))
-		}
-		close(servedSubscribe)
-	}()
+	servedSubscribe := serveOneSubscribe(serverConn)
 
 	ch := c.Events() // starts readLoop and sends the subscribe request
 	select {

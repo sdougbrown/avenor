@@ -88,7 +88,6 @@ type Client struct {
 
 	subMu      sync.Mutex
 	subscribed bool
-	subErr     error // first subscribe failure; subscribe is never retried
 
 	subsMu      sync.Mutex
 	runtimeSubs map[string]map[chan Event]struct{}
@@ -123,7 +122,10 @@ func (c *Client) call(method string, params any, result any, wait time.Duration)
 	if method == "subscribe" {
 		// An explicit subscribe (global or per-runtime) satisfies the
 		// ensureSubscribed contract; auto-subscribing again would register a
-		// second subscriber and duplicate event delivery.
+		// second subscriber and duplicate event delivery. Marking subscribed
+		// before the round trip means a failed explicit subscribe is never
+		// silently retried behind the caller's back; the error is the caller's
+		// to handle.
 		c.subMu.Lock()
 		c.subscribed = true
 		c.subMu.Unlock()
@@ -209,23 +211,19 @@ func (c *Client) subscribe() error {
 // ensureSubscribed issues the global "subscribe" call at most once so the
 // control server registers this connection in its subscriber set and delivers
 // events. A caller that already sent its own subscribe (via Call) takes over:
-// the auto-subscribe is skipped so its subscription mode is preserved. The
-// first error is captured and never retried; callers that need the error can
-// call subscribe themselves before Events()/SubscribeRuntime().
-func (c *Client) ensureSubscribed() error {
+// the auto-subscribe is skipped so its subscription mode is preserved. An
+// auto-subscribe failure is never retried and is not reported here; it
+// surfaces as no event delivery. Callers that need the subscribe error must
+// call subscribe themselves (via Call) and check it.
+func (c *Client) ensureSubscribed() {
 	c.subMu.Lock()
 	if c.subscribed {
-		err := c.subErr
 		c.subMu.Unlock()
-		return err
+		return
 	}
 	c.subscribed = true
 	c.subMu.Unlock()
-	err := c.subscribe()
-	c.subMu.Lock()
-	c.subErr = err
-	c.subMu.Unlock()
-	return err
+	_ = c.subscribe()
 }
 
 // Events returns a channel of server-sent events. Only one subscriber is
@@ -235,7 +233,7 @@ func (c *Client) Events() <-chan Event {
 	c.eventOnce.Do(func() {
 		go c.readLoop()
 	})
-	_ = c.ensureSubscribed()
+	c.ensureSubscribed()
 	return c.eventCh
 }
 
