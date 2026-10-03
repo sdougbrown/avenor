@@ -600,11 +600,10 @@ func TestRunChildAllowsNewPhaseAfterSameRuntimeFollowUp(t *testing.T) {
 		scripts: []stableScriptedAttempt{
 			{
 				sessionID: "ses_0",
-				events: []stableScriptedEvent{{event: events.Event{
-					Event:     "session.end",
-					SessionID: "ses_0",
-					Fields:    map[string]any{"stop_reason": "end_turn"},
-				}}},
+				events: []stableScriptedEvent{
+					{event: events.Event{Event: "agent.status", SessionID: "ses_0", Fields: map[string]any{"phase": "working"}}},
+					{event: events.Event{Event: "session.end", SessionID: "ses_0", Fields: map[string]any{"stop_reason": "end_turn"}}},
+				},
 			},
 			{
 				sessionID: "ses_1",
@@ -6513,5 +6512,92 @@ func TestGetOrCreateHTTPServerReturnsErrorOnceShutdownStarted(t *testing.T) {
 	defer sup.httpServerMu.Unlock()
 	if len(sup.httpServers) != 0 || len(sup.httpStarting) != 0 {
 		t.Fatalf("maps after rejected start: ready=%d starting=%d, want empty", len(sup.httpServers), len(sup.httpStarting))
+	}
+}
+
+type seqCaptureSink struct {
+	mu     sync.Mutex
+	events []events.Event
+}
+
+func (s *seqCaptureSink) Write(ev events.Event) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.events = append(s.events, ev)
+	return nil
+}
+
+func (s *seqCaptureSink) Close() error { return nil }
+
+// Regression: a runtime's event seq must stay monotonic across turns. Each
+// turn used to build a fresh EventMetadata whose counter restarted at zero,
+// so turn N+1's events looked like replays of turn N's to subscribers that
+// dedup by (runtime_id, seq) — silently dropping every follow-up turn's
+// session.end.
+func TestRunChildEventSeqMonotonicAcrossTurns(t *testing.T) {
+	provider := &stableScriptedProvider{
+		attempt: 0,
+		scripts: []stableScriptedAttempt{
+			{
+				sessionID: "ses_0",
+				events: []stableScriptedEvent{
+					{event: events.Event{Event: "agent.status", SessionID: "ses_0", Fields: map[string]any{"phase": "working"}}},
+					{event: events.Event{Event: "session.end", SessionID: "ses_0", Fields: map[string]any{"stop_reason": "end_turn"}}},
+				},
+			},
+			{
+				sessionID: "ses_1",
+				events: []stableScriptedEvent{
+					{event: events.Event{Event: "agent.status", SessionID: "ses_1", Fields: map[string]any{"phase": "working"}}},
+					{event: events.Event{Event: "session.end", SessionID: "ses_1", Fields: map[string]any{"stop_reason": "end_turn"}}},
+				},
+			},
+		},
+	}
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-seq-monotonic.sock", MaxRuntimes: 1})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sink := &seqCaptureSink{}
+	child := &childRuntime{
+		id:          "rt_seq_monotonic",
+		provider:    provider,
+		session:     runtime.Session{SessionID: "ses_0"},
+		eventWriter: sink,
+		done:        make(chan struct{}),
+		promptCh:    make(chan struct{}, 1),
+		cancelFn:    cancel,
+	}
+	sup.runtimes[child.id] = child
+	go sup.runChild(ctx, child, "first", 0, 0)
+
+	waitForStableChild(t, child, func(active bool, completed bool, phase, phaseLabel string) bool {
+		return !active && !completed && phase == "done"
+	})
+	if err := sup.RuntimePrompt(child.id, "follow up", ""); err != nil {
+		t.Fatalf("RuntimePrompt: %v", err)
+	}
+	waitForStableChild(t, child, func(active bool, completed bool, phase, phaseLabel string) bool {
+		return !active && !completed && phase == "done"
+	})
+	cancel()
+	waitForStableDone(t, child)
+
+	ends := 0
+	var seqs []int64
+	sink.mu.Lock()
+	for _, ev := range sink.events {
+		if ev.Event == "session.end" {
+			ends++
+			if seq, ok := events.Int64(ev.Fields["seq"]); ok {
+				seqs = append(seqs, seq)
+			}
+		}
+	}
+	sink.mu.Unlock()
+	if ends != 2 {
+		t.Fatalf("captured %d session.end events, want 2", ends)
+	}
+	if len(seqs) != 2 || seqs[1] <= seqs[0] {
+		t.Fatalf("session.end seqs across turns = %v, want strictly increasing", seqs)
 	}
 }

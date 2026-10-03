@@ -3959,7 +3959,13 @@ func (s *Supervisor) closeChildEventWriter(child *childRuntime) {
 // workflowEventMetadata returns event metadata threaded with workflow execution
 // identity when the child is part of a workflow run, otherwise plain metadata.
 func workflowEventMetadata(s *Supervisor, child *childRuntime) *cli.EventMetadata {
-	meta := cli.NewEventMetadata(s.runID, child.label, child.id)
+	child.mu.Lock()
+	lastSeq := child.latestSeq
+	child.mu.Unlock()
+	// Continue the runtime's event sequence across turns; a fresh per-turn
+	// counter would make turn N+1's events look like replays of turn N's to
+	// seq-deduplicating subscribers.
+	meta := cli.NewEventMetadata(s.runID, child.label, child.id).WithLatestSeq(lastSeq)
 	if child.workflowID != "" {
 		meta = meta.WithWorkflow(child.workflowID, child.nodeID, child.activationID, child.attemptID)
 	}

@@ -1530,6 +1530,17 @@ func (m *EventMetadata) WithWorkflow(workflowID, nodeID, activationID, attemptID
 	return m
 }
 
+// WithLatestSeq seeds the per-runtime sequence counter so a runtime's event
+// seq stays monotonic across turns. Each turn builds a fresh metadata; without
+// this seed, turn N+1 restarts at seq 1 and subscribers that dedup by
+// (runtime_id, seq) discard the turn's events as replays.
+func (m *EventMetadata) WithLatestSeq(n int64) *EventMetadata {
+	if n > m.latestSeq {
+		m.latestSeq = n
+	}
+	return m
+}
+
 func (m *EventMetadata) Stamp(event events.Event) events.Event {
 	if m == nil {
 		return events.Clone(event)
