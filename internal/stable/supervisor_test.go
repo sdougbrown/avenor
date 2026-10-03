@@ -6894,12 +6894,16 @@ func (p *turnEndProvider) Capabilities(context.Context) (runtime.Capabilities, e
 }
 
 // waitControlSessionEnd reads the client event stream until count session.end
-// events for runtimeID have been delivered, returning their seqs. Fails the
-// test if the stream stalls before count is reached.
+// events for runtimeID have been delivered, returning their seqs. It simulates
+// a real subscriber: the max seq of every event seen for a runtime (any event
+// type, matching the server's per-runtime dedup key) is tracked, and
+// session.end events whose seq is at or below that max are treated as dropped.
+// Fails the test if the stream stalls before count is reached.
 func waitControlSessionEnd(t *testing.T, eventCh <-chan client.Event, runtimeID string, count int) []int64 {
 	t.Helper()
 	var seqs []int64
 	var seen []string
+	seenMax := make(map[string]int64)
 	deadline := time.After(30 * time.Second)
 	for len(seqs) < count {
 		select {
@@ -6908,11 +6912,13 @@ func waitControlSessionEnd(t *testing.T, eventCh <-chan client.Event, runtimeID 
 				t.Fatalf("event stream closed after %d/%d session.end events", len(seqs), count)
 			}
 			seen = append(seen, fmt.Sprintf("%s[rt=%s seq=%v]", ev.Event, ev.RuntimeID, ev.Raw["seq"]))
-			if ev.Event != "session.end" || ev.RuntimeID != runtimeID {
-				continue
-			}
-			if seq, ok := events.Int64(ev.Raw["seq"]); ok {
-				seqs = append(seqs, seq)
+			if seq, hasSeq := events.Int64(ev.Raw["seq"]); hasSeq && ev.RuntimeID != "" {
+				if ev.Event == "session.end" && ev.RuntimeID == runtimeID && seq > seenMax[ev.RuntimeID] {
+					seqs = append(seqs, seq)
+				}
+				if seq > seenMax[ev.RuntimeID] {
+					seenMax[ev.RuntimeID] = seq
+				}
 			}
 		case <-deadline:
 			t.Fatalf("timed out waiting for session.end %d/%d (got seqs %v, events seen: %v)", len(seqs), count, seqs, seen)
@@ -6921,11 +6927,12 @@ func waitControlSessionEnd(t *testing.T, eventCh <-chan client.Event, runtimeID 
 	return seqs
 }
 
-// Integration: a control-stream subscriber must receive every turn's
-// session.end when a runtime is prompted more than once. Before the
-// cross-turn seq fix, turn N+1's events carried seqs at or below turn N's and
-// the subscriber dedup silently dropped the whole turn, including session.end.
-func TestControlSubscribeDeliversSessionEndAcrossTurns(t *testing.T) {
+// runControlTurnsTest starts a supervisor with a control server, subscribes a
+// client, spawns a runtime, and collects one session.end seq per turn across
+// turns turns. After each turn except the last it calls betweenTurn (if set)
+// before prompting the next turn. Returns the delivered session.end seqs.
+func runControlTurnsTest(t *testing.T, turns int, betweenTurn func(turn int, sup *Supervisor, c *client.Client, runtimeID string)) []int64 {
+	t.Helper()
 	socketPath := filepath.Join(t.TempDir(), "ctrl.sock")
 
 	provider := &turnEndProvider{}
@@ -6961,15 +6968,27 @@ func TestControlSubscribeDeliversSessionEndAcrossTurns(t *testing.T) {
 	}
 
 	var seqs []int64
-	for turn := 0; turn < 3; turn++ {
+	for turn := 0; turn < turns; turn++ {
 		turnSeqs := waitControlSessionEnd(t, eventCh, runtimeID, 1)
 		seqs = append(seqs, turnSeqs...)
-		if turn < 2 {
+		if turn < turns-1 {
+			if betweenTurn != nil {
+				betweenTurn(turn, sup, c, runtimeID)
+			}
 			if err := c.Prompt(runtimeID, fmt.Sprintf("follow up %d", turn+1)); err != nil {
 				t.Fatalf("prompt turn %d: %v", turn+1, err)
 			}
 		}
 	}
+	return seqs
+}
+
+// Integration: a control-stream subscriber must receive every turn's
+// session.end when a runtime is prompted more than once. Before the
+// cross-turn seq fix, turn N+1's events carried seqs at or below turn N's and
+// the subscriber dedup silently dropped the whole turn, including session.end.
+func TestControlSubscribeDeliversSessionEndAcrossTurns(t *testing.T) {
+	seqs := runControlTurnsTest(t, 3, nil)
 
 	if len(seqs) != 3 {
 		t.Fatalf("delivered %d session.end events, want 3", len(seqs))
@@ -6978,5 +6997,36 @@ func TestControlSubscribeDeliversSessionEndAcrossTurns(t *testing.T) {
 		if seqs[i] <= seqs[i-1] {
 			t.Fatalf("session.end seqs across turns = %v, want strictly increasing", seqs)
 		}
+	}
+}
+
+// Regression for the seq-authority unification: supervisor-level events that
+// bypass the runtime writer (avenor.error, child.question, synthetic
+// session.end) are stamped by the control server's canonical event state.
+// Before unification, those stamps never advanced the runtime's own counter,
+// so a control-stamped event published between turns made turn N+1's events
+// carry seqs at or below the subscriber's seen-max — silently dropping the
+// whole turn. With one shared counter, every turn delivers.
+func TestControlStampedEventsBetweenTurnsKeepSeqMonotonic(t *testing.T) {
+	seqs := runControlTurnsTest(t, 2, func(turn int, sup *Supervisor, c *client.Client, runtimeID string) {
+		// Simulate the supervisor's control-stamped emissions (error,
+		// child.question, synthetic session.end) landing between turns.
+		for i := 0; i < 3; i++ {
+			sup.control.PublishEvent(events.Event{
+				Event: "avenor.error",
+				Fields: map[string]any{
+					"runtime_id": runtimeID,
+					"message":    fmt.Sprintf("boom %d", i),
+					"source":     "error",
+				},
+			})
+		}
+	})
+
+	if len(seqs) != 2 {
+		t.Fatalf("delivered %d session.end events, want 2", len(seqs))
+	}
+	if seqs[1] <= seqs[0] {
+		t.Fatalf("session.end seqs across turns = %v, want strictly increasing", seqs)
 	}
 }

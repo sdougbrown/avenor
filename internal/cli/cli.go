@@ -1530,22 +1530,15 @@ func (m *EventMetadata) WithWorkflow(workflowID, nodeID, activationID, attemptID
 	return m
 }
 
-// WithLatestSeq seeds the per-runtime sequence counter so a runtime's event
-// seq stays monotonic across turns. Each turn builds a fresh metadata; without
-// this seed, turn N+1 restarts at seq 1 and subscribers that dedup by
-// (runtime_id, seq) discard the turn's events as replays.
-func (m *EventMetadata) WithLatestSeq(n int64) *EventMetadata {
-	if n > m.latestSeq {
-		m.latestSeq = n
-	}
-	return m
-}
-
-func (m *EventMetadata) Stamp(event events.Event) events.Event {
+// Tag enriches the event with run identity, workflow execution identity, and
+// a timestamp, without assigning a sequence number. Callers that publish
+// through a ControlServer let CanonicalizeEvent own the seq so every emitter
+// shares one per-runtime counter.
+func (m *EventMetadata) Tag(event events.Event) events.Event {
 	if m == nil {
 		return events.Clone(event)
 	}
-	// Stamping happens before durable NDJSON persistence, so it must not alter
+	// Tagging happens before durable NDJSON persistence, so it must not alter
 	// the terminal reply. Control/status paths apply their own preview bound.
 	out := events.Clone(event)
 	if out.Fields == nil {
@@ -1586,6 +1579,13 @@ func (m *EventMetadata) Stamp(event events.Event) events.Event {
 		}
 		out.Fields["ts"] = now().UnixMilli()
 	}
+	return out
+}
+
+func (m *EventMetadata) Stamp(event events.Event) events.Event {
+	out := m.Tag(event)
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if seq, ok := events.Int64(out.Fields["seq"]); ok {
 		if seq > m.latestSeq {
 			m.latestSeq = seq
@@ -1613,15 +1613,46 @@ func newFanoutWriter(base EventSink, cs *control.ControlServer, metadata *EventM
 	return &fanoutWriter{base: base, control: cs, metadata: metadata}
 }
 
+// StampFanoutEvent is the single authority for assigning a per-runtime seq on
+// the fan-out path. When a control server is present it owns the per-runtime
+// seq counter: the event is tagged with run identity and then canonicalized
+// there, so the durable log and the control stream carry one shared sequence
+// per runtime and subscriber dedup, replay cursors, and persistence can never
+// disagree about event order. Without a control server, the EventMetadata
+// stamps the seq itself; with neither, the event only carries its runtime
+// identity. The returned event is the lossless durable form.
+func StampFanoutEvent(ev events.Event, runtimeID string, metadata *EventMetadata, cs *control.ControlServer) events.Event {
+	if cs != nil {
+		if metadata != nil {
+			ev = metadata.Tag(ev)
+		} else if runtimeID != "" {
+			if ev.Fields == nil {
+				ev.Fields = map[string]any{}
+			}
+			if _, ok := ev.Fields["runtime_id"]; !ok {
+				ev.Fields["runtime_id"] = runtimeID
+			}
+		}
+		return cs.CanonicalizeEvent(ev)
+	}
+	if metadata != nil {
+		return metadata.Stamp(ev)
+	}
+	if runtimeID != "" {
+		if ev.Fields == nil {
+			ev.Fields = map[string]any{}
+		}
+		if _, ok := ev.Fields["runtime_id"]; !ok {
+			ev.Fields["runtime_id"] = runtimeID
+		}
+	}
+	return ev
+}
+
 func (f *fanoutWriter) Write(event events.Event) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	stamped := event
-	if f.metadata != nil {
-		stamped = f.metadata.Stamp(event)
-	} else if f.control != nil {
-		stamped = f.control.CanonicalizeEvent(event)
-	}
+	stamped := StampFanoutEvent(event, "", f.metadata, f.control)
 	if err := f.base.Write(stamped); err != nil {
 		return err
 	}
