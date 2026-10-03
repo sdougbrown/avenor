@@ -38,6 +38,8 @@ func main() {
 	maxAuto := flag.Int("max-auto", 8, "maximum automatic activations per operator turn")
 	excerpt := flag.Int("excerpt", 1200, "character bound for peer-facing excerpts")
 	heads := headsFlag{}
+	governor := flag.String("governor", "marker", "turn governor: marker (deterministic) or jev (TypeSafe System One)")
+	jevKeyFile := flag.String("jev-key-file", os.Getenv("HOME")+"/.secrets/jev.key", "path to the TypeSafe API key")
 	flag.Var(&heads, "head", "head spec name=model[@backend], repeatable; default a=sparky/gemma4:26b, b=sparky/qwen3.8:27b")
 	flag.Parse()
 
@@ -74,12 +76,21 @@ func main() {
 		}()
 	}
 
-	r, err := room.New(c, room.Options{
+	opts := room.Options{
 		Dir:          *dir,
 		ExcerptLimit: *excerpt,
 		MaxDepth:     *maxDepth,
 		MaxAuto:      *maxAuto,
-	})
+	}
+	if *governor == "jev" {
+		key, err := os.ReadFile(*jevKeyFile)
+		if err != nil {
+			fatal(fmt.Errorf("jev key: %w", err))
+		}
+		opts.Governor = room.NewJevGovernor(strings.TrimSpace(string(key)), room.MarkerGovernor{})
+		fmt.Printf("room: governor=jev (fallback: marker)\n")
+	}
+	r, err := room.New(c, opts)
 	if err != nil {
 		fatal(err)
 	}
