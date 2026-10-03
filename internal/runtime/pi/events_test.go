@@ -675,6 +675,10 @@ func TestTranslateExtensionUISelect(t *testing.T) {
 	if kind != "command" {
 		t.Errorf("kind = %q, want command", kind)
 	}
+	question, _ := ev.Fields["question"].(string)
+	if question != "Allow command execution?" {
+		t.Errorf("question = %q, want title as question", question)
+	}
 	desc, _ := ev.Fields["description"].(string)
 	if desc != "Allow command execution?" {
 		t.Errorf("description = %q", desc)
@@ -724,6 +728,10 @@ func TestTranslateExtensionUIInput(t *testing.T) {
 	kind, _ := ev.Fields["kind"].(string)
 	if kind != "input" {
 		t.Errorf("kind = %q, want input", kind)
+	}
+	question, _ := ev.Fields["question"].(string)
+	if question != "Enter value" {
+		t.Errorf("question = %q, want title as question", question)
 	}
 }
 
