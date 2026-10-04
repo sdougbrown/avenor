@@ -570,14 +570,13 @@ func TestIdempotencyFollowUpRetryConcurrent(t *testing.T) {
 
 	var wg sync.WaitGroup
 	results := make([]map[string]any, 2)
-	servers := make([]*Server, 2)
 	errs := make([]error, 2)
+	servers := []*Server{newIdempotencyServer(t, sup), newIdempotencyServer(t, sup)}
 	for i := 0; i < 2; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			s := newIdempotencyServer(t, sup)
-			servers[i] = s
+			s := servers[i]
 			_, r, err := s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
 				RunID:          parentID,
 				Message:        "continue",
