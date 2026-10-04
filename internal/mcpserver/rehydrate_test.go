@@ -776,6 +776,34 @@ func TestSpawnRejectsLabelClaimedByLiveRun(t *testing.T) {
 	}
 }
 
+func TestSpawnToleratesListErrorInLabelPrecheck(t *testing.T) {
+	var spawnCalls atomic.Int32
+	fake := &fakeClient{
+		listErr: fmt.Errorf("supervisor unavailable"),
+		spawnFunc: func(map[string]any) (map[string]any, error) {
+			spawnCalls.Add(1)
+			return map[string]any{"runtime_id": "rt-new", "session_id": "ses-new"}, nil
+		},
+	}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A list failure must not block the spawn: the registry collision check
+	// remains the backstop.
+	_, _, err = s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
+		RepoDir: "/tmp/test-repo",
+		Label:   "anything",
+	})
+	if err != nil {
+		t.Fatalf("spawn with list-error pre-check failed: %v", err)
+	}
+	if n := spawnCalls.Load(); n != 1 {
+		t.Fatalf("spawn calls = %d, want 1", n)
+	}
+}
+
 func TestSpawnReapsStaleLabelMapping(t *testing.T) {
 	var spawnCalls atomic.Int32
 	fake := &fakeClient{

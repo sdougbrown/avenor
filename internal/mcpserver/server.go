@@ -602,7 +602,7 @@ func (s *Server) reapStaleLabel(supervisorPath string, liveEntries []map[string]
 		return
 	}
 	old := s.registry.LookupLabel(supervisorPath, label)
-	if old == nil || old.SupervisorID != supervisorPath {
+	if old == nil {
 		return
 	}
 	runtimeID, _ := entry["runtime_id"].(string)
