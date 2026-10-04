@@ -64,6 +64,23 @@ func (p *idempotencyFailingProvider) Start(context.Context, runtime.StartOptions
 	return runtime.Session{}, fmt.Errorf("intentional spawn failure")
 }
 
+// idempotencyGatedProvider blocks its first Start call on gate until the test
+// closes it, so concurrent duplicates are forced to overlap the holder's
+// in-flight spawn instead of serializing into completed-cache hits.
+type idempotencyGatedProvider struct {
+	idempotencyTestProvider
+	gate chan struct{}
+}
+
+func (p *idempotencyGatedProvider) Start(ctx context.Context, opts runtime.StartOptions) (runtime.Session, error) {
+	select {
+	case <-p.gate:
+	case <-ctx.Done():
+		return runtime.Session{}, ctx.Err()
+	}
+	return p.idempotencyTestProvider.Start(ctx, opts)
+}
+
 func newIdempotencySupervisor(t *testing.T, cfg Config, provider runtime.Provider) *Supervisor {
 	t.Helper()
 	cfg.ControlSocket = newStableSocketPath(t, "idempotency")
@@ -136,14 +153,22 @@ func TestIdempotencySequentialIdenticalSpawnsOneRuntime(t *testing.T) {
 }
 
 // TestIdempotencyConcurrentIdenticalSpawnsOneRuntime: concurrent duplicate
-// spawns under one key all observe the holder's single result.
+// spawns under one key all observe the holder's single result. The holder's
+// provider Start is held until every duplicate is parked inside the store's
+// in-flight wait, so each duplicate exercises the waiter path rather than
+// serializing into a completed-cache hit.
 func TestIdempotencyConcurrentIdenticalSpawnsOneRuntime(t *testing.T) {
 	const n = 8
-	provider := &idempotencyTestProvider{}
+	provider := &idempotencyGatedProvider{gate: make(chan struct{})}
 	sup := newIdempotencySupervisor(t, Config{}, provider)
 	defer func() { _ = sup.broker.Stop() }()
 	dir := t.TempDir()
 	raw := idempotencySpawnRaw(t, "key_a", "hello", dir)
+
+	// One token per waiter, sent just before each duplicate blocks on the
+	// holder's flight.
+	parked := make(chan struct{}, n)
+	sup.idempotency.waiterSignal = parked
 
 	results := make([]SpawnResult, n)
 	errs := make([]error, n)
@@ -164,6 +189,17 @@ func TestIdempotencyConcurrentIdenticalSpawnsOneRuntime(t *testing.T) {
 			}
 		}(i)
 	}
+	// The first caller to reach the store becomes the holder and blocks in
+	// the provider; the other n-1 callers park as waiters. Wait for all of
+	// them before releasing the holder.
+	for i := 0; i < n-1; i++ {
+		select {
+		case <-parked:
+		case <-time.After(5 * time.Second):
+			t.Fatal("duplicate callers did not park inside the in-flight wait")
+		}
+	}
+	close(provider.gate)
 	wg.Wait()
 	for i, err := range errs {
 		if err != nil {
@@ -216,6 +252,8 @@ func TestIdempotencyExpiredTLRetrySpawnsFresh(t *testing.T) {
 	dir := t.TempDir()
 	raw := idempotencySpawnRaw(t, "key_a", "hello", dir)
 
+	base := time.Now()
+	sup.idempotency.now = func() time.Time { return base }
 	first, err := sup.Spawn(raw)
 	if err != nil {
 		t.Fatalf("first spawn: %v", err)
@@ -225,23 +263,35 @@ func TestIdempotencyExpiredTLRetrySpawnsFresh(t *testing.T) {
 		t.Fatalf("first result type = %T, want SpawnResult", first)
 	}
 
-	// Age the stored entry past its TTL.
-	sup.idempotency.mu.Lock()
-	for key, entry := range sup.idempotency.entries {
-		entry.expires = time.Now().Add(-time.Second)
-		sup.idempotency.entries[key] = entry
-	}
-	sup.idempotency.mu.Unlock()
-
+	// Just before the production TTL elapses, the retry is a stored hit.
+	sup.idempotency.now = func() time.Time { return base.Add(idempotencyTTL - time.Nanosecond) }
 	second, err := sup.Spawn(raw)
 	if err != nil {
-		t.Fatalf("retry after expiry: %v", err)
+		t.Fatalf("retry just before the TTL: %v", err)
 	}
 	secondRes, ok := second.(SpawnResult)
 	if !ok {
 		t.Fatalf("second result type = %T, want SpawnResult", second)
 	}
-	if secondRes.RuntimeID == firstRes.RuntimeID {
+	if secondRes.RuntimeID != firstRes.RuntimeID {
+		t.Fatalf("pre-TTL retry = %q, want the stored runtime %q", secondRes.RuntimeID, firstRes.RuntimeID)
+	}
+	if provider.startCalls != 1 {
+		t.Fatalf("provider Start calls = %d, want 1 before the TTL", provider.startCalls)
+	}
+
+	// At the TTL boundary the entry's retention window has closed, so the
+	// retry starts a fresh runtime instead of returning the stale result.
+	sup.idempotency.now = func() time.Time { return base.Add(idempotencyTTL) }
+	third, err := sup.Spawn(raw)
+	if err != nil {
+		t.Fatalf("retry at the TTL: %v", err)
+	}
+	thirdRes, ok := third.(SpawnResult)
+	if !ok {
+		t.Fatalf("third result type = %T, want SpawnResult", third)
+	}
+	if thirdRes.RuntimeID == firstRes.RuntimeID {
 		t.Fatalf("expired retry reused the stored runtime %q", firstRes.RuntimeID)
 	}
 	if got := countIdempotencyRuntimes(sup); got != 2 {
@@ -358,6 +408,8 @@ func TestIdempotencyStoreFullCapacityError(t *testing.T) {
 	defer func() { _ = sup.broker.Stop() }()
 	dir := t.TempDir()
 
+	base := time.Now()
+	sup.idempotency.now = func() time.Time { return base }
 	if _, err := sup.Spawn(idempotencySpawnRaw(t, "key_a", "hello", dir)); err != nil {
 		t.Fatalf("spawn A: %v", err)
 	}
@@ -370,13 +422,8 @@ func TestIdempotencyStoreFullCapacityError(t *testing.T) {
 		t.Fatalf("capacity error = %+v, want key_b capacity 1", ce)
 	}
 
-	// Expire A's entry; B now fits.
-	sup.idempotency.mu.Lock()
-	for key, entry := range sup.idempotency.entries {
-		entry.expires = time.Now().Add(-time.Second)
-		sup.idempotency.entries[key] = entry
-	}
-	sup.idempotency.mu.Unlock()
+	// Advance the injected clock past A's TTL; A is purged and B now fits.
+	sup.idempotency.now = func() time.Time { return base.Add(idempotencyTTL) }
 
 	res, err := sup.Spawn(idempotencySpawnRaw(t, "key_b", "hello", dir))
 	if err != nil {
@@ -515,12 +562,72 @@ func TestIdempotencyExplicitLabelMismatchConflicts(t *testing.T) {
 	}
 }
 
+// TestIdempotencyResolvedProvenanceRetryHits: supervisor-resolved provenance
+// (ParentID, AgentProfile) is excluded from the parameter hash, so a retry
+// whose resolved identity differs but whose caller intent is equal is a
+// stored hit; a retry with different caller intent still conflicts.
+func TestIdempotencyResolvedProvenanceRetryHits(t *testing.T) {
+	provider := &idempotencyTestProvider{}
+	sup := newIdempotencySupervisor(t, Config{}, provider)
+	defer func() { _ = sup.broker.Stop() }()
+	dir := t.TempDir()
+
+	raw1, err := json.Marshal(SpawnParams{Prompt: "hello", Dir: dir, Agent: "claude", ParentID: "rt_parent_1", AgentProfile: "profile-a", IdempotencyKey: "key_a"})
+	if err != nil {
+		t.Fatalf("marshal first params: %v", err)
+	}
+	first, err := sup.Spawn(raw1)
+	if err != nil {
+		t.Fatalf("first spawn: %v", err)
+	}
+	firstRes, ok := first.(SpawnResult)
+	if !ok {
+		t.Fatalf("first result type = %T, want SpawnResult", first)
+	}
+
+	// Same caller intent, different resolved provenance: stored hit.
+	raw2, err := json.Marshal(SpawnParams{Prompt: "hello", Dir: dir, Agent: "claude", ParentID: "rt_parent_2", AgentProfile: "profile-b", IdempotencyKey: "key_a"})
+	if err != nil {
+		t.Fatalf("marshal retry params: %v", err)
+	}
+	second, err := sup.Spawn(raw2)
+	if err != nil {
+		t.Fatalf("provenance-only retry: %v", err)
+	}
+	secondRes, ok := second.(SpawnResult)
+	if !ok {
+		t.Fatalf("second result type = %T, want SpawnResult", second)
+	}
+	if secondRes.RuntimeID != firstRes.RuntimeID {
+		t.Fatalf("provenance-only retry = %q, want stored runtime %q", secondRes.RuntimeID, firstRes.RuntimeID)
+	}
+
+	// Different caller intent under the same key still conflicts.
+	raw3, err := json.Marshal(SpawnParams{Prompt: "goodbye", Dir: dir, Agent: "claude", IdempotencyKey: "key_a"})
+	if err != nil {
+		t.Fatalf("marshal conflict params: %v", err)
+	}
+	_, err = sup.Spawn(raw3)
+	var ce *control.IdempotencyConflictError
+	if !errors.As(err, &ce) {
+		t.Fatalf("error = %v, want *control.IdempotencyConflictError", err)
+	}
+	assertOneRuntime(t, sup)
+	if provider.startCalls != 1 {
+		t.Fatalf("provider Start calls = %d, want 1", provider.startCalls)
+	}
+}
+
 // TestIdempotencyWaiterReleaseOnFailure exercises the store directly: a
 // waiter blocked on an in-flight key observes the holder's failure when the
 // holder releases, and the commit path leaves a stored entry with no
 // in-flight reservation.
 func TestIdempotencyWaiterReleaseOnFailure(t *testing.T) {
 	store := newIdempotencyStore(4)
+	// One token per waiter, sent by the store just before the waiter blocks
+	// on the holder's flight, so the release is ordered after the park.
+	waiterParked := make(chan struct{}, 1)
+	store.waiterSignal = waiterParked
 	_, holder, err := store.begin("k", "h")
 	if err != nil {
 		t.Fatalf("holder begin: %v", err)
@@ -529,11 +636,9 @@ func TestIdempotencyWaiterReleaseOnFailure(t *testing.T) {
 		t.Fatal("holder begin returned no flight")
 	}
 
-	waiterStarted := make(chan struct{})
 	waiterDone := make(chan struct{})
 	go func() {
 		defer close(waiterDone)
-		close(waiterStarted)
 		res, f, err := store.begin("k", "h")
 		if f != nil {
 			t.Error("waiter got a flight")
@@ -549,20 +654,14 @@ func TestIdempotencyWaiterReleaseOnFailure(t *testing.T) {
 		}
 	}()
 	select {
-	case <-waiterStarted:
-	case <-time.After(2 * time.Second):
-		t.Fatal("waiter did not start")
-	}
-	time.Sleep(50 * time.Millisecond)
-	select {
-	case <-waiterDone:
-		t.Fatal("waiter returned before the holder settled")
-	default:
+	case <-waiterParked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiter did not park inside the in-flight wait")
 	}
 	store.release("k", holder, fmt.Errorf("intentional holder failure"))
 	select {
 	case <-waiterDone:
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("waiter did not observe the holder's failure")
 	}
 	store.mu.Lock()
@@ -656,6 +755,31 @@ func TestIdempotencyHashIgnoresAttemptIdentity(t *testing.T) {
 	}
 	if explicitHash == explicitOtherHash {
 		t.Fatal("hash equal for different explicit labels")
+	}
+
+	// Supervisor-resolved provenance is excluded: a retry whose ParentID,
+	// SessionID, or AgentProfile resolved differently still hashes equal.
+	resolved := base
+	resolved.ParentID = "rt_parent"
+	resolved.SessionID = "ses_prior"
+	resolved.AgentProfile = "profile-a"
+	resolvedHash, err := idempotencyHash(resolved)
+	if err != nil {
+		t.Fatalf("hash(resolved): %v", err)
+	}
+	if baseHash != resolvedHash {
+		t.Fatalf("hash changed with supervisor-resolved provenance: %s vs %s", baseHash, resolvedHash)
+	}
+	resolvedOther := base
+	resolvedOther.ParentID = "rt_other"
+	resolvedOther.SessionID = "ses_other"
+	resolvedOther.AgentProfile = "profile-b"
+	resolvedOtherHash, err := idempotencyHash(resolvedOther)
+	if err != nil {
+		t.Fatalf("hash(resolvedOther): %v", err)
+	}
+	if resolvedHash != resolvedOtherHash {
+		t.Fatal("hash differs for different resolved provenance with equal intent")
 	}
 
 	other := base

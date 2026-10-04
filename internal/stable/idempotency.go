@@ -40,6 +40,10 @@ type idempotencyStore struct {
 	capacity int
 	entries  map[string]idempotencyEntry
 	inflight map[string]*idempotencyFlight
+	// waiterSignal, when non-nil, receives one token per waiter just before
+	// it blocks on a flight's done channel, letting tests order a release
+	// after waiters are parked. Production leaves it nil.
+	waiterSignal chan<- struct{}
 }
 
 func newIdempotencyStore(capacity int) *idempotencyStore {
@@ -86,6 +90,9 @@ func (s *idempotencyStore) begin(key, hash string) (SpawnResult, *idempotencyFli
 			s.mu.Unlock()
 			return SpawnResult{}, nil, &control.IdempotencyConflictError{Key: key}
 		}
+		if s.waiterSignal != nil {
+			s.waiterSignal <- struct{}{}
+		}
 		s.mu.Unlock()
 		<-f.done
 		return f.result, nil, f.err
@@ -126,14 +133,24 @@ func (s *idempotencyStore) release(key string, f *idempotencyFlight, err error) 
 }
 
 // idempotencyHash derives the parameter hash for an idempotent spawn: SHA-256
-// over canonical JSON of the typed params with per-attempt identity zeroed.
-// OnEvent and SentinelFile are attempt-local artifacts; IdempotencyKey is the
-// key itself; Label is an MCP-generated run ID when LabelDerived is set. All
-// four are excluded so a retry with the same semantic parameters hashes equal.
+// over canonical JSON of the typed params with per-attempt identity and
+// supervisor-resolved provenance zeroed. OnEvent and SentinelFile are
+// attempt-local artifacts; IdempotencyKey is the key itself; Label is an
+// MCP-generated run ID when LabelDerived is set; ParentID is auto-populated
+// from live runtime registration, SessionID is resolved from prior state on
+// follow-up, ParentRunID is broker-provenance of the calling runtime, and
+// AgentProfile is resolved through the profile fallback chain, so all four can
+// differ between legitimate retries of the same intent.
+// Everything excluded here is re-derived per attempt; caller intent stays in
+// the hash so a retry with different semantic parameters still conflicts.
 func idempotencyHash(p SpawnParams) (string, error) {
 	p.OnEvent = ""
 	p.SentinelFile = ""
 	p.IdempotencyKey = ""
+	p.ParentID = ""
+	p.ParentRunID = ""
+	p.SessionID = ""
+	p.AgentProfile = ""
 	if p.LabelDerived {
 		p.Label = ""
 	}

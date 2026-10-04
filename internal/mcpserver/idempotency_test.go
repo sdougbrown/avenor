@@ -30,7 +30,10 @@ type fakeIdempotentSupervisor struct {
 	inflight map[string]*fakeIdemFlight
 	nextRT   int
 	runtimes int
-	listRuns []map[string]any
+	// spawnCalls counts Spawn invocations, one per attempt that reached the
+	// supervisor (hits, waiters, and rejected conflicts included).
+	spawnCalls int
+	listRuns   []map[string]any
 }
 
 type fakeIdemEntry struct {
@@ -71,6 +74,9 @@ func fakeIdempotencyHash(p map[string]any) string {
 }
 
 func (f *fakeIdempotentSupervisor) Spawn(params map[string]any) (map[string]any, error) {
+	f.mu.Lock()
+	f.spawnCalls++
+	f.mu.Unlock()
 	key, _ := params["idempotency_key"].(string)
 	if key == "" {
 		return f.doSpawn(params), nil
@@ -157,6 +163,13 @@ func (f *fakeIdempotentSupervisor) RuntimeCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.runtimes
+}
+
+// SpawnCallCount reports how many spawn attempts reached the supervisor.
+func (f *fakeIdempotentSupervisor) SpawnCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.spawnCalls
 }
 
 func (f *fakeIdempotentSupervisor) List() ([]map[string]any, error) {
@@ -271,9 +284,32 @@ func TestIdempotencySpawnRetryReturnsOriginalRun(t *testing.T) {
 		t.Fatalf("supervisor_id mismatch: %v vs %v", m1["supervisor_id"], m2["supervisor_id"])
 	}
 
-	// Exactly one runtime was spawned (the retry was a stored hit).
+	// Exactly one runtime was spawned (the retry was a stored hit), and both
+	// keyed attempts reached the supervisor's Spawn.
 	if n := sup.RuntimeCount(); n != 1 {
 		t.Fatalf("runtimes = %d, want 1 (a retry must not spawn a second)", n)
+	}
+	if n := sup.SpawnCallCount(); n != 2 {
+		t.Fatalf("supervisor Spawn calls = %d, want 2 (both attempts reached the supervisor)", n)
+	}
+
+	// A same-server retry (third attempt on s2) is also a stored hit that
+	// reaches the supervisor.
+	_, r3, err := s2.handleAvenorSpawn(context.Background(), nil, spawnArgs{
+		RepoDir:        "/tmp/repo",
+		IdempotencyKey: "k1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r3.(map[string]any)["run_id"] != runID1 {
+		t.Fatalf("same-server retry run_id = %v, want the original %s", r3.(map[string]any)["run_id"], runID1)
+	}
+	if n := sup.SpawnCallCount(); n != 3 {
+		t.Fatalf("supervisor Spawn calls = %d, want 3 after the same-server retry", n)
+	}
+	if n := sup.RuntimeCount(); n != 1 {
+		t.Fatalf("runtimes = %d, want 1 after the same-server retry", n)
 	}
 
 	// The second server's registry records the original run's artifact paths,
@@ -328,6 +364,9 @@ func TestIdempotencySpawnRetryExplicitLabelKept(t *testing.T) {
 	if n := sup.RuntimeCount(); n != 1 {
 		t.Fatalf("runtimes = %d, want 1", n)
 	}
+	if n := sup.SpawnCallCount(); n != 2 {
+		t.Fatalf("supervisor Spawn calls = %d, want 2 (both attempts reached the supervisor)", n)
+	}
 }
 
 func TestIdempotencySpawnRetryHashMismatchFails(t *testing.T) {
@@ -357,6 +396,11 @@ func TestIdempotencySpawnRetryHashMismatchFails(t *testing.T) {
 	}
 	if n := sup.RuntimeCount(); n != 1 {
 		t.Fatalf("runtimes = %d, want 1 (a conflicting retry must not spawn)", n)
+	}
+	// The conflicting retry still reached the supervisor's Spawn and was
+	// rejected there; no runtime was started for it.
+	if n := sup.SpawnCallCount(); n != 2 {
+		t.Fatalf("supervisor Spawn calls = %d, want 2 (the conflicting retry reached the supervisor)", n)
 	}
 }
 
@@ -404,9 +448,33 @@ func TestIdempotencyFollowUpRetrySequential(t *testing.T) {
 	if m2["label"] != m1["label"] {
 		t.Fatalf("retry follow-up label = %v, want the original %v", m2["label"], m1["label"])
 	}
-	// One parent runtime + one follow-up runtime = 2 total; the retry was a hit.
+	// One parent runtime + one follow-up runtime = 2 total; the retry was a
+	// hit that still reached the supervisor.
 	if n := sup.RuntimeCount(); n != 2 {
 		t.Fatalf("runtimes = %d, want 2 (parent + one follow-up)", n)
+	}
+	if n := sup.SpawnCallCount(); n != 3 {
+		t.Fatalf("supervisor Spawn calls = %d, want 3 (parent + both follow-up attempts)", n)
+	}
+
+	// A same-server retry (third follow-up attempt on s2) is also a stored
+	// hit that reaches the supervisor.
+	_, r3, err := s2.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
+		RunID:          parentID,
+		Message:        "continue",
+		IdempotencyKey: "fk",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r3.(map[string]any)["run_id"] != fuID1 {
+		t.Fatalf("same-server retry follow-up run_id = %v, want the original %s", r3.(map[string]any)["run_id"], fuID1)
+	}
+	if n := sup.SpawnCallCount(); n != 4 {
+		t.Fatalf("supervisor Spawn calls = %d, want 4 after the same-server retry", n)
+	}
+	if n := sup.RuntimeCount(); n != 2 {
+		t.Fatalf("runtimes = %d, want 2 after the same-server retry", n)
 	}
 }
 
@@ -457,9 +525,13 @@ func TestIdempotencyFollowUpRetryConcurrent(t *testing.T) {
 	if id0 != id1 {
 		t.Fatalf("concurrent follow-ups returned different run_ids: %s vs %s", id0, id1)
 	}
-	// One parent runtime + one follow-up runtime = 2 total.
+	// One parent runtime + one follow-up runtime = 2 total; both keyed
+	// attempts reached the supervisor.
 	if n := sup.RuntimeCount(); n != 2 {
 		t.Fatalf("runtimes = %d, want 2 (parent + one follow-up)", n)
+	}
+	if n := sup.SpawnCallCount(); n != 3 {
+		t.Fatalf("supervisor Spawn calls = %d, want 3 (parent + both follow-up attempts)", n)
 	}
 }
 
@@ -493,6 +565,9 @@ func TestIdempotencySpawnAndFollowUpKeysDoNotCollide(t *testing.T) {
 		if n := sup.RuntimeCount(); n != 2 {
 			t.Fatalf("runtimes = %d, want 2 (the follow-up must spawn a new runtime)", n)
 		}
+		if n := sup.SpawnCallCount(); n != 2 {
+			t.Fatalf("supervisor Spawn calls = %d, want 2", n)
+		}
 	})
 
 	// (b) A spawn keyed "follow_up:k" must not be hit by a follow-up keyed k.
@@ -522,6 +597,9 @@ func TestIdempotencySpawnAndFollowUpKeysDoNotCollide(t *testing.T) {
 		}
 		if n := sup.RuntimeCount(); n != 2 {
 			t.Fatalf("runtimes = %d, want 2", n)
+		}
+		if n := sup.SpawnCallCount(); n != 2 {
+			t.Fatalf("supervisor Spawn calls = %d, want 2", n)
 		}
 	})
 }
@@ -568,8 +646,12 @@ func TestIdempotencyRetryRegistryLabelSafety(t *testing.T) {
 	if ri.SessionID != "ses_1" {
 		t.Fatalf("retry registry session = %s, want the original ses_1", ri.SessionID)
 	}
-	// Exactly one runtime exists on the supervisor.
+	// Exactly one runtime exists on the supervisor, and both keyed attempts
+	// reached its Spawn.
 	if n := sup.RuntimeCount(); n != 1 {
 		t.Fatalf("runtimes = %d, want 1", n)
+	}
+	if n := sup.SpawnCallCount(); n != 2 {
+		t.Fatalf("supervisor Spawn calls = %d, want 2 (both attempts reached the supervisor)", n)
 	}
 }
