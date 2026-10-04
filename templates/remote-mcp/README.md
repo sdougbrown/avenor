@@ -17,13 +17,19 @@ The MCP endpoint is what remote clients talk to. The control socket stays Unix-o
 
 ## Token
 
-Generate a token file the MCP server reads:
+Generate a token file the MCP server reads. The `umask 077` subshell makes the file 0600 from creation, so it is never world-readable before `chmod` runs:
 
 ```bash
-mkdir -p "$HOME/Library/Application Support/avenor/remote" && openssl rand -hex 32 > "$HOME/Library/Application Support/avenor/remote/token" && chmod 600 "$HOME/Library/Application Support/avenor/remote/token"
+mkdir -p "$HOME/Library/Application Support/avenor/remote"
+( umask 077; openssl rand -hex 32 > "$HOME/Library/Application Support/avenor/remote/token" ) && chmod 600 "$HOME/Library/Application Support/avenor/remote/token"
 ```
 
-On Linux, use your config directory instead (the templates use `/etc/avenor/remote`).
+On Linux, use your config directory instead (the templates use `/etc/avenor/remote`):
+
+```bash
+install -d -m 700 /etc/avenor/remote
+( umask 077; openssl rand -hex 32 > /etc/avenor/remote/token ) && chmod 600 /etc/avenor/remote/token
+```
 
 ## Install
 
@@ -41,10 +47,15 @@ launchctl load ~/Library/LaunchAgents/dev.avenor.stable.plist
 launchctl load ~/Library/LaunchAgents/dev.avenor.mcp.plist
 ```
 
+LaunchAgents only run while you have an active login session. After a reboot, a headless Mac has no MCP server until someone logs in. For durability, use the LaunchDaemon variant instead: install the plists in `/Library/LaunchDaemons/` (the system domain) and add a `UserName=` key so they run as your user.
+
 ### Linux (systemd)
 
+Create a dedicated non-root user and the state/config directories. BOTH units run as this user — the control socket is created 0600, so the MCP server can only dial it when the two processes share the UID:
+
 ```bash
-mkdir -p /var/lib/avenor/remote /etc/avenor/remote
+sudo useradd -r -s /usr/sbin/nologin avenor
+install -d -m 700 /var/lib/avenor/remote /etc/avenor/remote
 cp templates/remote-mcp/avenor-stable.service templates/remote-mcp/avenor-mcp.service /etc/systemd/system/
 ```
 
@@ -70,10 +81,16 @@ Allowed Host, no token → 401:
 curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: <host>.<tailnet>.ts.net' http://127.0.0.1:3748/mcp
 ```
 
-Allowed Host + token → not 401/403:
+Allowed Host + token → not 401/403. Write the token to a header file first so it never appears in `curl`'s argv (visible via `ps` for the duration of the request):
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: <host>.<tailnet>.ts.net' -H "Authorization: Bearer $(cat "$HOME/Library/Application Support/avenor/remote/token')" http://127.0.0.1:3748/mcp
+# macOS:
+printf 'Authorization: Bearer %s\n' "$(cat "$HOME/Library/Application Support/avenor/remote/token")" > /tmp/avenor-auth-header
+# Linux:
+printf 'Authorization: Bearer %s\n' "$(cat /etc/avenor/remote/token)" > /tmp/avenor-auth-header
+
+curl -s -o /dev/null -w '%{http_code}\n' -H @/tmp/avenor-auth-header -H 'Host: <host>.<tailnet>.ts.net' http://127.0.0.1:3748/mcp
+rm -f /tmp/avenor-auth-header
 ```
 
 Unlisted Host → 403:
@@ -98,6 +115,7 @@ What a remote MCP caller should do:
 
 ## Known limits
 
+- LaunchAgents only run while the user has an active login session; a headless Mac has no MCP server after a reboot until someone logs in (use the LaunchDaemon variant for durability)
 - idempotency records and the supervisor's runtimes are lost when the supervisor process restarts
 - parked runtimes are reaped after `--parked-timeout`
 - the wait budget is approximate: an in-flight RPC may add up to its own timeout

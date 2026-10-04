@@ -9,12 +9,23 @@
 #     --idempotency-capacity 1024 (raise deliberately for a busy remote host)
 #
 # The socket's directory must exist before the service starts:
-#   mkdir -p /var/lib/avenor/remote
+#   install -d -m 700 /var/lib/avenor/remote
 
 [Unit]
 Description=Avenor stable supervisor (durable)
 
 [Service]
+# Run as a dedicated non-root user. BOTH units must use the same user: the
+# control socket is created 0600, so the MCP server can only dial it when the
+# two processes share the UID.
+# StateDirectory=avenor pre-creates %S/avenor with ownership matching User=,
+# so the %S/avenor paths below resolve correctly.
+User=avenor
+StateDirectory=avenor
+# The supervisor spawns agent runtimes that write to arbitrary repo directories
+# and need outbound network, so it is not aggressively sandboxed.
+# NoNewPrivileges is the only hardening applied here.
+NoNewPrivileges=true
 ExecStart=/usr/local/bin/avenor stable --control-socket %S/avenor/remote/stable.sock --max-runtimes 16 --max-tree-budget 64 --idempotency-capacity 1024
 Restart=on-failure
 RestartSec=3
