@@ -863,10 +863,12 @@ func TestIdempotencyHashIgnoresAttemptIdentity(t *testing.T) {
 
 // TestIdempotencyHashExclusionSet pins the exact set of fields excluded from
 // the idempotency parameter hash: each excluded field, changed alone, leaves
-// the hash unchanged; each caller-intent field (Prompt, PromptFile, Dir,
-// Agent, Model, Backend, Timeout) changes it; and Label is excluded only when
-// derived. This guards against the MCP test's mirrored hash drifting from the
-// real exclusion set, in both directions.
+// the hash unchanged; every caller-influenceable field (Prompt, PromptFile,
+// Dir, Agent, Model, Thinking, ServerURL, Backend, PermissionHandler,
+// AutoApprove, Timeout, MaxRetries, LoopFile, TeamFile, RosterFile,
+// RosterEntry) changes it; and Label is excluded only when derived. This
+// guards against the MCP test's mirrored hash drifting from the real
+// exclusion set, in both directions.
 func TestIdempotencyHashExclusionSet(t *testing.T) {
 	base := SpawnParams{
 		Prompt:         "hello",
@@ -916,13 +918,22 @@ func TestIdempotencyHashExclusionSet(t *testing.T) {
 	// field added to the production exclusion set would stop changing the
 	// hash and fail here.
 	intent := map[string]func(*SpawnParams){
-		"Prompt":     func(p *SpawnParams) { p.Prompt = "goodbye" },
-		"PromptFile": func(p *SpawnParams) { p.PromptFile = "/other-prompt-file" },
-		"Dir":        func(p *SpawnParams) { p.Dir = "/other-dir" },
-		"Agent":      func(p *SpawnParams) { p.Agent = "other-agent" },
-		"Model":      func(p *SpawnParams) { p.Model = "other-model" },
-		"Backend":    func(p *SpawnParams) { p.Backend = "other-backend" },
-		"Timeout":    func(p *SpawnParams) { p.Timeout = 9999 },
+		"Prompt":            func(p *SpawnParams) { p.Prompt = "goodbye" },
+		"PromptFile":        func(p *SpawnParams) { p.PromptFile = "/other-prompt-file" },
+		"Dir":               func(p *SpawnParams) { p.Dir = "/other-dir" },
+		"Agent":             func(p *SpawnParams) { p.Agent = "other-agent" },
+		"Model":             func(p *SpawnParams) { p.Model = "other-model" },
+		"Backend":           func(p *SpawnParams) { p.Backend = "other-backend" },
+		"Timeout":           func(p *SpawnParams) { p.Timeout = 9999 },
+		"Thinking":          func(p *SpawnParams) { p.Thinking = "high" },
+		"ServerURL":         func(p *SpawnParams) { p.ServerURL = "https://other" },
+		"PermissionHandler": func(p *SpawnParams) { p.PermissionHandler = "other" },
+		"AutoApprove":       func(p *SpawnParams) { p.AutoApprove = true },
+		"MaxRetries":        func(p *SpawnParams) { p.MaxRetries = 3 },
+		"LoopFile":          func(p *SpawnParams) { p.LoopFile = "/other-loop" },
+		"TeamFile":          func(p *SpawnParams) { p.TeamFile = "/other-team" },
+		"RosterFile":        func(p *SpawnParams) { p.RosterFile = "/other-roster" },
+		"RosterEntry":       func(p *SpawnParams) { p.RosterEntry = "other-entry" },
 	}
 	var got string
 	for field, mutate := range intent {

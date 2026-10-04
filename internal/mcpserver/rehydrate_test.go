@@ -766,8 +766,9 @@ func TestSpawnSkipsLabelPrecheckForKeyedSpawn(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A keyed spawn whose label is live-claimed skips the pre-check: the retry
-	// must reach the idempotency gate and return the stored result.
+	// A keyed spawn whose label is live-claimed skips the pre-check: the
+	// request reaches the supervisor's idempotency gate (modeled here as the
+	// Spawn call).
 	_, _, err = s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
 		RepoDir:        "/tmp/test-repo",
 		Label:          "taken",
@@ -1182,6 +1183,10 @@ func TestAvenorEventsCrossSupervisorGuard(t *testing.T) {
 	}
 }
 
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
 func TestLookupRunResolvesCachedLabelAfterRuntimeLeavesList(t *testing.T) {
 	const sup = "/tmp/sup.sock"
 	// The run's runtime left the live list (e.g. a supervisor restart); the
@@ -1209,5 +1214,45 @@ func TestLookupRunResolvesCachedLabelAfterRuntimeLeavesList(t *testing.T) {
 	}
 	if ri == nil || ri.RunID != "run-x" || ri.RuntimeID != "rt-x" {
 		t.Fatalf("lookupRun = %#v, want run-x (rt-x)", ri)
+	}
+}
+func TestFollowUpSkipsLabelPrecheckForKeyedFollowUp(t *testing.T) {
+	dir := t.TempDir()
+	sentinelPath := filepath.Join(dir, "avenor-run-"+rehydrateUUID+".done")
+	if err := os.WriteFile(sentinelPath, []byte("DONE\nSESSION=ses_re_1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	var spawnCalls atomic.Int32
+	fake := &fakeClient{
+		listResult: []map[string]any{
+			rehydrateEntry(func(entry map[string]any) { entry["sentinel_file"] = sentinelPath }),
+			{"runtime_id": "rt-live", "label": "taken"},
+		},
+		spawnFunc: func(map[string]any) (map[string]any, error) {
+			spawnCalls.Add(1)
+			return map[string]any{"runtime_id": "rt-new", "session_id": "ses-new"}, nil
+		},
+	}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A keyed follow-up whose label is live-claimed skips the pre-check: the
+	// request reaches the supervisor's idempotency gate (modeled here as the
+	// Spawn call).
+	_, _, err = s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
+		RunID:          rehydrateUUID,
+		Message:        "continue",
+		Label:          "taken",
+		IdempotencyKey: "k1",
+	})
+	if err != nil {
+		t.Fatalf("keyed follow-up with live-claimed label errored: %v", err)
+	}
+	if n := spawnCalls.Load(); n != 1 {
+		t.Fatalf("spawn calls = %d, want 1 (pre-check skipped, gate consulted)", n)
+	}
+}
 	}
 }
