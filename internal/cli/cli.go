@@ -1740,7 +1740,7 @@ func resolvePermission(
 			return permissionResult{err: err}
 		}
 		if controlServer != nil {
-			controlServer.MarkPermissionClaimResolved(claimScope, requestID, "control")
+			controlServer.MarkPermissionClaimResolved(claimScope, requestID, "control", ans.OptionID, ans.Message)
 		}
 		return permissionResult{requestID: requestID, optionID: ans.OptionID, kind: kind, source: "control"}
 	}
@@ -1755,7 +1755,7 @@ func resolvePermission(
 			return permissionResult{err: err}
 		}
 		if controlServer != nil {
-			controlServer.MarkPermissionClaimResolved(claimScope, requestID, "avenor")
+			controlServer.MarkPermissionClaimResolved(claimScope, requestID, "avenor", optionID, "")
 		}
 		return permissionResult{requestID: requestID, optionID: optionID, kind: kind, source: "avenor"}
 	}
@@ -1856,7 +1856,7 @@ func resolvePermission(
 			return permissionResult{requestID: res.RequestID, optionID: res.OptionID, kind: permissionKindFromOptionID(res.OptionID, options), cancelled: true, source: "file"}
 		}
 		if controlServer != nil {
-			controlServer.MarkPermissionClaimResolved(claimScope, requestID, "file")
+			controlServer.MarkPermissionClaimResolved(claimScope, requestID, "file", res.OptionID, res.Message)
 		}
 		return permissionResult{requestID: res.RequestID, optionID: res.OptionID, kind: permissionKindFromOptionID(res.OptionID, options), source: "file"}
 	}

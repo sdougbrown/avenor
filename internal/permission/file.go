@@ -51,6 +51,7 @@ type FileHandler struct {
 type Resolution struct {
 	RequestID string
 	OptionID  string
+	Message   string
 	Cancelled bool
 }
 
@@ -120,7 +121,7 @@ func (h *FileHandler) Handle(ctx context.Context, provider runtime.Provider, eve
 		err = e
 		return
 	}
-	res = Resolution{RequestID: request.RequestID, OptionID: optionID}
+	res = Resolution{RequestID: request.RequestID, OptionID: optionID, Message: response.Message}
 	return
 }
 

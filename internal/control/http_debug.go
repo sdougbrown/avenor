@@ -380,10 +380,16 @@ func (h *HTTPDebugServer) handleAnswerPermission(w http.ResponseWriter, r *http.
 		return
 	}
 	// The early state check and delivery use separate locks. A claim may resolve
-	// after the early check. DeliverPendingPermission rechecks the state and
-	// returns AlreadyResolved, so this TOCTOU window is benign.
-	if h.control.PermissionResolverState("", p.RequestID) == PermissionResolverResolved {
-		writeJSON(w, map[string]any{"accepted": true})
+	// after the early check. DeliverPendingPermission rechecks the state under
+	// its own lock and compares against the recorded resolution, returning
+	// AlreadyResolvedSame or AlreadyResolved, so this TOCTOU window is benign:
+	// a conflicting answer can never race into success.
+	if resolved, matches := h.control.ResolvedPermissionMatches("", p.RequestID, p.OptionID, p.Message); resolved {
+		if matches {
+			writeJSON(w, map[string]any{"accepted": true})
+		} else {
+			http.Error(w, "permission request already resolved", http.StatusConflict)
+		}
 		return
 	}
 	if err := runtime.ValidatePermissionMessage(p.Message); err != nil {
@@ -391,8 +397,10 @@ func (h *HTTPDebugServer) handleAnswerPermission(w http.ResponseWriter, r *http.
 		return
 	}
 	switch delivery := h.control.DeliverPendingPermission("", p.RequestID, p.OptionID, p.Message); delivery {
-	case PermissionAnswerDelivered, PermissionAnswerAlreadyResolved:
+	case PermissionAnswerDelivered, PermissionAnswerAlreadyResolvedSame:
 		writeJSON(w, map[string]any{"accepted": true})
+	case PermissionAnswerAlreadyResolved:
+		http.Error(w, "permission request already resolved", http.StatusConflict)
 	case PermissionAnswerNotFound:
 		http.Error(w, "no pending permission", http.StatusConflict)
 	case PermissionAnswerInvalid:
