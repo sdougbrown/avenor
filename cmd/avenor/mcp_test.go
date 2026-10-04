@@ -107,6 +107,49 @@ func TestRunMCPMaxWaitNegativeRejected(t *testing.T) {
 	}
 }
 
+func TestRunMCPMaxWaitStdioRejected(t *testing.T) {
+	// stdio never clamps, so an explicit nonzero --max-wait is rejected before
+	// the server would block.
+	if got := runMCP([]string{"--transport", "stdio", "--max-wait", "5s"}); got != 1 {
+		t.Fatalf("runMCP() = %d, want 1 (stdio --max-wait 5s)", got)
+	}
+}
+
+func TestMCPMaxWaitTransport(t *testing.T) {
+	// runMCP blocks on Run/RunHTTP, so the accepted cases are validated at the
+	// helper level; the rejected case is covered by TestRunMCPMaxWaitStdioRejected.
+	for _, tc := range []struct {
+		name      string
+		transport string
+		explicit  bool
+		value     time.Duration
+		wantErr   bool
+	}{
+		{"stdio default", "stdio", false, 0, false},
+		{"stdio explicit zero", "stdio", true, 0, false},
+		{"stdio explicit nonzero", "stdio", true, 5 * time.Second, true},
+		{"http explicit zero", "http", true, 0, false},
+		{"http explicit nonzero", "http", true, 5 * time.Second, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := mcpMaxWaitError(tc.transport, tc.explicit, tc.value)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("mcpMaxWaitError(%q, %v, %v) = %v, wantErr %v", tc.transport, tc.explicit, tc.value, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestRunMCPAllowedHostInvalidRejected(t *testing.T) {
+	// At least one invalid entry (including a tab) must be rejected through
+	// runMCP, not just a direct Set call.
+	for _, entry := range []string{"box\thost", "box:8443"} {
+		if got := runMCP([]string{"--transport", "http", "--allowed-host", entry}); got != 1 {
+			t.Fatalf("runMCP() = %d, want 1 (invalid --allowed-host %q)", got, entry)
+		}
+	}
+}
+
 type stubControlClient struct{}
 
 func (s *stubControlClient) Status(runtimeID string) (map[string]any, error)     { return nil, nil }

@@ -432,3 +432,72 @@ func TestReadEventsMissingFileWithCursor(t *testing.T) {
 		t.Errorf("expected latest_seq=0 for missing file, got %d", latestSeq)
 	}
 }
+
+// Without a cursor, latest_seq is the highest seq anywhere in the file
+// (fileMaxSeq), not the max of the filtered page.
+func TestReadEventsNoCursorLatestSeqIsFileMax(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events-filemax.log")
+	// The "turn" event (seq 5) has a higher seq than the "lifecycle" events.
+	content := `{"event":"start","type":"lifecycle","seq":1}
+{"event":"prompt","type":"turn","seq":5}
+{"event":"done","type":"lifecycle","seq":3}
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Filter to lifecycle only; the excluded turn event (seq 5) is the file max.
+	events, latestSeq, err := readEvents(path, []string{"lifecycle"}, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected 2 lifecycle events, got %d", len(events))
+	}
+	if latestSeq != 5 {
+		t.Errorf("expected latest_seq=5 (the file max), got %d", latestSeq)
+	}
+}
+
+func TestReadEventsEmptyFilteredPageNoCursorReturnsFileMax(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events-emptyfilter.log")
+	content := `{"event":"start","type":"lifecycle","seq":1}
+{"event":"prompt","type":"turn","seq":5}
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Filter to a type that matches nothing; the page is empty.
+	events, latestSeq, err := readEvents(path, []string{"nope"}, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("expected 0 events, got %d", len(events))
+	}
+	if latestSeq != 5 {
+		t.Errorf("expected latest_seq=5 (the file max) for an empty filtered page, got %d", latestSeq)
+	}
+}
+
+func TestReadEventsSeqlessFileNoCursorReturnsZero(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events-seqless.log")
+	content := `{"event":"a"}
+{"event":"b"}
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, latestSeq, err := readEvents(path, nil, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latestSeq != 0 {
+		t.Errorf("expected latest_seq=0 for a seq-less file, got %d", latestSeq)
+	}
+}

@@ -3974,6 +3974,24 @@ func TestServerIsAllowedHTTPOrigin(t *testing.T) {
 	}
 }
 
+func TestServerIsAllowedHTTPHostRejectsNonASCII(t *testing.T) {
+	// The KELVIN SIGN (U+212A) simple-folds to 'k', so a non-ASCII host could
+	// otherwise match an allowlist entry via EqualFold.
+	s := &Server{opts: Options{AllowedHosts: []string{"kbox.example.ts.net"}}}
+	const kelvin = "\u212A"
+	if got := s.isAllowedHTTPHost(kelvin + "box.example.ts.net"); got {
+		t.Fatalf("isAllowedHTTPHost(%q) = true, want false (non-ASCII host)", kelvin+"box.example.ts.net")
+	}
+}
+
+func TestServerIsAllowedHTTPOriginRejectsNonASCII(t *testing.T) {
+	s := &Server{opts: Options{AllowedHosts: []string{"kbox.example.ts.net"}}}
+	const kelvin = "\u212A"
+	if got := s.isAllowedHTTPOrigin("https://" + kelvin + "box.example.ts.net"); got {
+		t.Fatalf("isAllowedHTTPOrigin(%q) = true, want false (non-ASCII origin)", "https://"+kelvin+"box.example.ts.net")
+	}
+}
+
 func TestServerAuthenticatedHTTPHandlerHostChecks(t *testing.T) {
 	s := &Server{opts: Options{AuthToken: "t", AllowedHosts: []string{"box.example.ts.net"}}}
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -4004,6 +4022,42 @@ func TestServerAuthenticatedHTTPHandlerHostChecks(t *testing.T) {
 			t.Fatalf("NewRequest: %v", err)
 		}
 		req.Host = "box.example.ts.net"
+		req.Header.Set("Authorization", "Bearer t")
+		resp, err := ts.Client().Do(req)
+		if err != nil {
+			t.Fatalf("Do: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+		}
+	})
+
+	t.Run("unlisted origin rejected", func(t *testing.T) {
+		req, err := http.NewRequest(http.MethodGet, ts.URL, nil)
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		req.Host = "box.example.ts.net"
+		req.Header.Set("Origin", "https://unlisted.example.ts.net")
+		req.Header.Set("Authorization", "Bearer t")
+		resp, err := ts.Client().Do(req)
+		if err != nil {
+			t.Fatalf("Do: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+		}
+	})
+
+	t.Run("allowed origin with valid token passes through", func(t *testing.T) {
+		req, err := http.NewRequest(http.MethodGet, ts.URL, nil)
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		req.Host = "box.example.ts.net"
+		req.Header.Set("Origin", "https://box.example.ts.net")
 		req.Header.Set("Authorization", "Bearer t")
 		resp, err := ts.Client().Do(req)
 		if err != nil {

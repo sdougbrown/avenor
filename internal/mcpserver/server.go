@@ -1639,8 +1639,12 @@ func (s *Server) isAllowedHTTPOrigin(origin string) bool {
 		return true
 	}
 	if u.Scheme == "http" || u.Scheme == "https" {
+		hostname := u.Hostname()
+		if !isASCIIHost(hostname) {
+			return false
+		}
 		for _, entry := range s.opts.AllowedHosts {
-			if strings.EqualFold(u.Hostname(), entry) {
+			if strings.EqualFold(hostname, entry) {
 				return true
 			}
 		}
@@ -1657,6 +1661,9 @@ func (s *Server) isAllowedHTTPHost(hostport string) bool {
 	if isLoopbackHost(host) {
 		return true
 	}
+	if !isASCIIHost(host) {
+		return false
+	}
 	for _, entry := range s.opts.AllowedHosts {
 		if strings.EqualFold(host, entry) {
 			return true
@@ -1671,6 +1678,19 @@ func isLoopbackHost(host string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// isASCIIHost reports whether s contains only ASCII runes. Non-ASCII hosts are
+// rejected before EqualFold because Unicode simple folding (e.g. the KELVIN
+// SIGN U+212A folding to 'k') could otherwise let a non-ASCII host match an
+// allowlist entry.
+func isASCIIHost(s string) bool {
+	for _, r := range s {
+		if r > 0x7F {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) RegisteredToolNames() []string {

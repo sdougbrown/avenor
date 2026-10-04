@@ -32,6 +32,7 @@ func newWaitBudgetServer(t *testing.T, maxWait time.Duration) (*Server, *fakeCli
 
 func TestMaxWaitClampsOverMaxStatusWait(t *testing.T) {
 	s, _ := newWaitBudgetServer(t, 25*time.Second)
+	start := s.clock()
 	_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{
 		RunID: "run-1", WaitFor: "terminal", Timeout: "10m", View: "lifecycle",
 	})
@@ -42,10 +43,16 @@ func TestMaxWaitClampsOverMaxStatusWait(t *testing.T) {
 	if status["timed_out"] != true || status["wait_clamped"] != true {
 		t.Fatalf("status = %#v, want timed_out and wait_clamped", status)
 	}
+	// The wait polled until the clamp, not just flagged it: the fake clock
+	// advanced to at least the budget.
+	if elapsed := s.clock().Sub(start); elapsed < 25*time.Second {
+		t.Fatalf("clock advanced %v, want at least the 25s budget", elapsed)
+	}
 }
 
 func TestMaxWaitDoesNotFlagUnderMaxStatusWait(t *testing.T) {
 	s, _ := newWaitBudgetServer(t, 25*time.Second)
+	start := s.clock()
 	_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{
 		RunID: "run-1", WaitFor: "terminal", Timeout: "5s", View: "lifecycle",
 	})
@@ -58,6 +65,38 @@ func TestMaxWaitDoesNotFlagUnderMaxStatusWait(t *testing.T) {
 	}
 	if _, ok := status["wait_clamped"]; ok {
 		t.Fatalf("status = %#v, want no wait_clamped", status)
+	}
+	// The wait stopped at the requested duration, not the budget.
+	if elapsed := s.clock().Sub(start); elapsed != 5*time.Second {
+		t.Fatalf("clock advanced %v, want exactly the 5s request (not the budget)", elapsed)
+	}
+}
+
+func TestMaxWaitPermissionInterruptNotFlagged(t *testing.T) {
+	fake := &fakeClient{statusResult: map[string]any{"status": "running", "pending_permission": true}}
+	s, err := NewServer(Options{
+		Transport:     "stdio",
+		NoAutostart:   true,
+		ControlClient: fake,
+		MaxWait:       25 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{
+		RunID: "run-1", WaitFor: "terminal", View: "lifecycle",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := statusOutputMap(t, result)
+	// A pending permission interrupts the wait (timedOut=false), so neither
+	// timed_out nor wait_clamped is flagged even under a clamp budget.
+	if _, ok := status["timed_out"]; ok {
+		t.Fatalf("status = %#v, want no timed_out (permission interrupt)", status)
+	}
+	if _, ok := status["wait_clamped"]; ok {
+		t.Fatalf("status = %#v, want no wait_clamped (permission interrupt)", status)
 	}
 }
 

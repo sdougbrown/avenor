@@ -54,6 +54,16 @@ func mcpFlagError(transport string, allowedHosts []string) error {
 	return nil
 }
 
+// mcpMaxWaitError reports whether an explicit --max-wait is valid for the
+// transport. stdio never clamps, so an explicit nonzero value is rejected;
+// an explicit 0 is a legal no-op.
+func mcpMaxWaitError(transport string, explicit bool, value time.Duration) error {
+	if transport == "stdio" && explicit && value != 0 {
+		return errors.New("--max-wait is only supported with --transport http")
+	}
+	return nil
+}
+
 func runMCP(args []string) int {
 	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
 	transport := fs.String("transport", "stdio", "transport for MCP server (\"stdio\" or \"http\")")
@@ -71,7 +81,18 @@ func runMCP(args []string) int {
 		return 1
 	}
 
+	maxWaitExplicit := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "max-wait" {
+			maxWaitExplicit = true
+		}
+	})
+
 	if err := mcpFlagError(*transport, allowedHosts); err != nil {
+		fmt.Fprintln(os.Stderr, "avenor mcp:", err)
+		return 1
+	}
+	if err := mcpMaxWaitError(*transport, maxWaitExplicit, *maxWait); err != nil {
 		fmt.Fprintln(os.Stderr, "avenor mcp:", err)
 		return 1
 	}
@@ -79,12 +100,6 @@ func runMCP(args []string) int {
 		fmt.Fprintln(os.Stderr, "avenor mcp: --max-wait must not be negative")
 		return 1
 	}
-	maxWaitExplicit := false
-	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "max-wait" {
-			maxWaitExplicit = true
-		}
-	})
 	if *noAutostart && *supervisorSocket == "" {
 		fmt.Fprintln(os.Stderr, "avenor mcp: --no-autostart requires --supervisor-socket")
 		return 1

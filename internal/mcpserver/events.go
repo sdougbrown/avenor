@@ -96,26 +96,22 @@ func readEvents(path string, types []string, limit int, afterSeq *int64) ([]map[
 		matched = matched[len(matched)-limit:]
 	}
 
-	// latestSeq is the highest seq among the returned events. With a cursor,
-	// an empty page returns the cursor itself so the caller can stop; without
-	// one, a page of seq-less events (or an empty page) falls back to
-	// fileMaxSeq — the safe resume point, 0 for a file with no sequence
-	// numbers.
+	// latestSeq is the safe resume point. Without a cursor it is the highest
+	// seq anywhere in the file (fileMaxSeq), regardless of the type filter —
+	// 0 for a file with no sequence numbers. With a cursor, an empty page
+	// returns the cursor itself so the caller can stop; otherwise it is the
+	// highest seq among the returned events.
 	var latestSeq int64
-	var returnedHasSeq bool
-	if afterSeq != nil && len(matched) == 0 {
+	if afterSeq == nil {
+		latestSeq = fileMaxSeq
+	} else if len(matched) == 0 {
 		latestSeq = *afterSeq
-	}
-	for _, e := range matched {
-		if seq, ok := parseSeq(e); ok {
-			returnedHasSeq = true
-			if seq > latestSeq {
+	} else {
+		for _, e := range matched {
+			if seq, ok := parseSeq(e); ok && seq > latestSeq {
 				latestSeq = seq
 			}
 		}
-	}
-	if !returnedHasSeq && afterSeq == nil {
-		latestSeq = fileMaxSeq
 	}
 
 	if matched == nil {
