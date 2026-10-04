@@ -4244,9 +4244,7 @@ func TestRedialExplicitSupervisorSocketAfterDisconnect(t *testing.T) {
 	}
 	closeAccepted()
 
-	s.supervisorMu.Lock()
-	dead := s.controlClient
-	s.supervisorMu.Unlock()
+	dead := s.persistentControlClientForTest()
 	deadline = time.Now().Add(5 * time.Second)
 	for !dead.Closed() {
 		if time.Now().After(deadline) {

@@ -160,7 +160,7 @@ func runMCP(args []string) int {
 // or validation errors are returned, never swallowed in favor of the env.
 func resolveAuthToken(tokenSet, fileSet bool, token, tokenFile, envToken string) (string, error) {
 	switch {
-	case tokenSet:
+	case tokenSet && strings.TrimSpace(token) != "":
 		return token, nil
 	case fileSet:
 		return readAuthTokenFile(tokenFile)

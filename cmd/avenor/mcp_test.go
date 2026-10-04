@@ -253,6 +253,18 @@ func TestMCPAuthTokenFilePrecedence(t *testing.T) {
 	}
 }
 
+func TestMCPAuthTokenEmptyFlagFallsThroughToEnv(t *testing.T) {
+	// An explicitly passed empty --auth-token must not be treated as
+	// authoritative; it should fall through to the env value.
+	token, err := resolveAuthToken(true, false, "", "", "env-token")
+	if err != nil {
+		t.Fatalf("resolveAuthToken: %v", err)
+	}
+	if token != "env-token" {
+		t.Fatalf("token = %q, want env-token", token)
+	}
+}
+
 func TestMCPAuthTokenFileRejected(t *testing.T) {
 	empty := writeTokenFile(t, "   \n", 0o600)
 	if _, err := readAuthTokenFile(empty); err == nil {

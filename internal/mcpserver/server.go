@@ -1180,11 +1180,7 @@ func (s *Server) handleAvenorAnswerPermission(ctx context.Context, req *mcp.Call
 	if err := runtime.ValidatePermissionMessage(args.Message); err != nil {
 		return nil, nil, err
 	}
-	ri := s.registry.LookupUnique(args.RunID)
-	supervisorID := args.SupervisorID
-	if supervisorID == "" && ri != nil {
-		supervisorID = ri.SupervisorID
-	}
+	supervisorID := s.resultSupervisorID(args.RunID, args.SupervisorID)
 
 	cl, cleanup, err := s.getClientForSupervisor(supervisorID)
 	if err != nil {
@@ -1192,7 +1188,7 @@ func (s *Server) handleAvenorAnswerPermission(ctx context.Context, req *mcp.Call
 	}
 	defer cleanup()
 
-	ri, err = s.lookupRun(cl, s.getSupervisorPath(supervisorID), args.RunID)
+	ri, err := s.lookupRun(cl, s.getSupervisorPath(supervisorID), args.RunID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1306,11 +1302,7 @@ func (s *Server) handleAvenorEvents(ctx context.Context, req *mcp.CallToolReques
 }
 
 func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequest, args followUpArgs) (*mcp.CallToolResult, any, error) {
-	ri := s.registry.LookupUnique(args.RunID)
-	supervisorID := args.SupervisorID
-	if supervisorID == "" && ri != nil {
-		supervisorID = ri.SupervisorID
-	}
+	supervisorID := s.resultSupervisorID(args.RunID, args.SupervisorID)
 
 	// Resolve the supervisor's control client once and store it in cl.
 	// The status lookup and follow-up Spawn call both use cl.
@@ -1321,7 +1313,7 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 	}
 	defer cleanup()
 
-	ri, err = s.lookupRun(cl, s.getSupervisorPath(supervisorID), args.RunID)
+	ri, err := s.lookupRun(cl, s.getSupervisorPath(supervisorID), args.RunID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1752,6 +1744,15 @@ var dialSupervisorClient = client.Dial
 // beforeSupervisorLock is a no-op production hook used to coordinate callers
 // at the lazy-supervisor lock boundary in concurrency tests.
 var beforeSupervisorLock = func() {}
+
+// persistentControlClientForTest returns the currently dialed persistent
+// control client under the supervisor lock. Test-only accessor for
+// asserting disconnect/redial behavior without reading unexported fields.
+func (s *Server) persistentControlClientForTest() ControlClient {
+	s.supervisorMu.Lock()
+	defer s.supervisorMu.Unlock()
+	return s.controlClient
+}
 
 func (s *Server) getClientForSupervisor(supervisorID string) (ControlClient, func(), error) {
 	cl, cleanup, _, err := s.getClientForSupervisorWithPath(supervisorID)
