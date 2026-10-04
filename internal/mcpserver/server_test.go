@@ -2695,6 +2695,9 @@ func TestAvenorAnswerPermissionNoPending(t *testing.T) {
 	if !strings.Contains(err.Error(), "no pending permission request") {
 		t.Errorf("expected 'no pending permission request', got: %v", err)
 	}
+	if !strings.Contains(err.Error(), "pass request_id to retry a resolved answer") {
+		t.Errorf("expected retry hint, got: %v", err)
+	}
 	if len(fake.answerPermissionCalls) != 0 {
 		t.Errorf("expected 0 AnswerPermission calls, got %d", len(fake.answerPermissionCalls))
 	}
