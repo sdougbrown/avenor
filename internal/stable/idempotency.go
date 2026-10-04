@@ -182,12 +182,18 @@ func (s *Supervisor) idempotentSpawn(p SpawnParams, hash string) (SpawnResult, e
 			s.idempotency.release(key, flight, fmt.Errorf("spawn panicked"))
 		}
 	}()
-	// Keyed first-use: reject a label already held by a live runtime.
+	// Keyed first-use: reject a label already held by a live runtime. The
+	// authoritative check is atomic with registration inside spawnReserved;
+	// this pre-check only fast-fails the common case.
 	if p.Label != "" {
 		s.controlMu.Lock()
 		var holder string
 		for _, child := range s.runtimes {
-			if child.label == p.Label {
+			child.mu.Lock()
+			label := child.label
+			completed := child.completed
+			child.mu.Unlock()
+			if label == p.Label && !completed {
 				holder = child.id
 				break
 			}

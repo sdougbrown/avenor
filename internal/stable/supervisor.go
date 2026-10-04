@@ -1305,6 +1305,21 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 	// Reserve the slot to prevent TOCTOU bypass of the max-runtime limit.
 	// Every child mode shares this lifecycle context so direct provider calls
 	// can be canceled before writer teardown waits for them.
+	// Keyed spawns enforce label uniqueness atomically with registration:
+	// two concurrent keyed first-use spawns with the same label cannot both
+	// register (the MCP pre-check is a fast path, not the authority).
+	if params.IdempotencyKey != "" && params.Label != "" {
+		for _, other := range s.runtimes {
+			other.mu.Lock()
+			label := other.label
+			completed := other.completed
+			other.mu.Unlock()
+			if label == params.Label && !completed {
+				s.controlMu.Unlock()
+				return SpawnResult{}, fmt.Errorf("label already in use: %s (runtime %s)", params.Label, other.id)
+			}
+		}
+	}
 	child := &childRuntime{
 		id:           rtID,
 		startedAt:    time.Now().UnixMilli(),

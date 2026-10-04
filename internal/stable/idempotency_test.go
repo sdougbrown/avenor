@@ -701,6 +701,70 @@ func TestIdempotencyResolvedProvenanceRetryHits(t *testing.T) {
 	}
 }
 
+// TestIdempotencyConcurrentSameLabelDifferentKeysOneRuntime proves the label
+// occupancy check is atomic with registration: two concurrent keyed
+// first-use spawns with the same label but different keys must not both
+// register a runtime holding the label.
+func TestIdempotencyConcurrentSameLabelDifferentKeysOneRuntime(t *testing.T) {
+	provider := &idempotencyTestProvider{}
+	sup := newIdempotencySupervisor(t, Config{}, provider)
+	defer func() { _ = sup.broker.Stop() }()
+	dir := t.TempDir()
+
+	type result struct {
+		res SpawnResult
+		err error
+	}
+	results := make(chan result, 2)
+	for _, key := range []string{"key_a", "key_b"} {
+		key := key
+		go func() {
+			raw, err := json.Marshal(SpawnParams{Prompt: "hello", Dir: dir, Agent: "claude", Label: "taken", IdempotencyKey: key})
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			out, err := sup.Spawn(raw)
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			res, ok := out.(SpawnResult)
+			if !ok {
+				results <- result{err: fmt.Errorf("spawn result type %T", out)}
+				return
+			}
+			results <- result{res: res, err: nil}
+		}()
+	}
+	var successes, conflicts, otherErrs int
+	var runtimeIDs []string
+	for range []int{0, 1} {
+		out := <-results
+		if out.err == nil {
+			successes++
+			runtimeIDs = append(runtimeIDs, out.res.RuntimeID)
+			continue
+		}
+		var ce *control.IdempotencyConflictError
+		if errors.As(out.err, &ce) || strings.Contains(out.err.Error(), "label already in use") {
+			conflicts++
+		} else {
+			otherErrs++
+		}
+	}
+	if otherErrs != 0 {
+		t.Fatalf("unexpected errors: %v", otherErrs)
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("successes=%d conflicts=%d, want exactly one of each", successes, conflicts)
+	}
+	assertOneRuntime(t, sup)
+	if provider.startCalls != 1 {
+		t.Fatalf("provider Start calls = %d, want 1", provider.startCalls)
+	}
+}
+
 // TestIdempotencyWaiterReleaseOnFailure exercises the store directly: a
 // waiter blocked on an in-flight key observes the holder's failure when the
 // holder releases, and the commit path leaves a stored entry with no
@@ -936,14 +1000,9 @@ func TestIdempotencyKeyedFirstUseLabelHeldByLiveRuntime(t *testing.T) {
 	if provider.startCalls != 1 {
 		t.Fatalf("provider Start calls = %d, want 1 (label check rejects before spawn)", provider.startCalls)
 	}
-	// The reservation was released: the store is not stuck.
-	sup.idempotency.mu.Lock()
-	inflight := len(sup.idempotency.inflight)
-	stored := len(sup.idempotency.entries)
-	sup.idempotency.mu.Unlock()
-	if inflight != 0 || stored != 0 {
-		t.Fatalf("store after label rejection: inflight=%d stored=%d, want 0/0", inflight, stored)
-	}
+	// The reservation was released: a subsequent keyed spawn with a different
+	// label succeeds (the functional reuse step below proves the store is not
+	// stuck without asserting on store internals).
 
 	// A subsequent keyed spawn with a different label succeeds.
 	raw3, err := json.Marshal(SpawnParams{Prompt: "hello", Dir: dir, Agent: "claude", Label: "other", IdempotencyKey: "key_a"})
