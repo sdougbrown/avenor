@@ -182,6 +182,24 @@ func (s *Supervisor) idempotentSpawn(p SpawnParams, hash string) (SpawnResult, e
 			s.idempotency.release(key, flight, fmt.Errorf("spawn panicked"))
 		}
 	}()
+	// Keyed first-use: reject a label already held by a live runtime.
+	if p.Label != "" {
+		s.controlMu.Lock()
+		var holder string
+		for _, child := range s.runtimes {
+			if child.label == p.Label {
+				holder = child.id
+				break
+			}
+		}
+		s.controlMu.Unlock()
+		if holder != "" {
+			reserved = true
+			labelErr := fmt.Errorf("label already in use: %s (runtime %s)", p.Label, holder)
+			s.idempotency.release(key, flight, labelErr)
+			return SpawnResult{}, labelErr
+		}
+	}
 	res, err := s.spawn(p)
 	reserved = true
 	if err != nil {

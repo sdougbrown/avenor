@@ -885,3 +885,114 @@ func TestIdempotencyHashExclusionSet(t *testing.T) {
 		t.Fatal("hash unchanged when only an explicit Label changed")
 	}
 }
+
+// TestIdempotencyKeyedFirstUseLabelHeldByLiveRuntime: a keyed first-use spawn
+// whose label is held by a live runtime is rejected before the provider is
+// called; the reservation is released so the key is reusable.
+func TestIdempotencyKeyedFirstUseLabelHeldByLiveRuntime(t *testing.T) {
+	provider := &idempotencyTestProvider{}
+	sup := newIdempotencySupervisor(t, Config{}, provider)
+	defer func() { _ = sup.broker.Stop() }()
+	dir := t.TempDir()
+
+	// First spawn: no key, label "taken". Starts a live runtime that holds the label.
+	raw1, err := json.Marshal(SpawnParams{Prompt: "hello", Dir: dir, Agent: "claude", Label: "taken"})
+	if err != nil {
+		t.Fatalf("marshal first params: %v", err)
+	}
+	if _, err := sup.Spawn(raw1); err != nil {
+		t.Fatalf("first spawn: %v", err)
+	}
+	assertOneRuntime(t, sup)
+	if provider.startCalls != 1 {
+		t.Fatalf("provider Start calls = %d, want 1", provider.startCalls)
+	}
+
+	// Keyed first-use with the same label: rejected before the provider is called.
+	raw2, err := json.Marshal(SpawnParams{Prompt: "hello", Dir: dir, Agent: "claude", Label: "taken", IdempotencyKey: "key_a"})
+	if err != nil {
+		t.Fatalf("marshal keyed params: %v", err)
+	}
+	_, err = sup.Spawn(raw2)
+	if err == nil || !strings.Contains(err.Error(), "label already in use: taken") {
+		t.Fatalf("keyed spawn error = %v, want label already in use", err)
+	}
+	// The second provider's Start was never called.
+	if provider.startCalls != 1 {
+		t.Fatalf("provider Start calls = %d, want 1 (label check rejects before spawn)", provider.startCalls)
+	}
+	// The reservation was released: the store is not stuck.
+	sup.idempotency.mu.Lock()
+	inflight := len(sup.idempotency.inflight)
+	stored := len(sup.idempotency.entries)
+	sup.idempotency.mu.Unlock()
+	if inflight != 0 || stored != 0 {
+		t.Fatalf("store after label rejection: inflight=%d stored=%d, want 0/0", inflight, stored)
+	}
+
+	// A subsequent keyed spawn with a different label succeeds.
+	raw3, err := json.Marshal(SpawnParams{Prompt: "hello", Dir: dir, Agent: "claude", Label: "other", IdempotencyKey: "key_a"})
+	if err != nil {
+		t.Fatalf("marshal retry params: %v", err)
+	}
+	res, err := sup.Spawn(raw3)
+	if err != nil {
+		t.Fatalf("keyed spawn after label rejection: %v", err)
+	}
+	resRes, ok := res.(SpawnResult)
+	if !ok {
+		t.Fatalf("result type = %T, want SpawnResult", res)
+	}
+	if resRes.RuntimeID == "" {
+		t.Fatal("keyed spawn after label rejection returned an empty runtime ID")
+	}
+	if provider.startCalls != 2 {
+		t.Fatalf("provider Start calls = %d, want 2", provider.startCalls)
+	}
+}
+
+// TestIdempotencyKeyedRetryHitWithHeldLabel: a keyed retry that HITS the store
+// returns the stored result without the label check interfering, even though
+// the first run still holds the label.
+func TestIdempotencyKeyedRetryHitWithHeldLabel(t *testing.T) {
+	provider := &idempotencyTestProvider{}
+	sup := newIdempotencySupervisor(t, Config{}, provider)
+	defer func() { _ = sup.broker.Stop() }()
+	dir := t.TempDir()
+
+	raw, err := json.Marshal(SpawnParams{Prompt: "hello", Dir: dir, Agent: "claude", Label: "taken", IdempotencyKey: "key_a"})
+	if err != nil {
+		t.Fatalf("marshal params: %v", err)
+	}
+	first, err := sup.Spawn(raw)
+	if err != nil {
+		t.Fatalf("first spawn: %v", err)
+	}
+	firstRes, ok := first.(SpawnResult)
+	if !ok {
+		t.Fatalf("first result type = %T, want SpawnResult", first)
+	}
+	assertOneRuntime(t, sup)
+	if provider.startCalls != 1 {
+		t.Fatalf("provider Start calls = %d, want 1", provider.startCalls)
+	}
+
+	// The first run still holds the label "taken". A keyed retry with the same
+	// key and same params HITS the store and returns the stored result without
+	// the label check interfering.
+	second, err := sup.Spawn(raw)
+	if err != nil {
+		t.Fatalf("keyed retry (hit): %v", err)
+	}
+	secondRes, ok := second.(SpawnResult)
+	if !ok {
+		t.Fatalf("second result type = %T, want SpawnResult", second)
+	}
+	if secondRes.RuntimeID != firstRes.RuntimeID {
+		t.Fatalf("keyed retry = %q, want stored runtime %q", secondRes.RuntimeID, firstRes.RuntimeID)
+	}
+	assertOneRuntime(t, sup)
+	if provider.startCalls != 1 {
+		t.Fatalf("provider Start calls = %d, want 1 (hit returns stored result)", provider.startCalls)
+	}
+}
