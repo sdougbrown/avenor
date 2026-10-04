@@ -2929,6 +2929,69 @@ func TestAvenorEventsNoFile(t *testing.T) {
 	}
 }
 
+func TestAvenorEventsAfterSeqFlowsToLatestSeq(t *testing.T) {
+	dir := t.TempDir()
+	eventLogPath := filepath.Join(dir, "events-cursor.log")
+	content := `{"event":"start","seq":1,"type":"lifecycle"}
+{"event":"prompt","seq":2,"type":"turn","text":"hello"}
+{"event":"done","seq":3,"type":"lifecycle"}
+`
+	if err := os.WriteFile(eventLogPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := &fakeClient{}
+	s, err := NewServer(Options{
+		Transport:     "stdio",
+		NoAutostart:   true,
+		ControlClient: fake,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.registry.Store(&RunInfo{
+		RunID:        "run-events-5",
+		Label:        "events-cursor-test",
+		RuntimeID:    "rt_events_5",
+		EventLogPath: eventLogPath,
+	})
+
+	// A mid-log cursor (seq 1) resumes after it: only seq 2 and 3 remain.
+	cursor := int64(1)
+	_, result, err := s.handleAvenorEvents(context.Background(), nil, eventsArgs{
+		RunID:    "run-events-5",
+		AfterSeq: &cursor,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The response is a raw map, not a typed struct: a regression renaming
+	// "latest_seq" must fail the key lookup, not a field access.
+	rm, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map[string]any, got %T", result)
+	}
+	events, ok := rm["events"].([]map[string]any)
+	if !ok {
+		t.Fatalf("expected events []map[string]any, got %T", rm["events"])
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events after cursor 1, got %d", len(events))
+	}
+	if events[0]["seq"] != float64(2) {
+		t.Errorf("expected first event seq=2, got %v", events[0]["seq"])
+	}
+	if events[1]["seq"] != float64(3) {
+		t.Errorf("expected second event seq=3, got %v", events[1]["seq"])
+	}
+	// after_seq flows to latest_seq: the safe resume point is the highest
+	// seq among the returned events.
+	if got, ok := rm["latest_seq"].(int64); !ok || got != 3 {
+		t.Fatalf("latest_seq = %#v, want int64 3", rm["latest_seq"])
+	}
+}
+
 func TestAvenorFollowUp(t *testing.T) {
 	dir := t.TempDir()
 	sentinelPath := filepath.Join(dir, "followup-test.done")

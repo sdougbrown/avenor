@@ -47,7 +47,7 @@ func TestRunMCPValidFlags(t *testing.T) {
 }
 
 func TestRunMCPAllowedHostValidation(t *testing.T) {
-	for _, entry := range []string{"", "*.ts.net", "box:8443", "box.example/ts.net", "box example.ts.net"} {
+	for _, entry := range []string{"", "*.ts.net", "box:8443", "box.example/ts.net", "box example.ts.net", "<host>.<tailnet>.ts.net"} {
 		var list allowedHostList
 		if err := list.Set(entry); err == nil {
 			t.Fatalf("Set(%q) succeeded, want error", entry)
@@ -63,8 +63,13 @@ func TestRunMCPAllowedHostValid(t *testing.T) {
 	if err := list.Set("other.example.ts.net"); err != nil {
 		t.Fatalf("Set() error = %v, want nil", err)
 	}
-	if got := list.String(); got != "box.example.ts.net,other.example.ts.net" {
-		t.Fatalf("String() = %q, want %q", got, "box.example.ts.net,other.example.ts.net")
+	// A substituted (normal) hostname is still accepted after the placeholder
+	// guard rejects < and >.
+	if err := list.Set("box.tailnet.ts.net"); err != nil {
+		t.Fatalf("Set() error = %v, want nil", err)
+	}
+	if got := list.String(); got != "box.example.ts.net,other.example.ts.net,box.tailnet.ts.net" {
+		t.Fatalf("String() = %q, want %q", got, "box.example.ts.net,other.example.ts.net,box.tailnet.ts.net")
 	}
 }
 
@@ -102,7 +107,9 @@ func TestEffectiveMaxWait(t *testing.T) {
 }
 
 func TestRunMCPMaxWaitNegativeRejected(t *testing.T) {
-	if got := runMCP([]string{"--max-wait", "-5s"}); got != 1 {
+	// --transport http skips the stdio --max-wait rejection so the negative
+	// value branch is the one exercised.
+	if got := runMCP([]string{"--transport", "http", "--max-wait", "-5s"}); got != 1 {
 		t.Fatalf("runMCP() = %d, want 1", got)
 	}
 }

@@ -20,7 +20,7 @@ func (a *allowedHostList) Set(value string) error {
 	if value == "" {
 		return errors.New("--allowed-host requires a non-empty hostname")
 	}
-	if strings.ContainsAny(value, "*/:") {
+	if strings.ContainsAny(value, "*/:<>") {
 		return errors.New("--allowed-host must be an exact hostname")
 	}
 	for _, r := range value {

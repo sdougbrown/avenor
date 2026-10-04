@@ -73,16 +73,8 @@ func TestMaxWaitDoesNotFlagUnderMaxStatusWait(t *testing.T) {
 }
 
 func TestMaxWaitPermissionInterruptNotFlagged(t *testing.T) {
-	fake := &fakeClient{statusResult: map[string]any{"status": "running", "pending_permission": true}}
-	s, err := NewServer(Options{
-		Transport:     "stdio",
-		NoAutostart:   true,
-		ControlClient: fake,
-		MaxWait:       25 * time.Second,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	s, fake := newWaitBudgetServer(t, 25*time.Second)
+	fake.statusResult = map[string]any{"status": "running", "pending_permission": true}
 	_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{
 		RunID: "run-1", WaitFor: "terminal", View: "lifecycle",
 	})
