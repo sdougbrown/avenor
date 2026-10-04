@@ -243,7 +243,7 @@ func NewServer(opts Options) (*Server, error) {
 		return nil, fmt.Errorf("unsupported transport: %s", opts.Transport)
 	}
 	if opts.Transport == "http" && strings.TrimSpace(opts.AuthToken) == "" {
-		return nil, fmt.Errorf("--transport http requires MCP_AUTH_TOKEN or --auth-token")
+		return nil, fmt.Errorf("--transport http requires MCP_AUTH_TOKEN, --auth-token, or --auth-token-file")
 	}
 	if opts.NoAutostart && opts.SupervisorSocket == "" && opts.ControlClient == nil {
 		return nil, fmt.Errorf("--no-autostart requires --supervisor-socket")
@@ -279,18 +279,12 @@ func NewServer(opts Options) (*Server, error) {
 		},
 	}
 
-	// Explicit sockets retain their eager, no-autostart dial semantics. The
-	// default autostart path is intentionally acquired by the first tool call
-	// so constructing an MCP server does not race other constructors.
+	// Explicit sockets keep their socket path for lazy acquisition: the first
+	// default-supervisor tool call dials, and redials after a dead connection.
+	// The default autostart path is intentionally acquired by the first tool
+	// call so constructing an MCP server does not race other constructors.
 	if opts.SupervisorSocket != "" {
 		s.defaultSupervisorPath = opts.SupervisorSocket
-	}
-	if opts.SupervisorSocket != "" && opts.ControlClient == nil {
-		cl, err := client.Dial(opts.SupervisorSocket)
-		if err != nil {
-			return nil, fmt.Errorf("dial supervisor socket: %w", err)
-		}
-		s.controlClient = cl
 	}
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
@@ -1496,6 +1490,10 @@ func (s *Server) handleAvenorWorkflowControllerStatus(ctx context.Context, req *
 
 var startSupervisorFunc = startSupervisor
 
+// dialSupervisorClient is the seam for dialing a supervisor control socket;
+// tests replace it to count or substitute dials.
+var dialSupervisorClient = client.Dial
+
 // beforeSupervisorLock is a no-op production hook used to coordinate callers
 // at the lazy-supervisor lock boundary in concurrency tests.
 var beforeSupervisorLock = func() {}
@@ -1522,13 +1520,28 @@ func (s *Server) getClientForSupervisorWithPath(supervisorID string) (ControlCli
 	isDefault := supervisorID == "" || supervisorID == s.defaultSupervisorPath
 	if !isDefault {
 		s.supervisorMu.Unlock()
-		cl, err := client.Dial(supervisorID)
+		cl, err := dialSupervisorClient(supervisorID)
 		if err != nil {
 			return nil, nil, "", fmt.Errorf("dial supervisor socket %s: %w", supervisorID, err)
 		}
 		return cl, func() { cl.Close() }, supervisorID, nil
 	}
 	defer s.supervisorMu.Unlock()
+
+	if s.opts.SupervisorSocket != "" {
+		// Explicit-socket deployment: dial lazily, redial after a dead
+		// connection, and never fall through to autostart. Holding the lock
+		// during the dial makes concurrent acquisitions share one attempt.
+		if s.controlClient == nil || s.controlClient.Closed() {
+			cl, err := dialSupervisorClient(s.opts.SupervisorSocket)
+			if err != nil {
+				s.controlClient = nil
+				return nil, nil, "", fmt.Errorf("supervisor unavailable at %s: %w", s.opts.SupervisorSocket, err)
+			}
+			s.controlClient = cl
+		}
+		return s.controlClient, func() {}, s.defaultSupervisorPath, nil
+	}
 
 	if s.controlClient == nil {
 		if s.opts.NoAutostart {
