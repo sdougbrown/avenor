@@ -217,7 +217,7 @@ The MCP server redials an explicit supervisor socket (`--supervisor-socket`) whe
 
 ### Client-side reliability
 
-- Send `idempotency_key` on `avenor_spawn` and `avenor_follow_up` so retries never double-spawn. Reusing a key with different parameters fails with `-32602`; exhausting the supervisor's idempotency capacity fails with `-32030`.
+- Send `idempotency_key` on `avenor_spawn` and `avenor_follow_up` so retries never double-spawn. A retried key with different parameters fails with a tool error whose message contains `idempotency key reused with different parameters (key "...")`; an exhausted idempotency store fails with `idempotency capacity exhausted (capacity N)`. These arrive as failed tool calls (error text), not JSON-RPC error codes — the control-plane codes behind them are documented in `control-protocol.md`.
 - Poll `avenor_events` with `after_seq` starting at `0`, feeding back `latest_seq` to page forward.
 - A clamped wait returns `wait_clamped: true`; treat it as "poll again".
 
