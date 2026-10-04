@@ -25,14 +25,16 @@ After=avenor-stable.service
 User=avenor
 StateDirectory=avenor
 # The MCP server only needs its Unix socket, the token file, and its logs.
-# The token file is read-only; ReadWritePaths covers the socket's directory.
+# The token file is read-only; ReadOnlyPaths covers the socket's directory.
 NoNewPrivileges=true
 ProtectSystem=strict
 PrivateTmp=true
 ProtectHome=read-only
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 CapabilityBoundingSet=
-ReadWritePaths=/var/lib/avenor/remote
+# Read-only access: the MCP only dials the supervisor's socket; it never
+# writes to the supervisor's state directory.
+ReadOnlyPaths=/var/lib/avenor/remote
 ExecStart=/usr/local/bin/avenor mcp --transport http --addr 127.0.0.1:3748 --supervisor-socket %S/avenor/remote/stable.sock --no-autostart --auth-token-file /etc/avenor/remote/token --allowed-host <host>.<tailnet>.ts.net
 Restart=on-failure
 RestartSec=3

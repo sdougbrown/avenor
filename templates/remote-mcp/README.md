@@ -85,9 +85,9 @@ Allowed Host + token → not 401/403. Write the token to a header file first so 
 
 ```bash
 # macOS:
-printf 'Authorization: Bearer %s\n' "$(cat "$HOME/Library/Application Support/avenor/remote/token")" > /tmp/avenor-auth-header
+( umask 077; printf 'Authorization: Bearer %s\n' "$(cat "$HOME/Library/Application Support/avenor/remote/token")" > /tmp/avenor-auth-header )
 # Linux:
-printf 'Authorization: Bearer %s\n' "$(cat /etc/avenor/remote/token)" > /tmp/avenor-auth-header
+( umask 077; printf 'Authorization: Bearer %s\n' "$(cat /etc/avenor/remote/token)" > /tmp/avenor-auth-header )
 
 curl -s -o /dev/null -w '%{http_code}\n' -H @/tmp/avenor-auth-header -H 'Host: <host>.<tailnet>.ts.net' http://127.0.0.1:3748/mcp
 rm -f /tmp/avenor-auth-header

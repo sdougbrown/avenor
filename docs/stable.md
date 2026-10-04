@@ -324,7 +324,7 @@ Two independently launched `avenor stable` supervisors do not share a tree budge
 
 ### Idempotency capacity
 
-`--idempotency-capacity` (default 1024) bounds the supervisor's idempotency store for keyed spawns. Unexpired entries are never evicted; a caller that exhausts the store gets a typed, retryable error. Raise it for busy remote hosts. See [docs/mcp.md](mcp.md#remote-access-over-a-tailnet) for the client-side contract and [templates/remote-mcp/](../templates/remote-mcp/) for service-managed deployment.
+`--idempotency-capacity` (default 1024) bounds the supervisor's idempotency store for keyed spawns. Unexpired entries are never evicted; a caller that exhausts the store gets a typed, retryable error. Raise it for busy remote hosts. See [docs/mcp.md](mcp.md#remote-access-over-a-tailnet) for the client-side contract and `templates/remote-mcp/` in the repository for service-managed deployment.
 
 ### Inspecting tree budget status
 
