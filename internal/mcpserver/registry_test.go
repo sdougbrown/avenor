@@ -66,6 +66,40 @@ func TestRunRegistryLabelCollision(t *testing.T) {
 	}
 }
 
+func TestRunRegistryStoreValidatesBeforeMutating(t *testing.T) {
+	r := NewRunRegistry()
+	if err := r.Store(&RunInfo{RunID: "run-a", Label: "a", SupervisorID: "/tmp/a.sock", RuntimeID: "rt-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Store(&RunInfo{RunID: "run-b", Label: "b", SupervisorID: "/tmp/b.sock", RuntimeID: "rt-2"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Re-storing A with B's label is a collision and must not disturb A's
+	// existing label mapping.
+	err := r.Store(&RunInfo{RunID: "run-a", Label: "b", SupervisorID: "/tmp/a.sock", RuntimeID: "rt-1"})
+	if err == nil || !strings.Contains(err.Error(), "label") {
+		t.Fatalf("expected label collision error, got %v", err)
+	}
+	if ri := r.LookupUnique("a"); ri == nil || ri.RunID != "run-a" {
+		t.Fatalf("A's label mapping was lost after a failed re-store: %#v", ri)
+	}
+	if ri := r.Lookup("/tmp/a.sock", "run-a"); ri == nil || ri.Label != "a" {
+		t.Fatalf("A's entry was disturbed by a failed re-store: %#v", ri)
+	}
+	if ri := r.LookupUnique("b"); ri == nil || ri.RunID != "run-b" {
+		t.Fatalf("B's label mapping was disturbed: %#v", ri)
+	}
+
+	// Re-storing with the same label is still benign reuse.
+	if err := r.Store(&RunInfo{RunID: "run-a", Label: "a", SupervisorID: "/tmp/a.sock", RuntimeID: "rt-1"}); err != nil {
+		t.Fatalf("same-label re-store failed: %v", err)
+	}
+	if ri := r.LookupUnique("a"); ri == nil || ri.RunID != "run-a" {
+		t.Fatalf("same-label re-store lost the mapping: %#v", ri)
+	}
+}
+
 func TestRunRegistryLookup(t *testing.T) {
 	r := NewRunRegistry()
 	r.Store(&RunInfo{RunID: "run-1", Label: "my-run", SupervisorID: "/tmp/a.sock"})

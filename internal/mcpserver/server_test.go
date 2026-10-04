@@ -58,6 +58,7 @@ func statusOutputRuns(t *testing.T, v any) []map[string]any {
 
 type fakeClient struct {
 	listResult               []map[string]any
+	listFunc                 func() ([]map[string]any, error)
 	statusResult             map[string]any
 	statusFunc               func(runtimeID string) (map[string]any, error)
 	spawnResult              map[string]any
@@ -145,6 +146,9 @@ func (f *fakeClient) Result(runtimeID string) (map[string]any, error) {
 }
 
 func (f *fakeClient) List() ([]map[string]any, error) {
+	if f.listFunc != nil {
+		return f.listFunc()
+	}
 	return f.listResult, f.listErr
 }
 
@@ -4144,6 +4148,7 @@ func TestServerAuthenticatedHTTPHandlerHostChecks(t *testing.T) {
 		}
 	})
 }
+
 // startStubSupervisorListener runs a listener that accepts supervisor
 // connections and parks them without speaking the control protocol; tests
 // use it as a dial target and close accepted conns to simulate a restart.
@@ -4268,15 +4273,28 @@ func TestConcurrentAcquisitionsShareOneDial(t *testing.T) {
 	acceptedCount, _, stopListener := startStubSupervisorListener(t, socketPath)
 	defer stopListener()
 
-	release := make(chan struct{})
+	const n = 8
+
 	var dials atomic.Int32
+	dialEntered := make(chan struct{})
+	releaseDial := make(chan struct{})
 	origDial := dialSupervisorClient
 	dialSupervisorClient = func(p string) (*client.Client, error) {
 		dials.Add(1)
-		<-release
+		dialEntered <- struct{}{}
+		<-releaseDial
 		return origDial(p)
 	}
 	defer func() { dialSupervisorClient = origDial }()
+
+	atLockBoundary := make(chan struct{}, n)
+	releaseLockBoundary := make(chan struct{})
+	origBeforeLock := beforeSupervisorLock
+	beforeSupervisorLock = func() {
+		atLockBoundary <- struct{}{}
+		<-releaseLockBoundary
+	}
+	defer func() { beforeSupervisorLock = origBeforeLock }()
 
 	s, err := NewServer(Options{Transport: "stdio", SupervisorSocket: socketPath, NoAutostart: true})
 	if err != nil {
@@ -4284,7 +4302,6 @@ func TestConcurrentAcquisitionsShareOneDial(t *testing.T) {
 	}
 	defer s.Close()
 
-	const n = 8
 	errs := make(chan error, n)
 	var wg sync.WaitGroup
 	for i := 0; i < n; i++ {
@@ -4300,9 +4317,30 @@ func TestConcurrentAcquisitionsShareOneDial(t *testing.T) {
 			}
 		}()
 	}
-	// Releasing the blocking dial seam lets the single lock holder complete;
-	// every other goroutine must observe the established client.
-	close(release)
+	// Hold every caller immediately before the lock so a serialized
+	// (non-shared) dial schedule is impossible: no caller can complete a
+	// dial before the others are parked at the boundary.
+	for i := 0; i < n; i++ {
+		select {
+		case <-atLockBoundary:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timeout waiting for callers at the lock boundary")
+		}
+	}
+	// Release the callers: exactly one may enter the dial, the rest must
+	// wait behind it for the lock.
+	close(releaseLockBoundary)
+	select {
+	case <-dialEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout: no dial began while callers were held")
+	}
+	if got := dials.Load(); got != 1 {
+		t.Fatalf("dials while other callers are held at the lock = %d, want exactly 1", got)
+	}
+	// Unblock the single in-flight dial; every caller must then observe the
+	// established client.
+	close(releaseDial)
 	wg.Wait()
 	close(errs)
 	for err := range errs {

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -131,6 +132,61 @@ func TestAvenorEventsRehydratesFromSupervisorList(t *testing.T) {
 				t.Fatalf("rehydrated entry = %#v", ri)
 			}
 		})
+	}
+}
+
+func TestAvenorEventsRehydratesUnderAutostartedSupervisorPath(t *testing.T) {
+	const socketPath = "/tmp/avenor-events-autostart.sock"
+	origStart := startSupervisorFunc
+	defer func() { startSupervisorFunc = origStart }()
+
+	var listCalls atomic.Int32
+	fake := &fakeClient{
+		listFunc: func() ([]map[string]any, error) {
+			n := listCalls.Add(1)
+			if n == 1 {
+				return []map[string]any{rehydrateEntry()}, nil
+			}
+			return nil, fmt.Errorf("list must not be called again")
+		},
+		statusResult: map[string]any{"status": "running", "session_id": "ses_re_1"},
+	}
+	startSupervisorFunc = func(string, time.Duration) (*supervisorLifecycle, error) {
+		return &supervisorLifecycle{socketPath: socketPath, client: fake}, nil
+	}
+
+	// A fresh server has no client yet: the first events call must autostart
+	// the default supervisor and scope the rehydrated entry to the real
+	// socket path, not "".
+	s, err := NewServer(Options{Transport: "stdio"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	_, _, err = s.handleAvenorEvents(context.Background(), nil, eventsArgs{RunID: rehydrateUUID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ri := s.registry.Lookup(socketPath, rehydrateUUID)
+	if ri == nil {
+		t.Fatalf("rehydrated entry not scoped to the autostarted socket path: %#v", s.registry.All())
+	}
+	if s.registry.Lookup("", rehydrateUUID) != nil {
+		t.Fatal("rehydrated entry leaked into the empty supervisor scope")
+	}
+
+	// A second call must resolve the cached entry without re-listing.
+	_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{RunID: rehydrateUUID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := statusOutputMap(t, result)
+	if m["run_id"] != rehydrateUUID {
+		t.Fatalf("status = %#v", m)
+	}
+	if got := listCalls.Load(); got != 1 {
+		t.Fatalf("list calls = %d, want 1 (the second call must use the cached entry)", got)
 	}
 }
 

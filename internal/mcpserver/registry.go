@@ -50,24 +50,27 @@ func NewRunRegistry() *RunRegistry {
 // on the same supervisor with the same runtime ID is benign reuse. A
 // different runtime ID for the same key, or a label that would map to a
 // different run, is a collision and is rejected rather than silently
-// overwriting a live mapping.
+// overwriting a live mapping. All collision conditions are validated before
+// either index is mutated, so a rejected store never disturbs live mappings.
 func (r *RunRegistry) Store(info *RunInfo) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if existing := r.byID[info.SupervisorID][info.RunID]; existing != nil {
-		if existing.RuntimeID != info.RuntimeID {
+	var existing *RunInfo
+	if e := r.byID[info.SupervisorID][info.RunID]; e != nil {
+		existing = e
+		if e.RuntimeID != info.RuntimeID {
 			return fmt.Errorf("run %s already registered on %s with runtime %s, not %s",
-				info.RunID, info.SupervisorID, existing.RuntimeID, info.RuntimeID)
-		}
-		if existing.Label != "" && existing.Label != info.Label && r.byLabel[existing.Label] == existing {
-			delete(r.byLabel, existing.Label)
+				info.RunID, info.SupervisorID, e.RuntimeID, info.RuntimeID)
 		}
 	}
 	if info.Label != "" {
-		if existing := r.byLabel[info.Label]; existing != nil &&
-			(existing.SupervisorID != info.SupervisorID || existing.RunID != info.RunID) {
-			return fmt.Errorf("label %q already maps to run %s on %s", info.Label, existing.RunID, existing.SupervisorID)
+		if e := r.byLabel[info.Label]; e != nil &&
+			(e.SupervisorID != info.SupervisorID || e.RunID != info.RunID) {
+			return fmt.Errorf("label %q already maps to run %s on %s", info.Label, e.RunID, e.SupervisorID)
 		}
+	}
+	if existing != nil && existing.Label != "" && existing.Label != info.Label && r.byLabel[existing.Label] == existing {
+		delete(r.byLabel, existing.Label)
 	}
 	sup := r.byID[info.SupervisorID]
 	if sup == nil {

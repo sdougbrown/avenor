@@ -1180,17 +1180,23 @@ func resolveRuntimeIDFromList(cl ControlClient, runID string) (string, error) {
 }
 
 func (s *Server) handleAvenorEvents(ctx context.Context, req *mcp.CallToolRequest, args eventsArgs) (*mcp.CallToolResult, any, error) {
-	supervisorPath := s.getSupervisorPath(args.SupervisorID)
-	ri := s.registry.Lookup(supervisorPath, args.RunID)
+	// The registry fast path only covers a run ID that resolves to a unique
+	// cached entry; any other key needs the supervisor to establish a match
+	// before the event log can be read locally.
+	ri := s.registry.LookupUnique(args.RunID)
+	if ri != nil && args.SupervisorID != "" && ri.SupervisorID != args.SupervisorID {
+		ri = nil
+	}
 	if ri == nil {
-		// The registry fast path only covers a scoped run ID; any other key
-		// needs the supervisor to establish a unique match before the event
-		// log can be read locally.
+		// Acquire the client before resolving the supervisor path: the
+		// acquisition may autostart the default supervisor, and a rehydrated
+		// entry must be scoped to the path it was found on.
 		cl, cleanup, err := s.getClientForSupervisor(args.SupervisorID)
 		if err != nil {
 			return nil, nil, err
 		}
 		defer cleanup()
+		supervisorPath := s.getSupervisorPath(args.SupervisorID)
 		ri, err = s.lookupRun(cl, supervisorPath, args.RunID)
 		if err != nil {
 			return nil, nil, err
