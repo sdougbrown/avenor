@@ -4303,6 +4303,13 @@ func (s *Supervisor) Spawn(raw json.RawMessage) (any, error) {
 			s.controlMu.Unlock()
 		}
 	}
+	if p.IdempotencyKey != "" {
+		hash, err := idempotencyHash(p)
+		if err != nil {
+			return nil, fmt.Errorf("idempotency hash: %w", err)
+		}
+		return s.idempotentSpawn(p, hash)
+	}
 	return s.spawn(p)
 }
 

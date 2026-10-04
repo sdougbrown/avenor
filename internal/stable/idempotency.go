@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 
@@ -142,4 +143,34 @@ func idempotencyHash(p SpawnParams) (string, error) {
 	}
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:]), nil
+}
+
+// idempotentSpawn gates a spawn through the idempotency store. The
+// store-wide mutex is never held while the runtime starts: begin either
+// returns a stored hit, the caller's in-flight reservation, or an error.
+func (s *Supervisor) idempotentSpawn(p SpawnParams, hash string) (SpawnResult, error) {
+	key := p.IdempotencyKey
+	result, flight, err := s.idempotency.begin(key, hash)
+	if err != nil {
+		return SpawnResult{}, err
+	}
+	if flight == nil {
+		return result, nil
+	}
+	// Holder path: spawn outside the store mutex; commit on success, release
+	// the reserved slot on any failure including panic.
+	reserved := false
+	defer func() {
+		if !reserved {
+			s.idempotency.release(key, flight, fmt.Errorf("spawn panicked"))
+		}
+	}()
+	res, err := s.spawn(p)
+	reserved = true
+	if err != nil {
+		s.idempotency.release(key, flight, err)
+		return SpawnResult{}, err
+	}
+	s.idempotency.commit(key, flight, res)
+	return res, nil
 }
