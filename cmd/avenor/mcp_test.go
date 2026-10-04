@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -108,9 +111,26 @@ func TestEffectiveMaxWait(t *testing.T) {
 
 func TestRunMCPMaxWaitNegativeRejected(t *testing.T) {
 	// --transport http skips the stdio --max-wait rejection so the negative
-	// value branch is the one exercised.
-	if got := runMCP([]string{"--transport", "http", "--max-wait", "-5s"}); got != 1 {
+	// value branch is the one exercised. MCP_AUTH_TOKEN is forced empty so a
+	// regressed guard exits at the token error, not at the guard — the stderr
+	// assertion is what distinguishes the two paths.
+	t.Setenv("MCP_AUTH_TOKEN", "")
+
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+	got := runMCP([]string{"--transport", "http", "--max-wait", "-5s"})
+	w.Close()
+	os.Stderr = oldStderr
+
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+
+	if got != 1 {
 		t.Fatalf("runMCP() = %d, want 1", got)
+	}
+	if !strings.Contains(buf.String(), "--max-wait must not be negative") {
+		t.Fatalf("stderr = %q, want it to contain %q", buf.String(), "--max-wait must not be negative")
 	}
 }
 
