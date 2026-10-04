@@ -54,6 +54,7 @@ type Options struct {
 	IdleTimeout      time.Duration
 	Addr             string
 	AuthToken        string
+	AllowedHosts     []string
 	ControlClient    ControlClient
 }
 
@@ -1540,7 +1541,7 @@ func (s *Server) HTTPHandler() http.Handler {
 func (s *Server) authenticatedHTTPHandler(next http.Handler) http.Handler {
 	token := strings.TrimSpace(s.opts.AuthToken)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !isAllowedHTTPHost(r.Host) || !isAllowedHTTPOrigin(r.Header.Get("Origin")) {
+		if !s.isAllowedHTTPHost(r.Host) || !s.isAllowedHTTPOrigin(r.Header.Get("Origin")) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
@@ -1587,7 +1588,7 @@ func bearerTokenMatches(header, want string) bool {
 	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
-func isAllowedHTTPOrigin(origin string) bool {
+func (s *Server) isAllowedHTTPOrigin(origin string) bool {
 	if origin == "" {
 		return true
 	}
@@ -1595,15 +1596,34 @@ func isAllowedHTTPOrigin(origin string) bool {
 	if err != nil {
 		return false
 	}
-	return u.Scheme == "http" && isLoopbackHost(u.Hostname())
+	if u.Scheme == "http" && isLoopbackHost(u.Hostname()) {
+		return true
+	}
+	if u.Scheme == "http" || u.Scheme == "https" {
+		for _, entry := range s.opts.AllowedHosts {
+			if strings.EqualFold(u.Hostname(), entry) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
-func isAllowedHTTPHost(hostport string) bool {
+func (s *Server) isAllowedHTTPHost(hostport string) bool {
 	host, _, err := net.SplitHostPort(hostport)
 	if err != nil {
 		host = hostport
 	}
-	return isLoopbackHost(strings.Trim(host, "[]"))
+	host = strings.Trim(host, "[]")
+	if isLoopbackHost(host) {
+		return true
+	}
+	for _, entry := range s.opts.AllowedHosts {
+		if strings.EqualFold(host, entry) {
+			return true
+		}
+	}
+	return false
 }
 
 func isLoopbackHost(host string) bool {

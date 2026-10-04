@@ -3910,3 +3910,108 @@ func TestAvenorShutdownWithExplicitLifecyclePath(t *testing.T) {
 		t.Error("lifecycle was not cleared after shutdown")
 	}
 }
+
+func TestServerIsAllowedHTTPHost(t *testing.T) {
+	empty := &Server{opts: Options{}}
+	populated := &Server{opts: Options{AllowedHosts: []string{"box.example.ts.net", "BOX.example.TS.net"}}}
+
+	tests := []struct {
+		name     string
+		s        *Server
+		hostport string
+		want     bool
+	}{
+		{"loopback localhost empty", empty, "localhost", true},
+		{"loopback localhost populated", populated, "localhost", true},
+		{"loopback 127.0.0.1 empty", empty, "127.0.0.1:3748", true},
+		{"loopback ::1 populated", populated, "[::1]:3748", true},
+		{"exact host with port", populated, "box.example.ts.net:8443", true},
+		{"case variant entry", populated, "Box.Example.ts.net", true},
+		{"lookalike prefix", populated, "evil-box.example.ts.net", false},
+		{"lookalike suffix", populated, "box.example.ts.net.evil.com", false},
+		{"lookalike suffix-only", populated, "ts.net", false},
+		{"unlisted host empty allowlist", empty, "box.example.ts.net", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.s.isAllowedHTTPHost(tt.hostport); got != tt.want {
+				t.Fatalf("isAllowedHTTPHost(%q) = %v, want %v", tt.hostport, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestServerIsAllowedHTTPOrigin(t *testing.T) {
+	empty := &Server{opts: Options{}}
+	populated := &Server{opts: Options{AllowedHosts: []string{"box.example.ts.net"}}}
+
+	tests := []struct {
+		name   string
+		s      *Server
+		origin string
+		want   bool
+	}{
+		{"empty origin empty allowlist", empty, "", true},
+		{"empty origin populated", populated, "", true},
+		{"loopback http empty", empty, "http://localhost", true},
+		{"loopback http with port populated", populated, "http://127.0.0.1:3748", true},
+		{"https exact host", populated, "https://box.example.ts.net", true},
+		{"http exact host", populated, "http://box.example.ts.net", true},
+		{"https with port", populated, "https://box.example.ts.net:8443", true},
+		{"http with port", populated, "http://box.example.ts.net:8443", true},
+		{"lookalike prefix", populated, "https://evil-box.example.ts.net", false},
+		{"lookalike suffix", populated, "https://box.example.ts.net.evil.com", false},
+		{"lookalike suffix-only", populated, "https://ts.net", false},
+		{"unlisted host empty allowlist", empty, "https://box.example.ts.net", false},
+		{"loopback https not allowed", empty, "https://localhost", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.s.isAllowedHTTPOrigin(tt.origin); got != tt.want {
+				t.Fatalf("isAllowedHTTPOrigin(%q) = %v, want %v", tt.origin, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestServerAuthenticatedHTTPHandlerHostChecks(t *testing.T) {
+	s := &Server{opts: Options{AuthToken: "t", AllowedHosts: []string{"box.example.ts.net"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	ts := httptest.NewServer(s.authenticatedHTTPHandler(next))
+	defer ts.Close()
+
+	t.Run("unlisted host rejected", func(t *testing.T) {
+		req, err := http.NewRequest(http.MethodGet, ts.URL, nil)
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		req.Host = "unlisted.example.ts.net"
+		resp, err := ts.Client().Do(req)
+		if err != nil {
+			t.Fatalf("Do: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+		}
+	})
+
+	t.Run("allowed host with valid token passes through", func(t *testing.T) {
+		req, err := http.NewRequest(http.MethodGet, ts.URL, nil)
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		req.Host = "box.example.ts.net"
+		req.Header.Set("Authorization", "Bearer t")
+		resp, err := ts.Client().Do(req)
+		if err != nil {
+			t.Fatalf("Do: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+		}
+	})
+}

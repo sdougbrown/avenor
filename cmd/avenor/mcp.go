@@ -1,13 +1,46 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/sdougbrown/avenor/internal/mcpserver"
 )
+
+type allowedHostList []string
+
+func (a *allowedHostList) String() string { return strings.Join(*a, ",") }
+
+func (a *allowedHostList) Set(value string) error {
+	if value == "" {
+		return errors.New("--allowed-host requires a non-empty hostname")
+	}
+	if strings.ContainsAny(value, "*/:") {
+		return errors.New("--allowed-host must be an exact hostname")
+	}
+	for _, r := range value {
+		if unicode.IsSpace(r) {
+			return errors.New("--allowed-host must not contain whitespace")
+		}
+	}
+	*a = append(*a, value)
+	return nil
+}
+
+func mcpFlagError(transport string, allowedHosts []string) error {
+	if transport != "stdio" && transport != "http" {
+		return errors.New(`--transport only supports "stdio" or "http"`)
+	}
+	if transport == "stdio" && len(allowedHosts) > 0 {
+		return errors.New("--allowed-host is only supported with --transport http")
+	}
+	return nil
+}
 
 func runMCP(args []string) int {
 	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
@@ -18,13 +51,15 @@ func runMCP(args []string) int {
 	idleTimeout := fs.Duration("idle-timeout", 30*time.Minute, "idle timeout before server exits")
 	addr := fs.String("addr", "127.0.0.1:3748", "address to listen on for HTTP transport")
 	authToken := fs.String("auth-token", "", "bearer token required for HTTP transport (defaults to MCP_AUTH_TOKEN)")
+	var allowedHosts allowedHostList
+	fs.Var(&allowedHosts, "allowed-host", "exact tailnet hostname accepted on the HTTP transport (repeatable)")
 
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
 
-	if *transport != "stdio" && *transport != "http" {
-		fmt.Fprintln(os.Stderr, "avenor mcp: --transport only supports \"stdio\" or \"http\"")
+	if err := mcpFlagError(*transport, allowedHosts); err != nil {
+		fmt.Fprintln(os.Stderr, "avenor mcp:", err)
 		return 1
 	}
 	if *noAutostart && *supervisorSocket == "" {
@@ -43,6 +78,7 @@ func runMCP(args []string) int {
 		IdleTimeout:      *idleTimeout,
 		Addr:             *addr,
 		AuthToken:        *authToken,
+		AllowedHosts:     allowedHosts,
 		ControlClient:    nil,
 	})
 	if err != nil {

@@ -46,6 +46,46 @@ func TestRunMCPValidFlags(t *testing.T) {
 	s.Close()
 }
 
+func TestRunMCPAllowedHostValidation(t *testing.T) {
+	for _, entry := range []string{"", "*.ts.net", "box:8443", "box.example/ts.net", "box example.ts.net"} {
+		var list allowedHostList
+		if err := list.Set(entry); err == nil {
+			t.Fatalf("Set(%q) succeeded, want error", entry)
+		}
+	}
+}
+
+func TestRunMCPAllowedHostValid(t *testing.T) {
+	var list allowedHostList
+	if err := list.Set("box.example.ts.net"); err != nil {
+		t.Fatalf("Set() error = %v, want nil", err)
+	}
+	if err := list.Set("other.example.ts.net"); err != nil {
+		t.Fatalf("Set() error = %v, want nil", err)
+	}
+	if got := list.String(); got != "box.example.ts.net,other.example.ts.net" {
+		t.Fatalf("String() = %q, want %q", got, "box.example.ts.net,other.example.ts.net")
+	}
+}
+
+func TestRunMCPAllowedHostStdioRejected(t *testing.T) {
+	if got := runMCP([]string{"--transport", "stdio", "--allowed-host", "box.example.ts.net"}); got != 1 {
+		t.Fatalf("runMCP() = %d, want 1", got)
+	}
+}
+
+func TestRunMCPAllowedHostHTTPAccepted(t *testing.T) {
+	if err := mcpFlagError("http", []string{"box.example.ts.net"}); err != nil {
+		t.Fatalf("mcpFlagError() = %v, want nil", err)
+	}
+}
+
+func TestRunMCPAllowedHostInvalidTransport(t *testing.T) {
+	if err := mcpFlagError("invalid", nil); err == nil {
+		t.Fatal("expected error for invalid transport")
+	}
+}
+
 type stubControlClient struct{}
 
 func (s *stubControlClient) Status(runtimeID string) (map[string]any, error)     { return nil, nil }
