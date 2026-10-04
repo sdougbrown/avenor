@@ -95,20 +95,21 @@ type resultArgs struct {
 }
 
 type spawnArgs struct {
-	Agent        string `json:"agent,omitempty" jsonschema:"optional agent name; omission uses the selected model or runtime defaults"`
-	RepoDir      string `json:"repo_dir" jsonschema:"required path to the repository"`
-	Prompt       string `json:"prompt,omitempty" jsonschema:"optional initial prompt"`
-	PromptFile   string `json:"prompt_file,omitempty" jsonschema:"optional path to file containing the initial prompt"`
-	Label        string `json:"label,omitempty" jsonschema:"optional label for the run"`
-	Timeout      string `json:"timeout,omitempty" jsonschema:"optional timeout in seconds (numeric string)"`
-	Model        string `json:"model,omitempty" jsonschema:"optional model to use"`
-	Thinking     string `json:"thinking,omitempty" jsonschema:"optional thinking level (off, minimal, low, medium, high, xhigh, max); omission uses the backend default"`
-	Backend      string `json:"backend,omitempty" jsonschema:"optional runtime backend (for example agy, pi, opencode-acp, or codex-app-server)"`
-	RosterFile   string `json:"roster_file,omitempty" jsonschema:"optional path to the roster map"`
-	RosterEntry  string `json:"roster_entry,omitempty" jsonschema:"optional roster entry key"`
-	ServerURL    string `json:"server_url,omitempty" jsonschema:"optional opencode serve URL for opencode-http backend"`
-	SupervisorID string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
-	AutoApprove  bool   `json:"auto_approve,omitempty" jsonschema:"optional auto-approve all permission requests so the run executes unattended (no answer_permission needed)"`
+	Agent          string `json:"agent,omitempty" jsonschema:"optional agent name; omission uses the selected model or runtime defaults"`
+	RepoDir        string `json:"repo_dir" jsonschema:"required path to the repository"`
+	Prompt         string `json:"prompt,omitempty" jsonschema:"optional initial prompt"`
+	PromptFile     string `json:"prompt_file,omitempty" jsonschema:"optional path to file containing the initial prompt"`
+	Label          string `json:"label,omitempty" jsonschema:"optional label for the run"`
+	Timeout        string `json:"timeout,omitempty" jsonschema:"optional timeout in seconds (numeric string)"`
+	Model          string `json:"model,omitempty" jsonschema:"optional model to use"`
+	Thinking       string `json:"thinking,omitempty" jsonschema:"optional thinking level (off, minimal, low, medium, high, xhigh, max); omission uses the backend default"`
+	Backend        string `json:"backend,omitempty" jsonschema:"optional runtime backend (for example agy, pi, opencode-acp, or codex-app-server)"`
+	RosterFile     string `json:"roster_file,omitempty" jsonschema:"optional path to the roster map"`
+	RosterEntry    string `json:"roster_entry,omitempty" jsonschema:"optional roster entry key"`
+	ServerURL      string `json:"server_url,omitempty" jsonschema:"optional opencode serve URL for opencode-http backend"`
+	SupervisorID   string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
+	IdempotencyKey string `json:"idempotency_key,omitempty" jsonschema:"optional idempotency key; a retry with the same key and parameters returns the original run instead of spawning a second one"`
+	AutoApprove    bool   `json:"auto_approve,omitempty" jsonschema:"optional auto-approve all permission requests so the run executes unattended (no answer_permission needed)"`
 }
 
 // UnmarshalJSON makes the Go MCP spawn tool a strict raw boundary: unknown
@@ -170,10 +171,11 @@ type eventsArgs struct {
 }
 
 type followUpArgs struct {
-	RunID        string `json:"run_id" jsonschema:"required prior run ID or label"`
-	Message      string `json:"message" jsonschema:"required follow-up message"`
-	Label        string `json:"label,omitempty" jsonschema:"optional label for the new run (defaults to <prior-label>-followup)"`
-	SupervisorID string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
+	RunID          string `json:"run_id" jsonschema:"required prior run ID or label"`
+	Message        string `json:"message" jsonschema:"required follow-up message"`
+	Label          string `json:"label,omitempty" jsonschema:"optional label for the new run (defaults to <prior-label>-followup)"`
+	SupervisorID   string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
+	IdempotencyKey string `json:"idempotency_key,omitempty" jsonschema:"optional idempotency key; a retry with the same key and parameters returns the original follow-up run instead of spawning a second one"`
 }
 
 type workflowStatusArgs struct {
@@ -1031,6 +1033,7 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 	}
 
 	runID := uuid.New().String()
+	labelDerived := args.Label == ""
 	label := args.Label
 	if label == "" {
 		label = runID
@@ -1046,6 +1049,12 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 		"on_event":      eventLogPath,
 	}
 
+	if args.IdempotencyKey != "" {
+		params["idempotency_key"] = "spawn:" + args.IdempotencyKey
+		if labelDerived {
+			params["label_derived"] = true
+		}
+	}
 	if args.Agent != "" {
 		params["agent"] = args.Agent
 	}
@@ -1099,6 +1108,23 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 	result, err := cl.Spawn(params)
 	if err != nil {
 		return nil, nil, fmt.Errorf("spawn: %w", err)
+	}
+
+	if args.IdempotencyKey != "" {
+		if sent, ok := result["sentinel_file"].(string); ok && sent != "" {
+			sentinelPath = sent
+			if id := runIDFromSentinel(sent); id != "" {
+				runID = id
+			}
+		}
+		if ev, ok := result["on_event"].(string); ok && ev != "" {
+			eventLogPath = ev
+		}
+		if labelDerived {
+			// The response label is the original run's ID, not the retry's
+			// freshly generated UUID (D4).
+			label = runID
+		}
 	}
 
 	runtimeID, _ := result["runtime_id"].(string)
@@ -1457,6 +1483,9 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 		"sentinel_file": sentinelPath,
 		"on_event":      eventLogPath,
 	}
+	if args.IdempotencyKey != "" {
+		params["idempotency_key"] = "follow_up:" + args.IdempotencyKey
+	}
 	if effectiveAgent != "" {
 		params["agent"] = effectiveAgent
 	}
@@ -1485,6 +1514,18 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 	result, err := cl.Spawn(params)
 	if err != nil {
 		return nil, nil, fmt.Errorf("spawn: %w", err)
+	}
+
+	if args.IdempotencyKey != "" {
+		if sent, ok := result["sentinel_file"].(string); ok && sent != "" {
+			sentinelPath = sent
+			if id := runIDFromSentinel(sent); id != "" {
+				runID = id
+			}
+		}
+		if ev, ok := result["on_event"].(string); ok && ev != "" {
+			eventLogPath = ev
+		}
 	}
 
 	runtimeID, _ := result["runtime_id"].(string)

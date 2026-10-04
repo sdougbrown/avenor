@@ -89,7 +89,7 @@ func TestSchemaFieldParity(t *testing.T) {
 		// spawnArgs — repo_dir is required.
 		// agent and model are independently optional; omitting both uses runtime defaults.
 		// All remaining fields are optional.
-		allowed := []string{"agent", "repo_dir", "prompt", "prompt_file", "label", "timeout", "model", "thinking", "backend", "roster_file", "roster_entry", "server_url", "supervisor_id", "auto_approve"}
+		allowed := []string{"agent", "repo_dir", "prompt", "prompt_file", "label", "timeout", "model", "thinking", "backend", "roster_file", "roster_entry", "server_url", "supervisor_id", "idempotency_key", "auto_approve"}
 		required := []string{"repo_dir"}
 		assertFields(t, "spawnArgs", allowed, required)
 	})
@@ -118,7 +118,7 @@ func TestSchemaFieldParity(t *testing.T) {
 	t.Run("avenor_follow_up", func(t *testing.T) {
 		// followUpArgs — required: run_id, message
 		// optional: label, supervisor_id
-		allowed := []string{"run_id", "message", "label", "supervisor_id"}
+		allowed := []string{"run_id", "message", "label", "supervisor_id", "idempotency_key"}
 		required := []string{"run_id", "message"}
 		assertFields(t, "followUpArgs", allowed, required)
 	})
