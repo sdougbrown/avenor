@@ -1004,4 +1004,21 @@ func TestHTTPAnswerPermissionEmptyOptionIDRejected(t *testing.T) {
 	if resp2.StatusCode != http.StatusBadRequest {
 		t.Fatalf("POST /answer-permission (empty option_id, no pending request): %d, want 400", resp2.StatusCode)
 	}
+
+	// A resolved claim recorded with an empty resolution option: the guard
+	// fires before the comparator, so the response is 400 (not the 409 the
+	// empty-recording comparator rule would produce if the guard moved).
+	ctrl3 := NewServer(NewState("run_cli", "", 0))
+	if !ctrl3.PreparePermissionClaim("", "req_resolved", PermissionResolverReserved, nil) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+	if !ctrl3.MarkPermissionClaimResolved("", "req_resolved", "avenor", "", "") {
+		t.Fatal("MarkPermissionClaimResolved returned false")
+	}
+	_, addr3, token3 := startDebugServer(t, ctrl3, nil)
+	resp3 := authedPostBody(t, client, "http://"+addr3+"/answer-permission", token3, `{"request_id":"req_resolved","option_id":""}`)
+	defer resp3.Body.Close()
+	if resp3.StatusCode != http.StatusBadRequest {
+		t.Fatalf("POST /answer-permission (empty option_id, resolved claim): %d, want 400", resp3.StatusCode)
+	}
 }
