@@ -1099,7 +1099,10 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 	}
 	defer cleanup()
 
-	if args.Label != "" {
+	if args.Label != "" && args.IdempotencyKey == "" {
+		// Keyed spawns skip the pre-check: a retry under the same key must be
+		// allowed to reach the idempotency gate and return the stored result,
+		// even though the original run still holds the label.
 		if err := s.checkLabelAvailable(cl, supervisorPath, args.Label); err != nil {
 			return nil, nil, err
 		}
@@ -1505,7 +1508,8 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 		params["auto_approve"] = true
 	}
 
-	if followupLabel != "" {
+	if followupLabel != "" && args.IdempotencyKey == "" {
+		// Same keyed-spawn rule as spawn: a retry reaches the idempotency gate.
 		if err := s.checkLabelAvailable(cl, s.getSupervisorPath(supervisorID), followupLabel); err != nil {
 			return nil, nil, err
 		}

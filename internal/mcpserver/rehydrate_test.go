@@ -752,6 +752,35 @@ func TestAvenorStatusListFiltersRegistryBySupervisor(t *testing.T) {
 
 // --- PR2 verdict: validate label availability before spawn ---
 
+func TestSpawnSkipsLabelPrecheckForKeyedSpawn(t *testing.T) {
+	var spawnCalls atomic.Int32
+	fake := &fakeClient{
+		listResult: []map[string]any{{"runtime_id": "rt-live", "label": "taken"}},
+		spawnFunc: func(map[string]any) (map[string]any, error) {
+			spawnCalls.Add(1)
+			return map[string]any{"runtime_id": "rt-new", "session_id": "ses-new"}, nil
+		},
+	}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A keyed spawn whose label is live-claimed skips the pre-check: the retry
+	// must reach the idempotency gate and return the stored result.
+	_, _, err = s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
+		RepoDir:        "/tmp/test-repo",
+		Label:          "taken",
+		IdempotencyKey: "k1",
+	})
+	if err != nil {
+		t.Fatalf("keyed spawn with live-claimed label errored: %v", err)
+	}
+	if n := spawnCalls.Load(); n != 1 {
+		t.Fatalf("spawn calls = %d, want 1 (pre-check skipped, gate consulted)", n)
+	}
+}
+
 func TestSpawnRejectsLabelClaimedByLiveRun(t *testing.T) {
 	var spawnCalls atomic.Int32
 	fake := &fakeClient{
