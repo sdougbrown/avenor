@@ -81,6 +81,17 @@ func (p *idempotencyGatedProvider) Start(ctx context.Context, opts runtime.Start
 	return p.idempotencyTestProvider.Start(ctx, opts)
 }
 
+// idempotencyPanicProvider panics at session start, exercising the
+// reserved-flag defer's release path in idempotentSpawn: a panic must release
+// the in-flight reservation instead of leaking it.
+type idempotencyPanicProvider struct {
+	idempotencyTestProvider
+}
+
+func (p *idempotencyPanicProvider) Start(context.Context, runtime.StartOptions) (runtime.Session, error) {
+	panic("intentional provider panic")
+}
+
 func newIdempotencySupervisor(t *testing.T, cfg Config, provider runtime.Provider) *Supervisor {
 	t.Helper()
 	cfg.ControlSocket = newStableSocketPath(t, "idempotency")
@@ -354,6 +365,63 @@ func TestIdempotencyFailedSpawnNotCached(t *testing.T) {
 	if thirdRes.RuntimeID != resRes.RuntimeID {
 		t.Fatalf("third spawn = %q, want the fresh runtime %q", thirdRes.RuntimeID, resRes.RuntimeID)
 	}
+	if provider.startCalls != 1 {
+		t.Fatalf("provider Start calls = %d, want 1", provider.startCalls)
+	}
+}
+
+// TestIdempotencyPanicReleasesInflightSlot: a provider whose Start panics
+// releases its reserved in-flight slot via the defer, so the key is reusable
+// by a later healthy spawn instead of leaking a flight that blocks every
+// retry on the key forever.
+func TestIdempotencyPanicReleasesInflightSlot(t *testing.T) {
+	sup := newIdempotencySupervisor(t, Config{}, &idempotencyPanicProvider{})
+	defer func() { _ = sup.broker.Stop() }()
+	dir := t.TempDir()
+	raw := idempotencySpawnRaw(t, "key_a", "hello", dir)
+
+	// The panicking spawn must surface the panic to the caller.
+	var panicked bool
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				panicked = true
+			}
+		}()
+		_, _ = sup.Spawn(raw)
+	}()
+	if !panicked {
+		t.Fatal("panicking spawn did not panic")
+	}
+
+	// The reserved slot must have been released by the defer: no leaked
+	// flight, no stored entry. A leaked flight would make the retry below
+	// block on a flight that never completes.
+	sup.idempotency.mu.Lock()
+	inflight := len(sup.idempotency.inflight)
+	stored := len(sup.idempotency.entries)
+	sup.idempotency.mu.Unlock()
+	if inflight != 0 || stored != 0 {
+		t.Fatalf("store after panic: inflight=%d stored=%d, want 0/0", inflight, stored)
+	}
+
+	// The key is reusable: a healthy provider starts a fresh runtime.
+	provider := &idempotencyTestProvider{}
+	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) {
+		return provider, nil
+	}
+	res, err := sup.Spawn(raw)
+	if err != nil {
+		t.Fatalf("spawn after panic: %v", err)
+	}
+	resRes, ok := res.(SpawnResult)
+	if !ok {
+		t.Fatalf("result type = %T, want SpawnResult", res)
+	}
+	if resRes.RuntimeID == "" {
+		t.Fatal("fresh spawn returned an empty runtime ID")
+	}
+	assertOneRuntime(t, sup)
 	if provider.startCalls != 1 {
 		t.Fatalf("provider Start calls = %d, want 1", provider.startCalls)
 	}
@@ -790,5 +858,94 @@ func TestIdempotencyHashIgnoresAttemptIdentity(t *testing.T) {
 	}
 	if baseHash == otherHash {
 		t.Fatal("hash equal for different prompts")
+	}
+}
+
+// TestIdempotencyHashExclusionSet pins the exact set of fields excluded from
+// the idempotency parameter hash: each excluded field, changed alone, leaves
+// the hash unchanged; a caller-intent field (Prompt) changes it; and Label is
+// excluded only when derived. This guards against the MCP test's mirrored hash
+// drifting from the real exclusion set.
+func TestIdempotencyHashExclusionSet(t *testing.T) {
+	base := SpawnParams{
+		Prompt:         "hello",
+		Dir:            "/tmp",
+		Agent:          "claude",
+		Model:          "sonnet",
+		Backend:        "claude",
+		Label:          "explicit-label",
+		LabelDerived:   false,
+		OnEvent:        "/on-event",
+		SentinelFile:   "/sentinel",
+		IdempotencyKey: "key_a",
+		ParentID:       "rt_parent",
+		ParentRunID:    "run_parent",
+		SessionID:      "ses_prior",
+		AgentProfile:   "profile-a",
+	}
+	baseHash, err := idempotencyHash(base)
+	if err != nil {
+		t.Fatalf("hash(base): %v", err)
+	}
+
+	// Each excluded field, changed alone, leaves the hash unchanged.
+	excluded := map[string]func(*SpawnParams){
+		"OnEvent":        func(p *SpawnParams) { p.OnEvent = "/other" },
+		"SentinelFile":   func(p *SpawnParams) { p.SentinelFile = "/other-sentinel" },
+		"IdempotencyKey": func(p *SpawnParams) { p.IdempotencyKey = "other-key" },
+		"ParentID":       func(p *SpawnParams) { p.ParentID = "rt_other" },
+		"ParentRunID":    func(p *SpawnParams) { p.ParentRunID = "run_other" },
+		"SessionID":      func(p *SpawnParams) { p.SessionID = "ses_other" },
+		"AgentProfile":   func(p *SpawnParams) { p.AgentProfile = "profile-b" },
+	}
+	for field, mutate := range excluded {
+		p := base
+		mutate(&p)
+		got, err := idempotencyHash(p)
+		if err != nil {
+			t.Fatalf("hash(base with %s changed): %v", field, err)
+		}
+		if got != baseHash {
+			t.Fatalf("hash changed when only %s changed: %s vs %s", field, got, baseHash)
+		}
+	}
+
+	// A caller-intent field (Prompt) DOES change the hash.
+	promptChanged := base
+	promptChanged.Prompt = "goodbye"
+	got, err := idempotencyHash(promptChanged)
+	if err != nil {
+		t.Fatalf("hash(prompt changed): %v", err)
+	}
+	if got == baseHash {
+		t.Fatal("hash unchanged when Prompt changed")
+	}
+
+	// Label is excluded only when derived: with LabelDerived=true, changing
+	// Label leaves the hash unchanged; with LabelDerived=false, it changes it.
+	derived := base
+	derived.LabelDerived = true
+	derivedHash, err := idempotencyHash(derived)
+	if err != nil {
+		t.Fatalf("hash(derived): %v", err)
+	}
+	derivedChanged := derived
+	derivedChanged.Label = "different-derived"
+	got, err = idempotencyHash(derivedChanged)
+	if err != nil {
+		t.Fatalf("hash(derived changed): %v", err)
+	}
+	if got != derivedHash {
+		t.Fatal("hash changed when only a derived Label changed")
+	}
+
+	explicitChanged := base
+	explicitChanged.Label = "different-explicit"
+	got, err = idempotencyHash(explicitChanged)
+	if err != nil {
+		t.Fatalf("hash(explicit changed): %v", err)
+	}
+	if got == baseHash {
+		t.Fatal("hash unchanged when only an explicit Label changed")
 	}
 }

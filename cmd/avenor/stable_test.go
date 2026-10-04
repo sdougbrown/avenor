@@ -95,3 +95,46 @@ func TestRunStableWorkflowRootFlagParses(t *testing.T) {
 		t.Fatalf("workflow root dir created on start failure: %v", err)
 	}
 }
+
+func TestRunStableIdempotencyCapacityGuard(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	// An overlong Unix-socket path fails fast in Listen, so a valid capacity
+	// proceeds past flag validation into Run and fails at the socket rather
+	// than the guard.
+	socketPath := filepath.Join(tmpDir, strings.Repeat("s", 200))
+	tombstonePath := socketPath + ".dead"
+
+	// The guard rejects non-positive capacity before Run: a pre-existing
+	// tombstone is left untouched (Run would overwrite it, and runStable only
+	// removes it after the guard passes).
+	marker := "pre-existing"
+	if err := os.WriteFile(tombstonePath, []byte(marker), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, cap := range []string{"0", "-5"} {
+		if code := runStable([]string{"--control-socket", socketPath, "--idempotency-capacity", cap}); code != 1 {
+			t.Fatalf("runStable(capacity %s) = %d, want 1", cap, code)
+		}
+		data, err := os.ReadFile(tombstonePath)
+		if err != nil {
+			t.Fatalf("capacity %s: tombstone missing: %v", cap, err)
+		}
+		if string(data) != marker {
+			t.Fatalf("capacity %s: tombstone = %q, want the pre-existing marker (guard must fire before Run)", cap, data)
+		}
+	}
+
+	// A valid capacity passes flag validation: Run executes and fails at the
+	// control socket, overwriting the tombstone with reason=start_failed.
+	if code := runStable([]string{"--control-socket", socketPath, "--idempotency-capacity", "64"}); code != 1 {
+		t.Fatalf("runStable(capacity 64) = %d, want 1 (start failure)", code)
+	}
+	data, err := os.ReadFile(tombstonePath)
+	if err != nil {
+		t.Fatalf("capacity 64: tombstone missing: %v", err)
+	}
+	if !strings.Contains(string(data), "reason=start_failed") {
+		t.Fatalf("capacity 64: tombstone = %q, want reason=start_failed (guard must not fire)", data)
+	}
+}
