@@ -21,6 +21,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sdougbrown/avenor/client"
+	"github.com/sdougbrown/avenor/internal/runstate"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/spawnselection"
 )
@@ -627,22 +628,32 @@ func (s *Server) reapStaleLabel(supervisorPath string, liveEntries []map[string]
 }
 
 // checkLabelAvailable rejects a spawn whose explicit label is already claimed
-// by a run in the supervisor's live list, and reaps a stale registry mapping
-// left behind by a supervisor restart (the live list is authoritative for
-// liveness). A list error never blocks the spawn: the registry's own
-// collision check remains the backstop.
+// by a non-terminal run in the supervisor's list, and reaps a stale registry
+// mapping left behind by a supervisor restart (the live list is authoritative
+// for liveness). Only non-terminal runs hold a label: an ended run's label is
+// free to re-claim, so terminal entries are excluded from both the claim scan
+// and the stale-mapping reap. A list error never blocks the spawn: the
+// registry's own collision check remains the backstop.
 func (s *Server) checkLabelAvailable(cl ControlClient, supervisorPath, label string) error {
 	entries, err := cl.List()
 	if err != nil {
 		return nil
 	}
+	live := make([]map[string]any, 0, len(entries))
 	for _, entry := range entries {
+		status, _ := entry["status"].(string)
+		if runstate.IsTerminalStatus(status) {
+			continue
+		}
+		live = append(live, entry)
+	}
+	for _, entry := range live {
 		if l, _ := entry["label"].(string); l == label {
 			runtimeID, _ := entry["runtime_id"].(string)
 			return fmt.Errorf("label already in use: %s (runtime %s)", label, runtimeID)
 		}
 	}
-	s.reapStaleLabel(supervisorPath, entries, map[string]any{"label": label})
+	s.reapStaleLabel(supervisorPath, live, map[string]any{"label": label})
 	return nil
 }
 

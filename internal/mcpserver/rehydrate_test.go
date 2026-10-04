@@ -880,3 +880,70 @@ func TestFollowUpRejectsLabelClaimedByLiveRun(t *testing.T) {
 		t.Fatalf("spawn calls = %d, want 0 (no run left untracked)", n)
 	}
 }
+
+func TestSpawnReclaimsLabelFromEndedRun(t *testing.T) {
+	t.Run("ended run does not hold the label", func(t *testing.T) {
+		var spawnCalls atomic.Int32
+		fake := &fakeClient{
+			listResult: []map[string]any{{"runtime_id": "rt-ended", "label": "taken", "status": "done"}},
+			spawnFunc: func(map[string]any) (map[string]any, error) {
+				spawnCalls.Add(1)
+				return map[string]any{"runtime_id": "rt-new", "session_id": "ses-new"}, nil
+			},
+		}
+		s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// An ended run's label is free to re-claim: the spawn must succeed.
+		_, _, err = s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
+			RepoDir: "/tmp/test-repo",
+			Label:   "taken",
+		})
+		if err != nil {
+			t.Fatalf("spawn = %v, want success (an ended run does not hold the label)", err)
+		}
+		if n := spawnCalls.Load(); n != 1 {
+			t.Fatalf("spawn calls = %d, want 1", n)
+		}
+	})
+
+	t.Run("ended mapping is unlinked and re-pointed", func(t *testing.T) {
+		var spawnCalls atomic.Int32
+		fake := &fakeClient{
+			listResult: []map[string]any{{"runtime_id": "rt-ended", "label": "taken", "status": "done"}},
+			spawnFunc: func(map[string]any) (map[string]any, error) {
+				spawnCalls.Add(1)
+				return map[string]any{"runtime_id": "rt-new", "session_id": "ses-new"}, nil
+			},
+		}
+		s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// A stale mapping whose runtime is ended: the label must be unlinked
+		// and re-pointed to the new run.
+		if err := s.registry.Store(&RunInfo{RunID: "run-old", Label: "taken", RuntimeID: "rt-ended", SupervisorID: ""}); err != nil {
+			t.Fatal(err)
+		}
+
+		_, result, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
+			RepoDir: "/tmp/test-repo",
+			Label:   "taken",
+		})
+		if err != nil {
+			t.Fatalf("spawn = %v, want success after unlinking the ended mapping", err)
+		}
+		if n := spawnCalls.Load(); n != 1 {
+			t.Fatalf("spawn calls = %d, want 1", n)
+		}
+		runID, _ := result.(map[string]any)["run_id"].(string)
+		if got := s.registry.LookupLabel("", "taken"); got == nil || got.RunID != runID {
+			t.Fatalf("LookupLabel(taken) = %#v, want the new run", got)
+		}
+		if s.registry.Lookup("", "run-old") == nil {
+			t.Fatal("the ended run must remain discoverable by run ID")
+		}
+	})
+}

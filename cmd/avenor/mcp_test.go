@@ -280,3 +280,33 @@ func TestMCPAuthTokenFileAccepted(t *testing.T) {
 		t.Fatalf("token = %q, want secret-token", token)
 	}
 }
+
+func TestRunMCPAuthTokenAndFileConflictRejected(t *testing.T) {
+	// Empty the env so the guard, not an env fallback, is what decides the
+	// outcome.
+	t.Setenv("MCP_AUTH_TOKEN", "")
+	path := writeTokenFile(t, "file-token\n", 0o600)
+
+	// Capture stderr: runMCP writes the guard message to os.Stderr directly.
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	defer func() { os.Stderr = oldStderr }()
+
+	got := runMCP([]string{"--transport", "http", "--auth-token", "flag-token", "--auth-token-file", path})
+	w.Close()
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+
+	if got != 1 {
+		t.Fatalf("runMCP() = %d, want 1", got)
+	}
+	if !strings.Contains(buf.String(), "cannot both be set") {
+		t.Fatalf("stderr = %q, want the flag-conflict guard message", buf.String())
+	}
+}
