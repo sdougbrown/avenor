@@ -60,6 +60,11 @@ type Config struct {
 	// nested supervisor joins an existing tree rather than creating one).
 	MaxTreeBudget int
 
+	// IdempotencyCapacity bounds the in-memory spawn idempotency store:
+	// completed entries plus distinct in-flight reservations. Zero or negative
+	// uses defaultIdempotencyCapacity.
+	IdempotencyCapacity int
+
 	// TreeBudgetFile is the path of an existing tree budget to join. When
 	// empty, the supervisor is a root and creates a new budget file in
 	// Avenor-owned runtime state. When set, the supervisor opens the existing
@@ -121,6 +126,14 @@ type SpawnParams struct {
 	SessionID         string `json:"session_id,omitempty"`
 	ParentID          string `json:"parent_id,omitempty"`     // runtime ID of the parent agent
 	ParentRunID       string `json:"parent_run_id,omitempty"` // broker run ID of the parent, for channel messaging
+	// IdempotencyKey makes a retried spawn return the stored result of the
+	// first spawn under the same key instead of starting a second runtime.
+	// Empty disables idempotency.
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
+	// LabelDerived marks Label as a per-attempt generated value (an MCP run
+	// ID) rather than a semantic parameter; derived labels are excluded from
+	// the idempotency parameter hash.
+	LabelDerived bool `json:"label_derived,omitempty"`
 	// Workflow execution identity attached to this run. Populated by the
 	// workflow direct-run executor; the supervisor attaches its own identity
 	// and callers cannot spoof it.
@@ -412,6 +425,9 @@ type Supervisor struct {
 	config  Config
 	runID   string
 	control *control.ControlServer
+	// idempotency gates retried spawns on their idempotency key so a retry
+	// never starts a second runtime.
+	idempotency *idempotencyStore
 	// workflowOnce runs the startup barrier exactly once and publishes its
 	// retained results below; reads after workflowOnce.Do are safe.
 	workflowOnce        sync.Once
@@ -541,6 +557,7 @@ func NewSupervisor(cfg Config) *Supervisor {
 		runID:                   runID,
 		state:                   state,
 		control:                 control.NewServer(state),
+		idempotency:             newIdempotencyStore(cfg.IdempotencyCapacity),
 		runtimes:                map[string]*childRuntime{},
 		controllerLoops:         map[string]*controllerLoop{},
 		controllerRenewInterval: workflowcontroller.RenewInterval,

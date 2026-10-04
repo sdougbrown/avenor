@@ -16,6 +16,7 @@ func runStable(args []string) int {
 	httpDebug := fs.String("http-debug", "", "http debug adapter bind address")
 	maxRuntimes := fs.Int("max-runtimes", 16, "maximum concurrent child runtimes")
 	maxTreeBudget := fs.Int("max-tree-budget", admission.DefaultTreeBudget, "maximum concurrent runtimes across the whole supervisor tree including nested supervisors (0 uses the default)")
+	idempotencyCapacity := fs.Int("idempotency-capacity", 1024, "idempotent-spawn store capacity: completed entries plus in-flight reservations (must be > 0)")
 	idleTimeout := fs.Duration("idle-timeout", 0, "exit after this duration with no child runtimes and no control connections")
 	shutdownTimeout := fs.Duration("shutdown-timeout", 10*time.Second, "graceful shutdown timeout before killing children")
 	parkedTimeout := fs.Duration("parked-timeout", 30*time.Minute, "how long a finished runtime stays parked awaiting a follow-up prompt before it is reaped (0 = park until shutdown)")
@@ -28,6 +29,10 @@ func runStable(args []string) int {
 	}
 	if *controlSocket == "" {
 		fmt.Fprintln(os.Stderr, "avenor stable: --control-socket is required")
+		return 1
+	}
+	if *idempotencyCapacity <= 0 {
+		fmt.Fprintln(os.Stderr, "avenor stable: --idempotency-capacity must be greater than 0")
 		return 1
 	}
 
@@ -48,6 +53,7 @@ func runStable(args []string) int {
 		HTTPDebug:                  *httpDebug,
 		MaxRuntimes:                *maxRuntimes,
 		MaxTreeBudget:              *maxTreeBudget,
+		IdempotencyCapacity:        *idempotencyCapacity,
 		TreeBudgetFile:             treeBudgetFile,
 		IdleTimeout:                *idleTimeout,
 		ShutdownTimeout:            *shutdownTimeout,
