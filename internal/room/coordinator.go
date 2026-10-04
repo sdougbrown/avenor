@@ -260,11 +260,13 @@ func (r *Room) HumanTurn(ctx context.Context, text string, targets []string) (st
 	}
 
 	// Governor rounds: bounded by depth and budget, never by model patience.
+	reactedTo := map[string]bool{}
 	for {
 		dec := r.opts.Governor.Decide(State{
 			HumanInput:      text,
 			Participants:    headNameList(r.heads),
 			Settled:         settled,
+			ReactedTo:       reactedTo,
 			Depth:           depth,
 			BudgetRemaining: autoBudget,
 			MaxDepth:        r.opts.MaxDepth,
@@ -281,6 +283,7 @@ func (r *Room) HumanTurn(ctx context.Context, text string, targets []string) (st
 		}
 		autoBudget -= len(dec.Activate)
 		depth++
+		reactedTo[dec.SpeakerEventID] = true
 		for _, name := range dec.Activate {
 			h, ok := r.head(name)
 			if !ok {
