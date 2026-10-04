@@ -1094,3 +1094,85 @@ func TestClientClosedOnServerDisconnect(t *testing.T) {
 		t.Fatalf("expected connection-closed error, got: %v", err)
 	}
 }
+
+// startErrorAndHangServer returns a stub supervisor that replies with a
+// JSON-RPC error frame for the "rpc_error" method and accepts but never
+// replies (keeping the connection open) for any other method.
+func startErrorAndHangServer(t *testing.T) (string, func()) {
+	t.Helper()
+	path := filepath.Join(os.TempDir(), "avc-client-err-hang-"+time.Now().Format("150405.000000")+".sock")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				buf := make([]byte, 4096)
+				n, _ := c.Read(buf)
+				var req Request
+				if err := json.Unmarshal(buf[:n], &req); err != nil {
+					return
+				}
+				if req.Method == "rpc_error" {
+					resp := Response{JSONRPC: "2.0", ID: req.ID, Error: &RespError{Code: -32000, Message: "boom"}}
+					data, _ := json.Marshal(resp)
+					_, _ = c.Write(append(data, '\n'))
+					return
+				}
+				// Accept the request but never reply, and keep the connection
+				// open so the client's readLoop does not observe an EOF.
+				select {}
+			}(conn)
+		}
+	}()
+	return path, func() { ln.Close(); os.Remove(path) }
+}
+
+func TestClientClosedFalseOnRPCErrorAndTimeout(t *testing.T) {
+	path, cleanup := startErrorAndHangServer(t)
+	defer cleanup()
+
+	t.Run("rpc error does not close", func(t *testing.T) {
+		c, err := Dial(path)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		defer c.Close()
+		err = c.Call("rpc_error", nil, nil)
+		if err == nil {
+			t.Fatal("expected an RPC error")
+		}
+		var rpcErr *RPCError
+		if !errors.As(err, &rpcErr) {
+			t.Fatalf("error = %v (%T), want an *RPCError", err, err)
+		}
+		if c.Closed() {
+			t.Fatal("Closed() = true after an RPC error, want false")
+		}
+	})
+
+	t.Run("response timeout does not close", func(t *testing.T) {
+		c, err := Dial(path)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		defer c.Close()
+		// A short wait bounds the response wait so the test stays fast; the
+		// timeout path must not mark the connection closed.
+		err = c.call("hang", nil, nil, 200*time.Millisecond)
+		if err == nil {
+			t.Fatal("expected a timeout error")
+		}
+		if !strings.Contains(err.Error(), "timeout") {
+			t.Fatalf("error = %v, want a timeout", err)
+		}
+		if c.Closed() {
+			t.Fatal("Closed() = true after a response timeout, want false")
+		}
+	})
+}

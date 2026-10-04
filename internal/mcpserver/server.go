@@ -562,13 +562,14 @@ func (s *Server) lookupRun(cl ControlClient, supervisorPath, key string) (*RunIn
 			labelMatches = append(labelMatches, i)
 		}
 	}
+	matched := -1
 	switch {
 	case sentinelMatch != -1:
-		return s.runInfoFromListEntry(entries[sentinelMatch], supervisorPath)
+		matched = sentinelMatch
 	case runtimeMatch != -1:
-		return s.runInfoFromListEntry(entries[runtimeMatch], supervisorPath)
+		matched = runtimeMatch
 	case len(labelMatches) == 1:
-		return s.runInfoFromListEntry(entries[labelMatches[0]], supervisorPath)
+		matched = labelMatches[0]
 	case len(labelMatches) > 1:
 		ids := make([]string, 0, len(labelMatches))
 		for _, i := range labelMatches {
@@ -577,7 +578,50 @@ func (s *Server) lookupRun(cl ControlClient, supervisorPath, key string) (*RunIn
 		}
 		return nil, fmt.Errorf("ambiguous label %s: matches runtimes %v", key, ids)
 	}
+	if matched != -1 {
+		s.reapStaleLabel(supervisorPath, entries, entries[matched])
+		return s.runInfoFromListEntry(entries[matched], supervisorPath)
+	}
 	return nil, nil
+}
+
+// reapStaleLabel removes a cached registry entry that claims the same label
+// under the same supervisor but whose runtime is no longer in the live list.
+// The live supervisor's list is authoritative for liveness: a supervisor
+// restart at the same socket path orphans its pre-restart entries, and the
+// live list re-points the colliding label to the live run so the subsequent
+// store succeeds. Entries whose runtime is still live, entries of other
+// supervisors, and non-colliding labels are left untouched. The known race (a
+// spawn storing an entry between the list and the reap) is acceptable and
+// self-healing: the next lookup miss re-discovers it.
+func (s *Server) reapStaleLabel(supervisorPath string, liveEntries []map[string]any, entry map[string]any) {
+	label, _ := entry["label"].(string)
+	if label == "" {
+		return
+	}
+	old := s.registry.LookupLabel(supervisorPath, label)
+	if old == nil || old.SupervisorID != supervisorPath {
+		return
+	}
+	runtimeID, _ := entry["runtime_id"].(string)
+	sentinelFile, _ := entry["sentinel_file"].(string)
+	newRunID := runIDFromSentinel(sentinelFile)
+	if newRunID == "" {
+		newRunID = runtimeID
+	}
+	if old.RunID == newRunID {
+		return
+	}
+	liveRuntimes := make(map[string]bool, len(liveEntries))
+	for _, live := range liveEntries {
+		if rid, ok := live["runtime_id"].(string); ok {
+			liveRuntimes[rid] = true
+		}
+	}
+	if liveRuntimes[old.RuntimeID] {
+		return
+	}
+	s.registry.Remove(old.SupervisorID, old.RunID)
 }
 
 // runIDFromSentinel extracts the MCP run UUID from a sentinel basename shaped

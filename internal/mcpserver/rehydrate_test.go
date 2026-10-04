@@ -598,3 +598,152 @@ func TestStatusSelectsScopedRegistryEntry(t *testing.T) {
 		t.Fatal("both scoped entries must survive")
 	}
 }
+
+func TestLookupRunRepointsStaleLabelAfterSupervisorRestart(t *testing.T) {
+	const supA = "/tmp/supA.sock"
+	const newUUID = "11111111-2222-3333-4444-555555555555"
+	fake := &fakeClient{listFunc: func() ([]map[string]any, error) { return nil, fmt.Errorf("list must not be called") }}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A pre-restart entry cached under the same explicit socket path.
+	if err := s.registry.Store(&RunInfo{RunID: "run1", Label: "x", RuntimeID: "rt-old", SupervisorID: supA}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The restarted supervisor's list carries only the new run, which claims
+	// the stale label. The list is consumed: a second call is an error.
+	var listCalls atomic.Int32
+	fake.listFunc = func() ([]map[string]any, error) {
+		if n := listCalls.Add(1); n > 1 {
+			return nil, fmt.Errorf("list must not be called again (call %d)", n)
+		}
+		return []map[string]any{{
+			"runtime_id":    "rt-new",
+			"label":         "x",
+			"sentinel_file": filepath.Join(os.TempDir(), "avenor-run-"+newUUID+".done"),
+		}}, nil
+	}
+
+	ri, err := s.lookupRun(fake, supA, "x")
+	if err != nil {
+		t.Fatalf("lookupRun = %v, want success after re-pointing the stale label", err)
+	}
+	if ri.RunID != newUUID || ri.RuntimeID != "rt-new" {
+		t.Fatalf("re-pointed entry = %#v, want the new live run", ri)
+	}
+	if got := s.registry.LookupLabel(supA, "x"); got == nil || got.RunID != newUUID {
+		t.Fatalf("LookupLabel(x) = %#v, want the new run", got)
+	}
+	if s.registry.Lookup(supA, "run1") != nil {
+		t.Fatal("stale pre-restart entry must be removed")
+	}
+
+	// A second lookup by the new run's ID resolves the cached entry without
+	// re-listing.
+	if _, err := s.lookupRun(fake, supA, newUUID); err != nil {
+		t.Fatalf("second lookupRun = %v", err)
+	}
+	if n := listCalls.Load(); n != 1 {
+		t.Fatalf("list calls = %d, want 1 (the second lookup must not re-list)", n)
+	}
+}
+
+func TestLookupRunKeepsStillLiveLabelCollision(t *testing.T) {
+	const supA = "/tmp/supA.sock"
+	fake := &fakeClient{listResult: []map[string]any{
+		{"runtime_id": "rt-old", "label": "x"},
+		{"runtime_id": "rt-new", "label": "x"},
+	}}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.registry.Store(&RunInfo{RunID: "run1", Label: "x", RuntimeID: "rt-old", SupervisorID: supA}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Both runtimes are live and both claim the label: the ambiguity error
+	// fires and the live entry is not re-pointed.
+	_, err = s.lookupRun(fake, supA, "x")
+	if err == nil || !strings.Contains(err.Error(), "ambiguous label x") {
+		t.Fatalf("lookupRun = %v, want ambiguity (both runtimes still live)", err)
+	}
+	if s.registry.Lookup(supA, "run1") == nil {
+		t.Fatal("still-live entry must not be re-pointed")
+	}
+}
+
+func TestLookupRunDoesNotRepointOtherSupervisorsLabel(t *testing.T) {
+	const supA = "/tmp/supA.sock"
+	const supB = "/tmp/supB.sock"
+	fake := &fakeClient{listResult: []map[string]any{{"runtime_id": "rt-new", "label": "x"}}}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The label is cached under supervisor B.
+	if err := s.registry.Store(&RunInfo{RunID: "run-b", Label: "x", RuntimeID: "rt-b", SupervisorID: supB}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Discovery on supervisor A collides with B's label: it errors and never
+	// re-points B's entry.
+	_, err = s.lookupRun(fake, supA, "x")
+	if err == nil || !strings.Contains(err.Error(), "already maps") {
+		t.Fatalf("lookupRun = %v, want a label-collision error (label owned by supervisor B)", err)
+	}
+	if s.registry.Lookup(supB, "run-b") == nil {
+		t.Fatal("supervisor B's entry must not be re-pointed by supervisor A's discovery")
+	}
+	if got := s.registry.LookupLabel(supB, "x"); got == nil || got.RunID != "run-b" {
+		t.Fatalf("supervisor B's label = %#v, want run-b intact", got)
+	}
+}
+
+func TestAvenorStatusListFiltersRegistryBySupervisor(t *testing.T) {
+	const supA = "/tmp/supA.sock"
+	const supB = "/tmp/supB.sock"
+	// Supervisor B's list returns a runtime that supervisor A has cached.
+	fake := &fakeClient{listResult: []map[string]any{
+		{"runtime_id": "rt_shared", "status": "running", "session_id": "ses_b"},
+	}}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.registry.Store(&RunInfo{
+		RunID:        "run-a",
+		Label:        "label-a",
+		RuntimeID:    "rt_shared",
+		SupervisorID: supA,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s.defaultSupervisorPath = supB
+
+	// The list output against supervisor B must not bleed supervisor A's
+	// registry identity into a matching runtime; the run is a raw supervisor
+	// B run.
+	_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runs := statusOutputRuns(t, result)
+	if len(runs) != 1 {
+		t.Fatalf("runs = %#v, want 1", runs)
+	}
+	if runs[0]["runtime_id"] != "rt_shared" {
+		t.Fatalf("runtime_id = %v, want rt_shared", runs[0]["runtime_id"])
+	}
+	if runs[0]["run_id"] != nil {
+		t.Fatalf("run_id = %v, want absent (supervisor A's entry must not bleed into B)", runs[0]["run_id"])
+	}
+	if runs[0]["label"] != nil {
+		t.Fatalf("label = %v, want absent (supervisor A's entry must not bleed into B)", runs[0]["label"])
+	}
+	if s.registry.Lookup(supA, "run-a") == nil {
+		t.Fatal("supervisor A's registry entry must remain intact")
+	}
+}

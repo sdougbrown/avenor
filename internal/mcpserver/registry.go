@@ -52,6 +52,9 @@ func NewRunRegistry() *RunRegistry {
 // different run, is a collision and is rejected rather than silently
 // overwriting a live mapping. All collision conditions are validated before
 // either index is mutated, so a rejected store never disturbs live mappings.
+// Staleness is owned by the discovery layer: a supervisor restart orphans its
+// pre-restart entries, and the live list re-points a colliding label before a
+// store so a restarted supervisor's run can reclaim a label.
 func (r *RunRegistry) Store(info *RunInfo) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -90,6 +93,18 @@ func (r *RunRegistry) Lookup(supervisorID, runID string) *RunInfo {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.byID[supervisorID][runID]
+}
+
+// LookupLabel returns the entry for (supervisorID, label), or nil. Labels are
+// globally unique across the registry, so a label maps to at most one entry;
+// this scoped lookup returns it only when it belongs to the given supervisor.
+func (r *RunRegistry) LookupLabel(supervisorID, label string) *RunInfo {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if info, ok := r.byLabel[label]; ok && info.SupervisorID == supervisorID {
+		return info
+	}
+	return nil
 }
 
 // LookupUnique resolves key across all supervisors and returns an entry only
