@@ -220,6 +220,7 @@ The MCP server redials an explicit supervisor socket (`--supervisor-socket`) whe
 - Send `idempotency_key` on `avenor_spawn` and `avenor_follow_up` so retries never double-spawn. A retried key with different parameters fails with a tool error whose message contains `idempotency key reused with different parameters (key "...")`; an exhausted idempotency store fails with `idempotency capacity exhausted (capacity N)`. These arrive as failed tool calls (error text), not JSON-RPC error codes — the control-plane codes behind them are documented in `control-protocol.md`.
 - Poll `avenor_events` with `after_seq` starting at `0`, feeding back `latest_seq` to page forward.
 - A clamped wait returns `wait_clamped: true`; treat it as "poll again".
+- Key namespaces are per supervisor and shared by every client: choose `idempotency_key` values that are unique to your client (for example prefix them with an identifier) — a colliding key with matching parameters returns the other client's run.
 
 For the full deployment walkthrough — service units, token generation, Tailscale exposure, containerized clients (Docker), and smoke tests — see `templates/remote-mcp/README.md` in the repository.
 
