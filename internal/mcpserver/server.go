@@ -585,12 +585,14 @@ func (s *Server) lookupRun(cl ControlClient, supervisorPath, key string) (*RunIn
 	return nil, nil
 }
 
-// reapStaleLabel removes a cached registry entry that claims the same label
+// reapStaleLabel unlinks a cached label mapping that claims the same label
 // under the same supervisor but whose runtime is no longer in the live list.
 // The live supervisor's list is authoritative for liveness: a supervisor
 // restart at the same socket path orphans its pre-restart entries, and the
 // live list re-points the colliding label to the live run so the subsequent
-// store succeeds. Entries whose runtime is still live, entries of other
+// store succeeds. The stale mapping is unlinked so the label re-points, while
+// the dead run stays discoverable by run ID for its persisted terminal result
+// and event log. Entries whose runtime is still live, entries of other
 // supervisors, and non-colliding labels are left untouched. The known race (a
 // spawn storing an entry between the list and the reap) is acceptable and
 // self-healing: the next lookup miss re-discovers it.
@@ -621,7 +623,7 @@ func (s *Server) reapStaleLabel(supervisorPath string, liveEntries []map[string]
 	if liveRuntimes[old.RuntimeID] {
 		return
 	}
-	s.registry.Remove(old.SupervisorID, old.RunID)
+	s.registry.UnlinkLabel(old.SupervisorID, old.Label)
 }
 
 // checkLabelAvailable rejects a spawn whose explicit label is already claimed

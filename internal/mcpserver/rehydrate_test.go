@@ -636,8 +636,8 @@ func TestLookupRunRepointsStaleLabelAfterSupervisorRestart(t *testing.T) {
 	if got := s.registry.LookupLabel(supA, "x"); got == nil || got.RunID != newUUID {
 		t.Fatalf("LookupLabel(x) = %#v, want the new run", got)
 	}
-	if s.registry.Lookup(supA, "run1") != nil {
-		t.Fatal("stale pre-restart entry must be removed")
+	if s.registry.Lookup(supA, "run1") == nil {
+		t.Fatal("stale pre-restart entry must remain discoverable by run ID")
 	}
 
 	// A second lookup by the new run's ID resolves the cached entry without
@@ -813,8 +813,8 @@ func TestSpawnReapsStaleLabelMapping(t *testing.T) {
 	if got := s.registry.LookupLabel("", "taken"); got == nil || got.RunID != runID {
 		t.Fatalf("LookupLabel(taken) = %#v, want the new run", got)
 	}
-	if s.registry.Lookup("", "run-old") != nil {
-		t.Fatal("stale pre-restart entry must be removed")
+	if s.registry.Lookup("", "run-old") == nil {
+		t.Fatal("stale pre-restart entry must remain discoverable by run ID")
 	}
 }
 

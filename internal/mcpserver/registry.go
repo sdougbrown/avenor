@@ -129,6 +129,17 @@ func (r *RunRegistry) LookupUnique(key string) *RunInfo {
 	return found
 }
 
+// UnlinkLabel deletes the label mapping for (supervisorID, label) only when
+// the label currently maps to an entry of that supervisor. The byID entry is
+// left untouched so the dead run remains discoverable by run ID.
+func (r *RunRegistry) UnlinkLabel(supervisorID, label string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if info, ok := r.byLabel[label]; ok && info.SupervisorID == supervisorID {
+		delete(r.byLabel, label)
+	}
+}
+
 // Remove deletes the entry for (supervisorID, runID) and returns it, or nil
 // when no such entry exists.
 func (r *RunRegistry) Remove(supervisorID, runID string) *RunInfo {

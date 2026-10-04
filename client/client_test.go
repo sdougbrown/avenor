@@ -1105,6 +1105,7 @@ func startErrorAndHangServer(t *testing.T) (string, func()) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
+	done := make(chan struct{})
 	go func() {
 		for {
 			conn, err := ln.Accept()
@@ -1112,25 +1113,27 @@ func startErrorAndHangServer(t *testing.T) (string, func()) {
 				return
 			}
 			go func(c net.Conn) {
-				buf := make([]byte, 4096)
-				n, _ := c.Read(buf)
+				defer c.Close()
+				data, err := bufio.NewReader(c).ReadBytes('\n')
+				if err != nil {
+					return
+				}
 				var req Request
-				if err := json.Unmarshal(buf[:n], &req); err != nil {
+				if err := json.Unmarshal(data, &req); err != nil {
 					return
 				}
 				if req.Method == "rpc_error" {
 					resp := Response{JSONRPC: "2.0", ID: req.ID, Error: &RespError{Code: -32000, Message: "boom"}}
-					data, _ := json.Marshal(resp)
-					_, _ = c.Write(append(data, '\n'))
-					return
+					respData, _ := json.Marshal(resp)
+					_, _ = c.Write(append(respData, '\n'))
 				}
-				// Accept the request but never reply, and keep the connection
-				// open so the client's readLoop does not observe an EOF.
-				select {}
+				// Keep the connection open until cleanup so the client's readLoop
+				// does not observe an EOF.
+				<-done
 			}(conn)
 		}
 	}()
-	return path, func() { ln.Close(); os.Remove(path) }
+	return path, func() { close(done); ln.Close(); os.Remove(path) }
 }
 
 func TestClientClosedFalseOnRPCErrorAndTimeout(t *testing.T) {
