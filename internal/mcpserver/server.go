@@ -435,7 +435,7 @@ func (s *Server) handleAvenorStatus(ctx context.Context, req *mcp.CallToolReques
 		seenRegistryRuns := make(map[string]bool)
 		for _, entry := range results {
 			runtimeID, _ := entry["runtime_id"].(string)
-			ri := s.findRegistryByRuntimeID(runtimeID)
+			ri := s.findRegistryByRuntimeID(supervisorPath, runtimeID)
 			var sentinelPath string
 			if ri != nil {
 				sentinelPath = ri.SentinelPath
@@ -467,12 +467,20 @@ func (s *Server) handleAvenorStatus(ctx context.Context, req *mcp.CallToolReques
 		return nil, statusToolOutput{Runs: &runs, Count: &count}, nil
 	}
 
+	ri, err := s.lookupRun(cl, supervisorPath, args.RunID)
+	if err != nil {
+		return nil, statusToolOutput{}, err
+	}
+	key := args.RunID
+	if ri != nil {
+		key = ri.RunID
+	}
 	var timedOut bool
 	var ts map[string]any
 	if condition != "" {
-		ts, timedOut, err = s.waitForRun(ctx, cl, args.RunID, condition, deadline)
+		ts, timedOut, err = s.waitForRun(ctx, cl, supervisorPath, key, condition, deadline)
 	} else {
-		ts, err = s.queryRunStatus(cl, args.RunID)
+		ts, err = s.queryRunStatus(cl, supervisorPath, key)
 	}
 	if err != nil {
 		return nil, statusToolOutput{}, err
@@ -516,8 +524,126 @@ func terminalStatusFromRunInfo(info *RunInfo) (map[string]any, bool) {
 	return status, true
 }
 
-func (s *Server) queryRunStatus(cl ControlClient, runID string) (map[string]any, error) {
-	ri := s.registry.Lookup(runID)
+// lookupRun resolves key (an MCP run UUID or a label) against the selected
+// supervisor, rehydrating the registry from the supervisor's list on a miss.
+// A nil result with a nil error means the list contained no match; callers
+// keep their existing not-found behavior. List errors propagate as errors.
+func (s *Server) lookupRun(cl ControlClient, supervisorPath, key string) (*RunInfo, error) {
+	if ri := s.registry.Lookup(supervisorPath, key); ri != nil {
+		return ri, nil
+	}
+	entries, err := cl.List()
+	if err != nil {
+		return nil, fmt.Errorf("list runs: %w", err)
+	}
+	var (
+		sentinelMatch = -1
+		runtimeMatch  = -1
+		labelMatches  []int
+	)
+	for i := range entries {
+		entry := entries[i]
+		sentinelFile, _ := entry["sentinel_file"].(string)
+		if key != "" && filepath.Base(sentinelFile) == "avenor-run-"+key+".done" {
+			if sentinelMatch == -1 {
+				sentinelMatch = i
+			}
+			continue
+		}
+		runtimeID, _ := entry["runtime_id"].(string)
+		if key != "" && runtimeID == key {
+			if runtimeMatch == -1 {
+				runtimeMatch = i
+			}
+			continue
+		}
+		label, _ := entry["label"].(string)
+		if key != "" && label != "" && label == key {
+			labelMatches = append(labelMatches, i)
+		}
+	}
+	switch {
+	case sentinelMatch != -1:
+		return s.runInfoFromListEntry(entries[sentinelMatch], supervisorPath)
+	case runtimeMatch != -1:
+		return s.runInfoFromListEntry(entries[runtimeMatch], supervisorPath)
+	case len(labelMatches) == 1:
+		return s.runInfoFromListEntry(entries[labelMatches[0]], supervisorPath)
+	case len(labelMatches) > 1:
+		ids := make([]string, 0, len(labelMatches))
+		for _, i := range labelMatches {
+			id, _ := entries[i]["runtime_id"].(string)
+			ids = append(ids, id)
+		}
+		return nil, fmt.Errorf("ambiguous label %s: matches runtimes %v", key, ids)
+	}
+	return nil, nil
+}
+
+// runIDFromSentinel extracts the MCP run UUID from a sentinel basename shaped
+// avenor-run-<uuid>.done, or returns empty for any other name.
+func runIDFromSentinel(sentinelFile string) string {
+	base := filepath.Base(sentinelFile)
+	id := strings.TrimSuffix(strings.TrimPrefix(base, "avenor-run-"), ".done")
+	if id == "" || id == base {
+		return ""
+	}
+	if _, err := uuid.Parse(id); err != nil {
+		return ""
+	}
+	return id
+}
+
+// runInfoFromListEntry converts a stable supervisor list entry into a registry
+// entry scoped to supervisorPath. The supervisor-wide run_id is never used as
+// the MCP run ID.
+func (s *Server) runInfoFromListEntry(entry map[string]any, supervisorPath string) (*RunInfo, error) {
+	runtimeID, _ := entry["runtime_id"].(string)
+	sentinelFile, _ := entry["sentinel_file"].(string)
+	runID := runIDFromSentinel(sentinelFile)
+	if runID == "" {
+		runID = runtimeID
+	}
+	label, _ := entry["label"].(string)
+	info := &RunInfo{
+		RunID:        runID,
+		Label:        label,
+		RuntimeID:    runtimeID,
+		SupervisorID: supervisorPath,
+		SentinelPath: sentinelFile,
+		Dir:          stringField(entry, "dir"),
+		EventLogPath: stringField(entry, "on_event"),
+		Thinking:     stringField(entry, "thinking"),
+	}
+	info.SessionID = stringField(entry, "session_id")
+	info.AutoApprove, _ = entry["auto_approve"].(bool)
+	if ms, ok := entry["started_at"].(float64); ok && ms > 0 {
+		info.CreatedAt = time.UnixMilli(int64(ms))
+	}
+	var identity resolvedSpawnIdentity
+	applySpawnIdentity(entry, &identity)
+	info.Agent = identity.EffectiveAgent
+	info.Model = identity.EffectiveModel
+	info.Backend = identity.EffectiveBackend
+	info.RosterFile = identity.RosterFile
+	info.RosterEntry = identity.RosterEntry
+	info.EffectiveAgent = identity.EffectiveAgent
+	info.EffectiveModel = identity.EffectiveModel
+	info.EffectiveBackend = identity.EffectiveBackend
+	info.AgentProfile = identity.AgentProfile
+	if err := s.registry.Store(info); err != nil {
+		return nil, fmt.Errorf("registry store: %w", err)
+	}
+	return info, nil
+}
+
+func stringField(entry map[string]any, key string) string {
+	value, _ := entry[key].(string)
+	return value
+}
+
+func (s *Server) queryRunStatus(cl ControlClient, supervisorPath, runID string) (map[string]any, error) {
+	ri := s.registry.Lookup(supervisorPath, runID)
 	if ri != nil {
 		result, err := cl.Status(ri.RuntimeID)
 		if err != nil {
@@ -592,8 +718,8 @@ func resultFromStatus(status map[string]any, timedOut bool) map[string]any {
 
 // recoverFinalOutput reads the durable terminal event when an older control
 // server does not implement the explicit result method.
-func (s *Server) recoverFinalOutput(runID string) (string, bool) {
-	ri := s.registry.Lookup(runID)
+func (s *Server) recoverFinalOutput(supervisorPath, runID string) (string, bool) {
+	ri := s.registry.Lookup(supervisorPath, runID)
 	if ri == nil || ri.EventLogPath == "" {
 		return "", false
 	}
@@ -608,13 +734,13 @@ func (s *Server) resultSupervisorID(runID, requestedSupervisorID string) string 
 	if requestedSupervisorID != "" {
 		return requestedSupervisorID
 	}
-	if ri := s.registry.Lookup(runID); ri != nil {
+	if ri := s.registry.LookupUnique(runID); ri != nil {
 		return ri.SupervisorID
 	}
 	return ""
 }
 
-func (s *Server) retrieveFinalOutput(cl ControlClient, runID string, status map[string]any) {
+func (s *Server) retrieveFinalOutput(cl ControlClient, supervisorPath, runID string, status map[string]any) {
 	// Status provides a bounded preview only. Call Result for full output when
 	// the control plane supports it.
 	fullResultRetrieved := false
@@ -631,7 +757,7 @@ func (s *Server) retrieveFinalOutput(cl ControlClient, runID string, status map[
 		}
 	}
 	if !fullResultRetrieved {
-		if output, found := s.recoverFinalOutput(runID); found {
+		if output, found := s.recoverFinalOutput(supervisorPath, runID); found {
 			status["final_output"] = output
 			status["final_output_truncated"] = false
 			fullResultRetrieved = true
@@ -672,20 +798,30 @@ func (s *Server) handleAvenorResult(ctx context.Context, req *mcp.CallToolReques
 		return nil, nil, err
 	}
 	defer cleanup()
+	supervisorPath := s.getSupervisorPath(supervisorID)
+
+	ri, err := s.lookupRun(cl, supervisorPath, args.RunID)
+	if err != nil {
+		return nil, nil, err
+	}
+	key := args.RunID
+	if ri != nil {
+		key = ri.RunID
+	}
 
 	var status map[string]any
 	var timedOut bool
 	if wait {
-		status, timedOut, err = s.waitForRun(ctx, cl, args.RunID, waitTurnComplete, deadline)
+		status, timedOut, err = s.waitForRun(ctx, cl, supervisorPath, key, waitTurnComplete, deadline)
 	} else {
-		status, err = s.queryRunStatus(cl, args.RunID)
+		status, err = s.queryRunStatus(cl, supervisorPath, key)
 	}
 	if err != nil {
 		return nil, nil, err
 	}
 
 	if isTerminalStatus(status) && !hasPendingPermission(status) {
-		s.retrieveFinalOutput(cl, args.RunID, status)
+		s.retrieveFinalOutput(cl, supervisorPath, key, status)
 	}
 	result := resultFromStatus(status, timedOut)
 	if clamped && timedOut {
@@ -937,7 +1073,7 @@ func (s *Server) handleAvenorShutdown(ctx context.Context, req *mcp.CallToolRequ
 	var cleanedUp []string
 	for _, ri := range s.registry.All() {
 		if ri.SupervisorID == supervisorPath {
-			s.registry.Remove(ri.RunID)
+			s.registry.Remove(ri.SupervisorID, ri.RunID)
 			if _, statErr := os.Stat(ri.SentinelPath); statErr == nil {
 				if rmErr := os.Remove(ri.SentinelPath); rmErr == nil {
 					cleanedUp = append(cleanedUp, ri.SentinelPath)
@@ -961,7 +1097,7 @@ func (s *Server) handleAvenorAnswerPermission(ctx context.Context, req *mcp.Call
 	if err := runtime.ValidatePermissionMessage(args.Message); err != nil {
 		return nil, nil, err
 	}
-	ri := s.registry.Lookup(args.RunID)
+	ri := s.registry.LookupUnique(args.RunID)
 	supervisorID := args.SupervisorID
 	if supervisorID == "" && ri != nil {
 		supervisorID = ri.SupervisorID
@@ -972,6 +1108,11 @@ func (s *Server) handleAvenorAnswerPermission(ctx context.Context, req *mcp.Call
 		return nil, nil, err
 	}
 	defer cleanup()
+
+	ri, err = s.lookupRun(cl, s.getSupervisorPath(supervisorID), args.RunID)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	runtimeID := ""
 	if ri != nil {
@@ -1039,9 +1180,24 @@ func resolveRuntimeIDFromList(cl ControlClient, runID string) (string, error) {
 }
 
 func (s *Server) handleAvenorEvents(ctx context.Context, req *mcp.CallToolRequest, args eventsArgs) (*mcp.CallToolResult, any, error) {
-	ri := s.registry.Lookup(args.RunID)
+	supervisorPath := s.getSupervisorPath(args.SupervisorID)
+	ri := s.registry.Lookup(supervisorPath, args.RunID)
 	if ri == nil {
-		return nil, nil, fmt.Errorf("run not found in registry")
+		// The registry fast path only covers a scoped run ID; any other key
+		// needs the supervisor to establish a unique match before the event
+		// log can be read locally.
+		cl, cleanup, err := s.getClientForSupervisor(args.SupervisorID)
+		if err != nil {
+			return nil, nil, err
+		}
+		defer cleanup()
+		ri, err = s.lookupRun(cl, supervisorPath, args.RunID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if ri == nil {
+			return nil, nil, fmt.Errorf("run not found in registry")
+		}
 	}
 
 	limit := args.Limit
@@ -1061,13 +1217,9 @@ func (s *Server) handleAvenorEvents(ctx context.Context, req *mcp.CallToolReques
 }
 
 func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequest, args followUpArgs) (*mcp.CallToolResult, any, error) {
-	ri := s.registry.Lookup(args.RunID)
-	if ri == nil {
-		return nil, nil, fmt.Errorf("run not found in registry")
-	}
-
+	ri := s.registry.LookupUnique(args.RunID)
 	supervisorID := args.SupervisorID
-	if supervisorID == "" {
+	if supervisorID == "" && ri != nil {
 		supervisorID = ri.SupervisorID
 	}
 
@@ -1079,6 +1231,14 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 		return nil, nil, err
 	}
 	defer cleanup()
+
+	ri, err = s.lookupRun(cl, s.getSupervisorPath(supervisorID), args.RunID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if ri == nil {
+		return nil, nil, fmt.Errorf("run not found in registry")
+	}
 
 	sessionID, err := readSentinelSession(ri.SentinelPath)
 	if err != nil {
@@ -1567,9 +1727,9 @@ func (s *Server) getSupervisorPath(supervisorID string) string {
 	return s.defaultSupervisorPath
 }
 
-func (s *Server) findRegistryByRuntimeID(runtimeID string) *RunInfo {
+func (s *Server) findRegistryByRuntimeID(supervisorPath, runtimeID string) *RunInfo {
 	for _, ri := range s.registry.All() {
-		if ri.RuntimeID == runtimeID {
+		if ri.SupervisorID == supervisorPath && ri.RuntimeID == runtimeID {
 			return ri
 		}
 	}

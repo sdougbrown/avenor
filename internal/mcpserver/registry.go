@@ -29,62 +29,121 @@ type RunInfo struct {
 	CreatedAt        time.Time
 }
 
+// RunRegistry stores MCP run metadata scoped by supervisor. The ID map is
+// keyed by (SupervisorID, RunID) so identical run or runtime IDs on different
+// supervisors cannot collide. Labels remain globally unique across the
+// registry: a label always maps to exactly one run.
 type RunRegistry struct {
 	mu      sync.RWMutex
-	byID    map[string]*RunInfo
+	byID    map[string]map[string]*RunInfo
 	byLabel map[string]*RunInfo
 }
 
 func NewRunRegistry() *RunRegistry {
 	return &RunRegistry{
-		byID:    make(map[string]*RunInfo),
+		byID:    make(map[string]map[string]*RunInfo),
 		byLabel: make(map[string]*RunInfo),
 	}
 }
 
+// Store upserts info scoped by (SupervisorID, RunID). Re-storing the same run
+// on the same supervisor with the same runtime ID is benign reuse. A
+// different runtime ID for the same key, or a label that would map to a
+// different run, is a collision and is rejected rather than silently
+// overwriting a live mapping.
 func (r *RunRegistry) Store(info *RunInfo) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, ok := r.byID[info.RunID]; ok {
-		return fmt.Errorf("run_id already exists: %s", info.RunID)
+	if existing := r.byID[info.SupervisorID][info.RunID]; existing != nil {
+		if existing.RuntimeID != info.RuntimeID {
+			return fmt.Errorf("run %s already registered on %s with runtime %s, not %s",
+				info.RunID, info.SupervisorID, existing.RuntimeID, info.RuntimeID)
+		}
+		if existing.Label != "" && existing.Label != info.Label && r.byLabel[existing.Label] == existing {
+			delete(r.byLabel, existing.Label)
+		}
 	}
-	r.byID[info.RunID] = info
-	r.byLabel[info.Label] = info
+	if info.Label != "" {
+		if existing := r.byLabel[info.Label]; existing != nil &&
+			(existing.SupervisorID != info.SupervisorID || existing.RunID != info.RunID) {
+			return fmt.Errorf("label %q already maps to run %s on %s", info.Label, existing.RunID, existing.SupervisorID)
+		}
+	}
+	sup := r.byID[info.SupervisorID]
+	if sup == nil {
+		sup = make(map[string]*RunInfo)
+		r.byID[info.SupervisorID] = sup
+	}
+	sup[info.RunID] = info
+	if info.Label != "" {
+		r.byLabel[info.Label] = info
+	}
 	return nil
 }
 
-func (r *RunRegistry) Lookup(key string) *RunInfo {
+// Lookup returns the entry for (supervisorID, runID), or nil. Labels are not
+// resolved here because they are not scoped per supervisor.
+func (r *RunRegistry) Lookup(supervisorID, runID string) *RunInfo {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	if info, ok := r.byID[key]; ok {
-		return info
-	}
+	return r.byID[supervisorID][runID]
+}
+
+// LookupUnique resolves key across all supervisors and returns an entry only
+// when the key identifies exactly one run: by globally unique label, or by a
+// run ID registered under exactly one supervisor. Ambiguous or unknown keys
+// return nil.
+func (r *RunRegistry) LookupUnique(key string) *RunInfo {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	if info, ok := r.byLabel[key]; ok {
 		return info
 	}
-	return nil
+	var found *RunInfo
+	for _, sup := range r.byID {
+		if info, ok := sup[key]; ok {
+			if found != nil {
+				return nil
+			}
+			found = info
+		}
+	}
+	return found
 }
 
-func (r *RunRegistry) Remove(runID string) *RunInfo {
+// Remove deletes the entry for (supervisorID, runID) and returns it, or nil
+// when no such entry exists.
+func (r *RunRegistry) Remove(supervisorID, runID string) *RunInfo {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	info, ok := r.byID[runID]
+	sup := r.byID[supervisorID]
+	info, ok := sup[runID]
 	if !ok {
 		return nil
 	}
-	delete(r.byID, runID)
-	if existing, ok := r.byLabel[info.Label]; ok && existing == info {
+	delete(sup, runID)
+	if len(sup) == 0 {
+		delete(r.byID, supervisorID)
+	}
+	if info.Label != "" && r.byLabel[info.Label] == info {
 		delete(r.byLabel, info.Label)
 	}
 	return info
 }
 
+// All returns every entry across all supervisors.
 func (r *RunRegistry) All() []*RunInfo {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	result := make([]*RunInfo, 0, len(r.byID))
-	for _, info := range r.byID {
-		result = append(result, info)
+	count := 0
+	for _, sup := range r.byID {
+		count += len(sup)
+	}
+	result := make([]*RunInfo, 0, count)
+	for _, sup := range r.byID {
+		for _, info := range sup {
+			result = append(result, info)
+		}
 	}
 	return result
 }

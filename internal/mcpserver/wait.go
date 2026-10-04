@@ -100,7 +100,7 @@ func sleepWithContext(ctx context.Context, delay time.Duration) error {
 	}
 }
 
-func (s *Server) waitForRun(ctx context.Context, cl ControlClient, runID string, condition waitCondition, deadline time.Time) (map[string]any, bool, error) {
+func (s *Server) waitForRun(ctx context.Context, cl ControlClient, supervisorPath, runID string, condition waitCondition, deadline time.Time) (map[string]any, bool, error) {
 	if !condition.valid() {
 		return nil, false, fmt.Errorf("invalid wait condition: %q", condition)
 	}
@@ -108,7 +108,7 @@ func (s *Server) waitForRun(ctx context.Context, cl ControlClient, runID string,
 	var initialPhase string
 	firstSnapshot := true
 	for {
-		status, err := s.queryRunStatus(cl, runID)
+		status, err := s.queryRunStatus(cl, supervisorPath, runID)
 		if err != nil {
 			return nil, false, err
 		}

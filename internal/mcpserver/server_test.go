@@ -1512,7 +1512,7 @@ func TestAvenorSpawn(t *testing.T) {
 		t.Errorf("expected label to default to run_id, got %v", m["label"])
 	}
 
-	ri := s.registry.Lookup(runID)
+	ri := s.registry.LookupUnique(runID)
 	if ri == nil {
 		t.Fatal("expected registry entry for spawn")
 	}
@@ -1576,7 +1576,7 @@ func TestAvenorSpawnRosterSelectorAndResolvedIdentity(t *testing.T) {
 		t.Fatalf("roster selector not forwarded: %#v", fake.spawnCapturedParams)
 	}
 
-	ri := s.registry.Lookup(result.(map[string]any)["run_id"].(string))
+	ri := s.registry.LookupUnique(result.(map[string]any)["run_id"].(string))
 	if ri == nil {
 		t.Fatal("expected registry entry")
 	}
@@ -1660,7 +1660,7 @@ func TestAvenorSpawnWithLabel(t *testing.T) {
 		t.Errorf("expected label my-label, got %s", label)
 	}
 
-	ri := s.registry.Lookup("my-label")
+	ri := s.registry.LookupUnique("my-label")
 	if ri == nil {
 		t.Fatal("expected registry entry lookup by label")
 	}
@@ -1743,7 +1743,7 @@ func TestAvenorSpawnWithOptionalParams(t *testing.T) {
 		t.Fatal("expected supervisor_id in result")
 	}
 
-	ri := s.registry.Lookup(runID)
+	ri := s.registry.LookupUnique(runID)
 	if ri == nil {
 		t.Fatal("expected registry entry for spawn")
 	}
@@ -1816,7 +1816,7 @@ func TestAvenorSpawnAutoApproveTrue(t *testing.T) {
 	if runID == "" {
 		t.Fatal("expected spawned run ID")
 	}
-	if ri := s.registry.Lookup(runID); ri == nil || !ri.AutoApprove {
+	if ri := s.registry.LookupUnique(runID); ri == nil || !ri.AutoApprove {
 		t.Fatalf("initial registry auto-approve = %#v, want true", ri)
 	}
 
@@ -2195,7 +2195,7 @@ func TestAvenorShutdownCleanup(t *testing.T) {
 		t.Error("event log file was not removed from disk")
 	}
 
-	if ri := s.registry.Lookup("run-clean-1"); ri != nil {
+	if ri := s.registry.LookupUnique("run-clean-1"); ri != nil {
 		t.Error("registry entry was not removed")
 	}
 }
@@ -3086,7 +3086,7 @@ func TestAvenorFollowUp(t *testing.T) {
 		t.Errorf("expected label prior-test-followup, got %v", p["label"])
 	}
 
-	ri := s.registry.Lookup(runID)
+	ri := s.registry.LookupUnique(runID)
 	if ri == nil {
 		t.Fatal("expected new registry entry for follow-up run")
 	}
@@ -3162,7 +3162,7 @@ func TestAvenorRosterFollowUpUsesResolvedIdentity(t *testing.T) {
 		t.Fatalf("follow-up reread roster_entry: %#v", captured)
 	}
 	followupID := result.(map[string]any)["run_id"].(string)
-	followup := s.registry.Lookup(followupID)
+	followup := s.registry.LookupUnique(followupID)
 	if followup == nil || followup.RosterFile != "/tmp/mutable-roster.json" || followup.EffectiveBackend != "agy" {
 		t.Fatalf("follow-up metadata = %#v", followup)
 	}
@@ -3257,7 +3257,7 @@ func TestAvenorFollowUpInheritsAutoApproveTransitively(t *testing.T) {
 	if got, ok := spawnParams[0]["auto_approve"].(bool); !ok || !got {
 		t.Fatalf("first follow-up auto_approve = %T %v, want bool true", spawnParams[0]["auto_approve"], spawnParams[0]["auto_approve"])
 	}
-	if ri := s.registry.Lookup(firstRunID); ri == nil || !ri.AutoApprove {
+	if ri := s.registry.LookupUnique(firstRunID); ri == nil || !ri.AutoApprove {
 		t.Fatalf("first follow-up registry auto-approve = %#v, want true", ri)
 	}
 
@@ -3275,7 +3275,7 @@ func TestAvenorFollowUpInheritsAutoApproveTransitively(t *testing.T) {
 		t.Fatalf("second follow-up auto_approve = %T %v, want bool true", spawnParams[1]["auto_approve"], spawnParams[1]["auto_approve"])
 	}
 	secondRunID, _ := secondResult.(map[string]any)["run_id"].(string)
-	if ri := s.registry.Lookup(secondRunID); ri == nil || !ri.AutoApprove {
+	if ri := s.registry.LookupUnique(secondRunID); ri == nil || !ri.AutoApprove {
 		t.Fatalf("second follow-up registry auto-approve = %#v, want true", ri)
 	}
 }
