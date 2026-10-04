@@ -379,6 +379,13 @@ func (h *HTTPDebugServer) handleAnswerPermission(w http.ResponseWriter, r *http.
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
+	// Mirror the RPC dispatch sites: an empty option_id is rejected before the
+	// resolution comparison so a claim recorded with an empty option cannot be
+	// matched by the universally guessable empty answer.
+	if p.OptionID == "" {
+		http.Error(w, "invalid params", http.StatusBadRequest)
+		return
+	}
 	// The early state check and delivery use separate locks. A claim may resolve
 	// after the early check. DeliverPendingPermission rechecks the state under
 	// its own lock and compares against the recorded resolution, returning

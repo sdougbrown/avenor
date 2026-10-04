@@ -640,9 +640,13 @@ func (s *ControlServer) MarkPermissionClaimResolved(scope, requestID, source, op
 }
 
 // resolvedMatchesLocked reports whether the recorded resolution on a resolved
-// claim matches the offered answer exactly. pendingMu must be held.
+// claim matches the offered answer exactly. pendingMu must be held. A claim
+// recorded with an empty option ID never matches: the auto-approve path can
+// record ("", "") when no allow option is found, and that must not be
+// matchable by the universally guessable ("", "") without knowing the real
+// answer.
 func resolvedMatchesLocked(claim *permissionClaim, optionID, message string) bool {
-	return claim.resolutionOptionID == optionID && claim.resolutionMessage == message
+	return claim.resolutionOptionID != "" && claim.resolutionOptionID == optionID && claim.resolutionMessage == message
 }
 
 // ResolvedPermissionMatches reports whether the request already has a recorded

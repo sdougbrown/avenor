@@ -974,3 +974,34 @@ func TestHTTPAnswerPermissionEmptyMessageOK(t *testing.T) {
 		t.Fatalf("POST /answer-permission (empty message): got 400, want non-400 (empty message is valid)")
 	}
 }
+
+// TestHTTPAnswerPermissionEmptyOptionIDRejected verifies that an empty
+// option_id is rejected with 400 before the resolution comparison, mirroring
+// the RPC dispatch sites. Without the guard, a claim recorded with an empty
+// option could be matched by the universally guessable empty answer.
+func TestHTTPAnswerPermissionEmptyOptionIDRejected(t *testing.T) {
+	client := &http.Client{Timeout: 2 * time.Second}
+
+	// A pending request exists: the empty option_id is rejected before the
+	// comparison, so it must not be accepted or reported as a conflict.
+	ctrl := NewServer(NewState("run_cli", "", 0))
+	if !ctrl.PreparePermissionClaim("", "req_pending", PermissionResolverReserved, nil) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+	_, addr, token := startDebugServer(t, ctrl, nil)
+	resp := authedPostBody(t, client, "http://"+addr+"/answer-permission", token, `{"request_id":"req_pending","option_id":""}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("POST /answer-permission (empty option_id, pending request): %d, want 400", resp.StatusCode)
+	}
+
+	// No pending request exists: the empty option_id is still rejected before
+	// the comparison.
+	ctrl2 := NewServer(NewState("run_cli", "", 0))
+	_, addr2, token2 := startDebugServer(t, ctrl2, nil)
+	resp2 := authedPostBody(t, client, "http://"+addr2+"/answer-permission", token2, `{"request_id":"req_missing","option_id":""}`)
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusBadRequest {
+		t.Fatalf("POST /answer-permission (empty option_id, no pending request): %d, want 400", resp2.StatusCode)
+	}
+}

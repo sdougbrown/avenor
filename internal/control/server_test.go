@@ -399,6 +399,26 @@ func TestMarkPermissionClaimResolvedRetainsTombstone(t *testing.T) {
 	}
 }
 
+// TestResolvedPermissionMatchesRejectsEmptyRecordedOption guards the comparator
+// against the auto-approve path recording ("", "") when it finds no allow
+// option: that empty recording must not be matchable by the universally
+// guessable ("", "") without knowing the real answer.
+func TestResolvedPermissionMatchesRejectsEmptyRecordedOption(t *testing.T) {
+	s := NewServer(NewState("run_1", "", 0))
+	if !s.PreparePermissionClaim("rt_1", "req_1", PermissionResolverAutomatic, nil) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+	if !s.MarkPermissionClaimResolved("rt_1", "req_1", "avenor", "", "") {
+		t.Fatal("MarkPermissionClaimResolved returned false")
+	}
+	if resolved, matches := s.ResolvedPermissionMatches("rt_1", "req_1", "", ""); !resolved || matches {
+		t.Fatalf("ResolvedPermissionMatches(\"\", \"\") = (%v, %v), want (true, false)", resolved, matches)
+	}
+	if got := s.DeliverPendingPermission("rt_1", "req_1", "", ""); got != PermissionAnswerAlreadyResolved {
+		t.Fatalf("repeat of empty recorded answer = %v, want AlreadyResolved", got)
+	}
+}
+
 func TestDeliverPendingPermissionRechecksResolutionUnderLock(t *testing.T) {
 	s := NewServer(NewState("run_1", "", 0))
 	if !s.PreparePermissionClaim("rt_1", "req_1", PermissionResolverAutomatic, nil) {
@@ -426,12 +446,53 @@ func TestDeliverPendingPermissionRechecksResolutionUnderLock(t *testing.T) {
 
 func TestDeliverPendingPermissionRaceWithResolution(t *testing.T) {
 	s := NewServer(NewState("run_1", "", 0))
-	if !s.PreparePermissionClaim("rt_1", "req_1", PermissionResolverAutomatic, nil) {
+	// Reserved so delivery is actually reachable: an Automatic claim would
+	// take the default branch and return ResolverOwned, making delivery
+	// (and the race with resolution) unobservable.
+	if !s.PreparePermissionClaim("rt_1", "req_1", PermissionResolverReserved, nil) {
 		t.Fatal("PreparePermissionClaim returned false")
 	}
 
+	// The recorded resolution. Goroutines offer both this answer (matching)
+	// and a mismatching answer so both post-resolution outcomes are exercised.
+	const (
+		matchOption = "allow"
+		wrongOption = "deny"
+	)
+
 	stop := make(chan struct{})
-	var delivered, wrongSame atomic.Int64
+	var (
+		delivered     atomic.Int64 // successful pre-resolution deliveries (<= 1)
+		matchResolved atomic.Int64 // matching answer reported as a conflict (must stay 0)
+		wrongSame     atomic.Int64 // mismatching answer reported as a match (must stay 0)
+	)
+	// Closed once any goroutine observes the pre-resolution state, proving the
+	// race window was entered before the resolution is forced.
+	preResolution := make(chan struct{})
+	var preOnce sync.Once
+
+	// deliver offers one answer and records the pre-resolution observation
+	// (Delivered or ChannelFull) plus the post-resolution Same/Resolved split.
+	// A nil counter is ignored, so only the outcomes a test asserts on are
+	// tracked.
+	deliver := func(optionID string, same, resolved *atomic.Int64) {
+		switch got := s.DeliverPendingPermission("rt_1", "req_1", optionID, ""); got {
+		case PermissionAnswerDelivered:
+			delivered.Add(1)
+			preOnce.Do(func() { close(preResolution) })
+		case PermissionAnswerChannelFull:
+			preOnce.Do(func() { close(preResolution) })
+		case PermissionAnswerAlreadyResolvedSame:
+			if same != nil {
+				same.Add(1)
+			}
+		case PermissionAnswerAlreadyResolved:
+			if resolved != nil {
+				resolved.Add(1)
+			}
+		}
+	}
+
 	var wg sync.WaitGroup
 	for i := 0; i < 4; i++ {
 		wg.Add(1)
@@ -443,30 +504,46 @@ func TestDeliverPendingPermissionRaceWithResolution(t *testing.T) {
 					return
 				default:
 				}
-				switch got := s.DeliverPendingPermission("rt_1", "req_1", "deny", ""); got {
-				case PermissionAnswerDelivered:
-					delivered.Add(1)
-				case PermissionAnswerAlreadyResolvedSame:
-					wrongSame.Add(1)
-				}
+				// The matching answer must never be reported as a conflict; the
+				// mismatching answer must never be reported as a match.
+				deliver(matchOption, nil, &matchResolved)
+				deliver(wrongOption, &wrongSame, nil)
 			}
 		}()
 	}
-	if !s.MarkPermissionClaimResolved("rt_1", "req_1", "avenor", "allow", "") {
+
+	// Wait (with a deadline) for at least one goroutine to observe the
+	// pre-resolution state before forcing the resolution. Without this the
+	// resolution could win the race and the test would be vacuous again.
+	select {
+	case <-preResolution:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no goroutine observed the pre-resolution state within 5 seconds")
+	}
+
+	if !s.MarkPermissionClaimResolved("rt_1", "req_1", "avenor", matchOption, "") {
 		t.Fatal("MarkPermissionClaimResolved returned false")
 	}
 	close(stop)
 	wg.Wait()
-	if got := wrongSame.Load(); got != 0 {
-		t.Fatalf("conflicting answers reported as Same = %d, want 0", got)
-	}
+
+	// Only one delivery can succeed: the first sets answerQueued and later
+	// deliveries observe it and return ChannelFull.
 	if got := delivered.Load(); got > 1 {
-		t.Fatalf("delivered conflicting answers = %d, want at most 1", got)
+		t.Fatalf("delivered = %d, want at most 1", got)
+	}
+	// A matching answer must never be reported as a conflicting resolution,
+	// and a mismatching answer must never be reported as a match.
+	if got := matchResolved.Load(); got != 0 {
+		t.Fatalf("matching answer reported as a conflicting resolution = %d, want 0", got)
+	}
+	if got := wrongSame.Load(); got != 0 {
+		t.Fatalf("mismatching answer reported as a match = %d, want 0", got)
 	}
 	// Once the resolution is recorded, a conflicting answer can never race
 	// into a delivery again.
 	for i := 0; i < 100; i++ {
-		if got := s.DeliverPendingPermission("rt_1", "req_1", "deny", ""); got != PermissionAnswerAlreadyResolved {
+		if got := s.DeliverPendingPermission("rt_1", "req_1", wrongOption, ""); got != PermissionAnswerAlreadyResolved {
 			t.Fatalf("post-resolution delivery = %v, want AlreadyResolved", got)
 		}
 	}
@@ -1529,8 +1606,10 @@ func TestHTTPDebugStatusAndCancel(t *testing.T) {
 		t.Fatalf("cancel ok = %v, want true", cancelResult["ok"])
 	}
 
-	// POST /answer-permission with no pending permission — assert 409
-	req, _ = http.NewRequest(http.MethodPost, "http://"+addr+"/answer-permission", strings.NewReader(`{}`))
+	// POST /answer-permission with no pending permission — assert 409. A
+	// non-empty option_id is required so the request reaches the no-pending
+	// path rather than the empty-option_id validation (400).
+	req, _ = http.NewRequest(http.MethodPost, "http://"+addr+"/answer-permission", strings.NewReader(`{"request_id":"req_none","option_id":"allow"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Avenor-Token", token)
 	resp, err = client.Do(req)

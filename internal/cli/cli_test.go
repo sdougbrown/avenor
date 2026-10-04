@@ -3412,6 +3412,18 @@ func TestControlPermissionResolution(t *testing.T) {
 			t.Fatalf("permission message leaked to event log: %#v", event)
 		}
 	}
+
+	// The control producer recorded the resolution (option + message) at
+	// cli.go:1743. Repeating the same option + message is a match (success),
+	// while the same option with a different message is a conflict. A
+	// regression recording "" for ans.Message would make the same-message
+	// repeat a conflict and the different-message repeat a match.
+	if got := cs.DeliverPendingPermission("", "req_ctrl", "allow_x", "typed response"); got != control.PermissionAnswerAlreadyResolvedSame {
+		t.Fatalf("control repeat same option + same message = %v, want AlreadyResolvedSame", got)
+	}
+	if got := cs.DeliverPendingPermission("", "req_ctrl", "allow_x", "different message"); got != control.PermissionAnswerAlreadyResolved {
+		t.Fatalf("control repeat same option + different message = %v, want AlreadyResolved", got)
+	}
 }
 
 // TestControlPermissionNonLiteralOptionIDMapsByKind verifies that the control
@@ -4655,6 +4667,96 @@ func TestFilePermissionCancelledOutcomeDoesNotError(t *testing.T) {
 	}
 	if provider.answerRequestID != "" {
 		t.Fatalf("AnswerPermission was called for request %q", provider.answerRequestID)
+	}
+}
+
+// TestFilePermissionRepeatComparisonRecordsMessage verifies that the file
+// producer records the resolving option and exact message (cli.go:1859, via
+// Resolution.Message in file.go) so later repeats can be compared. A
+// regression recording "" for res.Message would make the same-message repeat
+// a conflict and the different-message repeat a match.
+func TestFilePermissionRepeatComparisonRecordsMessage(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "perm")
+	fh := permission.NewFileHandler(base)
+	fh.Timeout = 5 * time.Second
+	fh.PollInterval = 20 * time.Millisecond
+
+	// No control client is connected, so the resolver state is File. Prepare
+	// the claim so the file producer's MarkPermissionClaimResolved records the
+	// resolution.
+	cs := control.NewServer(control.NewState("run_file", "label", 0))
+	if !cs.PreparePermissionClaim("", "req_file_rep", control.PermissionResolverFile, []any{
+		map[string]any{"optionId": "deny", "kind": "reject"},
+		map[string]any{"optionId": "allow_f", "kind": "allow", "requiresMessage": true},
+	}) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+
+	reqPath := base + ".req"
+	respPath := base + ".req.response"
+	go func() {
+		pollDeadline := time.Now().Add(5 * time.Second)
+		for {
+			if _, statErr := os.Stat(reqPath); statErr == nil {
+				break
+			}
+			if time.Now().After(pollDeadline) {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		_ = os.WriteFile(respPath, []byte(`{"outcome":"selected","option_id":"allow_f","message":"file note"}`+"\n"), 0o600)
+	}()
+
+	event := events.Event{
+		Event:     "permission.request",
+		SessionID: "ses_file_rep",
+		Fields: map[string]any{
+			"request_id": "req_file_rep",
+			"options": []any{
+				map[string]any{"optionId": "deny", "kind": "reject"},
+				map[string]any{"optionId": "allow_f", "kind": "allow", "requiresMessage": true},
+			},
+		},
+	}
+
+	provider := &cliFakeProvider{}
+	resultCh := make(chan permissionResult, 1)
+	go func() {
+		resultCh <- resolvePermission(context.Background(), provider, fh, cs, event, "ses_file_rep", "", "req_file_rep", false, 0)
+	}()
+
+	var res permissionResult
+	select {
+	case res = <-resultCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("resolvePermission did not return within 10 seconds")
+	}
+
+	if res.err != nil {
+		t.Fatalf("unexpected error: %v", res.err)
+	}
+	if res.source != "file" {
+		t.Fatalf("result source = %q, want \"file\"", res.source)
+	}
+	if res.optionID != "allow_f" {
+		t.Fatalf("optionID = %q, want \"allow_f\"", res.optionID)
+	}
+	// The file handler called provider.AnswerPermission with the message.
+	if provider.answerResponse.Message != "file note" {
+		t.Fatalf("provider.answerResponse.Message = %q, want \"file note\"", provider.answerResponse.Message)
+	}
+
+	// The file producer recorded the resolution (option + message) at
+	// cli.go:1859, via Resolution.Message (file.go). Repeating the same
+	// option + message is a match (success), while the same option with a
+	// different message is a conflict.
+	if got := cs.DeliverPendingPermission("", "req_file_rep", "allow_f", "file note"); got != control.PermissionAnswerAlreadyResolvedSame {
+		t.Fatalf("file repeat same option + same message = %v, want AlreadyResolvedSame", got)
+	}
+	if got := cs.DeliverPendingPermission("", "req_file_rep", "allow_f", "different message"); got != control.PermissionAnswerAlreadyResolved {
+		t.Fatalf("file repeat same option + different message = %v, want AlreadyResolved", got)
 	}
 }
 
