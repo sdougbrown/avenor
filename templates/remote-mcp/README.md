@@ -85,13 +85,17 @@ Allowed Host + token → not 401/403. Write the token to a header file first so 
 
 ```bash
 # macOS:
-( umask 077; printf 'Authorization: Bearer %s\n' "$(cat "$HOME/Library/Application Support/avenor/remote/token")" > /tmp/avenor-auth-header )
+hdr="$(mktemp "${TMPDIR:-/tmp}/avenor-auth-header.XXXXXX")"
+printf 'Authorization: Bearer %s\n' "$(cat "$HOME/Library/Application Support/avenor/remote/token")" > "$hdr"
 # Linux:
-( umask 077; printf 'Authorization: Bearer %s\n' "$(cat /etc/avenor/remote/token)" > /tmp/avenor-auth-header )
+hdr="$(mktemp "${TMPDIR:-/tmp}/avenor-auth-header.XXXXXX")"
+printf 'Authorization: Bearer %s\n' "$(cat /etc/avenor/remote/token)" > "$hdr"
 
-curl -s -o /dev/null -w '%{http_code}\n' -H @/tmp/avenor-auth-header -H 'Host: <host>.<tailnet>.ts.net' http://127.0.0.1:3748/mcp
-rm -f /tmp/avenor-auth-header
+curl -s -o /dev/null -w '%{http_code}\n' -H @"$hdr" -H 'Host: <host>.<tailnet>.ts.net' http://127.0.0.1:3748/mcp
+rm -f "$hdr"
 ```
+
+`mktemp` creates the file 0600 atomically, so a stale or planted `/tmp` path cannot leak the token.
 
 Unlisted Host → 403:
 
