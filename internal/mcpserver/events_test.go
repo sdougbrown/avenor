@@ -22,7 +22,7 @@ func TestReadEventsBasic(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	events, err := readEvents(path, nil, 0)
+	events, _, err := readEvents(path, nil, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +43,7 @@ func TestReadEventsBoundsTerminalPreviewAndMarksIt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	read, err := readEvents(path, nil, 0)
+	read, _, err := readEvents(path, nil, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestReadEventsFilterByType(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	events, err := readEvents(path, []string{"turn"}, 0)
+	events, _, err := readEvents(path, []string{"turn"}, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestReadEventsFilterByEventField(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	events, err := readEvents(path, []string{"lifecycle"}, 0)
+	events, _, err := readEvents(path, []string{"lifecycle"}, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestReadEventsWithLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	events, err := readEvents(path, nil, 10)
+	events, _, err := readEvents(path, nil, 10, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +145,7 @@ func TestReadEventsWithLimit(t *testing.T) {
 }
 
 func TestReadEventsFileNotFound(t *testing.T) {
-	events, err := readEvents("/nonexistent/events.log", nil, 50)
+	events, _, err := readEvents("/nonexistent/events.log", nil, 50, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +165,7 @@ not json
 		t.Fatal(err)
 	}
 
-	events, err := readEvents(path, nil, 0)
+	events, _, err := readEvents(path, nil, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,7 @@ func TestReadEventsEmptyFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	events, err := readEvents(path, nil, 0)
+	events, _, err := readEvents(path, nil, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +202,7 @@ func TestReadEventsFilterWithLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	events, err := readEvents(path, []string{"lifecycle"}, 5)
+	events, _, err := readEvents(path, []string{"lifecycle"}, 5, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,11 +234,201 @@ func TestReadEventsMultiTypeFilter(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	events, err := readEvents(path, []string{"lifecycle", "turn"}, 0)
+	events, _, err := readEvents(path, []string{"lifecycle", "turn"}, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(events) != 4 {
 		t.Fatalf("expected 4 events matching lifecycle or turn, got %d", len(events))
+	}
+}
+
+func TestReadEventsAfterSeqZeroReturnsFromStart(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events-cursor0.log")
+	var lines string
+	for i := 1; i <= 5; i++ {
+		lines += fmt.Sprintf(`{"event":"tick","seq":%d}`+"\n", i)
+	}
+	if err := os.WriteFile(path, []byte(lines), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cursor := int64(0)
+	events, latestSeq, err := readEvents(path, nil, 0, &cursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 5 {
+		t.Fatalf("expected 5 events from cursor 0, got %d", len(events))
+	}
+	first, _ := events[0]["seq"].(float64)
+	if first != 1 {
+		t.Errorf("expected first event seq=1 (oldest-first), got %v", first)
+	}
+	last, _ := events[4]["seq"].(float64)
+	if last != 5 {
+		t.Errorf("expected last event seq=5, got %v", last)
+	}
+	if latestSeq != 5 {
+		t.Errorf("expected latest_seq=5, got %d", latestSeq)
+	}
+}
+
+func TestReadEventsCursorPagesOldestFirst(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events-page.log")
+	var lines string
+	for i := 1; i <= 10; i++ {
+		lines += fmt.Sprintf(`{"event":"tick","seq":%d}`+"\n", i)
+	}
+	if err := os.WriteFile(path, []byte(lines), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cursor := int64(3)
+	events, latestSeq, err := readEvents(path, nil, 4, &cursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 4 {
+		t.Fatalf("expected 4 events, got %d", len(events))
+	}
+	want := []float64{4, 5, 6, 7}
+	for i, e := range events {
+		seq, _ := e["seq"].(float64)
+		if seq != want[i] {
+			t.Errorf("event %d seq = %v, want %v (oldest-first page)", i, seq, want[i])
+		}
+	}
+	if latestSeq != 7 {
+		t.Errorf("expected latest_seq=7, got %d", latestSeq)
+	}
+}
+
+func TestReadEventsEmptyPageReturnsCursor(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events-beyond.log")
+	var lines string
+	for i := 1; i <= 5; i++ {
+		lines += fmt.Sprintf(`{"event":"tick","seq":%d}`+"\n", i)
+	}
+	if err := os.WriteFile(path, []byte(lines), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cursor := int64(99)
+	events, latestSeq, err := readEvents(path, nil, 10, &cursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("expected 0 events beyond the end, got %d", len(events))
+	}
+	if latestSeq != 99 {
+		t.Errorf("expected latest_seq=99 (the cursor), got %d", latestSeq)
+	}
+}
+
+func TestReadEventsCursorDropsEventsWithoutSeq(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events-noseq.log")
+	content := `{"event":"a","seq":1}
+{"event":"b"}
+{"event":"c","seq":2}
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cursor := int64(0)
+	events, latestSeq, err := readEvents(path, nil, 0, &cursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected 2 seq-carrying events with cursor, got %d", len(events))
+	}
+	if latestSeq != 2 {
+		t.Errorf("expected latest_seq=2 with cursor, got %d", latestSeq)
+	}
+
+	all, latestAll, err := readEvents(path, nil, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("expected 3 events without cursor (seq-less included), got %d", len(all))
+	}
+	if latestAll != 2 {
+		t.Errorf("expected latest_seq=2 without cursor, got %d", latestAll)
+	}
+}
+
+func TestReadEventsRepeatedPagingCoversLogExactlyOnce(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events-resume.log")
+	var lines string
+	for i := 1; i <= 10; i++ {
+		lines += fmt.Sprintf(`{"event":"tick","seq":%d}`+"\n", i)
+	}
+	if err := os.WriteFile(path, []byte(lines), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	seen := map[int64]int{}
+	cursor := int64(0)
+	for page := 0; page < 100; page++ {
+		events, latestSeq, err := readEvents(path, nil, 3, &cursor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(events) == 0 {
+			if latestSeq != cursor {
+				t.Fatalf("empty page latest_seq = %d, want cursor %d", latestSeq, cursor)
+			}
+			break
+		}
+		for _, e := range events {
+			seq, _ := e["seq"].(float64)
+			seen[int64(seq)]++
+		}
+		if latestSeq <= cursor {
+			t.Fatalf("latest_seq %d did not advance past cursor %d", latestSeq, cursor)
+		}
+		cursor = latestSeq
+	}
+	if len(seen) != 10 {
+		t.Fatalf("expected 10 distinct seqs, got %d", len(seen))
+	}
+	for i := int64(1); i <= 10; i++ {
+		if seen[i] != 1 {
+			t.Errorf("seq %d seen %d times, want exactly once", i, seen[i])
+		}
+	}
+}
+
+func TestReadEventsMissingFileWithCursor(t *testing.T) {
+	cursor := int64(42)
+	events, latestSeq, err := readEvents("/nonexistent/events.log", nil, 50, &cursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("expected empty events for missing file with cursor, got %v", events)
+	}
+	if latestSeq != 42 {
+		t.Errorf("expected latest_seq=42 (the cursor) for missing file, got %d", latestSeq)
+	}
+
+	events, latestSeq, err = readEvents("/nonexistent/events.log", nil, 50, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if events != nil {
+		t.Fatalf("expected nil events for missing file, got %v", events)
+	}
+	if latestSeq != 0 {
+		t.Errorf("expected latest_seq=0 for missing file, got %d", latestSeq)
 	}
 }

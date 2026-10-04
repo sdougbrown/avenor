@@ -163,6 +163,7 @@ type eventsArgs struct {
 	RunID        string   `json:"run_id" jsonschema:"required run ID or label"`
 	Types        []string `json:"types,omitempty" jsonschema:"optional event types to filter by"`
 	Limit        int      `json:"limit,omitempty" jsonschema:"optional max events to return (default 50)"`
+	AfterSeq     *int64   `json:"after_seq,omitempty" jsonschema:"optional sequence cursor: return only events with seq > after_seq, oldest-first"`
 	SupervisorID string   `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
 }
 
@@ -1053,7 +1054,7 @@ func (s *Server) handleAvenorEvents(ctx context.Context, req *mcp.CallToolReques
 		limit = 50
 	}
 
-	events, err := readEvents(ri.EventLogPath, args.Types, limit)
+	events, latestSeq, err := readEvents(ri.EventLogPath, args.Types, limit, args.AfterSeq)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read events: %w", err)
 	}
@@ -1061,7 +1062,7 @@ func (s *Server) handleAvenorEvents(ctx context.Context, req *mcp.CallToolReques
 		events = []map[string]any{}
 	}
 
-	return nil, map[string]any{"events": events}, nil
+	return nil, map[string]any{"events": events, "latest_seq": latestSeq}, nil
 }
 
 func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequest, args followUpArgs) (*mcp.CallToolResult, any, error) {

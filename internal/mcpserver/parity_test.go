@@ -125,8 +125,8 @@ func TestSchemaFieldParity(t *testing.T) {
 
 	t.Run("avenor_events", func(t *testing.T) {
 		// eventsArgs — required: run_id
-		// optional: types, limit, supervisor_id
-		allowed := []string{"run_id", "types", "limit", "supervisor_id"}
+		// optional: types, limit, after_seq, supervisor_id
+		allowed := []string{"run_id", "types", "limit", "after_seq", "supervisor_id"}
 		required := []string{"run_id"}
 		assertFields(t, "eventsArgs", allowed, required)
 	})
