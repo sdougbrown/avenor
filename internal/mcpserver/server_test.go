@@ -73,6 +73,7 @@ type fakeClient struct {
 	spawnCapturedParams      map[string]any
 	answerPermissionCalls    []permissionCall
 	closeCalls               int
+	closed                   bool
 	statusCapturedRuntimeIDs []string
 	resultCapturedRuntimeIDs []string
 
@@ -176,6 +177,8 @@ func (f *fakeClient) Close() error {
 	return nil
 }
 
+func (f *fakeClient) Closed() bool { return f.closed }
+
 func (f *fakeClient) WorkflowStatus(workflowID string) (map[string]any, error) {
 	f.workflowStatusCalls = append(f.workflowStatusCalls, workflowID)
 	return f.workflowStatusResult, f.workflowStatusErr
@@ -227,6 +230,7 @@ func (c *spawnCountingClient) Spawn(map[string]any) (map[string]any, error) {
 }
 func (c *spawnCountingClient) Shutdown(string) error                         { return nil }
 func (c *spawnCountingClient) Close() error                                  { return nil }
+func (c *spawnCountingClient) Closed() bool                                  { return false }
 func (c *spawnCountingClient) AnswerPermission(string, string, string) error { return nil }
 func (c *spawnCountingClient) WorkflowStatus(string) (map[string]any, error) { return nil, nil }
 func (c *spawnCountingClient) WorkflowWait(string, time.Duration) (map[string]any, error) {

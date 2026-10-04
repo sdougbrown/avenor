@@ -31,6 +31,7 @@ type ControlClient interface {
 	Spawn(params map[string]any) (map[string]any, error)
 	Shutdown(mode string) error
 	Close() error
+	Closed() bool
 	AnswerPermission(runtimeID, requestID, optionID string) error
 	WorkflowStatus(workflowID string) (map[string]any, error)
 	WorkflowWait(workflowID string, timeout time.Duration) (map[string]any, error)

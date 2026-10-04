@@ -184,6 +184,7 @@ func (s *stubControlClient) List() ([]map[string]any, error)                    
 func (s *stubControlClient) Spawn(params map[string]any) (map[string]any, error) { return nil, nil }
 func (s *stubControlClient) Shutdown(mode string) error                          { return nil }
 func (s *stubControlClient) Close() error                                        { return nil }
+func (s *stubControlClient) Closed() bool                                        { return false }
 func (s *stubControlClient) AnswerPermission(runtimeID, requestID, optionID string) error {
 	return nil
 }

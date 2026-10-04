@@ -1038,3 +1038,59 @@ func TestWaitTurnIndefiniteTimeoutPinsWireParams(t *testing.T) {
 		t.Fatal("indefinite wait never unblocked after the settle was delivered")
 	}
 }
+
+func TestClientClosedOnServerDisconnect(t *testing.T) {
+	path := filepath.Join(os.TempDir(), "avc-client-closed-"+time.Now().Format("150405.000000")+".sock")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { ln.Close(); os.Remove(path) }()
+
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			close(accepted)
+			return
+		}
+		accepted <- conn
+	}()
+
+	c, err := Dial(path)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer c.Close()
+
+	select {
+	case conn, ok := <-accepted:
+		if !ok {
+			t.Fatal("server failed to accept the connection")
+		}
+		// The supervisor side drops the connection.
+		conn.Close()
+	case <-time.After(5 * time.Second):
+		t.Fatal("server never accepted the connection")
+	}
+
+	// readLoop observes the EOF and marks the client closed; poll with a
+	// deadline rather than sleeping a fixed interval.
+	deadline := time.Now().Add(5 * time.Second)
+	for !c.Closed() {
+		if time.Now().After(deadline) {
+			t.Fatal("Closed() never became true after server disconnect")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// A new Call after close must fail immediately (no 30s wait): the
+	// immediate-error path means the error is returned synchronously.
+	err = c.Call("status", nil, nil)
+	if err == nil {
+		t.Fatal("expected Call after close to fail")
+	}
+	if !strings.Contains(err.Error(), "connection closed") {
+		t.Fatalf("expected connection-closed error, got: %v", err)
+	}
+}
