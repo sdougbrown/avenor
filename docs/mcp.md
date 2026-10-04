@@ -221,7 +221,7 @@ The MCP server redials an explicit supervisor socket (`--supervisor-socket`) whe
 - Poll `avenor_events` with `after_seq` starting at `0`, feeding back `latest_seq` to page forward.
 - A clamped wait returns `wait_clamped: true`; treat it as "poll again".
 
-For the full deployment walkthrough — service units, token generation, Tailscale exposure, and smoke tests — see `templates/remote-mcp/README.md` in the repository.
+For the full deployment walkthrough — service units, token generation, Tailscale exposure, containerized clients (Docker), and smoke tests — see `templates/remote-mcp/README.md` in the repository.
 
 ## Tools
 

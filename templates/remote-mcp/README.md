@@ -76,6 +76,20 @@ systemctl enable --now avenor-mcp.service
 tailscale serve --bg --https=443 http://127.0.0.1:3748
 ```
 
+## Containerized clients (Docker)
+
+The server side of this deployment stays on the host; a containerized agent is just another MCP client of the HTTP endpoint. Nothing in the setup is Tailscale-specific — the client needs network reachability, the bearer token, and the client contract below.
+
+- **Docker Desktop (macOS/Windows):** services bound to the host loopback are reachable from containers at `host.docker.internal`. Keep `--addr 127.0.0.1:3748` and add `--allowed-host host.docker.internal` (repeatable — combine it with your tailnet hostname).
+- **Linux, bridge network:** containers reach the host gateway (default `172.17.0.1`), so the server must listen on that interface: `--addr 172.17.0.1:3748 --allowed-host 172.17.0.1`. Or run the client with `--network host`, which shares the host network stack and leaves `127.0.0.1:3748` working unchanged.
+- **Tailscale in the container** (sidecar or userspace mode): the server host's MagicDNS name works like any tailnet client, and `tailscale serve` already fronts the endpoint with TLS.
+
+Supply the token to the container by mounting the token file read-only (`-v /etc/avenor/remote/token:/token:ro`) and sending `Authorization: Bearer $(cat /token)`.
+
+Security notes: the Docker bridge is host-local but not user-isolated — keep the bearer token enabled even on the bridge, and prefer the narrowest bind address over `0.0.0.0`. `--allowed-host` still runs before authentication, so unlisted hosts are rejected before any token check.
+
+What does not change: the control socket stays a host-side Unix socket (the container never needs it), the wait budget is approximate, and the client contract below applies identically to containerized clients.
+
 ## Smoke test
 
 Allowed Host, no token → 401:
