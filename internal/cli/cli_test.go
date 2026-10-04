@@ -4101,6 +4101,68 @@ func TestPermissionRequestRejectsExistingNoResolverBeforePublishing(t *testing.T
 	}
 }
 
+// TestAutoApprovedResolutionAcceptsMatchingManualAnswer verifies that the
+// auto-approve producer records the chosen option, a matching manual repeat
+// succeeds, and a conflicting one is rejected.
+func TestAutoApprovedResolutionAcceptsMatchingManualAnswer(t *testing.T) {
+	cs := control.NewServer(control.NewState("run_1", "", 0))
+	socketPath := shortControlSocketPath(t)
+	if err := cs.Start(socketPath); err != nil {
+		t.Fatalf("start control server: %v", err)
+	}
+	defer cs.Stop()
+
+	event := events.Event{
+		Event:     "permission.request",
+		SessionID: "ses_auto",
+		Fields: map[string]any{
+			"request_id": "req_auto",
+			"options": []any{
+				map[string]any{"optionId": "allow_it", "kind": "allow"},
+				map[string]any{"optionId": "deny_it", "kind": "reject"},
+			},
+		},
+	}
+	resultCh := make(chan permissionResult, 1)
+	// The caller (WaitForSession) prepares the claim before resolving.
+	if !cs.PreparePermissionClaim("rt_1", "req_auto", control.PermissionResolverAutomatic, nil) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+	go func() {
+		resultCh <- resolvePermission(context.Background(), &cliFakeProvider{}, nil, cs, event, "ses_auto", "rt_1", "req_auto", true, 0)
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for cs.PermissionResolverState("rt_1", "req_auto") != control.PermissionResolverResolved {
+		if time.Now().After(deadline) {
+			t.Fatal("auto-approve resolution was not recorded")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if !cs.AnswerPendingPermission("rt_1", "req_auto", "allow_it", "") {
+		t.Fatal("matching repeat after auto-approve was rejected")
+	}
+	if cs.AnswerPendingPermission("rt_1", "req_auto", "deny_it", "") {
+		t.Fatal("conflicting repeat after auto-approve was accepted")
+	}
+	if cs.AnswerPendingPermission("rt_1", "req_auto", "allow_it", "different note") {
+		t.Fatal("repeat with different message after auto-approve was accepted")
+	}
+
+	select {
+	case res := <-resultCh:
+		if res.err != nil {
+			t.Fatalf("resolvePermission error: %v", res.err)
+		}
+		if res.source != "avenor" || res.optionID != "allow_it" {
+			t.Fatalf("result = %+v, want avenor/allow_it", res)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("resolvePermission did not return")
+	}
+}
+
 // TestControlPermissionClaimDisconnectFallsThrough verifies that when a
 // client is connected at the HasClients() gate but never sends
 // answer_permission, resolvePermission falls through to the file-handler (or

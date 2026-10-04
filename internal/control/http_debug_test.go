@@ -898,22 +898,22 @@ func TestHTTPAnswerPermissionNoResolver(t *testing.T) {
 	}
 }
 
-func TestHTTPAnswerPermissionAlreadyResolvedIsAccepted(t *testing.T) {
+func TestHTTPAnswerPermissionAlreadyResolved(t *testing.T) {
 	ctrl := NewServer(NewState("run_cli", "", 0))
 	if !ctrl.PreparePermissionClaim("", "req_done", PermissionResolverAutomatic, nil) {
 		t.Fatal("PreparePermissionClaim returned false")
 	}
-	if !ctrl.MarkPermissionClaimResolved("", "req_done", "avenor") {
+	if !ctrl.MarkPermissionClaimResolved("", "req_done", "avenor", "allow", "") {
 		t.Fatal("MarkPermissionClaimResolved returned false")
 	}
 	_, addr, token := startDebugServer(t, ctrl, nil)
 	client := &http.Client{Timeout: 2 * time.Second}
 
-	body := `{"request_id":"req_done","option_id":"stale","message":""}`
+	body := `{"request_id":"req_done","option_id":"allow","message":""}`
 	resp := authedPostBody(t, client, "http://"+addr+"/answer-permission", token, body)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("POST /answer-permission (resolved): %d, want 200", resp.StatusCode)
+		t.Fatalf("POST /answer-permission (same repeat): %d, want 200", resp.StatusCode)
 	}
 	var result map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -921,6 +921,39 @@ func TestHTTPAnswerPermissionAlreadyResolvedIsAccepted(t *testing.T) {
 	}
 	if result["accepted"] != true {
 		t.Fatalf("response = %#v, want accepted=true", result)
+	}
+}
+
+func TestHTTPAnswerPermissionConflictingRepeatIsRejected(t *testing.T) {
+	ctrl := NewServer(NewState("run_cli", "", 0))
+	if !ctrl.PreparePermissionClaim("", "req_done", PermissionResolverAutomatic, nil) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+	if !ctrl.MarkPermissionClaimResolved("", "req_done", "avenor", "allow", "") {
+		t.Fatal("MarkPermissionClaimResolved returned false")
+	}
+	_, addr, token := startDebugServer(t, ctrl, nil)
+	client := &http.Client{Timeout: 2 * time.Second}
+
+	for _, tt := range []struct {
+		name string
+		body string
+	}{
+		{name: "different option", body: `{"request_id":"req_done","option_id":"deny","message":""}`},
+		{name: "same option different message", body: `{"request_id":"req_done","option_id":"allow","message":"different note"}`},
+	} {
+		resp := authedPostBody(t, client, "http://"+addr+"/answer-permission", token, tt.body)
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusConflict {
+			t.Fatalf("POST /answer-permission (%s): %d, want 409", tt.name, resp.StatusCode)
+		}
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read %s response: %v", tt.name, err)
+		}
+		if !strings.Contains(string(body), "permission request already resolved") {
+			t.Fatalf("%s response body = %q, want 'permission request already resolved'", tt.name, string(body))
+		}
 	}
 }
 

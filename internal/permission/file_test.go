@@ -99,7 +99,7 @@ func TestFileHandlerRoundTrip(t *testing.T) {
 		t.Fatalf("request = %+v", request)
 	}
 
-	response := []byte(`{"outcome":"selected","option_id":"allow_fh"}`)
+	response := []byte(`{"outcome":"selected","option_id":"allow_fh","message":"approved with caveat"}`)
 	if err := os.WriteFile(reqPath+".response", response, 0o600); err != nil {
 		t.Fatalf("write response: %v", err)
 	}
@@ -122,10 +122,16 @@ func TestFileHandlerRoundTrip(t *testing.T) {
 	if provider.response.OptionID != "allow_fh" {
 		t.Fatalf("response.OptionID = %q, want allow_fh", provider.response.OptionID)
 	}
+	if provider.response.Message != "approved with caveat" {
+		t.Fatalf("response.Message = %q, want 'approved with caveat'", provider.response.Message)
+	}
 	select {
 	case res := <-resolved:
 		if res.RequestID != "42" || res.OptionID != "allow_fh" {
 			t.Fatalf("resolution = %+v", res)
+		}
+		if res.Message != "approved with caveat" {
+			t.Fatalf("resolution.Message = %q, want 'approved with caveat'", res.Message)
 		}
 	default:
 		t.Fatal("missing resolution")
@@ -184,6 +190,9 @@ func TestFileHandlerCancelledOutcomeDoesNotAnswerPermission(t *testing.T) {
 		}
 		if !got.res.Cancelled {
 			t.Fatalf("Resolution.Cancelled = false, want true: %+v", got.res)
+		}
+		if got.res.Message != "" {
+			t.Fatalf("cancelled Resolution.Message = %q, want empty", got.res.Message)
 		}
 		if provider.requestID != "" {
 			t.Fatalf("AnswerPermission was called for request %q", provider.requestID)

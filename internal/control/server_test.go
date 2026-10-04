@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -278,7 +279,7 @@ func TestOwnerRejectionForMutatingMethods(t *testing.T) {
 	}
 }
 
-func TestJSONAnswerPermissionAlreadyResolvedIsAccepted(t *testing.T) {
+func TestJSONAnswerPermissionSameRepeatIsAccepted(t *testing.T) {
 	s := NewServer(NewState("run_1", "", 0))
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
@@ -288,21 +289,59 @@ func TestJSONAnswerPermissionAlreadyResolvedIsAccepted(t *testing.T) {
 	if !s.PreparePermissionClaim("", "req_done", PermissionResolverAutomatic, nil) {
 		t.Fatal("PreparePermissionClaim returned false")
 	}
-	if !s.MarkPermissionClaimResolved("", "req_done", "avenor") {
+	if !s.MarkPermissionClaimResolved("", "req_done", "avenor", "allow", "") {
 		t.Fatal("MarkPermissionClaimResolved returned false")
 	}
 
 	conn := mustDial(t, path)
 	defer conn.Close()
-	params, _ := json.Marshal(PermissionAnswer{RequestID: "req_done", OptionID: "stale"})
+	params, _ := json.Marshal(PermissionAnswer{RequestID: "req_done", OptionID: "allow"})
 	_ = writeReq(t, conn, Request{JSONRPC: "2.0", ID: 1, Method: "answer_permission", Params: params})
 	response := readResp(t, conn)
 	if response.Error != nil {
-		t.Fatalf("resolved answer returned error: %+v", response.Error)
+		t.Fatalf("same repeat returned error: %+v", response.Error)
 	}
 	result, ok := response.Result.(map[string]any)
 	if !ok || result["accepted"] != true {
-		t.Fatalf("resolved answer result = %#v, want accepted=true", response.Result)
+		t.Fatalf("same repeat result = %#v, want accepted=true", response.Result)
+	}
+}
+
+func TestJSONAnswerPermissionConflictingRepeatIsRejected(t *testing.T) {
+	s := NewServer(NewState("run_1", "", 0))
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+	if !s.PreparePermissionClaim("", "req_done", PermissionResolverAutomatic, nil) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+	if !s.MarkPermissionClaimResolved("", "req_done", "avenor", "allow", "") {
+		t.Fatal("MarkPermissionClaimResolved returned false")
+	}
+
+	conn := mustDial(t, path)
+	defer conn.Close()
+	for _, tt := range []struct {
+		name   string
+		answer PermissionAnswer
+	}{
+		{name: "different option", answer: PermissionAnswer{RequestID: "req_done", OptionID: "deny"}},
+		{name: "same option different message", answer: PermissionAnswer{RequestID: "req_done", OptionID: "allow", Message: "different note"}},
+	} {
+		params, err := json.Marshal(tt.answer)
+		if err != nil {
+			t.Fatalf("marshal %s: %v", tt.name, err)
+		}
+		_ = writeReq(t, conn, Request{JSONRPC: "2.0", ID: 1, Method: "answer_permission", Params: params})
+		response := readResp(t, conn)
+		if response.Error == nil {
+			t.Fatalf("%s: conflicting repeat accepted: %+v", tt.name, response)
+		}
+		if response.Error.Code != -32001 || response.Error.Message != "permission request already resolved" {
+			t.Fatalf("%s: error = %+v, want -32001 permission request already resolved", tt.name, response.Error)
+		}
 	}
 }
 
@@ -337,7 +376,7 @@ func TestMarkPermissionClaimResolvedRetainsTombstone(t *testing.T) {
 	}) {
 		t.Fatal("PreparePermissionClaim returned false")
 	}
-	if !s.MarkPermissionClaimResolved("rt_1", "req_1", "avenor") {
+	if !s.MarkPermissionClaimResolved("rt_1", "req_1", "avenor", "", "") {
 		t.Fatal("MarkPermissionClaimResolved returned false")
 	}
 	if got := s.PermissionResolverState("rt_1", "req_1"); got != PermissionResolverResolved {
@@ -352,11 +391,84 @@ func TestMarkPermissionClaimResolvedRetainsTombstone(t *testing.T) {
 	if got := s.DeliverPendingPermission("rt_1", "req_1", "missing", ""); got != PermissionAnswerAlreadyResolved {
 		t.Fatalf("late delivery = %v, want already-resolved", got)
 	}
-	if !s.AnswerPendingPermission("rt_1", "req_1", "missing", "") {
-		t.Fatal("AnswerPendingPermission rejected an already-resolved claim")
+	if s.AnswerPendingPermission("rt_1", "req_1", "missing", "") {
+		t.Fatal("AnswerPendingPermission accepted a conflicting answer for a resolved claim")
 	}
 	if got := s.DeliverPendingPermission("rt_1", "missing", "allow", ""); got != PermissionAnswerNotFound {
 		t.Fatalf("unknown delivery = %v, want not-found", got)
+	}
+}
+
+func TestDeliverPendingPermissionRechecksResolutionUnderLock(t *testing.T) {
+	s := NewServer(NewState("run_1", "", 0))
+	if !s.PreparePermissionClaim("rt_1", "req_1", PermissionResolverAutomatic, nil) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+
+	// The standalone early check runs before the claim resolves.
+	if resolved, matches := s.ResolvedPermissionMatches("rt_1", "req_1", "deny", ""); resolved || matches {
+		t.Fatalf("early check = (%v, %v), want (false, false) for a pending claim", resolved, matches)
+	}
+
+	// The claim resolves between the early comparison and the delivery with a
+	// different answer. DeliverPendingPermission rechecks under the same lock,
+	// so the conflict must win over the delivery.
+	if !s.MarkPermissionClaimResolved("rt_1", "req_1", "avenor", "allow", "") {
+		t.Fatal("MarkPermissionClaimResolved returned false")
+	}
+	if got := s.DeliverPendingPermission("rt_1", "req_1", "deny", ""); got != PermissionAnswerAlreadyResolved {
+		t.Fatalf("conflicting delivery after race = %v, want AlreadyResolved", got)
+	}
+	if got := s.DeliverPendingPermission("rt_1", "req_1", "allow", ""); got != PermissionAnswerAlreadyResolvedSame {
+		t.Fatalf("matching delivery after race = %v, want AlreadyResolvedSame", got)
+	}
+}
+
+func TestDeliverPendingPermissionRaceWithResolution(t *testing.T) {
+	s := NewServer(NewState("run_1", "", 0))
+	if !s.PreparePermissionClaim("rt_1", "req_1", PermissionResolverAutomatic, nil) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+
+	stop := make(chan struct{})
+	var delivered, wrongSame atomic.Int64
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				switch got := s.DeliverPendingPermission("rt_1", "req_1", "deny", ""); got {
+				case PermissionAnswerDelivered:
+					delivered.Add(1)
+				case PermissionAnswerAlreadyResolvedSame:
+					wrongSame.Add(1)
+				}
+			}
+		}()
+	}
+	if !s.MarkPermissionClaimResolved("rt_1", "req_1", "avenor", "allow", "") {
+		t.Fatal("MarkPermissionClaimResolved returned false")
+	}
+	close(stop)
+	wg.Wait()
+	if got := wrongSame.Load(); got != 0 {
+		t.Fatalf("conflicting answers reported as Same = %d, want 0", got)
+	}
+	if got := delivered.Load(); got > 1 {
+		t.Fatalf("delivered conflicting answers = %d, want at most 1", got)
+	}
+	// Once the resolution is recorded, a conflicting answer can never race
+	// into a delivery again.
+	for i := 0; i < 100; i++ {
+		if got := s.DeliverPendingPermission("rt_1", "req_1", "deny", ""); got != PermissionAnswerAlreadyResolved {
+			t.Fatalf("post-resolution delivery = %v, want AlreadyResolved", got)
+		}
 	}
 }
 
@@ -370,7 +482,7 @@ func TestMarkPermissionClaimResolvedDoubleClose(t *testing.T) {
 	close(s.pendingClaims[permissionClaimKey{scope: "rt_1", requestID: "req_1"}].disconnectCh)
 	s.pendingMu.Unlock()
 
-	if !s.MarkPermissionClaimResolved("rt_1", "req_1", "disconnect") {
+	if !s.MarkPermissionClaimResolved("rt_1", "req_1", "disconnect", "", "") {
 		t.Fatal("MarkPermissionClaimResolved returned false")
 	}
 }
@@ -389,7 +501,7 @@ func TestMarkPermissionClaimResolvedConcurrent(t *testing.T) {
 	results := make(chan bool, callers)
 	for range callers {
 		go func() {
-			results <- s.MarkPermissionClaimResolved("rt_1", "req_1", "concurrent")
+			results <- s.MarkPermissionClaimResolved("rt_1", "req_1", "concurrent", "", "")
 		}()
 	}
 	for range callers {
@@ -420,7 +532,7 @@ func TestPreparePermissionClaimReplacesResolvedTombstone(t *testing.T) {
 	if !s.PreparePermissionClaim("rt_1", "req_1", PermissionResolverAutomatic, nil) {
 		t.Fatal("initial PreparePermissionClaim returned false")
 	}
-	if !s.MarkPermissionClaimResolved("rt_1", "req_1", "avenor") {
+	if !s.MarkPermissionClaimResolved("rt_1", "req_1", "avenor", "", "") {
 		t.Fatal("MarkPermissionClaimResolved returned false")
 	}
 	if !s.PreparePermissionClaim("rt_1", "req_1", PermissionResolverFile, nil) {
@@ -457,7 +569,7 @@ func TestPreparePermissionClaimWaitsForDirectCompletionBeforeReusedID(t *testing
 		prepared <- s.PreparePermissionClaimAfterDirectDelivery(context.Background(), "rt_1", "reused", PermissionResolverFile, nil)
 	}()
 	<-waiting
-	if !s.MarkPermissionClaimResolved("rt_1", "reused", "direct") {
+	if !s.MarkPermissionClaimResolved("rt_1", "reused", "direct", "", "") {
 		t.Fatal("direct provider completion did not resolve claim")
 	}
 	close(releaseWait)
@@ -559,7 +671,7 @@ func TestPermissionClaimsCreatedWithoutClientsSignalDisconnect(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatal("replacement did not begin waiting for direct completion")
 		}
-		if !s.MarkPermissionClaimResolved("rt_1", "reused", "direct") {
+		if !s.MarkPermissionClaimResolved("rt_1", "reused", "direct", "", "") {
 			t.Fatal("direct provider completion did not resolve claim")
 		}
 		select {
@@ -624,7 +736,7 @@ func TestPreparePermissionClaimAfterDirectDeliveryCancellation(t *testing.T) {
 	if got := s.PermissionResolverState("rt_1", "reused"); got != PermissionResolverDirectDelivery {
 		t.Fatalf("resolver state after cancellation = %v, want direct-delivery", got)
 	}
-	if !s.MarkPermissionClaimResolved("rt_1", "reused", "direct") {
+	if !s.MarkPermissionClaimResolved("rt_1", "reused", "direct", "", "") {
 		t.Fatal("direct provider completion did not resolve claim")
 	}
 }
@@ -841,7 +953,7 @@ func TestPreparePermissionClaimRejectsExistingNoResolver(t *testing.T) {
 func TestClearPermissionClaimsRemovesOnlyRequestedScope(t *testing.T) {
 	s := NewServer(NewState("run_1", "", 0))
 	s.PreparePermissionClaim("rt_1", "0", PermissionResolverFile, nil)
-	s.MarkPermissionClaimResolved("rt_1", "0", "file")
+	s.MarkPermissionClaimResolved("rt_1", "0", "file", "", "")
 	s.PreparePermissionClaim("rt_2", "0", PermissionResolverFile, nil)
 	s.ClearPermissionClaims("rt_1")
 	if got := s.PermissionResolverState("rt_1", "0"); got != PermissionResolverUnknown {
