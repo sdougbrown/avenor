@@ -1,0 +1,25 @@
+# Avenor MCP HTTP server (systemd, Linux).
+#
+# Placeholders to edit:
+#   - binary path: /usr/local/bin/avenor (edit if avenor lives elsewhere)
+#   - supervisor socket path: %S/avenor/remote/stable.sock (must match the
+#     stable supervisor's --control-socket)
+#   - token path: /etc/avenor/remote/token (the <config> directory; create it
+#     with openssl rand -hex 32 and chmod 600)
+#   - allowed host: <host>.<tailnet>.ts.net (this host's tailnet name)
+#
+# Ordering is NOT required: the MCP server dials the supervisor socket
+# lazily and recovers when the supervisor comes back. After= is only for
+# tidiness.
+
+[Unit]
+Description=Avenor MCP HTTP server (remote)
+After=avenor-stable.service
+
+[Service]
+ExecStart=/usr/local/bin/avenor mcp --transport http --addr 127.0.0.1:3748 --supervisor-socket %S/avenor/remote/stable.sock --no-autostart --auth-token-file /etc/avenor/remote/token --allowed-host <host>.<tailnet>.ts.net
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

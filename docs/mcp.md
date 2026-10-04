@@ -197,6 +197,31 @@ avenor mcp --supervisor-socket /tmp/avenor-stable.sock --no-autostart
 | `--supervisor-socket` | none | Existing supervisor socket to connect to |
 | `--no-autostart` | `false` | Require an existing supervisor |
 | `--idle-timeout` | `30m` | Idle timeout for the autostarted child supervisor |
+| `--allowed-host` | none | Exact hostname (case-insensitive) allowed to connect over HTTP; repeatable; loopback is always allowed |
+| `--max-wait` | `25s` (http) / `0` (stdio) | Approximate polling budget for blocking tools; an explicit `0` disables the clamp |
+| `--auth-token-file` | none | Mode-0600 token file; precedence flag > file > `MCP_AUTH_TOKEN`; conflicts with `--auth-token` |
+
+## Remote access over a tailnet
+
+To serve remote MCP clients over a tailnet, run `avenor mcp --transport http` with an auth token and an allowed host, backed by a durable `avenor stable` supervisor. The control socket stays Unix-only; the HTTP endpoint is the only network surface.
+
+### Flags
+
+- `--allowed-host` — exact hostname allowed to connect, case-insensitive. Repeatable. Loopback is always allowed. HTTP-only: stdio has no host check.
+- `--max-wait` — approximate polling budget for blocking tools. Defaults to 25s for HTTP and 0 (unclamped) for stdio; an explicit `0` disables the clamp.
+- `--auth-token-file` — path to a mode-0600 token file. Precedence: `--auth-token` flag > `--auth-token-file` > `MCP_AUTH_TOKEN`. Conflicts with `--auth-token`.
+
+### Reconnect behavior
+
+The MCP server redials an explicit supervisor socket (`--supervisor-socket`) when the connection dies. Startup order between the two processes does not matter: the MCP server recovers when the supervisor comes back.
+
+### Client-side reliability
+
+- Send `idempotency_key` on `avenor_spawn` and `avenor_follow_up` so retries never double-spawn. Reusing a key with different parameters fails with `-32602`; exhausting the supervisor's idempotency capacity fails with `-32030`.
+- Poll `avenor_events` with `after_seq` starting at `0`, feeding back `latest_seq` to page forward.
+- A clamped wait returns `wait_clamped: true`; treat it as "poll again".
+
+For the full deployment walkthrough — service units, token generation, Tailscale exposure, and smoke tests — see [templates/remote-mcp/README.md](../templates/remote-mcp/README.md).
 
 ## Tools
 

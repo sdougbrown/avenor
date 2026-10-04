@@ -1,0 +1,23 @@
+# Durable Avenor stable supervisor (systemd, Linux).
+#
+# Placeholders to edit:
+#   - binary path: /usr/local/bin/avenor (edit if avenor lives elsewhere)
+#   - socket path: %S/avenor/remote/stable.sock (%S is the state directory,
+#     usually /var/lib; use a literal path like /var/lib/avenor/remote/stable.sock
+#     if you prefer)
+#   - capacity numbers: --max-runtimes 16, --max-tree-budget 64,
+#     --idempotency-capacity 1024 (raise deliberately for a busy remote host)
+#
+# The socket's directory must exist before the service starts:
+#   mkdir -p /var/lib/avenor/remote
+
+[Unit]
+Description=Avenor stable supervisor (durable)
+
+[Service]
+ExecStart=/usr/local/bin/avenor stable --control-socket %S/avenor/remote/stable.sock --max-runtimes 16 --max-tree-budget 64 --idempotency-capacity 1024
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Durable Avenor stable supervisor (launchd, macOS).
+
+  Placeholders to edit before loading:
+    - binary path: /usr/local/bin/avenor (edit if avenor lives elsewhere)
+    - socket path: /Users/YOUR_USER/Library/Application Support/avenor/remote/stable.sock
+      (create the directory: mkdir -p "/Users/YOUR_USER/Library/Application Support/avenor/remote/logs")
+    - capacity numbers: --max-runtimes 16, --max-tree-budget 64,
+      --idempotency-capacity 1024 (raise deliberately for a busy remote host)
+
+  launchd does NOT expand environment variables - every path below must be an
+  absolute literal path. Replace YOUR_USER with the real username.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>dev.avenor.stable</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/bin/avenor</string>
+		<string>stable</string>
+		<string>--control-socket</string>
+		<string>/Users/YOUR_USER/Library/Application Support/avenor/remote/stable.sock</string>
+		<string>--max-runtimes</string>
+		<string>16</string>
+		<string>--max-tree-budget</string>
+		<string>64</string>
+		<string>--idempotency-capacity</string>
+		<string>1024</string>
+	</array>
+	<key>KeepAlive</key>
+	<true/>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>/Users/YOUR_USER/Library/Application Support/avenor/remote/logs/stable.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/YOUR_USER/Library/Application Support/avenor/remote/logs/stable.err.log</string>
+</dict>
+</plist>
