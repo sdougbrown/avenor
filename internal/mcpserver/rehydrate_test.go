@@ -123,7 +123,14 @@ func TestAvenorEventsRehydratesFromSupervisorList(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			events, _ := result.(map[string]any)["events"].([]map[string]any)
+			m, ok := result.(map[string]any)
+			if !ok {
+				t.Fatalf("result = %T, want map[string]any", result)
+			}
+			events, ok := m["events"].([]map[string]any)
+			if !ok {
+				t.Fatalf("events = %T, want []map[string]any", m["events"])
+			}
 			if len(events) != 2 {
 				t.Fatalf("events = %#v, want 2 entries", events)
 			}
@@ -215,7 +222,10 @@ func TestAvenorResultRehydratesFromSupervisorList(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			m := value.(map[string]any)
+			m, ok := value.(map[string]any)
+			if !ok {
+				t.Fatalf("value = %T, want map[string]any", value)
+			}
 			if m["ready"] != true || m["output"] != "full answer" {
 				t.Fatalf("result = %#v", m)
 			}
@@ -773,6 +783,44 @@ func TestSpawnRejectsLabelClaimedByLiveRun(t *testing.T) {
 	}
 	if n := spawnCalls.Load(); n != 0 {
 		t.Fatalf("spawn calls = %d, want 0 (no run left untracked)", n)
+	}
+}
+
+func TestSpawnRejectsLabelClaimedByOtherSupervisor(t *testing.T) {
+	const supA = "/tmp/supA.sock"
+	const supB = "/tmp/supB.sock"
+	var spawnCalls atomic.Int32
+	fake := &fakeClient{
+		listResult: []map[string]any{{"runtime_id": "rt-other", "label": "other"}},
+		spawnFunc: func(map[string]any) (map[string]any, error) {
+			spawnCalls.Add(1)
+			return map[string]any{"runtime_id": "rt-new", "session_id": "ses-new"}, nil
+		},
+	}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake, SupervisorSocket: supA})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The label is claimed by a cached entry on supervisor B.
+	if err := s.registry.Store(&RunInfo{RunID: "run-x", Label: "shared", RuntimeID: "rt-x", SupervisorID: supB}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Supervisor A's live list does not carry the label: the pre-check must
+	// reject before spawn so no run is left live but untracked.
+	_, _, err = s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
+		RepoDir: "/tmp/test-repo",
+		Label:   "shared",
+	})
+	if err == nil || !strings.Contains(err.Error(), "label already in use: shared") ||
+		!strings.Contains(err.Error(), supB) {
+		t.Fatalf("error = %v, want the mapped-supervisor rejection naming supervisor B", err)
+	}
+	if n := spawnCalls.Load(); n != 0 {
+		t.Fatalf("spawn calls = %d, want 0 (no run left untracked)", n)
+	}
+	if got := s.registry.LookupLabel(supB, "shared"); got == nil || got.RunID != "run-x" {
+		t.Fatalf("supervisor B entry = %#v, want run-x untouched", got)
 	}
 }
 

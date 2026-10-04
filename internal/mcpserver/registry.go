@@ -107,6 +107,14 @@ func (r *RunRegistry) LookupLabel(supervisorID, label string) *RunInfo {
 	return nil
 }
 
+// LabelHolder returns the entry currently mapped to label regardless of
+// supervisor, or nil. Unlike LookupLabel, it is not scoped by supervisor.
+func (r *RunRegistry) LabelHolder(label string) *RunInfo {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.byLabel[label]
+}
+
 // LookupUnique resolves key across all supervisors and returns an entry only
 // when the key identifies exactly one run: by globally unique label, or by a
 // run ID registered under exactly one supervisor. Ambiguous or unknown keys

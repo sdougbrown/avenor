@@ -96,7 +96,8 @@ type Client struct {
 	// closed records a terminal connection state: explicit Close, a readLoop
 	// exit (EOF or read error), or a failed request write. A closed client
 	// refuses new calls instead of parking them on the response timeout.
-	closed atomic.Bool
+	closed   atomic.Bool
+	closedCh chan struct{}
 }
 
 func Dial(socketPath string) (*Client, error) {
@@ -110,6 +111,7 @@ func Dial(socketPath string) (*Client, error) {
 		pending:     map[int]chan Response{},
 		eventCh:     make(chan Event, 256),
 		runtimeSubs: map[string]map[chan Event]struct{}{},
+		closedCh:    make(chan struct{}),
 	}
 	// Start reading immediately so an idle EOF (a supervisor that exited
 	// right after the dial) is observable via Closed() before the first RPC.
@@ -125,8 +127,24 @@ func Dial(socketPath string) (*Client, error) {
 // may still be usable.
 func (c *Client) Closed() bool { return c.closed.Load() }
 
+// ClosedChan returns a channel that is closed exactly once when the
+// connection reaches a terminal state. It is closed at the same sites that
+// set the closed flag; clients constructed without Dial have a nil channel.
+func (c *Client) ClosedChan() <-chan struct{} { return c.closedCh }
+
+// markClosed sets the closed flag and closes closedCh exactly once, so the
+// three close sites (Close, readLoop exit, failed write) can race safely.
+// Clients constructed without Dial have a nil channel and only get the flag.
+func (c *Client) markClosed() {
+	if c.closed.CompareAndSwap(false, true) {
+		if c.closedCh != nil {
+			close(c.closedCh)
+		}
+	}
+}
+
 func (c *Client) Close() error {
-	c.closed.Store(true)
+	c.markClosed()
 	return c.conn.Close()
 }
 
@@ -185,7 +203,7 @@ func (c *Client) call(method string, params any, result any, wait time.Duration)
 	if _, err := c.conn.Write(data); err != nil {
 		// A failed write means the connection is dead; mark it so callers can
 		// redial instead of waiting out the response timeout.
-		c.closed.Store(true)
+		c.markClosed()
 		delete(c.pending, id)
 		c.mu.Unlock()
 		return fmt.Errorf("write request: %w", err)
@@ -274,7 +292,7 @@ func (c *Client) readLoop() {
 	defer func() {
 		// Mark the connection closed before draining so a Call() goroutine
 		// woken by the channel close can observe Closed().
-		c.closed.Store(true)
+		c.markClosed()
 		// Drain pending channels so Call() goroutines don't hang
 		// on the 30s timeout after connection drop.
 		c.mu.Lock()
