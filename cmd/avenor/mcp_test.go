@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -210,4 +211,72 @@ func (s *stubControlClient) WorkflowControllerStatus(string) (map[string]any, er
 }
 func (s *stubControlClient) WorkflowControllerList() (map[string]any, error) {
 	return nil, nil
+}
+
+func writeTokenFile(t *testing.T, content string, mode os.FileMode) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(path, []byte(content), mode); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestMCPAuthTokenFilePrecedence(t *testing.T) {
+	path := writeTokenFile(t, "file-token\n", 0o600)
+
+	// Explicit --auth-token beats the file.
+	token, err := resolveAuthToken(true, true, "flag-token", path, "env-token")
+	if err != nil {
+		t.Fatalf("flag over file: %v", err)
+	}
+	if token != "flag-token" {
+		t.Fatalf("token = %q, want flag-token", token)
+	}
+
+	// File beats the environment.
+	token, err = resolveAuthToken(false, true, "flag-token", path, "env-token")
+	if err != nil {
+		t.Fatalf("file over env: %v", err)
+	}
+	if token != "file-token" {
+		t.Fatalf("token = %q, want file-token", token)
+	}
+
+	// Without flag or file, the environment is used.
+	token, err = resolveAuthToken(false, false, "", "", "env-token")
+	if err != nil {
+		t.Fatalf("env fallback: %v", err)
+	}
+	if token != "env-token" {
+		t.Fatalf("token = %q, want env-token", token)
+	}
+}
+
+func TestMCPAuthTokenFileRejected(t *testing.T) {
+	empty := writeTokenFile(t, "   \n", 0o600)
+	if _, err := readAuthTokenFile(empty); err == nil {
+		t.Fatal("expected empty token file to be rejected")
+	}
+
+	loose := writeTokenFile(t, "secret\n", 0o644)
+	if _, err := readAuthTokenFile(loose); err == nil {
+		t.Fatal("expected mode 0644 token file to be rejected")
+	}
+
+	missing := filepath.Join(t.TempDir(), "absent")
+	if _, err := readAuthTokenFile(missing); err == nil {
+		t.Fatal("expected missing token file to be rejected")
+	}
+}
+
+func TestMCPAuthTokenFileAccepted(t *testing.T) {
+	path := writeTokenFile(t, "secret-token\n", 0o600)
+	token, err := readAuthTokenFile(path)
+	if err != nil {
+		t.Fatalf("readAuthTokenFile: %v", err)
+	}
+	if token != "secret-token" {
+		t.Fatalf("token = %q, want secret-token", token)
+	}
 }

@@ -73,6 +73,7 @@ func runMCP(args []string) int {
 	idleTimeout := fs.Duration("idle-timeout", 30*time.Minute, "idle timeout before server exits")
 	addr := fs.String("addr", "127.0.0.1:3748", "address to listen on for HTTP transport")
 	authToken := fs.String("auth-token", "", "bearer token required for HTTP transport (defaults to MCP_AUTH_TOKEN)")
+	authTokenFile := fs.String("auth-token-file", "", "path to a mode-0600 file containing the bearer token for HTTP transport")
 	maxWait := fs.Duration("max-wait", 0, "approximate polling budget for blocking tools (default 25s over HTTP; 0 disables)")
 	var allowedHosts allowedHostList
 	fs.Var(&allowedHosts, "allowed-host", "exact tailnet hostname accepted on the HTTP transport (repeatable)")
@@ -81,8 +82,10 @@ func runMCP(args []string) int {
 		return 1
 	}
 
+	present := map[string]bool{}
 	maxWaitExplicit := false
 	fs.Visit(func(f *flag.Flag) {
+		present[f.Name] = true
 		if f.Name == "max-wait" {
 			maxWaitExplicit = true
 		}
@@ -100,12 +103,23 @@ func runMCP(args []string) int {
 		fmt.Fprintln(os.Stderr, "avenor mcp: --max-wait must not be negative")
 		return 1
 	}
+	if present["auth-token"] && present["auth-token-file"] {
+		fmt.Fprintln(os.Stderr, "avenor mcp: --auth-token and --auth-token-file cannot both be set")
+		return 1
+	}
 	if *noAutostart && *supervisorSocket == "" {
 		fmt.Fprintln(os.Stderr, "avenor mcp: --no-autostart requires --supervisor-socket")
 		return 1
 	}
-	if *transport == "http" && *authToken == "" {
-		*authToken = os.Getenv("MCP_AUTH_TOKEN")
+	if *transport == "http" {
+		// Precedence: explicit --auth-token, then --auth-token-file, then the
+		// MCP_AUTH_TOKEN environment variable.
+		token, err := resolveAuthToken(present["auth-token"], present["auth-token-file"], *authToken, *authTokenFile, os.Getenv("MCP_AUTH_TOKEN"))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "avenor mcp: %v\n", err)
+			return 1
+		}
+		*authToken = token
 	}
 
 	s, err := mcpserver.NewServer(mcpserver.Options{
@@ -138,4 +152,40 @@ func runMCP(args []string) int {
 		}
 	}
 	return 0
+}
+
+// resolveAuthToken applies the bearer-token precedence for HTTP transport:
+// an explicit --auth-token wins over --auth-token-file, which wins over the
+// MCP_AUTH_TOKEN environment variable. A set token file is always read; read
+// or validation errors are returned, never swallowed in favor of the env.
+func resolveAuthToken(tokenSet, fileSet bool, token, tokenFile, envToken string) (string, error) {
+	switch {
+	case tokenSet:
+		return token, nil
+	case fileSet:
+		return readAuthTokenFile(tokenFile)
+	default:
+		return envToken, nil
+	}
+}
+
+// readAuthTokenFile reads a bearer token from path, rejecting files that are
+// group- or world-readable and files whose trimmed content is empty.
+func readAuthTokenFile(path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if mode := info.Mode(); mode.Perm()&0o077 != 0 {
+		return "", fmt.Errorf("auth token file must not be group- or world-readable: %s", path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	token := strings.TrimSpace(string(data))
+	if token == "" {
+		return "", fmt.Errorf("auth token file is empty: %s", path)
+	}
+	return token, nil
 }
