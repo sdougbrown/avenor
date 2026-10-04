@@ -27,7 +27,7 @@ mkdir -p "$HOME/Library/Application Support/avenor/remote"
 On Linux, use your config directory instead (the templates use `/etc/avenor/remote`):
 
 ```bash
-install -d -m 700 -o avenor -g avenor /etc/avenor/remote
+sudo install -d -m 700 -o avenor -g avenor /etc/avenor/remote
 ( umask 077; openssl rand -hex 32 > /etc/avenor/remote/token ) && chmod 600 /etc/avenor/remote/token
 ```
 
@@ -37,7 +37,8 @@ install -d -m 700 -o avenor -g avenor /etc/avenor/remote
 
 ```bash
 mkdir -p "$HOME/Library/Application Support/avenor/remote/logs"
-cp templates/remote-mcp/avenor-stable.plist templates/remote-mcp/avenor-mcp.plist ~/Library/LaunchAgents/
+cp templates/remote-mcp/avenor-stable.plist ~/Library/LaunchAgents/dev.avenor.stable.plist
+cp templates/remote-mcp/avenor-mcp.plist ~/Library/LaunchAgents/dev.avenor.mcp.plist
 ```
 
 Adjust the placeholders in both plists (socket path, token path, allowed host, binary path, capacity numbers), then load:
@@ -55,7 +56,7 @@ Create a dedicated non-root user and the state/config directories. BOTH units ru
 
 ```bash
 sudo useradd -r -s /usr/sbin/nologin avenor
-install -d -m 700 -o avenor -g avenor /var/lib/avenor/remote /etc/avenor/remote
+sudo install -d -m 700 -o avenor -g avenor /var/lib/avenor/remote /etc/avenor/remote
 cp templates/remote-mcp/avenor-stable.service templates/remote-mcp/avenor-mcp.service /etc/systemd/system/
 ```
 
