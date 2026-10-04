@@ -86,6 +86,27 @@ func TestRunMCPAllowedHostInvalidTransport(t *testing.T) {
 	}
 }
 
+func TestEffectiveMaxWait(t *testing.T) {
+	if got := effectiveMaxWait("stdio", false, 0); got != 0 {
+		t.Fatalf("stdio default = %v, want 0", got)
+	}
+	if got := effectiveMaxWait("http", false, 0); got != 25*time.Second {
+		t.Fatalf("http default = %v, want 25s", got)
+	}
+	if got := effectiveMaxWait("http", true, 0); got != 0 {
+		t.Fatalf("explicit zero = %v, want 0", got)
+	}
+	if got := effectiveMaxWait("stdio", true, 5*time.Minute); got != 5*time.Minute {
+		t.Fatalf("explicit value = %v, want 5m", got)
+	}
+}
+
+func TestRunMCPMaxWaitNegativeRejected(t *testing.T) {
+	if got := runMCP([]string{"--max-wait", "-5s"}); got != 1 {
+		t.Fatalf("runMCP() = %d, want 1", got)
+	}
+}
+
 type stubControlClient struct{}
 
 func (s *stubControlClient) Status(runtimeID string) (map[string]any, error)     { return nil, nil }

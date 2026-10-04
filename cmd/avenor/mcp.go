@@ -32,6 +32,18 @@ func (a *allowedHostList) Set(value string) error {
 	return nil
 }
 
+// effectiveMaxWait resolves the configured polling budget: an explicit
+// --max-wait wins; otherwise HTTP gets the 25s default and stdio no clamp.
+func effectiveMaxWait(transport string, explicit bool, value time.Duration) time.Duration {
+	if explicit {
+		return value
+	}
+	if transport == "http" {
+		return 25 * time.Second
+	}
+	return 0
+}
+
 func mcpFlagError(transport string, allowedHosts []string) error {
 	if transport != "stdio" && transport != "http" {
 		return errors.New(`--transport only supports "stdio" or "http"`)
@@ -51,6 +63,7 @@ func runMCP(args []string) int {
 	idleTimeout := fs.Duration("idle-timeout", 30*time.Minute, "idle timeout before server exits")
 	addr := fs.String("addr", "127.0.0.1:3748", "address to listen on for HTTP transport")
 	authToken := fs.String("auth-token", "", "bearer token required for HTTP transport (defaults to MCP_AUTH_TOKEN)")
+	maxWait := fs.Duration("max-wait", 0, "approximate polling budget for blocking tools (default 25s over HTTP; 0 disables)")
 	var allowedHosts allowedHostList
 	fs.Var(&allowedHosts, "allowed-host", "exact tailnet hostname accepted on the HTTP transport (repeatable)")
 
@@ -62,6 +75,16 @@ func runMCP(args []string) int {
 		fmt.Fprintln(os.Stderr, "avenor mcp:", err)
 		return 1
 	}
+	if *maxWait < 0 {
+		fmt.Fprintln(os.Stderr, "avenor mcp: --max-wait must not be negative")
+		return 1
+	}
+	maxWaitExplicit := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "max-wait" {
+			maxWaitExplicit = true
+		}
+	})
 	if *noAutostart && *supervisorSocket == "" {
 		fmt.Fprintln(os.Stderr, "avenor mcp: --no-autostart requires --supervisor-socket")
 		return 1
@@ -78,6 +101,7 @@ func runMCP(args []string) int {
 		IdleTimeout:      *idleTimeout,
 		Addr:             *addr,
 		AuthToken:        *authToken,
+		MaxWait:          effectiveMaxWait(*transport, maxWaitExplicit, *maxWait),
 		AllowedHosts:     allowedHosts,
 		ControlClient:    nil,
 	})
