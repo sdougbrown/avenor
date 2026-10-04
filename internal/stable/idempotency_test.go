@@ -640,7 +640,7 @@ func TestIdempotencyResolvedProvenanceRetryHits(t *testing.T) {
 	defer func() { _ = sup.broker.Stop() }()
 	dir := t.TempDir()
 
-	raw1, err := json.Marshal(SpawnParams{Prompt: "hello", Dir: dir, Agent: "claude", ParentID: "rt_parent_1", AgentProfile: "profile-a", IdempotencyKey: "key_a"})
+	raw1, err := json.Marshal(SpawnParams{Prompt: "hello", Dir: dir, Agent: "claude", ParentID: "rt_parent_1", ParentRunID: "broker-run-1", AgentProfile: "profile-a", IdempotencyKey: "key_a"})
 	if err != nil {
 		t.Fatalf("marshal first params: %v", err)
 	}
@@ -654,7 +654,7 @@ func TestIdempotencyResolvedProvenanceRetryHits(t *testing.T) {
 	}
 
 	// Same caller intent, different resolved provenance: stored hit.
-	raw2, err := json.Marshal(SpawnParams{Prompt: "hello", Dir: dir, Agent: "claude", ParentID: "rt_parent_2", AgentProfile: "profile-b", IdempotencyKey: "key_a"})
+	raw2, err := json.Marshal(SpawnParams{Prompt: "hello", Dir: dir, Agent: "claude", ParentID: "rt_parent_2", ParentRunID: "broker-run-1", AgentProfile: "profile-b", IdempotencyKey: "key_a"})
 	if err != nil {
 		t.Fatalf("marshal retry params: %v", err)
 	}
@@ -671,12 +671,27 @@ func TestIdempotencyResolvedProvenanceRetryHits(t *testing.T) {
 	}
 
 	// Different caller intent under the same key still conflicts.
-	raw3, err := json.Marshal(SpawnParams{Prompt: "goodbye", Dir: dir, Agent: "claude", IdempotencyKey: "key_a"})
+	raw3, err := json.Marshal(SpawnParams{Prompt: "goodbye", Dir: dir, Agent: "claude", ParentRunID: "broker-run-1", IdempotencyKey: "key_a"})
 	if err != nil {
 		t.Fatalf("marshal conflict params: %v", err)
 	}
 	_, err = sup.Spawn(raw3)
 	var ce *control.IdempotencyConflictError
+	if !errors.As(err, &ce) {
+		t.Fatalf("error = %v, want *control.IdempotencyConflictError", err)
+	}
+	assertOneRuntime(t, sup)
+	if provider.startCalls != 1 {
+		t.Fatalf("provider Start calls = %d, want 1", provider.startCalls)
+	}
+
+	// ParentRunID is caller intent and stays in the hash: changing it alone
+	// under the same key conflicts (a different parent is a different spawn).
+	raw4, err := json.Marshal(SpawnParams{Prompt: "hello", Dir: dir, Agent: "claude", ParentID: "rt_parent_1", ParentRunID: "broker-run-2", AgentProfile: "profile-a", IdempotencyKey: "key_a"})
+	if err != nil {
+		t.Fatalf("marshal parentRunID conflict params: %v", err)
+	}
+	_, err = sup.Spawn(raw4)
 	if !errors.As(err, &ce) {
 		t.Fatalf("error = %v, want *control.IdempotencyConflictError", err)
 	}
@@ -801,7 +816,6 @@ func TestIdempotencyHashExclusionSet(t *testing.T) {
 		"SentinelFile":   func(p *SpawnParams) { p.SentinelFile = "/other-sentinel" },
 		"IdempotencyKey": func(p *SpawnParams) { p.IdempotencyKey = "other-key" },
 		"ParentID":       func(p *SpawnParams) { p.ParentID = "rt_other" },
-		"ParentRunID":    func(p *SpawnParams) { p.ParentRunID = "run_other" },
 		"SessionID":      func(p *SpawnParams) { p.SessionID = "ses_other" },
 		"AgentProfile":   func(p *SpawnParams) { p.AgentProfile = "profile-b" },
 	}
@@ -838,6 +852,7 @@ func TestIdempotencyHashExclusionSet(t *testing.T) {
 		"TeamFile":          func(p *SpawnParams) { p.TeamFile = "/other-team" },
 		"RosterFile":        func(p *SpawnParams) { p.RosterFile = "/other-roster" },
 		"RosterEntry":       func(p *SpawnParams) { p.RosterEntry = "other-entry" },
+		"ParentRunID":       func(p *SpawnParams) { p.ParentRunID = "run_other" },
 	}
 	var got string
 	for field, mutate := range intent {
