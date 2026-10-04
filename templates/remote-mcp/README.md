@@ -27,7 +27,7 @@ mkdir -p "$HOME/Library/Application Support/avenor/remote"
 On Linux, use your config directory instead (the templates use `/etc/avenor/remote`):
 
 ```bash
-install -d -m 700 /etc/avenor/remote
+install -d -m 700 -o avenor -g avenor /etc/avenor/remote
 ( umask 077; openssl rand -hex 32 > /etc/avenor/remote/token ) && chmod 600 /etc/avenor/remote/token
 ```
 
@@ -55,9 +55,11 @@ Create a dedicated non-root user and the state/config directories. BOTH units ru
 
 ```bash
 sudo useradd -r -s /usr/sbin/nologin avenor
-install -d -m 700 /var/lib/avenor/remote /etc/avenor/remote
+install -d -m 700 -o avenor -g avenor /var/lib/avenor/remote /etc/avenor/remote
 cp templates/remote-mcp/avenor-stable.service templates/remote-mcp/avenor-mcp.service /etc/systemd/system/
 ```
+
+The `-o avenor -g avenor` ownership matters: `StateDirectory=avenor` only creates `/var/lib/avenor` (one level), so a root-owned `remote/` subdirectory would leave the `avenor` user unable to create the control socket, dial it, or read the token — every unit would crash-loop.
 
 Adjust the placeholders in both units, then:
 
