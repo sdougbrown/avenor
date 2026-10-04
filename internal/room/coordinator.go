@@ -62,10 +62,6 @@ type Room struct {
 	deniedOnce    map[string]bool
 	arbiterActive bool
 	revision      int64
-	// lastTool tracks each runtime's most recent tool.call title so
-	// permission.request events (whose tool field is best-effort and often
-	// empty for confirm dialogs) can be attributed to the gated tool.
-	lastTool map[string]string
 	// workspaceFingerprint is the last observed git working-tree state; a
 	// change between turn boundaries counts as a mutation regardless of which
 	// tool (write tool or bash) caused it.
@@ -89,11 +85,6 @@ type TurnResult struct {
 }
 
 func New(c *client.Client, opts Options) (*Room, error) {
-	// The control server only pushes events to connections that subscribed;
-	// the room subscribes globally and lets the client filter per runtime.
-	if err := c.Call("subscribe", nil, nil); err != nil {
-		return nil, fmt.Errorf("subscribe to control events: %w", err)
-	}
 	logPath := filepath.Join(opts.Dir, ".room", "log.ndjson")
 	log, err := OpenLog(logPath)
 	if err != nil {
@@ -118,7 +109,6 @@ func New(c *client.Client, opts Options) (*Room, error) {
 		byRuntime:  map[string]*Head{},
 		pending:    map[string]*pendingTurn{},
 		deniedOnce: map[string]bool{},
-		lastTool:   map[string]string{},
 	}, nil
 }
 
@@ -318,8 +308,9 @@ func (r *Room) HumanTurn(ctx context.Context, text string, targets []string) (st
 	return r.digest(settled), nil
 }
 
-// startTurn registers a pending activation before the prompt is sent so the
-// pump cannot miss the session.end that closes it.
+// startTurn launches the turn-completion wait before the prompt is sent so
+// the settle can never be missed; wait_turn is state-machine-based (#264), so
+// delivery loss cannot strand it (the per-activation deadline is the backstop).
 func (r *Room) startTurn(h *Head, mode string, parents []string, depth int) (*pendingTurn, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -334,6 +325,22 @@ func (r *Room) startTurn(h *Head, mode string, parents []string, depth int) (*pe
 		parents: parents,
 	}
 	r.pending[h.RuntimeID] = p
+	timeout := r.opts.TurnTimeout
+	if timeout <= 0 {
+		timeout = 15 * time.Minute
+	}
+	go func() {
+		res, err := r.client.WaitTurn(h.RuntimeID, timeout)
+		if err != nil {
+			res = map[string]any{}
+			res["stop_reason"] = err.Error()
+		}
+		p.done <- TurnResult{
+			RuntimeID:   h.RuntimeID,
+			StopReason:  str(res["stop_reason"]),
+			FinalOutput: str(res["final_output"]),
+		}
+	}()
 	return p, nil
 }
 
@@ -383,51 +390,19 @@ func (r *Room) detectMutations(author Participant) bool {
 	return true
 }
 
-// await finalizes one pending activation into the room log. Event delivery
-// from the supervisor is best-effort (events may be deduped or dropped), so a
-// status poll acts as the fallback completion signal: a runtime that was seen
-// running and is idle again has finished its turn.
+// await finalizes one pending activation into the room log. The completion
+// signal is wait_turn (#264) — delivery-guarantee-independent — so no status
+// polling or event-loss fallback is needed.
 func (r *Room) await(ctx context.Context, p *pendingTurn) (Activation, error) {
-	timeout := r.opts.TurnTimeout
-	if timeout <= 0 {
-		timeout = 15 * time.Minute
-	}
-	deadline := time.After(timeout)
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
 	var res TurnResult
-	haveRes := false
-	for !haveRes {
-		select {
-		case <-ctx.Done():
-			return Activation{}, ctx.Err()
-		case <-deadline:
-			return Activation{}, fmt.Errorf("turn timeout for head %s (%s)", p.head.Name, timeout)
-		case res = <-p.done:
-			haveRes = true
-		case <-ticker.C:
-			st, err := r.client.Status(p.head.RuntimeID)
-			if err != nil {
-				continue
-			}
-			switch st["status"] {
-			case "running":
-				p.sawRunning = true
-			case "idle", "ended":
-				if p.sawRunning || st["status"] == "ended" {
-					res = TurnResult{
-						RuntimeID:   p.head.RuntimeID,
-						StopReason:  str(st["stop_reason"]),
-						FinalOutput: str(st["final_output"]),
-					}
-					haveRes = true
-					r.mu.Lock()
-					delete(r.pending, p.head.RuntimeID)
-					r.mu.Unlock()
-				}
-			}
-		}
+	select {
+	case <-ctx.Done():
+		return Activation{}, ctx.Err()
+	case res = <-p.done:
 	}
+	r.mu.Lock()
+	delete(r.pending, p.head.RuntimeID)
+	r.mu.Unlock()
 	debugf("await %s mode=%s depth=%d stop=%s", p.head.Name, p.mode, p.depth, res.StopReason)
 	ev, err := r.log.Append(Participant(p.head.Name), HeadOutput, res.FinalOutput, VisibilityRoom, p.parents, p.depth)
 	if err != nil {
@@ -446,8 +421,8 @@ func (r *Room) await(ctx context.Context, p *pendingTurn) (Activation, error) {
 	}, nil
 }
 
-// pump subscribes to every head's event stream and closes pending turns on
-// session.end.
+// pump subscribes to every head's event stream to resolve permission
+// requests. Turn completion no longer rides the event stream (#264).
 func (r *Room) pump(ctx context.Context) {
 	for _, h := range r.heads {
 		go func(h *Head) {
@@ -458,34 +433,8 @@ func (r *Room) pump(ctx context.Context) {
 					return
 				case ev := <-ch:
 					debugf("pump %s event=%s", h.Name, ev.Event)
-					switch ev.Event {
-					case "tool.call":
-						if title, _ := ev.Raw["title"].(string); title != "" {
-							r.mu.Lock()
-							r.lastTool[h.RuntimeID] = title
-							r.mu.Unlock()
-						}
-						continue
-					case "permission.request":
+					if ev.Event == "permission.request" {
 						r.gatePermission(h, ev)
-						continue
-					case "session.end":
-					default:
-						continue
-					}
-					res := TurnResult{RuntimeID: h.RuntimeID}
-					if v, ok := ev.Raw["stop_reason"].(string); ok {
-						res.StopReason = v
-					}
-					if v, ok := ev.Raw["final_output"].(string); ok {
-						res.FinalOutput = v
-					}
-					r.mu.Lock()
-					p := r.pending[h.RuntimeID]
-					delete(r.pending, h.RuntimeID)
-					r.mu.Unlock()
-					if p != nil {
-						p.done <- res
 					}
 				}
 			}
@@ -504,15 +453,9 @@ func (r *Room) gatePermission(h *Head, ev client.Event) {
 	// The permission event's kind field is the dialog kind ("confirm") and
 	// its tool field is best-effort and often empty for confirm dialogs, so
 	// correlate with the runtime's most recent tool.call title.
-	// The permission event's kind field is the dialog kind ("confirm") and
-	// its tool field is best-effort and often empty for confirm dialogs, so
-	// correlate with the runtime's most recent tool.call title.
+	// The permission event's kind field is the dialog kind ("confirm");
+	// avenor stamps the in-flight tool name into the tool field (#263).
 	kind, _ := ev.Raw["tool"].(string)
-	if kind == "" {
-		r.mu.Lock()
-		kind = r.lastTool[h.RuntimeID]
-		r.mu.Unlock()
-	}
 	options, _ := ev.Raw["options"].([]any)
 	r.mu.Lock()
 	holder := r.writeHolder
