@@ -624,6 +624,26 @@ func (s *Server) reapStaleLabel(supervisorPath string, liveEntries []map[string]
 	s.registry.Remove(old.SupervisorID, old.RunID)
 }
 
+// checkLabelAvailable rejects a spawn whose explicit label is already claimed
+// by a run in the supervisor's live list, and reaps a stale registry mapping
+// left behind by a supervisor restart (the live list is authoritative for
+// liveness). A list error never blocks the spawn: the registry's own
+// collision check remains the backstop.
+func (s *Server) checkLabelAvailable(cl ControlClient, supervisorPath, label string) error {
+	entries, err := cl.List()
+	if err != nil {
+		return nil
+	}
+	for _, entry := range entries {
+		if l, _ := entry["label"].(string); l == label {
+			runtimeID, _ := entry["runtime_id"].(string)
+			return fmt.Errorf("label already in use: %s (runtime %s)", label, runtimeID)
+		}
+	}
+	s.reapStaleLabel(supervisorPath, entries, map[string]any{"label": label})
+	return nil
+}
+
 // runIDFromSentinel extracts the MCP run UUID from a sentinel basename shaped
 // avenor-run-<uuid>.done, or returns empty for any other name.
 func runIDFromSentinel(sentinelFile string) string {
@@ -1028,6 +1048,12 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 	}
 	defer cleanup()
 
+	if args.Label != "" {
+		if err := s.checkLabelAvailable(cl, supervisorPath, args.Label); err != nil {
+			return nil, nil, err
+		}
+	}
+
 	result, err := cl.Spawn(params)
 	if err != nil {
 		return nil, nil, fmt.Errorf("spawn: %w", err)
@@ -1414,6 +1440,12 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 	}
 	if ri.AutoApprove {
 		params["auto_approve"] = true
+	}
+
+	if followupLabel != "" {
+		if err := s.checkLabelAvailable(cl, s.getSupervisorPath(supervisorID), followupLabel); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	result, err := cl.Spawn(params)

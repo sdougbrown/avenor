@@ -747,3 +747,108 @@ func TestAvenorStatusListFiltersRegistryBySupervisor(t *testing.T) {
 		t.Fatal("supervisor A's registry entry must remain intact")
 	}
 }
+
+// --- PR2 verdict: validate label availability before spawn ---
+
+func TestSpawnRejectsLabelClaimedByLiveRun(t *testing.T) {
+	var spawnCalls atomic.Int32
+	fake := &fakeClient{
+		listResult: []map[string]any{{"runtime_id": "rt-live", "label": "taken"}},
+		spawnFunc: func(map[string]any) (map[string]any, error) {
+			spawnCalls.Add(1)
+			return map[string]any{"runtime_id": "rt-new", "session_id": "ses-new"}, nil
+		},
+	}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
+		RepoDir: "/tmp/test-repo",
+		Label:   "taken",
+	})
+	if err == nil || !strings.Contains(err.Error(), "label already in use: taken") {
+		t.Fatalf("error = %v, want label already in use", err)
+	}
+	if n := spawnCalls.Load(); n != 0 {
+		t.Fatalf("spawn calls = %d, want 0 (no run left untracked)", n)
+	}
+}
+
+func TestSpawnReapsStaleLabelMapping(t *testing.T) {
+	var spawnCalls atomic.Int32
+	fake := &fakeClient{
+		listResult: []map[string]any{{"runtime_id": "rt-other", "label": "other"}},
+		spawnFunc: func(map[string]any) (map[string]any, error) {
+			spawnCalls.Add(1)
+			return map[string]any{"runtime_id": "rt-new", "session_id": "ses-new"}, nil
+		},
+	}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A stale pre-restart entry claiming the label, whose runtime is not live.
+	if err := s.registry.Store(&RunInfo{RunID: "run-old", Label: "taken", RuntimeID: "rt-dead", SupervisorID: ""}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, result, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
+		RepoDir: "/tmp/test-repo",
+		Label:   "taken",
+	})
+	if err != nil {
+		t.Fatalf("spawn = %v, want success after reaping the stale mapping", err)
+	}
+	if n := spawnCalls.Load(); n != 1 {
+		t.Fatalf("spawn calls = %d, want 1", n)
+	}
+	runID, _ := result.(map[string]any)["run_id"].(string)
+	ri := s.registry.Lookup("", runID)
+	if ri == nil || ri.RuntimeID != "rt-new" {
+		t.Fatalf("registry entry = %#v, want the new run", ri)
+	}
+	// The stale mapping was reaped and re-pointed to the new run.
+	if got := s.registry.LookupLabel("", "taken"); got == nil || got.RunID != runID {
+		t.Fatalf("LookupLabel(taken) = %#v, want the new run", got)
+	}
+	if s.registry.Lookup("", "run-old") != nil {
+		t.Fatal("stale pre-restart entry must be removed")
+	}
+}
+
+func TestFollowUpRejectsLabelClaimedByLiveRun(t *testing.T) {
+	dir := t.TempDir()
+	sentinelPath := filepath.Join(dir, "avenor-run-"+rehydrateUUID+".done")
+	if err := os.WriteFile(sentinelPath, []byte("DONE\nSESSION=ses_re_1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	var spawnCalls atomic.Int32
+	fake := &fakeClient{
+		listResult: []map[string]any{
+			rehydrateEntry(func(entry map[string]any) { entry["sentinel_file"] = sentinelPath }),
+			{"runtime_id": "rt-live", "label": "taken"},
+		},
+		spawnFunc: func(map[string]any) (map[string]any, error) {
+			spawnCalls.Add(1)
+			return map[string]any{"runtime_id": "rt-new", "session_id": "ses-new"}, nil
+		},
+	}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
+		RunID:   rehydrateUUID,
+		Message: "continue",
+		Label:   "taken",
+	})
+	if err == nil || !strings.Contains(err.Error(), "label already in use: taken") {
+		t.Fatalf("error = %v, want label already in use", err)
+	}
+	if n := spawnCalls.Load(); n != 0 {
+		t.Fatalf("spawn calls = %d, want 0 (no run left untracked)", n)
+	}
+}
