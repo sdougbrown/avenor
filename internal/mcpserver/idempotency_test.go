@@ -55,9 +55,12 @@ func newFakeIdempotentSupervisor() *fakeIdempotentSupervisor {
 	}
 }
 
-// fakeIdempotencyHash mirrors stable.idempotencyHash: zero the attempt-local
-// identity (on_event, sentinel_file, idempotency_key) and the derived label,
-// keeping the remaining semantic params (including label_derived) in the hash.
+// fakeIdempotencyHash mirrors stable.idempotencyHash (internal/stable/
+// idempotency.go): zero the mirrored exclusion set — the attempt-local
+// identity (on_event, sentinel_file, idempotency_key), the resolved
+// provenance (parent_id, parent_run_id, session_id, agent_profile), and the
+// derived label — keeping the remaining semantic params (including
+// label_derived) in the hash.
 func fakeIdempotencyHash(p map[string]any) string {
 	cp := make(map[string]any, len(p))
 	for k, v := range p {
@@ -66,6 +69,10 @@ func fakeIdempotencyHash(p map[string]any) string {
 	cp["on_event"] = ""
 	cp["sentinel_file"] = ""
 	cp["idempotency_key"] = ""
+	cp["parent_id"] = ""
+	cp["parent_run_id"] = ""
+	cp["session_id"] = ""
+	cp["agent_profile"] = ""
 	if ld, ok := cp["label_derived"].(bool); ok && ld {
 		cp["label"] = ""
 	}

@@ -863,9 +863,10 @@ func TestIdempotencyHashIgnoresAttemptIdentity(t *testing.T) {
 
 // TestIdempotencyHashExclusionSet pins the exact set of fields excluded from
 // the idempotency parameter hash: each excluded field, changed alone, leaves
-// the hash unchanged; a caller-intent field (Prompt) changes it; and Label is
-// excluded only when derived. This guards against the MCP test's mirrored hash
-// drifting from the real exclusion set.
+// the hash unchanged; each caller-intent field (Prompt, PromptFile, Dir,
+// Agent, Model, Backend, Timeout) changes it; and Label is excluded only when
+// derived. This guards against the MCP test's mirrored hash drifting from the
+// real exclusion set, in both directions.
 func TestIdempotencyHashExclusionSet(t *testing.T) {
 	base := SpawnParams{
 		Prompt:         "hello",
@@ -910,15 +911,30 @@ func TestIdempotencyHashExclusionSet(t *testing.T) {
 		}
 	}
 
-	// A caller-intent field (Prompt) DOES change the hash.
-	promptChanged := base
-	promptChanged.Prompt = "goodbye"
-	got, err := idempotencyHash(promptChanged)
-	if err != nil {
-		t.Fatalf("hash(prompt changed): %v", err)
+	// The complement: each caller-intent field, changed alone, DOES change
+	// the hash. This pins the exclusion set against silent additions: a
+	// field added to the production exclusion set would stop changing the
+	// hash and fail here.
+	intent := map[string]func(*SpawnParams){
+		"Prompt":     func(p *SpawnParams) { p.Prompt = "goodbye" },
+		"PromptFile": func(p *SpawnParams) { p.PromptFile = "/other-prompt-file" },
+		"Dir":        func(p *SpawnParams) { p.Dir = "/other-dir" },
+		"Agent":      func(p *SpawnParams) { p.Agent = "other-agent" },
+		"Model":      func(p *SpawnParams) { p.Model = "other-model" },
+		"Backend":    func(p *SpawnParams) { p.Backend = "other-backend" },
+		"Timeout":    func(p *SpawnParams) { p.Timeout = 9999 },
 	}
-	if got == baseHash {
-		t.Fatal("hash unchanged when Prompt changed")
+	var got string
+	for field, mutate := range intent {
+		p := base
+		mutate(&p)
+		got, err = idempotencyHash(p)
+		if err != nil {
+			t.Fatalf("hash(base with %s changed): %v", field, err)
+		}
+		if got == baseHash {
+			t.Fatalf("hash unchanged when only %s changed", field)
+		}
 	}
 
 	// Label is excluded only when derived: with LabelDerived=true, changing
