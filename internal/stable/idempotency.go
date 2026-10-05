@@ -138,17 +138,19 @@ func (s *idempotencyStore) release(key string, f *idempotencyFlight, err error) 
 // attempt-local artifacts; IdempotencyKey is the key itself; Label is an
 // MCP-generated run ID when LabelDerived is set; ParentID is auto-populated
 // from live runtime registration, SessionID is resolved from prior state on
-// follow-up, ParentRunID is broker-provenance of the calling runtime, and
-// AgentProfile is resolved through the profile fallback chain, so all four can
-// differ between legitimate retries of the same intent.
-// Everything excluded here is re-derived per attempt; caller intent stays in
-// the hash so a retry with different semantic parameters still conflicts.
+// follow-up, and AgentProfile is resolved through the profile fallback chain,
+// so all three can differ between legitimate retries of the same intent.
+// ParentRunID deliberately stays in the hash: it is caller intent (the
+// parent's broker run ID) consumed verbatim, so a retry from a different
+// parent under the same key conflicts rather than silently deduping.
+// Everything else excluded here is re-derived per attempt; caller intent
+// stays in the hash so a retry with different semantic parameters still
+// conflicts.
 func IdempotencyHash(p SpawnParams) (string, error) {
 	p.OnEvent = ""
 	p.SentinelFile = ""
 	p.IdempotencyKey = ""
 	p.ParentID = ""
-	p.ParentRunID = ""
 	p.SessionID = ""
 	p.AgentProfile = ""
 	if p.LabelDerived {

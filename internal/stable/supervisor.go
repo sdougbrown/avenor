@@ -1325,6 +1325,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 	// register (the MCP pre-check is a fast path, not the authority).
 	if params.IdempotencyKey != "" && params.Label != "" {
 		if holder := s.labelHolderLocked(params.Label); holder != "" {
+			childCancel()
 			s.controlMu.Unlock()
 			return SpawnResult{}, fmt.Errorf("label already in use: %s (runtime %s)", params.Label, holder)
 		}
