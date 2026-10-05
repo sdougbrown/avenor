@@ -4192,16 +4192,25 @@ func startStubSupervisorListener(t *testing.T, socketPath string) (acceptedCount
 	return acceptedCount, closeAccepted, cleanup
 }
 
-func TestRedialExplicitSupervisorSocketAfterDisconnect(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "sup.sock")
-
+// withCountedDials swaps dialSupervisorClient for a counting wrapper that
+// delegates to the original dial, restoring the seam when the test ends.
+// Tests that must block inside the dial keep their own wrapper instead.
+func withCountedDials(t *testing.T) *atomic.Int32 {
+	t.Helper()
 	var dials atomic.Int32
 	origDial := dialSupervisorClient
 	dialSupervisorClient = func(p string) (*client.Client, error) {
 		dials.Add(1)
 		return origDial(p)
 	}
-	defer func() { dialSupervisorClient = origDial }()
+	t.Cleanup(func() { dialSupervisorClient = origDial })
+	return &dials
+}
+
+func TestRedialExplicitSupervisorSocketAfterDisconnect(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "sup.sock")
+
+	dials := withCountedDials(t)
 
 	s, err := NewServer(Options{Transport: "stdio", SupervisorSocket: socketPath, NoAutostart: true})
 	if err != nil {
@@ -4361,13 +4370,7 @@ func TestConcurrentAcquisitionsShareOneDial(t *testing.T) {
 func TestInjectedControlClientNeverReplaced(t *testing.T) {
 	socketPath := filepath.Join(t.TempDir(), "sup.sock")
 
-	var dials atomic.Int32
-	origDial := dialSupervisorClient
-	dialSupervisorClient = func(p string) (*client.Client, error) {
-		dials.Add(1)
-		return origDial(p)
-	}
-	defer func() { dialSupervisorClient = origDial }()
+	dials := withCountedDials(t)
 
 	fake := &fakeClient{}
 	s, err := NewServer(Options{
@@ -4397,13 +4400,7 @@ func TestInjectedControlClientNeverReplaced(t *testing.T) {
 func TestNewServerWithSupervisorSocketDialsZeroTimes(t *testing.T) {
 	socketPath := filepath.Join(t.TempDir(), "sup.sock")
 
-	var dials atomic.Int32
-	origDial := dialSupervisorClient
-	dialSupervisorClient = func(p string) (*client.Client, error) {
-		dials.Add(1)
-		return origDial(p)
-	}
-	defer func() { dialSupervisorClient = origDial }()
+	dials := withCountedDials(t)
 
 	for _, noAutostart := range []bool{true, false} {
 		s, err := NewServer(Options{

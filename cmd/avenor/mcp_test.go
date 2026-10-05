@@ -219,6 +219,11 @@ func writeTokenFile(t *testing.T, content string, mode os.FileMode) string {
 	if err := os.WriteFile(path, []byte(content), mode); err != nil {
 		t.Fatal(err)
 	}
+	// WriteFile's perm is masked by the process umask; force the intended
+	// mode so the rejection tests exercise it regardless of umask.
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
+	}
 	return path
 }
 
