@@ -650,8 +650,9 @@ func (s *Server) reapStaleLabel(supervisorPath string, liveEntries []map[string]
 // stale registry mapping left behind by a supervisor restart (the live list
 // is authoritative for liveness). Only non-terminal runs hold a label: an
 // ended run's label is free to re-claim, so terminal entries are excluded
-// from both the claim scan and the stale-mapping reap. A list error never
-// blocks the spawn: the registry's own collision check remains the backstop.
+// from the claim scan, and a terminal cross-supervisor holder's mapping is
+// reaped so the spawn re-points the label. A list error never blocks the
+// spawn: the registry's own collision check remains the backstop.
 func (s *Server) checkLabelAvailable(cl ControlClient, supervisorPath, label string) error {
 	entries, err := cl.List()
 	if err != nil {
@@ -672,13 +673,11 @@ func (s *Server) checkLabelAvailable(cl ControlClient, supervisorPath, label str
 		}
 	}
 	if holder := s.registry.LabelHolder(label); holder != nil && holder.SupervisorID != supervisorPath {
-		liveRuntimes := make(map[string]bool, len(live))
-		for _, entry := range live {
-			if rid, ok := entry["runtime_id"].(string); ok {
-				liveRuntimes[rid] = true
-			}
-		}
-		if !liveRuntimes[holder.RuntimeID] {
+		if _, terminal := terminalStatusFromRunInfo(holder); terminal {
+			// An ended cross-supervisor run no longer holds the label:
+			// unlink its stale mapping so the spawn's store re-points it.
+			s.registry.UnlinkLabel(holder.SupervisorID, label)
+		} else {
 			return fmt.Errorf("label already in use: %s (mapped to supervisor %s runtime %s)",
 				label, holder.SupervisorID, holder.RuntimeID)
 		}

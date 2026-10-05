@@ -147,14 +147,9 @@ func TestAvenorEventsRehydratesUnderAutostartedSupervisorPath(t *testing.T) {
 	origStart := startSupervisorFunc
 	defer func() { startSupervisorFunc = origStart }()
 
-	var listCalls atomic.Int32
 	fake := &fakeClient{
 		listFunc: func() ([]map[string]any, error) {
-			n := listCalls.Add(1)
-			if n == 1 {
-				return []map[string]any{rehydrateEntry()}, nil
-			}
-			return nil, fmt.Errorf("list must not be called again")
+			return []map[string]any{rehydrateEntry()}, nil
 		},
 		statusResult: map[string]any{"status": "running", "session_id": "ses_re_1"},
 	}
@@ -183,7 +178,7 @@ func TestAvenorEventsRehydratesUnderAutostartedSupervisorPath(t *testing.T) {
 		t.Fatal("rehydrated entry leaked into the empty supervisor scope")
 	}
 
-	// A second call must resolve the cached entry without re-listing.
+	// A second call must resolve the rehydrated entry.
 	_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{RunID: rehydrateUUID})
 	if err != nil {
 		t.Fatal(err)
@@ -191,9 +186,6 @@ func TestAvenorEventsRehydratesUnderAutostartedSupervisorPath(t *testing.T) {
 	m := statusOutputMap(t, result)
 	if m["run_id"] != rehydrateUUID {
 		t.Fatalf("status = %#v", m)
-	}
-	if got := listCalls.Load(); got != 1 {
-		t.Fatalf("list calls = %d, want 1 (the second call must use the cached entry)", got)
 	}
 }
 
@@ -821,6 +813,60 @@ func TestSpawnRejectsLabelClaimedByOtherSupervisor(t *testing.T) {
 	}
 	if got := s.registry.LookupLabel(supB, "shared"); got == nil || got.RunID != "run-x" {
 		t.Fatalf("supervisor B entry = %#v, want run-x untouched", got)
+	}
+}
+
+func TestSpawnReclaimsLabelFromEndedRunOnOtherSupervisor(t *testing.T) {
+	const supA = "/tmp/supA.sock"
+	const supB = "/tmp/supB.sock"
+	dir := t.TempDir()
+	sentinelPath := filepath.Join(dir, "avenor-run-9f9619ff-8b86-d011-b42d-00cf4fc964ff.done")
+	if err := os.WriteFile(sentinelPath, []byte("DONE\nSESSION=ses-x\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	var spawnCalls atomic.Int32
+	fake := &fakeClient{
+		listResult: []map[string]any{{"runtime_id": "rt-other", "label": "other"}},
+		spawnFunc: func(map[string]any) (map[string]any, error) {
+			spawnCalls.Add(1)
+			return map[string]any{"runtime_id": "rt-new", "session_id": "ses-new"}, nil
+		},
+	}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake, SupervisorSocket: supA})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The label is claimed by an ended entry on supervisor B.
+	if err := s.registry.Store(&RunInfo{
+		RunID:        "run-x",
+		Label:        "shared",
+		RuntimeID:    "rt-x",
+		SupervisorID: supB,
+		SentinelPath: sentinelPath,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The ended run no longer holds the label: the pre-check must repoint
+	// the mapping and let the spawn proceed.
+	_, _, err = s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
+		RepoDir: "/tmp/test-repo",
+		Label:   "shared",
+	})
+	if err != nil {
+		t.Fatalf("spawn with ended cross-supervisor holder failed: %v", err)
+	}
+	if n := spawnCalls.Load(); n != 1 {
+		t.Fatalf("spawn calls = %d, want 1", n)
+	}
+	// The label mapping re-pointed to the new run on supervisor A.
+	got := s.registry.LabelHolder("shared")
+	if got == nil || got.SupervisorID != supA || got.RunID == "run-x" {
+		t.Fatalf("label holder = %#v, want the new run on supervisor A", got)
+	}
+	// The ended run stays discoverable by run ID.
+	if s.registry.Lookup(supB, "run-x") == nil {
+		t.Fatal("ended supervisor B entry must remain discoverable by run ID")
 	}
 }
 

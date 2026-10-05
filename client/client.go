@@ -127,11 +127,6 @@ func Dial(socketPath string) (*Client, error) {
 // may still be usable.
 func (c *Client) Closed() bool { return c.closed.Load() }
 
-// ClosedChan returns a channel that is closed exactly once when the
-// connection reaches a terminal state. It is closed at the same sites that
-// set the closed flag; clients constructed without Dial have a nil channel.
-func (c *Client) ClosedChan() <-chan struct{} { return c.closedCh }
-
 // markClosed sets the closed flag and closes closedCh exactly once, so the
 // three close sites (Close, readLoop exit, failed write) can race safely.
 // Clients constructed without Dial have a nil channel and only get the flag.

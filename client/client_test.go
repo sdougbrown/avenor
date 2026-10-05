@@ -1077,12 +1077,12 @@ func TestClientClosedOnServerDisconnect(t *testing.T) {
 	// readLoop observes the EOF and marks the client closed; wait on the
 	// close channel with a deadline rather than polling.
 	select {
-	case <-c.ClosedChan():
+	case <-c.closedCh:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Closed() never became true after server disconnect")
 	}
 	if !c.Closed() {
-		t.Fatal("ClosedChan closed but Closed() is false")
+		t.Fatal("closedCh closed but Closed() is false")
 	}
 
 	// A new Call after close must fail immediately (no 30s wait): the

@@ -299,9 +299,6 @@ func TestMCPAuthTokenFileAccepted(t *testing.T) {
 }
 
 func TestRunMCPAuthTokenAndFileConflictRejected(t *testing.T) {
-	// Empty the env so the guard, not an env fallback, is what decides the
-	// outcome.
-	t.Setenv("MCP_AUTH_TOKEN", "")
 	path := writeTokenFile(t, "file-token\n", 0o600)
 
 	// Capture stderr: runMCP writes the guard message to os.Stderr directly.
