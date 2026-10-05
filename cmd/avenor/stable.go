@@ -10,12 +10,17 @@ import (
 	"github.com/sdougbrown/avenor/internal/stable"
 )
 
+// newSupervisorFn is the supervisor constructor used by runStable. Tests patch
+// it to capture the Config without relying on Run's side effects.
+var newSupervisorFn = stable.NewSupervisor
+
 func runStable(args []string) int {
 	fs := flag.NewFlagSet("stable", flag.ContinueOnError)
 	controlSocket := fs.String("control-socket", "", "unix socket path for the control plane (required)")
 	httpDebug := fs.String("http-debug", "", "http debug adapter bind address")
 	maxRuntimes := fs.Int("max-runtimes", 16, "maximum concurrent child runtimes")
 	maxTreeBudget := fs.Int("max-tree-budget", admission.DefaultTreeBudget, "maximum concurrent runtimes across the whole supervisor tree including nested supervisors (0 uses the default)")
+	idempotencyCapacity := fs.Int("idempotency-capacity", 1024, "idempotent-spawn store capacity: completed entries plus in-flight reservations (must be > 0)")
 	idleTimeout := fs.Duration("idle-timeout", 0, "exit after this duration with no child runtimes and no control connections")
 	shutdownTimeout := fs.Duration("shutdown-timeout", 10*time.Second, "graceful shutdown timeout before killing children")
 	parkedTimeout := fs.Duration("parked-timeout", 30*time.Minute, "how long a finished runtime stays parked awaiting a follow-up prompt before it is reaped (0 = park until shutdown)")
@@ -30,6 +35,10 @@ func runStable(args []string) int {
 		fmt.Fprintln(os.Stderr, "avenor stable: --control-socket is required")
 		return 1
 	}
+	if *idempotencyCapacity <= 0 {
+		fmt.Fprintln(os.Stderr, "avenor stable: --idempotency-capacity must be greater than 0")
+		return 1
+	}
 
 	// A nested supervisor inherits its parent's tree budget via the environment.
 	// A root supervisor (no inherited budget) creates one in Avenor-owned
@@ -42,12 +51,13 @@ func runStable(args []string) int {
 		fmt.Fprintf(os.Stderr, "avenor stable: remove stale tombstone: %v\n", err)
 	}
 
-	sup := stable.NewSupervisor(stable.Config{
+	sup := newSupervisorFn(stable.Config{
 		ControlSocket:              *controlSocket,
 		TombstoneFile:              tombstoneFile,
 		HTTPDebug:                  *httpDebug,
 		MaxRuntimes:                *maxRuntimes,
 		MaxTreeBudget:              *maxTreeBudget,
+		IdempotencyCapacity:        *idempotencyCapacity,
 		TreeBudgetFile:             treeBudgetFile,
 		IdleTimeout:                *idleTimeout,
 		ShutdownTimeout:            *shutdownTimeout,

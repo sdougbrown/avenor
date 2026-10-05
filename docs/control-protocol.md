@@ -95,6 +95,8 @@ Error codes:
 | -32001 | No pending permission (tried to answer a request that doesn't exist) |
 | -32010 | Permission denied (not owner) |
 | -32020 | Backend prompt unsupported |
+| -32030 | Idempotency store capacity exceeded |
+| -32031 | Idempotency key conflict (same key, different intent) |
 
 ## Notifications (Server → Client)
 

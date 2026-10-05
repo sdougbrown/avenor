@@ -1325,6 +1325,14 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 				}
 				return failure(req.ID, -32050, ce.Error(), data)
 			}
+			var ice *IdempotencyConflictError
+			if errors.As(err, &ice) {
+				return failure(req.ID, -32031, ice.Error(), nil)
+			}
+			var icap *IdempotencyCapacityError
+			if errors.As(err, &icap) {
+				return failure(req.ID, -32030, icap.Error(), nil)
+			}
 			return failure(req.ID, -32000, err.Error(), nil)
 		}
 		return success(req.ID, result)

@@ -752,6 +752,56 @@ func TestAvenorStatusListFiltersRegistryBySupervisor(t *testing.T) {
 
 // --- PR2 verdict: validate label availability before spawn ---
 
+func TestSpawnSkipsLabelPrecheckForKeyedSpawn(t *testing.T) {
+	var spawnCalls atomic.Int32
+	fake := &fakeClient{
+		listResult: []map[string]any{{"runtime_id": "rt-live", "label": "taken"}},
+		spawnFunc: func(map[string]any) (map[string]any, error) {
+			spawnCalls.Add(1)
+			return map[string]any{"runtime_id": "rt-new", "session_id": "ses-new"}, nil
+		},
+	}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A keyed spawn whose label is live-claimed skips the pre-check: the
+	// request reaches the supervisor's idempotency gate (modeled here as the
+	// Spawn call).
+	_, spawnRes, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
+		RepoDir:        "/tmp/test-repo",
+		Label:          "taken",
+		IdempotencyKey: "k1",
+	})
+	if err != nil {
+		t.Fatalf("keyed spawn with live-claimed label errored: %v", err)
+	}
+	if n := spawnCalls.Load(); n != 1 {
+		t.Fatalf("spawn calls = %d, want 1 (pre-check skipped, gate consulted)", n)
+	}
+	// The no-sentinel response exercises the keyed re-derivation's false
+	// branch: the run must retain the fresh identity (run_id not overwritten
+	// to empty) and the registry entry must stay intact.
+	runID, _ := spawnRes.(map[string]any)["run_id"].(string)
+	if runID == "" {
+		t.Fatal("expected non-empty run_id")
+	}
+	ri := s.registry.LookupUnique(runID)
+	if ri == nil {
+		t.Fatal("expected the registry entry for the spawned run")
+	}
+	if ri.RunID != runID {
+		t.Fatalf("registry run = %s, want %s", ri.RunID, runID)
+	}
+	if ri.Label != "taken" {
+		t.Fatalf("registry label = %s, want taken", ri.Label)
+	}
+	if ri.RuntimeID == "" {
+		t.Fatal("expected non-empty registry runtime_id")
+	}
+}
+
 func TestSpawnRejectsLabelClaimedByLiveRun(t *testing.T) {
 	var spawnCalls atomic.Int32
 	fake := &fakeClient{
@@ -1180,5 +1230,63 @@ func TestLookupRunResolvesCachedLabelAfterRuntimeLeavesList(t *testing.T) {
 	}
 	if ri == nil || ri.RunID != "run-x" || ri.RuntimeID != "rt-x" {
 		t.Fatalf("lookupRun = %#v, want run-x (rt-x)", ri)
+	}
+}
+func TestFollowUpSkipsLabelPrecheckForKeyedFollowUp(t *testing.T) {
+	dir := t.TempDir()
+	sentinelPath := filepath.Join(dir, "avenor-run-"+rehydrateUUID+".done")
+	if err := os.WriteFile(sentinelPath, []byte("DONE\nSESSION=ses_re_1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	var spawnCalls atomic.Int32
+	fake := &fakeClient{
+		listResult: []map[string]any{
+			rehydrateEntry(func(entry map[string]any) { entry["sentinel_file"] = sentinelPath }),
+			{"runtime_id": "rt-live", "label": "taken"},
+		},
+		spawnFunc: func(map[string]any) (map[string]any, error) {
+			spawnCalls.Add(1)
+			return map[string]any{"runtime_id": "rt-new", "session_id": "ses-new"}, nil
+		},
+	}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A keyed follow-up whose label is live-claimed skips the pre-check: the
+	// request reaches the supervisor's idempotency gate (modeled here as the
+	// Spawn call).
+	_, fuRes, err := s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
+		RunID:          rehydrateUUID,
+		Message:        "continue",
+		Label:          "taken",
+		IdempotencyKey: "k1",
+	})
+	if err != nil {
+		t.Fatalf("keyed follow-up with live-claimed label errored: %v", err)
+	}
+	if n := spawnCalls.Load(); n != 1 {
+		t.Fatalf("spawn calls = %d, want 1 (pre-check skipped, gate consulted)", n)
+	}
+	// The no-sentinel response exercises the keyed re-derivation's false
+	// branch: the follow-up must retain the fresh identity (run_id not
+	// overwritten to empty) and the registry entry must stay intact.
+	runID, _ := fuRes.(map[string]any)["run_id"].(string)
+	if runID == "" {
+		t.Fatal("expected non-empty run_id")
+	}
+	ri := s.registry.LookupUnique(runID)
+	if ri == nil {
+		t.Fatal("expected the registry entry for the follow-up run")
+	}
+	if ri.RunID != runID {
+		t.Fatalf("registry run = %s, want %s", ri.RunID, runID)
+	}
+	if ri.Label != "taken" {
+		t.Fatalf("registry label = %s, want taken", ri.Label)
+	}
+	if ri.RuntimeID == "" {
+		t.Fatal("expected non-empty registry runtime_id")
 	}
 }
