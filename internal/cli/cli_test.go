@@ -4144,12 +4144,20 @@ func TestAutoApprovedResolutionAcceptsMatchingManualAnswer(t *testing.T) {
 		resultCh <- resolvePermission(context.Background(), &cliFakeProvider{}, nil, cs, event, "ses_auto", "rt_1", "req_auto", true, 0)
 	}()
 
-	deadline := time.Now().Add(5 * time.Second)
-	for cs.PermissionResolverState("rt_1", "req_auto") != control.PermissionResolverResolved {
-		if time.Now().After(deadline) {
-			t.Fatal("auto-approve resolution was not recorded")
-		}
-		time.Sleep(5 * time.Millisecond)
+	// resolvePermission records the resolution (MarkPermissionClaimResolved)
+	// before returning, so receiving the result is a channel-based signal that
+	// the claim is already Resolved — no polling of the resolver state needed.
+	var res permissionResult
+	select {
+	case res = <-resultCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("resolvePermission did not return")
+	}
+	if res.err != nil {
+		t.Fatalf("resolvePermission error: %v", res.err)
+	}
+	if res.source != "avenor" || res.optionID != "allow_it" {
+		t.Fatalf("result = %+v, want avenor/allow_it", res)
 	}
 
 	if !cs.AnswerPendingPermission("rt_1", "req_auto", "allow_it", "") {
@@ -4161,17 +4169,81 @@ func TestAutoApprovedResolutionAcceptsMatchingManualAnswer(t *testing.T) {
 	if cs.AnswerPendingPermission("rt_1", "req_auto", "allow_it", "different note") {
 		t.Fatal("repeat with different message after auto-approve was accepted")
 	}
+}
 
+// TestAutoApprovedResolutionWithoutAllowOptionRecordsEmptyAndRejectsReplay
+// drives the auto-approve path with no normalizable allow option, so
+// firstOptionKind records a resolution of ("", "") on the control server.
+// The safety of that empty recording rests on ResolvedPermissionMatches
+// rejecting it: a replay of the universally guessable ("", "") must not be
+// accepted as a matching repeat.
+func TestAutoApprovedResolutionWithoutAllowOptionRecordsEmptyAndRejectsReplay(t *testing.T) {
+	cs := control.NewServer(control.NewState("run_1", "", 0))
+	socketPath := shortControlSocketPath(t)
+	if err := cs.Start(socketPath); err != nil {
+		t.Fatalf("start control server: %v", err)
+	}
+	defer cs.Stop()
+
+	// No normalizable "allow" option: the only option is a reject, so
+	// firstOptionKind(options, "allow") returns ("", "").
+	event := events.Event{
+		Event:     "permission.request",
+		SessionID: "ses_auto",
+		Fields: map[string]any{
+			"request_id": "req_auto",
+			"options": []any{
+				map[string]any{"optionId": "deny_only", "kind": "reject"},
+			},
+		},
+	}
+	provider := &cliFakeProvider{}
+	resultCh := make(chan permissionResult, 1)
+	// The caller (WaitForSession) prepares the claim before resolving.
+	if !cs.PreparePermissionClaim("rt_1", "req_auto", control.PermissionResolverAutomatic, nil) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+	go func() {
+		resultCh <- resolvePermission(context.Background(), provider, nil, cs, event, "ses_auto", "rt_1", "req_auto", true, 0)
+	}()
+
+	// resolvePermission records the resolution before returning, so receiving
+	// the result signals the claim is Resolved with the ("", "") recording.
+	var res permissionResult
 	select {
-	case res := <-resultCh:
-		if res.err != nil {
-			t.Fatalf("resolvePermission error: %v", res.err)
-		}
-		if res.source != "avenor" || res.optionID != "allow_it" {
-			t.Fatalf("result = %+v, want avenor/allow_it", res)
-		}
+	case res = <-resultCh:
 	case <-time.After(5 * time.Second):
 		t.Fatal("resolvePermission did not return")
+	}
+	if res.err != nil {
+		t.Fatalf("resolvePermission error: %v", res.err)
+	}
+	if res.source != "avenor" || res.optionID != "" || res.kind != "" {
+		t.Fatalf("result = %+v, want avenor with empty option/kind", res)
+	}
+	if !provider.answerResponse.Allow {
+		t.Fatal("answerResponse.Allow = false, want true")
+	}
+	if provider.answerResponse.OptionID != "" {
+		t.Fatalf("answerResponse.OptionID = %q, want empty (no allow option)", provider.answerResponse.OptionID)
+	}
+
+	// The resolution is recorded as ("", ""): the claim is resolved, but the
+	// empty recording must not match the empty replay.
+	if resolved, matches := cs.ResolvedPermissionMatches("rt_1", "req_auto", "", ""); !resolved || matches {
+		t.Fatalf("ResolvedPermissionMatches(\"\", \"\") = (%v, %v), want (true, false)", resolved, matches)
+	}
+	// A replay of the empty answer through the control layer must be rejected,
+	// not accepted as a matching repeat.
+	if cs.AnswerPendingPermission("rt_1", "req_auto", "", "") {
+		t.Fatal("empty replay after auto-approve was accepted; the empty recording must not match")
+	}
+	if got := cs.DeliverPendingPermission("rt_1", "req_auto", "", ""); got != control.PermissionAnswerAlreadyResolved {
+		t.Fatalf("empty replay delivery = %v, want AlreadyResolved (conflict, not AlreadyResolvedSame)", got)
+	}
+	// A replay with a real option ID also must not match the empty recording.
+	if cs.AnswerPendingPermission("rt_1", "req_auto", "deny_only", "") {
+		t.Fatal("real-option replay after auto-approve was accepted; the empty recording must not match")
 	}
 }
 

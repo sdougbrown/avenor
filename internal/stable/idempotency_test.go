@@ -69,10 +69,15 @@ func (p *idempotencyFailingProvider) Start(context.Context, runtime.StartOptions
 // in-flight spawn instead of serializing into completed-cache hits.
 type idempotencyGatedProvider struct {
 	idempotencyTestProvider
-	gate chan struct{}
+	gate    chan struct{}
+	started chan struct{}
 }
 
 func (p *idempotencyGatedProvider) Start(ctx context.Context, opts runtime.StartOptions) (runtime.Session, error) {
+	// Signal that the holder has entered Start, which only happens after the
+	// idempotency store has reserved the in-flight slot. Tests wait on this
+	// instead of polling the store's internal map.
+	close(p.started)
 	select {
 	case <-p.gate:
 	case <-ctx.Done():
@@ -170,7 +175,7 @@ func TestIdempotencySequentialIdenticalSpawnsOneRuntime(t *testing.T) {
 // serializing into a completed-cache hit.
 func TestIdempotencyConcurrentIdenticalSpawnsOneRuntime(t *testing.T) {
 	const n = 8
-	provider := &idempotencyGatedProvider{gate: make(chan struct{})}
+	provider := &idempotencyGatedProvider{gate: make(chan struct{}), started: make(chan struct{})}
 	sup := newIdempotencySupervisor(t, Config{}, provider)
 	defer func() { _ = sup.broker.Stop() }()
 	dir := t.TempDir()
@@ -259,7 +264,7 @@ func TestIdempotencyHashMismatchConflict(t *testing.T) {
 // conflicts without starting a second runtime.
 func TestIdempotencyInFlightHashMismatchConflict(t *testing.T) {
 	gate := make(chan struct{})
-	provider := &idempotencyGatedProvider{gate: gate}
+	provider := &idempotencyGatedProvider{gate: gate, started: make(chan struct{})}
 	sup := newIdempotencySupervisor(t, Config{}, provider)
 	defer func() { _ = sup.broker.Stop() }()
 	dir := t.TempDir()
@@ -282,19 +287,13 @@ func TestIdempotencyInFlightHashMismatchConflict(t *testing.T) {
 		}
 		results <- result{res: res, err: nil}
 	}()
-	// Wait until the first spawn has reserved its in-flight slot.
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		sup.idempotency.mu.Lock()
-		inflight := len(sup.idempotency.inflight)
-		sup.idempotency.mu.Unlock()
-		if inflight == 1 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for the in-flight reservation")
-		}
-		time.Sleep(10 * time.Millisecond)
+	// Wait until the first spawn has reserved its in-flight slot. The
+	// provider's Start is only reached after the store has reserved the slot,
+	// so its started signal is a faithful stand-in for the internal map.
+	select {
+	case <-provider.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the in-flight reservation")
 	}
 	_, err := sup.Spawn(idempotencySpawnRaw(t, "key_a", "different prompt", dir))
 	if !errors.As(err, new(*control.IdempotencyConflictError)) {
