@@ -51,6 +51,7 @@ type statusRun struct {
 	FinalOutputTruncated *bool          `json:"final_output_truncated,omitempty"`
 	StartedAt            *int64         `json:"started_at,omitempty"`
 	TimedOut             *bool          `json:"timed_out,omitempty"`
+	WaitClamped          *bool          `json:"wait_clamped,omitempty"`
 }
 
 // statusToolOutput is the structured output of the avenor_status tool. The
@@ -106,6 +107,7 @@ func statusRunFromMap(m map[string]any) statusRun {
 	run.FinalOutputTruncated = boolPtr(m, "final_output_truncated")
 	run.StartedAt = int64Ptr(m, "started_at")
 	run.TimedOut = boolPtr(m, "timed_out")
+	run.WaitClamped = boolPtr(m, "wait_clamped")
 	return run
 }
 

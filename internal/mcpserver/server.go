@@ -54,6 +54,8 @@ type Options struct {
 	IdleTimeout      time.Duration
 	Addr             string
 	AuthToken        string
+	MaxWait          time.Duration
+	AllowedHosts     []string
 	ControlClient    ControlClient
 }
 
@@ -161,6 +163,7 @@ type eventsArgs struct {
 	RunID        string   `json:"run_id" jsonschema:"required run ID or label"`
 	Types        []string `json:"types,omitempty" jsonschema:"optional event types to filter by"`
 	Limit        int      `json:"limit,omitempty" jsonschema:"optional max events to return (default 50)"`
+	AfterSeq     *int64   `json:"after_seq,omitempty" jsonschema:"optional sequence cursor: return only events with seq > after_seq, oldest-first"`
 	SupervisorID string   `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
 }
 
@@ -291,12 +294,12 @@ func NewServer(opts Options) (*Server, error) {
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
 		Name:        "avenor_status",
-		Description: "Get lifecycle status of avenor runs; optionally wait for terminal, phase_change, turn_complete, or permission. Without run_id, returns an object with runs (array of status objects) and count.",
+		Description: "Get lifecycle status of avenor runs; optionally wait for terminal, phase_change, turn_complete, or permission. Without run_id, returns an object with runs (array of status objects) and count. The wait budget is approximate: a single underlying status poll may add up to its own timeout.",
 	}, s.handleAvenorStatus)
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
 		Name:        "avenor_result",
-		Description: "Wait for a run to finish and return its complete final output",
+		Description: "Wait for a run to finish and return its complete final output. The wait budget is approximate: a single underlying status poll may add up to its own timeout.",
 	}, s.handleAvenorResult)
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
@@ -331,7 +334,7 @@ func NewServer(opts Options) (*Server, error) {
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
 		Name:        "avenor_workflow_wait",
-		Description: "Wait for a workflow to reach a terminal state or until timeout",
+		Description: "Wait for a workflow to reach a terminal state or until timeout. The wait budget is approximate: a single underlying wait may add up to its own timeout.",
 	}, s.handleAvenorWorkflowWait)
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
@@ -360,6 +363,18 @@ func NewServer(opts Options) (*Server, error) {
 	}, s.handleAvenorWorkflowControllerStatus)
 
 	return s, nil
+}
+
+// clampWait applies the configured wait budget. A requested duration of 0
+// means unbounded. Returns the effective wait and whether the budget bit.
+func (s *Server) clampWait(requested time.Duration) (time.Duration, bool) {
+	if s.opts.MaxWait <= 0 {
+		return requested, false
+	}
+	if requested == 0 || requested > s.opts.MaxWait {
+		return s.opts.MaxWait, true
+	}
+	return requested, false
 }
 
 func (s *Server) Close() error {
@@ -395,13 +410,18 @@ func (s *Server) handleAvenorStatus(ctx context.Context, req *mcp.CallToolReques
 		return nil, statusToolOutput{}, fmt.Errorf("run_id is required when wait_for is set")
 	}
 
-	var deadline time.Time
+	var requested time.Duration
 	if args.Timeout != "" {
 		seconds, err := parseTimeoutSeconds(args.Timeout)
 		if err != nil {
 			return nil, statusToolOutput{}, err
 		}
-		deadline = s.clock().Add(time.Duration(seconds) * time.Second)
+		requested = time.Duration(seconds) * time.Second
+	}
+	effective, clamped := s.clampWait(requested)
+	var deadline time.Time
+	if effective > 0 {
+		deadline = s.clock().Add(effective)
 	}
 
 	cl, cleanup, err := s.getClientForSupervisor(args.SupervisorID)
@@ -464,6 +484,9 @@ func (s *Server) handleAvenorStatus(ctx context.Context, req *mcp.CallToolReques
 	}
 	if timedOut {
 		ts["timed_out"] = true
+		if clamped {
+			ts["wait_clamped"] = true
+		}
 	}
 	return nil, statusToolOutput{statusRun: statusRunFromMap(shapeStatusForView(ts, args.View))}, nil
 }
@@ -533,7 +556,7 @@ func shapeStatusForView(status map[string]any, view string) map[string]any {
 	}
 
 	result := make(map[string]any)
-	for _, key := range []string{"run_id", "label", "status", "runtime_id", "phase", "phase_label", "pending_permission", "permission", "latest_seq", "timed_out"} {
+	for _, key := range []string{"run_id", "label", "status", "runtime_id", "phase", "phase_label", "pending_permission", "permission", "latest_seq", "timed_out", "wait_clamped"} {
 		if value, ok := status[key]; ok {
 			result[key] = value
 		}
@@ -634,13 +657,18 @@ func (s *Server) handleAvenorResult(ctx context.Context, req *mcp.CallToolReques
 	}
 
 	wait := args.Wait == nil || *args.Wait
-	var deadline time.Time
+	var requested time.Duration
 	if args.Timeout != "" {
 		seconds, err := parseTimeoutSeconds(args.Timeout)
 		if err != nil {
 			return nil, nil, err
 		}
-		deadline = s.clock().Add(time.Duration(seconds) * time.Second)
+		requested = time.Duration(seconds) * time.Second
+	}
+	effective, clamped := s.clampWait(requested)
+	var deadline time.Time
+	if effective > 0 {
+		deadline = s.clock().Add(effective)
 	}
 
 	supervisorID := s.resultSupervisorID(args.RunID, args.SupervisorID)
@@ -664,7 +692,11 @@ func (s *Server) handleAvenorResult(ctx context.Context, req *mcp.CallToolReques
 	if isTerminalStatus(status) && !hasPendingPermission(status) {
 		s.retrieveFinalOutput(cl, args.RunID, status)
 	}
-	return nil, resultFromStatus(status, timedOut), nil
+	result := resultFromStatus(status, timedOut)
+	if clamped && timedOut {
+		result["wait_clamped"] = true
+	}
+	return nil, result, nil
 }
 
 type resolvedSpawnIdentity struct {
@@ -1022,7 +1054,7 @@ func (s *Server) handleAvenorEvents(ctx context.Context, req *mcp.CallToolReques
 		limit = 50
 	}
 
-	events, err := readEvents(ri.EventLogPath, args.Types, limit)
+	events, latestSeq, err := readEvents(ri.EventLogPath, args.Types, limit, args.AfterSeq)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read events: %w", err)
 	}
@@ -1030,7 +1062,7 @@ func (s *Server) handleAvenorEvents(ctx context.Context, req *mcp.CallToolReques
 		events = []map[string]any{}
 	}
 
-	return nil, map[string]any{"events": events}, nil
+	return nil, map[string]any{"events": events, "latest_seq": latestSeq}, nil
 }
 
 func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequest, args followUpArgs) (*mcp.CallToolResult, any, error) {
@@ -1245,22 +1277,30 @@ func (s *Server) handleAvenorWorkflowWait(ctx context.Context, req *mcp.CallTool
 	if args.WorkflowID == "" {
 		return nil, nil, fmt.Errorf("workflow_id is required")
 	}
-	timeout := 30 * time.Second
+	var requested time.Duration = 30 * time.Second
 	if args.Timeout != "" {
 		seconds, err := parseTimeoutSeconds(args.Timeout)
 		if err != nil {
 			return nil, nil, err
 		}
-		timeout = time.Duration(seconds) * time.Second
+		requested = time.Duration(seconds) * time.Second
 	}
+	effective, clamped := s.clampWait(requested)
 	cl, cleanup, err := s.getClientForSupervisor(args.SupervisorID)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer cleanup()
-	result, err := cl.WorkflowWait(args.WorkflowID, timeout)
+	result, err := cl.WorkflowWait(args.WorkflowID, effective)
 	if err != nil {
 		return nil, nil, fmt.Errorf("workflow wait: %w", err)
+	}
+	if clamped {
+		timedOut, _ := result["timed_out"].(bool)
+		terminal, _ := result["terminal"].(bool)
+		if timedOut && !terminal {
+			result["wait_clamped"] = true
+		}
 	}
 	return nil, result, nil
 }
@@ -1540,7 +1580,7 @@ func (s *Server) HTTPHandler() http.Handler {
 func (s *Server) authenticatedHTTPHandler(next http.Handler) http.Handler {
 	token := strings.TrimSpace(s.opts.AuthToken)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !isAllowedHTTPHost(r.Host) || !isAllowedHTTPOrigin(r.Header.Get("Origin")) {
+		if !s.isAllowedHTTPHost(r.Host) || !s.isAllowedHTTPOrigin(r.Header.Get("Origin")) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
@@ -1587,7 +1627,7 @@ func bearerTokenMatches(header, want string) bool {
 	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
-func isAllowedHTTPOrigin(origin string) bool {
+func (s *Server) isAllowedHTTPOrigin(origin string) bool {
 	if origin == "" {
 		return true
 	}
@@ -1595,15 +1635,41 @@ func isAllowedHTTPOrigin(origin string) bool {
 	if err != nil {
 		return false
 	}
-	return u.Scheme == "http" && isLoopbackHost(u.Hostname())
+	if u.Scheme == "http" && isLoopbackHost(u.Hostname()) {
+		return true
+	}
+	if u.Scheme == "http" || u.Scheme == "https" {
+		hostname := u.Hostname()
+		if !isASCIIHost(hostname) {
+			return false
+		}
+		for _, entry := range s.opts.AllowedHosts {
+			if strings.EqualFold(hostname, entry) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
-func isAllowedHTTPHost(hostport string) bool {
+func (s *Server) isAllowedHTTPHost(hostport string) bool {
 	host, _, err := net.SplitHostPort(hostport)
 	if err != nil {
 		host = hostport
 	}
-	return isLoopbackHost(strings.Trim(host, "[]"))
+	host = strings.Trim(host, "[]")
+	if isLoopbackHost(host) {
+		return true
+	}
+	if !isASCIIHost(host) {
+		return false
+	}
+	for _, entry := range s.opts.AllowedHosts {
+		if strings.EqualFold(host, entry) {
+			return true
+		}
+	}
+	return false
 }
 
 func isLoopbackHost(host string) bool {
@@ -1612,6 +1678,19 @@ func isLoopbackHost(host string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// isASCIIHost reports whether s contains only ASCII runes. Non-ASCII hosts are
+// rejected before EqualFold because Unicode simple folding (e.g. the KELVIN
+// SIGN U+212A folding to 'k') could otherwise let a non-ASCII host match an
+// allowlist entry.
+func isASCIIHost(s string) bool {
+	for _, r := range s {
+		if r > 0x7F {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) RegisteredToolNames() []string {

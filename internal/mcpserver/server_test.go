@@ -2929,6 +2929,69 @@ func TestAvenorEventsNoFile(t *testing.T) {
 	}
 }
 
+func TestAvenorEventsAfterSeqFlowsToLatestSeq(t *testing.T) {
+	dir := t.TempDir()
+	eventLogPath := filepath.Join(dir, "events-cursor.log")
+	content := `{"event":"start","seq":1,"type":"lifecycle"}
+{"event":"prompt","seq":2,"type":"turn","text":"hello"}
+{"event":"done","seq":3,"type":"lifecycle"}
+`
+	if err := os.WriteFile(eventLogPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := &fakeClient{}
+	s, err := NewServer(Options{
+		Transport:     "stdio",
+		NoAutostart:   true,
+		ControlClient: fake,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.registry.Store(&RunInfo{
+		RunID:        "run-events-5",
+		Label:        "events-cursor-test",
+		RuntimeID:    "rt_events_5",
+		EventLogPath: eventLogPath,
+	})
+
+	// A mid-log cursor (seq 1) resumes after it: only seq 2 and 3 remain.
+	cursor := int64(1)
+	_, result, err := s.handleAvenorEvents(context.Background(), nil, eventsArgs{
+		RunID:    "run-events-5",
+		AfterSeq: &cursor,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The response is a raw map, not a typed struct: a regression renaming
+	// "latest_seq" must fail the key lookup, not a field access.
+	rm, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map[string]any, got %T", result)
+	}
+	events, ok := rm["events"].([]map[string]any)
+	if !ok {
+		t.Fatalf("expected events []map[string]any, got %T", rm["events"])
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events after cursor 1, got %d", len(events))
+	}
+	if events[0]["seq"] != float64(2) {
+		t.Errorf("expected first event seq=2, got %v", events[0]["seq"])
+	}
+	if events[1]["seq"] != float64(3) {
+		t.Errorf("expected second event seq=3, got %v", events[1]["seq"])
+	}
+	// after_seq flows to latest_seq: the safe resume point is the highest
+	// seq among the returned events.
+	if got, ok := rm["latest_seq"].(int64); !ok || got != 3 {
+		t.Fatalf("latest_seq = %#v, want int64 3", rm["latest_seq"])
+	}
+}
+
 func TestAvenorFollowUp(t *testing.T) {
 	dir := t.TempDir()
 	sentinelPath := filepath.Join(dir, "followup-test.done")
@@ -3909,4 +3972,163 @@ func TestAvenorShutdownWithExplicitLifecyclePath(t *testing.T) {
 	if s.lifecycle != nil {
 		t.Error("lifecycle was not cleared after shutdown")
 	}
+}
+
+func TestServerIsAllowedHTTPHost(t *testing.T) {
+	empty := &Server{opts: Options{}}
+	populated := &Server{opts: Options{AllowedHosts: []string{"box.example.ts.net", "BOX.example.TS.net"}}}
+
+	tests := []struct {
+		name     string
+		s        *Server
+		hostport string
+		want     bool
+	}{
+		{"loopback localhost empty", empty, "localhost", true},
+		{"loopback localhost populated", populated, "localhost", true},
+		{"loopback 127.0.0.1 empty", empty, "127.0.0.1:3748", true},
+		{"loopback ::1 populated", populated, "[::1]:3748", true},
+		{"exact host with port", populated, "box.example.ts.net:8443", true},
+		{"case variant entry", populated, "Box.Example.ts.net", true},
+		{"lookalike prefix", populated, "evil-box.example.ts.net", false},
+		{"lookalike suffix", populated, "box.example.ts.net.evil.com", false},
+		{"lookalike suffix-only", populated, "ts.net", false},
+		{"unlisted host empty allowlist", empty, "box.example.ts.net", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.s.isAllowedHTTPHost(tt.hostport); got != tt.want {
+				t.Fatalf("isAllowedHTTPHost(%q) = %v, want %v", tt.hostport, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestServerIsAllowedHTTPOrigin(t *testing.T) {
+	empty := &Server{opts: Options{}}
+	populated := &Server{opts: Options{AllowedHosts: []string{"box.example.ts.net"}}}
+
+	tests := []struct {
+		name   string
+		s      *Server
+		origin string
+		want   bool
+	}{
+		{"empty origin empty allowlist", empty, "", true},
+		{"empty origin populated", populated, "", true},
+		{"loopback http empty", empty, "http://localhost", true},
+		{"loopback http with port populated", populated, "http://127.0.0.1:3748", true},
+		{"https exact host", populated, "https://box.example.ts.net", true},
+		{"http exact host", populated, "http://box.example.ts.net", true},
+		{"https with port", populated, "https://box.example.ts.net:8443", true},
+		{"http with port", populated, "http://box.example.ts.net:8443", true},
+		{"lookalike prefix", populated, "https://evil-box.example.ts.net", false},
+		{"lookalike suffix", populated, "https://box.example.ts.net.evil.com", false},
+		{"lookalike suffix-only", populated, "https://ts.net", false},
+		{"unlisted host empty allowlist", empty, "https://box.example.ts.net", false},
+		{"loopback https not allowed", empty, "https://localhost", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.s.isAllowedHTTPOrigin(tt.origin); got != tt.want {
+				t.Fatalf("isAllowedHTTPOrigin(%q) = %v, want %v", tt.origin, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestServerIsAllowedHTTPHostRejectsNonASCII(t *testing.T) {
+	// The KELVIN SIGN (U+212A) simple-folds to 'k', so a non-ASCII host could
+	// otherwise match an allowlist entry via EqualFold.
+	s := &Server{opts: Options{AllowedHosts: []string{"kbox.example.ts.net"}}}
+	const kelvin = "\u212A"
+	if got := s.isAllowedHTTPHost(kelvin + "box.example.ts.net"); got {
+		t.Fatalf("isAllowedHTTPHost(%q) = true, want false (non-ASCII host)", kelvin+"box.example.ts.net")
+	}
+}
+
+func TestServerIsAllowedHTTPOriginRejectsNonASCII(t *testing.T) {
+	s := &Server{opts: Options{AllowedHosts: []string{"kbox.example.ts.net"}}}
+	const kelvin = "\u212A"
+	if got := s.isAllowedHTTPOrigin("https://" + kelvin + "box.example.ts.net"); got {
+		t.Fatalf("isAllowedHTTPOrigin(%q) = true, want false (non-ASCII origin)", "https://"+kelvin+"box.example.ts.net")
+	}
+}
+
+func TestServerAuthenticatedHTTPHandlerHostChecks(t *testing.T) {
+	s := &Server{opts: Options{AuthToken: "t", AllowedHosts: []string{"box.example.ts.net"}}}
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	ts := httptest.NewServer(s.authenticatedHTTPHandler(next))
+	defer ts.Close()
+
+	t.Run("unlisted host rejected", func(t *testing.T) {
+		req, err := http.NewRequest(http.MethodGet, ts.URL, nil)
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		req.Host = "unlisted.example.ts.net"
+		resp, err := ts.Client().Do(req)
+		if err != nil {
+			t.Fatalf("Do: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+		}
+	})
+
+	t.Run("allowed host with valid token passes through", func(t *testing.T) {
+		req, err := http.NewRequest(http.MethodGet, ts.URL, nil)
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		req.Host = "box.example.ts.net"
+		req.Header.Set("Authorization", "Bearer t")
+		resp, err := ts.Client().Do(req)
+		if err != nil {
+			t.Fatalf("Do: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+		}
+	})
+
+	t.Run("unlisted origin rejected", func(t *testing.T) {
+		req, err := http.NewRequest(http.MethodGet, ts.URL, nil)
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		req.Host = "box.example.ts.net"
+		req.Header.Set("Origin", "https://unlisted.example.ts.net")
+		req.Header.Set("Authorization", "Bearer t")
+		resp, err := ts.Client().Do(req)
+		if err != nil {
+			t.Fatalf("Do: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+		}
+	})
+
+	t.Run("allowed origin with valid token passes through", func(t *testing.T) {
+		req, err := http.NewRequest(http.MethodGet, ts.URL, nil)
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		req.Host = "box.example.ts.net"
+		req.Header.Set("Origin", "https://box.example.ts.net")
+		req.Header.Set("Authorization", "Bearer t")
+		resp, err := ts.Client().Do(req)
+		if err != nil {
+			t.Fatalf("Do: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+		}
+	})
 }
