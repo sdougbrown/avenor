@@ -1155,6 +1155,12 @@ func TestClientClosedFalseOnRPCErrorAndTimeout(t *testing.T) {
 		if !errors.As(err, &rpcErr) {
 			t.Fatalf("error = %v (%T), want an *RPCError", err, err)
 		}
+		if rpcErr.Code != -32000 {
+			t.Fatalf("rpcErr.Code = %d, want -32000", rpcErr.Code)
+		}
+		if rpcErr.Message != "boom" {
+			t.Fatalf("rpcErr.Message = %q, want \"boom\"", rpcErr.Message)
+		}
 		if c.Closed() {
 			t.Fatal("Closed() = true after an RPC error, want false")
 		}

@@ -4275,6 +4275,55 @@ func TestRedialExplicitSupervisorSocketAfterDisconnect(t *testing.T) {
 	}
 }
 
+func TestAutostartRedialsAfterDeadClient(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "sup.sock")
+	_, _, stopListener := startStubSupervisorListener(t, socketPath)
+	defer stopListener()
+
+	origStart := startSupervisorFunc
+	defer func() { startSupervisorFunc = origStart }()
+	var starts atomic.Int32
+	startSupervisorFunc = func(string, time.Duration) (*supervisorLifecycle, error) {
+		starts.Add(1)
+		return nil, fmt.Errorf("dial control socket: connection refused")
+	}
+
+	// Establish then kill a real control connection so the server's
+	// persistent client is dead (Closed() == true).
+	cl, err := client.Dial(socketPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	if err := cl.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if !cl.Closed() {
+		t.Fatal("client is not closed after Close()")
+	}
+
+	s, err := NewServer(Options{Transport: "stdio", ControlClient: cl})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	// A supervisor-backed tool call must restart the supervisor (redial)
+	// instead of failing on the dead connection.
+	_, _, err = s.handleAvenorStatus(context.Background(), nil, statusArgs{})
+	if err == nil {
+		t.Fatal("expected an error (the replacement supervisor is not listening)")
+	}
+	if got := starts.Load(); got != 1 {
+		t.Fatalf("supervisor starts = %d, want 1 (the dead client must trigger a restart)", got)
+	}
+	if !strings.Contains(err.Error(), "connection refused") {
+		t.Fatalf("error = %v, want the clean dial error", err)
+	}
+	if strings.Contains(err.Error(), "connection closed") {
+		t.Fatalf("error = %v, must not be 'connection closed' (the dead client was used)", err)
+	}
+}
+
 func TestConcurrentAcquisitionsShareOneDial(t *testing.T) {
 	socketPath := filepath.Join(t.TempDir(), "sup.sock")
 	acceptedCount, _, stopListener := startStubSupervisorListener(t, socketPath)

@@ -995,3 +995,144 @@ func TestSpawnReclaimsLabelFromEndedRun(t *testing.T) {
 		}
 	})
 }
+
+func TestAvenorStatusListMergesRegistryIdentityWithMatchingScope(t *testing.T) {
+	const supA = "/tmp/supA.sock"
+	// The registry entry's supervisor matches the requested scope, so the
+	// list output must merge the registry identity fields into the runtime
+	// entry.
+	fake := &fakeClient{listResult: []map[string]any{
+		{"runtime_id": "rt_merge", "status": "running", "session_id": "ses_merge"},
+	}}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.defaultSupervisorPath = supA
+	if err := s.registry.Store(&RunInfo{
+		RunID:            "run-merge",
+		Label:            "label-merge",
+		RuntimeID:        "rt_merge",
+		SupervisorID:     supA,
+		RosterFile:       "/repo/roster.json",
+		RosterEntry:      "planner",
+		EffectiveBackend: "agy",
+		EffectiveAgent:   "planner-agent",
+		EffectiveModel:   "planner-model",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runs := statusOutputRuns(t, result)
+	if len(runs) != 1 {
+		t.Fatalf("runs = %#v, want 1", runs)
+	}
+	if runs[0]["run_id"] != "run-merge" {
+		t.Fatalf("run_id = %v, want run-merge (registry identity merged)", runs[0]["run_id"])
+	}
+	if runs[0]["label"] != "label-merge" {
+		t.Fatalf("label = %v, want label-merge (registry identity merged)", runs[0]["label"])
+	}
+	if runs[0]["roster_entry"] != "planner" || runs[0]["effective_backend"] != "agy" || runs[0]["effective_agent"] != "planner-agent" {
+		t.Fatalf("roster identity missing from merged list entry: %#v", runs[0])
+	}
+	if runs[0]["runtime_id"] != "rt_merge" || runs[0]["status"] != "running" || runs[0]["session_id"] != "ses_merge" {
+		t.Fatalf("live runtime fields missing from merged list entry: %#v", runs[0])
+	}
+}
+
+func TestAvenorEventsCrossSupervisorGuard(t *testing.T) {
+	const supA = "/tmp/supA.sock"
+	const supB = "/tmp/supB.sock"
+	const runX = "6f9619ff-8b86-d011-b42d-00cf4fc964ff"
+
+	dir := t.TempDir()
+	eventLogA := filepath.Join(dir, "events-a.log")
+	eventLogB := filepath.Join(dir, "events-b.log")
+	if err := os.WriteFile(eventLogA, []byte("{\"event\":\"from-a\",\"type\":\"lifecycle\"}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(eventLogB, []byte("{\"event\":\"from-b\",\"type\":\"lifecycle\"}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// supA's list carries the run (by sentinel), scoped to supA.
+	fake := &fakeClient{listResult: []map[string]any{{
+		"runtime_id":    "rt-a",
+		"sentinel_file": filepath.Join(dir, "avenor-run-"+runX+".done"),
+		"on_event":      eventLogA,
+	}}}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.defaultSupervisorPath = supA
+	// The run is cached under supB with a different event log.
+	if err := s.registry.Store(&RunInfo{
+		RunID:        runX,
+		RuntimeID:    "rt-b",
+		SupervisorID: supB,
+		EventLogPath: eventLogB,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Requesting the run under supA must not use supB's cached entry; it
+	// re-resolves under supA and reads supA's event log.
+	_, result, err := s.handleAvenorEvents(context.Background(), nil, eventsArgs{
+		RunID:        runX,
+		SupervisorID: supA,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("result = %T, want map[string]any", result)
+	}
+	events, ok := m["events"].([]map[string]any)
+	if !ok {
+		t.Fatalf("events = %T, want []map[string]any", m["events"])
+	}
+	if len(events) != 1 || events[0]["event"] != "from-a" {
+		t.Fatalf("events = %#v, want supA's event (from-a), not supB's (from-b)", events)
+	}
+	// supB's cached entry must remain intact (not clobbered by the re-resolution).
+	if got := s.registry.Lookup(supB, runX); got == nil || got.EventLogPath != eventLogB {
+		t.Fatalf("supB entry = %#v, want intact with eventLogB", got)
+	}
+}
+
+func TestLookupRunResolvesCachedLabelAfterRuntimeLeavesList(t *testing.T) {
+	const sup = "/tmp/sup.sock"
+	// The run's runtime left the live list (e.g. a supervisor restart); the
+	// label is still cached. The list carries a different run, not the one
+	// with the label.
+	fake := &fakeClient{listResult: []map[string]any{
+		{"runtime_id": "rt-other", "label": "other"},
+	}}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.registry.Store(&RunInfo{
+		RunID:        "run-x",
+		Label:        "mylabel",
+		RuntimeID:    "rt-x",
+		SupervisorID: sup,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ri, err := s.lookupRun(fake, sup, "mylabel")
+	if err != nil {
+		t.Fatalf("lookupRun = %v, want the cached label entry", err)
+	}
+	if ri == nil || ri.RunID != "run-x" || ri.RuntimeID != "rt-x" {
+		t.Fatalf("lookupRun = %#v, want run-x (rt-x)", ri)
+	}
+}

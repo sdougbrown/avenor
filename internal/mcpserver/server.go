@@ -434,9 +434,20 @@ func (s *Server) handleAvenorStatus(ctx context.Context, req *mcp.CallToolReques
 		}
 		translated := make([]map[string]any, 0, len(results))
 		seenRegistryRuns := make(map[string]bool)
+		// Index the scope's registry entries by runtime ID once so the
+		// per-entry merge is a single map lookup instead of a full registry
+		// scan per entry.
+		registryByRuntimeID := make(map[string]*RunInfo)
+		for _, ri := range s.registry.All() {
+			if ri.SupervisorID == supervisorPath {
+				if _, ok := registryByRuntimeID[ri.RuntimeID]; !ok {
+					registryByRuntimeID[ri.RuntimeID] = ri
+				}
+			}
+		}
 		for _, entry := range results {
 			runtimeID, _ := entry["runtime_id"].(string)
-			ri := s.findRegistryByRuntimeID(supervisorPath, runtimeID)
+			ri := registryByRuntimeID[runtimeID]
 			var sentinelPath string
 			if ri != nil {
 				sentinelPath = ri.SentinelPath
@@ -582,6 +593,12 @@ func (s *Server) lookupRun(cl ControlClient, supervisorPath, key string) (*RunIn
 	if matched != -1 {
 		s.reapStaleLabel(supervisorPath, entries, entries[matched])
 		return s.runInfoFromListEntry(entries[matched], supervisorPath)
+	}
+	// The run's runtime left the live list (e.g. a supervisor restart) but
+	// the label is still cached: resolve it to the cached entry so the dead
+	// run stays reachable by label for its persisted result and event log.
+	if ri := s.registry.LookupLabel(supervisorPath, key); ri != nil {
+		return ri, nil
 	}
 	return nil, nil
 }
@@ -1812,7 +1829,7 @@ func (s *Server) getClientForSupervisorWithPath(supervisorID string) (ControlCli
 		return s.controlClient, func() {}, s.defaultSupervisorPath, nil
 	}
 
-	if s.controlClient == nil {
+	if s.controlClient == nil || s.controlClient.Closed() {
 		if s.opts.NoAutostart {
 			return nil, nil, "", fmt.Errorf("no supervisor running: autostart disabled")
 		}
@@ -1834,15 +1851,6 @@ func (s *Server) getSupervisorPath(supervisorID string) string {
 	s.supervisorMu.Lock()
 	defer s.supervisorMu.Unlock()
 	return s.defaultSupervisorPath
-}
-
-func (s *Server) findRegistryByRuntimeID(supervisorPath, runtimeID string) *RunInfo {
-	for _, ri := range s.registry.All() {
-		if ri.SupervisorID == supervisorPath && ri.RuntimeID == runtimeID {
-			return ri
-		}
-	}
-	return nil
 }
 
 func (s *Server) Run() error {
