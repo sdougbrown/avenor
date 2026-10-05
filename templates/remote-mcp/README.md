@@ -41,7 +41,7 @@ cp templates/remote-mcp/avenor-stable.plist ~/Library/LaunchAgents/dev.avenor.st
 cp templates/remote-mcp/avenor-mcp.plist ~/Library/LaunchAgents/dev.avenor.mcp.plist
 ```
 
-Adjust the placeholders in both plists (socket path, token path, allowed host, binary path, capacity numbers), then load:
+Adjust the placeholders in both plists (socket path, token path, allowed host, binary path — capacity flags such as `--max-runtimes` and `--idempotency-capacity` live only in `avenor-stable.plist`), then load:
 
 ```bash
 launchctl bootstrap gui/$UID ~/Library/LaunchAgents/dev.avenor.stable.plist
