@@ -1227,6 +1227,21 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 	return s.spawnReserved(params, res)
 }
 
+// labelHolderLocked returns the ID of a live (non-completed) runtime holding
+// the given label, or "" if none. The caller must hold s.controlMu; each
+// child's mu is locked and unlocked here.
+func (s *Supervisor) labelHolderLocked(label string) string {
+	for _, child := range s.runtimes {
+		child.mu.Lock()
+		holding := child.label == label && !child.completed
+		child.mu.Unlock()
+		if holding {
+			return child.id
+		}
+	}
+	return ""
+}
+
 // spawnReserved starts a runtime using a pre-reserved admission. It never
 // acquires admission itself: the reservation's tree token moves to the child
 // on success and its local slot becomes the registered runtime. On any
@@ -1305,8 +1320,22 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 	// Reserve the slot to prevent TOCTOU bypass of the max-runtime limit.
 	// Every child mode shares this lifecycle context so direct provider calls
 	// can be canceled before writer teardown waits for them.
+	// Keyed spawns enforce label uniqueness atomically with registration:
+	// two concurrent keyed first-use spawns with the same label cannot both
+	// register (the MCP pre-check is a fast path, not the authority).
+	if params.IdempotencyKey != "" && params.Label != "" {
+		if holder := s.labelHolderLocked(params.Label); holder != "" {
+			childCancel()
+			s.controlMu.Unlock()
+			return SpawnResult{}, fmt.Errorf("label already in use: %s (runtime %s)", params.Label, holder)
+		}
+	}
 	child := &childRuntime{
-		id:           rtID,
+		id: rtID,
+		// Set before publication into s.runtimes so the label is visible
+		// under s.controlMu at the moment the child becomes visible to the
+		// label scans, instead of being written unlocked after publication.
+		label:        params.Label,
 		startedAt:    time.Now().UnixMilli(),
 		lifecycleCtx: childCtx,
 		cancelFn:     childCancel,
@@ -1459,7 +1488,6 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 			AgentProfile: params.AgentProfile,
 		}
 
-		child.label = params.Label
 		child.agent = params.Agent
 		child.agentProfile = params.AgentProfile
 		child.model = params.Model
@@ -1519,7 +1547,6 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 			AgentProfile: params.AgentProfile,
 		}
 
-		child.label = params.Label
 		child.agent = params.Agent
 		child.agentProfile = params.AgentProfile
 		child.model = params.Model
@@ -1601,7 +1628,6 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 	}
 
 	// Populate child with fully-initialised state.
-	child.label = params.Label
 	child.agent = params.Agent
 	child.agentProfile = params.AgentProfile
 	child.model = params.Model
@@ -3545,8 +3571,11 @@ func (s *Supervisor) answerPermission(rtID, requestID, optionID, message string)
 	if rt == nil {
 		return fmt.Errorf("runtime %q not found", rtID)
 	}
-	if s.control.PermissionResolverState(rtID, requestID) == control.PermissionResolverResolved {
-		return nil
+	if resolved, matches := s.control.ResolvedPermissionMatches(rtID, requestID, optionID, message); resolved {
+		if matches {
+			return nil
+		}
+		return fmt.Errorf("permission request already resolved")
 	}
 
 	// Validate message before consuming the pending claim so oversized
@@ -3560,8 +3589,11 @@ func (s *Supervisor) answerPermission(rtID, requestID, optionID, message string)
 	options := s.permOptions[key]
 	s.controlMu.Unlock()
 	if options == nil {
-		if s.control.PermissionResolverState(rtID, requestID) == control.PermissionResolverResolved {
-			return nil
+		if resolved, matches := s.control.ResolvedPermissionMatches(rtID, requestID, optionID, message); resolved {
+			if matches {
+				return nil
+			}
+			return fmt.Errorf("permission request already resolved")
 		}
 		return fmt.Errorf("permission request %q not found for runtime %q", requestID, rtID)
 	}
@@ -3610,8 +3642,10 @@ func (s *Supervisor) answerPermission(rtID, requestID, optionID, message string)
 		delete(s.permissionProviders, key)
 		s.permissionProviderMu.Unlock()
 		return nil
-	case control.PermissionAnswerAlreadyResolved:
+	case control.PermissionAnswerAlreadyResolvedSame:
 		return nil
+	case control.PermissionAnswerAlreadyResolved:
+		return fmt.Errorf("permission request already resolved")
 	case control.PermissionAnswerChannelFull:
 		return fmt.Errorf("permission request %q for runtime %q already has an answer pending delivery", requestID, rtID)
 	case control.PermissionAnswerResolverOwned:
@@ -3676,13 +3710,14 @@ func (s *Supervisor) answerPermission(rtID, requestID, optionID, message string)
 		s.control.RetryDirectPermissionDelivery(rtID, requestID)
 		return err
 	}
-	s.cleanupDirectPermission(rtID, requestID, nil)
+	s.cleanupDirectPermission(rtID, requestID, optionID, message, nil)
 	return nil
 }
 
 // Acquire controlMu to prevent replacements from publishing options while
-// options are removed and the claim is marked resolved.
-func (s *Supervisor) cleanupDirectPermission(runtimeID, requestID string, beforeRelease func()) {
+// options are removed and the claim is marked resolved with the successful
+// direct answer so later repeats can be compared.
+func (s *Supervisor) cleanupDirectPermission(runtimeID, requestID, optionID, message string, beforeRelease func()) {
 	s.controlMu.Lock()
 	defer s.controlMu.Unlock()
 	delete(s.permOptions, runtimeID+":"+requestID)
@@ -3692,7 +3727,7 @@ func (s *Supervisor) cleanupDirectPermission(runtimeID, requestID string, before
 	if beforeRelease != nil {
 		beforeRelease()
 	}
-	s.control.MarkPermissionClaimResolved(runtimeID, requestID, "direct")
+	s.control.MarkPermissionClaimResolved(runtimeID, requestID, "direct", optionID, message)
 }
 
 func (s *Supervisor) cachePermissionOptions(runtimeID, requestID string, options []any) {

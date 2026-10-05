@@ -1273,7 +1273,7 @@ func (s *Server) handleAvenorAnswerPermission(ctx context.Context, req *mcp.Call
 		// The supervisor reports pending_permission as a bool and carries the
 		// request details (including request_id) in a separate "permission" map.
 		if pending, _ := statusResult["pending_permission"].(bool); !pending {
-			return nil, nil, fmt.Errorf("no pending permission request")
+			return nil, nil, fmt.Errorf("no pending permission request for runtime %s; include request_id only when retrying a previously answered request", runtimeID)
 		}
 		perm, ok := statusResult["permission"].(map[string]any)
 		if !ok {

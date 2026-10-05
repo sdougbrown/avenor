@@ -4222,7 +4222,7 @@ func TestProviderCloseWaitsForAdmittedPermissionReservation(t *testing.T) {
 	default:
 	}
 
-	if !sup.control.MarkPermissionClaimResolved(child.id, requestID, "test") {
+	if !sup.control.MarkPermissionClaimResolved(child.id, requestID, "test", "", "") {
 		t.Fatal("old direct claim was not released")
 	}
 	select {
@@ -4372,12 +4372,17 @@ func TestAnswerPermissionNoResolverAllowsOnlyOneConcurrentProviderCall(t *testin
 	if _, ok := sup.permOptions["rt_direct:req_direct"]; ok {
 		t.Fatal("cache entry was not cleared after direct delivery")
 	}
-	if err := sup.answerPermission("rt_direct", "req_direct", "stale", strings.Repeat("x", 100000)); err != nil {
-		t.Fatalf("late answer after direct resolution: %v", err)
+	if err := sup.answerPermission("rt_direct", "req_direct", "allow_it", ""); err != nil {
+		t.Fatalf("matching repeat after direct resolution: %v", err)
+	}
+	if err := sup.answerPermission("rt_direct", "req_direct", "stale", ""); err == nil {
+		t.Fatal("conflicting repeat after direct resolution unexpectedly succeeded")
+	} else if err.Error() != "permission request already resolved" {
+		t.Fatalf("conflicting repeat error = %q, want 'permission request already resolved'", err.Error())
 	}
 }
 
-func TestAnswerPermissionAlreadyResolvedWithoutOptionsIsBenignNoOp(t *testing.T) {
+func TestAnswerPermissionAlreadyResolvedWithoutOptionsComparesRepeat(t *testing.T) {
 	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-answer-resolved.sock", MaxRuntimes: 1})
 	provider := &permRecordingProvider{}
 	sup.runtimes["rt_resolved"] = &childRuntime{
@@ -4390,14 +4395,22 @@ func TestAnswerPermissionAlreadyResolvedWithoutOptionsIsBenignNoOp(t *testing.T)
 	if !sup.control.PreparePermissionClaim("rt_resolved", "req_resolved", control.PermissionResolverAutomatic, nil) {
 		t.Fatal("PreparePermissionClaim returned false")
 	}
-	if !sup.control.MarkPermissionClaimResolved("rt_resolved", "req_resolved", "avenor") {
+	if !sup.control.MarkPermissionClaimResolved("rt_resolved", "req_resolved", "avenor", "allow", "") {
 		t.Fatal("MarkPermissionClaimResolved returned false")
 	}
-	if err := sup.answerPermission("rt_resolved", "req_resolved", "stale", strings.Repeat("x", 100000)); err != nil {
-		t.Fatalf("late answer after resolution: %v", err)
+	if err := sup.answerPermission("rt_resolved", "req_resolved", "allow", ""); err != nil {
+		t.Fatalf("matching repeat after resolution: %v", err)
+	}
+	if err := sup.answerPermission("rt_resolved", "req_resolved", "allow", "different"); err == nil {
+		t.Fatal("same option with different message unexpectedly succeeded")
+	} else if err.Error() != "permission request already resolved" {
+		t.Fatalf("mismatch error = %q, want 'permission request already resolved'", err.Error())
+	}
+	if err := sup.answerPermission("rt_resolved", "req_resolved", "stale", ""); err == nil {
+		t.Fatal("conflicting repeat after resolution unexpectedly succeeded")
 	}
 	if provider.called {
-		t.Fatal("late answer invoked provider")
+		t.Fatal("repeat answer invoked provider")
 	}
 }
 
@@ -4472,7 +4485,7 @@ func TestDirectPermissionCleanupBlocksReuseUntilOldOptionsAreDeleted(t *testing.
 	t.Cleanup(release)
 	cleanupDone := make(chan struct{})
 	go func() {
-		sup.cleanupDirectPermission("rt_reuse", "req_reuse", func() {
+		sup.cleanupDirectPermission("rt_reuse", "req_reuse", "old", "", func() {
 			close(cleanupReached)
 			<-releaseCleanup
 		})

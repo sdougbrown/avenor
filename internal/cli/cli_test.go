@@ -3412,6 +3412,18 @@ func TestControlPermissionResolution(t *testing.T) {
 			t.Fatalf("permission message leaked to event log: %#v", event)
 		}
 	}
+
+	// The control producer recorded the resolution (option + message) at
+	// cli.go:1743. Repeating the same option + message is a match (success),
+	// while the same option with a different message is a conflict. A
+	// regression recording "" for ans.Message would make the same-message
+	// repeat a conflict and the different-message repeat a match.
+	if got := cs.DeliverPendingPermission("", "req_ctrl", "allow_x", "typed response"); got != control.PermissionAnswerAlreadyResolvedSame {
+		t.Fatalf("control repeat same option + same message = %v, want AlreadyResolvedSame", got)
+	}
+	if got := cs.DeliverPendingPermission("", "req_ctrl", "allow_x", "different message"); got != control.PermissionAnswerAlreadyResolved {
+		t.Fatalf("control repeat same option + different message = %v, want AlreadyResolved", got)
+	}
 }
 
 // TestControlPermissionNonLiteralOptionIDMapsByKind verifies that the control
@@ -4101,6 +4113,140 @@ func TestPermissionRequestRejectsExistingNoResolverBeforePublishing(t *testing.T
 	}
 }
 
+// TestAutoApprovedResolutionAcceptsMatchingManualAnswer verifies that the
+// auto-approve producer records the chosen option, a matching manual repeat
+// succeeds, and a conflicting one is rejected.
+func TestAutoApprovedResolutionAcceptsMatchingManualAnswer(t *testing.T) {
+	cs := control.NewServer(control.NewState("run_1", "", 0))
+	socketPath := shortControlSocketPath(t)
+	if err := cs.Start(socketPath); err != nil {
+		t.Fatalf("start control server: %v", err)
+	}
+	defer cs.Stop()
+
+	event := events.Event{
+		Event:     "permission.request",
+		SessionID: "ses_auto",
+		Fields: map[string]any{
+			"request_id": "req_auto",
+			"options": []any{
+				map[string]any{"optionId": "allow_it", "kind": "allow"},
+				map[string]any{"optionId": "deny_it", "kind": "reject"},
+			},
+		},
+	}
+	resultCh := make(chan permissionResult, 1)
+	// The caller (WaitForSession) prepares the claim before resolving.
+	if !cs.PreparePermissionClaim("rt_1", "req_auto", control.PermissionResolverAutomatic, nil) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+	go func() {
+		resultCh <- resolvePermission(context.Background(), &cliFakeProvider{}, nil, cs, event, "ses_auto", "rt_1", "req_auto", true, 0)
+	}()
+
+	// resolvePermission records the resolution (MarkPermissionClaimResolved)
+	// before returning, so receiving the result is a channel-based signal that
+	// the claim is already Resolved — no polling of the resolver state needed.
+	var res permissionResult
+	select {
+	case res = <-resultCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("resolvePermission did not return")
+	}
+	if res.err != nil {
+		t.Fatalf("resolvePermission error: %v", res.err)
+	}
+	if res.source != "avenor" || res.optionID != "allow_it" {
+		t.Fatalf("result = %+v, want avenor/allow_it", res)
+	}
+
+	if !cs.AnswerPendingPermission("rt_1", "req_auto", "allow_it", "") {
+		t.Fatal("matching repeat after auto-approve was rejected")
+	}
+	if cs.AnswerPendingPermission("rt_1", "req_auto", "deny_it", "") {
+		t.Fatal("conflicting repeat after auto-approve was accepted")
+	}
+	if cs.AnswerPendingPermission("rt_1", "req_auto", "allow_it", "different note") {
+		t.Fatal("repeat with different message after auto-approve was accepted")
+	}
+}
+
+// TestAutoApprovedResolutionWithoutAllowOptionRecordsEmptyAndRejectsReplay
+// drives the auto-approve path with no normalizable allow option, so
+// firstOptionKind records a resolution of ("", "") on the control server.
+// The safety of that empty recording rests on ResolvedPermissionMatches
+// rejecting it: a replay of the universally guessable ("", "") must not be
+// accepted as a matching repeat.
+func TestAutoApprovedResolutionWithoutAllowOptionRecordsEmptyAndRejectsReplay(t *testing.T) {
+	cs := control.NewServer(control.NewState("run_1", "", 0))
+	socketPath := shortControlSocketPath(t)
+	if err := cs.Start(socketPath); err != nil {
+		t.Fatalf("start control server: %v", err)
+	}
+	defer cs.Stop()
+
+	// No normalizable "allow" option: the only option is a reject, so
+	// firstOptionKind(options, "allow") returns ("", "").
+	event := events.Event{
+		Event:     "permission.request",
+		SessionID: "ses_auto",
+		Fields: map[string]any{
+			"request_id": "req_auto",
+			"options": []any{
+				map[string]any{"optionId": "deny_only", "kind": "reject"},
+			},
+		},
+	}
+	provider := &cliFakeProvider{}
+	resultCh := make(chan permissionResult, 1)
+	// The caller (WaitForSession) prepares the claim before resolving.
+	if !cs.PreparePermissionClaim("rt_1", "req_auto", control.PermissionResolverAutomatic, nil) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+	go func() {
+		resultCh <- resolvePermission(context.Background(), provider, nil, cs, event, "ses_auto", "rt_1", "req_auto", true, 0)
+	}()
+
+	// resolvePermission records the resolution before returning, so receiving
+	// the result signals the claim is Resolved with the ("", "") recording.
+	var res permissionResult
+	select {
+	case res = <-resultCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("resolvePermission did not return")
+	}
+	if res.err != nil {
+		t.Fatalf("resolvePermission error: %v", res.err)
+	}
+	if res.source != "avenor" || res.optionID != "" || res.kind != "" {
+		t.Fatalf("result = %+v, want avenor with empty option/kind", res)
+	}
+	if !provider.answerResponse.Allow {
+		t.Fatal("answerResponse.Allow = false, want true")
+	}
+	if provider.answerResponse.OptionID != "" {
+		t.Fatalf("answerResponse.OptionID = %q, want empty (no allow option)", provider.answerResponse.OptionID)
+	}
+
+	// The resolution is recorded as ("", ""): the claim is resolved, but the
+	// empty recording must not match the empty replay.
+	if resolved, matches := cs.ResolvedPermissionMatches("rt_1", "req_auto", "", ""); !resolved || matches {
+		t.Fatalf("ResolvedPermissionMatches(\"\", \"\") = (%v, %v), want (true, false)", resolved, matches)
+	}
+	// A replay of the empty answer through the control layer must be rejected,
+	// not accepted as a matching repeat.
+	if cs.AnswerPendingPermission("rt_1", "req_auto", "", "") {
+		t.Fatal("empty replay after auto-approve was accepted; the empty recording must not match")
+	}
+	if got := cs.DeliverPendingPermission("rt_1", "req_auto", "", ""); got != control.PermissionAnswerAlreadyResolved {
+		t.Fatalf("empty replay delivery = %v, want AlreadyResolved (conflict, not AlreadyResolvedSame)", got)
+	}
+	// A replay with a real option ID also must not match the empty recording.
+	if cs.AnswerPendingPermission("rt_1", "req_auto", "deny_only", "") {
+		t.Fatal("real-option replay after auto-approve was accepted; the empty recording must not match")
+	}
+}
+
 // TestControlPermissionClaimDisconnectFallsThrough verifies that when a
 // client is connected at the HasClients() gate but never sends
 // answer_permission, resolvePermission falls through to the file-handler (or
@@ -4593,6 +4739,96 @@ func TestFilePermissionCancelledOutcomeDoesNotError(t *testing.T) {
 	}
 	if provider.answerRequestID != "" {
 		t.Fatalf("AnswerPermission was called for request %q", provider.answerRequestID)
+	}
+}
+
+// TestFilePermissionRepeatComparisonRecordsMessage verifies that the file
+// producer records the resolving option and exact message (cli.go:1859, via
+// Resolution.Message in file.go) so later repeats can be compared. A
+// regression recording "" for res.Message would make the same-message repeat
+// a conflict and the different-message repeat a match.
+func TestFilePermissionRepeatComparisonRecordsMessage(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "perm")
+	fh := permission.NewFileHandler(base)
+	fh.Timeout = 5 * time.Second
+	fh.PollInterval = 20 * time.Millisecond
+
+	// No control client is connected, so the resolver state is File. Prepare
+	// the claim so the file producer's MarkPermissionClaimResolved records the
+	// resolution.
+	cs := control.NewServer(control.NewState("run_file", "label", 0))
+	if !cs.PreparePermissionClaim("", "req_file_rep", control.PermissionResolverFile, []any{
+		map[string]any{"optionId": "deny", "kind": "reject"},
+		map[string]any{"optionId": "allow_f", "kind": "allow", "requiresMessage": true},
+	}) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+
+	reqPath := base + ".req"
+	respPath := base + ".req.response"
+	go func() {
+		pollDeadline := time.Now().Add(5 * time.Second)
+		for {
+			if _, statErr := os.Stat(reqPath); statErr == nil {
+				break
+			}
+			if time.Now().After(pollDeadline) {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		_ = os.WriteFile(respPath, []byte(`{"outcome":"selected","option_id":"allow_f","message":"file note"}`+"\n"), 0o600)
+	}()
+
+	event := events.Event{
+		Event:     "permission.request",
+		SessionID: "ses_file_rep",
+		Fields: map[string]any{
+			"request_id": "req_file_rep",
+			"options": []any{
+				map[string]any{"optionId": "deny", "kind": "reject"},
+				map[string]any{"optionId": "allow_f", "kind": "allow", "requiresMessage": true},
+			},
+		},
+	}
+
+	provider := &cliFakeProvider{}
+	resultCh := make(chan permissionResult, 1)
+	go func() {
+		resultCh <- resolvePermission(context.Background(), provider, fh, cs, event, "ses_file_rep", "", "req_file_rep", false, 0)
+	}()
+
+	var res permissionResult
+	select {
+	case res = <-resultCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("resolvePermission did not return within 10 seconds")
+	}
+
+	if res.err != nil {
+		t.Fatalf("unexpected error: %v", res.err)
+	}
+	if res.source != "file" {
+		t.Fatalf("result source = %q, want \"file\"", res.source)
+	}
+	if res.optionID != "allow_f" {
+		t.Fatalf("optionID = %q, want \"allow_f\"", res.optionID)
+	}
+	// The file handler called provider.AnswerPermission with the message.
+	if provider.answerResponse.Message != "file note" {
+		t.Fatalf("provider.answerResponse.Message = %q, want \"file note\"", provider.answerResponse.Message)
+	}
+
+	// The file producer recorded the resolution (option + message) at
+	// cli.go:1859, via Resolution.Message (file.go). Repeating the same
+	// option + message is a match (success), while the same option with a
+	// different message is a conflict.
+	if got := cs.DeliverPendingPermission("", "req_file_rep", "allow_f", "file note"); got != control.PermissionAnswerAlreadyResolvedSame {
+		t.Fatalf("file repeat same option + same message = %v, want AlreadyResolvedSame", got)
+	}
+	if got := cs.DeliverPendingPermission("", "req_file_rep", "allow_f", "different message"); got != control.PermissionAnswerAlreadyResolved {
+		t.Fatalf("file repeat same option + different message = %v, want AlreadyResolved", got)
 	}
 }
 

@@ -898,22 +898,22 @@ func TestHTTPAnswerPermissionNoResolver(t *testing.T) {
 	}
 }
 
-func TestHTTPAnswerPermissionAlreadyResolvedIsAccepted(t *testing.T) {
+func TestHTTPAnswerPermissionAlreadyResolved(t *testing.T) {
 	ctrl := NewServer(NewState("run_cli", "", 0))
 	if !ctrl.PreparePermissionClaim("", "req_done", PermissionResolverAutomatic, nil) {
 		t.Fatal("PreparePermissionClaim returned false")
 	}
-	if !ctrl.MarkPermissionClaimResolved("", "req_done", "avenor") {
+	if !ctrl.MarkPermissionClaimResolved("", "req_done", "avenor", "allow", "") {
 		t.Fatal("MarkPermissionClaimResolved returned false")
 	}
 	_, addr, token := startDebugServer(t, ctrl, nil)
 	client := &http.Client{Timeout: 2 * time.Second}
 
-	body := `{"request_id":"req_done","option_id":"stale","message":""}`
+	body := `{"request_id":"req_done","option_id":"allow","message":""}`
 	resp := authedPostBody(t, client, "http://"+addr+"/answer-permission", token, body)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("POST /answer-permission (resolved): %d, want 200", resp.StatusCode)
+		t.Fatalf("POST /answer-permission (same repeat): %d, want 200", resp.StatusCode)
 	}
 	var result map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -921,6 +921,39 @@ func TestHTTPAnswerPermissionAlreadyResolvedIsAccepted(t *testing.T) {
 	}
 	if result["accepted"] != true {
 		t.Fatalf("response = %#v, want accepted=true", result)
+	}
+}
+
+func TestHTTPAnswerPermissionConflictingRepeatIsRejected(t *testing.T) {
+	ctrl := NewServer(NewState("run_cli", "", 0))
+	if !ctrl.PreparePermissionClaim("", "req_done", PermissionResolverAutomatic, nil) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+	if !ctrl.MarkPermissionClaimResolved("", "req_done", "avenor", "allow", "") {
+		t.Fatal("MarkPermissionClaimResolved returned false")
+	}
+	_, addr, token := startDebugServer(t, ctrl, nil)
+	client := &http.Client{Timeout: 2 * time.Second}
+
+	for _, tt := range []struct {
+		name string
+		body string
+	}{
+		{name: "different option", body: `{"request_id":"req_done","option_id":"deny","message":""}`},
+		{name: "same option different message", body: `{"request_id":"req_done","option_id":"allow","message":"different note"}`},
+	} {
+		resp := authedPostBody(t, client, "http://"+addr+"/answer-permission", token, tt.body)
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusConflict {
+			t.Fatalf("POST /answer-permission (%s): %d, want 409", tt.name, resp.StatusCode)
+		}
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read %s response: %v", tt.name, err)
+		}
+		if !strings.Contains(string(body), "permission request already resolved") {
+			t.Fatalf("%s response body = %q, want 'permission request already resolved'", tt.name, string(body))
+		}
 	}
 }
 
@@ -939,5 +972,53 @@ func TestHTTPAnswerPermissionEmptyMessageOK(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusBadRequest {
 		t.Fatalf("POST /answer-permission (empty message): got 400, want non-400 (empty message is valid)")
+	}
+}
+
+// TestHTTPAnswerPermissionEmptyOptionIDRejected verifies that an empty
+// option_id is rejected with 400 before the resolution comparison, mirroring
+// the RPC dispatch sites. Without the guard, a claim recorded with an empty
+// option could be matched by the universally guessable empty answer.
+func TestHTTPAnswerPermissionEmptyOptionIDRejected(t *testing.T) {
+	client := &http.Client{Timeout: 2 * time.Second}
+
+	// A pending request exists: the empty option_id is rejected before the
+	// comparison, so it must not be accepted or reported as a conflict.
+	ctrl := NewServer(NewState("run_cli", "", 0))
+	if !ctrl.PreparePermissionClaim("", "req_pending", PermissionResolverReserved, nil) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+	_, addr, token := startDebugServer(t, ctrl, nil)
+	resp := authedPostBody(t, client, "http://"+addr+"/answer-permission", token, `{"request_id":"req_pending","option_id":""}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("POST /answer-permission (empty option_id, pending request): %d, want 400", resp.StatusCode)
+	}
+
+	// No pending request exists: the empty option_id is still rejected before
+	// the comparison.
+	ctrl2 := NewServer(NewState("run_cli", "", 0))
+	_, addr2, token2 := startDebugServer(t, ctrl2, nil)
+	resp2 := authedPostBody(t, client, "http://"+addr2+"/answer-permission", token2, `{"request_id":"req_missing","option_id":""}`)
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusBadRequest {
+		t.Fatalf("POST /answer-permission (empty option_id, no pending request): %d, want 400", resp2.StatusCode)
+	}
+
+	// A resolved claim recorded with an empty resolution option: the guard
+	// fires before the comparator, so the response is 400 (not the 409 the
+	// empty-recording comparator rule would produce if the guard moved).
+	ctrl3 := NewServer(NewState("run_cli", "", 0))
+	if !ctrl3.PreparePermissionClaim("", "req_resolved", PermissionResolverReserved, nil) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+	if !ctrl3.MarkPermissionClaimResolved("", "req_resolved", "avenor", "", "") {
+		t.Fatal("MarkPermissionClaimResolved returned false")
+	}
+	_, addr3, token3 := startDebugServer(t, ctrl3, nil)
+	resp3 := authedPostBody(t, client, "http://"+addr3+"/answer-permission", token3, `{"request_id":"req_resolved","option_id":""}`)
+	defer resp3.Body.Close()
+	if resp3.StatusCode != http.StatusBadRequest {
+		t.Fatalf("POST /answer-permission (empty option_id, resolved claim): %d, want 400", resp3.StatusCode)
 	}
 }
