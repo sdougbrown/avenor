@@ -253,6 +253,64 @@ func TestIdempotencyHashMismatchConflict(t *testing.T) {
 	}
 }
 
+// TestIdempotencyInFlightHashMismatchConflict: a second spawn with the same
+// key but different parameters that arrives while the first is still
+// in-flight (provider blocked) takes the in-flight hash-mismatch branch and
+// conflicts without starting a second runtime.
+func TestIdempotencyInFlightHashMismatchConflict(t *testing.T) {
+	gate := make(chan struct{})
+	provider := &idempotencyGatedProvider{gate: gate}
+	sup := newIdempotencySupervisor(t, Config{}, provider)
+	defer func() { _ = sup.broker.Stop() }()
+	dir := t.TempDir()
+
+	type result struct {
+		res SpawnResult
+		err error
+	}
+	results := make(chan result, 2)
+	go func() {
+		out, err := sup.Spawn(idempotencySpawnRaw(t, "key_a", "hello", dir))
+		if err != nil {
+			results <- result{err: err}
+			return
+		}
+		res, ok := out.(SpawnResult)
+		if !ok {
+			results <- result{err: fmt.Errorf("spawn result type %T", out)}
+			return
+		}
+		results <- result{res: res, err: nil}
+	}()
+	// Wait until the first spawn has reserved its in-flight slot.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		sup.idempotency.mu.Lock()
+		inflight := len(sup.idempotency.inflight)
+		sup.idempotency.mu.Unlock()
+		if inflight == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the in-flight reservation")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	_, err := sup.Spawn(idempotencySpawnRaw(t, "key_a", "different prompt", dir))
+	if !errors.As(err, new(*control.IdempotencyConflictError)) {
+		t.Fatalf("error = %v, want *control.IdempotencyConflictError", err)
+	}
+	close(gate)
+	out := <-results
+	if out.err != nil {
+		t.Fatalf("holder spawn: %v", out.err)
+	}
+	assertOneRuntime(t, sup)
+	if provider.startCalls != 1 {
+		t.Fatalf("provider Start calls = %d, want 1", provider.startCalls)
+	}
+}
+
 // TestIdempotencyExpiredTLRetrySpawnsFresh: once the stored entry's TTL has
 // passed, a retry starts a fresh runtime instead of returning the stale
 // result.
