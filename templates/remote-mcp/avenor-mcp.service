@@ -1,0 +1,46 @@
+# Avenor MCP HTTP server (systemd, Linux).
+#
+# Placeholders to edit:
+#   - binary path: /usr/local/bin/avenor (edit if avenor lives elsewhere)
+#   - supervisor socket path: %S/avenor/remote/stable.sock (must match the
+#     stable supervisor's --control-socket)
+#   - token path: /etc/avenor/remote/token (the <config> directory; create it
+#     with openssl rand -hex 32 and chmod 600)
+#   - allowed host: <host>.<tailnet>.ts.net (this host's tailnet name)
+#
+# Ordering is NOT required: the MCP server dials the supervisor socket
+# lazily and recovers when the supervisor comes back. After= is only for
+# tidiness.
+
+[Unit]
+Description=Avenor MCP HTTP server (remote)
+After=avenor-stable.service
+
+[Service]
+# Run as a dedicated non-root user. BOTH units must use the same user: the
+# control socket is created 0600, so the MCP server can only dial it when the
+# two processes share the UID.
+# StateDirectory=avenor pre-creates %S/avenor with ownership matching User=,
+# so the %S/avenor paths below resolve correctly.
+User=avenor
+StateDirectory=avenor
+# The MCP server only needs its Unix socket, the token file, and its logs.
+# The token file is read-only; ReadOnlyPaths covers the socket's directory.
+NoNewPrivileges=true
+ProtectSystem=strict
+# PrivateTmp is intentionally NOT set: the MCP server builds sentinel and
+# event-log paths with os.TempDir() and passes them to the supervisor, which
+# writes the event log. The two processes must share the same /tmp view, so
+# isolating /tmp here would silently break the event contract.
+ProtectHome=read-only
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+# Read-only access: the MCP only dials the supervisor's socket; it never
+# writes to the supervisor's state directory.
+ReadOnlyPaths=/var/lib/avenor/remote
+ExecStart=/usr/local/bin/avenor mcp --transport http --addr 127.0.0.1:3748 --supervisor-socket %S/avenor/remote/stable.sock --no-autostart --auth-token-file /etc/avenor/remote/token --allowed-host <host>.<tailnet>.ts.net
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

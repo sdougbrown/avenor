@@ -322,6 +322,10 @@ Each reservation records the PID of the supervisor process that holds it. The ro
 
 Two independently launched `avenor stable` supervisors do not share a tree budget. Each root creates its own budget file and propagates only to its own descendants.
 
+### Idempotency capacity
+
+`--idempotency-capacity` (default 1024) bounds the supervisor's idempotency store for keyed spawns. Unexpired entries are never evicted; a caller that exhausts the store gets a typed, retryable error. Raise it for busy remote hosts. See [docs/mcp.md](mcp.md#remote-access-over-a-tailnet) for the client-side contract and `templates/remote-mcp/` in the repository for service-managed deployment.
+
 ### Inspecting tree budget status
 
 The `tree_budget` control method reports the current tree admission state:

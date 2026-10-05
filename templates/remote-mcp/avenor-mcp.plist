@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Avenor MCP HTTP server (launchd, macOS).
+
+  Placeholders to edit before loading:
+    - binary path: /usr/local/bin/avenor (edit if avenor lives elsewhere)
+    - supervisor socket path: /Users/YOUR_USER/Library/Application Support/avenor/remote/stable.sock
+      (must match the stable supervisor's --control-socket)
+    - token path: /Users/YOUR_USER/Library/Application Support/avenor/remote/token
+      (create it with the umask-077 subshell from the README: ( umask 077; openssl rand -hex 32 > .../token ) && chmod 600 .../token)
+    - allowed host: <host>.<tailnet>.ts.net (this host's tailnet name)
+
+  launchd does NOT expand environment variables - every path below must be an
+  absolute literal path. Replace YOUR_USER with the real username.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>dev.avenor.mcp</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/bin/avenor</string>
+		<string>mcp</string>
+		<string>--transport</string>
+		<string>http</string>
+		<string>--addr</string>
+		<string>127.0.0.1:3748</string>
+		<string>--supervisor-socket</string>
+		<string>/Users/YOUR_USER/Library/Application Support/avenor/remote/stable.sock</string>
+		<string>--no-autostart</string>
+		<string>--auth-token-file</string>
+		<string>/Users/YOUR_USER/Library/Application Support/avenor/remote/token</string>
+		<string>--allowed-host</string>
+		<string>&lt;host&gt;.&lt;tailnet&gt;.ts.net</string>
+	</array>
+	<key>KeepAlive</key>
+	<true/>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>/Users/YOUR_USER/Library/Application Support/avenor/remote/logs/mcp.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/YOUR_USER/Library/Application Support/avenor/remote/logs/mcp.err.log</string>
+</dict>
+</plist>

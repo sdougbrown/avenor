@@ -197,6 +197,32 @@ avenor mcp --supervisor-socket /tmp/avenor-stable.sock --no-autostart
 | `--supervisor-socket` | none | Existing supervisor socket to connect to |
 | `--no-autostart` | `false` | Require an existing supervisor |
 | `--idle-timeout` | `30m` | Idle timeout for the autostarted child supervisor |
+| `--allowed-host` | none | Exact hostname (case-insensitive) allowed to connect over HTTP; repeatable; loopback is always allowed |
+| `--max-wait` | `25s` (http) / `0` (stdio) | Approximate polling budget for blocking tools; an explicit `0` disables the clamp |
+| `--auth-token-file` | none | Mode-0600 token file; precedence flag > file > `MCP_AUTH_TOKEN`; conflicts with `--auth-token` |
+
+## Remote access over a tailnet
+
+To serve remote MCP clients over a tailnet, run `avenor mcp --transport http` with an auth token and an allowed host, backed by a durable `avenor stable` supervisor. The control socket stays Unix-only; the HTTP endpoint is the only network surface.
+
+### Flags
+
+- `--allowed-host` — exact hostname allowed to connect, case-insensitive. Repeatable. Loopback is always allowed. HTTP-only: stdio has no host check.
+- `--max-wait` — approximate polling budget for blocking tools. Defaults to 25s for HTTP and 0 (unclamped) for stdio; an explicit `0` disables the clamp.
+- `--auth-token-file` — path to a mode-0600 token file. Precedence: `--auth-token` flag > `--auth-token-file` > `MCP_AUTH_TOKEN`. Conflicts with `--auth-token`.
+
+### Reconnect behavior
+
+The MCP server redials an explicit supervisor socket (`--supervisor-socket`) when the connection dies. Startup order between the two processes does not matter: the MCP server recovers when the supervisor comes back.
+
+### Client-side reliability
+
+- Send `idempotency_key` on `avenor_spawn` and `avenor_follow_up` so retries never double-spawn. A retried key with different parameters fails with a tool error whose message contains `idempotency key reused with different parameters (key "...")`; an exhausted idempotency store fails with `idempotency capacity exhausted (capacity N)`. These arrive as failed tool calls (error text), not JSON-RPC error codes — the control-plane codes behind them are documented in `control-protocol.md`.
+- Poll `avenor_events` with `after_seq` starting at `0`, feeding back `latest_seq` to page forward.
+- A clamped wait returns `wait_clamped: true`; treat it as "poll again".
+- Key namespaces are per supervisor and shared by every client: choose `idempotency_key` values that are unique to your client (for example prefix them with an identifier) — a colliding key with matching parameters returns the other client's run.
+
+For the full deployment walkthrough — service units, token generation, Tailscale exposure, containerized clients (Docker), and smoke tests — see `templates/remote-mcp/README.md` in the repository.
 
 ## Tools
 
