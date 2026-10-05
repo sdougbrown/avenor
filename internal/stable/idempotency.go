@@ -187,17 +187,7 @@ func (s *Supervisor) idempotentSpawn(p SpawnParams, hash string) (SpawnResult, e
 	// this pre-check only fast-fails the common case.
 	if p.Label != "" {
 		s.controlMu.Lock()
-		var holder string
-		for _, child := range s.runtimes {
-			child.mu.Lock()
-			label := child.label
-			completed := child.completed
-			child.mu.Unlock()
-			if label == p.Label && !completed {
-				holder = child.id
-				break
-			}
-		}
+		holder := s.labelHolderLocked(p.Label)
 		s.controlMu.Unlock()
 		if holder != "" {
 			reserved = true

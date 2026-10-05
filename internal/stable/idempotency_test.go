@@ -795,7 +795,8 @@ func TestIdempotencyConcurrentSameLabelDifferentKeysOneRuntime(t *testing.T) {
 			results <- result{res: res, err: nil}
 		}()
 	}
-	var successes, conflicts, otherErrs int
+	var successes, conflicts int
+	var otherErrs []error
 	var runtimeIDs []string
 	for range []int{0, 1} {
 		out := <-results
@@ -808,10 +809,10 @@ func TestIdempotencyConcurrentSameLabelDifferentKeysOneRuntime(t *testing.T) {
 		if errors.As(out.err, &ce) || strings.Contains(out.err.Error(), "label already in use") {
 			conflicts++
 		} else {
-			otherErrs++
+			otherErrs = append(otherErrs, out.err)
 		}
 	}
-	if otherErrs != 0 {
+	if len(otherErrs) != 0 {
 		t.Fatalf("unexpected errors: %v", otherErrs)
 	}
 	if successes != 1 || conflicts != 1 {
@@ -820,6 +821,48 @@ func TestIdempotencyConcurrentSameLabelDifferentKeysOneRuntime(t *testing.T) {
 	assertOneRuntime(t, sup)
 	if provider.startCalls != 1 {
 		t.Fatalf("provider Start calls = %d, want 1", provider.startCalls)
+	}
+}
+
+// TestIdempotencyKeyedSpawnAllowedWhenLabelHolderCompleted exercises the
+// allow direction of the label-occupancy checks: a keyed first-use spawn
+// whose label is held only by a completed runtime must succeed and start a
+// fresh runtime. The completed holder is constructed directly because the
+// test provider's sessions never end, so a spawned runtime cannot be driven
+// to completion; the holder therefore accounts for no provider Start call.
+func TestIdempotencyKeyedSpawnAllowedWhenLabelHolderCompleted(t *testing.T) {
+	provider := &idempotencyTestProvider{}
+	sup := newIdempotencySupervisor(t, Config{}, provider)
+	defer func() { _ = sup.broker.Stop() }()
+	dir := t.TempDir()
+
+	completed := &childRuntime{
+		id:    "rt_done_1",
+		label: "taken",
+		done:  make(chan struct{}),
+	}
+	completed.complete()
+	sup.controlMu.Lock()
+	sup.runtimes[completed.id] = completed
+	sup.controlMu.Unlock()
+
+	raw, err := json.Marshal(SpawnParams{Prompt: "hello", Dir: dir, Agent: "claude", Label: "taken", IdempotencyKey: "key_b"})
+	if err != nil {
+		t.Fatalf("marshal spawn params: %v", err)
+	}
+	out, err := sup.Spawn(raw)
+	if err != nil {
+		t.Fatalf("keyed spawn with completed label holder: %v, want success", err)
+	}
+	res, ok := out.(SpawnResult)
+	if !ok {
+		t.Fatalf("spawn result type = %T, want SpawnResult", out)
+	}
+	if res.RuntimeID == completed.id {
+		t.Fatal("the completed holder was returned instead of a fresh runtime")
+	}
+	if provider.startCalls != 1 {
+		t.Fatalf("provider Start calls = %d, want 1 (the completed holder was constructed directly, not started)", provider.startCalls)
 	}
 }
 

@@ -1227,6 +1227,21 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 	return s.spawnReserved(params, res)
 }
 
+// labelHolderLocked returns the ID of a live (non-completed) runtime holding
+// the given label, or "" if none. The caller must hold s.controlMu; each
+// child's mu is locked and unlocked here.
+func (s *Supervisor) labelHolderLocked(label string) string {
+	for _, child := range s.runtimes {
+		child.mu.Lock()
+		holding := child.label == label && !child.completed
+		child.mu.Unlock()
+		if holding {
+			return child.id
+		}
+	}
+	return ""
+}
+
 // spawnReserved starts a runtime using a pre-reserved admission. It never
 // acquires admission itself: the reservation's tree token moves to the child
 // on success and its local slot becomes the registered runtime. On any
@@ -1309,19 +1324,17 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 	// two concurrent keyed first-use spawns with the same label cannot both
 	// register (the MCP pre-check is a fast path, not the authority).
 	if params.IdempotencyKey != "" && params.Label != "" {
-		for _, other := range s.runtimes {
-			other.mu.Lock()
-			label := other.label
-			completed := other.completed
-			other.mu.Unlock()
-			if label == params.Label && !completed {
-				s.controlMu.Unlock()
-				return SpawnResult{}, fmt.Errorf("label already in use: %s (runtime %s)", params.Label, other.id)
-			}
+		if holder := s.labelHolderLocked(params.Label); holder != "" {
+			s.controlMu.Unlock()
+			return SpawnResult{}, fmt.Errorf("label already in use: %s (runtime %s)", params.Label, holder)
 		}
 	}
 	child := &childRuntime{
-		id:           rtID,
+		id: rtID,
+		// Set before publication into s.runtimes so the label is visible
+		// under s.controlMu at the moment the child becomes visible to the
+		// label scans, instead of being written unlocked after publication.
+		label:        params.Label,
 		startedAt:    time.Now().UnixMilli(),
 		lifecycleCtx: childCtx,
 		cancelFn:     childCancel,
@@ -1474,7 +1487,6 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 			AgentProfile: params.AgentProfile,
 		}
 
-		child.label = params.Label
 		child.agent = params.Agent
 		child.agentProfile = params.AgentProfile
 		child.model = params.Model
@@ -1534,7 +1546,6 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 			AgentProfile: params.AgentProfile,
 		}
 
-		child.label = params.Label
 		child.agent = params.Agent
 		child.agentProfile = params.AgentProfile
 		child.model = params.Model
@@ -1616,7 +1627,6 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 	}
 
 	// Populate child with fully-initialised state.
-	child.label = params.Label
 	child.agent = params.Agent
 	child.agentProfile = params.AgentProfile
 	child.model = params.Model

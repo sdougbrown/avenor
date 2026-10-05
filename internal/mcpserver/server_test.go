@@ -2695,8 +2695,11 @@ func TestAvenorAnswerPermissionNoPending(t *testing.T) {
 	if !strings.Contains(err.Error(), "no pending permission request") {
 		t.Errorf("expected 'no pending permission request', got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "pass request_id to retry a resolved answer") {
+	if !strings.Contains(err.Error(), "include request_id only when retrying a previously answered request") {
 		t.Errorf("expected retry hint, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "runtime rt_perm_3") {
+		t.Errorf("expected the runtime ID in the message, got: %v", err)
 	}
 	if len(fake.answerPermissionCalls) != 0 {
 		t.Errorf("expected 0 AnswerPermission calls, got %d", len(fake.answerPermissionCalls))

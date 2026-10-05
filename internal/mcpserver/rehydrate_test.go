@@ -800,6 +800,15 @@ func TestSpawnSkipsLabelPrecheckForKeyedSpawn(t *testing.T) {
 	if ri.RuntimeID == "" {
 		t.Fatal("expected non-empty registry runtime_id")
 	}
+	// The fake spawn returns no sentinel_file/on_event, so the keyed
+	// override is a no-op and the registry retains the pre-spawn defaults
+	// computed from the fresh run ID: <tmp>/avenor-run-<runID>.done/.log.
+	if want := filepath.Join(os.TempDir(), "avenor-run-"+runID+".done"); ri.SentinelPath != want {
+		t.Fatalf("RunInfo.SentinelPath = %q, want %q", ri.SentinelPath, want)
+	}
+	if want := filepath.Join(os.TempDir(), "avenor-run-"+runID+".log"); ri.EventLogPath != want {
+		t.Fatalf("RunInfo.EventLogPath = %q, want %q", ri.EventLogPath, want)
+	}
 }
 
 func TestSpawnRejectsLabelClaimedByLiveRun(t *testing.T) {
@@ -1288,5 +1297,14 @@ func TestFollowUpSkipsLabelPrecheckForKeyedFollowUp(t *testing.T) {
 	}
 	if ri.RuntimeID == "" {
 		t.Fatal("expected non-empty registry runtime_id")
+	}
+	// The fake spawn returns no sentinel_file/on_event, so the keyed
+	// override is a no-op and the registry retains the pre-spawn defaults
+	// computed from the fresh run ID: <tmp>/avenor-run-<runID>.done/.log.
+	if want := filepath.Join(os.TempDir(), "avenor-run-"+runID+".done"); ri.SentinelPath != want {
+		t.Fatalf("RunInfo.SentinelPath = %q, want %q", ri.SentinelPath, want)
+	}
+	if want := filepath.Join(os.TempDir(), "avenor-run-"+runID+".log"); ri.EventLogPath != want {
+		t.Fatalf("RunInfo.EventLogPath = %q, want %q", ri.EventLogPath, want)
 	}
 }
