@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -184,6 +185,7 @@ func (s *stubControlClient) List() ([]map[string]any, error)                    
 func (s *stubControlClient) Spawn(params map[string]any) (map[string]any, error) { return nil, nil }
 func (s *stubControlClient) Shutdown(mode string) error                          { return nil }
 func (s *stubControlClient) Close() error                                        { return nil }
+func (s *stubControlClient) Closed() bool                                        { return false }
 func (s *stubControlClient) AnswerPermission(runtimeID, requestID, optionID string) error {
 	return nil
 }
@@ -209,4 +211,116 @@ func (s *stubControlClient) WorkflowControllerStatus(string) (map[string]any, er
 }
 func (s *stubControlClient) WorkflowControllerList() (map[string]any, error) {
 	return nil, nil
+}
+
+func writeTokenFile(t *testing.T, content string, mode os.FileMode) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(path, []byte(content), mode); err != nil {
+		t.Fatal(err)
+	}
+	// WriteFile's perm is masked by the process umask; force the intended
+	// mode so the rejection tests exercise it regardless of umask.
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestMCPAuthTokenFilePrecedence(t *testing.T) {
+	path := writeTokenFile(t, "file-token\n", 0o600)
+
+	// Explicit --auth-token beats the file.
+	token, err := resolveAuthToken(true, true, "flag-token", path, "env-token")
+	if err != nil {
+		t.Fatalf("flag over file: %v", err)
+	}
+	if token != "flag-token" {
+		t.Fatalf("token = %q, want flag-token", token)
+	}
+
+	// File beats the environment.
+	token, err = resolveAuthToken(false, true, "flag-token", path, "env-token")
+	if err != nil {
+		t.Fatalf("file over env: %v", err)
+	}
+	if token != "file-token" {
+		t.Fatalf("token = %q, want file-token", token)
+	}
+
+	// Without flag or file, the environment is used.
+	token, err = resolveAuthToken(false, false, "", "", "env-token")
+	if err != nil {
+		t.Fatalf("env fallback: %v", err)
+	}
+	if token != "env-token" {
+		t.Fatalf("token = %q, want env-token", token)
+	}
+}
+
+func TestMCPAuthTokenEmptyFlagFallsThroughToEnv(t *testing.T) {
+	// An explicitly passed empty --auth-token must not be treated as
+	// authoritative; it should fall through to the env value.
+	token, err := resolveAuthToken(true, false, "", "", "env-token")
+	if err != nil {
+		t.Fatalf("resolveAuthToken: %v", err)
+	}
+	if token != "env-token" {
+		t.Fatalf("token = %q, want env-token", token)
+	}
+}
+
+func TestMCPAuthTokenFileRejected(t *testing.T) {
+	empty := writeTokenFile(t, "   \n", 0o600)
+	if _, err := readAuthTokenFile(empty); err == nil {
+		t.Fatal("expected empty token file to be rejected")
+	}
+
+	loose := writeTokenFile(t, "secret\n", 0o644)
+	if _, err := readAuthTokenFile(loose); err == nil {
+		t.Fatal("expected mode 0644 token file to be rejected")
+	}
+
+	missing := filepath.Join(t.TempDir(), "absent")
+	if _, err := readAuthTokenFile(missing); err == nil {
+		t.Fatal("expected missing token file to be rejected")
+	}
+}
+
+func TestMCPAuthTokenFileAccepted(t *testing.T) {
+	path := writeTokenFile(t, "secret-token\n", 0o600)
+	token, err := readAuthTokenFile(path)
+	if err != nil {
+		t.Fatalf("readAuthTokenFile: %v", err)
+	}
+	if token != "secret-token" {
+		t.Fatalf("token = %q, want secret-token", token)
+	}
+}
+
+func TestRunMCPAuthTokenAndFileConflictRejected(t *testing.T) {
+	path := writeTokenFile(t, "file-token\n", 0o600)
+
+	// Capture stderr: runMCP writes the guard message to os.Stderr directly.
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	defer func() { os.Stderr = oldStderr }()
+
+	got := runMCP([]string{"--transport", "http", "--auth-token", "flag-token", "--auth-token-file", path})
+	w.Close()
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+
+	if got != 1 {
+		t.Fatalf("runMCP() = %d, want 1", got)
+	}
+	if !strings.Contains(buf.String(), "cannot both be set") {
+		t.Fatalf("stderr = %q, want the flag-conflict guard message", buf.String())
+	}
 }

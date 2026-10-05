@@ -21,6 +21,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sdougbrown/avenor/client"
+	"github.com/sdougbrown/avenor/internal/runstate"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/spawnselection"
 )
@@ -31,6 +32,7 @@ type ControlClient interface {
 	Spawn(params map[string]any) (map[string]any, error)
 	Shutdown(mode string) error
 	Close() error
+	Closed() bool
 	AnswerPermission(runtimeID, requestID, optionID string) error
 	WorkflowStatus(workflowID string) (map[string]any, error)
 	WorkflowWait(workflowID string, timeout time.Duration) (map[string]any, error)
@@ -242,7 +244,7 @@ func NewServer(opts Options) (*Server, error) {
 		return nil, fmt.Errorf("unsupported transport: %s", opts.Transport)
 	}
 	if opts.Transport == "http" && strings.TrimSpace(opts.AuthToken) == "" {
-		return nil, fmt.Errorf("--transport http requires MCP_AUTH_TOKEN or --auth-token")
+		return nil, fmt.Errorf("--transport http requires MCP_AUTH_TOKEN, --auth-token, or --auth-token-file")
 	}
 	if opts.NoAutostart && opts.SupervisorSocket == "" && opts.ControlClient == nil {
 		return nil, fmt.Errorf("--no-autostart requires --supervisor-socket")
@@ -278,18 +280,12 @@ func NewServer(opts Options) (*Server, error) {
 		},
 	}
 
-	// Explicit sockets retain their eager, no-autostart dial semantics. The
-	// default autostart path is intentionally acquired by the first tool call
-	// so constructing an MCP server does not race other constructors.
+	// Explicit sockets keep their socket path for lazy acquisition: the first
+	// default-supervisor tool call dials, and redials after a dead connection.
+	// The default autostart path is intentionally acquired by the first tool
+	// call so constructing an MCP server does not race other constructors.
 	if opts.SupervisorSocket != "" {
 		s.defaultSupervisorPath = opts.SupervisorSocket
-	}
-	if opts.SupervisorSocket != "" && opts.ControlClient == nil {
-		cl, err := client.Dial(opts.SupervisorSocket)
-		if err != nil {
-			return nil, fmt.Errorf("dial supervisor socket: %w", err)
-		}
-		s.controlClient = cl
 	}
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
@@ -438,9 +434,20 @@ func (s *Server) handleAvenorStatus(ctx context.Context, req *mcp.CallToolReques
 		}
 		translated := make([]map[string]any, 0, len(results))
 		seenRegistryRuns := make(map[string]bool)
+		// Index the scope's registry entries by runtime ID once so the
+		// per-entry merge is a single map lookup instead of a full registry
+		// scan per entry.
+		registryByRuntimeID := make(map[string]*RunInfo)
+		for _, ri := range s.registry.All() {
+			if ri.SupervisorID == supervisorPath {
+				if _, ok := registryByRuntimeID[ri.RuntimeID]; !ok {
+					registryByRuntimeID[ri.RuntimeID] = ri
+				}
+			}
+		}
 		for _, entry := range results {
 			runtimeID, _ := entry["runtime_id"].(string)
-			ri := s.findRegistryByRuntimeID(runtimeID)
+			ri := registryByRuntimeID[runtimeID]
 			var sentinelPath string
 			if ri != nil {
 				sentinelPath = ri.SentinelPath
@@ -472,12 +479,20 @@ func (s *Server) handleAvenorStatus(ctx context.Context, req *mcp.CallToolReques
 		return nil, statusToolOutput{Runs: &runs, Count: &count}, nil
 	}
 
+	ri, err := s.lookupRun(cl, supervisorPath, args.RunID)
+	if err != nil {
+		return nil, statusToolOutput{}, err
+	}
+	key := args.RunID
+	if ri != nil {
+		key = ri.RunID
+	}
 	var timedOut bool
 	var ts map[string]any
 	if condition != "" {
-		ts, timedOut, err = s.waitForRun(ctx, cl, args.RunID, condition, deadline)
+		ts, timedOut, err = s.waitForRun(ctx, cl, supervisorPath, key, condition, deadline)
 	} else {
-		ts, err = s.queryRunStatus(cl, args.RunID)
+		ts, err = s.queryRunStatus(cl, supervisorPath, key)
 	}
 	if err != nil {
 		return nil, statusToolOutput{}, err
@@ -521,8 +536,220 @@ func terminalStatusFromRunInfo(info *RunInfo) (map[string]any, bool) {
 	return status, true
 }
 
-func (s *Server) queryRunStatus(cl ControlClient, runID string) (map[string]any, error) {
-	ri := s.registry.Lookup(runID)
+// lookupRun resolves key (an MCP run UUID or a label) against the selected
+// supervisor, rehydrating the registry from the supervisor's list on a miss.
+// A nil result with a nil error means the list contained no match; callers
+// keep their existing not-found behavior. List errors propagate as errors.
+func (s *Server) lookupRun(cl ControlClient, supervisorPath, key string) (*RunInfo, error) {
+	if ri := s.registry.Lookup(supervisorPath, key); ri != nil {
+		return ri, nil
+	}
+	entries, err := cl.List()
+	if err != nil {
+		return nil, fmt.Errorf("list runs: %w", err)
+	}
+	var (
+		sentinelMatch = -1
+		runtimeMatch  = -1
+		labelMatches  []int
+	)
+	for i := range entries {
+		entry := entries[i]
+		sentinelFile, _ := entry["sentinel_file"].(string)
+		if key != "" && filepath.Base(sentinelFile) == "avenor-run-"+key+".done" {
+			if sentinelMatch == -1 {
+				sentinelMatch = i
+			}
+			continue
+		}
+		runtimeID, _ := entry["runtime_id"].(string)
+		if key != "" && runtimeID == key {
+			if runtimeMatch == -1 {
+				runtimeMatch = i
+			}
+			continue
+		}
+		label, _ := entry["label"].(string)
+		if key != "" && label != "" && label == key {
+			labelMatches = append(labelMatches, i)
+		}
+	}
+	matched := -1
+	switch {
+	case sentinelMatch != -1:
+		matched = sentinelMatch
+	case runtimeMatch != -1:
+		matched = runtimeMatch
+	case len(labelMatches) == 1:
+		matched = labelMatches[0]
+	case len(labelMatches) > 1:
+		ids := make([]string, 0, len(labelMatches))
+		for _, i := range labelMatches {
+			id, _ := entries[i]["runtime_id"].(string)
+			ids = append(ids, id)
+		}
+		return nil, fmt.Errorf("ambiguous label %s: matches runtimes %v", key, ids)
+	}
+	if matched != -1 {
+		s.reapStaleLabel(supervisorPath, entries, entries[matched])
+		return s.runInfoFromListEntry(entries[matched], supervisorPath)
+	}
+	// The run's runtime left the live list (e.g. a supervisor restart) but
+	// the label is still cached: resolve it to the cached entry so the dead
+	// run stays reachable by label for its persisted result and event log.
+	if ri := s.registry.LookupLabel(supervisorPath, key); ri != nil {
+		return ri, nil
+	}
+	return nil, nil
+}
+
+// reapStaleLabel unlinks a cached label mapping that claims the same label
+// under the same supervisor but whose runtime is no longer in the live list.
+// The live supervisor's list is authoritative for liveness: a supervisor
+// restart at the same socket path orphans its pre-restart entries, and the
+// live list re-points the colliding label to the live run so the subsequent
+// store succeeds. The stale mapping is unlinked so the label re-points, while
+// the dead run stays discoverable by run ID for its persisted terminal result
+// and event log. Entries whose runtime is still live, entries of other
+// supervisors, and non-colliding labels are left untouched. The known race (a
+// spawn storing an entry between the list and the reap) is acceptable and
+// self-healing: the next lookup miss re-discovers it.
+func (s *Server) reapStaleLabel(supervisorPath string, liveEntries []map[string]any, entry map[string]any) {
+	label, _ := entry["label"].(string)
+	if label == "" {
+		return
+	}
+	old := s.registry.LookupLabel(supervisorPath, label)
+	if old == nil {
+		return
+	}
+	runtimeID, _ := entry["runtime_id"].(string)
+	sentinelFile, _ := entry["sentinel_file"].(string)
+	newRunID := runIDFromSentinel(sentinelFile)
+	if newRunID == "" {
+		newRunID = runtimeID
+	}
+	if old.RunID == newRunID {
+		return
+	}
+	liveRuntimes := make(map[string]bool, len(liveEntries))
+	for _, live := range liveEntries {
+		if rid, ok := live["runtime_id"].(string); ok {
+			liveRuntimes[rid] = true
+		}
+	}
+	if liveRuntimes[old.RuntimeID] {
+		return
+	}
+	s.registry.UnlinkLabel(old.SupervisorID, old.Label)
+}
+
+// checkLabelAvailable rejects a spawn whose explicit label is already claimed
+// by a non-terminal run in the supervisor's list, by a live run on another
+// supervisor (the registry enforces global label uniqueness), and reaps a
+// stale registry mapping left behind by a supervisor restart (the live list
+// is authoritative for liveness). Only non-terminal runs hold a label: an
+// ended run's label is free to re-claim, so terminal entries are excluded
+// from the claim scan, and a terminal cross-supervisor holder's mapping is
+// reaped so the spawn re-points the label. A list error never blocks the
+// spawn: the registry's own collision check remains the backstop.
+func (s *Server) checkLabelAvailable(cl ControlClient, supervisorPath, label string) error {
+	entries, err := cl.List()
+	if err != nil {
+		return nil
+	}
+	live := make([]map[string]any, 0, len(entries))
+	for _, entry := range entries {
+		status, _ := entry["status"].(string)
+		if runstate.IsTerminalStatus(status) {
+			continue
+		}
+		live = append(live, entry)
+	}
+	for _, entry := range live {
+		if l, _ := entry["label"].(string); l == label {
+			runtimeID, _ := entry["runtime_id"].(string)
+			return fmt.Errorf("label already in use: %s (runtime %s)", label, runtimeID)
+		}
+	}
+	if holder := s.registry.LabelHolder(label); holder != nil && holder.SupervisorID != supervisorPath {
+		if _, terminal := terminalStatusFromRunInfo(holder); terminal {
+			// An ended cross-supervisor run no longer holds the label:
+			// unlink its stale mapping so the spawn's store re-points it.
+			s.registry.UnlinkLabel(holder.SupervisorID, label)
+		} else {
+			return fmt.Errorf("label already in use: %s (mapped to supervisor %s runtime %s)",
+				label, holder.SupervisorID, holder.RuntimeID)
+		}
+	}
+	s.reapStaleLabel(supervisorPath, live, map[string]any{"label": label})
+	return nil
+}
+
+// runIDFromSentinel extracts the MCP run UUID from a sentinel basename shaped
+// avenor-run-<uuid>.done, or returns empty for any other name.
+func runIDFromSentinel(sentinelFile string) string {
+	base := filepath.Base(sentinelFile)
+	id := strings.TrimSuffix(strings.TrimPrefix(base, "avenor-run-"), ".done")
+	if id == "" || id == base {
+		return ""
+	}
+	if _, err := uuid.Parse(id); err != nil {
+		return ""
+	}
+	return id
+}
+
+// runInfoFromListEntry converts a stable supervisor list entry into a registry
+// entry scoped to supervisorPath. The supervisor-wide run_id is never used as
+// the MCP run ID.
+func (s *Server) runInfoFromListEntry(entry map[string]any, supervisorPath string) (*RunInfo, error) {
+	runtimeID, _ := entry["runtime_id"].(string)
+	sentinelFile, _ := entry["sentinel_file"].(string)
+	runID := runIDFromSentinel(sentinelFile)
+	if runID == "" {
+		runID = runtimeID
+	}
+	label, _ := entry["label"].(string)
+	info := &RunInfo{
+		RunID:        runID,
+		Label:        label,
+		RuntimeID:    runtimeID,
+		SupervisorID: supervisorPath,
+		SentinelPath: sentinelFile,
+		Dir:          stringField(entry, "dir"),
+		EventLogPath: stringField(entry, "on_event"),
+		Thinking:     stringField(entry, "thinking"),
+	}
+	info.SessionID = stringField(entry, "session_id")
+	info.AutoApprove, _ = entry["auto_approve"].(bool)
+	if ms, ok := entry["started_at"].(float64); ok && ms > 0 {
+		info.CreatedAt = time.UnixMilli(int64(ms))
+	}
+	var identity resolvedSpawnIdentity
+	applySpawnIdentity(entry, &identity)
+	info.Agent = identity.EffectiveAgent
+	info.Model = identity.EffectiveModel
+	info.Backend = identity.EffectiveBackend
+	info.RosterFile = identity.RosterFile
+	info.RosterEntry = identity.RosterEntry
+	info.EffectiveAgent = identity.EffectiveAgent
+	info.EffectiveModel = identity.EffectiveModel
+	info.EffectiveBackend = identity.EffectiveBackend
+	info.AgentProfile = identity.AgentProfile
+	if err := s.registry.Store(info); err != nil {
+		return nil, fmt.Errorf("registry store: %w", err)
+	}
+	return info, nil
+}
+
+func stringField(entry map[string]any, key string) string {
+	value, _ := entry[key].(string)
+	return value
+}
+
+func (s *Server) queryRunStatus(cl ControlClient, supervisorPath, runID string) (map[string]any, error) {
+	ri := s.registry.Lookup(supervisorPath, runID)
 	if ri != nil {
 		result, err := cl.Status(ri.RuntimeID)
 		if err != nil {
@@ -597,8 +824,8 @@ func resultFromStatus(status map[string]any, timedOut bool) map[string]any {
 
 // recoverFinalOutput reads the durable terminal event when an older control
 // server does not implement the explicit result method.
-func (s *Server) recoverFinalOutput(runID string) (string, bool) {
-	ri := s.registry.Lookup(runID)
+func (s *Server) recoverFinalOutput(supervisorPath, runID string) (string, bool) {
+	ri := s.registry.Lookup(supervisorPath, runID)
 	if ri == nil || ri.EventLogPath == "" {
 		return "", false
 	}
@@ -613,13 +840,13 @@ func (s *Server) resultSupervisorID(runID, requestedSupervisorID string) string 
 	if requestedSupervisorID != "" {
 		return requestedSupervisorID
 	}
-	if ri := s.registry.Lookup(runID); ri != nil {
+	if ri := s.registry.LookupUnique(runID); ri != nil {
 		return ri.SupervisorID
 	}
 	return ""
 }
 
-func (s *Server) retrieveFinalOutput(cl ControlClient, runID string, status map[string]any) {
+func (s *Server) retrieveFinalOutput(cl ControlClient, supervisorPath, runID string, status map[string]any) {
 	// Status provides a bounded preview only. Call Result for full output when
 	// the control plane supports it.
 	fullResultRetrieved := false
@@ -636,7 +863,7 @@ func (s *Server) retrieveFinalOutput(cl ControlClient, runID string, status map[
 		}
 	}
 	if !fullResultRetrieved {
-		if output, found := s.recoverFinalOutput(runID); found {
+		if output, found := s.recoverFinalOutput(supervisorPath, runID); found {
 			status["final_output"] = output
 			status["final_output_truncated"] = false
 			fullResultRetrieved = true
@@ -677,20 +904,30 @@ func (s *Server) handleAvenorResult(ctx context.Context, req *mcp.CallToolReques
 		return nil, nil, err
 	}
 	defer cleanup()
+	supervisorPath := s.getSupervisorPath(supervisorID)
+
+	ri, err := s.lookupRun(cl, supervisorPath, args.RunID)
+	if err != nil {
+		return nil, nil, err
+	}
+	key := args.RunID
+	if ri != nil {
+		key = ri.RunID
+	}
 
 	var status map[string]any
 	var timedOut bool
 	if wait {
-		status, timedOut, err = s.waitForRun(ctx, cl, args.RunID, waitTurnComplete, deadline)
+		status, timedOut, err = s.waitForRun(ctx, cl, supervisorPath, key, waitTurnComplete, deadline)
 	} else {
-		status, err = s.queryRunStatus(cl, args.RunID)
+		status, err = s.queryRunStatus(cl, supervisorPath, key)
 	}
 	if err != nil {
 		return nil, nil, err
 	}
 
 	if isTerminalStatus(status) && !hasPendingPermission(status) {
-		s.retrieveFinalOutput(cl, args.RunID, status)
+		s.retrieveFinalOutput(cl, supervisorPath, key, status)
 	}
 	result := resultFromStatus(status, timedOut)
 	if clamped && timedOut {
@@ -853,6 +1090,12 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 	}
 	defer cleanup()
 
+	if args.Label != "" {
+		if err := s.checkLabelAvailable(cl, supervisorPath, args.Label); err != nil {
+			return nil, nil, err
+		}
+	}
+
 	result, err := cl.Spawn(params)
 	if err != nil {
 		return nil, nil, fmt.Errorf("spawn: %w", err)
@@ -942,7 +1185,7 @@ func (s *Server) handleAvenorShutdown(ctx context.Context, req *mcp.CallToolRequ
 	var cleanedUp []string
 	for _, ri := range s.registry.All() {
 		if ri.SupervisorID == supervisorPath {
-			s.registry.Remove(ri.RunID)
+			s.registry.Remove(ri.SupervisorID, ri.RunID)
 			if _, statErr := os.Stat(ri.SentinelPath); statErr == nil {
 				if rmErr := os.Remove(ri.SentinelPath); rmErr == nil {
 					cleanedUp = append(cleanedUp, ri.SentinelPath)
@@ -966,17 +1209,18 @@ func (s *Server) handleAvenorAnswerPermission(ctx context.Context, req *mcp.Call
 	if err := runtime.ValidatePermissionMessage(args.Message); err != nil {
 		return nil, nil, err
 	}
-	ri := s.registry.Lookup(args.RunID)
-	supervisorID := args.SupervisorID
-	if supervisorID == "" && ri != nil {
-		supervisorID = ri.SupervisorID
-	}
+	supervisorID := s.resultSupervisorID(args.RunID, args.SupervisorID)
 
 	cl, cleanup, err := s.getClientForSupervisor(supervisorID)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer cleanup()
+
+	ri, err := s.lookupRun(cl, s.getSupervisorPath(supervisorID), args.RunID)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	runtimeID := ""
 	if ri != nil {
@@ -1044,9 +1288,30 @@ func resolveRuntimeIDFromList(cl ControlClient, runID string) (string, error) {
 }
 
 func (s *Server) handleAvenorEvents(ctx context.Context, req *mcp.CallToolRequest, args eventsArgs) (*mcp.CallToolResult, any, error) {
-	ri := s.registry.Lookup(args.RunID)
+	// The registry fast path only covers a run ID that resolves to a unique
+	// cached entry; any other key needs the supervisor to establish a match
+	// before the event log can be read locally.
+	ri := s.registry.LookupUnique(args.RunID)
+	if ri != nil && args.SupervisorID != "" && ri.SupervisorID != args.SupervisorID {
+		ri = nil
+	}
 	if ri == nil {
-		return nil, nil, fmt.Errorf("run not found in registry")
+		// Acquire the client before resolving the supervisor path: the
+		// acquisition may autostart the default supervisor, and a rehydrated
+		// entry must be scoped to the path it was found on.
+		cl, cleanup, err := s.getClientForSupervisor(args.SupervisorID)
+		if err != nil {
+			return nil, nil, err
+		}
+		defer cleanup()
+		supervisorPath := s.getSupervisorPath(args.SupervisorID)
+		ri, err = s.lookupRun(cl, supervisorPath, args.RunID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if ri == nil {
+			return nil, nil, fmt.Errorf("run not found in registry")
+		}
 	}
 
 	limit := args.Limit
@@ -1066,15 +1331,7 @@ func (s *Server) handleAvenorEvents(ctx context.Context, req *mcp.CallToolReques
 }
 
 func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequest, args followUpArgs) (*mcp.CallToolResult, any, error) {
-	ri := s.registry.Lookup(args.RunID)
-	if ri == nil {
-		return nil, nil, fmt.Errorf("run not found in registry")
-	}
-
-	supervisorID := args.SupervisorID
-	if supervisorID == "" {
-		supervisorID = ri.SupervisorID
-	}
+	supervisorID := s.resultSupervisorID(args.RunID, args.SupervisorID)
 
 	// Resolve the supervisor's control client once and store it in cl.
 	// The status lookup and follow-up Spawn call both use cl.
@@ -1084,6 +1341,14 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 		return nil, nil, err
 	}
 	defer cleanup()
+
+	ri, err := s.lookupRun(cl, s.getSupervisorPath(supervisorID), args.RunID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if ri == nil {
+		return nil, nil, fmt.Errorf("run not found in registry")
+	}
 
 	sessionID, err := readSentinelSession(ri.SentinelPath)
 	if err != nil {
@@ -1209,6 +1474,12 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 	}
 	if ri.AutoApprove {
 		params["auto_approve"] = true
+	}
+
+	if followupLabel != "" {
+		if err := s.checkLabelAvailable(cl, s.getSupervisorPath(supervisorID), followupLabel); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	result, err := cl.Spawn(params)
@@ -1495,9 +1766,22 @@ func (s *Server) handleAvenorWorkflowControllerStatus(ctx context.Context, req *
 
 var startSupervisorFunc = startSupervisor
 
+// dialSupervisorClient is the seam for dialing a supervisor control socket;
+// tests replace it to count or substitute dials.
+var dialSupervisorClient = client.Dial
+
 // beforeSupervisorLock is a no-op production hook used to coordinate callers
 // at the lazy-supervisor lock boundary in concurrency tests.
 var beforeSupervisorLock = func() {}
+
+// persistentControlClientForTest returns the currently dialed persistent
+// control client under the supervisor lock. Test-only accessor for
+// asserting disconnect/redial behavior without reading unexported fields.
+func (s *Server) persistentControlClientForTest() ControlClient {
+	s.supervisorMu.Lock()
+	defer s.supervisorMu.Unlock()
+	return s.controlClient
+}
 
 func (s *Server) getClientForSupervisor(supervisorID string) (ControlClient, func(), error) {
 	cl, cleanup, _, err := s.getClientForSupervisorWithPath(supervisorID)
@@ -1521,7 +1805,7 @@ func (s *Server) getClientForSupervisorWithPath(supervisorID string) (ControlCli
 	isDefault := supervisorID == "" || supervisorID == s.defaultSupervisorPath
 	if !isDefault {
 		s.supervisorMu.Unlock()
-		cl, err := client.Dial(supervisorID)
+		cl, err := dialSupervisorClient(supervisorID)
 		if err != nil {
 			return nil, nil, "", fmt.Errorf("dial supervisor socket %s: %w", supervisorID, err)
 		}
@@ -1529,7 +1813,22 @@ func (s *Server) getClientForSupervisorWithPath(supervisorID string) (ControlCli
 	}
 	defer s.supervisorMu.Unlock()
 
-	if s.controlClient == nil {
+	if s.opts.SupervisorSocket != "" {
+		// Explicit-socket deployment: dial lazily, redial after a dead
+		// connection, and never fall through to autostart. Holding the lock
+		// during the dial makes concurrent acquisitions share one attempt.
+		if s.controlClient == nil || s.controlClient.Closed() {
+			cl, err := dialSupervisorClient(s.opts.SupervisorSocket)
+			if err != nil {
+				s.controlClient = nil
+				return nil, nil, "", fmt.Errorf("supervisor unavailable at %s: %w", s.opts.SupervisorSocket, err)
+			}
+			s.controlClient = cl
+		}
+		return s.controlClient, func() {}, s.defaultSupervisorPath, nil
+	}
+
+	if s.controlClient == nil || s.controlClient.Closed() {
 		if s.opts.NoAutostart {
 			return nil, nil, "", fmt.Errorf("no supervisor running: autostart disabled")
 		}
@@ -1551,15 +1850,6 @@ func (s *Server) getSupervisorPath(supervisorID string) string {
 	s.supervisorMu.Lock()
 	defer s.supervisorMu.Unlock()
 	return s.defaultSupervisorPath
-}
-
-func (s *Server) findRegistryByRuntimeID(runtimeID string) *RunInfo {
-	for _, ri := range s.registry.All() {
-		if ri.RuntimeID == runtimeID {
-			return ri
-		}
-	}
-	return nil
 }
 
 func (s *Server) Run() error {

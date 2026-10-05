@@ -58,6 +58,7 @@ func statusOutputRuns(t *testing.T, v any) []map[string]any {
 
 type fakeClient struct {
 	listResult               []map[string]any
+	listFunc                 func() ([]map[string]any, error)
 	statusResult             map[string]any
 	statusFunc               func(runtimeID string) (map[string]any, error)
 	spawnResult              map[string]any
@@ -73,6 +74,7 @@ type fakeClient struct {
 	spawnCapturedParams      map[string]any
 	answerPermissionCalls    []permissionCall
 	closeCalls               int
+	closed                   bool
 	statusCapturedRuntimeIDs []string
 	resultCapturedRuntimeIDs []string
 
@@ -144,6 +146,9 @@ func (f *fakeClient) Result(runtimeID string) (map[string]any, error) {
 }
 
 func (f *fakeClient) List() ([]map[string]any, error) {
+	if f.listFunc != nil {
+		return f.listFunc()
+	}
 	return f.listResult, f.listErr
 }
 
@@ -175,6 +180,8 @@ func (f *fakeClient) Close() error {
 	f.closeCalls++
 	return nil
 }
+
+func (f *fakeClient) Closed() bool { return f.closed }
 
 func (f *fakeClient) WorkflowStatus(workflowID string) (map[string]any, error) {
 	f.workflowStatusCalls = append(f.workflowStatusCalls, workflowID)
@@ -227,6 +234,7 @@ func (c *spawnCountingClient) Spawn(map[string]any) (map[string]any, error) {
 }
 func (c *spawnCountingClient) Shutdown(string) error                         { return nil }
 func (c *spawnCountingClient) Close() error                                  { return nil }
+func (c *spawnCountingClient) Closed() bool                                  { return false }
 func (c *spawnCountingClient) AnswerPermission(string, string, string) error { return nil }
 func (c *spawnCountingClient) WorkflowStatus(string) (map[string]any, error) { return nil, nil }
 func (c *spawnCountingClient) WorkflowWait(string, time.Duration) (map[string]any, error) {
@@ -1451,17 +1459,25 @@ func TestServerCloseWithLifecycle(t *testing.T) {
 }
 
 func TestServerWithNoAutostartAndSocket(t *testing.T) {
-	// no-autostart with a non-existent socket should fail on dial
-	_, err := NewServer(Options{
+	// no-autostart with a non-existent socket must not fail at construction:
+	// the explicit socket is dialed lazily, and the first acquisition reports
+	// the supervisor as unavailable instead of falling back to autostart.
+	s, err := NewServer(Options{
 		Transport:        "stdio",
 		SupervisorSocket: "/nonexistent/socket/path",
 		NoAutostart:      true,
 	})
-	if err == nil {
-		t.Fatal("expected error dialing non-existent socket")
+	if err != nil {
+		t.Fatalf("NewServer() error = %v, want nil", err)
 	}
-	if !strings.Contains(err.Error(), "dial supervisor socket") {
-		t.Fatalf("expected error to mention dial supervisor socket, got: %v", err)
+	defer s.Close()
+
+	_, _, err = s.getClientForSupervisor("")
+	if err == nil {
+		t.Fatal("expected error acquiring client for non-existent socket")
+	}
+	if !strings.Contains(err.Error(), "supervisor unavailable at /nonexistent/socket/path") {
+		t.Fatalf("expected supervisor-unavailable error, got: %v", err)
 	}
 }
 
@@ -1500,7 +1516,7 @@ func TestAvenorSpawn(t *testing.T) {
 		t.Errorf("expected label to default to run_id, got %v", m["label"])
 	}
 
-	ri := s.registry.Lookup(runID)
+	ri := s.registry.LookupUnique(runID)
 	if ri == nil {
 		t.Fatal("expected registry entry for spawn")
 	}
@@ -1564,7 +1580,7 @@ func TestAvenorSpawnRosterSelectorAndResolvedIdentity(t *testing.T) {
 		t.Fatalf("roster selector not forwarded: %#v", fake.spawnCapturedParams)
 	}
 
-	ri := s.registry.Lookup(result.(map[string]any)["run_id"].(string))
+	ri := s.registry.LookupUnique(result.(map[string]any)["run_id"].(string))
 	if ri == nil {
 		t.Fatal("expected registry entry")
 	}
@@ -1648,7 +1664,7 @@ func TestAvenorSpawnWithLabel(t *testing.T) {
 		t.Errorf("expected label my-label, got %s", label)
 	}
 
-	ri := s.registry.Lookup("my-label")
+	ri := s.registry.LookupUnique("my-label")
 	if ri == nil {
 		t.Fatal("expected registry entry lookup by label")
 	}
@@ -1731,7 +1747,7 @@ func TestAvenorSpawnWithOptionalParams(t *testing.T) {
 		t.Fatal("expected supervisor_id in result")
 	}
 
-	ri := s.registry.Lookup(runID)
+	ri := s.registry.LookupUnique(runID)
 	if ri == nil {
 		t.Fatal("expected registry entry for spawn")
 	}
@@ -1804,7 +1820,7 @@ func TestAvenorSpawnAutoApproveTrue(t *testing.T) {
 	if runID == "" {
 		t.Fatal("expected spawned run ID")
 	}
-	if ri := s.registry.Lookup(runID); ri == nil || !ri.AutoApprove {
+	if ri := s.registry.LookupUnique(runID); ri == nil || !ri.AutoApprove {
 		t.Fatalf("initial registry auto-approve = %#v, want true", ri)
 	}
 
@@ -2183,7 +2199,7 @@ func TestAvenorShutdownCleanup(t *testing.T) {
 		t.Error("event log file was not removed from disk")
 	}
 
-	if ri := s.registry.Lookup("run-clean-1"); ri != nil {
+	if ri := s.registry.LookupUnique("run-clean-1"); ri != nil {
 		t.Error("registry entry was not removed")
 	}
 }
@@ -3074,7 +3090,7 @@ func TestAvenorFollowUp(t *testing.T) {
 		t.Errorf("expected label prior-test-followup, got %v", p["label"])
 	}
 
-	ri := s.registry.Lookup(runID)
+	ri := s.registry.LookupUnique(runID)
 	if ri == nil {
 		t.Fatal("expected new registry entry for follow-up run")
 	}
@@ -3150,7 +3166,7 @@ func TestAvenorRosterFollowUpUsesResolvedIdentity(t *testing.T) {
 		t.Fatalf("follow-up reread roster_entry: %#v", captured)
 	}
 	followupID := result.(map[string]any)["run_id"].(string)
-	followup := s.registry.Lookup(followupID)
+	followup := s.registry.LookupUnique(followupID)
 	if followup == nil || followup.RosterFile != "/tmp/mutable-roster.json" || followup.EffectiveBackend != "agy" {
 		t.Fatalf("follow-up metadata = %#v", followup)
 	}
@@ -3245,7 +3261,7 @@ func TestAvenorFollowUpInheritsAutoApproveTransitively(t *testing.T) {
 	if got, ok := spawnParams[0]["auto_approve"].(bool); !ok || !got {
 		t.Fatalf("first follow-up auto_approve = %T %v, want bool true", spawnParams[0]["auto_approve"], spawnParams[0]["auto_approve"])
 	}
-	if ri := s.registry.Lookup(firstRunID); ri == nil || !ri.AutoApprove {
+	if ri := s.registry.LookupUnique(firstRunID); ri == nil || !ri.AutoApprove {
 		t.Fatalf("first follow-up registry auto-approve = %#v, want true", ri)
 	}
 
@@ -3263,7 +3279,7 @@ func TestAvenorFollowUpInheritsAutoApproveTransitively(t *testing.T) {
 		t.Fatalf("second follow-up auto_approve = %T %v, want bool true", spawnParams[1]["auto_approve"], spawnParams[1]["auto_approve"])
 	}
 	secondRunID, _ := secondResult.(map[string]any)["run_id"].(string)
-	if ri := s.registry.Lookup(secondRunID); ri == nil || !ri.AutoApprove {
+	if ri := s.registry.LookupUnique(secondRunID); ri == nil || !ri.AutoApprove {
 		t.Fatalf("second follow-up registry auto-approve = %#v, want true", ri)
 	}
 }
@@ -4131,4 +4147,322 @@ func TestServerAuthenticatedHTTPHandlerHostChecks(t *testing.T) {
 			t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
 		}
 	})
+}
+
+// startStubSupervisorListener runs a listener that accepts supervisor
+// connections and parks them without speaking the control protocol; tests
+// use it as a dial target and close accepted conns to simulate a restart.
+func startStubSupervisorListener(t *testing.T, socketPath string) (acceptedCount func() int, closeAccepted func(), cleanup func()) {
+	t.Helper()
+	ln, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen %s: %v", socketPath, err)
+	}
+	var mu sync.Mutex
+	var conns []net.Conn
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, conn)
+			mu.Unlock()
+		}
+	}()
+	acceptedCount = func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(conns)
+	}
+	closeAccepted = func() {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range conns {
+			c.Close()
+		}
+		conns = nil
+	}
+	cleanup = func() {
+		ln.Close()
+		closeAccepted()
+		os.Remove(socketPath)
+	}
+	return acceptedCount, closeAccepted, cleanup
+}
+
+// withCountedDials swaps dialSupervisorClient for a counting wrapper that
+// delegates to the original dial, restoring the seam when the test ends.
+// Tests that must block inside the dial keep their own wrapper instead.
+func withCountedDials(t *testing.T) *atomic.Int32 {
+	t.Helper()
+	var dials atomic.Int32
+	origDial := dialSupervisorClient
+	dialSupervisorClient = func(p string) (*client.Client, error) {
+		dials.Add(1)
+		return origDial(p)
+	}
+	t.Cleanup(func() { dialSupervisorClient = origDial })
+	return &dials
+}
+
+func TestRedialExplicitSupervisorSocketAfterDisconnect(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "sup.sock")
+
+	dials := withCountedDials(t)
+
+	s, err := NewServer(Options{Transport: "stdio", SupervisorSocket: socketPath, NoAutostart: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	// Before the supervisor listens, acquisition fails per call and the
+	// explicit socket never falls back to autostart.
+	if _, _, err := s.getClientForSupervisor(""); err == nil {
+		t.Fatal("expected supervisor-unavailable error before listener exists")
+	}
+
+	acceptedCount, closeAccepted, stopListener := startStubSupervisorListener(t, socketPath)
+	defer stopListener()
+
+	// The next acquisition redials and succeeds once the supervisor listens.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		cl, cleanup, err := s.getClientForSupervisor("")
+		if err == nil {
+			cleanup()
+			_ = cl
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("acquisition never succeeded after listener started: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Wait for the server side to have accepted the client's connection, then
+	// simulate a supervisor restart by dropping it.
+	deadline = time.Now().Add(5 * time.Second)
+	for acceptedCount() < 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("supervisor never accepted the client connection")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	closeAccepted()
+
+	dead := s.persistentControlClientForTest()
+	deadline = time.Now().Add(5 * time.Second)
+	for !dead.Closed() {
+		if time.Now().After(deadline) {
+			t.Fatal("client never observed the closed connection")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// The next acquisition must redial exactly once, and it must succeed.
+	before := dials.Load()
+	cl, cleanup, err := s.getClientForSupervisor("")
+	if err != nil {
+		t.Fatalf("redial acquisition: %v", err)
+	}
+	cleanup()
+	_ = cl
+	if got := dials.Load() - before; got != 1 {
+		t.Fatalf("new dials after disconnect = %d, want exactly 1", got)
+	}
+}
+
+func TestAutostartRedialsAfterDeadClient(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "sup.sock")
+	_, _, stopListener := startStubSupervisorListener(t, socketPath)
+	defer stopListener()
+
+	origStart := startSupervisorFunc
+	defer func() { startSupervisorFunc = origStart }()
+	var starts atomic.Int32
+	startSupervisorFunc = func(string, time.Duration) (*supervisorLifecycle, error) {
+		starts.Add(1)
+		return nil, fmt.Errorf("dial control socket: connection refused")
+	}
+
+	// Establish then kill a real control connection so the server's
+	// persistent client is dead (Closed() == true).
+	cl, err := client.Dial(socketPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	if err := cl.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if !cl.Closed() {
+		t.Fatal("client is not closed after Close()")
+	}
+
+	s, err := NewServer(Options{Transport: "stdio", ControlClient: cl})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	// A supervisor-backed tool call must restart the supervisor (redial)
+	// instead of failing on the dead connection.
+	_, _, err = s.handleAvenorStatus(context.Background(), nil, statusArgs{})
+	if err == nil {
+		t.Fatal("expected an error (the replacement supervisor is not listening)")
+	}
+	if got := starts.Load(); got != 1 {
+		t.Fatalf("supervisor starts = %d, want 1 (the dead client must trigger a restart)", got)
+	}
+	if !strings.Contains(err.Error(), "connection refused") {
+		t.Fatalf("error = %v, want the clean dial error", err)
+	}
+	if strings.Contains(err.Error(), "connection closed") {
+		t.Fatalf("error = %v, must not be 'connection closed' (the dead client was used)", err)
+	}
+}
+
+func TestConcurrentAcquisitionsShareOneDial(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "sup.sock")
+	acceptedCount, _, stopListener := startStubSupervisorListener(t, socketPath)
+	defer stopListener()
+
+	const n = 8
+
+	var dials atomic.Int32
+	dialEntered := make(chan struct{})
+	releaseDial := make(chan struct{})
+	origDial := dialSupervisorClient
+	dialSupervisorClient = func(p string) (*client.Client, error) {
+		dials.Add(1)
+		dialEntered <- struct{}{}
+		<-releaseDial
+		return origDial(p)
+	}
+	defer func() { dialSupervisorClient = origDial }()
+
+	atLockBoundary := make(chan struct{}, n)
+	releaseLockBoundary := make(chan struct{})
+	origBeforeLock := beforeSupervisorLock
+	beforeSupervisorLock = func() {
+		atLockBoundary <- struct{}{}
+		<-releaseLockBoundary
+	}
+	defer func() { beforeSupervisorLock = origBeforeLock }()
+
+	s, err := NewServer(Options{Transport: "stdio", SupervisorSocket: socketPath, NoAutostart: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	errs := make(chan error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cl, cleanup, err := s.getClientForSupervisor("")
+			if err == nil {
+				cleanup()
+				_ = cl
+			} else {
+				errs <- err
+			}
+		}()
+	}
+	// Hold every caller immediately before the lock so a serialized
+	// (non-shared) dial schedule is impossible: no caller can complete a
+	// dial before the others are parked at the boundary.
+	for i := 0; i < n; i++ {
+		select {
+		case <-atLockBoundary:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timeout waiting for callers at the lock boundary")
+		}
+	}
+	// Release the callers: exactly one may enter the dial, the rest must
+	// wait behind it for the lock.
+	close(releaseLockBoundary)
+	select {
+	case <-dialEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout: no dial began while callers were held")
+	}
+	if got := dials.Load(); got != 1 {
+		t.Fatalf("dials while other callers are held at the lock = %d, want exactly 1", got)
+	}
+	// Unblock the single in-flight dial; every caller must then observe the
+	// established client.
+	close(releaseDial)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent acquisition failed: %v", err)
+	}
+	if got := dials.Load(); got != 1 {
+		t.Fatalf("dials = %d, want exactly 1 shared dial", got)
+	}
+	// The kernel may complete the connect before the accept goroutine runs;
+	// poll for the accepted connection.
+	deadline := time.Now().Add(5 * time.Second)
+	for acceptedCount() < 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("supervisor never accepted the shared dial")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestInjectedControlClientNeverReplaced(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "sup.sock")
+
+	dials := withCountedDials(t)
+
+	fake := &fakeClient{}
+	s, err := NewServer(Options{
+		Transport:        "stdio",
+		SupervisorSocket: socketPath,
+		NoAutostart:      true,
+		ControlClient:    fake,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	cl, cleanup, err := s.getClientForSupervisor("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanup()
+	if cl != ControlClient(fake) {
+		t.Fatal("injected control client was replaced")
+	}
+	if got := dials.Load(); got != 0 {
+		t.Fatalf("dials with injected client = %d, want 0", got)
+	}
+}
+
+func TestNewServerWithSupervisorSocketDialsZeroTimes(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "sup.sock")
+
+	dials := withCountedDials(t)
+
+	for _, noAutostart := range []bool{true, false} {
+		s, err := NewServer(Options{
+			Transport:        "stdio",
+			SupervisorSocket: socketPath,
+			NoAutostart:      noAutostart,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.Close()
+	}
+	if got := dials.Load(); got != 0 {
+		t.Fatalf("dials during construction = %d, want 0", got)
+	}
 }

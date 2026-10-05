@@ -99,7 +99,7 @@ func TestWaitConditions(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			s, fake := newWaitTestServer(t, test.snapshots)
-			status, timedOut, err := s.waitForRun(context.Background(), fake, "run-1", test.condition, time.Time{})
+			status, timedOut, err := s.waitForRun(context.Background(), fake, "", "run-1", test.condition, time.Time{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -120,7 +120,7 @@ func TestWaitPermissionInterruptsEveryCondition(t *testing.T) {
 	for _, condition := range []waitCondition{waitTerminal, waitPhaseChange, waitTurnComplete, waitPermission} {
 		t.Run(string(condition), func(t *testing.T) {
 			s, fake := newWaitTestServer(t, []map[string]any{{"status": "running", "phase": "working", "pending_permission": true}})
-			status, timedOut, err := s.waitForRun(context.Background(), fake, "run-1", condition, time.Time{})
+			status, timedOut, err := s.waitForRun(context.Background(), fake, "", "run-1", condition, time.Time{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -147,7 +147,7 @@ func TestWaitPendingPermissionRepresentations(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			s, fake := newWaitTestServer(t, []map[string]any{test.snapshot})
-			status, _, err := s.waitForRun(context.Background(), fake, "run-1", waitTerminal, time.Time{})
+			status, _, err := s.waitForRun(context.Background(), fake, "", "run-1", waitTerminal, time.Time{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -163,7 +163,7 @@ func TestWaitPendingPermissionClearingAndEventAlone(t *testing.T) {
 		{"status": "running", "pending_permission": false, "permission": map[string]any{"request_id": "history-only"}},
 		{"status": "running", "pending_permission": true},
 	})
-	status, _, err := s.waitForRun(context.Background(), fake, "run-1", waitTerminal, time.Time{})
+	status, _, err := s.waitForRun(context.Background(), fake, "", "run-1", waitTerminal, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +176,7 @@ func TestWaitTurnCompleteTerminalStates(t *testing.T) {
 	for _, state := range []string{"done", "failed", "timeout", "killed"} {
 		t.Run(state, func(t *testing.T) {
 			s, fake := newWaitTestServer(t, []map[string]any{{"status": state}})
-			status, timedOut, err := s.waitForRun(context.Background(), fake, "run-1", waitTurnComplete, time.Time{})
+			status, timedOut, err := s.waitForRun(context.Background(), fake, "", "run-1", waitTurnComplete, time.Time{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -192,7 +192,7 @@ func TestWaitDoesNotPromoteActiveTerminalPhase(t *testing.T) {
 		{"status": "running", "phase": "done"},
 		{"status": "idle", "phase": "done"},
 	})
-	status, timedOut, err := s.waitForRun(context.Background(), fake, "run-1", waitTurnComplete, time.Time{})
+	status, timedOut, err := s.waitForRun(context.Background(), fake, "", "run-1", waitTurnComplete, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +213,7 @@ func TestWaitTimeoutReturnsLatestSnapshot(t *testing.T) {
 		return nil
 	}
 
-	status, timedOut, err := s.waitForRun(context.Background(), fake, "run-1", waitTerminal, now.Add(2500*time.Millisecond))
+	status, timedOut, err := s.waitForRun(context.Background(), fake, "", "run-1", waitTerminal, now.Add(2500*time.Millisecond))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +234,7 @@ func TestWaitCancellationAndStatusError(t *testing.T) {
 			cancel()
 			return context.Canceled
 		}
-		_, _, err := s.waitForRun(ctx, fake, "run-1", waitTerminal, time.Time{})
+		_, _, err := s.waitForRun(ctx, fake, "", "run-1", waitTerminal, time.Time{})
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("error = %v, want context canceled", err)
 		}
@@ -247,7 +247,7 @@ func TestWaitCancellationAndStatusError(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, _, err = s.waitForRun(context.Background(), fake, "run-1", waitTerminal, time.Time{})
+		_, _, err = s.waitForRun(context.Background(), fake, "", "run-1", waitTerminal, time.Time{})
 		if !strings.Contains(err.Error(), "status: control plane unavailable") {
 			t.Fatalf("error = %v", err)
 		}
@@ -258,7 +258,7 @@ func TestWaitValidationAndTimeoutGrammar(t *testing.T) {
 	if _, err := parseWaitCondition("bogus"); err == nil {
 		t.Fatal("expected invalid wait condition error")
 	}
-	if _, _, err := (&Server{}).waitForRun(context.Background(), &fakeClient{}, "run-1", waitCondition("bogus"), time.Time{}); err == nil {
+	if _, _, err := (&Server{}).waitForRun(context.Background(), &fakeClient{}, "", "run-1", waitCondition("bogus"), time.Time{}); err == nil {
 		t.Fatal("expected invalid engine condition error")
 	}
 	for _, value := range []string{"2", "30s", "5m", "1h"} {
@@ -383,7 +383,7 @@ func TestWaitAutoApprovedFollowUpLifecycle(t *testing.T) {
 	if followUpRunID == "" {
 		t.Fatal("expected follow-up run ID")
 	}
-	if ri := s.registry.Lookup(followUpRunID); ri == nil || !ri.AutoApprove {
+	if ri := s.registry.Lookup("", followUpRunID); ri == nil || !ri.AutoApprove {
 		t.Fatalf("follow-up registry entry has no auto-approve: %#v", ri)
 	}
 
