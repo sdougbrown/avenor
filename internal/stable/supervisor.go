@@ -4304,7 +4304,7 @@ func (s *Supervisor) Spawn(raw json.RawMessage) (any, error) {
 		}
 	}
 	if p.IdempotencyKey != "" {
-		hash, err := idempotencyHash(p)
+		hash, err := IdempotencyHash(p)
 		if err != nil {
 			return nil, fmt.Errorf("idempotency hash: %w", err)
 		}

@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/sdougbrown/avenor/internal/stable"
 )
 
 // --- Stage 6: idempotent spawn (MCP server half) ---
@@ -64,31 +66,6 @@ func newFakeIdempotentSupervisor() *fakeIdempotentSupervisor {
 	}
 }
 
-// fakeIdempotencyHash mirrors stable.idempotencyHash (internal/stable/
-// idempotency.go): zero the mirrored exclusion set — the attempt-local
-// identity (on_event, sentinel_file, idempotency_key), the resolved
-// provenance (parent_id, parent_run_id, session_id, agent_profile), and the
-// derived label — keeping the remaining semantic params (including
-// label_derived) in the hash.
-func fakeIdempotencyHash(p map[string]any) string {
-	cp := make(map[string]any, len(p))
-	for k, v := range p {
-		cp[k] = v
-	}
-	cp["on_event"] = ""
-	cp["sentinel_file"] = ""
-	cp["idempotency_key"] = ""
-	cp["parent_id"] = ""
-	cp["parent_run_id"] = ""
-	cp["session_id"] = ""
-	cp["agent_profile"] = ""
-	if ld, ok := cp["label_derived"].(bool); ok && ld {
-		cp["label"] = ""
-	}
-	b, _ := json.Marshal(cp)
-	return string(b)
-}
-
 func (f *fakeIdempotentSupervisor) Spawn(params map[string]any) (map[string]any, error) {
 	f.mu.Lock()
 	f.spawnCalls++
@@ -97,7 +74,21 @@ func (f *fakeIdempotentSupervisor) Spawn(params map[string]any) (map[string]any,
 	if key == "" {
 		return f.doSpawn(params), nil
 	}
-	hash := fakeIdempotencyHash(params)
+	// Marshal to JSON and unmarshal into the typed SpawnParams, mirroring the
+	// real supervisor's map->JSON->SpawnParams path, then hash with the real
+	// stable.IdempotencyHash so the fake and production share one exclusion set.
+	b, err := json.Marshal(params)
+	if err != nil {
+		return nil, err
+	}
+	var sp stable.SpawnParams
+	if err := json.Unmarshal(b, &sp); err != nil {
+		return nil, err
+	}
+	hash, err := stable.IdempotencyHash(sp)
+	if err != nil {
+		return nil, err
+	}
 	result, flight, err := f.begin(key, hash)
 	if err != nil {
 		return nil, err

@@ -132,7 +132,7 @@ func (s *idempotencyStore) release(key string, f *idempotencyFlight, err error) 
 	close(f.done)
 }
 
-// idempotencyHash derives the parameter hash for an idempotent spawn: SHA-256
+// IdempotencyHash derives the parameter hash for an idempotent spawn: SHA-256
 // over canonical JSON of the typed params with per-attempt identity and
 // supervisor-resolved provenance zeroed. OnEvent and SentinelFile are
 // attempt-local artifacts; IdempotencyKey is the key itself; Label is an
@@ -143,7 +143,7 @@ func (s *idempotencyStore) release(key string, f *idempotencyFlight, err error) 
 // differ between legitimate retries of the same intent.
 // Everything excluded here is re-derived per attempt; caller intent stays in
 // the hash so a retry with different semantic parameters still conflicts.
-func idempotencyHash(p SpawnParams) (string, error) {
+func IdempotencyHash(p SpawnParams) (string, error) {
 	p.OnEvent = ""
 	p.SentinelFile = ""
 	p.IdempotencyKey = ""

@@ -769,7 +769,7 @@ func TestSpawnSkipsLabelPrecheckForKeyedSpawn(t *testing.T) {
 	// A keyed spawn whose label is live-claimed skips the pre-check: the
 	// request reaches the supervisor's idempotency gate (modeled here as the
 	// Spawn call).
-	_, _, err = s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
+	_, spawnRes, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
 		RepoDir:        "/tmp/test-repo",
 		Label:          "taken",
 		IdempotencyKey: "k1",
@@ -779,6 +779,26 @@ func TestSpawnSkipsLabelPrecheckForKeyedSpawn(t *testing.T) {
 	}
 	if n := spawnCalls.Load(); n != 1 {
 		t.Fatalf("spawn calls = %d, want 1 (pre-check skipped, gate consulted)", n)
+	}
+	// The no-sentinel response exercises the keyed re-derivation's false
+	// branch: the run must retain the fresh identity (run_id not overwritten
+	// to empty) and the registry entry must stay intact.
+	runID, _ := spawnRes.(map[string]any)["run_id"].(string)
+	if runID == "" {
+		t.Fatal("expected non-empty run_id")
+	}
+	ri := s.registry.LookupUnique(runID)
+	if ri == nil {
+		t.Fatal("expected the registry entry for the spawned run")
+	}
+	if ri.RunID != runID {
+		t.Fatalf("registry run = %s, want %s", ri.RunID, runID)
+	}
+	if ri.Label != "taken" {
+		t.Fatalf("registry label = %s, want taken", ri.Label)
+	}
+	if ri.RuntimeID == "" {
+		t.Fatal("expected non-empty registry runtime_id")
 	}
 }
 
@@ -1237,7 +1257,7 @@ func TestFollowUpSkipsLabelPrecheckForKeyedFollowUp(t *testing.T) {
 	// A keyed follow-up whose label is live-claimed skips the pre-check: the
 	// request reaches the supervisor's idempotency gate (modeled here as the
 	// Spawn call).
-	_, _, err = s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
+	_, fuRes, err := s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
 		RunID:          rehydrateUUID,
 		Message:        "continue",
 		Label:          "taken",
@@ -1248,5 +1268,25 @@ func TestFollowUpSkipsLabelPrecheckForKeyedFollowUp(t *testing.T) {
 	}
 	if n := spawnCalls.Load(); n != 1 {
 		t.Fatalf("spawn calls = %d, want 1 (pre-check skipped, gate consulted)", n)
+	}
+	// The no-sentinel response exercises the keyed re-derivation's false
+	// branch: the follow-up must retain the fresh identity (run_id not
+	// overwritten to empty) and the registry entry must stay intact.
+	runID, _ := fuRes.(map[string]any)["run_id"].(string)
+	if runID == "" {
+		t.Fatal("expected non-empty run_id")
+	}
+	ri := s.registry.LookupUnique(runID)
+	if ri == nil {
+		t.Fatal("expected the registry entry for the follow-up run")
+	}
+	if ri.RunID != runID {
+		t.Fatalf("registry run = %s, want %s", ri.RunID, runID)
+	}
+	if ri.Label != "taken" {
+		t.Fatalf("registry label = %s, want taken", ri.Label)
+	}
+	if ri.RuntimeID == "" {
+		t.Fatal("expected non-empty registry runtime_id")
 	}
 }

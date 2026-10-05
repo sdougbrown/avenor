@@ -790,7 +790,7 @@ func TestIdempotencyHashExclusionSet(t *testing.T) {
 		SessionID:      "ses_prior",
 		AgentProfile:   "profile-a",
 	}
-	baseHash, err := idempotencyHash(base)
+	baseHash, err := IdempotencyHash(base)
 	if err != nil {
 		t.Fatalf("hash(base): %v", err)
 	}
@@ -808,7 +808,7 @@ func TestIdempotencyHashExclusionSet(t *testing.T) {
 	for field, mutate := range excluded {
 		p := base
 		mutate(&p)
-		got, err := idempotencyHash(p)
+		got, err := IdempotencyHash(p)
 		if err != nil {
 			t.Fatalf("hash(base with %s changed): %v", field, err)
 		}
@@ -843,7 +843,7 @@ func TestIdempotencyHashExclusionSet(t *testing.T) {
 	for field, mutate := range intent {
 		p := base
 		mutate(&p)
-		got, err = idempotencyHash(p)
+		got, err = IdempotencyHash(p)
 		if err != nil {
 			t.Fatalf("hash(base with %s changed): %v", field, err)
 		}
@@ -856,7 +856,7 @@ func TestIdempotencyHashExclusionSet(t *testing.T) {
 	// Label leaves the hash unchanged; with LabelDerived=false, it changes it.
 	derived := base
 	derived.LabelDerived = true
-	derivedHash, err := idempotencyHash(derived)
+	derivedHash, err := IdempotencyHash(derived)
 	if err != nil {
 		t.Fatalf("hash(derived): %v", err)
 	}
@@ -867,7 +867,7 @@ func TestIdempotencyHashExclusionSet(t *testing.T) {
 	}
 	derivedChanged := derived
 	derivedChanged.Label = "different-derived"
-	got, err = idempotencyHash(derivedChanged)
+	got, err = IdempotencyHash(derivedChanged)
 	if err != nil {
 		t.Fatalf("hash(derived changed): %v", err)
 	}
@@ -877,7 +877,7 @@ func TestIdempotencyHashExclusionSet(t *testing.T) {
 
 	explicitChanged := base
 	explicitChanged.Label = "different-explicit"
-	got, err = idempotencyHash(explicitChanged)
+	got, err = IdempotencyHash(explicitChanged)
 	if err != nil {
 		t.Fatalf("hash(explicit changed): %v", err)
 	}

@@ -37,7 +37,7 @@ func TestSpawnIdempotencyConflictErrorMapped(t *testing.T) {
 	if r.Error.Code != -32031 {
 		t.Fatalf("error code = %d, want -32031", r.Error.Code)
 	}
-	if r.Error.Message != "idempotency key reused with different parameters" {
+	if r.Error.Message != `idempotency key "key_a" reused with different parameters` {
 		t.Fatalf("error message = %q, want the conflict message", r.Error.Message)
 	}
 }
@@ -52,7 +52,7 @@ func TestSpawnIdempotencyCapacityErrorMapped(t *testing.T) {
 	if r.Error.Code != -32030 {
 		t.Fatalf("error code = %d, want -32030", r.Error.Code)
 	}
-	if r.Error.Message != "idempotency capacity exhausted" {
+	if r.Error.Message != `idempotency capacity exhausted (1 unexpired entries); cannot reserve key "key_b"` {
 		t.Fatalf("error message = %q, want the capacity message", r.Error.Message)
 	}
 }
