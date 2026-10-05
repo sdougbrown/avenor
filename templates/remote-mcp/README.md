@@ -44,8 +44,8 @@ cp templates/remote-mcp/avenor-mcp.plist ~/Library/LaunchAgents/dev.avenor.mcp.p
 Adjust the placeholders in both plists (socket path, token path, allowed host, binary path, capacity numbers), then load:
 
 ```bash
-launchctl load ~/Library/LaunchAgents/dev.avenor.stable.plist
-launchctl load ~/Library/LaunchAgents/dev.avenor.mcp.plist
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/dev.avenor.stable.plist
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/dev.avenor.mcp.plist
 ```
 
 LaunchAgents only run while you have an active login session. After a reboot, a headless Mac has no MCP server until someone logs in. For durability, use the LaunchDaemon variant instead: install the plists in `/Library/LaunchDaemons/` (the system domain) and add a `UserName=` key so they run as your user.

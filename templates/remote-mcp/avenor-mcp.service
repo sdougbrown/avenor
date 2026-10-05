@@ -28,7 +28,10 @@ StateDirectory=avenor
 # The token file is read-only; ReadOnlyPaths covers the socket's directory.
 NoNewPrivileges=true
 ProtectSystem=strict
-PrivateTmp=true
+# PrivateTmp is intentionally NOT set: the MCP server builds sentinel and
+# event-log paths with os.TempDir() and passes them to the supervisor, which
+# writes the event log. The two processes must share the same /tmp view, so
+# isolating /tmp here would silently break the event contract.
 ProtectHome=read-only
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 CapabilityBoundingSet=
