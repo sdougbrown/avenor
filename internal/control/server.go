@@ -1327,7 +1327,7 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 			}
 			var ice *IdempotencyConflictError
 			if errors.As(err, &ice) {
-				return failure(req.ID, -32602, ice.Error(), nil)
+				return failure(req.ID, -32031, ice.Error(), nil)
 			}
 			var icap *IdempotencyCapacityError
 			if errors.As(err, &icap) {

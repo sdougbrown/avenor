@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -34,6 +35,14 @@ type fakeIdempotentSupervisor struct {
 	// supervisor (hits, waiters, and rejected conflicts included).
 	spawnCalls int
 	listRuns   []map[string]any
+	// gate, when non-nil, blocks the holder's doSpawn until the test closes
+	// it, so concurrent duplicates overlap the holder's in-flight spawn
+	// instead of serializing into completed-cache hits.
+	gate chan struct{}
+	// waiterSignal, when non-nil, receives one token per waiter just before
+	// it blocks on a flight's done channel, letting tests order a release
+	// after waiters are parked.
+	waiterSignal chan<- struct{}
 }
 
 type fakeIdemEntry struct {
@@ -96,6 +105,9 @@ func (f *fakeIdempotentSupervisor) Spawn(params map[string]any) (map[string]any,
 	if flight == nil {
 		return result, nil
 	}
+	if f.gate != nil {
+		<-f.gate
+	}
 	res := f.doSpawn(params)
 	f.commit(key, flight, res)
 	return res, nil
@@ -115,6 +127,9 @@ func (f *fakeIdempotentSupervisor) begin(key, hash string) (map[string]any, *fak
 		if fl.hash != hash {
 			f.mu.Unlock()
 			return nil, nil, errors.New("idempotency key reused with different parameters")
+		}
+		if f.waiterSignal != nil {
+			f.waiterSignal <- struct{}{}
 		}
 		f.mu.Unlock()
 		<-fl.done
@@ -331,6 +346,17 @@ func TestIdempotencySpawnRetryReturnsOriginalRun(t *testing.T) {
 	if got := filepath.Base(ri.EventLogPath); got != "avenor-run-"+runID1+".log" {
 		t.Fatalf("retry event log basename = %s, want the original run's avenor-run-%s.log", got, runID1)
 	}
+	// The registry entry carries the original run's identity (label, runtime,
+	// session), not the retry's.
+	if ri.Label != runID1 {
+		t.Fatalf("retry registry label = %s, want the original run ID %s", ri.Label, runID1)
+	}
+	if ri.RuntimeID != "rt_1" {
+		t.Fatalf("retry registry runtime = %s, want the original rt_1", ri.RuntimeID)
+	}
+	if ri.SessionID != "ses_1" {
+		t.Fatalf("retry registry session = %s, want the original ses_1", ri.SessionID)
+	}
 }
 
 func TestIdempotencySpawnRetryExplicitLabelKept(t *testing.T) {
@@ -411,6 +437,40 @@ func TestIdempotencySpawnRetryHashMismatchFails(t *testing.T) {
 	}
 }
 
+// TestIdempotencyKeyLengthValidation: a key longer than 256 bytes is rejected
+// at the MCP param level, before any spawn reaches the supervisor; a 256-byte
+// key is accepted.
+func TestIdempotencyKeyLengthValidation(t *testing.T) {
+	sup := newFakeIdempotentSupervisor()
+	s := newIdempotencyServer(t, sup)
+	longKey := strings.Repeat("k", 257)
+	if _, _, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
+		RepoDir:        "/tmp/repo",
+		IdempotencyKey: longKey,
+	}); err == nil {
+		t.Fatal("expected a key-length error for a 257-byte key")
+	} else if !strings.Contains(err.Error(), "idempotency_key too long") {
+		t.Fatalf("error = %v, want the key-length message", err)
+	}
+	if n := sup.SpawnCallCount(); n != 0 {
+		t.Fatalf("supervisor Spawn calls = %d, want 0 (a too-long key must be rejected pre-spawn)", n)
+	}
+
+	// A 256-byte key is accepted and reaches the supervisor.
+	sup2 := newFakeIdempotentSupervisor()
+	s2 := newIdempotencyServer(t, sup2)
+	maxKey := strings.Repeat("k", 256)
+	if _, _, err := s2.handleAvenorSpawn(context.Background(), nil, spawnArgs{
+		RepoDir:        "/tmp/repo",
+		IdempotencyKey: maxKey,
+	}); err != nil {
+		t.Fatalf("a 256-byte key should be accepted: %v", err)
+	}
+	if n := sup2.SpawnCallCount(); n != 1 {
+		t.Fatalf("supervisor Spawn calls = %d, want 1 (a 256-byte key reaches the supervisor)", n)
+	}
+}
+
 func TestIdempotencyFollowUpRetrySequential(t *testing.T) {
 	sup := newFakeIdempotentSupervisor()
 
@@ -455,6 +515,18 @@ func TestIdempotencyFollowUpRetrySequential(t *testing.T) {
 	if m2["label"] != m1["label"] {
 		t.Fatalf("retry follow-up label = %v, want the original %v", m2["label"], m1["label"])
 	}
+	// The registry records the follow-up's artifact paths, not the retry's
+	// freshly generated temp paths.
+	ri := s2.registry.LookupUnique(fuID1)
+	if ri == nil {
+		t.Fatal("expected the follow-up's registry entry")
+	}
+	if got, want := ri.SentinelPath, filepath.Join(os.TempDir(), fmt.Sprintf("avenor-run-%s.done", fuID1)); got != want {
+		t.Fatalf("follow-up sentinel = %s, want %s", got, want)
+	}
+	if got, want := ri.EventLogPath, filepath.Join(os.TempDir(), fmt.Sprintf("avenor-run-%s.log", fuID1)); got != want {
+		t.Fatalf("follow-up event log = %s, want %s", got, want)
+	}
 	// One parent runtime + one follow-up runtime = 2 total; the retry was a
 	// hit that still reached the supervisor.
 	if n := sup.RuntimeCount(); n != 2 {
@@ -487,6 +559,7 @@ func TestIdempotencyFollowUpRetrySequential(t *testing.T) {
 
 func TestIdempotencyFollowUpRetryConcurrent(t *testing.T) {
 	sup := newFakeIdempotentSupervisor()
+	sup.gate = make(chan struct{})
 
 	// Seed a parent run.
 	s0 := newIdempotencyServer(t, sup)
@@ -497,15 +570,23 @@ func TestIdempotencyFollowUpRetryConcurrent(t *testing.T) {
 	parentID, _ := parent.(map[string]any)["run_id"].(string)
 
 	// Two concurrent follow-ups with the same key: both observe the holder's
-	// single result and only one runtime is spawned.
+	// single result and only one runtime is spawned. The holder's follow-up
+	// spawn is held on the gate until the other parks inside the in-flight
+	// wait, so the second attempt exercises the waiter path rather than
+	// serializing into a completed-cache hit.
+	parked := make(chan struct{}, 1)
+	sup.waiterSignal = parked
+
 	var wg sync.WaitGroup
 	results := make([]map[string]any, 2)
+	servers := make([]*Server, 2)
 	errs := make([]error, 2)
 	for i := 0; i < 2; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 			s := newIdempotencyServer(t, sup)
+			servers[i] = s
 			_, r, err := s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
 				RunID:          parentID,
 				Message:        "continue",
@@ -518,6 +599,14 @@ func TestIdempotencyFollowUpRetryConcurrent(t *testing.T) {
 			results[i] = r.(map[string]any)
 		}(i)
 	}
+	// Wait for the second attempt to park inside the in-flight wait before
+	// releasing the holder.
+	select {
+	case <-parked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the second follow-up did not park inside the in-flight wait")
+	}
+	close(sup.gate)
 	wg.Wait()
 	for i, err := range errs {
 		if err != nil {
@@ -539,6 +628,18 @@ func TestIdempotencyFollowUpRetryConcurrent(t *testing.T) {
 	}
 	if n := sup.SpawnCallCount(); n != 3 {
 		t.Fatalf("supervisor Spawn calls = %d, want 3 (parent + both follow-up attempts)", n)
+	}
+	// The registry records the follow-up's artifact paths, not the retry's
+	// freshly generated temp paths.
+	ri := servers[0].registry.LookupUnique(id0)
+	if ri == nil {
+		t.Fatal("expected the follow-up's registry entry")
+	}
+	if got, want := ri.SentinelPath, filepath.Join(os.TempDir(), fmt.Sprintf("avenor-run-%s.done", id0)); got != want {
+		t.Fatalf("follow-up sentinel = %s, want %s", got, want)
+	}
+	if got, want := ri.EventLogPath, filepath.Join(os.TempDir(), fmt.Sprintf("avenor-run-%s.log", id0)); got != want {
+		t.Fatalf("follow-up event log = %s, want %s", got, want)
 	}
 }
 
@@ -609,56 +710,4 @@ func TestIdempotencySpawnAndFollowUpKeysDoNotCollide(t *testing.T) {
 			t.Fatalf("supervisor Spawn calls = %d, want 2", n)
 		}
 	})
-}
-
-// TestIdempotencyRetryRegistryLabelSafety asserts that after a retry the
-// registry entry carries the original run's identity (label, runtime, session)
-// and that the supervisor holds exactly one runtime.
-func TestIdempotencyRetryRegistryLabelSafety(t *testing.T) {
-	sup := newFakeIdempotentSupervisor()
-
-	s1 := newIdempotencyServer(t, sup)
-	_, r1, err := s1.handleAvenorSpawn(context.Background(), nil, spawnArgs{
-		RepoDir:        "/tmp/repo",
-		IdempotencyKey: "k1",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	runID1, _ := r1.(map[string]any)["run_id"].(string)
-
-	// Retry on a fresh server: the registry entry must carry the original
-	// run's identity, not the retry's.
-	s2 := newIdempotencyServer(t, sup)
-	_, r2, err := s2.handleAvenorSpawn(context.Background(), nil, spawnArgs{
-		RepoDir:        "/tmp/repo",
-		IdempotencyKey: "k1",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if r2.(map[string]any)["run_id"] != runID1 {
-		t.Fatalf("retry run_id = %v, want the original %v", r2.(map[string]any)["run_id"], runID1)
-	}
-	ri := s2.registry.LookupUnique(runID1)
-	if ri == nil {
-		t.Fatal("expected the retry's registry entry for the original run")
-	}
-	if ri.Label != runID1 {
-		t.Fatalf("retry registry label = %s, want the original run ID %s", ri.Label, runID1)
-	}
-	if ri.RuntimeID != "rt_1" {
-		t.Fatalf("retry registry runtime = %s, want the original rt_1", ri.RuntimeID)
-	}
-	if ri.SessionID != "ses_1" {
-		t.Fatalf("retry registry session = %s, want the original ses_1", ri.SessionID)
-	}
-	// Exactly one runtime exists on the supervisor, and both keyed attempts
-	// reached its Spawn.
-	if n := sup.RuntimeCount(); n != 1 {
-		t.Fatalf("runtimes = %d, want 1", n)
-	}
-	if n := sup.SpawnCallCount(); n != 2 {
-		t.Fatalf("supervisor Spawn calls = %d, want 2 (both attempts reached the supervisor)", n)
-	}
 }

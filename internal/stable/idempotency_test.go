@@ -765,102 +765,6 @@ func TestIdempotencyWaiterReleaseOnFailure(t *testing.T) {
 	}
 }
 
-// TestIdempotencyHashIgnoresAttemptIdentity: the parameter hash is stable
-// across per-attempt identity (OnEvent, SentinelFile, IdempotencyKey, derived
-// Label) and changes with semantic parameters.
-func TestIdempotencyHashIgnoresAttemptIdentity(t *testing.T) {
-	// A derived label is excluded from the hash, so two params that differ
-	// only in a derived Label (both LabelDerived) hash equal.
-	base := SpawnParams{
-		Prompt:         "hello",
-		Dir:            "/tmp",
-		Agent:          "claude",
-		Label:          "run-1",
-		LabelDerived:   true,
-		IdempotencyKey: "key_a",
-		OnEvent:        "/a",
-		SentinelFile:   "/b",
-	}
-	baseHash, err := idempotencyHash(base)
-	if err != nil {
-		t.Fatalf("hash(base): %v", err)
-	}
-
-	// Per-attempt identity (OnEvent, SentinelFile, IdempotencyKey) and a
-	// different derived label are all excluded.
-	retry := base
-	retry.OnEvent = "/a2"
-	retry.SentinelFile = "/b2"
-	retry.IdempotencyKey = "key_b"
-	retry.Label = "run-2"
-	retryHash, err := idempotencyHash(retry)
-	if err != nil {
-		t.Fatalf("hash(retry): %v", err)
-	}
-	if baseHash != retryHash {
-		t.Fatalf("hash changed with per-attempt identity: %s vs %s", baseHash, retryHash)
-	}
-
-	// An explicit label is a semantic parameter.
-	explicit := base
-	explicit.Label = "other"
-	explicit.LabelDerived = false
-	explicitHash, err := idempotencyHash(explicit)
-	if err != nil {
-		t.Fatalf("hash(explicit): %v", err)
-	}
-	if baseHash == explicitHash {
-		t.Fatal("hash equal for a derived vs an explicit label")
-	}
-
-	// Two different explicit labels also differ.
-	explicitOther := base
-	explicitOther.Label = "another"
-	explicitOther.LabelDerived = false
-	explicitOtherHash, err := idempotencyHash(explicitOther)
-	if err != nil {
-		t.Fatalf("hash(explicitOther): %v", err)
-	}
-	if explicitHash == explicitOtherHash {
-		t.Fatal("hash equal for different explicit labels")
-	}
-
-	// Supervisor-resolved provenance is excluded: a retry whose ParentID,
-	// SessionID, or AgentProfile resolved differently still hashes equal.
-	resolved := base
-	resolved.ParentID = "rt_parent"
-	resolved.SessionID = "ses_prior"
-	resolved.AgentProfile = "profile-a"
-	resolvedHash, err := idempotencyHash(resolved)
-	if err != nil {
-		t.Fatalf("hash(resolved): %v", err)
-	}
-	if baseHash != resolvedHash {
-		t.Fatalf("hash changed with supervisor-resolved provenance: %s vs %s", baseHash, resolvedHash)
-	}
-	resolvedOther := base
-	resolvedOther.ParentID = "rt_other"
-	resolvedOther.SessionID = "ses_other"
-	resolvedOther.AgentProfile = "profile-b"
-	resolvedOtherHash, err := idempotencyHash(resolvedOther)
-	if err != nil {
-		t.Fatalf("hash(resolvedOther): %v", err)
-	}
-	if resolvedHash != resolvedOtherHash {
-		t.Fatal("hash differs for different resolved provenance with equal intent")
-	}
-
-	other := base
-	other.Prompt = "goodbye"
-	otherHash, err := idempotencyHash(other)
-	if err != nil {
-		t.Fatalf("hash(other): %v", err)
-	}
-	if baseHash == otherHash {
-		t.Fatal("hash equal for different prompts")
-	}
-}
-
 // TestIdempotencyHashExclusionSet pins the exact set of fields excluded from
 // the idempotency parameter hash: each excluded field, changed alone, leaves
 // the hash unchanged; every caller-influenceable field (Prompt, PromptFile,
@@ -955,6 +859,11 @@ func TestIdempotencyHashExclusionSet(t *testing.T) {
 	derivedHash, err := idempotencyHash(derived)
 	if err != nil {
 		t.Fatalf("hash(derived): %v", err)
+	}
+	// A kept label (LabelDerived=false) differs from the same label zeroed
+	// (LabelDerived=true): the label is in the hash only when not derived.
+	if derivedHash == baseHash {
+		t.Fatal("hash equal for a kept label vs the same label zeroed (derived)")
 	}
 	derivedChanged := derived
 	derivedChanged.Label = "different-derived"

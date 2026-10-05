@@ -1183,10 +1183,6 @@ func TestAvenorEventsCrossSupervisorGuard(t *testing.T) {
 	}
 }
 
-	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
-	if err != nil {
-		t.Fatal(err)
-	}
 func TestLookupRunResolvesCachedLabelAfterRuntimeLeavesList(t *testing.T) {
 	const sup = "/tmp/sup.sock"
 	// The run's runtime left the live list (e.g. a supervisor restart); the
@@ -1252,7 +1248,5 @@ func TestFollowUpSkipsLabelPrecheckForKeyedFollowUp(t *testing.T) {
 	}
 	if n := spawnCalls.Load(); n != 1 {
 		t.Fatalf("spawn calls = %d, want 1 (pre-check skipped, gate consulted)", n)
-	}
-}
 	}
 }

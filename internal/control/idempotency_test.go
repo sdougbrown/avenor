@@ -27,14 +27,15 @@ func spawnTestResponse(t *testing.T, spawnErr error) Response {
 }
 
 // TestSpawnIdempotencyConflictErrorMapped: a reused idempotency key with
-// different parameters maps to -32602.
+// different parameters maps to the app-range -32031, distinct from the
+// -32602 used by param-validation failures.
 func TestSpawnIdempotencyConflictErrorMapped(t *testing.T) {
 	r := spawnTestResponse(t, &IdempotencyConflictError{Key: "key_a"})
 	if r.Error == nil {
 		t.Fatal("expected spawn error")
 	}
-	if r.Error.Code != -32602 {
-		t.Fatalf("error code = %d, want -32602", r.Error.Code)
+	if r.Error.Code != -32031 {
+		t.Fatalf("error code = %d, want -32031", r.Error.Code)
 	}
 	if r.Error.Message != "idempotency key reused with different parameters" {
 		t.Fatalf("error message = %q, want the conflict message", r.Error.Message)

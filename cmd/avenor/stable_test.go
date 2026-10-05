@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/sdougbrown/avenor/internal/admission"
+	"github.com/sdougbrown/avenor/internal/stable"
 )
 
 func TestRunStableJoinsInheritedTreeBudget(t *testing.T) {
@@ -136,5 +137,33 @@ func TestRunStableIdempotencyCapacityGuard(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "reason=start_failed") {
 		t.Fatalf("capacity 64: tombstone = %q, want reason=start_failed (guard must not fire)", data)
+	}
+}
+
+// TestRunStableIdempotencyCapacityFlagPropagation: --idempotency-capacity 7
+// propagates to Config.IdempotencyCapacity at the point the supervisor is
+// constructed.
+func TestRunStableIdempotencyCapacityFlagPropagation(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	// An overlong Unix-socket path makes Run fail fast, so the constructor
+	// seam is hit and the config captured before Run's side effects matter.
+	socketPath := filepath.Join(tmpDir, strings.Repeat("s", 200))
+
+	var captured *stable.Config
+	orig := newSupervisorFn
+	newSupervisorFn = func(cfg stable.Config) *stable.Supervisor {
+		c := cfg
+		captured = &c
+		return orig(cfg)
+	}
+	t.Cleanup(func() { newSupervisorFn = orig })
+
+	_ = runStable([]string{"--control-socket", socketPath, "--idempotency-capacity", "7"})
+	if captured == nil {
+		t.Fatal("config was not captured; the constructor seam was not hit")
+	}
+	if captured.IdempotencyCapacity != 7 {
+		t.Fatalf("Config.IdempotencyCapacity = %d, want 7", captured.IdempotencyCapacity)
 	}
 }

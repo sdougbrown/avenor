@@ -1031,6 +1031,9 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 	if err := runtime.ValidateThinking(args.Thinking); err != nil {
 		return nil, nil, err
 	}
+	if len(args.IdempotencyKey) > 256 {
+		return nil, nil, fmt.Errorf("idempotency_key too long (max 256 bytes)")
+	}
 
 	runID := uuid.New().String()
 	labelDerived := args.Label == ""

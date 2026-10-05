@@ -10,6 +10,10 @@ import (
 	"github.com/sdougbrown/avenor/internal/stable"
 )
 
+// newSupervisorFn is the supervisor constructor used by runStable. Tests patch
+// it to capture the Config without relying on Run's side effects.
+var newSupervisorFn = stable.NewSupervisor
+
 func runStable(args []string) int {
 	fs := flag.NewFlagSet("stable", flag.ContinueOnError)
 	controlSocket := fs.String("control-socket", "", "unix socket path for the control plane (required)")
@@ -47,7 +51,7 @@ func runStable(args []string) int {
 		fmt.Fprintf(os.Stderr, "avenor stable: remove stale tombstone: %v\n", err)
 	}
 
-	sup := stable.NewSupervisor(stable.Config{
+	sup := newSupervisorFn(stable.Config{
 		ControlSocket:              *controlSocket,
 		TombstoneFile:              tombstoneFile,
 		HTTPDebug:                  *httpDebug,
