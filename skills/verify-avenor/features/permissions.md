@@ -14,7 +14,7 @@
 When a backend asks for tool approval mid-run, avenor writes the request to the
 permission-handler file (`file:<path>`, derived from the sentinel path when
 `--sentinel-file` is set). The user (or their agent) reads the request JSON and
-writes back an answer with `avenor answer <path> --option <id>`.
+writes back an answer with `avenor answer <perm-base> --option <id>`.
 
 ## Driving it with the avenor binary
 
@@ -31,10 +31,12 @@ SCRATCH=$(mktemp -d /tmp/avenor-verify.XXXXXX)
   --sentinel-file "$SCRATCH/done.env" \
   --timeout 120s --label verify-perms &
 
-# Poll for the request file (same base as the sentinel, .request suffix or as
-# documented in docs/permission-handler.md), then inspect it:
-cat "$SCRATCH"/*request*.json        # note the option ids
-./avenor answer "$SCRATCH"/<request-file> --option <allow-option-id> \
+# With --sentinel-file "$SCRATCH/done.env" and no explicit
+# --permission-handler, the file handler base is "$SCRATCH/done.env.perm"
+# (DerivePermBase appends .perm). The request lands at "$SCRATCH/done.env.perm.req"
+# and the answer goes to "$SCRATCH/done.env.perm.req.response".
+cat "$SCRATCH/done.env.perm.req"     # note the option ids
+./avenor answer "$SCRATCH/done.env.perm" --option <allow-option-id> \
   --message "approved by verify harness"
 wait
 ```
@@ -42,14 +44,19 @@ wait
 **Observable end state (the proof):** the run completes (sentinel `DONE`) only
 after the answer was written; the response file exists with the chosen option;
 the agent's side effect (`proof.txt`) exists in the scratch dir; events show
-the permission exchange. A denial path (`--outcome cancelled` or a deny option)
-should produce a sentinel with a non-`end_turn` stop reason — capture both
+the permission exchange. The two denial paths end differently: a deny option
+(`kind: reject`, outcome `selected`) relays the rejection and the session
+still ends normally — sentinel `DONE` with `STOP_REASON=end_turn`, rejection
+visible in events — while `--outcome cancelled` terminates the run with
+sentinel `KILLED`, `STOP_REASON=cancelled`, `EXIT_CODE=130`. Capture both
 branches when the feature under test is the answerer itself.
 
 ## Gotchas
 
-- Without `--auto-approve` or an answered file, the run blocks indefinitely —
-  always bound it with `--timeout` and run it in the background.
+- Without `--auto-approve` or an answered file, the run blocks until the file
+  handler's default 10-minute timeout (`DefaultTimeout` in
+  `internal/permission/file.go`) expires and the run terminates with a
+  permission error — always answer promptly and bound the run with `--timeout`.
 - The request file may be rewritten between polls; read it once, answer once.
 - `--option` is required; `--outcome` defaults to `selected`.
 - If no request file ever appears, the pi backend may not be surfacing the

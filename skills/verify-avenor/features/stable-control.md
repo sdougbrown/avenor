@@ -32,15 +32,19 @@ until ./avenor control --socket "$SOCK" list >/dev/null 2>&1; do sleep 0.2; done
   --prompt "Reply with the single word OK and nothing else."
 
 ./avenor control --socket "$SOCK" list          # find the runtime_id (rt_N)
-./avenor control --socket "$SOCK" status rt_1    # poll until status=done
+# status takes only running, idle, or ended — "done" is a phase value, never
+# a status value. Poll until status=idle (turn complete); ended appears once
+# the supervisor reaps the child.
+./avenor control --socket "$SOCK" status rt_1
 ./avenor control --socket "$SOCK" shutdown graceful
 kill "$STABLE_PID" 2>/dev/null
 ```
 
 **Observable end state (the proof):** `status rt_1` JSON shows `"status":
-"done"` (or `"idle"` post-completion), `"exit_code": 0`, `"final_output"`
-containing `OK`, and `pending_permission: false`; the child's sentinel file
-(its path is in the spawn response `sentinel_file` field) contains `DONE`.
+"idle"` (or `"ended"` after reap) — not `"done"`, which exists only as a
+`phase` value — with `"exit_code": 0`, `"final_output"` containing `OK`, and
+`pending_permission: false`; the child's sentinel file (its path is in the
+spawn response `sentinel_file` field) contains `DONE`.
 
 ## Gotchas
 
