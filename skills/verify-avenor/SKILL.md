@@ -10,7 +10,7 @@ Avenor is a Go CLI that orchestrates agent runs. Its primary surface is the
 secondary surfaces are the embedded board web UI (needs `-tags board`) and the
 MCP server (`avenor mcp`) — see `features/README.md` for coverage.
 
-All commands below are run from the repo root (`/home/douglasbrown/Code/avenor`).
+All commands below are run from the repo root (the checkout containing this skill).
 
 ## Launch
 
