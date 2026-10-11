@@ -4,7 +4,7 @@
 
 - Spawning child runs from a live supervisor (`spawn`, with `--label`, `--backend`)
 - Inspecting runs (`list`, `status <rt_id>`)
-- Interacting with a running child (`prompt <rt_id>`)
+- Interacting with a running child (`prompt <text> [rt_id]` — text first, runtime id optional; omitting the id queues a root prompt instead of addressing the child)
 - Cancelling (`cancel <rt_id>`)
 - Graceful shutdown of the supervisor (`shutdown graceful`)
 
