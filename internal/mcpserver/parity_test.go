@@ -9,7 +9,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/spawnselection"
 )
 
-// tsToolNames lists the seven MCP tools from the TypeScript reference
+// tsToolNames lists the eight MCP tools from the TypeScript reference
 // (packages/mcp/src/mcp.ts).
 var tsToolNames = []string{
 	"avenor_spawn",
