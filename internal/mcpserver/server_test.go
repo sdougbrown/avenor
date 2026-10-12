@@ -434,6 +434,14 @@ func TestGetClientForSupervisorReusesOwnerConn(t *testing.T) {
 	cleanup()
 
 	// A different id outside the sockets root is rejected before any dial.
+	origRoot := supervisorSocketsRoot
+	root := filepath.Join(t.TempDir(), "sockets")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	supervisorSocketsRoot = func() (string, error) { return root, nil }
+	t.Cleanup(func() { supervisorSocketsRoot = origRoot })
+
 	if _, _, err := s.getClientForSupervisor("/tmp/avenor-other-nonexistent.sock"); err == nil || !strings.Contains(err.Error(), "invalid supervisorId") {
 		t.Fatalf("non-default supervisor_id outside the sockets root should be rejected, got: %v", err)
 	}
@@ -460,8 +468,13 @@ func TestValidateSupervisorSocketPath(t *testing.T) {
 	}{
 		{"outside root", "/var/run/docker.sock"},
 		{"wrong basename in root", filepath.Join(root, "evil.sock")},
-		{"traversal out of root", filepath.Join(root, "..", "avenor-mcp-evil.sock")},
+		// Raw concatenation on purpose: filepath.Join would clean the ".."
+		// before the validator sees it, and the uncleaned attack shape is the
+		// one that must be rejected.
+		{"traversal out of root", root + "/../avenor-mcp-evil.sock"},
 		{"missing parent dir", filepath.Join(root, "nope", "avenor-mcp-1.sock")},
+		{"relative path", "avenor-mcp-1.sock"},
+		{"NUL byte in basename", root + "/avenor-mcp-a\x00b.sock"},
 	}
 	for _, tc := range cases {
 		if err := validateSupervisorSocketPath(tc.path); err == nil || !strings.Contains(err.Error(), "invalid supervisorId") {
@@ -481,6 +494,13 @@ func TestValidateSupervisorSocketPath(t *testing.T) {
 	if err := validateSupervisorSocketPath(filepath.Join(link, "avenor-mcp-1.sock")); err == nil || !strings.Contains(err.Error(), "invalid supervisorId") {
 		t.Errorf("symlink escape: expected invalid supervisorId, got: %v", err)
 	}
+
+	// An unresolvable root rejects everything, fail-closed.
+	supervisorSocketsRoot = func() (string, error) { return "", fmt.Errorf("boom") }
+	defer func() { supervisorSocketsRoot = func() (string, error) { return root, nil } }()
+	if err := validateSupervisorSocketPath(valid); err == nil || !strings.Contains(err.Error(), "invalid supervisorId") {
+		t.Errorf("root unavailable: expected invalid supervisorId, got: %v", err)
+	}
 }
 
 func TestGetClientForSupervisorRejectsForeignSocketWithoutDialing(t *testing.T) {
@@ -494,6 +514,14 @@ func TestGetClientForSupervisorRejectsForeignSocketWithoutDialing(t *testing.T) 
 		t.Fatal(err)
 	}
 	defer s.Close()
+
+	root := filepath.Join(t.TempDir(), "sockets")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	origRoot := supervisorSocketsRoot
+	supervisorSocketsRoot = func() (string, error) { return root, nil }
+	t.Cleanup(func() { supervisorSocketsRoot = origRoot })
 
 	dials := withCountedDials(t)
 	if _, _, err := s.getClientForSupervisor("/var/run/docker.sock"); err == nil || !strings.Contains(err.Error(), "invalid supervisorId") {
@@ -536,11 +564,49 @@ func TestGetClientForSupervisorDialsValidInRootID(t *testing.T) {
 	}
 	t.Cleanup(func() { dialSupervisorClient = origDial })
 
-	if _, _, err := s.getClientForSupervisor(socketPath); err == nil {
-		t.Fatal("expected dial failure on missing in-root socket")
+	if _, _, err := s.getClientForSupervisor(socketPath); err == nil || !strings.Contains(err.Error(), "dial supervisor socket") {
+		t.Fatalf("expected dial failure on missing in-root socket, got: %v", err)
 	}
 	if dialed != socketPath {
 		t.Fatalf("expected dial of in-root id %q, got %q", socketPath, dialed)
+	}
+}
+
+func TestAvenorStatusRegistryRoutedSupervisorIDPassesValidation(t *testing.T) {
+	supervisorPath, cleanup := startFakeSupervisor(t)
+	defer cleanup()
+
+	// Point validation at the fake supervisor's dir so the registered id is
+	// an in-root, non-default path (startFakeSupervisor uses its own temp dir,
+	// not ~/.avenor/sockets).
+	origRoot := supervisorSocketsRoot
+	supervisorSocketsRoot = func() (string, error) { return filepath.Dir(supervisorPath), nil }
+	t.Cleanup(func() { supervisorSocketsRoot = origRoot })
+
+	s, err := NewServer(Options{
+		Transport:     "stdio",
+		NoAutostart:   true,
+		ControlClient: &fakeClient{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	// A run registered against a non-default supervisor must still be
+	// reachable: resultSupervisorID routes the stored id, validation accepts
+	// the in-root path, and the dial reaches the fake supervisor.
+	if err := s.registry.Store(&RunInfo{RunID: "run-secondary", SupervisorID: supervisorPath}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{RunID: "run-secondary"})
+	if err != nil {
+		t.Fatalf("expected registry-routed in-root supervisor to be dialed, got: %v", err)
+	}
+	m := statusOutputMap(t, result)
+	if m["status"] != "running" || m["run_id"] != "run-secondary" {
+		t.Errorf("expected response from secondary supervisor, got %v", m)
 	}
 }
 

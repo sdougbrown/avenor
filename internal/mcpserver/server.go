@@ -1851,15 +1851,18 @@ func (s *Server) getClientForSupervisorWithPath(supervisorID string) (ControlCli
 		return nil, nil, "", fmt.Errorf("control client not available")
 	}
 	isDefault := supervisorID == "" || supervisorID == s.defaultSupervisorPath
+
 	if !isDefault {
+		s.supervisorMu.Unlock()
 		// Tool-arg supervisor_ids must live in the sockets root; the configured
 		// --supervisor-socket (and the autostarted default) are exempt via
 		// isDefault. Blocks dialing arbitrary local sockets on caller say-so.
+		// Validation and dial both run outside the lock: neither touches
+		// lock-protected state, and holding supervisorMu across filesystem
+		// syscalls would serialize default-path acquisitions behind them.
 		if err := validateSupervisorSocketPath(supervisorID); err != nil {
-			s.supervisorMu.Unlock()
 			return nil, nil, "", err
 		}
-		s.supervisorMu.Unlock()
 		cl, err := dialSupervisorClient(supervisorID)
 		if err != nil {
 			return nil, nil, "", fmt.Errorf("dial supervisor socket %s: %w", supervisorID, err)

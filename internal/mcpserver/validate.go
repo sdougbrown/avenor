@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 )
 
 // supervisorSocketNameRe matches the socket filename convention shared by the
@@ -32,6 +33,9 @@ var supervisorSocketsRoot = func() (string, error) {
 // canonicalized (Unix sockets reject realpath on macOS); resolving the
 // containing directory is enough to block traversal and symlink escapes.
 func validateSupervisorSocketPath(supervisorID string) error {
+	if strings.ContainsRune(supervisorID, 0) {
+		return fmt.Errorf("invalid supervisorId: %s", supervisorID)
+	}
 	root, err := supervisorSocketsRoot()
 	if err != nil {
 		return fmt.Errorf("invalid supervisorId: %s", supervisorID)
