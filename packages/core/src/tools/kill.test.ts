@@ -4,7 +4,10 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 
 // The run registry resolves its storage root from AVENOR_HOME at import time,
-// so the temp home must exist before the tool module is loaded below.
+// so the temp home must exist before the tool module is loaded below. The
+// previous value is restored in afterAll: bun test shares the process env
+// across test files, and a dangling AVENOR_HOME breaks later socket tests.
+const previousHome = process.env.AVENOR_HOME
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-kill-test-'))
 process.env.AVENOR_HOME = home
 
@@ -36,6 +39,8 @@ describe('killTool', () => {
   })
 
   afterAll(() => {
+    if (previousHome === undefined) delete process.env.AVENOR_HOME
+    else process.env.AVENOR_HOME = previousHome
     fs.rmSync(home, { recursive: true, force: true })
   })
 
