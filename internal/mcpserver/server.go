@@ -1250,7 +1250,8 @@ func (s *Server) handleAvenorShutdown(ctx context.Context, req *mcp.CallToolRequ
 }
 
 func (s *Server) handleAvenorKill(ctx context.Context, req *mcp.CallToolRequest, args killArgs) (*mcp.CallToolResult, any, error) {
-	if strings.TrimSpace(args.RunID) == "" {
+	args.RunID = strings.TrimSpace(args.RunID)
+	if args.RunID == "" {
 		return nil, nil, fmt.Errorf("run_id is required")
 	}
 	supervisorID := s.resultSupervisorID(args.RunID, args.SupervisorID)
@@ -1266,8 +1267,10 @@ func (s *Server) handleAvenorKill(ctx context.Context, req *mcp.CallToolRequest,
 		return nil, nil, err
 	}
 
+	// The live list is authoritative when registry metadata is stale: a
+	// registry entry without a runtime_id resolves like an unknown run.
 	runtimeID := ""
-	if ri != nil {
+	if ri != nil && ri.RuntimeID != "" {
 		runtimeID = ri.RuntimeID
 	} else {
 		runtimeID, err = resolveRuntimeIDFromList(cl, args.RunID)
@@ -1365,7 +1368,8 @@ func resolveRuntimeIDFromList(cl ControlClient, runID string) (string, error) {
 		runtimeID, _ := entry["runtime_id"].(string)
 		label, _ := entry["label"].(string)
 		sessionID, _ := entry["session_id"].(string)
-		if runID == runtimeID || runID == label || runID == sessionID {
+		runEntryID, _ := entry["run_id"].(string)
+		if runID == runtimeID || runID == label || runID == sessionID || runID == runEntryID {
 			if runtimeID == "" {
 				return "", fmt.Errorf("run %q matched but has no runtime_id", runID)
 			}

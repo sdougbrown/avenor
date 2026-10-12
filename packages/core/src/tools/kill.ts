@@ -18,9 +18,7 @@ export interface KillResult {
 // A bare runtime ID also matches: the control server keys runs by runtime
 // ID, and the list entries carry it alongside the public run ID and label.
 function matchEntry(entry: Record<string, unknown>, reference: string): string | undefined {
-  const runtimeId = typeof entry.runtime_id === 'string'
-    ? entry.runtime_id
-    : typeof entry.id === 'string' ? entry.id : ''
+  const runtimeId = typeof entry.runtime_id === 'string' ? entry.runtime_id : ''
   if (!runtimeId) return undefined
   if (runtimeId === reference) return runtimeId
   if (typeof entry.label === 'string' && entry.label === reference) return runtimeId

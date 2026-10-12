@@ -2132,8 +2132,13 @@ func TestAvenorKillEmptyRunID(t *testing.T) {
 	}
 }
 
+// A registry entry without a runtime_id falls back to the live list (the
+// TS killTool resolves the same way), so both sides cover: fallback to a
+// matching list entry, and not-found when the list has no match either.
 func TestAvenorKillRegistryEntryWithoutRuntimeID(t *testing.T) {
-	fake := &fakeClient{}
+	fake := &fakeClient{
+		listResult: []map[string]any{{"runtime_id": "rt_5", "run_id": "run-1"}},
+	}
 	s, err := NewServer(Options{
 		Transport:     "stdio",
 		NoAutostart:   true,
@@ -2150,12 +2155,54 @@ func TestAvenorKillRegistryEntryWithoutRuntimeID(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	_, result, err := s.handleAvenorKill(context.Background(), nil, killArgs{RunID: "run-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.cancelCalls) != 1 || fake.cancelCalls[0] != "rt_5" {
+		t.Fatalf("expected one Cancel call with rt_5, got %v", fake.cancelCalls)
+	}
+	m, _ := result.(map[string]any)
+	if m["runtime_id"] != "rt_5" {
+		t.Errorf("unexpected runtime_id in kill result: %v", m)
+	}
+}
+
+func TestAvenorKillRegistryEntryWithoutRuntimeIDNotFound(t *testing.T) {
+	fake := &fakeClient{}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.registry.Store(&RunInfo{RunID: "run-1", Label: "worker"}); err != nil {
+		t.Fatal(err)
+	}
+
 	_, _, err = s.handleAvenorKill(context.Background(), nil, killArgs{RunID: "run-1"})
-	if err == nil || !strings.Contains(err.Error(), "resolved to no runtime_id") {
-		t.Fatalf("expected empty-runtime_id error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("expected run-not-found error, got %v", err)
 	}
 	if len(fake.cancelCalls) != 0 {
-		t.Fatalf("Cancel must not run with an empty runtime_id, got %v", fake.cancelCalls)
+		t.Fatalf("Cancel must not run for an unresolvable run, got %v", fake.cancelCalls)
+	}
+}
+
+func TestAvenorKillPaddedRunID(t *testing.T) {
+	fake := &fakeClient{
+		listResult: []map[string]any{{"runtime_id": "rt_6", "label": "worker"}},
+	}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = s.handleAvenorKill(context.Background(), nil, killArgs{RunID: "  worker  "})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.cancelCalls) != 1 || fake.cancelCalls[0] != "rt_6" {
+		t.Fatalf("expected one Cancel call with rt_6, got %v", fake.cancelCalls)
 	}
 }
 
