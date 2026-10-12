@@ -18,6 +18,7 @@ export function buildMockDeps(partial: Partial<ExtensionDeps> = {}): ExtensionDe
     brokerReceiveTool: mock(async () => ({ asks: [] })),
     brokerReplyTool: mock(async () => ({ ok: true })),
     shutdownTool: mock(async () => ({ ok: true })),
+    killTool: mock(async () => ({ killed: true, run_id: 'run-1' })),
     workflowStatusTool: mock(async () => ({})),
     workflowWaitTool: mock(async () => ({})),
     workflowInspectTool: mock(async () => ({})),

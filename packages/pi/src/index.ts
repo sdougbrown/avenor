@@ -20,6 +20,7 @@ import {
   eventsTool,
   followUpTool,
   inspectTool,
+  killTool,
   observeRun,
   peersTool,
   resultTool,
@@ -113,6 +114,7 @@ export interface ExtensionDeps {
   brokerReceiveTool: typeof brokerReceiveTool
   brokerReplyTool: typeof brokerReplyTool
   shutdownTool: typeof shutdownTool
+  killTool: typeof killTool
   workflowStatusTool: typeof workflowStatusTool
   workflowWaitTool: typeof workflowWaitTool
   workflowInspectTool: typeof workflowInspectTool
@@ -137,6 +139,7 @@ const defaultDeps: ExtensionDeps = {
   brokerReceiveTool,
   brokerReplyTool,
   shutdownTool,
+  killTool,
   workflowStatusTool,
   workflowWaitTool,
   workflowInspectTool,
@@ -1926,6 +1929,23 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       },
       renderResult(result, { expanded, isPartial }, theme, context) {
         return renderShutdownResult(result, { expanded, isPartial }, theme, context.args)
+      },
+    })
+
+    pi.registerTool({
+      name: 'avenor_kill',
+      label: 'Avenor Kill',
+      description: 'Terminate a run without shutting down the supervisor. Other runs and the supervisor itself keep running.',
+      parameters: Type.Object({
+        run_id: Type.String({ description: 'Run ID to terminate' }),
+        supervisor_id: Type.Optional(Type.String({ description: 'Reuse an existing supervisor by socket path' })),
+      }),
+      async execute(_toolCallId, params) {
+        const result = await deps.killTool({ runId: params.run_id, supervisorId: params.supervisor_id })
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          details: result,
+        }
       },
     })
 

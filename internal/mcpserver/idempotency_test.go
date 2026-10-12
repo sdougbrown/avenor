@@ -210,9 +210,10 @@ func (f *fakeIdempotentSupervisor) Status(runtimeID string) (map[string]any, err
 
 // --- ControlClient no-op methods ---
 
-func (f *fakeIdempotentSupervisor) Shutdown(mode string) error { return nil }
-func (f *fakeIdempotentSupervisor) Close() error               { return nil }
-func (f *fakeIdempotentSupervisor) Closed() bool               { return false }
+func (f *fakeIdempotentSupervisor) Shutdown(mode string) error    { return nil }
+func (f *fakeIdempotentSupervisor) Cancel(runtimeID string) error { return nil }
+func (f *fakeIdempotentSupervisor) Close() error                  { return nil }
+func (f *fakeIdempotentSupervisor) Closed() bool                  { return false }
 func (f *fakeIdempotentSupervisor) AnswerPermission(runtimeID, requestID, optionID string) error {
 	return nil
 }

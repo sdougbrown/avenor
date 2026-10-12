@@ -573,6 +573,7 @@ describe('Avenor Pi extension', () => {
     expect(Object.keys(registeredTools)).toContain('avenor_follow_up')
     expect(Object.keys(registeredTools)).toContain('avenor_events')
     expect(Object.keys(registeredTools)).toContain('avenor_shutdown')
+    expect(Object.keys(registeredTools)).toContain('avenor_kill')
     expect(Object.keys(registeredTools)).toContain('avenor_workflow_status')
     expect(Object.keys(registeredTools)).toContain('avenor_workflow_wait')
     expect(Object.keys(registeredTools)).toContain('avenor_workflow_inspect')
@@ -810,6 +811,7 @@ describe('Avenor Pi extension', () => {
     const followUpPayload = { run_id: 'follow-up-run', label: 'follow-up worker' }
     const eventsPayload = { events: [{ event: 'agent.message', seq: 1, delta: 'hello' }] }
     const shutdownPayload = { ok: true, cleaned_up: ['/tmp/one'] }
+    const killPayload = { killed: true, run_id: 'run-1' }
 
     const mockPi = {
       on: () => {},
@@ -831,6 +833,7 @@ describe('Avenor Pi extension', () => {
       followUpTool: mock(async () => followUpPayload),
       eventsTool: mock(async () => eventsPayload),
       shutdownTool: mock(async () => shutdownPayload),
+      killTool: mock(async () => killPayload),
       observeRun: mock(() => null),
       dial: mock(async () => ({ close() {}, cancel: async () => {}, interruptAndPrompt: async () => {}, events() { throw new Error('unused') } })),
       Supervisor: class {} as any,
@@ -870,6 +873,10 @@ describe('Avenor Pi extension', () => {
     const shutdown = await registeredTools.avenor_shutdown.execute('tool-shutdown', { supervisor_id: '/tmp/sock', force: true })
     expect(shutdown.content[0]?.text).toBe(JSON.stringify(shutdownPayload, null, 2))
     expect(shutdown.details).toEqual(shutdownPayload)
+
+    const kill = await registeredTools.avenor_kill.execute('tool-kill', { run_id: 'run-1' })
+    expect(kill.content[0]?.text).toBe(JSON.stringify(killPayload, null, 2))
+    expect(kill.details).toEqual(killPayload)
   })
 
   it('registers avenor_inspect with bounded JSON output', async () => {

@@ -4,6 +4,7 @@
 
 ### Added
 
+- `avenor_kill` tool: terminates a single run without shutting down the supervisor — the supervisor and all sibling runs keep running. Implemented across every tool surface: the Go MCP server (`internal/mcpserver`), the TypeScript reference (`packages/core` `killTool`, `packages/mcp`), the pi extension (`avenor_kill`), and the OpenCode plugin. Killed runs settle as `killed` (exit code 130, stop reason `cancelled`) and remain resolvable for `avenor_status`/`avenor_result`; killed runs are still not resumable via `avenor_follow_up`.
 - `Supervisor` (packages/core) exposes `getInstance(supervisorId)` — the single source of truth for singleton ownership, with `isCurrentInstance` now derived from it — and `forEachRun(cb)` for iterating stored runs without reaching into the private map. The last `(sup as any).runs` casts (in `avenor_shutdown`) are gone.
 - Per-phase roster entries in loop and team configs now apply their `thinking` level: the entry's default merges with the run-level value (an explicit `--thinking`/spawn level wins) and is validated against the phase's resolved backend before the phase starts. `ResolvedSelection` now carries the entry's level for phase consumers; the spawn selector deliberately still excludes `thinking`, which remains a default rather than a selection field.
 - `avenor await`: new wait-only subcommand from this feature work. Waits on a run until attention or done, with plain transition lines or JSON output.

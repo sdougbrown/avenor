@@ -68,11 +68,13 @@ type fakeClient struct {
 	resultErr                error
 	spawnErr                 error
 	shutdownErr              error
+	cancelErr                error
 	answerPermissionErr      error
 	shutdownFunc             func(mode string) error
 	spawnFunc                func(params map[string]any) (map[string]any, error)
 	spawnCapturedParams      map[string]any
 	answerPermissionCalls    []permissionCall
+	cancelCalls              []string
 	closeCalls               int
 	closed                   bool
 	statusCapturedRuntimeIDs []string
@@ -167,6 +169,11 @@ func (f *fakeClient) Shutdown(mode string) error {
 	return f.shutdownErr
 }
 
+func (f *fakeClient) Cancel(runtimeID string) error {
+	f.cancelCalls = append(f.cancelCalls, runtimeID)
+	return f.cancelErr
+}
+
 func (f *fakeClient) AnswerPermission(runtimeID, requestID, optionID string) error {
 	return f.AnswerPermissionWithMessage(runtimeID, requestID, optionID, "")
 }
@@ -233,6 +240,7 @@ func (c *spawnCountingClient) Spawn(map[string]any) (map[string]any, error) {
 	return map[string]any{"runtime_id": "rt-shared", "session_id": "ses-shared"}, nil
 }
 func (c *spawnCountingClient) Shutdown(string) error                         { return nil }
+func (c *spawnCountingClient) Cancel(string) error                           { return nil }
 func (c *spawnCountingClient) Close() error                                  { return nil }
 func (c *spawnCountingClient) Closed() bool                                  { return false }
 func (c *spawnCountingClient) AnswerPermission(string, string, string) error { return nil }
@@ -2006,6 +2014,85 @@ func TestAvenorShutdownError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "shutdown:") {
 		t.Fatalf("shutdown error lacks operation context: %v", err)
+	}
+}
+
+func TestAvenorKill(t *testing.T) {
+	fake := &fakeClient{}
+	s, err := NewServer(Options{
+		Transport:     "stdio",
+		NoAutostart:   true,
+		ControlClient: fake,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.registry.Store(&RunInfo{
+		RunID:     "run-1",
+		Label:     "worker",
+		RuntimeID: "rt_1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, result, err := s.handleAvenorKill(context.Background(), nil, killArgs{RunID: "run-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.cancelCalls) != 1 || fake.cancelCalls[0] != "rt_1" {
+		t.Fatalf("expected one Cancel call with rt_1, got %v", fake.cancelCalls)
+	}
+	m, _ := result.(map[string]any)
+	if m["killed"] != true || m["run_id"] != "run-1" || m["runtime_id"] != "rt_1" {
+		t.Errorf("unexpected kill result: %v", m)
+	}
+}
+
+func TestAvenorKillResolvesLabel(t *testing.T) {
+	fake := &fakeClient{}
+	s, err := NewServer(Options{
+		Transport:     "stdio",
+		NoAutostart:   true,
+		ControlClient: fake,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.registry.Store(&RunInfo{
+		RunID:     "run-1",
+		Label:     "worker",
+		RuntimeID: "rt_1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := s.handleAvenorKill(context.Background(), nil, killArgs{RunID: "worker"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.cancelCalls) != 1 || fake.cancelCalls[0] != "rt_1" {
+		t.Fatalf("expected one Cancel call with rt_1, got %v", fake.cancelCalls)
+	}
+}
+
+func TestAvenorKillError(t *testing.T) {
+	cause := errors.New("runtime \"rt_x\" not found")
+	fake := &fakeClient{
+		cancelErr:  cause,
+		listResult: []map[string]any{{"runtime_id": "rt_x"}},
+	}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = s.handleAvenorKill(context.Background(), nil, killArgs{RunID: "rt_x"})
+	if !errors.Is(err, cause) {
+		t.Fatalf("kill error does not wrap cause: %v", err)
+	}
+	if !strings.Contains(err.Error(), "cancel:") {
+		t.Fatalf("kill error lacks operation context: %v", err)
 	}
 }
 

@@ -24,6 +24,7 @@ import {
   type RunObserver,
   type RunSnapshot,
   shutdownTool,
+  killTool,
   spawnTool,
   statusTool,
   Supervisor,
@@ -954,6 +955,18 @@ export const AvenorPlugin: Plugin = async (ctx) => {
             supervisorId: args.supervisor_id,
           })
           return formatInspectOutput(args, result)
+        },
+      }),
+
+      avenor_kill: tool({
+        description: 'Terminate a run without shutting down the supervisor. Other runs and the supervisor itself keep running.',
+        args: {
+          run_id: tool.schema.string().describe('Run ID or label of the run to terminate'),
+          supervisor_id: tool.schema.string().optional().describe('Supervisor ID for multi-supervisor mode'),
+        },
+        async execute(args, _context) {
+          const result = await killTool({ runId: args.run_id, supervisorId: args.supervisor_id })
+          return { title: 'kill', output: JSON.stringify(result, null, 2) }
         },
       }),
 

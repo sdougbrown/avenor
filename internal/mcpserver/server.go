@@ -31,6 +31,7 @@ type ControlClient interface {
 	List() ([]map[string]any, error)
 	Spawn(params map[string]any) (map[string]any, error)
 	Shutdown(mode string) error
+	Cancel(runtimeID string) error
 	Close() error
 	Closed() bool
 	AnswerPermission(runtimeID, requestID, optionID string) error
@@ -132,6 +133,11 @@ func (a *spawnArgs) UnmarshalJSON(data []byte) error {
 type shutdownArgs struct {
 	SupervisorID string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
 	Force        bool   `json:"force,omitempty" jsonschema:"optional force kill instead of graceful shutdown"`
+}
+
+type killArgs struct {
+	RunID        string `json:"run_id" jsonschema:"required run ID or label"`
+	SupervisorID string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
 }
 
 type permissionArgs struct {
@@ -272,6 +278,7 @@ func NewServer(opts Options) (*Server, error) {
 			"avenor_answer_permission",
 			"avenor_events",
 			"avenor_follow_up",
+			"avenor_kill",
 			"avenor_workflow_status",
 			"avenor_workflow_wait",
 			"avenor_workflow_inspect",
@@ -309,6 +316,11 @@ func NewServer(opts Options) (*Server, error) {
 		Name:        "avenor_shutdown",
 		Description: "Shutdown the avenor supervisor and clean up run artifacts",
 	}, s.handleAvenorShutdown)
+
+	mcp.AddTool(mcpServer, &mcp.Tool{
+		Name:        "avenor_kill",
+		Description: "Terminate a single run without shutting down the supervisor. Other runs and the supervisor itself keep running.",
+	}, s.handleAvenorKill)
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
 		Name:        "avenor_answer_permission",
@@ -1234,6 +1246,41 @@ func (s *Server) handleAvenorShutdown(ctx context.Context, req *mcp.CallToolRequ
 	return nil, map[string]any{
 		"ok":         true,
 		"cleaned_up": cleanedUp,
+	}, nil
+}
+
+func (s *Server) handleAvenorKill(ctx context.Context, req *mcp.CallToolRequest, args killArgs) (*mcp.CallToolResult, any, error) {
+	supervisorID := s.resultSupervisorID(args.RunID, args.SupervisorID)
+
+	cl, cleanup, err := s.getClientForSupervisor(supervisorID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer cleanup()
+
+	ri, err := s.lookupRun(cl, s.getSupervisorPath(supervisorID), args.RunID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	runtimeID := ""
+	if ri != nil {
+		runtimeID = ri.RuntimeID
+	} else {
+		runtimeID, err = resolveRuntimeIDFromList(cl, args.RunID)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
+	if err := cl.Cancel(runtimeID); err != nil {
+		return nil, nil, fmt.Errorf("cancel: %w", err)
+	}
+
+	return nil, map[string]any{
+		"killed":     true,
+		"run_id":     args.RunID,
+		"runtime_id": runtimeID,
 	}, nil
 }
 

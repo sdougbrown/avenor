@@ -18,6 +18,7 @@ var tsToolNames = []string{
 	"avenor_answer_permission",
 	"avenor_follow_up",
 	"avenor_events",
+	"avenor_kill",
 	"avenor_shutdown",
 }
 
@@ -129,6 +130,13 @@ func TestSchemaFieldParity(t *testing.T) {
 		allowed := []string{"run_id", "types", "limit", "after_seq", "supervisor_id"}
 		required := []string{"run_id"}
 		assertFields(t, "eventsArgs", allowed, required)
+	})
+
+	t.Run("avenor_kill", func(t *testing.T) {
+		// killArgs — required: run_id; optional: supervisor_id
+		allowed := []string{"run_id", "supervisor_id"}
+		required := []string{"run_id"}
+		assertFields(t, "killArgs", allowed, required)
 	})
 
 	t.Run("avenor_shutdown", func(t *testing.T) {
@@ -400,6 +408,16 @@ func assertFields(t *testing.T, structName string, allowed, required []string) {
 		if a.RunID != "r" || a.Limit != 10 || a.SupervisorID != "s" {
 			t.Errorf("%s: fields not populated correctly", structName)
 		}
+	case "killArgs":
+		data := map[string]any{"run_id": "r", "supervisor_id": "s"}
+		b, _ := json.Marshal(data)
+		var a killArgs
+		if err := json.Unmarshal(b, &a); err != nil {
+			t.Fatalf("%s: unmarshal: %v", structName, err)
+		}
+		if a.RunID != "r" || a.SupervisorID != "s" {
+			t.Errorf("%s: fields not populated correctly", structName)
+		}
 	case "shutdownArgs":
 		data := map[string]any{"supervisor_id": "s", "force": true}
 		b, _ := json.Marshal(data)
@@ -545,6 +563,8 @@ func assertSchemaTags(t *testing.T, structName string, allowed, required []strin
 		typ = reflect.TypeOf(followUpArgs{})
 	case "eventsArgs":
 		typ = reflect.TypeOf(eventsArgs{})
+	case "killArgs":
+		typ = reflect.TypeOf(killArgs{})
 	case "shutdownArgs":
 		typ = reflect.TypeOf(shutdownArgs{})
 	case "workflowStatusArgs":
