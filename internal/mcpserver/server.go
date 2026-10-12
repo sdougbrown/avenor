@@ -1276,6 +1276,12 @@ func (s *Server) handleAvenorKill(ctx context.Context, req *mcp.CallToolRequest,
 		}
 	}
 
+	// Cancel without a runtime_id targets the supervisor's root run, so an
+	// empty resolution must fail instead of reaching the RPC.
+	if runtimeID == "" {
+		return nil, nil, fmt.Errorf("run %q resolved to no runtime_id", args.RunID)
+	}
+
 	if err := cl.Cancel(runtimeID); err != nil {
 		return nil, nil, fmt.Errorf("cancel: %w", err)
 	}

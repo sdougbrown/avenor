@@ -2132,6 +2132,33 @@ func TestAvenorKillEmptyRunID(t *testing.T) {
 	}
 }
 
+func TestAvenorKillRegistryEntryWithoutRuntimeID(t *testing.T) {
+	fake := &fakeClient{}
+	s, err := NewServer(Options{
+		Transport:     "stdio",
+		NoAutostart:   true,
+		ControlClient: fake,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.registry.Store(&RunInfo{
+		RunID: "run-1",
+		Label: "worker",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = s.handleAvenorKill(context.Background(), nil, killArgs{RunID: "run-1"})
+	if err == nil || !strings.Contains(err.Error(), "resolved to no runtime_id") {
+		t.Fatalf("expected empty-runtime_id error, got %v", err)
+	}
+	if len(fake.cancelCalls) != 0 {
+		t.Fatalf("Cancel must not run with an empty runtime_id, got %v", fake.cancelCalls)
+	}
+}
+
 func TestSpawnAfterShutdownAutostartsNewSupervisor(t *testing.T) {
 	origStart := startSupervisorFunc
 	defer func() { startSupervisorFunc = origStart }()

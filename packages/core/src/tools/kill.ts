@@ -1,5 +1,4 @@
-import { Supervisor, type Client } from '../supervisor.js'
-import type { RunInfo } from '../supervisor.js'
+import type { Client, RunInfo } from '../supervisor.js'
 import { validateRunId } from './validate.js'
 import { getSupervisorClient as realGetSupervisorClient } from './get-supervisor-client.js'
 import { findExternalRun } from './run-registry.js'
@@ -48,34 +47,22 @@ async function executeKillTool(
   // runtime_id targets the supervisor's own root run.
   validateRunId(args.runId)
 
-  if (args.supervisorId) {
-    const { client, isSingleton, sup, supervisorId } = await getSupervisorClient(args.supervisorId)
-    try {
-      const runInfo = isSingleton && sup
-        ? findLocalRunByReference(sup, args.runId)
-        : findExternalRun(supervisorId, args.runId)
-      const runtimeId = runInfo?.runtimeId ?? await resolveRuntimeId(client, args.runId)
-      await client.cancel(runtimeId)
-      return {
-        killed: true,
-        run_id: args.runId,
-        runtime_id: runtimeId,
-      }
-    } finally {
-      if (!isSingleton) {
-        client.close()
-      }
+  const { client, isSingleton, sup, supervisorId } = await getSupervisorClient(args.supervisorId)
+  try {
+    const runInfo: RunInfo | undefined = isSingleton && sup
+      ? findLocalRunByReference(sup, args.runId)
+      : findExternalRun(supervisorId, args.runId)
+    const runtimeId = runInfo?.runtimeId ?? await resolveRuntimeId(client, args.runId)
+    await client.cancel(runtimeId)
+    return {
+      killed: true,
+      run_id: args.runId,
+      runtime_id: runtimeId,
     }
-  }
-
-  const sup = await Supervisor.get()
-  const runInfo: RunInfo | undefined = findLocalRunByReference(sup, args.runId)
-  const runtimeId = runInfo?.runtimeId ?? await resolveRuntimeId(sup.getClient(), args.runId)
-  await sup.getClient().cancel(runtimeId)
-  return {
-    killed: true,
-    run_id: args.runId,
-    runtime_id: runtimeId,
+  } finally {
+    if (!isSingleton) {
+      client.close()
+    }
   }
 }
 

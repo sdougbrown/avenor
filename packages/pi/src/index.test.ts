@@ -812,6 +812,7 @@ describe('Avenor Pi extension', () => {
     const eventsPayload = { events: [{ event: 'agent.message', seq: 1, delta: 'hello' }] }
     const shutdownPayload = { ok: true, cleaned_up: ['/tmp/one'] }
     const killPayload = { killed: true, run_id: 'run-1' }
+    const killCalls: Array<Record<string, unknown>> = []
 
     const mockPi = {
       on: () => {},
@@ -833,7 +834,10 @@ describe('Avenor Pi extension', () => {
       followUpTool: mock(async () => followUpPayload),
       eventsTool: mock(async () => eventsPayload),
       shutdownTool: mock(async () => shutdownPayload),
-      killTool: mock(async () => killPayload),
+      killTool: mock(async (args: Record<string, unknown>) => {
+        killCalls.push(args)
+        return killPayload
+      }),
       observeRun: mock(() => null),
       dial: mock(async () => ({ close() {}, cancel: async () => {}, interruptAndPrompt: async () => {}, events() { throw new Error('unused') } })),
       Supervisor: class {} as any,
@@ -877,6 +881,7 @@ describe('Avenor Pi extension', () => {
     const kill = await registeredTools.avenor_kill.execute('tool-kill', { run_id: 'run-1' })
     expect(kill.content[0]?.text).toBe(JSON.stringify(killPayload, null, 2))
     expect(kill.details).toEqual(killPayload)
+    expect(killCalls.at(-1)).toEqual({ runId: 'run-1', supervisorId: undefined })
   })
 
   it('registers avenor_inspect with bounded JSON output', async () => {
