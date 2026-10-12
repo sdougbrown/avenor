@@ -62,6 +62,9 @@ describe('killTool', () => {
     }))
     singletonRuns.clear()
     forgetExternalRuns('/tmp/avenor-kill-test.sock')
+    // forgetExternalRuns clears the in-memory registry only; the persisted
+    // run.json files must go too or they accumulate across tests.
+    fs.rmSync(path.join(home, 'runs'), { recursive: true, force: true })
   })
 
   afterAll(() => {
