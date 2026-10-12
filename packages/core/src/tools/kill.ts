@@ -1,4 +1,5 @@
-import type { Client, RunInfo } from '../supervisor.js'
+import type { RunInfo } from '../supervisor.js'
+import type { Client } from '../client.js'
 import { validateRunId } from './validate.js'
 import { getSupervisorClient as realGetSupervisorClient } from './get-supervisor-client.js'
 import { findExternalRun } from './run-registry.js'

@@ -6,6 +6,7 @@ import {
   formatInspectOutput,
   formatResultOutput,
   formatShutdownOutput,
+  formatKillOutput,
   formatStatusOutput,
   formatWorkflowControllerStatusOutput,
 } from './render.js'
@@ -95,6 +96,23 @@ describe('OpenCode Avenor result renderers', () => {
         'Cleanup path: /tmp/one',
       ].join('\n'),
       metadata: { ok: false, cleaned_up: ['/tmp/one'], supervisor_id: '/tmp/sock', force: true },
+    }))
+  })
+
+  it('formats the kill tool as bounded prose with metadata', () => {
+    const kill = formatKillOutput({ run_id: 'verify-kill', supervisor_id: '/tmp/sock' }, {
+      killed: true,
+      run_id: 'verify-kill',
+      runtime_id: 'rt_1',
+    })
+    expect(kill).toEqual(expect.objectContaining({
+      title: 'Avenor — kill run',
+      output: [
+        'Kill: terminated.',
+        'Run: verify-kill (runtime rt_1)',
+        'Supervisor: /tmp/sock — still running, other runs unaffected.',
+      ].join('\n'),
+      metadata: { killed: true, run_id: 'verify-kill', runtime_id: 'rt_1', supervisor_id: '/tmp/sock' },
     }))
   })
 

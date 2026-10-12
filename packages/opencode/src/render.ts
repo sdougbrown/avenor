@@ -501,6 +501,35 @@ export function formatShutdownOutput(args: ShutdownArgs, result: { ok: boolean; 
   }
 }
 
+export function formatKillOutput(args: { run_id?: string; supervisor_id?: string }, result: {
+  killed: boolean
+  run_id: string
+  runtime_id?: string
+}): RichToolResult {
+  return {
+    title: 'Avenor — kill run',
+    output: output(killLines(result, args), 'kill'),
+    metadata: {
+      ...result,
+      supervisor_id: args.supervisor_id,
+    },
+  }
+}
+
+function killLines(details: unknown, args: { run_id?: string; supervisor_id?: string }): string[] | undefined {
+  const result = asRecord(details)
+  if (!result || typeof result.killed !== 'boolean' || typeof result.run_id !== 'string') return undefined
+  const requested = stringValue(args.run_id) ? scalar(args.run_id) : scalar(result.run_id)
+  const runtimeId = stringValue(result.runtime_id) ? scalar(result.runtime_id) : 'unresolved'
+  const supervisor = stringValue(args.supervisor_id) ? scalar(args.supervisor_id) : 'singleton'
+  return [
+    `Kill: ${result.killed ? 'terminated' : 'failed'}.`,
+    `Run: ${requested} (runtime ${runtimeId})`,
+    `Supervisor: ${supervisor} — still running, other runs unaffected.`,
+    ...(!result.killed ? ['Warning: kill did not complete.', 'Guidance: check avenor_status for the run state.'] : []),
+  ]
+}
+
 function controllerLeaderLine(leader: RecordValue | undefined): string {
   if (!leader) return 'Leader: none'
   const owner = leader.is_this_process === true ? 'this process' : `other owner (${scalar(leader.owner_id)})`

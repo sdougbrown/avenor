@@ -908,9 +908,14 @@ describe('AvenorPlugin', () => {
     expect(shutdownToolMock).toHaveBeenCalledWith({ supervisorId: '/tmp/avenor.sock', force: undefined })
 
     const kill = hooks.tool?.avenor_kill as any
-    await kill.execute({ run_id: 'run-1', supervisor_id: '/tmp/avenor.sock' }, {})
+    const killResult = await kill.execute({ run_id: 'run-1', supervisor_id: '/tmp/avenor.sock' }, {})
     await flush()
     expect(killToolMock).toHaveBeenCalledWith({ runId: 'run-1', supervisorId: '/tmp/avenor.sock' })
+    expect(killResult).toEqual(expect.objectContaining({
+      title: 'Avenor — kill run',
+      output: expect.stringContaining('Run: run-1 (runtime unresolved)'),
+      metadata: { killed: true, run_id: 'run-1', supervisor_id: '/tmp/avenor.sock' },
+    }))
 
     const inspect = hooks.tool?.avenor_inspect as any
     const output = await inspect.execute({

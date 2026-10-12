@@ -9,6 +9,7 @@ import {
   formatInspectOutput,
   formatResultOutput,
   formatShutdownOutput,
+  formatKillOutput,
   formatStatusOutput,
   formatWorkflowControllerStatusOutput,
 } from './render.js'
@@ -966,7 +967,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
         },
         async execute(args, _context) {
           const result = await killTool({ runId: args.run_id, supervisorId: args.supervisor_id })
-          return { title: 'kill', output: JSON.stringify(result, null, 2) }
+          return formatKillOutput(args, result)
         },
       }),
 
