@@ -1937,7 +1937,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       label: 'Avenor Kill',
       description: 'Terminate a run without shutting down the supervisor. Other runs and the supervisor itself keep running.',
       parameters: Type.Object({
-        run_id: Type.String({ minLength: 1, description: 'Run ID to terminate' }),
+        run_id: Type.String({ minLength: 1, description: 'Run ID or label to terminate' }),
         supervisor_id: Type.Optional(Type.String({ description: 'Reuse an existing supervisor by socket path' })),
       }),
       async execute(_toolCallId, params) {
