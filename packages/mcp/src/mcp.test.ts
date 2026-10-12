@@ -50,7 +50,7 @@ describe('avenor MCP server', () => {
       name: 'avenor_kill',
       arguments: { run_id: 'run-1', supervisor_id: 'sup-1' },
     })
-    expect(kill).toBeDefined()
+    expect(kill).toMatchObject({ killed: true })
     expect(killCalls.at(-1)).toEqual({ runId: 'run-1', supervisorId: 'sup-1' })
     await client.close()
     await server.close()

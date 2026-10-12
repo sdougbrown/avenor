@@ -1250,6 +1250,9 @@ func (s *Server) handleAvenorShutdown(ctx context.Context, req *mcp.CallToolRequ
 }
 
 func (s *Server) handleAvenorKill(ctx context.Context, req *mcp.CallToolRequest, args killArgs) (*mcp.CallToolResult, any, error) {
+	if strings.TrimSpace(args.RunID) == "" {
+		return nil, nil, fmt.Errorf("run_id is required")
+	}
 	supervisorID := s.resultSupervisorID(args.RunID, args.SupervisorID)
 
 	cl, cleanup, err := s.getClientForSupervisor(supervisorID)

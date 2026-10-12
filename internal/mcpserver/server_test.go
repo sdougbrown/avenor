@@ -2096,6 +2096,42 @@ func TestAvenorKillError(t *testing.T) {
 	}
 }
 
+func TestAvenorKillRunNotFound(t *testing.T) {
+	fake := &fakeClient{}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Empty list: the run cannot be resolved, so Cancel must never be called.
+	_, _, err = s.handleAvenorKill(context.Background(), nil, killArgs{RunID: "run-ghost"})
+	if err == nil {
+		t.Fatal("expected run-not-found error")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(fake.cancelCalls) != 0 {
+		t.Fatalf("Cancel must not run for an unresolved run, got %v", fake.cancelCalls)
+	}
+}
+
+func TestAvenorKillEmptyRunID(t *testing.T) {
+	fake := &fakeClient{}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = s.handleAvenorKill(context.Background(), nil, killArgs{RunID: "  "})
+	if err == nil || !strings.Contains(err.Error(), "run_id is required") {
+		t.Fatalf("expected run_id required error, got %v", err)
+	}
+	if len(fake.cancelCalls) != 0 {
+		t.Fatalf("Cancel must not run for an empty run_id, got %v", fake.cancelCalls)
+	}
+}
+
 func TestSpawnAfterShutdownAutostartsNewSupervisor(t *testing.T) {
 	origStart := startSupervisorFunc
 	defer func() { startSupervisorFunc = origStart }()

@@ -180,7 +180,7 @@ server.registerTool('avenor_events', {
 server.registerTool('avenor_kill', {
   description: 'Terminate a run without shutting down the supervisor. Other runs and the supervisor itself keep running.',
   inputSchema: {
-    run_id: z.string().describe('Run ID or label'),
+    run_id: z.string().min(1).describe('Run ID or label'),
     supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
   },
 }, async ({ run_id, supervisor_id }) => {
