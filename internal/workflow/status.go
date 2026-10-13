@@ -29,6 +29,7 @@ const (
 	ActivationLeaseExpired       ActivationStatus = "lease_expired"
 	ActivationSatisfied          ActivationStatus = "satisfied"
 	ActivationRejected           ActivationStatus = "rejected"
+	ActivationCanceled           ActivationStatus = "canceled"
 )
 
 // AttemptStatus records execution separately from activation acceptance.
@@ -147,4 +148,5 @@ const (
 	CommandChildAttach       CommandKind = "child_attach"
 	CommandChildOutcome      CommandKind = "child_outcome"
 	CommandParkExternal      CommandKind = "park_external"
+	CommandCancel            CommandKind = "cancel"
 )

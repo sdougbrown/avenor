@@ -492,6 +492,8 @@ func (m *Manager) WorkflowStatus(id string) (any, error) {
 		"status":           string(inst.Status),
 		"revision":         inst.Revision,
 		"terminal_outcome": string(inst.TerminalOutcome),
+		"canceled_by":      inst.CanceledBy,
+		"cancel_reason":    inst.CancelReason,
 	}, nil
 }
 
@@ -953,6 +955,9 @@ func (m *Manager) commandClaim(wf WorkflowID, payload json.RawMessage) (any, err
 	if act == nil {
 		return nil, fmt.Errorf("activation not found for node %q", req.NodeID)
 	}
+	if isTerminalStatus(snap.Instance.Status) {
+		return nil, fmt.Errorf("cannot claim activation: workflow is %s", snap.Instance.Status)
+	}
 	if !claimableActivationStatus(act.Status) {
 		return nil, fmt.Errorf("cannot claim activation in status %q", act.Status)
 	}
@@ -1039,6 +1044,9 @@ func (m *Manager) commandStart(wf WorkflowID, payload json.RawMessage) (any, err
 	}
 	if act == nil {
 		return nil, fmt.Errorf("activation not found for node %q", req.NodeID)
+	}
+	if isTerminalStatus(snap.Instance.Status) {
+		return nil, fmt.Errorf("cannot start activation: workflow is %s", snap.Instance.Status)
 	}
 	if act.Status != ActivationLeased {
 		return nil, fmt.Errorf("cannot start activation in status %q", act.Status)

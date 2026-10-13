@@ -267,6 +267,18 @@ func buildCommandEvents(state Snapshot, command Command) ([]Event, error) {
 		e.Outcome = command.Outcome
 		return []Event{e}, nil
 
+	case CommandCancel:
+		if command.Actor == "" {
+			return nil, errors.New("cancel command requires an actor")
+		}
+		if command.Reason == "" {
+			return nil, errors.New("cancel command requires a reason")
+		}
+		e := newEvent(EventCanceled)
+		e.Actor = command.Actor
+		e.Reason = command.Reason
+		return []Event{e}, nil
+
 	case CommandChildAttach:
 		e := newEvent(EventChildAttached)
 		e.LeaseID = command.LeaseID
@@ -306,6 +318,25 @@ func buildCommandEvents(state Snapshot, command Command) ([]Event, error) {
 	}
 }
 
+// canceledMutatingKinds is the set of event kinds a canceled (terminal)
+// instance must reject: everything that could advance, claim, or re-arm state.
+// Attempt-fact kinds (attempt_terminated, attempt_identified, heartbeat,
+// lease_expired) are not in the set: a late termination from an in-flight
+// runtime must still record its fact harmlessly after a cancel.
+var canceledMutatingKinds = map[EventKind]bool{
+	EventLeased:         true,
+	EventStarted:        true,
+	EventCompleted:      true,
+	EventGate:           true,
+	EventSkipped:        true,
+	EventUnblocked:      true,
+	EventRerouted:       true,
+	EventTransition:     true,
+	EventChildAttached:  true,
+	EventChildOutcome:   true,
+	EventExternalParked: true,
+}
+
 // applyEvent mutates a snapshot with the durable effect of one event. It is
 // the replay-side of the reducer: given the same event log it always yields
 // the same state. All events except EventInstantiated target one activation,
@@ -318,10 +349,20 @@ func applyEvent(next *Snapshot, event Event) error {
 			event.Identity.WorkflowID, next.Instance.WorkflowID)
 	}
 
-	// EventInstantiated and EventRerouted create activations and therefore do
-	// not require an existing one; every other kind must resolve one.
+	// A canceled instance is terminal: only attempt-fact events may still
+	// land on it (a late termination from an in-flight runtime whose cancel
+	// raced the instance cancel), never state-advancing ones. These events
+	// are rejected before the log append (ApplyCommand reduces before
+	// appending), so the command fails cleanly and nothing poisons replay.
+	if next.Instance.Status == WorkflowCanceled && canceledMutatingKinds[event.Kind] {
+		return fmt.Errorf("cannot apply %s to a canceled workflow instance", event.Kind)
+	}
+
+	// EventInstantiated, EventRerouted, and EventCanceled create or target the
+	// instance rather than one activation, so they do not require an existing
+	// one; every other kind must resolve one.
 	var act *Activation
-	if event.Kind != EventInstantiated && event.Kind != EventRerouted {
+	if event.Kind != EventInstantiated && event.Kind != EventRerouted && event.Kind != EventCanceled {
 		a, err := findActivation(&next.Instance, event.Identity.NodeID, event.Identity.ActivationID)
 		if err != nil {
 			return err
@@ -364,6 +405,8 @@ func applyEvent(next *Snapshot, event Event) error {
 		return applyChildAttached(next, act, event)
 	case EventExternalParked:
 		return applyExternalParked(act, event)
+	case EventCanceled:
+		return applyCanceled(next, event)
 	case EventChildOutcome:
 		return applyChildOutcome(next, act, event)
 	case EventTransition:
@@ -394,6 +437,39 @@ func applyEvent(next *Snapshot, event Event) error {
 	}
 
 	next.Instance.UpdatedAt = nowUTC()
+	return nil
+}
+
+// applyCanceled records an operator-attributed instance cancel: the instance
+// becomes terminal (WorkflowCanceled), every live lease is released, and every
+// non-terminal activation parks in the canceled status so no command can ever
+// advance it again. In-flight runtimes are canceled by the supervisor surface;
+// their late attempt_terminated events land harmlessly (the attempt fact is
+// recorded, nothing else moves). The event is rejected on an already-terminal
+// instance: a completed or failed workflow cannot be re-terminated.
+func applyCanceled(next *Snapshot, event Event) error {
+	if event.Actor == "" || event.Reason == "" {
+		return errors.New("canceled event requires both actor and reason")
+	}
+	switch next.Instance.Status {
+	case WorkflowCompleted, WorkflowFailed, WorkflowCanceled:
+		return fmt.Errorf("cannot cancel an instance already in status %q", next.Instance.Status)
+	}
+	now := nowUTC()
+	next.Instance.Status = WorkflowCanceled
+	next.Instance.CanceledBy = event.Actor
+	next.Instance.CancelReason = event.Reason
+	for i := range next.Instance.Activations {
+		act := &next.Instance.Activations[i]
+		act.ActiveLease = nil
+		switch act.Status {
+		case ActivationSatisfied, ActivationRejected, ActivationSkipped, ActivationCanceled:
+		default:
+			act.Status = ActivationCanceled
+			act.UpdatedAt = now
+		}
+	}
+	next.Instance.UpdatedAt = now
 	return nil
 }
 
@@ -613,11 +689,13 @@ func applyAttemptTerminated(next *Snapshot, act *Activation, event Event) error 
 		return nil
 	}
 	// Out-of-order termination: if the activation was already satisfied by an
-	// earlier completion, or the workflow is already completed, the termination
-	// is a distinct terminal attempt-fact and must not regress satisfaction or
-	// the workflow outcome. Record the attempt fact and return, skipping lease
-	// release and the retry/exhaustion logic entirely.
-	if act.Status == ActivationSatisfied || next.Instance.Status == WorkflowCompleted {
+	// earlier completion, or the workflow is already terminal (completed, or
+	// canceled by a race between an instance cancel and this late termination),
+	// the termination is a distinct terminal attempt-fact and must not regress
+	// satisfaction, the workflow outcome, or a cancel. Record the attempt fact
+	// and return, skipping lease release and the retry/exhaustion logic
+	// entirely.
+	if act.Status == ActivationSatisfied || next.Instance.Status == WorkflowCompleted || next.Instance.Status == WorkflowCanceled {
 		return nil
 	}
 	// A terminated attempt ends its worker's lease regardless of what follows

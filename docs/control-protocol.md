@@ -394,6 +394,7 @@ The `workflow.controller.create`, `workflow.controller.enable`, `workflow.contro
 | `workflow.inspect` | `{workflow_id}` | Full instance detail. |
 | `workflow.events` | `{workflow_id, after_seq?, limit?}` | Event log. |
 | `workflow.command` | `{workflow_id, command}` | Route an instance command by its `op` discriminator. |
+| `workflow.cancel` | `{workflow_id, actor, reason}` | Cancel the whole instance (terminal `canceled`); the supervisor also terminates its in-flight attempt runtimes. |
 | `workflow.controller.create` | `{controller_id, max_inflight}` | Register a controller with its in-flight limit. |
 | `workflow.controller.enable` | `{controller_id}` | Set the desired state to enabled and start the leader loop. |
 | `workflow.controller.disable` | `{controller_id, reason}` | Set the desired state to disabled (releasing any live lease) and stop the leader loop. |
@@ -409,7 +410,7 @@ The `workflow.controller.create`, `workflow.controller.enable`, `workflow.contro
    "command":{"op":"claim","node_id":"intake","activation_id":"act_...","actor":"controller"}}}
 ```
 
-`claim` returns `lease_id`, `owner_token`, and `expiry`. `start` validates the lease, allocates an `attempt_id`, and dispatches the declared action. `heartbeat` renews the lease with the claim's `(lease_id, owner_token)` pair. `complete`, `gate`, `skip`, and `unblock` carry their operation's fields (see [workflow.md](workflow.md#driving-a-workflow)).
+`claim` returns `lease_id`, `owner_token`, and `expiry`. `start` validates the lease, allocates an `attempt_id`, and dispatches the declared action. `heartbeat` renews the lease with the claim's `(lease_id, owner_token)` pair. `complete`, `gate`, `skip`, and `unblock` carry their operation's fields (see [workflow.md](workflow.md#driving-a-workflow)). `workflow.cancel` requires `actor` and `reason` and terminates the whole instance; it does not go through `workflow.command`.
 
 ## Owner Semantics
 

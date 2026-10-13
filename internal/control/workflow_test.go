@@ -23,6 +23,9 @@ type fakeWorkflowHandler struct {
 	eventsLimit       int
 	commandID         string
 	commandPayload    json.RawMessage
+	cancelID          string
+	cancelPayload     json.RawMessage
+	cancelErr         error
 }
 
 var _ WorkflowHandler = (*fakeWorkflowHandler)(nil)
@@ -64,6 +67,15 @@ func (f *fakeWorkflowHandler) WorkflowCommand(id string, payload json.RawMessage
 	f.commandID = id
 	f.commandPayload = payload
 	return map[string]any{"accepted": true}, nil
+}
+
+func (f *fakeWorkflowHandler) WorkflowCancel(id string, payload json.RawMessage) (any, error) {
+	f.cancelID = id
+	f.cancelPayload = payload
+	if f.cancelErr != nil {
+		return nil, f.cancelErr
+	}
+	return map[string]any{"status": "canceled", "canceled_runtimes": 1}, nil
 }
 
 func newWorkflowTestServer(t *testing.T) (*ControlServer, *fakeWorkflowHandler) {
@@ -190,6 +202,38 @@ func TestWorkflowCommandDispatch(t *testing.T) {
 	}
 	if string(fake.commandPayload) != `{"op":"pause"}` {
 		t.Fatalf("command payload = %s, want nested command object", fake.commandPayload)
+	}
+}
+
+func TestWorkflowCancelDispatch(t *testing.T) {
+	s, fake := newWorkflowTestServer(t)
+
+	resp := s.dispatch(nil, Request{JSONRPC: "2.0", ID: 1, Method: "workflow.cancel", Params: json.RawMessage(`{"workflow_id":"wf_1","actor":"ops","reason":"pr head moved"}`)})
+	if resp.Error != nil {
+		t.Fatalf("workflow.cancel returned error: %+v", resp.Error)
+	}
+	if fake.cancelID != "wf_1" {
+		t.Fatalf("cancel called with workflow_id %q, want wf_1", fake.cancelID)
+	}
+	result, ok := resp.Result.(map[string]any)
+	if !ok || result["status"] != "canceled" {
+		t.Fatalf("unexpected result: %#v", resp.Result)
+	}
+
+	// Missing workflow_id is invalid params; the handler is not called.
+	resp = s.dispatch(nil, Request{JSONRPC: "2.0", ID: 2, Method: "workflow.cancel", Params: json.RawMessage(`{"reason":"why"}`)})
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Fatalf("expected -32602 for missing workflow_id, got: %+v", resp.Error)
+	}
+	if fake.cancelID != "wf_1" {
+		t.Fatal("handler should not have been called again")
+	}
+
+	// Handler errors surface as -32000 with the handler's message.
+	fake.cancelErr = errors.New("cannot cancel workflow wf_1: instance is already completed")
+	resp = s.dispatch(nil, Request{JSONRPC: "2.0", ID: 3, Method: "workflow.cancel", Params: json.RawMessage(`{"workflow_id":"wf_1","actor":"ops","reason":"late"}`)})
+	if resp.Error == nil || resp.Error.Code != -32000 || resp.Error.Message != fake.cancelErr.Error() {
+		t.Fatalf("expected -32000 with handler error, got: %+v", resp.Error)
 	}
 }
 

@@ -1665,6 +1665,23 @@ func (s *ControlServer) dispatchWorkflow(c *connState, req Request) Response {
 			return failure(req.ID, -32000, err.Error(), nil)
 		}
 		return success(req.ID, result)
+	case "workflow.cancel":
+		var p struct {
+			WorkflowID string `json:"workflow_id"`
+			Actor      string `json:"actor"`
+			Reason     string `json:"reason"`
+		}
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return failure(req.ID, -32602, "invalid params", map[string]any{"detail": err.Error()})
+		}
+		if p.WorkflowID == "" {
+			return failure(req.ID, -32602, "invalid params", map[string]any{"required": []string{"workflow_id"}})
+		}
+		result, err := h.WorkflowCancel(p.WorkflowID, req.Params)
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), nil)
+		}
+		return success(req.ID, result)
 	case "workflow.command":
 		var p struct {
 			WorkflowID string          `json:"workflow_id"`

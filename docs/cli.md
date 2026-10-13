@@ -522,6 +522,7 @@ avenor workflow <command> [args] [flags]
 | `gate <workflow-id> <node-id> <gate-id> --activation-id ID --operation OP --request-file FILE` | Record a gate decision (`satisfy`, `reject`, `waive`, `external_result`). |
 | `skip <workflow-id> <node-id> --request-file FILE` | Waive every unsatisfied required gate on a parked activation. |
 | `unblock <workflow-id> <node-id> --request-file FILE` | Return a blocked activation to ready. |
+| `cancel <workflow-id> --reason TEXT [--actor ID]` | Cancel the whole instance: terminal `canceled`, in-flight attempts terminated. |
 
 ### Examples
 

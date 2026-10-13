@@ -681,6 +681,19 @@ func (c *Client) WorkflowUnblock(workflowID string, fields map[string]any) (map[
 	return c.workflowCommand(workflowID, "unblock", fields)
 }
 
+// WorkflowCancel cancels a whole workflow instance via the dedicated
+// workflow.cancel control method: the kernel records the attributed cancel and
+// the supervisor terminates the instance's in-flight attempt runtimes.
+func (c *Client) WorkflowCancel(workflowID, actor, reason string) (map[string]any, error) {
+	var result map[string]any
+	err := c.Call("workflow.cancel", map[string]any{
+		"workflow_id": workflowID,
+		"actor":       actor,
+		"reason":      reason,
+	}, &result)
+	return result, err
+}
+
 // WorkflowControllerCreate registers a workflow-controller given as raw JSON.
 func (c *Client) WorkflowControllerCreate(request json.RawMessage) (map[string]any, error) {
 	var result map[string]any
