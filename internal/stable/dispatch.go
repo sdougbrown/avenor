@@ -500,7 +500,9 @@ func (s *Supervisor) resolveDispatchSelection(mgr *workflow.Manager, workflowID,
 // direct spawn path enforces: the roster entry supplies the complete
 // backend/agent/model identity, the roster file's SHA-256 digest pins the
 // configuration the selection was resolved from, and thinking is validated
-// for the effective backend. A nil or empty assignment resolves to nil (no
+// for the effective backend. Thinking follows the #208 "default, not
+// identity" rule: an explicit assignment level wins, otherwise the roster
+// entry's level applies. A nil or empty assignment resolves to nil (no
 // pin). It is shared by the automatic dispatch boundary and the manual
 // start path's assignment resolution.
 func resolveAssignmentSelection(assignment *workflow.Assignment) (*workflow.ExecutionSelection, error) {
@@ -522,6 +524,7 @@ func resolveAssignmentSelection(assignment *workflow.Assignment) (*workflow.Exec
 		Agent:   assignment.Agent,
 		Model:   assignment.Model,
 	}
+	thinking := assignment.Thinking
 	if assignment.RosterEntry != "" {
 		roster, err := rosterconfig.Load(assignment.RosterFile)
 		if err != nil {
@@ -532,16 +535,19 @@ func resolveAssignmentSelection(assignment *workflow.Assignment) (*workflow.Exec
 			return nil, fmt.Errorf("node assignment: %w", err)
 		}
 		selection.Backend, selection.Agent, selection.Model = entry.Backend, entry.Agent, entry.Model
+		if thinking == "" {
+			thinking = entry.Thinking
+		}
 		digest, err := rosterFileDigest(assignment.RosterFile)
 		if err != nil {
 			return nil, fmt.Errorf("node assignment: %w", err)
 		}
 		selection.RosterDigest = digest
 	}
-	if err := runtime.ValidateThinkingForBackend(selection.Backend, assignment.Thinking); err != nil {
+	if err := runtime.ValidateThinkingForBackend(selection.Backend, thinking); err != nil {
 		return nil, fmt.Errorf("node assignment: %w", err)
 	}
-	selection.Thinking = assignment.Thinking
+	selection.Thinking = thinking
 	return selection, nil
 }
 
