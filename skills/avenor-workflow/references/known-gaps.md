@@ -63,3 +63,13 @@ from the node's `assignment`.
 
 **Workaround:** Set `thinking` on each node's `assignment`. Team and loop
 phases that name a roster entry still use that entry's default.
+
+## #289: no command cancels a workflow instance
+
+The `canceled` workflow status exists and counts as terminal, but no CLI
+subcommand, control method, or MCP tool sets it. `avenor control cancel`
+ends a runtime, and the instance stays `active`.
+
+**Workaround:** Cancel the runtime, then record the workflow as abandoned in
+the consumer's own state so later ticks skip it. Expect `workflow status` and
+`controller status` to keep listing it as active.
