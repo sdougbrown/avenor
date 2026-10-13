@@ -273,6 +273,11 @@ type Assignment struct {
 	Agent       string `json:"agent,omitempty"`
 	Model       string `json:"model,omitempty"`
 	Thinking    string `json:"thinking,omitempty"`
+	// AutoApprove requests an unattended permission policy for nodes
+	// dispatched with this assignment: every permission request is resolved
+	// as allow and no file permission handler is derived. It travels with
+	// the resolved ExecutionSelection so retries keep the policy.
+	AutoApprove bool `json:"auto_approve,omitempty"`
 }
 
 type ExecutionSelection struct {
@@ -282,6 +287,10 @@ type ExecutionSelection struct {
 	Model        string `json:"model,omitempty"`
 	Thinking     string `json:"thinking,omitempty"`
 	RosterDigest string `json:"roster_digest,omitempty"`
+	// AutoApprove carries the assignment's unattended permission policy:
+	// every permission request is resolved as allow and no file permission
+	// handler is derived for the spawned runtime.
+	AutoApprove bool `json:"auto_approve,omitempty"`
 }
 
 // Action is a strict tagged union. Exactly one variant pointer corresponds to

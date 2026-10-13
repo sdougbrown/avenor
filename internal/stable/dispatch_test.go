@@ -628,6 +628,65 @@ func TestDispatchPinnedSelectionInheritance(t *testing.T) {
 	res.Release()
 }
 
+// TestResolveAssignmentSelectionAutoApprove proves the assignment's
+// auto_approve flag resolves into the pinned selection, including an
+// auto_approve-only assignment (which is not an empty assignment).
+func TestResolveAssignmentSelectionAutoApprove(t *testing.T) {
+	sel, err := resolveAssignmentSelection(&workflow.Assignment{Backend: "codex", AutoApprove: true})
+	if err != nil {
+		t.Fatalf("resolveAssignmentSelection: %v", err)
+	}
+	if !sel.AutoApprove {
+		t.Fatal("selection.AutoApprove = false, want true")
+	}
+	sel, err = resolveAssignmentSelection(&workflow.Assignment{AutoApprove: true})
+	if err != nil {
+		t.Fatalf("resolveAssignmentSelection(auto_approve only): %v", err)
+	}
+	if !sel.AutoApprove || sel.Backend != "" || sel.Agent != "" || sel.Model != "" {
+		t.Fatalf("selection = %+v, want AutoApprove true with no identity", sel)
+	}
+}
+
+// TestDispatchAssignmentAutoApproveRunsUnattended proves a dispatched node
+// whose assignment declares auto_approve spawns its runtime under the
+// unattended permission policy: the runtime status surfaces auto_approve
+// true (no file permission handler was derived, so permission requests are
+// auto-resolved instead of stalling until the claim timeout).
+func TestDispatchAssignmentAutoApproveRunsUnattended(t *testing.T) {
+	template := mustJSON(t, map[string]any{
+		"schema_version":   1,
+		"template_id":      "tmpl-dispatch-dispatch-auto-approve",
+		"template_version": "1",
+		"entry_nodes":      []string{"start"},
+		"nodes": []any{map[string]any{
+			"id":           "start",
+			"action":       map[string]any{"type": "run", "prompt": "do the thing"},
+			"assignment":   map[string]any{"auto_approve": true},
+			"dispatch":     map[string]any{"mode": "auto", "controller_id": "c1"},
+			"retry_policy": map[string]any{"max_attempts": 3, "exhaustion": "block"},
+		}},
+		"terminal_outcomes":    []string{"done"},
+		"default_lease_policy": map[string]any{"ttl_seconds": 900},
+	})
+	f := newDispatchFixtureTemplate(t, "dispatch-auto-approve", 4, 4, template)
+	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
+	if err != nil {
+		t.Fatalf("dispatchWorkflowNode: %v", err)
+	}
+	if out.Kind != Dispatched {
+		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
+	}
+	waitFor(t, "runtime registration", func() bool { return f.sup.activeRuntimeCount() == 1 })
+	runtimes := f.sup.listRuntimes()
+	if len(runtimes) != 1 {
+		t.Fatalf("runtimes = %d, want 1", len(runtimes))
+	}
+	if got, ok := runtimes[0]["auto_approve"].(bool); !ok || !got {
+		t.Fatalf("runtime auto_approve = %T %v, want bool true", runtimes[0]["auto_approve"], runtimes[0]["auto_approve"])
+	}
+}
+
 // TestDispatchCrashAfterBeginDispatchRecovers proves a process death after
 // the attempt intent leaves an expiring lease that the lease-expiry sweep
 // recovers without creating a second live attempt.

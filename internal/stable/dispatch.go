@@ -519,10 +519,11 @@ func resolveAssignmentSelection(assignment *workflow.Assignment) (*workflow.Exec
 		return nil, fmt.Errorf("node assignment: %w", err)
 	}
 	selection := &workflow.ExecutionSelection{
-		Role:    assignment.Role,
-		Backend: assignment.Backend,
-		Agent:   assignment.Agent,
-		Model:   assignment.Model,
+		Role:        assignment.Role,
+		Backend:     assignment.Backend,
+		Agent:       assignment.Agent,
+		Model:       assignment.Model,
+		AutoApprove: assignment.AutoApprove,
 	}
 	thinking := assignment.Thinking
 	if assignment.RosterEntry != "" {
@@ -554,7 +555,8 @@ func resolveAssignmentSelection(assignment *workflow.Assignment) (*workflow.Exec
 // assignmentEmpty reports whether an assignment declares nothing to resolve.
 func assignmentEmpty(assignment *workflow.Assignment) bool {
 	return assignment.Role == "" && assignment.RosterFile == "" && assignment.RosterEntry == "" &&
-		assignment.Backend == "" && assignment.Agent == "" && assignment.Model == "" && assignment.Thinking == ""
+		assignment.Backend == "" && assignment.Agent == "" && assignment.Model == "" && assignment.Thinking == "" &&
+		!assignment.AutoApprove
 }
 
 // rosterFileDigest returns the "sha256:<hex>" digest of a roster file's

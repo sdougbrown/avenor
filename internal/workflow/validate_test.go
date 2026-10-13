@@ -215,6 +215,24 @@ func TestGeneratedStructuralValidatorAuthority(t *testing.T) {
 	})
 }
 
+// TestValidateTemplateJSONAssignmentAutoApprove pins the assignment permission
+// policy field: auto_approve is a declared boolean and misspelled variants are
+// rejected by the generated structural validator.
+func TestValidateTemplateJSONAssignmentAutoApprove(t *testing.T) {
+	withAutoApprove := mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
+		node["assignment"] = map[string]any{"auto_approve": true}
+	}))
+	if err := ValidateTemplateJSON(withAutoApprove); err != nil {
+		t.Fatalf("ValidateTemplateJSON() rejected assignment auto_approve: %v", err)
+	}
+	assertTemplateError(t, mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
+		node["assignment"] = map[string]any{"autoapprove": true}
+	})), `additionalProperties at /nodes/0/assignment/autoapprove`)
+	assertTemplateError(t, mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
+		node["assignment"] = map[string]any{"auto_approve": "yes"}
+	})), `type at /nodes/0/assignment/auto_approve`)
+}
+
 func TestValidateTemplateJSONRejectsIncompleteActionVariants(t *testing.T) {
 	tests := []struct {
 		name    string

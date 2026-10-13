@@ -68,6 +68,12 @@ supervisor's roster path before dispatching: the roster entry supplies the
 pinned backend/agent/model, the roster file's digest and the declared
 thinking level ride on the pinned selection, and retries inherit that pin.
 
+An assignment may also declare `"auto_approve": true` for an unattended
+permission policy: dispatched nodes resolve every permission request as allow
+instead of stalling until the permission claim times out. Without it, an
+auto-dispatched node on a backend that prompts for tool approval can sit
+blocked for the whole claim timeout.
+
 ## 3. Create and enable the controller
 
 ```sh

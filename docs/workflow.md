@@ -123,7 +123,7 @@ fields:
 | `outcomes` | Declared outcomes: `{name, target_node_id?, terminal?}`. |
 | `branches` | Map of outcome name → target node ID. The branch map is itself the declaration of the node's branch outcomes. |
 | `action` | The execution action (see [Action types](#action-types)). |
-| `assignment` | Role / roster / backend / agent / model / thinking selection. Automatic dispatch resolves it through the roster path and pins the effective selection on the activation. |
+| `assignment` | Role / roster / backend / agent / model / thinking selection, plus the optional `auto_approve` permission policy. Automatic dispatch resolves it through the roster path and pins the effective selection on the activation. |
 | `completion` | Completion contract (see [Completion](#completion)). |
 | `outputs` | Declared typed outputs: `{id, name, type, required?}`. |
 | `gates` | Declared gates: `{id, name?, type, required?, allowed_outcomes?, subject_type?}`. |
@@ -237,6 +237,18 @@ nodes that declare a `success_outcome` with at least one required external
 gate. An auto `run`, `loop`, or `team` node must not declare
 `completion.kind: explicit`: the supervisor completes it from the declared
 contract, and no worker handoff exists.
+
+### Unattended permission policy
+
+An `assignment` may declare `"auto_approve": true`. Nodes dispatched with
+that assignment — by a controller or by a manual dispatch — spawn under the
+unattended permission policy: every permission request is resolved as allow,
+and no file permission handler is derived for the runtime. Backends that
+would otherwise prompt for tool approval (for example `codex-app-server`)
+proceed instead of stalling until the permission claim times out. The flag
+rides on the pinned execution selection, so retries keep the policy; run,
+loop, and team children all inherit it. A per-tool allow/deny policy is not
+yet expressible: `auto_approve` is all-or-nothing per node.
 
 ## Instantiation
 

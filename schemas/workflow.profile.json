@@ -451,6 +451,9 @@
           },
           "thinking": {
             "type": "string"
+          },
+          "auto_approve": {
+            "type": "boolean"
           }
         },
         "additionalProperties": false

@@ -5351,6 +5351,7 @@ func (e *directRunExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorCo
 		params.Model = ec.Selection.Model
 		params.Backend = ec.Selection.Backend
 		params.Thinking = ec.Selection.Thinking
+		params.AutoApprove = ec.Selection.AutoApprove
 	}
 	if ec.Action.Run != nil {
 		params.Prompt = ec.Action.Run.Prompt
@@ -5407,6 +5408,7 @@ func (e *loopExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext
 		params.Model = ec.Selection.Model
 		params.Backend = ec.Selection.Backend
 		params.Thinking = ec.Selection.Thinking
+		params.AutoApprove = ec.Selection.AutoApprove
 	}
 	if ec.Action.Loop != nil {
 		params.LoopFile = ec.Action.Loop.LoopFile
@@ -5464,6 +5466,7 @@ func (e *teamExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext
 		params.Model = ec.Selection.Model
 		params.Backend = ec.Selection.Backend
 		params.Thinking = ec.Selection.Thinking
+		params.AutoApprove = ec.Selection.AutoApprove
 	}
 	if ec.Action.Team != nil {
 		params.TeamFile = ec.Action.Team.TeamFile

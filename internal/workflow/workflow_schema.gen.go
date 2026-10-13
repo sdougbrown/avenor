@@ -825,6 +825,7 @@ func svalidateWorkflowProfileAssignment(raw json.RawMessage, path, schemaPath st
 	_ = json.Unmarshal(raw, &m)
 	allowed := map[string]bool{
 		"agent":        true,
+		"auto_approve": true,
 		"backend":      true,
 		"model":        true,
 		"role":         true,
@@ -845,6 +846,15 @@ func svalidateWorkflowProfileAssignment(raw json.RawMessage, path, schemaPath st
 		case "string":
 			var sv string
 			_ = json.Unmarshal(r, &sv)
+		default:
+			*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
+		}
+	}
+	if r, ok := m["auto_approve"]; ok {
+		fpath := path + "/" + escapePtr("auto_approve")
+		fspath := schemaPath + "/properties/" + escapePtr("auto_approve")
+		switch WorkflowProfileStructuralKind(r) {
+		case "boolean":
 		default:
 			*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
 		}
@@ -3168,6 +3178,8 @@ func (v WorkflowProfileArtifactRequirement) validate(path string, issues *[]Issu
 func (v WorkflowProfileAssignment) validate(path string, issues *[]Issue) {
 	if v.Agent != nil {
 	}
+	if v.AutoApprove != nil {
+	}
 	if v.Backend != nil {
 	}
 	if v.Model != nil {
@@ -3542,6 +3554,7 @@ func (v *WorkflowProfileArtifactRequirement) UnmarshalJSON(data []byte) error {
 
 type WorkflowProfileAssignment struct {
 	Agent       *string "json:\"agent,omitempty\""
+	AutoApprove *bool   "json:\"auto_approve,omitempty\""
 	Backend     *string "json:\"backend,omitempty\""
 	Model       *string "json:\"model,omitempty\""
 	Role        *string "json:\"role,omitempty\""
@@ -3561,6 +3574,7 @@ func (v *WorkflowProfileAssignment) UnmarshalJSON(data []byte) error {
 	for key := range raw {
 		switch key {
 		case "agent":
+		case "auto_approve":
 		case "backend":
 		case "model":
 		case "role":
@@ -3574,6 +3588,11 @@ func (v *WorkflowProfileAssignment) UnmarshalJSON(data []byte) error {
 	if r, ok := raw["agent"]; ok {
 		if len(r) == 4 && string(r) == "null" {
 			return fmt.Errorf("field \"agent\" must not be null")
+		}
+	}
+	if r, ok := raw["auto_approve"]; ok {
+		if len(r) == 4 && string(r) == "null" {
+			return fmt.Errorf("field \"auto_approve\" must not be null")
 		}
 	}
 	if r, ok := raw["backend"]; ok {
@@ -3615,47 +3634,54 @@ func (v *WorkflowProfileAssignment) UnmarshalJSON(data []byte) error {
 		}
 		next.Agent = &decoded0
 	}
-	if encoded, ok := raw["backend"]; ok {
-		var decoded1 string
+	if encoded, ok := raw["auto_approve"]; ok {
+		var decoded1 bool
 		if err := json.Unmarshal(encoded, &decoded1); err != nil {
 			return err
 		}
-		next.Backend = &decoded1
+		next.AutoApprove = &decoded1
 	}
-	if encoded, ok := raw["model"]; ok {
+	if encoded, ok := raw["backend"]; ok {
 		var decoded2 string
 		if err := json.Unmarshal(encoded, &decoded2); err != nil {
 			return err
 		}
-		next.Model = &decoded2
+		next.Backend = &decoded2
 	}
-	if encoded, ok := raw["role"]; ok {
+	if encoded, ok := raw["model"]; ok {
 		var decoded3 string
 		if err := json.Unmarshal(encoded, &decoded3); err != nil {
 			return err
 		}
-		next.Role = &decoded3
+		next.Model = &decoded3
 	}
-	if encoded, ok := raw["roster_entry"]; ok {
+	if encoded, ok := raw["role"]; ok {
 		var decoded4 string
 		if err := json.Unmarshal(encoded, &decoded4); err != nil {
 			return err
 		}
-		next.RosterEntry = &decoded4
+		next.Role = &decoded4
 	}
-	if encoded, ok := raw["roster_file"]; ok {
+	if encoded, ok := raw["roster_entry"]; ok {
 		var decoded5 string
 		if err := json.Unmarshal(encoded, &decoded5); err != nil {
 			return err
 		}
-		next.RosterFile = &decoded5
+		next.RosterEntry = &decoded5
 	}
-	if encoded, ok := raw["thinking"]; ok {
+	if encoded, ok := raw["roster_file"]; ok {
 		var decoded6 string
 		if err := json.Unmarshal(encoded, &decoded6); err != nil {
 			return err
 		}
-		next.Thinking = &decoded6
+		next.RosterFile = &decoded6
+	}
+	if encoded, ok := raw["thinking"]; ok {
+		var decoded7 string
+		if err := json.Unmarshal(encoded, &decoded7); err != nil {
+			return err
+		}
+		next.Thinking = &decoded7
 	}
 	*v = WorkflowProfileAssignment(next)
 	return nil
