@@ -235,6 +235,9 @@ func (f *fakeIdempotentSupervisor) WorkflowComplete(workflowID string, fields ma
 func (f *fakeIdempotentSupervisor) WorkflowGate(workflowID string, fields map[string]any) (map[string]any, error) {
 	return nil, nil
 }
+func (f *fakeIdempotentSupervisor) WorkflowCancel(workflowID, actor, reason string) (map[string]any, error) {
+	return nil, nil
+}
 func (f *fakeIdempotentSupervisor) WorkflowControllerStatus(controllerID string) (map[string]any, error) {
 	return nil, nil
 }

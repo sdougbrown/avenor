@@ -72,6 +72,14 @@ func TestWorkflowRequiredArgs(t *testing.T) {
 			_, _, err := s.handleAvenorWorkflowGate(context.Background(), nil, workflowGateArgs{WorkflowID: "wf", GateID: "g", ActivationID: "a", Operation: "satisfy"})
 			return err
 		}},
+		{"cancel missing workflow_id", "workflow_id is required", func(s *Server) error {
+			_, _, err := s.handleAvenorWorkflowCancel(context.Background(), nil, workflowCancelArgs{Reason: "why"})
+			return err
+		}},
+		{"cancel missing reason", "reason is required", func(s *Server) error {
+			_, _, err := s.handleAvenorWorkflowCancel(context.Background(), nil, workflowCancelArgs{WorkflowID: "wf"})
+			return err
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -339,5 +347,42 @@ func TestWorkflowControllerErrorPropagation(t *testing.T) {
 				t.Fatalf("error %q should contain prefix %q", err.Error(), tc.wantPrefix)
 			}
 		})
+	}
+}
+
+func TestWorkflowCancelHandler(t *testing.T) {
+	s, fake := newWorkflowTestServer(t)
+	fake.workflowCancelResult = map[string]any{"status": "canceled", "revision": 7, "canceled_runtimes": 0}
+	_, result, err := s.handleAvenorWorkflowCancel(context.Background(), nil, workflowCancelArgs{
+		WorkflowID: "wf_1", Reason: "pr head moved",
+	})
+	if err != nil {
+		t.Fatalf("handleAvenorWorkflowCancel: %v", err)
+	}
+	if len(fake.workflowCancelCalls) != 1 {
+		t.Fatalf("expected one cancel call, got %d", len(fake.workflowCancelCalls))
+	}
+	call := fake.workflowCancelCalls[0]
+	if call.workflowID != "wf_1" || call.reason != "pr head moved" {
+		t.Fatalf("unexpected cancel call: %#v", call)
+	}
+	if call.actor != "mcp" {
+		t.Fatalf("default actor got %q want mcp", call.actor)
+	}
+	m, _ := result.(map[string]any)
+	if m["status"] != "canceled" {
+		t.Fatalf("result status got %v want canceled", m["status"])
+	}
+}
+
+func TestWorkflowCancelHandlerExplicitActor(t *testing.T) {
+	s, fake := newWorkflowTestServer(t)
+	if _, _, err := s.handleAvenorWorkflowCancel(context.Background(), nil, workflowCancelArgs{
+		WorkflowID: "wf_1", Reason: "why", Actor: "review-pr-auto",
+	}); err != nil {
+		t.Fatalf("handleAvenorWorkflowCancel: %v", err)
+	}
+	if got := fake.workflowCancelCalls[0].actor; got != "review-pr-auto" {
+		t.Fatalf("actor got %q want review-pr-auto", got)
 	}
 }

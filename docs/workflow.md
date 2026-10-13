@@ -352,10 +352,32 @@ pending → ready → leased → running
        │                └→ lease_expired
 awaiting_gate → satisfied | rejected | declared branch
 blocked ──workflow.unblock──> ready
+canceled is terminal: no command can advance a canceled instance.
 ```
 
 Workflow status is one of `active`, `blocked`, `awaiting_gate`, `completed`,
 `failed`, or `canceled`.
+
+### Canceling a workflow
+
+`workflow cancel` (CLI), the `workflow.cancel` control method, and the
+`avenor_workflow_cancel` MCP tool cancel a whole instance with one attributed
+decision. `actor` and `reason` are required — the reason is the durable audit
+trail recorded on the `workflow.canceled` event. The kernel transition is
+deterministic: the instance becomes terminal `canceled`, every live lease is
+released, and every non-terminal activation parks in the `canceled` status so
+no command can ever advance it again. The supervisor surface then terminates
+the instance's in-flight attempt runtimes; their late `attempt_terminated`
+facts land harmlessly on the already-canceled instance (the attempt fact is
+recorded; leases, retries, and statuses never regress). Canceling an already
+terminal instance (`completed`, `failed`) is a clear error; re-canceling the
+same instance is an idempotent no-op. A cancel covers only the targeted
+instance: attached child instances keep running.
+
+```sh
+avenor workflow cancel --socket /tmp/avenor.sock wf_... \
+  --actor review-pr-auto --reason "PR head moved; run superseded"
+```
 
 ### Commands
 
@@ -373,6 +395,7 @@ The CLI exposes these subcommands (all take `--socket`):
 | `gate` | Record a gate decision. |
 | `skip` | Waive every unsatisfied required gate on a parked activation. |
 | `unblock` | Return a blocked activation to ready. |
+| `cancel` | Cancel the whole instance: status `canceled`, every live lease released, non-terminal activations parked `canceled`, in-flight attempt runtimes terminated. Requires `actor` and `reason`. |
 
 `claim`, `start`, and `heartbeat` are control-plane commands, not CLI
 subcommands. Send them through the `workflow.command` control method (see
