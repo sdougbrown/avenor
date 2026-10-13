@@ -353,7 +353,7 @@ func applyEvent(next *Snapshot, event Event) error {
 	case EventSkipped:
 		return applySkipped(act, event)
 	case EventUnblocked:
-		return applyUnblocked(act, event)
+		return applyUnblocked(next, act, event)
 	case EventRerouted:
 		applyRerouted(next, event)
 	case EventHeartbeat:
@@ -627,11 +627,23 @@ func applyAttemptTerminated(next *Snapshot, act *Activation, event Event) error 
 	act.ActiveLease = nil
 	act.UpdatedAt = nowUTC()
 
-	// Retry applies only to plain failures, only on the same activation, and
-	// never consumes loop iteration budget. Exhaustion uses the node's retry
-	// policy; without a template the reducer falls back to a single attempt
-	// (any failure exhausts to ActivationBlocked).
-	if status != AttemptFailed {
+	// Cancellation is a deliberate stop: the run's context was canceled by an
+	// operator kill or supervisor teardown, so it never consumes the retry
+	// budget and never re-arms the node. The activation parks in a blocked,
+	// actionable state (workflow.unblock re-arms it) and the instance surfaces
+	// blocked, so a client polling status sees a decision point instead of a
+	// wedged attempt_failed.
+	if status == AttemptCanceled {
+		act.Status = ActivationBlocked
+		markInstanceBlocked(next)
+		return nil
+	}
+
+	// Retry applies to failed, timed_out, and panicked attempts, only on the
+	// same activation, and never consumes loop iteration budget. Exhaustion
+	// uses the node's retry policy; without a template the reducer falls back
+	// to a single attempt (any failure exhausts to ActivationBlocked).
+	if status != AttemptFailed && status != AttemptTimedOut && status != AttemptPanicked {
 		return nil
 	}
 	policy := retryPolicyFor(next, act.NodeID)
@@ -656,8 +668,20 @@ func applyAttemptTerminated(next *Snapshot, act *Activation, event Event) error 
 		act.Status = ActivationAttemptFailed
 	default: // RetryExhaustionBlock
 		act.Status = ActivationBlocked
+		markInstanceBlocked(next)
 	}
 	return nil
+}
+
+// markInstanceBlocked surfaces a blocked activation at the instance level:
+// a client polling workflow status must reach an actionable state rather
+// than watching an active instance with no dispatchable work. Blocking is
+// idempotent and never regresses a terminal or awaiting-gate instance.
+func markInstanceBlocked(next *Snapshot) {
+	switch next.Instance.Status {
+	case WorkflowActive, WorkflowBlocked:
+		next.Instance.Status = WorkflowBlocked
+	}
 }
 
 // findAttempt locates the attempt record for an activation, preferring the
@@ -970,8 +994,9 @@ func applySkipped(act *Activation, event Event) error {
 }
 
 // applyUnblocked returns a blocked activation to ready after an authorized
-// unblock.
-func applyUnblocked(act *Activation, event Event) error {
+// unblock. It also restores an instance-level blocked status to active once
+// no activation remains blocked.
+func applyUnblocked(next *Snapshot, act *Activation, event Event) error {
 	if act == nil {
 		return errors.New("unblocked event requires an activation")
 	}
@@ -984,7 +1009,21 @@ func applyUnblocked(act *Activation, event Event) error {
 	act.Status = ActivationReady
 	copyReadyAt(act, event)
 	act.UpdatedAt = nowUTC()
+	if next.Instance.Status == WorkflowBlocked && !instanceHasBlockedActivation(next) {
+		next.Instance.Status = WorkflowActive
+	}
 	return nil
+}
+
+// instanceHasBlockedActivation reports whether any activation in the instance
+// is still parked in the blocked status.
+func instanceHasBlockedActivation(next *Snapshot) bool {
+	for i := range next.Instance.Activations {
+		if next.Instance.Activations[i].Status == ActivationBlocked {
+			return true
+		}
+	}
+	return false
 }
 
 // applyRerouted introduces a fresh activation for the target node with the

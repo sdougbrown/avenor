@@ -936,9 +936,12 @@ func TestAutoHandoffNonSuccessExitsDoNotComplete(t *testing.T) {
 			attempts := attemptsForNode(inst, "produce")
 			act := activationFor(inst, "produce")
 			return len(attempts) == 1 && attempts[0].Status == workflow.AttemptCanceled &&
-				act != nil && act.Status == workflow.ActivationAttemptFailed
+				act != nil && act.Status == workflow.ActivationBlocked
 		})
 		inst := f.instance(t, wf)
+		if inst.Status != workflow.WorkflowBlocked {
+			t.Fatalf("workflow status after cancellation = %s, want blocked", inst.Status)
+		}
 		if calls := f.providerCalls.Load(); calls != 1 {
 			t.Fatalf("provider invoked %d times, want exactly 1 (canceled attempts do not retry); observed %s", calls, describeInstance(&inst, calls))
 		}

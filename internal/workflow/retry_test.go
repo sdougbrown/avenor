@@ -84,7 +84,7 @@ type retryScenario struct {
 // invariant: retry never branches, checkpoints, or creates a new activation.
 func TestDurableRetryExhaustion(t *testing.T) {
 	scenarios := []retryScenario{
-		{"block", "retry-block", 3, RetryExhaustionBlock, "", ActivationBlocked, WorkflowActive},
+		{"block", "retry-block", 3, RetryExhaustionBlock, "", ActivationBlocked, WorkflowBlocked},
 		{"fail", "retry-fail", 2, RetryExhaustionFail, "", ActivationAttemptFailed, WorkflowFailed},
 		{"outcome", "retry-outcome", 2, RetryExhaustionOutcome, "eh_out", ActivationAttemptFailed, WorkflowActive},
 	}
@@ -420,5 +420,159 @@ func TestRetryPolicyFallsBackToTemplateDefault(t *testing.T) {
 	own := retryPolicyFor(&snap, "own")
 	if own == nil || own.MaximumAttempts != 5 || own.Exhaustion != RetryExhaustionFail {
 		t.Fatalf("own retry policy = %+v, want the node's own {5 fail}", own)
+	}
+}
+
+// startRetryAttempt claims the activation and starts one attempt, returning
+// the attempt and lease IDs.
+func startRetryAttempt(t *testing.T, m *Manager, wf WorkflowID, nodeID NodeID, actID ActivationID) (attemptID, leaseID string) {
+	t.Helper()
+	res := claimActivation(t, m, wf, string(nodeID), string(actID), "bob")
+	lease, _ := res["lease_id"].(string)
+	token, _ := res["owner_token"].(string)
+	if lease == "" || token == "" {
+		t.Fatalf("claim result = %#v, want lease_id and owner_token", res)
+	}
+	out := startWithToken(t, m, wf, string(nodeID), string(actID), lease, token)
+	attemptID, _ = out["attempt_id"].(string)
+	if attemptID == "" {
+		t.Fatalf("start result = %#v, want attempt_id", out)
+	}
+	return attemptID, lease
+}
+
+// mustTerminateAs records an attempt termination with an explicit terminal
+// status through the manager.
+func mustTerminateAs(t *testing.T, m *Manager, wf WorkflowID, nodeID NodeID, actID ActivationID, attemptID, leaseID string, status AttemptStatus) {
+	t.Helper()
+	if err := m.RecordAttemptTerminated(wf, nodeID, actID, AttemptID(attemptID), LeaseID(leaseID), status); err != nil {
+		t.Fatalf("RecordAttemptTerminated(%s): %v", status, err)
+	}
+}
+
+// TestTimedOutAndPanickedAttemptsConsumeRetryBudget proves that timed_out and
+// panicked terminations take the same retry/exhaustion path as plain failed
+// terminations: the activation re-arms while budget remains and exhausts per
+// the node's policy when it is gone.
+func TestTimedOutAndPanickedAttemptsConsumeRetryBudget(t *testing.T) {
+	scenarios := []struct {
+		name   string
+		status AttemptStatus
+	}{
+		{"timed_out", AttemptTimedOut},
+		{"panicked", AttemptPanicked},
+	}
+	for _, sc := range scenarios {
+		sc := sc
+		t.Run(sc.name, func(t *testing.T) {
+			// max_attempts 2: the first terminal attempt re-arms, the second
+			// exhausts to the configured block.
+			m, s, wf := newRetryFixture(t, retryTemplateJSON("retry-"+sc.name, 2, RetryExhaustionBlock, ""), "retry-"+sc.name)
+			node := NodeID("start")
+			snap, _, err := s.loadCurrent(wf)
+			if err != nil {
+				t.Fatalf("loadCurrent: %v", err)
+			}
+			act := activationByNode(&snap.Instance, node)
+			if act == nil {
+				t.Fatal("start activation not found")
+			}
+			actID := act.ID
+
+			attempt1, lease1 := startRetryAttempt(t, m, wf, node, actID)
+			mustTerminateAs(t, m, wf, node, actID, attempt1, lease1, sc.status)
+			snap, _, err = s.loadCurrent(wf)
+			if err != nil {
+				t.Fatalf("reload after %s termination: %v", sc.status, err)
+			}
+			act = activationByNode(&snap.Instance, node)
+			if act.Status != ActivationReady {
+				t.Fatalf("status after %s termination = %s, want ready (retried)", sc.status, act.Status)
+			}
+			if snap.Instance.Status != WorkflowActive {
+				t.Fatalf("workflow status after %s termination = %s, want active", sc.status, snap.Instance.Status)
+			}
+
+			attempt2, lease2 := startRetryAttempt(t, m, wf, node, actID)
+			mustTerminateAs(t, m, wf, node, actID, attempt2, lease2, sc.status)
+			snap, _, err = s.loadCurrent(wf)
+			if err != nil {
+				t.Fatalf("reload after exhaustion: %v", err)
+			}
+			act = activationByNode(&snap.Instance, node)
+			if act.Status != ActivationBlocked {
+				t.Fatalf("status after budget exhaustion = %s, want blocked", act.Status)
+			}
+			if snap.Instance.Status != WorkflowBlocked {
+				t.Fatalf("workflow status after budget exhaustion = %s, want blocked", snap.Instance.Status)
+			}
+		})
+	}
+}
+
+// TestCanceledAttemptBlocksWithoutRetrying proves the cancellation semantics:
+// a canceled attempt is a deliberate stop that never re-arms the node. The
+// activation parks blocked, the instance surfaces blocked until an authorized
+// unblock restores it, and the canceled attempt still occupies a retry-budget
+// slot on the activation.
+func TestCanceledAttemptBlocksWithoutRetrying(t *testing.T) {
+	m, s, wf := newRetryFixture(t, retryTemplateJSON("retry-cancel", 2, RetryExhaustionBlock, ""), "retry-cancel")
+	node := NodeID("start")
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	act := activationByNode(&snap.Instance, node)
+	if act == nil {
+		t.Fatal("start activation not found")
+	}
+	actID := act.ID
+
+	// A1 canceled: no re-arm, no retry — the activation parks blocked and the
+	// instance surfaces blocked.
+	attempt1, lease1 := startRetryAttempt(t, m, wf, node, actID)
+	mustTerminateAs(t, m, wf, node, actID, attempt1, lease1, AttemptCanceled)
+	snap, _, err = s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("reload after cancellation: %v", err)
+	}
+	act = activationByNode(&snap.Instance, node)
+	if act.Status != ActivationBlocked {
+		t.Fatalf("status after cancellation = %s, want blocked", act.Status)
+	}
+	if snap.Instance.Status != WorkflowBlocked {
+		t.Fatalf("workflow status after cancellation = %s, want blocked", snap.Instance.Status)
+	}
+
+	// Unblock: the activation re-arms and the instance returns to active.
+	if _, err := m.WorkflowCommand(string(wf), unblockCommandPayload(t, "alice", "operator resumed the node")); err != nil {
+		t.Fatalf("unblock: %v", err)
+	}
+	snap, _, err = s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("reload after unblock: %v", err)
+	}
+	act = activationByNode(&snap.Instance, node)
+	if act.Status != ActivationReady {
+		t.Fatalf("status after unblock = %s, want ready", act.Status)
+	}
+	if snap.Instance.Status != WorkflowActive {
+		t.Fatalf("workflow status after unblock = %s, want active", snap.Instance.Status)
+	}
+
+	// A2 fails: with max_attempts 2 the canceled A1 occupies one slot, so this
+	// failure exhausts the budget to the configured block again.
+	attempt2, lease2 := startRetryAttempt(t, m, wf, node, actID)
+	mustTerminateAs(t, m, wf, node, actID, attempt2, lease2, AttemptFailed)
+	snap, _, err = s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("reload after exhaustion: %v", err)
+	}
+	act = activationByNode(&snap.Instance, node)
+	if act.Status != ActivationBlocked {
+		t.Fatalf("status after exhaustion = %s, want blocked", act.Status)
+	}
+	if snap.Instance.Status != WorkflowBlocked {
+		t.Fatalf("workflow status after exhaustion = %s, want blocked", snap.Instance.Status)
 	}
 }

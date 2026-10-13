@@ -566,9 +566,19 @@ passed (reason `stale`) and wakes the controller through the same change
 notification as an ordinary command, so a dead lease is reclaimed and its node
 re-dispatched without a restart. 0 disables the live sweep.
 
+A terminal attempt status of `failed`, `timed_out`, or `panicked` consumes
+the retry budget: the activation re-arms while attempts remain and applies
+the configured exhaustion when the budget is gone. A `canceled` attempt — a
+deliberate operator kill or supervisor teardown — never re-arms and never
+retries: the activation parks in `blocked`, the canceled attempt still
+occupies one retry-budget slot, and `workflow.unblock` re-arms it.
+
 A retry retains the activation and loop iteration, consumes only the retry
 budget, and cannot follow a semantic branch or checkpoint. Exhaustion applies
-only the configured `block`, operational `fail`, or named `outcome`.
+only the configured `block`, operational `fail`, or named `outcome`. When an
+activation blocks — retry exhaustion with `block`, or a canceled attempt —
+the instance reports `blocked`; `workflow.unblock` restores `active` once no
+activation remains blocked.
 
 ## Resume, inspect, review, and reconcile without coordinator memory
 
