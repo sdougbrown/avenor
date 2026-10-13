@@ -433,10 +433,250 @@ func TestGetClientForSupervisorReusesOwnerConn(t *testing.T) {
 	}
 	cleanup()
 
-	// A different id must still dial (and here fail on the missing socket),
-	// proving the two paths actually diverge.
-	if _, _, err := s.getClientForSupervisor("/tmp/avenor-other-nonexistent.sock"); err == nil {
-		t.Fatal("non-default supervisor_id should dial a fresh connection and fail on the missing socket")
+	// A different id outside the sockets root is rejected before any dial.
+	root := filepath.Join(t.TempDir(), "sockets")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stubSocketsRoot(t, root)
+
+	if _, _, err := s.getClientForSupervisor("/tmp/avenor-other-nonexistent.sock"); err == nil || !strings.Contains(err.Error(), "invalid supervisorId") {
+		t.Fatalf("non-default supervisor_id outside the sockets root should be rejected, got: %v", err)
+	}
+}
+
+func TestValidateSupervisorSocketPath(t *testing.T) {
+	tmp := t.TempDir()
+	root := filepath.Join(tmp, "sockets")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	resolvedRoot := stubSocketsRoot(t, root)
+
+	valid := filepath.Join(root, "avenor-mcp-123.sock")
+	if err := validateSupervisorSocketPath(valid); err != nil {
+		t.Fatalf("expected in-root avenor-mcp-*.sock to validate, got: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		path string
+	}{
+		{"outside root", "/var/run/docker.sock"},
+		{"wrong basename in root", filepath.Join(root, "evil.sock")},
+		{"missing .sock suffix", filepath.Join(root, "avenor-mcp-1")},
+		{"empty socket id", filepath.Join(root, "avenor-mcp-.sock")},
+		// Raw concatenation on purpose: filepath.Join would clean the ".."
+		// before the validator sees it, and the uncleaned attack shape is the
+		// one that must be rejected.
+		{"traversal out of root", root + "/../avenor-mcp-evil.sock"},
+		{"missing parent dir", filepath.Join(root, "nope", "avenor-mcp-1.sock")},
+		{"relative path", "avenor-mcp-1.sock"},
+		{"NUL byte in basename", root + "/avenor-mcp-a\x00b.sock"},
+	}
+	for _, tc := range cases {
+		if err := validateSupervisorSocketPath(tc.path); err == nil || !strings.Contains(err.Error(), "invalid supervisorId") {
+			t.Errorf("%s: expected invalid supervisorId, got: %v", tc.name, err)
+		}
+	}
+
+	// A symlinked parent that escapes the root is canonicalized away.
+	outside := filepath.Join(tmp, "outside")
+	if err := os.MkdirAll(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateSupervisorSocketPath(filepath.Join(link, "avenor-mcp-1.sock")); err == nil || !strings.Contains(err.Error(), "invalid supervisorId") {
+		t.Errorf("symlink escape: expected invalid supervisorId, got: %v", err)
+	}
+
+	// An unresolvable root rejects everything, fail-closed.
+	supervisorSocketsRoot = func() (string, error) { return "", fmt.Errorf("boom") }
+	defer func() { supervisorSocketsRoot = func() (string, error) { return resolvedRoot, nil } }()
+	if err := validateSupervisorSocketPath(valid); err == nil || !strings.Contains(err.Error(), "invalid supervisorId") {
+		t.Errorf("root unavailable: expected invalid supervisorId, got: %v", err)
+	}
+}
+
+func TestSupervisorSocketsRootMatchesTSCorePaths(t *testing.T) {
+	// Drives the unstubbed supervisorSocketsRoot so a misjoin in the
+	// AVENOR_HOME branch or the ~/.avenor fallback (the root contract shared
+	// with avenorHome() in packages/core/src/paths.ts) is caught by the suite
+	// instead of failing every legitimate secondary supervisor in production.
+	mkdir := func(dir string) {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	tmp := t.TempDir()
+	mkdir(filepath.Join(tmp, "sockets"))
+	t.Setenv("AVENOR_HOME", tmp)
+	if err := validateSupervisorSocketPath(filepath.Join(tmp, "sockets", "avenor-mcp-1.sock")); err != nil {
+		t.Fatalf("expected $AVENOR_HOME/sockets/avenor-mcp-1.sock to validate, got: %v", err)
+	}
+	if err := validateSupervisorSocketPath(filepath.Join(tmp, "avenor-mcp-1.sock")); err == nil || !strings.Contains(err.Error(), "invalid supervisorId") {
+		t.Errorf("expected socket outside the AVENOR_HOME sockets root to be rejected, got: %v", err)
+	}
+
+	// Fallback branch: AVENOR_HOME unset means an empty value resolves to
+	// ~/.avenor. os.UserHomeDir returns $USERPROFILE on Windows; set both so
+	// the fallback pins to tmp regardless of platform.
+	tmp2 := t.TempDir()
+	mkdir(filepath.Join(tmp2, ".avenor", "sockets"))
+	t.Setenv("AVENOR_HOME", "")
+	t.Setenv("HOME", tmp2)
+	t.Setenv("USERPROFILE", tmp2)
+	if err := validateSupervisorSocketPath(filepath.Join(tmp2, ".avenor", "sockets", "avenor-mcp-1.sock")); err != nil {
+		t.Fatalf("expected ~/.avenor/sockets/avenor-mcp-1.sock to validate, got: %v", err)
+	}
+}
+
+func TestGetClientForSupervisorRejectsForeignSocketWithoutDialing(t *testing.T) {
+	fake := &fakeClient{}
+	s, err := NewServer(Options{
+		Transport:     "stdio",
+		NoAutostart:   true,
+		ControlClient: fake,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	root := filepath.Join(t.TempDir(), "sockets")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stubSocketsRoot(t, root)
+
+	dials := withCountedDials(t)
+	if _, _, err := s.getClientForSupervisor("/var/run/docker.sock"); err == nil || !strings.Contains(err.Error(), "invalid supervisorId") {
+		t.Fatalf("expected foreign socket path to be rejected, got: %v", err)
+	}
+	if got := dials.Load(); got != 0 {
+		t.Fatalf("rejected supervisor_id must not dial, got %d dials", got)
+	}
+}
+
+func TestGetClientForSupervisorDialsValidInRootID(t *testing.T) {
+	// A valid in-root, non-default id must still reach the dial (and fail on
+	// the missing socket), proving validation only narrows, not replaces, the
+	// dial path.
+	tmp := t.TempDir()
+	root := filepath.Join(tmp, "sockets")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stubSocketsRoot(t, root)
+
+	s, err := NewServer(Options{
+		Transport:     "stdio",
+		NoAutostart:   true,
+		ControlClient: &fakeClient{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	socketPath := filepath.Join(root, "avenor-mcp-missing.sock")
+	origDial := dialSupervisorClient
+	var dialed string
+	dialSupervisorClient = func(p string) (*client.Client, error) {
+		dialed = p
+		return origDial(p)
+	}
+	t.Cleanup(func() { dialSupervisorClient = origDial })
+
+	if _, _, err := s.getClientForSupervisor(socketPath); err == nil || !strings.Contains(err.Error(), "dial supervisor socket") {
+		t.Fatalf("expected dial failure on missing in-root socket, got: %v", err)
+	}
+	if dialed != socketPath {
+		t.Fatalf("expected dial of in-root id %q, got %q", socketPath, dialed)
+	}
+}
+
+func TestAvenorResultRegistryRoutedSupervisorIDPassesValidation(t *testing.T) {
+	// Drive handleAvenorResult because it is the handler that routes through
+	// resultSupervisorID; handleAvenorStatus takes args.SupervisorID directly
+	// and would pass without exercising the registry -> validation -> dial
+	// chain. The fake supervisor's socket name matches the avenor-mcp-*.sock
+	// convention, and session_id "ses_test" is a marker only the fake can
+	// produce — a test that never dialed it could not see that value.
+	supervisorPath, cleanup := startFakeSupervisorNamed(t, "avenor-mcp-validate-test.sock")
+	defer cleanup()
+
+	// Point validation at the fake supervisor's dir so the registered id is
+	// an in-root, non-default path (startFakeSupervisorNamed uses its own temp
+	// dir, not the sockets root).
+	stubSocketsRoot(t, filepath.Dir(supervisorPath))
+
+	s, err := NewServer(Options{
+		Transport:     "stdio",
+		NoAutostart:   true,
+		ControlClient: &fakeClient{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	// A run registered against a non-default supervisor must still be
+	// reachable: resultSupervisorID routes the stored id, validation accepts
+	// the in-root path, and the dial reaches the fake supervisor.
+	if err := s.registry.Store(&RunInfo{RunID: "run-secondary", SupervisorID: supervisorPath}); err != nil {
+		t.Fatal(err)
+	}
+
+	waitFalse := false
+	_, result, err := s.handleAvenorResult(context.Background(), nil, resultArgs{RunID: "run-secondary", Wait: &waitFalse})
+	if err != nil {
+		t.Fatalf("expected registry-routed in-root supervisor to be dialed, got: %v", err)
+	}
+	m := statusOutputMap(t, result)
+	if m["session_id"] != "ses_test" || m["run_id"] != "run-secondary" {
+		t.Errorf("expected response from secondary supervisor, got %v", m)
+	}
+}
+
+func TestGetClientForSupervisorExemptsConfiguredSupervisorSocket(t *testing.T) {
+	// The configured --supervisor-socket lives outside the sockets root in
+	// tests; it must stay dialable as the server's own default even though a
+	// tool-arg id at the same path class would be rejected.
+	socketPath := filepath.Join(t.TempDir(), "sup.sock")
+	acceptedCount, _, stopListener := startStubSupervisorListener(t, socketPath)
+	defer stopListener()
+
+	s, err := NewServer(Options{Transport: "stdio", SupervisorSocket: socketPath, NoAutostart: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		cl, cleanup, err := s.getClientForSupervisor(socketPath)
+		if err == nil {
+			cleanup()
+			_ = cl
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("configured --supervisor-socket should stay exempt from validation: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for acceptedCount() < 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("expected the exempt socket to be dialed and accepted")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -1264,12 +1504,16 @@ func TestAvenorStatusNilClient(t *testing.T) {
 }
 
 func startFakeSupervisor(t *testing.T) (string, func()) {
+	return startFakeSupervisorNamed(t, "s")
+}
+
+func startFakeSupervisorNamed(t *testing.T, name string) (string, func()) {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "fs")
 	if err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	path := filepath.Join(dir, "s")
+	path := filepath.Join(dir, name)
 	ln, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -4201,6 +4445,22 @@ func startStubSupervisorListener(t *testing.T, socketPath string) (acceptedCount
 // withCountedDials swaps dialSupervisorClient for a counting wrapper that
 // delegates to the original dial, restoring the seam when the test ends.
 // Tests that must block inside the dial keep their own wrapper instead.
+// stubSocketsRoot points validateSupervisorSocketPath at dir for the test's
+// duration and returns the canonicalized stub value. Canonicalization keeps
+// the comparison against EvalSymlinks'd parents valid on symlinked temp
+// dirs (e.g. /tmp -> /private/tmp on macOS).
+func stubSocketsRoot(t *testing.T, dir string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origRoot := supervisorSocketsRoot
+	supervisorSocketsRoot = func() (string, error) { return resolved, nil }
+	t.Cleanup(func() { supervisorSocketsRoot = origRoot })
+	return resolved
+}
+
 func withCountedDials(t *testing.T) *atomic.Int32 {
 	t.Helper()
 	var dials atomic.Int32
