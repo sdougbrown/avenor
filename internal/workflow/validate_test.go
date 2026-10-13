@@ -233,6 +233,42 @@ func TestValidateTemplateJSONAssignmentAutoApprove(t *testing.T) {
 	})), `type at /nodes/0/assignment/auto_approve`)
 }
 
+// TestValidateTemplateJSONAssignmentPermissionPolicy pins the permission_policy
+// decider field: permission_policy is a declared object with a required decider
+// string, misspellings and wrong types are rejected by the generated structural
+// validator, and the semantic validator rejects the auto_approve combination.
+func TestValidateTemplateJSONAssignmentPermissionPolicy(t *testing.T) {
+	withPolicy := mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
+		node["assignment"] = map[string]any{"permission_policy": map[string]any{"decider": "rm-guard"}}
+	}))
+	if err := ValidateTemplateJSON(withPolicy); err != nil {
+		t.Fatalf("ValidateTemplateJSON() rejected assignment permission_policy: %v", err)
+	}
+	assertTemplateError(t, mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
+		node["assignment"] = map[string]any{"permissionpolicy": map[string]any{"decider": "rm-guard"}}
+	})), `additionalProperties at /nodes/0/assignment/permissionpolicy`)
+	assertTemplateError(t, mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
+		node["assignment"] = map[string]any{"permission_policy": map[string]any{}}
+	})), `required at /nodes/0/assignment/permission_policy`)
+	assertTemplateError(t, mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
+		node["assignment"] = map[string]any{"permission_policy": map[string]any{"decider": 7}}
+	})), `type at /nodes/0/assignment/permission_policy/decider`)
+
+	// Semantic: the two unattended policies are alternatives, not additives.
+	var tmpl Template
+	if err := json.Unmarshal(mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
+		node["assignment"] = map[string]any{
+			"auto_approve":      true,
+			"permission_policy": map[string]any{"decider": "rm-guard"},
+		}
+	})), &tmpl); err != nil {
+		t.Fatalf("decode template: %v", err)
+	}
+	if err := ValidateTemplate(tmpl); err == nil || !strings.Contains(err.Error(), "cannot declare both auto_approve and permission_policy") {
+		t.Fatalf("ValidateTemplate() error = %v, want mutual exclusion", err)
+	}
+}
+
 func TestValidateTemplateJSONRejectsIncompleteActionVariants(t *testing.T) {
 	tests := []struct {
 		name    string

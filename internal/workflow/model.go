@@ -265,6 +265,16 @@ func (d DispatchPolicy) priority() int {
 	return DefaultDispatchPriority
 }
 
+// PermissionPolicy declares how permission requests from a node dispatched
+// with this assignment are adjudicated. The kernel routes the request to the
+// declared decider; the decider agent owns the allow/reject/defer judgment.
+type PermissionPolicy struct {
+	// Decider names the deciding agent as a roster entry in the assignment's
+	// roster file. It resolves through the same roster path as the node's
+	// identity, mirroring how the assignment itself resolves identity.
+	Decider string `json:"decider"`
+}
+
 type Assignment struct {
 	Role        string `json:"role,omitempty"`
 	RosterFile  string `json:"roster_file,omitempty"`
@@ -276,8 +286,24 @@ type Assignment struct {
 	// AutoApprove requests an unattended permission policy for nodes
 	// dispatched with this assignment: every permission request is resolved
 	// as allow and no file permission handler is derived. It travels with
-	// the resolved ExecutionSelection so retries keep the policy.
+	// the resolved ExecutionSelection so retries keep the policy. It is one
+	// explicit option; PermissionPolicy is the judgment-gate alternative.
 	AutoApprove bool `json:"auto_approve,omitempty"`
+	// PermissionPolicy routes permission requests from dispatched nodes to a
+	// deciding agent instead of resolving them locally. Mutually exclusive
+	// with AutoApprove.
+	PermissionPolicy *PermissionPolicy `json:"permission_policy,omitempty"`
+}
+
+// PermissionDecider is the resolved decider target for a node's permission
+// policy: the declared roster entry plus the identity it resolved to through
+// the roster path. The kernel routes the node's permission requests to the
+// decider; the decider agent owns the allow/reject/defer judgment.
+type PermissionDecider struct {
+	Entry   string `json:"entry"`
+	Backend string `json:"backend,omitempty"`
+	Agent   string `json:"agent,omitempty"`
+	Model   string `json:"model,omitempty"`
 }
 
 type ExecutionSelection struct {
@@ -291,6 +317,10 @@ type ExecutionSelection struct {
 	// every permission request is resolved as allow and no file permission
 	// handler is derived for the spawned runtime.
 	AutoApprove bool `json:"auto_approve,omitempty"`
+	// PermissionDecider carries the resolved permission-policy decider: the
+	// runtime's permission requests route to this agent instead of a local
+	// resolver, and no file permission handler is derived.
+	PermissionDecider *PermissionDecider `json:"permission_decider,omitempty"`
 }
 
 // Action is a strict tagged union. Exactly one variant pointer corresponds to

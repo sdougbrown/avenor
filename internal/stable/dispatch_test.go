@@ -9,10 +9,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/admission"
+	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/workflow"
 	"github.com/sdougbrown/avenor/internal/workflowcontroller"
@@ -684,6 +686,155 @@ func TestDispatchAssignmentAutoApproveRunsUnattended(t *testing.T) {
 	}
 	if got, ok := runtimes[0]["auto_approve"].(bool); !ok || !got {
 		t.Fatalf("runtime auto_approve = %T %v, want bool true", runtimes[0]["auto_approve"], runtimes[0]["auto_approve"])
+	}
+}
+
+// TestResolveAssignmentSelectionPermissionDecider proves the assignment's
+// permission_policy resolves onto the pinned selection: the decider roster
+// entry resolves to the decider identity, a decider without a roster file is
+// rejected, and auto_approve plus permission_policy are mutually exclusive.
+func TestResolveAssignmentSelectionPermissionDecider(t *testing.T) {
+	rosterPath := writeStage5Roster(t, t.TempDir(), `{
+		"worker":  {"backend": "pi", "agent": "worker", "model": "m"},
+		"rm-guard": {"backend": "pi", "agent": "rm-guard", "model": "guard-m"}
+	}`)
+	sel, err := resolveAssignmentSelection(&workflow.Assignment{
+		RosterFile:       rosterPath,
+		RosterEntry:      "worker",
+		PermissionPolicy: &workflow.PermissionPolicy{Decider: "rm-guard"},
+	})
+	if err != nil {
+		t.Fatalf("resolveAssignmentSelection: %v", err)
+	}
+	if sel.PermissionDecider == nil || sel.PermissionDecider.Entry != "rm-guard" ||
+		sel.PermissionDecider.Agent != "rm-guard" || sel.PermissionDecider.Backend != "pi" {
+		t.Fatalf("selection.PermissionDecider = %+v, want rm-guard/pi", sel.PermissionDecider)
+	}
+	if sel.Agent != "worker" || sel.RosterDigest == "" {
+		t.Fatalf("selection identity = %+v, want the worker entry and a roster digest", sel)
+	}
+	if _, err := resolveAssignmentSelection(&workflow.Assignment{
+		Backend:          "pi",
+		PermissionPolicy: &workflow.PermissionPolicy{Decider: "rm-guard"},
+	}); err == nil || !strings.Contains(err.Error(), "requires roster_file") {
+		t.Fatalf("resolveAssignmentSelection(no roster) error = %v, want requires roster_file", err)
+	}
+	if _, err := resolveAssignmentSelection(&workflow.Assignment{
+		RosterFile:       rosterPath,
+		PermissionPolicy: &workflow.PermissionPolicy{Decider: "missing"},
+	}); err == nil || !strings.Contains(err.Error(), "permission_policy.decider") {
+		t.Fatalf("resolveAssignmentSelection(unknown decider) error = %v, want permission_policy.decider", err)
+	}
+	if _, err := resolveAssignmentSelection(&workflow.Assignment{
+		RosterFile:       rosterPath,
+		AutoApprove:      true,
+		PermissionPolicy: &workflow.PermissionPolicy{Decider: "rm-guard"},
+	}); err == nil || !strings.Contains(err.Error(), "cannot declare both auto_approve and permission_policy") {
+		t.Fatalf("resolveAssignmentSelection(both) error = %v, want mutual exclusion", err)
+	}
+}
+
+// TestDispatchAssignmentPermissionDeciderRoutesRequest proves the routing
+// half of the judgment-gate policy: a dispatched node whose assignment
+// declares permission_policy spawns its runtime with no file permission
+// handler, and a pending permission request on that runtime spawns the
+// declared decider run (auto-approved so the decider itself cannot stall)
+// while the request stays pending — never silently allowed.
+func TestDispatchAssignmentPermissionDeciderRoutesRequest(t *testing.T) {
+	rosterPath := writeStage5Roster(t, t.TempDir(), `{
+		"worker":  {"backend": "pi", "agent": "worker", "model": "m"},
+		"rm-guard": {"backend": "pi", "agent": "rm-guard", "model": "guard-m"}
+	}`)
+	template := mustJSON(t, map[string]any{
+		"schema_version":   1,
+		"template_id":      "tmpl-dispatch-dispatch-permdec",
+		"template_version": "1",
+		"entry_nodes":      []string{"start"},
+		"nodes": []any{map[string]any{
+			"id":           "start",
+			"action":       map[string]any{"type": "run", "prompt": "do the thing"},
+			"assignment":   map[string]any{"roster_file": rosterPath, "roster_entry": "worker", "permission_policy": map[string]any{"decider": "rm-guard"}},
+			"dispatch":     map[string]any{"mode": "auto", "controller_id": "c1"},
+			"retry_policy": map[string]any{"max_attempts": 3, "exhaustion": "block"},
+		}},
+		"terminal_outcomes":    []string{"done"},
+		"default_lease_policy": map[string]any{"ttl_seconds": 900},
+	})
+	f := newDispatchFixtureTemplate(t, "dispatch-permdec", 4, 4, template)
+	requestID := "perm_req_1"
+	var providerSeq int64
+	f.sup.newProviderFunc = func(_ runtime.StartOptions, _ string) (runtime.Provider, error) {
+		n := atomic.AddInt64(&providerSeq, 1)
+		return &stableScriptedProvider{attempt: -1, scripts: []stableScriptedAttempt{{
+			sessionID: fmt.Sprintf("ses_permdec_%d", n),
+			events: []stableScriptedEvent{{event: events.Event{
+				Event:     "permission.request",
+				SessionID: fmt.Sprintf("ses_permdec_%d", n),
+				Fields: map[string]any{
+					"request_id": requestID,
+					"tool":       "bash",
+					"command":    "rm -rf /tmp/build",
+					"options":    []any{map[string]any{"optionId": "allow_once", "kind": "allow"}},
+				},
+			}, release: nil}},
+		}}}, nil
+	}
+	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
+	if err != nil {
+		t.Fatalf("dispatchWorkflowNode: %v", err)
+	}
+	if out.Kind != Dispatched {
+		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
+	}
+	waitFor(t, "runtime registration", func() bool { return f.sup.activeRuntimeCount() >= 1 })
+
+	// The request must surface as pending on the worker runtime, with the
+	// declared decider, and no file permission handler may have been derived.
+	var worker map[string]any
+	waitFor(t, "pending permission", func() bool {
+		status, err := f.sup.RuntimeStatus(out.RuntimeID)
+		if err != nil {
+			return false
+		}
+		rt, _ := status.(map[string]any)
+		if pending, _ := rt["pending_permission"].(bool); pending {
+			worker = rt
+			return true
+		}
+		return false
+	})
+	if got, _ := worker["permission_decider"].(string); got != "rm-guard" {
+		t.Fatalf("worker permission_decider = %q, want rm-guard", got)
+	}
+	if worker["auto_approve"] != false {
+		t.Fatalf("worker auto_approve = %v, want false", worker["auto_approve"])
+	}
+
+	// The declared decider run spawns for the pending request, under the
+	// decider identity, auto-approved so the decider itself cannot stall.
+	var decider map[string]any
+	waitFor(t, "decider runtime", func() bool {
+		runtimes := f.sup.listRuntimes()
+		for _, rt := range runtimes {
+			if label, _ := rt["label"].(string); strings.HasPrefix(label, "permdec:") {
+				decider = rt
+				return true
+			}
+		}
+		return false
+	})
+	if got, _ := decider["agent"].(string); got != "rm-guard" {
+		t.Fatalf("decider agent = %q, want rm-guard", got)
+	}
+	if got, _ := decider["auto_approve"].(bool); !got {
+		t.Fatalf("decider auto_approve = %v, want true", decider["auto_approve"])
+	}
+	if got, _ := decider["effective_model"].(string); got != "guard-m" {
+		t.Fatalf("decider model = %q, want guard-m", got)
+	}
+	// The request stays pending: the kernel routed it, it did not answer it.
+	if pending, _ := worker["pending_permission"].(bool); !pending {
+		t.Fatal("worker pending_permission = false, want the request to stay pending")
 	}
 }
 

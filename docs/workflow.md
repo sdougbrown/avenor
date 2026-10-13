@@ -123,7 +123,7 @@ fields:
 | `outcomes` | Declared outcomes: `{name, target_node_id?, terminal?}`. |
 | `branches` | Map of outcome name → target node ID. The branch map is itself the declaration of the node's branch outcomes. |
 | `action` | The execution action (see [Action types](#action-types)). |
-| `assignment` | Role / roster / backend / agent / model / thinking selection, plus the optional `auto_approve` permission policy. Automatic dispatch resolves it through the roster path and pins the effective selection on the activation. |
+| `assignment` | Role / roster / backend / agent / model / thinking selection, plus the optional permission policy (`auto_approve` or `permission_policy.decider`). Automatic dispatch resolves it through the roster path and pins the effective selection on the activation. |
 | `completion` | Completion contract (see [Completion](#completion)). |
 | `outputs` | Declared typed outputs: `{id, name, type, required?}`. |
 | `gates` | Declared gates: `{id, name?, type, required?, allowed_outcomes?, subject_type?}`. |
@@ -238,17 +238,42 @@ gate. An auto `run`, `loop`, or `team` node must not declare
 `completion.kind: explicit`: the supervisor completes it from the declared
 contract, and no worker handoff exists.
 
-### Unattended permission policy
+### Permission policy
 
-An `assignment` may declare `"auto_approve": true`. Nodes dispatched with
-that assignment — by a controller or by a manual dispatch — spawn under the
-unattended permission policy: every permission request is resolved as allow,
-and no file permission handler is derived for the runtime. Backends that
-would otherwise prompt for tool approval (for example `codex-app-server`)
-proceed instead of stalling until the permission claim times out. The flag
-rides on the pinned execution selection, so retries keep the policy; run,
-loop, and team children all inherit it. A per-tool allow/deny policy is not
-yet expressible: `auto_approve` is all-or-nothing per node.
+An `assignment` declares how a dispatched node's permission requests are
+adjudicated. For unattended runs the judgment-gate policy is the headline:
+
+```json
+"assignment": {
+  "roster_file": "roster.json",
+  "roster_entry": "worker",
+  "permission_policy": {"decider": "rm-guard"}
+}
+```
+
+`permission_policy.decider` names a roster entry in the assignment's roster
+file — the deciding agent, resolved through the same roster path as the
+node's own identity and pinned on the execution selection, so retries keep
+the policy. The kernel routes, it does not judge: when a dispatched node
+with a declared decider hits a permission request, no file permission
+handler is derived (the request cannot stall into the file handler or be
+approved blindly), and the supervisor spawns the decider run for the
+pending request. The decider agent — for example a static-plus-model gate
+like [pi-rm-guard](https://github.com/sdougbrown/pi-rm-guard) — decides
+allow or reject against the node's declared task and answers through the
+ordinary control plane (`avenor_status`, `avenor_answer_permission`);
+anything it cannot clearly allow or deny it defers, and a deferral is a
+visible pending state: the request stays pending in runtime status for a
+human to answer, never a silent allow. A decider that fails to spawn also
+leaves the request pending.
+
+`auto_approve: true` remains available as one explicit, narrowly scoped
+option: every permission request is resolved as allow, and no file
+permission handler is derived for the runtime. Use it only for nodes whose
+requests are known-safe; the decider policy is the default answer for
+unattended runs. An assignment must not declare both. Neither policy makes
+a per-tool allow/deny expressible at the template level: judgment lives in
+the decider agent, and `auto_approve` is all-or-nothing per node.
 
 ## Instantiation
 

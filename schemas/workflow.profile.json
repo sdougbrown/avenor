@@ -454,6 +454,17 @@
           },
           "auto_approve": {
             "type": "boolean"
+          },
+          "permission_policy": {
+            "type": "object",
+            "properties": {
+              "decider": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": ["decider"],
+            "additionalProperties": false
           }
         },
         "additionalProperties": false

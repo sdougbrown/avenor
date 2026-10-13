@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/admission"
@@ -513,7 +514,7 @@ func resolveAssignmentSelection(assignment *workflow.Assignment) (*workflow.Exec
 		Agent:       assignment.Agent,
 		Model:       assignment.Model,
 		Backend:     assignment.Backend,
-		RosterFile:  assignment.RosterFile,
+		RosterFile:  rosterFileForIdentity(assignment),
 		RosterEntry: assignment.RosterEntry,
 	}, false); err != nil {
 		return nil, fmt.Errorf("node assignment: %w", err)
@@ -526,11 +527,26 @@ func resolveAssignmentSelection(assignment *workflow.Assignment) (*workflow.Exec
 		AutoApprove: assignment.AutoApprove,
 	}
 	thinking := assignment.Thinking
-	if assignment.RosterEntry != "" {
-		roster, err := rosterconfig.Load(assignment.RosterFile)
+	if assignment.PermissionPolicy != nil {
+		if assignment.AutoApprove {
+			return nil, fmt.Errorf("node assignment: cannot declare both auto_approve and permission_policy")
+		}
+		if strings.TrimSpace(assignment.PermissionPolicy.Decider) == "" {
+			return nil, fmt.Errorf("node assignment: permission_policy.decider is required")
+		}
+		if assignment.RosterFile == "" {
+			return nil, fmt.Errorf("node assignment: permission_policy.decider requires roster_file")
+		}
+	}
+	roster := (*rosterconfig.Config)(nil)
+	if assignment.RosterEntry != "" || assignment.PermissionPolicy != nil {
+		var err error
+		roster, err = rosterconfig.Load(assignment.RosterFile)
 		if err != nil {
 			return nil, fmt.Errorf("node assignment: %w", err)
 		}
+	}
+	if assignment.RosterEntry != "" {
 		entry, err := roster.Lookup(assignment.RosterEntry)
 		if err != nil {
 			return nil, fmt.Errorf("node assignment: %w", err)
@@ -545,6 +561,18 @@ func resolveAssignmentSelection(assignment *workflow.Assignment) (*workflow.Exec
 		}
 		selection.RosterDigest = digest
 	}
+	if assignment.PermissionPolicy != nil {
+		entry, err := roster.Lookup(assignment.PermissionPolicy.Decider)
+		if err != nil {
+			return nil, fmt.Errorf("node assignment: permission_policy.decider: %w", err)
+		}
+		selection.PermissionDecider = &workflow.PermissionDecider{
+			Entry:   assignment.PermissionPolicy.Decider,
+			Backend: entry.Backend,
+			Agent:   entry.Agent,
+			Model:   entry.Model,
+		}
+	}
 	if err := runtime.ValidateThinkingForBackend(selection.Backend, thinking); err != nil {
 		return nil, fmt.Errorf("node assignment: %w", err)
 	}
@@ -552,11 +580,22 @@ func resolveAssignmentSelection(assignment *workflow.Assignment) (*workflow.Exec
 	return selection, nil
 }
 
+// rosterFileForIdentity reports whether the assignment's roster file is part
+// of the spawn identity selection (a declared roster entry). A roster file
+// that only names the permission_policy decider is not an identity selector:
+// the decider resolves separately after the identity rules validate.
+func rosterFileForIdentity(assignment *workflow.Assignment) string {
+	if assignment.RosterEntry != "" {
+		return assignment.RosterFile
+	}
+	return ""
+}
+
 // assignmentEmpty reports whether an assignment declares nothing to resolve.
 func assignmentEmpty(assignment *workflow.Assignment) bool {
 	return assignment.Role == "" && assignment.RosterFile == "" && assignment.RosterEntry == "" &&
 		assignment.Backend == "" && assignment.Agent == "" && assignment.Model == "" && assignment.Thinking == "" &&
-		!assignment.AutoApprove
+		!assignment.AutoApprove && assignment.PermissionPolicy == nil
 }
 
 // rosterFileDigest returns the "sha256:<hex>" digest of a roster file's
