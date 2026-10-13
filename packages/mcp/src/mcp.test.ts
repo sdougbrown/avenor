@@ -11,6 +11,7 @@ import { spawnInputShape } from './spawn-schema'
 const controllerCalls: {
   status: Array<Record<string, unknown>>
 } = { status: [] }
+const killCalls: Array<Record<string, unknown>> = []
 
 mock.module('@dougbots/avenor-core', () => ({
   spawnTool: mock(async () => ({})),
@@ -19,6 +20,10 @@ mock.module('@dougbots/avenor-core', () => ({
   answerPermissionTool: mock(async () => ({})),
   followUpTool: mock(async () => ({})),
   eventsTool: mock(async () => ({})),
+  killTool: mock(async (args: Record<string, unknown>) => {
+    killCalls.push(args)
+    return { killed: true }
+  }),
   shutdownTool: mock(async () => ({})),
   workflowStatusTool: mock(async () => ({})),
   workflowWaitTool: mock(async () => ({})),
@@ -36,6 +41,21 @@ mock.module('@dougbots/avenor-core', () => ({
 const { server, getMcpAuthToken, isAllowedHost, isAllowedOrigin, parseBearerToken } = await import('./mcp.js')
 
 describe('avenor MCP server', () => {
+  it('registers avenor_kill and maps snake_case to camelCase', async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    const client = new Client({ name: 'test-client', version: '0.1.0' })
+    await Promise.all([client.connect(clientTransport), server.connect(serverTransport)])
+
+    const kill = await client.callTool({
+      name: 'avenor_kill',
+      arguments: { run_id: 'run-1', supervisor_id: 'sup-1' },
+    })
+    expect(kill).toMatchObject({ killed: true })
+    expect(killCalls.at(-1)).toEqual({ runId: 'run-1', supervisorId: 'sup-1' })
+    await client.close()
+    await server.close()
+  })
+
   it('registers the controller status tool on the production server and maps snake_case to camelCase', async () => {
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
     const client = new Client({ name: 'test-client', version: '0.1.0' })

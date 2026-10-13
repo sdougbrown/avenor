@@ -372,6 +372,27 @@ This is not a live prompt into the old runtime; it spawns a new runtime that res
 }
 ```
 
+### `avenor_kill`
+
+Terminates a single run without shutting down the supervisor. Other runs and
+the supervisor itself keep running. The killed run's status becomes `killed`
+(exit code 130, stop reason `cancelled`), and its sentinel records `KILLED`.
+
+**Required:**
+- `run_id` — run ID or label to terminate
+
+**Optional:**
+- `supervisor_id` — supervisor socket to use
+
+**Returns:**
+```json
+{
+  "killed": true,
+  "run_id": "...",
+  "runtime_id": "rt_1"
+}
+```
+
 ### `avenor_shutdown`
 
 Shuts down the supervisor and cleans up MCP-owned files.

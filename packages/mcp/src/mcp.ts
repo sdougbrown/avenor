@@ -12,6 +12,7 @@ import {
   answerPermissionTool,
   followUpTool,
   eventsTool,
+  killTool,
   shutdownTool,
   workflowStatusTool,
   workflowWaitTool,
@@ -174,6 +175,16 @@ server.registerTool('avenor_events', {
   },
 }, async ({ run_id, types, limit, supervisor_id }) => {
   return eventsTool({ runId: run_id, types, limit, supervisorId: supervisor_id })
+})
+
+server.registerTool('avenor_kill', {
+  description: 'Terminate a run without shutting down the supervisor. Other runs and the supervisor itself keep running.',
+  inputSchema: {
+    run_id: z.string().min(1).describe('Run ID or label'),
+    supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
+  },
+}, async ({ run_id, supervisor_id }) => {
+  return killTool({ runId: run_id, supervisorId: supervisor_id })
 })
 
 server.registerTool('avenor_shutdown', {

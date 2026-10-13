@@ -24,6 +24,7 @@ const answerPermissionToolMock = mock(async () => ({ ok: true }))
 const followUpToolMock = mock(async () => ({ run_id: 'run-2', label: 'test follow-up' }))
 const resultToolMock = mock(async () => ({ run_id: 'run-1', label: 'test run', status: 'done', ready: true, output: 'final answer' }))
 const shutdownToolMock = mock(async () => ({ ok: true }))
+const killToolMock = mock(async () => ({ killed: true, run_id: 'run-1' }))
 const inspectToolMock = mock(async () => {
   const snapshot = createRunSnapshot()
   snapshot.identity = { runtime_id: 'rt-1', session_id: 'child-session', run_id: 'run-1', run_label: 'test run' }
@@ -135,6 +136,7 @@ mock.module('@dougbots/avenor-core', () => ({
   followUpTool: followUpToolMock,
   resultTool: resultToolMock,
   shutdownTool: shutdownToolMock,
+  killTool: killToolMock,
   inspectTool: inspectToolMock,
   workflowStatusTool: mock(async () => ({})),
   workflowWaitTool: mock(async () => ({})),
@@ -227,6 +229,7 @@ describe('AvenorPlugin', () => {
     followUpToolMock.mockClear()
     resultToolMock.mockClear()
     shutdownToolMock.mockClear()
+    killToolMock.mockClear()
     inspectToolMock.mockClear()
     dialMock.mockClear()
     currentSupervisorMock.mockClear()
@@ -331,6 +334,7 @@ describe('AvenorPlugin', () => {
       'avenor_events',
       'avenor_inspect',
       'avenor_shutdown',
+      'avenor_kill',
     ]))
 
     const message = {
@@ -902,6 +906,16 @@ describe('AvenorPlugin', () => {
     expect(hangingStream.returnMock).toHaveBeenCalledTimes(1)
     expect(hangingStream.closeMock).toHaveBeenCalledTimes(1)
     expect(shutdownToolMock).toHaveBeenCalledWith({ supervisorId: '/tmp/avenor.sock', force: undefined })
+
+    const kill = hooks.tool?.avenor_kill as any
+    const killResult = await kill.execute({ run_id: 'run-1', supervisor_id: '/tmp/avenor.sock' }, {})
+    await flush()
+    expect(killToolMock).toHaveBeenCalledWith({ runId: 'run-1', supervisorId: '/tmp/avenor.sock' })
+    expect(killResult).toEqual(expect.objectContaining({
+      title: 'Avenor — kill run',
+      output: expect.stringContaining('Run: run-1 (runtime unresolved)'),
+      metadata: { killed: true, run_id: 'run-1', supervisor_id: '/tmp/avenor.sock' },
+    }))
 
     const inspect = hooks.tool?.avenor_inspect as any
     const output = await inspect.execute({
