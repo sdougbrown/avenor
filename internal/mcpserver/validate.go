@@ -15,16 +15,24 @@ var supervisorSocketNameRe = regexp.MustCompile(`^avenor-mcp-[^/\\]+\.sock$`)
 // supervisorSocketsRoot returns the canonical sockets root. A var so tests
 // can point validation at a scratch directory.
 var supervisorSocketsRoot = func() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
+	// Mirror avenorHome() in packages/core/src/paths.ts: AVENOR_HOME when
+	// set, otherwise ~/.avenor.
+	home := os.Getenv("AVENOR_HOME")
+	if home == "" {
+		var err error
+		home, err = os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		home = filepath.Join(home, ".avenor")
 	}
-	return filepath.EvalSymlinks(filepath.Join(home, ".avenor", "sockets"))
+	return filepath.EvalSymlinks(filepath.Join(home, "sockets"))
 }
 
 // validateSupervisorSocketPath enforces the same containment rule as the
 // TypeScript core (packages/core/src/tools/validate.ts): a tool-supplied
-// supervisor_id must resolve directly inside the private sockets root with
+// supervisor_id must resolve directly inside the private sockets root (under
+// AVENOR_HOME when set, otherwise ~/.avenor) with
 // the avenor-mcp-*.sock naming. Without this, an MCP client could point
 // supervisor_id at an arbitrary local Unix socket (e.g. /var/run/docker.sock)
 // and have the server dial it and issue control RPCs. Custom supervisor

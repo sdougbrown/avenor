@@ -186,7 +186,7 @@ avenor mcp --supervisor-socket /tmp/avenor-stable.sock --no-autostart
 
 `--supervisor-socket` disables autostart. `--no-autostart` requires `--supervisor-socket`.
 
-Tool arguments can only target a supervisor socket directly inside `~/.avenor/sockets` with the `avenor-mcp-*.sock` naming; other paths are rejected with `invalid supervisorId`. The configured `--supervisor-socket` and the autostarted default are exempt. This mirrors the TypeScript core and prevents clients from pointing the server at an arbitrary local Unix socket.
+Tool arguments can only target a supervisor socket directly inside the sockets root (`AVENOR_HOME/sockets` when set, otherwise `~/.avenor/sockets`) with the `avenor-mcp-*.sock` naming; other paths are rejected with `invalid supervisorId`. The configured `--supervisor-socket` and the autostarted default are exempt. This mirrors the TypeScript core and prevents clients from pointing the server at an arbitrary local Unix socket.
 
 ## Flags
 
@@ -247,7 +247,7 @@ Starts a new run.
 - `backend` — runtime backend (e.g., `"opencode-http"`, `"opencode-acp"`, `"codex-app-server"`, `"agy"`)
 - `roster_file` / `roster_entry` — optional roster selector pair
 - `server_url` — server URL for opencode-http backend
-- `supervisor_id` — supervisor socket to use instead of the default. Must be an `avenor-mcp-*.sock` directly inside `~/.avenor/sockets` (the same containment rule the TypeScript core enforces); a custom supervisor location is reachable only by configuring it as the MCP server's `--supervisor-socket`
+- `supervisor_id` — supervisor socket to use instead of the default. Must be an `avenor-mcp-*.sock` directly inside the sockets root (`AVENOR_HOME/sockets` when set, otherwise `~/.avenor/sockets`), the same containment rule the TypeScript core enforces; a custom supervisor location is reachable only by configuring it as the MCP server's `--supervisor-socket`
 
 **Returns:**
 ```json
