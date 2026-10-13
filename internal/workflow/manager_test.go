@@ -5,6 +5,7 @@ package workflow
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -239,6 +240,42 @@ func TestManagerCreateRejectsInvalidTemplate(t *testing.T) {
 	}
 	if _, err := m.WorkflowCreate([]byte(`not json`)); err == nil {
 		t.Fatal("WorkflowCreate accepted non-JSON")
+	}
+}
+
+// TestManagerCreateRecreateIdempotency asserts the manager-level contract:
+// re-creating an identical template under the same id+version succeeds as a
+// no-op, while different content under the same id+version is rejected with a
+// TemplateConflictError and leaves the original registration intact.
+func TestManagerCreateRecreateIdempotency(t *testing.T) {
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	m := NewManager(s)
+	if _, err := m.WorkflowCreate([]byte(managerTemplateJSON)); err != nil {
+		t.Fatalf("WorkflowCreate: %v", err)
+	}
+	if _, err := m.WorkflowCreate([]byte(managerTemplateJSON)); err != nil {
+		t.Fatalf("identical re-create: %v", err)
+	}
+	conflicting := strings.Replace(managerTemplateJSON,
+		`{"id": "start", "action": {"type": "manual"}}`,
+		`{"id": "start", "name": "renamed", "action": {"type": "manual"}}`, 1)
+	_, err := m.WorkflowCreate([]byte(conflicting))
+	if err == nil {
+		t.Fatal("expected conflicting re-create to fail, got nil error")
+	}
+	var conflict *TemplateConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("error = %T (%v), want *TemplateConflictError", err, err)
+	}
+	loaded, err := s.LoadTemplate("mgr-test", "1")
+	if err != nil {
+		t.Fatalf("LoadTemplate after conflict: %v", err)
+	}
+	if loaded.Nodes[0].Name == "renamed" {
+		t.Fatal("original template was replaced by the conflicting content")
 	}
 }
 

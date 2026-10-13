@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -267,6 +268,26 @@ func (s *Store) StoreTemplate(templateID TemplateID, templateVersion TemplateVer
 	path := filepath.Join(dir, string(templateVersion)+".json")
 	data, err := template.MarshalJSON()
 	if err != nil {
+		return err
+	}
+	// Templates are immutable revisions: re-registering identical bytes is a
+	// no-op, while different content under the same id+version is rejected so
+	// running instances never load a silently replaced template.
+	if existing, err := os.ReadFile(path); err == nil {
+		identical := bytes.Equal(existing, data)
+		if !identical {
+			var current Template
+			if jerr := json.Unmarshal(existing, &current); jerr == nil {
+				if canonical, merr := current.MarshalJSON(); merr == nil {
+					identical = bytes.Equal(canonical, data)
+				}
+			}
+		}
+		if identical {
+			return nil
+		}
+		return &TemplateConflictError{TemplateID: templateID, TemplateVersion: templateVersion}
+	} else if !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
 	tmp, err := os.CreateTemp(dir, string(templateVersion)+".json.tmp*")

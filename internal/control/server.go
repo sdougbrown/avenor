@@ -20,6 +20,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
+	"github.com/sdougbrown/avenor/internal/workflow"
 )
 
 const subscriberBuffer = 256
@@ -1605,6 +1606,10 @@ func (s *ControlServer) dispatchWorkflow(c *connState, req Request) Response {
 	case "workflow.create":
 		result, err := h.WorkflowCreate(req.Params)
 		if err != nil {
+			var tce *workflow.TemplateConflictError
+			if errors.As(err, &tce) {
+				return failure(req.ID, -32031, tce.Error(), nil)
+			}
 			return failure(req.ID, -32000, err.Error(), nil)
 		}
 		return success(req.ID, result)

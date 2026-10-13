@@ -96,7 +96,7 @@ Error codes:
 | -32010 | Permission denied (not owner) |
 | -32020 | Backend prompt unsupported |
 | -32030 | Idempotency store capacity exceeded |
-| -32031 | Idempotency key conflict (same key, different intent) |
+| -32031 | Idempotency conflict (reused spawn key or re-registered template id+version with different content) |
 
 ## Notifications (Server → Client)
 

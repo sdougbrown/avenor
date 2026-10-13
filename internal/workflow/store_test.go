@@ -8,7 +8,10 @@ package workflow
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -741,5 +744,73 @@ func TestStore_ReducerRejectedCommandLeavesLogClean(t *testing.T) {
 	}
 	if !containsStr(err.Error(), "cannot resolve child outcome for activation in status") {
 		t.Fatalf("expected the retry to fail in the reduce phase, got %q", err)
+	}
+}
+
+// storeTemplateFixture builds a minimal one-node manual template with the
+// given id and version for StoreTemplate tests.
+func storeTemplateFixture(t *testing.T, id, version string) Template {
+	t.Helper()
+	data := fmt.Sprintf(`{"schema_version":1,"template_id":%q,"template_version":%q,"entry_nodes":["start"],"nodes":[{"id":"start","action":{"type":"manual"}}],"terminal_outcomes":["done"]}`, id, version)
+	var tmpl Template
+	if err := json.Unmarshal([]byte(data), &tmpl); err != nil {
+		t.Fatalf("unmarshal fixture: %v", err)
+	}
+	return tmpl
+}
+
+// TestStoreTemplateIdenticalRecreateIsNoOp asserts re-registering a template
+// with identical content under the same id+version succeeds without touching
+// the stored file: the stored bytes are unchanged after the second store.
+func TestStoreTemplateIdenticalRecreateIsNoOp(t *testing.T) {
+	s := newStore(t)
+	tmpl := storeTemplateFixture(t, "dup", "1")
+	if err := s.StoreTemplate("dup", "1", tmpl); err != nil {
+		t.Fatalf("first StoreTemplate: %v", err)
+	}
+	path := filepath.Join(s.root, "templates", "dup", "1.json")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read stored template: %v", err)
+	}
+	if err := s.StoreTemplate("dup", "1", tmpl); err != nil {
+		t.Fatalf("identical re-store: %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read stored template after re-store: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("identical re-store replaced the stored template file")
+	}
+}
+
+// TestStoreTemplateRejectsConflictingContent asserts storing different content
+// under an already-registered id+version fails with a TemplateConflictError
+// and leaves the originally stored template intact.
+func TestStoreTemplateRejectsConflictingContent(t *testing.T) {
+	s := newStore(t)
+	if err := s.StoreTemplate("dup", "1", storeTemplateFixture(t, "dup", "1")); err != nil {
+		t.Fatalf("first StoreTemplate: %v", err)
+	}
+	conflicting := storeTemplateFixture(t, "dup", "1")
+	conflicting.Nodes[0].Name = "renamed"
+	err := s.StoreTemplate("dup", "1", conflicting)
+	if err == nil {
+		t.Fatal("expected conflicting re-store to fail, got nil error")
+	}
+	var conflict *TemplateConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("error = %T (%v), want *TemplateConflictError", err, err)
+	}
+	if conflict.TemplateID != "dup" || conflict.TemplateVersion != "1" {
+		t.Fatalf("conflict names %q/%q, want dup/1", conflict.TemplateID, conflict.TemplateVersion)
+	}
+	loaded, err := s.LoadTemplate("dup", "1")
+	if err != nil {
+		t.Fatalf("LoadTemplate after conflict: %v", err)
+	}
+	if loaded.Nodes[0].Name == "renamed" {
+		t.Fatal("original template was replaced by the conflicting content")
 	}
 }
