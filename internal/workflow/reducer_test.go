@@ -739,9 +739,9 @@ func testExhaustionBlock(t *testing.T) {
 	if act.SelectedOutcome != "" {
 		t.Fatalf("exhaustion=block: selected outcome got %q want empty", act.SelectedOutcome)
 	}
-	if state.Instance.Status != WorkflowActive {
+	if state.Instance.Status != WorkflowBlocked {
 		t.Fatalf("exhaustion=block: workflow status got %q want %q (not failed)",
-			state.Instance.Status, WorkflowActive)
+			state.Instance.Status, WorkflowBlocked)
 	}
 }
 
