@@ -464,6 +464,8 @@ func TestValidateSupervisorSocketPath(t *testing.T) {
 	}{
 		{"outside root", "/var/run/docker.sock"},
 		{"wrong basename in root", filepath.Join(root, "evil.sock")},
+		{"missing .sock suffix", filepath.Join(root, "avenor-mcp-1")},
+		{"empty socket id", filepath.Join(root, "avenor-mcp-.sock")},
 		// Raw concatenation on purpose: filepath.Join would clean the ".."
 		// before the validator sees it, and the uncleaned attack shape is the
 		// one that must be rejected.
@@ -496,6 +498,41 @@ func TestValidateSupervisorSocketPath(t *testing.T) {
 	defer func() { supervisorSocketsRoot = func() (string, error) { return resolvedRoot, nil } }()
 	if err := validateSupervisorSocketPath(valid); err == nil || !strings.Contains(err.Error(), "invalid supervisorId") {
 		t.Errorf("root unavailable: expected invalid supervisorId, got: %v", err)
+	}
+}
+
+func TestSupervisorSocketsRootMatchesTSCorePaths(t *testing.T) {
+	// Drives the unstubbed supervisorSocketsRoot so a misjoin in the
+	// AVENOR_HOME branch or the ~/.avenor fallback (the root contract shared
+	// with avenorHome() in packages/core/src/paths.ts) is caught by the suite
+	// instead of failing every legitimate secondary supervisor in production.
+	mkdir := func(dir string) {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	tmp := t.TempDir()
+	mkdir(filepath.Join(tmp, "sockets"))
+	t.Setenv("AVENOR_HOME", tmp)
+	if err := validateSupervisorSocketPath(filepath.Join(tmp, "sockets", "avenor-mcp-1.sock")); err != nil {
+		t.Fatalf("expected $AVENOR_HOME/sockets/avenor-mcp-1.sock to validate, got: %v", err)
+	}
+	if err := validateSupervisorSocketPath(filepath.Join(tmp, "avenor-mcp-1.sock")); err == nil || !strings.Contains(err.Error(), "invalid supervisorId") {
+		t.Errorf("expected socket outside the AVENOR_HOME sockets root to be rejected, got: %v", err)
+	}
+
+	// Fallback branch: AVENOR_HOME unset means an empty value resolves to
+	// ~/.avenor. os.UserHomeDir returns $USERPROFILE on Windows; set both so
+	// the fallback pins to tmp regardless of platform.
+	tmp2 := t.TempDir()
+	mkdir(filepath.Join(tmp2, ".avenor", "sockets"))
+	t.Setenv("AVENOR_HOME", "")
+	t.Setenv("HOME", tmp2)
+	t.Setenv("USERPROFILE", tmp2)
+	if err := validateSupervisorSocketPath(filepath.Join(tmp2, ".avenor", "sockets", "avenor-mcp-1.sock")); err != nil {
+		t.Fatalf("expected ~/.avenor/sockets/avenor-mcp-1.sock to validate, got: %v", err)
 	}
 }
 
