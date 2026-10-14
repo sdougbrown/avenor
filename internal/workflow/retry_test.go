@@ -66,6 +66,64 @@ func mustTerminate(t *testing.T, m *Manager, wf WorkflowID, nodeID NodeID, actID
 	}
 }
 
+// runBranchToExhaustion claims (with an already-expired lease), starts, and
+// terminates one failed attempt on the node's activation — the drive step both
+// parallel-branch retry tests share.
+func runBranchToExhaustion(t *testing.T, m *Manager, s *Store, wf WorkflowID, node NodeID, leaseID, token string) {
+	t.Helper()
+	startBranch(t, m, s, wf, node, leaseID, token, true)
+	runBranchToExhaustionTerminating(t, m, s, wf, node, leaseID)
+}
+
+// startBranch claims (with an already-expired lease) and starts one attempt
+// on the node's activation without terminating it.
+func startBranch(t *testing.T, m *Manager, s *Store, wf WorkflowID, node NodeID, leaseID, token string, expired bool) {
+	t.Helper()
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	act := activationByNode(&snap.Instance, node)
+	if act == nil {
+		t.Fatalf("activation for %s not found", node)
+	}
+	past := time.Now().UTC().Add(-time.Hour)
+	expiresAt := past
+	if !expired {
+		expiresAt = time.Now().UTC().Add(time.Hour)
+	}
+	claimWithLease(t, s, wf, node, Lease{
+		ID:           LeaseID(leaseID),
+		ActivationID: act.ID,
+		Owner:        "alice",
+		TokenDigest:  ownerTokenDigest(token),
+		AcquiredAt:   past.Add(-time.Minute),
+		ExpiresAt:    expiresAt,
+	}, "alice")
+	started := startWithToken(t, m, wf, string(node), string(act.ID), leaseID, token)
+	if _, ok := started["attempt_id"].(string); !ok {
+		t.Fatalf("start result missing attempt_id: %#v", started)
+	}
+}
+
+// runBranchToExhaustionTerminating terminates the node's in-flight attempt as
+// failed, consuming one retry-budget slot.
+func runBranchToExhaustionTerminating(t *testing.T, m *Manager, s *Store, wf WorkflowID, node NodeID, leaseID string) {
+	t.Helper()
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	act := activationByNode(&snap.Instance, node)
+	if act == nil {
+		t.Fatalf("activation for %s not found", node)
+	}
+	if len(act.AttemptIDs) == 0 {
+		t.Fatalf("activation %s has no attempts to terminate", node)
+	}
+	mustTerminate(t, m, wf, node, act.ID, string(act.AttemptIDs[len(act.AttemptIDs)-1]), leaseID)
+}
+
 // retryScenario is one end-to-end exhaustion scenario.
 type retryScenario struct {
 	name           string
@@ -597,34 +655,8 @@ func TestFailExhaustionDoesNotHideBlockedInstance(t *testing.T) {
 }`)
 	m, s, wf := newRetryFixture(t, templateJSON, "retry-parallel-fail")
 
-	run := func(node NodeID, leaseID, token string) {
-		snap, _, err := s.loadCurrent(wf)
-		if err != nil {
-			t.Fatalf("loadCurrent: %v", err)
-		}
-		act := activationByNode(&snap.Instance, node)
-		if act == nil {
-			t.Fatalf("activation for %s not found", node)
-		}
-		past := time.Now().UTC().Add(-time.Hour)
-		claimWithLease(t, s, wf, node, Lease{
-			ID:           LeaseID(leaseID),
-			ActivationID: act.ID,
-			Owner:        "alice",
-			TokenDigest:  ownerTokenDigest(token),
-			AcquiredAt:   past.Add(-time.Minute),
-			ExpiresAt:    past,
-		}, "alice")
-		started := startWithToken(t, m, wf, string(node), string(act.ID), leaseID, token)
-		attemptID, _ := started["attempt_id"].(string)
-		if attemptID == "" {
-			t.Fatalf("start result missing attempt_id: %#v", started)
-		}
-		mustTerminate(t, m, wf, node, act.ID, attemptID, leaseID)
-	}
-
 	// Branch a exhausts to block: the instance reports blocked.
-	run("a", "lease-a", "tok-a")
+	runBranchToExhaustion(t, m, s, wf, "a", "lease-a", "tok-a")
 	snap, _, err := s.loadCurrent(wf)
 	if err != nil {
 		t.Fatalf("loadCurrent: %v", err)
@@ -635,7 +667,7 @@ func TestFailExhaustionDoesNotHideBlockedInstance(t *testing.T) {
 
 	// Branch b then exhausts to fail: the failure stays on the activation and
 	// the blocked branch remains surfaced at the instance level.
-	run("b", "lease-b", "tok-b")
+	runBranchToExhaustion(t, m, s, wf, "b", "lease-b", "tok-b")
 	snap, _, err = s.loadCurrent(wf)
 	if err != nil {
 		t.Fatalf("loadCurrent: %v", err)
@@ -668,31 +700,6 @@ func TestUnblockKeepsInstanceBlockedWhileAnotherActivationBlocks(t *testing.T) {
 }`)
 	m, s, wf := newRetryFixture(t, templateJSON, "unblock-parallel")
 
-	run := func(node NodeID, leaseID, token string) {
-		snap, _, err := s.loadCurrent(wf)
-		if err != nil {
-			t.Fatalf("loadCurrent: %v", err)
-		}
-		act := activationByNode(&snap.Instance, node)
-		if act == nil {
-			t.Fatalf("activation for %s not found", node)
-		}
-		past := time.Now().UTC().Add(-time.Hour)
-		claimWithLease(t, s, wf, node, Lease{
-			ID:           LeaseID(leaseID),
-			ActivationID: act.ID,
-			Owner:        "alice",
-			TokenDigest:  ownerTokenDigest(token),
-			AcquiredAt:   past.Add(-time.Minute),
-			ExpiresAt:    past,
-		}, "alice")
-		started := startWithToken(t, m, wf, string(node), string(act.ID), leaseID, token)
-		attemptID, _ := started["attempt_id"].(string)
-		if attemptID == "" {
-			t.Fatalf("start result missing attempt_id: %#v", started)
-		}
-		mustTerminate(t, m, wf, node, act.ID, attemptID, leaseID)
-	}
 	unblock := func(node string) {
 		payload, err := json.Marshal(map[string]string{
 			"op": "unblock", "node_id": node, "actor": "ops", "reason": "re-arm " + node,
@@ -713,8 +720,8 @@ func TestUnblockKeepsInstanceBlockedWhileAnotherActivationBlocks(t *testing.T) {
 		return activationByNode(&snap.Instance, NodeID(node)).Status
 	}
 
-	run("a", "lease-a", "tok-a")
-	run("b", "lease-b", "tok-b")
+	runBranchToExhaustion(t, m, s, wf, "a", "lease-a", "tok-a")
+	runBranchToExhaustion(t, m, s, wf, "b", "lease-b", "tok-b")
 
 	// Both branches parked: the instance reports blocked.
 	snap, _, err := s.loadCurrent(wf)
@@ -750,5 +757,59 @@ func TestUnblockKeepsInstanceBlockedWhileAnotherActivationBlocks(t *testing.T) {
 	}
 	if snap.Instance.Status != WorkflowActive {
 		t.Fatalf("instance after final unblock = %s, want active", snap.Instance.Status)
+	}
+}
+
+// TestBlockExhaustionDoesNotResurrectFailedInstance pins the reverse order of
+// TestFailExhaustionDoesNotHideBlockedInstance: a fail exhaustion drives the
+// instance to terminal failed, and a later block exhaustion on a parallel
+// branch must not regress the terminal status — markInstanceBlocked only
+// transitions active/blocked instances.
+func TestBlockExhaustionDoesNotResurrectFailedInstance(t *testing.T) {
+	templateJSON := []byte(`{
+  "schema_version": 1,
+  "template_id": "retry-parallel-reverse",
+  "template_version": "1",
+  "entry_nodes": ["a", "b"],
+  "nodes": [
+    {"id": "a", "action": {"type": "run", "prompt": "branch a"}, "retry_policy": {"max_attempts": 1, "exhaustion": "fail"}},
+    {"id": "b", "action": {"type": "run", "prompt": "branch b"}, "retry_policy": {"max_attempts": 1, "exhaustion": "block"}}
+  ],
+  "terminal_outcomes": ["done"]
+}`)
+	m, s, wf := newRetryFixture(t, templateJSON, "retry-parallel-reverse")
+
+	// Both branches start BEFORE either terminates: once the instance is
+	// terminal the command path rejects fresh starts, so the late block
+	// exhaustion arrives through b's in-flight attempt. a's lease is expired,
+	// b's is fresh, so the sweep expires only a.
+	startBranch(t, m, s, wf, "a", "lease-a", "tok-a", true)
+	startBranch(t, m, s, wf, "b", "lease-b", "tok-b", false)
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	if activationByNode(&snap.Instance, "a").Status != ActivationRunning || activationByNode(&snap.Instance, "b").Status != ActivationRunning {
+		t.Fatalf("activations after starts = %s/%s, want running/running",
+			activationByNode(&snap.Instance, "a").Status, activationByNode(&snap.Instance, "b").Status)
+	}
+	runBranchToExhaustionTerminating(t, m, s, wf, "a", "lease-a")
+	snap, _, err = s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	if snap.Instance.Status != WorkflowFailed {
+		t.Fatalf("instance after fail exhaustion = %s, want failed", snap.Instance.Status)
+	}
+	runBranchToExhaustionTerminating(t, m, s, wf, "b", "lease-b")
+	snap, _, err = s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	if activationByNode(&snap.Instance, "b").Status != ActivationBlocked {
+		t.Fatalf("activation b after block exhaustion = %s, want blocked", activationByNode(&snap.Instance, "b").Status)
+	}
+	if snap.Instance.Status != WorkflowFailed {
+		t.Fatalf("instance after later block exhaustion = %s, want failed (terminal not regressed)", snap.Instance.Status)
 	}
 }
