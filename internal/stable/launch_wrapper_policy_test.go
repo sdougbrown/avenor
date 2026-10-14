@@ -43,6 +43,7 @@ func TestLoadMCPLaunchWrapperPolicyRejects(t *testing.T) {
 		{"empty entry", `{"allowed_argv": [[]]}`, "entry 0 is empty"},
 		{"empty element", `{"allowed_argv": [["/usr/bin/nice", ""]]}`, "element 1 is empty"},
 		{"NUL byte", "{\"allowed_argv\": [[\"/usr/bin/n\\u0000\"]]}", "NUL byte"},
+		{"NUL byte in non-executable element", "{\"allowed_argv\": [[\"/usr/bin/nice\", \"a\\u0000b\"]]}", "NUL byte"},
 		{"relative executable", `{"allowed_argv": [["nice", "-n", "5"]]}`, "absolute path"},
 		{"not JSON", `nope`, "invalid character"},
 	}
@@ -63,6 +64,23 @@ func TestLoadMCPLaunchWrapperPolicyRejects(t *testing.T) {
 func TestLoadMCPLaunchWrapperPolicyMissingFile(t *testing.T) {
 	if _, err := LoadMCPLaunchWrapperPolicy(filepath.Join(t.TempDir(), "absent.json")); err == nil {
 		t.Fatal("missing file accepted")
+	}
+}
+
+func TestLoadMCPLaunchWrapperPolicyAcceptsRelativeNonExecutableArgs(t *testing.T) {
+	path := writePolicyFile(t, `{"allowed_argv": [["/usr/bin/nice", "relative-arg"], ["/bin/sh"]]}`)
+	policy, err := LoadMCPLaunchWrapperPolicy(path)
+	if err != nil {
+		t.Fatalf("LoadMCPLaunchWrapperPolicy() = %v, want nil", err)
+	}
+	if len(policy.AllowedArgv) != 2 {
+		t.Fatalf("policy entries = %d, want 2 (multi-entry allowlists preserved)", len(policy.AllowedArgv))
+	}
+	if !mcpLaunchWrapperAllowed(policy, []string{"/bin/sh"}) {
+		t.Fatal("second allowlist entry not matched")
+	}
+	if mcpLaunchWrapperAllowed(policy, []string{"/usr/bin/nice", "other"}) {
+		t.Fatal("unmatched wrapper allowed")
 	}
 }
 
