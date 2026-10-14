@@ -338,6 +338,7 @@ func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions, 
 	client, err := NewClient(ctx, ClientConfig{
 		Bin:                  p.bin,
 		Args:                 p.args,
+		Wrapper:              opts.LaunchWrapper,
 		Dir:                  opts.Dir,
 		Env:                  env,
 		AutoAnswerPermission: false,

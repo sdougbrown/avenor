@@ -53,7 +53,7 @@ var _ runtime.Provider = (*Provider)(nil)
 
 func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtime.Session, error) {
 	merged := runtime.MergeStartOptions(p.opts, opts)
-	c, err := p.ensureClient(ctx)
+	c, err := p.ensureClient(ctx, merged.LaunchWrapper)
 	if err != nil {
 		return runtime.Session{}, err
 	}
@@ -131,7 +131,7 @@ func (p *Provider) resume(ctx context.Context, sessionID, effort string) (runtim
 	}
 	p.mu.Unlock()
 
-	c, err := p.ensureClient(ctx)
+	c, err := p.ensureClient(ctx, p.opts.LaunchWrapper)
 	if err != nil {
 		return runtime.Session{}, err
 	}
@@ -318,7 +318,7 @@ func (p *Provider) Close() error {
 	return c.Close()
 }
 
-func (p *Provider) ensureClient(ctx context.Context) (*client, error) {
+func (p *Provider) ensureClient(ctx context.Context, launchWrapper []string) (*client, error) {
 	p.mu.Lock()
 	if p.client != nil {
 		c := p.client
@@ -335,7 +335,7 @@ func (p *Provider) ensureClient(ctx context.Context) (*client, error) {
 	if starter == nil {
 		starter = StartClient
 	}
-	c, err := starter(ctx, nil)
+	c, err := starter(ctx, launchWrapper)
 	if err != nil {
 		return nil, err
 	}

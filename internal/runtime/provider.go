@@ -30,9 +30,14 @@ type StartOptions struct {
 	Model        string
 	AgentProfile string
 	Thinking     string
-	RuntimeID    string         // supervisor-assigned runtime ID (rt_N), for parent-child routing
-	Broker       *broker.Broker // optional shared broker instance; backends may create their own if nil
-	BrokerToken  string         // broker token for RuntimeID, so the child can poll/reply as itself
+	// LaunchWrapper is an opaque argv prefix placed in front of the backend
+	// process command at launch. Avenor does not interpret it; empty means
+	// the backend is launched unwrapped. Probes and helper processes are
+	// never wrapped.
+	LaunchWrapper []string
+	RuntimeID     string         // supervisor-assigned runtime ID (rt_N), for parent-child routing
+	Broker        *broker.Broker // optional shared broker instance; backends may create their own if nil
+	BrokerToken   string         // broker token for RuntimeID, so the child can poll/reply as itself
 }
 
 // Session represents an active ACP session.
@@ -188,6 +193,9 @@ func MergeStartOptions(base, override StartOptions) StartOptions {
 	}
 	if override.Thinking != "" {
 		merged.Thinking = override.Thinking
+	}
+	if len(override.LaunchWrapper) > 0 {
+		merged.LaunchWrapper = override.LaunchWrapper
 	}
 	if override.RuntimeID != "" {
 		merged.RuntimeID = override.RuntimeID

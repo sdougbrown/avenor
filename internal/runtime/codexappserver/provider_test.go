@@ -360,7 +360,7 @@ func TestEnsureClientReturnsWithoutDeadlock(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		got, err := p.ensureClient(context.Background())
+		got, err := p.ensureClient(context.Background(), nil)
 		if err != nil {
 			t.Errorf("ensureClient: %v", err)
 		}
@@ -395,7 +395,7 @@ func TestEnsureClientRaceLossClosesLoser(t *testing.T) {
 		return loser, nil
 	}
 
-	got, err := p.ensureClient(context.Background())
+	got, err := p.ensureClient(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("ensureClient: %v", err)
 	}
@@ -429,7 +429,7 @@ func TestEnsureClientStartError(t *testing.T) {
 	wantErr := errors.New("boom")
 	p.startClient = func(_ context.Context, _ []string) (*client, error) { return nil, wantErr }
 
-	if _, err := p.ensureClient(context.Background()); !errors.Is(err, wantErr) {
+	if _, err := p.ensureClient(context.Background(), nil); !errors.Is(err, wantErr) {
 		t.Fatalf("err = %v, want %v", err, wantErr)
 	}
 	p.mu.Lock()
@@ -444,7 +444,7 @@ func TestEnsureClientStartError(t *testing.T) {
 	p.startClient = func(_ context.Context, _ []string) (*client, error) { return c, nil }
 	done := make(chan *client, 1)
 	go func() {
-		got, err := p.ensureClient(context.Background())
+		got, err := p.ensureClient(context.Background(), nil)
 		if err != nil {
 			t.Errorf("second ensureClient: %v", err)
 		}
@@ -486,7 +486,7 @@ func TestEnsureClientConcurrentSingleWinner(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			c, err := p.ensureClient(context.Background())
+			c, err := p.ensureClient(context.Background(), nil)
 			if err != nil {
 				t.Errorf("ensureClient: %v", err)
 			}

@@ -11,6 +11,18 @@ func ValidateThinking(value string) error {
 	return thinkingpolicy.ValidateCanonical(value)
 }
 
+// ValidateLaunchWrapper rejects wrapper argvs containing empty elements. The
+// wrapper is otherwise not interpreted or validated further: whatever argv is
+// supplied is what ends up in front of the backend command.
+func ValidateLaunchWrapper(wrapper []string) error {
+	for _, element := range wrapper {
+		if element == "" {
+			return fmt.Errorf("launch wrapper elements must be non-empty")
+		}
+	}
+	return nil
+}
+
 // ValidateThinkingForBackend applies the conservative backend policy after
 // validating the canonical value. This is the start-session policy; explicit
 // resume support is represented separately (see thinkingpolicy.Policies).

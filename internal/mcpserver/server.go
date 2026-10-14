@@ -97,21 +97,22 @@ type resultArgs struct {
 }
 
 type spawnArgs struct {
-	Agent          string `json:"agent,omitempty" jsonschema:"optional agent name; omission uses the selected model or runtime defaults"`
-	RepoDir        string `json:"repo_dir" jsonschema:"required path to the repository"`
-	Prompt         string `json:"prompt,omitempty" jsonschema:"optional initial prompt"`
-	PromptFile     string `json:"prompt_file,omitempty" jsonschema:"optional path to file containing the initial prompt"`
-	Label          string `json:"label,omitempty" jsonschema:"optional label for the run"`
-	Timeout        string `json:"timeout,omitempty" jsonschema:"optional timeout in seconds (numeric string)"`
-	Model          string `json:"model,omitempty" jsonschema:"optional model to use"`
-	Thinking       string `json:"thinking,omitempty" jsonschema:"optional thinking level (off, minimal, low, medium, high, xhigh, max); omission uses the backend default"`
-	Backend        string `json:"backend,omitempty" jsonschema:"optional runtime backend (for example agy, pi, opencode-acp, or codex-app-server)"`
-	RosterFile     string `json:"roster_file,omitempty" jsonschema:"optional path to the roster map"`
-	RosterEntry    string `json:"roster_entry,omitempty" jsonschema:"optional roster entry key"`
-	ServerURL      string `json:"server_url,omitempty" jsonschema:"optional opencode serve URL for opencode-http backend"`
-	SupervisorID   string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
-	IdempotencyKey string `json:"idempotency_key,omitempty" jsonschema:"optional idempotency key; a retry with the same key and parameters returns the original run instead of spawning a second one"`
-	AutoApprove    bool   `json:"auto_approve,omitempty" jsonschema:"optional auto-approve all permission requests so the run executes unattended (no answer_permission needed)"`
+	Agent          string   `json:"agent,omitempty" jsonschema:"optional agent name; omission uses the selected model or runtime defaults"`
+	RepoDir        string   `json:"repo_dir" jsonschema:"required path to the repository"`
+	Prompt         string   `json:"prompt,omitempty" jsonschema:"optional initial prompt"`
+	PromptFile     string   `json:"prompt_file,omitempty" jsonschema:"optional path to file containing the initial prompt"`
+	Label          string   `json:"label,omitempty" jsonschema:"optional label for the run"`
+	Timeout        string   `json:"timeout,omitempty" jsonschema:"optional timeout in seconds (numeric string)"`
+	Model          string   `json:"model,omitempty" jsonschema:"optional model to use"`
+	Thinking       string   `json:"thinking,omitempty" jsonschema:"optional thinking level (off, minimal, low, medium, high, xhigh, max); omission uses the backend default"`
+	Backend        string   `json:"backend,omitempty" jsonschema:"optional runtime backend (for example agy, pi, opencode-acp, or codex-app-server)"`
+	RosterFile     string   `json:"roster_file,omitempty" jsonschema:"optional path to the roster map"`
+	RosterEntry    string   `json:"roster_entry,omitempty" jsonschema:"optional roster entry key"`
+	ServerURL      string   `json:"server_url,omitempty" jsonschema:"optional opencode serve URL for opencode-http backend"`
+	SupervisorID   string   `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
+	IdempotencyKey string   `json:"idempotency_key,omitempty" jsonschema:"optional idempotency key; a retry with the same key and parameters returns the original run instead of spawning a second one"`
+	LaunchWrapper  []string `json:"launch_wrapper,omitempty" jsonschema:"optional opaque argv prefix placed in front of the backend process command; avenor does not interpret it"`
+	AutoApprove    bool     `json:"auto_approve,omitempty" jsonschema:"optional auto-approve all permission requests so the run executes unattended (no answer_permission needed)"`
 }
 
 // UnmarshalJSON makes the Go MCP spawn tool a strict raw boundary: unknown
@@ -1057,6 +1058,9 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 	if err := runtime.ValidateThinking(args.Thinking); err != nil {
 		return nil, nil, err
 	}
+	if err := runtime.ValidateLaunchWrapper(args.LaunchWrapper); err != nil {
+		return nil, nil, fmt.Errorf("launch_wrapper: %w", err)
+	}
 	if len(args.IdempotencyKey) > 256 {
 		return nil, nil, fmt.Errorf("idempotency_key too long (max 256 bytes)")
 	}
@@ -1098,6 +1102,9 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 	}
 	if args.Thinking != "" {
 		params["thinking"] = args.Thinking
+	}
+	if len(args.LaunchWrapper) > 0 {
+		params["launch_wrapper"] = args.LaunchWrapper
 	}
 	if args.Backend != "" {
 		params["backend"] = args.Backend

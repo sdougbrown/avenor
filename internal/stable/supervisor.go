@@ -103,20 +103,25 @@ type Config struct {
 const DefaultLeaseSweepInterval = workflow.DefaultLeaseTTL / 3
 
 type SpawnParams struct {
-	Prompt            string `json:"prompt,omitempty"`
-	PromptFile        string `json:"prompt_file,omitempty"`
-	Dir               string `json:"dir"`
-	Agent             string `json:"agent,omitempty"`
-	AgentProfile      string `json:"agent_profile,omitempty"`
-	Label             string `json:"label,omitempty"`
-	Model             string `json:"model,omitempty"`
-	Thinking          string `json:"thinking,omitempty"`
-	ServerURL         string `json:"server_url,omitempty"`
-	Backend           string `json:"backend,omitempty"`
-	OnEvent           string `json:"on_event,omitempty"`
-	SentinelFile      string `json:"sentinel_file,omitempty"`
-	PermissionHandler string `json:"permission_handler,omitempty"`
-	AutoApprove       bool   `json:"auto_approve,omitempty"`
+	Prompt       string `json:"prompt,omitempty"`
+	PromptFile   string `json:"prompt_file,omitempty"`
+	Dir          string `json:"dir"`
+	Agent        string `json:"agent,omitempty"`
+	AgentProfile string `json:"agent_profile,omitempty"`
+	Label        string `json:"label,omitempty"`
+	Model        string `json:"model,omitempty"`
+	Thinking     string `json:"thinking,omitempty"`
+	ServerURL    string `json:"server_url,omitempty"`
+	Backend      string `json:"backend,omitempty"`
+	// LaunchWrapper is an opaque argv prefix placed in front of the backend
+	// process command at launch. Avenor does not interpret it; empty or
+	// absent means the backend is launched unwrapped. Probes and helper
+	// processes are never wrapped.
+	LaunchWrapper     []string `json:"launch_wrapper,omitempty"`
+	OnEvent           string   `json:"on_event,omitempty"`
+	SentinelFile      string   `json:"sentinel_file,omitempty"`
+	PermissionHandler string   `json:"permission_handler,omitempty"`
+	AutoApprove       bool     `json:"auto_approve,omitempty"`
 	// PermissionDecider routes this runtime's permission requests to a
 	// deciding agent (the resolved permission policy's decider) instead of a
 	// local resolver: no file permission handler is derived, and a pending
@@ -210,6 +215,7 @@ type childRuntime struct {
 	model            string
 	thinking         string
 	backend          string
+	launchWrapper    []string
 	rosterFile       string
 	rosterEntry      string
 	effectiveBackend string
@@ -1281,6 +1287,9 @@ func (s *Supervisor) labelHolderLocked(label string) string {
 // pre-start failure the reservation is released.
 func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation) (SpawnResult, error) {
 	defer res.Release()
+	if err := runtime.ValidateLaunchWrapper(params.LaunchWrapper); err != nil {
+		return SpawnResult{}, fmt.Errorf("launch_wrapper: %w", err)
+	}
 	if params.AutoApprove && params.PermissionDecider != nil {
 		return SpawnResult{}, fmt.Errorf("auto_approve and permission_decider are mutually exclusive")
 	}
@@ -1379,6 +1388,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		promptCh:          make(chan struct{}, 1),
 		autoApprove:       params.AutoApprove,
 		permissionDecider: params.PermissionDecider,
+		launchWrapper:     params.LaunchWrapper,
 		workflowID:        params.WorkflowID,
 		nodeID:            params.NodeID,
 		activationID:      params.ActivationID,
@@ -1625,15 +1635,16 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		s.ensureChildBrokerRun(child)
 	}
 	startOpts := runtime.StartOptions{
-		Agent:        params.Agent,
-		AgentProfile: params.AgentProfile,
-		Label:        params.Label,
-		Dir:          params.Dir,
-		Model:        params.Model,
-		Thinking:     params.Thinking,
-		RuntimeID:    rtID,
-		Broker:       s.broker,
-		BrokerToken:  child.brokerToken,
+		Agent:         params.Agent,
+		AgentProfile:  params.AgentProfile,
+		Label:         params.Label,
+		Dir:           params.Dir,
+		Model:         params.Model,
+		Thinking:      params.Thinking,
+		LaunchWrapper: params.LaunchWrapper,
+		RuntimeID:     rtID,
+		Broker:        s.broker,
+		BrokerToken:   child.brokerToken,
 	}
 	discovery := cli.DiscoverServer(params.ServerURL, os.Getenv)
 	startOpts.ServerURL = discovery.URL
@@ -2332,16 +2343,17 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 			}
 
 			startOpts := runtime.StartOptions{
-				Agent:        identity.Agent,
-				AgentProfile: identity.AgentProfile,
-				Label:        child.label,
-				Model:        identity.Model,
-				Thinking:     phaseThinking,
-				Dir:          child.dir,
-				ServerURL:    serverURL,
-				RuntimeID:    child.id,
-				Broker:       s.broker,
-				BrokerToken:  child.brokerToken,
+				Agent:         identity.Agent,
+				AgentProfile:  identity.AgentProfile,
+				Label:         child.label,
+				Model:         identity.Model,
+				Thinking:      phaseThinking,
+				Dir:           child.dir,
+				ServerURL:     serverURL,
+				RuntimeID:     child.id,
+				Broker:        s.broker,
+				BrokerToken:   child.brokerToken,
+				LaunchWrapper: child.launchWrapper,
 			}
 
 			resumeID := prevSessionID
@@ -2606,16 +2618,17 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				return teamrunner.PhaseAttemptResult{ExitCode: 1}, resumeErr
 			}
 			startOpts := runtime.StartOptions{
-				Agent:        identity.Agent,
-				AgentProfile: identity.AgentProfile,
-				Label:        child.label,
-				Model:        identity.Model,
-				Thinking:     phaseThinking,
-				Dir:          child.dir,
-				ServerURL:    serverURL,
-				RuntimeID:    child.id,
-				Broker:       s.broker,
-				BrokerToken:  child.brokerToken,
+				Agent:         identity.Agent,
+				AgentProfile:  identity.AgentProfile,
+				Label:         child.label,
+				Model:         identity.Model,
+				Thinking:      phaseThinking,
+				Dir:           child.dir,
+				ServerURL:     serverURL,
+				RuntimeID:     child.id,
+				Broker:        s.broker,
+				BrokerToken:   child.brokerToken,
+				LaunchWrapper: child.launchWrapper,
 			}
 
 			resumeID := prevSessionID
