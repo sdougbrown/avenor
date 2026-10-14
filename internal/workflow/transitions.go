@@ -661,7 +661,14 @@ func applyAttemptTerminated(next *Snapshot, act *Activation, event Event) error 
 	switch exhaustion {
 	case RetryExhaustionFail:
 		act.Status = ActivationAttemptFailed
-		next.Instance.Status = WorkflowFailed
+		// Only an active instance can become terminal here. A blocked or
+		// awaiting-gate instance is actionable (another branch parked there, or
+		// a gate is pending); a fail exhaustion on this activation must not
+		// hide that state behind a terminal status — the failure is recorded
+		// on the activation itself.
+		if next.Instance.Status == WorkflowActive {
+			next.Instance.Status = WorkflowFailed
+		}
 	case RetryExhaustionOutcome:
 		// policy is non-nil here (nil policies default to block above).
 		act.SelectedOutcome = policy.Outcome
