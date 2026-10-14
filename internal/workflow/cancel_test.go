@@ -144,9 +144,10 @@ func testLateLeaseExpiredOnCanceledRejected(t *testing.T) {
 }
 
 // testLateGateDecisionOnCanceledDropped applies a resolving gate decision
-// directly to a canceled instance snapshot and asserts it is dropped without
-// spawning a phantom branch: the activation stays canceled, no gate is
-// recorded, and the instance stays canceled rather than completing.
+// through the full Reduce path (mustApply → applyEvent) so BOTH guards are
+// pinned: the canceledMutatingKinds rejection in applyEvent AND the
+// applyGate-level late-decision drop. A regression that removes EventGate
+// from canceledMutatingKinds must fail here, not only under applyGate.
 func testLateGateDecisionOnCanceledDropped(t *testing.T) {
 	state, _, attemptID := runToStart(t, newInstance(t))
 	state = mustApply(t, state, Command{
@@ -157,7 +158,6 @@ func testLateGateDecisionOnCanceledDropped(t *testing.T) {
 		Actor:            "ops",
 		Reason:           "why",
 	}, "cancel")
-	next := state
 	gateEvent := Event{
 		Kind:     EventGate,
 		Identity: baseIdentity(actStart(state).ID, attemptID),
@@ -169,11 +169,15 @@ func testLateGateDecisionOnCanceledDropped(t *testing.T) {
 			Outcome:      "done",
 		},
 	}
-	if err := applyGate(&next, actStart(state), gateEvent); err != nil {
-		t.Fatalf("late gate decision on canceled instance: unexpected error %v", err)
+	next, err := Reduce(state, gateEvent)
+	if err == nil {
+		t.Fatalf("late gate decision on canceled instance: want EventGate rejected by the canceledMutatingKinds guard, got nil error")
+	}
+	if !strings.Contains(err.Error(), "canceled workflow instance") {
+		t.Fatalf("late gate decision error = %v, want the canceled-instance rejection", err)
 	}
 	if !reflect.DeepEqual(next, state) {
-		t.Fatalf("late gate decision on canceled instance mutated the snapshot: got %+v want %+v", next, state)
+		t.Fatalf("rejected gate decision mutated the snapshot: got %+v want %+v", next, state)
 	}
 }
 
