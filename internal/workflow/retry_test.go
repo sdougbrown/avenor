@@ -13,6 +13,7 @@ package workflow
 // library.
 
 import (
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -645,5 +646,109 @@ func TestFailExhaustionDoesNotHideBlockedInstance(t *testing.T) {
 	}
 	if snap.Instance.Status != WorkflowBlocked {
 		t.Fatalf("instance after fail exhaustion = %s, want blocked (blocked branch stays surfaced)", snap.Instance.Status)
+	}
+}
+
+// TestUnblockKeepsInstanceBlockedWhileAnotherActivationBlocks pins the
+// multi-activation branch of instanceHasBlockedActivation: with two parallel
+// run nodes both exhausted to block, unblocking one activation must keep the
+// instance blocked (the other is still parked), and unblocking the last one
+// restores active.
+func TestUnblockKeepsInstanceBlockedWhileAnotherActivationBlocks(t *testing.T) {
+	templateJSON := []byte(`{
+  "schema_version": 1,
+  "template_id": "unblock-parallel",
+  "template_version": "1",
+  "entry_nodes": ["a", "b"],
+  "nodes": [
+    {"id": "a", "action": {"type": "run", "prompt": "branch a"}, "retry_policy": {"max_attempts": 1, "exhaustion": "block"}},
+    {"id": "b", "action": {"type": "run", "prompt": "branch b"}, "retry_policy": {"max_attempts": 1, "exhaustion": "block"}}
+  ],
+  "terminal_outcomes": ["done"]
+}`)
+	m, s, wf := newRetryFixture(t, templateJSON, "unblock-parallel")
+
+	run := func(node NodeID, leaseID, token string) {
+		snap, _, err := s.loadCurrent(wf)
+		if err != nil {
+			t.Fatalf("loadCurrent: %v", err)
+		}
+		act := activationByNode(&snap.Instance, node)
+		if act == nil {
+			t.Fatalf("activation for %s not found", node)
+		}
+		past := time.Now().UTC().Add(-time.Hour)
+		claimWithLease(t, s, wf, node, Lease{
+			ID:           LeaseID(leaseID),
+			ActivationID: act.ID,
+			Owner:        "alice",
+			TokenDigest:  ownerTokenDigest(token),
+			AcquiredAt:   past.Add(-time.Minute),
+			ExpiresAt:    past,
+		}, "alice")
+		started := startWithToken(t, m, wf, string(node), string(act.ID), leaseID, token)
+		attemptID, _ := started["attempt_id"].(string)
+		if attemptID == "" {
+			t.Fatalf("start result missing attempt_id: %#v", started)
+		}
+		mustTerminate(t, m, wf, node, act.ID, attemptID, leaseID)
+	}
+	unblock := func(node string) {
+		payload, err := json.Marshal(map[string]string{
+			"op": "unblock", "node_id": node, "actor": "ops", "reason": "re-arm " + node,
+		})
+		if err != nil {
+			t.Fatalf("marshal unblock: %v", err)
+		}
+		if _, err := m.WorkflowCommand(string(wf), payload); err != nil {
+			t.Fatalf("unblock %s: %v", node, err)
+		}
+	}
+	blockStatus := func(node string) ActivationStatus {
+		t.Helper()
+		snap, _, err := s.loadCurrent(wf)
+		if err != nil {
+			t.Fatalf("loadCurrent: %v", err)
+		}
+		return activationByNode(&snap.Instance, NodeID(node)).Status
+	}
+
+	run("a", "lease-a", "tok-a")
+	run("b", "lease-b", "tok-b")
+
+	// Both branches parked: the instance reports blocked.
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	if snap.Instance.Status != WorkflowBlocked {
+		t.Fatalf("instance after both block exhaustions = %s, want blocked", snap.Instance.Status)
+	}
+	if blockStatus("a") != ActivationBlocked || blockStatus("b") != ActivationBlocked {
+		t.Fatalf("activations after block = %s/%s, want blocked/blocked", blockStatus("a"), blockStatus("b"))
+	}
+
+	// Unblocking one activation must keep the instance blocked: the other is
+	// still parked in blocked.
+	unblock("a")
+	snap, _, err = s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	if blockStatus("a") != ActivationReady {
+		t.Fatalf("activation a after unblock = %s, want ready", blockStatus("a"))
+	}
+	if snap.Instance.Status != WorkflowBlocked {
+		t.Fatalf("instance after first unblock = %s, want blocked (b still parked)", snap.Instance.Status)
+	}
+
+	// Unblocking the last blocked activation restores active.
+	unblock("b")
+	snap, _, err = s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	if snap.Instance.Status != WorkflowActive {
+		t.Fatalf("instance after final unblock = %s, want active", snap.Instance.Status)
 	}
 }
