@@ -628,11 +628,12 @@ func applyAttemptTerminated(next *Snapshot, act *Activation, event Event) error 
 	act.UpdatedAt = nowUTC()
 
 	// Cancellation is a deliberate stop: the run's context was canceled by an
-	// operator kill or supervisor teardown, so it never consumes the retry
-	// budget and never re-arms the node. The activation parks in a blocked,
-	// actionable state (workflow.unblock re-arms it) and the instance surfaces
-	// blocked, so a client polling status sees a decision point instead of a
-	// wedged attempt_failed.
+	// operator kill or supervisor teardown. It never re-arms the node — but
+	// the canceled attempt already occupies a retry-budget slot (its attempt
+	// ID is on the activation), matching docs/workflow.md. The activation
+	// parks in a blocked, actionable state (workflow.unblock re-arms it) and
+	// the instance surfaces blocked, so a client polling status sees a
+	// decision point instead of a wedged attempt_failed.
 	if status == AttemptCanceled {
 		act.Status = ActivationBlocked
 		markInstanceBlocked(next)
