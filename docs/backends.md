@@ -36,6 +36,8 @@ The recorded PID for a wrapped backend is the wrapper's PID: the wrapper is the 
 
 Ownership is recorded per session: resuming with a different wrapper is rejected exactly like a backend, agent, or model mismatch. An omitted wrapper on resume inherits the session's authoritative wrapper.
 
+The launch wrapper does not change the control socket's trust boundary: anything able to talk to the socket could already choose backend commands. The wrapper is an additional capability for trusted callers, not a security feature.
+
 The wrapper is documented, not enforced. Whatever argv you supply must satisfy these requirements — avenor does not check them:
 
 - **exec semantics** — stdio passes through (Avenor speaks the backend protocol over pipes), the backend's exit code must propagate as the wrapper's exit code, signals sent to the wrapper must reach the backend, and child processes must be torn down when the backend dies.
