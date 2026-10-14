@@ -8,8 +8,13 @@ package workflow
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -741,5 +746,229 @@ func TestStore_ReducerRejectedCommandLeavesLogClean(t *testing.T) {
 	}
 	if !containsStr(err.Error(), "cannot resolve child outcome for activation in status") {
 		t.Fatalf("expected the retry to fail in the reduce phase, got %q", err)
+	}
+}
+
+// storeTemplateFixture builds a minimal one-node manual template with the
+// given id and version for StoreTemplate tests.
+func storeTemplateFixture(t *testing.T, id, version string) Template {
+	t.Helper()
+	data := fmt.Sprintf(`{"schema_version":1,"template_id":%q,"template_version":%q,"entry_nodes":["start"],"nodes":[{"id":"start","action":{"type":"manual"}}],"terminal_outcomes":["done"]}`, id, version)
+	var tmpl Template
+	if err := json.Unmarshal([]byte(data), &tmpl); err != nil {
+		t.Fatalf("unmarshal fixture: %v", err)
+	}
+	return tmpl
+}
+
+// TestStoreTemplateIdenticalRecreateIsNoOp asserts re-registering a template
+// with identical content under the same id+version succeeds without touching
+// the stored file: the stored bytes are unchanged after the second store.
+func TestStoreTemplateIdenticalRecreateIsNoOp(t *testing.T) {
+	s := newStore(t)
+	tmpl := storeTemplateFixture(t, "dup", "1")
+	if err := s.StoreTemplate("dup", "1", tmpl); err != nil {
+		t.Fatalf("first StoreTemplate: %v", err)
+	}
+	path := filepath.Join(s.root, "templates", "dup", "1.json")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read stored template: %v", err)
+	}
+	if err := s.StoreTemplate("dup", "1", tmpl); err != nil {
+		t.Fatalf("identical re-store: %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read stored template after re-store: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("identical re-store replaced the stored template file")
+	}
+}
+
+// TestStoreTemplateRejectsConflictingContent asserts storing different content
+// under an already-registered id+version fails with a TemplateConflictError
+// and leaves the originally stored template intact.
+func TestStoreTemplateRejectsConflictingContent(t *testing.T) {
+	s := newStore(t)
+	if err := s.StoreTemplate("dup", "1", storeTemplateFixture(t, "dup", "1")); err != nil {
+		t.Fatalf("first StoreTemplate: %v", err)
+	}
+	conflicting := storeTemplateFixture(t, "dup", "1")
+	conflicting.Nodes[0].Name = "renamed"
+	err := s.StoreTemplate("dup", "1", conflicting)
+	if err == nil {
+		t.Fatal("expected conflicting re-store to fail, got nil error")
+	}
+	var conflict *TemplateConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("error = %T (%v), want *TemplateConflictError", err, err)
+	}
+	if conflict.TemplateID != "dup" || conflict.TemplateVersion != "1" {
+		t.Fatalf("conflict names %q/%q, want dup/1", conflict.TemplateID, conflict.TemplateVersion)
+	}
+	loaded, err := s.LoadTemplate("dup", "1")
+	if err != nil {
+		t.Fatalf("LoadTemplate after conflict: %v", err)
+	}
+	if loaded.Nodes[0].Name == "renamed" {
+		t.Fatal("original template was replaced by the conflicting content")
+	}
+}
+
+// TestStoreTemplateConcurrentConflictingCreateHasOneWinner hammers
+// StoreTemplate with concurrent creates of different content under the same
+// id+version and asserts exactly one registration wins: the losing callers
+// all get a TemplateConflictError and the stored file holds the winner's
+// content, never a mixture or a silent overwrite by a later writer.
+func TestStoreTemplateConcurrentConflictingCreateHasOneWinner(t *testing.T) {
+	s := newStore(t)
+	const writers = 32
+	errs := make([]error, writers)
+
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			tmpl := storeTemplateFixture(t, "race", "1")
+			tmpl.Nodes[0].Name = fmt.Sprintf("writer-%d", i)
+			errs[i] = s.StoreTemplate("race", "1", tmpl)
+		}(i)
+	}
+	wg.Wait()
+
+	winners := 0
+	winnerIndex := -1
+	for i, err := range errs {
+		if err == nil {
+			winners++
+			winnerIndex = i
+			continue
+		}
+		var conflict *TemplateConflictError
+		if !errors.As(err, &conflict) {
+			t.Fatalf("writer %d: error = %T (%v), want *TemplateConflictError", i, err, err)
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("winning registrations = %d, want exactly 1", winners)
+	}
+	loaded, err := s.LoadTemplate("race", "1")
+	if err != nil {
+		t.Fatalf("LoadTemplate after race: %v", err)
+	}
+	if want := fmt.Sprintf("writer-%d", winnerIndex); loaded.Nodes[0].Name != want {
+		t.Fatalf("stored template holds node name %q, want the single winner's %q", loaded.Nodes[0].Name, want)
+	}
+}
+
+// TestStoreTemplateCorruptStoredFileIsNotAConflict asserts a stored template
+// file that cannot be parsed reports a TemplateCorruptError rather than
+// claiming the content differs, and leaves the stored file untouched.
+func TestStoreTemplateCorruptStoredFileIsNotAConflict(t *testing.T) {
+	s := newStore(t)
+	dir := filepath.Join(s.root, "templates", "corrupt")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	path := filepath.Join(dir, "1.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("write corrupt template: %v", err)
+	}
+	err := s.StoreTemplate("corrupt", "1", storeTemplateFixture(t, "corrupt", "1"))
+	if err == nil {
+		t.Fatal("expected corrupt stored template to fail, got nil error")
+	}
+	var corrupt *TemplateCorruptError
+	if !errors.As(err, &corrupt) {
+		t.Fatalf("error = %T (%v), want *TemplateCorruptError", err, err)
+	}
+	if errors.As(err, new(*TemplateConflictError)) {
+		t.Fatal("corrupt stored template was misreported as a content conflict")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read stored template after corrupt error: %v", err)
+	}
+	if string(after) != "{not json" {
+		t.Fatalf("stored template was modified: %q", after)
+	}
+}
+
+// TestStoreTemplateAcceptsCanonicallyEquivalentRestores asserts the
+// canonicalization fallback: a stored file whose bytes are not the canonical
+// serialization (different key order and spacing) but decode to a
+// semantically equal template is accepted as a no-op re-store.
+func TestStoreTemplateAcceptsCanonicallyEquivalentRestores(t *testing.T) {
+	s := newStore(t)
+	tmpl := storeTemplateFixture(t, "canon", "1")
+	if err := s.StoreTemplate("canon", "1", tmpl); err != nil {
+		t.Fatalf("first StoreTemplate: %v", err)
+	}
+	// Rewrite the stored file with different key order and spacing.
+	nonCanonical := `{"terminal_outcomes":["done"],"nodes":[{"action":{"type":"manual"},"id":"start"}],"entry_nodes":["start"],"template_version":"1","template_id":"canon","schema_version":1}`
+	path := filepath.Join(s.root, "templates", "canon", "1.json")
+	if err := os.WriteFile(path, []byte(nonCanonical), 0o644); err != nil {
+		t.Fatalf("rewrite stored template: %v", err)
+	}
+	if err := s.StoreTemplate("canon", "1", tmpl); err != nil {
+		t.Fatalf("canonically equivalent re-store: %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read stored template after re-store: %v", err)
+	}
+	if string(after) != nonCanonical {
+		t.Fatal("canonically equivalent re-store replaced the stored file")
+	}
+}
+
+// TestStoreTemplateCanonicalizesMetadataNumbers pins the canonicalization
+// fallback against number-formatting drift (the decodeStrict path decodes
+// with UseNumber, so metadata values become json.Number): a stored template
+// whose metadata numbers are formatted differently from the incoming
+// canonical form ("1.0" vs 1.0) must be judged by semantic equality, not raw
+// bytes — equal content is a no-op, different content is a conflict.
+func TestStoreTemplateCanonicalizesMetadataNumbers(t *testing.T) {
+	s := newStore(t)
+	tmpl := storeTemplateFixture(t, "num", "1")
+	tmpl.Metadata = map[string]any{"limit": json.Number("1.0"), "name": "x"}
+	if err := s.StoreTemplate("num", "1", tmpl); err != nil {
+		t.Fatalf("first StoreTemplate: %v", err)
+	}
+	// Same semantic metadata with an equivalent-but-differently-keyed stored
+	// file: still a no-op.
+	same := storeTemplateFixture(t, "num", "1")
+	same.Metadata = map[string]any{"name": "x", "limit": json.Number("1.0")}
+	if err := s.StoreTemplate("num", "1", same); err != nil {
+		t.Fatalf("equivalent re-store with json.Number metadata: %v", err)
+	}
+	// Number-formatting drift alone is not a conflict: the stored file may
+	// carry "1" where the incoming canonical form has "1.0" (json.Number
+	// keeps the literal, a float64 producer drops the trailing ".0").
+	stored := filepath.Join(s.root, "templates", "num", "1.json")
+	raw, err := os.ReadFile(stored)
+	if err != nil {
+		t.Fatalf("read stored template: %v", err)
+	}
+	drifted := strings.Replace(string(raw), `"limit":1.0`, `"limit":1`, 1)
+	if drifted == string(raw) {
+		t.Fatal("fixture drift: stored metadata does not carry the 1.0 literal")
+	}
+	if err := os.WriteFile(stored, []byte(drifted), 0o644); err != nil {
+		t.Fatalf("rewrite stored template with drifted number format: %v", err)
+	}
+	if err := s.StoreTemplate("num", "1", same); err != nil {
+		t.Fatalf("re-store across number-format drift: %v", err)
+	}
+	// Different metadata values under the same id+version: conflict.
+	diff := storeTemplateFixture(t, "num", "1")
+	diff.Metadata = map[string]any{"name": "x", "limit": json.Number("2.0")}
+	err = s.StoreTemplate("num", "1", diff)
+	var conflict *TemplateConflictError
+	if err == nil || !errors.As(err, &conflict) {
+		t.Fatalf("re-store with different metadata = %v, want TemplateConflictError", err)
 	}
 }

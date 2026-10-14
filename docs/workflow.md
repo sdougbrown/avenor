@@ -61,6 +61,12 @@ avenor workflow status --socket /path/to/socket wf_...
 Then drive nodes with `claim` → `start` → `complete` (or `gate`), as described
 in [Driving a workflow](#driving-a-workflow).
 
+Registration is idempotent: re-creating a template with identical content
+under the same `template_id` + `template_version` succeeds as a no-op. Different
+content under an already-registered id+version is rejected with an idempotency
+conflict error (code `-32031`), preserving the exact revision instances bind
+to.
+
 ## The durable layout
 
 The workflow root separates reusable templates from instantiated workflows:

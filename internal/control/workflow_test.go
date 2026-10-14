@@ -5,12 +5,15 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/sdougbrown/avenor/internal/workflow"
 )
 
 // fakeWorkflowHandler is a recording stub implementing WorkflowHandler for
 // dispatch routing tests.
 type fakeWorkflowHandler struct {
 	createCalled      bool
+	createErr         error
 	instantiateCalled bool
 	statusID          string
 	statusResult      any
@@ -32,7 +35,7 @@ var _ WorkflowHandler = (*fakeWorkflowHandler)(nil)
 
 func (f *fakeWorkflowHandler) WorkflowCreate(params json.RawMessage) (any, error) {
 	f.createCalled = true
-	return map[string]any{"workflow_id": "wf_new"}, nil
+	return map[string]any{"workflow_id": "wf_new"}, f.createErr
 }
 
 func (f *fakeWorkflowHandler) WorkflowInstantiate(params json.RawMessage) (any, error) {
@@ -84,6 +87,24 @@ func newWorkflowTestServer(t *testing.T) (*ControlServer, *fakeWorkflowHandler) 
 	fake := &fakeWorkflowHandler{}
 	s.SetWorkflowHandler(fake)
 	return s, fake
+}
+
+func TestWorkflowCreateConflictMappedToIdempotencyCode(t *testing.T) {
+	s, fake := newWorkflowTestServer(t)
+	fake.createErr = &workflow.TemplateConflictError{
+		TemplateID: "software-factory-work", TemplateVersion: "1",
+	}
+
+	resp := s.dispatch(nil, Request{JSONRPC: "2.0", ID: 1, Method: "workflow.create", Params: json.RawMessage(`{"name":"review"}`)})
+	if resp.Error == nil || resp.Error.Code != -32031 {
+		t.Fatalf("expected -32031 idempotency conflict, got: %+v", resp.Error)
+	}
+	// The message names the conflicting id+version exactly, matching the
+	// TemplateConflictError message.
+	want := `template "software-factory-work" version "1" already registered with different content`
+	if resp.Error.Message != want {
+		t.Fatalf("conflict message = %q, want %q", resp.Error.Message, want)
+	}
 }
 
 func TestWorkflowStatusDispatch(t *testing.T) {

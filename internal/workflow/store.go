@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +9,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sync"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/durablefile"
@@ -18,6 +21,11 @@ import (
 // snapshot per instance.
 type Store struct {
 	root string
+	// templateMu serializes template registrations so the existence and
+	// content checks in StoreTemplate cannot race a concurrent create's
+	// rename, which would silently overwrite a different template under the
+	// same id+version.
+	templateMu sync.Mutex
 	// now is the clock the recovery lease sweep reads for staleness (the
 	// "recovery" reason). It must match the manager's lease-liveness clock so
 	// injected timestamps and staleness comparisons agree.
@@ -260,6 +268,8 @@ func (s *Store) writeSnapshot(workflowID WorkflowID, snap Snapshot) error {
 // StoreTemplate atomically persists a versioned template under
 // <root>/templates/<templateID>/<version>.json.
 func (s *Store) StoreTemplate(templateID TemplateID, templateVersion TemplateVersion, template Template) error {
+	s.templateMu.Lock()
+	defer s.templateMu.Unlock()
 	dir := filepath.Join(s.root, "templates", string(templateID))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -267,6 +277,41 @@ func (s *Store) StoreTemplate(templateID TemplateID, templateVersion TemplateVer
 	path := filepath.Join(dir, string(templateVersion)+".json")
 	data, err := template.MarshalJSON()
 	if err != nil {
+		return err
+	}
+	// Templates are immutable revisions: re-registering identical bytes is a
+	// no-op, while different content under the same id+version is rejected so
+	// running instances never load a silently replaced template.
+	if existing, err := os.ReadFile(path); err == nil {
+		identical := bytes.Equal(existing, data)
+		if !identical {
+			var current Template
+			if jerr := json.Unmarshal(existing, &current); jerr != nil {
+				return &TemplateCorruptError{TemplateID: templateID, TemplateVersion: templateVersion, Err: jerr}
+			}
+			if canonical, merr := current.MarshalJSON(); merr == nil {
+				identical = bytes.Equal(canonical, data)
+			}
+		}
+		if !identical {
+			// Number formatting must not decide the conflict: the stored file
+			// may have been produced by a writer that serialized metadata
+			// numbers differently (json.Number keeps the literal, a float64
+			// drops a trailing ".0"), while the content is semantically the
+			// same. Compare both documents decoded generically, where numbers
+			// become float64 and formatting differences vanish.
+			var existingDoc, incomingDoc any
+			if jerr := json.Unmarshal(existing, &existingDoc); jerr == nil {
+				if jerr := json.Unmarshal(data, &incomingDoc); jerr == nil {
+					identical = reflect.DeepEqual(existingDoc, incomingDoc)
+				}
+			}
+		}
+		if identical {
+			return nil
+		}
+		return &TemplateConflictError{TemplateID: templateID, TemplateVersion: templateVersion}
+	} else if !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
 	tmp, err := os.CreateTemp(dir, string(templateVersion)+".json.tmp*")

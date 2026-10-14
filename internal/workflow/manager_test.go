@@ -5,6 +5,7 @@ package workflow
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -239,6 +240,56 @@ func TestManagerCreateRejectsInvalidTemplate(t *testing.T) {
 	}
 	if _, err := m.WorkflowCreate([]byte(`not json`)); err == nil {
 		t.Fatal("WorkflowCreate accepted non-JSON")
+	}
+}
+
+// TestManagerCreateRecreateIdempotency asserts the manager-level contract:
+// re-creating an identical template under the same id+version succeeds as a
+// no-op, while different content under the same id+version is rejected with a
+// TemplateConflictError and leaves the original registration intact.
+func TestManagerCreateRecreateIdempotency(t *testing.T) {
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	m := NewManager(s)
+	if _, err := m.WorkflowCreate([]byte(managerTemplateJSON)); err != nil {
+		t.Fatalf("WorkflowCreate: %v", err)
+	}
+	if _, err := m.WorkflowCreate([]byte(managerTemplateJSON)); err != nil {
+		t.Fatalf("identical re-create: %v", err)
+	}
+	// Build the conflicting payload by decoding and mutating, so the fixture
+	// cannot drift out of sync with managerTemplateJSON the way a string
+	// replace can.
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(managerTemplateJSON), &doc); err != nil {
+		t.Fatalf("unmarshal managerTemplateJSON: %v", err)
+	}
+	nodes, _ := doc["nodes"].([]any)
+	if len(nodes) == 0 {
+		t.Fatal("managerTemplateJSON has no nodes")
+	}
+	node0, _ := nodes[0].(map[string]any)
+	node0["name"] = "renamed"
+	conflicting, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal conflicting payload: %v", err)
+	}
+	_, err = m.WorkflowCreate([]byte(conflicting))
+	if err == nil {
+		t.Fatal("expected conflicting re-create to fail, got nil error")
+	}
+	var conflict *TemplateConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("error = %T (%v), want *TemplateConflictError", err, err)
+	}
+	loaded, err := s.LoadTemplate("mgr-test", "1")
+	if err != nil {
+		t.Fatalf("LoadTemplate after conflict: %v", err)
+	}
+	if loaded.Nodes[0].Name == "renamed" {
+		t.Fatal("original template was replaced by the conflicting content")
 	}
 }
 
