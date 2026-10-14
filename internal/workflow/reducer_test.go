@@ -151,6 +151,8 @@ func TestApply(t *testing.T) {
 		{"child_outcome_wrong_lease", testChildOutcomeWrongLease},
 		{"child_outcome_branch_target", testChildOutcomeBranchTarget},
 		{"child_events_replay_idempotent", testChildEventsReplayIdempotent},
+		{"late_lease_expired_on_canceled_rejected", testLateLeaseExpiredOnCanceledRejected},
+		{"late_gate_decision_on_canceled_dropped", testLateGateDecisionOnCanceledDropped},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, tt.run)
