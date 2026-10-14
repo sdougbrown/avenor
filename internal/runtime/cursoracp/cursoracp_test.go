@@ -67,3 +67,17 @@ func TestProviderResumeLaunchesWithWrapperFromOpts(t *testing.T) {
 	// backend argv follows behind it.
 	waitForArgv(t, argvPath, []string{wrapper, "--flag", "agent", "acp"})
 }
+
+// TestCapabilitiesPinsBackendID keeps the backend id string pinned: the id is
+// the wire identity for backend selection, and a silent rename would break
+// operators' configured backend values without any test failure.
+func TestCapabilitiesPinsBackendID(t *testing.T) {
+	p := New()
+	caps, err := p.Capabilities(context.Background())
+	if err != nil {
+		t.Fatalf("Capabilities: %v", err)
+	}
+	if caps.Backend != "cursor-acp" {
+		t.Fatalf("Capabilities.Backend = %q, want cursor-acp", caps.Backend)
+	}
+}
