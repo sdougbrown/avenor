@@ -351,7 +351,7 @@ func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions) 
 			}
 			return StartClientWithAgentProfileThinkingAndDir(
 				ctx, "", opts.Model, "", opts.Agent, opts.AgentProfile, opts.Thinking, opts.Dir,
-				brokerURL, brokerRunID, brokerToken,
+				brokerURL, brokerRunID, brokerToken, nil,
 			)
 		}
 	}

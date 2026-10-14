@@ -27,7 +27,7 @@ type Provider struct {
 
 	// startClient constructs a new app-server client. Overridable in tests;
 	// defaults to StartClient when nil.
-	startClient func(context.Context) (*client, error)
+	startClient func(context.Context, []string) (*client, error)
 
 	// Broker fields for channel-wrapped prompt injection.
 	broker          *broker.Broker
@@ -335,7 +335,7 @@ func (p *Provider) ensureClient(ctx context.Context) (*client, error) {
 	if starter == nil {
 		starter = StartClient
 	}
-	c, err := starter(ctx)
+	c, err := starter(ctx, nil)
 	if err != nil {
 		return nil, err
 	}

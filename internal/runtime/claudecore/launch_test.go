@@ -142,12 +142,12 @@ func TestStripANSILeavesTextIntact(t *testing.T) {
 func TestLaunchCommandRedirectsStderr(t *testing.T) {
 	// Every word goes through ShellQuote, the redirect target included, so a path
 	// with a space in it survives the shell.
-	got := LaunchCommand([]string{"--agent", "my agent"}, "/tmp/log with space.log")
+	got := LaunchCommand([]string{"--agent", "my agent"}, "/tmp/log with space.log", nil)
 	want := `exec claude "--agent" "my agent" 2>"/tmp/log with space.log"`
 	if got != want {
 		t.Errorf("LaunchCommand = %q, want %q", got, want)
 	}
-	if got := LaunchCommand([]string{"--agent", "horse"}, ""); strings.Contains(got, "2>") {
+	if got := LaunchCommand([]string{"--agent", "horse"}, "", nil); strings.Contains(got, "2>") {
 		t.Errorf("no log requested but command redirects: %q", got)
 	}
 }

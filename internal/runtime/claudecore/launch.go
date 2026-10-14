@@ -101,9 +101,13 @@ func (a AgentNotFound) Message() string {
 // and with remain-on-exit holding the dead pane open). A file survives both. The
 // redirect costs nothing on a healthy run: Claude Code draws its TUI on stdout
 // and leaves stderr empty.
-func LaunchCommand(args []string, stderrLog string) string {
-	parts := make([]string, 0, len(args)+3)
-	parts = append(parts, "exec", "claude")
+func LaunchCommand(args []string, stderrLog string, launchWrapper []string) string {
+	parts := make([]string, 0, len(args)+len(launchWrapper)+3)
+	parts = append(parts, "exec")
+	// The wrapper argv goes in front of claude so the shell execs into the
+	// wrapper, which owns the claude process tree.
+	parts = append(parts, launchWrapper...)
+	parts = append(parts, "claude")
 	for _, arg := range args {
 		parts = append(parts, ShellQuote(arg))
 	}
