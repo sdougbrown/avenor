@@ -923,3 +923,33 @@ func TestStoreTemplateAcceptsCanonicallyEquivalentRestores(t *testing.T) {
 		t.Fatal("canonically equivalent re-store replaced the stored file")
 	}
 }
+
+// TestStoreTemplateCanonicalizesMetadataNumbers pins the canonicalization
+// fallback against number-formatting drift (the decodeStrict path decodes
+// with UseNumber, so metadata values become json.Number): a stored template
+// whose metadata numbers are formatted differently from the incoming
+// canonical form ("1.0" vs 1.0) must be judged by semantic equality, not raw
+// bytes — equal content is a no-op, different content is a conflict.
+func TestStoreTemplateCanonicalizesMetadataNumbers(t *testing.T) {
+	s := newStore(t)
+	tmpl := storeTemplateFixture(t, "num", "1")
+	tmpl.Metadata = map[string]any{"limit": json.Number("1.0"), "name": "x"}
+	if err := s.StoreTemplate("num", "1", tmpl); err != nil {
+		t.Fatalf("first StoreTemplate: %v", err)
+	}
+	// Same semantic metadata with an equivalent-but-differently-keyed stored
+	// file: still a no-op.
+	same := storeTemplateFixture(t, "num", "1")
+	same.Metadata = map[string]any{"name": "x", "limit": json.Number("1.0")}
+	if err := s.StoreTemplate("num", "1", same); err != nil {
+		t.Fatalf("equivalent re-store with json.Number metadata: %v", err)
+	}
+	// Different metadata values under the same id+version: conflict.
+	diff := storeTemplateFixture(t, "num", "1")
+	diff.Metadata = map[string]any{"name": "x", "limit": json.Number("2.0")}
+	err := s.StoreTemplate("num", "1", diff)
+	var conflict *TemplateConflictError
+	if err == nil || !errors.As(err, &conflict) {
+		t.Fatalf("re-store with different metadata = %v, want TemplateConflictError", err)
+	}
+}
