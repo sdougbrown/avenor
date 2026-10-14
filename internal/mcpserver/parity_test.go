@@ -376,6 +376,9 @@ func assertFields(t *testing.T, structName string, allowed, required []string) {
 		if !a.AutoApprove {
 			t.Errorf("%s: auto_approve not populated", structName)
 		}
+		if !reflect.DeepEqual(a.LaunchWrapper, []string{"test"}) {
+			t.Errorf("%s: launch_wrapper not populated: %v", structName, a.LaunchWrapper)
+		}
 	case "statusArgs":
 		var a statusArgs
 		if err := json.Unmarshal(data, &a); err != nil {

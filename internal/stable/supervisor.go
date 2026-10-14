@@ -2874,8 +2874,20 @@ func (c *childRuntime) sessionID() string {
 	return c.session.SessionID
 }
 
+// authoritativeIdentityEqual compares the ownership fields that every resume
+// path resolves to a complete value. LaunchWrapper is compared separately: it
+// is optional on direct resumes (omission inherits), so equality semantics
+// differ per path.
 func authoritativeIdentityEqual(left, right effectiveIdentity) bool {
-	return left.Backend == right.Backend && left.Agent == right.Agent && left.Model == right.Model && left.AgentProfile == right.AgentProfile && slices.Equal(left.LaunchWrapper, right.LaunchWrapper)
+	return left.Backend == right.Backend && left.Agent == right.Agent && left.Model == right.Model && left.AgentProfile == right.AgentProfile
+}
+
+// launchWrapperSupplied reports whether a resume request carries an explicit
+// wrapper. Roster entries do not carry wrappers (docs/backends.md), so an
+// omitted wrapper must inherit the session's authoritative one instead of
+// reading as a mismatch against it.
+func launchWrapperSupplied(wrapper []string) bool {
+	return len(wrapper) > 0
 }
 
 func resumeIdentityConflict(sessionID, field, supplied, authoritative string) error {
@@ -2898,6 +2910,14 @@ func (s *Supervisor) resolveDirectResumeIdentity(sessionID string, supplied, res
 	mapped, ok := s.sessionIdentity(sessionID)
 	if !ok {
 		return resolved, nil
+	}
+	// Both direct paths share this rule: a supplied wrapper that differs
+	// conflicts, an omitted one inherits the authoritative value. Roster
+	// entries never carry wrappers, so the roster path cannot rely on
+	// resolved.LaunchWrapper being non-empty.
+	if launchWrapperSupplied(supplied.LaunchWrapper) && !slices.Equal(supplied.LaunchWrapper, mapped.LaunchWrapper) {
+		return effectiveIdentity{}, resumeIdentityConflict(sessionID, "launch_wrapper",
+			launchWrapperDisplay(supplied.LaunchWrapper), launchWrapperDisplay(mapped.LaunchWrapper))
 	}
 	if supplied.RosterFile != "" || supplied.RosterEntry != "" {
 		if supplied.RosterFile != mapped.RosterFile || supplied.RosterEntry != mapped.RosterEntry {
@@ -2928,6 +2948,9 @@ func (s *Supervisor) resolveDirectResumeIdentity(sessionID string, supplied, res
 // resolveWorkflowResumeIdentity treats a phase selection as complete. Resuming
 // with a changed phase agent/model/profile is as unsafe as changing backend, so
 // reject it before provider creation rather than silently replacing the map.
+// The wrapper comparison stays strict: resolved.LaunchWrapper carries the
+// run's configured wrapper on every attempt (phases cannot override it and
+// there is no omission channel), so any difference is a real config change.
 func (s *Supervisor) resolveWorkflowResumeIdentity(sessionID string, resolved effectiveIdentity) (effectiveIdentity, error) {
 	if sessionID == "" {
 		return resolved, nil
@@ -2938,6 +2961,10 @@ func (s *Supervisor) resolveWorkflowResumeIdentity(sessionID string, resolved ef
 	}
 	if !authoritativeIdentityEqual(resolved, mapped) {
 		return effectiveIdentity{}, fmt.Errorf("cannot resume session %q: phase identity conflicts with the authoritative session identity", sessionID)
+	}
+	if !slices.Equal(resolved.LaunchWrapper, mapped.LaunchWrapper) {
+		return effectiveIdentity{}, resumeIdentityConflict(sessionID, "launch_wrapper",
+			launchWrapperDisplay(resolved.LaunchWrapper), launchWrapperDisplay(mapped.LaunchWrapper))
 	}
 	return mapped, nil
 }

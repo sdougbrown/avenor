@@ -1017,6 +1017,7 @@ func TestIdempotencyHashExclusionSet(t *testing.T) {
 		"RosterFile":        func(p *SpawnParams) { p.RosterFile = "/other-roster" },
 		"RosterEntry":       func(p *SpawnParams) { p.RosterEntry = "other-entry" },
 		"ParentRunID":       func(p *SpawnParams) { p.ParentRunID = "run_other" },
+		"LaunchWrapper":     func(p *SpawnParams) { p.LaunchWrapper = []string{"other-wrapper"} },
 	}
 	var got string
 	for field, mutate := range intent {
