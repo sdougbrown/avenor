@@ -28,7 +28,7 @@ import (
 // node hands off to an auto-dispatched assessment run node that reroutes to a
 // publication run node on its ready outcome. Both provider nodes declare
 // roster-backed assignments resolved at dispatch time.
-func factorySelectionTemplateJSON(t *testing.T, templateID string, ttlSeconds int, rosterPath string) []byte {
+func factorySelectionTemplateJSON(t *testing.T, templateID string, ttlSeconds int, rosterPath, assessmentThinking, publisherThinking string) []byte {
 	policy := map[string]any{"mode": "auto", "controller_id": "c1", "priority": 30}
 	template := map[string]any{
 		"schema_version":   1,
@@ -48,7 +48,7 @@ func factorySelectionTemplateJSON(t *testing.T, templateID string, ttlSeconds in
 				"dependencies": []string{"intake"},
 				"action":       map[string]any{"type": "run", "prompt": "assess the issue"},
 				"assignment": map[string]any{
-					"role": "assessor", "roster_file": rosterPath, "roster_entry": "assessor", "thinking": "high",
+					"role": "assessor", "roster_file": rosterPath, "roster_entry": "assessor", "thinking": assessmentThinking,
 				},
 				"dispatch":     policy,
 				"retry_policy": map[string]any{"max_attempts": 2, "exhaustion": "block"},
@@ -59,7 +59,7 @@ func factorySelectionTemplateJSON(t *testing.T, templateID string, ttlSeconds in
 				"dependencies": []string{"assessment"},
 				"action":       map[string]any{"type": "run", "prompt": "publish the work"},
 				"assignment": map[string]any{
-					"role": "publisher", "roster_file": rosterPath, "roster_entry": "publisher", "thinking": "medium",
+					"role": "publisher", "roster_file": rosterPath, "roster_entry": "publisher", "thinking": publisherThinking,
 				},
 				"dispatch": map[string]any{"mode": "auto", "controller_id": "c1", "priority": 60},
 			},
@@ -91,19 +91,28 @@ type factorySelectionFixture struct {
 }
 
 func newFactorySelectionFixture(t *testing.T, name string, ttlSeconds int) *factorySelectionFixture {
+	return newFactorySelectionFixtureRoster(t, name, ttlSeconds,
+		`{"assessor":{"backend":"codex-app-server","agent":"factory-assessor","model":"glm-5.3"},"publisher":{"backend":"pi","agent":"factory-publisher","model":"claude-opus"}}`,
+		"high", "medium")
+}
+
+// newFactorySelectionFixtureRoster builds the fixture from explicit roster
+// entries and per-assignment thinking levels, so tests can pin what a
+// roster-level default (an assignment without a level) resolves to.
+func newFactorySelectionFixtureRoster(t *testing.T, name string, ttlSeconds int, rosterEntries, assessmentThinking, publisherThinking string) *factorySelectionFixture {
 	t.Helper()
-	rosterPath := writeStage5Roster(t, t.TempDir(), `{"assessor":{"backend":"codex-app-server","agent":"factory-assessor","model":"glm-5.3"},"publisher":{"backend":"pi","agent":"factory-publisher","model":"claude-opus"}}`)
+	rosterPath := writeStage5Roster(t, t.TempDir(), rosterEntries)
 	// The effective selections come from the supervisor's production
 	// assignment resolver — the same path automatic dispatch uses — never
 	// from test-local resolution logic.
 	assessment, err := resolveAssignmentSelection(&workflow.Assignment{
-		Role: "assessor", RosterFile: rosterPath, RosterEntry: "assessor", Thinking: "high",
+		Role: "assessor", RosterFile: rosterPath, RosterEntry: "assessor", Thinking: assessmentThinking,
 	})
 	if err != nil {
 		t.Fatalf("resolve assessor assignment: %v", err)
 	}
 	publisher, err := resolveAssignmentSelection(&workflow.Assignment{
-		Role: "publisher", RosterFile: rosterPath, RosterEntry: "publisher", Thinking: "medium",
+		Role: "publisher", RosterFile: rosterPath, RosterEntry: "publisher", Thinking: publisherThinking,
 	})
 	if err != nil {
 		t.Fatalf("resolve publisher assignment: %v", err)
@@ -120,7 +129,7 @@ func newFactorySelectionFixture(t *testing.T, name string, ttlSeconds int) *fact
 	if err != nil {
 		t.Fatalf("workflow barrier: %v", err)
 	}
-	if _, err := mgr.WorkflowCreate(factorySelectionTemplateJSON(t, "factory-sel-"+name, ttlSeconds, rosterPath)); err != nil {
+	if _, err := mgr.WorkflowCreate(factorySelectionTemplateJSON(t, "factory-sel-"+name, ttlSeconds, rosterPath, assessmentThinking, publisherThinking)); err != nil {
 		t.Fatalf("WorkflowCreate: %v", err)
 	}
 	out, err := mgr.WorkflowInstantiate(mustJSON(t, map[string]string{"template_id": "factory-sel-" + name, "template_version": "1.0.0"}))
@@ -462,4 +471,55 @@ func TestFactoryRerouteCreatesNewActivationSelection(t *testing.T) {
 	if pub.ID == begin.ActivationID {
 		t.Fatal("reroute reused the assessment activation")
 	}
+}
+
+// TestFactoryDispatchPinsRosterThinkingDefault proves the automatic dispatch
+// path applies the #208 "default, not identity" rule to node assignments: a
+// run node whose assignment names a roster entry but omits thinking pins the
+// entry's thinking level on the activation, not an empty one. The expected
+// selection is built field-by-field here rather than through
+// resolveAssignmentSelection, so a regression that drops the fallback fails
+// the comparison instead of matching an equally empty expectation.
+func TestFactoryDispatchPinsRosterThinkingDefault(t *testing.T) {
+	f := newFactorySelectionFixtureRoster(t, "sel-roster-thinking", 900,
+		`{"assessor":{"backend":"codex-app-server","agent":"factory-assessor","model":"glm-5.3","thinking":"high"},"publisher":{"backend":"pi","agent":"factory-publisher","model":"claude-opus","thinking":"medium"}}`,
+		"", "")
+	f.completeIntake(t)
+	act := f.activationByNode(t, "assessment")
+	if act == nil || act.Status != workflow.ActivationPending {
+		t.Fatalf("no pending assessment activation: %+v", act)
+	}
+	out, err := f.sup.dispatchWorkflowNode(context.Background(), DispatchRequest{
+		WorkflowID:       f.wf,
+		NodeID:           "assessment",
+		ActivationID:     string(act.ID),
+		ExpectedRevision: actRevision(t, f, act),
+		ControllerID:     "c1",
+		LeaderLeaseID:    f.leaseID,
+		OwnerEpoch:       f.ownerEpoch,
+		Selection:        nil,
+	})
+	if err != nil {
+		t.Fatalf("dispatchWorkflowNode: %v", err)
+	}
+	if out.Kind != Dispatched {
+		t.Fatalf("dispatch outcome = %s (%s), want dispatched", out.Kind, out.Detail)
+	}
+	sum := sha256.Sum256(readRosterBytes(t, f.rosterPath))
+	want := &workflow.ExecutionSelection{
+		Role: "assessor", Backend: "codex-app-server", Agent: "factory-assessor",
+		Model: "glm-5.3", Thinking: "high",
+		RosterDigest: "sha256:" + hex.EncodeToString(sum[:]),
+	}
+	assertSelection(t, "assessment activation", f.activationByNode(t, "assessment").Selection, want, f.rosterPath)
+}
+
+// readRosterBytes reads the roster file for an independent digest computation.
+func readRosterBytes(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read roster file: %v", err)
+	}
+	return data
 }

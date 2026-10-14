@@ -13,6 +13,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/rosterconfig"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/teamrunner"
+	"github.com/sdougbrown/avenor/internal/workflow"
 )
 
 // The spawn path is what MCP-driven delegation uses, so the roster default
@@ -235,5 +236,63 @@ func TestStableLoopPhaseCachedSelectionKeepsRosterThinking(t *testing.T) {
 		if opts.Thinking != "high" {
 			t.Fatalf("attempt %d Thinking = %q, want the roster level", i+1, opts.Thinking)
 		}
+	}
+}
+
+// Workflow node assignments resolve through the same roster rules the spawn
+// and phase paths enforce, so an assignment that names a roster entry gets
+// the entry's thinking level as the default (an explicit assignment level
+// wins), not the template's — or no — level (#287).
+func TestStableWorkflowAssignmentRosterSuppliesThinkingUnlessAssignmentOverridesIt(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		entry              string
+		assignmentThinking string
+		want               string
+	}{
+		{
+			name:  "roster supplies the level",
+			entry: `{"horse":{"backend":"codex-app-server","model":"gpt-5.6-terra","thinking":"high"}}`,
+			want:  "high",
+		},
+		{
+			name:               "explicit assignment thinking overrides the roster",
+			entry:              `{"horse":{"backend":"codex-app-server","model":"gpt-5.6-terra","thinking":"high"}}`,
+			assignmentThinking: "low",
+			want:               "low",
+		},
+		{
+			name:  "entry without a level leaves thinking to the backend default",
+			entry: `{"horse":{"backend":"codex-app-server","model":"gpt-5.6-terra"}}`,
+			want:  "",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rosterPath := writeStage5Roster(t, t.TempDir(), tc.entry)
+			selection, err := resolveAssignmentSelection(&workflow.Assignment{
+				Role: "worker", RosterFile: rosterPath, RosterEntry: "horse", Thinking: tc.assignmentThinking,
+			})
+			if err != nil {
+				t.Fatalf("resolveAssignmentSelection: %v", err)
+			}
+			if selection.Thinking != tc.want {
+				t.Fatalf("selection.Thinking = %q, want %q", selection.Thinking, tc.want)
+			}
+		})
+	}
+}
+
+// A roster entry's thinking level is a default that must be validated against
+// the resolved backend on the workflow assignment path, just like on the
+// spawn path: a regression that validates only the assignment value would
+// let an unsupported roster level through to the start.
+func TestStableWorkflowAssignmentRosterThinkingIsCheckedAgainstTheBackend(t *testing.T) {
+	rosterPath := writeStage5Roster(t, t.TempDir(),
+		`{"horse":{"backend":"agy","agent":"windsurf-swe","thinking":"low"}}`)
+	_, err := resolveAssignmentSelection(&workflow.Assignment{
+		Role: "worker", RosterFile: rosterPath, RosterEntry: "horse",
+	})
+	if err == nil || !strings.Contains(err.Error(), "agy") || !strings.Contains(err.Error(), "thinking") {
+		t.Fatalf("resolveAssignmentSelection error = %v, want a thinking-rejection naming agy", err)
 	}
 }
