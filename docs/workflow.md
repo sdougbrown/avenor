@@ -267,6 +267,13 @@ visible pending state: the request stays pending in runtime status for a
 human to answer, never a silent allow. A decider that fails to spawn also
 leaves the request pending.
 
+> **Operator caveat:** the decider run is spawned with auto-approve in the
+> requesting runtime's working directory, so a compromised decider roster
+> entry is an unsandboxed execution path on the node host. Scope the
+> decider's agent profile at the roster/agent level — restrict its tools to
+> the minimum the judgment task needs — rather than relying on the workflow
+> to contain it.
+
 `auto_approve: true` remains available as one explicit, narrowly scoped
 option: every permission request is resolved as allow, and no file
 permission handler is derived for the runtime. Use it only for nodes whose
