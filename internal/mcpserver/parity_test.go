@@ -631,7 +631,7 @@ func assertSchemaTags(t *testing.T, structName string, allowed, required []strin
 			}
 			continue
 		}
-		if !strings.Contains(schemaTag, "optional") {
+		if !strings.Contains(strings.ToLower(schemaTag), "optional") {
 			t.Errorf("%s.%s missing optional jsonschema tag", structName, jsonName)
 		}
 	}

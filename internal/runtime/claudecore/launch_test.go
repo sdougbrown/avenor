@@ -154,6 +154,35 @@ func TestLaunchCommandRedirectsStderr(t *testing.T) {
 	}
 }
 
+// TestLaunchCommandWrapperSurvivesRealShellExecution executes the full launch
+// command in a real shell and proves hostile wrapper elements reach the final
+// process as literal argv: injection payloads are not parsed or executed.
+// The wrapper executable is a printf shim, so it prints exactly the argv the
+// backend process would have received, one element per line.
+func TestLaunchCommandWrapperSurvivesRealShellExecution(t *testing.T) {
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	shimPath := filepath.Join(binDir, "wrapper-shim")
+	if err := os.WriteFile(shimPath, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wrapper := []string{shimPath, "fire;jail", "pre$(injection)fix", "back`tick'", "a b", "new\nline"}
+	cmd := LaunchCommand([]string{"--version"}, "", wrapper)
+	out, err := exec.Command("sh", "-c", cmd).Output()
+	if err != nil {
+		t.Fatalf("shell execution of %q: %v", cmd, err)
+	}
+	// Each element is printed with a trailing newline, so the byte-exact output
+	// is the literal argv joined by newlines. A real newline inside an element
+	// survives as part of that element's bytes.
+	want := append(append([]string{}, wrapper[1:]...), "claude", "--version")
+	if string(out) != strings.Join(want, "\n")+"\n" {
+		t.Fatalf("exec'd output = %q, want %q", out, strings.Join(want, "\n")+"\n")
+	}
+}
+
 func TestLaunchCommandQuotesLaunchWrapperElements(t *testing.T) {
 	// A wrapper element is one argv element on the non-terminal backends, so it
 	// must be exactly one shell word here too — including a value with spaces

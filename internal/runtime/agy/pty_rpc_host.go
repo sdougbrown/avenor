@@ -91,6 +91,10 @@ func startPTYRPCHost(ctx context.Context, launcher terminal.Launcher, opts runti
 	}
 
 	lifetimeCtx, cancel := context.WithCancel(context.Background())
+	if len(opts.LaunchWrapper) > 0 {
+		cancel()
+		return nil, errors.New("launch_wrapper: not supported for agy rpc host")
+	}
 	session, err := launcher.Start(lifetimeCtx, terminal.StartOptions{
 		Name:    "agy-rpc",
 		Dir:     opts.Dir,
