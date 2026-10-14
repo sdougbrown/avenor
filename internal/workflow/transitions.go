@@ -721,13 +721,12 @@ func applyAttemptTerminated(next *Snapshot, act *Activation, event Event) error 
 		return nil
 	}
 
-	// Retry applies to failed, timed_out, and panicked attempts, only on the
-	// same activation, and never consumes loop iteration budget. Exhaustion
-	// uses the node's retry policy; without a template the reducer falls back
-	// to a single attempt (any failure exhausts to ActivationBlocked).
-	if status != AttemptFailed && status != AttemptTimedOut && status != AttemptPanicked {
-		return nil
-	}
+	// Retry applies to failed, timed_out, and panicked attempts — the only
+	// statuses that reach this point (the switch above rejected the rest,
+	// success and cancellation returned earlier) — only on the same
+	// activation, and never consumes loop iteration budget. Exhaustion uses
+	// the node's retry policy; without a template the reducer falls back to a
+	// single attempt (any failure exhausts to ActivationBlocked).
 	policy := retryPolicyFor(next, act.NodeID)
 	if policy != nil && len(act.AttemptIDs) < policy.MaximumAttempts {
 		// Re-arm the same activation for a new attempt; the stale lease was
@@ -976,9 +975,11 @@ func applyGate(next *Snapshot, act *Activation, event Event) error {
 	// not be re-decided or spawn a phantom branch. The event still lands on
 	// the event log for audit; only the snapshot projection is left
 	// untouched.
+	// The WorkflowCanceled instance case is intentionally absent: EventGate
+	// is in canceledMutatingKinds, so applyEvent rejects gate events on
+	// canceled instances before this function runs.
 	if act.Status == ActivationSatisfied || act.Status == ActivationRejected ||
-		next.Instance.Status == WorkflowCompleted || next.Instance.Status == WorkflowFailed ||
-		next.Instance.Status == WorkflowCanceled {
+		next.Instance.Status == WorkflowCompleted || next.Instance.Status == WorkflowFailed {
 		return nil
 	}
 	replaced := false

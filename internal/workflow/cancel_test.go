@@ -512,3 +512,30 @@ func TestManagerWorkflowCancelRejectsFailed(t *testing.T) {
 		t.Fatalf("cancel on failed instance: expected clear error, got %v", err)
 	}
 }
+
+// TestManagerWorkflowCancelBoundaryValidation pins the manager-boundary
+// cancel contract: malformed JSON, a missing actor, and a missing reason
+// each fail with their own error before any snapshot is loaded or command
+// applied.
+func TestManagerWorkflowCancelBoundaryValidation(t *testing.T) {
+	m, wf := newCancelFixture(t)
+
+	if _, err := m.WorkflowCancel(string(wf), []byte(`{not json`)); err == nil || !strings.Contains(err.Error(), "cancel payload") {
+		t.Fatalf("malformed cancel payload: err = %v, want a cancel payload error", err)
+	}
+	if _, err := m.WorkflowCancel(string(wf), []byte(`{"reason":"no actor"}`)); err == nil || !strings.Contains(err.Error(), "requires actor") {
+		t.Fatalf("missing actor: err = %v, want an actor error", err)
+	}
+	if _, err := m.WorkflowCancel(string(wf), []byte(`{"actor":"ops"}`)); err == nil || !strings.Contains(err.Error(), "requires reason") {
+		t.Fatalf("missing reason: err = %v, want a reason error", err)
+	}
+	// The instance must be untouched by the rejected requests.
+	snapAny, err := m.WorkflowStatus(string(wf))
+	snap, _ := snapAny.(map[string]any)
+	if err != nil {
+		t.Fatalf("WorkflowStatus: %v", err)
+	}
+	if got := snap["status"]; got != string(WorkflowActive) {
+		t.Fatalf("instance status after rejected cancels = %v, want active", got)
+	}
+}
