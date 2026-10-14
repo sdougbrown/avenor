@@ -746,21 +746,7 @@ func TestDispatchAssignmentPermissionDeciderRoutesRequest(t *testing.T) {
 		"worker":  {"backend": "pi", "agent": "worker", "model": "m"},
 		"rm-guard": {"backend": "pi", "agent": "rm-guard", "model": "guard-m"}
 	}`)
-	template := mustJSON(t, map[string]any{
-		"schema_version":   1,
-		"template_id":      "tmpl-dispatch-dispatch-permdec",
-		"template_version": "1",
-		"entry_nodes":      []string{"start"},
-		"nodes": []any{map[string]any{
-			"id":           "start",
-			"action":       map[string]any{"type": "run", "prompt": "do the thing"},
-			"assignment":   map[string]any{"roster_file": rosterPath, "roster_entry": "worker", "permission_policy": map[string]any{"decider": "rm-guard"}},
-			"dispatch":     map[string]any{"mode": "auto", "controller_id": "c1"},
-			"retry_policy": map[string]any{"max_attempts": 3, "exhaustion": "block"},
-		}},
-		"terminal_outcomes":    []string{"done"},
-		"default_lease_policy": map[string]any{"ttl_seconds": 900},
-	})
+	template := mustJSON(t, dispatchPermdecTemplate(rosterPath, "tmpl-dispatch-dispatch-permdec"))
 	f := newDispatchFixtureTemplate(t, "dispatch-permdec", 4, 4, template)
 	requestID := "perm_req_1"
 	var providerSeq int64
@@ -842,18 +828,14 @@ func TestDispatchAssignmentPermissionDeciderRoutesRequest(t *testing.T) {
 	}
 }
 
-// TestDispatchPermissionDeciderSpawnFailureReroutesRequest proves a failed
-// decider spawn unmarks the request as routed, so the next permission.request
-// event for the same request re-routes it instead of stalling pending with
-// only a stderr line.
-func TestDispatchPermissionDeciderSpawnFailureReroutesRequest(t *testing.T) {
-	rosterPath := writeStage5Roster(t, t.TempDir(), `{
-		"worker":  {"backend": "pi", "agent": "worker", "model": "m"},
-		"rm-guard": {"backend": "pi", "agent": "rm-guard", "model": "guard-m"}
-	}`)
-	template := mustJSON(t, map[string]any{
+// dispatchPermdecTemplate builds the single-node dispatch template whose
+// assignment routes the node's permission requests to the "rm-guard" decider
+// declared in the roster at rosterPath. The decider dispatch tests differ
+// only in their template ID.
+func dispatchPermdecTemplate(rosterPath, templateID string) map[string]any {
+	return map[string]any{
 		"schema_version":   1,
-		"template_id":      "tmpl-dispatch-permdec-retry",
+		"template_id":      templateID,
 		"template_version": "1",
 		"entry_nodes":      []string{"start"},
 		"nodes": []any{map[string]any{
@@ -865,7 +847,19 @@ func TestDispatchPermissionDeciderSpawnFailureReroutesRequest(t *testing.T) {
 		}},
 		"terminal_outcomes":    []string{"done"},
 		"default_lease_policy": map[string]any{"ttl_seconds": 900},
-	})
+	}
+}
+
+// TestDispatchPermissionDeciderSpawnFailureReroutesRequest proves a failed
+// decider spawn unmarks the request as routed, so the next permission.request
+// event for the same request re-routes it instead of stalling pending with
+// only a stderr line.
+func TestDispatchPermissionDeciderSpawnFailureReroutesRequest(t *testing.T) {
+	rosterPath := writeStage5Roster(t, t.TempDir(), `{
+		"worker":  {"backend": "pi", "agent": "worker", "model": "m"},
+		"rm-guard": {"backend": "pi", "agent": "rm-guard", "model": "guard-m"}
+	}`)
+	template := mustJSON(t, dispatchPermdecTemplate(rosterPath, "tmpl-dispatch-permdec-retry"))
 	f := newDispatchFixtureTemplate(t, "permdec-retry", 4, 4, template)
 	requestID := "perm_req_retry"
 	permissionEvent := func() events.Event {
@@ -903,27 +897,13 @@ func TestDispatchPermissionDeciderSpawnFailureReroutesRequest(t *testing.T) {
 		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
 	}
 	// The failed spawn must unmark the request as routed so the next
-	// permission.request event for the same request can route again.
-	waitFor(t, "failed decider spawn", func() bool { return deciderSpawns.Load() >= 1 })
-	waitFor(t, "request unmarked after failed spawn", func() bool {
-		f.sup.controlMu.Lock()
-		rt := f.sup.runtimes[out.RuntimeID]
-		f.sup.controlMu.Unlock()
-		if rt == nil {
-			return false
-		}
-		rt.mu.Lock()
-		_, routed := rt.routedPermissionRequests[requestID]
-		rt.mu.Unlock()
-		return !routed
-	})
-	// A re-emitted permission.request event for the same request reaches the
-	// routing layer (the CLI session loop refuses a concurrent second
-	// request, so the event is driven at the routing boundary here), and this
-	// time the decider run spawns.
-	f.sup.routePermissionRequest(out.RuntimeID, requestID, []any{map[string]any{"optionId": "allow_once", "kind": "allow"}})
+	// permission.request event for the same request can route again. Re-emit
+	// the event (the CLI session loop refuses a concurrent second request, so
+	// the event is driven at the routing boundary here) until the retried
+	// decider run appears; re-routes that land before the unroute are no-ops.
 	var decider map[string]any
 	waitFor(t, "retried decider runtime", func() bool {
+		f.sup.routePermissionRequest(out.RuntimeID, requestID, []any{map[string]any{"optionId": "allow_once", "kind": "allow"}})
 		for _, rt := range f.sup.listRuntimes() {
 			if label, _ := rt["label"].(string); strings.HasPrefix(label, "permdec:") {
 				decider = rt
@@ -949,21 +929,7 @@ func TestPermissionDeciderSkipsAlreadyResolvedRequest(t *testing.T) {
 		"worker":  {"backend": "pi", "agent": "worker", "model": "m"},
 		"rm-guard": {"backend": "pi", "agent": "rm-guard", "model": "guard-m"}
 	}`)
-	template := mustJSON(t, map[string]any{
-		"schema_version":   1,
-		"template_id":      "tmpl-dispatch-permdec-resolved",
-		"template_version": "1",
-		"entry_nodes":      []string{"start"},
-		"nodes": []any{map[string]any{
-			"id":           "start",
-			"action":       map[string]any{"type": "run", "prompt": "do the thing"},
-			"assignment":   map[string]any{"roster_file": rosterPath, "roster_entry": "worker", "permission_policy": map[string]any{"decider": "rm-guard"}},
-			"dispatch":     map[string]any{"mode": "auto", "controller_id": "c1"},
-			"retry_policy": map[string]any{"max_attempts": 3, "exhaustion": "block"},
-		}},
-		"terminal_outcomes":    []string{"done"},
-		"default_lease_policy": map[string]any{"ttl_seconds": 900},
-	})
+	template := mustJSON(t, dispatchPermdecTemplate(rosterPath, "tmpl-dispatch-permdec-resolved"))
 	f := newDispatchFixtureTemplate(t, "permdec-resolved", 4, 4, template)
 	requestID := "perm_req_resolved"
 	gate := make(chan struct{})
