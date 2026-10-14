@@ -28,7 +28,17 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime/pony"
 )
 
+// noProcessBackends connect to an already-running or in-process runtime and
+// never exec a child process, so a launch wrapper has nothing to prefix.
+var noProcessBackends = map[string]bool{
+	"opencode-http": true,
+	"pony":          true,
+}
+
 func NewProvider(startOpts runtime.StartOptions, backend string) (runtime.Provider, error) {
+	if len(startOpts.LaunchWrapper) > 0 && noProcessBackends[backend] {
+		return nil, fmt.Errorf("launch_wrapper: not supported for backend %s (spawns no process to wrap)", backend)
+	}
 	switch backend {
 	case "opencode-acp":
 		return opencodeacp.NewWithOptions(startOpts), nil

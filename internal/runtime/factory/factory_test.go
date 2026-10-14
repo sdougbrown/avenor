@@ -1,6 +1,7 @@
 package factory
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/sdougbrown/avenor/internal/runtime"
@@ -86,5 +87,26 @@ func TestNewProviderUnknown(t *testing.T) {
 	}
 	if err.Error() != `unknown backend "unknown"` {
 		t.Fatalf("NewProvider(unknown) error = %q, want %q", err.Error(), `unknown backend "unknown"`)
+	}
+}
+
+// TestNewProviderRejectsWrapperForNoProcessBackends pins the admission
+// contract: backends that never exec a child process (opencode-http connects
+// to a running server, pony runs in-process) must reject a launch_wrapper at
+// provider construction instead of silently recording a wrapper that is
+// never applied.
+func TestNewProviderRejectsWrapperForNoProcessBackends(t *testing.T) {
+	for _, backend := range []string{"opencode-http", "pony"} {
+		_, err := NewProvider(runtime.StartOptions{LaunchWrapper: []string{"/usr/bin/nice", "-n", "5"}}, backend)
+		if err == nil {
+			t.Fatalf("NewProvider(%s) with launch_wrapper: want error, got nil", backend)
+		}
+		if !strings.Contains(err.Error(), "launch_wrapper: not supported for backend "+backend) {
+			t.Fatalf("NewProvider(%s) error = %v, want launch_wrapper not-supported error", backend, err)
+		}
+		// The same backend without a wrapper must still construct.
+		if _, err := NewProvider(runtime.StartOptions{}, backend); err != nil {
+			t.Fatalf("NewProvider(%s) without wrapper: %v", backend, err)
+		}
 	}
 }

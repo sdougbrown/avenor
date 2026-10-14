@@ -3,6 +3,7 @@ package agy
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -111,7 +112,7 @@ func TestSelectTransportPolicies(t *testing.T) {
 			host := &fakeRPCSessionHost{id: "conversation"}
 			selection, diagnostic, err := selectTransport(context.Background(), func(string) string { return tc.mode }, opts, "resume-id", "1.1.7", func(_ context.Context, got runtime.StartOptions, resumeID, version string) (rpcSessionHost, error) {
 				calls++
-				if got != opts || resumeID != "resume-id" || version != "1.1.7" {
+				if !reflect.DeepEqual(got, opts) || resumeID != "resume-id" || version != "1.1.7" {
 					t.Fatalf("factory args = %#v, %q, %q", got, resumeID, version)
 				}
 				return host, nil

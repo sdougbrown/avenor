@@ -271,7 +271,7 @@ func TestSessionBackendMapResumeCanReadoptMappedAuthoritativeID(t *testing.T) {
 	if _, ok := mapping.identity("resume-pending"); ok {
 		t.Fatal("resume provisional alias survived cleanup")
 	}
-	if got, ok := mapping.identity("authoritative"); !ok || got != identity {
+	if got, ok := mapping.identity("authoritative"); !ok || !got.equal(identity) {
 		t.Fatalf("authoritative identity = %#v, ok=%v", got, ok)
 	}
 }
@@ -301,10 +301,10 @@ func TestSessionBackendMapRejectedResumePreservesAuthoritativeMapping(t *testing
 	}
 	mapping.finish("resume-session", "resume-session", resumed)
 
-	if got, ok := mapping.identity("resume-session"); !ok || got != identity {
+	if got, ok := mapping.identity("resume-session"); !ok || !got.equal(identity) {
 		t.Fatalf("resume mapping = %#v, ok=%v; want preserved identity %#v", got, ok, identity)
 	}
-	if got, ok := mapping.identity("occupied"); !ok || got != collisionIdentity {
+	if got, ok := mapping.identity("occupied"); !ok || !got.equal(collisionIdentity) {
 		t.Fatalf("collision mapping = %#v, ok=%v; want preserved identity %#v", got, ok, collisionIdentity)
 	}
 }
@@ -322,7 +322,7 @@ func TestSessionBackendMapRestoresCompleteIdentityAndRejectsSameBackendConflict(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != want {
+	if !got.equal(want) {
 		t.Fatalf("restored identity = %#v, want %#v", got, want)
 	}
 	for name, supplied := range map[string]cliSessionIdentity{

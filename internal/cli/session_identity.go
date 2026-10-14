@@ -2,6 +2,8 @@ package cli
 
 import (
 	"fmt"
+	"slices"
+	"strings"
 	"sync"
 )
 
@@ -9,10 +11,17 @@ import (
 // during one non-stable CLI run. Empty fields are authoritative once recorded;
 // callers may omit them on resume, but may not replace them.
 type cliSessionIdentity struct {
-	backend      string
-	agent        string
-	model        string
-	agentProfile string
+	backend       string
+	agent         string
+	model         string
+	agentProfile  string
+	launchWrapper []string
+}
+
+// equal compares two identities field by field. The launch wrapper is a slice,
+// so identities cannot be compared with ==.
+func (a cliSessionIdentity) equal(b cliSessionIdentity) bool {
+	return a.backend == b.backend && a.agent == b.agent && a.model == b.model && a.agentProfile == b.agentProfile && slices.Equal(a.launchWrapper, b.launchWrapper)
 }
 
 // sessionBackendMap records the complete identity that owns each session ID
@@ -85,7 +94,19 @@ func (m *sessionBackendMap) resolveResume(sessionID string, supplied cliSessionI
 			return cliSessionIdentity{}, fmt.Errorf("cannot resume session %q with %s %q: session belongs to %s %q", sessionID, check.field, check.supplied, check.field, check.authoritative)
 		}
 	}
+	if len(supplied.launchWrapper) > 0 && !slices.Equal(supplied.launchWrapper, authoritative.launchWrapper) {
+		return cliSessionIdentity{}, fmt.Errorf("cannot resume session %q with launch_wrapper %q: session belongs to launch_wrapper %q", sessionID,
+			launchWrapperDisplay(supplied.launchWrapper), launchWrapperDisplay(authoritative.launchWrapper))
+	}
 	return authoritative, nil
+}
+
+// launchWrapperDisplay renders a wrapper argv for identity-conflict messages.
+func launchWrapperDisplay(wrapper []string) string {
+	if len(wrapper) == 0 {
+		return "(none)"
+	}
+	return strings.Join(wrapper, " ")
 }
 
 // claim records the session returned by Start/Resume. An existing ID may only
@@ -102,7 +123,7 @@ func (m *sessionBackendMap) claim(sessionID string, identity cliSessionIdentity,
 	}
 	existing, wasMapped := m.entries[sessionID]
 	if wasMapped {
-		if existing.identity != identity {
+		if !existing.identity.equal(identity) {
 			return fmt.Errorf("session ID %q is already assigned to a different provider identity", sessionID)
 		}
 		if sessionID != resumeID || existing.owner != nil {
@@ -136,7 +157,7 @@ func (m *sessionBackendMap) adopt(provisionalID, authoritativeID string, owner *
 		return false
 	}
 	if existing, exists := m.entries[authoritativeID]; exists {
-		if owner == nil || authoritativeID != owner.resumeID || existing.owner != nil || existing.identity != old.identity {
+		if owner == nil || authoritativeID != owner.resumeID || existing.owner != nil || !existing.identity.equal(old.identity) {
 			if owner != nil {
 				owner.rejected = true
 			}

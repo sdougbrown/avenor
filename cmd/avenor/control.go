@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/sdougbrown/avenor/client"
 	"github.com/sdougbrown/avenor/internal/runtime"
@@ -133,6 +134,8 @@ func spawnParamsFromArgs(args []string, stderr io.Writer) (map[string]any, int) 
 	autoApprove := fs.Bool("auto-approve", false, "automatically approve all permission requests")
 	timeout := fs.Int("timeout", 0, "overall session timeout in seconds")
 	maxRetries := fs.Int("max-retries", 0, "maximum retry attempts on transient failure")
+	var launchWrapper launchWrapperFlag
+	fs.Var(&launchWrapper, "launch-wrapper", "opaque argv prefix in front of the backend command; repeatable, each use adds one element")
 	if err := fs.Parse(args); err != nil {
 		return nil, 1
 	}
@@ -181,6 +184,9 @@ func spawnParamsFromArgs(args []string, stderr io.Writer) (map[string]any, int) 
 	if *autoApprove {
 		params["auto_approve"] = true
 	}
+	if len(launchWrapper) > 0 {
+		params["launch_wrapper"] = []string(launchWrapper)
+	}
 	if *timeout > 0 {
 		params["timeout"] = *timeout
 	}
@@ -188,6 +194,15 @@ func spawnParamsFromArgs(args []string, stderr io.Writer) (map[string]any, int) 
 		params["max_retries"] = *maxRetries
 	}
 	return params, 0
+}
+
+type launchWrapperFlag []string
+
+func (w *launchWrapperFlag) String() string { return strings.Join(*w, " ") }
+
+func (w *launchWrapperFlag) Set(value string) error {
+	*w = append(*w, value)
+	return nil
 }
 
 func cmdCancel(c *client.Client, args []string) int {

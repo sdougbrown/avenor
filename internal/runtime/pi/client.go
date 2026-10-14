@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/runtime/launcher"
 )
 
 const stderrCap = 400
@@ -94,10 +95,10 @@ func StartClientWithAgentAndDir(ctx context.Context, provider string, model stri
 }
 
 func StartClientWithAgentProfileAndDir(ctx context.Context, provider string, model string, sessionDir string, agent string, agentProfile string, cwd string) (*client, error) {
-	return StartClientWithAgentProfileThinkingAndDir(ctx, provider, model, sessionDir, agent, agentProfile, "", cwd, "", "", "")
+	return StartClientWithAgentProfileThinkingAndDir(ctx, provider, model, sessionDir, agent, agentProfile, "", cwd, "", "", "", nil)
 }
 
-func StartClientWithAgentProfileThinkingAndDir(ctx context.Context, provider string, model string, sessionDir string, agent string, agentProfile string, thinking string, cwd string, brokerURL string, brokerRunID string, brokerToken string) (*client, error) {
+func StartClientWithAgentProfileThinkingAndDir(ctx context.Context, provider string, model string, sessionDir string, agent string, agentProfile string, thinking string, cwd string, brokerURL string, brokerRunID string, brokerToken string, launchWrapper []string) (*client, error) {
 	args := []string{"--mode", "rpc", "--no-session"}
 	if provider != "" {
 		args = append(args, "--provider", provider)
@@ -112,7 +113,8 @@ func StartClientWithAgentProfileThinkingAndDir(ctx context.Context, provider str
 		args = append(args, "--thinking", thinking)
 	}
 
-	proc := piExecCommandContext(ctx, "pi", args...)
+	argv := launcher.Argv("pi", args, launchWrapper)
+	proc := piExecCommandContext(ctx, argv[0], argv[1:]...)
 	proc.Dir = cwd
 	// Stale PI_AGENT / broker credentials from the parent must never leak into
 	// the child: they would activate sub-agent broker mode under the wrong

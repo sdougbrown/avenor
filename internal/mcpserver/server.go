@@ -30,6 +30,7 @@ type ControlClient interface {
 	Status(runtimeID string) (map[string]any, error)
 	List() ([]map[string]any, error)
 	Spawn(params map[string]any) (map[string]any, error)
+	SpawnMCP(params map[string]any) (map[string]any, error)
 	Shutdown(mode string) error
 	Cancel(runtimeID string) error
 	Close() error
@@ -61,6 +62,12 @@ type Options struct {
 	MaxWait          time.Duration
 	AllowedHosts     []string
 	ControlClient    ControlClient
+
+	// MCPLaunchWrapperPolicyPath is forwarded to a supervisor this server
+	// autostarts, giving that supervisor its MCP launch wrapper allowlist.
+	// Attaching to an already-running supervisor never changes its policy:
+	// the path is ignored on attach.
+	MCPLaunchWrapperPolicyPath string
 }
 
 type Server struct {
@@ -97,21 +104,22 @@ type resultArgs struct {
 }
 
 type spawnArgs struct {
-	Agent          string `json:"agent,omitempty" jsonschema:"optional agent name; omission uses the selected model or runtime defaults"`
-	RepoDir        string `json:"repo_dir" jsonschema:"required path to the repository"`
-	Prompt         string `json:"prompt,omitempty" jsonschema:"optional initial prompt"`
-	PromptFile     string `json:"prompt_file,omitempty" jsonschema:"optional path to file containing the initial prompt"`
-	Label          string `json:"label,omitempty" jsonschema:"optional label for the run"`
-	Timeout        string `json:"timeout,omitempty" jsonschema:"optional timeout in seconds (numeric string)"`
-	Model          string `json:"model,omitempty" jsonschema:"optional model to use"`
-	Thinking       string `json:"thinking,omitempty" jsonschema:"optional thinking level (off, minimal, low, medium, high, xhigh, max); omission uses the backend default"`
-	Backend        string `json:"backend,omitempty" jsonschema:"optional runtime backend (for example agy, pi, opencode-acp, or codex-app-server)"`
-	RosterFile     string `json:"roster_file,omitempty" jsonschema:"optional path to the roster map"`
-	RosterEntry    string `json:"roster_entry,omitempty" jsonschema:"optional roster entry key"`
-	ServerURL      string `json:"server_url,omitempty" jsonschema:"optional opencode serve URL for opencode-http backend"`
-	SupervisorID   string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
-	IdempotencyKey string `json:"idempotency_key,omitempty" jsonschema:"optional idempotency key; a retry with the same key and parameters returns the original run instead of spawning a second one"`
-	AutoApprove    bool   `json:"auto_approve,omitempty" jsonschema:"optional auto-approve all permission requests so the run executes unattended (no answer_permission needed)"`
+	Agent          string   `json:"agent,omitempty" jsonschema:"optional agent name; omission uses the selected model or runtime defaults"`
+	RepoDir        string   `json:"repo_dir" jsonschema:"required path to the repository"`
+	Prompt         string   `json:"prompt,omitempty" jsonschema:"optional initial prompt"`
+	PromptFile     string   `json:"prompt_file,omitempty" jsonschema:"optional path to file containing the initial prompt"`
+	Label          string   `json:"label,omitempty" jsonschema:"optional label for the run"`
+	Timeout        string   `json:"timeout,omitempty" jsonschema:"optional timeout in seconds (numeric string)"`
+	Model          string   `json:"model,omitempty" jsonschema:"optional model to use"`
+	Thinking       string   `json:"thinking,omitempty" jsonschema:"optional thinking level (off, minimal, low, medium, high, xhigh, max); omission uses the backend default"`
+	Backend        string   `json:"backend,omitempty" jsonschema:"optional runtime backend (for example agy, pi, opencode-acp, or codex-app-server)"`
+	RosterFile     string   `json:"roster_file,omitempty" jsonschema:"optional path to the roster map"`
+	RosterEntry    string   `json:"roster_entry,omitempty" jsonschema:"optional roster entry key"`
+	ServerURL      string   `json:"server_url,omitempty" jsonschema:"optional opencode serve URL for opencode-http backend"`
+	SupervisorID   string   `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
+	IdempotencyKey string   `json:"idempotency_key,omitempty" jsonschema:"optional idempotency key; a retry with the same key and parameters returns the original run instead of spawning a second one"`
+	LaunchWrapper  []string `json:"launch_wrapper,omitempty" jsonschema:"optional argv prefix; disabled unless the selected supervisor enables an operator allowlist. Must exactly match an approved argv array. No shell expansion."`
+	AutoApprove    bool     `json:"auto_approve,omitempty" jsonschema:"optional auto-approve all permission requests so the run executes unattended (no answer_permission needed)"`
 }
 
 // UnmarshalJSON makes the Go MCP spawn tool a strict raw boundary: unknown
@@ -1057,6 +1065,9 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 	if err := runtime.ValidateThinking(args.Thinking); err != nil {
 		return nil, nil, err
 	}
+	if err := runtime.ValidateLaunchWrapper(args.LaunchWrapper); err != nil {
+		return nil, nil, fmt.Errorf("launch_wrapper: %w", err)
+	}
 	if len(args.IdempotencyKey) > 256 {
 		return nil, nil, fmt.Errorf("idempotency_key too long (max 256 bytes)")
 	}
@@ -1099,6 +1110,9 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 	if args.Thinking != "" {
 		params["thinking"] = args.Thinking
 	}
+	if len(args.LaunchWrapper) > 0 {
+		params["launch_wrapper"] = args.LaunchWrapper
+	}
 	if args.Backend != "" {
 		params["backend"] = args.Backend
 	}
@@ -1137,8 +1151,22 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 		}
 	}
 
-	result, err := cl.Spawn(params)
+	var result map[string]any
+	if len(args.LaunchWrapper) > 0 {
+		// Wrapped requests must use the gated spawn_mcp verb so the
+		// supervisor-side launch-wrapper allowlist applies.
+		result, err = cl.SpawnMCP(params)
+	} else {
+		// Unwrapped requests use the plain spawn verb, which also works on
+		// supervisors predating spawn_mcp.
+		result, err = cl.Spawn(params)
+	}
 	if err != nil {
+		// Fail closed for older supervisors without the spawn_mcp verb: a
+		// wrapped MCP request must never fall back to the ungated spawn path.
+		if isMethodNotFound(err) && len(args.LaunchWrapper) > 0 {
+			return nil, nil, errors.New("launch_wrapper: disabled for MCP on this supervisor")
+		}
 		return nil, nil, fmt.Errorf("spawn: %w", err)
 	}
 
@@ -1371,6 +1399,17 @@ func (s *Server) handleAvenorAnswerPermission(ctx context.Context, req *mcp.Call
 	}
 
 	return nil, map[string]any{"ok": true}, nil
+}
+
+// isMethodNotFound reports whether err is a control-protocol "method not
+// found" failure (code -32601), as returned when the supervisor predates the
+// spawn_mcp verb.
+func isMethodNotFound(err error) bool {
+	var rpcErr *client.RPCError
+	if errors.As(err, &rpcErr) {
+		return rpcErr.Code == -32601
+	}
+	return strings.Contains(err.Error(), "method not found")
 }
 
 func resolveRuntimeIDFromList(cl ControlClient, runID string) (string, error) {
@@ -1991,7 +2030,7 @@ func (s *Server) getClientForSupervisorWithPath(supervisorID string) (ControlCli
 		if s.opts.NoAutostart {
 			return nil, nil, "", fmt.Errorf("no supervisor running: autostart disabled")
 		}
-		lc, err := startSupervisorFunc(s.opts.ControlSocket, s.opts.IdleTimeout)
+		lc, err := startSupervisorFunc(s.opts.ControlSocket, s.opts.IdleTimeout, s.opts.MCPLaunchWrapperPolicyPath)
 		if err != nil {
 			return nil, nil, "", fmt.Errorf("autostart supervisor: %w", err)
 		}

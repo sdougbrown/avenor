@@ -15,6 +15,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime"
 	agyv115 "github.com/sdougbrown/avenor/internal/runtime/agy/interop/v115"
 	"github.com/sdougbrown/avenor/internal/runtime/claudecore/terminal"
+	"github.com/sdougbrown/avenor/internal/shellquote"
 )
 
 type recordingLauncher struct {
@@ -137,6 +138,20 @@ func TestSupportedRPCVersions(t *testing.T) {
 	}
 }
 
+// TestStartPTYRPCHostRejectsLaunchWrapper proves wrapped RPC launches fail
+// explicitly instead of being silently unwrapped.
+func TestStartPTYRPCHostRejectsLaunchWrapper(t *testing.T) {
+	launcher := &recordingLauncher{session: &noTerminalProtocolSession{FakeSession: &terminal.FakeSession{}}}
+	_, err := startPTYRPCHost(context.Background(), launcher,
+		runtime.StartOptions{LaunchWrapper: []string{"nice", "-n", "5"}}, "", "1.1.5", rpcDiscoveryOptions{})
+	if err == nil || err.Error() != "launch_wrapper: not supported for agy rpc host" {
+		t.Fatalf("startPTYRPCHost() error = %v, want exact launch_wrapper error", err)
+	}
+	if launcher.calls != 0 {
+		t.Fatal("launcher was invoked for a wrapped RPC launch")
+	}
+}
+
 func TestPTYRPCHostStartupAcceptsCompatibleMajorAndRejectsOtherMajor(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -206,7 +221,7 @@ func TestInteractiveAgyCommandQuotesOnlySupportedValues(t *testing.T) {
 		})
 	}
 	for _, value := range []string{"", "plain", "quote'and spaces", "$(not-a-command); *\nnext"} {
-		output, err := exec.Command("sh", "-c", "set -- "+posixShellQuote(value)+"; printf '%s' \"$1\"").Output()
+		output, err := exec.Command("sh", "-c", "set -- "+shellquote.Quote(value)+"; printf '%s' \"$1\"").Output()
 		if err != nil || string(output) != value {
 			t.Fatalf("shell quote value=%q output=%q err=%v", value, output, err)
 		}

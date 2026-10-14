@@ -471,6 +471,7 @@ func (p *Provider) runInitialPrompt(ctx context.Context, s *sessionState, provis
 	s.mu.Lock()
 	s.client = cl
 	startOpts := s.startOpts
+	cl.launchWrapper = startOpts.LaunchWrapper
 	s.mu.Unlock()
 
 	cl.mu.Lock()
@@ -610,6 +611,7 @@ func (p *Provider) runResumedPrompt(ctx context.Context, s *sessionState, sessio
 
 	cl := p.clientFactory()
 	cl.version = p.version
+	cl.launchWrapper = startOpts.LaunchWrapper
 
 	s.mu.Lock()
 	s.client = cl // Publish before launch so concurrent Cancel can stop it.

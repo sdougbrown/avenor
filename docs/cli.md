@@ -290,6 +290,7 @@ Spawn flags (all optional):
 | `--auto-approve` | Automatically approve all permission requests |
 | `--timeout` | Overall session timeout (Go duration: `30s`, `5m`, etc.) |
 | `--max-retries` | Maximum retry attempts on transient failure |
+| `--launch-wrapper` | Opaque argv prefix placed in front of the backend process command; repeatable, each use adds one element (e.g. `--launch-wrapper nice --launch-wrapper -n --launch-wrapper 5`). Avenor does not interpret the wrapper — see [backends.md](backends.md#launch-wrapper) |
 
 ```sh
 avenor control --socket /tmp/avenor.sock spawn \

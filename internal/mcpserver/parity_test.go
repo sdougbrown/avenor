@@ -89,7 +89,7 @@ func TestSchemaFieldParity(t *testing.T) {
 		// spawnArgs — repo_dir is required.
 		// agent and model are independently optional; omitting both uses runtime defaults.
 		// All remaining fields are optional.
-		allowed := []string{"agent", "repo_dir", "prompt", "prompt_file", "label", "timeout", "model", "thinking", "backend", "roster_file", "roster_entry", "server_url", "supervisor_id", "idempotency_key", "auto_approve"}
+		allowed := []string{"agent", "repo_dir", "prompt", "prompt_file", "label", "timeout", "model", "thinking", "backend", "roster_file", "roster_entry", "server_url", "supervisor_id", "idempotency_key", "launch_wrapper", "auto_approve"}
 		required := []string{"repo_dir"}
 		assertFields(t, "spawnArgs", allowed, required)
 	})
@@ -346,6 +346,10 @@ func assertFields(t *testing.T, structName string, allowed, required []string) {
 			obj[f] = true
 			continue
 		}
+		if f == "launch_wrapper" {
+			obj[f] = []string{"test"}
+			continue
+		}
 		obj[f] = "test"
 	}
 	data, err := json.Marshal(obj)
@@ -371,6 +375,9 @@ func assertFields(t *testing.T, structName string, allowed, required []string) {
 		}
 		if !a.AutoApprove {
 			t.Errorf("%s: auto_approve not populated", structName)
+		}
+		if !reflect.DeepEqual(a.LaunchWrapper, []string{"test"}) {
+			t.Errorf("%s: launch_wrapper not populated: %v", structName, a.LaunchWrapper)
 		}
 	case "statusArgs":
 		var a statusArgs

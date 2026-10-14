@@ -548,6 +548,14 @@ func (c *Client) Spawn(params map[string]any) (map[string]any, error) {
 	return result, err
 }
 
+// SpawnMCP creates a new runtime through the MCP-gated spawn verb: the
+// supervisor enforces its launch wrapper policy on this verb only.
+func (c *Client) SpawnMCP(params map[string]any) (map[string]any, error) {
+	var result map[string]any
+	err := c.Call("spawn_mcp", params, &result)
+	return result, err
+}
+
 // Shutdown shuts down the stable supervisor.
 func (c *Client) Shutdown(mode string) error {
 	return c.Call("shutdown", map[string]string{"mode": mode}, nil)

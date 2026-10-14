@@ -67,6 +67,15 @@ func newFakeIdempotentSupervisor() *fakeIdempotentSupervisor {
 }
 
 func (f *fakeIdempotentSupervisor) Spawn(params map[string]any) (map[string]any, error) {
+	return f.spawn(params)
+}
+
+// SpawnMCP mirrors Spawn: the fake has no policy layer to enforce.
+func (f *fakeIdempotentSupervisor) SpawnMCP(params map[string]any) (map[string]any, error) {
+	return f.Spawn(params)
+}
+
+func (f *fakeIdempotentSupervisor) spawn(params map[string]any) (map[string]any, error) {
 	f.mu.Lock()
 	f.spawnCalls++
 	f.mu.Unlock()

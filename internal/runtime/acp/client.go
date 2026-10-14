@@ -19,11 +19,16 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/runtime/launcher"
 )
 
 type ClientConfig struct {
-	Bin                  string
-	Args                 []string
+	Bin  string
+	Args []string
+	// Wrapper is an opaque argv prefix placed in front of Bin when non-empty.
+	// Avenor does not interpret it; the wrapper becomes the direct child and
+	// owns the backend process tree.
+	Wrapper              []string
 	Dir                  string
 	Env                  map[string]string
 	AutoAnswerPermission bool
@@ -64,7 +69,7 @@ func NewClient(ctx context.Context, cfg ClientConfig) (*Client, error) {
 	if cfg.AppendCWDArg {
 		args = append(args, "--cwd", absDir)
 	}
-	cmd := exec.CommandContext(ctx, cfg.Bin, args...)
+	cmd := launcher.Command(ctx, cfg.Wrapper, cfg.Bin, args...)
 	cmd.Env = mergeEnviron(os.Environ(), cfg.Env)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

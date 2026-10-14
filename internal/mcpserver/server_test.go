@@ -171,6 +171,10 @@ func (f *fakeClient) Spawn(params map[string]any) (map[string]any, error) {
 	return f.spawnResult, f.spawnErr
 }
 
+func (f *fakeClient) SpawnMCP(params map[string]any) (map[string]any, error) {
+	return f.Spawn(params)
+}
+
 func (f *fakeClient) Shutdown(mode string) error {
 	if f.shutdownFunc != nil {
 		return f.shutdownFunc(mode)
@@ -253,6 +257,9 @@ func (c *spawnCountingClient) Spawn(map[string]any) (map[string]any, error) {
 	c.spawns.Add(1)
 	return map[string]any{"runtime_id": "rt-shared", "session_id": "ses-shared"}, nil
 }
+func (c *spawnCountingClient) SpawnMCP(params map[string]any) (map[string]any, error) {
+	return c.Spawn(params)
+}
 func (c *spawnCountingClient) Shutdown(string) error                         { return nil }
 func (c *spawnCountingClient) Cancel(string) error                           { return nil }
 func (c *spawnCountingClient) Close() error                                  { return nil }
@@ -295,7 +302,7 @@ func TestParallelSpawnLazilyStartsOneSharedSupervisor(t *testing.T) {
 	var starts atomic.Int32
 	startupEntered := make(chan struct{})
 	releaseStartup := make(chan struct{})
-	startSupervisorFunc = func(string, time.Duration) (*supervisorLifecycle, error) {
+	startSupervisorFunc = func(string, time.Duration, string) (*supervisorLifecycle, error) {
 		starts.Add(1)
 		startupEntered <- struct{}{}
 		<-releaseStartup
@@ -2472,8 +2479,10 @@ func TestSpawnAfterShutdownAutostartsNewSupervisor(t *testing.T) {
 	defer func() { startSupervisorFunc = origStart }()
 
 	var starts atomic.Int32
-	startSupervisorFunc = func(socketPath string, idleTimeout time.Duration) (*supervisorLifecycle, error) {
+	var policyPaths []string
+	startSupervisorFunc = func(socketPath string, idleTimeout time.Duration, mcpLaunchWrapperPolicyPath string) (*supervisorLifecycle, error) {
 		n := starts.Add(1)
+		policyPaths = append(policyPaths, mcpLaunchWrapperPolicyPath)
 		return &supervisorLifecycle{
 			socketPath: fmt.Sprintf("/tmp/avenor-restart-%d.sock", n),
 			client:     &spawnCountingClient{},
@@ -2521,6 +2530,17 @@ func TestSpawnAfterShutdownAutostartsNewSupervisor(t *testing.T) {
 		t.Fatalf("supervisor starts after two shutdown+spawn cycles = %d, want 3", got)
 	}
 
+	// Every autostart must forward the configured policy path; with no path
+	// configured the argument is the empty string.
+	for i, got := range policyPaths {
+		if got != s.opts.MCPLaunchWrapperPolicyPath {
+			t.Fatalf("start %d policy path = %q, want %q", i+1, got, s.opts.MCPLaunchWrapperPolicyPath)
+		}
+	}
+	if s.opts.MCPLaunchWrapperPolicyPath != "" {
+		t.Fatalf("MCPLaunchWrapperPolicyPath = %q, want empty by default", s.opts.MCPLaunchWrapperPolicyPath)
+	}
+
 	// Server teardown still blocks later tool calls: shutdown must not set
 	// closed, but Close() must.
 	if err := s.Close(); err != nil {
@@ -2532,6 +2552,40 @@ func TestSpawnAfterShutdownAutostartsNewSupervisor(t *testing.T) {
 		Prompt:  "hello",
 	}); err == nil || !strings.Contains(err.Error(), "control client not available") {
 		t.Fatalf("spawn after Close error = %v, want 'control client not available'", err)
+	}
+}
+
+// TestSpawnAutostartForwardsMCPLaunchWrapperPolicyPath proves a configured
+// policy path reaches the autostart seam instead of being dropped.
+func TestSpawnAutostartForwardsMCPLaunchWrapperPolicyPath(t *testing.T) {
+	origStart := startSupervisorFunc
+	defer func() { startSupervisorFunc = origStart }()
+
+	const policyPath = "/tmp/avenor-policy.json"
+	var gotPolicyPath string
+	startSupervisorFunc = func(socketPath string, idleTimeout time.Duration, mcpLaunchWrapperPolicyPath string) (*supervisorLifecycle, error) {
+		gotPolicyPath = mcpLaunchWrapperPolicyPath
+		return &supervisorLifecycle{
+			socketPath: "/tmp/avenor-policy-forward.sock",
+			client:     &spawnCountingClient{},
+		}, nil
+	}
+
+	s, err := NewServer(Options{Transport: "stdio", MCPLaunchWrapperPolicyPath: policyPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	if _, _, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
+		Agent:   "test",
+		RepoDir: ".",
+		Prompt:  "hello",
+	}); err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	if gotPolicyPath != policyPath {
+		t.Fatalf("autostart policy path = %q, want %q", gotPolicyPath, policyPath)
 	}
 }
 
@@ -4763,7 +4817,7 @@ func TestAutostartRedialsAfterDeadClient(t *testing.T) {
 	origStart := startSupervisorFunc
 	defer func() { startSupervisorFunc = origStart }()
 	var starts atomic.Int32
-	startSupervisorFunc = func(string, time.Duration) (*supervisorLifecycle, error) {
+	startSupervisorFunc = func(string, time.Duration, string) (*supervisorLifecycle, error) {
 		starts.Add(1)
 		return nil, fmt.Errorf("dial control socket: connection refused")
 	}

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/runtime/launcher"
 )
 
 const (
@@ -86,7 +87,16 @@ type client struct {
 
 	// testMode skips subprocess spawning and stdin writes.
 	testMode bool
+
+	// launchWrapper is an opaque argv prefix placed in front of the agy
+	// command when non-empty. Avenor does not interpret it; the wrapper
+	// becomes the direct child and owns the process tree.
+	launchWrapper []string
 }
+
+// agyLaunchCommandContext is the process-creation seam for backend launches;
+// probes use exec.CommandContext directly.
+var agyLaunchCommandContext = exec.CommandContext
 
 // processState captures the subprocess and its I/O at launch time.
 type processState struct {
@@ -197,7 +207,8 @@ func (c *client) LaunchInitial(ctx context.Context, prompt, model, agent, dir st
 
 	// The startup context bounds init discovery only. Provider Cancel/Close
 	// owns the process after launch.
-	proc := exec.CommandContext(context.Background(), "agy", args...)
+	argv := launcher.Argv("agy", args, c.launchWrapper)
+	proc := agyLaunchCommandContext(context.Background(), argv[0], argv[1:]...)
 	proc.Dir = dir
 	stdout, err := proc.StdoutPipe()
 	if err != nil {
@@ -436,7 +447,8 @@ func (c *client) LaunchResumed(ctx context.Context, conversationID, prompt, mode
 
 	args := resumedArgs(conversationID, prompt, model, agent, dir)
 
-	proc := exec.CommandContext(context.Background(), "agy", args...)
+	argv := launcher.Argv("agy", args, c.launchWrapper)
+	proc := agyLaunchCommandContext(context.Background(), argv[0], argv[1:]...)
 	proc.Dir = dir
 
 	stdin, err := proc.StdinPipe()

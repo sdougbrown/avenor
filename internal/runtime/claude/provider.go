@@ -103,7 +103,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	if err != nil {
 		return runtime.Session{}, fmt.Errorf("create stderr log: %w", err)
 	}
-	shellCmd := claudecore.LaunchCommand(claudeArgs, stderrLog)
+	shellCmd := claudecore.LaunchCommand(claudeArgs, stderrLog, merged.LaunchWrapper)
 
 	var transcript *claudecore.TranscriptReader
 	if home, err := os.UserHomeDir(); err == nil {

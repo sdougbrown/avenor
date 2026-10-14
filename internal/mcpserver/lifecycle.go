@@ -48,7 +48,7 @@ type supervisorLifecycle struct {
 	shared bool
 }
 
-func startSupervisor(socketPath string, idleTimeout time.Duration) (*supervisorLifecycle, error) {
+func startSupervisor(socketPath string, idleTimeout time.Duration, mcpLaunchWrapperPolicyPath string) (*supervisorLifecycle, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("get home directory: %w", err)
@@ -100,6 +100,11 @@ func startSupervisor(socketPath string, idleTimeout time.Duration) (*supervisorL
 	args := []string{"stable", "--control-socket", socketPath}
 	if idleTimeout > 0 {
 		args = append(args, "--idle-timeout", idleTimeout.String())
+	}
+	// The policy path is forwarded only when this process autostarts the
+	// supervisor; attaching to a healthy supervisor above never modifies it.
+	if mcpLaunchWrapperPolicyPath != "" {
+		args = append(args, "--mcp-launch-wrapper-policy", mcpLaunchWrapperPolicyPath)
 	}
 
 	cmd := execCommand(exePath, args...)

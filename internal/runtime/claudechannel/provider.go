@@ -181,7 +181,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		_ = os.RemoveAll(mcpDir)
 		return runtime.Session{}, fmt.Errorf("create stderr log: %w", err)
 	}
-	shellCmd := claudecore.LaunchCommand(claudeArgs, stderrLog)
+	shellCmd := claudecore.LaunchCommand(claudeArgs, stderrLog, merged.LaunchWrapper)
 
 	// Launch claude in a detached tmux session. tmux provides a real virtual
 	// terminal, which is what prevents claude from falling back to --print mode.

@@ -20,7 +20,8 @@ type ProviderConfig struct {
 	Args                []string
 	SubprocessDiscovery bool
 	AppendCWDArg        bool
-	Authenticate        string // optional: if non-empty, call Client.Authenticate with this methodId after Initialize
+	Authenticate        string               // optional: if non-empty, call Client.Authenticate with this methodId after Initialize
+	Opts                runtime.StartOptions // authoritative launch options; retained so Resume launches with the same wrapper and settings
 	ConfigureSession    func(ctx context.Context, session *Session, opts runtime.StartOptions) error
 	BuildClientEnv      func(opts runtime.StartOptions, runID, brokerToken, brokerAddr string) (map[string]string, func() error)
 }
@@ -55,7 +56,7 @@ type Provider struct {
 
 func NewProvider(cfg ProviderConfig) runtime.Provider {
 	return &Provider{
-		opts:                runtime.StartOptions{},
+		opts:                cfg.Opts,
 		backendID:           cfg.BackendID,
 		bin:                 cfg.Bin,
 		args:                cfg.Args,
@@ -338,6 +339,7 @@ func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions, 
 	client, err := NewClient(ctx, ClientConfig{
 		Bin:                  p.bin,
 		Args:                 p.args,
+		Wrapper:              opts.LaunchWrapper,
 		Dir:                  opts.Dir,
 		Env:                  env,
 		AutoAnswerPermission: false,

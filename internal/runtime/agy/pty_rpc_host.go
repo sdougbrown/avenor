@@ -11,6 +11,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime"
 	agyv115 "github.com/sdougbrown/avenor/internal/runtime/agy/interop/v115"
 	"github.com/sdougbrown/avenor/internal/runtime/claudecore/terminal"
+	"github.com/sdougbrown/avenor/internal/shellquote"
 )
 
 const ptyRPCCloseTimeout = 5 * time.Second
@@ -91,6 +92,10 @@ func startPTYRPCHost(ctx context.Context, launcher terminal.Launcher, opts runti
 	}
 
 	lifetimeCtx, cancel := context.WithCancel(context.Background())
+	if len(opts.LaunchWrapper) > 0 {
+		cancel()
+		return nil, errors.New("launch_wrapper: not supported for agy rpc host")
+	}
 	session, err := launcher.Start(lifetimeCtx, terminal.StartOptions{
 		Name:    "agy-rpc",
 		Dir:     opts.Dir,
@@ -449,10 +454,10 @@ func boundedPTYRPCCloseContext(ctx context.Context) (context.Context, context.Ca
 func interactiveAgyCommand(resumeID, agent, dir string) string {
 	command := "exec agy"
 	if resumeID != "" {
-		command += " --conversation " + posixShellQuote(resumeID)
+		command += " --conversation " + shellquote.Quote(resumeID)
 	}
 	if agent != "" {
-		command += " --agent " + posixShellQuote(agent)
+		command += " --agent " + shellquote.Quote(agent)
 	}
 	// agy's interactive tool workspace is not derived from the process cwd, and
 	// it resolves a literal "." after changing directories. Let the launch shell
@@ -461,15 +466,4 @@ func interactiveAgyCommand(resumeID, agent, dir string) string {
 		command += " --add-dir \"$PWD\""
 	}
 	return command
-}
-
-// posixShellQuote produces one POSIX-shell word. Single quotes are represented
-// by adjacent quoted fragments, so newlines and shell metacharacters remain
-// literal data rather than syntax.
-func posixShellQuote(value string) string {
-	return "'" + replaceSingleQuotes(value) + "'"
-}
-
-func replaceSingleQuotes(value string) string {
-	return strings.ReplaceAll(value, "'", "'\"'\"'")
 }

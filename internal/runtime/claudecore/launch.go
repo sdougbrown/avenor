@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/shellquote"
 )
 
 // Stop reasons for a Claude process that exited without ever running a turn.
@@ -101,14 +102,23 @@ func (a AgentNotFound) Message() string {
 // and with remain-on-exit holding the dead pane open). A file survives both. The
 // redirect costs nothing on a healthy run: Claude Code draws its TUI on stdout
 // and leaves stderr empty.
-func LaunchCommand(args []string, stderrLog string) string {
-	parts := make([]string, 0, len(args)+3)
-	parts = append(parts, "exec", "claude")
+func LaunchCommand(args []string, stderrLog string, launchWrapper []string) string {
+	parts := make([]string, 0, len(args)+len(launchWrapper)+3)
+	parts = append(parts, "exec")
+	// The wrapper argv goes in front of claude so the shell execs into the
+	// wrapper, which owns the claude process tree. Each element is quoted so it
+	// stays exactly one shell word, matching the argv semantics of the
+	// non-terminal backends; unquoted, the shell would parse wrapper text like
+	// `;` or `$()` as command syntax.
+	for _, element := range launchWrapper {
+		parts = append(parts, shellquote.Quote(element))
+	}
+	parts = append(parts, "claude")
 	for _, arg := range args {
-		parts = append(parts, ShellQuote(arg))
+		parts = append(parts, shellquote.Quote(arg))
 	}
 	if stderrLog != "" {
-		parts = append(parts, "2>"+ShellQuote(stderrLog))
+		parts = append(parts, "2>"+shellquote.Quote(stderrLog))
 	}
 	return strings.Join(parts, " ")
 }

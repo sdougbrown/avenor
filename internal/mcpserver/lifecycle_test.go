@@ -36,11 +36,46 @@ func TestStartSupervisorLeavesStaleSocketForChild(t *testing.T) {
 	}
 	defer func() { execCommand = origExec }()
 
-	if _, err := startSupervisor(socketPath, 5*time.Second); err == nil {
+	if _, err := startSupervisor(socketPath, 5*time.Second, ""); err == nil {
 		t.Fatal("expected error from failed spawn")
 	}
 	if _, err := os.Stat(socketPath); err != nil {
 		t.Fatalf("parent removed stale socket instead of leaving it for child Start: %v", err)
+	}
+}
+
+// TestStartSupervisorForwardsLaunchWrapperPolicy proves the policy path is
+// passed to the autostarted supervisor's command line.
+func TestStartSupervisorForwardsLaunchWrapperPolicy(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var capturedArgs []string
+	origExec := execCommand
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		capturedArgs = args
+		return exec.Command("/nonexistent/avenor-test-stub")
+	}
+	defer func() { execCommand = origExec }()
+	_, _ = startSupervisor(filepath.Join(t.TempDir(), "s.sock"), 0, "/etc/avenor/policy.json")
+	joined := strings.Join(capturedArgs, " ")
+	if !strings.Contains(joined, "--mcp-launch-wrapper-policy /etc/avenor/policy.json") {
+		t.Fatalf("args = %v, want policy flag forwarded", capturedArgs)
+	}
+}
+
+// TestStartSupervisorOmitsLaunchWrapperPolicyByDefault proves no policy flag is
+// emitted when the path is empty.
+func TestStartSupervisorOmitsLaunchWrapperPolicyByDefault(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var capturedArgs []string
+	origExec := execCommand
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		capturedArgs = args
+		return exec.Command("/nonexistent/avenor-test-stub")
+	}
+	defer func() { execCommand = origExec }()
+	_, _ = startSupervisor(filepath.Join(t.TempDir(), "s.sock"), 0, "")
+	if strings.Contains(strings.Join(capturedArgs, " "), "mcp-launch-wrapper-policy") {
+		t.Fatalf("args = %v, want no policy flag", capturedArgs)
 	}
 }
 
@@ -72,7 +107,7 @@ func TestStartSupervisorDefaultSocketPath(t *testing.T) {
 		}
 	}()
 
-	_, _ = startSupervisor("", 5*time.Second)
+	_, _ = startSupervisor("", 5*time.Second, "")
 
 	if capturedSocket == "" {
 		t.Fatal("captured socket path is empty")
@@ -107,7 +142,7 @@ func TestStartSupervisorZeroIdleTimeoutOmitsFlag(t *testing.T) {
 	}
 	defer func() { execCommand = origExec }()
 
-	_, _ = startSupervisor(socketPath, 0)
+	_, _ = startSupervisor(socketPath, 0, "")
 
 	for _, a := range capturedArgs {
 		if a == "--idle-timeout" {
@@ -130,7 +165,7 @@ func TestStartSupervisorNonZeroIdleTimeoutIncludesFlag(t *testing.T) {
 	}
 	defer func() { execCommand = origExec }()
 
-	_, _ = startSupervisor(socketPath, 30*time.Minute)
+	_, _ = startSupervisor(socketPath, 30*time.Minute, "")
 
 	found := false
 	for i, a := range capturedArgs {
@@ -266,7 +301,7 @@ func TestStartSupervisorStartupTimeout(t *testing.T) {
 	}
 	defer func() { execCommand = origExec }()
 
-	_, err := startSupervisor(socketPath, 0)
+	_, err := startSupervisor(socketPath, 0, "")
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}
@@ -326,7 +361,7 @@ func TestStartSupervisorReuseExistingSocket(t *testing.T) {
 	}
 	defer func() { execCommand = origExec }()
 
-	lc, err := startSupervisor(socketPath, 0)
+	lc, err := startSupervisor(socketPath, 0, "")
 	if err != nil {
 		t.Fatalf("startSupervisor: %v", err)
 	}
@@ -435,7 +470,7 @@ func TestPreReadyWinnerIsSharedAndSurvivesLoserClose(t *testing.T) {
 		}
 	}()
 
-	lifecycle, err := startSupervisor(socketPath, 0)
+	lifecycle, err := startSupervisor(socketPath, 0, "")
 	if err != nil {
 		t.Fatalf("startSupervisor: %v", err)
 	}
@@ -548,7 +583,7 @@ func TestPostReadyReplacementIsShared(t *testing.T) {
 	}
 	started := make(chan startResult, 1)
 	go func() {
-		lifecycle, err := startSupervisor(socketPath, 0)
+		lifecycle, err := startSupervisor(socketPath, 0, "")
 		started <- startResult{lifecycle: lifecycle, err: err}
 	}()
 
@@ -662,7 +697,7 @@ func TestCompetingLifecycleStartersConvergeOnWinner(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		go func() {
 			defer wg.Done()
-			lifecycle, err := startSupervisor(socketPath, 0)
+			lifecycle, err := startSupervisor(socketPath, 0, "")
 			results <- result{lifecycle: lifecycle, err: err}
 		}()
 	}
@@ -740,11 +775,11 @@ func TestCompetingLifecycleAttachmentsDoNotRemoveWinner(t *testing.T) {
 		}
 	}()
 
-	first, err := startSupervisor(socketPath, 0)
+	first, err := startSupervisor(socketPath, 0, "")
 	if err != nil {
 		t.Fatalf("first startSupervisor: %v", err)
 	}
-	second, err := startSupervisor(socketPath, 0)
+	second, err := startSupervisor(socketPath, 0, "")
 	if err != nil {
 		t.Fatalf("second startSupervisor: %v", err)
 	}
@@ -802,7 +837,7 @@ func TestStartSupervisorExitsDuringStartup(t *testing.T) {
 	}
 	defer func() { execCommand = origExec }()
 
-	_, err := startSupervisor(socketPath, 0)
+	_, err := startSupervisor(socketPath, 0, "")
 	if err == nil {
 		t.Fatal("expected error for supervisor exiting during startup")
 	}

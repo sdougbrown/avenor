@@ -3,6 +3,8 @@ package agy
 import (
 	"context"
 	"errors"
+	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +20,91 @@ func testProvider(opts runtime.StartOptions) *Provider {
 	p.version = "1.1.5"
 	p.versionOnce.Do(func() {})
 	return p
+}
+
+// launchCapture holds what the provider-level launch stubs observed: the
+// client the provider factory created and the argv the launch site built.
+type launchCapture struct {
+	client *client
+	argv   []string
+}
+
+// captureProviderLaunch installs stubs that capture the client the provider's
+// clientFactory hands to the prompt path and the argv that client launches
+// with. The launch seam returns a binary that cannot start, so the launch
+// fails deterministically before any goroutines are spawned; the run*Prompt
+// error is expected and asserted by the caller.
+func captureProviderLaunch(t *testing.T, p *Provider) *launchCapture {
+	t.Helper()
+	original := agyLaunchCommandContext
+	t.Cleanup(func() { agyLaunchCommandContext = original })
+
+	capture := &launchCapture{}
+	p.clientFactory = func() *client {
+		capture.client = newClient(nil, nil, nil, nil)
+		return capture.client
+	}
+	agyLaunchCommandContext = func(_ context.Context, name string, args ...string) *exec.Cmd {
+		capture.argv = append([]string{name}, args...)
+		return exec.Command("agy-wrapper-handoff-missing-binary")
+	}
+	return capture
+}
+
+// assertLaunchWrapperHandoff proves the provider-level assignment copied the
+// wrapper onto the launched client and that the launch argv carries the
+// wrapper prefix, so dropping the assignment cannot go unnoticed.
+func assertLaunchWrapperHandoff(t *testing.T, capture *launchCapture, wrapper []string) {
+	t.Helper()
+	if capture.client == nil {
+		t.Fatal("client factory was never invoked")
+	}
+	if !slices.Equal(capture.client.launchWrapper, wrapper) {
+		t.Fatalf("client.launchWrapper = %#v, want %#v", capture.client.launchWrapper, wrapper)
+	}
+	if len(capture.argv) < len(wrapper) || !slices.Equal(capture.argv[:len(wrapper)], wrapper) {
+		t.Fatalf("launch argv = %#v, want wrapper prefix %#v", capture.argv, wrapper)
+	}
+}
+
+// TestProviderInitialPromptHandsLaunchWrapperToClient pins the
+// provider-level handoff in runInitialPrompt: StartOptions.LaunchWrapper must
+// reach the launched client, not just a client built in a unit test.
+func TestProviderInitialPromptHandsLaunchWrapperToClient(t *testing.T) {
+	wrapper := []string{"nice", "-n", "5"}
+	p := testProvider(runtime.StartOptions{Dir: "/work"})
+	capture := captureProviderLaunch(t, p)
+
+	sess, err := p.Start(context.Background(), runtime.StartOptions{Dir: "/work", LaunchWrapper: wrapper})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := p.Prompt(context.Background(), sess.SessionID, "hi"); err == nil {
+		t.Fatal("Prompt against the unstartable stub binary should fail")
+	}
+	assertLaunchWrapperHandoff(t, capture, wrapper)
+}
+
+// TestProviderResumePromptHandsLaunchWrapperToClient pins the
+// provider-level handoff in runResumedPrompt: the resumed launch must carry
+// the session's StartOptions.LaunchWrapper onto the freshly created client.
+func TestProviderResumePromptHandsLaunchWrapperToClient(t *testing.T) {
+	wrapper := []string{"nice", "-n", "5"}
+	p := testProvider(runtime.StartOptions{Dir: "/work", LaunchWrapper: wrapper})
+	p.ptyRPCHostFactory = func(context.Context, runtime.StartOptions, string, string) (*ptyRPCHost, error) {
+		t.Fatal("wrapper handoff must not select or launch the RPC PTY host")
+		return nil, nil
+	}
+	capture := captureProviderLaunch(t, p)
+
+	sess, err := p.Resume(context.Background(), "conv-wrapper-resume")
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if err := p.Prompt(context.Background(), sess.SessionID, "continue"); err == nil {
+		t.Fatal("Prompt against the unstartable stub binary should fail")
+	}
+	assertLaunchWrapperHandoff(t, capture, wrapper)
 }
 
 func eventWithin(t *testing.T, ch <-chan events.Event) events.Event {

@@ -3,7 +3,9 @@ package claudecore
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -140,15 +142,67 @@ func TestStripANSILeavesTextIntact(t *testing.T) {
 }
 
 func TestLaunchCommandRedirectsStderr(t *testing.T) {
-	// Every word goes through ShellQuote, the redirect target included, so a path
-	// with a space in it survives the shell.
-	got := LaunchCommand([]string{"--agent", "my agent"}, "/tmp/log with space.log")
-	want := `exec claude "--agent" "my agent" 2>"/tmp/log with space.log"`
+	// Every word is shell-quoted (shellquote.Quote), the redirect target
+	// included, so a path with a space in it survives the shell.
+	got := LaunchCommand([]string{"--agent", "my agent"}, "/tmp/log with space.log", nil)
+	want := `exec claude '--agent' 'my agent' 2>'/tmp/log with space.log'`
 	if got != want {
 		t.Errorf("LaunchCommand = %q, want %q", got, want)
 	}
-	if got := LaunchCommand([]string{"--agent", "horse"}, ""); strings.Contains(got, "2>") {
+	if got := LaunchCommand([]string{"--agent", "horse"}, "", nil); strings.Contains(got, "2>") {
 		t.Errorf("no log requested but command redirects: %q", got)
+	}
+}
+
+// TestLaunchCommandWrapperSurvivesRealShellExecution executes the full launch
+// command in a real shell and proves hostile wrapper elements reach the final
+// process as literal argv: injection payloads are not parsed or executed.
+// The wrapper executable is a printf shim, so it prints exactly the argv the
+// backend process would have received, one element per line.
+func TestLaunchCommandWrapperSurvivesRealShellExecution(t *testing.T) {
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	shimPath := filepath.Join(binDir, "wrapper-shim")
+	if err := os.WriteFile(shimPath, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wrapper := []string{shimPath, "fire;jail", "pre$(injection)fix", "back`tick'", "a b", "new\nline"}
+	cmd := LaunchCommand([]string{"--version"}, "", wrapper)
+	out, err := exec.Command("sh", "-c", cmd).Output()
+	if err != nil {
+		t.Fatalf("shell execution of %q: %v", cmd, err)
+	}
+	// Each element is printed with a trailing newline, so the byte-exact output
+	// is the literal argv joined by newlines. A real newline inside an element
+	// survives as part of that element's bytes.
+	want := append(append([]string{}, wrapper[1:]...), "claude", "--version")
+	if string(out) != strings.Join(want, "\n")+"\n" {
+		t.Fatalf("exec'd output = %q, want %q", out, strings.Join(want, "\n")+"\n")
+	}
+}
+
+func TestLaunchCommandQuotesLaunchWrapperElements(t *testing.T) {
+	// A wrapper element is one argv element on the non-terminal backends, so it
+	// must be exactly one shell word here too — including a value with spaces
+	// ("nice -n 5" as a single element) and values full of shell syntax.
+	wrapper := []string{"nice -n 5", "fire;jail", "pre$(injection)fix", "back`tick'", "$HOME"}
+	got := LaunchCommand([]string{"--agent", "horse"}, "", wrapper)
+
+	// Drop the leading `exec` and parse the command the way the terminal shell
+	// would, to prove each element survives as one token with injection dead.
+	words, err := exec.Command("sh", "-c", "set -- "+strings.TrimPrefix(got, "exec ")+"; printf '%s\\n' \"$@\"").Output()
+	if err != nil {
+		t.Fatalf("shell parse of %q: %v", got, err)
+	}
+	var tokens []string
+	for _, tok := range strings.Split(strings.TrimRight(string(words), "\n"), "\n") {
+		tokens = append(tokens, tok)
+	}
+	want := append(append([]string{}, wrapper...), "claude", "--agent", "horse")
+	if !slices.Equal(tokens, want) {
+		t.Fatalf("shell-parsed tokens = %#v, want %#v", tokens, want)
 	}
 }
 

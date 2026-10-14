@@ -313,6 +313,13 @@ Params:
 - `max_retries` (int) — max retries after transient backend errors.
 - `loop_file` (string) — path to a loop config JSON file (advanced multi-phase mode).
 - `session_id` (string) — resume session ID (for resuming a previous session).
+- `launch_wrapper` (array of strings) — opaque argv prefix placed in front of the backend process command (e.g. `["nice", "-n", "5"]`). Avenor does not interpret the wrapper; see [backends.md](backends.md#launch-wrapper). Empty or absent launches the backend unwrapped. Resuming with a different wrapper is rejected like a backend/agent/model mismatch.
+
+Requires ownership.
+
+#### `spawn_mcp`
+
+Identical request and response shape to `spawn`. This is the MCP-gated variant: the supervisor enforces its launch wrapper policy on this verb only — a `launch_wrapper` that does not exactly match an allowlist entry is rejected before any process is created (`launch_wrapper: argv is not allowed by this supervisor`), and a supervisor without a policy rejects every wrapped request (`launch_wrapper: disabled for MCP on this supervisor`). Ordinary `spawn` and the CLI are operator-trusted and not allowlist-gated. See [backends.md](backends.md#mcp-surfaces-operator-allowlist).
 
 Requires ownership.
 

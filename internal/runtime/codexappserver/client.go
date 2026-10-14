@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/runtime/launcher"
 )
 
 const stderrCap = 400 // max lines of stderr retained in rolling buffer
@@ -70,9 +71,15 @@ func newClient(proc *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, stder
 	return c
 }
 
-// StartClient spawns `codex app-server` and performs the initialize handshake.
-func StartClient(ctx context.Context) (*client, error) {
-	proc := exec.CommandContext(ctx, "codex", "app-server")
+// appServerCommandContext is the process-creation seam for the backend
+// launch; probes use exec.CommandContext directly.
+var appServerCommandContext = exec.CommandContext
+
+// StartClient spawns `codex app-server` (optionally behind the opaque wrapper
+// argv prefix) and performs the initialize handshake.
+func StartClient(ctx context.Context, launchWrapper []string) (*client, error) {
+	argv := launcher.Argv("codex", []string{"app-server"}, launchWrapper)
+	proc := appServerCommandContext(ctx, argv[0], argv[1:]...)
 	stdin, err := proc.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("codex stdin pipe: %w", err)

@@ -2,7 +2,6 @@ package claudecore
 
 import (
 	"encoding/json"
-	"strconv"
 )
 
 func MustJSON(v any) json.RawMessage {
@@ -28,9 +27,4 @@ func ValidTmuxKey(key string) bool {
 		return false
 	}
 	return true
-}
-
-// ShellQuote single-quotes a string for safe interpolation into a shell command.
-func ShellQuote(s string) string {
-	return strconv.Quote(s)
 }

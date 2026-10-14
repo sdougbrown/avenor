@@ -15,13 +15,14 @@ func New() runtime.Provider {
 
 func NewWithOptions(opts runtime.StartOptions) runtime.Provider {
 	return acp.NewProvider(acp.ProviderConfig{
-		BackendID:             backendID,
-		Bin:                   "agent",
-		Args:                  []string{"acp"},
-		SubprocessDiscovery:   false,
-		AppendCWDArg:          false,
-		Authenticate:          "cursor_login",
-		ConfigureSession:      noopConfigureSession,
+		BackendID:           backendID,
+		Opts:                opts,
+		Bin:                 "agent",
+		Args:                []string{"acp"},
+		SubprocessDiscovery: false,
+		AppendCWDArg:        false,
+		Authenticate:        "cursor_login",
+		ConfigureSession:    noopConfigureSession,
 	})
 }
 

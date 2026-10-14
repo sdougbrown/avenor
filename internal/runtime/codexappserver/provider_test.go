@@ -356,11 +356,11 @@ func TestProviderPipeRoundtrip(t *testing.T) {
 func TestEnsureClientReturnsWithoutDeadlock(t *testing.T) {
 	c, _, _ := fakeClient()
 	p := NewWithOptions(runtime.StartOptions{})
-	p.startClient = func(context.Context) (*client, error) { return c, nil }
+	p.startClient = func(_ context.Context, _ []string) (*client, error) { return c, nil }
 
 	done := make(chan struct{})
 	go func() {
-		got, err := p.ensureClient(context.Background())
+		got, err := p.ensureClient(context.Background(), nil)
 		if err != nil {
 			t.Errorf("ensureClient: %v", err)
 		}
@@ -387,7 +387,7 @@ func TestEnsureClientRaceLossClosesLoser(t *testing.T) {
 	loser, _, _ := fakeClient()
 
 	p := NewWithOptions(runtime.StartOptions{})
-	p.startClient = func(context.Context) (*client, error) {
+	p.startClient = func(_ context.Context, _ []string) (*client, error) {
 		// Simulate a concurrent winner publishing its client during our start.
 		p.mu.Lock()
 		p.client = winner
@@ -395,7 +395,7 @@ func TestEnsureClientRaceLossClosesLoser(t *testing.T) {
 		return loser, nil
 	}
 
-	got, err := p.ensureClient(context.Background())
+	got, err := p.ensureClient(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("ensureClient: %v", err)
 	}
@@ -427,9 +427,9 @@ func TestEnsureClientRaceLossClosesLoser(t *testing.T) {
 func TestEnsureClientStartError(t *testing.T) {
 	p := NewWithOptions(runtime.StartOptions{})
 	wantErr := errors.New("boom")
-	p.startClient = func(context.Context) (*client, error) { return nil, wantErr }
+	p.startClient = func(_ context.Context, _ []string) (*client, error) { return nil, wantErr }
 
-	if _, err := p.ensureClient(context.Background()); !errors.Is(err, wantErr) {
+	if _, err := p.ensureClient(context.Background(), nil); !errors.Is(err, wantErr) {
 		t.Fatalf("err = %v, want %v", err, wantErr)
 	}
 	p.mu.Lock()
@@ -441,10 +441,10 @@ func TestEnsureClientStartError(t *testing.T) {
 
 	// A second call must retry the start and must not deadlock on a leaked lock.
 	c, _, _ := fakeClient()
-	p.startClient = func(context.Context) (*client, error) { return c, nil }
+	p.startClient = func(_ context.Context, _ []string) (*client, error) { return c, nil }
 	done := make(chan *client, 1)
 	go func() {
-		got, err := p.ensureClient(context.Background())
+		got, err := p.ensureClient(context.Background(), nil)
 		if err != nil {
 			t.Errorf("second ensureClient: %v", err)
 		}
@@ -472,7 +472,7 @@ func TestEnsureClientConcurrentSingleWinner(t *testing.T) {
 
 	var mu sync.Mutex
 	var created []*client
-	p.startClient = func(context.Context) (*client, error) {
+	p.startClient = func(_ context.Context, _ []string) (*client, error) {
 		c, _, _ := fakeClient()
 		mu.Lock()
 		created = append(created, c)
@@ -486,7 +486,7 @@ func TestEnsureClientConcurrentSingleWinner(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			c, err := p.ensureClient(context.Background())
+			c, err := p.ensureClient(context.Background(), nil)
 			if err != nil {
 				t.Errorf("ensureClient: %v", err)
 			}

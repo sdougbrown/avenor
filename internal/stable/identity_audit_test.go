@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -360,6 +361,7 @@ func TestStableDirectResumeRestoresCompleteAuthoritativeIdentity(t *testing.T) {
 	mapped := effectiveIdentity{
 		Backend: "pi", Agent: "mapped-agent", Model: "mapped-model", AgentProfile: "cloud",
 		RosterFile: "/repo/original-roster.json", RosterEntry: "planner",
+		LaunchWrapper: []string{"nice", "-n", "5"},
 	}
 	sup.rememberSessionIdentity("resume-session", mapped, nil)
 	provider := &thinkingCaptureProvider{}
@@ -379,6 +381,9 @@ func TestStableDirectResumeRestoresCompleteAuthoritativeIdentity(t *testing.T) {
 	defer sup.cancelRuntime(result.RuntimeID)
 	if gotBackend != mapped.Backend || gotOpts.Agent != mapped.Agent || gotOpts.Model != mapped.Model || gotOpts.AgentProfile != mapped.AgentProfile {
 		t.Fatalf("restored provider identity: backend=%q opts=%+v", gotBackend, gotOpts)
+	}
+	if !slices.Equal(gotOpts.LaunchWrapper, mapped.LaunchWrapper) {
+		t.Fatalf("restored launch wrapper = %#v, want %#v", gotOpts.LaunchWrapper, mapped.LaunchWrapper)
 	}
 	if result.RosterFile != mapped.RosterFile || result.RosterEntry != mapped.RosterEntry {
 		t.Fatalf("restored roster metadata = %q/%q", result.RosterFile, result.RosterEntry)
