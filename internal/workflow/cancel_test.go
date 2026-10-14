@@ -275,6 +275,33 @@ func TestManagerWorkflowCancelIdempotent(t *testing.T) {
 	}
 }
 
+// TestManagerWorkflowCancelDuplicatesUnderConcurrency pins the in-loop
+// duplicate branch: a concurrent cancel that commits between this cancel's
+// read and its apply turns the duplicate-key apply error into the same
+// idempotent response the sequential pre-check returns, never a raw error.
+func TestManagerWorkflowCancelDuplicatesUnderConcurrency(t *testing.T) {
+	m, wf := newCancelFixture(t)
+	// The first cancel's pre-commit hook issues a second WorkflowCancel for the
+	// same workflow, which commits first; the outer apply then hits the
+	// duplicate idempotency key.
+	m.testHooks.cancelPreCommit = func() {
+		if _, err := m.WorkflowCancel(string(wf), cancelPayload("ops", "concurrent duplicate")); err != nil {
+			t.Errorf("concurrent cancel: %v", err)
+		}
+	}
+	resultAny, err := m.WorkflowCancel(string(wf), cancelPayload("ops", "lost race"))
+	if err != nil {
+		t.Fatalf("WorkflowCancel: %v", err)
+	}
+	result, _ := resultAny.(map[string]any)
+	if got, ok := result["idempotent"].(bool); !ok || !got {
+		t.Fatalf("duplicate cancel result not idempotent: %#v", result)
+	}
+	if got := result["status"]; got != string(WorkflowCanceled) {
+		t.Fatalf("duplicate cancel status got %v want canceled", got)
+	}
+}
+
 func TestManagerWorkflowCancelRejectsTerminal(t *testing.T) {
 	m, wf := newCancelFixture(t)
 	// Drive claim → start → complete through the control-plane command path so
