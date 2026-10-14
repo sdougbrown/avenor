@@ -233,6 +233,9 @@ func (m *Manager) BeginDispatch(req BeginDispatchRequest) (BeginDispatchResult, 
 	if selection == nil {
 		selection = act.Selection
 	}
+	if err := selection.ValidatePermissionPolicy(); err != nil {
+		return BeginDispatchResult{}, err
+	}
 	concurrencyKey := act.Dispatch.ConcurrencyKey
 	// Key derivation is a pure read (no lease recovery), so it cannot move
 	// the revision the commit below validates against.

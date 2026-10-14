@@ -327,6 +327,18 @@ type ExecutionSelection struct {
 	PermissionDecider *PermissionDecider `json:"permission_decider,omitempty"`
 }
 
+// ValidatePermissionPolicy rejects a selection that carries both unattended
+// permission policies: auto-approve resolves every request as allow, while a
+// permission decider routes requests to a judging agent. Template validation
+// keeps assignments from declaring both, but caller-supplied selections at
+// the start/dispatch command boundaries must be checked too.
+func (s *ExecutionSelection) ValidatePermissionPolicy() error {
+	if s == nil || !s.AutoApprove || s.PermissionDecider == nil {
+		return nil
+	}
+	return fmt.Errorf("auto_approve and permission_decider are mutually exclusive")
+}
+
 // Action is a strict tagged union. Exactly one variant pointer corresponds to
 // Kind; MarshalJSON and UnmarshalJSON use the flat {"type": ...} wire shape.
 type Action struct {
