@@ -15,6 +15,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime"
 	agyv115 "github.com/sdougbrown/avenor/internal/runtime/agy/interop/v115"
 	"github.com/sdougbrown/avenor/internal/runtime/claudecore/terminal"
+	"github.com/sdougbrown/avenor/internal/shellquote"
 )
 
 type recordingLauncher struct {
@@ -220,7 +221,7 @@ func TestInteractiveAgyCommandQuotesOnlySupportedValues(t *testing.T) {
 		})
 	}
 	for _, value := range []string{"", "plain", "quote'and spaces", "$(not-a-command); *\nnext"} {
-		output, err := exec.Command("sh", "-c", "set -- "+posixShellQuote(value)+"; printf '%s' \"$1\"").Output()
+		output, err := exec.Command("sh", "-c", "set -- "+shellquote.Quote(value)+"; printf '%s' \"$1\"").Output()
 		if err != nil || string(output) != value {
 			t.Fatalf("shell quote value=%q output=%q err=%v", value, output, err)
 		}
