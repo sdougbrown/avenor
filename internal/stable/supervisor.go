@@ -2938,10 +2938,6 @@ func (s *Supervisor) resolveDirectResumeIdentity(sessionID string, supplied, res
 			return effectiveIdentity{}, resumeIdentityConflict(sessionID, check.field, check.value, check.authoritative)
 		}
 	}
-	if len(supplied.LaunchWrapper) > 0 && !slices.Equal(supplied.LaunchWrapper, mapped.LaunchWrapper) {
-		return effectiveIdentity{}, resumeIdentityConflict(sessionID, "launch_wrapper",
-			launchWrapperDisplay(supplied.LaunchWrapper), launchWrapperDisplay(mapped.LaunchWrapper))
-	}
 	return mapped, nil
 }
 

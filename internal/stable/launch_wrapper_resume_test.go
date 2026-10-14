@@ -2,6 +2,7 @@ package stable
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -37,8 +38,8 @@ func TestResolveDirectResumeIdentityLaunchWrapper(t *testing.T) {
 	_, err = sup.resolveDirectResumeIdentity("wrap-session",
 		effectiveIdentity{Backend: "pi", LaunchWrapper: []string{"firejail"}},
 		effectiveIdentity{Backend: "pi", LaunchWrapper: []string{"firejail"}})
-	if err == nil {
-		t.Fatal("wrapper mismatch accepted, want conflict error")
+	if err == nil || !strings.Contains(err.Error(), "launch_wrapper") {
+		t.Fatalf("wrapper mismatch: err = %v, want launch_wrapper conflict", err)
 	}
 }
 
@@ -66,8 +67,8 @@ func TestResolveDirectResumeIdentityRosterLaunchWrapper(t *testing.T) {
 	_, err = sup.resolveDirectResumeIdentity("roster-wrap-session",
 		effectiveIdentity{Backend: "pi", Agent: "planner", Model: "planner-model", RosterFile: "/repo/roster.json", RosterEntry: "planner", LaunchWrapper: []string{"firejail"}},
 		effectiveIdentity{Backend: "pi", Agent: "planner", Model: "planner-model", RosterFile: "/repo/roster.json", RosterEntry: "planner", LaunchWrapper: []string{"firejail"}})
-	if err == nil {
-		t.Fatal("roster resume with a different wrapper accepted, want conflict error")
+	if err == nil || !strings.Contains(err.Error(), "launch_wrapper") {
+		t.Fatalf("roster wrapper mismatch: err = %v, want launch_wrapper conflict", err)
 	}
 }
 
@@ -80,8 +81,8 @@ func TestResolveWorkflowResumeIdentityLaunchWrapperConflict(t *testing.T) {
 	_, err := sup.resolveWorkflowResumeIdentity("phase-session", effectiveIdentity{
 		Backend: "pi", Agent: "planner", Model: "planner-model", LaunchWrapper: []string{"firejail"},
 	})
-	if err == nil {
-		t.Fatal("workflow resume with a changed wrapper accepted, want conflict error")
+	if err == nil || !strings.Contains(err.Error(), "launch_wrapper") {
+		t.Fatalf("workflow wrapper mismatch: err = %v, want launch_wrapper conflict", err)
 	}
 
 	if _, err := sup.resolveWorkflowResumeIdentity("phase-session", effectiveIdentity{
