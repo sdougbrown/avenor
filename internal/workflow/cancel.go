@@ -85,6 +85,18 @@ func (m *Manager) WorkflowCancel(id string, payload json.RawMessage) (any, error
 		if !exists {
 			return nil, fmt.Errorf("workflow not found: %s", wf)
 		}
+		// Idempotency before the status check, mirroring the sequential
+		// pre-check: a duplicate cancel that committed between the read and the
+		// apply bumps the revision (so Apply reports the mismatch, not the
+		// duplicate key), and the retry must surface the same idempotent
+		// response rather than a terminal-instance rejection.
+		if _, done := fresh.Idempotency[idemKey]; done {
+			return map[string]any{
+				"idempotent": true,
+				"status":     string(fresh.Instance.Status),
+				"revision":   fresh.Instance.Revision,
+			}, nil
+		}
 		if isTerminalStatus(fresh.Instance.Status) {
 			// A concurrent command terminated the instance between the read
 			// and the apply; the cancel loses to the observed terminal fact.
