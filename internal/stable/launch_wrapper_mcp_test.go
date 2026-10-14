@@ -3,6 +3,7 @@ package stable
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sdougbrown/avenor/internal/runtime"
 )
@@ -97,6 +98,37 @@ func TestSpawnMCPAllowlistEnforcement(t *testing.T) {
 				t.Fatal("runtime was registered for a denied wrapper")
 			}
 		})
+	}
+}
+
+// TestSpawnMCPDeniesInheritedWrapperOnResume proves the gate sees the
+// effective (inherited) wrapper: resuming a wrapped session without supplying
+// a wrapper is still subject to the MCP policy.
+func TestSpawnMCPDeniesInheritedWrapperOnResume(t *testing.T) {
+	sup, _ := mcpTestSupervisor(t, nil)
+	dir := t.TempDir()
+	if _, err := sup.spawn(SpawnParams{Dir: dir, Prompt: "hi", LaunchWrapper: []string{"nice", "-n", "5"}}); err != nil {
+		t.Fatalf("seed spawn: %v", err)
+	}
+	// The resume path resolves the authoritative wrapper from the registered
+	// session identity; wait for the seed provider's session registration.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		sup.sessionIdentityMu.Lock()
+		_, ok := sup.sessionIdentities["ses_mcp_wrapper"]
+		sup.sessionIdentityMu.Unlock()
+		if ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("seed session identity never registered")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	_, err := sup.SpawnMCP([]byte(`{"dir":"` + dir + `","prompt":"hi","session_id":"ses_mcp_wrapper"}`))
+	if err == nil || err.Error() != "launch_wrapper: disabled for MCP on this supervisor" {
+		t.Fatalf("SpawnMCP() error = %v, want exact disabled error for inherited wrapper", err)
 	}
 }
 

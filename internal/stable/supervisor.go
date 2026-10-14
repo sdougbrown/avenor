@@ -4726,15 +4726,20 @@ var errMCPLaunchWrapperDisabled = errors.New("launch_wrapper: disabled for MCP o
 // resolution — and requires an exact allowlist match. It must be called
 // before reservations, idempotency, or any process creation.
 func (s *Supervisor) authorizeMCPLaunchWrapper(params SpawnParams) error {
-	if len(params.LaunchWrapper) == 0 {
-		return nil
+	if len(params.LaunchWrapper) > 0 {
+		if err := runtime.ValidateLaunchWrapper(params.LaunchWrapper); err != nil {
+			return fmt.Errorf("launch_wrapper: %w", err)
+		}
 	}
-	if err := runtime.ValidateLaunchWrapper(params.LaunchWrapper); err != nil {
-		return fmt.Errorf("launch_wrapper: %w", err)
-	}
+	// Resolve even when the request omits the wrapper: a resume inherits the
+	// session's authoritative wrapper, and the inherited argv is the argv that
+	// will be exec'd — it needs the same gate.
 	resolved, _, err := s.resolveDirectSpawnIdentity(params)
 	if err != nil {
 		return err
+	}
+	if len(resolved.LaunchWrapper) == 0 {
+		return nil
 	}
 	if s.config.MCPLaunchWrapperPolicy == nil {
 		return errMCPLaunchWrapperDisabled
