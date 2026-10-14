@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/admission"
+	"github.com/sdougbrown/avenor/internal/control"
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/workflow"
@@ -838,6 +839,179 @@ func TestDispatchAssignmentPermissionDeciderRoutesRequest(t *testing.T) {
 	// The request stays pending: the kernel routed it, it did not answer it.
 	if pending, _ := worker["pending_permission"].(bool); !pending {
 		t.Fatal("worker pending_permission = false, want the request to stay pending")
+	}
+}
+
+// TestDispatchPermissionDeciderSpawnFailureReroutesRequest proves a failed
+// decider spawn unmarks the request as routed, so the next permission.request
+// event for the same request re-routes it instead of stalling pending with
+// only a stderr line.
+func TestDispatchPermissionDeciderSpawnFailureReroutesRequest(t *testing.T) {
+	rosterPath := writeStage5Roster(t, t.TempDir(), `{
+		"worker":  {"backend": "pi", "agent": "worker", "model": "m"},
+		"rm-guard": {"backend": "pi", "agent": "rm-guard", "model": "guard-m"}
+	}`)
+	template := mustJSON(t, map[string]any{
+		"schema_version":   1,
+		"template_id":      "tmpl-dispatch-permdec-retry",
+		"template_version": "1",
+		"entry_nodes":      []string{"start"},
+		"nodes": []any{map[string]any{
+			"id":           "start",
+			"action":       map[string]any{"type": "run", "prompt": "do the thing"},
+			"assignment":   map[string]any{"roster_file": rosterPath, "roster_entry": "worker", "permission_policy": map[string]any{"decider": "rm-guard"}},
+			"dispatch":     map[string]any{"mode": "auto", "controller_id": "c1"},
+			"retry_policy": map[string]any{"max_attempts": 3, "exhaustion": "block"},
+		}},
+		"terminal_outcomes":    []string{"done"},
+		"default_lease_policy": map[string]any{"ttl_seconds": 900},
+	})
+	f := newDispatchFixtureTemplate(t, "permdec-retry", 4, 4, template)
+	requestID := "perm_req_retry"
+	permissionEvent := func() events.Event {
+		return events.Event{
+			Event:     "permission.request",
+			SessionID: "ses_worker_retry",
+			Fields: map[string]any{
+				"request_id": requestID,
+				"tool":       "bash",
+				"command":    "rm -rf /tmp/build",
+				"options":    []any{map[string]any{"optionId": "allow_once", "kind": "allow"}},
+			},
+		}
+	}
+	var deciderSpawns atomic.Int64
+	f.sup.newProviderFunc = func(startOpts runtime.StartOptions, _ string) (runtime.Provider, error) {
+		if strings.HasPrefix(startOpts.Label, "permdec:") {
+			if deciderSpawns.Add(1) == 1 {
+				return nil, fmt.Errorf("decider spawn failed")
+			}
+			return &stableScriptedProvider{attempt: -1, scripts: []stableScriptedAttempt{{
+				sessionID: "ses_decider_retry",
+			}}}, nil
+		}
+		return &stableScriptedProvider{attempt: -1, scripts: []stableScriptedAttempt{{
+			sessionID: "ses_worker_retry",
+			events:    []stableScriptedEvent{{event: permissionEvent()}},
+		}}}, nil
+	}
+	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
+	if err != nil {
+		t.Fatalf("dispatchWorkflowNode: %v", err)
+	}
+	if out.Kind != Dispatched {
+		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
+	}
+	// The failed spawn must unmark the request as routed so the next
+	// permission.request event for the same request can route again.
+	waitFor(t, "failed decider spawn", func() bool { return deciderSpawns.Load() >= 1 })
+	waitFor(t, "request unmarked after failed spawn", func() bool {
+		f.sup.controlMu.Lock()
+		rt := f.sup.runtimes[out.RuntimeID]
+		f.sup.controlMu.Unlock()
+		if rt == nil {
+			return false
+		}
+		rt.mu.Lock()
+		_, routed := rt.routedPermissionRequests[requestID]
+		rt.mu.Unlock()
+		return !routed
+	})
+	// A re-emitted permission.request event for the same request reaches the
+	// routing layer (the CLI session loop refuses a concurrent second
+	// request, so the event is driven at the routing boundary here), and this
+	// time the decider run spawns.
+	f.sup.routePermissionRequest(out.RuntimeID, requestID, []any{map[string]any{"optionId": "allow_once", "kind": "allow"}})
+	var decider map[string]any
+	waitFor(t, "retried decider runtime", func() bool {
+		for _, rt := range f.sup.listRuntimes() {
+			if label, _ := rt["label"].(string); strings.HasPrefix(label, "permdec:") {
+				decider = rt
+				return true
+			}
+		}
+		return false
+	})
+	if deciderSpawns.Load() < 2 {
+		t.Fatalf("decider spawns = %d, want the retry to spawn a second time", deciderSpawns.Load())
+	}
+	if got, _ := decider["agent"].(string); got != "rm-guard" {
+		t.Fatalf("decider agent = %q, want rm-guard", got)
+	}
+}
+
+// TestPermissionDeciderSkipsAlreadyResolvedRequest proves the decider spawn
+// re-checks the control plane before starting: a request that was already
+// resolved (for example by a human answering through the control plane while
+// the spawn was being prepared) spawns no decider run.
+func TestPermissionDeciderSkipsAlreadyResolvedRequest(t *testing.T) {
+	rosterPath := writeStage5Roster(t, t.TempDir(), `{
+		"worker":  {"backend": "pi", "agent": "worker", "model": "m"},
+		"rm-guard": {"backend": "pi", "agent": "rm-guard", "model": "guard-m"}
+	}`)
+	template := mustJSON(t, map[string]any{
+		"schema_version":   1,
+		"template_id":      "tmpl-dispatch-permdec-resolved",
+		"template_version": "1",
+		"entry_nodes":      []string{"start"},
+		"nodes": []any{map[string]any{
+			"id":           "start",
+			"action":       map[string]any{"type": "run", "prompt": "do the thing"},
+			"assignment":   map[string]any{"roster_file": rosterPath, "roster_entry": "worker", "permission_policy": map[string]any{"decider": "rm-guard"}},
+			"dispatch":     map[string]any{"mode": "auto", "controller_id": "c1"},
+			"retry_policy": map[string]any{"max_attempts": 3, "exhaustion": "block"},
+		}},
+		"terminal_outcomes":    []string{"done"},
+		"default_lease_policy": map[string]any{"ttl_seconds": 900},
+	})
+	f := newDispatchFixtureTemplate(t, "permdec-resolved", 4, 4, template)
+	requestID := "perm_req_resolved"
+	gate := make(chan struct{})
+	// Always release the held spawn so teardown never waits on it, even when
+	// the assertion below fails.
+	defer close(gate)
+	var deciderSpawns atomic.Int64
+	f.sup.newProviderFunc = func(startOpts runtime.StartOptions, _ string) (runtime.Provider, error) {
+		if strings.HasPrefix(startOpts.Label, "permdec:") {
+			deciderSpawns.Add(1)
+			// Hold the automatic spawn so only the explicit re-check below is
+			// under test; release it as a failure so no decider run lingers.
+			<-gate
+			return nil, fmt.Errorf("decider spawn failed")
+		}
+		return &stableScriptedProvider{attempt: -1, scripts: []stableScriptedAttempt{{
+			sessionID: "ses_worker_resolved",
+			events: []stableScriptedEvent{{event: events.Event{
+				Event:     "permission.request",
+				SessionID: "ses_worker_resolved",
+				Fields: map[string]any{
+					"request_id": requestID,
+					"tool":       "bash",
+					"command":    "rm -rf /tmp/build",
+					"options":    []any{map[string]any{"optionId": "allow_once", "kind": "allow"}},
+				},
+			}}},
+		}}}, nil
+	}
+	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
+	if err != nil {
+		t.Fatalf("dispatchWorkflowNode: %v", err)
+	}
+	if out.Kind != Dispatched {
+		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
+	}
+	waitFor(t, "decider spawn blocked", func() bool { return deciderSpawns.Load() >= 1 })
+	waitFor(t, "permission claim", func() bool {
+		return f.sup.control.PermissionResolverState(out.RuntimeID, requestID) != control.PermissionResolverUnknown
+	})
+	if !f.sup.control.MarkPermissionClaimResolved(out.RuntimeID, requestID, "test", "allow_once", "") {
+		t.Fatal("MarkPermissionClaimResolved returned false")
+	}
+	// The already-resolved request must not start another decider run.
+	f.sup.spawnPermissionDecider(workflow.PermissionDecider{Entry: "rm-guard", Backend: "pi", Agent: "rm-guard", Model: "guard-m"},
+		out.RuntimeID, requestID, nil, "worker", ".")
+	if got := deciderSpawns.Load(); got != 1 {
+		t.Fatalf("decider spawns = %d, want the resolved request to spawn none", got)
 	}
 }
 

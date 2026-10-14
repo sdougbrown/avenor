@@ -3796,10 +3796,15 @@ func (s *Supervisor) routePermissionRequest(runtimeID, requestID string, options
 
 // spawnPermissionDecider starts the decider run for one pending permission
 // request. The decider is spawned under auto-approve so the decider itself
-// can never stall on a permission prompt. A failed spawn leaves the request
-// pending: it stays visible in runtime status and can still be answered
-// through the control plane or by a human.
+// can never stall on a permission prompt. A request that was already resolved
+// before the spawn starts (for example by a human answering through the
+// control plane) spawns no decider. A failed spawn unmarks the request as
+// routed so the next permission.request event re-routes it instead of
+// stalling pending with only a log line.
 func (s *Supervisor) spawnPermissionDecider(decider workflow.PermissionDecider, runtimeID, requestID string, options []any, label, dir string) {
+	if s.control.PermissionResolverState(runtimeID, requestID) == control.PermissionResolverResolved {
+		return
+	}
 	optionsJSON, err := json.Marshal(options)
 	if err != nil {
 		optionsJSON = []byte("[]")
@@ -3830,7 +3835,23 @@ Never answer blindly: allow only requests the task plainly needs.`,
 	}
 	if _, err := s.spawn(params); err != nil {
 		fmt.Fprintf(s.stderrWriter(), "avenor: spawn permission decider %q for runtime %s request %s: %v\n", decider.Entry, runtimeID, requestID, err)
+		s.unroutePermissionRequest(runtimeID, requestID)
 	}
+}
+
+// unroutePermissionRequest drops a request's routed mark after a failed
+// decider spawn so a later permission.request event for the same request can
+// route again. The request stays pending and visible in runtime status.
+func (s *Supervisor) unroutePermissionRequest(runtimeID, requestID string) {
+	s.controlMu.Lock()
+	rt := s.runtimes[runtimeID]
+	s.controlMu.Unlock()
+	if rt == nil {
+		return
+	}
+	rt.mu.Lock()
+	delete(rt.routedPermissionRequests, requestID)
+	rt.mu.Unlock()
 }
 
 func (s *Supervisor) clearRuntimePermissionOptions(runtimeID string) {
