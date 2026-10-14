@@ -6,6 +6,7 @@ package workflow
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -112,6 +113,67 @@ func testClaimRejectedAfterCancel(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "canceled") {
 		t.Fatalf("claim on canceled instance: expected canceled error, got %v", err)
+	}
+}
+
+// testLateLeaseExpiredOnCanceledRejected pins the uniform rejection of a late
+// lease_expired on a canceled instance: the guard fires before any
+// lease-specific validation, so the error is the canceled-instance one no
+// matter what lease state the cancel left behind.
+func testLateLeaseExpiredOnCanceledRejected(t *testing.T) {
+	state, _, attemptID := runToStart(t, newInstance(t))
+	state = mustApply(t, state, Command{
+		Kind:             CommandCancel,
+		ExpectedRevision: state.Instance.Revision,
+		IdempotencyKey:   "cancel-1",
+		Identity:         ExecutionIdentity{WorkflowID: "wf1"},
+		Actor:            "ops",
+		Reason:           "why",
+	}, "cancel")
+	_, err := Reduce(state, Event{
+		Kind:     EventLeaseExpired,
+		Identity: baseIdentity(actStart(state).ID, attemptID),
+		LeaseID:  "lease-1",
+	})
+	if err == nil || !strings.Contains(err.Error(), "canceled") {
+		t.Fatalf("late lease_expired on canceled instance: expected canceled error, got %v", err)
+	}
+	if got := state.Instance.Status; got != WorkflowCanceled {
+		t.Fatalf("late lease_expired regressed instance status to %q", got)
+	}
+}
+
+// testLateGateDecisionOnCanceledDropped applies a resolving gate decision
+// directly to a canceled instance snapshot and asserts it is dropped without
+// spawning a phantom branch: the activation stays canceled, no gate is
+// recorded, and the instance stays canceled rather than completing.
+func testLateGateDecisionOnCanceledDropped(t *testing.T) {
+	state, _, attemptID := runToStart(t, newInstance(t))
+	state = mustApply(t, state, Command{
+		Kind:             CommandCancel,
+		ExpectedRevision: state.Instance.Revision,
+		IdempotencyKey:   "cancel-1",
+		Identity:         ExecutionIdentity{WorkflowID: "wf1"},
+		Actor:            "ops",
+		Reason:           "why",
+	}, "cancel")
+	next := state
+	gateEvent := Event{
+		Kind:     EventGate,
+		Identity: baseIdentity(actStart(state).ID, attemptID),
+		Gate: &GateInstance{
+			ID:           "gate-1",
+			GateID:       "gate1",
+			ActivationID: actStart(state).ID,
+			Status:       GatePassed,
+			Outcome:      "done",
+		},
+	}
+	if err := applyGate(&next, actStart(state), gateEvent); err != nil {
+		t.Fatalf("late gate decision on canceled instance: unexpected error %v", err)
+	}
+	if !reflect.DeepEqual(next, state) {
+		t.Fatalf("late gate decision on canceled instance mutated the snapshot: got %+v want %+v", next, state)
 	}
 }
 

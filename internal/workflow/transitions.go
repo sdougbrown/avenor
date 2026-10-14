@@ -320,9 +320,11 @@ func buildCommandEvents(state Snapshot, command Command) ([]Event, error) {
 
 // canceledMutatingKinds is the set of event kinds a canceled (terminal)
 // instance must reject: everything that could advance, claim, or re-arm state.
-// Attempt-fact kinds (attempt_terminated, attempt_identified, heartbeat,
-// lease_expired) are not in the set: a late termination from an in-flight
-// runtime must still record its fact harmlessly after a cancel.
+// lease_expired is in the set: a late expiry re-arms the activation as
+// claimable and marks attempts timed out, which must not happen after cancel.
+// Attempt-fact kinds (attempt_terminated, attempt_identified, heartbeat) are
+// not in the set: a late termination from an in-flight runtime must still
+// record its fact harmlessly after a cancel.
 var canceledMutatingKinds = map[EventKind]bool{
 	EventLeased:         true,
 	EventStarted:        true,
@@ -332,6 +334,7 @@ var canceledMutatingKinds = map[EventKind]bool{
 	EventUnblocked:      true,
 	EventRerouted:       true,
 	EventTransition:     true,
+	EventLeaseExpired:   true,
 	EventChildAttached:  true,
 	EventChildOutcome:   true,
 	EventExternalParked: true,
@@ -974,7 +977,8 @@ func applyGate(next *Snapshot, act *Activation, event Event) error {
 	// the event log for audit; only the snapshot projection is left
 	// untouched.
 	if act.Status == ActivationSatisfied || act.Status == ActivationRejected ||
-		next.Instance.Status == WorkflowCompleted || next.Instance.Status == WorkflowFailed {
+		next.Instance.Status == WorkflowCompleted || next.Instance.Status == WorkflowFailed ||
+		next.Instance.Status == WorkflowCanceled {
 		return nil
 	}
 	replaced := false
