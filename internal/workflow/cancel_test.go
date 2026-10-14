@@ -255,6 +255,9 @@ func TestManagerWorkflowCancel(t *testing.T) {
 	if got := status["cancel_reason"]; got != "operator abandon" {
 		t.Fatalf("post-cancel cancel_reason got %v", got)
 	}
+	if got := status["canceled_by"]; got != "ops" {
+		t.Fatalf("post-cancel canceled_by got %v", got)
+	}
 }
 
 func TestManagerWorkflowCancelIdempotent(t *testing.T) {
