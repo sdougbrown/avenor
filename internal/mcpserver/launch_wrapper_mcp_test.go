@@ -77,17 +77,55 @@ func TestAvenorSpawnFailClosedOnUnsupportedVerb(t *testing.T) {
 	}
 }
 
-// TestAvenorSpawnMethodNotFoundUnwrappedStillErrors proves the fail-closed
-// translation only applies to wrapped requests: an unwrapped spawn on an old
-// supervisor surfaces the underlying error.
-func TestAvenorSpawnMethodNotFoundUnwrappedStillErrors(t *testing.T) {
-	cl := &failingSpawnMCPClient{}
-	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: cl})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, _, err = s.handleAvenorSpawn(context.Background(), nil, spawnArgs{RepoDir: "/tmp/test-repo"})
-	if err == nil || err.Error() != "spawn: rpc error [-32601]: method not found" {
-		t.Fatalf("spawn error = %v, want underlying method-not-found error", err)
+// routingSpyClient records which spawn verb the server routes a request
+// through, succeeding on both paths.
+type routingSpyClient struct {
+	fakeClient
+	spawnCalls    int
+	spawnMCPCalls int
+}
+
+func (f *routingSpyClient) Spawn(params map[string]any) (map[string]any, error) {
+	f.spawnCalls++
+	return map[string]any{"runtime_id": "rt_route", "session_id": "ses_route"}, nil
+}
+
+func (f *routingSpyClient) SpawnMCP(params map[string]any) (map[string]any, error) {
+	f.spawnMCPCalls++
+	return map[string]any{"runtime_id": "rt_route", "session_id": "ses_route"}, nil
+}
+
+// TestAvenorSpawnRoutesByLaunchWrapper pins the spawn verb routing: an
+// unwrapped request goes through the plain spawn verb (which pre-spawn_mcp
+// supervisors have), while a wrapped request goes through the gated spawn_mcp
+// verb.
+func TestAvenorSpawnRoutesByLaunchWrapper(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		launchWrapper []string
+		wantSpawn     int
+		wantSpawnMCP  int
+	}{
+		{"unwrapped routes to spawn", nil, 1, 0},
+		{"wrapped routes to spawn_mcp", []string{"nice", "-n", "5"}, 0, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cl := &routingSpyClient{}
+			s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: cl})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _, err = s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
+				RepoDir:       "/tmp/test-repo",
+				LaunchWrapper: tc.launchWrapper,
+			})
+			if err != nil {
+				t.Fatalf("spawn error = %v, want nil", err)
+			}
+			if cl.spawnCalls != tc.wantSpawn || cl.spawnMCPCalls != tc.wantSpawnMCP {
+				t.Fatalf("routing: Spawn calls = %d (want %d), SpawnMCP calls = %d (want %d)",
+					cl.spawnCalls, tc.wantSpawn, cl.spawnMCPCalls, tc.wantSpawnMCP)
+			}
+		})
 	}
 }

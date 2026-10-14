@@ -1151,7 +1151,16 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 		}
 	}
 
-	result, err := cl.SpawnMCP(params)
+	var result map[string]any
+	if len(args.LaunchWrapper) > 0 {
+		// Wrapped requests must use the gated spawn_mcp verb so the
+		// supervisor-side launch-wrapper allowlist applies.
+		result, err = cl.SpawnMCP(params)
+	} else {
+		// Unwrapped requests use the plain spawn verb, which also works on
+		// supervisors predating spawn_mcp.
+		result, err = cl.Spawn(params)
+	}
 	if err != nil {
 		// Fail closed for older supervisors without the spawn_mcp verb: a
 		// wrapped MCP request must never fall back to the ungated spawn path.
