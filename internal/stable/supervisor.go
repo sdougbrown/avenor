@@ -5207,7 +5207,10 @@ func (s *Supervisor) runWorkflowStartupBarrier() {
 	m.RegisterExecutor(workflow.ActionLoop, s.loopExecutor())
 	m.RegisterExecutor(workflow.ActionTeam, s.teamExecutor())
 	s.workflowMgr = m
-	s.control.SetWorkflowHandler(m)
+	// Keep the lazy wrapper registered, not the bare manager: only the wrapper
+	// routes workflow.cancel through cancelWorkflowRuntimes to terminate
+	// in-flight attempt runtimes owned by this supervisor.
+	s.control.SetWorkflowHandler(lazyWorkflowHandler{s})
 	s.workflowControllers = workflowcontroller.NewStore(root)
 
 	var barrierErr error
