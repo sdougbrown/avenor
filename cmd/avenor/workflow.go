@@ -42,7 +42,7 @@ func runWorkflowTo(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if len(rest) == 0 {
-		fmt.Fprintln(stderr, "avenor workflow: command required (create, instantiate, status, wait, inspect, events, complete, gate, skip, unblock, controller, ready)")
+		fmt.Fprintln(stderr, "avenor workflow: command required (create, instantiate, status, wait, inspect, events, complete, gate, skip, unblock, cancel, controller, ready)")
 		return 1
 	}
 
@@ -76,6 +76,8 @@ func runWorkflowTo(args []string, stdout, stderr io.Writer) int {
 		return cmdWorkflowSkip(c, subArgs, stdout, stderr)
 	case "unblock":
 		return cmdWorkflowUnblock(c, subArgs, stdout, stderr)
+	case "cancel":
+		return cmdWorkflowCancel(c, subArgs, stdout, stderr)
 	case "controller":
 		return cmdWorkflowController(c, subArgs, stdout, stderr)
 	case "ready":
@@ -501,6 +503,39 @@ func cmdWorkflowSkip(c *client.Client, args []string, stdout, stderr io.Writer) 
 	result, err := c.WorkflowSkip(ids[0], fields)
 	if err != nil {
 		fmt.Fprintf(stderr, "avenor workflow: skip: %v\n", err)
+		return 1
+	}
+	printWorkflowResult(stdout, result)
+	return 0
+}
+
+// cmdWorkflowCancel cancels a whole workflow instance. --reason is required
+// (the durable audit trail of the workflow.canceled event); --actor is
+// optional and defaults to "cli". The control method also terminates the
+// instance's in-flight attempt runtimes supervisor-side.
+func cmdWorkflowCancel(c *client.Client, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("cancel", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	reason := fs.String("reason", "", "reason for the cancel (required; recorded on the workflow.canceled event)")
+	actor := fs.String("actor", "cli", "actor id recorded as the canceling operator")
+	flagArgs, id, code := splitIDArgs("cancel", args, []string{"reason", "actor"}, stderr)
+	if code != 0 {
+		return code
+	}
+	if err := fs.Parse(flagArgs); err != nil {
+		return 1
+	}
+	if id == "" {
+		fmt.Fprintln(stderr, "usage: avenor workflow cancel --socket SOCKET <workflow-id> --reason TEXT [--actor ID]")
+		return 1
+	}
+	if *reason == "" {
+		fmt.Fprintln(stderr, "avenor workflow: cancel: --reason is required")
+		return 1
+	}
+	result, err := c.WorkflowCancel(id, *actor, *reason)
+	if err != nil {
+		fmt.Fprintf(stderr, "avenor workflow: cancel: %v\n", err)
 		return 1
 	}
 	printWorkflowResult(stdout, result)

@@ -40,6 +40,7 @@ type WorkflowHandler interface {
 	WorkflowWait(string, time.Duration) (any, error)
 	WorkflowInspect(string) (any, error)
 	WorkflowEvents(string, int64, int) (any, error)
+	WorkflowCancel(string, json.RawMessage) (any, error)
 	WorkflowCommand(string, json.RawMessage) (any, error)
 }
 

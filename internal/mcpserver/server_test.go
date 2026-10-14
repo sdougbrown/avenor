@@ -86,17 +86,20 @@ type fakeClient struct {
 	workflowEventsResult   map[string]any
 	workflowCompleteResult map[string]any
 	workflowGateResult     map[string]any
+	workflowCancelResult   map[string]any
 	workflowStatusErr      error
 	workflowWaitErr        error
 	workflowInspectErr     error
 	workflowEventsErr      error
 	workflowCompleteErr    error
 	workflowGateErr        error
+	workflowCancelErr      error
 	workflowStatusCalls    []string
 	workflowWaitCalls      []workflowWaitCall
 	workflowEventsCalls    []workflowEventsCall
 	workflowCompleteCalls  []workflowCompleteCall
 	workflowGateCalls      []workflowGateCall
+	workflowCancelCalls    []workflowCancelCall
 
 	workflowControllerStatusResult map[string]any
 	workflowControllerListResult   map[string]any
@@ -125,6 +128,12 @@ type workflowCompleteCall struct {
 type workflowGateCall struct {
 	workflowID string
 	fields     map[string]any
+}
+
+type workflowCancelCall struct {
+	workflowID string
+	actor      string
+	reason     string
 }
 
 type permissionCall struct {
@@ -219,6 +228,11 @@ func (f *fakeClient) WorkflowGate(workflowID string, fields map[string]any) (map
 	return f.workflowGateResult, f.workflowGateErr
 }
 
+func (f *fakeClient) WorkflowCancel(workflowID, actor, reason string) (map[string]any, error) {
+	f.workflowCancelCalls = append(f.workflowCancelCalls, workflowCancelCall{workflowID, actor, reason})
+	return f.workflowCancelResult, f.workflowCancelErr
+}
+
 func (f *fakeClient) WorkflowControllerStatus(controllerID string) (map[string]any, error) {
 	f.workflowControllerStatusCalls = append(f.workflowControllerStatusCalls, controllerID)
 	return f.workflowControllerStatusResult, f.workflowControllerStatusErr
@@ -256,6 +270,9 @@ func (c *spawnCountingClient) WorkflowComplete(string, map[string]any) (map[stri
 	return nil, nil
 }
 func (c *spawnCountingClient) WorkflowGate(string, map[string]any) (map[string]any, error) {
+	return nil, nil
+}
+func (c *spawnCountingClient) WorkflowCancel(string, string, string) (map[string]any, error) {
 	return nil, nil
 }
 func (c *spawnCountingClient) WorkflowControllerStatus(string) (map[string]any, error) {

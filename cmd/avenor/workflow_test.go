@@ -324,6 +324,55 @@ func TestWorkflowCLIGateRoundTrip(t *testing.T) {
 	}
 }
 
+// TestWorkflowCLICancel drives the cancel subcommand through a real in-process
+// control server and manager: an active instance becomes canceled, the result
+// reports the terminal status, a re-cancel is an idempotent no-op, and a
+// missing --reason fails fast without any server call.
+func TestWorkflowCLICancel(t *testing.T) {
+	run, mgr, wf := cliWorkflowEnv(t)
+
+	out, code := run("cancel", wf, "--reason", "pr head moved", "--actor", "review-pr-auto")
+	if code != 0 {
+		t.Fatalf("cancel: exit %d: %s", code, out)
+	}
+	if !strings.Contains(out, `"status": "canceled"`) {
+		t.Fatalf("cancel result = %s", out)
+	}
+	statusAny, err := mgr.WorkflowStatus(wf)
+	if err != nil {
+		t.Fatalf("WorkflowStatus: %v", err)
+	}
+	status := statusAny.(map[string]any)
+	if status["status"] != string(workflow.WorkflowCanceled) {
+		t.Fatalf("post-cancel instance status = %v", status["status"])
+	}
+	if status["cancel_reason"] != "pr head moved" {
+		t.Fatalf("post-cancel cancel_reason = %v", status["cancel_reason"])
+	}
+
+	// Re-cancel is an idempotent no-op, not a second terminal event.
+	out, code = run("cancel", wf, "--reason", "again")
+	if code != 0 || !strings.Contains(out, `"idempotent": true`) {
+		t.Fatalf("re-cancel: exit %d: %s", code, out)
+	}
+
+	// Missing --reason fails fast before any server call: dial a live but
+	// unhandled socket so a premature RPC would hang/error differently.
+	sockDir := t.TempDir()
+	sock := filepath.Join(sockDir, "control.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	defer os.Remove(sock)
+	var outBuf, errBuf bytes.Buffer
+	code = runWorkflowTo([]string{"--socket", sock, "cancel", wf}, &outBuf, &errBuf)
+	if code != 1 || !strings.Contains(errBuf.String(), "--reason is required") {
+		t.Fatalf("cancel without --reason: want exit 1 with required message, got %d: %s", code, errBuf.String())
+	}
+}
+
 // TestWorkflowCLIGateUnknownOperation pins the CLI-level fail-fast: an
 // unknown --operation exits nonzero with a clear message before any server
 // call, so nothing is mutated.

@@ -22,10 +22,8 @@ var tsToolNames = []string{
 	"avenor_shutdown",
 }
 
-// workflowToolNames lists the six Go-only MCP workflow tools (Stage 14) plus
-// the read-only MCP workflow-controller status tool. That tool now has
-// TypeScript references in the mcp, opencode, and pi packages; the six
-// workflow tools remain Go-only.
+// workflowToolNames lists the Go-only MCP workflow tools (Stage 14) plus the
+// read-only MCP workflow-controller status tool and the instance-cancel tool.
 var workflowToolNames = []string{
 	"avenor_workflow_status",
 	"avenor_workflow_wait",
@@ -33,6 +31,7 @@ var workflowToolNames = []string{
 	"avenor_workflow_events",
 	"avenor_workflow_complete",
 	"avenor_workflow_gate",
+	"avenor_workflow_cancel",
 	"avenor_workflow_controller_status",
 }
 
@@ -184,6 +183,14 @@ func TestSchemaFieldParity(t *testing.T) {
 		allowed := []string{"workflow_id", "node_id", "gate_id", "activation_id", "operation", "actor", "reason", "outcome", "subject", "poll_id", "source", "result", "response_hash", "observed_at", "evidence_ids", "supervisor_id"}
 		required := []string{"workflow_id", "node_id", "gate_id", "activation_id", "operation"}
 		assertFields(t, "workflowGateArgs", allowed, required)
+	})
+
+	t.Run("avenor_workflow_cancel", func(t *testing.T) {
+		// workflowCancelArgs — required: workflow_id, reason; optional: actor,
+		// supervisor_id
+		allowed := []string{"workflow_id", "reason", "actor", "supervisor_id"}
+		required := []string{"workflow_id", "reason"}
+		assertFields(t, "workflowCancelArgs", allowed, required)
 	})
 
 	t.Run("avenor_workflow_controller_status", func(t *testing.T) {
@@ -534,6 +541,21 @@ func assertFields(t *testing.T, structName string, allowed, required []string) {
 		if listA.ControllerID != "" || listA.SupervisorID != "s" {
 			t.Errorf("%s: omitted controller_id should default to empty", structName)
 		}
+	case "workflowCancelArgs":
+		data := map[string]any{
+			"workflow_id":   "wf-1",
+			"reason":        "why",
+			"actor":         "bob",
+			"supervisor_id": "s",
+		}
+		b, _ := json.Marshal(data)
+		var a workflowCancelArgs
+		if err := json.Unmarshal(b, &a); err != nil {
+			t.Fatalf("%s: unmarshal: %v", structName, err)
+		}
+		if a.WorkflowID != "wf-1" || a.Reason != "why" || a.Actor != "bob" || a.SupervisorID != "s" {
+			t.Errorf("%s: fields not populated correctly", structName)
+		}
 	}
 
 	// Verify required fields: send JSON without required fields and confirm
@@ -579,6 +601,8 @@ func assertSchemaTags(t *testing.T, structName string, allowed, required []strin
 		typ = reflect.TypeOf(workflowCompleteArgs{})
 	case "workflowGateArgs":
 		typ = reflect.TypeOf(workflowGateArgs{})
+	case "workflowCancelArgs":
+		typ = reflect.TypeOf(workflowCancelArgs{})
 	case "workflowControllerStatusArgs":
 		typ = reflect.TypeOf(workflowControllerStatusArgs{})
 	default:

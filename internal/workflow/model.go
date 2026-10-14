@@ -790,22 +790,26 @@ type AuthorityRule struct {
 }
 
 type WorkflowInstance struct {
-	WorkflowID      WorkflowID       `json:"workflow_id"`
-	InstanceID      InstanceID       `json:"instance_id"`
-	TemplateID      TemplateID       `json:"template_id"`
-	TemplateVersion TemplateVersion  `json:"template_version"`
-	Revision        int64            `json:"revision"`
-	CreatedAt       time.Time        `json:"created_at"`
-	UpdatedAt       time.Time        `json:"updated_at"`
-	Metadata        map[string]any   `json:"metadata,omitempty"`
-	Status          WorkflowStatus   `json:"status"`
-	TerminalOutcome OutcomeName      `json:"terminal_outcome,omitempty"`
-	Activations     []Activation     `json:"activations"`
-	Attempts        []Attempt        `json:"attempts,omitempty"`
-	Evidence        []Evidence       `json:"evidence,omitempty"`
-	Gates           []GateInstance   `json:"gates,omitempty"`
-	Outputs         []OutputValue    `json:"outputs,omitempty"`
-	Children        []ChildReference `json:"children,omitempty"`
+	WorkflowID      WorkflowID      `json:"workflow_id"`
+	InstanceID      InstanceID      `json:"instance_id"`
+	TemplateID      TemplateID      `json:"template_id"`
+	TemplateVersion TemplateVersion `json:"template_version"`
+	Revision        int64           `json:"revision"`
+	CreatedAt       time.Time       `json:"created_at"`
+	UpdatedAt       time.Time       `json:"updated_at"`
+	Metadata        map[string]any  `json:"metadata,omitempty"`
+	Status          WorkflowStatus  `json:"status"`
+	TerminalOutcome OutcomeName     `json:"terminal_outcome,omitempty"`
+	// CanceledBy/CancelReason are the attribution of the workflow.canceled
+	// event that terminated the instance. Empty on non-canceled instances.
+	CanceledBy   string           `json:"canceled_by,omitempty"`
+	CancelReason string           `json:"cancel_reason,omitempty"`
+	Activations  []Activation     `json:"activations"`
+	Attempts     []Attempt        `json:"attempts,omitempty"`
+	Evidence     []Evidence       `json:"evidence,omitempty"`
+	Gates        []GateInstance   `json:"gates,omitempty"`
+	Outputs      []OutputValue    `json:"outputs,omitempty"`
+	Children     []ChildReference `json:"children,omitempty"`
 	// Params are the instance parameters supplied at instantiation. They are
 	// immutable facts of the instance: the concurrency-key resolution reads
 	// them, nothing writes them after instantiation.

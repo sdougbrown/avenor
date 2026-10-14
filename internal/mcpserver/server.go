@@ -41,6 +41,7 @@ type ControlClient interface {
 	WorkflowEvents(workflowID string, afterSeq int64, limit int) (map[string]any, error)
 	WorkflowComplete(workflowID string, fields map[string]any) (map[string]any, error)
 	WorkflowGate(workflowID string, fields map[string]any) (map[string]any, error)
+	WorkflowCancel(workflowID, actor, reason string) (map[string]any, error)
 	WorkflowControllerStatus(controllerID string) (map[string]any, error)
 	WorkflowControllerList() (map[string]any, error)
 }
@@ -244,6 +245,13 @@ type workflowControllerStatusArgs struct {
 	SupervisorID string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
 }
 
+type workflowCancelArgs struct {
+	WorkflowID   string `json:"workflow_id" jsonschema:"required workflow ID"`
+	Reason       string `json:"reason" jsonschema:"required reason for the cancel; recorded on the workflow.canceled event"`
+	Actor        string `json:"actor,omitempty" jsonschema:"optional actor id recorded as the canceling operator (default mcp)"`
+	SupervisorID string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
+}
+
 func NewServer(opts Options) (*Server, error) {
 	if opts.Transport == "" {
 		return nil, fmt.Errorf("transport is required")
@@ -285,6 +293,7 @@ func NewServer(opts Options) (*Server, error) {
 			"avenor_workflow_events",
 			"avenor_workflow_complete",
 			"avenor_workflow_gate",
+			"avenor_workflow_cancel",
 			"avenor_workflow_controller_status",
 		},
 	}
@@ -366,6 +375,11 @@ func NewServer(opts Options) (*Server, error) {
 		Name:        "avenor_workflow_gate",
 		Description: "Record a gate decision on a parked awaiting_gate activation",
 	}, s.handleAvenorWorkflowGate)
+
+	mcp.AddTool(mcpServer, &mcp.Tool{
+		Name:        "avenor_workflow_cancel",
+		Description: "Cancel a workflow instance: records the attributed cancel event (actor, reason), releases leases, parks non-terminal activations, and terminates the instance's in-flight attempt runtimes. The instance becomes terminal (canceled); re-canceling is an idempotent no-op, and a completed or failed instance cannot be canceled.",
+	}, s.handleAvenorWorkflowCancel)
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
 		Name:        "avenor_workflow_controller_status",
@@ -1842,6 +1856,33 @@ func (s *Server) handleAvenorWorkflowGate(ctx context.Context, req *mcp.CallTool
 	result, err := cl.WorkflowGate(args.WorkflowID, fields)
 	if err != nil {
 		return nil, nil, fmt.Errorf("workflow gate: %w", err)
+	}
+	return nil, result, nil
+}
+
+// handleAvenorWorkflowCancel cancels a whole workflow instance. The reason is
+// required: it is the durable audit trail of the workflow.canceled event. The
+// actor is optional and defaults to "cli" at the CLI surface; the manager
+// requires an explicit actor, so the tool supplies the caller's value or "mcp".
+func (s *Server) handleAvenorWorkflowCancel(ctx context.Context, req *mcp.CallToolRequest, args workflowCancelArgs) (*mcp.CallToolResult, any, error) {
+	if args.WorkflowID == "" {
+		return nil, nil, fmt.Errorf("workflow_id is required")
+	}
+	if args.Reason == "" {
+		return nil, nil, fmt.Errorf("reason is required")
+	}
+	actor := args.Actor
+	if actor == "" {
+		actor = "mcp"
+	}
+	cl, cleanup, err := s.getClientForSupervisor(args.SupervisorID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer cleanup()
+	result, err := cl.WorkflowCancel(args.WorkflowID, actor, args.Reason)
+	if err != nil {
+		return nil, nil, fmt.Errorf("workflow cancel: %w", err)
 	}
 	return nil, result, nil
 }

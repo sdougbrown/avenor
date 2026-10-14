@@ -210,6 +210,11 @@ func (m *Manager) BeginDispatch(req BeginDispatchRequest) (BeginDispatchResult, 
 	stale := func() (BeginDispatchResult, error) {
 		return BeginDispatchResult{}, ErrStaleCandidate
 	}
+	if isTerminalStatus(snap.Instance.Status) {
+		// A concurrent cancel (or other terminal transition) landed after the
+		// candidate was fetched: the instance is no longer schedulable.
+		return stale()
+	}
 	act, err := findActivation(&snap.Instance, req.NodeID, req.ActivationID)
 	if err != nil {
 		return BeginDispatchResult{}, err

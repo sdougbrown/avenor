@@ -3617,6 +3617,26 @@ func (s *Supervisor) cancelRuntime(rtID string) error {
 	return nil
 }
 
+// cancelWorkflowRuntimes begins shutdown for every child runtime belonging to
+// the given workflow instance, signaling each attempt's runtime so its
+// termination records the canceled attempt fact. It returns the number of
+// runtimes signaled; the registry is read under the control lock and the
+// shutdowns run outside it (mirroring cancelRuntime).
+func (s *Supervisor) cancelWorkflowRuntimes(workflowID string) int {
+	s.controlMu.Lock()
+	children := make([]*childRuntime, 0, 1)
+	for _, rt := range s.runtimes {
+		if rt.workflowID == workflowID {
+			children = append(children, rt)
+		}
+	}
+	s.controlMu.Unlock()
+	for _, child := range children {
+		s.beginChildShutdown(child)
+	}
+	return len(children)
+}
+
 func (s *Supervisor) answerPermission(rtID, requestID, optionID, message string) error {
 	s.controlMu.Lock()
 	rt := s.runtimes[rtID]
@@ -5187,7 +5207,10 @@ func (s *Supervisor) runWorkflowStartupBarrier() {
 	m.RegisterExecutor(workflow.ActionLoop, s.loopExecutor())
 	m.RegisterExecutor(workflow.ActionTeam, s.teamExecutor())
 	s.workflowMgr = m
-	s.control.SetWorkflowHandler(m)
+	// Keep the lazy wrapper registered, not the bare manager: only the wrapper
+	// routes workflow.cancel through cancelWorkflowRuntimes to terminate
+	// in-flight attempt runtimes owned by this supervisor.
+	s.control.SetWorkflowHandler(lazyWorkflowHandler{s})
 	s.workflowControllers = workflowcontroller.NewStore(root)
 
 	var barrierErr error
@@ -5915,6 +5938,23 @@ func (h lazyWorkflowHandler) WorkflowInspect(id string) (any, error) {
 }
 func (h lazyWorkflowHandler) WorkflowEvents(id string, afterSeq int64, limit int) (any, error) {
 	return h.s.workflowManager().WorkflowEvents(id, afterSeq, limit)
+}
+
+// WorkflowCancel cancels a workflow instance through the kernel and then
+// cancels every in-flight attempt runtime this supervisor still owns for that
+// instance. The durable cancel lands first: a runtime killed afterwards
+// records its late attempt_terminated fact harmlessly on the already-canceled
+// instance (the reducer records the attempt fact and skips lease/retry work).
+func (h lazyWorkflowHandler) WorkflowCancel(id string, p json.RawMessage) (any, error) {
+	result, err := h.s.workflowManager().WorkflowCancel(id, p)
+	if err != nil {
+		return nil, err
+	}
+	if m, ok := result.(map[string]any); ok {
+		m["canceled_runtimes"] = h.s.cancelWorkflowRuntimes(id)
+		result = m
+	}
+	return result, nil
 }
 func (h lazyWorkflowHandler) WorkflowCommand(id string, p json.RawMessage) (any, error) {
 	return h.s.workflowManager().WorkflowCommand(id, p)

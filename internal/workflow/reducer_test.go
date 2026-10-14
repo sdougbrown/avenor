@@ -151,6 +151,13 @@ func TestApply(t *testing.T) {
 		{"child_outcome_wrong_lease", testChildOutcomeWrongLease},
 		{"child_outcome_branch_target", testChildOutcomeBranchTarget},
 		{"child_events_replay_idempotent", testChildEventsReplayIdempotent},
+		{"cancel_parks_activation_and_releases_lease", testCancelParksActivationsAndReleasesLeases},
+		{"cancel_rejects_already_terminal", testCancelRejectsAlreadyTerminal},
+		{"late_termination_after_cancel_is_harmless", testLateTerminationAfterCancelIsHarmless},
+		{"claim_rejected_after_cancel", testClaimRejectedAfterCancel},
+		{"cancel_requires_actor_and_reason", testCancelRequiresActorAndReason},
+		{"late_lease_expired_on_canceled_rejected", testLateLeaseExpiredOnCanceledRejected},
+		{"late_gate_decision_on_canceled_dropped", testLateGateDecisionOnCanceledDropped},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, tt.run)
@@ -739,9 +746,9 @@ func testExhaustionBlock(t *testing.T) {
 	if act.SelectedOutcome != "" {
 		t.Fatalf("exhaustion=block: selected outcome got %q want empty", act.SelectedOutcome)
 	}
-	if state.Instance.Status != WorkflowActive {
+	if state.Instance.Status != WorkflowBlocked {
 		t.Fatalf("exhaustion=block: workflow status got %q want %q (not failed)",
-			state.Instance.Status, WorkflowActive)
+			state.Instance.Status, WorkflowBlocked)
 	}
 }
 
