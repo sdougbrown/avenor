@@ -257,6 +257,14 @@ func TestWorkflowErrorPropagation(t *testing.T) {
 			})
 			return err
 		}},
+		{"cancel rejects rejected cancel", func(f *fakeClient) {
+			f.workflowCancelErr = errors.New("cannot cancel workflow wf: instance is already completed")
+		}, func(s *Server) error {
+			_, _, err := s.handleAvenorWorkflowCancel(context.Background(), nil, workflowCancelArgs{
+				WorkflowID: "wf", Reason: "test", Actor: "test",
+			})
+			return err
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
