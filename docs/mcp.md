@@ -247,7 +247,7 @@ Starts a new run.
 - `backend` — runtime backend (e.g., `"opencode-http"`, `"opencode-acp"`, `"codex-app-server"`, `"agy"`)
 - `roster_file` / `roster_entry` — optional roster selector pair
 - `server_url` — server URL for opencode-http backend
-- `launch_wrapper` — optional array of strings used as an opaque argv prefix in front of the backend process command; avenor does not interpret it (see [backends.md](backends.md#launch-wrapper))
+- `launch_wrapper` — optional argv prefix; disabled unless the selected supervisor enables an operator allowlist. Must exactly match an approved argv array. No shell expansion (see [backends.md](backends.md#mcp-surfaces-operator-allowlist))
 - `supervisor_id` — supervisor socket to use instead of the default. Must be an `avenor-mcp-*.sock` directly inside the sockets root (`AVENOR_HOME/sockets` when set, otherwise `~/.avenor/sockets`), the same containment rule the TypeScript core enforces; a custom supervisor location is reachable only by configuring it as the MCP server's `--supervisor-socket`
 
 **Returns:**

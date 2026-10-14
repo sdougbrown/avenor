@@ -38,6 +38,32 @@ Ownership is recorded per session: resuming with a different wrapper is rejected
 
 The launch wrapper does not change the control socket's trust boundary: anything able to talk to the socket could already choose backend commands. The wrapper is an additional capability for trusted callers, not a security feature.
 
+### MCP surfaces: operator allowlist
+
+The launch wrapper on MCP-driven spawns (`avenor_spawn` tool) is **disabled by default** and gated by an operator allowlist. Start the supervisor with:
+
+```sh
+avenor stable --control-socket /tmp/avenor.sock --mcp-launch-wrapper-policy /etc/avenor/launch-wrapper-policy.json
+```
+
+The policy file is strict JSON:
+
+```json
+{"allowed_argv": [["/usr/bin/nice", "-n", "5"]]}
+```
+
+Unknown fields, trailing data, an empty allowlist, empty entries, empty elements, NUL bytes, and non-absolute executables are rejected at supervisor startup (`mcp launch wrapper policy: <reason>`). An MCP spawn carrying a wrapper must **exactly match** one `allowed_argv` entry — same executable (absolute path), same flags, same order, no extra or missing arguments. A wrapper that is not allowed is rejected with `launch_wrapper: argv is not allowed by this supervisor` before any process is created; a supervisor without the flag rejects every wrapped MCP spawn with `launch_wrapper: disabled for MCP on this supervisor`. MCP servers also fail closed against older supervisors that predate the gated `spawn_mcp` verb.
+
+Approved wrappers are **trusted code with supervisor privileges**: a wrapper process receives the backend environment, including provider API keys and per-run broker credentials. The allowlist is an exposure control on which wrappers MCP clients may invoke — it is **not** sandboxing, and approving a wrapper accepts that residual risk.
+
+The `avenor mcp` command accepts `--mcp-launch-wrapper-policy` only to forward the policy to a supervisor it autostarts. Attaching to an already-running supervisor never changes that supervisor's policy.
+
+The CLI (`avenor control spawn`) and ordinary control-socket `spawn` calls are operator-trusted surfaces: they are **not** allowlist-gated and keep the pre-existing behavior above.
+
+### agy RPC host
+
+The launch wrapper is not supported for the agy RPC transport (PTY RPC host). A spawn that combines a wrapper with the RPC host path fails explicitly with `launch_wrapper: not supported for agy rpc host`.
+
 The wrapper is documented, not enforced. Whatever argv you supply must satisfy these requirements — avenor does not check them:
 
 - **exec semantics** — stdio passes through (Avenor speaks the backend protocol over pipes), the backend's exit code must propagate as the wrapper's exit code, signals sent to the wrapper must reach the backend, and child processes must be torn down when the backend dies.
