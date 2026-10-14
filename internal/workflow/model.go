@@ -300,10 +300,14 @@ type Assignment struct {
 // the roster path. The kernel routes the node's permission requests to the
 // decider; the decider agent owns the allow/reject/defer judgment.
 type PermissionDecider struct {
-	Entry   string `json:"entry"`
-	Backend string `json:"backend,omitempty"`
-	Agent   string `json:"agent,omitempty"`
-	Model   string `json:"model,omitempty"`
+	Entry string `json:"entry"`
+	// Thinking is the roster entry's default thinking level (Entry.Thinking):
+	// the decider is a pure roster entry, so the entry's level is the only
+	// default there is — assignments carry no decider-specific override.
+	Thinking string `json:"thinking,omitempty"`
+	Backend  string `json:"backend,omitempty"`
+	Agent    string `json:"agent,omitempty"`
+	Model    string `json:"model,omitempty"`
 }
 
 type ExecutionSelection struct {

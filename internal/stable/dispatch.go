@@ -566,11 +566,15 @@ func resolveAssignmentSelection(assignment *workflow.Assignment) (*workflow.Exec
 		if err != nil {
 			return nil, fmt.Errorf("node assignment: permission_policy.decider: %w", err)
 		}
+		if err := runtime.ValidateThinkingForBackend(entry.Backend, entry.Thinking); err != nil {
+			return nil, fmt.Errorf("node assignment: permission_policy.decider: %w", err)
+		}
 		selection.PermissionDecider = &workflow.PermissionDecider{
-			Entry:   assignment.PermissionPolicy.Decider,
-			Backend: entry.Backend,
-			Agent:   entry.Agent,
-			Model:   entry.Model,
+			Entry:    assignment.PermissionPolicy.Decider,
+			Thinking: entry.Thinking,
+			Backend:  entry.Backend,
+			Agent:    entry.Agent,
+			Model:    entry.Model,
 		}
 	}
 	if err := runtime.ValidateThinkingForBackend(selection.Backend, thinking); err != nil {

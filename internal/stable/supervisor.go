@@ -232,17 +232,24 @@ type childRuntime struct {
 	// request already spawned a decider run, so a repeated request event
 	// cannot spawn a second decider for the same request.
 	routedPermissionRequests map[string]struct{}
-	runID                    string
-	dir                      string
-	onEvent                  string
-	sentinelFile             string
-	lifecycleCtx             context.Context
-	cancelFn                 func()
-	interruptFn              func()
-	done                     chan struct{}
-	doneOnce                 sync.Once
-	exitCode                 int
-	completed                bool
+	// permissionDeciderFailures counts failed decider spawns per request ID.
+	// Past maxPermissionDeciderSpawnFailures the request keeps its routed
+	// mark: no further spawns fire and the request stays pending for a human.
+	permissionDeciderFailures map[string]int
+	// permissionDeciderExhausted is surfaced in runtime status once any
+	// request on this runtime exhausted its decider spawn retries.
+	permissionDeciderExhausted bool
+	runID                      string
+	dir                        string
+	onEvent                    string
+	sentinelFile               string
+	lifecycleCtx               context.Context
+	cancelFn                   func()
+	interruptFn                func()
+	done                       chan struct{}
+	doneOnce                   sync.Once
+	exitCode                   int
+	completed                  bool
 	// parked is set while the runtime waits for a follow-up prompt after a
 	// successful turn. Parked runtimes do not count against MaxRuntimes.
 	parked         bool
@@ -3548,6 +3555,9 @@ func (s *Supervisor) listRuntimes() []map[string]any {
 			"pending_permission": rt.pendingPermission,
 			"latest_seq":         rt.latestSeq,
 			"auto_approve":       rt.autoApprove,
+			// True once a pending request exhausted its decider spawn retries;
+			// the request itself stays pending for a human gate.
+			"permission_decider_exhausted": rt.permissionDeciderExhausted,
 		}
 		if rt.permissionDecider != nil {
 			entry["permission_decider"] = rt.permissionDecider.Entry
@@ -3799,8 +3809,9 @@ func (s *Supervisor) routePermissionRequest(runtimeID, requestID string, options
 // can never stall on a permission prompt. A request that was already resolved
 // before the spawn starts (for example by a human answering through the
 // control plane) spawns no decider. A failed spawn unmarks the request as
-// routed so the next permission.request event re-routes it instead of
-// stalling pending with only a log line.
+// routed so the next permission.request event re-routes it, but after
+// maxPermissionDeciderSpawnFailures failures the routed mark is kept: no
+// further spawns fire and the request stays pending for a human gate.
 func (s *Supervisor) spawnPermissionDecider(decider workflow.PermissionDecider, runtimeID, requestID string, options []any, label, dir string) {
 	if s.control.PermissionResolverState(runtimeID, requestID) == control.PermissionResolverResolved {
 		return
@@ -3824,19 +3835,55 @@ command, and working directory). Then either:
 Never answer blindly: allow only requests the task plainly needs.`,
 		decider.Entry, runtimeID, requestID, optionsJSON, label, runtimeID, runtimeID, requestID)
 	params := SpawnParams{
-		Prompt:  prompt,
-		Dir:     dir,
-		Label:   fmt.Sprintf("permdec:%s:%s", runtimeID, requestID),
-		Agent:   decider.Agent,
-		Model:   decider.Model,
-		Backend: decider.Backend,
+		Prompt:   prompt,
+		Dir:      dir,
+		Label:    fmt.Sprintf("permdec:%s:%s", runtimeID, requestID),
+		Agent:    decider.Agent,
+		Model:    decider.Model,
+		Backend:  decider.Backend,
+		Thinking: decider.Thinking,
 		// The decider must never block on its own permission prompts.
 		AutoApprove: true,
 	}
 	if _, err := s.spawn(params); err != nil {
 		fmt.Fprintf(s.stderrWriter(), "avenor: spawn permission decider %q for runtime %s request %s: %v\n", decider.Entry, runtimeID, requestID, err)
+		if exhausted := s.recordPermissionDeciderFailure(runtimeID, requestID); exhausted {
+			fmt.Fprintf(s.stderrWriter(), "avenor: permission decider for runtime %s request %s failed %d times; no further decider spawns for this request — it stays pending for a human gate\n", runtimeID, requestID, maxPermissionDeciderSpawnFailures)
+			return
+		}
 		s.unroutePermissionRequest(runtimeID, requestID)
 	}
+}
+
+// maxPermissionDeciderSpawnFailures bounds the decider spawn retries for one
+// pending permission request: each failed spawn unmarks the request as routed
+// so the next permission.request event can re-route it, but past this bound
+// the routed mark is kept and the request stays pending for a human gate
+// instead of churning spawns forever.
+const maxPermissionDeciderSpawnFailures = 3
+
+// recordPermissionDeciderFailure counts one failed decider spawn for a
+// request and reports whether the retry bound is now exhausted. The count
+// lives on the child runtime under its mutex; a missing runtime counts as
+// exhausted (there is nothing left to route for).
+func (s *Supervisor) recordPermissionDeciderFailure(runtimeID, requestID string) bool {
+	s.controlMu.Lock()
+	rt := s.runtimes[runtimeID]
+	s.controlMu.Unlock()
+	if rt == nil {
+		return true
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rt.permissionDeciderFailures == nil {
+		rt.permissionDeciderFailures = map[string]int{}
+	}
+	rt.permissionDeciderFailures[requestID]++
+	exhausted := rt.permissionDeciderFailures[requestID] >= maxPermissionDeciderSpawnFailures
+	if exhausted {
+		rt.permissionDeciderExhausted = true
+	}
+	return exhausted
 }
 
 // unroutePermissionRequest drops a request's routed mark after a failed
@@ -4525,6 +4572,9 @@ func (s *Supervisor) RuntimeStatus(rtID string) (any, error) {
 		"pending_permission": rt.pendingPermission,
 		"latest_seq":         rt.latestSeq,
 		"auto_approve":       rt.autoApprove,
+		// True once a pending request exhausted its decider spawn retries; the
+		// request itself stays pending for a human gate.
+		"permission_decider_exhausted": rt.permissionDeciderExhausted,
 	}
 	if rt.permissionDecider != nil {
 		entry["permission_decider"] = rt.permissionDecider.Entry

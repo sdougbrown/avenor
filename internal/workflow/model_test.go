@@ -202,7 +202,7 @@ func TestSnapshotJSONRoundTrip(t *testing.T) {
 			Metadata: map[string]any{"large": json.Number("1e400")},
 			Activations: []Activation{{
 				ID: activationID, NodeID: "review", Iteration: 1, Status: ActivationAwaitingGate,
-				Selection:  &ExecutionSelection{Role: "reviewer", Backend: "pi", Model: "model", RosterDigest: "sha256:abc", AutoApprove: true, PermissionDecider: &PermissionDecider{Entry: "rm-guard", Backend: "pi", Agent: "rm-guard", Model: "guard-m"}},
+				Selection:  &ExecutionSelection{Role: "reviewer", Backend: "pi", Model: "model", RosterDigest: "sha256:abc", AutoApprove: true, PermissionDecider: &PermissionDecider{Entry: "rm-guard", Thinking: "high", Backend: "pi", Agent: "rm-guard", Model: "guard-m"}},
 				AttemptIDs: []AttemptID{attemptID}, CreatedAt: now, UpdatedAt: ended,
 			}},
 			Attempts: []Attempt{{
