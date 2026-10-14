@@ -220,6 +220,9 @@ func validateAssignmentPermissionPolicy(assignment *Assignment) error {
 	if strings.TrimSpace(assignment.PermissionPolicy.Decider) == "" {
 		return fmt.Errorf("assignment permission_policy.decider is required")
 	}
+	if assignment.RosterFile == "" {
+		return fmt.Errorf("assignment permission_policy.decider requires roster_file")
+	}
 	return nil
 }
 

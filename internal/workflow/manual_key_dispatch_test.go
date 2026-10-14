@@ -505,6 +505,63 @@ func TestBeginDispatchPermissionDeciderSelectionReDispatch(t *testing.T) {
 	}); !errors.Is(err, ErrSelectionConflict) {
 		t.Fatalf("re-dispatch with differing decider error = %v, want ErrSelectionConflict", err)
 	}
+
+	// A pinned selection without a decider (reachable when a template gains a
+	// permission policy across versions) conflicts with a freshly resolved
+	// decider: nil and non-nil are never the same.
+	m3, _, wf3 := newAutoDispatchFixture(t, "begin-sel-permdec-3", "ctl-a", -1)
+	if err := m3.RebuildCandidateIndex("test"); err != nil {
+		t.Fatalf("RebuildCandidateIndex: %v", err)
+	}
+	cands3, err := m3.CandidatesForController("ctl-a", 1)
+	if err != nil || len(cands3) != 1 {
+		t.Fatalf("candidates: n=%d err=%v", len(cands3), err)
+	}
+	begin3, err := m3.BeginDispatch(BeginDispatchRequest{
+		WorkflowID:       wf3,
+		NodeID:           cands3[0].Identity.NodeID,
+		ActivationID:     cands3[0].Identity.ActivationID,
+		ExpectedRevision: cands3[0].Revision,
+		ControllerID:     "ctl-a",
+		LeaderLeaseID:    "lease_leader_1",
+		Selection:        &ExecutionSelection{Backend: "pi", Agent: "worker", Model: "m1"},
+	})
+	if err != nil {
+		t.Fatalf("BeginDispatch: %v", err)
+	}
+	// Fail the attempt so the retry policy re-arms the activation with the
+	// selection still pinned.
+	if err := m3.FinalizeDispatch(FinalizeDispatchRequest{
+		WorkflowID:    wf3,
+		NodeID:        cands3[0].Identity.NodeID,
+		ActivationID:  cands3[0].Identity.ActivationID,
+		AttemptID:     begin3.AttemptID,
+		LeaseID:       begin3.LeaseID,
+		FailureStatus: AttemptFailed,
+	}); err != nil {
+		t.Fatalf("FinalizeDispatch: %v", err)
+	}
+	if err := m3.RebuildCandidateIndex("test"); err != nil {
+		t.Fatalf("RebuildCandidateIndex after re-arm: %v", err)
+	}
+	reCands3, err := m3.CandidatesForController("ctl-a", 10)
+	if err != nil || len(reCands3) != 1 {
+		t.Fatalf("re-armed candidates: n=%d err=%v", len(reCands3), err)
+	}
+	if _, err := m3.BeginDispatch(BeginDispatchRequest{
+		WorkflowID:       wf3,
+		NodeID:           reCands3[0].Identity.NodeID,
+		ActivationID:     reCands3[0].Identity.ActivationID,
+		ExpectedRevision: reCands3[0].Revision,
+		ControllerID:     "ctl-a",
+		LeaderLeaseID:    "lease_leader_1",
+		Selection: &ExecutionSelection{
+			Backend: "pi", Agent: "worker", Model: "m1",
+			PermissionDecider: &PermissionDecider{Entry: "rm-guard", Backend: "pi", Agent: "rm-guard", Model: "guard-m"},
+		},
+	}); !errors.Is(err, ErrSelectionConflict) {
+		t.Fatalf("re-dispatch with decider over nil-pinned decider error = %v, want ErrSelectionConflict", err)
+	}
 }
 
 // TestManualStartSelectionRespectsPinnedSelection proves a manual workflow

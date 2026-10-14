@@ -235,11 +235,12 @@ func TestValidateTemplateJSONAssignmentAutoApprove(t *testing.T) {
 
 // TestValidateTemplateJSONAssignmentPermissionPolicy pins the permission_policy
 // decider field: permission_policy is a declared object with a required decider
-// string, misspellings and wrong types are rejected by the generated structural
-// validator, and the semantic validator rejects the auto_approve combination.
+// string that must name a roster file, misspellings and wrong types are
+// rejected by the generated structural validator, and the semantic validator
+// rejects the auto_approve combination and a policy without a roster file.
 func TestValidateTemplateJSONAssignmentPermissionPolicy(t *testing.T) {
 	withPolicy := mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
-		node["assignment"] = map[string]any{"permission_policy": map[string]any{"decider": "rm-guard"}}
+		node["assignment"] = map[string]any{"roster_file": "roster.json", "permission_policy": map[string]any{"decider": "rm-guard"}}
 	}))
 	if err := ValidateTemplateJSON(withPolicy); err != nil {
 		t.Fatalf("ValidateTemplateJSON() rejected assignment permission_policy: %v", err)
@@ -266,6 +267,17 @@ func TestValidateTemplateJSONAssignmentPermissionPolicy(t *testing.T) {
 	}
 	if err := ValidateTemplate(tmpl); err == nil || !strings.Contains(err.Error(), "cannot declare both auto_approve and permission_policy") {
 		t.Fatalf("ValidateTemplate() error = %v, want mutual exclusion", err)
+	}
+
+	// Semantic: a decider routes through the assignment's roster, so a policy
+	// without a roster file is invalid at template time, not only at dispatch.
+	if err := json.Unmarshal(mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
+		node["assignment"] = map[string]any{"permission_policy": map[string]any{"decider": "rm-guard"}}
+	})), &tmpl); err != nil {
+		t.Fatalf("decode template: %v", err)
+	}
+	if err := ValidateTemplate(tmpl); err == nil || !strings.Contains(err.Error(), "permission_policy.decider requires roster_file") {
+		t.Fatalf("ValidateTemplate() error = %v, want decider requires roster_file", err)
 	}
 }
 
