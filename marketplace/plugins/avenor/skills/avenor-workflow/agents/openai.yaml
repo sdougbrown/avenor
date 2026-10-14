@@ -1,0 +1,10 @@
+interface:
+  display_name: "Avenor workflow automations"
+  short_description: "Build unattended pipelines on durable workflows"
+  default_prompt: "Use $avenor-workflow to design the workflow templates and controller for this automation."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "avenor"
+      description: "Avenor agent orchestration MCP server"
