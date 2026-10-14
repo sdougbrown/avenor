@@ -302,7 +302,7 @@ func TestParallelSpawnLazilyStartsOneSharedSupervisor(t *testing.T) {
 	var starts atomic.Int32
 	startupEntered := make(chan struct{})
 	releaseStartup := make(chan struct{})
-	startSupervisorFunc = func(string, time.Duration) (*supervisorLifecycle, error) {
+	startSupervisorFunc = func(string, time.Duration, string) (*supervisorLifecycle, error) {
 		starts.Add(1)
 		startupEntered <- struct{}{}
 		<-releaseStartup
@@ -2479,7 +2479,7 @@ func TestSpawnAfterShutdownAutostartsNewSupervisor(t *testing.T) {
 	defer func() { startSupervisorFunc = origStart }()
 
 	var starts atomic.Int32
-	startSupervisorFunc = func(socketPath string, idleTimeout time.Duration) (*supervisorLifecycle, error) {
+	startSupervisorFunc = func(socketPath string, idleTimeout time.Duration, mcpLaunchWrapperPolicyPath string) (*supervisorLifecycle, error) {
 		n := starts.Add(1)
 		return &supervisorLifecycle{
 			socketPath: fmt.Sprintf("/tmp/avenor-restart-%d.sock", n),
@@ -4770,7 +4770,7 @@ func TestAutostartRedialsAfterDeadClient(t *testing.T) {
 	origStart := startSupervisorFunc
 	defer func() { startSupervisorFunc = origStart }()
 	var starts atomic.Int32
-	startSupervisorFunc = func(string, time.Duration) (*supervisorLifecycle, error) {
+	startSupervisorFunc = func(string, time.Duration, string) (*supervisorLifecycle, error) {
 		starts.Add(1)
 		return nil, fmt.Errorf("dial control socket: connection refused")
 	}

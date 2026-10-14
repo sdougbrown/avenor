@@ -153,7 +153,7 @@ func TestAvenorEventsRehydratesUnderAutostartedSupervisorPath(t *testing.T) {
 		},
 		statusResult: map[string]any{"status": "running", "session_id": "ses_re_1"},
 	}
-	startSupervisorFunc = func(string, time.Duration) (*supervisorLifecycle, error) {
+	startSupervisorFunc = func(string, time.Duration, string) (*supervisorLifecycle, error) {
 		return &supervisorLifecycle{socketPath: socketPath, client: fake}, nil
 	}
 

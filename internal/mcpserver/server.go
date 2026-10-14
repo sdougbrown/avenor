@@ -62,6 +62,12 @@ type Options struct {
 	MaxWait          time.Duration
 	AllowedHosts     []string
 	ControlClient    ControlClient
+
+	// MCPLaunchWrapperPolicyPath is forwarded to a supervisor this server
+	// autostarts, giving that supervisor its MCP launch wrapper allowlist.
+	// Attaching to an already-running supervisor never changes its policy:
+	// the path is ignored on attach.
+	MCPLaunchWrapperPolicyPath string
 }
 
 type Server struct {
@@ -2015,7 +2021,7 @@ func (s *Server) getClientForSupervisorWithPath(supervisorID string) (ControlCli
 		if s.opts.NoAutostart {
 			return nil, nil, "", fmt.Errorf("no supervisor running: autostart disabled")
 		}
-		lc, err := startSupervisorFunc(s.opts.ControlSocket, s.opts.IdleTimeout)
+		lc, err := startSupervisorFunc(s.opts.ControlSocket, s.opts.IdleTimeout, s.opts.MCPLaunchWrapperPolicyPath)
 		if err != nil {
 			return nil, nil, "", fmt.Errorf("autostart supervisor: %w", err)
 		}

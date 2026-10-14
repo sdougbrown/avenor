@@ -77,6 +77,7 @@ func runMCP(args []string) int {
 	maxWait := fs.Duration("max-wait", 0, "approximate polling budget for blocking tools (default 25s over HTTP; 0 disables)")
 	var allowedHosts allowedHostList
 	fs.Var(&allowedHosts, "allowed-host", "exact tailnet hostname accepted on the HTTP transport (repeatable)")
+	mcpLaunchWrapperPolicy := fs.String("mcp-launch-wrapper-policy", "", "path to a launch_wrapper policy file forwarded to a supervisor this command autostarts; ignored when attaching to an existing supervisor")
 
 	if err := fs.Parse(args); err != nil {
 		return 1
@@ -123,16 +124,17 @@ func runMCP(args []string) int {
 	}
 
 	s, err := mcpserver.NewServer(mcpserver.Options{
-		Transport:        *transport,
-		ControlSocket:    *controlSocket,
-		SupervisorSocket: *supervisorSocket,
-		NoAutostart:      *noAutostart,
-		IdleTimeout:      *idleTimeout,
-		Addr:             *addr,
-		AuthToken:        *authToken,
-		MaxWait:          effectiveMaxWait(*transport, maxWaitExplicit, *maxWait),
-		AllowedHosts:     allowedHosts,
-		ControlClient:    nil,
+		Transport:                  *transport,
+		ControlSocket:              *controlSocket,
+		SupervisorSocket:           *supervisorSocket,
+		NoAutostart:                *noAutostart,
+		IdleTimeout:                *idleTimeout,
+		Addr:                       *addr,
+		AuthToken:                  *authToken,
+		MaxWait:                    effectiveMaxWait(*transport, maxWaitExplicit, *maxWait),
+		AllowedHosts:               allowedHosts,
+		ControlClient:              nil,
+		MCPLaunchWrapperPolicyPath: *mcpLaunchWrapperPolicy,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "avenor mcp: %v\n", err)
