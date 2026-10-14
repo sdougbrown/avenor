@@ -118,7 +118,7 @@ type spawnArgs struct {
 	ServerURL      string   `json:"server_url,omitempty" jsonschema:"optional opencode serve URL for opencode-http backend"`
 	SupervisorID   string   `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
 	IdempotencyKey string   `json:"idempotency_key,omitempty" jsonschema:"optional idempotency key; a retry with the same key and parameters returns the original run instead of spawning a second one"`
-	LaunchWrapper  []string `json:"launch_wrapper,omitempty" jsonschema:"Optional argv prefix; disabled unless the selected supervisor enables an operator allowlist. Must exactly match an approved argv array. No shell expansion."`
+	LaunchWrapper  []string `json:"launch_wrapper,omitempty" jsonschema:"optional argv prefix; disabled unless the selected supervisor enables an operator allowlist. Must exactly match an approved argv array. No shell expansion."`
 	AutoApprove    bool     `json:"auto_approve,omitempty" jsonschema:"optional auto-approve all permission requests so the run executes unattended (no answer_permission needed)"`
 }
 
