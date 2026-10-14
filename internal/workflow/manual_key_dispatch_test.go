@@ -300,6 +300,133 @@ func TestBeginDispatchRevisionRaceMapsToStaleCandidate(t *testing.T) {
 	}
 }
 
+// TestBeginDispatchPermissionDeciderSelectionReDispatch proves a re-dispatch
+// (retry) of a permission_policy node does not conflict when the freshly
+// resolved selection carries an equal-content decider under a different
+// pointer, while a decider with different content is still rejected.
+func TestBeginDispatchPermissionDeciderSelectionReDispatch(t *testing.T) {
+	m, _, wf := newAutoDispatchFixture(t, "begin-sel-permdec", "ctl-a", -1)
+	if err := m.RebuildCandidateIndex("test"); err != nil {
+		t.Fatalf("RebuildCandidateIndex: %v", err)
+	}
+	cands, err := m.CandidatesForController("ctl-a", 1)
+	if err != nil || len(cands) != 1 {
+		t.Fatalf("candidates: n=%d err=%v", len(cands), err)
+	}
+	cand := cands[0]
+	begin, err := m.BeginDispatch(BeginDispatchRequest{
+		WorkflowID:       wf,
+		NodeID:           cand.Identity.NodeID,
+		ActivationID:     cand.Identity.ActivationID,
+		ExpectedRevision: cand.Revision,
+		ControllerID:     "ctl-a",
+		LeaderLeaseID:    "lease_leader_1",
+		Selection: &ExecutionSelection{
+			Backend: "pi", Agent: "worker", Model: "m1",
+			PermissionDecider: &PermissionDecider{Entry: "rm-guard", Backend: "pi", Agent: "rm-guard", Model: "guard-m"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BeginDispatch: %v", err)
+	}
+	// Fail the attempt so the retry policy re-arms the activation with the
+	// selection still pinned.
+	if err := m.FinalizeDispatch(FinalizeDispatchRequest{
+		WorkflowID:    wf,
+		NodeID:        cand.Identity.NodeID,
+		ActivationID:  cand.Identity.ActivationID,
+		AttemptID:     begin.AttemptID,
+		LeaseID:       begin.LeaseID,
+		FailureStatus: AttemptFailed,
+	}); err != nil {
+		t.Fatalf("FinalizeDispatch: %v", err)
+	}
+	if err := m.RebuildCandidateIndex("test"); err != nil {
+		t.Fatalf("RebuildCandidateIndex after re-arm: %v", err)
+	}
+	reCands, err := m.CandidatesForController("ctl-a", 10)
+	if err != nil || len(reCands) != 1 {
+		t.Fatalf("re-armed candidates: n=%d err=%v", len(reCands), err)
+	}
+
+	// An equal-content decider resolved into a fresh pointer re-dispatches
+	// without conflict.
+	if _, err := m.BeginDispatch(BeginDispatchRequest{
+		WorkflowID:       wf,
+		NodeID:           reCands[0].Identity.NodeID,
+		ActivationID:     reCands[0].Identity.ActivationID,
+		ExpectedRevision: reCands[0].Revision,
+		ControllerID:     "ctl-a",
+		LeaderLeaseID:    "lease_leader_1",
+		Selection: &ExecutionSelection{
+			Backend: "pi", Agent: "worker", Model: "m1",
+			PermissionDecider: &PermissionDecider{Entry: "rm-guard", Backend: "pi", Agent: "rm-guard", Model: "guard-m"},
+		},
+	}); err != nil {
+		t.Fatalf("re-dispatch with equal-content decider: %v, want no conflict", err)
+	}
+
+	// A decider whose content differs still conflicts.
+	m2, _, wf2 := newAutoDispatchFixture(t, "begin-sel-permdec-2", "ctl-a", -1)
+	if err := m2.RebuildCandidateIndex("test"); err != nil {
+		t.Fatalf("RebuildCandidateIndex: %v", err)
+	}
+	cands2, err := m2.CandidatesForController("ctl-a", 1)
+	if err != nil || len(cands2) != 1 {
+		t.Fatalf("candidates: n=%d err=%v", len(cands2), err)
+	}
+	cand2 := cands2[0]
+	begin2, err := m2.BeginDispatch(BeginDispatchRequest{
+		WorkflowID:       wf2,
+		NodeID:           cand2.Identity.NodeID,
+		ActivationID:     cand2.Identity.ActivationID,
+		ExpectedRevision: cand2.Revision,
+		ControllerID:     "ctl-a",
+		LeaderLeaseID:    "lease_leader_1",
+		Selection: &ExecutionSelection{
+			Backend: "pi", Agent: "worker", Model: "m1",
+			PermissionDecider: &PermissionDecider{Entry: "rm-guard", Backend: "pi", Agent: "rm-guard", Model: "guard-m"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BeginDispatch: %v", err)
+	}
+	_ = begin2
+	// Fail the attempt so the retry policy re-arms the activation with the
+	// selection still pinned.
+	if err := m2.FinalizeDispatch(FinalizeDispatchRequest{
+		WorkflowID:    wf2,
+		NodeID:        cand2.Identity.NodeID,
+		ActivationID:  cand2.Identity.ActivationID,
+		AttemptID:     begin2.AttemptID,
+		LeaseID:       begin2.LeaseID,
+		FailureStatus: AttemptFailed,
+	}); err != nil {
+		t.Fatalf("FinalizeDispatch: %v", err)
+	}
+	if err := m2.RebuildCandidateIndex("test"); err != nil {
+		t.Fatalf("RebuildCandidateIndex after re-arm: %v", err)
+	}
+	reCands2, err := m2.CandidatesForController("ctl-a", 10)
+	if err != nil || len(reCands2) != 1 {
+		t.Fatalf("re-armed candidates: n=%d err=%v", len(reCands2), err)
+	}
+	if _, err := m2.BeginDispatch(BeginDispatchRequest{
+		WorkflowID:       wf2,
+		NodeID:           reCands2[0].Identity.NodeID,
+		ActivationID:     reCands2[0].Identity.ActivationID,
+		ExpectedRevision: reCands2[0].Revision,
+		ControllerID:     "ctl-a",
+		LeaderLeaseID:    "lease_leader_1",
+		Selection: &ExecutionSelection{
+			Backend: "pi", Agent: "worker", Model: "m1",
+			PermissionDecider: &PermissionDecider{Entry: "rm-guard", Backend: "pi", Agent: "rm-guard", Model: "other-m"},
+		},
+	}); !errors.Is(err, ErrSelectionConflict) {
+		t.Fatalf("re-dispatch with differing decider error = %v, want ErrSelectionConflict", err)
+	}
+}
+
 // TestManualStartSelectionRespectsPinnedSelection proves a manual workflow
 // start with a selection conflicting with the one pinned by BeginDispatch is
 // rejected, and a start without a selection inherits the pinned one.

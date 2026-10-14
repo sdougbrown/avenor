@@ -161,8 +161,25 @@ func collectHeldKeys(held map[string]bool, snap Snapshot, skipWorkflow WorkflowI
 }
 
 // sameSelection reports whether two selections are identical. Two nils are
-// the same; a nil and a non-nil are not.
+// the same; a nil and a non-nil are not. The permission decider is compared
+// by content: the pinned selection and a freshly resolved one unmarshal into
+// separate pointers, and pointer identity would wrongly reject every
+// re-dispatch of a permission_policy node.
 func sameSelection(a, b *ExecutionSelection) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if !samePermissionDecider(a.PermissionDecider, b.PermissionDecider) {
+		return false
+	}
+	x, y := *a, *b
+	x.PermissionDecider, y.PermissionDecider = nil, nil
+	return x == y
+}
+
+// samePermissionDecider reports whether two decider targets are identical.
+// Two nils are the same; a nil and a non-nil are not.
+func samePermissionDecider(a, b *PermissionDecider) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
