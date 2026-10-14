@@ -6,19 +6,27 @@ description: Build unattended automations on Avenor durable workflows and the in
 # Avenor workflow automations
 
 This skill covers the shape of an unattended pipeline built on the workflow
-kernel and the workflow controller. The docs own the reference material. Read
-them for field definitions instead of guessing:
+kernel and the workflow controller. It describes avenor v0.33.0 and later.
+Check `avenor --version` first.
 
-- `docs/workflow.md`: templates, nodes, completion, outputs, dispatch policy,
-  working directories, the activation lifecycle, and retry.
-- `docs/workflow-controller.md`: a controller walkthrough with the
-  software-factory templates.
-- `docs/stable.md#workflow-controllers`: controller CLI and status fields.
-- `docs/control-protocol.md#workflow-methods`: the `workflow.*` methods.
-- `schemas/workflow.profile.json`: the template schema the kernel validates.
-- `templates/software-factory/`: a complete, validated template set.
+The docs own the reference material. Read them for field definitions instead
+of guessing:
 
-All paths are relative to the repo root.
+- [Workflows](https://avenor.douggo.com/workflow): templates, nodes,
+  completion, outputs, dispatch policy, permission policy, working
+  directories, the activation lifecycle, and retry.
+- [Workflow controller](https://avenor.douggo.com/workflow-controller): a
+  controller walkthrough with the software-factory templates.
+- [Stable: workflow controllers](https://avenor.douggo.com/stable#workflow-controllers):
+  controller CLI and status fields.
+- [Control protocol: workflow methods](https://avenor.douggo.com/control-protocol#workflow-methods):
+  the `workflow.*` methods.
+- [`schemas/workflow.profile.json`](https://github.com/sdougbrown/avenor/blob/main/schemas/workflow.profile.json):
+  the template schema the kernel validates.
+- [`templates/software-factory/`](https://github.com/sdougbrown/avenor/tree/main/templates/software-factory):
+  a complete, validated template set.
+
+Inside the avenor repository, the same pages are under `docs/`.
 
 ## When to use a workflow
 
@@ -28,8 +36,9 @@ that it ran. Each stage becomes a separate attempt. The kernel completes an
 attempt only when the stage's declared evidence exists. A skipped stage
 therefore fails instead of passing on the worker's report.
 
-`docs/workflow.md#when-you-need-a-workflow` lists the durable-state reasons
-(crash recovery, exact-head gates, declared review branches).
+[When you need a workflow](https://avenor.douggo.com/workflow#when-you-need-a-workflow)
+lists the durable-state reasons (crash recovery, exact-head gates, declared
+review branches).
 
 ## Architecture
 
@@ -45,8 +54,8 @@ setup script (idempotent) ─► register templates, create + enable controller
 - **Dedicated supervisor.** Run one `avenor stable` per automation with its own
   `--control-socket`, `--workflow-root`, and `--workflow-adapter-dir`. Pass
   the adapter directory even when the pipeline has no external gates. The
-  default directory (`docs/stable.md#workflow-controllers`) may hold adapters
-  installed for other supervisors. Keep it alive with a process supervisor.
+  default directory may hold adapters installed for other supervisors. Keep
+  the supervisor alive with a process supervisor.
 - **Idempotent setup script.** It registers every template, creates the
   controller only when `controller status` fails, and always runs `enable`.
   Re-running it after a template change is the deploy step.
@@ -70,22 +79,27 @@ setup script (idempotent) ─► register templates, create + enable controller
 Read `references/template-authoring.md` before writing a template. It covers:
 
 - auto dispatch with a concurrency key templated from an instance param
-- roster-resolved assignments and pinned `thinking`
+- roster-resolved assignments and thinking levels
+- the permission policy for nodes whose backend asks for approval
 - `files` completion contracts with JSON-pointer outputs
 - how an auto-completed node selects its outcome (run nodes declare exactly
   one outcome)
 - mode variants as separate templates instead of branches
 - where attempts run, and why that can be outside the target repo
 - path resolution for `prompt_file`, `team_file`, and `roster_file`
+- retry, and which attempt endings re-arm a node
 
 ## Lifecycle
 
 All commands take `--socket <path>`. Each command and its flags are in
-`docs/workflow.md#commands` and `docs/stable.md#workflow-controllers`.
+[Workflows: commands](https://avenor.douggo.com/workflow#commands) and
+[Stable: workflow controllers](https://avenor.douggo.com/stable#workflow-controllers).
 
 1. **Register.** `avenor workflow create --request-file <template.json>`.
-   Bump `template_version` on every template change. Running instances load
-   their template by ID and version (see #283 in `references/known-gaps.md`).
+   Re-registering identical content is a no-op. Different content under the
+   same `template_id` and `template_version` fails with error `-32031`, so
+   bump `template_version` on every template change. Running instances keep
+   the version they started with.
 2. **Controller.** `avenor workflow controller create --request-file
    <controller.json>` registers it disabled. `controller.json` holds
    `controller_id` and `max_inflight`. Then run `controller enable <id>`.
@@ -99,17 +113,32 @@ All commands take `--socket <path>`. Each command and its flags are in
      controller can dispatch now.
    - `controller status <id>` shows `desired_state`, `leader`, `inflight`,
      and `capacity_blocked`.
+   - `workflow status <wf>` reports `active`, `blocked`, `awaiting_gate`,
+     `completed`, `failed`, or `canceled`. The runner acts on everything
+     except `active`.
    - `workflow inspect <wf>` shows activations, attempts, evidence, and
      outputs.
    - `workflow events <wf> --after-seq 0` shows the history.
-5. **Retention.** The kernel keeps instances and evidence. Your runner owns
+5. **Recover or stop.**
+   - A `blocked` instance has an activation that exhausted its retries under
+     `exhaustion: "block"`, or whose attempt was canceled. `avenor workflow
+     unblock <wf> <node-id> --request-file <f>` re-arms it. The request
+     needs `actor` and `reason`.
+   - `avenor workflow cancel <wf> --reason <text> --actor <id>` ends the
+     instance as `canceled`. It releases leases and terminates the instance's
+     in-flight runtimes. Use it for a runner-side timeout or a unit the runner
+     gives up on. A second cancel is a no-op.
+   - Prefer `workflow cancel` over `avenor control cancel <runtime>`. A
+     canceled runtime parks its activation `blocked`, and the instance stays
+     open.
+6. **Retention.** The kernel keeps instances and evidence. Your runner owns
    its own working directories and must prune them. Never prune a directory
    that a non-terminal workflow still uses as its working directory.
 
 ## Verify
 
-Drive the CLI as `skills/verify-avenor/SKILL.md` describes (build, doctor,
-evidence capture). For a workflow pipeline:
+Inside the avenor repository, drive the CLI as `skills/verify-avenor/SKILL.md`
+describes (build, doctor, evidence capture). For a workflow pipeline:
 
 1. Start an isolated `avenor stable` with its own workflow root and a short
    socket path such as `/tmp/wf-<name>.sock`. A long socket path fails with
@@ -126,12 +155,6 @@ evidence capture). For a workflow pipeline:
 4. In `workflow inspect`, confirm one attempt per stage and evidence for every
    declared artifact. In `workflow events`, confirm separate attempts. A stage
    that should not have run must have no activation.
-
-## Known gaps
-
-`references/known-gaps.md` lists open kernel issues, how to check whether each
-is fixed on your installed version, and the workaround for each. Read it
-before you debug a stuck workflow.
 
 ## Worked example: unattended PR review
 
@@ -151,3 +174,6 @@ The first real controller consumer reviews pull requests unattended.
 - The runner labels a review `deep` only when the stored template is the deep
   one and all three reviewer files are in satisfied-`fanout` evidence. It
   validates `review.json`, rechecks the PR head, and posts once.
+- A workflow that ends `failed`, `canceled`, or `blocked`, or runs past the
+  runner's time limit, counts against the runner's retry cap. The runner
+  cancels any instance that is still open.

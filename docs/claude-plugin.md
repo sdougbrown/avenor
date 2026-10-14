@@ -63,7 +63,7 @@ Inspect the plugin's component inventory:
 claude plugin details avenor@avenor
 ```
 
-Confirm that Avenor appears as an installed plugin from the `avenor` marketplace, with one skill (`avenor-orchestrate`) and one MCP server (`avenor`). In a new Claude Code session, asking Claude to delegate explicitly through Avenor should make the `avenor_` MCP tools available. Avenor delegation remains opt-in; the bundled skill does not dispatch ordinary work without an explicit request.
+Confirm that Avenor appears as an installed plugin from the `avenor` marketplace, with two skills (`avenor-orchestrate` and `avenor-workflow`) and one MCP server (`avenor`). In a new Claude Code session, asking Claude to delegate explicitly through Avenor should make the `avenor_` MCP tools available. Avenor delegation remains opt-in; the bundled skill does not dispatch ordinary work without an explicit request.
 
 ## Troubleshooting
 
