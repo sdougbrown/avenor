@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -812,5 +813,52 @@ func TestStoreTemplateRejectsConflictingContent(t *testing.T) {
 	}
 	if loaded.Nodes[0].Name == "renamed" {
 		t.Fatal("original template was replaced by the conflicting content")
+	}
+}
+
+// TestStoreTemplateConcurrentConflictingCreateHasOneWinner hammers
+// StoreTemplate with concurrent creates of different content under the same
+// id+version and asserts exactly one registration wins: the losing callers
+// all get a TemplateConflictError and the stored file holds the winner's
+// content, never a mixture or a silent overwrite by a later writer.
+func TestStoreTemplateConcurrentConflictingCreateHasOneWinner(t *testing.T) {
+	s := newStore(t)
+	const writers = 32
+	errs := make([]error, writers)
+
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			tmpl := storeTemplateFixture(t, "race", "1")
+			tmpl.Nodes[0].Name = fmt.Sprintf("writer-%d", i)
+			errs[i] = s.StoreTemplate("race", "1", tmpl)
+		}(i)
+	}
+	wg.Wait()
+
+	winners := 0
+	winnerIndex := -1
+	for i, err := range errs {
+		if err == nil {
+			winners++
+			winnerIndex = i
+			continue
+		}
+		var conflict *TemplateConflictError
+		if !errors.As(err, &conflict) {
+			t.Fatalf("writer %d: error = %T (%v), want *TemplateConflictError", i, err, err)
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("winning registrations = %d, want exactly 1", winners)
+	}
+	loaded, err := s.LoadTemplate("race", "1")
+	if err != nil {
+		t.Fatalf("LoadTemplate after race: %v", err)
+	}
+	if want := fmt.Sprintf("writer-%d", winnerIndex); loaded.Nodes[0].Name != want {
+		t.Fatalf("stored template holds node name %q, want the single winner's %q", loaded.Nodes[0].Name, want)
 	}
 }
