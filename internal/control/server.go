@@ -95,6 +95,7 @@ type ControlServer struct {
 
 type StableHandler interface {
 	Spawn(params json.RawMessage) (any, error)
+	SpawnMCP(params json.RawMessage) (any, error)
 	List() any
 	Shutdown(mode string) error
 	RuntimeStatus(runtimeID string) (any, error)
@@ -1355,6 +1356,39 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 			return failure(req.ID, -32601, "method not found", nil)
 		}
 		result, err := s.stableHandler.Spawn(req.Params)
+		if err != nil {
+			var ce *admission.CapacityError
+			if errors.As(err, &ce) {
+				data := map[string]any{
+					"source":    ce.Source,
+					"retryable": ce.Retryable(),
+					"limit":     ce.Limit,
+					"active":    ce.Active,
+				}
+				if ce.RootID != "" {
+					data["root_id"] = ce.RootID
+				}
+				return failure(req.ID, -32050, ce.Error(), data)
+			}
+			var ice *IdempotencyConflictError
+			if errors.As(err, &ice) {
+				return failure(req.ID, -32031, ice.Error(), nil)
+			}
+			var icap *IdempotencyCapacityError
+			if errors.As(err, &icap) {
+				return failure(req.ID, -32030, icap.Error(), nil)
+			}
+			return failure(req.ID, -32000, err.Error(), nil)
+		}
+		return success(req.ID, result)
+	case "spawn_mcp":
+		if !s.ensureOwner(c) {
+			return failure(req.ID, -32010, "permission_denied", nil)
+		}
+		if s.stableHandler == nil {
+			return failure(req.ID, -32601, "method not found", nil)
+		}
+		result, err := s.stableHandler.SpawnMCP(req.Params)
 		if err != nil {
 			var ce *admission.CapacityError
 			if errors.As(err, &ce) {

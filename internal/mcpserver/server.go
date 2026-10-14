@@ -30,6 +30,7 @@ type ControlClient interface {
 	Status(runtimeID string) (map[string]any, error)
 	List() ([]map[string]any, error)
 	Spawn(params map[string]any) (map[string]any, error)
+	SpawnMCP(params map[string]any) (map[string]any, error)
 	Shutdown(mode string) error
 	Cancel(runtimeID string) error
 	Close() error
@@ -1144,8 +1145,13 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 		}
 	}
 
-	result, err := cl.Spawn(params)
+	result, err := cl.SpawnMCP(params)
 	if err != nil {
+		// Fail closed for older supervisors without the spawn_mcp verb: a
+		// wrapped MCP request must never fall back to the ungated spawn path.
+		if isMethodNotFound(err) && len(args.LaunchWrapper) > 0 {
+			return nil, nil, errors.New("launch_wrapper: disabled for MCP on this supervisor")
+		}
 		return nil, nil, fmt.Errorf("spawn: %w", err)
 	}
 
@@ -1378,6 +1384,17 @@ func (s *Server) handleAvenorAnswerPermission(ctx context.Context, req *mcp.Call
 	}
 
 	return nil, map[string]any{"ok": true}, nil
+}
+
+// isMethodNotFound reports whether err is a control-protocol "method not
+// found" failure (code -32601), as returned when the supervisor predates the
+// spawn_mcp verb.
+func isMethodNotFound(err error) bool {
+	var rpcErr *client.RPCError
+	if errors.As(err, &rpcErr) {
+		return rpcErr.Code == -32601
+	}
+	return strings.Contains(err.Error(), "method not found")
 }
 
 func resolveRuntimeIDFromList(cl ControlClient, runID string) (string, error) {

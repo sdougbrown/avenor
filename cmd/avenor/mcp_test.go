@@ -183,6 +183,8 @@ type stubControlClient struct{}
 func (s *stubControlClient) Status(runtimeID string) (map[string]any, error)     { return nil, nil }
 func (s *stubControlClient) List() ([]map[string]any, error)                     { return nil, nil }
 func (s *stubControlClient) Spawn(params map[string]any) (map[string]any, error) { return nil, nil }
+
+func (s *stubControlClient) SpawnMCP(params map[string]any) (map[string]any, error) { return nil, nil }
 func (s *stubControlClient) Shutdown(mode string) error                          { return nil }
 func (s *stubControlClient) Cancel(runtimeID string) error                       { return nil }
 func (s *stubControlClient) Close() error                                        { return nil }

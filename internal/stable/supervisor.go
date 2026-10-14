@@ -1323,48 +1323,9 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		}
 	}
 
-	directSupplied := effectiveIdentity{
-		Backend: params.Backend, Agent: params.Agent, Model: params.Model,
-		AgentProfile: params.AgentProfile, RosterFile: params.RosterFile, RosterEntry: params.RosterEntry,
-		LaunchWrapper: params.LaunchWrapper,
-	}
-	backend := params.Backend
-	if backend == "" {
-		backend = cli.DefaultBackend
-	}
-	roster := (*rosterconfig.Config)(nil)
-	if !workflowMode && params.RosterFile != "" {
-		loaded, err := rosterconfig.Load(params.RosterFile)
-		if err != nil {
-			return SpawnResult{}, err
-		}
-		roster = loaded
-		entry, err := roster.Lookup(params.RosterEntry)
-		if err != nil {
-			return SpawnResult{}, err
-		}
-		backend, params.Agent, params.Model = entry.Backend, entry.Agent, entry.Model
-		// Roster supplies a default; an explicitly spawned thinking level
-		// wins. ValidateThinkingForBackend below sees the merged value.
-		if params.Thinking == "" {
-			params.Thinking = entry.Thinking
-		}
-	}
-	if !workflowMode {
-		resolved, err := s.resolveDirectResumeIdentity(params.SessionID, directSupplied, effectiveIdentity{
-			Backend: backend, Agent: params.Agent, Model: params.Model,
-			AgentProfile: params.AgentProfile, RosterFile: params.RosterFile, RosterEntry: params.RosterEntry,
-			LaunchWrapper: params.LaunchWrapper,
-		})
-		if err != nil {
-			return SpawnResult{}, err
-		}
-		backend, params.Agent, params.Model, params.AgentProfile = resolved.Backend, resolved.Agent, resolved.Model, resolved.AgentProfile
-		params.LaunchWrapper = resolved.LaunchWrapper
-		params.RosterFile, params.RosterEntry = resolved.RosterFile, resolved.RosterEntry
-		if err := runtime.ValidateThinkingForBackend(backend, params.Thinking); err != nil {
-			return SpawnResult{}, err
-		}
+	params, backend, err := s.resolveDirectSpawnIdentity(params)
+	if err != nil {
+		return SpawnResult{}, err
 	}
 
 	// The admission reservation already holds the tree slot and one local
@@ -4700,35 +4661,142 @@ func newRecorderFor(s *Supervisor, runID string) *broker.Recorder {
 	return broker.NewRecorder(s.broker, runID)
 }
 
-// StableHandler implementation.
+// resolveDirectSpawnIdentity applies workflow/roster/resume identity
+// resolution to a spawn: it validates the workflow-mode selector, applies
+// roster defaults for backend/agent/model/thinking, and resolves resume
+// conflicts. The returned params carry the effective launch wrapper — the
+// argv that will actually be exec'd — in LaunchWrapper.
+func (s *Supervisor) resolveDirectSpawnIdentity(params SpawnParams) (SpawnParams, string, error) {
+	workflowMode := params.LoopFile != "" || params.TeamFile != ""
+	backend := params.Backend
+	if backend == "" {
+		backend = cli.DefaultBackend
+	}
+	if workflowMode {
+		if params.RosterEntry != "" {
+			return params, backend, fmt.Errorf("roster_entry is not valid with loop_file or team_file")
+		}
+		return params, backend, nil
+	}
+	directSupplied := effectiveIdentity{
+		Backend: params.Backend, Agent: params.Agent, Model: params.Model,
+		AgentProfile: params.AgentProfile, RosterFile: params.RosterFile, RosterEntry: params.RosterEntry,
+		LaunchWrapper: params.LaunchWrapper,
+	}
+	if params.RosterFile != "" {
+		roster, err := rosterconfig.Load(params.RosterFile)
+		if err != nil {
+			return params, backend, err
+		}
+		entry, err := roster.Lookup(params.RosterEntry)
+		if err != nil {
+			return params, backend, err
+		}
+		backend, params.Agent, params.Model = entry.Backend, entry.Agent, entry.Model
+		// Roster supplies a default; an explicitly spawned thinking level
+		// wins. ValidateThinkingForBackend below sees the merged value.
+		if params.Thinking == "" {
+			params.Thinking = entry.Thinking
+		}
+	}
+	resolved, err := s.resolveDirectResumeIdentity(params.SessionID, directSupplied, effectiveIdentity{
+		Backend: backend, Agent: params.Agent, Model: params.Model,
+		AgentProfile: params.AgentProfile, RosterFile: params.RosterFile, RosterEntry: params.RosterEntry,
+		LaunchWrapper: params.LaunchWrapper,
+	})
+	if err != nil {
+		return params, backend, err
+	}
+	backend, params.Agent, params.Model, params.AgentProfile = resolved.Backend, resolved.Agent, resolved.Model, resolved.AgentProfile
+	params.LaunchWrapper = resolved.LaunchWrapper
+	params.RosterFile, params.RosterEntry = resolved.RosterFile, resolved.RosterEntry
+	if err := runtime.ValidateThinkingForBackend(backend, params.Thinking); err != nil {
+		return params, backend, err
+	}
+	return params, backend, nil
+}
 
-func (s *Supervisor) Spawn(raw json.RawMessage) (any, error) {
+// spawnMCPAuthorizationDisabled is the exact error an MCP spawn receives when
+// the supervisor has no launch wrapper policy configured.
+var errMCPLaunchWrapperDisabled = errors.New("launch_wrapper: disabled for MCP on this supervisor")
+
+// authorizeMCPLaunchWrapper enforces the supervisor's MCP launch wrapper
+// policy for a spawn_mcp request. It resolves the effective wrapper argv —
+// the final argv that will be exec'd, after roster and resume identity
+// resolution — and requires an exact allowlist match. It must be called
+// before reservations, idempotency, or any process creation.
+func (s *Supervisor) authorizeMCPLaunchWrapper(params SpawnParams) error {
+	if len(params.LaunchWrapper) == 0 {
+		return nil
+	}
+	if err := runtime.ValidateLaunchWrapper(params.LaunchWrapper); err != nil {
+		return fmt.Errorf("launch_wrapper: %w", err)
+	}
+	resolved, _, err := s.resolveDirectSpawnIdentity(params)
+	if err != nil {
+		return err
+	}
+	if s.config.MCPLaunchWrapperPolicy == nil {
+		return errMCPLaunchWrapperDisabled
+	}
+	if !mcpLaunchWrapperAllowed(s.config.MCPLaunchWrapperPolicy, resolved.LaunchWrapper) {
+		return errors.New("launch_wrapper: argv is not allowed by this supervisor")
+	}
+	return nil
+}
+
+// SpawnMCP implements control.StableHandler for the spawn_mcp verb: an
+// MCP-driven spawn whose launch_wrapper is subject to the supervisor's
+// operator allowlist. Everything else about the spawn is identical to Spawn.
+func (s *Supervisor) SpawnMCP(raw json.RawMessage) (any, error) {
+	p, err := parseStableSpawn(raw)
+	if err != nil {
+		return nil, err
+	}
+	s.applySpawnCallerParent(raw, &p)
+	if err := s.authorizeMCPLaunchWrapper(p); err != nil {
+		return nil, err
+	}
+	return s.finishSpawn(p)
+}
+
+// parseStableSpawn parses and sanitizes a control-socket spawn payload: it
+// strips workflow identity (only the internal direct-run executor may set it)
+// and auto-populates ParentID from a registered caller runtime.
+func parseStableSpawn(raw json.RawMessage) (SpawnParams, error) {
 	var p SpawnParams
 	if err := json.Unmarshal(raw, &p); err != nil {
-		return nil, fmt.Errorf("invalid spawn params: %w", err)
+		return p, fmt.Errorf("invalid spawn params: %w", err)
 	}
-	// Workflow identity is attached only by the internal direct-run executor
-	// (which calls the unexported spawn directly, bypassing this method).
-	// External control-socket callers cannot spoof workflow identity.
 	p.WorkflowID = ""
 	p.NodeID = ""
 	p.ActivationID = ""
 	p.AttemptID = ""
-	// Auto-populate ParentID when the spawn is called by a known runtime.
-	// The caller embeds its own runtime_id in the spawn params; if it maps to
-	// a registered runtime, treat it as the parent.
-	if p.ParentID == "" {
-		var caller struct {
-			RuntimeID string `json:"runtime_id"`
-		}
-		if err := json.Unmarshal(raw, &caller); err == nil && caller.RuntimeID != "" {
-			s.controlMu.Lock()
-			if _, ok := s.runtimes[caller.RuntimeID]; ok {
-				p.ParentID = caller.RuntimeID
-			}
-			s.controlMu.Unlock()
-		}
+	return p, nil
+}
+
+// applySpawnCallerParent auto-populates ParentID when the spawn is called by
+// a known runtime: the caller embeds its own runtime_id in the spawn params;
+// if it maps to a registered runtime, treat it as the parent.
+func (s *Supervisor) applySpawnCallerParent(raw json.RawMessage, p *SpawnParams) {
+	if p.ParentID != "" {
+		return
 	}
+	var caller struct {
+		RuntimeID string `json:"runtime_id"`
+	}
+	if err := json.Unmarshal(raw, &caller); err == nil && caller.RuntimeID != "" {
+		s.controlMu.Lock()
+		if _, ok := s.runtimes[caller.RuntimeID]; ok {
+			p.ParentID = caller.RuntimeID
+		}
+		s.controlMu.Unlock()
+	}
+}
+
+// finishSpawn applies idempotency and starts the runtime for a
+// control-socket spawn (shared by the spawn and spawn_mcp verbs).
+func (s *Supervisor) finishSpawn(p SpawnParams) (any, error) {
 	if p.IdempotencyKey != "" {
 		hash, err := IdempotencyHash(p)
 		if err != nil {
@@ -4739,6 +4807,16 @@ func (s *Supervisor) Spawn(raw json.RawMessage) (any, error) {
 	return s.spawn(p)
 }
 
+// StableHandler implementation.
+
+func (s *Supervisor) Spawn(raw json.RawMessage) (any, error) {
+	p, err := parseStableSpawn(raw)
+	if err != nil {
+		return nil, err
+	}
+	s.applySpawnCallerParent(raw, &p)
+	return s.finishSpawn(p)
+}
 func (s *Supervisor) List() any {
 	return s.listRuntimes()
 }

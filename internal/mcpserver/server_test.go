@@ -171,6 +171,10 @@ func (f *fakeClient) Spawn(params map[string]any) (map[string]any, error) {
 	return f.spawnResult, f.spawnErr
 }
 
+func (f *fakeClient) SpawnMCP(params map[string]any) (map[string]any, error) {
+	return f.Spawn(params)
+}
+
 func (f *fakeClient) Shutdown(mode string) error {
 	if f.shutdownFunc != nil {
 		return f.shutdownFunc(mode)
@@ -252,6 +256,9 @@ func (c *spawnCountingClient) List() ([]map[string]any, error)       { return ni
 func (c *spawnCountingClient) Spawn(map[string]any) (map[string]any, error) {
 	c.spawns.Add(1)
 	return map[string]any{"runtime_id": "rt-shared", "session_id": "ses-shared"}, nil
+}
+func (c *spawnCountingClient) SpawnMCP(params map[string]any) (map[string]any, error) {
+	return c.Spawn(params)
 }
 func (c *spawnCountingClient) Shutdown(string) error                         { return nil }
 func (c *spawnCountingClient) Cancel(string) error                           { return nil }

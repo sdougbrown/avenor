@@ -1779,6 +1779,8 @@ func testSocketPath(t *testing.T) string {
 type mockStableHandler struct {
 	spawnResult          any
 	spawnErr             error
+	spawnMCPCalls        int
+	spawnCalls           int
 	listResult           any
 	waitErr              error
 	waitGate             chan struct{} // non-nil: RuntimeWaitTurn blocks until the gate is closed
@@ -1789,6 +1791,12 @@ type mockStableHandler struct {
 }
 
 func (m *mockStableHandler) Spawn(params json.RawMessage) (any, error) {
+	m.spawnCalls++
+	return m.spawnResult, m.spawnErr
+}
+
+func (m *mockStableHandler) SpawnMCP(params json.RawMessage) (any, error) {
+	m.spawnMCPCalls++
 	return m.spawnResult, m.spawnErr
 }
 
@@ -1867,6 +1875,35 @@ func (m *mockStableHandler) TreeBudgetStatus() any {
 
 func (m *mockStableHandler) WaitForCapacityMS(timeoutMS int) error {
 	return m.waitErr
+}
+
+func TestStableSpawnMCPMethod(t *testing.T) {
+	state := NewState("run_1", "", 0)
+	s := NewServer(state)
+	mock := &mockStableHandler{
+		spawnResult: map[string]any{"runtime_id": "rt_1", "session_id": "ses_x"},
+	}
+	s.SetStableHandler(mock)
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	c := mustDial(t, path)
+	defer c.Close()
+	params, _ := json.Marshal(map[string]any{"prompt": "hello", "dir": "/tmp"})
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "spawn_mcp", Params: params})
+	r := readResp(t, c)
+	if r.Error != nil {
+		t.Fatalf("spawn_mcp error: %+v", r.Error)
+	}
+	if mock.spawnMCPCalls != 1 {
+		t.Fatalf("SpawnMCP calls = %d, want 1", mock.spawnMCPCalls)
+	}
+	if mock.spawnCalls != 0 {
+		t.Fatalf("Spawn calls = %d, want 0", mock.spawnCalls)
+	}
 }
 
 func TestStableSpawnMethod(t *testing.T) {
