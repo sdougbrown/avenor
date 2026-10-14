@@ -2,7 +2,7 @@ package claudecore
 
 import (
 	"encoding/json"
-	"strconv"
+	"strings"
 )
 
 func MustJSON(v any) json.RawMessage {
@@ -30,7 +30,11 @@ func ValidTmuxKey(key string) bool {
 	return true
 }
 
-// ShellQuote single-quotes a string for safe interpolation into a shell command.
+// ShellQuote produces one POSIX-shell word. Single quotes are represented by
+// adjacent quoted fragments, so whitespace and shell metacharacters — including
+// $(), backticks, and ; — stay literal data instead of being parsed as syntax.
+// A double-quoted string would not do: the shell still expands $() and
+// backticks inside double quotes.
 func ShellQuote(s string) string {
-	return strconv.Quote(s)
+	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }

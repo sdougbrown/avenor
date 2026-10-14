@@ -105,8 +105,13 @@ func LaunchCommand(args []string, stderrLog string, launchWrapper []string) stri
 	parts := make([]string, 0, len(args)+len(launchWrapper)+3)
 	parts = append(parts, "exec")
 	// The wrapper argv goes in front of claude so the shell execs into the
-	// wrapper, which owns the claude process tree.
-	parts = append(parts, launchWrapper...)
+	// wrapper, which owns the claude process tree. Each element is quoted so it
+	// stays exactly one shell word, matching the argv semantics of the
+	// non-terminal backends; unquoted, the shell would parse wrapper text like
+	// `;` or `$()` as command syntax.
+	for _, element := range launchWrapper {
+		parts = append(parts, ShellQuote(element))
+	}
 	parts = append(parts, "claude")
 	for _, arg := range args {
 		parts = append(parts, ShellQuote(arg))
