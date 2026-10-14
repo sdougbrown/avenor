@@ -1111,8 +1111,8 @@ func TestPermissionDeciderSkipsAlreadyResolvedRequest(t *testing.T) {
 	f := newDispatchFixtureTemplate(t, "permdec-resolved", 4, 4, template)
 	requestID := "perm_req_resolved"
 	gate := make(chan struct{})
-	// Always release the held spawn so teardown never waits on it, even when
-	// the assertion below fails.
+	// Release the held spawn and the held worker prompt on every exit path so
+	// teardown never waits on them, even when an assertion below fails.
 	defer close(gate)
 	var deciderSpawns atomic.Int64
 	f.sup.newProviderFunc = func(startOpts runtime.StartOptions, _ string) (runtime.Provider, error) {
@@ -1125,16 +1125,23 @@ func TestPermissionDeciderSkipsAlreadyResolvedRequest(t *testing.T) {
 		}
 		return &stableScriptedProvider{attempt: -1, scripts: []stableScriptedAttempt{{
 			sessionID: "ses_worker_resolved",
-			events: []stableScriptedEvent{{event: events.Event{
-				Event:     "permission.request",
-				SessionID: "ses_worker_resolved",
-				Fields: map[string]any{
-					"request_id": requestID,
-					"tool":       "bash",
-					"command":    "rm -rf /tmp/build",
-					"options":    []any{map[string]any{"optionId": "allow_once", "kind": "allow"}},
-				},
-			}}},
+			events: []stableScriptedEvent{
+				{event: events.Event{
+					Event:     "permission.request",
+					SessionID: "ses_worker_resolved",
+					Fields: map[string]any{
+						"request_id": requestID,
+						"tool":       "bash",
+						"command":    "rm -rf /tmp/build",
+						"options":    []any{map[string]any{"optionId": "allow_once", "kind": "allow"}},
+					},
+				}},
+				// Hold the worker prompt open after the permission request so
+				// the child run never completes: its teardown would clear the
+				// runtime's control-plane claims, and the claim below must stay
+				// observable for the whole test.
+				{release: gate},
+			},
 		}}}, nil
 	}
 	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
@@ -1145,6 +1152,9 @@ func TestPermissionDeciderSkipsAlreadyResolvedRequest(t *testing.T) {
 		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
 	}
 	waitFor(t, "decider spawn blocked", func() bool { return deciderSpawns.Load() >= 1 })
+	// The claim is prepared before the event reaches the fanout writer that
+	// triggers the decider spawn, and the held worker prompt keeps it alive,
+	// so the claim must already be observable here.
 	waitFor(t, "permission claim", func() bool {
 		return f.sup.control.PermissionResolverState(out.RuntimeID, requestID) != control.PermissionResolverUnknown
 	})
