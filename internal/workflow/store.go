@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"time"
 
@@ -290,6 +291,20 @@ func (s *Store) StoreTemplate(templateID TemplateID, templateVersion TemplateVer
 			}
 			if canonical, merr := current.MarshalJSON(); merr == nil {
 				identical = bytes.Equal(canonical, data)
+			}
+		}
+		if !identical {
+			// Number formatting must not decide the conflict: the stored file
+			// may have been produced by a writer that serialized metadata
+			// numbers differently (json.Number keeps the literal, a float64
+			// drops a trailing ".0"), while the content is semantically the
+			// same. Compare both documents decoded generically, where numbers
+			// become float64 and formatting differences vanish.
+			var existingDoc, incomingDoc any
+			if jerr := json.Unmarshal(existing, &existingDoc); jerr == nil {
+				if jerr := json.Unmarshal(data, &incomingDoc); jerr == nil {
+					identical = reflect.DeepEqual(existingDoc, incomingDoc)
+				}
 			}
 		}
 		if identical {

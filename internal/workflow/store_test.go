@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -944,10 +945,28 @@ func TestStoreTemplateCanonicalizesMetadataNumbers(t *testing.T) {
 	if err := s.StoreTemplate("num", "1", same); err != nil {
 		t.Fatalf("equivalent re-store with json.Number metadata: %v", err)
 	}
+	// Number-formatting drift alone is not a conflict: the stored file may
+	// carry "1" where the incoming canonical form has "1.0" (json.Number
+	// keeps the literal, a float64 producer drops the trailing ".0").
+	stored := filepath.Join(s.root, "templates", "num", "1.json")
+	raw, err := os.ReadFile(stored)
+	if err != nil {
+		t.Fatalf("read stored template: %v", err)
+	}
+	drifted := strings.Replace(string(raw), `"limit":1.0`, `"limit":1`, 1)
+	if drifted == string(raw) {
+		t.Fatal("fixture drift: stored metadata does not carry the 1.0 literal")
+	}
+	if err := os.WriteFile(stored, []byte(drifted), 0o644); err != nil {
+		t.Fatalf("rewrite stored template with drifted number format: %v", err)
+	}
+	if err := s.StoreTemplate("num", "1", same); err != nil {
+		t.Fatalf("re-store across number-format drift: %v", err)
+	}
 	// Different metadata values under the same id+version: conflict.
 	diff := storeTemplateFixture(t, "num", "1")
 	diff.Metadata = map[string]any{"name": "x", "limit": json.Number("2.0")}
-	err := s.StoreTemplate("num", "1", diff)
+	err = s.StoreTemplate("num", "1", diff)
 	var conflict *TemplateConflictError
 	if err == nil || !errors.As(err, &conflict) {
 		t.Fatalf("re-store with different metadata = %v, want TemplateConflictError", err)

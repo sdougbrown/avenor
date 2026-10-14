@@ -259,16 +259,24 @@ func TestManagerCreateRecreateIdempotency(t *testing.T) {
 	if _, err := m.WorkflowCreate([]byte(managerTemplateJSON)); err != nil {
 		t.Fatalf("identical re-create: %v", err)
 	}
-	conflicting := strings.Replace(managerTemplateJSON,
-		`{"id": "start", "action": {"type": "manual"}}`,
-		`{"id": "start", "name": "renamed", "action": {"type": "manual"}}`, 1)
-	if conflicting == managerTemplateJSON || !strings.Contains(conflicting, `"name": "renamed"`) {
-		// The Replace target drifted from managerTemplateJSON: a no-op here
-		// would make the test re-create the identical template and fail
-		// confusingly at the conflicting step below.
-		t.Fatal("conflicting payload must differ and carry the renamed node; the Replace target drifted from managerTemplateJSON")
+	// Build the conflicting payload by decoding and mutating, so the fixture
+	// cannot drift out of sync with managerTemplateJSON the way a string
+	// replace can.
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(managerTemplateJSON), &doc); err != nil {
+		t.Fatalf("unmarshal managerTemplateJSON: %v", err)
 	}
-	_, err := m.WorkflowCreate([]byte(conflicting))
+	nodes, _ := doc["nodes"].([]any)
+	if len(nodes) == 0 {
+		t.Fatal("managerTemplateJSON has no nodes")
+	}
+	node0, _ := nodes[0].(map[string]any)
+	node0["name"] = "renamed"
+	conflicting, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal conflicting payload: %v", err)
+	}
+	_, err = m.WorkflowCreate([]byte(conflicting))
 	if err == nil {
 		t.Fatal("expected conflicting re-create to fail, got nil error")
 	}
