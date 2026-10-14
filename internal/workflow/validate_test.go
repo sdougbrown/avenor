@@ -254,6 +254,11 @@ func TestValidateTemplateJSONAssignmentPermissionPolicy(t *testing.T) {
 	assertTemplateError(t, mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
 		node["assignment"] = map[string]any{"permission_policy": map[string]any{"decider": 7}}
 	})), `type at /nodes/0/assignment/permission_policy/decider`)
+	// An empty decider name violates the schema's minLength: 1 — a policy that
+	// names no decider must be rejected structurally, not just semantically.
+	assertTemplateError(t, mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
+		node["assignment"] = map[string]any{"permission_policy": map[string]any{"decider": ""}}
+	})), `minLength at /nodes/0/assignment/permission_policy/decider`)
 
 	// Semantic: the two unattended policies are alternatives, not additives.
 	var tmpl Template
