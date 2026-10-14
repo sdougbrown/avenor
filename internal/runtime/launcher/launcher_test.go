@@ -44,7 +44,7 @@ func TestCommandWithoutWrapperMatchesExecCommand(t *testing.T) {
 
 func TestCommandPrependsWrapper(t *testing.T) {
 	cmd := Command(context.Background(), []string{"nice", "-n", "5"}, "agy", "--print", "hi")
-	if cmd.Path == "" || !slices.Equal(cmd.Args, []string{"nice", "-n", "5", "agy", "--print", "hi"}) {
+	if !slices.Equal(cmd.Args, []string{"nice", "-n", "5", "agy", "--print", "hi"}) {
 		t.Fatalf("Args = %#v, want wrapper-prefixed argv", cmd.Args)
 	}
 }

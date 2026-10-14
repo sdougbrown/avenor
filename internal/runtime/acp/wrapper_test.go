@@ -44,9 +44,10 @@ func TestNewClientWithoutWrapperPreservesArgv(t *testing.T) {
 	waitForArgv(t, argvPath, append([]string{bin}, args...))
 }
 
-// TestNewClientWrapperPrefixesBackendArgv proves wrapper prefixing at the
-// shared ACP launch site: the wrapper runs first, and the backend still
-// receives its own argv behind the wrapper prefix.
+// TestNewClientWrapperPrefixesBackendArgv pins the launched process's argv at
+// the shared ACP launch site: the launched argv is the wrapper prefix
+// followed by the backend command. The recorder wrapper stub exits without
+// exec'ing the backend, so this test does not prove backend execution.
 func TestNewClientWrapperPrefixesBackendArgv(t *testing.T) {
 	argvPath := filepath.Join(t.TempDir(), "argv.txt")
 	bin := writeArgvRecorder(t, argvPath)
