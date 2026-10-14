@@ -9,7 +9,7 @@
       "source": "./marketplace/plugins/avenor",
       "displayName": "Avenor",
       "description": "Inspect available local backends, delegate work to independent agents, and supervise their runs through Avenor.",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "author": {
         "name": "Doug Brown",
         "url": "https://github.com/sdougbrown"
