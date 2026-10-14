@@ -251,6 +251,27 @@ func TestTranslateStatusRunningTerminalPhaseStaysRunning(t *testing.T) {
 	}
 }
 
+// TestTranslateStatusPermissionDeciderReachesLifecycleView proves the
+// permission-decider keys pass translateStatus's pass-through allowlist and
+// survive the lifecycle view shaping: without the pass-through, the decider
+// identity and spawn exhaustion recorded on the runtime are invisible in
+// every shaped status view even though shapeStatusForView lists them.
+func TestTranslateStatusPermissionDeciderReachesLifecycleView(t *testing.T) {
+	raw := map[string]any{
+		"status":                       "blocked",
+		"session_id":                   "ses_dec",
+		"permission_decider":           "rm-guard",
+		"permission_decider_exhausted": true,
+	}
+	shaped := shapeStatusForView(translateStatus(raw, ""), "lifecycle")
+	if got, _ := shaped["permission_decider"].(string); got != "rm-guard" {
+		t.Fatalf("shaped permission_decider = %q, want rm-guard", got)
+	}
+	if exhausted, _ := shaped["permission_decider_exhausted"].(bool); !exhausted {
+		t.Fatalf("shaped permission_decider_exhausted = %v, want true", shaped["permission_decider_exhausted"])
+	}
+}
+
 func TestTranslateStatusParkedSuccessUsesCurrentMetadata(t *testing.T) {
 	path := writeSentinel(t, t.TempDir(), "parked.sentinel", "DONE\nSESSION=ses_stale\nSTOP_REASON=stale\n")
 

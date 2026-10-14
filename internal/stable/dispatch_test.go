@@ -755,6 +755,29 @@ func TestResolveAssignmentSelectionPermissionDecider(t *testing.T) {
 	}
 }
 
+// TestSpawnRejectsAutoApproveWithPermissionDecider pins the spawn guard: a
+// runtime cannot carry both unattended permission policies — auto-approve
+// resolves every request as allow, a permission decider routes requests to a
+// judging agent — and the guard must fire before any provider work happens.
+func TestSpawnRejectsAutoApproveWithPermissionDecider(t *testing.T) {
+	sup := NewSupervisor(Config{
+		ControlSocket: "/tmp/test-permdec-exclusive.sock",
+		MaxRuntimes:   1,
+	})
+	_, err := sup.spawn(SpawnParams{
+		Prompt:            "hello",
+		Dir:               "/tmp",
+		AutoApprove:       true,
+		PermissionDecider: &workflow.PermissionDecider{Entry: "rm-guard"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "auto_approve and permission_decider are mutually exclusive") {
+		t.Fatalf("err = %v, want auto_approve/permission_decider mutual exclusion", err)
+	}
+	if got := sup.activeRuntimeCount(); got != 0 {
+		t.Fatalf("activeRuntimeCount() = %d, want 0 after rejected spawn", got)
+	}
+}
+
 // TestDispatchAssignmentPermissionDeciderRoutesRequest proves the routing
 // half of the judgment-gate policy: a dispatched node whose assignment
 // declares permission_policy spawns its runtime with no file permission
@@ -1018,6 +1041,61 @@ func TestDispatchPermissionDeciderSpawnFailuresBounded(t *testing.T) {
 	if pending, _ := worker["pending_permission"].(bool); !pending {
 		t.Fatal("worker pending_permission = false, want the request to stay pending")
 	}
+}
+
+// TestPermissionDeciderMarshalFailureDoesNotSpawnBlind proves options that
+// cannot be encoded never reach a decider as empty options: the failed encode
+// is a failed attempt against the retry bound, no decider run starts, and the
+// request stays pending for a human gate once the bound is exhausted.
+func TestPermissionDeciderMarshalFailureDoesNotSpawnBlind(t *testing.T) {
+	rosterPath := writeStage5Roster(t, t.TempDir(), `{
+		"worker":  {"backend": "pi", "agent": "worker", "model": "m"},
+		"rm-guard": {"backend": "pi", "agent": "rm-guard", "model": "guard-m"}
+	}`)
+	f := newDispatchFixtureTemplate(t, "permdec-marshal", 4, 4, mustJSON(t, dispatchPermdecTemplate(rosterPath, "tmpl-dispatch-permdec-marshal")))
+	requestID := "perm_req_marshal"
+	var deciderSpawns atomic.Int64
+	f.sup.newProviderFunc = func(startOpts runtime.StartOptions, _ string) (runtime.Provider, error) {
+		if strings.HasPrefix(startOpts.Label, "permdec:") {
+			deciderSpawns.Add(1)
+			return &stableScriptedProvider{attempt: -1, scripts: []stableScriptedAttempt{{
+				sessionID: "ses_decider_marshal",
+			}}}, nil
+		}
+		return &stableScriptedProvider{attempt: -1, scripts: []stableScriptedAttempt{{
+			sessionID: "ses_worker_marshal",
+		}}}, nil
+	}
+	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
+	if err != nil {
+		t.Fatalf("dispatchWorkflowNode: %v", err)
+	}
+	if out.Kind != Dispatched {
+		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
+	}
+	decider := workflow.PermissionDecider{Entry: "rm-guard", Backend: "pi", Agent: "rm-guard", Model: "guard-m"}
+	// A channel value cannot marshal: every attempt must fail before any
+	// provider call instead of spawning a decider that judges blind.
+	for i := 0; i < maxPermissionDeciderSpawnFailures; i++ {
+		f.sup.spawnPermissionDecider(decider, out.RuntimeID, requestID, []any{make(chan int)}, "worker", ".")
+	}
+	if got := deciderSpawns.Load(); got != 0 {
+		t.Fatalf("decider spawns = %d, want none from marshal failures", got)
+	}
+	if state := f.sup.control.PermissionResolverState(out.RuntimeID, requestID); state == control.PermissionResolverResolved {
+		t.Fatal("permission resolver state resolved, want the request left pending")
+	}
+	// Each failed encode counts against the bound, so the exhaustion marker
+	// surfaces in runtime status after the bound is reached.
+	waitFor(t, "exhaustion surfaced", func() bool {
+		status, err := f.sup.RuntimeStatus(out.RuntimeID)
+		if err != nil {
+			return false
+		}
+		rt, _ := status.(map[string]any)
+		exhausted, _ := rt["permission_decider_exhausted"].(bool)
+		return exhausted
+	})
 }
 
 // TestPermissionDeciderSkipsAlreadyResolvedRequest proves the decider spawn
