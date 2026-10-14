@@ -105,7 +105,7 @@ Spawn returns immediately with the runtime ID and paths to the event log and sen
 
 ### Roster selection
 
-A roster file is a top-level JSON map. `roster_file` is its path and `roster_entry` is the key to select. Each entry requires `backend` plus at least one of `agent` or `model`; an entry may provide both. An entry may also set `thinking`, a default reasoning level rather than part of its identity: an explicit `--thinking` or spawn-supplied level wins. Direct spawns (#208) and loop and team phases (#248) apply it; workflow node assignments do not yet (#287). Other fields, such as `system`, are not supported and strict decoding rejects them.
+A roster file is a top-level JSON map. `roster_file` is its path and `roster_entry` is the key to select. Each entry requires `backend` plus at least one of `agent` or `model`; an entry may provide both. An entry may also set `thinking`, a default reasoning level rather than part of its identity: an explicit `--thinking` or spawn-supplied level wins. Direct spawns (#208), loop and team phases (#248), and workflow node assignments (#292) apply it. Other fields, such as `system`, are not supported and strict decoding rejects them.
 
 ```sh
 cat >/tmp/avenor-roster.json <<'JSON'
