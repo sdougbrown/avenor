@@ -15,3 +15,16 @@ type TemplateConflictError struct {
 func (e *TemplateConflictError) Error() string {
 	return fmt.Sprintf("template %q version %q already registered with different content", e.TemplateID, e.TemplateVersion)
 }
+
+// TemplateCorruptError reports a stored template file that exists but cannot
+// be parsed as a Template, so StoreTemplate cannot determine whether new
+// content conflicts with it. The stored file is left untouched.
+type TemplateCorruptError struct {
+	TemplateID      TemplateID
+	TemplateVersion TemplateVersion
+	Err             error
+}
+
+func (e *TemplateCorruptError) Error() string {
+	return fmt.Sprintf("template %q version %q is stored but unreadable: %v", e.TemplateID, e.TemplateVersion, e.Err)
+}

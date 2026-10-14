@@ -285,10 +285,11 @@ func (s *Store) StoreTemplate(templateID TemplateID, templateVersion TemplateVer
 		identical := bytes.Equal(existing, data)
 		if !identical {
 			var current Template
-			if jerr := json.Unmarshal(existing, &current); jerr == nil {
-				if canonical, merr := current.MarshalJSON(); merr == nil {
-					identical = bytes.Equal(canonical, data)
-				}
+			if jerr := json.Unmarshal(existing, &current); jerr != nil {
+				return &TemplateCorruptError{TemplateID: templateID, TemplateVersion: templateVersion, Err: jerr}
+			}
+			if canonical, merr := current.MarshalJSON(); merr == nil {
+				identical = bytes.Equal(canonical, data)
 			}
 		}
 		if identical {

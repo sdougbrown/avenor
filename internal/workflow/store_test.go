@@ -862,3 +862,64 @@ func TestStoreTemplateConcurrentConflictingCreateHasOneWinner(t *testing.T) {
 		t.Fatalf("stored template holds node name %q, want the single winner's %q", loaded.Nodes[0].Name, want)
 	}
 }
+
+// TestStoreTemplateCorruptStoredFileIsNotAConflict asserts a stored template
+// file that cannot be parsed reports a TemplateCorruptError rather than
+// claiming the content differs, and leaves the stored file untouched.
+func TestStoreTemplateCorruptStoredFileIsNotAConflict(t *testing.T) {
+	s := newStore(t)
+	dir := filepath.Join(s.root, "templates", "corrupt")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	path := filepath.Join(dir, "1.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("write corrupt template: %v", err)
+	}
+	err := s.StoreTemplate("corrupt", "1", storeTemplateFixture(t, "corrupt", "1"))
+	if err == nil {
+		t.Fatal("expected corrupt stored template to fail, got nil error")
+	}
+	var corrupt *TemplateCorruptError
+	if !errors.As(err, &corrupt) {
+		t.Fatalf("error = %T (%v), want *TemplateCorruptError", err, err)
+	}
+	if errors.As(err, new(*TemplateConflictError)) {
+		t.Fatal("corrupt stored template was misreported as a content conflict")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read stored template after corrupt error: %v", err)
+	}
+	if string(after) != "{not json" {
+		t.Fatalf("stored template was modified: %q", after)
+	}
+}
+
+// TestStoreTemplateAcceptsCanonicallyEquivalentRestores asserts the
+// canonicalization fallback: a stored file whose bytes are not the canonical
+// serialization (different key order and spacing) but decode to a
+// semantically equal template is accepted as a no-op re-store.
+func TestStoreTemplateAcceptsCanonicallyEquivalentRestores(t *testing.T) {
+	s := newStore(t)
+	tmpl := storeTemplateFixture(t, "canon", "1")
+	if err := s.StoreTemplate("canon", "1", tmpl); err != nil {
+		t.Fatalf("first StoreTemplate: %v", err)
+	}
+	// Rewrite the stored file with different key order and spacing.
+	nonCanonical := `{"terminal_outcomes":["done"],"nodes":[{"action":{"type":"manual"},"id":"start"}],"entry_nodes":["start"],"template_version":"1","template_id":"canon","schema_version":1}`
+	path := filepath.Join(s.root, "templates", "canon", "1.json")
+	if err := os.WriteFile(path, []byte(nonCanonical), 0o644); err != nil {
+		t.Fatalf("rewrite stored template: %v", err)
+	}
+	if err := s.StoreTemplate("canon", "1", tmpl); err != nil {
+		t.Fatalf("canonically equivalent re-store: %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read stored template after re-store: %v", err)
+	}
+	if string(after) != nonCanonical {
+		t.Fatal("canonically equivalent re-store replaced the stored file")
+	}
+}
