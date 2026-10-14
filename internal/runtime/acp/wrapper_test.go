@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sdougbrown/avenor/internal/runtime"
 )
 
 // writeArgvRecorder creates a shell script that appends its own argv ($0 plus
@@ -83,4 +85,30 @@ func waitForArgv(t *testing.T, argvPath string, want []string) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// TestProviderResumeLaunchesWithWrapperFromOpts proves the resume path uses
+// the authoritative launch options retained on the provider: a resume after
+// construction launches the backend behind the wrapper, not bare. The
+// recorder script is not an ACP server, so the handshake fails — the argv
+// capture is the assertion; the error is expected.
+func TestProviderResumeLaunchesWithWrapperFromOpts(t *testing.T) {
+	argvPath := filepath.Join(t.TempDir(), "argv.txt")
+	bin := writeArgvRecorder(t, argvPath)
+	wrapper := writeArgvRecorder(t, argvPath)
+	args := []string{"acp", "--pure"}
+
+	p := NewProvider(ProviderConfig{
+		BackendID: "opencode-acp",
+		Bin:       bin,
+		Args:      args,
+		Opts:      runtime.StartOptions{LaunchWrapper: []string{wrapper, "--flag"}},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, _ = p.Resume(ctx, "ses_resume_wrapper")
+
+	// The full sequence proves the ordering: the wrapper runs first, and the
+	// backend argv follows behind it.
+	waitForArgv(t, argvPath, []string{wrapper, "--flag", bin, "acp", "--pure"})
 }

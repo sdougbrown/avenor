@@ -16,6 +16,7 @@ func New() runtime.Provider {
 func NewWithOptions(opts runtime.StartOptions) runtime.Provider {
 	return acp.NewProvider(acp.ProviderConfig{
 		BackendID:           backendID,
+		Opts:                opts,
 		Bin:                 "gemini",
 		Args:                []string{"--acp", "--approval-mode", "default"},
 		SubprocessDiscovery: false,

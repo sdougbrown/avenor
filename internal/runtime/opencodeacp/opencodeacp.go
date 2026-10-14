@@ -26,6 +26,7 @@ func New() runtime.Provider {
 func NewWithOptions(opts runtime.StartOptions) runtime.Provider {
 	return acp.NewProvider(acp.ProviderConfig{
 		BackendID:           backendID,
+		Opts:                opts,
 		Bin:                 "opencode",
 		Args:                []string{"acp", "--pure", "--log-level", "WARN"},
 		SubprocessDiscovery: true,
