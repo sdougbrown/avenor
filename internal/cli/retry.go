@@ -67,7 +67,7 @@ func runSingleAttempt(
 ) attemptResult {
 	identity, err := cfg.sessionBackends.resolveResume(cfg.resumeID, cliSessionIdentity{
 		backend: cfg.backend, agent: cfg.startOptions.Agent, model: cfg.startOptions.Model,
-		agentProfile: cfg.startOptions.AgentProfile,
+		agentProfile: cfg.startOptions.AgentProfile, launchWrapper: cfg.startOptions.LaunchWrapper,
 	})
 	if err != nil {
 		fmt.Fprintf(deps.stderr, "avenor: %v\n", err)

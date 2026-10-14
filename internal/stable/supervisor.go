@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -331,6 +332,10 @@ type effectiveIdentity struct {
 	AgentProfile string
 	RosterFile   string
 	RosterEntry  string
+	// LaunchWrapper is the wrapper argv the owning process was launched
+	// behind. It is part of the ownership record so a resume cannot hand a
+	// session to a differently wrapped backend.
+	LaunchWrapper []string
 }
 
 type sessionIdentityEntry struct {
@@ -1313,6 +1318,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 	directSupplied := effectiveIdentity{
 		Backend: params.Backend, Agent: params.Agent, Model: params.Model,
 		AgentProfile: params.AgentProfile, RosterFile: params.RosterFile, RosterEntry: params.RosterEntry,
+		LaunchWrapper: params.LaunchWrapper,
 	}
 	backend := params.Backend
 	if backend == "" {
@@ -1340,11 +1346,13 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		resolved, err := s.resolveDirectResumeIdentity(params.SessionID, directSupplied, effectiveIdentity{
 			Backend: backend, Agent: params.Agent, Model: params.Model,
 			AgentProfile: params.AgentProfile, RosterFile: params.RosterFile, RosterEntry: params.RosterEntry,
+			LaunchWrapper: params.LaunchWrapper,
 		})
 		if err != nil {
 			return SpawnResult{}, err
 		}
 		backend, params.Agent, params.Model, params.AgentProfile = resolved.Backend, resolved.Agent, resolved.Model, resolved.AgentProfile
+		params.LaunchWrapper = resolved.LaunchWrapper
 		params.RosterFile, params.RosterEntry = resolved.RosterFile, resolved.RosterEntry
 		if err := runtime.ValidateThinkingForBackend(backend, params.Thinking); err != nil {
 			return SpawnResult{}, err
@@ -1699,12 +1707,13 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 	child.onEvent = onEvent
 	child.sentinelFile = sentinelFile
 	attempt, err := s.registerSessionAttempt(session.SessionID, effectiveIdentity{
-		Backend:      backend,
-		Agent:        params.Agent,
-		Model:        params.Model,
-		AgentProfile: params.AgentProfile,
-		RosterFile:   params.RosterFile,
-		RosterEntry:  params.RosterEntry,
+		Backend:       backend,
+		Agent:         params.Agent,
+		Model:         params.Model,
+		AgentProfile:  params.AgentProfile,
+		RosterFile:    params.RosterFile,
+		RosterEntry:   params.RosterEntry,
+		LaunchWrapper: params.LaunchWrapper,
 	}, provider, params.SessionID)
 	if err != nil {
 		s.closeChildProvider(child, providerLifecycle)
@@ -2335,6 +2344,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 			identity := effectiveIdentity{
 				Backend: selection.Backend, Agent: selection.Agent, Model: selection.Model,
 				AgentProfile: agentProfile, RosterFile: phaseRosterFile, RosterEntry: phase.RosterEntry,
+				LaunchWrapper: child.launchWrapper,
 			}
 			var resumeErr error
 			identity, resumeErr = s.resolveWorkflowResumeIdentity(prevSessionID, identity)
@@ -2611,6 +2621,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 			identity := effectiveIdentity{
 				Backend: selection.Backend, Agent: selection.Agent, Model: selection.Model,
 				AgentProfile: agentProfile, RosterFile: phaseRosterFile, RosterEntry: phase.RosterEntry,
+				LaunchWrapper: child.launchWrapper,
 			}
 			var resumeErr error
 			identity, resumeErr = s.resolveWorkflowResumeIdentity(prevSessionID, identity)
@@ -2864,11 +2875,19 @@ func (c *childRuntime) sessionID() string {
 }
 
 func authoritativeIdentityEqual(left, right effectiveIdentity) bool {
-	return left.Backend == right.Backend && left.Agent == right.Agent && left.Model == right.Model && left.AgentProfile == right.AgentProfile
+	return left.Backend == right.Backend && left.Agent == right.Agent && left.Model == right.Model && left.AgentProfile == right.AgentProfile && slices.Equal(left.LaunchWrapper, right.LaunchWrapper)
 }
 
 func resumeIdentityConflict(sessionID, field, supplied, authoritative string) error {
 	return fmt.Errorf("cannot resume session %q with %s %q: session belongs to %s %q", sessionID, field, supplied, field, authoritative)
+}
+
+// launchWrapperDisplay renders a wrapper argv for identity-conflict messages.
+func launchWrapperDisplay(wrapper []string) string {
+	if len(wrapper) == 0 {
+		return "(none)"
+	}
+	return strings.Join(wrapper, " ")
 }
 
 // resolveDirectResumeIdentity restores omitted identity fields from the
@@ -2898,6 +2917,10 @@ func (s *Supervisor) resolveDirectResumeIdentity(sessionID string, supplied, res
 		if check.value != "" && check.value != check.authoritative {
 			return effectiveIdentity{}, resumeIdentityConflict(sessionID, check.field, check.value, check.authoritative)
 		}
+	}
+	if len(supplied.LaunchWrapper) > 0 && !slices.Equal(supplied.LaunchWrapper, mapped.LaunchWrapper) {
+		return effectiveIdentity{}, resumeIdentityConflict(sessionID, "launch_wrapper",
+			launchWrapperDisplay(supplied.LaunchWrapper), launchWrapperDisplay(mapped.LaunchWrapper))
 	}
 	return mapped, nil
 }
@@ -3154,12 +3177,13 @@ func (s *Supervisor) statusIdentity(child *childRuntime, sessionID string) effec
 		return identity
 	}
 	identity := effectiveIdentity{
-		Backend:      child.effectiveBackend,
-		Agent:        child.effectiveAgent,
-		Model:        child.effectiveModel,
-		AgentProfile: child.agentProfile,
-		RosterFile:   child.rosterFile,
-		RosterEntry:  child.rosterEntry,
+		Backend:       child.effectiveBackend,
+		Agent:         child.effectiveAgent,
+		Model:         child.effectiveModel,
+		AgentProfile:  child.agentProfile,
+		RosterFile:    child.rosterFile,
+		RosterEntry:   child.rosterEntry,
+		LaunchWrapper: child.launchWrapper,
 	}
 	if identity.Backend == "" {
 		identity.Backend = child.backend
@@ -3214,6 +3238,7 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 	identity := effectiveIdentity{
 		Backend: child.effectiveBackend, Agent: child.effectiveAgent, Model: child.effectiveModel,
 		AgentProfile: child.agentProfile, RosterFile: child.rosterFile, RosterEntry: child.rosterEntry,
+		LaunchWrapper: child.launchWrapper,
 	}
 	child.mu.Unlock()
 	if mapped, ok := s.sessionIdentity(session.SessionID); ok {
