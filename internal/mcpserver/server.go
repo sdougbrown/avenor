@@ -248,7 +248,7 @@ type workflowControllerStatusArgs struct {
 type workflowCancelArgs struct {
 	WorkflowID   string `json:"workflow_id" jsonschema:"required workflow ID"`
 	Reason       string `json:"reason" jsonschema:"required reason for the cancel; recorded on the workflow.canceled event"`
-	Actor        string `json:"actor,omitempty" jsonschema:"optional actor id recorded as the canceling operator (default cli)"`
+	Actor        string `json:"actor,omitempty" jsonschema:"optional actor id recorded as the canceling operator (default mcp)"`
 	SupervisorID string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
 }
 

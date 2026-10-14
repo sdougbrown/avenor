@@ -90,6 +90,10 @@ func (m *Manager) WorkflowCancel(id string, payload json.RawMessage) (any, error
 			// and the apply; the cancel loses to the observed terminal fact.
 			return nil, fmt.Errorf("cannot cancel workflow %s: instance is already %s", wf, fresh.Instance.Status)
 		}
+		if hook := m.testHooks.cancelPreCommit; hook != nil {
+			m.testHooks.cancelPreCommit = nil
+			hook()
+		}
 		result, err := m.store.ApplyCommand(wf, Command{
 			ID:               NewCommandID(),
 			Kind:             CommandCancel,

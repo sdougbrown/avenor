@@ -32,6 +32,9 @@ type testHooks struct {
 	// parkExternalPreCommit runs after the snapshot read and revalidation
 	// checks but before the park commit.
 	parkExternalPreCommit func()
+	// cancelPreCommit runs after the cancel's snapshot read and status checks
+	// but before the cancel command commit.
+	cancelPreCommit func()
 }
 
 type Manager struct {
