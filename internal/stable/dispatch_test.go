@@ -786,10 +786,13 @@ func TestDispatchAssignmentPermissionDeciderRoutesRequest(t *testing.T) {
 	if out.Kind != Dispatched {
 		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
 	}
-	waitFor(t, "runtime registration", func() bool { return f.sup.activeRuntimeCount() >= 1 })
-
 	// The request must surface as pending on the worker runtime, with the
 	// declared decider, and no file permission handler may have been derived.
+	// Wait on the runtime's pending_permission status rather than the active
+	// runtime count: the scripted worker finishes its turn right after
+	// emitting permission.request, so the runtime can tear down (leaving a
+	// status tombstone that still reports the pending request) before an
+	// active-count poll ever observes it.
 	var worker map[string]any
 	waitFor(t, "pending permission", func() bool {
 		status, err := f.sup.RuntimeStatus(out.RuntimeID)
