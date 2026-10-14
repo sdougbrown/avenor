@@ -419,3 +419,66 @@ func TestManagerWorkflowCancelRetriesRevisionMismatch(t *testing.T) {
 		t.Fatalf("first cancel must not report idempotent: %#v", result)
 	}
 }
+
+// TestManagerWorkflowCancelRejectsFailed pins the failed branch of the
+// terminal-instance rejection: a cancel against an instance whose retry
+// policy exhausted to fail is a clear error, not a silent no-op.
+func TestManagerWorkflowCancelRejectsFailed(t *testing.T) {
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	m := NewManager(s)
+	m.RegisterExecutor(ActionRun, &fakeExecutor{})
+	failTemplate := []byte(`{
+  "schema_version": 1,
+  "template_id": "cancel-fail",
+  "template_version": "1",
+  "entry_nodes": ["start"],
+  "nodes": [{"id": "start", "action": {"type": "run", "prompt": "do the thing"}, "retry_policy": {"max_attempts": 1, "exhaustion": "fail"}}],
+  "terminal_outcomes": ["done"]
+}`)
+	if _, err := m.WorkflowCreate(failTemplate); err != nil {
+		t.Fatalf("WorkflowCreate: %v", err)
+	}
+	instOut, err := m.WorkflowInstantiate([]byte(`{"template_id":"cancel-fail","template_version":"1"}`))
+	if err != nil {
+		t.Fatalf("WorkflowInstantiate: %v", err)
+	}
+	inst, _ := instOut.(map[string]any)
+	wf, _ := inst["workflow_id"].(string)
+	if wf == "" {
+		t.Fatalf("instantiate result missing workflow_id: %#v", instOut)
+	}
+
+	claimOut, err := m.WorkflowCommand(wf, []byte(`{"op":"claim","node_id":"start","actor":"cli"}`))
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	claim, _ := claimOut.(map[string]any)
+	leaseID, _ := claim["lease_id"].(string)
+	ownerToken, _ := claim["owner_token"].(string)
+	startOut, err := m.WorkflowCommand(wf, []byte(`{"op":"start","node_id":"start","lease_id":"`+leaseID+`","owner_token":"`+ownerToken+`"}`))
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	start, _ := startOut.(map[string]any)
+	attemptID, _ := start["attempt_id"].(string)
+	// The single attempt fails; max_attempts 1 with fail exhaustion makes the
+	// instance terminal failed.
+	if err := m.RecordAttemptTerminated(WorkflowID(wf), "start", "", AttemptID(attemptID), LeaseID(leaseID), AttemptFailed); err != nil {
+		t.Fatalf("RecordAttemptTerminated: %v", err)
+	}
+	if _, err := m.WorkflowStatus(wf); err != nil {
+		t.Fatalf("WorkflowStatus: %v", err)
+	}
+	snapAny, err := m.WorkflowStatus(wf)
+	snap, _ := snapAny.(map[string]any)
+	if got := snap["status"]; got != string(WorkflowFailed) {
+		t.Fatalf("instance after fail exhaustion = %v, want failed", got)
+	}
+	_, err = m.WorkflowCancel(wf, cancelPayload("ops", "late"))
+	if err == nil || !strings.Contains(err.Error(), "already failed") {
+		t.Fatalf("cancel on failed instance: expected clear error, got %v", err)
+	}
+}
