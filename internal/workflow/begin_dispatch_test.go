@@ -464,3 +464,49 @@ func TestFinalizeDispatchRetriesRevisionMismatch(t *testing.T) {
 		t.Fatalf("attempt identity = %+v, want rt_retry/ses_retry", attempt)
 	}
 }
+
+// TestBeginDispatchStaleAfterCancel pins the terminal-instance guard in
+// BeginDispatch: a cancel that lands between the candidate fetch and the
+// dispatch attempt must return ErrStaleCandidate and leave no claim or
+// attempt behind.
+func TestBeginDispatchStaleAfterCancel(t *testing.T) {
+	m, s, wf := newAutoDispatchFixture(t, "begin-cancelled", "ctl-a", -1)
+	if err := m.RebuildCandidateIndex("test"); err != nil {
+		t.Fatalf("RebuildCandidateIndex: %v", err)
+	}
+	cands, err := m.CandidatesForController("ctl-a", 1)
+	if err != nil || len(cands) != 1 {
+		t.Fatalf("candidates: n=%d err=%v", len(cands), err)
+	}
+	cand := cands[0]
+	if _, err := m.WorkflowCancel(string(wf), []byte(`{"actor":"ops","reason":"cancelled mid-dispatch"}`)); err != nil {
+		t.Fatalf("WorkflowCancel: %v", err)
+	}
+	_, err = m.BeginDispatch(BeginDispatchRequest{
+		WorkflowID:       wf,
+		NodeID:           cand.Identity.NodeID,
+		ActivationID:     cand.Identity.ActivationID,
+		ExpectedRevision: cand.Revision,
+		ControllerID:     "ctl-a",
+		LeaderLeaseID:    "lease_leader_1",
+	})
+	if !errors.Is(err, ErrStaleCandidate) {
+		t.Fatalf("BeginDispatch after cancel = %v, want ErrStaleCandidate", err)
+	}
+	// No events: the canceled instance's activation is untouched.
+	snap, ok, err := s.loadCurrent(wf)
+	if err != nil || !ok {
+		t.Fatalf("loadCurrent: ok=%v err=%v", ok, err)
+	}
+	if snap.Instance.Status != WorkflowCanceled {
+		t.Fatalf("instance status = %v, want canceled", snap.Instance.Status)
+	}
+	for _, act := range snap.Instance.Activations {
+		if act.ActiveLease != nil {
+			t.Fatalf("activation %s kept a lease after cancel", act.NodeID)
+		}
+	}
+	if len(snap.Instance.Attempts) != 0 {
+		t.Fatalf("attempts = %d, want none after a rejected dispatch", len(snap.Instance.Attempts))
+	}
+}
