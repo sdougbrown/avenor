@@ -16,8 +16,12 @@ func TestValidateLaunchWrapperAcceptsNonEmptyElements(t *testing.T) {
 
 func TestValidateLaunchWrapperRejectsEmptyElement(t *testing.T) {
 	for _, wrapper := range [][]string{{""}, {"nice", ""}} {
-		if err := ValidateLaunchWrapper(wrapper); err == nil {
+		err := ValidateLaunchWrapper(wrapper)
+		if err == nil {
 			t.Fatalf("ValidateLaunchWrapper(%q) = nil, want error", wrapper)
+		}
+		if err.Error() != "launch wrapper elements must be non-empty" {
+			t.Fatalf("ValidateLaunchWrapper(%q) error = %q, want %q", wrapper, err, "launch wrapper elements must be non-empty")
 		}
 	}
 }

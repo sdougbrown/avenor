@@ -35,4 +35,7 @@ func TestStableSpawnRejectsEmptyLaunchWrapperElement(t *testing.T) {
 	if err == nil {
 		t.Fatal("spawn with an empty launch wrapper element succeeded, want error")
 	}
+	if err.Error() != "launch_wrapper: launch wrapper elements must be non-empty" {
+		t.Fatalf("spawn error = %q, want %q", err, "launch_wrapper: launch wrapper elements must be non-empty")
+	}
 }
