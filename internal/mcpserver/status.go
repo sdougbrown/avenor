@@ -29,29 +29,32 @@ type statusRun struct {
 	PhaseLabel *string `json:"phase_label,omitempty"`
 	// PendingPermission is genuinely polymorphic on the wire (bool | record),
 	// so `any` is intentional.
-	PendingPermission    any            `json:"pending_permission,omitempty"`
-	Dir                  *string        `json:"dir,omitempty"`
-	Thinking             *string        `json:"thinking,omitempty"`
-	Backend              *string        `json:"backend,omitempty"`
-	Agent                *string        `json:"agent,omitempty"`
-	AgentProfile         *string        `json:"agent_profile,omitempty"`
-	Model                *string        `json:"model,omitempty"`
-	RosterFile           *string        `json:"roster_file,omitempty"`
-	RosterEntry          *string        `json:"roster_entry,omitempty"`
-	EffectiveBackend     *string        `json:"effective_backend,omitempty"`
-	EffectiveAgent       *string        `json:"effective_agent,omitempty"`
-	EffectiveModel       *string        `json:"effective_model,omitempty"`
-	ParentID             *string        `json:"parent_id,omitempty"`
-	Children             []string       `json:"children,omitempty"`
-	EventPath            *string        `json:"event_path,omitempty"`
-	Usage                map[string]any `json:"usage,omitempty"`
-	Permission           map[string]any `json:"permission,omitempty"`
-	LatestSeq            *int64         `json:"latest_seq,omitempty"`
-	FinalOutput          *string        `json:"final_output,omitempty"`
-	FinalOutputTruncated *bool          `json:"final_output_truncated,omitempty"`
-	StartedAt            *int64         `json:"started_at,omitempty"`
-	TimedOut             *bool          `json:"timed_out,omitempty"`
-	WaitClamped          *bool          `json:"wait_clamped,omitempty"`
+	PendingPermission any     `json:"pending_permission,omitempty"`
+	Dir               *string `json:"dir,omitempty"`
+	Thinking          *string `json:"thinking,omitempty"`
+	Backend           *string `json:"backend,omitempty"`
+	Agent             *string `json:"agent,omitempty"`
+	AgentProfile      *string `json:"agent_profile,omitempty"`
+	Model             *string `json:"model,omitempty"`
+	RosterFile        *string `json:"roster_file,omitempty"`
+	RosterEntry       *string `json:"roster_entry,omitempty"`
+	PermissionDecider *string `json:"permission_decider,omitempty"`
+	// Pointer so an explicit false survives the omitempty passthrough.
+	PermissionDeciderExhausted *bool `json:"permission_decider_exhausted,omitempty"`
+	EffectiveBackend           *string        `json:"effective_backend,omitempty"`
+	EffectiveAgent             *string        `json:"effective_agent,omitempty"`
+	EffectiveModel             *string        `json:"effective_model,omitempty"`
+	ParentID                   *string        `json:"parent_id,omitempty"`
+	Children                   []string       `json:"children,omitempty"`
+	EventPath                  *string        `json:"event_path,omitempty"`
+	Usage                      map[string]any `json:"usage,omitempty"`
+	Permission                 map[string]any `json:"permission,omitempty"`
+	LatestSeq                  *int64         `json:"latest_seq,omitempty"`
+	FinalOutput                *string        `json:"final_output,omitempty"`
+	FinalOutputTruncated       *bool          `json:"final_output_truncated,omitempty"`
+	StartedAt                  *int64         `json:"started_at,omitempty"`
+	TimedOut                   *bool          `json:"timed_out,omitempty"`
+	WaitClamped                *bool          `json:"wait_clamped,omitempty"`
 }
 
 // statusToolOutput is the structured output of the avenor_status tool. The
@@ -94,6 +97,8 @@ func statusRunFromMap(m map[string]any) statusRun {
 	run.Model = stringPtr(m, "model")
 	run.RosterFile = stringPtr(m, "roster_file")
 	run.RosterEntry = stringPtr(m, "roster_entry")
+	run.PermissionDecider = stringPtr(m, "permission_decider")
+	run.PermissionDeciderExhausted = boolPtr(m, "permission_decider_exhausted")
 	run.EffectiveBackend = stringPtr(m, "effective_backend")
 	run.EffectiveAgent = stringPtr(m, "effective_agent")
 	run.EffectiveModel = stringPtr(m, "effective_model")

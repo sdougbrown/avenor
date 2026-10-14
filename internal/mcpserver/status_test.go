@@ -252,10 +252,12 @@ func TestTranslateStatusRunningTerminalPhaseStaysRunning(t *testing.T) {
 }
 
 // TestTranslateStatusPermissionDeciderReachesLifecycleView proves the
-// permission-decider keys pass translateStatus's pass-through allowlist and
-// survive the lifecycle view shaping: without the pass-through, the decider
-// identity and spawn exhaustion recorded on the runtime are invisible in
-// every shaped status view even though shapeStatusForView lists them.
+// permission-decider keys survive the whole avenor_status chain: through
+// translateStatus's pass-through allowlist, through the lifecycle view
+// shaping, and through the final statusRunFromMap typed mapping — the last
+// step drops any key without a statusRun field, so the typed struct must
+// carry them or the MCP tool output loses the decider identity and spawn
+// exhaustion recorded on the runtime.
 func TestTranslateStatusPermissionDeciderReachesLifecycleView(t *testing.T) {
 	raw := map[string]any{
 		"status":                       "blocked",
@@ -269,6 +271,15 @@ func TestTranslateStatusPermissionDeciderReachesLifecycleView(t *testing.T) {
 	}
 	if exhausted, _ := shaped["permission_decider_exhausted"].(bool); !exhausted {
 		t.Fatalf("shaped permission_decider_exhausted = %v, want true", shaped["permission_decider_exhausted"])
+	}
+	// The final typed output (what the avenor_status tool actually returns)
+	// must carry both keys too; a missing statusRun field silently drops them.
+	run := statusRunFromMap(shaped)
+	if run.PermissionDecider == nil || *run.PermissionDecider != "rm-guard" {
+		t.Fatalf("mapped PermissionDecider = %v, want rm-guard", run.PermissionDecider)
+	}
+	if run.PermissionDeciderExhausted == nil || !*run.PermissionDeciderExhausted {
+		t.Fatalf("mapped PermissionDeciderExhausted = %v, want true", run.PermissionDeciderExhausted)
 	}
 }
 
