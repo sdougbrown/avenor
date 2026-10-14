@@ -262,11 +262,11 @@ func TestManagerCreateRecreateIdempotency(t *testing.T) {
 	conflicting := strings.Replace(managerTemplateJSON,
 		`{"id": "start", "action": {"type": "manual"}}`,
 		`{"id": "start", "name": "renamed", "action": {"type": "manual"}}`, 1)
-	if conflicting == managerTemplateJSON {
+	if conflicting == managerTemplateJSON || !strings.Contains(conflicting, `"name": "renamed"`) {
 		// The Replace target drifted from managerTemplateJSON: a no-op here
 		// would make the test re-create the identical template and fail
 		// confusingly at the conflicting step below.
-		t.Fatal("conflicting payload is unchanged; the Replace target drifted from managerTemplateJSON")
+		t.Fatal("conflicting payload must differ and carry the renamed node; the Replace target drifted from managerTemplateJSON")
 	}
 	_, err := m.WorkflowCreate([]byte(conflicting))
 	if err == nil {

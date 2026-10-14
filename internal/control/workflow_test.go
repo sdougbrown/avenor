@@ -3,7 +3,6 @@ package control
 import (
 	"encoding/json"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -13,9 +12,9 @@ import (
 // fakeWorkflowHandler is a recording stub implementing WorkflowHandler for
 // dispatch routing tests.
 type fakeWorkflowHandler struct {
-	createCalled       bool
-	createErr          error
-	instantiateCalled  bool
+	createCalled      bool
+	createErr         error
+	instantiateCalled bool
 	statusID          string
 	statusResult      any
 	statusErr         error
@@ -88,9 +87,11 @@ func TestWorkflowCreateConflictMappedToIdempotencyCode(t *testing.T) {
 	if resp.Error == nil || resp.Error.Code != -32031 {
 		t.Fatalf("expected -32031 idempotency conflict, got: %+v", resp.Error)
 	}
-	// The message names the conflicting id+version.
-	if !strings.Contains(resp.Error.Message, "software-factory-work") || !strings.Contains(resp.Error.Message, "1") {
-		t.Fatalf("conflict message should name the template: %q", resp.Error.Message)
+	// The message names the conflicting id+version exactly, matching the
+	// TemplateConflictError message.
+	want := `template "software-factory-work" version "1" already registered with different content`
+	if resp.Error.Message != want {
+		t.Fatalf("conflict message = %q, want %q", resp.Error.Message, want)
 	}
 }
 
