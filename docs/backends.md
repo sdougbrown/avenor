@@ -20,6 +20,28 @@ avenor --backend claude-channel --prompt "say hi"
 
 Both `claude` and `claude-channel` require `claude` to be on `PATH`. `claude-channel` additionally requires `tmux` on `PATH` and uses `--dangerously-load-development-channels` to open a broker channel; `claude` requires neither.
 
+## Launch wrapper
+
+Spawns accept an optional **launch wrapper** — an opaque argv prefix placed in front of the backend process command at launch:
+
+```sh
+avenor control --socket /tmp/avenor.sock spawn \
+  --prompt "find bugs" \
+  --launch-wrapper nice --launch-wrapper -n --launch-wrapper 5
+```
+
+The wrapper applies to the backend process only. Version probes (`claude --version`, `pi --help`, `agy --version`) and helper processes (tmux, the shell tool, lsof) are never wrapped. Roster entries do not carry wrappers — they select backend/agent/model identity only, so the wrapper is a per-spawn parameter. Inside a loop or team, every phase inherits the parent run's wrapper; phases cannot override it.
+
+The recorded PID for a wrapped backend is the wrapper's PID: the wrapper is the direct child of the launcher and owns the backend process tree.
+
+Ownership is recorded per session: resuming with a different wrapper is rejected exactly like a backend, agent, or model mismatch. An omitted wrapper on resume inherits the session's authoritative wrapper.
+
+The wrapper is documented, not enforced. Whatever argv you supply must satisfy these requirements — avenor does not check them:
+
+- **exec semantics** — stdio passes through (Avenor speaks the backend protocol over pipes), the backend's exit code must propagate as the wrapper's exit code, signals sent to the wrapper must reach the backend, and child processes must be torn down when the backend dies.
+- **Same-path mounts** — `--dir` and the paths Avenor injects (config files, event/sentinel files, permission-handler directories) must resolve identically inside the wrapper.
+- **MCP-server reachability** — stdio MCP servers launched by the backend inherit the wrapper's environment automatically; socket or HTTP MCP servers must be exposed by the wrapper (port forwarding, network namespace sharing, or equivalent).
+
 ## Capability matrix
 
 | Capability | opencode-acp | opencode-http | codex-app-server | agy | gemini-acp | cursor-acp | pi | claude | claude-channel | pony |

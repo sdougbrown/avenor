@@ -313,6 +313,7 @@ Params:
 - `max_retries` (int) — max retries after transient backend errors.
 - `loop_file` (string) — path to a loop config JSON file (advanced multi-phase mode).
 - `session_id` (string) — resume session ID (for resuming a previous session).
+- `launch_wrapper` (array of strings) — opaque argv prefix placed in front of the backend process command (e.g. `["nice", "-n", "5"]`). Avenor does not interpret the wrapper; see [backends.md](backends.md#launch-wrapper). Empty or absent launches the backend unwrapped. Resuming with a different wrapper is rejected like a backend/agent/model mismatch.
 
 Requires ownership.
 
