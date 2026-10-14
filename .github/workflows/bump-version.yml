@@ -1,4 +1,4 @@
-name: Bump package versions
+name: Bump versions
 
 on:
   workflow_dispatch:
@@ -11,6 +11,15 @@ on:
           - Bump minor version
           - Bump patch version
         default: Bump minor version
+      bump_target:
+        description: 'Select what to bump'
+        required: true
+        type: choice
+        options:
+          - packages
+          - plugin
+          - both
+        default: packages
 
 permissions:
   contents: write
@@ -18,7 +27,7 @@ permissions:
 
 jobs:
   bump-version:
-    name: Bump package versions and open PR
+    name: Bump versions and open PR
     runs-on: ubuntu-latest
 
     steps:
@@ -26,11 +35,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: main
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v1
-        with:
-          bun-version: "1.3.11"
 
       - name: Determine bump type
         id: bump
@@ -41,53 +45,151 @@ jobs:
             echo "bump_type=patch" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Calculate new version from core package
-        id: versioning
+      - name: Determine bump target
+        id: target
         run: |
-          CURRENT_VERSION=$(jq -r '.version' packages/core/package.json)
-          if [ -z "$CURRENT_VERSION" ]; then
-            echo "Error: Could not read version from packages/core/package.json"
-            exit 1
-          fi
-          echo "Current version: $CURRENT_VERSION"
+          case "${{ github.event.inputs.bump_target }}" in
+            packages)
+              echo "bump_packages=true" >> "$GITHUB_OUTPUT"
+              echo "bump_plugin=false" >> "$GITHUB_OUTPUT"
+              ;;
+            plugin)
+              echo "bump_packages=false" >> "$GITHUB_OUTPUT"
+              echo "bump_plugin=true" >> "$GITHUB_OUTPUT"
+              ;;
+            both)
+              echo "bump_packages=true" >> "$GITHUB_OUTPUT"
+              echo "bump_plugin=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Error: unknown bump target '${{ github.event.inputs.bump_target }}'"
+              exit 1
+              ;;
+          esac
 
-          IFS='.' read -r major minor patch <<< "$CURRENT_VERSION"
-          if [ "${{ steps.bump.outputs.bump_type }}" = "minor" ]; then
-            minor=$((minor + 1))
-            patch=0
+      - name: Setup Bun
+        if: steps.target.outputs.bump_packages == 'true'
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: "1.3.11"
+
+      - name: Calculate new versions
+        id: versioning
+        env:
+          BUMP_TYPE: ${{ steps.bump.outputs.bump_type }}
+          BUMP_PACKAGES: ${{ steps.target.outputs.bump_packages }}
+          BUMP_PLUGIN: ${{ steps.target.outputs.bump_plugin }}
+        run: |
+          bump_version() {
+            local current="$1"
+            local major minor patch
+            if ! [[ "$current" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Error: unexpected version format: $current"
+              exit 1
+            fi
+            IFS='.' read -r major minor patch <<< "$current"
+            if [ "$BUMP_TYPE" = "minor" ]; then
+              minor=$((minor + 1))
+              patch=0
+            else
+              patch=$((patch + 1))
+            fi
+            echo "$major.$minor.$patch"
+          }
+
+          PKG_VERSION=""
+          PLUGIN_VERSION=""
+
+          if [ "$BUMP_PACKAGES" = "true" ]; then
+            CURRENT_VERSION=$(jq -r '.version' packages/core/package.json)
+            if [ -z "$CURRENT_VERSION" ] || [ "$CURRENT_VERSION" = "null" ]; then
+              echo "Error: Could not read version from packages/core/package.json"
+              exit 1
+            fi
+            echo "Current package version: $CURRENT_VERSION"
+            PKG_VERSION=$(bump_version "$CURRENT_VERSION")
+          fi
+
+          if [ "$BUMP_PLUGIN" = "true" ]; then
+            CURRENT_VERSION=$(jq -r '.version' marketplace/plugins/avenor/.claude-plugin/plugin.json)
+            if [ -z "$CURRENT_VERSION" ] || [ "$CURRENT_VERSION" = "null" ]; then
+              echo "Error: Could not read version from the plugin manifest"
+              exit 1
+            fi
+            echo "Current plugin version: $CURRENT_VERSION"
+            PLUGIN_VERSION=$(bump_version "$CURRENT_VERSION")
+          fi
+
+          if [ "$BUMP_PACKAGES" = "true" ] && [ "$BUMP_PLUGIN" = "true" ]; then
+            BRANCH_NAME="version/v${PKG_VERSION}-plugin-v${PLUGIN_VERSION}"
+            PR_TITLE="🐪 bump: packages v${PKG_VERSION}, plugin v${PLUGIN_VERSION}"
+            COMMIT_MESSAGE="🐪 bump: packages v${PKG_VERSION}, plugin v${PLUGIN_VERSION}"
+          elif [ "$BUMP_PACKAGES" = "true" ]; then
+            BRANCH_NAME="version/v${PKG_VERSION}"
+            PR_TITLE="🐪 packages bump: v${PKG_VERSION}"
+            COMMIT_MESSAGE="🐪 bump: v${PKG_VERSION}"
           else
-            patch=$((patch + 1))
+            BRANCH_NAME="plugin/v${PLUGIN_VERSION}"
+            PR_TITLE="🔖 plugin bump: v${PLUGIN_VERSION}"
+            COMMIT_MESSAGE="🔖 bump: v${PLUGIN_VERSION}"
           fi
 
-          NEW_VERSION="$major.$minor.$patch"
-          echo "New version: $NEW_VERSION"
-          echo "branch_name=version/v$NEW_VERSION" >> "$GITHUB_OUTPUT"
-          echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          if [ -n "$PKG_VERSION" ]; then
+            PKG_LINE="Packages: v${PKG_VERSION}"
+          else
+            PKG_LINE="Packages: not bumped"
+          fi
+          if [ -n "$PLUGIN_VERSION" ]; then
+            PLUGIN_LINE="Plugin: v${PLUGIN_VERSION}"
+          else
+            PLUGIN_LINE="Plugin: not bumped"
+          fi
+
+          echo "pkg_version=${PKG_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "plugin_version=${PLUGIN_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "branch_name=${BRANCH_NAME}" >> "$GITHUB_OUTPUT"
+          echo "pr_title=${PR_TITLE}" >> "$GITHUB_OUTPUT"
+          echo "commit_message=${COMMIT_MESSAGE}" >> "$GITHUB_OUTPUT"
+          echo "pkg_line=${PKG_LINE}" >> "$GITHUB_OUTPUT"
+          echo "plugin_line=${PLUGIN_LINE}" >> "$GITHUB_OUTPUT"
 
       - name: Bump all package versions
+        if: steps.target.outputs.bump_packages == 'true'
         run: |
-          NEW_VERSION="${{ steps.versioning.outputs.new_version }}"
           for pkg in packages/*/; do
             [ -f "$pkg/package.json" ] || continue
-            jq --arg v "$NEW_VERSION" '.version = $v' "$pkg/package.json" > "$pkg/.tmp.json" && mv "$pkg/.tmp.json" "$pkg/package.json"
+            jq --arg v "${{ steps.versioning.outputs.pkg_version }}" '.version = $v' "$pkg/package.json" > "$pkg/.tmp.json" && mv "$pkg/.tmp.json" "$pkg/package.json"
           done
 
       - name: Regenerate lockfile
+        if: steps.target.outputs.bump_packages == 'true'
         run: bun install
+
+      - name: Bump plugin manifests
+        if: steps.target.outputs.bump_plugin == 'true'
+        run: |
+          for f in \
+            marketplace/plugins/avenor/.claude-plugin/plugin.json \
+            marketplace/plugins/avenor/.codex-plugin/plugin.json; do
+            jq --arg v "${{ steps.versioning.outputs.plugin_version }}" '.version = $v' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+          done
+          jq --arg v "${{ steps.versioning.outputs.plugin_version }}" '.plugins[0].version = $v' .claude-plugin/marketplace.json > .claude-plugin/marketplace.json.tmp && mv .claude-plugin/marketplace.json.tmp .claude-plugin/marketplace.json
 
       - name: Create pull request
         uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "🐪 bump: v${{ steps.versioning.outputs.new_version }}"
+          commit-message: "${{ steps.versioning.outputs.commit_message }}"
           committer: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
           author: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
-          title: "🐪 packages bump: v${{ steps.versioning.outputs.new_version }}"
+          title: "${{ steps.versioning.outputs.pr_title }}"
           body: |
-            This PR was created automatically by the **Bump app version** workflow.
+            This PR was created automatically by the **Bump versions** workflow.
 
+            - Bump target: ${{ github.event.inputs.bump_target }}
             - Bump type: ${{ steps.bump.outputs.bump_type }}
-            - New version: v${{ steps.versioning.outputs.new_version }}
+            - ${{ steps.versioning.outputs.pkg_line }}
+            - ${{ steps.versioning.outputs.plugin_line }}
           branch: ${{ steps.versioning.outputs.branch_name }}
           base: main
           draft: true
