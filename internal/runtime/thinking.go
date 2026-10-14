@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/sdougbrown/avenor/internal/thinkingpolicy"
 )
@@ -11,13 +12,18 @@ func ValidateThinking(value string) error {
 	return thinkingpolicy.ValidateCanonical(value)
 }
 
-// ValidateLaunchWrapper rejects wrapper argvs containing empty elements. The
-// wrapper is otherwise not interpreted or validated further: whatever argv is
-// supplied is what ends up in front of the backend command.
+// ValidateLaunchWrapper rejects wrapper argvs containing empty elements or
+// NUL bytes. The wrapper is otherwise not interpreted or validated further:
+// whatever argv is supplied is what ends up in front of the backend command.
+// Allowlist authorization is not part of this check; it lives with the
+// surfaces that own a policy (see the supervisor's MCP launch wrapper policy).
 func ValidateLaunchWrapper(wrapper []string) error {
 	for _, element := range wrapper {
 		if element == "" {
 			return fmt.Errorf("launch wrapper elements must be non-empty")
+		}
+		if strings.ContainsRune(element, '\x00') {
+			return fmt.Errorf("launch wrapper elements must not contain NUL")
 		}
 	}
 	return nil

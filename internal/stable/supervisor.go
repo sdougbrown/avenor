@@ -96,6 +96,14 @@ type Config struct {
 	// output without touching the process-global s.stderrWriter(), which leaked
 	// runChild goroutines would otherwise race against.
 	Stderr io.Writer
+
+	// MCPLaunchWrapperPolicy gates the launch_wrapper parameter on MCP-driven
+	// spawns (the control spawn_mcp verb). Nil disables launch_wrapper for
+	// MCP on this supervisor: any MCP spawn carrying a wrapper is rejected.
+	// A non-nil policy permits only argv arrays that exactly match an entry in
+	// the operator's allowlist. Control-socket spawns and the CLI are
+	// operator-trusted and are not gated by this policy.
+	MCPLaunchWrapperPolicy *MCPLaunchWrapperPolicy
 }
 
 // DefaultLeaseSweepInterval is the default live lease-expiry cadence: a

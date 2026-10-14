@@ -1,0 +1,95 @@
+package stable
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func writePolicyFile(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "policy.json")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestLoadMCPLaunchWrapperPolicyAcceptsValidAllowlist(t *testing.T) {
+	path := writePolicyFile(t, `{"allowed_argv": [["/usr/bin/nice", "-n", "5"]]}`)
+	policy, err := LoadMCPLaunchWrapperPolicy(path)
+	if err != nil {
+		t.Fatalf("LoadMCPLaunchWrapperPolicy() = %v, want nil", err)
+	}
+	if len(policy.AllowedArgv) != 1 || len(policy.AllowedArgv[0]) != 3 {
+		t.Fatalf("policy = %#v, want one 3-element entry", policy.AllowedArgv)
+	}
+	if !mcpLaunchWrapperAllowed(policy, []string{"/usr/bin/nice", "-n", "5"}) {
+		t.Fatal("exact-match wrapper was not allowed")
+	}
+}
+
+func TestLoadMCPLaunchWrapperPolicyRejects(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{"unknown field", `{"allowed_argv": [["/usr/bin/nice"]], "extra": 1}`, "unknown field"},
+		{"trailing data", `{"allowed_argv": [["/usr/bin/nice"]]} {"x":1}`, "trailing data"},
+		{"empty allowlist", `{"allowed_argv": []}`, "at least one entry"},
+		{"missing allowlist", `{}`, "at least one entry"},
+		{"empty entry", `{"allowed_argv": [[]]}`, "entry 0 is empty"},
+		{"empty element", `{"allowed_argv": [["/usr/bin/nice", ""]]}`, "element 1 is empty"},
+		{"NUL byte", "{\"allowed_argv\": [[\"/usr/bin/n\\u0000\"]]}", "NUL byte"},
+		{"relative executable", `{"allowed_argv": [["nice", "-n", "5"]]}`, "absolute path"},
+		{"not JSON", `nope`, "invalid character"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writePolicyFile(t, tt.content)
+			_, err := LoadMCPLaunchWrapperPolicy(path)
+			if err == nil {
+				t.Fatalf("LoadMCPLaunchWrapperPolicy() = nil, want error containing %q", tt.want)
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %q, want containing %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadMCPLaunchWrapperPolicyMissingFile(t *testing.T) {
+	if _, err := LoadMCPLaunchWrapperPolicy(filepath.Join(t.TempDir(), "absent.json")); err == nil {
+		t.Fatal("missing file accepted")
+	}
+}
+
+func TestMcpLaunchWrapperAllowedRequiresExactMatch(t *testing.T) {
+	policy := &MCPLaunchWrapperPolicy{AllowedArgv: [][]string{{"/usr/bin/nice", "-n", "5"}}}
+	cases := []struct {
+		name    string
+		wrapper []string
+		want    bool
+	}{
+		{"exact", []string{"/usr/bin/nice", "-n", "5"}, true},
+		{"basename vs absolute", []string{"nice", "-n", "5"}, false},
+		{"changed flag value", []string{"/usr/bin/nice", "-n", "10"}, false},
+		{"reordered", []string{"-n", "5", "/usr/bin/nice"}, false},
+		{"extra arg", []string{"/usr/bin/nice", "-n", "5", "x"}, false},
+		{"missing arg", []string{"/usr/bin/nice", "-n"}, false},
+		{"different executable", []string{"/bin/sh", "-n", "5"}, false},
+		{"empty wrapper", nil, false},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := mcpLaunchWrapperAllowed(policy, tt.wrapper); got != tt.want {
+				t.Fatalf("mcpLaunchWrapperAllowed(%v) = %v, want %v", tt.wrapper, got, tt.want)
+			}
+		})
+	}
+	if mcpLaunchWrapperAllowed(nil, []string{"/usr/bin/nice"}) {
+		t.Fatal("nil policy must not allow anything")
+	}
+}

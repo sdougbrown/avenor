@@ -26,6 +26,14 @@ func TestValidateLaunchWrapperRejectsEmptyElement(t *testing.T) {
 	}
 }
 
+func TestValidateLaunchWrapperRejectsNULByte(t *testing.T) {
+	if err := ValidateLaunchWrapper([]string{"nice", "a\x00b"}); err == nil {
+		t.Fatal("ValidateLaunchWrapper() = nil, want error")
+	} else if err.Error() != "launch wrapper elements must not contain NUL" {
+		t.Fatalf("ValidateLaunchWrapper() = %q, want NUL error", err)
+	}
+}
+
 func TestMergeStartOptionsOverridesLaunchWrapper(t *testing.T) {
 	base := StartOptions{LaunchWrapper: []string{"base"}}
 	merged := MergeStartOptions(base, StartOptions{LaunchWrapper: []string{"nice", "-n", "5"}})

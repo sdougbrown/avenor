@@ -26,6 +26,7 @@ func runStable(args []string) int {
 	parkedTimeout := fs.Duration("parked-timeout", 30*time.Minute, "how long a finished runtime stays parked awaiting a follow-up prompt before it is reaped (0 = park until shutdown)")
 	leaseSweepInterval := fs.Duration("lease-sweep-interval", stable.DefaultLeaseSweepInterval, "how often the supervisor expires workflow leases whose heartbeat stopped (0 = disable; leases then expire only on restart recovery)")
 	permClaimTimeout := fs.Duration("permission-claim-timeout", 0, "how long to wait for a connected socket client to answer a permission request before falling through to the file handler or 'none' resolver (0 = disabled: fall through only when all clients disconnect; use a non-zero value for unattended automation where client processes may hang)")
+	mcpLaunchWrapperPolicyPath := fs.String("mcp-launch-wrapper-policy", "", "path to a JSON allowlist of launch_wrapper argv entries permitted for MCP-driven spawns (default: disabled)")
 	workflowRoot := fs.String("workflow-root", "", "workflow store root (default: $XDG_STATE_HOME/avenor/workflows, else $HOME/.avenor/workflows)")
 	workflowAdapterDir := fs.String("workflow-adapter-dir", "", "host-owned trusted adapter manifest directory (default: $XDG_CONFIG_HOME/avenor/workflow-adapters, else $HOME/.config/avenor/workflow-adapters)")
 	if err := fs.Parse(args); err != nil {
@@ -51,6 +52,16 @@ func runStable(args []string) int {
 		fmt.Fprintf(os.Stderr, "avenor stable: remove stale tombstone: %v\n", err)
 	}
 
+	var mcpPolicy *stable.MCPLaunchWrapperPolicy
+	if *mcpLaunchWrapperPolicyPath != "" {
+		policy, err := stable.LoadMCPLaunchWrapperPolicy(*mcpLaunchWrapperPolicyPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "avenor stable: mcp launch wrapper policy: %v\n", err)
+			return 1
+		}
+		mcpPolicy = policy
+	}
+
 	sup := newSupervisorFn(stable.Config{
 		ControlSocket:              *controlSocket,
 		TombstoneFile:              tombstoneFile,
@@ -66,6 +77,7 @@ func runStable(args []string) int {
 		PermissionClaimTimeout:     *permClaimTimeout,
 		WorkflowRoot:               *workflowRoot,
 		WorkflowAdapterDir:         *workflowAdapterDir,
+		MCPLaunchWrapperPolicy:     mcpPolicy,
 	})
 	if treeBudgetFile == "" {
 		// Root: propagate the tree budget path to descendant processes.
