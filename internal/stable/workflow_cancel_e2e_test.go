@@ -92,3 +92,95 @@ func TestWorkflowCancelTerminatesInFlightRuntimes(t *testing.T) {
 		return f.sup.activeRuntimeCount() == 0
 	})
 }
+
+// TestWorkflowCancelTerminatesEveryInFlightRuntime pins the multi-runtime
+// case: two auto-dispatched entry nodes with both runtimes in flight, one
+// cancel through the real control RPC, and both runtimes torn down — a
+// regression that signals only one child runtime leaves a surviving runtime.
+func TestWorkflowCancelTerminatesEveryInFlightRuntime(t *testing.T) {
+	t.Chdir(t.TempDir())
+	// Two scripted attempts that never finish: each stays in flight until
+	// cancel tears it down.
+	blocked := make(chan struct{})
+	provider := &stableScriptedProvider{attempt: -1, scripts: []stableScriptedAttempt{
+		{
+			sessionID: "ses_cancel_me_a",
+			events: []stableScriptedEvent{{event: events.Event{
+				Event: "agent.status", SessionID: "ses_cancel_me_a", Fields: map[string]any{"phase": "working"},
+			}, release: blocked}},
+		},
+		{
+			sessionID: "ses_cancel_me_b",
+			events: []stableScriptedEvent{{event: events.Event{
+				Event: "agent.status", SessionID: "ses_cancel_me_b", Fields: map[string]any{"phase": "working"},
+			}, release: blocked}},
+		},
+	}}
+	f := newAutoHandoffFixture(t, "auto-cancel-two", provider)
+	wf := f.addWorkflow(t, "tmpl-auto-cancel-two", mustJSON(t, map[string]any{
+		"schema_version":   1,
+		"template_id":      "tmpl-auto-cancel-two",
+		"template_version": "1",
+		"entry_nodes":      []string{"a", "b"},
+		"nodes": []any{
+			map[string]any{
+				"id":           "a",
+				"action":       map[string]any{"type": "run", "prompt": "do the thing"},
+				"dispatch":     map[string]any{"mode": "auto", "controller_id": "c1"},
+				"retry_policy": map[string]any{"max_attempts": 1, "exhaustion": "block"},
+			},
+			map[string]any{
+				"id":           "b",
+				"action":       map[string]any{"type": "run", "prompt": "do the other thing"},
+				"dispatch":     map[string]any{"mode": "auto", "controller_id": "c1"},
+				"retry_policy": map[string]any{"max_attempts": 1, "exhaustion": "block"},
+			},
+		},
+		"terminal_outcomes": []string{"done"},
+	}))
+	f.enableController(t, 2)
+
+	f.waitForInstance(t, wf, "both auto nodes' activations to be running", func(inst *workflow.WorkflowInstance) bool {
+		running := 0
+		for _, node := range []string{"a", "b"} {
+			if act := activationFor(inst, workflow.NodeID(node)); act != nil && act.Status == workflow.ActivationRunning {
+				running++
+			}
+		}
+		return running == 2
+	})
+	waitFor(t, "both attempt runtimes to be in flight", func() bool {
+		return f.sup.activeRuntimeCount() == 2
+	})
+
+	socket := f.sup.config.ControlSocket
+	if err := f.sup.control.Start(socket); err != nil {
+		t.Fatalf("start control server: %v", err)
+	}
+	t.Cleanup(func() { f.sup.control.Stop() })
+	cl, err := client.Dial(socket)
+	if err != nil {
+		t.Fatalf("dial control server: %v", err)
+	}
+	defer cl.Close()
+	var cancelResult map[string]any
+	if err := cl.Call("workflow.cancel", map[string]any{
+		"workflow_id": wf, "actor": "test", "reason": "cancel e2e two",
+	}, &cancelResult); err != nil {
+		t.Fatalf("workflow.cancel: %v", err)
+	}
+	if n, _ := cancelResult["canceled_runtimes"].(float64); n != 2 {
+		t.Fatalf("workflow.cancel result = %#v, want canceled_runtimes=2", cancelResult)
+	}
+	f.waitForInstance(t, wf, "both attempts to record canceled", func(inst *workflow.WorkflowInstance) bool {
+		if inst.Status != workflow.WorkflowCanceled {
+			return false
+		}
+		a, b := attemptsForNode(inst, "a"), attemptsForNode(inst, "b")
+		return len(a) == 1 && a[0].Status == workflow.AttemptCanceled &&
+			len(b) == 1 && b[0].Status == workflow.AttemptCanceled
+	})
+	waitFor(t, "both in-flight runtimes to tear down after cancel", func() bool {
+		return f.sup.activeRuntimeCount() == 0
+	})
+}

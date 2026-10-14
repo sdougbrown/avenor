@@ -310,3 +310,108 @@ func TestManagerWorkflowCancelWaitTerminal(t *testing.T) {
 		t.Fatalf("wait on canceled instance reported terminal=%v: %#v", terminal, result)
 	}
 }
+
+// TestCancelParksEveryActivationAndReleasesEveryLease pins the multi-activation
+// case: applyCanceled's loop must park BOTH activations in ActivationCanceled
+// and release BOTH live leases, not just the first one it visits.
+func TestCancelParksEveryActivationAndReleasesEveryLease(t *testing.T) {
+	payload, err := json.Marshal(InstanceRecord{
+		TemplateID:       "t2",
+		TemplateVersion:  "1",
+		TerminalOutcomes: []OutcomeName{"done", "failed_out"},
+		EntryNodes:       []NodeID{"a", "b"},
+	})
+	if err != nil {
+		t.Fatalf("marshal instance record: %v", err)
+	}
+	state := mustApply(t, Snapshot{}, Command{
+		Kind:             CommandInstantiate,
+		ExpectedRevision: 0,
+		IdempotencyKey:   "inst",
+		Identity:         ExecutionIdentity{WorkflowID: "wf1"},
+		Payload:          payload,
+	}, "instantiate")
+
+	claim := func(node string, lease string) {
+		var actID ActivationID
+		for _, act := range state.Instance.Activations {
+			if act.NodeID == NodeID(node) {
+				actID = act.ID
+				break
+			}
+		}
+		if actID == "" {
+			t.Fatalf("activation for %s not found", node)
+		}
+		identity := ExecutionIdentity{WorkflowID: "wf1", NodeID: NodeID(node), ActivationID: actID}
+		state = mustApply(t, state, Command{
+			Kind:             CommandClaim,
+			ExpectedRevision: state.Instance.Revision,
+			IdempotencyKey:   "claim-" + node,
+			Identity:         identity,
+			LeaseID:          LeaseID(lease),
+			Actor:            "alice",
+		}, "claim-"+node)
+		startIdentity := identity
+		startIdentity.AttemptID = AttemptID("att-" + node)
+		state = mustApply(t, state, Command{
+			Kind:             CommandStart,
+			ExpectedRevision: state.Instance.Revision,
+			IdempotencyKey:   "start-" + node,
+			Identity:         startIdentity,
+			LeaseID:          LeaseID(lease),
+		}, "start-"+node)
+	}
+	claim("a", "lease-a")
+	claim("b", "lease-b")
+
+	state = mustApply(t, state, Command{
+		Kind:             CommandCancel,
+		ExpectedRevision: state.Instance.Revision,
+		IdempotencyKey:   "cancel-1",
+		Identity:         ExecutionIdentity{WorkflowID: "wf1"},
+		Actor:            "ops",
+		Reason:           "multi-activation pin",
+	}, "cancel")
+
+	if got := state.Instance.Status; got != WorkflowCanceled {
+		t.Fatalf("instance status got %q want %q", got, WorkflowCanceled)
+	}
+	if len(state.Instance.Activations) != 2 {
+		t.Fatalf("activations = %d, want 2", len(state.Instance.Activations))
+	}
+	for _, act := range state.Instance.Activations {
+		if act.Status != ActivationCanceled {
+			t.Fatalf("activation %s status = %q, want canceled", act.NodeID, act.Status)
+		}
+		if act.ActiveLease != nil {
+			t.Fatalf("activation %s kept its lease after cancel", act.NodeID)
+		}
+	}
+}
+
+// TestManagerWorkflowCancelRetriesRevisionMismatch pins the optimistic
+// concurrency path: a concurrent command that moves the revision while the
+// cancel sits in its read window must not fail the cancel — the bounded retry
+// re-reads and applies.
+func TestManagerWorkflowCancelRetriesRevisionMismatch(t *testing.T) {
+	m, wf := newCancelFixture(t)
+	// While the cancel sits between its read and its commit, a claim commits
+	// and moves the revision.
+	m.testHooks.cancelPreCommit = func() {
+		if _, err := m.WorkflowCommand(string(wf), []byte(`{"op":"claim","node_id":"start","actor":"cli"}`)); err != nil {
+			t.Errorf("concurrent claim: %v", err)
+		}
+	}
+	resultAny, err := m.WorkflowCancel(string(wf), cancelPayload("ops", "raced cancel"))
+	if err != nil {
+		t.Fatalf("WorkflowCancel: %v", err)
+	}
+	result, _ := resultAny.(map[string]any)
+	if got := result["status"]; got != string(WorkflowCanceled) {
+		t.Fatalf("status got %v want canceled", got)
+	}
+	if got, ok := result["idempotent"].(bool); ok && got {
+		t.Fatalf("first cancel must not report idempotent: %#v", result)
+	}
+}
