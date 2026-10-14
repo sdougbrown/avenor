@@ -68,6 +68,17 @@ supervisor's roster path before dispatching: the roster entry supplies the
 pinned backend/agent/model, the roster file's digest and the declared
 thinking level ride on the pinned selection, and retries inherit that pin.
 
+An assignment may also declare a permission policy. `"permission_policy":
+{"decider": "rm-guard"}` names a roster entry as the node's deciding agent:
+dispatched nodes derive no file permission handler, and a pending permission
+request spawns the decider run, which judges the request against the node's
+task and answers through the control plane — or defers, leaving the request
+pending for a human. `"auto_approve": true` remains the explicit
+resolve-everything-as-allow option for nodes whose requests are known-safe;
+the two are mutually exclusive. Without either policy, an auto-dispatched
+node on a backend that prompts for tool approval can sit blocked until the
+permission claim times out.
+
 ## 3. Create and enable the controller
 
 ```sh

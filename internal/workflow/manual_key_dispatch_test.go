@@ -3,6 +3,7 @@ package workflow
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -117,6 +118,85 @@ func mustManualStart(t *testing.T, m *Manager, wf WorkflowID, nodeID NodeID, act
 	}
 	if _, err := m.WorkflowCommand(string(wf), data); err != nil {
 		t.Fatalf("start %s/%s: %v", nodeID, activationID, err)
+	}
+}
+
+// TestBeginDispatchRejectsBothAutoApproveAndDecider proves the command
+// boundary rejects a caller-supplied selection carrying both unattended
+// permission policies: auto-approve and a permission decider are mutually
+// exclusive, and the conflict must surface before any attempt is recorded.
+func TestBeginDispatchRejectsBothAutoApproveAndDecider(t *testing.T) {
+	m, _, wf := newAutoDispatchFixture(t, "begin-permdec-both", "ctl-a", -1)
+	if err := m.RebuildCandidateIndex("test"); err != nil {
+		t.Fatalf("RebuildCandidateIndex: %v", err)
+	}
+	cands, err := m.CandidatesForController("ctl-a", 1)
+	if err != nil || len(cands) != 1 {
+		t.Fatalf("candidates: n=%d err=%v", len(cands), err)
+	}
+	_, err = m.BeginDispatch(BeginDispatchRequest{
+		WorkflowID:       wf,
+		NodeID:           cands[0].Identity.NodeID,
+		ActivationID:     cands[0].Identity.ActivationID,
+		ExpectedRevision: cands[0].Revision,
+		ControllerID:     "ctl-a",
+		LeaderLeaseID:    "lease_leader_1",
+		Selection: &ExecutionSelection{
+			AutoApprove:       true,
+			PermissionDecider: &PermissionDecider{Entry: "rm-guard"},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("BeginDispatch error = %v, want auto_approve/permission_decider mutual exclusion", err)
+	}
+}
+
+// TestManualStartRejectsBothAutoApproveAndDecider proves the start command
+// boundary rejects a caller-supplied selection carrying both unattended
+// permission policies, without consuming the claim's lease: a valid start of
+// the same activation still succeeds afterward.
+func TestManualStartRejectsBothAutoApproveAndDecider(t *testing.T) {
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	m := NewManager(s)
+	m.RegisterExecutor(ActionRun, &fakeExecutor{})
+	if _, err := m.WorkflowCreate(manualKeyedTemplateJSON("manual-permdec-both", "deploys")); err != nil {
+		t.Fatalf("WorkflowCreate: %v", err)
+	}
+	wf := mustInstantiateTemplate(t, m, "manual-permdec-both", "1")
+	snap, ok, err := s.loadCurrent(wf)
+	if err != nil || !ok {
+		t.Fatalf("loadCurrent: ok=%v err=%v", ok, err)
+	}
+	act := activationByNode(&snap.Instance, "start")
+	if act == nil {
+		t.Fatal("start activation not found")
+	}
+	leaseID, token := mustClaimWorkflow(t, m, wf, "start", act.ID, "manual-1")
+	payload, err := json.Marshal(map[string]any{
+		"op":            "start",
+		"node_id":       "start",
+		"activation_id": string(act.ID),
+		"lease_id":      string(leaseID),
+		"owner_token":   token,
+		"selection": map[string]any{
+			"auto_approve":       true,
+			"permission_decider": map[string]any{"entry": "rm-guard"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal start: %v", err)
+	}
+	if _, err := m.WorkflowCommand(string(wf), payload); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("start error = %v, want auto_approve/permission_decider mutual exclusion", err)
+	}
+	mustManualStart(t, m, wf, "start", act.ID, leaseID, token, nil)
+	inst := mustLoadInstance(t, s, wf)
+	started := activationByNode(inst, "start")
+	if started == nil || started.ActiveLease == nil || started.ActiveLease.ID != leaseID {
+		t.Fatalf("activation after valid start = %+v, want the claim's lease still active", started)
 	}
 }
 
@@ -297,6 +377,190 @@ func TestBeginDispatchRevisionRaceMapsToStaleCandidate(t *testing.T) {
 	start := activationByNode(mustLoadInstance(t, s, wf), "start")
 	if len(start.AttemptIDs) != 0 {
 		t.Fatalf("attempt ids = %v, want none", start.AttemptIDs)
+	}
+}
+
+// TestBeginDispatchPermissionDeciderSelectionReDispatch proves a re-dispatch
+// (retry) of a permission_policy node does not conflict when the freshly
+// resolved selection carries an equal-content decider under a different
+// pointer, while a decider with different content is still rejected.
+func TestBeginDispatchPermissionDeciderSelectionReDispatch(t *testing.T) {
+	m, _, wf := newAutoDispatchFixture(t, "begin-sel-permdec", "ctl-a", -1)
+	if err := m.RebuildCandidateIndex("test"); err != nil {
+		t.Fatalf("RebuildCandidateIndex: %v", err)
+	}
+	cands, err := m.CandidatesForController("ctl-a", 1)
+	if err != nil || len(cands) != 1 {
+		t.Fatalf("candidates: n=%d err=%v", len(cands), err)
+	}
+	cand := cands[0]
+	begin, err := m.BeginDispatch(BeginDispatchRequest{
+		WorkflowID:       wf,
+		NodeID:           cand.Identity.NodeID,
+		ActivationID:     cand.Identity.ActivationID,
+		ExpectedRevision: cand.Revision,
+		ControllerID:     "ctl-a",
+		LeaderLeaseID:    "lease_leader_1",
+		Selection: &ExecutionSelection{
+			Backend: "pi", Agent: "worker", Model: "m1",
+			PermissionDecider: &PermissionDecider{Entry: "rm-guard", Backend: "pi", Agent: "rm-guard", Model: "guard-m"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BeginDispatch: %v", err)
+	}
+	// Fail the attempt so the retry policy re-arms the activation with the
+	// selection still pinned.
+	if err := m.FinalizeDispatch(FinalizeDispatchRequest{
+		WorkflowID:    wf,
+		NodeID:        cand.Identity.NodeID,
+		ActivationID:  cand.Identity.ActivationID,
+		AttemptID:     begin.AttemptID,
+		LeaseID:       begin.LeaseID,
+		FailureStatus: AttemptFailed,
+	}); err != nil {
+		t.Fatalf("FinalizeDispatch: %v", err)
+	}
+	if err := m.RebuildCandidateIndex("test"); err != nil {
+		t.Fatalf("RebuildCandidateIndex after re-arm: %v", err)
+	}
+	reCands, err := m.CandidatesForController("ctl-a", 10)
+	if err != nil || len(reCands) != 1 {
+		t.Fatalf("re-armed candidates: n=%d err=%v", len(reCands), err)
+	}
+
+	// An equal-content decider resolved into a fresh pointer re-dispatches
+	// without conflict.
+	if _, err := m.BeginDispatch(BeginDispatchRequest{
+		WorkflowID:       wf,
+		NodeID:           reCands[0].Identity.NodeID,
+		ActivationID:     reCands[0].Identity.ActivationID,
+		ExpectedRevision: reCands[0].Revision,
+		ControllerID:     "ctl-a",
+		LeaderLeaseID:    "lease_leader_1",
+		Selection: &ExecutionSelection{
+			Backend: "pi", Agent: "worker", Model: "m1",
+			PermissionDecider: &PermissionDecider{Entry: "rm-guard", Backend: "pi", Agent: "rm-guard", Model: "guard-m"},
+		},
+	}); err != nil {
+		t.Fatalf("re-dispatch with equal-content decider: %v, want no conflict", err)
+	}
+
+	// A decider whose content differs still conflicts.
+	m2, _, wf2 := newAutoDispatchFixture(t, "begin-sel-permdec-2", "ctl-a", -1)
+	if err := m2.RebuildCandidateIndex("test"); err != nil {
+		t.Fatalf("RebuildCandidateIndex: %v", err)
+	}
+	cands2, err := m2.CandidatesForController("ctl-a", 1)
+	if err != nil || len(cands2) != 1 {
+		t.Fatalf("candidates: n=%d err=%v", len(cands2), err)
+	}
+	cand2 := cands2[0]
+	begin2, err := m2.BeginDispatch(BeginDispatchRequest{
+		WorkflowID:       wf2,
+		NodeID:           cand2.Identity.NodeID,
+		ActivationID:     cand2.Identity.ActivationID,
+		ExpectedRevision: cand2.Revision,
+		ControllerID:     "ctl-a",
+		LeaderLeaseID:    "lease_leader_1",
+		Selection: &ExecutionSelection{
+			Backend: "pi", Agent: "worker", Model: "m1",
+			PermissionDecider: &PermissionDecider{Entry: "rm-guard", Backend: "pi", Agent: "rm-guard", Model: "guard-m"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BeginDispatch: %v", err)
+	}
+	_ = begin2
+	// Fail the attempt so the retry policy re-arms the activation with the
+	// selection still pinned.
+	if err := m2.FinalizeDispatch(FinalizeDispatchRequest{
+		WorkflowID:    wf2,
+		NodeID:        cand2.Identity.NodeID,
+		ActivationID:  cand2.Identity.ActivationID,
+		AttemptID:     begin2.AttemptID,
+		LeaseID:       begin2.LeaseID,
+		FailureStatus: AttemptFailed,
+	}); err != nil {
+		t.Fatalf("FinalizeDispatch: %v", err)
+	}
+	if err := m2.RebuildCandidateIndex("test"); err != nil {
+		t.Fatalf("RebuildCandidateIndex after re-arm: %v", err)
+	}
+	reCands2, err := m2.CandidatesForController("ctl-a", 10)
+	if err != nil || len(reCands2) != 1 {
+		t.Fatalf("re-armed candidates: n=%d err=%v", len(reCands2), err)
+	}
+	if _, err := m2.BeginDispatch(BeginDispatchRequest{
+		WorkflowID:       wf2,
+		NodeID:           reCands2[0].Identity.NodeID,
+		ActivationID:     reCands2[0].Identity.ActivationID,
+		ExpectedRevision: reCands2[0].Revision,
+		ControllerID:     "ctl-a",
+		LeaderLeaseID:    "lease_leader_1",
+		Selection: &ExecutionSelection{
+			Backend: "pi", Agent: "worker", Model: "m1",
+			PermissionDecider: &PermissionDecider{Entry: "rm-guard", Backend: "pi", Agent: "rm-guard", Model: "other-m"},
+		},
+	}); !errors.Is(err, ErrSelectionConflict) {
+		t.Fatalf("re-dispatch with differing decider error = %v, want ErrSelectionConflict", err)
+	}
+
+	// A pinned selection without a decider (reachable when a template gains a
+	// permission policy across versions) conflicts with a freshly resolved
+	// decider: nil and non-nil are never the same.
+	m3, _, wf3 := newAutoDispatchFixture(t, "begin-sel-permdec-3", "ctl-a", -1)
+	if err := m3.RebuildCandidateIndex("test"); err != nil {
+		t.Fatalf("RebuildCandidateIndex: %v", err)
+	}
+	cands3, err := m3.CandidatesForController("ctl-a", 1)
+	if err != nil || len(cands3) != 1 {
+		t.Fatalf("candidates: n=%d err=%v", len(cands3), err)
+	}
+	begin3, err := m3.BeginDispatch(BeginDispatchRequest{
+		WorkflowID:       wf3,
+		NodeID:           cands3[0].Identity.NodeID,
+		ActivationID:     cands3[0].Identity.ActivationID,
+		ExpectedRevision: cands3[0].Revision,
+		ControllerID:     "ctl-a",
+		LeaderLeaseID:    "lease_leader_1",
+		Selection:        &ExecutionSelection{Backend: "pi", Agent: "worker", Model: "m1"},
+	})
+	if err != nil {
+		t.Fatalf("BeginDispatch: %v", err)
+	}
+	// Fail the attempt so the retry policy re-arms the activation with the
+	// selection still pinned.
+	if err := m3.FinalizeDispatch(FinalizeDispatchRequest{
+		WorkflowID:    wf3,
+		NodeID:        cands3[0].Identity.NodeID,
+		ActivationID:  cands3[0].Identity.ActivationID,
+		AttemptID:     begin3.AttemptID,
+		LeaseID:       begin3.LeaseID,
+		FailureStatus: AttemptFailed,
+	}); err != nil {
+		t.Fatalf("FinalizeDispatch: %v", err)
+	}
+	if err := m3.RebuildCandidateIndex("test"); err != nil {
+		t.Fatalf("RebuildCandidateIndex after re-arm: %v", err)
+	}
+	reCands3, err := m3.CandidatesForController("ctl-a", 10)
+	if err != nil || len(reCands3) != 1 {
+		t.Fatalf("re-armed candidates: n=%d err=%v", len(reCands3), err)
+	}
+	if _, err := m3.BeginDispatch(BeginDispatchRequest{
+		WorkflowID:       wf3,
+		NodeID:           reCands3[0].Identity.NodeID,
+		ActivationID:     reCands3[0].Identity.ActivationID,
+		ExpectedRevision: reCands3[0].Revision,
+		ControllerID:     "ctl-a",
+		LeaderLeaseID:    "lease_leader_1",
+		Selection: &ExecutionSelection{
+			Backend: "pi", Agent: "worker", Model: "m1",
+			PermissionDecider: &PermissionDecider{Entry: "rm-guard", Backend: "pi", Agent: "rm-guard", Model: "guard-m"},
+		},
+	}); !errors.Is(err, ErrSelectionConflict) {
+		t.Fatalf("re-dispatch with decider over nil-pinned decider error = %v, want ErrSelectionConflict", err)
 	}
 }
 

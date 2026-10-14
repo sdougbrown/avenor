@@ -183,6 +183,9 @@ func ValidateTemplate(template Template) error {
 		if err := validateOutputSources(node); err != nil {
 			return fmt.Errorf("invalid workflow template: node %q: %w", node.ID, err)
 		}
+		if err := validateAssignmentPermissionPolicy(node.Assignment); err != nil {
+			return fmt.Errorf("invalid workflow template: node %q: %w", node.ID, err)
+		}
 	}
 	if err := validateTemplateParams(template); err != nil {
 		return err
@@ -199,6 +202,26 @@ func ValidateTemplate(template Template) error {
 	}
 	if err := ValidateGraph(template); err != nil {
 		return err
+	}
+	return nil
+}
+
+// validateAssignmentPermissionPolicy enforces the permission-policy contract:
+// auto_approve (resolve everything as allow) and permission_policy (route to a
+// decider) are alternative unattended policies, so an assignment must not
+// declare both, and a declared policy must name its decider.
+func validateAssignmentPermissionPolicy(assignment *Assignment) error {
+	if assignment == nil || assignment.PermissionPolicy == nil {
+		return nil
+	}
+	if assignment.AutoApprove {
+		return fmt.Errorf("assignment cannot declare both auto_approve and permission_policy")
+	}
+	if strings.TrimSpace(assignment.PermissionPolicy.Decider) == "" {
+		return fmt.Errorf("assignment permission_policy.decider is required")
+	}
+	if assignment.RosterFile == "" {
+		return fmt.Errorf("assignment permission_policy.decider requires roster_file")
 	}
 	return nil
 }

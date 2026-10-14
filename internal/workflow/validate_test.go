@@ -215,6 +215,77 @@ func TestGeneratedStructuralValidatorAuthority(t *testing.T) {
 	})
 }
 
+// TestValidateTemplateJSONAssignmentAutoApprove pins the assignment permission
+// policy field: auto_approve is a declared boolean and misspelled variants are
+// rejected by the generated structural validator.
+func TestValidateTemplateJSONAssignmentAutoApprove(t *testing.T) {
+	withAutoApprove := mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
+		node["assignment"] = map[string]any{"auto_approve": true}
+	}))
+	if err := ValidateTemplateJSON(withAutoApprove); err != nil {
+		t.Fatalf("ValidateTemplateJSON() rejected assignment auto_approve: %v", err)
+	}
+	assertTemplateError(t, mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
+		node["assignment"] = map[string]any{"autoapprove": true}
+	})), `additionalProperties at /nodes/0/assignment/autoapprove`)
+	assertTemplateError(t, mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
+		node["assignment"] = map[string]any{"auto_approve": "yes"}
+	})), `type at /nodes/0/assignment/auto_approve`)
+}
+
+// TestValidateTemplateJSONAssignmentPermissionPolicy pins the permission_policy
+// decider field: permission_policy is a declared object with a required decider
+// string that must name a roster file, misspellings and wrong types are
+// rejected by the generated structural validator, and the semantic validator
+// rejects the auto_approve combination and a policy without a roster file.
+func TestValidateTemplateJSONAssignmentPermissionPolicy(t *testing.T) {
+	withPolicy := mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
+		node["assignment"] = map[string]any{"roster_file": "roster.json", "permission_policy": map[string]any{"decider": "rm-guard"}}
+	}))
+	if err := ValidateTemplateJSON(withPolicy); err != nil {
+		t.Fatalf("ValidateTemplateJSON() rejected assignment permission_policy: %v", err)
+	}
+	assertTemplateError(t, mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
+		node["assignment"] = map[string]any{"permissionpolicy": map[string]any{"decider": "rm-guard"}}
+	})), `additionalProperties at /nodes/0/assignment/permissionpolicy`)
+	assertTemplateError(t, mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
+		node["assignment"] = map[string]any{"permission_policy": map[string]any{}}
+	})), `required at /nodes/0/assignment/permission_policy`)
+	assertTemplateError(t, mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
+		node["assignment"] = map[string]any{"permission_policy": map[string]any{"decider": 7}}
+	})), `type at /nodes/0/assignment/permission_policy/decider`)
+	// An empty decider name violates the schema's minLength: 1 — a policy that
+	// names no decider must be rejected structurally, not just semantically.
+	assertTemplateError(t, mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
+		node["assignment"] = map[string]any{"permission_policy": map[string]any{"decider": ""}}
+	})), `minLength at /nodes/0/assignment/permission_policy/decider`)
+
+	// Semantic: the two unattended policies are alternatives, not additives.
+	var tmpl Template
+	if err := json.Unmarshal(mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
+		node["assignment"] = map[string]any{
+			"auto_approve":      true,
+			"permission_policy": map[string]any{"decider": "rm-guard"},
+		}
+	})), &tmpl); err != nil {
+		t.Fatalf("decode template: %v", err)
+	}
+	if err := ValidateTemplate(tmpl); err == nil || !strings.Contains(err.Error(), "cannot declare both auto_approve and permission_policy") {
+		t.Fatalf("ValidateTemplate() error = %v, want mutual exclusion", err)
+	}
+
+	// Semantic: a decider routes through the assignment's roster, so a policy
+	// without a roster file is invalid at template time, not only at dispatch.
+	if err := json.Unmarshal(mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
+		node["assignment"] = map[string]any{"permission_policy": map[string]any{"decider": "rm-guard"}}
+	})), &tmpl); err != nil {
+		t.Fatalf("decode template: %v", err)
+	}
+	if err := ValidateTemplate(tmpl); err == nil || !strings.Contains(err.Error(), "permission_policy.decider requires roster_file") {
+		t.Fatalf("ValidateTemplate() error = %v, want decider requires roster_file", err)
+	}
+}
+
 func TestValidateTemplateJSONRejectsIncompleteActionVariants(t *testing.T) {
 	tests := []struct {
 		name    string

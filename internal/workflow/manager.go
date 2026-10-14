@@ -1023,6 +1023,9 @@ func (m *Manager) commandStart(wf WorkflowID, payload json.RawMessage) (any, err
 	if req.OwnerToken == "" {
 		return nil, errors.New("start requires owner_token")
 	}
+	if err := req.Selection.ValidatePermissionPolicy(); err != nil {
+		return nil, err
+	}
 	snap, exists, err := m.store.loadCurrent(wf)
 	if err != nil {
 		return nil, err

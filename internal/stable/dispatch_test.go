@@ -9,10 +9,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/admission"
+	"github.com/sdougbrown/avenor/internal/control"
+	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/workflow"
 	"github.com/sdougbrown/avenor/internal/workflowcontroller"
@@ -626,6 +630,690 @@ func TestDispatchPinnedSelectionInheritance(t *testing.T) {
 		t.Fatalf("inherited selection = %+v, want pinned agent-a", begin.Selection)
 	}
 	res.Release()
+}
+
+// TestResolveAssignmentSelectionAutoApprove proves the assignment's
+// auto_approve flag resolves into the pinned selection, including an
+// auto_approve-only assignment (which is not an empty assignment).
+func TestResolveAssignmentSelectionAutoApprove(t *testing.T) {
+	sel, err := resolveAssignmentSelection(&workflow.Assignment{Backend: "codex", AutoApprove: true})
+	if err != nil {
+		t.Fatalf("resolveAssignmentSelection: %v", err)
+	}
+	if !sel.AutoApprove {
+		t.Fatal("selection.AutoApprove = false, want true")
+	}
+	sel, err = resolveAssignmentSelection(&workflow.Assignment{AutoApprove: true})
+	if err != nil {
+		t.Fatalf("resolveAssignmentSelection(auto_approve only): %v", err)
+	}
+	if !sel.AutoApprove || sel.Backend != "" || sel.Agent != "" || sel.Model != "" {
+		t.Fatalf("selection = %+v, want AutoApprove true with no identity", sel)
+	}
+}
+
+// TestDispatchAssignmentAutoApproveRunsUnattended proves a dispatched node
+// whose assignment declares auto_approve runs unattended: the runtime status
+// surfaces auto_approve true, and a scripted permission.request event on that
+// runtime resolves on its own — the CLI auto-answer path marks the claim
+// resolved (source "avenor") and emits permission.response, so the request
+// never stays pending until the claim timeout and no decider run is spawned
+// (no permdec: label ever appears).
+func TestDispatchAssignmentAutoApproveRunsUnattended(t *testing.T) {
+	template := mustJSON(t, map[string]any{
+		"schema_version":   1,
+		"template_id":      "tmpl-dispatch-dispatch-auto-approve",
+		"template_version": "1",
+		"entry_nodes":      []string{"start"},
+		"nodes": []any{map[string]any{
+			"id":           "start",
+			"action":       map[string]any{"type": "run", "prompt": "do the thing"},
+			"assignment":   map[string]any{"auto_approve": true},
+			"dispatch":     map[string]any{"mode": "auto", "controller_id": "c1"},
+			"retry_policy": map[string]any{"max_attempts": 3, "exhaustion": "block"},
+		}},
+		"terminal_outcomes":    []string{"done"},
+		"default_lease_policy": map[string]any{"ttl_seconds": 900},
+	})
+	f := newDispatchFixtureTemplate(t, "dispatch-auto-approve", 4, 4, template)
+	requestID := "perm_req_auto"
+	// Hold the worker prompt open after the permission request so the runtime
+	// stays alive while the auto-answer is observed.
+	gate := make(chan struct{})
+	defer close(gate)
+	var deciderSpawned atomic.Bool
+	f.sup.newProviderFunc = func(startOpts runtime.StartOptions, _ string) (runtime.Provider, error) {
+		if strings.HasPrefix(startOpts.Label, "permdec:") {
+			deciderSpawned.Store(true)
+		}
+		return &stableScriptedProvider{attempt: -1, scripts: []stableScriptedAttempt{{
+			sessionID: "ses_auto_worker",
+			events: []stableScriptedEvent{
+				{event: events.Event{
+					Event:     "permission.request",
+					SessionID: "ses_auto_worker",
+					Fields: map[string]any{
+						"request_id": requestID,
+						"tool":       "bash",
+						"command":    "rm -rf /tmp/build",
+						"options":    []any{map[string]any{"optionId": "allow_once", "kind": "allow"}},
+					},
+				}},
+				{release: gate},
+			},
+		}}}, nil
+	}
+	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
+	if err != nil {
+		t.Fatalf("dispatchWorkflowNode: %v", err)
+	}
+	if out.Kind != Dispatched {
+		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
+	}
+	waitFor(t, "runtime registration", func() bool { return f.sup.activeRuntimeCount() == 1 })
+	runtimes := f.sup.listRuntimes()
+	if len(runtimes) != 1 {
+		t.Fatalf("runtimes = %d, want 1", len(runtimes))
+	}
+	if got, ok := runtimes[0]["auto_approve"].(bool); !ok || !got {
+		t.Fatalf("runtime auto_approve = %T %v, want bool true", runtimes[0]["auto_approve"], runtimes[0]["auto_approve"])
+	}
+	// The auto-approve runtime must resolve the pending request on its own:
+	// the claim is marked resolved (no human, no decider) and the runtime
+	// status clears pending_permission via the permission.response event.
+	waitFor(t, "auto-resolved permission", func() bool {
+		if f.sup.control.PermissionResolverState(out.RuntimeID, requestID) != control.PermissionResolverResolved {
+			return false
+		}
+		status, err := f.sup.RuntimeStatus(out.RuntimeID)
+		if err != nil {
+			return false
+		}
+		rt, _ := status.(map[string]any)
+		pending, _ := rt["pending_permission"].(bool)
+		return !pending
+	})
+	if deciderSpawned.Load() {
+		t.Fatal("a permdec: decider run was spawned on an auto-approve runtime, want none")
+	}
+}
+
+// TestResolveAssignmentSelectionPermissionDecider proves the assignment's
+// permission_policy resolves onto the pinned selection: the decider roster
+// entry resolves to the decider identity with the entry's default thinking
+// level (validated against the decider's own backend, like the node
+// identity's level), a decider without a roster file is rejected, and
+// auto_approve plus permission_policy are mutually exclusive.
+func TestResolveAssignmentSelectionPermissionDecider(t *testing.T) {
+	rosterPath := writeStage5Roster(t, t.TempDir(), `{
+		"worker":  {"backend": "pi", "agent": "worker", "model": "m"},
+		"rm-guard": {"backend": "pi", "agent": "rm-guard", "model": "guard-m"},
+		"thinking-guard": {"backend": "pi", "agent": "guard", "model": "m", "thinking": "high"},
+		"bad-thinking": {"backend": "agy", "agent": "guard", "model": "m", "thinking": "low"}
+	}`)
+	sel, err := resolveAssignmentSelection(&workflow.Assignment{
+		RosterFile:       rosterPath,
+		RosterEntry:      "worker",
+		PermissionPolicy: &workflow.PermissionPolicy{Decider: "rm-guard"},
+	})
+	if err != nil {
+		t.Fatalf("resolveAssignmentSelection: %v", err)
+	}
+	if sel.PermissionDecider == nil || sel.PermissionDecider.Entry != "rm-guard" ||
+		sel.PermissionDecider.Agent != "rm-guard" || sel.PermissionDecider.Backend != "pi" {
+		t.Fatalf("selection.PermissionDecider = %+v, want rm-guard/pi", sel.PermissionDecider)
+	}
+	if sel.Agent != "worker" || sel.RosterDigest == "" {
+		t.Fatalf("selection identity = %+v, want the worker entry and a roster digest", sel)
+	}
+	sel, err = resolveAssignmentSelection(&workflow.Assignment{
+		RosterFile:       rosterPath,
+		PermissionPolicy: &workflow.PermissionPolicy{Decider: "thinking-guard"},
+	})
+	if err != nil {
+		t.Fatalf("resolveAssignmentSelection(decider thinking): %v", err)
+	}
+	if sel.PermissionDecider == nil || sel.PermissionDecider.Thinking != "high" {
+		t.Fatalf("selection.PermissionDecider = %+v, want the entry's high thinking level", sel.PermissionDecider)
+	}
+	if _, err := resolveAssignmentSelection(&workflow.Assignment{
+		RosterFile:       rosterPath,
+		PermissionPolicy: &workflow.PermissionPolicy{Decider: "bad-thinking"},
+	}); err == nil || !strings.Contains(err.Error(), `does not support parameter "thinking"`) {
+		t.Fatalf("resolveAssignmentSelection(bad thinking) error = %v, want unsupported thinking", err)
+	}
+	if _, err := resolveAssignmentSelection(&workflow.Assignment{
+		Backend:          "pi",
+		PermissionPolicy: &workflow.PermissionPolicy{Decider: "rm-guard"},
+	}); err == nil || !strings.Contains(err.Error(), "requires roster_file") {
+		t.Fatalf("resolveAssignmentSelection(no roster) error = %v, want requires roster_file", err)
+	}
+	if _, err := resolveAssignmentSelection(&workflow.Assignment{
+		RosterFile:       rosterPath,
+		PermissionPolicy: &workflow.PermissionPolicy{Decider: "missing"},
+	}); err == nil || !strings.Contains(err.Error(), "permission_policy.decider") {
+		t.Fatalf("resolveAssignmentSelection(unknown decider) error = %v, want permission_policy.decider", err)
+	}
+	if _, err := resolveAssignmentSelection(&workflow.Assignment{
+		RosterFile:       rosterPath,
+		AutoApprove:      true,
+		PermissionPolicy: &workflow.PermissionPolicy{Decider: "rm-guard"},
+	}); err == nil || !strings.Contains(err.Error(), "cannot declare both auto_approve and permission_policy") {
+		t.Fatalf("resolveAssignmentSelection(both) error = %v, want mutual exclusion", err)
+	}
+}
+
+// TestSpawnRejectsAutoApproveWithPermissionDecider pins the spawn guard: a
+// runtime cannot carry both unattended permission policies — auto-approve
+// resolves every request as allow, a permission decider routes requests to a
+// judging agent — and the guard must fire before any provider work happens.
+func TestSpawnRejectsAutoApproveWithPermissionDecider(t *testing.T) {
+	sup := NewSupervisor(Config{
+		ControlSocket: "/tmp/test-permdec-exclusive.sock",
+		MaxRuntimes:   1,
+	})
+	_, err := sup.spawn(SpawnParams{
+		Prompt:            "hello",
+		Dir:               "/tmp",
+		AutoApprove:       true,
+		PermissionDecider: &workflow.PermissionDecider{Entry: "rm-guard"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "auto_approve and permission_decider are mutually exclusive") {
+		t.Fatalf("err = %v, want auto_approve/permission_decider mutual exclusion", err)
+	}
+	if got := sup.activeRuntimeCount(); got != 0 {
+		t.Fatalf("activeRuntimeCount() = %d, want 0 after rejected spawn", got)
+	}
+}
+
+// TestDispatchAssignmentPermissionDeciderRoutesRequest proves the routing
+// half of the judgment-gate policy: a dispatched node whose assignment
+// declares permission_policy spawns its runtime with no file permission
+// handler, and a pending permission request on that runtime spawns the
+// declared decider run (auto-approved so the decider itself cannot stall)
+// while the request stays pending — never silently allowed.
+func TestDispatchAssignmentPermissionDeciderRoutesRequest(t *testing.T) {
+	rosterPath := writeStage5Roster(t, t.TempDir(), `{
+		"worker":  {"backend": "pi", "agent": "worker", "model": "m"},
+		"rm-guard": {"backend": "pi", "agent": "rm-guard", "model": "guard-m", "thinking": "high"}
+	}`)
+	template := mustJSON(t, dispatchPermdecTemplate(rosterPath, "tmpl-dispatch-dispatch-permdec"))
+	f := newDispatchFixtureTemplate(t, "dispatch-permdec", 4, 4, template)
+	requestID := "perm_req_1"
+	var providerSeq int64
+	// Capture the spawn dirs so the test can prove the decider runs in a
+	// neutral scratch directory instead of the worker's workspace.
+	var workerDir, deciderDir string
+	f.sup.newProviderFunc = func(startOpts runtime.StartOptions, _ string) (runtime.Provider, error) {
+		if strings.HasPrefix(startOpts.Label, "permdec:") {
+			deciderDir = startOpts.Dir
+		} else {
+			workerDir = startOpts.Dir
+		}
+		n := atomic.AddInt64(&providerSeq, 1)
+		return &stableScriptedProvider{attempt: -1, scripts: []stableScriptedAttempt{{
+			sessionID: fmt.Sprintf("ses_permdec_%d", n),
+			events: []stableScriptedEvent{{event: events.Event{
+				Event:     "permission.request",
+				SessionID: fmt.Sprintf("ses_permdec_%d", n),
+				Fields: map[string]any{
+					"request_id": requestID,
+					"tool":       "bash",
+					"command":    "rm -rf /tmp/build",
+					"options":    []any{map[string]any{"optionId": "allow_once", "kind": "allow"}},
+				},
+			}, release: nil}},
+		}}}, nil
+	}
+	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
+	if err != nil {
+		t.Fatalf("dispatchWorkflowNode: %v", err)
+	}
+	if out.Kind != Dispatched {
+		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
+	}
+	// The request must surface as pending on the worker runtime, with the
+	// declared decider, and no file permission handler may have been derived.
+	// Wait on the runtime's pending_permission status rather than the active
+	// runtime count: the scripted worker finishes its turn right after
+	// emitting permission.request, so the runtime can tear down (leaving a
+	// status tombstone that still reports the pending request) before an
+	// active-count poll ever observes it.
+	var worker map[string]any
+	waitFor(t, "pending permission", func() bool {
+		status, err := f.sup.RuntimeStatus(out.RuntimeID)
+		if err != nil {
+			return false
+		}
+		rt, _ := status.(map[string]any)
+		if pending, _ := rt["pending_permission"].(bool); pending {
+			worker = rt
+			return true
+		}
+		return false
+	})
+	if got, _ := worker["permission_decider"].(string); got != "rm-guard" {
+		t.Fatalf("worker permission_decider = %q, want rm-guard", got)
+	}
+	if worker["auto_approve"] != false {
+		t.Fatalf("worker auto_approve = %v, want false", worker["auto_approve"])
+	}
+
+	// The declared decider run spawns for the pending request, under the
+	// decider identity, auto-approved so the decider itself cannot stall.
+	var decider map[string]any
+	waitFor(t, "decider runtime", func() bool {
+		runtimes := f.sup.listRuntimes()
+		for _, rt := range runtimes {
+			if label, _ := rt["label"].(string); strings.HasPrefix(label, "permdec:") {
+				decider = rt
+				return true
+			}
+		}
+		return false
+	})
+	if got, _ := decider["agent"].(string); got != "rm-guard" {
+		t.Fatalf("decider agent = %q, want rm-guard", got)
+	}
+	if got, _ := decider["auto_approve"].(bool); !got {
+		t.Fatalf("decider auto_approve = %v, want true", decider["auto_approve"])
+	}
+	if got, _ := decider["effective_model"].(string); got != "guard-m" {
+		t.Fatalf("decider model = %q, want guard-m", got)
+	}
+	if got, _ := decider["thinking"].(string); got != "high" {
+		t.Fatalf("decider thinking = %q, want the roster entry's high", got)
+	}
+	if got, _ := decider["backend"].(string); got != "pi" {
+		t.Fatalf("decider backend = %q, want pi", got)
+	}
+	// The decider must not run in the worker's workspace: it is spawned in a
+	// neutral per-request scratch directory under the system temp dir, then
+	// that directory is removed when the decider run tears down.
+	if deciderDir == "" || deciderDir == workerDir {
+		t.Fatalf("decider dir = %q, want a scratch dir distinct from the worker dir %q", deciderDir, workerDir)
+	}
+	if !strings.HasPrefix(deciderDir, os.TempDir()+string(os.PathSeparator)) {
+		t.Fatalf("decider dir = %q, want a scratch dir under %s", deciderDir, os.TempDir())
+	}
+	waitFor(t, "decider scratch dir removed", func() bool {
+		_, err := os.Stat(deciderDir)
+		return os.IsNotExist(err)
+	})
+	// The request stays pending: the kernel routed it, it did not answer it.
+	if pending, _ := worker["pending_permission"].(bool); !pending {
+		t.Fatal("worker pending_permission = false, want the request to stay pending")
+	}
+}
+
+// dispatchPermdecTemplate builds the single-node dispatch template whose
+// assignment routes the node's permission requests to the "rm-guard" decider
+// declared in the roster at rosterPath. The decider dispatch tests differ
+// only in their template ID.
+func dispatchPermdecTemplate(rosterPath, templateID string) map[string]any {
+	return map[string]any{
+		"schema_version":   1,
+		"template_id":      templateID,
+		"template_version": "1",
+		"entry_nodes":      []string{"start"},
+		"nodes": []any{map[string]any{
+			"id":           "start",
+			"action":       map[string]any{"type": "run", "prompt": "do the thing"},
+			"assignment":   map[string]any{"roster_file": rosterPath, "roster_entry": "worker", "permission_policy": map[string]any{"decider": "rm-guard"}},
+			"dispatch":     map[string]any{"mode": "auto", "controller_id": "c1"},
+			"retry_policy": map[string]any{"max_attempts": 3, "exhaustion": "block"},
+		}},
+		"terminal_outcomes":    []string{"done"},
+		"default_lease_policy": map[string]any{"ttl_seconds": 900},
+	}
+}
+
+// TestDispatchPermissionDeciderSpawnFailureReroutesRequest proves a failed
+// decider spawn unmarks the request as routed, so the next permission.request
+// event for the same request re-routes it instead of stalling pending with
+// only a stderr line.
+func TestDispatchPermissionDeciderSpawnFailureReroutesRequest(t *testing.T) {
+	rosterPath := writeStage5Roster(t, t.TempDir(), `{
+		"worker":  {"backend": "pi", "agent": "worker", "model": "m"},
+		"rm-guard": {"backend": "pi", "agent": "rm-guard", "model": "guard-m"}
+	}`)
+	template := mustJSON(t, dispatchPermdecTemplate(rosterPath, "tmpl-dispatch-permdec-retry"))
+	f := newDispatchFixtureTemplate(t, "permdec-retry", 4, 4, template)
+	requestID := "perm_req_retry"
+	permissionEvent := func() events.Event {
+		return events.Event{
+			Event:     "permission.request",
+			SessionID: "ses_worker_retry",
+			Fields: map[string]any{
+				"request_id": requestID,
+				"tool":       "bash",
+				"command":    "rm -rf /tmp/build",
+				"options":    []any{map[string]any{"optionId": "allow_once", "kind": "allow"}},
+			},
+		}
+	}
+	var deciderSpawns atomic.Int64
+	f.sup.newProviderFunc = func(startOpts runtime.StartOptions, _ string) (runtime.Provider, error) {
+		if strings.HasPrefix(startOpts.Label, "permdec:") {
+			if deciderSpawns.Add(1) == 1 {
+				return nil, fmt.Errorf("decider spawn failed")
+			}
+			return &stableScriptedProvider{attempt: -1, scripts: []stableScriptedAttempt{{
+				sessionID: "ses_decider_retry",
+			}}}, nil
+		}
+		return &stableScriptedProvider{attempt: -1, scripts: []stableScriptedAttempt{{
+			sessionID: "ses_worker_retry",
+			events:    []stableScriptedEvent{{event: permissionEvent()}},
+		}}}, nil
+	}
+	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
+	if err != nil {
+		t.Fatalf("dispatchWorkflowNode: %v", err)
+	}
+	if out.Kind != Dispatched {
+		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
+	}
+	// The failed spawn must unmark the request as routed so the next
+	// permission.request event for the same request can route again. Re-emit
+	// the event (the CLI session loop refuses a concurrent second request, so
+	// the event is driven at the routing boundary here) until the retried
+	// decider run appears; re-routes that land before the unroute are no-ops.
+	var decider map[string]any
+	waitFor(t, "retried decider runtime", func() bool {
+		f.sup.routePermissionRequest(out.RuntimeID, requestID, []any{map[string]any{"optionId": "allow_once", "kind": "allow"}})
+		for _, rt := range f.sup.listRuntimes() {
+			if label, _ := rt["label"].(string); strings.HasPrefix(label, "permdec:") {
+				decider = rt
+				return true
+			}
+		}
+		return false
+	})
+	if deciderSpawns.Load() < 2 {
+		t.Fatalf("decider spawns = %d, want the retry to spawn a second time", deciderSpawns.Load())
+	}
+	if got, _ := decider["agent"].(string); got != "rm-guard" {
+		t.Fatalf("decider agent = %q, want rm-guard", got)
+	}
+}
+
+// TestDispatchPermissionDeciderSpawnFailuresBounded proves the decider spawn
+// retries are bounded per request: each failed spawn re-opens routing for the
+// next permission.request event, but past maxPermissionDeciderSpawnFailures
+// the routed mark is kept, no further spawns fire, the exhaustion surfaces in
+// runtime status, and the request stays pending for a human gate — never
+// silently rejected.
+func TestDispatchPermissionDeciderSpawnFailuresBounded(t *testing.T) {
+	rosterPath := writeStage5Roster(t, t.TempDir(), `{
+		"worker":  {"backend": "pi", "agent": "worker", "model": "m"},
+		"rm-guard": {"backend": "pi", "agent": "rm-guard", "model": "guard-m"}
+	}`)
+	f := newDispatchFixtureTemplate(t, "permdec-bounded", 4, 4, mustJSON(t, dispatchPermdecTemplate(rosterPath, "tmpl-dispatch-permdec-bounded")))
+	requestID := "perm_req_bounded"
+	var deciderSpawns atomic.Int64
+	f.sup.newProviderFunc = func(startOpts runtime.StartOptions, _ string) (runtime.Provider, error) {
+		if strings.HasPrefix(startOpts.Label, "permdec:") {
+			deciderSpawns.Add(1)
+			return nil, fmt.Errorf("decider spawn failed")
+		}
+		return &stableScriptedProvider{attempt: -1, scripts: []stableScriptedAttempt{{
+			sessionID: "ses_worker_bounded",
+			events: []stableScriptedEvent{{event: events.Event{
+				Event:     "permission.request",
+				SessionID: "ses_worker_bounded",
+				Fields: map[string]any{
+					"request_id": requestID,
+					"tool":       "bash",
+					"command":    "rm -rf /tmp/build",
+					"options":    []any{map[string]any{"optionId": "allow_once", "kind": "allow"}},
+				},
+			}}},
+		}}}, nil
+	}
+	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
+	if err != nil {
+		t.Fatalf("dispatchWorkflowNode: %v", err)
+	}
+	if out.Kind != Dispatched {
+		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
+	}
+	// Re-emit the permission.request event until the retry bound is reached:
+	// each poll re-routes once, so exactly maxPermissionDeciderSpawnFailures
+	// decider spawns fire before the exhaustion sticks.
+	var worker map[string]any
+	waitFor(t, "decider spawn retries exhausted", func() bool {
+		status, err := f.sup.RuntimeStatus(out.RuntimeID)
+		if err == nil {
+			if rt, ok := status.(map[string]any); ok {
+				if exhausted, _ := rt["permission_decider_exhausted"].(bool); exhausted {
+					worker = rt
+					return true
+				}
+			}
+		}
+		f.sup.routePermissionRequest(out.RuntimeID, requestID, []any{map[string]any{"optionId": "allow_once", "kind": "allow"}})
+		return false
+	})
+	if got := deciderSpawns.Load(); got != maxPermissionDeciderSpawnFailures {
+		t.Fatalf("decider spawns = %d, want exactly the %d-attempt bound", got, maxPermissionDeciderSpawnFailures)
+	}
+	// Further events must not spawn another decider: the routed mark stays.
+	for i := 0; i < 3; i++ {
+		f.sup.routePermissionRequest(out.RuntimeID, requestID, []any{map[string]any{"optionId": "allow_once", "kind": "allow"}})
+	}
+	if got := deciderSpawns.Load(); got != maxPermissionDeciderSpawnFailures {
+		t.Fatalf("decider spawns after exhaustion = %d, want no further spawns", got)
+	}
+	// The request stays pending for the human gate: no auto-reject, no local
+	// resolution, and the pending permission still surfaces in status.
+	if state := f.sup.control.PermissionResolverState(out.RuntimeID, requestID); state == control.PermissionResolverResolved {
+		t.Fatalf("permission resolver state = %v, want the request left unresolved", state)
+	}
+	if pending, _ := worker["pending_permission"].(bool); !pending {
+		t.Fatal("worker pending_permission = false, want the request to stay pending")
+	}
+}
+
+// TestDispatchPermissionDeciderConcurrencyCapHolds proves the supervisor caps
+// concurrent permission-decider runs: with the cap full, a new distinct
+// pending request is routed but spawns no decider run — it stays pending for
+// a human gate instead of crowding other runtimes out of the shared MaxRuntimes
+// admission — and once a decider run tears down and frees capacity, the
+// blocked request is unrouted so a later routing event can retry it.
+func TestDispatchPermissionDeciderConcurrencyCapHolds(t *testing.T) {
+	rosterPath := writeStage5Roster(t, t.TempDir(), `{
+		"worker":  {"backend": "pi", "agent": "worker", "model": "m"},
+		"rm-guard": {"backend": "pi", "agent": "rm-guard", "model": "guard-m"}
+	}`)
+	f := newDispatchFixtureTemplate(t, "permdec-cap", 8, 8, mustJSON(t, dispatchPermdecTemplate(rosterPath, "tmpl-dispatch-permdec-cap")))
+	blockedID := "perm_req_cap_blocked"
+	// Hold the decider runs open so the decider concurrency counter stays at
+	// the cap, and hold the worker prompt open so its routing state stays alive.
+	gate := make(chan struct{})
+	var gateOnce sync.Once
+	closeGate := func() { gateOnce.Do(func() { close(gate) }) }
+	defer closeGate()
+	var deciderSpawns atomic.Int64
+	f.sup.newProviderFunc = func(startOpts runtime.StartOptions, _ string) (runtime.Provider, error) {
+		if strings.HasPrefix(startOpts.Label, "permdec:") {
+			deciderSpawns.Add(1)
+			<-gate
+			return nil, fmt.Errorf("decider spawn released")
+		}
+		return &stableScriptedProvider{attempt: -1, scripts: []stableScriptedAttempt{{
+			sessionID: "ses_worker_cap",
+			events:    []stableScriptedEvent{{release: gate}},
+		}}}, nil
+	}
+	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
+	if err != nil {
+		t.Fatalf("dispatchWorkflowNode: %v", err)
+	}
+	if out.Kind != Dispatched {
+		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
+	}
+	waitFor(t, "worker runtime", func() bool {
+		_, err := f.sup.RuntimeStatus(out.RuntimeID)
+		return err == nil
+	})
+	options := []any{map[string]any{"optionId": "allow_once", "kind": "allow"}}
+	// Fill the cap with distinct pending requests, waiting for each spawn so
+	// the routing order is deterministic.
+	for i := 0; i < maxConcurrentPermissionDeciders; i++ {
+		f.sup.routePermissionRequest(out.RuntimeID, fmt.Sprintf("perm_req_cap_%d", i), options)
+		waitFor(t, fmt.Sprintf("decider spawn %d", i+1), func() bool { return deciderSpawns.Load() >= int64(i+1) })
+	}
+	// A further distinct request hits the cap: no spawn fires, the routed mark
+	// stays, and the request stays pending for a human gate.
+	for i := 0; i < 3; i++ {
+		f.sup.routePermissionRequest(out.RuntimeID, blockedID, options)
+	}
+	if got := deciderSpawns.Load(); got != int64(maxConcurrentPermissionDeciders) {
+		t.Fatalf("decider spawns = %d, want the cap of %d held with no overflow spawn", got, maxConcurrentPermissionDeciders)
+	}
+	for _, rt := range f.sup.listRuntimes() {
+		if label, _ := rt["label"].(string); label == "permdec:"+out.RuntimeID+":"+blockedID {
+			t.Fatalf("capped request spawned a decider run %q, want it left pending", label)
+		}
+	}
+	if state := f.sup.control.PermissionResolverState(out.RuntimeID, blockedID); state == control.PermissionResolverResolved {
+		t.Fatalf("capped request resolver state = %v, want the request left unresolved", state)
+	}
+	// Free the held decider runs: each spawn fails and releases its slot, and
+	// the release unrouts the blocked request so a later routing event retries
+	// it now that capacity has freed.
+	closeGate()
+	waitFor(t, "blocked request retried after capacity freed", func() bool {
+		f.sup.routePermissionRequest(out.RuntimeID, blockedID, options)
+		return deciderSpawns.Load() > int64(maxConcurrentPermissionDeciders)
+	})
+}
+
+// TestPermissionDeciderMarshalFailureDoesNotSpawnBlind proves options that
+// cannot be encoded never reach a decider as empty options: the failed encode
+// is a failed attempt against the retry bound, no decider run starts, and the
+// request stays pending for a human gate once the bound is exhausted.
+func TestPermissionDeciderMarshalFailureDoesNotSpawnBlind(t *testing.T) {
+	rosterPath := writeStage5Roster(t, t.TempDir(), `{
+		"worker":  {"backend": "pi", "agent": "worker", "model": "m"},
+		"rm-guard": {"backend": "pi", "agent": "rm-guard", "model": "guard-m"}
+	}`)
+	f := newDispatchFixtureTemplate(t, "permdec-marshal", 4, 4, mustJSON(t, dispatchPermdecTemplate(rosterPath, "tmpl-dispatch-permdec-marshal")))
+	requestID := "perm_req_marshal"
+	var deciderSpawns atomic.Int64
+	f.sup.newProviderFunc = func(startOpts runtime.StartOptions, _ string) (runtime.Provider, error) {
+		if strings.HasPrefix(startOpts.Label, "permdec:") {
+			deciderSpawns.Add(1)
+			return &stableScriptedProvider{attempt: -1, scripts: []stableScriptedAttempt{{
+				sessionID: "ses_decider_marshal",
+			}}}, nil
+		}
+		return &stableScriptedProvider{attempt: -1, scripts: []stableScriptedAttempt{{
+			sessionID: "ses_worker_marshal",
+		}}}, nil
+	}
+	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
+	if err != nil {
+		t.Fatalf("dispatchWorkflowNode: %v", err)
+	}
+	if out.Kind != Dispatched {
+		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
+	}
+	decider := workflow.PermissionDecider{Entry: "rm-guard", Backend: "pi", Agent: "rm-guard", Model: "guard-m"}
+	// A channel value cannot marshal: every attempt must fail before any
+	// provider call instead of spawning a decider that judges blind.
+	for i := 0; i < maxPermissionDeciderSpawnFailures; i++ {
+		f.sup.spawnPermissionDecider(decider, out.RuntimeID, requestID, []any{make(chan int)}, "worker")
+	}
+	if got := deciderSpawns.Load(); got != 0 {
+		t.Fatalf("decider spawns = %d, want none from marshal failures", got)
+	}
+	if state := f.sup.control.PermissionResolverState(out.RuntimeID, requestID); state == control.PermissionResolverResolved {
+		t.Fatal("permission resolver state resolved, want the request left pending")
+	}
+	// Each failed encode counts against the bound, so the exhaustion marker
+	// surfaces in runtime status after the bound is reached.
+	waitFor(t, "exhaustion surfaced", func() bool {
+		status, err := f.sup.RuntimeStatus(out.RuntimeID)
+		if err != nil {
+			return false
+		}
+		rt, _ := status.(map[string]any)
+		exhausted, _ := rt["permission_decider_exhausted"].(bool)
+		return exhausted
+	})
+}
+
+// TestPermissionDeciderSkipsAlreadyResolvedRequest proves the decider spawn
+// re-checks the control plane before starting: a request that was already
+// resolved (for example by a human answering through the control plane while
+// the spawn was being prepared) spawns no decider run.
+func TestPermissionDeciderSkipsAlreadyResolvedRequest(t *testing.T) {
+	rosterPath := writeStage5Roster(t, t.TempDir(), `{
+		"worker":  {"backend": "pi", "agent": "worker", "model": "m"},
+		"rm-guard": {"backend": "pi", "agent": "rm-guard", "model": "guard-m"}
+	}`)
+	template := mustJSON(t, dispatchPermdecTemplate(rosterPath, "tmpl-dispatch-permdec-resolved"))
+	f := newDispatchFixtureTemplate(t, "permdec-resolved", 4, 4, template)
+	requestID := "perm_req_resolved"
+	gate := make(chan struct{})
+	// Release the held spawn and the held worker prompt on every exit path so
+	// teardown never waits on them, even when an assertion below fails.
+	defer close(gate)
+	var deciderSpawns atomic.Int64
+	f.sup.newProviderFunc = func(startOpts runtime.StartOptions, _ string) (runtime.Provider, error) {
+		if strings.HasPrefix(startOpts.Label, "permdec:") {
+			deciderSpawns.Add(1)
+			// Hold the automatic spawn so only the explicit re-check below is
+			// under test; release it as a failure so no decider run lingers.
+			<-gate
+			return nil, fmt.Errorf("decider spawn failed")
+		}
+		return &stableScriptedProvider{attempt: -1, scripts: []stableScriptedAttempt{{
+			sessionID: "ses_worker_resolved",
+			events: []stableScriptedEvent{
+				{event: events.Event{
+					Event:     "permission.request",
+					SessionID: "ses_worker_resolved",
+					Fields: map[string]any{
+						"request_id": requestID,
+						"tool":       "bash",
+						"command":    "rm -rf /tmp/build",
+						"options":    []any{map[string]any{"optionId": "allow_once", "kind": "allow"}},
+					},
+				}},
+				// Hold the worker prompt open after the permission request so
+				// the child run never completes: its teardown would clear the
+				// runtime's control-plane claims, and the claim below must stay
+				// observable for the whole test.
+				{release: gate},
+			},
+		}}}, nil
+	}
+	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
+	if err != nil {
+		t.Fatalf("dispatchWorkflowNode: %v", err)
+	}
+	if out.Kind != Dispatched {
+		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
+	}
+	waitFor(t, "decider spawn blocked", func() bool { return deciderSpawns.Load() >= 1 })
+	// The claim is prepared before the event reaches the fanout writer that
+	// triggers the decider spawn, and the held worker prompt keeps it alive,
+	// so the claim must already be observable here.
+	waitFor(t, "permission claim", func() bool {
+		return f.sup.control.PermissionResolverState(out.RuntimeID, requestID) != control.PermissionResolverUnknown
+	})
+	if !f.sup.control.MarkPermissionClaimResolved(out.RuntimeID, requestID, "test", "allow_once", "") {
+		t.Fatal("MarkPermissionClaimResolved returned false")
+	}
+	// The already-resolved request must not start another decider run.
+	f.sup.spawnPermissionDecider(workflow.PermissionDecider{Entry: "rm-guard", Backend: "pi", Agent: "rm-guard", Model: "guard-m"},
+		out.RuntimeID, requestID, nil, "worker")
+	if got := deciderSpawns.Load(); got != 1 {
+		t.Fatalf("decider spawns = %d, want the resolved request to spawn none", got)
+	}
 }
 
 // TestDispatchCrashAfterBeginDispatchRecovers proves a process death after
