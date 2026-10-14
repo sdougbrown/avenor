@@ -111,7 +111,7 @@ type spawnArgs struct {
 	ServerURL      string   `json:"server_url,omitempty" jsonschema:"optional opencode serve URL for opencode-http backend"`
 	SupervisorID   string   `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
 	IdempotencyKey string   `json:"idempotency_key,omitempty" jsonschema:"optional idempotency key; a retry with the same key and parameters returns the original run instead of spawning a second one"`
-	LaunchWrapper  []string `json:"launch_wrapper,omitempty" jsonschema:"optional opaque argv prefix placed in front of the backend process command; avenor does not interpret it"`
+	LaunchWrapper  []string `json:"launch_wrapper,omitempty" jsonschema:"optional operator-supplied argv prefix applied by the supervisor in front of the backend command at launch; use is subject to the operator's deployment policy"`
 	AutoApprove    bool     `json:"auto_approve,omitempty" jsonschema:"optional auto-approve all permission requests so the run executes unattended (no answer_permission needed)"`
 }
 
