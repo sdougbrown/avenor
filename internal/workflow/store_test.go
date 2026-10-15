@@ -7,10 +7,12 @@ package workflow
 // standard library.
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -970,5 +972,175 @@ func TestStoreTemplateCanonicalizesMetadataNumbers(t *testing.T) {
 	var conflict *TemplateConflictError
 	if err == nil || !errors.As(err, &conflict) {
 		t.Fatalf("re-store with different metadata = %v, want TemplateConflictError", err)
+	}
+}
+
+// The cross-process StoreTemplate tests re-exec this test binary as a helper
+// subprocess. The env vars below switch the helper into registration mode;
+// without them the test is a no-op so normal runs skip it.
+const (
+	helperEnvRoot   = "AVENOR_STORE_TEMPLATE_HELPER_ROOT"
+	helperEnvName   = "AVENOR_STORE_TEMPLATE_HELPER_NAME"
+	helperEnvResult = "AVENOR_STORE_TEMPLATE_HELPER_RESULT"
+)
+
+// TestStoreTemplateCrossProcessHelper runs inside a helper subprocess: it
+// registers one template against the root passed in the environment and
+// writes the outcome ("ok", "conflict", or "error: ...") to the result file.
+func TestStoreTemplateCrossProcessHelper(t *testing.T) {
+	root := os.Getenv(helperEnvRoot)
+	if root == "" {
+		return
+	}
+	name := os.Getenv(helperEnvName)
+	resultPath := os.Getenv(helperEnvResult)
+
+	tmpl := storeTemplateFixture(t, "cross", "1")
+	tmpl.Nodes[0].Name = name
+	err := New(root).StoreTemplate("cross", "1", tmpl)
+	result := "conflict"
+	if err != nil {
+		var conflict *TemplateConflictError
+		if !errors.As(err, &conflict) {
+			result = "error: " + err.Error()
+		}
+	} else {
+		result = "ok"
+	}
+	if err := os.WriteFile(resultPath, []byte(result), 0o644); err != nil {
+		t.Fatalf("write result: %v", err)
+	}
+}
+
+// storeTemplateHelperCmd builds a helper-subprocess command that registers a
+// template whose node name is nodeName and records the outcome in resultPath.
+func storeTemplateHelperCmd(t *testing.T, root, nodeName, resultPath string) *exec.Cmd {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestStoreTemplateCrossProcessHelper$")
+	cmd.Env = append(os.Environ(),
+		helperEnvRoot+"="+root,
+		helperEnvName+"="+nodeName,
+		helperEnvResult+"="+resultPath,
+	)
+	return cmd
+}
+
+// TestStoreTemplateCrossProcessRegistrationBlocksOnRootLock proves the lock
+// StoreTemplate takes is the root-scoped flock, not just an in-process
+// mutex: while this test process holds <root>/templates.lock, a helper
+// process's StoreTemplate call must not complete, and once the lock is
+// released the helper must report a cross-process TemplateConflictError
+// against the already-stored template.
+func TestStoreTemplateCrossProcessRegistrationBlocksOnRootLock(t *testing.T) {
+	s := newStore(t)
+	first := storeTemplateFixture(t, "cross", "1")
+	first.Nodes[0].Name = "first"
+	if err := s.StoreTemplate("cross", "1", first); err != nil {
+		t.Fatalf("first registration: %v", err)
+	}
+
+	// Hold the root-scoped templates lock the way another process
+	// mid-registration would.
+	unlock, err := durablefile.Lock(filepath.Join(s.Root(), "templates.lock"))
+	if err != nil {
+		t.Fatalf("acquire templates lock: %v", err)
+	}
+
+	resultPath := filepath.Join(t.TempDir(), "helper-result")
+	var out bytes.Buffer
+	cmd := storeTemplateHelperCmd(t, s.Root(), "second", resultPath)
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Start(); err != nil {
+		unlock()
+		t.Fatalf("start helper: %v", err)
+	}
+
+	// While the lock is held the helper must stay blocked. Absence of the
+	// result file is the observation: a StoreTemplate that skipped the file
+	// lock would register the template and write the result within this
+	// window, failing the test.
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(resultPath); err == nil {
+			unlock()
+			_ = cmd.Wait()
+			t.Fatalf("helper completed while the templates lock was held here; StoreTemplate is not taking the root-scoped lock\nhelper output:\n%s", out.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if err := unlock(); err != nil {
+		t.Fatalf("release templates lock: %v", err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("helper after lock release: %v\nhelper output:\n%s", err, out.String())
+	}
+	result, err := os.ReadFile(resultPath)
+	if err != nil {
+		t.Fatalf("read helper result: %v\nhelper output:\n%s", err, out.String())
+	}
+	if string(result) != "conflict" {
+		t.Fatalf("helper result = %q, want \"conflict\"\nhelper output:\n%s", result, out.String())
+	}
+	loaded, err := s.LoadTemplate("cross", "1")
+	if err != nil {
+		t.Fatalf("LoadTemplate after helper: %v", err)
+	}
+	if loaded.Nodes[0].Name != "first" {
+		t.Fatalf("stored template holds node name %q, want the first registration's \"first\"", loaded.Nodes[0].Name)
+	}
+}
+
+// TestStoreTemplateCrossProcessRaceHasOneWinner races several helper
+// processes registering different content under the same id+version and
+// asserts exactly one registration wins while every loser reports a
+// TemplateConflictError — never a silent overwrite.
+func TestStoreTemplateCrossProcessRaceHasOneWinner(t *testing.T) {
+	s := newStore(t)
+	const writers = 8
+	resultsDir := t.TempDir()
+
+	cmds := make([]*exec.Cmd, writers)
+	resultPaths := make([]string, writers)
+	for i := range writers {
+		resultPaths[i] = filepath.Join(resultsDir, fmt.Sprintf("result-%d", i))
+		cmds[i] = storeTemplateHelperCmd(t, s.Root(), fmt.Sprintf("writer-%d", i), resultPaths[i])
+		if err := cmds[i].Start(); err != nil {
+			t.Fatalf("start helper %d: %v", i, err)
+		}
+	}
+	for i, cmd := range cmds {
+		if err := cmd.Wait(); err != nil {
+			t.Fatalf("helper %d: %v", i, err)
+		}
+	}
+
+	winnerIndex := -1
+	for i, path := range resultPaths {
+		result, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read helper %d result: %v", i, err)
+		}
+		switch string(result) {
+		case "ok":
+			if winnerIndex != -1 {
+				t.Fatalf("helpers %d and %d both registered", winnerIndex, i)
+			}
+			winnerIndex = i
+		case "conflict":
+		default:
+			t.Fatalf("helper %d result = %q, want \"ok\" or \"conflict\"", i, result)
+		}
+	}
+	if winnerIndex == -1 {
+		t.Fatal("no helper registered the template")
+	}
+	loaded, err := s.LoadTemplate("cross", "1")
+	if err != nil {
+		t.Fatalf("LoadTemplate after race: %v", err)
+	}
+	if want := fmt.Sprintf("writer-%d", winnerIndex); loaded.Nodes[0].Name != want {
+		t.Fatalf("stored template holds node name %q, want the winner's %q", loaded.Nodes[0].Name, want)
 	}
 }

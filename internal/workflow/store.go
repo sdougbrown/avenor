@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"sync"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/durablefile"
@@ -21,11 +20,6 @@ import (
 // snapshot per instance.
 type Store struct {
 	root string
-	// templateMu serializes template registrations so the existence and
-	// content checks in StoreTemplate cannot race a concurrent create's
-	// rename, which would silently overwrite a different template under the
-	// same id+version.
-	templateMu sync.Mutex
 	// now is the clock the recovery lease sweep reads for staleness (the
 	// "recovery" reason). It must match the manager's lease-liveness clock so
 	// injected timestamps and staleness comparisons agree.
@@ -268,8 +262,19 @@ func (s *Store) writeSnapshot(workflowID WorkflowID, snap Snapshot) error {
 // StoreTemplate atomically persists a versioned template under
 // <root>/templates/<templateID>/<version>.json.
 func (s *Store) StoreTemplate(templateID TemplateID, templateVersion TemplateVersion, template Template) error {
-	s.templateMu.Lock()
-	defer s.templateMu.Unlock()
+	// The existence and content checks must not race a concurrent create's
+	// rename, which would silently overwrite a different template under the
+	// same id+version. Registration is serialized with a root-scoped file
+	// lock rather than a mutex so supervisors sharing a workflow root — the
+	// default multi-process setup — are mutually excluded too.
+	if err := os.MkdirAll(s.root, 0o755); err != nil {
+		return err
+	}
+	unlock, err := durablefile.Lock(filepath.Join(s.root, "templates.lock"))
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	dir := filepath.Join(s.root, "templates", string(templateID))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
