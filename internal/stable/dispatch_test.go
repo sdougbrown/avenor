@@ -803,6 +803,27 @@ func TestResolveAssignmentSelectionPermissionDecider(t *testing.T) {
 	}
 }
 
+// TestResolveAssignmentSelectionRosterFileOnlyRejected proves a node
+// assignment that sets roster_file without a roster_entry (and without a
+// permission policy) is rejected at dispatch: the roster file remains an
+// identity selector, so the spawn-selection rules fire and the assignment
+// cannot silently run on the default backend.
+func TestResolveAssignmentSelectionRosterFileOnlyRejected(t *testing.T) {
+	rosterPath := writeStage5Roster(t, t.TempDir(), `{
+		"worker": {"backend": "pi", "agent": "worker", "model": "m"}
+	}`)
+	_, err := resolveAssignmentSelection(&workflow.Assignment{RosterFile: rosterPath})
+	if err == nil || !strings.Contains(err.Error(), "roster_file requires roster_entry") {
+		t.Fatalf("resolveAssignmentSelection(roster file without entry) error = %v, want roster_file requires roster_entry", err)
+	}
+	if _, err := resolveAssignmentSelection(&workflow.Assignment{
+		RosterFile:       rosterPath,
+		PermissionPolicy: &workflow.PermissionPolicy{Decider: "worker"},
+	}); err != nil {
+		t.Fatalf("resolveAssignmentSelection(decider without roster entry): %v", err)
+	}
+}
+
 // TestSpawnRejectsAutoApproveWithPermissionDecider pins the spawn guard: a
 // runtime cannot carry both unattended permission policies — auto-approve
 // resolves every request as allow, a permission decider routes requests to a

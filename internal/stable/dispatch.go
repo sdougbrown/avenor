@@ -585,11 +585,14 @@ func resolveAssignmentSelection(assignment *workflow.Assignment) (*workflow.Exec
 }
 
 // rosterFileForIdentity reports whether the assignment's roster file is part
-// of the spawn identity selection (a declared roster entry). A roster file
-// that only names the permission_policy decider is not an identity selector:
-// the decider resolves separately after the identity rules validate.
+// of the spawn identity selection. A declared roster entry always resolves
+// its identity from the file, and a roster file with no roster entry stays
+// an identity selector so the spawn-selection rules reject it — a bare
+// roster_file must not be silently ignored. A roster file that only names
+// the permission_policy decider is not an identity selector: the decider
+// resolves separately after the identity rules validate.
 func rosterFileForIdentity(assignment *workflow.Assignment) string {
-	if assignment.RosterEntry != "" {
+	if assignment.RosterEntry != "" || assignment.PermissionPolicy == nil {
 		return assignment.RosterFile
 	}
 	return ""
