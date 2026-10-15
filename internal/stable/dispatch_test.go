@@ -933,7 +933,7 @@ func TestDispatchAssignmentPermissionDeciderRoutesRequest(t *testing.T) {
 	if deciderDir == "" || deciderDir == workerDir {
 		t.Fatalf("decider dir = %q, want a scratch dir distinct from the worker dir %q", deciderDir, workerDir)
 	}
-	if !strings.HasPrefix(deciderDir, os.TempDir()+string(os.PathSeparator)) {
+	if !strings.HasPrefix(deciderDir, filepath.Clean(os.TempDir())+string(os.PathSeparator)) {
 		t.Fatalf("decider dir = %q, want a scratch dir under %s", deciderDir, os.TempDir())
 	}
 	waitFor(t, "decider scratch dir removed", func() bool {
