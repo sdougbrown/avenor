@@ -2,6 +2,7 @@ package teamrunner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -221,5 +222,81 @@ func TestRunMemberErrorAfterDeadlineIsTimeout(t *testing.T) {
 	}
 	if result.ExitCode != 124 || result.StopReason != "timeout" {
 		t.Fatalf("Run() = {%d %q}, want {124 timeout}", result.ExitCode, result.StopReason)
+	}
+}
+
+// TestRunPrePhaseDeadlineReportsTimeout pins the pre-phase timeout
+// classification: a pre-phase stopped by the run deadline (its per-waiter
+// timer reports timeout) ends the team with the timeout exit reason, not
+// pre_failure.
+func TestRunPrePhaseDeadlineReportsTimeout(t *testing.T) {
+	cfg := makeConfig(
+		[]phaseconfig.Phase{simplePhase("setup", "do setup")},
+		[]phaseconfig.Phase{simplePhase("review", "review")},
+		nil,
+	)
+
+	var events eventsRecorder
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(5*time.Second))
+	defer cancel()
+
+	result, err := Run(ctx, RunOptions{
+		WorkDir:   t.TempDir(),
+		RunID:     "test-run",
+		EventSink: &events,
+		Config:    cfg,
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
+			// The attempt's per-waiter timer fired before the run deadline,
+			// so the classification under test decides the exit reason.
+			return PhaseAttemptResult{ExitCode: 124, StopReason: "timeout"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.ExitCode != 124 || result.StopReason != "timeout" {
+		t.Fatalf("Run() = {%d %q}, want {124 timeout}", result.ExitCode, result.StopReason)
+	}
+	if !events.has("avenor.team.end", "timeout") {
+		t.Fatalf("team end event = %+v, want exit_reason timeout", events.snapshot())
+	}
+}
+
+// TestRunPrePhaseNudgeAttemptErrorPropagates pins the nudge attempt's error
+// path: an error from the incomplete-output nudge must reach Run instead of
+// being dropped, which would misclassify an internal failure as a clean or
+// incomplete stop.
+func TestRunPrePhaseNudgeAttemptErrorPropagates(t *testing.T) {
+	cfg := makeConfig(
+		[]phaseconfig.Phase{{
+			Name:   "setup",
+			Prompt: "do setup",
+			Requires: phaseconfig.PhaseRequirements{
+				NonEmptyFiles: []string{"SETUP.md"},
+			},
+		}},
+		[]phaseconfig.Phase{simplePhase("review", "review")},
+		nil,
+	)
+
+	boom := errors.New("nudge attempt exploded")
+	var attempts atomic.Int32
+	_, err := Run(context.Background(), RunOptions{
+		WorkDir:   t.TempDir(),
+		RunID:     "test-run",
+		EventSink: discardEventWriter{},
+		Config:    cfg,
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
+			if attempts.Add(1) == 1 {
+				return PhaseAttemptResult{ExitCode: 0, StopReason: "end_turn", SessionID: "s1"}, nil
+			}
+			return PhaseAttemptResult{}, boom
+		},
+	})
+	if !errors.Is(err, boom) {
+		t.Fatalf("Run() error = %v, want the nudge attempt error", err)
+	}
+	if attempts.Load() != 2 {
+		t.Fatalf("attempts = %d, want 2 (initial attempt + nudge)", attempts.Load())
 	}
 }

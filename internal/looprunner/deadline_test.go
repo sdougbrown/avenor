@@ -2,6 +2,7 @@ package looprunner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -259,4 +260,83 @@ func (r *eventRecorder) has(name, exitReason string) bool {
 		}
 	}
 	return false
+}
+
+// TestLoopPrePhaseDeadlineReportsTimeout pins the sequential-phase timeout
+// classification: a pre-phase stopped by the run deadline (its per-waiter
+// timer reports timeout) ends the loop with the timeout exit reason, not
+// phase_failure.
+func TestLoopPrePhaseDeadlineReportsTimeout(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &LoopConfig{
+		MaxIterations: 1,
+		Pre:           []phaseconfig.Phase{{Name: "orient", Prompt: "orient"}},
+		Loop:          []phaseconfig.Phase{{Name: "review", Prompt: "review"}},
+	}
+
+	var events eventRecorder
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(5*time.Second))
+	defer cancel()
+
+	result, err := Run(ctx, RunOptions{
+		WorkDir:   dir,
+		RunID:     "test-run",
+		EventSink: &events,
+		Config:    cfg,
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, iteration int, prevSessionID string) (PhaseAttemptResult, error) {
+			// The attempt's per-waiter timer fired before the run deadline:
+			// the run deadline is still in the future, so the classification
+			// under test — not the post-attempt deadline check — decides the
+			// exit reason.
+			return PhaseAttemptResult{ExitCode: 124, StopReason: "timeout"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.ExitCode != 124 || result.StopReason != "timeout" {
+		t.Fatalf("Run() = {%d %q}, want {124 timeout}", result.ExitCode, result.StopReason)
+	}
+	if !events.has("avenor.loop.end", "timeout") {
+		t.Fatalf("loop end event = %+v, want exit_reason timeout", events.snapshot())
+	}
+}
+
+// TestLoopNudgeAttemptErrorPropagates pins the nudge attempt's error path:
+// an error from the incomplete-output nudge must reach Run instead of being
+// dropped, which would misclassify an internal failure as a clean or
+// incomplete stop.
+func TestLoopNudgeAttemptErrorPropagates(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &LoopConfig{
+		MaxIterations: 1,
+		Loop: []phaseconfig.Phase{{
+			Name:   "review",
+			Prompt: "review",
+			Requires: phaseconfig.PhaseRequirements{
+				NonEmptyFiles: []string{"REVIEW_CODE.md"},
+			},
+		}},
+	}
+
+	boom := errors.New("nudge attempt exploded")
+	var attempts atomic.Int32
+	_, err := Run(context.Background(), RunOptions{
+		WorkDir:   dir,
+		RunID:     "test-run",
+		EventSink: &eventRecorder{},
+		Config:    cfg,
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, iteration int, prevSessionID string) (PhaseAttemptResult, error) {
+			if attempts.Add(1) == 1 {
+				return PhaseAttemptResult{ExitCode: 0, StopReason: "end_turn", SessionID: "s1"}, nil
+			}
+			return PhaseAttemptResult{}, boom
+		},
+	})
+	if !errors.Is(err, boom) {
+		t.Fatalf("Run() error = %v, want the nudge attempt error", err)
+	}
+	if attempts.Load() != 2 {
+		t.Fatalf("attempts = %d, want 2 (initial attempt + nudge)", attempts.Load())
+	}
 }
