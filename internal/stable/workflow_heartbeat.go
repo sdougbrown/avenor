@@ -15,6 +15,12 @@ import (
 // attempt's runtime is live. Without it, a runtime that outlives its lease's
 // TTL would be swept as lease_expired while still running, letting a second
 // attempt run concurrently.
+//
+// The lease is a liveness/recovery mechanism, not an execution deadline: a
+// renewal never extends an attempt's wall-clock limit. Dispatched loop, team,
+// and run children bound their execution independently through the context
+// deadline derived from their action's timeout (see runLoopChild, runTeamChild,
+// and runChild), so a live but semantically stuck runtime still stops.
 
 // leaseHeartbeat is one attempt's heartbeat goroutine. Stop closes the stop
 // channel; the goroutine exits on stop, supervisor shutdown, or a heartbeat

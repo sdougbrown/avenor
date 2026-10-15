@@ -352,7 +352,7 @@ func waitForSessionForTest(
 	runLabel string,
 	autoApprove bool,
 	permClaimTimeout time.Duration,
-	timeout <-chan time.Time,
+	deadline time.Time,
 	stderr io.Writer,
 ) sessionResult {
 	return WaitForSession(ctx, provider, SessionWaitConfig{
@@ -364,7 +364,7 @@ func waitForSessionForTest(
 		RunLabel:               runLabel,
 		AutoApprove:            autoApprove,
 		PermissionClaimTimeout: permClaimTimeout,
-		Timeout:                timeout,
+		Deadline:               deadline,
 	}, SessionWaitDeps{
 		Writer:        writer,
 		FileHandler:   fileHandler,
@@ -443,7 +443,7 @@ func TestWaitForSessionAutoApproveAnswersAllowKindAndOrdersEvents(t *testing.T) 
 
 	provider := &cliFakeProvider{}
 	var stderr strings.Builder
-	result := waitForSessionForTest(context.Background(), provider, writer, nil, nil, eventCh, promptDone, nil, "ses_1", "run_1", "review", true, DefaultPermissionClaimTimeout, nil, &stderr)
+	result := waitForSessionForTest(context.Background(), provider, writer, nil, nil, eventCh, promptDone, nil, "ses_1", "run_1", "review", true, DefaultPermissionClaimTimeout, time.Time{}, &stderr)
 	if closeErr := writer.Close(); closeErr != nil {
 		t.Fatalf("close writer: %v", closeErr)
 	}
@@ -580,7 +580,7 @@ func TestPermissionRequestEmitsEffectiveResolverAndClaimState(t *testing.T) {
 				fileHandler = permission.NewFileHandler(filepath.Join(t.TempDir(), "permission"))
 			}
 
-			result := waitForSessionForTest(ctx, &cliFakeProvider{}, sink, fileHandler, cs, eventCh, promptDone, nil, "ses_resolver", "run_1", "", tt.autoApprove, time.Millisecond, nil, io.Discard)
+			result := waitForSessionForTest(ctx, &cliFakeProvider{}, sink, fileHandler, cs, eventCh, promptDone, nil, "ses_resolver", "run_1", "", tt.autoApprove, time.Millisecond, time.Time{}, io.Discard)
 			if result.ExitCode == 0 && tt.want == control.PermissionResolverReserved {
 				t.Fatal("reserved permission unexpectedly completed")
 			}
@@ -617,7 +617,7 @@ func TestPermissionRequestResolverInjectionDoesNotMutateSourceEvent(t *testing.T
 	promptDone <- nil
 	sink := &permissionRequestCaptureSink{}
 
-	result := waitForSessionForTest(context.Background(), &cliFakeProvider{}, sink, nil, nil, eventCh, promptDone, nil, source.SessionID, "run_source_event", "", true, DefaultPermissionClaimTimeout, nil, io.Discard)
+	result := waitForSessionForTest(context.Background(), &cliFakeProvider{}, sink, nil, nil, eventCh, promptDone, nil, source.SessionID, "run_source_event", "", true, DefaultPermissionClaimTimeout, time.Time{}, io.Discard)
 	if result.ExitCode != 0 {
 		t.Fatalf("WaitForSession exit code = %d, want 0", result.ExitCode)
 	}
@@ -660,7 +660,7 @@ func TestWaitForSessionFilePermissionEmitsOneEffectiveRequestAndCleansUp(t *test
 	promptDone <- nil
 	sink := &permissionRequestCaptureSink{onRequest: cancel}
 
-	result := waitForSessionForTest(ctx, &cliFakeProvider{}, sink, handler, nil, eventCh, promptDone, nil, "ses_file_once", "run_1", "", false, time.Second, nil, io.Discard)
+	result := waitForSessionForTest(ctx, &cliFakeProvider{}, sink, handler, nil, eventCh, promptDone, nil, "ses_file_once", "run_1", "", false, time.Second, time.Time{}, io.Discard)
 	if result.ExitCode != 130 {
 		t.Fatalf("WaitForSession exit code = %d, want 130", result.ExitCode)
 	}
@@ -680,13 +680,14 @@ func TestWaitForSessionSynchronizesFileCleanupForEveryTerminationSource(t *testi
 		name             string
 		stopReason       string
 		expectedExitCode int
-		trigger          func(chan<- error, chan<- time.Time, chan<- time.Time, chan<- struct{})
+		deadline         time.Time
+		trigger          func(chan<- error, chan<- time.Time, chan<- struct{})
 	}{
 		{
 			name:             "prompt cancellation",
 			stopReason:       "cancelled",
 			expectedExitCode: 130,
-			trigger: func(promptDone chan<- error, _ chan<- time.Time, _ chan<- time.Time, _ chan<- struct{}) {
+			trigger: func(promptDone chan<- error, _ chan<- time.Time, _ chan<- struct{}) {
 				promptDone <- context.Canceled
 			},
 		},
@@ -694,7 +695,7 @@ func TestWaitForSessionSynchronizesFileCleanupForEveryTerminationSource(t *testi
 			name:             "progress timeout",
 			stopReason:       "progress_timeout",
 			expectedExitCode: 124,
-			trigger: func(_ chan<- error, progressTimer chan<- time.Time, _ chan<- time.Time, _ chan<- struct{}) {
+			trigger: func(_ chan<- error, progressTimer chan<- time.Time, _ chan<- struct{}) {
 				progressTimer <- time.Time{}
 			},
 		},
@@ -702,15 +703,15 @@ func TestWaitForSessionSynchronizesFileCleanupForEveryTerminationSource(t *testi
 			name:             "configured timeout",
 			stopReason:       "timeout",
 			expectedExitCode: 124,
-			trigger: func(_ chan<- error, _ chan<- time.Time, timeout chan<- time.Time, _ chan<- struct{}) {
-				timeout <- time.Time{}
-			},
+			// The shared run deadline is a wall-clock deadline now: the wait
+			// stops on its own once the per-waiter timer expires.
+			deadline: time.Now().Add(50 * time.Millisecond),
 		},
 		{
 			name:             "interrupt",
 			stopReason:       "cancelled",
 			expectedExitCode: 130,
-			trigger: func(_ chan<- error, _ chan<- time.Time, _ chan<- time.Time, interruptCh chan<- struct{}) {
+			trigger: func(_ chan<- error, _ chan<- time.Time, interruptCh chan<- struct{}) {
 				interruptCh <- struct{}{}
 			},
 		},
@@ -723,7 +724,6 @@ func TestWaitForSessionSynchronizesFileCleanupForEveryTerminationSource(t *testi
 			handler.PollInterval = time.Millisecond
 			promptDone := make(chan error)
 			progressTimer := make(chan time.Time, 1)
-			timeout := make(chan time.Time, 1)
 			interruptCh := make(chan struct{}, 1)
 			eventCh := make(chan events.Event, 1)
 			eventCh <- events.Event{Event: "permission.request", SessionID: "ses_cleanup", Fields: map[string]any{
@@ -744,7 +744,7 @@ func TestWaitForSessionSynchronizesFileCleanupForEveryTerminationSource(t *testi
 					RunID:                  "run_cleanup",
 					PermissionClaimTimeout: time.Second,
 					ProgressTimeout:        time.Second,
-					Timeout:                timeout,
+					Deadline:               tt.deadline,
 				}, SessionWaitDeps{
 					Writer:         sink,
 					FileHandler:    handler,
@@ -770,7 +770,9 @@ func TestWaitForSessionSynchronizesFileCleanupForEveryTerminationSource(t *testi
 			triggerDone := make(chan struct{})
 			go func() {
 				defer close(triggerDone)
-				tt.trigger(promptDone, progressTimer, timeout, interruptCh)
+				if tt.trigger != nil {
+					tt.trigger(promptDone, progressTimer, interruptCh)
+				}
 			}()
 			select {
 			case result := <-resultCh:
@@ -901,6 +903,60 @@ func TestRunCleansSentinelFilesBetweenRetries(t *testing.T) {
 	}
 	if attempts != 2 {
 		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+}
+
+// TestRunRetryBackoffStopsAtRunDeadline proves the direct run path cannot
+// escape the shared --timeout deadline: when the deadline expires during a
+// retry backoff, the run is classified as a timeout (exit 124) with a TIMEOUT
+// sentinel, not a generic retryable failure.
+func TestRunRetryBackoffStopsAtRunDeadline(t *testing.T) {
+	oldRunAttempt, oldRetryAfter := runAttempt, retryAfter
+	t.Cleanup(func() {
+		runAttempt, retryAfter = oldRunAttempt, oldRetryAfter
+	})
+
+	dir := t.TempDir()
+	promptPath := filepath.Join(dir, "prompt.txt")
+	sentinelPath := filepath.Join(dir, "run.done")
+	if err := os.WriteFile(promptPath, []byte("hello"), 0o600); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+
+	var attempts int
+	runAttempt = func(ctx context.Context, cfg attemptConfig, deps attemptDeps) attemptResult {
+		attempts++
+		return attemptResult{exitCode: 1, sessionID: fmt.Sprintf("ses_%d", attempts)}
+	}
+	// The backoff never fires its own tick; only the run deadline can end it.
+	retryAfter = func(time.Duration) <-chan time.Time {
+		return make(chan time.Time)
+	}
+
+	var stderr strings.Builder
+	exitCode := run([]string{
+		"--prompt-file", promptPath,
+		"--sentinel-file", sentinelPath,
+		"--timeout", "50ms",
+		"--max-retries", "3",
+	}, func(key string) string {
+		if key == "AVENOR_OPENCODE_URL" {
+			return "http://localhost:8080"
+		}
+		return ""
+	}, &stderr)
+	if exitCode != 124 {
+		t.Fatalf("run() = %d, want 124; stderr=%s", exitCode, stderr.String())
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1 (deadline stops the retry)", attempts)
+	}
+	raw, err := os.ReadFile(sentinelPath)
+	if err != nil {
+		t.Fatalf("read sentinel: %v", err)
+	}
+	if !strings.Contains(string(raw), "TIMEOUT") || !strings.Contains(string(raw), "STOP_REASON=timeout") {
+		t.Fatalf("sentinel = %q, want TIMEOUT with STOP_REASON=timeout", string(raw))
 	}
 }
 
@@ -2128,9 +2184,7 @@ func TestWaitForSessionExitMatrixStopsEveryNonCleanReturn(t *testing.T) {
 		{
 			name: "synthetic timeout",
 			setup: func(cfg *SessionWaitConfig) {
-				timeout := make(chan time.Time, 1)
-				timeout <- time.Now()
-				cfg.Timeout = timeout
+				cfg.Deadline = time.Now().Add(-time.Second)
 			},
 			wantExitCode:    124,
 			wantStopReason:  "timeout",
@@ -2220,9 +2274,8 @@ func TestWaitForSessionExitMatrixPreservesForwardedAuthoritativeEndDuringTeardow
 		{
 			name: "configured timeout",
 			trigger: func(_ context.CancelFunc, cfg *SessionWaitConfig, _ *SessionWaitDeps, _ *waitExitMatrixProvider) func() {
-				timeoutCh := make(chan time.Time, 1)
-				cfg.Timeout = timeoutCh
-				return func() { timeoutCh <- time.Now() }
+				cfg.Deadline = time.Now().Add(50 * time.Millisecond)
+				return func() {}
 			},
 		},
 		{
@@ -2333,7 +2386,6 @@ func TestWaitForSessionTerminationCancelsBeforeJoiningPermissionAnswer(t *testin
 			ctx, cancel := context.WithCancel(context.Background())
 			interruptCh := make(chan struct{})
 			progressCh := make(chan time.Time, 1)
-			timeoutCh := make(chan time.Time, 1)
 			promptDone := make(chan error, 1)
 			eventCh := make(chan events.Event, 1)
 			eventCh <- events.Event{
@@ -2345,6 +2397,13 @@ func TestWaitForSessionTerminationCancelsBeforeJoiningPermissionAnswer(t *testin
 						map[string]any{"optionId": "allow", "kind": "allow"},
 					},
 				},
+			}
+
+			cfgDeadline := time.Time{}
+			if tt.trigger == "timeout" {
+				// The shared run deadline is a wall-clock deadline now: the
+				// wait stops on its own once the per-waiter timer expires.
+				cfgDeadline = time.Now().Add(50 * time.Millisecond)
 			}
 
 			resultCh := make(chan sessionResult, 1)
@@ -2370,7 +2429,7 @@ func TestWaitForSessionTerminationCancelsBeforeJoiningPermissionAnswer(t *testin
 					SessionID:   "ses_cancel_answer",
 					RunID:       "run_cancel_answer",
 					AutoApprove: true,
-					Timeout:     timeoutCh,
+					Deadline:    cfgDeadline,
 				}, SessionWaitDeps{
 					Writer:         writer,
 					Stderr:         io.Discard,
@@ -2393,7 +2452,7 @@ func TestWaitForSessionTerminationCancelsBeforeJoiningPermissionAnswer(t *testin
 			case "progress":
 				progressCh <- time.Now()
 			case "timeout":
-				timeoutCh <- time.Now()
+				// The deadline timer drives this case on its own.
 			}
 
 			select {
@@ -2447,6 +2506,7 @@ func TestProviderLifecycleDefersCloseAndSharesBlockedCancel(t *testing.T) {
 					},
 				},
 			}
+
 			resultCh := make(chan sessionResult, 1)
 			waitDone := make(chan struct{})
 			t.Cleanup(func() {
@@ -2929,7 +2989,7 @@ func TestAutoAnswerGoroutineDoesNotBlockEventLoop(t *testing.T) {
 	var result sessionResult
 	go func() {
 		defer wg.Done()
-		result = waitForSessionForTest(context.Background(), provider, writer, nil, nil, eventCh, promptDone, nil, "ses_1", "run_1", "", true, DefaultPermissionClaimTimeout, nil, io.Discard)
+		result = waitForSessionForTest(context.Background(), provider, writer, nil, nil, eventCh, promptDone, nil, "ses_1", "run_1", "", true, DefaultPermissionClaimTimeout, time.Time{}, io.Discard)
 	}()
 
 	// Wait until AnswerPermission has been called (goroutine is now blocked inside it).
@@ -3015,7 +3075,7 @@ func TestAutoAnswerMissingRequestIDEmitsErrorNotWorking(t *testing.T) {
 
 	provider := &cliFakeProvider{}
 	var stderr strings.Builder
-	result := waitForSessionForTest(context.Background(), provider, writer, nil, nil, eventCh, promptDone, nil, "ses_1", "run_1", "", true, DefaultPermissionClaimTimeout, nil, &stderr)
+	result := waitForSessionForTest(context.Background(), provider, writer, nil, nil, eventCh, promptDone, nil, "ses_1", "run_1", "", true, DefaultPermissionClaimTimeout, time.Time{}, &stderr)
 	if err := writer.Close(); err != nil {
 		t.Fatalf("close writer: %v", err)
 	}
@@ -3091,7 +3151,7 @@ func TestAutoAnswerEmitsPermissionResponse(t *testing.T) {
 
 	provider := &cliFakeProvider{}
 	var stderr strings.Builder
-	result := waitForSessionForTest(context.Background(), provider, writer, nil, nil, eventCh, promptDone, nil, "ses_1", "run_1", "mylabel", true, DefaultPermissionClaimTimeout, nil, &stderr)
+	result := waitForSessionForTest(context.Background(), provider, writer, nil, nil, eventCh, promptDone, nil, "ses_1", "run_1", "mylabel", true, DefaultPermissionClaimTimeout, time.Time{}, &stderr)
 	if err := writer.Close(); err != nil {
 		t.Fatalf("close writer: %v", err)
 	}
@@ -3162,7 +3222,7 @@ func TestAutoAnswerAnswerPermissionErrorEmitsError(t *testing.T) {
 
 	provider := &errorFakeProvider{answerErr: fmt.Errorf("backend unavailable")}
 	var stderr strings.Builder
-	result := waitForSessionForTest(context.Background(), provider, writer, nil, nil, eventCh, promptDone, nil, "ses_1", "run_1", "", true, DefaultPermissionClaimTimeout, nil, &stderr)
+	result := waitForSessionForTest(context.Background(), provider, writer, nil, nil, eventCh, promptDone, nil, "ses_1", "run_1", "", true, DefaultPermissionClaimTimeout, time.Time{}, &stderr)
 	if closeErr := writer.Close(); closeErr != nil {
 		t.Fatalf("close writer: %v", closeErr)
 	}
@@ -3217,7 +3277,7 @@ func TestAutoAnswerWorkingStatusEmittedOnPermissionResume(t *testing.T) {
 	var result sessionResult
 	go func() {
 		defer wg.Done()
-		result = waitForSessionForTest(context.Background(), provider, writer, nil, nil, eventCh, promptDone, nil, "ses_1", "run_1", "", true, DefaultPermissionClaimTimeout, nil, io.Discard)
+		result = waitForSessionForTest(context.Background(), provider, writer, nil, nil, eventCh, promptDone, nil, "ses_1", "run_1", "", true, DefaultPermissionClaimTimeout, time.Time{}, io.Discard)
 	}()
 
 	// Wait until AnswerPermission is called, then unblock it so the
@@ -3351,7 +3411,7 @@ func TestControlPermissionResolution(t *testing.T) {
 	var result sessionResult
 	go func() {
 		defer wg.Done()
-		result = waitForSessionForTest(context.Background(), provider, writer, nil, cs, eventCh, promptDone, nil, "ses_ctrl", "run_1", "mylabel", false, 5*time.Second, nil, io.Discard)
+		result = waitForSessionForTest(context.Background(), provider, writer, nil, cs, eventCh, promptDone, nil, "ses_ctrl", "run_1", "mylabel", false, 5*time.Second, time.Time{}, io.Discard)
 	}()
 
 	waitForPendingPermissionForTest(t, cs)
@@ -3500,7 +3560,7 @@ func TestControlPermissionNonLiteralOptionIDMapsByKind(t *testing.T) {
 		var result sessionResult
 		go func() {
 			defer wg.Done()
-			result = waitForSessionForTest(context.Background(), provider, writer, nil, cs, eventCh, promptDone, nil, "ses_map", "run_map", "", false, 5*time.Second, nil, io.Discard)
+			result = waitForSessionForTest(context.Background(), provider, writer, nil, cs, eventCh, promptDone, nil, "ses_map", "run_map", "", false, 5*time.Second, time.Time{}, io.Discard)
 		}()
 
 		waitForPendingPermissionForTest(t, cs)
@@ -3530,8 +3590,18 @@ func TestControlPermissionNonLiteralOptionIDMapsByKind(t *testing.T) {
 		if err := writer.Close(); err != nil {
 			t.Fatalf("close writer: %v", err)
 		}
-		if result.ExitCode != 0 {
-			t.Fatalf("WaitForSession() = %d, want 0", result.ExitCode)
+		// A turn that ends end_turn right after an explicitly rejected
+		// approval request is the denial masquerade: the clean stop reason is
+		// not evidence of completion.
+		wantExitCode, wantStopReason := 0, "end_turn"
+		if !expectAllow {
+			wantExitCode, wantStopReason = 2, "tool_denied"
+		}
+		if result.ExitCode != wantExitCode {
+			t.Fatalf("WaitForSession() = %d, want %d", result.ExitCode, wantExitCode)
+		}
+		if result.StopReason != wantStopReason {
+			t.Fatalf("StopReason = %q, want %q", result.StopReason, wantStopReason)
 		}
 		if provider.answerResponse.Allow != expectAllow {
 			t.Fatalf("answerResponse.Allow = %v, want %v (optionID=%q)", provider.answerResponse.Allow, expectAllow, optionID)
@@ -3608,7 +3678,7 @@ func TestControlPermissionRejectsUnknownOptionID(t *testing.T) {
 	var result sessionResult
 	go func() {
 		defer wg.Done()
-		result = waitForSessionForTest(context.Background(), provider, writer, nil, cs, eventCh, promptDone, nil, "ses_bad", "run_bad", "", false, 5*time.Second, nil, io.Discard)
+		result = waitForSessionForTest(context.Background(), provider, writer, nil, cs, eventCh, promptDone, nil, "ses_bad", "run_bad", "", false, 5*time.Second, time.Time{}, io.Discard)
 	}()
 	waitForPendingPermissionForTest(t, cs)
 
@@ -3690,7 +3760,7 @@ func TestControlPermissionRejectsUnsupportedKind(t *testing.T) {
 	var result sessionResult
 	go func() {
 		defer wg.Done()
-		result = waitForSessionForTest(context.Background(), provider, writer, nil, cs, eventCh, promptDone, nil, "ses_bad_kind", "run_bad_kind", "", false, 5*time.Second, nil, io.Discard)
+		result = waitForSessionForTest(context.Background(), provider, writer, nil, cs, eventCh, promptDone, nil, "ses_bad_kind", "run_bad_kind", "", false, 5*time.Second, time.Time{}, io.Discard)
 	}()
 	waitForPendingPermissionForTest(t, cs)
 
@@ -3749,7 +3819,7 @@ func TestAutoAnswerSecondRequestWhilePendingEmitsErrorAndExits(t *testing.T) {
 		signal:    overlapSeen,
 	}
 	go func() {
-		resultCh <- waitForSessionForTest(context.Background(), provider, sink, nil, nil, eventCh, promptDone, nil, "ses_1", "run_1", "", true, DefaultPermissionClaimTimeout, nil, io.Discard)
+		resultCh <- waitForSessionForTest(context.Background(), provider, sink, nil, nil, eventCh, promptDone, nil, "ses_1", "run_1", "", true, DefaultPermissionClaimTimeout, time.Time{}, io.Discard)
 	}()
 	var unblockOnce sync.Once
 	unblockProvider := func() { unblockOnce.Do(func() { close(provider.unblockAnswer) }) }
@@ -4876,7 +4946,7 @@ func TestWaitForSessionCancelledFilePermissionCancelsRun(t *testing.T) {
 	promptDone := make(chan error)
 
 	provider := &cliFakeProvider{}
-	result := waitForSessionForTest(context.Background(), provider, writer, fh, nil, eventCh, promptDone, nil, "ses_cancel_file", "run_cancel_file", "", false, DefaultPermissionClaimTimeout, nil, io.Discard)
+	result := waitForSessionForTest(context.Background(), provider, writer, fh, nil, eventCh, promptDone, nil, "ses_cancel_file", "run_cancel_file", "", false, DefaultPermissionClaimTimeout, time.Time{}, io.Discard)
 	if err := writer.Close(); err != nil {
 		t.Fatalf("close writer: %v", err)
 	}
@@ -4938,7 +5008,7 @@ func TestWaitForSessionClosedEventChannelWaitsForPermissionThenErrors(t *testing
 	defer writer.Close()
 
 	provider := &cliFakeProvider{}
-	result := waitForSessionForTest(context.Background(), provider, writer, fh, nil, eventCh, promptDone, nil, "ses_closed", "run_closed", "", false, DefaultPermissionClaimTimeout, nil, io.Discard)
+	result := waitForSessionForTest(context.Background(), provider, writer, fh, nil, eventCh, promptDone, nil, "ses_closed", "run_closed", "", false, DefaultPermissionClaimTimeout, time.Time{}, io.Discard)
 
 	if result.ExitCode != 1 {
 		t.Fatalf("WaitForSession() = %d, want 1", result.ExitCode)
@@ -5159,7 +5229,7 @@ func TestWaitForSessionChunkedLoopMarker(t *testing.T) {
 				eventCh, promptDone, nil,
 				"ses_chunk", "run_chunk", "",
 				true, DefaultPermissionClaimTimeout,
-				nil, &stderr,
+				time.Time{}, &stderr,
 			)
 			if closeErr := writer.Close(); closeErr != nil {
 				t.Fatalf("close writer: %v", closeErr)
@@ -5504,7 +5574,7 @@ func TestWaitForSessionChunkedStatusMarker(t *testing.T) {
 				eventCh, promptDone, nil,
 				"ses_chunk", "run_chunk", "",
 				true, DefaultPermissionClaimTimeout,
-				nil, &stderr,
+				time.Time{}, &stderr,
 			)
 			if closeErr := writer.Close(); closeErr != nil {
 				t.Fatalf("close writer: %v", closeErr)
@@ -5583,7 +5653,7 @@ func TestWaitForSessionChunkedStatusMarkerDedup(t *testing.T) {
 		eventCh, promptDone, nil,
 		"ses_dedup", "run_dedup", "",
 		true, DefaultPermissionClaimTimeout,
-		nil, &stderr,
+		time.Time{}, &stderr,
 	)
 	if closeErr := writer.Close(); closeErr != nil {
 		t.Fatalf("close writer: %v", closeErr)
@@ -5637,7 +5707,7 @@ func TestCancelAndEndIncludesBufferedUsage(t *testing.T) {
 	var result sessionResult
 	go func() {
 		defer wg.Done()
-		result = waitForSessionForTest(context.Background(), provider, writer, nil, nil, eventCh, nil, nil, "ses_usage", "run_usage", "", true, DefaultPermissionClaimTimeout, timeoutCh, io.Discard)
+		result = waitForSessionForTest(context.Background(), provider, writer, nil, nil, eventCh, nil, nil, "ses_usage", "run_usage", "", true, DefaultPermissionClaimTimeout, time.Now().Add(500*time.Millisecond), io.Discard)
 	}()
 
 	usageWritten := make(chan struct{})
@@ -5724,7 +5794,7 @@ func TestCancelAndEndNilUsage(t *testing.T) {
 	var result sessionResult
 	go func() {
 		defer wg.Done()
-		result = waitForSessionForTest(context.Background(), provider, writer, nil, nil, eventCh, nil, nil, "ses_nousage", "run_nousage", "", true, DefaultPermissionClaimTimeout, timeoutCh, io.Discard)
+		result = waitForSessionForTest(context.Background(), provider, writer, nil, nil, eventCh, nil, nil, "ses_nousage", "run_nousage", "", true, DefaultPermissionClaimTimeout, time.Now().Add(500*time.Millisecond), io.Discard)
 	}()
 
 	// No usage-bearing event — fire timeout immediately.
@@ -5784,7 +5854,7 @@ func TestWaitForSessionAccumulatesAgentMessageOutput(t *testing.T) {
 	}
 	defer writer.Close()
 
-	result := waitForSessionForTest(context.Background(), &cliFakeProvider{}, writer, nil, nil, eventCh, promptDone, nil, "ses_output", "run_output", "", true, DefaultPermissionClaimTimeout, nil, io.Discard)
+	result := waitForSessionForTest(context.Background(), &cliFakeProvider{}, writer, nil, nil, eventCh, promptDone, nil, "ses_output", "run_output", "", true, DefaultPermissionClaimTimeout, time.Time{}, io.Discard)
 	if result.Output != "[team: skip | security]" {
 		t.Fatalf("Output = %q, want assistant output only", result.Output)
 	}
@@ -5822,7 +5892,7 @@ func TestWaitForSessionAccumulatesDeltaAgentMessageOutput(t *testing.T) {
 	}
 	defer writer.Close()
 
-	result := waitForSessionForTest(context.Background(), &cliFakeProvider{}, writer, nil, nil, eventCh, promptDone, nil, "ses_output", "run_output", "", true, DefaultPermissionClaimTimeout, nil, io.Discard)
+	result := waitForSessionForTest(context.Background(), &cliFakeProvider{}, writer, nil, nil, eventCh, promptDone, nil, "ses_output", "run_output", "", true, DefaultPermissionClaimTimeout, time.Time{}, io.Discard)
 	if result.Output != "[team: skip | security-reviewer]" {
 		t.Fatalf("Output = %q, want delta assistant output only", result.Output)
 	}
@@ -5851,7 +5921,7 @@ func TestWaitForSessionFinalReply(t *testing.T) {
 		}
 		defer writer.Close()
 
-		result := waitForSessionForTest(context.Background(), &cliFakeProvider{}, writer, nil, nil, eventCh, promptDone, nil, "ses_output", "run_output", "", true, DefaultPermissionClaimTimeout, nil, io.Discard)
+		result := waitForSessionForTest(context.Background(), &cliFakeProvider{}, writer, nil, nil, eventCh, promptDone, nil, "ses_output", "run_output", "", true, DefaultPermissionClaimTimeout, time.Time{}, io.Discard)
 		if result.Output != wantOutput {
 			t.Fatalf("Output = %q, want %q", result.Output, wantOutput)
 		}
@@ -5964,7 +6034,7 @@ func TestWaitForSessionSessionEndIncludesFinalOutput(t *testing.T) {
 				promptDone := make(chan error, 1)
 				promptDone <- nil
 
-				return waitForSessionForTest(context.Background(), &cliFakeProvider{}, writer, nil, nil, eventCh, promptDone, nil, "ses_output", "run_output", "", true, DefaultPermissionClaimTimeout, nil, io.Discard)
+				return waitForSessionForTest(context.Background(), &cliFakeProvider{}, writer, nil, nil, eventCh, promptDone, nil, "ses_output", "run_output", "", true, DefaultPermissionClaimTimeout, time.Time{}, io.Discard)
 			})
 			if result.Output != tt.wantOutput {
 				t.Fatalf("Output = %q, want %q", result.Output, tt.wantOutput)
@@ -5989,7 +6059,7 @@ func TestWaitForSessionSessionEndIncludesFinalOutput(t *testing.T) {
 			promptDone := make(chan error, 1)
 			promptDone <- nil
 
-			return waitForSessionForTest(context.Background(), &cliFakeProvider{}, writer, nil, nil, eventCh, promptDone, nil, "ses_output_empty", "run_output_empty", "", true, DefaultPermissionClaimTimeout, nil, io.Discard)
+			return waitForSessionForTest(context.Background(), &cliFakeProvider{}, writer, nil, nil, eventCh, promptDone, nil, "ses_output_empty", "run_output_empty", "", true, DefaultPermissionClaimTimeout, time.Time{}, io.Discard)
 		})
 		if result.Output != "" {
 			t.Fatalf("Output = %q, want empty", result.Output)
@@ -6030,7 +6100,7 @@ func TestWaitForSessionSessionEndPreservesBackendFinalOutput(t *testing.T) {
 				promptDone := make(chan error, 1)
 				promptDone <- nil
 
-				return waitForSessionForTest(context.Background(), &cliFakeProvider{}, writer, nil, nil, eventCh, promptDone, nil, "ses_backend_final", "run_backend_final", "", true, DefaultPermissionClaimTimeout, nil, io.Discard)
+				return waitForSessionForTest(context.Background(), &cliFakeProvider{}, writer, nil, nil, eventCh, promptDone, nil, "ses_backend_final", "run_backend_final", "", true, DefaultPermissionClaimTimeout, time.Time{}, io.Discard)
 			})
 			if result.Output != tt.wantOutput {
 				t.Fatalf("Output = %q, want %q", result.Output, tt.wantOutput)
@@ -6060,7 +6130,8 @@ func TestWaitForSessionCancelAndEndUsesFullReply(t *testing.T) {
 		wantOutput      string
 		wantFinalReply  string
 		wantFinalOutput string
-		cancel          func(context.CancelFunc, chan<- time.Time)
+		deadline        time.Time
+		cancel          func(context.CancelFunc)
 	}{
 		{
 			name:            "context cancellation",
@@ -6068,7 +6139,7 @@ func TestWaitForSessionCancelAndEndUsesFullReply(t *testing.T) {
 			wantOutput:      "Before the tool. After the tool.",
 			wantFinalReply:  "After the tool.",
 			wantFinalOutput: "Before the tool. After the tool.",
-			cancel: func(cancel context.CancelFunc, _ chan<- time.Time) {
+			cancel: func(cancel context.CancelFunc) {
 				cancel()
 			},
 		},
@@ -6078,9 +6149,9 @@ func TestWaitForSessionCancelAndEndUsesFullReply(t *testing.T) {
 			wantOutput:      "Before the tool. After the tool.",
 			wantFinalReply:  "After the tool.",
 			wantFinalOutput: "Before the tool. After the tool.",
-			cancel: func(_ context.CancelFunc, timeout chan<- time.Time) {
-				timeout <- time.Now()
-			},
+			// The shared run deadline is a wall-clock deadline now: the wait
+			// stops on its own once the per-waiter timer expires.
+			deadline: time.Now().Add(50 * time.Millisecond),
 		},
 		{
 			name:            "trailing tool call",
@@ -6088,7 +6159,7 @@ func TestWaitForSessionCancelAndEndUsesFullReply(t *testing.T) {
 			wantOutput:      "Before the tool. ",
 			wantFinalReply:  "",
 			wantFinalOutput: "Before the tool. ",
-			cancel: func(cancel context.CancelFunc, _ chan<- time.Time) {
+			cancel: func(cancel context.CancelFunc) {
 				cancel()
 			},
 		},
@@ -6099,7 +6170,6 @@ func TestWaitForSessionCancelAndEndUsesFullReply(t *testing.T) {
 			result, logged := runSessionEventLogTest(t, func(writer EventSink) sessionResult {
 				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
-				timeoutCh := make(chan time.Time, 1)
 				eventCh := make(chan events.Event)
 				eventsToSend := []events.Event{msg("Before the tool. "), toolCall}
 				if tt.wantFinalReply != "" {
@@ -6119,7 +6189,7 @@ func TestWaitForSessionCancelAndEndUsesFullReply(t *testing.T) {
 						EventCh:   eventCh,
 						SessionID: "ses_cancel",
 						RunID:     "run_cancel",
-						Timeout:   timeoutCh,
+						Deadline:  tt.deadline,
 					}, SessionWaitDeps{Writer: writer, Stderr: io.Discard})
 				}()
 
@@ -6128,7 +6198,9 @@ func TestWaitForSessionCancelAndEndUsesFullReply(t *testing.T) {
 				case <-time.After(2 * time.Second):
 					t.Fatal("message events were not consumed")
 				}
-				tt.cancel(cancel, timeoutCh)
+				if tt.cancel != nil {
+					tt.cancel(cancel)
+				}
 
 				select {
 				case result := <-resultCh:

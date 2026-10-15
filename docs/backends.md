@@ -220,6 +220,12 @@ avenor \
 
 The ACP backend does not support network transport. If you pass `--server-url` or set `AVENOR_OPENCODE_URL`, the backend will fail cleanly. Either remove the URL or switch to `opencode-http`.
 
+### OpenCode version support
+
+OpenCode 1.15.x–1.17.x report a turn aborted by a configured permission deny (for example `permission.doom_loop: deny`) as a clean `end_turn` — the ACP layer drops the assistant error. Avenor works around this by classifying denial-shaped turns (a tool call aborted with the `interrupted` footprint, or a turn ending `end_turn` right after an explicit `reject`) as the `tool_denied` stop reason instead of success. OpenCode 1.18.0+ fixed the upstream bug and reports the denial as a failed prompt; Avenor's classification stays on as defense in depth for those versions.
+
+The pre-1.18 workaround is a deprecated compatibility shim, expected to be removed on **2027-07-14** (one year after the 1.18.0 fix). Runs on OpenCode 1.15.x–1.17.x that rely on a configured deny will silently report success again after removal — upgrade to 1.18.0+.
+
 ---
 
 ## opencode-http

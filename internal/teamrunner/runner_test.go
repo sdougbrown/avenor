@@ -1007,19 +1007,23 @@ func TestRunDefaultNudgeUsesCurrentMissingFiles(t *testing.T) {
 	}
 }
 
-func TestRequiredFilePathRejectsPathsOutsideWorkDir(t *testing.T) {
+func TestRequiredPathsOutsideWorkDirAlwaysReportedMissing(t *testing.T) {
 	dir := t.TempDir()
 	for _, path := range []string{"/etc/passwd", "../outside", "nested/../../outside"} {
-		if _, ok := requiredFilePath(dir, path); ok {
-			t.Fatalf("requiredFilePath(%q) allowed path outside workdir", path)
+		missing := phaseconfig.MissingRequiredFiles(dir, phaseconfig.PhaseRequirements{Files: []string{path}})
+		if len(missing) != 1 || missing[0] != path {
+			t.Fatalf("required path %q not reported missing: %v", path, missing)
 		}
 	}
-	fullPath, ok := requiredFilePath(dir, "nested/file.txt")
-	if !ok {
-		t.Fatal("expected relative path under workdir to be allowed")
+	if err := os.MkdirAll(filepath.Join(dir, "nested"), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	if fullPath != filepath.Join(dir, "nested", "file.txt") {
-		t.Fatalf("fullPath = %q, want nested file under workdir", fullPath)
+	if err := os.WriteFile(filepath.Join(dir, "nested", "file.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	missing := phaseconfig.MissingRequiredFiles(dir, phaseconfig.PhaseRequirements{Files: []string{"nested/file.txt"}})
+	if len(missing) != 0 {
+		t.Fatalf("nested file under workdir reported missing: %v", missing)
 	}
 }
 

@@ -89,7 +89,7 @@ Spawn parameters (all optional except one prompt source):
 | `--sentinel-file` | string | Path to write completion sentinel (exit code, session ID, stop reason). Auto-created under `$TMPDIR/avenor-stable/<supervisor_run_id>/<runtime_id>/sentinel.env` if not set |
 | `--permission-handler` | string | Permission handler (supports `file:<path>`). Auto-derived from sentinel-file if unset. Use `--auto-approve` to skip file-based handlers |
 | `--auto-approve` | bool | Automatically approve ordinary permission requests without file-based handlers. Questions that require user input still wait for an answer |
-| `--timeout` | int | Overall session timeout in seconds |
+| `--timeout` | int | Overall session timeout in seconds. Bounds direct, loop, and team spawns alike: every attempt, retry, and nudge stops at the shared wall-clock deadline and the runtime records `timeout` |
 | `--max-retries` | int | Maximum retry attempts on transient failure |
 
 Spawn returns immediately with the runtime ID and paths to the event log and sentinel file:

@@ -1541,7 +1541,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		}
 
 		releaseReservation = nil
-		go s.runLoopChild(childCtx, child, cfg, params.MaxRetries, params.Agent, params.AgentProfile, params.Model, params.Thinking, params.ServerURL, backend)
+		go s.runLoopChild(childCtx, child, cfg, params.Timeout, params.MaxRetries, params.Agent, params.AgentProfile, params.Model, params.Thinking, params.ServerURL, backend)
 
 		return result, nil
 	}
@@ -1599,7 +1599,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		}
 
 		releaseReservation = nil
-		go s.runTeamChild(childCtx, child, cfg, params.MaxRetries, params.Agent, params.AgentProfile, params.Model, params.Thinking, params.ServerURL, backend)
+		go s.runTeamChild(childCtx, child, cfg, params.Timeout, params.MaxRetries, params.Agent, params.AgentProfile, params.Model, params.Thinking, params.ServerURL, backend)
 
 		return result, nil
 	}
@@ -2061,6 +2061,13 @@ func (s *Supervisor) BrokerReply(toRunID, replyTo, message string) error {
 	return err
 }
 
+// deadlineFromContext returns the context's deadline, or the zero time when
+// the context carries none.
+func deadlineFromContext(ctx context.Context) time.Time {
+	deadline, _ := ctx.Deadline()
+	return deadline
+}
+
 func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptText string, timeoutSec, maxRetries int) {
 	defer func() {
 		panicked := false
@@ -2094,11 +2101,13 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 		s.ensureChildBrokerRun(child)
 	}
 
-	var timer <-chan time.Time
+	// The run deadline bounds every attempt and retry backoff of this child:
+	// each WaitForSession derives its own timer from it, so a retry cannot
+	// consume or miss a single one-shot tick.
 	if timeoutSec > 0 {
-		t := time.NewTimer(time.Duration(timeoutSec) * time.Second)
-		defer t.Stop()
-		timer = t.C
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, time.Now().Add(time.Duration(timeoutSec)*time.Second))
+		defer cancel()
 	}
 
 	resumeID := ""
@@ -2113,7 +2122,7 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			}
 			needAcquire = false
 		}
-		result := s.runChildAttempt(ctx, child, resumeID, promptText, timer)
+		result := s.runChildAttempt(ctx, child, resumeID, promptText)
 		// Release tree admission after the turn so a parked runtime does not
 		// consume descendant budget while idle. A subsequent prompt
 		// re-acquires before its turn.
@@ -2208,12 +2217,28 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 		select {
 		case <-time.After(backoffDelay(attempt)):
 		case <-ctx.Done():
+			if ctx.Err() == context.DeadlineExceeded {
+				child.mu.Lock()
+				child.exitCode = 124
+				child.mu.Unlock()
+				if child.sentinelFile != "" {
+					cli.WriteSentinel(child.sentinelFile, 124, child.sessionID(), "timeout", s.runID, s.stderrWriter())
+				}
+			}
 			return
 		}
 	}
 }
 
-func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg *looprunner.LoopConfig, maxRetries int, agent, agentProfile, model, thinking, serverURL, backend string) {
+func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg *looprunner.LoopConfig, timeoutSec, maxRetries int, agent, agentProfile, model, thinking, serverURL, backend string) {
+	// SpawnParams.Timeout is an enforceable execution deadline for loop
+	// children, not just a direct-run feature: the whole loop — every phase
+	// attempt, retry, and nudge — stops at the shared wall-clock limit.
+	if timeoutSec > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, time.Now().Add(time.Duration(timeoutSec)*time.Second))
+		defer cancel()
+	}
 	var brokerAttemptIDs []string
 	var brokerAttemptIDsMu sync.Mutex
 	sessions := newWorkflowSessionTracker()
@@ -2404,6 +2429,9 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				promptDone <- providerTurn.Prompt(context.Background(), session.SessionID, phase.Prompt)
 			}()
 
+			// Each phase attempt derives its own timer from the shared run
+			// deadline, so this waiter cannot consume or miss another
+			// attempt's tick.
 			result := cli.WaitForSession(ctx, provider, cli.SessionWaitConfig{
 				EventCh:                eventCh,
 				PromptDone:             promptDone,
@@ -2413,6 +2441,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				PermissionClaimScope:   child.id,
 				AutoApprove:            child.autoApprove,
 				PermissionClaimTimeout: child.permClaimTimeout,
+				Deadline:               deadlineFromContext(ctx),
 				// adoptSessionID propagates the authoritative conversation id onto
 				// the phase-local session, which is authoritative for retries,
 				// resume, and the terminal sentinel. It also updates the aggregate
@@ -2491,7 +2520,16 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 	}
 }
 
-func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg *teamrunner.TeamConfig, maxRetries int, agent, agentProfile, model, thinking, serverURL, backend string) {
+func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg *teamrunner.TeamConfig, timeoutSec, maxRetries int, agent, agentProfile, model, thinking, serverURL, backend string) {
+	// SpawnParams.Timeout is an enforceable execution deadline for team
+	// children: every member, retry, and nudge stops at the shared
+	// wall-clock limit, while ordinary member failure still leaves peers
+	// running (the deadline, not member failure, is what cancels).
+	if timeoutSec > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, time.Now().Add(time.Duration(timeoutSec)*time.Second))
+		defer cancel()
+	}
 	var brokerAttemptIDs []string
 	var brokerAttemptIDsMu sync.Mutex
 	sessions := newWorkflowSessionTracker()
@@ -2680,6 +2718,9 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				promptDone <- providerTurn.Prompt(context.Background(), session.SessionID, phase.Prompt)
 			}()
 
+			// Each member attempt derives its own timer from the shared run
+			// deadline, so this waiter cannot consume or miss another
+			// attempt's tick.
 			result := cli.WaitForSession(ctx, provider, cli.SessionWaitConfig{
 				EventCh:                eventCh,
 				PromptDone:             promptDone,
@@ -2689,6 +2730,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				PermissionClaimScope:   child.id,
 				AutoApprove:            child.autoApprove,
 				PermissionClaimTimeout: child.permClaimTimeout,
+				Deadline:               deadlineFromContext(ctx),
 				// adoptSessionID propagates the authoritative conversation id onto
 				// the phase-local session, which is authoritative for retries,
 				// resume, and the terminal sentinel. It also updates the aggregate
@@ -3189,7 +3231,8 @@ func (s *Supervisor) statusIdentity(child *childRuntime, sessionID string) effec
 	return identity
 }
 
-func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, resumeID, promptText string, timer <-chan time.Time) childAttemptResult {
+func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, resumeID, promptText string) childAttemptResult {
+	deadline, _ := ctx.Deadline()
 	child.mu.Lock()
 	child.phase = ""
 	child.phaseLabel = ""
@@ -3294,7 +3337,7 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 		PermissionClaimScope:   child.id,
 		AutoApprove:            child.autoApprove,
 		PermissionClaimTimeout: child.permClaimTimeout,
-		Timeout:                timer,
+		Deadline:               deadline,
 		// adoptSessionID fires inside WaitForSession before the session.start
 		// event is forwarded, so the stable status identity cannot lag the
 		// authoritative event. The attempt-local session is always updated.
@@ -5862,6 +5905,7 @@ func (e *directRunExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorCo
 	if ec.Action.Run != nil {
 		params.Prompt = ec.Action.Run.Prompt
 		params.PromptFile = ec.Action.Run.PromptFile
+		params.Timeout = ec.Action.Run.Timeout
 	}
 	dir, err := attemptSpawnDir(ec)
 	if err != nil {
@@ -5919,6 +5963,7 @@ func (e *loopExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext
 	}
 	if ec.Action.Loop != nil {
 		params.LoopFile = ec.Action.Loop.LoopFile
+		params.Timeout = ec.Action.Loop.Timeout
 	}
 	dir, err := attemptSpawnDir(ec)
 	if err != nil {
@@ -5978,6 +6023,7 @@ func (e *teamExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext
 	}
 	if ec.Action.Team != nil {
 		params.TeamFile = ec.Action.Team.TeamFile
+		params.Timeout = ec.Action.Team.Timeout
 	}
 	dir, err := attemptSpawnDir(ec)
 	if err != nil {

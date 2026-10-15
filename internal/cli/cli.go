@@ -425,11 +425,15 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		controlServer.SetCancelFunc(stopSignals)
 	}
 
-	var timer <-chan time.Time
+	// The run deadline (not a one-shot timer) bounds every attempt, retry,
+	// and nudge of this CLI execution. Each WaitForSession derives its own
+	// timer from the shared deadline, so no waiter can consume another's
+	// only tick and no later attempt can outlive the limit.
+	runCtx := ctx
 	if *timeout > 0 {
-		t := time.NewTimer(*timeout)
-		defer t.Stop()
-		timer = t.C
+		var cancelRun context.CancelFunc
+		runCtx, cancelRun = context.WithDeadline(ctx, time.Now().Add(*timeout))
+		defer cancelRun()
 	}
 
 	// Stable supervisor metadata is unavailable in this execution path. Keep
@@ -452,7 +456,6 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			autoApprove:            *autoApprove,
 			permissionClaimTimeout: *permClaimTimeout,
 			progressTimeout:        *progressTimeout,
-			timer:                  timer,
 		}, attemptDeps{
 			writer:        writer,
 			fileHandler:   fileHandler,
@@ -704,7 +707,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			NestedRun:    nestedRun,
 		}
 
-		lrCtx, lrCancel := context.WithCancel(ctx)
+		lrCtx, lrCancel := context.WithCancel(runCtx)
 		defer lrCancel()
 
 		result, err := looprunner.Run(lrCtx, opts)
@@ -825,7 +828,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			NestedRun:    nestedRun,
 		}
 
-		trCtx, trCancel := context.WithCancel(ctx)
+		trCtx, trCancel := context.WithCancel(runCtx)
 		defer trCancel()
 
 		result, err := teamrunner.Run(trCtx, opts)
@@ -854,7 +857,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		if controlServer != nil {
 			state.Update(func(s *control.Snapshot) { s.RetryAttempt = attempt })
 		}
-		result = runAttempt(ctx, attemptConfig{
+		result = runAttempt(runCtx, attemptConfig{
 			startOptions:           startOptions,
 			backend:                *backend,
 			resumeID:               resumeID,
@@ -865,7 +868,6 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			autoApprove:            *autoApprove,
 			permissionClaimTimeout: *permClaimTimeout,
 			progressTimeout:        *progressTimeout,
-			timer:                  timer,
 		}, attemptDeps{
 			writer:        writer,
 			fileHandler:   fileHandler,
@@ -894,9 +896,10 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 
 		select {
 		case <-retryAfter(backoffDelay(attempt)):
-		case <-timer:
-			return exitWithSentinel(124)
-		case <-ctx.Done():
+		case <-runCtx.Done():
+			if runCtx.Err() == context.DeadlineExceeded {
+				return exitWithSentinel(124)
+			}
 			return exitWithSentinel(130)
 		}
 	}
@@ -944,6 +947,13 @@ func StartSession(ctx context.Context, provider runtime.Provider, backend string
 
 var runAttempt = runSingleAttempt
 var retryAfter = time.After
+
+// deadlineFromContext returns the context's deadline, or the zero time when
+// the context carries none.
+func deadlineFromContext(ctx context.Context) time.Time {
+	deadline, _ := ctx.Deadline()
+	return deadline
+}
 
 func effectivePermissionHandler(sentinelPath, permissionHandler string, autoApprove bool) string {
 	if permissionHandler != "" {
@@ -1011,7 +1021,12 @@ type SessionWaitConfig struct {
 	AutoApprove            bool
 	PermissionClaimTimeout time.Duration
 	ProgressTimeout        time.Duration
-	Timeout                <-chan time.Time
+	// Deadline is the shared run deadline for the whole bounded run (zero
+	// means unbounded). Every WaitForSession invocation derives its own timer
+	// from it, so parallel team members, sequential phases, retries, and
+	// nudges all stop at the same wall-clock limit instead of competing for
+	// a single one-shot timer tick.
+	Deadline time.Time
 	// AcceptSessionID validates an authoritative provider ID before the legacy
 	// AdoptSessionID callback is invoked. Rejection is a fatal session identity
 	// conflict; continuing on the provisional ID would report false success for
@@ -1060,6 +1075,16 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 	var finalReply strings.Builder
 	var fullReply strings.Builder
 	eventChClosed := false
+	// interruptedToolFailure records a tool call the backend aborted
+	// (tool.call_update status=failed with rawOutput.metadata.interrupted).
+	// OpenCode aborts tool execution on a configured permission deny and then
+	// still reports stopReason end_turn, so a clean-looking stop reason is not
+	// evidence of completion when an abort happened in the same turn.
+	interruptedToolFailure := false
+	// deniedPermission records an approval request this resolver explicitly
+	// rejected. A turn that ends end_turn right after an explicit rejection
+	// is the same masquerade, with the denial's provenance on the record.
+	deniedPermission := false
 	// promptSettlementGrace bounds how long WaitForSession keeps draining the
 	// event channel after a prompt error, so a provider's authoritative
 	// session.end can still win the run classification. See the PromptDone
@@ -1122,6 +1147,15 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 		// Surface the authoritative stop reason: callers derive the sentinel's
 		// classification from it, and an empty value degrades to exit_1 even
 		// when session.end named the real reason.
+		if finalStopReason == "end_turn" && (interruptedToolFailure || deniedPermission) {
+			// A backend aborted a tool call (configured deny, or an explicitly
+			// rejected approval request) and still reported a clean end_turn.
+			// The turn did not complete its work: report the denial instead of
+			// letting it count as success. Ordinary failed tool calls without
+			// an abort remain recoverable and keep their own classification.
+			emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "stop_reason", "turn reported end_turn after an aborted or rejected tool call; classified as "+runtime.ToolDeniedStopReason, deps.Stderr, cfg.RunLabel)
+			finalStopReason = runtime.ToolDeniedStopReason
+		}
 		return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), StopReason: finalStopReason, LoopDirective: loopDirective, LoopLabel: loopLabel, Output: output.String(), FinalReply: finalReply.String(), Usage: bufferedUsage}
 	}
 	completeAuthoritativeAfterStop := func() (sessionResult, bool) {
@@ -1155,6 +1189,18 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 		progressTimer = time.NewTimer(cfg.ProgressTimeout)
 		defer progressTimer.Stop()
 		progressTimerC = progressTimer.C
+	}
+
+	var deadlineTimerC <-chan time.Time
+	var deadlineTimer *time.Timer
+	if !cfg.Deadline.IsZero() {
+		remaining := time.Until(cfg.Deadline)
+		if remaining < 0 {
+			remaining = 0
+		}
+		deadlineTimer = time.NewTimer(remaining)
+		defer deadlineTimer.Stop()
+		deadlineTimerC = deadlineTimer.C
 	}
 
 	writeStatus := func(ev events.Event, ok bool) bool {
@@ -1216,6 +1262,9 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 			if !writeStatus(tracker.PermissionAnswered()) {
 				return sessionResult{ExitCode: 1}, true
 			}
+		}
+		if res.kind == "reject" {
+			deniedPermission = true
 		}
 		// If session.end + promptDone already arrived while we were waiting for
 		// AnswerPermission, exit now that the permission goroutine has resolved.
@@ -1280,6 +1329,17 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 			markerHandled := false
 			if event.Event == "tool.call" {
 				finalReply.Reset()
+			}
+			if event.Event == "tool.call_update" {
+				if status, _ := event.Fields["status"].(string); status == "failed" {
+					if rawOutput, ok := event.Fields["rawOutput"].(map[string]any); ok {
+						if meta, ok := rawOutput["metadata"].(map[string]any); ok {
+							if interrupted, _ := meta["interrupted"].(bool); interrupted {
+								interruptedToolFailure = true
+							}
+						}
+					}
+				}
 			}
 			if event.Event == "agent.message_chunk" || event.Event == "agent.thought_chunk" {
 				if text := chunkText(event); text != "" {
@@ -1444,10 +1504,13 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 		case <-cfg.InterruptCh:
 			return terminate("cancelled")
 		case <-ctx.Done():
+			if ctx.Err() == context.DeadlineExceeded {
+				return terminate("timeout")
+			}
 			return terminate("cancelled")
 		case <-progressTimerC:
 			return terminate("progress_timeout")
-		case <-cfg.Timeout:
+		case <-deadlineTimerC:
 			return terminate("timeout")
 		}
 	}

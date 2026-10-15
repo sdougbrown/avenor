@@ -496,6 +496,7 @@ func svalidateWorkflowProfileAction(raw json.RawMessage, path, schemaPath string
 		allowed := map[string]bool{
 			"prompt":      true,
 			"prompt_file": true,
+			"timeout":     true,
 			"type":        true,
 		}
 		for key := range m {
@@ -526,9 +527,30 @@ func svalidateWorkflowProfileAction(raw json.RawMessage, path, schemaPath string
 				*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
 			}
 		}
+		if r, ok := m["timeout"]; ok {
+			fpath := path + "/" + escapePtr("timeout")
+			fspath := schemaPath + "/properties/" + escapePtr("timeout")
+			switch WorkflowProfileStructuralKind(r) {
+			case "number":
+				ival, isInt, isSafe := WorkflowProfileStructuralIntParts(r)
+				_ = ival
+				if !isInt {
+					*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
+				} else if !isSafe {
+					*issues = append(*issues, WorkflowProfileStructuralIssueAt("safeInteger", fpath, fspath))
+				} else {
+					if float64(ival) < 0 {
+						*issues = append(*issues, WorkflowProfileStructuralIssueAt("minimum", fpath, fspath))
+					}
+				}
+			default:
+				*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
+			}
+		}
 	case "loop":
 		allowed := map[string]bool{
 			"loop_file": true,
+			"timeout":   true,
 			"type":      true,
 		}
 		for key := range m {
@@ -548,9 +570,30 @@ func svalidateWorkflowProfileAction(raw json.RawMessage, path, schemaPath string
 				*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
 			}
 		}
+		if r, ok := m["timeout"]; ok {
+			fpath := path + "/" + escapePtr("timeout")
+			fspath := schemaPath + "/properties/" + escapePtr("timeout")
+			switch WorkflowProfileStructuralKind(r) {
+			case "number":
+				ival, isInt, isSafe := WorkflowProfileStructuralIntParts(r)
+				_ = ival
+				if !isInt {
+					*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
+				} else if !isSafe {
+					*issues = append(*issues, WorkflowProfileStructuralIssueAt("safeInteger", fpath, fspath))
+				} else {
+					if float64(ival) < 0 {
+						*issues = append(*issues, WorkflowProfileStructuralIssueAt("minimum", fpath, fspath))
+					}
+				}
+			default:
+				*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
+			}
+		}
 	case "team":
 		allowed := map[string]bool{
 			"team_file": true,
+			"timeout":   true,
 			"type":      true,
 		}
 		for key := range m {
@@ -566,6 +609,26 @@ func svalidateWorkflowProfileAction(raw json.RawMessage, path, schemaPath string
 			case "string":
 				var sv string
 				_ = json.Unmarshal(r, &sv)
+			default:
+				*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
+			}
+		}
+		if r, ok := m["timeout"]; ok {
+			fpath := path + "/" + escapePtr("timeout")
+			fspath := schemaPath + "/properties/" + escapePtr("timeout")
+			switch WorkflowProfileStructuralKind(r) {
+			case "number":
+				ival, isInt, isSafe := WorkflowProfileStructuralIntParts(r)
+				_ = ival
+				if !isInt {
+					*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
+				} else if !isSafe {
+					*issues = append(*issues, WorkflowProfileStructuralIssueAt("safeInteger", fpath, fspath))
+				} else {
+					if float64(ival) < 0 {
+						*issues = append(*issues, WorkflowProfileStructuralIssueAt("minimum", fpath, fspath))
+					}
+				}
 			default:
 				*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
 			}
@@ -3102,6 +3165,11 @@ func (v WorkflowProfileActionValueRun) validate(path string, issues *[]Issue) {
 	}
 	if v.PromptFile != nil {
 	}
+	if v.Timeout != nil {
+		if float64(*v.Timeout) < 0 {
+			*issues = append(*issues, Issue{Code: "minimum", Path: path + "/" + escapePtr("timeout")})
+		}
+	}
 	switch v.Type {
 	case WorkflowProfileActionKindExternal:
 	case WorkflowProfileActionKindLoop:
@@ -3117,6 +3185,11 @@ func (v WorkflowProfileActionValueRun) validate(path string, issues *[]Issue) {
 func (v WorkflowProfileActionValueLoop) validate(path string, issues *[]Issue) {
 	if v.LoopFile != nil {
 	}
+	if v.Timeout != nil {
+		if float64(*v.Timeout) < 0 {
+			*issues = append(*issues, Issue{Code: "minimum", Path: path + "/" + escapePtr("timeout")})
+		}
+	}
 	switch v.Type {
 	case WorkflowProfileActionKindExternal:
 	case WorkflowProfileActionKindLoop:
@@ -3131,6 +3204,11 @@ func (v WorkflowProfileActionValueLoop) validate(path string, issues *[]Issue) {
 
 func (v WorkflowProfileActionValueTeam) validate(path string, issues *[]Issue) {
 	if v.TeamFile != nil {
+	}
+	if v.Timeout != nil {
+		if float64(*v.Timeout) < 0 {
+			*issues = append(*issues, Issue{Code: "minimum", Path: path + "/" + escapePtr("timeout")})
+		}
 	}
 	switch v.Type {
 	case WorkflowProfileActionKindExternal:
@@ -5714,6 +5792,7 @@ type WorkflowProfileAction struct {
 type WorkflowProfileActionValueRun struct {
 	Prompt     *string                   "json:\"prompt,omitempty\""
 	PromptFile *string                   "json:\"prompt_file,omitempty\""
+	Timeout    *int64                    "json:\"timeout,omitempty\""
 	Type       WorkflowProfileActionKind "json:\"type\""
 }
 
@@ -5731,6 +5810,7 @@ func (v *WorkflowProfileActionValueRun) UnmarshalJSON(data []byte) error {
 		switch key {
 		case "prompt":
 		case "prompt_file":
+		case "timeout":
 		case "type":
 		default:
 			return fmt.Errorf("unknown field %q", key)
@@ -5744,6 +5824,11 @@ func (v *WorkflowProfileActionValueRun) UnmarshalJSON(data []byte) error {
 	if r, ok := raw["prompt_file"]; ok {
 		if len(r) == 4 && string(r) == "null" {
 			return fmt.Errorf("field \"prompt_file\" must not be null")
+		}
+	}
+	if r, ok := raw["timeout"]; ok {
+		if len(r) == 4 && string(r) == "null" {
+			return fmt.Errorf("field \"timeout\" must not be null")
 		}
 	}
 	if r, ok := raw["type"]; ok {
@@ -5770,6 +5855,15 @@ func (v *WorkflowProfileActionValueRun) UnmarshalJSON(data []byte) error {
 		}
 		next.PromptFile = &decoded1
 	}
+	if encoded, ok := raw["timeout"]; ok {
+		var decoded2 int64
+		integer3, integral, safe := WorkflowProfileStructuralIntParts(encoded)
+		if !integral || !safe {
+			return fmt.Errorf("integer value is not a safe mathematical integer")
+		}
+		decoded2 = int64(integer3)
+		next.Timeout = &decoded2
+	}
 	if encoded, ok := raw["type"]; ok {
 		if err := json.Unmarshal(encoded, &next.Type); err != nil {
 			return err
@@ -5781,6 +5875,7 @@ func (v *WorkflowProfileActionValueRun) UnmarshalJSON(data []byte) error {
 
 type WorkflowProfileActionValueLoop struct {
 	LoopFile *string                   "json:\"loop_file,omitempty\""
+	Timeout  *int64                    "json:\"timeout,omitempty\""
 	Type     WorkflowProfileActionKind "json:\"type\""
 }
 
@@ -5797,6 +5892,7 @@ func (v *WorkflowProfileActionValueLoop) UnmarshalJSON(data []byte) error {
 	for key := range raw {
 		switch key {
 		case "loop_file":
+		case "timeout":
 		case "type":
 		default:
 			return fmt.Errorf("unknown field %q", key)
@@ -5805,6 +5901,11 @@ func (v *WorkflowProfileActionValueLoop) UnmarshalJSON(data []byte) error {
 	if r, ok := raw["loop_file"]; ok {
 		if len(r) == 4 && string(r) == "null" {
 			return fmt.Errorf("field \"loop_file\" must not be null")
+		}
+	}
+	if r, ok := raw["timeout"]; ok {
+		if len(r) == 4 && string(r) == "null" {
+			return fmt.Errorf("field \"timeout\" must not be null")
 		}
 	}
 	if r, ok := raw["type"]; ok {
@@ -5824,6 +5925,15 @@ func (v *WorkflowProfileActionValueLoop) UnmarshalJSON(data []byte) error {
 		}
 		next.LoopFile = &decoded0
 	}
+	if encoded, ok := raw["timeout"]; ok {
+		var decoded1 int64
+		integer2, integral, safe := WorkflowProfileStructuralIntParts(encoded)
+		if !integral || !safe {
+			return fmt.Errorf("integer value is not a safe mathematical integer")
+		}
+		decoded1 = int64(integer2)
+		next.Timeout = &decoded1
+	}
 	if encoded, ok := raw["type"]; ok {
 		if err := json.Unmarshal(encoded, &next.Type); err != nil {
 			return err
@@ -5835,6 +5945,7 @@ func (v *WorkflowProfileActionValueLoop) UnmarshalJSON(data []byte) error {
 
 type WorkflowProfileActionValueTeam struct {
 	TeamFile *string                   "json:\"team_file,omitempty\""
+	Timeout  *int64                    "json:\"timeout,omitempty\""
 	Type     WorkflowProfileActionKind "json:\"type\""
 }
 
@@ -5851,6 +5962,7 @@ func (v *WorkflowProfileActionValueTeam) UnmarshalJSON(data []byte) error {
 	for key := range raw {
 		switch key {
 		case "team_file":
+		case "timeout":
 		case "type":
 		default:
 			return fmt.Errorf("unknown field %q", key)
@@ -5859,6 +5971,11 @@ func (v *WorkflowProfileActionValueTeam) UnmarshalJSON(data []byte) error {
 	if r, ok := raw["team_file"]; ok {
 		if len(r) == 4 && string(r) == "null" {
 			return fmt.Errorf("field \"team_file\" must not be null")
+		}
+	}
+	if r, ok := raw["timeout"]; ok {
+		if len(r) == 4 && string(r) == "null" {
+			return fmt.Errorf("field \"timeout\" must not be null")
 		}
 	}
 	if r, ok := raw["type"]; ok {
@@ -5877,6 +5994,15 @@ func (v *WorkflowProfileActionValueTeam) UnmarshalJSON(data []byte) error {
 			return err
 		}
 		next.TeamFile = &decoded0
+	}
+	if encoded, ok := raw["timeout"]; ok {
+		var decoded1 int64
+		integer2, integral, safe := WorkflowProfileStructuralIntParts(encoded)
+		if !integral || !safe {
+			return fmt.Errorf("integer value is not a safe mathematical integer")
+		}
+		decoded1 = int64(integer2)
+		next.Timeout = &decoded1
 	}
 	if encoded, ok := raw["type"]; ok {
 		if err := json.Unmarshal(encoded, &next.Type); err != nil {

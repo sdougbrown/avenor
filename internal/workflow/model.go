@@ -354,14 +354,26 @@ type Action struct {
 type RunAction struct {
 	Prompt     string `json:"prompt,omitempty"`
 	PromptFile string `json:"prompt_file,omitempty"`
+	// Timeout bounds the run action's child execution in seconds (0 =
+	// unbounded): every attempt and retry of the dispatched runtime stops at
+	// the shared wall-clock deadline.
+	Timeout int `json:"timeout,omitempty"`
 }
 
 type LoopAction struct {
 	LoopFile string `json:"loop_file"`
+	// Timeout bounds the loop child's execution in seconds (0 = unbounded):
+	// every phase attempt, retry, and nudge stops at the shared wall-clock
+	// deadline.
+	Timeout int `json:"timeout,omitempty"`
 }
 
 type TeamAction struct {
 	TeamFile string `json:"team_file"`
+	// Timeout bounds the team child's execution in seconds (0 = unbounded):
+	// every member, retry, and nudge stops at the shared wall-clock
+	// deadline.
+	Timeout int `json:"timeout,omitempty"`
 }
 
 type ManualAction struct {
@@ -491,7 +503,7 @@ func (action *Action) UnmarshalJSON(data []byte) error {
 			Type ActionKind `json:"type"`
 			RunAction
 		}
-		if err := decodeActionObject(data, &wire, "type", "prompt", "prompt_file"); err != nil {
+		if err := decodeActionObject(data, &wire, "type", "prompt", "prompt_file", "timeout"); err != nil {
 			return err
 		}
 		*action = Action{Kind: ActionRun, Run: &wire.RunAction}
@@ -500,7 +512,7 @@ func (action *Action) UnmarshalJSON(data []byte) error {
 			Type ActionKind `json:"type"`
 			LoopAction
 		}
-		if err := decodeActionObject(data, &wire, "type", "loop_file"); err != nil {
+		if err := decodeActionObject(data, &wire, "type", "loop_file", "timeout"); err != nil {
 			return err
 		}
 		*action = Action{Kind: ActionLoop, Loop: &wire.LoopAction}
@@ -509,7 +521,7 @@ func (action *Action) UnmarshalJSON(data []byte) error {
 			Type ActionKind `json:"type"`
 			TeamAction
 		}
-		if err := decodeActionObject(data, &wire, "type", "team_file"); err != nil {
+		if err := decodeActionObject(data, &wire, "type", "team_file", "timeout"); err != nil {
 			return err
 		}
 		*action = Action{Kind: ActionTeam, Team: &wire.TeamAction}
