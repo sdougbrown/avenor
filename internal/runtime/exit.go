@@ -2,6 +2,13 @@ package runtime
 
 const SessionIDConflictStopReason = "session_id_conflict"
 
+// ToolDeniedStopReason classifies a turn the backend ended with a clean
+// end_turn even though a tool call was aborted by denial (a configured
+// permission deny, or an explicitly rejected approval request). It keeps the
+// denial from masquerading as successful completion while ordinary failed
+// tool calls stay recoverable.
+const ToolDeniedStopReason = "tool_denied"
+
 // IsRetryableFailure reports whether a failed attempt may be retried. Session
 // identity conflicts are fatal: retrying could resume a provisional ID or let
 // an attempt finish without adopting the provider's authoritative session ID.
@@ -16,6 +23,8 @@ func ExitCodeForStopReason(stopReason string) int {
 	case "end_turn":
 		return 0
 	case "refusal":
+		return 2
+	case ToolDeniedStopReason:
 		return 2
 	case "max_tokens":
 		return 3

@@ -40,7 +40,6 @@ type attemptConfig struct {
 	autoApprove            bool
 	permissionClaimTimeout time.Duration
 	progressTimeout        time.Duration
-	timer                  <-chan time.Time
 }
 
 type attemptDeps struct {
@@ -151,7 +150,10 @@ func runSingleAttempt(
 			AutoApprove:            cfg.autoApprove,
 			PermissionClaimTimeout: cfg.permissionClaimTimeout,
 			ProgressTimeout:        cfg.progressTimeout,
-			Timeout:                cfg.timer,
+			// The run deadline travels on the attempt context (see the CLI's
+			// run-scoped context.WithDeadline): each waiter derives its own
+			// timer, so attempts never compete for a single timer tick.
+			Deadline: deadlineFromContext(ctx),
 			AcceptSessionID: func(externalID string) bool {
 				return cfg.sessionBackends.adopt(session.SessionID, externalID, attempt)
 			},
