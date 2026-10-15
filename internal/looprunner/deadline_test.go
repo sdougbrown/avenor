@@ -182,6 +182,55 @@ func TestLoopNudgeCancelledParentReportsCancelled(t *testing.T) {
 	}
 }
 
+// TestLoopNudgeStopsAtRunDeadline proves an incomplete-output nudge cannot
+// escape the shared run deadline: once the deadline has expired, no nudge is
+// dispatched and the phase reports the timeout instead of an
+// incomplete-output failure.
+func TestLoopNudgeStopsAtRunDeadline(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &LoopConfig{
+		MaxIterations: 1,
+		Loop: []phaseconfig.Phase{{
+			Name:   "review",
+			Prompt: "review",
+			Requires: phaseconfig.PhaseRequirements{
+				NonEmptyFiles: []string{"REVIEW_CODE.md"},
+			},
+		}},
+	}
+
+	var attempts atomic.Int32
+	var events eventRecorder
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(50*time.Millisecond))
+	defer cancel()
+
+	result, err := Run(ctx, RunOptions{
+		WorkDir:   dir,
+		RunID:     "test-run",
+		EventSink: &events,
+		Config:    cfg,
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, iteration int, prevSessionID string) (PhaseAttemptResult, error) {
+			attempts.Add(1)
+			// The run deadline expires during the attempt, so the requirement
+			// check runs against an already-expired context.
+			<-ctx.Done()
+			return PhaseAttemptResult{ExitCode: 0, StopReason: "end_turn", SessionID: fmt.Sprintf("s%d", attempts.Load())}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("attempts = %d, want 1 (no nudge after the deadline)", attempts.Load())
+	}
+	if result.ExitCode != 124 || result.StopReason != "timeout" {
+		t.Fatalf("Run() = {%d %q}, want {124 timeout}", result.ExitCode, result.StopReason)
+	}
+	if !events.has("avenor.loop.end", "timeout") {
+		t.Fatalf("loop end event = %+v, want exit_reason timeout", events.snapshot())
+	}
+}
+
 type eventRecorder struct {
 	mu     sync.Mutex
 	events []events.Event
