@@ -10,21 +10,25 @@ import (
 // gives workflow-controlled run, loop, and team actions an explicit enforceable
 // execution deadline.
 func TestActionTimeoutRoundTripAndValidation(t *testing.T) {
-	for _, input := range []string{
-		`{"type":"run","prompt":"do it","timeout":900}`,
-		`{"type":"loop","loop_file":"loop.json","timeout":600}`,
-		`{"type":"team","team_file":"team.json","timeout":300}`,
+	for _, tc := range []struct {
+		input, wantTimeout string
+	}{
+		{`{"type":"run","prompt":"do it","timeout":900}`, `"timeout":900`},
+		{`{"type":"loop","loop_file":"loop.json","timeout":600}`, `"timeout":600`},
+		{`{"type":"team","team_file":"team.json","timeout":300}`, `"timeout":300`},
 	} {
 		var action Action
-		if err := json.Unmarshal([]byte(input), &action); err != nil {
-			t.Fatalf("Unmarshal(%s) error = %v", input, err)
+		if err := json.Unmarshal([]byte(tc.input), &action); err != nil {
+			t.Fatalf("Unmarshal(%s) error = %v", tc.input, err)
 		}
 		data, err := json.Marshal(action)
 		if err != nil {
-			t.Fatalf("Marshal(%s) error = %v", input, err)
+			t.Fatalf("Marshal(%s) error = %v", tc.input, err)
 		}
-		if !strings.Contains(string(data), `"timeout":`) {
-			t.Fatalf("Marshal(%s) = %s, want the timeout field on the wire", input, data)
+		// The exact value is pinned: omitempty means a zeroed or dropped
+		// timeout must fail, not just a missing key.
+		if !strings.Contains(string(data), tc.wantTimeout) {
+			t.Fatalf("Marshal(%s) = %s, want it to contain %s", tc.input, data, tc.wantTimeout)
 		}
 	}
 	for _, input := range []string{
