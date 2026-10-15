@@ -77,6 +77,35 @@ func TestRunLoopChildTimeoutProducesTimeoutSentinel(t *testing.T) {
 	}
 }
 
+// TestRunChildTimeoutProducesTimeoutSentinel proves SpawnParams.Timeout is an
+// enforceable deadline for stable plain run children: a hanging provider is
+// stopped by the shared wall-clock deadline and the sentinel records the
+// timeout classification, including across retry backoffs.
+func TestRunChildTimeoutProducesTimeoutSentinel(t *testing.T) {
+	provider := hangingProvider{}
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-run-timeout.sock", MaxRuntimes: 1})
+	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
+
+	sentinel := filepath.Join(t.TempDir(), "sentinel.env")
+	child := &childRuntime{id: "rt_run_timeout", done: make(chan struct{}), promptCh: make(chan struct{}, 1), eventWriter: stableTestSink{}, sentinelFile: sentinel, cancelFn: func() {}, provider: provider}
+	sup.runtimes[child.id] = child
+	go sup.runChild(context.Background(), child, "work", 1, 0)
+
+	select {
+	case <-child.done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("run child did not stop at the run deadline")
+	}
+
+	raw, err := os.ReadFile(sentinel)
+	if err != nil {
+		t.Fatalf("read sentinel: %v", err)
+	}
+	if !strings.Contains(string(raw), "TIMEOUT") || !strings.Contains(string(raw), "STOP_REASON=timeout") {
+		t.Fatalf("sentinel = %q, want TIMEOUT with STOP_REASON=timeout", string(raw))
+	}
+}
+
 // TestRunTeamChildTimeoutProducesTimeoutSentinel proves SpawnParams.Timeout is
 // an enforceable deadline for stable team children.
 func TestRunTeamChildTimeoutProducesTimeoutSentinel(t *testing.T) {
