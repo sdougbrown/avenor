@@ -803,6 +803,27 @@ func TestResolveAssignmentSelectionPermissionDecider(t *testing.T) {
 	}
 }
 
+// TestResolveAssignmentSelectionRosterFileOnlyRejected proves a node
+// assignment that sets roster_file without a roster_entry (and without a
+// permission policy) is rejected at dispatch: the roster file remains an
+// identity selector, so the spawn-selection rules fire and the assignment
+// cannot silently run on the default backend.
+func TestResolveAssignmentSelectionRosterFileOnlyRejected(t *testing.T) {
+	rosterPath := writeStage5Roster(t, t.TempDir(), `{
+		"worker": {"backend": "pi", "agent": "worker", "model": "m"}
+	}`)
+	_, err := resolveAssignmentSelection(&workflow.Assignment{RosterFile: rosterPath})
+	if err == nil || !strings.Contains(err.Error(), "roster_file requires roster_entry") {
+		t.Fatalf("resolveAssignmentSelection(roster file without entry) error = %v, want roster_file requires roster_entry", err)
+	}
+	if _, err := resolveAssignmentSelection(&workflow.Assignment{
+		RosterFile:       rosterPath,
+		PermissionPolicy: &workflow.PermissionPolicy{Decider: "worker"},
+	}); err != nil {
+		t.Fatalf("resolveAssignmentSelection(decider without roster entry): %v", err)
+	}
+}
+
 // TestSpawnRejectsAutoApproveWithPermissionDecider pins the spawn guard: a
 // runtime cannot carry both unattended permission policies — auto-approve
 // resolves every request as allow, a permission decider routes requests to a
@@ -933,7 +954,7 @@ func TestDispatchAssignmentPermissionDeciderRoutesRequest(t *testing.T) {
 	if deciderDir == "" || deciderDir == workerDir {
 		t.Fatalf("decider dir = %q, want a scratch dir distinct from the worker dir %q", deciderDir, workerDir)
 	}
-	if !strings.HasPrefix(deciderDir, os.TempDir()+string(os.PathSeparator)) {
+	if !strings.HasPrefix(deciderDir, filepath.Clean(os.TempDir())+string(os.PathSeparator)) {
 		t.Fatalf("decider dir = %q, want a scratch dir under %s", deciderDir, os.TempDir())
 	}
 	waitFor(t, "decider scratch dir removed", func() bool {
@@ -969,9 +990,10 @@ func dispatchPermdecTemplate(rosterPath, templateID string) map[string]any {
 }
 
 // TestDispatchPermissionDeciderSpawnFailureReroutesRequest proves a failed
-// decider spawn unmarks the request as routed, so the next permission.request
-// event for the same request re-routes it instead of stalling pending with
-// only a stderr line.
+// decider spawn re-routes the request internally: the backend sent its
+// permission.request event once and is blocked waiting for the answer, so the
+// retry happens from the cached options without a further event instead of
+// stalling pending with only a stderr line.
 func TestDispatchPermissionDeciderSpawnFailureReroutesRequest(t *testing.T) {
 	rosterPath := writeStage5Roster(t, t.TempDir(), `{
 		"worker":  {"backend": "pi", "agent": "worker", "model": "m"},
@@ -980,6 +1002,10 @@ func TestDispatchPermissionDeciderSpawnFailureReroutesRequest(t *testing.T) {
 	template := mustJSON(t, dispatchPermdecTemplate(rosterPath, "tmpl-dispatch-permdec-retry"))
 	f := newDispatchFixtureTemplate(t, "permdec-retry", 4, 4, template)
 	requestID := "perm_req_retry"
+	// Hold the worker prompt open after the permission request so the run
+	// stays alive while the internal re-route is observed.
+	gate := make(chan struct{})
+	defer close(gate)
 	permissionEvent := func() events.Event {
 		return events.Event{
 			Event:     "permission.request",
@@ -1004,7 +1030,7 @@ func TestDispatchPermissionDeciderSpawnFailureReroutesRequest(t *testing.T) {
 		}
 		return &stableScriptedProvider{attempt: -1, scripts: []stableScriptedAttempt{{
 			sessionID: "ses_worker_retry",
-			events:    []stableScriptedEvent{{event: permissionEvent()}},
+			events:    []stableScriptedEvent{{event: permissionEvent()}, {release: gate}},
 		}}}, nil
 	}
 	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
@@ -1014,14 +1040,11 @@ func TestDispatchPermissionDeciderSpawnFailureReroutesRequest(t *testing.T) {
 	if out.Kind != Dispatched {
 		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
 	}
-	// The failed spawn must unmark the request as routed so the next
-	// permission.request event for the same request can route again. Re-emit
-	// the event (the CLI session loop refuses a concurrent second request, so
-	// the event is driven at the routing boundary here) until the retried
-	// decider run appears; re-routes that land before the unroute are no-ops.
+	// The failed spawn must re-route the request on its own: the retry runs
+	// internally from the cached options, with no further permission.request
+	// event (the CLI session loop would refuse a concurrent second one).
 	var decider map[string]any
 	waitFor(t, "retried decider runtime", func() bool {
-		f.sup.routePermissionRequest(out.RuntimeID, requestID, []any{map[string]any{"optionId": "allow_once", "kind": "allow"}})
 		for _, rt := range f.sup.listRuntimes() {
 			if label, _ := rt["label"].(string); strings.HasPrefix(label, "permdec:") {
 				decider = rt
@@ -1039,8 +1062,8 @@ func TestDispatchPermissionDeciderSpawnFailureReroutesRequest(t *testing.T) {
 }
 
 // TestDispatchPermissionDeciderSpawnFailuresBounded proves the decider spawn
-// retries are bounded per request: each failed spawn re-opens routing for the
-// next permission.request event, but past maxPermissionDeciderSpawnFailures
+// retries are bounded per request: each failed spawn re-routes the request
+// internally from the cached options, but past maxPermissionDeciderSpawnFailures
 // the routed mark is kept, no further spawns fire, the exhaustion surfaces in
 // runtime status, and the request stays pending for a human gate — never
 // silently rejected.
@@ -1051,6 +1074,10 @@ func TestDispatchPermissionDeciderSpawnFailuresBounded(t *testing.T) {
 	}`)
 	f := newDispatchFixtureTemplate(t, "permdec-bounded", 4, 4, mustJSON(t, dispatchPermdecTemplate(rosterPath, "tmpl-dispatch-permdec-bounded")))
 	requestID := "perm_req_bounded"
+	// Hold the worker prompt open after the permission request so the run
+	// stays alive while the bounded retries play out.
+	gate := make(chan struct{})
+	defer close(gate)
 	var deciderSpawns atomic.Int64
 	f.sup.newProviderFunc = func(startOpts runtime.StartOptions, _ string) (runtime.Provider, error) {
 		if strings.HasPrefix(startOpts.Label, "permdec:") {
@@ -1068,7 +1095,7 @@ func TestDispatchPermissionDeciderSpawnFailuresBounded(t *testing.T) {
 					"command":    "rm -rf /tmp/build",
 					"options":    []any{map[string]any{"optionId": "allow_once", "kind": "allow"}},
 				},
-			}}},
+			}}, {release: gate}},
 		}}}, nil
 	}
 	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
@@ -1078,9 +1105,10 @@ func TestDispatchPermissionDeciderSpawnFailuresBounded(t *testing.T) {
 	if out.Kind != Dispatched {
 		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
 	}
-	// Re-emit the permission.request event until the retry bound is reached:
-	// each poll re-routes once, so exactly maxPermissionDeciderSpawnFailures
-	// decider spawns fire before the exhaustion sticks.
+	// The retries are internal: each failed spawn re-routes the request from
+	// the cached options without a further permission.request event, so
+	// exactly maxPermissionDeciderSpawnFailures decider spawns fire before
+	// the exhaustion sticks.
 	var worker map[string]any
 	waitFor(t, "decider spawn retries exhausted", func() bool {
 		status, err := f.sup.RuntimeStatus(out.RuntimeID)
@@ -1092,16 +1120,14 @@ func TestDispatchPermissionDeciderSpawnFailuresBounded(t *testing.T) {
 				}
 			}
 		}
-		f.sup.routePermissionRequest(out.RuntimeID, requestID, []any{map[string]any{"optionId": "allow_once", "kind": "allow"}})
 		return false
 	})
 	if got := deciderSpawns.Load(); got != maxPermissionDeciderSpawnFailures {
 		t.Fatalf("decider spawns = %d, want exactly the %d-attempt bound", got, maxPermissionDeciderSpawnFailures)
 	}
-	// Further events must not spawn another decider: the routed mark stays.
-	for i := 0; i < 3; i++ {
-		f.sup.routePermissionRequest(out.RuntimeID, requestID, []any{map[string]any{"optionId": "allow_once", "kind": "allow"}})
-	}
+	// A further routing attempt must not spawn another decider: the routed
+	// mark stays once the bound is exhausted.
+	f.sup.routePermissionRequest(out.RuntimeID, requestID, []any{map[string]any{"optionId": "allow_once", "kind": "allow"}})
 	if got := deciderSpawns.Load(); got != maxPermissionDeciderSpawnFailures {
 		t.Fatalf("decider spawns after exhaustion = %d, want no further spawns", got)
 	}
@@ -1119,8 +1145,9 @@ func TestDispatchPermissionDeciderSpawnFailuresBounded(t *testing.T) {
 // concurrent permission-decider runs: with the cap full, a new distinct
 // pending request is routed but spawns no decider run — it stays pending for
 // a human gate instead of crowding other runtimes out of the shared MaxRuntimes
-// admission — and once a decider run tears down and frees capacity, the
-// blocked request is unrouted so a later routing event can retry it.
+// admission — and once a decider run fails and frees capacity, the blocked
+// request is re-routed internally from its cached options without a further
+// permission.request event.
 func TestDispatchPermissionDeciderConcurrencyCapHolds(t *testing.T) {
 	rosterPath := writeStage5Roster(t, t.TempDir(), `{
 		"worker":  {"backend": "pi", "agent": "worker", "model": "m"},
@@ -1131,9 +1158,11 @@ func TestDispatchPermissionDeciderConcurrencyCapHolds(t *testing.T) {
 	// Hold the decider runs open so the decider concurrency counter stays at
 	// the cap, and hold the worker prompt open so its routing state stays alive.
 	gate := make(chan struct{})
+	workerGate := make(chan struct{})
 	var gateOnce sync.Once
 	closeGate := func() { gateOnce.Do(func() { close(gate) }) }
 	defer closeGate()
+	defer close(workerGate)
 	var deciderSpawns atomic.Int64
 	f.sup.newProviderFunc = func(startOpts runtime.StartOptions, _ string) (runtime.Provider, error) {
 		if strings.HasPrefix(startOpts.Label, "permdec:") {
@@ -1143,7 +1172,7 @@ func TestDispatchPermissionDeciderConcurrencyCapHolds(t *testing.T) {
 		}
 		return &stableScriptedProvider{attempt: -1, scripts: []stableScriptedAttempt{{
 			sessionID: "ses_worker_cap",
-			events:    []stableScriptedEvent{{release: gate}},
+			events:    []stableScriptedEvent{{release: workerGate}},
 		}}}, nil
 	}
 	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
@@ -1159,16 +1188,16 @@ func TestDispatchPermissionDeciderConcurrencyCapHolds(t *testing.T) {
 	})
 	options := []any{map[string]any{"optionId": "allow_once", "kind": "allow"}}
 	// Fill the cap with distinct pending requests, waiting for each spawn so
-	// the routing order is deterministic.
+	// the routing order is deterministic. Routing goes through the production
+	// fanout entry (cachePermissionOptions), which caches the options a re-route
+	// needs after a failed spawn or a freed slot.
 	for i := 0; i < maxConcurrentPermissionDeciders; i++ {
-		f.sup.routePermissionRequest(out.RuntimeID, fmt.Sprintf("perm_req_cap_%d", i), options)
+		f.sup.cachePermissionOptions(out.RuntimeID, fmt.Sprintf("perm_req_cap_%d", i), options)
 		waitFor(t, fmt.Sprintf("decider spawn %d", i+1), func() bool { return deciderSpawns.Load() >= int64(i+1) })
 	}
 	// A further distinct request hits the cap: no spawn fires, the routed mark
 	// stays, and the request stays pending for a human gate.
-	for i := 0; i < 3; i++ {
-		f.sup.routePermissionRequest(out.RuntimeID, blockedID, options)
-	}
+	f.sup.cachePermissionOptions(out.RuntimeID, blockedID, options)
 	if got := deciderSpawns.Load(); got != int64(maxConcurrentPermissionDeciders) {
 		t.Fatalf("decider spawns = %d, want the cap of %d held with no overflow spawn", got, maxConcurrentPermissionDeciders)
 	}
@@ -1180,12 +1209,11 @@ func TestDispatchPermissionDeciderConcurrencyCapHolds(t *testing.T) {
 	if state := f.sup.control.PermissionResolverState(out.RuntimeID, blockedID); state == control.PermissionResolverResolved {
 		t.Fatalf("capped request resolver state = %v, want the request left unresolved", state)
 	}
-	// Free the held decider runs: each spawn fails and releases its slot, and
-	// the release unrouts the blocked request so a later routing event retries
-	// it now that capacity has freed.
+	// Free the held decider runs: each spawn fails, releases its slot, and
+	// re-routes the blocked request from its cached options — no further
+	// permission.request event is needed.
 	closeGate()
-	waitFor(t, "blocked request retried after capacity freed", func() bool {
-		f.sup.routePermissionRequest(out.RuntimeID, blockedID, options)
+	waitFor(t, "blocked request re-routed after capacity freed", func() bool {
 		return deciderSpawns.Load() > int64(maxConcurrentPermissionDeciders)
 	})
 }

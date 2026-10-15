@@ -3872,9 +3872,9 @@ func (s *Supervisor) routePermissionRequest(runtimeID, requestID string, options
 	deciderLabel := permdecLabelPrefix + runtimeID + ":" + requestID
 	if !s.acquirePermissionDeciderSlot(deciderLabel) {
 		// The decider concurrency cap is full: keep the routed mark and leave
-		// the request pending — do not spawn and do not unroute. When a decider
-		// run tears down and frees capacity, the blocked request is unrouted so
-		// the next permission.request event can retry it.
+		// the request pending — do not spawn and do not re-route. When a
+		// decider run tears down and frees capacity, releasePermissionDecider
+		// re-routes the blocked request internally from its cached options.
 		fmt.Fprintf(s.stderrWriter(), "avenor: permission decider concurrency cap (%d) reached; request %s on runtime %s stays pending until capacity frees\n", maxConcurrentPermissionDeciders, requestID, runtimeID)
 		s.blockPermissionRequestForRetry(runtimeID, requestID)
 		return
@@ -3888,20 +3888,24 @@ func (s *Supervisor) routePermissionRequest(runtimeID, requestID string, options
 // before the spawn starts (for example by a human answering through the
 // control plane) spawns no decider. A failed spawn — or options that cannot
 // be encoded for the decider prompt — counts as a failed attempt against the
-// bound and unmarks the request as routed so the next permission.request
-// event re-routes it, but after maxPermissionDeciderSpawnFailures failures
-// the routed mark is kept: no further spawns fire and the request stays
-// pending for a human gate.
+// bound and re-routes the request internally from its cached options, but
+// after maxPermissionDeciderSpawnFailures failures the routed mark is kept:
+// no further spawns fire and the request stays pending for a human gate.
 func (s *Supervisor) spawnPermissionDecider(decider workflow.PermissionDecider, runtimeID, requestID string, options []any, label string) {
 	deciderLabel := permdecLabelPrefix + runtimeID + ":" + requestID
 	failSpawn := func(what string, err error) {
 		fmt.Fprintf(s.stderrWriter(), "avenor: %s for runtime %s request %s: %v\n", what, runtimeID, requestID, err)
-		if exhausted := s.recordPermissionDeciderFailure(runtimeID, requestID); exhausted {
+		exhausted := s.recordPermissionDeciderFailure(runtimeID, requestID)
+		if exhausted {
 			fmt.Fprintf(s.stderrWriter(), "avenor: permission decider for runtime %s request %s failed %d times; no further decider spawns for this request — it stays pending for a human gate\n", runtimeID, requestID, maxPermissionDeciderSpawnFailures)
-		} else {
-			s.unroutePermissionRequest(runtimeID, requestID)
 		}
 		s.releasePermissionDecider(deciderLabel)
+		if !exhausted {
+			// Re-route the request right away: the backend sent its
+			// permission.request once and is blocked waiting for the answer, so
+			// the retry must not wait for a further event.
+			s.retryPermissionRequest(runtimeID, requestID)
+		}
 	}
 	if s.control.PermissionResolverState(runtimeID, requestID) == control.PermissionResolverResolved {
 		s.releasePermissionDecider(deciderLabel)
@@ -3911,9 +3915,9 @@ func (s *Supervisor) spawnPermissionDecider(decider workflow.PermissionDecider, 
 	if err != nil {
 		// Marshaling the options failed, so a spawned decider would judge from
 		// no (or blank) options — i.e. blind. Do not spawn. Count the failure
-		// against the retry bound and re-open routing so a later
-		// permission.request event can retry, exactly like a failed spawn; once
-		// the bound is exhausted the request stays pending for a human gate.
+		// against the retry bound and re-open routing, exactly like a failed
+		// spawn; once the bound is exhausted the request stays pending for a
+		// human gate.
 		failSpawn("encode permission options", err)
 		return
 	}
@@ -3963,10 +3967,10 @@ Never answer blindly: allow only requests the task plainly needs.`,
 }
 
 // maxPermissionDeciderSpawnFailures bounds the decider spawn retries for one
-// pending permission request: each failed spawn unmarks the request as routed
-// so the next permission.request event can re-route it, but past this bound
-// the routed mark is kept and the request stays pending for a human gate
-// instead of churning spawns forever.
+// pending permission request: each failed spawn re-routes the request
+// internally from its cached options, but past this bound the routed mark is
+// kept and the request stays pending for a human gate instead of churning
+// spawns forever.
 const maxPermissionDeciderSpawnFailures = 3
 
 // permdecLabelPrefix marks a child run as a permission decider spawned for a
@@ -3999,8 +4003,8 @@ func (s *Supervisor) acquirePermissionDeciderSlot(deciderLabel string) bool {
 }
 
 // blockPermissionRequestForRetry records a request that hit the decider
-// concurrency cap so its routed mark is dropped when capacity next frees,
-// letting a later permission.request event retry it.
+// concurrency cap so releasePermissionDecider re-routes it from its cached
+// options when capacity next frees.
 func (s *Supervisor) blockPermissionRequestForRetry(runtimeID, requestID string) {
 	s.permDeciderMu.Lock()
 	defer s.permDeciderMu.Unlock()
@@ -4023,10 +4027,10 @@ func (s *Supervisor) rememberDeciderScratchDir(deciderLabel, dir string) {
 
 // releasePermissionDecider releases the slot held by a permission-decider run
 // (acquired at routing, released here at teardown or failed spawn), removes
-// the run's scratch directory, and unrouts any requests that were blocked by
-// the concurrency cap so they can retry now that capacity has freed. Labels
-// without a held slot (for example a direct spawn attempt that never routed)
-// release nothing.
+// the run's scratch directory, and re-routes any requests that were blocked
+// by the concurrency cap, now that capacity has freed. Labels without a held
+// slot (for example a direct spawn attempt that never routed) release
+// nothing.
 func (s *Supervisor) releasePermissionDecider(deciderLabel string) {
 	s.permDeciderMu.Lock()
 	if _, held := s.permDeciderSlots[deciderLabel]; !held {
@@ -4045,8 +4049,26 @@ func (s *Supervisor) releasePermissionDecider(deciderLabel string) {
 	}
 	for key := range blocked {
 		runtimeID, requestID, _ := strings.Cut(key, "\x00")
-		s.unroutePermissionRequest(runtimeID, requestID)
+		s.retryPermissionRequest(runtimeID, requestID)
 	}
+}
+
+// retryPermissionRequest re-routes a pending permission request internally
+// from its cached options: a failed decider spawn, or a concurrency-cap block
+// whose slot has since freed, must retry routing without waiting for a
+// further permission.request event, which production backends never re-send
+// while the request is pending. A request with no cached options (already
+// answered, or its runtime gone) only drops the routed mark.
+func (s *Supervisor) retryPermissionRequest(runtimeID, requestID string) {
+	s.controlMu.Lock()
+	options := s.permOptions[runtimeID+":"+requestID]
+	s.controlMu.Unlock()
+	if options == nil {
+		s.unroutePermissionRequest(runtimeID, requestID)
+		return
+	}
+	s.unroutePermissionRequest(runtimeID, requestID)
+	s.routePermissionRequest(runtimeID, requestID, options)
 }
 
 // recordPermissionDeciderFailure counts one failed decider spawn for a
@@ -4073,9 +4095,9 @@ func (s *Supervisor) recordPermissionDeciderFailure(runtimeID, requestID string)
 	return exhausted
 }
 
-// unroutePermissionRequest drops a request's routed mark after a failed
-// decider spawn so a later permission.request event for the same request can
-// route again. The request stays pending and visible in runtime status.
+// unroutePermissionRequest drops a request's routed mark so routing can
+// attempt the request again. The request stays pending and visible in
+// runtime status.
 func (s *Supervisor) unroutePermissionRequest(runtimeID, requestID string) {
 	s.controlMu.Lock()
 	rt := s.runtimes[runtimeID]
