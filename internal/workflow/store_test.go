@@ -982,6 +982,10 @@ const (
 	helperEnvRoot   = "AVENOR_STORE_TEMPLATE_HELPER_ROOT"
 	helperEnvName   = "AVENOR_STORE_TEMPLATE_HELPER_NAME"
 	helperEnvResult = "AVENOR_STORE_TEMPLATE_HELPER_RESULT"
+	// helperEnvArrived names a marker file the helper writes immediately
+	// before calling StoreTemplate, so the parent can prove the subprocess
+	// reached the registration call before it starts timing the block.
+	helperEnvArrived = "AVENOR_STORE_TEMPLATE_HELPER_ARRIVED"
 )
 
 // TestStoreTemplateCrossProcessHelper runs inside a helper subprocess: it
@@ -994,6 +998,12 @@ func TestStoreTemplateCrossProcessHelper(t *testing.T) {
 	}
 	name := os.Getenv(helperEnvName)
 	resultPath := os.Getenv(helperEnvResult)
+
+	if arrivedPath := os.Getenv(helperEnvArrived); arrivedPath != "" {
+		if err := os.WriteFile(arrivedPath, nil, 0o644); err != nil {
+			t.Fatalf("write arrived marker: %v", err)
+		}
+	}
 
 	tmpl := storeTemplateFixture(t, "cross", "1")
 	tmpl.Nodes[0].Name = name
@@ -1014,14 +1024,20 @@ func TestStoreTemplateCrossProcessHelper(t *testing.T) {
 
 // storeTemplateHelperCmd builds a helper-subprocess command that registers a
 // template whose node name is nodeName and records the outcome in resultPath.
-func storeTemplateHelperCmd(t *testing.T, root, nodeName, resultPath string) *exec.Cmd {
+// When arrivedPath is non-empty the helper writes it immediately before the
+// registration call, marking the moment it reached StoreTemplate.
+func storeTemplateHelperCmd(t *testing.T, root, nodeName, resultPath, arrivedPath string) *exec.Cmd {
 	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run=^TestStoreTemplateCrossProcessHelper$")
-	cmd.Env = append(os.Environ(),
-		helperEnvRoot+"="+root,
-		helperEnvName+"="+nodeName,
-		helperEnvResult+"="+resultPath,
-	)
+	env := []string{
+		helperEnvRoot + "=" + root,
+		helperEnvName + "=" + nodeName,
+		helperEnvResult + "=" + resultPath,
+	}
+	if arrivedPath != "" {
+		env = append(env, helperEnvArrived+"="+arrivedPath)
+	}
+	cmd.Env = append(os.Environ(), env...)
 	return cmd
 }
 
@@ -1047,13 +1063,31 @@ func TestStoreTemplateCrossProcessRegistrationBlocksOnRootLock(t *testing.T) {
 	}
 
 	resultPath := filepath.Join(t.TempDir(), "helper-result")
+	arrivedPath := filepath.Join(t.TempDir(), "helper-arrived")
 	var out bytes.Buffer
-	cmd := storeTemplateHelperCmd(t, s.Root(), "second", resultPath)
+	cmd := storeTemplateHelperCmd(t, s.Root(), "second", resultPath, arrivedPath)
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 	if err := cmd.Start(); err != nil {
 		unlock()
 		t.Fatalf("start helper: %v", err)
+	}
+
+	// Wait (bounded) for the helper to reach the registration call. Without
+	// this, a slow helper launch would leave the absence window below
+	// unstarted at the moment the helper actually blocks, making it prove
+	// nothing on loaded machines.
+	arrivedDeadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(arrivedPath); err == nil {
+			break
+		}
+		if time.Now().After(arrivedDeadline) {
+			unlock()
+			_ = cmd.Wait()
+			t.Fatalf("helper did not reach StoreTemplate within 10s\nhelper output:\n%s", out.String())
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	// While the lock is held the helper must stay blocked. Absence of the
@@ -1105,7 +1139,7 @@ func TestStoreTemplateCrossProcessRaceHasOneWinner(t *testing.T) {
 	resultPaths := make([]string, writers)
 	for i := range writers {
 		resultPaths[i] = filepath.Join(resultsDir, fmt.Sprintf("result-%d", i))
-		cmds[i] = storeTemplateHelperCmd(t, s.Root(), fmt.Sprintf("writer-%d", i), resultPaths[i])
+		cmds[i] = storeTemplateHelperCmd(t, s.Root(), fmt.Sprintf("writer-%d", i), resultPaths[i], "")
 		if err := cmds[i].Start(); err != nil {
 			t.Fatalf("start helper %d: %v", i, err)
 		}
