@@ -906,6 +906,60 @@ func TestRunCleansSentinelFilesBetweenRetries(t *testing.T) {
 	}
 }
 
+// TestRunRetryBackoffStopsAtRunDeadline proves the direct run path cannot
+// escape the shared --timeout deadline: when the deadline expires during a
+// retry backoff, the run is classified as a timeout (exit 124) with a TIMEOUT
+// sentinel, not a generic retryable failure.
+func TestRunRetryBackoffStopsAtRunDeadline(t *testing.T) {
+	oldRunAttempt, oldRetryAfter := runAttempt, retryAfter
+	t.Cleanup(func() {
+		runAttempt, retryAfter = oldRunAttempt, oldRetryAfter
+	})
+
+	dir := t.TempDir()
+	promptPath := filepath.Join(dir, "prompt.txt")
+	sentinelPath := filepath.Join(dir, "run.done")
+	if err := os.WriteFile(promptPath, []byte("hello"), 0o600); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+
+	var attempts int
+	runAttempt = func(ctx context.Context, cfg attemptConfig, deps attemptDeps) attemptResult {
+		attempts++
+		return attemptResult{exitCode: 1, sessionID: fmt.Sprintf("ses_%d", attempts)}
+	}
+	// The backoff never fires its own tick; only the run deadline can end it.
+	retryAfter = func(time.Duration) <-chan time.Time {
+		return make(chan time.Time)
+	}
+
+	var stderr strings.Builder
+	exitCode := run([]string{
+		"--prompt-file", promptPath,
+		"--sentinel-file", sentinelPath,
+		"--timeout", "50ms",
+		"--max-retries", "3",
+	}, func(key string) string {
+		if key == "AVENOR_OPENCODE_URL" {
+			return "http://localhost:8080"
+		}
+		return ""
+	}, &stderr)
+	if exitCode != 124 {
+		t.Fatalf("run() = %d, want 124; stderr=%s", exitCode, stderr.String())
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1 (deadline stops the retry)", attempts)
+	}
+	raw, err := os.ReadFile(sentinelPath)
+	if err != nil {
+		t.Fatalf("read sentinel: %v", err)
+	}
+	if !strings.Contains(string(raw), "TIMEOUT") || !strings.Contains(string(raw), "STOP_REASON=timeout") {
+		t.Fatalf("sentinel = %q, want TIMEOUT with STOP_REASON=timeout", string(raw))
+	}
+}
+
 func TestRunSessionIDConflictDoesNotRetryProvisionalSession(t *testing.T) {
 	oldRunAttempt, oldNewProvider, oldRetryAfter := runAttempt, newProvider, retryAfter
 	t.Cleanup(func() {
