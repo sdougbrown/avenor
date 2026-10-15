@@ -1039,8 +1039,8 @@ func TestStoreTemplateCrossProcessRegistrationBlocksOnRootLock(t *testing.T) {
 		t.Fatalf("first registration: %v", err)
 	}
 
-	// Hold the root-scoped templates lock the way another process
-	// mid-registration would.
+	// Hold the root-scoped templates lock the way another process holds it
+	// mid-registration.
 	unlock, err := durablefile.Lock(filepath.Join(s.Root(), "templates.lock"))
 	if err != nil {
 		t.Fatalf("acquire templates lock: %v", err)
@@ -1057,9 +1057,9 @@ func TestStoreTemplateCrossProcessRegistrationBlocksOnRootLock(t *testing.T) {
 	}
 
 	// While the lock is held the helper must stay blocked. Absence of the
-	// result file is the observation: a StoreTemplate that skipped the file
-	// lock would register the template and write the result within this
-	// window, failing the test.
+	// result file is the observation: without the file lock, StoreTemplate
+	// registers the template and writes the result within this window,
+	// failing the test.
 	deadline := time.Now().Add(300 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(resultPath); err == nil {

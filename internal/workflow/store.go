@@ -263,10 +263,11 @@ func (s *Store) writeSnapshot(workflowID WorkflowID, snap Snapshot) error {
 // <root>/templates/<templateID>/<version>.json.
 func (s *Store) StoreTemplate(templateID TemplateID, templateVersion TemplateVersion, template Template) error {
 	// The existence and content checks must not race a concurrent create's
-	// rename, which would silently overwrite a different template under the
-	// same id+version. Registration is serialized with a root-scoped file
-	// lock rather than a mutex so supervisors sharing a workflow root — the
-	// default multi-process setup — are mutually excluded too.
+	// rename: without serialization, the rename silently overwrites a
+	// different template under the same id+version. Registration is
+	// serialized with a root-scoped file lock rather than a mutex so
+	// supervisors sharing a workflow root — the default multi-process setup
+	// — are mutually excluded too.
 	if err := os.MkdirAll(s.root, 0o755); err != nil {
 		return err
 	}
