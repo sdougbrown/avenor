@@ -2,6 +2,7 @@ package looprunner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"time"
@@ -135,10 +136,14 @@ func Run(ctx context.Context, opts RunOptions) (RunResult, error) {
 			}
 
 			if sr != "end_turn" {
-				_ = emitLoopEnd(opts.EventSink, opts.RunID, "phase_failure", "", iterationsCompleted)
 				stopReason := result.StopReason
 				if stopReason == "" {
 					stopReason = sr
+				}
+				if stopReason == "timeout" {
+					_ = emitLoopEnd(opts.EventSink, opts.RunID, "timeout", "", iterationsCompleted)
+				} else {
+					_ = emitLoopEnd(opts.EventSink, opts.RunID, "phase_failure", "", iterationsCompleted)
 				}
 				return RunResult{
 					ExitCode:   result.ExitCode,
@@ -197,10 +202,14 @@ func runSequentialPhases(ctx context.Context, opts RunOptions, phases []phasecon
 
 		sr := runtime.StopReasonForExitCode(result.ExitCode)
 		if sr != "end_turn" {
-			_ = emitLoopEnd(opts.EventSink, opts.RunID, "phase_failure", "", iterationsCompleted)
 			stopReason := result.StopReason
 			if stopReason == "" {
 				stopReason = sr
+			}
+			if stopReason == "timeout" {
+				_ = emitLoopEnd(opts.EventSink, opts.RunID, "timeout", "", iterationsCompleted)
+			} else {
+				_ = emitLoopEnd(opts.EventSink, opts.RunID, "phase_failure", "", iterationsCompleted)
 			}
 			r := RunResult{ExitCode: result.ExitCode, StopReason: stopReason, SessionID: result.SessionID}
 			return &r, nil
@@ -295,7 +304,64 @@ func executePhase(ctx context.Context, opts RunOptions, phase phaseconfig.Phase,
 	}
 
 	result, rerr = runPhaseWithRetry(ctx, wrappedAttempt, opts.MaxRetries)
+	if rerr != nil {
+		return
+	}
+	result, rerr = completePhaseRequirements(ctx, opts, phase, iteration, result)
 	return
+}
+
+// completePhaseRequirements enforces a loop phase's declared outputs: when a
+// phase ends end_turn but its required files are missing or empty, the phase
+// is nudged (bounded by OnIncomplete) and, if still unmet, classified as
+// incomplete_output instead of successful completion. This mirrors the team
+// runner's requirement enforcement so a missing deliverable cannot count as
+// a successful loop iteration.
+func completePhaseRequirements(ctx context.Context, opts RunOptions, phase phaseconfig.Phase, iteration int, result PhaseAttemptResult) (PhaseAttemptResult, error) {
+	missing := phaseconfig.MissingRequiredFiles(opts.WorkDir, phase.Requires)
+	if len(missing) == 0 || result.ExitCode != 0 || phaseStopReason(result) != "end_turn" {
+		return result, nil
+	}
+
+	maxNudges := phase.OnIncomplete.MaxNudges
+	if maxNudges == 0 {
+		maxNudges = 1
+	}
+	customNudge := phase.OnIncomplete.Nudge
+
+	sessionID := result.SessionID
+	for i := 0; i < maxNudges; i++ {
+		if err := ctx.Err(); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				// The run deadline expired before recovery could start:
+				// report the timeout instead of an incomplete-output failure.
+				result.ExitCode = runtime.ExitCodeForStopReason("timeout")
+				result.StopReason = "timeout"
+				return result, nil
+			}
+			return result, err
+		}
+		nudgePhase := phase
+		nudgePhase.Prompt = phaseconfig.IncompleteNudgePrompt(customNudge, missing)
+		result, err := opts.PhaseAttempt(ctx, nudgePhase, i+1, iteration, sessionID)
+		if err != nil {
+			return result, err
+		}
+		sessionID = result.SessionID
+		missing = phaseconfig.MissingRequiredFiles(opts.WorkDir, phase.Requires)
+		if len(missing) == 0 || result.ExitCode != 0 || phaseStopReason(result) != "end_turn" {
+			return result, nil
+		}
+	}
+
+	return PhaseAttemptResult{
+		ExitCode:      runtime.ExitCodeForStopReason("incomplete_output"),
+		SessionID:     sessionID,
+		StopReason:    "incomplete_output",
+		LoopDirective: result.LoopDirective,
+		LoopLabel:     result.LoopLabel,
+		BrokerRunID:   result.BrokerRunID,
+	}, nil
 }
 
 func runPhaseWithRetry(ctx context.Context, attemptFn func(ctx context.Context) (PhaseAttemptResult, error), maxRetries int) (PhaseAttemptResult, error) {
@@ -311,6 +377,12 @@ func runPhaseWithRetry(ctx context.Context, attemptFn func(ctx context.Context) 
 
 		select {
 		case <-ctx.Done():
+			if ctx.Err() == context.DeadlineExceeded {
+				// The run deadline expired during the retry backoff: the
+				// bounded run stops here with a consistent timeout class.
+				result.ExitCode = runtime.ExitCodeForStopReason("timeout")
+				result.StopReason = "timeout"
+			}
 			return result, nil
 		case <-phaseRetryAfter(phaseconfig.BackoffDuration(retry - 1)):
 		}

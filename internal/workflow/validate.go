@@ -815,13 +815,22 @@ func validateAction(action Action) error {
 		if hasPrompt == hasPromptFile {
 			return fmt.Errorf("run action requires exactly one of prompt or prompt_file")
 		}
+		if action.Run.Timeout < 0 {
+			return fmt.Errorf("run action timeout must be a non-negative number of seconds")
+		}
 	case ActionLoop:
 		if strings.TrimSpace(action.Loop.LoopFile) == "" {
 			return fmt.Errorf("loop action requires loop_file")
 		}
+		if action.Loop.Timeout < 0 {
+			return fmt.Errorf("loop action timeout must be a non-negative number of seconds")
+		}
 	case ActionTeam:
 		if strings.TrimSpace(action.Team.TeamFile) == "" {
 			return fmt.Errorf("team action requires team_file")
+		}
+		if action.Team.Timeout < 0 {
+			return fmt.Errorf("team action timeout must be a non-negative number of seconds")
 		}
 	case ActionExternal:
 		if strings.TrimSpace(action.External.Source) == "" {

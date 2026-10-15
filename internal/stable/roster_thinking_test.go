@@ -131,10 +131,10 @@ func TestStablePhaseRosterSuppliesThinkingUnlessRunOverridesIt(t *testing.T) {
 				}
 				if kind == "loop" {
 					cfg := &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "work", Prompt: "work", RosterEntry: "horse"}}}
-					go sup.runLoopChild(context.Background(), child, cfg, 1, "", "", "", tc.runThinking, "", "")
+					go sup.runLoopChild(context.Background(), child, cfg, 0, 1, "", "", "", tc.runThinking, "", "")
 				} else {
 					cfg := &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work", RosterEntry: "horse"}}}
-					go sup.runTeamChild(context.Background(), child, cfg, 1, "", "", "", tc.runThinking, "", "")
+					go sup.runTeamChild(context.Background(), child, cfg, 0, 1, "", "", "", tc.runThinking, "", "")
 				}
 				select {
 				case <-child.done:
@@ -220,7 +220,7 @@ func TestStableLoopPhaseCachedSelectionKeepsRosterThinking(t *testing.T) {
 		cancelFn: func() {}, roster: roster, dir: t.TempDir(),
 	}
 	cfg := &looprunner.LoopConfig{MaxIterations: 2, Loop: []phaseconfig.Phase{{Name: "work", Prompt: "work", RosterEntry: "horse"}}}
-	go sup.runLoopChild(context.Background(), child, cfg, 1, "", "", "", "", "", "")
+	go sup.runLoopChild(context.Background(), child, cfg, 0, 1, "", "", "", "", "", "")
 	select {
 	case <-child.done:
 	case <-time.After(5 * time.Second):

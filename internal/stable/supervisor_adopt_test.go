@@ -179,7 +179,7 @@ func TestRunChildAttemptAdoptsExternalConversationID(t *testing.T) {
 	child, _ := newDeferredChild(t, sup, provisionalID, realID, deferredStartEndEvents(realID, nil))
 	sup.runtimes[child.id] = child
 
-	result := sup.runChildAttempt(context.Background(), child, "", "hello", nil)
+	result := sup.runChildAttempt(context.Background(), child, "", "hello")
 	if result.exitCode != 0 {
 		t.Fatalf("exitCode = %d, want 0", result.exitCode)
 	}
@@ -214,7 +214,7 @@ func TestRuntimeStatusAndListUseAdoptedSessionID(t *testing.T) {
 	child, _ := newDeferredChild(t, sup, provisionalID, realID, deferredStartEndEvents(realID, nil))
 	sup.runtimes[child.id] = child
 
-	if res := sup.runChildAttempt(context.Background(), child, "", "hello", nil); res.exitCode != 0 {
+	if res := sup.runChildAttempt(context.Background(), child, "", "hello"); res.exitCode != 0 {
 		t.Fatalf("exitCode = %d, want 0", res.exitCode)
 	}
 
@@ -244,7 +244,7 @@ func TestAdoptChildSessionIDIgnoresStaleAttempt(t *testing.T) {
 	child, provider := newDeferredChild(t, sup, provisionalID, realID, deferredStartEndEvents(realID, nil))
 	sup.runtimes[child.id] = child
 
-	if res := sup.runChildAttempt(context.Background(), child, "", "hello", nil); res.exitCode != 0 {
+	if res := sup.runChildAttempt(context.Background(), child, "", "hello"); res.exitCode != 0 {
 		t.Fatalf("first attempt exitCode = %d, want 0", res.exitCode)
 	}
 	// After the attempt completes, simulate a newer active session replacing
@@ -286,7 +286,7 @@ func TestSessionStartUpdatesChildBeforeEventForwarding(t *testing.T) {
 	sup.runtimes[child.id] = child
 
 	resultCh := make(chan childAttemptResult, 1)
-	go func() { resultCh <- sup.runChildAttempt(context.Background(), child, "", "hello", nil) }()
+	go func() { resultCh <- sup.runChildAttempt(context.Background(), child, "", "hello") }()
 
 	// Wait until the attempt is active (Prompt goroutine subscribed and blocked
 	// on the release gate), then assert the provisional identity is still live.
@@ -375,7 +375,7 @@ func TestRunLoopChildSessionIDConflictIsFatalWithRetriesEnabled(t *testing.T) {
 	sup.runtimes[child.id] = child
 	cfg := &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "conflict", Prompt: "conflict"}}}
 
-	sup.runLoopChild(context.Background(), child, cfg, 3, "", "", "", "", "", "agy")
+	sup.runLoopChild(context.Background(), child, cfg, 0, 3, "", "", "", "", "", "agy")
 
 	provider.mu.Lock()
 	prompts, resumes := provider.prompts, provider.resumes
@@ -410,7 +410,7 @@ func TestRunTeamChildSessionIDConflictIsFatalWithRetriesEnabled(t *testing.T) {
 	sup.runtimes[child.id] = child
 	cfg := &teamrunner.TeamConfig{Pre: []phaseconfig.Phase{{Name: "conflict", Prompt: "conflict"}}}
 
-	sup.runTeamChild(context.Background(), child, cfg, 3, "", "", "", "", "", "agy")
+	sup.runTeamChild(context.Background(), child, cfg, 0, 3, "", "", "", "", "", "agy")
 
 	provider.mu.Lock()
 	prompts, resumes := provider.prompts, provider.resumes
@@ -455,7 +455,7 @@ func TestRunLoopChildAdoptsExternalConversationID(t *testing.T) {
 	sup.runtimes[child.id] = child
 
 	cfg := &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
-	go sup.runLoopChild(context.Background(), child, cfg, 0, "", "", "", "", "", "agy")
+	go sup.runLoopChild(context.Background(), child, cfg, 0, 0, "", "", "", "", "", "agy")
 
 	// Before session.start is delivered the aggregate child must still hold the
 	// provisional id and status must mirror it.
@@ -517,7 +517,7 @@ func TestRunTeamChildAdoptsExternalConversationID(t *testing.T) {
 	sup.runtimes[child.id] = child
 
 	cfg := &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
-	go sup.runTeamChild(context.Background(), child, cfg, 0, "", "", "", "", "", "agy")
+	go sup.runTeamChild(context.Background(), child, cfg, 0, 0, "", "", "", "", "", "agy")
 
 	waitForStableChild(t, child, func(active, completed bool, phase, phaseLabel string) bool { return active })
 	assertChildSessionID(t, child, provisionalID)
@@ -644,7 +644,7 @@ func TestRunLoopChildPreservesAdoptedSessionAfterPhaseCleanup(t *testing.T) {
 	sup.runtimes[child.id] = child
 
 	cfg := &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
-	go sup.runLoopChild(context.Background(), child, cfg, 0, "", "", "", "", "", "agy")
+	go sup.runLoopChild(context.Background(), child, cfg, 0, 0, "", "", "", "", "", "agy")
 
 	waitForStableChild(t, child, func(active, completed bool, phase, phaseLabel string) bool { return active })
 	close(startRelease)
@@ -691,7 +691,7 @@ func TestRunTeamChildPreservesAdoptedSessionAfterPhaseCleanup(t *testing.T) {
 	sup.runtimes[child.id] = child
 
 	cfg := &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
-	go sup.runTeamChild(context.Background(), child, cfg, 0, "", "", "", "", "", "agy")
+	go sup.runTeamChild(context.Background(), child, cfg, 0, 0, "", "", "", "", "", "agy")
 
 	waitForStableChild(t, child, func(active, completed bool, phase, phaseLabel string) bool { return active })
 	close(startRelease)
@@ -737,7 +737,7 @@ func TestRunLoopChildSentinelCarriesAdoptedSessionOnNormalSuccess(t *testing.T) 
 	sup.runtimes[child.id] = child
 
 	cfg := &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
-	sup.runLoopChild(context.Background(), child, cfg, 0, "", "", "", "", "", "agy")
+	sup.runLoopChild(context.Background(), child, cfg, 0, 0, "", "", "", "", "", "agy")
 
 	waitForStableDone(t, child)
 	assertSentinelHasSession(t, readSentinel(t, sentinelPath), "DONE", realID)
@@ -773,7 +773,7 @@ func TestRunTeamChildSentinelCarriesAdoptedSessionOnNormalSuccess(t *testing.T) 
 	sup.runtimes[child.id] = child
 
 	cfg := &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
-	sup.runTeamChild(context.Background(), child, cfg, 0, "", "", "", "", "", "agy")
+	sup.runTeamChild(context.Background(), child, cfg, 0, 0, "", "", "", "", "", "agy")
 
 	waitForStableDone(t, child)
 	assertSentinelHasSession(t, readSentinel(t, sentinelPath), "DONE", realID)
@@ -812,7 +812,7 @@ func TestRunTeamChildStaleAttemptCleanupDoesNotEraseNewerSession(t *testing.T) {
 	sup.runtimes[child.id] = child
 
 	cfg := &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
-	go sup.runTeamChild(context.Background(), child, cfg, 0, "", "", "", "", "", "agy")
+	go sup.runTeamChild(context.Background(), child, cfg, 0, 0, "", "", "", "", "", "agy")
 
 	// Wait until the older attempt is active and has adopted the real id.
 	waitForStableChild(t, child, func(active, completed bool, phase, phaseLabel string) bool { return active })

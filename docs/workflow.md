@@ -152,19 +152,23 @@ A node's `action` is a tagged union. Exactly one variant:
 
 | Type | Fields | Behavior |
 |---|---|---|
-| `run` | `prompt` **or** `prompt_file` | Dispatches a single direct run. |
-| `loop` | `loop_file` | Dispatches an existing [loop](loop.md) config. |
-| `team` | `team_file` | Dispatches an existing [team](team.md) config. |
+| `run` | `prompt` **or** `prompt_file`, `timeout?` | Dispatches a single direct run. |
+| `loop` | `loop_file`, `timeout?` | Dispatches an existing [loop](loop.md) config. |
+| `team` | `team_file`, `timeout?` | Dispatches an existing [team](team.md) config. |
 | `manual` | `instructions?` | Parks awaiting an explicit `workflow.complete`. No runtime. |
 | `external` | `source`, `subject_type?` | Parks awaiting an explicit `workflow.complete` + external gate results. No runtime. |
 | `workflow` | `template_id`, `template_version`, `child_key`, `input_bindings?`, `output_bindings?`, `outcome_map` | Invokes a declared child workflow (see [Composition](#composition)). |
 
 `run`, `loop`, and `team` are provider-backed: `workflow.start` dispatches them
 through a registered executor and records the attempt's terminal facts.
-`manual` and `external` create an attempt with no runtime and require an
+`timeout` (seconds, optional) is an enforceable execution deadline for the
+dispatched child: every phase attempt, retry, and nudge stops at the shared
+wall-clock limit and the attempt records `timed_out`. `manual` and `external`
+create an attempt with no runtime and require an
 explicit `workflow.complete`. File references (`prompt_file`, `loop_file`,
 `team_file`) resolve relative to the stable supervisor's working directory at
-dispatch time.
+dispatch time. Renewing the attempt's lease keeps the attempt alive; it never
+extends the execution deadline.
 
 ### Completion
 

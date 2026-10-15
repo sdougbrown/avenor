@@ -493,7 +493,7 @@ func TestRunChildAttemptUsesInitialSpawnSession(t *testing.T) {
 		promptCh:    make(chan struct{}, 1),
 	}
 
-	result := sup.runChildAttempt(context.Background(), child, "", "hello", nil)
+	result := sup.runChildAttempt(context.Background(), child, "", "hello")
 	if result.exitCode != 0 {
 		t.Fatalf("exitCode = %d, want 0", result.exitCode)
 	}
@@ -579,7 +579,7 @@ func TestRunChildAttemptClearsPhaseAfterSessionEnd(t *testing.T) {
 	}
 	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-attempt-phase.sock", MaxRuntimes: 1})
 
-	result := sup.runChildAttempt(context.Background(), child, "", "hello", nil)
+	result := sup.runChildAttempt(context.Background(), child, "", "hello")
 	if result.exitCode != 0 {
 		t.Fatalf("exitCode = %d, want 0", result.exitCode)
 	}
@@ -751,7 +751,7 @@ func TestRunLoopChildClearsPhaseDuringRetryBackoff(t *testing.T) {
 	child := &childRuntime{id: "rt_loop_retry_phase", done: make(chan struct{}), promptCh: make(chan struct{}, 1), eventWriter: stableTestSink{}, phase: "done", cancelFn: func() {}}
 	sup.runtimes[child.id] = child
 	cfg := &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
-	go sup.runLoopChild(context.Background(), child, cfg, 1, "", "", "", "", "", "")
+	go sup.runLoopChild(context.Background(), child, cfg, 0, 1, "", "", "", "", "", "")
 	select {
 	case <-provider.emitted:
 	case <-time.After(2 * time.Second):
@@ -791,7 +791,7 @@ func TestRunTeamChildClearsPhaseDuringRetryBackoff(t *testing.T) {
 	child := &childRuntime{id: "rt_team_retry_phase", done: make(chan struct{}), promptCh: make(chan struct{}, 1), eventWriter: stableTestSink{}, phase: "done", cancelFn: func() {}}
 	sup.runtimes[child.id] = child
 	cfg := &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
-	go sup.runTeamChild(context.Background(), child, cfg, 1, "", "", "", "", "", "unknown-backend")
+	go sup.runTeamChild(context.Background(), child, cfg, 0, 1, "", "", "", "", "", "unknown-backend")
 	select {
 	case <-provider.emitted:
 	case <-time.After(2 * time.Second):
@@ -826,7 +826,7 @@ func TestRunLoopChildClearsStalePhaseOnAttemptSetupFailure(t *testing.T) {
 	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
 	child := &childRuntime{id: "rt_loop_setup_phase", done: make(chan struct{}), promptCh: make(chan struct{}, 1), eventWriter: stableTestSink{}, phase: "done", phaseLabel: "stale", cancelFn: func() {}}
 	sup.runtimes[child.id] = child
-	sup.runLoopChild(context.Background(), child, &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}, 0, "", "", "", "", "", "")
+	sup.runLoopChild(context.Background(), child, &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}, 0, 0, "", "", "", "", "", "")
 	child.mu.Lock()
 	phase, phaseLabel := child.phase, child.phaseLabel
 	child.mu.Unlock()
@@ -844,7 +844,7 @@ func TestRunTeamChildClearsStalePhaseOnAttemptSetupFailure(t *testing.T) {
 	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
 	child := &childRuntime{id: "rt_team_setup_phase", done: make(chan struct{}), promptCh: make(chan struct{}, 1), eventWriter: stableTestSink{}, phase: "done", phaseLabel: "stale", cancelFn: func() {}}
 	sup.runtimes[child.id] = child
-	sup.runTeamChild(context.Background(), child, &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}, 0, "", "", "", "", "", "unknown-backend")
+	sup.runTeamChild(context.Background(), child, &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}, 0, 0, "", "", "", "", "", "unknown-backend")
 	child.mu.Lock()
 	phase, phaseLabel := child.phase, child.phaseLabel
 	child.mu.Unlock()
@@ -1209,7 +1209,7 @@ func TestShutdownWaitsForLoopChildCleanup(t *testing.T) {
 		sup.runLoopChild(ctx, child, &looprunner.LoopConfig{
 			MaxIterations: 1,
 			Pre:           []phaseconfig.Phase{{Name: "work", Prompt: "wait for shutdown"}},
-		}, 0, "", "", "", "", "", "test")
+		}, 0, 0, "", "", "", "", "", "test")
 	})
 }
 
@@ -1220,7 +1220,7 @@ func TestShutdownWaitsForTeamChildCleanup(t *testing.T) {
 		}
 		sup.runTeamChild(ctx, child, &teamrunner.TeamConfig{
 			Team: []phaseconfig.Phase{{Name: "work", Prompt: "wait for shutdown"}},
-		}, 0, "", "", "", "", "", "test")
+		}, 0, 0, "", "", "", "", "", "test")
 	})
 }
 
@@ -1251,7 +1251,7 @@ func TestRunLoopChildCleansUpOnLooprunnerError(t *testing.T) {
 		MaxIterations: 1,
 		Pre:           []phaseconfig.Phase{{Name: "broken", Prompt: "{{"}},
 	}
-	sup.runLoopChild(context.Background(), child, cfg, 0, "", "", "", "", "", "")
+	sup.runLoopChild(context.Background(), child, cfg, 0, 0, "", "", "", "", "", "")
 
 	select {
 	case <-child.done:
@@ -1320,7 +1320,7 @@ func TestRunTeamChildCleansUpBrokerRuns(t *testing.T) {
 	cfg := &teamrunner.TeamConfig{
 		Team: []phaseconfig.Phase{{Name: "review", Prompt: "review"}},
 	}
-	sup.runTeamChild(context.Background(), child, cfg, 0, "", "", "", "", "", "unknown-backend")
+	sup.runTeamChild(context.Background(), child, cfg, 0, 0, "", "", "", "", "", "unknown-backend")
 
 	select {
 	case <-child.done:
@@ -2742,7 +2742,7 @@ func TestRunChildAttemptWiresControlServerForClaims(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go sup.runChildAttempt(ctx, child, "", "do it", nil)
+	go sup.runChildAttempt(ctx, child, "", "do it")
 
 	select {
 	case err := <-answerErr:
@@ -2831,7 +2831,7 @@ func TestRunLoopChildWiresControlServerForClaims(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go sup.runLoopChild(ctx, child, cfg, 0, "", "cloud", "", "", "", "")
+	go sup.runLoopChild(ctx, child, cfg, 0, 0, "", "cloud", "", "", "", "")
 
 	// Wait for the child to complete (with timeout).
 	select {
@@ -2937,7 +2937,7 @@ func TestRunTeamChildWiresControlServerForClaims(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go sup.runTeamChild(ctx, child, cfg, 0, "", "cloud", "", "", "", "unknown-backend")
+	go sup.runTeamChild(ctx, child, cfg, 0, 0, "", "cloud", "", "", "", "unknown-backend")
 
 	// Wait for the child to complete (with timeout).
 	select {
@@ -4062,11 +4062,11 @@ func assertChildModeDrainsAcceptedDirectAnswer(t *testing.T, mode string) {
 			go sup.runLoopChild(ctx, child, &looprunner.LoopConfig{
 				MaxIterations: 1,
 				Pre:           []phaseconfig.Phase{{Name: "ask", Prompt: "ask"}},
-			}, 0, "", "", "", "", "", "test")
+			}, 0, 0, "", "", "", "", "", "test")
 		} else {
 			go sup.runTeamChild(ctx, child, &teamrunner.TeamConfig{
 				Team: []phaseconfig.Phase{{Name: "ask", Prompt: "ask"}},
-			}, 0, "", "", "", "", "", "test")
+			}, 0, 0, "", "", "", "", "", "test")
 		}
 	}
 
@@ -5498,7 +5498,7 @@ func TestLoopChildReceivesResolvedDefaultBackend(t *testing.T) {
 
 	// Call runLoopChild directly with an empty backend string, which is what
 	// spawn() passes after resolving params.Backend == "" → cli.DefaultBackend.
-	go sup.runLoopChild(context.Background(), child, cfg, 0, "", "", "", "", "", cli.DefaultBackend)
+	go sup.runLoopChild(context.Background(), child, cfg, 0, 0, "", "", "", "", "", cli.DefaultBackend)
 
 	select {
 	case <-child.done:
@@ -5544,7 +5544,7 @@ func TestLoopChildReceivesExplicitBackend(t *testing.T) {
 
 	cfg := &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
 
-	go sup.runLoopChild(context.Background(), child, cfg, 0, "", "", "", "", "", "custom-backend")
+	go sup.runLoopChild(context.Background(), child, cfg, 0, 0, "", "", "", "", "", "custom-backend")
 
 	select {
 	case <-child.done:
@@ -5591,7 +5591,7 @@ func TestTeamChildReceivesResolvedDefaultBackend(t *testing.T) {
 
 	cfg := &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
 
-	go sup.runTeamChild(context.Background(), child, cfg, 0, "", "", "", "", "", cli.DefaultBackend)
+	go sup.runTeamChild(context.Background(), child, cfg, 0, 0, "", "", "", "", "", cli.DefaultBackend)
 
 	select {
 	case <-child.done:
@@ -5637,7 +5637,7 @@ func TestTeamChildReceivesExplicitBackend(t *testing.T) {
 
 	cfg := &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
 
-	go sup.runTeamChild(context.Background(), child, cfg, 0, "", "", "", "", "", "agy")
+	go sup.runTeamChild(context.Background(), child, cfg, 0, 0, "", "", "", "", "", "agy")
 
 	select {
 	case <-child.done:
@@ -6087,7 +6087,7 @@ func TestWorkflowLoopChildRecordsTermination(t *testing.T) {
 		mu.Unlock()
 	}
 
-	go sup.runLoopChild(ctx, child, &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}, 0, "", "", "", "", "", "")
+	go sup.runLoopChild(ctx, child, &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}, 0, 0, "", "", "", "", "", "")
 	waitForStableDone(t, child)
 
 	mu.Lock()
@@ -6211,7 +6211,7 @@ func TestWorkflowTeamChildRecordsTermination(t *testing.T) {
 		mu.Unlock()
 	}
 
-	go sup.runTeamChild(ctx, child, &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}, 0, "", "", "", "", "", "")
+	go sup.runTeamChild(ctx, child, &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}, 0, 0, "", "", "", "", "", "")
 	waitForStableDone(t, child)
 
 	mu.Lock()

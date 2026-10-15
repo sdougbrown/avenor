@@ -2,8 +2,8 @@ package teamrunner
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -214,10 +214,14 @@ func runPrePhases(ctx context.Context, opts RunOptions, prevCommit *string) (str
 
 		sr := runtime.StopReasonForExitCode(result.ExitCode)
 		if sr != "end_turn" {
-			_ = emitTeamEnd(opts.EventSink, opts.RunID, "pre_failure", "", 0, 0)
 			stopReason := result.StopReason
 			if stopReason == "" {
 				stopReason = sr
+			}
+			if stopReason == "timeout" {
+				_ = emitTeamEnd(opts.EventSink, opts.RunID, "timeout", "", 0, 0)
+			} else {
+				_ = emitTeamEnd(opts.EventSink, opts.RunID, "pre_failure", "", 0, 0)
 			}
 			r := RunResult{ExitCode: result.ExitCode, StopReason: stopReason, SessionID: result.SessionID}
 			return output.String(), &r, nil
@@ -251,6 +255,11 @@ func runTeamMembers(ctx context.Context, opts RunOptions, members []phaseconfig.
 				// Internal error (template rendering, event emission failure).
 				// Treat as a non-clean stop so the team result reflects the failure.
 				r = PhaseAttemptResult{ExitCode: 1, StopReason: "phase_error"}
+				if teamCtx.Err() == context.DeadlineExceeded {
+					// The run deadline expired: classify the member as timed
+					// out instead of an internal phase error.
+					r = PhaseAttemptResult{ExitCode: runtime.ExitCodeForStopReason("timeout"), StopReason: "timeout"}
+				}
 			}
 			results[idx] = memberResult{index: idx, result: r}
 
@@ -330,7 +339,11 @@ func runTeamMembers(ctx context.Context, opts RunOptions, members []phaseconfig.
 	}
 
 	if failureResult != nil {
-		_ = emitTeamEnd(opts.EventSink, opts.RunID, "phase_failure", "", membersCompleted, membersAborted)
+		exitReason := "phase_failure"
+		if failureResult.StopReason == "timeout" {
+			exitReason = "timeout"
+		}
+		_ = emitTeamEnd(opts.EventSink, opts.RunID, exitReason, "", membersCompleted, membersAborted)
 		return membersCompleted, membersAborted, failureResult, "", ""
 	}
 
@@ -378,10 +391,14 @@ func runSequentialPhases(ctx context.Context, opts RunOptions, phases []phasecon
 
 		sr := runtime.StopReasonForExitCode(result.ExitCode)
 		if sr != "end_turn" {
-			_ = emitTeamEnd(opts.EventSink, opts.RunID, "post_failure", "", 0, 0)
 			stopReason := result.StopReason
 			if stopReason == "" {
 				stopReason = sr
+			}
+			if stopReason == "timeout" {
+				_ = emitTeamEnd(opts.EventSink, opts.RunID, "timeout", "", 0, 0)
+			} else {
+				_ = emitTeamEnd(opts.EventSink, opts.RunID, "post_failure", "", 0, 0)
 			}
 			r := RunResult{ExitCode: result.ExitCode, StopReason: stopReason, SessionID: result.SessionID}
 			return nil, &r, nil
@@ -485,7 +502,7 @@ func executePhase(ctx context.Context, opts RunOptions, phase phaseconfig.Phase,
 }
 
 func completePhaseRequirements(ctx context.Context, opts RunOptions, phase phaseconfig.Phase, result PhaseAttemptResult) (PhaseAttemptResult, error) {
-	missing := missingRequiredFiles(opts.WorkDir, phase.Requires)
+	missing := phaseconfig.MissingRequiredFiles(opts.WorkDir, phase.Requires)
 	if len(missing) == 0 || result.ExitCode != 0 || phaseStopReason(result) != "end_turn" {
 		return result, nil
 	}
@@ -499,16 +516,23 @@ func completePhaseRequirements(ctx context.Context, opts RunOptions, phase phase
 	sessionID := result.SessionID
 	for i := 0; i < maxNudges; i++ {
 		if err := ctx.Err(); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				// The run deadline expired before recovery could start:
+				// report the timeout instead of an incomplete-output failure.
+				result.ExitCode = runtime.ExitCodeForStopReason("timeout")
+				result.StopReason = "timeout"
+				return result, nil
+			}
 			return result, err
 		}
 		nudgePhase := phase
-		nudgePhase.Prompt = incompleteNudgePrompt(customNudge, missing)
+		nudgePhase.Prompt = phaseconfig.IncompleteNudgePrompt(customNudge, missing)
 		result, err := opts.PhaseAttempt(ctx, nudgePhase, i+1, sessionID)
 		if err != nil {
 			return result, err
 		}
 		sessionID = result.SessionID
-		missing = missingRequiredFiles(opts.WorkDir, phase.Requires)
+		missing = phaseconfig.MissingRequiredFiles(opts.WorkDir, phase.Requires)
 		if len(missing) == 0 || result.ExitCode != 0 || phaseStopReason(result) != "end_turn" {
 			return result, nil
 		}
@@ -525,69 +549,11 @@ func completePhaseRequirements(ctx context.Context, opts RunOptions, phase phase
 }
 
 func incompleteNudgePrompt(custom string, missing []string) string {
-	if strings.TrimSpace(custom) != "" {
-		return custom
-	}
-	return fmt.Sprintf("Continue. The phase is incomplete because required output files are missing: %s. Complete the assigned task now and write the required files. Do not ask for permission to continue.", strings.Join(missing, ", "))
+	return phaseconfig.IncompleteNudgePrompt(custom, missing)
 }
 
 func missingRequiredFiles(workDir string, req phaseconfig.PhaseRequirements) []string {
-	checkedFiles := map[string]struct{}{}
-	missingSet := map[string]struct{}{}
-	var missing []string
-	for _, path := range req.Files {
-		if path == "" {
-			continue
-		}
-		if _, ok := checkedFiles[path]; ok {
-			continue
-		}
-		checkedFiles[path] = struct{}{}
-		if !requiredFileExists(workDir, path, false) {
-			missing = append(missing, path)
-			missingSet[path] = struct{}{}
-		}
-	}
-	for _, path := range req.NonEmptyFiles {
-		if path == "" {
-			continue
-		}
-		if !requiredFileExists(workDir, path, true) {
-			if _, ok := missingSet[path]; !ok {
-				missing = append(missing, path)
-				missingSet[path] = struct{}{}
-			}
-		}
-	}
-	return missing
-}
-
-func requiredFileExists(workDir, path string, nonEmpty bool) bool {
-	fullPath, ok := requiredFilePath(workDir, path)
-	if !ok {
-		return false
-	}
-	info, err := os.Stat(fullPath)
-	if err != nil || info.IsDir() {
-		return false
-	}
-	return !nonEmpty || info.Size() > 0
-}
-
-func requiredFilePath(workDir, path string) (string, bool) {
-	if filepath.IsAbs(path) {
-		return "", false
-	}
-	cleanWorkDir, err := filepath.Abs(workDir)
-	if err != nil {
-		return "", false
-	}
-	cleanWorkDir = filepath.Clean(cleanWorkDir)
-	fullPath := filepath.Clean(filepath.Join(cleanWorkDir, path))
-	if fullPath != cleanWorkDir && !strings.HasPrefix(fullPath, cleanWorkDir+string(filepath.Separator)) {
-		return "", false
-	}
-	return fullPath, true
+	return phaseconfig.MissingRequiredFiles(workDir, req)
 }
 
 func runPhaseWithRetry(ctx context.Context, attemptFn func(ctx context.Context) (PhaseAttemptResult, error), maxRetries int) (PhaseAttemptResult, error) {
@@ -603,6 +569,12 @@ func runPhaseWithRetry(ctx context.Context, attemptFn func(ctx context.Context) 
 
 		select {
 		case <-ctx.Done():
+			if ctx.Err() == context.DeadlineExceeded {
+				// The run deadline expired during the retry backoff: the
+				// bounded run stops here with a consistent timeout class.
+				result.ExitCode = runtime.ExitCodeForStopReason("timeout")
+				result.StopReason = "timeout"
+			}
 			return result, nil
 		case <-phaseRetryAfter(phaseconfig.BackoffDuration(retry - 1)):
 		}
