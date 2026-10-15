@@ -128,6 +128,46 @@ func TestRunNudgeStopsAtRunDeadline(t *testing.T) {
 	}
 }
 
+// TestRunNudgeCancelledParentReportsCancelled proves a parent cancellation
+// (supervisor shutdown, workflow cancellation) during the requirement nudge
+// loop is reported as a cancelled run, not a generic phase-failure error.
+func TestRunNudgeCancelledParentReportsCancelled(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeConfig(nil, []phaseconfig.Phase{{
+		Name:   "review",
+		Prompt: "review",
+		Requires: phaseconfig.PhaseRequirements{
+			NonEmptyFiles: []string{"REVIEW_CODE.md"},
+		},
+	}}, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var attempts atomic.Int32
+	result, err := Run(ctx, RunOptions{
+		WorkDir:   dir,
+		RunID:     "test-run",
+		EventSink: discardEventWriter{},
+		Config:    cfg,
+		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
+			attempts.Add(1)
+			// The parent context is cancelled between the attempt and the nudge.
+			cancel()
+			return PhaseAttemptResult{ExitCode: 0, StopReason: "end_turn", SessionID: fmt.Sprintf("s%d", attempts.Load())}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("attempts = %d, want 1 (no nudge after cancellation)", attempts.Load())
+	}
+	if result.ExitCode != 130 || result.StopReason != "cancelled" {
+		t.Fatalf("Run() = {%d %q}, want {130 cancelled}", result.ExitCode, result.StopReason)
+	}
+}
+
 type eventsRecorder struct {
 	mu     sync.Mutex
 	events []events.Event

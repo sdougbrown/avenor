@@ -523,7 +523,12 @@ func completePhaseRequirements(ctx context.Context, opts RunOptions, phase phase
 				result.StopReason = "timeout"
 				return result, nil
 			}
-			return result, err
+			// The parent context was cancelled (supervisor shutdown, workflow
+			// cancellation): report the cancellation instead of propagating a
+			// generic error that would be classified as a phase failure.
+			result.ExitCode = runtime.ExitCodeForStopReason("cancelled")
+			result.StopReason = "cancelled"
+			return result, nil
 		}
 		nudgePhase := phase
 		nudgePhase.Prompt = phaseconfig.IncompleteNudgePrompt(customNudge, missing)
