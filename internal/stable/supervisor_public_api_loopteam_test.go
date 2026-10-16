@@ -1,0 +1,701 @@
+package stable
+
+// Public-API tests for the stable Supervisor's loop and team children, the
+// workflow-mode siblings of the single-runtime scenarios in
+// supervisor_public_api_test.go. Every scenario spawns through Spawn with
+// loop_file or team_file and asserts only what a caller can see:
+// RuntimeStatus translated through runstate.Translate with the completion
+// sentinel applied, RuntimeResult, RuntimeWaitTurn, List rows, and the
+// events published on the control stream. The one seam is the provider
+// factory (newProviderFunc), which stands in for the backend; loop phases
+// are sequential, so one scripted provider serves the attempts in order, and
+// team members are keyed by their inline agent so each member's provider is
+// addressed deterministically despite concurrent attempts.
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/runtime"
+)
+
+// itestWorkflowConfig writes a loop or team config file in the JSON shape
+// configs use on disk and returns its path.
+func itestWorkflowConfig(t *testing.T, kind string, cfg map[string]any) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), kind+".json")
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal %s config: %v", kind, err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write %s config: %v", kind, err)
+	}
+	return path
+}
+
+// spawnWorkflow spawns a loop or team child through Spawn. The spawn prompt
+// is cleared: a non-empty prompt is injected as an extra "(initial)" pre
+// phase, which would add a provider attempt to every scenario.
+func (h *itestHarness) spawnWorkflow(kind, file string, params map[string]any) string {
+	h.t.Helper()
+	merged := map[string]any{"prompt": ""}
+	for k, v := range params {
+		merged[k] = v
+	}
+	merged[kind+"_file"] = file
+	return h.spawn(merged)
+}
+
+// itestMemberEndIs matches a session.end carrying a given session ID and stop
+// reason. Team and loop phase attempts are distinguished by their session IDs
+// because every event of the child shares one runtime id.
+func itestMemberEndIs(sessionID, stopReason string) func(events.Event) bool {
+	return func(ev events.Event) bool {
+		if ev.Event != "session.end" {
+			return false
+		}
+		if got, _ := ev.Fields["stop_reason"].(string); got != stopReason {
+			return false
+		}
+		id := ev.SessionID
+		if id == "" {
+			id, _ = ev.Fields["session_id"].(string)
+		}
+		return id == sessionID
+	}
+}
+
+// itestTeamProviders routes provider requests to per-member providers keyed
+// by the member's inline agent: the only per-member field visible in
+// StartOptions, since concurrent members cannot be ordered.
+func itestTeamProviders(members map[string]*itestProvider) func(runtime.StartOptions, string) (runtime.Provider, error) {
+	return func(opts runtime.StartOptions, _ string) (runtime.Provider, error) {
+		p, ok := members[opts.Agent]
+		if !ok {
+			return nil, fmt.Errorf("unexpected provider request for agent %q", opts.Agent)
+		}
+		return p, nil
+	}
+}
+
+// itestWorking marks the provider's session as working before its next step,
+// so a test can observe that a phase attempt is in flight.
+func itestWorking(sessionID string) stableScriptedEvent {
+	return stableScriptedEvent{event: events.Event{Event: "agent.status", SessionID: sessionID, Fields: map[string]any{"phase": "working"}}}
+}
+
+// sentinelText returns the completion sentinel's content, which callers read
+// from disk at the sentinel_file path RuntimeStatus reports.
+func (h *itestHarness) sentinelText(rtID string) string {
+	h.t.Helper()
+	out, err := h.sup.RuntimeStatus(rtID)
+	if err != nil {
+		h.t.Fatalf("RuntimeStatus(%s): %v", rtID, err)
+	}
+	raw, _ := out.(map[string]any)
+	path, _ := raw["sentinel_file"].(string)
+	if path == "" {
+		h.t.Fatalf("runtime %s reports no sentinel_file", rtID)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		h.t.Fatalf("read sentinel for %s: %v", rtID, err)
+	}
+	return string(data)
+}
+
+// Loop scenarios.
+
+// TestSupervisorPublicAPILoopPhasesSucceed proves a loop child that runs
+// every phase to end_turn is caller-visible as done: one session.end per
+// phase, the loop lifecycle events on the stream, the final phase's output in
+// RuntimeResult, the terminal sentinel on disk, and an ended List row with
+// the zero exit code.
+func TestSupervisorPublicAPILoopPhasesSucceed(t *testing.T) {
+	t.Parallel()
+	provider := newItestProvider(
+		itestAttempt("ses_loop_prep", itestSessionEnd("ses_loop_prep", "end_turn", "prep done")),
+		itestAttempt("ses_loop_work", itestSessionEnd("ses_loop_work", "end_turn", "work done")),
+		itestAttempt("ses_loop_wrap", itestSessionEnd("ses_loop_wrap", "end_turn", "wrap done")),
+	)
+	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+
+	file := itestWorkflowConfig(t, "loop", map[string]any{
+		"max_iterations": 1,
+		"pre":            []map[string]any{{"name": "prep", "prompt": "prep work"}},
+		"loop":           []map[string]any{{"name": "work", "prompt": "loop work"}},
+		"post":           []map[string]any{{"name": "wrap", "prompt": "wrap up"}},
+	})
+	rt := h.spawnWorkflow("loop", file, map[string]any{"label": "loop-ok"})
+
+	// Each phase attempt is a caller-visible session ending on the stream.
+	for _, out := range []string{"prep done", "work done", "wrap done"} {
+		h.log.waitFor(t, out+" session.end", func(ev events.Event) bool {
+			o, _ := ev.Fields["final_output"].(string)
+			return itestEventIs("session.end", rt)(ev) && o == out
+		})
+	}
+	// The loop runner's lifecycle events reach the control stream, and the
+	// single iteration that ran to end_turn reports max_iterations.
+	end := h.log.waitFor(t, "avenor.loop.end", itestEventIs("avenor.loop.end", rt))
+	if reason, _ := end.Fields["exit_reason"].(string); reason != "max_iterations" {
+		t.Fatalf("avenor.loop.end exit_reason = %q, want max_iterations", reason)
+	}
+
+	v := h.awaitStatus(rt, "done")
+	if !v.TurnComplete {
+		t.Fatal("done view TurnComplete = false, want true")
+	}
+	// The last settled phase is the authoritative final output.
+	if v.FinalOutput != "wrap done" {
+		t.Fatalf("status final_output = %q, want %q", v.FinalOutput, "wrap done")
+	}
+	if got := h.result(rt); got != "wrap done" {
+		t.Fatalf("RuntimeResult final_output = %q, want %q", got, "wrap done")
+	}
+	// The terminal sentinel declares the success on disk.
+	if status, _, _ := itestSentinelStatus(h.sentinelText(rt)); status != "done" {
+		t.Fatalf("sentinel status = %q, want done", status)
+	}
+	turn := h.waitTurn(rt)
+	if got, _ := turn["stop_reason"].(string); got != "end_turn" {
+		t.Fatalf("WaitTurn stop_reason = %q, want end_turn", got)
+	}
+	if starts, resumes := provider.counts(); starts != 3 || resumes != 0 {
+		t.Fatalf("provider starts/resumes = %d/%d, want 3/0 (one attempt per phase)", starts, resumes)
+	}
+	// A finished loop child is an ended row, not a parked idle row.
+	rows := h.listed("loop-ok")
+	if len(rows) != 1 || rows[0]["runtime_id"] != rt {
+		t.Fatalf("List = %v, want the one runtime %s", rows, rt)
+	}
+	if got := rows[0]["status"]; got != "ended" {
+		t.Fatalf("List status = %v, want ended", got)
+	}
+	if got := rows[0]["exit_code"]; got != 0 {
+		t.Fatalf("List exit_code = %v, want 0", got)
+	}
+}
+
+func TestSupervisorPublicAPILoopPhaseFailureExhaustsRetries(t *testing.T) {
+	t.Parallel()
+	provider := newItestProvider(
+		itestAttempt("ses_loop_rex1", itestSessionEnd("ses_loop_rex1", "error", "")),
+		itestAttempt("ses_loop_rex2", itestSessionEnd("ses_loop_rex2", "error", "")),
+	)
+	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+
+	file := itestWorkflowConfig(t, "loop", map[string]any{
+		"max_iterations": 1,
+		"loop":           []map[string]any{{"name": "work", "prompt": "loop work"}},
+	})
+	rt := h.spawnWorkflow("loop", file, map[string]any{"label": "loop-retry-exhaust", "max_retries": 1})
+
+	// Both the initial attempt and the one retry end with a failed session.end.
+	h.log.waitFor(t, "first failure session.end", itestMemberEndIs("ses_loop_rex1", "error"))
+	h.log.waitFor(t, "retry failure session.end", itestMemberEndIs("ses_loop_rex2", "error"))
+	if n := h.log.count(func(ev events.Event) bool {
+		return itestMemberEndIs("ses_loop_rex1", "error")(ev) || itestMemberEndIs("ses_loop_rex2", "error")(ev)
+	}); n != 2 {
+		t.Fatalf("failed session.end events = %d, want 2 (initial attempt plus one retry)", n)
+	}
+	h.awaitStatus(rt, "failed")
+	v := h.view(rt)
+	if v.StopReason != "error" {
+		t.Fatalf("failed view stop reason = %q, want error", v.StopReason)
+	}
+	if code := h.rawExitCode(rt); code != 1 {
+		t.Fatalf("raw RuntimeStatus exit_code = %d, want 1", code)
+	}
+	turn := h.waitTurn(rt)
+	if got, _ := turn["stop_reason"].(string); got != "error" {
+		t.Fatalf("WaitTurn stop_reason = %q, want error", got)
+	}
+	if starts, resumes := provider.counts(); starts != 2 || resumes != 0 {
+		t.Fatalf("provider starts/resumes = %d/%d, want 2/0 (exhausted budget starts no third attempt)", starts, resumes)
+	}
+	rows := h.listed("loop-retry-exhaust")
+	if len(rows) != 1 || rows[0]["status"] != "ended" || rows[0]["exit_code"] != 1 {
+		t.Fatalf("List row = %v, want ended with exit code 1", rows)
+	}
+}
+
+// TestSupervisorPublicAPILoopRunDeadlineDuringPhase proves a caller-set run
+// deadline ends a loop phase that never settles: the child ends as a timeout
+// with exit code 124 and the phase attempt is never retried.
+func TestSupervisorPublicAPILoopRunDeadlineDuringPhase(t *testing.T) {
+	t.Parallel()
+	gate := newItestGate()
+	defer gate.open()
+	// The scripted attempt never reaches a session.end: only the run
+	// deadline can stop the phase.
+	provider := newItestProvider(itestAttempt("ses_loop_deadline", gate.step()))
+	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+
+	file := itestWorkflowConfig(t, "loop", map[string]any{
+		"max_iterations": 1,
+		"loop":           []map[string]any{{"name": "work", "prompt": "loop work"}},
+	})
+	rt := h.spawnWorkflow("loop", file, map[string]any{"label": "loop-deadline", "timeout": 1})
+
+	h.log.waitFor(t, "timeout session.end", itestStopReasonIs(rt, "timeout"))
+	v := h.awaitStatus(rt, "timeout")
+	if v.StopReason != "timeout" {
+		t.Fatalf("timeout view stop reason = %q, want timeout", v.StopReason)
+	}
+	if code := h.rawExitCode(rt); code != 124 {
+		t.Fatalf("raw RuntimeStatus exit_code = %d, want 124", code)
+	}
+	turn := h.waitTurn(rt)
+	if got, _ := turn["stop_reason"].(string); got != "timeout" {
+		t.Fatalf("WaitTurn stop_reason = %q, want timeout", got)
+	}
+	if starts, _ := provider.counts(); starts != 1 {
+		t.Fatalf("provider starts = %d, want 1 (a timed-out phase is not retried)", starts)
+	}
+}
+
+// TestSupervisorPublicAPILoopCancelDuringPhase proves RuntimeCancel during a
+// running phase kills the loop child with exit code 130 and no further phase
+// ever starts.
+func TestSupervisorPublicAPILoopCancelDuringPhase(t *testing.T) {
+	t.Parallel()
+	gate := newItestGate()
+	defer gate.open()
+	provider := newItestProvider(
+		itestAttempt("ses_loop_c1", itestWorking("ses_loop_c1"), gate.step(),
+			itestSessionEnd("ses_loop_c1", "end_turn", "never reached")),
+		itestAttempt("ses_loop_c2", itestSessionEnd("ses_loop_c2", "end_turn", "never started")),
+	)
+	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+
+	file := itestWorkflowConfig(t, "loop", map[string]any{
+		"max_iterations": 1,
+		"loop": []map[string]any{
+			{"name": "first", "prompt": "first work"},
+			{"name": "second", "prompt": "second work"},
+		},
+	})
+	rt := h.spawnWorkflow("loop", file, map[string]any{"label": "loop-cancel"})
+
+	h.log.waitFor(t, "working status", itestEventIs("agent.status", rt))
+	if v := h.view(rt); v.Status != "running" || v.Phase != "working" {
+		t.Fatalf("view before cancel = %+v, want running in the working phase", v)
+	}
+	if err := h.sup.RuntimeCancel(rt); err != nil {
+		t.Fatalf("RuntimeCancel: %v", err)
+	}
+	h.awaitStatus(rt, "killed")
+	if v := h.view(rt); v.StopReason != "cancelled" {
+		t.Fatalf("killed view stop reason = %q, want cancelled", v.StopReason)
+	}
+	if code := h.rawExitCode(rt); code != 130 {
+		t.Fatalf("raw RuntimeStatus exit_code = %d, want 130", code)
+	}
+	turn := h.waitTurn(rt)
+	if got, _ := turn["stop_reason"].(string); got != "cancelled" {
+		t.Fatalf("WaitTurn stop_reason = %q, want cancelled", got)
+	}
+	// The cancelled run must not wake into the second phase: once the child
+	// has ended, the attempt count is final.
+	if starts, _ := provider.counts(); starts != 1 {
+		t.Fatalf("provider starts = %d, want 1 (the second phase never starts)", starts)
+	}
+	if got := h.result(rt); got == "never started" {
+		t.Fatal("cancelled loop child produced the output of a phase it never ran")
+	}
+}
+
+// TestSupervisorPublicAPILoopCancelDuringRetryBackoff proves a cancel issued
+// while the loop is inside a retry backoff ends the child as killed without
+// waking into the retry attempt: the caller sees the killed status with exit
+// code 130, and the retry never starts.
+//
+// Characterization note: unlike an ordinary runtime (whose idle-time cancel
+// records a cancelled session.end and reports "cancelled" through WaitTurn),
+// a loop child killed in backoff reports the failed attempt's own stop
+// reason through WaitTurn, because the loop's cancel path writes only the
+// sentinel. This test pins the caller-visible end state that both paths
+// share: killed status, exit code 130, and no retry attempt.
+func TestSupervisorPublicAPILoopCancelDuringRetryBackoff(t *testing.T) {
+	t.Parallel()
+	provider := newItestProvider(itestAttempt("ses_loop_cb", itestSessionEnd("ses_loop_cb", "error", "")))
+	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+
+	file := itestWorkflowConfig(t, "loop", map[string]any{
+		"max_iterations": 1,
+		"loop":           []map[string]any{{"name": "work", "prompt": "loop work"}},
+	})
+	// The first retry's backoff is 2s, so the cancel issued right after the
+	// failed attempt's session.end lands inside the backoff window.
+	rt := h.spawnWorkflow("loop", file, map[string]any{"label": "loop-backoff-cancel", "max_retries": 1})
+	h.log.waitFor(t, "failed attempt session.end", func(ev events.Event) bool {
+		return itestMemberEndIs("ses_loop_cb", "error")(ev)
+	})
+	// The cancel is level-triggered on the run context, so issuing it now is
+	// guaranteed to be in force by the time the backoff select runs.
+	if err := h.sup.RuntimeCancel(rt); err != nil {
+		t.Fatalf("RuntimeCancel: %v", err)
+	}
+	h.awaitStatus(rt, "killed")
+	if v := h.view(rt); v.StopReason != "cancelled" {
+		t.Fatalf("killed view stop reason = %q, want cancelled", v.StopReason)
+	}
+	if code := h.rawExitCode(rt); code != 130 {
+		t.Fatalf("raw RuntimeStatus exit_code = %d, want 130", code)
+	}
+	// The cancelled backoff must not wake into the retry attempt. Once the
+	// child has ended, the attempt count is final; the window outlasts the
+	// backoff delay so a late start cannot slip through.
+	h.consistentlyFor(2*time.Second+500*time.Millisecond, "no retry attempt after cancel", func() bool {
+		starts, _ := provider.counts()
+		return starts == 1
+	})
+}
+
+// Team scenarios.
+
+// TestSupervisorPublicAPITeamMembersSucceed proves a team child whose members
+// all end end_turn is caller-visible as done: one session.end per member, a
+// zero exit code, an ended row, and a final output produced by one of the
+// members (the members settle concurrently, so either member's output is a
+// legitimate final).
+func TestSupervisorPublicAPITeamMembersSucceed(t *testing.T) {
+	t.Parallel()
+	alpha := newItestProvider(itestAttempt("ses_team_alpha", itestSessionEnd("ses_team_alpha", "end_turn", "alpha done")))
+	beta := newItestProvider(itestAttempt("ses_team_beta", itestSessionEnd("ses_team_beta", "end_turn", "beta done")))
+	h := newItestHarness(t, Config{}, itestTeamProviders(map[string]*itestProvider{
+		"alpha-agent": alpha,
+		"beta-agent":  beta,
+	}))
+
+	file := itestWorkflowConfig(t, "team", map[string]any{
+		"team": []map[string]any{
+			{"name": "alpha", "prompt": "alpha work", "agent": "alpha-agent"},
+			{"name": "beta", "prompt": "beta work", "agent": "beta-agent"},
+		},
+	})
+	rt := h.spawnWorkflow("team", file, map[string]any{"label": "team-ok"})
+
+	for _, sessionID := range []string{"ses_team_alpha", "ses_team_beta"} {
+		h.log.waitFor(t, sessionID+" session.end", itestMemberEndIs(sessionID, "end_turn"))
+	}
+	h.log.waitFor(t, "avenor.team.end", itestEventIs("avenor.team.end", rt))
+
+	h.awaitStatus(rt, "done")
+	if code := h.rawExitCode(rt); code != 0 {
+		t.Fatalf("raw RuntimeStatus exit_code = %d, want 0", code)
+	}
+	got := h.result(rt)
+	if got != "alpha done" && got != "beta done" {
+		t.Fatalf("RuntimeResult final_output = %q, want a member output", got)
+	}
+	turn := h.waitTurn(rt)
+	if reason, _ := turn["stop_reason"].(string); reason != "end_turn" {
+		t.Fatalf("WaitTurn stop_reason = %q, want end_turn", reason)
+	}
+	alphaStarts, _ := alpha.counts()
+	betaStarts, _ := beta.counts()
+	if alphaStarts != 1 || betaStarts != 1 {
+		t.Fatalf("member starts = %d/%d, want 1/1", alphaStarts, betaStarts)
+	}
+	rows := h.listed("team-ok")
+	if len(rows) != 1 || rows[0]["status"] != "ended" || rows[0]["exit_code"] != 0 {
+		t.Fatalf("List row = %v, want ended with exit code 0", rows)
+	}
+}
+
+// TestSupervisorPublicAPITeamMemberFailureLeavesPeersRunning proves the
+// team's failure semantics a caller sees: one member's ordinary failure does
+// not stop the peers — they run to completion — and the child then ends
+// failed with the failed member's exit code and stop reason.
+func TestSupervisorPublicAPITeamMemberFailureLeavesPeersRunning(t *testing.T) {
+	t.Parallel()
+	gate := newItestGate()
+	defer gate.open()
+	alpha := newItestProvider(itestAttempt("ses_team_fail_alpha", gate.step(),
+		itestSessionEnd("ses_team_fail_alpha", "end_turn", "alpha finished")))
+	beta := newItestProvider(itestAttempt("ses_team_fail_beta", itestSessionEnd("ses_team_fail_beta", "error", "")))
+	h := newItestHarness(t, Config{}, itestTeamProviders(map[string]*itestProvider{
+		"alpha-agent": alpha,
+		"beta-agent":  beta,
+	}))
+
+	file := itestWorkflowConfig(t, "team", map[string]any{
+		"team": []map[string]any{
+			{"name": "alpha", "prompt": "alpha work", "agent": "alpha-agent"},
+			{"name": "beta", "prompt": "beta work", "agent": "beta-agent"},
+		},
+	})
+	rt := h.spawnWorkflow("team", file, map[string]any{"label": "team-failure"})
+
+	// Beta fails while alpha is still working.
+	h.log.waitFor(t, "beta failure session.end", itestMemberEndIs("ses_team_fail_beta", "error"))
+	// The peer keeps running: an ordinary member failure does not cancel the
+	// team. If a failure tore down the team, the child would end within this
+	// window and the assertion fails.
+	h.consistentlyFor(300*time.Millisecond, "the peer keeps running after a member failure", func() bool {
+		return h.view(rt).Status == "running"
+	})
+	// Released, the peer runs to its own end_turn.
+	gate.open()
+	h.log.waitFor(t, "alpha session.end", itestMemberEndIs("ses_team_fail_alpha", "end_turn"))
+	h.awaitStatus(rt, "failed")
+	if v := h.view(rt); v.StopReason != "error" {
+		t.Fatalf("failed view stop reason = %q, want error", v.StopReason)
+	}
+	if code := h.rawExitCode(rt); code != 1 {
+		t.Fatalf("raw RuntimeStatus exit_code = %d, want 1", code)
+	}
+	// WaitTurn's stop reason for a failed team is deliberately not pinned:
+	// it reflects the last member to settle rather than the team result.
+	alphaStarts, _ := alpha.counts()
+	betaStarts, _ := beta.counts()
+	if alphaStarts != 1 || betaStarts != 1 {
+		t.Fatalf("member starts = %d/%d, want 1/1", alphaStarts, betaStarts)
+	}
+}
+
+// TestSupervisorPublicAPITeamRunDeadline proves a caller-set run deadline
+// ends a team whose members never settle: the child ends as a timeout with
+// exit code 124, and every member attempt is stopped with its own timeout
+// session.end.
+func TestSupervisorPublicAPITeamRunDeadline(t *testing.T) {
+	t.Parallel()
+	alphaGate := newItestGate()
+	defer alphaGate.open()
+	betaGate := newItestGate()
+	defer betaGate.open()
+	alpha := newItestProvider(itestAttempt("ses_team_deadline_alpha", alphaGate.step()))
+	beta := newItestProvider(itestAttempt("ses_team_deadline_beta", betaGate.step()))
+	h := newItestHarness(t, Config{}, itestTeamProviders(map[string]*itestProvider{
+		"alpha-agent": alpha,
+		"beta-agent":  beta,
+	}))
+
+	file := itestWorkflowConfig(t, "team", map[string]any{
+		"team": []map[string]any{
+			{"name": "alpha", "prompt": "alpha work", "agent": "alpha-agent"},
+			{"name": "beta", "prompt": "beta work", "agent": "beta-agent"},
+		},
+	})
+	rt := h.spawnWorkflow("team", file, map[string]any{"label": "team-deadline", "timeout": 1})
+
+	h.awaitStatus(rt, "timeout")
+	if v := h.view(rt); v.StopReason != "timeout" {
+		t.Fatalf("timeout view stop reason = %q, want timeout", v.StopReason)
+	}
+	if code := h.rawExitCode(rt); code != 124 {
+		t.Fatalf("raw RuntimeStatus exit_code = %d, want 124", code)
+	}
+	// Both members were stopped by the shared deadline, each with its own
+	// timeout session.end.
+	if n := h.log.count(itestStopReasonIs(rt, "timeout")); n != 2 {
+		t.Fatalf("timeout session.end events = %d, want 2 (one per member)", n)
+	}
+	turn := h.waitTurn(rt)
+	if got, _ := turn["stop_reason"].(string); got != "timeout" {
+		t.Fatalf("WaitTurn stop_reason = %q, want timeout", got)
+	}
+	alphaStarts, _ := alpha.counts()
+	betaStarts, _ := beta.counts()
+	if alphaStarts != 1 || betaStarts != 1 {
+		t.Fatalf("member starts = %d/%d, want 1/1", alphaStarts, betaStarts)
+	}
+}
+
+// TestSupervisorPublicAPITeamCancel proves RuntimeCancel stops every member
+// and ends the team child as killed with exit code 130.
+func TestSupervisorPublicAPITeamCancel(t *testing.T) {
+	t.Parallel()
+	alphaGate := newItestGate()
+	defer alphaGate.open()
+	betaGate := newItestGate()
+	defer betaGate.open()
+	alpha := newItestProvider(itestAttempt("ses_team_cancel_alpha",
+		itestWorking("ses_team_cancel_alpha"), alphaGate.step()))
+	beta := newItestProvider(itestAttempt("ses_team_cancel_beta",
+		itestWorking("ses_team_cancel_beta"), betaGate.step()))
+	h := newItestHarness(t, Config{}, itestTeamProviders(map[string]*itestProvider{
+		"alpha-agent": alpha,
+		"beta-agent":  beta,
+	}))
+
+	file := itestWorkflowConfig(t, "team", map[string]any{
+		"team": []map[string]any{
+			{"name": "alpha", "prompt": "alpha work", "agent": "alpha-agent"},
+			{"name": "beta", "prompt": "beta work", "agent": "beta-agent"},
+		},
+	})
+	rt := h.spawnWorkflow("team", file, map[string]any{"label": "team-cancel"})
+
+	// Both members are in flight before the cancel lands.
+	for _, sessionID := range []string{"ses_team_cancel_alpha", "ses_team_cancel_beta"} {
+		h.log.waitFor(t, sessionID+" working status", itestEventIs("agent.status", rt))
+	}
+	if err := h.sup.RuntimeCancel(rt); err != nil {
+		t.Fatalf("RuntimeCancel: %v", err)
+	}
+	h.awaitStatus(rt, "killed")
+	if v := h.view(rt); v.StopReason != "cancelled" {
+		t.Fatalf("killed view stop reason = %q, want cancelled", v.StopReason)
+	}
+	if code := h.rawExitCode(rt); code != 130 {
+		t.Fatalf("raw RuntimeStatus exit_code = %d, want 130", code)
+	}
+	if n := h.log.count(itestStopReasonIs(rt, "cancelled")); n != 2 {
+		t.Fatalf("cancelled session.end events = %d, want 2 (one per member)", n)
+	}
+	turn := h.waitTurn(rt)
+	if got, _ := turn["stop_reason"].(string); got != "cancelled" {
+		t.Fatalf("WaitTurn stop_reason = %q, want cancelled", got)
+	}
+}
+
+// Shutdown and List scenarios.
+
+// TestSupervisorPublicAPILoopShutdownGracefulEndsActiveChild proves graceful
+// Shutdown tears down a loop child mid-phase and leaves the killed end state
+// callers observe.
+func TestSupervisorPublicAPILoopShutdownGracefulEndsActiveChild(t *testing.T) {
+	t.Parallel()
+	gate := newItestGate()
+	defer gate.open()
+	provider := newItestProvider(itestAttempt("ses_loop_sd",
+		itestWorking("ses_loop_sd"), gate.step(),
+		itestSessionEnd("ses_loop_sd", "end_turn", "never reached")))
+	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+
+	file := itestWorkflowConfig(t, "loop", map[string]any{
+		"max_iterations": 1,
+		"loop":           []map[string]any{{"name": "work", "prompt": "loop work"}},
+	})
+	rt := h.spawnWorkflow("loop", file, map[string]any{"label": "loop-shutdown"})
+	h.log.waitFor(t, "working status", itestEventIs("agent.status", rt))
+	if v := h.view(rt); v.Status != "running" || v.Phase != "working" {
+		t.Fatalf("view before shutdown = %+v, want running in the working phase", v)
+	}
+	h.shutdown("graceful")
+	h.awaitStatus(rt, "killed")
+	if v := h.view(rt); v.StopReason != "cancelled" {
+		t.Fatalf("killed view stop reason = %q, want cancelled", v.StopReason)
+	}
+	if code := h.rawExitCode(rt); code != 130 {
+		t.Fatalf("raw RuntimeStatus exit_code = %d, want 130", code)
+	}
+	if got := h.result(rt); got == "never reached" {
+		t.Fatal("shutdown loop child produced the output of a phase it never finished")
+	}
+}
+
+// TestSupervisorPublicAPITeamShutdownKillEndsActiveChild proves kill-mode
+// Shutdown tears down a team child mid-member and leaves the killed end state
+// callers observe.
+func TestSupervisorPublicAPITeamShutdownKillEndsActiveChild(t *testing.T) {
+	t.Parallel()
+	gate := newItestGate()
+	defer gate.open()
+	solo := newItestProvider(itestAttempt("ses_team_sd",
+		itestWorking("ses_team_sd"), gate.step(),
+		itestSessionEnd("ses_team_sd", "end_turn", "never reached")))
+	h := newItestHarness(t, Config{}, itestTeamProviders(map[string]*itestProvider{"solo-agent": solo}))
+
+	file := itestWorkflowConfig(t, "team", map[string]any{
+		"team": []map[string]any{{"name": "solo", "prompt": "solo work", "agent": "solo-agent"}},
+	})
+	rt := h.spawnWorkflow("team", file, map[string]any{"label": "team-shutdown"})
+	h.log.waitFor(t, "working status", itestEventIs("agent.status", rt))
+	if v := h.view(rt); v.Status != "running" || v.Phase != "working" {
+		t.Fatalf("view before shutdown = %+v, want running in the working phase", v)
+	}
+	h.shutdown("kill")
+	h.awaitStatus(rt, "killed")
+	if v := h.view(rt); v.StopReason != "cancelled" {
+		t.Fatalf("killed view stop reason = %q, want cancelled", v.StopReason)
+	}
+	if code := h.rawExitCode(rt); code != 130 {
+		t.Fatalf("raw RuntimeStatus exit_code = %d, want 130", code)
+	}
+}
+
+// TestSupervisorPublicAPILoopAndTeamListRows proves List rows for loop and
+// team children carry the statuses callers see: running while a phase or
+// member is in flight, ended with the run's exit code once the child
+// completes.
+func TestSupervisorPublicAPILoopAndTeamListRows(t *testing.T) {
+	t.Parallel()
+	loopGate := newItestGate()
+	defer loopGate.open()
+	loop := newItestProvider(itestAttempt("ses_list_loop",
+		itestWorking("ses_list_loop"), loopGate.step(),
+		itestSessionEnd("ses_list_loop", "end_turn", "loop list done")))
+	teamGate := newItestGate()
+	defer teamGate.open()
+	solo := newItestProvider(itestAttempt("ses_list_team",
+		itestWorking("ses_list_team"), teamGate.step(),
+		itestSessionEnd("ses_list_team", "end_turn", "team list done")))
+	h := newItestHarness(t, Config{}, func(opts runtime.StartOptions, backend string) (runtime.Provider, error) {
+		if opts.Agent == "solo-agent" {
+			return solo, nil
+		}
+		return loop, nil
+	})
+
+	loopFile := itestWorkflowConfig(t, "loop", map[string]any{
+		"max_iterations": 1,
+		"loop":           []map[string]any{{"name": "work", "prompt": "loop work"}},
+	})
+	teamFile := itestWorkflowConfig(t, "team", map[string]any{
+		"team": []map[string]any{{"name": "solo", "prompt": "solo work", "agent": "solo-agent"}},
+	})
+	loopRT := h.spawnWorkflow("loop", loopFile, map[string]any{"label": "rows-loop"})
+	teamRT := h.spawnWorkflow("team", teamFile, map[string]any{"label": "rows-team"})
+
+	// Both children are live mid-attempt.
+	h.log.waitFor(t, "loop working status", itestEventIs("agent.status", loopRT))
+	h.log.waitFor(t, "team working status", itestEventIs("agent.status", teamRT))
+	rows := h.listed("rows-")
+	if len(rows) != 2 {
+		t.Fatalf("List = %d rows, want 2", len(rows))
+	}
+	for _, row := range rows {
+		if got := row["status"]; got != "running" {
+			t.Fatalf("List status before completion = %v, want running", got)
+		}
+		if got := row["exit_code"]; got != 0 {
+			t.Fatalf("List exit_code before completion = %v, want 0", got)
+		}
+	}
+
+	loopGate.open()
+	teamGate.open()
+	h.awaitStatus(loopRT, "done")
+	h.awaitStatus(teamRT, "done")
+	rows = h.listed("rows-")
+	if len(rows) != 2 {
+		t.Fatalf("List after completion = %d rows, want 2", len(rows))
+	}
+	byID := map[string]map[string]any{}
+	for _, row := range rows {
+		id, _ := row["runtime_id"].(string)
+		byID[id] = row
+	}
+	for _, id := range []string{loopRT, teamRT} {
+		row, ok := byID[id]
+		if !ok {
+			t.Fatalf("List after completion lost runtime %s: %v", id, rows)
+		}
+		if got := row["status"]; got != "ended" {
+			t.Fatalf("List status after completion = %v, want ended", got)
+		}
+		if got := row["exit_code"]; got != 0 {
+			t.Fatalf("List exit_code after completion = %v, want 0", got)
+		}
+	}
+}
