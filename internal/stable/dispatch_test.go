@@ -208,6 +208,20 @@ func (f *dispatchFixture) treeActive(t *testing.T) int {
 	return active
 }
 
+// assertNotWithin fails the test if cond becomes true inside the window:
+// the event-driven shape of a "must not happen" assertion, replacing a
+// raw sleep whose window could always be raced by a delayed call.
+func assertNotWithin(t *testing.T, what string, window time.Duration, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(window)
+	for time.Now().Before(deadline) {
+		if cond() {
+			t.Fatalf("%s became true within %v", what, window)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -2385,9 +2399,12 @@ func TestDispatchModelDeciderBudgetBoundsCalls(t *testing.T) {
 		calls, _, _ := capture.snapshot()
 		return calls >= maxModelDeciderCallsPerRuntime
 	})
-	time.Sleep(100 * time.Millisecond)
+	assertNotWithin(t, "an overflow decision call past the budget", 250*time.Millisecond, func() bool {
+		calls, _, _ := capture.snapshot()
+		return calls > maxModelDeciderCallsPerRuntime
+	})
 	if calls, _, _ := capture.snapshot(); calls != maxModelDeciderCallsPerRuntime {
-		t.Fatalf("decision calls = %d, want the budget of %d with no overflow call", calls, maxModelDeciderCallsPerRuntime)
+		t.Fatalf("decision calls = %d, want the budget of %d", calls, maxModelDeciderCallsPerRuntime)
 	}
 }
 
@@ -2557,6 +2574,46 @@ func TestDispatchModelDeciderPromptFileReachesDecision(t *testing.T) {
 	}
 }
 
+// TestDispatchModelDeciderDecisionFiresWithoutMirror proves the
+// mirror-wait deadline path: a request routed with no pending-permission
+// mirror (the structured details never land) still gets its decision call
+// after the bounded wait, instead of stalling forever.
+func TestDispatchModelDeciderDecisionFiresWithoutMirror(t *testing.T) {
+	requestID := "perm_req_model_nomirror"
+	f, capture := newModelDeciderFixture(t, "dispatch-modeldec-nomirror", func(w http.ResponseWriter) {
+		w.Write([]byte(`{"choices":[{"message":{"content":"{\"decision\":\"defer\"}"}}]}`))
+	})
+	gate := make(chan struct{})
+	defer close(gate)
+	f.sup.newProviderFunc = func(_ runtime.StartOptions, _ string) (runtime.Provider, error) {
+		return scriptedWorkerRequest(requestID, gate), nil
+	}
+	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
+	if err != nil {
+		t.Fatalf("dispatchWorkflowNode: %v", err)
+	}
+	if out.Kind != Dispatched {
+		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
+	}
+	// The worker's own request carries a mirror and fires first; answer it
+	// as a human so the runtime holds no pending request, then route a
+	// second request whose mirror never lands: its decision fires only once
+	// the mirror wait expires.
+	base := time.Now()
+	calls0, _, _ := capture.snapshot()
+	if err := f.sup.answerPermission(out.RuntimeID, requestID, "allow_once", "test"); err != nil {
+		t.Fatalf("answerPermission: %v", err)
+	}
+	f.sup.cachePermissionOptions(out.RuntimeID, "perm_req_model_nomirror_2", []any{map[string]any{"optionId": "allow_once", "kind": "allow"}})
+	waitFor(t, "decision call fired after mirror-wait deadline", func() bool {
+		calls, _, _ := capture.snapshot()
+		return calls >= calls0+1
+	})
+	if elapsed := time.Since(base); elapsed < modelDeciderMirrorWait-time.Second {
+		t.Fatalf("decision fired after %v; the mirror-wait deadline path did not run", elapsed)
+	}
+}
+
 // TestDispatchModelDeciderConcurrencyCapHolds proves the direct-model cap
 // behaves like the harness decider's: while maxConcurrentModelDeciders calls
 // are in flight, a further distinct request gets no decision call and stays
@@ -2621,9 +2678,11 @@ func TestDispatchModelDeciderConcurrencyCapHolds(t *testing.T) {
 	// A further distinct request hits the cap: no decision call fires, the
 	// routed mark stays, and the request stays pending.
 	f.sup.cachePermissionOptions(out.RuntimeID, blockedID, options)
-	time.Sleep(50 * time.Millisecond)
+	assertNotWithin(t, "an overflow decision call past the cap", 250*time.Millisecond, func() bool {
+		return calls.Load() > int64(maxConcurrentModelDeciders)
+	})
 	if got := calls.Load(); got != int64(maxConcurrentModelDeciders) {
-		t.Fatalf("decision calls = %d, want the cap of %d held with no overflow call", got, maxConcurrentModelDeciders)
+		t.Fatalf("decision calls = %d, want the cap of %d held", got, maxConcurrentModelDeciders)
 	}
 	if state := f.sup.control.PermissionResolverState(out.RuntimeID, blockedID); state == control.PermissionResolverResolved {
 		t.Fatalf("capped request resolver state = %v, want the request left unresolved", state)
@@ -2634,10 +2693,14 @@ func TestDispatchModelDeciderConcurrencyCapHolds(t *testing.T) {
 	waitFor(t, "blocked request re-routed after capacity freed", func() bool {
 		return calls.Load() > int64(maxConcurrentModelDeciders)
 	})
-	time.Sleep(50 * time.Millisecond)
-	if got := calls.Load(); got != int64(maxConcurrentModelDeciders+1) {
-		t.Fatalf("decision calls after release = %d, want exactly %d", got, maxConcurrentModelDeciders+1)
-	}
+	// Wait for the re-routed call to complete, then bound the window in
+	// which any duplicate re-route could have fired.
+	waitFor(t, "re-routed call completed", func() bool {
+		return calls.Load() >= int64(maxConcurrentModelDeciders+1)
+	})
+	assertNotWithin(t, "a duplicate re-route past the single re-route", 250*time.Millisecond, func() bool {
+		return calls.Load() > int64(maxConcurrentModelDeciders+1)
+	})
 	status, err := f.sup.RuntimeStatus(out.RuntimeID)
 	if err != nil {
 		t.Fatalf("RuntimeStatus: %v", err)

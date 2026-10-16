@@ -1,9 +1,10 @@
 // Package providerconfig reads the user-level model-provider registry:
 // named OpenAI-compatible endpoints avenor can call directly, outside any
 // agent runtime. The registry lives under $XDG_CONFIG_HOME/avenor (else
-// ~/.config/avenor) as providers.json, providers.yaml, or providers.toml,
-// so a template can name a provider without embedding endpoints or
-// credentials, and a user can add or rotate one without touching templates.
+// ~/.config/avenor) as providers.json, providers.yaml, providers.yml, or
+// providers.toml, so a template can name a provider without embedding
+// endpoints or credentials, and a user can add or rotate one without
+// touching templates.
 package providerconfig
 
 import (
@@ -43,8 +44,8 @@ func DefaultDir() string {
 }
 
 // Load reads the provider registry from DefaultDir. The file is
-// providers.json, providers.yaml, or providers.toml; the first present name
-// wins (JSON first). No registry at all is not an error: (nil, nil) means no
+// providers.json, providers.yaml, providers.yml, or providers.toml; the
+// first present name wins (JSON first). No registry at all is not an error: (nil, nil) means no
 // providers are configured and every lookup will fail with a clear message.
 func Load() (*Config, error) {
 	return LoadDir(DefaultDir())

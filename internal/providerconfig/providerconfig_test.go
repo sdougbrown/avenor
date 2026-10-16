@@ -168,3 +168,15 @@ func TestLoadDirRejectsEndpointPathAsBaseURL(t *testing.T) {
 		t.Fatal("a full chat-completions endpoint as base_url should be rejected")
 	}
 }
+
+func TestLoadDirYML(t *testing.T) {
+	dir := t.TempDir()
+	writeRegistry(t, dir, "providers.yml", "providers:\n  groq:\n    base_url: https://api.groq.com/openai/v1\n    api_key_env: GROQ_API_KEY\n")
+	cfg, err := LoadDir(dir)
+	if err != nil {
+		t.Fatalf("LoadDir yml: %v", err)
+	}
+	if _, err := cfg.Lookup("groq"); err != nil {
+		t.Fatalf("lookup groq from .yml registry: %v", err)
+	}
+}
