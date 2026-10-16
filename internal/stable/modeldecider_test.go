@@ -1,8 +1,6 @@
 package stable
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -144,20 +142,13 @@ func TestReasonSuffix(t *testing.T) {
 // surfaces), a pinned env that is unset fails fast, and a provider with a
 // literal key resolves it from the registry without any environment.
 func TestResolvePermissionModelDeciderKey(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, "avenor"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "avenor", "providers.json"), []byte(`{
+	writeProviderRegistry(t, `{
 		"providers": {
 			"env":    {"base_url": "http://x/v1", "api_key_env": "MODELDEC_TEST_KEY"},
 			"lit":    {"base_url": "http://x/v1", "api_key": "literal-secret"},
 			"rotated": {"base_url": "http://x/v1", "api_key_env": "MODELDEC_ROTATED_KEY"}
 		}
-	}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("XDG_CONFIG_HOME", dir)
+	}`)
 	t.Setenv("MODELDEC_TEST_KEY", "from-env")
 
 	key, err := resolvePermissionModelDeciderKey(&workflow.PermissionModelDecider{Provider: "env", APIKeyEnv: "MODELDEC_TEST_KEY"})
