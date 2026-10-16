@@ -1012,11 +1012,13 @@ func TestSupervisorPublicAPIDeciderAllow(t *testing.T) {
 	if len(answers) != 1 || !answers[0].Allow || answers[0].OptionID != "allow_once" {
 		t.Fatalf("backend permission answers = %+v, want one allow_once", answers)
 	}
-	// The decider row's lifecycle after its turn is pinned by
-	// TestSupervisorPublicAPIDeciderSlotFreedWhenDeciderFinishes.
-	if rows := h.listed("permdec:"); len(rows) != 1 {
-		t.Fatalf("decider runs listed = %d, want 1", len(rows))
-	}
+	// The decider ends after its single turn, and its row can settle after
+	// the worker, so poll until it reads ended with the turn's zero exit
+	// code.
+	h.awaitCondition("finished decider row to read ended with exit code 0", func() bool {
+		rows := h.listed("permdec:")
+		return len(rows) == 1 && rows[0]["status"] == "ended" && rows[0]["exit_code"] == 0
+	})
 }
 
 func TestSupervisorPublicAPIDeciderDeny(t *testing.T) {
@@ -1227,6 +1229,79 @@ func TestSupervisorPublicAPIDeciderSlotFreedWhenDeciderFinishes(t *testing.T) {
 	}
 }
 
+// TestSupervisorPublicAPIDeciderQueuedPromptDoesNotResumeFailedTurn proves a
+// decider's single turn is terminal on the failure path too: a prompt queued
+// on the decider's own runtime mid-turn never resumes it after the turn
+// fails, so the decider ends with the failure's exit code and accepts no
+// further prompt.
+func TestSupervisorPublicAPIDeciderQueuedPromptDoesNotResumeFailedTurn(t *testing.T) {
+	t.Parallel()
+	worker := itestWorker("ses_dq", "req_dq", "answered work")
+	queued := make(chan error, 1)
+	deciderReady := make(chan *itestProvider, 1)
+	var h *itestHarness
+	decider := func(opts runtime.StartOptions) (runtime.Provider, error) {
+		workerRtID, reqID := itestDeciderLabel(opts.Label)
+		// The decider answers, then its turn fails the way a backend crash
+		// mid-judgment would.
+		p := newItestProvider(itestAttempt("ses_dq_decider", itestSessionEnd("ses_dq_decider", "error", "")))
+		p.onPrompt = func(context.Context) {
+			// Registration precedes the turn, so the decider's own runtime is
+			// discoverable by its label. The prompt queued here is resume bait:
+			// it must never run.
+			rows, _ := h.sup.List().([]map[string]any)
+			var self string
+			for _, row := range rows {
+				if label, _ := row["label"].(string); label == opts.Label {
+					self, _ = row["runtime_id"].(string)
+				}
+			}
+			if self == "" {
+				queued <- fmt.Errorf("decider runtime with label %q is not listed", opts.Label)
+				return
+			}
+			queued <- h.sup.RuntimePrompt(self, "follow-up", "")
+			_ = h.sup.RuntimeAnswerPermission(workerRtID, reqID, "allow_once", "")
+		}
+		deciderReady <- p
+		return p, nil
+	}
+	h = newItestHarness(t, Config{}, itestDeciderFactory(func(string) runtime.Provider { return worker }, decider))
+
+	rt := h.spawn(map[string]any{"label": "worker", "permission_decider": itestDecider()})
+	if err := itestRecv(t, queued, "queued prompt on the decider runtime"); err != nil {
+		t.Fatalf("queueing a prompt on the decider's own runtime: %v", err)
+	}
+	// The decider answered before its turn failed, so the worker finishes
+	// normally.
+	h.awaitStatus(rt, "done")
+	if got := h.result(rt); got != "answered work" {
+		t.Fatalf("RuntimeResult = %q, want %q", got, "answered work")
+	}
+	answers := worker.recordedAnswers()
+	if len(answers) != 1 || !answers[0].Allow || answers[0].OptionID != "allow_once" {
+		t.Fatalf("backend permission answers = %+v, want one allow_once", answers)
+	}
+	// The failed turn ends the decider; the queued prompt never resumes it.
+	p := itestRecv(t, deciderReady, "decider provider")
+	h.awaitCondition("failed decider row to read ended", func() bool {
+		rows := h.listed("permdec:")
+		return len(rows) == 1 && rows[0]["status"] == "ended"
+	})
+	rows := h.listed("permdec:")
+	if starts, resumes := p.counts(); starts != 1 || resumes != 0 {
+		t.Fatalf("decider provider starts/resumes = %d/%d, want 1/0 (a queued prompt must not resume a failed decider turn)", starts, resumes)
+	}
+	if got := rows[0]["exit_code"]; got != 1 {
+		t.Fatalf("decider row exit_code = %v, want 1 (the failed turn's exit code)", got)
+	}
+	// The ended decider accepts no further prompt.
+	deciderRT, _ := rows[0]["runtime_id"].(string)
+	if err := h.sup.RuntimePrompt(deciderRT, "late follow-up", ""); err == nil {
+		t.Fatal("RuntimePrompt on the ended decider succeeded, want rejection")
+	}
+}
+
 // TestSupervisorPublicAPIUserRuntimeWithDeciderLabelParks proves a label is
 // not what makes a runtime a permission decider: a caller-spawned runtime
 // wearing a decider-shaped label parks after its first finished turn like any
@@ -1260,6 +1335,111 @@ func TestSupervisorPublicAPIUserRuntimeWithDeciderLabelParks(t *testing.T) {
 	}
 	if starts, resumes := provider.counts(); starts != 1 || resumes != 1 {
 		t.Fatalf("provider starts/resumes = %d/%d, want 1/1", starts, resumes)
+	}
+}
+
+// TestSupervisorPublicAPIDeciderSlotSurvivesLabelCollision proves the decider
+// slot release follows the run's own reservation, not its label: an ordinary
+// runtime spawned with a live decider's exact label finishes and is ended
+// without freeing the real decider's slot or removing its scratch directory,
+// so with the cap full a further permission request stays blocked and the
+// live decider can still answer.
+func TestSupervisorPublicAPIDeciderSlotSurvivesLabelCollision(t *testing.T) {
+	t.Parallel()
+	const workers = itestDeciderCap + 1
+	providers := map[string]*itestProvider{}
+	for i := 1; i <= workers; i++ {
+		label := fmt.Sprintf("w%d", i)
+		providers[label] = itestWorker("ses_coll_"+label, "req_"+label, label+" finished")
+	}
+	var spawns atomic.Int64
+	holds := map[string]*itestGate{}
+	var holdsMu sync.Mutex
+	hold := func(reqID string) *itestGate {
+		holdsMu.Lock()
+		defer holdsMu.Unlock()
+		if holds[reqID] == nil {
+			holds[reqID] = newItestGate()
+		}
+		return holds[reqID]
+	}
+	started := make(chan string, workers)
+	// collide holds the live decider's exact label once discovered, so the
+	// factory can route the ordinary runtime wearing it to an ordinary turn.
+	var collide atomic.Value
+	var h *itestHarness
+	h = newItestHarness(t, Config{}, func(opts runtime.StartOptions, _ string) (runtime.Provider, error) {
+		if c, _ := collide.Load().(string); c != "" && opts.Label == c {
+			return newItestProvider(itestAttempt("ses_collide", itestSessionEnd("ses_collide", "end_turn", "collision"))), nil
+		}
+		if strings.HasPrefix(opts.Label, "permdec:") {
+			spawns.Add(1)
+			rtID, reqID := itestDeciderLabel(opts.Label)
+			sessionID := fmt.Sprintf("ses_coll_decider_%s", reqID)
+			p := newItestProvider(itestAttempt(sessionID, itestSessionEnd(sessionID, "end_turn", "")))
+			g := hold(reqID)
+			p.onPrompt = func(ctx context.Context) {
+				started <- reqID
+				select {
+				case <-g.ch:
+				case <-ctx.Done():
+					return
+				}
+				_ = h.sup.RuntimeAnswerPermission(rtID, reqID, "allow_once", "")
+			}
+			return p, nil
+		}
+		return providers[opts.Label], nil
+	})
+	t.Cleanup(func() {
+		holdsMu.Lock()
+		defer holdsMu.Unlock()
+		for _, g := range holds {
+			g.open()
+		}
+	})
+
+	ids := map[string]string{}
+	for i := 1; i <= itestDeciderCap; i++ {
+		label := fmt.Sprintf("w%d", i)
+		ids[label] = h.spawn(map[string]any{"label": label, "permission_decider": itestDecider()})
+		itestRecv(t, started, "decider start for "+label)
+	}
+	// The cap is full: the next worker's request stays pending with no
+	// decider for it.
+	blockedLabel := fmt.Sprintf("w%d", workers)
+	ids[blockedLabel] = h.spawn(map[string]any{"label": blockedLabel, "permission_decider": itestDecider()})
+	h.log.waitFor(t, "blocked permission.request", itestEventIs("permission.request", ids[blockedLabel]))
+	h.consistentlyFor(permission.DefaultPollInterval+500*time.Millisecond, "decider cap holds", func() bool {
+		v := h.view(ids[blockedLabel])
+		return spawns.Load() == itestDeciderCap && v.PendingPermission && v.Status == "running"
+	})
+	// Discover the live decider's exact label, then run an ordinary runtime
+	// under it, let it finish, and end it: its teardown is where a label-keyed
+	// release would free the real decider's slot.
+	rows := h.listed("permdec:" + ids["w1"] + ":")
+	if len(rows) != 1 {
+		t.Fatalf("decider runs for w1 = %d, want 1", len(rows))
+	}
+	deciderLabel, _ := rows[0]["label"].(string)
+	collide.Store(deciderLabel)
+	collideRT := h.spawn(map[string]any{"label": deciderLabel})
+	h.awaitStatus(collideRT, "done")
+	if err := h.sup.RuntimeCancel(collideRT); err != nil {
+		t.Fatalf("cancel the label-colliding runtime: %v", err)
+	}
+	h.awaitStatus(collideRT, "killed")
+	// The collision must not have freed the real decider's slot: the blocked
+	// request still has no decider and stays pending.
+	h.consistentlyFor(permission.DefaultPollInterval+500*time.Millisecond, "decider slot held through the label collision", func() bool {
+		v := h.view(ids[blockedLabel])
+		return spawns.Load() == itestDeciderCap && v.PendingPermission && v.Status == "running"
+	})
+	// The live decider can still answer its request.
+	hold("req_w1").open()
+	h.awaitStatus(ids["w1"], "done")
+	if got := h.result(ids["w1"]); got != "w1 finished" {
+		t.Fatalf("w1 RuntimeResult = %q, want %q", got, "w1 finished")
 	}
 }
 

@@ -180,6 +180,12 @@ type SpawnParams struct {
 	// by spawnPermissionDecider, so a caller-supplied label cannot make an
 	// ordinary runtime end after its first turn.
 	permissionDeciderRun bool
+	// permissionDeciderSlotKey is the decider concurrency-slot key reserved
+	// for this run at routing. It carries no JSON tag and is set only by
+	// spawnPermissionDecider, from the same key the slot was acquired with,
+	// so teardown releases the run's own slot even if another runtime wears
+	// the same label.
+	permissionDeciderSlotKey string
 }
 
 type SpawnResult struct {
@@ -354,6 +360,11 @@ type childRuntime struct {
 	// permission decider: its single turn is terminal and teardown releases
 	// its decider slot and scratch directory. Only decider spawns set it.
 	permissionDeciderRun bool
+	// permissionDeciderSlotKey is the decider concurrency-slot key reserved
+	// for this run. Teardown releases the slot by this key rather than by the
+	// label, so an ordinary runtime wearing a decider's exact label cannot
+	// release the live decider's slot. Empty for ordinary runs.
+	permissionDeciderSlotKey string
 	// onWorkflowTerminate records the terminal workflow attempt fact before the
 	// child's runtime state is cleaned up. Nil for non-workflow direct runs.
 	onWorkflowTerminate func(workflow.AttemptStatus)
@@ -1408,24 +1419,25 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		// Set before publication into s.runtimes so the label is visible
 		// under s.controlMu at the moment the child becomes visible to the
 		// label scans, instead of being written unlocked after publication.
-		label:                params.Label,
-		startedAt:            time.Now().UnixMilli(),
-		lifecycleCtx:         childCtx,
-		cancelFn:             childCancel,
-		done:                 make(chan struct{}),
-		promptCh:             make(chan struct{}, 1),
-		autoApprove:          params.AutoApprove,
-		permissionDecider:    params.PermissionDecider,
-		modelDecider:         params.PermissionModelDecider,
-		modelDeciderKey:      modelDeciderKey,
-		task:                 params.Prompt,
-		taskFile:             params.PromptFile,
-		launchWrapper:        params.LaunchWrapper,
-		workflowID:           params.WorkflowID,
-		nodeID:               params.NodeID,
-		activationID:         params.ActivationID,
-		attemptID:            params.AttemptID,
-		permissionDeciderRun: params.permissionDeciderRun,
+		label:                    params.Label,
+		startedAt:                time.Now().UnixMilli(),
+		lifecycleCtx:             childCtx,
+		cancelFn:                 childCancel,
+		done:                     make(chan struct{}),
+		promptCh:                 make(chan struct{}, 1),
+		autoApprove:              params.AutoApprove,
+		permissionDecider:        params.PermissionDecider,
+		modelDecider:             params.PermissionModelDecider,
+		modelDeciderKey:          modelDeciderKey,
+		task:                     params.Prompt,
+		taskFile:                 params.PromptFile,
+		launchWrapper:            params.LaunchWrapper,
+		workflowID:               params.WorkflowID,
+		nodeID:                   params.NodeID,
+		activationID:             params.ActivationID,
+		attemptID:                params.AttemptID,
+		permissionDeciderRun:     params.permissionDeciderRun,
+		permissionDeciderSlotKey: params.permissionDeciderSlotKey,
 	}
 	if terminate := params.workflowTerminate; terminate != nil {
 		child.onWorkflowTerminate = func(status workflow.AttemptStatus) { terminate(child, status) }
@@ -2146,8 +2158,10 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 		if child.permissionDeciderRun {
 			// A permission-decider run holds a decider concurrency slot and a
 			// neutral scratch directory; release both so blocked requests can
-			// retry and no scratch dir leaks.
-			s.releasePermissionDecider(child.label)
+			// retry and no scratch dir leaks. The slot is keyed by the
+			// reservation made at routing, not by the label: a caller can
+			// spawn an ordinary runtime wearing the decider's exact label.
+			s.releasePermissionDecider(child.permissionDeciderSlotKey)
 		}
 		child.complete()
 		s.signalCapacityChange()
@@ -2249,7 +2263,11 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 				continue
 			}
 
-			if ctx.Err() == nil && result.stopReason != runtime.SessionIDConflictStopReason {
+			// A permission decider's turn is terminal on failure too: a queued
+			// prompt must not resume it for a second turn. Falling through
+			// records the failure's exit code and sentinel exactly as a
+			// promptless failure.
+			if ctx.Err() == nil && !child.permissionDeciderRun && result.stopReason != runtime.SessionIDConflictStopReason {
 				if nextPrompt, ok := child.dequeuePrompt(); ok {
 					if child.sentinelFile != "" {
 						cli.WriteSentinel(child.sentinelFile, result.exitCode, result.sessionID, stopReason, s.runID, s.stderrWriter())
@@ -2267,6 +2285,11 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			if child.sentinelFile != "" {
 				cli.WriteSentinel(child.sentinelFile, result.exitCode, result.sessionID, stopReason, s.runID, s.stderrWriter())
 			}
+			return
+		}
+		// A permission decider's turn is terminal on every path: neither a
+		// queued prompt nor the retry backoff may resume it for another turn.
+		if child.permissionDeciderRun {
 			return
 		}
 		if result.sessionID != "" {
@@ -4102,8 +4125,10 @@ Never answer blindly: allow only requests the task plainly needs.`,
 		AutoApprove: true,
 		// Marks the run as a permission decider so it ends after its single
 		// turn; the label prefix alone is not proof, since a caller can set any
-		// label it likes.
-		permissionDeciderRun: true,
+		// label it likes. The slot key is the same key the slot was reserved
+		// with, so teardown releases this run's own slot.
+		permissionDeciderRun:     true,
+		permissionDeciderSlotKey: deciderLabel,
 	}
 	if _, err := s.spawn(params); err != nil {
 		failSpawn(fmt.Sprintf("spawn permission decider %q", decider.Entry), err)
