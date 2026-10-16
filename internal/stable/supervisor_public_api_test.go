@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/client"
+	"github.com/sdougbrown/avenor/internal/admission"
 	"github.com/sdougbrown/avenor/internal/control"
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/permission"
@@ -315,6 +316,52 @@ func itestSentinelStatus(sentinel string) (status, stopReason string, exitCode i
 		}
 	}
 	return status, stopReason, exitCode
+}
+
+// rawExitCode reads exit_code straight from RuntimeStatus, before view applies
+// the completion sentinel, so tests can pin the exit code the runtime itself
+// recorded.
+func (h *itestHarness) rawExitCode(rtID string) int {
+	h.t.Helper()
+	out, err := h.sup.RuntimeStatus(rtID)
+	if err != nil {
+		h.t.Fatalf("RuntimeStatus(%s): %v", rtID, err)
+	}
+	raw, _ := out.(map[string]any)
+	code, _ := raw["exit_code"].(int)
+	return code
+}
+
+// requireSessionEnd waits for the runtime's session.end carrying stopReason
+// and fails unless its exit_code field matches want.
+func (h *itestHarness) requireSessionEnd(rtID, stopReason string, want int) {
+	h.t.Helper()
+	end := h.log.waitFor(h.t, stopReason+" session.end", itestStopReasonIs(rtID, stopReason))
+	if code, _ := end.Fields["exit_code"].(int); code != want {
+		h.t.Fatalf("%s session.end exit_code = %d, want %d", stopReason, code, want)
+	}
+}
+
+// requireIdleEnd proves a runtime's idle end end-to-end: the translated
+// status carries stopReason, the raw exit code matches exitCode, the
+// session.end event carries stopReason with exitCode, and WaitTurn reports
+// stopReason. It returns the view from awaitStatus so callers can make
+// extra checks.
+func (h *itestHarness) requireIdleEnd(rtID, status, stopReason string, exitCode int) itestView {
+	h.t.Helper()
+	v := h.awaitStatus(rtID, status)
+	if v.StopReason != stopReason {
+		h.t.Fatalf("%s view stop reason = %q, want %s", status, v.StopReason, stopReason)
+	}
+	if code := h.rawExitCode(rtID); code != exitCode {
+		h.t.Fatalf("raw RuntimeStatus exit_code = %d, want %d", code, exitCode)
+	}
+	h.requireSessionEnd(rtID, stopReason, exitCode)
+	turn := h.waitTurn(rtID)
+	if got, _ := turn["stop_reason"].(string); got != stopReason {
+		h.t.Fatalf("WaitTurn stop_reason = %q, want %s", got, stopReason)
+	}
+	return v
 }
 
 // awaitStatus polls RuntimeStatus, as consumer await loops do, until the
@@ -635,6 +682,52 @@ func TestSupervisorPublicAPIRunDeadlineTimesOut(t *testing.T) {
 	}
 }
 
+// TestSupervisorPublicAPIRunDeadlineWhileParkedTimesOut proves a run deadline
+// that passes while the runtime is parked after a finished turn ends it as a
+// timeout: consumers see the timeout status, raw exit code 124, and a timeout
+// session.end.
+func TestSupervisorPublicAPIRunDeadlineWhileParkedTimesOut(t *testing.T) {
+	t.Parallel()
+	provider := newItestProvider(itestAttempt("ses_dpark", itestSessionEnd("ses_dpark", "end_turn", "parked work")))
+	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+
+	// A three-second deadline leaves the first turn room to finish before it.
+	rt := h.spawn(map[string]any{"label": "deadline-parked", "timeout": 3})
+	h.awaitStatus(rt, "done")
+	if got := h.result(rt); got != "parked work" {
+		t.Fatalf("RuntimeResult after the turn = %q, want %q", got, "parked work")
+	}
+	// The turn is over and the runtime is parked waiting for a follow-up
+	// prompt. The run deadline ends the parked runtime as a timeout, matching
+	// a deadline during an attempt.
+	h.requireIdleEnd(rt, "timeout", "timeout", 124)
+}
+
+// TestSupervisorPublicAPIRunDeadlineDuringBackoffTimesOut proves a run
+// deadline that passes while the runtime is inside a retry backoff ends it as
+// a timeout instead of letting the backoff wake into another attempt:
+// consumers see the timeout status, raw exit code 124, and a timeout
+// session.end, and the provider is never resumed for the retry.
+func TestSupervisorPublicAPIRunDeadlineDuringBackoffTimesOut(t *testing.T) {
+	t.Parallel()
+	provider := newItestProvider(itestAttempt("ses_dback", itestSessionEnd("ses_dback", "error", "")))
+	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+
+	// backoffDelay(1) is 2s, so the 1s run deadline lands inside the backoff
+	// that follows the retryable failed attempt.
+	rt := h.spawn(map[string]any{"label": "deadline-backoff", "max_retries": 1, "timeout": 1})
+	h.log.waitFor(t, "failed attempt session.end", itestStopReasonIs(rt, "error"))
+	// WaitTurn reports the idle end's stop reason, not the failed attempt's;
+	// reading it after the runtime has ended avoids racing the failed
+	// attempt's own settle.
+	h.requireIdleEnd(rt, "timeout", "timeout", 124)
+	// The deadline must end the run inside the backoff: the retry attempt is
+	// never started.
+	if starts, resumes := provider.counts(); starts != 1 || resumes != 0 {
+		t.Fatalf("provider starts/resumes = %d/%d, want 1/0", starts, resumes)
+	}
+}
+
 func TestSupervisorPublicAPICancelWhileRunning(t *testing.T) {
 	t.Parallel()
 	gate := newItestGate()
@@ -668,7 +761,6 @@ func TestSupervisorPublicAPICancelWhileRunning(t *testing.T) {
 }
 
 func TestSupervisorPublicAPICancelDuringBackoff(t *testing.T) {
-	t.Skip("#319: cancelling a runtime during retry backoff ends it with exit code 0, no sentinel and no cancelled session.end, so consumers see done instead of killed")
 	t.Parallel()
 	provider := newItestProvider(
 		itestAttempt("ses_cb1", itestSessionEnd("ses_cb1", "error", "")),
@@ -687,10 +779,13 @@ func TestSupervisorPublicAPICancelDuringBackoff(t *testing.T) {
 	if err := h.sup.RuntimeCancel(rt); err != nil {
 		t.Fatalf("RuntimeCancel: %v", err)
 	}
-	h.waitTurn(rt)
-	v := h.awaitStatus(rt, "killed")
-	if v.StopReason != "cancelled" {
-		t.Fatalf("killed view stop reason = %q, want cancelled", v.StopReason)
+	// WaitTurn reports the idle end's stop reason, not the failed attempt's;
+	// reading it after the end avoids racing the failed attempt's own settle.
+	v := h.requireIdleEnd(rt, "killed", "cancelled", 130)
+	// The idle end records a terminal phase, so consumers see the turn as
+	// complete even though the runtime was killed mid-backoff.
+	if v.Phase != "done" {
+		t.Fatalf("killed view phase = %q, want done", v.Phase)
 	}
 	// The cancelled backoff must not wake into another attempt. The window
 	// outlasts the backoff delay so a late Resume cannot slip through.
@@ -887,10 +982,7 @@ func TestSupervisorPublicAPIShutdownGracefulEndsParkedRuntime(t *testing.T) {
 	// The runtime is parked waiting for a follow-up prompt. Graceful
 	// shutdown ends it instead of leaving it idle.
 	h.shutdown("graceful")
-	v := h.awaitStatus(rt, "killed")
-	if v.StopReason != "cancelled" {
-		t.Fatalf("killed view stop reason = %q, want cancelled", v.StopReason)
-	}
+	v := h.requireIdleEnd(rt, "killed", "cancelled", 130)
 	if v.ExitCode != 130 {
 		t.Fatalf("killed view exit code = %d, want 130", v.ExitCode)
 	}
@@ -899,6 +991,146 @@ func TestSupervisorPublicAPIShutdownGracefulEndsParkedRuntime(t *testing.T) {
 	if v.Phase != "done" {
 		t.Fatalf("killed view phase = %q, want done", v.Phase)
 	}
+}
+
+// TestSupervisorPublicAPIRunDeadlineWhileWaitingForTreeBudget proves a run
+// deadline that passes while a resumed runtime is blocked waiting for a
+// tree-budget slot ends it as a timeout instead of returning silently, which
+// would leave the parked turn's DONE sentinel standing.
+func TestSupervisorPublicAPIRunDeadlineWhileWaitingForTreeBudget(t *testing.T) {
+	t.Parallel()
+	gate := newItestGate()
+	defer gate.open()
+	var n atomic.Int64
+	factory := func(runtime.StartOptions, string) (runtime.Provider, error) {
+		id := fmt.Sprintf("ses_tb%d", n.Add(1))
+		if n.Load() == 1 {
+			return newItestProvider(itestAttempt(id, itestSessionEnd(id, "end_turn", "parked work"))), nil
+		}
+		working := stableScriptedEvent{event: events.Event{Event: "agent.status", SessionID: id, Fields: map[string]any{"phase": "working"}}}
+		return newItestProvider(itestAttempt(id, working, gate.step(), itestSessionEnd(id, "end_turn", "holder done"))), nil
+	}
+	// A one-slot tree budget: the holder's in-flight turn occupies the only
+	// slot, so a resumed peer blocks in the budget wait until its run
+	// deadline passes.
+	h := newItestHarness(t, Config{MaxTreeBudget: 1}, factory)
+
+	// A five-second run deadline leaves a wide margin over setup, which is
+	// measured from the spawn: slow setup must not let the deadline fire
+	// before the runtime is parked in the tree-budget wait.
+	const runDeadline = 5 * time.Second
+	spawnedAt := time.Now()
+	rt := h.spawn(map[string]any{"label": "budget-parked", "timeout": int(runDeadline / time.Second)})
+	h.awaitStatus(rt, "done")
+	// The parked runtime releases its slot after the turn; the holder spawn
+	// can race that release, so retry the admission until it succeeds.
+	var holder string
+	h.awaitCondition("a free tree slot for the holder spawn", func() bool {
+		id, err := h.trySpawn(map[string]any{"label": "budget-holder"})
+		var ce *admission.CapacityError
+		if err != nil && !errors.As(err, &ce) {
+			h.t.Fatalf("holder spawn: %v", err)
+		}
+		if err != nil {
+			return false
+		}
+		holder = id
+		return true
+	})
+	h.log.waitFor(t, "holder working status", itestEventIs("agent.status", holder))
+	// The follow-up prompt resumes the parked runtime, which blocks in the
+	// tree-budget wait for the rest of its run deadline.
+	if err := h.sup.RuntimePrompt(rt, "again", ""); err != nil {
+		t.Fatalf("RuntimePrompt: %v", err)
+	}
+	// Wait out most of the run deadline, then prove the runtime is still
+	// blocked in the tree-budget wait: it has not ended yet, and the holder
+	// still holds the only slot. A deadline that fired in the parked wait or
+	// during setup would already have ended the runtime and fails here.
+	if remaining := runDeadline - 500*time.Millisecond - time.Since(spawnedAt); remaining > 0 {
+		time.Sleep(remaining)
+	}
+	if v := h.view(rt); v.Status == "timeout" {
+		t.Fatalf("runtime ended before its deadline: view %+v", v)
+	}
+	if v := h.view(holder); v.Status != "running" {
+		t.Fatalf("holder status just before the deadline = %q, want running", v.Status)
+	}
+	h.requireIdleEnd(rt, "timeout", "timeout", 124)
+	// The holder is unaffected: released from the gate, its turn finishes
+	// normally.
+	gate.open()
+	h.awaitStatus(holder, "done")
+}
+
+// TestSupervisorPublicAPIRunDeadlineWhileWaitingForLocalSlot proves a run
+// deadline that passes while a resumed runtime is blocked waiting for a local
+// MaxRuntimes slot ends it as a timeout instead of returning silently, which
+// would leave the parked turn's DONE sentinel standing.
+func TestSupervisorPublicAPIRunDeadlineWhileWaitingForLocalSlot(t *testing.T) {
+	t.Parallel()
+	gate := newItestGate()
+	defer gate.open()
+	var n atomic.Int64
+	factory := func(runtime.StartOptions, string) (runtime.Provider, error) {
+		id := fmt.Sprintf("ses_ls%d", n.Add(1))
+		if n.Load() == 1 {
+			return newItestProvider(itestAttempt(id, itestSessionEnd(id, "end_turn", "parked work"))), nil
+		}
+		working := stableScriptedEvent{event: events.Event{Event: "agent.status", SessionID: id, Fields: map[string]any{"phase": "working"}}}
+		return newItestProvider(itestAttempt(id, working, gate.step(), itestSessionEnd(id, "end_turn", "holder done"))), nil
+	}
+	// A one-runtime cap: the holder's in-flight turn occupies the only slot,
+	// so a resumed peer blocks in the local slot wait until its run deadline
+	// passes.
+	h := newItestHarness(t, Config{MaxRuntimes: 1}, factory)
+
+	// A five-second run deadline leaves a wide margin over setup, which is
+	// measured from the spawn: slow setup must not let the deadline fire
+	// before the runtime is parked in the local slot wait.
+	const runDeadline = 5 * time.Second
+	spawnedAt := time.Now()
+	rt := h.spawn(map[string]any{"label": "slot-parked", "timeout": int(runDeadline / time.Second)})
+	h.awaitStatus(rt, "done")
+	// The parked runtime releases its slot after the turn; the holder spawn
+	// can race that release, so retry the admission until it succeeds.
+	var holder string
+	h.awaitCondition("a free runtime slot for the holder spawn", func() bool {
+		id, err := h.trySpawn(map[string]any{"label": "slot-holder"})
+		var ce *admission.CapacityError
+		if err != nil && !errors.As(err, &ce) {
+			h.t.Fatalf("holder spawn: %v", err)
+		}
+		if err != nil {
+			return false
+		}
+		holder = id
+		return true
+	})
+	h.log.waitFor(t, "holder working status", itestEventIs("agent.status", holder))
+	// The follow-up prompt resumes the parked runtime, which blocks in the
+	// local slot wait for the rest of its run deadline.
+	if err := h.sup.RuntimePrompt(rt, "again", ""); err != nil {
+		t.Fatalf("RuntimePrompt: %v", err)
+	}
+	// Wait out most of the run deadline, then prove the runtime is still
+	// blocked in the local slot wait: it has not ended yet, and the holder
+	// still holds the only slot. A deadline that fired in the parked wait or
+	// during setup would already have ended the runtime and fails here.
+	if remaining := runDeadline - 500*time.Millisecond - time.Since(spawnedAt); remaining > 0 {
+		time.Sleep(remaining)
+	}
+	if v := h.view(rt); v.Status == "timeout" {
+		t.Fatalf("runtime ended before its deadline: view %+v", v)
+	}
+	if v := h.view(holder); v.Status != "running" {
+		t.Fatalf("holder status just before the deadline = %q, want running", v.Status)
+	}
+	h.requireIdleEnd(rt, "timeout", "timeout", 124)
+	// The holder is unaffected: released from the gate, its turn finishes
+	// normally.
+	gate.open()
+	h.awaitStatus(holder, "done")
 }
 
 // Permission scenarios.
