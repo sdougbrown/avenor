@@ -74,8 +74,32 @@ func TestNewAppendsV1WhenMissing(t *testing.T) {
 	if _, err := client.Complete(context.Background(), []Message{{Role: "user", Content: "x"}}, 8); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
-	if !strings.HasSuffix(gotPath, "/v1/chat/completions") {
-		t.Fatalf("path = %q", gotPath)
+	if gotPath != "/v1/chat/completions" {
+		t.Fatalf("path = %q, want /v1/chat/completions exactly", gotPath)
+	}
+}
+
+// TestNewDoesNotReappendV1 proves the documented canonical registry form —
+// a /v1-suffixed root — produces exactly one /v1 in the request path: a
+// double append (/v1/v1/chat/completions) would still end in the suffix a
+// HasSuffix check accepts, so the path is compared for equality.
+func TestNewDoesNotReappendV1(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer srv.Close()
+
+	client, err := New(srv.URL+"/v1", "", "m", srv.Client())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := client.Complete(context.Background(), []Message{{Role: "user", Content: "x"}}, 8); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if gotPath != "/v1/chat/completions" {
+		t.Fatalf("path = %q, want /v1/chat/completions with a single /v1", gotPath)
 	}
 }
 
