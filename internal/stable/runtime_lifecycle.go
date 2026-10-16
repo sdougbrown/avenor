@@ -1,0 +1,890 @@
+package stable
+
+// Pure childRuntime lifecycle machine (issue #316, Stage 1).
+//
+// This file owns the closed lifecycle dimensions (exec, attempts, shutdown,
+// writer, completion, attempt class), the signal/effect/continuation enums,
+// the field-specific predicates, and the pure transition function next.
+// Stage 1 scope: nothing outside this file and its test may reference these
+// symbols; the imperative interpreter (applyLifecycle), shadow mode and call
+// site wiring all belong to later stages.
+//
+// Invariants encoded here mirror origin/main behavior:
+//   - The park timeout marks admission closed before done closes, so
+//     isCompleted() is true for both completionAdmissionClosed and
+//     completionPublished (supervisor.go:2968 vs complete()).
+//   - writerClosing stays true after writerClosed is set and every admission
+//     gate keys on writerClosing (supervisor.go:4741-4757), so
+//     isWriterClosing() is true for both writer stages.
+//   - The local-slot failure window keeps the child parked until final
+//     publication: execParkedEnding at the complete boundary normalizes to
+//     execEnded only at completionPublished (supervisor.go:2257-2261,
+//     1206-1211, 2247-2255).
+
+import (
+	"errors"
+	"fmt"
+)
+
+// execState is the execution dimension of the lifecycle. V (execReserved) is
+// the pre-publication state; S/I/R/P/PE/E follow the plan's matrix shorthand
+// (starting/idle/running/parked/parked-ending/ended).
+type execState int
+
+const (
+	execReserved execState = iota
+	execStarting
+	execRunning
+	execIdle
+	execParked
+	execParkedEnding
+	execEnded
+)
+
+func (e execState) valid() bool { return e >= execReserved && e <= execEnded }
+
+// shutdownStage is the child-scoped shutdown dimension.
+type shutdownStage int
+
+const (
+	shutdownNone shutdownStage = iota
+	shutdownRequested
+)
+
+func (s shutdownStage) valid() bool { return s >= shutdownNone && s <= shutdownRequested }
+
+// writerStage is the event-writer dimension.
+type writerStage int
+
+const (
+	writerOpen writerStage = iota
+	writerClosing
+	writerClosed
+)
+
+func (w writerStage) valid() bool { return w >= writerOpen && w <= writerClosed }
+
+// completionStage is the completion dimension: open (still admitting), admission
+// closed (park timeout marked it completed; done not yet closed), or published
+// (complete ran inside doneOnce).
+type completionStage int
+
+const (
+	completionOpen completionStage = iota
+	completionAdmissionClosed
+	completionPublished
+)
+
+func (c completionStage) valid() bool { return c >= completionOpen && c <= completionPublished }
+
+// attemptClass is the immutable classification set at child initialization:
+// workflow class when either LoopFile or TeamFile is nonempty, otherwise
+// direct. Workflow-direct runs still use the direct attempt class.
+type attemptClass int
+
+const (
+	directAttemptClass attemptClass = iota
+	workflowAttemptClass
+)
+
+func (a attemptClass) valid() bool { return a >= directAttemptClass && a <= workflowAttemptClass }
+
+// runKind is the result-policy classification of a direct run: decider first,
+// then workflow-direct when workflowID is nonempty, otherwise ordinary direct.
+type runKind int
+
+const (
+	runKindOrdinaryDirect runKind = iota
+	runKindWorkflowDirect
+	runKindDecider
+)
+
+func (k runKind) valid() bool { return k >= runKindOrdinaryDirect && k <= runKindDecider }
+
+// probeKind selects which branch protocol the promptContinuation signal
+// reports on (decision 5's two-step continuation).
+type probeKind int
+
+const (
+	probeNone probeKind = iota
+	probeTerminalPrompt
+	probeRetryPrompt
+)
+
+func (p probeKind) valid() bool { return p >= probeTerminalPrompt && p <= probeRetryPrompt }
+
+// completionBoundary attests which caller boundary the completion publication
+// runs at (decision 8).
+type completionBoundary int
+
+const (
+	afterRunTeardown completionBoundary = iota
+	afterSpawnRollback
+)
+
+func (b completionBoundary) valid() bool { return b >= afterRunTeardown && b <= afterSpawnRollback }
+
+// lifecycleState is the closed lifecycle state struct. Dimensions outside it
+// (phase/label presentation, exitCode, lastStopReason, prompt queues and
+// channels, waiters, provider resources, output, permission state, decider
+// data) remain on the child and are written only by effects.
+type lifecycleState struct {
+	exec       execState
+	attempts   int
+	shutdown   shutdownStage
+	writer     writerStage
+	completion completionStage
+	// class is immutable after initialization; no transition changes it.
+	class attemptClass
+}
+
+// Pointer-receiver, nonlocking predicates. Each reads only its named field
+// (plan decision 3); they are range checks, not equality checks.
+
+func (l *lifecycleState) isActive() bool { return l.exec == execRunning }
+
+// isParked recognizes both parked states: execParked and execParkedEnding
+// (the child is still parked at the final completion boundary when the
+// local-slot failure window ran through teardown).
+func (l *lifecycleState) isParked() bool {
+	return l.exec == execParked || l.exec == execParkedEnding
+}
+
+// isCompleted is true for both completionAdmissionClosed and completionPublished:
+// the park timeout sets completed before done closes, and RuntimePrompt must
+// reject in that window (supervisor.go:2968).
+func (l *lifecycleState) isCompleted() bool {
+	return l.completion == completionAdmissionClosed || l.completion == completionPublished
+}
+
+func (l *lifecycleState) isShuttingDown() bool { return l.shutdown == shutdownRequested }
+
+// isWriterClosing is true for both writerClosing and writerClosed: today
+// writerClosing stays true after writerClosed is set and every admission gate
+// keys on writerClosing (supervisor.go:4741-4757).
+func (l *lifecycleState) isWriterClosing() bool {
+	return l.writer == writerClosing || l.writer == writerClosed
+}
+
+// isWriterClosed is true only for writerClosed.
+func (l *lifecycleState) isWriterClosed() bool { return l.writer == writerClosed }
+
+// continuationKind enumerates the final continuations the two-step decision
+// protocol (attemptOutcome then promptContinuation) can select. The selected
+// prompt string stays in a caller-local variable, never in lifecycle state.
+type continuationKind int
+
+const (
+	contNone continuationKind = iota
+	// attemptOutcome continuations.
+	contPark                // ordinary direct success: caller sends successPresented, then parkRequested
+	contEnd                 // terminal: return through teardown
+	contProbeTerminalPrompt // terminal probe: sample context, dequeue once
+	contProbeRetryPrompt    // retry probe: dequeue before checking context
+	// promptContinuation continuations.
+	contResumeQueued   // terminal probe dequeued a prompt: resume with attempt=0
+	contRetry          // retry probe consumed a prompt with live context: resume with attempt=0
+	contBackoff        // retry probe found no prompt, context live: run the backoff timer
+	contIdleContextEnd // context dead: caller runs the idle-context end, then returns
+)
+
+type continuation struct{ kind continuationKind }
+
+// signalKind enumerates every lifecycle signal the matrix accepts. Matrix
+// names are symbolic; Go constants carry the signal prefix to avoid
+// collisions with state constants such as shutdownRequested and
+// completionPublished.
+type signalKind int
+
+const (
+	signalPublished signalKind = iota
+	signalAttemptPreparing
+	signalAttemptStarted
+	signalAttemptStartFailed
+	signalAttemptSettled
+	signalWorkflowFinalized
+	signalAttemptReturned
+	signalAttemptOutcome
+	signalPromptContinuation
+	signalSuccessPresented
+	signalParkRequested
+	signalPromptDequeued
+	signalLocalSlotAcquired
+	signalParkTimedOut
+	signalParkWaitEnded
+	signalIdleContextEnded
+	signalRunEnded
+	signalSpawnRolledBack
+	signalShutdownRequested
+	signalWriterCloseBegun
+	signalWriterCloseFinished
+	signalCompletionPublished
+	signalAgentStatusObserved
+	signalSessionEndObserved
+)
+
+// lifecycleSignal carries immutable snapshots only — no resource pointers,
+// channels or closures. Resources and closures are bound exclusively by the
+// imperative interpreter.
+type lifecycleSignal struct {
+	kind signalKind
+
+	// Immutable attempt classification, copied into every signal (decision 5).
+	class attemptClass
+
+	// Decision-5 result data (attemptOutcome, promptContinuation). stopReason
+	// is the raw result stop reason, preserved for retry/conflict selection;
+	// sentinelReason is the caller-normalized sentinel reason (stop-reason
+	// fallback already applied). sessionIDConflict is computed by the caller
+	// from the raw stop reason.
+	runKind           runKind
+	exitCode          int
+	stopReason        string
+	sentinelReason    string
+	resultSessionID   string
+	sessionIDConflict bool
+	retryable         bool
+	retriesRemaining  bool
+
+	// promptContinuation inputs. terminalContextErr is sampled inside the
+	// terminal probe after the exit code is recorded and unlocked;
+	// resumeContextErr is sampled only after an actual dequeue; the retry
+	// probe dequeues before checking context (decision 5).
+	probeKind          probeKind
+	promptConsumed     bool // an actual successful dequeue, not queue nonemptiness
+	terminalContextErr error
+	resumeContextErr   error
+	idleContextErr     error
+
+	// agentStatusObserved snapshot, sampled under child.mu (decision 6).
+	phase               string
+	label               string
+	presentationWasDone bool
+
+	// idleContextEnded carries caller-normalized reason/exitCode computed with
+	// the existing deadline/error mapping (decision 6).
+	idleExitCode   int
+	idleStopReason string
+
+	// writerCloseFinished: Close was actually called on a nonnil sink. No
+	// signal is sent when the sink is nil; a Close error still counts as called.
+	closeCalled bool
+
+	// completionPublished attests the boundary it publishes at (decision 8).
+	boundary completionBoundary
+}
+
+// effectKind enumerates the effect descriptions next returns. These are
+// descriptions, not operations: the Stage 2 interpreter binds resources and
+// executes them at the sites named in the Stage 1 effect table. Locked effects
+// execute within applyLifecycle under mu; deferred ones return to the outer
+// lock owner. The retained imperative orchestration (writer drain and sink
+// Close, provider closing/cancelAnswers, registry/provider/broker cleanup,
+// rollback cancel/delete, post-complete capacity signaling) is deliberately
+// NOT modeled as effects — the interpreter keeps those at their exact sites.
+type effectKind int
+
+const (
+	effectClearPresentation         effectKind = iota // preparing; settled→0
+	effectSetAgentPresentation                        // agentStatusObserved
+	effectSetSuccessPresentation                      // successPresented
+	effectSetSessionEndPresentation                   // sessionEndObserved
+	effectSetIdleEndData                              // idleContextEnded
+	effectRecordOutcomeExit                           // attemptOutcome terminal/decider cases
+	effectSettleTurnWaiters                           // settled→0; workflowFinalized; completionPublished
+	effectReleaseTreeToken                            // attemptReturned
+	effectWriteSentinel                               // attemptOutcome success/end/decider; promptContinuation terminal probe; idleContextEnded
+	effectSignalCapacity                              // parkRequested
+	effectEmitSessionEnd                              // idleContextEnded
+	effectConsiderProviderCancel                      // shutdownRequested, including repeats
+	effectCancelContext                               // first shutdownRequested only
+	effectPublishCompletion                           // first runEnded / spawnRolledBack
+	effectCloseDone                                   // completionPublished first publication
+)
+
+// lifecycleEffect is a single effect description with its immutable payload.
+// Only the fields named for a kind in the Stage 1 effect table are meaningful.
+type lifecycleEffect struct {
+	kind effectKind
+
+	exitCode  int    // recordOutcomeExit, writeSentinel, setIdleEndData
+	reason    string // writeSentinel (normalized), setIdleEndData; setSessionEndPresentation may be empty
+	sessionID string // writeSentinel
+
+	phase string // setAgentPresentation
+	label string // setAgentPresentation
+
+	boundary completionBoundary // publishCompletion
+}
+
+// validateLifecycleState enforces the cross-dimension contract (plan decision
+// 3). It rejects: negative counts, running with count 0, positive counts with
+// any nonrunning exec, non-open completion with positive attempts, admission
+// closed outside parked/idle/parked-ending/ended, published outside ended,
+// reserved with non-open completion or nonzero attempts, and direct attempt
+// counts above one. It deliberately does NOT reject running+shutdown,
+// parked+shutdown, parked+writerClosed, or running+phase done: the first two
+// are orthogonal, the local-slot failure explains the third, and session.end
+// precedes active cleanup for the fourth.
+func validateLifecycleState(l lifecycleState) error {
+	if !l.exec.valid() {
+		return fmt.Errorf("lifecycle: invalid exec state %d", l.exec)
+	}
+	if !l.shutdown.valid() {
+		return fmt.Errorf("lifecycle: invalid shutdown stage %d", l.shutdown)
+	}
+	if !l.writer.valid() {
+		return fmt.Errorf("lifecycle: invalid writer stage %d", l.writer)
+	}
+	if !l.completion.valid() {
+		return fmt.Errorf("lifecycle: invalid completion stage %d", l.completion)
+	}
+	if !l.class.valid() {
+		return fmt.Errorf("lifecycle: invalid attempt class %d", l.class)
+	}
+	if l.attempts < 0 {
+		return fmt.Errorf("lifecycle: negative attempt count %d", l.attempts)
+	}
+	if l.exec == execRunning && l.attempts == 0 {
+		return errors.New("lifecycle: running with zero attempts")
+	}
+	if l.attempts > 0 && l.exec != execRunning {
+		return fmt.Errorf("lifecycle: %d attempts in exec state %d", l.attempts, l.exec)
+	}
+	if l.completion != completionOpen && l.attempts > 0 {
+		return fmt.Errorf("lifecycle: completion %d with %d attempts", l.completion, l.attempts)
+	}
+	switch l.completion {
+	case completionAdmissionClosed:
+		switch l.exec {
+		case execParked, execIdle, execParkedEnding, execEnded:
+		default:
+			return fmt.Errorf("lifecycle: admission closed in exec state %d", l.exec)
+		}
+	case completionPublished:
+		if l.exec != execEnded {
+			return fmt.Errorf("lifecycle: published in exec state %d", l.exec)
+		}
+	}
+	if l.exec == execReserved && (l.completion != completionOpen || l.attempts != 0) {
+		return fmt.Errorf("lifecycle: reserved with completion %d, attempts %d", l.completion, l.attempts)
+	}
+	if l.class == directAttemptClass && l.attempts > 1 {
+		return fmt.Errorf("lifecycle: direct runtime with %d attempts", l.attempts)
+	}
+	return nil
+}
+
+// requireOpen rejects signals that model attempt activity, admission or
+// continuation once completion has left open or the run has reached a terminal
+// exec state (cross-dimension contract).
+func requireOpen(l lifecycleState, sig signalKind) error {
+	if l.completion != completionOpen {
+		return fmt.Errorf("lifecycle: signal %d after completion %d", sig, l.completion)
+	}
+	if l.exec == execEnded || l.exec == execParkedEnding {
+		return fmt.Errorf("lifecycle: signal %d in exec state %d", sig, l.exec)
+	}
+	return nil
+}
+
+// validateLifecycleSignal rejects unknown signal, attempt-class, run-kind,
+// probe-kind and boundary values, plus the per-signal payload rules.
+func validateLifecycleSignal(sig lifecycleSignal) error {
+	if sig.kind < signalPublished || sig.kind > signalSessionEndObserved {
+		return fmt.Errorf("lifecycle: unknown signal kind %d", sig.kind)
+	}
+	if !sig.class.valid() {
+		return fmt.Errorf("lifecycle: signal %d with invalid attempt class %d", sig.kind, sig.class)
+	}
+	switch sig.kind {
+	case signalAttemptOutcome:
+		if !sig.runKind.valid() {
+			return fmt.Errorf("lifecycle: attemptOutcome with invalid run kind %d", sig.runKind)
+		}
+	case signalPromptContinuation:
+		if !sig.probeKind.valid() {
+			return fmt.Errorf("lifecycle: promptContinuation with invalid probe kind %d", sig.probeKind)
+		}
+	case signalSuccessPresented:
+		if sig.exitCode != 0 {
+			return fmt.Errorf("lifecycle: successPresented with exit code %d", sig.exitCode)
+		}
+	case signalParkRequested:
+		if !sig.runKind.valid() || sig.runKind != runKindOrdinaryDirect {
+			return fmt.Errorf("lifecycle: parkRequested with run kind %d", sig.runKind)
+		}
+	case signalWriterCloseFinished:
+		if !sig.closeCalled {
+			return errors.New("lifecycle: writerCloseFinished without a Close call on a nonnil sink")
+		}
+	case signalCompletionPublished:
+		if !sig.boundary.valid() {
+			return fmt.Errorf("lifecycle: completionPublished with invalid boundary %d", sig.boundary)
+		}
+	}
+	return nil
+}
+
+// next validates the input state and signal, applies the signal matrix, and
+// validates the output state. It is pure: it never reads a child, clock,
+// context, provider, channel or lock. An invalid input returns the unchanged
+// input state, no continuation, no effects, and an error — without
+// reconstruction or silent recovery (decision 6).
+func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation, []lifecycleEffect, error) {
+	if err := validateLifecycleState(st); err != nil {
+		return st, continuation{contNone}, nil, fmt.Errorf("lifecycle: signal %d on invalid state: %w", sig.kind, err)
+	}
+	if err := validateLifecycleSignal(sig); err != nil {
+		return st, continuation{contNone}, nil, err
+	}
+
+	out := st
+	var eff []lifecycleEffect
+	cont := continuation{contNone}
+
+	switch sig.kind {
+	case signalPublished:
+		// Source V/C0/attempts 0; duplicate (non-reserved source) rejected.
+		if st.exec != execReserved {
+			return st, cont, nil, fmt.Errorf("lifecycle: published from exec state %d", st.exec)
+		}
+		out.exec = execStarting
+
+	case signalAttemptPreparing:
+		// Sources S/I, plus R for the workflow class (parallel preparation);
+		// repeat allowed; clears phase+label even while another team attempt runs.
+		if err := requireOpen(st, sig.kind); err != nil {
+			return st, cont, nil, err
+		}
+		switch st.exec {
+		case execStarting, execIdle:
+		case execRunning:
+			if sig.class != workflowAttemptClass {
+				return st, cont, nil, fmt.Errorf("lifecycle: preparing in running state with class %d", sig.class)
+			}
+		default:
+			return st, cont, nil, fmt.Errorf("lifecycle: preparing from exec state %d", st.exec)
+		}
+		eff = append(eff, lifecycleEffect{kind: effectClearPresentation})
+
+	case signalAttemptStarted:
+		// Sources S/I, plus R for the workflow class; attempts++ and exec R.
+		// A direct parallel start is rejected; not idempotent. A requested
+		// shutdown and a closing writer are both allowed (provider admission
+		// is a separate gate).
+		if err := requireOpen(st, sig.kind); err != nil {
+			return st, cont, nil, err
+		}
+		switch st.exec {
+		case execStarting, execIdle:
+		case execRunning:
+			if sig.class != workflowAttemptClass {
+				return st, cont, nil, fmt.Errorf("lifecycle: direct parallel attempt start rejected")
+			}
+		default:
+			return st, cont, nil, fmt.Errorf("lifecycle: attempt started from exec state %d", st.exec)
+		}
+		out.attempts++
+		out.exec = execRunning
+
+	case signalAttemptStartFailed:
+		// Sources S/I, plus R for the workflow class; S→I, otherwise unchanged;
+		// no count change; repeat allowed; no settle. Only for a prepared
+		// attempt that never incremented activity.
+		if err := requireOpen(st, sig.kind); err != nil {
+			return st, cont, nil, err
+		}
+		switch st.exec {
+		case execStarting, execIdle:
+		case execRunning:
+			if sig.class != workflowAttemptClass {
+				return st, cont, nil, fmt.Errorf("lifecycle: start failed in running state with class %d", sig.class)
+			}
+		default:
+			return st, cont, nil, fmt.Errorf("lifecycle: start failed from exec state %d", st.exec)
+		}
+		if st.exec == execStarting {
+			out.exec = execIdle
+		}
+
+	case signalAttemptSettled:
+		// Source R/C0/attempts>0; direct requires count 1. Extra settles are
+		// rejected. Phase+label clear and waiter settle happen only on →0.
+		if err := requireOpen(st, sig.kind); err != nil {
+			return st, cont, nil, err
+		}
+		if st.exec != execRunning || st.attempts <= 0 {
+			return st, cont, nil, fmt.Errorf("lifecycle: settled from exec %d with %d attempts", st.exec, st.attempts)
+		}
+		if sig.class == directAttemptClass && st.attempts != 1 {
+			return st, cont, nil, fmt.Errorf("lifecycle: direct settle with %d attempts", st.attempts)
+		}
+		out.attempts--
+		if out.attempts == 0 {
+			out.exec = execIdle
+			eff = append(eff,
+				lifecycleEffect{kind: effectClearPresentation},
+				lifecycleEffect{kind: effectSettleTurnWaiters},
+			)
+		}
+
+	case signalWorkflowFinalized:
+		// Source S/I/R, C0, workflow class; repeat allowed; settles waiters
+		// unconditionally and never clears presentation.
+		if err := requireOpen(st, sig.kind); err != nil {
+			return st, cont, nil, err
+		}
+		if sig.class != workflowAttemptClass {
+			return st, cont, nil, fmt.Errorf("lifecycle: workflow finalized with class %d", sig.class)
+		}
+		switch st.exec {
+		case execStarting, execIdle, execRunning:
+		default:
+			return st, cont, nil, fmt.Errorf("lifecycle: finalized from exec state %d", st.exec)
+		}
+		out.attempts = 0
+		out.exec = execIdle
+		eff = append(eff, lifecycleEffect{kind: effectSettleTurnWaiters})
+
+	case signalAttemptReturned:
+		// Source S/I, C0, direct class; no dimension change; releases the tree
+		// token at the old post-attempt boundary. Repeated release is safe but
+		// the caller emits the signal once per returned attempt.
+		if err := requireOpen(st, sig.kind); err != nil {
+			return st, cont, nil, err
+		}
+		if sig.class != directAttemptClass {
+			return st, cont, nil, fmt.Errorf("lifecycle: attempt returned with class %d", sig.class)
+		}
+		if st.exec != execStarting && st.exec != execIdle {
+			return st, cont, nil, fmt.Errorf("lifecycle: attempt returned from exec state %d", st.exec)
+		}
+		eff = append(eff, lifecycleEffect{kind: effectReleaseTreeToken})
+
+	case signalAttemptOutcome:
+		// Source S/I, C0, direct class; decision-5 result policy. Never changes
+		// presentation or ends execution by itself.
+		if err := requireOpen(st, sig.kind); err != nil {
+			return st, cont, nil, err
+		}
+		if sig.class != directAttemptClass {
+			return st, cont, nil, fmt.Errorf("lifecycle: attempt outcome with class %d", sig.class)
+		}
+		if st.exec != execStarting && st.exec != execIdle {
+			return st, cont, nil, fmt.Errorf("lifecycle: attempt outcome from exec state %d", st.exec)
+		}
+		record := lifecycleEffect{kind: effectRecordOutcomeExit, exitCode: sig.exitCode}
+		sentinel := lifecycleEffect{
+			kind:      effectWriteSentinel,
+			exitCode:  sig.exitCode,
+			reason:    sig.sentinelReason,
+			sessionID: sig.resultSessionID,
+		}
+		switch {
+		case !sig.retryable || !sig.retriesRemaining:
+			// Nonretryable or retries exhausted.
+			if sig.exitCode == 0 {
+				// Success: record exit, sentinel; the separate successPresented
+				// signal fires at the old post-sentinel site. Ordinary direct
+				// parks; workflow-direct and decider end. No prompt probe.
+				eff = append(eff, record, sentinel)
+				if sig.runKind == runKindOrdinaryDirect {
+					cont = continuation{contPark}
+				} else {
+					cont = continuation{contEnd}
+				}
+			} else if sig.runKind == runKindDecider || sig.sessionIDConflict {
+				// A decider's failed turn is terminal; a session-ID conflict is
+				// not resumable. Record exit, write sentinel, return.
+				eff = append(eff, record, sentinel)
+				cont = continuation{contEnd}
+			} else {
+				// Terminal probe selected: record exit first; the terminal
+				// probe's sentinel is emitted by promptContinuation.
+				eff = append(eff, record)
+				cont = continuation{contProbeTerminalPrompt}
+			}
+		case sig.runKind == runKindDecider:
+			// Retryable with retries remaining, decider: record exit, write
+			// sentinel with stop-reason fallback, return. No resumeID update,
+			// dequeue or backoff.
+			eff = append(eff, record, sentinel)
+			cont = continuation{contEnd}
+		default:
+			// Retryable with retries remaining, not decider: retry probe. The
+			// caller first updates resumeID only if result.sessionID is
+			// nonempty, then dequeues before checking context.
+			cont = continuation{contProbeRetryPrompt}
+		}
+
+	case signalPromptContinuation:
+		// Source S/I, C0, direct class; final continuation of the two-step
+		// protocol.
+		if err := requireOpen(st, sig.kind); err != nil {
+			return st, cont, nil, err
+		}
+		if sig.class != directAttemptClass {
+			return st, cont, nil, fmt.Errorf("lifecycle: prompt continuation with class %d", sig.class)
+		}
+		if st.exec != execStarting && st.exec != execIdle {
+			return st, cont, nil, fmt.Errorf("lifecycle: prompt continuation from exec state %d", st.exec)
+		}
+		sentinel := lifecycleEffect{
+			kind:      effectWriteSentinel,
+			exitCode:  sig.exitCode,
+			reason:    sig.sentinelReason,
+			sessionID: sig.resultSessionID,
+		}
+		switch sig.probeKind {
+		case probeTerminalPrompt:
+			// The terminal probe emits the result sentinel regardless of
+			// consumed status. Resume only when the context was live and the
+			// dequeue succeeded.
+			eff = append(eff, sentinel)
+			if sig.terminalContextErr == nil && sig.promptConsumed {
+				cont = continuation{contResumeQueued}
+			} else {
+				cont = continuation{contEnd}
+			}
+		case probeRetryPrompt:
+			// The retry probe dequeued before checking context. If a prompt
+			// was consumed and the context is live, resume (no sentinel). If
+			// resuming is off and the context is dead — even with a consumed
+			// and discarded prompt — the idle-context end runs immediately.
+			switch {
+			case sig.promptConsumed && sig.resumeContextErr == nil:
+				cont = continuation{contRetry}
+			case sig.promptConsumed && sig.resumeContextErr != nil:
+				cont = continuation{contIdleContextEnd}
+			case sig.idleContextErr != nil:
+				cont = continuation{contIdleContextEnd}
+			default:
+				cont = continuation{contBackoff}
+			}
+		default:
+			return st, cont, nil, fmt.Errorf("lifecycle: prompt continuation without a probe kind")
+		}
+
+	case signalSuccessPresented:
+		// Source S/I, C0, exit 0, after the sentinel; repeat sets phase done
+		// and never clears the label.
+		if err := requireOpen(st, sig.kind); err != nil {
+			return st, cont, nil, err
+		}
+		if st.exec != execStarting && st.exec != execIdle {
+			return st, cont, nil, fmt.Errorf("lifecycle: success presented from exec state %d", st.exec)
+		}
+		eff = append(eff, lifecycleEffect{kind: effectSetSuccessPresentation})
+
+	case signalParkRequested:
+		// Source S/I, C0, ordinary direct success; duplicate rejected.
+		if err := requireOpen(st, sig.kind); err != nil {
+			return st, cont, nil, err
+		}
+		if st.exec != execStarting && st.exec != execIdle {
+			return st, cont, nil, fmt.Errorf("lifecycle: park requested from exec state %d", st.exec)
+		}
+		out.exec = execParked
+		eff = append(eff, lifecycleEffect{kind: effectSignalCapacity})
+
+	case signalPromptDequeued:
+		// Source P, C0; observational repeat with no activity or admission
+		// effect (continuation probes use their own signals).
+		if err := requireOpen(st, sig.kind); err != nil {
+			return st, cont, nil, err
+		}
+		if st.exec != execParked {
+			return st, cont, nil, fmt.Errorf("lifecycle: prompt dequeued from exec state %d", st.exec)
+		}
+
+	case signalLocalSlotAcquired:
+		// Source P, C0; duplicate rejected; no active attempt yet.
+		if err := requireOpen(st, sig.kind); err != nil {
+			return st, cont, nil, err
+		}
+		if st.exec != execParked {
+			return st, cont, nil, fmt.Errorf("lifecycle: local slot acquired from exec state %d", st.exec)
+		}
+		out.exec = execIdle
+
+	case signalParkTimedOut:
+		// Source P, C0, queue empty observed under the same mu; duplicate
+		// rejected; no waiter settle, no done close.
+		if err := requireOpen(st, sig.kind); err != nil {
+			return st, cont, nil, err
+		}
+		if st.exec != execParked {
+			return st, cont, nil, fmt.Errorf("lifecycle: park timed out from exec state %d", st.exec)
+		}
+		out.completion = completionAdmissionClosed
+
+	case signalParkWaitEnded:
+		// Source P, C0 or CA; only the not-ok wait path, never the local-slot
+		// failure. Duplicate rejected.
+		if st.completion == completionPublished {
+			return st, cont, nil, fmt.Errorf("lifecycle: park wait ended after completion %d", st.completion)
+		}
+		if st.exec != execParked {
+			return st, cont, nil, fmt.Errorf("lifecycle: park wait ended from exec state %d", st.exec)
+		}
+		out.exec = execIdle
+
+	case signalIdleContextEnded:
+		// Source S/I/P, C0 or CA; repeat overwrites exit/phase/reason, emits
+		// sentinel then session.end; never clears parked or settles waiters.
+		if st.completion == completionPublished {
+			return st, cont, nil, fmt.Errorf("lifecycle: idle context ended after completion %d", st.completion)
+		}
+		switch st.exec {
+		case execStarting, execIdle, execParked:
+		default:
+			return st, cont, nil, fmt.Errorf("lifecycle: idle context ended from exec state %d", st.exec)
+		}
+		eff = append(eff,
+			lifecycleEffect{kind: effectSetIdleEndData, exitCode: sig.idleExitCode, reason: sig.idleStopReason},
+			lifecycleEffect{kind: effectWriteSentinel, exitCode: sig.idleExitCode, reason: sig.idleStopReason},
+			lifecycleEffect{kind: effectEmitSessionEnd, exitCode: sig.idleExitCode, reason: sig.idleStopReason},
+		)
+
+	case signalRunEnded:
+		// Source S/I/P, C0 or CA, attempts 0, at the end of teardown. E/PE
+		// repeats carry no effects; the first transition emits publication at
+		// the afterRunTeardown boundary. Panic recovery runs through this
+		// boundary too.
+		if st.completion != completionOpen && st.completion != completionAdmissionClosed {
+			return st, cont, nil, fmt.Errorf("lifecycle: run ended after completion %d", st.completion)
+		}
+		if st.attempts != 0 {
+			return st, cont, nil, fmt.Errorf("lifecycle: run ended with %d attempts", st.attempts)
+		}
+		switch st.exec {
+		case execStarting, execIdle:
+			out.exec = execEnded
+			eff = append(eff, lifecycleEffect{kind: effectPublishCompletion, boundary: afterRunTeardown})
+		case execParked:
+			out.exec = execParkedEnding
+			eff = append(eff, lifecycleEffect{kind: effectPublishCompletion, boundary: afterRunTeardown})
+		case execEnded, execParkedEnding:
+			// Repeat: no effects.
+		default:
+			return st, cont, nil, fmt.Errorf("lifecycle: run ended from exec state %d", st.exec)
+		}
+
+	case signalSpawnRolledBack:
+		// Source V/S, C0, attempts 0; E repeat without effects. The first
+		// transition publishes at the afterSpawnRollback boundary (rollback goes
+		// directly to complete).
+		if st.completion != completionOpen {
+			return st, cont, nil, fmt.Errorf("lifecycle: spawn rolled back after completion %d", st.completion)
+		}
+		switch st.exec {
+		case execReserved, execStarting:
+			out.exec = execEnded
+			eff = append(eff, lifecycleEffect{kind: effectPublishCompletion, boundary: afterSpawnRollback})
+		case execEnded:
+			// Repeat: no effects.
+		default:
+			return st, cont, nil, fmt.Errorf("lifecycle: spawn rolled back from exec state %d", st.exec)
+		}
+
+	case signalShutdownRequested:
+		// Any otherwise-valid state. Repeats allowed; every call emits the
+		// provider-cancel consideration; the context cancel is first-only.
+		if err := validateLifecycleState(st); err != nil {
+			return st, cont, nil, err
+		}
+		eff = append(eff, lifecycleEffect{kind: effectConsiderProviderCancel})
+		if st.shutdown == shutdownNone {
+			out.shutdown = shutdownRequested
+			eff = append(eff, lifecycleEffect{kind: effectCancelContext})
+		}
+
+	case signalWriterCloseBegun:
+		// Any otherwise-valid state; open→closing, closing/closed unchanged.
+		// Repeat allowed even after closed; the interpreter still observes the
+		// existing drain/idempotence protocol.
+		if err := validateLifecycleState(st); err != nil {
+			return st, cont, nil, err
+		}
+		if st.writer == writerOpen {
+			out.writer = writerClosing
+		}
+
+	case signalWriterCloseFinished:
+		// Source writerClosing with Close actually called on a nonnil sink; a
+		// repeated finished signal is rejected (the caller's closed guard
+		// avoids it). No signal when the sink is nil; a Close error still
+		// counts as called.
+		if err := validateLifecycleState(st); err != nil {
+			return st, cont, nil, err
+		}
+		if st.writer != writerClosing {
+			return st, cont, nil, fmt.Errorf("lifecycle: writer close finished from writer stage %d", st.writer)
+		}
+		out.writer = writerClosed
+
+	case signalCompletionPublished:
+		// Source E/PE, attempts 0, C0/CA, with the boundary attested. CP repeat
+		// is a no-op. afterRunTeardown additionally requires a requested
+		// shutdown and a closing (or closed) writer — writer closing is
+		// sufficient when the sink is nil and writerClosed is never fabricated.
+		// afterSpawnRollback permits writer open/shutdown none because
+		// rollback goes directly to complete.
+		if st.completion == completionPublished {
+			// Repeat: no-op; doneOnce prevents duplicate publication effects.
+			break
+		}
+		if st.attempts != 0 {
+			return st, cont, nil, fmt.Errorf("lifecycle: completion published with %d attempts", st.attempts)
+		}
+		switch st.exec {
+		case execEnded, execParkedEnding:
+		default:
+			return st, cont, nil, fmt.Errorf("lifecycle: completion published from exec state %d", st.exec)
+		}
+		if st.completion != completionOpen && st.completion != completionAdmissionClosed {
+			return st, cont, nil, fmt.Errorf("lifecycle: completion published after completion %d", st.completion)
+		}
+		if sig.boundary == afterRunTeardown {
+			if !st.isShuttingDown() {
+				return st, cont, nil, errors.New("lifecycle: afterRunTeardown publication without a requested shutdown")
+			}
+			if !st.isWriterClosing() {
+				return st, cont, nil, errors.New("lifecycle: afterRunTeardown publication without a closing writer")
+			}
+		}
+		out.completion = completionPublished
+		if out.exec == execParkedEnding {
+			out.exec = execEnded
+		}
+		eff = append(eff,
+			lifecycleEffect{kind: effectSettleTurnWaiters},
+			lifecycleEffect{kind: effectCloseDone},
+		)
+
+	case signalAgentStatusObserved:
+		// Any valid state; snapshot from decision 6. The presentation write is
+		// emitted only when the phase is nonempty and presentation was not
+		// already done; nonempty labels replace, empty labels retain.
+		if err := validateLifecycleState(st); err != nil {
+			return st, cont, nil, err
+		}
+		if sig.phase != "" && !sig.presentationWasDone {
+			eff = append(eff, lifecycleEffect{kind: effectSetAgentPresentation, phase: sig.phase, label: sig.label})
+		}
+
+	case signalSessionEndObserved:
+		// Any valid state; sets phase done and a nonempty stop reason; never
+		// settles an attempt.
+		if err := validateLifecycleState(st); err != nil {
+			return st, cont, nil, err
+		}
+		eff = append(eff, lifecycleEffect{kind: effectSetSessionEndPresentation, reason: sig.stopReason})
+	}
+
+	if err := validateLifecycleState(out); err != nil {
+		return st, continuation{contNone}, nil, fmt.Errorf("lifecycle: signal %d produces invalid state: %w", sig.kind, err)
+	}
+	return out, cont, eff, nil
+}
