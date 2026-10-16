@@ -492,7 +492,7 @@ func (m *Manager) commandUnblock(wf WorkflowID, payload json.RawMessage) (any, e
 // poll ID, everything else by the legacy result-discriminated key.
 func (m *Manager) applyGateDecision(wf WorkflowID, snap Snapshot, tmpl *Template, node *NodeDefinition, act *Activation, gateID GateID, op GateOperation, status GateStatus, req commandGateRequest, idemKey string) (map[string]any, error) {
 	def := gateDefinitionByID(node, gateID)
-	now := time.Now().UTC()
+	now := m.now()
 	gateInstance := &GateInstance{
 		ID:           NewGateInstanceID(),
 		GateID:       gateID,
@@ -612,7 +612,7 @@ func (m *Manager) applyGateDecision(wf WorkflowID, snap Snapshot, tmpl *Template
 // a pass with remaining required gates, or a reject/fail without a declared
 // branch.
 func (m *Manager) gateTransitionPayload(inst *WorkflowInstance, tmpl *Template, node *NodeDefinition, act *Activation, gateID GateID, op GateOperation, status GateStatus, req commandGateRequest) (json.RawMessage, OutcomeName, error) {
-	now := time.Now().UTC()
+	now := m.now()
 	marshal := func(outcome OutcomeName) (json.RawMessage, OutcomeName, error) {
 		if err := validateDeclaredOutcome(tmpl, node, outcome); err != nil {
 			return nil, "", err

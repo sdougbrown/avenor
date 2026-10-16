@@ -141,6 +141,136 @@ func TestReplayLegacyEventsWithoutMintedFields(t *testing.T) {
 	if got := snap.Instance.Activations[0]; got.Status != ActivationRunning || got.UpdatedAt.IsZero() {
 		t.Fatalf("activation = %+v, want running with an update time", got)
 	}
+
+	// Legacy transition and rerouted events carry no at and no activation_ids:
+	// replay stamps the time and mints the ID, so the fold still creates the
+	// new activation.
+	branchTail := fmt.Sprintf(`{"id":"e4","kind":"workflow.event.transition","sequence":4,"identity":{"workflow_id":"wf-legacy","node_id":"a","activation_id":%q},"transition":{"activation_id":"","outcome":"next","target_node_id":"c"}}
+{"id":"e5","kind":"workflow.event.rerouted","sequence":5,"identity":{"workflow_id":"wf-legacy","node_id":"d"}}
+`, actID)
+	if err := os.WriteFile(path, []byte(legacy+tail+branchTail), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	snap, n, _, err = replayEvents(snap, path, nil)
+	if err != nil || n != 5 {
+		t.Fatalf("replay legacy transition/rerouted: n=%d err=%v", n, err)
+	}
+	if got := len(snap.Instance.Activations); got != 4 {
+		t.Fatalf("activations = %d, want 4 (two entries plus transition and rerouted)", got)
+	}
+	transitioned := snap.Instance.Activations[2]
+	if transitioned.ID == "" || transitioned.NodeID != "c" {
+		t.Fatalf("transition activation = %+v, want a minted ID on node c", transitioned)
+	}
+	rerouted := snap.Instance.Activations[3]
+	if rerouted.ID == "" || rerouted.NodeID != "d" {
+		t.Fatalf("rerouted activation = %+v, want a minted ID on node d", rerouted)
+	}
+}
+
+// TestReplayWithPoliciesReproducesLiveSnapshot proves the same parity when
+// the reducer consults template policies: an instance driven through a
+// manager whose template carries a retry policy and a dispatch policy folds
+// back from an empty snapshot — with the store's policies — into exactly the
+// live snapshot, retry budget and stamped dispatch included.
+func TestReplayWithPoliciesReproducesLiveSnapshot(t *testing.T) {
+	template := []byte(`{
+  "schema_version": 1,
+  "template_id": "replay-policy",
+  "template_version": "1",
+  "entry_nodes": ["start"],
+  "nodes": [
+    {"id": "start", "action": {"type": "run", "prompt": "try"}, "retry_policy": {"max_attempts": 2, "exhaustion": "fail"}, "branches": {"next": "second"}},
+    {"id": "second", "action": {"type": "run", "prompt": "continue"}, "dispatch": {"mode": "auto", "controller_id": "ctl-a"}}
+  ],
+  "terminal_outcomes": ["done"],
+  "default_lease_policy": {"ttl_seconds": 900}
+}`)
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	m := NewManager(s)
+	m.RegisterExecutor(ActionRun, &fakeExecutor{})
+	if _, err := m.WorkflowCreate(template); err != nil {
+		t.Fatalf("WorkflowCreate: %v", err)
+	}
+	wf := mustInstantiateTemplate(t, m, "replay-policy", "1")
+
+	// First attempt fails: the retry policy re-arms the same activation so the
+	// second attempt runs against the remaining budget.
+	snap, ok, err := s.loadCurrent(wf)
+	if err != nil || !ok {
+		t.Fatalf("loadCurrent: ok=%v err=%v", ok, err)
+	}
+	start := activationByNode(&snap.Instance, "start")
+	res := claimActivation(t, m, wf, "start", string(start.ID), "alice")
+	out, err := m.WorkflowCommand(string(wf), startCommandPayload(t, "start", string(start.ID), res, nil))
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	attemptID := out.(map[string]any)["attempt_id"].(string)
+	if err := m.RecordAttemptTerminated(wf, "start", start.ID, AttemptID(attemptID), LeaseID(res["lease_id"].(string)), AttemptFailed); err != nil {
+		t.Fatalf("terminate failed attempt: %v", err)
+	}
+
+	// Second attempt succeeds and completes with the "next" branch outcome,
+	// transitioning to the auto-dispatched second node.
+	snap, ok, err = s.loadCurrent(wf)
+	if err != nil || !ok {
+		t.Fatalf("reload: ok=%v err=%v", ok, err)
+	}
+	start = activationByNode(&snap.Instance, "start")
+	res = claimActivation(t, m, wf, "start", string(start.ID), "alice")
+	out, err = m.WorkflowCommand(string(wf), startCommandPayload(t, "start", string(start.ID), res, nil))
+	if err != nil {
+		t.Fatalf("second start: %v", err)
+	}
+	attemptID = out.(map[string]any)["attempt_id"].(string)
+	complete := map[string]any{
+		"op":            "complete",
+		"node_id":       "start",
+		"activation_id": string(start.ID),
+		"attempt_id":    attemptID,
+		"lease_id":      res["lease_id"].(string),
+		"owner_token":   res["owner_token"],
+		"outcome":       "next",
+	}
+	cdata, err := json.Marshal(complete)
+	if err != nil {
+		t.Fatalf("marshal complete: %v", err)
+	}
+	if _, err := m.WorkflowCommand(string(wf), cdata); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+
+	live, ok, err := s.loadCurrent(wf)
+	if err != nil || !ok {
+		t.Fatalf("loadCurrent after complete: ok=%v err=%v", ok, err)
+	}
+
+	// The sequence must actually exercise both policies: the start activation
+	// carries both attempts (the retry re-arm consumed one failed attempt),
+	// and the second activation carries the template's stamped dispatch
+	// policy.
+	startAct := activationByNode(&live.Instance, "start")
+	if startAct == nil || len(startAct.AttemptIDs) != 2 {
+		t.Fatalf("start activation attempts = %+v, want two attempts on the re-armed activation", startAct)
+	}
+	second := activationByNode(&live.Instance, "second")
+	if second == nil || second.Dispatch == nil || !second.Dispatch.IsAuto() {
+		t.Fatalf("second activation dispatch = %+v, want the template's auto policy", second)
+	}
+
+	for i := 1; i <= 2; i++ {
+		replayed, _, _, err := replayEvents(Snapshot{}, s.eventsPath(wf), s.policies)
+		if err != nil {
+			t.Fatalf("replay %d: %v", i, err)
+		}
+		if !reflect.DeepEqual(live, replayed) {
+			t.Fatalf("replay %d differs from live snapshot:\nlive:   %+v\nreplay: %+v", i, live, replayed)
+		}
+	}
 }
 
 // TestStoreAndManagerShareOneClock proves a manager's clock stamps the
