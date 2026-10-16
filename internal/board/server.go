@@ -84,57 +84,57 @@ func NewServer(cfg Config) (*Server, error) {
 			http.Redirect(w, r, "/board/", http.StatusMovedPermanently)
 		})
 	} else {
-	mux.HandleFunc("/board/", func(w http.ResponseWriter, r *http.Request) {
-		// Trim the /board/ prefix to get the file path within the embedded FS
-		name := strings.TrimPrefix(r.URL.Path, "/board/")
-		if name == "" {
-			name = "index.html"
-		}
-		// Try to serve the file directly
-		f, err := boardFS.Open(name)
-		if err != nil {
-			// File not found — SPA fallback: serve index.html
-			f, err = boardFS.Open("index.html")
+		mux.HandleFunc("/board/", func(w http.ResponseWriter, r *http.Request) {
+			// Trim the /board/ prefix to get the file path within the embedded FS
+			name := strings.TrimPrefix(r.URL.Path, "/board/")
+			if name == "" {
+				name = "index.html"
+			}
+			// Try to serve the file directly
+			f, err := boardFS.Open(name)
+			if err != nil {
+				// File not found — SPA fallback: serve index.html
+				f, err = boardFS.Open("index.html")
+				if err != nil {
+					http.NotFound(w, r)
+					return
+				}
+				name = "index.html"
+			}
+			defer f.Close()
+
+			stat, err := f.Stat()
 			if err != nil {
 				http.NotFound(w, r)
 				return
 			}
-			name = "index.html"
-		}
-		defer f.Close()
 
-		stat, err := f.Stat()
-		if err != nil {
-			http.NotFound(w, r)
-			return
-		}
+			// Set content type based on file extension
+			ext := strings.ToLower(filepath.Ext(name))
+			switch ext {
+			case ".html":
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			case ".js":
+				w.Header().Set("Content-Type", "application/javascript")
+			case ".css":
+				w.Header().Set("Content-Type", "text/css")
+			case ".json":
+				w.Header().Set("Content-Type", "application/json")
+			case ".svg":
+				w.Header().Set("Content-Type", "image/svg+xml")
+			case ".png":
+				w.Header().Set("Content-Type", "image/png")
+			case ".ico":
+				w.Header().Set("Content-Type", "image/x-icon")
+			default:
+				w.Header().Set("Content-Type", "application/octet-stream")
+			}
 
-		// Set content type based on file extension
-		ext := strings.ToLower(filepath.Ext(name))
-		switch ext {
-		case ".html":
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		case ".js":
-			w.Header().Set("Content-Type", "application/javascript")
-		case ".css":
-			w.Header().Set("Content-Type", "text/css")
-		case ".json":
-			w.Header().Set("Content-Type", "application/json")
-		case ".svg":
-			w.Header().Set("Content-Type", "image/svg+xml")
-		case ".png":
-			w.Header().Set("Content-Type", "image/png")
-		case ".ico":
-			w.Header().Set("Content-Type", "image/x-icon")
-		default:
-			w.Header().Set("Content-Type", "application/octet-stream")
-		}
-
-		http.ServeContent(w, r, name, stat.ModTime(), f.(io.ReadSeeker))
-	})
-	mux.HandleFunc("/board", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/board/", http.StatusMovedPermanently)
-	})
+			http.ServeContent(w, r, name, stat.ModTime(), f.(io.ReadSeeker))
+		})
+		mux.HandleFunc("/board", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/board/", http.StatusMovedPermanently)
+		})
 	} // end else (boardFS available)
 
 	// Redirect root to /board/

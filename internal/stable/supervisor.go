@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/admission"
+	"github.com/sdougbrown/avenor/internal/appdir"
 	"github.com/sdougbrown/avenor/internal/cli"
 	"github.com/sdougbrown/avenor/internal/control"
 	"github.com/sdougbrown/avenor/internal/events"
@@ -138,15 +139,22 @@ type SpawnParams struct {
 	// plane or defers (leaving the request pending for a human). Mutually
 	// exclusive with AutoApprove.
 	PermissionDecider *workflow.PermissionDecider `json:"permission_decider,omitempty"`
-	Timeout           int                         `json:"timeout,omitempty"`
-	MaxRetries        int                         `json:"max_retries,omitempty"`
-	LoopFile          string                      `json:"loop_file,omitempty"`
-	TeamFile          string                      `json:"team_file,omitempty"`
-	RosterFile        string                      `json:"roster_file,omitempty"`
-	RosterEntry       string                      `json:"roster_entry,omitempty"`
-	SessionID         string                      `json:"session_id,omitempty"`
-	ParentID          string                      `json:"parent_id,omitempty"`     // runtime ID of the parent agent
-	ParentRunID       string                      `json:"parent_run_id,omitempty"` // broker run ID of the parent, for channel messaging
+	// PermissionModelDecider resolves this runtime's permission requests
+	// with a direct model call avenor itself makes: no runtime is spawned,
+	// no file permission handler is derived, and an allow/reject answer is
+	// applied through the control plane while a defer (or any failed or
+	// unparseable call) leaves the request pending for a human. Mutually
+	// exclusive with AutoApprove and PermissionDecider.
+	PermissionModelDecider *workflow.PermissionModelDecider `json:"permission_model_decider,omitempty"`
+	Timeout                int                              `json:"timeout,omitempty"`
+	MaxRetries             int                              `json:"max_retries,omitempty"`
+	LoopFile               string                           `json:"loop_file,omitempty"`
+	TeamFile               string                           `json:"team_file,omitempty"`
+	RosterFile             string                           `json:"roster_file,omitempty"`
+	RosterEntry            string                           `json:"roster_entry,omitempty"`
+	SessionID              string                           `json:"session_id,omitempty"`
+	ParentID               string                           `json:"parent_id,omitempty"`     // runtime ID of the parent agent
+	ParentRunID            string                           `json:"parent_run_id,omitempty"` // broker run ID of the parent, for channel messaging
 	// IdempotencyKey makes a retried spawn return the stored result of the
 	// first spawn under the same key instead of starting a second runtime.
 	// Empty disables idempotency.
@@ -243,6 +251,23 @@ type childRuntime struct {
 	// permissionDecider carries the resolved permission policy's decider;
 	// nil means the runtime uses the ordinary permission resolver behavior.
 	permissionDecider *workflow.PermissionDecider
+	// modelDecider carries the resolved direct-model decider; nil means no
+	// direct-model resolution. Mutually exclusive with permissionDecider.
+	modelDecider *workflow.PermissionModelDecider
+	// modelDeciderKey is the resolved API key for modelDecider's provider,
+	// resolved once at spawn and held only here, in supervisor memory: it
+	// never enters the pinned selection, snapshots, or status surfaces.
+	modelDeciderKey string
+	// task and taskFile carry the spawn prompt for the direct-model
+	// permission decider's prompt context: what the node was dispatched to
+	// do, so the decision can judge whether the request plainly serves it.
+	task     string
+	taskFile string
+	// modelDeciderCalls counts the direct-model decision calls this runtime
+	// has made; past maxModelDeciderCallsPerRuntime further requests stay
+	// pending for a human, so a worker in a permission-gated loop cannot
+	// generate unbounded billable calls.
+	modelDeciderCalls int
 	// routedPermissionRequests records request IDs whose pending permission
 	// request already spawned a decider run, so a repeated request event
 	// cannot spawn a second decider for the same request.
@@ -252,7 +277,8 @@ type childRuntime struct {
 	// mark: no further spawns fire and the request stays pending for a human.
 	permissionDeciderFailures map[string]int
 	// permissionDeciderExhausted is surfaced in runtime status once any
-	// request on this runtime exhausted its decider spawn retries.
+	// request on this runtime exhausted its decider retries (harness decider
+	// spawns or direct-model decision calls).
 	permissionDeciderExhausted bool
 	runID                      string
 	dir                        string
@@ -550,16 +576,21 @@ type Supervisor struct {
 	permissionProviders           map[string]permissionProviderBinding // same key; exact direct-answer target
 	// Permission-decider concurrency accounting, guarded by permDeciderMu.
 	// permDeciderSlots records which decider labels currently hold one of the
-	// maxConcurrentPermissionDeciders slots (so a release is always paired
-	// with exactly one acquire); permDeciderScratchDirs maps a live decider
-	// label to its neutral scratch directory, removed at teardown;
+	// maxConcurrentPermissionDeciders slots (a release always pairs one
+	// acquire); permDeciderScratchDirs maps a live decider label to its
+	// neutral scratch directory, removed at teardown;
 	// permDeciderBlocked holds requests that hit the cap and stay pending
 	// until a teardown frees capacity and unrouts them for a retry.
-	permDeciderMu                sync.Mutex
-	permDeciderActive            int
-	permDeciderSlots             map[string]struct{}           // decider label → slot held
-	permDeciderScratchDirs       map[string]string             // decider label → scratch dir
-	permDeciderBlocked           map[string]struct{}           // "runtimeID\x00requestID"
+	permDeciderMu          sync.Mutex
+	permDeciderActive      int
+	permDeciderSlots       map[string]struct{} // decider label → slot held
+	permDeciderScratchDirs map[string]string   // decider label → scratch dir
+	permDeciderBlocked     map[string]struct{} // "runtimeID\x00requestID"
+	// Direct-model decider accounting shares permDeciderMu: model calls
+	// consume no admission slot, so their own cap bounds concurrent calls.
+	modelDeciderActive           int
+	modelDeciderSlots            map[string]struct{}           // "runtimeID:requestID" → slot held
+	modelDeciderBlocked          map[string]struct{}           // "runtimeID\x00requestID"
 	httpServers                  map[string]*managedHTTPServer // dir → ready server
 	httpStarting                 map[string]struct{}           // dirs with a start in flight
 	httpShutdownStarted          bool
@@ -1303,8 +1334,19 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 	if err := runtime.ValidateLaunchWrapper(params.LaunchWrapper); err != nil {
 		return SpawnResult{}, fmt.Errorf("launch_wrapper: %w", err)
 	}
-	if params.AutoApprove && params.PermissionDecider != nil {
-		return SpawnResult{}, fmt.Errorf("auto_approve and permission_decider are mutually exclusive")
+	if params.AutoApprove && (params.PermissionDecider != nil || params.PermissionModelDecider != nil) {
+		return SpawnResult{}, fmt.Errorf("auto_approve and permission deciders are mutually exclusive")
+	}
+	if params.PermissionDecider != nil && params.PermissionModelDecider != nil {
+		return SpawnResult{}, fmt.Errorf("permission_decider and permission_model_decider are mutually exclusive")
+	}
+	modelDeciderKey := ""
+	if params.PermissionModelDecider != nil {
+		key, err := resolvePermissionModelDeciderKey(params.PermissionModelDecider)
+		if err != nil {
+			return SpawnResult{}, err
+		}
+		modelDeciderKey = key
 	}
 	workflowMode := params.LoopFile != "" || params.TeamFile != ""
 	if workflowMode {
@@ -1365,6 +1407,10 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		promptCh:          make(chan struct{}, 1),
 		autoApprove:       params.AutoApprove,
 		permissionDecider: params.PermissionDecider,
+		modelDecider:      params.PermissionModelDecider,
+		modelDeciderKey:   modelDeciderKey,
+		task:              params.Prompt,
+		taskFile:          params.PromptFile,
 		launchWrapper:     params.LaunchWrapper,
 		workflowID:        params.WorkflowID,
 		nodeID:            params.NodeID,
@@ -1472,7 +1518,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 	// handler is derived, so a pending request stays pending (surfacing to
 	// the decider and, on defer, to a human) instead of stalling in the
 	// file handler or being approved blindly.
-	if permHandler == "" && !params.AutoApprove && params.PermissionDecider == nil && sentinelFile != "" {
+	if permHandler == "" && !params.AutoApprove && params.PermissionDecider == nil && params.PermissionModelDecider == nil && sentinelFile != "" {
 		permHandler = "file:" + cli.DerivePermBase(sentinelFile)
 	}
 	if permHandler != "" {
@@ -3646,12 +3692,15 @@ func (s *Supervisor) listRuntimes() []map[string]any {
 			"pending_permission": rt.pendingPermission,
 			"latest_seq":         rt.latestSeq,
 			"auto_approve":       rt.autoApprove,
-			// True once a pending request exhausted its decider spawn retries;
-			// the request itself stays pending for a human gate.
+			// True once a pending request exhausted its decider retries (harness
+			// spawns or direct-model calls); it stays pending for a human gate.
 			"permission_decider_exhausted": rt.permissionDeciderExhausted,
 		}
 		if rt.permissionDecider != nil {
 			entry["permission_decider"] = rt.permissionDecider.Entry
+		}
+		if rt.modelDecider != nil {
+			entry["permission_model_decider"] = rt.modelDecider.Provider + "/" + rt.modelDecider.Model
 		}
 		if rt.permission != nil {
 			perm := make(map[string]any, len(rt.permission))
@@ -3884,11 +3933,13 @@ func (s *Supervisor) cachePermissionOptions(runtimeID, requestID string, options
 }
 
 // routePermissionRequest routes a pending permission request on a runtime
-// whose resolved permission policy declares a decider: the kernel spawns the
-// decider run (once per request) and hands it the request. The decider agent
-// owns the allow/reject/defer judgment and answers through the control plane;
-// a defer is a visible pending state, never a silent allow. Runtimes without
-// a decider keep the ordinary permission resolver behavior.
+// whose resolved permission policy declares a decider. A harness decider
+// spawns the decider run (once per request) and hands it the request; the
+// decider agent owns the allow/reject/defer judgment and answers through the
+// control plane. A direct-model decider spawns nothing: avenor itself makes
+// the decision call and applies the answer. In both shapes a defer is a
+// visible pending state, never a silent allow. Runtimes without a decider
+// keep the ordinary permission resolver behavior.
 func (s *Supervisor) routePermissionRequest(runtimeID, requestID string, options []any) {
 	if requestID == "" {
 		return
@@ -3896,7 +3947,10 @@ func (s *Supervisor) routePermissionRequest(runtimeID, requestID string, options
 	s.controlMu.Lock()
 	rt := s.runtimes[runtimeID]
 	s.controlMu.Unlock()
-	if rt == nil || rt.permissionDecider == nil {
+	if rt == nil {
+		return
+	}
+	if rt.permissionDecider == nil && rt.modelDecider == nil {
 		return
 	}
 	rt.mu.Lock()
@@ -3907,9 +3961,32 @@ func (s *Supervisor) routePermissionRequest(runtimeID, requestID string, options
 	if !routed {
 		rt.routedPermissionRequests[requestID] = struct{}{}
 	}
-	decider, label := *rt.permissionDecider, rt.label
+	decider, modelDecider, modelDeciderKey, label, ctx := rt.permissionDecider, rt.modelDecider, rt.modelDeciderKey, rt.label, rt.lifecycleCtx
 	rt.mu.Unlock()
 	if routed {
+		return
+	}
+	if modelDecider != nil {
+		slotKey := runtimeID + ":" + requestID
+		if !s.acquireModelDeciderSlot(slotKey) {
+			// The model-call cap is full: keep the routed mark and leave the
+			// request pending — do not call and do not re-route. When an
+			// in-flight call finishes, releaseModelDeciderSlot re-routes the
+			// blocked request internally from its cached options.
+			fmt.Fprintf(s.stderrWriter(), "avenor: model decider concurrency cap (%d) reached; request %s on runtime %s stays pending until capacity frees\n", maxConcurrentModelDeciders, requestID, runtimeID)
+			s.blockModelDecisionForRetry(runtimeID, requestID)
+			return
+		}
+		go func() {
+			if s.resolvePermissionWithModel(ctx, *modelDecider, modelDeciderKey, slotKey, runtimeID, requestID, options, label) {
+				// The decision slot is already released; the re-route can
+				// acquire cleanly.
+				s.retryPermissionRequest(runtimeID, requestID)
+			}
+		}()
+		return
+	}
+	if decider == nil {
 		return
 	}
 	deciderLabel := permdecLabelPrefix + runtimeID + ":" + requestID
@@ -3922,7 +3999,7 @@ func (s *Supervisor) routePermissionRequest(runtimeID, requestID string, options
 		s.blockPermissionRequestForRetry(runtimeID, requestID)
 		return
 	}
-	go s.spawnPermissionDecider(decider, runtimeID, requestID, options, label)
+	go s.spawnPermissionDecider(*decider, runtimeID, requestID, options, label)
 }
 
 // spawnPermissionDecider starts the decider run for one pending permission
@@ -4024,8 +4101,16 @@ const permdecLabelPrefix = "permdec:"
 // maxConcurrentPermissionDeciders caps how many permission-decider runs may
 // be live at once across the supervisor. Each decider consumes a shared
 // MaxRuntimes admission slot, so a worker issuing many distinct permission
-// requests could otherwise crowd out other runtimes with decider runs.
+// requests can crowd out other runtimes with decider runs.
 const maxConcurrentPermissionDeciders = 3
+
+// maxConcurrentModelDeciders caps concurrent in-flight direct-model decision
+// calls across the supervisor. A model call consumes no MaxRuntimes
+// admission slot, so without a cap a worker's pending requests fan out one
+// unbounded goroutine each. The cap keeps provider load bounded; a blocked
+// request re-routes when capacity frees instead of burning its bounded
+// retries against a throttled provider.
+const maxConcurrentModelDeciders = 4
 
 // acquirePermissionDeciderSlot reserves one decider run slot for the request
 // identified by deciderLabel and reports whether capacity was available.
@@ -4090,6 +4175,55 @@ func (s *Supervisor) releasePermissionDecider(deciderLabel string) {
 	if dir != "" {
 		os.RemoveAll(dir)
 	}
+	for key := range blocked {
+		runtimeID, requestID, _ := strings.Cut(key, "\x00")
+		s.retryPermissionRequest(runtimeID, requestID)
+	}
+}
+
+// acquireModelDeciderSlot reserves one direct-model decision slot for the
+// request identified by slotKey and reports whether capacity was available.
+// The slot is held from routing until the decision call completes.
+func (s *Supervisor) acquireModelDeciderSlot(slotKey string) bool {
+	s.permDeciderMu.Lock()
+	defer s.permDeciderMu.Unlock()
+	if s.modelDeciderActive >= maxConcurrentModelDeciders {
+		return false
+	}
+	s.modelDeciderActive++
+	if s.modelDeciderSlots == nil {
+		s.modelDeciderSlots = map[string]struct{}{}
+	}
+	s.modelDeciderSlots[slotKey] = struct{}{}
+	return true
+}
+
+// blockModelDecisionForRetry records a request that hit the model-call cap
+// so releaseModelDeciderSlot re-routes it from its cached options when
+// capacity next frees.
+func (s *Supervisor) blockModelDecisionForRetry(runtimeID, requestID string) {
+	s.permDeciderMu.Lock()
+	defer s.permDeciderMu.Unlock()
+	if s.modelDeciderBlocked == nil {
+		s.modelDeciderBlocked = map[string]struct{}{}
+	}
+	s.modelDeciderBlocked[runtimeID+"\x00"+requestID] = struct{}{}
+}
+
+// releaseModelDeciderSlot releases the model-call slot held by a completed
+// decision and re-routes any requests that were blocked by the cap, now that
+// capacity has freed. Keys without a held slot release nothing.
+func (s *Supervisor) releaseModelDeciderSlot(slotKey string) {
+	s.permDeciderMu.Lock()
+	if _, held := s.modelDeciderSlots[slotKey]; !held {
+		s.permDeciderMu.Unlock()
+		return
+	}
+	delete(s.modelDeciderSlots, slotKey)
+	s.modelDeciderActive--
+	blocked := s.modelDeciderBlocked
+	s.modelDeciderBlocked = nil
+	s.permDeciderMu.Unlock()
 	for key := range blocked {
 		runtimeID, requestID, _ := strings.Cut(key, "\x00")
 		s.retryPermissionRequest(runtimeID, requestID)
@@ -4946,12 +5080,15 @@ func (s *Supervisor) RuntimeStatus(rtID string) (any, error) {
 		"pending_permission": rt.pendingPermission,
 		"latest_seq":         rt.latestSeq,
 		"auto_approve":       rt.autoApprove,
-		// True once a pending request exhausted its decider spawn retries; the
-		// request itself stays pending for a human gate.
+		// True once a pending request exhausted its decider retries (harness
+		// spawns or direct-model calls); it stays pending for a human gate.
 		"permission_decider_exhausted": rt.permissionDeciderExhausted,
 	}
 	if rt.permissionDecider != nil {
 		entry["permission_decider"] = rt.permissionDecider.Entry
+	}
+	if rt.modelDecider != nil {
+		entry["permission_model_decider"] = rt.modelDecider.Provider + "/" + rt.modelDecider.Model
 	}
 	if rt.permission != nil {
 		perm := make(map[string]any, len(rt.permission))
@@ -5336,25 +5473,13 @@ func resolveWorkflowRoot(configured string) string {
 }
 
 // resolveWorkflowAdapterDir returns the configured adapter manifest directory,
-// or the default under XDG_CONFIG_HOME (falling back to
-// $HOME/.config/avenor) when unset. It never creates directories.
+// or the default under the shared avenor config home (XDG_CONFIG_HOME/avenor,
+// falling back to ~/.config/avenor) when unset. It never creates directories.
 func resolveWorkflowAdapterDir(configured string) string {
 	if configured != "" {
 		return configured
 	}
-	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" && filepath.IsAbs(xdg) {
-		return filepath.Join(xdg, "avenor", "workflow-adapters")
-	}
-	home := os.Getenv("HOME")
-	if home == "" {
-		if u, err := os.UserHomeDir(); err == nil && u != "" {
-			home = u
-		}
-	}
-	if home == "" {
-		return "avenor/workflow-adapters"
-	}
-	return filepath.Join(home, ".config", "avenor", "workflow-adapters")
+	return filepath.Join(appdir.ConfigHome(), "workflow-adapters")
 }
 
 // loadWorkflowAdapters loads the adapter manifest registry from the
@@ -5901,6 +6026,7 @@ func (e *directRunExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorCo
 		params.Thinking = ec.Selection.Thinking
 		params.AutoApprove = ec.Selection.AutoApprove
 		params.PermissionDecider = ec.Selection.PermissionDecider
+		params.PermissionModelDecider = ec.Selection.PermissionModelDecider
 	}
 	if ec.Action.Run != nil {
 		params.Prompt = ec.Action.Run.Prompt
@@ -5960,6 +6086,7 @@ func (e *loopExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext
 		params.Thinking = ec.Selection.Thinking
 		params.AutoApprove = ec.Selection.AutoApprove
 		params.PermissionDecider = ec.Selection.PermissionDecider
+		params.PermissionModelDecider = ec.Selection.PermissionModelDecider
 	}
 	if ec.Action.Loop != nil {
 		params.LoopFile = ec.Action.Loop.LoopFile
@@ -6020,6 +6147,7 @@ func (e *teamExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext
 		params.Thinking = ec.Selection.Thinking
 		params.AutoApprove = ec.Selection.AutoApprove
 		params.PermissionDecider = ec.Selection.PermissionDecider
+		params.PermissionModelDecider = ec.Selection.PermissionModelDecider
 	}
 	if ec.Action.Team != nil {
 		params.TeamFile = ec.Action.Team.TeamFile

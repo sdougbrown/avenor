@@ -49,7 +49,7 @@ const (
 // ToolCallDelta is a partial or complete tool call from the stream.
 type ToolCallDelta struct {
 	ID        string          `json:"id,omitempty"`
-Index     int             `json:"index"`
+	Index     int             `json:"index"`
 	Name      string          `json:"name,omitempty"`
 	Arguments json.RawMessage `json:"arguments,omitempty"`
 }
@@ -67,20 +67,20 @@ type Usage struct {
 
 // Request is the canonical request sent to the model adapter.
 type Request struct {
-	Model     string     `json:"model"`
-	Messages  []Message  `json:"messages"`
-	Tools     []ToolDef  `json:"tools,omitempty"`
-	Stream    bool       `json:"stream"`
-	MaxTokens int        `json:"max_tokens,omitempty"`
+	Model     string    `json:"model"`
+	Messages  []Message `json:"messages"`
+	Tools     []ToolDef `json:"tools,omitempty"`
+	Stream    bool      `json:"stream"`
+	MaxTokens int       `json:"max_tokens,omitempty"`
 }
 
 // Chunk is a single item from the adapter's stream channel.
 type Chunk struct {
-	Type             ChunkType       `json:"type"`
-	Text             string          `json:"text,omitempty"`
-	ReasoningContent string          `json:"reasoning_content,omitempty"`
-	ToolCall         *ToolCallDelta  `json:"tool_call,omitempty"`
-	Finish           *FinishReason   `json:"finish,omitempty"`
-	Usage            *Usage          `json:"usage,omitempty"`
-	Err              error           `json:"-"`
+	Type             ChunkType      `json:"type"`
+	Text             string         `json:"text,omitempty"`
+	ReasoningContent string         `json:"reasoning_content,omitempty"`
+	ToolCall         *ToolCallDelta `json:"tool_call,omitempty"`
+	Finish           *FinishReason  `json:"finish,omitempty"`
+	Usage            *Usage         `json:"usage,omitempty"`
+	Err              error          `json:"-"`
 }

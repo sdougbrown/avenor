@@ -27,7 +27,7 @@ func TestBackendPolicyGenerated(t *testing.T) {
 		{"claude", str("low"), false, true, true},
 		{"claude", str("max"), false, true, true},
 		{"claude", str("off"), false, false, true}, // off not supported
-		{"claude", str("low"), true, false, true},   // start-only
+		{"claude", str("low"), true, false, true},  // start-only
 		{"claude-channel", str("medium"), false, true, true},
 		{"claude-channel", str("low"), true, false, true}, // start-only
 

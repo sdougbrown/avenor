@@ -73,11 +73,17 @@ An assignment may also declare a permission policy. `"permission_policy":
 dispatched nodes derive no file permission handler, and a pending permission
 request spawns the decider run, which judges the request against the node's
 task and answers through the control plane — or defers, leaving the request
-pending for a human. `"auto_approve": true` remains the explicit
-resolve-everything-as-allow option for nodes whose requests are known-safe;
-the two are mutually exclusive. Without either policy, an auto-dispatched
-node on a backend that prompts for tool approval can sit blocked until the
-permission claim times out.
+pending for a human. `"permission_policy": {"decider_model":
+{"provider": "groq", "model": "llama-3.3-70b"}}` names a direct-model
+decider instead: no decider run is spawned, avenor itself performs one
+model call against the user-level provider registry (see
+[workflow.md](workflow.md#direct-model-decider)) and applies the allow or
+reject answer — or defers, leaving the request pending for a human.
+`"auto_approve": true` remains the explicit resolve-everything-as-allow
+option for nodes whose requests are known-safe; the three are mutually
+exclusive. Without either policy, an auto-dispatched node on a backend that
+prompts for tool approval can sit blocked until the permission claim times
+out.
 
 ## 3. Create and enable the controller
 

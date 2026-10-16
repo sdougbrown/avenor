@@ -26,23 +26,23 @@ var RuntimeIDKey = &runtimeIDKey{}
 
 // Config configures the pony provider.
 type Config struct {
-	Adapter                model.Adapter
-	Model                  string
-	MaxTokens              int
-	SystemPrompt           string
-	InitialPrompt          string
-	Executor               OrchestratorExecutor // nil when OrchTools is false
-	LocalTools             bool
-	OrchTools              bool
-	WorkingDir             string // for AGENTS.md discovery
-	InjectAgentsMD         bool
-	AllowedReadDirs        []string        // additional directories read tools may access (e.g. skills)
-	AllowedWriteDirs       []string        // additional directories write tools may access
-	ToolApproval           map[string]bool // tool name → requires approval
-	ShellConfig     *ShellConfig     // overrides for shell tool
-	FileReadConfig         *FileReadConfig  // overrides for file_read tool
-	Context                int              // model context window in tokens; 0 = use default compaction
-	CompactionPrompt       string           // override LLM compaction task prompt
+	Adapter          model.Adapter
+	Model            string
+	MaxTokens        int
+	SystemPrompt     string
+	InitialPrompt    string
+	Executor         OrchestratorExecutor // nil when OrchTools is false
+	LocalTools       bool
+	OrchTools        bool
+	WorkingDir       string // for AGENTS.md discovery
+	InjectAgentsMD   bool
+	AllowedReadDirs  []string        // additional directories read tools may access (e.g. skills)
+	AllowedWriteDirs []string        // additional directories write tools may access
+	ToolApproval     map[string]bool // tool name → requires approval
+	ShellConfig      *ShellConfig    // overrides for shell tool
+	FileReadConfig   *FileReadConfig // overrides for file_read tool
+	Context          int             // model context window in tokens; 0 = use default compaction
+	CompactionPrompt string          // override LLM compaction task prompt
 	// Registry is internal; built from tool config.
 	toolRegistry *tools.Registry
 
@@ -61,7 +61,7 @@ type OrchestratorExecutor interface {
 
 // Provider implements runtime.Provider for the pony backend.
 type Provider struct {
-	cfg Config
+	cfg      Config
 	startErr error
 
 	mu             sync.Mutex
@@ -167,9 +167,9 @@ func newWithStartErr(cfg Config, err error) *Provider {
 // This is a thin wrapper — the actual config is loaded by the CLI and stored
 // in a package-level variable before factory call.
 var (
-	globalConfigMu sync.Mutex
-	globalConfig   *Config
-	globalProfiles map[string]Config
+	globalConfigMu     sync.Mutex
+	globalConfig       *Config
+	globalProfiles     map[string]Config
 	globalDefaultAgent string
 )
 

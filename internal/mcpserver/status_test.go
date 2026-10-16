@@ -283,6 +283,26 @@ func TestTranslateStatusPermissionDeciderReachesLifecycleView(t *testing.T) {
 	}
 }
 
+// The resolved direct-model decider reaches the same avenor_status chain:
+// translateStatus, the lifecycle view, and the typed output all carry the
+// provider/model identity so an operator (or a harness decider watching a
+// sibling) can see which model answered policy for the run.
+func TestTranslateStatusPermissionModelDeciderReachesLifecycleView(t *testing.T) {
+	raw := map[string]any{
+		"status":                   "blocked",
+		"session_id":               "ses_mdec",
+		"permission_model_decider": "groq/llama-3.3-70b",
+	}
+	shaped := shapeStatusForView(translateStatus(raw, ""), "lifecycle")
+	if got, _ := shaped["permission_model_decider"].(string); got != "groq/llama-3.3-70b" {
+		t.Fatalf("shaped permission_model_decider = %q, want groq/llama-3.3-70b", got)
+	}
+	run := statusRunFromMap(shaped)
+	if run.PermissionModelDecider == nil || *run.PermissionModelDecider != "groq/llama-3.3-70b" {
+		t.Fatalf("mapped PermissionModelDecider = %v, want groq/llama-3.3-70b", run.PermissionModelDecider)
+	}
+}
+
 func TestTranslateStatusParkedSuccessUsesCurrentMetadata(t *testing.T) {
 	path := writeSentinel(t, t.TempDir(), "parked.sentinel", "DONE\nSESSION=ses_stale\nSTOP_REASON=stale\n")
 

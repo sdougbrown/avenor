@@ -713,3 +713,33 @@ func TestTransitionCreatesAutoDispatchCandidate(t *testing.T) {
 		t.Fatalf("next activation not in candidates: %v", candidates)
 	}
 }
+
+// TestSameSelectionComparesModelDeciderByContent pins the re-dispatch guard
+// for direct-model policies: the pinned selection on an activation and a
+// freshly resolved one are separate pointers but identical content, so a
+// permission_policy node re-dispatches instead of failing the
+// selection-conflict check.
+func TestSameSelectionComparesModelDeciderByContent(t *testing.T) {
+	pinned := &ExecutionSelection{
+		PermissionModelDecider: &PermissionModelDecider{Provider: "groq", Model: "m", BaseURL: "http://x/v1", APIKeyEnv: "K"},
+	}
+	fresh := &ExecutionSelection{
+		PermissionModelDecider: &PermissionModelDecider{Provider: "groq", Model: "m", BaseURL: "http://x/v1", APIKeyEnv: "K"},
+	}
+	if !sameSelection(pinned, fresh) {
+		t.Fatal("identical model deciders must compare equal despite distinct pointers")
+	}
+	if sameSelection(pinned, &ExecutionSelection{
+		PermissionModelDecider: &PermissionModelDecider{Provider: "groq", Model: "other", BaseURL: "http://x/v1", APIKeyEnv: "K"},
+	}) {
+		t.Fatal("a changed model decider must fail the selection-conflict check")
+	}
+	if sameSelection(pinned, &ExecutionSelection{}) {
+		t.Fatal("a dropped model decider must fail the selection-conflict check")
+	}
+	if sameSelection(pinned, &ExecutionSelection{
+		PermissionDecider: &PermissionDecider{Entry: "rm-guard"},
+	}) {
+		t.Fatal("a swapped decider variant must fail the selection-conflict check")
+	}
+}

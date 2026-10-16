@@ -39,8 +39,11 @@ type statusRun struct {
 	RosterFile        *string `json:"roster_file,omitempty"`
 	RosterEntry       *string `json:"roster_entry,omitempty"`
 	PermissionDecider *string `json:"permission_decider,omitempty"`
+	// PermissionModelDecider names the direct-model decider as
+	// "provider/model" when the run's permission policy declared one.
+	PermissionModelDecider *string `json:"permission_model_decider,omitempty"`
 	// Pointer so an explicit false survives the omitempty passthrough.
-	PermissionDeciderExhausted *bool `json:"permission_decider_exhausted,omitempty"`
+	PermissionDeciderExhausted *bool          `json:"permission_decider_exhausted,omitempty"`
 	EffectiveBackend           *string        `json:"effective_backend,omitempty"`
 	EffectiveAgent             *string        `json:"effective_agent,omitempty"`
 	EffectiveModel             *string        `json:"effective_model,omitempty"`
@@ -98,6 +101,7 @@ func statusRunFromMap(m map[string]any) statusRun {
 	run.RosterFile = stringPtr(m, "roster_file")
 	run.RosterEntry = stringPtr(m, "roster_entry")
 	run.PermissionDecider = stringPtr(m, "permission_decider")
+	run.PermissionModelDecider = stringPtr(m, "permission_model_decider")
 	run.PermissionDeciderExhausted = boolPtr(m, "permission_decider_exhausted")
 	run.EffectiveBackend = stringPtr(m, "effective_backend")
 	run.EffectiveAgent = stringPtr(m, "effective_agent")
@@ -210,7 +214,7 @@ func readSentinel(path string) (*sentinelData, error) {
 func translateStatus(raw map[string]any, sentinelPath string) map[string]any {
 	result := make(map[string]any)
 
-	for _, k := range []string{"runtime_id", "label", "dir", "phase", "phase_label", "pending_permission", "permission", "permission_decider", "permission_decider_exhausted", "backend", "agent", "agent_profile", "model", "roster_file", "roster_entry", "effective_backend", "effective_agent", "effective_model", "parent_id", "children", "event_path", "usage", "latest_seq", "final_output", "final_output_truncated", "started_at"} {
+	for _, k := range []string{"runtime_id", "label", "dir", "phase", "phase_label", "pending_permission", "permission", "permission_decider", "permission_model_decider", "permission_decider_exhausted", "backend", "agent", "agent_profile", "model", "roster_file", "roster_entry", "effective_backend", "effective_agent", "effective_model", "parent_id", "children", "event_path", "usage", "latest_seq", "final_output", "final_output_truncated", "started_at"} {
 		if v, ok := raw[k]; ok {
 			result[k] = v
 		}

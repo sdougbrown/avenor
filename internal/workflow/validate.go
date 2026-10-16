@@ -207,9 +207,11 @@ func ValidateTemplate(template Template) error {
 }
 
 // validateAssignmentPermissionPolicy enforces the permission-policy contract:
-// auto_approve (resolve everything as allow) and permission_policy (route to a
-// decider) are alternative unattended policies, so an assignment must not
-// declare both, and a declared policy must name its decider.
+// auto_approve (resolve everything as allow), permission_policy.decider
+// (route to a harness decider run), and permission_policy.decider_model
+// (avenor itself asks a model directly) are alternative unattended policies,
+// so an assignment must declare at most one, and a declared policy must name
+// exactly one decider variant.
 func validateAssignmentPermissionPolicy(assignment *Assignment) error {
 	if assignment == nil || assignment.PermissionPolicy == nil {
 		return nil
@@ -217,13 +219,26 @@ func validateAssignmentPermissionPolicy(assignment *Assignment) error {
 	if assignment.AutoApprove {
 		return fmt.Errorf("assignment cannot declare both auto_approve and permission_policy")
 	}
-	if strings.TrimSpace(assignment.PermissionPolicy.Decider) == "" {
-		return fmt.Errorf("assignment permission_policy.decider is required")
+	policy := assignment.PermissionPolicy
+	if policy.Decider != "" && policy.DeciderModel != nil {
+		return fmt.Errorf("assignment permission_policy cannot declare both decider and decider_model")
 	}
-	if assignment.RosterFile == "" {
-		return fmt.Errorf("assignment permission_policy.decider requires roster_file")
+	if policy.Decider != "" {
+		if assignment.RosterFile == "" {
+			return fmt.Errorf("assignment permission_policy.decider requires roster_file")
+		}
+		return nil
 	}
-	return nil
+	if policy.DeciderModel != nil {
+		if strings.TrimSpace(policy.DeciderModel.Provider) == "" {
+			return fmt.Errorf("assignment permission_policy.decider_model.provider is required")
+		}
+		if strings.TrimSpace(policy.DeciderModel.Model) == "" {
+			return fmt.Errorf("assignment permission_policy.decider_model.model is required")
+		}
+		return nil
+	}
+	return fmt.Errorf("assignment permission_policy must declare decider or decider_model")
 }
 
 // maxInstanceParamValueLength bounds one instance-parameter value.

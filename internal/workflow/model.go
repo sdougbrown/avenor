@@ -266,13 +266,26 @@ func (d DispatchPolicy) priority() int {
 }
 
 // PermissionPolicy declares how permission requests from a node dispatched
-// with this assignment are adjudicated. The kernel routes the request to the
-// declared decider; the decider agent owns the allow/reject/defer judgment.
+// with this assignment are adjudicated. Exactly one variant is set: the
+// kernel routes the request to the declared harness decider, or avenor
+// itself asks the declared model directly.
 type PermissionPolicy struct {
 	// Decider names the deciding agent as a roster entry in the assignment's
 	// roster file. It resolves through the same roster path as the node's
 	// identity, mirroring how the assignment itself resolves identity.
-	Decider string `json:"decider"`
+	Decider string `json:"decider,omitempty"`
+	// DeciderModel names a direct-model decider: a provider from the
+	// user-level provider registry plus a model on it. No runtime is
+	// spawned; avenor performs the decision call itself.
+	DeciderModel *PermissionDeciderModel `json:"decider_model,omitempty"`
+}
+
+// PermissionDeciderModel is the template-declared direct-model decider: a
+// named provider (resolved against the user-level provider registry, not
+// the roster) and the model to call on it.
+type PermissionDeciderModel struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
 }
 
 type Assignment struct {
@@ -290,8 +303,8 @@ type Assignment struct {
 	// explicit option; PermissionPolicy is the judgment-gate alternative.
 	AutoApprove bool `json:"auto_approve,omitempty"`
 	// PermissionPolicy routes permission requests from dispatched nodes to a
-	// deciding agent instead of resolving them locally. Mutually exclusive
-	// with AutoApprove.
+	// deciding agent (a harness decider or a direct model call) instead of
+	// resolving them locally. Mutually exclusive with AutoApprove.
 	PermissionPolicy *PermissionPolicy `json:"permission_policy,omitempty"`
 }
 
@@ -310,6 +323,19 @@ type PermissionDecider struct {
 	Model    string `json:"model,omitempty"`
 }
 
+// PermissionModelDecider is the resolved direct-model decider target for a
+// node's permission policy: the named provider's endpoint as pinned at
+// dispatch time, plus the model to call on it. It carries no credential —
+// the API key is resolved at spawn time and held in supervisor memory only,
+// so pinned selections (which are serialized into instance snapshots and
+// status surfaces) never contain secrets.
+type PermissionModelDecider struct {
+	Provider  string `json:"provider"`
+	Model     string `json:"model"`
+	BaseURL   string `json:"base_url,omitempty"`
+	APIKeyEnv string `json:"api_key_env,omitempty"`
+}
+
 type ExecutionSelection struct {
 	Role         string `json:"role,omitempty"`
 	Backend      string `json:"backend,omitempty"`
@@ -325,18 +351,37 @@ type ExecutionSelection struct {
 	// runtime's permission requests route to this agent instead of a local
 	// resolver, and no file permission handler is derived.
 	PermissionDecider *PermissionDecider `json:"permission_decider,omitempty"`
+	// PermissionModelDecider carries the resolved direct-model decider: the
+	// runtime's permission requests are answered by a model call avenor
+	// itself makes, and no file permission handler is derived. Mutually
+	// exclusive with PermissionDecider and AutoApprove.
+	PermissionModelDecider *PermissionModelDecider `json:"permission_model_decider,omitempty"`
 }
 
-// ValidatePermissionPolicy rejects a selection that carries both unattended
-// permission policies: auto-approve resolves every request as allow, while a
-// permission decider routes requests to a judging agent. Template validation
-// keeps assignments from declaring both, but caller-supplied selections at
+// ValidatePermissionPolicy rejects a selection that carries more than one
+// unattended permission policy: auto-approve resolves every request as
+// allow, a permission decider routes requests to a judging agent, and a
+// model decider resolves them with a direct model call. Template validation
+// keeps assignments from combining them, but caller-supplied selections at
 // the start/dispatch command boundaries must be checked too.
 func (s *ExecutionSelection) ValidatePermissionPolicy() error {
-	if s == nil || !s.AutoApprove || s.PermissionDecider == nil {
+	if s == nil {
 		return nil
 	}
-	return fmt.Errorf("auto_approve and permission_decider are mutually exclusive")
+	deciders := 0
+	if s.PermissionDecider != nil {
+		deciders++
+	}
+	if s.PermissionModelDecider != nil {
+		deciders++
+	}
+	if s.AutoApprove && deciders > 0 {
+		return fmt.Errorf("auto_approve and permission deciders are mutually exclusive")
+	}
+	if deciders > 1 {
+		return fmt.Errorf("permission_decider and permission_model_decider are mutually exclusive")
+	}
+	return nil
 }
 
 // Action is a strict tagged union. Exactly one variant pointer corresponds to

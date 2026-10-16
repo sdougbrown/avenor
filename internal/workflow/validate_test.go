@@ -248,9 +248,12 @@ func TestValidateTemplateJSONAssignmentPermissionPolicy(t *testing.T) {
 	assertTemplateError(t, mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
 		node["assignment"] = map[string]any{"permissionpolicy": map[string]any{"decider": "rm-guard"}}
 	})), `additionalProperties at /nodes/0/assignment/permissionpolicy`)
+	// An empty policy is not structurally distinguishable (either variant may
+	// be absent), so the typed rules own the rejection: a policy must declare
+	// exactly one decider variant.
 	assertTemplateError(t, mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
 		node["assignment"] = map[string]any{"permission_policy": map[string]any{}}
-	})), `required at /nodes/0/assignment/permission_policy`)
+	})), `permission_policy must declare decider or decider_model`)
 	assertTemplateError(t, mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
 		node["assignment"] = map[string]any{"permission_policy": map[string]any{"decider": 7}}
 	})), `type at /nodes/0/assignment/permission_policy/decider`)
@@ -660,5 +663,91 @@ func TestValidateTemplateChildParamBindingRequiresExactlyOneSource(t *testing.T)
 				t.Fatalf("ValidateTemplate() error = %v, want requiring exactly one of value or from_instance_param", err)
 			}
 		})
+	}
+}
+
+// TestValidateTemplateJSONAssignmentDeciderModel pins the permission_policy
+// decider_model variant: a direct-model decider (provider + model, no roster
+// file) validates structurally and semantically, the structural validator
+// rejects misspellings, wrong types, and missing model fields, and the typed
+// rules reject combining the two decider variants or auto_approve.
+func TestValidateTemplateJSONAssignmentDeciderModel(t *testing.T) {
+	withModel := mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
+		node["assignment"] = map[string]any{"permission_policy": map[string]any{
+			"decider_model": map[string]any{"provider": "groq", "model": "llama-3.3-70b"},
+		}}
+	}))
+	if err := ValidateTemplateJSON(withModel); err != nil {
+		t.Fatalf("ValidateTemplateJSON() rejected decider_model: %v", err)
+	}
+	assertTemplateError(t, mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
+		node["assignment"] = map[string]any{"permission_policy": map[string]any{
+			"decider_model": map[string]any{"provider": "groq", "model": "llama-3.3-70b", "roster_file": "r.json"},
+		}}
+	})), `additionalProperties at /nodes/0/assignment/permission_policy/decider_model`)
+	assertTemplateError(t, mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
+		node["assignment"] = map[string]any{"permission_policy": map[string]any{
+			"decider_model": map[string]any{"provider": "groq"},
+		}}
+	})), `required at /nodes/0/assignment/permission_policy/decider_model`)
+	assertTemplateError(t, mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
+		node["assignment"] = map[string]any{"permission_policy": map[string]any{
+			"decider_model": map[string]any{"provider": 7, "model": "m"},
+		}}
+	})), `type at /nodes/0/assignment/permission_policy/decider_model/provider`)
+	assertTemplateError(t, mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
+		node["assignment"] = map[string]any{"permission_policy": map[string]any{
+			"decider_model": map[string]any{"provider": "", "model": "m"},
+		}}
+	})), `minLength at /nodes/0/assignment/permission_policy/decider_model/provider`)
+	assertTemplateError(t, mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
+		node["assignment"] = map[string]any{"permission_policy": map[string]any{
+			"decider_model": map[string]any{"provider": " ", "model": "m"},
+		}}
+	})), `permission_policy.decider_model.provider is required`)
+	assertTemplateError(t, mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
+		node["assignment"] = map[string]any{"permission_policy": map[string]any{
+			"decider_model": map[string]any{"provider": "groq", "model": " "},
+		}}
+	})), `permission_policy.decider_model.model is required`)
+
+	// Semantic: the two decider variants are alternatives, and neither
+	// combines with auto_approve.
+	for _, tc := range []struct {
+		name        string
+		assignment  map[string]any
+		wantErrPart string
+	}{
+		{
+			name: "both decider variants",
+			assignment: map[string]any{
+				"roster_file": "roster.json",
+				"permission_policy": map[string]any{
+					"decider":       "rm-guard",
+					"decider_model": map[string]any{"provider": "groq", "model": "m"},
+				},
+			},
+			wantErrPart: "cannot declare both decider and decider_model",
+		},
+		{
+			name: "auto approve plus model",
+			assignment: map[string]any{
+				"auto_approve": true,
+				"permission_policy": map[string]any{
+					"decider_model": map[string]any{"provider": "groq", "model": "m"},
+				},
+			},
+			wantErrPart: "cannot declare both auto_approve and permission_policy",
+		},
+	} {
+		var tmpl Template
+		if err := json.Unmarshal(mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
+			node["assignment"] = tc.assignment
+		})), &tmpl); err != nil {
+			t.Fatalf("decode template (%s): %v", tc.name, err)
+		}
+		if err := ValidateTemplate(tmpl); err == nil || !strings.Contains(err.Error(), tc.wantErrPart) {
+			t.Fatalf("ValidateTemplate(%s) error = %v, want %q", tc.name, err, tc.wantErrPart)
+		}
 	}
 }

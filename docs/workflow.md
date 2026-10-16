@@ -129,7 +129,7 @@ fields:
 | `outcomes` | Declared outcomes: `{name, target_node_id?, terminal?}`. |
 | `branches` | Map of outcome name → target node ID. The branch map is itself the declaration of the node's branch outcomes. |
 | `action` | The execution action (see [Action types](#action-types)). |
-| `assignment` | Role / roster / backend / agent / model / thinking selection, plus the optional permission policy (`auto_approve` or `permission_policy.decider`). Automatic dispatch resolves it through the roster path and pins the effective selection on the activation. |
+| `assignment` | Role / roster / backend / agent / model / thinking selection, plus the optional permission policy (`auto_approve`, `permission_policy.decider`, or `permission_policy.decider_model`). Automatic dispatch resolves it through the roster path and pins the effective selection on the activation. |
 | `completion` | Completion contract (see [Completion](#completion)). |
 | `outputs` | Declared typed outputs: `{id, name, type, required?}`. |
 | `gates` | Declared gates: `{id, name?, type, required?, allowed_outcomes?, subject_type?}`. |
@@ -291,6 +291,98 @@ requests are known-safe; the decider policy is the default answer for
 unattended runs. An assignment must not declare both. Neither policy makes
 a per-tool allow/deny expressible at the template level: judgment lives in
 the decider agent, and `auto_approve` is all-or-nothing per node.
+
+### Direct-model decider
+
+`permission_policy.decider_model` is the lightweight alternative to the
+harness decider: no agent run is spawned at all, and avenor itself performs
+one model call per pending request and applies the answer.
+
+```json
+"assignment": {
+  "permission_policy": {"decider_model": {"provider": "groq", "model": "llama-3.3-70b"}}
+}
+```
+
+The policy names a provider from the user-level provider registry plus a
+model on it. The registry lives at
+`$XDG_CONFIG_HOME/avenor/providers.json` (default
+`~/.config/avenor/providers.json`; `.yaml`/`.yml`/`.toml` variants are read
+in that fallback order), and each provider declares an
+OpenAI-compatible chat-completions endpoint:
+
+```json
+{
+  "providers": {
+    "groq": {
+      "base_url": "https://api.groq.com/openai/v1",
+      "api_key_env": "GROQ_API_KEY"
+    },
+    "local": {
+      "base_url": "http://localhost:8080/v1",
+      "api_key": "sk-..."
+    }
+  }
+}
+```
+
+`api_key_env` names the environment variable holding the bearer token and
+wins over a literal `api_key`; prefer it so the secret stays out of config
+files. The resolved selection pins the provider, model, endpoint, and key
+variable name on the activation (retries keep the policy), but never a
+credential: the API key is resolved at spawn time and held only in
+supervisor memory. A provider that cannot be resolved at dispatch — unknown
+name, no key, invalid endpoint — fails the dispatch with a clear error
+instead of stalling the first permission request.
+
+When a pending request arrives, the supervisor builds the decision prompt
+from the request's structured mirror (tool, command, working directory), the
+node's task, and the pending options — all framed to the model as untrusted
+worker-supplied data — and makes one bounded, non-streaming call (concurrent
+calls are capped; a request that hits the cap stays pending until capacity
+frees). The model answers with a strict-JSON decision:
+
+- **allow** / **reject**: mapped onto the pending option of the matching
+  kind — a once-style variant when the backend offers both (least
+  privilege) — and applied through the ordinary control plane, with the
+  model's reason as the answer message.
+- **defer** (or anything the model cannot clearly decide): the request
+  stays pending for a human gate — the same visible deferral as a harness
+  decider, never a silent allow.
+
+A failed or unparseable call shares the harness decider's bounded retry
+semantics: after three failed attempts no further calls fire, the request
+stays pending for a human, and runtime status surfaces
+`permission_decider_exhausted`. The runtime status also surfaces the
+resolved decider as `permission_model_decider` (`"provider/model"`).
+
+Trade-offs between the three policies:
+
+| Policy | Judgment | Cost | Best for |
+|---|---|---|---|
+| `permission_policy.decider` | Full agent with tools, verifies via `avenor_status` | One runtime spawn per pending request | Requests that need inspection, multi-step reasoning, or tools |
+| `permission_policy.decider_model` | One direct model call against the request mirror | One HTTP call per pending request | Cheap, bounded per-request classification on chatty backends |
+| `auto_approve` | None — everything is allowed | None | Nodes whose requests are known-safe |
+
+Resource bounds differ: harness decider runs consume MaxRuntimes admission
+slots and can exhaust their retry bound under pressure
+(`permission_decider_exhausted`); model calls bypass admission, are capped
+only by their own concurrency cap and a per-runtime call budget, and a
+blocked or budget-exhausted request simply stays pending.
+
+The direct-model call is made by `internal/modelapi`, a small
+OpenAI-compatible client shared with future harness-free judgment steps
+(gate answers, loop exit markers), so the resolver is not
+permission-specific infrastructure.
+
+> **Trust assumption:** the model's allow decision is applied without a
+> second confirmation — that is the point of the variant. The worker's
+> request data (command, options) reaches the model as untrusted input, but
+> a compromised or fooled model still decides. Choose this variant for
+> nodes whose request surface is well-understood and bounded; when the
+> worker is untrusted or the request surface is not, use the harness
+> decider, whose agent can inspect, or keep requests on a human gate by
+> not declaring an unattended policy.
 
 ## Instantiation
 

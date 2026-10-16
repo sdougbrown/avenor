@@ -10,9 +10,9 @@ import (
 
 // Skill is a reusable prompt component loaded from a skill file.
 type Skill struct {
-	Name           string `json:"name"`
-	SystemPrompt   string `json:"system_prompt,omitempty"`
-	InitialPrompt  string `json:"initial_prompt,omitempty"`
+	Name          string `json:"name"`
+	SystemPrompt  string `json:"system_prompt,omitempty"`
+	InitialPrompt string `json:"initial_prompt,omitempty"`
 }
 
 // LoadSkills discovers and loads skills referenced by a profile.
@@ -107,7 +107,7 @@ func parseSkillMarkdown(name string, data []byte) (Skill, error) {
 
 	// Split on --- separators
 	sections := strings.Split(content, "---")
-	
+
 	// Filter out empty sections and strip whitespace
 	var parts []string
 	for _, s := range sections {
