@@ -580,6 +580,11 @@ type Supervisor struct {
 	permDeciderSlots             map[string]struct{}           // decider label → slot held
 	permDeciderScratchDirs       map[string]string             // decider label → scratch dir
 	permDeciderBlocked           map[string]struct{}           // "runtimeID\x00requestID"
+	// Direct-model decider accounting shares permDeciderMu: model calls
+	// consume no admission slot, so their own cap bounds concurrent calls.
+	modelDeciderActive  int
+	modelDeciderSlots   map[string]struct{} // "runtimeID:requestID" → slot held
+	modelDeciderBlocked map[string]struct{} // "runtimeID\x00requestID"
 	httpServers                  map[string]*managedHTTPServer // dir → ready server
 	httpStarting                 map[string]struct{}           // dirs with a start in flight
 	httpShutdownStarted          bool
@@ -3950,13 +3955,26 @@ func (s *Supervisor) routePermissionRequest(runtimeID, requestID string, options
 	if !routed {
 		rt.routedPermissionRequests[requestID] = struct{}{}
 	}
-	decider, modelDecider, modelDeciderKey, label := rt.permissionDecider, rt.modelDecider, rt.modelDeciderKey, rt.label
+	decider, modelDecider, modelDeciderKey, label, ctx := rt.permissionDecider, rt.modelDecider, rt.modelDeciderKey, rt.label, rt.lifecycleCtx
 	rt.mu.Unlock()
 	if routed {
 		return
 	}
 	if modelDecider != nil {
-		go s.resolvePermissionWithModel(*modelDecider, modelDeciderKey, runtimeID, requestID, options, label)
+		slotKey := runtimeID + ":" + requestID
+		if !s.acquireModelDeciderSlot(slotKey) {
+			// The model-call cap is full: keep the routed mark and leave the
+			// request pending — do not call and do not re-route. When an
+			// in-flight call finishes, releaseModelDeciderSlot re-routes the
+			// blocked request internally from its cached options.
+			fmt.Fprintf(s.stderrWriter(), "avenor: model decider concurrency cap (%d) reached; request %s on runtime %s stays pending until capacity frees\n", maxConcurrentModelDeciders, requestID, runtimeID)
+			s.blockModelDecisionForRetry(runtimeID, requestID)
+			return
+		}
+		go func() {
+			defer s.releaseModelDeciderSlot(slotKey)
+			s.resolvePermissionWithModel(ctx, *modelDecider, modelDeciderKey, runtimeID, requestID, options, label)
+		}()
 		return
 	}
 	if decider == nil {
@@ -4077,6 +4095,14 @@ const permdecLabelPrefix = "permdec:"
 // requests could otherwise crowd out other runtimes with decider runs.
 const maxConcurrentPermissionDeciders = 3
 
+// maxConcurrentModelDeciders caps concurrent in-flight direct-model decision
+// calls across the supervisor. A model call consumes no MaxRuntimes
+// admission slot, so without a cap a worker's pending requests would fan out
+// one unbounded goroutine each; the cap keeps provider load bounded, and a
+// blocked request re-routes when capacity frees instead of burning its
+// bounded retries against a throttled provider.
+const maxConcurrentModelDeciders = 4
+
 // acquirePermissionDeciderSlot reserves one decider run slot for the request
 // identified by deciderLabel and reports whether capacity was available.
 // The slot is held from routing (before the spawn goroutine starts) until the
@@ -4140,6 +4166,55 @@ func (s *Supervisor) releasePermissionDecider(deciderLabel string) {
 	if dir != "" {
 		os.RemoveAll(dir)
 	}
+	for key := range blocked {
+		runtimeID, requestID, _ := strings.Cut(key, "\x00")
+		s.retryPermissionRequest(runtimeID, requestID)
+	}
+}
+
+// acquireModelDeciderSlot reserves one direct-model decision slot for the
+// request identified by slotKey and reports whether capacity was available.
+// The slot is held from routing until the decision call completes.
+func (s *Supervisor) acquireModelDeciderSlot(slotKey string) bool {
+	s.permDeciderMu.Lock()
+	defer s.permDeciderMu.Unlock()
+	if s.modelDeciderActive >= maxConcurrentModelDeciders {
+		return false
+	}
+	s.modelDeciderActive++
+	if s.modelDeciderSlots == nil {
+		s.modelDeciderSlots = map[string]struct{}{}
+	}
+	s.modelDeciderSlots[slotKey] = struct{}{}
+	return true
+}
+
+// blockModelDecisionForRetry records a request that hit the model-call cap
+// so releaseModelDeciderSlot re-routes it from its cached options when
+// capacity next frees.
+func (s *Supervisor) blockModelDecisionForRetry(runtimeID, requestID string) {
+	s.permDeciderMu.Lock()
+	defer s.permDeciderMu.Unlock()
+	if s.modelDeciderBlocked == nil {
+		s.modelDeciderBlocked = map[string]struct{}{}
+	}
+	s.modelDeciderBlocked[runtimeID+"\x00"+requestID] = struct{}{}
+}
+
+// releaseModelDeciderSlot releases the model-call slot held by a completed
+// decision and re-routes any requests that were blocked by the cap, now that
+// capacity has freed. Keys without a held slot release nothing.
+func (s *Supervisor) releaseModelDeciderSlot(slotKey string) {
+	s.permDeciderMu.Lock()
+	if _, held := s.modelDeciderSlots[slotKey]; !held {
+		s.permDeciderMu.Unlock()
+		return
+	}
+	delete(s.modelDeciderSlots, slotKey)
+	s.modelDeciderActive--
+	blocked := s.modelDeciderBlocked
+	s.modelDeciderBlocked = nil
+	s.permDeciderMu.Unlock()
 	for key := range blocked {
 		runtimeID, requestID, _ := strings.Cut(key, "\x00")
 		s.retryPermissionRequest(runtimeID, requestID)

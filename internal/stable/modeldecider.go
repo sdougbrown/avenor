@@ -70,7 +70,7 @@ func resolvePermissionModelDeciderKey(md *workflow.PermissionModelDecider) (stri
 // gate. A defer is a decision, not a failure: the request stays pending and
 // nothing retries, mirroring a harness decider that reads the request and
 // exits without answering.
-func (s *Supervisor) resolvePermissionWithModel(md workflow.PermissionModelDecider, key, runtimeID, requestID string, options []any, label string) {
+func (s *Supervisor) resolvePermissionWithModel(ctx context.Context, md workflow.PermissionModelDecider, key, runtimeID, requestID string, options []any, label string) {
 	if s.control.PermissionResolverState(runtimeID, requestID) == control.PermissionResolverResolved {
 		return
 	}
@@ -91,7 +91,7 @@ func (s *Supervisor) resolvePermissionWithModel(md workflow.PermissionModelDecid
 		s.failModelDecision(runtimeID, requestID, err)
 		return
 	}
-	raw, err := client.Complete(context.Background(), []modelapi.Message{
+	raw, err := client.Complete(ctx, []modelapi.Message{
 		{Role: "system", Content: system},
 		{Role: "user", Content: user},
 	}, modelDeciderMaxTokens)
