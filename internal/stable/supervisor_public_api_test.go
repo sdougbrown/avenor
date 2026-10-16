@@ -648,8 +648,8 @@ func TestSupervisorPublicAPICancelWhileRunning(t *testing.T) {
 
 	rt := h.spawn(nil)
 	h.log.waitFor(t, "working status", itestEventIs("agent.status", rt))
-	if v := h.view(rt); v.Status != "running" {
-		t.Fatalf("view before cancel = %+v, want running", v)
+	if v := h.view(rt); v.Status != "running" || v.Phase != "working" {
+		t.Fatalf("view before cancel = %+v, want running in the working phase", v)
 	}
 	if err := h.sup.RuntimeCancel(rt); err != nil {
 		t.Fatalf("RuntimeCancel: %v", err)
@@ -796,8 +796,8 @@ func TestSupervisorPublicAPIShutdownWithActiveRuntimes(t *testing.T) {
 	rt2 := h.spawn(map[string]any{"label": "sd-two"})
 	for _, rt := range []string{rt1, rt2} {
 		h.log.waitFor(t, "working status", itestEventIs("agent.status", rt))
-		if v := h.view(rt); v.Status != "running" {
-			t.Fatalf("runtime %s before shutdown = %+v, want running", rt, v)
+		if v := h.view(rt); v.Status != "running" || v.Phase != "working" {
+			t.Fatalf("runtime %s before shutdown = %+v, want running in the working phase", rt, v)
 		}
 	}
 	// Both rows are live mid-turn while the runtimes run.
@@ -822,7 +822,11 @@ func TestSupervisorPublicAPIShutdownWithActiveRuntimes(t *testing.T) {
 	}
 	// Shutdown cancels the mid-turn runtimes, so their rows carry the ended
 	// status and the 130 exit code a cancelled turn records.
-	for _, row := range h.listed("sd-") {
+	rows := h.listed("sd-")
+	if len(rows) != 2 {
+		t.Fatalf("List after shutdown = %d rows, want 2", len(rows))
+	}
+	for _, row := range rows {
 		if got := row["status"]; got != "ended" {
 			t.Fatalf("List status after shutdown = %v, want ended", got)
 		}
@@ -883,6 +887,14 @@ func TestSupervisorPublicAPIShutdownGracefulEndsParkedRuntime(t *testing.T) {
 	v := h.awaitStatus(rt, "killed")
 	if v.StopReason != "cancelled" {
 		t.Fatalf("killed view stop reason = %q, want cancelled", v.StopReason)
+	}
+	if v.ExitCode != 130 {
+		t.Fatalf("killed view exit code = %d, want 130", v.ExitCode)
+	}
+	// The turn ended successfully before shutdown, so Translate passes the
+	// done phase through to the killed view.
+	if v.Phase != "done" {
+		t.Fatalf("killed view phase = %q, want done", v.Phase)
 	}
 }
 
