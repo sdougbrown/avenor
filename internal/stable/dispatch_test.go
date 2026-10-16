@@ -2413,3 +2413,20 @@ func TestDispatchModelDeciderHumanAnswerWinsRace(t *testing.T) {
 		t.Fatal("a race the human won must not mark the decider exhausted")
 	}
 }
+
+// TestResolveAssignmentSelectionModelDeciderRequiresModel pins the
+// dispatch-time model check: an assignment whose decider_model names no
+// model fails at dispatch with a clear error, before any runtime spawns and
+// before the first permission request can burn bounded retries on an
+// uncallable provider.
+func TestResolveAssignmentSelectionModelDeciderRequiresModel(t *testing.T) {
+	writeProviderRegistry(t, `{
+		"providers": {"groq": {"base_url": "http://model.example/openai/v1", "api_key_env": "MODEL_DECIDER_TEST_KEY"}}
+	}`)
+	_, err := resolveAssignmentSelection(&workflow.Assignment{
+		PermissionPolicy: &workflow.PermissionPolicy{DeciderModel: &workflow.PermissionDeciderModel{Provider: "groq", Model: " "}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "model is required") {
+		t.Fatalf("resolveAssignmentSelection(blank model) error = %v, want model is required", err)
+	}
+}

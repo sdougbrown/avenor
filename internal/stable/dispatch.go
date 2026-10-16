@@ -13,6 +13,8 @@ import (
 	"github.com/sdougbrown/avenor/internal/providerconfig"
 	"github.com/sdougbrown/avenor/internal/rosterconfig"
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"strings"
+
 	"github.com/sdougbrown/avenor/internal/spawnselection"
 	"github.com/sdougbrown/avenor/internal/workflow"
 	"github.com/sdougbrown/avenor/internal/workflowcontroller"
@@ -582,6 +584,9 @@ func resolveAssignmentSelection(assignment *workflow.Assignment) (*workflow.Exec
 	}
 	if assignment.PermissionPolicy != nil && assignment.PermissionPolicy.DeciderModel != nil {
 		dm := assignment.PermissionPolicy.DeciderModel
+		if strings.TrimSpace(dm.Model) == "" {
+			return nil, fmt.Errorf("node assignment: permission_policy.decider_model: model is required")
+		}
 		registry, err := providerconfig.Load()
 		if err != nil {
 			return nil, fmt.Errorf("node assignment: permission_policy.decider_model: %w", err)
