@@ -1227,6 +1227,42 @@ func TestSupervisorPublicAPIDeciderSlotFreedWhenDeciderFinishes(t *testing.T) {
 	}
 }
 
+// TestSupervisorPublicAPIUserRuntimeWithDeciderLabelParks proves a label is
+// not what makes a runtime a permission decider: a caller-spawned runtime
+// wearing a decider-shaped label parks after its first finished turn like any
+// ordinary runtime, and a RuntimePrompt resumes it for another turn.
+func TestSupervisorPublicAPIUserRuntimeWithDeciderLabelParks(t *testing.T) {
+	t.Parallel()
+	gate := newItestGate()
+	defer gate.open()
+	provider := newItestProvider(
+		itestAttempt("ses_label1", itestSessionEnd("ses_label1", "end_turn", "first")),
+		itestAttempt("ses_label2", gate.step(), itestSessionEnd("ses_label2", "end_turn", "second")),
+	)
+	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+
+	rt := h.spawn(map[string]any{"label": "permdec:spoof:req"})
+	h.awaitStatus(rt, "done")
+	// The finished turn parks the runtime rather than ending it: a prompt is
+	// accepted and resumes the session for another turn.
+	if err := h.sup.RuntimePrompt(rt, "again", ""); err != nil {
+		t.Fatalf("RuntimePrompt on a runtime with a decider-shaped label: %v", err)
+	}
+	h.awaitStatus(rt, "running")
+	gate.open()
+	h.log.waitFor(t, "second turn session.end", func(ev events.Event) bool {
+		out, _ := ev.Fields["final_output"].(string)
+		return itestEventIs("session.end", rt)(ev) && out == "second"
+	})
+	h.awaitStatus(rt, "done")
+	if got := h.result(rt); got != "second" {
+		t.Fatalf("RuntimeResult after resumed turn = %q, want second", got)
+	}
+	if starts, resumes := provider.counts(); starts != 1 || resumes != 1 {
+		t.Fatalf("provider starts/resumes = %d/%d, want 1/1", starts, resumes)
+	}
+}
+
 func TestSupervisorPublicAPIPermissionClaimTimeoutFallsBackToFileHandler(t *testing.T) {
 	t.Parallel()
 	worker := itestWorker("ses_claim_file", "req_claim", "answered by file")
