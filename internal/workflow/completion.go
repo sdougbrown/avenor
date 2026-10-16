@@ -148,7 +148,7 @@ func (m *Manager) commandComplete(wf WorkflowID, payload json.RawMessage) (any, 
 
 	// Stage evidence FIRST (a filesystem side effect, no state transition).
 	// Any failure removes what was already staged in this call.
-	now := time.Now().UTC()
+	now := m.now()
 	var staged []StagedEvidence
 	for _, a := range req.Artifacts {
 		se, err := m.store.StageEvidence(wf, a.SrcPath, a.StoredPath, a.NonEmpty, a.SHA256)

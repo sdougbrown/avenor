@@ -681,7 +681,7 @@ func TestApplyHeartbeatDurableRenewalIsReplayStable(t *testing.T) {
 		Identity:         baseIdentity(actID, ""),
 		LeaseID:          "lease-1",
 		Lease:            &Lease{ExpiresAt: newExpiry, LastHeartbeatAt: &hbTime},
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("Apply heartbeat: %v", err)
 	}
@@ -696,20 +696,22 @@ func TestApplyHeartbeatDurableRenewalIsReplayStable(t *testing.T) {
 	}
 
 	// Reduce the same event batch into two fresh copies of the pre-heartbeat
-	// snapshot: the results must be identical (replay determinism). The only
-	// wall-clock field Reduce may stamp is Instance.UpdatedAt, so normalize
-	// it before comparing.
+	// snapshot: the results must be identical (replay determinism). Every
+	// timestamp Reduce stamps comes from the event-carried At; a heartbeat
+	// stamps none, so the instance's UpdatedAt is untouched.
 	replay := func() Snapshot {
-		next, err := Reduce(state, events[0])
+		next, err := Reduce(state, events[0], nil)
 		if err != nil {
 			t.Fatalf("Reduce heartbeat: %v", err)
 		}
-		next.Instance.UpdatedAt = time.Time{}
 		return next
 	}
 	a, b := replay(), replay()
 	if !reflect.DeepEqual(a, b) {
 		t.Fatal("replaying the same heartbeat batch twice produced different snapshots")
+	}
+	if !a.Instance.UpdatedAt.Equal(state.Instance.UpdatedAt) {
+		t.Fatalf("UpdatedAt = %v, want the pre-heartbeat %v (a heartbeat stamps no wall clock)", a.Instance.UpdatedAt, state.Instance.UpdatedAt)
 	}
 	act := actStart(a)
 	if act.Status != ActivationLeased {
@@ -736,14 +738,14 @@ func TestApplyHeartbeatDurableRenewalIsReplayStable(t *testing.T) {
 		IdempotencyKey:   "hb-legacy",
 		Identity:         baseIdentity(actID, ""),
 		LeaseID:          "lease-1",
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("Apply legacy heartbeat: %v", err)
 	}
 	if legacy[0].Lease != nil {
 		t.Fatalf("legacy heartbeat event carries lease metadata: %+v", legacy[0].Lease)
 	}
-	legacySnap, err := Reduce(state, legacy[0])
+	legacySnap, err := Reduce(state, legacy[0], nil)
 	if err != nil {
 		t.Fatalf("Reduce legacy heartbeat: %v", err)
 	}

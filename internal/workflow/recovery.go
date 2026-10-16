@@ -43,7 +43,7 @@ func (s *Store) recoverInstance(workflowID WorkflowID) (Snapshot, bool, error) {
 	if err != nil {
 		return Snapshot{}, false, err
 	}
-	sn, n, truncated, err := replayEvents(snap, s.eventsPath(workflowID))
+	sn, n, truncated, err := replayEvents(snap, s.eventsPath(workflowID), s.policies)
 	if err != nil {
 		return Snapshot{}, false, err
 	}
@@ -92,6 +92,7 @@ func collectExpiredLeaseEvents(snap *Snapshot, reason string, now time.Time) []E
 				},
 				LeaseID: a.ActiveLease.ID,
 				ReadyAt: &stamp,
+				At:      stamp,
 			})
 		}
 	}
@@ -110,7 +111,7 @@ func (s *Store) appendExpiredLeases(workflowID WorkflowID, snap *Snapshot) (int,
 		return 0, err
 	}
 	for _, e := range events {
-		next, err := Reduce(*snap, e)
+		next, err := Reduce(*snap, e, s.policies)
 		if err != nil {
 			return 0, err
 		}
@@ -146,7 +147,7 @@ func (s *Store) sweepStaleLeases(workflowID WorkflowID, reason string, now time.
 	if err != nil || !exists {
 		return 0, 0, err
 	}
-	replayed, n, truncated, err := replayEvents(snap, s.eventsPath(workflowID))
+	replayed, n, truncated, err := replayEvents(snap, s.eventsPath(workflowID), s.policies)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -173,7 +174,7 @@ func (s *Store) sweepStaleLeases(workflowID WorkflowID, reason string, now time.
 			return 0, 0, err
 		}
 		for _, e := range events {
-			next, err := Reduce(snap, e)
+			next, err := Reduce(snap, e, s.policies)
 			if err != nil {
 				return 0, 0, err
 			}

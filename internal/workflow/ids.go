@@ -22,6 +22,15 @@ type (
 	OutcomeName      string
 )
 
+// newActivationIDs mints n fresh activation IDs.
+func newActivationIDs(n int) []ActivationID {
+	ids := make([]ActivationID, n)
+	for i := range ids {
+		ids[i] = NewActivationID()
+	}
+	return ids
+}
+
 func newID(prefix string) string { return prefix + "_" + uuid.NewString() }
 
 func NewWorkflowID() WorkflowID             { return WorkflowID(newID("wf")) }

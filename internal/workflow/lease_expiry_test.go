@@ -146,7 +146,7 @@ func TestLeaseExpiryTimedOutAttemptsReplay(t *testing.T) {
 		t.Fatalf("ExpireStaleLeases: %v", err)
 	}
 
-	replayed, _, _, err := replayEvents(base, s.eventsPath(wf))
+	replayed, _, _, err := replayEvents(base, s.eventsPath(wf), s.policies)
 	if err != nil {
 		t.Fatalf("replayEvents: %v", err)
 	}

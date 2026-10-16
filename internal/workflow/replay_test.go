@@ -51,13 +51,13 @@ func baseSnap(t *testing.T) Snapshot {
 		Identity:         ExecutionIdentity{WorkflowID: "wf1"},
 		Payload:          payload,
 	}
-	events, err := Apply(Snapshot{}, cmd)
+	events, err := Apply(Snapshot{}, cmd, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	snap := Snapshot{}
 	for _, e := range events {
-		snap, err = Reduce(snap, e)
+		snap, err = Reduce(snap, e, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -87,7 +87,7 @@ func TestReplay_MissingLog(t *testing.T) {
 	base := baseSnap(t)
 	path := t.TempDir() + "/missing.ndjson"
 
-	got, n, tr, err := replayEvents(base, path)
+	got, n, tr, err := replayEvents(base, path, nil)
 	if err != nil {
 		t.Fatalf("replayEvents: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestReplay_EmptyLog(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, n, tr, err := replayEvents(base, path)
+	got, n, tr, err := replayEvents(base, path, nil)
 	if err != nil {
 		t.Fatalf("replayEvents: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestReplay_ReplayBeyondSnapshot(t *testing.T) {
 	ev := leasedEvent(t, base)
 	writeEvents(t, path, ev)
 
-	got, n, tr, err := replayEvents(base, path)
+	got, n, tr, err := replayEvents(base, path, nil)
 	if err != nil {
 		t.Fatalf("replayEvents: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestReplay_IdempotentAlreadyApplied(t *testing.T) {
 	ev := leasedEvent(t, base)
 
 	// Reduce the event once to produce a snapshot that already carries its ID.
-	s2, err := Reduce(base, ev)
+	s2, err := Reduce(base, ev, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +165,7 @@ func TestReplay_IdempotentAlreadyApplied(t *testing.T) {
 	writeEvents(t, path, ev)
 
 	// Replaying against s2 (which already applied ev) must be a no-op.
-	got, n, tr, err := replayEvents(s2, path)
+	got, n, tr, err := replayEvents(s2, path, nil)
 	if err != nil {
 		t.Fatalf("replayEvents: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestReplay_TruncatedFinalLine(t *testing.T) {
 
 	goodLine := mustMarshalLine(t, ev)
 
-	got, n, tr, err := replayEvents(base, path)
+	got, n, tr, err := replayEvents(base, path, nil)
 	if err != nil {
 		t.Fatalf("replayEvents: %v", err)
 	}
@@ -256,7 +256,7 @@ func TestReplay_MalformedInteriorLine(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, n, tr, err := replayEvents(base, path)
+	got, n, tr, err := replayEvents(base, path, nil)
 	if err == nil {
 		t.Fatal("expected corruption error, got nil")
 	}
@@ -299,7 +299,7 @@ func TestReplay_ReduceErrorPropagates(t *testing.T) {
 	path := t.TempDir() + "/events.ndjson"
 	writeEvents(t, path, ev)
 
-	_, _, _, err := replayEvents(base, path)
+	_, _, _, err := replayEvents(base, path, nil)
 	if err == nil {
 		t.Fatal("expected reducer error to propagate, got nil")
 	}

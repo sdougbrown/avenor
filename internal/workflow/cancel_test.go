@@ -134,7 +134,7 @@ func testLateLeaseExpiredOnCanceledRejected(t *testing.T) {
 		Kind:     EventLeaseExpired,
 		Identity: baseIdentity(actStart(state).ID, attemptID),
 		LeaseID:  "lease-1",
-	})
+	}, nil)
 	if err == nil || !strings.Contains(err.Error(), "canceled") {
 		t.Fatalf("late lease_expired on canceled instance: expected canceled error, got %v", err)
 	}
@@ -169,7 +169,7 @@ func testLateGateDecisionOnCanceledDropped(t *testing.T) {
 			Outcome:      "done",
 		},
 	}
-	next, err := Reduce(state, gateEvent)
+	next, err := Reduce(state, gateEvent, nil)
 	if err == nil {
 		t.Fatalf("late gate decision on canceled instance: want EventGate rejected by the canceledMutatingKinds guard, got nil error")
 	}

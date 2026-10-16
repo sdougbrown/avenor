@@ -32,16 +32,21 @@ func baseIdentity(actID ActivationID, attemptID AttemptID) ExecutionIdentity {
 	}
 }
 
-// applyCmd applies a command and reduces every returned event in order. When
-// any step errors, the error is returned together with the snapshot as it was
-// before the failing reduction (the reducer never mutates on error).
+// applyCmd applies a command without template policies.
 func applyCmd(state Snapshot, cmd Command) (Snapshot, error) {
-	events, err := Apply(state, cmd)
+	return applyCmdWith(nil, state, cmd)
+}
+
+// applyCmdWith applies a command and reduces every returned event in order.
+// When any step errors, the error is returned together with the snapshot as it
+// was before the failing reduction (the reducer never mutates on error).
+func applyCmdWith(policies Policies, state Snapshot, cmd Command) (Snapshot, error) {
+	events, err := Apply(state, cmd, policies)
 	if err != nil {
 		return state, err
 	}
 	for _, e := range events {
-		state, err = Reduce(state, e)
+		state, err = Reduce(state, e, policies)
 		if err != nil {
 			return state, err
 		}
@@ -52,7 +57,13 @@ func applyCmd(state Snapshot, cmd Command) (Snapshot, error) {
 // mustApply is applyCmd that fails the test on error.
 func mustApply(t *testing.T, state Snapshot, cmd Command, what string) Snapshot {
 	t.Helper()
-	next, err := applyCmd(state, cmd)
+	return mustApplyWith(t, nil, state, cmd, what)
+}
+
+// mustApplyWith is applyCmdWith that fails the test on error.
+func mustApplyWith(t *testing.T, policies Policies, state Snapshot, cmd Command, what string) Snapshot {
+	t.Helper()
+	next, err := applyCmdWith(policies, state, cmd)
 	if err != nil {
 		t.Fatalf("%s: %v", what, err)
 	}
@@ -106,14 +117,38 @@ func runToStart(t *testing.T, state Snapshot) (Snapshot, LeaseID, AttemptID) {
 	return state, LeaseID("lease-1"), AttemptID("att-1")
 }
 
-// setRetryPolicy installs a package-global retry policy resolver for this
-// subtest and guarantees it is reset to nil when the subtest finishes.
-func setRetryPolicy(t *testing.T, maximum int, exhaustion RetryExhaustionKind, outcome OutcomeName) {
-	t.Helper()
-	SetRetryPolicyResolver(func(TemplateID, TemplateVersion, NodeID) *RetryPolicy {
-		return &RetryPolicy{MaximumAttempts: maximum, Exhaustion: exhaustion, Outcome: outcome}
-	})
-	t.Cleanup(func() { SetRetryPolicyResolver(nil) })
+// stubPolicies is a Policies whose answers are fixed by the test. A zero field
+// reads as no policy (a nil template disables gate pinning).
+type stubPolicies struct {
+	gates    []GateDefinition
+	retry    *RetryPolicy
+	template *Template
+}
+
+func (p stubPolicies) CompletionGates(TemplateID, TemplateVersion, NodeID) []GateDefinition {
+	return p.gates
+}
+
+func (p stubPolicies) RetryPolicy(TemplateID, TemplateVersion, NodeID) *RetryPolicy {
+	return p.retry
+}
+
+func (p stubPolicies) DispatchPolicy(TemplateID, TemplateVersion, NodeID) *DispatchPolicy {
+	return nil
+}
+
+func (p stubPolicies) Template(TemplateID, TemplateVersion) (*Template, error) {
+	return p.template, nil
+}
+
+func (p stubPolicies) ChildSnapshot(WorkflowID) (Snapshot, bool, error) {
+	return Snapshot{}, false, nil
+}
+
+// retryPolicies returns policies that give every node the described retry
+// policy.
+func retryPolicies(maximum int, exhaustion RetryExhaustionKind, outcome OutcomeName) Policies {
+	return stubPolicies{retry: &RetryPolicy{MaximumAttempts: maximum, Exhaustion: exhaustion, Outcome: outcome}}
 }
 
 func TestApply(t *testing.T) {
@@ -429,13 +464,13 @@ func testSkip(t *testing.T) {
 }
 
 func testUnblock(t *testing.T) {
-	setRetryPolicy(t, 1, RetryExhaustionBlock, "")
+	p := retryPolicies(1, RetryExhaustionBlock, "")
 	state := newInstance(t)
 	actID := actStart(state).ID
 
 	// Block the activation through exhaustion.
 	state, _, _ = runToStart(t, state)
-	state = mustApply(t, state, Command{
+	state = mustApplyWith(t, p, state, Command{
 		Kind:             CommandTerminate,
 		ExpectedRevision: state.Instance.Revision,
 		IdempotencyKey:   "term-1",
@@ -446,7 +481,7 @@ func testUnblock(t *testing.T) {
 		t.Fatalf("setup: expected blocked activation, got %q", got)
 	}
 
-	state = mustApply(t, state, Command{
+	state = mustApplyWith(t, p, state, Command{
 		Kind:             CommandUnblock,
 		ExpectedRevision: state.Instance.Revision,
 		IdempotencyKey:   "unblock-1",
@@ -459,7 +494,7 @@ func testUnblock(t *testing.T) {
 	}
 
 	// Unblock without actor/reason must error.
-	_, err := applyCmd(state, Command{
+	_, err := applyCmdWith(p, state, Command{
 		Kind:             CommandUnblock,
 		ExpectedRevision: state.Instance.Revision,
 		IdempotencyKey:   "unblock-bad",
@@ -571,7 +606,7 @@ func testRevisionMismatch(t *testing.T) {
 		IdempotencyKey:   "claim-stale",
 		Identity:         baseIdentity(actID, ""),
 		LeaseID:          "lease-1",
-	})
+	}, nil)
 	if err == nil {
 		t.Fatalf("stale expected revision: expected error, got nil")
 	}
@@ -603,7 +638,7 @@ func testDuplicateIdempotencyKey(t *testing.T) {
 		IdempotencyKey:   "claim-dup", // same key, retried command
 		Identity:         baseIdentity(actID, ""),
 		LeaseID:          "lease-2",
-	})
+	}, nil)
 	if err == nil {
 		t.Fatalf("duplicate idempotency key: expected error, got nil")
 	}
@@ -626,15 +661,15 @@ func testDuplicateEventID(t *testing.T) {
 		Identity:         baseIdentity(actID, ""),
 		LeaseID:          "lease-1",
 		Actor:            "alice",
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("apply claim: %v", err)
 	}
-	first, err := Reduce(state, events[0])
+	first, err := Reduce(state, events[0], nil)
 	if err != nil {
 		t.Fatalf("reduce claim (first): %v", err)
 	}
-	second, err := Reduce(first, events[0])
+	second, err := Reduce(first, events[0], nil)
 	if err != nil {
 		t.Fatalf("reduce claim (duplicate): %v", err)
 	}
@@ -662,7 +697,7 @@ func testIdentityMismatch(t *testing.T) {
 		Identity:         baseIdentity(actID, ""),
 		LeaseID:          "lease-1",
 		Actor:            "alice",
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("apply claim: %v", err)
 	}
@@ -671,7 +706,7 @@ func testIdentityMismatch(t *testing.T) {
 	foreign.ID = eventIDOutside(foreign.ID) // distinct so it is not a no-op
 
 	before := state
-	got, err := Reduce(state, foreign)
+	got, err := Reduce(state, foreign, nil)
 	if err == nil {
 		t.Fatalf("event with mismatched workflow id: expected error, got nil")
 	}
@@ -684,14 +719,14 @@ func testIdentityMismatch(t *testing.T) {
 func eventIDOutside(id EventID) EventID { return EventID(string(id) + "-foreign") }
 
 func testRetryRearms(t *testing.T) {
-	setRetryPolicy(t, 3, RetryExhaustionBlock, "")
+	p := retryPolicies(3, RetryExhaustionBlock, "")
 	state := newInstance(t)
 	actID := actStart(state).ID
 	state, _, _ = runToStart(t, state)
 	before := *actStart(state)
 	activationCount := len(state.Instance.Activations)
 
-	state = mustApply(t, state, Command{
+	state = mustApplyWith(t, p, state, Command{
 		Kind:             CommandTerminate,
 		ExpectedRevision: state.Instance.Revision,
 		IdempotencyKey:   "term-1",
@@ -727,12 +762,12 @@ func testRetryRearms(t *testing.T) {
 }
 
 func testExhaustionBlock(t *testing.T) {
-	setRetryPolicy(t, 1, RetryExhaustionBlock, "")
+	p := retryPolicies(1, RetryExhaustionBlock, "")
 	state := newInstance(t)
 	actID := actStart(state).ID
 	state, _, _ = runToStart(t, state)
 
-	state = mustApply(t, state, Command{
+	state = mustApplyWith(t, p, state, Command{
 		Kind:             CommandTerminate,
 		ExpectedRevision: state.Instance.Revision,
 		IdempotencyKey:   "term-1",
@@ -753,12 +788,12 @@ func testExhaustionBlock(t *testing.T) {
 }
 
 func testExhaustionFail(t *testing.T) {
-	setRetryPolicy(t, 1, RetryExhaustionFail, "")
+	p := retryPolicies(1, RetryExhaustionFail, "")
 	state := newInstance(t)
 	actID := actStart(state).ID
 	state, _, _ = runToStart(t, state)
 
-	state = mustApply(t, state, Command{
+	state = mustApplyWith(t, p, state, Command{
 		Kind:             CommandTerminate,
 		ExpectedRevision: state.Instance.Revision,
 		IdempotencyKey:   "term-1",
@@ -777,12 +812,12 @@ func testExhaustionFail(t *testing.T) {
 }
 
 func testExhaustionOutcome(t *testing.T) {
-	setRetryPolicy(t, 1, RetryExhaustionOutcome, "failed_out")
+	p := retryPolicies(1, RetryExhaustionOutcome, "failed_out")
 	state := newInstance(t)
 	actID := actStart(state).ID
 	state, _, _ = runToStart(t, state)
 
-	state = mustApply(t, state, Command{
+	state = mustApplyWith(t, p, state, Command{
 		Kind:             CommandTerminate,
 		ExpectedRevision: state.Instance.Revision,
 		IdempotencyKey:   "term-1",
@@ -848,12 +883,12 @@ func testTerminationBeforeCompletion(t *testing.T) {
 	// activation, which an unblock then returns to ready. The contract under
 	// test: a completion is still accepted after a termination has been
 	// recorded for the same attempt.
-	setRetryPolicy(t, 1, RetryExhaustionBlock, "")
+	p := retryPolicies(1, RetryExhaustionBlock, "")
 	state := newInstance(t)
 	actID := actStart(state).ID
 	state, leaseID, attemptID := runToStart(t, state)
 
-	state = mustApply(t, state, Command{
+	state = mustApplyWith(t, p, state, Command{
 		Kind:             CommandTerminate,
 		ExpectedRevision: state.Instance.Revision,
 		IdempotencyKey:   "term-1",
@@ -864,7 +899,7 @@ func testTerminationBeforeCompletion(t *testing.T) {
 		t.Fatalf("setup: expected blocked activation, got %q", got)
 	}
 
-	state = mustApply(t, state, Command{
+	state = mustApplyWith(t, p, state, Command{
 		Kind:             CommandUnblock,
 		ExpectedRevision: state.Instance.Revision,
 		IdempotencyKey:   "unblock-1",
@@ -877,7 +912,7 @@ func testTerminationBeforeCompletion(t *testing.T) {
 	}
 
 	// Completion after a recorded termination must be accepted.
-	state = mustApply(t, state, Command{
+	state = mustApplyWith(t, p, state, Command{
 		Kind:             CommandComplete,
 		ExpectedRevision: state.Instance.Revision,
 		IdempotencyKey:   "complete-1",
@@ -916,7 +951,7 @@ func testTerminateMarkerInert(t *testing.T) {
 			MarkerLabel:      "labeled",
 		}
 		// The generated event must carry the marker evidence through.
-		events, err := Apply(state, cmd)
+		events, err := Apply(state, cmd, nil)
 		if err != nil {
 			t.Fatalf("%s: Apply: %v", kind, err)
 		}
@@ -927,7 +962,7 @@ func testTerminateMarkerInert(t *testing.T) {
 			t.Fatalf("%s: event marker = %q/%q, want %q/labeled", kind, events[0].MarkerKind, events[0].MarkerLabel, kind)
 		}
 		for _, e := range events {
-			state, err = Reduce(state, e)
+			state, err = Reduce(state, e, nil)
 			if err != nil {
 				t.Fatalf("%s: Reduce: %v", kind, err)
 			}
@@ -969,14 +1004,11 @@ func testGateAwaitedOnComplete(t *testing.T) {
 	// the lease is released atomically; the workflow is NOT completed and no
 	// branch is followed until the gates resolve.
 	state := newInstance(t)
-	SetCompletionGateResolver(func(TemplateID, TemplateVersion, NodeID) []GateDefinition {
-		return []GateDefinition{{ID: "review", Required: true}}
-	})
-	t.Cleanup(func() { SetCompletionGateResolver(nil) })
+	p := stubPolicies{gates: []GateDefinition{{ID: "review", Required: true}}}
 	actID := actStart(state).ID
 	state, leaseID, attemptID := runToStart(t, state)
 
-	state = mustApply(t, state, Command{
+	state = mustApplyWith(t, p, state, Command{
 		Kind:             CommandComplete,
 		ExpectedRevision: state.Instance.Revision,
 		IdempotencyKey:   "complete-with-gates",
@@ -1024,7 +1056,7 @@ func TestReduceDoesNotMutateInput(t *testing.T) {
 		Identity:         baseIdentity(actID, ""),
 		LeaseID:          "lease-1",
 		Actor:            "alice",
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
@@ -1032,7 +1064,7 @@ func TestReduceDoesNotMutateInput(t *testing.T) {
 	if !reflect.DeepEqual(state, want) {
 		t.Fatalf("baseline mismatch: apply mutated its input")
 	}
-	if _, err := Reduce(state, events[0]); err != nil {
+	if _, err := Reduce(state, events[0], nil); err != nil {
 		t.Fatalf("reduce: %v", err)
 	}
 	if !reflect.DeepEqual(state, want) {
@@ -1068,11 +1100,11 @@ func TestReduceDoesNotMutateInputDispatch(t *testing.T) {
 		Identity:         baseIdentity(act.ID, ""),
 		LeaseID:          "lease-1",
 		Actor:            "alice",
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
-	next, err := Reduce(state, events[0])
+	next, err := Reduce(state, events[0], nil)
 	if err != nil {
 		t.Fatalf("reduce: %v", err)
 	}
@@ -1417,18 +1449,18 @@ func testChildEventsReplayIdempotent(t *testing.T) {
 	state, leaseID, attemptID := runToStart(t, state)
 	actID := actStart(state).ID
 
-	attachEvents, err := Apply(state, childAttachCmd(state, "attach-r", leaseID, baseIdentity(actID, "att-1")))
+	attachEvents, err := Apply(state, childAttachCmd(state, "attach-r", leaseID, baseIdentity(actID, "att-1")), nil)
 	if err != nil {
 		t.Fatalf("apply attach: %v", err)
 	}
 	for _, e := range attachEvents {
-		state, err = Reduce(state, e)
+		state, err = Reduce(state, e, nil)
 		if err != nil {
 			t.Fatalf("reduce attach: %v", err)
 		}
 	}
 	// Replaying the same attach event is a no-op.
-	if again, err := Reduce(state, attachEvents[0]); err != nil {
+	if again, err := Reduce(state, attachEvents[0], nil); err != nil {
 		t.Fatalf("replay attach: %v", err)
 	} else if !reflect.DeepEqual(state, again) {
 		t.Fatalf("replayed attach event changed state")
@@ -1441,18 +1473,18 @@ func testChildEventsReplayIdempotent(t *testing.T) {
 		Identity:         baseIdentity(actID, attemptID),
 		LeaseID:          leaseID,
 		Outcome:          "done",
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("apply child outcome: %v", err)
 	}
 	for _, e := range outcomeEvents {
-		state, err = Reduce(state, e)
+		state, err = Reduce(state, e, nil)
 		if err != nil {
 			t.Fatalf("reduce child outcome: %v", err)
 		}
 	}
 	// Replaying the outcome batch is a no-op (no double-apply).
-	if again, err := Reduce(state, outcomeEvents[0]); err != nil {
+	if again, err := Reduce(state, outcomeEvents[0], nil); err != nil {
 		t.Fatalf("replay child outcome: %v", err)
 	} else if !reflect.DeepEqual(state, again) {
 		t.Fatalf("replayed child outcome event changed state")

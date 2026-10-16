@@ -449,7 +449,7 @@ func noBranchEvents(t *testing.T, s *Store, wf WorkflowID) bool {
 	return false
 }
 
-// TestRetryPolicyFallsBackToTemplateDefault proves the manager's resolver
+// TestRetryPolicyFallsBackToTemplateDefault proves the manager's policies
 // applies the template's default_retry_policy to a node that declares no
 // retry_policy, while a node's own policy still overrides it.
 func TestRetryPolicyFallsBackToTemplateDefault(t *testing.T) {
@@ -472,11 +472,11 @@ func TestRetryPolicyFallsBackToTemplateDefault(t *testing.T) {
 		t.Fatalf("loadCurrent: %v", err)
 	}
 
-	inherited := retryPolicyFor(&snap, "start")
+	inherited := retryPolicyFor(s.policies, &snap, "start")
 	if inherited == nil || inherited.MaximumAttempts != 2 || inherited.Exhaustion != RetryExhaustionBlock {
 		t.Fatalf("start retry policy = %+v, want the template default {2 block}", inherited)
 	}
-	own := retryPolicyFor(&snap, "own")
+	own := retryPolicyFor(s.policies, &snap, "own")
 	if own == nil || own.MaximumAttempts != 5 || own.Exhaustion != RetryExhaustionFail {
 		t.Fatalf("own retry policy = %+v, want the node's own {5 fail}", own)
 	}

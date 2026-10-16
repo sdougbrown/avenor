@@ -20,14 +20,20 @@ import (
 // snapshot per instance.
 type Store struct {
 	root string
-	// now is the clock the recovery lease sweep reads for staleness (the
-	// "recovery" reason). It must match the manager's lease-liveness clock so
-	// injected timestamps and staleness comparisons agree.
+	// now is the clock for event and readiness timestamps and for the
+	// recovery lease sweep. A manager over the store adopts it as its own
+	// lease-liveness clock (or replaces it), so injected timestamps and
+	// staleness comparisons agree.
 	now func() time.Time
 	// onCommit, when non-nil, is invoked after every successfully committed
 	// command snapshot, outside the flock. Set with SetCommitObserver before
 	// the store starts serving commands.
 	onCommit func(WorkflowID, Snapshot)
+
+	// policies supplies the template lookups the reducer consults plus the
+	// child-snapshot read command-time gate pinning consults. nil reads as
+	// no template knowledge. The manager installs itself here.
+	policies Policies
 }
 
 // readinessCommandKinds are the command kinds whose event batch can create a
@@ -48,8 +54,9 @@ func New(root string) *Store {
 	return &Store{root: root, now: nowUTC}
 }
 
-// NewStoreWithClock returns a store whose recovery lease sweep reads the
-// supplied clock for staleness. Callers must supply a UTC time.
+// NewStoreWithClock returns a store that reads the supplied clock for event
+// and readiness timestamps and for the recovery lease sweep. Callers must
+// supply a UTC time.
 func NewStoreWithClock(root string, now func() time.Time) *Store {
 	return &Store{root: root, now: now}
 }
@@ -141,7 +148,7 @@ func (s *Store) applyLocked(workflowID WorkflowID, cmd Command) (Snapshot, error
 			return Snapshot{}, fmt.Errorf("workflow %s does not exist", workflowID)
 		}
 	} else {
-		replayed, n, truncated, err := replayEvents(snap, s.eventsPath(workflowID))
+		replayed, n, truncated, err := replayEvents(snap, s.eventsPath(workflowID), s.policies)
 		if err != nil {
 			return Snapshot{}, err
 		}
@@ -152,13 +159,16 @@ func (s *Store) applyLocked(workflowID WorkflowID, cmd Command) (Snapshot, error
 			snap = replayed
 		}
 	}
-	// Stamp readiness transitions with an explicit timestamp: the reducer
-	// copies this onto activations during replay and never consults the wall
-	// clock for ready_at itself.
-	if readinessCommandKinds[cmd.Kind] && cmd.ReadyAt.IsZero() {
-		cmd.ReadyAt = nowUTC()
+	// Stamp the command with explicit timestamps: the reducer copies them
+	// onto the events' records during replay and never reads a clock.
+	now := s.now()
+	if cmd.At.IsZero() {
+		cmd.At = now
 	}
-	events, err := Apply(snap, cmd)
+	if readinessCommandKinds[cmd.Kind] && cmd.ReadyAt.IsZero() {
+		cmd.ReadyAt = now
+	}
+	events, err := Apply(snap, cmd, s.policies)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -166,7 +176,7 @@ func (s *Store) applyLocked(workflowID WorkflowID, cmd Command) (Snapshot, error
 	// the log, where every later replay would fail on it.
 	next := snap
 	for _, e := range events {
-		next, err = Reduce(next, e)
+		next, err = Reduce(next, e, s.policies)
 		if err != nil {
 			return Snapshot{}, err
 		}
@@ -386,7 +396,7 @@ func (s *Store) loadCurrent(workflowID WorkflowID) (Snapshot, bool, error) {
 	if err != nil || !exists {
 		return snap, exists, err
 	}
-	replayed, _, _, err := replayEvents(snap, s.eventsPath(workflowID))
+	replayed, _, _, err := replayEvents(snap, s.eventsPath(workflowID), s.policies)
 	return replayed, true, err
 }
 

@@ -37,6 +37,9 @@ type InstanceRecord struct {
 	// Params are the instance's immutable parameters, recorded so replay
 	// resolves templated concurrency keys identically to the live path.
 	Params map[string]string `json:"params,omitempty"`
+	// InstanceID is the instance's identity, minted by the command boundary
+	// and copied onto the instance by the reducer.
+	InstanceID InstanceID `json:"instance_id,omitempty"`
 }
 
 // Event is one record in the workflow store's NDJSON log. It carries its own
@@ -90,4 +93,12 @@ type Event struct {
 	// state, stamped by the command boundary and copied onto the activation
 	// during replay so the reducer never calls the wall clock.
 	ReadyAt *time.Time `json:"ready_at,omitempty"`
+	// At is the event's timestamp, stamped by the command boundary. The
+	// reducer copies it onto CreatedAt, UpdatedAt and EndedAt and never reads
+	// a clock.
+	At time.Time `json:"at,omitzero"`
+	// ActivationIDs are the IDs of the activations the event creates, minted
+	// by the command boundary: one per entry node on an instantiated event
+	// (in entry-node order) and one on a transition or rerouted event.
+	ActivationIDs []ActivationID `json:"activation_ids,omitempty"`
 }
