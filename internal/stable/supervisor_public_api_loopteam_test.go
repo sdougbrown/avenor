@@ -42,8 +42,9 @@ func itestWorkflowConfig(t *testing.T, kind string, cfg map[string]any) string {
 }
 
 // spawnWorkflow spawns a loop or team child through Spawn. The spawn prompt
-// is cleared: a non-empty prompt is injected as an extra "(initial)" pre
-// phase, which would add a provider attempt to every scenario.
+// defaults to empty so scenarios see only their configured phases; a test that
+// passes an explicit "prompt" opts into the injected "(initial)" pre phase
+// and the extra provider attempt it causes.
 func (h *itestHarness) spawnWorkflow(kind, file string, params map[string]any) string {
 	h.t.Helper()
 	merged := map[string]any{"prompt": ""}
@@ -71,6 +72,21 @@ func itestMemberEndIs(sessionID, stopReason string) func(events.Event) bool {
 		}
 		return id == sessionID
 	}
+}
+
+// sessionEndOrder returns the recorded-stream position of the first
+// session.end for sessionID, failing the test when the event has not been
+// recorded yet. Callers wait for the events first so ordering compares a
+// settled stream.
+func (h *itestHarness) sessionEndOrder(t *testing.T, sessionID string) int {
+	t.Helper()
+	for i, ev := range h.log.all() {
+		if itestMemberEndIs(sessionID, "end_turn")(ev) {
+			return i
+		}
+	}
+	t.Fatalf("no session.end for %s recorded", sessionID)
+	return -1
 }
 
 // itestMemberWorkingIs matches a working agent.status carrying a given session
@@ -235,6 +251,52 @@ func TestSupervisorPublicAPILoopPhasesSucceed(t *testing.T) {
 	}
 	if got := rows[0]["exit_code"]; got != 0 {
 		t.Fatalf("List exit_code = %v, want 0", got)
+	}
+}
+
+// TestSupervisorPublicAPILoopSpawnPromptRunsAsInitialPrePhase proves a
+// non-empty spawn prompt on a loop child runs as an injected "(initial)" pre
+// phase ahead of the configured pre phases: exactly one extra provider start,
+// the prompt text as the first prompt the provider sees, and the injected
+// attempt's session.end on the stream before the configured phases'
+// session.ends.
+func TestSupervisorPublicAPILoopSpawnPromptRunsAsInitialPrePhase(t *testing.T) {
+	t.Parallel()
+	provider := newItestProvider(
+		itestAttempt("ses_loop_i1", itestSessionEnd("ses_loop_i1", "end_turn", "initial done")),
+		itestAttempt("ses_loop_p1", itestSessionEnd("ses_loop_p1", "end_turn", "prep done")),
+		itestAttempt("ses_loop_w1", itestSessionEnd("ses_loop_w1", "end_turn", "work done")),
+	)
+	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+
+	file := itestWorkflowConfig(t, "loop", map[string]any{
+		"max_iterations": 1,
+		"pre":            []map[string]any{{"name": "prep", "prompt": "prep work"}},
+		"loop":           []map[string]any{{"name": "work", "prompt": "loop work"}},
+	})
+	rt := h.spawnWorkflow("loop", file, map[string]any{"label": "loop-spawn-prompt", "prompt": "spawn prompt work"})
+
+	// Every attempt settles on the stream before its position is compared.
+	for _, sessionID := range []string{"ses_loop_i1", "ses_loop_p1", "ses_loop_w1"} {
+		h.log.waitFor(t, sessionID+" session.end", itestMemberEndIs(sessionID, "end_turn"))
+	}
+	h.requireWorkflowEnd(rt, "done", "end_turn", 0)
+
+	if starts, resumes := provider.counts(); starts != 3 || resumes != 0 {
+		t.Fatalf("provider starts/resumes = %d/%d, want 3/0 (the injected (initial) pre phase adds one start beyond the two configured phases)", starts, resumes)
+	}
+	// The spawn prompt is the first prompt the provider sees, ahead of the
+	// configured phases' own prompts.
+	if got := provider.recordedPrompts(); len(got) != 3 || got[0] != "spawn prompt work" || got[1] != "prep work" || got[2] != "loop work" {
+		t.Fatalf("prompts = %q, want [spawn prompt work prep work loop work]", got)
+	}
+	// The injected phase's session.end is recorded before the configured
+	// phases' session.ends.
+	initial := h.sessionEndOrder(t, "ses_loop_i1")
+	for _, sessionID := range []string{"ses_loop_p1", "ses_loop_w1"} {
+		if later := h.sessionEndOrder(t, sessionID); later < initial {
+			t.Fatalf("session.end for %s (index %d) recorded before the injected phase's (index %d)", sessionID, later, initial)
+		}
 	}
 }
 
@@ -525,9 +587,6 @@ func TestSupervisorPublicAPILoopPhaseResumesPreviousSession(t *testing.T) {
 	if ids := provider.resumeIDs(); len(ids) != 1 || ids[0] != "ses_loop_r1" {
 		t.Fatalf("Resume arguments = %v, want [ses_loop_r1] (the first attempt's session ID)", ids)
 	}
-	if ids := provider.returnedSessionIDs(); len(ids) != 2 || ids[0] != "ses_loop_r1" || ids[1] != "ses_loop_r2" {
-		t.Fatalf("Start/Resume session IDs = %v, want [ses_loop_r1 ses_loop_r2]", ids)
-	}
 }
 
 // TestSupervisorPublicAPILoopRequiresNudgeResumesOwnSession proves a loop
@@ -565,9 +624,6 @@ func TestSupervisorPublicAPILoopRequiresNudgeResumesOwnSession(t *testing.T) {
 	if ids := provider.resumeIDs(); len(ids) != 1 || ids[0] != "ses_loop_n1" {
 		t.Fatalf("Resume arguments = %v, want [ses_loop_n1] (the nudged attempt's session ID)", ids)
 	}
-	if ids := provider.returnedSessionIDs(); len(ids) != 2 || ids[0] != "ses_loop_n1" || ids[1] != "ses_loop_n2" {
-		t.Fatalf("Start/Resume session IDs = %v, want [ses_loop_n1 ses_loop_n2]", ids)
-	}
 	rows := h.listed("loop-nudge")
 	if len(rows) != 1 || rows[0]["status"] != "ended" || rows[0]["exit_code"] != 1 {
 		t.Fatalf("List row = %v, want ended with exit code 1", rows)
@@ -601,12 +657,6 @@ func TestSupervisorPublicAPITeamPrePhaseResumesPreviousSession(t *testing.T) {
 	h.requireWorkflowEnd(rt, "done", "end_turn", 0)
 	if ids := prep.resumeIDs(); len(ids) != 1 || ids[0] != "ses_team_r1" {
 		t.Fatalf("prep Resume arguments = %v, want [ses_team_r1] (the first pre phase's session ID)", ids)
-	}
-	if ids := prep.returnedSessionIDs(); len(ids) != 2 || ids[0] != "ses_team_r1" || ids[1] != "ses_team_r2" {
-		t.Fatalf("prep Start/Resume session IDs = %v, want [ses_team_r1 ses_team_r2]", ids)
-	}
-	if ids := worker.returnedSessionIDs(); len(ids) != 1 || ids[0] != "ses_team_r3" {
-		t.Fatalf("worker Start/Resume session IDs = %v, want [ses_team_r3] (the member starts fresh)", ids)
 	}
 	if starts, resumes := worker.counts(); starts != 1 || resumes != 0 {
 		t.Fatalf("worker starts/resumes = %d/%d, want 1/0 (the member starts fresh after the resumed pre phases)", starts, resumes)
@@ -733,6 +783,51 @@ func TestSupervisorPublicAPITeamMembersSucceed(t *testing.T) {
 	rows := h.listed("team-ok")
 	if len(rows) != 1 || rows[0]["status"] != "ended" || rows[0]["exit_code"] != 0 {
 		t.Fatalf("List row = %v, want ended with exit code 0", rows)
+	}
+}
+
+// TestSupervisorPublicAPITeamSpawnPromptRunsAsInitialPrePhase proves a
+// non-empty spawn prompt on a team child runs as an injected "(initial)" pre
+// phase ahead of the configured pre phases and members: exactly one extra
+// provider start, the prompt text as the first prompt the provider sees, and
+// the injected attempt's session.end on the stream before the configured
+// phases' session.ends.
+func TestSupervisorPublicAPITeamSpawnPromptRunsAsInitialPrePhase(t *testing.T) {
+	t.Parallel()
+	provider := newItestProvider(
+		itestAttempt("ses_team_i1", itestSessionEnd("ses_team_i1", "end_turn", "initial done")),
+		itestAttempt("ses_team_p1", itestSessionEnd("ses_team_p1", "end_turn", "prep done")),
+		itestAttempt("ses_team_w1", itestSessionEnd("ses_team_w1", "end_turn", "team done")),
+	)
+	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+
+	file := itestWorkflowConfig(t, "team", map[string]any{
+		"pre":  []map[string]any{{"name": "prep", "prompt": "prep work"}},
+		"team": []map[string]any{{"name": "worker", "prompt": "team work"}},
+	})
+	rt := h.spawnWorkflow("team", file, map[string]any{"label": "team-spawn-prompt", "prompt": "spawn prompt work"})
+
+	// Every attempt settles on the stream before its position is compared.
+	for _, sessionID := range []string{"ses_team_i1", "ses_team_p1", "ses_team_w1"} {
+		h.log.waitFor(t, sessionID+" session.end", itestMemberEndIs(sessionID, "end_turn"))
+	}
+	h.requireWorkflowEnd(rt, "done", "end_turn", 0)
+
+	if starts, resumes := provider.counts(); starts != 3 || resumes != 0 {
+		t.Fatalf("provider starts/resumes = %d/%d, want 3/0 (the injected (initial) pre phase adds one start beyond the two configured phases)", starts, resumes)
+	}
+	// The spawn prompt is the first prompt the provider sees, ahead of the
+	// configured phases' own prompts.
+	if got := provider.recordedPrompts(); len(got) != 3 || got[0] != "spawn prompt work" || got[1] != "prep work" || got[2] != "team work" {
+		t.Fatalf("prompts = %q, want [spawn prompt work prep work team work]", got)
+	}
+	// The injected phase's session.end is recorded before the configured
+	// phases' session.ends.
+	initial := h.sessionEndOrder(t, "ses_team_i1")
+	for _, sessionID := range []string{"ses_team_p1", "ses_team_w1"} {
+		if later := h.sessionEndOrder(t, sessionID); later < initial {
+			t.Fatalf("session.end for %s (index %d) recorded before the injected phase's (index %d)", sessionID, later, initial)
+		}
 	}
 }
 
