@@ -369,6 +369,15 @@ OpenAI-compatible client shared with future harness-free judgment steps
 (gate answers, loop exit markers), so the resolver is not
 permission-specific infrastructure.
 
+> **Trust assumption:** the model's allow decision is applied without a
+> second confirmation — that is the point of the variant. The worker's
+> request data (command, options) reaches the model as untrusted input, but
+> a compromised or fooled model still decides. Choose this variant for
+> nodes whose request surface is well-understood and bounded; when the
+> worker is untrusted or the request surface is not, use the harness
+> decider, whose agent can inspect, or keep requests on a human gate by
+> not declaring an unattended policy.
+
 ## Instantiation
 
 `avenor workflow instantiate` creates an instance of a registered template
