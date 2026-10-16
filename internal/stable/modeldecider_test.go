@@ -88,7 +88,7 @@ func TestModelDecisionOption(t *testing.T) {
 	// variant still wins (least privilege).
 	if id, _ := modelDecisionOption([]any{
 		map[string]any{"optionId": "allow_always", "kind": "allow_always"},
-		map[string]any{"optionId": "allow_once", "kind": "allow"},
+		map[string]any{"optionId": "allow_once", "kind": "allow_once"},
 	}, "allow"); id != "allow_once" {
 		t.Fatalf("allow option = %q, want allow_once preferred over allow_always", id)
 	}
