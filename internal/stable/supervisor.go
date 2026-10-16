@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/admission"
+	"github.com/sdougbrown/avenor/internal/appdir"
 	"github.com/sdougbrown/avenor/internal/cli"
 	"github.com/sdougbrown/avenor/internal/control"
 	"github.com/sdougbrown/avenor/internal/events"
@@ -575,16 +576,16 @@ type Supervisor struct {
 	// label to its neutral scratch directory, removed at teardown;
 	// permDeciderBlocked holds requests that hit the cap and stay pending
 	// until a teardown frees capacity and unrouts them for a retry.
-	permDeciderMu                sync.Mutex
-	permDeciderActive            int
-	permDeciderSlots             map[string]struct{}           // decider label → slot held
-	permDeciderScratchDirs       map[string]string             // decider label → scratch dir
-	permDeciderBlocked           map[string]struct{}           // "runtimeID\x00requestID"
+	permDeciderMu          sync.Mutex
+	permDeciderActive      int
+	permDeciderSlots       map[string]struct{} // decider label → slot held
+	permDeciderScratchDirs map[string]string   // decider label → scratch dir
+	permDeciderBlocked     map[string]struct{} // "runtimeID\x00requestID"
 	// Direct-model decider accounting shares permDeciderMu: model calls
 	// consume no admission slot, so their own cap bounds concurrent calls.
-	modelDeciderActive  int
-	modelDeciderSlots   map[string]struct{} // "runtimeID:requestID" → slot held
-	modelDeciderBlocked map[string]struct{} // "runtimeID\x00requestID"
+	modelDeciderActive           int
+	modelDeciderSlots            map[string]struct{}           // "runtimeID:requestID" → slot held
+	modelDeciderBlocked          map[string]struct{}           // "runtimeID\x00requestID"
 	httpServers                  map[string]*managedHTTPServer // dir → ready server
 	httpStarting                 map[string]struct{}           // dirs with a start in flight
 	httpShutdownStarted          bool
@@ -5464,25 +5465,13 @@ func resolveWorkflowRoot(configured string) string {
 }
 
 // resolveWorkflowAdapterDir returns the configured adapter manifest directory,
-// or the default under XDG_CONFIG_HOME (falling back to
-// $HOME/.config/avenor) when unset. It never creates directories.
+// or the default under the shared avenor config home (XDG_CONFIG_HOME/avenor,
+// falling back to ~/.config/avenor) when unset. It never creates directories.
 func resolveWorkflowAdapterDir(configured string) string {
 	if configured != "" {
 		return configured
 	}
-	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" && filepath.IsAbs(xdg) {
-		return filepath.Join(xdg, "avenor", "workflow-adapters")
-	}
-	home := os.Getenv("HOME")
-	if home == "" {
-		if u, err := os.UserHomeDir(); err == nil && u != "" {
-			home = u
-		}
-	}
-	if home == "" {
-		return "avenor/workflow-adapters"
-	}
-	return filepath.Join(home, ".config", "avenor", "workflow-adapters")
+	return filepath.Join(appdir.ConfigHome(), "workflow-adapters")
 }
 
 // loadWorkflowAdapters loads the adapter manifest registry from the

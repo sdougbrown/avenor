@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sdougbrown/avenor/internal/appdir"
 	"github.com/sdougbrown/avenor/internal/configfile"
 )
 
@@ -35,22 +36,10 @@ type Config struct {
 	Providers map[string]Provider `json:"providers"`
 }
 
-// DefaultDir returns the directory the provider registry is read from:
-// $XDG_CONFIG_HOME/avenor when set (absolute), else ~/.config/avenor.
+// DefaultDir returns the directory the provider registry is read from: the
+// shared avenor config home ($XDG_CONFIG_HOME/avenor, else ~/.config/avenor).
 func DefaultDir() string {
-	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" && filepath.IsAbs(xdg) {
-		return filepath.Join(xdg, "avenor")
-	}
-	home := os.Getenv("HOME")
-	if home == "" {
-		if u, err := os.UserHomeDir(); err == nil && u != "" {
-			home = u
-		}
-	}
-	if home == "" {
-		return "avenor"
-	}
-	return filepath.Join(home, ".config", "avenor")
+	return appdir.ConfigHome()
 }
 
 // Load reads the provider registry from DefaultDir. The file may be
