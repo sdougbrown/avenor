@@ -342,6 +342,28 @@ func (h *itestHarness) requireSessionEnd(rtID, stopReason string, want int) {
 	}
 }
 
+// requireIdleEnd proves a runtime's idle end end-to-end: the translated
+// status carries stopReason, the raw exit code matches exitCode, the
+// session.end event carries stopReason with exitCode, and WaitTurn reports
+// stopReason. It returns the view from awaitStatus so callers can make
+// extra checks.
+func (h *itestHarness) requireIdleEnd(rtID, status, stopReason string, exitCode int) itestView {
+	h.t.Helper()
+	v := h.awaitStatus(rtID, status)
+	if v.StopReason != stopReason {
+		h.t.Fatalf("%s view stop reason = %q, want %s", status, v.StopReason, stopReason)
+	}
+	if code := h.rawExitCode(rtID); code != exitCode {
+		h.t.Fatalf("raw RuntimeStatus exit_code = %d, want %d", code, exitCode)
+	}
+	h.requireSessionEnd(rtID, stopReason, exitCode)
+	turn := h.waitTurn(rtID)
+	if got, _ := turn["stop_reason"].(string); got != stopReason {
+		h.t.Fatalf("WaitTurn stop_reason = %q, want %s", got, stopReason)
+	}
+	return v
+}
+
 // awaitStatus polls RuntimeStatus, as consumer await loops do, until the
 // translated status equals want. Status transitions that follow a turn
 // settling have no wake-up channel of their own.
@@ -678,18 +700,7 @@ func TestSupervisorPublicAPIRunDeadlineWhileParkedTimesOut(t *testing.T) {
 	// The turn is over and the runtime is parked waiting for a follow-up
 	// prompt. The run deadline ends the parked runtime as a timeout, matching
 	// a deadline during an attempt.
-	v := h.awaitStatus(rt, "timeout")
-	if v.StopReason != "timeout" {
-		t.Fatalf("timeout view stop reason = %q, want timeout", v.StopReason)
-	}
-	if code := h.rawExitCode(rt); code != 124 {
-		t.Fatalf("raw RuntimeStatus exit_code = %d, want 124", code)
-	}
-	h.requireSessionEnd(rt, "timeout", 124)
-	turn := h.waitTurn(rt)
-	if got, _ := turn["stop_reason"].(string); got != "timeout" {
-		t.Fatalf("WaitTurn stop_reason = %q, want timeout", got)
-	}
+	h.requireIdleEnd(rt, "timeout", "timeout", 124)
 }
 
 // TestSupervisorPublicAPIRunDeadlineDuringBackoffTimesOut proves a run
@@ -706,21 +717,10 @@ func TestSupervisorPublicAPIRunDeadlineDuringBackoffTimesOut(t *testing.T) {
 	// that follows the retryable failed attempt.
 	rt := h.spawn(map[string]any{"label": "deadline-backoff", "max_retries": 1, "timeout": 1})
 	h.log.waitFor(t, "failed attempt session.end", itestStopReasonIs(rt, "error"))
-	v := h.awaitStatus(rt, "timeout")
-	if v.StopReason != "timeout" {
-		t.Fatalf("timeout view stop reason = %q, want timeout", v.StopReason)
-	}
-	if code := h.rawExitCode(rt); code != 124 {
-		t.Fatalf("raw RuntimeStatus exit_code = %d, want 124", code)
-	}
-	h.requireSessionEnd(rt, "timeout", 124)
 	// WaitTurn reports the idle end's stop reason, not the failed attempt's;
 	// reading it after the runtime has ended avoids racing the failed
 	// attempt's own settle.
-	turn := h.waitTurn(rt)
-	if got, _ := turn["stop_reason"].(string); got != "timeout" {
-		t.Fatalf("WaitTurn stop_reason = %q, want timeout", got)
-	}
+	h.requireIdleEnd(rt, "timeout", "timeout", 124)
 	// The deadline must end the run inside the backoff: the retry attempt is
 	// never started.
 	if starts, resumes := provider.counts(); starts != 1 || resumes != 0 {
@@ -779,24 +779,13 @@ func TestSupervisorPublicAPICancelDuringBackoff(t *testing.T) {
 	if err := h.sup.RuntimeCancel(rt); err != nil {
 		t.Fatalf("RuntimeCancel: %v", err)
 	}
-	v := h.awaitStatus(rt, "killed")
-	if v.StopReason != "cancelled" {
-		t.Fatalf("killed view stop reason = %q, want cancelled", v.StopReason)
-	}
+	// WaitTurn reports the idle end's stop reason, not the failed attempt's;
+	// reading it after the end avoids racing the failed attempt's own settle.
+	v := h.requireIdleEnd(rt, "killed", "cancelled", 130)
 	// The idle end records a terminal phase, so consumers see the turn as
 	// complete even though the runtime was killed mid-backoff.
 	if v.Phase != "done" {
 		t.Fatalf("killed view phase = %q, want done", v.Phase)
-	}
-	if code := h.rawExitCode(rt); code != 130 {
-		t.Fatalf("raw RuntimeStatus exit_code = %d, want 130", code)
-	}
-	h.requireSessionEnd(rt, "cancelled", 130)
-	// WaitTurn reports the idle end's stop reason, not the failed attempt's;
-	// reading it after the end avoids racing the failed attempt's own settle.
-	turn := h.waitTurn(rt)
-	if got, _ := turn["stop_reason"].(string); got != "cancelled" {
-		t.Fatalf("WaitTurn stop_reason = %q, want cancelled", got)
 	}
 	// The cancelled backoff must not wake into another attempt. The window
 	// outlasts the backoff delay so a late Resume cannot slip through.
@@ -993,10 +982,7 @@ func TestSupervisorPublicAPIShutdownGracefulEndsParkedRuntime(t *testing.T) {
 	// The runtime is parked waiting for a follow-up prompt. Graceful
 	// shutdown ends it instead of leaving it idle.
 	h.shutdown("graceful")
-	v := h.awaitStatus(rt, "killed")
-	if v.StopReason != "cancelled" {
-		t.Fatalf("killed view stop reason = %q, want cancelled", v.StopReason)
-	}
+	v := h.requireIdleEnd(rt, "killed", "cancelled", 130)
 	if v.ExitCode != 130 {
 		t.Fatalf("killed view exit code = %d, want 130", v.ExitCode)
 	}
@@ -1004,14 +990,6 @@ func TestSupervisorPublicAPIShutdownGracefulEndsParkedRuntime(t *testing.T) {
 	// done phase through to the killed view.
 	if v.Phase != "done" {
 		t.Fatalf("killed view phase = %q, want done", v.Phase)
-	}
-	if code := h.rawExitCode(rt); code != 130 {
-		t.Fatalf("raw RuntimeStatus exit_code = %d, want 130", code)
-	}
-	h.requireSessionEnd(rt, "cancelled", 130)
-	turn := h.waitTurn(rt)
-	if got, _ := turn["stop_reason"].(string); got != "cancelled" {
-		t.Fatalf("WaitTurn stop_reason = %q, want cancelled", got)
 	}
 }
 
@@ -1078,18 +1056,7 @@ func TestSupervisorPublicAPIRunDeadlineWhileWaitingForTreeBudget(t *testing.T) {
 	if v := h.view(holder); v.Status != "running" {
 		t.Fatalf("holder status just before the deadline = %q, want running", v.Status)
 	}
-	v := h.awaitStatus(rt, "timeout")
-	if v.StopReason != "timeout" {
-		t.Fatalf("timeout view stop reason = %q, want timeout", v.StopReason)
-	}
-	if code := h.rawExitCode(rt); code != 124 {
-		t.Fatalf("raw RuntimeStatus exit_code = %d, want 124", code)
-	}
-	h.requireSessionEnd(rt, "timeout", 124)
-	turn := h.waitTurn(rt)
-	if got, _ := turn["stop_reason"].(string); got != "timeout" {
-		t.Fatalf("WaitTurn stop_reason = %q, want timeout", got)
-	}
+	h.requireIdleEnd(rt, "timeout", "timeout", 124)
 	// The holder is unaffected: released from the gate, its turn finishes
 	// normally.
 	gate.open()
@@ -1159,18 +1126,7 @@ func TestSupervisorPublicAPIRunDeadlineWhileWaitingForLocalSlot(t *testing.T) {
 	if v := h.view(holder); v.Status != "running" {
 		t.Fatalf("holder status just before the deadline = %q, want running", v.Status)
 	}
-	v := h.awaitStatus(rt, "timeout")
-	if v.StopReason != "timeout" {
-		t.Fatalf("timeout view stop reason = %q, want timeout", v.StopReason)
-	}
-	if code := h.rawExitCode(rt); code != 124 {
-		t.Fatalf("raw RuntimeStatus exit_code = %d, want 124", code)
-	}
-	h.requireSessionEnd(rt, "timeout", 124)
-	turn := h.waitTurn(rt)
-	if got, _ := turn["stop_reason"].(string); got != "timeout" {
-		t.Fatalf("WaitTurn stop_reason = %q, want timeout", got)
-	}
+	h.requireIdleEnd(rt, "timeout", "timeout", 124)
 	// The holder is unaffected: released from the gate, its turn finishes
 	// normally.
 	gate.open()
