@@ -337,8 +337,8 @@ func RunLoop(
 
 	toolDefs := buildToolDefs(reg)
 	var (
-		lastErrorKey         string // "toolName:errorMessage" of last failed tool call
-		consecutiveErrors    int    // how many times lastErrorKey has repeated
+		lastErrorKey      string // "toolName:errorMessage" of last failed tool call
+		consecutiveErrors int    // how many times lastErrorKey has repeated
 	)
 
 turnLoop:

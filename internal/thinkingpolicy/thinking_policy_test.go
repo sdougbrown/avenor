@@ -100,9 +100,9 @@ func TestSchemaCanonicalLockstep(t *testing.T) {
 		t.Fatalf("read schema: %v", err)
 	}
 	var schema struct {
-		Conditions map[string]any        `json:"conditions"`
-		Fields     map[string]any        `json:"fields"`
-		Rules     []map[string]any      `json:"rules"`
+		Conditions map[string]any   `json:"conditions"`
+		Fields     map[string]any   `json:"fields"`
+		Rules      []map[string]any `json:"rules"`
 	}
 	if err := json.Unmarshal(data, &schema); err != nil {
 		t.Fatalf("parse schema: %v", err)

@@ -9,6 +9,7 @@ package providerconfig
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -99,10 +100,23 @@ func validateProvider(name string, p Provider) error {
 	if strings.HasSuffix(strings.TrimRight(p.BaseURL, "/"), "/chat/completions") {
 		return fmt.Errorf("provider %q: base_url %q must be the API root, not the chat-completions endpoint", name, p.BaseURL)
 	}
+	if u, perr := url.Parse(p.BaseURL); perr == nil && strings.HasPrefix(p.BaseURL, "http://") && !isLoopbackHost(u.Hostname()) && strings.TrimSpace(p.APIKey) != "" {
+		return fmt.Errorf("provider %q: api_key over plaintext http:// to non-loopback %q would transmit the credential in cleartext; use api_key_env or an https:// base_url", name, u.Hostname())
+	}
 	if strings.TrimSpace(p.APIKey) == "" && strings.TrimSpace(p.APIKeyEnv) == "" {
 		return fmt.Errorf("provider %q: api_key or api_key_env is required", name)
 	}
 	return nil
+}
+
+// isLoopbackHost reports whether the host is loopback (localhost or the
+// loopback IPs), where plaintext http is a local-model convenience.
+func isLoopbackHost(host string) bool {
+	switch host {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	return false
 }
 
 // ResolveKey returns the bearer token for a call to this provider. A

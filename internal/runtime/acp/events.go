@@ -25,7 +25,7 @@ var knownProbeEvents = map[string]bool{
 	"user.message_chunk":  true,
 	"session.plan":        true,
 	"permission.request":  true,
-	"session.end":          true,
+	"session.end":         true,
 }
 
 func mapSessionUpdate(params json.RawMessage) (events.Event, error) {

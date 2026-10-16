@@ -68,8 +68,8 @@ api_key = "lit"
 
 func TestLoadDirJSONWinsOverYAML(t *testing.T) {
 	dir := t.TempDir()
-	writeRegistry(t, dir, "providers.yaml", "providers:\n  only: {base_url: 'http://y/v1', api_key: k}\n")
-	writeRegistry(t, dir, "providers.json", `{"providers":{"first":{"base_url":"http://j/v1","api_key":"k"}}}`)
+	writeRegistry(t, dir, "providers.yaml", "providers:\n  only: {base_url: 'https://y.example/v1', api_key: k}\n")
+	writeRegistry(t, dir, "providers.json", `{"providers":{"first":{"base_url":"https://j.example/v1","api_key":"k"}}}`)
 	cfg, err := LoadDir(dir)
 	if err != nil {
 		t.Fatalf("LoadDir: %v", err)
@@ -97,7 +97,7 @@ func TestLoadDirMissingRegistryIsNotAnError(t *testing.T) {
 
 func TestLoadDirRejectsUnknownFields(t *testing.T) {
 	dir := t.TempDir()
-	writeRegistry(t, dir, "providers.json", `{"providers":{"groq":{"base_url":"http://x/v1","api_key":"k","api_kye":"oops"}}}`)
+	writeRegistry(t, dir, "providers.json", `{"providers":{"groq":{"base_url":"https://x.example/v1","api_key":"k","api_kye":"oops"}}}`)
 	if _, err := LoadDir(dir); err == nil {
 		t.Fatal("unknown field should be rejected")
 	}
@@ -111,7 +111,7 @@ func TestLoadDirRejectsBadProviders(t *testing.T) {
 		{"no base_url", `{"providers":{"g":{"api_key":"k"}}}`},
 		{"bad scheme", `{"providers":{"g":{"base_url":"ftp://x","api_key":"k"}}}`},
 		{"no key", `{"providers":{"g":{"base_url":"http://x/v1"}}}`},
-		{"empty name", `{"providers":{"":{"base_url":"http://x/v1","api_key":"k"}}}`},
+		{"empty name", `{"providers":{"":{"base_url":"https://x.example/v1","api_key":"k"}}}`},
 	}
 	for _, tc := range cases {
 		dir := t.TempDir()
@@ -178,5 +178,26 @@ func TestLoadDirYML(t *testing.T) {
 	}
 	if _, err := cfg.Lookup("groq"); err != nil {
 		t.Fatalf("lookup groq from .yml registry: %v", err)
+	}
+}
+
+func TestLoadDirRejectsPlaintextKeyToNonLoopback(t *testing.T) {
+	dir := t.TempDir()
+	writeRegistry(t, dir, "providers.json", `{"providers":{"g":{"base_url":"http://api.example.com/v1","api_key":"sk-live"}}}`)
+	if _, err := LoadDir(dir); err == nil {
+		t.Fatal("a literal key over non-loopback plaintext http should be rejected")
+	}
+	// Loopback plaintext stays allowed (local models).
+	dir2 := t.TempDir()
+	writeRegistry(t, dir2, "providers.json", `{"providers":{"local":{"base_url":"http://127.0.0.1:8080/v1","api_key":"lit"}}}`)
+	if _, err := LoadDir(dir2); err != nil {
+		t.Fatalf("LoadDir(loopback plaintext): %v", err)
+	}
+	// An env-key provider over plaintext http is fine too (no credential in
+	// the registry to intercept).
+	dir3 := t.TempDir()
+	writeRegistry(t, dir3, "providers.json", `{"providers":{"g":{"base_url":"http://api.example.com/v1","api_key_env":"GROQ_API_KEY"}}}`)
+	if _, err := LoadDir(dir3); err != nil {
+		t.Fatalf("LoadDir(plaintext with env key): %v", err)
 	}
 }

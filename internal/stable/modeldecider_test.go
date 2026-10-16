@@ -145,7 +145,7 @@ func TestResolvePermissionModelDeciderKey(t *testing.T) {
 	writeProviderRegistry(t, `{
 		"providers": {
 			"env":    {"base_url": "http://x/v1", "api_key_env": "MODELDEC_TEST_KEY"},
-			"lit":    {"base_url": "http://x/v1", "api_key": "literal-secret"},
+			"lit":    {"base_url": "https://x.example/v1", "api_key": "literal-secret"},
 			"rotated": {"base_url": "http://x/v1", "api_key_env": "MODELDEC_ROTATED_KEY"}
 		}
 	}`)

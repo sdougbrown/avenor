@@ -2007,7 +2007,7 @@ func TestResolveAssignmentSelectionModelDecider(t *testing.T) {
 	writeProviderRegistry(t, `{
 		"providers": {
 			"groq": {"base_url": "http://model.example/openai/v1", "api_key_env": "MODEL_DECIDER_TEST_KEY"},
-			"lit":  {"base_url": "http://model.example/openai/v1", "api_key": "literal"}
+			"lit":  {"base_url": "https://model.example/openai/v1", "api_key": "literal"}
 		}
 	}`)
 	sel, err := resolveAssignmentSelection(&workflow.Assignment{
@@ -2804,5 +2804,74 @@ func TestDispatchModelDeciderUnappliableDecisionStaysPending(t *testing.T) {
 	rt, _ := status.(map[string]any)
 	if exhausted, _ := rt["permission_decider_exhausted"].(bool); exhausted {
 		t.Fatal("an unappliable decision must not mark the decider exhausted")
+	}
+}
+
+// TestDispatchLoopModelDeciderCarriesPolicy proves the loop executor
+// threads a decider_model policy onto the spawned loop runtime: the
+// runtime status surfaces the resolved direct-model decider, so a dropped
+// assignment on that path cannot silently downgrade the policy to local
+// permission resolution.
+func TestDispatchLoopModelDeciderCarriesPolicy(t *testing.T) {
+	capture := &modelDeciderCapture{}
+	srv := newModelDeciderServer(capture, func(w http.ResponseWriter) {
+		w.Write([]byte(`{"choices":[{"message":{"content":"{\"decision\":\"defer\"}"}}]}`))
+	})
+	defer srv.Close()
+	writeProviderRegistry(t, fmt.Sprintf(`{
+		"providers": {"groq": {"base_url": %q, "api_key_env": "MODEL_DECIDER_TEST_KEY"}}
+	}`, srv.URL))
+	t.Setenv("MODEL_DECIDER_TEST_KEY", "sk-model-test")
+
+	loopPath := filepath.Join(t.TempDir(), "loop.json")
+	cfg := map[string]any{"max_iterations": 1, "loop": []any{map[string]any{"name": "work", "prompt": "work"}}}
+	if err := os.WriteFile(loopPath, mustJSON(t, cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	template := mustJSON(t, map[string]any{
+		"schema_version":   1,
+		"template_id":      "tmpl-dispatch-dispatch-modeldec-loop",
+		"template_version": "1",
+		"entry_nodes":      []string{"start"},
+		"nodes": []any{map[string]any{
+			"id":         "start",
+			"action":     map[string]any{"type": "loop", "loop_file": loopPath},
+			"assignment": map[string]any{"permission_policy": map[string]any{"decider_model": map[string]any{"provider": "groq", "model": "llama-3.3-70b"}}},
+			"dispatch":   map[string]any{"mode": "auto", "controller_id": "c1"},
+			"retry_policy": map[string]any{
+				"max_attempts": 3,
+				"exhaustion":   "block",
+			},
+		}},
+		"terminal_outcomes":    []string{"done"},
+		"default_lease_policy": map[string]any{"ttl_seconds": 900},
+	})
+	f := newDispatchFixtureTemplate(t, "dispatch-modeldec-loop", 4, 4, template)
+	gate := make(chan struct{})
+	defer close(gate)
+	f.sup.newProviderFunc = func(_ runtime.StartOptions, _ string) (runtime.Provider, error) {
+		return &stableScriptedProvider{attempt: -1, scripts: []stableScriptedAttempt{{
+			sessionID: "ses_modeldec_loop",
+			events:    []stableScriptedEvent{{release: gate}},
+		}}}, nil
+	}
+	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
+	if err != nil {
+		t.Fatalf("dispatchWorkflowNode: %v", err)
+	}
+	if out.Kind != Dispatched {
+		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
+	}
+	waitFor(t, "loop runtime", func() bool {
+		_, err := f.sup.RuntimeStatus(out.RuntimeID)
+		return err == nil
+	})
+	status, err := f.sup.RuntimeStatus(out.RuntimeID)
+	if err != nil {
+		t.Fatalf("RuntimeStatus: %v", err)
+	}
+	rt, _ := status.(map[string]any)
+	if got, _ := rt["permission_model_decider"].(string); got != "groq/llama-3.3-70b" {
+		t.Fatalf("loop runtime permission_model_decider = %q, want groq/llama-3.3-70b", got)
 	}
 }

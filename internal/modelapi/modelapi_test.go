@@ -3,6 +3,7 @@ package modelapi
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -66,7 +67,7 @@ func TestNewAppendsV1WhenMissing(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client, err := New(strings.TrimSuffix(srv.URL, "/v1"), "", "m", srv.Client())
+	client, err := New(srv.URL, "", "m", srv.Client())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -87,8 +88,31 @@ func TestCompleteHTTPErrorIsAnError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, err := client.Complete(context.Background(), []Message{{Role: "user", Content: "x"}}, 8); err == nil {
+	_, err = client.Complete(context.Background(), []Message{{Role: "user", Content: "x"}}, 8)
+	if err == nil {
 		t.Fatal("500 response should be an error")
+	}
+	// The surfaced error must carry the provider's status line and body: the
+	// operator's only signal for why the judgment call failed.
+	if !strings.Contains(err.Error(), "500") || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("error = %v, want the status line and the served body", err)
+	}
+}
+
+// TestCompleteNonJSONBodyIsAnError proves a 2xx response whose body is not
+// JSON (a realistic proxy failure mode) is an error, not an empty
+// completion.
+func TestCompleteNonJSONBodyIsAnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`<html>gateway error</html>`))
+	}))
+	defer srv.Close()
+	client, err := New(srv.URL, "k", "m", srv.Client())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := client.Complete(context.Background(), []Message{{Role: "user", Content: "x"}}, 8); err == nil {
+		t.Fatal("a non-JSON 200 body should be an error")
 	}
 }
 
@@ -130,7 +154,15 @@ func TestDefaultTimeoutIsApplied(t *testing.T) {
 // query string — a provider entry may authenticate via ?key=... — into the
 // returned error, which callers write to stderr.
 func TestCompleteRedactsQueryCredentialsInTransportErrors(t *testing.T) {
-	client, err := New("http://127.0.0.1:1/v1?secret=sk-live-secret", "k", "m", &http.Client{Timeout: time.Second})
+	// Bind a listener and close it: the address is deterministically
+	// refused, unlike a hardcoded port that something could occupy.
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	addr := l.Addr().String()
+	l.Close()
+	client, err := New("http://"+addr+"/v1?secret=sk-live-secret", "k", "m", &http.Client{Timeout: time.Second})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

@@ -43,7 +43,7 @@ type statusRun struct {
 	// "provider/model" when the run's permission policy declared one.
 	PermissionModelDecider *string `json:"permission_model_decider,omitempty"`
 	// Pointer so an explicit false survives the omitempty passthrough.
-	PermissionDeciderExhausted *bool `json:"permission_decider_exhausted,omitempty"`
+	PermissionDeciderExhausted *bool          `json:"permission_decider_exhausted,omitempty"`
 	EffectiveBackend           *string        `json:"effective_backend,omitempty"`
 	EffectiveAgent             *string        `json:"effective_agent,omitempty"`
 	EffectiveModel             *string        `json:"effective_model,omitempty"`

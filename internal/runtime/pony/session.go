@@ -13,12 +13,12 @@ import (
 type sessionState struct {
 	mu sync.Mutex
 
-	history    []model.Message
-	cancel     context.CancelFunc // cancels the in-flight Prompt call
-	subs       []chan events.Event
-	subsMu     sync.Mutex
-	initialised  bool // true after Start has set up history
-	droppedEvents int // count of events dropped due to full subscriber channels
+	history       []model.Message
+	cancel        context.CancelFunc // cancels the in-flight Prompt call
+	subs          []chan events.Event
+	subsMu        sync.Mutex
+	initialised   bool   // true after Start has set up history
+	droppedEvents int    // count of events dropped due to full subscriber channels
 	runtimeID     string // supervisor-assigned runtime ID (rt_N)
 
 	// pendingPerm is set when a tool call is waiting for permission approval.

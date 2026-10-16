@@ -79,9 +79,9 @@ type reasoningStreamGuard struct {
 type deltaKind uint8
 
 const (
-	deltaHex   deltaKind = iota // single [0-9a-fA-F] char
-	deltaProgress               // any other non-empty delta
-	deltaEmpty                  // empty delta (should not normally happen)
+	deltaHex      deltaKind = iota // single [0-9a-fA-F] char
+	deltaProgress                  // any other non-empty delta
+	deltaEmpty                     // empty delta (should not normally happen)
 )
 
 // knownControlTokens is the set of upstream provider control tokens that
@@ -242,12 +242,12 @@ func (g *reasoningStreamGuard) Diagnostics() map[string]any {
 		return nil
 	}
 	return map[string]any{
-		"abort_signal":      g.abortSignal,
-		"observed_total":    g.observedTotal,
-		"hex_total":         g.hexTotal,
-		"hex_in_window":     g.hexInWindow,
-		"window_size":       g.windowSize,
-		"consecutive_hex":   g.consecutiveHex,
+		"abort_signal":       g.abortSignal,
+		"observed_total":     g.observedTotal,
+		"hex_total":          g.hexTotal,
+		"hex_in_window":      g.hexInWindow,
+		"window_size":        g.windowSize,
+		"consecutive_hex":    g.consecutiveHex,
 		"progress_in_window": g.progressInWindow,
 	}
 }

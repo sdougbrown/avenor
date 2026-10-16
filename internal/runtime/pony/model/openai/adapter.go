@@ -187,7 +187,7 @@ func (a *Adapter) parseSSE(ctx context.Context, reader io.Reader, ch chan<- mode
 			if usage := chunk.Usage; usage != nil {
 				select {
 				case ch <- model.Chunk{
-					Type:  model.ChunkTypeUsage,
+					Type: model.ChunkTypeUsage,
 					Usage: &model.Usage{
 						InputTokens:  usage.InputTokens,
 						OutputTokens: usage.OutputTokens,
@@ -258,27 +258,27 @@ func (p *payloadParser) processDelta(delta openAIDelta) {
 }
 
 type openAIRequest struct {
-	Model     string            `json:"model"`
-	Messages  []openAIMessage   `json:"messages"`
-	Tools     []openAITool      `json:"tools,omitempty"`
-	Stream    bool              `json:"stream"`
-	MaxTokens int               `json:"max_tokens,omitempty"`
+	Model     string          `json:"model"`
+	Messages  []openAIMessage `json:"messages"`
+	Tools     []openAITool    `json:"tools,omitempty"`
+	Stream    bool            `json:"stream"`
+	MaxTokens int             `json:"max_tokens,omitempty"`
 }
 
 type openAIMessage struct {
-	Role       string                   `json:"role"`
-	Content    *string                  `json:"content,omitempty"`
-	ToolCallID string                   `json:"tool_call_id,omitempty"`
-	ToolCalls  []openAIToolCallMessage  `json:"tool_calls,omitempty"`
+	Role       string                  `json:"role"`
+	Content    *string                 `json:"content,omitempty"`
+	ToolCallID string                  `json:"tool_call_id,omitempty"`
+	ToolCalls  []openAIToolCallMessage `json:"tool_calls,omitempty"`
 }
 
 // openAIToolCallMessage is the full tool call structure for request messages.
 // OpenAI API requires type:"function" and a nested function object with
 // name and arguments (JSON-encoded string).
 type openAIToolCallMessage struct {
-	ID       string               `json:"id"`
-	Type     string               `json:"type"`
-	Function openAIToolCallFunc   `json:"function"`
+	ID       string             `json:"id"`
+	Type     string             `json:"type"`
+	Function openAIToolCallFunc `json:"function"`
 }
 
 type openAIToolCallFunc struct {
@@ -287,8 +287,8 @@ type openAIToolCallFunc struct {
 }
 
 type openAITool struct {
-	Type     string           `json:"type"`
-	Function openAIFunction   `json:"function"`
+	Type     string         `json:"type"`
+	Function openAIFunction `json:"function"`
 }
 
 type openAIFunction struct {
@@ -312,10 +312,10 @@ type openAIChoice struct {
 }
 
 type openAIDelta struct {
-	Role              string           `json:"role,omitempty"`
-	Content           string           `json:"content,omitempty"`
-	ReasoningContent  string           `json:"reasoning_content,omitempty"`
-	ToolCalls         []openAIToolCall `json:"tool_calls,omitempty"`
+	Role             string           `json:"role,omitempty"`
+	Content          string           `json:"content,omitempty"`
+	ReasoningContent string           `json:"reasoning_content,omitempty"`
+	ToolCalls        []openAIToolCall `json:"tool_calls,omitempty"`
 }
 
 type openAIToolCall struct {
