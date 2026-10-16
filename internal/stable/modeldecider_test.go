@@ -181,3 +181,19 @@ func TestParseModelDecisionSkipsUndecidableObjects(t *testing.T) {
 		t.Fatalf("parseModelDecision = %q/%q, %v; want reject/destructive", decision, reason, err)
 	}
 }
+
+// TestReasonSuffixStripsControlCharacters proves model-supplied reasons
+// cannot carry terminal escape sequences into stderr logs: C0/C1 control
+// bytes are stripped, length still bounded.
+func TestReasonSuffixStripsControlCharacters(t *testing.T) {
+	for _, tc := range []struct{ name, in, want string }{
+		{"ansi escape", "a\x1b[31mb", " (a[31mb)"},
+		{"del", "a\x7fb", " (ab)"},
+		{"c1 byte decodes to replacement", "a\x9bb", " (ab)"},
+		{"lone newline", "a\nb", " (ab)"},
+	} {
+		if got := reasonSuffix(tc.in); got != tc.want {
+			t.Errorf("%s: reasonSuffix(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
+		}
+	}
+}

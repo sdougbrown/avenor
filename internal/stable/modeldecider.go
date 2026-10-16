@@ -86,15 +86,21 @@ func resolvePermissionModelDeciderKey(md *workflow.PermissionModelDecider) (stri
 // gate. A defer is a decision, not a failure: the request stays pending and
 // nothing retries, mirroring a harness decider that reads the request and
 // exits without answering.
-func (s *Supervisor) resolvePermissionWithModel(ctx context.Context, md workflow.PermissionModelDecider, key, slotKey, runtimeID, requestID string, options []any, label string) {
+// The returned bool asks the caller to re-route the request from its cached
+// options (a failed or unparseable call within the retry bound); the caller
+// re-routes only after the deferred slot release, so acquire/release stays
+// strictly paired and the retry cannot contend with the slot the failed
+// call held.
+func (s *Supervisor) resolvePermissionWithModel(ctx context.Context, md workflow.PermissionModelDecider, key, slotKey, runtimeID, requestID string, options []any, label string) (retry bool) {
+	defer s.releaseModelDeciderSlot(slotKey)
 	if s.control.PermissionResolverState(runtimeID, requestID) == control.PermissionResolverResolved {
-		return
+		return false
 	}
 	s.controlMu.Lock()
 	rt := s.runtimes[runtimeID]
 	s.controlMu.Unlock()
 	if rt == nil {
-		return
+		return false
 	}
 	rt.mu.Lock()
 	rt.modelDeciderCalls++
@@ -104,15 +110,14 @@ func (s *Supervisor) resolvePermissionWithModel(ctx context.Context, md workflow
 		// A budget stop is a policy stop, not a failure: the request stays
 		// pending for a human and nothing retries.
 		fmt.Fprintf(s.stderrWriter(), "avenor: model decider budget (%d calls) exhausted for runtime %s; request %s stays pending for a human gate\n", maxModelDeciderCallsPerRuntime, runtimeID, requestID)
-		return
+		return false
 	}
 	optionsJSON, err := json.Marshal(options)
 	if err != nil {
 		// Options that cannot be encoded leave the model to judge from a
 		// blank request. Count the failure and re-route, exactly like a
 		// failed decider spawn.
-		s.failModelDecision(slotKey, runtimeID, requestID, fmt.Errorf("encode permission options: %w", err))
-		return
+		return s.failModelDecision(slotKey, runtimeID, requestID, fmt.Errorf("encode permission options: %w", err))
 	}
 	requestSnapshot := s.modelDeciderPermissionSnapshot(runtimeID)
 	task := s.modelDeciderTaskContext(runtimeID)
@@ -120,26 +125,23 @@ func (s *Supervisor) resolvePermissionWithModel(ctx context.Context, md workflow
 
 	client, err := modelapi.New(md.BaseURL, key, md.Model, &http.Client{Timeout: modelapi.DefaultTimeout})
 	if err != nil {
-		s.failModelDecision(slotKey, runtimeID, requestID, err)
-		return
+		return s.failModelDecision(slotKey, runtimeID, requestID, err)
 	}
 	raw, err := client.Complete(ctx, []modelapi.Message{
 		{Role: "system", Content: system},
 		{Role: "user", Content: user},
 	}, modelDeciderMaxTokens)
 	if err != nil {
-		s.failModelDecision(slotKey, runtimeID, requestID, err)
-		return
+		return s.failModelDecision(slotKey, runtimeID, requestID, err)
 	}
 	decision, reason, err := parseModelDecision(raw)
 	if err != nil {
-		s.failModelDecision(slotKey, runtimeID, requestID, fmt.Errorf("decision for runtime %s request %s: %w", runtimeID, requestID, err))
-		return
+		return s.failModelDecision(slotKey, runtimeID, requestID, fmt.Errorf("decision for runtime %s request %s: %w", runtimeID, requestID, err))
 	}
 	if decision == "defer" {
 		fmt.Fprintf(s.stderrWriter(), "avenor: model decider (%s/%s) deferred request %s on runtime %s%s; it stays pending for a human gate\n",
 			md.Provider, md.Model, requestID, runtimeID, reasonSuffix(reason))
-		return
+		return false
 	}
 	optionID, requiresMessage := modelDecisionOption(options, decision)
 	if optionID == "" {
@@ -148,42 +150,40 @@ func (s *Supervisor) resolvePermissionWithModel(ctx context.Context, md workflow
 		// burning retries on a call that cannot be applied.
 		fmt.Fprintf(s.stderrWriter(), "avenor: model decider (%s/%s) decided %s for request %s on runtime %s but no %q option is pending; it stays pending for a human gate\n",
 			md.Provider, md.Model, decision, requestID, runtimeID, decision)
-		return
+		return false
 	}
 	message := truncateRunes(reason, maxModelDeciderReasonRunes)
 	if requiresMessage && strings.TrimSpace(message) == "" {
 		fmt.Fprintf(s.stderrWriter(), "avenor: model decider (%s/%s) decided %s for request %s on runtime %s but the option requires a message the model did not give; it stays pending for a human gate\n",
 			md.Provider, md.Model, decision, requestID, runtimeID)
-		return
+		return false
 	}
 	if err := s.answerPermission(runtimeID, requestID, optionID, message); err != nil {
 		// A request answered by a human while the call was in flight resolves
 		// cleanly; anything else is a failed attempt with the shared bound.
 		if resolved, _ := s.control.ResolvedPermissionMatches(runtimeID, requestID, optionID, message); resolved {
-			return
+			return false
 		}
-		s.failModelDecision(slotKey, runtimeID, requestID, err)
-		return
+		return s.failModelDecision(slotKey, runtimeID, requestID, err)
 	}
 	fmt.Fprintf(s.stderrWriter(), "avenor: model decider (%s/%s) answered request %s on runtime %s: %s%s\n",
 		md.Provider, md.Model, requestID, runtimeID, decision, reasonSuffix(reason))
+	return false
 }
 
 // failModelDecision records one failed direct-model decision attempt and
-// re-routes the request from its cached options unless the shared decider
-// retry bound is exhausted, in which case the request stays pending for a
-// human gate. The decision slot is released first, mirroring failSpawn's
-// release-before-retry order, so the retry cannot contend with the slot the
-// failing call still held.
-func (s *Supervisor) failModelDecision(slotKey, runtimeID, requestID string, err error) {
+// reports whether the request should be re-routed from its cached options.
+// The caller re-routes only after the deferred slot release (release-before-
+// retry, mirroring failSpawn), so acquire and release stay strictly paired.
+func (s *Supervisor) failModelDecision(slotKey, runtimeID, requestID string, err error) bool {
 	fmt.Fprintf(s.stderrWriter(), "avenor: model decider for runtime %s request %s: %v\n", runtimeID, requestID, err)
 	exhausted := s.recordPermissionDeciderFailure(runtimeID, requestID)
 	if exhausted {
 		fmt.Fprintf(s.stderrWriter(), "avenor: model decider for runtime %s request %s failed %d times; no further decision calls for this request — it stays pending for a human gate\n",
 			runtimeID, requestID, maxPermissionDeciderSpawnFailures)
-		return
+		return false
 	}
-	s.retryPermissionRequest(runtimeID, requestID)
+	return true
 }
 
 // modelDeciderPermissionSnapshot waits briefly for the pending request's
@@ -194,6 +194,7 @@ func (s *Supervisor) failModelDecision(slotKey, runtimeID, requestID string, err
 // and task alone.
 func (s *Supervisor) modelDeciderPermissionSnapshot(runtimeID string) map[string]any {
 	deadline := time.Now().Add(modelDeciderMirrorWait)
+	seenPending := false
 	for {
 		s.controlMu.Lock()
 		rt := s.runtimes[runtimeID]
@@ -210,12 +211,18 @@ func (s *Supervisor) modelDeciderPermissionSnapshot(runtimeID string) map[string
 			rt.mu.Unlock()
 			return snap
 		}
-		pending, mirrored := rt.pendingPermission, rt.permission != nil
+		pending := rt.pendingPermission
+		if pending {
+			seenPending = true
+		}
 		rt.mu.Unlock()
-		if pending && !mirrored && time.Now().After(deadline) {
+		// A request the mirror briefly showed pending but that is no longer
+		// pending was answered by a human while this goroutine polled; a
+		// decision call for it would be wasted work.
+		if seenPending && !pending {
 			return nil
 		}
-		if !pending && time.Now().After(deadline) {
+		if time.Now().After(deadline) {
 			return nil
 		}
 		time.Sleep(25 * time.Millisecond)
@@ -366,11 +373,12 @@ func modelDecisionOption(options []any, decision string) (optionID string, requi
 }
 
 // reasonSuffix renders a model reason for a stderr log line. The reason
-// originates outside avenor, so control characters (terminal escape
-// sequences included) are stripped and the length is bounded.
+// originates outside avenor, so control characters (terminal escape bytes
+// included) are stripped and the length is bounded; a broken escape sequence
+// degrades to inert text.
 func reasonSuffix(reason string) string {
 	reason = strings.Map(func(r rune) rune {
-		if r < 0x20 || (r >= 0x7f && r < 0xa0) {
+		if r < 0x20 || r == 0x7f || r == 0xfffd {
 			return -1
 		}
 		return r

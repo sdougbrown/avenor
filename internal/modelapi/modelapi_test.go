@@ -124,3 +124,21 @@ func TestDefaultTimeoutIsApplied(t *testing.T) {
 		t.Fatal("DefaultTimeout must be positive")
 	}
 }
+
+// TestCompleteRedactsQueryCredentialsInTransportErrors proves a transport
+// error (timeout, refused connection) never carries the registry base_url's
+// query string — a provider entry may authenticate via ?key=... — into the
+// returned error, which callers write to stderr.
+func TestCompleteRedactsQueryCredentialsInTransportErrors(t *testing.T) {
+	client, err := New("http://127.0.0.1:1/v1?secret=sk-live-secret", "k", "m", &http.Client{Timeout: time.Second})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = client.Complete(context.Background(), []Message{{Role: "user", Content: "x"}}, 8)
+	if err == nil {
+		t.Fatal("a refused connection should error")
+	}
+	if strings.Contains(err.Error(), "sk-live-secret") {
+		t.Fatalf("transport error leaked the query-string credential: %v", err)
+	}
+}

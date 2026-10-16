@@ -3978,8 +3978,11 @@ func (s *Supervisor) routePermissionRequest(runtimeID, requestID string, options
 			return
 		}
 		go func() {
-			s.resolvePermissionWithModel(ctx, *modelDecider, modelDeciderKey, slotKey, runtimeID, requestID, options, label)
-			s.releaseModelDeciderSlot(slotKey)
+			if s.resolvePermissionWithModel(ctx, *modelDecider, modelDeciderKey, slotKey, runtimeID, requestID, options, label) {
+				// The decision slot is already released; the re-route can
+				// acquire cleanly.
+				s.retryPermissionRequest(runtimeID, requestID)
+			}
 		}()
 		return
 	}

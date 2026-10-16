@@ -109,9 +109,12 @@ func (c *Client) Complete(ctx context.Context, messages []Message, maxTokens int
 		// Transport errors embed the full request URL; a registry base_url
 		// may carry credentials in its query string, so redact everything
 		// after the path before the error reaches any log.
-		if uerr := (*url.Error)(nil); errors.As(err, &uerr) {
-			if u, perr := url.Parse(uerr.URL); perr == nil {
-				u.RawQuery, u.User, uerr.URL = "", nil, u.String()
+		var uerr *url.Error
+		if errors.As(err, &uerr) {
+			u, perr := url.Parse(uerr.URL)
+			if perr == nil {
+				u.RawQuery, u.User = "", nil
+				uerr.URL = u.String()
 			}
 		}
 		return "", fmt.Errorf("modelapi: call %s: %w", c.model, err)

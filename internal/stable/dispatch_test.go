@@ -2113,6 +2113,25 @@ func scriptedWorkerRequest(requestID string, gate <-chan struct{}) *stableScript
 	}}}
 }
 
+// newModelDeciderFixture builds the shared setup for the dispatched-node
+// model-decider tests: a decision server serving respond, a provider
+// registry pointing at it, the decision key in the environment, and a
+// fixture whose single node declares the decider_model policy. The caller
+// wires newProviderFunc and holds the worker open as its test needs.
+func newModelDeciderFixture(t *testing.T, name string, respond func(http.ResponseWriter)) (*dispatchFixture, *modelDeciderCapture) {
+	t.Helper()
+	capture := &modelDeciderCapture{}
+	srv := newModelDeciderServer(capture, respond)
+	t.Cleanup(srv.Close)
+	writeProviderRegistry(t, fmt.Sprintf(`{
+		"providers": {"groq": {"base_url": %q, "api_key_env": "MODEL_DECIDER_TEST_KEY"}}
+	}`, srv.URL))
+	t.Setenv("MODEL_DECIDER_TEST_KEY", "sk-model-test")
+	template := mustJSON(t, dispatchModelDeciderTemplate("groq", "llama-3.3-70b", "tmpl-dispatch-"+name))
+	f := newDispatchFixtureTemplate(t, name, 4, 4, template)
+	return f, capture
+}
+
 // TestDispatchModelDeciderAnswersRequest proves the direct-model resolver end
 // to end: a dispatched node with a decider_model assignment spawns its worker
 // with no file permission handler and no decider run; the pending request is
@@ -2122,18 +2141,9 @@ func scriptedWorkerRequest(requestID string, gate <-chan struct{}) *stableScript
 // option with its reason as the answer message.
 func TestDispatchModelDeciderAnswersRequest(t *testing.T) {
 	requestID := "perm_req_model_allow"
-	capture := &modelDeciderCapture{}
-	srv := newModelDeciderServer(capture, func(w http.ResponseWriter) {
+	f, capture := newModelDeciderFixture(t, "dispatch-modeldec-allow", func(w http.ResponseWriter) {
 		w.Write([]byte(`{"choices":[{"message":{"content":"{\"decision\":\"allow\",\"reason\":\"cleanup is plainly needed for the task\"}"}}]}`))
 	})
-	defer srv.Close()
-	writeProviderRegistry(t, fmt.Sprintf(`{
-		"providers": {"groq": {"base_url": %q, "api_key_env": "MODEL_DECIDER_TEST_KEY"}}
-	}`, srv.URL))
-	t.Setenv("MODEL_DECIDER_TEST_KEY", "sk-model-test")
-
-	template := mustJSON(t, dispatchModelDeciderTemplate("groq", "llama-3.3-70b", "tmpl-dispatch-dispatch-modeldec-allow"))
-	f := newDispatchFixtureTemplate(t, "dispatch-modeldec-allow", 4, 4, template)
 	gate := make(chan struct{})
 	defer close(gate)
 	var deciderSpawned atomic.Bool
@@ -2212,18 +2222,9 @@ func TestDispatchModelDeciderAnswersRequest(t *testing.T) {
 // retry fires, and the decider-exhausted flag stays clear.
 func TestDispatchModelDeciderDeferStaysPending(t *testing.T) {
 	requestID := "perm_req_model_defer"
-	capture := &modelDeciderCapture{}
-	srv := newModelDeciderServer(capture, func(w http.ResponseWriter) {
+	f, capture := newModelDeciderFixture(t, "dispatch-modeldec-defer", func(w http.ResponseWriter) {
 		w.Write([]byte(`{"choices":[{"message":{"content":"{\"decision\":\"defer\",\"reason\":\"unclear scope\"}"}}]}`))
 	})
-	defer srv.Close()
-	writeProviderRegistry(t, fmt.Sprintf(`{
-		"providers": {"groq": {"base_url": %q, "api_key_env": "MODEL_DECIDER_TEST_KEY"}}
-	}`, srv.URL))
-	t.Setenv("MODEL_DECIDER_TEST_KEY", "sk-model-test")
-
-	template := mustJSON(t, dispatchModelDeciderTemplate("groq", "llama-3.3-70b", "tmpl-dispatch-dispatch-modeldec-defer"))
-	f := newDispatchFixtureTemplate(t, "dispatch-modeldec-defer", 4, 4, template)
 	gate := make(chan struct{})
 	defer close(gate)
 	f.sup.newProviderFunc = func(_ runtime.StartOptions, _ string) (runtime.Provider, error) {
@@ -2276,18 +2277,9 @@ func TestDispatchModelDeciderDeferStaysPending(t *testing.T) {
 // stays pending for a human gate with the exhausted flag surfaced.
 func TestDispatchModelDeciderFailuresBounded(t *testing.T) {
 	requestID := "perm_req_model_fail"
-	capture := &modelDeciderCapture{}
-	srv := newModelDeciderServer(capture, func(w http.ResponseWriter) {
+	f, capture := newModelDeciderFixture(t, "dispatch-modeldec-fail", func(w http.ResponseWriter) {
 		http.Error(w, "upstream unavailable", http.StatusBadGateway)
 	})
-	defer srv.Close()
-	writeProviderRegistry(t, fmt.Sprintf(`{
-		"providers": {"groq": {"base_url": %q, "api_key_env": "MODEL_DECIDER_TEST_KEY"}}
-	}`, srv.URL))
-	t.Setenv("MODEL_DECIDER_TEST_KEY", "sk-model-test")
-
-	template := mustJSON(t, dispatchModelDeciderTemplate("groq", "llama-3.3-70b", "tmpl-dispatch-dispatch-modeldec-fail"))
-	f := newDispatchFixtureTemplate(t, "dispatch-modeldec-fail", 4, 4, template)
 	gate := make(chan struct{})
 	defer close(gate)
 	f.sup.newProviderFunc = func(_ runtime.StartOptions, _ string) (runtime.Provider, error) {
@@ -2320,6 +2312,15 @@ func TestDispatchModelDeciderFailuresBounded(t *testing.T) {
 	rt, _ := status.(map[string]any)
 	if pending, _ := rt["pending_permission"].(bool); !pending {
 		t.Fatal("request must stay pending after exhausted retries")
+	}
+	// Every acquire must be paired with exactly one release: a leaked slot
+	// would permanently shrink the concurrency pool (four exhausted requests
+	// would kill the decider for the process lifetime).
+	f.sup.permDeciderMu.Lock()
+	active := f.sup.modelDeciderActive
+	f.sup.permDeciderMu.Unlock()
+	if active != 0 {
+		t.Fatalf("modelDeciderActive = %d after exhausted retries, want 0 (no leaked slots)", active)
 	}
 }
 
@@ -2354,18 +2355,9 @@ func TestSpawnModelDeciderRequiresResolvableKey(t *testing.T) {
 // stay pending for a human without a call.
 func TestDispatchModelDeciderBudgetBoundsCalls(t *testing.T) {
 	requestID := "perm_req_model_budget_0"
-	capture := &modelDeciderCapture{}
-	srv := newModelDeciderServer(capture, func(w http.ResponseWriter) {
+	f, capture := newModelDeciderFixture(t, "dispatch-modeldec-budget", func(w http.ResponseWriter) {
 		w.Write([]byte(`{"choices":[{"message":{"content":"{\"decision\":\"defer\"}"}}]}`))
 	})
-	defer srv.Close()
-	writeProviderRegistry(t, fmt.Sprintf(`{
-		"providers": {"groq": {"base_url": %q, "api_key_env": "MODEL_DECIDER_TEST_KEY"}}
-	}`, srv.URL))
-	t.Setenv("MODEL_DECIDER_TEST_KEY", "sk-model-test")
-
-	template := mustJSON(t, dispatchModelDeciderTemplate("groq", "llama-3.3-70b", "tmpl-dispatch-dispatch-modeldec-budget"))
-	f := newDispatchFixtureTemplate(t, "dispatch-modeldec-budget", 8, 8, template)
 	gate := make(chan struct{})
 	defer close(gate)
 	f.sup.newProviderFunc = func(_ runtime.StartOptions, _ string) (runtime.Provider, error) {
@@ -2602,26 +2594,17 @@ func seedPendingPermission(t *testing.T, sup *Supervisor, runtimeID string) {
 // but which requires a message the model did not supply stays pending too.
 func TestDispatchModelDeciderUnappliableDecisionStaysPending(t *testing.T) {
 	requestID := "perm_req_model_unappliable"
-	capture := &modelDeciderCapture{}
 	// The first call decides reject with only an allow option pending; the
 	// second decides allow with no reason against an option that requires a
 	// message. Both are decisions the resolver cannot apply.
 	var callNum atomic.Int64
-	srv := newModelDeciderServer(capture, func(w http.ResponseWriter) {
+	f, capture := newModelDeciderFixture(t, "dispatch-modeldec-unappliable", func(w http.ResponseWriter) {
 		if callNum.Add(1) == 1 {
 			w.Write([]byte(`{"choices":[{"message":{"content":"{\"decision\":\"reject\",\"reason\":\"looks bad\"}"}}]}`))
 			return
 		}
 		w.Write([]byte(`{"choices":[{"message":{"content":"{\"decision\":\"allow\"}"}}]}`))
 	})
-	defer srv.Close()
-	writeProviderRegistry(t, fmt.Sprintf(`{
-		"providers": {"groq": {"base_url": %q, "api_key_env": "MODEL_DECIDER_TEST_KEY"}}
-	}`, srv.URL))
-	t.Setenv("MODEL_DECIDER_TEST_KEY", "sk-model-test")
-
-	template := mustJSON(t, dispatchModelDeciderTemplate("groq", "llama-3.3-70b", "tmpl-dispatch-dispatch-modeldec-unappliable"))
-	f := newDispatchFixtureTemplate(t, "dispatch-modeldec-unappliable", 4, 4, template)
 	gate := make(chan struct{})
 	defer close(gate)
 	// The worker's scripted request offers only an allow option; the model
