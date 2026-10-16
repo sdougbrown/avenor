@@ -301,3 +301,60 @@ func sampleTemplate() Template {
 		CompositionLimits: &CompositionLimits{MaximumDepth: 4, MaximumChildren: 32},
 	}
 }
+
+// TestExecutionSelectionPermissionModelDeciderRoundTrip proves a resolved
+// direct-model decider survives snapshot serialization — the pinned policy
+// travels with retries like every other selection field, carrying the
+// provider, model, endpoint, and key variable name but never a credential.
+func TestExecutionSelectionPermissionModelDeciderRoundTrip(t *testing.T) {
+	selection := &ExecutionSelection{
+		Role: "reviewer", Backend: "pi",
+		PermissionModelDecider: &PermissionModelDecider{
+			Provider: "groq", Model: "llama-3.3-70b",
+			BaseURL: "http://model.example/openai/v1", APIKeyEnv: "GROQ_API_KEY",
+		},
+	}
+	data, err := json.Marshal(selection)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(data), "api_key") && !strings.Contains(string(data), "api_key_env") {
+		t.Fatalf("selection serialized a credential: %s", data)
+	}
+	var decoded ExecutionSelection
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(decoded, *selection) {
+		t.Fatalf("round trip mismatch\n got: %#v\nwant: %#v", decoded, *selection)
+	}
+	if err := decoded.ValidatePermissionPolicy(); err != nil {
+		t.Fatalf("ValidatePermissionPolicy on a model-decider selection: %v", err)
+	}
+}
+
+// TestExecutionSelectionValidatePermissionPolicy pins the selection-level
+// permission-policy combinations: at most one unattended policy may ride on
+// a selection, and the boundary check names each conflict.
+func TestExecutionSelectionValidatePermissionPolicy(t *testing.T) {
+	harness := &PermissionDecider{Entry: "rm-guard"}
+	model := &PermissionModelDecider{Provider: "groq", Model: "m"}
+	if err := (&ExecutionSelection{PermissionDecider: harness}).ValidatePermissionPolicy(); err != nil {
+		t.Fatalf("harness decider alone: %v", err)
+	}
+	if err := (&ExecutionSelection{PermissionModelDecider: model}).ValidatePermissionPolicy(); err != nil {
+		t.Fatalf("model decider alone: %v", err)
+	}
+	if err := (&ExecutionSelection{AutoApprove: true, PermissionDecider: harness}).ValidatePermissionPolicy(); err == nil ||
+		!strings.Contains(err.Error(), "auto_approve and permission deciders are mutually exclusive") {
+		t.Fatalf("auto + harness = %v, want mutual exclusion", err)
+	}
+	if err := (&ExecutionSelection{AutoApprove: true, PermissionModelDecider: model}).ValidatePermissionPolicy(); err == nil ||
+		!strings.Contains(err.Error(), "auto_approve and permission deciders are mutually exclusive") {
+		t.Fatalf("auto + model = %v, want mutual exclusion", err)
+	}
+	if err := (&ExecutionSelection{PermissionDecider: harness, PermissionModelDecider: model}).ValidatePermissionPolicy(); err == nil ||
+		!strings.Contains(err.Error(), "permission_decider and permission_model_decider are mutually exclusive") {
+		t.Fatalf("harness + model = %v, want mutual exclusion", err)
+	}
+}

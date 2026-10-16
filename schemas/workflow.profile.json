@@ -473,9 +473,23 @@
               "decider": {
                 "type": "string",
                 "minLength": 1
+              },
+              "decider_model": {
+                "type": "object",
+                "properties": {
+                  "provider": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "model": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": ["provider", "model"],
+                "additionalProperties": false
               }
             },
-            "required": ["decider"],
             "additionalProperties": false
           }
         },

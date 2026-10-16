@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -839,11 +841,29 @@ func TestSpawnRejectsAutoApproveWithPermissionDecider(t *testing.T) {
 		AutoApprove:       true,
 		PermissionDecider: &workflow.PermissionDecider{Entry: "rm-guard"},
 	})
-	if err == nil || !strings.Contains(err.Error(), "auto_approve and permission_decider are mutually exclusive") {
+	if err == nil || !strings.Contains(err.Error(), "auto_approve and permission deciders are mutually exclusive") {
 		t.Fatalf("err = %v, want auto_approve/permission_decider mutual exclusion", err)
 	}
+	_, err = sup.spawn(SpawnParams{
+		Prompt:                 "hello",
+		Dir:                    "/tmp",
+		AutoApprove:            true,
+		PermissionModelDecider: &workflow.PermissionModelDecider{Provider: "groq", Model: "m"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "auto_approve and permission deciders are mutually exclusive") {
+		t.Fatalf("err = %v, want auto_approve/permission_model_decider mutual exclusion", err)
+	}
+	_, err = sup.spawn(SpawnParams{
+		Prompt:                 "hello",
+		Dir:                    "/tmp",
+		PermissionDecider:      &workflow.PermissionDecider{Entry: "rm-guard"},
+		PermissionModelDecider: &workflow.PermissionModelDecider{Provider: "groq", Model: "m"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "permission_decider and permission_model_decider are mutually exclusive") {
+		t.Fatalf("err = %v, want decider/decider_model mutual exclusion", err)
+	}
 	if got := sup.activeRuntimeCount(); got != 0 {
-		t.Fatalf("activeRuntimeCount() = %d, want 0 after rejected spawn", got)
+		t.Fatalf("activeRuntimeCount() = %d, want 0 after rejected spawns", got)
 	}
 }
 
@@ -1919,5 +1939,402 @@ func TestTranslateDispatchOutcome(t *testing.T) {
 		if got := translateDispatchOutcome(tt.in); got != tt.want {
 			t.Errorf("translateDispatchOutcome(%q) = %q, want %q", tt.in, got, tt.want)
 		}
+	}
+}
+
+// writeProviderRegistry installs a user-level provider registry for a test:
+// XDG_CONFIG_HOME points at a scratch dir holding the given providers.json.
+func writeProviderRegistry(t *testing.T, providersJSON string) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "avenor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "avenor", "providers.json"), []byte(providersJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", dir)
+}
+
+// dispatchModelDeciderTemplate builds the single-node dispatch template whose
+// assignment routes the node's permission requests to a direct-model decider
+// (provider + model, no roster file).
+func dispatchModelDeciderTemplate(provider, model, templateID string) map[string]any {
+	return map[string]any{
+		"schema_version":   1,
+		"template_id":      templateID,
+		"template_version": "1",
+		"entry_nodes":      []string{"start"},
+		"nodes": []any{map[string]any{
+			"id":         "start",
+			"action":     map[string]any{"type": "run", "prompt": "clean up the build directory"},
+			"assignment": map[string]any{"permission_policy": map[string]any{"decider_model": map[string]any{"provider": provider, "model": model}}},
+			"dispatch":   map[string]any{"mode": "auto", "controller_id": "c1"},
+			"retry_policy": map[string]any{
+				"max_attempts": 3,
+				"exhaustion":   "block",
+			},
+		}},
+		"terminal_outcomes":    []string{"done"},
+		"default_lease_policy": map[string]any{"ttl_seconds": 900},
+	}
+}
+
+// TestResolveAssignmentSelectionModelDecider proves the direct-model decider
+// resolves onto the pinned selection from the user-level provider registry —
+// without a roster file — and pins the endpoint and key variable name while
+// never carrying a credential. An unknown provider and combined decider
+// variants are rejected.
+func TestResolveAssignmentSelectionModelDecider(t *testing.T) {
+	writeProviderRegistry(t, `{
+		"providers": {
+			"groq": {"base_url": "http://model.example/openai/v1", "api_key_env": "MODEL_DECIDER_TEST_KEY"},
+			"lit":  {"base_url": "http://model.example/openai/v1", "api_key": "literal"}
+		}
+	}`)
+	sel, err := resolveAssignmentSelection(&workflow.Assignment{
+		PermissionPolicy: &workflow.PermissionPolicy{DeciderModel: &workflow.PermissionDeciderModel{Provider: "groq", Model: "llama-3.3-70b"}},
+	})
+	if err != nil {
+		t.Fatalf("resolveAssignmentSelection: %v", err)
+	}
+	if sel.PermissionModelDecider == nil ||
+		sel.PermissionModelDecider.Provider != "groq" ||
+		sel.PermissionModelDecider.Model != "llama-3.3-70b" ||
+		sel.PermissionModelDecider.BaseURL != "http://model.example/openai/v1" ||
+		sel.PermissionModelDecider.APIKeyEnv != "MODEL_DECIDER_TEST_KEY" {
+		t.Fatalf("selection.PermissionModelDecider = %+v, want the pinned groq endpoint", sel.PermissionModelDecider)
+	}
+	if sel.AutoApprove || sel.PermissionDecider != nil {
+		t.Fatalf("selection = %+v, want no other permission policy", sel)
+	}
+	// A literal api_key provider pins the endpoint but never the credential.
+	sel, err = resolveAssignmentSelection(&workflow.Assignment{
+		PermissionPolicy: &workflow.PermissionPolicy{DeciderModel: &workflow.PermissionDeciderModel{Provider: "lit", Model: "m"}},
+	})
+	if err != nil {
+		t.Fatalf("resolveAssignmentSelection(literal key): %v", err)
+	}
+	if sel.PermissionModelDecider == nil || sel.PermissionModelDecider.APIKeyEnv != "" {
+		t.Fatalf("selection.PermissionModelDecider = %+v, want no api_key_env and no credential", sel.PermissionModelDecider)
+	}
+	if _, err := resolveAssignmentSelection(&workflow.Assignment{
+		PermissionPolicy: &workflow.PermissionPolicy{DeciderModel: &workflow.PermissionDeciderModel{Provider: "missing", Model: "m"}},
+	}); err == nil || !strings.Contains(err.Error(), `provider "missing" is not configured`) {
+		t.Fatalf("resolveAssignmentSelection(unknown provider) error = %v, want not configured", err)
+	}
+	rosterPath := writeStage5Roster(t, t.TempDir(), `{
+		"worker":  {"backend": "pi", "agent": "worker", "model": "m"},
+		"rm-guard": {"backend": "pi", "agent": "rm-guard", "model": "guard-m"}
+	}`)
+	if _, err := resolveAssignmentSelection(&workflow.Assignment{
+		RosterFile:       rosterPath,
+		RosterEntry:      "worker",
+		PermissionPolicy: &workflow.PermissionPolicy{Decider: "rm-guard", DeciderModel: &workflow.PermissionDeciderModel{Provider: "groq", Model: "m"}},
+	}); err == nil || !strings.Contains(err.Error(), "cannot declare both decider and decider_model") {
+		t.Fatalf("resolveAssignmentSelection(both variants) error = %v, want mutual exclusion", err)
+	}
+	if _, err := resolveAssignmentSelection(&workflow.Assignment{
+		AutoApprove:      true,
+		PermissionPolicy: &workflow.PermissionPolicy{DeciderModel: &workflow.PermissionDeciderModel{Provider: "groq", Model: "m"}},
+	}); err == nil || !strings.Contains(err.Error(), "cannot declare both auto_approve and permission_policy") {
+		t.Fatalf("resolveAssignmentSelection(auto + model) error = %v, want mutual exclusion", err)
+	}
+	// A decider_model policy does not make the roster file an identity
+	// selector: a bare roster_file with only a model decider is still
+	// rejected by the spawn-selection rules.
+	if _, err := resolveAssignmentSelection(&workflow.Assignment{
+		RosterFile:       rosterPath,
+		PermissionPolicy: &workflow.PermissionPolicy{DeciderModel: &workflow.PermissionDeciderModel{Provider: "groq", Model: "m"}},
+	}); err == nil || !strings.Contains(err.Error(), "roster_file requires roster_entry") {
+		t.Fatalf("resolveAssignmentSelection(bare roster file) error = %v, want identity-selector rejection", err)
+	}
+}
+
+// modelDeciderCapture records what the decision endpoint saw.
+type modelDeciderCapture struct {
+	mu    sync.Mutex
+	calls int
+	auth  string
+	body  string
+}
+
+func (c *modelDeciderCapture) record(auth string, body []byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls++
+	c.auth = auth
+	c.body = string(body)
+}
+
+func (c *modelDeciderCapture) snapshot() (int, string, string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls, c.auth, c.body
+}
+
+// newModelDeciderServer serves OpenAI-compatible decision completions with a
+// fixed response body.
+func newModelDeciderServer(capture *modelDeciderCapture, respond func(w http.ResponseWriter)) *httptest.Server {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		capture.record(r.Header.Get("Authorization"), body)
+		respond(w)
+	}))
+	return srv
+}
+
+// scriptedWorkerRequest holds the worker runtime open after its scripted
+// permission.request so the decision and answer can be observed on a live
+// runtime.
+func scriptedWorkerRequest(requestID string, gate <-chan struct{}) *stableScriptedProvider {
+	return &stableScriptedProvider{attempt: -1, scripts: []stableScriptedAttempt{{
+		sessionID: "ses_modeldec_worker",
+		events: []stableScriptedEvent{
+			{event: events.Event{
+				Event:     "permission.request",
+				SessionID: "ses_modeldec_worker",
+				Fields: map[string]any{
+					"request_id": requestID,
+					"tool":       "bash",
+					"command":    "rm -rf /tmp/build",
+					"options": []any{
+						map[string]any{"optionId": "allow_once", "kind": "allow"},
+						map[string]any{"optionId": "reject_once", "kind": "reject"},
+					},
+				},
+			}},
+			{release: gate},
+		},
+	}}}
+}
+
+// TestDispatchModelDeciderAnswersRequest proves the direct-model resolver end
+// to end: a dispatched node with a decider_model assignment spawns its worker
+// with no file permission handler and no decider run; the pending request is
+// answered by a single model call to the configured provider (authenticated
+// with the registry key, judged against the node task and the request's
+// tool/command), and the model's allow decision applies the matching pending
+// option with its reason as the answer message.
+func TestDispatchModelDeciderAnswersRequest(t *testing.T) {
+	requestID := "perm_req_model_allow"
+	capture := &modelDeciderCapture{}
+	srv := newModelDeciderServer(capture, func(w http.ResponseWriter) {
+		w.Write([]byte(`{"choices":[{"message":{"content":"{\"decision\":\"allow\",\"reason\":\"cleanup is plainly needed for the task\"}"}}]}`))
+	})
+	defer srv.Close()
+	writeProviderRegistry(t, fmt.Sprintf(`{
+		"providers": {"groq": {"base_url": %q, "api_key_env": "MODEL_DECIDER_TEST_KEY"}}
+	}`, srv.URL))
+	t.Setenv("MODEL_DECIDER_TEST_KEY", "sk-model-test")
+
+	template := mustJSON(t, dispatchModelDeciderTemplate("groq", "llama-3.3-70b", "tmpl-dispatch-dispatch-modeldec-allow"))
+	f := newDispatchFixtureTemplate(t, "dispatch-modeldec-allow", 4, 4, template)
+	gate := make(chan struct{})
+	defer close(gate)
+	var deciderSpawned atomic.Bool
+	f.sup.newProviderFunc = func(startOpts runtime.StartOptions, _ string) (runtime.Provider, error) {
+		if strings.HasPrefix(startOpts.Label, "permdec:") {
+			deciderSpawned.Store(true)
+		}
+		return scriptedWorkerRequest(requestID, gate), nil
+	}
+	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
+	if err != nil {
+		t.Fatalf("dispatchWorkflowNode: %v", err)
+	}
+	if out.Kind != Dispatched {
+		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
+	}
+	waitFor(t, "runtime registration", func() bool { return f.sup.activeRuntimeCount() == 1 })
+	status, err := f.sup.RuntimeStatus(out.RuntimeID)
+	if err != nil {
+		t.Fatalf("RuntimeStatus: %v", err)
+	}
+	rtStatus, _ := status.(map[string]any)
+	if got, _ := rtStatus["permission_model_decider"].(string); got != "groq/llama-3.3-70b" {
+		t.Fatalf("worker permission_model_decider = %q, want groq/llama-3.3-70b", got)
+	}
+	if approve, _ := rtStatus["auto_approve"].(bool); approve {
+		t.Fatal("worker auto_approve = true, want false")
+	}
+	// The model's allow decision answers the request: the claim resolves with
+	// the chosen option and the reason as the message, the status clears, and
+	// no decider run was ever spawned.
+	waitFor(t, "model-answered permission", func() bool {
+		resolved, matches := f.sup.control.ResolvedPermissionMatches(out.RuntimeID, requestID, "allow_once", "cleanup is plainly needed for the task")
+		return resolved && matches
+	})
+	waitFor(t, "pending cleared", func() bool {
+		status, err := f.sup.RuntimeStatus(out.RuntimeID)
+		if err != nil {
+			return false
+		}
+		rt, _ := status.(map[string]any)
+		pending, _ := rt["pending_permission"].(bool)
+		return !pending
+	})
+	if deciderSpawned.Load() {
+		t.Fatal("a permdec: decider run was spawned for a direct-model policy, want none")
+	}
+	calls, auth, body := capture.snapshot()
+	if calls != 1 {
+		t.Fatalf("decision calls = %d, want 1", calls)
+	}
+	if auth != "Bearer sk-model-test" {
+		t.Fatalf("decision auth = %q, want the registry key", auth)
+	}
+	if !strings.Contains(body, `"model":"llama-3.3-70b"`) {
+		t.Fatalf("decision request body missing model: %s", body)
+	}
+	if !strings.Contains(body, "clean up the build directory") {
+		t.Fatalf("decision request body missing the node task: %s", body)
+	}
+	if !strings.Contains(body, "rm -rf /tmp/build") {
+		t.Fatalf("decision request body missing the pending command: %s", body)
+	}
+	if !strings.Contains(body, "allow_once") {
+		t.Fatalf("decision request body missing the options: %s", body)
+	}
+}
+
+// TestDispatchModelDeciderDeferStaysPending proves a defer decision is a
+// judgment, not a failure: the request stays pending for a human gate, no
+// retry fires, and the decider-exhausted flag stays clear.
+func TestDispatchModelDeciderDeferStaysPending(t *testing.T) {
+	requestID := "perm_req_model_defer"
+	capture := &modelDeciderCapture{}
+	srv := newModelDeciderServer(capture, func(w http.ResponseWriter) {
+		w.Write([]byte(`{"choices":[{"message":{"content":"{\"decision\":\"defer\",\"reason\":\"unclear scope\"}"}}]}`))
+	})
+	defer srv.Close()
+	writeProviderRegistry(t, fmt.Sprintf(`{
+		"providers": {"groq": {"base_url": %q, "api_key_env": "MODEL_DECIDER_TEST_KEY"}}
+	}`, srv.URL))
+	t.Setenv("MODEL_DECIDER_TEST_KEY", "sk-model-test")
+
+	template := mustJSON(t, dispatchModelDeciderTemplate("groq", "llama-3.3-70b", "tmpl-dispatch-dispatch-modeldec-defer"))
+	f := newDispatchFixtureTemplate(t, "dispatch-modeldec-defer", 4, 4, template)
+	gate := make(chan struct{})
+	defer close(gate)
+	f.sup.newProviderFunc = func(_ runtime.StartOptions, _ string) (runtime.Provider, error) {
+		return scriptedWorkerRequest(requestID, gate), nil
+	}
+	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
+	if err != nil {
+		t.Fatalf("dispatchWorkflowNode: %v", err)
+	}
+	if out.Kind != Dispatched {
+		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
+	}
+	waitFor(t, "decision call", func() bool {
+		calls, _, _ := capture.snapshot()
+		return calls >= 1
+	})
+	waitFor(t, "request mirrored pending", func() bool {
+		status, err := f.sup.RuntimeStatus(out.RuntimeID)
+		if err != nil {
+			return false
+		}
+		rt, _ := status.(map[string]any)
+		pending, _ := rt["pending_permission"].(bool)
+		return pending
+	})
+	// The deferred request stays pending: one call, no retry, not exhausted.
+	calls, _, _ := capture.snapshot()
+	if calls != 1 {
+		t.Fatalf("decision calls = %d, want 1 (a defer must not retry)", calls)
+	}
+	status, err := f.sup.RuntimeStatus(out.RuntimeID)
+	if err != nil {
+		t.Fatalf("RuntimeStatus: %v", err)
+	}
+	rt, _ := status.(map[string]any)
+	if pending, _ := rt["pending_permission"].(bool); !pending {
+		t.Fatal("deferred request must stay pending for a human gate")
+	}
+	if exhausted, _ := rt["permission_decider_exhausted"].(bool); exhausted {
+		t.Fatal("a defer must not mark the decider exhausted")
+	}
+	if state := f.sup.control.PermissionResolverState(out.RuntimeID, requestID); state == control.PermissionResolverResolved {
+		t.Fatal("a deferred request must not be resolved")
+	}
+}
+
+// TestDispatchModelDeciderFailuresBounded proves failed decision calls share
+// the harness decider's bounded failure semantics: each failure re-routes the
+// request internally, past the bound no further calls fire, and the request
+// stays pending for a human gate with the exhausted flag surfaced.
+func TestDispatchModelDeciderFailuresBounded(t *testing.T) {
+	requestID := "perm_req_model_fail"
+	capture := &modelDeciderCapture{}
+	srv := newModelDeciderServer(capture, func(w http.ResponseWriter) {
+		http.Error(w, "upstream unavailable", http.StatusBadGateway)
+	})
+	defer srv.Close()
+	writeProviderRegistry(t, fmt.Sprintf(`{
+		"providers": {"groq": {"base_url": %q, "api_key_env": "MODEL_DECIDER_TEST_KEY"}}
+	}`, srv.URL))
+	t.Setenv("MODEL_DECIDER_TEST_KEY", "sk-model-test")
+
+	template := mustJSON(t, dispatchModelDeciderTemplate("groq", "llama-3.3-70b", "tmpl-dispatch-dispatch-modeldec-fail"))
+	f := newDispatchFixtureTemplate(t, "dispatch-modeldec-fail", 4, 4, template)
+	gate := make(chan struct{})
+	defer close(gate)
+	f.sup.newProviderFunc = func(_ runtime.StartOptions, _ string) (runtime.Provider, error) {
+		return scriptedWorkerRequest(requestID, gate), nil
+	}
+	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
+	if err != nil {
+		t.Fatalf("dispatchWorkflowNode: %v", err)
+	}
+	if out.Kind != Dispatched {
+		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
+	}
+	waitFor(t, "decider retries exhausted", func() bool {
+		status, err := f.sup.RuntimeStatus(out.RuntimeID)
+		if err != nil {
+			return false
+		}
+		rt, _ := status.(map[string]any)
+		exhausted, _ := rt["permission_decider_exhausted"].(bool)
+		return exhausted
+	})
+	calls, _, _ := capture.snapshot()
+	if calls != maxPermissionDeciderSpawnFailures {
+		t.Fatalf("decision calls = %d, want %d (bounded retries, then a human gate)", calls, maxPermissionDeciderSpawnFailures)
+	}
+	status, err := f.sup.RuntimeStatus(out.RuntimeID)
+	if err != nil {
+		t.Fatalf("RuntimeStatus: %v", err)
+	}
+	rt, _ := status.(map[string]any)
+	if pending, _ := rt["pending_permission"].(bool); !pending {
+		t.Fatal("request must stay pending after exhausted retries")
+	}
+}
+
+// TestSpawnModelDeciderRequiresResolvableKey pins the fail-fast contract: a
+// direct-model decider whose provider key cannot be resolved at spawn fails
+// the spawn before any runtime starts, surfacing the misconfiguration to the
+// operator instead of stalling the first permission request.
+func TestSpawnModelDeciderRequiresResolvableKey(t *testing.T) {
+	writeProviderRegistry(t, `{
+		"providers": {"groq": {"base_url": "http://model.example/openai/v1", "api_key_env": "MODEL_DECIDER_TEST_UNSET_KEY"}}
+	}`)
+	sup := NewSupervisor(Config{
+		ControlSocket: newStableSocketPath(t, "modeldec-nokey"),
+		MaxRuntimes:   1,
+	})
+	_, err := sup.spawn(SpawnParams{
+		Prompt:                 "hello",
+		Dir:                    "/tmp",
+		PermissionModelDecider: &workflow.PermissionModelDecider{Provider: "groq", Model: "llama-3.3-70b"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "MODEL_DECIDER_TEST_UNSET_KEY") {
+		t.Fatalf("err = %v, want unset api_key_env failure", err)
+	}
+	if got := sup.activeRuntimeCount(); got != 0 {
+		t.Fatalf("activeRuntimeCount() = %d, want 0 after rejected spawn", got)
 	}
 }
