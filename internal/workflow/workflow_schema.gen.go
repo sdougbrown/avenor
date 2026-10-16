@@ -2711,7 +2711,13 @@ func svalidateWorkflowProfileAssignmentPermissionPolicy(raw json.RawMessage, pat
 		}
 	}
 	if r, ok := m["decider_model"]; ok {
-		svalidateWorkflowProfileAssignmentPermissionPolicyDeciderModel(r, path+"/"+escapePtr("decider_model"), schemaPath+"/properties/"+escapePtr("decider_model"), issues)
+		fpath := path + "/" + escapePtr("decider_model")
+		fspath := schemaPath + "/properties/" + escapePtr("decider_model")
+		if WorkflowProfileStructuralKind(r) == "object" {
+			svalidateWorkflowProfileAssignmentPermissionPolicyDeciderModel(r, fpath, fspath, issues)
+		} else {
+			*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
+		}
 	}
 }
 
@@ -2722,15 +2728,15 @@ func svalidateWorkflowProfileAssignmentPermissionPolicyDeciderModel(raw json.Raw
 	}
 	var m map[string]json.RawMessage
 	_ = json.Unmarshal(raw, &m)
-	if _, ok := m["provider"]; !ok {
-		*issues = append(*issues, WorkflowProfileStructuralIssueAt("required", path+"/"+escapePtr("provider"), schemaPath))
-	}
 	if _, ok := m["model"]; !ok {
 		*issues = append(*issues, WorkflowProfileStructuralIssueAt("required", path+"/"+escapePtr("model"), schemaPath))
 	}
+	if _, ok := m["provider"]; !ok {
+		*issues = append(*issues, WorkflowProfileStructuralIssueAt("required", path+"/"+escapePtr("provider"), schemaPath))
+	}
 	allowed := map[string]bool{
-		"provider": true,
 		"model":    true,
+		"provider": true,
 	}
 	for key := range m {
 		if allowed[key] {
@@ -2738,13 +2744,23 @@ func svalidateWorkflowProfileAssignmentPermissionPolicyDeciderModel(raw json.Raw
 		}
 		*issues = append(*issues, WorkflowProfileStructuralIssueAt("additionalProperties", path+"/"+escapePtr(key), schemaPath))
 	}
-	for _, field := range []struct{ name string }{{"provider"}, {"model"}} {
-		r, ok := m[field.name]
-		if !ok {
-			continue
+	if r, ok := m["model"]; ok {
+		fpath := path + "/" + escapePtr("model")
+		fspath := schemaPath + "/properties/" + escapePtr("model")
+		switch WorkflowProfileStructuralKind(r) {
+		case "string":
+			var sv string
+			_ = json.Unmarshal(r, &sv)
+			if utf8.RuneCountInString(sv) < 1 {
+				*issues = append(*issues, WorkflowProfileStructuralIssueAt("minLength", fpath, fspath))
+			}
+		default:
+			*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
 		}
-		fpath := path + "/" + escapePtr(field.name)
-		fspath := schemaPath + "/properties/" + escapePtr(field.name)
+	}
+	if r, ok := m["provider"]; ok {
+		fpath := path + "/" + escapePtr("provider")
+		fspath := schemaPath + "/properties/" + escapePtr("provider")
 		switch WorkflowProfileStructuralKind(r) {
 		case "string":
 			var sv string
@@ -3609,13 +3625,22 @@ func (v WorkflowProfileActionWorkflowOutcomeMap) validate(path string, issues *[
 }
 
 func (v WorkflowProfileAssignmentPermissionPolicy) validate(path string, issues *[]Issue) {
-	if v.Decider != "" {
-		if utf8.RuneCountInString(v.Decider) < 1 {
+	if v.Decider != nil {
+		if utf8.RuneCountInString(*v.Decider) < 1 {
 			*issues = append(*issues, Issue{Code: "minLength", Path: path + "/" + escapePtr("decider")})
 		}
 	}
 	if v.DeciderModel != nil {
 		v.DeciderModel.validate(path+"/"+escapePtr("decider_model"), issues)
+	}
+}
+
+func (v WorkflowProfileAssignmentPermissionPolicyDeciderModel) validate(path string, issues *[]Issue) {
+	if utf8.RuneCountInString(v.Model) < 1 {
+		*issues = append(*issues, Issue{Code: "minLength", Path: path + "/" + escapePtr("model")})
+	}
+	if utf8.RuneCountInString(v.Provider) < 1 {
+		*issues = append(*issues, Issue{Code: "minLength", Path: path + "/" + escapePtr("provider")})
 	}
 }
 
@@ -5614,7 +5639,7 @@ func (v *WorkflowProfileActionWorkflowOutcomeMap) UnmarshalJSON(data []byte) err
 }
 
 type WorkflowProfileAssignmentPermissionPolicy struct {
-	Decider      string                                                 "json:\"decider\""
+	Decider      *string                                                "json:\"decider,omitempty\""
 	DeciderModel *WorkflowProfileAssignmentPermissionPolicyDeciderModel "json:\"decider_model,omitempty\""
 }
 
@@ -5647,24 +5672,26 @@ func (v *WorkflowProfileAssignmentPermissionPolicy) UnmarshalJSON(data []byte) e
 	type alias WorkflowProfileAssignmentPermissionPolicy
 	var next alias
 	if encoded, ok := raw["decider"]; ok {
-		if err := json.Unmarshal(encoded, &next.Decider); err != nil {
+		var decoded0 string
+		if err := json.Unmarshal(encoded, &decoded0); err != nil {
 			return err
 		}
+		next.Decider = &decoded0
 	}
 	if encoded, ok := raw["decider_model"]; ok {
-		var decoded WorkflowProfileAssignmentPermissionPolicyDeciderModel
-		if err := json.Unmarshal(encoded, &decoded); err != nil {
+		var decoded1 WorkflowProfileAssignmentPermissionPolicyDeciderModel
+		if err := json.Unmarshal(encoded, &decoded1); err != nil {
 			return err
 		}
-		next.DeciderModel = &decoded
+		next.DeciderModel = &decoded1
 	}
 	*v = WorkflowProfileAssignmentPermissionPolicy(next)
 	return nil
 }
 
 type WorkflowProfileAssignmentPermissionPolicyDeciderModel struct {
-	Provider string "json:\"provider\""
 	Model    string "json:\"model\""
+	Provider string "json:\"provider\""
 }
 
 func (v *WorkflowProfileAssignmentPermissionPolicyDeciderModel) UnmarshalJSON(data []byte) error {
@@ -5677,15 +5704,10 @@ func (v *WorkflowProfileAssignmentPermissionPolicyDeciderModel) UnmarshalJSON(da
 	}
 	for key := range raw {
 		switch key {
-		case "provider":
 		case "model":
+		case "provider":
 		default:
 			return fmt.Errorf("unknown field %q", key)
-		}
-	}
-	if r, ok := raw["provider"]; ok {
-		if len(r) == 4 && string(r) == "null" {
-			return fmt.Errorf("field \"provider\" must not be null")
 		}
 	}
 	if r, ok := raw["model"]; ok {
@@ -5693,35 +5715,31 @@ func (v *WorkflowProfileAssignmentPermissionPolicyDeciderModel) UnmarshalJSON(da
 			return fmt.Errorf("field \"model\" must not be null")
 		}
 	}
-	if _, ok := raw["provider"]; !ok {
-		return fmt.Errorf("missing required field \"provider\"")
+	if r, ok := raw["provider"]; ok {
+		if len(r) == 4 && string(r) == "null" {
+			return fmt.Errorf("field \"provider\" must not be null")
+		}
 	}
 	if _, ok := raw["model"]; !ok {
 		return fmt.Errorf("missing required field \"model\"")
 	}
+	if _, ok := raw["provider"]; !ok {
+		return fmt.Errorf("missing required field \"provider\"")
+	}
 	type alias WorkflowProfileAssignmentPermissionPolicyDeciderModel
 	var next alias
-	if encoded, ok := raw["provider"]; ok {
-		if err := json.Unmarshal(encoded, &next.Provider); err != nil {
-			return err
-		}
-	}
 	if encoded, ok := raw["model"]; ok {
 		if err := json.Unmarshal(encoded, &next.Model); err != nil {
 			return err
 		}
 	}
+	if encoded, ok := raw["provider"]; ok {
+		if err := json.Unmarshal(encoded, &next.Provider); err != nil {
+			return err
+		}
+	}
 	*v = WorkflowProfileAssignmentPermissionPolicyDeciderModel(next)
 	return nil
-}
-
-func (v WorkflowProfileAssignmentPermissionPolicyDeciderModel) validate(path string, issues *[]Issue) {
-	if utf8.RuneCountInString(v.Provider) < 1 {
-		*issues = append(*issues, Issue{Code: "minLength", Path: path + "/" + escapePtr("provider")})
-	}
-	if utf8.RuneCountInString(v.Model) < 1 {
-		*issues = append(*issues, Issue{Code: "minLength", Path: path + "/" + escapePtr("model")})
-	}
 }
 
 type WorkflowProfileGateInputs struct {
