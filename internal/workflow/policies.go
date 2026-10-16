@@ -65,14 +65,13 @@ func (p templatePolicies) DispatchPolicy(templateID TemplateID, templateVersion 
 	return &effective
 }
 
-// withLegacyDefaults fills the identity and timestamp fields that events
-// written before the command boundary minted them do not carry, so the rest
-// of the reducer only ever copies event fields. A legacy event lacking a
-// field gets a freshly minted ID or the wall-clock time; replay of such an
-// event is therefore not reproducible, and a later event that refers to a
-// minted ID resolves only against a snapshot that already holds it (the
-// materialized snapshot, never a from-zero rebuild). Events written by the
-// command boundary always carry every field and replay deterministically.
+// withLegacyDefaults fills the identity and timestamp fields that legacy
+// events do not carry, so the rest of the reducer only copies event fields.
+// A missing field gets a freshly minted ID or the wall-clock time. Replay of
+// a legacy event is therefore not reproducible. A later event that refers to
+// a minted ID resolves only against a materialized snapshot that already
+// holds that ID, never against a from-zero rebuild. Events written by the
+// command boundary carry every field and replay deterministically.
 func withLegacyDefaults(event Event) Event {
 	if event.At.IsZero() {
 		event.At = nowUTC()
