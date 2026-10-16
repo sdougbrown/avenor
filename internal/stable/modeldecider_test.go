@@ -1,8 +1,12 @@
 package stable
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sdougbrown/avenor/internal/workflow"
 )
 
 func TestBuildModelDecisionPromptFramesUntrustedData(t *testing.T) {
@@ -132,5 +136,45 @@ func TestReasonSuffix(t *testing.T) {
 	long := reasonSuffix(strings.Repeat("x", 10_000))
 	if len([]rune(long)) > maxModelDeciderReasonRunes+3 {
 		t.Fatalf("reasonSuffix not bounded: %d runes", len([]rune(long)))
+	}
+}
+
+// TestResolvePermissionModelDeciderKey pins the key-resolution contract: the
+// pinned api_key_env wins (the key always matches the variable the status
+// surfaces), a pinned env that is unset fails fast, and a provider with a
+// literal key resolves it from the registry without any environment.
+func TestResolvePermissionModelDeciderKey(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "avenor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "avenor", "providers.json"), []byte(`{
+		"providers": {
+			"env":    {"base_url": "http://x/v1", "api_key_env": "MODELDEC_TEST_KEY"},
+			"lit":    {"base_url": "http://x/v1", "api_key": "literal-secret"},
+			"rotated": {"base_url": "http://x/v1", "api_key_env": "MODELDEC_ROTATED_KEY"}
+		}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("MODELDEC_TEST_KEY", "from-env")
+
+	key, err := resolvePermissionModelDeciderKey(&workflow.PermissionModelDecider{Provider: "env", APIKeyEnv: "MODELDEC_TEST_KEY"})
+	if err != nil || key != "from-env" {
+		t.Fatalf("pinned env key = %q, %v; want from-env", key, err)
+	}
+	key, err = resolvePermissionModelDeciderKey(&workflow.PermissionModelDecider{Provider: "lit"})
+	if err != nil || key != "literal-secret" {
+		t.Fatalf("literal key = %q, %v; want literal-secret", key, err)
+	}
+	if _, err := resolvePermissionModelDeciderKey(&workflow.PermissionModelDecider{Provider: "rotated", APIKeyEnv: "MODELDEC_ROTATED_KEY"}); err == nil {
+		t.Fatal("a pinned env that is unset must fail fast")
+	}
+	// The registry entry drifting from the pin (an env var renamed between
+	// dispatch and spawn) must not silently authenticate with the new
+	// variable while status still shows the old name: the pinned name rules.
+	if _, err := resolvePermissionModelDeciderKey(&workflow.PermissionModelDecider{Provider: "env", APIKeyEnv: "MODELDEC_ROTATED_KEY"}); err == nil {
+		t.Fatal("pinned env unset even though the registry names another env must fail")
 	}
 }

@@ -46,11 +46,20 @@ const (
 )
 
 // resolvePermissionModelDeciderKey resolves the API key for a direct-model
-// decider at spawn time, from the current provider registry entry for the
-// pinned provider. The key is held only in supervisor memory for the life of
-// the runtime; the pinned selection carries just the endpoint, so snapshots
-// and status surfaces never see a credential.
+// decider at spawn time. A pinned api_key_env wins: the environment variable
+// named on the pinned selection is authoritative, so the key a runtime uses
+// always matches the variable its status surfaces. Without a pinned env the
+// provider declares a literal key in the registry, resolved from the current
+// entry here — the credential itself is still never pinned, only read into
+// supervisor memory.
 func resolvePermissionModelDeciderKey(md *workflow.PermissionModelDecider) (string, error) {
+	if env := strings.TrimSpace(md.APIKeyEnv); env != "" {
+		key := os.Getenv(env)
+		if strings.TrimSpace(key) == "" {
+			return "", fmt.Errorf("permission model decider: api_key_env %q is unset or empty", env)
+		}
+		return key, nil
+	}
 	registry, err := providerconfig.Load()
 	if err != nil {
 		return "", fmt.Errorf("permission model decider: %w", err)
