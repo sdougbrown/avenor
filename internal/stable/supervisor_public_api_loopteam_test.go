@@ -13,6 +13,7 @@ package stable
 // addressed deterministically despite concurrent attempts.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -71,6 +72,26 @@ func itestMemberEndIs(sessionID, stopReason string) func(events.Event) bool {
 	}
 }
 
+// itestMemberWorkingIs matches a working agent.status carrying a given session
+// ID, so a barrier can require one specific member or phase attempt to be in
+// flight: team members and loop phases share one runtime id, so the runtime
+// id alone cannot tell them apart.
+func itestMemberWorkingIs(sessionID string) func(events.Event) bool {
+	return func(ev events.Event) bool {
+		if ev.Event != "agent.status" {
+			return false
+		}
+		if phase, _ := ev.Fields["phase"].(string); phase != "working" {
+			return false
+		}
+		id := ev.SessionID
+		if id == "" {
+			id, _ = ev.Fields["session_id"].(string)
+		}
+		return id == sessionID
+	}
+}
+
 // itestTeamProviders routes provider requests to per-member providers keyed
 // by the member's inline agent: the only per-member field visible in
 // StartOptions, since concurrent members cannot be ordered.
@@ -112,6 +133,27 @@ func (h *itestHarness) sentinelText(rtID string) string {
 
 // Loop scenarios.
 
+// requireWorkflowEnd asserts a loop or team child's caller-visible end state:
+// the translated status carries stopReason, the raw RuntimeStatus exit code
+// matches exitCode, and WaitTurn reports stopReason. Unlike requireIdleEnd it
+// does not read the exit code from the terminal session.end: a workflow
+// child's session.end events are its attempts' own and carry no exit_code.
+func (h *itestHarness) requireWorkflowEnd(rtID, status, stopReason string, exitCode int) itestView {
+	h.t.Helper()
+	v := h.awaitStatus(rtID, status)
+	if v.StopReason != stopReason {
+		h.t.Fatalf("%s view stop reason = %q, want %s", status, v.StopReason, stopReason)
+	}
+	if code := h.rawExitCode(rtID); code != exitCode {
+		h.t.Fatalf("raw RuntimeStatus exit_code = %d, want %d", code, exitCode)
+	}
+	turn := h.waitTurn(rtID)
+	if got, _ := turn["stop_reason"].(string); got != stopReason {
+		h.t.Fatalf("WaitTurn stop_reason = %q, want %s", got, stopReason)
+	}
+	return v
+}
+
 // TestSupervisorPublicAPILoopPhasesSucceed proves a loop child that runs
 // every phase to end_turn is caller-visible as done: one session.end per
 // phase, the loop lifecycle events on the stream, the final phase's output in
@@ -148,7 +190,7 @@ func TestSupervisorPublicAPILoopPhasesSucceed(t *testing.T) {
 		t.Fatalf("avenor.loop.end exit_reason = %q, want max_iterations", reason)
 	}
 
-	v := h.awaitStatus(rt, "done")
+	v := h.requireWorkflowEnd(rt, "done", "end_turn", 0)
 	if !v.TurnComplete {
 		t.Fatal("done view TurnComplete = false, want true")
 	}
@@ -163,10 +205,6 @@ func TestSupervisorPublicAPILoopPhasesSucceed(t *testing.T) {
 	if status, _, _ := itestSentinelStatus(h.sentinelText(rt)); status != "done" {
 		t.Fatalf("sentinel status = %q, want done", status)
 	}
-	turn := h.waitTurn(rt)
-	if got, _ := turn["stop_reason"].(string); got != "end_turn" {
-		t.Fatalf("WaitTurn stop_reason = %q, want end_turn", got)
-	}
 	if starts, resumes := provider.counts(); starts != 3 || resumes != 0 {
 		t.Fatalf("provider starts/resumes = %d/%d, want 3/0 (one attempt per phase)", starts, resumes)
 	}
@@ -180,6 +218,105 @@ func TestSupervisorPublicAPILoopPhasesSucceed(t *testing.T) {
 	}
 	if got := rows[0]["exit_code"]; got != 0 {
 		t.Fatalf("List exit_code = %v, want 0", got)
+	}
+}
+
+// TestSupervisorPublicAPILoopRunsEveryIteration proves max_iterations drives
+// the loop phase once per iteration before the child ends: two provider
+// starts for the loop phase plus one for the post phase, two completed
+// iterations on the loop end event, and the post phase's output as the
+// result.
+func TestSupervisorPublicAPILoopRunsEveryIteration(t *testing.T) {
+	t.Parallel()
+	provider := newItestProvider(
+		itestAttempt("ses_loop_it1", itestSessionEnd("ses_loop_it1", "end_turn", "iteration one")),
+		itestAttempt("ses_loop_it2", itestSessionEnd("ses_loop_it2", "end_turn", "iteration two")),
+		itestAttempt("ses_loop_wrap", itestSessionEnd("ses_loop_wrap", "end_turn", "wrap done")),
+	)
+	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+
+	file := itestWorkflowConfig(t, "loop", map[string]any{
+		"max_iterations": 2,
+		"loop":           []map[string]any{{"name": "work", "prompt": "loop work"}},
+		"post":           []map[string]any{{"name": "wrap", "prompt": "wrap up"}},
+	})
+	rt := h.spawnWorkflow("loop", file, map[string]any{"label": "loop-iterations"})
+
+	// The single loop end reports the two iterations it completed.
+	end := h.log.waitFor(t, "avenor.loop.end", itestEventIs("avenor.loop.end", rt))
+	completed := 0
+	switch got := end.Fields["iterations_completed"].(type) {
+	case int:
+		completed = got
+	case float64:
+		completed = int(got)
+	}
+	if completed != 2 {
+		t.Fatalf("avenor.loop.end iterations_completed = %v, want 2", end.Fields["iterations_completed"])
+	}
+
+	v := h.requireWorkflowEnd(rt, "done", "end_turn", 0)
+	if v.FinalOutput != "wrap done" {
+		t.Fatalf("status final_output = %q, want %q", v.FinalOutput, "wrap done")
+	}
+	if got := h.result(rt); got != "wrap done" {
+		t.Fatalf("RuntimeResult final_output = %q, want %q", got, "wrap done")
+	}
+	if starts, resumes := provider.counts(); starts != 3 || resumes != 0 {
+		t.Fatalf("provider starts/resumes = %d/%d, want 3/0 (one attempt per iteration plus the post phase)", starts, resumes)
+	}
+}
+
+// TestSupervisorPublicAPILoopPhasePermissionRequest proves a permission
+// request raised mid-attempt inside a loop phase surfaces to the caller as a
+// pending permission on the child and, once answered, lets the loop run to
+// completion.
+func TestSupervisorPublicAPILoopPhasePermissionRequest(t *testing.T) {
+	t.Parallel()
+	gate := newItestGate()
+	provider := newItestProvider(
+		itestAttempt("ses_loop_perm",
+			itestPermissionRequest("ses_loop_perm", "req_loop_perm"),
+			gate.step(),
+			itestSessionEnd("ses_loop_perm", "end_turn", "answered work")),
+		itestAttempt("ses_loop_wrap", itestSessionEnd("ses_loop_wrap", "end_turn", "wrap done")),
+	)
+	provider.onAnswer = func(string, runtime.PermissionResponse) { gate.open() }
+	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+	h.connectClient()
+
+	file := itestWorkflowConfig(t, "loop", map[string]any{
+		"max_iterations": 1,
+		"loop":           []map[string]any{{"name": "work", "prompt": "loop work"}},
+		"post":           []map[string]any{{"name": "wrap", "prompt": "wrap up"}},
+	})
+	rt := h.spawnWorkflow("loop", file, map[string]any{"label": "loop-permission"})
+
+	h.log.waitFor(t, "permission.request", itestEventIs("permission.request", rt))
+	v := h.view(rt)
+	if !v.PendingPermission || v.Status != "running" {
+		t.Fatalf("view with a pending request = %+v, want running with pending_permission", v)
+	}
+	// The phase cannot settle before its request is answered.
+	if n := h.log.count(itestStopReasonIs(rt, "end_turn")); n != 0 {
+		t.Fatalf("session.end events before the answer = %d, want 0", n)
+	}
+	if err := h.sup.RuntimeAnswerPermission(rt, "req_loop_perm", "allow_once", ""); err != nil {
+		t.Fatalf("RuntimeAnswerPermission: %v", err)
+	}
+	h.log.waitFor(t, "permission.response", itestEventIs("permission.response", rt))
+	// The loop completes: the released phase ends and the post phase runs.
+	h.log.waitFor(t, "post session.end", itestMemberEndIs("ses_loop_wrap", "end_turn"))
+	h.requireWorkflowEnd(rt, "done", "end_turn", 0)
+	if got := h.result(rt); got != "wrap done" {
+		t.Fatalf("RuntimeResult final_output = %q, want %q", got, "wrap done")
+	}
+	if v := h.view(rt); v.PendingPermission {
+		t.Fatal("pending_permission still set after the answer")
+	}
+	answers := provider.recordedAnswers()
+	if len(answers) != 1 || !answers[0].Allow || answers[0].OptionID != "allow_once" {
+		t.Fatalf("backend permission answers = %+v, want one allow_once", answers)
 	}
 }
 
@@ -205,6 +342,8 @@ func TestSupervisorPublicAPILoopPhaseFailureExhaustsRetries(t *testing.T) {
 	}); n != 2 {
 		t.Fatalf("failed session.end events = %d, want 2 (initial attempt plus one retry)", n)
 	}
+	// The child's terminal session.end is the failed attempt's own event and
+	// carries no exit_code, so the end state is asserted field by field.
 	h.awaitStatus(rt, "failed")
 	v := h.view(rt)
 	if v.StopReason != "error" {
@@ -245,17 +384,7 @@ func TestSupervisorPublicAPILoopRunDeadlineDuringPhase(t *testing.T) {
 	rt := h.spawnWorkflow("loop", file, map[string]any{"label": "loop-deadline", "timeout": 1})
 
 	h.log.waitFor(t, "timeout session.end", itestStopReasonIs(rt, "timeout"))
-	v := h.awaitStatus(rt, "timeout")
-	if v.StopReason != "timeout" {
-		t.Fatalf("timeout view stop reason = %q, want timeout", v.StopReason)
-	}
-	if code := h.rawExitCode(rt); code != 124 {
-		t.Fatalf("raw RuntimeStatus exit_code = %d, want 124", code)
-	}
-	turn := h.waitTurn(rt)
-	if got, _ := turn["stop_reason"].(string); got != "timeout" {
-		t.Fatalf("WaitTurn stop_reason = %q, want timeout", got)
-	}
+	h.requireWorkflowEnd(rt, "timeout", "timeout", 124)
 	if starts, _ := provider.counts(); starts != 1 {
 		t.Fatalf("provider starts = %d, want 1 (a timed-out phase is not retried)", starts)
 	}
@@ -291,17 +420,7 @@ func TestSupervisorPublicAPILoopCancelDuringPhase(t *testing.T) {
 	if err := h.sup.RuntimeCancel(rt); err != nil {
 		t.Fatalf("RuntimeCancel: %v", err)
 	}
-	h.awaitStatus(rt, "killed")
-	if v := h.view(rt); v.StopReason != "cancelled" {
-		t.Fatalf("killed view stop reason = %q, want cancelled", v.StopReason)
-	}
-	if code := h.rawExitCode(rt); code != 130 {
-		t.Fatalf("raw RuntimeStatus exit_code = %d, want 130", code)
-	}
-	turn := h.waitTurn(rt)
-	if got, _ := turn["stop_reason"].(string); got != "cancelled" {
-		t.Fatalf("WaitTurn stop_reason = %q, want cancelled", got)
-	}
+	h.requireWorkflowEnd(rt, "killed", "cancelled", 130)
 	// The cancelled run must not wake into the second phase: once the child
 	// has ended, the attempt count is final.
 	if starts, _ := provider.counts(); starts != 1 {
@@ -332,8 +451,9 @@ func TestSupervisorPublicAPILoopCancelDuringRetryBackoff(t *testing.T) {
 		"max_iterations": 1,
 		"loop":           []map[string]any{{"name": "work", "prompt": "loop work"}},
 	})
-	// The first retry's backoff is 2s, so the cancel issued right after the
-	// failed attempt's session.end lands inside the backoff window.
+	// The first retry's backoff is backoffDelay(1) long, so the cancel issued
+	// right after the failed attempt's session.end lands inside the backoff
+	// window.
 	rt := h.spawnWorkflow("loop", file, map[string]any{"label": "loop-backoff-cancel", "max_retries": 1})
 	h.log.waitFor(t, "failed attempt session.end", func(ev events.Event) bool {
 		return itestMemberEndIs("ses_loop_cb", "error")(ev)
@@ -350,13 +470,11 @@ func TestSupervisorPublicAPILoopCancelDuringRetryBackoff(t *testing.T) {
 	if code := h.rawExitCode(rt); code != 130 {
 		t.Fatalf("raw RuntimeStatus exit_code = %d, want 130", code)
 	}
-	// The cancelled backoff must not wake into the retry attempt. Once the
-	// child has ended, the attempt count is final; the window outlasts the
-	// backoff delay so a late start cannot slip through.
-	h.consistentlyFor(2*time.Second+500*time.Millisecond, "no retry attempt after cancel", func() bool {
-		starts, _ := provider.counts()
-		return starts == 1
-	})
+	// The cancelled backoff must not wake into the retry attempt: once the
+	// child has ended, the attempt count is final.
+	if starts, _ := provider.counts(); starts != 1 {
+		t.Fatalf("provider starts = %d, want 1 (the retry never starts)", starts)
+	}
 }
 
 // Team scenarios.
@@ -388,17 +506,10 @@ func TestSupervisorPublicAPITeamMembersSucceed(t *testing.T) {
 	}
 	h.log.waitFor(t, "avenor.team.end", itestEventIs("avenor.team.end", rt))
 
-	h.awaitStatus(rt, "done")
-	if code := h.rawExitCode(rt); code != 0 {
-		t.Fatalf("raw RuntimeStatus exit_code = %d, want 0", code)
-	}
+	h.requireWorkflowEnd(rt, "done", "end_turn", 0)
 	got := h.result(rt)
 	if got != "alpha done" && got != "beta done" {
 		t.Fatalf("RuntimeResult final_output = %q, want a member output", got)
-	}
-	turn := h.waitTurn(rt)
-	if reason, _ := turn["stop_reason"].(string); reason != "end_turn" {
-		t.Fatalf("WaitTurn stop_reason = %q, want end_turn", reason)
 	}
 	alphaStarts, _ := alpha.counts()
 	betaStarts, _ := beta.counts()
@@ -462,6 +573,98 @@ func TestSupervisorPublicAPITeamMemberFailureLeavesPeersRunning(t *testing.T) {
 	}
 }
 
+// TestSupervisorPublicAPITeamMemberRetrySucceeds proves a member's retryable
+// failure is retried inside the team: the member runs a second attempt after
+// the backoff while its peer is unaffected, and the team ends done once the
+// retry succeeds.
+func TestSupervisorPublicAPITeamMemberRetrySucceeds(t *testing.T) {
+	t.Parallel()
+	alpha := newItestProvider(itestAttempt("ses_team_retry_alpha", itestSessionEnd("ses_team_retry_alpha", "end_turn", "alpha done")))
+	beta := newItestProvider(
+		itestAttempt("ses_team_retry_beta1", itestSessionEnd("ses_team_retry_beta1", "error", "")),
+		itestAttempt("ses_team_retry_beta2", itestSessionEnd("ses_team_retry_beta2", "end_turn", "beta done")),
+	)
+	h := newItestHarness(t, Config{}, itestTeamProviders(map[string]*itestProvider{
+		"alpha-agent": alpha,
+		"beta-agent":  beta,
+	}))
+
+	file := itestWorkflowConfig(t, "team", map[string]any{
+		"team": []map[string]any{
+			{"name": "alpha", "prompt": "alpha work", "agent": "alpha-agent"},
+			{"name": "beta", "prompt": "beta work", "agent": "beta-agent"},
+		},
+	})
+	rt := h.spawnWorkflow("team", file, map[string]any{"label": "team-member-retry", "max_retries": 1})
+
+	h.log.waitFor(t, "failed member session.end", itestMemberEndIs("ses_team_retry_beta1", "error"))
+	h.log.waitFor(t, "retry session.end", itestMemberEndIs("ses_team_retry_beta2", "end_turn"))
+	h.requireWorkflowEnd(rt, "done", "end_turn", 0)
+	got := h.result(rt)
+	if got != "alpha done" && got != "beta done" {
+		t.Fatalf("RuntimeResult final_output = %q, want a member output", got)
+	}
+	alphaStarts, _ := alpha.counts()
+	betaStarts, _ := beta.counts()
+	if alphaStarts != 1 || betaStarts != 2 {
+		t.Fatalf("member starts = %d/%d, want 1/2 (the failed member retried once)", alphaStarts, betaStarts)
+	}
+}
+
+// TestSupervisorPublicAPITeamMemberPermissionRequest proves a permission
+// request raised by a team member surfaces as a pending permission on the
+// team child and, once answered, lets the team run to completion.
+func TestSupervisorPublicAPITeamMemberPermissionRequest(t *testing.T) {
+	t.Parallel()
+	gate := newItestGate()
+	alpha := newItestProvider(
+		itestAttempt("ses_team_perm_alpha",
+			itestPermissionRequest("ses_team_perm_alpha", "req_team_perm"),
+			gate.step(),
+			itestSessionEnd("ses_team_perm_alpha", "end_turn", "alpha answered")),
+	)
+	alpha.onAnswer = func(string, runtime.PermissionResponse) { gate.open() }
+	beta := newItestProvider(itestAttempt("ses_team_perm_beta", itestSessionEnd("ses_team_perm_beta", "end_turn", "beta done")))
+	h := newItestHarness(t, Config{}, itestTeamProviders(map[string]*itestProvider{
+		"alpha-agent": alpha,
+		"beta-agent":  beta,
+	}))
+	h.connectClient()
+
+	file := itestWorkflowConfig(t, "team", map[string]any{
+		"team": []map[string]any{
+			{"name": "alpha", "prompt": "alpha work", "agent": "alpha-agent"},
+			{"name": "beta", "prompt": "beta work", "agent": "beta-agent"},
+		},
+	})
+	rt := h.spawnWorkflow("team", file, map[string]any{"label": "team-permission"})
+
+	h.log.waitFor(t, "permission.request", itestEventIs("permission.request", rt))
+	v := h.view(rt)
+	if !v.PendingPermission || v.Status != "running" {
+		t.Fatalf("view with a pending request = %+v, want running with pending_permission", v)
+	}
+	// The requesting member cannot settle before its request is answered.
+	if n := h.log.count(itestMemberEndIs("ses_team_perm_alpha", "end_turn")); n != 0 {
+		t.Fatalf("requesting member session.end events before the answer = %d, want 0", n)
+	}
+	if err := h.sup.RuntimeAnswerPermission(rt, "req_team_perm", "allow_once", ""); err != nil {
+		t.Fatalf("RuntimeAnswerPermission: %v", err)
+	}
+	h.log.waitFor(t, "permission.response", itestEventIs("permission.response", rt))
+	for _, sessionID := range []string{"ses_team_perm_alpha", "ses_team_perm_beta"} {
+		h.log.waitFor(t, sessionID+" session.end", itestMemberEndIs(sessionID, "end_turn"))
+	}
+	h.requireWorkflowEnd(rt, "done", "end_turn", 0)
+	if v := h.view(rt); v.PendingPermission {
+		t.Fatal("pending_permission still set after the answer")
+	}
+	answers := alpha.recordedAnswers()
+	if len(answers) != 1 || !answers[0].Allow || answers[0].OptionID != "allow_once" {
+		t.Fatalf("backend permission answers = %+v, want one allow_once", answers)
+	}
+}
+
 // TestSupervisorPublicAPITeamRunDeadline proves a caller-set run deadline
 // ends a team whose members never settle: the child ends as a timeout with
 // exit code 124, and every member attempt is stopped with its own timeout
@@ -487,21 +690,15 @@ func TestSupervisorPublicAPITeamRunDeadline(t *testing.T) {
 	})
 	rt := h.spawnWorkflow("team", file, map[string]any{"label": "team-deadline", "timeout": 1})
 
-	h.awaitStatus(rt, "timeout")
-	if v := h.view(rt); v.StopReason != "timeout" {
-		t.Fatalf("timeout view stop reason = %q, want timeout", v.StopReason)
-	}
-	if code := h.rawExitCode(rt); code != 124 {
-		t.Fatalf("raw RuntimeStatus exit_code = %d, want 124", code)
-	}
 	// Both members were stopped by the shared deadline, each with its own
-	// timeout session.end.
+	// timeout session.end. Waiting for each member's session.end first keeps
+	// the async event-log goroutine from lagging the count below.
+	for _, sessionID := range []string{"ses_team_deadline_alpha", "ses_team_deadline_beta"} {
+		h.log.waitFor(t, sessionID+" timeout session.end", itestMemberEndIs(sessionID, "timeout"))
+	}
+	h.requireWorkflowEnd(rt, "timeout", "timeout", 124)
 	if n := h.log.count(itestStopReasonIs(rt, "timeout")); n != 2 {
 		t.Fatalf("timeout session.end events = %d, want 2 (one per member)", n)
-	}
-	turn := h.waitTurn(rt)
-	if got, _ := turn["stop_reason"].(string); got != "timeout" {
-		t.Fatalf("WaitTurn stop_reason = %q, want timeout", got)
 	}
 	alphaStarts, _ := alpha.counts()
 	betaStarts, _ := beta.counts()
@@ -535,26 +732,92 @@ func TestSupervisorPublicAPITeamCancel(t *testing.T) {
 	})
 	rt := h.spawnWorkflow("team", file, map[string]any{"label": "team-cancel"})
 
-	// Both members are in flight before the cancel lands.
+	// Both members are in flight before the cancel lands: each member's
+	// working status is matched by session ID, since every event of the child
+	// shares one runtime id and a runtime-id match would return early on the
+	// first member alone.
 	for _, sessionID := range []string{"ses_team_cancel_alpha", "ses_team_cancel_beta"} {
-		h.log.waitFor(t, sessionID+" working status", itestEventIs("agent.status", rt))
+		h.log.waitFor(t, sessionID+" working status", itestMemberWorkingIs(sessionID))
 	}
 	if err := h.sup.RuntimeCancel(rt); err != nil {
 		t.Fatalf("RuntimeCancel: %v", err)
 	}
-	h.awaitStatus(rt, "killed")
-	if v := h.view(rt); v.StopReason != "cancelled" {
-		t.Fatalf("killed view stop reason = %q, want cancelled", v.StopReason)
+	// Waiting for each member's cancelled session.end first keeps the async
+	// event-log goroutine from lagging the count below. The members'
+	// session.end events carry no exit_code, so the 130 is validated through
+	// RuntimeStatus alone.
+	for _, sessionID := range []string{"ses_team_cancel_alpha", "ses_team_cancel_beta"} {
+		h.log.waitFor(t, sessionID+" cancelled session.end", itestMemberEndIs(sessionID, "cancelled"))
 	}
-	if code := h.rawExitCode(rt); code != 130 {
-		t.Fatalf("raw RuntimeStatus exit_code = %d, want 130", code)
-	}
+	h.requireWorkflowEnd(rt, "killed", "cancelled", 130)
 	if n := h.log.count(itestStopReasonIs(rt, "cancelled")); n != 2 {
 		t.Fatalf("cancelled session.end events = %d, want 2 (one per member)", n)
 	}
-	turn := h.waitTurn(rt)
-	if got, _ := turn["stop_reason"].(string); got != "cancelled" {
-		t.Fatalf("WaitTurn stop_reason = %q, want cancelled", got)
+}
+
+// TestSupervisorPublicAPITeamWaitTurnWakesAfterLastMember proves a waiter
+// registered while every member is still running wakes when the last member
+// settles: the child's turn settle fires only once no attempt is active, so
+// a member that settles first cannot wake the waiter alone.
+func TestSupervisorPublicAPITeamWaitTurnWakesAfterLastMember(t *testing.T) {
+	t.Parallel()
+	alphaGate := newItestGate()
+	defer alphaGate.open()
+	betaGate := newItestGate()
+	defer betaGate.open()
+	alpha := newItestProvider(itestAttempt("ses_team_wait_alpha",
+		itestWorking("ses_team_wait_alpha"), alphaGate.step(),
+		itestSessionEnd("ses_team_wait_alpha", "end_turn", "alpha done")))
+	beta := newItestProvider(itestAttempt("ses_team_wait_beta",
+		itestWorking("ses_team_wait_beta"), betaGate.step(),
+		itestSessionEnd("ses_team_wait_beta", "end_turn", "beta done")))
+	h := newItestHarness(t, Config{}, itestTeamProviders(map[string]*itestProvider{
+		"alpha-agent": alpha,
+		"beta-agent":  beta,
+	}))
+
+	file := itestWorkflowConfig(t, "team", map[string]any{
+		"team": []map[string]any{
+			{"name": "alpha", "prompt": "alpha work", "agent": "alpha-agent"},
+			{"name": "beta", "prompt": "beta work", "agent": "beta-agent"},
+		},
+	})
+	rt := h.spawnWorkflow("team", file, map[string]any{"label": "team-waitturn"})
+
+	for _, sessionID := range []string{"ses_team_wait_alpha", "ses_team_wait_beta"} {
+		h.log.waitFor(t, sessionID+" working status", itestMemberWorkingIs(sessionID))
+	}
+	// Register the waiter while both members are still running.
+	returned := make(chan map[string]any, 1)
+	waitCtx, cancelWait := context.WithCancel(context.Background())
+	defer cancelWait()
+	go func() {
+		out, err := h.sup.RuntimeWaitTurn(waitCtx, rt, 0)
+		if err != nil {
+			return
+		}
+		if res, ok := out.(map[string]any); ok {
+			returned <- res
+		}
+	}()
+
+	// Alpha settles first; the waiter must not wake while beta is still an
+	// active attempt.
+	alphaGate.open()
+	h.log.waitFor(t, "alpha session.end", itestMemberEndIs("ses_team_wait_alpha", "end_turn"))
+	h.consistentlyFor(300*time.Millisecond, "the waiter stays blocked while a member still runs", func() bool {
+		select {
+		case <-returned:
+			return false
+		default:
+			return true
+		}
+	})
+	// The last member settling wakes the waiter.
+	betaGate.open()
+	res := itestRecv(t, returned, "the waiter waking after the last member settles")
+	if got, _ := res["stop_reason"].(string); got != "end_turn" {
+		t.Fatalf("WaitTurn stop_reason = %q, want end_turn", got)
 	}
 }
 
