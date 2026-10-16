@@ -451,9 +451,9 @@ func TestSupervisorPublicAPILoopCancelDuringRetryBackoff(t *testing.T) {
 		"max_iterations": 1,
 		"loop":           []map[string]any{{"name": "work", "prompt": "loop work"}},
 	})
-	// The first retry's backoff is backoffDelay(1) long, so the cancel issued
-	// right after the failed attempt's session.end lands inside the backoff
-	// window.
+	// The first retry's backoff is phaseconfig.BackoffDuration(0) long, so the
+	// cancel issued right after the failed attempt's session.end lands inside
+	// the backoff window.
 	rt := h.spawnWorkflow("loop", file, map[string]any{"label": "loop-backoff-cancel", "max_retries": 1})
 	h.log.waitFor(t, "failed attempt session.end", func(ev events.Event) bool {
 		return itestMemberEndIs("ses_loop_cb", "error")(ev)
@@ -474,6 +474,183 @@ func TestSupervisorPublicAPILoopCancelDuringRetryBackoff(t *testing.T) {
 	// child has ended, the attempt count is final.
 	if starts, _ := provider.counts(); starts != 1 {
 		t.Fatalf("provider starts = %d, want 1 (the retry never starts)", starts)
+	}
+}
+
+// TestSupervisorPublicAPILoopPhaseResumesPreviousSession proves a loop phase
+// marked resume_from_previous resumes the exact session ID the previous phase
+// attempt produced: the provider sees one Resume carrying that ID, and the
+// runtime adopts the session IDs Start and Resume returned.
+func TestSupervisorPublicAPILoopPhaseResumesPreviousSession(t *testing.T) {
+	t.Parallel()
+	provider := newItestProvider(
+		itestAttempt("ses_loop_r1", itestSessionEnd("ses_loop_r1", "end_turn", "first phase")),
+		itestAttempt("ses_loop_r2", itestSessionEnd("ses_loop_r2", "end_turn", "second phase")),
+	)
+	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+
+	file := itestWorkflowConfig(t, "loop", map[string]any{
+		"max_iterations": 1,
+		"loop": []map[string]any{
+			{"name": "first", "prompt": "first work"},
+			{"name": "second", "prompt": "second work", "resume_from_previous": true},
+		},
+	})
+	rt := h.spawnWorkflow("loop", file, map[string]any{"label": "loop-resume"})
+
+	h.requireWorkflowEnd(rt, "done", "end_turn", 0)
+	if got := h.result(rt); got != "second phase" {
+		t.Fatalf("RuntimeResult final_output = %q, want %q", got, "second phase")
+	}
+	if starts, resumes := provider.counts(); starts != 1 || resumes != 1 {
+		t.Fatalf("provider starts/resumes = %d/%d, want 1/1 (the second phase resumes)", starts, resumes)
+	}
+	if ids := provider.resumeIDs(); len(ids) != 1 || ids[0] != "ses_loop_r1" {
+		t.Fatalf("Resume arguments = %v, want [ses_loop_r1] (the first attempt's session ID)", ids)
+	}
+	if ids := provider.returnedSessionIDs(); len(ids) != 2 || ids[0] != "ses_loop_r1" || ids[1] != "ses_loop_r2" {
+		t.Fatalf("Start/Resume session IDs = %v, want [ses_loop_r1 ses_loop_r2]", ids)
+	}
+}
+
+// TestSupervisorPublicAPILoopRequiresNudgeResumesOwnSession proves a loop
+// phase whose required files stay missing is nudged as a resume of its own
+// attempt: the provider sees one Resume carrying the first attempt's session
+// ID, and the still-unmet requirement fails the child.
+func TestSupervisorPublicAPILoopRequiresNudgeResumesOwnSession(t *testing.T) {
+	t.Parallel()
+	provider := newItestProvider(
+		itestAttempt("ses_loop_n1", itestSessionEnd("ses_loop_n1", "end_turn", "claimed done")),
+		itestAttempt("ses_loop_n2", itestSessionEnd("ses_loop_n2", "end_turn", "still no file")),
+	)
+	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+
+	file := itestWorkflowConfig(t, "loop", map[string]any{
+		"max_iterations": 1,
+		"loop": []map[string]any{{
+			"name": "work", "prompt": "loop work",
+			"requires": map[string]any{"files": []string{"never-written.txt"}},
+		}},
+	})
+	rt := h.spawnWorkflow("loop", file, map[string]any{"label": "loop-nudge"})
+
+	v := h.awaitStatus(rt, "failed")
+	if v.StopReason != "incomplete_output" {
+		t.Fatalf("failed view stop reason = %q, want incomplete_output", v.StopReason)
+	}
+	if starts, resumes := provider.counts(); starts != 1 || resumes != 1 {
+		t.Fatalf("provider starts/resumes = %d/%d, want 1/1 (the nudge resumes the attempt)", starts, resumes)
+	}
+	if ids := provider.resumeIDs(); len(ids) != 1 || ids[0] != "ses_loop_n1" {
+		t.Fatalf("Resume arguments = %v, want [ses_loop_n1] (the nudged attempt's session ID)", ids)
+	}
+	if ids := provider.returnedSessionIDs(); len(ids) != 2 || ids[0] != "ses_loop_n1" || ids[1] != "ses_loop_n2" {
+		t.Fatalf("Start/Resume session IDs = %v, want [ses_loop_n1 ses_loop_n2]", ids)
+	}
+}
+
+// TestSupervisorPublicAPITeamPrePhaseResumesPreviousSession proves a team pre
+// phase marked resume_from_previous resumes the exact session ID the previous
+// pre phase produced, while the team member that follows still starts fresh.
+func TestSupervisorPublicAPITeamPrePhaseResumesPreviousSession(t *testing.T) {
+	t.Parallel()
+	prep := newItestProvider(
+		itestAttempt("ses_team_r1", itestSessionEnd("ses_team_r1", "end_turn", "prep done")),
+		itestAttempt("ses_team_r2", itestSessionEnd("ses_team_r2", "end_turn", "polish done")),
+	)
+	worker := newItestProvider(itestAttempt("ses_team_r3", itestSessionEnd("ses_team_r3", "end_turn", "team done")))
+	h := newItestHarness(t, Config{}, itestTeamProviders(map[string]*itestProvider{
+		"prep-agent":   prep,
+		"worker-agent": worker,
+	}))
+
+	file := itestWorkflowConfig(t, "team", map[string]any{
+		"pre": []map[string]any{
+			{"name": "prep", "prompt": "prep work", "agent": "prep-agent"},
+			{"name": "polish", "prompt": "polish work", "agent": "prep-agent", "resume_from_previous": true},
+		},
+		"team": []map[string]any{{"name": "worker", "prompt": "team work", "agent": "worker-agent"}},
+	})
+	rt := h.spawnWorkflow("team", file, map[string]any{"label": "team-resume"})
+
+	h.requireWorkflowEnd(rt, "done", "end_turn", 0)
+	if ids := prep.resumeIDs(); len(ids) != 1 || ids[0] != "ses_team_r1" {
+		t.Fatalf("prep Resume arguments = %v, want [ses_team_r1] (the first pre phase's session ID)", ids)
+	}
+	if ids := prep.returnedSessionIDs(); len(ids) != 2 || ids[0] != "ses_team_r1" || ids[1] != "ses_team_r2" {
+		t.Fatalf("prep Start/Resume session IDs = %v, want [ses_team_r1 ses_team_r2]", ids)
+	}
+	if ids := worker.returnedSessionIDs(); len(ids) != 1 || ids[0] != "ses_team_r3" {
+		t.Fatalf("worker Start/Resume session IDs = %v, want [ses_team_r3] (the member starts fresh)", ids)
+	}
+}
+
+// TestSupervisorPublicAPILoopProviderFactoryFailure proves a provider factory
+// error during a loop phase fails the child without any attempt: the caller
+// sees the failed status with exit code 1, the error sentinel, and an ended
+// List row, and no session was ever started.
+func TestSupervisorPublicAPILoopProviderFactoryFailure(t *testing.T) {
+	t.Parallel()
+	provider := newItestProvider(itestAttempt("ses_loop_never", itestSessionEnd("ses_loop_never", "end_turn", "never ran")))
+	h := newItestHarness(t, Config{}, func(runtime.StartOptions, string) (runtime.Provider, error) {
+		return nil, fmt.Errorf("provider factory offline")
+	})
+
+	file := itestWorkflowConfig(t, "loop", map[string]any{
+		"max_iterations": 1,
+		"loop":           []map[string]any{{"name": "work", "prompt": "loop work"}},
+	})
+	rt := h.spawnWorkflow("loop", file, map[string]any{"label": "loop-factory-fail"})
+
+	v := h.awaitStatus(rt, "failed")
+	if v.StopReason != "error" {
+		t.Fatalf("failed view stop reason = %q, want error", v.StopReason)
+	}
+	// The sentinel classifies the start failure the same way callers do.
+	if status, stopReason, code := itestSentinelStatus(h.sentinelText(rt)); status != "failed" || stopReason != "error" || code != 1 {
+		t.Fatalf("sentinel = (%q, %q, %d), want (failed, error, 1)", status, stopReason, code)
+	}
+	if v.FinalOutput == "never ran" {
+		t.Fatal("failed loop child produced the output of a phase it never ran")
+	}
+	if starts, _ := provider.counts(); starts != 0 {
+		t.Fatalf("provider starts = %d, want 0 (the factory failed before any attempt)", starts)
+	}
+	rows := h.listed("loop-factory-fail")
+	if len(rows) != 1 || rows[0]["status"] != "ended" || rows[0]["exit_code"] != 1 {
+		t.Fatalf("List row = %v, want ended with exit code 1", rows)
+	}
+}
+
+// TestSupervisorPublicAPITeamMemberStartFailure proves a member's scripted
+// Start error fails the team child: the caller sees the failed status with
+// exit code 1, the error sentinel, and an ended List row.
+func TestSupervisorPublicAPITeamMemberStartFailure(t *testing.T) {
+	t.Parallel()
+	failer := newItestProvider(stableScriptedAttempt{sessionID: "ses_team_startfail", startErr: fmt.Errorf("start exploded")})
+	h := newItestHarness(t, Config{}, itestTeamProviders(map[string]*itestProvider{"fail-agent": failer}))
+
+	file := itestWorkflowConfig(t, "team", map[string]any{
+		"team": []map[string]any{{"name": "solo", "prompt": "solo work", "agent": "fail-agent"}},
+	})
+	rt := h.spawnWorkflow("team", file, map[string]any{"label": "team-start-fail"})
+
+	// A team member whose provider start fails is classified by the team
+	// runner as phase_error, not error: the internal error becomes the member's
+	// stop reason before the sentinel is written.
+	v := h.awaitStatus(rt, "failed")
+	if v.StopReason != "phase_error" {
+		t.Fatalf("failed view stop reason = %q, want phase_error", v.StopReason)
+	}
+	if status, stopReason, code := itestSentinelStatus(h.sentinelText(rt)); status != "failed" || stopReason != "phase_error" || code != 1 {
+		t.Fatalf("sentinel = (%q, %q, %d), want (failed, phase_error, 1)", status, stopReason, code)
+	}
+	if starts, _ := failer.counts(); starts != 1 {
+		t.Fatalf("provider starts = %d, want 1 (the failed start is not retried)", starts)
+	}
+	rows := h.listed("team-start-fail")
+	if len(rows) != 1 || rows[0]["status"] != "ended" || rows[0]["exit_code"] != 1 {
+		t.Fatalf("List row = %v, want ended with exit code 1", rows)
 	}
 }
 

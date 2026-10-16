@@ -443,15 +443,20 @@ func (h *itestHarness) listed(labelPrefix string) []map[string]any {
 }
 
 // itestProvider wraps a stableScriptedProvider with call counters and hooks.
+// resumeCalls records every Resume argument and returnedIDs records the
+// session IDs Start and Resume returned, so tests can pin resume-ID fidelity
+// against the production path that passes resume IDs through.
 type itestProvider struct {
 	*stableScriptedProvider
-	mu       sync.Mutex
-	starts   int
-	resumes  int
-	cancels  int
-	answers  []runtime.PermissionResponse
-	onPrompt func(ctx context.Context)
-	onAnswer func(requestID string, resp runtime.PermissionResponse)
+	mu          sync.Mutex
+	starts      int
+	resumes     int
+	cancels     int
+	answers     []runtime.PermissionResponse
+	resumeCalls []string
+	returnedIDs []string
+	onPrompt    func(ctx context.Context)
+	onAnswer    func(requestID string, resp runtime.PermissionResponse)
 }
 
 func newItestProvider(attempts ...stableScriptedAttempt) *itestProvider {
@@ -462,14 +467,23 @@ func (p *itestProvider) Start(ctx context.Context, opts runtime.StartOptions) (r
 	p.mu.Lock()
 	p.starts++
 	p.mu.Unlock()
-	return p.stableScriptedProvider.Start(ctx, opts)
+	sess, err := p.stableScriptedProvider.Start(ctx, opts)
+	p.mu.Lock()
+	p.returnedIDs = append(p.returnedIDs, sess.SessionID)
+	p.mu.Unlock()
+	return sess, err
 }
 
 func (p *itestProvider) Resume(ctx context.Context, sessionID string) (runtime.Session, error) {
 	p.mu.Lock()
 	p.resumes++
+	p.resumeCalls = append(p.resumeCalls, sessionID)
 	p.mu.Unlock()
-	return p.stableScriptedProvider.Resume(ctx, sessionID)
+	sess, err := p.stableScriptedProvider.Resume(ctx, sessionID)
+	p.mu.Lock()
+	p.returnedIDs = append(p.returnedIDs, sess.SessionID)
+	p.mu.Unlock()
+	return sess, err
 }
 
 func (p *itestProvider) Prompt(ctx context.Context, sessionID, text string) error {
@@ -500,6 +514,21 @@ func (p *itestProvider) counts() (starts, resumes int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.starts, p.resumes
+}
+
+// resumeIDs returns every session ID passed to Resume, in call order.
+func (p *itestProvider) resumeIDs() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.resumeCalls...)
+}
+
+// returnedSessionIDs returns the session IDs Start and Resume returned, in
+// call order.
+func (p *itestProvider) returnedSessionIDs() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.returnedIDs...)
 }
 
 func (p *itestProvider) recordedAnswers() []runtime.PermissionResponse {
