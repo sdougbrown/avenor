@@ -42,19 +42,6 @@ var (
 // safe-integer range.
 const maxSafeOutputFloat = 9007199254740991
 
-// childSnapshotResolve loads one child workflow's current snapshot during
-// event building so subject references that route through a workflow-action
-// node can read the pinned child output value. Load failures leave the
-// subject unresolved instead of failing the command.
-var childSnapshotResolve func(workflowID WorkflowID) (Snapshot, bool, error)
-
-// SetChildSnapshotResolver wires the child-workflow snapshot lookup used at
-// command time to resolve subject values that flow through child output
-// bindings. It is owned by the manager.
-func SetChildSnapshotResolver(fn func(workflowID WorkflowID) (Snapshot, bool, error)) {
-	childSnapshotResolve = fn
-}
-
 // ---------------------------------------------------------------------------
 // Template-side validation
 // ---------------------------------------------------------------------------
@@ -318,7 +305,7 @@ func attachGateBindings(state Snapshot, event *Event, targetNodeID NodeID, cause
 	if err != nil || !nodeDeclaresBoundGates(node) {
 		return nil
 	}
-	resolved, err := resolveGates(state, tmpl, node, causedBy)
+	resolved, err := resolveGates(state, tmpl, node, causedBy, policies)
 	if err != nil {
 		return err
 	}
@@ -374,7 +361,7 @@ func nodeDeclaresBoundGates(node *NodeDefinition) bool {
 // the causing activation back to the nearest completed activation of the
 // source node; a fan-in (two or more at the same nearest distance) is
 // rejected; a missing source output is recorded as unresolved.
-func resolveGates(state Snapshot, tmpl *Template, node *NodeDefinition, causedBy ActivationID) (map[GateID]ResolvedGate, error) {
+func resolveGates(state Snapshot, tmpl *Template, node *NodeDefinition, causedBy ActivationID, policies Policies) (map[GateID]ResolvedGate, error) {
 	byID := make(map[ActivationID]*Activation, len(state.Instance.Activations))
 	for i := range state.Instance.Activations {
 		byID[state.Instance.Activations[i].ID] = &state.Instance.Activations[i]
@@ -391,7 +378,7 @@ func resolveGates(state Snapshot, tmpl *Template, node *NodeDefinition, causedBy
 				record.Inputs[name] = ResolvedGateInput{Literal: append(json.RawMessage(nil), value.Literal...)}
 				continue
 			}
-			input, err := resolveReferencedInput(state, tmpl, byID, causedBy, value.FromNodeOutput)
+			input, err := resolveReferencedInput(state, tmpl, byID, causedBy, value.FromNodeOutput, policies)
 			if err != nil {
 				return nil, err
 			}
@@ -401,7 +388,7 @@ func resolveGates(state Snapshot, tmpl *Template, node *NodeDefinition, causedBy
 			record.Inputs[name] = input
 		}
 		if binding := gate.SubjectBinding; binding != nil {
-			subject, unresolved, err := resolvePinnedSubject(state, tmpl, byID, causedBy, binding)
+			subject, unresolved, err := resolvePinnedSubject(state, tmpl, byID, causedBy, binding, policies)
 			if err != nil {
 				return nil, err
 			}
@@ -419,7 +406,7 @@ func resolveGates(state Snapshot, tmpl *Template, node *NodeDefinition, causedBy
 // resolveReferencedInput pins one from_node_output input reference against
 // the causal chain. A nil result (with no error) records the reference as
 // unresolved.
-func resolveReferencedInput(state Snapshot, tmpl *Template, byID map[ActivationID]*Activation, causedBy ActivationID, ref *TemplateOutputReference) (ResolvedGateInput, error) {
+func resolveReferencedInput(state Snapshot, tmpl *Template, byID map[ActivationID]*Activation, causedBy ActivationID, ref *TemplateOutputReference, policies Policies) (ResolvedGateInput, error) {
 	source, err := nearestCompletedSource(byID, causedBy, ref.NodeID)
 	if err != nil {
 		return ResolvedGateInput{}, err
@@ -427,7 +414,7 @@ func resolveReferencedInput(state Snapshot, tmpl *Template, byID map[ActivationI
 	if source == nil {
 		return ResolvedGateInput{}, nil
 	}
-	pinned, _, err := pinOutputReference(state, tmpl, source, ref.NodeID, ref.OutputID)
+	pinned, _, err := pinOutputReference(state, tmpl, source, ref.NodeID, ref.OutputID, policies)
 	if err != nil {
 		return ResolvedGateInput{}, err
 	}
@@ -441,7 +428,7 @@ func resolveReferencedInput(state Snapshot, tmpl *Template, byID map[ActivationI
 // causal source activation: repository and revision from string outputs and
 // the pull request number from an integral number output. Any missing
 // reference leaves the subject nil and reports the field under unresolved.
-func resolvePinnedSubject(state Snapshot, tmpl *Template, byID map[ActivationID]*Activation, causedBy ActivationID, binding *SubjectBinding) (*Subject, []string, error) {
+func resolvePinnedSubject(state Snapshot, tmpl *Template, byID map[ActivationID]*Activation, causedBy ActivationID, binding *SubjectBinding, policies Policies) (*Subject, []string, error) {
 	fields := []struct {
 		name string
 		ref  *TemplateOutputReference
@@ -466,7 +453,7 @@ func resolvePinnedSubject(state Snapshot, tmpl *Template, byID map[ActivationID]
 			unresolved = append(unresolved, field.name)
 			continue
 		}
-		pinned, value, err := pinOutputReference(state, tmpl, source, field.ref.NodeID, field.ref.OutputID)
+		pinned, value, err := pinOutputReference(state, tmpl, source, field.ref.NodeID, field.ref.OutputID, policies)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -555,7 +542,7 @@ func nearestCompletedSource(byID map[ActivationID]*Activation, causedBy Activati
 // resolves through its declared output_bindings and the durable child
 // reference; the pinned reference then carries the child workflow identity.
 // A nil result means the source completed without recording the output.
-func pinOutputReference(state Snapshot, tmpl *Template, source *Activation, sourceNode NodeID, outputID OutputID) (*OutputReference, json.RawMessage, error) {
+func pinOutputReference(state Snapshot, tmpl *Template, source *Activation, sourceNode NodeID, outputID OutputID, policies Policies) (*OutputReference, json.RawMessage, error) {
 	node, err := findNode(tmpl, sourceNode)
 	if err != nil {
 		return nil, nil, err
@@ -580,8 +567,8 @@ func pinOutputReference(state Snapshot, tmpl *Template, source *Activation, sour
 				continue
 			}
 			pinned := out
-			if childSnapshotResolve != nil {
-				if childSnap, ok, err := childSnapshotResolve(out.WorkflowID); err == nil && ok {
+			if policies != nil {
+				if childSnap, ok, err := policies.ChildSnapshot(out.WorkflowID); err == nil && ok {
 					for _, childOut := range childSnap.Instance.Outputs {
 						if childOut.ActivationID == out.ActivationID && childOut.DefinitionID == out.OutputID {
 							return &pinned, childOut.Value, nil

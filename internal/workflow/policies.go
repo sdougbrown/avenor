@@ -1,10 +1,12 @@
 package workflow
 
-// Policies supplies the template-aware lookups the reducer consults while
-// folding events. The reducer cannot see templates itself, so a nil Policies
-// reads as no template knowledge: completions always satisfy, any failure
-// exhausts immediately, and every activation reads as manual. A template is
-// versioned, so every lookup carries the template version.
+// Policies supplies the template-aware lookups the reducer and the
+// command-time gate pinning consult. The reducer cannot see templates
+// itself, so a nil Policies reads as no template knowledge: completions
+// always satisfy, any failure exhausts immediately, every activation reads
+// as manual, and bound-gate subjects that route through child workflows
+// stay unresolved. A template is versioned, so every lookup carries the
+// template version.
 type Policies interface {
 	// CompletionGates returns the node's declared gates.
 	CompletionGates(templateID TemplateID, templateVersion TemplateVersion, nodeID NodeID) []GateDefinition
@@ -19,6 +21,11 @@ type Policies interface {
 	// subjects. A load error disables pinning for that template (legacy
 	// snapshots without templates keep the unbound behavior).
 	Template(templateID TemplateID, templateVersion TemplateVersion) (*Template, error)
+	// ChildSnapshot loads one child workflow's current snapshot so subject
+	// values that flow through a workflow-action node's child output bindings
+	// can be read from the pinned child output. Load failures leave the
+	// subject unresolved instead of failing the command.
+	ChildSnapshot(workflowID WorkflowID) (Snapshot, bool, error)
 }
 
 // templatePolicies resolves policies from the versioned templates held by a
@@ -76,6 +83,13 @@ func (p templatePolicies) DispatchPolicy(templateID TemplateID, templateVersion 
 	effective := node.Dispatch.effective()
 	effective.ActionKind = node.Action.Kind
 	return &effective
+}
+
+// ChildSnapshot loads one child workflow's current snapshot from the store.
+// The child read takes the child instance's flock while the parent command
+// holds the parent's; no code path takes them in the reverse order.
+func (p templatePolicies) ChildSnapshot(workflowID WorkflowID) (Snapshot, bool, error) {
+	return p.store.loadCurrent(workflowID)
 }
 
 // withLegacyDefaults fills the identity and timestamp fields that legacy

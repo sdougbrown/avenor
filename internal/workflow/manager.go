@@ -91,21 +91,14 @@ func NewManagerWithClock(store *Store, now func() time.Time) *Manager {
 	// admission), so its executor ships with the manager by default.
 	m.executors[ActionWorkflow] = &workflowExecutor{manager: m}
 	// The reducer resolves gates, retry and dispatch policies from the
-	// instance's versioned template. Load errors read as no policy for that
-	// node: a template that loads fine with no required gates is unaffected,
-	// a node without its own retry policy inherits the template default, and
-	// a node without dispatch metadata reads as manual.
+	// instance's versioned template, and command-time gate pinning resolves
+	// child output values through the same policies. Load errors read as no
+	// policy for that node: a template that loads fine with no required gates
+	// is unaffected, a node without its own retry policy inherits the
+	// template default, a node without dispatch metadata reads as manual,
+	// and an unresolvable child lookup leaves the binding unresolved rather
+	// than failing the command.
 	store.policies = templatePolicies{store: store}
-	// Bound-gate pinning resolves at command time in event building: the
-	// Policies' template lookup (installed above) supplies the target node's
-	// gate bindings, and the child snapshot lookup resolves subject values
-	// that flow through child output bindings. Load errors leave the binding
-	// unresolved rather than failing the command. The child read takes the
-	// child instance's flock while the parent command holds the parent's; no
-	// code path takes them in the reverse order.
-	SetChildSnapshotResolver(func(workflowID WorkflowID) (Snapshot, bool, error) {
-		return m.store.loadCurrent(workflowID)
-	})
 	return m
 }
 

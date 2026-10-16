@@ -141,6 +141,10 @@ func (p stubPolicies) Template(TemplateID, TemplateVersion) (*Template, error) {
 	return p.template, nil
 }
 
+func (p stubPolicies) ChildSnapshot(WorkflowID) (Snapshot, bool, error) {
+	return Snapshot{}, false, nil
+}
+
 // retryPolicies returns policies that give every node the described retry
 // policy.
 func retryPolicies(maximum int, exhaustion RetryExhaustionKind, outcome OutcomeName) Policies {
