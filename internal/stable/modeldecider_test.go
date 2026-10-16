@@ -82,7 +82,15 @@ func TestModelDecisionOption(t *testing.T) {
 		map[string]any{"optionId": "deny", "kind": "deny"},
 	}
 	if id, requiresMessage := modelDecisionOption(options, "allow"); id != "allow_once" || requiresMessage {
-		t.Fatalf("allow option = %q/%v, want the first allow option allow_once", id, requiresMessage)
+		t.Fatalf("allow option = %q/%v, want the once-style allow option allow_once", id, requiresMessage)
+	}
+	// When the backend lists the persistent grant first, the once-style
+	// variant still wins (least privilege).
+	if id, _ := modelDecisionOption([]any{
+		map[string]any{"optionId": "allow_always", "kind": "allow_always"},
+		map[string]any{"optionId": "allow_once", "kind": "allow"},
+	}, "allow"); id != "allow_once" {
+		t.Fatalf("allow option = %q, want allow_once preferred over allow_always", id)
 	}
 	if id, _ := modelDecisionOption(options, "reject"); id != "reject_once" {
 		t.Fatalf("reject option = %q, want reject_once", id)

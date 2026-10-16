@@ -341,8 +341,9 @@ node's task, and the pending options — all framed to the model as untrusted
 worker-supplied data — and makes one bounded, non-streaming call. The
 model answers with a strict-JSON decision:
 
-- **allow** / **reject**: mapped onto the first pending option of the
-  matching kind and applied through the ordinary control plane, with the
+- **allow** / **reject**: mapped onto the pending option of the matching
+  kind — a once-style variant when the backend offers both (least
+  privilege) — and applied through the ordinary control plane, with the
   model's reason as the answer message.
 - **defer** (or anything the model cannot clearly decide): the request
   stays pending for a human gate — the same visible deferral as a harness

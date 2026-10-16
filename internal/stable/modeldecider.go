@@ -296,9 +296,12 @@ func parseModelDecision(raw string) (decision, reason string, err error) {
 }
 
 // modelDecisionOption finds the pending option that can express the model's
-// decision: the first option whose normalized kind matches. A request with
-// no matching option cannot be answered, and the caller defers it.
+// decision among the options whose normalized kind matches, preferring a
+// once-style variant when the backend offers both (least privilege: an allow
+// that must not outlive this request). A request with no matching option
+// cannot be answered, and the caller defers it.
 func modelDecisionOption(options []any, decision string) (optionID string, requiresMessage bool) {
+	fallbackID, fallbackRequiresMessage := "", false
 	for _, opt := range options {
 		m, ok := opt.(map[string]any)
 		if !ok {
@@ -309,13 +312,18 @@ func modelDecisionOption(options []any, decision string) (optionID string, requi
 			continue
 		}
 		oid, _ := m["optionId"].(string)
-		requiresMessage, _ = m["requiresMessage"].(bool)
 		if oid == "" {
 			continue
 		}
-		return oid, requiresMessage
+		requiresMessage, _ = m["requiresMessage"].(bool)
+		if strings.HasSuffix(strings.ToLower(strings.TrimSpace(kind)), "_once") {
+			return oid, requiresMessage
+		}
+		if fallbackID == "" {
+			fallbackID, fallbackRequiresMessage = oid, requiresMessage
+		}
 	}
-	return "", false
+	return fallbackID, fallbackRequiresMessage
 }
 
 // reasonSuffix renders a model reason for a stderr log line.
