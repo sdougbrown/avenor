@@ -1096,6 +1096,87 @@ func TestSupervisorPublicAPIRunDeadlineWhileWaitingForTreeBudget(t *testing.T) {
 	h.awaitStatus(holder, "done")
 }
 
+// TestSupervisorPublicAPIRunDeadlineWhileWaitingForLocalSlot proves a run
+// deadline that passes while a resumed runtime is blocked waiting for a local
+// MaxRuntimes slot ends it as a timeout instead of returning silently, which
+// would leave the parked turn's DONE sentinel standing.
+func TestSupervisorPublicAPIRunDeadlineWhileWaitingForLocalSlot(t *testing.T) {
+	t.Parallel()
+	gate := newItestGate()
+	defer gate.open()
+	var n atomic.Int64
+	factory := func(runtime.StartOptions, string) (runtime.Provider, error) {
+		id := fmt.Sprintf("ses_ls%d", n.Add(1))
+		if n.Load() == 1 {
+			return newItestProvider(itestAttempt(id, itestSessionEnd(id, "end_turn", "parked work"))), nil
+		}
+		working := stableScriptedEvent{event: events.Event{Event: "agent.status", SessionID: id, Fields: map[string]any{"phase": "working"}}}
+		return newItestProvider(itestAttempt(id, working, gate.step(), itestSessionEnd(id, "end_turn", "holder done"))), nil
+	}
+	// A one-runtime cap: the holder's in-flight turn occupies the only slot,
+	// so a resumed peer blocks in the local slot wait until its run deadline
+	// passes.
+	h := newItestHarness(t, Config{MaxRuntimes: 1}, factory)
+
+	// A five-second run deadline leaves a wide margin over setup, which is
+	// measured from the spawn: slow setup must not let the deadline fire
+	// before the runtime is parked in the local slot wait.
+	const runDeadline = 5 * time.Second
+	spawnedAt := time.Now()
+	rt := h.spawn(map[string]any{"label": "slot-parked", "timeout": int(runDeadline / time.Second)})
+	h.awaitStatus(rt, "done")
+	// The parked runtime releases its slot after the turn; the holder spawn
+	// can race that release, so retry the admission until it succeeds.
+	var holder string
+	h.awaitCondition("a free runtime slot for the holder spawn", func() bool {
+		id, err := h.trySpawn(map[string]any{"label": "slot-holder"})
+		var ce *admission.CapacityError
+		if err != nil && !errors.As(err, &ce) {
+			h.t.Fatalf("holder spawn: %v", err)
+		}
+		if err != nil {
+			return false
+		}
+		holder = id
+		return true
+	})
+	h.log.waitFor(t, "holder working status", itestEventIs("agent.status", holder))
+	// The follow-up prompt resumes the parked runtime, which blocks in the
+	// local slot wait for the rest of its run deadline.
+	if err := h.sup.RuntimePrompt(rt, "again", ""); err != nil {
+		t.Fatalf("RuntimePrompt: %v", err)
+	}
+	// Wait out most of the run deadline, then prove the runtime is still
+	// blocked in the local slot wait: it has not ended yet, and the holder
+	// still holds the only slot. A deadline that fired in the parked wait or
+	// during setup would already have ended the runtime and fails here.
+	if remaining := runDeadline - 500*time.Millisecond - time.Since(spawnedAt); remaining > 0 {
+		time.Sleep(remaining)
+	}
+	if v := h.view(rt); v.Status == "timeout" {
+		t.Fatalf("runtime ended before its deadline: view %+v", v)
+	}
+	if v := h.view(holder); v.Status != "running" {
+		t.Fatalf("holder status just before the deadline = %q, want running", v.Status)
+	}
+	v := h.awaitStatus(rt, "timeout")
+	if v.StopReason != "timeout" {
+		t.Fatalf("timeout view stop reason = %q, want timeout", v.StopReason)
+	}
+	if code := h.rawExitCode(rt); code != 124 {
+		t.Fatalf("raw RuntimeStatus exit_code = %d, want 124", code)
+	}
+	h.requireSessionEnd(rt, "timeout", 124)
+	turn := h.waitTurn(rt)
+	if got, _ := turn["stop_reason"].(string); got != "timeout" {
+		t.Fatalf("WaitTurn stop_reason = %q, want timeout", got)
+	}
+	// The holder is unaffected: released from the gate, its turn finishes
+	// normally.
+	gate.open()
+	h.awaitStatus(holder, "done")
+}
+
 // Permission scenarios.
 
 // itestWorker builds the provider for a worker that raises one permission
