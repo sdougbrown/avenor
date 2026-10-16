@@ -2406,6 +2406,14 @@ func TestDispatchModelDeciderBudgetBoundsCalls(t *testing.T) {
 	if calls, _, _ := capture.snapshot(); calls != maxModelDeciderCallsPerRuntime {
 		t.Fatalf("decision calls = %d, want the budget of %d", calls, maxModelDeciderCallsPerRuntime)
 	}
+	status, err := f.sup.RuntimeStatus(out.RuntimeID)
+	if err != nil {
+		t.Fatalf("RuntimeStatus: %v", err)
+	}
+	rt, _ := status.(map[string]any)
+	if exhausted, _ := rt["permission_decider_exhausted"].(bool); !exhausted {
+		t.Fatal("a budget-exhausted runtime must surface permission_decider_exhausted")
+	}
 }
 
 // TestDispatchModelDeciderHumanAnswerWinsRace proves a human answering a

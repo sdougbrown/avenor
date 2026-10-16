@@ -105,10 +105,14 @@ func (s *Supervisor) resolvePermissionWithModel(ctx context.Context, md workflow
 	rt.mu.Lock()
 	rt.modelDeciderCalls++
 	exhaustedBudget := rt.modelDeciderCalls > maxModelDeciderCallsPerRuntime
+	if exhaustedBudget {
+		rt.permissionDeciderExhausted = true
+	}
 	rt.mu.Unlock()
 	if exhaustedBudget {
 		// A budget stop is a policy stop, not a failure: the request stays
-		// pending for a human and nothing retries.
+		// pending for a human and nothing retries. The exhausted flag is
+		// still set so runtime status shows the decider stopped deciding.
 		fmt.Fprintf(s.stderrWriter(), "avenor: model decider budget (%d calls) exhausted for runtime %s; request %s stays pending for a human gate\n", maxModelDeciderCallsPerRuntime, runtimeID, requestID)
 		return false
 	}
