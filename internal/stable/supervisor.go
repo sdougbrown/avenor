@@ -2289,7 +2289,18 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 		}
 		// A permission decider's turn is terminal on every path: neither a
 		// queued prompt nor the retry backoff may resume it for another turn.
+		// Its failure is recorded the same way as a non-retryable failure.
 		if child.permissionDeciderRun {
+			stopReason := result.stopReason
+			if stopReason == "" {
+				stopReason = runtime.StopReasonForExitCode(result.exitCode)
+			}
+			child.mu.Lock()
+			child.exitCode = result.exitCode
+			child.mu.Unlock()
+			if child.sentinelFile != "" {
+				cli.WriteSentinel(child.sentinelFile, result.exitCode, result.sessionID, stopReason, s.runID, s.stderrWriter())
+			}
 			return
 		}
 		if result.sessionID != "" {

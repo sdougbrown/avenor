@@ -1341,9 +1341,8 @@ func TestSupervisorPublicAPIUserRuntimeWithDeciderLabelParks(t *testing.T) {
 // TestSupervisorPublicAPIDeciderSlotSurvivesLabelCollision proves the decider
 // slot release follows the run's own reservation, not its label: an ordinary
 // runtime spawned with a live decider's exact label finishes and is ended
-// without freeing the real decider's slot or removing its scratch directory,
-// so with the cap full a further permission request stays blocked and the
-// live decider can still answer.
+// without freeing the real decider's slot, so with the cap full a further
+// permission request stays blocked and the live decider can still answer.
 func TestSupervisorPublicAPIDeciderSlotSurvivesLabelCollision(t *testing.T) {
 	t.Parallel()
 	const workers = itestDeciderCap + 1
