@@ -2210,13 +2210,13 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 					child.parked = false
 					child.mu.Unlock()
 					if ctx.Err() != nil {
-						s.writeIdleCancelled(child)
+						s.writeIdleContextEnd(child, ctx.Err())
 					}
 					return
 				}
 				if err := s.acquireLocalRuntimeSlot(ctx, child); err != nil {
 					if ctx.Err() != nil {
-						s.writeIdleCancelled(child)
+						s.writeIdleContextEnd(child, ctx.Err())
 					}
 					return
 				}
@@ -2258,24 +2258,13 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			continue
 		}
 		if ctx.Err() != nil {
-			if ctx.Err() == context.Canceled {
-				s.writeIdleCancelled(child)
-			}
+			s.writeIdleContextEnd(child, ctx.Err())
 			return
 		}
 		select {
 		case <-time.After(backoffDelay(attempt)):
 		case <-ctx.Done():
-			if ctx.Err() == context.DeadlineExceeded {
-				child.mu.Lock()
-				child.exitCode = 124
-				child.mu.Unlock()
-				if child.sentinelFile != "" {
-					cli.WriteSentinel(child.sentinelFile, 124, child.sessionID(), "timeout", s.runID, s.stderrWriter())
-				}
-				return
-			}
-			s.writeIdleCancelled(child)
+			s.writeIdleContextEnd(child, ctx.Err())
 			return
 		}
 	}
@@ -3550,18 +3539,23 @@ func (s *Supervisor) emitSessionEnd(child *childRuntime, exitCode int, stopReaso
 	})
 }
 
-// writeIdleCancelled records a cancel that landed while the child had no
-// running attempt (parked, waiting for a slot, or in retry backoff): killed
-// exit code, a cancelled sentinel, and a cancelled session.end, matching a
-// cancel during an attempt.
-func (s *Supervisor) writeIdleCancelled(child *childRuntime) {
+// writeIdleContextEnd records the run context ending while the child has no
+// running attempt (parked, waiting for a slot, or in retry backoff), matching
+// how the same end reports itself during an attempt: a deadline is a timeout
+// (exit code 124, timeout sentinel, timeout session.end) and a cancel is a
+// kill (exit code 130, cancelled sentinel, cancelled session.end).
+func (s *Supervisor) writeIdleContextEnd(child *childRuntime, ctxErr error) {
+	exitCode, stopReason := 130, "cancelled"
+	if errors.Is(ctxErr, context.DeadlineExceeded) {
+		exitCode, stopReason = 124, "timeout"
+	}
 	child.mu.Lock()
-	child.exitCode = 130
+	child.exitCode = exitCode
 	child.mu.Unlock()
 	if child.sentinelFile != "" {
-		cli.WriteSentinel(child.sentinelFile, 130, child.sessionID(), "cancelled", s.runID, s.stderrWriter())
+		cli.WriteSentinel(child.sentinelFile, exitCode, child.sessionID(), stopReason, s.runID, s.stderrWriter())
 	}
-	s.emitSessionEnd(child, 130, "cancelled")
+	s.emitSessionEnd(child, exitCode, stopReason)
 }
 
 func (s *Supervisor) emitChildError(child *childRuntime, message, source string) {
