@@ -855,6 +855,9 @@ func TestSupervisorPublicAPIShutdownKillEndsActiveRuntime(t *testing.T) {
 
 	rt := h.spawn(map[string]any{"label": "kill-shutdown"})
 	h.log.waitFor(t, "working status", itestEventIs("agent.status", rt))
+	if v := h.view(rt); v.Status != "running" || v.Phase != "working" {
+		t.Fatalf("view before kill shutdown = %+v, want running in the working phase", v)
+	}
 	h.shutdown("kill")
 	v := h.awaitStatus(rt, "killed")
 	if v.StopReason != "cancelled" {
