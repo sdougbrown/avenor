@@ -263,29 +263,35 @@ type modelDecision struct {
 
 // parseModelDecision extracts the decision call's answer from the completion
 // text. The model is told to answer with only a JSON object, but completions
-// drift — the first balanced object in the text is parsed leniently, and the
-// decision vocabulary accepts the approve/deny synonyms the issue's contract
-// names. Anything else is an error, and the caller treats it exactly like a
-// failed call: the request stays pending.
+// drift: parsing tries each '{' in the text and a json.Decoder reads the
+// first balanced object from there, so prose with stray braces or a trailing
+// second object cannot corrupt the answer — and the decision vocabulary
+// accepts the approve/deny synonyms the issue's contract names. Anything
+// else is an error, and the caller treats it exactly like a failed call: the
+// request stays pending.
 func parseModelDecision(raw string) (decision, reason string, err error) {
-	start := strings.Index(raw, "{")
-	end := strings.LastIndex(raw, "}")
-	if start < 0 || end < start {
-		return "", "", fmt.Errorf("no JSON object in completion")
-	}
-	var parsed modelDecision
-	if err := json.Unmarshal([]byte(raw[start:end+1]), &parsed); err != nil {
-		return "", "", fmt.Errorf("decode completion JSON: %w", err)
-	}
-	switch strings.ToLower(strings.TrimSpace(parsed.Decision)) {
-	case "allow", "approve":
-		return "allow", parsed.Reason, nil
-	case "reject", "deny":
-		return "reject", parsed.Reason, nil
-	case "defer":
-		return "defer", parsed.Reason, nil
-	default:
-		return "", "", fmt.Errorf("unknown decision %q", parsed.Decision)
+	offset := 0
+	for {
+		start := strings.Index(raw[offset:], "{")
+		if start < 0 {
+			return "", "", fmt.Errorf("no decodable JSON object in completion")
+		}
+		offset += start
+		var parsed modelDecision
+		if err := json.NewDecoder(strings.NewReader(raw[offset:])).Decode(&parsed); err != nil {
+			offset++
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(parsed.Decision)) {
+		case "allow", "approve":
+			return "allow", parsed.Reason, nil
+		case "reject", "deny":
+			return "reject", parsed.Reason, nil
+		case "defer":
+			return "defer", parsed.Reason, nil
+		default:
+			return "", "", fmt.Errorf("unknown decision %q", parsed.Decision)
+		}
 	}
 }
 

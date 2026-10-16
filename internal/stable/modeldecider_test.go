@@ -52,6 +52,9 @@ func TestParseModelDecision(t *testing.T) {
 		{"no json", "I cannot answer that in JSON", "", "", true},
 		{"unbalanced", `{"decision":"allow"`, "", "", true},
 		{"wrong shape", `{"verdict":"allow"}`, "", "", true},
+		{"trailing stray brace", `{"decision":"allow","reason":"ok"} }`, "allow", "ok", false},
+		{"second trailing object", `{"decision":"defer"} {"decision":"allow"}`, "defer", "", false},
+		{"prose braces before", `use { or } carefully: {"decision":"allow","reason":"needed"}`, "allow", "needed", false},
 	}
 	for _, tc := range cases {
 		decision, reason, err := parseModelDecision(tc.raw)
