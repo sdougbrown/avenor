@@ -30,6 +30,7 @@ import (
 	"github.com/sdougbrown/avenor/client"
 	"github.com/sdougbrown/avenor/internal/control"
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/permission"
 	"github.com/sdougbrown/avenor/internal/runstate"
 	"github.com/sdougbrown/avenor/internal/runtime"
 )
@@ -137,15 +138,11 @@ func itestEventIs(name, runtimeID string) func(events.Event) bool {
 // Unix milliseconds) of ev.
 func itestEventTS(t *testing.T, ev events.Event) time.Time {
 	t.Helper()
-	switch ts := ev.Fields["ts"].(type) {
-	case int64:
-		return time.UnixMilli(ts)
-	case float64:
-		return time.UnixMilli(int64(ts))
-	default:
+	ts, ok := ev.Fields["ts"].(int64)
+	if !ok {
 		t.Fatalf("%s event has no numeric ts field: %#v", ev.Event, ev.Fields["ts"])
-		return time.Time{}
 	}
+	return time.UnixMilli(ts)
 }
 
 func itestStopReasonIs(runtimeID, stopReason string) func(events.Event) bool {
@@ -303,24 +300,13 @@ func (h *itestHarness) view(rtID string) itestView {
 	return v
 }
 
-// itestSentinelStatus maps a completion sentinel to the consumer-facing
-// status, its stop reason, and the sentinel's declared exit code (-1 when the
-// sentinel does not declare one).
+// itestSentinelStatus reads a completion sentinel and returns the
+// consumer-facing status, its stop reason, and the sentinel's declared exit
+// code (-1 when the sentinel does not declare one).
 func itestSentinelStatus(sentinel string) (status, stopReason string, exitCode int) {
 	exitCode = -1
 	lines := strings.Split(strings.TrimSpace(sentinel), "\n")
-	switch lines[0] {
-	case "DONE":
-		status = "done"
-	case "FAILED", "BLOCKED":
-		status = "failed"
-	case "TIMEOUT":
-		status = "timeout"
-	case "KILLED":
-		status = "killed"
-	default:
-		status = strings.ToLower(lines[0])
-	}
+	status = runstate.SentinelStatus(lines[0])
 	for _, line := range lines[1:] {
 		if v, ok := strings.CutPrefix(line, "STOP_REASON="); ok {
 			stopReason = v
@@ -1072,7 +1058,7 @@ func TestSupervisorPublicAPIDeciderSpawnFailuresExhaustToHuman(t *testing.T) {
 	if got := deciderCalls.Load(); got != itestDeciderSpawnBound {
 		t.Fatalf("decider spawns = %d, want the bound of %d", got, itestDeciderSpawnBound)
 	}
-	h.consistently("exhausted request stays pending without further spawns", func() bool {
+	h.consistentlyFor(backoffDelay(1)+500*time.Millisecond, "exhausted request stays pending without further spawns", func() bool {
 		v := h.view(rt)
 		return deciderCalls.Load() == itestDeciderSpawnBound && v.PendingPermission && v.Status == "running"
 	})
@@ -1150,7 +1136,7 @@ func TestSupervisorPublicAPIDeciderConcurrencyCapReleasesBlockedRequest(t *testi
 	blockedLabel := fmt.Sprintf("w%d", workers)
 	ids[blockedLabel] = h.spawn(map[string]any{"label": blockedLabel, "permission_decider": itestDecider()})
 	h.log.waitFor(t, "blocked permission.request", itestEventIs("permission.request", ids[blockedLabel]))
-	h.consistently("decider cap holds", func() bool {
+	h.consistentlyFor(permission.DefaultPollInterval+500*time.Millisecond, "decider cap holds", func() bool {
 		v := h.view(ids[blockedLabel])
 		return spawns.Load() == itestDeciderCap && v.PendingPermission && v.Status == "running"
 	})
@@ -1265,7 +1251,7 @@ func TestSupervisorPublicAPIDeciderDeferLeavesRequestForHuman(t *testing.T) {
 	// The decider deferred. No control client is connected, so nothing claims
 	// the request; it stays pending on the human gate, with no re-route or
 	// respawn of the decider.
-	h.consistently("deferred request stays pending with exactly one decider spawn", func() bool {
+	h.consistentlyFor(permission.DefaultPollInterval+500*time.Millisecond, "deferred request stays pending with exactly one decider spawn", func() bool {
 		v := h.view(rt)
 		return v.PendingPermission && v.Status == "running" && deciderSpawns.Load() == 1
 	})

@@ -1,6 +1,8 @@
 // Package runstate normalizes supervisor lifecycle status for consumers.
 package runstate
 
+import "strings"
+
 // Translation is the consumer-facing lifecycle state derived from a raw
 // supervisor status and phase.
 type Translation struct {
@@ -65,4 +67,22 @@ func IsTerminalStatus(status string) bool {
 
 func isTerminalPhase(phase string) bool {
 	return IsTerminalStatus(phase)
+}
+
+// SentinelStatus maps a completion sentinel's status word to the
+// consumer-facing status it represents. Unrecognized status words pass
+// through lowercased.
+func SentinelStatus(raw string) string {
+	switch raw {
+	case "DONE":
+		return "done"
+	case "FAILED", "BLOCKED":
+		return "failed"
+	case "TIMEOUT":
+		return "timeout"
+	case "KILLED":
+		return "killed"
+	default:
+		return strings.ToLower(raw)
+	}
 }

@@ -35,6 +35,29 @@ func TestTranslate(t *testing.T) {
 	}
 }
 
+func TestSentinelStatus(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want string
+	}{
+		{raw: "DONE", want: "done"},
+		{raw: "FAILED", want: "failed"},
+		{raw: "BLOCKED", want: "failed"},
+		{raw: "TIMEOUT", want: "timeout"},
+		{raw: "KILLED", want: "killed"},
+		{raw: "STOPPED", want: "stopped"},
+		{raw: "", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.raw, func(t *testing.T) {
+			if got := SentinelStatus(tt.raw); got != tt.want {
+				t.Fatalf("SentinelStatus(%q) = %q, want %q", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestTerminalStatuses(t *testing.T) {
 	for _, status := range []string{"done", "failed", "timeout", "killed"} {
 		if !IsTerminalStatus(status) {

@@ -351,18 +351,7 @@ func readSentinelSession(path string) (string, error) {
 }
 
 func applySentinelStatus(result map[string]any, sd *sentinelData) {
-	switch sd.Status {
-	case "DONE":
-		result["status"] = "done"
-	case "FAILED", "BLOCKED":
-		result["status"] = "failed"
-	case "TIMEOUT":
-		result["status"] = "timeout"
-	case "KILLED":
-		result["status"] = "killed"
-	default:
-		result["status"] = strings.ToLower(sd.Status)
-	}
+	result["status"] = runstate.SentinelStatus(sd.Status)
 	if sd.SessionID != "" {
 		result["session_id"] = sd.SessionID
 	}
