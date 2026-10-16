@@ -691,6 +691,42 @@ func TestSupervisorPublicAPIRunDeadlineWhileParkedTimesOut(t *testing.T) {
 	}
 }
 
+// TestSupervisorPublicAPIRunDeadlineDuringBackoffTimesOut proves a run
+// deadline that passes while the runtime is inside a retry backoff ends it as
+// a timeout instead of letting the backoff wake into another attempt:
+// consumers see the timeout status, raw exit code 124, and a timeout
+// session.end, and the provider is never resumed for the retry.
+func TestSupervisorPublicAPIRunDeadlineDuringBackoffTimesOut(t *testing.T) {
+	t.Parallel()
+	provider := newItestProvider(itestAttempt("ses_dback", itestSessionEnd("ses_dback", "error", "")))
+	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+
+	// backoffDelay(1) is 2s, so the 1s run deadline lands inside the backoff
+	// that follows the retryable failed attempt.
+	rt := h.spawn(map[string]any{"label": "deadline-backoff", "max_retries": 1, "timeout": 1})
+	h.log.waitFor(t, "failed attempt session.end", itestStopReasonIs(rt, "error"))
+	v := h.awaitStatus(rt, "timeout")
+	if v.StopReason != "timeout" {
+		t.Fatalf("timeout view stop reason = %q, want timeout", v.StopReason)
+	}
+	if code := h.rawExitCode(rt); code != 124 {
+		t.Fatalf("raw RuntimeStatus exit_code = %d, want 124", code)
+	}
+	h.requireSessionEnd(rt, "timeout", 124)
+	// WaitTurn reports the idle end's stop reason, not the failed attempt's;
+	// reading it after the runtime has ended avoids racing the failed
+	// attempt's own settle.
+	turn := h.waitTurn(rt)
+	if got, _ := turn["stop_reason"].(string); got != "timeout" {
+		t.Fatalf("WaitTurn stop_reason = %q, want timeout", got)
+	}
+	// The deadline must end the run inside the backoff: the retry attempt is
+	// never started.
+	if starts, resumes := provider.counts(); starts != 1 || resumes != 0 {
+		t.Fatalf("provider starts/resumes = %d/%d, want 1/0", starts, resumes)
+	}
+}
+
 func TestSupervisorPublicAPICancelWhileRunning(t *testing.T) {
 	t.Parallel()
 	gate := newItestGate()
@@ -745,6 +781,11 @@ func TestSupervisorPublicAPICancelDuringBackoff(t *testing.T) {
 	v := h.awaitStatus(rt, "killed")
 	if v.StopReason != "cancelled" {
 		t.Fatalf("killed view stop reason = %q, want cancelled", v.StopReason)
+	}
+	// The idle end records a terminal phase, so consumers see the turn as
+	// complete even though the runtime was killed mid-backoff.
+	if v.Phase != "done" {
+		t.Fatalf("killed view phase = %q, want done", v.Phase)
 	}
 	if code := h.rawExitCode(rt); code != 130 {
 		t.Fatalf("raw RuntimeStatus exit_code = %d, want 130", code)
@@ -995,7 +1036,11 @@ func TestSupervisorPublicAPIRunDeadlineWhileWaitingForTreeBudget(t *testing.T) {
 	// deadline passes.
 	h := newItestHarness(t, Config{MaxTreeBudget: 1}, factory)
 
-	rt := h.spawn(map[string]any{"label": "budget-parked", "timeout": 2})
+	// A five-second run deadline leaves a wide margin over setup, which is
+	// measured from the spawn: slow setup must not let the deadline fire
+	// before the runtime is parked in the tree-budget wait.
+	spawnedAt := time.Now()
+	rt := h.spawn(map[string]any{"label": "budget-parked", "timeout": 5})
 	h.awaitStatus(rt, "done")
 	// The parked runtime releases its slot after the turn; the holder spawn
 	// can race that release, so retry the admission until it succeeds.
@@ -1017,6 +1062,16 @@ func TestSupervisorPublicAPIRunDeadlineWhileWaitingForTreeBudget(t *testing.T) {
 	// tree-budget wait for the rest of its run deadline.
 	if err := h.sup.RuntimePrompt(rt, "again", ""); err != nil {
 		t.Fatalf("RuntimePrompt: %v", err)
+	}
+	// Wait out most of the run deadline, then prove the holder still holds
+	// the tree slot: a deadline that fired in the parked wait or during setup
+	// would already have ended the runtime, so this check makes the test fail
+	// instead of passing when the deadline lands in the wrong wait.
+	if remaining := 5*time.Second - 500*time.Millisecond - time.Since(spawnedAt); remaining > 0 {
+		time.Sleep(remaining)
+	}
+	if v := h.view(holder); v.Status != "running" {
+		t.Fatalf("holder status just before the deadline = %q, want running", v.Status)
 	}
 	v := h.awaitStatus(rt, "timeout")
 	if v.StopReason != "timeout" {
