@@ -142,3 +142,25 @@ func TestCompleteRedactsQueryCredentialsInTransportErrors(t *testing.T) {
 		t.Fatalf("transport error leaked the query-string credential: %v", err)
 	}
 }
+
+// TestCompleteOmitsAuthorizationWithoutKey proves a keyless provider entry
+// sends no Authorization header at all — not a malformed "Bearer " with an
+// empty token.
+func TestCompleteOmitsAuthorizationWithoutKey(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer srv.Close()
+	client, err := New(srv.URL, "", "m", srv.Client())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := client.Complete(context.Background(), []Message{{Role: "user", Content: "x"}}, 8); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if gotAuth != "" {
+		t.Fatalf("Authorization header = %q, want none for a keyless provider", gotAuth)
+	}
+}

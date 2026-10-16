@@ -2478,6 +2478,85 @@ func TestResolveAssignmentSelectionModelDeciderRequiresModel(t *testing.T) {
 	}
 }
 
+// TestDispatchModelDeciderPromptFileReachesDecision proves the task
+// excerpt for a prompt_file run action reaches the decision prompt: a node
+// dispatched with prompt_file (no inline prompt) still judges against the
+// file's content.
+func TestDispatchModelDeciderPromptFileReachesDecision(t *testing.T) {
+	requestID := "perm_req_model_promptfile"
+	capture := &modelDeciderCapture{}
+	srv := newModelDeciderServer(capture, func(w http.ResponseWriter) {
+		w.Write([]byte(`{"choices":[{"message":{"content":"{\"decision\":\"defer\",\"reason\":\"not sure\"}"}}]}`))
+	})
+	defer srv.Close()
+	writeProviderRegistry(t, fmt.Sprintf(`{
+		"providers": {"groq": {"base_url": %q, "api_key_env": "MODEL_DECIDER_TEST_KEY"}}
+	}`, srv.URL))
+	t.Setenv("MODEL_DECIDER_TEST_KEY", "sk-model-test")
+
+	promptFile := filepath.Join(t.TempDir(), "task.md")
+	if err := os.WriteFile(promptFile, []byte("scrub the old deployment directories from the artifact store"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	template := mustJSON(t, map[string]any{
+		"schema_version":   1,
+		"template_id":      "tmpl-dispatch-dispatch-modeldec-promptfile",
+		"template_version": "1",
+		"entry_nodes":      []string{"start"},
+		"nodes": []any{map[string]any{
+			"id":         "start",
+			"action":     map[string]any{"type": "run", "prompt_file": promptFile},
+			"assignment": map[string]any{"permission_policy": map[string]any{"decider_model": map[string]any{"provider": "groq", "model": "llama-3.3-70b"}}},
+			"dispatch":   map[string]any{"mode": "auto", "controller_id": "c1"},
+			"retry_policy": map[string]any{
+				"max_attempts": 3,
+				"exhaustion":   "block",
+			},
+		}},
+		"terminal_outcomes":    []string{"done"},
+		"default_lease_policy": map[string]any{"ttl_seconds": 900},
+	})
+	f := newDispatchFixtureTemplate(t, "dispatch-modeldec-promptfile", 4, 4, template)
+	gate := make(chan struct{})
+	defer close(gate)
+	f.sup.newProviderFunc = func(_ runtime.StartOptions, _ string) (runtime.Provider, error) {
+		return &stableScriptedProvider{attempt: -1, scripts: []stableScriptedAttempt{{
+			sessionID: "ses_modeldec_promptfile",
+			events: []stableScriptedEvent{
+				{event: events.Event{
+					Event:     "permission.request",
+					SessionID: "ses_modeldec_promptfile",
+					Fields: map[string]any{
+						"request_id": requestID,
+						"tool":       "bash",
+						"command":    "rm -rf /tmp/old-deploy",
+						"options": []any{
+							map[string]any{"optionId": "allow_once", "kind": "allow"},
+							map[string]any{"optionId": "reject_once", "kind": "reject"},
+						},
+					},
+				}},
+				{release: gate},
+			},
+		}}}, nil
+	}
+	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
+	if err != nil {
+		t.Fatalf("dispatchWorkflowNode: %v", err)
+	}
+	if out.Kind != Dispatched {
+		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
+	}
+	waitFor(t, "decision call", func() bool {
+		calls, _, _ := capture.snapshot()
+		return calls >= 1
+	})
+	_, _, body := capture.snapshot()
+	if !strings.Contains(body, "scrub the old deployment directories") {
+		t.Fatalf("decision request body missing the prompt_file content: %s", body)
+	}
+}
+
 // TestDispatchModelDeciderConcurrencyCapHolds proves the direct-model cap
 // behaves like the harness decider's: while maxConcurrentModelDeciders calls
 // are in flight, a further distinct request gets no decision call and stays

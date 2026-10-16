@@ -117,7 +117,7 @@ func (s *Supervisor) resolvePermissionWithModel(ctx context.Context, md workflow
 		// Options that cannot be encoded leave the model to judge from a
 		// blank request. Count the failure and re-route, exactly like a
 		// failed decider spawn.
-		return s.failModelDecision(slotKey, runtimeID, requestID, fmt.Errorf("encode permission options: %w", err))
+		return s.failModelDecision(runtimeID, requestID, fmt.Errorf("encode permission options: %w", err))
 	}
 	requestSnapshot := s.modelDeciderPermissionSnapshot(runtimeID)
 	task := s.modelDeciderTaskContext(runtimeID)
@@ -125,18 +125,18 @@ func (s *Supervisor) resolvePermissionWithModel(ctx context.Context, md workflow
 
 	client, err := modelapi.New(md.BaseURL, key, md.Model, &http.Client{Timeout: modelapi.DefaultTimeout})
 	if err != nil {
-		return s.failModelDecision(slotKey, runtimeID, requestID, err)
+		return s.failModelDecision(runtimeID, requestID, err)
 	}
 	raw, err := client.Complete(ctx, []modelapi.Message{
 		{Role: "system", Content: system},
 		{Role: "user", Content: user},
 	}, modelDeciderMaxTokens)
 	if err != nil {
-		return s.failModelDecision(slotKey, runtimeID, requestID, err)
+		return s.failModelDecision(runtimeID, requestID, err)
 	}
 	decision, reason, err := parseModelDecision(raw)
 	if err != nil {
-		return s.failModelDecision(slotKey, runtimeID, requestID, fmt.Errorf("decision for runtime %s request %s: %w", runtimeID, requestID, err))
+		return s.failModelDecision(runtimeID, requestID, fmt.Errorf("decision for runtime %s request %s: %w", runtimeID, requestID, err))
 	}
 	if decision == "defer" {
 		fmt.Fprintf(s.stderrWriter(), "avenor: model decider (%s/%s) deferred request %s on runtime %s%s; it stays pending for a human gate\n",
@@ -164,7 +164,7 @@ func (s *Supervisor) resolvePermissionWithModel(ctx context.Context, md workflow
 		if resolved, _ := s.control.ResolvedPermissionMatches(runtimeID, requestID, optionID, message); resolved {
 			return false
 		}
-		return s.failModelDecision(slotKey, runtimeID, requestID, err)
+		return s.failModelDecision(runtimeID, requestID, err)
 	}
 	fmt.Fprintf(s.stderrWriter(), "avenor: model decider (%s/%s) answered request %s on runtime %s: %s%s\n",
 		md.Provider, md.Model, requestID, runtimeID, decision, reasonSuffix(reason))
@@ -175,7 +175,7 @@ func (s *Supervisor) resolvePermissionWithModel(ctx context.Context, md workflow
 // reports whether the request should be re-routed from its cached options.
 // The caller re-routes only after the deferred slot release (release-before-
 // retry, mirroring failSpawn), so acquire and release stay strictly paired.
-func (s *Supervisor) failModelDecision(slotKey, runtimeID, requestID string, err error) bool {
+func (s *Supervisor) failModelDecision(runtimeID, requestID string, err error) bool {
 	fmt.Fprintf(s.stderrWriter(), "avenor: model decider for runtime %s request %s: %v\n", runtimeID, requestID, err)
 	exhausted := s.recordPermissionDeciderFailure(runtimeID, requestID)
 	if exhausted {
