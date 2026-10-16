@@ -136,6 +136,12 @@ type lifecycleState struct {
 	completion completionStage
 	// class is immutable after initialization; no transition changes it.
 	class attemptClass
+	// pendingProbe guards the two-step continuation protocol (decision 5):
+	// attemptOutcome sets it to the probe it selects and the matching
+	// promptContinuation clears it. It is an internal guard dimension, not a
+	// lifecycle predicate: validateLifecycleState does not read it, and only
+	// the two protocol signals do (inventory amendment 5).
+	pendingProbe probeKind
 }
 
 // Pointer-receiver, nonlocking predicates. Each reads only its named field
@@ -438,6 +444,13 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 	if err := validateLifecycleSignal(sig); err != nil {
 		return st, continuation{contNone}, nil, err
 	}
+	// The attempt class is immutable: a signal carrying a class that differs
+	// from the state's class is rejected (decision 5 copies the class into
+	// every signal, including fanout/completion ones).
+	if sig.class != st.class {
+		return st, continuation{contNone}, nil, fmt.Errorf(
+			"lifecycle: signal %d with attempt class %d on state class %d", sig.kind, sig.class, st.class)
+	}
 
 	out := st
 	var eff []lifecycleEffect
@@ -563,8 +576,8 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 		eff = append(eff, lifecycleEffect{kind: effectReleaseTreeToken})
 
 	case signalAttemptOutcome:
-		// Source S/I, C0, direct class; decision-5 result policy. Never changes
-		// presentation or ends execution by itself.
+		// Source S/I, C0, direct class, no probe pending; decision-5 result
+		// policy. Never changes presentation or ends execution by itself.
 		if err := requireOpen(st, sig.kind); err != nil {
 			return st, cont, nil, err
 		}
@@ -573,6 +586,9 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 		}
 		if st.exec != execStarting && st.exec != execIdle {
 			return st, cont, nil, fmt.Errorf("lifecycle: attempt outcome from exec state %d", st.exec)
+		}
+		if st.pendingProbe != probeNone {
+			return st, cont, nil, fmt.Errorf("lifecycle: attempt outcome with probe %d still pending", st.pendingProbe)
 		}
 		record := lifecycleEffect{kind: effectRecordOutcomeExit, exitCode: sig.exitCode}
 		sentinel := lifecycleEffect{
@@ -604,6 +620,7 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 				// probe's sentinel is emitted by promptContinuation.
 				eff = append(eff, record)
 				cont = continuation{contProbeTerminalPrompt}
+				out.pendingProbe = probeTerminalPrompt
 			}
 		case sig.runKind == runKindDecider:
 			// Retryable with retries remaining, decider: record exit, write
@@ -616,11 +633,13 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 			// caller first updates resumeID only if result.sessionID is
 			// nonempty, then dequeues before checking context.
 			cont = continuation{contProbeRetryPrompt}
+			out.pendingProbe = probeRetryPrompt
 		}
 
 	case signalPromptContinuation:
 		// Source S/I, C0, direct class; final continuation of the two-step
-		// protocol.
+		// protocol. The signal's probe kind must match the probe attemptOutcome
+		// left pending, and some probe must be pending at all.
 		if err := requireOpen(st, sig.kind); err != nil {
 			return st, cont, nil, err
 		}
@@ -629,6 +648,13 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 		}
 		if st.exec != execStarting && st.exec != execIdle {
 			return st, cont, nil, fmt.Errorf("lifecycle: prompt continuation from exec state %d", st.exec)
+		}
+		if st.pendingProbe == probeNone {
+			return st, cont, nil, errors.New("lifecycle: prompt continuation without a pending probe")
+		}
+		if sig.probeKind != st.pendingProbe {
+			return st, cont, nil, fmt.Errorf(
+				"lifecycle: prompt continuation with probe %d while probe %d is pending", sig.probeKind, st.pendingProbe)
 		}
 		sentinel := lifecycleEffect{
 			kind:      effectWriteSentinel,
@@ -662,9 +688,9 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 			default:
 				cont = continuation{contBackoff}
 			}
-		default:
-			return st, cont, nil, fmt.Errorf("lifecycle: prompt continuation without a probe kind")
 		}
+		// The matching continuation consumed the pending probe.
+		out.pendingProbe = probeNone
 
 	case signalSuccessPresented:
 		// Source S/I, C0, exit 0, after the sentinel; repeat sets phase done

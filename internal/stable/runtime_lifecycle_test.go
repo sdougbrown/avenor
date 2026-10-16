@@ -260,7 +260,7 @@ func TestRuntimeLifecycleMatrixRows(t *testing.T) {
 				stopReason: "error", sentinelReason: "error", resultSessionID: "s1",
 				retryable: false, retriesRemaining: false,
 			},
-			want: idleDirect(),
+			want: lifecycleState{exec: execIdle, class: directAttemptClass, pendingProbe: probeTerminalPrompt},
 			cont: contProbeTerminalPrompt,
 			effects: []lifecycleEffect{
 				{kind: effectRecordOutcomeExit, exitCode: 1},
@@ -324,12 +324,13 @@ func TestRuntimeLifecycleMatrixRows(t *testing.T) {
 				stopReason: "error", sentinelReason: "error",
 				retryable: true, retriesRemaining: true,
 			},
-			want: idleDirect(),
+			want: lifecycleState{exec: execIdle, class: directAttemptClass, pendingProbe: probeRetryPrompt},
 			cont: contProbeRetryPrompt,
 		},
 		{
-			name:  "continuation terminal probe resume keeps sentinel regardless of consumed",
-			start: idleDirect(),
+			name: "continuation terminal probe resume keeps sentinel regardless of consumed",
+			// Mid-protocol state: attemptOutcome selected the terminal probe.
+			start: lifecycleState{exec: execIdle, class: directAttemptClass, pendingProbe: probeTerminalPrompt},
 			signal: lifecycleSignal{
 				kind: signalPromptContinuation, class: directAttemptClass,
 				probeKind: probeTerminalPrompt, promptConsumed: true,
@@ -343,7 +344,7 @@ func TestRuntimeLifecycleMatrixRows(t *testing.T) {
 		},
 		{
 			name:  "continuation terminal probe no prompt ends with sentinel",
-			start: idleDirect(),
+			start: lifecycleState{exec: execIdle, class: directAttemptClass, pendingProbe: probeTerminalPrompt},
 			signal: lifecycleSignal{
 				kind: signalPromptContinuation, class: directAttemptClass,
 				probeKind: probeTerminalPrompt, promptConsumed: false,
@@ -356,8 +357,9 @@ func TestRuntimeLifecycleMatrixRows(t *testing.T) {
 			},
 		},
 		{
-			name:  "continuation retry probe consumed and live resumes without sentinel",
-			start: idleDirect(),
+			name: "continuation retry probe consumed and live resumes without sentinel",
+			// Mid-protocol state: attemptOutcome selected the retry probe.
+			start: lifecycleState{exec: execIdle, class: directAttemptClass, pendingProbe: probeRetryPrompt},
 			signal: lifecycleSignal{
 				kind: signalPromptContinuation, class: directAttemptClass,
 				probeKind: probeRetryPrompt, promptConsumed: true,
@@ -368,7 +370,7 @@ func TestRuntimeLifecycleMatrixRows(t *testing.T) {
 		},
 		{
 			name:  "continuation retry probe consumed but context dead ends idle",
-			start: idleDirect(),
+			start: lifecycleState{exec: execIdle, class: directAttemptClass, pendingProbe: probeRetryPrompt},
 			signal: lifecycleSignal{
 				kind: signalPromptContinuation, class: directAttemptClass,
 				probeKind: probeRetryPrompt, promptConsumed: true,
@@ -379,7 +381,7 @@ func TestRuntimeLifecycleMatrixRows(t *testing.T) {
 		},
 		{
 			name:  "continuation retry probe no prompt and live context backs off",
-			start: idleDirect(),
+			start: lifecycleState{exec: execIdle, class: directAttemptClass, pendingProbe: probeRetryPrompt},
 			signal: lifecycleSignal{
 				kind: signalPromptContinuation, class: directAttemptClass,
 				probeKind: probeRetryPrompt, promptConsumed: false,
@@ -424,10 +426,35 @@ func TestRuntimeLifecycleMatrixRows(t *testing.T) {
 			want:   lifecycleState{exec: execParked, completion: completionAdmissionClosed, class: directAttemptClass},
 		},
 		{
+			// The not-ok park wait (context canceled, supervisor.go:2956-2957)
+			// resumes to idle with completion still open.
+			name:   "park wait ended from parked with open completion resumes to idle",
+			start:  lifecycleState{exec: execParked, class: directAttemptClass},
+			signal: lifecycleSignal{kind: signalParkWaitEnded, class: directAttemptClass},
+			want:   idleDirect(),
+		},
+		{
 			name:   "park wait ended resumes to idle",
 			start:  lifecycleState{exec: execParked, completion: completionAdmissionClosed, class: directAttemptClass},
 			signal: lifecycleSignal{kind: signalParkWaitEnded, class: directAttemptClass},
 			want:   lifecycleState{exec: execIdle, completion: completionAdmissionClosed, class: directAttemptClass},
+		},
+		{
+			// Park-window rule (decision 4): the idle-context end while parked
+			// after the admission closed (local-slot failure trace) must retain
+			// the parked accounting exactly.
+			name:  "idle context ended while parked after admission closed retains parked",
+			start: lifecycleState{exec: execParked, completion: completionAdmissionClosed, class: directAttemptClass},
+			signal: lifecycleSignal{
+				kind: signalIdleContextEnded, class: directAttemptClass,
+				idleExitCode: 130, idleStopReason: "cancelled",
+			},
+			want: lifecycleState{exec: execParked, completion: completionAdmissionClosed, class: directAttemptClass},
+			effects: []lifecycleEffect{
+				{kind: effectSetIdleEndData, exitCode: 130, reason: "cancelled"},
+				{kind: effectWriteSentinel, exitCode: 130, reason: "cancelled"},
+				{kind: effectEmitSessionEnd, exitCode: 130, reason: "cancelled"},
+			},
 		},
 		{
 			name:  "idle context ended overwrites data and emits sentinel and session end",
@@ -716,6 +743,12 @@ func TestRuntimeLifecycleRepeats(t *testing.T) {
 		if out != st || len(eff) != 0 {
 			t.Fatalf("spawnRolledBack repeat: %+v %v", out, eff)
 		}
+		// runEnded repeat from parked-ending: no effects, state unchanged.
+		st = lifecycleState{exec: execParkedEnding, class: directAttemptClass}
+		out, _, eff = applyOK(t, st, lifecycleSignal{kind: signalRunEnded, class: directAttemptClass})
+		if out != st || len(eff) != 0 {
+			t.Fatalf("runEnded repeat from parked-ending: %+v %v", out, eff)
+		}
 
 		// completionPublished: CP repeat is a no-op.
 		st = lifecycleState{exec: execEnded, completion: completionPublished}
@@ -773,6 +806,12 @@ func TestRuntimeLifecycleInvalidSources(t *testing.T) {
 			lifecycleSignal{kind: signalAttemptSettled, class: directAttemptClass}},
 		{"workflow finalized with direct class", runningDirect(),
 			lifecycleSignal{kind: signalWorkflowFinalized, class: directAttemptClass}},
+		// Class is immutable: a signal whose class differs from the state's
+		// class is rejected regardless of the signal kind.
+		{"direct class signal on workflow child", workflowState(execIdle, 0),
+			lifecycleSignal{kind: signalShutdownRequested, class: directAttemptClass}},
+		{"workflow class signal on direct child", idleDirect(),
+			lifecycleSignal{kind: signalShutdownRequested, class: workflowAttemptClass}},
 		{"returned with workflow class", idleDirect(),
 			lifecycleSignal{kind: signalAttemptReturned, class: workflowAttemptClass}},
 		{"returned from running", runningDirect(),
@@ -791,6 +830,10 @@ func TestRuntimeLifecycleInvalidSources(t *testing.T) {
 			lifecycleSignal{kind: signalPromptDequeued}},
 		{"prompt dequeued after admission closed", lifecycleState{exec: execParked, completion: completionAdmissionClosed},
 			lifecycleSignal{kind: signalPromptDequeued}},
+		// The gate at runtime_lifecycle.go: preparing in a running state is
+		// workflow-only (parallel preparation).
+		{"preparing in running with direct class", runningDirect(),
+			lifecycleSignal{kind: signalAttemptPreparing, class: directAttemptClass}},
 		{"park timed out from idle", idleDirect(), lifecycleSignal{kind: signalParkTimedOut}},
 		{"park wait ended from idle", idleDirect(), lifecycleSignal{kind: signalParkWaitEnded}},
 		{"idle end from running", runningDirect(), lifecycleSignal{kind: signalIdleContextEnded}},
@@ -871,8 +914,6 @@ func TestRuntimeLifecycleCrossDimensionInvariants(t *testing.T) {
 			{exec: execParked, shutdown: shutdownRequested},
 			// parked+writerClosed is reachable via the local-slot failure path.
 			{exec: execParked, writer: writerClosed},
-			// running+phase done is reachable: session.end precedes attempt cleanup.
-			{exec: execRunning, attempts: 1},
 			// parked-ending with closed writer and admission closed.
 			{exec: execParkedEnding, writer: writerClosed, completion: completionAdmissionClosed},
 		}
@@ -1130,6 +1171,13 @@ func TestRuntimeLifecycleRetryProbeContextTiming(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st := idleDirect()
+			// The retry probe is only reachable after attemptOutcome selected it.
+			st, _, _ = applyOK(t, st, lifecycleSignal{
+				kind: signalAttemptOutcome, class: directAttemptClass,
+				runKind: runKindOrdinaryDirect, exitCode: 1,
+				stopReason: "error", sentinelReason: "error",
+				retryable: true, retriesRemaining: true,
+			})
 			st, cont, eff := applyOK(t, st, lifecycleSignal{
 				kind: signalPromptContinuation, class: directAttemptClass,
 				probeKind:        probeRetryPrompt,
@@ -1153,6 +1201,99 @@ func TestRuntimeLifecycleRetryProbeContextTiming(t *testing.T) {
 	}
 }
 
+// TestRuntimeLifecycleTwoStepContinuationProtocol binds the two-step
+// continuation protocol (decision 5, inventory amendment 5): attemptOutcome
+// arms pendingProbe with the probe it selects, the matching promptContinuation
+// consumes it, a mismatched probe kind is rejected with unchanged state, a
+// continuation without a pending probe is rejected, and a second attemptOutcome
+// while a probe is pending is rejected.
+func TestRuntimeLifecycleTwoStepContinuationProtocol(t *testing.T) {
+	retryOutcome := lifecycleSignal{
+		kind: signalAttemptOutcome, class: directAttemptClass,
+		runKind: runKindOrdinaryDirect, exitCode: 1,
+		stopReason: "error", sentinelReason: "error",
+		retryable: true, retriesRemaining: true,
+	}
+
+	t.Run("matching retry pair accepted and clears the pending probe", func(t *testing.T) {
+		st := idleDirect()
+		st, cont, _ := applyOK(t, st, retryOutcome)
+		if cont.kind != contProbeRetryPrompt || st.pendingProbe != probeRetryPrompt {
+			t.Fatalf("outcome: continuation %d pendingProbe %d", cont.kind, st.pendingProbe)
+		}
+		st, cont, _ = applyOK(t, st, lifecycleSignal{
+			kind: signalPromptContinuation, class: directAttemptClass,
+			probeKind: probeRetryPrompt, promptConsumed: true,
+		})
+		if cont.kind != contRetry {
+			t.Fatalf("continuation = %d, want %d", cont.kind, contRetry)
+		}
+		if st.pendingProbe != probeNone {
+			t.Fatalf("pending probe not cleared: %d", st.pendingProbe)
+		}
+	})
+
+	t.Run("matching terminal pair accepted and clears the pending probe", func(t *testing.T) {
+		st := idleDirect()
+		st, _, _ = applyOK(t, st, lifecycleSignal{
+			kind: signalAttemptOutcome, class: directAttemptClass,
+			runKind: runKindOrdinaryDirect, exitCode: 1,
+			stopReason: "error", sentinelReason: "error", resultSessionID: "s1",
+			retryable: false, retriesRemaining: false,
+		})
+		if st.pendingProbe != probeTerminalPrompt {
+			t.Fatalf("pendingProbe = %d, want %d", st.pendingProbe, probeTerminalPrompt)
+		}
+		st, cont, _ := applyOK(t, st, lifecycleSignal{
+			kind: signalPromptContinuation, class: directAttemptClass,
+			probeKind: probeTerminalPrompt, promptConsumed: false,
+			terminalContextErr: context.Canceled,
+			exitCode:           1, sentinelReason: "error", resultSessionID: "s1",
+		})
+		if cont.kind != contEnd || st.pendingProbe != probeNone {
+			t.Fatalf("continuation %d pendingProbe %d", cont.kind, st.pendingProbe)
+		}
+	})
+
+	t.Run("mismatched probe kind rejected with unchanged state", func(t *testing.T) {
+		st := idleDirect()
+		st, _, _ = applyOK(t, st, retryOutcome)
+		before := st
+		expectErr(t, st, lifecycleSignal{
+			kind: signalPromptContinuation, class: directAttemptClass,
+			probeKind: probeTerminalPrompt, promptConsumed: true,
+		})
+		if st != before {
+			t.Fatalf("rejected mismatch changed state: %+v", st)
+		}
+		// The pending probe survives the rejection: the matching continuation
+		// is still accepted afterwards.
+		st, cont, _ := applyOK(t, st, lifecycleSignal{
+			kind: signalPromptContinuation, class: directAttemptClass,
+			probeKind: probeRetryPrompt, promptConsumed: false,
+		})
+		if cont.kind != contBackoff || st.pendingProbe != probeNone {
+			t.Fatalf("after mismatch: continuation %d pendingProbe %d", cont.kind, st.pendingProbe)
+		}
+	})
+
+	t.Run("continuation without attemptOutcome rejected", func(t *testing.T) {
+		expectErr(t, idleDirect(), lifecycleSignal{
+			kind: signalPromptContinuation, class: directAttemptClass,
+			probeKind: probeRetryPrompt,
+		})
+	})
+
+	t.Run("attemptOutcome twice rejected while probe pending", func(t *testing.T) {
+		st := idleDirect()
+		st, _, _ = applyOK(t, st, retryOutcome)
+		expectErr(t, st, retryOutcome)
+		if st.pendingProbe != probeRetryPrompt {
+			t.Fatalf("pending probe disturbed by rejected outcome: %d", st.pendingProbe)
+		}
+	})
+}
+
 // TestRuntimeLifecycleConflictAndDeciderExclusions covers the branch
 // exclusions: a session-ID conflict cannot resume a failed terminal turn, a
 // decider run is terminal on every path (including decider+workflow
@@ -1164,8 +1305,10 @@ func TestRuntimeLifecycleConflictAndDeciderExclusions(t *testing.T) {
 		conflict bool
 	}{
 		{"session conflict", runKindOrdinaryDirect, true},
+		// Decider wins when decider and workflow classifications coincide; the
+		// caller resolves that before runKind reaches the machine, so a single
+		// decider row covers both (the former duplicate row is removed).
 		{"decider", runKindDecider, false},
-		{"decider and workflow", runKindDecider, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1281,9 +1424,9 @@ func TestRuntimeLifecycleParallelPreparation(t *testing.T) {
 // startFailed/settled pair beyond the single settle.
 func TestRuntimeLifecycleAdmissionRejectionAfterShutdown(t *testing.T) {
 	st := workflowState(execStarting, 0)
-	st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalShutdownRequested})
+	st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalShutdownRequested, class: workflowAttemptClass})
 	// A closing writer does not block attempt bookkeeping either.
-	st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalWriterCloseBegun})
+	st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalWriterCloseBegun, class: workflowAttemptClass})
 	st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalAttemptPreparing, class: workflowAttemptClass})
 	st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalAttemptStarted, class: workflowAttemptClass})
 	if !st.isActive() || !st.isShuttingDown() {
@@ -1539,18 +1682,18 @@ func TestRuntimeLifecycleWorkflowDirectAndLoopTraces(t *testing.T) {
 		st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalAttemptPreparing, class: workflowAttemptClass})
 		st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalAttemptStarted, class: workflowAttemptClass})
 		// Session end observed mid-attempt: phase done while active.
-		st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalSessionEndObserved, stopReason: "end_turn"})
+		st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalSessionEndObserved, class: workflowAttemptClass, stopReason: "end_turn"})
 		if !st.isActive() {
 			t.Fatal("session end must not settle the attempt")
 		}
 		st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalAttemptSettled, class: workflowAttemptClass})
 		// Run error: exit recorded by the imperative path, then finalization.
 		st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalWorkflowFinalized, class: workflowAttemptClass})
-		st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalShutdownRequested})
-		st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalWriterCloseBegun})
-		st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalWriterCloseFinished, closeCalled: true})
-		st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalRunEnded})
-		st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalCompletionPublished, boundary: afterRunTeardown})
+		st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalShutdownRequested, class: workflowAttemptClass})
+		st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalWriterCloseBegun, class: workflowAttemptClass})
+		st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalWriterCloseFinished, class: workflowAttemptClass, closeCalled: true})
+		st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalRunEnded, class: workflowAttemptClass})
+		st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalCompletionPublished, class: workflowAttemptClass, boundary: afterRunTeardown})
 	})
 }
 
