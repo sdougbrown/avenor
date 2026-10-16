@@ -175,6 +175,17 @@ type SpawnParams struct {
 	// so a runtime that finishes before its executor returns still records
 	// its terminal fact. Set only by workflow executors.
 	workflowTerminate func(child *childRuntime, status workflow.AttemptStatus)
+	// permissionDeciderRun marks the spawn as a supervisor-spawned permission
+	// decider for one pending request. It carries no JSON tag and is set only
+	// by spawnPermissionDecider, so a caller-supplied label cannot make an
+	// ordinary runtime end after its first turn.
+	permissionDeciderRun bool
+	// permissionDeciderSlotKey is the decider concurrency-slot key reserved
+	// for this run at routing. It carries no JSON tag and is set only by
+	// spawnPermissionDecider, from the same key the slot was acquired with,
+	// so teardown releases the run's own slot even if another runtime wears
+	// the same label.
+	permissionDeciderSlotKey string
 }
 
 type SpawnResult struct {
@@ -345,6 +356,16 @@ type childRuntime struct {
 	// reach the termination path). Empty for direct runs and marker-less
 	// loop/team exits.
 	workflowMarkerLabel string
+	// permissionDeciderRun marks this runtime as a supervisor-spawned
+	// permission decider: its single turn is terminal and teardown releases
+	// its decider slot and scratch directory. Only decider spawns set it.
+	permissionDeciderRun bool
+	// permissionDeciderSlotKey is the decider concurrency-slot key this run
+	// reserved, recorded so teardown releases exactly that reservation. It
+	// equals the decider's label today; the permissionDeciderRun flag, not
+	// this key, keeps an ordinary runtime with a decider's label from
+	// releasing a slot. Empty for ordinary runs.
+	permissionDeciderSlotKey string
 	// onWorkflowTerminate records the terminal workflow attempt fact before the
 	// child's runtime state is cleaned up. Nil for non-workflow direct runs.
 	onWorkflowTerminate func(workflow.AttemptStatus)
@@ -1399,23 +1420,25 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		// Set before publication into s.runtimes so the label is visible
 		// under s.controlMu at the moment the child becomes visible to the
 		// label scans, instead of being written unlocked after publication.
-		label:             params.Label,
-		startedAt:         time.Now().UnixMilli(),
-		lifecycleCtx:      childCtx,
-		cancelFn:          childCancel,
-		done:              make(chan struct{}),
-		promptCh:          make(chan struct{}, 1),
-		autoApprove:       params.AutoApprove,
-		permissionDecider: params.PermissionDecider,
-		modelDecider:      params.PermissionModelDecider,
-		modelDeciderKey:   modelDeciderKey,
-		task:              params.Prompt,
-		taskFile:          params.PromptFile,
-		launchWrapper:     params.LaunchWrapper,
-		workflowID:        params.WorkflowID,
-		nodeID:            params.NodeID,
-		activationID:      params.ActivationID,
-		attemptID:         params.AttemptID,
+		label:                    params.Label,
+		startedAt:                time.Now().UnixMilli(),
+		lifecycleCtx:             childCtx,
+		cancelFn:                 childCancel,
+		done:                     make(chan struct{}),
+		promptCh:                 make(chan struct{}, 1),
+		autoApprove:              params.AutoApprove,
+		permissionDecider:        params.PermissionDecider,
+		modelDecider:             params.PermissionModelDecider,
+		modelDeciderKey:          modelDeciderKey,
+		task:                     params.Prompt,
+		taskFile:                 params.PromptFile,
+		launchWrapper:            params.LaunchWrapper,
+		workflowID:               params.WorkflowID,
+		nodeID:                   params.NodeID,
+		activationID:             params.ActivationID,
+		attemptID:                params.AttemptID,
+		permissionDeciderRun:     params.permissionDeciderRun,
+		permissionDeciderSlotKey: params.permissionDeciderSlotKey,
 	}
 	if terminate := params.workflowTerminate; terminate != nil {
 		child.onWorkflowTerminate = func(status workflow.AttemptStatus) { terminate(child, status) }
@@ -2133,11 +2156,13 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 		// A claim reservation admitted just before shutdown may finish while
 		// provider close drains it. Sweep again so no late binding survives.
 		s.clearRuntimePermissionOptions(child.id)
-		if strings.HasPrefix(child.label, permdecLabelPrefix) {
+		if child.permissionDeciderRun {
 			// A permission-decider run holds a decider concurrency slot and a
 			// neutral scratch directory; release both so blocked requests can
-			// retry and no scratch dir leaks.
-			s.releasePermissionDecider(child.label)
+			// retry and no scratch dir leaks. Only a run marked as a decider
+			// reaches this release, so an ordinary runtime wearing a decider's
+			// exact label never frees the live decider's slot.
+			s.releasePermissionDecider(child.permissionDeciderSlotKey)
 		}
 		child.complete()
 		s.signalCapacityChange()
@@ -2204,6 +2229,16 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 				if child.workflowID != "" {
 					return
 				}
+				// A permission decider judges one request in a single turn and
+				// receives no follow-up prompt, so parking would hold its
+				// decider slot and scratch directory until the parked timeout.
+				// Its successful end_turn is terminal too (recorded in the
+				// runChild defer). The dedicated flag, not the label prefix,
+				// decides: a caller can spawn an ordinary runtime with a
+				// decider-shaped label, and that runtime parks like any other.
+				if child.permissionDeciderRun {
+					return
+				}
 				child.mu.Lock()
 				child.parked = true
 				child.mu.Unlock()
@@ -2234,7 +2269,11 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 				continue
 			}
 
-			if ctx.Err() == nil && result.stopReason != runtime.SessionIDConflictStopReason {
+			// A permission decider's turn is terminal on failure too: a queued
+			// prompt must not resume it for a second turn. Falling through
+			// records the failure's exit code and sentinel exactly as a
+			// promptless failure.
+			if ctx.Err() == nil && !child.permissionDeciderRun && result.stopReason != runtime.SessionIDConflictStopReason {
 				if nextPrompt, ok := child.dequeuePrompt(); ok {
 					if child.sentinelFile != "" {
 						cli.WriteSentinel(child.sentinelFile, result.exitCode, result.sessionID, stopReason, s.runID, s.stderrWriter())
@@ -2249,6 +2288,22 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 				}
 			}
 
+			if child.sentinelFile != "" {
+				cli.WriteSentinel(child.sentinelFile, result.exitCode, result.sessionID, stopReason, s.runID, s.stderrWriter())
+			}
+			return
+		}
+		// A permission decider's turn is terminal on every path: neither a
+		// queued prompt nor the retry backoff may resume it for another turn.
+		// Its failure is recorded the same way as a non-retryable failure.
+		if child.permissionDeciderRun {
+			stopReason := result.stopReason
+			if stopReason == "" {
+				stopReason = runtime.StopReasonForExitCode(result.exitCode)
+			}
+			child.mu.Lock()
+			child.exitCode = result.exitCode
+			child.mu.Unlock()
 			if child.sentinelFile != "" {
 				cli.WriteSentinel(child.sentinelFile, result.exitCode, result.sessionID, stopReason, s.runID, s.stderrWriter())
 			}
@@ -4098,6 +4153,12 @@ Never answer blindly: allow only requests the task plainly needs.`,
 		Thinking: decider.Thinking,
 		// The decider must never block on its own permission prompts.
 		AutoApprove: true,
+		// Marks the run as a permission decider so it ends after its single
+		// turn and releases its slot at teardown; the label prefix alone is
+		// not proof, since a caller can set any label it likes. The slot key
+		// records the reservation teardown releases.
+		permissionDeciderRun:     true,
+		permissionDeciderSlotKey: deciderLabel,
 	}
 	if _, err := s.spawn(params); err != nil {
 		failSpawn(fmt.Sprintf("spawn permission decider %q", decider.Entry), err)
@@ -4111,9 +4172,8 @@ Never answer blindly: allow only requests the task plainly needs.`,
 // spawns forever.
 const maxPermissionDeciderSpawnFailures = 3
 
-// permdecLabelPrefix marks a child run as a permission decider spawned for a
-// pending request; the teardown path uses it to release the decider's
-// concurrency slot and scratch directory.
+// permdecLabelPrefix prefixes the label of a permission decider spawned for
+// a pending request; each decider label maps to one decider concurrency slot.
 const permdecLabelPrefix = "permdec:"
 
 // maxConcurrentPermissionDeciders caps how many permission-decider runs may
