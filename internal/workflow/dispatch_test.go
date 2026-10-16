@@ -319,7 +319,7 @@ func TestDispatchReadyAtOnCreateAndRearm(t *testing.T) {
 	// marking only the instantiate event as applied, so the subsequent events
 	// replay and re-derive ReadyAt from the log.
 	base := resetToPostInstantiate(snap, node)
-	replayed, _, _, err := replayEvents(base, s.eventsPath(wf))
+	replayed, _, _, err := replayEvents(base, s.eventsPath(wf), s.policies)
 	if err != nil {
 		t.Fatalf("replayEvents: %v", err)
 	}

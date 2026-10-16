@@ -615,7 +615,7 @@ func (e *workflowExecutor) resolveChildOutcome(ec ExecutorContext, childID Workf
 			ActivationID: ec.ActivationID,
 			Outcome:      parentOutcome,
 			TargetNodeID: target,
-			CreatedAt:    nowUTC(),
+			CreatedAt:    m.now(),
 		}
 		data, err := json.Marshal(t)
 		if err != nil {

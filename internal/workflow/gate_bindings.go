@@ -346,12 +346,12 @@ func attachGateBindings(state Snapshot, event *Event, targetNodeID NodeID, cause
 // completing activation is only satisfied, and its outputs only recorded,
 // inside this same event batch, and references must pin against the state
 // the command itself creates — never the pre-command snapshot.
-func attachTransitionGateBindings(state Snapshot, primary *Event, transition *Event, targetNodeID NodeID, causedBy ActivationID) error {
+func attachTransitionGateBindings(state Snapshot, primary *Event, transition *Event, targetNodeID NodeID, causedBy ActivationID, policies Policies) error {
 	if bindingTemplateResolve == nil {
 		transition.CausedBy = append([]ActivationID(nil), causedBy)
 		return nil
 	}
-	sim, err := simulateResolvedState(state, primary)
+	sim, err := simulateResolvedState(state, primary, policies)
 	if err != nil {
 		return err
 	}
@@ -362,10 +362,10 @@ func attachTransitionGateBindings(state Snapshot, primary *Event, transition *Ev
 // command's primary resolving event applied, so bound-gate references pin
 // against the post-command state. The copy is discarded after resolution;
 // the reducer applies the real events to the live snapshot.
-func simulateResolvedState(state Snapshot, primary *Event) (Snapshot, error) {
+func simulateResolvedState(state Snapshot, primary *Event, policies Policies) (Snapshot, error) {
 	sim := cloneSnapshot(state)
 	if primary != nil {
-		if err := applyEvent(&sim, *primary); err != nil {
+		if err := applyEvent(&sim, *primary, policies); err != nil {
 			return state, err
 		}
 	}

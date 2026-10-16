@@ -15,18 +15,15 @@ import (
 
 // parkedGatedCompletion builds a snapshot in which a completion parked the
 // single start activation in awaiting_gate because the resolver reports
-// required gates, and returns the snapshot and the parked activation id. The
-// resolver is installed for the lifetime of the test.
-func parkedGatedCompletion(t *testing.T, defs []GateDefinition) (Snapshot, ActivationID) {
+// required gates, and returns the snapshot, the parked activation id and the
+// policies that report them.
+func parkedGatedCompletion(t *testing.T, defs []GateDefinition) (Snapshot, ActivationID, Policies) {
 	t.Helper()
-	SetCompletionGateResolver(func(TemplateID, TemplateVersion, NodeID) []GateDefinition {
-		return defs
-	})
-	t.Cleanup(func() { SetCompletionGateResolver(nil) })
+	p := stubPolicies{gates: defs}
 	state := newInstance(t)
 	actID := actStart(state).ID
 	state, leaseID, attemptID := runToStart(t, state)
-	state = mustApply(t, state, Command{
+	state = mustApplyWith(t, p, state, Command{
 		Kind:             CommandComplete,
 		ExpectedRevision: state.Instance.Revision,
 		IdempotencyKey:   "complete-1",
@@ -41,7 +38,7 @@ func parkedGatedCompletion(t *testing.T, defs []GateDefinition) (Snapshot, Activ
 	if state.Instance.Status != WorkflowActive {
 		t.Fatalf("setup: workflow status = %q, want active", state.Instance.Status)
 	}
-	return state, actID
+	return state, actID, p
 }
 
 // humanGateCmd builds a structured CommandGate for a human operation.
@@ -108,7 +105,7 @@ func TestGateOperationValidation(t *testing.T) {
 	cmd := valid(actID)
 	cmd.ExpectedRevision = state.Instance.Revision
 	cmd.Operation = GateOperation("bogus")
-	events, err := Apply(state, cmd)
+	events, err := Apply(state, cmd, nil)
 	if err == nil {
 		t.Fatalf("unknown operation: Apply succeeded, want error")
 	}
@@ -178,12 +175,12 @@ func TestGateExternalResultValidation(t *testing.T) {
 // gate decision on a parked awaiting_gate activation satisfies it and
 // follows the declared branch exactly as a successful completion would.
 func TestGatePassResolvesParkedBranch(t *testing.T) {
-	state, actID := parkedGatedCompletion(t, []GateDefinition{{ID: "review", Type: GateHuman, Required: true}})
+	state, actID, p := parkedGatedCompletion(t, []GateDefinition{{ID: "review", Type: GateHuman, Required: true}})
 	branch, err := json.Marshal(Transition{ActivationID: actID, Outcome: "done", TargetNodeID: "next"})
 	if err != nil {
 		t.Fatalf("marshal transition: %v", err)
 	}
-	state = mustApply(t, state, humanGateCmd(state, "gate-1", actID, "review", GateOpSatisfy, GatePassed, branch), "gate satisfy")
+	state = mustApplyWith(t, p, state, humanGateCmd(state, "gate-1", actID, "review", GateOpSatisfy, GatePassed, branch), "gate satisfy")
 
 	act := actStart(state)
 	if act.Status != ActivationSatisfied {
@@ -210,12 +207,12 @@ func TestGatePassResolvesParkedBranch(t *testing.T) {
 // TestGatePassTerminalResolution: a satisfying gate with no declared branch
 // completes the workflow with the selected outcome.
 func TestGatePassTerminalResolution(t *testing.T) {
-	state, actID := parkedGatedCompletion(t, []GateDefinition{{ID: "review", Type: GateHuman, Required: true}})
+	state, actID, p := parkedGatedCompletion(t, []GateDefinition{{ID: "review", Type: GateHuman, Required: true}})
 	terminal, err := json.Marshal(Transition{ActivationID: actID, Outcome: "done"})
 	if err != nil {
 		t.Fatalf("marshal transition: %v", err)
 	}
-	state = mustApply(t, state, humanGateCmd(state, "gate-1", actID, "review", GateOpSatisfy, GatePassed, terminal), "gate satisfy (terminal)")
+	state = mustApplyWith(t, p, state, humanGateCmd(state, "gate-1", actID, "review", GateOpSatisfy, GatePassed, terminal), "gate satisfy (terminal)")
 
 	if got := actStart(state).Status; got != ActivationSatisfied {
 		t.Fatalf("after gate satisfy: activation status got %q want satisfied", got)
@@ -234,11 +231,11 @@ func TestGatePassTerminalResolution(t *testing.T) {
 // TestGatePassParksWhenOtherGateUnresolved: resolving one of two required
 // gates leaves the activation parked until every required gate resolves.
 func TestGatePassParksWhenOtherGateUnresolved(t *testing.T) {
-	state, actID := parkedGatedCompletion(t, []GateDefinition{
+	state, actID, p := parkedGatedCompletion(t, []GateDefinition{
 		{ID: "review", Type: GateHuman, Required: true},
 		{ID: "security", Type: GateExternal, Required: true},
 	})
-	state = mustApply(t, state, humanGateCmd(state, "gate-1", actID, "review", GateOpSatisfy, GatePassed, nil), "gate satisfy (first of two)")
+	state = mustApplyWith(t, p, state, humanGateCmd(state, "gate-1", actID, "review", GateOpSatisfy, GatePassed, nil), "gate satisfy (first of two)")
 
 	if got := actStart(state).Status; got != ActivationAwaitingGate {
 		t.Fatalf("after first gate: activation status got %q want awaiting_gate", got)
@@ -258,14 +255,14 @@ func TestGatePassParksWhenOtherGateUnresolved(t *testing.T) {
 // branch rejects the activation and creates the failure-branch activation;
 // the workflow stays active (never failed).
 func TestGateRejectDeclaredFailureBranch(t *testing.T) {
-	state, actID := parkedGatedCompletion(t, []GateDefinition{{ID: "review", Type: GateHuman, Required: true}})
+	state, actID, p := parkedGatedCompletion(t, []GateDefinition{{ID: "review", Type: GateHuman, Required: true}})
 	branch, err := json.Marshal(Transition{ActivationID: actID, Outcome: "needs_fix", TargetNodeID: "fixup"})
 	if err != nil {
 		t.Fatalf("marshal transition: %v", err)
 	}
 	cmd := humanGateCmd(state, "gate-1", actID, "review", GateOpReject, GateRejected, branch)
 	cmd.Outcome = "needs_fix"
-	state = mustApply(t, state, cmd, "gate reject")
+	state = mustApplyWith(t, p, state, cmd, "gate reject")
 
 	if got := actStart(state).Status; got != ActivationRejected {
 		t.Fatalf("after gate reject: activation status got %q want rejected", got)
@@ -285,8 +282,8 @@ func TestGateRejectDeclaredFailureBranch(t *testing.T) {
 // TestGateRejectWithoutBranch: a rejection with no declared failure path
 // rejects the activation and creates nothing.
 func TestGateRejectWithoutBranch(t *testing.T) {
-	state, actID := parkedGatedCompletion(t, []GateDefinition{{ID: "review", Type: GateHuman, Required: true}})
-	state = mustApply(t, state, humanGateCmd(state, "gate-1", actID, "review", GateOpReject, GateRejected, nil), "gate reject")
+	state, actID, p := parkedGatedCompletion(t, []GateDefinition{{ID: "review", Type: GateHuman, Required: true}})
+	state = mustApplyWith(t, p, state, humanGateCmd(state, "gate-1", actID, "review", GateOpReject, GateRejected, nil), "gate reject")
 
 	if got := actStart(state).Status; got != ActivationRejected {
 		t.Fatalf("after gate reject: activation status got %q want rejected", got)
@@ -303,18 +300,18 @@ func TestGateRejectWithoutBranch(t *testing.T) {
 // safe no-op, and a different operation for a different gate instance leaves
 // the first issue's gate record untouched (append-only prior facts).
 func TestGateIdempotentReissue(t *testing.T) {
-	state, actID := parkedGatedCompletion(t, []GateDefinition{
+	state, actID, p := parkedGatedCompletion(t, []GateDefinition{
 		{ID: "review", Type: GateHuman, Required: true},
 		{ID: "security", Type: GateExternal, Required: true},
 	})
 	first := humanGateCmd(state, "gate-a", actID, "review", GateOpSatisfy, GatePassed, nil)
-	state = mustApply(t, state, first, "gate satisfy (first issue)")
+	state = mustApplyWith(t, p, state, first, "gate satisfy (first issue)")
 	prior := state.Instance.Gates[0]
 
 	// Re-issue under the same operator idempotency key: rejected, no change.
 	before := state
 	first.ExpectedRevision = state.Instance.Revision
-	_, err := applyCmd(state, first)
+	_, err := applyCmdWith(p, state, first)
 	if err != errDuplicateIdempotency {
 		t.Fatalf("duplicate idempotency key: err = %v, want errDuplicateIdempotency", err)
 	}
@@ -325,7 +322,7 @@ func TestGateIdempotentReissue(t *testing.T) {
 	// A different operation for the OTHER gate does not mutate the prior
 	// gate record; it appends its own.
 	second := humanGateCmd(state, "gate-b", actID, "security", GateOpWaive, GateWaived, nil)
-	state = mustApply(t, state, second, "gate waive (different gate)")
+	state = mustApplyWith(t, p, state, second, "gate waive (different gate)")
 	if got := state.Instance.Gates[0]; !reflect.DeepEqual(got, prior) {
 		t.Fatalf("prior gate record mutated: before %+v after %+v", prior, got)
 	}
@@ -340,7 +337,7 @@ func TestGateIdempotentReissue(t *testing.T) {
 // TestGateExternalResultPasses: an external_result mapped to passed resolves
 // the parked activation (terminal, no branch payload).
 func TestGateExternalResultPasses(t *testing.T) {
-	state, actID := parkedGatedCompletion(t, []GateDefinition{{ID: "review", Type: GateExternal, Required: true}})
+	state, actID, p := parkedGatedCompletion(t, []GateDefinition{{ID: "review", Type: GateExternal, Required: true}})
 	ts := time.Now().UTC()
 	cmd := Command{
 		Kind:             CommandGate,
@@ -361,7 +358,7 @@ func TestGateExternalResultPasses(t *testing.T) {
 			ObservedAt:   &ts,
 		},
 	}
-	state = mustApply(t, state, cmd, "external_result passed")
+	state = mustApplyWith(t, p, state, cmd, "external_result passed")
 
 	if got := actStart(state).Status; got != ActivationSatisfied {
 		t.Fatalf("external_result passed: activation status got %q want satisfied", got)
@@ -380,7 +377,7 @@ func TestGateExternalResultPasses(t *testing.T) {
 // TestGateExternalResultFails: an external_result mapped to failed rejects
 // the parked activation; the workflow stays active.
 func TestGateExternalResultFails(t *testing.T) {
-	state, actID := parkedGatedCompletion(t, []GateDefinition{{ID: "review", Type: GateExternal, Required: true}})
+	state, actID, p := parkedGatedCompletion(t, []GateDefinition{{ID: "review", Type: GateExternal, Required: true}})
 	ts := time.Now().UTC()
 	cmd := Command{
 		Kind:             CommandGate,
@@ -401,7 +398,7 @@ func TestGateExternalResultFails(t *testing.T) {
 			ObservedAt:   &ts,
 		},
 	}
-	state = mustApply(t, state, cmd, "external_result failed")
+	state = mustApplyWith(t, p, state, cmd, "external_result failed")
 
 	if got := actStart(state).Status; got != ActivationRejected {
 		t.Fatalf("external_result failed: activation status got %q want rejected", got)
@@ -414,21 +411,19 @@ func TestGateExternalResultFails(t *testing.T) {
 	}
 }
 
-// TestGateFailedBoundGateWithoutResolver pins the nil-resolver path of
-// gateIsBound: with no resolver installed (replayed/recovered logs), a
+// TestGateFailedBoundGateWithoutResolver pins the nil-policies path of
+// gateIsBound: with no policies supplied (replayed/recovered logs), a
 // failed result on a gate that would be bound cannot be read as bound, so
 // the legacy failed-rejects behavior applies and the activation is
 // rejected, not parked awaiting_gate.
 func TestGateFailedBoundGateWithoutResolver(t *testing.T) {
-	state, actID := parkedGatedCompletion(t, []GateDefinition{{
+	state, actID, p := parkedGatedCompletion(t, []GateDefinition{{
 		ID:             "review",
 		Type:           GateExternal,
 		Required:       true,
 		SubjectBinding: &SubjectBinding{Type: "pull_request"},
 	}})
-	saved := completionGateResolve
-	completionGateResolve = nil
-	t.Cleanup(func() { completionGateResolve = saved })
+	p = nil
 	ts := time.Now().UTC()
 	cmd := Command{
 		Kind:             CommandGate,
@@ -449,7 +444,7 @@ func TestGateFailedBoundGateWithoutResolver(t *testing.T) {
 			ObservedAt:   &ts,
 		},
 	}
-	state = mustApply(t, state, cmd, "external_result failed (no resolver)")
+	state = mustApplyWith(t, p, state, cmd, "external_result failed (no resolver)")
 
 	if got := actStart(state).Status; got != ActivationRejected {
 		t.Fatalf("failed result without resolver: activation status got %q want rejected (legacy)", got)

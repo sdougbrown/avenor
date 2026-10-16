@@ -17,7 +17,7 @@ import (
 // a non-zero byte offset if a malformed trailing event was truncated to the
 // last good line, and any error. An event that fails to reduce is a replay
 // error and aborts without truncation.
-func replayEvents(snap Snapshot, path string) (Snapshot, int, int64, error) {
+func replayEvents(snap Snapshot, path string, policies Policies) (Snapshot, int, int64, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -41,7 +41,7 @@ func replayEvents(snap Snapshot, path string) (Snapshot, int, int64, error) {
 		var e Event
 		if err := json.Unmarshal(lineData, &e); err == nil {
 			var rerr error
-			next, rerr = Reduce(next, e)
+			next, rerr = Reduce(next, e, policies)
 			if rerr != nil {
 				return next, count, 0, rerr
 			}

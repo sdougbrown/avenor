@@ -681,7 +681,7 @@ func TestApplyHeartbeatDurableRenewalIsReplayStable(t *testing.T) {
 		Identity:         baseIdentity(actID, ""),
 		LeaseID:          "lease-1",
 		Lease:            &Lease{ExpiresAt: newExpiry, LastHeartbeatAt: &hbTime},
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("Apply heartbeat: %v", err)
 	}
@@ -700,7 +700,7 @@ func TestApplyHeartbeatDurableRenewalIsReplayStable(t *testing.T) {
 	// wall-clock field Reduce may stamp is Instance.UpdatedAt, so normalize
 	// it before comparing.
 	replay := func() Snapshot {
-		next, err := Reduce(state, events[0])
+		next, err := Reduce(state, events[0], nil)
 		if err != nil {
 			t.Fatalf("Reduce heartbeat: %v", err)
 		}
@@ -736,14 +736,14 @@ func TestApplyHeartbeatDurableRenewalIsReplayStable(t *testing.T) {
 		IdempotencyKey:   "hb-legacy",
 		Identity:         baseIdentity(actID, ""),
 		LeaseID:          "lease-1",
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("Apply legacy heartbeat: %v", err)
 	}
 	if legacy[0].Lease != nil {
 		t.Fatalf("legacy heartbeat event carries lease metadata: %+v", legacy[0].Lease)
 	}
-	legacySnap, err := Reduce(state, legacy[0])
+	legacySnap, err := Reduce(state, legacy[0], nil)
 	if err != nil {
 		t.Fatalf("Reduce legacy heartbeat: %v", err)
 	}

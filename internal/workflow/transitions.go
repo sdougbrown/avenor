@@ -34,11 +34,11 @@ func copyReadyAt(act *Activation, event Event) {
 // start boundary and the root-wide held-key check can serialize it; a
 // policy-less manual node leaves Dispatch nil, which is how legacy snapshots
 // read as manual.
-func applyDispatchPolicy(next *Snapshot, act *Activation, nodeID NodeID) {
+func applyDispatchPolicy(policies Policies, next *Snapshot, act *Activation, nodeID NodeID) {
 	if act == nil {
 		return
 	}
-	policy := dispatchPolicyFor(next, nodeID)
+	policy := dispatchPolicyFor(policies, next, nodeID)
 	if policy == nil {
 		return
 	}
@@ -71,9 +71,13 @@ func freezeConcurrencyKey(policy *DispatchPolicy, params map[string]string) {
 // a workflow-local sequence that continues from the snapshot revision. Most
 // commands emit a single event; CommandComplete may emit EventCompleted plus
 // an EventTransition that advances the run to the declared branch target.
-func buildCommandEvents(state Snapshot, command Command) ([]Event, error) {
+func buildCommandEvents(state Snapshot, command Command, policies Policies) ([]Event, error) {
 	seq := state.Instance.Revision
 	readyAt := commandReadyAt(command)
+	at := command.At
+	if at.IsZero() {
+		at = nowUTC()
+	}
 	newEvent := func(kind EventKind) Event {
 		seq++
 		return Event{
@@ -83,6 +87,7 @@ func buildCommandEvents(state Snapshot, command Command) ([]Event, error) {
 			CommandID:      command.ID,
 			IdempotencyKey: command.IdempotencyKey,
 			Identity:       command.Identity,
+			At:             at,
 			ReadyAt:        readyAt,
 		}
 	}
@@ -97,7 +102,14 @@ func buildCommandEvents(state Snapshot, command Command) ([]Event, error) {
 			return nil, fmt.Errorf("instantiate command: %w", err)
 		}
 		e := newEvent(EventInstantiated)
+		if e.Identity.WorkflowID == "" {
+			e.Identity.WorkflowID = NewWorkflowID()
+		}
+		if rec.InstanceID == "" {
+			rec.InstanceID = NewInstanceID()
+		}
 		e.Instantiated = rec
+		e.ActivationIDs = newActivationIDs(len(rec.EntryNodes))
 		return []Event{e}, nil
 
 	case CommandClaim:
@@ -110,6 +122,9 @@ func buildCommandEvents(state Snapshot, command Command) ([]Event, error) {
 	case CommandStart:
 		e := newEvent(EventStarted)
 		e.AttemptID = command.Identity.AttemptID
+		if e.AttemptID == "" {
+			e.AttemptID = NewAttemptID()
+		}
 		e.LeaseID = command.LeaseID
 		e.Selection = command.Selection
 		return []Event{e}, nil
@@ -137,9 +152,10 @@ func buildCommandEvents(state Snapshot, command Command) ([]Event, error) {
 			return []Event{e}, nil
 		}
 		next := newEvent(EventTransition)
+		next.ActivationIDs = newActivationIDs(1)
 		next.Transition = t
 		next.Outcome = command.Outcome
-		if err := attachTransitionGateBindings(state, &e, &next, t.TargetNodeID, t.ActivationID); err != nil {
+		if err := attachTransitionGateBindings(state, &e, &next, t.TargetNodeID, t.ActivationID, policies); err != nil {
 			return nil, err
 		}
 		return []Event{e, next}, nil
@@ -166,9 +182,10 @@ func buildCommandEvents(state Snapshot, command Command) ([]Event, error) {
 			return []Event{e}, nil
 		}
 		next := newEvent(EventTransition)
+		next.ActivationIDs = newActivationIDs(1)
 		next.Transition = t
 		next.Outcome = command.Outcome
-		if err := attachTransitionGateBindings(state, &e, &next, t.TargetNodeID, t.ActivationID); err != nil {
+		if err := attachTransitionGateBindings(state, &e, &next, t.TargetNodeID, t.ActivationID, policies); err != nil {
 			return nil, err
 		}
 		return []Event{e, next}, nil
@@ -187,6 +204,7 @@ func buildCommandEvents(state Snapshot, command Command) ([]Event, error) {
 
 	case CommandReroute:
 		e := newEvent(EventRerouted)
+		e.ActivationIDs = newActivationIDs(1)
 		if len(command.Payload) > 0 {
 			var p struct {
 				Selection *ExecutionSelection `json:"selection,omitempty"`
@@ -306,9 +324,10 @@ func buildCommandEvents(state Snapshot, command Command) ([]Event, error) {
 			return []Event{e}, nil
 		}
 		next := newEvent(EventTransition)
+		next.ActivationIDs = newActivationIDs(1)
 		next.Transition = t
 		next.Outcome = command.Outcome
-		if err := attachTransitionGateBindings(state, &e, &next, t.TargetNodeID, t.ActivationID); err != nil {
+		if err := attachTransitionGateBindings(state, &e, &next, t.TargetNodeID, t.ActivationID, policies); err != nil {
 			return nil, err
 		}
 		return []Event{e, next}, nil
@@ -345,7 +364,8 @@ var canceledMutatingKinds = map[EventKind]bool{
 // the same state. All events except EventInstantiated target one activation,
 // so authority is enforced first: the event's workflow must match, and its
 // (node, activation) identity must resolve to a live activation.
-func applyEvent(next *Snapshot, event Event) error {
+func applyEvent(next *Snapshot, event Event, policies Policies) error {
+	event = withLegacyDefaults(event)
 	if next.Instance.WorkflowID != "" && event.Identity.WorkflowID != "" &&
 		event.Identity.WorkflowID != next.Instance.WorkflowID {
 		return fmt.Errorf("workflow identity mismatch: event targets %q, instance is %q",
@@ -379,7 +399,7 @@ func applyEvent(next *Snapshot, event Event) error {
 
 	switch event.Kind {
 	case EventInstantiated:
-		if err := applyInstantiated(next, event); err != nil {
+		if err := applyInstantiated(next, event, policies); err != nil {
 			return err
 		}
 	case EventLeased:
@@ -389,17 +409,17 @@ func applyEvent(next *Snapshot, event Event) error {
 	case EventAttemptIdentified:
 		return applyAttemptIdentified(next, act, event)
 	case EventAttemptTerminated:
-		return applyAttemptTerminated(next, act, event)
+		return applyAttemptTerminated(next, act, event, policies)
 	case EventCompleted:
-		return applyCompleted(next, act, event)
+		return applyCompleted(next, act, event, policies)
 	case EventGate:
-		return applyGate(next, act, event)
+		return applyGate(next, act, event, policies)
 	case EventSkipped:
 		return applySkipped(act, event)
 	case EventUnblocked:
 		return applyUnblocked(next, act, event)
 	case EventRerouted:
-		applyRerouted(next, event)
+		applyRerouted(next, event, policies)
 	case EventHeartbeat:
 		return applyHeartbeat(act, event)
 	case EventLeaseExpired:
@@ -411,7 +431,7 @@ func applyEvent(next *Snapshot, event Event) error {
 	case EventCanceled:
 		return applyCanceled(next, event)
 	case EventChildOutcome:
-		return applyChildOutcome(next, act, event)
+		return applyChildOutcome(next, act, event, policies)
 	case EventTransition:
 		if event.Transition == nil {
 			return errors.New("transition event requires a transition")
@@ -419,9 +439,9 @@ func applyEvent(next *Snapshot, event Event) error {
 		if event.Transition.TargetNodeID == "" {
 			return errors.New("transition event requires a target node")
 		}
-		now := nowUTC()
+		now := event.At
 		created := Activation{
-			ID:              NewActivationID(),
+			ID:              event.ActivationIDs[0],
 			NodeID:          event.Transition.TargetNodeID,
 			IncomingOutcome: event.Transition.Outcome,
 			Status:          ActivationPending,
@@ -433,13 +453,13 @@ func applyEvent(next *Snapshot, event Event) error {
 		created.CausedBy = append([]ActivationID(nil), event.CausedBy...)
 		created.ResolvedGates = cloneResolvedGates(event.ResolvedGates)
 		copyReadyAt(&created, event)
-		applyDispatchPolicy(next, &created, event.Transition.TargetNodeID)
+		applyDispatchPolicy(policies, next, &created, event.Transition.TargetNodeID)
 		next.Instance.Activations = append(next.Instance.Activations, created)
 	default:
 		return fmt.Errorf("unsupported event kind %q", event.Kind)
 	}
 
-	next.Instance.UpdatedAt = nowUTC()
+	next.Instance.UpdatedAt = event.At
 	return nil
 }
 
@@ -458,7 +478,7 @@ func applyCanceled(next *Snapshot, event Event) error {
 	case WorkflowCompleted, WorkflowFailed, WorkflowCanceled:
 		return fmt.Errorf("cannot cancel an instance already in status %q", next.Instance.Status)
 	}
-	now := nowUTC()
+	now := event.At
 	next.Instance.Status = WorkflowCanceled
 	next.Instance.CanceledBy = event.Actor
 	next.Instance.CancelReason = event.Reason
@@ -510,7 +530,7 @@ func findActivation(inst *WorkflowInstance, nodeID NodeID, activationID Activati
 // InstanceRecord: one pending activation per entry node. Workflow and instance
 // IDs are taken from the identity/record when supplied and otherwise freshly
 // generated.
-func applyInstantiated(next *Snapshot, event Event) error {
+func applyInstantiated(next *Snapshot, event Event, policies Policies) error {
 	if next.Instance.WorkflowID != "" {
 		return errors.New("instance already instantiated")
 	}
@@ -518,20 +538,9 @@ func applyInstantiated(next *Snapshot, event Event) error {
 	if rec == nil {
 		return errors.New("instantiate event requires an instance record")
 	}
-	workflowID := next.Instance.WorkflowID
-	if workflowID == "" {
-		workflowID = event.Identity.WorkflowID
-	}
-	if workflowID == "" {
-		workflowID = NewWorkflowID()
-	}
-	instanceID := next.Instance.InstanceID
-	if instanceID == "" {
-		instanceID = NewInstanceID()
-	}
-	now := nowUTC()
-	next.Instance.WorkflowID = workflowID
-	next.Instance.InstanceID = instanceID
+	now := event.At
+	next.Instance.WorkflowID = event.Identity.WorkflowID
+	next.Instance.InstanceID = rec.InstanceID
 	next.Instance.TemplateID = rec.TemplateID
 	next.Instance.TemplateVersion = rec.TemplateVersion
 	next.Instance.Params = cloneParams(rec.Params)
@@ -542,16 +551,16 @@ func applyInstantiated(next *Snapshot, event Event) error {
 	// The composition manifest (durable child references) is carried on the
 	// instance record so replay reconstructs it without re-derivation.
 	next.Instance.Children = append(next.Instance.Children, rec.Children...)
-	for _, nodeID := range rec.EntryNodes {
+	for i, nodeID := range rec.EntryNodes {
 		created := Activation{
-			ID:        NewActivationID(),
+			ID:        event.ActivationIDs[i],
 			NodeID:    nodeID,
 			Status:    ActivationPending,
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
 		copyReadyAt(&created, event)
-		applyDispatchPolicy(next, &created, nodeID)
+		applyDispatchPolicy(policies, next, &created, nodeID)
 		next.Instance.Activations = append(next.Instance.Activations, created)
 	}
 	return nil
@@ -585,7 +594,7 @@ func applyLeased(next *Snapshot, act *Activation, event Event) error {
 		act.ActiveLease.AcquiredAt = event.Lease.AcquiredAt
 		act.ActiveLease.ExpiresAt = event.Lease.ExpiresAt
 	}
-	act.UpdatedAt = nowUTC()
+	act.UpdatedAt = event.At
 	return nil
 }
 
@@ -600,9 +609,6 @@ func applyStarted(next *Snapshot, act *Activation, event Event) error {
 		return fmt.Errorf("cannot start activation in status %q", act.Status)
 	}
 	attemptID := event.AttemptID
-	if attemptID == "" {
-		attemptID = NewAttemptID()
-	}
 	attempt := Attempt{
 		ID:       attemptID,
 		Identity: event.Identity,
@@ -610,7 +616,7 @@ func applyStarted(next *Snapshot, act *Activation, event Event) error {
 	}
 	act.AttemptIDs = append(act.AttemptIDs, attemptID)
 	act.Status = ActivationRunning
-	act.UpdatedAt = nowUTC()
+	act.UpdatedAt = event.At
 	if event.Selection != nil {
 		// Pin the resolved ExecutionSelection on the start; retries/runtime
 		// inherit it. Deterministic because it is carried on the event.
@@ -643,14 +649,14 @@ func applyAttemptIdentified(next *Snapshot, act *Activation, event Event) error 
 	if event.Identity.RunID != "" {
 		attempt.Identity.RunID = event.Identity.RunID
 	}
-	act.UpdatedAt = nowUTC()
+	act.UpdatedAt = event.At
 	return nil
 }
 
 // applyAttemptTerminated records the outcome of an attempt. It never satisfies
 // the activation on its own: retry and retry-exhaustion are handled here, but
 // only a follow-up completion (or a reroute) advances the workflow.
-func applyAttemptTerminated(next *Snapshot, act *Activation, event Event) error {
+func applyAttemptTerminated(next *Snapshot, act *Activation, event Event, policies Policies) error {
 	if act == nil {
 		return errors.New("attempt_terminated event requires an activation")
 	}
@@ -673,7 +679,7 @@ func applyAttemptTerminated(next *Snapshot, act *Activation, event Event) error 
 		return nil
 	}
 	attempt.Status = status
-	ended := nowUTC()
+	ended := event.At
 	attempt.EndedAt = &ended
 	// The marker kind/label is inert evidence of the terminal directive the
 	// backend observed (e.g. the loop exit marker). It is recorded on every
@@ -706,7 +712,7 @@ func applyAttemptTerminated(next *Snapshot, act *Activation, event Event) error 
 	// activation can be freshly claimed afterwards.
 	act.Status = ActivationAttemptFailed
 	act.ActiveLease = nil
-	act.UpdatedAt = nowUTC()
+	act.UpdatedAt = event.At
 
 	// Cancellation is a deliberate stop: the run's context was canceled by an
 	// operator kill or supervisor teardown. It never re-arms the node — but
@@ -727,7 +733,7 @@ func applyAttemptTerminated(next *Snapshot, act *Activation, event Event) error 
 	// activation, and never consumes loop iteration budget. Exhaustion uses
 	// the node's retry policy; without a template the reducer falls back to a
 	// single attempt (any failure exhausts to ActivationBlocked).
-	policy := retryPolicyFor(next, act.NodeID)
+	policy := retryPolicyFor(policies, next, act.NodeID)
 	if policy != nil && len(act.AttemptIDs) < policy.MaximumAttempts {
 		// Re-arm the same activation for a new attempt; the stale lease was
 		// already released above so the new attempt is freshly claimed.
@@ -796,7 +802,7 @@ func findAttempt(next *Snapshot, act *Activation, attemptID AttemptID) *Attempt 
 // event.Transition on this event); without one the outcome terminates the
 // workflow. Completion is accepted even if no attempt_terminated was applied
 // first, as long as the activation is running or awaiting completion.
-func applyCompleted(next *Snapshot, act *Activation, event Event) error {
+func applyCompleted(next *Snapshot, act *Activation, event Event, policies Policies) error {
 	if act == nil {
 		return errors.New("completed event requires an activation")
 	}
@@ -818,7 +824,7 @@ func applyCompleted(next *Snapshot, act *Activation, event Event) error {
 			return errors.New("completed event lease does not match the active lease")
 		}
 	}
-	return satisfyActivation(next, act, event)
+	return satisfyActivation(next, act, event, policies)
 }
 
 // satisfyActivation is the shared satisfaction tail of the completion path:
@@ -830,21 +836,18 @@ func applyCompleted(next *Snapshot, act *Activation, event Event) error {
 // semantics. When the node declares required gates that are still
 // unsatisfied, the activation is parked awaiting_gate instead (evidence and
 // outputs are still recorded; the workflow is not completed).
-func satisfyActivation(next *Snapshot, act *Activation, event Event) error {
+func satisfyActivation(next *Snapshot, act *Activation, event Event, policies Policies) error {
 	// Gate-aware completion (Stage 11): if the node declares required gates
 	// that are not yet satisfied, completion parks the activation in
 	// awaiting_gate instead of satisfying it. Evidence and outputs are still
 	// recorded and the lease released atomically; the workflow is NOT
 	// completed and NO branch is followed until the gates resolve.
-	defs := []GateDefinition(nil)
-	if completionGateResolve != nil {
-		defs = completionGateResolve(next.Instance.TemplateID, next.Instance.TemplateVersion, act.NodeID)
-	}
+	defs := completionGatesFor(policies, next, act.NodeID)
 	if missing := unsatisfiedRequiredGates(&next.Instance, defs, act); len(missing) > 0 {
 		act.Status = ActivationAwaitingGate
 		act.SelectedOutcome = event.Outcome
 		act.ActiveLease = nil
-		act.UpdatedAt = nowUTC()
+		act.UpdatedAt = event.At
 		if len(event.Evidence) > 0 {
 			next.Instance.Evidence = append(next.Instance.Evidence, event.Evidence...)
 		}
@@ -856,7 +859,7 @@ func satisfyActivation(next *Snapshot, act *Activation, event Event) error {
 	act.Status = ActivationSatisfied
 	act.SelectedOutcome = event.Outcome
 	act.ActiveLease = nil
-	act.UpdatedAt = nowUTC()
+	act.UpdatedAt = event.At
 	if len(event.Evidence) > 0 {
 		next.Instance.Evidence = append(next.Instance.Evidence, event.Evidence...)
 	}
@@ -913,7 +916,7 @@ func applyChildAttached(next *Snapshot, act *Activation, event Event) error {
 	}
 	ref.ParentActivation = act.ID
 	act.Status = ActivationAwaitingChild
-	act.UpdatedAt = nowUTC()
+	act.UpdatedAt = event.At
 	return nil
 }
 
@@ -923,7 +926,7 @@ func applyChildAttached(next *Snapshot, act *Activation, event Event) error {
 // parent outcome and the selected child output references on the child
 // reference, and satisfies the activation through the same completion tail
 // as applyCompleted.
-func applyChildOutcome(next *Snapshot, act *Activation, event Event) error {
+func applyChildOutcome(next *Snapshot, act *Activation, event Event, policies Policies) error {
 	if act == nil {
 		return errors.New("child_outcome event requires an activation")
 	}
@@ -946,7 +949,7 @@ func applyChildOutcome(next *Snapshot, act *Activation, event Event) error {
 	}
 	ref.Outcome = event.Outcome
 	ref.Outputs = append([]OutputReference(nil), event.ChildOutputs...)
-	return satisfyActivation(next, act, event)
+	return satisfyActivation(next, act, event, policies)
 }
 
 // applyGate records a gate decision on the activation and, for a resolving
@@ -960,7 +963,7 @@ func applyChildOutcome(next *Snapshot, act *Activation, event Event) error {
 // A rejected or failed decision rejects the activation; a declared
 // failure/correction/checkpoint branch, if any, is carried by the sibling
 // EventTransition. The workflow status is never set to failed here.
-func applyGate(next *Snapshot, act *Activation, event Event) error {
+func applyGate(next *Snapshot, act *Activation, event Event, policies Policies) error {
 	if act == nil {
 		return errors.New("gate event requires an activation")
 	}
@@ -1006,10 +1009,7 @@ func applyGate(next *Snapshot, act *Activation, event Event) error {
 		}
 		// The decision is recorded before the recheck so it counts as a
 		// satisfied gate, mirroring satisfyActivation.
-		defs := []GateDefinition(nil)
-		if completionGateResolve != nil {
-			defs = completionGateResolve(next.Instance.TemplateID, next.Instance.TemplateVersion, act.NodeID)
-		}
+		defs := completionGatesFor(policies, next, act.NodeID)
 		if missing := unsatisfiedRequiredGates(&next.Instance, defs, act); len(missing) > 0 {
 			act.Status = ActivationAwaitingGate
 		} else {
@@ -1027,7 +1027,7 @@ func applyGate(next *Snapshot, act *Activation, event Event) error {
 			// A bound gate's mapped result routing resolves the activation
 			// onto its declared branch (the sibling transition event).
 			act.Status = ActivationRejected
-		} else if gateIsBound(next, act, gate) {
+		} else if gateIsBound(policies, next, act, gate) {
 			// A bound gate result with no result_outcomes mapping stays
 			// parked; the diagnostic lives on the gate instance.
 			act.Status = ActivationAwaitingGate
@@ -1043,7 +1043,7 @@ func applyGate(next *Snapshot, act *Activation, event Event) error {
 			act.Status = ActivationAwaitingGate
 		}
 	}
-	act.UpdatedAt = nowUTC()
+	act.UpdatedAt = event.At
 	return nil
 }
 
@@ -1064,7 +1064,7 @@ func applyExternalParked(act *Activation, event Event) error {
 	}
 	act.Status = ActivationAwaitingGate
 	act.SelectedOutcome = event.Outcome
-	act.UpdatedAt = nowUTC()
+	act.UpdatedAt = event.At
 	return nil
 }
 
@@ -1080,7 +1080,7 @@ func applySkipped(act *Activation, event Event) error {
 		return fmt.Errorf("cannot skip activation in status %q", act.Status)
 	}
 	act.Status = ActivationSkipped
-	act.UpdatedAt = nowUTC()
+	act.UpdatedAt = event.At
 	return nil
 }
 
@@ -1099,7 +1099,7 @@ func applyUnblocked(next *Snapshot, act *Activation, event Event) error {
 	}
 	act.Status = ActivationReady
 	copyReadyAt(act, event)
-	act.UpdatedAt = nowUTC()
+	act.UpdatedAt = event.At
 	if next.Instance.Status == WorkflowBlocked && !instanceHasBlockedActivation(next) {
 		next.Instance.Status = WorkflowActive
 	}
@@ -1120,10 +1120,10 @@ func instanceHasBlockedActivation(next *Snapshot) bool {
 // applyRerouted introduces a fresh activation for the target node with the
 // supplied selection. It is a creation event, so no pre-existing activation
 // is required.
-func applyRerouted(next *Snapshot, event Event) {
-	now := nowUTC()
+func applyRerouted(next *Snapshot, event Event, policies Policies) {
+	now := event.At
 	created := Activation{
-		ID:        NewActivationID(),
+		ID:        event.ActivationIDs[0],
 		NodeID:    event.Identity.NodeID,
 		Iteration: event.Iteration,
 		Status:    ActivationPending,
@@ -1132,7 +1132,7 @@ func applyRerouted(next *Snapshot, event Event) {
 		UpdatedAt: now,
 	}
 	copyReadyAt(&created, event)
-	applyDispatchPolicy(next, &created, event.Identity.NodeID)
+	applyDispatchPolicy(policies, next, &created, event.Identity.NodeID)
 	next.Instance.Activations = append(next.Instance.Activations, created)
 }
 
@@ -1140,7 +1140,7 @@ func applyRerouted(next *Snapshot, event Event) {
 // event carries lease-renewal metadata (event.Lease, stamped by the manager
 // layer), the heartbeat renews the lease durably: LastHeartbeatAt and
 // ExpiresAt are copied from the event so replay reproduces the exact liveness
-// fields deterministically (the reducer never calls nowUTC()). A legacy /
+// fields deterministically (the reducer never reads a clock). A legacy /
 // reducer-only heartbeat event without lease metadata falls back to the fixed
 // zero-time sentinel so LastHeartbeatAt stays non-nil and replay is stable.
 func applyHeartbeat(act *Activation, event Event) error {
@@ -1196,20 +1196,17 @@ func applyLeaseExpired(next *Snapshot, act *Activation, event Event) error {
 	act.Status = ActivationLeaseExpired
 	act.ActiveLease = nil
 	copyReadyAt(act, event)
-	act.UpdatedAt = nowUTC()
+	act.UpdatedAt = event.At
 	return nil
 }
 
 // gateIsBound reports whether the decided gate carries a subject_binding
 // (a bound external gate): its results route only through result_outcomes,
-// so an unmapped failed result parks instead of rejecting. The reducer
-// cannot see templates without the resolver, so legacy/recovered histories
-// read as unbound and keep the legacy failed-rejects behavior.
-func gateIsBound(next *Snapshot, act *Activation, gate *GateInstance) bool {
-	if completionGateResolve == nil {
-		return false
-	}
-	for _, def := range completionGateResolve(next.Instance.TemplateID, next.Instance.TemplateVersion, act.NodeID) {
+// so an unmapped failed result parks instead of rejecting. Without policies
+// the reducer cannot see templates, so legacy/recovered histories read as
+// unbound and keep the legacy failed-rejects behavior.
+func gateIsBound(policies Policies, next *Snapshot, act *Activation, gate *GateInstance) bool {
+	for _, def := range completionGatesFor(policies, next, act.NodeID) {
 		if def.ID == gate.GateID {
 			return def.SubjectBinding != nil
 		}
@@ -1217,55 +1214,24 @@ func gateIsBound(next *Snapshot, act *Activation, gate *GateInstance) bool {
 	return false
 }
 
-// completionGateResolve is an optional template-aware gate lookup installed
-// by the workflow manager. The reducer cannot see templates, so without it
-// gate-awareness on completion is disabled entirely (a completion always
-// satisfies). A template is versioned, so the resolver also carries the
-// template version.
-var completionGateResolve func(templateID TemplateID, templateVersion TemplateVersion, nodeID NodeID) []GateDefinition
-
-// SetCompletionGateResolver wires the template-aware gate lookup used by the
-// completion path: when a completion leaves required gates unsatisfied, the
-// activation is parked awaiting_gate instead of being satisfied. It is owned
-// by the manager (which can resolve the instance's versioned template); the
-// reducer defaults to no-gate behavior when unset.
-func SetCompletionGateResolver(fn func(templateID TemplateID, templateVersion TemplateVersion, nodeID NodeID) []GateDefinition) {
-	completionGateResolve = fn
-}
-
-// retryResolve is an optional template-aware retry policy lookup installed by
-// the workflow store/manager. The reducer cannot see templates, so without it
-// any failure exhausts immediately (blocked). A template is versioned, so the
-// resolver also carries the template version (mirroring the gate resolver).
-var retryResolve func(templateID TemplateID, templateVersion TemplateVersion, nodeID NodeID) *RetryPolicy
-
-// SetRetryPolicyResolver wires the template-aware retry policy lookup used by
-// attempt_terminated handling. It is owned by the store (which can resolve the
-// instance's versioned template); the reducer defaults to single-attempt
-// behavior when unset.
-func SetRetryPolicyResolver(fn func(templateID TemplateID, templateVersion TemplateVersion, nodeID NodeID) *RetryPolicy) {
-	retryResolve = fn
-}
-
-// dispatchResolve is the optional template-aware dispatch-policy lookup
-// installed by the workflow manager, mirroring the retry resolver. Without it
-// (or without a template) every activation reads as manual.
-var dispatchResolve func(templateID TemplateID, templateVersion TemplateVersion, nodeID NodeID) *DispatchPolicy
-
-// SetDispatchPolicyResolver wires the template-aware dispatch policy lookup
-// used when activations are created. It is owned by the manager (which can
-// resolve the instance's versioned template).
-func SetDispatchPolicyResolver(fn func(templateID TemplateID, templateVersion TemplateVersion, nodeID NodeID) *DispatchPolicy) {
-	dispatchResolve = fn
+// completionGatesFor returns the node's declared gates as resolved by the
+// policies, or nil when none are supplied (a completion then always
+// satisfies).
+func completionGatesFor(policies Policies, next *Snapshot, nodeID NodeID) []GateDefinition {
+	if policies == nil {
+		return nil
+	}
+	return policies.CompletionGates(next.Instance.TemplateID, next.Instance.TemplateVersion, nodeID)
 }
 
 // dispatchPolicyFor returns the node's effective dispatch policy as resolved
-// by the manager, or nil when no resolver/template is available (manual).
-func dispatchPolicyFor(next *Snapshot, nodeID NodeID) *DispatchPolicy {
-	if dispatchResolve == nil {
+// by the policies, or nil when none are supplied or the node has no policy
+// (manual).
+func dispatchPolicyFor(policies Policies, next *Snapshot, nodeID NodeID) *DispatchPolicy {
+	if policies == nil {
 		return nil
 	}
-	policy := dispatchResolve(next.Instance.TemplateID, next.Instance.TemplateVersion, nodeID)
+	policy := policies.DispatchPolicy(next.Instance.TemplateID, next.Instance.TemplateVersion, nodeID)
 	if policy == nil {
 		return nil
 	}
@@ -1273,16 +1239,16 @@ func dispatchPolicyFor(next *Snapshot, nodeID NodeID) *DispatchPolicy {
 	return &effective
 }
 
-// retryPolicyFor returns the node's retry policy as resolved by the store, or
-// nil when no resolver/template is available.
-func retryPolicyFor(next *Snapshot, nodeID NodeID) *RetryPolicy {
-	if retryResolve == nil {
+// retryPolicyFor returns the node's retry policy as resolved by the policies,
+// or nil when none are supplied (any failure then exhausts immediately).
+func retryPolicyFor(policies Policies, next *Snapshot, nodeID NodeID) *RetryPolicy {
+	if policies == nil {
 		return nil
 	}
-	return retryResolve(next.Instance.TemplateID, next.Instance.TemplateVersion, nodeID)
+	return policies.RetryPolicy(next.Instance.TemplateID, next.Instance.TemplateVersion, nodeID)
 }
 
-// nowUTC returns the current time in UTC for event/record timestamps.
+// nowUTC is the default clock: the current time in UTC.
 func nowUTC() time.Time {
 	return time.Now().UTC()
 }

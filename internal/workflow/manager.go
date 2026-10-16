@@ -42,9 +42,9 @@ type Manager struct {
 
 	// now is the wall-clock source for lease liveness (claim, heartbeat
 	// renewal, and stale-lease sweeps). It is shared by every writer of
-	// ExpiresAt and every reader that decides staleness, so an injected test
-	// clock advances lease time for all of them together. Event timestamps
-	// keep using nowUTC regardless of this clock.
+	// ExpiresAt and every reader that decides staleness, and it is the
+	// store's clock, so an injected test clock advances lease and event time
+	// together.
 	now func() time.Time
 
 	// testHooks holds seams set only by tests. nil in production; tests set
@@ -71,16 +71,18 @@ type Manager struct {
 	subscribers []chan struct{}
 }
 
-// NewManager returns a manager over store that reads the real wall clock.
+// NewManager returns a manager over store that shares the store's clock.
 func NewManager(store *Store) *Manager {
-	return NewManagerWithClock(store, func() time.Time { return time.Now().UTC() })
+	return NewManagerWithClock(store, store.now)
 }
 
 // NewManagerWithClock returns a manager whose lease-liveness clock is read
 // through now: every lease's AcquiredAt and ExpiresAt, every heartbeat
-// renewal, and every stale-lease sweep stamp and compare against it. Callers
-// must supply a UTC time.
+// renewal, and every stale-lease sweep stamp and compare against it. The
+// store adopts the same clock for event and readiness timestamps, so the two
+// cannot drift. Callers must supply a UTC time.
 func NewManagerWithClock(store *Store, now func() time.Time) *Manager {
+	store.now = now
 	m := &Manager{store: store, now: now, executors: make(map[ActionKind]Executor)}
 	// Keep the candidate index fresh across commands: every committed
 	// snapshot upserts into the index once it has been recovered.
@@ -88,61 +90,12 @@ func NewManagerWithClock(store *Store, now func() time.Time) *Manager {
 	// The workflow action is kernel-local composition (no provider
 	// admission), so its executor ships with the manager by default.
 	m.executors[ActionWorkflow] = &workflowExecutor{manager: m}
-	// Completion is gate-aware: the reducer resolves the node's declared
-	// required gates from the instance's versioned template, so a completion
-	// with unsatisfied required gates parks the activation in awaiting_gate.
-	// Load errors return nil, which disables gating for that node (a
-	// template that loads fine with no required gates is unaffected).
-	SetCompletionGateResolver(func(templateID TemplateID, templateVersion TemplateVersion, nodeID NodeID) []GateDefinition {
-		tmpl, err := m.store.LoadTemplate(templateID, templateVersion)
-		if err != nil {
-			return nil
-		}
-		node, err := findNode(&tmpl, nodeID)
-		if err != nil {
-			return nil
-		}
-		return node.Gates
-	})
-	// Retry policies are resolved from the instance's versioned template so
-	// the reducer's retry/exhaustion logic sees the node's durable policy
-	// (matching production): without this resolver every failure would
-	// exhaust to a single attempt. A node without its own policy inherits the
-	// template's default_retry_policy. Load errors return nil, which keeps
-	// single-attempt behavior for that node.
-	SetRetryPolicyResolver(func(templateID TemplateID, templateVersion TemplateVersion, nodeID NodeID) *RetryPolicy {
-		tmpl, err := m.store.LoadTemplate(templateID, templateVersion)
-		if err != nil {
-			return nil
-		}
-		node, err := findNode(&tmpl, nodeID)
-		if err != nil {
-			return nil
-		}
-		if node.RetryPolicy != nil {
-			return node.RetryPolicy
-		}
-		return tmpl.DefaultRetry
-	})
-	// Dispatch policies are resolved from the instance's versioned template so
-	// activation creation copies the node's auto-dispatch metadata into the
-	// snapshot (mirroring the retry resolver). Load errors return nil, which
-	// reads as manual for that node.
-	SetDispatchPolicyResolver(func(templateID TemplateID, templateVersion TemplateVersion, nodeID NodeID) *DispatchPolicy {
-		tmpl, err := m.store.LoadTemplate(templateID, templateVersion)
-		if err != nil {
-			return nil
-		}
-		node, err := findNode(&tmpl, nodeID)
-		if err != nil || node.Dispatch == nil {
-			return nil
-		}
-		// Stamp the action kind onto the resolved copy so activations carry
-		// the dispatched node's kind without a template reload.
-		effective := node.Dispatch.effective()
-		effective.ActionKind = node.Action.Kind
-		return &effective
-	})
+	// The reducer resolves gates, retry and dispatch policies from the
+	// instance's versioned template. Load errors read as no policy for that
+	// node: a template that loads fine with no required gates is unaffected,
+	// a node without its own retry policy inherits the template default, and
+	// a node without dispatch metadata reads as manual.
+	store.policies = templatePolicies{store: store}
 	// Bound-gate pinning resolves at command time in event building: the
 	// template lookup supplies the target node's gate bindings, and the child
 	// snapshot lookup resolves subject values that flow through child output

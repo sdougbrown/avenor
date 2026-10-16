@@ -1054,7 +1054,11 @@ type Command struct {
 	// ReadyAt is stamped by the store for commands that can create or re-arm
 	// claimability; the reducer copies it onto the affected activation and
 	// never consults the wall clock itself.
-	ReadyAt time.Time       `json:"ready_at,omitempty"`
+	ReadyAt time.Time `json:"ready_at,omitempty"`
+	// At is the timestamp stamped onto every event the command emits. The
+	// store sets it from its clock; when zero, event building falls back to
+	// the default clock.
+	At      time.Time       `json:"at,omitzero"`
 	Payload json.RawMessage `json:"payload,omitempty"`
 }
 

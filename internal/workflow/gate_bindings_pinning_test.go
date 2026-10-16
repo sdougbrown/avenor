@@ -293,7 +293,7 @@ func TestFanInAmbiguousBindingFailsCommand(t *testing.T) {
 		Outcome:          "done",
 		Identity:         ExecutionIdentity{WorkflowID: "wf-fanin", NodeID: "joiner", ActivationID: "join"},
 		Payload:          branch,
-	})
+	}, nil)
 	if !errors.Is(err, ErrAmbiguousBinding) {
 		t.Fatalf("buildCommandEvents error = %v, want ErrAmbiguousBinding", err)
 	}
@@ -347,7 +347,7 @@ func TestReplayReproducesResolvedGates(t *testing.T) {
 	base := cloneSnapshot(baseSnap)
 	pubID := driveBoundPublication(t, m, s, wf, boundPublicationOutputs("org/repo", 42, "abc123"))
 
-	rebuilt, _, _, err := replayEvents(base, s.eventsPath(wf))
+	rebuilt, _, _, err := replayEvents(base, s.eventsPath(wf), s.policies)
 	var want, got *Activation
 	for i := range rebuilt.Instance.Activations {
 		if rebuilt.Instance.Activations[i].NodeID == "review" {

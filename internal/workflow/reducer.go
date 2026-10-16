@@ -169,7 +169,7 @@ func derefTime(t *time.Time) *time.Time {
 // Apply is the only place that consults the caller-supplied expectations
 // (expected revision, idempotency). Event-level state transitions live in
 // transitions.go (applyEvent), which stays purely replay-driven.
-func Apply(state Snapshot, command Command) ([]Event, error) {
+func Apply(state Snapshot, command Command, policies Policies) ([]Event, error) {
 	if command.ExpectedRevision != state.Instance.Revision {
 		return nil, errRevisionMismatch
 	}
@@ -178,19 +178,19 @@ func Apply(state Snapshot, command Command) ([]Event, error) {
 			return nil, errDuplicateIdempotency
 		}
 	}
-	return buildCommandEvents(state, command)
+	return buildCommandEvents(state, command, policies)
 }
 
 // Reduce applies one event to a snapshot and returns the next snapshot. It is
 // idempotent per event ID: replaying an already-applied event is a no-op.
 // Events sharing a command's idempotency key are also deduplicated so a
 // retried batch never double-applies.
-func Reduce(state Snapshot, event Event) (Snapshot, error) {
+func Reduce(state Snapshot, event Event, policies Policies) (Snapshot, error) {
 	if containsID(state.AppliedEventIDs, event.ID) {
 		return state, nil
 	}
 	next := cloneSnapshot(state)
-	if err := applyEvent(&next, event); err != nil {
+	if err := applyEvent(&next, event, policies); err != nil {
 		return state, err
 	}
 	next.AppliedEventIDs = append(next.AppliedEventIDs, event.ID)
