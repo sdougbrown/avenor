@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -105,6 +106,20 @@ func (l *itestEventLog) waitFor(t *testing.T, what string, pred func(events.Even
 		case <-deadline:
 			t.Fatalf("timed out waiting for event: %s", what)
 		}
+	}
+}
+
+// itestRecv bounds a channel receive by the test timeout so a silent sender
+// cannot hang the suite.
+func itestRecv[T any](t *testing.T, ch <-chan T, what string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(itestTimeout):
+		t.Fatalf("timed out waiting for %s", what)
+		var zero T
+		return zero
 	}
 }
 
@@ -237,6 +252,7 @@ type itestView struct {
 	Phase             string
 	TurnComplete      bool
 	StopReason        string
+	ExitCode          int
 	PendingPermission bool
 	DeciderExhausted  bool
 	FinalOutput       string
@@ -253,14 +269,19 @@ func (h *itestHarness) view(rtID string) itestView {
 	rawPhase, _ := raw["phase"].(string)
 	tr := runstate.Translate(rawStatus, rawPhase)
 	v := itestView{Status: tr.Status, Phase: tr.Phase, TurnComplete: tr.TurnComplete}
+	v.ExitCode, _ = raw["exit_code"].(int)
 	v.PendingPermission, _ = raw["pending_permission"].(bool)
 	v.DeciderExhausted, _ = raw["permission_decider_exhausted"].(bool)
 	v.FinalOutput, _ = raw["final_output"].(string)
 	if rawStatus == "ended" {
 		if path, _ := raw["sentinel_file"].(string); path != "" {
 			if data, err := os.ReadFile(path); err == nil {
-				v.Status, v.StopReason = itestSentinelStatus(string(data))
+				var sentinelExit int
+				v.Status, v.StopReason, sentinelExit = itestSentinelStatus(string(data))
 				v.TurnComplete = runstate.IsTerminalStatus(v.Status)
+				if sentinelExit >= 0 {
+					v.ExitCode = sentinelExit
+				}
 			}
 		}
 	}
@@ -268,8 +289,10 @@ func (h *itestHarness) view(rtID string) itestView {
 }
 
 // itestSentinelStatus maps a completion sentinel to the consumer-facing
-// status and its stop reason.
-func itestSentinelStatus(sentinel string) (status, stopReason string) {
+// status, its stop reason, and the sentinel's declared exit code (-1 when the
+// sentinel does not declare one).
+func itestSentinelStatus(sentinel string) (status, stopReason string, exitCode int) {
+	exitCode = -1
 	lines := strings.Split(strings.TrimSpace(sentinel), "\n")
 	switch lines[0] {
 	case "DONE":
@@ -287,8 +310,13 @@ func itestSentinelStatus(sentinel string) (status, stopReason string) {
 		if v, ok := strings.CutPrefix(line, "STOP_REASON="); ok {
 			stopReason = v
 		}
+		if v, ok := strings.CutPrefix(line, "EXIT_CODE="); ok {
+			if n, err := strconv.Atoi(v); err == nil {
+				exitCode = n
+			}
+		}
 	}
-	return status, stopReason
+	return status, stopReason, exitCode
 }
 
 // awaitStatus polls RuntimeStatus, as consumer await loops do, until the
@@ -322,8 +350,15 @@ func (h *itestHarness) awaitCondition(what string, cond func() bool) {
 
 // consistently fails the test if cond becomes false within the quiet window.
 func (h *itestHarness) consistently(what string, cond func() bool) {
+	h.consistentlyFor(itestQuietWindow, what, cond)
+}
+
+// consistentlyFor fails the test if cond becomes false within the given
+// window. Negative assertions that must outlast a retry backoff need a longer
+// window than the default quiet one.
+func (h *itestHarness) consistentlyFor(window time.Duration, what string, cond func() bool) {
 	h.t.Helper()
-	deadline := time.Now().Add(itestQuietWindow)
+	deadline := time.Now().Add(window)
 	for time.Now().Before(deadline) {
 		if !cond() {
 			h.t.Fatalf("%s did not hold", what)
@@ -518,12 +553,18 @@ func TestSupervisorPublicAPIRetryWithBackoffThenSuccess(t *testing.T) {
 	rt := h.spawn(map[string]any{"max_retries": 1})
 	h.log.waitFor(t, "failed attempt session.end", itestStopReasonIs(rt, "error"))
 	// The failed attempt is not a terminal outcome: the runtime is backing
-	// off to retry.
+	// off to retry. The backoff is observable: the retry's session.end must
+	// trail the failed attempt by at least one backoff delay.
+	firstEndAt := time.Now()
 	v := h.view(rt)
 	if v.TurnComplete || v.Status != "running" {
 		t.Fatalf("view after failed attempt = %+v, want running and not complete", v)
 	}
 	h.log.waitFor(t, "retry session.end", itestStopReasonIs(rt, "end_turn"))
+	if elapsed := time.Since(firstEndAt); elapsed < backoffDelay(1)-500*time.Millisecond {
+		t.Fatalf("gap from failed attempt to retry = %s, want at least %s (backoff delay %s minus slack)",
+			elapsed, backoffDelay(1)-500*time.Millisecond, backoffDelay(1))
+	}
 	h.awaitStatus(rt, "done")
 	if got := h.result(rt); got != "recovered" {
 		t.Fatalf("RuntimeResult final_output = %q, want %q", got, "recovered")
@@ -542,8 +583,10 @@ func TestSupervisorPublicAPIRetryExhaustion(t *testing.T) {
 	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
 
 	rt := h.spawn(map[string]any{"max_retries": 1})
-	// The runtime ends once the retry budget is spent, so WaitTurn returns the
-	// terminal turn without waiting for another one.
+	// The retry budget is spent and the runtime has ended, so WaitTurn
+	// returns the terminal snapshot through its completed branch without
+	// waiting for a further turn.
+	h.awaitStatus(rt, "failed")
 	turn := h.waitTurn(rt)
 	if got, _ := turn["stop_reason"].(string); got != "error" {
 		t.Fatalf("WaitTurn stop_reason = %q, want error", got)
@@ -557,6 +600,36 @@ func TestSupervisorPublicAPIRetryExhaustion(t *testing.T) {
 	}
 	if starts, resumes := provider.counts(); starts != 1 || resumes != 1 {
 		t.Fatalf("provider starts/resumes = %d/%d, want 1/1", starts, resumes)
+	}
+}
+
+// TestSupervisorPublicAPIRunDeadlineTimesOut proves a caller-set run deadline
+// ends a turn that never settles: consumers see the timeout status, the
+// TIMEOUT sentinel and exit code 124.
+func TestSupervisorPublicAPIRunDeadlineTimesOut(t *testing.T) {
+	t.Parallel()
+	gate := newItestGate()
+	defer gate.open()
+	// The scripted attempt never reaches a session.end: only the run
+	// deadline can stop the turn.
+	provider := newItestProvider(itestAttempt("ses_deadline", gate.step()))
+	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+
+	rt := h.spawn(map[string]any{"label": "deadline", "timeout": 1})
+	h.log.waitFor(t, "timeout session.end", itestStopReasonIs(rt, "timeout"))
+	v := h.awaitStatus(rt, "timeout")
+	if v.StopReason != "timeout" {
+		t.Fatalf("timeout view stop reason = %q, want timeout", v.StopReason)
+	}
+	if v.ExitCode != 124 {
+		t.Fatalf("timeout view exit code = %d, want 124", v.ExitCode)
+	}
+	turn := h.waitTurn(rt)
+	if got, _ := turn["stop_reason"].(string); got != "timeout" {
+		t.Fatalf("WaitTurn stop_reason = %q, want timeout", got)
+	}
+	if _, err := h.sup.RuntimeResult(rt); err != nil {
+		t.Fatalf("RuntimeResult after timeout: %v", err)
 	}
 }
 
@@ -603,6 +676,12 @@ func TestSupervisorPublicAPICancelDuringBackoff(t *testing.T) {
 
 	rt := h.spawn(map[string]any{"max_retries": 1})
 	h.log.waitFor(t, "failed attempt session.end", itestStopReasonIs(rt, "error"))
+	// The failed attempt has just ended and the runtime is heading into the
+	// retry backoff. RuntimeCancel is level-triggered on the run context, so
+	// issuing it now is guaranteed to be in force by the time the backoff
+	// select runs — the backoff cannot fire into another attempt. (Waiting
+	// for a turn settle here would be wrong: WaitTurn waits for the next
+	// settle, which is the retry itself.)
 	if err := h.sup.RuntimeCancel(rt); err != nil {
 		t.Fatalf("RuntimeCancel: %v", err)
 	}
@@ -611,8 +690,9 @@ func TestSupervisorPublicAPICancelDuringBackoff(t *testing.T) {
 	if v.StopReason != "cancelled" {
 		t.Fatalf("killed view stop reason = %q, want cancelled", v.StopReason)
 	}
-	// The cancelled backoff must not wake into another attempt.
-	h.consistently("no retry attempt after cancel", func() bool {
+	// The cancelled backoff must not wake into another attempt. The window
+	// outlasts the backoff delay so a late Resume cannot slip through.
+	h.consistentlyFor(backoffDelay(1)+500*time.Millisecond, "no retry attempt after cancel", func() bool {
 		_, resumes := provider.counts()
 		return resumes == 0 && h.log.count(itestStopReasonIs(rt, "end_turn")) == 0
 	})
@@ -656,6 +736,48 @@ func TestSupervisorPublicAPIParkAndResume(t *testing.T) {
 	}
 }
 
+// TestSupervisorPublicAPIPromptQueuedDuringActiveTurn proves a prompt queued
+// while a turn is still running is not lost when that turn ends: the runtime
+// runs the queued prompt as its next turn with no further RuntimePrompt to
+// wake it.
+func TestSupervisorPublicAPIPromptQueuedDuringActiveTurn(t *testing.T) {
+	t.Parallel()
+	gate := newItestGate()
+	defer gate.open()
+	provider := newItestProvider(
+		itestAttempt("ses_q1",
+			stableScriptedEvent{event: events.Event{Event: "agent.status", SessionID: "ses_q1", Fields: map[string]any{"phase": "working"}}},
+			gate.step(),
+			itestSessionEnd("ses_q1", "end_turn", "first turn"),
+		),
+		itestAttempt("ses_q2", itestSessionEnd("ses_q2", "end_turn", "queued turn")),
+	)
+	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+
+	rt := h.spawn(map[string]any{"label": "queued"})
+	h.log.waitFor(t, "working status", itestEventIs("agent.status", rt))
+	// The turn is in flight: the queued prompt must run as the next turn the
+	// moment this one ends, without another RuntimePrompt after the settle.
+	if err := h.sup.RuntimePrompt(rt, "follow-up", ""); err != nil {
+		t.Fatalf("RuntimePrompt during an active turn: %v", err)
+	}
+	gate.open()
+	h.log.waitFor(t, "queued turn session.end", func(ev events.Event) bool {
+		out, _ := ev.Fields["final_output"].(string)
+		return itestEventIs("session.end", rt)(ev) && out == "queued turn"
+	})
+	v := h.awaitStatus(rt, "done")
+	if v.FinalOutput != "queued turn" {
+		t.Fatalf("status final_output = %q, want %q", v.FinalOutput, "queued turn")
+	}
+	if got := h.result(rt); got != "queued turn" {
+		t.Fatalf("RuntimeResult final_output = %q, want %q", got, "queued turn")
+	}
+	if starts, resumes := provider.counts(); starts != 1 || resumes != 1 {
+		t.Fatalf("provider starts/resumes = %d/%d, want 1/1 (queued prompt resumes the session)", starts, resumes)
+	}
+}
+
 func TestSupervisorPublicAPIShutdownWithActiveRuntimes(t *testing.T) {
 	t.Parallel()
 	gate := newItestGate()
@@ -688,6 +810,57 @@ func TestSupervisorPublicAPIShutdownWithActiveRuntimes(t *testing.T) {
 	}
 	if _, err := h.trySpawn(map[string]any{"label": "after-shutdown"}); err == nil {
 		t.Fatal("Spawn after Shutdown succeeded, want rejection")
+	}
+}
+
+// TestSupervisorPublicAPIShutdownKillEndsActiveRuntime proves kill-mode
+// Shutdown tears down a mid-turn runtime and leaves the caller-visible killed
+// end state.
+func TestSupervisorPublicAPIShutdownKillEndsActiveRuntime(t *testing.T) {
+	t.Parallel()
+	gate := newItestGate()
+	defer gate.open()
+	provider := newItestProvider(itestAttempt("ses_sk",
+		stableScriptedEvent{event: events.Event{Event: "agent.status", SessionID: "ses_sk", Fields: map[string]any{"phase": "working"}}},
+		gate.step(),
+		itestSessionEnd("ses_sk", "end_turn", "never reached"),
+	))
+	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+
+	rt := h.spawn(map[string]any{"label": "kill-shutdown"})
+	h.log.waitFor(t, "working status", itestEventIs("agent.status", rt))
+	h.shutdown("kill")
+	v := h.awaitStatus(rt, "killed")
+	if v.StopReason != "cancelled" {
+		t.Fatalf("killed view stop reason = %q, want cancelled", v.StopReason)
+	}
+	if v.ExitCode != 130 {
+		t.Fatalf("killed view exit code = %d, want 130", v.ExitCode)
+	}
+	if got := h.result(rt); got == "never reached" {
+		t.Fatal("shutdown runtime produced the output of a turn it never finished")
+	}
+}
+
+// TestSupervisorPublicAPIShutdownGracefulEndsParkedRuntime proves graceful
+// Shutdown ends a runtime parked after a finished turn, replacing the parked
+// done view with the killed end state callers observe.
+func TestSupervisorPublicAPIShutdownGracefulEndsParkedRuntime(t *testing.T) {
+	t.Parallel()
+	provider := newItestProvider(itestAttempt("ses_gp", itestSessionEnd("ses_gp", "end_turn", "parked work")))
+	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+
+	rt := h.spawn(map[string]any{"label": "parked-shutdown"})
+	h.awaitStatus(rt, "done")
+	if got := h.result(rt); got != "parked work" {
+		t.Fatalf("RuntimeResult after the turn = %q, want %q", got, "parked work")
+	}
+	// The runtime is parked waiting for a follow-up prompt. Graceful
+	// shutdown ends it instead of leaving it idle.
+	h.shutdown("graceful")
+	v := h.awaitStatus(rt, "killed")
+	if v.StopReason != "cancelled" {
+		t.Fatalf("killed view stop reason = %q, want cancelled", v.StopReason)
 	}
 }
 
@@ -791,8 +964,7 @@ func TestSupervisorPublicAPIDeciderAllow(t *testing.T) {
 	h = newItestHarness(t, Config{}, itestDeciderFactory(func(string) runtime.Provider { return worker }, decider))
 
 	rt := h.spawn(map[string]any{"label": "worker", "permission_decider": itestDecider()})
-	h.log.waitFor(t, "permission.request", itestEventIs("permission.request", rt))
-	if err := <-answered; err != nil {
+	if err := itestRecv(t, answered, "decider answer"); err != nil {
 		t.Fatalf("decider answer: %v", err)
 	}
 	h.awaitStatus(rt, "done")
@@ -817,8 +989,7 @@ func TestSupervisorPublicAPIDeciderDeny(t *testing.T) {
 	h = newItestHarness(t, Config{}, itestDeciderFactory(func(string) runtime.Provider { return worker }, decider))
 
 	rt := h.spawn(map[string]any{"label": "worker", "permission_decider": itestDecider()})
-	h.log.waitFor(t, "permission.request", itestEventIs("permission.request", rt))
-	if err := <-answered; err != nil {
+	if err := itestRecv(t, answered, "decider answer"); err != nil {
 		t.Fatalf("decider answer: %v", err)
 	}
 	h.log.waitFor(t, "permission.response", itestEventIs("permission.response", rt))
@@ -957,7 +1128,7 @@ func TestSupervisorPublicAPIDeciderConcurrencyCapReleasesBlockedRequest(t *testi
 	for i := 1; i <= itestDeciderCap; i++ {
 		label := fmt.Sprintf("w%d", i)
 		ids[label] = h.spawn(map[string]any{"label": label, "permission_decider": itestDecider()})
-		<-started
+		itestRecv(t, started, "decider start for "+label)
 	}
 	// The cap is full: the next request is routed but no decider runs for it.
 	blockedLabel := fmt.Sprintf("w%d", workers)
@@ -1018,6 +1189,16 @@ func TestSupervisorPublicAPIPermissionClaimTimeoutFallsBackToFileHandler(t *test
 
 	rt := h.spawn(map[string]any{"permission_handler": "file:" + base})
 	h.log.waitFor(t, "permission.request", itestEventIs("permission.request", rt))
+	// The connected client reserves the request first: a claim that times out
+	// falls back to the file handler, so the request must start reserved
+	// rather than go straight to the file handler.
+	req, ok := h.log.find(itestEventIs("permission.request", rt))
+	if !ok {
+		t.Fatal("permission.request event not found")
+	}
+	if got, _ := req.Fields["resolver"].(string); got != "reserved" {
+		t.Fatalf("permission.request resolver = %q, want %q (control claim before the file fallback)", got, "reserved")
+	}
 	// Nobody answers over the control plane: once the claim times out the
 	// request moves to the file handler, which publishes the request file.
 	h.awaitCondition("permission request file", func() bool {
@@ -1043,24 +1224,34 @@ func TestSupervisorPublicAPIPermissionClaimTimeoutFallsBackToFileHandler(t *test
 func TestSupervisorPublicAPIDeciderDeferLeavesRequestForHuman(t *testing.T) {
 	t.Parallel()
 	worker := itestWorker("ses_defer", "req_defer", "human decided")
-	var deciderRan = make(chan struct{}, 1)
-	h := newItestHarness(t, Config{PermissionClaimTimeout: 100 * time.Millisecond}, itestDeciderFactory(
+	var deciderSpawns atomic.Int64
+	deciderRan := make(chan struct{}, 1)
+	h := newItestHarness(t, Config{}, itestDeciderFactory(
 		func(string) runtime.Provider { return worker },
 		func(runtime.StartOptions) (runtime.Provider, error) {
 			// A deferring decider exits without answering.
+			deciderSpawns.Add(1)
 			p := newItestProvider(itestAttempt("ses_defer_decider", itestSessionEnd("ses_defer_decider", "end_turn", "")))
-			p.onPrompt = func(context.Context) { deciderRan <- struct{}{} }
+			p.onPrompt = func(context.Context) {
+				// Non-blocking send: a second decider run must surface in the
+				// spawn count instead of stalling silently on the channel.
+				select {
+				case deciderRan <- struct{}{}:
+				default:
+				}
+			}
 			return p, nil
 		},
 	))
 
 	rt := h.spawn(map[string]any{"label": "worker", "permission_decider": itestDecider()})
-	<-deciderRan
-	// The claim times out with no control or file resolver; the request is
-	// still pending and the backend is still waiting.
-	h.consistently("deferred request stays pending", func() bool {
+	itestRecv(t, deciderRan, "decider turn")
+	// The decider deferred. No control client is connected, so nothing claims
+	// the request; it stays pending on the human gate, with no re-route or
+	// respawn of the decider.
+	h.consistently("deferred request stays pending with exactly one decider spawn", func() bool {
 		v := h.view(rt)
-		return v.PendingPermission && v.Status == "running"
+		return v.PendingPermission && v.Status == "running" && deciderSpawns.Load() == 1
 	})
 	if err := h.sup.RuntimeAnswerPermission(rt, "req_defer", "allow_once", ""); err != nil {
 		t.Fatalf("human RuntimeAnswerPermission: %v", err)
@@ -1068,5 +1259,8 @@ func TestSupervisorPublicAPIDeciderDeferLeavesRequestForHuman(t *testing.T) {
 	h.awaitStatus(rt, "done")
 	if got := h.result(rt); got != "human decided" {
 		t.Fatalf("RuntimeResult = %q, want %q", got, "human decided")
+	}
+	if got := deciderSpawns.Load(); got != 1 {
+		t.Fatalf("decider spawns = %d, want 1 (a deferred request is not re-routed)", got)
 	}
 }
