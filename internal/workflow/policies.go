@@ -5,8 +5,10 @@ package workflow
 // itself, so a nil Policies reads as no template knowledge: completions
 // always satisfy, any failure exhausts immediately, every activation reads
 // as manual, and bound-gate subjects that route through child workflows
-// stay unresolved. A template is versioned, so every lookup carries the
-// template version.
+// stay unresolved. The template lookups carry the template version, since
+// a template is versioned; ChildSnapshot instead keys on the child
+// workflow's ID, loading the child's current snapshot at command time for
+// the gate pinning that reads pinned child output.
 type Policies interface {
 	// CompletionGates returns the node's declared gates.
 	CompletionGates(templateID TemplateID, templateVersion TemplateVersion, nodeID NodeID) []GateDefinition
@@ -29,7 +31,8 @@ type Policies interface {
 }
 
 // templatePolicies resolves policies from the versioned templates held by a
-// store. Load errors read as no policy for that node.
+// store. Load errors read as no policy for that node. ChildSnapshot reads
+// the child instance's current snapshot from the same store.
 type templatePolicies struct {
 	store *Store
 }

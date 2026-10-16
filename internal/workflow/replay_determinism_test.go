@@ -295,20 +295,51 @@ func TestReplayWithPoliciesReproducesLiveSnapshot(t *testing.T) {
 // store's events and readiness, so injected time shows up exactly in the
 // snapshot.
 func TestStoreAndManagerShareOneClock(t *testing.T) {
-	fixed := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
+	wf := WorkflowID("wf-clock")
+	times := []time.Time{
+		time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC),
+		time.Date(2030, 1, 2, 3, 5, 6, 0, time.UTC),
+	}
+	tick := 0
 	s := newStore(t)
-	NewManagerWithClock(s, func() time.Time { return fixed })
+	NewManagerWithClock(s, func() time.Time {
+		if tick < len(times) {
+			tick++
+			return times[tick-1]
+		}
+		return times[len(times)-1]
+	})
 
-	snap := mustInstantiate(t, s, "wf-clock")
+	snap := mustInstantiate(t, s, wf)
 	act := snap.Instance.Activations[0]
-	if !snap.Instance.CreatedAt.Equal(fixed) || !act.CreatedAt.Equal(fixed) {
-		t.Fatalf("created at = %v / %v, want %v", snap.Instance.CreatedAt, act.CreatedAt, fixed)
+	if !snap.Instance.CreatedAt.Equal(times[0]) || !act.CreatedAt.Equal(times[0]) {
+		t.Fatalf("created at = %v / %v, want %v", snap.Instance.CreatedAt, act.CreatedAt, times[0])
 	}
-	if !snap.Instance.UpdatedAt.Equal(fixed) || !act.UpdatedAt.Equal(fixed) {
-		t.Fatalf("updated at = %v / %v, want %v", snap.Instance.UpdatedAt, act.UpdatedAt, fixed)
+	if !snap.Instance.UpdatedAt.Equal(times[0]) || !act.UpdatedAt.Equal(times[0]) {
+		t.Fatalf("updated at = %v / %v, want %v", snap.Instance.UpdatedAt, act.UpdatedAt, times[0])
 	}
-	if act.ReadyAt == nil || !act.ReadyAt.Equal(fixed) {
-		t.Fatalf("ready_at = %v, want %v", act.ReadyAt, fixed)
+	if act.ReadyAt == nil || !act.ReadyAt.Equal(times[0]) {
+		t.Fatalf("ready_at = %v, want %v", act.ReadyAt, times[0])
+	}
+
+	// The next command stamps its own event time: the leased event the claim
+	// produces stamps the activation's UpdatedAt but not the instance's.
+	next, err := s.ApplyCommand(wf, Command{
+		Kind:             CommandClaim,
+		ExpectedRevision: snap.Instance.Revision,
+		IdempotencyKey:   "claim-1",
+		Identity:         ExecutionIdentity{WorkflowID: wf, NodeID: act.NodeID, ActivationID: act.ID},
+		LeaseID:          "lease-1",
+		Actor:            "alice",
+	})
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if next.Instance.UpdatedAt.Equal(times[1]) {
+		t.Fatalf("instance updated at = %v, want it unchanged at %v", next.Instance.UpdatedAt, times[0])
+	}
+	if claimed := next.Instance.Activations[0]; !claimed.UpdatedAt.Equal(times[1]) {
+		t.Fatalf("activation updated at = %v, want %v", claimed.UpdatedAt, times[1])
 	}
 }
 
@@ -317,22 +348,28 @@ func TestStoreAndManagerShareOneClock(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // assertFromEmptyReplayParity requires two from-empty folds of the
-// workflow's event log — with the store's policies — to DeepEqual the live
-// snapshot, so every field the reducers touch must come from the events.
+// workflow's event log — with the store's policies — to DeepEqual each
+// other and the live snapshot, so every field the reducers touch must come
+// from the events.
 func assertFromEmptyReplayParity(t *testing.T, s *Store, wf WorkflowID) {
 	t.Helper()
 	live, ok, err := s.loadCurrent(wf)
 	if err != nil || !ok {
 		t.Fatalf("loadCurrent: ok=%v err=%v", ok, err)
 	}
+	var prev Snapshot
 	for i := 1; i <= 2; i++ {
 		replayed, _, _, err := replayEvents(Snapshot{}, s.eventsPath(wf), s.policies)
 		if err != nil {
 			t.Fatalf("replay %d: %v", i, err)
 		}
+		if i > 1 && !reflect.DeepEqual(prev, replayed) {
+			t.Fatalf("replay %d differs from the earlier fold:\nfirst:  %+v\nsecond: %+v", i, prev, replayed)
+		}
 		if !reflect.DeepEqual(live, replayed) {
 			t.Fatalf("replay %d differs from live snapshot:\nlive:   %+v\nreplay: %+v", i, live, replayed)
 		}
+		prev = replayed
 	}
 }
 
@@ -396,6 +433,55 @@ func TestReplaySkippedParity(t *testing.T) {
 		Reason:           "not needed",
 	}); err != nil {
 		t.Fatalf("skip: %v", err)
+	}
+
+	// The skip's timestamp rides on the event: the live activation must
+	// carry that At as its UpdatedAt before the parity folds run.
+	var skipAt time.Time
+	for _, e := range readEvents(t, s, wf) {
+		if e.Kind == EventSkipped {
+			skipAt = e.At
+		}
+	}
+	live, ok, err := s.loadCurrent(wf)
+	if err != nil || !ok {
+		t.Fatalf("loadCurrent: ok=%v err=%v", ok, err)
+	}
+	skipped := live.Instance.Activations[0]
+	if skipped.UpdatedAt.IsZero() || !skipped.UpdatedAt.Equal(skipAt) {
+		t.Fatalf("skipped activation updated_at = %v, want the skip event's %v", skipped.UpdatedAt, skipAt)
+	}
+
+	assertFromEmptyReplayParity(t, s, wf)
+}
+
+// TestReplayReroutedParity pins the rerouted kind through the store command
+// boundary: the fresh activation's ID, iteration, and selection ride on the
+// event, so a from-empty fold rebuilds the rerouted activation exactly.
+func TestReplayReroutedParity(t *testing.T) {
+	_, s, wf := newAutoDispatchFixture(t, "dispatch-reroute-replay", "ctl-a", -1)
+	snap, ok, err := s.loadCurrent(wf)
+	if err != nil || !ok {
+		t.Fatalf("loadCurrent: ok=%v err=%v", ok, err)
+	}
+	payload, err := json.Marshal(struct {
+		Selection *ExecutionSelection `json:"selection,omitempty"`
+		Iteration int                 `json:"iteration,omitempty"`
+	}{
+		Selection: &ExecutionSelection{Role: "role-x", Backend: "b1", Model: "m1"},
+		Iteration: 2,
+	})
+	if err != nil {
+		t.Fatalf("marshal reroute payload: %v", err)
+	}
+	if _, err := s.ApplyCommand(wf, Command{
+		Kind:             CommandReroute,
+		ExpectedRevision: snap.Instance.Revision,
+		IdempotencyKey:   "reroute-1",
+		Identity:         ExecutionIdentity{WorkflowID: wf, NodeID: "start"},
+		Payload:          payload,
+	}); err != nil {
+		t.Fatalf("reroute: %v", err)
 	}
 	assertFromEmptyReplayParity(t, s, wf)
 }

@@ -30,8 +30,9 @@ type Store struct {
 	// the store starts serving commands.
 	onCommit func(WorkflowID, Snapshot)
 
-	// policies supplies the template-aware lookups the reducer consults. nil
-	// reads as no template knowledge. The manager installs itself here.
+	// policies supplies the template lookups the reducer consults plus the
+	// child-snapshot read command-time gate pinning consults. nil reads as
+	// no template knowledge. The manager installs itself here.
 	policies Policies
 }
 
