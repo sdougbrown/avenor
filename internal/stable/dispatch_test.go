@@ -2158,6 +2158,11 @@ func TestDispatchModelDeciderAnswersRequest(t *testing.T) {
 	if approve, _ := rtStatus["auto_approve"].(bool); approve {
 		t.Fatal("worker auto_approve = true, want false")
 	}
+	// The resolved key must never reach a status surface: the registry holds
+	// it, the pinned selection carries only its variable name.
+	if strings.Contains(fmt.Sprintf("%v", rtStatus), "sk-model-test") {
+		t.Fatal("runtime status leaked the provider API key")
+	}
 	// The model's allow decision answers the request: the claim resolves with
 	// the chosen option and the reason as the message, the status clears, and
 	// no decider run was ever spawned.

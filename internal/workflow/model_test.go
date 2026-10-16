@@ -318,8 +318,23 @@ func TestExecutionSelectionPermissionModelDeciderRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
-	if strings.Contains(string(data), "api_key") && !strings.Contains(string(data), "api_key_env") {
-		t.Fatalf("selection serialized a credential: %s", data)
+	// The pinned selection carries the key variable name, never a credential.
+	if !strings.Contains(string(data), `"api_key_env":"GROQ_API_KEY"`) {
+		t.Fatalf("selection should serialize the key variable name: %s", data)
+	}
+	if strings.Contains(string(data), `"api_key":`) {
+		t.Fatalf("selection serialized a literal credential field: %s", data)
+	}
+	// A provider without an env name (a literal-key registry entry) pins no
+	// key field at all.
+	literal, err := json.Marshal(&ExecutionSelection{
+		PermissionModelDecider: &PermissionModelDecider{Provider: "lit", Model: "m", BaseURL: "http://x/v1"},
+	})
+	if err != nil {
+		t.Fatalf("Marshal(literal): %v", err)
+	}
+	if strings.Contains(string(literal), "api_key") {
+		t.Fatalf("selection without an env name serialized an api_key field: %s", literal)
 	}
 	var decoded ExecutionSelection
 	if err := json.Unmarshal(data, &decoded); err != nil {
