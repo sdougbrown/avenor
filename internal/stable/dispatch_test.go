@@ -2430,3 +2430,170 @@ func TestResolveAssignmentSelectionModelDeciderRequiresModel(t *testing.T) {
 		t.Fatalf("resolveAssignmentSelection(blank model) error = %v, want model is required", err)
 	}
 }
+
+// TestDispatchModelDeciderConcurrencyCapHolds proves the direct-model cap
+// behaves like the harness decider's: while maxConcurrentModelDeciders calls
+// are in flight, a further distinct request gets no decision call and stays
+// pending; when capacity frees, the blocked request re-routes from its
+// cached options and receives exactly one call — no further
+// permission.request event needed.
+func TestDispatchModelDeciderConcurrencyCapHolds(t *testing.T) {
+	writeProviderRegistry(t, `{
+		"providers": {"groq": {"base_url": "http://model.example/openai/v1", "api_key_env": "MODEL_DECIDER_TEST_KEY"}}
+	}`)
+	t.Setenv("MODEL_DECIDER_TEST_KEY", "sk-model-test")
+	template := mustJSON(t, dispatchModelDeciderTemplate("groq", "llama-3.3-70b", "tmpl-dispatch-dispatch-modeldec-cap"))
+	f := newDispatchFixtureTemplate(t, "dispatch-modeldec-cap", 8, 8, template)
+	blockedID := "perm_req_model_cap_blocked"
+	// Hold every in-flight decision call on the gate so the cap stays full;
+	// each call resolves as a defer so no retry churn muddies the counts.
+	gate := make(chan struct{})
+	closeGate := sync.OnceFunc(func() { close(gate) })
+	defer closeGate()
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		<-gate
+		w.Write([]byte(`{"choices":[{"message":{"content":"{\"decision\":\"defer\"}"}}]}`))
+	}))
+	defer srv.Close()
+	writeProviderRegistry(t, fmt.Sprintf(`{
+		"providers": {"groq": {"base_url": %q, "api_key_env": "MODEL_DECIDER_TEST_KEY"}}
+	}`, srv.URL))
+	workerGate := make(chan struct{})
+	defer close(workerGate)
+	f.sup.newProviderFunc = func(_ runtime.StartOptions, _ string) (runtime.Provider, error) {
+		return &stableScriptedProvider{attempt: -1, scripts: []stableScriptedAttempt{{
+			sessionID: "ses_modeldec_cap",
+			events:    []stableScriptedEvent{{release: workerGate}},
+		}}}, nil
+	}
+	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
+	if err != nil {
+		t.Fatalf("dispatchWorkflowNode: %v", err)
+	}
+	if out.Kind != Dispatched {
+		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
+	}
+	waitFor(t, "worker runtime", func() bool {
+		_, err := f.sup.RuntimeStatus(out.RuntimeID)
+		return err == nil
+	})
+	options := []any{map[string]any{"optionId": "allow_once", "kind": "allow"}}
+	// Fill the cap with distinct pending requests, waiting for each call so
+	// the routing order is deterministic. Routing goes through the production
+	// fanout entry (cachePermissionOptions), which caches the options a
+	// re-route needs after a freed slot.
+	for i := 0; i < maxConcurrentModelDeciders; i++ {
+		f.sup.cachePermissionOptions(out.RuntimeID, fmt.Sprintf("perm_req_model_cap_%d", i), options)
+		want := int64(i + 1)
+		waitFor(t, fmt.Sprintf("in-flight decision call %d", i+1), func() bool { return calls.Load() >= want })
+	}
+	// A further distinct request hits the cap: no decision call fires, the
+	// routed mark stays, and the request stays pending.
+	f.sup.cachePermissionOptions(out.RuntimeID, blockedID, options)
+	time.Sleep(50 * time.Millisecond)
+	if got := calls.Load(); got != int64(maxConcurrentModelDeciders) {
+		t.Fatalf("decision calls = %d, want the cap of %d held with no overflow call", got, maxConcurrentModelDeciders)
+	}
+	if state := f.sup.control.PermissionResolverState(out.RuntimeID, blockedID); state == control.PermissionResolverResolved {
+		t.Fatalf("capped request resolver state = %v, want the request left unresolved", state)
+	}
+	// Free the in-flight calls: each completes as a defer, and the blocked
+	// request re-routes from its cached options and gets its call.
+	closeGate()
+	waitFor(t, "blocked request re-routed after capacity freed", func() bool {
+		return calls.Load() > int64(maxConcurrentModelDeciders)
+	})
+	time.Sleep(50 * time.Millisecond)
+	if got := calls.Load(); got != int64(maxConcurrentModelDeciders+1) {
+		t.Fatalf("decision calls after release = %d, want exactly %d", got, maxConcurrentModelDeciders+1)
+	}
+	status, err := f.sup.RuntimeStatus(out.RuntimeID)
+	if err != nil {
+		t.Fatalf("RuntimeStatus: %v", err)
+	}
+	rt, _ := status.(map[string]any)
+	if exhausted, _ := rt["permission_decider_exhausted"].(bool); exhausted {
+		t.Fatal("cap blocking must not mark the decider exhausted")
+	}
+}
+
+// TestDispatchModelDeciderUnappliableDecisionStaysPending proves decisions
+// that no pending option can express are judgments the resolver cannot
+// apply, not failures: the request stays pending for a human gate, no retry
+// fires, and the exhausted flag stays clear. An option whose kind matches
+// but which requires a message the model did not supply stays pending too.
+func TestDispatchModelDeciderUnappliableDecisionStaysPending(t *testing.T) {
+	requestID := "perm_req_model_unappliable"
+	capture := &modelDeciderCapture{}
+	srv := newModelDeciderServer(capture, func(w http.ResponseWriter) {
+		w.Write([]byte(`{"choices":[{"message":{"content":"{\"decision\":\"reject\",\"reason\":\"looks bad\"}"}}]}`))
+	})
+	defer srv.Close()
+	writeProviderRegistry(t, fmt.Sprintf(`{
+		"providers": {"groq": {"base_url": %q, "api_key_env": "MODEL_DECIDER_TEST_KEY"}}
+	}`, srv.URL))
+	t.Setenv("MODEL_DECIDER_TEST_KEY", "sk-model-test")
+
+	template := mustJSON(t, dispatchModelDeciderTemplate("groq", "llama-3.3-70b", "tmpl-dispatch-dispatch-modeldec-unappliable"))
+	f := newDispatchFixtureTemplate(t, "dispatch-modeldec-unappliable", 4, 4, template)
+	gate := make(chan struct{})
+	defer close(gate)
+	// The worker's scripted request offers only an allow option; the model
+	// decides reject — no pending option can express it.
+	f.sup.newProviderFunc = func(_ runtime.StartOptions, _ string) (runtime.Provider, error) {
+		return &stableScriptedProvider{attempt: -1, scripts: []stableScriptedAttempt{{
+			sessionID: "ses_modeldec_unappliable",
+			events: []stableScriptedEvent{
+				{event: events.Event{
+					Event:     "permission.request",
+					SessionID: "ses_modeldec_unappliable",
+					Fields: map[string]any{
+						"request_id": requestID,
+						"tool":       "bash",
+						"command":    "rm -rf /tmp/build",
+						"options":    []any{map[string]any{"optionId": "allow_once", "kind": "allow"}},
+					},
+				}},
+				{release: gate},
+			},
+		}}}, nil
+	}
+	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
+	if err != nil {
+		t.Fatalf("dispatchWorkflowNode: %v", err)
+	}
+	if out.Kind != Dispatched {
+		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
+	}
+	waitFor(t, "decision call", func() bool {
+		calls, _, _ := capture.snapshot()
+		return calls >= 1
+	})
+	// A second routed request offers only an option that requires a message;
+	// the model's decision carries no reason the resolver could apply.
+	messageOption := []any{map[string]any{"optionId": "allow", "kind": "allow", "requiresMessage": true}}
+	f.sup.cachePermissionOptions(out.RuntimeID, "perm_req_model_msg", messageOption)
+	waitFor(t, "second decision call", func() bool {
+		calls, _, _ := capture.snapshot()
+		return calls >= 2
+	})
+	time.Sleep(50 * time.Millisecond)
+	if calls, _, _ := capture.snapshot(); calls != 2 {
+		t.Fatalf("decision calls = %d, want 2 (unappliable decisions must not retry)", calls)
+	}
+	for _, id := range []string{requestID, "perm_req_model_msg"} {
+		if state := f.sup.control.PermissionResolverState(out.RuntimeID, id); state == control.PermissionResolverResolved {
+			t.Fatalf("request %s must stay pending for a human gate", id)
+		}
+	}
+	status, err := f.sup.RuntimeStatus(out.RuntimeID)
+	if err != nil {
+		t.Fatalf("RuntimeStatus: %v", err)
+	}
+	rt, _ := status.(map[string]any)
+	if exhausted, _ := rt["permission_decider_exhausted"].(bool); exhausted {
+		t.Fatal("an unappliable decision must not mark the decider exhausted")
+	}
+}
