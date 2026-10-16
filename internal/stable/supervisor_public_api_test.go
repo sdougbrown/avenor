@@ -1211,7 +1211,6 @@ func TestSupervisorPublicAPIDeciderConcurrencyCapReleasesBlockedRequest(t *testi
 }
 
 func TestSupervisorPublicAPIDeciderSlotFreedWhenDeciderFinishes(t *testing.T) {
-	t.Skip("#320: a decider run that finishes its judgment parks instead of exiting and keeps its concurrency slot, so a request blocked by the cap stays pending")
 	t.Parallel()
 	const workers = itestDeciderCap + 1
 	var h *itestHarness

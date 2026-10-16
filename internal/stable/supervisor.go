@@ -2199,6 +2199,14 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 				if child.workflowID != "" {
 					return
 				}
+				// A permission decider judges one request in a single turn and
+				// receives no follow-up prompt, so parking would hold its
+				// decider slot and scratch directory until the parked timeout.
+				// Its successful end_turn is terminal too (recorded in the
+				// runChild defer).
+				if strings.HasPrefix(child.label, permdecLabelPrefix) {
+					return
+				}
 				child.mu.Lock()
 				child.parked = true
 				child.mu.Unlock()
