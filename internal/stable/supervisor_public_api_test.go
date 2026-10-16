@@ -669,7 +669,8 @@ func TestSupervisorPublicAPIRunDeadlineWhileParkedTimesOut(t *testing.T) {
 	provider := newItestProvider(itestAttempt("ses_dpark", itestSessionEnd("ses_dpark", "end_turn", "parked work")))
 	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
 
-	rt := h.spawn(map[string]any{"label": "deadline-parked", "timeout": 1})
+	// A three-second deadline leaves the first turn room to finish before it.
+	rt := h.spawn(map[string]any{"label": "deadline-parked", "timeout": 3})
 	h.awaitStatus(rt, "done")
 	if got := h.result(rt); got != "parked work" {
 		t.Fatalf("RuntimeResult after the turn = %q, want %q", got, "parked work")
@@ -1039,8 +1040,9 @@ func TestSupervisorPublicAPIRunDeadlineWhileWaitingForTreeBudget(t *testing.T) {
 	// A five-second run deadline leaves a wide margin over setup, which is
 	// measured from the spawn: slow setup must not let the deadline fire
 	// before the runtime is parked in the tree-budget wait.
+	const runDeadline = 5 * time.Second
 	spawnedAt := time.Now()
-	rt := h.spawn(map[string]any{"label": "budget-parked", "timeout": 5})
+	rt := h.spawn(map[string]any{"label": "budget-parked", "timeout": int(runDeadline / time.Second)})
 	h.awaitStatus(rt, "done")
 	// The parked runtime releases its slot after the turn; the holder spawn
 	// can race that release, so retry the admission until it succeeds.
@@ -1063,12 +1065,15 @@ func TestSupervisorPublicAPIRunDeadlineWhileWaitingForTreeBudget(t *testing.T) {
 	if err := h.sup.RuntimePrompt(rt, "again", ""); err != nil {
 		t.Fatalf("RuntimePrompt: %v", err)
 	}
-	// Wait out most of the run deadline, then prove the holder still holds
-	// the tree slot: a deadline that fired in the parked wait or during setup
-	// would already have ended the runtime, so this check makes the test fail
-	// instead of passing when the deadline lands in the wrong wait.
-	if remaining := 5*time.Second - 500*time.Millisecond - time.Since(spawnedAt); remaining > 0 {
+	// Wait out most of the run deadline, then prove the runtime is still
+	// blocked in the tree-budget wait: it has not ended yet, and the holder
+	// still holds the only slot. A deadline that fired in the parked wait or
+	// during setup would already have ended the runtime and fails here.
+	if remaining := runDeadline - 500*time.Millisecond - time.Since(spawnedAt); remaining > 0 {
 		time.Sleep(remaining)
+	}
+	if v := h.view(rt); v.Status == "timeout" {
+		t.Fatalf("runtime ended before its deadline: view %+v", v)
 	}
 	if v := h.view(holder); v.Status != "running" {
 		t.Fatalf("holder status just before the deadline = %q, want running", v.Status)
