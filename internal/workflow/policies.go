@@ -14,6 +14,11 @@ type Policies interface {
 	// DispatchPolicy returns the node's dispatch policy, or nil when the
 	// node declares none.
 	DispatchPolicy(templateID TemplateID, templateVersion TemplateVersion, nodeID NodeID) *DispatchPolicy
+	// Template loads the versioned template for command-time gate binding,
+	// which reads the target node's gate bindings to pin resolved inputs and
+	// subjects. A load error disables pinning for that template (legacy
+	// snapshots without templates keep the unbound behavior).
+	Template(templateID TemplateID, templateVersion TemplateVersion) (*Template, error)
 }
 
 // templatePolicies resolves policies from the versioned templates held by a
@@ -32,6 +37,14 @@ func (p templatePolicies) node(templateID TemplateID, templateVersion TemplateVe
 		return nil, nil
 	}
 	return &tmpl, node
+}
+
+func (p templatePolicies) Template(templateID TemplateID, templateVersion TemplateVersion) (*Template, error) {
+	tmpl, err := p.store.LoadTemplate(templateID, templateVersion)
+	if err != nil {
+		return nil, err
+	}
+	return &tmpl, nil
 }
 
 func (p templatePolicies) CompletionGates(templateID TemplateID, templateVersion TemplateVersion, nodeID NodeID) []GateDefinition {

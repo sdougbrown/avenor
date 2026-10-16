@@ -118,10 +118,11 @@ func runToStart(t *testing.T, state Snapshot) (Snapshot, LeaseID, AttemptID) {
 }
 
 // stubPolicies is a Policies whose answers are fixed by the test. A zero field
-// reads as no policy.
+// reads as no policy (a nil template disables gate pinning).
 type stubPolicies struct {
-	gates []GateDefinition
-	retry *RetryPolicy
+	gates    []GateDefinition
+	retry    *RetryPolicy
+	template *Template
 }
 
 func (p stubPolicies) CompletionGates(TemplateID, TemplateVersion, NodeID) []GateDefinition {
@@ -134,6 +135,10 @@ func (p stubPolicies) RetryPolicy(TemplateID, TemplateVersion, NodeID) *RetryPol
 
 func (p stubPolicies) DispatchPolicy(TemplateID, TemplateVersion, NodeID) *DispatchPolicy {
 	return nil
+}
+
+func (p stubPolicies) Template(TemplateID, TemplateVersion) (*Template, error) {
+	return p.template, nil
 }
 
 // retryPolicies returns policies that give every node the described retry

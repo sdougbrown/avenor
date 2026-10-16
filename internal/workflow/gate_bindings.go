@@ -42,25 +42,11 @@ var (
 // safe-integer range.
 const maxSafeOutputFloat = 9007199254740991
 
-// bindingTemplateResolve is the template-aware lookup installed by the
-// manager, mirroring the other template resolvers: event building needs the
-// target node's gate bindings when it pins resolved gate inputs and
-// subjects. Load errors disable pinning for that template (legacy snapshots
-// without templates keep today's behavior).
-var bindingTemplateResolve func(templateID TemplateID, templateVersion TemplateVersion) (*Template, error)
-
 // childSnapshotResolve loads one child workflow's current snapshot during
 // event building so subject references that route through a workflow-action
 // node can read the pinned child output value. Load failures leave the
 // subject unresolved instead of failing the command.
 var childSnapshotResolve func(workflowID WorkflowID) (Snapshot, bool, error)
-
-// SetBindingTemplateResolver wires the template lookup used at command time
-// to pin bound gate inputs and subjects onto transition-created activations.
-// It is owned by the manager (which can resolve the versioned template).
-func SetBindingTemplateResolver(fn func(templateID TemplateID, templateVersion TemplateVersion) (*Template, error)) {
-	bindingTemplateResolve = fn
-}
 
 // SetChildSnapshotResolver wires the child-workflow snapshot lookup used at
 // command time to resolve subject values that flow through child output
@@ -317,12 +303,12 @@ func trimmedJSON(raw json.RawMessage) []byte {
 // fan-in (more than one completed source activation at the nearest causal
 // distance) fails the whole command with ErrAmbiguousBinding so nothing is
 // appended. Templates without bound gates resolve nothing.
-func attachGateBindings(state Snapshot, event *Event, targetNodeID NodeID, causedBy ActivationID) error {
+func attachGateBindings(state Snapshot, event *Event, targetNodeID NodeID, causedBy ActivationID, policies Policies) error {
 	event.CausedBy = append([]ActivationID(nil), causedBy)
-	if bindingTemplateResolve == nil {
+	if policies == nil {
 		return nil
 	}
-	tmpl, err := bindingTemplateResolve(state.Instance.TemplateID, state.Instance.TemplateVersion)
+	tmpl, err := policies.Template(state.Instance.TemplateID, state.Instance.TemplateVersion)
 	if err != nil || tmpl == nil {
 		// A missing template disables pinning; the activation behaves like a
 		// legacy unbound one.
@@ -347,7 +333,7 @@ func attachGateBindings(state Snapshot, event *Event, targetNodeID NodeID, cause
 // inside this same event batch, and references must pin against the state
 // the command itself creates — never the pre-command snapshot.
 func attachTransitionGateBindings(state Snapshot, primary *Event, transition *Event, targetNodeID NodeID, causedBy ActivationID, policies Policies) error {
-	if bindingTemplateResolve == nil {
+	if policies == nil {
 		transition.CausedBy = append([]ActivationID(nil), causedBy)
 		return nil
 	}
@@ -355,7 +341,7 @@ func attachTransitionGateBindings(state Snapshot, primary *Event, transition *Ev
 	if err != nil {
 		return err
 	}
-	return attachGateBindings(sim, transition, targetNodeID, causedBy)
+	return attachGateBindings(sim, transition, targetNodeID, causedBy, policies)
 }
 
 // simulateResolvedState returns a scratch deep copy of the snapshot with the

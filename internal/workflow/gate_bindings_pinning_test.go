@@ -265,11 +265,7 @@ func TestFanInAmbiguousBindingFailsCommand(t *testing.T) {
 	if err := decodeStrict(fixture, &tmpl); err != nil {
 		t.Fatalf("decode fixture: %v", err)
 	}
-	SetBindingTemplateResolver(func(templateID TemplateID, templateVersion TemplateVersion) (*Template, error) {
-		return &tmpl, nil
-	})
-	t.Cleanup(func() { SetBindingTemplateResolver(nil) })
-
+	policies := stubPolicies{template: &tmpl}
 	// Two completed publication activations are causal parents of the
 	// completing joiner activation, so no unique pin exists.
 	state := Snapshot{Instance: WorkflowInstance{
@@ -293,7 +289,7 @@ func TestFanInAmbiguousBindingFailsCommand(t *testing.T) {
 		Outcome:          "done",
 		Identity:         ExecutionIdentity{WorkflowID: "wf-fanin", NodeID: "joiner", ActivationID: "join"},
 		Payload:          branch,
-	}, nil)
+	}, policies)
 	if !errors.Is(err, ErrAmbiguousBinding) {
 		t.Fatalf("buildCommandEvents error = %v, want ErrAmbiguousBinding", err)
 	}
@@ -337,17 +333,11 @@ func TestMissingOutputLeavesGateUnresolved(t *testing.T) {
 
 func TestReplayReproducesResolvedGates(t *testing.T) {
 	m, s, wf := newCompleteFixture(t, boundGateTemplateJSON, "bound-gates", "1.0.0")
-	// Base snapshot before the completing command: replay advances it with
-	// the completion's event batch (activation IDs are reducer-generated, so
-	// the event log alone cannot rebuild state from empty).
-	baseSnap, ok, err := s.loadCurrent(wf)
-	if err != nil || !ok {
-		t.Fatalf("load current: %v", err)
-	}
-	base := cloneSnapshot(baseSnap)
 	pubID := driveBoundPublication(t, m, s, wf, boundPublicationOutputs("org/repo", 42, "abc123"))
 
-	rebuilt, _, _, err := replayEvents(base, s.eventsPath(wf), s.policies)
+	// Replay from an empty snapshot: the event log carries every minted ID
+	// and timestamp, so it alone rebuilds the state.
+	rebuilt, _, _, err := replayEvents(Snapshot{}, s.eventsPath(wf), s.policies)
 	var want, got *Activation
 	for i := range rebuilt.Instance.Activations {
 		if rebuilt.Instance.Activations[i].NodeID == "review" {

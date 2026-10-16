@@ -122,6 +122,23 @@ func TestReplayLegacyEventsWithoutMintedFields(t *testing.T) {
 		t.Fatalf("activations = %+v, want two distinct non-empty IDs", inst.Activations)
 	}
 
+	// A legacy instantiated event whose identity carries no workflow_id (and
+	// no at or activation_ids) still yields a workflow identity: the reducer
+	// mints one into the instance.
+	anonymous := `{"id":"e1","kind":"workflow.event.instantiated","sequence":1,"instantiated":{"template_id":"t1","template_version":"1","terminal_outcomes":["done"],"entry_nodes":["a"]}}
+`
+	anonPath := filepath.Join(t.TempDir(), "events.ndjson")
+	if err := os.WriteFile(anonPath, []byte(anonymous), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	anonSnap, n, _, err := replayEvents(Snapshot{}, anonPath, nil)
+	if err != nil || n != 1 {
+		t.Fatalf("replay anonymous instantiated: n=%d err=%v", n, err)
+	}
+	if anonSnap.Instance.WorkflowID == "" {
+		t.Fatalf("workflow ID = %q, want a minted non-empty ID", anonSnap.Instance.WorkflowID)
+	}
+
 	// A legacy tail past a materialized snapshot resolves against the IDs the
 	// snapshot already holds.
 	actID := inst.Activations[0].ID
