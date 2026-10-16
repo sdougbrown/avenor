@@ -360,10 +360,11 @@ type childRuntime struct {
 	// permission decider: its single turn is terminal and teardown releases
 	// its decider slot and scratch directory. Only decider spawns set it.
 	permissionDeciderRun bool
-	// permissionDeciderSlotKey is the decider concurrency-slot key reserved
-	// for this run. Teardown releases the slot by this key rather than by the
-	// label, so an ordinary runtime wearing a decider's exact label cannot
-	// release the live decider's slot. Empty for ordinary runs.
+	// permissionDeciderSlotKey is the decider concurrency-slot key this run
+	// reserved, recorded so teardown releases exactly that reservation. It
+	// equals the decider's label today; the permissionDeciderRun flag, not
+	// this key, keeps an ordinary runtime with a decider's label from
+	// releasing a slot. Empty for ordinary runs.
 	permissionDeciderSlotKey string
 	// onWorkflowTerminate records the terminal workflow attempt fact before the
 	// child's runtime state is cleaned up. Nil for non-workflow direct runs.
@@ -2158,9 +2159,9 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 		if child.permissionDeciderRun {
 			// A permission-decider run holds a decider concurrency slot and a
 			// neutral scratch directory; release both so blocked requests can
-			// retry and no scratch dir leaks. The slot is keyed by the
-			// reservation made at routing, not by the label: a caller can
-			// spawn an ordinary runtime wearing the decider's exact label.
+			// retry and no scratch dir leaks. Only a run marked as a decider
+			// reaches this release, so an ordinary runtime wearing a decider's
+			// exact label never frees the live decider's slot.
 			s.releasePermissionDecider(child.permissionDeciderSlotKey)
 		}
 		child.complete()
@@ -4135,9 +4136,9 @@ Never answer blindly: allow only requests the task plainly needs.`,
 		// The decider must never block on its own permission prompts.
 		AutoApprove: true,
 		// Marks the run as a permission decider so it ends after its single
-		// turn; the label prefix alone is not proof, since a caller can set any
-		// label it likes. The slot key is the same key the slot was reserved
-		// with, so teardown releases this run's own slot.
+		// turn and releases its slot at teardown; the label prefix alone is
+		// not proof, since a caller can set any label it likes. The slot key
+		// records the reservation teardown releases.
 		permissionDeciderRun:     true,
 		permissionDeciderSlotKey: deciderLabel,
 	}
