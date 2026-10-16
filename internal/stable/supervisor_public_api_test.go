@@ -443,15 +443,20 @@ func (h *itestHarness) listed(labelPrefix string) []map[string]any {
 }
 
 // itestProvider wraps a stableScriptedProvider with call counters and hooks.
+// resumeCalls records every Resume argument and promptTexts records every
+// Prompt text argument, so tests can pin resume-ID fidelity and prompt
+// fidelity against the production paths.
 type itestProvider struct {
 	*stableScriptedProvider
-	mu       sync.Mutex
-	starts   int
-	resumes  int
-	cancels  int
-	answers  []runtime.PermissionResponse
-	onPrompt func(ctx context.Context)
-	onAnswer func(requestID string, resp runtime.PermissionResponse)
+	mu          sync.Mutex
+	starts      int
+	resumes     int
+	cancels     int
+	answers     []runtime.PermissionResponse
+	resumeCalls []string
+	promptTexts []string
+	onPrompt    func(ctx context.Context)
+	onAnswer    func(requestID string, resp runtime.PermissionResponse)
 }
 
 func newItestProvider(attempts ...stableScriptedAttempt) *itestProvider {
@@ -468,11 +473,15 @@ func (p *itestProvider) Start(ctx context.Context, opts runtime.StartOptions) (r
 func (p *itestProvider) Resume(ctx context.Context, sessionID string) (runtime.Session, error) {
 	p.mu.Lock()
 	p.resumes++
+	p.resumeCalls = append(p.resumeCalls, sessionID)
 	p.mu.Unlock()
 	return p.stableScriptedProvider.Resume(ctx, sessionID)
 }
 
 func (p *itestProvider) Prompt(ctx context.Context, sessionID, text string) error {
+	p.mu.Lock()
+	p.promptTexts = append(p.promptTexts, text)
+	p.mu.Unlock()
 	if p.onPrompt != nil {
 		p.onPrompt(ctx)
 	}
@@ -500,6 +509,20 @@ func (p *itestProvider) counts() (starts, resumes int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.starts, p.resumes
+}
+
+// resumeIDs returns every session ID passed to Resume, in call order.
+func (p *itestProvider) resumeIDs() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.resumeCalls...)
+}
+
+// recordedPrompts returns every prompt text passed to Prompt, in call order.
+func (p *itestProvider) recordedPrompts() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.promptTexts...)
 }
 
 func (p *itestProvider) recordedAnswers() []runtime.PermissionResponse {
