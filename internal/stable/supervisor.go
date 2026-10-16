@@ -571,9 +571,9 @@ type Supervisor struct {
 	permissionProviders           map[string]permissionProviderBinding // same key; exact direct-answer target
 	// Permission-decider concurrency accounting, guarded by permDeciderMu.
 	// permDeciderSlots records which decider labels currently hold one of the
-	// maxConcurrentPermissionDeciders slots (so a release is always paired
-	// with exactly one acquire); permDeciderScratchDirs maps a live decider
-	// label to its neutral scratch directory, removed at teardown;
+	// maxConcurrentPermissionDeciders slots (a release always pairs one
+	// acquire); permDeciderScratchDirs maps a live decider label to its
+	// neutral scratch directory, removed at teardown;
 	// permDeciderBlocked holds requests that hit the cap and stay pending
 	// until a teardown frees capacity and unrouts them for a retry.
 	permDeciderMu          sync.Mutex
@@ -4093,15 +4093,15 @@ const permdecLabelPrefix = "permdec:"
 // maxConcurrentPermissionDeciders caps how many permission-decider runs may
 // be live at once across the supervisor. Each decider consumes a shared
 // MaxRuntimes admission slot, so a worker issuing many distinct permission
-// requests could otherwise crowd out other runtimes with decider runs.
+// requests can crowd out other runtimes with decider runs.
 const maxConcurrentPermissionDeciders = 3
 
 // maxConcurrentModelDeciders caps concurrent in-flight direct-model decision
 // calls across the supervisor. A model call consumes no MaxRuntimes
-// admission slot, so without a cap a worker's pending requests would fan out
-// one unbounded goroutine each; the cap keeps provider load bounded, and a
-// blocked request re-routes when capacity frees instead of burning its
-// bounded retries against a throttled provider.
+// admission slot, so without a cap a worker's pending requests fan out one
+// unbounded goroutine each. The cap keeps provider load bounded; a blocked
+// request re-routes when capacity frees instead of burning its bounded
+// retries against a throttled provider.
 const maxConcurrentModelDeciders = 4
 
 // acquirePermissionDeciderSlot reserves one decider run slot for the request

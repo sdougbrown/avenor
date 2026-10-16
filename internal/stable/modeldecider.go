@@ -88,8 +88,8 @@ func (s *Supervisor) resolvePermissionWithModel(ctx context.Context, md workflow
 	}
 	optionsJSON, err := json.Marshal(options)
 	if err != nil {
-		// Options that cannot be encoded would make the model judge from a
-		// blank request; count the failure and re-route, exactly like a
+		// Options that cannot be encoded leave the model to judge from a
+		// blank request. Count the failure and re-route, exactly like a
 		// failed decider spawn.
 		s.failModelDecision(runtimeID, requestID, fmt.Errorf("encode permission options: %w", err))
 		return

@@ -42,7 +42,7 @@ func DefaultDir() string {
 	return appdir.ConfigHome()
 }
 
-// Load reads the provider registry from DefaultDir. The file may be
+// Load reads the provider registry from DefaultDir. The file is
 // providers.json, providers.yaml, or providers.toml; the first present name
 // wins (JSON first). No registry at all is not an error: (nil, nil) means no
 // providers are configured and every lookup will fail with a clear message.
@@ -87,7 +87,7 @@ func (c *Config) Lookup(name string) (Provider, error) {
 	return provider, nil
 }
 
-// validateProvider rejects a provider entry that could never make a call.
+// validateProvider rejects a provider entry that cannot make a call.
 func validateProvider(name string, p Provider) error {
 	if strings.TrimSpace(p.BaseURL) == "" {
 		return fmt.Errorf("provider %q: base_url is required", name)
