@@ -443,9 +443,10 @@ func (h *itestHarness) listed(labelPrefix string) []map[string]any {
 }
 
 // itestProvider wraps a stableScriptedProvider with call counters and hooks.
-// resumeCalls records every Resume argument and returnedIDs records the
-// session IDs Start and Resume returned, so tests can pin resume-ID fidelity
-// against the production path that passes resume IDs through.
+// resumeCalls records every Resume argument, returnedIDs records the session
+// IDs Start and Resume returned, and promptTexts records every Prompt text
+// argument, so tests can pin resume-ID fidelity and prompt fidelity against
+// the production paths.
 type itestProvider struct {
 	*stableScriptedProvider
 	mu          sync.Mutex
@@ -455,6 +456,7 @@ type itestProvider struct {
 	answers     []runtime.PermissionResponse
 	resumeCalls []string
 	returnedIDs []string
+	promptTexts []string
 	onPrompt    func(ctx context.Context)
 	onAnswer    func(requestID string, resp runtime.PermissionResponse)
 }
@@ -491,6 +493,9 @@ func (p *itestProvider) Resume(ctx context.Context, sessionID string) (runtime.S
 }
 
 func (p *itestProvider) Prompt(ctx context.Context, sessionID, text string) error {
+	p.mu.Lock()
+	p.promptTexts = append(p.promptTexts, text)
+	p.mu.Unlock()
 	if p.onPrompt != nil {
 		p.onPrompt(ctx)
 	}
@@ -533,6 +538,13 @@ func (p *itestProvider) returnedSessionIDs() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]string(nil), p.returnedIDs...)
+}
+
+// recordedPrompts returns every prompt text passed to Prompt, in call order.
+func (p *itestProvider) recordedPrompts() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.promptTexts...)
 }
 
 func (p *itestProvider) recordedAnswers() []runtime.PermissionResponse {

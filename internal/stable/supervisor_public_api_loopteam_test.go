@@ -209,6 +209,22 @@ func TestSupervisorPublicAPILoopPhasesSucceed(t *testing.T) {
 	if starts, resumes := provider.counts(); starts != 3 || resumes != 0 {
 		t.Fatalf("provider starts/resumes = %d/%d, want 3/0 (one attempt per phase)", starts, resumes)
 	}
+	// Every configured phase prompt reached the provider exactly as written
+	// in the workflow config.
+	wantPrompts := []string{"prep work", "loop work", "wrap up"}
+	gotPrompts := provider.recordedPrompts()
+	for _, want := range wantPrompts {
+		found := false
+		for _, got := range gotPrompts {
+			if got == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("prompts = %q, want %q among them", gotPrompts, want)
+		}
+	}
 	// A finished loop child is an ended row, not a parked idle row.
 	rows := h.listed("loop-ok")
 	if len(rows) != 1 || rows[0]["runtime_id"] != rt {
@@ -616,6 +632,8 @@ func TestSupervisorPublicAPILoopProviderFactoryFailure(t *testing.T) {
 	rt := h.spawnWorkflow("loop", file, map[string]any{"label": "loop-factory-fail"})
 
 	v := h.awaitStatus(rt, "failed")
+	// A provider start failure currently reports "error" for loop children;
+	// this assertion characterizes that behavior.
 	if v.StopReason != "error" {
 		t.Fatalf("failed view stop reason = %q, want error", v.StopReason)
 	}
@@ -645,9 +663,10 @@ func TestSupervisorPublicAPITeamMemberStartFailure(t *testing.T) {
 	})
 	rt := h.spawnWorkflow("team", file, map[string]any{"label": "team-start-fail"})
 
-	// A team member whose provider start fails is classified by the team
-	// runner as phase_error, not error: the internal error becomes the member's
-	// stop reason before the sentinel is written.
+	// A provider start failure currently reports "error" for loop children
+	// but "phase_error" for team children (the team runner reclassifies the
+	// internal error as the member's stop reason before the sentinel is
+	// written); this assertion characterizes that difference.
 	v := h.awaitStatus(rt, "failed")
 	if v.StopReason != "phase_error" {
 		t.Fatalf("failed view stop reason = %q, want phase_error", v.StopReason)
@@ -702,6 +721,14 @@ func TestSupervisorPublicAPITeamMembersSucceed(t *testing.T) {
 	betaStarts, _ := beta.counts()
 	if alphaStarts != 1 || betaStarts != 1 {
 		t.Fatalf("member starts = %d/%d, want 1/1", alphaStarts, betaStarts)
+	}
+	// Each member's configured prompt reached its own provider exactly as
+	// written in the workflow config.
+	if got := alpha.recordedPrompts(); len(got) != 1 || got[0] != "alpha work" {
+		t.Fatalf("alpha prompts = %q, want [alpha work]", got)
+	}
+	if got := beta.recordedPrompts(); len(got) != 1 || got[0] != "beta work" {
+		t.Fatalf("beta prompts = %q, want [beta work]", got)
 	}
 	rows := h.listed("team-ok")
 	if len(rows) != 1 || rows[0]["status"] != "ended" || rows[0]["exit_code"] != 0 {
@@ -976,11 +1003,13 @@ func TestSupervisorPublicAPITeamWaitTurnWakesAfterLastMember(t *testing.T) {
 	}
 	// Register the waiter while both members are still running.
 	returned := make(chan map[string]any, 1)
+	waitErr := make(chan error, 1)
 	waitCtx, cancelWait := context.WithCancel(context.Background())
 	defer cancelWait()
 	go func() {
 		out, err := h.sup.RuntimeWaitTurn(waitCtx, rt, 0)
 		if err != nil {
+			waitErr <- err
 			return
 		}
 		if res, ok := out.(map[string]any); ok {
@@ -1002,6 +1031,11 @@ func TestSupervisorPublicAPITeamWaitTurnWakesAfterLastMember(t *testing.T) {
 	})
 	// The last member settling wakes the waiter.
 	betaGate.open()
+	select {
+	case err := <-waitErr:
+		t.Fatalf("RuntimeWaitTurn failed: %v", err)
+	default:
+	}
 	res := itestRecv(t, returned, "the waiter waking after the last member settles")
 	if got, _ := res["stop_reason"].(string); got != "end_turn" {
 		t.Fatalf("WaitTurn stop_reason = %q, want end_turn", got)
