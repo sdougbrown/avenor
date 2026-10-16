@@ -668,7 +668,6 @@ func TestSupervisorPublicAPICancelWhileRunning(t *testing.T) {
 }
 
 func TestSupervisorPublicAPICancelDuringBackoff(t *testing.T) {
-	t.Skip("#319: cancelling a runtime during retry backoff ends it with exit code 0, no sentinel and no cancelled session.end, so consumers see done instead of killed")
 	t.Parallel()
 	provider := newItestProvider(
 		itestAttempt("ses_cb1", itestSessionEnd("ses_cb1", "error", "")),

@@ -2258,6 +2258,9 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			continue
 		}
 		if ctx.Err() != nil {
+			if ctx.Err() == context.Canceled {
+				s.writeIdleCancelled(child)
+			}
 			return
 		}
 		select {
@@ -2270,7 +2273,9 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 				if child.sentinelFile != "" {
 					cli.WriteSentinel(child.sentinelFile, 124, child.sessionID(), "timeout", s.runID, s.stderrWriter())
 				}
+				return
 			}
+			s.writeIdleCancelled(child)
 			return
 		}
 	}
@@ -3545,7 +3550,14 @@ func (s *Supervisor) emitSessionEnd(child *childRuntime, exitCode int, stopReaso
 	})
 }
 
+// writeIdleCancelled records a cancel that landed while the child had no
+// running attempt (parked, waiting for a slot, or in retry backoff): killed
+// exit code, a cancelled sentinel, and a cancelled session.end, matching a
+// cancel during an attempt.
 func (s *Supervisor) writeIdleCancelled(child *childRuntime) {
+	child.mu.Lock()
+	child.exitCode = 130
+	child.mu.Unlock()
 	if child.sentinelFile != "" {
 		cli.WriteSentinel(child.sentinelFile, 130, child.sessionID(), "cancelled", s.runID, s.stderrWriter())
 	}
