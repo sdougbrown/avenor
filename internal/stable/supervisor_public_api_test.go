@@ -468,9 +468,11 @@ func (p *itestProvider) Start(ctx context.Context, opts runtime.StartOptions) (r
 	p.starts++
 	p.mu.Unlock()
 	sess, err := p.stableScriptedProvider.Start(ctx, opts)
-	p.mu.Lock()
-	p.returnedIDs = append(p.returnedIDs, sess.SessionID)
-	p.mu.Unlock()
+	if err == nil {
+		p.mu.Lock()
+		p.returnedIDs = append(p.returnedIDs, sess.SessionID)
+		p.mu.Unlock()
+	}
 	return sess, err
 }
 
@@ -480,9 +482,11 @@ func (p *itestProvider) Resume(ctx context.Context, sessionID string) (runtime.S
 	p.resumeCalls = append(p.resumeCalls, sessionID)
 	p.mu.Unlock()
 	sess, err := p.stableScriptedProvider.Resume(ctx, sessionID)
-	p.mu.Lock()
-	p.returnedIDs = append(p.returnedIDs, sess.SessionID)
-	p.mu.Unlock()
+	if err == nil {
+		p.mu.Lock()
+		p.returnedIDs = append(p.returnedIDs, sess.SessionID)
+		p.mu.Unlock()
+	}
 	return sess, err
 }
 

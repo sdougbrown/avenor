@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -538,6 +539,10 @@ func TestSupervisorPublicAPILoopRequiresNudgeResumesOwnSession(t *testing.T) {
 	if v.StopReason != "incomplete_output" {
 		t.Fatalf("failed view stop reason = %q, want incomplete_output", v.StopReason)
 	}
+	// The sentinel classifies the unmet requirement the same way callers do.
+	if status, stopReason, code := itestSentinelStatus(h.sentinelText(rt)); status != "failed" || stopReason != "incomplete_output" || code != 1 {
+		t.Fatalf("sentinel = (%q, %q, %d), want (failed, incomplete_output, 1)", status, stopReason, code)
+	}
 	if starts, resumes := provider.counts(); starts != 1 || resumes != 1 {
 		t.Fatalf("provider starts/resumes = %d/%d, want 1/1 (the nudge resumes the attempt)", starts, resumes)
 	}
@@ -546,6 +551,10 @@ func TestSupervisorPublicAPILoopRequiresNudgeResumesOwnSession(t *testing.T) {
 	}
 	if ids := provider.returnedSessionIDs(); len(ids) != 2 || ids[0] != "ses_loop_n1" || ids[1] != "ses_loop_n2" {
 		t.Fatalf("Start/Resume session IDs = %v, want [ses_loop_n1 ses_loop_n2]", ids)
+	}
+	rows := h.listed("loop-nudge")
+	if len(rows) != 1 || rows[0]["status"] != "ended" || rows[0]["exit_code"] != 1 {
+		t.Fatalf("List row = %v, want ended with exit code 1", rows)
 	}
 }
 
@@ -583,6 +592,9 @@ func TestSupervisorPublicAPITeamPrePhaseResumesPreviousSession(t *testing.T) {
 	if ids := worker.returnedSessionIDs(); len(ids) != 1 || ids[0] != "ses_team_r3" {
 		t.Fatalf("worker Start/Resume session IDs = %v, want [ses_team_r3] (the member starts fresh)", ids)
 	}
+	if starts, resumes := worker.counts(); starts != 1 || resumes != 0 {
+		t.Fatalf("worker starts/resumes = %d/%d, want 1/0 (the member starts fresh after the resumed pre phases)", starts, resumes)
+	}
 }
 
 // TestSupervisorPublicAPILoopProviderFactoryFailure proves a provider factory
@@ -591,8 +603,9 @@ func TestSupervisorPublicAPITeamPrePhaseResumesPreviousSession(t *testing.T) {
 // List row, and no session was ever started.
 func TestSupervisorPublicAPILoopProviderFactoryFailure(t *testing.T) {
 	t.Parallel()
-	provider := newItestProvider(itestAttempt("ses_loop_never", itestSessionEnd("ses_loop_never", "end_turn", "never ran")))
+	var factoryCalls atomic.Int32
 	h := newItestHarness(t, Config{}, func(runtime.StartOptions, string) (runtime.Provider, error) {
+		factoryCalls.Add(1)
 		return nil, fmt.Errorf("provider factory offline")
 	})
 
@@ -610,11 +623,8 @@ func TestSupervisorPublicAPILoopProviderFactoryFailure(t *testing.T) {
 	if status, stopReason, code := itestSentinelStatus(h.sentinelText(rt)); status != "failed" || stopReason != "error" || code != 1 {
 		t.Fatalf("sentinel = (%q, %q, %d), want (failed, error, 1)", status, stopReason, code)
 	}
-	if v.FinalOutput == "never ran" {
-		t.Fatal("failed loop child produced the output of a phase it never ran")
-	}
-	if starts, _ := provider.counts(); starts != 0 {
-		t.Fatalf("provider starts = %d, want 0 (the factory failed before any attempt)", starts)
+	if got := factoryCalls.Load(); got != 1 {
+		t.Fatalf("factory calls = %d, want 1 (the failed factory is not retried)", got)
 	}
 	rows := h.listed("loop-factory-fail")
 	if len(rows) != 1 || rows[0]["status"] != "ended" || rows[0]["exit_code"] != 1 {
