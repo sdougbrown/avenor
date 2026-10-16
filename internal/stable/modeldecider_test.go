@@ -169,3 +169,15 @@ func TestResolvePermissionModelDeciderKey(t *testing.T) {
 		t.Fatal("pinned env unset even though the registry names another env must fail")
 	}
 }
+
+// TestParseModelDecisionSkipsUndecidableObjects proves the scan does not
+// stop at the first decodable object whose decision is outside the
+// vocabulary: a verbose completion carrying an unrelated object before the
+// real answer still yields the real answer instead of burning a retry.
+func TestParseModelDecisionSkipsUndecidableObjects(t *testing.T) {
+	raw := `Analysis: {"tool":"bash"} and then {"decision":"reject","reason":"destructive"}`
+	decision, reason, err := parseModelDecision(raw)
+	if err != nil || decision != "reject" || reason != "destructive" {
+		t.Fatalf("parseModelDecision = %q/%q, %v; want reject/destructive", decision, reason, err)
+	}
+}

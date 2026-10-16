@@ -700,6 +700,16 @@ func TestValidateTemplateJSONAssignmentDeciderModel(t *testing.T) {
 			"decider_model": map[string]any{"provider": "", "model": "m"},
 		}}
 	})), `minLength at /nodes/0/assignment/permission_policy/decider_model/provider`)
+	assertTemplateError(t, mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
+		node["assignment"] = map[string]any{"permission_policy": map[string]any{
+			"decider_model": map[string]any{"provider": " ", "model": "m"},
+		}}
+	})), `permission_policy.decider_model.provider is required`)
+	assertTemplateError(t, mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
+		node["assignment"] = map[string]any{"permission_policy": map[string]any{
+			"decider_model": map[string]any{"provider": "groq", "model": " "},
+		}}
+	})), `permission_policy.decider_model.model is required`)
 
 	// Semantic: the two decider variants are alternatives, and neither
 	// combines with auto_approve.

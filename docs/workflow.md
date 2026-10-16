@@ -364,6 +364,12 @@ Trade-offs between the three policies:
 | `permission_policy.decider_model` | One direct model call against the request mirror | One HTTP call per pending request | Cheap, bounded per-request classification on chatty backends |
 | `auto_approve` | None — everything is allowed | None | Nodes whose requests are known-safe |
 
+Resource bounds differ: harness decider runs consume MaxRuntimes admission
+slots and can exhaust their retry bound under pressure
+(`permission_decider_exhausted`); model calls bypass admission, are capped
+only by their own concurrency cap and a per-runtime call budget, and a
+blocked or budget-exhausted request simply stays pending.
+
 The direct-model call is made by `internal/modelapi`, a small
 OpenAI-compatible client shared with future harness-free judgment steps
 (gate answers, loop exit markers), so the resolver is not

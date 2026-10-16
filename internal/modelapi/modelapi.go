@@ -10,9 +10,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -104,6 +106,14 @@ func (c *Client) Complete(ctx context.Context, messages []Message, maxTokens int
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
+		// Transport errors embed the full request URL; a registry base_url
+		// may carry credentials in its query string, so redact everything
+		// after the path before the error reaches any log.
+		if uerr := (*url.Error)(nil); errors.As(err, &uerr) {
+			if u, perr := url.Parse(uerr.URL); perr == nil {
+				u.RawQuery, u.User, uerr.URL = "", nil, u.String()
+			}
+		}
 		return "", fmt.Errorf("modelapi: call %s: %w", c.model, err)
 	}
 	defer resp.Body.Close()

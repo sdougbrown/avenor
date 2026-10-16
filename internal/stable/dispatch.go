@@ -584,6 +584,9 @@ func resolveAssignmentSelection(assignment *workflow.Assignment) (*workflow.Exec
 	}
 	if assignment.PermissionPolicy != nil && assignment.PermissionPolicy.DeciderModel != nil {
 		dm := assignment.PermissionPolicy.DeciderModel
+		if strings.TrimSpace(dm.Provider) == "" {
+			return nil, fmt.Errorf("node assignment: permission_policy.decider_model: provider is required")
+		}
 		if strings.TrimSpace(dm.Model) == "" {
 			return nil, fmt.Errorf("node assignment: permission_policy.decider_model: model is required")
 		}

@@ -263,6 +263,11 @@ type childRuntime struct {
 	// do, so the decision can judge whether the request plainly serves it.
 	task     string
 	taskFile string
+	// modelDeciderCalls counts the direct-model decision calls this runtime
+	// has made; past maxModelDeciderCallsPerRuntime further requests stay
+	// pending for a human, so a worker in a permission-gated loop cannot
+	// generate unbounded billable calls.
+	modelDeciderCalls int
 	// routedPermissionRequests records request IDs whose pending permission
 	// request already spawned a decider run, so a repeated request event
 	// cannot spawn a second decider for the same request.
@@ -3973,8 +3978,8 @@ func (s *Supervisor) routePermissionRequest(runtimeID, requestID string, options
 			return
 		}
 		go func() {
-			defer s.releaseModelDeciderSlot(slotKey)
-			s.resolvePermissionWithModel(ctx, *modelDecider, modelDeciderKey, runtimeID, requestID, options, label)
+			s.resolvePermissionWithModel(ctx, *modelDecider, modelDeciderKey, slotKey, runtimeID, requestID, options, label)
+			s.releaseModelDeciderSlot(slotKey)
 		}()
 		return
 	}

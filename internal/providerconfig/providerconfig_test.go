@@ -160,3 +160,11 @@ func TestDefaultDirXDG(t *testing.T) {
 		t.Fatalf("relative XDG should fall back to HOME: %q", got)
 	}
 }
+
+func TestLoadDirRejectsEndpointPathAsBaseURL(t *testing.T) {
+	dir := t.TempDir()
+	writeRegistry(t, dir, "providers.json", `{"providers":{"g":{"base_url":"https://x/v1/chat/completions","api_key":"k"}}}`)
+	if _, err := LoadDir(dir); err == nil {
+		t.Fatal("a full chat-completions endpoint as base_url should be rejected")
+	}
+}

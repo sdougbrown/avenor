@@ -95,6 +95,9 @@ func validateProvider(name string, p Provider) error {
 	if !strings.HasPrefix(p.BaseURL, "http://") && !strings.HasPrefix(p.BaseURL, "https://") {
 		return fmt.Errorf("provider %q: base_url %q must be an http:// or https:// URL", name, p.BaseURL)
 	}
+	if strings.HasSuffix(strings.TrimRight(p.BaseURL, "/"), "/chat/completions") {
+		return fmt.Errorf("provider %q: base_url %q must be the API root, not the chat-completions endpoint", name, p.BaseURL)
+	}
 	if strings.TrimSpace(p.APIKey) == "" && strings.TrimSpace(p.APIKeyEnv) == "" {
 		return fmt.Errorf("provider %q: api_key or api_key_env is required", name)
 	}
