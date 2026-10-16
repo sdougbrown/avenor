@@ -2343,3 +2343,73 @@ func TestSpawnModelDeciderRequiresResolvableKey(t *testing.T) {
 		t.Fatalf("activeRuntimeCount() = %d, want 0 after rejected spawn", got)
 	}
 }
+
+// TestDispatchModelDeciderHumanAnswerWinsRace proves a human answering a
+// request while the decision call is in flight resolves cleanly: the model's
+// late answer is dropped as already-resolved, no retry fires, and the
+// resolved claim carries the human's option and message — never the model's.
+func TestDispatchModelDeciderHumanAnswerWinsRace(t *testing.T) {
+	requestID := "perm_req_model_race"
+	capture := &modelDeciderCapture{}
+	srv := newModelDeciderServer(capture, func(w http.ResponseWriter) {
+		// Hold the decision call in flight so the human answer lands first.
+		time.Sleep(800 * time.Millisecond)
+		w.Write([]byte(`{"choices":[{"message":{"content":"{\"decision\":\"allow\",\"reason\":\"too late\"}"}}]}`))
+	})
+	defer srv.Close()
+	writeProviderRegistry(t, fmt.Sprintf(`{
+		"providers": {"groq": {"base_url": %q, "api_key_env": "MODEL_DECIDER_TEST_KEY"}}
+	}`, srv.URL))
+	t.Setenv("MODEL_DECIDER_TEST_KEY", "sk-model-test")
+
+	template := mustJSON(t, dispatchModelDeciderTemplate("groq", "llama-3.3-70b", "tmpl-dispatch-dispatch-modeldec-race"))
+	f := newDispatchFixtureTemplate(t, "dispatch-modeldec-race", 4, 4, template)
+	gate := make(chan struct{})
+	defer close(gate)
+	f.sup.newProviderFunc = func(_ runtime.StartOptions, _ string) (runtime.Provider, error) {
+		return scriptedWorkerRequest(requestID, gate), nil
+	}
+	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
+	if err != nil {
+		t.Fatalf("dispatchWorkflowNode: %v", err)
+	}
+	if out.Kind != Dispatched {
+		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
+	}
+	waitFor(t, "runtime registration", func() bool { return f.sup.activeRuntimeCount() == 1 })
+	waitFor(t, "request pending", func() bool {
+		status, err := f.sup.RuntimeStatus(out.RuntimeID)
+		if err != nil {
+			return false
+		}
+		rt, _ := status.(map[string]any)
+		pending, _ := rt["pending_permission"].(bool)
+		return pending
+	})
+	waitFor(t, "decision call in flight", func() bool {
+		calls, _, _ := capture.snapshot()
+		return calls >= 1
+	})
+	// The human answers while the model call is still in flight.
+	if err := f.sup.answerPermission(out.RuntimeID, requestID, "reject_once", "human override"); err != nil {
+		t.Fatalf("human answerPermission: %v", err)
+	}
+	// Past the in-flight decision: the model's allow must not be applied and
+	// must not burn a retry.
+	time.Sleep(1200 * time.Millisecond)
+	calls, _, _ := capture.snapshot()
+	if calls != 1 {
+		t.Fatalf("decision calls = %d, want 1 (the late model answer must not retry)", calls)
+	}
+	if resolved, matches := f.sup.control.ResolvedPermissionMatches(out.RuntimeID, requestID, "reject_once", "human override"); !resolved || !matches {
+		t.Fatalf("resolved claim matches = %v/%v, want the human's option and message", resolved, matches)
+	}
+	status, err := f.sup.RuntimeStatus(out.RuntimeID)
+	if err != nil {
+		t.Fatalf("RuntimeStatus: %v", err)
+	}
+	rt, _ := status.(map[string]any)
+	if exhausted, _ := rt["permission_decider_exhausted"].(bool); exhausted {
+		t.Fatal("a race the human won must not mark the decider exhausted")
+	}
+}
