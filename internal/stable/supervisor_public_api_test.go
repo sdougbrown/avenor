@@ -37,9 +37,6 @@ import (
 
 const (
 	itestTimeout = 10 * time.Second
-	// itestQuietWindow bounds how long a negative assertion (something must
-	// not happen) observes the supervisor.
-	itestQuietWindow = 200 * time.Millisecond
 	// Decider limits as callers experience them.
 	itestDeciderSpawnBound = 3
 	itestDeciderCap        = 3
@@ -349,14 +346,9 @@ func (h *itestHarness) awaitCondition(what string, cond func() bool) {
 	}
 }
 
-// consistently fails the test if cond becomes false within the quiet window.
-func (h *itestHarness) consistently(what string, cond func() bool) {
-	h.consistentlyFor(itestQuietWindow, what, cond)
-}
-
 // consistentlyFor fails the test if cond becomes false within the given
-// window. Negative assertions that must outlast a retry backoff need a longer
-// window than the default quiet one.
+// window. Callers that must outlast a retry backoff pass a window longer
+// than the backoff delay.
 func (h *itestHarness) consistentlyFor(window time.Duration, what string, cond func() bool) {
 	h.t.Helper()
 	deadline := time.Now().Add(window)
@@ -540,6 +532,14 @@ func TestSupervisorPublicAPISuccess(t *testing.T) {
 	rows := h.listed("success")
 	if len(rows) != 1 || rows[0]["runtime_id"] != rt {
 		t.Fatalf("List = %v, want the one runtime %s", rows, rt)
+	}
+	// The finished turn parks the runtime awaiting a follow-up prompt, so the
+	// caller sees an idle row carrying the turn's zero exit code.
+	if got := rows[0]["status"]; got != "idle" {
+		t.Fatalf("List status = %v, want idle", got)
+	}
+	if got := rows[0]["exit_code"]; got != 0 {
+		t.Fatalf("List exit_code = %v, want 0", got)
 	}
 }
 
@@ -800,6 +800,16 @@ func TestSupervisorPublicAPIShutdownWithActiveRuntimes(t *testing.T) {
 			t.Fatalf("runtime %s before shutdown = %+v, want running", rt, v)
 		}
 	}
+	// Both rows are live mid-turn while the runtimes run.
+	if rows := h.listed("sd-"); len(rows) != 2 {
+		t.Fatalf("List = %d rows, want 2", len(rows))
+	} else {
+		for _, row := range rows {
+			if got := row["status"]; got != "running" {
+				t.Fatalf("List status before shutdown = %v, want running", got)
+			}
+		}
+	}
 	if err := h.sup.Shutdown("sideways"); err == nil {
 		t.Fatal("Shutdown with an unknown mode succeeded, want an error")
 	}
@@ -808,6 +818,16 @@ func TestSupervisorPublicAPIShutdownWithActiveRuntimes(t *testing.T) {
 		v := h.awaitStatus(rt, "killed")
 		if v.StopReason != "cancelled" {
 			t.Fatalf("runtime %s stop reason = %q, want cancelled", rt, v.StopReason)
+		}
+	}
+	// Shutdown cancels the mid-turn runtimes, so their rows carry the ended
+	// status and the 130 exit code a cancelled turn records.
+	for _, row := range h.listed("sd-") {
+		if got := row["status"]; got != "ended" {
+			t.Fatalf("List status after shutdown = %v, want ended", got)
+		}
+		if got := row["exit_code"]; got != 130 {
+			t.Fatalf("List exit_code after shutdown = %v, want 130", got)
 		}
 	}
 	if _, err := h.trySpawn(map[string]any{"label": "after-shutdown"}); err == nil {
@@ -977,6 +997,8 @@ func TestSupervisorPublicAPIDeciderAllow(t *testing.T) {
 	if len(answers) != 1 || !answers[0].Allow || answers[0].OptionID != "allow_once" {
 		t.Fatalf("backend permission answers = %+v, want one allow_once", answers)
 	}
+	// The decider row's lifecycle after its turn is pinned by
+	// TestSupervisorPublicAPIDeciderSlotFreedWhenDeciderFinishes.
 	if rows := h.listed("permdec:"); len(rows) != 1 {
 		t.Fatalf("decider runs listed = %d, want 1", len(rows))
 	}
@@ -1140,6 +1162,12 @@ func TestSupervisorPublicAPIDeciderConcurrencyCapReleasesBlockedRequest(t *testi
 		v := h.view(ids[blockedLabel])
 		return spawns.Load() == itestDeciderCap && v.PendingPermission && v.Status == "running"
 	})
+	// Each listed decider run is mid-turn holding its concurrency slot.
+	for _, row := range h.listed("permdec:") {
+		if got := row["status"]; got != "running" {
+			t.Fatalf("decider run status = %v, want running", got)
+		}
+	}
 	if rows := h.listed("permdec:"); len(rows) != itestDeciderCap {
 		t.Fatalf("decider runs listed = %d, want %d", len(rows), itestDeciderCap)
 	}
@@ -1148,6 +1176,9 @@ func TestSupervisorPublicAPIDeciderConcurrencyCapReleasesBlockedRequest(t *testi
 	rows := h.listed("permdec:" + ids["w1"] + ":")
 	if len(rows) != 1 {
 		t.Fatalf("decider runs for w1 = %d, want 1", len(rows))
+	}
+	if got := rows[0]["status"]; got != "running" {
+		t.Fatalf("decider run for w1 status = %v, want running", got)
 	}
 	if err := h.sup.RuntimeCancel(rows[0]["runtime_id"].(string)); err != nil {
 		t.Fatalf("cancel decider: %v", err)
