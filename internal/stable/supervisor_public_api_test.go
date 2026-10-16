@@ -133,6 +133,21 @@ func itestEventIs(name, runtimeID string) func(events.Event) bool {
 	}
 }
 
+// itestEventTS returns the supervisor's publish timestamp (the ts field, in
+// Unix milliseconds) of ev.
+func itestEventTS(t *testing.T, ev events.Event) time.Time {
+	t.Helper()
+	switch ts := ev.Fields["ts"].(type) {
+	case int64:
+		return time.UnixMilli(ts)
+	case float64:
+		return time.UnixMilli(int64(ts))
+	default:
+		t.Fatalf("%s event has no numeric ts field: %#v", ev.Event, ev.Fields["ts"])
+		return time.Time{}
+	}
+}
+
 func itestStopReasonIs(runtimeID, stopReason string) func(events.Event) bool {
 	isEnd := itestEventIs("session.end", runtimeID)
 	return func(ev events.Event) bool {
@@ -551,19 +566,20 @@ func TestSupervisorPublicAPIRetryWithBackoffThenSuccess(t *testing.T) {
 	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
 
 	rt := h.spawn(map[string]any{"max_retries": 1})
-	h.log.waitFor(t, "failed attempt session.end", itestStopReasonIs(rt, "error"))
+	failedEnd := h.log.waitFor(t, "failed attempt session.end", itestStopReasonIs(rt, "error"))
 	// The failed attempt is not a terminal outcome: the runtime is backing
 	// off to retry. The backoff is observable: the retry's session.end must
-	// trail the failed attempt by at least one backoff delay.
-	firstEndAt := time.Now()
+	// trail the failed attempt by at least one backoff delay. Both gaps use
+	// the supervisor's publish timestamps, so observer lag cannot skew them.
 	v := h.view(rt)
 	if v.TurnComplete || v.Status != "running" {
 		t.Fatalf("view after failed attempt = %+v, want running and not complete", v)
 	}
-	h.log.waitFor(t, "retry session.end", itestStopReasonIs(rt, "end_turn"))
-	if elapsed := time.Since(firstEndAt); elapsed < backoffDelay(1)-500*time.Millisecond {
-		t.Fatalf("gap from failed attempt to retry = %s, want at least %s (backoff delay %s minus slack)",
-			elapsed, backoffDelay(1)-500*time.Millisecond, backoffDelay(1))
+	retryEnd := h.log.waitFor(t, "retry session.end", itestStopReasonIs(rt, "end_turn"))
+	// Millisecond timestamps truncate, so allow one millisecond of rounding.
+	minGap := backoffDelay(1) - time.Millisecond
+	if gap := itestEventTS(t, retryEnd).Sub(itestEventTS(t, failedEnd)); gap < minGap {
+		t.Fatalf("gap from failed attempt to retry = %s, want at least %s (backoff delay %s)", gap, minGap, backoffDelay(1))
 	}
 	h.awaitStatus(rt, "done")
 	if got := h.result(rt); got != "recovered" {
