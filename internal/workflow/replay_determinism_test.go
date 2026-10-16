@@ -280,15 +280,7 @@ func TestReplayWithPoliciesReproducesLiveSnapshot(t *testing.T) {
 		t.Fatalf("second activation dispatch = %+v, want the template's auto policy", second)
 	}
 
-	for i := 1; i <= 2; i++ {
-		replayed, _, _, err := replayEvents(Snapshot{}, s.eventsPath(wf), s.policies)
-		if err != nil {
-			t.Fatalf("replay %d: %v", i, err)
-		}
-		if !reflect.DeepEqual(live, replayed) {
-			t.Fatalf("replay %d differs from live snapshot:\nlive:   %+v\nreplay: %+v", i, live, replayed)
-		}
-	}
+	assertFromEmptyReplayParity(t, s, wf)
 }
 
 // TestStoreAndManagerShareOneClock proves a manager's clock stamps the
