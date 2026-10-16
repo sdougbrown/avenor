@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -303,7 +304,371 @@ func TestStoreAndManagerShareOneClock(t *testing.T) {
 	if !snap.Instance.CreatedAt.Equal(fixed) || !act.CreatedAt.Equal(fixed) {
 		t.Fatalf("created at = %v / %v, want %v", snap.Instance.CreatedAt, act.CreatedAt, fixed)
 	}
+	if !snap.Instance.UpdatedAt.Equal(fixed) || !act.UpdatedAt.Equal(fixed) {
+		t.Fatalf("updated at = %v / %v, want %v", snap.Instance.UpdatedAt, act.UpdatedAt, fixed)
+	}
 	if act.ReadyAt == nil || !act.ReadyAt.Equal(fixed) {
 		t.Fatalf("ready_at = %v, want %v", act.ReadyAt, fixed)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// From-empty replay parity for the remaining event kinds
+// ---------------------------------------------------------------------------
+
+// assertFromEmptyReplayParity requires two from-empty folds of the
+// workflow's event log — with the store's policies — to DeepEqual the live
+// snapshot, so every field the reducers touch must come from the events.
+func assertFromEmptyReplayParity(t *testing.T, s *Store, wf WorkflowID) {
+	t.Helper()
+	live, ok, err := s.loadCurrent(wf)
+	if err != nil || !ok {
+		t.Fatalf("loadCurrent: ok=%v err=%v", ok, err)
+	}
+	for i := 1; i <= 2; i++ {
+		replayed, _, _, err := replayEvents(Snapshot{}, s.eventsPath(wf), s.policies)
+		if err != nil {
+			t.Fatalf("replay %d: %v", i, err)
+		}
+		if !reflect.DeepEqual(live, replayed) {
+			t.Fatalf("replay %d differs from live snapshot:\nlive:   %+v\nreplay: %+v", i, live, replayed)
+		}
+	}
+}
+
+// managerRunningActivation claims and starts the fixture's single node
+// through the manager, returning the activation ID, the claim result
+// (lease_id/owner_token), and the started attempt ID.
+func managerRunningActivation(t *testing.T, m *Manager, s *Store, wf WorkflowID, node string) (ActivationID, map[string]any, string) {
+	t.Helper()
+	snap, ok, err := s.loadCurrent(wf)
+	if err != nil || !ok {
+		t.Fatalf("loadCurrent: ok=%v err=%v", ok, err)
+	}
+	actID := activationByNode(&snap.Instance, NodeID(node)).ID
+	res := claimActivation(t, m, wf, node, string(actID), "alice")
+	out, err := m.WorkflowCommand(string(wf), startCommandPayload(t, node, string(actID), res, nil))
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	attemptID, ok := out.(map[string]any)["attempt_id"].(string)
+	if !ok || attemptID == "" {
+		t.Fatalf("start result missing attempt_id: %#v", out)
+	}
+	return actID, res, attemptID
+}
+
+// TestReplayAttemptIdentifiedParity pins the attempt_identified kind: the
+// runtime identity a dispatch finalization records must come wholly from the
+// event, so a from-empty fold rebuilds the identified attempt exactly.
+func TestReplayAttemptIdentifiedParity(t *testing.T) {
+	m, s, wf, node := newManagerFixture(t)
+	actID, res, attemptID := managerRunningActivation(t, m, s, wf, node)
+	if err := m.FinalizeDispatch(FinalizeDispatchRequest{
+		WorkflowID:   wf,
+		NodeID:       NodeID(node),
+		ActivationID: actID,
+		AttemptID:    AttemptID(attemptID),
+		LeaseID:      LeaseID(res["lease_id"].(string)),
+		RuntimeID:    "rt-1",
+		RunID:        "run-1",
+		SessionID:    "sess-1",
+	}); err != nil {
+		t.Fatalf("FinalizeDispatch: %v", err)
+	}
+	assertFromEmptyReplayParity(t, s, wf)
+}
+
+// TestReplaySkippedParity pins the skipped kind through the store command
+// boundary: the skip's actor, reason, and timestamp live on the event, so a
+// from-empty fold rebuilds the skipped activation exactly.
+func TestReplaySkippedParity(t *testing.T) {
+	s := newStore(t)
+	wf := WorkflowID("wf-replay-skipped")
+	snap := mustInstantiate(t, s, wf)
+	actID := snap.Instance.Activations[0].ID
+	if _, err := s.ApplyCommand(wf, Command{
+		Kind:             CommandSkip,
+		ExpectedRevision: snap.Instance.Revision,
+		IdempotencyKey:   "skip-1",
+		Identity:         ExecutionIdentity{WorkflowID: wf, NodeID: "start", ActivationID: actID},
+		Actor:            "alice",
+		Reason:           "not needed",
+	}); err != nil {
+		t.Fatalf("skip: %v", err)
+	}
+	assertFromEmptyReplayParity(t, s, wf)
+}
+
+// TestReplayCanceledParity pins the canceled kind: the cancel parks the
+// live-leased activation and stamps the instance terminal, and a from-empty
+// fold reproduces the released lease and the terminal attribution exactly.
+func TestReplayCanceledParity(t *testing.T) {
+	m, s, wf, node := newManagerFixture(t)
+	managerRunningActivation(t, m, s, wf, node)
+	payload, err := json.Marshal(map[string]string{"actor": "ops", "reason": "superseded by a newer run"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.WorkflowCancel(string(wf), payload); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	assertFromEmptyReplayParity(t, s, wf)
+}
+
+// TestReplayHeartbeatParity pins the heartbeat kind: the renewal's
+// LastHeartbeatAt and ExpiresAt ride on the event's lease metadata, so a
+// from-empty fold rebuilds the renewed liveness fields exactly.
+func TestReplayHeartbeatParity(t *testing.T) {
+	m, s, wf, node := newManagerFixture(t)
+	actID, res, _ := managerRunningActivation(t, m, s, wf, node)
+	if err := m.Heartbeat(wf, NodeID(node), actID, LeaseID(res["lease_id"].(string)), res["owner_token"].(string)); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+	assertFromEmptyReplayParity(t, s, wf)
+}
+
+// TestReplayLeaseExpiredParity pins the lease_expired kind: the sweep's event
+// carries the stamps the reducer copies (the re-armed readiness and the timed
+// out attempt's end), so a from-empty fold rebuilds the expired activation
+// exactly.
+func TestReplayLeaseExpiredParity(t *testing.T) {
+	m, s, wf, node := newManagerFixture(t)
+	snap, ok, err := s.loadCurrent(wf)
+	if err != nil || !ok {
+		t.Fatalf("loadCurrent: ok=%v err=%v", ok, err)
+	}
+	nodeID := NodeID(node)
+	actID := activationByNode(&snap.Instance, nodeID).ID
+	past := time.Now().UTC().Add(-time.Hour)
+	claimWithLease(t, s, wf, nodeID, Lease{
+		ID:           "lease-ghost",
+		ActivationID: actID,
+		Owner:        "alice",
+		TokenDigest:  ownerTokenDigest("ghost-token"),
+		AcquiredAt:   past.Add(-time.Minute),
+		ExpiresAt:    past,
+	}, "alice")
+	startWithToken(t, m, wf, node, string(actID), "lease-ghost", "ghost-token")
+	if _, err := m.ExpireStaleLeases(); err != nil {
+		t.Fatalf("ExpireStaleLeases: %v", err)
+	}
+	assertFromEmptyReplayParity(t, s, wf)
+}
+
+// TestReplayGateDecisionParity pins the gate kind: a resolving satisfy
+// decision records the gate instance and follows the declared branch, and a
+// from-empty fold rebuilds the decided gate and the branch activation
+// exactly.
+func TestReplayGateDecisionParity(t *testing.T) {
+	m, s, wf := newCompleteFixture(t, completeGatedTemplateJSON, "complete-gated", "1")
+	actID := parkGatedActivation(t, m, s, wf)
+	if _, err := m.WorkflowCommand(string(wf), gateCommandPayload(t, string(actID), "review", "satisfy", map[string]any{
+		"actor":        "alice",
+		"reason":       "approved",
+		"evidence_ids": []string{"ev_1"},
+	})); err != nil {
+		t.Fatalf("gate satisfy: %v", err)
+	}
+	assertFromEmptyReplayParity(t, s, wf)
+}
+
+// TestReplayChildAttachedAndOutcomeParity pins the composition kinds: the
+// spawn's attach parks the parent activation awaiting_child, the child's
+// terminal outcome resolves it, and from-empty folds rebuild both the parent
+// and the child exactly.
+func TestReplayChildAttachedAndOutcomeParity(t *testing.T) {
+	m, s, wf, childID := compositionPhase2Fixture(t, map[OutcomeName]OutcomeName{"done": "done"})
+	registerBoundedWorkflowExecutor(t, m, 10*time.Second)
+
+	driveErr := make(chan error, 1)
+	go func() {
+		if err := waitParentAwaitingChild(s, wf, 10*time.Second); err != nil {
+			driveErr <- err
+			return
+		}
+		driveErr <- driveChildTerminalErr(s, childID, "done", nil)
+	}()
+	parentPayload, _ := claimStartSpawn(t, m, s, wf)
+	if _, err := m.WorkflowCommand(string(wf), parentPayload); err != nil {
+		t.Fatalf("start spawn: %v", err)
+	}
+	if err := <-driveErr; err != nil {
+		t.Fatalf("child driver: %v", err)
+	}
+	assertFromEmptyReplayParity(t, s, wf)
+	assertFromEmptyReplayParity(t, s, childID)
+}
+
+// TestReplayExternalParkedParity pins the external_parked kind: the
+// controller's kernel-local park moves the auto external activation to
+// awaiting_gate under the pinned success outcome, and a from-empty fold
+// rebuilds the parked activation and its pinned gates exactly.
+func TestReplayExternalParkedParity(t *testing.T) {
+	m, s, wf := parkFixture(t, boundGateTemplateJSON)
+	driveBoundPublication(t, m, s, wf, boundPublicationOutputs("org/repo", 42, "abc123"))
+	review := latestActivation(t, s, wf, "review")
+	rev := revision(t, s, wf)
+	if _, err := m.ParkExternal(ParkExternalRequest{
+		WorkflowID:       wf,
+		NodeID:           "review",
+		ActivationID:     review.ID,
+		ExpectedRevision: rev,
+		ControllerID:     "ctl",
+	}); err != nil {
+		t.Fatalf("ParkExternal: %v", err)
+	}
+	assertFromEmptyReplayParity(t, s, wf)
+}
+
+// ---------------------------------------------------------------------------
+// Migration from the pre-change on-disk shape
+// ---------------------------------------------------------------------------
+
+// TestLegacySnapshotMigrationAcceptsNewCommands builds the pre-change
+// on-disk shape — an events.ndjson whose lines carry no at and no
+// activation_ids, plus the workflow.json snapshot one replay of that log
+// materializes — then drives new commands through the manager. The
+// commands must succeed, the appended events must carry the fields the
+// command boundary mints, and folding the whole log from the legacy
+// snapshot must reproduce the live snapshot exactly.
+func TestLegacySnapshotMigrationAcceptsNewCommands(t *testing.T) {
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	template := Template{
+		SchemaVersion:    1,
+		TemplateID:       "t1",
+		TemplateVersion:  "1",
+		EntryNodes:       []NodeID{"start", "other"},
+		TerminalOutcomes: []OutcomeName{"done"},
+		Nodes: []NodeDefinition{
+			{ID: "start", Action: Action{Kind: ActionManual, Manual: &ManualAction{Instructions: "do"}}, Branches: map[OutcomeName]NodeID{"next": "second"}},
+			{ID: "other", Action: Action{Kind: ActionManual, Manual: &ManualAction{Instructions: "do"}}},
+			{ID: "second", Action: Action{Kind: ActionManual, Manual: &ManualAction{Instructions: "do"}}},
+		},
+	}
+	if err := s.StoreTemplate(template.TemplateID, template.TemplateVersion, template); err != nil {
+		t.Fatalf("StoreTemplate: %v", err)
+	}
+	m := NewManager(s)
+	wf := WorkflowID("wf-migrate")
+
+	// The pre-change log: hand-written legacy lines with no at, no
+	// activation_ids, and no instance_id, exactly like the events written
+	// before the command boundary minted them.
+	first := `{"id":"e1","kind":"workflow.event.instantiated","sequence":1,"identity":{"workflow_id":"wf-migrate"},"instantiated":{"template_id":"t1","template_version":"1","terminal_outcomes":["done"],"entry_nodes":["start","other"]}}
+`
+	if err := s.ensureInstanceDir(wf); err != nil {
+		t.Fatalf("ensureInstanceDir: %v", err)
+	}
+	if err := os.WriteFile(s.eventsPath(wf), []byte(first), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	seed, n, _, err := replayEvents(Snapshot{}, s.eventsPath(wf), s.policies)
+	if err != nil || n != 1 {
+		t.Fatalf("replay legacy instantiated: n=%d err=%v", n, err)
+	}
+	// The legacy skipped line resolves against the activation ID the seed
+	// fold minted, the way the pre-change snapshot held it.
+	tail := fmt.Sprintf(`{"id":"e2","kind":"workflow.event.skipped","sequence":2,"identity":{"workflow_id":"wf-migrate","node_id":"other","activation_id":%q},"actor":"alice","reason":"not needed"}
+`, seed.Instance.Activations[1].ID)
+	legacy := first + tail
+	if err := os.WriteFile(s.eventsPath(wf), []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(legacy), "\n") {
+		if err := json.Unmarshal([]byte(line), &raw); err != nil {
+			t.Fatalf("legacy line: %v", err)
+		}
+		if _, ok := raw["at"]; ok {
+			t.Fatalf("legacy line carries at: %s", line)
+		}
+		if _, ok := raw["activation_ids"]; ok {
+			t.Fatalf("legacy line carries activation_ids: %s", line)
+		}
+	}
+	legacySnap, n, _, err := replayEvents(seed, s.eventsPath(wf), s.policies)
+	if err != nil || n != 2 {
+		t.Fatalf("replay legacy log: n=%d err=%v", n, err)
+	}
+	if err := s.writeSnapshot(wf, legacySnap); err != nil {
+		t.Fatalf("write legacy snapshot: %v", err)
+	}
+
+	// New commands land on the migrated instance through the manager.
+	snap, ok, err := s.loadCurrent(wf)
+	if err != nil || !ok {
+		t.Fatalf("loadCurrent: ok=%v err=%v", ok, err)
+	}
+	start := activationByNode(&snap.Instance, "start")
+	if start == nil || start.Status != ActivationPending {
+		t.Fatalf("start activation = %+v, want pending after the legacy fold", start)
+	}
+	res := claimActivation(t, m, wf, "start", string(start.ID), "alice")
+	out, err := m.WorkflowCommand(string(wf), startCommandPayload(t, "start", string(start.ID), res, nil))
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	attemptID, ok := out.(map[string]any)["attempt_id"].(string)
+	if !ok || attemptID == "" {
+		t.Fatalf("start result missing attempt_id: %#v", out)
+	}
+	complete, err := json.Marshal(map[string]any{
+		"op":            "complete",
+		"node_id":       "start",
+		"activation_id": string(start.ID),
+		"attempt_id":    attemptID,
+		"lease_id":      res["lease_id"],
+		"owner_token":   res["owner_token"],
+		"outcome":       "next",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.WorkflowCommand(string(wf), complete); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+
+	// Every appended event carries the minted fields, and the transition
+	// created the branch activation under a command-minted ID.
+	events := readEvents(t, s, wf)
+	if len(events) != 6 {
+		t.Fatalf("events = %d, want 6 (two legacy plus leased, started, completed, transition)", len(events))
+	}
+	for _, e := range events[2:] {
+		if e.At.IsZero() {
+			t.Fatalf("appended event %s (%s) carries no at", e.ID, e.Kind)
+		}
+	}
+	if got := events[3]; got.Kind != EventStarted || got.AttemptID == "" {
+		t.Fatalf("started event = %+v, want a command-minted attempt id", got)
+	}
+	transition := events[5]
+	if transition.Kind != EventTransition || len(transition.ActivationIDs) != 1 || transition.ActivationIDs[0] == "" {
+		t.Fatalf("transition event = %+v, want one command-minted activation id", transition)
+	}
+	live, ok, err := s.loadCurrent(wf)
+	if err != nil || !ok {
+		t.Fatalf("loadCurrent: ok=%v err=%v", ok, err)
+	}
+	second := activationByNode(&live.Instance, "second")
+	if second == nil || second.ID != transition.ActivationIDs[0] {
+		t.Fatalf("branch activation = %+v, want the transition's minted id %s", second, transition.ActivationIDs[0])
+	}
+
+	// Folding the whole log — legacy lines included — from the legacy
+	// snapshot reproduces the live snapshot exactly.
+	replayed, n, _, err := replayEvents(legacySnap, s.eventsPath(wf), s.policies)
+	if err != nil {
+		t.Fatalf("replay from legacy snapshot: %v", err)
+	}
+	if n != len(events) {
+		t.Fatalf("replayed %d events, want %d", n, len(events))
+	}
+	if !reflect.DeepEqual(live, replayed) {
+		t.Fatalf("replay from the legacy snapshot differs from live:\nlive:   %+v\nreplay: %+v", live, replayed)
 	}
 }
