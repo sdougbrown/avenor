@@ -338,8 +338,9 @@ instead of stalling the first permission request.
 When a pending request arrives, the supervisor builds the decision prompt
 from the request's structured mirror (tool, command, working directory), the
 node's task, and the pending options — all framed to the model as untrusted
-worker-supplied data — and makes one bounded, non-streaming call. The
-model answers with a strict-JSON decision:
+worker-supplied data — and makes one bounded, non-streaming call (concurrent
+calls are capped; a request that hits the cap stays pending until capacity
+frees). The model answers with a strict-JSON decision:
 
 - **allow** / **reject**: mapped onto the pending option of the matching
   kind — a once-style variant when the backend offers both (least
