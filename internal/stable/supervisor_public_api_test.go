@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/client"
+	"github.com/sdougbrown/avenor/internal/admission"
 	"github.com/sdougbrown/avenor/internal/control"
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/permission"
@@ -684,6 +685,10 @@ func TestSupervisorPublicAPIRunDeadlineWhileParkedTimesOut(t *testing.T) {
 		t.Fatalf("raw RuntimeStatus exit_code = %d, want 124", code)
 	}
 	h.requireSessionEnd(rt, "timeout", 124)
+	turn := h.waitTurn(rt)
+	if got, _ := turn["stop_reason"].(string); got != "timeout" {
+		t.Fatalf("WaitTurn stop_reason = %q, want timeout", got)
+	}
 }
 
 func TestSupervisorPublicAPICancelWhileRunning(t *testing.T) {
@@ -737,7 +742,6 @@ func TestSupervisorPublicAPICancelDuringBackoff(t *testing.T) {
 	if err := h.sup.RuntimeCancel(rt); err != nil {
 		t.Fatalf("RuntimeCancel: %v", err)
 	}
-	h.waitTurn(rt)
 	v := h.awaitStatus(rt, "killed")
 	if v.StopReason != "cancelled" {
 		t.Fatalf("killed view stop reason = %q, want cancelled", v.StopReason)
@@ -746,6 +750,12 @@ func TestSupervisorPublicAPICancelDuringBackoff(t *testing.T) {
 		t.Fatalf("raw RuntimeStatus exit_code = %d, want 130", code)
 	}
 	h.requireSessionEnd(rt, "cancelled", 130)
+	// WaitTurn reports the idle end's stop reason, not the failed attempt's;
+	// reading it after the end avoids racing the failed attempt's own settle.
+	turn := h.waitTurn(rt)
+	if got, _ := turn["stop_reason"].(string); got != "cancelled" {
+		t.Fatalf("WaitTurn stop_reason = %q, want cancelled", got)
+	}
 	// The cancelled backoff must not wake into another attempt. The window
 	// outlasts the backoff delay so a late Resume cannot slip through.
 	h.consistentlyFor(backoffDelay(1)+500*time.Millisecond, "no retry attempt after cancel", func() bool {
@@ -957,6 +967,73 @@ func TestSupervisorPublicAPIShutdownGracefulEndsParkedRuntime(t *testing.T) {
 		t.Fatalf("raw RuntimeStatus exit_code = %d, want 130", code)
 	}
 	h.requireSessionEnd(rt, "cancelled", 130)
+	turn := h.waitTurn(rt)
+	if got, _ := turn["stop_reason"].(string); got != "cancelled" {
+		t.Fatalf("WaitTurn stop_reason = %q, want cancelled", got)
+	}
+}
+
+// TestSupervisorPublicAPIRunDeadlineWhileWaitingForTreeBudget proves a run
+// deadline that passes while a resumed runtime is blocked waiting for a
+// tree-budget slot ends it as a timeout instead of returning silently, which
+// would leave the parked turn's DONE sentinel standing.
+func TestSupervisorPublicAPIRunDeadlineWhileWaitingForTreeBudget(t *testing.T) {
+	t.Parallel()
+	gate := newItestGate()
+	defer gate.open()
+	var n atomic.Int64
+	factory := func(runtime.StartOptions, string) (runtime.Provider, error) {
+		id := fmt.Sprintf("ses_tb%d", n.Add(1))
+		if n.Load() == 1 {
+			return newItestProvider(itestAttempt(id, itestSessionEnd(id, "end_turn", "parked work"))), nil
+		}
+		working := stableScriptedEvent{event: events.Event{Event: "agent.status", SessionID: id, Fields: map[string]any{"phase": "working"}}}
+		return newItestProvider(itestAttempt(id, working, gate.step(), itestSessionEnd(id, "end_turn", "holder done"))), nil
+	}
+	// A one-slot tree budget: the holder's in-flight turn occupies the only
+	// slot, so a resumed peer blocks in the budget wait until its run
+	// deadline passes.
+	h := newItestHarness(t, Config{MaxTreeBudget: 1}, factory)
+
+	rt := h.spawn(map[string]any{"label": "budget-parked", "timeout": 2})
+	h.awaitStatus(rt, "done")
+	// The parked runtime releases its slot after the turn; the holder spawn
+	// can race that release, so retry the admission until it succeeds.
+	var holder string
+	h.awaitCondition("a free tree slot for the holder spawn", func() bool {
+		id, err := h.trySpawn(map[string]any{"label": "budget-holder"})
+		var ce *admission.CapacityError
+		if err != nil && !errors.As(err, &ce) {
+			h.t.Fatalf("holder spawn: %v", err)
+		}
+		if err != nil {
+			return false
+		}
+		holder = id
+		return true
+	})
+	h.log.waitFor(t, "holder working status", itestEventIs("agent.status", holder))
+	// The follow-up prompt resumes the parked runtime, which blocks in the
+	// tree-budget wait for the rest of its run deadline.
+	if err := h.sup.RuntimePrompt(rt, "again", ""); err != nil {
+		t.Fatalf("RuntimePrompt: %v", err)
+	}
+	v := h.awaitStatus(rt, "timeout")
+	if v.StopReason != "timeout" {
+		t.Fatalf("timeout view stop reason = %q, want timeout", v.StopReason)
+	}
+	if code := h.rawExitCode(rt); code != 124 {
+		t.Fatalf("raw RuntimeStatus exit_code = %d, want 124", code)
+	}
+	h.requireSessionEnd(rt, "timeout", 124)
+	turn := h.waitTurn(rt)
+	if got, _ := turn["stop_reason"].(string); got != "timeout" {
+		t.Fatalf("WaitTurn stop_reason = %q, want timeout", got)
+	}
+	// The holder is unaffected: released from the gate, its turn finishes
+	// normally.
+	gate.open()
+	h.awaitStatus(holder, "done")
 }
 
 // Permission scenarios.
