@@ -264,6 +264,12 @@ func (s *Supervisor) applyOwnedLifecycleEffects(child *childRuntime, predicted l
 // runtime. The caller must hold child.mu and report the transition error
 // outside every lock.
 func (s *Supervisor) completePublicationFailSafe(child *childRuntime) {
+	// A published completion implies an ended exec with no attempts and no
+	// pending probe; commit all of them so the forced state still satisfies
+	// the machine's invariants.
+	child.lc.exec = execEnded
+	child.lc.attempts = 0
+	child.lc.pendingProbe = probeNone
 	child.lc.completion = completionPublished
 	child.settleTurnLocked()
 	child.completed = true

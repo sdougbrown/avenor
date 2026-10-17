@@ -1334,7 +1334,7 @@ func TestRunChildTransitionFailureRunsFailSafe(t *testing.T) {
 		sup := NewSupervisor(Config{
 			ControlSocket:        "/tmp/test-fault-parktimeout.sock",
 			MaxRuntimes:          1,
-			ParkedRuntimeTimeout: 50 * time.Millisecond,
+			ParkedRuntimeTimeout: 300 * time.Millisecond,
 			Stderr:               &buf,
 		})
 		t.Cleanup(func() { _ = sup.broker.Stop() })
