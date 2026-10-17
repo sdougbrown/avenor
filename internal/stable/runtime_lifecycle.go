@@ -139,8 +139,10 @@ type lifecycleState struct {
 	// pendingProbe guards the two-step continuation protocol (decision 5):
 	// attemptOutcome sets it to the probe it selects and the matching
 	// promptContinuation clears it. It is an internal guard dimension, not a
-	// lifecycle predicate: validateLifecycleState does not read it, and only
-	// the two protocol signals do (inventory amendment 5).
+	// lifecycle predicate: validateLifecycleState requires a pending probe to
+	// sit in S/I with open completion, and the signals that prepare, start or
+	// park a new attempt are rejected while it is set, so no attempt lifecycle
+	// interleaves with the protocol (inventory amendments 5 and 8).
 	pendingProbe probeKind
 }
 
@@ -327,11 +329,12 @@ type lifecycleEffect struct {
 // 3). It rejects: negative counts, running with count 0, positive counts with
 // any nonrunning exec, non-open completion with positive attempts, admission
 // closed outside parked/idle/parked-ending/ended, published outside ended,
-// reserved with non-open completion or nonzero attempts, and direct attempt
-// counts above one. It deliberately does NOT reject running+shutdown,
-// parked+shutdown, parked+writerClosed, or running+phase done: the first two
-// are orthogonal, the local-slot failure explains the third, and session.end
-// precedes active cleanup for the fourth.
+// reserved with non-open completion or nonzero attempts, direct attempt
+// counts above one, and a pending probe outside S/I with open completion. It
+// deliberately does NOT reject running+shutdown, parked+shutdown,
+// parked+writerClosed, or running+phase done: the first two are orthogonal,
+// the local-slot failure explains the third, and session.end precedes active
+// cleanup for the fourth.
 func validateLifecycleState(l lifecycleState) error {
 	if !l.exec.valid() {
 		return fmt.Errorf("lifecycle: invalid exec state %d", l.exec)
@@ -377,6 +380,14 @@ func validateLifecycleState(l lifecycleState) error {
 	}
 	if l.class == directAttemptClass && l.attempts > 1 {
 		return fmt.Errorf("lifecycle: direct runtime with %d attempts", l.attempts)
+	}
+	if l.pendingProbe != probeNone {
+		if l.exec != execStarting && l.exec != execIdle {
+			return fmt.Errorf("lifecycle: pending probe %d in exec state %d", l.pendingProbe, l.exec)
+		}
+		if l.completion != completionOpen {
+			return fmt.Errorf("lifecycle: pending probe %d after completion %d", l.pendingProbe, l.completion)
+		}
 	}
 	return nil
 }
@@ -424,6 +435,17 @@ func validateLifecycleSignal(sig lifecycleSignal) error {
 		if !sig.closeCalled {
 			return errors.New("lifecycle: writerCloseFinished without a Close call on a nonnil sink")
 		}
+	case signalRunEnded:
+		// The first runEnded emits publishCompletion at the teardown boundary;
+		// a wrong attestation is rejected exactly like completionPublished's.
+		if sig.boundary != afterRunTeardown {
+			return fmt.Errorf("lifecycle: runEnded with boundary %d, want afterRunTeardown", sig.boundary)
+		}
+	case signalSpawnRolledBack:
+		// Rollback publishes at the afterSpawnRollback boundary only.
+		if sig.boundary != afterSpawnRollback {
+			return fmt.Errorf("lifecycle: spawnRolledBack with boundary %d, want afterSpawnRollback", sig.boundary)
+		}
 	case signalCompletionPublished:
 		if !sig.boundary.valid() {
 			return fmt.Errorf("lifecycle: completionPublished with invalid boundary %d", sig.boundary)
@@ -450,6 +472,19 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 	if sig.class != st.class {
 		return st, continuation{contNone}, nil, fmt.Errorf(
 			"lifecycle: signal %d with attempt class %d on state class %d", sig.kind, sig.class, st.class)
+	}
+	// While a continuation probe is pending, the two-step protocol must
+	// complete before another attempt lifecycle begins: reject the signals
+	// that prepare, start or park a new attempt. attemptStartFailed is not
+	// blocked because it only aborts an already-prepared attempt, and
+	// preparing is rejected while a probe is pending, so it cannot
+	// legitimately occur mid-protocol.
+	if st.pendingProbe != probeNone {
+		switch sig.kind {
+		case signalAttemptPreparing, signalAttemptStarted, signalParkRequested:
+			return st, continuation{contNone}, nil, fmt.Errorf(
+				"lifecycle: signal %d while probe %d is pending", sig.kind, st.pendingProbe)
+		}
 	}
 
 	out := st
@@ -704,7 +739,12 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 		eff = append(eff, lifecycleEffect{kind: effectSetSuccessPresentation})
 
 	case signalParkRequested:
-		// Source S/I, C0, ordinary direct success; duplicate rejected.
+		// Source S/I, C0, ordinary direct success; duplicate rejected. Only
+		// runChild parks (supervisor.go:2243); loop/team children never park,
+		// so a workflow-class park signal is rejected.
+		if sig.class != directAttemptClass {
+			return st, cont, nil, fmt.Errorf("lifecycle: park requested with class %d", sig.class)
+		}
 		if err := requireOpen(st, sig.kind); err != nil {
 			return st, cont, nil, err
 		}

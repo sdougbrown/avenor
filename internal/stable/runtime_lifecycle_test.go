@@ -177,6 +177,14 @@ func TestRuntimeLifecycleMatrixRows(t *testing.T) {
 			want:   idleDirect(),
 		},
 		{
+			// A prepared workflow attempt can fail out of a running state without
+			// touching the count (parallel preparation keeps another attempt live).
+			name:   "start failed in running with workflow class leaves the attempt running",
+			start:  workflowState(execRunning, 1),
+			signal: lifecycleSignal{kind: signalAttemptStartFailed, class: workflowAttemptClass},
+			want:   workflowState(execRunning, 1),
+		},
+		{
 			name:  "settled to zero clears and settles",
 			start: runningDirect(),
 			signal: lifecycleSignal{
@@ -493,7 +501,7 @@ func TestRuntimeLifecycleMatrixRows(t *testing.T) {
 		{
 			name:   "rollback from reserved publishes at rollback boundary",
 			start:  lifecycleState{},
-			signal: lifecycleSignal{kind: signalSpawnRolledBack},
+			signal: lifecycleSignal{kind: signalSpawnRolledBack, boundary: afterSpawnRollback},
 			want:   lifecycleState{exec: execEnded},
 			effects: []lifecycleEffect{
 				{kind: effectPublishCompletion, boundary: afterSpawnRollback},
@@ -739,7 +747,7 @@ func TestRuntimeLifecycleRepeats(t *testing.T) {
 		if out != st || len(eff) != 0 {
 			t.Fatalf("runEnded repeat: %+v %v", out, eff)
 		}
-		out, _, eff = applyOK(t, st, lifecycleSignal{kind: signalSpawnRolledBack})
+		out, _, eff = applyOK(t, st, lifecycleSignal{kind: signalSpawnRolledBack, boundary: afterSpawnRollback})
 		if out != st || len(eff) != 0 {
 			t.Fatalf("spawnRolledBack repeat: %+v %v", out, eff)
 		}
@@ -826,6 +834,12 @@ func TestRuntimeLifecycleInvalidSources(t *testing.T) {
 			lifecycleSignal{kind: signalParkRequested, runKind: runKindOrdinaryDirect}},
 		{"park requested from running", runningDirect(),
 			lifecycleSignal{kind: signalParkRequested, runKind: runKindOrdinaryDirect}},
+		// Only runChild parks (supervisor.go:2243); loop/team children never
+		// park, so a workflow-class park signal is rejected from every source.
+		{"park requested from workflow child in starting", workflowState(execStarting, 0),
+			lifecycleSignal{kind: signalParkRequested, class: workflowAttemptClass, runKind: runKindOrdinaryDirect}},
+		{"park requested from workflow child after finalization", workflowState(execIdle, 0),
+			lifecycleSignal{kind: signalParkRequested, class: workflowAttemptClass, runKind: runKindOrdinaryDirect}},
 		{"prompt dequeued from idle", idleDirect(),
 			lifecycleSignal{kind: signalPromptDequeued}},
 		{"prompt dequeued after admission closed", lifecycleState{exec: execParked, completion: completionAdmissionClosed},
@@ -834,6 +848,8 @@ func TestRuntimeLifecycleInvalidSources(t *testing.T) {
 		// workflow-only (parallel preparation).
 		{"preparing in running with direct class", runningDirect(),
 			lifecycleSignal{kind: signalAttemptPreparing, class: directAttemptClass}},
+		{"start failed in running with direct class", runningDirect(),
+			lifecycleSignal{kind: signalAttemptStartFailed, class: directAttemptClass}},
 		{"park timed out from idle", idleDirect(), lifecycleSignal{kind: signalParkTimedOut}},
 		{"park wait ended from idle", idleDirect(), lifecycleSignal{kind: signalParkWaitEnded}},
 		{"idle end from running", runningDirect(), lifecycleSignal{kind: signalIdleContextEnded}},
@@ -843,9 +859,14 @@ func TestRuntimeLifecycleInvalidSources(t *testing.T) {
 		{"run ended from running with attempts", runningDirect(), lifecycleSignal{kind: signalRunEnded}},
 		{"run ended after published", lifecycleState{exec: execEnded, completion: completionPublished},
 			lifecycleSignal{kind: signalRunEnded}},
-		{"rollback from idle", idleDirect(), lifecycleSignal{kind: signalSpawnRolledBack}},
+		{"rollback from idle", idleDirect(),
+			lifecycleSignal{kind: signalSpawnRolledBack, boundary: afterSpawnRollback}},
 		{"rollback after admission closed", lifecycleState{exec: execIdle, completion: completionAdmissionClosed},
-			lifecycleSignal{kind: signalSpawnRolledBack}},
+			lifecycleSignal{kind: signalSpawnRolledBack, boundary: afterSpawnRollback}},
+		{"run ended with rollback boundary", idleDirect(),
+			lifecycleSignal{kind: signalRunEnded, class: directAttemptClass, boundary: afterSpawnRollback}},
+		{"rollback with teardown boundary", lifecycleState{},
+			lifecycleSignal{kind: signalSpawnRolledBack, boundary: afterRunTeardown}},
 		{"close finished from open", lifecycleState{}, lifecycleSignal{kind: signalWriterCloseFinished, closeCalled: true}},
 		{"close finished without close call", lifecycleState{writer: writerClosing},
 			lifecycleSignal{kind: signalWriterCloseFinished, closeCalled: false}},
@@ -1294,6 +1315,67 @@ func TestRuntimeLifecycleTwoStepContinuationProtocol(t *testing.T) {
 	})
 }
 
+// TestRuntimeLifecyclePendingProbeGuard covers the broadened pending-probe
+// guard: while a probe is pending, the signals that prepare, start or park a
+// new attempt are rejected with unchanged state, and validateLifecycleState
+// enforces the pending-probe invariant (S/I with open completion).
+func TestRuntimeLifecyclePendingProbeGuard(t *testing.T) {
+	probes := []struct {
+		name  string
+		probe probeKind
+	}{
+		{"terminal probe pending", probeTerminalPrompt},
+		{"retry probe pending", probeRetryPrompt},
+	}
+	blocked := []struct {
+		name   string
+		signal lifecycleSignal
+	}{
+		{"preparing", lifecycleSignal{kind: signalAttemptPreparing, class: directAttemptClass}},
+		{"started", lifecycleSignal{kind: signalAttemptStarted, class: directAttemptClass}},
+		{"park requested", lifecycleSignal{kind: signalParkRequested, class: directAttemptClass, runKind: runKindOrdinaryDirect}},
+	}
+	for _, p := range probes {
+		for _, b := range blocked {
+			t.Run(p.name+"/"+b.name, func(t *testing.T) {
+				st := lifecycleState{exec: execIdle, class: directAttemptClass, pendingProbe: p.probe}
+				expectErr(t, st, b.signal)
+				if st.pendingProbe != p.probe {
+					t.Fatalf("rejected signal changed pendingProbe: %d", st.pendingProbe)
+				}
+			})
+		}
+	}
+
+	t.Run("pending probe invariant", func(t *testing.T) {
+		// A pending probe requires S/I with open completion.
+		invalid := []lifecycleState{
+			{exec: execReserved, pendingProbe: probeRetryPrompt},
+			{exec: execRunning, attempts: 1, class: directAttemptClass, pendingProbe: probeRetryPrompt},
+			{exec: execParked, class: directAttemptClass, pendingProbe: probeRetryPrompt},
+			{exec: execParkedEnding, class: directAttemptClass, pendingProbe: probeRetryPrompt},
+			{exec: execIdle, completion: completionAdmissionClosed, class: directAttemptClass, pendingProbe: probeRetryPrompt},
+			{exec: execEnded, completion: completionPublished, class: directAttemptClass, pendingProbe: probeRetryPrompt},
+		}
+		for i, st := range invalid {
+			if err := validateLifecycleState(st); err == nil {
+				t.Errorf("case %d: validateLifecycleState(%+v) expected error", i, st)
+			}
+			// next must reject it on input regardless of the signal.
+			expectErr(t, st, lifecycleSignal{kind: signalShutdownRequested})
+		}
+		valid := []lifecycleState{
+			{exec: execStarting, class: directAttemptClass, pendingProbe: probeTerminalPrompt},
+			{exec: execIdle, class: directAttemptClass, pendingProbe: probeRetryPrompt},
+		}
+		for i, st := range valid {
+			if err := validateLifecycleState(st); err != nil {
+				t.Errorf("case %d: validateLifecycleState(%+v) = %v, want nil", i, st, err)
+			}
+		}
+	})
+}
+
 // TestRuntimeLifecycleConflictAndDeciderExclusions covers the branch
 // exclusions: a session-ID conflict cannot resume a failed terminal turn, a
 // decider run is terminal on every path (including decider+workflow
@@ -1500,7 +1582,7 @@ func TestRuntimeLifecycleRollback(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st := tc.start
-			st, _, eff := applyOK(t, st, lifecycleSignal{kind: signalSpawnRolledBack})
+			st, _, eff := applyOK(t, st, lifecycleSignal{kind: signalSpawnRolledBack, boundary: afterSpawnRollback})
 			if st.exec != execEnded || st.completion != completionOpen {
 				t.Fatalf("after rollback: %+v", st)
 			}
@@ -1508,7 +1590,7 @@ func TestRuntimeLifecycleRollback(t *testing.T) {
 				t.Fatalf("rollback effects = %v", eff)
 			}
 			// Terminal repeats carry no effects before publication.
-			st, _, eff = applyOK(t, st, lifecycleSignal{kind: signalSpawnRolledBack})
+			st, _, eff = applyOK(t, st, lifecycleSignal{kind: signalSpawnRolledBack, boundary: afterSpawnRollback})
 			if len(eff) != 0 {
 				t.Fatalf("rollback repeat effects = %v", eff)
 			}
