@@ -275,6 +275,25 @@ func TestRuntimeLifecycleMatrixRows(t *testing.T) {
 			},
 		},
 		{
+			// The workflow gate applies only to the exit-0 branch: a
+			// workflow-direct nonretryable nonzero outcome still probes the
+			// terminal prompt queue (supervisor.go:2272-2294; the workflowID
+			// gate at 2230-2240 is success-only).
+			name:  "outcome workflow-direct terminal failure probes the terminal prompt",
+			start: idleDirect(),
+			signal: lifecycleSignal{
+				kind: signalAttemptOutcome, class: directAttemptClass,
+				runKind: runKindWorkflowDirect, exitCode: 1,
+				stopReason: "error", sentinelReason: "error", resultSessionID: "s1",
+				retryable: false,
+			},
+			want: lifecycleState{exec: execIdle, class: directAttemptClass, pendingProbe: probeTerminalPrompt},
+			cont: contProbeTerminalPrompt,
+			effects: []lifecycleEffect{
+				{kind: effectRecordOutcomeExit, exitCode: 1},
+			},
+		},
+		{
 			name:  "outcome terminal failure with conflict ends with sentinel",
 			start: idleDirect(),
 			signal: lifecycleSignal{
@@ -499,23 +518,37 @@ func TestRuntimeLifecycleMatrixRows(t *testing.T) {
 			},
 		},
 		{
-			name:   "rollback from reserved publishes at rollback boundary",
+			// The rollback cue leaves the child in V/S: the publication itself
+			// ends a rollback child (supervisor.go:1475-1480).
+			name:   "rollback from reserved emits the publication cue unchanged",
 			start:  lifecycleState{},
 			signal: lifecycleSignal{kind: signalSpawnRolledBack, boundary: afterSpawnRollback},
-			want:   lifecycleState{exec: execEnded},
+			want:   lifecycleState{},
 			effects: []lifecycleEffect{
 				{kind: effectPublishCompletion, boundary: afterSpawnRollback},
 			},
 		},
 		{
-			name:  "rollback from starting publishes at rollback boundary",
+			name:  "rollback from starting emits the publication cue unchanged",
 			start: directState(execStarting),
 			signal: lifecycleSignal{
 				kind: signalSpawnRolledBack, boundary: afterSpawnRollback,
 			},
-			want: lifecycleState{exec: execEnded, class: directAttemptClass},
+			want: directState(execStarting),
 			effects: []lifecycleEffect{
 				{kind: effectPublishCompletion, boundary: afterSpawnRollback},
+			},
+		},
+		{
+			// Panic-recovery teardown: a starting child (attempt never
+			// incremented) ends through the teardown boundary
+			// (supervisor.go:2141-2167).
+			name:   "run ended from starting publishes at teardown boundary",
+			start:  directState(execStarting),
+			signal: lifecycleSignal{kind: signalRunEnded, class: directAttemptClass, boundary: afterRunTeardown},
+			want:   lifecycleState{exec: execEnded, class: directAttemptClass},
+			effects: []lifecycleEffect{
+				{kind: effectPublishCompletion, boundary: afterRunTeardown},
 			},
 		},
 		{
@@ -557,8 +590,11 @@ func TestRuntimeLifecycleMatrixRows(t *testing.T) {
 			},
 		},
 		{
-			name:   "completion published after rollback allows open writer and no shutdown",
-			start:  lifecycleState{exec: execEnded},
+			// A rollback publication runs while the child is still reserved with
+			// completion open, with writer open and no shutdown, and the
+			// publication itself ends the child (supervisor.go:1475-1480).
+			name:   "rollback publication from reserved ends the child",
+			start:  lifecycleState{},
 			signal: lifecycleSignal{kind: signalCompletionPublished, boundary: afterSpawnRollback},
 			want:   lifecycleState{exec: execEnded, completion: completionPublished},
 			effects: []lifecycleEffect{
@@ -587,6 +623,19 @@ func TestRuntimeLifecycleMatrixRows(t *testing.T) {
 			},
 		},
 		{
+			// An empty label carries an empty payload label: the caller keeps the
+			// previous label (supervisor.go:4860-4864).
+			name:  "agent status observed with phase and empty label carries empty label",
+			start: idleDirect(),
+			signal: lifecycleSignal{
+				kind: signalAgentStatusObserved, phase: "running", label: "",
+			},
+			want: idleDirect(),
+			effects: []lifecycleEffect{
+				{kind: effectSetAgentPresentation, phase: "running"},
+			},
+		},
+		{
 			name:  "agent status observed with empty phase emits nothing",
 			start: idleDirect(),
 			signal: lifecycleSignal{
@@ -595,6 +644,8 @@ func TestRuntimeLifecycleMatrixRows(t *testing.T) {
 			want: idleDirect(),
 		},
 		{
+			// An empty stop reason is absent from the payload: the effect leaves
+			// the stored reason untouched (supervisor.go:4895-4897).
 			name:   "session end observed sets done and keeps empty reason",
 			start:  runningDirect(),
 			signal: lifecycleSignal{kind: signalSessionEndObserved, stopReason: ""},
@@ -741,15 +792,40 @@ func TestRuntimeLifecycleRepeats(t *testing.T) {
 			t.Fatalf("close begun after closed: %+v %v", out, eff)
 		}
 
-		// runEnded / spawnRolledBack: terminal repeats carry no effects.
+		// runEnded: terminal repeat carries no effects. A rollback signal from
+		// a teardown-ended child is rejected: only a reserved or starting child
+		// with open completion may roll back.
 		st = lifecycleState{exec: execEnded}
 		out, _, eff = applyOK(t, st, lifecycleSignal{kind: signalRunEnded})
 		if out != st || len(eff) != 0 {
 			t.Fatalf("runEnded repeat: %+v %v", out, eff)
 		}
+		expectErr(t, st, lifecycleSignal{kind: signalSpawnRolledBack, boundary: afterSpawnRollback})
+
+		// spawnRolledBack: the cue leaves the state unchanged and repeats
+		// re-emit it; the publication's CP repeat guards double publication.
+		st = lifecycleState{}
 		out, _, eff = applyOK(t, st, lifecycleSignal{kind: signalSpawnRolledBack, boundary: afterSpawnRollback})
-		if out != st || len(eff) != 0 {
-			t.Fatalf("spawnRolledBack repeat: %+v %v", out, eff)
+		if out != st || !effectsEqual(eff, []lifecycleEffect{{kind: effectPublishCompletion, boundary: afterSpawnRollback}}) {
+			t.Fatalf("first rollback: %+v %v", out, eff)
+		}
+		out, _, eff = applyOK(t, out, lifecycleSignal{kind: signalSpawnRolledBack, boundary: afterSpawnRollback})
+		if out != st || !effectsEqual(eff, []lifecycleEffect{{kind: effectPublishCompletion, boundary: afterSpawnRollback}}) {
+			t.Fatalf("repeat rollback: %+v %v", out, eff)
+		}
+
+		// shutdownRequested repeats from parked-ending and ended: state
+		// unchanged, only the provider-cancel consideration repeats (the repeat
+		// may request provider cancel again; the parent cancel is once-only).
+		st = lifecycleState{exec: execParkedEnding, shutdown: shutdownRequested, class: directAttemptClass}
+		out, _, eff = applyOK(t, st, lifecycleSignal{kind: signalShutdownRequested})
+		if out != st || !effectsEqual(eff, []lifecycleEffect{{kind: effectConsiderProviderCancel}}) {
+			t.Fatalf("repeat shutdown from parked-ending: %+v %v", out, eff)
+		}
+		st = lifecycleState{exec: execEnded, shutdown: shutdownRequested}
+		out, _, eff = applyOK(t, st, lifecycleSignal{kind: signalShutdownRequested})
+		if out != st || !effectsEqual(eff, []lifecycleEffect{{kind: effectConsiderProviderCancel}}) {
+			t.Fatalf("repeat shutdown from ended: %+v %v", out, eff)
 		}
 		// runEnded repeat from parked-ending: no effects, state unchanged.
 		st = lifecycleState{exec: execParkedEnding, class: directAttemptClass}
@@ -878,6 +954,14 @@ func TestRuntimeLifecycleInvalidSources(t *testing.T) {
 			lifecycleSignal{kind: signalCompletionPublished, boundary: afterRunTeardown}},
 		{"teardown publication with open writer", lifecycleState{exec: execEnded, shutdown: shutdownRequested},
 			lifecycleSignal{kind: signalCompletionPublished, boundary: afterRunTeardown}},
+		// Rollback publication is only valid from a reserved or starting child
+		// with open completion (supervisor.go:1475-1480).
+		{"rollback publication from parked ending", lifecycleState{exec: execParkedEnding, completion: completionAdmissionClosed, class: directAttemptClass},
+			lifecycleSignal{kind: signalCompletionPublished, boundary: afterSpawnRollback}},
+		{"rollback publication from ended", lifecycleState{exec: execEnded},
+			lifecycleSignal{kind: signalCompletionPublished, boundary: afterSpawnRollback}},
+		{"rollback publication after admission closed", lifecycleState{exec: execIdle, completion: completionAdmissionClosed},
+			lifecycleSignal{kind: signalCompletionPublished, boundary: afterSpawnRollback}},
 		{"unknown signal kind", idleDirect(), lifecycleSignal{kind: signalKind(999)}},
 		{"success presented with nonzero exit", idleDirect(),
 			lifecycleSignal{kind: signalSuccessPresented, exitCode: 1}},
@@ -1334,6 +1418,7 @@ func TestRuntimeLifecyclePendingProbeGuard(t *testing.T) {
 		{"preparing", lifecycleSignal{kind: signalAttemptPreparing, class: directAttemptClass}},
 		{"started", lifecycleSignal{kind: signalAttemptStarted, class: directAttemptClass}},
 		{"park requested", lifecycleSignal{kind: signalParkRequested, class: directAttemptClass, runKind: runKindOrdinaryDirect}},
+		{"idle context ended", lifecycleSignal{kind: signalIdleContextEnded}},
 	}
 	for _, p := range probes {
 		for _, b := range blocked {
@@ -1374,6 +1459,29 @@ func TestRuntimeLifecyclePendingProbeGuard(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestRuntimeLifecycleShutdownSlotAcquisition pins that a requested child
+// shutdown does not gate parking or local-slot acquisition: the slot gate
+// checks only the supervisor's shutdown (supervisor.go:1199-1216), so the
+// park/slot path moves parked→idle with shutdown requested.
+func TestRuntimeLifecycleShutdownSlotAcquisition(t *testing.T) {
+	st := idleDirect()
+	st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalShutdownRequested})
+	if !st.isShuttingDown() {
+		t.Fatal("shutdown must be requested before parking")
+	}
+	st, _, eff := applyOK(t, st, lifecycleSignal{kind: signalParkRequested, class: directAttemptClass, runKind: runKindOrdinaryDirect})
+	if st.exec != execParked || !st.isShuttingDown() {
+		t.Fatalf("park with shutdown requested: %+v", st)
+	}
+	if !effectsEqual(eff, []lifecycleEffect{{kind: effectSignalCapacity}}) {
+		t.Fatalf("park effects = %v", eff)
+	}
+	st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalLocalSlotAcquired, class: directAttemptClass})
+	if st.exec != execIdle || !st.isShuttingDown() {
+		t.Fatalf("slot acquisition with shutdown requested: %+v", st)
+	}
 }
 
 // TestRuntimeLifecycleConflictAndDeciderExclusions covers the branch
@@ -1570,8 +1678,10 @@ func TestRuntimeLifecycleWriterCloseStages(t *testing.T) {
 }
 
 // TestRuntimeLifecycleRollback covers spawn rollback from reserved and from a
-// starting child, including the publication boundary that allows an open
-// writer and no shutdown.
+// starting child: the cleanup signal emits the publication cue with the state
+// unchanged, and the publication — valid only from V/S with completion open,
+// with writer open and no shutdown — is what ends the child
+// (supervisor.go:1475-1480).
 func TestRuntimeLifecycleRollback(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -1583,18 +1693,15 @@ func TestRuntimeLifecycleRollback(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			st := tc.start
 			st, _, eff := applyOK(t, st, lifecycleSignal{kind: signalSpawnRolledBack, boundary: afterSpawnRollback})
-			if st.exec != execEnded || st.completion != completionOpen {
-				t.Fatalf("after rollback: %+v", st)
+			if st != tc.start {
+				t.Fatalf("rollback changed state: %+v", st)
 			}
 			if !effectsEqual(eff, []lifecycleEffect{{kind: effectPublishCompletion, boundary: afterSpawnRollback}}) {
 				t.Fatalf("rollback effects = %v", eff)
 			}
-			// Terminal repeats carry no effects before publication.
-			st, _, eff = applyOK(t, st, lifecycleSignal{kind: signalSpawnRolledBack, boundary: afterSpawnRollback})
-			if len(eff) != 0 {
-				t.Fatalf("rollback repeat effects = %v", eff)
-			}
-			// Publication runs with writer open and shutdown none.
+			// Publication runs while the child is still V/S with completion
+			// open, with writer open and shutdown none, and normalizes exec to
+			// ended.
 			st, _, eff = applyOK(t, st, lifecycleSignal{kind: signalCompletionPublished, boundary: afterSpawnRollback})
 			if want := []effectKind{effectSettleTurnWaiters, effectCloseDone}; !reflect.DeepEqual(effectKinds(eff), want) {
 				t.Fatalf("publication effects = %v", effectKinds(eff))

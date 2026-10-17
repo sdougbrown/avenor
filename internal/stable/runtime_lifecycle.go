@@ -475,13 +475,14 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 	}
 	// While a continuation probe is pending, the two-step protocol must
 	// complete before another attempt lifecycle begins: reject the signals
-	// that prepare, start or park a new attempt. attemptStartFailed is not
-	// blocked because it only aborts an already-prepared attempt, and
-	// preparing is rejected while a probe is pending, so it cannot
-	// legitimately occur mid-protocol.
+	// that prepare, start or park a new attempt, and the idle-context end
+	// (the probe sequence is synchronous inside runChild, so no idle end can
+	// legitimately interleave). attemptStartFailed is not blocked because it
+	// only aborts an already-prepared attempt, and preparing is rejected
+	// while a probe is pending, so it cannot legitimately occur mid-protocol.
 	if st.pendingProbe != probeNone {
 		switch sig.kind {
-		case signalAttemptPreparing, signalAttemptStarted, signalParkRequested:
+		case signalAttemptPreparing, signalAttemptStarted, signalParkRequested, signalIdleContextEnded:
 			return st, continuation{contNone}, nil, fmt.Errorf(
 				"lifecycle: signal %d while probe %d is pending", sig.kind, st.pendingProbe)
 		}
@@ -838,18 +839,18 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 		}
 
 	case signalSpawnRolledBack:
-		// Source V/S, C0, attempts 0; E repeat without effects. The first
-		// transition publishes at the afterSpawnRollback boundary (rollback goes
-		// directly to complete).
+		// Source V/S, C0, attempts 0, after rollback cleanup. The signal emits
+		// the publication cue but leaves the child in V/S: a rollback child is
+		// only ever reserved or starting with completion open when complete
+		// runs (supervisor.go:1475-1480), so the publication itself ends it.
+		// Repeats re-emit the cue with the state unchanged; double publication
+		// is guarded by the completionPublished CP repeat (doneOnce).
 		if st.completion != completionOpen {
 			return st, cont, nil, fmt.Errorf("lifecycle: spawn rolled back after completion %d", st.completion)
 		}
 		switch st.exec {
 		case execReserved, execStarting:
-			out.exec = execEnded
 			eff = append(eff, lifecycleEffect{kind: effectPublishCompletion, boundary: afterSpawnRollback})
-		case execEnded:
-			// Repeat: no effects.
 		default:
 			return st, cont, nil, fmt.Errorf("lifecycle: spawn rolled back from exec state %d", st.exec)
 		}
@@ -891,19 +892,38 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 		out.writer = writerClosed
 
 	case signalCompletionPublished:
-		// Source E/PE, attempts 0, C0/CA, with the boundary attested. CP repeat
-		// is a no-op. afterRunTeardown additionally requires a requested
-		// shutdown and a closing (or closed) writer — writer closing is
-		// sufficient when the sink is nil and writerClosed is never fabricated.
-		// afterSpawnRollback permits writer open/shutdown none because
-		// rollback goes directly to complete.
+		// CP repeat is a no-op; doneOnce prevents duplicate publication effects.
 		if st.completion == completionPublished {
-			// Repeat: no-op; doneOnce prevents duplicate publication effects.
 			break
 		}
 		if st.attempts != 0 {
 			return st, cont, nil, fmt.Errorf("lifecycle: completion published with %d attempts", st.attempts)
 		}
+		if sig.boundary == afterSpawnRollback {
+			// Rollback publishes while the child is still reserved or starting
+			// with completion open (supervisor.go:1475-1480): the publication
+			// itself is what ends a rollback child, with writer open and no
+			// shutdown. Parked-ending, ended and admission-closed sources are
+			// rejected.
+			if st.completion != completionOpen {
+				return st, cont, nil, fmt.Errorf("lifecycle: rollback publication after completion %d", st.completion)
+			}
+			switch st.exec {
+			case execReserved, execStarting:
+			default:
+				return st, cont, nil, fmt.Errorf("lifecycle: rollback publication from exec state %d", st.exec)
+			}
+			out.exec = execEnded
+			out.completion = completionPublished
+			eff = append(eff,
+				lifecycleEffect{kind: effectSettleTurnWaiters},
+				lifecycleEffect{kind: effectCloseDone},
+			)
+			break
+		}
+		// afterRunTeardown: source E/PE, C0/CA; requires a requested shutdown
+		// and a closing (or closed) writer — writer closing is sufficient when
+		// the sink is nil and writerClosed is never fabricated.
 		switch st.exec {
 		case execEnded, execParkedEnding:
 		default:
@@ -912,13 +932,11 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 		if st.completion != completionOpen && st.completion != completionAdmissionClosed {
 			return st, cont, nil, fmt.Errorf("lifecycle: completion published after completion %d", st.completion)
 		}
-		if sig.boundary == afterRunTeardown {
-			if !st.isShuttingDown() {
-				return st, cont, nil, errors.New("lifecycle: afterRunTeardown publication without a requested shutdown")
-			}
-			if !st.isWriterClosing() {
-				return st, cont, nil, errors.New("lifecycle: afterRunTeardown publication without a closing writer")
-			}
+		if !st.isShuttingDown() {
+			return st, cont, nil, errors.New("lifecycle: afterRunTeardown publication without a requested shutdown")
+		}
+		if !st.isWriterClosing() {
+			return st, cont, nil, errors.New("lifecycle: afterRunTeardown publication without a closing writer")
 		}
 		out.completion = completionPublished
 		if out.exec == execParkedEnding {
@@ -942,11 +960,17 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 
 	case signalSessionEndObserved:
 		// Any valid state; sets phase done and a nonempty stop reason; never
-		// settles an attempt.
+		// settles an attempt. The reason rides in the payload only when
+		// nonempty, matching the final write (supervisor.go:4895-4897): an
+		// empty stop reason leaves the stored reason untouched.
 		if err := validateLifecycleState(st); err != nil {
 			return st, cont, nil, err
 		}
-		eff = append(eff, lifecycleEffect{kind: effectSetSessionEndPresentation, reason: sig.stopReason})
+		end := lifecycleEffect{kind: effectSetSessionEndPresentation}
+		if sig.stopReason != "" {
+			end.reason = sig.stopReason
+		}
+		eff = append(eff, end)
 	}
 
 	if err := validateLifecycleState(out); err != nil {
