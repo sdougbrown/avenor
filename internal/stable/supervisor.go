@@ -2271,20 +2271,6 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			needAcquire = false
 		}
 		result := s.runChildAttempt(ctx, child, resumeID, promptText)
-		// Release tree admission after the turn so a parked runtime does not
-		// consume descendant budget while idle. A subsequent prompt
-		// re-acquires before its turn.
-		child.mu.Lock()
-		_, retEff, retErr := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptReturned, class: child.lc.class}, nil)
-		child.mu.Unlock()
-		if retErr != nil {
-			s.reportLifecycleError(child, retErr)
-		}
-		if !lifecycleTransitionFailed(retErr) {
-			s.executeDeferredLifecycleEffects(child, retEff)
-		}
-		needAcquire = true
-
 		// Sample the immutable result data the continuation selection needs.
 		retryable := runtime.IsRetryableFailure(result.exitCode, result.stopReason)
 		retriesRemaining := attempt <= maxRetries
@@ -2299,6 +2285,24 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 		if stopReason == "" {
 			stopReason = runtime.StopReasonForExitCode(result.exitCode)
 		}
+		// Release tree admission after the turn so a parked runtime does not
+		// consume descendant budget while idle. A subsequent prompt
+		// re-acquires before its turn.
+		child.mu.Lock()
+		_, retEff, retErr := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptReturned, class: child.lc.class}, nil)
+		child.mu.Unlock()
+		if retErr != nil {
+			s.reportLifecycleError(child, retErr)
+		}
+		if lifecycleTransitionFailed(retErr) {
+			// No predicted release ran; the fail-safe returns the tree token
+			// and ends the run.
+			s.failSafeRunChildTransition(child, result, stopReason, false, false)
+			return
+		}
+		s.executeDeferredLifecycleEffects(child, retEff)
+		needAcquire = true
+
 		// The machine owns the result policy: it records the exit code under
 		// the lock and selects the continuation this switch executes.
 		child.mu.Lock()
@@ -2319,8 +2323,9 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			s.reportLifecycleError(child, err)
 		}
 		if lifecycleTransitionFailed(err) {
-			// Without a valid continuation the only safe action is the
-			// teardown return.
+			// The predicted sentinel never ran; the fail-safe writes it with
+			// the result payload and ends the run.
+			s.failSafeRunChildTransition(child, result, stopReason, false, false)
 			return
 		}
 		switch cont.kind {
@@ -2360,10 +2365,15 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			if parkErr != nil {
 				s.reportLifecycleError(child, parkErr)
 			}
-			// Parking frees a local slot; wake spawn waiters blocked on the cap.
-			if !lifecycleTransitionFailed(parkErr) {
-				s.executeDeferredLifecycleEffects(child, parkEff)
+			if lifecycleTransitionFailed(parkErr) {
+				// The outcome sentinel already ran on the park path; the
+				// fail-safe only signals the capacity the park would have
+				// freed and ends the run.
+				s.failSafeRunChildTransition(child, result, stopReason, true, true)
+				return
 			}
+			// Parking frees a local slot; wake spawn waiters blocked on the cap.
+			s.executeDeferredLifecycleEffects(child, parkEff)
 			nextPrompt, ok := child.waitForNextPrompt(s, ctx, s.config.ParkedRuntimeTimeout)
 			if !ok {
 				// parkWaitEnded is only the not-ok wait path, never the
@@ -2428,13 +2438,18 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			if probeErr != nil {
 				s.reportLifecycleError(child, probeErr)
 			}
-			if !lifecycleTransitionFailed(probeErr) {
-				// Whether resuming or ending, this result's sentinel writes
-				// after the dequeue.
-				s.executeDeferredLifecycleEffects(child, probeEff)
-				if probeCont.kind == contResumeQueued {
-					continue
-				}
+			if lifecycleTransitionFailed(probeErr) {
+				// The probe carried this result's sentinel; the fail-safe
+				// writes it and ends the run. A prompt dequeued before the
+				// failure is consumed by the failed path.
+				s.failSafeRunChildTransition(child, result, stopReason, false, false)
+				return
+			}
+			// Whether resuming or ending, this result's sentinel writes
+			// after the dequeue.
+			s.executeDeferredLifecycleEffects(child, probeEff)
+			if probeCont.kind == contResumeQueued {
+				continue
 			}
 			return
 		case contProbeRetryPrompt:
@@ -2463,6 +2478,12 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			if probeErr != nil {
 				s.reportLifecycleError(child, probeErr)
 			}
+			if lifecycleTransitionFailed(probeErr) {
+				// The failed prediction must not fall into the backoff timer:
+				// the fail-safe writes the terminal sentinel and ends the run.
+				s.failSafeRunChildTransition(child, result, stopReason, false, false)
+				return
+			}
 			if probeCont.kind == contIdleContextEnd {
 				s.writeIdleContextEnd(child, resumeCtxErr)
 				return
@@ -2470,7 +2491,7 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			if probeCont.kind == contRetry {
 				continue
 			}
-			// contBackoff (or a failed prediction) runs the backoff timer.
+			// contBackoff runs the backoff timer.
 			select {
 			case <-time.After(backoffDelay(attempt)):
 			case <-ctx.Done():

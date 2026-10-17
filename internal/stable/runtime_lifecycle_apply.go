@@ -417,6 +417,32 @@ func (s *Supervisor) compareLifecycleEffects(predicted, witnessed []lifecycleEff
 // sentinel file. Effects the adapter already executed under the caller's
 // locks (activity, presentation, recorded exit, waiter release) are not
 // deferred and are ignored here.
+// failSafeRunChildTransition is the fixed fail-safe for an illegal transition
+// in runChild's owned continuation paths (attemptReturned, attemptOutcome,
+// promptContinuation, parkRequested). A failed prediction leaves the run with
+// external waiters (a sentinel consumer, a held tree token, a spawned peer
+// waiting for capacity), so instead of the skipped predicted effects the
+// adapter executes a fixed recovery: it releases the tree token if the run
+// still holds one, writes the terminal sentinel with the legacy payload (the
+// result's exit code, normalized stop reason and session ID) when a sentinel
+// file is configured and this outcome has not written one, and signals
+// capacity when the failure happened on the park path. The caller then ends
+// the run: the fail-safe never resumes, retries or parks. It must be called
+// outside child.mu, where the original deferred effects ran; the transition
+// error is reported by the caller before this helper runs.
+func (s *Supervisor) failSafeRunChildTransition(child *childRuntime, result childAttemptResult, stopReason string, sentinelWritten, parkPath bool) {
+	eff := []lifecycleEffect{{kind: effectReleaseTreeToken}}
+	if !sentinelWritten {
+		eff = append(eff, lifecycleEffect{
+			kind: effectWriteSentinel, exitCode: result.exitCode, reason: stopReason, sessionID: result.sessionID,
+		})
+	}
+	if parkPath {
+		eff = append(eff, lifecycleEffect{kind: effectSignalCapacity})
+	}
+	s.executeDeferredLifecycleEffects(child, eff)
+}
+
 func (s *Supervisor) executeDeferredLifecycleEffects(child *childRuntime, eff []lifecycleEffect) {
 	for _, e := range eff {
 		switch e.kind {

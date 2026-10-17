@@ -1200,6 +1200,18 @@ func TestSupervisorPublicAPICancelWhileWaitingForLocalSlot(t *testing.T) {
 	if err := h.sup.RuntimePrompt(rt, "again", ""); err != nil {
 		t.Fatalf("RuntimePrompt: %v", err)
 	}
+	// Same-package sync check: the follow-up prompt is only dequeued once the
+	// run loop left waitForNextPrompt, and with the holder holding the only
+	// slot an empty queue means the runtime is blocked in the local slot wait
+	// (still marked parked, not yet ended). Without this wait the cancel below
+	// could fire while the runtime is still parked in waitForNextPrompt, which
+	// would not exercise the slot-wait end at all.
+	slotChild := fetchChild(t, h.sup, rt)
+	h.awaitCondition("follow-up prompt dequeued into the local slot wait", func() bool {
+		slotChild.mu.Lock()
+		defer slotChild.mu.Unlock()
+		return len(slotChild.promptQueue) == 0 && slotChild.parked && !slotChild.completed
+	})
 	// While blocked, the runtime must not start its follow-up turn: its first
 	// turn already ended, so any second session.end would mean it resumed.
 	h.consistentlyFor(300*time.Millisecond, "resumed runtime stays blocked on the slot", func() bool {
@@ -1220,6 +1232,79 @@ func TestSupervisorPublicAPICancelWhileWaitingForLocalSlot(t *testing.T) {
 	// normally.
 	gate.open()
 	h.awaitStatus(holder, "done")
+}
+
+// TestSupervisorPublicAPIParkWakesLocalSlotWait proves that a runtime's park
+// wakes a peer blocked in the local MaxRuntimes slot wait through the park
+// capacity signal: the blocked follow-up must resume well inside
+// WaitForCapacity's 2s poll fallback, which would otherwise gate every
+// park-unblock on a fixed timer.
+func TestSupervisorPublicAPIParkWakesLocalSlotWait(t *testing.T) {
+	t.Parallel()
+	gate := newItestGate()
+	defer gate.open()
+	var n atomic.Int64
+	factory := func(runtime.StartOptions, string) (runtime.Provider, error) {
+		id := fmt.Sprintf("ses_wake%d", n.Add(1))
+		if n.Load() == 1 {
+			// The parked runtime's follow-up is a resumed second attempt, so its
+			// provider carries both scripts.
+			return newItestProvider(
+				itestAttempt(id, itestSessionEnd(id, "end_turn", "parked work")),
+				itestAttempt(id, itestSessionEnd(id, "end_turn", "follow-up done")),
+			), nil
+		}
+		working := stableScriptedEvent{event: events.Event{Event: "agent.status", SessionID: id, Fields: map[string]any{"phase": "working"}}}
+		return newItestProvider(itestAttempt(id, working, gate.step(), itestSessionEnd(id, "end_turn", "holder done"))), nil
+	}
+	// A one-runtime cap: the holder's in-flight turn occupies the only slot,
+	// so the parked runtime's follow-up blocks in the local slot wait.
+	h := newItestHarness(t, Config{MaxRuntimes: 1}, factory)
+
+	rt := h.spawn(map[string]any{"label": "slot-wake"})
+	h.awaitStatus(rt, "done")
+	// The parked runtime released its slot after the turn; the holder spawn
+	// can race that release, so retry the admission until it succeeds.
+	var holder string
+	h.awaitCondition("a free runtime slot for the holder spawn", func() bool {
+		id, err := h.trySpawn(map[string]any{"label": "slot-holder"})
+		var ce *admission.CapacityError
+		if err != nil && !errors.As(err, &ce) {
+			h.t.Fatalf("holder spawn: %v", err)
+		}
+		if err != nil {
+			return false
+		}
+		holder = id
+		return true
+	})
+	h.log.waitFor(t, "holder working status", itestEventIs("agent.status", holder))
+	// The follow-up prompt blocks the parked runtime in the local slot wait:
+	// same-package check that the prompt was dequeued out of the parked wait.
+	if err := h.sup.RuntimePrompt(rt, "wake me", ""); err != nil {
+		t.Fatalf("RuntimePrompt: %v", err)
+	}
+	slotChild := fetchChild(t, h.sup, rt)
+	h.awaitCondition("follow-up prompt dequeued into the local slot wait", func() bool {
+		slotChild.mu.Lock()
+		defer slotChild.mu.Unlock()
+		return len(slotChild.promptQueue) == 0 && slotChild.parked && !slotChild.completed
+	})
+	// Releasing the holder's turn makes it park. The park's capacity signal
+	// must wake the blocked slot wait: the follow-up's own session.end has to
+	// arrive far inside the 2s poll fallback (bounded here at 1s).
+	gate.open()
+	start := time.Now()
+	h.awaitCondition("blocked follow-up resumed and ended", func() bool {
+		return h.log.count(itestEventIs("session.end", rt)) == 2
+	})
+	if elapsed := time.Since(start); elapsed >= time.Second {
+		t.Fatalf("park capacity wake took %v, want well under the 2s poll fallback", elapsed)
+	}
+	// The holder finished its turn and parked normally, and the woken runtime
+	// completed its follow-up turn and parked again.
+	h.awaitStatus(holder, "done")
+	h.awaitStatus(rt, "done")
 }
 
 // Permission scenarios.

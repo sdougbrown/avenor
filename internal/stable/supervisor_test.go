@@ -1,6 +1,7 @@
 package stable
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -746,6 +747,78 @@ func TestRunChildParksSuccessfulTurnWithDonePhase(t *testing.T) {
 	child.mu.Unlock()
 	if !completed {
 		t.Fatal("runtime was not marked completed after cancellation")
+	}
+}
+
+// TestRunChildTransitionFailureRunsFailSafe injects an illegal transition into
+// runChild's owned continuation path and pins the fail-safe: the adapter must
+// write the terminal sentinel with the legacy result payload and end the run
+// instead of dropping the predicted effects. The injection is a fixture child
+// declaring the workflow attempt class on the direct run loop: every attempt
+// signal still validates, but attemptReturned requires the direct class, so
+// the first returned attempt fails. The run's diagnostics go to the captured
+// stderr writer and the supervisor is built directly (not through the
+// suite-wide zero-error owner), with the expected counter values asserted
+// here.
+func TestRunChildTransitionFailureRunsFailSafe(t *testing.T) {
+	var buf bytes.Buffer
+	provider := &stableScriptedProvider{
+		attempt: 0,
+		scripts: []stableScriptedAttempt{{
+			sessionID: "ses_failsafe",
+			events: []stableScriptedEvent{{event: events.Event{
+				Event:     "session.end",
+				SessionID: "ses_failsafe",
+				Fields:    map[string]any{"stop_reason": "end_turn"},
+			}}},
+		}},
+	}
+	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-failsafe-transition.sock", MaxRuntimes: 1, Stderr: &buf})
+	t.Cleanup(func() { _ = sup.broker.Stop() })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	child := &childRuntime{
+		id:           "rt_failsafe_transition",
+		provider:     provider,
+		session:      runtime.Session{SessionID: "ses_failsafe"},
+		eventWriter:  stableTestSink{},
+		sentinelFile: filepath.Join(t.TempDir(), "run.done"),
+		lifecycleCtx: ctx,
+		cancelFn:     cancel,
+		done:         make(chan struct{}),
+		promptCh:     make(chan struct{}, 1),
+	}
+	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
+	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
+	go sup.runChild(ctx, child, "hello", 0, 0)
+
+	// The failed transition must end the run, not strand it.
+	waitForStableDone(t, child)
+	joinTestChildCompletion(t, child)
+
+	// The fail-safe wrote the terminal sentinel for the outcome whose
+	// predicted effects were dropped.
+	sentinel, err := os.ReadFile(child.sentinelFile)
+	if err != nil {
+		t.Fatalf("fail-safe sentinel not written: %v", err)
+	}
+	content := string(sentinel)
+	for _, want := range []string{"DONE\n", "SESSION=ses_failsafe\n", "STOP_REASON=end_turn\n"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("fail-safe sentinel = %q, want it to contain %q", content, want)
+		}
+	}
+	// The injected failure is counted exactly once and nothing else diverged.
+	if got := sup.lifecycleErrors.Load(); got != 1 {
+		t.Fatalf("lifecycleErrors = %d, want exactly the injected transition failure", got)
+	}
+	if got := sup.lifecycleShadowMismatches.Load(); got != 0 {
+		t.Fatalf("lifecycleShadowMismatches = %d, want 0", got)
+	}
+	if out := buf.String(); !strings.Contains(out, "lifecycle error (runtime rt_failsafe_transition)") ||
+		!strings.Contains(out, "attempt returned with class") {
+		t.Fatalf("captured stderr = %q, want the injected transition failure report", out)
 	}
 }
 

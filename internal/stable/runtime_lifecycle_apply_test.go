@@ -149,9 +149,10 @@ func TestTransactLifecycleLockedWitnessIsSoleDivergence(t *testing.T) {
 		runKind: runKindOrdinaryDirect, exitCode: 7, sentinelReason: "error", resultSessionID: "ses_x",
 	}, func() legacyLifecycleWitness {
 		// The exit write matches the prediction (the adapter overwrites the
-		// mirror anyway), but the witness records a locked effect the machine
-		// no longer predicts, so the extra locked witness is the sole
-		// divergence.
+		// mirror anyway). The witnessed locked effect is the adapter-owned
+		// record-exit, which the legacy comparison pool excludes, so the
+		// witnessed entry has no predicted counterpart: that unpaired witness
+		// is the sole divergence.
 		child.exitCode = 7
 		w := legacyLifecycleWitness{}
 		w.locked = append(w.locked, lifecycleEffect{kind: effectRecordOutcomeExit, exitCode: 7})
