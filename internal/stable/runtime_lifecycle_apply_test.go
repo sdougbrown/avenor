@@ -121,9 +121,62 @@ func TestTransactLifecycleCollectsOneSyntheticMismatch(t *testing.T) {
 	if got := s.lifecycleShadowMismatches.Load(); got != 1 {
 		t.Fatalf("lifecycleShadowMismatches = %d, want 1", got)
 	}
+	if out := buf.String(); out != "" {
+		t.Fatalf("stderr written before reportLifecycleError: %q", out)
+	}
 	s.reportLifecycleError(child, err)
-	if out := buf.String(); !strings.Contains(out, "lifecycle shadow mismatch") || !strings.Contains(out, "rt_mismatch_transact") {
-		t.Fatalf("captured stderr = %q, want the collected mismatch detail for the child", out)
+	// A shadow-diag error reports per detail line and leaves the transition
+	// counter untouched; only the bundled fallback increments it.
+	if got := s.lifecycleErrors.Load(); got != 0 {
+		t.Fatalf("lifecycleErrors = %d after reportLifecycleError, want 0", got)
+	}
+	if out := buf.String(); !strings.Contains(out, "lifecycle shadow mismatch (") || !strings.Contains(out, "rt_mismatch_transact") || strings.Contains(out, "lifecycle error (runtime") {
+		t.Fatalf("captured stderr = %q, want the per-detail shadow mismatch lines for the child", out)
+	}
+}
+
+// TestTransactLifecycleLockedWitnessIsSoleDivergence pins the locked-effect
+// detail routing: the only divergence is a missing locked effect in the
+// witness, so the collected stderr detail comes solely from the in-transaction
+// sink, not from any field or presentation comparison.
+func TestTransactLifecycleLockedWitnessIsSoleDivergence(t *testing.T) {
+	var buf bytes.Buffer
+	s := newLifecycleTestOwner()
+	s.errWriter = &buf
+	child := &childRuntime{id: "rt_locked_witness", done: make(chan struct{})}
+	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execRunning, attempts: 1, class: directAttemptClass})
+
+	child.mu.Lock()
+	_, _, err := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptSettled, class: directAttemptClass}, func() legacyLifecycleWitness {
+		// The legacy settle performs only the waiter release; the predicted
+		// clear-presentation effect is absent from the locked witness while
+		// every mirror already matches the prediction.
+		w := legacyLifecycleWitness{}
+		child.active = false
+		child.settleTurnLocked()
+		w.locked = append(w.locked, lifecycleEffect{kind: effectSettleTurnWaiters})
+		return w
+	})
+	child.mu.Unlock()
+
+	if err == nil || lifecycleTransitionFailed(err) {
+		t.Fatalf("applyLifecycle err = %v, want a shadow-diag error", err)
+	}
+	if got := s.lifecycleShadowMismatches.Load(); got != 1 {
+		t.Fatalf("lifecycleShadowMismatches = %d, want 1 (locked-effect witness is the sole divergence)", got)
+	}
+	if got := s.lifecycleErrors.Load(); got != 0 {
+		t.Fatalf("lifecycleErrors = %d, want 0 (a mismatch is not an illegal transition)", got)
+	}
+	if out := buf.String(); out != "" {
+		t.Fatalf("stderr written before reportLifecycleError: %q", out)
+	}
+	s.reportLifecycleError(child, err)
+	if got := s.lifecycleErrors.Load(); got != 0 {
+		t.Fatalf("lifecycleErrors = %d after reportLifecycleError, want 0", got)
+	}
+	if out := buf.String(); !strings.Contains(out, "lifecycle shadow mismatch (") || !strings.Contains(out, "rt_locked_witness") || strings.Contains(out, "lifecycle error (runtime") {
+		t.Fatalf("captured stderr = %q, want the per-detail locked-effect line", out)
 	}
 }
 

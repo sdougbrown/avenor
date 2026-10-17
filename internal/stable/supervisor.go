@@ -2881,9 +2881,11 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 	if err != nil {
 		child.mu.Lock()
 		child.exitCode = 1
+		// Witness the observed post-write value, not the planned exit.
+		witnessedExit := child.exitCode
 		child.mu.Unlock()
 		if finalizeEffects != nil {
-			s.compareDeferredLifecycleEffects(child, finalizeEffects, []lifecycleEffect{{kind: effectRecordWorkflowExit, exitCode: 1}}, signalWorkflowFinalized)
+			s.compareDeferredLifecycleEffects(child, finalizeEffects, []lifecycleEffect{{kind: effectRecordWorkflowExit, exitCode: witnessedExit}}, signalWorkflowFinalized)
 		}
 		if child.sentinelFile != "" {
 			cli.WriteSentinel(child.sentinelFile, 1, child.sessionID(), "error", s.runID, s.stderrWriter())
@@ -2892,9 +2894,10 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 	}
 	child.mu.Lock()
 	child.exitCode = result.ExitCode
+	witnessedExit := child.exitCode
 	child.mu.Unlock()
 	if finalizeEffects != nil {
-		s.compareDeferredLifecycleEffects(child, finalizeEffects, []lifecycleEffect{{kind: effectRecordWorkflowExit, exitCode: result.ExitCode}}, signalWorkflowFinalized)
+		s.compareDeferredLifecycleEffects(child, finalizeEffects, []lifecycleEffect{{kind: effectRecordWorkflowExit, exitCode: witnessedExit}}, signalWorkflowFinalized)
 	}
 	child.stashWorkflowTerminalMarker(result.MarkerDirective, result.MarkerLabel)
 
@@ -3214,9 +3217,11 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 	if err != nil {
 		child.mu.Lock()
 		child.exitCode = 1
+		// Witness the observed post-write value, not the planned exit.
+		witnessedExit := child.exitCode
 		child.mu.Unlock()
 		if finalizeEffects != nil {
-			s.compareDeferredLifecycleEffects(child, finalizeEffects, []lifecycleEffect{{kind: effectRecordWorkflowExit, exitCode: 1}}, signalWorkflowFinalized)
+			s.compareDeferredLifecycleEffects(child, finalizeEffects, []lifecycleEffect{{kind: effectRecordWorkflowExit, exitCode: witnessedExit}}, signalWorkflowFinalized)
 		}
 		if child.sentinelFile != "" {
 			cli.WriteSentinel(child.sentinelFile, 1, child.sessionID(), "error", s.runID, s.stderrWriter())
@@ -3225,9 +3230,10 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 	}
 	child.mu.Lock()
 	child.exitCode = result.ExitCode
+	witnessedExit := child.exitCode
 	child.mu.Unlock()
 	if finalizeEffects != nil {
-		s.compareDeferredLifecycleEffects(child, finalizeEffects, []lifecycleEffect{{kind: effectRecordWorkflowExit, exitCode: result.ExitCode}}, signalWorkflowFinalized)
+		s.compareDeferredLifecycleEffects(child, finalizeEffects, []lifecycleEffect{{kind: effectRecordWorkflowExit, exitCode: witnessedExit}}, signalWorkflowFinalized)
 	}
 	child.stashWorkflowTerminalMarker(result.MarkerDirective, result.MarkerLabel)
 
@@ -4892,6 +4898,7 @@ func (child *childRuntime) complete(s *Supervisor, boundary completionBoundary) 
 			// stage.
 			child.completed = true
 			child.settleTurnLocked()
+			// Repeats never reach this witness: doneOnce guards complete() and a repeat predicts no effects.
 			w.locked = append(w.locked, lifecycleEffect{kind: effectSettleTurnWaiters})
 			return w
 		})
