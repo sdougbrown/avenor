@@ -58,7 +58,6 @@ func TestRunLoopChildTimeoutProducesTimeoutSentinel(t *testing.T) {
 
 	sentinel := filepath.Join(t.TempDir(), "sentinel.env")
 	child := &childRuntime{id: "rt_loop_timeout", done: make(chan struct{}), promptCh: make(chan struct{}, 1), eventWriter: stableTestSink{}, sentinelFile: sentinel, cancelFn: func() {}}
-	sup.runtimes[child.id] = child
 	cfg := &looprunner.LoopConfig{MaxIterations: 1, Loop: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
 	if child.done == nil {
 		child.done = make(chan struct{})
@@ -68,6 +67,7 @@ func TestRunLoopChildTimeoutProducesTimeoutSentinel(t *testing.T) {
 	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	go sup.runLoopChild(context.Background(), child, cfg, 1, 0, "", "", "", "", "", "")
 
 	select {
@@ -96,7 +96,6 @@ func TestRunChildTimeoutProducesTimeoutSentinel(t *testing.T) {
 
 	sentinel := filepath.Join(t.TempDir(), "sentinel.env")
 	child := &childRuntime{id: "rt_run_timeout", done: make(chan struct{}), promptCh: make(chan struct{}, 1), eventWriter: stableTestSink{}, sentinelFile: sentinel, cancelFn: func() {}, provider: provider}
-	sup.runtimes[child.id] = child
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
@@ -105,6 +104,7 @@ func TestRunChildTimeoutProducesTimeoutSentinel(t *testing.T) {
 	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	go sup.runChild(context.Background(), child, "work", 1, 0)
 
 	select {
@@ -131,7 +131,6 @@ func TestRunTeamChildTimeoutProducesTimeoutSentinel(t *testing.T) {
 
 	sentinel := filepath.Join(t.TempDir(), "sentinel.env")
 	child := &childRuntime{id: "rt_team_timeout", done: make(chan struct{}), promptCh: make(chan struct{}, 1), eventWriter: stableTestSink{}, sentinelFile: sentinel, cancelFn: func() {}}
-	sup.runtimes[child.id] = child
 	cfg := &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
 	if child.done == nil {
 		child.done = make(chan struct{})
@@ -141,6 +140,7 @@ func TestRunTeamChildTimeoutProducesTimeoutSentinel(t *testing.T) {
 	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	go sup.runTeamChild(context.Background(), child, cfg, 1, 0, "", "", "", "", "", "")
 
 	select {

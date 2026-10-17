@@ -42,6 +42,11 @@ func initializeTestLifecycle(t testing.TB, child *childRuntime, opts testLifecyc
 		// channel so cleanup can join it.
 		child.done = make(chan struct{})
 	}
+	if child.runDone == nil {
+		// The run-goroutine join point is created alongside done; closeRunDone
+		// makes closing it idempotent for fixtures without a run goroutine.
+		child.runDone = make(chan struct{})
+	}
 	class := opts.class
 	if class == directAttemptClass && opts.attempts > 1 {
 		t.Fatalf("test child %s: direct attempt class cannot carry %d attempts", child.id, opts.attempts)
@@ -164,6 +169,8 @@ func joinTestChildCompletion(t testing.TB, child *childRuntime) {
 		case <-time.After(5 * time.Second):
 			t.Errorf("lifecycle cleanup: child %s run goroutine still running after teardown", child.id)
 		}
+	} else {
+		t.Errorf("lifecycle cleanup: child %s has no run-goroutine join point", child.id)
 	}
 }
 

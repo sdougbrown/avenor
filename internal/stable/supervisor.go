@@ -2452,7 +2452,11 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			// alone — the prediction never gates the dequeue, and a transition
 			// error leaves the legacy path untouched. The branch legacy took
 			// (probe resume or direct end) is the witness compared below.
-			probeEligible := ctx.Err() == nil && !child.permissionDeciderRun && !conflict
+			// Sample the context once for both the eligibility decision and the
+			// probe signal: a cancellation between the two reads must not show
+			// the machine a different context state than the branch legacy took.
+			probeCtxErr := ctx.Err()
+			probeEligible := probeCtxErr == nil && !child.permissionDeciderRun && !conflict
 			probeResumed := false
 			var probeNext string
 			if probeEligible {
@@ -2483,7 +2487,7 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 					kind:               signalPromptContinuation,
 					class:              child.lc.class,
 					probeKind:          probeTerminalPrompt,
-					terminalContextErr: ctx.Err(),
+					terminalContextErr: probeCtxErr,
 					promptConsumed:     probeResumed,
 					exitCode:           result.exitCode,
 					sentinelReason:     stopReason,
@@ -2671,6 +2675,21 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 		MaxRetries: maxRetries,
 		Broker:     s.broker,
 		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, iteration int, prevSessionID string) (looprunner.PhaseAttemptResult, error) {
+			// A prepared attempt that returns before beginWorkflowAttempt
+			// incremented activity never started: record the pre-activity
+			// failure, including on panic.
+			attemptActive := false
+			defer func() {
+				if attemptActive {
+					return
+				}
+				child.mu.Lock()
+				_, _, startFailErr := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptStartFailed, class: child.lc.class}, nil)
+				child.mu.Unlock()
+				if startFailErr != nil {
+					s.reportLifecycleError(child, startFailErr)
+				}
+			}()
 			child.mu.Lock()
 			// Shadow: attemptPreparing clears the phase presentation even while
 			// another parallel attempt runs; the legacy clear is its mutation.
@@ -2784,6 +2803,9 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 			defer s.releaseSessionAttempt(attempt)
 			identity = attempt.identity
 			providerLifecycle = s.beginWorkflowAttempt(child, provider, session, identity)
+			// Activity is counted from here on; later failures unwind through the
+			// attempt's own settle path, not this pre-activity signal.
+			attemptActive = true
 			providerTurn, admitted := s.beginChildProviderTurn(child, providerLifecycle)
 			if !admitted {
 				s.closeChildProvider(child, providerLifecycle)
@@ -3007,6 +3029,21 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 		MaxRetries: maxRetries,
 		Broker:     s.broker,
 		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (teamrunner.PhaseAttemptResult, error) {
+			// A prepared attempt that returns before beginWorkflowAttempt
+			// incremented activity never started: record the pre-activity
+			// failure, including on panic.
+			attemptActive := false
+			defer func() {
+				if attemptActive {
+					return
+				}
+				child.mu.Lock()
+				_, _, startFailErr := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptStartFailed, class: child.lc.class}, nil)
+				child.mu.Unlock()
+				if startFailErr != nil {
+					s.reportLifecycleError(child, startFailErr)
+				}
+			}()
 			child.mu.Lock()
 			// Shadow: attemptPreparing clears the phase presentation even while
 			// another parallel attempt runs; the legacy clear is its mutation.
@@ -3118,6 +3155,9 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 			defer s.releaseSessionAttempt(attempt)
 			identity = attempt.identity
 			providerLifecycle = s.beginWorkflowAttempt(child, provider, session, identity)
+			// Activity is counted from here on; later failures unwind through the
+			// attempt's own settle path, not this pre-activity signal.
+			attemptActive = true
 			providerTurn, admitted := s.beginChildProviderTurn(child, providerLifecycle)
 			if !admitted {
 				s.closeChildProvider(child, providerLifecycle)

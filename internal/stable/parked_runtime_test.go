@@ -544,13 +544,13 @@ func TestWaitForNextPromptTimerReapsWithoutPrompt(t *testing.T) {
 	if ok || prompt != "" {
 		t.Fatalf("waitForNextPrompt = (%q, %v), want a reap with no prompt", prompt, ok)
 	}
-	// No run goroutine: finish the modeled lifecycle explicitly after the
-	// wait observation.
-	finishSyntheticChildLifecycle(sup, c)
 	c.mu.Lock()
 	completed := c.completed
 	c.mu.Unlock()
 	if !completed {
 		t.Fatal("timer branch must mark the runtime completed so late prompts are rejected")
 	}
+	// No run goroutine: finish the modeled lifecycle explicitly after the
+	// wait observation.
+	finishSyntheticChildLifecycle(sup, c)
 }

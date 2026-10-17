@@ -89,9 +89,9 @@ func TestStableHandlerNoRuntimes(t *testing.T) {
 func TestStableHandlerListIncludesStartedAt(t *testing.T) {
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-stable-started-at.sock", MaxRuntimes: 4})
 	statusChild := &childRuntime{id: "rt_1", startedAt: 123456789, done: make(chan struct{})}
-	sup.runtimes["rt_1"] = statusChild
 	initializeTestLifecycle(t, statusChild, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, statusChild)
+	sup.runtimes["rt_1"] = statusChild
 	finishUnrunChildAtCleanup(t, sup, statusChild)
 
 	list := sup.List()
@@ -418,13 +418,14 @@ func TestActiveRuntimeCountIgnoresCompletedHistory(t *testing.T) {
 		ControlSocket: "/tmp/test-active-count.sock",
 		MaxRuntimes:   1,
 	})
-	sup.runtimes["rt_done"] = &childRuntime{
+	doneChild := &childRuntime{
 		id:        "rt_done",
 		done:      make(chan struct{}),
 		promptCh:  make(chan struct{}, 1),
 		completed: true,
 	}
-	initializeCompletedTestChild(t, sup, sup.runtimes["rt_done"])
+	initializeCompletedTestChild(t, sup, doneChild)
+	sup.runtimes["rt_done"] = doneChild
 
 	if got := sup.activeRuntimeCount(); got != 0 {
 		t.Fatalf("activeRuntimeCount() = %d, want 0 for completed history", got)
@@ -436,13 +437,14 @@ func TestRuntimePromptRejectsCompletedRuntime(t *testing.T) {
 		ControlSocket: "/tmp/test-prompt-completed.sock",
 		MaxRuntimes:   1,
 	})
-	sup.runtimes["rt_done"] = &childRuntime{
+	doneChild := &childRuntime{
 		id:        "rt_done",
 		done:      make(chan struct{}),
 		promptCh:  make(chan struct{}, 1),
 		completed: true,
 	}
-	initializeCompletedTestChild(t, sup, sup.runtimes["rt_done"])
+	initializeCompletedTestChild(t, sup, doneChild)
+	sup.runtimes["rt_done"] = doneChild
 
 	if err := sup.RuntimePrompt("rt_done", "hello", ""); err == nil {
 		t.Fatal("RuntimePrompt on completed runtime should error")
@@ -463,9 +465,9 @@ func TestRuntimeInterruptAndPromptCancelsTurnNotRuntime(t *testing.T) {
 		cancelFn:    func() { runtimeCancelled = true },
 		interruptFn: func() { turnInterrupted = true },
 	}
-	sup.runtimes["rt_1"] = interruptChild
 	initializeTestLifecycle(t, interruptChild, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, interruptChild)
+	sup.runtimes["rt_1"] = interruptChild
 	finishUnrunChildAtCleanup(t, sup, interruptChild)
 
 	if err := sup.RuntimeInterruptAndPrompt("rt_1", "replacement", false); err != nil {
@@ -545,7 +547,6 @@ func TestStableChildCancelsProviderOnNonCleanSessionWait(t *testing.T) {
 		done:         make(chan struct{}),
 		promptCh:     make(chan struct{}, 1),
 	}
-	sup.runtimes[child.id] = child
 
 	if child.done == nil {
 		child.done = make(chan struct{})
@@ -555,6 +556,7 @@ func TestStableChildCancelsProviderOnNonCleanSessionWait(t *testing.T) {
 	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	go sup.runChild(ctx, child, "close without session.end", 0, 0)
 	waitForStableDone(t, child)
 
@@ -658,7 +660,6 @@ func TestRunChildAllowsNewPhaseAfterSameRuntimeFollowUp(t *testing.T) {
 		promptCh:    make(chan struct{}, 1),
 		cancelFn:    cancel,
 	}
-	sup.runtimes[child.id] = child
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
@@ -667,6 +668,7 @@ func TestRunChildAllowsNewPhaseAfterSameRuntimeFollowUp(t *testing.T) {
 	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	go sup.runChild(ctx, child, "first", 0, 0)
 
 	waitForStableChild(t, child, func(active bool, completed bool, phase, phaseLabel string) bool {
@@ -709,7 +711,6 @@ func TestRunChildParksSuccessfulTurnWithDonePhase(t *testing.T) {
 		promptCh:    make(chan struct{}, 1),
 		cancelFn:    cancel,
 	}
-	sup.runtimes[child.id] = child
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
@@ -718,6 +719,7 @@ func TestRunChildParksSuccessfulTurnWithDonePhase(t *testing.T) {
 	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	go sup.runChild(ctx, child, "park", 0, 0)
 
 	waitForStableChild(t, child, func(active bool, completed bool, phase, phaseLabel string) bool {
@@ -768,7 +770,6 @@ func TestRunChildClearsPhaseDuringRetryBackoff(t *testing.T) {
 		phase:       "done",
 		cancelFn:    cancel,
 	}
-	sup.runtimes[child.id] = child
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
@@ -777,6 +778,7 @@ func TestRunChildClearsPhaseDuringRetryBackoff(t *testing.T) {
 	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	go sup.runChild(ctx, child, "retry", 0, 1)
 	select {
 	case <-provider.emitted:
@@ -805,7 +807,6 @@ func TestRunLoopChildClearsPhaseDuringRetryBackoff(t *testing.T) {
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-loop-retry-phase.sock", MaxRuntimes: 1})
 	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
 	child := &childRuntime{id: "rt_loop_retry_phase", done: make(chan struct{}), promptCh: make(chan struct{}, 1), eventWriter: stableTestSink{}, phase: "done", cancelFn: func() {}}
-	sup.runtimes[child.id] = child
 	cfg := &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
 	if child.done == nil {
 		child.done = make(chan struct{})
@@ -815,6 +816,7 @@ func TestRunLoopChildClearsPhaseDuringRetryBackoff(t *testing.T) {
 	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	go sup.runLoopChild(context.Background(), child, cfg, 0, 1, "", "", "", "", "", "")
 	select {
 	case <-provider.emitted:
@@ -853,7 +855,6 @@ func TestRunTeamChildClearsPhaseDuringRetryBackoff(t *testing.T) {
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-team-retry-phase.sock", MaxRuntimes: 1})
 	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
 	child := &childRuntime{id: "rt_team_retry_phase", done: make(chan struct{}), promptCh: make(chan struct{}, 1), eventWriter: stableTestSink{}, phase: "done", cancelFn: func() {}}
-	sup.runtimes[child.id] = child
 	cfg := &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
 	if child.done == nil {
 		child.done = make(chan struct{})
@@ -863,6 +864,7 @@ func TestRunTeamChildClearsPhaseDuringRetryBackoff(t *testing.T) {
 	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	go sup.runTeamChild(context.Background(), child, cfg, 0, 1, "", "", "", "", "", "unknown-backend")
 	select {
 	case <-provider.emitted:
@@ -897,7 +899,6 @@ func TestRunLoopChildClearsStalePhaseOnAttemptSetupFailure(t *testing.T) {
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-loop-setup-phase.sock", MaxRuntimes: 1})
 	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
 	child := &childRuntime{id: "rt_loop_setup_phase", done: make(chan struct{}), promptCh: make(chan struct{}, 1), eventWriter: stableTestSink{}, phase: "done", phaseLabel: "stale", cancelFn: func() {}}
-	sup.runtimes[child.id] = child
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
@@ -906,6 +907,7 @@ func TestRunLoopChildClearsStalePhaseOnAttemptSetupFailure(t *testing.T) {
 	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	sup.runLoopChild(context.Background(), child, &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}, 0, 0, "", "", "", "", "", "")
 	child.mu.Lock()
 	phase, phaseLabel := child.phase, child.phaseLabel
@@ -923,7 +925,6 @@ func TestRunTeamChildClearsStalePhaseOnAttemptSetupFailure(t *testing.T) {
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-team-setup-phase.sock", MaxRuntimes: 1})
 	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
 	child := &childRuntime{id: "rt_team_setup_phase", done: make(chan struct{}), promptCh: make(chan struct{}, 1), eventWriter: stableTestSink{}, phase: "done", phaseLabel: "stale", cancelFn: func() {}}
-	sup.runtimes[child.id] = child
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
@@ -932,6 +933,7 @@ func TestRunTeamChildClearsStalePhaseOnAttemptSetupFailure(t *testing.T) {
 	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	sup.runTeamChild(context.Background(), child, &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}, 0, 0, "", "", "", "", "", "unknown-backend")
 	child.mu.Lock()
 	phase, phaseLabel := child.phase, child.phaseLabel
@@ -1140,23 +1142,23 @@ func TestShutdownTimeoutDoesNotHangWithMultipleStuckRuntimes(t *testing.T) {
 		MaxRuntimes:     2,
 		ShutdownTimeout: 10 * time.Millisecond,
 	})
-	sup.runtimes["rt_1"] = &childRuntime{
+	lcFixtureChild := &childRuntime{
 		id:       "rt_1",
 		done:     make(chan struct{}),
 		cancelFn: func() {},
 	}
-	lcFixtureChild := sup.runtimes["rt_1"]
 	initializeTestLifecycle(t, lcFixtureChild, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, lcFixtureChild)
+	sup.runtimes["rt_1"] = lcFixtureChild
 	finishUnrunChildAtCleanup(t, sup, lcFixtureChild)
-	sup.runtimes["rt_2"] = &childRuntime{
+	lcFixtureChild2 := &childRuntime{
 		id:       "rt_2",
 		done:     make(chan struct{}),
 		cancelFn: func() {},
 	}
-	lcFixtureChild2 := sup.runtimes["rt_2"]
 	initializeTestLifecycle(t, lcFixtureChild2, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, lcFixtureChild2)
+	sup.runtimes["rt_2"] = lcFixtureChild2
 	finishUnrunChildAtCleanup(t, sup, lcFixtureChild2)
 
 	done := make(chan struct{})
@@ -1218,7 +1220,6 @@ func assertShutdownWaitsForNestedChildCleanup(t *testing.T, kind string, run fun
 	}
 	sink := child.eventWriter.(*closeNotifyingSink)
 	sup.controlMu.Lock()
-	sup.runtimes[child.id] = child
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
@@ -1226,6 +1227,7 @@ func assertShutdownWaitsForNestedChildCleanup(t *testing.T, kind string, run fun
 	// attempt class is workflow (plan decision 5).
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	sup.permOptions[child.id+":req_cleanup"] = []any{"allow"}
 	sup.controlMu.Unlock()
 
@@ -1354,7 +1356,6 @@ func TestRunLoopChildCleansUpOnLooprunnerError(t *testing.T) {
 		eventWriter: sink,
 		cancelFn:    func() { cancelled = true },
 	}
-	sup.runtimes[child.id] = child
 
 	cfg := &looprunner.LoopConfig{
 		MaxIterations: 1,
@@ -1368,6 +1369,7 @@ func TestRunLoopChildCleansUpOnLooprunnerError(t *testing.T) {
 	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	sup.runLoopChild(context.Background(), child, cfg, 0, 0, "", "", "", "", "", "")
 
 	select {
@@ -1428,7 +1430,6 @@ func TestRunTeamChildCleansUpBrokerRuns(t *testing.T) {
 		eventWriter: sink,
 		cancelFn:    func() { cancelled = true },
 	}
-	sup.runtimes[child.id] = child
 
 	// Pre-register the child's broker run so the EnsureRun inside runTeamChild
 	// settles on this exact token.
@@ -1445,6 +1446,7 @@ func TestRunTeamChildCleansUpBrokerRuns(t *testing.T) {
 	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	sup.runTeamChild(context.Background(), child, cfg, 0, 0, "", "", "", "", "", "unknown-backend")
 
 	select {
@@ -1524,14 +1526,14 @@ func TestRuntimeAnswerPermissionRejectsRuntimeWithoutActiveSession(t *testing.T)
 		ControlSocket: "/tmp/test-loop-answer-no-session.sock",
 		MaxRuntimes:   1,
 	})
-	sup.runtimes["rt_loop"] = &childRuntime{
+	lcFixtureChild := &childRuntime{
 		id:       "rt_loop",
 		done:     make(chan struct{}),
 		promptCh: make(chan struct{}, 1),
 	}
-	lcFixtureChild := sup.runtimes["rt_loop"]
 	initializeTestLifecycle(t, lcFixtureChild, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, lcFixtureChild)
+	sup.runtimes["rt_loop"] = lcFixtureChild
 	finishUnrunChildAtCleanup(t, sup, lcFixtureChild)
 
 	if err := sup.RuntimeAnswerPermission("rt_loop", "req_1", "allow", ""); err == nil {
@@ -1598,7 +1600,6 @@ func TestWorkflowRunChildRecordsSucceededTermination(t *testing.T) {
 	}
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-wf-success.sock", MaxRuntimes: 1})
 	defer func() { _ = sup.broker.Stop() }()
-	sup.runtimes[child.id] = child
 
 	var mu sync.Mutex
 	var called bool
@@ -1618,6 +1619,7 @@ func TestWorkflowRunChildRecordsSucceededTermination(t *testing.T) {
 	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	go sup.runChild(ctx, child, "hello", 0, 0)
 	waitForStableDone(t, child)
 
@@ -1644,9 +1646,9 @@ func TestRuntimeStatusSurfacesPhaseAndPermission(t *testing.T) {
 		active:      true,
 		autoApprove: true,
 	}
-	sup.runtimes[child.id] = child
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execRunning, attempts: 1, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	finishUnrunChildAtCleanup(t, sup, child)
 
 	writer := &runtimeFanoutWriter{
@@ -1804,9 +1806,9 @@ func TestListRuntimesSurfacesPhaseAndPermission(t *testing.T) {
 		autoApprove:       true,
 		permission:        map[string]any{"request_id": "req_99"},
 	}
-	sup.runtimes[child.id] = child
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execRunning, attempts: 1, class: directAttemptClass, phase: child.phase, phaseLabel: child.phaseLabel})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	finishUnrunChildAtCleanup(t, sup, child)
 
 	listAny := sup.List()
@@ -1850,12 +1852,12 @@ func TestRuntimeStatusAndListRuntimesSurfaceAutoApproveFalse(t *testing.T) {
 		done:     make(chan struct{}),
 		promptCh: make(chan struct{}, 1),
 	}
-	sup.runtimes[child.id] = child
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	finishUnrunChildAtCleanup(t, sup, child)
 
 	statusAny, err := sup.RuntimeStatus(child.id)
@@ -1892,12 +1894,12 @@ func TestRuntimeStatusMetadataIncludesUsageFinalOutputAndStamp(t *testing.T) {
 		done:         make(chan struct{}),
 		promptCh:     make(chan struct{}, 1),
 	}
-	sup.runtimes[child.id] = child
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	finishUnrunChildAtCleanup(t, sup, child)
 
 	sink := &metadataCaptureSink{}
@@ -2002,10 +2004,10 @@ func TestStableResultOverControlSocketUsesRuntimeIDAndPreservesLargeOutput(t *te
 	socket := filepath.Join(newStableSocketTestDir(t, "stable-result"), "control.sock")
 	sup := newTestSupervisor(t, Config{ControlSocket: socket, MaxRuntimes: 1})
 	complete := strings.Repeat("é", 40_000) // 80 KiB UTF-8, beyond Scanner's 64 KiB default.
-	sup.runtimes["rt_large"] = &childRuntime{id: "rt_large", fullFinalOutput: complete}
-	lcFixtureChild := sup.runtimes["rt_large"]
+	lcFixtureChild := &childRuntime{id: "rt_large", fullFinalOutput: complete}
 	initializeTestLifecycle(t, lcFixtureChild, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, lcFixtureChild)
+	sup.runtimes["rt_large"] = lcFixtureChild
 	finishUnrunChildAtCleanup(t, sup, lcFixtureChild)
 	if err := sup.control.Start(socket); err != nil {
 		t.Fatalf("start control: %v", err)
@@ -2903,7 +2905,6 @@ func TestRunChildAttemptWiresControlServerForClaims(t *testing.T) {
 			},
 		},
 	}
-	sup.runtimes["rt_claim"] = child
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -2915,6 +2916,7 @@ func TestRunChildAttemptWiresControlServerForClaims(t *testing.T) {
 	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes["rt_claim"] = child
 	finishUnrunChildAtCleanup(t, sup, child)
 	// Join the attempt goroutine before cleanup: the cleanup finish helper
 	// must not race the attempt defer.
@@ -3001,7 +3003,6 @@ func TestRunLoopChildWiresControlServerForClaims(t *testing.T) {
 		permClaimTimeout: 2 * time.Second,
 		cancelFn:         func() {},
 	}
-	sup.runtimes[child.id] = child
 
 	// Inject the controlClaimProvider into the provider construction seam.
 	startOptions := make(chan runtime.StartOptions, 1)
@@ -3025,6 +3026,7 @@ func TestRunLoopChildWiresControlServerForClaims(t *testing.T) {
 	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	go sup.runLoopChild(ctx, child, cfg, 0, 0, "", "cloud", "", "", "", "")
 
 	// Wait for the child to complete (with timeout).
@@ -3116,7 +3118,6 @@ func TestRunTeamChildWiresControlServerForClaims(t *testing.T) {
 		permClaimTimeout: 2 * time.Second,
 		cancelFn:         func() {},
 	}
-	sup.runtimes[child.id] = child
 
 	// Inject the controlClaimProvider into the provider construction seam.
 	startOptions := make(chan runtime.StartOptions, 1)
@@ -3139,6 +3140,7 @@ func TestRunTeamChildWiresControlServerForClaims(t *testing.T) {
 	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	go sup.runTeamChild(ctx, child, cfg, 0, 0, "", "cloud", "", "", "", "unknown-backend")
 
 	// Wait for the child to complete (with timeout).
@@ -3185,16 +3187,16 @@ func TestAnswerPermissionRejectsUnknownOptionIDWithoutConsumingCache(t *testing.
 		PermissionClaimTimeout: 5 * time.Second,
 	})
 	provider := &permRecordingProvider{}
-	sup.runtimes["rt_unknown"] = &childRuntime{
+	lcFixtureChild := &childRuntime{
 		id:       "rt_unknown",
 		provider: provider,
 		session:  runtime.Session{SessionID: "ses_unknown"},
 		done:     make(chan struct{}),
 		promptCh: make(chan struct{}, 1),
 	}
-	lcFixtureChild := sup.runtimes["rt_unknown"]
 	initializeTestLifecycle(t, lcFixtureChild, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, lcFixtureChild)
+	sup.runtimes["rt_unknown"] = lcFixtureChild
 	finishUnrunChildAtCleanup(t, sup, lcFixtureChild)
 	cachePermissionOptionsThroughFanout(t, sup, "rt_unknown", events.Event{
 		Event: "permission.request",
@@ -3221,10 +3223,10 @@ func TestAnswerPermissionRejectsUnknownOptionIDWithoutConsumingCache(t *testing.
 func TestAnswerPermissionRequiresWriteInBeforeConsumingClaim(t *testing.T) {
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-answer-write-in.sock", MaxRuntimes: 1, PermissionClaimTimeout: 5 * time.Second})
 	provider := &permRecordingProvider{}
-	sup.runtimes["rt_write"] = &childRuntime{id: "rt_write", provider: provider, session: runtime.Session{SessionID: "ses_write"}, done: make(chan struct{}), promptCh: make(chan struct{}, 1)}
-	lcFixtureChild := sup.runtimes["rt_write"]
+	lcFixtureChild := &childRuntime{id: "rt_write", provider: provider, session: runtime.Session{SessionID: "ses_write"}, done: make(chan struct{}), promptCh: make(chan struct{}, 1)}
 	initializeTestLifecycle(t, lcFixtureChild, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, lcFixtureChild)
+	sup.runtimes["rt_write"] = lcFixtureChild
 	finishUnrunChildAtCleanup(t, sup, lcFixtureChild)
 	cachePermissionOptionsThroughFanout(t, sup, "rt_write", events.Event{Event: "permission.request", Fields: map[string]any{
 		"request_id": "req_write",
@@ -3257,16 +3259,16 @@ func TestAnswerPermissionUsesActiveControlClaim(t *testing.T) {
 		PermissionClaimTimeout: 5 * time.Second,
 	})
 	provider := &permRecordingProvider{}
-	sup.runtimes["rt_claim"] = &childRuntime{
+	lcFixtureChild := &childRuntime{
 		id:       "rt_claim",
 		provider: provider,
 		session:  runtime.Session{SessionID: "ses_claim"},
 		done:     make(chan struct{}),
 		promptCh: make(chan struct{}, 1),
 	}
-	lcFixtureChild := sup.runtimes["rt_claim"]
 	initializeTestLifecycle(t, lcFixtureChild, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, lcFixtureChild)
+	sup.runtimes["rt_claim"] = lcFixtureChild
 	finishUnrunChildAtCleanup(t, sup, lcFixtureChild)
 	cachePermissionOptionsThroughFanout(t, sup, "rt_claim", events.Event{
 		Event: "permission.request",
@@ -3316,9 +3318,9 @@ func TestAnswerPermissionScopesSameRequestIDByRuntime(t *testing.T) {
 			done:     make(chan struct{}),
 			promptCh: make(chan struct{}, 1),
 		}
-		sup.runtimes[runtimeID] = scopedChild
 		initializeTestLifecycle(t, scopedChild, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 		trackTestChildCompletion(t, sup, scopedChild)
+		sup.runtimes[runtimeID] = scopedChild
 		finishUnrunChildAtCleanup(t, sup, scopedChild)
 		cachePermissionOptionsThroughFanout(t, sup, runtimeID, events.Event{
 			Event: "permission.request",
@@ -3405,9 +3407,9 @@ func TestStableWaitersRouteSameRequestIDThroughScopedResolvers(t *testing.T) {
 			done:     make(chan struct{}),
 			promptCh: make(chan struct{}, 1),
 		}
-		sup.runtimes[w.runtimeID] = w.child
 		initializeTestLifecycle(t, w.child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 		trackTestChildCompletion(t, sup, w.child)
+		sup.runtimes[w.runtimeID] = w.child
 		finishUnrunChildAtCleanup(t, sup, w.child)
 	}
 	for _, w := range waiters {
@@ -3498,16 +3500,16 @@ func TestStableWaitersRouteSameRequestIDThroughScopedResolvers(t *testing.T) {
 func TestAnswerPermissionRejectsLateAnswerOwnedByFileResolver(t *testing.T) {
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-file-owned.sock", MaxRuntimes: 1})
 	provider := &permRecordingProvider{}
-	sup.runtimes["rt_file"] = &childRuntime{
+	lcFixtureChild := &childRuntime{
 		id:       "rt_file",
 		provider: provider,
 		session:  runtime.Session{SessionID: "ses_file"},
 		done:     make(chan struct{}),
 		promptCh: make(chan struct{}, 1),
 	}
-	lcFixtureChild := sup.runtimes["rt_file"]
 	initializeTestLifecycle(t, lcFixtureChild, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, lcFixtureChild)
+	sup.runtimes["rt_file"] = lcFixtureChild
 	finishUnrunChildAtCleanup(t, sup, lcFixtureChild)
 	cachePermissionOptionsThroughFanout(t, sup, "rt_file", events.Event{
 		Event: "permission.request",
@@ -3538,16 +3540,16 @@ func TestAnswerPermissionRejectsUnsupportedKindWithoutConsumingCache(t *testing.
 		PermissionClaimTimeout: 5 * time.Second,
 	})
 	provider := &permRecordingProvider{}
-	sup.runtimes["rt_kind_bad"] = &childRuntime{
+	lcFixtureChild := &childRuntime{
 		id:       "rt_kind_bad",
 		provider: provider,
 		session:  runtime.Session{SessionID: "ses_kind_bad"},
 		done:     make(chan struct{}),
 		promptCh: make(chan struct{}, 1),
 	}
-	lcFixtureChild := sup.runtimes["rt_kind_bad"]
 	initializeTestLifecycle(t, lcFixtureChild, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, lcFixtureChild)
+	sup.runtimes["rt_kind_bad"] = lcFixtureChild
 	finishUnrunChildAtCleanup(t, sup, lcFixtureChild)
 	cachePermissionOptionsThroughFanout(t, sup, "rt_kind_bad", events.Event{
 		Event: "permission.request",
@@ -3577,16 +3579,16 @@ func TestAnswerPermissionMapsAllowByKind(t *testing.T) {
 		PermissionClaimTimeout: 5 * time.Second,
 	})
 	provider := &permRecordingProvider{}
-	sup.runtimes["rt_kind"] = &childRuntime{
+	lcFixtureChild := &childRuntime{
 		id:       "rt_kind",
 		provider: provider,
 		session:  runtime.Session{SessionID: "ses_kind"},
 		done:     make(chan struct{}),
 		promptCh: make(chan struct{}, 1),
 	}
-	lcFixtureChild := sup.runtimes["rt_kind"]
 	initializeTestLifecycle(t, lcFixtureChild, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, lcFixtureChild)
+	sup.runtimes["rt_kind"] = lcFixtureChild
 	finishUnrunChildAtCleanup(t, sup, lcFixtureChild)
 	cachePermissionOptionsThroughFanout(t, sup, "rt_kind", events.Event{
 		Event: "permission.request",
@@ -3650,16 +3652,16 @@ func TestAnswerPermissionClearsCacheEntry(t *testing.T) {
 		PermissionClaimTimeout: 5 * time.Second,
 	})
 	provider := &permRecordingProvider{}
-	sup.runtimes["rt_clear"] = &childRuntime{
+	lcFixtureChild := &childRuntime{
 		id:       "rt_clear",
 		provider: provider,
 		session:  runtime.Session{SessionID: "ses_clear"},
 		done:     make(chan struct{}),
 		promptCh: make(chan struct{}, 1),
 	}
-	lcFixtureChild := sup.runtimes["rt_clear"]
 	initializeTestLifecycle(t, lcFixtureChild, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, lcFixtureChild)
+	sup.runtimes["rt_clear"] = lcFixtureChild
 	finishUnrunChildAtCleanup(t, sup, lcFixtureChild)
 	cachePermissionOptionsThroughFanout(t, sup, "rt_clear", events.Event{
 		Event: "permission.request",
@@ -3703,12 +3705,12 @@ func TestAnswerPermissionDirectPublishesThroughCanonicalFanout(t *testing.T) {
 		onPermissionReq: sup.cachePermissionOptions,
 	}
 	sup.setFanoutWriter(child, writer)
-	sup.runtimes[child.id] = child
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	finishUnrunChildAtCleanup(t, sup, child)
 
 	options := []any{map[string]any{"optionId": "allow", "kind": "allow"}}
@@ -3772,12 +3774,12 @@ func TestFailedDirectResponseWriteKeepsReusedIDTombstone(t *testing.T) {
 	}
 	writer := &runtimeFanoutWriter{base: sink, runtimeID: child.id, child: child, supervisor: sup, control: sup.control, metadata: cli.NewEventMetadata(sup.runID, "write-failure", child.id), onPermissionReq: sup.cachePermissionOptions}
 	sup.setFanoutWriter(child, writer)
-	sup.runtimes[child.id] = child
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	finishUnrunChildAtCleanup(t, sup, child)
 	options := []any{map[string]any{"optionId": "allow", "kind": "allow"}}
 	if !sup.control.PreparePermissionClaim(child.id, "reused", control.PermissionResolverNoResolver, options) {
@@ -3831,12 +3833,12 @@ func TestDirectPermissionResponseOrdersReusedRequestIDStatus(t *testing.T) {
 		onPermissionReq: sup.cachePermissionOptions,
 	}
 	sup.setFanoutWriter(child, writer)
-	sup.runtimes[child.id] = child
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	finishUnrunChildAtCleanup(t, sup, child)
 
 	oldOptions := []any{map[string]any{"optionId": "old", "kind": "allow"}}
@@ -3935,12 +3937,12 @@ func TestTerminationCancelsProviderBeforeJoiningContextIgnoringAnswer(t *testing
 	writer := &runtimeFanoutWriter{base: sink, runtimeID: child.id, child: child, supervisor: sup, control: sup.control, metadata: cli.NewEventMetadata(sup.runID, "cancel-before-join", child.id), onPermissionReq: sup.cachePermissionOptions}
 	sup.setFanoutWriter(child, writer)
 	lifecycle := sup.installChildProvider(child, provider, runtime.Session{SessionID: "ses_cancel_before_join"})
-	sup.runtimes[child.id] = child
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	finishUnrunChildAtCleanup(t, sup, child)
 	options := []any{map[string]any{"optionId": "allow", "kind": "allow"}}
 	if !sup.prepareChildPermissionClaim(context.Background(), child, lifecycle, writer, lifecycle.sessionID, child.id, "req_cancel_before_join", control.PermissionResolverNoResolver, options) {
@@ -4014,12 +4016,12 @@ func TestNormalChildTeardownWaitsForAcceptedDirectResponse(t *testing.T) {
 		onPermissionReq: sup.cachePermissionOptions,
 	}
 	sup.setFanoutWriter(child, writer)
-	sup.runtimes[child.id] = child
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	finishUnrunChildAtCleanup(t, sup, child)
 
 	options := []any{map[string]any{"optionId": "allow", "kind": "allow"}}
@@ -4086,12 +4088,12 @@ func TestCancellingLifecycleReleasesDirectAnswerAndWriterClose(t *testing.T) {
 		onPermissionReq: sup.cachePermissionOptions,
 	}
 	sup.setFanoutWriter(child, writer)
-	sup.runtimes[child.id] = child
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	finishUnrunChildAtCleanup(t, sup, child)
 
 	options := []any{map[string]any{"optionId": "allow", "kind": "allow"}}
@@ -4325,7 +4327,6 @@ func assertChildModeDrainsAcceptedDirectAnswer(t *testing.T, mode string) {
 		eventWriter:  sink,
 		autoApprove:  true,
 	}
-	sup.runtimes[child.id] = child
 	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
 
 	teardownWaiting := make(chan struct{})
@@ -4341,6 +4342,7 @@ func assertChildModeDrainsAcceptedDirectAnswer(t *testing.T, mode string) {
 		// relying on zero values.
 		initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 		trackTestChildCompletion(t, sup, child)
+		sup.runtimes[child.id] = child
 		go sup.runChild(ctx, child, "ask", 0, 0)
 	} else {
 		sup.beforeChildProviderCloseWait = func() { teardownOnce.Do(func() { close(teardownWaiting) }) }
@@ -4353,6 +4355,7 @@ func assertChildModeDrainsAcceptedDirectAnswer(t *testing.T, mode string) {
 			// relying on zero values.
 			initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 			trackTestChildCompletion(t, sup, child)
+			sup.runtimes[child.id] = child
 			go sup.runLoopChild(ctx, child, &looprunner.LoopConfig{
 				MaxIterations: 1,
 				Pre:           []phaseconfig.Phase{{Name: "ask", Prompt: "ask"}},
@@ -4366,6 +4369,7 @@ func assertChildModeDrainsAcceptedDirectAnswer(t *testing.T, mode string) {
 			// relying on zero values.
 			initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 			trackTestChildCompletion(t, sup, child)
+			sup.runtimes[child.id] = child
 			go sup.runTeamChild(ctx, child, &teamrunner.TeamConfig{
 				Team: []phaseconfig.Phase{{Name: "ask", Prompt: "ask"}},
 			}, 0, 0, "", "", "", "", "", "test")
@@ -4564,12 +4568,12 @@ func TestConcurrentTeamStreamsUseProviderAndWriterGenerationThatReservedClaim(t 
 		promptCh:     make(chan struct{}, 1),
 		eventWriter:  oldSink,
 	}
-	sup.runtimes[child.id] = child
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	finishUnrunChildAtCleanup(t, sup, child)
 	oldWriter := &runtimeFanoutWriter{base: oldSink, runtimeID: child.id, child: child, supervisor: sup, control: sup.control, metadata: cli.NewEventMetadata(sup.runID, "old-team-member", child.id)}
 	newWriter := &runtimeFanoutWriter{base: newSink, runtimeID: child.id, child: child, supervisor: sup, control: sup.control, metadata: cli.NewEventMetadata(sup.runID, "new-team-member", child.id)}
@@ -4615,16 +4619,16 @@ func TestAnswerPermissionNoResolverAllowsOnlyOneConcurrentProviderCall(t *testin
 	var releaseOnce sync.Once
 	releaseProvider := func() { releaseOnce.Do(func() { close(provider.release) }) }
 	t.Cleanup(releaseProvider)
-	sup.runtimes["rt_direct"] = &childRuntime{
+	lcFixtureChild := &childRuntime{
 		id:       "rt_direct",
 		provider: provider,
 		session:  runtime.Session{SessionID: "ses_direct"},
 		done:     make(chan struct{}),
 		promptCh: make(chan struct{}, 1),
 	}
-	lcFixtureChild := sup.runtimes["rt_direct"]
 	initializeTestLifecycle(t, lcFixtureChild, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, lcFixtureChild)
+	sup.runtimes["rt_direct"] = lcFixtureChild
 	finishUnrunChildAtCleanup(t, sup, lcFixtureChild)
 	cachePermissionOptionsThroughFanout(t, sup, "rt_direct", events.Event{
 		Event: "permission.request",
@@ -4697,16 +4701,16 @@ func TestAnswerPermissionNoResolverAllowsOnlyOneConcurrentProviderCall(t *testin
 func TestAnswerPermissionAlreadyResolvedWithoutOptionsComparesRepeat(t *testing.T) {
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-answer-resolved.sock", MaxRuntimes: 1})
 	provider := &permRecordingProvider{}
-	sup.runtimes["rt_resolved"] = &childRuntime{
+	lcFixtureChild := &childRuntime{
 		id:       "rt_resolved",
 		provider: provider,
 		session:  runtime.Session{SessionID: "ses_resolved"},
 		done:     make(chan struct{}),
 		promptCh: make(chan struct{}, 1),
 	}
-	lcFixtureChild := sup.runtimes["rt_resolved"]
 	initializeTestLifecycle(t, lcFixtureChild, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, lcFixtureChild)
+	sup.runtimes["rt_resolved"] = lcFixtureChild
 	finishUnrunChildAtCleanup(t, sup, lcFixtureChild)
 	if !sup.control.PreparePermissionClaim("rt_resolved", "req_resolved", control.PermissionResolverAutomatic, nil) {
 		t.Fatal("PreparePermissionClaim returned false")
@@ -4737,16 +4741,16 @@ func TestAnswerPermissionNoResolverRetriesAfterProviderError(t *testing.T) {
 		PermissionClaimTimeout: 5 * time.Second,
 	})
 	provider := &retryPermissionProvider{}
-	sup.runtimes["rt_retry"] = &childRuntime{
+	lcFixtureChild := &childRuntime{
 		id:       "rt_retry",
 		provider: provider,
 		session:  runtime.Session{SessionID: "ses_retry"},
 		done:     make(chan struct{}),
 		promptCh: make(chan struct{}, 1),
 	}
-	lcFixtureChild := sup.runtimes["rt_retry"]
 	initializeTestLifecycle(t, lcFixtureChild, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, lcFixtureChild)
+	sup.runtimes["rt_retry"] = lcFixtureChild
 	finishUnrunChildAtCleanup(t, sup, lcFixtureChild)
 	cachePermissionOptionsThroughFanout(t, sup, "rt_retry", events.Event{
 		Event: "permission.request",
@@ -5414,16 +5418,16 @@ func TestSendToParentTimeoutInjectsSyntheticPrompt(t *testing.T) {
 	child.session.SessionID = "ses_child"
 
 	sup.controlMu.Lock()
-	sup.runtimes[parent.id] = parent
-	sup.runtimes[child.id] = child
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
 	initializeTestLifecycle(t, parent, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, parent)
 	finishUnrunChildAtCleanup(t, sup, parent)
+	sup.runtimes[parent.id] = parent
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	finishUnrunChildAtCleanup(t, sup, child)
 	sup.controlMu.Unlock()
 
@@ -5452,16 +5456,16 @@ func TestSendToParentTimeoutCancelledByPrompt(t *testing.T) {
 	child.session.SessionID = "ses_child"
 
 	sup.controlMu.Lock()
-	sup.runtimes[parent.id] = parent
-	sup.runtimes[child.id] = child
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
 	initializeTestLifecycle(t, parent, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, parent)
 	finishUnrunChildAtCleanup(t, sup, parent)
+	sup.runtimes[parent.id] = parent
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	finishUnrunChildAtCleanup(t, sup, child)
 	sup.controlMu.Unlock()
 
@@ -5489,12 +5493,12 @@ func TestSendToParentDuplicateRequestIDIgnored(t *testing.T) {
 
 	child := &childRuntime{id: "rt_child", promptCh: make(chan struct{}, 1)}
 	sup.controlMu.Lock()
-	sup.runtimes[child.id] = child
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	finishUnrunChildAtCleanup(t, sup, child)
 	sup.pendingQuestions[child.id] = pendingChildQuestion{requestID: "cq_42"}
 	sup.controlMu.Unlock()
@@ -5838,7 +5842,6 @@ func TestLoopChildReceivesResolvedDefaultBackend(t *testing.T) {
 		eventWriter: stableTestSink{},
 		cancelFn:    func() {},
 	}
-	sup.runtimes[child.id] = child
 
 	cfg := &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
 
@@ -5852,6 +5855,7 @@ func TestLoopChildReceivesResolvedDefaultBackend(t *testing.T) {
 	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	go sup.runLoopChild(context.Background(), child, cfg, 0, 0, "", "", "", "", "", cli.DefaultBackend)
 
 	select {
@@ -5894,7 +5898,6 @@ func TestLoopChildReceivesExplicitBackend(t *testing.T) {
 		eventWriter: stableTestSink{},
 		cancelFn:    func() {},
 	}
-	sup.runtimes[child.id] = child
 
 	cfg := &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
 
@@ -5906,6 +5909,7 @@ func TestLoopChildReceivesExplicitBackend(t *testing.T) {
 	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	go sup.runLoopChild(context.Background(), child, cfg, 0, 0, "", "", "", "", "", "custom-backend")
 
 	select {
@@ -5949,7 +5953,6 @@ func TestTeamChildReceivesResolvedDefaultBackend(t *testing.T) {
 		eventWriter: stableTestSink{},
 		cancelFn:    func() {},
 	}
-	sup.runtimes[child.id] = child
 
 	cfg := &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
 
@@ -5961,6 +5964,7 @@ func TestTeamChildReceivesResolvedDefaultBackend(t *testing.T) {
 	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	go sup.runTeamChild(context.Background(), child, cfg, 0, 0, "", "", "", "", "", cli.DefaultBackend)
 
 	select {
@@ -6003,7 +6007,6 @@ func TestTeamChildReceivesExplicitBackend(t *testing.T) {
 		eventWriter: stableTestSink{},
 		cancelFn:    func() {},
 	}
-	sup.runtimes[child.id] = child
 
 	cfg := &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
 
@@ -6015,6 +6018,7 @@ func TestTeamChildReceivesExplicitBackend(t *testing.T) {
 	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	go sup.runTeamChild(context.Background(), child, cfg, 0, 0, "", "", "", "", "", "agy")
 
 	select {
@@ -6374,7 +6378,6 @@ func TestWorkflowRunChildRecordsFailedTermination(t *testing.T) {
 	}
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-wf-fail.sock", MaxRuntimes: 1})
 	defer func() { _ = sup.broker.Stop() }()
-	sup.runtimes[child.id] = child
 
 	var mu sync.Mutex
 	var called bool
@@ -6394,6 +6397,7 @@ func TestWorkflowRunChildRecordsFailedTermination(t *testing.T) {
 	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	go sup.runChild(ctx, child, "hello", 0, 0)
 	waitForStableDone(t, child)
 
@@ -6461,7 +6465,6 @@ func TestWorkflowLoopChildRecordsTermination(t *testing.T) {
 		eventWriter:  stableTestSink{},
 		cancelFn:     cancel,
 	}
-	sup.runtimes[child.id] = child
 
 	var mu sync.Mutex
 	var called bool
@@ -6481,6 +6484,7 @@ func TestWorkflowLoopChildRecordsTermination(t *testing.T) {
 	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	go sup.runLoopChild(ctx, child, &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}, 0, 0, "", "", "", "", "", "")
 	waitForStableDone(t, child)
 
@@ -6593,7 +6597,6 @@ func TestWorkflowTeamChildRecordsTermination(t *testing.T) {
 		eventWriter:  stableTestSink{},
 		cancelFn:     cancel,
 	}
-	sup.runtimes[child.id] = child
 
 	var mu sync.Mutex
 	var called bool
@@ -6613,6 +6616,7 @@ func TestWorkflowTeamChildRecordsTermination(t *testing.T) {
 	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	go sup.runTeamChild(ctx, child, &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}, 0, 0, "", "", "", "", "", "")
 	waitForStableDone(t, child)
 
@@ -7218,7 +7222,6 @@ func TestRunChildEventSeqMonotonicAcrossTurns(t *testing.T) {
 		promptCh:    make(chan struct{}, 1),
 		cancelFn:    cancel,
 	}
-	sup.runtimes[child.id] = child
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
@@ -7227,6 +7230,7 @@ func TestRunChildEventSeqMonotonicAcrossTurns(t *testing.T) {
 	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
 	go sup.runChild(ctx, child, "first", 0, 0)
 
 	waitForStableChild(t, child, func(active bool, completed bool, phase, phaseLabel string) bool {
