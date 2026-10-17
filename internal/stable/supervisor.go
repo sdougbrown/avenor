@@ -5351,12 +5351,13 @@ func (w *runtimeFanoutWriter) writeLocked(ev events.Event, diagnostics *[]error)
 		switch presentation.Event {
 		case "agent.status":
 			if phase, _ := presentation.Fields["phase"].(string); phase != "" && w.child.phase != "done" {
-				// The adapter owns the agent-status presentation write; the
-				// label is only replaced when nonempty.
+				// The adapter owns the agent-status presentation write; the caller's
+				// done guard is the only dedup point. The label is only replaced
+				// when nonempty.
 				label, _ := presentation.Fields["label"].(string)
 				_, _, statusErr := w.supervisor.applyLifecycle(w.child, lifecycleSignal{
 					kind: signalAgentStatusObserved, class: w.child.lc.class,
-					phase: phase, label: label, presentationWasDone: w.child.phase == "done",
+					phase: phase, label: label,
 				})
 				if statusErr != nil {
 					*diagnostics = append(*diagnostics, statusErr)

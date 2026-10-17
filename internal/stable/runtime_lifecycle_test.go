@@ -619,15 +619,6 @@ func TestRuntimeLifecycleMatrixRows(t *testing.T) {
 			},
 		},
 		{
-			name:  "agent status observed with phase and done presentation emits nothing",
-			start: idleDirect(),
-			signal: lifecycleSignal{
-				kind: signalAgentStatusObserved, phase: "running", label: "next",
-				presentationWasDone: true,
-			},
-			want: idleDirect(),
-		},
-		{
 			name:  "agent status observed with phase emits presentation write",
 			start: idleDirect(),
 			signal: lifecycleSignal{

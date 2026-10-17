@@ -286,9 +286,8 @@ type lifecycleSignal struct {
 	idleContextErr     error
 
 	// agentStatusObserved snapshot, sampled under child.mu.
-	phase               string
-	label               string
-	presentationWasDone bool
+	phase string
+	label string
 
 	// idleContextEnded carries caller-normalized reason/exitCode computed with
 	// the existing deadline/error mapping.
@@ -986,10 +985,10 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 		)
 
 	case signalAgentStatusObserved:
-		// Any valid state. The presentation write is
-		// emitted only when the phase is nonempty and presentation was not
-		// already done; nonempty labels replace, empty labels retain.
-		if sig.phase != "" && !sig.presentationWasDone {
+		// Any valid state. The presentation write is emitted only when the
+		// phase is nonempty; the caller's guard already deduplicates a done
+		// presentation. Nonempty labels replace, empty labels retain.
+		if sig.phase != "" {
 			eff = append(eff, lifecycleEffect{kind: effectSetAgentPresentation, phase: sig.phase, label: sig.label})
 		}
 
