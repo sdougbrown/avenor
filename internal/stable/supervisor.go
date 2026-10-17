@@ -3598,8 +3598,8 @@ func (s *Supervisor) endWorkflowAttempt(child *childRuntime, provider runtime.Pr
 }
 
 // finalizeWorkflowChild resets the workflow child's activity to the finalized
-// state and settles its waiters. The caller writes the child's exit code after
-// this returns.
+// state and settles its waiters. On paths that record an exit code, the caller
+// writes it after this returns; panic teardown writes none.
 func (s *Supervisor) finalizeWorkflowChild(child *childRuntime, final workflowSession) {
 	child.mu.Lock()
 	// The adapter owns workflowFinalized: it resets the count, settles the

@@ -303,6 +303,12 @@ func (s *Supervisor) executeShutdownDeferredEffects(child *childRuntime, eff []l
 			if cancel != nil {
 				cancel()
 			}
+		default:
+			// Owned kinds already ran under the caller's locks; only a kind in
+			// neither set is a machine bug.
+			if !ownedLifecycleEffect(e.kind) {
+				s.reportLifecycleError(child, fmt.Errorf("lifecycle: unhandled effect kind %d", e.kind))
+			}
 		}
 	}
 }

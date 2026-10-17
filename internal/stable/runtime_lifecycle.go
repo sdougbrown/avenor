@@ -126,9 +126,11 @@ const (
 func (b completionBoundary) valid() bool { return b >= afterRunTeardown && b <= afterSpawnRollback }
 
 // lifecycleState is the closed lifecycle state struct. Dimensions outside it
-// remain on the child and are written only by effects. They cover phase/label
-// presentation, exitCode, lastStopReason, prompt queues and channels,
-// waiters, provider resources, output, permission state, and decider data.
+// remain on the child. They cover phase/label presentation, exitCode,
+// lastStopReason, prompt queues and channels, waiters, provider resources,
+// output, permission state, and decider data. Effects write presentation and
+// the direct-run exit data; the workflow runners write their exit code after
+// finalization.
 type lifecycleState struct {
 	exec       execState
 	attempts   int
