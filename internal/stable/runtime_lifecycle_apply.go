@@ -328,31 +328,32 @@ func (s *Supervisor) reportLifecycleError(child *childRuntime, err error) {
 // in runChild's owned paths and the idle-context end. The failed prediction
 // leaves external waiters: a sentinel consumer, a held tree token, a spawned
 // peer waiting for capacity, an unsettled turn waiter. It also leaves a
-// machine state teardown would reject. The fail-safe therefore first applies
+// machine state teardown would reject. The fail-safe therefore applies
 // signalFault under child.mu. The fault moves exec to the ended form teardown
-// accepts, clears a pending probe, zeroes the attempts and settles the turn
-// waiters. In that same critical section it records the terminal exit code
-// and on the idle-context path the terminal phase and stop reason. The
-// termination classification then sees the real outcome. Outside the lock it
-// then
-// releases the tree token. It writes the terminal sentinel with the caller's
-// payload when this outcome has not written one. It emits the session.end on
-// the idle-context path. It signals capacity when the failure happened on the
-// park path. It must be called outside child.mu, where the original deferred
-// effects would have run. The caller reports the transition error before this
-// helper runs; a fault that itself fails is reported here.
+// accepts, clears a pending probe and zeroes the attempts. It settles the turn
+// waiters the failed path left behind. Through the machine's locked effects it
+// records the terminal exit code and, on the idle-context path, the terminal
+// phase and stop reason. The termination classification then sees the real
+// outcome. Outside the lock it then releases the tree token. It writes
+// the terminal sentinel with the caller's payload when this outcome has not
+// written one. It emits the session.end on the idle-context path. It signals
+// capacity when the failure happened on the park path. It must be called
+// outside child.mu, where the original deferred effects would have run. The
+// caller reports the transition error before this helper runs; a fault that
+// itself fails is reported here.
 func (s *Supervisor) failSafeRunChildTransition(child *childRuntime, fault lifecycleFault) {
-	child.mu.Lock()
-	_, _, err := s.applyLifecycle(child, lifecycleSignal{kind: signalFault, class: child.lc.class})
-	if err == nil {
-		if fault.recordExit {
-			child.exitCode = fault.exitCode
-		}
-		if fault.idleEnd {
-			child.phase = "done"
-			child.lastStopReason = fault.reason
-		}
+	sig := lifecycleSignal{kind: signalFault, class: child.lc.class}
+	if fault.recordExit {
+		sig.recordExit = true
+		sig.exitCode = fault.exitCode
 	}
+	if fault.idleEnd {
+		sig.idleEnd = true
+		sig.idleExitCode = fault.exitCode
+		sig.idleStopReason = fault.reason
+	}
+	child.mu.Lock()
+	_, _, err := s.applyLifecycle(child, sig)
 	child.mu.Unlock()
 	if err != nil {
 		s.reportLifecycleError(child, err)
@@ -373,10 +374,11 @@ func (s *Supervisor) failSafeRunChildTransition(child *childRuntime, fault lifec
 }
 
 // lifecycleFault carries the terminal payload a fault fail-safe applies: the
-// sentinel/session data. Its booleans state whether the exit code and
-// idle-end presentation must be recorded under the lock, and whether this
-// outcome already wrote its sentinel. They also state whether the failure
-// happened on the park path (capacity signal) or the idle-context path
+// sentinel/session data. recordExit and idleEnd state which terminal writes
+// the signalFault transaction must commit (the recorded outcome exit and the
+// idle-end presentation); the bare fault sets neither. sentinelWritten states
+// whether this outcome already wrote its sentinel. They also state whether the
+// failure happened on the park path (capacity signal) or the idle-context path
 // (session.end).
 type lifecycleFault struct {
 	exitCode        int

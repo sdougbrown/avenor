@@ -4988,11 +4988,9 @@ func (s *Supervisor) beginChildShutdown(child *childRuntime) *permissionProvider
 	child.writeMu.Unlock()
 	if shutdownErr != nil {
 		// The transition failure must not skip the provider request cancel or
-		// the first parent cancel always performed.
-		shutdownEff = []lifecycleEffect{{kind: effectConsiderProviderCancel}}
-		if !alreadyShuttingDown {
-			shutdownEff = append(shutdownEff, lifecycleEffect{kind: effectCancelContext})
-		}
+		// the first parent cancel always performed: emit the same effects a
+		// valid shutdownRequested transaction would have.
+		shutdownEff = shutdownRequestedEffects(alreadyShuttingDown)
 	}
 	// The provider-cancel consideration runs on every shutdown request; whether
 	// a RequestCancel fires is captured eligibility, not a lifecycle dimension.

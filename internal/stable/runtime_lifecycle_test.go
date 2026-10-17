@@ -1956,6 +1956,47 @@ func TestRuntimeLifecycleFaultSignal(t *testing.T) {
 		})
 	}
 
+	t.Run("fault records the terminal data the caller carries", func(t *testing.T) {
+		st := directState(execStarting)
+		out, cont, eff := applyOK(t, st, lifecycleSignal{
+			kind: signalFault, class: directAttemptClass, recordExit: true, exitCode: 3,
+		})
+		if out.exec != execEnded || cont.kind != contEnd {
+			t.Fatalf("fault with exit data: exec %d, continuation %d", out.exec, cont.kind)
+		}
+		if want := []lifecycleEffect{
+			{kind: effectRecordOutcomeExit, exitCode: 3},
+			{kind: effectSettleTurnWaiters},
+		}; !effectsEqual(eff, want) {
+			t.Fatalf("fault effects = %v, want %v", eff, want)
+		}
+		out, cont, eff = applyOK(t, st, lifecycleSignal{
+			kind: signalFault, class: directAttemptClass,
+			idleEnd: true, idleExitCode: 124, idleStopReason: "timeout",
+		})
+		if out.exec != execEnded || cont.kind != contEnd {
+			t.Fatalf("fault with idle end: exec %d, continuation %d", out.exec, cont.kind)
+		}
+		if want := []lifecycleEffect{
+			{kind: effectSetIdleEndData, exitCode: 124, reason: "timeout"},
+			{kind: effectSettleTurnWaiters},
+		}; !effectsEqual(eff, want) {
+			t.Fatalf("fault effects = %v, want %v", eff, want)
+		}
+		_, _, eff = applyOK(t, st, lifecycleSignal{
+			kind: signalFault, class: directAttemptClass,
+			recordExit: true, exitCode: 1,
+			idleEnd: true, idleExitCode: 1, idleStopReason: "cancelled",
+		})
+		if want := []lifecycleEffect{
+			{kind: effectRecordOutcomeExit, exitCode: 1},
+			{kind: effectSetIdleEndData, exitCode: 1, reason: "cancelled"},
+			{kind: effectSettleTurnWaiters},
+		}; !effectsEqual(eff, want) {
+			t.Fatalf("fault effects = %v, want %v", eff, want)
+		}
+	})
+
 	t.Run("fault clears a pending probe", func(t *testing.T) {
 		for _, probe := range []probeKind{probeTerminalPrompt, probeRetryPrompt} {
 			for _, exec := range []execState{execStarting, execIdle} {

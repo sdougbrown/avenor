@@ -153,6 +153,18 @@ type lifecycleState struct {
 	pendingProbe probeKind
 }
 
+// shutdownRequestedEffects returns the deferred effects a shutdownRequested
+// transaction emits: the provider-cancel consideration on every request, plus
+// the first-only parent context cancel. Both next() and the beginChildShutdown
+// error path emit the same list.
+func shutdownRequestedEffects(alreadyRequested bool) []lifecycleEffect {
+	eff := []lifecycleEffect{{kind: effectConsiderProviderCancel}}
+	if !alreadyRequested {
+		eff = append(eff, lifecycleEffect{kind: effectCancelContext})
+	}
+	return eff
+}
+
 // Pointer-receiver, nonlocking predicates. Each reads only its named field;
 // they are range checks, not equality checks.
 
@@ -293,6 +305,15 @@ type lifecycleSignal struct {
 	// the existing deadline/error mapping.
 	idleExitCode   int
 	idleStopReason string
+
+	// fault carries the terminal writes the fault fail-safe replays through
+	// the machine's locked effects. recordExit selects the recorded outcome
+	// exit: attemptOutcome's effectRecordOutcomeExit, with the code in
+	// exitCode. idleEnd selects the idle-end presentation:
+	// signalIdleContextEnded's effectSetIdleEndData, with the data in
+	// idleExitCode and idleStopReason. The bare fault sets neither.
+	recordExit bool
+	idleEnd    bool
 
 	// writerCloseFinished: Close was actually called on a nonnil sink. No
 	// signal is sent when the sink is nil; a Close error still counts as called.
@@ -896,11 +917,10 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 	case signalShutdownRequested:
 		// Any otherwise-valid state. Repeats allowed; every call emits the
 		// provider-cancel consideration; the context cancel is first-only.
-		eff = append(eff, lifecycleEffect{kind: effectConsiderProviderCancel})
 		if st.shutdown == shutdownNone {
 			out.shutdown = shutdownRequested
-			eff = append(eff, lifecycleEffect{kind: effectCancelContext})
 		}
+		eff = append(eff, shutdownRequestedEffects(st.shutdown == shutdownRequested)...)
 
 	case signalWriterCloseBegun:
 		// Any otherwise-valid state; open→closing, closing/closed unchanged.
@@ -1010,9 +1030,11 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 		// form the teardown accepts: execEnded, or execParkedEnding when the
 		// child is parked, preserving the parked teardown path. It clears a
 		// pending continuation probe, zeroes the attempt count and settles the
-		// turn waiters the failed path left behind. Completion, shutdown and
-		// writer
-		// dimensions are untouched: the teardown's runEnded repeat and
+		// turn waiters the failed path left behind. The fault replays the
+		// terminal writes the caller carries. recordExit selects the recorded
+		// outcome exit. idleEnd selects the idle-end presentation: exit code,
+		// done phase and stop reason. Completion, shutdown and
+		// writer dimensions are untouched: the teardown's runEnded repeat and
 		// completionPublished still validate. The fault selects only contEnd
 		// and never resets a counted error.
 		if st.completion == completionPublished {
@@ -1027,6 +1049,12 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 			// Already in the parked teardown form; the fault is a repeat.
 		default:
 			out.exec = execEnded
+		}
+		if sig.recordExit {
+			eff = append(eff, lifecycleEffect{kind: effectRecordOutcomeExit, exitCode: sig.exitCode})
+		}
+		if sig.idleEnd {
+			eff = append(eff, lifecycleEffect{kind: effectSetIdleEndData, exitCode: sig.idleExitCode, reason: sig.idleStopReason})
 		}
 		eff = append(eff, lifecycleEffect{kind: effectSettleTurnWaiters})
 		cont = continuation{contEnd}
