@@ -11,16 +11,18 @@ package stable
 // sites.
 //
 // Invariants encoded here match the supervisor behavior they preserve:
-//   - The park timeout marks admission closed before done closes.
-//     isCompleted() is therefore true for both completionAdmissionClosed and
-//     completionPublished (supervisor.go:2968 vs complete()).
-//   - writerClosing stays true after writerClosed is set and every admission
-//     gate keys on writerClosing (supervisor.go:4741-4757), so
-//     isWriterClosing() is true for both writer stages.
+//   - The park timeout marks admission closed before done closes. The
+//     RuntimePrompt admission gate therefore rejects completed runtimes:
+//     isCompleted() is true for both completionAdmissionClosed and
+//     completionPublished.
+//   - writerClosing stays true after writerClosed is set. Every admission gate
+//     (beginChildProviderTurn, prepareChildPermissionClaim and
+//     beginDirectPermissionAnswer) keys on writerClosing, so isWriterClosing()
+//     is true for both writer stages.
 //   - The local-slot failure window keeps the child parked until final
-//     publication. execParkedEnding at the complete boundary normalizes to
-//     execEnded only at completionPublished (supervisor.go:2257-2261,
-//     1206-1211, 2247-2255).
+//     publication. A failed acquireLocalRuntimeSlot wait in runChild leaves
+//     execParked. The complete boundary normalizes execParkedEnding to
+//     execEnded only at completionPublished.
 
 import (
 	"errors"
@@ -164,8 +166,8 @@ func (l *lifecycleState) isParked() bool {
 }
 
 // isCompleted is true for both completionAdmissionClosed and completionPublished.
-// The park timeout sets completed before done closes, and RuntimePrompt must
-// reject in that window (supervisor.go:2968).
+// The park timeout sets completed before done closes, and the RuntimePrompt
+// admission gate must reject in that window.
 func (l *lifecycleState) isCompleted() bool {
 	return l.completion == completionAdmissionClosed || l.completion == completionPublished
 }
@@ -174,7 +176,8 @@ func (l *lifecycleState) isShuttingDown() bool { return l.shutdown == shutdownRe
 
 // isWriterClosing is true for both writerClosing and writerClosed. Today
 // writerClosing stays true after writerClosed is set, and every admission
-// gate keys on writerClosing (supervisor.go:4741-4757).
+// gate keys on writerClosing (beginChildProviderTurn,
+// prepareChildPermissionClaim and beginDirectPermissionAnswer).
 func (l *lifecycleState) isWriterClosing() bool {
 	return l.writer == writerClosing || l.writer == writerClosed
 }
@@ -269,8 +272,8 @@ type lifecycleSignal struct {
 	// probe dequeues before checking context.
 	//
 	// The retry probe's idle-context decision uses a single context sample.
-	// The run loop reads ctx.Err() once after the dequeue attempt
-	// (supervisor.go ~2315-2319). A consumed prompt with a dead context is
+	// The run loop reads ctx.Err() once after the dequeue attempt (the retry
+	// probe's dequeue in runChild). A consumed prompt with a dead context is
 	// therefore an idle-context end, and an empty queue with a dead context is
 	// one too.
 	// resumeContextErr and idleContextErr therefore describe the same single
@@ -763,7 +766,7 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 
 	case signalParkRequested:
 		// Source S/I, C0, ordinary direct success; duplicate rejected. Only
-		// runChild parks (supervisor.go:2243); loop/team children never park,
+		// runChild parks (its contPark continuation); loop/team children never park,
 		// so a workflow-class park signal is rejected.
 		if sig.class != directAttemptClass {
 			return st, cont, nil, fmt.Errorf("lifecycle: park requested with class %d", sig.class)
@@ -874,7 +877,8 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 		// Source V/S, C0, attempts 0, after rollback cleanup. The signal emits
 		// the publication cue but leaves the child in V/S. A rollback child is
 		// only ever reserved or starting with completion open when complete
-		// runs (supervisor.go:1475-1480), so the publication itself ends it.
+		// runs: the releaseReservation rollback in spawnReserved is the only
+		// source. The publication itself ends the child.
 		// Repeats re-emit the cue only while the child is still unpublished
 		// (V/S with completion open, i.e. before the publication ran). Once the
 		// publication has moved the child to completionPublished, the
@@ -927,7 +931,8 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 		}
 		if sig.boundary == afterSpawnRollback {
 			// Rollback publishes while the child is still reserved or starting
-			// with completion open (supervisor.go:1475-1480). The publication
+			// with completion open (the releaseReservation rollback path in
+			// spawnReserved). The publication
 			// itself is what ends a rollback child, with writer open and no
 			// shutdown. Parked-ending, ended and admission-closed sources are
 			// rejected.
@@ -991,8 +996,8 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 	case signalSessionEndObserved:
 		// Any valid state; sets phase done and a nonempty stop reason; never
 		// settles an attempt. The reason rides in the payload only when
-		// nonempty, matching the final write (supervisor.go:4895-4897): an
-		// empty stop reason leaves the stored reason untouched.
+		// nonempty, matching the adapter's effectSetSessionEndPresentation
+		// write: an empty stop reason leaves the stored reason untouched.
 		end := lifecycleEffect{kind: effectSetSessionEndPresentation}
 		if sig.stopReason != "" {
 			end.reason = sig.stopReason
