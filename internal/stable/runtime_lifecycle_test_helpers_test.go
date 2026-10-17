@@ -159,6 +159,9 @@ func joinTestChild(t testing.TB, child *childRuntime, fatal bool) {
 	case <-child.done:
 	case <-time.After(5 * time.Second):
 		fail("lifecycle cleanup: child %s done channel still open after teardown", child.id)
+		// One stuck join is enough evidence; do not wait out a second timeout
+		// per child on the non-fatal path.
+		return
 	}
 	if child.runDone != nil {
 		select {

@@ -549,3 +549,44 @@ func TestWaitForNextPromptTimerReapsWithoutPrompt(t *testing.T) {
 	finishSyntheticChildLifecycle(sup, c)
 	assertNoLifecycleErrors(t, sup)
 }
+
+// The admission-closed-before-done window rejects prompts through the public
+// API: after the park timeout marks completion admission-closed and before
+// the teardown's publication closes done, RuntimePrompt reports the runtime
+// as ended instead of queueing onto a runtime whose publication has not run.
+// The synthetic fixture drives both boundaries deterministically: the reap
+// runs through waitForNextPrompt, and the modeled finish publishes only when
+// the test calls it.
+func TestRuntimePromptRejectedBeforeTeardownPublication(t *testing.T) {
+	sup := newTestSupervisor(t, Config{
+		ControlSocket: newStableSocketPath(t, "park-admission-window"),
+		MaxRuntimes:   2,
+	})
+	c := newTestChildLifecycle(t, sup, testLifecycleOptions{id: "rt_park_window", exec: execParked, class: directAttemptClass})
+	sup.controlMu.Lock()
+	sup.runtimes[c.id] = c
+	sup.controlMu.Unlock()
+
+	// The park wait's timer branch reaps: it closes admission in the same
+	// critical section as the queue check, while done stays open until the
+	// modeled teardown publishes.
+	prompt, ok := c.waitForNextPrompt(sup, context.Background(), 50*time.Millisecond)
+	if ok || prompt != "" {
+		t.Fatalf("waitForNextPrompt = (%q, %v), want a reap with no prompt", prompt, ok)
+	}
+
+	// Inside the window: admission is closed, done is still open, and the
+	// public prompt path must reject with runtime-has-ended.
+	if err := sup.RuntimePrompt(c.id, "too late", ""); err == nil || !strings.Contains(err.Error(), "has ended") {
+		t.Fatalf("RuntimePrompt before publication err = %v, want runtime-has-ended", err)
+	}
+	select {
+	case <-c.done:
+		t.Fatal("done closed before the teardown published completion")
+	default:
+	}
+
+	// No run goroutine: the modeled finish owns the publication boundary.
+	finishSyntheticChildLifecycle(sup, c)
+	assertNoLifecycleErrors(t, sup)
+}
