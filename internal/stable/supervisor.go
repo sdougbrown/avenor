@@ -1241,22 +1241,11 @@ func (s *Supervisor) acquireLocalRuntimeSlot(ctx context.Context, child *childRu
 					// machine still reports the child parked. The admission
 					// check granted nothing (it is a predicate), so there is no
 					// slot accounting to release; the child stays parked until
-					// the final publication, keeping it capacity-excluded.
-					fault := lifecycleFault{sentinelWritten: true}
-					if ctxErr := ctx.Err(); ctxErr != nil {
-						// The context also ended: record the idle terminal end
-						// (sentinel and session.end) the legacy idle end made on
-						// a slot failure plus a cancel or deadline.
-						stopReason := "cancelled"
-						if errors.Is(ctxErr, context.DeadlineExceeded) {
-							stopReason = "timeout"
-						}
-						fault = lifecycleFault{
-							exitCode: runtime.ExitCodeForStopReason(stopReason), reason: stopReason, sessionID: child.sessionID(),
-							recordExit: true, idleEnd: true,
-						}
-					}
-					s.failSafeRunChildTransition(child, fault)
+					// the final publication, keeping it capacity-excluded. If the
+					// context also ended, the fail-safe records the idle terminal
+					// end (sentinel and session.end) the legacy idle end made on
+					// a slot failure plus a cancel or deadline.
+					s.failSafeRunChildTransition(child, idleEndFault(child, ctx.Err()))
 					return fmt.Errorf("%w: %w", errLifecycleFaultRecovery, err)
 				}
 			}
@@ -2426,6 +2415,22 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 				child.mu.Unlock()
 				if pweErr != nil {
 					s.reportLifecycleError(child, pweErr)
+				}
+				if lifecycleTransitionFailed(pweErr) {
+					// The outcome sentinel already ran on the park path; the fail-
+					// safe signals the capacity the park would have freed and ends
+					// the run, recording the idle terminal end when the context
+					// ended the wait.
+					fault := lifecycleFault{
+						exitCode: result.exitCode, reason: stopReason, sessionID: result.sessionID,
+						recordExit: true, sentinelWritten: true,
+					}
+					if ctxErr := ctx.Err(); ctxErr != nil {
+						fault = idleEndFault(child, ctxErr)
+					}
+					fault.parkPath = true
+					s.failSafeRunChildTransition(child, fault)
+					return
 				}
 				if ctx.Err() != nil {
 					s.writeIdleContextEnd(child, ctx.Err())
@@ -4007,6 +4012,31 @@ func (s *Supervisor) emitSessionEnd(child *childRuntime, exitCode int, stopReaso
 	})
 }
 
+// stopReasonForCtxErr maps a run context error to the stop reason the idle
+// terminal end records: a deadline is a timeout, a cancel is a kill.
+func stopReasonForCtxErr(ctxErr error) string {
+	if errors.Is(ctxErr, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	return "cancelled"
+}
+
+// idleEndFault builds the terminal payload the fault fail-safe applies when a
+// run ends while the child has no running attempt: the idle terminal end
+// (exit code, stop reason, sentinel, session.end) when the context ended, or
+// the bare sentinel-written fault when it did not. The stop reason and exit
+// code come from the canonical context-error and stop-reason mappings.
+func idleEndFault(child *childRuntime, ctxErr error) lifecycleFault {
+	if ctxErr == nil {
+		return lifecycleFault{sentinelWritten: true}
+	}
+	stopReason := stopReasonForCtxErr(ctxErr)
+	return lifecycleFault{
+		exitCode: runtime.ExitCodeForStopReason(stopReason), reason: stopReason, sessionID: child.sessionID(),
+		recordExit: true, idleEnd: true,
+	}
+}
+
 // writeIdleContextEnd records the run context ending while the child has no
 // running attempt (parked, waiting for a slot, or in retry backoff), matching
 // how the same end reports itself during an attempt: a deadline is a timeout
@@ -4017,10 +4047,7 @@ func (s *Supervisor) emitSessionEnd(child *childRuntime, exitCode int, stopReaso
 // child state, so the terminal phase and stop reason are recorded here for
 // status and WaitTurn snapshots.
 func (s *Supervisor) writeIdleContextEnd(child *childRuntime, ctxErr error) {
-	stopReason := "cancelled"
-	if errors.Is(ctxErr, context.DeadlineExceeded) {
-		stopReason = "timeout"
-	}
+	stopReason := stopReasonForCtxErr(ctxErr)
 	exitCode := runtime.ExitCodeForStopReason(stopReason)
 	sessionID := child.sessionID()
 	child.mu.Lock()
@@ -4039,10 +4066,7 @@ func (s *Supervisor) writeIdleContextEnd(child *childRuntime, ctxErr error) {
 		// The dropped idle-end writes are recovered by the fault fail-safe:
 		// terminal data, sentinel and session.end, the writes the legacy idle
 		// end made unconditionally.
-		s.failSafeRunChildTransition(child, lifecycleFault{
-			exitCode: exitCode, reason: stopReason, sessionID: sessionID,
-			recordExit: true, idleEnd: true,
-		})
+		s.failSafeRunChildTransition(child, idleEndFault(child, ctxErr))
 		return
 	}
 	s.executeDeferredLifecycleEffects(child, eff)

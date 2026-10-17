@@ -760,6 +760,31 @@ func TestRunChildParksSuccessfulTurnWithDonePhase(t *testing.T) {
 // itself rejects the signal. The runs' diagnostics go to captured stderr
 // writers and the supervisors are built directly (not through the suite-wide
 // zero-error owner), with the expected counter values asserted here.
+func TestIdleEndFaultMapsContextEnds(t *testing.T) {
+	child := &childRuntime{}
+	cases := []struct {
+		name   string
+		ctxErr error
+		reason string
+		exit   int
+	}{
+		{"cancel", context.Canceled, "cancelled", 130},
+		{"deadline", context.DeadlineExceeded, "timeout", 124},
+		{"wrapped deadline", fmt.Errorf("run: %w", context.DeadlineExceeded), "timeout", 124},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := idleEndFault(child, tc.ctxErr)
+			if f.reason != tc.reason || f.exitCode != tc.exit || !f.idleEnd || !f.recordExit || f.sentinelWritten {
+				t.Fatalf("idleEndFault(%v) = %+v, want reason %q exit %d with idle end", tc.ctxErr, f, tc.reason, tc.exit)
+			}
+		})
+	}
+	if f := idleEndFault(child, nil); f.idleEnd || !f.sentinelWritten {
+		t.Fatalf("idleEndFault(nil) = %+v, want a sentinel-written fault without an idle end", f)
+	}
+}
+
 func TestRunChildTransitionFailureRunsFailSafe(t *testing.T) {
 	newFaultSupervisor := func(t *testing.T, name string, buf *bytes.Buffer) *Supervisor {
 		sup := NewSupervisor(Config{ControlSocket: "/tmp/test-fault-" + name + ".sock", MaxRuntimes: 1, Stderr: buf})
@@ -925,6 +950,60 @@ func TestRunChildTransitionFailureRunsFailSafe(t *testing.T) {
 			t.Fatalf("a duplicate sentinel write was attempted: %q", out)
 		}
 		assertFaultTeardown(t, sup, &buf, "rt_park_fault", 1)
+	})
+
+	t.Run("failed park wait end signals capacity and records the idle end", func(t *testing.T) {
+		var buf bytes.Buffer
+		sup := newFaultSupervisor(t, "parkwait", &buf)
+		provider := faultEndScript("ses_parkwait_fault", "end_turn")
+		child, ctx, cancel := startFaultChild(t, sup, "rt_parkwait_fault", "ses_parkwait_fault", provider, directAttemptClass)
+		defer cancel()
+		var capAtFault, capAtShutdown chan struct{}
+		sup.testHooks.lifecycleTransitionFailure = func(site signalKind) bool {
+			switch site {
+			case signalParkWaitEnded:
+				return true
+			case signalFault:
+				sup.capacityMu.Lock()
+				capAtFault = sup.capacityCh
+				sup.capacityMu.Unlock()
+			case signalShutdownRequested:
+				sup.capacityMu.Lock()
+				capAtShutdown = sup.capacityCh
+				sup.capacityMu.Unlock()
+			}
+			return false
+		}
+		go sup.runChild(ctx, child, "hello", 0, 0)
+
+		// Wait for the attempt to settle into the park; the context dies
+		// while parked, so the park wait ends and the parkWaitEnded
+		// transition runs.
+		waitForStableChild(t, child, func(active bool, completed bool, phase, phaseLabel string) bool {
+			return !active && !completed && phase == "done"
+		})
+		cancel()
+		waitForStableDone(t, child)
+		joinTestChildCompletion(t, child)
+
+		// Exactly one capacity signal ran between the fault and the
+		// teardown's first signal: the fail-safe's park-path signal.
+		if capAtFault == nil || capAtShutdown == nil {
+			t.Fatal("injection did not observe the fault and the teardown")
+		}
+		if capAtFault == capAtShutdown {
+			t.Fatal("no capacity signal ran between the fault and teardown: the fail-safe capacity signal is missing")
+		}
+		// The cancel ended the park wait, so the fail-safe recorded the idle
+		// terminal end the legacy not-ok wait wrote.
+		readSentinel(t, child.sentinelFile, "KILLED\n", "SESSION=ses_parkwait_fault\n", "STOP_REASON=cancelled\n", "EXIT_CODE=130\n")
+		child.mu.Lock()
+		exit, reason := child.exitCode, child.lastStopReason
+		child.mu.Unlock()
+		if exit != 130 || reason != "cancelled" {
+			t.Fatalf("park-wait fault data: exit=%d reason=%q", exit, reason)
+		}
+		assertFaultTeardown(t, sup, &buf, "rt_parkwait_fault", 1)
 	})
 
 	t.Run("failed slot acquisition ends the run without resuming", func(t *testing.T) {
