@@ -509,7 +509,7 @@ func TestRunChildAttemptUsesInitialSpawnSession(t *testing.T) {
 		child.done = make(chan struct{})
 	}
 	// Explicit lifecycle initialization (plan Stage 2 change 2).
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass, phase: child.phase, phaseLabel: child.phaseLabel, exitCode: child.exitCode, lastStopReason: child.lastStopReason})
+	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, child)
 	finishUnrunChildAtCleanup(t, sup, child)
 	result := sup.runChildAttempt(context.Background(), child, "", "hello")
@@ -610,7 +610,7 @@ func TestRunChildAttemptClearsPhaseAfterSessionEnd(t *testing.T) {
 		child.done = make(chan struct{})
 	}
 	// Explicit lifecycle initialization (plan Stage 2 change 2).
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass, phase: child.phase, phaseLabel: child.phaseLabel, exitCode: child.exitCode, lastStopReason: child.lastStopReason})
+	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass, phase: "done", phaseLabel: "finished"})
 	trackTestChildCompletion(t, sup, child)
 	finishUnrunChildAtCleanup(t, sup, child)
 	result := sup.runChildAttempt(context.Background(), child, "", "hello")
@@ -776,7 +776,7 @@ func TestRunChildClearsPhaseDuringRetryBackoff(t *testing.T) {
 	// Explicit lifecycle initialization (plan Stage 2 change 2): the
 	// fixture declares starting state and its attempt class instead of
 	// relying on zero values.
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass, phase: child.phase})
+	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass, phase: "done"})
 	trackTestChildCompletion(t, sup, child)
 	sup.runtimes[child.id] = child
 	go sup.runChild(ctx, child, "retry", 0, 1)
@@ -814,7 +814,7 @@ func TestRunLoopChildClearsPhaseDuringRetryBackoff(t *testing.T) {
 	// Explicit lifecycle initialization (plan Stage 2 change 2): the
 	// fixture declares starting state and its attempt class instead of
 	// relying on zero values.
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass, phase: child.phase})
+	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass, phase: "done"})
 	trackTestChildCompletion(t, sup, child)
 	sup.runtimes[child.id] = child
 	go sup.runLoopChild(context.Background(), child, cfg, 0, 1, "", "", "", "", "", "")
@@ -862,7 +862,7 @@ func TestRunTeamChildClearsPhaseDuringRetryBackoff(t *testing.T) {
 	// Explicit lifecycle initialization (plan Stage 2 change 2): the
 	// fixture declares starting state and its attempt class instead of
 	// relying on zero values.
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass, phase: child.phase})
+	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass, phase: "done"})
 	trackTestChildCompletion(t, sup, child)
 	sup.runtimes[child.id] = child
 	go sup.runTeamChild(context.Background(), child, cfg, 0, 1, "", "", "", "", "", "unknown-backend")
@@ -905,7 +905,7 @@ func TestRunLoopChildClearsStalePhaseOnAttemptSetupFailure(t *testing.T) {
 	// Explicit lifecycle initialization (plan Stage 2 change 2): the
 	// fixture declares starting state and its attempt class instead of
 	// relying on zero values.
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass, phase: child.phase, phaseLabel: child.phaseLabel})
+	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass, phase: "done", phaseLabel: "stale"})
 	trackTestChildCompletion(t, sup, child)
 	sup.runtimes[child.id] = child
 	sup.runLoopChild(context.Background(), child, &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}, 0, 0, "", "", "", "", "", "")
@@ -931,7 +931,7 @@ func TestRunTeamChildClearsStalePhaseOnAttemptSetupFailure(t *testing.T) {
 	// Explicit lifecycle initialization (plan Stage 2 change 2): the
 	// fixture declares starting state and its attempt class instead of
 	// relying on zero values.
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass, phase: child.phase, phaseLabel: child.phaseLabel})
+	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass, phase: "done", phaseLabel: "stale"})
 	trackTestChildCompletion(t, sup, child)
 	sup.runtimes[child.id] = child
 	sup.runTeamChild(context.Background(), child, &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}, 0, 0, "", "", "", "", "", "unknown-backend")
@@ -1806,7 +1806,7 @@ func TestListRuntimesSurfacesPhaseAndPermission(t *testing.T) {
 		autoApprove:       true,
 		permission:        map[string]any{"request_id": "req_99"},
 	}
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execRunning, attempts: 1, class: directAttemptClass, phase: child.phase, phaseLabel: child.phaseLabel})
+	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execRunning, attempts: 1, class: directAttemptClass, phase: "waiting", phaseLabel: "Need approval"})
 	trackTestChildCompletion(t, sup, child)
 	sup.runtimes[child.id] = child
 	finishUnrunChildAtCleanup(t, sup, child)
@@ -1990,6 +1990,7 @@ func TestRuntimeFanoutWriterPreservesBackendFinalOutputAndBoundsStatus(t *testin
 	// No run goroutine: finish the modeled lifecycle explicitly after the
 	// writer observation.
 	finishSyntheticChildLifecycle(owner, child)
+	assertNoLifecycleDivergence(t, owner)
 	resultSup := &Supervisor{runtimes: map[string]*childRuntime{child.id: child}}
 	result, err := resultSup.RuntimeResult(child.id)
 	if err != nil {

@@ -182,7 +182,7 @@ func TestRunChildAttemptAdoptsExternalConversationID(t *testing.T) {
 		child.done = make(chan struct{})
 	}
 	// Explicit lifecycle initialization (plan Stage 2 change 2).
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass, phase: child.phase, phaseLabel: child.phaseLabel, exitCode: child.exitCode, lastStopReason: child.lastStopReason})
+	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, child)
 	sup.runtimes[child.id] = child
 	finishUnrunChildAtCleanup(t, sup, child)
@@ -224,7 +224,7 @@ func TestRuntimeStatusAndListUseAdoptedSessionID(t *testing.T) {
 		child.done = make(chan struct{})
 	}
 	// Explicit lifecycle initialization (plan Stage 2 change 2).
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass, phase: child.phase, phaseLabel: child.phaseLabel, exitCode: child.exitCode, lastStopReason: child.lastStopReason})
+	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, child)
 	sup.runtimes[child.id] = child
 	finishUnrunChildAtCleanup(t, sup, child)
@@ -261,7 +261,7 @@ func TestAdoptChildSessionIDIgnoresStaleAttempt(t *testing.T) {
 		child.done = make(chan struct{})
 	}
 	// Explicit lifecycle initialization (plan Stage 2 change 2).
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass, phase: child.phase, phaseLabel: child.phaseLabel, exitCode: child.exitCode, lastStopReason: child.lastStopReason})
+	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, child)
 	sup.runtimes[child.id] = child
 	finishUnrunChildAtCleanup(t, sup, child)

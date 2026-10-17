@@ -103,13 +103,14 @@ func newTestChildLifecycle(t *testing.T, sup *Supervisor, opts testLifecycleOpti
 }
 
 // trackTestChildCompletion registers the owned-child cleanup tracking for a
-// child constructed elsewhere: wait for its done channel, then assert the
-// supervisor's lifecycle counters are zero.
+// child constructed elsewhere: wait for its done channel and run-goroutine
+// join. A join failure fails the cleanup fatally, so the lifecycle counters
+// are never read while a child is still tearing down; the counter assertion
+// itself belongs to the owner-level cleanup.
 func trackTestChildCompletion(t *testing.T, sup *Supervisor, child *childRuntime) {
 	t.Helper()
 	t.Cleanup(func() {
-		joinTestChildCompletion(t, child)
-		assertNoLifecycleDivergence(t, sup)
+		joinTestChildCompletionFatal(t, child)
 	})
 }
 
@@ -156,21 +157,38 @@ func assertSupervisorLifecycleClean(t *testing.T, sup *Supervisor) {
 // joinTestChildCompletion waits for a child's done channel and then for its
 // run-goroutine join point. done alone is insufficient: direct runs do work
 // after complete (the capacity release) and the run/writer/answer goroutines
-// must be joined before any lifecycle counter is read.
+// must be joined before any lifecycle counter is read. Owner-level cleanups
+// use this variant so every owned child is attempted before the counters are
+// read once.
 func joinTestChildCompletion(t testing.TB, child *childRuntime) {
+	joinTestChild(t, child, false)
+}
+
+// joinTestChildCompletionFatal waits like joinTestChildCompletion but fails
+// the test fatally on a join timeout or a missing join point: a cleanup that
+// would be followed by counter reads must never continue past a failed join.
+func joinTestChildCompletionFatal(t testing.TB, child *childRuntime) {
+	joinTestChild(t, child, true)
+}
+
+func joinTestChild(t testing.TB, child *childRuntime, fatal bool) {
+	fail := t.Errorf
+	if fatal {
+		fail = t.Fatalf
+	}
 	select {
 	case <-child.done:
 	case <-time.After(5 * time.Second):
-		t.Errorf("lifecycle cleanup: child %s done channel still open after teardown", child.id)
+		fail("lifecycle cleanup: child %s done channel still open after teardown", child.id)
 	}
 	if child.runDone != nil {
 		select {
 		case <-child.runDone:
 		case <-time.After(5 * time.Second):
-			t.Errorf("lifecycle cleanup: child %s run goroutine still running after teardown", child.id)
+			fail("lifecycle cleanup: child %s run goroutine still running after teardown", child.id)
 		}
 	} else {
-		t.Errorf("lifecycle cleanup: child %s has no run-goroutine join point", child.id)
+		fail("lifecycle cleanup: child %s has no run-goroutine join point", child.id)
 	}
 }
 
