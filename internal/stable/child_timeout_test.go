@@ -59,9 +59,7 @@ func TestRunLoopChildTimeoutProducesTimeoutSentinel(t *testing.T) {
 	sentinel := filepath.Join(t.TempDir(), "sentinel.env")
 	child := &childRuntime{id: "rt_loop_timeout", done: make(chan struct{}), promptCh: make(chan struct{}, 1), eventWriter: stableTestSink{}, sentinelFile: sentinel, cancelFn: func() {}}
 	cfg := &looprunner.LoopConfig{MaxIterations: 1, Loop: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
-	trackTestChildCompletion(t, sup, child)
-	sup.runtimes[child.id] = child
+	registerSyntheticChild(t, sup, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	go sup.runLoopChild(context.Background(), child, cfg, 1, 0, "", "", "", "", "", "")
 
 	select {
@@ -90,9 +88,7 @@ func TestRunChildTimeoutProducesTimeoutSentinel(t *testing.T) {
 
 	sentinel := filepath.Join(t.TempDir(), "sentinel.env")
 	child := &childRuntime{id: "rt_run_timeout", done: make(chan struct{}), promptCh: make(chan struct{}, 1), eventWriter: stableTestSink{}, sentinelFile: sentinel, cancelFn: func() {}, provider: provider}
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
-	trackTestChildCompletion(t, sup, child)
-	sup.runtimes[child.id] = child
+	registerSyntheticChild(t, sup, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	go sup.runChild(context.Background(), child, "work", 1, 0)
 
 	select {
@@ -120,9 +116,7 @@ func TestRunTeamChildTimeoutProducesTimeoutSentinel(t *testing.T) {
 	sentinel := filepath.Join(t.TempDir(), "sentinel.env")
 	child := &childRuntime{id: "rt_team_timeout", done: make(chan struct{}), promptCh: make(chan struct{}, 1), eventWriter: stableTestSink{}, sentinelFile: sentinel, cancelFn: func() {}}
 	cfg := &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
-	trackTestChildCompletion(t, sup, child)
-	sup.runtimes[child.id] = child
+	registerSyntheticChild(t, sup, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	go sup.runTeamChild(context.Background(), child, cfg, 1, 0, "", "", "", "", "", "")
 
 	select {

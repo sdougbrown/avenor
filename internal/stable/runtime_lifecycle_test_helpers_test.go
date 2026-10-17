@@ -67,6 +67,18 @@ func initializeTestLifecycle(t testing.TB, child *childRuntime, opts testLifecyc
 	child.lastStopReason = opts.lastStopReason
 }
 
+// registerSyntheticChild registers a synthetic child with its owning
+// supervisor in one ordered step: explicit lifecycle initialization, then
+// owned-completion tracking, then registry insertion. initializeTestLifecycle
+// also creates the done and run-goroutine join points when the fixture omitted
+// them, so no separate done guard is needed before the call.
+func registerSyntheticChild(t *testing.T, sup *Supervisor, child *childRuntime, opts testLifecycleOptions) {
+	t.Helper()
+	initializeTestLifecycle(t, child, opts)
+	trackTestChildCompletion(t, sup, child)
+	sup.runtimes[child.id] = child
+}
+
 // newTestChildLifecycle constructs a synthetic child with an explicitly
 // initialized lifecycle and registers the owned-child cleanup tracking: the
 // cleanup joins every owned child (done channel and run-goroutine join point)

@@ -178,12 +178,7 @@ func TestRunChildAttemptAdoptsExternalConversationID(t *testing.T) {
 	const provisionalID, realID = "agy-pending-direct", "conv-direct-real"
 	child, _ := newDeferredChild(t, sup, provisionalID, realID, deferredStartEndEvents(realID, nil))
 
-	if child.done == nil {
-		child.done = make(chan struct{})
-	}
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
-	trackTestChildCompletion(t, sup, child)
-	sup.runtimes[child.id] = child
+	registerSyntheticChild(t, sup, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	finishUnrunChildAtCleanup(t, sup, child)
 	result := sup.runChildAttempt(context.Background(), child, "", "hello")
 	if result.exitCode != 0 {
@@ -219,12 +214,7 @@ func TestRuntimeStatusAndListUseAdoptedSessionID(t *testing.T) {
 	const provisionalID, realID = "agy-pending-status", "conv-status-real"
 	child, _ := newDeferredChild(t, sup, provisionalID, realID, deferredStartEndEvents(realID, nil))
 
-	if child.done == nil {
-		child.done = make(chan struct{})
-	}
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
-	trackTestChildCompletion(t, sup, child)
-	sup.runtimes[child.id] = child
+	registerSyntheticChild(t, sup, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	finishUnrunChildAtCleanup(t, sup, child)
 	if res := sup.runChildAttempt(context.Background(), child, "", "hello"); res.exitCode != 0 {
 		t.Fatalf("exitCode = %d, want 0", res.exitCode)
@@ -255,12 +245,7 @@ func TestAdoptChildSessionIDIgnoresStaleAttempt(t *testing.T) {
 	const provisionalID, realID = "agy-pending-stale", "conv-stale-real"
 	child, provider := newDeferredChild(t, sup, provisionalID, realID, deferredStartEndEvents(realID, nil))
 
-	if child.done == nil {
-		child.done = make(chan struct{})
-	}
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
-	trackTestChildCompletion(t, sup, child)
-	sup.runtimes[child.id] = child
+	registerSyntheticChild(t, sup, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	finishUnrunChildAtCleanup(t, sup, child)
 	if res := sup.runChildAttempt(context.Background(), child, "", "hello"); res.exitCode != 0 {
 		t.Fatalf("first attempt exitCode = %d, want 0", res.exitCode)
@@ -303,12 +288,7 @@ func TestSessionStartUpdatesChildBeforeEventForwarding(t *testing.T) {
 	child.eventWriter = sink
 
 	resultCh := make(chan childAttemptResult, 1)
-	if child.done == nil {
-		child.done = make(chan struct{})
-	}
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
-	trackTestChildCompletion(t, sup, child)
-	sup.runtimes[child.id] = child
+	registerSyntheticChild(t, sup, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	finishUnrunChildAtCleanup(t, sup, child)
 	go func() { resultCh <- sup.runChildAttempt(context.Background(), child, "", "hello") }()
 
@@ -360,12 +340,7 @@ func TestRunChildSessionIDConflictIsFatalWithRetriesEnabled(t *testing.T) {
 		done: make(chan struct{}), promptCh: make(chan struct{}, 1), promptQueue: []string{"must not run"}, runID: sup.runID,
 	}
 
-	if child.done == nil {
-		child.done = make(chan struct{})
-	}
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
-	trackTestChildCompletion(t, sup, child)
-	sup.runtimes[child.id] = child
+	registerSyntheticChild(t, sup, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	sup.runChild(context.Background(), child, "conflict", 0, 3)
 
 	provider.mu.Lock()
@@ -403,12 +378,7 @@ func TestRunLoopChildSessionIDConflictIsFatalWithRetriesEnabled(t *testing.T) {
 	}
 	cfg := &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "conflict", Prompt: "conflict"}}}
 
-	if child.done == nil {
-		child.done = make(chan struct{})
-	}
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
-	trackTestChildCompletion(t, sup, child)
-	sup.runtimes[child.id] = child
+	registerSyntheticChild(t, sup, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	sup.runLoopChild(context.Background(), child, cfg, 0, 3, "", "", "", "", "", "agy")
 
 	provider.mu.Lock()
@@ -443,12 +413,7 @@ func TestRunTeamChildSessionIDConflictIsFatalWithRetriesEnabled(t *testing.T) {
 	}
 	cfg := &teamrunner.TeamConfig{Pre: []phaseconfig.Phase{{Name: "conflict", Prompt: "conflict"}}}
 
-	if child.done == nil {
-		child.done = make(chan struct{})
-	}
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
-	trackTestChildCompletion(t, sup, child)
-	sup.runtimes[child.id] = child
+	registerSyntheticChild(t, sup, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	sup.runTeamChild(context.Background(), child, cfg, 0, 3, "", "", "", "", "", "agy")
 
 	provider.mu.Lock()
@@ -493,12 +458,7 @@ func TestRunLoopChildAdoptsExternalConversationID(t *testing.T) {
 	}
 
 	cfg := &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
-	if child.done == nil {
-		child.done = make(chan struct{})
-	}
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
-	trackTestChildCompletion(t, sup, child)
-	sup.runtimes[child.id] = child
+	registerSyntheticChild(t, sup, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	go sup.runLoopChild(context.Background(), child, cfg, 0, 0, "", "", "", "", "", "agy")
 
 	// Before session.start is delivered the aggregate child must still hold the
@@ -560,12 +520,7 @@ func TestRunTeamChildAdoptsExternalConversationID(t *testing.T) {
 	}
 
 	cfg := &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
-	if child.done == nil {
-		child.done = make(chan struct{})
-	}
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
-	trackTestChildCompletion(t, sup, child)
-	sup.runtimes[child.id] = child
+	registerSyntheticChild(t, sup, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	go sup.runTeamChild(context.Background(), child, cfg, 0, 0, "", "", "", "", "", "agy")
 
 	waitForStableChild(t, child, func(active, completed bool, phase, phaseLabel string) bool { return active })
@@ -604,9 +559,7 @@ func TestStableAdoptionDoesNotOverwriteNewerConcurrentAttempt(t *testing.T) {
 		promptCh: make(chan struct{}, 1),
 		runID:    sup.runID,
 	}
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
-	trackTestChildCompletion(t, sup, child)
-	sup.runtimes[child.id] = child
+	registerSyntheticChild(t, sup, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	finishUnrunChildAtCleanup(t, sup, child)
 
 	older := &stableDeferredProvider{provisionalID: "agy-pending-old", realID: "conv-old-real", backend: "agy", pid: 1111, events: deferredStartEndEvents("conv-old-real", nil)}
@@ -695,12 +648,7 @@ func TestRunLoopChildPreservesAdoptedSessionAfterPhaseCleanup(t *testing.T) {
 	}
 
 	cfg := &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
-	if child.done == nil {
-		child.done = make(chan struct{})
-	}
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
-	trackTestChildCompletion(t, sup, child)
-	sup.runtimes[child.id] = child
+	registerSyntheticChild(t, sup, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	go sup.runLoopChild(context.Background(), child, cfg, 0, 0, "", "", "", "", "", "agy")
 
 	waitForStableChild(t, child, func(active, completed bool, phase, phaseLabel string) bool { return active })
@@ -747,12 +695,7 @@ func TestRunTeamChildPreservesAdoptedSessionAfterPhaseCleanup(t *testing.T) {
 	}
 
 	cfg := &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
-	if child.done == nil {
-		child.done = make(chan struct{})
-	}
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
-	trackTestChildCompletion(t, sup, child)
-	sup.runtimes[child.id] = child
+	registerSyntheticChild(t, sup, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	go sup.runTeamChild(context.Background(), child, cfg, 0, 0, "", "", "", "", "", "agy")
 
 	waitForStableChild(t, child, func(active, completed bool, phase, phaseLabel string) bool { return active })
@@ -798,12 +741,7 @@ func TestRunLoopChildSentinelCarriesAdoptedSessionOnNormalSuccess(t *testing.T) 
 	}
 
 	cfg := &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
-	if child.done == nil {
-		child.done = make(chan struct{})
-	}
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
-	trackTestChildCompletion(t, sup, child)
-	sup.runtimes[child.id] = child
+	registerSyntheticChild(t, sup, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	sup.runLoopChild(context.Background(), child, cfg, 0, 0, "", "", "", "", "", "agy")
 
 	waitForStableDone(t, child)
@@ -839,12 +777,7 @@ func TestRunTeamChildSentinelCarriesAdoptedSessionOnNormalSuccess(t *testing.T) 
 	}
 
 	cfg := &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
-	if child.done == nil {
-		child.done = make(chan struct{})
-	}
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
-	trackTestChildCompletion(t, sup, child)
-	sup.runtimes[child.id] = child
+	registerSyntheticChild(t, sup, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	sup.runTeamChild(context.Background(), child, cfg, 0, 0, "", "", "", "", "", "agy")
 
 	waitForStableDone(t, child)
@@ -883,12 +816,7 @@ func TestRunTeamChildStaleAttemptCleanupDoesNotEraseNewerSession(t *testing.T) {
 	}
 
 	cfg := &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
-	if child.done == nil {
-		child.done = make(chan struct{})
-	}
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
-	trackTestChildCompletion(t, sup, child)
-	sup.runtimes[child.id] = child
+	registerSyntheticChild(t, sup, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	go sup.runTeamChild(context.Background(), child, cfg, 0, 0, "", "", "", "", "", "agy")
 
 	// Wait until the older attempt is active and has adopted the real id.
