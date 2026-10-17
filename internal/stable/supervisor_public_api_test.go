@@ -1292,7 +1292,7 @@ func TestSupervisorPublicAPIParkWakesLocalSlotWait(t *testing.T) {
 	})
 	// Releasing the holder's turn makes it park. The park's capacity signal
 	// must wake the blocked slot wait: the follow-up's own session.end has to
-	// arrive far inside the 2s poll fallback (bounded here at 1s).
+	// arrive far inside the 2s poll fallback (bounded here at 1.5s).
 	gate.open()
 	h.awaitCondition("blocked follow-up resumed and ended", func() bool {
 		return h.log.count(itestEventIs("session.end", rt)) == 2
