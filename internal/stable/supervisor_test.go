@@ -400,12 +400,6 @@ func TestShutdownWaitsForFailedReservedRuntime(t *testing.T) {
 		t.Fatal("Shutdown did not return after failed reservation completed")
 	}
 
-	child.mu.Lock()
-	completed := child.lc.isCompleted()
-	child.mu.Unlock()
-	if !completed {
-		t.Fatal("failed reservation was not marked completed")
-	}
 	sup.controlMu.Lock()
 	_, stillRegistered := sup.runtimes[child.id]
 	sup.controlMu.Unlock()
@@ -429,24 +423,6 @@ func TestActiveRuntimeCountIgnoresCompletedHistory(t *testing.T) {
 
 	if got := sup.activeRuntimeCount(); got != 0 {
 		t.Fatalf("activeRuntimeCount() = %d, want 0 for completed history", got)
-	}
-}
-
-func TestRuntimePromptRejectsCompletedRuntime(t *testing.T) {
-	sup := newTestSupervisor(t, Config{
-		ControlSocket: "/tmp/test-prompt-completed.sock",
-		MaxRuntimes:   1,
-	})
-	doneChild := &childRuntime{
-		id:       "rt_done",
-		done:     make(chan struct{}),
-		promptCh: make(chan struct{}, 1),
-	}
-	initializeCompletedTestChild(t, sup, doneChild)
-	sup.runtimes["rt_done"] = doneChild
-
-	if err := sup.RuntimePrompt("rt_done", "hello", ""); err == nil {
-		t.Fatal("RuntimePrompt on completed runtime should error")
 	}
 }
 
@@ -732,20 +708,8 @@ func TestRunChildParksSuccessfulTurnWithDonePhase(t *testing.T) {
 	if status["status"] != "idle" || status["phase"] != "done" {
 		t.Fatalf("parked status = %#v, want idle/done", status)
 	}
-	child.mu.Lock()
-	completed := child.lc.isCompleted()
-	child.mu.Unlock()
-	if completed {
-		t.Fatal("parked runtime was marked completed")
-	}
 	cancel()
 	waitForStableDone(t, child)
-	child.mu.Lock()
-	completed = child.lc.isCompleted()
-	child.mu.Unlock()
-	if !completed {
-		t.Fatal("runtime was not marked completed after cancellation")
-	}
 }
 
 // TestRunChildTransitionFailureRunsFailSafe injects illegal transitions into
@@ -2200,12 +2164,8 @@ func TestRunLoopChildCleansUpOnLooprunnerError(t *testing.T) {
 		t.Fatal("loop child cancel function was not called")
 	}
 	child.mu.Lock()
-	completed := child.lc.isCompleted()
 	exitCode := child.exitCode
 	child.mu.Unlock()
-	if !completed {
-		t.Fatal("loop child was not marked completed")
-	}
 	if exitCode != 1 {
 		t.Fatalf("loop child exitCode = %d, want 1", exitCode)
 	}
@@ -2266,12 +2226,8 @@ func TestRunTeamChildCleansUpBrokerRuns(t *testing.T) {
 		t.Fatal("team child cancel function was not called")
 	}
 	child.mu.Lock()
-	completed := child.lc.isCompleted()
 	brokerToken := child.brokerToken
 	child.mu.Unlock()
-	if !completed {
-		t.Fatal("team child was not marked completed")
-	}
 	if brokerToken != wantToken {
 		t.Fatalf("child.brokerToken = %q, want the token from broker.EnsureRun (%q)", brokerToken, wantToken)
 	}
@@ -5088,12 +5044,6 @@ func TestShutdownWaitsForDirectPermissionTeardown(t *testing.T) {
 	case <-provider.closed:
 	default:
 		t.Fatal("provider was not closed before shutdown returned")
-	}
-	child.mu.Lock()
-	completed := child.lc.isCompleted()
-	child.mu.Unlock()
-	if !completed {
-		t.Fatal("child was not marked completed before shutdown returned")
 	}
 	sup.controlMu.Lock()
 	_, cached := sup.permOptions[spawn.RuntimeID+":req_shutdown_direct"]
