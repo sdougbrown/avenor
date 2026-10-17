@@ -9,6 +9,48 @@ import (
 	"testing"
 )
 
+// TestEffectExecutionPartitionCoversEveryKind pins the effectKind partition:
+// every defined kind must map to exactly one executor side — owned kinds run
+// under the transaction's locks, deferred kinds after every lock is released.
+// A kind in neither set is a machine bug both executors would report at
+// runtime, so the table must never return effectSideUnknown for a defined
+// kind.
+func TestEffectExecutionPartitionCoversEveryKind(t *testing.T) {
+	owned := []effectKind{
+		effectClearPresentation, effectSetAgentPresentation, effectSetSuccessPresentation,
+		effectSetSessionEndPresentation, effectSetIdleEndData, effectRecordOutcomeExit,
+		effectSettleTurnWaiters,
+	}
+	deferred := []effectKind{
+		effectWriteSentinel, effectSignalCapacity, effectReleaseTreeToken,
+		effectEmitSessionEnd, effectConsiderProviderCancel, effectCancelContext,
+		effectPublishCompletion, effectCloseDone,
+	}
+	sides := make(map[effectKind]effectSide, len(owned)+len(deferred))
+	for _, k := range owned {
+		if side := effectExecution(k); side != effectSideOwned {
+			t.Errorf("effectExecution(%d) = %d, want effectSideOwned", int(k), int(side))
+		}
+		sides[k] = effectSideOwned
+	}
+	for _, k := range deferred {
+		if side := effectExecution(k); side != effectSideDeferred {
+			t.Errorf("effectExecution(%d) = %d, want effectSideDeferred", int(k), int(side))
+		}
+		if _, dup := sides[k]; dup {
+			t.Errorf("effectKind %d is in both the owned and deferred sets", int(k))
+		}
+		sides[k] = effectSideDeferred
+	}
+	// The effectKind const block is a contiguous iota run, so walking its
+	// range reaches every defined kind exactly once.
+	for k := effectClearPresentation; k <= effectCloseDone; k++ {
+		if _, ok := sides[k]; !ok {
+			t.Errorf("effectKind %d is in neither the owned nor the deferred set", int(k))
+		}
+	}
+}
+
 func TestReportLifecycleErrorCountsIllegalTransitions(t *testing.T) {
 	s := newLifecycleTestOwner()
 	s.errWriter = io.Discard // keep the expected-error log out of test output

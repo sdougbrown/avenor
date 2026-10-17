@@ -164,28 +164,43 @@ func (s *Supervisor) transactLifecycle(child *childRuntime, sig lifecycleSignal,
 	return cont, eff, nil
 }
 
-// ownedLifecycleEffect and deferredLifecycleEffect partition effectKind
-// between the adapter's two effect switches. The locked kinds execute under
-// the transaction's locks; the rest after every lock is released. A kind in
-// neither set is a machine bug that both switches report.
-func ownedLifecycleEffect(k effectKind) bool {
+// effectSide names the executor that runs an effect kind: owned kinds run
+// under the transaction's locks, deferred kinds after every lock is released.
+// unknown marks a kind in neither set; both executors report it as a
+// lifecycle error.
+type effectSide int
+
+const (
+	effectSideOwned effectSide = iota
+	effectSideDeferred
+	effectSideUnknown
+)
+
+// effectExecution is the single partition of effectKind between the adapter's
+// two effect executors. A kind in neither set is a machine bug that both
+// executors report.
+func effectExecution(k effectKind) effectSide {
 	switch k {
 	case effectClearPresentation, effectSetAgentPresentation, effectSetSuccessPresentation,
 		effectSetSessionEndPresentation, effectSetIdleEndData, effectRecordOutcomeExit,
 		effectSettleTurnWaiters:
-		return true
-	}
-	return false
-}
-
-func deferredLifecycleEffect(k effectKind) bool {
-	switch k {
+		return effectSideOwned
 	case effectWriteSentinel, effectSignalCapacity, effectReleaseTreeToken,
 		effectEmitSessionEnd, effectConsiderProviderCancel, effectCancelContext,
 		effectPublishCompletion, effectCloseDone:
-		return true
+		return effectSideDeferred
 	}
-	return false
+	return effectSideUnknown
+}
+
+// ownedLifecycleEffect and deferredLifecycleEffect derive from the single
+// effectExecution partition, so a kind can never belong to both sets.
+func ownedLifecycleEffect(k effectKind) bool {
+	return effectExecution(k) == effectSideOwned
+}
+
+func deferredLifecycleEffect(k effectKind) bool {
+	return effectExecution(k) == effectSideDeferred
 }
 
 // applyOwnedLifecycleEffects executes the locked lifecycle effects this
