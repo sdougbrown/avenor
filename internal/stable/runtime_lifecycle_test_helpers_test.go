@@ -63,13 +63,10 @@ func initializeTestLifecycle(t testing.TB, child *childRuntime, opts testLifecyc
 		t.Fatalf("test child %s: invalid declared lifecycle state: %v", child.id, err)
 	}
 	child.lc = st
-	// Legacy mirrors, written once to match the declared state exactly.
+	// Legacy mirrors, written once to match the declared state exactly. The
+	// activity mirrors carry the machine count for both classes.
 	child.active = opts.attempts > 0
-	if class == workflowAttemptClass {
-		child.activeAttempts = opts.attempts
-	} else {
-		child.activeAttempts = 0
-	}
+	child.activeAttempts = opts.attempts
 	child.parked = opts.exec == execParked || opts.exec == execParkedEnding
 	child.completed = opts.completion != completionOpen
 	child.shuttingDown = opts.shutdown == shutdownRequested
@@ -299,20 +296,13 @@ func finishUnrunChildAtCleanup(t *testing.T, sup *Supervisor, child *childRuntim
 }
 
 // finishActiveSyntheticChild finishes the modeled lifecycle of an active
-// status fixture (legacy active=true, machine attempts=1, no run goroutine):
-// it settles the modeled attempt, then establishes the shutdown boundary,
-// closes the writer and publishes completion.
+// status fixture (machine attempts=1, no run goroutine): it settles the
+// modeled attempt, then establishes the shutdown boundary, closes the writer
+// and publishes completion. The adapter owns the settled signal's mirrors
+// and waiter release.
 func finishActiveSyntheticChild(s *Supervisor, child *childRuntime) {
 	child.mu.Lock()
-	_, _, err := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptSettled, class: child.lc.class}, func() legacyLifecycleWitness {
-		w := legacyLifecycleWitness{}
-		child.active = false
-		child.phase = ""
-		child.phaseLabel = ""
-		w.locked = append(w.locked, lifecycleEffect{kind: effectClearPresentation}, lifecycleEffect{kind: effectSettleTurnWaiters})
-		child.settleTurnLocked()
-		return w
-	})
+	_, _, err := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptSettled, class: child.lc.class}, nil)
 	child.mu.Unlock()
 	if err != nil {
 		s.reportLifecycleError(child, err)

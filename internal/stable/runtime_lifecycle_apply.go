@@ -1,23 +1,19 @@
 package stable
 
-// Stage 2 imperative adapter for the childRuntime lifecycle machine
-// (issue #316, plan decision 8).
+// Imperative adapter for the childRuntime lifecycle machine.
 //
-// The pure machine in runtime_lifecycle.go only predicts. This file owns the
-// shadow-mode transaction: capture the pre-state under the caller's locks,
-// predict with next, execute the still-legacy-owned mutations through the
-// caller-supplied closure, field-commit the prediction, and independently
-// compare the committed state, presentation and legacy effect witnesses.
-// Legacy writes stay authoritative; the machine owns nothing yet (plan
-// decision 9).
-//
-// applyLifecycle requires the caller to hold child.mu and acquires no lock.
-// applyLifecycleWriteLocked requires the caller to hold writeMu -> child.mu
-// and is the only path that commits the shutdown and writer dimensions
-// (plan decision 7). Both take the temporary legacy closure that performs the
-// still-legacy-owned locked mutations; it is deleted in Stage 7. Errors are
-// returned to the caller and must be reported with reportLifecycleError
-// outside every lock.
+// The pure machine in runtime_lifecycle.go only predicts. This file commits
+// the prediction field by field, executes the owned locked effects — activity
+// and attempt count with their mirrors, presentation, and the settled/finalized
+// waiter release — and compares the remaining still-legacy-owned mirrors
+// (parked, completion, shutdown, writer, recorded exit codes) against the
+// prediction as shadow evidence. The legacy closure performs only the
+// still-legacy-owned locked mutations; it is deleted once every effect is
+// owned. applyLifecycle requires the caller to hold child.mu and acquires no
+// lock. applyLifecycleWriteLocked requires the caller to hold
+// writeMu -> child.mu and is the only path that commits the shutdown and
+// writer dimensions. Errors are returned to the caller and
+// must be reported with reportLifecycleError outside every lock.
 
 import (
 	"errors"
@@ -90,8 +86,10 @@ func signalKindName(k signalKind) string {
 	return fmt.Sprintf("signal(%d)", int(k))
 }
 
-// legacyLifecycleWitness records the legacy effects the closure actually
-// performed under the caller's locks, in execution order. Deferred legacy
+// legacyLifecycleWitness records the still-legacy-owned locked effects the
+// closure actually performed under the caller's locks, in execution order.
+// Owned effects (activity/count, presentation, the settled/finalized waiter
+// release) are executed by the adapter and never witnessed; deferred legacy
 // effects (sentinels, capacity signals, session ends, cancels, publication)
 // are witnessed at their outer execution sites and compared with
 // compareDeferredLifecycleEffects.
@@ -182,6 +180,7 @@ func (s *Supervisor) transactLifecycle(child *childRuntime, sig lifecycleSignal,
 		child.lc.writer = predicted.writer
 	}
 	var mismatchDetails []string
+	s.applyOwnedLifecycleEffects(child, predicted, sig.kind, eff)
 	s.compareShadowTransaction(child, pre, prePhase, preLabel, preExit, preReason, predicted, eff, witness, sig.kind, &mismatchDetails)
 	if len(mismatchDetails) > 0 {
 		// The mismatch counter was already incremented; bundle the detail lines
@@ -191,8 +190,46 @@ func (s *Supervisor) transactLifecycle(child *childRuntime, sig lifecycleSignal,
 	return cont, eff, nil
 }
 
+// applyOwnedLifecycleEffects executes the locked lifecycle effects this
+// adapter owns and writes the mirrors derived from them: the activity mirrors
+// (active, activeAttempts, kept synchronized to the machine count for both
+// classes), presentation (phase, phaseLabel), the idle-end data (exitCode,
+// lastStopReason) and the waiter release of a settled or finalized attempt.
+// The completion publication's waiter release is not owned here; complete()
+// keeps its legacy settle until completion ownership moves.
+func (s *Supervisor) applyOwnedLifecycleEffects(child *childRuntime, predicted lifecycleState, site signalKind, eff []lifecycleEffect) {
+	for _, e := range eff {
+		switch e.kind {
+		case effectClearPresentation:
+			child.phase, child.phaseLabel = "", ""
+		case effectSetAgentPresentation:
+			child.phase = e.phase
+			if e.label != "" {
+				child.phaseLabel = e.label
+			}
+		case effectSetSuccessPresentation:
+			child.phase = "done"
+		case effectSetSessionEndPresentation:
+			child.phase = "done"
+			if e.reason != "" {
+				child.lastStopReason = e.reason
+			}
+		case effectSetIdleEndData:
+			child.exitCode = e.exitCode
+			child.phase = "done"
+			child.lastStopReason = e.reason
+		case effectSettleTurnWaiters:
+			if site == signalAttemptSettled || site == signalWorkflowFinalized {
+				child.settleTurnLocked()
+			}
+		}
+	}
+	child.activeAttempts = predicted.attempts
+	child.active = predicted.attempts > 0
+}
+
 // reportLifecycleError counts every illegal transition and logs it. It must
-// be called outside all locks (plan decision 7). An error that carries only
+// be called outside all locks. An error that carries only
 // collected shadow-mismatch details is emitted here line by line; its
 // mismatches were counted at detection, so the transition counter is not
 // incremented for it.
@@ -220,22 +257,24 @@ func (s *Supervisor) reportLifecycleError(child *childRuntime, err error) {
 // against the legacy mirrors, presentation and locked-effect witness. Every
 // failed comparison increments lifecycleShadowMismatches.
 func (s *Supervisor) compareShadowTransaction(child *childRuntime, pre lifecycleState, prePhase, preLabel string, preExit int, preReason string, predicted lifecycleState, eff []lifecycleEffect, witness legacyLifecycleWitness, site signalKind, sink *[]string) {
-	// Attempt count: workflow compares against activeAttempts; direct compares
-	// against the 0/1 legacy active boolean (its activeAttempts is unused).
-	switch predicted.class {
-	case workflowAttemptClass:
-		if child.activeAttempts != predicted.attempts {
-			s.countShadowMismatch(child, site, fmt.Sprintf("attempts: lc=%d legacy activeAttempts=%d", predicted.attempts, child.activeAttempts), sink)
-		}
-	case directAttemptClass:
-		want := 0
-		if child.active {
-			want = 1
-		}
-		if want != predicted.attempts {
-			s.countShadowMismatch(child, site, fmt.Sprintf("attempts: lc=%d legacy active=%v", predicted.attempts, child.active), sink)
-		}
+	// Adapter consistency: the mirrors this adapter owns must match the state
+	// it just committed. These are not shadow comparisons — the adapter writes
+	// the mirrors itself — but a failed write or stale read still indicates a
+	// bug, so the shared mismatch counter records it.
+	if child.activeAttempts != predicted.attempts {
+		s.countMirrorMismatch(child, site, fmt.Sprintf("attempts mirror: lc=%d activeAttempts=%d", predicted.attempts, child.activeAttempts), sink)
 	}
+	if child.active != (predicted.attempts > 0) {
+		s.countMirrorMismatch(child, site, fmt.Sprintf("active mirror: attempts=%d active=%v", predicted.attempts, child.active), sink)
+	}
+	// Presentation mirror: apply the predicted presentation effects to the pre
+	// snapshot and compare with the post-values the adapter wrote.
+	wantPhase, wantLabel := applyLifecyclePresentation(prePhase, preLabel, eff)
+	if child.phase != wantPhase || child.phaseLabel != wantLabel {
+		s.countMirrorMismatch(child, site, fmt.Sprintf("presentation mirror: post=(%q,%q) predicted=(%q,%q)", child.phase, child.phaseLabel, wantPhase, wantLabel), sink)
+	}
+	// Still-legacy-owned mirrors, compared as shadow evidence against the
+	// prediction.
 	// Parked: compared exactly until final publication (plan decision 4);
 	// once completion is published the legacy parked value may be obsolete.
 	if predicted.completion != completionPublished && child.parked != predicted.isParked() {
@@ -271,13 +310,10 @@ func (s *Supervisor) compareShadowTransaction(child *childRuntime, pre lifecycle
 			"capacity exclusion: legacy=(completed=%v,parked=%v) lc=(completed=%v,parked=%v)",
 			child.completed, child.parked, predicted.isCompleted(), predicted.isParked()), sink)
 	}
-	// Presentation: apply the predicted presentation effects to the pre
-	// snapshot and compare with the actual legacy post-values.
-	wantPhase, wantLabel := applyLifecyclePresentation(prePhase, preLabel, eff)
-	if child.phase != wantPhase || child.phaseLabel != wantLabel {
-		s.countShadowMismatch(child, site, fmt.Sprintf("presentation: legacy=(%q,%q) predicted=(%q,%q)", child.phase, child.phaseLabel, wantPhase, wantLabel), sink)
-	}
-	// Terminal data written by predicted locked effects.
+	// Terminal data written by predicted locked effects. The recorded outcome
+	// exit code is still legacy-owned (written by the caller's legacy closure);
+	// the idle-end and session-end data are adapter-owned mirrors checked for
+	// consistency above their writes.
 	for _, e := range eff {
 		switch e.kind {
 		case effectRecordOutcomeExit:
@@ -286,20 +322,22 @@ func (s *Supervisor) compareShadowTransaction(child *childRuntime, pre lifecycle
 			}
 		case effectSetIdleEndData:
 			if child.exitCode != e.exitCode {
-				s.countShadowMismatch(child, site, fmt.Sprintf("idle exitCode: legacy=%d predicted=%d", child.exitCode, e.exitCode), sink)
+				s.countMirrorMismatch(child, site, fmt.Sprintf("idle exitCode mirror: post=%d predicted=%d", child.exitCode, e.exitCode), sink)
 			}
 			if child.lastStopReason != e.reason {
-				s.countShadowMismatch(child, site, fmt.Sprintf("idle stop reason: legacy=%q predicted=%q", child.lastStopReason, e.reason), sink)
+				s.countMirrorMismatch(child, site, fmt.Sprintf("idle stop reason mirror: post=%q predicted=%q", child.lastStopReason, e.reason), sink)
 			}
 		case effectSetSessionEndPresentation:
 			if e.reason != "" && child.lastStopReason != e.reason {
-				s.countShadowMismatch(child, site, fmt.Sprintf("session end stop reason: legacy=%q predicted=%q", child.lastStopReason, e.reason), sink)
+				s.countMirrorMismatch(child, site, fmt.Sprintf("session end stop reason mirror: post=%q predicted=%q", child.lastStopReason, e.reason), sink)
 			}
 		}
 	}
-	// Locked-effect witness. The sink collects detail lines so nothing is
-	// printed while the caller's locks are held.
-	s.compareLifecycleEffects(lifecycleLockedEffects(eff), witness.locked, child, site, "locked", sink)
+	// Locked-effect witness. Only the still-legacy-owned locked effects are
+	// witnessed by the legacy closure; owned effects are executed by the
+	// adapter. The sink collects detail lines so nothing is printed while the
+	// caller's locks are held.
+	s.compareLifecycleEffects(lifecycleLegacyLockedEffects(eff, site), witness.locked, child, site, "locked", sink)
 }
 
 // applyLifecyclePresentation applies predicted presentation effects to a
@@ -388,17 +426,30 @@ func (s *Supervisor) compareLifecycleContinuation(child *childRuntime, predicted
 	}
 }
 
-// countShadowMismatch increments the mismatch counter and records the detail.
-// A nonnil sink collects the formatted line for emission after the caller's
-// locks are released; a nil sink (out-of-lock comparators, tests) emits the
-// line immediately.
+// countShadowMismatch increments the mismatch counter and records the detail
+// of a failed comparison against a still-legacy-owned mirror or witnessed
+// effect. A nonnil sink collects the formatted line for emission after the
+// caller's locks are released; a nil sink (out-of-lock comparators, tests)
+// emits the line immediately.
 func (s *Supervisor) countShadowMismatch(child *childRuntime, site signalKind, detail string, sink *[]string) {
+	s.countLifecycleComparisonMismatch(child, site, "lifecycle shadow mismatch", detail, sink)
+}
+
+// countMirrorMismatch records a failed adapter consistency check: an owned
+// mirror does not match the state the adapter just committed. These are not
+// shadow comparisons — the adapter writes the mirror itself — but they still
+// indicate a bug and share the mismatch counter.
+func (s *Supervisor) countMirrorMismatch(child *childRuntime, site signalKind, detail string, sink *[]string) {
+	s.countLifecycleComparisonMismatch(child, site, "lifecycle mirror mismatch", detail, sink)
+}
+
+func (s *Supervisor) countLifecycleComparisonMismatch(child *childRuntime, site signalKind, class, detail string, sink *[]string) {
 	s.lifecycleShadowMismatches.Add(1)
 	id := ""
 	if child != nil {
 		id = child.id
 	}
-	line := fmt.Sprintf("lifecycle shadow mismatch (%s, runtime %s): %s", signalKindName(site), id, detail)
+	line := fmt.Sprintf("%s (%s, runtime %s): %s", class, signalKindName(site), id, detail)
 	if sink != nil {
 		*sink = append(*sink, line)
 		return
@@ -406,15 +457,21 @@ func (s *Supervisor) countShadowMismatch(child *childRuntime, site signalKind, d
 	fmt.Fprintf(s.stderrWriter(), "avenor stable: %s\n", line)
 }
 
-// lifecycleLockedEffects filters the locked effects (executed under the
-// caller's locks) out of a predicted effect list.
-func lifecycleLockedEffects(eff []lifecycleEffect) []lifecycleEffect {
+// lifecycleLegacyLockedEffects filters the locked effects that are still
+// legacy-owned out of a predicted effect list: the recorded outcome exit code
+// (until continuation ownership) and the completion publication's waiter
+// release (until completion ownership). Owned effects are executed by the
+// adapter and carry no witness.
+func lifecycleLegacyLockedEffects(eff []lifecycleEffect, site signalKind) []lifecycleEffect {
 	locked := make([]lifecycleEffect, 0, len(eff))
 	for _, e := range eff {
 		switch e.kind {
-		case effectClearPresentation, effectSetAgentPresentation, effectSetSuccessPresentation,
-			effectSetSessionEndPresentation, effectSetIdleEndData, effectRecordOutcomeExit, effectSettleTurnWaiters:
+		case effectRecordOutcomeExit:
 			locked = append(locked, e)
+		case effectSettleTurnWaiters:
+			if site == signalCompletionPublished {
+				locked = append(locked, e)
+			}
 		}
 	}
 	return locked

@@ -88,9 +88,9 @@ func TestCompareDeferredLifecycleEffectsCountsSequenceMismatch(t *testing.T) {
 }
 
 // TestTransactLifecycleCollectsOneSyntheticMismatch drives one divergent
-// legacy mirror through the real transaction and asserts the mismatch is
-// counted without an illegal-transition error, with the detail lines emitted
-// only into the captured stderr writer.
+// still-legacy-owned mirror through the real transaction and asserts the
+// mismatch is counted without an illegal-transition error, with the detail
+// line emitted only into the captured stderr writer.
 func TestTransactLifecycleCollectsOneSyntheticMismatch(t *testing.T) {
 	var buf bytes.Buffer
 	s := newLifecycleTestOwner()
@@ -100,12 +100,9 @@ func TestTransactLifecycleCollectsOneSyntheticMismatch(t *testing.T) {
 
 	child.mu.Lock()
 	_, _, err := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptPreparing, class: directAttemptClass}, func() legacyLifecycleWitness {
-		// The legacy mutation writes a divergent mirror and records the
-		// locked effect it actually performed.
-		w := legacyLifecycleWitness{}
-		child.phase = "done"
-		w.locked = append(w.locked, lifecycleEffect{kind: effectClearPresentation})
-		return w
+		// The legacy mutation writes a divergent still-legacy-owned mirror.
+		child.shuttingDown = true
+		return legacyLifecycleWitness{}
 	})
 	child.mu.Unlock()
 
@@ -144,18 +141,17 @@ func TestTransactLifecycleLockedWitnessIsSoleDivergence(t *testing.T) {
 	s := newLifecycleTestOwner()
 	s.errWriter = &buf
 	child := &childRuntime{id: "rt_locked_witness", done: make(chan struct{})}
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execRunning, attempts: 1, class: directAttemptClass})
+	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execIdle, class: directAttemptClass})
 
 	child.mu.Lock()
-	_, _, err := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptSettled, class: directAttemptClass}, func() legacyLifecycleWitness {
-		// The legacy settle performs only the waiter release; the predicted
-		// clear-presentation effect is absent from the locked witness while
-		// every mirror already matches the prediction.
-		w := legacyLifecycleWitness{}
-		child.active = false
-		child.settleTurnLocked()
-		w.locked = append(w.locked, lifecycleEffect{kind: effectSettleTurnWaiters})
-		return w
+	_, _, err := s.applyLifecycle(child, lifecycleSignal{
+		kind: signalAttemptOutcome, class: directAttemptClass,
+		runKind: runKindOrdinaryDirect, exitCode: 7, sentinelReason: "error", resultSessionID: "ses_x",
+	}, func() legacyLifecycleWitness {
+		// The legacy exit write matches the prediction but records no locked
+		// effect, so the missing locked witness is the sole divergence.
+		child.exitCode = 7
+		return legacyLifecycleWitness{}
 	})
 	child.mu.Unlock()
 
@@ -181,22 +177,20 @@ func TestTransactLifecycleLockedWitnessIsSoleDivergence(t *testing.T) {
 }
 
 // TestCompareShadowTransactionCountsDivergentMirrors runs a real transaction
-// per compared dimension with one divergent legacy mirror on an otherwise
-// valid fixture, on an isolated owner whose counters are asserted exactly.
+// per compared dimension with one divergent still-legacy-owned mirror on an
+// otherwise valid fixture, on an isolated owner whose counters are asserted
+// exactly. Owned mirrors (activity, presentation, idle-end data) are written
+// by the adapter itself and have no legacy divergence to compare; only the
+// remaining shadow dimensions appear here.
 func TestCompareShadowTransactionCountsDivergentMirrors(t *testing.T) {
-	// prepareLegacy performs the locked presentation clear the legacy
-	// attemptPreparing path performs, records the effect it performed, and
-	// applies an optional divergence to the legacy mirrors.
+	// prepareLegacy leaves the mirrors to the adapter and performs no locked
+	// effects: attemptPreparing's owned clear runs in the adapter.
 	prepare := func(diverge func(*childRuntime)) func(*childRuntime) legacyLifecycleWitness {
 		return func(c *childRuntime) legacyLifecycleWitness {
-			w := legacyLifecycleWitness{}
-			c.phase = ""
-			c.phaseLabel = ""
 			if diverge != nil {
 				diverge(c)
 			}
-			w.locked = append(w.locked, lifecycleEffect{kind: effectClearPresentation})
-			return w
+			return legacyLifecycleWitness{}
 		}
 	}
 
@@ -213,27 +207,6 @@ func TestCompareShadowTransactionCountsDivergentMirrors(t *testing.T) {
 			signal: lifecycleSignal{kind: signalAttemptPreparing, class: directAttemptClass},
 			legacy: prepare(nil),
 			want:   0,
-		},
-		{
-			name:   "direct attempts",
-			opts:   testLifecycleOptions{exec: execIdle, class: directAttemptClass},
-			signal: lifecycleSignal{kind: signalAttemptPreparing, class: directAttemptClass},
-			legacy: prepare(func(c *childRuntime) { c.active = true }),
-			want:   1,
-		},
-		{
-			name:   "workflow attempts",
-			opts:   testLifecycleOptions{exec: execRunning, attempts: 1, class: workflowAttemptClass},
-			signal: lifecycleSignal{kind: signalWorkflowFinalized, class: workflowAttemptClass},
-			legacy: func(c *childRuntime) legacyLifecycleWitness {
-				w := legacyLifecycleWitness{}
-				c.activeAttempts = 2
-				c.active = true
-				c.settleTurnLocked()
-				w.locked = append(w.locked, lifecycleEffect{kind: effectSettleTurnWaiters})
-				return w
-			},
-			want: 1,
 		},
 		{
 			name:   "parked",
@@ -264,13 +237,6 @@ func TestCompareShadowTransactionCountsDivergentMirrors(t *testing.T) {
 			want:   1,
 		},
 		{
-			name:   "presentation",
-			opts:   testLifecycleOptions{exec: execIdle, class: directAttemptClass},
-			signal: lifecycleSignal{kind: signalAttemptPreparing, class: directAttemptClass},
-			legacy: prepare(func(c *childRuntime) { c.phase = "done" }),
-			want:   1,
-		},
-		{
 			name:   "recorded exit code",
 			opts:   testLifecycleOptions{exec: execIdle, class: directAttemptClass},
 			signal: lifecycleSignal{kind: signalAttemptOutcome, class: directAttemptClass, runKind: runKindOrdinaryDirect, exitCode: 7, sentinelReason: "error", resultSessionID: "ses_x"},
@@ -281,44 +247,6 @@ func TestCompareShadowTransactionCountsDivergentMirrors(t *testing.T) {
 				return w
 			},
 			want: 2, // exit-code field and locked-effect payload both fire
-		},
-		{
-			name:   "idle end data",
-			opts:   testLifecycleOptions{exec: execIdle, class: directAttemptClass},
-			signal: lifecycleSignal{kind: signalIdleContextEnded, class: directAttemptClass, idleExitCode: 2, idleStopReason: "deadline"},
-			legacy: func(c *childRuntime) legacyLifecycleWitness {
-				w := legacyLifecycleWitness{}
-				c.exitCode = 3
-				c.lastStopReason = "other"
-				w.locked = append(w.locked, lifecycleEffect{kind: effectSetIdleEndData, exitCode: 3, reason: "other"})
-				return w
-			},
-			want: 4, // exit code, stop reason, locked-effect payload and presentation all fire
-		},
-		{
-			name:   "session end stop reason",
-			opts:   testLifecycleOptions{exec: execIdle, class: directAttemptClass},
-			signal: lifecycleSignal{kind: signalSessionEndObserved, class: directAttemptClass, stopReason: "end_turn"},
-			legacy: func(c *childRuntime) legacyLifecycleWitness {
-				w := legacyLifecycleWitness{}
-				c.lastStopReason = "other"
-				w.locked = append(w.locked, lifecycleEffect{kind: effectSetSessionEndPresentation, reason: "other"})
-				return w
-			},
-			want: 2, // stop reason and presentation both fire
-		},
-		{
-			name:   "locked effect witness",
-			opts:   testLifecycleOptions{exec: execRunning, attempts: 1, class: directAttemptClass},
-			signal: lifecycleSignal{kind: signalAttemptSettled, class: directAttemptClass},
-			legacy: func(c *childRuntime) legacyLifecycleWitness {
-				w := legacyLifecycleWitness{}
-				c.active = false
-				c.settleTurnLocked()
-				w.locked = append(w.locked, lifecycleEffect{kind: effectSettleTurnWaiters})
-				return w
-			},
-			want: 1, // the predicted clear-presentation effect is missing from the witness
 		},
 	}
 
@@ -348,6 +276,135 @@ func TestCompareShadowTransactionCountsDivergentMirrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestApplyLifecycleWritesOwnedMirrors drives the signals whose effects the
+// adapter owns and asserts the mirrors it writes: the activity mirrors for
+// both attempt classes, the presentation writes, the idle-end data and the
+// settled/finalized waiter release.
+func TestApplyLifecycleWritesOwnedMirrors(t *testing.T) {
+	apply := func(t *testing.T, s *Supervisor, child *childRuntime, sig lifecycleSignal) {
+		t.Helper()
+		child.mu.Lock()
+		_, _, err := s.applyLifecycle(child, sig, nil)
+		child.mu.Unlock()
+		if err != nil {
+			t.Fatalf("applyLifecycle(%v): %v", sig.kind, err)
+		}
+	}
+	mirrorState := func(t *testing.T, child *childRuntime) (active bool, activeAttempts int, phase, phaseLabel string) {
+		t.Helper()
+		child.mu.Lock()
+		defer child.mu.Unlock()
+		return child.active, child.activeAttempts, child.phase, child.phaseLabel
+	}
+
+	t.Run("direct activity and presentation", func(t *testing.T) {
+		s := newLifecycleTestOwner()
+		child := &childRuntime{id: "rt_owned_direct", done: make(chan struct{})}
+		initializeTestLifecycle(t, child, testLifecycleOptions{exec: execIdle, class: directAttemptClass, phase: "stale", phaseLabel: "old"})
+
+		// Preparing clears the presentation without touching the count.
+		apply(t, s, child, lifecycleSignal{kind: signalAttemptPreparing, class: directAttemptClass})
+		if active, attempts, phase, label := mirrorState(t, child); active || attempts != 0 || phase != "" || label != "" {
+			t.Fatalf("after preparing: active=%v attempts=%d phase=%q label=%q", active, attempts, phase, label)
+		}
+
+		// Starting increments the count and marks activity.
+		apply(t, s, child, lifecycleSignal{kind: signalAttemptStarted, class: directAttemptClass})
+		if active, attempts, _, _ := mirrorState(t, child); !active || attempts != 1 {
+			t.Fatalf("after start: active=%v attempts=%d", active, attempts)
+		}
+
+		// Settling decrements back to zero, keeps the presentation clear and
+		// releases the registered waiter.
+		child.mu.Lock()
+		waiter := make(chan struct{})
+		child.turnWaiters = append(child.turnWaiters, waiter)
+		child.mu.Unlock()
+		apply(t, s, child, lifecycleSignal{kind: signalAttemptSettled, class: directAttemptClass})
+		if active, attempts, phase, label := mirrorState(t, child); active || attempts != 0 || phase != "" || label != "" {
+			t.Fatalf("after settle: active=%v attempts=%d phase=%q label=%q", active, attempts, phase, label)
+		}
+		select {
+		case <-waiter:
+		default:
+			t.Fatal("registered waiter was not released by the settle")
+		}
+	})
+
+	t.Run("workflow parallel attempts and finalization", func(t *testing.T) {
+		s := newLifecycleTestOwner()
+		child := &childRuntime{id: "rt_owned_workflow", done: make(chan struct{})}
+		initializeTestLifecycle(t, child, testLifecycleOptions{exec: execRunning, attempts: 2, class: workflowAttemptClass, phase: "working", phaseLabel: "phase two"})
+
+		// The first of two parallel settles keeps the last attempt active and
+		// leaves the presentation alone.
+		apply(t, s, child, lifecycleSignal{kind: signalAttemptSettled, class: workflowAttemptClass})
+		if active, attempts, phase, label := mirrorState(t, child); !active || attempts != 1 || phase != "working" || label != "phase two" {
+			t.Fatalf("after parallel settle: active=%v attempts=%d phase=%q label=%q", active, attempts, phase, label)
+		}
+
+		// Finalization resets the count, releases the waiters unconditionally
+		// and never clears the presentation.
+		child.mu.Lock()
+		waiter := make(chan struct{})
+		child.turnWaiters = append(child.turnWaiters, waiter)
+		child.mu.Unlock()
+		apply(t, s, child, lifecycleSignal{kind: signalWorkflowFinalized, class: workflowAttemptClass})
+		if active, attempts, phase, label := mirrorState(t, child); active || attempts != 0 || phase != "working" || label != "phase two" {
+			t.Fatalf("after finalize: active=%v attempts=%d phase=%q label=%q", active, attempts, phase, label)
+		}
+		select {
+		case <-waiter:
+		default:
+			t.Fatal("registered waiter was not released by the finalization")
+		}
+	})
+
+	t.Run("presentation and idle-end data", func(t *testing.T) {
+		s := newLifecycleTestOwner()
+		child := &childRuntime{id: "rt_owned_presentation", done: make(chan struct{})}
+		initializeTestLifecycle(t, child, testLifecycleOptions{exec: execIdle, class: directAttemptClass, phaseLabel: "kept"})
+
+		// An agent status replaces the phase; an empty label retains the stored one.
+		apply(t, s, child, lifecycleSignal{kind: signalAgentStatusObserved, class: directAttemptClass, phase: "working"})
+		if _, _, phase, label := mirrorState(t, child); phase != "working" || label != "kept" {
+			t.Fatalf("after agent status: phase=%q label=%q", phase, label)
+		}
+
+		// A successful presentation marks the phase done.
+		apply(t, s, child, lifecycleSignal{kind: signalSuccessPresented, class: directAttemptClass, exitCode: 0})
+		if _, _, phase, _ := mirrorState(t, child); phase != "done" {
+			t.Fatalf("after success: phase=%q", phase)
+		}
+
+		// A session end with a nonempty stop reason records it; an empty one
+		// leaves the stored reason alone.
+		apply(t, s, child, lifecycleSignal{kind: signalSessionEndObserved, class: directAttemptClass, stopReason: "end_turn"})
+		child.mu.Lock()
+		reason := child.lastStopReason
+		child.mu.Unlock()
+		if reason != "end_turn" {
+			t.Fatalf("after session end: lastStopReason=%q", reason)
+		}
+		apply(t, s, child, lifecycleSignal{kind: signalSessionEndObserved, class: directAttemptClass})
+		child.mu.Lock()
+		reason = child.lastStopReason
+		child.mu.Unlock()
+		if reason != "end_turn" {
+			t.Fatalf("after empty session end: lastStopReason=%q", reason)
+		}
+
+		// An idle-context end overwrites the terminal data.
+		apply(t, s, child, lifecycleSignal{kind: signalIdleContextEnded, class: directAttemptClass, idleExitCode: 2, idleStopReason: "timeout"})
+		child.mu.Lock()
+		exitCode, reason, phase := child.exitCode, child.lastStopReason, child.phase
+		child.mu.Unlock()
+		if exitCode != 2 || reason != "timeout" || phase != "done" {
+			t.Fatalf("after idle end: exitCode=%d reason=%q phase=%q", exitCode, reason, phase)
+		}
+	})
 }
 
 func TestFinishSyntheticRunChildDrivesFullTeardown(t *testing.T) {

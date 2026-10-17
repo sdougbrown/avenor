@@ -2349,17 +2349,12 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 				if !lifecycleTransitionFailed(err) {
 					s.compareDeferredLifecycleEffects(child, eff, successWitness, signalAttemptOutcome)
 				}
-				// Shadow: successPresented fires at the old post-sentinel site,
-				// never at result selection (decision 6).
+				// successPresented fires at the old post-sentinel site, never at
+				// result selection; the adapter writes the phase mirror.
 				child.mu.Lock()
 				_, _, sucErr := s.applyLifecycle(child, lifecycleSignal{
 					kind: signalSuccessPresented, class: child.lc.class, exitCode: result.exitCode,
-				}, func() legacyLifecycleWitness {
-					w := legacyLifecycleWitness{}
-					child.phase = "done"
-					w.locked = append(w.locked, lifecycleEffect{kind: effectSetSuccessPresentation})
-					return w
-				})
+				}, nil)
 				child.mu.Unlock()
 				if sucErr != nil {
 					s.reportLifecycleError(child, sucErr)
@@ -2695,16 +2690,9 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 			phaseRoster, phaseRosterFile, prepErr := func() (*rosterconfig.Config, string, error) {
 				child.mu.Lock()
 				defer child.mu.Unlock()
-				// Shadow: attemptPreparing clears the phase presentation even
-				// while another parallel attempt runs; the legacy clear is its
-				// mutation.
-				_, _, prepErr := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptPreparing, class: child.lc.class}, func() legacyLifecycleWitness {
-					w := legacyLifecycleWitness{}
-					child.phase = ""
-					child.phaseLabel = ""
-					w.locked = append(w.locked, lifecycleEffect{kind: effectClearPresentation})
-					return w
-				})
+				// The adapter owns attemptPreparing: it clears the phase
+				// presentation even while another parallel attempt runs.
+				_, _, prepErr := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptPreparing, class: child.lc.class}, nil)
 				return child.roster, child.rosterFile, prepErr
 			}()
 			if prepErr != nil {
@@ -3053,16 +3041,9 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 			phaseRoster, phaseRosterFile, prepErr := func() (*rosterconfig.Config, string, error) {
 				child.mu.Lock()
 				defer child.mu.Unlock()
-				// Shadow: attemptPreparing clears the phase presentation even
-				// while another parallel attempt runs; the legacy clear is its
-				// mutation.
-				_, _, prepErr := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptPreparing, class: child.lc.class}, func() legacyLifecycleWitness {
-					w := legacyLifecycleWitness{}
-					child.phase = ""
-					child.phaseLabel = ""
-					w.locked = append(w.locked, lifecycleEffect{kind: effectClearPresentation})
-					return w
-				})
+				// The adapter owns attemptPreparing: it clears the phase
+				// presentation even while another parallel attempt runs.
+				_, _, prepErr := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptPreparing, class: child.lc.class}, nil)
 				return child.roster, child.rosterFile, prepErr
 			}()
 			if prepErr != nil {
@@ -3654,14 +3635,10 @@ func (s *Supervisor) beginWorkflowAttempt(child *childRuntime, provider runtime.
 		lifecycle.cancelAnswers()
 	}
 	child.mu.Lock()
-	// Shadow: attemptStarted predicts attempts++ and exec -> R; the legacy
-	// counter and active writes run in the closure.
+	// attemptStarted is owned by the adapter: it commits the count and the
+	// active/activeAttempts mirrors. The provider pairing below stays legacy.
 	var deferredStartErr error
-	_, _, deferredStartErr = s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptStarted, class: child.lc.class}, func() legacyLifecycleWitness {
-		child.activeAttempts++
-		child.active = true
-		return legacyLifecycleWitness{}
-	})
+	_, _, deferredStartErr = s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptStarted, class: child.lc.class}, nil)
 	// These fields are a presentation slot only. Attempt ownership lives in
 	// sessionOwners, so parallel replacement cannot reject another provider.
 	// Keep the provider and its permission lifecycle generation paired under
@@ -3685,14 +3662,10 @@ func (s *Supervisor) beginWorkflowAttempt(child *childRuntime, provider runtime.
 
 func (s *Supervisor) endWorkflowAttempt(child *childRuntime, provider runtime.Provider) {
 	child.mu.Lock()
-	// Shadow: attemptSettled predicts the count decrement and the settle-once
-	// presentation clear and waiter settle on the transition to zero; the
-	// legacy block below is the mutation and its witness.
+	// The adapter owns attemptSettled: it decrements the count, clears the
+	// presentation and releases the waiters on the transition to zero. The
+	// provider/session teardown below stays legacy.
 	_, _, settledErr := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptSettled, class: child.lc.class}, func() legacyLifecycleWitness {
-		w := legacyLifecycleWitness{}
-		if child.activeAttempts > 0 {
-			child.activeAttempts--
-		}
 		if child.provider == provider {
 			sessionID := child.session.SessionID
 			child.provider = nil
@@ -3700,19 +3673,7 @@ func (s *Supervisor) endWorkflowAttempt(child *childRuntime, provider runtime.Pr
 			// become invalid when it closes.
 			child.session = runtime.Session{SessionID: sessionID}
 		}
-		prevActive := child.active
-		child.active = child.activeAttempts > 0
-		if !child.active {
-			child.phase = ""
-			child.phaseLabel = ""
-			w.locked = append(w.locked, lifecycleEffect{kind: effectClearPresentation})
-			if prevActive {
-				// The last parallel phase settled (running→idle).
-				child.settleTurnLocked()
-				w.locked = append(w.locked, lifecycleEffect{kind: effectSettleTurnWaiters})
-			}
-		}
-		return w
+		return legacyLifecycleWitness{}
 	})
 	child.mu.Unlock()
 	if settledErr != nil {
@@ -3728,10 +3689,10 @@ func (s *Supervisor) endWorkflowAttempt(child *childRuntime, provider runtime.Pr
 // transaction failed and nothing may be compared.
 func (s *Supervisor) finalizeWorkflowChild(child *childRuntime, final workflowSession, exitCode int, recordsExit bool) []lifecycleEffect {
 	child.mu.Lock()
-	// Shadow: workflowFinalized resets the count and settles unconditionally,
-	// and never clears presentation; the legacy block below is the mutation
-	// and its witness. The exit-code write is a deferred prediction the caller
-	// witnesses at its legacy write site.
+	// The adapter owns workflowFinalized: it resets the count, settles the
+	// waiters unconditionally and never clears presentation. The provider and
+	// identity teardown below stays legacy. The exit-code write is a deferred
+	// prediction the caller witnesses at its legacy write site.
 	sig := lifecycleSignal{kind: signalWorkflowFinalized, class: child.lc.class, exitCode: exitCode, workflowExitRecords: recordsExit}
 	_, predEff, finErr := s.applyLifecycle(child, sig, func() legacyLifecycleWitness {
 		w := legacyLifecycleWitness{}
@@ -3744,10 +3705,6 @@ func (s *Supervisor) finalizeWorkflowChild(child *childRuntime, final workflowSe
 		child.agentProfile = final.Identity.AgentProfile
 		child.rosterFile = final.Identity.RosterFile
 		child.rosterEntry = final.Identity.RosterEntry
-		child.activeAttempts = 0
-		child.active = false
-		child.settleTurnLocked()
-		w.locked = append(w.locked, lifecycleEffect{kind: effectSettleTurnWaiters})
 		return w
 	})
 	child.mu.Unlock()
@@ -3788,15 +3745,8 @@ func (s *Supervisor) statusIdentity(child *childRuntime, sessionID string) effec
 func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, resumeID, promptText string) childAttemptResult {
 	deadline, _ := ctx.Deadline()
 	child.mu.Lock()
-	// Shadow: attemptPreparing clears the phase presentation; the legacy
-	// clear is its mutation.
-	_, _, prepErr := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptPreparing, class: child.lc.class}, func() legacyLifecycleWitness {
-		w := legacyLifecycleWitness{}
-		child.phase = ""
-		child.phaseLabel = ""
-		w.locked = append(w.locked, lifecycleEffect{kind: effectClearPresentation})
-		return w
-	})
+	// The adapter owns attemptPreparing: it clears the phase presentation.
+	_, _, prepErr := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptPreparing, class: child.lc.class}, nil)
 	child.mu.Unlock()
 	if prepErr != nil {
 		s.reportLifecycleError(child, prepErr)
@@ -3822,12 +3772,9 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 
 	turnCtx, cancelTurn := context.WithCancel(ctx)
 	child.mu.Lock()
-	// Shadow: attemptStarted predicts attempts 0 -> 1 and exec -> R; the
-	// legacy active write is its mutation.
-	_, _, startErr := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptStarted, class: child.lc.class}, func() legacyLifecycleWitness {
-		child.active = true
-		return legacyLifecycleWitness{}
-	})
+	// The adapter owns attemptStarted: it commits the count and the
+	// active/activeAttempts mirrors.
+	_, _, startErr := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptStarted, class: child.lc.class}, nil)
 	child.interruptFn = cancelTurn
 	child.mu.Unlock()
 	if startErr != nil {
@@ -3836,20 +3783,12 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 	defer func() {
 		cancelTurn()
 		child.mu.Lock()
-		// Shadow: attemptSettled predicts the count decrement to zero and the
-		// presentation clear plus waiter settle; the legacy block is the
-		// mutation and its witness.
+		// The adapter owns attemptSettled: it decrements the count to zero,
+		// clears the presentation and releases the waiters. The interrupt
+		// teardown stays legacy beside it.
 		_, _, settledErr := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptSettled, class: child.lc.class}, func() legacyLifecycleWitness {
-			w := legacyLifecycleWitness{}
-			child.active = false
 			child.interruptFn = nil
-			child.phase = ""
-			child.phaseLabel = ""
-			w.locked = append(w.locked, lifecycleEffect{kind: effectClearPresentation})
-			// The turn settled (running→idle): wake wait_turn callers.
-			child.settleTurnLocked()
-			w.locked = append(w.locked, lifecycleEffect{kind: effectSettleTurnWaiters})
-			return w
+			return legacyLifecycleWitness{}
 		})
 		child.mu.Unlock()
 		if settledErr != nil {
@@ -4108,19 +4047,12 @@ func (s *Supervisor) writeIdleContextEnd(child *childRuntime, ctxErr error) {
 	}
 	exitCode := runtime.ExitCodeForStopReason(stopReason)
 	child.mu.Lock()
-	// Shadow: idleContextEnded overwrites exit/phase/reason and emits the
-	// sentinel then session.end; it never clears parked or settles waiters.
+	// The adapter owns idleContextEnded's data writes (exit code, phase,
+	// stop reason); the sentinel and session.end below stay legacy beside it.
 	_, eff, err := s.applyLifecycle(child, lifecycleSignal{
 		kind: signalIdleContextEnded, class: child.lc.class,
 		idleExitCode: exitCode, idleStopReason: stopReason,
-	}, func() legacyLifecycleWitness {
-		w := legacyLifecycleWitness{}
-		child.exitCode = exitCode
-		child.phase = "done"
-		child.lastStopReason = stopReason
-		w.locked = append(w.locked, lifecycleEffect{kind: effectSetIdleEndData, exitCode: exitCode, reason: stopReason})
-		return w
-	})
+	}, nil)
 	child.mu.Unlock()
 	if err != nil {
 		s.reportLifecycleError(child, err)
@@ -5499,21 +5431,13 @@ func (w *runtimeFanoutWriter) writeLocked(ev events.Event, diagnostics *[]error)
 		switch presentation.Event {
 		case "agent.status":
 			if phase, _ := presentation.Fields["phase"].(string); phase != "" && w.child.phase != "done" {
-				// Shadow: agentStatusObserved carries the snapshot (decision 6);
-				// the legacy presentation write is its mutation.
+				// The adapter owns the agent-status presentation write; the
+				// label is only replaced when nonempty.
 				label, _ := presentation.Fields["label"].(string)
 				_, _, statusErr := w.supervisor.applyLifecycle(w.child, lifecycleSignal{
 					kind: signalAgentStatusObserved, class: w.child.lc.class,
 					phase: phase, label: label, presentationWasDone: w.child.phase == "done",
-				}, func() legacyLifecycleWitness {
-					wr := legacyLifecycleWitness{}
-					w.child.phase = phase
-					if label != "" {
-						w.child.phaseLabel = label
-					}
-					wr.locked = append(wr.locked, lifecycleEffect{kind: effectSetAgentPresentation, phase: phase, label: label})
-					return wr
-				})
+				}, nil)
 				if statusErr != nil {
 					*diagnostics = append(*diagnostics, statusErr)
 				}
@@ -5548,24 +5472,12 @@ func (w *runtimeFanoutWriter) writeLocked(ev events.Event, diagnostics *[]error)
 			w.child.permission = nil
 		case "session.end":
 			stopReason, _ := presentation.Fields["stop_reason"].(string)
-			// Shadow: sessionEndObserved sets phase done and a nonempty stop
-			// reason; it does not settle an attempt (decision 6). The
-			// final-output data updates stay legacy-owned beside it.
+			// The adapter owns the session-end presentation (phase done and a
+			// nonempty stop reason); the final-output data updates below stay
+			// legacy beside it.
 			_, _, endErr := w.supervisor.applyLifecycle(w.child, lifecycleSignal{
 				kind: signalSessionEndObserved, class: w.child.lc.class, stopReason: stopReason,
-			}, func() legacyLifecycleWitness {
-				wr := legacyLifecycleWitness{}
-				w.child.phase = "done"
-				if stopReason != "" {
-					w.child.lastStopReason = stopReason
-				}
-				end := lifecycleEffect{kind: effectSetSessionEndPresentation}
-				if stopReason != "" {
-					end.reason = stopReason
-				}
-				wr.locked = append(wr.locked, end)
-				return wr
-			})
+			}, nil)
 			if endErr != nil {
 				*diagnostics = append(*diagnostics, endErr)
 			}
