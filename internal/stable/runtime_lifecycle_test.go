@@ -207,16 +207,6 @@ func TestRuntimeLifecycleMatrixRows(t *testing.T) {
 			},
 		},
 		{
-			name:   "finalized records the exit code the finalization path writes",
-			start:  workflowState(execRunning, 2),
-			signal: lifecycleSignal{kind: signalWorkflowFinalized, class: workflowAttemptClass, exitCode: 3, workflowExitRecords: true},
-			want:   workflowState(execIdle, 0),
-			effects: []lifecycleEffect{
-				{kind: effectSettleTurnWaiters},
-				{kind: effectRecordWorkflowExit, exitCode: 3},
-			},
-		},
-		{
 			name:    "returned releases tree token",
 			start:   idleDirect(),
 			signal:  lifecycleSignal{kind: signalAttemptReturned, class: directAttemptClass},
@@ -746,15 +736,6 @@ func TestRuntimeLifecycleRepeats(t *testing.T) {
 		}
 		if !effectsEqual(eff, []lifecycleEffect{{kind: effectSettleTurnWaiters}}) {
 			t.Fatalf("repeat finalize effects = %v", eff)
-		}
-		// The exit-record variant carries the exit code the finalization path
-		// writes after finalization.
-		out, _, eff = applyOK(t, out, lifecycleSignal{kind: signalWorkflowFinalized, class: workflowAttemptClass, exitCode: 2, workflowExitRecords: true})
-		if !effectsEqual(eff, []lifecycleEffect{
-			{kind: effectSettleTurnWaiters},
-			{kind: effectRecordWorkflowExit, exitCode: 2},
-		}) {
-			t.Fatalf("finalize exit-record effects = %v", eff)
 		}
 
 		// attemptReturned: repeated release is safe; effect emitted per signal.

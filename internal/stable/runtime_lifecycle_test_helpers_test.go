@@ -66,10 +66,9 @@ func initializeTestLifecycle(t testing.TB, child *childRuntime, opts testLifecyc
 }
 
 // newTestChildLifecycle constructs a synthetic child with an explicitly
-// initialized lifecycle and registers the owned-child cleanup tracking
-// required by the standard gate: the cleanup waits for the child's done
-// channel and asserts the supervisor's lifecycle counters are zero after
-// teardown.
+// initialized lifecycle and registers the owned-child cleanup tracking: the
+// cleanup joins every owned child (done channel and run-goroutine join point)
+// before the lifecycle error counter is read after teardown.
 func newTestChildLifecycle(t *testing.T, sup *Supervisor, opts testLifecycleOptions) *childRuntime {
 	t.Helper()
 	if sup == nil {
@@ -220,10 +219,8 @@ func finishSyntheticRunChild(s *Supervisor, child *childRuntime) {
 	child.mu.Unlock()
 	if err != nil {
 		s.reportLifecycleError(child, err)
-	}
-	// A failed transition still publishes, so external waiters are never
-	// stranded on a machine error.
-	if lifecycleTransitionFailed(err) {
+		// A failed transition still publishes, so external waiters are never
+		// stranded on a machine error.
 		child.complete(s, afterRunTeardown)
 	} else {
 		s.executeDeferredLifecycleEffects(child, eff)
@@ -256,10 +253,8 @@ func finishSyntheticRollback(s *Supervisor, child *childRuntime) {
 	child.mu.Unlock()
 	if err != nil {
 		s.reportLifecycleError(child, err)
-	}
-	// A failed transition still publishes, so external waiters are never
-	// stranded on a machine error.
-	if lifecycleTransitionFailed(err) {
+		// A failed transition still publishes, so external waiters are never
+		// stranded on a machine error.
 		child.complete(s, afterSpawnRollback)
 	} else {
 		s.executeDeferredLifecycleEffects(child, eff)

@@ -13,6 +13,12 @@ package stable
 // dimension's stage through the shutdown/writer fail-safes below. Errors are
 // returned to the caller and must be reported with reportLifecycleError
 // outside every lock.
+//
+// The adapter's effect switches partition effectKind: applyOwnedLifecycleEffects
+// executes the locked kinds under the transaction's locks, and
+// executeDeferredLifecycleEffects executes the rest after every lock is
+// released. Each switch skips the other's kinds and reports a kind in neither
+// set as a lifecycle error, never ignored.
 
 import (
 	"errors"
@@ -102,12 +108,6 @@ func (s *Supervisor) applyLifecycleWriteLocked(child *childRuntime, sig lifecycl
 	return s.transactLifecycle(child, sig, true)
 }
 
-// lifecycleTransitionFailed reports whether err is an illegal-transition
-// error.
-func lifecycleTransitionFailed(err error) bool {
-	return err != nil
-}
-
 // errLifecycleFaultRecovery marks a slot-wait failure whose fault fail-safe
 // already ended the run, so the caller must not layer an idle-context end on
 // top of the ended state.
@@ -158,16 +158,44 @@ func (s *Supervisor) transactLifecycle(child *childRuntime, sig lifecycleSignal,
 		child.lc.shutdown = predicted.shutdown
 		child.lc.writer = predicted.writer
 	}
-	s.applyOwnedLifecycleEffects(child, predicted, sig.kind, eff)
+	if err := s.applyOwnedLifecycleEffects(child, eff); err != nil {
+		return cont, eff, err
+	}
 	return cont, eff, nil
+}
+
+// ownedLifecycleEffect and deferredLifecycleEffect partition effectKind
+// between the adapter's two effect switches: the locked kinds execute under
+// the transaction's locks, the rest after every lock is released. A kind in
+// neither set is a machine bug that both switches report.
+func ownedLifecycleEffect(k effectKind) bool {
+	switch k {
+	case effectClearPresentation, effectSetAgentPresentation, effectSetSuccessPresentation,
+		effectSetSessionEndPresentation, effectSetIdleEndData, effectRecordOutcomeExit,
+		effectSettleTurnWaiters:
+		return true
+	}
+	return false
+}
+
+func deferredLifecycleEffect(k effectKind) bool {
+	switch k {
+	case effectWriteSentinel, effectSignalCapacity, effectReleaseTreeToken,
+		effectEmitSessionEnd, effectConsiderProviderCancel, effectCancelContext,
+		effectPublishCompletion, effectCloseDone:
+		return true
+	}
+	return false
 }
 
 // applyOwnedLifecycleEffects executes the locked lifecycle effects this
 // adapter owns: presentation (phase, phaseLabel), the idle-end data
 // (exitCode, lastStopReason), the recorded outcome exit code and the waiter
 // release of a settled or finalized attempt, of a fault recovery and of the
-// final publication.
-func (s *Supervisor) applyOwnedLifecycleEffects(child *childRuntime, predicted lifecycleState, site signalKind, eff []lifecycleEffect) {
+// final publication. An unknown effect kind is a machine bug; it returns an
+// error the caller reports outside every lock.
+func (s *Supervisor) applyOwnedLifecycleEffects(child *childRuntime, eff []lifecycleEffect) error {
+	var unhandled error
 	for _, e := range eff {
 		switch e.kind {
 		case effectClearPresentation:
@@ -191,11 +219,18 @@ func (s *Supervisor) applyOwnedLifecycleEffects(child *childRuntime, predicted l
 		case effectRecordOutcomeExit:
 			child.exitCode = e.exitCode
 		case effectSettleTurnWaiters:
-			if site == signalAttemptSettled || site == signalWorkflowFinalized || site == signalFault || site == signalCompletionPublished {
-				child.settleTurnLocked()
+			child.settleTurnLocked()
+		default:
+			// Deferred kinds are the deferred executor's job; only a kind in
+			// neither set is a machine bug.
+			if !deferredLifecycleEffect(e.kind) {
+				if unhandled == nil {
+					unhandled = fmt.Errorf("lifecycle: unhandled effect kind %d", e.kind)
+				}
 			}
 		}
 	}
+	return unhandled
 }
 
 // completePublicationFailSafe applies the publication's unconditional writes
@@ -352,7 +387,8 @@ type lifecycleFault struct {
 // names (the doneOnce-protected complete), and effectCloseDone closes the
 // done channel — it must only run inside complete's doneOnce. Effects the
 // adapter already executed under the caller's locks (activity, presentation,
-// recorded exit, waiter release) are not deferred and are ignored here.
+// recorded exit, waiter release) are not deferred; they are skipped here, and
+// an unknown kind is counted and reported as a lifecycle error.
 func (s *Supervisor) executeDeferredLifecycleEffects(child *childRuntime, eff []lifecycleEffect) {
 	for _, e := range eff {
 		switch e.kind {
@@ -370,6 +406,12 @@ func (s *Supervisor) executeDeferredLifecycleEffects(child *childRuntime, eff []
 			child.complete(s, e.boundary)
 		case effectCloseDone:
 			close(child.done)
+		default:
+			// Owned kinds flow through call sites that pass the whole effect
+			// list back; only a kind in neither set is a machine bug.
+			if !ownedLifecycleEffect(e.kind) {
+				s.reportLifecycleError(child, fmt.Errorf("lifecycle: unhandled effect kind %d", e.kind))
+			}
 		}
 	}
 }

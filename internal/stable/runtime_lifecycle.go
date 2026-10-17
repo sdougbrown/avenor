@@ -9,7 +9,7 @@ package stable
 // commits its predictions and executes the effects at the supervisor's call
 // sites.
 //
-// Invariants encoded here mirror the supervisor behavior they preserve:
+// Invariants encoded here match the supervisor behavior they preserve:
 //   - The park timeout marks admission closed before done closes, so
 //     isCompleted() is true for both completionAdmissionClosed and
 //     completionPublished (supervisor.go:2968 vs complete()).
@@ -243,7 +243,7 @@ type lifecycleSignal struct {
 	// Immutable attempt classification, copied into every signal.
 	class attemptClass
 
-	// Decision-5 result data (attemptOutcome, promptContinuation). stopReason
+	// Attempt-outcome and continuation result data. stopReason
 	// is the raw result stop reason, preserved for retry/conflict selection;
 	// sentinelReason is the caller-normalized sentinel reason (stop-reason
 	// fallback already applied). sessionIDConflict is computed by the caller
@@ -259,12 +259,6 @@ type lifecycleSignal struct {
 	sessionIDConflict bool
 	retryable         bool
 	retriesRemaining  bool
-
-	// workflowFinalized exit data: workflowExitRecords attests that the
-	// finalization path writes child.exitCode after finalization (panic
-	// teardown leaves the stored exit code untouched); exitCode carries the
-	// value that path will write.
-	workflowExitRecords bool
 
 	// promptContinuation inputs. terminalContextErr is sampled inside the
 	// terminal probe after the exit code is recorded and unlocked;
@@ -319,7 +313,6 @@ const (
 	effectSetSessionEndPresentation                   // sessionEndObserved
 	effectSetIdleEndData                              // idleContextEnded
 	effectRecordOutcomeExit                           // attemptOutcome terminal/decider cases
-	effectRecordWorkflowExit                          // workflowFinalized: the exit code the finalization path writes
 	effectSettleTurnWaiters                           // settled→0; workflowFinalized; completionPublished
 	effectReleaseTreeToken                            // attemptReturned
 	effectWriteSentinel                               // attemptOutcome success/end/decider; promptContinuation terminal probe; idleContextEnded
@@ -614,9 +607,8 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 		out.attempts = 0
 		out.exec = execIdle
 		eff = append(eff, lifecycleEffect{kind: effectSettleTurnWaiters})
-		if sig.workflowExitRecords {
-			eff = append(eff, lifecycleEffect{kind: effectRecordWorkflowExit, exitCode: sig.exitCode})
-		}
+		// The caller writes child.exitCode after finalization returns; the
+		// machine never records a workflowFinalized exit code.
 
 	case signalAttemptReturned:
 		// Source S/I, C0, direct class; no dimension change; releases the tree
@@ -634,8 +626,8 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 		eff = append(eff, lifecycleEffect{kind: effectReleaseTreeToken})
 
 	case signalAttemptOutcome:
-		// Source S/I, C0, direct class, no probe pending; decision-5 result
-		// policy. Never changes presentation or ends execution by itself.
+		// Source S/I, C0, direct class, no probe pending; result policy. Never
+		// changes presentation or ends execution by itself.
 		if err := requireOpen(st, sig.kind); err != nil {
 			return st, cont, nil, err
 		}
@@ -893,9 +885,6 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 	case signalShutdownRequested:
 		// Any otherwise-valid state. Repeats allowed; every call emits the
 		// provider-cancel consideration; the context cancel is first-only.
-		if err := validateLifecycleState(st); err != nil {
-			return st, cont, nil, err
-		}
 		eff = append(eff, lifecycleEffect{kind: effectConsiderProviderCancel})
 		if st.shutdown == shutdownNone {
 			out.shutdown = shutdownRequested
@@ -906,9 +895,6 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 		// Any otherwise-valid state; open→closing, closing/closed unchanged.
 		// Repeat allowed even after closed; the interpreter still observes the
 		// existing drain/idempotence protocol.
-		if err := validateLifecycleState(st); err != nil {
-			return st, cont, nil, err
-		}
 		if st.writer == writerOpen {
 			out.writer = writerClosing
 		}
@@ -918,9 +904,6 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 		// repeated finished signal is rejected (the caller's closed guard
 		// avoids it). No signal when the sink is nil; a Close error still
 		// counts as called.
-		if err := validateLifecycleState(st); err != nil {
-			return st, cont, nil, err
-		}
 		if st.writer != writerClosing {
 			return st, cont, nil, fmt.Errorf("lifecycle: writer close finished from writer stage %d", st.writer)
 		}
@@ -992,9 +975,6 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 		// Any valid state. The presentation write is
 		// emitted only when the phase is nonempty and presentation was not
 		// already done; nonempty labels replace, empty labels retain.
-		if err := validateLifecycleState(st); err != nil {
-			return st, cont, nil, err
-		}
 		if sig.phase != "" && !sig.presentationWasDone {
 			eff = append(eff, lifecycleEffect{kind: effectSetAgentPresentation, phase: sig.phase, label: sig.label})
 		}
@@ -1004,9 +984,6 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 		// settles an attempt. The reason rides in the payload only when
 		// nonempty, matching the final write (supervisor.go:4895-4897): an
 		// empty stop reason leaves the stored reason untouched.
-		if err := validateLifecycleState(st); err != nil {
-			return st, cont, nil, err
-		}
 		end := lifecycleEffect{kind: effectSetSessionEndPresentation}
 		if sig.stopReason != "" {
 			end.reason = sig.stopReason
