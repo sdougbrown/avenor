@@ -3335,6 +3335,9 @@ func (c *childRuntime) waitForNextPrompt(s *Supervisor, ctx context.Context, par
 			// same mu as the queue check; the adapter writes the completed
 			// mirror. No waiter settle, no done close.
 			_, _, err := s.applyLifecycle(c, lifecycleSignal{kind: signalParkTimedOut, class: c.lc.class}, nil)
+			if lifecycleTransitionFailed(err) {
+				s.parkTimeoutFailSafe(c)
+			}
 			c.mu.Unlock()
 			if err != nil {
 				s.reportLifecycleError(c, err)
@@ -4874,7 +4877,7 @@ func (child *childRuntime) complete(s *Supervisor, boundary completionBoundary) 
 		_, pubEff, pubErr := s.applyLifecycle(child, lifecycleSignal{
 			kind: signalCompletionPublished, class: child.lc.class, boundary: boundary,
 		}, nil)
-		if pubErr != nil {
+		if lifecycleTransitionFailed(pubErr) {
 			// A failed publication must not strand registered turn waiters or
 			// leave the capacity reader counting the ended runtime as active:
 			// the legacy close always performed both.

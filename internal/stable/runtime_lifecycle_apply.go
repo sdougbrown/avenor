@@ -258,12 +258,26 @@ func (s *Supervisor) applyOwnedLifecycleEffects(child *childRuntime, predicted l
 }
 
 // completePublicationFailSafe applies the legacy publication's unconditional
-// writes when the completionPublished transition itself failed: it settles the
-// turn waiters and sets the completed mirror so capacity accounting and
-// registered waiters still observe the ended runtime. The caller must hold
-// child.mu and report the transition error outside every lock.
+// writes when the completionPublished transition itself failed: it commits the
+// published completion, settles the turn waiters and sets the completed mirror
+// so capacity accounting and registered waiters still observe the ended
+// runtime. The caller must hold child.mu and report the transition error
+// outside every lock.
 func (s *Supervisor) completePublicationFailSafe(child *childRuntime) {
+	child.lc.completion = completionPublished
 	child.settleTurnLocked()
+	child.completed = true
+}
+
+// parkTimeoutFailSafe applies the legacy park-timeout writes when the
+// parkTimedOut transition itself failed: it sets completion to
+// admission-closed when it is still open and sets the completed mirror so
+// admission readers reject prompts as the legacy timeout did. The caller must
+// hold child.mu and report the transition error outside every lock.
+func (s *Supervisor) parkTimeoutFailSafe(child *childRuntime) {
+	if child.lc.completion == completionOpen {
+		child.lc.completion = completionAdmissionClosed
+	}
 	child.completed = true
 }
 

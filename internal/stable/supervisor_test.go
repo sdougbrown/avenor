@@ -1305,9 +1305,20 @@ func TestRunChildTransitionFailureRunsFailSafe(t *testing.T) {
 		// status readers and released the registered waiter.
 		child.mu.Lock()
 		completed := child.completed
+		isCompleted := child.lc.isCompleted()
 		child.mu.Unlock()
 		if !completed {
 			t.Fatal("failed publication did not set the completed mirror")
+		}
+		if !isCompleted {
+			t.Fatal("failed publication did not commit the published completion")
+		}
+		// A late prompt is rejected exactly as a normally completed runtime
+		// rejects it.
+		if err := sup.RuntimePrompt("rt_publish_fault", "late prompt", ""); err == nil {
+			t.Fatal("RuntimePrompt accepted a prompt after the failed publication")
+		} else if want := `runtime "rt_publish_fault" has ended`; err.Error() != want {
+			t.Fatalf("RuntimePrompt error = %q, want %q", err.Error(), want)
 		}
 		select {
 		case <-wait:
@@ -1316,6 +1327,97 @@ func TestRunChildTransitionFailureRunsFailSafe(t *testing.T) {
 		}
 		// The injected publication failure is the only transition error.
 		assertFaultTeardown(t, sup, &buf, "rt_publish_fault", 1)
+	})
+
+	t.Run("failed park timeout closes admission and still completes", func(t *testing.T) {
+		var buf bytes.Buffer
+		sup := NewSupervisor(Config{
+			ControlSocket:        "/tmp/test-fault-parktimeout.sock",
+			MaxRuntimes:          1,
+			ParkedRuntimeTimeout: 50 * time.Millisecond,
+			Stderr:               &buf,
+		})
+		t.Cleanup(func() { _ = sup.broker.Stop() })
+		parkTimeoutFired := make(chan struct{})
+		var parkTimeoutFiredOnce sync.Once
+		sup.testHooks.lifecycleTransitionFailure = func(site signalKind) bool {
+			if site == signalParkTimedOut {
+				parkTimeoutFiredOnce.Do(func() { close(parkTimeoutFired) })
+				return true
+			}
+			return false
+		}
+		provider := faultEndScript("ses_park_timeout_fault", "end_turn")
+		child, ctx, cancel := startFaultChild(t, sup, "rt_park_timeout_fault", "ses_park_timeout_fault", provider, directAttemptClass)
+		defer cancel()
+		go sup.runChild(ctx, child, "hello", 0, 0)
+
+		// Wait for the park, then for the park timeout to fire. The hook
+		// runs under child.mu in the same critical section as the fail-safe,
+		// so by the time the channel is observed the fail-safe has run.
+		waitForStableChild(t, child, func(active bool, completed bool, phase, phaseLabel string) bool {
+			return !active && !completed && phase == "done"
+		})
+		select {
+		case <-parkTimeoutFired:
+		case <-time.After(5 * time.Second):
+			t.Fatal("park timeout did not fire")
+		}
+		// The fail-safe closed admission and set the completed mirror in that
+		// critical section; the teardown may already have published.
+		child.mu.Lock()
+		closed := child.lc.isCompleted()
+		completed := child.completed
+		child.mu.Unlock()
+		if !closed {
+			t.Fatal("park timeout fail-safe left admission open")
+		}
+		if !completed {
+			t.Fatal("park timeout fail-safe did not set the completed mirror")
+		}
+		// A prompt sent before the teardown publication is rejected.
+		if err := sup.RuntimePrompt("rt_park_timeout_fault", "late prompt", ""); err == nil {
+			t.Fatal("RuntimePrompt accepted a prompt after the failed park timeout")
+		} else if want := `runtime "rt_park_timeout_fault" has ended`; err.Error() != want {
+			t.Fatalf("RuntimePrompt error = %q, want %q", err.Error(), want)
+		}
+		// The run still completes.
+		waitForStableDone(t, child)
+		joinTestChildCompletion(t, child)
+		assertFaultTeardown(t, sup, &buf, "rt_park_timeout_fault", 1)
+	})
+
+	t.Run("failed publication still closes done and rejects prompts", func(t *testing.T) {
+		var buf bytes.Buffer
+		sup := newFaultSupervisor(t, "publication", &buf)
+		sup.testHooks.lifecycleTransitionFailure = func(site signalKind) bool { return site == signalCompletionPublished }
+		provider := faultEndScript("ses_publication_fault", "end_turn")
+		child, ctx, cancel := startFaultChild(t, sup, "rt_publication_fault", "ses_publication_fault", provider, directAttemptClass)
+		defer cancel()
+		go sup.runChild(ctx, child, "hello", 0, 0)
+
+		// Park after the turn, then end the run so the teardown publishes.
+		waitForStableChild(t, child, func(active bool, completed bool, phase, phaseLabel string) bool {
+			return !active && !completed && phase == "done"
+		})
+		cancel()
+		waitForStableDone(t, child)
+		joinTestChildCompletion(t, child)
+
+		// The fail-safe committed the published completion, so every
+		// completion reader agrees with the closed done channel.
+		child.mu.Lock()
+		completion, completed := child.lc.completion, child.completed
+		child.mu.Unlock()
+		if completion != completionPublished || !completed {
+			t.Fatalf("publication fail-safe left completion=%v completed=%v, want published and completed", completion, completed)
+		}
+		if err := sup.RuntimePrompt("rt_publication_fault", "late prompt", ""); err == nil {
+			t.Fatal("RuntimePrompt accepted a prompt after the failed publication")
+		} else if want := `runtime "rt_publication_fault" has ended`; err.Error() != want {
+			t.Fatalf("RuntimePrompt error = %q, want %q", err.Error(), want)
+		}
+		assertFaultTeardown(t, sup, &buf, "rt_publication_fault", 1)
 	})
 }
 
