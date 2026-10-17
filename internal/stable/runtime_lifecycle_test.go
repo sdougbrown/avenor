@@ -508,6 +508,22 @@ func TestRuntimeLifecycleMatrixRows(t *testing.T) {
 			},
 		},
 		{
+			// The idle sentinel carries the session ID the caller resolved
+			// outside mu; an empty one keeps the payload empty.
+			name:  "idle context ended sentinel carries the resolved session id",
+			start: idleDirect(),
+			signal: lifecycleSignal{
+				kind: signalIdleContextEnded, class: directAttemptClass,
+				idleExitCode: 124, idleStopReason: "timeout", resultSessionID: "ses_idle",
+			},
+			want: idleDirect(),
+			effects: []lifecycleEffect{
+				{kind: effectSetIdleEndData, exitCode: 124, reason: "timeout"},
+				{kind: effectWriteSentinel, exitCode: 124, reason: "timeout", sessionID: "ses_idle"},
+				{kind: effectEmitSessionEnd, exitCode: 124, reason: "timeout"},
+			},
+		},
+		{
 			name:  "run ended from idle publishes at teardown boundary",
 			start: idleDirect(),
 			signal: lifecycleSignal{

@@ -1156,6 +1156,72 @@ func TestSupervisorPublicAPIRunDeadlineWhileWaitingForLocalSlot(t *testing.T) {
 	h.awaitStatus(holder, "done")
 }
 
+// TestSupervisorPublicAPICancelWhileWaitingForLocalSlot proves that a resumed
+// runtime blocked in the local MaxRuntimes slot wait ends as a cancelled idle
+// end when the runtime is cancelled, rather than resuming into a turn it can
+// no longer run or dying silently with the parked sentinel standing.
+func TestSupervisorPublicAPICancelWhileWaitingForLocalSlot(t *testing.T) {
+	t.Parallel()
+	gate := newItestGate()
+	defer gate.open()
+	var n atomic.Int64
+	factory := func(runtime.StartOptions, string) (runtime.Provider, error) {
+		id := fmt.Sprintf("ses_sc%d", n.Add(1))
+		if n.Load() == 1 {
+			return newItestProvider(itestAttempt(id, itestSessionEnd(id, "end_turn", "parked work"))), nil
+		}
+		working := stableScriptedEvent{event: events.Event{Event: "agent.status", SessionID: id, Fields: map[string]any{"phase": "working"}}}
+		return newItestProvider(itestAttempt(id, working, gate.step(), itestSessionEnd(id, "end_turn", "holder done"))), nil
+	}
+	// A one-runtime cap: the holder's in-flight turn occupies the only slot,
+	// so a resumed peer blocks in the local slot wait instead of starting.
+	h := newItestHarness(t, Config{MaxRuntimes: 1}, factory)
+
+	rt := h.spawn(map[string]any{"label": "slot-cancel"})
+	h.awaitStatus(rt, "done")
+	// The parked runtime releases its slot after the turn; the holder spawn
+	// can race that release, so retry the admission until it succeeds.
+	var holder string
+	h.awaitCondition("a free runtime slot for the holder spawn", func() bool {
+		id, err := h.trySpawn(map[string]any{"label": "slot-holder"})
+		var ce *admission.CapacityError
+		if err != nil && !errors.As(err, &ce) {
+			h.t.Fatalf("holder spawn: %v", err)
+		}
+		if err != nil {
+			return false
+		}
+		holder = id
+		return true
+	})
+	h.log.waitFor(t, "holder working status", itestEventIs("agent.status", holder))
+	// The follow-up prompt resumes the parked runtime, which dequeues the
+	// prompt and blocks in the local slot wait while the holder runs.
+	if err := h.sup.RuntimePrompt(rt, "again", ""); err != nil {
+		t.Fatalf("RuntimePrompt: %v", err)
+	}
+	// While blocked, the runtime must not start its follow-up turn: its first
+	// turn already ended, so any second session.end would mean it resumed.
+	h.consistentlyFor(300*time.Millisecond, "resumed runtime stays blocked on the slot", func() bool {
+		return h.log.count(itestEventIs("session.end", rt)) == 1
+	})
+	// Cancelling the blocked runtime ends it as a cancelled idle end instead
+	// of leaving it queued for a slot it will never take.
+	if err := h.sup.RuntimeCancel(rt); err != nil {
+		t.Fatalf("RuntimeCancel: %v", err)
+	}
+	v := h.requireIdleEnd(rt, "killed", "cancelled", 130)
+	// The turn before the park ended successfully, so the killed view keeps
+	// the done phase.
+	if v.Phase != "done" {
+		t.Fatalf("killed view phase = %q, want done", v.Phase)
+	}
+	// The holder is unaffected: released from the gate, its turn finishes
+	// normally.
+	gate.open()
+	h.awaitStatus(holder, "done")
+}
+
 // Permission scenarios.
 
 // itestWorker builds the provider for a worker that raises one permission

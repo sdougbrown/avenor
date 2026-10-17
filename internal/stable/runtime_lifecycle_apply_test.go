@@ -133,9 +133,9 @@ func TestTransactLifecycleCollectsOneSyntheticMismatch(t *testing.T) {
 }
 
 // TestTransactLifecycleLockedWitnessIsSoleDivergence pins the locked-effect
-// detail routing: the only divergence is a missing locked effect in the
-// witness, so the collected stderr detail comes solely from the in-transaction
-// sink, not from any field or presentation comparison.
+// detail routing: the only divergence is a locked-effect witness entry with no
+// predicted counterpart, so the collected stderr detail comes solely from the
+// in-transaction sink, not from any field or presentation comparison.
 func TestTransactLifecycleLockedWitnessIsSoleDivergence(t *testing.T) {
 	var buf bytes.Buffer
 	s := newLifecycleTestOwner()
@@ -148,10 +148,14 @@ func TestTransactLifecycleLockedWitnessIsSoleDivergence(t *testing.T) {
 		kind: signalAttemptOutcome, class: directAttemptClass,
 		runKind: runKindOrdinaryDirect, exitCode: 7, sentinelReason: "error", resultSessionID: "ses_x",
 	}, func() legacyLifecycleWitness {
-		// The legacy exit write matches the prediction but records no locked
-		// effect, so the missing locked witness is the sole divergence.
+		// The exit write matches the prediction (the adapter overwrites the
+		// mirror anyway), but the witness records a locked effect the machine
+		// no longer predicts, so the extra locked witness is the sole
+		// divergence.
 		child.exitCode = 7
-		return legacyLifecycleWitness{}
+		w := legacyLifecycleWitness{}
+		w.locked = append(w.locked, lifecycleEffect{kind: effectRecordOutcomeExit, exitCode: 7})
+		return w
 	})
 	child.mu.Unlock()
 
@@ -177,11 +181,12 @@ func TestTransactLifecycleLockedWitnessIsSoleDivergence(t *testing.T) {
 }
 
 // TestCompareShadowTransactionCountsDivergentMirrors runs a real transaction
-// per compared dimension with one divergent still-legacy-owned mirror on an
-// otherwise valid fixture, on an isolated owner whose counters are asserted
-// exactly. Owned mirrors (activity, presentation, idle-end data) are written
-// by the adapter itself and have no legacy divergence to compare; only the
-// remaining shadow dimensions appear here.
+// per compared dimension with one divergent mirror on an otherwise valid
+// fixture, on an isolated owner whose counters are asserted exactly. The
+// adapter writes the mirrors it owns (activity, presentation, idle-end data,
+// recorded exit, parked) itself, so a rogue write on a signal that does not
+// own that mirror still shows up as a mismatch, while a rogue write the
+// adapter overwrites does not.
 func TestCompareShadowTransactionCountsDivergentMirrors(t *testing.T) {
 	// prepareLegacy leaves the mirrors to the adapter and performs no locked
 	// effects: attemptPreparing's owned clear runs in the adapter.
@@ -241,12 +246,15 @@ func TestCompareShadowTransactionCountsDivergentMirrors(t *testing.T) {
 			opts:   testLifecycleOptions{exec: execIdle, class: directAttemptClass},
 			signal: lifecycleSignal{kind: signalAttemptOutcome, class: directAttemptClass, runKind: runKindOrdinaryDirect, exitCode: 7, sentinelReason: "error", resultSessionID: "ses_x"},
 			legacy: func(c *childRuntime) legacyLifecycleWitness {
+				// The adapter overwrites the exit mirror itself, so a divergent
+				// legacy write is invisible; the spurious locked-effect witness
+				// is the only divergence left.
 				w := legacyLifecycleWitness{}
 				c.exitCode = 9
 				w.locked = append(w.locked, lifecycleEffect{kind: effectRecordOutcomeExit, exitCode: 9})
 				return w
 			},
-			want: 2, // exit-code field and locked-effect payload both fire
+			want: 1, // locked-effect witness fires
 		},
 	}
 
@@ -362,6 +370,37 @@ func TestApplyLifecycleWritesOwnedMirrors(t *testing.T) {
 		}
 	})
 
+	t.Run("parking transitions write the parked mirror", func(t *testing.T) {
+		s := newLifecycleTestOwner()
+		child := &childRuntime{id: "rt_owned_parked", done: make(chan struct{})}
+		initializeTestLifecycle(t, child, testLifecycleOptions{exec: execIdle, class: directAttemptClass})
+		parkedState := func(t *testing.T) (execState, bool) {
+			t.Helper()
+			child.mu.Lock()
+			defer child.mu.Unlock()
+			return child.lc.exec, child.parked
+		}
+
+		// ParkRequested parks; localSlotAcquired and parkWaitEnded clear the
+		// parked mirror again.
+		apply(t, s, child, lifecycleSignal{kind: signalParkRequested, class: directAttemptClass, runKind: runKindOrdinaryDirect})
+		if exec, parked := parkedState(t); exec != execParked || !parked {
+			t.Fatalf("after park: exec=%d parked=%v", exec, parked)
+		}
+		apply(t, s, child, lifecycleSignal{kind: signalLocalSlotAcquired, class: directAttemptClass})
+		if exec, parked := parkedState(t); exec != execIdle || parked {
+			t.Fatalf("after slot acquire: exec=%d parked=%v", exec, parked)
+		}
+		apply(t, s, child, lifecycleSignal{kind: signalParkRequested, class: directAttemptClass, runKind: runKindOrdinaryDirect})
+		if exec, parked := parkedState(t); exec != execParked || !parked {
+			t.Fatalf("after second park: exec=%d parked=%v", exec, parked)
+		}
+		apply(t, s, child, lifecycleSignal{kind: signalParkWaitEnded, class: directAttemptClass})
+		if exec, parked := parkedState(t); exec != execIdle || parked {
+			t.Fatalf("after wait ended: exec=%d parked=%v", exec, parked)
+		}
+	})
+
 	t.Run("presentation and idle-end data", func(t *testing.T) {
 		s := newLifecycleTestOwner()
 		child := &childRuntime{id: "rt_owned_presentation", done: make(chan struct{})}
@@ -379,21 +418,21 @@ func TestApplyLifecycleWritesOwnedMirrors(t *testing.T) {
 			t.Fatalf("after success: phase=%q", phase)
 		}
 
-		// A session end with a nonempty stop reason records it; an empty one
-		// leaves the stored reason alone.
+		// A session end marks the phase done and records a nonempty stop
+		// reason; an empty one leaves the stored reason alone.
 		apply(t, s, child, lifecycleSignal{kind: signalSessionEndObserved, class: directAttemptClass, stopReason: "end_turn"})
 		child.mu.Lock()
-		reason := child.lastStopReason
+		reason, phase := child.lastStopReason, child.phase
 		child.mu.Unlock()
-		if reason != "end_turn" {
-			t.Fatalf("after session end: lastStopReason=%q", reason)
+		if reason != "end_turn" || phase != "done" {
+			t.Fatalf("after session end: lastStopReason=%q phase=%q", reason, phase)
 		}
 		apply(t, s, child, lifecycleSignal{kind: signalSessionEndObserved, class: directAttemptClass})
 		child.mu.Lock()
-		reason = child.lastStopReason
+		reason, phase = child.lastStopReason, child.phase
 		child.mu.Unlock()
-		if reason != "end_turn" {
-			t.Fatalf("after empty session end: lastStopReason=%q", reason)
+		if reason != "end_turn" || phase != "done" {
+			t.Fatalf("after empty session end: lastStopReason=%q phase=%q", reason, phase)
 		}
 
 		// An idle-context end overwrites the terminal data.

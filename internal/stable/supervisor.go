@@ -1222,12 +1222,9 @@ func (s *Supervisor) acquireLocalRuntimeSlot(ctx context.Context, child *childRu
 		}
 		if s.activeRuntimeCountLocked()+s.outstandingReservations < s.config.MaxRuntimes {
 			child.mu.Lock()
-			// Shadow: localSlotAcquired predicts P -> I; the legacy parked write
-			// is the mutation it shadows.
-			_, _, err := s.applyLifecycle(child, lifecycleSignal{kind: signalLocalSlotAcquired, class: child.lc.class}, func() legacyLifecycleWitness {
-				child.parked = false
-				return legacyLifecycleWitness{}
-			})
+			// The adapter commits the parked-to-idle transition and clears the
+			// parked mirror; a slot failure leaves both untouched.
+			_, _, err := s.applyLifecycle(child, lifecycleSignal{kind: signalLocalSlotAcquired, class: child.lc.class}, nil)
 			child.mu.Unlock()
 			s.controlMu.Unlock()
 			if err != nil {
@@ -2277,23 +2274,18 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 		// Release tree admission after the turn so a parked runtime does not
 		// consume descendant budget while idle. A subsequent prompt
 		// re-acquires before its turn.
-		// Shadow: attemptReturned predicts the release at the old post-attempt
-		// boundary; the release call below is its witness.
 		child.mu.Lock()
-		retCont, retEff, retErr := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptReturned, class: child.lc.class}, nil)
+		_, retEff, retErr := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptReturned, class: child.lc.class}, nil)
 		child.mu.Unlock()
 		if retErr != nil {
 			s.reportLifecycleError(child, retErr)
 		}
-		s.releaseChildTreeToken(child)
 		if !lifecycleTransitionFailed(retErr) {
-			s.compareDeferredLifecycleEffects(child, retEff, []lifecycleEffect{{kind: effectReleaseTreeToken}}, signalAttemptReturned)
+			s.executeDeferredLifecycleEffects(child, retEff)
 		}
-		_ = retCont
 		needAcquire = true
 
-		// Classify the result exactly as the legacy branches below decide, so
-		// the machine's prediction can be compared against the branch taken.
+		// Sample the immutable result data the continuation selection needs.
 		retryable := runtime.IsRetryableFailure(result.exitCode, result.stopReason)
 		retriesRemaining := attempt <= maxRetries
 		runKind := runKindOrdinaryDirect
@@ -2307,11 +2299,8 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 		if stopReason == "" {
 			stopReason = runtime.StopReasonForExitCode(result.exitCode)
 		}
-		// The legacy branches that record the exit code under child.mu.
-		recordsExit := !retryable || !retriesRemaining || runKind == runKindDecider
-
-		// Shadow: attemptOutcome predicts the branch continuation and the
-		// locked exit recording before the legacy mutation runs in the closure.
+		// The machine owns the result policy: it records the exit code under
+		// the lock and selects the continuation this switch executes.
 		child.mu.Lock()
 		cont, eff, err := s.applyLifecycle(child, lifecycleSignal{
 			kind:              signalAttemptOutcome,
@@ -2324,33 +2313,24 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			sessionIDConflict: conflict,
 			retryable:         retryable,
 			retriesRemaining:  retriesRemaining,
-		}, func() legacyLifecycleWitness {
-			w := legacyLifecycleWitness{}
-			if recordsExit {
-				child.exitCode = result.exitCode
-				w.locked = append(w.locked, lifecycleEffect{kind: effectRecordOutcomeExit, exitCode: result.exitCode})
-			}
-			return w
-		})
+		}, nil)
 		child.mu.Unlock()
 		if err != nil {
 			s.reportLifecycleError(child, err)
 		}
-		if !retryable || !retriesRemaining {
+		if lifecycleTransitionFailed(err) {
+			// Without a valid continuation the only safe action is the
+			// teardown return.
+			return
+		}
+		switch cont.kind {
+		case contEnd:
+			// Terminal result. The recorded exit's sentinel runs at the old
+			// post-record site. A successful workflow-direct or decider turn
+			// presents done before returning, exactly as the success branch
+			// did; failed terminals never present.
+			s.executeDeferredLifecycleEffects(child, eff)
 			if result.exitCode == 0 {
-				// Shadow: the success sentinel is written here for the
-				// workflow-direct, decider and park branches alike; compare it
-				// against attemptOutcome's predicted deferred sentinel.
-				var successWitness []lifecycleEffect
-				if child.sentinelFile != "" {
-					cli.WriteSentinel(child.sentinelFile, result.exitCode, result.sessionID, stopReason, s.runID, s.stderrWriter())
-					successWitness = append(successWitness, lifecycleEffect{kind: effectWriteSentinel, exitCode: result.exitCode, reason: stopReason, sessionID: result.sessionID})
-				}
-				if !lifecycleTransitionFailed(err) {
-					s.compareDeferredLifecycleEffects(child, eff, successWitness, signalAttemptOutcome)
-				}
-				// successPresented fires at the old post-sentinel site, never at
-				// result selection; the adapter writes the phase mirror.
 				child.mu.Lock()
 				_, _, sucErr := s.applyLifecycle(child, lifecycleSignal{
 					kind: signalSuccessPresented, class: child.lc.class, exitCode: result.exitCode,
@@ -2359,108 +2339,72 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 				if sucErr != nil {
 					s.reportLifecycleError(child, sucErr)
 				}
-
-				// A workflow direct run is a single-shot task with no follow-up
-				// prompt queue, so a successful end_turn is terminal. Terminate
-				// the attempt now (recorded in the runChild defer) rather than
-				// parking for a follow-up prompt, which would otherwise defer
-				// and mislabel the result as cancelled at teardown.
-				if child.workflowID != "" {
-					if err == nil {
-						s.compareLifecycleContinuation(child, cont.kind, contEnd, signalAttemptOutcome)
-					}
-					return
-				}
-				// A permission decider judges one request in a single turn and
-				// receives no follow-up prompt, so parking would hold its
-				// decider slot and scratch directory until the parked timeout.
-				// Its successful end_turn is terminal too (recorded in the
-				// runChild defer). The dedicated flag, not the label prefix,
-				// decides: a caller can spawn an ordinary runtime with a
-				// decider-shaped label, and that runtime parks like any other.
-				if child.permissionDeciderRun {
-					if err == nil {
-						s.compareLifecycleContinuation(child, cont.kind, contEnd, signalAttemptOutcome)
-					}
-					return
-				}
-				if err == nil {
-					s.compareLifecycleContinuation(child, cont.kind, contPark, signalAttemptOutcome)
-				}
-				// Shadow: parkRequested predicts the parked transition; the
-				// legacy parked write is its mutation.
-				child.mu.Lock()
-				_, parkEff, parkErr := s.applyLifecycle(child, lifecycleSignal{
-					kind: signalParkRequested, class: child.lc.class, runKind: runKindOrdinaryDirect,
-				}, func() legacyLifecycleWitness {
-					child.parked = true
-					return legacyLifecycleWitness{}
-				})
-				child.mu.Unlock()
-				if parkErr != nil {
-					s.reportLifecycleError(child, parkErr)
-				}
-				// Parking frees a local slot; wake spawn waiters blocked on the cap.
-				s.signalCapacityChange()
-				if !lifecycleTransitionFailed(parkErr) {
-					s.compareDeferredLifecycleEffects(child, parkEff, []lifecycleEffect{{kind: effectSignalCapacity}}, signalParkRequested)
-				}
-				nextPrompt, ok := child.waitForNextPrompt(s, ctx, s.config.ParkedRuntimeTimeout)
-				if !ok {
-					// Shadow: parkWaitEnded is only the not-ok wait path, never
-					// the local-slot failure; the legacy parked clear is its
-					// mutation.
-					child.mu.Lock()
-					_, _, pweErr := s.applyLifecycle(child, lifecycleSignal{kind: signalParkWaitEnded, class: child.lc.class}, func() legacyLifecycleWitness {
-						child.parked = false
-						return legacyLifecycleWitness{}
-					})
-					child.mu.Unlock()
-					if pweErr != nil {
-						s.reportLifecycleError(child, pweErr)
-					}
-					if ctx.Err() != nil {
-						s.writeIdleContextEnd(child, ctx.Err())
-					}
-					return
-				}
-				if err := s.acquireLocalRuntimeSlot(ctx, child); err != nil {
-					if ctx.Err() != nil {
-						s.writeIdleContextEnd(child, ctx.Err())
-					}
-					return
-				}
-				promptText = nextPrompt
-				resumeID = result.sessionID
-				if resumeID == "" {
-					resumeID = child.sessionID()
-				}
-				attempt = 0
-				continue
 			}
-
-			// A permission decider's turn is terminal on failure too: a queued
-			// prompt must not resume it for a second turn. Falling through
-			// records the failure's exit code and sentinel exactly as a
-			// promptless failure.
-			// Shadow: the terminal-probe branch is decided from legacy inputs
-			// alone — the prediction never gates the dequeue, and a transition
-			// error leaves the legacy path untouched. The branch legacy took
-			// (probe resume or direct end) is the witness compared below.
-			// Sample the context once for both the eligibility decision and the
-			// probe signal: a cancellation between the two reads must not show
-			// the machine a different context state than the branch legacy took.
+			return
+		case contPark:
+			// Ordinary direct success: sentinel, success presentation, park.
+			s.executeDeferredLifecycleEffects(child, eff)
+			child.mu.Lock()
+			_, _, sucErr := s.applyLifecycle(child, lifecycleSignal{
+				kind: signalSuccessPresented, class: child.lc.class, exitCode: result.exitCode,
+			}, nil)
+			child.mu.Unlock()
+			if sucErr != nil {
+				s.reportLifecycleError(child, sucErr)
+			}
+			child.mu.Lock()
+			_, parkEff, parkErr := s.applyLifecycle(child, lifecycleSignal{
+				kind: signalParkRequested, class: child.lc.class, runKind: runKindOrdinaryDirect,
+			}, nil)
+			child.mu.Unlock()
+			if parkErr != nil {
+				s.reportLifecycleError(child, parkErr)
+			}
+			// Parking frees a local slot; wake spawn waiters blocked on the cap.
+			if !lifecycleTransitionFailed(parkErr) {
+				s.executeDeferredLifecycleEffects(child, parkEff)
+			}
+			nextPrompt, ok := child.waitForNextPrompt(s, ctx, s.config.ParkedRuntimeTimeout)
+			if !ok {
+				// parkWaitEnded is only the not-ok wait path, never the
+				// local-slot failure; the parked mirror stays set on a slot
+				// failure.
+				child.mu.Lock()
+				_, _, pweErr := s.applyLifecycle(child, lifecycleSignal{kind: signalParkWaitEnded, class: child.lc.class}, nil)
+				child.mu.Unlock()
+				if pweErr != nil {
+					s.reportLifecycleError(child, pweErr)
+				}
+				if ctx.Err() != nil {
+					s.writeIdleContextEnd(child, ctx.Err())
+				}
+				return
+			}
+			if err := s.acquireLocalRuntimeSlot(ctx, child); err != nil {
+				if ctx.Err() != nil {
+					s.writeIdleContextEnd(child, ctx.Err())
+				}
+				return
+			}
+			promptText = nextPrompt
+			resumeID = result.sessionID
+			if resumeID == "" {
+				resumeID = child.sessionID()
+			}
+			attempt = 0
+			continue
+		case contProbeTerminalPrompt:
+			// Sample the context before any dequeue; the dequeue itself runs
+			// once outside any held mu with no context recheck after it.
 			probeCtxErr := ctx.Err()
-			probeEligible := probeCtxErr == nil && !child.permissionDeciderRun && !conflict
 			probeResumed := false
 			var probeNext string
-			if probeEligible {
+			if probeCtxErr == nil {
 				if nextPrompt, ok := child.dequeuePrompt(); ok {
 					probeResumed = true
 					probeNext = nextPrompt
 				}
 			}
-			var probeWitness []lifecycleEffect
 			if probeResumed {
 				promptText = probeNext
 				resumeID = result.sessionID
@@ -2469,114 +2413,70 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 				}
 				attempt = 0
 			}
-			if child.sentinelFile != "" {
-				cli.WriteSentinel(child.sentinelFile, result.exitCode, result.sessionID, stopReason, s.runID, s.stderrWriter())
-				probeWitness = append(probeWitness, lifecycleEffect{kind: effectWriteSentinel, exitCode: result.exitCode, reason: stopReason, sessionID: result.sessionID})
+			child.mu.Lock()
+			probeCont, probeEff, probeErr := s.applyLifecycle(child, lifecycleSignal{
+				kind:               signalPromptContinuation,
+				class:              child.lc.class,
+				probeKind:          probeTerminalPrompt,
+				terminalContextErr: probeCtxErr,
+				promptConsumed:     probeResumed,
+				exitCode:           result.exitCode,
+				sentinelReason:     stopReason,
+				resultSessionID:    result.sessionID,
+			}, nil)
+			child.mu.Unlock()
+			if probeErr != nil {
+				s.reportLifecycleError(child, probeErr)
 			}
-			// The probe continuation transaction runs whenever legacy took the
-			// probe branch, and whenever the prediction left a terminal probe
-			// pending to resolve — regardless of the other side.
-			if probeResumed || (err == nil && cont.kind == contProbeTerminalPrompt) {
-				child.mu.Lock()
-				probeCont, probeEff, probeErr := s.applyLifecycle(child, lifecycleSignal{
-					kind:               signalPromptContinuation,
-					class:              child.lc.class,
-					probeKind:          probeTerminalPrompt,
-					terminalContextErr: probeCtxErr,
-					promptConsumed:     probeResumed,
-					exitCode:           result.exitCode,
-					sentinelReason:     stopReason,
-					resultSessionID:    result.sessionID,
-				}, nil)
-				child.mu.Unlock()
-				if probeErr != nil {
-					s.reportLifecycleError(child, probeErr)
+			if !lifecycleTransitionFailed(probeErr) {
+				// Whether resuming or ending, this result's sentinel writes
+				// after the dequeue.
+				s.executeDeferredLifecycleEffects(child, probeEff)
+				if probeCont.kind == contResumeQueued {
+					continue
 				}
-				if !lifecycleTransitionFailed(probeErr) {
-					if probeResumed {
-						s.compareLifecycleContinuation(child, probeCont.kind, contResumeQueued, signalPromptContinuation)
-					} else {
-						s.compareLifecycleContinuation(child, probeCont.kind, contEnd, signalPromptContinuation)
-					}
-					s.compareDeferredLifecycleEffects(child, probeEff, probeWitness, signalPromptContinuation)
-				}
-			} else if !lifecycleTransitionFailed(err) {
-				s.compareLifecycleContinuation(child, cont.kind, contEnd, signalAttemptOutcome)
-				s.compareDeferredLifecycleEffects(child, eff, probeWitness, signalAttemptOutcome)
 			}
-			if probeResumed {
+			return
+		case contProbeRetryPrompt:
+			if result.sessionID != "" {
+				resumeID = result.sessionID
+			}
+			// The retry probe dequeues before checking the context; a prompt
+			// consumed against a dead context is discarded into the idle end.
+			retryConsumed := false
+			if nextPrompt, ok := child.dequeuePrompt(); ok && ctx.Err() == nil {
+				retryConsumed = true
+				promptText = nextPrompt
+				attempt = 0
+			}
+			resumeCtxErr := ctx.Err()
+			child.mu.Lock()
+			probeCont, _, probeErr := s.applyLifecycle(child, lifecycleSignal{
+				kind:             signalPromptContinuation,
+				class:            child.lc.class,
+				probeKind:        probeRetryPrompt,
+				promptConsumed:   retryConsumed,
+				resumeContextErr: resumeCtxErr,
+				idleContextErr:   resumeCtxErr,
+			}, nil)
+			child.mu.Unlock()
+			if probeErr != nil {
+				s.reportLifecycleError(child, probeErr)
+			}
+			if probeCont.kind == contIdleContextEnd {
+				s.writeIdleContextEnd(child, resumeCtxErr)
+				return
+			}
+			if probeCont.kind == contRetry {
 				continue
 			}
-			return
-		}
-		// A permission decider's turn is terminal on every path: neither a
-		// queued prompt nor the retry backoff may resume it for another turn.
-		// Its failure is recorded the same way as a non-retryable failure.
-		if child.permissionDeciderRun {
-			// Shadow: witness the decider's terminal sentinel and compare
-			// attemptOutcome's predicted deferred effects against it.
-			var deciderWitness []lifecycleEffect
-			if child.sentinelFile != "" {
-				cli.WriteSentinel(child.sentinelFile, result.exitCode, result.sessionID, stopReason, s.runID, s.stderrWriter())
-				deciderWitness = append(deciderWitness, lifecycleEffect{kind: effectWriteSentinel, exitCode: result.exitCode, reason: stopReason, sessionID: result.sessionID})
+			// contBackoff (or a failed prediction) runs the backoff timer.
+			select {
+			case <-time.After(backoffDelay(attempt)):
+			case <-ctx.Done():
+				s.writeIdleContextEnd(child, ctx.Err())
+				return
 			}
-			if !lifecycleTransitionFailed(err) {
-				s.compareLifecycleContinuation(child, cont.kind, contEnd, signalAttemptOutcome)
-				s.compareDeferredLifecycleEffects(child, eff, deciderWitness, signalAttemptOutcome)
-			}
-			return
-		}
-		if result.sessionID != "" {
-			resumeID = result.sessionID
-		}
-		// Shadow: the retry probe dequeues before checking the context; the
-		// transaction compares the continuation with the branch taken, and
-		// attemptOutcome's predicted continuation is the retry probe itself.
-		retryConsumed := false
-		if nextPrompt, ok := child.dequeuePrompt(); ok && ctx.Err() == nil {
-			retryConsumed = true
-			promptText = nextPrompt
-			attempt = 0
-		}
-		if !lifecycleTransitionFailed(err) {
-			s.compareLifecycleContinuation(child, cont.kind, contProbeRetryPrompt, signalAttemptOutcome)
-		}
-		resumeCtxErr := ctx.Err()
-		child.mu.Lock()
-		probeCont, probeEff, probeErr := s.applyLifecycle(child, lifecycleSignal{
-			kind:             signalPromptContinuation,
-			class:            child.lc.class,
-			probeKind:        probeRetryPrompt,
-			promptConsumed:   retryConsumed,
-			resumeContextErr: resumeCtxErr,
-			idleContextErr:   resumeCtxErr,
-		}, nil)
-		child.mu.Unlock()
-		if probeErr != nil {
-			s.reportLifecycleError(child, probeErr)
-		}
-		if resumeCtxErr != nil {
-			s.writeIdleContextEnd(child, resumeCtxErr)
-			if probeErr == nil {
-				s.compareLifecycleContinuation(child, probeCont.kind, contIdleContextEnd, signalPromptContinuation)
-			}
-			return
-		}
-		if retryConsumed {
-			if probeErr == nil {
-				s.compareLifecycleContinuation(child, probeCont.kind, contRetry, signalPromptContinuation)
-			}
-			continue
-		}
-		if probeErr == nil {
-			s.compareLifecycleContinuation(child, probeCont.kind, contBackoff, signalPromptContinuation)
-		}
-		_ = probeEff
-		select {
-		case <-time.After(backoffDelay(attempt)):
-		case <-ctx.Done():
-			s.writeIdleContextEnd(child, ctx.Err())
-			return
 		}
 	}
 }
@@ -4046,26 +3946,21 @@ func (s *Supervisor) writeIdleContextEnd(child *childRuntime, ctxErr error) {
 		stopReason = "timeout"
 	}
 	exitCode := runtime.ExitCodeForStopReason(stopReason)
+	sessionID := child.sessionID()
 	child.mu.Lock()
-	// The adapter owns idleContextEnded's data writes (exit code, phase,
-	// stop reason); the sentinel and session.end below stay legacy beside it.
+	// The adapter owns idleContextEnded's locked data writes (exit code,
+	// phase, stop reason) and the machine's deferred sentinel and session.end
+	// effects execute below, after the lock is released.
 	_, eff, err := s.applyLifecycle(child, lifecycleSignal{
 		kind: signalIdleContextEnded, class: child.lc.class,
-		idleExitCode: exitCode, idleStopReason: stopReason,
+		idleExitCode: exitCode, idleStopReason: stopReason, resultSessionID: sessionID,
 	}, nil)
 	child.mu.Unlock()
 	if err != nil {
 		s.reportLifecycleError(child, err)
 	}
-	var idleWitness []lifecycleEffect
-	if child.sentinelFile != "" {
-		cli.WriteSentinel(child.sentinelFile, exitCode, child.sessionID(), stopReason, s.runID, s.stderrWriter())
-		idleWitness = append(idleWitness, lifecycleEffect{kind: effectWriteSentinel, exitCode: exitCode, reason: stopReason, sessionID: child.sessionID()})
-	}
-	s.emitSessionEnd(child, exitCode, stopReason)
-	idleWitness = append(idleWitness, lifecycleEffect{kind: effectEmitSessionEnd, exitCode: exitCode, reason: stopReason})
 	if !lifecycleTransitionFailed(err) {
-		s.compareDeferredLifecycleEffects(child, eff, idleWitness, signalIdleContextEnded)
+		s.executeDeferredLifecycleEffects(child, eff)
 	}
 }
 

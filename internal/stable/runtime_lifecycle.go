@@ -247,7 +247,10 @@ type lifecycleSignal struct {
 	// is the raw result stop reason, preserved for retry/conflict selection;
 	// sentinelReason is the caller-normalized sentinel reason (stop-reason
 	// fallback already applied). sessionIDConflict is computed by the caller
-	// from the raw stop reason.
+	// from the raw stop reason. resultSessionID is the session ID written into
+	// a result sentinel: the attempt result's session ID for attemptOutcome and
+	// promptContinuation, and the caller-resolved session ID (read outside mu)
+	// for idleContextEnded.
 	runKind           runKind
 	exitCode          int
 	stopReason        string
@@ -831,7 +834,7 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 		}
 		eff = append(eff,
 			lifecycleEffect{kind: effectSetIdleEndData, exitCode: sig.idleExitCode, reason: sig.idleStopReason},
-			lifecycleEffect{kind: effectWriteSentinel, exitCode: sig.idleExitCode, reason: sig.idleStopReason},
+			lifecycleEffect{kind: effectWriteSentinel, exitCode: sig.idleExitCode, reason: sig.idleStopReason, sessionID: sig.resultSessionID},
 			lifecycleEffect{kind: effectEmitSessionEnd, exitCode: sig.idleExitCode, reason: sig.idleStopReason},
 		)
 
