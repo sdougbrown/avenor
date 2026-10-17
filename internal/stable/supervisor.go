@@ -2532,6 +2532,64 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 	}
 }
 
+// workflowPhaseAttempt owns the pre-activity attempt protocol shared by the
+// loop and team PhaseAttempt callbacks: the attemptPreparing transaction, the
+// roster snapshot, and the pre-activity failure guard.
+type workflowPhaseAttempt struct {
+	s     *Supervisor
+	child *childRuntime
+	// active records that the attempt handed off to the activity-based
+	// settle path; once set, finish sends nothing.
+	active bool
+}
+
+// beginWorkflowPhaseAttempt returns the pre-activity attempt guard for child.
+// The callback defers finish before running preparing, so the guard fires
+// even if preparing panics.
+func (s *Supervisor) beginWorkflowPhaseAttempt(child *childRuntime) *workflowPhaseAttempt {
+	return &workflowPhaseAttempt{s: s, child: child}
+}
+
+// preparing sends attemptPreparing under child.mu and returns the roster
+// snapshot for the attempt. The locked section owns its Unlock via defer so
+// a panic between Lock and the startFailed defer cannot leave child.mu held.
+func (p *workflowPhaseAttempt) preparing() (*rosterconfig.Config, string) {
+	roster, rosterFile, prepErr := func() (*rosterconfig.Config, string, error) {
+		p.child.mu.Lock()
+		defer p.child.mu.Unlock()
+		// The adapter owns attemptPreparing: it clears the phase
+		// presentation even while another parallel attempt runs.
+		_, _, prepErr := p.s.applyLifecycle(p.child, lifecycleSignal{kind: signalAttemptPreparing, class: p.child.lc.class})
+		return p.child.roster, p.child.rosterFile, prepErr
+	}()
+	if prepErr != nil {
+		p.s.reportLifecycleError(p.child, prepErr)
+	}
+	return roster, rosterFile
+}
+
+// markActive records that beginWorkflowAttempt incremented activity: later
+// failures unwind through the attempt's own settle path, not this
+// pre-activity signal.
+func (p *workflowPhaseAttempt) markActive() {
+	p.active = true
+}
+
+// finish records the pre-activity failure, including on panic: a prepared
+// attempt that returns before beginWorkflowAttempt incremented activity
+// never started.
+func (p *workflowPhaseAttempt) finish() {
+	if p.active {
+		return
+	}
+	p.child.mu.Lock()
+	_, _, startFailErr := p.s.applyLifecycle(p.child, lifecycleSignal{kind: signalAttemptStartFailed, class: p.child.lc.class})
+	p.child.mu.Unlock()
+	if startFailErr != nil {
+		p.s.reportLifecycleError(p.child, startFailErr)
+	}
+}
+
 func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg *looprunner.LoopConfig, timeoutSec, maxRetries int, agent, agentProfile, model, thinking, serverURL, backend string) {
 	// Registered first so it runs last: the join closes only after the
 	// teardown defer's post-completion work is done (test teardown joins on
@@ -2599,34 +2657,9 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 		MaxRetries: maxRetries,
 		Broker:     s.broker,
 		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, iteration int, prevSessionID string) (looprunner.PhaseAttemptResult, error) {
-			// A prepared attempt that returns before beginWorkflowAttempt
-			// incremented activity never started: record the pre-activity
-			// failure, including on panic.
-			attemptActive := false
-			defer func() {
-				if attemptActive {
-					return
-				}
-				child.mu.Lock()
-				_, _, startFailErr := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptStartFailed, class: child.lc.class})
-				child.mu.Unlock()
-				if startFailErr != nil {
-					s.reportLifecycleError(child, startFailErr)
-				}
-			}()
-			// The locked section owns its Unlock via defer so a panic between
-			// Lock and the startFailed defer cannot leave child.mu held.
-			phaseRoster, phaseRosterFile, prepErr := func() (*rosterconfig.Config, string, error) {
-				child.mu.Lock()
-				defer child.mu.Unlock()
-				// The adapter owns attemptPreparing: it clears the phase
-				// presentation even while another parallel attempt runs.
-				_, _, prepErr := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptPreparing, class: child.lc.class})
-				return child.roster, child.rosterFile, prepErr
-			}()
-			if prepErr != nil {
-				s.reportLifecycleError(child, prepErr)
-			}
+			prep := s.beginWorkflowPhaseAttempt(child)
+			defer prep.finish()
+			phaseRoster, phaseRosterFile := prep.preparing()
 
 			selectionMu.Lock()
 			selection, cached := resolvedSelections[phase.Name]
@@ -2724,9 +2757,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 			defer s.releaseSessionAttempt(attempt)
 			identity = attempt.identity
 			providerLifecycle = s.beginWorkflowAttempt(child, provider, session, identity)
-			// Activity is counted from here on; later failures unwind through the
-			// attempt's own settle path, not this pre-activity signal.
-			attemptActive = true
+			prep.markActive()
 			providerTurn, admitted := s.beginChildProviderTurn(child, providerLifecycle)
 			if !admitted {
 				s.closeChildProvider(child, providerLifecycle)
@@ -2912,34 +2943,9 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 		MaxRetries: maxRetries,
 		Broker:     s.broker,
 		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (teamrunner.PhaseAttemptResult, error) {
-			// A prepared attempt that returns before beginWorkflowAttempt
-			// incremented activity never started: record the pre-activity
-			// failure, including on panic.
-			attemptActive := false
-			defer func() {
-				if attemptActive {
-					return
-				}
-				child.mu.Lock()
-				_, _, startFailErr := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptStartFailed, class: child.lc.class})
-				child.mu.Unlock()
-				if startFailErr != nil {
-					s.reportLifecycleError(child, startFailErr)
-				}
-			}()
-			// The locked section owns its Unlock via defer so a panic between
-			// Lock and the startFailed defer cannot leave child.mu held.
-			phaseRoster, phaseRosterFile, prepErr := func() (*rosterconfig.Config, string, error) {
-				child.mu.Lock()
-				defer child.mu.Unlock()
-				// The adapter owns attemptPreparing: it clears the phase
-				// presentation even while another parallel attempt runs.
-				_, _, prepErr := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptPreparing, class: child.lc.class})
-				return child.roster, child.rosterFile, prepErr
-			}()
-			if prepErr != nil {
-				s.reportLifecycleError(child, prepErr)
-			}
+			prep := s.beginWorkflowPhaseAttempt(child)
+			defer prep.finish()
+			phaseRoster, phaseRosterFile := prep.preparing()
 
 			selectionMu.Lock()
 			selection, cached := resolvedSelections[phase.Name]
@@ -3035,9 +3041,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 			defer s.releaseSessionAttempt(attempt)
 			identity = attempt.identity
 			providerLifecycle = s.beginWorkflowAttempt(child, provider, session, identity)
-			// Activity is counted from here on; later failures unwind through the
-			// attempt's own settle path, not this pre-activity signal.
-			attemptActive = true
+			prep.markActive()
 			providerTurn, admitted := s.beginChildProviderTurn(child, providerLifecycle)
 			if !admitted {
 				s.closeChildProvider(child, providerLifecycle)
