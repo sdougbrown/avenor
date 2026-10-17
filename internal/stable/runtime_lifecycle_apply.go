@@ -297,8 +297,9 @@ func (s *Supervisor) compareShadowTransaction(child *childRuntime, pre lifecycle
 			}
 		}
 	}
-	// Locked-effect witness.
-	s.compareLifecycleEffects(lifecycleLockedEffects(eff), witness.locked, child, site, "locked", nil)
+	// Locked-effect witness. The sink collects detail lines so nothing is
+	// printed while the caller's locks are held.
+	s.compareLifecycleEffects(lifecycleLockedEffects(eff), witness.locked, child, site, "locked", sink)
 }
 
 // applyLifecyclePresentation applies predicted presentation effects to a
@@ -337,7 +338,7 @@ func (s *Supervisor) compareLifecycleEffects(predicted, witnessed []lifecycleEff
 			continue
 		}
 		switch p.kind {
-		case effectRecordOutcomeExit, effectSetIdleEndData, effectEmitSessionEnd:
+		case effectRecordOutcomeExit, effectRecordWorkflowExit, effectSetIdleEndData, effectEmitSessionEnd:
 			if p.exitCode != w.exitCode || p.reason != w.reason {
 				s.countShadowMismatch(child, site, fmt.Sprintf("%s effect %d payload: predicted (%d,%q), witnessed (%d,%q)", class, i, p.exitCode, p.reason, w.exitCode, w.reason), sink)
 			}

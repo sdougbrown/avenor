@@ -225,9 +225,7 @@ func finishSyntheticRunChild(s *Supervisor, child *childRuntime) {
 // closeTestRunJoin closes a synthetic child's run-goroutine join point: the
 // fixture has no run goroutine, so the finish helper owns the close.
 func closeTestRunJoin(child *childRuntime) {
-	if child.runDone != nil {
-		close(child.runDone)
-	}
+	child.closeRunDone()
 }
 
 // finishSyntheticChildLifecycle explicitly finishes the modeled lifecycle of a

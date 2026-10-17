@@ -300,6 +300,7 @@ type childRuntime struct {
 	interruptFn                func()
 	done                       chan struct{}
 	doneOnce                   sync.Once
+	runDoneOnce                sync.Once
 	// runDone is a test-observable join point: it is closed when the child's
 	// run goroutine exits (after its post-completion work, such as the
 	// capacity release that follows complete) or by the rollback/finish path
@@ -1532,7 +1533,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		child.complete(s, afterSpawnRollback)
 		// No run goroutine was started for a rolled-back child; close the join
 		// point so test teardown never waits on it.
-		close(child.runDone)
+		child.closeRunDone()
 	}
 	defer func() {
 		if releaseReservation != nil {
@@ -2196,9 +2197,7 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 	// Registered first so it runs last: the join closes only after the
 	// teardown defer's post-completion work (such as the capacity release) is
 	// done, so test teardown can join this goroutine before reading counters.
-	if child.runDone != nil {
-		defer close(child.runDone)
-	}
+	defer child.closeRunDone()
 	defer func() {
 		panicked := false
 		if r := recover(); r != nil {
@@ -2449,16 +2448,14 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			// prompt must not resume it for a second turn. Falling through
 			// records the failure's exit code and sentinel exactly as a
 			// promptless failure.
-			// Shadow: the machine either selected the terminal probe
-			// (contProbeTerminalPrompt) or ended directly at attemptOutcome
-			// (decider/conflict, contEnd). Only a selected probe runs the
-			// continuation transaction; the direct end compares
-			// attemptOutcome's predicted sentinel against the fallthrough
-			// witness below.
-			probeSelected := err == nil && cont.kind == contProbeTerminalPrompt
+			// Shadow: the terminal-probe branch is decided from legacy inputs
+			// alone — the prediction never gates the dequeue, and a transition
+			// error leaves the legacy path untouched. The branch legacy took
+			// (probe resume or direct end) is the witness compared below.
+			probeEligible := ctx.Err() == nil && !child.permissionDeciderRun && !conflict
 			probeResumed := false
 			var probeNext string
-			if probeSelected && ctx.Err() == nil && !child.permissionDeciderRun && !conflict {
+			if probeEligible {
 				if nextPrompt, ok := child.dequeuePrompt(); ok {
 					probeResumed = true
 					probeNext = nextPrompt
@@ -2477,7 +2474,10 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 				cli.WriteSentinel(child.sentinelFile, result.exitCode, result.sessionID, stopReason, s.runID, s.stderrWriter())
 				probeWitness = append(probeWitness, lifecycleEffect{kind: effectWriteSentinel, exitCode: result.exitCode, reason: stopReason, sessionID: result.sessionID})
 			}
-			if probeSelected {
+			// The probe continuation transaction runs whenever legacy took the
+			// probe branch, and whenever the prediction left a terminal probe
+			// pending to resolve — regardless of the other side.
+			if probeResumed || (err == nil && cont.kind == contProbeTerminalPrompt) {
 				child.mu.Lock()
 				probeCont, probeEff, probeErr := s.applyLifecycle(child, lifecycleSignal{
 					kind:               signalPromptContinuation,
@@ -2521,8 +2521,8 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 				cli.WriteSentinel(child.sentinelFile, result.exitCode, result.sessionID, stopReason, s.runID, s.stderrWriter())
 				deciderWitness = append(deciderWitness, lifecycleEffect{kind: effectWriteSentinel, exitCode: result.exitCode, reason: stopReason, sessionID: result.sessionID})
 			}
-			s.compareLifecycleContinuation(child, cont.kind, contEnd, signalAttemptOutcome)
 			if !lifecycleTransitionFailed(err) {
+				s.compareLifecycleContinuation(child, cont.kind, contEnd, signalAttemptOutcome)
 				s.compareDeferredLifecycleEffects(child, eff, deciderWitness, signalAttemptOutcome)
 			}
 			return
@@ -2586,9 +2586,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 	// Registered first so it runs last: the join closes only after the
 	// teardown defer's post-completion work is done (test teardown joins on
 	// it before reading lifecycle counters).
-	if child.runDone != nil {
-		defer close(child.runDone)
-	}
+	defer child.closeRunDone()
 	// SpawnParams.Timeout is an enforceable execution deadline for loop
 	// children, not just a direct-run feature: the whole loop — every phase
 	// attempt, retry, and nudge — stops at the shared wall-clock limit.
@@ -2607,7 +2605,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 			fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s panic: %v\n", child.id, r)
 			s.emitChildError(child, fmt.Sprintf("panic: %v", r), "error")
 			if final, ok := sessions.latest(); ok {
-				s.finalizeWorkflowChild(child, final)
+				s.finalizeWorkflowChild(child, final, 0, false)
 			}
 			if child.sentinelFile != "" {
 				cli.WriteSentinel(child.sentinelFile, 1, child.sessionID(), "error", s.runID, s.stderrWriter())
@@ -2870,13 +2868,23 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 			finalSession, hasFinal = workflowSession{SessionID: result.SessionID, Identity: identity}, true
 		}
 	}
+	// The exit code the legacy path writes after finalization: 1 on failure,
+	// the aggregate result's code on success.
+	plannedExit := result.ExitCode
+	if err != nil {
+		plannedExit = 1
+	}
+	var finalizeEffects []lifecycleEffect
 	if hasFinal {
-		s.finalizeWorkflowChild(child, finalSession)
+		finalizeEffects = s.finalizeWorkflowChild(child, finalSession, plannedExit, true)
 	}
 	if err != nil {
 		child.mu.Lock()
 		child.exitCode = 1
 		child.mu.Unlock()
+		if finalizeEffects != nil {
+			s.compareDeferredLifecycleEffects(child, finalizeEffects, []lifecycleEffect{{kind: effectRecordWorkflowExit, exitCode: 1}}, signalWorkflowFinalized)
+		}
 		if child.sentinelFile != "" {
 			cli.WriteSentinel(child.sentinelFile, 1, child.sessionID(), "error", s.runID, s.stderrWriter())
 		}
@@ -2885,6 +2893,9 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 	child.mu.Lock()
 	child.exitCode = result.ExitCode
 	child.mu.Unlock()
+	if finalizeEffects != nil {
+		s.compareDeferredLifecycleEffects(child, finalizeEffects, []lifecycleEffect{{kind: effectRecordWorkflowExit, exitCode: result.ExitCode}}, signalWorkflowFinalized)
+	}
 	child.stashWorkflowTerminalMarker(result.MarkerDirective, result.MarkerLabel)
 
 	// When every iteration phase returns end_turn, looprunner stops at
@@ -2907,9 +2918,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 	// Registered first so it runs last: the join closes only after the
 	// teardown defer's post-completion work is done (test teardown joins on
 	// it before reading lifecycle counters).
-	if child.runDone != nil {
-		defer close(child.runDone)
-	}
+	defer child.closeRunDone()
 	// SpawnParams.Timeout is an enforceable execution deadline for team
 	// children: every member, retry, and nudge stops at the shared
 	// wall-clock limit, while ordinary member failure still leaves peers
@@ -2929,7 +2938,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 			fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s panic: %v\n", child.id, r)
 			s.emitChildError(child, fmt.Sprintf("panic: %v", r), "error")
 			if final, ok := sessions.final(cfg.Post, cfg.Team, cfg.Pre); ok {
-				s.finalizeWorkflowChild(child, final)
+				s.finalizeWorkflowChild(child, final, 0, false)
 			}
 			if child.sentinelFile != "" {
 				cli.WriteSentinel(child.sentinelFile, 1, child.sessionID(), "error", s.runID, s.stderrWriter())
@@ -3192,13 +3201,23 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 			finalSession, hasFinal = workflowSession{SessionID: result.SessionID, Identity: identity}, true
 		}
 	}
+	// The exit code the legacy path writes after finalization: 1 on failure,
+	// the aggregate result's code on success.
+	plannedExit := result.ExitCode
+	if err != nil {
+		plannedExit = 1
+	}
+	var finalizeEffects []lifecycleEffect
 	if hasFinal {
-		s.finalizeWorkflowChild(child, finalSession)
+		finalizeEffects = s.finalizeWorkflowChild(child, finalSession, plannedExit, true)
 	}
 	if err != nil {
 		child.mu.Lock()
 		child.exitCode = 1
 		child.mu.Unlock()
+		if finalizeEffects != nil {
+			s.compareDeferredLifecycleEffects(child, finalizeEffects, []lifecycleEffect{{kind: effectRecordWorkflowExit, exitCode: 1}}, signalWorkflowFinalized)
+		}
 		if child.sentinelFile != "" {
 			cli.WriteSentinel(child.sentinelFile, 1, child.sessionID(), "error", s.runID, s.stderrWriter())
 		}
@@ -3207,6 +3226,9 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 	child.mu.Lock()
 	child.exitCode = result.ExitCode
 	child.mu.Unlock()
+	if finalizeEffects != nil {
+		s.compareDeferredLifecycleEffects(child, finalizeEffects, []lifecycleEffect{{kind: effectRecordWorkflowExit, exitCode: result.ExitCode}}, signalWorkflowFinalized)
+	}
 	child.stashWorkflowTerminalMarker(result.MarkerDirective, result.MarkerLabel)
 
 	// A successful team can finish all members and post phases with end_turn.
@@ -3644,12 +3666,20 @@ func (s *Supervisor) endWorkflowAttempt(child *childRuntime, provider runtime.Pr
 	}
 }
 
-func (s *Supervisor) finalizeWorkflowChild(child *childRuntime, final workflowSession) {
+// finalizeWorkflowChild resets the workflow child's activity to the finalized
+// state and settles its waiters. exitCode carries the exit code the legacy
+// finalization path writes after finalization; recordsExit is false when that
+// path writes none. The predicted exit-record effect is returned as a deferred
+// prediction for the caller to witness at its legacy write site; nil means the
+// transaction failed and nothing may be compared.
+func (s *Supervisor) finalizeWorkflowChild(child *childRuntime, final workflowSession, exitCode int, recordsExit bool) []lifecycleEffect {
 	child.mu.Lock()
 	// Shadow: workflowFinalized resets the count and settles unconditionally,
 	// and never clears presentation; the legacy block below is the mutation
-	// and its witness.
-	_, _, finErr := s.applyLifecycle(child, lifecycleSignal{kind: signalWorkflowFinalized, class: child.lc.class}, func() legacyLifecycleWitness {
+	// and its witness. The exit-code write is a deferred prediction the caller
+	// witnesses at its legacy write site.
+	sig := lifecycleSignal{kind: signalWorkflowFinalized, class: child.lc.class, exitCode: exitCode, workflowExitRecords: recordsExit}
+	_, predEff, finErr := s.applyLifecycle(child, sig, func() legacyLifecycleWitness {
 		w := legacyLifecycleWitness{}
 		child.provider = nil
 		child.providerLifecycle = nil
@@ -3670,6 +3700,10 @@ func (s *Supervisor) finalizeWorkflowChild(child *childRuntime, final workflowSe
 	if finErr != nil {
 		s.reportLifecycleError(child, finErr)
 	}
+	if lifecycleTransitionFailed(finErr) {
+		return nil
+	}
+	return lifecycleDeferredEffects(predEff)
 }
 
 func (s *Supervisor) statusIdentity(child *childRuntime, sessionID string) effectiveIdentity {
@@ -4853,16 +4887,12 @@ func (child *childRuntime) complete(s *Supervisor, boundary completionBoundary) 
 			kind: signalCompletionPublished, class: child.lc.class, boundary: boundary,
 		}, func() legacyLifecycleWitness {
 			w := legacyLifecycleWitness{}
+			// Record what the legacy path did — the settle call runs on every
+			// publication — rather than consulting the machine's completion
+			// stage.
 			child.completed = true
-			// Safety net for paths that end the runtime without a turn-settle
-			// transition (e.g. an aborted start attempt); waiters report the
-			// terminal snapshot instead of blocking on a done channel race. A
-			// completion that was already published (CP repeat through doneOnce)
-			// settled at its first publication, so the repeat records no settle.
 			child.settleTurnLocked()
-			if child.lc.completion != completionPublished {
-				w.locked = append(w.locked, lifecycleEffect{kind: effectSettleTurnWaiters})
-			}
+			w.locked = append(w.locked, lifecycleEffect{kind: effectSettleTurnWaiters})
 			return w
 		})
 		child.mu.Unlock()
@@ -4877,6 +4907,17 @@ func (child *childRuntime) complete(s *Supervisor, boundary completionBoundary) 
 		}
 		_ = pubCont
 	})
+}
+
+// closeRunDone closes the run-goroutine join point exactly once. The close
+// owner varies — spawn rollback, the run-goroutine teardown defers, and the
+// test finish helpers — so the close must be idempotent. A nil channel has no
+// join point to close.
+func (child *childRuntime) closeRunDone() {
+	if child.runDone == nil {
+		return
+	}
+	child.runDoneOnce.Do(func() { close(child.runDone) })
 }
 
 // releaseTreeToken returns the runtime's current tree-budget slot, if any. It

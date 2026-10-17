@@ -257,6 +257,12 @@ type lifecycleSignal struct {
 	retryable         bool
 	retriesRemaining  bool
 
+	// workflowFinalized exit data: workflowExitRecords attests that the legacy
+	// finalization path writes child.exitCode after finalization (panic
+	// teardown leaves the stored exit code untouched); exitCode carries the
+	// value that path will write.
+	workflowExitRecords bool
+
 	// promptContinuation inputs. terminalContextErr is sampled inside the
 	// terminal probe after the exit code is recorded and unlocked;
 	// resumeContextErr is sampled only after an actual dequeue; the retry
@@ -310,6 +316,7 @@ const (
 	effectSetSessionEndPresentation                   // sessionEndObserved
 	effectSetIdleEndData                              // idleContextEnded
 	effectRecordOutcomeExit                           // attemptOutcome terminal/decider cases
+	effectRecordWorkflowExit                          // workflowFinalized: the exit code the legacy path writes after finalization
 	effectSettleTurnWaiters                           // settled→0; workflowFinalized; completionPublished
 	effectReleaseTreeToken                            // attemptReturned
 	effectWriteSentinel                               // attemptOutcome success/end/decider; promptContinuation terminal probe; idleContextEnded
@@ -606,6 +613,9 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 		out.attempts = 0
 		out.exec = execIdle
 		eff = append(eff, lifecycleEffect{kind: effectSettleTurnWaiters})
+		if sig.workflowExitRecords {
+			eff = append(eff, lifecycleEffect{kind: effectRecordWorkflowExit, exitCode: sig.exitCode})
+		}
 
 	case signalAttemptReturned:
 		// Source S/I, C0, direct class; no dimension change; releases the tree
