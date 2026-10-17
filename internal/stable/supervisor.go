@@ -306,16 +306,10 @@ type childRuntime struct {
 	// capacity release that follows complete) or by the rollback/finish path
 	// when no run goroutine ever started. Production never reads it; test
 	// teardown joins on it before asserting lifecycle counters.
-	runDone   chan struct{}
-	exitCode  int
-	completed bool
-	// parked is set while the runtime waits for a follow-up prompt after a
-	// successful turn. Parked runtimes do not count against MaxRuntimes.
-	parked         bool
-	active         bool
-	activeAttempts int
-	promptCh       chan struct{}
-	promptQueue    []string
+	runDone     chan struct{}
+	exitCode    int
+	promptCh    chan struct{}
+	promptQueue []string
 	// turnWaiters are wait_turn callers blocked on the runtime's next
 	// running→idle transition. Each waiter registers a channel under child.mu;
 	// settleTurnLocked closes them when the active turn settles, so a settle
@@ -341,19 +335,16 @@ type childRuntime struct {
 	permission        map[string]any
 	directAttempt     *sessionAttempt
 	// lc is the closed lifecycle state owned by the pure machine
-	// (runtime_lifecycle.go). In Stage 2 it runs in shadow mode: legacy flag
-	// writes stay authoritative, and every transition is predicted, committed
-	// and independently compared by the adapter (runtime_lifecycle_apply.go).
+	// (runtime_lifecycle.go) and committed field by field by the adapter
+	// (runtime_lifecycle_apply.go). Read it through the field-specific
+	// predicates under the locks each reader already holds.
 	lc                lifecycleState
 	mu                sync.Mutex
 	writeMu           sync.Mutex
 	fanoutWriter      *runtimeFanoutWriter
 	providerLifecycle *permissionProviderLifecycle
-	shuttingDown      bool
 	brokerToken       string // broker token for this run (mirrors StartOptions.BrokerToken)
 
-	writerClosing     bool
-	writerClosed      bool
 	directAnswers     int
 	directAnswersDone chan struct{}
 
@@ -1354,7 +1345,7 @@ func (s *Supervisor) activeRuntimeCountLocked() int {
 		rt.mu.Lock()
 		// Parked runtimes await an optional follow-up prompt; they hold no
 		// turn in flight, so they must not consume a MaxRuntimes slot.
-		if !rt.completed && !rt.parked {
+		if !rt.lc.isCompleted() && !rt.lc.isParked() {
 			n++
 		}
 		rt.mu.Unlock()
@@ -4143,10 +4134,10 @@ func (s *Supervisor) listRuntimes() []map[string]any {
 	for _, rt := range s.runtimes {
 		rt.mu.Lock()
 		status := "idle"
-		if rt.active {
+		if rt.lc.isActive() {
 			status = "running"
 		}
-		if rt.completed {
+		if rt.lc.isCompleted() {
 			status = "ended"
 		}
 		identity := s.statusIdentity(rt, rt.session.SessionID)
@@ -5680,10 +5671,10 @@ func (s *Supervisor) RuntimeStatus(rtID string) (any, error) {
 	}
 	rt.mu.Lock()
 	status := "idle"
-	if rt.active {
+	if rt.lc.isActive() {
 		status = "running"
 	}
-	if rt.completed {
+	if rt.lc.isCompleted() {
 		status = "ended"
 	}
 	identity := s.statusIdentity(rt, rt.session.SessionID)

@@ -14,9 +14,8 @@ import (
 )
 
 // testLifecycleOptions declares the explicit lifecycle initialization for a
-// synthetic test child. The legacy mirrors are derived from these declared
-// values once, before publication or concurrent use; later mutations use
-// signals or field commits under the required locks.
+// synthetic test child. Later mutations use signals or field commits under
+// the required locks.
 type testLifecycleOptions struct {
 	id             string
 	exec           execState
@@ -31,10 +30,9 @@ type testLifecycleOptions struct {
 	lastStopReason string
 }
 
-// initializeTestLifecycle explicitly initializes a synthetic child's lifecycle
-// and its legacy mirrors. Whole-state initialization is allowed only for a
-// new, unpublished child with no concurrent users (plan decision 7); the
-// invariant check keeps test declarations honest.
+// initializeTestLifecycle explicitly initializes a synthetic child's lifecycle.
+// Whole-state initialization is allowed only for a new, unpublished child with
+// no concurrent users; the invariant check keeps test declarations honest.
 func initializeTestLifecycle(t testing.TB, child *childRuntime, opts testLifecycleOptions) {
 	t.Helper()
 	if child.done == nil {
@@ -63,15 +61,6 @@ func initializeTestLifecycle(t testing.TB, child *childRuntime, opts testLifecyc
 		t.Fatalf("test child %s: invalid declared lifecycle state: %v", child.id, err)
 	}
 	child.lc = st
-	// Legacy mirrors, written once to match the declared state exactly. The
-	// activity mirrors carry the machine count for both classes.
-	child.active = opts.attempts > 0
-	child.activeAttempts = opts.attempts
-	child.parked = opts.exec == execParked || opts.exec == execParkedEnding
-	child.completed = opts.completion != completionOpen
-	child.shuttingDown = opts.shutdown == shutdownRequested
-	child.writerClosing = opts.writer == writerClosing || opts.writer == writerClosed
-	child.writerClosed = opts.writer == writerClosed
 	child.phase = opts.phase
 	child.phaseLabel = opts.phaseLabel
 	child.exitCode = opts.exitCode

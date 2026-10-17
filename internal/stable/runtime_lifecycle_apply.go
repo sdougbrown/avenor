@@ -162,21 +162,10 @@ func (s *Supervisor) transactLifecycle(child *childRuntime, sig lifecycleSignal,
 }
 
 // applyOwnedLifecycleEffects executes the locked lifecycle effects this
-// adapter owns and writes the mirrors derived from them: the activity mirrors
-// (active, activeAttempts, kept synchronized to the machine count for both
-// classes), presentation (phase, phaseLabel), the idle-end data (exitCode,
-// lastStopReason), the recorded outcome exit code and the waiter release of a
-// settled or finalized attempt, of a fault recovery and of the final
-// publication. The parked mirror is written only by the signals the legacy
-// code parked with: parkRequested, localSlotAcquired and parkWaitEnded; every
-// other signal leaves the mirror alone, and the final publication deliberately
-// retains the obsolete parked value until the mirror is deleted. The completed
-// mirror is written only by the two signals the legacy code completed with:
-// parkTimedOut (admission closed before done) and completionPublished. The
-// shutdown/writer mirrors are written only by the dual-locked signals:
-// shutdownRequested (shuttingDown), writerCloseBegun (writerClosing, staying
-// true after writerClosed as the legacy flags did) and writerCloseFinished
-// (writerClosed).
+// adapter owns: presentation (phase, phaseLabel), the idle-end data
+// (exitCode, lastStopReason), the recorded outcome exit code and the waiter
+// release of a settled or finalized attempt, of a fault recovery and of the
+// final publication.
 func (s *Supervisor) applyOwnedLifecycleEffects(child *childRuntime, predicted lifecycleState, site signalKind, eff []lifecycleEffect) {
 	for _, e := range eff {
 		switch e.kind {
@@ -206,85 +195,60 @@ func (s *Supervisor) applyOwnedLifecycleEffects(child *childRuntime, predicted l
 			}
 		}
 	}
-	child.activeAttempts = predicted.attempts
-	child.active = predicted.attempts > 0
-	switch site {
-	case signalParkRequested, signalLocalSlotAcquired, signalParkWaitEnded:
-		child.parked = predicted.isParked()
-	case signalParkTimedOut, signalCompletionPublished:
-		child.completed = predicted.completion != completionOpen
-	case signalShutdownRequested:
-		child.shuttingDown = predicted.isShuttingDown()
-	case signalWriterCloseBegun:
-		child.writerClosing = predicted.isWriterClosing()
-	case signalWriterCloseFinished:
-		// writerClosing stays true after writerClosed, as the legacy flags did.
-		child.writerClosing = predicted.isWriterClosing()
-		child.writerClosed = predicted.isWriterClosed()
-	}
 }
 
-// completePublicationFailSafe applies the legacy publication's unconditional
-// writes when the completionPublished transition itself failed: it commits the
-// published completion, settles the turn waiters and sets the completed mirror
-// so capacity accounting and registered waiters still observe the ended
-// runtime. The caller must hold child.mu and report the transition error
-// outside every lock.
+// completePublicationFailSafe applies the publication's unconditional writes
+// when the completionPublished transition itself failed: it commits the
+// published completion (with its implied ended exec, empty attempts and no
+// pending probe, so the forced state satisfies the machine's invariants) and
+// settles the turn waiters, so capacity accounting and registered waiters
+// still observe the ended runtime. The caller must hold child.mu and report
+// the transition error outside every lock.
 func (s *Supervisor) completePublicationFailSafe(child *childRuntime) {
-	// A published completion implies an ended exec with no attempts and no
-	// pending probe; commit all of them so the forced state still satisfies
-	// the machine's invariants.
 	child.lc.exec = execEnded
 	child.lc.attempts = 0
 	child.lc.pendingProbe = probeNone
 	child.lc.completion = completionPublished
 	child.settleTurnLocked()
-	child.completed = true
 }
 
-// parkTimeoutFailSafe applies the legacy park-timeout writes when the
-// parkTimedOut transition itself failed: it sets completion to
-// admission-closed when it is still open and sets the completed mirror so
-// admission readers reject prompts as the legacy timeout did. The caller must
-// hold child.mu and report the transition error outside every lock.
+// parkTimeoutFailSafe applies the park-timeout writes when the parkTimedOut
+// transition itself failed: it sets completion to admission-closed when it is
+// still open, so admission readers reject prompts as the timeout did. The
+// caller must hold child.mu and report the transition error outside every
+// lock.
 func (s *Supervisor) parkTimeoutFailSafe(child *childRuntime) {
 	if child.lc.completion == completionOpen {
 		child.lc.completion = completionAdmissionClosed
 	}
-	child.completed = true
 }
 
-// shutdownFailSafe applies the legacy shutdown write when the
-// shutdownRequested transition itself failed: it commits the requested stage
-// and sets its mirror so admission gates reject new work and the parent cancel
-// stays first-only, exactly as the legacy flag write did. The caller must
+// shutdownFailSafe applies the shutdown write when the shutdownRequested
+// transition itself failed: it commits the requested stage so admission gates
+// reject new work and the parent cancel stays first-only. The caller must
 // hold writeMu -> child.mu and report the transition error outside every lock.
 func (s *Supervisor) shutdownFailSafe(child *childRuntime) {
 	child.lc.shutdown = shutdownRequested
-	child.shuttingDown = true
 }
 
-// writerCloseBegunFailSafe applies the legacy writer write when the
-// writerCloseBegun transition itself failed: it commits the closing stage
-// (never regressing a closed writer) and sets its mirror so admission gates
-// reject new writes while the drain runs. The caller must hold writeMu ->
-// child.mu and report the transition error outside every lock.
+// writerCloseBegunFailSafe applies the writer write when the writerCloseBegun
+// transition itself failed: it commits the closing stage (never regressing a
+// closed writer) so admission gates reject new writes while the drain runs.
+// The caller must hold writeMu -> child.mu and report the transition error
+// outside every lock.
 func (s *Supervisor) writerCloseBegunFailSafe(child *childRuntime) {
 	if child.lc.writer == writerOpen {
 		child.lc.writer = writerClosing
 	}
-	child.writerClosing = true
 }
 
-// writerCloseFinishedFailSafe applies the legacy writer writes when the
+// writerCloseFinishedFailSafe applies the writer write when the
 // writerCloseFinished transition itself failed: the sink Close already ran,
-// so the closed stage commits and a repeat close never closes the sink again;
-// the closing mirror stays true, as the legacy flags did. The caller must hold
-// writeMu -> child.mu and report the transition error outside every lock.
+// so the closed stage commits and a repeat close never closes the sink again.
+// The caller must hold writeMu -> child.mu and report the transition error
+// outside every lock.
 func (s *Supervisor) writerCloseFinishedFailSafe(child *childRuntime) {
 	child.lc.writer = writerClosed
-	child.writerClosing = true
-	child.writerClosed = true
 }
 
 // executeShutdownDeferredEffects executes the deferred effects a shutdown

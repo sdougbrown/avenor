@@ -401,7 +401,7 @@ func TestShutdownWaitsForFailedReservedRuntime(t *testing.T) {
 	}
 
 	child.mu.Lock()
-	completed := child.completed
+	completed := child.lc.isCompleted()
 	child.mu.Unlock()
 	if !completed {
 		t.Fatal("failed reservation was not marked completed")
@@ -420,10 +420,9 @@ func TestActiveRuntimeCountIgnoresCompletedHistory(t *testing.T) {
 		MaxRuntimes:   1,
 	})
 	doneChild := &childRuntime{
-		id:        "rt_done",
-		done:      make(chan struct{}),
-		promptCh:  make(chan struct{}, 1),
-		completed: true,
+		id:       "rt_done",
+		done:     make(chan struct{}),
+		promptCh: make(chan struct{}, 1),
 	}
 	initializeCompletedTestChild(t, sup, doneChild)
 	sup.runtimes["rt_done"] = doneChild
@@ -439,10 +438,9 @@ func TestRuntimePromptRejectsCompletedRuntime(t *testing.T) {
 		MaxRuntimes:   1,
 	})
 	doneChild := &childRuntime{
-		id:        "rt_done",
-		done:      make(chan struct{}),
-		promptCh:  make(chan struct{}, 1),
-		completed: true,
+		id:       "rt_done",
+		done:     make(chan struct{}),
+		promptCh: make(chan struct{}, 1),
 	}
 	initializeCompletedTestChild(t, sup, doneChild)
 	sup.runtimes["rt_done"] = doneChild
@@ -619,7 +617,7 @@ func TestRunChildAttemptClearsPhaseAfterSessionEnd(t *testing.T) {
 		t.Fatalf("exitCode = %d, want 0", result.exitCode)
 	}
 	child.mu.Lock()
-	active, phase, phaseLabel := child.active, child.phase, child.phaseLabel
+	active, phase, phaseLabel := child.lc.isActive(), child.phase, child.phaseLabel
 	child.mu.Unlock()
 	if active {
 		t.Fatal("active = true after attempt cleanup")
@@ -735,7 +733,7 @@ func TestRunChildParksSuccessfulTurnWithDonePhase(t *testing.T) {
 		t.Fatalf("parked status = %#v, want idle/done", status)
 	}
 	child.mu.Lock()
-	completed := child.completed
+	completed := child.lc.isCompleted()
 	child.mu.Unlock()
 	if completed {
 		t.Fatal("parked runtime was marked completed")
@@ -743,7 +741,7 @@ func TestRunChildParksSuccessfulTurnWithDonePhase(t *testing.T) {
 	cancel()
 	waitForStableDone(t, child)
 	child.mu.Lock()
-	completed = child.completed
+	completed = child.lc.isCompleted()
 	child.mu.Unlock()
 	if !completed {
 		t.Fatal("runtime was not marked completed after cancellation")
@@ -1035,10 +1033,10 @@ func TestRunChildTransitionFailureRunsFailSafe(t *testing.T) {
 			t.Fatalf("provider opened %d resumed sessions, want none after the failed acquisition", attempts)
 		}
 		child.mu.Lock()
-		exec, active, activeAttempts := child.lc.exec, child.active, child.activeAttempts
+		state := child.lc
 		child.mu.Unlock()
-		if exec != execEnded || active || activeAttempts != 0 {
-			t.Fatalf("child after the failed acquisition: exec=%d active=%v attempts=%d", exec, active, activeAttempts)
+		if state.exec != execEnded || state.attempts != 0 {
+			t.Fatalf("child after the failed acquisition: exec=%d attempts=%d", state.exec, state.attempts)
 		}
 		assertFaultTeardown(t, sup, &buf, "rt_slot_fault", 1)
 	})
@@ -1301,12 +1299,8 @@ func TestRunChildTransitionFailureRunsFailSafe(t *testing.T) {
 		// The failed publication left the runtime ended for the capacity and
 		// status readers and released the registered waiter.
 		child.mu.Lock()
-		completed := child.completed
 		isCompleted := child.lc.isCompleted()
 		child.mu.Unlock()
-		if !completed {
-			t.Fatal("failed publication did not set the completed mirror")
-		}
 		if !isCompleted {
 			t.Fatal("failed publication did not commit the published completion")
 		}
@@ -1360,17 +1354,13 @@ func TestRunChildTransitionFailureRunsFailSafe(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatal("park timeout did not fire")
 		}
-		// The fail-safe closed admission and set the completed mirror in that
-		// critical section; the teardown may already have published.
+		// The fail-safe closed admission in that critical section; the
+		// teardown may already have published.
 		child.mu.Lock()
 		closed := child.lc.isCompleted()
-		completed := child.completed
 		child.mu.Unlock()
 		if !closed {
 			t.Fatal("park timeout fail-safe left admission open")
-		}
-		if !completed {
-			t.Fatal("park timeout fail-safe did not set the completed mirror")
 		}
 		// A prompt sent before the teardown publication is rejected.
 		if err := sup.RuntimePrompt("rt_park_timeout_fault", "late prompt", ""); err == nil {
@@ -1404,10 +1394,10 @@ func TestRunChildTransitionFailureRunsFailSafe(t *testing.T) {
 		// The fail-safe committed the published completion, so every
 		// completion reader agrees with the closed done channel.
 		child.mu.Lock()
-		completion, completed := child.lc.completion, child.completed
+		completion := child.lc.completion
 		child.mu.Unlock()
-		if completion != completionPublished || !completed {
-			t.Fatalf("publication fail-safe left completion=%v completed=%v, want published and completed", completion, completed)
+		if completion != completionPublished {
+			t.Fatalf("publication fail-safe left completion=%v, want published", completion)
 		}
 		if err := sup.RuntimePrompt("rt_publication_fault", "late prompt", ""); err == nil {
 			t.Fatal("RuntimePrompt accepted a prompt after the failed publication")
@@ -1452,12 +1442,12 @@ func TestRunChildTransitionFailureRunsFailSafe(t *testing.T) {
 
 		sup.beginChildShutdown(child)
 
-		// The fail-safe committed the requested stage and its mirror.
+		// The fail-safe committed the requested stage.
 		child.mu.Lock()
-		requested, mirror := child.lc.isShuttingDown(), child.shuttingDown
+		requested := child.lc.isShuttingDown()
 		child.mu.Unlock()
-		if !requested || !mirror {
-			t.Fatalf("shutdown fail-safe left requested=%v mirror=%v, want both true", requested, mirror)
+		if !requested {
+			t.Fatal("shutdown fail-safe left the requested stage uncommitted")
 		}
 		select {
 		case <-provider.cancelCalled:
@@ -1501,15 +1491,15 @@ func TestRunChildTransitionFailureRunsFailSafe(t *testing.T) {
 
 		sup.closeChildEventWriter(child)
 
-		// The fail-safe committed the closing stage and its mirror, so
-		// admission gates and the completion precondition observe the drain
-		// boundary, and the imperative sink Close still ran.
+		// The fail-safe committed the closing stage, so admission gates and
+		// the completion precondition observe the drain boundary, and the
+		// imperative sink Close still ran.
 		child.mu.Lock()
-		closing, mirror := child.lc.isWriterClosing(), child.writerClosing
+		closing := child.lc.isWriterClosing()
 		closed := child.lc.isWriterClosed()
 		child.mu.Unlock()
-		if !closing || !mirror {
-			t.Fatalf("writer begun fail-safe left closing=%v mirror=%v, want both true", closing, mirror)
+		if !closing {
+			t.Fatal("writer begun fail-safe left the closing stage uncommitted")
 		}
 		if !closed {
 			t.Fatal("writer close finished did not commit after the failed begun")
@@ -1545,13 +1535,13 @@ func TestRunChildTransitionFailureRunsFailSafe(t *testing.T) {
 
 		sup.closeChildEventWriter(child)
 
-		// Close already ran, so the fail-safe commits the closed stage and both
-		// mirrors, and a repeat close never closes the sink again.
+		// Close already ran, so the fail-safe commits the closed stage and a
+		// repeat close never closes the sink again.
 		child.mu.Lock()
-		closed, closedMirror, closingMirror := child.lc.isWriterClosed(), child.writerClosed, child.writerClosing
+		closed := child.lc.isWriterClosed()
 		child.mu.Unlock()
-		if !closed || !closedMirror || !closingMirror {
-			t.Fatalf("writer finished fail-safe left closed=%v closedMirror=%v closingMirror=%v, want all true", closed, closedMirror, closingMirror)
+		if !closed {
+			t.Fatal("writer finished fail-safe left the closed stage uncommitted")
 		}
 		if got := sink.recordedOrder(); len(got) != 1 || got[0] != "close" {
 			t.Fatalf("sink order = %v, want exactly one close", got)
@@ -1641,7 +1631,7 @@ func TestRunLoopChildClearsPhaseDuringRetryBackoff(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("first loop retry event was not emitted")
 	}
-	// openSession emits the first signal before child.active is true.
+	// openSession emits the first signal before the first attempt starts.
 	// Wait for Prompt's signal to ensure session.end ran; otherwise the
 	// assertion can observe the empty pre-attempt setup state.
 	select {
@@ -1689,7 +1679,7 @@ func TestRunTeamChildClearsPhaseDuringRetryBackoff(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("first team retry event was not emitted")
 	}
-	// openSession emits the first signal before child.active is true.
+	// openSession emits the first signal before the first attempt starts.
 	// Wait for Prompt's signal to ensure session.end ran; otherwise the
 	// assertion can observe the empty pre-attempt setup state.
 	select {
@@ -1766,7 +1756,7 @@ func waitForStableChild(t *testing.T, child *childRuntime, condition func(active
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		child.mu.Lock()
-		active, completed, phase, phaseLabel := child.active, child.completed, child.phase, child.phaseLabel
+		active, completed, phase, phaseLabel := child.lc.isActive(), child.lc.isCompleted(), child.phase, child.phaseLabel
 		child.mu.Unlock()
 		if condition(active, completed, phase, phaseLabel) {
 			return
@@ -1774,7 +1764,7 @@ func waitForStableChild(t *testing.T, child *childRuntime, condition func(active
 		time.Sleep(5 * time.Millisecond)
 	}
 	child.mu.Lock()
-	active, completed, phase, phaseLabel := child.active, child.completed, child.phase, child.phaseLabel
+	active, completed, phase, phaseLabel := child.lc.isActive(), child.lc.isCompleted(), child.phase, child.phaseLabel
 	child.mu.Unlock()
 	t.Fatalf("timed out waiting for child state: active=%v completed=%v phase=%q phase_label=%q", active, completed, phase, phaseLabel)
 }
@@ -1896,7 +1886,7 @@ func TestShutdownClosesPermissionAdmissionBeforeManagedHTTPTeardown(t *testing.T
 		t.Fatal("shutdown did not close supervisor admission")
 	}
 	child.writeMu.Lock()
-	locallyClosing := child.shuttingDown
+	locallyClosing := child.lc.isShuttingDown()
 	child.writeMu.Unlock()
 	if locallyClosing {
 		t.Fatal("test did not stop in the managed HTTP teardown gap")
@@ -2106,7 +2096,7 @@ func assertShutdownWaitsForNestedChildCleanup(t *testing.T, kind string, run fun
 	}
 
 	child.mu.Lock()
-	completed := child.completed
+	completed := child.lc.isCompleted()
 	providerCleared := child.provider == nil
 	child.mu.Unlock()
 	if !completed {
@@ -2210,7 +2200,7 @@ func TestRunLoopChildCleansUpOnLooprunnerError(t *testing.T) {
 		t.Fatal("loop child cancel function was not called")
 	}
 	child.mu.Lock()
-	completed := child.completed
+	completed := child.lc.isCompleted()
 	exitCode := child.exitCode
 	child.mu.Unlock()
 	if !completed {
@@ -2276,7 +2266,7 @@ func TestRunTeamChildCleansUpBrokerRuns(t *testing.T) {
 		t.Fatal("team child cancel function was not called")
 	}
 	child.mu.Lock()
-	completed := child.completed
+	completed := child.lc.isCompleted()
 	brokerToken := child.brokerToken
 	child.mu.Unlock()
 	if !completed {
@@ -2461,7 +2451,6 @@ func TestRuntimeStatusSurfacesPhaseAndPermission(t *testing.T) {
 		id:          "rt_status",
 		done:        make(chan struct{}),
 		promptCh:    make(chan struct{}, 1),
-		active:      true,
 		autoApprove: true,
 	}
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execRunning, attempts: 1, class: directAttemptClass})
@@ -2617,7 +2606,6 @@ func TestListRuntimesSurfacesPhaseAndPermission(t *testing.T) {
 		id:                "rt_list",
 		done:              make(chan struct{}),
 		promptCh:          make(chan struct{}, 1),
-		active:            true,
 		phase:             "waiting",
 		phaseLabel:        "Need approval",
 		pendingPermission: true,
@@ -5102,7 +5090,7 @@ func TestShutdownWaitsForDirectPermissionTeardown(t *testing.T) {
 		t.Fatal("provider was not closed before shutdown returned")
 	}
 	child.mu.Lock()
-	completed := child.completed
+	completed := child.lc.isCompleted()
 	child.mu.Unlock()
 	if !completed {
 		t.Fatal("child was not marked completed before shutdown returned")

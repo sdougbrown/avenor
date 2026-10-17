@@ -1210,7 +1210,7 @@ func TestSupervisorPublicAPICancelWhileWaitingForLocalSlot(t *testing.T) {
 	h.awaitCondition("follow-up prompt dequeued into the local slot wait", func() bool {
 		slotChild.mu.Lock()
 		defer slotChild.mu.Unlock()
-		return len(slotChild.promptQueue) == 0 && slotChild.parked && !slotChild.completed
+		return len(slotChild.promptQueue) == 0 && slotChild.lc.isParked() && !slotChild.lc.isCompleted()
 	})
 	// While blocked, the runtime must not start its follow-up turn: its first
 	// turn already ended, so any second session.end would mean it resumed.
@@ -1288,7 +1288,7 @@ func TestSupervisorPublicAPIParkWakesLocalSlotWait(t *testing.T) {
 	h.awaitCondition("follow-up prompt dequeued into the local slot wait", func() bool {
 		slotChild.mu.Lock()
 		defer slotChild.mu.Unlock()
-		return len(slotChild.promptQueue) == 0 && slotChild.parked && !slotChild.completed
+		return len(slotChild.promptQueue) == 0 && slotChild.lc.isParked() && !slotChild.lc.isCompleted()
 	})
 	// Releasing the holder's turn makes it park. The park's capacity signal
 	// must wake the blocked slot wait: the follow-up's own session.end has to

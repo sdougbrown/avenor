@@ -84,13 +84,13 @@ func fetchChild(t *testing.T, sup *Supervisor, rtID string) *childRuntime {
 func childCompleted(child *childRuntime) bool {
 	child.mu.Lock()
 	defer child.mu.Unlock()
-	return child.completed
+	return child.lc.isCompleted()
 }
 
 func childParked(child *childRuntime) bool {
 	child.mu.Lock()
 	defer child.mu.Unlock()
-	return child.parked
+	return child.lc.isParked()
 }
 
 // A runtime parked after a successful end_turn must not count against
@@ -517,7 +517,7 @@ func TestWaitForNextPromptTimerHonorsQueuedPrompt(t *testing.T) {
 		t.Fatalf("waitForNextPrompt = (%q, %v), want the queued prompt honored", prompt, ok)
 	}
 	c.mu.Lock()
-	completed := c.completed
+	completed := c.lc.isCompleted()
 	c.mu.Unlock()
 	if completed {
 		t.Fatal("runtime that honored a boundary prompt must not be completed")
@@ -539,7 +539,7 @@ func TestWaitForNextPromptTimerReapsWithoutPrompt(t *testing.T) {
 		t.Fatalf("waitForNextPrompt = (%q, %v), want a reap with no prompt", prompt, ok)
 	}
 	c.mu.Lock()
-	completed := c.completed
+	completed := c.lc.isCompleted()
 	c.mu.Unlock()
 	if !completed {
 		t.Fatal("timer branch must mark the runtime completed so late prompts are rejected")

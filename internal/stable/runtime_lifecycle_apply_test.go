@@ -52,11 +52,11 @@ func TestApplyLifecycleWritesOwnedMirrors(t *testing.T) {
 			t.Fatalf("applyLifecycle(%v): %v", sig.kind, err)
 		}
 	}
-	mirrorState := func(t *testing.T, child *childRuntime) (active bool, activeAttempts int, phase, phaseLabel string) {
+	lifecycleSnapshot := func(t *testing.T, child *childRuntime) (active bool, attempts int, phase, phaseLabel string) {
 		t.Helper()
 		child.mu.Lock()
 		defer child.mu.Unlock()
-		return child.active, child.activeAttempts, child.phase, child.phaseLabel
+		return child.lc.isActive(), child.lc.attempts, child.phase, child.phaseLabel
 	}
 
 	t.Run("direct activity and presentation", func(t *testing.T) {
@@ -66,13 +66,13 @@ func TestApplyLifecycleWritesOwnedMirrors(t *testing.T) {
 
 		// Preparing clears the presentation without touching the count.
 		apply(t, s, child, lifecycleSignal{kind: signalAttemptPreparing, class: directAttemptClass})
-		if active, attempts, phase, label := mirrorState(t, child); active || attempts != 0 || phase != "" || label != "" {
+		if active, attempts, phase, label := lifecycleSnapshot(t, child); active || attempts != 0 || phase != "" || label != "" {
 			t.Fatalf("after preparing: active=%v attempts=%d phase=%q label=%q", active, attempts, phase, label)
 		}
 
 		// Starting increments the count and marks activity.
 		apply(t, s, child, lifecycleSignal{kind: signalAttemptStarted, class: directAttemptClass})
-		if active, attempts, _, _ := mirrorState(t, child); !active || attempts != 1 {
+		if active, attempts, _, _ := lifecycleSnapshot(t, child); !active || attempts != 1 {
 			t.Fatalf("after start: active=%v attempts=%d", active, attempts)
 		}
 
@@ -83,7 +83,7 @@ func TestApplyLifecycleWritesOwnedMirrors(t *testing.T) {
 		child.turnWaiters = append(child.turnWaiters, waiter)
 		child.mu.Unlock()
 		apply(t, s, child, lifecycleSignal{kind: signalAttemptSettled, class: directAttemptClass})
-		if active, attempts, phase, label := mirrorState(t, child); active || attempts != 0 || phase != "" || label != "" {
+		if active, attempts, phase, label := lifecycleSnapshot(t, child); active || attempts != 0 || phase != "" || label != "" {
 			t.Fatalf("after settle: active=%v attempts=%d phase=%q label=%q", active, attempts, phase, label)
 		}
 		select {
@@ -101,7 +101,7 @@ func TestApplyLifecycleWritesOwnedMirrors(t *testing.T) {
 		// The first of two parallel settles keeps the last attempt active and
 		// leaves the presentation alone.
 		apply(t, s, child, lifecycleSignal{kind: signalAttemptSettled, class: workflowAttemptClass})
-		if active, attempts, phase, label := mirrorState(t, child); !active || attempts != 1 || phase != "working" || label != "phase two" {
+		if active, attempts, phase, label := lifecycleSnapshot(t, child); !active || attempts != 1 || phase != "working" || label != "phase two" {
 			t.Fatalf("after parallel settle: active=%v attempts=%d phase=%q label=%q", active, attempts, phase, label)
 		}
 
@@ -112,7 +112,7 @@ func TestApplyLifecycleWritesOwnedMirrors(t *testing.T) {
 		child.turnWaiters = append(child.turnWaiters, waiter)
 		child.mu.Unlock()
 		apply(t, s, child, lifecycleSignal{kind: signalWorkflowFinalized, class: workflowAttemptClass})
-		if active, attempts, phase, label := mirrorState(t, child); active || attempts != 0 || phase != "working" || label != "phase two" {
+		if active, attempts, phase, label := lifecycleSnapshot(t, child); active || attempts != 0 || phase != "working" || label != "phase two" {
 			t.Fatalf("after finalize: active=%v attempts=%d phase=%q label=%q", active, attempts, phase, label)
 		}
 		select {
@@ -122,51 +122,51 @@ func TestApplyLifecycleWritesOwnedMirrors(t *testing.T) {
 		}
 	})
 
-	t.Run("parking transitions write the parked mirror", func(t *testing.T) {
+	t.Run("parking transitions move exec between parked and idle", func(t *testing.T) {
 		s := newLifecycleTestOwner()
 		child := &childRuntime{id: "rt_owned_parked", done: make(chan struct{})}
 		initializeTestLifecycle(t, child, testLifecycleOptions{exec: execIdle, class: directAttemptClass})
-		parkedState := func(t *testing.T) (execState, bool) {
+		parkedState := func(t *testing.T) execState {
 			t.Helper()
 			child.mu.Lock()
 			defer child.mu.Unlock()
-			return child.lc.exec, child.parked
+			return child.lc.exec
 		}
 
-		// ParkRequested parks; localSlotAcquired and parkWaitEnded clear the
-		// parked mirror again.
+		// ParkRequested parks; localSlotAcquired and parkWaitEnded return exec
+		// to idle.
 		apply(t, s, child, lifecycleSignal{kind: signalParkRequested, class: directAttemptClass, runKind: runKindOrdinaryDirect})
-		if exec, parked := parkedState(t); exec != execParked || !parked {
-			t.Fatalf("after park: exec=%d parked=%v", exec, parked)
+		if exec := parkedState(t); exec != execParked {
+			t.Fatalf("after park: exec=%d", exec)
 		}
 		apply(t, s, child, lifecycleSignal{kind: signalLocalSlotAcquired, class: directAttemptClass})
-		if exec, parked := parkedState(t); exec != execIdle || parked {
-			t.Fatalf("after slot acquire: exec=%d parked=%v", exec, parked)
+		if exec := parkedState(t); exec != execIdle {
+			t.Fatalf("after slot acquire: exec=%d", exec)
 		}
 		apply(t, s, child, lifecycleSignal{kind: signalParkRequested, class: directAttemptClass, runKind: runKindOrdinaryDirect})
-		if exec, parked := parkedState(t); exec != execParked || !parked {
-			t.Fatalf("after second park: exec=%d parked=%v", exec, parked)
+		if exec := parkedState(t); exec != execParked {
+			t.Fatalf("after second park: exec=%d", exec)
 		}
 		apply(t, s, child, lifecycleSignal{kind: signalParkWaitEnded, class: directAttemptClass})
-		if exec, parked := parkedState(t); exec != execIdle || parked {
-			t.Fatalf("after wait ended: exec=%d parked=%v", exec, parked)
+		if exec := parkedState(t); exec != execIdle {
+			t.Fatalf("after wait ended: exec=%d", exec)
 		}
 	})
 
-	t.Run("completion transitions write the completed mirror", func(t *testing.T) {
+	t.Run("completion transitions close admission and publication", func(t *testing.T) {
 		s := newLifecycleTestOwner()
 		child := &childRuntime{id: "rt_owned_completion", done: make(chan struct{})}
 		initializeTestLifecycle(t, child, testLifecycleOptions{exec: execIdle, class: directAttemptClass})
 
-		// The park timeout closes admission and writes the completed mirror,
-		// but leaves done open: no waiter settle, no done close.
+		// The park timeout closes admission but leaves done open: no waiter
+		// settle, no done close.
 		apply(t, s, child, lifecycleSignal{kind: signalParkRequested, class: directAttemptClass, runKind: runKindOrdinaryDirect})
 		apply(t, s, child, lifecycleSignal{kind: signalParkTimedOut, class: directAttemptClass})
 		child.mu.Lock()
-		completion, completed := child.lc.completion, child.completed
+		completion := child.lc.completion
 		child.mu.Unlock()
-		if completion != completionAdmissionClosed || !completed {
-			t.Fatalf("after park timeout: completion=%d completed=%v", completion, completed)
+		if completion != completionAdmissionClosed {
+			t.Fatalf("after park timeout: completion=%d", completion)
 		}
 		select {
 		case <-child.done:
@@ -174,9 +174,9 @@ func TestApplyLifecycleWritesOwnedMirrors(t *testing.T) {
 		default:
 		}
 
-		// The final publication writes the completed mirror again and settles
-		// the registered waiter. The finish helper owns the shutdown/writer
-		// legacy mirrors (nil sink, so the writer stays closing only).
+		// The final publication settles the registered waiter. The finish
+		// helper owns the shutdown/writer stages (nil sink, so the writer
+		// stays closing only).
 		apply(t, s, child, lifecycleSignal{kind: signalParkWaitEnded, class: directAttemptClass})
 		apply(t, s, child, lifecycleSignal{kind: signalIdleContextEnded, class: directAttemptClass, idleExitCode: 124, idleStopReason: "timeout"})
 		child.mu.Lock()
@@ -185,7 +185,7 @@ func TestApplyLifecycleWritesOwnedMirrors(t *testing.T) {
 		child.mu.Unlock()
 		finishSyntheticChildLifecycle(s, child)
 		child.mu.Lock()
-		completed, waiting := child.completed, len(child.turnWaiters)
+		completed, waiting := child.lc.isCompleted(), len(child.turnWaiters)
 		child.mu.Unlock()
 		if !completed || waiting != 0 {
 			t.Fatalf("after publication: completed=%v waiters=%d", completed, waiting)
@@ -204,13 +204,13 @@ func TestApplyLifecycleWritesOwnedMirrors(t *testing.T) {
 
 		// An agent status replaces the phase; an empty label retains the stored one.
 		apply(t, s, child, lifecycleSignal{kind: signalAgentStatusObserved, class: directAttemptClass, phase: "working"})
-		if _, _, phase, label := mirrorState(t, child); phase != "working" || label != "kept" {
+		if _, _, phase, label := lifecycleSnapshot(t, child); phase != "working" || label != "kept" {
 			t.Fatalf("after agent status: phase=%q label=%q", phase, label)
 		}
 
 		// A successful presentation marks the phase done.
 		apply(t, s, child, lifecycleSignal{kind: signalSuccessPresented, class: directAttemptClass, exitCode: 0})
-		if _, _, phase, _ := mirrorState(t, child); phase != "done" {
+		if _, _, phase, _ := lifecycleSnapshot(t, child); phase != "done" {
 			t.Fatalf("after success: phase=%q", phase)
 		}
 
@@ -252,9 +252,6 @@ func TestFinishSyntheticRunChildDrivesFullTeardown(t *testing.T) {
 	child.mu.Unlock()
 	if state.exec != execEnded || state.completion != completionPublished || !state.isShuttingDown() || !state.isWriterClosing() {
 		t.Fatalf("post-finish lifecycle = %+v, want ended/published/shutdown/writer-closing", state)
-	}
-	if !child.completed {
-		t.Fatal("legacy completed mirror not set by the finish helper")
 	}
 	select {
 	case <-child.done:
