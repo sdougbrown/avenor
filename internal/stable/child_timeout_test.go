@@ -59,9 +59,6 @@ func TestRunLoopChildTimeoutProducesTimeoutSentinel(t *testing.T) {
 	sentinel := filepath.Join(t.TempDir(), "sentinel.env")
 	child := &childRuntime{id: "rt_loop_timeout", done: make(chan struct{}), promptCh: make(chan struct{}, 1), eventWriter: stableTestSink{}, sentinelFile: sentinel, cancelFn: func() {}}
 	cfg := &looprunner.LoopConfig{MaxIterations: 1, Loop: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
-	if child.done == nil {
-		child.done = make(chan struct{})
-	}
 	// Explicit lifecycle initialization: the
 	// fixture declares starting state and its attempt class instead of
 	// relying on zero values.
@@ -96,9 +93,6 @@ func TestRunChildTimeoutProducesTimeoutSentinel(t *testing.T) {
 
 	sentinel := filepath.Join(t.TempDir(), "sentinel.env")
 	child := &childRuntime{id: "rt_run_timeout", done: make(chan struct{}), promptCh: make(chan struct{}, 1), eventWriter: stableTestSink{}, sentinelFile: sentinel, cancelFn: func() {}, provider: provider}
-	if child.done == nil {
-		child.done = make(chan struct{})
-	}
 	// Explicit lifecycle initialization: the
 	// fixture declares starting state and its attempt class instead of
 	// relying on zero values.
@@ -132,9 +126,6 @@ func TestRunTeamChildTimeoutProducesTimeoutSentinel(t *testing.T) {
 	sentinel := filepath.Join(t.TempDir(), "sentinel.env")
 	child := &childRuntime{id: "rt_team_timeout", done: make(chan struct{}), promptCh: make(chan struct{}, 1), eventWriter: stableTestSink{}, sentinelFile: sentinel, cancelFn: func() {}}
 	cfg := &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}
-	if child.done == nil {
-		child.done = make(chan struct{})
-	}
 	// Explicit lifecycle initialization: the
 	// fixture declares starting state and its attempt class instead of
 	// relying on zero values.

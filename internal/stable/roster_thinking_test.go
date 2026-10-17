@@ -131,9 +131,6 @@ func TestStablePhaseRosterSuppliesThinkingUnlessRunOverridesIt(t *testing.T) {
 				}
 				if kind == "loop" {
 					cfg := &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "work", Prompt: "work", RosterEntry: "horse"}}}
-					if child.done == nil {
-						child.done = make(chan struct{})
-					}
 					// Explicit lifecycle initialization: the
 					// fixture declares starting state and its attempt class instead of
 					// relying on zero values.
@@ -142,9 +139,6 @@ func TestStablePhaseRosterSuppliesThinkingUnlessRunOverridesIt(t *testing.T) {
 					go sup.runLoopChild(context.Background(), child, cfg, 0, 1, "", "", "", tc.runThinking, "", "")
 				} else {
 					cfg := &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work", RosterEntry: "horse"}}}
-					if child.done == nil {
-						child.done = make(chan struct{})
-					}
 					// Explicit lifecycle initialization: the
 					// fixture declares starting state and its attempt class instead of
 					// relying on zero values.
@@ -236,9 +230,6 @@ func TestStableLoopPhaseCachedSelectionKeepsRosterThinking(t *testing.T) {
 		cancelFn: func() {}, roster: roster, dir: t.TempDir(),
 	}
 	cfg := &looprunner.LoopConfig{MaxIterations: 2, Loop: []phaseconfig.Phase{{Name: "work", Prompt: "work", RosterEntry: "horse"}}}
-	if child.done == nil {
-		child.done = make(chan struct{})
-	}
 	// Explicit lifecycle initialization: the
 	// fixture declares starting state and its attempt class instead of
 	// relying on zero values.
