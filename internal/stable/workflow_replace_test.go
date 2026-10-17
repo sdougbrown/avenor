@@ -40,7 +40,7 @@ func newWfReplaceSupervisor(t *testing.T, socketName string) (*Supervisor, *work
 	if err := store.CreateRoot(); err != nil {
 		t.Fatalf("CreateRoot: %v", err)
 	}
-	sup := NewSupervisor(Config{ControlSocket: newStableSocketPath(t, socketName), MaxRuntimes: 1, WorkflowRoot: root})
+	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, socketName), MaxRuntimes: 1, WorkflowRoot: root})
 	mgr := sup.workflowManager()
 	if _, err := mgr.WorkflowCreate([]byte(wfReplaceTemplateJSON)); err != nil {
 		t.Fatalf("WorkflowCreate: %v", err)

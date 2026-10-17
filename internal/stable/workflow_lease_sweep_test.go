@@ -328,7 +328,7 @@ func TestLeaseSweepSparesLiveHeartbeatedAttempt(t *testing.T) {
 // sweep, because the joined goroutine is the only receiver of the tick
 // channel.
 func TestLeaseSweepStopsAfterShutdown(t *testing.T) {
-	sup := NewSupervisor(Config{
+	sup := newTestSupervisor(t, Config{
 		ControlSocket:              newStableSocketPath(t, "lease-sweep-stop"),
 		MaxRuntimes:                2,
 		MaxTreeBudget:              2,
@@ -372,7 +372,7 @@ func TestLeaseSweepStopsAfterShutdown(t *testing.T) {
 // already passed: once stopLeaseSweep has run, startLeaseSweepLoop is a no-op
 // — structurally, no loop-start is ever reported.
 func TestLeaseSweepNeverStartsAfterStop(t *testing.T) {
-	sup := NewSupervisor(Config{
+	sup := newTestSupervisor(t, Config{
 		ControlSocket:              newStableSocketPath(t, "lease-sweep-late-start"),
 		MaxRuntimes:                2,
 		MaxTreeBudget:              2,
@@ -434,7 +434,7 @@ func TestLeaseSweepDoesNotStartWhenDisabledOrBarrierFails(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			sup := NewSupervisor(Config{
+			sup := newTestSupervisor(t, Config{
 				ControlSocket:              newStableSocketPath(t, "lease-sweep-off"),
 				WorkflowRoot:               tc.root(t),
 				WorkflowLeaseSweepInterval: tc.interval,

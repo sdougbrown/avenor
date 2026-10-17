@@ -43,7 +43,7 @@ func TestStableDirectRosterSuppliesThinkingUnlessSpawnOverridesIt(t *testing.T) 
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			sup := NewSupervisor(Config{ControlSocket: "/tmp/roster-thinking.sock", MaxRuntimes: 1})
+			sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/roster-thinking.sock", MaxRuntimes: 1})
 			provider := scriptedStage5Provider("ses_thinking", "end_turn")
 			var gotOpts runtime.StartOptions
 			sup.newProviderFunc = func(opts runtime.StartOptions, _ string) (runtime.Provider, error) {
@@ -107,7 +107,7 @@ func TestStablePhaseRosterSuppliesThinkingUnlessRunOverridesIt(t *testing.T) {
 	} {
 		for _, kind := range []string{"loop", "team"} {
 			t.Run(kind+"/"+tc.name, func(t *testing.T) {
-				sup := NewSupervisor(Config{ControlSocket: "/tmp/phase-roster-thinking.sock", MaxRuntimes: 1})
+				sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/phase-roster-thinking.sock", MaxRuntimes: 1})
 				provider := scriptedStage5Provider("ses_phase_thinking", "end_turn")
 				var gotOpts runtime.StartOptions
 				sup.newProviderFunc = func(opts runtime.StartOptions, _ string) (runtime.Provider, error) {
@@ -131,9 +131,13 @@ func TestStablePhaseRosterSuppliesThinkingUnlessRunOverridesIt(t *testing.T) {
 				}
 				if kind == "loop" {
 					cfg := &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "work", Prompt: "work", RosterEntry: "horse"}}}
+					initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
+					trackTestChildCompletion(t, child)
 					go sup.runLoopChild(context.Background(), child, cfg, 0, 1, "", "", "", tc.runThinking, "", "")
 				} else {
 					cfg := &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work", RosterEntry: "horse"}}}
+					initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
+					trackTestChildCompletion(t, child)
 					go sup.runTeamChild(context.Background(), child, cfg, 0, 1, "", "", "", tc.runThinking, "", "")
 				}
 				select {
@@ -156,7 +160,7 @@ func TestStablePhaseRosterSuppliesThinkingUnlessRunOverridesIt(t *testing.T) {
 // backend consume a runtime; failing with nothing reserved pins the check to
 // the merged roster value too.
 func TestStableRosterThinkingIsCheckedAgainstTheBackend(t *testing.T) {
-	sup := NewSupervisor(Config{ControlSocket: "/tmp/roster-thinking-agy.sock", MaxRuntimes: 1})
+	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/roster-thinking-agy.sock", MaxRuntimes: 1})
 	providerCalled := false
 	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) {
 		providerCalled = true
@@ -198,7 +202,7 @@ func TestStableLoopPhaseCachedSelectionKeepsRosterThinking(t *testing.T) {
 			{sessionID: "ses_cached_2", events: []stableScriptedEvent{end("ses_cached_2")}},
 		},
 	}
-	sup := NewSupervisor(Config{ControlSocket: "/tmp/phase-roster-thinking-cached.sock", MaxRuntimes: 1})
+	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/phase-roster-thinking-cached.sock", MaxRuntimes: 1})
 	var mu sync.Mutex
 	var got []runtime.StartOptions
 	sup.newProviderFunc = func(opts runtime.StartOptions, _ string) (runtime.Provider, error) {
@@ -220,6 +224,8 @@ func TestStableLoopPhaseCachedSelectionKeepsRosterThinking(t *testing.T) {
 		cancelFn: func() {}, roster: roster, dir: t.TempDir(),
 	}
 	cfg := &looprunner.LoopConfig{MaxIterations: 2, Loop: []phaseconfig.Phase{{Name: "work", Prompt: "work", RosterEntry: "horse"}}}
+	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
+	trackTestChildCompletion(t, child)
 	go sup.runLoopChild(context.Background(), child, cfg, 0, 1, "", "", "", "", "", "")
 	select {
 	case <-child.done:

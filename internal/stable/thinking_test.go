@@ -47,7 +47,7 @@ func (*thinkingCaptureProvider) Capabilities(context.Context) (runtime.Capabilit
 }
 
 func TestSpawnThinkingValidationPrecedesReservation(t *testing.T) {
-	sup := NewSupervisor(Config{ControlSocket: "/tmp/thinking-validation.sock", MaxRuntimes: 1})
+	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/thinking-validation.sock", MaxRuntimes: 1})
 	providerCalled := false
 	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) {
 		providerCalled = true
@@ -73,7 +73,7 @@ func TestSpawnThinkingRawJSONAndExecutionModes(t *testing.T) {
 
 	for _, mode := range []string{"normal", "loop", "team"} {
 		t.Run(mode, func(t *testing.T) {
-			sup := NewSupervisor(Config{ControlSocket: "/tmp/thinking-" + mode + ".sock", MaxRuntimes: 1})
+			sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/thinking-" + mode + ".sock", MaxRuntimes: 1})
 			provider := &thinkingCaptureProvider{}
 			constructorOpts := make(chan runtime.StartOptions, 4)
 			sup.newProviderFunc = func(opts runtime.StartOptions, backend string) (runtime.Provider, error) {
@@ -126,7 +126,7 @@ func TestSpawnThinkingRawJSONAndExecutionModes(t *testing.T) {
 func TestAttemptSessionRetainsThinkingOnResume(t *testing.T) {
 	provider := &thinkingCaptureProvider{}
 	child := &childRuntime{provider: provider, backend: "pi", thinking: "max", agent: "agent", model: "model", dir: "/work"}
-	sup := NewSupervisor(Config{ControlSocket: "/tmp/thinking-resume.sock", MaxRuntimes: 1})
+	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/thinking-resume.sock", MaxRuntimes: 1})
 	if _, err := sup.attemptSession(context.Background(), child, "session"); err != nil {
 		t.Fatalf("attemptSession: %v", err)
 	}

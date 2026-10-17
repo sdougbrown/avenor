@@ -99,7 +99,7 @@ type autoHandoffFixture struct {
 // barrier consumes.
 func newAutoHandoffFixture(t *testing.T, name string, provider *stableScriptedProvider, opts ...func(*autoHandoffFixture)) *autoHandoffFixture {
 	t.Helper()
-	sup := NewSupervisor(Config{
+	sup := newTestSupervisor(t, Config{
 		ControlSocket:   newStableSocketPath(t, name),
 		MaxRuntimes:     4,
 		MaxTreeBudget:   4,

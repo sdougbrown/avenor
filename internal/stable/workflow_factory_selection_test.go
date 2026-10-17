@@ -118,7 +118,7 @@ func newFactorySelectionFixtureRoster(t *testing.T, name string, ttlSeconds int,
 		t.Fatalf("resolve publisher assignment: %v", err)
 	}
 
-	sup := NewSupervisor(Config{
+	sup := newTestSupervisor(t, Config{
 		ControlSocket:   newStableSocketPath(t, name),
 		MaxRuntimes:     4,
 		MaxTreeBudget:   4,

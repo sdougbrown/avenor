@@ -66,7 +66,7 @@ func stopLoopsAtCleanup(t *testing.T, sups ...*Supervisor) {
 // id) never create the root, instances/, or controllers/.
 func TestControllerBarrierIdleCreatesNothing(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "wfroot")
-	sup := NewSupervisor(Config{ControlSocket: newStableSocketPath(t, "wfctl-noroot"), WorkflowRoot: root})
+	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "wfctl-noroot"), WorkflowRoot: root})
 	stopLoopsAtCleanup(t, sup)
 
 	assertAbsent(t, root, filepath.Join(root, "instances"), filepath.Join(root, "controllers"))
@@ -93,7 +93,7 @@ func TestControllerBarrierConcurrentWorkflowAndController(t *testing.T) {
 	if err := workflow.New(root).CreateRoot(); err != nil {
 		t.Fatalf("CreateRoot: %v", err)
 	}
-	sup := NewSupervisor(Config{ControlSocket: newStableSocketPath(t, "wfctl-race"), WorkflowRoot: root})
+	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "wfctl-race"), WorkflowRoot: root})
 	stopLoopsAtCleanup(t, sup)
 
 	type rpcResult struct {
@@ -155,7 +155,7 @@ func TestControllerBarrierCatalogFailureDisablesControllers(t *testing.T) {
 		t.Fatalf("corrupt event log: %v", err)
 	}
 
-	sup := NewSupervisor(Config{ControlSocket: newStableSocketPath(t, "wfctl-catalog-fail"), WorkflowRoot: root})
+	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "wfctl-catalog-fail"), WorkflowRoot: root})
 	stopLoopsAtCleanup(t, sup)
 
 	// The first controller command triggers the barrier and retains its error.
@@ -208,7 +208,7 @@ func TestControllerRestartReacquiresLease(t *testing.T) {
 	}
 	store := workflowcontroller.NewStore(root)
 
-	supA := NewSupervisor(Config{ControlSocket: newStableSocketPath(t, "wfctl-restart-a"), WorkflowRoot: root})
+	supA := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "wfctl-restart-a"), WorkflowRoot: root})
 	stopLoopsAtCleanup(t, supA)
 	if _, err := supA.WorkflowControllerCreate(createControllerParams(t, "c1", 5)); err != nil {
 		t.Fatalf("A create: %v", err)
@@ -238,7 +238,7 @@ func TestControllerRestartReacquiresLease(t *testing.T) {
 
 	// B starts on the same root; its barrier recovers the controller and its
 	// leader loop re-acquires the lease with owner epoch+1.
-	supB := NewSupervisor(Config{ControlSocket: newStableSocketPath(t, "wfctl-restart-b"), WorkflowRoot: root})
+	supB := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "wfctl-restart-b"), WorkflowRoot: root})
 	stopLoopsAtCleanup(t, supB)
 	if _, err := supB.WorkflowControllerList(); err != nil {
 		t.Fatalf("B list (barrier trigger): %v", err)
@@ -286,7 +286,7 @@ func TestControllerRestartReacquiresLease(t *testing.T) {
 // surfaced error.
 func TestControllerStatusSurfacesNextPollReadError(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "wfroot")
-	sup := NewSupervisor(Config{ControlSocket: newStableSocketPath(t, "wfctl-nextpoll-err"), WorkflowRoot: root})
+	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "wfctl-nextpoll-err"), WorkflowRoot: root})
 	stopLoopsAtCleanup(t, sup)
 	if _, err := sup.WorkflowControllerCreate(createControllerParams(t, "c1", 2)); err != nil {
 		t.Fatalf("create: %v", err)
@@ -323,7 +323,7 @@ func TestControllerStatusSurfacesNextPollReadError(t *testing.T) {
 func TestControllerDisableReleasesLiveLease(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "wfroot")
 	store := workflowcontroller.NewStore(root)
-	sup := NewSupervisor(Config{ControlSocket: newStableSocketPath(t, "wfctl-disable"), WorkflowRoot: root})
+	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "wfctl-disable"), WorkflowRoot: root})
 	stopLoopsAtCleanup(t, sup)
 
 	if _, err := sup.WorkflowControllerCreate(createControllerParams(t, "c1", 5)); err != nil {
@@ -377,7 +377,7 @@ func TestControllerDisableReleasesLiveLease(t *testing.T) {
 func TestControllerEnableTwiceSingleLoop(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "wfroot")
 	store := workflowcontroller.NewStore(root)
-	sup := NewSupervisor(Config{ControlSocket: newStableSocketPath(t, "wfctl-enable-twice"), WorkflowRoot: root})
+	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "wfctl-enable-twice"), WorkflowRoot: root})
 	stopLoopsAtCleanup(t, sup)
 
 	if _, err := sup.WorkflowControllerCreate(createControllerParams(t, "c1", 5)); err != nil {
@@ -418,7 +418,7 @@ func TestControllerEnableTwiceSingleLoop(t *testing.T) {
 func TestControllerSelfExitThenReenable(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "wfroot")
 	store := workflowcontroller.NewStore(root)
-	sup := NewSupervisor(Config{ControlSocket: newStableSocketPath(t, "wfctl-self-exit"), WorkflowRoot: root})
+	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "wfctl-self-exit"), WorkflowRoot: root})
 	sup.controllerRenewInterval = 20 * time.Millisecond
 	stopLoopsAtCleanup(t, sup)
 
@@ -477,7 +477,7 @@ func TestControllerSelfExitThenReenable(t *testing.T) {
 func TestControllerEnableDisableRaceMatchesDesiredState(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "wfroot")
 	store := workflowcontroller.NewStore(root)
-	sup := NewSupervisor(Config{ControlSocket: newStableSocketPath(t, "wfctl-race-hammer"), WorkflowRoot: root})
+	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "wfctl-race-hammer"), WorkflowRoot: root})
 	stopLoopsAtCleanup(t, sup)
 
 	if _, err := sup.WorkflowControllerCreate(createControllerParams(t, "c1", 5)); err != nil {
@@ -548,7 +548,7 @@ func TestControllerEagerBarrierStartsLeaderWithoutRPC(t *testing.T) {
 		t.Fatalf("previous-process enable: %v", err)
 	}
 
-	sup := NewSupervisor(Config{ControlSocket: newStableSocketPath(t, "wfctl-eager"), WorkflowRoot: root})
+	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "wfctl-eager"), WorkflowRoot: root})
 	stopLoopsAtCleanup(t, sup)
 	t.Cleanup(func() { _ = sup.Shutdown("graceful") })
 	done := make(chan int, 1)
@@ -572,7 +572,7 @@ func TestControllerEagerBarrierStartsLeaderWithoutRPC(t *testing.T) {
 func TestControllerLeaseRenewalObserved(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "wfroot")
 	store := workflowcontroller.NewStore(root)
-	sup := NewSupervisor(Config{ControlSocket: newStableSocketPath(t, "wfctl-renew"), WorkflowRoot: root})
+	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "wfctl-renew"), WorkflowRoot: root})
 	sup.controllerRenewInterval = 25 * time.Millisecond
 	stopLoopsAtCleanup(t, sup)
 
@@ -625,7 +625,7 @@ func TestWorkflowReadyAdvisoryCandidates(t *testing.T) {
 	if err := workflow.New(root).CreateRoot(); err != nil {
 		t.Fatalf("CreateRoot: %v", err)
 	}
-	sup := NewSupervisor(Config{ControlSocket: newStableSocketPath(t, "wfctl-ready"), WorkflowRoot: root})
+	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "wfctl-ready"), WorkflowRoot: root})
 	stopLoopsAtCleanup(t, sup)
 
 	if _, err := sup.WorkflowControllerCreate(createControllerParams(t, "c1", 5)); err != nil {
@@ -747,7 +747,7 @@ func TestControllerRenewFailureYieldsAndReacquires(t *testing.T) {
 		t.Fatalf("CreateRoot: %v", err)
 	}
 	store := workflowcontroller.NewStore(root)
-	sup := NewSupervisor(Config{ControlSocket: newStableSocketPath(t, "wfctl-renew-fail"), WorkflowRoot: root})
+	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "wfctl-renew-fail"), WorkflowRoot: root})
 	sup.controllerRenewInterval = 20 * time.Millisecond
 	stopLoopsAtCleanup(t, sup)
 

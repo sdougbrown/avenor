@@ -120,7 +120,7 @@ func newRunnerFixture(t *testing.T, name, root string, maxRuntimes, maxTreeBudge
 	if root == "" {
 		root = filepath.Join(t.TempDir(), "wfroot")
 	}
-	sup := NewSupervisor(Config{
+	sup := newTestSupervisor(t, Config{
 		ControlSocket:   newStableSocketPath(t, name),
 		MaxRuntimes:     maxRuntimes,
 		MaxTreeBudget:   maxTreeBudget,

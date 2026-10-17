@@ -29,7 +29,7 @@ func TestStableRosterSameBackendResume(t *testing.T) {
 		{sessionID: "stable-stage6-session", events: []stableScriptedEvent{{event: events.Event{Event: "session.end", Fields: map[string]any{"stop_reason": "end_turn"}}}}},
 		{sessionID: "stable-stage6-session", events: []stableScriptedEvent{{event: events.Event{Event: "session.end", Fields: map[string]any{"stop_reason": "end_turn"}}}}},
 	}}
-	sup := NewSupervisor(Config{ControlSocket: "/tmp/stage6-stable-same.sock", MaxRuntimes: 1})
+	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/stage6-stable-same.sock", MaxRuntimes: 1})
 	var mu sync.Mutex
 	var backends []string
 	sup.newProviderFunc = func(_ runtime.StartOptions, backend string) (runtime.Provider, error) {
@@ -71,7 +71,7 @@ func TestStableRosterRejectsCrossBackendResumeBeforeProvider(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sup := NewSupervisor(Config{ControlSocket: "/tmp/stage6-stable-cross.sock", MaxRuntimes: 1})
+	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/stage6-stable-cross.sock", MaxRuntimes: 1})
 	var mu sync.Mutex
 	var backends []string
 	sequence := 0

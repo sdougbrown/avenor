@@ -103,7 +103,7 @@ func newIdempotencySupervisor(t *testing.T, cfg Config, provider runtime.Provide
 	if cfg.MaxRuntimes == 0 {
 		cfg.MaxRuntimes = 8
 	}
-	sup := NewSupervisor(cfg)
+	sup := newTestSupervisor(t, cfg)
 	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) {
 		return provider, nil
 	}
@@ -840,7 +840,11 @@ func TestIdempotencyKeyedSpawnAllowedWhenLabelHolderCompleted(t *testing.T) {
 		label: "taken",
 		done:  make(chan struct{}),
 	}
-	completed.complete()
+	// Explicit lifecycle: the tombstone is initialized reserved and finished
+	// through the spawn-rollback boundary before registration.
+	initializeTestLifecycle(t, completed, testLifecycleOptions{id: "rt_done_1", exec: execReserved, class: directAttemptClass})
+	finishSyntheticRollback(sup, completed)
+	trackTestChildCompletion(t, completed)
 	sup.controlMu.Lock()
 	sup.runtimes[completed.id] = completed
 	sup.controlMu.Unlock()

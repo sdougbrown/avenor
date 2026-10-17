@@ -10,7 +10,7 @@ import (
 
 func mcpTestSupervisor(t *testing.T, policy *MCPLaunchWrapperPolicy) (*Supervisor, *[]string) {
 	t.Helper()
-	sup := NewSupervisor(Config{
+	sup := newTestSupervisor(t, Config{
 		ControlSocket:          "/tmp/launch-wrapper-mcp-test.sock",
 		MaxRuntimes:            1,
 		MCPLaunchWrapperPolicy: policy,

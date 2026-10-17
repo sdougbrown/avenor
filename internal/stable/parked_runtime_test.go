@@ -84,19 +84,19 @@ func fetchChild(t *testing.T, sup *Supervisor, rtID string) *childRuntime {
 func childCompleted(child *childRuntime) bool {
 	child.mu.Lock()
 	defer child.mu.Unlock()
-	return child.completed
+	return child.lc.isCompleted()
 }
 
 func childParked(child *childRuntime) bool {
 	child.mu.Lock()
 	defer child.mu.Unlock()
-	return child.parked
+	return child.lc.isParked()
 }
 
 // A runtime parked after a successful end_turn must not count against
 // MaxRuntimes: the slot belongs to turns in flight, not to parked sessions.
 func TestParkedRuntimeDoesNotCountAgainstMaxRuntimes(t *testing.T) {
-	sup := NewSupervisor(Config{
+	sup := newTestSupervisor(t, Config{
 		ControlSocket:        newStableSocketPath(t, "parked-not-counted"),
 		MaxRuntimes:          1,
 		ParkedRuntimeTimeout: 0, // disabled: parked runtimes are kept
@@ -148,7 +148,7 @@ func TestParkedRuntimeDoesNotCountAgainstMaxRuntimes(t *testing.T) {
 // tears down its provider, leaves the sentinel at its last turn result, and
 // stays addressable as a status tombstone.
 func TestParkedRuntimeReapedAfterTimeout(t *testing.T) {
-	sup := NewSupervisor(Config{
+	sup := newTestSupervisor(t, Config{
 		ControlSocket:        newStableSocketPath(t, "parked-reap"),
 		MaxRuntimes:          2,
 		ParkedRuntimeTimeout: 100 * time.Millisecond,
@@ -226,7 +226,7 @@ func TestParkedRuntimeReapedAfterTimeout(t *testing.T) {
 // runtime instead of letting the timeout reap it, and the runtime parks again
 // after the resumed turn ends.
 func TestParkedRuntimePromptWithinGraceResumes(t *testing.T) {
-	sup := NewSupervisor(Config{
+	sup := newTestSupervisor(t, Config{
 		ControlSocket: newStableSocketPath(t, "parked-resume"),
 		MaxRuntimes:   2,
 		// Generous grace: the test's 5s wait deadlines must never race the
@@ -285,7 +285,7 @@ func TestParkedRuntimePromptWithinGraceResumes(t *testing.T) {
 // RuntimePrompt on a reaped runtime reports that the runtime has ended
 // instead of silently queueing a prompt that can never run.
 func TestRuntimePromptOnReapedRuntimeFails(t *testing.T) {
-	sup := NewSupervisor(Config{
+	sup := newTestSupervisor(t, Config{
 		ControlSocket:        newStableSocketPath(t, "parked-prompt-ended"),
 		MaxRuntimes:          2,
 		ParkedRuntimeTimeout: 100 * time.Millisecond,
@@ -321,7 +321,7 @@ func TestRuntimePromptOnReapedRuntimeFails(t *testing.T) {
 // while a first runtime is mid-turn (not parked), guarding against a fix that
 // exempts every non-active runtime from the count.
 func TestRunningRuntimeStillCountsAgainstMaxRuntimes(t *testing.T) {
-	sup := NewSupervisor(Config{
+	sup := newTestSupervisor(t, Config{
 		ControlSocket:        newStableSocketPath(t, "parked-running-counts"),
 		MaxRuntimes:          1,
 		ParkedRuntimeTimeout: 0,
@@ -361,7 +361,7 @@ func TestRunningRuntimeStillCountsAgainstMaxRuntimes(t *testing.T) {
 // A follow-up prompt to a parked runtime must wait for a free local slot:
 // parking freed the slot, and a later spawn may have claimed it.
 func TestParkedRuntimeResumeWaitsForLocalCapacity(t *testing.T) {
-	sup := NewSupervisor(Config{
+	sup := newTestSupervisor(t, Config{
 		ControlSocket:        newStableSocketPath(t, "parked-resume-capacity"),
 		MaxRuntimes:          1,
 		ParkedRuntimeTimeout: 0,
@@ -438,7 +438,7 @@ func TestParkedRuntimeResumeWaitsForHeldReservation(t *testing.T) {
 }
 
 func testParkedRuntimeResumeWaitsForHeldReservation(t *testing.T, localOnly bool) {
-	sup := NewSupervisor(Config{
+	sup := newTestSupervisor(t, Config{
 		ControlSocket:        newStableSocketPath(t, "parked-resume-reservation"),
 		MaxRuntimes:          1,
 		ParkedRuntimeTimeout: 0,
@@ -495,20 +495,14 @@ func testParkedRuntimeResumeWaitsForHeldReservation(t *testing.T, localOnly bool
 	waitForActiveRuntimeCount(t, sup, 0) // parks again
 }
 
-func newWaitTestChild() *childRuntime {
-	return &childRuntime{
-		done:     make(chan struct{}),
-		promptCh: make(chan struct{}, 1),
-	}
-}
-
 // The parked-timeout timer branch must honor a prompt queued before the
 // deadline instead of reaping. Queueing without signaling promptCh leaves the
 // wait loop parked in its select, so the timer branch is the path that finds
 // the prompt. (A prompt queued via RuntimePrompt would usually be dequeued at
 // the top of the loop instead; both paths must return the prompt.)
 func TestWaitForNextPromptTimerHonorsQueuedPrompt(t *testing.T) {
-	c := newWaitTestChild()
+	sup := newLifecycleTestOwner()
+	c := newTestChildLifecycle(t, sup, testLifecycleOptions{id: "rt_wait_honor", exec: execParked, class: directAttemptClass})
 	go func() {
 		time.Sleep(10 * time.Millisecond)
 		c.mu.Lock()
@@ -518,31 +512,81 @@ func TestWaitForNextPromptTimerHonorsQueuedPrompt(t *testing.T) {
 	// The queue is populated well before the timer fires: a scheduling
 	// delay must not push the populate past the deadline, or the timer
 	// branch would correctly see an empty queue and reap.
-	prompt, ok := c.waitForNextPrompt(context.Background(), 2*time.Second)
+	prompt, ok := c.waitForNextPrompt(sup, context.Background(), 2*time.Second)
 	if !ok || prompt != "boundary prompt" {
 		t.Fatalf("waitForNextPrompt = (%q, %v), want the queued prompt honored", prompt, ok)
 	}
 	c.mu.Lock()
-	completed := c.completed
+	completed := c.lc.isCompleted()
 	c.mu.Unlock()
 	if completed {
 		t.Fatal("runtime that honored a boundary prompt must not be completed")
 	}
+	// No run goroutine: finish the modeled lifecycle explicitly after the
+	// wait observation.
+	finishSyntheticChildLifecycle(sup, c)
+	assertNoLifecycleErrors(t, sup)
 }
 
 // With no prompt queued, the timer branch reaps: it marks the runtime
 // completed in the same critical section, so later RuntimePrompt calls see
 // the runtime ended instead of queueing onto a runtime about to tear down.
 func TestWaitForNextPromptTimerReapsWithoutPrompt(t *testing.T) {
-	c := newWaitTestChild()
-	prompt, ok := c.waitForNextPrompt(context.Background(), 50*time.Millisecond)
+	sup := newLifecycleTestOwner()
+	c := newTestChildLifecycle(t, sup, testLifecycleOptions{id: "rt_wait_reap", exec: execParked, class: directAttemptClass})
+	prompt, ok := c.waitForNextPrompt(sup, context.Background(), 50*time.Millisecond)
 	if ok || prompt != "" {
 		t.Fatalf("waitForNextPrompt = (%q, %v), want a reap with no prompt", prompt, ok)
 	}
 	c.mu.Lock()
-	completed := c.completed
+	completed := c.lc.isCompleted()
 	c.mu.Unlock()
 	if !completed {
 		t.Fatal("timer branch must mark the runtime completed so late prompts are rejected")
 	}
+	// No run goroutine: finish the modeled lifecycle explicitly after the
+	// wait observation.
+	finishSyntheticChildLifecycle(sup, c)
+	assertNoLifecycleErrors(t, sup)
+}
+
+// The admission-closed-before-done window rejects prompts through the public
+// API: after the park timeout marks completion admission-closed and before
+// the teardown's publication closes done, RuntimePrompt reports the runtime
+// as ended instead of queueing onto a runtime whose publication has not run.
+// The synthetic fixture drives both boundaries deterministically: the reap
+// runs through waitForNextPrompt, and the modeled finish publishes only when
+// the test calls it.
+func TestRuntimePromptRejectedBeforeTeardownPublication(t *testing.T) {
+	sup := newTestSupervisor(t, Config{
+		ControlSocket: newStableSocketPath(t, "park-admission-window"),
+		MaxRuntimes:   2,
+	})
+	c := newTestChildLifecycle(t, sup, testLifecycleOptions{id: "rt_park_window", exec: execParked, class: directAttemptClass})
+	sup.controlMu.Lock()
+	sup.runtimes[c.id] = c
+	sup.controlMu.Unlock()
+
+	// The park wait's timer branch reaps: it closes admission in the same
+	// critical section as the queue check, while done stays open until the
+	// modeled teardown publishes.
+	prompt, ok := c.waitForNextPrompt(sup, context.Background(), 50*time.Millisecond)
+	if ok || prompt != "" {
+		t.Fatalf("waitForNextPrompt = (%q, %v), want a reap with no prompt", prompt, ok)
+	}
+
+	// Inside the window: admission is closed, done is still open, and the
+	// public prompt path must reject with runtime-has-ended.
+	if err := sup.RuntimePrompt(c.id, "too late", ""); err == nil || !strings.Contains(err.Error(), "has ended") {
+		t.Fatalf("RuntimePrompt before publication err = %v, want runtime-has-ended", err)
+	}
+	select {
+	case <-c.done:
+		t.Fatal("done closed before the teardown published completion")
+	default:
+	}
+
+	// No run goroutine: the modeled finish owns the publication boundary.
+	finishSyntheticChildLifecycle(sup, c)
+	assertNoLifecycleErrors(t, sup)
 }
