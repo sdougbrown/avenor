@@ -119,15 +119,12 @@ func newLifecycleTestOwner() *Supervisor {
 	return &Supervisor{}
 }
 
-// assertNoLifecycleDivergence asserts that the supervisor recorded zero
-// illegal transitions and zero shadow mismatches.
-func assertNoLifecycleDivergence(t testing.TB, sup *Supervisor) {
+// assertNoLifecycleErrors asserts that the supervisor recorded zero illegal
+// lifecycle transitions.
+func assertNoLifecycleErrors(t testing.TB, sup *Supervisor) {
 	t.Helper()
 	if errs := sup.lifecycleErrors.Load(); errs != 0 {
 		t.Errorf("lifecycleErrors = %d, want 0", errs)
-	}
-	if mismatches := sup.lifecycleShadowMismatches.Load(); mismatches != 0 {
-		t.Errorf("lifecycleShadowMismatches = %d, want 0", mismatches)
 	}
 }
 
@@ -148,7 +145,7 @@ func assertSupervisorLifecycleClean(t *testing.T, sup *Supervisor) {
 	for _, c := range children {
 		joinTestChildCompletion(t, c)
 	}
-	assertNoLifecycleDivergence(t, sup)
+	assertNoLifecycleErrors(t, sup)
 }
 
 // joinTestChildCompletion waits for a child's done channel and then for its
@@ -233,7 +230,7 @@ func finishSyntheticRunChild(s *Supervisor, child *childRuntime) {
 	child.mu.Lock()
 	_, eff, err := s.applyLifecycle(child, lifecycleSignal{
 		kind: signalRunEnded, class: child.lc.class, boundary: afterRunTeardown,
-	}, nil)
+	})
 	child.mu.Unlock()
 	if err != nil {
 		s.reportLifecycleError(child, err)
@@ -269,7 +266,7 @@ func finishSyntheticRollback(s *Supervisor, child *childRuntime) {
 	child.mu.Lock()
 	_, eff, err := s.applyLifecycle(child, lifecycleSignal{
 		kind: signalSpawnRolledBack, class: child.lc.class, boundary: afterSpawnRollback,
-	}, nil)
+	})
 	child.mu.Unlock()
 	if err != nil {
 		s.reportLifecycleError(child, err)
@@ -310,7 +307,7 @@ func finishUnrunChildAtCleanup(t *testing.T, sup *Supervisor, child *childRuntim
 // and waiter release.
 func finishActiveSyntheticChild(s *Supervisor, child *childRuntime) {
 	child.mu.Lock()
-	_, _, err := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptSettled, class: child.lc.class}, nil)
+	_, _, err := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptSettled, class: child.lc.class})
 	child.mu.Unlock()
 	if err != nil {
 		s.reportLifecycleError(child, err)

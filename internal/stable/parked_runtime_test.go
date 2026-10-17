@@ -525,7 +525,7 @@ func TestWaitForNextPromptTimerHonorsQueuedPrompt(t *testing.T) {
 	// No run goroutine: finish the modeled lifecycle explicitly after the
 	// wait observation.
 	finishSyntheticChildLifecycle(sup, c)
-	assertNoLifecycleDivergence(t, sup)
+	assertNoLifecycleErrors(t, sup)
 }
 
 // With no prompt queued, the timer branch reaps: it marks the runtime
@@ -547,5 +547,5 @@ func TestWaitForNextPromptTimerReapsWithoutPrompt(t *testing.T) {
 	// No run goroutine: finish the modeled lifecycle explicitly after the
 	// wait observation.
 	finishSyntheticChildLifecycle(sup, c)
-	assertNoLifecycleDivergence(t, sup)
+	assertNoLifecycleErrors(t, sup)
 }

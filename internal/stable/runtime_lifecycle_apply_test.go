@@ -1,14 +1,11 @@
 package stable
 
-// Isolated reporter/diagnostic tests for the Stage 2 lifecycle adapter
-// (plan Stage 2 change 6): diagnostic propagation is exercised with explicit
-// expected counts on an isolated owner, not by whitelisting real lifecycle
-// paths in suite-wide zero-error assertions.
+// Isolated lifecycle adapter tests: diagnostic propagation is exercised with
+// explicit expected counts on an isolated owner, not by whitelisting real
+// lifecycle paths in suite-wide zero-error assertions.
 
 import (
-	"bytes"
 	"io"
-	"strings"
 	"testing"
 )
 
@@ -22,7 +19,7 @@ func TestReportLifecycleErrorCountsIllegalTransitions(t *testing.T) {
 	// lc unchanged, and the report must count exactly one error.
 	child.mu.Lock()
 	child.lc = lifecycleState{exec: execStarting, attempts: 1}
-	_, _, err := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptPreparing, class: directAttemptClass}, nil)
+	_, _, err := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptPreparing, class: directAttemptClass})
 	child.mu.Unlock()
 	if err == nil {
 		t.Fatal("applyLifecycle accepted a signal on an invalid state")
@@ -38,253 +35,6 @@ func TestReportLifecycleErrorCountsIllegalTransitions(t *testing.T) {
 	if got := s.lifecycleErrors.Load(); got != 2 {
 		t.Fatalf("lifecycleErrors = %d, want 2 after a second report", got)
 	}
-	if s.lifecycleShadowMismatches.Load() != 0 {
-		t.Fatalf("lifecycleShadowMismatches = %d, want 0", s.lifecycleShadowMismatches.Load())
-	}
-}
-
-func TestCountShadowMismatchCountsIndependentComparisons(t *testing.T) {
-	s := newLifecycleTestOwner()
-	s.errWriter = io.Discard
-	child := &childRuntime{id: "rt_mismatch", done: make(chan struct{})}
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
-
-	s.countShadowMismatch(child, signalPublished, "synthetic comparison failure", nil)
-	if got := s.lifecycleShadowMismatches.Load(); got != 1 {
-		t.Fatalf("lifecycleShadowMismatches = %d, want 1", got)
-	}
-	if s.lifecycleErrors.Load() != 0 {
-		t.Fatalf("lifecycleErrors = %d, want 0 (mismatches are counted separately)", s.lifecycleErrors.Load())
-	}
-	// The isolated owner never contributed to any real supervisor's counters.
-	assertNoLifecycleDivergence(t, &Supervisor{})
-}
-
-func TestCompareDeferredLifecycleEffectsCountsSequenceMismatch(t *testing.T) {
-	s := newLifecycleTestOwner()
-	s.errWriter = io.Discard
-	child := &childRuntime{id: "rt_seq", done: make(chan struct{})}
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
-	child.sentinelFile = "/tmp/rt_seq_sentinel"
-
-	predicted := []lifecycleEffect{
-		{kind: effectWriteSentinel, exitCode: 3, reason: "boom", sessionID: "ses_x"},
-		{kind: effectEmitSessionEnd, exitCode: 3, reason: "boom"},
-	}
-	witnessed := []lifecycleEffect{
-		{kind: effectEmitSessionEnd, exitCode: 3, reason: "boom"},
-	}
-	s.compareDeferredLifecycleEffects(child, predicted, witnessed, signalIdleContextEnded)
-	if got := s.lifecycleShadowMismatches.Load(); got != 1 {
-		t.Fatalf("lifecycleShadowMismatches = %d, want 1 after a dropped sentinel witness", got)
-	}
-
-	// A matching sequence counts nothing.
-	s.lifecycleShadowMismatches.Store(0)
-	s.compareDeferredLifecycleEffects(child, predicted, predicted, signalIdleContextEnded)
-	if got := s.lifecycleShadowMismatches.Load(); got != 0 {
-		t.Fatalf("lifecycleShadowMismatches = %d, want 0 for a matching sequence", got)
-	}
-}
-
-// TestTransactLifecycleCollectsOneSyntheticMismatch drives one divergent
-// owned mirror through the real transaction and asserts the mismatch is
-// counted without an illegal-transition error, with the detail line emitted
-// only into the captured stderr writer.
-func TestTransactLifecycleCollectsOneSyntheticMismatch(t *testing.T) {
-	var buf bytes.Buffer
-	s := newLifecycleTestOwner()
-	s.errWriter = &buf
-	child := &childRuntime{id: "rt_mismatch_transact", done: make(chan struct{})}
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execIdle, class: directAttemptClass})
-
-	child.mu.Lock()
-	_, _, err := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptPreparing, class: directAttemptClass}, func() legacyLifecycleWitness {
-		// The legacy mutation writes a divergent owned mirror.
-		child.shuttingDown = true
-		return legacyLifecycleWitness{}
-	})
-	child.mu.Unlock()
-
-	if err == nil {
-		t.Fatal("transactLifecycle accepted a divergent legacy mirror without a mismatch")
-	}
-	if lifecycleTransitionFailed(err) {
-		t.Fatalf("a shadow mismatch must not surface as a transition error: %v", err)
-	}
-	if got := s.lifecycleErrors.Load(); got != 0 {
-		t.Fatalf("lifecycleErrors = %d, want 0 (a mismatch is not an illegal transition)", got)
-	}
-	if got := s.lifecycleShadowMismatches.Load(); got != 1 {
-		t.Fatalf("lifecycleShadowMismatches = %d, want 1", got)
-	}
-	if out := buf.String(); out != "" {
-		t.Fatalf("stderr written before reportLifecycleError: %q", out)
-	}
-	s.reportLifecycleError(child, err)
-	// A shadow-diag error reports per detail line and leaves the transition
-	// counter untouched; only the bundled fallback increments it.
-	if got := s.lifecycleErrors.Load(); got != 0 {
-		t.Fatalf("lifecycleErrors = %d after reportLifecycleError, want 0", got)
-	}
-	if out := buf.String(); !strings.Contains(out, "lifecycle mirror mismatch (") || !strings.Contains(out, "rt_mismatch_transact") || strings.Contains(out, "lifecycle error (runtime") {
-		t.Fatalf("captured stderr = %q, want the per-detail mirror mismatch lines for the child", out)
-	}
-}
-
-// TestTransactLifecycleLockedWitnessIsSoleDivergence pins the locked-effect
-// detail routing: the only divergence is a locked-effect witness entry with no
-// predicted counterpart, so the collected stderr detail comes solely from the
-// in-transaction sink, not from any field or presentation comparison.
-func TestTransactLifecycleLockedWitnessIsSoleDivergence(t *testing.T) {
-	var buf bytes.Buffer
-	s := newLifecycleTestOwner()
-	s.errWriter = &buf
-	child := &childRuntime{id: "rt_locked_witness", done: make(chan struct{})}
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execIdle, class: directAttemptClass})
-
-	child.mu.Lock()
-	_, _, err := s.applyLifecycle(child, lifecycleSignal{
-		kind: signalAttemptOutcome, class: directAttemptClass,
-		runKind: runKindOrdinaryDirect, exitCode: 7, sentinelReason: "error", resultSessionID: "ses_x",
-	}, func() legacyLifecycleWitness {
-		// The exit write matches the prediction (the adapter overwrites the
-		// mirror anyway). The witnessed locked effect is the adapter-owned
-		// record-exit, which the legacy comparison pool excludes, so the
-		// witnessed entry has no predicted counterpart: that unpaired witness
-		// is the sole divergence.
-		child.exitCode = 7
-		w := legacyLifecycleWitness{}
-		w.locked = append(w.locked, lifecycleEffect{kind: effectRecordOutcomeExit, exitCode: 7})
-		return w
-	})
-	child.mu.Unlock()
-
-	if err == nil || lifecycleTransitionFailed(err) {
-		t.Fatalf("applyLifecycle err = %v, want a shadow-diag error", err)
-	}
-	if got := s.lifecycleShadowMismatches.Load(); got != 1 {
-		t.Fatalf("lifecycleShadowMismatches = %d, want 1 (locked-effect witness is the sole divergence)", got)
-	}
-	if got := s.lifecycleErrors.Load(); got != 0 {
-		t.Fatalf("lifecycleErrors = %d, want 0 (a mismatch is not an illegal transition)", got)
-	}
-	if out := buf.String(); out != "" {
-		t.Fatalf("stderr written before reportLifecycleError: %q", out)
-	}
-	s.reportLifecycleError(child, err)
-	if got := s.lifecycleErrors.Load(); got != 0 {
-		t.Fatalf("lifecycleErrors = %d after reportLifecycleError, want 0", got)
-	}
-	if out := buf.String(); !strings.Contains(out, "lifecycle shadow mismatch (") || !strings.Contains(out, "rt_locked_witness") || strings.Contains(out, "lifecycle error (runtime") {
-		t.Fatalf("captured stderr = %q, want the per-detail locked-effect line", out)
-	}
-}
-
-// TestCompareShadowTransactionCountsDivergentMirrors runs a real transaction
-// per compared dimension with one divergent mirror on an otherwise valid
-// fixture, on an isolated owner whose counters are asserted exactly. The
-// adapter writes the mirrors it owns (activity, presentation, idle-end data,
-// recorded exit, parked, completion, shutdown, writer) itself, so a rogue
-// write on a signal that does not own that mirror still shows up as a
-// mismatch, while a rogue write the adapter overwrites does not.
-func TestCompareShadowTransactionCountsDivergentMirrors(t *testing.T) {
-	// prepareLegacy leaves the mirrors to the adapter and performs no locked
-	// effects: attemptPreparing's owned clear runs in the adapter.
-	prepare := func(diverge func(*childRuntime)) func(*childRuntime) legacyLifecycleWitness {
-		return func(c *childRuntime) legacyLifecycleWitness {
-			if diverge != nil {
-				diverge(c)
-			}
-			return legacyLifecycleWitness{}
-		}
-	}
-
-	cases := []struct {
-		name   string
-		opts   testLifecycleOptions
-		signal lifecycleSignal
-		legacy func(*childRuntime) legacyLifecycleWitness
-		want   int64
-	}{
-		{
-			name:   "no divergence counts nothing",
-			opts:   testLifecycleOptions{exec: execIdle, class: directAttemptClass},
-			signal: lifecycleSignal{kind: signalAttemptPreparing, class: directAttemptClass},
-			legacy: prepare(nil),
-			want:   0,
-		},
-		{
-			name:   "parked",
-			opts:   testLifecycleOptions{exec: execIdle, class: directAttemptClass},
-			signal: lifecycleSignal{kind: signalAttemptPreparing, class: directAttemptClass},
-			legacy: prepare(func(c *childRuntime) { c.parked = true }),
-			want:   2, // parked and effective-capacity comparisons both fire
-		},
-		{
-			name:   "completed",
-			opts:   testLifecycleOptions{exec: execIdle, class: directAttemptClass},
-			signal: lifecycleSignal{kind: signalAttemptPreparing, class: directAttemptClass},
-			legacy: prepare(func(c *childRuntime) { c.completed = true }),
-			want:   2, // completed and effective-capacity comparisons both fire
-		},
-		{
-			name:   "shutting down",
-			opts:   testLifecycleOptions{exec: execIdle, class: directAttemptClass},
-			signal: lifecycleSignal{kind: signalAttemptPreparing, class: directAttemptClass},
-			legacy: prepare(func(c *childRuntime) { c.shuttingDown = true }),
-			want:   1,
-		},
-		{
-			name:   "writer closing",
-			opts:   testLifecycleOptions{exec: execIdle, class: directAttemptClass},
-			signal: lifecycleSignal{kind: signalAttemptPreparing, class: directAttemptClass},
-			legacy: prepare(func(c *childRuntime) { c.writerClosing = true }),
-			want:   1,
-		},
-		{
-			name:   "recorded exit code",
-			opts:   testLifecycleOptions{exec: execIdle, class: directAttemptClass},
-			signal: lifecycleSignal{kind: signalAttemptOutcome, class: directAttemptClass, runKind: runKindOrdinaryDirect, exitCode: 7, sentinelReason: "error", resultSessionID: "ses_x"},
-			legacy: func(c *childRuntime) legacyLifecycleWitness {
-				// The adapter overwrites the exit mirror itself, so a divergent
-				// legacy write is invisible; the spurious locked-effect witness
-				// is the only divergence left.
-				w := legacyLifecycleWitness{}
-				c.exitCode = 9
-				w.locked = append(w.locked, lifecycleEffect{kind: effectRecordOutcomeExit, exitCode: 9})
-				return w
-			},
-			want: 1, // locked-effect witness fires
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			s := newLifecycleTestOwner()
-			s.errWriter = io.Discard
-			child := &childRuntime{id: "rt_mirror", done: make(chan struct{})}
-			initializeTestLifecycle(t, child, tc.opts)
-
-			var legacy func() legacyLifecycleWitness
-			if tc.legacy != nil {
-				c := child
-				legacy = func() legacyLifecycleWitness { return tc.legacy(c) }
-			}
-			child.mu.Lock()
-			_, _, err := s.applyLifecycle(child, tc.signal, legacy)
-			child.mu.Unlock()
-			if err != nil && lifecycleTransitionFailed(err) {
-				t.Fatalf("fixture produced an illegal transition, not a mismatch: %v", err)
-			}
-			if got := s.lifecycleErrors.Load(); got != 0 {
-				t.Fatalf("lifecycleErrors = %d, want 0", got)
-			}
-			if got := s.lifecycleShadowMismatches.Load(); got != tc.want {
-				t.Fatalf("lifecycleShadowMismatches = %d, want %d", got, tc.want)
-			}
-		})
-	}
 }
 
 // TestApplyLifecycleWritesOwnedMirrors drives the signals whose effects the
@@ -296,7 +46,7 @@ func TestApplyLifecycleWritesOwnedMirrors(t *testing.T) {
 	apply := func(t *testing.T, s *Supervisor, child *childRuntime, sig lifecycleSignal) {
 		t.Helper()
 		child.mu.Lock()
-		_, _, err := s.applyLifecycle(child, sig, nil)
+		_, _, err := s.applyLifecycle(child, sig)
 		child.mu.Unlock()
 		if err != nil {
 			t.Fatalf("applyLifecycle(%v): %v", sig.kind, err)
@@ -511,5 +261,5 @@ func TestFinishSyntheticRunChildDrivesFullTeardown(t *testing.T) {
 	default:
 		t.Fatal("done channel not closed by the finish helper")
 	}
-	assertNoLifecycleDivergence(t, owner)
+	assertNoLifecycleErrors(t, owner)
 }

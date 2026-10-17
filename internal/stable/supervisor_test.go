@@ -827,9 +827,6 @@ func TestRunChildTransitionFailureRunsFailSafe(t *testing.T) {
 		if got := sup.lifecycleErrors.Load(); got != wantErrors {
 			t.Fatalf("lifecycleErrors = %d, want %d", got, wantErrors)
 		}
-		if got := sup.lifecycleShadowMismatches.Load(); got != 0 {
-			t.Fatalf("lifecycleShadowMismatches = %d, want 0", got)
-		}
 		if out := buf.String(); strings.Count(out, "lifecycle error (runtime "+id+")") != int(wantErrors) {
 			t.Fatalf("captured stderr = %q, want exactly %d lifecycle error report(s)", out, wantErrors)
 		}
@@ -2811,7 +2808,7 @@ func TestRuntimeFanoutWriterPreservesBackendFinalOutputAndBoundsStatus(t *testin
 	// No run goroutine: finish the modeled lifecycle explicitly after the
 	// writer observation.
 	finishSyntheticChildLifecycle(owner, child)
-	assertNoLifecycleDivergence(t, owner)
+	assertNoLifecycleErrors(t, owner)
 	resultSup := &Supervisor{runtimes: map[string]*childRuntime{child.id: child}}
 	result, err := resultSup.RuntimeResult(child.id)
 	if err != nil {

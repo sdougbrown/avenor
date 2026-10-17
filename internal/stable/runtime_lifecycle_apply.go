@@ -6,21 +6,16 @@ package stable
 // the prediction field by field, executes the owned locked effects — activity
 // and attempt count with their mirrors, presentation, the settled/finalized
 // waiter release, the recorded outcome exit code, the parked and completed
-// mirrors and the shutdown/writer mirrors — and compares every committed
-// mirror against the prediction as an adapter consistency check. The legacy
-// closure parameter remains for the retained imperative orchestration that
-// still runs inside callers' closures; it is deleted once every effect is
-// owned. applyLifecycle requires the caller to hold child.mu and acquires
-// no lock. applyLifecycleWriteLocked requires the caller to hold writeMu ->
-// child.mu and is the only path that commits the shutdown and writer
-// dimensions; a failed transition commits the legacy stage through the
-// shutdown/writer fail-safes below. Errors are returned to the caller and
-// must be reported with reportLifecycleError outside every lock.
+// mirrors and the shutdown/writer mirrors. applyLifecycle requires the caller
+// to hold child.mu and acquires no lock. applyLifecycleWriteLocked requires
+// the caller to hold writeMu -> child.mu and is the only path that commits
+// the shutdown and writer dimensions; a failed transition commits the legacy
+// stage through the shutdown/writer fail-safes below. Errors are returned to
+// the caller and must be reported with reportLifecycleError outside every lock.
 
 import (
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/sdougbrown/avenor/internal/cli"
 )
@@ -92,54 +87,24 @@ func signalKindName(k signalKind) string {
 	return fmt.Sprintf("signal(%d)", int(k))
 }
 
-// legacyLifecycleWitness records the still-legacy-owned locked effects the
-// closure actually performed under the caller's locks, in execution order.
-// Owned effects (activity/count, presentation, the waiter release, the
-// recorded exit, the completion mirror and the shutdown/writer mirrors) are
-// executed by the adapter and never witnessed; deferred legacy effects
-// (sentinels, capacity signals, session ends, cancels) are witnessed at their
-// outer execution sites and compared with compareDeferredLifecycleEffects.
-type legacyLifecycleWitness struct {
-	locked []lifecycleEffect
-}
-
 // applyLifecycle applies one lifecycle signal while the caller holds child.mu.
 // It acquires no lock and never reports diagnostics itself; the caller reports
 // the returned error through reportLifecycleError after releasing every lock.
-func (s *Supervisor) applyLifecycle(child *childRuntime, sig lifecycleSignal, legacy func() legacyLifecycleWitness) (continuation, []lifecycleEffect, error) {
-	return s.transactLifecycle(child, sig, legacy, false)
+func (s *Supervisor) applyLifecycle(child *childRuntime, sig lifecycleSignal) (continuation, []lifecycleEffect, error) {
+	return s.transactLifecycle(child, sig, false)
 }
 
 // applyLifecycleWriteLocked applies one lifecycle signal while the caller
 // holds writeMu -> child.mu. Only the dedicated shutdown/writer signal paths
 // may use it: it is the only writer of lc.shutdown and lc.writer.
-func (s *Supervisor) applyLifecycleWriteLocked(child *childRuntime, sig lifecycleSignal, legacy func() legacyLifecycleWitness) (continuation, []lifecycleEffect, error) {
-	return s.transactLifecycle(child, sig, legacy, true)
+func (s *Supervisor) applyLifecycleWriteLocked(child *childRuntime, sig lifecycleSignal) (continuation, []lifecycleEffect, error) {
+	return s.transactLifecycle(child, sig, true)
 }
-
-// errLifecycleShadowDiag marks an error that carries only shadow-mismatch
-// detail lines collected inside the caller's critical section. The outer lock
-// owner emits those lines after every enclosing lock is released (decision 7);
-// the mismatch counter was already incremented at detection, so this is not
-// an illegal transition.
-var errLifecycleShadowDiag = errors.New("lifecycle shadow mismatch")
-
-// lifecycleShadowDiagError bundles the mismatch detail lines of one shadow
-// transaction so they are emitted by the caller's existing post-unlock
-// reportLifecycleError call instead of being written under the caller's
-// locks.
-type lifecycleShadowDiagError struct {
-	details []string
-}
-
-func (e *lifecycleShadowDiagError) Error() string { return strings.Join(e.details, "; ") }
-func (e *lifecycleShadowDiagError) Unwrap() error { return errLifecycleShadowDiag }
 
 // lifecycleTransitionFailed reports whether err is an illegal-transition
-// error rather than collected shadow-mismatch diagnostics. A mismatch never
-// aborts the legacy operation or the later deferred comparisons.
+// error.
 func lifecycleTransitionFailed(err error) bool {
-	return err != nil && !errors.Is(err, errLifecycleShadowDiag)
+	return err != nil
 }
 
 // errLifecycleFaultRecovery marks a slot-wait failure whose fault fail-safe
@@ -147,8 +112,9 @@ func lifecycleTransitionFailed(err error) bool {
 // top of the ended state.
 var errLifecycleFaultRecovery = errors.New("lifecycle fault recovery ended the run")
 
-// transactLifecycle is the shared shadow transaction core.
-func (s *Supervisor) transactLifecycle(child *childRuntime, sig lifecycleSignal, legacy func() legacyLifecycleWitness, dualLocked bool) (continuation, []lifecycleEffect, error) {
+// transactLifecycle is the shared transaction core: predict, then field-commit
+// and execute the owned locked effects.
+func (s *Supervisor) transactLifecycle(child *childRuntime, sig lifecycleSignal, dualLocked bool) (continuation, []lifecycleEffect, error) {
 	if !dualLocked {
 		switch sig.kind {
 		case signalShutdownRequested, signalWriterCloseBegun, signalWriterCloseFinished:
@@ -159,8 +125,6 @@ func (s *Supervisor) transactLifecycle(child *childRuntime, sig lifecycleSignal,
 	// Capture the full pre-state under the caller's locks. Every state writer
 	// holds these locks, so the copy is consistent (plan decision 7).
 	pre := child.lc
-	prePhase, preLabel := child.phase, child.phaseLabel
-	preExit, preReason := child.exitCode, child.lastStopReason
 
 	predicted, cont, eff, err := next(pre, sig)
 	if err == nil && s.testHooks.lifecycleTransitionFailure != nil && s.testHooks.lifecycleTransitionFailure(sig.kind) {
@@ -177,13 +141,9 @@ func (s *Supervisor) transactLifecycle(child *childRuntime, sig lifecycleSignal,
 		return continuation{contNone}, nil, fmt.Errorf(
 			"lifecycle: signal %d changed a dual-locked dimension outside the wrapper", sig.kind)
 	}
-	witness := legacyLifecycleWitness{}
-	if legacy != nil {
-		witness = legacy()
-	}
 	if err != nil {
-		// Invalid prediction: leave lc unchanged, the legacy operation has
-		// finished in shadow mode; the caller reports and the gate fails.
+		// Invalid prediction: leave lc unchanged; the caller reports the error
+		// and runs the fail-safe its site prescribes.
 		return cont, nil, err
 	}
 	// Field-commit the valid prediction. Ordinary fields are committed by
@@ -197,14 +157,7 @@ func (s *Supervisor) transactLifecycle(child *childRuntime, sig lifecycleSignal,
 		child.lc.shutdown = predicted.shutdown
 		child.lc.writer = predicted.writer
 	}
-	var mismatchDetails []string
 	s.applyOwnedLifecycleEffects(child, predicted, sig.kind, eff)
-	s.compareShadowTransaction(child, pre, prePhase, preLabel, preExit, preReason, predicted, eff, witness, sig.kind, &mismatchDetails)
-	if len(mismatchDetails) > 0 {
-		// The mismatch counter was already incremented; bundle the detail lines
-		// so the caller's post-unlock report emits them outside every lock.
-		return cont, eff, &lifecycleShadowDiagError{details: mismatchDetails}
-	}
 	return cont, eff, nil
 }
 
@@ -355,176 +308,14 @@ func (s *Supervisor) executeShutdownDeferredEffects(child *childRuntime, eff []l
 }
 
 // reportLifecycleError counts every illegal transition and logs it. It must
-// be called outside all locks. An error that carries only
-// collected shadow-mismatch details is emitted here line by line; its
-// mismatches were counted at detection, so the transition counter is not
-// incremented for it.
+// be called outside all locks.
 func (s *Supervisor) reportLifecycleError(child *childRuntime, err error) {
-	var diag *lifecycleShadowDiagError
-	if errors.As(err, &diag) {
-		id := ""
-		if child != nil {
-			id = child.id
-		}
-		for _, detail := range diag.details {
-			fmt.Fprintf(s.stderrWriter(), "avenor stable: lifecycle shadow mismatch (runtime %s): %s\n", id, detail)
-		}
-		return
-	}
 	s.lifecycleErrors.Add(1)
 	id := ""
 	if child != nil {
 		id = child.id
 	}
 	fmt.Fprintf(s.stderrWriter(), "avenor stable: lifecycle error (runtime %s): %v\n", id, err)
-}
-
-// compareShadowTransaction independently compares the committed prediction
-// against the mirrors, presentation and locked-effect witness. Every failed
-// comparison increments lifecycleShadowMismatches.
-func (s *Supervisor) compareShadowTransaction(child *childRuntime, pre lifecycleState, prePhase, preLabel string, preExit int, preReason string, predicted lifecycleState, eff []lifecycleEffect, witness legacyLifecycleWitness, site signalKind, sink *[]string) {
-	// Adapter consistency: the mirrors this adapter owns must match the state
-	// it just committed. These are not shadow comparisons — the adapter writes
-	// the mirrors itself — but a failed write or stale read still indicates a
-	// bug, so the shared mismatch counter records it.
-	if child.activeAttempts != predicted.attempts {
-		s.countMirrorMismatch(child, site, fmt.Sprintf("attempts mirror: lc=%d activeAttempts=%d", predicted.attempts, child.activeAttempts), sink)
-	}
-	if child.active != (predicted.attempts > 0) {
-		s.countMirrorMismatch(child, site, fmt.Sprintf("active mirror: attempts=%d active=%v", predicted.attempts, child.active), sink)
-	}
-	// Presentation mirror: apply the predicted presentation effects to the pre
-	// snapshot and compare with the post-values the adapter wrote.
-	wantPhase, wantLabel := applyLifecyclePresentation(prePhase, preLabel, eff)
-	if child.phase != wantPhase || child.phaseLabel != wantLabel {
-		s.countMirrorMismatch(child, site, fmt.Sprintf("presentation mirror: post=(%q,%q) predicted=(%q,%q)", child.phase, child.phaseLabel, wantPhase, wantLabel), sink)
-	}
-	// Parked mirror: the adapter writes it for the park, slot-acquired and
-	// wait-ended signals; a divergence here means the mirror write failed or
-	// a rogue writer touched the field. Compared exactly until final
-	// publication, where the legacy parked value may be obsolete and is
-	// retained until the mirror is deleted.
-	if predicted.completion != completionPublished && child.parked != predicted.isParked() {
-		s.countMirrorMismatch(child, site, fmt.Sprintf("parked: lc=%v mirror=%v", predicted.isParked(), child.parked), sink)
-	}
-	// Completed mirror: the adapter writes it for the park timeout (admission
-	// closed before done) and the final publication; legacy completed covers
-	// both admission-closed and published.
-	if child.completed != (predicted.completion != completionOpen) {
-		s.countMirrorMismatch(child, site, fmt.Sprintf("completed: lc completion=%d mirror=%v", predicted.completion, child.completed), sink)
-	}
-	// Shutdown mirror: the adapter writes it for the dedicated shutdown
-	// signal; a divergence here means the mirror write failed or a rogue
-	// writer touched the field.
-	if child.shuttingDown != predicted.isShuttingDown() {
-		s.countMirrorMismatch(child, site, fmt.Sprintf("shuttingDown: mirror=%v lc=%v", child.shuttingDown, predicted.isShuttingDown()), sink)
-	}
-	// Writer mirror: the adapter writes it for the dedicated writer signals;
-	// legacy writerClosing stays true after writerClosed.
-	switch predicted.writer {
-	case writerOpen:
-		if child.writerClosing || child.writerClosed {
-			s.countMirrorMismatch(child, site, fmt.Sprintf("writer open: closing=%v closed=%v", child.writerClosing, child.writerClosed), sink)
-		}
-	case writerClosing:
-		if !child.writerClosing || child.writerClosed {
-			s.countMirrorMismatch(child, site, fmt.Sprintf("writer closing: closing=%v closed=%v", child.writerClosing, child.writerClosed), sink)
-		}
-	case writerClosed:
-		if !child.writerClosed {
-			s.countMirrorMismatch(child, site, "writer closed: closed mirror=false", sink)
-		}
-	}
-	// Effective capacity exclusion (completed || parked) at all times. Both
-	// mirrors are adapter-written, so this is an adapter consistency check.
-	if (child.completed || child.parked) != (predicted.isCompleted() || predicted.isParked()) {
-		s.countMirrorMismatch(child, site, fmt.Sprintf(
-			"capacity exclusion: mirror=(completed=%v,parked=%v) lc=(completed=%v,parked=%v)",
-			child.completed, child.parked, predicted.isCompleted(), predicted.isParked()), sink)
-	}
-	// Terminal data written by predicted locked effects. The recorded outcome
-	// exit code is an adapter-owned mirror checked for consistency against
-	// its write; the idle-end and session-end data are adapter-owned mirrors
-	// too.
-	for _, e := range eff {
-		switch e.kind {
-		case effectRecordOutcomeExit:
-			if child.exitCode != e.exitCode {
-				s.countMirrorMismatch(child, site, fmt.Sprintf("exitCode mirror: post=%d predicted=%d", child.exitCode, e.exitCode), sink)
-			}
-		case effectSetIdleEndData:
-			if child.exitCode != e.exitCode {
-				s.countMirrorMismatch(child, site, fmt.Sprintf("idle exitCode mirror: post=%d predicted=%d", child.exitCode, e.exitCode), sink)
-			}
-			if child.lastStopReason != e.reason {
-				s.countMirrorMismatch(child, site, fmt.Sprintf("idle stop reason mirror: post=%q predicted=%q", child.lastStopReason, e.reason), sink)
-			}
-		case effectSetSessionEndPresentation:
-			if e.reason != "" && child.lastStopReason != e.reason {
-				s.countMirrorMismatch(child, site, fmt.Sprintf("session end stop reason mirror: post=%q predicted=%q", child.lastStopReason, e.reason), sink)
-			}
-		}
-	}
-	// Locked-effect witness. No locked effect is legacy-owned any more: every
-	// locked effect is executed by the adapter, so a nonempty witness has no
-	// predicted counterpart and is a mismatch. The sink collects detail lines
-	// so nothing is printed while the caller's locks are held.
-	s.compareLifecycleEffects(nil, witness.locked, child, site, "locked", sink)
-}
-
-// applyLifecyclePresentation applies predicted presentation effects to a
-// pre-image and returns the expected post-image. Label retention: only a
-// nonempty label replaces the stored one; clear resets both.
-func applyLifecyclePresentation(phase, label string, eff []lifecycleEffect) (string, string) {
-	for _, e := range eff {
-		switch e.kind {
-		case effectClearPresentation:
-			phase, label = "", ""
-		case effectSetAgentPresentation:
-			phase = e.phase
-			if e.label != "" {
-				label = e.label
-			}
-		case effectSetSuccessPresentation, effectSetSessionEndPresentation, effectSetIdleEndData:
-			phase = "done"
-		}
-	}
-	return phase, label
-}
-
-// compareLifecycleEffects compares two ordered effect sequences. It is used
-// for locked witnesses (inside the transaction) and, via
-// compareDeferredLifecycleEffects, for deferred witnesses at their outer
-// execution sites.
-func (s *Supervisor) compareLifecycleEffects(predicted, witnessed []lifecycleEffect, child *childRuntime, site signalKind, class string, sink *[]string) {
-	if len(predicted) != len(witnessed) {
-		s.countShadowMismatch(child, site, fmt.Sprintf("%s effects: predicted %d %v, witnessed %d %v", class, len(predicted), predicted, len(witnessed), witnessed), sink)
-		return
-	}
-	for i := range predicted {
-		p, w := predicted[i], witnessed[i]
-		if p.kind != w.kind {
-			s.countShadowMismatch(child, site, fmt.Sprintf("%s effect %d: predicted %d, witnessed %d", class, i, p.kind, w.kind), sink)
-			continue
-		}
-		switch p.kind {
-		case effectRecordOutcomeExit, effectRecordWorkflowExit, effectSetIdleEndData, effectEmitSessionEnd:
-			if p.exitCode != w.exitCode || p.reason != w.reason {
-				s.countShadowMismatch(child, site, fmt.Sprintf("%s effect %d payload: predicted (%d,%q), witnessed (%d,%q)", class, i, p.exitCode, p.reason, w.exitCode, w.reason), sink)
-			}
-		case effectWriteSentinel:
-			// The session ID is caller-resolved (the machine carries only what
-			// the result snapshot had); an empty predicted value means the
-			// caller resolves the session outside the transaction.
-			if p.exitCode != w.exitCode || p.reason != w.reason || (p.sessionID != "" && p.sessionID != w.sessionID) {
-				s.countShadowMismatch(child, site, fmt.Sprintf("%s sentinel payload: predicted (%d,%q,%q), witnessed (%d,%q,%q)", class, p.exitCode, p.reason, p.sessionID, w.exitCode, w.reason, w.sessionID), sink)
-			}
-		case effectPublishCompletion:
-			if p.boundary != w.boundary {
-				s.countShadowMismatch(child, site, fmt.Sprintf("%s boundary: predicted %d, witnessed %d", class, p.boundary, w.boundary), sink)
-			}
-		}
-	}
 }
 
 // failSafeRunChildTransition is the fixed fail-safe for an illegal transition
@@ -545,7 +336,7 @@ func (s *Supervisor) compareLifecycleEffects(predicted, witnessed []lifecycleEff
 // before this helper runs, and a fault that itself fails is reported here.
 func (s *Supervisor) failSafeRunChildTransition(child *childRuntime, fault lifecycleFault) {
 	child.mu.Lock()
-	_, _, err := s.applyLifecycle(child, lifecycleSignal{kind: signalFault, class: child.lc.class}, nil)
+	_, _, err := s.applyLifecycle(child, lifecycleSignal{kind: signalFault, class: child.lc.class})
 	if err == nil {
 		if fault.recordExit {
 			child.exitCode = fault.exitCode
@@ -616,73 +407,4 @@ func (s *Supervisor) executeDeferredLifecycleEffects(child *childRuntime, eff []
 			close(child.done)
 		}
 	}
-}
-
-// compareDeferredLifecycleEffects compares the predicted deferred effects of
-// a transaction with the witnesses recorded at the legacy effect call sites.
-// Two kinds are caller-bound and may legitimately be skipped by legacy:
-//   - writeSentinel when the child has no sentinel file;
-//   - cancelContext when the child has no cancel callback.
-//
-// Every other predicted kind must be witnessed, in order.
-func (s *Supervisor) compareDeferredLifecycleEffects(child *childRuntime, predicted, witnessed []lifecycleEffect, site signalKind) {
-	deferred := lifecycleDeferredEffects(predicted)
-	filtered := make([]lifecycleEffect, 0, len(deferred))
-	for _, e := range deferred {
-		if e.kind == effectWriteSentinel && child.sentinelFile == "" {
-			continue
-		}
-		if e.kind == effectCancelContext && child.cancelFn == nil {
-			continue
-		}
-		filtered = append(filtered, e)
-	}
-	s.compareLifecycleEffects(filtered, witnessed, child, site, "deferred", nil)
-}
-
-// countShadowMismatch increments the mismatch counter and records the detail
-// of a failed comparison against a still-legacy-owned effect: the locked
-// witness must stay empty because every locked effect is adapter-owned. A
-// nonnil sink collects the formatted line for emission after the caller's
-// locks are released; a nil sink (out-of-lock comparators, tests) emits the
-// line immediately.
-func (s *Supervisor) countShadowMismatch(child *childRuntime, site signalKind, detail string, sink *[]string) {
-	s.countLifecycleComparisonMismatch(child, site, "lifecycle shadow mismatch", detail, sink)
-}
-
-// countMirrorMismatch records a failed adapter consistency check: an owned
-// mirror does not match the state the adapter just committed. These are not
-// shadow comparisons — the adapter writes the mirror itself — but they still
-// indicate a bug and share the mismatch counter.
-func (s *Supervisor) countMirrorMismatch(child *childRuntime, site signalKind, detail string, sink *[]string) {
-	s.countLifecycleComparisonMismatch(child, site, "lifecycle mirror mismatch", detail, sink)
-}
-
-func (s *Supervisor) countLifecycleComparisonMismatch(child *childRuntime, site signalKind, class, detail string, sink *[]string) {
-	s.lifecycleShadowMismatches.Add(1)
-	id := ""
-	if child != nil {
-		id = child.id
-	}
-	line := fmt.Sprintf("%s (%s, runtime %s): %s", class, signalKindName(site), id, detail)
-	if sink != nil {
-		*sink = append(*sink, line)
-		return
-	}
-	fmt.Fprintf(s.stderrWriter(), "avenor stable: %s\n", line)
-}
-
-// lifecycleDeferredEffects filters the deferred effects out of a predicted
-// effect list.
-func lifecycleDeferredEffects(eff []lifecycleEffect) []lifecycleEffect {
-	deferred := make([]lifecycleEffect, 0, len(eff))
-	for _, e := range eff {
-		switch e.kind {
-		case effectClearPresentation, effectSetAgentPresentation, effectSetSuccessPresentation,
-			effectSetSessionEndPresentation, effectSetIdleEndData, effectRecordOutcomeExit, effectSettleTurnWaiters:
-		default:
-			deferred = append(deferred, e)
-		}
-	}
-	return deferred
 }
