@@ -333,6 +333,11 @@ type childRuntime struct {
 	pendingPermission bool
 	permission        map[string]any
 	directAttempt     *sessionAttempt
+	// lc is the closed lifecycle state owned by the pure machine
+	// (runtime_lifecycle.go). In Stage 2 it runs in shadow mode: legacy flag
+	// writes stay authoritative, and every transition is predicted, committed
+	// and independently compared by the adapter (runtime_lifecycle_apply.go).
+	lc                lifecycleState
 	mu                sync.Mutex
 	writeMu           sync.Mutex
 	fanoutWriter      *runtimeFanoutWriter
@@ -547,6 +552,11 @@ type Supervisor struct {
 	// candidateRebuilds counts every candidate-index rebuild performed by
 	// stableRunnerDeps.Refresh (test instrumentation).
 	candidateRebuilds atomic.Int64
+	// lifecycleErrors counts every illegal lifecycle transition reported by
+	// the #316 shadow machine; lifecycleShadowMismatches counts every failed
+	// independent shadow comparison. Both must be zero after teardown.
+	lifecycleErrors           atomic.Int64
+	lifecycleShadowMismatches atomic.Int64
 	// controllerPollBaseDelay is the interval before a parked gate's first
 	// adapter poll; defaults to 30s. Tests shorten it.
 	controllerPollBaseDelay time.Duration
@@ -1205,9 +1215,17 @@ func (s *Supervisor) acquireLocalRuntimeSlot(ctx context.Context, child *childRu
 		}
 		if s.activeRuntimeCountLocked()+s.outstandingReservations < s.config.MaxRuntimes {
 			child.mu.Lock()
-			child.parked = false
+			// Shadow: localSlotAcquired predicts P -> I; the legacy parked write
+			// is the mutation it shadows.
+			_, _, err := s.applyLifecycle(child, lifecycleSignal{kind: signalLocalSlotAcquired, class: child.lc.class}, func() legacyLifecycleWitness {
+				child.parked = false
+				return legacyLifecycleWitness{}
+			})
 			child.mu.Unlock()
 			s.controlMu.Unlock()
+			if err != nil {
+				s.reportLifecycleError(child, err)
+			}
 			return nil
 		}
 		s.controlMu.Unlock()
@@ -1439,6 +1457,10 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		attemptID:                params.AttemptID,
 		permissionDeciderRun:     params.permissionDeciderRun,
 		permissionDeciderSlotKey: params.permissionDeciderSlotKey,
+		// Explicit reserved lifecycle state (plan decision 7): the class is
+		// immutable and set before publication; published is sent immediately
+		// before map insertion below.
+		lc: lifecycleState{class: childAttemptClass(params)},
 	}
 	if terminate := params.workflowTerminate; terminate != nil {
 		child.onWorkflowTerminate = func(status workflow.AttemptStatus) { terminate(child, status) }
@@ -1455,6 +1477,14 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 			}
 		}
 	}
+	// Shadow: predict-and-commit the published transition immediately before
+	// map insertion, under controlMu -> child.mu (plan Stage 2). The signal
+	// has no legacy counterpart; the commit is prediction-only.
+	child.mu.Lock()
+	if _, _, err := s.applyLifecycle(child, lifecycleSignal{kind: signalPublished, class: child.lc.class}, nil); err != nil {
+		s.reportLifecycleError(child, err)
+	}
+	child.mu.Unlock()
 	s.runtimes[rtID] = child
 	s.controlMu.Unlock()
 
@@ -1477,7 +1507,19 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		s.controlMu.Lock()
 		delete(s.runtimes, rtID)
 		s.controlMu.Unlock()
-		child.complete()
+		// Shadow: the rollback publication cue is predicted before the legacy
+		// complete call; the call itself is the publishCompletion witness.
+		child.mu.Lock()
+		_, eff, err := s.applyLifecycle(child, lifecycleSignal{
+			kind: signalSpawnRolledBack, class: child.lc.class, boundary: afterSpawnRollback,
+		}, nil)
+		child.mu.Unlock()
+		if err != nil {
+			s.reportLifecycleError(child, err)
+		} else {
+			s.compareDeferredLifecycleEffects(child, eff, []lifecycleEffect{{kind: effectPublishCompletion, boundary: afterSpawnRollback}}, signalSpawnRolledBack)
+		}
+		child.complete(s, afterSpawnRollback)
 	}
 	defer func() {
 		if releaseReservation != nil {
@@ -2164,7 +2206,21 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			// exact label never frees the live decider's slot.
 			s.releasePermissionDecider(child.permissionDeciderSlotKey)
 		}
-		child.complete()
+		// Shadow: runEnded predicts the final teardown transition (S/I -> E,
+		// P -> PE) and emits the publication cue; the complete call below is
+		// its publishCompletion witness. It requires attempts 0, so it runs
+		// after every attempt defer has settled.
+		child.mu.Lock()
+		_, eff, err := s.applyLifecycle(child, lifecycleSignal{
+			kind: signalRunEnded, class: child.lc.class, boundary: afterRunTeardown,
+		}, nil)
+		child.mu.Unlock()
+		if err != nil {
+			s.reportLifecycleError(child, err)
+		} else {
+			s.compareDeferredLifecycleEffects(child, eff, []lifecycleEffect{{kind: effectPublishCompletion, boundary: afterRunTeardown}}, signalRunEnded)
+		}
+		child.complete(s, afterRunTeardown)
 		s.signalCapacityChange()
 	}()
 
@@ -2202,24 +2258,85 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 		// Release tree admission after the turn so a parked runtime does not
 		// consume descendant budget while idle. A subsequent prompt
 		// re-acquires before its turn.
+		// Shadow: attemptReturned predicts the release at the old post-attempt
+		// boundary; the release call below is its witness.
+		child.mu.Lock()
+		retCont, retEff, retErr := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptReturned, class: child.lc.class}, nil)
+		child.mu.Unlock()
+		if retErr != nil {
+			s.reportLifecycleError(child, retErr)
+		}
 		s.releaseChildTreeToken(child)
+		if retErr == nil {
+			s.compareDeferredLifecycleEffects(child, retEff, []lifecycleEffect{{kind: effectReleaseTreeToken}}, signalAttemptReturned)
+		}
+		_ = retCont
 		needAcquire = true
-		if !runtime.IsRetryableFailure(result.exitCode, result.stopReason) || attempt > maxRetries {
-			stopReason := result.stopReason
-			if stopReason == "" {
-				stopReason = runtime.StopReasonForExitCode(result.exitCode)
-			}
-			child.mu.Lock()
-			child.exitCode = result.exitCode
-			child.mu.Unlock()
 
+		// Classify the result exactly as the legacy branches below decide, so
+		// the machine's prediction can be compared against the branch taken.
+		retryable := runtime.IsRetryableFailure(result.exitCode, result.stopReason)
+		retriesRemaining := attempt <= maxRetries
+		runKind := runKindOrdinaryDirect
+		if child.permissionDeciderRun {
+			runKind = runKindDecider
+		} else if child.workflowID != "" {
+			runKind = runKindWorkflowDirect
+		}
+		conflict := result.stopReason == runtime.SessionIDConflictStopReason
+		stopReason := result.stopReason
+		if stopReason == "" {
+			stopReason = runtime.StopReasonForExitCode(result.exitCode)
+		}
+		// The legacy branches that record the exit code under child.mu.
+		recordsExit := !retryable || !retriesRemaining || runKind == runKindDecider
+
+		// Shadow: attemptOutcome predicts the branch continuation and the
+		// locked exit recording before the legacy mutation runs in the closure.
+		child.mu.Lock()
+		cont, eff, err := s.applyLifecycle(child, lifecycleSignal{
+			kind:              signalAttemptOutcome,
+			class:             child.lc.class,
+			runKind:           runKind,
+			exitCode:          result.exitCode,
+			stopReason:        result.stopReason,
+			sentinelReason:    stopReason,
+			resultSessionID:   result.sessionID,
+			sessionIDConflict: conflict,
+			retryable:         retryable,
+			retriesRemaining:  retriesRemaining,
+		}, func() legacyLifecycleWitness {
+			w := legacyLifecycleWitness{}
+			if recordsExit {
+				child.exitCode = result.exitCode
+				w.locked = append(w.locked, lifecycleEffect{kind: effectRecordOutcomeExit, exitCode: result.exitCode})
+			}
+			return w
+		})
+		child.mu.Unlock()
+		if err != nil {
+			s.reportLifecycleError(child, err)
+		}
+		if !retryable || !retriesRemaining {
 			if result.exitCode == 0 {
 				if child.sentinelFile != "" {
 					cli.WriteSentinel(child.sentinelFile, result.exitCode, result.sessionID, stopReason, s.runID, s.stderrWriter())
 				}
+				// Shadow: successPresented fires at the old post-sentinel site,
+				// never at result selection (decision 6).
 				child.mu.Lock()
-				child.phase = "done"
+				_, _, sucErr := s.applyLifecycle(child, lifecycleSignal{
+					kind: signalSuccessPresented, class: child.lc.class, exitCode: result.exitCode,
+				}, func() legacyLifecycleWitness {
+					w := legacyLifecycleWitness{}
+					child.phase = "done"
+					w.locked = append(w.locked, lifecycleEffect{kind: effectSetSuccessPresentation})
+					return w
+				})
 				child.mu.Unlock()
+				if sucErr != nil {
+					s.reportLifecycleError(child, sucErr)
+				}
 
 				// A workflow direct run is a single-shot task with no follow-up
 				// prompt queue, so a successful end_turn is terminal. Terminate
@@ -2227,6 +2344,9 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 				// parking for a follow-up prompt, which would otherwise defer
 				// and mislabel the result as cancelled at teardown.
 				if child.workflowID != "" {
+					if err == nil {
+						s.compareLifecycleContinuation(child, cont.kind, contEnd, signalAttemptOutcome)
+					}
 					return
 				}
 				// A permission decider judges one request in a single turn and
@@ -2237,18 +2357,46 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 				// decides: a caller can spawn an ordinary runtime with a
 				// decider-shaped label, and that runtime parks like any other.
 				if child.permissionDeciderRun {
+					if err == nil {
+						s.compareLifecycleContinuation(child, cont.kind, contEnd, signalAttemptOutcome)
+					}
 					return
 				}
+				if err == nil {
+					s.compareLifecycleContinuation(child, cont.kind, contPark, signalAttemptOutcome)
+				}
+				// Shadow: parkRequested predicts the parked transition; the
+				// legacy parked write is its mutation.
 				child.mu.Lock()
-				child.parked = true
+				_, parkEff, parkErr := s.applyLifecycle(child, lifecycleSignal{
+					kind: signalParkRequested, class: child.lc.class, runKind: runKindOrdinaryDirect,
+				}, func() legacyLifecycleWitness {
+					child.parked = true
+					return legacyLifecycleWitness{}
+				})
 				child.mu.Unlock()
+				if parkErr != nil {
+					s.reportLifecycleError(child, parkErr)
+				}
 				// Parking frees a local slot; wake spawn waiters blocked on the cap.
 				s.signalCapacityChange()
-				nextPrompt, ok := child.waitForNextPrompt(ctx, s.config.ParkedRuntimeTimeout)
+				if parkErr == nil {
+					s.compareDeferredLifecycleEffects(child, parkEff, []lifecycleEffect{{kind: effectSignalCapacity}}, signalParkRequested)
+				}
+				nextPrompt, ok := child.waitForNextPrompt(s, ctx, s.config.ParkedRuntimeTimeout)
 				if !ok {
+					// Shadow: parkWaitEnded is only the not-ok wait path, never
+					// the local-slot failure; the legacy parked clear is its
+					// mutation.
 					child.mu.Lock()
-					child.parked = false
+					_, _, pweErr := s.applyLifecycle(child, lifecycleSignal{kind: signalParkWaitEnded, class: child.lc.class}, func() legacyLifecycleWitness {
+						child.parked = false
+						return legacyLifecycleWitness{}
+					})
 					child.mu.Unlock()
+					if pweErr != nil {
+						s.reportLifecycleError(child, pweErr)
+					}
 					if ctx.Err() != nil {
 						s.writeIdleContextEnd(child, ctx.Err())
 					}
@@ -2273,23 +2421,63 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			// prompt must not resume it for a second turn. Falling through
 			// records the failure's exit code and sentinel exactly as a
 			// promptless failure.
-			if ctx.Err() == nil && !child.permissionDeciderRun && result.stopReason != runtime.SessionIDConflictStopReason {
+			// Shadow: the machine either selected the terminal probe
+			// (contProbeTerminalPrompt) or ended directly at attemptOutcome
+			// (decider/conflict, contEnd). Only a selected probe runs the
+			// continuation transaction; the direct end compares
+			// attemptOutcome's predicted sentinel against the fallthrough
+			// witness below.
+			probeSelected := err == nil && cont.kind == contProbeTerminalPrompt
+			probeResumed := false
+			var probeNext string
+			if probeSelected && ctx.Err() == nil && !child.permissionDeciderRun && !conflict {
 				if nextPrompt, ok := child.dequeuePrompt(); ok {
-					if child.sentinelFile != "" {
-						cli.WriteSentinel(child.sentinelFile, result.exitCode, result.sessionID, stopReason, s.runID, s.stderrWriter())
-					}
-					promptText = nextPrompt
-					resumeID = result.sessionID
-					if resumeID == "" {
-						resumeID = child.sessionID()
-					}
-					attempt = 0
-					continue
+					probeResumed = true
+					probeNext = nextPrompt
 				}
 			}
-
+			var probeWitness []lifecycleEffect
+			if probeResumed {
+				promptText = probeNext
+				resumeID = result.sessionID
+				if resumeID == "" {
+					resumeID = child.sessionID()
+				}
+				attempt = 0
+			}
 			if child.sentinelFile != "" {
 				cli.WriteSentinel(child.sentinelFile, result.exitCode, result.sessionID, stopReason, s.runID, s.stderrWriter())
+				probeWitness = append(probeWitness, lifecycleEffect{kind: effectWriteSentinel, exitCode: result.exitCode, reason: stopReason, sessionID: result.sessionID})
+			}
+			if probeSelected {
+				child.mu.Lock()
+				probeCont, probeEff, probeErr := s.applyLifecycle(child, lifecycleSignal{
+					kind:               signalPromptContinuation,
+					class:              child.lc.class,
+					probeKind:          probeTerminalPrompt,
+					terminalContextErr: ctx.Err(),
+					promptConsumed:     probeResumed,
+					exitCode:           result.exitCode,
+					sentinelReason:     stopReason,
+					resultSessionID:    result.sessionID,
+				}, nil)
+				child.mu.Unlock()
+				if probeErr != nil {
+					s.reportLifecycleError(child, probeErr)
+				} else {
+					if probeResumed {
+						s.compareLifecycleContinuation(child, probeCont.kind, contResumeQueued, signalPromptContinuation)
+					} else {
+						s.compareLifecycleContinuation(child, probeCont.kind, contEnd, signalPromptContinuation)
+					}
+					s.compareDeferredLifecycleEffects(child, probeEff, probeWitness, signalPromptContinuation)
+				}
+			} else if err == nil {
+				s.compareLifecycleContinuation(child, cont.kind, contEnd, signalAttemptOutcome)
+				s.compareDeferredLifecycleEffects(child, eff, probeWitness, signalAttemptOutcome)
+			}
+			if probeResumed {
+				continue
 			}
 			return
 		}
@@ -2297,30 +2485,54 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 		// queued prompt nor the retry backoff may resume it for another turn.
 		// Its failure is recorded the same way as a non-retryable failure.
 		if child.permissionDeciderRun {
-			stopReason := result.stopReason
-			if stopReason == "" {
-				stopReason = runtime.StopReasonForExitCode(result.exitCode)
-			}
-			child.mu.Lock()
-			child.exitCode = result.exitCode
-			child.mu.Unlock()
 			if child.sentinelFile != "" {
 				cli.WriteSentinel(child.sentinelFile, result.exitCode, result.sessionID, stopReason, s.runID, s.stderrWriter())
 			}
+			s.compareLifecycleContinuation(child, cont.kind, contEnd, signalAttemptOutcome)
 			return
 		}
 		if result.sessionID != "" {
 			resumeID = result.sessionID
 		}
+		// Shadow: the retry probe dequeues before checking the context; the
+		// transaction compares the continuation with the branch taken.
+		retryConsumed := false
 		if nextPrompt, ok := child.dequeuePrompt(); ok && ctx.Err() == nil {
+			retryConsumed = true
 			promptText = nextPrompt
 			attempt = 0
-			continue
 		}
-		if ctx.Err() != nil {
-			s.writeIdleContextEnd(child, ctx.Err())
+		resumeCtxErr := ctx.Err()
+		child.mu.Lock()
+		probeCont, probeEff, probeErr := s.applyLifecycle(child, lifecycleSignal{
+			kind:             signalPromptContinuation,
+			class:            child.lc.class,
+			probeKind:        probeRetryPrompt,
+			promptConsumed:   retryConsumed,
+			resumeContextErr: resumeCtxErr,
+			idleContextErr:   resumeCtxErr,
+		}, nil)
+		child.mu.Unlock()
+		if probeErr != nil {
+			s.reportLifecycleError(child, probeErr)
+		}
+		if resumeCtxErr != nil {
+			s.writeIdleContextEnd(child, resumeCtxErr)
+			if probeErr == nil {
+				s.compareLifecycleContinuation(child, probeCont.kind, contIdleContextEnd, signalPromptContinuation)
+			}
 			return
 		}
+		if retryConsumed {
+			if probeErr == nil {
+				s.compareLifecycleContinuation(child, probeCont.kind, contRetry, signalPromptContinuation)
+			}
+			continue
+		}
+		if probeErr == nil {
+			s.compareLifecycleContinuation(child, probeCont.kind, contBackoff, signalPromptContinuation)
+		}
+		_ = probeEff
 		select {
 		case <-time.After(backoffDelay(attempt)):
 		case <-ctx.Done():
@@ -2372,7 +2584,20 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 			}
 			s.broker.DeleteRun(child.id)
 		}
-		child.complete()
+		// Shadow: runEnded predicts the final teardown transition (S/I -> E,
+		// P -> PE) and emits the publication cue; the complete call below is
+		// its publishCompletion witness.
+		child.mu.Lock()
+		_, eff, err := s.applyLifecycle(child, lifecycleSignal{
+			kind: signalRunEnded, class: child.lc.class, boundary: afterRunTeardown,
+		}, nil)
+		child.mu.Unlock()
+		if err != nil {
+			s.reportLifecycleError(child, err)
+		} else {
+			s.compareDeferredLifecycleEffects(child, eff, []lifecycleEffect{{kind: effectPublishCompletion, boundary: afterRunTeardown}}, signalRunEnded)
+		}
+		child.complete(s, afterRunTeardown)
 	}()
 
 	if s.broker != nil {
@@ -2382,6 +2607,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 		base:            child.eventWriter,
 		runtimeID:       child.id,
 		child:           child,
+		supervisor:      s,
 		control:         s.control,
 		metadata:        cli.NewEventMetadata(s.runID, child.label, child.id),
 		onPermissionReq: s.cachePermissionOptions,
@@ -2401,11 +2627,21 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 		Broker:     s.broker,
 		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, iteration int, prevSessionID string) (looprunner.PhaseAttemptResult, error) {
 			child.mu.Lock()
-			child.phase = ""
-			child.phaseLabel = ""
+			// Shadow: attemptPreparing clears the phase presentation even while
+			// another parallel attempt runs; the legacy clear is its mutation.
+			_, _, prepErr := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptPreparing, class: child.lc.class}, func() legacyLifecycleWitness {
+				w := legacyLifecycleWitness{}
+				child.phase = ""
+				child.phaseLabel = ""
+				w.locked = append(w.locked, lifecycleEffect{kind: effectClearPresentation})
+				return w
+			})
 			phaseRoster := child.roster
 			phaseRosterFile := child.rosterFile
 			child.mu.Unlock()
+			if prepErr != nil {
+				s.reportLifecycleError(child, prepErr)
+			}
 
 			selectionMu.Lock()
 			selection, cached := resolvedSelections[phase.Name]
@@ -2663,7 +2899,20 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 			}
 			s.broker.DeleteRun(child.id)
 		}
-		child.complete()
+		// Shadow: runEnded predicts the final teardown transition (S/I -> E,
+		// P -> PE) and emits the publication cue; the complete call below is
+		// its publishCompletion witness.
+		child.mu.Lock()
+		_, eff, err := s.applyLifecycle(child, lifecycleSignal{
+			kind: signalRunEnded, class: child.lc.class, boundary: afterRunTeardown,
+		}, nil)
+		child.mu.Unlock()
+		if err != nil {
+			s.reportLifecycleError(child, err)
+		} else {
+			s.compareDeferredLifecycleEffects(child, eff, []lifecycleEffect{{kind: effectPublishCompletion, boundary: afterRunTeardown}}, signalRunEnded)
+		}
+		child.complete(s, afterRunTeardown)
 	}()
 
 	if s.broker != nil {
@@ -2673,6 +2922,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 		base:            child.eventWriter,
 		runtimeID:       child.id,
 		child:           child,
+		supervisor:      s,
 		control:         s.control,
 		metadata:        cli.NewEventMetadata(s.runID, child.label, child.id),
 		onPermissionReq: s.cachePermissionOptions,
@@ -2692,11 +2942,21 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 		Broker:     s.broker,
 		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (teamrunner.PhaseAttemptResult, error) {
 			child.mu.Lock()
-			child.phase = ""
-			child.phaseLabel = ""
+			// Shadow: attemptPreparing clears the phase presentation even while
+			// another parallel attempt runs; the legacy clear is its mutation.
+			_, _, prepErr := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptPreparing, class: child.lc.class}, func() legacyLifecycleWitness {
+				w := legacyLifecycleWitness{}
+				child.phase = ""
+				child.phaseLabel = ""
+				w.locked = append(w.locked, lifecycleEffect{kind: effectClearPresentation})
+				return w
+			})
 			phaseRoster := child.roster
 			phaseRosterFile := child.rosterFile
 			child.mu.Unlock()
+			if prepErr != nil {
+				s.reportLifecycleError(child, prepErr)
+			}
 
 			selectionMu.Lock()
 			selection, cached := resolvedSelections[phase.Name]
@@ -2928,7 +3188,7 @@ func (c *childRuntime) dequeuePrompt() (string, bool) {
 	return prompt, true
 }
 
-func (c *childRuntime) waitForNextPrompt(ctx context.Context, parkedTimeout time.Duration) (string, bool) {
+func (c *childRuntime) waitForNextPrompt(s *Supervisor, ctx context.Context, parkedTimeout time.Duration) (string, bool) {
 	var parkedTimeoutCh <-chan time.Time
 	if parkedTimeout > 0 {
 		timer := time.NewTimer(parkedTimeout)
@@ -2937,6 +3197,14 @@ func (c *childRuntime) waitForNextPrompt(ctx context.Context, parkedTimeout time
 	}
 	for {
 		if prompt, ok := c.dequeuePrompt(); ok {
+			// Shadow: promptDequeued is observational; no activity or admission
+			// effect (continuation probes use their own signals).
+			c.mu.Lock()
+			_, _, err := s.applyLifecycle(c, lifecycleSignal{kind: signalPromptDequeued, class: c.lc.class}, nil)
+			c.mu.Unlock()
+			if err != nil {
+				s.reportLifecycleError(c, err)
+			}
 			return prompt, true
 		}
 		c.mu.Lock()
@@ -2962,11 +3230,23 @@ func (c *childRuntime) waitForNextPrompt(ctx context.Context, parkedTimeout time
 			if len(c.promptQueue) > 0 {
 				prompt := c.promptQueue[0]
 				c.promptQueue = c.promptQueue[1:]
+				_, _, err := s.applyLifecycle(c, lifecycleSignal{kind: signalPromptDequeued, class: c.lc.class}, nil)
 				c.mu.Unlock()
+				if err != nil {
+					s.reportLifecycleError(c, err)
+				}
 				return prompt, true
 			}
-			c.completed = true
+			// Shadow: parkTimedOut predicts completion -> admission-closed under
+			// the same mu as the queue check; no waiter settle, no done close.
+			_, _, err := s.applyLifecycle(c, lifecycleSignal{kind: signalParkTimedOut, class: c.lc.class}, func() legacyLifecycleWitness {
+				c.completed = true
+				return legacyLifecycleWitness{}
+			})
 			c.mu.Unlock()
+			if err != nil {
+				s.reportLifecycleError(c, err)
+			}
 			return "", false
 		}
 	}
@@ -3244,8 +3524,14 @@ func (s *Supervisor) beginWorkflowAttempt(child *childRuntime, provider runtime.
 		lifecycle.cancelAnswers()
 	}
 	child.mu.Lock()
-	child.activeAttempts++
-	child.active = true
+	// Shadow: attemptStarted predicts attempts++ and exec -> R; the legacy
+	// counter and active writes run in the closure.
+	var deferredStartErr error
+	_, _, deferredStartErr = s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptStarted, class: child.lc.class}, func() legacyLifecycleWitness {
+		child.activeAttempts++
+		child.active = true
+		return legacyLifecycleWitness{}
+	})
 	// These fields are a presentation slot only. Attempt ownership lives in
 	// sessionOwners, so parallel replacement cannot reject another provider.
 	// Keep the provider and its permission lifecycle generation paired under
@@ -3261,49 +3547,75 @@ func (s *Supervisor) beginWorkflowAttempt(child *childRuntime, provider runtime.
 	child.rosterEntry = identity.RosterEntry
 	child.mu.Unlock()
 	child.writeMu.Unlock()
+	if deferredStartErr != nil {
+		s.reportLifecycleError(child, deferredStartErr)
+	}
 	return lifecycle
 }
 
 func (s *Supervisor) endWorkflowAttempt(child *childRuntime, provider runtime.Provider) {
 	child.mu.Lock()
-	if child.activeAttempts > 0 {
-		child.activeAttempts--
-	}
-	if child.provider == provider {
-		sessionID := child.session.SessionID
-		child.provider = nil
-		// Retain only the authoritative ID. The provider's PID and other fields
-		// become invalid when it closes.
-		child.session = runtime.Session{SessionID: sessionID}
-	}
-	prevActive := child.active
-	child.active = child.activeAttempts > 0
-	if !child.active {
-		child.phase = ""
-		child.phaseLabel = ""
-		if prevActive {
-			// The last parallel phase settled (running→idle).
-			child.settleTurnLocked()
+	// Shadow: attemptSettled predicts the count decrement and the settle-once
+	// presentation clear and waiter settle on the transition to zero; the
+	// legacy block below is the mutation and its witness.
+	_, _, settledErr := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptSettled, class: child.lc.class}, func() legacyLifecycleWitness {
+		w := legacyLifecycleWitness{}
+		if child.activeAttempts > 0 {
+			child.activeAttempts--
 		}
-	}
+		if child.provider == provider {
+			sessionID := child.session.SessionID
+			child.provider = nil
+			// Retain only the authoritative ID. The provider's PID and other fields
+			// become invalid when it closes.
+			child.session = runtime.Session{SessionID: sessionID}
+		}
+		prevActive := child.active
+		child.active = child.activeAttempts > 0
+		if !child.active {
+			child.phase = ""
+			child.phaseLabel = ""
+			w.locked = append(w.locked, lifecycleEffect{kind: effectClearPresentation})
+			if prevActive {
+				// The last parallel phase settled (running→idle).
+				child.settleTurnLocked()
+				w.locked = append(w.locked, lifecycleEffect{kind: effectSettleTurnWaiters})
+			}
+		}
+		return w
+	})
 	child.mu.Unlock()
+	if settledErr != nil {
+		s.reportLifecycleError(child, settledErr)
+	}
 }
 
 func (s *Supervisor) finalizeWorkflowChild(child *childRuntime, final workflowSession) {
 	child.mu.Lock()
-	child.provider = nil
-	child.providerLifecycle = nil
-	child.session = runtime.Session{SessionID: final.SessionID}
-	child.effectiveBackend = final.Identity.Backend
-	child.effectiveAgent = final.Identity.Agent
-	child.effectiveModel = final.Identity.Model
-	child.agentProfile = final.Identity.AgentProfile
-	child.rosterFile = final.Identity.RosterFile
-	child.rosterEntry = final.Identity.RosterEntry
-	child.activeAttempts = 0
-	child.active = false
-	child.settleTurnLocked()
+	// Shadow: workflowFinalized resets the count and settles unconditionally,
+	// and never clears presentation; the legacy block below is the mutation
+	// and its witness.
+	_, _, finErr := s.applyLifecycle(child, lifecycleSignal{kind: signalWorkflowFinalized, class: child.lc.class}, func() legacyLifecycleWitness {
+		w := legacyLifecycleWitness{}
+		child.provider = nil
+		child.providerLifecycle = nil
+		child.session = runtime.Session{SessionID: final.SessionID}
+		child.effectiveBackend = final.Identity.Backend
+		child.effectiveAgent = final.Identity.Agent
+		child.effectiveModel = final.Identity.Model
+		child.agentProfile = final.Identity.AgentProfile
+		child.rosterFile = final.Identity.RosterFile
+		child.rosterEntry = final.Identity.RosterEntry
+		child.activeAttempts = 0
+		child.active = false
+		child.settleTurnLocked()
+		w.locked = append(w.locked, lifecycleEffect{kind: effectSettleTurnWaiters})
+		return w
+	})
 	child.mu.Unlock()
+	if finErr != nil {
+		s.reportLifecycleError(child, finErr)
+	}
 }
 
 func (s *Supervisor) statusIdentity(child *childRuntime, sessionID string) effectiveIdentity {
@@ -3334,13 +3646,31 @@ func (s *Supervisor) statusIdentity(child *childRuntime, sessionID string) effec
 func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, resumeID, promptText string) childAttemptResult {
 	deadline, _ := ctx.Deadline()
 	child.mu.Lock()
-	child.phase = ""
-	child.phaseLabel = ""
+	// Shadow: attemptPreparing clears the phase presentation; the legacy
+	// clear is its mutation.
+	_, _, prepErr := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptPreparing, class: child.lc.class}, func() legacyLifecycleWitness {
+		w := legacyLifecycleWitness{}
+		child.phase = ""
+		child.phaseLabel = ""
+		w.locked = append(w.locked, lifecycleEffect{kind: effectClearPresentation})
+		return w
+	})
 	child.mu.Unlock()
+	if prepErr != nil {
+		s.reportLifecycleError(child, prepErr)
+	}
 
 	session, err := s.attemptSession(ctx, child, resumeID)
 	if err != nil {
 		s.emitChildError(child, fmt.Sprintf("start session: %v", err), "error")
+		// Shadow: attemptStartFailed is only for a prepared attempt that never
+		// incremented activity; the pre-activity return records nothing.
+		child.mu.Lock()
+		_, _, failErr := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptStartFailed, class: child.lc.class}, nil)
+		child.mu.Unlock()
+		if failErr != nil {
+			s.reportLifecycleError(child, failErr)
+		}
 		return childAttemptResult{exitCode: 1}
 	}
 	child.mu.Lock()
@@ -3350,19 +3680,39 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 
 	turnCtx, cancelTurn := context.WithCancel(ctx)
 	child.mu.Lock()
-	child.active = true
+	// Shadow: attemptStarted predicts attempts 0 -> 1 and exec -> R; the
+	// legacy active write is its mutation.
+	_, _, startErr := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptStarted, class: child.lc.class}, func() legacyLifecycleWitness {
+		child.active = true
+		return legacyLifecycleWitness{}
+	})
 	child.interruptFn = cancelTurn
 	child.mu.Unlock()
+	if startErr != nil {
+		s.reportLifecycleError(child, startErr)
+	}
 	defer func() {
 		cancelTurn()
 		child.mu.Lock()
-		child.active = false
-		child.interruptFn = nil
-		child.phase = ""
-		child.phaseLabel = ""
-		// The turn settled (running→idle): wake wait_turn callers.
-		child.settleTurnLocked()
+		// Shadow: attemptSettled predicts the count decrement to zero and the
+		// presentation clear plus waiter settle; the legacy block is the
+		// mutation and its witness.
+		_, _, settledErr := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptSettled, class: child.lc.class}, func() legacyLifecycleWitness {
+			w := legacyLifecycleWitness{}
+			child.active = false
+			child.interruptFn = nil
+			child.phase = ""
+			child.phaseLabel = ""
+			w.locked = append(w.locked, lifecycleEffect{kind: effectClearPresentation})
+			// The turn settled (running→idle): wake wait_turn callers.
+			child.settleTurnLocked()
+			w.locked = append(w.locked, lifecycleEffect{kind: effectSettleTurnWaiters})
+			return w
+		})
 		child.mu.Unlock()
+		if settledErr != nil {
+			s.reportLifecycleError(child, settledErr)
+		}
 	}()
 
 	eventCtx, cancelEvents := context.WithCancel(turnCtx)
@@ -3422,6 +3772,7 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 		base:            child.eventWriter,
 		runtimeID:       child.id,
 		child:           child,
+		supervisor:      s,
 		control:         s.control,
 		metadata:        workflowEventMetadata(s, child),
 		onPermissionReq: s.cachePermissionOptions,
@@ -3615,14 +3966,33 @@ func (s *Supervisor) writeIdleContextEnd(child *childRuntime, ctxErr error) {
 	}
 	exitCode := runtime.ExitCodeForStopReason(stopReason)
 	child.mu.Lock()
-	child.exitCode = exitCode
-	child.phase = "done"
-	child.lastStopReason = stopReason
+	// Shadow: idleContextEnded overwrites exit/phase/reason and emits the
+	// sentinel then session.end; it never clears parked or settles waiters.
+	_, eff, err := s.applyLifecycle(child, lifecycleSignal{
+		kind: signalIdleContextEnded, class: child.lc.class,
+		idleExitCode: exitCode, idleStopReason: stopReason,
+	}, func() legacyLifecycleWitness {
+		w := legacyLifecycleWitness{}
+		child.exitCode = exitCode
+		child.phase = "done"
+		child.lastStopReason = stopReason
+		w.locked = append(w.locked, lifecycleEffect{kind: effectSetIdleEndData, exitCode: exitCode, reason: stopReason})
+		return w
+	})
 	child.mu.Unlock()
+	if err != nil {
+		s.reportLifecycleError(child, err)
+	}
+	var idleWitness []lifecycleEffect
 	if child.sentinelFile != "" {
 		cli.WriteSentinel(child.sentinelFile, exitCode, child.sessionID(), stopReason, s.runID, s.stderrWriter())
+		idleWitness = append(idleWitness, lifecycleEffect{kind: effectWriteSentinel, exitCode: exitCode, reason: stopReason, sessionID: child.sessionID()})
 	}
 	s.emitSessionEnd(child, exitCode, stopReason)
+	idleWitness = append(idleWitness, lifecycleEffect{kind: effectEmitSessionEnd, exitCode: exitCode, reason: stopReason})
+	if err == nil {
+		s.compareDeferredLifecycleEffects(child, eff, idleWitness, signalIdleContextEnded)
+	}
 }
 
 func (s *Supervisor) emitChildError(child *childRuntime, message, source string) {
@@ -3951,9 +4321,13 @@ func (s *Supervisor) answerPermission(rtID, requestID, optionID, message string)
 	// remains non-terminal until the canonical response write returns, so a
 	// reused request ID cannot replace it before durable publication.
 	rt.writeMu.Lock()
+	// Diagnostics are collected in this outer scope and reported after the
+	// deferred writeMu unlock, including on panic (plan decision 8).
+	diagnostics := make([]error, 0, 2)
 	defer func() {
 		s.finishDirectPermissionAnswerLocked(rt, reservation)
 		rt.writeMu.Unlock()
+		reportLifecycleDiagnostics(s, rt, diagnostics)
 	}()
 	if providerErr != nil {
 		s.control.RetryDirectPermissionDelivery(rtID, requestID)
@@ -3972,7 +4346,7 @@ func (s *Supervisor) answerPermission(rtID, requestID, optionID, message string)
 			"source": "control",
 			"ts":     time.Now().UnixMilli(),
 		},
-	}); err != nil {
+	}, &diagnostics); err != nil {
 		// Keep a non-terminal tombstone. The same request may be retried, but
 		// a reused ID cannot replace it without a durable canonical response.
 		s.control.RetryDirectPermissionDelivery(rtID, requestID)
@@ -4411,17 +4785,42 @@ func (child *childRuntime) removeTurnWaiterLocked(wait chan struct{}) {
 
 // complete publishes terminal completion after the caller has finished all
 // teardown. It is safe for reservation rollback and a child goroutine to race.
-func (child *childRuntime) complete() {
+// The owning supervisor and the attested completion boundary are explicit
+// arguments (plan decision 8); runEnded/spawnRolledBack predictions run at the
+// caller boundary and the completionPublished transaction runs here.
+func (child *childRuntime) complete(s *Supervisor, boundary completionBoundary) {
 	child.doneOnce.Do(func() {
 		child.releaseTreeToken()
 		child.mu.Lock()
-		child.completed = true
-		// Safety net for paths that end the runtime without a turn-settle
-		// transition (e.g. an aborted start attempt); waiters report the
-		// terminal snapshot instead of blocking on a done channel race.
-		child.settleTurnLocked()
+		// Shadow: completionPublished predicts the published completion (and
+		// the parked-ending normalization) after the token release; the legacy
+		// completed write and settle call run in the closure.
+		pubCont, pubEff, pubErr := s.applyLifecycle(child, lifecycleSignal{
+			kind: signalCompletionPublished, class: child.lc.class, boundary: boundary,
+		}, func() legacyLifecycleWitness {
+			w := legacyLifecycleWitness{}
+			child.completed = true
+			// Safety net for paths that end the runtime without a turn-settle
+			// transition (e.g. an aborted start attempt); waiters report the
+			// terminal snapshot instead of blocking on a done channel race. A
+			// completion that was already published (CP repeat through doneOnce)
+			// settled at its first publication, so the repeat records no settle.
+			child.settleTurnLocked()
+			if child.lc.completion != completionPublished {
+				w.locked = append(w.locked, lifecycleEffect{kind: effectSettleTurnWaiters})
+			}
+			return w
+		})
 		child.mu.Unlock()
+		// done must close even when the shadow transaction is invalid: legacy
+		// behavior is preserved in shadow mode.
 		close(child.done)
+		if pubErr != nil {
+			s.reportLifecycleError(child, pubErr)
+		} else {
+			s.compareDeferredLifecycleEffects(child, pubEff, []lifecycleEffect{{kind: effectCloseDone}}, signalCompletionPublished)
+		}
+		_ = pubCont
 	})
 }
 
@@ -4552,8 +4951,18 @@ func (s *Supervisor) prepareChildPermissionClaim(ctx context.Context, child *chi
 func (s *Supervisor) beginChildShutdown(child *childRuntime) *permissionProviderLifecycle {
 	child.writeMu.Lock()
 	alreadyShuttingDown := child.shuttingDown
-	child.shuttingDown = true
 	child.mu.Lock()
+	// Shadow: shutdownRequested is a dedicated dual-locked signal (writeMu ->
+	// child.mu). The legacy flag write runs in the closure; the provider-cancel
+	// consideration and first-only parent cancel are witnessed at their outer
+	// execution sites below.
+	_, shutdownEff, shutdownErr := s.applyLifecycleWriteLocked(child, lifecycleSignal{
+		kind: signalShutdownRequested, class: child.lc.class,
+	}, func() legacyLifecycleWitness {
+		child.shuttingDown = true
+		return legacyLifecycleWitness{}
+	})
+	var shutdownWitness []lifecycleEffect
 	lifecycle := child.providerLifecycle
 	if child.provider != nil && (lifecycle == nil || lifecycle.provider != child.provider) {
 		lifecycle = newPermissionProviderLifecycle(child, child.provider, child.session.SessionID)
@@ -4579,8 +4988,18 @@ func (s *Supervisor) beginChildShutdown(child *childRuntime) *permissionProvider
 	if cancelProvider && turn != nil {
 		turn.RequestCancel(sessionID, directPermissionJoinTimeout)
 	}
+	// The provider-cancel consideration is reached on every shutdown request;
+	// whether a RequestCancel fires is legacy eligibility, not a lifecycle
+	// dimension.
+	shutdownWitness = append(shutdownWitness, lifecycleEffect{kind: effectConsiderProviderCancel})
 	if !alreadyShuttingDown && cancel != nil {
 		cancel()
+		shutdownWitness = append(shutdownWitness, lifecycleEffect{kind: effectCancelContext})
+	}
+	if shutdownErr != nil {
+		s.reportLifecycleError(child, shutdownErr)
+	} else {
+		s.compareDeferredLifecycleEffects(child, shutdownEff, shutdownWitness, signalShutdownRequested)
 	}
 	return lifecycle
 }
@@ -4740,7 +5159,15 @@ func (s *Supervisor) finishDirectPermissionAnswerLocked(child *childRuntime, res
 // admitted before teardown has written its canonical permission.response.
 func (s *Supervisor) closeChildEventWriter(child *childRuntime) {
 	child.writeMu.Lock()
-	child.writerClosing = true
+	// Shadow: writerCloseBegun is a dedicated dual-locked signal; the legacy
+	// writerClosing write runs in the closure.
+	_, _, begunErr := s.applyLifecycleWriteLocked(child, lifecycleSignal{
+		kind: signalWriterCloseBegun, class: child.lc.class,
+	}, func() legacyLifecycleWitness {
+		child.writerClosing = true
+		return legacyLifecycleWitness{}
+	})
+	var finishedErr error
 	if child.directAnswers > 0 {
 		done := child.directAnswersDone
 		if s.beforeChildWriterCloseWait != nil {
@@ -4752,9 +5179,23 @@ func (s *Supervisor) closeChildEventWriter(child *childRuntime) {
 	}
 	if !child.writerClosed && child.eventWriter != nil {
 		_ = child.eventWriter.Close()
-		child.writerClosed = true
+		// Shadow: writerCloseFinished is sent only after Close was actually
+		// called on a nonnil sink, regardless of Close's ignored error. No
+		// signal when the sink is nil (the caller's guard stays writerClosing).
+		_, _, finishedErr = s.applyLifecycleWriteLocked(child, lifecycleSignal{
+			kind: signalWriterCloseFinished, class: child.lc.class, closeCalled: true,
+		}, func() legacyLifecycleWitness {
+			child.writerClosed = true
+			return legacyLifecycleWitness{}
+		})
 	}
 	child.writeMu.Unlock()
+	if begunErr != nil {
+		s.reportLifecycleError(child, begunErr)
+	}
+	if finishedErr != nil {
+		s.reportLifecycleError(child, finishedErr)
+	}
 }
 
 // workflowEventMetadata returns event metadata threaded with workflow execution
@@ -4796,6 +5237,7 @@ func (s *Supervisor) fanoutWriterForChildLocked(child *childRuntime) *runtimeFan
 			base:            child.eventWriter,
 			runtimeID:       child.id,
 			child:           child,
+			supervisor:      s,
 			control:         s.control,
 			metadata:        cli.NewEventMetadata(s.runID, child.label, child.id),
 			onPermissionReq: s.cachePermissionOptions,
@@ -4805,9 +5247,12 @@ func (s *Supervisor) fanoutWriterForChildLocked(child *childRuntime) *runtimeFan
 }
 
 type runtimeFanoutWriter struct {
-	base            cli.EventSink
-	runtimeID       string
-	child           *childRuntime
+	base      cli.EventSink
+	runtimeID string
+	child     *childRuntime
+	// supervisor is the owner used for lifecycle shadow transactions; it must
+	// be nonnil whenever child is nonnil (plan decision 8).
+	supervisor      *Supervisor
 	control         *control.ControlServer
 	metadata        *cli.EventMetadata
 	onPermissionReq func(runtimeID, requestID string, options []any)
@@ -4820,17 +5265,42 @@ func (w *runtimeFanoutWriter) Write(ev events.Event) error {
 		if w.beforeWriteLock != nil {
 			w.beforeWriteLock()
 		}
-		w.child.writeMu.Lock()
-		defer w.child.writeMu.Unlock()
+		// The diagnostic slice lives in the outer scope and is reported after
+		// the locked helper unlocks, including on a sink panic (plan decision 8).
+		diagnostics := make([]error, 0, 2)
+		defer func() { reportLifecycleDiagnostics(w.supervisor, w.child, diagnostics) }()
+		err := w.writeHoldingWriteLock(ev, &diagnostics)
+		return err
 	}
-	return w.writeLocked(ev)
+	return w.writeLocked(ev, nil)
+}
+
+// writeHoldingWriteLock scopes the writeMu acquisition so it releases before
+// the outer owner reports diagnostics and returns the original IO error.
+func (w *runtimeFanoutWriter) writeHoldingWriteLock(ev events.Event, diagnostics *[]error) error {
+	w.child.writeMu.Lock()
+	defer w.child.writeMu.Unlock()
+	return w.writeLocked(ev, diagnostics)
+}
+
+// reportLifecycleDiagnostics reports collected lifecycle errors outside all
+// locks. It is idempotent per call site: callers report each slice once.
+func reportLifecycleDiagnostics(s *Supervisor, child *childRuntime, diagnostics []error) {
+	if s == nil {
+		return
+	}
+	for _, err := range diagnostics {
+		s.reportLifecycleError(child, err)
+	}
 }
 
 // writeLocked is the canonical event path for callers that already hold the
 // child write lock. In particular, a direct permission answer must mark the
 // old claim, clear its status, and publish its response as one ordered write
-// relative to a reused request ID.
-func (w *runtimeFanoutWriter) writeLocked(ev events.Event) error {
+// relative to a reused request ID. Lifecycle errors are appended to the
+// diagnostics slice before the event proceeds; publication is never suppressed
+// because of a lifecycle diagnostic.
+func (w *runtimeFanoutWriter) writeLocked(ev events.Event, diagnostics *[]error) error {
 	// stamped is the lossless durable event (written to file/broker);
 	// presentation is the bounded copy for control/status surfaces.
 	stamped := cli.StampFanoutEvent(ev, w.runtimeID, w.metadata, w.control)
@@ -4858,9 +5328,23 @@ func (w *runtimeFanoutWriter) writeLocked(ev events.Event) error {
 		switch presentation.Event {
 		case "agent.status":
 			if phase, _ := presentation.Fields["phase"].(string); phase != "" && w.child.phase != "done" {
-				w.child.phase = phase
-				if label, _ := presentation.Fields["label"].(string); label != "" {
-					w.child.phaseLabel = label
+				// Shadow: agentStatusObserved carries the snapshot (decision 6);
+				// the legacy presentation write is its mutation.
+				label, _ := presentation.Fields["label"].(string)
+				_, _, statusErr := w.supervisor.applyLifecycle(w.child, lifecycleSignal{
+					kind: signalAgentStatusObserved, class: w.child.lc.class,
+					phase: phase, label: label, presentationWasDone: w.child.phase == "done",
+				}, func() legacyLifecycleWitness {
+					wr := legacyLifecycleWitness{}
+					w.child.phase = phase
+					if label != "" {
+						w.child.phaseLabel = label
+					}
+					wr.locked = append(wr.locked, lifecycleEffect{kind: effectSetAgentPresentation, phase: phase, label: label})
+					return wr
+				})
+				if statusErr != nil && diagnostics != nil {
+					*diagnostics = append(*diagnostics, statusErr)
 				}
 			}
 		case "permission.request":
@@ -4892,9 +5376,27 @@ func (w *runtimeFanoutWriter) writeLocked(ev events.Event) error {
 			w.child.pendingPermission = false
 			w.child.permission = nil
 		case "session.end":
-			w.child.phase = "done"
-			if stopReason, _ := presentation.Fields["stop_reason"].(string); stopReason != "" {
-				w.child.lastStopReason = stopReason
+			stopReason, _ := presentation.Fields["stop_reason"].(string)
+			// Shadow: sessionEndObserved sets phase done and a nonempty stop
+			// reason; it does not settle an attempt (decision 6). The
+			// final-output data updates stay legacy-owned beside it.
+			_, _, endErr := w.supervisor.applyLifecycle(w.child, lifecycleSignal{
+				kind: signalSessionEndObserved, class: w.child.lc.class, stopReason: stopReason,
+			}, func() legacyLifecycleWitness {
+				wr := legacyLifecycleWitness{}
+				w.child.phase = "done"
+				if stopReason != "" {
+					w.child.lastStopReason = stopReason
+				}
+				end := lifecycleEffect{kind: effectSetSessionEndPresentation}
+				if stopReason != "" {
+					end.reason = stopReason
+				}
+				wr.locked = append(wr.locked, end)
+				return wr
+			})
+			if endErr != nil && diagnostics != nil {
+				*diagnostics = append(*diagnostics, endErr)
 			}
 			if finalOutput, _ := presentation.Fields["final_output"].(string); finalOutput != "" {
 				w.child.finalOutput = finalOutput

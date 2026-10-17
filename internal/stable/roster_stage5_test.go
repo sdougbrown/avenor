@@ -60,7 +60,7 @@ func TestStableWorkflowBackendPropagationAtProviderBoundary(t *testing.T) {
 				if err := os.WriteFile(configPath, []byte(contents), 0o600); err != nil {
 					t.Fatal(err)
 				}
-				sup := NewSupervisor(Config{ControlSocket: "/tmp/stage5-boundary-" + mode + "-" + supplied + ".sock", MaxRuntimes: 1})
+				sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/stage5-boundary-" + mode + "-" + supplied + ".sock", MaxRuntimes: 1})
 				want := supplied
 				if want == "" {
 					want = cli.DefaultBackend
@@ -96,7 +96,7 @@ func TestStableWorkflowBackendPropagationAtProviderBoundary(t *testing.T) {
 }
 
 func TestStableDirectRosterIdentityAndStatus(t *testing.T) {
-	sup := NewSupervisor(Config{ControlSocket: "/tmp/stage5-direct-roster.sock", MaxRuntimes: 1})
+	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/stage5-direct-roster.sock", MaxRuntimes: 1})
 	provider := scriptedStage5Provider("ses_roster", "end_turn")
 	var gotOpts runtime.StartOptions
 	var gotBackend string
@@ -162,7 +162,7 @@ func TestStableRosterPhasesReachProviderBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sup := NewSupervisor(Config{ControlSocket: "/tmp/stage5-phase-roster.sock", MaxRuntimes: 1})
+	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/stage5-phase-roster.sock", MaxRuntimes: 1})
 	var mu sync.Mutex
 	var backends []string
 	var options []runtime.StartOptions
@@ -214,7 +214,7 @@ func TestStableTeamRosterMembersUseDifferentBackends(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sup := NewSupervisor(Config{ControlSocket: "/tmp/stage5-team-roster.sock", MaxRuntimes: 2})
+	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/stage5-team-roster.sock", MaxRuntimes: 2})
 	var mu sync.Mutex
 	var backends []string
 	var options []runtime.StartOptions
@@ -258,7 +258,7 @@ func TestStableRosterMigratesInlineTeamIdentity(t *testing.T) {
 	if err := os.WriteFile(teamPath, []byte(`{"roster_file":"roster.json","team":[{"name":"review","prompt":"review","roster_entry":"review"}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	sup := NewSupervisor(Config{ControlSocket: "/tmp/stage5-migration.sock", MaxRuntimes: 1})
+	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/stage5-migration.sock", MaxRuntimes: 1})
 	var gotOpts runtime.StartOptions
 	var gotBackend string
 	sup.newProviderFunc = func(opts runtime.StartOptions, backend string) (runtime.Provider, error) {
@@ -290,7 +290,7 @@ func TestStableRosterThinkingValidatesBeforeProviderCreation(t *testing.T) {
 	if err := os.WriteFile(loopPath, []byte(`{"roster_file":"roster.json","pre":[{"name":"work","prompt":"work","roster_entry":"slow"}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	sup := NewSupervisor(Config{ControlSocket: "/tmp/stage5-thinking.sock", MaxRuntimes: 1})
+	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/stage5-thinking.sock", MaxRuntimes: 1})
 	called := false
 	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) {
 		called = true
@@ -319,7 +319,7 @@ func TestStableRosterRetryRetainsResolvedIdentity(t *testing.T) {
 	if err := os.WriteFile(loopPath, []byte(`{"roster_file":"roster.json","pre":[{"name":"work","prompt":"work","roster_entry":"retry"}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	sup := NewSupervisor(Config{ControlSocket: "/tmp/stage5-retry.sock", MaxRuntimes: 1})
+	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/stage5-retry.sock", MaxRuntimes: 1})
 	var mu sync.Mutex
 	var backends []string
 	var options []runtime.StartOptions
@@ -356,7 +356,7 @@ func TestStableRosterRetryRetainsResolvedIdentity(t *testing.T) {
 }
 
 func TestStableSessionIdentityAdoptionDoesNotStaleOverwrite(t *testing.T) {
-	sup := NewSupervisor(Config{ControlSocket: "/tmp/stage5-adoption-map.sock", MaxRuntimes: 1})
+	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/stage5-adoption-map.sock", MaxRuntimes: 1})
 	child := &childRuntime{
 		id:               "rt_map",
 		provider:         &stableFakeProvider{},
@@ -394,7 +394,7 @@ func TestStableSessionIdentityAdoptionDoesNotStaleOverwrite(t *testing.T) {
 }
 
 func TestStableFollowUpUsesAuthoritativeEffectiveIdentity(t *testing.T) {
-	sup := NewSupervisor(Config{ControlSocket: "/tmp/stage5-followup-map.sock", MaxRuntimes: 1})
+	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/stage5-followup-map.sock", MaxRuntimes: 1})
 	provider := &thinkingCaptureProvider{}
 	child := &childRuntime{
 		provider:         provider,

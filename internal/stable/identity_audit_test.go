@@ -14,7 +14,7 @@ import (
 )
 
 func TestSessionAttemptRejectsConcurrentProviderIDCollision(t *testing.T) {
-	sup := NewSupervisor(Config{ControlSocket: "/tmp/audit-session-collision.sock", MaxRuntimes: 1})
+	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/audit-session-collision.sock", MaxRuntimes: 1})
 	providers := []runtime.Provider{&stableFakeProvider{}, &stableFakeProvider{}}
 	identities := []effectiveIdentity{
 		{Backend: "pi", Agent: "first", Model: "model-first", AgentProfile: "cloud"},
@@ -61,7 +61,7 @@ func TestSessionAttemptRejectsConcurrentProviderIDCollision(t *testing.T) {
 }
 
 func TestSessionAttemptRejectsAuthoritativeIDCollision(t *testing.T) {
-	sup := NewSupervisor(Config{ControlSocket: "/tmp/audit-authoritative-collision.sock", MaxRuntimes: 1})
+	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/audit-authoritative-collision.sock", MaxRuntimes: 1})
 	firstProvider, secondProvider := &stableFakeProvider{}, &stableFakeProvider{}
 	firstIdentity := effectiveIdentity{Backend: "pi", Agent: "first", Model: "first-model"}
 	secondIdentity := effectiveIdentity{Backend: "agy", Agent: "second", Model: "second-model"}
@@ -109,7 +109,7 @@ func TestStableTeamAuthoritativeIDCollisionFailsWorkflowDeterministically(t *tes
 		events: deferredStartEndEvents("shared-authoritative", nil),
 	}
 	sentinelPath := filepath.Join(dir, "collision.done")
-	sup := NewSupervisor(Config{ControlSocket: "/tmp/audit-team-collision-e2e.sock", MaxRuntimes: 1})
+	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/audit-team-collision-e2e.sock", MaxRuntimes: 1})
 	sup.newProviderFunc = func(opts runtime.StartOptions, _ string) (runtime.Provider, error) {
 		if opts.Agent == "first" {
 			return first, nil
@@ -176,7 +176,7 @@ func TestStableParallelTeamAdoptionUsesPerAttemptOwnership(t *testing.T) {
 		events: deferredGatedEvents("authoritative-second", secondStart, secondEnd),
 	}
 	providersStarted := make(chan struct{}, 2)
-	sup := NewSupervisor(Config{ControlSocket: "/tmp/audit-team-interleave.sock", MaxRuntimes: 1})
+	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/audit-team-interleave.sock", MaxRuntimes: 1})
 	sup.newProviderFunc = func(opts runtime.StartOptions, _ string) (runtime.Provider, error) {
 		providersStarted <- struct{}{}
 		if opts.Agent == "first" {
@@ -264,7 +264,7 @@ func TestStableWorkflowRejectsSameBackendIdentityChangeOnResume(t *testing.T) {
 	]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	sup := NewSupervisor(Config{ControlSocket: "/tmp/audit-workflow-resume-conflict.sock", MaxRuntimes: 1})
+	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/audit-workflow-resume-conflict.sock", MaxRuntimes: 1})
 	var mu sync.Mutex
 	providerCalls := 0
 	sup.newProviderFunc = func(_ runtime.StartOptions, _ string) (runtime.Provider, error) {
@@ -321,7 +321,7 @@ func TestStableFailedTeamFinalizesIdentityBeforeErrorReturn(t *testing.T) {
 		t.Fatal(err)
 	}
 	sentinelPath := filepath.Join(dir, "team-error.done")
-	sup := NewSupervisor(Config{ControlSocket: "/tmp/audit-team-error-finalize.sock", MaxRuntimes: 1})
+	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/audit-team-error-finalize.sock", MaxRuntimes: 1})
 	var calls int
 	sup.newProviderFunc = func(_ runtime.StartOptions, _ string) (runtime.Provider, error) {
 		calls++
@@ -357,7 +357,7 @@ func TestStableFailedTeamFinalizesIdentityBeforeErrorReturn(t *testing.T) {
 }
 
 func TestStableDirectResumeRestoresCompleteAuthoritativeIdentity(t *testing.T) {
-	sup := NewSupervisor(Config{ControlSocket: "/tmp/audit-resume-restore.sock", MaxRuntimes: 1})
+	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/audit-resume-restore.sock", MaxRuntimes: 1})
 	mapped := effectiveIdentity{
 		Backend: "pi", Agent: "mapped-agent", Model: "mapped-model", AgentProfile: "cloud",
 		RosterFile: "/repo/original-roster.json", RosterEntry: "planner",
@@ -406,7 +406,7 @@ func TestStableDirectResumeRestoresCompleteAuthoritativeIdentity(t *testing.T) {
 func TestStableResumeRejectsChangedRosterWithoutOverwritingMapping(t *testing.T) {
 	dir := t.TempDir()
 	rosterPath := writeStage5Roster(t, dir, `{"planner":{"backend":"pi","agent":"changed","model":"changed-model"}}`)
-	sup := NewSupervisor(Config{ControlSocket: "/tmp/audit-resume-roster.sock", MaxRuntimes: 1})
+	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/audit-resume-roster.sock", MaxRuntimes: 1})
 	mapped := effectiveIdentity{
 		Backend: "pi", Agent: "original", Model: "original-model", AgentProfile: "cloud",
 		RosterFile: rosterPath, RosterEntry: "planner",
@@ -458,7 +458,7 @@ func testStableCompletedWorkflowRetainsFinalRosterIdentity(t *testing.T, mode st
 	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	sup := NewSupervisor(Config{ControlSocket: "/tmp/audit-final-" + mode + ".sock", MaxRuntimes: 1})
+	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/audit-final-" + mode + ".sock", MaxRuntimes: 1})
 	var mu sync.Mutex
 	sequence := 0
 	sup.newProviderFunc = func(_ runtime.StartOptions, _ string) (runtime.Provider, error) {

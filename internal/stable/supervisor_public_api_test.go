@@ -182,7 +182,7 @@ func newItestHarness(t *testing.T, cfg Config, factory func(runtime.StartOptions
 	if cfg.MaxRuntimes == 0 {
 		cfg.MaxRuntimes = 10
 	}
-	sup := NewSupervisor(cfg)
+	sup := newTestSupervisor(t, cfg)
 	sup.newProviderFunc = factory
 	if err := sup.control.Start(cfg.ControlSocket); err != nil {
 		t.Fatalf("start control server: %v", err)

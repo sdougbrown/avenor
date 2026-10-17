@@ -93,7 +93,7 @@ func (p *waitTurnTestProvider) Capabilities(context.Context) (runtime.Capabiliti
 func startWaitTurnSupervisor(t *testing.T, provider *waitTurnTestProvider) (*client.Client, *Supervisor) {
 	t.Helper()
 	socketPath := filepath.Join(t.TempDir(), "ctrl.sock")
-	sup := NewSupervisor(Config{ControlSocket: socketPath, MaxRuntimes: 10})
+	sup := newTestSupervisor(t, Config{ControlSocket: socketPath, MaxRuntimes: 10})
 	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) {
 		return provider, nil
 	}

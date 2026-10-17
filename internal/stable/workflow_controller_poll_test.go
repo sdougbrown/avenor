@@ -128,7 +128,7 @@ func newPollFixtureWithTemplate(t *testing.T, name string, manifests map[string]
 	if _, err := workflowcontroller.LoadAdapterRegistry(adapterDir); err != nil {
 		t.Fatalf("adapter registry load from %s: %v", adapterDir, err)
 	}
-	sup := NewSupervisor(Config{
+	sup := newTestSupervisor(t, Config{
 		ControlSocket:      newStableSocketPath(t, name),
 		WorkflowRoot:       root,
 		WorkflowAdapterDir: adapterDir,
@@ -944,7 +944,7 @@ func TestStartupSweepRemovesOrphanedStagingFilesOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sup := NewSupervisor(Config{
+	sup := newTestSupervisor(t, Config{
 		ControlSocket: newStableSocketPath(t, "poll-sweep"),
 		WorkflowRoot:  root,
 	})

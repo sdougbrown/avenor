@@ -1,0 +1,284 @@
+package stable
+
+// Stage 2 test lifecycle helpers (issue #316, plan decision 8 and the
+// standard gate). Every fixture that drives a lifecycle transition initializes
+// its synthetic child explicitly — options declare the lifecycle state,
+// attempt class and presentation data, never "derive from flags" — and every
+// supervisor-owning test registers the post-teardown counter assertion that
+// waits for owned child completion before asserting both lifecycle counters
+// are zero.
+
+import (
+	"testing"
+	"time"
+)
+
+// testLifecycleOptions declares the explicit lifecycle initialization for a
+// synthetic test child. The legacy mirrors are derived from these declared
+// values once, before publication or concurrent use; later mutations use
+// signals or field commits under the required locks.
+type testLifecycleOptions struct {
+	id             string
+	exec           execState
+	attempts       int
+	completion     completionStage
+	shutdown       shutdownStage
+	writer         writerStage
+	class          attemptClass
+	phase          string
+	phaseLabel     string
+	exitCode       int
+	lastStopReason string
+}
+
+// initializeTestLifecycle explicitly initializes a synthetic child's lifecycle
+// and its legacy mirrors. Whole-state initialization is allowed only for a
+// new, unpublished child with no concurrent users (plan decision 7); the
+// invariant check keeps test declarations honest.
+func initializeTestLifecycle(t testing.TB, child *childRuntime, opts testLifecycleOptions) {
+	t.Helper()
+	if child.done == nil {
+		// Fixture setup: a synthetic child always needs a completable done
+		// channel so cleanup can join it.
+		child.done = make(chan struct{})
+	}
+	class := opts.class
+	if class == directAttemptClass && opts.attempts > 1 {
+		t.Fatalf("test child %s: direct attempt class cannot carry %d attempts", child.id, opts.attempts)
+	}
+	st := lifecycleState{
+		exec:       opts.exec,
+		attempts:   opts.attempts,
+		shutdown:   opts.shutdown,
+		writer:     opts.writer,
+		completion: opts.completion,
+		class:      class,
+	}
+	if err := validateLifecycleState(st); err != nil {
+		t.Fatalf("test child %s: invalid declared lifecycle state: %v", child.id, err)
+	}
+	child.lc = st
+	// Legacy mirrors, written once to match the declared state exactly.
+	child.active = opts.attempts > 0
+	if class == workflowAttemptClass {
+		child.activeAttempts = opts.attempts
+	} else {
+		child.activeAttempts = 0
+	}
+	child.parked = opts.exec == execParked || opts.exec == execParkedEnding
+	child.completed = opts.completion != completionOpen
+	child.shuttingDown = opts.shutdown == shutdownRequested
+	child.writerClosing = opts.writer == writerClosing || opts.writer == writerClosed
+	child.writerClosed = opts.writer == writerClosed
+	child.phase = opts.phase
+	child.phaseLabel = opts.phaseLabel
+	child.exitCode = opts.exitCode
+	child.lastStopReason = opts.lastStopReason
+}
+
+// newTestChildLifecycle constructs a synthetic child with an explicitly
+// initialized lifecycle and registers the owned-child cleanup tracking
+// required by the standard gate: the cleanup waits for the child's done
+// channel and asserts the supervisor's lifecycle counters are zero after
+// teardown.
+func newTestChildLifecycle(t *testing.T, sup *Supervisor, opts testLifecycleOptions) *childRuntime {
+	t.Helper()
+	if sup == nil {
+		t.Fatal("newTestChildLifecycle requires an explicit owning supervisor")
+	}
+	child := &childRuntime{
+		id:       opts.id,
+		done:     make(chan struct{}),
+		promptCh: make(chan struct{}, 1),
+	}
+	initializeTestLifecycle(t, child, opts)
+	trackTestChildCompletion(t, sup, child)
+	return child
+}
+
+// trackTestChildCompletion registers the owned-child cleanup tracking for a
+// child constructed elsewhere: wait for its done channel, then assert the
+// supervisor's lifecycle counters are zero.
+func trackTestChildCompletion(t *testing.T, sup *Supervisor, child *childRuntime) {
+	t.Helper()
+	t.Cleanup(func() {
+		select {
+		case <-child.done:
+		case <-time.After(5 * time.Second):
+			t.Errorf("lifecycle cleanup: child %s done channel still open after teardown", child.id)
+		}
+		assertNoLifecycleDivergence(t, sup)
+	})
+}
+
+// newLifecycleTestOwner returns an explicit bare Supervisor owner for
+// synthetic fixtures that drive lifecycle transitions without a full
+// supervisor. It is nonnil by construction: there is no nil-owner fallback
+// (plan decision 8).
+func newLifecycleTestOwner() *Supervisor {
+	return &Supervisor{}
+}
+
+// assertNoLifecycleDivergence asserts that the supervisor recorded zero
+// illegal transitions and zero shadow mismatches.
+func assertNoLifecycleDivergence(t testing.TB, sup *Supervisor) {
+	t.Helper()
+	if errs := sup.lifecycleErrors.Load(); errs != 0 {
+		t.Errorf("lifecycleErrors = %d, want 0", errs)
+	}
+	if mismatches := sup.lifecycleShadowMismatches.Load(); mismatches != 0 {
+		t.Errorf("lifecycleShadowMismatches = %d, want 0", mismatches)
+	}
+}
+
+// assertSupervisorLifecycleClean waits for every child completion channel
+// currently owned by the supervisor and then asserts both lifecycle counters
+// are zero. It must run after the test's teardown actions (shutdown, control
+// stop, cancel, joins), never before them. Children deleted from the registry
+// before completion (spawn rollback) complete inside the rollback path, so
+// their counters still land here.
+func assertSupervisorLifecycleClean(t *testing.T, sup *Supervisor) {
+	t.Helper()
+	sup.controlMu.Lock()
+	children := make([]*childRuntime, 0, len(sup.runtimes))
+	for _, c := range sup.runtimes {
+		children = append(children, c)
+	}
+	sup.controlMu.Unlock()
+	for _, c := range children {
+		select {
+		case <-c.done:
+		case <-time.After(5 * time.Second):
+			t.Errorf("lifecycle cleanup: child %s done channel still open after teardown", c.id)
+		}
+	}
+	assertNoLifecycleDivergence(t, sup)
+}
+
+// newTestSupervisor is the explicit owner constructor for tests: it registers
+// the post-teardown lifecycle assertion as a cleanup that runs after the
+// test's own deferred teardown actions. The cleanup stops admission by
+// cancelling every owned runtime, waits for all child completion channels and
+// joins, then asserts both counters are zero (plan standard gate).
+func newTestSupervisor(t *testing.T, cfg Config) *Supervisor {
+	t.Helper()
+	sup := NewSupervisor(cfg)
+	t.Cleanup(func() {
+		stopAllTestRuntimes(sup)
+		assertSupervisorLifecycleClean(t, sup)
+	})
+	return sup
+}
+
+// stopAllTestRuntimes cancels every runtime the supervisor still owns so
+// teardown-driven children complete before the lifecycle counter assertion.
+// Cancellation is idempotent for already-ended children.
+func stopAllTestRuntimes(sup *Supervisor) {
+	sup.controlMu.Lock()
+	ids := make([]string, 0, len(sup.runtimes))
+	for id := range sup.runtimes {
+		ids = append(ids, id)
+	}
+	sup.controlMu.Unlock()
+	for _, id := range ids {
+		_ = sup.cancelRuntime(id)
+	}
+}
+
+// finishSyntheticRunChild finishes a synthetic child's modeled lifecycle at
+// the afterRunTeardown boundary: it closes the child's event writer through
+// the owning supervisor (writerCloseBegun/Finished), then sends runEnded and
+// completes with afterRunTeardown. It must not re-enter beginChildShutdown:
+// the caller's cancel/shutdown action already established the shutdown
+// boundary (plan Stage 2 change 2).
+func finishSyntheticRunChild(s *Supervisor, child *childRuntime) {
+	s.closeChildEventWriter(child)
+	child.mu.Lock()
+	_, eff, err := s.applyLifecycle(child, lifecycleSignal{
+		kind: signalRunEnded, class: child.lc.class, boundary: afterRunTeardown,
+	}, nil)
+	child.mu.Unlock()
+	if err != nil {
+		s.reportLifecycleError(child, err)
+	} else {
+		s.compareDeferredLifecycleEffects(child, eff, []lifecycleEffect{{kind: effectPublishCompletion, boundary: afterRunTeardown}}, signalRunEnded)
+	}
+	child.complete(s, afterRunTeardown)
+}
+
+// finishSyntheticChildLifecycle explicitly finishes the modeled lifecycle of a
+// park-wait-only synthetic fixture (no run goroutine): shutdown boundary,
+// writer close, runEnded and publication with the afterRunTeardown boundary.
+func finishSyntheticChildLifecycle(s *Supervisor, child *childRuntime) {
+	s.beginChildShutdown(child)
+	finishSyntheticRunChild(s, child)
+}
+
+// finishSyntheticRollback finishes a reserved synthetic child through the
+// spawn-rollback boundary: spawnRolledBack then publication with
+// afterSpawnRollback (plan Stage 2 change 2, idempotency tombstone).
+func finishSyntheticRollback(s *Supervisor, child *childRuntime) {
+	child.mu.Lock()
+	_, eff, err := s.applyLifecycle(child, lifecycleSignal{
+		kind: signalSpawnRolledBack, class: child.lc.class, boundary: afterSpawnRollback,
+	}, nil)
+	child.mu.Unlock()
+	if err != nil {
+		s.reportLifecycleError(child, err)
+	} else {
+		s.compareDeferredLifecycleEffects(child, eff, []lifecycleEffect{{kind: effectPublishCompletion, boundary: afterSpawnRollback}}, signalSpawnRolledBack)
+	}
+	child.complete(s, afterSpawnRollback)
+}
+
+// finishUnrunChildAtCleanup registers an explicit modeled-lifecycle finish for
+// a synthetic child driven only through private entry points (such as
+// runChildAttempt) that never execute the production teardown defer. The
+// finish runs after the test's assertions but before the completion tracking
+// cleanup that waits on done.
+func finishUnrunChildAtCleanup(t *testing.T, sup *Supervisor, child *childRuntime) {
+	t.Helper()
+	t.Cleanup(func() {
+		child.mu.Lock()
+		active := child.active
+		child.mu.Unlock()
+		if active {
+			finishActiveSyntheticChild(sup, child)
+			return
+		}
+		finishSyntheticChildLifecycle(sup, child)
+	})
+}
+
+// finishActiveSyntheticChild finishes the modeled lifecycle of an active
+// status fixture (legacy active=true, machine attempts=1, no run goroutine):
+// it settles the modeled attempt, then establishes the shutdown boundary,
+// closes the writer and publishes completion.
+func finishActiveSyntheticChild(s *Supervisor, child *childRuntime) {
+	child.mu.Lock()
+	_, _, err := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptSettled, class: child.lc.class}, func() legacyLifecycleWitness {
+		w := legacyLifecycleWitness{}
+		child.active = false
+		child.phase = ""
+		child.phaseLabel = ""
+		w.locked = append(w.locked, lifecycleEffect{kind: effectClearPresentation}, lifecycleEffect{kind: effectSettleTurnWaiters})
+		child.settleTurnLocked()
+		return w
+	})
+	child.mu.Unlock()
+	if err != nil {
+		s.reportLifecycleError(child, err)
+	}
+	s.beginChildShutdown(child)
+	finishSyntheticRunChild(s, child)
+}
+
+// initializeCompletedTestChild declares a fully published synthetic child
+// (execEnded/completionPublished) and closes its done channel as the explicit
+// teardown setup; a completed tombstone has no run goroutine to complete it.
+func initializeCompletedTestChild(t *testing.T, sup *Supervisor, child *childRuntime) {
+	t.Helper()
+	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execEnded, completion: completionPublished, class: directAttemptClass})
+	close(child.done)
+	trackTestChildCompletion(t, sup, child)
+}

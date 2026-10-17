@@ -16,7 +16,7 @@ func TestStableSpawnThreadsLaunchWrapperToProvider(t *testing.T) {
 		events: deferredStartEndEvents("wrap-session", nil),
 	}
 	var got runtime.StartOptions
-	sup := NewSupervisor(Config{ControlSocket: "/tmp/launch-wrapper-thread.sock", MaxRuntimes: 1})
+	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/launch-wrapper-thread.sock", MaxRuntimes: 1})
 	sup.newProviderFunc = func(startOpts runtime.StartOptions, _ string) (runtime.Provider, error) {
 		got = startOpts
 		return provider, nil
@@ -30,7 +30,7 @@ func TestStableSpawnThreadsLaunchWrapperToProvider(t *testing.T) {
 }
 
 func TestStableSpawnRejectsEmptyLaunchWrapperElement(t *testing.T) {
-	sup := NewSupervisor(Config{ControlSocket: "/tmp/launch-wrapper-empty.sock", MaxRuntimes: 1})
+	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/launch-wrapper-empty.sock", MaxRuntimes: 1})
 	_, err := sup.spawn(SpawnParams{Prompt: "work", Dir: ".", LaunchWrapper: []string{"nice", ""}})
 	if err == nil {
 		t.Fatal("spawn with an empty launch wrapper element succeeded, want error")

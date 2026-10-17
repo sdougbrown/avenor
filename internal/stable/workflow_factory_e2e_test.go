@@ -405,7 +405,7 @@ func newFactoryE2E(t *testing.T, name string, maxInflight int, worktree string, 
 			t.Fatalf("adapter registry missing %s", wantID)
 		}
 	}
-	sup := NewSupervisor(Config{
+	sup := newTestSupervisor(t, Config{
 		ControlSocket:      newStableSocketPath(t, name),
 		WorkflowRoot:       root,
 		WorkflowAdapterDir: adapterDir,
@@ -1400,7 +1400,7 @@ func TestFactoryWorkRecoveryOnFreshSupervisor(t *testing.T) {
 	// A fresh supervisor recovers the same root and adapter registry. Its
 	// provider factory only counts: any auto re-dispatch after recovery
 	// would show up here and fail the no-duplicate-dispatch assertion.
-	sup2 := NewSupervisor(Config{
+	sup2 := newTestSupervisor(t, Config{
 		ControlSocket:      newStableSocketPath(t, "factory-e2e-recover-2"),
 		WorkflowRoot:       f.root,
 		WorkflowAdapterDir: f.adapterDir,

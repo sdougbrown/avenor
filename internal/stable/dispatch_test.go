@@ -120,7 +120,7 @@ func newDispatchFixtureTTL(t *testing.T, name string, maxRuntimes, maxTreeBudget
 // template instead of the default auto run template.
 func newDispatchFixtureTemplate(t *testing.T, name string, maxRuntimes, maxTreeBudget int, template []byte) *dispatchFixture {
 	t.Helper()
-	sup := NewSupervisor(Config{
+	sup := newTestSupervisor(t, Config{
 		ControlSocket:   newStableSocketPath(t, name),
 		MaxRuntimes:     maxRuntimes,
 		MaxTreeBudget:   maxTreeBudget,
@@ -462,7 +462,7 @@ func TestDispatchKeyHeldAcrossControllersAndManual(t *testing.T) {
 
 	// A second supervisor on the same root (separate store handle, like a
 	// separate process) must see the key as held.
-	sup2 := NewSupervisor(Config{
+	sup2 := newTestSupervisor(t, Config{
 		ControlSocket:   newStableSocketPath(t, "dispatch-key-2"),
 		MaxRuntimes:     4,
 		MaxTreeBudget:   4,
@@ -845,7 +845,7 @@ func TestResolveAssignmentSelectionRosterFileOnlyRejected(t *testing.T) {
 // resolves every request as allow, a permission decider routes requests to a
 // judging agent — and the guard must fire before any provider work happens.
 func TestSpawnRejectsAutoApproveWithPermissionDecider(t *testing.T) {
-	sup := NewSupervisor(Config{
+	sup := newTestSupervisor(t, Config{
 		ControlSocket: "/tmp/test-permdec-exclusive.sock",
 		MaxRuntimes:   1,
 	})
@@ -1468,7 +1468,7 @@ func TestReservationDegradedLocalOnlyMode(t *testing.T) {
 	t.Setenv("HOME", unwritable)
 	var sup *Supervisor
 	stderr := captureStderr(t, func(stderr io.Writer) {
-		sup = NewSupervisor(Config{
+		sup = newTestSupervisor(t, Config{
 			ControlSocket:   filepath.Join(t.TempDir(), "control.sock"),
 			MaxRuntimes:     2,
 			MaxTreeBudget:   8,
@@ -1507,7 +1507,7 @@ func TestReservationDegradedLocalOnlyMode(t *testing.T) {
 // TestReservationHoldsLocalSlotAgainstSpawn proves outstanding reservations
 // count against the local limit.
 func TestReservationHoldsLocalSlotAgainstSpawn(t *testing.T) {
-	sup := NewSupervisor(Config{
+	sup := newTestSupervisor(t, Config{
 		ControlSocket:   newStableSocketPath(t, "dispatch-hold"),
 		MaxRuntimes:     1,
 		MaxTreeBudget:   4,
@@ -1532,7 +1532,7 @@ func TestReservationHoldsLocalSlotAgainstSpawn(t *testing.T) {
 // TestSpawnConsumesReservationOnSuccess proves the ordinary spawn path
 // converts its reservation into the registered runtime (tree token included).
 func TestSpawnConsumesReservationOnSuccess(t *testing.T) {
-	sup := NewSupervisor(Config{
+	sup := newTestSupervisor(t, Config{
 		ControlSocket:   newStableSocketPath(t, "dispatch-spawn-convert"),
 		MaxRuntimes:     2,
 		MaxTreeBudget:   2,
@@ -2346,7 +2346,7 @@ func TestSpawnModelDeciderRequiresResolvableKey(t *testing.T) {
 	writeProviderRegistry(t, `{
 		"providers": {"groq": {"base_url": "http://model.example/openai/v1", "api_key_env": "MODEL_DECIDER_TEST_UNSET_KEY"}}
 	}`)
-	sup := NewSupervisor(Config{
+	sup := newTestSupervisor(t, Config{
 		ControlSocket: newStableSocketPath(t, "modeldec-nokey"),
 		MaxRuntimes:   1,
 	})

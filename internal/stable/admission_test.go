@@ -59,7 +59,7 @@ func (s *Supervisor) treeBudgetStatusValues() (active, capacity int, rootID stri
 func newBlockingScriptedSupervisor(t *testing.T, maxRuntimes, maxTreeBudget int) (*Supervisor, chan struct{}, func()) {
 	t.Helper()
 	socket := newStableSocketPath(t, "admission-block")
-	sup := NewSupervisor(Config{
+	sup := newTestSupervisor(t, Config{
 		ControlSocket:   socket,
 		MaxRuntimes:     maxRuntimes,
 		MaxTreeBudget:   maxTreeBudget,
@@ -76,6 +76,10 @@ func newBlockingScriptedSupervisor(t *testing.T, maxRuntimes, maxTreeBudget int)
 	}
 	t.Cleanup(func() {
 		safeClose()
+		// Release unblocks the in-flight turns; children then park with done
+		// still open. Shut the supervisor down so every owned child completes
+		// before the lifecycle counter assertion runs.
+		_ = sup.Shutdown("kill")
 		_ = sup.broker.Stop()
 		sup.stopReaper()
 	})
@@ -206,7 +210,7 @@ func TestSpawnTreeBudgetAcquiresAndReleasesOnPark(t *testing.T) {
 
 func TestSpawnReleaseOnStartupFailure(t *testing.T) {
 	socket := newStableSocketPath(t, "admission-fail")
-	sup := NewSupervisor(Config{
+	sup := newTestSupervisor(t, Config{
 		ControlSocket: socket,
 		MaxRuntimes:   4,
 		MaxTreeBudget: 8,
@@ -234,7 +238,7 @@ func TestSpawnReleaseOnStartupFailure(t *testing.T) {
 
 func TestSpawnReleaseOnLoopFileFailure(t *testing.T) {
 	socket := newStableSocketPath(t, "admission-loop-fail")
-	sup := NewSupervisor(Config{
+	sup := newTestSupervisor(t, Config{
 		ControlSocket: socket,
 		MaxRuntimes:   4,
 		MaxTreeBudget: 8,
@@ -390,7 +394,7 @@ func TestNestedSupervisorSharesTreeBudget(t *testing.T) {
 	waitTreeActive(t, root, 2)
 
 	// Nested supervisor opens the root's budget file.
-	nested := NewSupervisor(Config{
+	nested := newTestSupervisor(t, Config{
 		ControlSocket:   newStableSocketPath(t, "nested"),
 		MaxRuntimes:     8,
 		TreeBudgetFile:  root.TreeBudgetPath(),
@@ -527,7 +531,7 @@ func TestDegradedModeNoBudgetStillEnforcesLocal(t *testing.T) {
 	t.Setenv("HOME", unwritable)
 	var sup *Supervisor
 	stderr := captureStderr(t, func(stderr io.Writer) {
-		sup = NewSupervisor(Config{
+		sup = newTestSupervisor(t, Config{
 			ControlSocket:   filepath.Join(t.TempDir(), "control.sock"),
 			MaxRuntimes:     1,
 			MaxTreeBudget:   8,
@@ -583,7 +587,7 @@ func TestInheritedBudgetFailureReportsDegradedMode(t *testing.T) {
 	socket := newStableSocketPath(t, "degraded-tree-budget")
 	var sup *Supervisor
 	stderr := captureStderr(t, func(stderr io.Writer) {
-		sup = NewSupervisor(Config{
+		sup = newTestSupervisor(t, Config{
 			ControlSocket:  socket,
 			MaxRuntimes:    1,
 			TreeBudgetFile: filepath.Join(t.TempDir(), "missing.tree-budget"),
@@ -640,7 +644,7 @@ func TestParkedRuntimeReacquiresOnResume(t *testing.T) {
 		},
 	}
 
-	sup := NewSupervisor(Config{
+	sup := newTestSupervisor(t, Config{
 		ControlSocket:   newStableSocketPath(t, "park-resume"),
 		MaxRuntimes:     2,
 		MaxTreeBudget:   1,

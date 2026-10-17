@@ -23,7 +23,7 @@ func TestStableLoopAndTeamInheritLaunchWrapper(t *testing.T) {
 			if err := os.WriteFile(configPath, []byte(contents), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			sup := NewSupervisor(Config{ControlSocket: "/tmp/launch-wrapper-inherit-" + mode + ".sock", MaxRuntimes: 1})
+			sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/launch-wrapper-inherit-" + mode + ".sock", MaxRuntimes: 1})
 			var got []string
 			sup.newProviderFunc = func(startOpts runtime.StartOptions, _ string) (runtime.Provider, error) {
 				got = startOpts.LaunchWrapper

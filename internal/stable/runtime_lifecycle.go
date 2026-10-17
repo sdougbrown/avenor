@@ -140,9 +140,12 @@ type lifecycleState struct {
 	// attemptOutcome sets it to the probe it selects and the matching
 	// promptContinuation clears it. It is an internal guard dimension, not a
 	// lifecycle predicate: validateLifecycleState requires a pending probe to
-	// sit in S/I with open completion, and the signals that prepare, start or
-	// park a new attempt are rejected while it is set, so no attempt lifecycle
-	// interleaves with the protocol (inventory amendments 5 and 8).
+	// sit in S/I with open completion, and the signals blocked while it is set
+	// are exactly signalAttemptPreparing, signalAttemptStarted,
+	// signalParkRequested and signalIdleContextEnded (the signals that would
+	// prepare, start or park a new attempt, plus the idle-context end), so no
+	// attempt lifecycle interleaves with the protocol (inventory amendments
+	// 5, 8 and 10).
 	pendingProbe probeKind
 }
 
@@ -258,6 +261,14 @@ type lifecycleSignal struct {
 	// terminal probe after the exit code is recorded and unlocked;
 	// resumeContextErr is sampled only after an actual dequeue; the retry
 	// probe dequeues before checking context (decision 5).
+	//
+	// The retry probe's idle-context decision uses a single context sample:
+	// the legacy code reads ctx.Err() once after the dequeue attempt
+	// (supervisor.go ~2315-2319), so a consumed prompt with a dead context is
+	// an idle-context end, and an empty queue with a dead context is one too.
+	// resumeContextErr and idleContextErr therefore describe the same single
+	// sample; the caller must not resample between the dequeue and the
+	// idle-end decision.
 	probeKind          probeKind
 	promptConsumed     bool // an actual successful dequeue, not queue nonemptiness
 	terminalContextErr error
@@ -819,6 +830,11 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 		// repeats carry no effects; the first transition emits publication at
 		// the afterRunTeardown boundary. Panic recovery runs through this
 		// boundary too.
+		//
+		// runEnded deliberately does not read the writer dimension: unlike
+		// completionPublished, publication readiness is attested at the
+		// completionPublished transaction, not here, and a rollback child
+		// publishes with the writer still open.
 		if st.completion != completionOpen && st.completion != completionAdmissionClosed {
 			return st, cont, nil, fmt.Errorf("lifecycle: run ended after completion %d", st.completion)
 		}
@@ -843,8 +859,11 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 		// the publication cue but leaves the child in V/S: a rollback child is
 		// only ever reserved or starting with completion open when complete
 		// runs (supervisor.go:1475-1480), so the publication itself ends it.
-		// Repeats re-emit the cue with the state unchanged; double publication
-		// is guarded by the completionPublished CP repeat (doneOnce).
+		// Repeats re-emit the cue only while the child is still unpublished
+		// (V/S with completion open, i.e. before the publication ran). Once the
+		// publication has moved the child to completionPublished, the
+		// completion guard below rejects any further spawnRolledBack: a
+		// post-publication repeat is not a state-preserving no-op.
 		if st.completion != completionOpen {
 			return st, cont, nil, fmt.Errorf("lifecycle: spawn rolled back after completion %d", st.completion)
 		}
@@ -923,7 +942,13 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 		}
 		// afterRunTeardown: source E/PE, C0/CA; requires a requested shutdown
 		// and a closing (or closed) writer — writer closing is sufficient when
-		// the sink is nil and writerClosed is never fabricated.
+		// the sink is nil and writerClosed is never fabricated. These
+		// preconditions are intentionally stricter than complete() itself:
+		// all three teardown defers (runChild, runLoopChild, runTeamChild)
+		// order beginChildShutdown and closeChildEventWriter before complete,
+		// so every afterRunTeardown publication satisfies them. Do not loosen
+		// them toward complete(); the afterSpawnRollback branch above is the
+		// only writer-open/shutdown-none exception.
 		switch st.exec {
 		case execEnded, execParkedEnding:
 		default:
