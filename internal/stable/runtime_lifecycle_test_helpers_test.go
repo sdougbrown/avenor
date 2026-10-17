@@ -29,8 +29,10 @@ type testLifecycleOptions struct {
 }
 
 // initializeTestLifecycle explicitly initializes a synthetic child's lifecycle.
-// Whole-state initialization is allowed only for a new, unpublished child with
-// no concurrent users; the invariant check keeps test declarations honest.
+// Fixtures declare the starting state and its attempt class here instead of
+// relying on zero values. Whole-state initialization is allowed only for a
+// new, unpublished child with no concurrent users; the invariant check keeps
+// test declarations honest.
 func initializeTestLifecycle(t testing.TB, child *childRuntime, opts testLifecycleOptions) {
 	t.Helper()
 	if child.done == nil {

@@ -27,11 +27,18 @@ import (
 	"github.com/sdougbrown/avenor/internal/cli"
 )
 
+// spawnIsWorkflow reports whether a spawn runs a loop or team workflow
+// rather than a direct child: either workflow file is set. Runner dispatch
+// and the machine's attempt class share this predicate.
+func spawnIsWorkflow(params SpawnParams) bool {
+	return params.LoopFile != "" || params.TeamFile != ""
+}
+
 // childAttemptClass selects the immutable attempt class for a spawn: workflow
-// class when either LoopFile or TeamFile is nonempty, otherwise direct.
-// Workflow-direct runs still use the direct class.
+// class for a workflow spawn, otherwise direct. Workflow-direct runs still
+// use the direct class.
 func childAttemptClass(params SpawnParams) attemptClass {
-	if params.LoopFile != "" || params.TeamFile != "" {
+	if spawnIsWorkflow(params) {
 		return workflowAttemptClass
 	}
 	return directAttemptClass
@@ -134,13 +141,6 @@ func (s *Supervisor) transactLifecycle(child *childRuntime, sig lifecycleSignal,
 		// A test can therefore drive the fault fail-safe at a chosen site.
 		err = fmt.Errorf("lifecycle: injected transition failure for signal %d (%s)", sig.kind, signalKindName(sig.kind))
 		cont = continuation{contNone}
-	}
-	if !dualLocked && err == nil && (predicted.shutdown != pre.shutdown || predicted.writer != pre.writer) {
-		// Defensive: a non-dedicated signal must never move the dual-locked
-		// dimensions. next cannot do this today; the guard keeps the contract
-		// enforced if the machine ever grows one.
-		return continuation{contNone}, nil, fmt.Errorf(
-			"lifecycle: signal %d changed a dual-locked dimension outside the wrapper", sig.kind)
 	}
 	if err != nil {
 		// Invalid prediction: leave lc unchanged; the caller reports the error

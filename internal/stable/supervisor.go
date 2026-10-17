@@ -1397,7 +1397,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		}
 		modelDeciderKey = key
 	}
-	workflowMode := params.LoopFile != "" || params.TeamFile != ""
+	workflowMode := spawnIsWorkflow(params)
 	if workflowMode {
 		if params.RosterEntry != "" {
 			return SpawnResult{}, fmt.Errorf("roster_entry is not valid with loop_file or team_file")
@@ -2195,6 +2195,25 @@ func deadlineFromContext(ctx context.Context) time.Time {
 	return deadline
 }
 
+// finishRunEnded commits the final teardown transition (S/I -> E, P -> PE)
+// and emits the publishCompletion cue that runs the completion boundary.
+// It requires attempts 0, so it runs after every attempt defer has settled.
+// The caller must not hold child.mu. A failed transition still publishes, so
+// external waiters are never stranded on a machine error.
+func (s *Supervisor) finishRunEnded(child *childRuntime) {
+	child.mu.Lock()
+	_, eff, err := s.applyLifecycle(child, lifecycleSignal{
+		kind: signalRunEnded, class: child.lc.class, boundary: afterRunTeardown,
+	})
+	child.mu.Unlock()
+	if err != nil {
+		s.reportLifecycleError(child, err)
+		child.complete(s, afterRunTeardown)
+	} else {
+		s.executeDeferredLifecycleEffects(child, eff)
+	}
+}
+
 func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptText string, timeoutSec, maxRetries int) {
 	// Registered first so it runs last: the join closes only after the
 	// teardown defer's post-completion work (such as the capacity release) is
@@ -2226,23 +2245,7 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			// exact label never frees the live decider's slot.
 			s.releasePermissionDecider(child.permissionDeciderSlotKey)
 		}
-		// runEnded commits the final teardown transition (S/I -> E, P -> PE)
-		// and emits the publishCompletion cue that runs the completion
-		// boundary. It requires attempts 0, so it runs after every attempt
-		// defer has settled.
-		child.mu.Lock()
-		_, eff, err := s.applyLifecycle(child, lifecycleSignal{
-			kind: signalRunEnded, class: child.lc.class, boundary: afterRunTeardown,
-		})
-		child.mu.Unlock()
-		// A failed transition still publishes, so external waiters are never
-		// stranded on a machine error.
-		if err != nil {
-			s.reportLifecycleError(child, err)
-			child.complete(s, afterRunTeardown)
-		} else {
-			s.executeDeferredLifecycleEffects(child, eff)
-		}
+		s.finishRunEnded(child)
 		s.signalCapacityChange()
 	}()
 
@@ -2575,21 +2578,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 			}
 			s.broker.DeleteRun(child.id)
 		}
-		// runEnded commits the final teardown transition (S/I -> E, P -> PE)
-		// and emits the publishCompletion cue that runs the completion
-		// boundary; a failed transition still publishes, so external waiters
-		// are never stranded on a machine error.
-		child.mu.Lock()
-		_, eff, err := s.applyLifecycle(child, lifecycleSignal{
-			kind: signalRunEnded, class: child.lc.class, boundary: afterRunTeardown,
-		})
-		child.mu.Unlock()
-		if err != nil {
-			s.reportLifecycleError(child, err)
-			child.complete(s, afterRunTeardown)
-		} else {
-			s.executeDeferredLifecycleEffects(child, eff)
-		}
+		s.finishRunEnded(child)
 	}()
 
 	if s.broker != nil {
@@ -2910,21 +2899,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 			}
 			s.broker.DeleteRun(child.id)
 		}
-		// runEnded commits the final teardown transition (S/I -> E, P -> PE)
-		// and emits the publishCompletion cue that runs the completion
-		// boundary; a failed transition still publishes, so external waiters
-		// are never stranded on a machine error.
-		child.mu.Lock()
-		_, eff, err := s.applyLifecycle(child, lifecycleSignal{
-			kind: signalRunEnded, class: child.lc.class, boundary: afterRunTeardown,
-		})
-		child.mu.Unlock()
-		if err != nil {
-			s.reportLifecycleError(child, err)
-			child.complete(s, afterRunTeardown)
-		} else {
-			s.executeDeferredLifecycleEffects(child, eff)
-		}
+		s.finishRunEnded(child)
 	}()
 
 	if s.broker != nil {
@@ -5448,7 +5423,7 @@ func newRecorderFor(s *Supervisor, runID string) *broker.Recorder {
 // conflicts. The returned params carry the effective launch wrapper — the
 // argv that will actually be exec'd — in LaunchWrapper.
 func (s *Supervisor) resolveDirectSpawnIdentity(params SpawnParams) (SpawnParams, string, error) {
-	workflowMode := params.LoopFile != "" || params.TeamFile != ""
+	workflowMode := spawnIsWorkflow(params)
 	backend := params.Backend
 	if backend == "" {
 		backend = cli.DefaultBackend

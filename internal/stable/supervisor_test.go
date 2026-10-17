@@ -483,7 +483,6 @@ func TestRunChildAttemptUsesInitialSpawnSession(t *testing.T) {
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
-	// Explicit lifecycle initialization.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, child)
 	finishUnrunChildAtCleanup(t, sup, child)
@@ -526,9 +525,6 @@ func TestStableChildCancelsProviderOnNonCleanSessionWait(t *testing.T) {
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
-	// Explicit lifecycle initialization: the
-	// fixture declares starting state and its attempt class instead of
-	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, child)
 	sup.runtimes[child.id] = child
@@ -584,7 +580,6 @@ func TestRunChildAttemptClearsPhaseAfterSessionEnd(t *testing.T) {
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
-	// Explicit lifecycle initialization.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass, phase: "done", phaseLabel: "finished"})
 	trackTestChildCompletion(t, sup, child)
 	finishUnrunChildAtCleanup(t, sup, child)
@@ -638,9 +633,6 @@ func TestRunChildAllowsNewPhaseAfterSameRuntimeFollowUp(t *testing.T) {
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
-	// Explicit lifecycle initialization: the
-	// fixture declares starting state and its attempt class instead of
-	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, child)
 	sup.runtimes[child.id] = child
@@ -689,9 +681,6 @@ func TestRunChildParksSuccessfulTurnWithDonePhase(t *testing.T) {
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
-	// Explicit lifecycle initialization: the
-	// fixture declares starting state and its attempt class instead of
-	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, child)
 	sup.runtimes[child.id] = child
@@ -1545,9 +1534,6 @@ func TestRunChildClearsPhaseDuringRetryBackoff(t *testing.T) {
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
-	// Explicit lifecycle initialization: the
-	// fixture declares starting state and its attempt class instead of
-	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass, phase: "done"})
 	trackTestChildCompletion(t, sup, child)
 	sup.runtimes[child.id] = child
@@ -1583,9 +1569,6 @@ func TestRunLoopChildClearsPhaseDuringRetryBackoff(t *testing.T) {
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
-	// Explicit lifecycle initialization: the
-	// fixture declares starting state and its attempt class instead of
-	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass, phase: "done"})
 	trackTestChildCompletion(t, sup, child)
 	sup.runtimes[child.id] = child
@@ -1631,9 +1614,6 @@ func TestRunTeamChildClearsPhaseDuringRetryBackoff(t *testing.T) {
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
-	// Explicit lifecycle initialization: the
-	// fixture declares starting state and its attempt class instead of
-	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass, phase: "done"})
 	trackTestChildCompletion(t, sup, child)
 	sup.runtimes[child.id] = child
@@ -1674,9 +1654,6 @@ func TestRunLoopChildClearsStalePhaseOnAttemptSetupFailure(t *testing.T) {
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
-	// Explicit lifecycle initialization: the
-	// fixture declares starting state and its attempt class instead of
-	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass, phase: "done", phaseLabel: "stale"})
 	trackTestChildCompletion(t, sup, child)
 	sup.runtimes[child.id] = child
@@ -1700,9 +1677,6 @@ func TestRunTeamChildClearsStalePhaseOnAttemptSetupFailure(t *testing.T) {
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
-	// Explicit lifecycle initialization: the
-	// fixture declares starting state and its attempt class instead of
-	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass, phase: "done", phaseLabel: "stale"})
 	trackTestChildCompletion(t, sup, child)
 	sup.runtimes[child.id] = child
@@ -2136,9 +2110,6 @@ func TestRunLoopChildCleansUpOnLooprunnerError(t *testing.T) {
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
-	// Explicit lifecycle initialization: the
-	// fixture declares starting state and its attempt class instead of
-	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	trackTestChildCompletion(t, sup, child)
 	sup.runtimes[child.id] = child
@@ -2209,9 +2180,6 @@ func TestRunTeamChildCleansUpBrokerRuns(t *testing.T) {
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
-	// Explicit lifecycle initialization: the
-	// fixture declares starting state and its attempt class instead of
-	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	trackTestChildCompletion(t, sup, child)
 	sup.runtimes[child.id] = child
@@ -2378,9 +2346,6 @@ func TestWorkflowRunChildRecordsSucceededTermination(t *testing.T) {
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
-	// Explicit lifecycle initialization: the
-	// fixture declares starting state and its attempt class instead of
-	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, child)
 	sup.runtimes[child.id] = child
@@ -3674,9 +3639,6 @@ func TestRunChildAttemptWiresControlServerForClaims(t *testing.T) {
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
-	// Explicit lifecycle initialization: the
-	// fixture declares starting state and its attempt class instead of
-	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, child)
 	sup.runtimes["rt_claim"] = child
@@ -3784,9 +3746,6 @@ func TestRunLoopChildWiresControlServerForClaims(t *testing.T) {
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
-	// Explicit lifecycle initialization: the
-	// fixture declares starting state and its attempt class instead of
-	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	trackTestChildCompletion(t, sup, child)
 	sup.runtimes[child.id] = child
@@ -3898,9 +3857,6 @@ func TestRunTeamChildWiresControlServerForClaims(t *testing.T) {
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
-	// Explicit lifecycle initialization: the
-	// fixture declares starting state and its attempt class instead of
-	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	trackTestChildCompletion(t, sup, child)
 	sup.runtimes[child.id] = child
@@ -4672,8 +4628,6 @@ func TestCloseChildEventWriterIsIdempotent(t *testing.T) {
 	defer func() { _ = sup.broker.Stop() }()
 	sink := &orderedCloseSink{}
 	child := &childRuntime{eventWriter: sink}
-	// Explicit lifecycle initialization: the fixture declares its attempt
-	// class instead of relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{class: directAttemptClass})
 	sup.closeChildEventWriter(child)
 	sup.closeChildEventWriter(child)
@@ -5097,9 +5051,6 @@ func assertChildModeDrainsAcceptedDirectAnswer(t *testing.T, mode string) {
 		if child.done == nil {
 			child.done = make(chan struct{})
 		}
-		// Explicit lifecycle initialization: the
-		// fixture declares starting state and its attempt class instead of
-		// relying on zero values.
 		initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 		trackTestChildCompletion(t, sup, child)
 		sup.runtimes[child.id] = child
@@ -5110,9 +5061,6 @@ func assertChildModeDrainsAcceptedDirectAnswer(t *testing.T, mode string) {
 			if child.done == nil {
 				child.done = make(chan struct{})
 			}
-			// Explicit lifecycle initialization: the
-			// fixture declares starting state and its attempt class instead of
-			// relying on zero values.
 			initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 			trackTestChildCompletion(t, sup, child)
 			sup.runtimes[child.id] = child
@@ -5124,9 +5072,6 @@ func assertChildModeDrainsAcceptedDirectAnswer(t *testing.T, mode string) {
 			if child.done == nil {
 				child.done = make(chan struct{})
 			}
-			// Explicit lifecycle initialization: the
-			// fixture declares starting state and its attempt class instead of
-			// relying on zero values.
 			initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 			trackTestChildCompletion(t, sup, child)
 			sup.runtimes[child.id] = child
@@ -6610,9 +6555,6 @@ func TestLoopChildReceivesResolvedDefaultBackend(t *testing.T) {
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
-	// Explicit lifecycle initialization: the
-	// fixture declares starting state and its attempt class instead of
-	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	trackTestChildCompletion(t, sup, child)
 	sup.runtimes[child.id] = child
@@ -6664,9 +6606,6 @@ func TestLoopChildReceivesExplicitBackend(t *testing.T) {
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
-	// Explicit lifecycle initialization: the
-	// fixture declares starting state and its attempt class instead of
-	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	trackTestChildCompletion(t, sup, child)
 	sup.runtimes[child.id] = child
@@ -6719,9 +6658,6 @@ func TestTeamChildReceivesResolvedDefaultBackend(t *testing.T) {
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
-	// Explicit lifecycle initialization: the
-	// fixture declares starting state and its attempt class instead of
-	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	trackTestChildCompletion(t, sup, child)
 	sup.runtimes[child.id] = child
@@ -6773,9 +6709,6 @@ func TestTeamChildReceivesExplicitBackend(t *testing.T) {
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
-	// Explicit lifecycle initialization: the
-	// fixture declares starting state and its attempt class instead of
-	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	trackTestChildCompletion(t, sup, child)
 	sup.runtimes[child.id] = child
@@ -7152,9 +7085,6 @@ func TestWorkflowRunChildRecordsFailedTermination(t *testing.T) {
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
-	// Explicit lifecycle initialization: the
-	// fixture declares starting state and its attempt class instead of
-	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, child)
 	sup.runtimes[child.id] = child
@@ -7239,9 +7169,6 @@ func TestWorkflowLoopChildRecordsTermination(t *testing.T) {
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
-	// Explicit lifecycle initialization: the
-	// fixture declares starting state and its attempt class instead of
-	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	trackTestChildCompletion(t, sup, child)
 	sup.runtimes[child.id] = child
@@ -7371,9 +7298,6 @@ func TestWorkflowTeamChildRecordsTermination(t *testing.T) {
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
-	// Explicit lifecycle initialization: the
-	// fixture declares starting state and its attempt class instead of
-	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
 	trackTestChildCompletion(t, sup, child)
 	sup.runtimes[child.id] = child
@@ -7985,9 +7909,6 @@ func TestRunChildEventSeqMonotonicAcrossTurns(t *testing.T) {
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
-	// Explicit lifecycle initialization: the
-	// fixture declares starting state and its attempt class instead of
-	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, sup, child)
 	sup.runtimes[child.id] = child

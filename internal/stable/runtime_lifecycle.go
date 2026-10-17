@@ -977,8 +977,8 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 		// These preconditions are intentionally stricter than complete()
 		// itself. All three teardown defers (runChild, runLoopChild,
 		// runTeamChild) order beginChildShutdown and closeChildEventWriter
-		// before complete. Every afterRunTeardown publication therefore
-		// satisfies them. Do not loosen
+		// before their finishRunEnded call. Every afterRunTeardown
+		// publication therefore satisfies them. Do not loosen
 		// them toward complete(); the afterSpawnRollback branch above is the
 		// only writer-open/shutdown-none exception.
 		switch st.exec {
@@ -1060,6 +1060,17 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 		cont = continuation{contEnd}
 	}
 
+	// Only the dedicated shutdown/writer signals may move the shutdown and
+	// writer dimensions: the dual-locked wrapper is the only committer of
+	// those fields. Any other signal that would change them is rejected.
+	switch sig.kind {
+	case signalShutdownRequested, signalWriterCloseBegun, signalWriterCloseFinished:
+	default:
+		if out.shutdown != st.shutdown || out.writer != st.writer {
+			return st, continuation{contNone}, nil, fmt.Errorf(
+				"lifecycle: signal %d changed a dual-locked dimension", sig.kind)
+		}
+	}
 	if err := validateLifecycleState(out); err != nil {
 		return st, continuation{contNone}, nil, fmt.Errorf("lifecycle: signal %d produces invalid state: %w", sig.kind, err)
 	}
