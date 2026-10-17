@@ -47,7 +47,7 @@ func TestCountShadowMismatchCountsIndependentComparisons(t *testing.T) {
 	child := &childRuntime{id: "rt_mismatch", done: make(chan struct{})}
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 
-	s.countShadowMismatch(child, signalPublished, "synthetic comparison failure")
+	s.countShadowMismatch(child, signalPublished, "synthetic comparison failure", nil)
 	if got := s.lifecycleShadowMismatches.Load(); got != 1 {
 		t.Fatalf("lifecycleShadowMismatches = %d, want 1", got)
 	}

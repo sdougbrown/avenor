@@ -89,6 +89,7 @@ func newTestChildLifecycle(t *testing.T, sup *Supervisor, opts testLifecycleOpti
 	child := &childRuntime{
 		id:       opts.id,
 		done:     make(chan struct{}),
+		runDone:  make(chan struct{}),
 		promptCh: make(chan struct{}, 1),
 	}
 	initializeTestLifecycle(t, child, opts)
@@ -102,11 +103,7 @@ func newTestChildLifecycle(t *testing.T, sup *Supervisor, opts testLifecycleOpti
 func trackTestChildCompletion(t *testing.T, sup *Supervisor, child *childRuntime) {
 	t.Helper()
 	t.Cleanup(func() {
-		select {
-		case <-child.done:
-		case <-time.After(5 * time.Second):
-			t.Errorf("lifecycle cleanup: child %s done channel still open after teardown", child.id)
-		}
+		joinTestChildCompletion(t, child)
 		assertNoLifecycleDivergence(t, sup)
 	})
 }
@@ -146,20 +143,38 @@ func assertSupervisorLifecycleClean(t *testing.T, sup *Supervisor) {
 	}
 	sup.controlMu.Unlock()
 	for _, c := range children {
-		select {
-		case <-c.done:
-		case <-time.After(5 * time.Second):
-			t.Errorf("lifecycle cleanup: child %s done channel still open after teardown", c.id)
-		}
+		joinTestChildCompletion(t, c)
 	}
 	assertNoLifecycleDivergence(t, sup)
 }
 
+// joinTestChildCompletion waits for a child's done channel and then for its
+// run-goroutine join point. done alone is insufficient: direct runs do work
+// after complete (the capacity release) and the run/writer/answer goroutines
+// must be joined before any lifecycle counter is read.
+func joinTestChildCompletion(t testing.TB, child *childRuntime) {
+	select {
+	case <-child.done:
+	case <-time.After(5 * time.Second):
+		t.Errorf("lifecycle cleanup: child %s done channel still open after teardown", child.id)
+	}
+	if child.runDone != nil {
+		select {
+		case <-child.runDone:
+		case <-time.After(5 * time.Second):
+			t.Errorf("lifecycle cleanup: child %s run goroutine still running after teardown", child.id)
+		}
+	}
+}
+
 // newTestSupervisor is the explicit owner constructor for tests: it registers
 // the post-teardown lifecycle assertion as a cleanup that runs after the
-// test's own deferred teardown actions. The cleanup stops admission by
-// cancelling every owned runtime, waits for all child completion channels and
-// joins, then asserts both counters are zero (plan standard gate).
+// test's own deferred teardown actions. It must be called before the test
+// registers its own teardown cleanups: t.Cleanup runs last-in-first-out, so a
+// cleanup registered later would run before this one and race the assertion.
+// The cleanup stops admission by cancelling every owned runtime, waits for
+// all child completion channels and run-goroutine joins, then asserts both
+// counters are zero (plan standard gate).
 func newTestSupervisor(t *testing.T, cfg Config) *Supervisor {
 	t.Helper()
 	sup := NewSupervisor(cfg)
@@ -204,6 +219,15 @@ func finishSyntheticRunChild(s *Supervisor, child *childRuntime) {
 		s.compareDeferredLifecycleEffects(child, eff, []lifecycleEffect{{kind: effectPublishCompletion, boundary: afterRunTeardown}}, signalRunEnded)
 	}
 	child.complete(s, afterRunTeardown)
+	closeTestRunJoin(child)
+}
+
+// closeTestRunJoin closes a synthetic child's run-goroutine join point: the
+// fixture has no run goroutine, so the finish helper owns the close.
+func closeTestRunJoin(child *childRuntime) {
+	if child.runDone != nil {
+		close(child.runDone)
+	}
 }
 
 // finishSyntheticChildLifecycle explicitly finishes the modeled lifecycle of a
@@ -229,6 +253,7 @@ func finishSyntheticRollback(s *Supervisor, child *childRuntime) {
 		s.compareDeferredLifecycleEffects(child, eff, []lifecycleEffect{{kind: effectPublishCompletion, boundary: afterSpawnRollback}}, signalSpawnRolledBack)
 	}
 	child.complete(s, afterSpawnRollback)
+	closeTestRunJoin(child)
 }
 
 // finishUnrunChildAtCleanup registers an explicit modeled-lifecycle finish for
@@ -240,9 +265,9 @@ func finishUnrunChildAtCleanup(t *testing.T, sup *Supervisor, child *childRuntim
 	t.Helper()
 	t.Cleanup(func() {
 		child.mu.Lock()
-		active := child.active
+		attempts := child.lc.attempts
 		child.mu.Unlock()
-		if active {
+		if attempts > 0 {
 			finishActiveSyntheticChild(sup, child)
 			return
 		}
@@ -280,5 +305,6 @@ func initializeCompletedTestChild(t *testing.T, sup *Supervisor, child *childRun
 	t.Helper()
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execEnded, completion: completionPublished, class: directAttemptClass})
 	close(child.done)
+	closeTestRunJoin(child)
 	trackTestChildCompletion(t, sup, child)
 }

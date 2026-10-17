@@ -300,8 +300,14 @@ type childRuntime struct {
 	interruptFn                func()
 	done                       chan struct{}
 	doneOnce                   sync.Once
-	exitCode                   int
-	completed                  bool
+	// runDone is a test-observable join point: it is closed when the child's
+	// run goroutine exits (after its post-completion work, such as the
+	// capacity release that follows complete) or by the rollback/finish path
+	// when no run goroutine ever started. Production never reads it; test
+	// teardown joins on it before asserting lifecycle counters.
+	runDone   chan struct{}
+	exitCode  int
+	completed bool
 	// parked is set while the runtime waits for a follow-up prompt after a
 	// successful turn. Parked runtimes do not count against MaxRuntimes.
 	parked         bool
@@ -1443,6 +1449,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		lifecycleCtx:             childCtx,
 		cancelFn:                 childCancel,
 		done:                     make(chan struct{}),
+		runDone:                  make(chan struct{}),
 		promptCh:                 make(chan struct{}, 1),
 		autoApprove:              params.AutoApprove,
 		permissionDecider:        params.PermissionDecider,
@@ -1481,12 +1488,14 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 	// map insertion, under controlMu -> child.mu (plan Stage 2). The signal
 	// has no legacy counterpart; the commit is prediction-only.
 	child.mu.Lock()
-	if _, _, err := s.applyLifecycle(child, lifecycleSignal{kind: signalPublished, class: child.lc.class}, nil); err != nil {
-		s.reportLifecycleError(child, err)
-	}
+	_, _, pubErr := s.applyLifecycle(child, lifecycleSignal{kind: signalPublished, class: child.lc.class}, nil)
 	child.mu.Unlock()
 	s.runtimes[rtID] = child
 	s.controlMu.Unlock()
+	if pubErr != nil {
+		// Reported after both child.mu and controlMu are released (decision 7).
+		s.reportLifecycleError(child, pubErr)
+	}
 
 	// Track parent-child relationship.
 	if params.ParentID != "" {
@@ -1516,10 +1525,14 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		child.mu.Unlock()
 		if err != nil {
 			s.reportLifecycleError(child, err)
-		} else {
+		}
+		if !lifecycleTransitionFailed(err) {
 			s.compareDeferredLifecycleEffects(child, eff, []lifecycleEffect{{kind: effectPublishCompletion, boundary: afterSpawnRollback}}, signalSpawnRolledBack)
 		}
 		child.complete(s, afterSpawnRollback)
+		// No run goroutine was started for a rolled-back child; close the join
+		// point so test teardown never waits on it.
+		close(child.runDone)
 	}
 	defer func() {
 		if releaseReservation != nil {
@@ -2180,6 +2193,12 @@ func deadlineFromContext(ctx context.Context) time.Time {
 }
 
 func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptText string, timeoutSec, maxRetries int) {
+	// Registered first so it runs last: the join closes only after the
+	// teardown defer's post-completion work (such as the capacity release) is
+	// done, so test teardown can join this goroutine before reading counters.
+	if child.runDone != nil {
+		defer close(child.runDone)
+	}
 	defer func() {
 		panicked := false
 		if r := recover(); r != nil {
@@ -2217,7 +2236,8 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 		child.mu.Unlock()
 		if err != nil {
 			s.reportLifecycleError(child, err)
-		} else {
+		}
+		if !lifecycleTransitionFailed(err) {
 			s.compareDeferredLifecycleEffects(child, eff, []lifecycleEffect{{kind: effectPublishCompletion, boundary: afterRunTeardown}}, signalRunEnded)
 		}
 		child.complete(s, afterRunTeardown)
@@ -2267,7 +2287,7 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			s.reportLifecycleError(child, retErr)
 		}
 		s.releaseChildTreeToken(child)
-		if retErr == nil {
+		if !lifecycleTransitionFailed(retErr) {
 			s.compareDeferredLifecycleEffects(child, retEff, []lifecycleEffect{{kind: effectReleaseTreeToken}}, signalAttemptReturned)
 		}
 		_ = retCont
@@ -2319,8 +2339,16 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 		}
 		if !retryable || !retriesRemaining {
 			if result.exitCode == 0 {
+				// Shadow: the success sentinel is written here for the
+				// workflow-direct, decider and park branches alike; compare it
+				// against attemptOutcome's predicted deferred sentinel.
+				var successWitness []lifecycleEffect
 				if child.sentinelFile != "" {
 					cli.WriteSentinel(child.sentinelFile, result.exitCode, result.sessionID, stopReason, s.runID, s.stderrWriter())
+					successWitness = append(successWitness, lifecycleEffect{kind: effectWriteSentinel, exitCode: result.exitCode, reason: stopReason, sessionID: result.sessionID})
+				}
+				if !lifecycleTransitionFailed(err) {
+					s.compareDeferredLifecycleEffects(child, eff, successWitness, signalAttemptOutcome)
 				}
 				// Shadow: successPresented fires at the old post-sentinel site,
 				// never at result selection (decision 6).
@@ -2380,7 +2408,7 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 				}
 				// Parking frees a local slot; wake spawn waiters blocked on the cap.
 				s.signalCapacityChange()
-				if parkErr == nil {
+				if !lifecycleTransitionFailed(parkErr) {
 					s.compareDeferredLifecycleEffects(child, parkEff, []lifecycleEffect{{kind: effectSignalCapacity}}, signalParkRequested)
 				}
 				nextPrompt, ok := child.waitForNextPrompt(s, ctx, s.config.ParkedRuntimeTimeout)
@@ -2464,7 +2492,8 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 				child.mu.Unlock()
 				if probeErr != nil {
 					s.reportLifecycleError(child, probeErr)
-				} else {
+				}
+				if !lifecycleTransitionFailed(probeErr) {
 					if probeResumed {
 						s.compareLifecycleContinuation(child, probeCont.kind, contResumeQueued, signalPromptContinuation)
 					} else {
@@ -2472,7 +2501,7 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 					}
 					s.compareDeferredLifecycleEffects(child, probeEff, probeWitness, signalPromptContinuation)
 				}
-			} else if err == nil {
+			} else if !lifecycleTransitionFailed(err) {
 				s.compareLifecycleContinuation(child, cont.kind, contEnd, signalAttemptOutcome)
 				s.compareDeferredLifecycleEffects(child, eff, probeWitness, signalAttemptOutcome)
 			}
@@ -2485,22 +2514,33 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 		// queued prompt nor the retry backoff may resume it for another turn.
 		// Its failure is recorded the same way as a non-retryable failure.
 		if child.permissionDeciderRun {
+			// Shadow: witness the decider's terminal sentinel and compare
+			// attemptOutcome's predicted deferred effects against it.
+			var deciderWitness []lifecycleEffect
 			if child.sentinelFile != "" {
 				cli.WriteSentinel(child.sentinelFile, result.exitCode, result.sessionID, stopReason, s.runID, s.stderrWriter())
+				deciderWitness = append(deciderWitness, lifecycleEffect{kind: effectWriteSentinel, exitCode: result.exitCode, reason: stopReason, sessionID: result.sessionID})
 			}
 			s.compareLifecycleContinuation(child, cont.kind, contEnd, signalAttemptOutcome)
+			if !lifecycleTransitionFailed(err) {
+				s.compareDeferredLifecycleEffects(child, eff, deciderWitness, signalAttemptOutcome)
+			}
 			return
 		}
 		if result.sessionID != "" {
 			resumeID = result.sessionID
 		}
 		// Shadow: the retry probe dequeues before checking the context; the
-		// transaction compares the continuation with the branch taken.
+		// transaction compares the continuation with the branch taken, and
+		// attemptOutcome's predicted continuation is the retry probe itself.
 		retryConsumed := false
 		if nextPrompt, ok := child.dequeuePrompt(); ok && ctx.Err() == nil {
 			retryConsumed = true
 			promptText = nextPrompt
 			attempt = 0
+		}
+		if !lifecycleTransitionFailed(err) {
+			s.compareLifecycleContinuation(child, cont.kind, contProbeRetryPrompt, signalAttemptOutcome)
 		}
 		resumeCtxErr := ctx.Err()
 		child.mu.Lock()
@@ -2543,6 +2583,12 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 }
 
 func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg *looprunner.LoopConfig, timeoutSec, maxRetries int, agent, agentProfile, model, thinking, serverURL, backend string) {
+	// Registered first so it runs last: the join closes only after the
+	// teardown defer's post-completion work is done (test teardown joins on
+	// it before reading lifecycle counters).
+	if child.runDone != nil {
+		defer close(child.runDone)
+	}
 	// SpawnParams.Timeout is an enforceable execution deadline for loop
 	// children, not just a direct-run feature: the whole loop — every phase
 	// attempt, retry, and nudge — stops at the shared wall-clock limit.
@@ -2594,7 +2640,8 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 		child.mu.Unlock()
 		if err != nil {
 			s.reportLifecycleError(child, err)
-		} else {
+		}
+		if !lifecycleTransitionFailed(err) {
 			s.compareDeferredLifecycleEffects(child, eff, []lifecycleEffect{{kind: effectPublishCompletion, boundary: afterRunTeardown}}, signalRunEnded)
 		}
 		child.complete(s, afterRunTeardown)
@@ -2857,6 +2904,12 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 }
 
 func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg *teamrunner.TeamConfig, timeoutSec, maxRetries int, agent, agentProfile, model, thinking, serverURL, backend string) {
+	// Registered first so it runs last: the join closes only after the
+	// teardown defer's post-completion work is done (test teardown joins on
+	// it before reading lifecycle counters).
+	if child.runDone != nil {
+		defer close(child.runDone)
+	}
 	// SpawnParams.Timeout is an enforceable execution deadline for team
 	// children: every member, retry, and nudge stops at the shared
 	// wall-clock limit, while ordinary member failure still leaves peers
@@ -2909,7 +2962,8 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 		child.mu.Unlock()
 		if err != nil {
 			s.reportLifecycleError(child, err)
-		} else {
+		}
+		if !lifecycleTransitionFailed(err) {
 			s.compareDeferredLifecycleEffects(child, eff, []lifecycleEffect{{kind: effectPublishCompletion, boundary: afterRunTeardown}}, signalRunEnded)
 		}
 		child.complete(s, afterRunTeardown)
@@ -3990,7 +4044,7 @@ func (s *Supervisor) writeIdleContextEnd(child *childRuntime, ctxErr error) {
 	}
 	s.emitSessionEnd(child, exitCode, stopReason)
 	idleWitness = append(idleWitness, lifecycleEffect{kind: effectEmitSessionEnd, exitCode: exitCode, reason: stopReason})
-	if err == nil {
+	if !lifecycleTransitionFailed(err) {
 		s.compareDeferredLifecycleEffects(child, eff, idleWitness, signalIdleContextEnded)
 	}
 }
@@ -4817,7 +4871,8 @@ func (child *childRuntime) complete(s *Supervisor, boundary completionBoundary) 
 		close(child.done)
 		if pubErr != nil {
 			s.reportLifecycleError(child, pubErr)
-		} else {
+		}
+		if !lifecycleTransitionFailed(pubErr) {
 			s.compareDeferredLifecycleEffects(child, pubEff, []lifecycleEffect{{kind: effectCloseDone}}, signalCompletionPublished)
 		}
 		_ = pubCont
@@ -4998,7 +5053,8 @@ func (s *Supervisor) beginChildShutdown(child *childRuntime) *permissionProvider
 	}
 	if shutdownErr != nil {
 		s.reportLifecycleError(child, shutdownErr)
-	} else {
+	}
+	if !lifecycleTransitionFailed(shutdownErr) {
 		s.compareDeferredLifecycleEffects(child, shutdownEff, shutdownWitness, signalShutdownRequested)
 	}
 	return lifecycle
@@ -5159,14 +5215,17 @@ func (s *Supervisor) finishDirectPermissionAnswerLocked(child *childRuntime, res
 // admitted before teardown has written its canonical permission.response.
 func (s *Supervisor) closeChildEventWriter(child *childRuntime) {
 	child.writeMu.Lock()
-	// Shadow: writerCloseBegun is a dedicated dual-locked signal; the legacy
-	// writerClosing write runs in the closure.
+	// Shadow: writerCloseBegun is a dedicated dual-locked signal (writeMu ->
+	// child.mu); the legacy writerClosing write runs in the closure. The wait
+	// for direct answers happens outside child.mu.
+	child.mu.Lock()
 	_, _, begunErr := s.applyLifecycleWriteLocked(child, lifecycleSignal{
 		kind: signalWriterCloseBegun, class: child.lc.class,
 	}, func() legacyLifecycleWitness {
 		child.writerClosing = true
 		return legacyLifecycleWitness{}
 	})
+	child.mu.Unlock()
 	var finishedErr error
 	if child.directAnswers > 0 {
 		done := child.directAnswersDone
@@ -5182,12 +5241,14 @@ func (s *Supervisor) closeChildEventWriter(child *childRuntime) {
 		// Shadow: writerCloseFinished is sent only after Close was actually
 		// called on a nonnil sink, regardless of Close's ignored error. No
 		// signal when the sink is nil (the caller's guard stays writerClosing).
+		child.mu.Lock()
 		_, _, finishedErr = s.applyLifecycleWriteLocked(child, lifecycleSignal{
 			kind: signalWriterCloseFinished, class: child.lc.class, closeCalled: true,
 		}, func() legacyLifecycleWitness {
 			child.writerClosed = true
 			return legacyLifecycleWitness{}
 		})
+		child.mu.Unlock()
 	}
 	child.writeMu.Unlock()
 	if begunErr != nil {
@@ -5272,7 +5333,11 @@ func (w *runtimeFanoutWriter) Write(ev events.Event) error {
 		err := w.writeHoldingWriteLock(ev, &diagnostics)
 		return err
 	}
-	return w.writeLocked(ev, nil)
+	// Nil-child writers emit no child lifecycle signals, but they keep a
+	// collector so an unexpected diagnostic can never be dropped (decision 8).
+	diagnostics := make([]error, 0, 2)
+	defer func() { reportLifecycleDiagnostics(w.supervisor, w.child, diagnostics) }()
+	return w.writeLocked(ev, &diagnostics)
 }
 
 // writeHoldingWriteLock scopes the writeMu acquisition so it releases before
@@ -5284,9 +5349,19 @@ func (w *runtimeFanoutWriter) writeHoldingWriteLock(ev events.Event, diagnostics
 }
 
 // reportLifecycleDiagnostics reports collected lifecycle errors outside all
-// locks. It is idempotent per call site: callers report each slice once.
+// locks. It is idempotent per call site: callers report each slice once. A
+// nil owner is an invariant violation, never a tolerated path: a
+// child-bearing writer always has a supervisor (decision 8), and diagnostics
+// must not be lost.
 func reportLifecycleDiagnostics(s *Supervisor, child *childRuntime, diagnostics []error) {
 	if s == nil {
+		if child != nil || len(diagnostics) > 0 {
+			id := ""
+			if child != nil {
+				id = child.id
+			}
+			panic(fmt.Sprintf("lifecycle: nil supervisor would drop %d lifecycle diagnostics for runtime %q", len(diagnostics), id))
+		}
 		return
 	}
 	for _, err := range diagnostics {
@@ -5343,7 +5418,7 @@ func (w *runtimeFanoutWriter) writeLocked(ev events.Event, diagnostics *[]error)
 					wr.locked = append(wr.locked, lifecycleEffect{kind: effectSetAgentPresentation, phase: phase, label: label})
 					return wr
 				})
-				if statusErr != nil && diagnostics != nil {
+				if statusErr != nil {
 					*diagnostics = append(*diagnostics, statusErr)
 				}
 			}
@@ -5395,7 +5470,7 @@ func (w *runtimeFanoutWriter) writeLocked(ev events.Event, diagnostics *[]error)
 				wr.locked = append(wr.locked, end)
 				return wr
 			})
-			if endErr != nil && diagnostics != nil {
+			if endErr != nil {
 				*diagnostics = append(*diagnostics, endErr)
 			}
 			if finalOutput, _ := presentation.Fields["final_output"].(string); finalOutput != "" {
