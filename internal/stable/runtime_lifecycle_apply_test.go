@@ -185,9 +185,9 @@ func TestTransactLifecycleLockedWitnessIsSoleDivergence(t *testing.T) {
 // per compared dimension with one divergent mirror on an otherwise valid
 // fixture, on an isolated owner whose counters are asserted exactly. The
 // adapter writes the mirrors it owns (activity, presentation, idle-end data,
-// recorded exit, parked) itself, so a rogue write on a signal that does not
-// own that mirror still shows up as a mismatch, while a rogue write the
-// adapter overwrites does not.
+// recorded exit, parked, completion) itself, so a rogue write on a signal that
+// does not own that mirror still shows up as a mismatch, while a rogue write
+// the adapter overwrites does not.
 func TestCompareShadowTransactionCountsDivergentMirrors(t *testing.T) {
 	// prepareLegacy leaves the mirrors to the adapter and performs no locked
 	// effects: attemptPreparing's owned clear runs in the adapter.
@@ -289,8 +289,9 @@ func TestCompareShadowTransactionCountsDivergentMirrors(t *testing.T) {
 
 // TestApplyLifecycleWritesOwnedMirrors drives the signals whose effects the
 // adapter owns and asserts the mirrors it writes: the activity mirrors for
-// both attempt classes, the presentation writes, the idle-end data and the
-// settled/finalized waiter release.
+// both attempt classes, the presentation writes, the idle-end data, the
+// settled/finalized waiter release, the parked mirror and the completed
+// mirror.
 func TestApplyLifecycleWritesOwnedMirrors(t *testing.T) {
 	apply := func(t *testing.T, s *Supervisor, child *childRuntime, sig lifecycleSignal) {
 		t.Helper()
@@ -399,6 +400,50 @@ func TestApplyLifecycleWritesOwnedMirrors(t *testing.T) {
 		apply(t, s, child, lifecycleSignal{kind: signalParkWaitEnded, class: directAttemptClass})
 		if exec, parked := parkedState(t); exec != execIdle || parked {
 			t.Fatalf("after wait ended: exec=%d parked=%v", exec, parked)
+		}
+	})
+
+	t.Run("completion transitions write the completed mirror", func(t *testing.T) {
+		s := newLifecycleTestOwner()
+		child := &childRuntime{id: "rt_owned_completion", done: make(chan struct{})}
+		initializeTestLifecycle(t, child, testLifecycleOptions{exec: execIdle, class: directAttemptClass})
+
+		// The park timeout closes admission and writes the completed mirror,
+		// but leaves done open: no waiter settle, no done close.
+		apply(t, s, child, lifecycleSignal{kind: signalParkRequested, class: directAttemptClass, runKind: runKindOrdinaryDirect})
+		apply(t, s, child, lifecycleSignal{kind: signalParkTimedOut, class: directAttemptClass})
+		child.mu.Lock()
+		completion, completed := child.lc.completion, child.completed
+		child.mu.Unlock()
+		if completion != completionAdmissionClosed || !completed {
+			t.Fatalf("after park timeout: completion=%d completed=%v", completion, completed)
+		}
+		select {
+		case <-child.done:
+			t.Fatal("park timeout closed done")
+		default:
+		}
+
+		// The final publication writes the completed mirror again and settles
+		// the registered waiter. The finish helper owns the shutdown/writer
+		// legacy mirrors (nil sink, so the writer stays closing only).
+		apply(t, s, child, lifecycleSignal{kind: signalParkWaitEnded, class: directAttemptClass})
+		apply(t, s, child, lifecycleSignal{kind: signalIdleContextEnded, class: directAttemptClass, idleExitCode: 124, idleStopReason: "timeout"})
+		child.mu.Lock()
+		waiter := make(chan struct{})
+		child.turnWaiters = append(child.turnWaiters, waiter)
+		child.mu.Unlock()
+		finishSyntheticChildLifecycle(s, child)
+		child.mu.Lock()
+		completed, waiting := child.completed, len(child.turnWaiters)
+		child.mu.Unlock()
+		if !completed || waiting != 0 {
+			t.Fatalf("after publication: completed=%v waiters=%d", completed, waiting)
+		}
+		select {
+		case <-waiter:
+		default:
+			t.Fatal("registered waiter was not released by the publication")
 		}
 	})
 

@@ -440,7 +440,7 @@ func (s *Supervisor) runtimeForAttempt(attemptID string) (runtimeID, sessionID s
 	child := (*childRuntime)(nil)
 	for _, rt := range s.runtimes {
 		rt.mu.Lock()
-		match := rt.attemptID == attemptID && !rt.completed
+		match := rt.attemptID == attemptID && !rt.lc.isCompleted()
 		if match {
 			child = rt
 		}

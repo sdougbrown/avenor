@@ -1378,7 +1378,7 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 func (s *Supervisor) labelHolderLocked(label string) string {
 	for _, child := range s.runtimes {
 		child.mu.Lock()
-		holding := child.label == label && !child.completed
+		holding := child.label == label && !child.lc.isCompleted()
 		child.mu.Unlock()
 		if holding {
 			return child.id
@@ -1533,8 +1533,9 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		s.controlMu.Lock()
 		delete(s.runtimes, rtID)
 		s.controlMu.Unlock()
-		// Shadow: the rollback publication cue is predicted before the legacy
-		// complete call; the call itself is the publishCompletion witness.
+		// The rollback publication cue runs the completion boundary itself; a
+		// failed transition still publishes, so external waiters are never
+		// stranded on a machine error.
 		child.mu.Lock()
 		_, eff, err := s.applyLifecycle(child, lifecycleSignal{
 			kind: signalSpawnRolledBack, class: child.lc.class, boundary: afterSpawnRollback,
@@ -1543,10 +1544,11 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		if err != nil {
 			s.reportLifecycleError(child, err)
 		}
-		if !lifecycleTransitionFailed(err) {
-			s.compareDeferredLifecycleEffects(child, eff, []lifecycleEffect{{kind: effectPublishCompletion, boundary: afterSpawnRollback}}, signalSpawnRolledBack)
+		if lifecycleTransitionFailed(err) {
+			child.complete(s, afterSpawnRollback)
+		} else {
+			s.executeDeferredLifecycleEffects(child, eff)
 		}
-		child.complete(s, afterSpawnRollback)
 		// No run goroutine was started for a rolled-back child; close the join
 		// point so test teardown never waits on it.
 		child.closeRunDone()
@@ -2240,10 +2242,10 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			// exact label never frees the live decider's slot.
 			s.releasePermissionDecider(child.permissionDeciderSlotKey)
 		}
-		// Shadow: runEnded predicts the final teardown transition (S/I -> E,
-		// P -> PE) and emits the publication cue; the complete call below is
-		// its publishCompletion witness. It requires attempts 0, so it runs
-		// after every attempt defer has settled.
+		// runEnded commits the final teardown transition (S/I -> E, P -> PE)
+		// and emits the publishCompletion cue that runs the completion
+		// boundary. It requires attempts 0, so it runs after every attempt
+		// defer has settled.
 		child.mu.Lock()
 		_, eff, err := s.applyLifecycle(child, lifecycleSignal{
 			kind: signalRunEnded, class: child.lc.class, boundary: afterRunTeardown,
@@ -2252,13 +2254,13 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 		if err != nil {
 			s.reportLifecycleError(child, err)
 		}
-		// The publication-cue witness belongs to a first runEnded only: after
-		// a fault the repeat carries no effects and the publication is
-		// witnessed by completionPublished alone.
-		if !lifecycleTransitionFailed(err) && len(eff) > 0 {
-			s.compareDeferredLifecycleEffects(child, eff, []lifecycleEffect{{kind: effectPublishCompletion, boundary: afterRunTeardown}}, signalRunEnded)
+		// A failed transition still publishes, so external waiters are never
+		// stranded on a machine error.
+		if lifecycleTransitionFailed(err) {
+			child.complete(s, afterRunTeardown)
+		} else {
+			s.executeDeferredLifecycleEffects(child, eff)
 		}
-		child.complete(s, afterRunTeardown)
 		s.signalCapacityChange()
 	}()
 
@@ -2604,9 +2606,10 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 			}
 			s.broker.DeleteRun(child.id)
 		}
-		// Shadow: runEnded predicts the final teardown transition (S/I -> E,
-		// P -> PE) and emits the publication cue; the complete call below is
-		// its publishCompletion witness.
+		// runEnded commits the final teardown transition (S/I -> E, P -> PE)
+		// and emits the publishCompletion cue that runs the completion
+		// boundary; a failed transition still publishes, so external waiters
+		// are never stranded on a machine error.
 		child.mu.Lock()
 		_, eff, err := s.applyLifecycle(child, lifecycleSignal{
 			kind: signalRunEnded, class: child.lc.class, boundary: afterRunTeardown,
@@ -2615,12 +2618,11 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 		if err != nil {
 			s.reportLifecycleError(child, err)
 		}
-		// A repeat runEnded (after a fault) carries no effects; the publication
-		// cue is witnessed only on the first transition.
-		if !lifecycleTransitionFailed(err) && len(eff) > 0 {
-			s.compareDeferredLifecycleEffects(child, eff, []lifecycleEffect{{kind: effectPublishCompletion, boundary: afterRunTeardown}}, signalRunEnded)
+		if lifecycleTransitionFailed(err) {
+			child.complete(s, afterRunTeardown)
+		} else {
+			s.executeDeferredLifecycleEffects(child, eff)
 		}
-		child.complete(s, afterRunTeardown)
 	}()
 
 	if s.broker != nil {
@@ -2957,9 +2959,10 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 			}
 			s.broker.DeleteRun(child.id)
 		}
-		// Shadow: runEnded predicts the final teardown transition (S/I -> E,
-		// P -> PE) and emits the publication cue; the complete call below is
-		// its publishCompletion witness.
+		// runEnded commits the final teardown transition (S/I -> E, P -> PE)
+		// and emits the publishCompletion cue that runs the completion
+		// boundary; a failed transition still publishes, so external waiters
+		// are never stranded on a machine error.
 		child.mu.Lock()
 		_, eff, err := s.applyLifecycle(child, lifecycleSignal{
 			kind: signalRunEnded, class: child.lc.class, boundary: afterRunTeardown,
@@ -2968,12 +2971,11 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 		if err != nil {
 			s.reportLifecycleError(child, err)
 		}
-		// A repeat runEnded (after a fault) carries no effects; the publication
-		// cue is witnessed only on the first transition.
-		if !lifecycleTransitionFailed(err) && len(eff) > 0 {
-			s.compareDeferredLifecycleEffects(child, eff, []lifecycleEffect{{kind: effectPublishCompletion, boundary: afterRunTeardown}}, signalRunEnded)
+		if lifecycleTransitionFailed(err) {
+			child.complete(s, afterRunTeardown)
+		} else {
+			s.executeDeferredLifecycleEffects(child, eff)
 		}
-		child.complete(s, afterRunTeardown)
 	}()
 
 	if s.broker != nil {
@@ -3272,7 +3274,7 @@ type childAttemptResult struct {
 func (c *childRuntime) dequeuePrompt() (string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.completed || len(c.promptQueue) == 0 {
+	if c.lc.isCompleted() || len(c.promptQueue) == 0 {
 		return "", false
 	}
 	prompt := c.promptQueue[0]
@@ -3300,7 +3302,7 @@ func (c *childRuntime) waitForNextPrompt(s *Supervisor, ctx context.Context, par
 			return prompt, true
 		}
 		c.mu.Lock()
-		if c.completed {
+		if c.lc.isCompleted() {
 			c.mu.Unlock()
 			return "", false
 		}
@@ -3329,12 +3331,10 @@ func (c *childRuntime) waitForNextPrompt(s *Supervisor, ctx context.Context, par
 				}
 				return prompt, true
 			}
-			// Shadow: parkTimedOut predicts completion -> admission-closed under
-			// the same mu as the queue check; no waiter settle, no done close.
-			_, _, err := s.applyLifecycle(c, lifecycleSignal{kind: signalParkTimedOut, class: c.lc.class}, func() legacyLifecycleWitness {
-				c.completed = true
-				return legacyLifecycleWitness{}
-			})
+			// parkTimedOut commits completion -> admission-closed under the
+			// same mu as the queue check; the adapter writes the completed
+			// mirror. No waiter settle, no done close.
+			_, _, err := s.applyLifecycle(c, lifecycleSignal{kind: signalParkTimedOut, class: c.lc.class}, nil)
 			c.mu.Unlock()
 			if err != nil {
 				s.reportLifecycleError(c, err)
@@ -4863,39 +4863,35 @@ func (child *childRuntime) removeTurnWaiterLocked(wait chan struct{}) {
 // complete publishes terminal completion after the caller has finished all
 // teardown. It is safe for reservation rollback and a child goroutine to race.
 // The owning supervisor and the attested completion boundary are explicit
-// arguments (plan decision 8); runEnded/spawnRolledBack predictions run at the
-// caller boundary and the completionPublished transaction runs here.
+// arguments; runEnded/spawnRolledBack emit the publishCompletion cue that runs
+// this boundary, and the completionPublished transaction runs here.
 func (child *childRuntime) complete(s *Supervisor, boundary completionBoundary) {
 	child.doneOnce.Do(func() {
 		child.releaseTreeToken()
 		child.mu.Lock()
-		// Shadow: completionPublished predicts the published completion (and
-		// the parked-ending normalization) after the token release; the legacy
-		// completed write and settle call run in the closure.
-		pubCont, pubEff, pubErr := s.applyLifecycle(child, lifecycleSignal{
+		// The adapter owns the publication: it commits the completion stage,
+		// writes the completed mirror and settles the turn waiters.
+		_, pubEff, pubErr := s.applyLifecycle(child, lifecycleSignal{
 			kind: signalCompletionPublished, class: child.lc.class, boundary: boundary,
-		}, func() legacyLifecycleWitness {
-			w := legacyLifecycleWitness{}
-			// Record what the legacy path did — the settle call runs on every
-			// publication — rather than consulting the machine's completion
-			// stage.
-			child.completed = true
-			child.settleTurnLocked()
-			// Repeats never reach this witness: doneOnce guards complete() and a repeat predicts no effects.
-			w.locked = append(w.locked, lifecycleEffect{kind: effectSettleTurnWaiters})
-			return w
-		})
+		}, nil)
+		if pubErr != nil {
+			// A failed publication must not strand registered turn waiters or
+			// leave the capacity reader counting the ended runtime as active:
+			// the legacy close always performed both.
+			s.completePublicationFailSafe(child)
+		}
 		child.mu.Unlock()
-		// done must close even when the shadow transaction is invalid: legacy
-		// behavior is preserved in shadow mode.
-		close(child.done)
 		if pubErr != nil {
 			s.reportLifecycleError(child, pubErr)
 		}
 		if !lifecycleTransitionFailed(pubErr) {
-			s.compareDeferredLifecycleEffects(child, pubEff, []lifecycleEffect{{kind: effectCloseDone}}, signalCompletionPublished)
+			// closeDone runs inside doneOnce, after the publication transaction.
+			s.executeDeferredLifecycleEffects(child, pubEff)
+		} else {
+			// A failed publication must still close done: a machine error can
+			// never leave external waiters blocked on done forever.
+			close(child.done)
 		}
-		_ = pubCont
 	})
 }
 
@@ -5817,7 +5813,7 @@ func (s *Supervisor) RuntimeWaitTurn(ctx context.Context, rtID string, timeout t
 	}
 
 	child.mu.Lock()
-	if child.completed {
+	if child.lc.isCompleted() {
 		// An ended runtime has no further turn to observe.
 		result := s.waitTurnResultLocked(child)
 		child.mu.Unlock()
@@ -5905,7 +5901,7 @@ func (s *Supervisor) RuntimePrompt(rtID, text, requestID string) error {
 		return fmt.Errorf("runtime %q not found", rtID)
 	}
 	rt.mu.Lock()
-	if rt.completed {
+	if rt.lc.isCompleted() {
 		rt.mu.Unlock()
 		return fmt.Errorf("runtime %q has ended", rtID)
 	}
@@ -5943,7 +5939,7 @@ func (s *Supervisor) RuntimeInterruptAndPrompt(rtID, text string, keepQueue bool
 		return fmt.Errorf("runtime %q not found", rtID)
 	}
 	rt.mu.Lock()
-	if rt.completed {
+	if rt.lc.isCompleted() {
 		rt.mu.Unlock()
 		return fmt.Errorf("runtime %q has ended", rtID)
 	}

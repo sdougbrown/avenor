@@ -237,10 +237,14 @@ func finishSyntheticRunChild(s *Supervisor, child *childRuntime) {
 	child.mu.Unlock()
 	if err != nil {
 		s.reportLifecycleError(child, err)
-	} else {
-		s.compareDeferredLifecycleEffects(child, eff, []lifecycleEffect{{kind: effectPublishCompletion, boundary: afterRunTeardown}}, signalRunEnded)
 	}
-	child.complete(s, afterRunTeardown)
+	// A failed transition still publishes, so external waiters are never
+	// stranded on a machine error.
+	if lifecycleTransitionFailed(err) {
+		child.complete(s, afterRunTeardown)
+	} else {
+		s.executeDeferredLifecycleEffects(child, eff)
+	}
 	closeTestRunJoin(child)
 }
 
@@ -269,10 +273,14 @@ func finishSyntheticRollback(s *Supervisor, child *childRuntime) {
 	child.mu.Unlock()
 	if err != nil {
 		s.reportLifecycleError(child, err)
-	} else {
-		s.compareDeferredLifecycleEffects(child, eff, []lifecycleEffect{{kind: effectPublishCompletion, boundary: afterSpawnRollback}}, signalSpawnRolledBack)
 	}
-	child.complete(s, afterSpawnRollback)
+	// A failed transition still publishes, so external waiters are never
+	// stranded on a machine error.
+	if lifecycleTransitionFailed(err) {
+		child.complete(s, afterSpawnRollback)
+	} else {
+		s.executeDeferredLifecycleEffects(child, eff)
+	}
 	closeTestRunJoin(child)
 }
 

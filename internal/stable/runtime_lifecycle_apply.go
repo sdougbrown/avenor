@@ -92,11 +92,11 @@ func signalKindName(k signalKind) string {
 
 // legacyLifecycleWitness records the still-legacy-owned locked effects the
 // closure actually performed under the caller's locks, in execution order.
-// Owned effects (activity/count, presentation, the settled/finalized waiter
-// release) are executed by the adapter and never witnessed; deferred legacy
-// effects (sentinels, capacity signals, session ends, cancels, publication)
-// are witnessed at their outer execution sites and compared with
-// compareDeferredLifecycleEffects.
+// Owned effects (activity/count, presentation, the waiter release, the
+// recorded exit, the completion mirror) are executed by the adapter and never
+// witnessed; deferred legacy effects (sentinels, capacity signals, session
+// ends, cancels) are witnessed at their outer execution sites and compared
+// with compareDeferredLifecycleEffects.
 type legacyLifecycleWitness struct {
 	locked []lifecycleEffect
 }
@@ -211,13 +211,13 @@ func (s *Supervisor) transactLifecycle(child *childRuntime, sig lifecycleSignal,
 // (active, activeAttempts, kept synchronized to the machine count for both
 // classes), presentation (phase, phaseLabel), the idle-end data (exitCode,
 // lastStopReason), the recorded outcome exit code and the waiter release of a
-// settled or finalized attempt. The parked mirror is written only by the
-// signals the legacy code parked with: parkRequested, localSlotAcquired and
-// parkWaitEnded; every other signal leaves the mirror alone, and the final
-// publication deliberately retains the obsolete parked value until the mirror
-// is deleted.
-// The completion publication's waiter release is not owned here; complete()
-// keeps its legacy settle until completion ownership moves.
+// settled or finalized attempt, of a fault recovery and of the final
+// publication. The parked mirror is written only by the signals the legacy
+// code parked with: parkRequested, localSlotAcquired and parkWaitEnded; every
+// other signal leaves the mirror alone, and the final publication deliberately
+// retains the obsolete parked value until the mirror is deleted. The completed
+// mirror is written only by the two signals the legacy code completed with:
+// parkTimedOut (admission closed before done) and completionPublished.
 func (s *Supervisor) applyOwnedLifecycleEffects(child *childRuntime, predicted lifecycleState, site signalKind, eff []lifecycleEffect) {
 	for _, e := range eff {
 		switch e.kind {
@@ -242,7 +242,7 @@ func (s *Supervisor) applyOwnedLifecycleEffects(child *childRuntime, predicted l
 		case effectRecordOutcomeExit:
 			child.exitCode = e.exitCode
 		case effectSettleTurnWaiters:
-			if site == signalAttemptSettled || site == signalWorkflowFinalized || site == signalFault {
+			if site == signalAttemptSettled || site == signalWorkflowFinalized || site == signalFault || site == signalCompletionPublished {
 				child.settleTurnLocked()
 			}
 		}
@@ -252,7 +252,19 @@ func (s *Supervisor) applyOwnedLifecycleEffects(child *childRuntime, predicted l
 	switch site {
 	case signalParkRequested, signalLocalSlotAcquired, signalParkWaitEnded:
 		child.parked = predicted.isParked()
+	case signalParkTimedOut, signalCompletionPublished:
+		child.completed = predicted.completion != completionOpen
 	}
+}
+
+// completePublicationFailSafe applies the legacy publication's unconditional
+// writes when the completionPublished transition itself failed: it settles the
+// turn waiters and sets the completed mirror so capacity accounting and
+// registered waiters still observe the ended runtime. The caller must hold
+// child.mu and report the transition error outside every lock.
+func (s *Supervisor) completePublicationFailSafe(child *childRuntime) {
+	child.settleTurnLocked()
+	child.completed = true
 }
 
 // reportLifecycleError counts every illegal transition and logs it. It must
@@ -308,12 +320,11 @@ func (s *Supervisor) compareShadowTransaction(child *childRuntime, pre lifecycle
 	if predicted.completion != completionPublished && child.parked != predicted.isParked() {
 		s.countMirrorMismatch(child, site, fmt.Sprintf("parked: lc=%v mirror=%v", predicted.isParked(), child.parked), sink)
 	}
-	// Still-legacy-owned mirrors, compared as shadow evidence against the
-	// prediction.
-	// Completion mirror: legacy completed covers both admission-closed and
-	// published.
+	// Completed mirror: the adapter writes it for the park timeout (admission
+	// closed before done) and the final publication; legacy completed covers
+	// both admission-closed and published.
 	if child.completed != (predicted.completion != completionOpen) {
-		s.countShadowMismatch(child, site, fmt.Sprintf("completed: legacy=%v lc completion=%d", child.completed, predicted.completion), sink)
+		s.countMirrorMismatch(child, site, fmt.Sprintf("completed: lc completion=%d mirror=%v", predicted.completion, child.completed), sink)
 	}
 	// Shutdown mirror.
 	if child.shuttingDown != predicted.isShuttingDown() {
@@ -334,10 +345,11 @@ func (s *Supervisor) compareShadowTransaction(child *childRuntime, pre lifecycle
 			s.countShadowMismatch(child, site, "writer closed: legacy writerClosed=false", sink)
 		}
 	}
-	// Effective capacity exclusion (completed || parked) at all times.
+	// Effective capacity exclusion (completed || parked) at all times. Both
+	// mirrors are adapter-written, so this is an adapter consistency check.
 	if (child.completed || child.parked) != (predicted.isCompleted() || predicted.isParked()) {
-		s.countShadowMismatch(child, site, fmt.Sprintf(
-			"capacity exclusion: legacy=(completed=%v,parked=%v) lc=(completed=%v,parked=%v)",
+		s.countMirrorMismatch(child, site, fmt.Sprintf(
+			"capacity exclusion: mirror=(completed=%v,parked=%v) lc=(completed=%v,parked=%v)",
 			child.completed, child.parked, predicted.isCompleted(), predicted.isParked()), sink)
 	}
 	// Terminal data written by predicted locked effects. The recorded outcome
@@ -363,11 +375,11 @@ func (s *Supervisor) compareShadowTransaction(child *childRuntime, pre lifecycle
 			}
 		}
 	}
-	// Locked-effect witness. Only the still-legacy-owned locked effects are
-	// witnessed by the legacy closure; owned effects are executed by the
-	// adapter. The sink collects detail lines so nothing is printed while the
-	// caller's locks are held.
-	s.compareLifecycleEffects(lifecycleLegacyLockedEffects(eff, site), witness.locked, child, site, "locked", sink)
+	// Locked-effect witness. No locked effect is legacy-owned any more: every
+	// locked effect is executed by the adapter, so a nonempty witness has no
+	// predicted counterpart and is a mismatch. The sink collects detail lines
+	// so nothing is printed while the caller's locks are held.
+	s.compareLifecycleEffects(nil, witness.locked, child, site, "locked", sink)
 }
 
 // applyLifecyclePresentation applies predicted presentation effects to a
@@ -490,9 +502,11 @@ type lifecycleFault struct {
 // executeDeferredLifecycleEffects executes the deferred effects a valid
 // prediction returned, at the caller's site after every lock has been
 // released. Caller-bound skips: a sentinel writes only when the child has a
-// sentinel file. Effects the adapter already executed under the caller's
-// locks (activity, presentation, recorded exit, waiter release) are not
-// deferred and are ignored here.
+// sentinel file. effectPublishCompletion runs the completion boundary the cue
+// names (the doneOnce-protected complete), and effectCloseDone closes the
+// done channel — it must only run inside complete's doneOnce. Effects the
+// adapter already executed under the caller's locks (activity, presentation,
+// recorded exit, waiter release) are not deferred and are ignored here.
 func (s *Supervisor) executeDeferredLifecycleEffects(child *childRuntime, eff []lifecycleEffect) {
 	for _, e := range eff {
 		switch e.kind {
@@ -506,6 +520,10 @@ func (s *Supervisor) executeDeferredLifecycleEffects(child *childRuntime, eff []
 			s.releaseChildTreeToken(child)
 		case effectEmitSessionEnd:
 			s.emitSessionEnd(child, e.exitCode, e.reason)
+		case effectPublishCompletion:
+			child.complete(s, e.boundary)
+		case effectCloseDone:
+			close(child.done)
 		}
 	}
 }
@@ -561,20 +579,6 @@ func (s *Supervisor) countLifecycleComparisonMismatch(child *childRuntime, site 
 		return
 	}
 	fmt.Fprintf(s.stderrWriter(), "avenor stable: %s\n", line)
-}
-
-// lifecycleLegacyLockedEffects filters the locked effects that are still
-// legacy-owned out of a predicted effect list: the completion publication's
-// waiter release (until completion ownership). Owned effects are executed by
-// the adapter and carry no witness.
-func lifecycleLegacyLockedEffects(eff []lifecycleEffect, site signalKind) []lifecycleEffect {
-	locked := make([]lifecycleEffect, 0, len(eff))
-	for _, e := range eff {
-		if e.kind == effectSettleTurnWaiters && site == signalCompletionPublished {
-			locked = append(locked, e)
-		}
-	}
-	return locked
 }
 
 // lifecycleDeferredEffects filters the deferred effects out of a predicted

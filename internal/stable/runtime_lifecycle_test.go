@@ -827,12 +827,14 @@ func TestRuntimeLifecycleRepeats(t *testing.T) {
 			t.Fatalf("close begun after closed: %+v %v", out, eff)
 		}
 
-		// runEnded: terminal repeat carries no effects. A rollback signal from
-		// a teardown-ended child is rejected: only a reserved or starting child
-		// with open completion may roll back.
+		// runEnded: a terminal repeat re-emits the publication cue; the
+		// interpreter's doneOnce and the completionPublished repeat no-op keep
+		// the publication idempotent. A rollback signal from a teardown-ended
+		// child is rejected: only a reserved or starting child with open
+		// completion may roll back.
 		st = lifecycleState{exec: execEnded}
 		out, _, eff = applyOK(t, st, lifecycleSignal{kind: signalRunEnded})
-		if out != st || len(eff) != 0 {
+		if out != st || !effectsEqual(eff, []lifecycleEffect{{kind: effectPublishCompletion, boundary: afterRunTeardown}}) {
 			t.Fatalf("runEnded repeat: %+v %v", out, eff)
 		}
 		expectErr(t, st, lifecycleSignal{kind: signalSpawnRolledBack, boundary: afterSpawnRollback})
@@ -862,10 +864,11 @@ func TestRuntimeLifecycleRepeats(t *testing.T) {
 		if out != st || !effectsEqual(eff, []lifecycleEffect{{kind: effectConsiderProviderCancel}}) {
 			t.Fatalf("repeat shutdown from ended: %+v %v", out, eff)
 		}
-		// runEnded repeat from parked-ending: no effects, state unchanged.
+		// runEnded repeat from parked-ending: state unchanged, the publication
+		// cue re-emits.
 		st = lifecycleState{exec: execParkedEnding, class: directAttemptClass}
 		out, _, eff = applyOK(t, st, lifecycleSignal{kind: signalRunEnded, class: directAttemptClass})
-		if out != st || len(eff) != 0 {
+		if out != st || !effectsEqual(eff, []lifecycleEffect{{kind: effectPublishCompletion, boundary: afterRunTeardown}}) {
 			t.Fatalf("runEnded repeat from parked-ending: %+v %v", out, eff)
 		}
 
@@ -2013,8 +2016,8 @@ func TestRuntimeLifecycleFaultSignal(t *testing.T) {
 		st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalWriterCloseBegun, class: directAttemptClass})
 		st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalWriterCloseFinished, class: directAttemptClass, closeCalled: true})
 		out, _, eff := applyOK(t, st, lifecycleSignal{kind: signalRunEnded, class: directAttemptClass})
-		if len(eff) != 0 {
-			t.Fatalf("runEnded after a fault must be an effect-free repeat, got %v", eff)
+		if !effectsEqual(eff, []lifecycleEffect{{kind: effectPublishCompletion, boundary: afterRunTeardown}}) {
+			t.Fatalf("runEnded after a fault must re-emit the publication cue, got %v", eff)
 		}
 		st = out
 		st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalCompletionPublished, class: directAttemptClass, boundary: afterRunTeardown})
@@ -2035,8 +2038,8 @@ func TestRuntimeLifecycleFaultSignal(t *testing.T) {
 		st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalWriterCloseBegun, class: directAttemptClass})
 		st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalWriterCloseFinished, class: directAttemptClass, closeCalled: true})
 		out, _, eff := applyOK(t, st, lifecycleSignal{kind: signalRunEnded, class: directAttemptClass})
-		if len(eff) != 0 {
-			t.Fatalf("runEnded after a fault must be an effect-free repeat, got %v", eff)
+		if !effectsEqual(eff, []lifecycleEffect{{kind: effectPublishCompletion, boundary: afterRunTeardown}}) {
+			t.Fatalf("runEnded after a parked fault must re-emit the publication cue, got %v", eff)
 		}
 		st = out
 		st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalCompletionPublished, class: directAttemptClass, boundary: afterRunTeardown})

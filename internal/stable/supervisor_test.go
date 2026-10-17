@@ -1274,6 +1274,47 @@ func TestRunChildTransitionFailureRunsFailSafe(t *testing.T) {
 		}
 		assertFaultTeardown(t, sup, &buf, "rt_retry_probe", 1)
 	})
+
+	t.Run("failed publication still closes done and settles waiters", func(t *testing.T) {
+		var buf bytes.Buffer
+		sup := newFaultSupervisor(t, "publish", &buf)
+		sup.testHooks.lifecycleTransitionFailure = func(site signalKind) bool { return site == signalCompletionPublished }
+		provider := faultEndScript("ses_publish_fault", "end_turn")
+		child, ctx, cancel := startFaultChild(t, sup, "rt_publish_fault", "ses_publish_fault", provider, directAttemptClass)
+		defer cancel()
+		// A waiter registered before the run starts must be released by the
+		// failed publication's fail-safe settle.
+		wait := make(chan struct{})
+		child.mu.Lock()
+		child.turnWaiters = append(child.turnWaiters, wait)
+		child.mu.Unlock()
+		go sup.runChild(ctx, child, "hello", 0, 0)
+
+		// The injection only fires at the completion boundary, so end the
+		// parked wait explicitly instead of waiting out the park timeout.
+		waitForStableChild(t, child, func(active bool, completed bool, phase, phaseLabel string) bool {
+			return !active && !completed && phase == "done"
+		})
+		cancel()
+		waitForStableDone(t, child)
+		joinTestChildCompletion(t, child)
+
+		// The failed publication left the runtime ended for the capacity and
+		// status readers and released the registered waiter.
+		child.mu.Lock()
+		completed := child.completed
+		child.mu.Unlock()
+		if !completed {
+			t.Fatal("failed publication did not set the completed mirror")
+		}
+		select {
+		case <-wait:
+		default:
+			t.Fatal("registered turn waiter was not released by the failed publication")
+		}
+		// The injected publication failure is the only transition error.
+		assertFaultTeardown(t, sup, &buf, "rt_publish_fault", 1)
+	})
 }
 
 func TestRunChildClearsPhaseDuringRetryBackoff(t *testing.T) {

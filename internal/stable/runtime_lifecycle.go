@@ -328,7 +328,7 @@ const (
 	effectEmitSessionEnd                              // idleContextEnded
 	effectConsiderProviderCancel                      // shutdownRequested, including repeats
 	effectCancelContext                               // first shutdownRequested only
-	effectPublishCompletion                           // first runEnded / spawnRolledBack
+	effectPublishCompletion                           // runEnded / spawnRolledBack
 	effectCloseDone                                   // completionPublished first publication
 )
 
@@ -458,8 +458,8 @@ func validateLifecycleSignal(sig lifecycleSignal) error {
 			return errors.New("lifecycle: writerCloseFinished without a Close call on a nonnil sink")
 		}
 	case signalRunEnded:
-		// The first runEnded emits publishCompletion at the teardown boundary;
-		// a wrong attestation is rejected exactly like completionPublished's.
+		// runEnded emits publishCompletion at the teardown boundary; a wrong
+		// attestation is rejected exactly like completionPublished's.
 		if sig.boundary != afterRunTeardown {
 			return fmt.Errorf("lifecycle: runEnded with boundary %d, want afterRunTeardown", sig.boundary)
 		}
@@ -840,10 +840,11 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 		)
 
 	case signalRunEnded:
-		// Source S/I/P, C0 or CA, attempts 0, at the end of teardown. E/PE
-		// repeats carry no effects; the first transition emits publication at
-		// the afterRunTeardown boundary. Panic recovery runs through this
-		// boundary too.
+		// Source S/I/P, C0 or CA, attempts 0, at the end of teardown. Every
+		// transition emits the publication cue at the afterRunTeardown
+		// boundary; the interpreter's doneOnce and the completionPublished
+		// repeat no-op keep the publication idempotent. Panic recovery runs
+		// through this boundary too.
 		//
 		// runEnded deliberately does not read the writer dimension: unlike
 		// completionPublished, publication readiness is attested at the
@@ -863,7 +864,11 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 			out.exec = execParkedEnding
 			eff = append(eff, lifecycleEffect{kind: effectPublishCompletion, boundary: afterRunTeardown})
 		case execEnded, execParkedEnding:
-			// Repeat: no effects.
+			// Repeat: the publication cue re-emits. A fault recovery ends the
+			// run before teardown, so the repeat is the normal post-fault
+			// publication path; without the cue an effect-driven teardown would
+			// never publish and external waiters would block on done forever.
+			eff = append(eff, lifecycleEffect{kind: effectPublishCompletion, boundary: afterRunTeardown})
 		default:
 			return st, cont, nil, fmt.Errorf("lifecycle: run ended from exec state %d", st.exec)
 		}
