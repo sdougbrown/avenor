@@ -518,6 +518,12 @@ type testHooks struct {
 	// barrier), becomes the workflow manager's lease-liveness clock (lease
 	// claims, heartbeat renewals, and stale-lease sweeps). nil in production.
 	workflowNow func() time.Time
+	// lifecycleTransitionFailure, when non-nil (set by tests), is consulted by
+	// the lifecycle transaction before the machine validates a signal: a true
+	// return rejects the transition exactly like an illegal one (unchanged
+	// state, no effects), so a test can drive the fault fail-safe at a chosen
+	// site. nil in production.
+	lifecycleTransitionFailure func(site signalKind) bool
 }
 
 type Supervisor struct {
@@ -1229,6 +1235,16 @@ func (s *Supervisor) acquireLocalRuntimeSlot(ctx context.Context, child *childRu
 			s.controlMu.Unlock()
 			if err != nil {
 				s.reportLifecycleError(child, err)
+				if lifecycleTransitionFailed(err) {
+					// A failed acquisition never grants the slot: the run ends
+					// through the fault fail-safe instead of resuming while the
+					// machine still reports the child parked. The admission
+					// check granted nothing (it is a predicate), so there is no
+					// slot accounting to release; the child stays parked until
+					// the final publication, keeping it capacity-excluded.
+					s.failSafeRunChildTransition(child, lifecycleFault{sentinelWritten: true})
+					return fmt.Errorf("%w: %w", errLifecycleFaultRecovery, err)
+				}
 			}
 			return nil
 		}
@@ -2233,7 +2249,10 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 		if err != nil {
 			s.reportLifecycleError(child, err)
 		}
-		if !lifecycleTransitionFailed(err) {
+		// The publication-cue witness belongs to a first runEnded only: after
+		// a fault the repeat carries no effects and the publication is
+		// witnessed by completionPublished alone.
+		if !lifecycleTransitionFailed(err) && len(eff) > 0 {
 			s.compareDeferredLifecycleEffects(child, eff, []lifecycleEffect{{kind: effectPublishCompletion, boundary: afterRunTeardown}}, signalRunEnded)
 		}
 		child.complete(s, afterRunTeardown)
@@ -2295,9 +2314,12 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			s.reportLifecycleError(child, retErr)
 		}
 		if lifecycleTransitionFailed(retErr) {
-			// No predicted release ran; the fail-safe returns the tree token
-			// and ends the run.
-			s.failSafeRunChildTransition(child, result, stopReason, false, false)
+			// No predicted release ran; the fail-safe records the outcome exit,
+			// returns the tree token, writes the sentinel and ends the run.
+			s.failSafeRunChildTransition(child, lifecycleFault{
+				exitCode: result.exitCode, reason: stopReason, sessionID: result.sessionID,
+				recordExit: true,
+			})
 			return
 		}
 		s.executeDeferredLifecycleEffects(child, retEff)
@@ -2323,9 +2345,12 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			s.reportLifecycleError(child, err)
 		}
 		if lifecycleTransitionFailed(err) {
-			// The predicted sentinel never ran; the fail-safe writes it with
-			// the result payload and ends the run.
-			s.failSafeRunChildTransition(child, result, stopReason, false, false)
+			// The predicted record and sentinel never ran; the fail-safe records
+			// the exit, writes the sentinel and ends the run.
+			s.failSafeRunChildTransition(child, lifecycleFault{
+				exitCode: result.exitCode, reason: stopReason, sessionID: result.sessionID,
+				recordExit: true,
+			})
 			return
 		}
 		switch cont.kind {
@@ -2366,10 +2391,13 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 				s.reportLifecycleError(child, parkErr)
 			}
 			if lifecycleTransitionFailed(parkErr) {
-				// The outcome sentinel already ran on the park path; the
-				// fail-safe only signals the capacity the park would have
-				// freed and ends the run.
-				s.failSafeRunChildTransition(child, result, stopReason, true, true)
+				// The outcome sentinel already ran on the park path; the fail-
+				// safe only signals the capacity the park would have freed and
+				// ends the run.
+				s.failSafeRunChildTransition(child, lifecycleFault{
+					exitCode: result.exitCode, reason: stopReason, sessionID: result.sessionID,
+					recordExit: true, sentinelWritten: true, parkPath: true,
+				})
 				return
 			}
 			// Parking frees a local slot; wake spawn waiters blocked on the cap.
@@ -2391,7 +2419,9 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 				return
 			}
 			if err := s.acquireLocalRuntimeSlot(ctx, child); err != nil {
-				if ctx.Err() != nil {
+				// A fault fail-safe already ended the run; the idle-context end
+				// belongs only to a context or shutdown wait failure.
+				if !errors.Is(err, errLifecycleFaultRecovery) && ctx.Err() != nil {
 					s.writeIdleContextEnd(child, ctx.Err())
 				}
 				return
@@ -2439,10 +2469,13 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 				s.reportLifecycleError(child, probeErr)
 			}
 			if lifecycleTransitionFailed(probeErr) {
-				// The probe carried this result's sentinel; the fail-safe
-				// writes it and ends the run. A prompt dequeued before the
-				// failure is consumed by the failed path.
-				s.failSafeRunChildTransition(child, result, stopReason, false, false)
+				// The probe carried this result's sentinel; the fail-safe writes
+				// it and ends the run. A prompt dequeued before the failure is
+				// consumed by the failed path.
+				s.failSafeRunChildTransition(child, lifecycleFault{
+					exitCode: result.exitCode, reason: stopReason, sessionID: result.sessionID,
+					recordExit: true,
+				})
 				return
 			}
 			// Whether resuming or ending, this result's sentinel writes
@@ -2480,8 +2513,12 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			}
 			if lifecycleTransitionFailed(probeErr) {
 				// The failed prediction must not fall into the backoff timer:
-				// the fail-safe writes the terminal sentinel and ends the run.
-				s.failSafeRunChildTransition(child, result, stopReason, false, false)
+				// the fail-safe records the exit, writes the terminal sentinel
+				// and ends the run.
+				s.failSafeRunChildTransition(child, lifecycleFault{
+					exitCode: result.exitCode, reason: stopReason, sessionID: result.sessionID,
+					recordExit: true,
+				})
 				return
 			}
 			if probeCont.kind == contIdleContextEnd {
@@ -2559,7 +2596,9 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 		if err != nil {
 			s.reportLifecycleError(child, err)
 		}
-		if !lifecycleTransitionFailed(err) {
+		// A repeat runEnded (after a fault) carries no effects; the publication
+		// cue is witnessed only on the first transition.
+		if !lifecycleTransitionFailed(err) && len(eff) > 0 {
 			s.compareDeferredLifecycleEffects(child, eff, []lifecycleEffect{{kind: effectPublishCompletion, boundary: afterRunTeardown}}, signalRunEnded)
 		}
 		child.complete(s, afterRunTeardown)
@@ -2910,7 +2949,9 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 		if err != nil {
 			s.reportLifecycleError(child, err)
 		}
-		if !lifecycleTransitionFailed(err) {
+		// A repeat runEnded (after a fault) carries no effects; the publication
+		// cue is witnessed only on the first transition.
+		if !lifecycleTransitionFailed(err) && len(eff) > 0 {
 			s.compareDeferredLifecycleEffects(child, eff, []lifecycleEffect{{kind: effectPublishCompletion, boundary: afterRunTeardown}}, signalRunEnded)
 		}
 		child.complete(s, afterRunTeardown)
@@ -3980,9 +4021,17 @@ func (s *Supervisor) writeIdleContextEnd(child *childRuntime, ctxErr error) {
 	if err != nil {
 		s.reportLifecycleError(child, err)
 	}
-	if !lifecycleTransitionFailed(err) {
-		s.executeDeferredLifecycleEffects(child, eff)
+	if lifecycleTransitionFailed(err) {
+		// The dropped idle-end writes are recovered by the fault fail-safe:
+		// terminal data, sentinel and session.end, the writes the legacy idle
+		// end made unconditionally.
+		s.failSafeRunChildTransition(child, lifecycleFault{
+			exitCode: exitCode, reason: stopReason, sessionID: sessionID,
+			recordExit: true, idleEnd: true,
+		})
+		return
 	}
+	s.executeDeferredLifecycleEffects(child, eff)
 }
 
 func (s *Supervisor) emitChildError(child *childRuntime, message, source string) {

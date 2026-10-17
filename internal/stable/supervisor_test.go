@@ -750,76 +750,292 @@ func TestRunChildParksSuccessfulTurnWithDonePhase(t *testing.T) {
 	}
 }
 
-// TestRunChildTransitionFailureRunsFailSafe injects an illegal transition into
-// runChild's owned continuation path and pins the fail-safe: the adapter must
-// write the terminal sentinel with the legacy result payload and end the run
-// instead of dropping the predicted effects. The injection is a fixture child
-// declaring the workflow attempt class on the direct run loop: every attempt
-// signal still validates, but attemptReturned requires the direct class, so
-// the first returned attempt fails. The run's diagnostics go to the captured
-// stderr writer and the supervisor is built directly (not through the
-// suite-wide zero-error owner), with the expected counter values asserted
-// here.
+// TestRunChildTransitionFailureRunsFailSafe injects illegal transitions into
+// runChild's owned paths and the idle-context end, and pins the fault
+// fail-safe: the adapter must apply signalFault, record the terminal exit
+// code, recover the dropped external effects (tree-token release, terminal
+// sentinel, session.end, capacity signal) and end the run through a teardown
+// that validates cleanly. Injections run through the supervisor's test hook;
+// the first case also covers the fixture-class injection where the machine
+// itself rejects the signal. The runs' diagnostics go to captured stderr
+// writers and the supervisors are built directly (not through the suite-wide
+// zero-error owner), with the expected counter values asserted here.
 func TestRunChildTransitionFailureRunsFailSafe(t *testing.T) {
-	var buf bytes.Buffer
-	provider := &stableScriptedProvider{
-		attempt: 0,
-		scripts: []stableScriptedAttempt{{
-			sessionID: "ses_failsafe",
-			events: []stableScriptedEvent{{event: events.Event{
-				Event:     "session.end",
-				SessionID: "ses_failsafe",
-				Fields:    map[string]any{"stop_reason": "end_turn"},
-			}}},
-		}},
+	newFaultSupervisor := func(t *testing.T, name string, buf *bytes.Buffer) *Supervisor {
+		sup := NewSupervisor(Config{ControlSocket: "/tmp/test-fault-" + name + ".sock", MaxRuntimes: 1, Stderr: buf})
+		t.Cleanup(func() { _ = sup.broker.Stop() })
+		return sup
 	}
-	sup := NewSupervisor(Config{ControlSocket: "/tmp/test-failsafe-transition.sock", MaxRuntimes: 1, Stderr: &buf})
-	t.Cleanup(func() { _ = sup.broker.Stop() })
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	child := &childRuntime{
-		id:           "rt_failsafe_transition",
-		provider:     provider,
-		session:      runtime.Session{SessionID: "ses_failsafe"},
-		eventWriter:  stableTestSink{},
-		sentinelFile: filepath.Join(t.TempDir(), "run.done"),
-		lifecycleCtx: ctx,
-		cancelFn:     cancel,
-		done:         make(chan struct{}),
-		promptCh:     make(chan struct{}, 1),
-	}
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
-	trackTestChildCompletion(t, sup, child)
-	sup.runtimes[child.id] = child
-	go sup.runChild(ctx, child, "hello", 0, 0)
-
-	// The failed transition must end the run, not strand it.
-	waitForStableDone(t, child)
-	joinTestChildCompletion(t, child)
-
-	// The fail-safe wrote the terminal sentinel for the outcome whose
-	// predicted effects were dropped.
-	sentinel, err := os.ReadFile(child.sentinelFile)
-	if err != nil {
-		t.Fatalf("fail-safe sentinel not written: %v", err)
-	}
-	content := string(sentinel)
-	for _, want := range []string{"DONE\n", "SESSION=ses_failsafe\n", "STOP_REASON=end_turn\n"} {
-		if !strings.Contains(content, want) {
-			t.Fatalf("fail-safe sentinel = %q, want it to contain %q", content, want)
+	faultEndScript := func(sessionID, stopReason string) *stableScriptedProvider {
+		return &stableScriptedProvider{
+			attempt: 0,
+			scripts: []stableScriptedAttempt{{
+				sessionID: sessionID,
+				events: []stableScriptedEvent{{event: events.Event{
+					Event:     "session.end",
+					SessionID: sessionID,
+					Fields:    map[string]any{"stop_reason": stopReason},
+				}}},
+			}},
 		}
 	}
-	// The injected failure is counted exactly once and nothing else diverged.
-	if got := sup.lifecycleErrors.Load(); got != 1 {
-		t.Fatalf("lifecycleErrors = %d, want exactly the injected transition failure", got)
+	startFaultChild := func(t *testing.T, sup *Supervisor, id, sessionID string, provider *stableScriptedProvider, class attemptClass) (*childRuntime, context.Context, context.CancelFunc) {
+		ctx, cancel := context.WithCancel(context.Background())
+		child := &childRuntime{
+			id:           id,
+			provider:     provider,
+			session:      runtime.Session{SessionID: sessionID},
+			eventWriter:  stableTestSink{},
+			sentinelFile: filepath.Join(t.TempDir(), "run.done"),
+			lifecycleCtx: ctx,
+			cancelFn:     cancel,
+			done:         make(chan struct{}),
+			promptCh:     make(chan struct{}, 1),
+		}
+		initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: class})
+		trackTestChildCompletion(t, sup, child)
+		sup.runtimes[child.id] = child
+		return child, ctx, cancel
 	}
-	if got := sup.lifecycleShadowMismatches.Load(); got != 0 {
-		t.Fatalf("lifecycleShadowMismatches = %d, want 0", got)
+	assertFaultTeardown := func(t *testing.T, sup *Supervisor, buf *bytes.Buffer, id string, wantErrors int64) {
+		t.Helper()
+		if got := sup.lifecycleErrors.Load(); got != wantErrors {
+			t.Fatalf("lifecycleErrors = %d, want %d", got, wantErrors)
+		}
+		if got := sup.lifecycleShadowMismatches.Load(); got != 0 {
+			t.Fatalf("lifecycleShadowMismatches = %d, want 0", got)
+		}
+		if out := buf.String(); strings.Count(out, "lifecycle error (runtime "+id+")") != int(wantErrors) {
+			t.Fatalf("captured stderr = %q, want exactly %d lifecycle error report(s)", out, wantErrors)
+		}
 	}
-	if out := buf.String(); !strings.Contains(out, "lifecycle error (runtime rt_failsafe_transition)") ||
-		!strings.Contains(out, "attempt returned with class") {
-		t.Fatalf("captured stderr = %q, want the injected transition failure report", out)
+	readSentinel := func(t *testing.T, path string, wants ...string) string {
+		t.Helper()
+		sentinel, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("fail-safe sentinel not written: %v", err)
+		}
+		content := string(sentinel)
+		for _, want := range wants {
+			if !strings.Contains(content, want) {
+				t.Fatalf("fail-safe sentinel = %q, want it to contain %q", content, want)
+			}
+		}
+		return content
 	}
+
+	t.Run("failed attempt return ends the run", func(t *testing.T) {
+		// The injection is a fixture child declaring the workflow attempt
+		// class on the direct run loop: every attempt signal still validates,
+		// but attemptReturned requires the direct class, so the first
+		// returned attempt fails.
+		var buf bytes.Buffer
+		sup := newFaultSupervisor(t, "returned", &buf)
+		provider := faultEndScript("ses_failsafe", "end_turn")
+		child, ctx, cancel := startFaultChild(t, sup, "rt_failsafe_transition", "ses_failsafe", provider, workflowAttemptClass)
+		defer cancel()
+		go sup.runChild(ctx, child, "hello", 0, 0)
+
+		// The failed transition must end the run, not strand it.
+		waitForStableDone(t, child)
+		joinTestChildCompletion(t, child)
+
+		// The fail-safe recorded the outcome exit and wrote the terminal
+		// sentinel for the outcome whose predicted effects were dropped.
+		child.mu.Lock()
+		exit := child.exitCode
+		child.mu.Unlock()
+		if exit != 0 {
+			t.Fatalf("child.exitCode = %d, want the recorded outcome exit 0", exit)
+		}
+		readSentinel(t, child.sentinelFile, "DONE\n", "SESSION=ses_failsafe\n", "STOP_REASON=end_turn\n")
+		assertFaultTeardown(t, sup, &buf, "rt_failsafe_transition", 1)
+		if out := buf.String(); !strings.Contains(out, "attempt returned with class") {
+			t.Fatalf("captured stderr = %q, want the injected transition failure report", out)
+		}
+	})
+
+	t.Run("failed outcome records the exit and writes the sentinel", func(t *testing.T) {
+		var buf bytes.Buffer
+		sup := newFaultSupervisor(t, "outcome", &buf)
+		sup.testHooks.lifecycleTransitionFailure = func(site signalKind) bool { return site == signalAttemptOutcome }
+		provider := faultEndScript("ses_outcome_fault", "error")
+		child, ctx, cancel := startFaultChild(t, sup, "rt_outcome_fault", "ses_outcome_fault", provider, directAttemptClass)
+		defer cancel()
+		go sup.runChild(ctx, child, "hello", 0, 0)
+
+		waitForStableDone(t, child)
+		joinTestChildCompletion(t, child)
+
+		// The fail-safe recorded the result exit code the dropped prediction
+		// would have written.
+		child.mu.Lock()
+		exit := child.exitCode
+		child.mu.Unlock()
+		if exit != 1 {
+			t.Fatalf("child.exitCode = %d, want the failed outcome's 1", exit)
+		}
+		readSentinel(t, child.sentinelFile, "FAILED\n", "SESSION=ses_outcome_fault\n", "STOP_REASON=error\n", "EXIT_CODE=1\n")
+		assertFaultTeardown(t, sup, &buf, "rt_outcome_fault", 1)
+	})
+
+	t.Run("failed park signals capacity without a duplicate sentinel", func(t *testing.T) {
+		var buf bytes.Buffer
+		sup := newFaultSupervisor(t, "park", &buf)
+		provider := faultEndScript("ses_park_fault", "end_turn")
+		child, ctx, cancel := startFaultChild(t, sup, "rt_park_fault", "ses_park_fault", provider, directAttemptClass)
+		defer cancel()
+		sentinelDir := filepath.Dir(child.sentinelFile)
+		var capAtFault, capAtShutdown chan struct{}
+		sup.testHooks.lifecycleTransitionFailure = func(site signalKind) bool {
+			switch site {
+			case signalParkRequested:
+				// The outcome sentinel is already on disk; any duplicate
+				// fail-safe write would fail loudly in the captured stderr.
+				_ = os.Chmod(sentinelDir, 0o500)
+				return true
+			case signalFault:
+				sup.capacityMu.Lock()
+				capAtFault = sup.capacityCh
+				sup.capacityMu.Unlock()
+			case signalShutdownRequested:
+				sup.capacityMu.Lock()
+				capAtShutdown = sup.capacityCh
+				sup.capacityMu.Unlock()
+			}
+			return false
+		}
+		t.Cleanup(func() { _ = os.Chmod(sentinelDir, 0o700) })
+		go sup.runChild(ctx, child, "hello", 0, 0)
+
+		waitForStableDone(t, child)
+		joinTestChildCompletion(t, child)
+
+		// Exactly one capacity signal ran between the fault and the
+		// teardown's first signal: the fail-safe's park-path signal.
+		if capAtFault == nil || capAtShutdown == nil {
+			t.Fatal("injection did not observe the fault and the teardown")
+		}
+		if capAtFault == capAtShutdown {
+			t.Fatal("no capacity signal ran between the fault and teardown: the fail-safe capacity signal is missing")
+		}
+		// The outcome sentinel is intact: the fail-safe skipped the write.
+		readSentinel(t, child.sentinelFile, "DONE\n", "SESSION=ses_park_fault\n", "STOP_REASON=end_turn\n")
+		if out := buf.String(); strings.Contains(out, "sentinel: create tmp") {
+			t.Fatalf("a duplicate sentinel write was attempted: %q", out)
+		}
+		assertFaultTeardown(t, sup, &buf, "rt_park_fault", 1)
+	})
+
+	t.Run("failed slot acquisition ends the run without resuming", func(t *testing.T) {
+		var buf bytes.Buffer
+		sup := newFaultSupervisor(t, "slot", &buf)
+		sup.testHooks.lifecycleTransitionFailure = func(site signalKind) bool { return site == signalLocalSlotAcquired }
+		provider := faultEndScript("ses_slot_fault", "end_turn")
+		child, ctx, cancel := startFaultChild(t, sup, "rt_slot_fault", "ses_slot_fault", provider, directAttemptClass)
+		defer cancel()
+		go sup.runChild(ctx, child, "first", 0, 0)
+
+		// Wait for the park, queue the follow-up, and let the run reach the
+		// slot acquisition the injection fails.
+		waitForStableChild(t, child, func(active bool, completed bool, phase, phaseLabel string) bool {
+			return !active && !completed && phase == "done"
+		})
+		if err := sup.RuntimePrompt(child.id, "follow up", ""); err != nil {
+			t.Fatalf("RuntimePrompt: %v", err)
+		}
+		waitForStableDone(t, child)
+		joinTestChildCompletion(t, child)
+
+		// The run never resumed: the failed acquisition consumed the follow-up
+		// prompt without a second attempt, so the provider never opened a
+		// resumed session.
+		provider.mu.Lock()
+		attempts := provider.attempt
+		provider.mu.Unlock()
+		if attempts != 0 {
+			t.Fatalf("provider opened %d resumed sessions, want none after the failed acquisition", attempts)
+		}
+		child.mu.Lock()
+		exec, active, activeAttempts := child.lc.exec, child.active, child.activeAttempts
+		child.mu.Unlock()
+		if exec != execEnded || active || activeAttempts != 0 {
+			t.Fatalf("child after the failed acquisition: exec=%d active=%v attempts=%d", exec, active, activeAttempts)
+		}
+		assertFaultTeardown(t, sup, &buf, "rt_slot_fault", 1)
+	})
+
+	t.Run("failed idle end writes the sentinel and session.end", func(t *testing.T) {
+		var buf bytes.Buffer
+		sup := newFaultSupervisor(t, "idle", &buf)
+		sup.testHooks.lifecycleTransitionFailure = func(site signalKind) bool { return site == signalIdleContextEnded }
+		provider := &stableScriptedProvider{
+			attempt: 0,
+			emitted: make(chan int, 4),
+			scripts: []stableScriptedAttempt{{
+				sessionID: "ses_idle_fault",
+				events: []stableScriptedEvent{{event: events.Event{
+					Event:     "session.end",
+					SessionID: "ses_idle_fault",
+					Fields:    map[string]any{"stop_reason": "error"},
+				}}},
+			}},
+		}
+		evtCtx, evtCancel := context.WithCancel(context.Background())
+		defer evtCancel()
+		liveCh := sup.control.SubscribeEvents(evtCtx)
+		child, ctx, cancel := startFaultChild(t, sup, "rt_idle_fault", "ses_idle_fault", provider, directAttemptClass)
+		defer cancel()
+		go sup.runChild(ctx, child, "hello", 0, 1)
+
+		select {
+		case <-provider.emitted:
+		case <-time.After(2 * time.Second):
+			t.Fatal("first scripted event was not emitted")
+		}
+		// Wait for the attempt to start and then to settle into the retry
+		// backoff; the context dies inside the backoff window, so the
+		// idle-context end runs while the run waits out the retry.
+		waitForStableChild(t, child, func(active bool, completed bool, phase, phaseLabel string) bool {
+			return active && !completed
+		})
+		waitForStableChild(t, child, func(active bool, completed bool, phase, phaseLabel string) bool {
+			return !active && !completed && phase == ""
+		})
+		cancel()
+		waitForStableDone(t, child)
+		joinTestChildCompletion(t, child)
+
+		// The fail-safe restored the terminal data the dropped prediction
+		// would have written.
+		child.mu.Lock()
+		exit, phase, reason := child.exitCode, child.phase, child.lastStopReason
+		child.mu.Unlock()
+		if exit != 130 || phase != "done" || reason != "cancelled" {
+			t.Fatalf("idle-end fault data: exit=%d phase=%q reason=%q", exit, phase, reason)
+		}
+		readSentinel(t, child.sentinelFile, "KILLED\n", "SESSION=ses_idle_fault\n", "STOP_REASON=cancelled\n", "EXIT_CODE=130\n")
+		// The fail-safe published the session.end the dropped prediction
+		// would have emitted.
+		sawSessionEnd := false
+		deadline := time.After(5 * time.Second)
+		for !sawSessionEnd {
+			select {
+			case ev := <-liveCh:
+				if ev.Event != "session.end" || ev.Fields["runtime_id"] != "rt_idle_fault" {
+					continue
+				}
+				stop, _ := ev.Fields["stop_reason"].(string)
+				code, _ := ev.Fields["exit_code"].(int)
+				if stop == "cancelled" && code == 130 {
+					sawSessionEnd = true
+				}
+			case <-deadline:
+				t.Fatal("fail-safe session.end was not published")
+			}
+		}
+		assertFaultTeardown(t, sup, &buf, "rt_idle_fault", 1)
+	})
 }
 
 func TestRunChildClearsPhaseDuringRetryBackoff(t *testing.T) {

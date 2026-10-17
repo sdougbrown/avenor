@@ -232,6 +232,7 @@ const (
 	signalCompletionPublished
 	signalAgentStatusObserved
 	signalSessionEndObserved
+	signalFault
 )
 
 // lifecycleSignal carries immutable snapshots only — no resource pointers,
@@ -429,7 +430,7 @@ func requireOpen(l lifecycleState, sig signalKind) error {
 // validateLifecycleSignal rejects unknown signal, attempt-class, run-kind,
 // probe-kind and boundary values, plus the per-signal payload rules.
 func validateLifecycleSignal(sig lifecycleSignal) error {
-	if sig.kind < signalPublished || sig.kind > signalSessionEndObserved {
+	if sig.kind < signalPublished || sig.kind > signalFault {
 		return fmt.Errorf("lifecycle: unknown signal kind %d", sig.kind)
 	}
 	if !sig.class.valid() {
@@ -1009,6 +1010,33 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 			end.reason = sig.stopReason
 		}
 		eff = append(eff, end)
+
+	case signalFault:
+		// Fail-safe recovery after an illegal transition elsewhere (a machine
+		// bug): legal from every state except a published completion, so the
+		// fault itself can never strand a run. It moves exec to the ended form
+		// the teardown accepts — execEnded, or execParkedEnding when the child
+		// is parked so the parked teardown path is preserved — clears a pending
+		// continuation probe, zeroes the attempt count and settles the turn
+		// waiters the failed path left behind. Completion, shutdown and writer
+		// dimensions are untouched: the teardown's runEnded repeat and
+		// completionPublished still validate. The fault selects only contEnd
+		// and never resets a counted error.
+		if st.completion == completionPublished {
+			return st, cont, nil, fmt.Errorf("lifecycle: fault after completion %d", st.completion)
+		}
+		out.pendingProbe = probeNone
+		out.attempts = 0
+		switch st.exec {
+		case execParked:
+			out.exec = execParkedEnding
+		case execParkedEnding:
+			// Already in the parked teardown form; the fault is a repeat.
+		default:
+			out.exec = execEnded
+		}
+		eff = append(eff, lifecycleEffect{kind: effectSettleTurnWaiters})
+		cont = continuation{contEnd}
 	}
 
 	if err := validateLifecycleState(out); err != nil {

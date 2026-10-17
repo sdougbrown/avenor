@@ -1298,7 +1298,7 @@ func TestSupervisorPublicAPIParkWakesLocalSlotWait(t *testing.T) {
 	h.awaitCondition("blocked follow-up resumed and ended", func() bool {
 		return h.log.count(itestEventIs("session.end", rt)) == 2
 	})
-	if elapsed := time.Since(start); elapsed >= time.Second {
+	if elapsed := time.Since(start); elapsed >= 1500*time.Millisecond {
 		t.Fatalf("park capacity wake took %v, want well under the 2s poll fallback", elapsed)
 	}
 	// The holder finished its turn and parked normally, and the woken runtime

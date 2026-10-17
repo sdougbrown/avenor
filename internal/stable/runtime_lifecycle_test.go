@@ -1936,3 +1936,112 @@ func TestRuntimeLifecycleErrorCarriesSignalContext(t *testing.T) {
 		t.Fatal("expected error for unknown signal kind")
 	}
 }
+
+// TestRuntimeLifecycleFaultSignal covers the fault fail-safe signal: it is
+// legal from every exec state except a published completion, moves exec to
+// the ended form teardown accepts, clears a pending probe, zeroes the
+// attempts, settles the waiters, and leaves completion, shutdown and writer
+// untouched so the teardown sequence still validates.
+func TestRuntimeLifecycleFaultSignal(t *testing.T) {
+	cases := []struct {
+		name     string
+		start    lifecycleState
+		wantExec execState
+	}{
+		{"reserved", directState(execReserved), execEnded},
+		{"starting", directState(execStarting), execEnded},
+		{"idle", idleDirect(), execEnded},
+		{"running", workflowState(execRunning, 1), execEnded},
+		{"parked", directState(execParked), execParkedEnding},
+		{"parked with admission closed", lifecycleState{exec: execParked, completion: completionAdmissionClosed, class: directAttemptClass}, execParkedEnding},
+		{"parked ending", directState(execParkedEnding), execParkedEnding},
+		{"ended", directState(execEnded), execEnded},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, cont, eff := applyOK(t, tc.start, lifecycleSignal{kind: signalFault, class: tc.start.class})
+			if out.exec != tc.wantExec {
+				t.Fatalf("fault exec = %d, want %d", out.exec, tc.wantExec)
+			}
+			if out.attempts != 0 {
+				t.Fatalf("fault attempts = %d, want 0", out.attempts)
+			}
+			if out.pendingProbe != probeNone {
+				t.Fatalf("fault left probe %d pending", out.pendingProbe)
+			}
+			if out.completion != tc.start.completion || out.shutdown != tc.start.shutdown || out.writer != tc.start.writer {
+				t.Fatalf("fault changed a protected dimension: %+v", out)
+			}
+			if cont.kind != contEnd {
+				t.Fatalf("fault continuation = %d, want %d", cont.kind, contEnd)
+			}
+			if want := []lifecycleEffect{{kind: effectSettleTurnWaiters}}; !effectsEqual(eff, want) {
+				t.Fatalf("fault effects = %v, want %v", eff, want)
+			}
+		})
+	}
+
+	t.Run("fault clears a pending probe", func(t *testing.T) {
+		for _, probe := range []probeKind{probeTerminalPrompt, probeRetryPrompt} {
+			for _, exec := range []execState{execStarting, execIdle} {
+				st := lifecycleState{exec: exec, class: directAttemptClass, pendingProbe: probe}
+				out, cont, eff := applyOK(t, st, lifecycleSignal{kind: signalFault, class: directAttemptClass})
+				if out.exec != execEnded || out.pendingProbe != probeNone {
+					t.Fatalf("fault from probe %d in exec %d: %+v", probe, exec, out)
+				}
+				if cont.kind != contEnd {
+					t.Fatalf("fault continuation = %d, want %d", cont.kind, contEnd)
+				}
+				if want := []lifecycleEffect{{kind: effectSettleTurnWaiters}}; !effectsEqual(eff, want) {
+					t.Fatalf("fault effects = %v, want %v", eff, want)
+				}
+			}
+		}
+	})
+
+	t.Run("fault rejected after completion published", func(t *testing.T) {
+		st := lifecycleState{exec: execEnded, completion: completionPublished}
+		expectErr(t, st, lifecycleSignal{kind: signalFault})
+	})
+
+	t.Run("teardown sequence after a fault validates cleanly", func(t *testing.T) {
+		// A failed promptContinuation leaves the probe pending; the fault
+		// clears it and the teardown transactions all validate.
+		st := lifecycleState{exec: execIdle, class: directAttemptClass, pendingProbe: probeRetryPrompt}
+		st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalFault, class: directAttemptClass})
+		st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalShutdownRequested, class: directAttemptClass})
+		st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalWriterCloseBegun, class: directAttemptClass})
+		st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalWriterCloseFinished, class: directAttemptClass, closeCalled: true})
+		out, _, eff := applyOK(t, st, lifecycleSignal{kind: signalRunEnded, class: directAttemptClass})
+		if len(eff) != 0 {
+			t.Fatalf("runEnded after a fault must be an effect-free repeat, got %v", eff)
+		}
+		st = out
+		st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalCompletionPublished, class: directAttemptClass, boundary: afterRunTeardown})
+		if st.completion != completionPublished || st.exec != execEnded {
+			t.Fatalf("publication after a fault: %+v", st)
+		}
+	})
+
+	t.Run("parked teardown sequence after a fault validates cleanly", func(t *testing.T) {
+		// A failed local-slot acquisition leaves the child parked; the fault
+		// keeps the parked form until the publication normalizes it.
+		st := directState(execParked)
+		st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalFault, class: directAttemptClass})
+		if st.exec != execParkedEnding {
+			t.Fatalf("fault from parked: %d", st.exec)
+		}
+		st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalShutdownRequested, class: directAttemptClass})
+		st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalWriterCloseBegun, class: directAttemptClass})
+		st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalWriterCloseFinished, class: directAttemptClass, closeCalled: true})
+		out, _, eff := applyOK(t, st, lifecycleSignal{kind: signalRunEnded, class: directAttemptClass})
+		if len(eff) != 0 {
+			t.Fatalf("runEnded after a fault must be an effect-free repeat, got %v", eff)
+		}
+		st = out
+		st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalCompletionPublished, class: directAttemptClass, boundary: afterRunTeardown})
+		if st.completion != completionPublished || st.exec != execEnded {
+			t.Fatalf("publication after a parked fault: %+v", st)
+		}
+	})
+}

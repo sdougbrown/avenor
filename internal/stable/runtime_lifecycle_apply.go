@@ -84,6 +84,8 @@ func signalKindName(k signalKind) string {
 		return "agentStatusObserved"
 	case signalSessionEndObserved:
 		return "sessionEndObserved"
+	case signalFault:
+		return "fault"
 	}
 	return fmt.Sprintf("signal(%d)", int(k))
 }
@@ -138,6 +140,11 @@ func lifecycleTransitionFailed(err error) bool {
 	return err != nil && !errors.Is(err, errLifecycleShadowDiag)
 }
 
+// errLifecycleFaultRecovery marks a slot-wait failure whose fault fail-safe
+// already ended the run, so the caller must not layer an idle-context end on
+// top of the ended state.
+var errLifecycleFaultRecovery = errors.New("lifecycle fault recovery ended the run")
+
 // transactLifecycle is the shared shadow transaction core.
 func (s *Supervisor) transactLifecycle(child *childRuntime, sig lifecycleSignal, legacy func() legacyLifecycleWitness, dualLocked bool) (continuation, []lifecycleEffect, error) {
 	if !dualLocked {
@@ -154,6 +161,13 @@ func (s *Supervisor) transactLifecycle(child *childRuntime, sig lifecycleSignal,
 	preExit, preReason := child.exitCode, child.lastStopReason
 
 	predicted, cont, eff, err := next(pre, sig)
+	if err == nil && s.testHooks.lifecycleTransitionFailure != nil && s.testHooks.lifecycleTransitionFailure(sig.kind) {
+		// Test-injected failure: the transition is rejected exactly like an
+		// illegal one — state unchanged, no effects, no continuation — so a
+		// test can drive the fault fail-safe at a chosen site.
+		err = fmt.Errorf("lifecycle: injected transition failure for signal %d (%s)", sig.kind, signalKindName(sig.kind))
+		cont = continuation{contNone}
+	}
 	if !dualLocked && err == nil && (predicted.shutdown != pre.shutdown || predicted.writer != pre.writer) {
 		// Defensive: a non-dedicated signal must never move the dual-locked
 		// dimensions. next cannot do this today; the guard keeps the contract
@@ -228,7 +242,7 @@ func (s *Supervisor) applyOwnedLifecycleEffects(child *childRuntime, predicted l
 		case effectRecordOutcomeExit:
 			child.exitCode = e.exitCode
 		case effectSettleTurnWaiters:
-			if site == signalAttemptSettled || site == signalWorkflowFinalized {
+			if site == signalAttemptSettled || site == signalWorkflowFinalized || site == signalFault {
 				child.settleTurnLocked()
 			}
 		}
@@ -412,29 +426,65 @@ func (s *Supervisor) compareLifecycleEffects(predicted, witnessed []lifecycleEff
 }
 
 // failSafeRunChildTransition is the fixed fail-safe for an illegal transition
-// in runChild's owned continuation paths (attemptReturned, attemptOutcome,
-// promptContinuation, parkRequested). A failed prediction leaves the run with
-// external waiters (a sentinel consumer, a held tree token, a spawned peer
-// waiting for capacity), so instead of the skipped predicted effects the
-// adapter executes a fixed recovery: it releases the tree token if the run
-// still holds one, writes the terminal sentinel with the legacy payload (the
-// result's exit code, normalized stop reason and session ID) when a sentinel
-// file is configured and this outcome has not written one, and signals
-// capacity when the failure happened on the park path. The caller then ends
-// the run: the fail-safe never resumes, retries or parks. It must be called
-// outside child.mu, where the original deferred effects ran; the transition
-// error is reported by the caller before this helper runs.
-func (s *Supervisor) failSafeRunChildTransition(child *childRuntime, result childAttemptResult, stopReason string, sentinelWritten, parkPath bool) {
+// in runChild's owned paths and the idle-context end. The failed prediction
+// leaves the run with external waiters (a sentinel consumer, a held tree
+// token, a spawned peer waiting for capacity, an unsettled turn waiter) and a
+// machine state teardown would reject, so the fail-safe first applies
+// signalFault under child.mu: the fault moves exec to the ended form teardown
+// accepts, clears a pending probe, zeroes the attempts and settles the turn
+// waiters. In that same critical section it records the terminal exit code
+// (and, on the idle-context path, the terminal phase and stop reason) so the
+// termination classification sees the real outcome. Outside the lock it then
+// releases the tree token, writes the terminal sentinel with the caller's
+// payload when this outcome has not written one, emits the session.end on the
+// idle-context path, and signals capacity when the failure happened on the
+// park path. It must be called outside child.mu, where the original deferred
+// effects would have run; the transition error is reported by the caller
+// before this helper runs, and a fault that itself fails is reported here.
+func (s *Supervisor) failSafeRunChildTransition(child *childRuntime, fault lifecycleFault) {
+	child.mu.Lock()
+	_, _, err := s.applyLifecycle(child, lifecycleSignal{kind: signalFault, class: child.lc.class}, nil)
+	if err == nil {
+		if fault.recordExit {
+			child.exitCode = fault.exitCode
+		}
+		if fault.idleEnd {
+			child.phase = "done"
+			child.lastStopReason = fault.reason
+		}
+	}
+	child.mu.Unlock()
+	if err != nil {
+		s.reportLifecycleError(child, err)
+	}
 	eff := []lifecycleEffect{{kind: effectReleaseTreeToken}}
-	if !sentinelWritten {
+	if !fault.sentinelWritten {
 		eff = append(eff, lifecycleEffect{
-			kind: effectWriteSentinel, exitCode: result.exitCode, reason: stopReason, sessionID: result.sessionID,
+			kind: effectWriteSentinel, exitCode: fault.exitCode, reason: fault.reason, sessionID: fault.sessionID,
 		})
 	}
-	if parkPath {
+	if fault.idleEnd {
+		eff = append(eff, lifecycleEffect{kind: effectEmitSessionEnd, exitCode: fault.exitCode, reason: fault.reason})
+	}
+	if fault.parkPath {
 		eff = append(eff, lifecycleEffect{kind: effectSignalCapacity})
 	}
 	s.executeDeferredLifecycleEffects(child, eff)
+}
+
+// lifecycleFault carries the terminal payload a fault fail-safe applies: the
+// sentinel/session data, whether the exit code and idle-end presentation must
+// be recorded under the lock, whether this outcome already wrote its
+// sentinel, and whether the failure happened on the park path (capacity
+// signal) or the idle-context path (session.end).
+type lifecycleFault struct {
+	exitCode        int
+	reason          string
+	sessionID       string
+	recordExit      bool
+	sentinelWritten bool
+	parkPath        bool
+	idleEnd         bool
 }
 
 // executeDeferredLifecycleEffects executes the deferred effects a valid
