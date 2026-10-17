@@ -42,11 +42,15 @@ func TestEffectExecutionPartitionCoversEveryKind(t *testing.T) {
 		}
 		sides[k] = effectSideDeferred
 	}
-	// The effectKind const block is a contiguous iota run, so walking its
-	// range reaches every defined kind exactly once.
-	for k := effectClearPresentation; k <= effectCloseDone; k++ {
+	// The effectKind const block is a contiguous iota run ending at
+	// effectKindEnd, so walking its range reaches every defined kind,
+	// including kinds added later, exactly once.
+	for k := effectClearPresentation; k < effectKindEnd; k++ {
+		if effectExecution(k) == effectSideUnknown {
+			t.Errorf("effectExecution(%d) = effectSideUnknown: the kind has no executor", int(k))
+		}
 		if _, ok := sides[k]; !ok {
-			t.Errorf("effectKind %d is in neither the owned nor the deferred set", int(k))
+			t.Errorf("effectKind %d is missing from this test's owned/deferred lists", int(k))
 		}
 	}
 }

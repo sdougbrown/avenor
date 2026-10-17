@@ -350,6 +350,9 @@ const (
 	effectCancelContext                               // first shutdownRequested only
 	effectPublishCompletion                           // runEnded / spawnRolledBack
 	effectCloseDone                                   // completionPublished first publication
+
+	// effectKindEnd bounds the kinds above; add new kinds before it.
+	effectKindEnd
 )
 
 // lifecycleEffect is a single effect description with its immutable payload.
