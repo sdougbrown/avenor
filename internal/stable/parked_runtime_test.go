@@ -495,13 +495,6 @@ func testParkedRuntimeResumeWaitsForHeldReservation(t *testing.T, localOnly bool
 	waitForActiveRuntimeCount(t, sup, 0) // parks again
 }
 
-func newWaitTestChild() *childRuntime {
-	return &childRuntime{
-		done:     make(chan struct{}),
-		promptCh: make(chan struct{}, 1),
-	}
-}
-
 // The parked-timeout timer branch must honor a prompt queued before the
 // deadline instead of reaping. Queueing without signaling promptCh leaves the
 // wait loop parked in its select, so the timer branch is the path that finds

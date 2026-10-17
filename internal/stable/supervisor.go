@@ -1242,7 +1242,21 @@ func (s *Supervisor) acquireLocalRuntimeSlot(ctx context.Context, child *childRu
 					// check granted nothing (it is a predicate), so there is no
 					// slot accounting to release; the child stays parked until
 					// the final publication, keeping it capacity-excluded.
-					s.failSafeRunChildTransition(child, lifecycleFault{sentinelWritten: true})
+					fault := lifecycleFault{sentinelWritten: true}
+					if ctxErr := ctx.Err(); ctxErr != nil {
+						// The context also ended: record the idle terminal end
+						// (sentinel and session.end) the legacy idle end made on
+						// a slot failure plus a cancel or deadline.
+						stopReason := "cancelled"
+						if errors.Is(ctxErr, context.DeadlineExceeded) {
+							stopReason = "timeout"
+						}
+						fault = lifecycleFault{
+							exitCode: runtime.ExitCodeForStopReason(stopReason), reason: stopReason, sessionID: child.sessionID(),
+							recordExit: true, idleEnd: true,
+						}
+					}
+					s.failSafeRunChildTransition(child, fault)
 					return fmt.Errorf("%w: %w", errLifecycleFaultRecovery, err)
 				}
 			}

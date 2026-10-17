@@ -1294,12 +1294,25 @@ func TestSupervisorPublicAPIParkWakesLocalSlotWait(t *testing.T) {
 	// must wake the blocked slot wait: the follow-up's own session.end has to
 	// arrive far inside the 2s poll fallback (bounded here at 1s).
 	gate.open()
-	start := time.Now()
 	h.awaitCondition("blocked follow-up resumed and ended", func() bool {
 		return h.log.count(itestEventIs("session.end", rt)) == 2
 	})
-	if elapsed := time.Since(start); elapsed >= 1500*time.Millisecond {
-		t.Fatalf("park capacity wake took %v, want well under the 2s poll fallback", elapsed)
+	// The wake latency is the gap between the holder's session.end (the park
+	// that frees the slot) and the follow-up's session.end (the resumed turn
+	// ending). Both use the supervisor's publish timestamps, so observer lag
+	// cannot skew the gap.
+	holderEnd, ok := h.log.find(itestEventIs("session.end", holder))
+	if !ok {
+		t.Fatal("holder session.end not found")
+	}
+	var followUpEnd events.Event
+	for _, ev := range h.log.all() {
+		if itestEventIs("session.end", rt)(ev) {
+			followUpEnd = ev
+		}
+	}
+	if gap := itestEventTS(t, followUpEnd).Sub(itestEventTS(t, holderEnd)); gap >= 1500*time.Millisecond {
+		t.Fatalf("park capacity wake took %v, want well under the 2s poll fallback", gap)
 	}
 	// The holder finished its turn and parked normally, and the woken runtime
 	// completed its follow-up turn and parked again.

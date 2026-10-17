@@ -965,6 +965,78 @@ func TestRunChildTransitionFailureRunsFailSafe(t *testing.T) {
 		assertFaultTeardown(t, sup, &buf, "rt_slot_fault", 1)
 	})
 
+	t.Run("failed slot acquisition with a dead context records the idle end", func(t *testing.T) {
+		var buf bytes.Buffer
+		sup := newFaultSupervisor(t, "slotctx", &buf)
+		provider := faultEndScript("ses_slot_ctx", "end_turn")
+		child, ctx, cancel := startFaultChild(t, sup, "rt_slot_ctx", "ses_slot_ctx", provider, directAttemptClass)
+		defer cancel()
+		evtCtx, evtCancel := context.WithCancel(context.Background())
+		defer evtCancel()
+		liveCh := sup.control.SubscribeEvents(evtCtx)
+		sup.testHooks.lifecycleTransitionFailure = func(site signalKind) bool {
+			if site == signalLocalSlotAcquired {
+				// The context dies as the slot acquisition commits, so the
+				// fail-safe records the idle terminal end.
+				cancel()
+				return true
+			}
+			return false
+		}
+		go sup.runChild(ctx, child, "first", 0, 0)
+
+		// Wait for the park, queue the follow-up, and let the run reach the
+		// slot acquisition the injection fails.
+		waitForStableChild(t, child, func(active bool, completed bool, phase, phaseLabel string) bool {
+			return !active && !completed && phase == "done"
+		})
+		if err := sup.RuntimePrompt(child.id, "follow up", ""); err != nil {
+			t.Fatalf("RuntimePrompt: %v", err)
+		}
+		waitForStableDone(t, child)
+		joinTestChildCompletion(t, child)
+
+		// The run never resumed: the failed acquisition consumed the follow-up
+		// prompt without a second attempt, so the provider never opened a
+		// resumed session.
+		provider.mu.Lock()
+		attempts := provider.attempt
+		provider.mu.Unlock()
+		if attempts != 0 {
+			t.Fatalf("provider opened %d resumed sessions, want none after the failed acquisition", attempts)
+		}
+		// The fail-safe recorded the idle terminal end (sentinel and
+		// session.end) the legacy idle end made on a slot failure plus a
+		// cancel.
+		child.mu.Lock()
+		exit, phase, reason := child.exitCode, child.phase, child.lastStopReason
+		child.mu.Unlock()
+		if exit != 130 || phase != "done" || reason != "cancelled" {
+			t.Fatalf("slot-ctx idle-end fault data: exit=%d phase=%q reason=%q", exit, phase, reason)
+		}
+		readSentinel(t, child.sentinelFile, "KILLED\n", "SESSION=ses_slot_ctx\n", "STOP_REASON=cancelled\n", "EXIT_CODE=130\n")
+		// The fail-safe published the session.end the dropped prediction
+		// would have emitted.
+		sawSessionEnd := false
+		deadline := time.After(5 * time.Second)
+		for !sawSessionEnd {
+			select {
+			case ev := <-liveCh:
+				if ev.Event != "session.end" || ev.Fields["runtime_id"] != "rt_slot_ctx" {
+					continue
+				}
+				stop, _ := ev.Fields["stop_reason"].(string)
+				code, _ := ev.Fields["exit_code"].(int)
+				if stop == "cancelled" && code == 130 {
+					sawSessionEnd = true
+				}
+			case <-deadline:
+				t.Fatal("fail-safe session.end was not published")
+			}
+		}
+		assertFaultTeardown(t, sup, &buf, "rt_slot_ctx", 1)
+	})
+
 	t.Run("failed idle end writes the sentinel and session.end", func(t *testing.T) {
 		var buf bytes.Buffer
 		sup := newFaultSupervisor(t, "idle", &buf)
@@ -977,7 +1049,7 @@ func TestRunChildTransitionFailureRunsFailSafe(t *testing.T) {
 				events: []stableScriptedEvent{{event: events.Event{
 					Event:     "session.end",
 					SessionID: "ses_idle_fault",
-					Fields:    map[string]any{"stop_reason": "error"},
+					Fields:    map[string]any{"stop_reason": "end_turn"},
 				}}},
 			}},
 		}
@@ -986,21 +1058,21 @@ func TestRunChildTransitionFailureRunsFailSafe(t *testing.T) {
 		liveCh := sup.control.SubscribeEvents(evtCtx)
 		child, ctx, cancel := startFaultChild(t, sup, "rt_idle_fault", "ses_idle_fault", provider, directAttemptClass)
 		defer cancel()
-		go sup.runChild(ctx, child, "hello", 0, 1)
+		go sup.runChild(ctx, child, "hello", 0, 0)
 
 		select {
 		case <-provider.emitted:
 		case <-time.After(2 * time.Second):
 			t.Fatal("first scripted event was not emitted")
 		}
-		// Wait for the attempt to start and then to settle into the retry
-		// backoff; the context dies inside the backoff window, so the
-		// idle-context end runs while the run waits out the retry.
+		// Wait for the attempt to start and then to settle into the park;
+		// the context dies while parked, so the idle-context end runs while
+		// the run waits for a follow-up prompt.
 		waitForStableChild(t, child, func(active bool, completed bool, phase, phaseLabel string) bool {
 			return active && !completed
 		})
 		waitForStableChild(t, child, func(active bool, completed bool, phase, phaseLabel string) bool {
-			return !active && !completed && phase == ""
+			return !active && !completed && phase == "done"
 		})
 		cancel()
 		waitForStableDone(t, child)
@@ -1035,6 +1107,96 @@ func TestRunChildTransitionFailureRunsFailSafe(t *testing.T) {
 			}
 		}
 		assertFaultTeardown(t, sup, &buf, "rt_idle_fault", 1)
+	})
+
+	t.Run("failed terminal probe writes the sentinel and ends the run", func(t *testing.T) {
+		var buf bytes.Buffer
+		sup := newFaultSupervisor(t, "terminalprobe", &buf)
+		sup.testHooks.lifecycleTransitionFailure = func(site signalKind) bool { return site == signalPromptContinuation }
+		// Non-retryable failure (exit code 2) with MaxRetries 0: the machine
+		// selects the terminal probe, the one prompt continuation this run
+		// ever sends.
+		provider := &stableScriptedProvider{
+			attempt: 0,
+			scripts: []stableScriptedAttempt{{
+				sessionID: "ses_terminal_probe",
+				events: []stableScriptedEvent{{event: events.Event{
+					Event:     "session.end",
+					SessionID: "ses_terminal_probe",
+					Fields:    map[string]any{"stop_reason": "refusal"},
+				}}},
+			}},
+		}
+		child, ctx, cancel := startFaultChild(t, sup, "rt_terminal_probe", "ses_terminal_probe", provider, directAttemptClass)
+		defer cancel()
+		go sup.runChild(ctx, child, "hello", 0, 0)
+
+		waitForStableDone(t, child)
+		joinTestChildCompletion(t, child)
+
+		// The fail-safe recorded the result exit and wrote the result's
+		// sentinel (nonzero exit, reason, session id).
+		child.mu.Lock()
+		exit := child.exitCode
+		child.mu.Unlock()
+		if exit != 2 {
+			t.Fatalf("child.exitCode = %d, want the non-retryable result exit 2", exit)
+		}
+		readSentinel(t, child.sentinelFile, "FAILED\n", "SESSION=ses_terminal_probe\n", "STOP_REASON=refusal\n", "EXIT_CODE=2\n")
+		// The run never resumed: the failed probe consumed the result without
+		// a second attempt, so the provider never opened a resumed session.
+		provider.mu.Lock()
+		attempts := provider.attempt
+		provider.mu.Unlock()
+		if attempts != 0 {
+			t.Fatalf("provider opened %d resumed sessions, want none after the failed probe", attempts)
+		}
+		assertFaultTeardown(t, sup, &buf, "rt_terminal_probe", 1)
+	})
+
+	t.Run("failed retry probe ends the run without a backoff retry", func(t *testing.T) {
+		var buf bytes.Buffer
+		sup := newFaultSupervisor(t, "retryprobe", &buf)
+		sup.testHooks.lifecycleTransitionFailure = func(site signalKind) bool { return site == signalPromptContinuation }
+		// Retryable failure (exit code 1) with a retry remaining: the machine
+		// selects the retry probe, the one prompt continuation this run ever
+		// sends.
+		provider := &stableScriptedProvider{
+			attempt: 0,
+			scripts: []stableScriptedAttempt{{
+				sessionID: "ses_retry_probe",
+				events: []stableScriptedEvent{{event: events.Event{
+					Event:     "session.end",
+					SessionID: "ses_retry_probe",
+					Fields:    map[string]any{"stop_reason": "error"},
+				}}},
+			}},
+		}
+		child, ctx, cancel := startFaultChild(t, sup, "rt_retry_probe", "ses_retry_probe", provider, directAttemptClass)
+		defer cancel()
+		go sup.runChild(ctx, child, "hello", 0, 1)
+
+		waitForStableDone(t, child)
+		joinTestChildCompletion(t, child)
+
+		// The fail-safe recorded the result exit and wrote the result's
+		// sentinel.
+		child.mu.Lock()
+		exit := child.exitCode
+		child.mu.Unlock()
+		if exit != 1 {
+			t.Fatalf("child.exitCode = %d, want the retryable result exit 1", exit)
+		}
+		readSentinel(t, child.sentinelFile, "FAILED\n", "SESSION=ses_retry_probe\n", "STOP_REASON=error\n", "EXIT_CODE=1\n")
+		// The run never retried: the failed probe ended the run before the
+		// backoff, so the provider never opened a resumed session.
+		provider.mu.Lock()
+		attempts := provider.attempt
+		provider.mu.Unlock()
+		if attempts != 0 {
+			t.Fatalf("provider opened %d resumed sessions, want none after the failed probe", attempts)
+		}
+		assertFaultTeardown(t, sup, &buf, "rt_retry_probe", 1)
 	})
 }
 
