@@ -660,121 +660,16 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 		eff = append(eff, lifecycleEffect{kind: effectReleaseTreeToken})
 
 	case signalAttemptOutcome:
-		// Source S/I, C0, direct class, no probe pending; result policy. Never
-		// changes presentation or ends execution by itself.
-		if err := requireOpen(st, sig.kind); err != nil {
-			return st, cont, nil, err
-		}
-		if sig.class != directAttemptClass {
-			return st, cont, nil, fmt.Errorf("lifecycle: attempt outcome with class %d", sig.class)
-		}
-		if st.exec != execStarting && st.exec != execIdle {
-			return st, cont, nil, fmt.Errorf("lifecycle: attempt outcome from exec state %d", st.exec)
-		}
-		if st.pendingProbe != probeNone {
-			return st, cont, nil, fmt.Errorf("lifecycle: attempt outcome with probe %d still pending", st.pendingProbe)
-		}
-		record := lifecycleEffect{kind: effectRecordOutcomeExit, exitCode: sig.exitCode}
-		sentinel := lifecycleEffect{
-			kind:      effectWriteSentinel,
-			exitCode:  sig.exitCode,
-			reason:    sig.sentinelReason,
-			sessionID: sig.resultSessionID,
-		}
-		switch {
-		case !sig.retryable || !sig.retriesRemaining:
-			// Nonretryable or retries exhausted.
-			if sig.exitCode == 0 {
-				// Success: record exit, sentinel; the separate successPresented
-				// signal fires at the old post-sentinel site. Ordinary direct
-				// parks; workflow-direct and decider end. No prompt probe.
-				eff = append(eff, record, sentinel)
-				if sig.runKind == runKindOrdinaryDirect {
-					cont = continuation{contPark}
-				} else {
-					cont = continuation{contEnd}
-				}
-			} else if sig.runKind == runKindDecider || sig.sessionIDConflict {
-				// A decider's failed turn is terminal; a session-ID conflict is
-				// not resumable. Record exit, write sentinel, return.
-				eff = append(eff, record, sentinel)
-				cont = continuation{contEnd}
-			} else {
-				// Terminal probe selected: record exit first; the terminal
-				// probe's sentinel is emitted by promptContinuation.
-				eff = append(eff, record)
-				cont = continuation{contProbeTerminalPrompt}
-				out.pendingProbe = probeTerminalPrompt
-			}
-		case sig.runKind == runKindDecider:
-			// Retryable with retries remaining, decider: record exit, write
-			// sentinel with stop-reason fallback, return. No resumeID update,
-			// dequeue or backoff.
-			eff = append(eff, record, sentinel)
-			cont = continuation{contEnd}
-		default:
-			// Retryable with retries remaining, not decider: retry probe. The
-			// caller first updates resumeID only if result.sessionID is
-			// nonempty, then dequeues before checking context.
-			cont = continuation{contProbeRetryPrompt}
-			out.pendingProbe = probeRetryPrompt
+		var err error
+		if out, cont, eff, err = nextAttemptOutcome(st, sig); err != nil {
+			return st, continuation{contNone}, nil, err
 		}
 
 	case signalPromptContinuation:
-		// Source S/I, C0, direct class; final continuation of the two-step
-		// protocol. The signal's probe kind must match the probe attemptOutcome
-		// left pending, and some probe must be pending at all.
-		if err := requireOpen(st, sig.kind); err != nil {
-			return st, cont, nil, err
+		var err error
+		if out, cont, eff, err = nextPromptContinuation(st, sig); err != nil {
+			return st, continuation{contNone}, nil, err
 		}
-		if sig.class != directAttemptClass {
-			return st, cont, nil, fmt.Errorf("lifecycle: prompt continuation with class %d", sig.class)
-		}
-		if st.exec != execStarting && st.exec != execIdle {
-			return st, cont, nil, fmt.Errorf("lifecycle: prompt continuation from exec state %d", st.exec)
-		}
-		if st.pendingProbe == probeNone {
-			return st, cont, nil, errors.New("lifecycle: prompt continuation without a pending probe")
-		}
-		if sig.probeKind != st.pendingProbe {
-			return st, cont, nil, fmt.Errorf(
-				"lifecycle: prompt continuation with probe %d while probe %d is pending", sig.probeKind, st.pendingProbe)
-		}
-		sentinel := lifecycleEffect{
-			kind:      effectWriteSentinel,
-			exitCode:  sig.exitCode,
-			reason:    sig.sentinelReason,
-			sessionID: sig.resultSessionID,
-		}
-		switch sig.probeKind {
-		case probeTerminalPrompt:
-			// The terminal probe emits the result sentinel regardless of
-			// consumed status. Resume only when the context was live and the
-			// dequeue succeeded.
-			eff = append(eff, sentinel)
-			if sig.terminalContextErr == nil && sig.promptConsumed {
-				cont = continuation{contResumeQueued}
-			} else {
-				cont = continuation{contEnd}
-			}
-		case probeRetryPrompt:
-			// The retry probe dequeued before checking context. If a prompt
-			// was consumed and the context is live, resume (no sentinel). If
-			// resuming is off and the context is dead — even with a consumed
-			// and discarded prompt — the idle-context end runs immediately.
-			switch {
-			case sig.promptConsumed && sig.resumeContextErr == nil:
-				cont = continuation{contRetry}
-			case sig.promptConsumed && sig.resumeContextErr != nil:
-				cont = continuation{contIdleContextEnd}
-			case sig.idleContextErr != nil:
-				cont = continuation{contIdleContextEnd}
-			default:
-				cont = continuation{contBackoff}
-			}
-		}
-		// The matching continuation consumed the pending probe.
-		out.pendingProbe = probeNone
 
 	case signalSuccessPresented:
 		// Source S/I, C0, exit 0, after the sentinel; repeat sets phase done
@@ -1077,5 +972,134 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 	if err := validateLifecycleState(out); err != nil {
 		return st, continuation{contNone}, nil, fmt.Errorf("lifecycle: signal %d produces invalid state: %w", sig.kind, err)
 	}
+	return out, cont, eff, nil
+}
+
+// nextAttemptOutcome applies the signalAttemptOutcome result policy: source
+// S/I, C0, direct class, no probe pending. It never changes presentation or
+// ends execution by itself. next validates the returned state.
+func nextAttemptOutcome(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation, []lifecycleEffect, error) {
+	out := st
+	var eff []lifecycleEffect
+	cont := continuation{contNone}
+	if err := requireOpen(st, sig.kind); err != nil {
+		return st, cont, nil, err
+	}
+	if sig.class != directAttemptClass {
+		return st, cont, nil, fmt.Errorf("lifecycle: attempt outcome with class %d", sig.class)
+	}
+	if st.exec != execStarting && st.exec != execIdle {
+		return st, cont, nil, fmt.Errorf("lifecycle: attempt outcome from exec state %d", st.exec)
+	}
+	if st.pendingProbe != probeNone {
+		return st, cont, nil, fmt.Errorf("lifecycle: attempt outcome with probe %d still pending", st.pendingProbe)
+	}
+	record := lifecycleEffect{kind: effectRecordOutcomeExit, exitCode: sig.exitCode}
+	sentinel := lifecycleEffect{
+		kind:      effectWriteSentinel,
+		exitCode:  sig.exitCode,
+		reason:    sig.sentinelReason,
+		sessionID: sig.resultSessionID,
+	}
+	switch {
+	case !sig.retryable || !sig.retriesRemaining:
+		// Nonretryable or retries exhausted.
+		if sig.exitCode == 0 {
+			// Success: record exit, sentinel; the separate successPresented
+			// signal fires at the old post-sentinel site. Ordinary direct
+			// parks; workflow-direct and decider end. No prompt probe.
+			eff = append(eff, record, sentinel)
+			if sig.runKind == runKindOrdinaryDirect {
+				cont = continuation{contPark}
+			} else {
+				cont = continuation{contEnd}
+			}
+		} else if sig.runKind == runKindDecider || sig.sessionIDConflict {
+			// A decider's failed turn is terminal; a session-ID conflict is
+			// not resumable. Record exit, write sentinel, return.
+			eff = append(eff, record, sentinel)
+			cont = continuation{contEnd}
+		} else {
+			// Terminal probe selected: record exit first; the terminal
+			// probe's sentinel is emitted by promptContinuation.
+			eff = append(eff, record)
+			cont = continuation{contProbeTerminalPrompt}
+			out.pendingProbe = probeTerminalPrompt
+		}
+	case sig.runKind == runKindDecider:
+		// Retryable with retries remaining, decider: record exit, write
+		// sentinel with stop-reason fallback, return. No resumeID update,
+		// dequeue or backoff.
+		eff = append(eff, record, sentinel)
+		cont = continuation{contEnd}
+	default:
+		// Retryable with retries remaining, not decider: retry probe. The
+		// caller first updates resumeID only if result.sessionID is
+		// nonempty, then dequeues before checking context.
+		cont = continuation{contProbeRetryPrompt}
+		out.pendingProbe = probeRetryPrompt
+	}
+	return out, cont, eff, nil
+}
+
+// nextPromptContinuation applies the signalPromptContinuation result policy:
+// source S/I, C0, direct class; final continuation of the two-step protocol.
+// The signal's probe kind must match the probe attemptOutcome left pending,
+// and some probe must be pending at all. next validates the returned state.
+func nextPromptContinuation(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation, []lifecycleEffect, error) {
+	out := st
+	var eff []lifecycleEffect
+	cont := continuation{contNone}
+	if err := requireOpen(st, sig.kind); err != nil {
+		return st, cont, nil, err
+	}
+	if sig.class != directAttemptClass {
+		return st, cont, nil, fmt.Errorf("lifecycle: prompt continuation with class %d", sig.class)
+	}
+	if st.exec != execStarting && st.exec != execIdle {
+		return st, cont, nil, fmt.Errorf("lifecycle: prompt continuation from exec state %d", st.exec)
+	}
+	if st.pendingProbe == probeNone {
+		return st, cont, nil, errors.New("lifecycle: prompt continuation without a pending probe")
+	}
+	if sig.probeKind != st.pendingProbe {
+		return st, cont, nil, fmt.Errorf(
+			"lifecycle: prompt continuation with probe %d while probe %d is pending", sig.probeKind, st.pendingProbe)
+	}
+	sentinel := lifecycleEffect{
+		kind:      effectWriteSentinel,
+		exitCode:  sig.exitCode,
+		reason:    sig.sentinelReason,
+		sessionID: sig.resultSessionID,
+	}
+	switch sig.probeKind {
+	case probeTerminalPrompt:
+		// The terminal probe emits the result sentinel regardless of
+		// consumed status. Resume only when the context was live and the
+		// dequeue succeeded.
+		eff = append(eff, sentinel)
+		if sig.terminalContextErr == nil && sig.promptConsumed {
+			cont = continuation{contResumeQueued}
+		} else {
+			cont = continuation{contEnd}
+		}
+	case probeRetryPrompt:
+		// The retry probe dequeued before checking context. If a prompt
+		// was consumed and the context is live, resume (no sentinel). If
+		// resuming is off and the context is dead — even with a consumed
+		// and discarded prompt — the idle-context end runs immediately.
+		switch {
+		case sig.promptConsumed && sig.resumeContextErr == nil:
+			cont = continuation{contRetry}
+		case sig.promptConsumed && sig.resumeContextErr != nil:
+			cont = continuation{contIdleContextEnd}
+		case sig.idleContextErr != nil:
+			cont = continuation{contIdleContextEnd}
+		default:
+			cont = continuation{contBackoff}
+		}
+	}
+	// The matching continuation consumed the pending probe.
+	out.pendingProbe = probeNone
 	return out, cont, eff, nil
 }
