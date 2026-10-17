@@ -411,12 +411,6 @@ func (s *Supervisor) compareLifecycleEffects(predicted, witnessed []lifecycleEff
 	}
 }
 
-// executeDeferredLifecycleEffects executes the deferred effects a valid
-// prediction returned, at the caller's site after every lock has been
-// released. Caller-bound skips: a sentinel writes only when the child has a
-// sentinel file. Effects the adapter already executed under the caller's
-// locks (activity, presentation, recorded exit, waiter release) are not
-// deferred and are ignored here.
 // failSafeRunChildTransition is the fixed fail-safe for an illegal transition
 // in runChild's owned continuation paths (attemptReturned, attemptOutcome,
 // promptContinuation, parkRequested). A failed prediction leaves the run with
@@ -443,6 +437,12 @@ func (s *Supervisor) failSafeRunChildTransition(child *childRuntime, result chil
 	s.executeDeferredLifecycleEffects(child, eff)
 }
 
+// executeDeferredLifecycleEffects executes the deferred effects a valid
+// prediction returned, at the caller's site after every lock has been
+// released. Caller-bound skips: a sentinel writes only when the child has a
+// sentinel file. Effects the adapter already executed under the caller's
+// locks (activity, presentation, recorded exit, waiter release) are not
+// deferred and are ignored here.
 func (s *Supervisor) executeDeferredLifecycleEffects(child *childRuntime, eff []lifecycleEffect) {
 	for _, e := range eff {
 		switch e.kind {
