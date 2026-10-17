@@ -2690,19 +2690,23 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 					s.reportLifecycleError(child, startFailErr)
 				}
 			}()
-			child.mu.Lock()
-			// Shadow: attemptPreparing clears the phase presentation even while
-			// another parallel attempt runs; the legacy clear is its mutation.
-			_, _, prepErr := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptPreparing, class: child.lc.class}, func() legacyLifecycleWitness {
-				w := legacyLifecycleWitness{}
-				child.phase = ""
-				child.phaseLabel = ""
-				w.locked = append(w.locked, lifecycleEffect{kind: effectClearPresentation})
-				return w
-			})
-			phaseRoster := child.roster
-			phaseRosterFile := child.rosterFile
-			child.mu.Unlock()
+			// The locked section owns its Unlock via defer so a panic between
+			// Lock and the startFailed defer cannot leave child.mu held.
+			phaseRoster, phaseRosterFile, prepErr := func() (*rosterconfig.Config, string, error) {
+				child.mu.Lock()
+				defer child.mu.Unlock()
+				// Shadow: attemptPreparing clears the phase presentation even
+				// while another parallel attempt runs; the legacy clear is its
+				// mutation.
+				_, _, prepErr := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptPreparing, class: child.lc.class}, func() legacyLifecycleWitness {
+					w := legacyLifecycleWitness{}
+					child.phase = ""
+					child.phaseLabel = ""
+					w.locked = append(w.locked, lifecycleEffect{kind: effectClearPresentation})
+					return w
+				})
+				return child.roster, child.rosterFile, prepErr
+			}()
 			if prepErr != nil {
 				s.reportLifecycleError(child, prepErr)
 			}
@@ -3044,19 +3048,23 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 					s.reportLifecycleError(child, startFailErr)
 				}
 			}()
-			child.mu.Lock()
-			// Shadow: attemptPreparing clears the phase presentation even while
-			// another parallel attempt runs; the legacy clear is its mutation.
-			_, _, prepErr := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptPreparing, class: child.lc.class}, func() legacyLifecycleWitness {
-				w := legacyLifecycleWitness{}
-				child.phase = ""
-				child.phaseLabel = ""
-				w.locked = append(w.locked, lifecycleEffect{kind: effectClearPresentation})
-				return w
-			})
-			phaseRoster := child.roster
-			phaseRosterFile := child.rosterFile
-			child.mu.Unlock()
+			// The locked section owns its Unlock via defer so a panic between
+			// Lock and the startFailed defer cannot leave child.mu held.
+			phaseRoster, phaseRosterFile, prepErr := func() (*rosterconfig.Config, string, error) {
+				child.mu.Lock()
+				defer child.mu.Unlock()
+				// Shadow: attemptPreparing clears the phase presentation even
+				// while another parallel attempt runs; the legacy clear is its
+				// mutation.
+				_, _, prepErr := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptPreparing, class: child.lc.class}, func() legacyLifecycleWitness {
+					w := legacyLifecycleWitness{}
+					child.phase = ""
+					child.phaseLabel = ""
+					w.locked = append(w.locked, lifecycleEffect{kind: effectClearPresentation})
+					return w
+				})
+				return child.roster, child.rosterFile, prepErr
+			}()
 			if prepErr != nil {
 				s.reportLifecycleError(child, prepErr)
 			}
