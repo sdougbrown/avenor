@@ -4,12 +4,12 @@ package stable
 //
 // The pure machine in runtime_lifecycle.go only predicts. This file commits
 // the prediction field by field (exec, attempts, completion, pending probe,
-// shutdown and writer stages) and executes the owned locked effects:
+// shutdown and writer stages). It executes the owned locked effects:
 // presentation, the settled/finalized waiter release and the recorded
 // outcome exit code. applyLifecycle requires the caller
 // to hold child.mu and acquires no lock. applyLifecycleWriteLocked requires
-// the caller to hold writeMu -> child.mu and is the only path that commits
-// the shutdown and writer dimensions; a failed transition commits the
+// the caller to hold writeMu -> child.mu; it is the only path that commits
+// the shutdown and writer dimensions. A failed transition commits the
 // dimension's stage through the shutdown/writer fail-safes below. Errors are
 // returned to the caller and must be reported with reportLifecycleError
 // outside every lock.
@@ -109,8 +109,8 @@ func (s *Supervisor) applyLifecycleWriteLocked(child *childRuntime, sig lifecycl
 }
 
 // errLifecycleFaultRecovery marks a slot-wait failure whose fault fail-safe
-// already ended the run, so the caller must not layer an idle-context end on
-// top of the ended state.
+// already ended the run. The caller must not layer an idle-context end on top
+// of the ended state.
 var errLifecycleFaultRecovery = errors.New("lifecycle fault recovery ended the run")
 
 // transactLifecycle is the shared transaction core: predict, then field-commit
@@ -130,8 +130,8 @@ func (s *Supervisor) transactLifecycle(child *childRuntime, sig lifecycleSignal,
 	predicted, cont, eff, err := next(pre, sig)
 	if err == nil && s.testHooks.lifecycleTransitionFailure != nil && s.testHooks.lifecycleTransitionFailure(sig.kind) {
 		// Test-injected failure: the transition is rejected exactly like an
-		// illegal one — state unchanged, no effects, no continuation — so a
-		// test can drive the fault fail-safe at a chosen site.
+		// illegal one, with state unchanged, no effects and no continuation.
+		// A test can therefore drive the fault fail-safe at a chosen site.
 		err = fmt.Errorf("lifecycle: injected transition failure for signal %d (%s)", sig.kind, signalKindName(sig.kind))
 		cont = continuation{contNone}
 	}
@@ -165,8 +165,8 @@ func (s *Supervisor) transactLifecycle(child *childRuntime, sig lifecycleSignal,
 }
 
 // ownedLifecycleEffect and deferredLifecycleEffect partition effectKind
-// between the adapter's two effect switches: the locked kinds execute under
-// the transaction's locks, the rest after every lock is released. A kind in
+// between the adapter's two effect switches. The locked kinds execute under
+// the transaction's locks; the rest after every lock is released. A kind in
 // neither set is a machine bug that both switches report.
 func ownedLifecycleEffect(k effectKind) bool {
 	switch k {
@@ -190,10 +190,10 @@ func deferredLifecycleEffect(k effectKind) bool {
 
 // applyOwnedLifecycleEffects executes the locked lifecycle effects this
 // adapter owns: presentation (phase, phaseLabel), the idle-end data
-// (exitCode, lastStopReason), the recorded outcome exit code and the waiter
-// release of a settled or finalized attempt, of a fault recovery and of the
-// final publication. An unknown effect kind is a machine bug; it returns an
-// error the caller reports outside every lock.
+// (exitCode, lastStopReason) and the recorded outcome exit code. It also
+// executes the waiter release of a settled or finalized attempt, of a fault
+// recovery and of the final publication. An unknown effect kind is a machine
+// bug; it returns an error the caller reports outside every lock.
 func (s *Supervisor) applyOwnedLifecycleEffects(child *childRuntime, eff []lifecycleEffect) error {
 	var unhandled error
 	for _, e := range eff {
@@ -234,9 +234,9 @@ func (s *Supervisor) applyOwnedLifecycleEffects(child *childRuntime, eff []lifec
 }
 
 // completePublicationFailSafe applies the publication's unconditional writes
-// when the completionPublished transition itself failed: it commits the
-// published completion (with its implied ended exec, empty attempts and no
-// pending probe, so the forced state satisfies the machine's invariants) and
+// when the completionPublished transition itself failed. It commits the
+// published completion with its implied ended exec, empty attempts and no
+// pending probe, so the forced state satisfies the machine's invariants. It
 // settles the turn waiters, so capacity accounting and registered waiters
 // still observe the ended runtime. The caller must hold child.mu and report
 // the transition error outside every lock.
@@ -249,7 +249,7 @@ func (s *Supervisor) completePublicationFailSafe(child *childRuntime) {
 }
 
 // parkTimeoutFailSafe applies the park-timeout writes when the parkTimedOut
-// transition itself failed: it sets completion to admission-closed when it is
+// transition itself failed. It sets completion to admission-closed when it is
 // still open, so admission readers reject prompts as the timeout did. The
 // caller must hold child.mu and report the transition error outside every
 // lock.
@@ -260,7 +260,7 @@ func (s *Supervisor) parkTimeoutFailSafe(child *childRuntime) {
 }
 
 // shutdownFailSafe applies the shutdown write when the shutdownRequested
-// transition itself failed: it commits the requested stage so admission gates
+// transition itself failed. It commits the requested stage so admission gates
 // reject new work and the parent cancel stays first-only. The caller must
 // hold writeMu -> child.mu and report the transition error outside every lock.
 func (s *Supervisor) shutdownFailSafe(child *childRuntime) {
@@ -268,8 +268,8 @@ func (s *Supervisor) shutdownFailSafe(child *childRuntime) {
 }
 
 // writerCloseBegunFailSafe applies the writer write when the writerCloseBegun
-// transition itself failed: it commits the closing stage (never regressing a
-// closed writer) so admission gates reject new writes while the drain runs.
+// transition itself failed. It commits the closing stage (never regressing a
+// closed writer), so admission gates reject new writes while the drain runs.
 // The caller must hold writeMu -> child.mu and report the transition error
 // outside every lock.
 func (s *Supervisor) writerCloseBegunFailSafe(child *childRuntime) {
@@ -279,7 +279,7 @@ func (s *Supervisor) writerCloseBegunFailSafe(child *childRuntime) {
 }
 
 // writerCloseFinishedFailSafe applies the writer write when the
-// writerCloseFinished transition itself failed: the sink Close already ran,
+// writerCloseFinished transition itself failed. The sink Close already ran,
 // so the closed stage commits and a repeat close never closes the sink again.
 // The caller must hold writeMu -> child.mu and report the transition error
 // outside every lock.
@@ -288,9 +288,9 @@ func (s *Supervisor) writerCloseFinishedFailSafe(child *childRuntime) {
 }
 
 // executeShutdownDeferredEffects executes the deferred effects a shutdown
-// transaction returned, binding the data captured under the caller's locks:
-// the consideration requests provider cancellation only for an eligible
-// captured turn, and the parent cancel fires on the captured callback. It must
+// transaction returned, binding the data captured under the caller's locks.
+// The consideration requests provider cancellation only for an eligible
+// captured turn. The parent cancel fires on the captured callback. It must
 // be called after every lock has been released.
 func (s *Supervisor) executeShutdownDeferredEffects(child *childRuntime, eff []lifecycleEffect, turn *cli.ProviderTurn, sessionID string, cancelProvider bool, cancel func()) {
 	for _, e := range eff {
@@ -320,20 +320,21 @@ func (s *Supervisor) reportLifecycleError(child *childRuntime, err error) {
 
 // failSafeRunChildTransition is the fixed fail-safe for an illegal transition
 // in runChild's owned paths and the idle-context end. The failed prediction
-// leaves the run with external waiters (a sentinel consumer, a held tree
-// token, a spawned peer waiting for capacity, an unsettled turn waiter) and a
-// machine state teardown would reject, so the fail-safe first applies
-// signalFault under child.mu: the fault moves exec to the ended form teardown
+// leaves external waiters: a sentinel consumer, a held tree token, a spawned
+// peer waiting for capacity, an unsettled turn waiter. It also leaves a
+// machine state teardown would reject. The fail-safe therefore first applies
+// signalFault under child.mu. The fault moves exec to the ended form teardown
 // accepts, clears a pending probe, zeroes the attempts and settles the turn
 // waiters. In that same critical section it records the terminal exit code
-// (and, on the idle-context path, the terminal phase and stop reason) so the
-// termination classification sees the real outcome. Outside the lock it then
-// releases the tree token, writes the terminal sentinel with the caller's
-// payload when this outcome has not written one, emits the session.end on the
-// idle-context path, and signals capacity when the failure happened on the
+// and on the idle-context path the terminal phase and stop reason. The
+// termination classification then sees the real outcome. Outside the lock it
+// then
+// releases the tree token. It writes the terminal sentinel with the caller's
+// payload when this outcome has not written one. It emits the session.end on
+// the idle-context path. It signals capacity when the failure happened on the
 // park path. It must be called outside child.mu, where the original deferred
-// effects would have run; the transition error is reported by the caller
-// before this helper runs, and a fault that itself fails is reported here.
+// effects would have run. The caller reports the transition error before this
+// helper runs; a fault that itself fails is reported here.
 func (s *Supervisor) failSafeRunChildTransition(child *childRuntime, fault lifecycleFault) {
 	child.mu.Lock()
 	_, _, err := s.applyLifecycle(child, lifecycleSignal{kind: signalFault, class: child.lc.class})
@@ -366,10 +367,11 @@ func (s *Supervisor) failSafeRunChildTransition(child *childRuntime, fault lifec
 }
 
 // lifecycleFault carries the terminal payload a fault fail-safe applies: the
-// sentinel/session data, whether the exit code and idle-end presentation must
-// be recorded under the lock, whether this outcome already wrote its
-// sentinel, and whether the failure happened on the park path (capacity
-// signal) or the idle-context path (session.end).
+// sentinel/session data. Its booleans state whether the exit code and
+// idle-end presentation must be recorded under the lock, and whether this
+// outcome already wrote its sentinel. They also state whether the failure
+// happened on the park path (capacity signal) or the idle-context path
+// (session.end).
 type lifecycleFault struct {
 	exitCode        int
 	reason          string
@@ -387,8 +389,8 @@ type lifecycleFault struct {
 // names (the doneOnce-protected complete), and effectCloseDone closes the
 // done channel — it must only run inside complete's doneOnce. Effects the
 // adapter already executed under the caller's locks (activity, presentation,
-// recorded exit, waiter release) are not deferred; they are skipped here, and
-// an unknown kind is counted and reported as a lifecycle error.
+// recorded exit, waiter release) are not deferred; they are skipped here. An
+// unknown kind is counted and reported as a lifecycle error.
 func (s *Supervisor) executeDeferredLifecycleEffects(child *childRuntime, eff []lifecycleEffect) {
 	for _, e := range eff {
 		switch e.kind {

@@ -3,21 +3,22 @@ package stable
 // Pure childRuntime lifecycle machine.
 //
 // This file owns the closed lifecycle dimensions (exec, attempts, shutdown,
-// writer, completion, attempt class), the signal/effect/continuation enums,
-// the field-specific predicates, and the pure transition function next. The
+// writer, completion, attempt class). It also owns the signal/effect/
+// continuation enums, the field-specific predicates, and the pure transition
+// function next. The
 // imperative interpreter (applyLifecycle in runtime_lifecycle_apply.go)
 // commits its predictions and executes the effects at the supervisor's call
 // sites.
 //
 // Invariants encoded here match the supervisor behavior they preserve:
-//   - The park timeout marks admission closed before done closes, so
-//     isCompleted() is true for both completionAdmissionClosed and
+//   - The park timeout marks admission closed before done closes.
+//     isCompleted() is therefore true for both completionAdmissionClosed and
 //     completionPublished (supervisor.go:2968 vs complete()).
 //   - writerClosing stays true after writerClosed is set and every admission
 //     gate keys on writerClosing (supervisor.go:4741-4757), so
 //     isWriterClosing() is true for both writer stages.
 //   - The local-slot failure window keeps the child parked until final
-//     publication: execParkedEnding at the complete boundary normalizes to
+//     publication. execParkedEnding at the complete boundary normalizes to
 //     execEnded only at completionPublished (supervisor.go:2257-2261,
 //     1206-1211, 2247-2255).
 
@@ -28,7 +29,7 @@ import (
 
 // execState is the execution dimension of the lifecycle. V (execReserved) is
 // the pre-publication state; S/I/R/P/PE/E (starting/idle/running/parked/
-// parked-ending/ended) are the states of the transition matrix below.
+// parked-ending/ended) are the transition matrix states below.
 type execState int
 
 const (
@@ -125,9 +126,9 @@ const (
 func (b completionBoundary) valid() bool { return b >= afterRunTeardown && b <= afterSpawnRollback }
 
 // lifecycleState is the closed lifecycle state struct. Dimensions outside it
-// (phase/label presentation, exitCode, lastStopReason, prompt queues and
-// channels, waiters, provider resources, output, permission state, decider
-// data) remain on the child and are written only by effects.
+// remain on the child and are written only by effects. They cover phase/label
+// presentation, exitCode, lastStopReason, prompt queues and channels,
+// waiters, provider resources, output, permission state, and decider data.
 type lifecycleState struct {
 	exec       execState
 	attempts   int
@@ -139,12 +140,12 @@ type lifecycleState struct {
 	// pendingProbe guards the two-step continuation protocol:
 	// attemptOutcome sets it to the probe it selects and the matching
 	// promptContinuation clears it. It is an internal guard dimension, not a
-	// lifecycle predicate: validateLifecycleState requires a pending probe to
-	// sit in S/I with open completion, and the signals blocked while it is set
-	// are exactly signalAttemptPreparing, signalAttemptStarted,
-	// signalParkRequested and signalIdleContextEnded (the signals that would
-	// prepare, start or park a new attempt, plus the idle-context end), so no
-	// attempt lifecycle interleaves with the protocol.
+	// lifecycle predicate. validateLifecycleState requires a pending probe to
+	// sit in S/I with open completion. The signals blocked while it is set are
+	// exactly signalAttemptPreparing, signalAttemptStarted,
+	// signalParkRequested and signalIdleContextEnded. Those are the signals
+	// that would prepare, start or park a new attempt, plus the idle-context
+	// end. No attempt lifecycle therefore interleaves with the protocol.
 	pendingProbe probeKind
 }
 
@@ -153,15 +154,15 @@ type lifecycleState struct {
 
 func (l *lifecycleState) isActive() bool { return l.exec == execRunning }
 
-// isParked recognizes both parked states: execParked and execParkedEnding
-// (the child is still parked at the final completion boundary when the
-// local-slot failure window ran through teardown).
+// isParked recognizes both parked states: execParked and execParkedEnding.
+// In the second state the child is still parked at the final completion
+// boundary, after the local-slot failure window ran through teardown.
 func (l *lifecycleState) isParked() bool {
 	return l.exec == execParked || l.exec == execParkedEnding
 }
 
-// isCompleted is true for both completionAdmissionClosed and completionPublished:
-// the park timeout sets completed before done closes, and RuntimePrompt must
+// isCompleted is true for both completionAdmissionClosed and completionPublished.
+// The park timeout sets completed before done closes, and RuntimePrompt must
 // reject in that window (supervisor.go:2968).
 func (l *lifecycleState) isCompleted() bool {
 	return l.completion == completionAdmissionClosed || l.completion == completionPublished
@@ -169,9 +170,9 @@ func (l *lifecycleState) isCompleted() bool {
 
 func (l *lifecycleState) isShuttingDown() bool { return l.shutdown == shutdownRequested }
 
-// isWriterClosing is true for both writerClosing and writerClosed: today
-// writerClosing stays true after writerClosed is set and every admission gate
-// keys on writerClosing (supervisor.go:4741-4757).
+// isWriterClosing is true for both writerClosing and writerClosed. Today
+// writerClosing stays true after writerClosed is set, and every admission
+// gate keys on writerClosing (supervisor.go:4741-4757).
 func (l *lifecycleState) isWriterClosing() bool {
 	return l.writer == writerClosing || l.writer == writerClosed
 }
@@ -248,9 +249,9 @@ type lifecycleSignal struct {
 	// sentinelReason is the caller-normalized sentinel reason (stop-reason
 	// fallback already applied). sessionIDConflict is computed by the caller
 	// from the raw stop reason. resultSessionID is the session ID written into
-	// a result sentinel: the attempt result's session ID for attemptOutcome and
-	// promptContinuation, and the caller-resolved session ID (read outside mu)
-	// for idleContextEnded.
+	// a result sentinel. It is the attempt result's session ID for
+	// attemptOutcome and promptContinuation, and the caller-resolved session
+	// ID (read outside mu) for idleContextEnded.
 	runKind           runKind
 	exitCode          int
 	stopReason        string
@@ -261,14 +262,15 @@ type lifecycleSignal struct {
 	retriesRemaining  bool
 
 	// promptContinuation inputs. terminalContextErr is sampled inside the
-	// terminal probe after the exit code is recorded and unlocked;
-	// resumeContextErr is sampled only after an actual dequeue; the retry
+	// terminal probe after the exit code is recorded and unlocked.
+	// resumeContextErr is sampled only after an actual dequeue. The retry
 	// probe dequeues before checking context.
 	//
-	// The retry probe's idle-context decision uses a single context sample:
-	// the run loop reads ctx.Err() once after the dequeue attempt
-	// (supervisor.go ~2315-2319), so a consumed prompt with a dead context is
-	// an idle-context end, and an empty queue with a dead context is one too.
+	// The retry probe's idle-context decision uses a single context sample.
+	// The run loop reads ctx.Err() once after the dequeue attempt
+	// (supervisor.go ~2315-2319). A consumed prompt with a dead context is
+	// therefore an idle-context end, and an empty queue with a dead context is
+	// one too.
 	// resumeContextErr and idleContextErr therefore describe the same single
 	// sample; the caller must not resample between the dequeue and the
 	// idle-end decision.
@@ -300,10 +302,11 @@ type lifecycleSignal struct {
 // descriptions, not operations: the interpreter in runtime_lifecycle_apply.go
 // binds resources and executes them at the supervisor's call sites. Locked effects
 // execute within applyLifecycle under mu; deferred ones return to the outer
-// lock owner. The retained imperative orchestration (writer drain and sink
-// Close, provider closing/cancelAnswers, registry/provider/broker cleanup,
-// rollback cancel/delete, post-complete capacity signaling) is deliberately
-// NOT modeled as effects — the interpreter keeps those at their exact sites.
+// lock owner. The retained imperative orchestration is deliberately NOT
+// modeled as effects; the interpreter keeps those at their exact sites. It
+// covers writer drain and sink Close, provider closing/cancelAnswers,
+// registry/provider/broker cleanup, rollback cancel/delete, and post-complete
+// capacity signaling.
 type effectKind int
 
 const (
@@ -339,14 +342,16 @@ type lifecycleEffect struct {
 	boundary completionBoundary // publishCompletion
 }
 
-// validateLifecycleState enforces the cross-dimension contract. It rejects: negative counts, running with count 0, positive counts with
-// any nonrunning exec, non-open completion with positive attempts, admission
-// closed outside parked/idle/parked-ending/ended, published outside ended,
-// reserved with non-open completion or nonzero attempts, direct attempt
-// counts above one, and a pending probe outside S/I with open completion. It
+// validateLifecycleState enforces the cross-dimension contract. It rejects
+// negative counts, running with count 0, and positive counts with any
+// nonrunning exec. It rejects non-open completion with positive attempts and
+// admission closed outside parked/idle/parked-ending/ended. It rejects
+// published outside ended and reserved with non-open completion or nonzero
+// attempts. It rejects direct attempt counts above one and a pending probe
+// outside S/I with open completion. It
 // deliberately does NOT reject running+shutdown, parked+shutdown,
-// parked+writerClosed, or running+phase done: the first two are orthogonal,
-// the local-slot failure explains the third, and session.end precedes active
+// parked+writerClosed, or running+phase done. The first two are orthogonal;
+// the local-slot failure explains the third. session.end precedes active
 // cleanup for the fourth.
 func validateLifecycleState(l lifecycleState) error {
 	if !l.exec.valid() {
@@ -406,8 +411,8 @@ func validateLifecycleState(l lifecycleState) error {
 }
 
 // requireOpen rejects signals that model attempt activity, admission or
-// continuation once completion has left open or the run has reached a terminal
-// exec state (cross-dimension contract).
+// continuation. It rejects them once completion has left open or the run has
+// reached a terminal exec state (cross-dimension contract).
 func requireOpen(l lifecycleState, sig signalKind) error {
 	if l.completion != completionOpen {
 		return fmt.Errorf("lifecycle: signal %d after completion %d", sig, l.completion)
@@ -486,12 +491,13 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 			"lifecycle: signal %d with attempt class %d on state class %d", sig.kind, sig.class, st.class)
 	}
 	// While a continuation probe is pending, the two-step protocol must
-	// complete before another attempt lifecycle begins: reject the signals
-	// that prepare, start or park a new attempt, and the idle-context end
-	// (the probe sequence is synchronous inside runChild, so no idle end can
-	// legitimately interleave). attemptStartFailed is not blocked because it
-	// only aborts an already-prepared attempt, and preparing is rejected
-	// while a probe is pending, so it cannot legitimately occur mid-protocol.
+	// complete before another attempt lifecycle begins. The machine rejects
+	// the signals that prepare, start or park a new attempt, and the
+	// idle-context end. The probe sequence is synchronous inside runChild, so
+	// no idle end can legitimately interleave. attemptStartFailed is not
+	// blocked: it only aborts an already-prepared attempt, and preparing is
+	// rejected while a probe is pending. It therefore cannot legitimately
+	// occur mid-protocol.
 	if st.pendingProbe != probeNone {
 		switch sig.kind {
 		case signalAttemptPreparing, signalAttemptStarted, signalParkRequested, signalIdleContextEnded:
@@ -835,10 +841,10 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 		// repeat no-op keep the publication idempotent. Panic recovery runs
 		// through this boundary too.
 		//
-		// runEnded deliberately does not read the writer dimension: unlike
+		// runEnded deliberately does not read the writer dimension. Unlike
 		// completionPublished, publication readiness is attested at the
-		// completionPublished transaction, not here, and a rollback child
-		// publishes with the writer still open.
+		// completionPublished transaction, not here. A rollback child publishes
+		// with the writer still open.
 		if st.completion != completionOpen && st.completion != completionAdmissionClosed {
 			return st, cont, nil, fmt.Errorf("lifecycle: run ended after completion %d", st.completion)
 		}
@@ -855,8 +861,8 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 		case execEnded, execParkedEnding:
 			// Repeat: the publication cue re-emits. A fault recovery ends the
 			// run before teardown, so the repeat is the normal post-fault
-			// publication path; without the cue an effect-driven teardown would
-			// never publish and external waiters would block on done forever.
+			// publication path. Without the cue an effect-driven teardown would
+			// never publish, and external waiters would block on done forever.
 			eff = append(eff, lifecycleEffect{kind: effectPublishCompletion, boundary: afterRunTeardown})
 		default:
 			return st, cont, nil, fmt.Errorf("lifecycle: run ended from exec state %d", st.exec)
@@ -864,7 +870,7 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 
 	case signalSpawnRolledBack:
 		// Source V/S, C0, attempts 0, after rollback cleanup. The signal emits
-		// the publication cue but leaves the child in V/S: a rollback child is
+		// the publication cue but leaves the child in V/S. A rollback child is
 		// only ever reserved or starting with completion open when complete
 		// runs (supervisor.go:1475-1480), so the publication itself ends it.
 		// Repeats re-emit the cue only while the child is still unpublished
@@ -919,7 +925,7 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 		}
 		if sig.boundary == afterSpawnRollback {
 			// Rollback publishes while the child is still reserved or starting
-			// with completion open (supervisor.go:1475-1480): the publication
+			// with completion open (supervisor.go:1475-1480). The publication
 			// itself is what ends a rollback child, with writer open and no
 			// shutdown. Parked-ending, ended and admission-closed sources are
 			// rejected.
@@ -939,13 +945,14 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 			)
 			break
 		}
-		// afterRunTeardown: source E/PE, C0/CA; requires a requested shutdown
-		// and a closing (or closed) writer — writer closing is sufficient when
-		// the sink is nil and writerClosed is never fabricated. These
-		// preconditions are intentionally stricter than complete() itself:
-		// all three teardown defers (runChild, runLoopChild, runTeamChild)
-		// order beginChildShutdown and closeChildEventWriter before complete,
-		// so every afterRunTeardown publication satisfies them. Do not loosen
+		// afterRunTeardown: source E/PE, C0/CA. It requires a requested
+		// shutdown and a closing (or closed) writer. Writer closing is
+		// sufficient when the sink is nil; writerClosed is never fabricated.
+		// These preconditions are intentionally stricter than complete()
+		// itself. All three teardown defers (runChild, runLoopChild,
+		// runTeamChild) order beginChildShutdown and closeChildEventWriter
+		// before complete. Every afterRunTeardown publication therefore
+		// satisfies them. Do not loosen
 		// them toward complete(); the afterSpawnRollback branch above is the
 		// only writer-open/shutdown-none exception.
 		switch st.exec {
@@ -992,12 +999,13 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 
 	case signalFault:
 		// Fail-safe recovery after an illegal transition elsewhere (a machine
-		// bug): legal from every state except a published completion, so the
-		// fault itself can never strand a run. It moves exec to the ended form
-		// the teardown accepts — execEnded, or execParkedEnding when the child
-		// is parked so the parked teardown path is preserved — clears a pending
-		// continuation probe, zeroes the attempt count and settles the turn
-		// waiters the failed path left behind. Completion, shutdown and writer
+		// bug). The fault is legal from every state except a published
+		// completion, so it can never strand a run. It moves exec to the ended
+		// form the teardown accepts: execEnded, or execParkedEnding when the
+		// child is parked, preserving the parked teardown path. It clears a
+		// pending continuation probe, zeroes the attempt count and settles the
+		// turn waiters the failed path left behind. Completion, shutdown and
+		// writer
 		// dimensions are untouched: the teardown's runEnded repeat and
 		// completionPublished still validate. The fault selects only contEnd
 		// and never resets a counted error.
