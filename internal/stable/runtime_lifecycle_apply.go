@@ -3,10 +3,10 @@ package stable
 // Imperative adapter for the childRuntime lifecycle machine.
 //
 // The pure machine in runtime_lifecycle.go only predicts. This file commits
-// the prediction field by field, executes the owned locked effects — activity
-// and attempt count with their mirrors, presentation, the settled/finalized
-// waiter release, the recorded outcome exit code, the parked and completed
-// mirrors and the shutdown/writer mirrors. applyLifecycle requires the caller
+// the prediction field by field (exec, attempts, completion, pending probe,
+// shutdown and writer stages) and executes the owned locked effects:
+// presentation, the settled/finalized waiter release and the recorded
+// outcome exit code. applyLifecycle requires the caller
 // to hold child.mu and acquires no lock. applyLifecycleWriteLocked requires
 // the caller to hold writeMu -> child.mu and is the only path that commits
 // the shutdown and writer dimensions; a failed transition commits the

@@ -115,8 +115,8 @@ func assertNoLifecycleErrors(t testing.TB, sup *Supervisor) {
 }
 
 // assertSupervisorLifecycleClean waits for every child completion channel
-// currently owned by the supervisor and then asserts both lifecycle counters
-// are zero. It must run after the test's teardown actions (shutdown, control
+// currently owned by the supervisor and then asserts the lifecycle error
+// counter is zero. It must run after the test's teardown actions (shutdown, control
 // stop, cancel, joins), never before them. Children deleted from the registry
 // before completion (spawn rollback) complete inside the rollback path, so
 // their counters still land here.
@@ -289,8 +289,8 @@ func finishUnrunChildAtCleanup(t *testing.T, sup *Supervisor, child *childRuntim
 // finishActiveSyntheticChild finishes the modeled lifecycle of an active
 // status fixture (machine attempts=1, no run goroutine): it settles the
 // modeled attempt, then establishes the shutdown boundary, closes the writer
-// and publishes completion. The adapter owns the settled signal's mirrors
-// and waiter release.
+// and publishes completion. The adapter owns the settled signal's waiter
+// release.
 func finishActiveSyntheticChild(s *Supervisor, child *childRuntime) {
 	child.mu.Lock()
 	_, _, err := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptSettled, class: child.lc.class})

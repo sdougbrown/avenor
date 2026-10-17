@@ -1217,8 +1217,8 @@ func (s *Supervisor) acquireLocalRuntimeSlot(ctx context.Context, child *childRu
 		}
 		if s.activeRuntimeCountLocked()+s.outstandingReservations < s.config.MaxRuntimes {
 			child.mu.Lock()
-			// The adapter commits the parked-to-idle transition and clears the
-			// parked mirror; a slot failure leaves both untouched.
+			// The adapter commits the parked-to-idle transition; a slot failure
+			// leaves the child parked.
 			_, _, err := s.applyLifecycle(child, lifecycleSignal{kind: signalLocalSlotAcquired, class: child.lc.class})
 			child.mu.Unlock()
 			s.controlMu.Unlock()
@@ -2398,8 +2398,7 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			nextPrompt, ok := child.waitForNextPrompt(s, ctx, s.config.ParkedRuntimeTimeout)
 			if !ok {
 				// parkWaitEnded is only the not-ok wait path, never the
-				// local-slot failure; the parked mirror stays set on a slot
-				// failure.
+				// local-slot failure; a slot failure leaves the child parked.
 				child.mu.Lock()
 				_, _, pweErr := s.applyLifecycle(child, lifecycleSignal{kind: signalParkWaitEnded, class: child.lc.class})
 				child.mu.Unlock()
@@ -3300,8 +3299,7 @@ func (c *childRuntime) waitForNextPrompt(s *Supervisor, ctx context.Context, par
 				return prompt, true
 			}
 			// parkTimedOut commits completion -> admission-closed under the
-			// same mu as the queue check; the adapter writes the completed
-			// mirror. No waiter settle, no done close.
+			// same mu as the queue check. No waiter settle, no done close.
 			_, _, err := s.applyLifecycle(c, lifecycleSignal{kind: signalParkTimedOut, class: c.lc.class})
 			if lifecycleTransitionFailed(err) {
 				s.parkTimeoutFailSafe(c)
@@ -4826,8 +4824,8 @@ func (child *childRuntime) complete(s *Supervisor, boundary completionBoundary) 
 	child.doneOnce.Do(func() {
 		child.releaseTreeToken()
 		child.mu.Lock()
-		// The adapter owns the publication: it commits the completion stage,
-		// writes the completed mirror and settles the turn waiters.
+		// The adapter owns the publication: it commits the completion stage
+		// and settles the turn waiters.
 		_, pubEff, pubErr := s.applyLifecycle(child, lifecycleSignal{
 			kind: signalCompletionPublished, class: child.lc.class, boundary: boundary,
 		})
@@ -4993,7 +4991,7 @@ func (s *Supervisor) beginChildShutdown(child *childRuntime) *permissionProvider
 	// only when no earlier shutdown request committed.
 	alreadyShuttingDown := child.lc.isShuttingDown()
 	// shutdownRequested is a dedicated dual-locked signal (writeMu ->
-	// child.mu); the adapter commits the requested stage and its mirror. The
+	// child.mu); the adapter commits the requested stage. The
 	// provider-cancel consideration and the first-only parent cancel execute
 	// below, after every lock is released.
 	_, shutdownEff, shutdownErr := s.applyLifecycleWriteLocked(child, lifecycleSignal{
@@ -5199,8 +5197,7 @@ func (s *Supervisor) finishDirectPermissionAnswerLocked(child *childRuntime, res
 func (s *Supervisor) closeChildEventWriter(child *childRuntime) {
 	child.writeMu.Lock()
 	// writerCloseBegun is a dedicated dual-locked signal (writeMu ->
-	// child.mu); the adapter commits the closing stage and its mirror before
-	// the drain. The wait for direct answers happens outside writeMu.
+	// child.mu); the adapter commits the closing stage before the drain. The wait for direct answers happens outside writeMu.
 	child.mu.Lock()
 	_, _, begunErr := s.applyLifecycleWriteLocked(child, lifecycleSignal{
 		kind: signalWriterCloseBegun, class: child.lc.class,

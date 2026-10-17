@@ -37,12 +37,11 @@ func TestReportLifecycleErrorCountsIllegalTransitions(t *testing.T) {
 	}
 }
 
-// TestApplyLifecycleWritesOwnedMirrors drives the signals whose effects the
-// adapter owns and asserts the mirrors it writes: the activity mirrors for
-// both attempt classes, the presentation writes, the idle-end data, the
-// settled/finalized waiter release, the parked mirror and the completed
-// mirror.
-func TestApplyLifecycleWritesOwnedMirrors(t *testing.T) {
+// TestApplyLifecycleCommitsOwnedEffects drives the signals whose effects the
+// adapter owns and asserts what it commits and executes: activity and attempt
+// count for both attempt classes, the presentation writes, the idle-end data,
+// the settled/finalized waiter release, parking and completion.
+func TestApplyLifecycleCommitsOwnedEffects(t *testing.T) {
 	apply := func(t *testing.T, s *Supervisor, child *childRuntime, sig lifecycleSignal) {
 		t.Helper()
 		child.mu.Lock()
