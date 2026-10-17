@@ -936,8 +936,9 @@ func TestRunChildTransitionFailureRunsFailSafe(t *testing.T) {
 		waitForStableDone(t, child)
 		joinTestChildCompletion(t, child)
 
-		// Exactly one capacity signal ran between the fault and the
-		// teardown's first signal: the fail-safe's park-path signal.
+		// At least one capacity signal ran between the fault and the
+		// teardown's first signal: the channel-identity check proves the
+		// fail-safe's park-path signal fired.
 		if capAtFault == nil || capAtShutdown == nil {
 			t.Fatal("injection did not observe the fault and the teardown")
 		}
@@ -986,8 +987,9 @@ func TestRunChildTransitionFailureRunsFailSafe(t *testing.T) {
 		waitForStableDone(t, child)
 		joinTestChildCompletion(t, child)
 
-		// Exactly one capacity signal ran between the fault and the
-		// teardown's first signal: the fail-safe's park-path signal.
+		// At least one capacity signal ran between the fault and the
+		// teardown's first signal: the channel-identity check proves the
+		// fail-safe's park-path signal fired.
 		if capAtFault == nil || capAtShutdown == nil {
 			t.Fatal("injection did not observe the fault and the teardown")
 		}
