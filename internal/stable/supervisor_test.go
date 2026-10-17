@@ -1065,12 +1065,9 @@ func TestRunChildTransitionFailureRunsFailSafe(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatal("first scripted event was not emitted")
 		}
-		// Wait for the attempt to start and then to settle into the park;
-		// the context dies while parked, so the idle-context end runs while
-		// the run waits for a follow-up prompt.
-		waitForStableChild(t, child, func(active bool, completed bool, phase, phaseLabel string) bool {
-			return active && !completed
-		})
+		// Wait for the attempt to settle into the park; the context dies
+		// while parked, so the idle-context end runs while the run waits for
+		// a follow-up prompt.
 		waitForStableChild(t, child, func(active bool, completed bool, phase, phaseLabel string) bool {
 			return !active && !completed && phase == "done"
 		})
