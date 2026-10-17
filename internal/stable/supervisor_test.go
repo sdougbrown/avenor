@@ -480,7 +480,7 @@ func TestRunChildAttemptUsesInitialSpawnSession(t *testing.T) {
 		child.done = make(chan struct{})
 	}
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
-	trackTestChildCompletion(t, sup, child)
+	trackTestChildCompletion(t, child)
 	finishUnrunChildAtCleanup(t, sup, child)
 	result := sup.runChildAttempt(context.Background(), child, "", "hello")
 	if result.exitCode != 0 {
@@ -572,7 +572,7 @@ func TestRunChildAttemptClearsPhaseAfterSessionEnd(t *testing.T) {
 		child.done = make(chan struct{})
 	}
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass, phase: "done", phaseLabel: "finished"})
-	trackTestChildCompletion(t, sup, child)
+	trackTestChildCompletion(t, child)
 	finishUnrunChildAtCleanup(t, sup, child)
 	result := sup.runChildAttempt(context.Background(), child, "", "hello")
 	if result.exitCode != 0 {
@@ -1364,7 +1364,7 @@ func TestRunChildTransitionFailureRunsFailSafe(t *testing.T) {
 			promptCh: make(chan struct{}, 1),
 		}
 		initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
-		trackTestChildCompletion(t, sup, child)
+		trackTestChildCompletion(t, child)
 		lifecycle := sup.installChildProvider(child, provider, child.session)
 		// An admitted direct answer makes the provider-cancel consideration
 		// eligible, so the failed transition must still reach RequestCancel.
@@ -1419,7 +1419,7 @@ func TestRunChildTransitionFailureRunsFailSafe(t *testing.T) {
 			promptCh:    make(chan struct{}, 1),
 		}
 		initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
-		trackTestChildCompletion(t, sup, child)
+		trackTestChildCompletion(t, child)
 
 		sup.closeChildEventWriter(child)
 
@@ -1463,7 +1463,7 @@ func TestRunChildTransitionFailureRunsFailSafe(t *testing.T) {
 			promptCh:    make(chan struct{}, 1),
 		}
 		initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
-		trackTestChildCompletion(t, sup, child)
+		trackTestChildCompletion(t, child)
 
 		sup.closeChildEventWriter(child)
 
@@ -1689,7 +1689,7 @@ func TestShutdownRejectsSpawnAfterReservationBoundary(t *testing.T) {
 		promptCh: make(chan struct{}, 1),
 	}
 	initializeTestLifecycle(t, child, testLifecycleOptions{id: "rt_existing", exec: execStarting, class: directAttemptClass})
-	trackTestChildCompletion(t, sup, child)
+	trackTestChildCompletion(t, child)
 	child.cancelFn = func() {
 		close(cancelStarted)
 		<-releaseCancel
@@ -1757,7 +1757,7 @@ func TestShutdownClosesPermissionAdmissionBeforeManagedHTTPTeardown(t *testing.T
 	writer := &runtimeFanoutWriter{base: child.eventWriter, runtimeID: child.id, child: child, supervisor: sup, control: sup.control}
 	lifecycle := sup.installChildProvider(child, &permRecordingProvider{}, runtime.Session{SessionID: "ses_shutdown_permission_boundary"})
 	initializeTestLifecycle(t, child, testLifecycleOptions{id: "rt_shutdown_permission_boundary", exec: execStarting, class: directAttemptClass})
-	trackTestChildCompletion(t, sup, child)
+	trackTestChildCompletion(t, child)
 	child.cancelFn = func() {
 		cancel()
 		finishSyntheticRunChild(sup, child)
@@ -1807,7 +1807,7 @@ func TestConcurrentShutdownDoesNotCloseChannelTwice(t *testing.T) {
 	cancelled := make(chan struct{})
 	child := &childRuntime{id: "rt_concurrent_shutdown", done: make(chan struct{})}
 	initializeTestLifecycle(t, child, testLifecycleOptions{id: "rt_concurrent_shutdown", exec: execStarting, class: directAttemptClass})
-	trackTestChildCompletion(t, sup, child)
+	trackTestChildCompletion(t, child)
 	child.cancelFn = func() {
 		close(cancelled) // a second invocation would panic and fail the test
 		finishSyntheticRunChild(sup, child)
@@ -4016,7 +4016,7 @@ func TestStableWaitersRouteSameRequestIDThroughScopedResolvers(t *testing.T) {
 			promptCh: make(chan struct{}, 1),
 		}
 		initializeTestLifecycle(t, w.child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
-		trackTestChildCompletion(t, sup, w.child)
+		trackTestChildCompletion(t, w.child)
 		sup.runtimes[w.runtimeID] = w.child
 		finishUnrunChildAtCleanup(t, sup, w.child)
 	}
@@ -5952,7 +5952,7 @@ func TestSendToParentTimeoutInjectsSyntheticPrompt(t *testing.T) {
 		child.done = make(chan struct{})
 	}
 	initializeTestLifecycle(t, parent, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
-	trackTestChildCompletion(t, sup, parent)
+	trackTestChildCompletion(t, parent)
 	finishUnrunChildAtCleanup(t, sup, parent)
 	sup.runtimes[parent.id] = parent
 	registerSyntheticChild(t, sup, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
@@ -5988,7 +5988,7 @@ func TestSendToParentTimeoutCancelledByPrompt(t *testing.T) {
 		child.done = make(chan struct{})
 	}
 	initializeTestLifecycle(t, parent, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
-	trackTestChildCompletion(t, sup, parent)
+	trackTestChildCompletion(t, parent)
 	finishUnrunChildAtCleanup(t, sup, parent)
 	sup.runtimes[parent.id] = parent
 	registerSyntheticChild(t, sup, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})

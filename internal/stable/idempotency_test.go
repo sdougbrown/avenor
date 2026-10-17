@@ -844,7 +844,7 @@ func TestIdempotencyKeyedSpawnAllowedWhenLabelHolderCompleted(t *testing.T) {
 	// through the spawn-rollback boundary before registration.
 	initializeTestLifecycle(t, completed, testLifecycleOptions{id: "rt_done_1", exec: execReserved, class: directAttemptClass})
 	finishSyntheticRollback(sup, completed)
-	trackTestChildCompletion(t, sup, completed)
+	trackTestChildCompletion(t, completed)
 	sup.controlMu.Lock()
 	sup.runtimes[completed.id] = completed
 	sup.controlMu.Unlock()

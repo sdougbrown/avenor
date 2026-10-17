@@ -132,12 +132,12 @@ func TestStablePhaseRosterSuppliesThinkingUnlessRunOverridesIt(t *testing.T) {
 				if kind == "loop" {
 					cfg := &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "work", Prompt: "work", RosterEntry: "horse"}}}
 					initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
-					trackTestChildCompletion(t, sup, child)
+					trackTestChildCompletion(t, child)
 					go sup.runLoopChild(context.Background(), child, cfg, 0, 1, "", "", "", tc.runThinking, "", "")
 				} else {
 					cfg := &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work", RosterEntry: "horse"}}}
 					initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
-					trackTestChildCompletion(t, sup, child)
+					trackTestChildCompletion(t, child)
 					go sup.runTeamChild(context.Background(), child, cfg, 0, 1, "", "", "", tc.runThinking, "", "")
 				}
 				select {
@@ -225,7 +225,7 @@ func TestStableLoopPhaseCachedSelectionKeepsRosterThinking(t *testing.T) {
 	}
 	cfg := &looprunner.LoopConfig{MaxIterations: 2, Loop: []phaseconfig.Phase{{Name: "work", Prompt: "work", RosterEntry: "horse"}}}
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
-	trackTestChildCompletion(t, sup, child)
+	trackTestChildCompletion(t, child)
 	go sup.runLoopChild(context.Background(), child, cfg, 0, 1, "", "", "", "", "", "")
 	select {
 	case <-child.done:

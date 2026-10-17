@@ -75,7 +75,7 @@ func initializeTestLifecycle(t testing.TB, child *childRuntime, opts testLifecyc
 func registerSyntheticChild(t *testing.T, sup *Supervisor, child *childRuntime, opts testLifecycleOptions) {
 	t.Helper()
 	initializeTestLifecycle(t, child, opts)
-	trackTestChildCompletion(t, sup, child)
+	trackTestChildCompletion(t, child)
 	sup.runtimes[child.id] = child
 }
 
@@ -95,7 +95,7 @@ func newTestChildLifecycle(t *testing.T, sup *Supervisor, opts testLifecycleOpti
 		promptCh: make(chan struct{}, 1),
 	}
 	initializeTestLifecycle(t, child, opts)
-	trackTestChildCompletion(t, sup, child)
+	trackTestChildCompletion(t, child)
 	return child
 }
 
@@ -104,7 +104,7 @@ func newTestChildLifecycle(t *testing.T, sup *Supervisor, opts testLifecycleOpti
 // join. A join failure fails the cleanup fatally, so the lifecycle counters
 // are never read while a child is still tearing down; the counter assertion
 // itself belongs to the owner-level cleanup.
-func trackTestChildCompletion(t *testing.T, sup *Supervisor, child *childRuntime) {
+func trackTestChildCompletion(t *testing.T, child *childRuntime) {
 	t.Helper()
 	t.Cleanup(func() {
 		joinTestChildCompletionFatal(t, child)
@@ -322,5 +322,5 @@ func initializeCompletedTestChild(t *testing.T, sup *Supervisor, child *childRun
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execEnded, completion: completionPublished, class: directAttemptClass})
 	close(child.done)
 	closeTestRunJoin(child)
-	trackTestChildCompletion(t, sup, child)
+	trackTestChildCompletion(t, child)
 }
