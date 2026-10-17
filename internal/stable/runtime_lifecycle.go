@@ -339,8 +339,8 @@ const (
 	effectSetAgentPresentation                        // agentStatusObserved
 	effectSetSuccessPresentation                      // successPresented
 	effectSetSessionEndPresentation                   // sessionEndObserved
-	effectSetIdleEndData                              // idleContextEnded
-	effectRecordOutcomeExit                           // attemptOutcome terminal/decider cases
+	effectSetIdleEndData                              // idleContextEnded; signalFault idle end
+	effectRecordOutcomeExit                           // attemptOutcome terminal/decider cases; signalFault
 	effectSettleTurnWaiters                           // settled→0; workflowFinalized; completionPublished
 	effectReleaseTreeToken                            // attemptReturned
 	effectWriteSentinel                               // attemptOutcome success/end/decider; promptContinuation terminal probe; idleContextEnded

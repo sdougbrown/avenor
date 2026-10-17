@@ -342,6 +342,7 @@ func (s *Supervisor) reportLifecycleError(child *childRuntime, err error) {
 // caller reports the transition error before this helper runs; a fault that
 // itself fails is reported here.
 func (s *Supervisor) failSafeRunChildTransition(child *childRuntime, fault lifecycleFault) {
+	child.mu.Lock()
 	sig := lifecycleSignal{kind: signalFault, class: child.lc.class}
 	if fault.recordExit {
 		sig.recordExit = true
@@ -352,7 +353,6 @@ func (s *Supervisor) failSafeRunChildTransition(child *childRuntime, fault lifec
 		sig.idleExitCode = fault.exitCode
 		sig.idleStopReason = fault.reason
 	}
-	child.mu.Lock()
 	_, _, err := s.applyLifecycle(child, sig)
 	child.mu.Unlock()
 	if err != nil {
@@ -379,7 +379,9 @@ func (s *Supervisor) failSafeRunChildTransition(child *childRuntime, fault lifec
 // idle-end presentation); the bare fault sets neither. sentinelWritten states
 // whether this outcome already wrote its sentinel. They also state whether the
 // failure happened on the park path (capacity signal) or the idle-context path
-// (session.end).
+// (session.end). An idle-end fault records the same exit code through both
+// effects, so idleEnd callers set recordExit with the same exitCode
+// (idleEndFault does both).
 type lifecycleFault struct {
 	exitCode        int
 	reason          string

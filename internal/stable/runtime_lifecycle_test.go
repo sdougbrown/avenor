@@ -277,8 +277,8 @@ func TestRuntimeLifecycleMatrixRows(t *testing.T) {
 		{
 			// The workflow gate applies only to the exit-0 branch: a
 			// workflow-direct nonretryable nonzero outcome still probes the
-			// terminal prompt queue (supervisor.go:2272-2294; the workflowID
-			// gate at 2230-2240 is success-only).
+			// terminal prompt queue (runChild's terminal-prompt probe; its
+			// workflowID gate is success-only).
 			name:  "outcome workflow-direct terminal failure probes the terminal prompt",
 			start: idleDirect(),
 			signal: lifecycleSignal{
@@ -453,7 +453,7 @@ func TestRuntimeLifecycleMatrixRows(t *testing.T) {
 			want:   lifecycleState{exec: execParked, completion: completionAdmissionClosed, class: directAttemptClass},
 		},
 		{
-			// The not-ok park wait (context canceled, supervisor.go:2956-2957)
+			// The not-ok park wait (context canceled in waitForNextPrompt)
 			// resumes to idle with completion still open.
 			name:   "park wait ended from parked with open completion resumes to idle",
 			start:  lifecycleState{exec: execParked, class: directAttemptClass},
@@ -535,7 +535,7 @@ func TestRuntimeLifecycleMatrixRows(t *testing.T) {
 		},
 		{
 			// The rollback cue leaves the child in V/S: the publication itself
-			// ends a rollback child (supervisor.go:1475-1480).
+			// ends a rollback child (spawnReserved's reservation rollback).
 			name:   "rollback from reserved emits the publication cue unchanged",
 			start:  lifecycleState{},
 			signal: lifecycleSignal{kind: signalSpawnRolledBack, boundary: afterSpawnRollback},
@@ -558,7 +558,7 @@ func TestRuntimeLifecycleMatrixRows(t *testing.T) {
 		{
 			// Panic-recovery teardown: a starting child (attempt never
 			// incremented) ends through the teardown boundary
-			// (supervisor.go:2141-2167).
+			// (runChild's teardown defer).
 			name:   "run ended from starting publishes at teardown boundary",
 			start:  directState(execStarting),
 			signal: lifecycleSignal{kind: signalRunEnded, class: directAttemptClass, boundary: afterRunTeardown},
@@ -608,7 +608,7 @@ func TestRuntimeLifecycleMatrixRows(t *testing.T) {
 		{
 			// A rollback publication runs while the child is still reserved with
 			// completion open, with writer open and no shutdown, and the
-			// publication itself ends the child (supervisor.go:1475-1480).
+			// publication itself ends the child (spawnReserved's reservation rollback).
 			name:   "rollback publication from reserved ends the child",
 			start:  lifecycleState{},
 			signal: lifecycleSignal{kind: signalCompletionPublished, boundary: afterSpawnRollback},
@@ -631,7 +631,7 @@ func TestRuntimeLifecycleMatrixRows(t *testing.T) {
 		},
 		{
 			// An empty label carries an empty payload label: the caller keeps the
-			// previous label (supervisor.go:4860-4864).
+			// previous label (the agent.status fanout in writeLocked).
 			name:  "agent status observed with phase and empty label carries empty label",
 			start: idleDirect(),
 			signal: lifecycleSignal{
@@ -652,7 +652,7 @@ func TestRuntimeLifecycleMatrixRows(t *testing.T) {
 		},
 		{
 			// An empty stop reason is absent from the payload: the effect leaves
-			// the stored reason untouched (supervisor.go:4895-4897).
+			// the stored reason untouched (the session.end fanout in writeLocked).
 			name:   "session end observed sets done and keeps empty reason",
 			start:  runningDirect(),
 			signal: lifecycleSignal{kind: signalSessionEndObserved, stopReason: ""},
@@ -920,7 +920,7 @@ func TestRuntimeLifecycleInvalidSources(t *testing.T) {
 			lifecycleSignal{kind: signalParkRequested, runKind: runKindOrdinaryDirect}},
 		{"park requested from running", runningDirect(),
 			lifecycleSignal{kind: signalParkRequested, runKind: runKindOrdinaryDirect}},
-		// Only runChild parks (supervisor.go:2243); loop/team children never
+		// Only runChild parks; loop/team children never
 		// park, so a workflow-class park signal is rejected from every source.
 		{"park requested from workflow child in starting", workflowState(execStarting, 0),
 			lifecycleSignal{kind: signalParkRequested, class: workflowAttemptClass, runKind: runKindOrdinaryDirect}},
@@ -965,7 +965,7 @@ func TestRuntimeLifecycleInvalidSources(t *testing.T) {
 		{"teardown publication with open writer", lifecycleState{exec: execEnded, shutdown: shutdownRequested},
 			lifecycleSignal{kind: signalCompletionPublished, boundary: afterRunTeardown}},
 		// Rollback publication is only valid from a reserved or starting child
-		// with open completion (supervisor.go:1475-1480).
+		// with open completion (spawnReserved's reservation rollback).
 		{"rollback publication from parked ending", lifecycleState{exec: execParkedEnding, completion: completionAdmissionClosed, class: directAttemptClass},
 			lifecycleSignal{kind: signalCompletionPublished, boundary: afterSpawnRollback}},
 		{"rollback publication from ended", lifecycleState{exec: execEnded},
@@ -1473,7 +1473,7 @@ func TestRuntimeLifecyclePendingProbeGuard(t *testing.T) {
 
 // TestRuntimeLifecycleShutdownSlotAcquisition pins that a requested child
 // shutdown does not gate parking or local-slot acquisition: the slot gate
-// checks only the supervisor's shutdown (supervisor.go:1199-1216), so the
+// checks only the supervisor's shutdown (acquireLocalRuntimeSlot), so the
 // park/slot path moves parked→idle with shutdown requested.
 func TestRuntimeLifecycleShutdownSlotAcquisition(t *testing.T) {
 	st := idleDirect()
@@ -1691,7 +1691,7 @@ func TestRuntimeLifecycleWriterCloseStages(t *testing.T) {
 // starting child: the cleanup signal emits the publication cue with the state
 // unchanged, and the publication — valid only from V/S with completion open,
 // with writer open and no shutdown — is what ends the child
-// (supervisor.go:1475-1480).
+// (spawnReserved's reservation rollback).
 func TestRuntimeLifecycleRollback(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
