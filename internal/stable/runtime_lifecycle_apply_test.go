@@ -88,9 +88,9 @@ func TestCompareDeferredLifecycleEffectsCountsSequenceMismatch(t *testing.T) {
 }
 
 // TestTransactLifecycleCollectsOneSyntheticMismatch drives one divergent
-// still-legacy-owned mirror through the real transaction and asserts the
-// mismatch is counted without an illegal-transition error, with the detail
-// line emitted only into the captured stderr writer.
+// owned mirror through the real transaction and asserts the mismatch is
+// counted without an illegal-transition error, with the detail line emitted
+// only into the captured stderr writer.
 func TestTransactLifecycleCollectsOneSyntheticMismatch(t *testing.T) {
 	var buf bytes.Buffer
 	s := newLifecycleTestOwner()
@@ -100,7 +100,7 @@ func TestTransactLifecycleCollectsOneSyntheticMismatch(t *testing.T) {
 
 	child.mu.Lock()
 	_, _, err := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptPreparing, class: directAttemptClass}, func() legacyLifecycleWitness {
-		// The legacy mutation writes a divergent still-legacy-owned mirror.
+		// The legacy mutation writes a divergent owned mirror.
 		child.shuttingDown = true
 		return legacyLifecycleWitness{}
 	})
@@ -127,8 +127,8 @@ func TestTransactLifecycleCollectsOneSyntheticMismatch(t *testing.T) {
 	if got := s.lifecycleErrors.Load(); got != 0 {
 		t.Fatalf("lifecycleErrors = %d after reportLifecycleError, want 0", got)
 	}
-	if out := buf.String(); !strings.Contains(out, "lifecycle shadow mismatch (") || !strings.Contains(out, "rt_mismatch_transact") || strings.Contains(out, "lifecycle error (runtime") {
-		t.Fatalf("captured stderr = %q, want the per-detail shadow mismatch lines for the child", out)
+	if out := buf.String(); !strings.Contains(out, "lifecycle mirror mismatch (") || !strings.Contains(out, "rt_mismatch_transact") || strings.Contains(out, "lifecycle error (runtime") {
+		t.Fatalf("captured stderr = %q, want the per-detail mirror mismatch lines for the child", out)
 	}
 }
 
@@ -185,9 +185,9 @@ func TestTransactLifecycleLockedWitnessIsSoleDivergence(t *testing.T) {
 // per compared dimension with one divergent mirror on an otherwise valid
 // fixture, on an isolated owner whose counters are asserted exactly. The
 // adapter writes the mirrors it owns (activity, presentation, idle-end data,
-// recorded exit, parked, completion) itself, so a rogue write on a signal that
-// does not own that mirror still shows up as a mismatch, while a rogue write
-// the adapter overwrites does not.
+// recorded exit, parked, completion, shutdown, writer) itself, so a rogue
+// write on a signal that does not own that mirror still shows up as a
+// mismatch, while a rogue write the adapter overwrites does not.
 func TestCompareShadowTransactionCountsDivergentMirrors(t *testing.T) {
 	// prepareLegacy leaves the mirrors to the adapter and performs no locked
 	// effects: attemptPreparing's owned clear runs in the adapter.

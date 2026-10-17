@@ -1419,6 +1419,155 @@ func TestRunChildTransitionFailureRunsFailSafe(t *testing.T) {
 		}
 		assertFaultTeardown(t, sup, &buf, "rt_publication_fault", 1)
 	})
+
+	t.Run("failed shutdown still cancels provider and parent", func(t *testing.T) {
+		var buf bytes.Buffer
+		sup := newFaultSupervisor(t, "shutdown", &buf)
+		sup.testHooks.lifecycleTransitionFailure = func(site signalKind) bool { return site == signalShutdownRequested }
+		provider := &cancelUnblocksPermissionProvider{cancelCalled: make(chan struct{})}
+		cancelled := make(chan struct{})
+		var cancels atomic.Int32
+		child := &childRuntime{
+			id:           "rt_shutdown_fault",
+			provider:     provider,
+			session:      runtime.Session{SessionID: "ses_shutdown_fault"},
+			eventWriter:  stableTestSink{},
+			lifecycleCtx: context.Background(),
+			cancelFn: func() {
+				cancels.Add(1)
+				select {
+				case <-cancelled:
+				default:
+					close(cancelled)
+				}
+			},
+			done:     make(chan struct{}),
+			promptCh: make(chan struct{}, 1),
+		}
+		initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
+		trackTestChildCompletion(t, sup, child)
+		lifecycle := sup.installChildProvider(child, provider, child.session)
+		// An admitted direct answer makes the provider-cancel consideration
+		// eligible, so the failed transition must still reach RequestCancel.
+		child.writeMu.Lock()
+		lifecycle.directAnswers = 1
+		child.writeMu.Unlock()
+
+		sup.beginChildShutdown(child)
+
+		// The fail-safe committed the requested stage and its mirror.
+		child.mu.Lock()
+		requested, mirror := child.lc.isShuttingDown(), child.shuttingDown
+		child.mu.Unlock()
+		if !requested || !mirror {
+			t.Fatalf("shutdown fail-safe left requested=%v mirror=%v, want both true", requested, mirror)
+		}
+		select {
+		case <-provider.cancelCalled:
+		case <-time.After(time.Second):
+			t.Fatal("provider RequestCancel did not run after the failed shutdown")
+		}
+		select {
+		case <-cancelled:
+		case <-time.After(time.Second):
+			t.Fatal("parent cancel did not run after the failed shutdown")
+		}
+		// A turn gate against a fresh non-closing lifecycle rejects only through
+		// the committed shutdown stage, exactly as the legacy flag gate did.
+		if turn, ok := sup.beginChildProviderTurn(child, newPermissionProviderLifecycle(child, provider, child.session.SessionID)); ok || turn != nil {
+			t.Fatal("beginChildProviderTurn admitted a turn after the failed shutdown")
+		}
+		sup.testHooks.lifecycleTransitionFailure = nil
+		finishSyntheticChildLifecycle(sup, child)
+		joinTestChildCompletion(t, child)
+		// The repeat shutdown considered provider cancel again but never
+		// re-fired the first-only parent cancel.
+		if got := cancels.Load(); got != 1 {
+			t.Fatalf("parent cancel ran %d times, want exactly once", got)
+		}
+		assertFaultTeardown(t, sup, &buf, "rt_shutdown_fault", 1)
+	})
+
+	t.Run("failed writer close begun still marks closing and closes the sink", func(t *testing.T) {
+		var buf bytes.Buffer
+		sup := newFaultSupervisor(t, "writerbegun", &buf)
+		sup.testHooks.lifecycleTransitionFailure = func(site signalKind) bool { return site == signalWriterCloseBegun }
+		sink := &orderedCloseSink{}
+		child := &childRuntime{
+			id:          "rt_writer_begun_fault",
+			eventWriter: sink,
+			done:        make(chan struct{}),
+			promptCh:    make(chan struct{}, 1),
+		}
+		initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
+		trackTestChildCompletion(t, sup, child)
+
+		sup.closeChildEventWriter(child)
+
+		// The fail-safe committed the closing stage and its mirror, so
+		// admission gates and the completion precondition observe the drain
+		// boundary, and the imperative sink Close still ran.
+		child.mu.Lock()
+		closing, mirror := child.lc.isWriterClosing(), child.writerClosing
+		closed := child.lc.isWriterClosed()
+		child.mu.Unlock()
+		if !closing || !mirror {
+			t.Fatalf("writer begun fail-safe left closing=%v mirror=%v, want both true", closing, mirror)
+		}
+		if !closed {
+			t.Fatal("writer close finished did not commit after the failed begun")
+		}
+		if got := sink.recordedOrder(); len(got) != 1 || got[0] != "close" {
+			t.Fatalf("sink order = %v, want exactly one close", got)
+		}
+		sup.testHooks.lifecycleTransitionFailure = nil
+		// A repeat close must not close the sink again; the finish helper then
+		// completes the child through the normal teardown boundary.
+		sup.closeChildEventWriter(child)
+		finishSyntheticChildLifecycle(sup, child)
+		joinTestChildCompletion(t, child)
+		if got := sink.recordedOrder(); len(got) != 1 {
+			t.Fatalf("repeat close order = %v, want a single close", got)
+		}
+		assertFaultTeardown(t, sup, &buf, "rt_writer_begun_fault", 1)
+	})
+
+	t.Run("failed writer close finished still marks closed", func(t *testing.T) {
+		var buf bytes.Buffer
+		sup := newFaultSupervisor(t, "writerfinished", &buf)
+		sup.testHooks.lifecycleTransitionFailure = func(site signalKind) bool { return site == signalWriterCloseFinished }
+		sink := &orderedCloseSink{}
+		child := &childRuntime{
+			id:          "rt_writer_finished_fault",
+			eventWriter: sink,
+			done:        make(chan struct{}),
+			promptCh:    make(chan struct{}, 1),
+		}
+		initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
+		trackTestChildCompletion(t, sup, child)
+
+		sup.closeChildEventWriter(child)
+
+		// Close already ran, so the fail-safe commits the closed stage and both
+		// mirrors, and a repeat close never closes the sink again.
+		child.mu.Lock()
+		closed, closedMirror, closingMirror := child.lc.isWriterClosed(), child.writerClosed, child.writerClosing
+		child.mu.Unlock()
+		if !closed || !closedMirror || !closingMirror {
+			t.Fatalf("writer finished fail-safe left closed=%v closedMirror=%v closingMirror=%v, want all true", closed, closedMirror, closingMirror)
+		}
+		if got := sink.recordedOrder(); len(got) != 1 || got[0] != "close" {
+			t.Fatalf("sink order = %v, want exactly one close", got)
+		}
+		sup.testHooks.lifecycleTransitionFailure = nil
+		sup.closeChildEventWriter(child)
+		finishSyntheticChildLifecycle(sup, child)
+		joinTestChildCompletion(t, child)
+		if got := sink.recordedOrder(); len(got) != 1 {
+			t.Fatalf("repeat close order = %v, want a single close", got)
+		}
+		assertFaultTeardown(t, sup, &buf, "rt_writer_finished_fault", 1)
+	})
 }
 
 func TestRunChildClearsPhaseDuringRetryBackoff(t *testing.T) {
@@ -4582,6 +4731,9 @@ func TestCloseChildEventWriterIsIdempotent(t *testing.T) {
 	defer func() { _ = sup.broker.Stop() }()
 	sink := &orderedCloseSink{}
 	child := &childRuntime{eventWriter: sink}
+	// Explicit lifecycle initialization: the fixture declares its attempt
+	// class instead of relying on zero values.
+	initializeTestLifecycle(t, child, testLifecycleOptions{class: directAttemptClass})
 	sup.closeChildEventWriter(child)
 	sup.closeChildEventWriter(child)
 	if got := sink.recordedOrder(); fmt.Sprint(got) != fmt.Sprint([]string{"close"}) {

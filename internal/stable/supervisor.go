@@ -3614,7 +3614,7 @@ func (s *Supervisor) sessionIdentityEntry(sessionID string) (sessionIdentityEntr
 func (s *Supervisor) beginWorkflowAttempt(child *childRuntime, provider runtime.Provider, session runtime.Session, identity effectiveIdentity) *permissionProviderLifecycle {
 	lifecycle := newPermissionProviderLifecycle(child, provider, session.SessionID)
 	child.writeMu.Lock()
-	lifecycle.closing = child.shuttingDown
+	lifecycle.closing = child.lc.isShuttingDown()
 	if lifecycle.closing {
 		lifecycle.cancelAnswers()
 	}
@@ -4942,7 +4942,7 @@ func newPermissionProviderLifecycle(child *childRuntime, provider runtime.Provid
 func (s *Supervisor) installChildProvider(child *childRuntime, provider runtime.Provider, session runtime.Session) *permissionProviderLifecycle {
 	lifecycle := newPermissionProviderLifecycle(child, provider, session.SessionID)
 	child.writeMu.Lock()
-	lifecycle.closing = child.shuttingDown
+	lifecycle.closing = child.lc.isShuttingDown()
 	if lifecycle.closing {
 		lifecycle.cancelAnswers()
 	}
@@ -4965,7 +4965,7 @@ func (s *Supervisor) ensureChildProviderLifecycle(child *childRuntime) *permissi
 	}
 	if child.providerLifecycle == nil || child.providerLifecycle.provider != child.provider {
 		child.providerLifecycle = newPermissionProviderLifecycle(child, child.provider, child.session.SessionID)
-		child.providerLifecycle.closing = child.shuttingDown
+		child.providerLifecycle.closing = child.lc.isShuttingDown()
 		if child.providerLifecycle.closing {
 			child.providerLifecycle.cancelAnswers()
 		}
@@ -4980,7 +4980,7 @@ func (s *Supervisor) ensureChildProviderLifecycle(child *childRuntime) *permissi
 func (s *Supervisor) beginChildProviderTurn(child *childRuntime, lifecycle *permissionProviderLifecycle) (*cli.ProviderTurn, bool) {
 	child.writeMu.Lock()
 	defer child.writeMu.Unlock()
-	if lifecycle == nil || lifecycle.closing || child.shuttingDown || child.writerClosing {
+	if lifecycle == nil || lifecycle.closing || child.lc.isShuttingDown() || child.lc.isWriterClosing() {
 		return nil, false
 	}
 	lifecycle.turn = lifecycle.providerCalls.NewTurn()
@@ -5000,7 +5000,7 @@ func (s *Supervisor) prepareChildPermissionClaim(ctx context.Context, child *chi
 	s.controlMu.Lock()
 	supervisorClosing := s.shuttingDown
 	s.controlMu.Unlock()
-	if supervisorClosing || child.shuttingDown || child.writerClosing || lifecycle == nil || lifecycle.closing || writer == nil || ctx.Err() != nil {
+	if supervisorClosing || child.lc.isShuttingDown() || child.lc.isWriterClosing() || lifecycle == nil || lifecycle.closing || writer == nil || ctx.Err() != nil {
 		child.writeMu.Unlock()
 		return false
 	}
@@ -5035,19 +5035,23 @@ func (s *Supervisor) prepareChildPermissionClaim(ctx context.Context, child *chi
 // closed without admitting a late direct answer in the cancellation window.
 func (s *Supervisor) beginChildShutdown(child *childRuntime) *permissionProviderLifecycle {
 	child.writeMu.Lock()
-	alreadyShuttingDown := child.shuttingDown
 	child.mu.Lock()
-	// Shadow: shutdownRequested is a dedicated dual-locked signal (writeMu ->
-	// child.mu). The legacy flag write runs in the closure; the provider-cancel
-	// consideration and first-only parent cancel are witnessed at their outer
-	// execution sites below.
+	// First-shutdown comes from the pre-state: the parent context cancel fires
+	// only when no earlier shutdown request committed.
+	alreadyShuttingDown := child.lc.isShuttingDown()
+	// shutdownRequested is a dedicated dual-locked signal (writeMu ->
+	// child.mu); the adapter commits the requested stage and its mirror. The
+	// provider-cancel consideration and the first-only parent cancel execute
+	// below, after every lock is released.
 	_, shutdownEff, shutdownErr := s.applyLifecycleWriteLocked(child, lifecycleSignal{
 		kind: signalShutdownRequested, class: child.lc.class,
-	}, func() legacyLifecycleWitness {
-		child.shuttingDown = true
-		return legacyLifecycleWitness{}
-	})
-	var shutdownWitness []lifecycleEffect
+	}, nil)
+	if lifecycleTransitionFailed(shutdownErr) {
+		// A failed transition must not leave admission open or allow a second
+		// parent cancel: commit the requested stage the legacy flag write
+		// produced.
+		s.shutdownFailSafe(child)
+	}
 	lifecycle := child.providerLifecycle
 	if child.provider != nil && (lifecycle == nil || lifecycle.provider != child.provider) {
 		lifecycle = newPermissionProviderLifecycle(child, child.provider, child.session.SessionID)
@@ -5070,22 +5074,19 @@ func (s *Supervisor) beginChildShutdown(child *childRuntime) *permissionProvider
 		sessionID = lifecycle.sessionID
 	}
 	child.writeMu.Unlock()
-	if cancelProvider && turn != nil {
-		turn.RequestCancel(sessionID, directPermissionJoinTimeout)
+	if lifecycleTransitionFailed(shutdownErr) {
+		// The transition failure must not skip the provider request cancel or
+		// the first parent cancel the legacy path always performed.
+		shutdownEff = []lifecycleEffect{{kind: effectConsiderProviderCancel}}
+		if !alreadyShuttingDown {
+			shutdownEff = append(shutdownEff, lifecycleEffect{kind: effectCancelContext})
+		}
 	}
-	// The provider-cancel consideration is reached on every shutdown request;
-	// whether a RequestCancel fires is legacy eligibility, not a lifecycle
-	// dimension.
-	shutdownWitness = append(shutdownWitness, lifecycleEffect{kind: effectConsiderProviderCancel})
-	if !alreadyShuttingDown && cancel != nil {
-		cancel()
-		shutdownWitness = append(shutdownWitness, lifecycleEffect{kind: effectCancelContext})
-	}
+	// The provider-cancel consideration runs on every shutdown request; whether
+	// a RequestCancel fires is captured eligibility, not a lifecycle dimension.
+	s.executeShutdownDeferredEffects(child, shutdownEff, turn, sessionID, cancelProvider, cancel)
 	if shutdownErr != nil {
 		s.reportLifecycleError(child, shutdownErr)
-	}
-	if !lifecycleTransitionFailed(shutdownErr) {
-		s.compareDeferredLifecycleEffects(child, shutdownEff, shutdownWitness, signalShutdownRequested)
 	}
 	return lifecycle
 }
@@ -5143,7 +5144,7 @@ func (s *Supervisor) beginDirectPermissionAnswer(child *childRuntime, binding *p
 	s.controlMu.Lock()
 	supervisorClosing := s.shuttingDown
 	s.controlMu.Unlock()
-	if supervisorClosing || child.shuttingDown || child.writerClosing {
+	if supervisorClosing || child.lc.isShuttingDown() || child.lc.isWriterClosing() {
 		return nil, false
 	}
 	child.mu.Lock()
@@ -5245,16 +5246,18 @@ func (s *Supervisor) finishDirectPermissionAnswerLocked(child *childRuntime, res
 // admitted before teardown has written its canonical permission.response.
 func (s *Supervisor) closeChildEventWriter(child *childRuntime) {
 	child.writeMu.Lock()
-	// Shadow: writerCloseBegun is a dedicated dual-locked signal (writeMu ->
-	// child.mu); the legacy writerClosing write runs in the closure. The wait
-	// for direct answers happens outside child.mu.
+	// writerCloseBegun is a dedicated dual-locked signal (writeMu ->
+	// child.mu); the adapter commits the closing stage and its mirror before
+	// the drain. The wait for direct answers happens outside writeMu.
 	child.mu.Lock()
 	_, _, begunErr := s.applyLifecycleWriteLocked(child, lifecycleSignal{
 		kind: signalWriterCloseBegun, class: child.lc.class,
-	}, func() legacyLifecycleWitness {
-		child.writerClosing = true
-		return legacyLifecycleWitness{}
-	})
+	}, nil)
+	if lifecycleTransitionFailed(begunErr) {
+		// A failed transition must still mark the writer closing, so admission
+		// gates and the completion precondition observe the drain boundary.
+		s.writerCloseBegunFailSafe(child)
+	}
 	child.mu.Unlock()
 	var finishedErr error
 	if child.directAnswers > 0 {
@@ -5266,18 +5269,22 @@ func (s *Supervisor) closeChildEventWriter(child *childRuntime) {
 		<-done
 		child.writeMu.Lock()
 	}
-	if !child.writerClosed && child.eventWriter != nil {
+	// Close runs under writeMu only when the writer is not already closed and
+	// the sink exists; a nil sink stays writerClosing.
+	if !child.lc.isWriterClosed() && child.eventWriter != nil {
 		_ = child.eventWriter.Close()
-		// Shadow: writerCloseFinished is sent only after Close was actually
-		// called on a nonnil sink, regardless of Close's ignored error. No
-		// signal when the sink is nil (the caller's guard stays writerClosing).
+		// writerCloseFinished is sent only after Close was actually called on a
+		// nonnil sink, regardless of Close's ignored error. No signal when the
+		// sink is nil (the caller's guard stays writerClosing).
 		child.mu.Lock()
 		_, _, finishedErr = s.applyLifecycleWriteLocked(child, lifecycleSignal{
 			kind: signalWriterCloseFinished, class: child.lc.class, closeCalled: true,
-		}, func() legacyLifecycleWitness {
-			child.writerClosed = true
-			return legacyLifecycleWitness{}
-		})
+		}, nil)
+		if lifecycleTransitionFailed(finishedErr) {
+			// Close already ran, so the closed stage must still commit; a repeat
+			// close must never call Close on the sink again.
+			s.writerCloseFinishedFailSafe(child)
+		}
 		child.mu.Unlock()
 	}
 	child.writeMu.Unlock()

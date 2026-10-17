@@ -5,15 +5,17 @@ package stable
 // The pure machine in runtime_lifecycle.go only predicts. This file commits
 // the prediction field by field, executes the owned locked effects — activity
 // and attempt count with their mirrors, presentation, the settled/finalized
-// waiter release, the recorded outcome exit code and the parked mirror — and
-// compares the remaining still-legacy-owned mirrors (completion, shutdown,
-// writer) against the prediction as shadow evidence. The legacy closure
-// performs only the still-legacy-owned locked mutations; it is deleted once
-// every effect is owned. applyLifecycle requires the caller to hold child.mu
-// and acquires no lock. applyLifecycleWriteLocked requires the caller to hold
-// writeMu -> child.mu and is the only path that commits the shutdown and
-// writer dimensions. Errors are returned to the caller and must be reported
-// with reportLifecycleError outside every lock.
+// waiter release, the recorded outcome exit code, the parked and completed
+// mirrors and the shutdown/writer mirrors — and compares every committed
+// mirror against the prediction as an adapter consistency check. The legacy
+// closure parameter remains for the retained imperative orchestration that
+// still runs inside callers' closures; it is deleted once every effect is
+// owned. applyLifecycle requires the caller to hold child.mu and acquires
+// no lock. applyLifecycleWriteLocked requires the caller to hold writeMu ->
+// child.mu and is the only path that commits the shutdown and writer
+// dimensions; a failed transition commits the legacy stage through the
+// shutdown/writer fail-safes below. Errors are returned to the caller and
+// must be reported with reportLifecycleError outside every lock.
 
 import (
 	"errors"
@@ -93,10 +95,10 @@ func signalKindName(k signalKind) string {
 // legacyLifecycleWitness records the still-legacy-owned locked effects the
 // closure actually performed under the caller's locks, in execution order.
 // Owned effects (activity/count, presentation, the waiter release, the
-// recorded exit, the completion mirror) are executed by the adapter and never
-// witnessed; deferred legacy effects (sentinels, capacity signals, session
-// ends, cancels) are witnessed at their outer execution sites and compared
-// with compareDeferredLifecycleEffects.
+// recorded exit, the completion mirror and the shutdown/writer mirrors) are
+// executed by the adapter and never witnessed; deferred legacy effects
+// (sentinels, capacity signals, session ends, cancels) are witnessed at their
+// outer execution sites and compared with compareDeferredLifecycleEffects.
 type legacyLifecycleWitness struct {
 	locked []lifecycleEffect
 }
@@ -217,7 +219,11 @@ func (s *Supervisor) transactLifecycle(child *childRuntime, sig lifecycleSignal,
 // other signal leaves the mirror alone, and the final publication deliberately
 // retains the obsolete parked value until the mirror is deleted. The completed
 // mirror is written only by the two signals the legacy code completed with:
-// parkTimedOut (admission closed before done) and completionPublished.
+// parkTimedOut (admission closed before done) and completionPublished. The
+// shutdown/writer mirrors are written only by the dual-locked signals:
+// shutdownRequested (shuttingDown), writerCloseBegun (writerClosing, staying
+// true after writerClosed as the legacy flags did) and writerCloseFinished
+// (writerClosed).
 func (s *Supervisor) applyOwnedLifecycleEffects(child *childRuntime, predicted lifecycleState, site signalKind, eff []lifecycleEffect) {
 	for _, e := range eff {
 		switch e.kind {
@@ -254,6 +260,14 @@ func (s *Supervisor) applyOwnedLifecycleEffects(child *childRuntime, predicted l
 		child.parked = predicted.isParked()
 	case signalParkTimedOut, signalCompletionPublished:
 		child.completed = predicted.completion != completionOpen
+	case signalShutdownRequested:
+		child.shuttingDown = predicted.isShuttingDown()
+	case signalWriterCloseBegun:
+		child.writerClosing = predicted.isWriterClosing()
+	case signalWriterCloseFinished:
+		// writerClosing stays true after writerClosed, as the legacy flags did.
+		child.writerClosing = predicted.isWriterClosing()
+		child.writerClosed = predicted.isWriterClosed()
 	}
 }
 
@@ -287,6 +301,59 @@ func (s *Supervisor) parkTimeoutFailSafe(child *childRuntime) {
 	child.completed = true
 }
 
+// shutdownFailSafe applies the legacy shutdown write when the
+// shutdownRequested transition itself failed: it commits the requested stage
+// and sets its mirror so admission gates reject new work and the parent cancel
+// stays first-only, exactly as the legacy flag write did. The caller must
+// hold writeMu -> child.mu and report the transition error outside every lock.
+func (s *Supervisor) shutdownFailSafe(child *childRuntime) {
+	child.lc.shutdown = shutdownRequested
+	child.shuttingDown = true
+}
+
+// writerCloseBegunFailSafe applies the legacy writer write when the
+// writerCloseBegun transition itself failed: it commits the closing stage
+// (never regressing a closed writer) and sets its mirror so admission gates
+// reject new writes while the drain runs. The caller must hold writeMu ->
+// child.mu and report the transition error outside every lock.
+func (s *Supervisor) writerCloseBegunFailSafe(child *childRuntime) {
+	if child.lc.writer == writerOpen {
+		child.lc.writer = writerClosing
+	}
+	child.writerClosing = true
+}
+
+// writerCloseFinishedFailSafe applies the legacy writer writes when the
+// writerCloseFinished transition itself failed: the sink Close already ran,
+// so the closed stage commits and a repeat close never closes the sink again;
+// the closing mirror stays true, as the legacy flags did. The caller must hold
+// writeMu -> child.mu and report the transition error outside every lock.
+func (s *Supervisor) writerCloseFinishedFailSafe(child *childRuntime) {
+	child.lc.writer = writerClosed
+	child.writerClosing = true
+	child.writerClosed = true
+}
+
+// executeShutdownDeferredEffects executes the deferred effects a shutdown
+// transaction returned, binding the data captured under the caller's locks:
+// the consideration requests provider cancellation only for an eligible
+// captured turn, and the parent cancel fires on the captured callback. It must
+// be called after every lock has been released.
+func (s *Supervisor) executeShutdownDeferredEffects(child *childRuntime, eff []lifecycleEffect, turn *cli.ProviderTurn, sessionID string, cancelProvider bool, cancel func()) {
+	for _, e := range eff {
+		switch e.kind {
+		case effectConsiderProviderCancel:
+			if cancelProvider && turn != nil {
+				turn.RequestCancel(sessionID, directPermissionJoinTimeout)
+			}
+		case effectCancelContext:
+			if cancel != nil {
+				cancel()
+			}
+		}
+	}
+}
+
 // reportLifecycleError counts every illegal transition and logs it. It must
 // be called outside all locks. An error that carries only
 // collected shadow-mismatch details is emitted here line by line; its
@@ -313,8 +380,8 @@ func (s *Supervisor) reportLifecycleError(child *childRuntime, err error) {
 }
 
 // compareShadowTransaction independently compares the committed prediction
-// against the legacy mirrors, presentation and locked-effect witness. Every
-// failed comparison increments lifecycleShadowMismatches.
+// against the mirrors, presentation and locked-effect witness. Every failed
+// comparison increments lifecycleShadowMismatches.
 func (s *Supervisor) compareShadowTransaction(child *childRuntime, pre lifecycleState, prePhase, preLabel string, preExit int, preReason string, predicted lifecycleState, eff []lifecycleEffect, witness legacyLifecycleWitness, site signalKind, sink *[]string) {
 	// Adapter consistency: the mirrors this adapter owns must match the state
 	// it just committed. These are not shadow comparisons — the adapter writes
@@ -346,23 +413,26 @@ func (s *Supervisor) compareShadowTransaction(child *childRuntime, pre lifecycle
 	if child.completed != (predicted.completion != completionOpen) {
 		s.countMirrorMismatch(child, site, fmt.Sprintf("completed: lc completion=%d mirror=%v", predicted.completion, child.completed), sink)
 	}
-	// Shutdown mirror.
+	// Shutdown mirror: the adapter writes it for the dedicated shutdown
+	// signal; a divergence here means the mirror write failed or a rogue
+	// writer touched the field.
 	if child.shuttingDown != predicted.isShuttingDown() {
-		s.countShadowMismatch(child, site, fmt.Sprintf("shuttingDown: legacy=%v lc=%v", child.shuttingDown, predicted.isShuttingDown()), sink)
+		s.countMirrorMismatch(child, site, fmt.Sprintf("shuttingDown: mirror=%v lc=%v", child.shuttingDown, predicted.isShuttingDown()), sink)
 	}
-	// Writer mirror: legacy writerClosing stays true after writerClosed.
+	// Writer mirror: the adapter writes it for the dedicated writer signals;
+	// legacy writerClosing stays true after writerClosed.
 	switch predicted.writer {
 	case writerOpen:
 		if child.writerClosing || child.writerClosed {
-			s.countShadowMismatch(child, site, fmt.Sprintf("writer open: legacy closing=%v closed=%v", child.writerClosing, child.writerClosed), sink)
+			s.countMirrorMismatch(child, site, fmt.Sprintf("writer open: closing=%v closed=%v", child.writerClosing, child.writerClosed), sink)
 		}
 	case writerClosing:
 		if !child.writerClosing || child.writerClosed {
-			s.countShadowMismatch(child, site, fmt.Sprintf("writer closing: legacy closing=%v closed=%v", child.writerClosing, child.writerClosed), sink)
+			s.countMirrorMismatch(child, site, fmt.Sprintf("writer closing: closing=%v closed=%v", child.writerClosing, child.writerClosed), sink)
 		}
 	case writerClosed:
 		if !child.writerClosed {
-			s.countShadowMismatch(child, site, "writer closed: legacy writerClosed=false", sink)
+			s.countMirrorMismatch(child, site, "writer closed: closed mirror=false", sink)
 		}
 	}
 	// Effective capacity exclusion (completed || parked) at all times. Both
@@ -571,10 +641,11 @@ func (s *Supervisor) compareDeferredLifecycleEffects(child *childRuntime, predic
 }
 
 // countShadowMismatch increments the mismatch counter and records the detail
-// of a failed comparison against a still-legacy-owned mirror or witnessed
-// effect. A nonnil sink collects the formatted line for emission after the
-// caller's locks are released; a nil sink (out-of-lock comparators, tests)
-// emits the line immediately.
+// of a failed comparison against a still-legacy-owned effect: the locked
+// witness must stay empty because every locked effect is adapter-owned. A
+// nonnil sink collects the formatted line for emission after the caller's
+// locks are released; a nil sink (out-of-lock comparators, tests) emits the
+// line immediately.
 func (s *Supervisor) countShadowMismatch(child *childRuntime, site signalKind, detail string, sink *[]string) {
 	s.countLifecycleComparisonMismatch(child, site, "lifecycle shadow mismatch", detail, sink)
 }
