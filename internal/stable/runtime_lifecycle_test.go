@@ -1,8 +1,8 @@
 package stable
 
-// Table and sequence tests for the pure childRuntime lifecycle machine
-// (issue #316, Stage 1). These tests drive only next() and the field-specific
-// predicates; no production call site or fixture is touched.
+// Table and sequence tests for the pure childRuntime lifecycle machine.
+// These tests drive only next() and the field-specific predicates; no
+// production call site or fixture is touched.
 
 import (
 	"context"
@@ -207,7 +207,7 @@ func TestRuntimeLifecycleMatrixRows(t *testing.T) {
 			},
 		},
 		{
-			name:   "finalized records the exit code the legacy path writes",
+			name:   "finalized records the exit code the finalization path writes",
 			start:  workflowState(execRunning, 2),
 			signal: lifecycleSignal{kind: signalWorkflowFinalized, class: workflowAttemptClass, exitCode: 3, workflowExitRecords: true},
 			want:   workflowState(execIdle, 0),
@@ -477,7 +477,7 @@ func TestRuntimeLifecycleMatrixRows(t *testing.T) {
 			want:   lifecycleState{exec: execIdle, completion: completionAdmissionClosed, class: directAttemptClass},
 		},
 		{
-			// Park-window rule (decision 4): the idle-context end while parked
+			// Park-window rule: the idle-context end while parked
 			// after the admission closed (local-slot failure trace) must retain
 			// the parked accounting exactly.
 			name:  "idle context ended while parked after admission closed retains parked",
@@ -747,8 +747,8 @@ func TestRuntimeLifecycleRepeats(t *testing.T) {
 		if !effectsEqual(eff, []lifecycleEffect{{kind: effectSettleTurnWaiters}}) {
 			t.Fatalf("repeat finalize effects = %v", eff)
 		}
-		// The exit-record variant carries the exit code the legacy path writes
-		// after finalization.
+		// The exit-record variant carries the exit code the finalization path
+		// writes after finalization.
 		out, _, eff = applyOK(t, out, lifecycleSignal{kind: signalWorkflowFinalized, class: workflowAttemptClass, exitCode: 2, workflowExitRecords: true})
 		if !effectsEqual(eff, []lifecycleEffect{
 			{kind: effectSettleTurnWaiters},
@@ -1345,7 +1345,7 @@ func TestRuntimeLifecycleRetryProbeContextTiming(t *testing.T) {
 }
 
 // TestRuntimeLifecycleTwoStepContinuationProtocol binds the two-step
-// continuation protocol (decision 5, inventory amendment 5): attemptOutcome
+// continuation protocol: attemptOutcome
 // arms pendingProbe with the probe it selects, the matching promptContinuation
 // consumes it, a mismatched probe kind is rejected with unchanged state, a
 // continuation without a pending probe is rejected, and a second attemptOutcome

@@ -134,7 +134,7 @@ func TestStablePhaseRosterSuppliesThinkingUnlessRunOverridesIt(t *testing.T) {
 					if child.done == nil {
 						child.done = make(chan struct{})
 					}
-					// Explicit lifecycle initialization (plan Stage 2 change 2): the
+					// Explicit lifecycle initialization: the
 					// fixture declares starting state and its attempt class instead of
 					// relying on zero values.
 					initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
@@ -145,7 +145,7 @@ func TestStablePhaseRosterSuppliesThinkingUnlessRunOverridesIt(t *testing.T) {
 					if child.done == nil {
 						child.done = make(chan struct{})
 					}
-					// Explicit lifecycle initialization (plan Stage 2 change 2): the
+					// Explicit lifecycle initialization: the
 					// fixture declares starting state and its attempt class instead of
 					// relying on zero values.
 					initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
@@ -239,7 +239,7 @@ func TestStableLoopPhaseCachedSelectionKeepsRosterThinking(t *testing.T) {
 	if child.done == nil {
 		child.done = make(chan struct{})
 	}
-	// Explicit lifecycle initialization (plan Stage 2 change 2): the
+	// Explicit lifecycle initialization: the
 	// fixture declares starting state and its attempt class instead of
 	// relying on zero values.
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})

@@ -1,12 +1,10 @@
 package stable
 
-// Stage 2 test lifecycle helpers (issue #316, plan decision 8 and the
-// standard gate). Every fixture that drives a lifecycle transition initializes
-// its synthetic child explicitly — options declare the lifecycle state,
-// attempt class and presentation data, never "derive from flags" — and every
-// supervisor-owning test registers the post-teardown counter assertion that
-// waits for owned child completion before asserting both lifecycle counters
-// are zero.
+// Test lifecycle helpers. Every fixture that drives a lifecycle transition
+// initializes its synthetic child explicitly — options declare the lifecycle
+// state, attempt class and presentation data, never "derive from flags" — and
+// every supervisor-owning test registers the post-teardown assertion that
+// waits for owned child completion before asserting lifecycleErrors is zero.
 
 import (
 	"testing"
@@ -102,8 +100,7 @@ func trackTestChildCompletion(t *testing.T, sup *Supervisor, child *childRuntime
 
 // newLifecycleTestOwner returns an explicit bare Supervisor owner for
 // synthetic fixtures that drive lifecycle transitions without a full
-// supervisor. It is nonnil by construction: there is no nil-owner fallback
-// (plan decision 8).
+// supervisor. It is nonnil by construction: there is no nil-owner fallback.
 func newLifecycleTestOwner() *Supervisor {
 	return &Supervisor{}
 }
@@ -181,8 +178,8 @@ func joinTestChild(t testing.TB, child *childRuntime, fatal bool) {
 // registers its own teardown cleanups: t.Cleanup runs last-in-first-out, so a
 // cleanup registered later would run before this one and race the assertion.
 // The cleanup stops admission by cancelling every owned runtime, waits for
-// all child completion channels and run-goroutine joins, then asserts both
-// counters are zero (plan standard gate).
+// all child completion channels and run-goroutine joins, then asserts
+// lifecycleErrors is zero.
 func newTestSupervisor(t *testing.T, cfg Config) *Supervisor {
 	t.Helper()
 	sup := NewSupervisor(cfg)
@@ -213,7 +210,7 @@ func stopAllTestRuntimes(sup *Supervisor) {
 // the owning supervisor (writerCloseBegun/Finished), then sends runEnded and
 // completes with afterRunTeardown. It must not re-enter beginChildShutdown:
 // the caller's cancel/shutdown action already established the shutdown
-// boundary (plan Stage 2 change 2).
+// boundary.
 func finishSyntheticRunChild(s *Supervisor, child *childRuntime) {
 	s.closeChildEventWriter(child)
 	child.mu.Lock()
@@ -250,7 +247,7 @@ func finishSyntheticChildLifecycle(s *Supervisor, child *childRuntime) {
 
 // finishSyntheticRollback finishes a reserved synthetic child through the
 // spawn-rollback boundary: spawnRolledBack then publication with
-// afterSpawnRollback (plan Stage 2 change 2, idempotency tombstone).
+// afterSpawnRollback.
 func finishSyntheticRollback(s *Supervisor, child *childRuntime) {
 	child.mu.Lock()
 	_, eff, err := s.applyLifecycle(child, lifecycleSignal{

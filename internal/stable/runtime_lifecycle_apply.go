@@ -9,9 +9,10 @@ package stable
 // mirrors and the shutdown/writer mirrors. applyLifecycle requires the caller
 // to hold child.mu and acquires no lock. applyLifecycleWriteLocked requires
 // the caller to hold writeMu -> child.mu and is the only path that commits
-// the shutdown and writer dimensions; a failed transition commits the legacy
-// stage through the shutdown/writer fail-safes below. Errors are returned to
-// the caller and must be reported with reportLifecycleError outside every lock.
+// the shutdown and writer dimensions; a failed transition commits the
+// dimension's stage through the shutdown/writer fail-safes below. Errors are
+// returned to the caller and must be reported with reportLifecycleError
+// outside every lock.
 
 import (
 	"errors"
@@ -21,8 +22,8 @@ import (
 )
 
 // childAttemptClass selects the immutable attempt class for a spawn: workflow
-// class when either LoopFile or TeamFile is nonempty, otherwise direct
-// (plan decision 5). Workflow-direct runs still use the direct class.
+// class when either LoopFile or TeamFile is nonempty, otherwise direct.
+// Workflow-direct runs still use the direct class.
 func childAttemptClass(params SpawnParams) attemptClass {
 	if params.LoopFile != "" || params.TeamFile != "" {
 		return workflowAttemptClass
@@ -123,7 +124,7 @@ func (s *Supervisor) transactLifecycle(child *childRuntime, sig lifecycleSignal,
 		}
 	}
 	// Capture the full pre-state under the caller's locks. Every state writer
-	// holds these locks, so the copy is consistent (plan decision 7).
+	// holds these locks, so the copy is consistent.
 	pre := child.lc
 
 	predicted, cont, eff, err := next(pre, sig)
@@ -148,7 +149,7 @@ func (s *Supervisor) transactLifecycle(child *childRuntime, sig lifecycleSignal,
 	}
 	// Field-commit the valid prediction. Ordinary fields are committed by
 	// both wrappers; shutdown/writer only by the dual-locked wrapper. Never
-	// store the whole predicted struct (plan decision 7).
+	// store the whole predicted struct.
 	child.lc.exec = predicted.exec
 	child.lc.attempts = predicted.attempts
 	child.lc.completion = predicted.completion

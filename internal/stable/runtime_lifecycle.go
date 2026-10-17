@@ -1,15 +1,15 @@
 package stable
 
-// Pure childRuntime lifecycle machine (issue #316, Stage 1).
+// Pure childRuntime lifecycle machine.
 //
 // This file owns the closed lifecycle dimensions (exec, attempts, shutdown,
 // writer, completion, attempt class), the signal/effect/continuation enums,
-// the field-specific predicates, and the pure transition function next.
-// Stage 1 scope: nothing outside this file and its test may reference these
-// symbols; the imperative interpreter (applyLifecycle), shadow mode and call
-// site wiring all belong to later stages.
+// the field-specific predicates, and the pure transition function next. The
+// imperative interpreter (applyLifecycle in runtime_lifecycle_apply.go)
+// commits its predictions and executes the effects at the supervisor's call
+// sites.
 //
-// Invariants encoded here mirror origin/main behavior:
+// Invariants encoded here mirror the supervisor behavior they preserve:
 //   - The park timeout marks admission closed before done closes, so
 //     isCompleted() is true for both completionAdmissionClosed and
 //     completionPublished (supervisor.go:2968 vs complete()).
@@ -27,8 +27,8 @@ import (
 )
 
 // execState is the execution dimension of the lifecycle. V (execReserved) is
-// the pre-publication state; S/I/R/P/PE/E follow the plan's matrix shorthand
-// (starting/idle/running/parked/parked-ending/ended).
+// the pre-publication state; S/I/R/P/PE/E (starting/idle/running/parked/
+// parked-ending/ended) are the states of the transition matrix below.
 type execState int
 
 const (
@@ -102,7 +102,7 @@ const (
 func (k runKind) valid() bool { return k >= runKindOrdinaryDirect && k <= runKindDecider }
 
 // probeKind selects which branch protocol the promptContinuation signal
-// reports on (decision 5's two-step continuation).
+// reports on in the two-step continuation protocol.
 type probeKind int
 
 const (
@@ -114,7 +114,7 @@ const (
 func (p probeKind) valid() bool { return p >= probeTerminalPrompt && p <= probeRetryPrompt }
 
 // completionBoundary attests which caller boundary the completion publication
-// runs at (decision 8).
+// runs at.
 type completionBoundary int
 
 const (
@@ -136,7 +136,7 @@ type lifecycleState struct {
 	completion completionStage
 	// class is immutable after initialization; no transition changes it.
 	class attemptClass
-	// pendingProbe guards the two-step continuation protocol (decision 5):
+	// pendingProbe guards the two-step continuation protocol:
 	// attemptOutcome sets it to the probe it selects and the matching
 	// promptContinuation clears it. It is an internal guard dimension, not a
 	// lifecycle predicate: validateLifecycleState requires a pending probe to
@@ -144,13 +144,12 @@ type lifecycleState struct {
 	// are exactly signalAttemptPreparing, signalAttemptStarted,
 	// signalParkRequested and signalIdleContextEnded (the signals that would
 	// prepare, start or park a new attempt, plus the idle-context end), so no
-	// attempt lifecycle interleaves with the protocol (inventory amendments
-	// 5, 8 and 10).
+	// attempt lifecycle interleaves with the protocol.
 	pendingProbe probeKind
 }
 
-// Pointer-receiver, nonlocking predicates. Each reads only its named field
-// (plan decision 3); they are range checks, not equality checks.
+// Pointer-receiver, nonlocking predicates. Each reads only its named field;
+// they are range checks, not equality checks.
 
 func (l *lifecycleState) isActive() bool { return l.exec == execRunning }
 
@@ -241,7 +240,7 @@ const (
 type lifecycleSignal struct {
 	kind signalKind
 
-	// Immutable attempt classification, copied into every signal (decision 5).
+	// Immutable attempt classification, copied into every signal.
 	class attemptClass
 
 	// Decision-5 result data (attemptOutcome, promptContinuation). stopReason
@@ -261,7 +260,7 @@ type lifecycleSignal struct {
 	retryable         bool
 	retriesRemaining  bool
 
-	// workflowFinalized exit data: workflowExitRecords attests that the legacy
+	// workflowFinalized exit data: workflowExitRecords attests that the
 	// finalization path writes child.exitCode after finalization (panic
 	// teardown leaves the stored exit code untouched); exitCode carries the
 	// value that path will write.
@@ -270,10 +269,10 @@ type lifecycleSignal struct {
 	// promptContinuation inputs. terminalContextErr is sampled inside the
 	// terminal probe after the exit code is recorded and unlocked;
 	// resumeContextErr is sampled only after an actual dequeue; the retry
-	// probe dequeues before checking context (decision 5).
+	// probe dequeues before checking context.
 	//
 	// The retry probe's idle-context decision uses a single context sample:
-	// the legacy code reads ctx.Err() once after the dequeue attempt
+	// the run loop reads ctx.Err() once after the dequeue attempt
 	// (supervisor.go ~2315-2319), so a consumed prompt with a dead context is
 	// an idle-context end, and an empty queue with a dead context is one too.
 	// resumeContextErr and idleContextErr therefore describe the same single
@@ -285,13 +284,13 @@ type lifecycleSignal struct {
 	resumeContextErr   error
 	idleContextErr     error
 
-	// agentStatusObserved snapshot, sampled under child.mu (decision 6).
+	// agentStatusObserved snapshot, sampled under child.mu.
 	phase               string
 	label               string
 	presentationWasDone bool
 
 	// idleContextEnded carries caller-normalized reason/exitCode computed with
-	// the existing deadline/error mapping (decision 6).
+	// the existing deadline/error mapping.
 	idleExitCode   int
 	idleStopReason string
 
@@ -299,13 +298,13 @@ type lifecycleSignal struct {
 	// signal is sent when the sink is nil; a Close error still counts as called.
 	closeCalled bool
 
-	// completionPublished attests the boundary it publishes at (decision 8).
+	// completionPublished attests the boundary it publishes at.
 	boundary completionBoundary
 }
 
 // effectKind enumerates the effect descriptions next returns. These are
-// descriptions, not operations: the Stage 2 interpreter binds resources and
-// executes them at the sites named in the Stage 1 effect table. Locked effects
+// descriptions, not operations: the interpreter in runtime_lifecycle_apply.go
+// binds resources and executes them at the supervisor's call sites. Locked effects
 // execute within applyLifecycle under mu; deferred ones return to the outer
 // lock owner. The retained imperative orchestration (writer drain and sink
 // Close, provider closing/cancelAnswers, registry/provider/broker cleanup,
@@ -320,7 +319,7 @@ const (
 	effectSetSessionEndPresentation                   // sessionEndObserved
 	effectSetIdleEndData                              // idleContextEnded
 	effectRecordOutcomeExit                           // attemptOutcome terminal/decider cases
-	effectRecordWorkflowExit                          // workflowFinalized: the exit code the legacy path writes after finalization
+	effectRecordWorkflowExit                          // workflowFinalized: the exit code the finalization path writes
 	effectSettleTurnWaiters                           // settled→0; workflowFinalized; completionPublished
 	effectReleaseTreeToken                            // attemptReturned
 	effectWriteSentinel                               // attemptOutcome success/end/decider; promptContinuation terminal probe; idleContextEnded
@@ -333,7 +332,7 @@ const (
 )
 
 // lifecycleEffect is a single effect description with its immutable payload.
-// Only the fields named for a kind in the Stage 1 effect table are meaningful.
+// Only the fields named for a signal's effects are meaningful.
 type lifecycleEffect struct {
 	kind effectKind
 
@@ -347,8 +346,7 @@ type lifecycleEffect struct {
 	boundary completionBoundary // publishCompletion
 }
 
-// validateLifecycleState enforces the cross-dimension contract (plan decision
-// 3). It rejects: negative counts, running with count 0, positive counts with
+// validateLifecycleState enforces the cross-dimension contract. It rejects: negative counts, running with count 0, positive counts with
 // any nonrunning exec, non-open completion with positive attempts, admission
 // closed outside parked/idle/parked-ending/ended, published outside ended,
 // reserved with non-open completion or nonzero attempts, direct attempt
@@ -480,7 +478,7 @@ func validateLifecycleSignal(sig lifecycleSignal) error {
 // validates the output state. It is pure: it never reads a child, clock,
 // context, provider, channel or lock. An invalid input returns the unchanged
 // input state, no continuation, no effects, and an error — without
-// reconstruction or silent recovery (decision 6).
+// reconstruction or silent recovery.
 func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation, []lifecycleEffect, error) {
 	if err := validateLifecycleState(st); err != nil {
 		return st, continuation{contNone}, nil, fmt.Errorf("lifecycle: signal %d on invalid state: %w", sig.kind, err)
@@ -489,8 +487,7 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 		return st, continuation{contNone}, nil, err
 	}
 	// The attempt class is immutable: a signal carrying a class that differs
-	// from the state's class is rejected (decision 5 copies the class into
-	// every signal, including fanout/completion ones).
+	// from the state's class is rejected; every signal carries the class.
 	if sig.class != st.class {
 		return st, continuation{contNone}, nil, fmt.Errorf(
 			"lifecycle: signal %d with attempt class %d on state class %d", sig.kind, sig.class, st.class)
@@ -992,7 +989,7 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 		)
 
 	case signalAgentStatusObserved:
-		// Any valid state; snapshot from decision 6. The presentation write is
+		// Any valid state. The presentation write is
 		// emitted only when the phase is nonempty and presentation was not
 		// already done; nonempty labels replace, empty labels retain.
 		if err := validateLifecycleState(st); err != nil {

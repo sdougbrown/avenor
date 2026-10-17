@@ -1232,8 +1232,8 @@ func (s *Supervisor) acquireLocalRuntimeSlot(ctx context.Context, child *childRu
 					// slot accounting to release; the child stays parked until
 					// the final publication, keeping it capacity-excluded. If the
 					// context also ended, the fail-safe records the idle terminal
-					// end (sentinel and session.end) the legacy idle end made on
-					// a slot failure plus a cancel or deadline.
+					// end (sentinel and session.end) the idle end performs on a
+					// slot failure plus a cancel or deadline.
 					s.failSafeRunChildTransition(child, idleEndFault(child, ctx.Err()))
 					return fmt.Errorf("%w: %w", errLifecycleFaultRecovery, err)
 				}
@@ -1470,9 +1470,9 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		attemptID:                params.AttemptID,
 		permissionDeciderRun:     params.permissionDeciderRun,
 		permissionDeciderSlotKey: params.permissionDeciderSlotKey,
-		// Explicit reserved lifecycle state (plan decision 7): the class is
-		// immutable and set before publication; published is sent immediately
-		// before map insertion below.
+		// Explicit reserved lifecycle state: the class is immutable and set
+		// before publication; published is sent immediately before map
+		// insertion below.
 		lc: lifecycleState{class: childAttemptClass(params)},
 	}
 	if terminate := params.workflowTerminate; terminate != nil {
@@ -1490,16 +1490,15 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 			}
 		}
 	}
-	// Shadow: predict-and-commit the published transition immediately before
-	// map insertion, under controlMu -> child.mu (plan Stage 2). The signal
-	// has no legacy counterpart; the commit is prediction-only.
+	// Predict-and-commit the published transition immediately before map
+	// insertion, under controlMu -> child.mu.
 	child.mu.Lock()
 	_, _, pubErr := s.applyLifecycle(child, lifecycleSignal{kind: signalPublished, class: child.lc.class})
 	child.mu.Unlock()
 	s.runtimes[rtID] = child
 	s.controlMu.Unlock()
 	if pubErr != nil {
-		// Reported after both child.mu and controlMu are released (decision 7).
+		// Reported after both child.mu and controlMu are released.
 		s.reportLifecycleError(child, pubErr)
 	}
 
@@ -2852,8 +2851,8 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 			finalSession, hasFinal = workflowSession{SessionID: result.SessionID, Identity: identity}, true
 		}
 	}
-	// The exit code the legacy path writes after finalization: 1 on failure,
-	// the aggregate result's code on success.
+	// The exit code written after finalization: 1 on failure, the aggregate
+	// result's code on success.
 	plannedExit := result.ExitCode
 	if err != nil {
 		plannedExit = 1
@@ -3195,8 +3194,8 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 			finalSession, hasFinal = workflowSession{SessionID: result.SessionID, Identity: identity}, true
 		}
 	}
-	// The exit code the legacy path writes after finalization: 1 on failure,
-	// the aggregate result's code on success.
+	// The exit code written after finalization: 1 on failure, the aggregate
+	// result's code on success.
 	plannedExit := result.ExitCode
 	if err != nil {
 		plannedExit = 1
@@ -3260,8 +3259,8 @@ func (c *childRuntime) waitForNextPrompt(s *Supervisor, ctx context.Context, par
 	}
 	for {
 		if prompt, ok := c.dequeuePrompt(); ok {
-			// Shadow: promptDequeued is observational; no activity or admission
-			// effect (continuation probes use their own signals).
+			// promptDequeued is observational: no activity or admission effect
+			// (continuation probes use their own signals).
 			c.mu.Lock()
 			_, _, err := s.applyLifecycle(c, lifecycleSignal{kind: signalPromptDequeued, class: c.lc.class})
 			c.mu.Unlock()
@@ -3588,8 +3587,9 @@ func (s *Supervisor) beginWorkflowAttempt(child *childRuntime, provider runtime.
 		lifecycle.cancelAnswers()
 	}
 	child.mu.Lock()
-	// attemptStarted is owned by the adapter: it commits the count and the
-	// active/activeAttempts mirrors. The provider pairing below stays legacy.
+	// attemptStarted is owned by the adapter: it commits the count. The
+	// provider pairing below is imperative and runs in the same critical
+	// section.
 	var deferredStartErr error
 	_, _, deferredStartErr = s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptStarted, class: child.lc.class})
 	// These fields are a presentation slot only. Attempt ownership lives in
@@ -3697,7 +3697,7 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 	session, err := s.attemptSession(ctx, child, resumeID)
 	if err != nil {
 		s.emitChildError(child, fmt.Sprintf("start session: %v", err), "error")
-		// Shadow: attemptStartFailed is only for a prepared attempt that never
+		// attemptStartFailed is only for a prepared attempt that never
 		// incremented activity; the pre-activity return records nothing.
 		child.mu.Lock()
 		_, _, failErr := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptStartFailed, class: child.lc.class})
@@ -3714,8 +3714,7 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 
 	turnCtx, cancelTurn := context.WithCancel(ctx)
 	child.mu.Lock()
-	// The adapter owns attemptStarted: it commits the count and the
-	// active/activeAttempts mirrors.
+	// The adapter owns attemptStarted: it commits the count.
 	_, _, startErr := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptStarted, class: child.lc.class})
 	child.interruptFn = cancelTurn
 	child.mu.Unlock()
@@ -3727,7 +3726,7 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 		child.mu.Lock()
 		// The adapter owns attemptSettled: it decrements the count to zero,
 		// clears the presentation and releases the waiters. The interrupt
-		// teardown stays legacy beside it.
+		// teardown below runs in the same critical section.
 		_, _, settledErr := s.applyLifecycle(child, lifecycleSignal{kind: signalAttemptSettled, class: child.lc.class})
 		child.interruptFn = nil
 		child.mu.Unlock()
@@ -4023,8 +4022,7 @@ func (s *Supervisor) writeIdleContextEnd(child *childRuntime, ctxErr error) {
 	}
 	if lifecycleTransitionFailed(err) {
 		// The dropped idle-end writes are recovered by the fault fail-safe:
-		// terminal data, sentinel and session.end, the writes the legacy idle
-		// end made unconditionally.
+		// terminal data, sentinel and session.end.
 		s.failSafeRunChildTransition(child, idleEndFault(child, ctxErr))
 		return
 	}
@@ -4358,7 +4356,7 @@ func (s *Supervisor) answerPermission(rtID, requestID, optionID, message string)
 	// reused request ID cannot replace it before durable publication.
 	rt.writeMu.Lock()
 	// Diagnostics are collected in this outer scope and reported after the
-	// deferred writeMu unlock, including on panic (plan decision 8).
+	// deferred writeMu unlock, including on panic.
 	diagnostics := make([]error, 0, 2)
 	defer func() {
 		s.finishDirectPermissionAnswerLocked(rt, reservation)
@@ -4836,7 +4834,6 @@ func (child *childRuntime) complete(s *Supervisor, boundary completionBoundary) 
 		if lifecycleTransitionFailed(pubErr) {
 			// A failed publication must not strand registered turn waiters or
 			// leave the capacity reader counting the ended runtime as active:
-			// the legacy close always performed both.
 			s.completePublicationFailSafe(child)
 		}
 		child.mu.Unlock()
@@ -5004,8 +5001,7 @@ func (s *Supervisor) beginChildShutdown(child *childRuntime) *permissionProvider
 	})
 	if lifecycleTransitionFailed(shutdownErr) {
 		// A failed transition must not leave admission open or allow a second
-		// parent cancel: commit the requested stage the legacy flag write
-		// produced.
+		// parent cancel: commit the requested stage.
 		s.shutdownFailSafe(child)
 	}
 	lifecycle := child.providerLifecycle
@@ -5032,7 +5028,7 @@ func (s *Supervisor) beginChildShutdown(child *childRuntime) *permissionProvider
 	child.writeMu.Unlock()
 	if lifecycleTransitionFailed(shutdownErr) {
 		// The transition failure must not skip the provider request cancel or
-		// the first parent cancel the legacy path always performed.
+		// the first parent cancel always performed.
 		shutdownEff = []lifecycleEffect{{kind: effectConsiderProviderCancel}}
 		if !alreadyShuttingDown {
 			shutdownEff = append(shutdownEff, lifecycleEffect{kind: effectCancelContext})
@@ -5304,8 +5300,8 @@ type runtimeFanoutWriter struct {
 	base      cli.EventSink
 	runtimeID string
 	child     *childRuntime
-	// supervisor is the owner used for lifecycle shadow transactions; it must
-	// be nonnil whenever child is nonnil (plan decision 8).
+	// supervisor is the owner used for lifecycle transactions; it must
+	// be nonnil whenever child is nonnil.
 	supervisor      *Supervisor
 	control         *control.ControlServer
 	metadata        *cli.EventMetadata
@@ -5320,14 +5316,14 @@ func (w *runtimeFanoutWriter) Write(ev events.Event) error {
 			w.beforeWriteLock()
 		}
 		// The diagnostic slice lives in the outer scope and is reported after
-		// the locked helper unlocks, including on a sink panic (plan decision 8).
+		// the locked helper unlocks, including on a sink panic.
 		diagnostics := make([]error, 0, 2)
 		defer func() { reportLifecycleDiagnostics(w.supervisor, w.child, diagnostics) }()
 		err := w.writeHoldingWriteLock(ev, &diagnostics)
 		return err
 	}
 	// Nil-child writers emit no child lifecycle signals, but they keep a
-	// collector so an unexpected diagnostic can never be dropped (decision 8).
+	// collector so an unexpected diagnostic can never be dropped.
 	diagnostics := make([]error, 0, 2)
 	defer func() { reportLifecycleDiagnostics(w.supervisor, w.child, diagnostics) }()
 	return w.writeLocked(ev, &diagnostics)
@@ -5344,7 +5340,7 @@ func (w *runtimeFanoutWriter) writeHoldingWriteLock(ev events.Event, diagnostics
 // reportLifecycleDiagnostics reports collected lifecycle errors outside all
 // locks. It is idempotent per call site: callers report each slice once. A
 // nil owner is an invariant violation, never a tolerated path: a
-// child-bearing writer always has a supervisor (decision 8), and diagnostics
+// child-bearing writer always has a supervisor, and diagnostics
 // must not be lost.
 func reportLifecycleDiagnostics(s *Supervisor, child *childRuntime, diagnostics []error) {
 	if s == nil {
@@ -5438,8 +5434,8 @@ func (w *runtimeFanoutWriter) writeLocked(ev events.Event, diagnostics *[]error)
 		case "session.end":
 			stopReason, _ := presentation.Fields["stop_reason"].(string)
 			// The adapter owns the session-end presentation (phase done and a
-			// nonempty stop reason); the final-output data updates below stay
-			// legacy beside it.
+			// nonempty stop reason); the final-output data updates below are
+			// imperative writes beside it.
 			_, _, endErr := w.supervisor.applyLifecycle(w.child, lifecycleSignal{
 				kind: signalSessionEndObserved, class: w.child.lc.class, stopReason: stopReason,
 			})
