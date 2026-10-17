@@ -2584,16 +2584,8 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 	if s.broker != nil {
 		s.ensureChildBrokerRun(child)
 	}
-	taggedWriter := &runtimeFanoutWriter{
-		base:            child.eventWriter,
-		runtimeID:       child.id,
-		child:           child,
-		supervisor:      s,
-		control:         s.control,
-		metadata:        cli.NewEventMetadata(s.runID, child.label, child.id),
-		onPermissionReq: s.cachePermissionOptions,
-		recorder:        newRecorderFor(s, child.id),
-	}
+	taggedWriter := newRuntimeFanoutWriter(s, child,
+		cli.NewEventMetadata(s.runID, child.label, child.id), newRecorderFor(s, child.id))
 	s.setFanoutWriter(child, taggedWriter)
 
 	var selectionMu sync.Mutex
@@ -2905,16 +2897,8 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 	if s.broker != nil {
 		s.ensureChildBrokerRun(child)
 	}
-	taggedWriter := &runtimeFanoutWriter{
-		base:            child.eventWriter,
-		runtimeID:       child.id,
-		child:           child,
-		supervisor:      s,
-		control:         s.control,
-		metadata:        cli.NewEventMetadata(s.runID, child.label, child.id),
-		onPermissionReq: s.cachePermissionOptions,
-		recorder:        newRecorderFor(s, child.id),
-	}
+	taggedWriter := newRuntimeFanoutWriter(s, child,
+		cli.NewEventMetadata(s.runID, child.label, child.id), newRecorderFor(s, child.id))
 	s.setFanoutWriter(child, taggedWriter)
 
 	var selectionMu sync.Mutex
@@ -3727,16 +3711,8 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 	}()
 
 	// Tag events with runtime_id and fan out to both file and control subscribers.
-	taggedWriter := &runtimeFanoutWriter{
-		base:            child.eventWriter,
-		runtimeID:       child.id,
-		child:           child,
-		supervisor:      s,
-		control:         s.control,
-		metadata:        workflowEventMetadata(s, child),
-		onPermissionReq: s.cachePermissionOptions,
-		recorder:        newRecorderFor(s, child.id),
-	}
+	taggedWriter := newRuntimeFanoutWriter(s, child,
+		workflowEventMetadata(s, child), newRecorderFor(s, child.id))
 	s.setFanoutWriter(child, taggedWriter)
 	result := cli.WaitForSession(turnCtx, attemptProvider, cli.SessionWaitConfig{
 		EventCh:                eventCh,
@@ -5215,17 +5191,27 @@ func (s *Supervisor) fanoutWriterLocked(child *childRuntime) *runtimeFanoutWrite
 func (s *Supervisor) fanoutWriterForChildLocked(child *childRuntime) *runtimeFanoutWriter {
 	writer := child.fanoutWriter
 	if writer == nil {
-		writer = &runtimeFanoutWriter{
-			base:            child.eventWriter,
-			runtimeID:       child.id,
-			child:           child,
-			supervisor:      s,
-			control:         s.control,
-			metadata:        cli.NewEventMetadata(s.runID, child.label, child.id),
-			onPermissionReq: s.cachePermissionOptions,
-		}
+		writer = newRuntimeFanoutWriter(s, child, cli.NewEventMetadata(s.runID, child.label, child.id), nil)
 	}
 	return writer
+}
+
+// newRuntimeFanoutWriter builds the fanout writer for child under supervisor s.
+// The supervisor is a required parameter: a child-bearing writer always has
+// the supervisor that reports its lifecycle diagnostics, so production
+// construction goes through this constructor and reportLifecycleDiagnostics's
+// nil-owner invariant panic stays unreachable for built writers.
+func newRuntimeFanoutWriter(s *Supervisor, child *childRuntime, metadata *cli.EventMetadata, recorder *broker.Recorder) *runtimeFanoutWriter {
+	return &runtimeFanoutWriter{
+		base:            child.eventWriter,
+		runtimeID:       child.id,
+		child:           child,
+		supervisor:      s,
+		control:         s.control,
+		metadata:        metadata,
+		onPermissionReq: s.cachePermissionOptions,
+		recorder:        recorder,
+	}
 }
 
 type runtimeFanoutWriter struct {
@@ -5272,8 +5258,8 @@ func (w *runtimeFanoutWriter) writeHoldingWriteLock(ev events.Event, diagnostics
 // reportLifecycleDiagnostics reports collected lifecycle errors outside all
 // locks. It is idempotent per call site: callers report each slice once. A
 // nil owner is an invariant violation, never a tolerated path: a
-// child-bearing writer always has a supervisor, and diagnostics
-// must not be lost.
+// child-bearing writer is built only through newRuntimeFanoutWriter, which
+// requires the supervisor, and diagnostics must not be lost.
 func reportLifecycleDiagnostics(s *Supervisor, child *childRuntime, diagnostics []error) {
 	if s == nil {
 		if child != nil || len(diagnostics) > 0 {
