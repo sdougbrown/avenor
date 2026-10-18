@@ -56,17 +56,15 @@ type permissionRouter struct {
 
 	host    permissionRouterHost
 	control *control.ControlServer
-	diag    io.Writer
 }
 
-func newPermissionRouter(host permissionRouterHost, control *control.ControlServer, diag io.Writer, hooks *testHooks) *permissionRouter {
+func newPermissionRouter(host permissionRouterHost, control *control.ControlServer, hooks *testHooks) *permissionRouter {
 	return &permissionRouter{
 		permOptions:         map[string][]any{},
 		permissionProviders: map[string]permissionProviderBinding{},
 		hooks:               hooks,
 		host:                host,
 		control:             control,
-		diag:                diag,
 	}
 }
 
@@ -74,6 +72,8 @@ func newPermissionRouter(host permissionRouterHost, control *control.ControlServ
 // method returns a value or a bounded snapshot; none exposes the runtime
 // registry or a general child lookup, and none may be called with mu held.
 type permissionRouterHost interface {
+	// diagnostics returns the supervisor's current diagnostics writer.
+	diagnostics() io.Writer
 	// runtimeExists reports whether runtimeID is registered.
 	runtimeExists(runtimeID string) bool
 	// routeTarget marks requestID routed on runtimeID and returns the inputs
@@ -108,6 +108,8 @@ type permissionRouteTarget struct {
 // takes child-owned state under child.mu and supervisor state under controlMu,
 // and keeps the direct-answer transaction on the supervisor.
 type supervisorPermissionHost struct{ sup *Supervisor }
+
+func (h supervisorPermissionHost) diagnostics() io.Writer { return h.sup.stderrWriter() }
 
 func (h supervisorPermissionHost) runtimeExists(runtimeID string) bool {
 	h.sup.controlMu.Lock()
@@ -518,7 +520,7 @@ func (r *permissionRouter) routePermissionRequest(runtimeID, requestID string, o
 			// request pending — do not call and do not re-route. When an
 			// in-flight call finishes, releaseModelDeciderSlot re-routes the
 			// blocked request internally from its cached options.
-			fmt.Fprintf(r.diag, "avenor: model decider concurrency cap (%d) reached; request %s on runtime %s stays pending until capacity frees\n", maxConcurrentModelDeciders, requestID, runtimeID)
+			fmt.Fprintf(r.host.diagnostics(), "avenor: model decider concurrency cap (%d) reached; request %s on runtime %s stays pending until capacity frees\n", maxConcurrentModelDeciders, requestID, runtimeID)
 			r.blockModelDecisionForRetry(runtimeID, requestID)
 			return
 		}
@@ -540,7 +542,7 @@ func (r *permissionRouter) routePermissionRequest(runtimeID, requestID string, o
 		// the request pending — do not spawn and do not re-route. When a
 		// decider run tears down and frees capacity, releasePermissionDecider
 		// re-routes the blocked request internally from its cached options.
-		fmt.Fprintf(r.diag, "avenor: permission decider concurrency cap (%d) reached; request %s on runtime %s stays pending until capacity frees\n", maxConcurrentPermissionDeciders, requestID, runtimeID)
+		fmt.Fprintf(r.host.diagnostics(), "avenor: permission decider concurrency cap (%d) reached; request %s on runtime %s stays pending until capacity frees\n", maxConcurrentPermissionDeciders, requestID, runtimeID)
 		r.blockPermissionRequestForRetry(runtimeID, requestID)
 		return
 	}
@@ -559,10 +561,10 @@ func (r *permissionRouter) routePermissionRequest(runtimeID, requestID string, o
 func (r *permissionRouter) spawnPermissionDecider(decider workflow.PermissionDecider, runtimeID, requestID string, options []any, label string) {
 	deciderLabel := permdecLabelPrefix + runtimeID + ":" + requestID
 	failSpawn := func(what string, err error) {
-		fmt.Fprintf(r.diag, "avenor: %s for runtime %s request %s: %v\n", what, runtimeID, requestID, err)
+		fmt.Fprintf(r.host.diagnostics(), "avenor: %s for runtime %s request %s: %v\n", what, runtimeID, requestID, err)
 		exhausted := r.recordPermissionDeciderFailure(runtimeID, requestID)
 		if exhausted {
-			fmt.Fprintf(r.diag, "avenor: permission decider for runtime %s request %s failed %d times; no further decider spawns for this request — it stays pending for a human gate\n", runtimeID, requestID, maxPermissionDeciderSpawnFailures)
+			fmt.Fprintf(r.host.diagnostics(), "avenor: permission decider for runtime %s request %s failed %d times; no further decider spawns for this request — it stays pending for a human gate\n", runtimeID, requestID, maxPermissionDeciderSpawnFailures)
 		}
 		r.releasePermissionDecider(deciderLabel)
 		if !exhausted {
