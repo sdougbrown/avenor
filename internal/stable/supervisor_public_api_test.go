@@ -1762,14 +1762,34 @@ func TestSupervisorPublicAPIDeciderSpawnFailuresExhaustToHuman(t *testing.T) {
 	h.requireEncodedContinuation(rt, "req_exhaust", "allow_once", "allow")
 }
 
-func TestSupervisorPublicAPIDeciderConcurrencyCapReleasesBlockedRequest(t *testing.T) {
-	t.Parallel()
+// itestDeciderCapScenario is a cap-fill setup: the decider cap is filled with
+// held deciders and one further request is routed while the cap stays full.
+type itestDeciderCapScenario struct {
+	h          *itestHarness
+	ids        map[string]string
+	deciders   map[string]string
+	holds      map[string]*itestGate
+	answered   map[string]*itestGate
+	blockedReq string
+	blockedRT  string
+}
+
+// newItestDeciderCapScenario builds the harness, fills the cap with held
+// deciders, spawns the request that the cap blocks, and returns once that
+// request is routed but unresolved. Every worker and decider session ID is
+// prefixed with sessionPrefix. A held decider publishes its identity, then
+// holds its slot on a gate keyed by its request; with holdUntilAnswer its turn
+// also waits on a second gate after its answer, so the slot stays taken until
+// the test opens that gate. capHoldsMsg names the window asserting the cap is
+// full. Every gate opens at cleanup.
+func newItestDeciderCapScenario(t *testing.T, sessionPrefix, capHoldsMsg string, holdUntilAnswer bool) *itestDeciderCapScenario {
+	t.Helper()
 	const workers = itestDeciderCap + 1
 	blockedReq := fmt.Sprintf("req_w%d", workers)
 	providers := map[string]*itestProvider{}
 	for i := 1; i <= workers; i++ {
 		label := fmt.Sprintf("w%d", i)
-		providers[label] = itestDeliveryWorker("ses_cap_"+label, "req_"+label)
+		providers[label] = itestDeliveryWorker(sessionPrefix+label, "req_"+label)
 	}
 	holds := map[string]*itestGate{}
 	answered := map[string]*itestGate{}
@@ -1787,7 +1807,7 @@ func TestSupervisorPublicAPIDeciderConcurrencyCapReleasesBlockedRequest(t *testi
 		func(label string) runtime.Provider { return providers[label] },
 		func(opts runtime.StartOptions) (runtime.Provider, error) {
 			workerRT, reqID := itestDeciderLabel(opts.Label)
-			sessionID := fmt.Sprintf("ses_cap_decider_%s", reqID)
+			sessionID := sessionPrefix + "decider_" + reqID
 			if reqID == blockedReq {
 				// The request the cap blocked gets a decider that answers at
 				// once once it finally runs.
@@ -1800,14 +1820,15 @@ func TestSupervisorPublicAPIDeciderConcurrencyCapReleasesBlockedRequest(t *testi
 				}
 				return p, nil
 			}
-			// A held decider publishes its identity first, then holds its slot
-			// on a scripted gate; after the test releases it and answers its
-			// request, a second gate lets the turn end.
-			return newItestProvider(itestAttempt(sessionID,
+			steps := []stableScriptedEvent{
 				itestAgentStatus(sessionID, "working", nil),
 				itestAgentStatus(sessionID, "working", gate(holds, reqID).ch),
-				stableScriptedEvent{release: gate(answered, reqID).ch, event: itestSessionEnd(sessionID, "end_turn", "").event},
-			)), nil
+			}
+			end := itestSessionEnd(sessionID, "end_turn", "")
+			if holdUntilAnswer {
+				end.release = gate(answered, reqID).ch
+			}
+			return newItestProvider(itestAttempt(sessionID, append(steps, end)...)), nil
 		},
 	))
 	t.Cleanup(func() {
@@ -1833,12 +1854,12 @@ func TestSupervisorPublicAPIDeciderConcurrencyCapReleasesBlockedRequest(t *testi
 		deciders[reqID] = h.deciderRuntimeID(ids[label], reqID)
 		h.awaitRawStatus(deciders[reqID], "running")
 	}
-	// The cap is full: the next request is routed but no decider runs for it,
-	// and no response resolves it while the three deciders stay held.
+	// The cap is full: the next request is routed but no decider runs for it
+	// and no response resolves it.
 	blockedLabel := fmt.Sprintf("w%d", workers)
 	ids[blockedLabel] = h.spawn(map[string]any{"label": blockedLabel, "permission_decider": itestDecider()})
 	h.log.waitFor(t, "blocked permission.request", itestEventIs("permission.request", ids[blockedLabel]))
-	h.consistentlyFor(permission.DefaultPollInterval+500*time.Millisecond, "decider cap holds", func() bool {
+	h.consistentlyFor(permission.DefaultPollInterval+500*time.Millisecond, capHoldsMsg, func() bool {
 		raw := h.rawRuntimeStatus(ids[blockedLabel])
 		pending, _ := raw["pending_permission"].(bool)
 		status, _ := raw["status"].(string)
@@ -1846,127 +1867,68 @@ func TestSupervisorPublicAPIDeciderConcurrencyCapReleasesBlockedRequest(t *testi
 			h.log.count(itestEventIs("permission.response", ids[blockedLabel])) == 0 &&
 			h.deciderIdentityCount() == itestDeciderCap
 	})
+	return &itestDeciderCapScenario{
+		h:          h,
+		ids:        ids,
+		deciders:   deciders,
+		holds:      holds,
+		answered:   answered,
+		blockedReq: blockedReq,
+		blockedRT:  ids[blockedLabel],
+	}
+}
+
+func TestSupervisorPublicAPIDeciderConcurrencyCapReleasesBlockedRequest(t *testing.T) {
+	t.Parallel()
+	s := newItestDeciderCapScenario(t, "ses_cap_", "decider cap holds", true)
 	// Release the first held decider: it answers its worker's request, which
 	// continues the worker, and its turn ends and frees the slot.
-	holds["req_w1"].open()
-	if err := h.sup.RuntimeAnswerPermission(ids["w1"], "req_w1", "allow_once", ""); err != nil {
+	s.holds["req_w1"].open()
+	if err := s.h.sup.RuntimeAnswerPermission(s.ids["w1"], "req_w1", "allow_once", ""); err != nil {
 		t.Fatalf("released decider answer: %v", err)
 	}
-	h.requirePermissionResponse(ids["w1"], "req_w1", "allow_once", "allow")
-	h.requireEncodedContinuation(ids["w1"], "req_w1", "allow_once", "allow")
+	s.h.requirePermissionResponse(s.ids["w1"], "req_w1", "allow_once", "allow")
+	s.h.requireEncodedContinuation(s.ids["w1"], "req_w1", "allow_once", "allow")
 	// The released decider's turn is still open and still holds the slot: the
 	// blocked request must keep waiting with no response and no new decider.
-	h.consistentlyFor(permission.DefaultPollInterval+500*time.Millisecond, "blocked request waits while the released decider's turn is open", func() bool {
-		return h.deciderIdentityCount() == itestDeciderCap &&
-			h.log.count(itestEventIs("permission.response", ids[blockedLabel])) == 0
+	s.h.consistentlyFor(permission.DefaultPollInterval+500*time.Millisecond, "blocked request waits while the released decider's turn is open", func() bool {
+		return s.h.deciderIdentityCount() == itestDeciderCap &&
+			s.h.log.count(itestEventIs("permission.response", s.blockedRT)) == 0
 	})
-	answered["req_w1"].open()
-	h.awaitRawStatus(deciders["req_w1"], "ended")
+	s.answered["req_w1"].open()
+	s.h.awaitRawStatus(s.deciders["req_w1"], "ended")
 	// The freed slot routes the blocked request to a new decider identity,
 	// which answers it once; the worker never sends a second request.
-	fourthDecider := h.deciderRuntimeID(ids[blockedLabel], blockedReq)
-	h.requirePermissionResponse(ids[blockedLabel], blockedReq, "allow_once", "allow")
-	h.requireEncodedContinuation(ids[blockedLabel], blockedReq, "allow_once", "allow")
-	h.awaitRawStatus(fourthDecider, "ended")
-	if got := h.deciderIdentityCount(); got != itestDeciderCap+1 {
+	fourthDecider := s.h.deciderRuntimeID(s.blockedRT, s.blockedReq)
+	s.h.requirePermissionResponse(s.blockedRT, s.blockedReq, "allow_once", "allow")
+	s.h.requireEncodedContinuation(s.blockedRT, s.blockedReq, "allow_once", "allow")
+	s.h.awaitRawStatus(fourthDecider, "ended")
+	if got := s.h.deciderIdentityCount(); got != itestDeciderCap+1 {
 		t.Fatalf("decider identities = %d, want %d (two held, one canceled, one replacement)", got, itestDeciderCap+1)
 	}
-	if got := h.log.count(itestEventIs("permission.request", ids[blockedLabel])); got != 1 {
+	if got := s.h.log.count(itestEventIs("permission.request", s.blockedRT)); got != 1 {
 		t.Fatalf("permission.request events for the blocked worker = %d, want 1", got)
 	}
 }
 
 func TestSupervisorPublicAPIDeciderSlotFreedWhenDeciderCanceled(t *testing.T) {
 	t.Parallel()
-	const workers = itestDeciderCap + 1
-	blockedReq := fmt.Sprintf("req_w%d", workers)
-	providers := map[string]*itestProvider{}
-	for i := 1; i <= workers; i++ {
-		label := fmt.Sprintf("w%d", i)
-		providers[label] = itestDeliveryWorker("ses_cc_"+label, "req_"+label)
-	}
-	holds := map[string]*itestGate{}
-	var gatesMu sync.Mutex
-	gate := func(m map[string]*itestGate, reqID string) *itestGate {
-		gatesMu.Lock()
-		defer gatesMu.Unlock()
-		if m[reqID] == nil {
-			m[reqID] = newItestGate()
-		}
-		return m[reqID]
-	}
-	var h *itestHarness
-	h = newItestHarness(t, Config{}, itestDeciderFactory(
-		func(label string) runtime.Provider { return providers[label] },
-		func(opts runtime.StartOptions) (runtime.Provider, error) {
-			workerRT, reqID := itestDeciderLabel(opts.Label)
-			sessionID := fmt.Sprintf("ses_cc_decider_%s", reqID)
-			if reqID == blockedReq {
-				// The request the cap blocked gets a decider that answers at
-				// once once it finally runs.
-				p := newItestProvider(itestAttempt(sessionID,
-					itestAgentStatus(sessionID, "working", nil),
-					itestSessionEnd(sessionID, "end_turn", ""),
-				))
-				p.onPrompt = func(context.Context) {
-					_ = h.sup.RuntimeAnswerPermission(workerRT, reqID, "allow_once", "")
-				}
-				return p, nil
-			}
-			// A held decider publishes its identity, then holds its slot on a
-			// scripted gate until the test ends.
-			return newItestProvider(itestAttempt(sessionID,
-				itestAgentStatus(sessionID, "working", nil),
-				itestAgentStatus(sessionID, "working", gate(holds, reqID).ch),
-				itestSessionEnd(sessionID, "end_turn", ""),
-			)), nil
-		},
-	))
-	t.Cleanup(func() {
-		gatesMu.Lock()
-		defer gatesMu.Unlock()
-		for _, g := range holds {
-			g.open()
-		}
-	})
-
-	ids := map[string]string{}
-	deciders := map[string]string{}
-	for i := 1; i <= itestDeciderCap; i++ {
-		label := fmt.Sprintf("w%d", i)
-		ids[label] = h.spawn(map[string]any{"label": label, "permission_decider": itestDecider()})
-		reqID := "req_" + label
-		deciders[reqID] = h.deciderRuntimeID(ids[label], reqID)
-		h.awaitRawStatus(deciders[reqID], "running")
-	}
-	// The cap is full: the next request is routed but no decider runs for it
-	// and no response resolves it.
-	blockedLabel := fmt.Sprintf("w%d", workers)
-	ids[blockedLabel] = h.spawn(map[string]any{"label": blockedLabel, "permission_decider": itestDecider()})
-	h.log.waitFor(t, "blocked permission.request", itestEventIs("permission.request", ids[blockedLabel]))
-	h.consistentlyFor(permission.DefaultPollInterval+500*time.Millisecond, "decider cap holds before the cancel", func() bool {
-		raw := h.rawRuntimeStatus(ids[blockedLabel])
-		pending, _ := raw["pending_permission"].(bool)
-		status, _ := raw["status"].(string)
-		return pending && status == "running" &&
-			h.log.count(itestEventIs("permission.response", ids[blockedLabel])) == 0 &&
-			h.deciderIdentityCount() == itestDeciderCap
-	})
+	s := newItestDeciderCapScenario(t, "ses_cc_", "decider cap holds before the cancel", false)
 	// Cancelling one running decider through the public API frees its slot:
 	// the blocked request routes to a new decider identity that answers it,
 	// and the worker never sends a second request.
-	if err := h.sup.RuntimeCancel(deciders["req_w1"]); err != nil {
+	if err := s.h.sup.RuntimeCancel(s.deciders["req_w1"]); err != nil {
 		t.Fatalf("cancel decider: %v", err)
 	}
-	h.awaitRawStatus(deciders["req_w1"], "ended")
-	fourthDecider := h.deciderRuntimeID(ids[blockedLabel], blockedReq)
-	h.requirePermissionResponse(ids[blockedLabel], blockedReq, "allow_once", "allow")
-	h.requireEncodedContinuation(ids[blockedLabel], blockedReq, "allow_once", "allow")
-	h.awaitRawStatus(fourthDecider, "ended")
-	if got := h.deciderIdentityCount(); got != itestDeciderCap+1 {
+	s.h.awaitRawStatus(s.deciders["req_w1"], "ended")
+	fourthDecider := s.h.deciderRuntimeID(s.blockedRT, s.blockedReq)
+	s.h.requirePermissionResponse(s.blockedRT, s.blockedReq, "allow_once", "allow")
+	s.h.requireEncodedContinuation(s.blockedRT, s.blockedReq, "allow_once", "allow")
+	s.h.awaitRawStatus(fourthDecider, "ended")
+	if got := s.h.deciderIdentityCount(); got != itestDeciderCap+1 {
 		t.Fatalf("decider identities = %d, want %d (two held, one canceled, one replacement)", got, itestDeciderCap+1)
 	}
-	if got := h.log.count(itestEventIs("permission.request", ids[blockedLabel])); got != 1 {
+	if got := s.h.log.count(itestEventIs("permission.request", s.blockedRT)); got != 1 {
 		t.Fatalf("permission.request events for the blocked worker = %d, want 1", got)
 	}
 }
