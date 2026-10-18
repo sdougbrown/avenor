@@ -165,7 +165,10 @@ function stopHostAskPoll(): void {
     hostPollTimer = null
   }
 }
-async function startHostAskPoll(ctx: ExtensionContext): Promise<void> {
+async function startHostAskPoll(
+  pi: Pick<ExtensionAPI, 'sendUserMessage'>,
+  deps: Pick<ExtensionDeps, 'brokerReceiveTool'>,
+): Promise<void> {
   stopHostAskPoll()
   // Poll every 2s (mirrors the sidecar's pollControlLoop cadence) for inbound asks.
   hostPollTimer = setInterval(async () => {
@@ -178,7 +181,7 @@ async function startHostAskPoll(ctx: ExtensionContext): Promise<void> {
           `**📨 Ask from sub-agent** (\`${from}\`)\n\n` +
           `${ask.message}\n\n` +
           `To answer, use the intercom tool: avenor_reply({ from_run_id: ${JSON.stringify(ask.from_run_id)}, reply_to_message_id: ${JSON.stringify(ask.message_id)}, message: "..." })`
-        await ctx.sendUserMessage(body, { deliverAs: 'steer' as const })
+        pi.sendUserMessage(body, { deliverAs: 'steer' as const })
       }
     } catch (error) {
       // No supervisor/broker yet — this is expected until a supervisor starts a broker.
@@ -552,7 +555,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       }
     }
 
-    async function startSubAgentPoll(ctx: ExtensionContext): Promise<void> {
+    async function startSubAgentPoll(): Promise<void> {
       if (!subAgentEnv) return
       stopSubAgentPoll()
       const generation = subAgentPollGeneration
@@ -570,7 +573,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             const ask = parseControlMessage(msg)
             if (!ask) continue
             subAgentPendingAsks.set(ask.message_id, { from_run_id: ask.from_run_id, message_id: ask.message_id })
-            await ctx.sendUserMessage(formatInboundAskBody(ask), { deliverAs: 'steer' as const })
+            pi.sendUserMessage(formatInboundAskBody(ask), { deliverAs: 'steer' as const })
           }
         } catch (error) {
           // Broker unreachable while it is starting up is expected; persistent
@@ -1209,8 +1212,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       lastStatusEntries = []
       pollingErrorCount = 0
       pollingErrors.length = 0
-      void startHostAskPoll(ctx)
-      void startSubAgentPoll(ctx)
+      void startHostAskPoll(pi, deps)
+      void startSubAgentPoll()
     })
 
     pi.on('session_shutdown', async () => {

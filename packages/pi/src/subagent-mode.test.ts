@@ -61,7 +61,7 @@ async function startSubAgentExtension(opts: {
 }) {
   const registeredTools: Record<string, any> = {}
   const eventHandlers: Record<string, any> = {}
-  const sendUserMessage = mock(async () => {})
+  const sendUserMessage = mock(() => {})
   const mockPi = {
     on: (event: string, handler: any) => {
       eventHandlers[event] = handler
@@ -71,12 +71,13 @@ async function startSubAgentExtension(opts: {
     },
     registerCommand: () => {},
     registerMessageRenderer: () => {},
+    sendUserMessage,
     events: { emit: mock(() => {}), on: mock(() => () => {}) },
   }
   // null must stay null: it is the declared way to force non-sub-agent mode.
   const subAgentEnvOption = opts.subAgentEnv === undefined ? subAgentEnv : opts.subAgentEnv
   await createExtension(buildMockDeps(opts.deps), { pollIntervalMs: 5, subAgentEnv: subAgentEnvOption })(mockPi as any)
-  const ctx = { cwd: '/tmp', sendUserMessage, ui: { setStatus: mock(() => {}), setWidget: mock(() => {}), notify: mock(() => {}) } }
+  const ctx = { cwd: '/tmp', ui: { setStatus: mock(() => {}), setWidget: mock(() => {}), notify: mock(() => {}) } }
   await eventHandlers.session_start({}, ctx)
   return { ctx, eventHandlers, registeredTools, sendUserMessage }
 }
