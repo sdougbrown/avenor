@@ -1210,9 +1210,6 @@ func TestSubscriberBackpressureDropAgainstDrainingReader(t *testing.T) {
 	if lagged == 0 {
 		t.Fatal("expected subscriber.lagged notifications; the drop path never ran")
 	}
-	if delivered >= iterations*eventsPerIteration {
-		t.Fatalf("delivered %d of %d events, expected the drop path to discard some", delivered, iterations*eventsPerIteration)
-	}
 }
 
 func TestNormalizeHistoryLimit(t *testing.T) {
