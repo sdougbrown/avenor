@@ -1280,13 +1280,13 @@ func TestSupervisorPublicAPILoopAndTeamListRows(t *testing.T) {
 	}
 }
 
-// TestSupervisorPublicAPITeamStatusStaysRunningWhileMembersStart proves a team
-// child is visible as running from spawn until it ends, including the window
-// before its first member attempt starts. A status waiter that reads a
-// finished-looking status stops waiting and shuts the team down, which cancels
-// member startup mid-flight. Opening and closing status connections must leave
-// the members alone.
-func TestSupervisorPublicAPITeamStatusStaysRunningWhileMembersStart(t *testing.T) {
+// TestSupervisorPublicAPITeamStatusRunningBeforeFirstMemberAttempt pins the
+// window between team publication and the first member attempt: both members
+// block in Start, so no attempt has incremented yet, and every status read
+// must report running. It also asserts both members still start exactly once
+// and the team ends cleanly, so status connections cannot disturb member
+// startup.
+func TestSupervisorPublicAPITeamStatusRunningBeforeFirstMemberAttempt(t *testing.T) {
 	t.Parallel()
 	gate := newItestGate()
 	defer gate.open()
@@ -1377,5 +1377,65 @@ func TestSupervisorPublicAPITeamStatusStaysRunningWhileMembersStart(t *testing.T
 	}
 	if starts, _ := beta.counts(); starts != 1 {
 		t.Errorf("beta starts = %d, want 1", starts)
+	}
+}
+
+// TestSupervisorPublicAPILoopStatusRunningBetweenAttempts pins the gap between
+// two loop attempts: the first attempt has settled, so no attempt is live, and
+// the second Start is blocked. The child must still report running, because the
+// loop runner owns the whole run and has not finished it.
+func TestSupervisorPublicAPILoopStatusRunningBetweenAttempts(t *testing.T) {
+	t.Parallel()
+	gate := newItestGate()
+	defer gate.open()
+	var startCount atomic.Int32
+	secondStart := make(chan struct{}, 1)
+	provider := newItestProvider(
+		itestAttempt("ses_gap_one", itestSessionEnd("ses_gap_one", "end_turn", "iteration one")),
+		itestAttempt("ses_gap_two", itestSessionEnd("ses_gap_two", "end_turn", "iteration two")),
+	)
+	provider.onStart = func(ctx context.Context) {
+		if startCount.Add(1) != 2 {
+			return
+		}
+		secondStart <- struct{}{}
+		select {
+		case <-gate.ch:
+		case <-ctx.Done():
+		}
+	}
+	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+
+	file := itestWorkflowConfig(t, "loop", map[string]any{
+		"max_iterations": 2,
+		"loop":           []map[string]any{{"name": "work", "prompt": "loop work"}},
+	})
+	rt := h.spawnWorkflow("loop", file, map[string]any{"label": "loop-gap"})
+
+	h.log.waitFor(t, "first attempt session.end", itestMemberEndIs("ses_gap_one", "end_turn"))
+	itestRecv(t, secondStart, "second attempt Start")
+
+	// The second Start is blocked, so each of these reads lands in the gap.
+	var observed []any
+	for i := 0; i < 5; i++ {
+		out, err := h.sup.RuntimeStatus(rt)
+		if err != nil {
+			t.Fatalf("status: %v", err)
+		}
+		raw, _ := out.(map[string]any)
+		observed = append(observed, raw["status"])
+	}
+
+	gate.open()
+	h.log.waitFor(t, "second attempt session.end", itestMemberEndIs("ses_gap_two", "end_turn"))
+	h.requireWorkflowEnd(rt, "done", "end_turn", 0)
+
+	for i, got := range observed {
+		if got != "running" {
+			t.Errorf("status read %d between attempts = %v, want running", i+1, got)
+		}
+	}
+	if starts, _ := provider.counts(); starts != 2 {
+		t.Errorf("provider starts = %d, want 2", starts)
 	}
 }
