@@ -14,6 +14,8 @@ import (
 
 	"github.com/chubin/vt10x"
 	"github.com/creack/pty"
+
+	"github.com/sdougbrown/avenor/internal/runtime"
 )
 
 // PTYLauncher implements Launcher by spawning processes with a PTY.
@@ -40,11 +42,13 @@ func (l PTYLauncher) Start(ctx context.Context, opts StartOptions) (Session, err
 			"FORCE_COLOR=1",
 		}
 	}
-	// Scrub the combined environment last. The hosted process is an independent
-	// Claude Code session, and inheriting the launching session's marker turns a
-	// completed turn into a silent hang. Scrubbing after the append also means a
-	// caller-provided Env entry cannot reintroduce a scrubbed identity.
-	cmd.Env = ScrubParentClaudeEnv(append(os.Environ(), env...))
+	// Scrub the combined environment last, then add this launch's identity. The
+	// hosted process is an independent Claude Code session, and inheriting the
+	// launching session's marker turns a completed turn into a silent hang.
+	// Scrubbing after the append also means a caller-provided Env entry cannot
+	// reintroduce a scrubbed variable.
+	combined := ScrubParentClaudeEnv(append(os.Environ(), env...))
+	cmd.Env = append(runtime.ScrubIdentityEnv(combined), opts.Provenance.IdentityEnv()...)
 
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
 		Cols: uint16(opts.Cols),

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/launcher"
 )
 
@@ -92,6 +93,11 @@ type client struct {
 	// command when non-empty. Avenor does not interpret it; the wrapper
 	// becomes the direct child and owns the process tree.
 	launchWrapper []string
+
+	// provenance is the informational launch identity exported to the
+	// subprocess. It is set from the session's launch options before the first
+	// launch and never mutated afterwards.
+	provenance *runtime.LaunchProvenance
 }
 
 // agyLaunchCommandContext is the process-creation seam for backend launches;
@@ -210,6 +216,7 @@ func (c *client) LaunchInitial(ctx context.Context, prompt, model, agent, dir st
 	argv := launcher.Argv("agy", args, c.launchWrapper)
 	proc := agyLaunchCommandContext(context.Background(), argv[0], argv[1:]...)
 	proc.Dir = dir
+	proc.Env = append(runtime.ScrubIdentityEnv(proc.Environ()), c.provenance.IdentityEnv()...)
 	stdout, err := proc.StdoutPipe()
 	if err != nil {
 		return sessionInfo{}, fmt.Errorf("agy stdout pipe: %w", err)
@@ -450,6 +457,7 @@ func (c *client) LaunchResumed(ctx context.Context, conversationID, prompt, mode
 	argv := launcher.Argv("agy", args, c.launchWrapper)
 	proc := agyLaunchCommandContext(context.Background(), argv[0], argv[1:]...)
 	proc.Dir = dir
+	proc.Env = append(runtime.ScrubIdentityEnv(proc.Environ()), c.provenance.IdentityEnv()...)
 
 	stdin, err := proc.StdinPipe()
 	if err != nil {

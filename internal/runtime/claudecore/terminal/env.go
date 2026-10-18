@@ -1,6 +1,11 @@
 package terminal
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/shellquote"
+)
 
 // parentClaudeSessionEnv names the variables that identify the Claude Code
 // session avenor itself was launched from. A hosted terminal must not inherit
@@ -77,5 +82,28 @@ func UnsetParentClaudeEnvPrefix() string {
 		b.WriteString(name)
 	}
 	b.WriteString("; ")
+	return b.String()
+}
+
+// identityEnvPrefix returns a shell prefix that removes inherited launch
+// identity from a pane's environment and exports this launch's identity. Values
+// are single-quoted so labels containing quotes, newlines or command
+// substitution text stay literal data.
+func identityEnvPrefix(p *runtime.LaunchProvenance) string {
+	var b strings.Builder
+	b.WriteString("unset")
+	for _, name := range runtime.IdentityEnvNames() {
+		b.WriteString(" ")
+		b.WriteString(name)
+	}
+	b.WriteString("; ")
+	for _, entry := range p.IdentityEnv() {
+		key, value, _ := strings.Cut(entry, "=")
+		b.WriteString("export ")
+		b.WriteString(key)
+		b.WriteString("=")
+		b.WriteString(shellquote.Quote(value))
+		b.WriteString("; ")
+	}
 	return b.String()
 }
