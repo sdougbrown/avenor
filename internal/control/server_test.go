@@ -1190,6 +1190,10 @@ func TestSubscriberBackpressureDropAgainstDrainingReader(t *testing.T) {
 		select {
 		case <-enqueued:
 		case <-time.After(5 * time.Second):
+			// Close the pipe so the reader goroutine exits; loop and the
+			// enqueuer stay blocked on sub.mu in a real deadlock.
+			_ = client.Close()
+			_ = srv.Close()
 			t.Fatalf("iteration %d: enqueue blocked for 5s against a draining reader (subscriber deadlock)", i)
 		}
 
