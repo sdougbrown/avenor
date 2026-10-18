@@ -44,7 +44,7 @@ Permission handling matters because a backend can ask for approval mid-run, and 
 --permission-handler file:<path>
 ```
 
-Avenor writes the request there; `avenor answer <path> --option <id>` writes the response back atomically. See [docs/permission-handler.md](docs/permission-handler.md) for the request and response JSON shapes.
+Avenor writes the request there; `avenor answer --option <id> <path>` writes the response back atomically. See [docs/permission-handler.md](docs/permission-handler.md) for the request and response JSON shapes.
 
 ## Control sockets
 

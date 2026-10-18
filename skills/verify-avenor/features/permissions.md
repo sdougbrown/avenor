@@ -3,7 +3,7 @@
 ## Sub-features
 
 - File-based permission requests written by a running session
-- Atomic answer via `avenor answer <path> --option <id>`
+- Atomic answer via `avenor answer --option <id> <path>`
 - Free-text message attachment (`--message`)
 - Cancellation outcome (`--outcome cancelled`)
 - Force-overwrite of an existing response (`--force`)
@@ -14,7 +14,7 @@
 When a backend asks for tool approval mid-run, avenor writes the request to the
 permission-handler file (`file:<path>`, derived from the sentinel path when
 `--sentinel-file` is set). The user (or their agent) reads the request JSON and
-writes back an answer with `avenor answer <perm-base> --option <id>`.
+writes back an answer with `avenor answer --option <id> <perm-base>`.
 
 ## Driving it with the avenor binary
 
@@ -36,8 +36,8 @@ SCRATCH=$(mktemp -d /tmp/avenor-verify.XXXXXX)
 # (DerivePermBase appends .perm). The request lands at "$SCRATCH/done.env.perm.req"
 # and the answer goes to "$SCRATCH/done.env.perm.req.response".
 cat "$SCRATCH/done.env.perm.req"     # note the option ids
-./avenor answer "$SCRATCH/done.env.perm" --option <allow-option-id> \
-  --message "approved by verify harness"
+./avenor answer --option <allow-option-id> \
+  --message "approved by verify harness" "$SCRATCH/done.env.perm"
 wait
 ```
 
