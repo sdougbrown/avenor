@@ -82,16 +82,16 @@ func runAwaitTo(args []string, stdout, stderr io.Writer) int {
 
 	// status has no cursor. Read history only after the snapshot, then subscribe
 	// with its cursor on this same connection to close the attachment race.
-	var history struct {
-		LatestSeq int64 `json:"latest_seq"`
-	}
-	if err := awaitCall(ctx, c, func() error {
-		return c.Call("history", map[string]any{"runtime_id": runtimeID, "limit": 1}, &history)
-	}); err != nil {
+	history, err := awaitCall(ctx, c, func() (awaitHistory, error) {
+		var response awaitHistory
+		err := c.Call("history", map[string]any{"runtime_id": runtimeID, "limit": 1}, &response)
+		return response, err
+	})
+	if err != nil {
 		return awaitCallError(stderr, err)
 	}
-	if err := awaitCall(ctx, c, func() error {
-		return c.Call("subscribe", map[string]any{
+	if _, err := awaitCall(ctx, c, func() (struct{}, error) {
+		return struct{}{}, c.Call("subscribe", map[string]any{
 			"runtime_id": runtimeID,
 			"replay":     true,
 			"after_seq":  history.LatestSeq,
@@ -211,14 +211,14 @@ func parseAwaitArgs(args []string, stderr io.Writer) (awaitOptions, int) {
 	return awaitOptions{socket: *socket, until: *until, timeout: *timeout, printOutput: *printOutput, format: *format, target: target}, 0
 }
 
+// awaitHistory is the reply to the one-event history probe whose latest
+// sequence seeds the subscription cursor.
+type awaitHistory struct {
+	LatestSeq int64 `json:"latest_seq"`
+}
+
 func awaitList(ctx context.Context, c *client.Client) ([]map[string]any, error) {
-	var runtimes []map[string]any
-	err := awaitCall(ctx, c, func() error {
-		var err error
-		runtimes, err = c.List()
-		return err
-	})
-	return runtimes, err
+	return awaitCall(ctx, c, c.List)
 }
 
 type awaitRuntimeResolution struct {
@@ -410,12 +410,10 @@ func (d *awaitStatusDiagnostics) warn(rawStatus string) {
 }
 
 func fetchAwaitStatus(ctx context.Context, c *client.Client, runtimeID string, diag *awaitStatusDiagnostics) (awaitSnapshot, error) {
-	var raw map[string]any
-	if err := awaitCall(ctx, c, func() error {
-		var err error
-		raw, err = c.Status(runtimeID)
-		return err
-	}); err != nil {
+	raw, err := awaitCall(ctx, c, func() (map[string]any, error) {
+		return c.Status(runtimeID)
+	})
+	if err != nil {
 		return awaitSnapshot{}, err
 	}
 	if responseRuntimeID := runtimeString(raw, "runtime_id"); responseRuntimeID != "" && responseRuntimeID != runtimeID {
@@ -463,15 +461,27 @@ func fetchAwaitStatus(ctx context.Context, c *client.Client, runtimeID string, d
 	return snapshot, nil
 }
 
-func awaitCall(ctx context.Context, c *client.Client, call func() error) error {
-	done := make(chan error, 1)
-	go func() { done <- call() }()
+// awaitCall runs an RPC in its own goroutine and delivers its result through
+// a channel, so the caller only reads the result after the goroutine has
+// finished. When the context ends first, the client is closed to unblock the
+// in-flight call and ctx.Err() is returned without reading the result.
+func awaitCall[T any](ctx context.Context, c *client.Client, call func() (T, error)) (T, error) {
+	type result struct {
+		value T
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		value, err := call()
+		done <- result{value: value, err: err}
+	}()
 	select {
-	case err := <-done:
-		return err
+	case r := <-done:
+		return r.value, r.err
 	case <-ctx.Done():
 		_ = c.Close()
-		return ctx.Err()
+		var zero T
+		return zero, ctx.Err()
 	}
 }
 
@@ -686,12 +696,10 @@ func finishAwait(ctx context.Context, c *client.Client, out *awaitOutput, stderr
 	// A pending-permission exit is not a completed run: there is no final
 	// output yet, so do not fetch or print a result payload.
 	if printOutput && state != runstate.StatePendingPermission {
-		var result map[string]any
-		if err := awaitCall(ctx, c, func() error {
-			var err error
-			result, err = c.Result(runtimeID)
-			return err
-		}); err != nil {
+		result, err := awaitCall(ctx, c, func() (map[string]any, error) {
+			return c.Result(runtimeID)
+		})
+		if err != nil {
 			return awaitCallError(stderr, err)
 		}
 		finalOutput := runtimeString(result, "final_output")
