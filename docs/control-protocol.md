@@ -357,7 +357,7 @@ Returns all active and recently-completed child runtimes with status summaries. 
 ]
 ```
 
-`status` is one of `"idle"`, `"running"`, or `"ended"`. Metadata fields are additive and may be absent when the backend does not expose them. Completed runtimes can include a bounded `final_output` preview; when it was bounded, `final_output_truncated: true` is included. Use `result` with that runtime's `runtime_id` for the complete reply. Blocked runtimes include their pending permission details.
+`status` is one of `"idle"`, `"running"`, or `"ended"`. A runtime reports `running` from spawn until it ends; `idle` means a direct run settled a turn and is waiting for the next prompt. Metadata fields are additive and may be absent when the backend does not expose them. Completed runtimes can include a bounded `final_output` preview; when it was bounded, `final_output_truncated: true` is included. Use `result` with that runtime's `runtime_id` for the complete reply. Blocked runtimes include their pending permission details.
 
 #### `shutdown`
 

@@ -4050,13 +4050,7 @@ func (s *Supervisor) listRuntimes() []map[string]any {
 	out := make([]map[string]any, 0, len(s.runtimes))
 	for _, rt := range s.runtimes {
 		rt.mu.Lock()
-		status := runstate.StatusIdle
-		if rt.lc.isActive() {
-			status = runstate.StatusRunning
-		}
-		if rt.lc.isCompleted() {
-			status = runstate.StatusEnded
-		}
+		status := rt.lc.runtimeStatus()
 		identity := s.statusIdentity(rt, rt.session.SessionID)
 		entry := map[string]any{
 			"runtime_id":         rt.id,
@@ -5061,13 +5055,7 @@ func (s *Supervisor) RuntimeStatus(rtID string) (any, error) {
 		return nil, fmt.Errorf("runtime %q not found", rtID)
 	}
 	rt.mu.Lock()
-	status := runstate.StatusIdle
-	if rt.lc.isActive() {
-		status = runstate.StatusRunning
-	}
-	if rt.lc.isCompleted() {
-		status = runstate.StatusEnded
-	}
+	status := rt.lc.runtimeStatus()
 	identity := s.statusIdentity(rt, rt.session.SessionID)
 	entry := map[string]any{
 		"runtime_id":         rt.id,
