@@ -48,6 +48,7 @@ must distinguish them because each requires a different action.
 | `timeout` | Run exceeded its configured timeout. | Report the timeout and any partial artifacts. |
 | `killed` | Run was forcefully terminated. | Report the kill. |
 | `waiting` (`pending_permission`) | Agent hit a tool approval gate. It is blocked mid-task, not finished. | Inspect the offered options. Call `avenor_answer_permission` with an offered `option_id`, then resume monitoring. |
+| `unknown` | Supervisor reported a status this client does not recognize. | Keep waiting; report it if it persists. |
 
 ### Two supervision patterns
 
