@@ -408,7 +408,7 @@ func TestStableFollowUpUsesAuthoritativeEffectiveIdentity(t *testing.T) {
 		thinking:         "high",
 	}
 	sup.rememberSessionIdentity("authoritative", effectiveIdentity{Backend: "pi", Agent: "mapped-agent", Model: "mapped-model", AgentProfile: "cloud"}, provider)
-	if _, err := sup.attemptSession(context.Background(), child, "authoritative"); err != nil {
+	if _, err := sup.attemptSession(context.Background(), child, "authoritative", 1); err != nil {
 		t.Fatalf("attemptSession: %v", err)
 	}
 	provider.mu.Lock()

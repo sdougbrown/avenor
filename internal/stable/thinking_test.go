@@ -127,7 +127,7 @@ func TestAttemptSessionRetainsThinkingOnResume(t *testing.T) {
 	provider := &thinkingCaptureProvider{}
 	child := &childRuntime{provider: provider, backend: "pi", thinking: "max", agent: "agent", model: "model", dir: "/work"}
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/thinking-resume.sock", MaxRuntimes: 1})
-	if _, err := sup.attemptSession(context.Background(), child, "session"); err != nil {
+	if _, err := sup.attemptSession(context.Background(), child, "session", 1); err != nil {
 		t.Fatalf("attemptSession: %v", err)
 	}
 	provider.mu.Lock()

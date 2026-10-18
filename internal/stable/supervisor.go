@@ -1747,6 +1747,13 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		RuntimeID:     rtID,
 		Broker:        s.broker,
 		BrokerToken:   child.brokerToken,
+		Provenance: &runtime.LaunchProvenance{
+			RuntimeID:   rtID,
+			ExecutionID: rtID,
+			Kind:        "run",
+			Label:       params.Label,
+			Attempt:     1,
+		},
 	}
 	discovery := cli.DiscoverServer(params.ServerURL, os.Getenv)
 	startOpts.ServerURL = discovery.URL
@@ -2277,7 +2284,7 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			}
 			needAcquire = false
 		}
-		result := s.runChildAttempt(ctx, child, resumeID, promptText)
+		result := s.runChildAttempt(ctx, child, resumeID, promptText, attempt)
 		// Sample the immutable result data the continuation selection needs.
 		retryable := runtime.IsRetryableFailure(result.exitCode, result.stopReason)
 		retriesRemaining := attempt <= maxRetries
@@ -2710,6 +2717,15 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				Broker:        s.broker,
 				BrokerToken:   child.brokerToken,
 				LaunchWrapper: child.launchWrapper,
+				Provenance: &runtime.LaunchProvenance{
+					RuntimeID:   child.id,
+					ExecutionID: child.id,
+					Kind:        "loop",
+					Phase:       phase.Name,
+					Iteration:   &iteration,
+					Label:       child.label,
+					Attempt:     attemptNum + 1,
+				},
 			}
 
 			resumeID := prevSessionID
@@ -2994,6 +3010,14 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				Broker:        s.broker,
 				BrokerToken:   child.brokerToken,
 				LaunchWrapper: child.launchWrapper,
+				Provenance: &runtime.LaunchProvenance{
+					RuntimeID:   child.id,
+					ExecutionID: child.id,
+					Kind:        "team",
+					Phase:       phase.Name,
+					Label:       child.label,
+					Attempt:     attemptNum + 1,
+				},
 			}
 
 			resumeID := prevSessionID
@@ -3609,7 +3633,7 @@ func (s *Supervisor) statusIdentity(child *childRuntime, sessionID string) effec
 	return identity
 }
 
-func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, resumeID, promptText string) childAttemptResult {
+func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, resumeID, promptText string, launchAttempt int) childAttemptResult {
 	deadline, _ := ctx.Deadline()
 	child.mu.Lock()
 	// The adapter owns attemptPreparing: it clears the phase presentation.
@@ -3619,7 +3643,7 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 		s.reportLifecycleError(child, prepErr)
 	}
 
-	session, err := s.attemptSession(ctx, child, resumeID)
+	session, err := s.attemptSession(ctx, child, resumeID, launchAttempt)
 	if err != nil {
 		s.emitChildError(child, fmt.Sprintf("start session: %v", err), "error")
 		// attemptStartFailed is only for a prepared attempt that never
@@ -3752,7 +3776,7 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 	return childAttemptResult{exitCode: exitCode, sessionID: session.SessionID, stopReason: result.StopReason}
 }
 
-func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, resumeID string) (runtime.Session, error) {
+func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, resumeID string, launchAttempt int) (runtime.Session, error) {
 	if resumeID == "" {
 		child.mu.Lock()
 		session := child.session
@@ -3801,6 +3825,13 @@ func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, re
 		RuntimeID:    child.id,
 		Broker:       s.broker,
 		BrokerToken:  brokerToken,
+		Provenance: &runtime.LaunchProvenance{
+			RuntimeID:   child.id,
+			ExecutionID: child.id,
+			Kind:        "run",
+			Label:       label,
+			Attempt:     launchAttempt,
+		},
 	}, resumeID)
 }
 
